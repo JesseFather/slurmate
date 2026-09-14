@@ -221,9 +221,10 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
                     // 一律彻底终止（取消作业 + 释放资源），不留下还在烧的作业
                     'app:disconnect',
-                    // 密钥与主机密钥。密钥只有「重新生成」这一个入口 ——
-                    // 「保存方式」那个下拉框已经删掉，私钥永远加密保存。
-                    'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey',
+                    // 密钥与主机密钥。生成只有两个入口：「新建」时的 app:newKey，
+                    // 以及用户显式发起的 app:regenerateKey —— 「保存方式」那个
+                    // 下拉框已经删掉，私钥永远加密保存。
+                    'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey', 'app:newKey',
                     'app:trustHostKey', 'app:forgetHostKey']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
@@ -244,30 +245,37 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   // 写回源码，那样每个 clone 的人都会带着那个集群的 IP。
   assert.ok(Array.isArray(b.connections), 'connections 必须是数组');
   assert.equal(b.connections.length, 0, '不得有任何内置的登录节点地址');
-  assert.equal(b.connection, null);
+  assert.equal(b.connection, undefined, "活动连接不再随 bootstrap 一起下发（它唯一的用途是预填表单，那个行为已删）");
 });
 
-test('★ 密钥在首次启动时就生成好了，公钥可查（用户要拿去注册）', async (t) => {
+test('★ 点开「新建」密钥就已经生成好了，公钥可查（用户要拿去注册）', async (t) => {
   t.after(() => { Module._load = origLoad; });
-  const r = await invoke('app:publicKey');
+  const r = await invoke('app:newKey');
   assert.equal(r.ok, true);
-  assert.match(r.publicKey, /^ssh-ed25519 [A-Za-z0-9+/]+=* slurmate-\d{8}$/,
+  assert.match(r.key.publicKey, /^ssh-ed25519 [A-Za-z0-9+/]+=* slurmate-\d{8}-\d{4}$/,
     '公钥必须是 OpenSSH 一行格式，用户要原样粘到 IDM 里');
-  assert.match(r.fingerprint, /^SHA256:/);
+  assert.match(r.key.fingerprint, /^SHA256:/);
+  assert.equal(r.generated, true, '第一次问当然要真的生成一把');
   // 这台机器没有凭据库 —— 密钥只能留在内存里，绝不该悄悄写明文落盘
-  assert.equal(r.persisted, false, '没有安全存储时不得自动落盘');
+  assert.equal(r.key.persisted, false, '没有安全存储时不得自动落盘');
   assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
     '一个字节都不该落盘');
+
+  // ★ 幂等。每次点开「新建」就换一把的话，用户刚复制去 IDM 注册的那把公钥
+  //   会当场作废，而他看到的只是「认证失败」。
+  const again = await invoke('app:newKey');
+  assert.equal(again.generated, false, '第二次必须是复用，不是重新生成');
+  assert.equal(again.key.publicKey, r.key.publicKey);
 });
 
 test('★ 没有安全存储时，重新生成密钥要明确报告「存不下来」，绝不静默写明文', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  const before = await invoke('app:publicKey');
-  const r = await invoke('app:regenerateKey');
+  const before = await invoke('app:newKey');
+  const r = await invoke('app:regenerateKey');       // 不带 connectionId = 「新建」位
   // 密钥本身生成出来了 —— 用户此刻正需要拿它去 IDM 注册，不能因为存不了就什么都不给
-  assert.match(r.publicKey, /^ssh-ed25519 /);
-  assert.notEqual(r.publicKey, before.publicKey, '重新生成必须真的换一把');
+  assert.match(r.key.publicKey, /^ssh-ed25519 /);
+  assert.notEqual(r.key.publicKey, before.key.publicKey, '重新生成必须真的换一把');
   // 但「存下来了」这件事必须明确否认，界面据此如实告知用户
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'no_secure_storage');
@@ -275,8 +283,40 @@ test('★ 没有安全存储时，重新生成密钥要明确报告「存不下�
     '一个字节都不该落盘 —— 私钥没有「明文保存」这条退路了');
 
   const after = await invoke('app:publicKey');
-  assert.equal(after.persisted, false);
-  assert.equal(after.publicKey, r.publicKey, '内存里那把必须换成新的，否则界面显示的公钥是旧的');
+  assert.equal(after.key.persisted, false);
+  assert.equal(after.key.publicKey, r.key.publicKey,
+    '内存里那把必须换成新的，否则界面显示的公钥是旧的');
+});
+
+test('★ 密钥按连接隔离：新建那条拿走「新建位」的钥匙，别的连接不受影响', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // 「新建」时用户已经把公钥复制去 IDM 注册了 —— 保存时必须**原样**把那把交出去
+  const pending = (await invoke('app:newKey')).key;
+  const a = await invoke('app:saveConnection', { user: 'alice', host: '198.51.100.10', port: 10100 });
+  assert.equal(a.ok, true);
+  assert.equal(a.key.publicKey, pending.publicKey,
+    '新建时生成的那把公钥必须原样交给这条连接，另生成一把会作废用户刚注册的');
+
+  // 交付之后「新建位」就空了，下一次新建是一把新的钥匙
+  const next = (await invoke('app:newKey')).key;
+  assert.notEqual(next.publicKey, a.key.publicKey);
+
+  const b = await invoke('app:saveConnection', { user: 'bob', host: '203.0.113.7', port: 10100 });
+  assert.equal(b.key.publicKey, next.publicKey);
+  assert.notEqual(b.key.publicKey, a.key.publicKey, '两条连接各拿各的钥匙');
+
+  // 作废其中一条，另一条必须原样还在
+  const regen = await invoke('app:regenerateKey', { connectionId: a.connection.id });
+  assert.notEqual(regen.key.publicKey, a.key.publicKey);
+  const aAfter = await invoke('app:publicKey', { connectionId: a.connection.id });
+  const bAfter = await invoke('app:publicKey', { connectionId: b.connection.id });
+  assert.equal(aAfter.key.publicKey, regen.key.publicKey);
+  assert.equal(bAfter.key.publicKey, b.key.publicKey, '重新生成一条不该动到另一条');
+
+  assert.equal((await invoke('app:deleteConnection', a.connection.id)).keyDeleted, true,
+    '删掉连接时它的私钥要跟着删');
+  assert.equal((await invoke('app:deleteConnection', b.connection.id)).keyDeleted, true);
 });
 
 test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
@@ -310,6 +350,17 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(again.connections.length, 1, '列表里不能出现第二条一样的');
   assert.equal(again.connection.id, saved.connection.id, '必须复用同一个 id');
   assert.equal(again.connection.label, '内网', '复用不得把已有的备注冲掉');
+
+  // ★ 编辑时把地址改成另一条已有的 —— 拒绝，而不是留下两条同身份、各带一把密钥的
+  const other = await invoke('app:saveConnection',
+    { user: 'alice', host: '203.0.113.7', port: 10100 });
+  const clash = await invoke('app:saveConnection',
+    { id: saved.connection.id, user: 'alice', host: '203.0.113.7', port: 10100 });
+  assert.equal(clash.ok, false);
+  assert.equal(clash.code, 'duplicate');
+  assert.match(clash.error, /203\.0\.113\.7/, '要说清楚撞上的是哪个地址');
+  assert.equal((await invoke('app:bootstrap')).connections.length, 2, '两条都该原样留着');
+  await invoke('app:deleteConnection', other.connection.id);
 
   const del = await invoke('app:deleteConnection', saved.connection.id);
   assert.equal(del.ok, true);

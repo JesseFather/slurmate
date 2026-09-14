@@ -95,21 +95,33 @@ button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 
-/* ── 公钥框 ──
-   只读，但必须可选中、可复制 —— 这是用户唯一一次要手工搬运的东西。 */
-.keybox {
-  width: 100%; resize: vertical; min-height: 62px;
-  font: 12px/1.5 ui-monospace, Consolas, monospace;
-  color: var(--fg); background: #2a2d2e;
-  border: 1px solid var(--border); border-radius: 3px; padding: 8px 10px;
-  word-break: break-all; margin-bottom: 10px;
+/* ── 密钥指纹 ──
+   这里**故意不显示公钥本身**：所有 ed25519 公钥的前 40 个字符逐字相同，看不出
+   变化，而「钥匙换了」正是最要命的一种变化。指纹每一位都随机，短，能一眼比对。 */
+.keyid {
+  display: flex; align-items: baseline; gap: 10px;
+  background: #2a2d2e; border: 1px solid var(--border); border-radius: 3px;
+  padding: 9px 12px; margin-bottom: 10px;
 }
-.keybox:focus { outline: 1px solid var(--accent); }
+.keyid .k { color: var(--fg-dim); font-size: 12px; flex: none; }
+.keyid code { font-size: 13px; color: #9cdcfe; word-break: break-all; }
+
 .mono { font-family: ui-monospace, Consolas, monospace; }
 .grow-note { margin: 0 0 0 4px; align-self: center; }
 
-/* ── 已保存的连接列表 ── */
-.conns { list-style: none; margin: 0 0 10px; padding: 0; }
+/* ── 区块标题行 ──
+   操作按钮在右上角：它们是入口，列表才是内容。摆在列表下面时，列表一长就得先
+   滚过全部条目才够得着。 */
+.sec-head { display: flex; align-items: center; gap: 8px; margin: 26px 0 10px; }
+.sec-head h2 { margin: 0; flex: 1; }
+
+/* ── 已保存的连接列表 ──
+   自己滚。列表和下面的日志是两块各自独立的内容，让它们分别滚，比整页一起滚
+   好找 —— 条目多的时候，日志会把列表顶出视野。 */
+.conns {
+  list-style: none; margin: 0 0 10px; padding: 0;
+  max-height: 300px; overflow-y: auto; overscroll-behavior: contain;
+}
 .conn {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 12px; margin-bottom: 6px;
@@ -140,6 +152,13 @@ details[open] summary { margin-bottom: 12px; }
 .bad { color: var(--err); }
 button.danger-ghost { color: var(--err); }
 
+/* 「这台机器存不下私钥」必须显眼。它不是一句可以略过的提示：密钥每次启动都会
+   换一把，而用户注册过的那把公钥随之作废 —— 症状是「认证失败」，指不回这里。 */
+p.alarm {
+  background: #3a1c1c; border: 1px solid var(--err); border-radius: 3px;
+  padding: 9px 12px; margin: 0 0 12px;
+}
+
 /* ── 主机密钥确认框 ── */
 dialog {
   color: var(--fg); background: var(--bg-alt);
@@ -156,8 +175,19 @@ dialog .fp {
 }
 dialog .row { justify-content: flex-end; }
 
-/* ── 提示与日志 ── */
-.notices { margin-top: 8px; border-top: 1px solid var(--border); }
+/* ── 提示与日志 ──
+   日志**自己滚**。不设上限的话它会一直往下长，把上面的表单顶出屏幕 ——
+   而上面那块才是用户正在操作的东西。新的条目插在最前面（见 panel.js 的 prepend），
+   所以停在顶端就是停在新消息上，不需要自动滚动。
+
+   min-height 是给「一条都还没有」时留的高度：那时候 max-height 不产生高度，
+   整块会塌成 0，看起来像界面坏了。 */
+.notices {
+  margin-top: 8px; border-top: 1px solid var(--border);
+  max-height: 260px; min-height: 64px;
+  overflow-y: auto; overscroll-behavior: contain;
+  padding-right: 4px;      /* 滚动条不贴着正文 */
+}
 .notice {
   padding: 7px 0; border-bottom: 1px solid #2a2a2a;
   display: flex; gap: 9px; font-size: 12px;

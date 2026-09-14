@@ -215,12 +215,18 @@ function decodePrivate(pem) {
 
 // ── 对外 API ────────────────────────────────────────────────────────────────
 
-/** 默认注释。带日期是为了用户在 IDM 里能分辨「哪把是哪把」。 */
+/**
+ * 默认注释。它是公钥行里**唯一人能读的部分**，所以承担两件事：
+ * 在 IDM 的列表里分辨「哪把是哪把」，以及**看出钥匙换了**。
+ *
+ * ★ 精确到分钟，不是只到天。只到天的话，同一天重新生成出来的两把钥匙注释完全一样，
+ *   而它们的指纹和 IDM 里那条又都对不上 —— 用户面对的是「名字一样、却登不上」，
+ *   指不回「其实是换了一把」。密钥换掉是这里最要命的一种变化，不能让它不可见。
+ */
 function defaultComment(now = new Date()) {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `slurmate-${y}${m}${d}`;
+  const p = (n) => String(n).padStart(2, '0');
+  return `slurmate-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}`
+       + `-${p(now.getHours())}${p(now.getMinutes())}`;
 }
 
 /** OpenSSH 的一行公钥格式：`ssh-ed25519 <base64(blob)> <comment>`。 */

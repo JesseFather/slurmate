@@ -9,6 +9,13 @@
  *   是「连上上次那台」，不是「再填一遍地址」。公钥和地址表单折进「新建连接」里，
  *   那是第一次使用时才走一遍的流程。
  *
+ * ★ 密钥是**按连接**的（见 main/config.js）。所以「新建」与「编辑」共用同一块表单，
+ *   各自展现自己那一把钥匙：新建时是刚生成、还没有归属的那把，编辑时是这条连接的
+ *   那把。界面上没有「全局密钥」这个概念 —— 重新生成只影响当前这一条。
+ *
+ * ★ 地址栏永远不预填。预填上一个连接的地址，用户不改直接点保存，得到的只是
+ *   「又存了一条一样的」，而他以为自己新建了一条。
+ *
  * 会话跑起来之后窗口主体会被 code-server 的 WebContentsView 整个盖住，
  * 所以「重新加载 / 结束会话」这两个必需的操作也放在状态条里 ——
  * 那是唯一始终可见的、属于我们自己的区域。
@@ -33,7 +40,15 @@ let boot = null;
 let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
-let newOpen = false;         // 「新建连接」表单是否展开
+
+/**
+ * 「新建／编辑」表单的状态。
+ *   mode='new'  → 展示那把还没有归属的密钥（新建时生成的）
+ *   mode='edit' → 展示 id 指向的那条连接的密钥
+ * id 始终是「当前正在编辑哪条连接」，新建时为 null —— 它是保存时告诉主进程
+ * 「改哪一条」的唯一依据，搞错就会把 A 的地址写到 B 头上。
+ */
+let form = { open: false, mode: 'new', id: null };
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
 function fmtLeft(expiresAt) {
@@ -106,8 +121,8 @@ function renderSnapshot(s) {
   // 形态切换
   const idle = !s || st === 'idle';
   $('sec-connect').classList.toggle('hidden', !idle);
-  // 会话一起来就把新建表单收掉 —— 它只在「还没连上」这一屏里说得通
-  if (!idle) setNewOpen(false);
+  // 会话一起来就把表单收掉 —— 它只在「还没连上」这一屏里说得通
+  if (!idle) closeForm();
   // 「开始开发」只在真的连上之后才出现 —— 连不上就没有分区可挑，
   // 摆一个按不动的按钮只会让人以为客户端坏了。
   $('sec-purpose').classList.toggle('hidden', !(idle && connected));
@@ -116,16 +131,80 @@ function renderSnapshot(s) {
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
 }
 
-/** 展开／收起「新建连接」。表单开着的时候把入口按钮收起来，免得两块并排。 */
-function setNewOpen(open) {
-  newOpen = open;
-  $('sec-new').classList.toggle('hidden', !open);
-  $('btn-new').classList.toggle('hidden', open);
-  // 一条连接都没有时的引导语要跟着变：表单已经开着的时候还叫用户去点
-  // 「上面的新建连接」，而那个按钮恰好被收起来了 —— 指令指向一个不存在的东西。
-  $('conn-empty').textContent = open
+/**
+ * 打开「新建」表单。
+ *
+ * ★ 密钥**在这一步生成**，早于用户填地址 —— 他得先把公钥复制去 IDM 注册，
+ *   回来才连得上。所以这一步是异步的：公钥框会先显示「正在生成密钥…」。
+ *   主进程那边是幂等的：已经有一把还没归属的密钥就复用它，不会又换一把
+ *   （那会作废用户可能已经注册好的公钥）。
+ */
+async function openNewForm() {
+  form = { open: true, mode: 'new', id: null };
+  $('sec-form').classList.remove('hidden');
+  $('btn-new').classList.add('hidden');
+
+  $('form-title').textContent = '新建连接';
+  $('form-hint').textContent =
+    '两步：把下面的公钥注册到你的 IDM 账户，再填登录节点的地址。';
+  $('btn-save').textContent = '保存并连接';
+  // 地址栏一律清空 —— 见文件头：预填上一条的地址会让「新建」悄悄变成「又存一遍」
+  $('f-label').value = '';
+  $('f-user').value = '';
+  $('f-host').value = '';
+  $('f-port').value = '';
+  $('key-hint').textContent = '正在生成密钥…';
+  hideKeyMessages();
+  renderConnEmpty();
+
+  const r = await window.slurmate.newKey();
+  if (!form.open || form.mode !== 'new') return;    // 用户已经关掉或切走了
+  if (!r || !r.ok) return showKeyError((r && r.error) || '生成密钥失败。');
+  $('key-hint').textContent = r.generated
+    ? '这把密钥属于下面这条新连接，还没有别的连接用它。'
+    : '这把密钥是上次「新建」时生成的（如果你已经把它注册过了，直接往下填就行）。';
+  renderKey(r.key);
+}
+
+/** 打开某条连接的编辑表单。 */
+async function openEditForm(c) {
+  form = { open: true, mode: 'edit', id: c.id };
+  $('sec-form').classList.remove('hidden');
+  $('btn-new').classList.add('hidden');
+
+  $('form-title').textContent = '编辑连接';
+  $('form-hint').textContent = '改这里的地址只影响这一条连接。';
+  $('btn-save').textContent = '保存';
+  $('f-label').value = c.label || '';
+  $('f-user').value = c.user;
+  $('f-host').value = c.host;
+  $('f-port').value = c.port;
+  $('key-hint').textContent = '正在读取密钥…';
+  hideKeyMessages();
+  renderConnEmpty();
+
+  const r = await window.slurmate.publicKey({ connectionId: c.id });
+  if (!form.open || form.mode !== 'edit' || form.id !== c.id) return;
+  if (!r || !r.ok) return showKeyError((r && r.error) || '读取密钥失败。');
+  $('key-hint').textContent = r.key.missing
+    ? '这条连接还没有密钥。点「重新生成密钥…」生成一把，再把公钥注册到 IDM。'
+    : '这是这条连接自己的密钥。重新生成只作废它，其他连接不受影响。';
+  renderKey(r.key);
+}
+
+/** 收起表单，回到「已保存的连接」那一屏。 */
+function closeForm() {
+  form = { open: false, mode: 'new', id: null };
+  $('sec-form').classList.add('hidden');
+  $('btn-new').classList.remove('hidden');
+  renderConnEmpty();
+}
+
+/** 「一条连接都没有」时的引导语。表单开着的时候它得指向表单，而不是那个已被收起的按钮。 */
+function renderConnEmpty() {
+  $('conn-empty').textContent = form.open
     ? '还没有保存任何登录节点。填好下面的用户名、主机和端口，点「保存并连接」。'
-    : '还没有保存任何登录节点。点上面的「新建连接」填一个 —— 只需要用户名、主机和端口。';
+    : '还没有保存任何登录节点。点右上角的「新建连接」填一个 —— 只需要用户名、主机和端口。';
 }
 
 function renderKv(s) {
@@ -162,18 +241,46 @@ function renderKv(s) {
 }
 
 // ── 公钥 ────────────────────────────────────────────────────────────────────
-function renderKey(info) {
-  $('f-pubkey').value = info.publicKey || '';
-  $('key-fp').textContent = info.fingerprint ? `指纹 ${info.fingerprint}` : '';
 
-  const err = $('key-error');
-  if (boot.keyError) {
-    err.classList.remove('hidden');
-    err.textContent = (boot.keyErrorDetail || '本机保存的私钥不可用。')
-      + ' 若确认要重新生成（你会需要把新公钥重新注册到 IDM），点上面的「重新生成密钥…」。';
-  } else {
-    err.classList.add('hidden');
+/** 清掉密钥区那几条提示。**切换表单时必须先清** —— 否则上一把钥匙的毛病会留在屏幕上。 */
+function hideKeyMessages() {
+  for (const id of ['key-error', 'key-nopersist']) {
+    const el = $(id);
+    el.classList.add('hidden');
+    el.classList.remove('alarm');
+    el.textContent = '';
   }
+  $('key-fp').textContent = '—';
+}
+
+function showKeyError(text) {
+  const err = $('key-error');
+  err.textContent = text;
+  err.classList.remove('hidden');
+}
+
+/**
+ * 渲染一把密钥。
+ * @param {{publicKey, fingerprint, persisted, error, detail, missing}} k
+ */
+function renderKey(k) {
+  hideKeyMessages();
+  // ★ 只显示指纹，**不显示公钥本身**：所有 ed25519 公钥的前 40 个字符逐字相同
+  //   （`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI` 是固定的），于是「换了一把钥匙」
+  //   在一个文本框里看起来毫无变化 —— 而这是最要命的一种变化，用户会以为还是
+  //   原来那把，实际拿去认证的已经不是了，症状只有「认证失败」。
+  //   指纹短、每一位都随机，拿去和 IDM 里那条一比对就知道对不对。
+  $('key-fp').textContent = k.fingerprint || '—';
+
+  if (k.error) {
+    // 密钥在，但读不出来。这是**唯一**一条会走到「重新生成」的路，
+    // 而点下去会作废用户已经注册到 IDM 的那把公钥 —— 必须说清楚。
+    showKeyError((k.detail || '这把密钥不可用。')
+      + ' 若确认要重新生成（你会需要把新的公钥重新注册到 IDM），点上面的「重新生成密钥…」。');
+    return;
+  }
+  // 还没有密钥。由 key-hint 说明该怎么办，这里再喊一遍只会重复。
+  if (k.missing) return;
 
   // 密钥存不下来（这台机器没有凭据库）。必须**说出来**，不能只是没保存成功。
   //
@@ -181,17 +288,21 @@ function renderKey(info) {
   // 那等于把「你的私钥会以明文躺在磁盘上」包装成一个需要用户自己权衡的选项 ——
   // 选明文的那个用户并不知道自己在放弃什么。现在只有加密一种方式，
   // 存不了就如实讲清楚后果，没有第二个选项可以让人选错。
-  const np = $('key-nopersist');
-  const nopersist = !boot.keyError && info.persisted === false;
-  np.classList.toggle('hidden', !nopersist);
-  if (nopersist) {
-    // 「没有凭据库」和「有凭据库但这次写失败了」是两种不同的毛病，
-    // 修法也不同，所以文案要分开 —— 一句笼统的「保存失败」指不回根因。
-    const tail = '本次运行可以正常使用；但下次启动会重新生成一把新密钥，'
-      + '你得把新公钥重新注册到 IDM 一次。';
+  if (k.persisted === false) {
+    const np = $('key-nopersist');
+    // 「没有凭据库」和「有凭据库但这次写失败了」是两种不同的毛病，修法也不同，
+    // 所以文案要分开 —— 一句笼统的「保存失败」指不回根因。
+    //
+    // ★ 这条必须**显眼**（.alarm），因为它预告的正是后面那个「认证失败」：
+    //   密钥存不下来 → 下次启动换一把 → 已经注册到 IDM 的那把公钥作废。
+    //   写成一行灰字时，用户会一路读到「认证失败」才回头，而那时已经指不回这里了。
+    const tail = '下次启动会重新生成一把新密钥，你注册到 IDM 的那把公钥随之作废 ——'
+      + '到时候你看到的只会是「认证失败」。';
     np.textContent = boot.secureStorageAvailable
       ? '注意：私钥这次没能保存到本机。' + tail
-      : '注意：这台机器上没有可用的系统凭据库，私钥存不下来。' + tail;
+      : '注意：这台机器上没有可用的系统凭据库，私钥存不下来（只能留在内存里）。' + tail;
+    np.classList.add('alarm');
+    np.classList.remove('hidden');
   }
 }
 
@@ -209,12 +320,12 @@ function renderConnections(list) {
 
     const t = document.createElement('span');
     t.className = 't';
-    // label 只在它真的多提供了信息时才显示。表单里没有「备注」这一栏，
-    // label 默认就等于 host —— 照搬会出现
-    // 「198.51.100.10 — alice@198.51.100.10:10100」这种把同一件事说两遍的条目。
-    t.textContent = (c.label && c.label !== c.host)
-      ? `${c.label} · ${c.user}@${c.host}:${c.port}`
-      : `${c.user}@${c.host}:${c.port}`;
+    // 有备注就显示备注 —— 用户给它起了名，就是为了不必再读地址。
+    // 没起名才回落成地址。**两者取其一，不并排显示**：并排等于把备注降级成一个
+    // 前缀，那这个名字就白起了，用户还是得去读那串地址。
+    t.textContent = c.label || `${c.user}@${c.host}:${c.port}`;
+    // 地址仍然在，只是不占地方 —— 鼠标停一下就能看到。
+    t.title = `${c.user}@${c.host}:${c.port}`;
 
     const probe = lastProbe.find((p) => p.id === c.id);
     const m = document.createElement('span');
@@ -238,20 +349,37 @@ function renderConnections(list) {
     main.textContent = live ? '断开' : '连接';
     main.onclick = () => (live ? doDisconnect() : doConnectTo(c));
 
+    // 编辑：地址 / 这条连接自己的密钥。
+    const edit = document.createElement('button');
+    edit.className = 'ghost tiny';
+    edit.textContent = '编辑';
+    edit.onclick = () => openEditForm(c);
+
     const del = document.createElement('button');
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
     del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
     del.onclick = async () => {
+      // 删除现在连带销毁这条连接的私钥，所以要先问一句 —— 它是一条不可逆的操作，
+      // 而且用户已经拿去 IDM 注册过的公钥会就此作废（重新建一条要重新注册）。
+      const sure = window.confirm(
+        `删除「${c.user}@${c.host}:${c.port}」？\n\n`
+        + '这条连接的私钥会一起删掉。你注册到 IDM 的那把公钥随之作废，'
+        + '重建一条需要重新注册。');
+      if (!sure) return;
       const r = await window.slurmate.deleteConnection(c.id);
       if (!r.ok) return notice('error', r.error);
       boot.connections = r.connections;
       boot.activeConnectionId = r.activeConnectionId;
+      // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
+      if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
       renderConnections(boot.connections);
-      notice('info', '已删除该连接。');
+      notice('info', r.keyDeleted
+        ? '已删除该连接，它的私钥也一并删掉了。'
+        : '已删除该连接。');
     };
 
-    li.append(t, m, main, del);
+    li.append(t, m, main, edit, del);
     box.append(li);
   }
 }
@@ -348,44 +476,40 @@ async function init() {
     $('app-sub').textContent = boot.backendLabel;
   }
 
-  // bootstrap 的字段名是 keyXxx（那个包里同时还装着连接、分区、版本号一堆东西），
-  // renderKey 要的是密钥本身那几个。**必须显式转一手** —— 此前直接把 boot 整个传进去，
-  // 于是 `info.fingerprint` 一直是 undefined，指纹从来没在首屏出现过；
-  // 「私钥存不下来」的提示也因为 `undefined === false` 不成立而永远不显示。
-  renderKey({
-    publicKey: boot.publicKey,
-    fingerprint: boot.keyFingerprint,
-    persisted: boot.keyPersisted,
-  });
-
-  if (boot.connection) {
-    $('f-user').value = boot.connection.user;
-    $('f-host').value = boot.connection.host;
-    $('f-port').value = boot.connection.port;
-  }
+  // ★ bootstrap 里**没有**公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
+  //   单独去问（app:publicKey / app:newKey）。曾经这里从 bootstrap 读全局的
+  //   keyFingerprint，而字段名对不上，于是指纹从来没在首屏出现过；
+  //   现在那条路径整个不存在了，每个字段都是问出来的、当场渲染的。
   renderConnections(boot.connections);
   renderPartitions(boot.partitions || []);
+  renderConnEmpty();
   // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
-  if ((boot.connections || []).length === 0) setNewOpen(true);
+  if ((boot.connections || []).length === 0) await openNewForm();
+
+  // 当前表单在操作哪把密钥。新建时是那把还没有归属的，编辑时是这条连接的。
+  const keyPayload = () =>
+    (form.mode === 'edit' && form.id ? { connectionId: form.id } : undefined);
 
   // ── 事件 ──
-  $('btn-new').onclick = () => setNewOpen(true);
-  $('btn-cancel-new').onclick = () => setNewOpen(false);
+  $('btn-new').onclick = () => openNewForm();
+  $('btn-cancel-form').onclick = () => closeForm();
 
   $('btn-copykey').onclick = async () => {
-    const r = await window.slurmate.copyPublicKey();
-    notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : r.error);
+    const r = await window.slurmate.copyPublicKey(keyPayload());
+    notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : (r && r.error) || '复制失败。');
   };
 
   $('btn-regen').onclick = async () => {
+    const which = form.mode === 'edit' ? '这条连接的' : '这把';
     const yes = window.confirm(
-      '重新生成会作废当前这把密钥。\n\n'
+      `重新生成会作废${which}密钥。\n\n`
       + '你必须把新的公钥重新注册到 IDM，否则连不上。\n\n确定要重新生成吗？');
     if (!yes) return;
-    const r = await window.slurmate.regenerateKey();
-    if (!r || !r.publicKey) return notice('error', '重新生成失败。');
-    boot.keyError = null;
-    renderKey(await window.slurmate.publicKey());
+    const r = await window.slurmate.regenerateKey(keyPayload());
+    if (!r || !r.key || !r.key.publicKey) {
+      return notice('error', (r && r.error) || '重新生成失败。');
+    }
+    renderKey(r.key);
     if (r.ok) {
       notice('warn', '已生成新密钥。请把上面的新公钥重新注册到 IDM，然后重新连接。');
     } else {
@@ -396,27 +520,51 @@ async function init() {
     }
   };
 
-  $('btn-connect').onclick = async () => {
+  $('btn-save').onclick = async () => {
+    const label = $('f-label').value.trim();
     const user = $('f-user').value.trim();
     const host = $('f-host').value.trim();
-    const port = Number($('f-port').value) || 10100;
+    const port = Number($('f-port').value);
     if (!user || !host) return notice('error', '请先填写用户名和主机。');
+    // 端口不给默认值：编一个默认端口出来，用户会以为「填不填都行」，
+    // 而错端口的表现是连接超时 —— 一个指不回这里的原因。
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return notice('error', '端口请填 1-65535 之间的整数（集群登录节点监听的端口）。');
+    }
 
-    // 不传 label：表单里没有「备注」这一栏，服务端会回落成 host。
-    // 更要紧的是**不传 id** —— 服务端按 user@host:port 判重，
-    // 同一个地址反复点「保存并连接」只会复用已有那条，不会攒出一串一样的条目。
-    const saved = await window.slurmate.saveConnection({ user, host, port });
+    // ★ 备注这一栏的传法在两种模式下不同，因为**空备注的含义不同**：
+    //   编辑时那一栏就是当前值，清空即清空，必须原样传上去；
+    //   新建时留空只表示「这次没起名」，不该拿它把已有条目的备注冲掉。
+    const editing = form.mode === 'edit' && form.id ? form.id : null;
+    const input = { user, host, port };
+    if (editing) input.id = editing;
+    if (editing || label) input.label = label;
+
+    const saved = await window.slurmate.saveConnection(input);
     if (!saved.ok) return notice('error', saved.error);
     boot.connections = saved.connections;
     boot.activeConnectionId = saved.connection.id;
     renderConnections(boot.connections);
-    notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
 
-    setNewOpen(false);
-    const ok = await handleConnectResult(
+    if (editing) {
+      const wasLive = connected && saved.connection.id === boot.activeConnectionId;
+      closeForm();
+      notice('ok', '已保存这条连接。');
+      if (wasLive) {
+        // 地址改了但 SSH 连接还挂在旧地址上。不说的话，用户会以为改动没生效。
+        notice('info', '这条连接正连着 —— 新地址要重新点一次「连接」才会生效。');
+      }
+      return;
+    }
+
+    notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
+    await handleConnectResult(
       await window.slurmate.connect({ connectionId: saved.connection.id }));
-    // 没连上就把表单放回来，省得用户还要再点一次「新建连接…」
-    if (!ok) setNewOpen(true);
+    // ★ 无论连上没连上，表单都收起来。
+    //   此前没连上时会把表单再摆回来，用户看到的是「刚保存完又弹出一个新建连接」——
+    //   像是什么都没存进去。这条连接已经在右上角下面的列表里了，它有「连接」「编辑」
+    //   两个按钮；连不上时日志里那条错误会说清楚下一步该做什么。
+    closeForm();
   };
 
   $('btn-probe').onclick = doProbe;

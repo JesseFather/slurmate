@@ -22,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA = 3;   // 2：profile → connections；3：删掉「私钥保存方式」（永远加密保存）
+const SCHEMA = 4;   // 2：profile → connections；3：永远加密保存；4：**每条连接一把密钥**
 
 // 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
 // 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
@@ -30,6 +30,19 @@ const SCHEMA = 3;   // 2：profile → connections；3：删掉「私钥保存�
 // 用户以为密钥丢了，跑去重新生成、重新注册。读到时带上 legacy:true，由调用方加密重存。
 const SECRET_ENCRYPTED = 'encrypted';
 const LEGACY_SECRET_PLAIN = 'plain';
+
+/**
+ * 「新建连接」时先于连接存在的那把密钥，占一个保留 id。
+ *
+ * 为什么需要它：一条新连接的密钥必须在**用户点保存之前**就存在 —— 否则
+ * 「保存并连接」的第一次尝试必然认证失败（公钥还没来得及注册）。所以流程是
+ * 打开新建表单 → 生成密钥 → 用户复制去 IDM 注册 → 填地址 → 保存，一次走完。
+ *
+ * 它落盘的，而且**跨重启保留**：用户可能复制完公钥、去 IDM 注册、中途关掉客户端
+ * 再回来。丢掉它等于让刚注册的那把公钥当场作废，而症状只是「认证失败」。
+ * 连接 id 是 `c<hex>`，与它不可能相撞。
+ */
+const PENDING_ID = '__pending__';
 
 const DEFAULTS = {
   schema: SCHEMA,
@@ -81,7 +94,14 @@ function newConnectionId() {
  */
 function connectionKey(c) { return `${c.user}@${c.host}:${c.port}`; }
 
-/** 把任意输入规整成一条合法连接；字段不合法则返回 null（由调用方报错，不静默填空）。 */
+/**
+ * 把任意输入规整成一条合法连接；字段不合法则返回 null（由调用方报错，不静默填空）。
+ *
+ * **备注（label）为空是合法状态**，表示「用户没起名」。界面上据此回落成显示地址。
+ * 这里曾经把空备注回落成 host，那让「没起名」和「名字就叫这个地址」变得无法区分 ——
+ * 而界面要按这个区分决定显示哪一样。
+ * 旧版本写下的 label 恰好等于 host 的那些，也在这里一并归成「没起名」。
+ */
 function normalizeConnection(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
   const user = String(raw.user || '').trim();
@@ -89,9 +109,10 @@ function normalizeConnection(raw, fallbackId) {
   const port = Number(raw.port);
   if (!user || !host) return null;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const label = String(raw.label || '').trim();
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newConnectionId()),
-    label: String(raw.label || '').trim() || host,
+    label: label === host ? '' : label,
     user, host, port,
   };
 }
@@ -166,7 +187,9 @@ function loadConfig(dir) {
  *   界面上不修改任何字段、连点两次「保存并连接」，不该得到两条一样的条目 ——
  *   列表会越点越长，而用户分不清该点哪一条。
  *
- * @returns {{connection:object, created:boolean}|null}  输入不合法时返回 null
+ * @returns {{connection:object, created:boolean}
+ *          | {conflict:object}
+ *          | null}  输入不合法时返回 null
  */
 function upsertConnection(cfg, input) {
   const conn = normalizeConnection(input, input && input.id);
@@ -181,16 +204,30 @@ function upsertConnection(cfg, input) {
   }
 
   const prev = cfg.connections[idx];
+
+  // ★ 编辑场景：输入的 id 指向 A，但 user@host:port 撞上了另一条 B。
+  //   照直改下去，A 和 B 会变成同一身份的两份副本 —— 之后「相同条目检测」
+  //   再也说不清该复用哪一条，而且两条各有各的密钥，界面却完全看不出差别。
+  //   所以明确拒绝，让用户改地址或者删掉重复的那条，而不是替他们挑一条。
+  const clash = cfg.connections.find((c) => c.id !== prev.id && connectionKey(c) === key);
+  if (clash) {
+    return {
+      conflict: {
+        id: clash.id, label: clash.label,
+        user: clash.user, host: clash.host, port: clash.port,
+      },
+    };
+  }
+
   // 复用旧条目：**id 用回旧的那个**（可能已经被 activeConnectionId 之类引用着）。
-  // label 只在这次给了一个有意义的名字时才覆盖 —— 界面上的表单没有「备注」这一栏，
-  // 传进来的 label 就是 host；拿它把用户手写的「内网」冲掉是静默的信息丢失。
-  const next = {
-    ...prev,
-    user: conn.user,
-    host: conn.host,
-    port: conn.port,
-    label: (conn.label && conn.label !== conn.host) ? conn.label : prev.label,
-  };
+  const next = { ...prev, user: conn.user, host: conn.host, port: conn.port };
+
+  // 备注按两条不同的语义处理，因为**空备注在这两条路径上意思不同**：
+  //   · 编辑（输入带了 id）—— 表单里那一栏就是当前值，清空即清空，必须写回去；
+  //   · 按地址判重（输入没带 id）—— 空备注只表示「这次没填」，
+  //     拿它把用户手写的「内网」冲掉是静默的信息丢失。
+  if (input && input.id) next.label = conn.label;
+  else if (conn.label) next.label = conn.label;
   cfg.connections = cfg.connections.map((c, i) => (i === idx ? next : c));
   return { connection: next, created: false };
 }
@@ -248,15 +285,34 @@ function forgetHostKey(dir, cfg, host, port) {
   saveConfig(dir, cfg);
 }
 
-// ── 凭据（SSH 私钥）────────────────────────────────────────────────────────
+// ── 凭据（SSH 私钥）：**每条连接一把** ──────────────────────────────────────
+//
+// 为什么按连接存，而不是全局一把：
+//   · 公钥是注册在**某个账户**上的，而连接就是「哪个账户、哪台机器、哪个端口」。
+//     同一账户的多条连接本就该共用、也允许各自独立作废。
+//   · 「重新生成密钥」这个动作的作用域因此变成一条连接，而不是整个客户端 ——
+//     作废一把钥匙不该顺带把别的连接也打断。
+//
+// 磁盘形态（一个文件装全部，0600）：
+//   { schema: 4, keys: { "<连接 id 或 PENDING_ID>": { mode, data } } }
+//
+// 旧形态（schema ≤ 3）是 { schema, mode, data } 一份全局密钥，见 migrateLegacySecret。
+
 function secretPath(dir) { return path.join(dir, 'secrets.json'); }
 
+function readSecretFile(dir) {
+  const raw = readJson(secretPath(dir));
+  if (!raw || typeof raw !== 'object') return null;
+  return raw;
+}
+
+function writeSecretFile(dir, obj) {
+  writeAtomic(secretPath(dir), JSON.stringify(obj, null, 2), 0o600);
+}
+
 /**
- * 存凭据（当前只有一样：SSH 私钥的 PEM 文本）。
- *
- * **只有加密一种方式。** 界面上不再有「保存方式」这个下拉框 —— 一个需要用户
- * 在「安全」和「不安全」之间做选择的设计，本身就是设计失败：选明文的那个用户
- * 并不知道自己在放弃什么，而选加密的那个也不该为此感到庆幸。
+ * 加密并写下一条密钥。**只有加密一种方式** —— 界面上不再有「保存方式」这个下拉框；
+ * 一个需要用户在「安全」和「不安全」之间做选择的设计，本身就是设计失败。
  *
  * @param {object|null} cryptoSafe  Electron 的 safeStorage 封装：
  *                                  { encrypt(str)->Buffer, decrypt(Buffer)->str }
@@ -266,7 +322,7 @@ function secretPath(dir) { return path.join(dir, 'secrets.json'); }
  * **调用方必须先读返回值**：这台机器存不了密钥时，唯一诚实的做法是如实说出来，
  * 而不是降级成明文让它「看起来存上了」。
  */
-function setSecret(dir, cryptoSafe, value) {
+function setKey(dir, cryptoSafe, id, value) {
   if (!cryptoSafe) return { ok: false, reason: 'no_secure_storage' };
   let buf;
   try {
@@ -274,38 +330,102 @@ function setSecret(dir, cryptoSafe, value) {
   } catch (e) {
     return { ok: false, reason: 'encrypt_failed: ' + e.message };
   }
-  writeAtomic(secretPath(dir),
-    JSON.stringify({ schema: SCHEMA, mode: SECRET_ENCRYPTED, data: buf.toString('base64') }), 0o600);
+  const raw = readSecretFile(dir);
+  const keys = (raw && raw.keys && typeof raw.keys === 'object') ? { ...raw.keys } : {};
+  keys[id] = { mode: SECRET_ENCRYPTED, data: buf.toString('base64') };
+  // 写下去的就是新格式。旧格式那两个字段（data/mode）**不保留** ——
+  // 能走到「已经写下新格式、旧格式那份还躺着」这一步，只可能是「有密钥但没有
+  // 任何连接」的配置，而旧版本的界面根本不让人在没有连接的情况下配密钥。
+  // 真正有可能带旧格式的用户，在 bootstrap 时就已经被 migrateLegacySecret 搬完了。
+  writeSecretFile(dir, { schema: SCHEMA, keys });
   return { ok: true, mode: SECRET_ENCRYPTED };
 }
 
 /**
- * 取凭据。
+ * 取一条密钥。
  * @returns {{ok:true, value:string, mode:string, legacy?:true} | {ok:false, reason:string}}
  */
-function getSecret(dir, cryptoSafe) {
-  const raw = readJson(secretPath(dir));
-  if (!raw || typeof raw !== 'object' || typeof raw.data !== 'string') {
+function getKey(dir, cryptoSafe, id) {
+  const raw = readSecretFile(dir);
+  if (!raw) return { ok: false, reason: 'not_saved' };
+  const entry = raw.keys && raw.keys[id];
+  if (!entry || typeof entry !== 'object' || typeof entry.data !== 'string') {
     return { ok: false, reason: 'not_saved' };
   }
-  if (raw.mode === LEGACY_SECRET_PLAIN) {
+  if (entry.mode === LEGACY_SECRET_PLAIN) {
     // 旧版本写下的明文。现在不再产生这种文件，但已经存在的那一份必须读得出来。
     // legacy:true 是在告诉调用方：这东西还以明文躺着，有条件就加密重存一遍。
-    return { ok: true, value: raw.data, mode: LEGACY_SECRET_PLAIN, legacy: true };
+    return { ok: true, value: entry.data, mode: LEGACY_SECRET_PLAIN, legacy: true };
   }
-  if (raw.mode !== SECRET_ENCRYPTED) {
-    return { ok: false, reason: 'bad_mode: ' + raw.mode };
+  if (entry.mode !== SECRET_ENCRYPTED) {
+    return { ok: false, reason: 'bad_mode: ' + entry.mode };
   }
   if (!cryptoSafe) {
     return { ok: false, reason: 'no_secure_storage' };
   }
   try {
-    return { ok: true, value: cryptoSafe.decrypt(Buffer.from(raw.data, 'base64')),
+    return { ok: true, value: cryptoSafe.decrypt(Buffer.from(entry.data, 'base64')),
              mode: SECRET_ENCRYPTED };
   } catch (e) {
     // 换过机器、换过用户、keyring 被重置 —— 都会走到这里
     return { ok: false, reason: 'decrypt_failed: ' + e.message };
   }
+}
+
+/** 删掉一条密钥（连接被删除时跟着走）。文件空了就删掉文件本身。 */
+function deleteKey(dir, id) {
+  const raw = readSecretFile(dir);
+  if (!raw || !raw.keys || !Object.prototype.hasOwnProperty.call(raw.keys, id)) {
+    return { ok: true, removed: false };
+  }
+  const keys = { ...raw.keys };
+  delete keys[id];
+  if (Object.keys(keys).length === 0) {
+    try { fs.unlinkSync(secretPath(dir)); } catch { /* 已经不在了 */ }
+  } else {
+    writeSecretFile(dir, { schema: SCHEMA, keys });
+  }
+  return { ok: true, removed: true };
+}
+
+/** 这条 id 下有没有密钥。**只查存在性，不解密** —— 界面上要据此决定说话的方式。 */
+function hasKey(dir, id) {
+  const raw = readSecretFile(dir);
+  return Boolean(raw && raw.keys && raw.keys[id]);
+}
+
+/**
+ * 把旧版本那份**全局**密钥搬到新格式里。
+ *
+ * 旧格式里一把密钥服务所有连接，所以这里把它原样复制给每一条已有连接 ——
+ * 那正是升级前的事实，复制之后每一条的行为都不变，用户也不必重新注册。
+ * 之后各条可以各自「重新生成」，互不影响。
+ *
+ * 一条连接都没有时**什么也不做**（把文件留着），等有了第一条再搬 ——
+ * 那时它会被交给那条连接。删掉它则等于让用户已经注册过的公钥凭空消失。
+ *
+ * @returns {{migrated:boolean, count?:number, deferred?:boolean}}
+ */
+function migrateLegacySecret(dir, ids) {
+  const raw = readSecretFile(dir);
+  if (!raw || typeof raw.data !== 'string') return { migrated: false };
+  if (raw.mode !== SECRET_ENCRYPTED && raw.mode !== LEGACY_SECRET_PLAIN) {
+    return { migrated: false };
+  }
+  if (!Array.isArray(ids) || ids.length === 0) return { migrated: false, deferred: true };
+
+  // 保留文件里已有的条目（正常情况下不会有 —— 见 setKey 的注释），只补缺的那些。
+  // 手改过的文件不该因为一次迁移就丢掉别的密钥。
+  const keys = (raw.keys && typeof raw.keys === 'object') ? { ...raw.keys } : {};
+  let added = 0;
+  for (const id of ids) {
+    if (keys[id]) continue;
+    keys[id] = { mode: raw.mode, data: raw.data };
+    added += 1;
+  }
+  if (added === 0) return { migrated: false };
+  writeSecretFile(dir, { schema: SCHEMA, keys });
+  return { migrated: true, count: added };
 }
 
 // ── 待补发的 goodbye（见 session.js：断电/kill -9 时 goodbye 一定发不出去）────────
@@ -335,12 +455,12 @@ function removePendingGoodbye(dir, sessionId) {
 }
 
 module.exports = {
-  SCHEMA, DEFAULTS, SECRET_ENCRYPTED,
+  SCHEMA, DEFAULTS, SECRET_ENCRYPTED, LEGACY_SECRET_PLAIN, PENDING_ID,
   loadConfig, saveConfig, slotPort, setSlotPort,
   activeConnection, newConnectionId, normalizeConnection,
   connectionKey, upsertConnection,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
-  setSecret, getSecret,
+  setKey, getKey, deleteKey, hasKey, migrateLegacySecret, readSecretFile,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,
   // 导出给测试用
   _internal: { writeAtomic, readJson, configPath, secretPath, pendingGoodbyePath },

@@ -44,56 +44,68 @@
          公钥和地址表单都折进「新建连接」里 —— 它们是**一次性**的活，
          而用户每次打开客户端真正要做的事是「连上上次那台」。 -->
     <section id="sec-connect">
-      <h2>登录节点</h2>
-      <ul id="conn-list" class="conns"></ul>
-      <!-- 文案由 setNewOpen 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
-           再叫用户去点它就成了一条指向不存在的东西的指令。 -->
-      <p class="sub" id="conn-empty">
-        还没有保存任何登录节点。点上面的「新建连接」填一个 ——
-        只需要用户名、主机和端口。
-      </p>
-      <div class="row">
+      <!-- 两个操作放右上角：它们是这一屏的「入口」，而列表本身是内容。
+           摆在列表下面时，列表一长就得先滚过全部条目才够得着。 -->
+      <div class="sec-head">
+        <h2>登录节点</h2>
         <button id="btn-new">新建连接…</button>
         <button id="btn-probe" class="ghost">探测全部</button>
       </div>
+      <ul id="conn-list" class="conns"></ul>
+      <!-- 文案由 renderConnEmpty 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
+           再叫用户去点它就成了一条指向不存在的东西的指令。 -->
+      <p class="sub" id="conn-empty">
+        还没有保存任何登录节点。点右上角的「新建连接」填一个 ——
+        只需要用户名、主机和端口。
+      </p>
     </section>
 
-    <!-- ── 新建连接（含首次使用的公钥注册）── -->
-    <section id="sec-new" class="hidden">
-      <h2>新建连接</h2>
-      <p class="sub">
-        第一次使用时有两步：把下面的公钥注册到你的 IDM 账户，再填登录节点的地址。
-        公钥只需要注册这一次，之后换机器才需要重来。
+    <!-- ── 新建 / 编辑连接 ──
+         两种形态共用这一块：字段完全一样，只有标题、按钮文案和「密钥属于谁」不同。
+         各写一份只会让两处慢慢长歪。
+         ★ 地址栏**永不预填**：预填上一条连接的地址，用户不改就点保存，得到的
+           只是「又存了一条一样的」，而他以为自己新建了一条。 -->
+    <section id="sec-form" class="hidden">
+      <h2 id="form-title">新建连接</h2>
+      <p class="sub" id="form-hint">
+        两步：把下面的公钥注册到你的 IDM 账户，再填登录节点的地址。
       </p>
 
-      <h3>① 你的公钥</h3>
-      <p class="sub">
-        把下面这一行加进你的 IDM 账户。之后客户端用它登录，不再需要密码。
-        它是一把专用密钥，与你平时 ssh 用的那把互不影响。
-      </p>
-      <textarea id="f-pubkey" class="keybox" readonly rows="3"
-                spellcheck="false" placeholder="正在生成密钥…"></textarea>
+      <h3>① 这条连接的密钥</h3>
+      <p class="sub" id="key-hint"></p>
+      <!-- ★ 这里**不显示公钥本身**。原因是它显示不出信息：所有 ed25519 公钥的前
+           40 个字符逐字相同（`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI` 是固定的），
+           于是「换了一把钥匙」在文本框里看起来毫无变化 —— 而这恰恰是最要命的一种
+           变化：用户以为还是原来那把，实际拿去认证的已经不是了，症状只有「认证失败」。
+           指纹短、且每一位都随机，对照 IDM 就看得出。公钥交给「复制公钥」按钮。 -->
+      <div class="keyid">
+        <span class="k">指纹</span>
+        <code class="mono" id="key-fp">—</code>
+      </div>
       <div class="row">
         <button id="btn-copykey" class="ghost">复制公钥</button>
         <button id="btn-regen" class="ghost danger-ghost">重新生成密钥…</button>
-        <span class="sub mono grow-note" id="key-fp"></span>
+        <span class="sub grow-note">注册到 IDM 的就是「复制公钥」里的那一行。</span>
       </div>
       <p class="sub bad hidden" id="key-error"></p>
       <p class="sub bad hidden" id="key-nopersist"></p>
 
       <h3>② 登录节点</h3>
       <div class="row">
+        <div><label for="f-label">备注（可留空）</label>
+             <input type="text" id="f-label" spellcheck="false"
+                    placeholder="留空则显示地址"></div>
         <div><label for="f-user">用户名</label>
              <input type="text" id="f-user" autocomplete="username" spellcheck="false"></div>
         <div class="grow"><label for="f-host">主机（IP 或域名）</label>
              <input type="text" id="f-host" class="full" spellcheck="false"
                     placeholder="login.example.com"></div>
         <div><label for="f-port">端口</label>
-             <input type="number" id="f-port" min="1" max="65535" value="10100"></div>
+             <input type="number" id="f-port" min="1" max="65535" placeholder="10100"></div>
       </div>
       <div class="row row-spaced">
-        <button id="btn-connect">保存并连接</button>
-        <button id="btn-cancel-new" class="ghost">取消</button>
+        <button id="btn-save">保存并连接</button>
+        <button id="btn-cancel-form" class="ghost">取消</button>
       </div>
     </section>
 

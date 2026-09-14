@@ -215,3 +215,42 @@ test('★ kind=transport 的信封被 classify 归为传输层，而不是「守
   assert.equal(c.action, Action.TRANSPORT);
   assert.match(c.message, /命令没跑起来/, '要带上具体原因，而不是笼统的「没有返回应答」');
 });
+
+// ── 认证失败：把 ssh2 的原话翻译成能指向根因的话 ─────────────────────────────
+//
+// 这一节存在的理由很具体：真机上「All configured authentication methods failed」
+// 是用户唯一看得到的东西，而它**完全不提用的是哪把钥匙**——于是唯一能做出的反应
+// 是反复重试。这句话的真实含义很窄：服务器不认这把公钥。
+
+test('★ ssh2 的认证失败原话被认出来', () => {
+  assert.equal(sshBackend.AUTH_FAILED_RE.test('All configured authentication methods failed'), true);
+  assert.equal(sshBackend.AUTH_FAILED_RE.test('all configured authentication methods failed'), true,
+    '大小写不该决定识别与否');
+  // 别的错误不能被误判成认证失败 —— 它们的修法完全不同
+  assert.equal(sshBackend.AUTH_FAILED_RE.test('Timed out while waiting for handshake'), false);
+  assert.equal(sshBackend.AUTH_FAILED_RE.test('Host verification failed'), false);
+  assert.equal(sshBackend.AUTH_FAILED_RE.test('connect ECONNREFUSED'), false);
+});
+
+test('★ 认证失败的说明必须带指纹与公钥 —— 否则用户无从核对', () => {
+  const { publicKeyLine, fingerprint } = keys.generate('slurmate-20260914');
+  const msg = sshBackend.authFailureDetail({
+    user: 'alice', host: '198.51.100.10', port: 10100,
+    keyType: 'ssh-ed25519', keyFingerprint: fingerprint, publicKeyLine,
+  });
+
+  assert.match(msg, /alice@198\.51\.100\.10:10100/, '要说是对哪台机器、哪个账户被拒了');
+  assert.ok(msg.includes(fingerprint), '指纹是用户唯一能拿去和 IDM 对照的东西');
+  assert.ok(msg.includes(publicKeyLine), '公钥要原样给出来，用户可直接复制去核对');
+  assert.match(msg, /ssh-keygen -lf/, '给一条能自己跑的核对命令，而不是让他去猜');
+  // 「拒绝」而不是「连不上」—— 这两件事的下一步动作完全不同
+  assert.match(msg, /拒绝/);
+  assert.ok(!/无法连接|网络/.test(msg), '别把它说成网络问题');
+});
+
+test('缺字段时不抛异常，而是如实说「未知」', () => {
+  const msg = sshBackend.authFailureDetail({ user: 'u', host: 'h', port: 22 });
+  assert.match(msg, /u@h:22/);
+  assert.match(msg, /指纹 未知/);
+  assert.match(msg, /没能取到公钥/);
+});

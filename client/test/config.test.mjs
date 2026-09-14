@@ -9,6 +9,8 @@
  *    本身就意味着有人会选错。
  * 2. 「**不静默填空**」—— 不合法的连接条目一律拒绝并明确报错，
  *    而不是回落成某个默认值让用户以为设置生效了。
+ * 3. 「**密钥属于连接，不属于客户端**」—— 一把钥匙作废只该影响它那一条连接。
+ *    见下面「凭据」那一节。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,7 +47,7 @@ const conn = (over = {}) => ({
 test('空目录加载出默认配置', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 3);
+  assert.equal(cfg.schema, 4);
   assert.deepEqual(cfg.connections, []);
   assert.equal(cfg.activeConnectionId, null);
   assert.deepEqual(cfg.hostKeys, {});
@@ -74,7 +76,7 @@ test('损坏的配置文件回落到默认值而不是崩溃', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), '{ 这不是 JSON');
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 3);
+  assert.equal(cfg.schema, 4);
   assert.deepEqual(cfg.connections, []);
 });
 
@@ -99,12 +101,24 @@ test('不合法的连接条目被剔除，而不是补默认值', () => {
   assert.equal(back.connections[0].id, 'c1');
 });
 
-test('label 缺省回落到 host', () => {
+test('★ 备注留空就是「没起名」，不是回落成 host', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   cfg.connections = [conn({ label: '   ' })];
   config.saveConfig(dir, cfg);
-  assert.equal(config.loadConfig(dir).connections[0].label, '198.51.100.10');
+  // 回落成 host 会让「没起名」和「名字就叫这个地址」无法区分，
+  // 而界面要按这个区分决定显示备注还是显示地址。
+  assert.equal(config.loadConfig(dir).connections[0].label, '');
+
+  // 旧版本写下的 label 恰好等于 host 的那些，读进来也归成「没起名」
+  const dir2 = tmpdir();
+  fs.writeFileSync(path.join(dir2, 'config.json'), JSON.stringify({
+    schema: 3,
+    connections: [{ id: 'c1', user: 'alice', host: '198.51.100.10', port: 10100,
+                    label: '198.51.100.10' }],
+    activeConnectionId: 'c1',
+  }));
+  assert.equal(config.loadConfig(dir2).connections[0].label, '');
 });
 
 test('activeConnectionId 指向不存在的条目时，回落到第一条', () => {
@@ -159,17 +173,37 @@ test('★ 端口不同就是两条连接（同一台主机的不同入口）', (
   assert.equal(cfg.connections.length, 3);
 });
 
-test('★ 复用已有条目不得把用户写的备注冲掉', () => {
+test('★ 按地址判重时，空备注不得把已有备注冲掉', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   cfg.connections = [conn({ label: '内网' })];
 
-  // 界面的表单里没有「备注」这一栏，传上来的 label 就是 host
+  // 新建那条路径上，空备注只表示「这次没起名」
   const up = config.upsertConnection(cfg, {
-    user: 'alice', host: '198.51.100.10', port: 10100, label: '198.51.100.10',
+    user: 'alice', host: '198.51.100.10', port: 10100,
   });
   assert.equal(up.created, false);
-  assert.equal(up.connection.label, '内网', '拿 host 把备注冲掉是静默的信息丢失');
+  assert.equal(up.connection.label, '内网', '拿空备注把已有的名字冲掉是静默的信息丢失');
+
+  // 填了备注就写进去
+  const named = config.upsertConnection(cfg, {
+    user: 'alice', host: '198.51.100.10', port: 10100, label: '公网入口',
+  });
+  assert.equal(named.connection.label, '公网入口');
+});
+
+test('★ 编辑时备注可以清空 —— 那一栏就是当前值', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  const a = config.upsertConnection(cfg, {
+    user: 'alice', host: '198.51.100.10', port: 10100, label: '内网',
+  });
+  // 编辑走的是 id 那条路：表单里那一栏被清空了，就得真的清掉。
+  // 不分这两条路径的话，「清空备注」这个动作会永远无效，而用户看不出为什么。
+  const cleared = config.upsertConnection(cfg, {
+    id: a.connection.id, user: 'alice', host: '198.51.100.10', port: 10100, label: '',
+  });
+  assert.equal(cleared.connection.label, '');
 });
 
 test('不合法的输入让 upsert 返回 null，而不是补个默认值存下去', () => {
@@ -177,6 +211,38 @@ test('不合法的输入让 upsert 返回 null，而不是补个默认值存下�
   assert.equal(config.upsertConnection(cfg, { user: '', host: 'h', port: 22 }), null);
   assert.equal(config.upsertConnection(cfg, { user: 'u', host: 'h', port: 0 }), null);
   assert.equal(cfg.connections.length, 0);
+});
+
+test('★ 编辑时把地址改成另一条已有的，必须拒绝而不是留下两条同身份的', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  const a = config.upsertConnection(cfg, { user: 'alice', host: '198.51.100.10', port: 10100 });
+  const b = config.upsertConnection(cfg, { user: 'alice', host: '203.0.113.7', port: 10100 });
+  assert.equal(b.created, true);
+
+  // 用户打开 a 的编辑框，把地址改成 b 的地址
+  const clash = config.upsertConnection(cfg, {
+    id: a.connection.id, user: 'alice', host: '203.0.113.7', port: 10100,
+  });
+  assert.ok(clash.conflict, '必须报冲突，而不是默默改下去');
+  assert.equal(clash.conflict.id, b.connection.id, '要指出撞上的是哪一条');
+
+  // 两条都原样不动 —— 尤其是 b 的密钥不能被 a 顶掉
+  assert.equal(cfg.connections.length, 2);
+  assert.equal(cfg.connections.find((c) => c.id === a.connection.id).host, '198.51.100.10',
+    '冲突时不该把 a 改掉');
+});
+
+test('★ 编辑时不改地址（只改别处）不该被自己的身份判成冲突', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  const a = config.upsertConnection(cfg, { user: 'alice', host: '198.51.100.10', port: 10100 });
+  const up = config.upsertConnection(cfg, {
+    id: a.connection.id, user: 'alice', host: '198.51.100.10', port: 10100,
+  });
+  assert.equal(up.conflict, undefined);
+  assert.equal(up.created, false);
+  assert.equal(cfg.connections.length, 1);
 });
 
 test('★ 升级时顺手清掉旧版本攒下的一串相同条目', () => {
@@ -297,86 +363,170 @@ test('槽位端口：越界值不采信，回落默认', () => {
   assert.equal(config.slotPort(cfg, 3), 18082, '非数字不采信');
 });
 
-// ── 凭据（SSH 私钥）─────────────────────────────────────────────────────────
+// ── 凭据（SSH 私钥）：**每条连接一把** ──────────────────────────────────────
+//
+// 因为公钥是注册在**某个账户**上的，而一条连接就是「哪个账户、哪台机器、哪个端口」。
+// 按连接存，才能做到「重新生成一把钥匙只作废那一条连接」，而不是把整个客户端打断。
+
+const secretsOf = (dir) => path.join(dir, 'secrets.json');
+/** 造一份「加密后的数据」该长的样子（fakeCrypto 的密文 = 'ENC:' + 明文）。 */
+const encrypted = (s) => fakeCrypto().encrypt(s).toString('base64');
 
 test('★ 机器没有安全存储 → 明确失败，且绝不写明文', () => {
   const dir = tmpdir();
-  const res = config.setSecret(dir, null, 'PRIVATE-KEY-PEM');
+  const res = config.setKey(dir, null, 'c1', 'PRIVATE-KEY-PEM');
   assert.equal(res.ok, false);
   assert.equal(res.reason, 'no_secure_storage');
 
   // 关键：一个字节都不该落盘。以前这里还有一条「明文保存」的退路，
   // 现在没有 —— 存不了就是存不了，由界面如实告诉用户，而不是换个方式偷偷存下来。
-  assert.equal(fs.existsSync(path.join(dir, 'secrets.json')), false,
+  assert.equal(fs.existsSync(secretsOf(dir)), false,
     '安全存储不可用时绝不能悄悄写明文');
 });
 
 test('加密保存：有安全存储时正常往返', () => {
   const dir = tmpdir();
   const c = fakeCrypto();
-  assert.deepEqual(config.setSecret(dir, c, 'PRIVATE-KEY-PEM'),
+  assert.deepEqual(config.setKey(dir, c, 'c1', 'PRIVATE-KEY-PEM'),
     { ok: true, mode: 'encrypted' });
 
-  const f = path.join(dir, 'secrets.json');
-  assert.equal(mode(f), 0o600, '凭据文件必须是 0600');
-  assert.equal(fs.readFileSync(f, 'utf8').includes('PRIVATE-KEY-PEM'), false, '落盘的必须是密文');
+  assert.equal(mode(secretsOf(dir)), 0o600, '凭据文件必须是 0600');
+  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('PRIVATE-KEY-PEM'), false,
+    '落盘的必须是密文');
 
-  const got = config.getSecret(dir, c);
+  const got = config.getKey(dir, c, 'c1');
   assert.equal(got.ok, true);
   assert.equal(got.value, 'PRIVATE-KEY-PEM');
   assert.equal(got.mode, 'encrypted');
   assert.equal(got.legacy, undefined, '新写下去的不是 legacy');
 });
 
+test('★ 密钥按连接隔离：各是各的，删一条不动另一条', () => {
+  const dir = tmpdir();
+  const c = fakeCrypto();
+  config.setKey(dir, c, 'c1', 'PEM-C1');
+  config.setKey(dir, c, 'c2', 'PEM-C2');
+
+  assert.equal(config.getKey(dir, c, 'c1').value, 'PEM-C1');
+  assert.equal(config.getKey(dir, c, 'c2').value, 'PEM-C2');
+
+  config.deleteKey(dir, 'c1');
+  assert.equal(config.getKey(dir, c, 'c1').reason, 'not_saved');
+  assert.equal(config.getKey(dir, c, 'c2').value, 'PEM-C2',
+    '删掉一条连接不该动到另一条的密钥');
+
+  // 删空之后文件本身也消失，不留一个空壳
+  config.deleteKey(dir, 'c2');
+  assert.equal(fs.existsSync(secretsOf(dir)), false);
+});
+
+test('hasKey 只查存在性，不试图解密', () => {
+  const dir = tmpdir();
+  config.setKey(dir, fakeCrypto(), 'c1', 'X');
+  assert.equal(config.hasKey(dir, 'c1'), true);
+  assert.equal(config.hasKey(dir, 'c2'), false);
+  assert.equal(config.hasKey(tmpdir(), 'c1'), false, '文件都不存在时不该抛异常');
+});
+
 test('换过机器 / keyring 被重置：解密失败要明确报错，不能当成空值', () => {
   const dir = tmpdir();
-  config.setSecret(dir, fakeCrypto(), 'PRIVATE-KEY-PEM');
+  config.setKey(dir, fakeCrypto(), 'c1', 'PRIVATE-KEY-PEM');
 
   const other = { encrypt: () => Buffer.from('x'), decrypt: () => { throw new Error('bad key'); } };
-  const got = config.getSecret(dir, other);
+  const got = config.getKey(dir, other, 'c1');
   assert.equal(got.ok, false);
   assert.match(got.reason, /decrypt_failed/);
 
   // 连安全存储都没有了
-  assert.equal(config.getSecret(dir, null).reason, 'no_secure_storage');
+  assert.equal(config.getKey(dir, null, 'c1').reason, 'no_secure_storage');
 });
 
 test('★ 旧版本留下的明文私钥必须读得出来，并标记成 legacy', () => {
   const dir = tmpdir();
   // schema 2 及更早允许用户选「明文保存」，磁盘上可能就留着这么一份
-  fs.writeFileSync(path.join(dir, 'secrets.json'), JSON.stringify({
+  fs.writeFileSync(secretsOf(dir), JSON.stringify({
     schema: 2, mode: 'plain', data: 'PRIVATE-KEY-PEM',
   }));
+  config.migrateLegacySecret(dir, ['c1']);
 
-  const got = config.getSecret(dir, fakeCrypto());
+  const got = config.getKey(dir, fakeCrypto(), 'c1');
   assert.equal(got.ok, true, '读不出来会让用户以为密钥丢了，跑去重新生成、重新注册');
   assert.equal(got.value, 'PRIVATE-KEY-PEM');
   assert.equal(got.legacy, true, 'legacy:true 是在告诉调用方「有条件就加密重存一遍」');
 
   // 调用方看到 legacy 后加密重存一遍，明文就没了
-  const f = path.join(dir, 'secrets.json');
-  assert.equal(fs.readFileSync(f, 'utf8').includes('"mode":"plain"'), true, '前置条件');
-  assert.equal(config.setSecret(dir, fakeCrypto(), got.value).ok, true);
-  assert.equal(fs.readFileSync(f, 'utf8').includes('"mode":"plain"'), false,
+  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('"plain"'), true, '前置条件');
+  assert.equal(config.setKey(dir, fakeCrypto(), 'c1', got.value).ok, true);
+  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('"plain"'), false,
     '重存之后不该还是明文');
-  assert.equal(fs.readFileSync(f, 'utf8').includes('PRIVATE-KEY-PEM'), false, '落盘的必须是密文');
-  assert.equal(config.getSecret(dir, fakeCrypto()).legacy, undefined);
+  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('PRIVATE-KEY-PEM'), false,
+    '落盘的必须是密文');
+  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').legacy, undefined);
 
   // 而没有凭据库的机器上，重存这一步会失败 —— 那就只能维持原样，
   // 由界面把它当作「明文存放」如实告知，而不是假装加密了
-  assert.equal(config.setSecret(dir, null, 'x').reason, 'no_secure_storage');
+  assert.equal(config.setKey(dir, null, 'c1', 'x').reason, 'no_secure_storage');
+});
+
+test('★ 旧版本的**全局**密钥被搬到每一条连接上（用户不必重新注册）', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(secretsOf(dir), JSON.stringify({
+    schema: 3, mode: 'encrypted', data: encrypted('ONLY-KEY'),
+  }));
+
+  const r = config.migrateLegacySecret(dir, ['c1', 'c2']);
+  assert.equal(r.migrated, true);
+  assert.equal(r.count, 2);
+  // 升级前它服务所有连接，升级后每条都拿到同一把 —— 那正是升级前的事实
+  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').value, 'ONLY-KEY');
+  assert.equal(config.getKey(dir, fakeCrypto(), 'c2').value, 'ONLY-KEY');
+
+  // 旧格式那两个字段不再留着，否则每读一次都会以为还有一份没搬完
+  const raw = JSON.parse(fs.readFileSync(secretsOf(dir), 'utf8'));
+  assert.equal(raw.schema, 4);
+  assert.equal(raw.data, undefined);
+  assert.equal(raw.mode, undefined);
+});
+
+test('★ 还没有任何连接时先不搬 —— 那份密钥必须原样留着', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(secretsOf(dir), JSON.stringify({
+    schema: 3, mode: 'encrypted', data: encrypted('ONLY-KEY'),
+  }));
+
+  const r = config.migrateLegacySecret(dir, []);
+  assert.equal(r.migrated, false);
+  assert.equal(r.deferred, true, '必须报告「推迟了」，而不是「没有可搬的」');
+  // 删掉它等于让用户已经注册过的公钥凭空消失
+  assert.equal(JSON.parse(fs.readFileSync(secretsOf(dir), 'utf8')).data, encrypted('ONLY-KEY'));
+
+  // 等第一条连接出现，它就该落到那条连接上
+  assert.equal(config.migrateLegacySecret(dir, ['c1']).migrated, true);
+  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').value, 'ONLY-KEY');
+});
+
+test('已经是新格式时迁移是空操作', () => {
+  const dir = tmpdir();
+  config.setKey(dir, fakeCrypto(), 'c1', 'PEM-C1');
+  const before = fs.readFileSync(secretsOf(dir), 'utf8');
+  assert.equal(config.migrateLegacySecret(dir, ['c1', 'c2']).migrated, false);
+  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8'), before, '不该动它');
 });
 
 test('认不出的 mode 明确报错，不当成空值', () => {
   const dir = tmpdir();
-  fs.writeFileSync(path.join(dir, 'secrets.json'), JSON.stringify({
-    schema: 9, mode: 'whatever', data: 'x',
+  fs.writeFileSync(secretsOf(dir), JSON.stringify({
+    schema: 4, keys: { c1: { mode: 'whatever', data: 'x' } },
   }));
-  assert.match(config.getSecret(dir, fakeCrypto()).reason, /bad_mode/);
+  assert.match(config.getKey(dir, fakeCrypto(), 'c1').reason, /bad_mode/);
 });
 
-test('没存过凭据时 getSecret 明确返回 not_saved', () => {
-  assert.equal(config.getSecret(tmpdir(), fakeCrypto()).reason, 'not_saved');
+test('没存过凭据时 getKey 明确返回 not_saved', () => {
+  assert.equal(config.getKey(tmpdir(), fakeCrypto(), 'c1').reason, 'not_saved');
+  // 文件在、但没有这一条 —— 同样是 not_saved，而不是「读不出来」
+  const dir = tmpdir();
+  config.setKey(dir, fakeCrypto(), 'c1', 'X');
+  assert.equal(config.getKey(dir, fakeCrypto(), 'c2').reason, 'not_saved');
 });
 
 // ── 其余 ────────────────────────────────────────────────────────────────────

@@ -83,7 +83,7 @@ test('公钥行是 OpenSSH 一行格式：类型 + base64 + 注释', () => {
   assert.equal(parts.length, 3);
   assert.equal(parts[0], 'ssh-ed25519');
   assert.match(parts[1], /^[A-Za-z0-9+/]+=*$/);
-  assert.match(parts[2], /^slurmate-\d{8}$/, '注释带日期，便于在 IDM 里分辨');
+  assert.match(parts[2], /^slurmate-\d{8}-\d{4}$/, '注释带日期与时分，便于在 IDM 里分辨 —— 也让人看得出钥匙换了');
 });
 
 test('私钥是 PEM 包裹的 openssh-key-v1，且我们能认它', () => {

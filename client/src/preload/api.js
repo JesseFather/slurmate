@@ -30,12 +30,18 @@ contextBridge.exposeInMainWorld('slurmate', {
   trustHostKey: (fingerprint) => ipcRenderer.invoke('app:trustHostKey', fingerprint),
   forgetHostKey: () => ipcRenderer.invoke('app:forgetHostKey'),
 
-  // ── 密钥 ──
-  publicKey: () => ipcRenderer.invoke('app:publicKey'),
-  copyPublicKey: () => ipcRenderer.invoke('app:copyPublicKey'),
-  // 作废现有密钥、重新生成一把。会作废已注册到 IDM 的公钥，必须由用户显式发起。
+  // ── 密钥（**每条连接一把**）──
+  //
+  // 参数统一是 { connectionId }；省略或传 null 表示「新建」表单上那把还没有
+  // 归属的密钥。界面里没有「全局密钥」这个概念 —— 每把钥匙属于一条连接，
+  // 重新生成一把只影响那一条。
+  publicKey: (payload) => ipcRenderer.invoke('app:publicKey', payload),
+  copyPublicKey: (payload) => ipcRenderer.invoke('app:copyPublicKey', payload),
+  // 作废这条连接的密钥、换一把新的。会作废已注册到 IDM 的公钥，必须由用户显式发起。
   // 私钥没有「保存方式」这个选项 —— 永远加密保存。
-  regenerateKey: () => ipcRenderer.invoke('app:regenerateKey'),
+  regenerateKey: (payload) => ipcRenderer.invoke('app:regenerateKey', payload),
+  // 「新建连接」时先于连接生成的那把密钥（用户要拿它的公钥去 IDM 注册）。
+  newKey: () => ipcRenderer.invoke('app:newKey'),
 
   // ── 会话 ──
   // resources 是高级选项里的**临时**覆盖：{cpus, mem, gpus, partition}。

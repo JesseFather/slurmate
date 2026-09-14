@@ -150,6 +150,37 @@ function transportError(detail) {
   return { ok: false, code: null, data: null, error: { kind: 'transport', detail } };
 }
 
+/** ssh2 在「服务器拒绝了所有认证方式」时抛的原话。 */
+const AUTH_FAILED_RE = /all configured authentication methods failed/i;
+
+/**
+ * 把认证失败翻译成能指向根因的话。
+ *
+ * ★ 「All configured authentication methods failed」是 ssh2 的原话，唯一含义是
+ *   **服务器拒绝了客户端出示的全部认证方式**。这里只配了公钥一种，所以它就是
+ *   「服务器不认这把钥匙」—— 既不是网络不通，也不是协议不匹配。
+ *
+ *   问题在于这句话**完全不提用的是哪把钥匙**，于是用户唯一能做出的反应是反复重试。
+ *   所以这里把指纹和公钥原样给出来，并列出三条要核对的实事：它们分别对应三种
+ *   完全不同的修法，而在这句英文报错里长得一模一样。
+ *
+ * （纯函数，导出给测试钉住 —— 这段文案是这个项目里唯一能帮上「认证失败」的地方。）
+ */
+function authFailureDetail(info) {
+  const who = `${info.user}@${info.host}:${info.port}`;
+  const line = info.publicKeyLine || '（没能取到公钥）';
+  return `登录节点拒绝了这把公钥（${who}）。\n`
+    + `客户端出示的是 ${info.keyType || '未知类型'}，指纹 ${info.keyFingerprint || '未知'}：\n`
+    + `${line}\n`
+    + '请依次核对这三件事 —— 它们的修法完全不同：\n'
+    + '① 上面这个指纹就是你注册进 IDM 的那一把吗？把公钥粘进这条命令即可核对：\n'
+    + `   ssh-keygen -lf <(echo '${line}')\n`
+    + '② 注册确实生效了吗（有的 IDM 要重新登录一次才开始下发公钥）；\n'
+    + '③ 这个端口上的 sshd 允许纯公钥认证吗 —— 有的集群在这个端口上还要求额外一步\n'
+    + '   验证，那种情况下只配公钥是不够的。\n'
+    + '这条连接的公钥可以在它的「编辑」里看到并复制。';
+}
+
 class SshBackend extends Backend {
   /**
    * @param {object} opts
@@ -197,15 +228,30 @@ class SshBackend extends Backend {
     //   「不抛异常」的契约 —— 在真机上表现为主进程里一个没人处理的 rejection，
     //   而用户看到的只是「点了没反应」。宁可在这里明确地失败。
     const parsed = ssh2.utils.parseKey(this._opts.privateKey);
-    if (parsed instanceof Error || !parsed.isPrivateKey()) {
+    // parseKey 在输入里含多把密钥时返回**数组**。不先摊平的话，下面 `.isPrivateKey()`
+    // 会在数组上抛 TypeError，穿出「不抛异常」的契约。
+    const key = Array.isArray(parsed)
+      ? parsed.find((k) => k && typeof k.isPrivateKey === 'function' && k.isPrivateKey())
+      : parsed;
+    if (parsed instanceof Error || !key) {
       return {
         ok: false,
         code: 'bad_private_key',
         error: '本机保存的 SSH 私钥无法解析（'
              + (parsed instanceof Error ? parsed.message : '不是私钥') + '）。'
-             + '请在设置里重新生成密钥，并把新的公钥重新注册到 IDM。',
+             + '请在这一条连接的「编辑」里重新生成密钥，并把新的公钥重新注册到 IDM。',
       };
     }
+    // 记下**这次真正出示的是哪把钥匙**。认证失败时唯一有价值的线索就是它 ——
+    // 没有它，用户只能对着一句「认证失败」反复重试。
+    this._offeredKey = {
+      keyType: key.type || null,
+      keyFingerprint: hostKeyFingerprint(key.getPublicSSH()),
+      publicKeyLine: (() => {
+        const blob = key.getPublicSSH();
+        return Buffer.isBuffer(blob) ? `${key.type} ${blob.toString('base64')} slurmate` : null;
+      })(),
+    };
     this._profile = { user: profile.user, host: profile.host, port: profile.port };
     this._closed = false;
     this._attempt = 0;
@@ -238,7 +284,6 @@ class SshBackend extends Backend {
     return new Promise((resolve) => {
       const client = new ssh2.Client();
       let settled = false;
-      let offeredKey = null;     // hostVerifier 里捕获到的主机密钥
       let rejected = null;       // 主机密钥被拒时的原因
 
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
@@ -274,7 +319,19 @@ class SshBackend extends Backend {
           // 主机密钥被我们自己拒了 —— 报这个，别报 ssh2 顺带抛出的握手错误
           return done({ ok: false, code: rejected.code, error: rejected.error, hostKey: rejected.hostKey });
         }
-        done({ ok: false, error: `SSH 连接失败：${e.message}` });
+        const msg = (e && e.message) || '未知错误';
+        // ★ 认证失败要单独识别。ssh2 的原话（「All configured authentication
+        //   methods failed」）直接透出去，用户看到的是又一句不指向任何根因的英文，
+        //   而它的真实含义很具体：**服务器不认这把钥匙**。
+        if (AUTH_FAILED_RE.test(msg)) {
+          const { user, host, port } = this._profile;
+          return done({
+            ok: false,
+            code: 'auth_failed',
+            error: authFailureDetail({ user, host, port, ...(this._offeredKey || {}) }),
+          });
+        }
+        done({ ok: false, error: `SSH 连接失败：${msg}` });
       });
 
       client.on('close', () => {
@@ -293,7 +350,6 @@ class SshBackend extends Backend {
         privateKey: this._opts.privateKey,
         // ★ 必须实现。ssh2 默认不校验主机密钥，不做的后果是裸奔。
         hostVerifier: (key) => {
-          offeredKey = key;
           const verdict = this._judgeHostKey(key);
           if (verdict === 'accept') return true;
           rejected = verdict;      // { code, error, hostKey }
@@ -455,5 +511,7 @@ function isImplemented() {
 
 module.exports = {
   isImplemented, SshBackend, RPC_CMD, hostKeyFingerprint, hostKeyAlgorithm,
-  pickEnvelope,     // 导出给测试：它是纯函数，规则又值得钉住
+  pickEnvelope,       // 导出给测试：它是纯函数，规则又值得钉住
+  authFailureDetail,  // 同上：这是「认证失败」唯一能指向根因的东西
+  AUTH_FAILED_RE,
 };

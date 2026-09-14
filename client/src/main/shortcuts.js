@@ -58,6 +58,30 @@ function normalizeKey(input) {
   return k.length === 1 ? k.toUpperCase() : k;
 }
 
+/**
+ * 光秃秃的修饰键本身（Ctrl / Shift / Alt / Meta）。
+ *
+ * ★ 这个判断存在，是因为按住 Ctrl 会**连续**产生 keyDown（操作系统的自动重复），
+ *   每一次的 `input.key` 都是 'Control' —— 于是诊断日志里刷满
+ *   「已放行：Ctrl+Control」。用户按住 Ctrl 是为了配一个组合键，不是为了看这个。
+ *   修饰键单独按下**不携带任何信息**：它既没有被吞掉的可能，也不是一个动作。
+ */
+const BARE_MODIFIERS = new Set(['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']);
+
+function isBareModifier(input) {
+  return BARE_MODIFIERS.has(input.key);
+}
+
+/**
+ * 这次按键值不值得进诊断日志。
+ *
+ * 第二条是 `isAutoRepeat` —— 按住不放的重复事件不该重复上报（同一条信息说 N 遍
+ * 和说一遍是同一个信息量，只是淹掉了别的东西）。
+ */
+function worthReporting(input) {
+  return input.type === 'keyDown' && !input.isAutoRepeat && !isBareModifier(input);
+}
+
 function match(table, input) {
   const key = normalizeKey(input);
   for (const e of table) {
@@ -128,7 +152,7 @@ function attachKeyGuard(wc, opts = {}) {
     const owned = match(OWNED, input);
     if (owned && input.type === 'keyDown') {
       event.preventDefault();
-      opts.onBlocked?.(describe(input) + `（${owned.desc}）`);
+      if (worthReporting(input)) opts.onBlocked?.(describe(input) + `（${owned.desc}）`);
       opts.onOwned?.(owned.action);
       return;
     }
@@ -137,15 +161,13 @@ function attachKeyGuard(wc, opts = {}) {
     const blocked = match(BLACKLIST, input);
     if (blocked) {
       event.preventDefault();
-      if (input.type === 'keyDown') {
-        opts.onBlocked?.(describe(input) + `（${blocked.desc}）`);
-      }
+      if (worthReporting(input)) opts.onBlocked?.(describe(input) + `（${blocked.desc}）`);
       return;
     }
 
     // 其余一律放行 —— 包括 Ctrl+W / Ctrl+N / Ctrl+T / F5 / Ctrl+P。
     // 它们没有菜单加速键，会直达页面由 code-server 处理。
-    if (input.type === 'keyDown' && opts.onSeen) {
+    if (worthReporting(input) && opts.onSeen) {
       // 只报「用户可能关心是否被吞」的那一类，避免刷屏
       if (input.control || input.alt || input.meta || /^F\d+$/.test(input.key)) {
         opts.onSeen(describe(input));
@@ -157,4 +179,7 @@ function attachKeyGuard(wc, opts = {}) {
   return () => wc.removeListener('before-input-event', handler);
 }
 
-module.exports = { BLACKLIST, OWNED, installMenu, attachKeyGuard, describe };
+module.exports = {
+  BLACKLIST, OWNED, installMenu, attachKeyGuard, describe,
+  isBareModifier, worthReporting,   // 导出给测试：它们是纯函数，规则值得钉住
+};

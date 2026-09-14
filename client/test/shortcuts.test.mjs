@@ -35,8 +35,8 @@ Module._load = function (request, ...rest) {
 };
 
 const require = createRequire(import.meta.url);
-const { installMenu, attachKeyGuard, describe, BLACKLIST, OWNED } =
-  require('../src/main/shortcuts.js');
+const { installMenu, attachKeyGuard, describe, BLACKLIST, OWNED,
+        isBareModifier, worthReporting } = require('../src/main/shortcuts.js');
 
 /** 造一个假的 webContents，只实现 on / removeListener。 */
 function fakeWc() {
@@ -53,8 +53,8 @@ function fakeWc() {
       let action = null;
       const event = { preventDefault: () => { prevented = true; } };
       for (const fn of handlers['before-input-event'] || []) {
-        fn(event, { type: 'keyDown', isComposing: false, control: false, shift: false,
-                    alt: false, meta: false, key: '', ...input });
+        fn(event, { type: 'keyDown', isComposing: false, isAutoRepeat: false,
+                    control: false, shift: false, alt: false, meta: false, key: '', ...input });
       }
       return { prevented, action };
     },
@@ -218,4 +218,56 @@ test('describe 渲染成人能读的形态', () => {
   assert.equal(describe({ key: 'w', control: true, shift: true, alt: false, meta: false }),
     'Ctrl+Shift+w');
   assert.equal(describe({ key: 'F5' }), 'F5');
+});
+
+// ── 诊断日志的噪声 ───────────────────────────────────────────────────────────
+//
+// 症状：按住 Ctrl，日志里就刷满「已放行：Ctrl+Control」。
+// 根因有两层：① 操作系统对按住的修饰键会**连续**产生 keyDown；
+// ② 那时 input.key 就是 'Control'，于是每一次都被当成一条独立的消息记下来。
+// 而修饰键单独按下不携带任何信息 —— 它既没有被吞掉的可能，也不是一个动作。
+
+test('★ 按住 Ctrl 不刷屏：修饰键本身 + 自动重复都不进日志', () => {
+  // 裸修饰键：不是「值不值得报」，而是它根本不是一条消息
+  for (const key of ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']) {
+    assert.equal(isBareModifier({ key }), true, `${key} 单独按下不该进日志`);
+  }
+  assert.equal(isBareModifier({ key: 'c' }), false, '普通字母不是修饰键');
+  assert.equal(isBareModifier({ key: 'F5' }), false);
+
+  // 真实的刷屏现场：按住 Ctrl，操作系统连发 keyDown
+  const held = { type: 'keyDown', key: 'Control', control: true, isComposing: false,
+                 shift: false, alt: false, meta: false, isAutoRepeat: true };
+  assert.equal(worthReporting(held), false);
+
+  // 自动重复的普通键同理（按住 w 不该写 30 行日志）
+  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: true }), false);
+  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: false }), true,
+    '按一次还是要报的');
+  // keyUp 不报（只处理 keyDown），组合期间不报
+  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: false, type: 'keyUp' }), false);
+});
+
+test('★ 端到端：按住 Ctrl 一次也不上报，正常组合键照报', () => {
+  const wc = fakeWc();
+  const seen = [];
+  attachKeyGuard(wc, { onSeen: (d) => seen.push(d) });
+
+  const press = (input) => {
+    const event = { preventDefault: () => {} };
+    for (const fn of wc.handlers['before-input-event']) {
+      fn(event, { type: 'keyDown', isComposing: false, isAutoRepeat: false,
+                  control: false, shift: false, alt: false, meta: false, key: '', ...input });
+    }
+  };
+
+  press({ key: 'Control', control: true });                       // 按下
+  for (let i = 0; i < 30; i += 1) {                              // 按住不放
+    press({ key: 'Control', control: true, isAutoRepeat: true });
+  }
+  assert.deepEqual(seen, [], '按住 Ctrl 不该产生任何一条日志');
+
+  press({ key: 'w', control: true });
+  assert.equal(seen.length, 1, '真正的组合键仍然要报，否则诊断就废了');
+  assert.match(seen[0], /Ctrl\+w/);
 });

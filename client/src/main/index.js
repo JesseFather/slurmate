@@ -12,13 +12,21 @@
  * 把公钥显示出来让用户自己去注册；改密码、设邮箱那些事归 IDM 自己的网页管，
  * 客户端从「账户已经配好了」开始。
  *
- * ── 密钥的三条纪律 ────────────────────────────────────────────────────────
+ * ── 密钥的纪律 ────────────────────────────────────────────────────────────
+ *
+ * **每条连接一把**，私钥由客户端生成并自托管。存法只有加密一种。
  *
  * 1. **有安全存储就直接加密存盘**，不打扰用户。
- * 2. **没有安全存储就先放在内存里**，由界面问用户怎么存 —— 绝不静默写明文。
+ * 2. **没有安全存储就留在内存里**，由界面如实说明 —— 绝不静默写明文。
  * 3. **读不出来的密钥绝不自动覆盖**。文件在但解不开（换机器、keyring 被重置）时，
  *    生成新密钥会让用户已经注册进 IDM 的那把静默失效，而症状只是「认证失败」。
  *    这种情况必须报错，让用户自己决定。
+ * 4. **「没有」和「读不出来」必须分开。** 前者生成一把是安全的（没有东西可毁），
+ *    后者生成一把就是在毁东西。`ensureKey` 只在 `not_saved` 时才生成。
+ *
+ * 「新建连接」这条路上还有一条特殊约定：密钥在**用户点保存之前**就生成好了
+ * （存在 PENDING_ID 这个保留位上），因为用户必须先把公钥拿去 IDM 注册、
+ * 回来再填地址。否则「保存并连接」的第一次尝试必然认证失败。
  *
  * ── 演示模式的三重互锁 ────────────────────────────────────────────────────
  * 做了假后端却不标注，正是这个项目一路在清的那类问题：**系统声称了不成立的事**。
@@ -46,10 +54,17 @@ let backend = null;
 let controller = null;
 let cfgDir = null;
 let cfg = null;
-let keyInfo = null;      // { privateKeyPem, publicKeyLine, fingerprint, persisted, mode, error }
 let whoami = null;
 let partitions = [];
 let quitting = false;
+
+/**
+ * 这台机器没有凭据库时，密钥只能留在内存里 —— 按 id 记着。
+ *
+ * 少了它，演示模式（safeStorage 不可用）下每连一次就会换一把钥匙，
+ * 而用户明明刚从界面上把上一把复制去注册过。症状仍然只是「认证失败」。
+ */
+const memKeys = new Map();
 
 // ── 单实例锁 ────────────────────────────────────────────────────────────────
 // 满足「限制用户只能启动一次软件」。第二次启动时聚焦已有窗口，而不是开第二个。
@@ -77,7 +92,10 @@ function bootstrap() {
       : app.getPath('userData');
     cfg = config.loadConfig(cfgDir);
 
-    keyInfo = loadOrCreateKey();
+    // 旧版本（schema ≤ 3）只有一把**全局**私钥。搬到新格式：原样复制给每一条已有
+    // 连接 —— 那正是升级前的事实，复制完每条的行为都不变，用户也不必重新去 IDM
+    // 注册一遍。一条连接都没有时它会被留在原地，等有了第一条再搬。
+    config.migrateLegacySecret(cfgDir, cfg.connections.map((c) => c.id));
 
     backend = createBackend({
       demo: DEMO_FLAG,
@@ -94,14 +112,24 @@ function bootstrap() {
       onAction: handleWindowAction,
     });
 
-    // 快捷键拦截：黑名单 + 诊断。演示模式下把被吞掉的键回灌给对面页面，便于对照验证。
+    // 快捷键拦截：黑名单 + 诊断。
+    //
+    // ★ 诊断**只装在演示模式**。它的用途是「验证按键到底有没有直达页面」，而那件
+    //   事只在拿演示后端做对照时才需要看；真实模式里用户是在干活，不是在校验外壳。
+    //   常开的代价很具体：每按一次带修饰键的键、每按一次 F 键都往日志里写一行，
+    //   而按住 Ctrl 时操作系统会**连续**产生 keyDown —— 日志会被
+    //   「已放行：Ctrl+Control」刷满，把真正要紧的消息顶掉。
+    //   被我们**吞掉**的键（F12 之类）仍然照报：那是在解释「为什么按了没反应」，
+    //   是用户自己触发的、想问的问题。
     attachKeyGuard(win.win.webContents, {
       onOwned: (action) => { if (action === 'reload') win.reloadCodeServer(); },
       onBlocked: (desc) => {
         win.pushNotice('key-blocked', desc);
         if (backend.kind === 'demo') win.pushSwallowed(desc);
       },
-      onSeen: (desc) => win.pushNotice('key-seen', desc),
+      ...(backend.kind === 'demo'
+        ? { onSeen: (desc) => win.pushNotice('key-seen', desc) }
+        : {}),
     });
 
     registerIpc();
@@ -135,87 +163,150 @@ function bootstrap() {
 
 // ── 密钥 ────────────────────────────────────────────────────────────────────
 
+/** 「读不出来」的四种原因，各自该怎么跟用户说 —— 它们修法完全不同。 */
+function keyErrorDetail(reason) {
+  const tail = '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。';
+  if (reason === 'no_secure_storage') {
+    return '本机保存过一把私钥，但这台机器现在没有可用的凭据库，解不开它。' + tail;
+  }
+  if (/^decrypt_failed/.test(reason)) {
+    return '本机保存的私钥解密失败（凭据库可能被重置过）。' + tail;
+  }
+  if (/^bad_mode/.test(reason)) {
+    return '本机保存的私钥文件格式无法识别。' + tail;
+  }
+  return '本机保存的私钥不可用。' + tail;
+}
+
 /**
- * 取已有的密钥，没有就生成一把。
+ * 解析一条连接（或「新建」位）的密钥。**只读，不生成。**
  *
- * ★ 三种「没有可用密钥」的情况必须分开对待 —— 混在一起处理，就会在第三种情况下
- *   悄悄毁掉用户已经注册过的公钥：
- *     not_saved            → 确实还没有，生成一把（放内存，等用户去重新生成）
- *     no_secure_storage    → 文件在，但这台机器没有凭据库，解不开 → **报错，不覆盖**
- *     decrypt_failed       → 文件在，但 keyring 变了 → **报错，不覆盖**
- *     文件在但格式不对      → **报错，不覆盖**
+ * ★ 返回值的 error 字段把四种情况分开了，调用方必须区别对待：
+ *     not_saved         → 确实还没有。生成一把是**安全**的（没有东西可毁）。
+ *     no_secure_storage → 文件在，但这台机器没有凭据库，解不开 → 绝不覆盖
+ *     decrypt_failed    → 文件在，但 keyring 变了 → 绝不覆盖
+ *     bad_key_format    → 文件在，但内容不是我们能认的私钥 → 绝不覆盖
+ *
+ * @returns {{ok:true, privateKeyPem, publicKeyLine, fingerprint, persisted:boolean}
+ *          | {ok:false, error:string, detail?:string}}
  */
-function loadOrCreateKey() {
-  const got = config.getSecret(cfgDir, secureCrypto());
+function resolveKey(id) {
+  const cached = memKeys.get(id);
+  if (cached) return cached;
 
-  if (got.ok) {
-    // 旧版本允许「明文保存」，磁盘上可能有这么一份。既然已经读出来了，
-    // 就别让它继续以明文躺着 —— 顺手加密重存。存不下去（这台机器没有凭据库）
-    // 也不当作失败：密钥本身是可用的，为一件副产品把用户拦在门外不值当，
-    // 记一个标记，等窗口建好之后再如实告诉他。
-    let legacyPlain = false;
-    let migrated = false;
-    if (got.legacy) {
-      if (config.setSecret(cfgDir, secureCrypto(), got.value).ok) migrated = true;
-      else legacyPlain = true;
-    }
-    if (!keys.isUsablePrivatePem(got.value)) {
-      return { error: 'bad_key_format',
-               detail: '本机保存的私钥无法解析。它可能被截断或改写过。' };
-    }
-    const line = keys.publicKeyLineFromPrivatePem(got.value);
-    if (!line) {
-      return { error: 'bad_key_format', detail: '本机保存的私钥推不出公钥。' };
-    }
-    return {
-      privateKeyPem: got.value,
-      publicKeyLine: line,
-      fingerprint: keys.fingerprintOf(line),
-      persisted: true,
-      legacyPlain,
-      migrated,
-    };
+  const got = config.getKey(cfgDir, secureCrypto(), id);
+  if (!got.ok) {
+    if (got.reason === 'not_saved') return { ok: false, error: 'not_saved' };
+    return { ok: false, error: got.reason, detail: keyErrorDetail(got.reason) };
   }
 
-  if (got.reason === 'no_secure_storage' || got.reason === 'decrypt_failed') {
-    return {
-      error: got.reason,
-      detail: got.reason === 'no_secure_storage'
-        ? '本机保存过一把私钥，但这台机器现在没有可用的凭据库，解不开它。'
-          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。'
-        : '本机保存的私钥解密失败（凭据库可能被重置过）。'
-          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。',
-    };
+  // 旧版本允许「明文保存」，磁盘上可能有这么一份。既然已经读出来了，
+  // 就别让它继续以明文躺着 —— 顺手加密重存。存不下去（这台机器没有凭据库）
+  // 也不当作失败：密钥本身是可用的，为一件副产品把用户拦在门外不值当，
+  // 记一个标记，由调用方如实告诉他。
+  let legacyPlain = false;
+  let migrated = false;
+  if (got.legacy) {
+    if (config.setKey(cfgDir, secureCrypto(), id, got.value).ok) migrated = true;
+    else legacyPlain = true;
   }
 
-  // not_saved：真的还没有。生成一把。
+  if (!keys.isUsablePrivatePem(got.value)) {
+    return { ok: false, error: 'bad_key_format',
+             detail: '本机保存的私钥无法解析。它可能被截断或改写过。' + keyErrorDetail('') };
+  }
+  const line = keys.publicKeyLineFromPrivatePem(got.value);
+  if (!line) {
+    return { ok: false, error: 'bad_key_format',
+             detail: '本机保存的私钥推不出公钥。' + keyErrorDetail('') };
+  }
+
+  return {
+    ok: true,
+    privateKeyPem: got.value,
+    publicKeyLine: line,
+    fingerprint: keys.fingerprintOf(line),
+    persisted: true,
+    legacyPlain,
+    migrated,
+  };
+}
+
+/** 生成一把新密钥并尽量存下来。存不下来就留在内存里（见 memKeys）。 */
+function generateKey(id) {
   const gen = keys.generate();
+  const saved = config.setKey(cfgDir, secureCrypto(), id, gen.privateKeyPem);
   const info = {
+    ok: true,
     privateKeyPem: gen.privateKeyPem,
     publicKeyLine: gen.publicKeyLine,
     fingerprint: gen.fingerprint,
-    persisted: false,
+    persisted: saved.ok,
+    saveError: saved.ok ? null : saved.reason,
+    generated: true,
   };
-  // 有安全存储就直接加密存盘，不打扰用户；没有则留在内存里，
-  // 由界面如实说明「这台机器存不了密钥」，而不是换个方式偷偷存下来。
-  const res = config.setSecret(cfgDir, secureCrypto(), gen.privateKeyPem);
-  if (res.ok) info.persisted = true;
+  // 缓存里**抹掉 generated**：那个标志的含义是「刚刚生成了一把，用户还没注册过」，
+  // 只对产生它的那一次调用成立。留着它，同一条警告会在每次连接时重放一遍 ——
+  // 而第二次起它已经不再是真的了。
+  if (!saved.ok) memKeys.set(id, { ...info, generated: false });
   return info;
+}
+
+/**
+ * 取密钥，**没有才生成**。
+ *
+ * 这条分界线是整个密钥管理的要害：「没有」生成是安全的，「读不出来」生成是在
+ * 悄悄毁掉用户已经注册过的公钥，而症状只是「认证失败」，指不回根因。
+ */
+function ensureKey(id) {
+  const r = resolveKey(id);
+  if (r.ok) {
+    // 旧版本留下的痕迹。只在真有这回事时才说话 —— 一条每次都出现的提示，
+    // 和没有提示是一回事。
+    if (r.migrated) win.pushNotice('info', '本机保存的私钥此前是明文，已改为加密保存。');
+    if (r.legacyPlain) {
+      win.pushNotice('warn',
+        '本机保存的私钥仍是明文：这台机器没有可用的系统凭据库，加密存不了。'
+        + '密钥可以正常使用，但它在磁盘上是可读的。');
+    }
+    return r;
+  }
+  if (r.error !== 'not_saved') return r;
+  return generateKey(id);
+}
+
+/** 界面要的那几个字段。**不生成** —— 只有「新建」与「重新生成」两个入口才生成。 */
+function keyView(id) {
+  const r = resolveKey(id);
+  if (!r.ok) {
+    return {
+      publicKey: null, fingerprint: null, persisted: false,
+      error: r.error === 'not_saved' ? null : r.error,
+      detail: r.detail || null,
+      missing: r.error === 'not_saved',
+    };
+  }
+  return {
+    publicKey: r.publicKeyLine, fingerprint: r.fingerprint,
+    persisted: r.persisted, error: null, detail: null, missing: false,
+  };
+}
+
+/** 作废一条密钥、换一把新的。**必须由用户显式发起**（界面上带确认的按钮）。 */
+function regenerateKey(id) {
+  memKeys.delete(id);
+  const info = generateKey(id);
+  return {
+    ok: info.persisted,
+    reason: info.saveError,
+    publicKey: info.publicKeyLine,
+    fingerprint: info.fingerprint,
+    persisted: info.persisted,
+  };
 }
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
 async function announceBackend() {
-  // 旧版本的「明文保存」留下的痕迹。只在真有这回事时才说话 —— 一条每次都出现的
-  // 提示，和没有提示是一回事。
-  if (keyInfo && keyInfo.migrated) {
-    win.pushNotice('info', '本机保存的私钥此前是明文，已改为加密保存。');
-  }
-  if (keyInfo && keyInfo.legacyPlain) {
-    win.pushNotice('warn',
-      '本机保存的私钥仍是明文：这台机器没有可用的系统凭据库，加密存不了。'
-      + '密钥可以正常使用，但它在磁盘上是可读的。');
-  }
-
   if (backend.kind === 'demo') {
     // ★ 演示后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
     //   曾经这里在演示模式下提前 return，结果是 service_port 恒为 0，
@@ -231,11 +322,6 @@ async function announceBackend() {
     return;
   }
 
-  if (keyInfo && keyInfo.error) {
-    win.pushNotice('error', keyInfo.detail);
-    win.setTitle('Slurmate — 私钥不可用');
-    return;
-  }
   const conn = config.activeConnection(cfg);
   if (!conn) {
     // 一条连接都没配 —— 这是**真实状态**，不是错误。如实说出来，
@@ -249,10 +335,30 @@ async function announceBackend() {
 
 /** 真正发起一次连接（含主机密钥裁决）。 */
 async function doConnect(conn, extra = {}) {
+  // 这条连接自己的那把私钥。没有就生成一把 —— 但**读不出来时绝不生成**
+  // （见 ensureKey）：那会作废用户已经注册到 IDM 的公钥，而症状只是「认证失败」。
+  const key = ensureKey(conn.id);
+  if (!key.ok) {
+    return { ok: false, code: 'key_unavailable', error: key.detail || key.error };
+  }
+  if (key.generated) {
+    // 走到这儿说明配置里这条连接本来没有密钥（手改过配置，或从更旧的版本升上来）。
+    // 新公钥用户还没注册过，所以这一次连接**注定**会认证失败 —— 与其让他自己
+    // 从报错里猜，不如现在就说清楚。
+    //
+    // 只在「刚生成」这一次说：见 generateKey 里为什么缓存要抹掉这个标志。
+    win.pushNotice('warn',
+      `这条连接此前没有密钥，已生成一把新的（指纹 ${key.fingerprint}）。`
+      + (key.persisted
+        ? ''
+        : '这台机器没有可用的系统凭据库，私钥存不下来 —— 关闭客户端后它会消失。')
+      + '请先在「编辑」里复制它的公钥、注册到你的 IDM 账户，否则连不上。');
+  }
+
   const res = await backend.connect(
     { user: conn.user, host: conn.host, port: conn.port },
     {
-      privateKey: keyInfo && keyInfo.privateKeyPem,
+      privateKey: key.privateKeyPem,
       hostKeyCheck: (fp) => config.checkHostKey(cfg, conn.host, conn.port, fp).status,
       expectedHostKey: (config.checkHostKey(cfg, conn.host, conn.port, '') || {}).expected,
       ...extra,
@@ -485,21 +591,20 @@ function registerIpc() {
     catch (e) { return { ok: false, error: e.message }; }
   });
 
+  // ★ 这里**不再有**公钥字段：密钥是按连接存的，界面在打开某条连接的表单时
+  //   单独问（app:publicKey / app:newKey）。全局一份公钥的写法会让人以为
+  //   「注册一次，所有连接都用它」—— 那是上一个版本的行为。
   send('app:bootstrap', async () => ({
     demo: backend.kind === 'demo',
     backendLabel: backend.label,
     connections: cfg.connections,
     activeConnectionId: cfg.activeConnectionId,
-    connection: config.activeConnection(cfg),
+    // ★ 这里**不再有** connection（活动连接那条本身）：它此前唯一的用途是把地址
+    //   预填进「新建」表单，而那个行为正是要删掉的（不改就保存 = 又存一条一样的）。
     whoami,
     partitions,
-    publicKey: (keyInfo && keyInfo.publicKeyLine) || null,
-    keyFingerprint: (keyInfo && keyInfo.fingerprint) || null,
-    keyError: (keyInfo && keyInfo.error) || null,
-    keyErrorDetail: (keyInfo && keyInfo.detail) || null,
-    keyPersisted: Boolean(keyInfo && keyInfo.persisted),
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
-    // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去选明文保存。
+    // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去找一个不存在的开关。
     secureStorageAvailable: secureAvailable(),
     slotPort: config.slotPort(cfg, 1),
     version: app.getVersion(),
@@ -515,11 +620,43 @@ function registerIpc() {
     if (!up) {
       return { ok: false, error: '连接信息不完整：用户名、主机、端口（1-65535）都必填。' };
     }
+    if (up.conflict) {
+      // 编辑时把地址改成了另一条已有的连接。两条同身份、各带一把密钥，
+      // 界面完全看不出差别 —— 与其替用户挑一条，不如让他自己决定。
+      const c = up.conflict;
+      return {
+        ok: false, code: 'duplicate',
+        error: `已经有一条 ${c.user}@${c.host}:${c.port} 了（备注「${c.label}」）。`
+             + '同一个人在同一台机器上只保留一条 —— 请改掉这里的地址，'
+             + '或者先把那一条删掉。',
+      };
+    }
+
+    if (up.created) {
+      // 把「新建」时生成的那把密钥交给这条连接。
+      // ★ 顺序要紧：密钥必须**先于**用户的第一次连接尝试就位，因为公钥得先拿去
+      //   IDM 注册。所以它在用户点开「新建」时就已经生成好了（PENDING_ID 那个位）。
+      //   这里绝不另生成一把 —— 那会作废用户可能已经注册好的那把。
+      const pending = config.getKey(cfgDir, secureCrypto(), config.PENDING_ID);
+      if (pending.ok) config.setKey(cfgDir, secureCrypto(), up.connection.id, pending.value);
+      const mem = memKeys.get(config.PENDING_ID);
+      if (mem) memKeys.set(up.connection.id, { ...mem });
+      config.deleteKey(cfgDir, config.PENDING_ID);
+      memKeys.delete(config.PENDING_ID);
+
+      // 没有「新建位」的密钥，说明这是从更旧的版本上来的第一条连接 ——
+      // 把旧格式那份全局密钥交给它，用户不必重新注册。
+      if (!pending.ok && !mem) {
+        config.migrateLegacySecret(cfgDir, [up.connection.id]);
+      }
+    }
+
     if (!cfg.activeConnectionId) cfg.activeConnectionId = up.connection.id;
     config.saveConfig(cfgDir, cfg);
     return {
       ok: true, connection: up.connection, created: up.created,
       connections: cfg.connections,
+      key: keyView(up.connection.id),
     };
   });
 
@@ -529,7 +666,14 @@ function registerIpc() {
       cfg.activeConnectionId = cfg.connections[0] ? cfg.connections[0].id : null;
     }
     config.saveConfig(cfgDir, cfg);
-    return { ok: true, connections: cfg.connections, activeConnectionId: cfg.activeConnectionId };
+    // 这条连接的密钥跟着走 —— 留着它既无用，又会在界面上留下一条看不见的凭据。
+    // 两处都要清：落盘的那份，以及「这台机器没有凭据库」时留在内存里的那份。
+    const gone = config.deleteKey(cfgDir, id).removed;
+    const memGone = memKeys.delete(id);
+    return {
+      ok: true, connections: cfg.connections,
+      activeConnectionId: cfg.activeConnectionId, keyDeleted: gone || memGone,
+    };
   });
 
   send('app:setActiveConnection', async (id) => {
@@ -543,9 +687,6 @@ function registerIpc() {
 
   // ── 连接 ──
   send('app:connect', async (payload) => {
-    if (keyInfo && keyInfo.error) {
-      return { ok: false, error: keyInfo.detail, code: 'key_unavailable' };
-    }
     let conn = config.activeConnection(cfg);
     if (payload && payload.connectionId) {
       conn = cfg.connections.find((c) => c.id === payload.connectionId) || conn;
@@ -589,45 +730,77 @@ function registerIpc() {
     return { ok: true };
   });
 
-  // ── 密钥 ──
-  send('app:publicKey', async () => ({
-    ok: true,
-    publicKey: (keyInfo && keyInfo.publicKeyLine) || null,
-    fingerprint: (keyInfo && keyInfo.fingerprint) || null,
-    persisted: Boolean(keyInfo && keyInfo.persisted),
-  }));
+  // ── 密钥（按连接）──
+  //
+  // 两个 id 位：某条连接的 id，或 PENDING_ID（「新建」表单上那把还没有归属的）。
+  // null / 省略 = PENDING_ID。
 
-  send('app:copyPublicKey', async () => {
-    if (!keyInfo || !keyInfo.publicKeyLine) return { ok: false, error: '还没有可用的公钥。' };
-    clipboard.writeText(keyInfo.publicKeyLine);
+  /** 把界面给的 id 归一：null 表示「新建位」。不存在则返回 null（由调用方报错）。 */
+  const keyTarget = (payload) => {
+    const id = payload && payload.connectionId;
+    if (!id) return config.PENDING_ID;
+    return cfg.connections.some((c) => c.id === id) ? id : null;
+  };
+
+  /**
+   * 查一条密钥的公钥。**不生成** —— 界面上「看」这个动作不该产生副作用，
+   * 否则用户点开编辑看一眼，就作废了别的东西。
+   */
+  send('app:publicKey', async (payload) => {
+    const id = keyTarget(payload);
+    if (!id) return { ok: false, error: '这条连接不存在。' };
+    return { ok: true, key: keyView(id) };
+  });
+
+  /**
+   * 「新建连接」时生成（或取回）那把还没有归属的密钥。
+   *
+   * ★ 生成发生在**用户填地址之前**：他要把公钥复制去 IDM 注册，回来才能连上。
+   *   generated=false 表示这把是上次新建时留下的 —— 用户可能已经注册过它，
+   *   界面据此说明「已经注册过就直接用」。绝不在这里无声地换一把。
+   */
+  send('app:newKey', async () => {
+    const existed = Boolean(memKeys.get(config.PENDING_ID))
+      || config.hasKey(cfgDir, config.PENDING_ID);
+    const r = ensureKey(config.PENDING_ID);
+    if (!r.ok) return { ok: false, error: r.detail || r.error };
+    return {
+      ok: true, generated: !existed,
+      key: {
+        publicKey: r.publicKeyLine, fingerprint: r.fingerprint,
+        persisted: r.persisted, error: null, detail: null, missing: false,
+      },
+    };
+  });
+
+  send('app:copyPublicKey', async (payload) => {
+    const id = keyTarget(payload);
+    if (!id) return { ok: false, error: '这条连接不存在。' };
+    const v = keyView(id);
+    if (!v.publicKey) return { ok: false, error: v.detail || '这条连接还没有公钥。' };
+    clipboard.writeText(v.publicKey);
     return { ok: true };
   });
 
   /**
-   * 作废现有密钥、重新生成一把，并加密存盘。
+   * 作废这条连接的密钥、换一把新的，并加密存盘。
    *
-   * ★ 这是唯一的密钥生成入口，且**必须由用户显式发起**（界面上是一个带确认的按钮）：
-   *   它会作废用户已经注册到 IDM 的那把公钥，一旦悄悄发生，表现只是「认证失败」，
-   *   指不回根因。同理，密钥读不出来（keyError）时也是走这里，不做任何自动覆盖。
+   * ★ 它会作废用户已经注册到 IDM 的那把公钥，一旦悄悄发生，表现只是「认证失败」，
+   *   指不回根因。所以界面上是一个带确认的按钮，而这是唯一的生成入口。
+   *   同理，密钥**读不出来**时也是走这里，不做任何自动覆盖。
    */
-  send('app:regenerateKey', async () => {
-    const gen = keys.generate();
-    const saved = config.setSecret(cfgDir, secureCrypto(), gen.privateKeyPem);
-    keyInfo = {
-      privateKeyPem: gen.privateKeyPem,
-      publicKeyLine: gen.publicKeyLine,
-      fingerprint: gen.fingerprint,
-      persisted: saved.ok,
-      error: null,
-      detail: null,
-    };
+  send('app:regenerateKey', async (payload) => {
+    const id = keyTarget(payload);
+    if (!id) return { ok: false, error: '这条连接不存在。' };
+    const r = regenerateKey(id);
     // 存不下去也要把新公钥给出去：用户此刻正需要把它注册到 IDM，
     // 至于「这台机器存不了」，由界面另外如实说明。
     return {
-      ok: saved.ok,
-      reason: saved.ok ? null : saved.reason,
-      publicKey: gen.publicKeyLine,
-      fingerprint: gen.fingerprint,
+      ok: r.ok, reason: r.reason,
+      key: {
+        publicKey: r.publicKey, fingerprint: r.fingerprint,
+        persisted: r.persisted, error: null, detail: null, missing: false,
+      },
     };
   });
 
@@ -724,6 +897,9 @@ module.exports = {
     getBackend: () => backend,
     getController: () => controller,
     getWindow: () => win,
-    getKeyInfo: () => keyInfo,
+    /** 一条连接的密钥（读不到就返回错误对象）。测试用它核对「按连接隔离」。 */
+    getKey: (id) => resolveKey(id || config.PENDING_ID),
+    getCfg: () => cfg,
+    getCfgDir: () => cfgDir,
   },
 };
