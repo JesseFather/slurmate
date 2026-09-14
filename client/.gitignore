@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+Thumbs.db
+
+# 本机配置与凭据 —— 绝不能被提交
+# （真实位置在 app.getPath('userData')，这两条是防御性兜底）
+config.json
+secrets.json
+pending-goodbye.json

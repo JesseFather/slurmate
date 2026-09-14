@@ -1,0 +1,22 @@
+{
+  "name": "slurmate",
+  "productName": "Slurmate",
+  "version": "0.1.0",
+  "description": "Slurmate — 远程开发会话桌面客户端（Electron 外壳）",
+  "license": "Apache-2.0",
+  "author": "JesseFather <JesseFather@users.noreply.github.com>",
+  "homepage": "https://github.com/JesseFather/slurmate",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "demo": "electron . --demo",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  }
+}

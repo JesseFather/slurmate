@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 渲染进程只加载本地资源，不需要任何远程来源。
+     这里用一个严格的 CSP 把这件事钉死：即使将来有人往页面里塞了远程脚本也加载不了。 -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+<title>Slurmate</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- 状态条：会话运行期间，窗口主体会被 code-server 页面盖住，
+     这 30px 是我们唯一始终可见的像素。 -->
+<div id="statusbar" class="s-idle">
+  <span class="dot"></span>
+  <span class="st" id="sb-state">未开始</span>
+  <span class="sep" id="sb-sep1">|</span>
+  <span id="sb-detail"></span>
+  <span class="spacer"></span>
+  <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 code-server
+       页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
+  <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
+  <button id="sb-end" class="danger tiny hidden">结束会话</button>
+  <span id="sb-demo" class="demo-tag hidden">演示模式 · 未连接集群</span>
+</div>
+
+<div id="panel">
+  <div class="wrap">
+
+    <div id="demo-banner" class="banner-demo hidden">
+      演示模式 · 未连接集群 —— 下面的会话是一个本地的模拟服务，不是真实的计算节点。
+    </div>
+
+    <h1>Slurmate</h1>
+    <p class="sub" id="app-sub">远程开发会话</p>
+
+    <!-- ── ① 首次设置 ── -->
+    <section id="sec-setup">
+      <h2>登录节点</h2>
+      <div class="row">
+        <div><label for="f-user">用户名</label><input type="text" id="f-user" autocomplete="username"></div>
+        <div><label for="f-pass">密码</label><input type="password" id="f-pass" autocomplete="current-password"></div>
+        <div><button id="btn-probe" class="ghost">探测地址</button></div>
+      </div>
+      <h2>地址</h2>
+      <div class="row">
+        <div style="flex:1">
+          <label for="f-host">登录节点（内网优先，探测结果决定）</label>
+          <select id="f-host" style="width:100%"></select>
+        </div>
+        <div><button id="btn-connect">测试连接</button></div>
+      </div>
+      <h2>密码保存</h2>
+      <div class="row">
+        <div style="flex:1">
+          <label for="f-savepw">在这台电脑上保存密码的方式</label>
+          <select id="f-savepw">
+            <option value="ask">每次询问</option>
+            <option value="encrypted">加密保存（系统凭据库）</option>
+            <option value="none">不保存</option>
+            <option value="plain">明文保存（不推荐）</option>
+          </select>
+        </div>
+        <div><button id="btn-savepw" class="ghost">保存设置</button></div>
+      </div>
+      <p class="sub" id="securenote" style="margin-top:10px"></p>
+    </section>
+
+    <!-- ── ② 用途选择 ── -->
+    <section id="sec-purpose" class="hidden">
+      <h2>用途</h2>
+      <p class="sub">
+        节点由 Slurm 在分区内自动挑选，端口也自动分配 —— 不用自己拟。
+        会话最长 12 小时，到期前会自动续期。
+      </p>
+      <div class="purposes" id="purposes"></div>
+      <div class="row" style="margin-top:18px">
+        <button id="btn-start">开始开发</button>
+        <button id="btn-doctor" class="ghost">体检集群</button>
+      </div>
+    </section>
+
+    <!-- ── ③ 会话进行中 ── -->
+    <section id="sec-session" class="hidden">
+      <h2>当前会话</h2>
+      <dl class="kv" id="kv"></dl>
+      <div class="row" style="margin-top:16px">
+        <button id="btn-reload" class="ghost">重新加载页面</button>
+        <button id="btn-keep" class="ghost">关闭窗口但保持作业运行</button>
+        <button id="btn-end" class="danger">结束会话</button>
+      </div>
+      <p class="sub" style="margin-top:10px">
+        会话运行期间，下面的按钮也可以从左上的状态条直接点到。
+      </p>
+    </section>
+
+    <!-- ── 演示模式的调试开关 ── -->
+    <section id="sec-debug" class="debug hidden">
+      <h2>演示调试</h2>
+      <p>
+        下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
+        这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+      </p>
+      <div class="row">
+        <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
+        <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
+        <button class="ghost" data-debug="reap">模拟会话被回收</button>
+        <button class="ghost" data-debug="reset">复位</button>
+      </div>
+    </section>
+
+    <h2>日志</h2>
+    <div class="notices" id="notices"></div>
+
+  </div>
+</div>
+
+<script src="panel.js"></script>
+</body>
+</html>

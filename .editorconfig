@@ -1,0 +1,60 @@
+# https://editorconfig.org
+#
+# 这个仓库里同时有 JavaScript、shell 和 Python，三者的主流缩进并不相同：
+#
+#   JavaScript   2 空格
+#   Python       4 空格
+#   shell        4 空格（与本仓库现有脚本一致）
+#
+# 不写清楚会怎样：编辑器按自己的默认值格式化，一次保存就把整个文件重排，
+# diff 里混进几屏与改动无关的空白变更 —— 真正的改动从此淹没在里面，评审失效。
+#
+# 行尾统一 lf：本仓库在 Linux 上开发、由 CI 在 Linux/macOS 上构建。
+# 若在 Windows 上被转成 crlf，shell 脚本会以
+# `bad interpreter: /bin/bash^M: No such file or directory` 失败 ——
+# 报错信息完全看不出根因是行尾。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# ── JavaScript / JSON：2 空格 ────────────────────────────────────────────────
+[*.{js,mjs,cjs,json}]
+indent_size = 2
+
+# ── Python：4 空格 ──────────────────────────────────────────────────────────
+[*.py]
+indent_size = 4
+
+# ── shell：4 空格 ───────────────────────────────────────────────────────────
+[*.sh]
+indent_size = 4
+
+# 作业模板。它是 bash，但后缀是 .sbatch，上面那条 *.sh 管不到它。
+[*.sbatch]
+indent_size = 4
+
+# cluster/slurmate 与 cluster/slurmate-sessiond 是 Python 源码，但【没有 .py 后缀】
+# —— 它们是最终安装到 /usr/local/bin 与 /usr/local/sbin 的命令。
+# 漏掉这两条，编辑器会把它们当成无后缀的普通文本文件，缩进规则全靠猜，
+# 而这个文件里 4 空格缩进一旦被改坏，Python 直接 IndentationError 起不来。
+[cluster/slurmate]
+indent_size = 4
+
+[cluster/slurmate-sessiond]
+indent_size = 4
+
+# ── YAML：2 空格（GitHub Actions workflow 等）────────────────────────────────
+[*.yml]
+indent_size = 2
+
+# ── Markdown ────────────────────────────────────────────────────────────────
+# Markdown 用【行尾两个空格】表示强制换行（CommonMark 的 hard line break）。
+# 去掉行尾空白会把换行一起吃掉，原本分行的内容挤成一行。
+[*.md]
+trim_trailing_whitespace = false

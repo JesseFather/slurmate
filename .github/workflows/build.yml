@@ -1,0 +1,93 @@
+name: build
+
+# 只负责一件事：把 client/ 打包成三个平台的安装包。
+#
+# 发布（打 tag → 挂 Release）在 release.yml 里，**故意分开**。
+# 原因见 release.yml 顶部的说明：GitHub 对 push 事件是把 branches + tags + paths
+# 三者取【与】的，而给一个已推送的提交打 tag 时变更文件集为空 —— 只要这个
+# workflow 带 paths 过滤器，release 就永远不会触发，且失败时没有任何报错。
+#
+# ── 关于 CI 成本 ────────────────────────────────────────────────────────────
+# Actions 分钟数按平台加权：Linux 1× / Windows 2× / macOS 10×。
+# 一次三平台打包约 100 分钟额度。所以：
+#   - paths 过滤器挡掉只改 cluster/ 或文档的提交
+#   - concurrency 挡掉连推多次时的并行排队（只跑最新的那个）
+#   - 想不制造提交就验证构建：Actions 页面 → Run workflow（workflow_dispatch）
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'client/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+# 同一分支上连推多次时，取消排队中的旧运行，只跑最新的。
+# 没有这个的话，改一行注释就会排起一串约 100 分钟的任务。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 先在 Linux 上跑测试 —— 不需要 Electron 运行时，十几秒就完。
+  # 测试挂了就不必再花 100 分钟去打三个平台的包。
+  #
+  # 注意 `defaults.run.working-directory` 只对 `run:` 步骤生效，
+  # **对 `uses:` 步骤无效** —— 所以下面 upload-artifact 的 path 要写全 `client/dist/...`。
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # electron-builder 的依赖树要求 ^20.17.0 || >=22.9.0，
+          # 而 Node 20 已在 2026-04 EOL。用 22。
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      # npm ci 而不是 npm install：既装依赖，也顺带校验 lockfile 与
+      # package.json 是否一致（有人改了后者忘了前者，这里就会红）。
+      - run: npm ci
+      - run: npm test
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false          # 一个平台挂了，另外两个的产物仍要拿到
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - name: 打包
+        # --publish never：只产出安装包，不碰 Release。
+        # 发布是 release.yml 的事，这里不需要 GH_TOKEN。
+        run: npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurmate-${{ matrix.os }}
+          path: |
+            client/dist/*.exe
+            client/dist/*.dmg
+            client/dist/*.AppImage
+            client/dist/*.deb
+            client/dist/*.zip
+          if-no-files-found: error
+          retention-days: 30

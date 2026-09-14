@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>演示工作区 — Slurmate</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #1e1e1e; color: #d4d4d4;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: #252526; border-bottom: 1px solid #333;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  .magenta { color: #ff5cf4; font-weight: 600; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .pane + .pane { border-left: 1px solid #333; }
+  .pane h2 {
+    font-size: 12px; margin: 0; padding: 8px 14px; color: #9cdcfe;
+    background: #252526; border-bottom: 1px solid #333; font-weight: 600;
+  }
+  .hint { padding: 10px 14px; color: #808080; font-size: 12px; }
+  .hint code { background: #2d2d2d; padding: 1px 5px; border-radius: 3px; color: #ce9178; }
+  ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  li { padding: 5px 14px; border-bottom: 1px solid #2a2a2a; display: flex; gap: 10px; }
+  li .k { color: #dcdcaa; min-width: 180px; }
+  li .t { color: #6a9955; }
+  li.swallowed { background: #3a1d1d; }
+  #swallowed { color: #f48771; }
+  .empty { color: #6a6a6a; font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>演示工作区</h1>
+  <span class="magenta">演示模式 · 未连接集群</span>
+</header>
+<main>
+  <section class="pane">
+    <h2>页面收到的按键（快捷键接管验证）</h2>
+    <p class="hint">
+      在这里按 <code>Ctrl+W</code> / <code>Ctrl+N</code> / <code>F5</code>，
+      它们应当出现在下面的列表里 —— 说明按键到达了页面而不是被外壳吞掉。
+      <br>
+      再按 <code>Ctrl+Shift+I</code> 和 <code>F11</code>，它们应当<b>不</b>出现 —— 那是被刻意拦截的。
+      <br>
+      切到中文输入法打一段拼音，按键不该出现在列表里（输入法组合期间必须放行给输入法）。
+    </p>
+    <ul id="keys"><li class="empty">（还没有按键）</li></ul>
+  </section>
+  <section class="pane">
+    <h2>被外壳吞掉的按键</h2>
+    <p class="hint">这一侧由外壳的 <code>before-input-event</code> 黑名单决定，页面收不到，所以它记录不了自己 —— 由外壳通过 IPC 回灌。</p>
+    <ul id="swallowed"><li class="empty">（还没有被吞掉的按键）</li></ul>
+  </section>
+</main>
+<script>
+  const keys = document.getElementById('keys');
+  const swallowed = document.getElementById('swallowed');
+  let n = 0;
+
+  function combo(e) {
+    const parts = [];
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.metaKey) parts.push('Meta');
+    parts.push(e.key === ' ' ? 'Space' : e.key);
+    return parts.join('+');
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;               // 输入法组合中，不记
+    if (n === 0) keys.innerHTML = '';
+    n++;
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="k"></span><span class="t"></span>';
+    li.querySelector('.k').textContent = combo(e);
+    li.querySelector('.t').textContent = 'keydown #' + n;
+    keys.prepend(li);
+    while (keys.children.length > 200) keys.lastChild.remove();
+  }, true);
+
+  // 外壳通过 preload 把「它吞掉了哪些键」推过来，用于对照
+  if (window.slurmateDemo && window.slurmateDemo.onSwallowed) {
+    window.slurmateDemo.onSwallowed((desc) => {
+      if (swallowed.querySelector('.empty')) swallowed.innerHTML = '';
+      const li = document.createElement('li');
+      li.className = 'swallowed';
+      li.textContent = desc + '（已拦截，未到达页面）';
+      swallowed.prepend(li);
+    });
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+# ==============================================================================
+#  slurmate-sessiond.service.in — Slurmate 会话守护进程（systemd 单元模板）
+# ==============================================================================
+#  这是【模板】，不是可直接安装的单元文件。deploy.sh 会在安装时把
+#  @READONLY_PATHS@ 替换成该站点的共享家目录挂载点，生成
+#  /etc/systemd/system/slurmate-sessiond.service。
+#
+#  手工修改生成后的单元没有意义 —— 下次部署会被覆盖。要改就改这里，
+#  或改 slurmate.conf 里的 readonly_paths。
+#
+#  加固指令的可行性在 RHEL 9 系上实测过：沙箱内 scontrol ping 成功、
+#  munge 的 /run/munge/munge.socket.2 可读、nft list 可用。
+# ==============================================================================
+
+[Unit]
+Description=Slurmate session ACL daemon
+Documentation=https://github.com/JesseFather/slurmate
+After=network-online.target nftables.service slurmctld.service remote-fs.target
+Wants=network-online.target
+# nftables.service 的 ExecReload 是 `nft 'flush ruleset; include ...'`，
+# 会连本服务的表一起清掉。用 PartOf 跟着重启，保证表被重建。
+# 注意：这里【不能】用 BindsTo —— 那会让 nftables 启动失败时本服务也起不来。
+PartOf=nftables.service
+# 永不放弃重启
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.conf
+ExecStart=/usr/local/sbin/slurmate-sessiond --foreground --config=/etc/slurmate/slurmate.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+
+User=root
+Group=root
+UMask=0027
+
+# ── 加固 ────────────────────────────────────────────────────────────────────
+# 注意：必须是 full 而不是 strict。strict 会把整个文件系统挂成只读，
+# 包括 /run —— 那会切断 munge 的 /run/munge/munge.socket.2，
+# 导致 scontrol/scancel 全部失败。
+ProtectSystem=full
+# 守护进程【从不写】用户家目录（口令由作业自己生成写进会话文件），
+# 所以共享存储可以只读挂载。这是本设计相对"root 写用户文件"的实质安全增量。
+# 挂载点由 deploy.sh 按 slurmate.conf 的 readonly_paths 生成；该项留空时
+# 本行会被整行删除（此时上面的保护就不存在了，请确认这是你要的）。
+ReadOnlyPaths=@READONLY_PATHS@
+# 状态、日志、运行时目录由 systemd 管理（自动创建并设置属主/权限）
+StateDirectory=slurmate-session
+StateDirectoryMode=0700
+LogsDirectory=slurmate
+LogsDirectoryMode=0750
+RuntimeDirectory=slurmate-session
+RuntimeDirectoryMode=0755
+
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# nft 走 netlink；scontrol/scancel 走 AF_UNIX（munge）+ AF_INET（slurmctld）
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# 能力最小集：
+#   CAP_NET_ADMIN       维护 nftables（唯一的网络能力）
+#   CAP_SETUID/SETGID   以目标用户身份提交作业
+#   CAP_DAC_READ_SEARCH 读取用户家目录里 0600 的会话文件
+#   CAP_DAC_OVERRIDE    同上（家目录 0700 时需要）
+#   CAP_KILL            回收子进程
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+slurmate — Slurmate 用户态 CLI
+==============================================================================
+
+以【普通用户身份】运行，通过 unix socket 与 slurmate-sessiond 通信。
+身份认证完全由守护进程侧 getsockopt(SO_PEERCRED) 完成，本程序不发送任何身份信息。
+
+对客户端（Electron）的稳定接口是 `slurmate rpc`：
+    从 stdin 读一行 JSON 请求，向 stdout 写一行 JSON 响应。
+客户端应以【固定 argv】调用它，请求体走 stdin：
+
+    ssh -T -o BatchMode=yes -p 10100 user@host -- /usr/local/bin/slurmate rpc
+
+这样命令行是编译期常量，用户输入永远不可能出现在 SSH 命令串里 ——
+从构造上消除注入，而不是靠"记得别用某个词"。
+
+退出码：
+    0 成功 / 2 用法错误 / 3 未找到 / 4 被拒绝（配额、权限、账户）/
+    5 守护进程不可达 / 6 Slurm 或提交失败 / 7 触发限流
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+VERSION = "0.1.0"
+DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
+CONF_PATH = "/etc/slurmate/slurmate.conf"
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_NOTFOUND = 3
+EXIT_REJECTED = 4
+EXIT_NODAEMON = 5
+EXIT_SLURM = 6
+EXIT_RATELIMIT = 7
+
+
+def socket_path():
+    """优先用配置里的路径；配置读不到就用默认值。"""
+    try:
+        with open(CONF_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line.startswith("socket_path"):
+                    _, _, val = line.partition("=")
+                    val = val.strip()
+                    if val:
+                        return val
+    except OSError:
+        pass
+    return DEFAULT_SOCKET
+
+
+def rpc(req, timeout=40.0):
+    """向守护进程发一行 JSON，读回一行 JSON。失败抛 RpcError。"""
+    path = socket_path()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(path)
+    except (FileNotFoundError, ConnectionRefusedError, socket.timeout) as e:
+        s.close()
+        raise RpcError(EXIT_NODAEMON,
+                       "无法连接 Slurmate 守护进程（%s）：%s\n"
+                       "请确认控制节点上 slurmate-sessiond 正在运行：\n"
+                       "  systemctl status slurmate-sessiond" % (path, e))
+    except OSError as e:
+        s.close()
+        raise RpcError(EXIT_NODAEMON, "连接守护进程失败（%s）：%s" % (path, e))
+    try:
+        s.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf and len(buf) < 1 << 20:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except socket.timeout:
+        s.close()
+        raise RpcError(EXIT_NODAEMON, "守护进程响应超时")
+    except OSError as e:
+        s.close()
+        raise RpcError(EXIT_NODAEMON, "与守护进程通信失败：%s" % e)
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+    line = buf.split(b"\n", 1)[0].strip()
+    if not line:
+        raise RpcError(EXIT_NODAEMON, "守护进程返回了空响应")
+    try:
+        return json.loads(line.decode("utf-8"))
+    except ValueError as e:
+        raise RpcError(EXIT_NODAEMON, "守护进程返回的响应不是合法 JSON：%s" % e)
+
+
+class RpcError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def call(req, want_json=False, timeout=40.0):
+    """发 RPC 并按需渲染。返回退出码。"""
+    try:
+        resp = rpc(req, timeout=timeout)
+    except RpcError as e:
+        if want_json:
+            print(json.dumps({"ok": False, "code": e.code, "data": None,
+                              "error": {"kind": "daemon_unreachable",
+                                        "detail": e.message}},
+                             ensure_ascii=False))
+        else:
+            print(e.message, file=sys.stderr)
+        return e.code
+
+    if want_json:
+        print(json.dumps(resp, ensure_ascii=False))
+        return 0 if resp.get("ok") else _code_to_exit(resp)
+
+    if not resp.get("ok"):
+        err = resp.get("error") or {}
+        print("[错误] %s" % (err.get("detail") or err.get("kind") or "未知错误"),
+              file=sys.stderr)
+        return _code_to_exit(resp)
+    return resp
+
+
+def _code_to_exit(resp):
+    code = resp.get("code", 1)
+    if code == 2:
+        return EXIT_USAGE
+    if code == 3:
+        return EXIT_NOTFOUND
+    if code == 4:
+        return EXIT_REJECTED
+    if code == 5:
+        return EXIT_NODAEMON
+    if code == 6:
+        return EXIT_SLURM
+    if code == 7:
+        return EXIT_RATELIMIT
+    return 1
+
+
+def human_state(state):
+    return {
+        "reserved": "已分配端口",
+        "submitted": "已提交，等待调度",
+        "enrolled": "运行中",
+        "suspect": "连接中断（作业仍在运行）",
+        "orphaned": "判定异常退出，正在释放",
+        "releasing": "正在释放",
+        "released": "已结束",
+        "rejected": "已拒绝",
+        "expired": "已过期",
+    }.get(state, state)
+
+
+def fmt_left(expires_at):
+    if not expires_at:
+        return "-"
+    left = int(expires_at - time.time())
+    if left <= 0:
+        return "已到期"
+    h, rem = divmod(left, 3600)
+    m, _ = divmod(rem, 60)
+    if h >= 24:
+        return "%dd %dh" % (h // 24, h % 24)
+    return "%dh %dm" % (h, m)
+
+
+def print_session(s, verbose=True):
+    if not s:
+        print("（没有活跃会话）")
+        return
+    print("会话 ID   : %s" % s.get("session_id"))
+    print("状态      : %s" % human_state(s.get("state")))
+    if s.get("job_id"):
+        print("作业 ID   : %s" % s.get("job_id"))
+    print("用途/分区 : %s / %s" % (s.get("purpose"), s.get("partition")))
+    if s.get("tunnel_target"):
+        print("隧道目标  : %s" % s.get("tunnel_target"))
+        print("连          : ssh -N -L <本地端口>:%s ..." % s.get("tunnel_target"))
+    if s.get("expires_at"):
+        print("剩余时间  : %s" % fmt_left(s.get("expires_at")))
+        if s.get("time_limit"):
+            print("时间上限  : %s（已续期 %s 次）"
+                  % (s.get("time_limit"), s.get("renew_count", 0)))
+    if s.get("node"):
+        print("节点      : %s (%s)" % (s.get("node"), s.get("node_ip")))
+    if s.get("note"):
+        print("备注      : %s" % s.get("note"))
+
+
+# ==============================================================================
+#  子命令
+# ==============================================================================
+
+def cmd_rpc(args):
+    """从 stdin 读一行 JSON 请求，写一行 JSON 响应。客户端的固定入口。"""
+    raw = sys.stdin.readline()
+    if not raw.strip():
+        print(json.dumps({"ok": False, "code": EXIT_USAGE, "data": None,
+                          "error": {"kind": "empty_request",
+                                    "detail": "stdin 上没有收到请求"}},
+                         ensure_ascii=False))
+        return EXIT_USAGE
+    try:
+        req = json.loads(raw)
+        if not isinstance(req, dict):
+            raise ValueError("请求必须是 JSON 对象")
+    except ValueError as e:
+        print(json.dumps({"ok": False, "code": EXIT_USAGE, "data": None,
+                          "error": {"kind": "bad_json", "detail": str(e)}},
+                         ensure_ascii=False))
+        return EXIT_USAGE
+    try:
+        resp = rpc(req)
+    except RpcError as e:
+        print(json.dumps({"ok": False, "code": e.code, "data": None,
+                          "error": {"kind": "daemon_unreachable",
+                                    "detail": e.message}}, ensure_ascii=False))
+        return e.code
+    print(json.dumps(resp, ensure_ascii=False))
+    return 0 if resp.get("ok") else _code_to_exit(resp)
+
+
+def cmd_whoami(args):
+    r = call({"op": "whoami"}, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    d = r["data"]
+    print("用户      : %s (uid=%s)" % (d.get("user"), d.get("uid")))
+    print("家目录    : %s" % d.get("home"))
+    if d.get("can_submit"):
+        print("计算账户  : %s" % d.get("account"))
+    else:
+        print("计算账户  : 无 —— %s" % (d.get("account_error") or "未分配"))
+    ap = d.get("allowed_partitions")
+    print("可用分区  : %s" % ("不限" if ap is None else ", ".join(ap)))
+    return 0
+
+
+def cmd_purposes(args):
+    r = call({"op": "purposes"}, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    print("%-10s %-9s %-6s %-6s %s" % ("用途", "分区", "核心", "内存", "说明"))
+    print("-" * 62)
+    for p in r["data"]["purposes"]:
+        mark = "" if p.get("allowed") else "  [无权限]"
+        print("%-10s %-9s %-6s %-6s %s%s"
+              % (p["key"], p["partition"], p["cpus"], p["mem"], p["label"], mark))
+    return 0
+
+
+def cmd_submit(args):
+    req = {"op": "submit", "purpose": args.purpose}
+    if args.cpus:
+        req["cpus"] = args.cpus
+    if args.mem:
+        req["mem"] = args.mem
+    if args.gpus is not None:
+        req["gpus"] = args.gpus
+    if args.time:
+        req["time"] = args.time
+    r = call(req, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    d = r["data"]
+    print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
+    print("分区 %s，时间上限 %s" % (d.get("partition"), d.get("requested_time")))
+    print()
+    print("下一步：等待调度完成后即可连接 ——")
+    print("  slurmate wait --session %s" % d.get("session_id"))
+    return 0
+
+
+def cmd_status(args):
+    req = {"op": "status"}
+    if args.session:
+        req["session_id"] = args.session
+    r = call(req, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    print_session(r["data"].get("session"))
+    return 0
+
+
+def cmd_list(args):
+    r = call({"op": "list"}, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    rows = r["data"]["sessions"]
+    if not rows:
+        print("（没有会话记录）")
+        return 0
+    print("%-18s %-8s %-14s %-22s %s"
+          % ("会话 ID", "作业", "状态", "隧道目标", "剩余"))
+    print("-" * 78)
+    for s in rows:
+        print("%-18s %-8s %-14s %-22s %s"
+              % (s.get("session_id"), s.get("job_id") or "-",
+                 human_state(s.get("state")), s.get("tunnel_target") or "-",
+                 fmt_left(s.get("expires_at"))))
+    return 0
+
+
+def cmd_wait(args):
+    """轮询直到会话登记完成（拿到隧道目标）或失败/超时。"""
+    deadline = time.time() + args.timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            r = rpc({"op": "status", "session_id": args.session})
+        except RpcError as e:
+            print(e.message, file=sys.stderr)
+            return e.code
+        if not r.get("ok"):
+            if args.json:
+                print(json.dumps(r, ensure_ascii=False))
+            else:
+                err = r.get("error") or {}
+                print("[错误] %s" % (err.get("detail") or err.get("kind")),
+                      file=sys.stderr)
+            return _code_to_exit(r)
+        s = r["data"].get("session") or {}
+        st = s.get("state")
+        if not args.json and st != last:
+            print("状态: %s%s" % (human_state(st),
+                                 "" if st != "submitted" else "（排队中）"))
+            last = st
+        if s.get("tunnel_target"):
+            if args.json:
+                print(json.dumps(r, ensure_ascii=False))
+            else:
+                print()
+                print("就绪：隧道目标 %s" % s["tunnel_target"])
+                if s.get("auth_password"):
+                    print("code-server 口令 %s" % s["auth_password"])
+            return 0
+        if st in ("released", "rejected", "expired", "orphaned"):
+            if args.json:
+                print(json.dumps(r, ensure_ascii=False))
+            else:
+                print("[失败] 会话已结束：%s" % human_state(st), file=sys.stderr)
+                if s.get("note"):
+                    print("  原因: %s" % s.get("note"), file=sys.stderr)
+            return EXIT_REJECTED
+        time.sleep(args.interval)
+    print("[超时] 等待超过 %ds 仍未就绪" % args.timeout, file=sys.stderr)
+    return EXIT_SLURM
+
+
+def cmd_heartbeat(args):
+    return _simple({"op": "heartbeat", "session_id": args.session}, args,
+                   "心跳已发送")
+
+
+def cmd_goodbye(args):
+    return _simple({"op": "goodbye", "session_id": args.session}, args,
+                   "已请求释放会话")
+
+
+def _simple(req, args, okmsg):
+    r = call(req, args.json, timeout=20.0)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    print("%s（状态: %s）" % (okmsg, human_state(r["data"].get("state"))))
+    return 0
+
+
+def cmd_doctor(args):
+    r = call({"op": "doctor"}, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    d = r["data"]
+    ok = "✓"
+    bad = "✗"
+    print("Slurmate 守护进程自检")
+    print("  socket 存在        : %s" % (ok if d.get("socket") else bad))
+    print("  nft 表存在         : %s" % (ok if d.get("table") else bad))
+    print("  规则可读           : %s" % (ok if d.get("rules_readable") else bad))
+    print("  ACL 规则数         : %s" % d.get("rules_count"))
+    print("  活跃会话数         : %s" % d.get("active_sessions"))
+    print("  规则与会话一致     : %s" % (ok if d.get("consistent") else bad))
+    print("  端口池             : %s-%s" % tuple(d.get("port_range", ["?", "?"])))
+    ex = d.get("existing") or {}
+    print("  --- 现有系统（只读体检，本系统不碰它们）---")
+    print("    控制节点 inet codeserver 表 : %s"
+          % (ok if ex.get("codeserver_table") else bad))
+    print("    port-daemon DNAT 表        : %s"
+          % (ok if ex.get("portdaemon_table") else bad))
+    return 0
+
+
+def cmd_gc(args):
+    """清理自己家目录里的陈旧会话文件（本命令不连守护进程）。"""
+    home = os.path.expanduser("~")
+    d = os.path.join(home, ".slurmate", "sessions")
+    if not os.path.isdir(d):
+        print("没有需要清理的内容（%s 不存在）" % d)
+        return 0
+    removed = 0
+    kept = 0
+    now = time.time()
+    for name in sorted(os.listdir(d)):
+        if not name.startswith("job-"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not os.path.isfile(p) or os.path.islink(p):
+            continue
+        if now - st.st_mtime > args.older_than:
+            if args.dry_run:
+                print("  将删除 %s（%.1f 天未更新）"
+                      % (name, (now - st.st_mtime) / 86400))
+            else:
+                os.unlink(p)
+                print("  已删除 %s" % name)
+            removed += 1
+        else:
+            kept += 1
+    print("扫描完成：删除 %d 个，保留 %d 个%s"
+          % (removed, kept, "（dry-run，未实际删除）" if args.dry_run else ""))
+    return 0
+
+
+# ==============================================================================
+#  入口
+# ==============================================================================
+
+def build_parser():
+    ap = argparse.ArgumentParser(
+        prog="slurmate",
+        description="Slurmate — 远程开发会话管理（客户端请用 `slurmate rpc`）")
+    ap.add_argument("--version", action="version", version=VERSION)
+    sub = ap.add_subparsers(dest="cmd")
+
+    def add(name, fn, help_text, **kw):
+        p = sub.add_parser(name, help=help_text, **kw)
+        p.set_defaults(func=fn)
+        return p
+
+    p = add("rpc", cmd_rpc, "从 stdin 读 JSON 请求、向 stdout 写 JSON 响应（客户端入口）")
+
+    p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
+    p.add_argument("--json", action="store_true")
+
+    p = add("purposes", cmd_purposes, "列出可选的开发用途及其分区/资源")
+    p.add_argument("--json", action="store_true")
+
+    p = add("submit", cmd_submit, "提交一个开发会话")
+    p.add_argument("--purpose", default="code", help="用途（见 slurmate purposes）")
+    p.add_argument("--cpus", type=int, help="CPU 核心数")
+    p.add_argument("--mem", help="内存，如 4G")
+    p.add_argument("--gpus", type=int, help="GPU 数量（默认 0，不占卡）")
+    p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
+    p.add_argument("--json", action="store_true")
+
+    p = add("status", cmd_status, "查看会话状态")
+    p.add_argument("--session", help="会话 ID（省略则取最近一个活跃会话）")
+    p.add_argument("--json", action="store_true")
+
+    p = add("list", cmd_list, "列出自己的会话记录")
+    p.add_argument("--json", action="store_true")
+
+    p = add("wait", cmd_wait, "等待会话就绪（拿到隧道目标）")
+    p.add_argument("--session", required=True)
+    p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--json", action="store_true")
+
+    p = add("heartbeat", cmd_heartbeat, "发送心跳（客户端周期调用）")
+    p.add_argument("--session", required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = add("goodbye", cmd_goodbye, "结束会话并释放资源")
+    p.add_argument("--session", required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = add("stop", cmd_goodbye, "同 goodbye")
+    p.add_argument("--session", required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = add("doctor", cmd_doctor, "诊断守护进程与 nft 规则状态")
+    p.add_argument("--json", action="store_true")
+
+    p = add("gc", cmd_gc, "清理自己家目录里的陈旧会话文件")
+    p.add_argument("--older-than", type=int, default=7 * 86400,
+                   help="超过多少秒未更新才清理（默认 7 天）")
+    p.add_argument("--dry-run", action="store_true")
+    return ap
+
+
+def main():
+    ap = build_parser()
+    args = ap.parse_args()
+    if not getattr(args, "func", None):
+        ap.print_help()
+        return EXIT_USAGE
+    if not hasattr(args, "json"):
+        args.json = False
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except RpcError as e:
+        print(e.message, file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

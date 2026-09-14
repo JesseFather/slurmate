@@ -1,0 +1,89 @@
+name: checks
+
+# 与打包无关的检查。跑得很快（不到一分钟），所以每次推都跑，不做 paths 过滤 ——
+# 这些检查要防的恰恰是"改了 A 结果弄坏了 B"。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 脱敏回归 ────────────────────────────────────────────────────────────────
+  # 这个仓库是公开的，发布前做过一次脱敏。这条检查防的是"真实值又回来了"——
+  # 一旦推上去就永久可被索引，改回来也收不回。
+  sanitized:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/check-sanitized.sh
+
+  # ── 集群侧自测 ──────────────────────────────────────────────────────────────
+  # 注意：有人可能会以为这个测试需要真集群才能跑。**不需要** ——
+  # 它对 Slurm 的调用全部打了桩（替换 run_cmd），测的是解析逻辑本身。
+  # 所以它能在裸的 ubuntu-latest 上跑，也【应该】在这里跑：
+  # 以前它只在开发机上手动跑过，等于没有回归防线。
+  cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'      # 与部署目标（RHEL 9 系）一致，不用更新的语法
+      - name: 守护进程自测
+        run: python3 cluster/test-sessiond-logic.py
+      - name: 比对器自测
+        # nft-compare.py 自带用例，验证"非干扰比对"这个安全保证本身是有效的
+        run: python3 cluster/nft-compare.py --selftest
+
+  # ── 语法与一致性 ────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Shell 语法
+        run: |
+          fail=0
+          for f in $(git ls-files '*.sh' cluster/deploy.sh tools/*.sh); do
+            [ -f "$f" ] || continue
+            if bash -n "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
+          done
+          exit $fail
+
+      - name: Python 语法
+        run: |
+          fail=0
+          for f in cluster/slurmate cluster/slurmate-sessiond cluster/nft-compare.py \
+                   cluster/test-sessiond-logic.py; do
+            if python3 -m py_compile "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
+          done
+          exit $fail
+
+      - name: 三处版本号必须一致
+        # client/package.json、cluster/slurmate、cluster/slurmate-sessiond 各自
+        # 声明版本，没有任何机制保证它们同步。不一致的后果是：
+        # 安装包叫 0.2.0，而它在联系的服务端自称 0.1.0，排查时无从对起。
+        run: |
+          v_pkg=$(python3 -c "import json;print(json.load(open('client/package.json'))['version'])")
+          v_cli=$(sed -nE 's/^VERSION *= *"([^"]+)".*/\1/p' cluster/slurmate | head -1)
+          v_dmn=$(sed -nE 's/^VERSION *= *"([^"]+)".*/\1/p' cluster/slurmate-sessiond | head -1)
+          echo "client/package.json : $v_pkg"
+          echo "cluster/slurmate    : $v_cli"
+          echo "cluster/slurmate-sessiond: $v_dmn"
+          if [ "$v_pkg" = "$v_cli" ] && [ "$v_cli" = "$v_dmn" ] && [ -n "$v_pkg" ]; then
+            echo "✓ 三者一致"
+          else
+            echo "✗ 版本号不一致。改版本时三处都要改（或改成本 workflow 从单一来源派生）。"
+            exit 1
+          fi

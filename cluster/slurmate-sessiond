@@ -1,0 +1,2018 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+slurmate-sessiond — Slurmate 会话守护进程
+==============================================================================
+
+职责
+----
+1. 代表用户提交 code-server 作业（fork + setuid + sbatch），并记住"这个 job_id
+   是我代表哪个 uid 提交的"—— 这是整个防伪造体系的支点。
+2. 从用户家目录的会话文件发现作业实际落在哪个节点、哪个端口。
+3. 按【作业】维度维护 nftables ACL（独立的 inet slurmate 表），寿命 = 作业寿命。
+4. 心跳判活、到期续期、孤儿释放、崩溃恢复。
+5. 通过 unix socket 为 slurmate CLI 提供 RPC（身份取自 SO_PEERCRED）。
+
+与现有系统零耦合
+----------------
+不碰 inet codeserver 表、ip port-daemon 表、/tmp/codeserver-ports、
+/usr/local/bin/codeserver-*、sshd 配置、sudoers、user@.service。
+独立表、独立端口区间（55001-55999）、独立状态目录、独立单元。
+
+为什么是 Python
+---------------
+bash 无法 getsockopt(SO_PEERCRED)（身份认证的唯一可信来源），且现有 bash 脚本
+的 sed 文本解析正是最脆弱的地方。目标环境 Python 3.9.25。
+"""
+
+import argparse
+import configparser
+import errno
+import json
+import logging
+import os
+import pwd
+import re
+import selectors
+import signal
+import socket
+import sqlite3
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+VERSION = "0.1.0"
+SCHEMA_VERSION = 1
+
+# 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
+SESSION_FILE_FIELDS = {
+    "schema", "session_id", "job_id", "uid", "user", "purpose", "node", "node_ip",
+    "service_port", "tunnel_target", "state", "job_started_at", "written_at",
+    "job_hb_at", "code_server_pid", "auth_mode", "auth_password",
+    "slurm_restart_number", "exit_code",
+}
+
+# 会话状态机
+ST_RESERVED = "reserved"     # 已分配候选端口，尚未提交
+ST_SUBMITTED = "submitted"   # sbatch 已返回 job_id，等待作业跑起来 + 会话文件
+ST_ENROLLED = "enrolled"     # 作业在跑、会话文件校验通过、ACL 已装
+ST_SUSPECT = "suspect"       # 心跳丢失 > suspect_after：判定网络闪断，什么都不做
+ST_ORPHANED = "orphaned"     # 心跳丢失 > orphan_after：判定异常退出，已发 scancel
+ST_RELEASING = "releasing"   # 正在拆除
+ST_RELEASED = "released"     # 终态
+ST_REJECTED = "rejected"     # 终态（校验失败）
+ST_EXPIRED = "expired"       # 终态（TTL 到期未登记）
+
+TERMINAL_STATES = (ST_RELEASED, ST_REJECTED, ST_EXPIRED)
+# ACL 存在的状态集合 —— 与 nft 规则必须严格一一对应
+ACL_STATES = (ST_ENROLLED, ST_SUSPECT, ST_ORPHANED, ST_RELEASING)
+
+
+def log_setup(level=logging.INFO):
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s",
+                                     datefmt="%Y-%m-%dT%H:%M:%S"))
+    root = logging.getLogger()
+    root.handlers[:] = [h]
+    root.setLevel(level)
+
+
+log = logging.getLogger("slurmate")
+
+
+# ==============================================================================
+#  工具函数
+# ==============================================================================
+
+_INF_TOKENS = {"unlimited", "infinite", "inf", "none", "n/a", "unknown", ""}
+
+# 无法确定（查询失败）—— 与 None（已确认"不限制"）严格区分。
+# 比较时用 `is`，不要用 ==。
+PARTITIONS_UNKNOWN = "__PARTITIONS_UNKNOWN__"
+
+
+def parse_slurm_time(s):
+    """把 Slurm 的各种时间写法解析成秒。返回 None 表示"无限"。
+
+    实测本集群会出现：183-00:00:00 / 12:00:00 / UNLIMITED / infinite
+    """
+    if s is None:
+        return None
+    s = str(s).strip()
+    if s.lower() in _INF_TOKENS:
+        return None
+    m = re.fullmatch(r"(?:(\d+)-)?(\d+)(?::(\d+))?(?::(\d+))?", s)
+    if not m:
+        raise ValueError("无法解析 Slurm 时间: %r" % s)
+    d, a, b, c = m.groups()
+    if d is not None:                 # D-HH[:MM[:SS]]
+        return ((int(d) * 24 + int(a)) * 60 + int(b or 0)) * 60 + int(c or 0)
+    if b is None and c is None:       # 纯分钟
+        return int(a) * 60
+    if c is None:                     # MM:SS
+        return int(a) * 60 + int(b)
+    return (int(a) * 60 + int(b)) * 60 + int(c)   # HH:MM:SS
+
+
+def fmt_slurm_time(secs):
+    """秒 → Slurm 的 [D-]HH:MM:SS"""
+    days, rem = divmod(int(secs), 86400)
+    hh, rem = divmod(rem, 3600)
+    mm, ss = divmod(rem, 60)
+    if days:
+        return "%d-%02d:%02d:%02d" % (days, hh, mm, ss)
+    return "%02d:%02d:%02d" % (hh, mm, ss)
+
+
+def normalize_ipv4(s):
+    """严格校验并规范化 IPv4。返回规范字符串，不合法返回 None。
+
+    用 ipaddress 而不是手写分割：手写版会放行 `010.1.1.1`、`1.2.3.04` 这类
+    带前导零的写法（八进制歧义），也可能与 nft 的解析不一致。
+    注意 Python 3.9.5+ 的 ipaddress 已经拒绝前导零，这里再显式挡一层，
+    保证在更老的解释器上行为一致。
+    """
+    if not isinstance(s, str) or not s or len(s) > 15:
+        return None
+    try:
+        import ipaddress
+        addr = ipaddress.IPv4Address(s)
+    except Exception:                                        # noqa: BLE001
+        return None
+    canon = str(addr)
+    # 输入里任何一段带前导零（如 010）都拒绝
+    for part in s.split("."):
+        if len(part) > 1 and part.startswith("0"):
+            return None
+    return canon
+
+
+def is_ipv4(s):
+    return normalize_ipv4(s) is not None
+
+
+def run_cmd(argv, timeout=10, check=False):
+    """执行命令，返回 (rc, stdout, stderr)。永不抛异常。"""
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout)
+        out = p.stdout.decode("utf-8", "replace")
+        err = p.stderr.decode("utf-8", "replace")
+        if check and p.returncode != 0:
+            log.warning("命令失败 rc=%s: %s | stderr=%s", p.returncode,
+                        " ".join(argv), err.strip()[:200])
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        log.warning("命令超时(%ss): %s", timeout, " ".join(argv))
+        return 124, "", "timeout"
+    except FileNotFoundError:
+        return 127, "", "not found: %s" % argv[0]
+    except Exception as e:                                   # noqa: BLE001
+        return 1, "", str(e)
+
+
+def now_ts():
+    return int(time.time())
+
+
+# ==============================================================================
+#  配置
+# ==============================================================================
+
+class Purpose(object):
+    def __init__(self, key, label, partition, gres, cpus, mem):
+        self.key = key
+        self.label = label
+        self.partition = partition
+        self.gres = gres
+        self.cpus = cpus
+        self.mem = mem
+
+    def to_dict(self):
+        return {"key": self.key, "label": self.label, "partition": self.partition,
+                "gres": self.gres, "cpus": self.cpus, "mem": self.mem}
+
+
+class Config(object):
+    def __init__(self, path):
+        # inline_comment_prefixes：允许 `key = value   # 说明` 这种写法。
+        # 注意这意味着值里不能出现 '#'（本配置文件里的路径/网段/时间都不含）。
+        cp = configparser.ConfigParser(inline_comment_prefixes=("#",))
+        with open(path, "r", encoding="utf-8") as f:
+            cp.read_file(f)
+        self.raw = cp
+        self.path = path
+
+        g = cp["general"]
+        self.socket_path = g.get("socket_path", "/run/slurmate-session/ctl.sock")
+        self.state_dir = g.get("state_dir", "/var/lib/slurmate-session")
+        self.db_path = g.get("db_path", os.path.join(self.state_dir, "claims.db"))
+        self.rejected_dir = g.get("rejected_dir", os.path.join(self.state_dir, "rejected"))
+        self.log_dir = g.get("log_dir", "/var/log/slurmate")
+        self.audit_log = g.get("audit_log", os.path.join(self.log_dir, "audit.log"))
+        self.cluster_cidr = g.get("cluster_cidr", "192.0.2.0/24")
+        self.tick_seconds = g.getint("tick_seconds", 2)
+        self.startup_grace_seconds = g.getint("startup_grace_seconds", 120)
+
+        p = cp["ports"]
+        self.port_start = p.getint("range_start", 55001)
+        self.port_end = p.getint("range_end", 55999)
+        self.candidates_per_session = p.getint("candidates_per_session", 6)
+
+        # 需要避让的其他端口区间，格式 "start-end,start-end"（逗号分隔，可留空）。
+        # 若你的集群上还有别的端口管理系统（某些 guard / DNAT 守护进程之类），
+        # 把它们的区间写在这里，启动时会断言不交 —— nftables 对同 hook 同
+        # priority 的【跨表顺序不给保证】，只有"集合不交"才能让行为确定。
+        # 开源前的旧实现把 "必须 > 55000" 写死在代码里，那是本集群的约定，
+        # 别人的集群用 55000 以下端口时会直接起不来。
+        self.reserved_ranges = []
+        for _item in (p.get("reserved_ranges", "") or "").split(","):
+            _item = _item.strip()
+            if not _item:
+                continue
+            if "-" not in _item:
+                raise ValueError("reserved_ranges 的每一项应为 start-end 形式，得到: %r"
+                                 % _item)
+            _a, _b = _item.split("-", 1)
+            self.reserved_ranges.append((int(_a), int(_b)))
+
+        lc = cp["lifecycle"]
+        self.default_time = lc.get("default_time", "12:00:00")
+        self.max_time = lc.get("max_time", "7-00:00:00")
+        self.suspect_after = lc.getint("suspect_after_seconds", 300)
+        self.orphan_after = lc.getint("orphan_after_seconds", 1800)
+        self.reserved_ttl = lc.getint("reserved_ttl_seconds", 600)
+        # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
+        self.job_missing_confirm_ticks = lc.getint("job_missing_confirm_ticks", 3)
+        self.submitted_ttl = lc.getint("submitted_ttl_seconds", 1800)
+        self.released_keep = lc.getint("released_keep_seconds", 600)
+
+        rn = cp["renew"]
+        self.renew_enabled = rn.getboolean("enabled", True)
+        self.renew_threshold = rn.getint("threshold_seconds", 7200)
+        self.renew_increment = rn.get("increment", "12:00:00")
+        self.renew_max_total = rn.getint("max_total_seconds", 604800)
+
+        sec = cp["security"]
+        self.auth_mode = sec.get("auth_mode", "password").strip().lower()
+        self.password_bytes = sec.getint("password_bytes", 12)
+
+        q = cp["quota"]
+        self.max_active_per_user = q.getint("max_active_per_user", 1)
+        self.max_pending_per_user = q.getint("max_pending_per_user", 4)
+        self.max_rpc_per_second = q.getint("max_rpc_per_second", 10)
+        self.reject_threshold = q.getint("reject_threshold", 20)
+        self.reject_window = q.getint("reject_window_seconds", 600)
+        self.throttle_seconds = q.getint("throttle_seconds", 1800)
+
+        s = cp["slurm"]
+        self.sbatch = s.get("sbatch") or "/usr/bin/sbatch"
+        self.scancel = s.get("scancel") or "/usr/bin/scancel"
+        self.squeue = s.get("squeue") or "/usr/bin/squeue"
+        self.scontrol = s.get("scontrol") or "/usr/bin/scontrol"
+        self.sacctmgr = s.get("sacctmgr") or "/usr/bin/sacctmgr"
+        self.job_script = s.get("job_script", "/usr/local/share/slurmate/run.sbatch")
+        self.code_server_bin = s.get("code_server_bin", "/usr/local/bin/code-server")
+        # 作业日志在用户家目录下的相对路径。Slurm.submit() 用它拼 sbatch 的 -o/-e。
+        #
+        # ⚠️ 这一行曾经【漏掉过】—— 配置项在 slurmate.conf 里写着，Slurm.submit()
+        #    里也读着，唯独 Config 从来没把它从配置里取出来。后果不是"日志路径
+        #    不对"，而是 `AttributeError`，被 dispatch 兜成 code 9 内部错误：
+        #    **每一次提交都失败**，而错误信息里看不出任何与"日志路径"有关的线索。
+        #    教训：配置项要在三处对齐 —— 示例配置、读取处、使用处。少一处就是
+        #    一个只在运行时才炸的洞。
+        self.job_log_subdir = s.get("job_log_subdir", ".slurmate/logs")
+
+        self.purposes = {}
+        for sec in cp.sections():
+            if sec.startswith("purpose:"):
+                key = sec.split(":", 1)[1]
+                self.purposes[key] = Purpose(
+                    key=key,
+                    label=cp.get(sec, "label", fallback=key),
+                    partition=cp.get(sec, "partition"),
+                    gres=cp.get(sec, "gres", fallback=""),
+                    cpus=cp.getint(sec, "cpus", fallback=1),
+                    mem=cp.get(sec, "mem", fallback="2G"),
+                )
+
+    def validate(self):
+        """启动时自检。任何一条不满足都拒绝启动 —— 宁可不起，也不要带病运行。"""
+        errors = []
+        # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
+        # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
+        # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
+        if self.port_start > self.port_end:
+            errors.append("端口区间起止颠倒: %d-%d" % (self.port_start, self.port_end))
+        for _a, _b in self.reserved_ranges:
+            if self.port_start <= _b and _a <= self.port_end:
+                errors.append("端口区间 %d-%d 与 reserved_ranges 里的 %d-%d 重叠"
+                              % (self.port_start, self.port_end, _a, _b))
+        if self.port_end > 65535:
+            errors.append("端口区间上界 %d 越界" % self.port_end)
+        # 阈值关系
+        if self.job_missing_confirm_ticks < 1:
+            errors.append("job_missing_confirm_ticks 必须 >= 1")
+        if self.suspect_after >= self.orphan_after:
+            errors.append("suspect_after(%d) 必须小于 orphan_after(%d)"
+                          % (self.suspect_after, self.orphan_after))
+        if not os.path.exists(self.job_script):
+            errors.append("作业脚本不存在: %s" % self.job_script)
+        if not is_ipv4(self.cluster_cidr.split("/")[0]):
+            errors.append("cluster_cidr 不是 IPv4 网段: %s" % self.cluster_cidr)
+        for want in (self.sbatch, self.scancel, self.scontrol):
+            if not os.path.exists(want):
+                errors.append("Slurm 命令不存在: %s" % want)
+        if not self.purposes:
+            errors.append("没有配置任何 [purpose:*]")
+        if self.auth_mode not in ("password", "none"):
+            errors.append("security.auth_mode 只能是 password 或 none，当前为 %r"
+                          % self.auth_mode)
+        if not (4 <= self.password_bytes <= 64):
+            errors.append("security.password_bytes 应在 4-64 之间，当前为 %d"
+                          % self.password_bytes)
+        return errors
+
+
+# ==============================================================================
+#  数据库
+# ==============================================================================
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id      TEXT PRIMARY KEY,
+    uid             INTEGER NOT NULL,
+    user            TEXT NOT NULL,
+    purpose         TEXT NOT NULL,
+    partition       TEXT NOT NULL,
+    account         TEXT NOT NULL,
+    cpus            INTEGER NOT NULL DEFAULT 1,
+    mem             TEXT NOT NULL DEFAULT '2G',
+    gres            TEXT,
+    requested_time  TEXT NOT NULL,
+    job_id          INTEGER,
+    state           TEXT NOT NULL,
+    node            TEXT,
+    node_ip         TEXT,
+    service_port    INTEGER,
+    candidates      TEXT NOT NULL,
+    auth_mode       TEXT NOT NULL DEFAULT 'password',
+    created_at      INTEGER NOT NULL,
+    submitted_at    INTEGER,
+    enrolled_at     INTEGER,
+    ended_at        INTEGER,
+    last_hb_socket  INTEGER,
+    file_inode      INTEGER,
+    file_ctime      INTEGER,
+    job_started_at  INTEGER,
+    renew_count     INTEGER NOT NULL DEFAULT 0,
+    renew_last_at   INTEGER,
+    trust           TEXT NOT NULL DEFAULT 'owned',
+    note            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+CREATE INDEX IF NOT EXISTS idx_sessions_job   ON sessions(job_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_uid   ON sessions(uid, state);
+-- 活跃期间 (node_ip, service_port) 唯一：防止两个会话抢同一个节点端口
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_port_active
+    ON sessions(node_ip, service_port)
+    WHERE service_port IS NOT NULL
+      AND state IN ('enrolled','suspect','orphaned','releasing');
+
+CREATE TABLE IF NOT EXISTS rejects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid        INTEGER NOT NULL,
+    at         INTEGER NOT NULL,
+    reason     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rejects_uid ON rejects(uid, at);
+"""
+
+
+class Store(object):
+    def __init__(self, path):
+        self.path = path
+        self.conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.executescript(SCHEMA_SQL)
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    # ── 查询 ────────────────────────────────────────────────────────────────
+    def get(self, session_id):
+        cur = self.conn.execute("SELECT * FROM sessions WHERE session_id=?",
+                                (session_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def by_state(self, states):
+        q = ",".join("?" * len(states))
+        cur = self.conn.execute(
+            "SELECT * FROM sessions WHERE state IN (%s) ORDER BY created_at" % q,
+            tuple(states))
+        return [dict(r) for r in cur.fetchall()]
+
+    def by_job(self, job_id):
+        cur = self.conn.execute("SELECT * FROM sessions WHERE job_id=?", (job_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def by_uid(self, uid, states=None):
+        if states:
+            q = ",".join("?" * len(states))
+            cur = self.conn.execute(
+                "SELECT * FROM sessions WHERE uid=? AND state IN (%s) "
+                "ORDER BY created_at" % q, (uid,) + tuple(states))
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM sessions WHERE uid=? ORDER BY created_at", (uid,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def active_ports(self):
+        """所有活跃会话占用的端口（候选集 ∪ 已选定），用于分配时避让。"""
+        used = set()
+        for s in self.by_state((ST_RESERVED, ST_SUBMITTED) + ACL_STATES):
+            for tok in (s.get("candidates") or "").split(","):
+                if tok.strip().isdigit():
+                    used.add(int(tok))
+            if s.get("service_port"):
+                used.add(int(s["service_port"]))
+        return used
+
+    def count_active(self, uid):
+        q = ",".join("?" * len(ACL_STATES))
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (%s)" % q,
+            (uid,) + ACL_STATES)
+        return cur.fetchone()[0]
+
+    def count_pending(self, uid):
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (?,?)",
+            (uid, ST_RESERVED, ST_SUBMITTED))
+        return cur.fetchone()[0]
+
+    # ── 写入 ────────────────────────────────────────────────────────────────
+    def insert(self, **kw):
+        cols = ",".join(kw.keys())
+        ph = ",".join("?" * len(kw))
+        self.conn.execute("INSERT INTO sessions (%s) VALUES (%s)" % (cols, ph),
+                          tuple(kw.values()))
+
+    def update(self, session_id, **kw):
+        if not kw:
+            return
+        sets = ",".join("%s=?" % k for k in kw)
+        self.conn.execute("UPDATE sessions SET %s WHERE session_id=?" % sets,
+                          tuple(kw.values()) + (session_id,))
+
+    def delete(self, session_id):
+        self.conn.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+
+    def record_reject(self, uid, reason):
+        self.conn.execute("INSERT INTO rejects (uid, at, reason) VALUES (?,?,?)",
+                          (uid, now_ts(), reason[:300]))
+        self.conn.execute("DELETE FROM rejects WHERE at < ?", (now_ts() - 86400,))
+
+    def reject_count_since(self, uid, since_ts):
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM rejects WHERE uid=? AND at > ?", (uid, since_ts))
+        return cur.fetchone()[0]
+
+
+# ==============================================================================
+#  nftables
+# ==============================================================================
+
+class Nft(object):
+    """维护 inet slurmate 表的 ACL。
+
+    规则形态（单条，而不是 guard 的 DROP+ACCEPT 对）：
+        ip daddr <节点IP> tcp dport <端口> ct state new \\
+            meta skuid != <属主UID> meta skuid != 0 drop comment "slurmate-sess-..."
+
+    为什么单条：
+      - 爆炸半径锁死在"该 UID 自己"—— guard 的无条件 drop 一旦误注册会打死该端口的
+        所有用户；
+      - 单次 nft 调用即原子，消灭"插了 DROP 没插 ACCEPT"的中间态；
+      - ct state new 只拦新连接，已建立的转发不会因规则抖动被掐断（这是"隧道重连
+        不中断"的物理保证）。
+    """
+
+    TABLE = "inet slurmate"
+    CHAIN = "output"
+    RE_SESS = re.compile(r'comment "(slurmate-sess-\d+-\d+-\d+)"\s*#\s*handle (\d+)')
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.bin = "/sbin/nft" if os.path.exists("/sbin/nft") else (
+            "/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else "nft")
+
+    def _nft(self, args, check=False, timeout=10):
+        return run_cmd([self.bin] + args, timeout=timeout, check=check)
+
+    def table_exists(self):
+        rc, _, _ = self._nft(["list", "table", "inet", "slurmate"])
+        return rc == 0
+
+    def ensure(self):
+        """建表建链建基础规则（幂等）。
+
+        注意：不能只判"表是否存在"就返回。如果有人只删了链（`nft delete chain
+        inet slurmate output`）而表还在，早期实现会直接返回 True，之后所有
+        `add rule ... inet slurmate output` 都失败 → session_rules() 返回 None
+        → reconcile() 每 tick 直接 return → 【后续所有清理阶段被跳过】：
+        新会话拿不到 ACL、孤儿规则永远不删，而进程看起来"健康"、不会重启。
+        故障静默且持续。所以这里逐项补齐：表、链、基础规则。
+        """
+        if not self.table_exists():
+            rc, _, err = self._nft(["add", "table", "inet", "slurmate"], check=True)
+            if rc != 0:
+                log.error("建表失败: %s", err.strip())
+                return False
+            log.info("已创建 nft 表 inet slurmate")
+
+        rc, _, _ = self._nft(["list", "chain", "inet", "slurmate", "output"])
+        if rc != 0:
+            self._nft(["add", "chain", "inet", "slurmate", "output",
+                       "{ type filter hook output priority filter; policy accept; }"],
+                      check=True)
+            log.warning("nft 链 inet slurmate output 缺失，已重建")
+
+        # 基础规则：只在缺失时补（按 comment 判断），避免每次 tick 重复添加。
+        # 用 insert 而不是 add —— add 会追加到链尾，也就是跑到已有会话规则【后面】。
+        # 虽然两者的匹配集基本不相交（会话规则只匹配集群网段内的具体 IP:端口），
+        # 但 `oif "lo" accept` 与"目标是本机 IP"的会话规则理论上会重叠，
+        # 保持"基础规则在前"能让语义始终确定。
+        rc, out, _ = self._nft(["list", "chain", "inet", "slurmate", "output"])
+        if rc == 0:
+            if "slurmate-base-lo" not in out:
+                self._nft(["insert", "rule", "inet", "slurmate", "output",
+                           "oif", "lo", "accept", "comment", "slurmate-base-lo"],
+                          check=True)
+                log.warning("补齐基础规则 slurmate-base-lo")
+            if "slurmate-base-offcluster" not in out:
+                # 最后一道几何约束：本网段之外的流量一律放行，
+                # 即使前面所有校验都被绕过，也影响不到集群之外
+                self._nft(["insert", "rule", "inet", "slurmate", "output",
+                           "ip", "daddr", "!=", self.cfg.cluster_cidr, "accept",
+                           "comment", "slurmate-base-offcluster"], check=True)
+                log.warning("补齐基础规则 slurmate-base-offcluster")
+        return True
+
+    def session_rules(self):
+        """返回 {comment: handle}"""
+        rc, out, _ = self._nft(["-a", "list", "chain", "inet", "slurmate", "output"])
+        if rc != 0:
+            return None                      # None = 读不到（表不存在或没权限）
+        rules = {}
+        for line in out.splitlines():
+            m = self.RE_SESS.search(line)
+            if m:
+                rules[m.group(1)] = int(m.group(2))
+        return rules
+
+    @staticmethod
+    def comment_for(uid, job_id, port):
+        return "slurmate-sess-%d-%d-%d" % (uid, job_id, port)
+
+    def add_session_rule(self, node_ip, port, uid, job_id):
+        if not is_ipv4(node_ip):
+            return False, "节点地址不是 IPv4: %r" % node_ip
+        comment = self.comment_for(uid, job_id, port)
+        # 幂等：先删同名（防重复）
+        self.del_by_comment(comment)
+        rc, _, err = self._nft([
+            "add", "rule", "inet", "slurmate", "output",
+            "ip", "daddr", node_ip, "tcp", "dport", str(port), "ct", "state", "new",
+            "meta", "skuid", "!=", str(uid),
+            "meta", "skuid", "!=", "0",
+            "drop", "comment", comment,
+        ], check=True)
+        if rc != 0:
+            return False, err.strip()[:200]
+        return True, comment
+
+    def del_by_comment(self, comment):
+        rc, out, _ = self._nft(["-a", "list", "chain", "inet", "slurmate", "output"])
+        if rc != 0:
+            return False
+        handles = []
+        for line in out.splitlines():
+            m = self.RE_SESS.search(line)
+            if m and m.group(1) == comment:
+                handles.append(int(m.group(2)))
+        for h in sorted(handles, reverse=True):
+            self._nft(["delete", "rule", "inet", "slurmate", "output", "handle", str(h)])
+        return True
+
+    def delete_table(self):
+        """整表删除。仅用于人工排障，正常运行路径【绝不】调用 ——
+        卸载由 deploy-slurmate-session.sh --uninstall 负责，
+        且卸载前会先确认服务已停止（否则本进程下一个 tick 就把表重建回来）。"""
+        self._nft(["delete", "table", "inet", "slurmate"])
+
+
+# ==============================================================================
+#  Slurm
+# ==============================================================================
+
+class Slurm(object):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._acct_cache = {}      # uid -> (ts, account)
+        self._part_cache = {}      # uid -> (ts, set(partitions) or None)
+
+    def show_job(self, job_id):
+        """返回 dict 或 None。**仅用于展示**，不要用它做生命周期判定。
+
+        做生命周期判定请用 job_state() —— 它区分"作业不存在"和"根本问不到"。
+        """
+        status, info = self.job_state(job_id)
+        return info if status == "ok" else None
+
+    # job_state 的三种结果
+    JOB_OK = "ok"            # 查到了（info 可能为空 dict，表示拿不到详情）
+    JOB_MISSING = "missing"  # 已确认不存在
+    JOB_UNKNOWN = "unknown"  # 【问不到】—— 联系不上控制器
+
+    def job_state(self, job_id):
+        """返回 (status, info)。
+
+        ⚠️ 为什么必须区分 JOB_MISSING 与 JOB_UNKNOWN：
+        早期实现把两者合并成 None，于是 scontrol 的**一次抖动**（slurmctld 重启、
+        munge 重启、控制器繁忙）就会让所有活跃会话在同一个 tick 内被判成
+        "作业已结束"→ phase_release 删掉 nft 规则 + 删掉用户家目录里的会话文件，
+        而作业还在跑。
+        这是最危险的一类误判：静默、批量、且不可恢复（会话文件被删后无法重新登记，
+        防护消失而 code-server 仍在监听端口，直到 TimeLimit 到期）。
+        运维重启 slurmctld 是例行动作，所以这条路径必须保守。
+
+        `scontrol show job <不存在的 id>` 通常返回非零并打印 "Invalid job id
+        specified"；而联系不上控制器时【同样】是非零返回码。两者无法用返回码
+        区分，所以这里靠的是【控制器本身是否可达】（scontrol ping），不是返回码。
+
+        注意：某些 Slurm 版本对不存在的作业返回 rc=0 且输出为空。所以判据是
+        "rc==0 且输出非空"，不是只看 rc。
+        """
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "job", str(job_id), "-o"],
+                             timeout=8)
+        if rc == 0 and out.strip():
+            d = {}
+            for key in ("JobState", "NodeList", "UserId", "TimeLimit", "EndTime",
+                        "StartTime", "Partition", "Account", "JobName", "RestartCnt"):
+                m = re.search(r"\b%s=(\S+)" % key, out)
+                if m:
+                    d[key] = m.group(1)
+            return self.JOB_OK, d
+
+        # 到这里：命令失败，或返回了空输出 —— 这次没拿到作业信息。
+        # 必须分清"作业确实不存在"和"我们根本问不到"。
+        rc0, out0, _ = run_cmd([self.cfg.scontrol, "ping"], timeout=5)
+        if rc0 != 0 or "UP" not in out0.upper():
+            return self.JOB_UNKNOWN, None
+        # 控制器可达，却查不到这个作业 → 它确实结束了
+        # （正常结束/被取消/记录已被 MinJobAge=300 清理）。
+        # 再用 squeue 兜一道，覆盖"记录异常但仍在队列"的极端情况。
+        rc2, out2, _ = run_cmd([self.cfg.squeue, "-h", "-j", str(job_id),
+                                "-o", "%i"], timeout=8)
+        if rc2 == 0 and out2.strip():
+            return self.JOB_OK, {}          # 还在队列里，但拿不到详情
+        return self.JOB_MISSING, None
+
+    def expand_node(self, nodelist):
+        if not nodelist:
+            return None
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "hostname", nodelist],
+                             timeout=8)
+        if rc != 0 or not out.strip():
+            return nodelist.split(",")[0]
+        return out.split()[0]
+
+    def node_ip(self, node):
+        """节点 IPv4。以 Slurm 的 NodeAddr 为权威，【不要】用 DNS / getent 解析。
+
+        Debian/Ubuntu 系默认的 /etc/hosts 里有一条 `127.0.1.1 <本机主机名>`，
+        于是计算节点上 `getent hosts <自己的节点名>` 会返回回环地址而不是真实
+        的集群地址 —— 拿它去写 nft 的 ip daddr，规则会指向一个永远不成立的
+        目标，ACL 静默失效（策略是 accept，没有任何人会发现问题）。"""
+        if not node:
+            return None
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "node", node], timeout=8)
+        if rc == 0:
+            m = re.search(r"\bNodeAddr=(\S+)", out)
+            if m and is_ipv4(m.group(1)):
+                return m.group(1)
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "hostname", node], timeout=8)
+        if rc == 0:
+            cand = out.split()[0] if out.split() else ""
+            if is_ipv4(cand):
+                return cand
+        return None
+
+    def partitions(self):
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "partition", "-o"], timeout=8)
+        if rc != 0:
+            return []
+        return re.findall(r"PartitionName=(\S+)", out)
+
+    def is_accounting_enforced(self):
+        """AccountingStorageEnforce 里是否含 associations —— 决定 sbatch 必须带 -A。"""
+        rc, out, _ = run_cmd([self.cfg.scontrol, "show", "config"], timeout=8)
+        if rc != 0:
+            return False
+        for line in out.splitlines():
+            if line.strip().startswith("AccountingStorageEnforce"):
+                return "associations" in line
+        return False
+
+    def account_for(self, user, ttl=300):
+        """用户的 sbatch 账户。AccountingStorageEnforce 含 associations 时【必须】带。
+
+        返回 (account, None) 或 (None, 错误说明)。
+        """
+        key = user
+        hit = self._acct_cache.get(key)
+        if hit and now_ts() - hit[0] < ttl:
+            return hit[1], None
+        rc, out, err = run_cmd(
+            [self.cfg.sacctmgr, "-n", "-P", "show", "assoc", "user=%s" % user,
+             "format=Account"], timeout=10)
+        acct = None
+        if rc == 0:
+            for line in out.splitlines():
+                a = line.strip()
+                if a:
+                    acct = a
+                    break
+        if not acct:
+            return None, ("你的账号尚未分配集群计算账户（association），无法提交作业。"
+                          "请联系管理员。")
+        self._acct_cache[key] = (now_ts(), acct)
+        return acct, None
+
+    def allowed_partitions(self, user, ttl=300):
+        """用户 association 允许的分区集合。
+
+        None      = 【已确认】不限制
+        PARTITIONS_UNKNOWN = 查询失败，无法确定（调用方必须按最保守方式处理）
+
+        早期实现在 rc!=0 时 allowed 为空集，于是 `not allowed` 为真 → 返回 None，
+        把"查不到"当成了"不限制"。一个被注释描述为"二次校验"的函数在这里是
+        fail-open。
+
+        注意：Slurm 分区名【大小写敏感】，而 association 里的 Partition 字段
+        由管理员手工填写，实践中经常出现大小写与实际分区名不一致的情况
+        （例如 association 写了 2080ti，而 --partition 必须是 2080TI）。
+        这里统一按小写比较，避免把【有权限的用户误判成没权限】。
+
+        ⚠️ 这不是冗余防御，不要因为"看着多余"而删掉它 —— 删掉之后，那些
+        association 大小写写错的用户会表现为"所有用途都不可用"，而且
+        守护进程侧不会报任何错（只会拒绝提交），极难排查。
+        """
+        hit = self._part_cache.get(user)
+        if hit and now_ts() - hit[0] < ttl:
+            return hit[1]
+        rc, out = 1, ""
+        for _attempt in (1, 2):                  # 失败重试一次，扛瞬时抖动
+            rc, out, _ = run_cmd(
+                [self.cfg.sacctmgr, "-n", "-P", "show", "assoc", "user=%s" % user,
+                 "format=Account,Partition"], timeout=10)
+            if rc == 0:
+                break
+        if rc != 0:
+            log.warning("查询 %s 的分区权限失败（sacctmgr rc=%s），本次按未知处理", user, rc)
+            return PARTITIONS_UNKNOWN          # 不缓存，下次重查
+        allowed = set()
+        unrestricted = False
+        for line in out.splitlines():
+            parts = line.split("|")
+            p = parts[1].strip() if len(parts) > 1 else ""
+            if p:
+                allowed.add(p.lower())
+            else:
+                unrestricted = True
+        result = None if (unrestricted or not allowed) else allowed
+        self._part_cache[user] = (now_ts(), result)
+        return result
+
+    def submit(self, sess, env, home, uid, user):
+        """以目标用户身份提交作业。返回 (job_id, None) 或 (None, 错误)。
+
+        身份切换用 Popen(user=/group=/extra_groups=)（Python 3.9+），
+        不走 shell、不做字符串拼接 —— 参数全部是 argv 元素。
+        """
+        s = self.cfg
+        # 作业的 stdout/stderr 写到哪里。
+        # 优先 ~/.slurmate/logs/（作业脚本会在启动早期创建它；实测本集群的 Slurm
+        # 也会自动创建 -o 的父目录）。但"Slurm 自动建目录"是版本相关行为，万一
+        # 哪天不成立，作业会在启动阶段静默失败、用户干等 —— 那是最难排查的故障。
+        # 所以这里退一步：目录不存在时就把输出放到家目录根下（家目录一定存在）。
+        logdir = os.path.join(home, s.job_log_subdir)
+        if os.path.isdir(logdir):
+            outpat = os.path.join(logdir, "slurm-%j.out")
+        else:
+            outpat = os.path.join(home, "slurm-%j.out")
+
+        argv = [s.sbatch, "--parsable",
+                "--job-name=slurmate-%s" % sess["purpose"],
+                "-p", sess["partition"],
+                "-A", sess["account"],
+                "-c", str(sess["cpus"]),
+                "--mem=%s" % sess["mem"],
+                "--time=%s" % sess["requested_time"],
+                "-o", outpat, "-e", outpat]
+        if sess.get("gres"):
+            argv.append("--gres=%s" % sess["gres"])
+        # 注意：不写 -w。节点由 Slurm 在分区内自动选择 —— 这既是需求
+        # （按用途选、自动分配），也避免所有用户都写死同一个节点名、
+        # 造成"一台排队到天荒地老、同分区另一台空着"的经典局面。
+        exports = ["ALL"]
+        for k, v in env.items():
+            exports.append("%s=%s" % (k, v))
+        argv.append("--export=%s" % ",".join(exports))
+        argv.append(s.job_script)
+
+        pw = pwd.getpwnam(user)
+        try:
+            groups = os.getgrouplist(user, pw.pw_gid)
+        except Exception:                                    # noqa: BLE001
+            groups = [pw.pw_gid]
+        try:
+            p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=30, cwd=home, user=uid, group=pw.pw_gid,
+                               extra_groups=groups,
+                               env={"PATH": "/usr/local/bin:/usr/bin:/bin",
+                                    "HOME": home, "USER": user, "LOGNAME": user,
+                                    "LANG": "C.UTF-8"})
+        except Exception as e:                               # noqa: BLE001
+            return None, "提交失败: %s" % e
+        out = p.stdout.decode("utf-8", "replace").strip()
+        err = p.stderr.decode("utf-8", "replace").strip()
+        if p.returncode != 0:
+            return None, "sbatch 失败: %s" % (err[:300] or out[:300])
+        m = re.match(r"^(\d+)", out)
+        if not m:
+            return None, "无法解析 sbatch 输出: %r" % out[:200]
+        return int(m.group(1)), None
+
+    def cancel(self, job_id, reason=""):
+        rc, _, err = run_cmd([self.cfg.scancel, str(job_id)], timeout=15)
+        if rc != 0:
+            log.warning("scancel %s 失败: %s", job_id, err.strip()[:200])
+            return False
+        return True
+
+    def renew(self, job_id, increment):
+        """续期。注意：只有 root/Slurm 管理员能增加 TimeLimit，普通用户不行 ——
+        这就是为什么续期必须是守护进程的职责。
+
+        scontrol 要求 JobId 写在 TimeLimit 之前，否则报错。
+        """
+        rc, _, err = run_cmd(
+            [self.cfg.scontrol, "update", "JobId=%d" % job_id,
+             "TimeLimit=+%s" % increment], timeout=10)
+        if rc != 0:
+            return False, err.strip()[:200]
+        return True, ""
+
+
+def parse_iso_ts(s):
+    """Slurm 的 EndTime/StartTime 形如 2026-09-14T10:41:41；可能是 N/A 或 Unknown。"""
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return int(time.mktime(time.strptime(s, fmt)))
+        except ValueError:
+            continue
+    return None
+
+
+# ==============================================================================
+#  会话守护进程
+# ==============================================================================
+
+class Sessiond(object):
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.store = Store(cfg.db_path)
+        self.nft = Nft(cfg)
+        self.slurm = Slurm(cfg)
+        self.selector = selectors.DefaultSelector()
+        self.listener = None
+        self.audit_fp = None
+        self.port_cursor = cfg.port_start
+        self.rpc_hits = {}          # uid -> [ts, ...]
+        self.throttled = {}         # uid -> until_ts
+        # 作业状态查询的连续计数（见 phase_running 里的说明）
+        self.job_missing = {}       # session_id -> 连续"查不到"次数
+        self.job_unknown = {}       # session_id -> 连续"查不了"次数
+        self.startup_at = now_ts()
+        # 启动静默期：这段时间内不做任何超时判定，避免重启窗口把在跑的会话误判成孤儿
+        self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
+        self.running = True
+        self._reconcile_warned = False
+
+    # ── 审计 ────────────────────────────────────────────────────────────────
+    def audit(self, event, **kw):
+        rec = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event}
+        rec.update(kw)
+        line = json.dumps(rec, ensure_ascii=False)
+        log.info("AUDIT %s", line)
+        if self.audit_fp:
+            try:
+                self.audit_fp.write(line + "\n")
+                self.audit_fp.flush()
+            except Exception:                                # noqa: BLE001
+                pass
+
+    # ── 启动 ────────────────────────────────────────────────────────────────
+    def start(self):
+        for d in (self.cfg.state_dir, self.cfg.rejected_dir, self.cfg.log_dir):
+            os.makedirs(d, exist_ok=True)
+        os.chmod(self.cfg.state_dir, 0o700)
+        try:
+            self.audit_fp = open(self.cfg.audit_log, "a", encoding="utf-8")
+            os.chmod(self.cfg.audit_log, 0o640)
+        except Exception as e:                               # noqa: BLE001
+            log.warning("无法打开审计日志 %s: %s", self.cfg.audit_log, e)
+
+        self.nft.ensure()
+        # DB 可能丢过 —— 先从既有规则反向恢复，再让对账去收敛。
+        # 顺序很重要：先恢复再对账，否则对账会把它们当孤儿删掉。
+        try:
+            n = self.recover_from_rules()
+            if n:
+                log.warning("已从 nft 规则恢复 %d 个会话（DB 曾丢失？）", n)
+        except Exception:                                    # noqa: BLE001
+            log.exception("从规则恢复会话时异常（继续启动，对账会收敛）")
+        self.setup_socket()
+        self.audit("daemon_start", version=VERSION, pid=os.getpid(),
+                   port_range=[self.cfg.port_start, self.cfg.port_end])
+        log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds)",
+                 VERSION, os.getpid(), self.cfg.port_start, self.cfg.port_end,
+                 self.cfg.tick_seconds)
+
+    def setup_socket(self):
+        path = self.cfg.socket_path
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        if os.path.exists(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(path)
+        # 0666：安全性【不】建立在这个权限位上，而是靠 accept 后的 SO_PEERCRED。
+        os.chmod(path, 0o666)
+        self.listener.listen(64)
+        self.listener.setblocking(False)
+        self.selector.register(self.listener, selectors.EVENT_READ)
+
+    # ── 主循环 ──────────────────────────────────────────────────────────────
+    def run(self):
+        signal.signal(signal.SIGTERM, self._on_signal)
+        signal.signal(signal.SIGINT, self._on_signal)
+        signal.signal(signal.SIGHUP, self._on_signal)
+        while self.running:
+            try:
+                self.tick()
+            except Exception:                                # noqa: BLE001
+                log.exception("tick 异常（已捕获，守护进程继续）")
+            # 用 select 等待，既能及时响应 socket，又保持 tick 周期
+            try:
+                events = self.selector.select(timeout=self.cfg.tick_seconds)
+            except InterruptedError:
+                continue
+            for key, _ in events:
+                if key.fileobj is self.listener:
+                    self.accept_one()
+
+    def _on_signal(self, signum, _frame):
+        log.info("收到信号 %d，准备退出", signum)
+        self.running = False
+
+    def shutdown(self):
+        self.audit("daemon_stop")
+        try:
+            if self.audit_fp:
+                self.audit_fp.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+        # 注意：退出时【不】删 nft 规则。规则代表的是作业的存在，
+        # 而作业是 Slurm 管的、不随本进程生死。重启后靠对账收敛。
+        try:
+            if self.listener:
+                self.listener.close()
+            if os.path.exists(self.cfg.socket_path):
+                os.unlink(self.cfg.socket_path)
+        except OSError:
+            pass
+        self.store.close()
+        log.info("已退出")
+
+    # ── tick 各阶段 ─────────────────────────────────────────────────────────
+    def tick(self):
+        if not self.reconcile():
+            return                       # 表都拿不到，后面的都不必做
+        self.phase_pending()
+        self.phase_running()
+        self.phase_heartbeat()
+        self.phase_release()
+        self.phase_gc()
+
+    def reconcile(self):
+        """自愈 + 对账：nft 规则集合 与 DB 中应有的 ACL 集合必须一致。
+
+        这是防"nftables 被 reload/flush 后 ACL 静默消失"的关键 ——
+        链的 policy 是 accept，规则没了不会报错，只会悄悄失去保护。
+        """
+        if not self.nft.ensure():
+            return False
+        rules = self.nft.session_rules()
+        if rules is None:
+            if not self._reconcile_warned:
+                log.error("无法读取 inet slurmate 的规则，本 tick 跳过对账")
+                self._reconcile_warned = True
+            return False
+        self._reconcile_warned = False
+
+        expected = {}
+        for s in self.store.by_state(ACL_STATES):
+            if s.get("node_ip") and s.get("service_port"):
+                expected[self.nft.comment_for(s["uid"], s["job_id"],
+                                              s["service_port"])] = s
+
+        # 多余的规则 → 删（fail-secure：宁可少放行）
+        for comment in set(rules) - set(expected):
+            log.warning("删除孤儿规则 %s", comment)
+            self.nft.del_by_comment(comment)
+            self.audit("acl_orphan_removed", comment=comment)
+
+        # 缺失的规则 → 补
+        for comment, s in expected.items():
+            if comment not in rules:
+                log.warning("补齐缺失规则 %s", comment)
+                ok, detail = self.nft.add_session_rule(s["node_ip"], s["service_port"],
+                                                       s["uid"], s["job_id"])
+                self.audit("acl_reinstalled" if ok else "acl_reinstall_failed",
+                           comment=comment, detail=detail)
+        return True
+
+    def recover_from_rules(self):
+        """从 nft 规则的 comment 反向重建 claim —— DB 丢失时的兜底。
+
+        comment 编码了 (uid, job_id, port)，配合 Slurm 就能确认作业是否还在跑。
+        重建的行标 trust='recovered'，【永不参与自动 scancel】—— 因为我们对
+        "用户是否还连着"没有可靠信息，误杀在跑的作业比多留一会儿更糟。
+
+        不实现这一步的后果：DB 一丢，reconcile() 会把所有规则当成孤儿删掉 ——
+        在跑的会话瞬间失去防护，而且因为 DB 里没有 job_id 归属，它们永远
+        无法重新登记（会话文件即使还在也没用）。
+        """
+        rules = self.nft.session_rules()
+        if not rules:
+            return 0
+        known = set()
+        for s in self.store.by_state((ST_RESERVED, ST_SUBMITTED) + ACL_STATES):
+            if s.get("job_id") and s.get("service_port"):
+                known.add(self.nft.comment_for(s["uid"], s["job_id"],
+                                               s["service_port"]))
+        recovered = 0
+        for comment in rules:
+            if comment in known:
+                continue
+            m = re.match(r"^slurmate-sess-(\d+)-(\d+)-(\d+)$", comment)
+            if not m:
+                continue
+            uid, job_id, port = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if self.store.by_job(job_id):
+                continue                      # 已有记录，交给正常对账
+            status, job = self.slurm.job_state(job_id)
+            if status != self.slurm.JOB_OK or not job:
+                continue                      # 查不到 —— 留给对账去删
+            if job.get("JobState") != "RUNNING":
+                continue
+            try:
+                if int(job.get("UserId", -1)) != uid:
+                    log.warning("规则 %s 的 uid 与作业属主不符，不予恢复", comment)
+                    continue
+            except (TypeError, ValueError):
+                continue
+            try:
+                user = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                continue
+            node = self.slurm.expand_node(job.get("NodeList"))
+            node_ip = self.slurm.node_ip(node) if node else None
+            if not node_ip:
+                continue
+            now = now_ts()
+            self.store.insert(
+                session_id=os.urandom(8).hex(), uid=uid, user=user,
+                purpose="recovered", partition=job.get("Partition", "?"),
+                account=job.get("Account", "?"), cpus=0, mem="0",
+                requested_time=job.get("TimeLimit", "?"), job_id=job_id,
+                state=ST_ENROLLED, node=node, node_ip=node_ip,
+                service_port=port, candidates=str(port),
+                auth_mode="password", created_at=now, enrolled_at=now,
+                submitted_at=now, trust="recovered", note="recovered_from_rule")
+            recovered += 1
+            log.warning("从 nft 规则恢复会话：uid=%d job=%s -> %s:%d（trust=recovered，"
+                        "不会自动 scancel）", uid, job_id, node_ip, port)
+            self.audit("recovered", uid=uid, job=job_id, node=node,
+                       node_ip=node_ip, port=port, comment=comment)
+        return recovered
+
+    def phase_pending(self):
+        """回收卡在 reserved 的会话（提交失败/进程崩溃留下的悬挂）。"""
+        now = now_ts()
+        for s in self.store.by_state((ST_RESERVED,)):
+            if now - s["created_at"] > self.cfg.reserved_ttl:
+                log.warning("会话 %s 长时间停留在 reserved，回收", s["session_id"])
+                self.store.update(s["session_id"], state=ST_EXPIRED, ended_at=now,
+                                  note="reserved_ttl")
+                self.audit("expired", session=s["session_id"], reason="reserved_ttl")
+
+    def phase_running(self):
+        now = now_ts()
+        states = (ST_SUBMITTED, ST_ENROLLED, ST_SUSPECT, ST_ORPHANED)
+        for s in self.store.by_state(states):
+            if not s.get("job_id"):
+                continue
+            status, job = self.slurm.job_state(s["job_id"])
+
+            # 查不了 → 什么都不做。绝不能因为一次命令失败就拆掉在跑的会话。
+            if status == self.slurm.JOB_UNKNOWN:
+                n = self.job_unknown.get(s["session_id"], 0) + 1
+                self.job_unknown[s["session_id"]] = n
+                if n == 1 or n % 30 == 0:
+                    log.warning("会话 %s（job=%s）状态查询失败已连续 %d 次，"
+                                "保守起见不做任何处理", s["session_id"], s["job_id"], n)
+                    self.audit("job_query_failed", session=s["session_id"],
+                               job=s["job_id"], consecutive=n)
+                continue
+            self.job_unknown.pop(s["session_id"], None)
+
+            # 确认不存在 → 还要连续确认若干 tick，避免把"瞬时不可见"当成结束
+            if status == self.slurm.JOB_MISSING:
+                n = self.job_missing.get(s["session_id"], 0) + 1
+                self.job_missing[s["session_id"]] = n
+                if n < self.cfg.job_missing_confirm_ticks:
+                    log.warning("会话 %s（job=%s）连续 %d 次查不到，"
+                                "未达确认阈值 %d，暂不释放",
+                                s["session_id"], s["job_id"], n,
+                                self.cfg.job_missing_confirm_ticks)
+                    continue
+                self.job_missing.pop(s["session_id"], None)
+                self.begin_release(s, "job_gone")
+                continue
+            self.job_missing.pop(s["session_id"], None)
+
+            jstate = job.get("JobState") if job else None
+            if not jstate:
+                continue                      # 拿不到状态，保守跳过
+            if jstate in ("PENDING", "CONFIGURING"):
+                continue                      # 还没跑起来，保留（重排队不释放）
+            if jstate != "RUNNING":
+                self.begin_release(s, "job_%s" % jstate.lower())
+                continue
+
+            if s["state"] == ST_SUBMITTED:
+                self.try_enroll(s, job)
+            else:
+                self.refresh_enrollment(s, job)
+                self.maybe_renew(s, job)
+
+    def try_enroll(self, s, job):
+        now = now_ts()
+        info, why = self.load_session_file(s["uid"], s["job_id"])
+        if info is None:
+            if now - (s["submitted_at"] or s["created_at"]) > self.cfg.submitted_ttl:
+                log.warning("会话 %s 迟迟未登记（%s），回收并取消作业", s["session_id"], why)
+                # 必须 scancel：否则作业会白占节点直到 TimeLimit，而且 EXPIRED
+                # 不在 phase_running 的扫描集合里，再也没人回收它。
+                if s.get("job_id"):
+                    self.slurm.cancel(s["job_id"], "enroll_timeout")
+                self.store.update(s["session_id"], state=ST_EXPIRED, ended_at=now,
+                                  note="enroll_timeout:%s" % why)
+                self.audit("expired", session=s["session_id"], reason="enroll_timeout",
+                           job=s.get("job_id"), detail=why)
+            return
+
+        ok, why = self.validate_session(s, info, job)
+        if not ok:
+            self.reject(s, why, info)
+            return
+
+        node_ip = info["node_ip"]
+        port = int(info["service_port"])
+        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"], s["job_id"])
+        if not ok:
+            log.error("会话 %s 装 ACL 失败: %s（下个 tick 重试）", s["session_id"], detail)
+            return
+
+        self.store.update(
+            s["session_id"], state=ST_ENROLLED, node=info.get("node"),
+            node_ip=node_ip, service_port=port, enrolled_at=now,
+            file_inode=info.get("_inode"), file_ctime=info.get("_ctime"),
+            job_started_at=info.get("job_started_at"),
+            auth_mode=info.get("auth_mode", "password"),
+            last_hb_socket=s["last_hb_socket"] or now, note=None)
+        self.audit("enrolled", session=s["session_id"], uid=s["uid"],
+                   job=s["job_id"], node=info.get("node"), node_ip=node_ip,
+                   port=port, rule=detail)
+        log.info("会话登记: %s (uid=%d job=%s) → %s:%d",
+                 s["session_id"], s["uid"], s["job_id"], node_ip, port)
+
+    def refresh_enrollment(self, s, job):
+        """已登记的会话：作业重启/重排后可能换节点或端口，要跟着更新 ACL。"""
+        info, why = self.load_session_file(s["uid"], s["job_id"])
+        if info is None:
+            # 文件不见了但作业还在 —— 可能是 NFS 抖动或作业正在重启。
+            # 绝不因此拆规则（那样会打断正在用的隧道）。
+            log.warning("会话 %s 的会话文件暂时读不到（%s），保留 ACL", s["session_id"], why)
+            return
+        ok, why = self.validate_session(s, info, job, for_refresh=True)
+        if not ok:
+            log.warning("会话 %s 刷新校验失败: %s", s["session_id"], why)
+            return
+        node_ip = info["node_ip"]
+        port = int(info["service_port"])
+        if node_ip == s["node_ip"] and port == s["service_port"]:
+            return
+        log.warning("会话 %s 目标变更 %s:%s → %s:%d，重装 ACL", s["session_id"],
+                    s["node_ip"], s["service_port"], node_ip, port)
+        self.nft.del_by_comment(self.nft.comment_for(s["uid"], s["job_id"],
+                                                     s["service_port"]))
+        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"], s["job_id"])
+        if ok:
+            self.store.update(s["session_id"], node=info.get("node"), node_ip=node_ip,
+                              service_port=port, file_inode=info.get("_inode"),
+                              file_ctime=info.get("_ctime"), note=None)
+            self.audit("reenrolled", session=s["session_id"], node_ip=node_ip,
+                       port=port, rule=detail)
+
+    def maybe_renew(self, s, job):
+        cfg = self.cfg
+        if not cfg.renew_enabled or s["trust"] != "owned":
+            return
+        if s["state"] != ST_ENROLLED:
+            return                     # 只给心跳新鲜的会话续命
+        now = now_ts()
+        # 冷却：失败时不要每 tick 重试刷屏
+        if s["renew_last_at"] and now - s["renew_last_at"] < 300:
+            return
+        tl = job.get("TimeLimit")
+        if tl and tl.strip().lower() in _INF_TOKENS:
+            return                     # UNLIMITED 不能做增量续期
+        end_ts = parse_iso_ts(job.get("EndTime"))
+        if end_ts is None:
+            return
+        if end_ts - now > cfg.renew_threshold:
+            return
+        if now - s["created_at"] > cfg.renew_max_total:
+            if s["note"] != "renew_exhausted":
+                log.info("会话 %s 已达续期总量上限，不再续期", s["session_id"])
+                self.store.update(s["session_id"], note="renew_exhausted")
+                self.audit("renew_exhausted", session=s["session_id"],
+                           job=s["job_id"], total=cfg.renew_max_total)
+            return
+        ok, err = self.slurm.renew(s["job_id"], cfg.renew_increment)
+        self.store.update(s["session_id"], renew_last_at=now,
+                          renew_count=(s["renew_count"] or 0) + (1 if ok else 0))
+        if ok:
+            self.audit("renewed", session=s["session_id"], job=s["job_id"],
+                       before=tl, increment=cfg.renew_increment)
+            log.info("已续期 job=%s (%s +%s)", s["job_id"], tl, cfg.renew_increment)
+        else:
+            self.audit("renew_failed", session=s["session_id"], job=s["job_id"],
+                       detail=err)
+            log.warning("续期 job=%s 失败: %s", s["job_id"], err)
+
+    def phase_heartbeat(self):
+        """两阈值判活。
+            miss <  suspect_after : 正常
+            miss >= suspect_after : 网络闪断 —— 【什么都不做】，作业与 ACL 都保留
+            miss >= orphan_after  : 异常退出 —— 自动 scancel 释放
+        """
+        now = now_ts()
+        if now < self.hb_grace_until:
+            return                                # 启动静默期
+        for s in self.store.by_state((ST_ENROLLED, ST_SUSPECT)):
+            hb = s["last_hb_socket"] or s["enrolled_at"] or s["created_at"]
+            miss = now - hb
+            if s["state"] == ST_ENROLLED and miss >= self.cfg.suspect_after:
+                self.store.update(s["session_id"], state=ST_SUSPECT)
+                self.audit("suspect", session=s["session_id"], miss_seconds=miss)
+                log.info("会话 %s 心跳中断 %ds，判定为网络闪断，保留作业与 ACL",
+                         s["session_id"], miss)
+            elif s["state"] == ST_SUSPECT and miss >= self.cfg.orphan_after:
+                if s["trust"] == "recovered":
+                    log.warning("会话 %s 是恢复态记录，不自动 scancel", s["session_id"])
+                    continue
+                log.warning("会话 %s 心跳中断 %ds，判定为异常退出，释放资源",
+                            s["session_id"], miss)
+                self.audit("orphaned", session=s["session_id"], uid=s["uid"],
+                           job=s["job_id"], miss_seconds=miss)
+                self.slurm.cancel(s["job_id"], "orphaned")
+                self.store.update(s["session_id"], state=ST_ORPHANED)
+                self.begin_release(s, "orphaned")
+
+    def begin_release(self, s, reason):
+        self.store.update(s["session_id"], state=ST_RELEASING, note=reason)
+        self.audit("releasing", session=s["session_id"], job=s["job_id"], reason=reason)
+
+    def phase_release(self):
+        """拆除：删 ACL → 删口令文件 → 尽力删会话文件 → 置 released。
+
+        released 之前规则一定在，之后规则一定不在。
+        """
+        now = now_ts()
+        for s in self.store.by_state((ST_RELEASING,)):
+            # 1) 删掉该会话可能存在的【所有】规则（端口可能变过，按前缀删更稳妥）
+            prefix = "slurmate-sess-%d-%s-" % (s["uid"], s["job_id"])
+            rules = self.nft.session_rules() or {}
+            for comment in list(rules):
+                if comment.startswith(prefix):
+                    self.nft.del_by_comment(comment)
+                    self.audit("acl_removed", session=s["session_id"], comment=comment)
+            # 2) 口令文件
+            # 3) 会话文件（只在能被安全确认属于该用户时才删）
+            self.remove_session_file(s)
+            self.store.update(s["session_id"], state=ST_RELEASED, ended_at=now)
+            self.audit("released", session=s["session_id"], job=s["job_id"],
+                       reason=s.get("note"))
+
+    def phase_gc(self):
+        now = now_ts()
+        for s in self.store.by_state(TERMINAL_STATES):
+            ref = s["ended_at"] or s["created_at"]
+            if now - ref > self.cfg.released_keep:
+                self.store.delete(s["session_id"])
+
+    # ── 会话文件读取（安全关键）─────────────────────────────────────────────
+    def user_home(self, uid):
+        """家目录必须从 getpwnam 取，【绝不能】拼 家目录前缀 + 用户名。
+
+        两个独立的理由，任一成立都足以否掉拼字符串：
+          1. 用户名与目录名不保证一致 —— 目录名可能是用户名加大小写变体
+             （例如用户 carol 的家目录是 /shared/home/Carol）。
+          2. 家目录前缀本身就是按站点配置的，不同集群不一样。
+
+        直接查 NSS 拿 pw_dir，这两类问题从构造上就不存在。
+        """
+        try:
+            return pwd.getpwuid(uid).pw_dir
+        except KeyError:
+            return None
+
+    def load_session_file(self, uid, job_id):
+        """返回 (info, None) 或 (None, 原因)。每一项检查都对应一个具体攻击。"""
+        home = self.user_home(uid)
+        if not home:
+            return None, "uid_unknown"
+        base = os.path.join(home, ".slurmate", "sessions")
+        path = os.path.join(base, "job-%d.json" % job_id)
+
+        # 逐级 lstat 目录链：非符号链接、属主是本人或 root、组/其他不可写
+        for d in (home, os.path.join(home, ".slurmate"), base):
+            try:
+                st = os.lstat(d)
+            except OSError:
+                return None, "missing_component"
+            if not stat.S_ISDIR(st.st_mode):
+                return None, "component_not_dir"
+            if st.st_uid not in (uid, 0):
+                return None, "component_bad_owner"
+            if st.st_mode & 0o022:
+                return None, "component_group_or_world_writable"
+
+        # O_NONBLOCK 防 FIFO 挂死；O_NOFOLLOW 防符号链接；用 fstat 而非 stat 防 TOCTOU
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.EAGAIN):
+                return None, "not_yet"
+            return None, "open_failed:%s" % e.errno
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None, "not_regular"
+            if st.st_uid != uid:
+                return None, "uid_mismatch"
+            if st.st_mode & 0o077:
+                return None, "mode_too_open"
+            if st.st_size > 65536:
+                return None, "too_large"
+            if st.st_nlink != 1:
+                return None, "hardlinked"
+            raw = b""
+            while len(raw) < st.st_size:
+                chunk = os.read(fd, st.st_size - len(raw))
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:                                    # noqa: BLE001
+            return None, "bad_json"
+        if not isinstance(data, dict):
+            return None, "not_object"
+        data = {k: v for k, v in data.items() if k in SESSION_FILE_FIELDS}
+        data["_inode"] = st.st_ino
+        data["_ctime"] = int(st.st_ctime)
+        return data, None
+
+    def validate_session(self, s, info, job, for_refresh=False):
+        """会话文件只是"登记提示"，不是授权来源 —— 真正的授权是：
+        这个 job_id 在 DB 里、由本守护进程代表该 uid 提交过。"""
+        if info.get("schema") != SCHEMA_VERSION:
+            return False, "schema_mismatch"
+        try:
+            if int(info.get("job_id", -1)) != int(s["job_id"]):
+                return False, "job_id_mismatch"
+            if int(info.get("uid", -1)) != int(s["uid"]):
+                return False, "uid_field_mismatch"
+        except (TypeError, ValueError):
+            return False, "field_not_int"
+
+        node_ip = normalize_ipv4(info.get("node_ip"))
+        if not node_ip:
+            return False, "node_ip_not_ipv4"
+
+        try:
+            port = int(info.get("service_port", 0))
+        except (TypeError, ValueError):
+            return False, "port_not_int"
+        cands = [int(x) for x in (s["candidates"] or "").split(",") if x.strip().isdigit()]
+        if port not in cands:
+            # 这是防伪造的核心：端口必须是【守护进程分配的那几个】之一，
+            # 否则用户可以写任意端口让守护进程去建 ACL。
+            return False, "port_not_in_candidates"
+        if not (self.cfg.port_start <= port <= self.cfg.port_end):
+            return False, "port_out_of_range"
+
+        if str(info.get("state", "")) != "running":
+            return False, "not_running_state"
+
+        # 与 Slurm 交叉校验：会话文件声称的节点必须是作业实际所在的节点，
+        # 且 IP 必须是该节点在 Slurm 里的权威地址（NodeAddr）。
+        # 只核对节点名是不够的 —— 会话文件由用户自己写，若 IP 不核对，用户就可以
+        # 让守护进程为【任意集群内 IP】装上一条 drop 规则（虽被限制在自己候选端口
+        # 内，但足以对其他用户造成定向丢包），同时自己的会话实际上失去了保护。
+        node = info.get("node")
+        if node and job:
+            actual = self.slurm.expand_node(job.get("NodeList"))
+            if actual and actual != node:
+                return False, "node_mismatch_with_slurm"
+            real_ip = self.slurm.node_ip(node)
+            if real_ip and real_ip != node_ip:
+                return False, "node_ip_mismatch_with_slurm"
+        return True, None
+
+    def reject(self, s, why, info):
+        now = now_ts()
+        log.error("拒绝会话 %s（uid=%d job=%s）: %s", s["session_id"], s["uid"],
+                  s["job_id"], why)
+        self.audit("rejected", session=s["session_id"], uid=s["uid"],
+                   job=s["job_id"], reason=why)
+        self.store.record_reject(s["uid"], why)
+        # 取证副本（只读，root）
+        try:
+            home = self.user_home(s["uid"])
+            src = os.path.join(home, ".slurmate", "sessions",
+                               "job-%d.json" % s["job_id"])
+            dst_dir = os.path.join(self.cfg.rejected_dir, str(s["uid"]))
+            os.makedirs(dst_dir, exist_ok=True)
+            os.chmod(dst_dir, 0o700)
+            dst = os.path.join(dst_dir, "%d-%s.json" % (now, s["job_id"]))
+            with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                fdst.write(fsrc.read(65536))
+            os.chmod(dst, 0o600)
+        except Exception:                                    # noqa: BLE001
+            pass
+        # 拒绝熔断
+        cur = self.store.reject_count_since(s["uid"], now - self.cfg.reject_window)
+        if cur >= self.cfg.reject_threshold:
+            self.throttled[s["uid"]] = now + self.cfg.throttle_seconds
+            self.audit("throttled", uid=s["uid"], until=self.throttled[s["uid"]])
+        self.store.update(s["session_id"], state=ST_REJECTED, ended_at=now, note=why)
+        if s.get("job_id"):
+            self.slurm.cancel(s["job_id"], "rejected")
+
+    # ── 文件清理（安全关键）─────────────────────────────────────────────────
+    def remove_session_file(self, s):
+        home = self.user_home(s["uid"])
+        if not home:
+            return
+        p = os.path.join(home, ".slurmate", "sessions", "job-%d.json" % s["job_id"])
+        try:
+            st = os.lstat(p)
+            # 只删我们自己能确认属于该用户的常规文件
+            if (stat.S_ISREG(st.st_mode) and st.st_uid == s["uid"]
+                    and st.st_nlink == 1 and not stat.S_ISLNK(st.st_mode)):
+                os.unlink(p)
+        except OSError:
+            pass
+        for suffix in (".jobhb",):
+            q = p[:-5] + suffix
+            try:
+                st = os.lstat(q)
+                if stat.S_ISREG(st.st_mode) and st.st_uid == s["uid"]:
+                    os.unlink(q)
+            except OSError:
+                pass
+
+    # ── 用户目录与密钥文件（以 root 写用户家目录，必须防符号链接）──────────
+    def allocate_candidates(self, n):
+        used = self.store.active_ports()
+        out = []
+        total = self.cfg.port_end - self.cfg.port_start + 1
+        for i in range(total):
+            p = self.cfg.port_start + ((self.port_cursor - self.cfg.port_start + i)
+                                       % total)
+            if p in used:
+                continue
+            out.append(p)
+            if len(out) >= n:
+                break
+        if out:
+            self.port_cursor = out[-1] + 1
+            if self.port_cursor > self.cfg.port_end:
+                self.port_cursor = self.cfg.port_start
+        return out
+
+    # ── RPC：接受连接 ───────────────────────────────────────────────────────
+    def accept_one(self):
+        try:
+            conn, _ = self.listener.accept()
+        except OSError:
+            return
+        try:
+            self.handle_client(conn)
+        except Exception:                                    # noqa: BLE001
+            log.exception("处理 RPC 连接时异常")
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def handle_client(self, conn):
+        # 【必须在读任何数据之前】取 SO_PEERCRED —— 这是身份的唯一可信来源，
+        # 由内核在 connect() 时填充，用户态不可伪造。不信任 pid（PID 会复用）。
+        try:
+            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            _pid, uid, gid = struct.unpack("3i", raw)
+        except OSError:
+            return
+
+        conn.settimeout(5.0)
+        buf = b""
+        try:
+            while len(buf) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\n" in chunk:
+                    break
+        except (socket.timeout, OSError):
+            pass
+        line = buf.split(b"\n", 1)[0].strip()
+        if not line:
+            return
+        try:
+            req = json.loads(line.decode("utf-8"))
+            if not isinstance(req, dict):
+                raise ValueError("not an object")
+        except Exception:                                    # noqa: BLE001
+            resp = self._err(2, "bad_request", "请求不是合法的 JSON 对象")
+        else:
+            resp = self.dispatch(uid, gid, req)
+        try:
+            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
+    # ── RPC：限流与分发 ─────────────────────────────────────────────────────
+    @staticmethod
+    def _ok(data):
+        return {"ok": True, "code": 0, "data": data, "error": None}
+
+    @staticmethod
+    def _err(code, kind, detail=None):
+        return {"ok": False, "code": code, "data": None,
+                "error": {"kind": kind, "detail": detail}}
+
+    def rpc_allowed(self, uid):
+        now = time.time()
+        hits = self.rpc_hits.setdefault(uid, [])
+        hits[:] = [t for t in hits if now - t < 1.0]
+        if len(hits) >= self.cfg.max_rpc_per_second:
+            return False
+        hits.append(now)
+        return True
+
+    def is_throttled(self, uid):
+        until = self.throttled.get(uid)
+        if not until:
+            return False
+        if time.time() < until:
+            return True
+        self.throttled.pop(uid, None)
+        return False
+
+    def dispatch(self, uid, gid, req):
+        op = str(req.get("op") or "")
+        if not self.rpc_allowed(uid):
+            return self._err(7, "rate_limited")
+        try:
+            if op == "ping":
+                return self._ok({"pong": True, "version": VERSION,
+                                 "time": now_ts()})
+            if op == "whoami":
+                return self.op_whoami(uid, gid)
+            if op == "purposes":
+                return self.op_purposes(uid)
+            if op == "submit":
+                return self.op_submit(uid, req)
+            if op == "status":
+                return self.op_status(uid, req)
+            if op == "list":
+                return self.op_list(uid)
+            if op == "heartbeat":
+                return self.op_heartbeat(uid, req)
+            if op == "goodbye":
+                return self.op_goodbye(uid, req)
+            if op == "doctor":
+                return self.op_doctor(uid)
+            return self._err(2, "unknown_op", op)
+        except Exception as e:                               # noqa: BLE001
+            log.exception("RPC %s 处理异常", op)
+            return self._err(9, "internal", str(e)[:200])
+
+    # ── RPC：只读操作 ───────────────────────────────────────────────────────
+    def op_whoami(self, uid, gid):
+        try:
+            pw = pwd.getpwuid(uid)
+        except KeyError:
+            return self._err(3, "unknown_uid", str(uid))
+        acct, why = self.slurm.account_for(pw.pw_name)
+        allowed = self.slurm.allowed_partitions(pw.pw_name)
+        return self._ok({
+            "uid": uid, "gid": gid, "user": pw.pw_name, "home": pw.pw_dir,
+            "account": acct, "account_error": why,
+            "allowed_partitions": sorted(allowed) if allowed else None,
+            "can_submit": bool(acct),
+        })
+
+    def op_purposes(self, uid):
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return self._err(3, "unknown_uid", str(uid))
+        allowed = self.slurm.allowed_partitions(user)
+        unknown = (allowed is PARTITIONS_UNKNOWN)
+        out = []
+        for p in self.cfg.purposes.values():
+            d = p.to_dict()
+            # 分区比较统一转小写 —— association 里的 Partition 是管理员手填的，
+            # 大小写与实际分区名不一致是常见情况，不能因此误判为无权限。
+            # 详见 allowed_partitions() 的 docstring，那里解释了为何这不是冗余防御。
+            ok = unknown or (allowed is None) or (p.partition.lower() in allowed)
+            d["allowed"] = ok
+            if not ok:
+                d["reason"] = "你的账号没有 %s 分区的权限" % p.partition
+            if unknown:
+                d["reason"] = "暂时无法确认分区权限（查询失败）"
+            out.append(d)
+        return self._ok({"purposes": out})
+
+    def session_view(self, s, with_secret=True):
+        d = {
+            "session_id": s["session_id"], "job_id": s["job_id"],
+            "state": s["state"], "purpose": s["purpose"],
+            "partition": s["partition"], "node": s["node"],
+            "node_ip": s["node_ip"], "service_port": s["service_port"],
+            "created_at": s["created_at"], "enrolled_at": s["enrolled_at"],
+            "last_hb_at": s["last_hb_socket"], "renew_count": s["renew_count"],
+            "requested_time": s["requested_time"], "note": s["note"],
+            "auth_mode": s["auth_mode"], "account": s["account"],
+        }
+        if s["node_ip"] and s["service_port"]:
+            # 客户端必须原样使用这个【字面 IPv4:端口】去建 -L。
+            # 不要再解析节点名 —— 否则客户端解析出的地址可能和守护进程写进
+            # nft 的 ip daddr 不一致，ACL 会静默失效。
+            d["tunnel_target"] = "%s:%d" % (s["node_ip"], s["service_port"])
+        else:
+            d["tunnel_target"] = None
+        if s["job_id"]:
+            job = self.slurm.show_job(s["job_id"])
+            if job:
+                d["job_state"] = job.get("JobState")
+                d["time_limit"] = job.get("TimeLimit")
+                d["expires_at"] = parse_iso_ts(job.get("EndTime"))
+        if with_secret and s["state"] in ACL_STATES:
+            # 口令由【作业自己生成】并写在 0600 的会话文件里（守护进程从不写用户
+            # 家目录）。这里只读，复用带全部安全检查的读取路径。
+            info, _why = self.load_session_file(s["uid"], s["job_id"])
+            if info:
+                pw = info.get("auth_password")
+                if isinstance(pw, str) and pw:
+                    d["auth_password"] = pw
+                d["auth_mode"] = info.get("auth_mode", d.get("auth_mode"))
+        return d
+
+    def op_status(self, uid, req):
+        sid = req.get("session_id")
+        if sid:
+            s = self.store.get(str(sid))
+            if not s or s["uid"] != uid:
+                return self._err(3, "not_found")
+            return self._ok({"session": self.session_view(s)})
+        act = self.store.by_uid(uid, (ST_RESERVED, ST_SUBMITTED) + ACL_STATES)
+        if not act:
+            return self._ok({"session": None})
+        return self._ok({"session": self.session_view(act[-1])})
+
+    def op_list(self, uid):
+        rows = self.store.by_uid(uid)
+        return self._ok({"sessions": [self.session_view(s, with_secret=False)
+                                      for s in rows[-50:]]})
+
+    def op_doctor(self, uid):
+        out = {"socket": os.path.exists(self.cfg.socket_path),
+               "table": self.nft.table_exists()}
+        rules = self.nft.session_rules()
+        out["rules_readable"] = rules is not None
+        out["rules_count"] = len(rules) if rules else 0
+        out["active_sessions"] = len(self.store.by_state(ACL_STATES))
+        out["consistent"] = (rules is not None
+                             and out["rules_count"] == out["active_sessions"])
+        out["port_range"] = [self.cfg.port_start, self.cfg.port_end]
+        # 非侵入式体检：现有三件套是否还在
+        # 用与 Nft 相同的路径解析，不要硬编码 /sbin/nft ——
+        # 在只有 /usr/sbin/nft 的主机上会把生产的表误报成"不存在"，
+        # 那是一条把运维引向生产系统的假警报。
+        nftbin = self.nft.bin
+        out["existing"] = {
+            "codeserver_table": run_cmd([nftbin, "list", "table",
+                                         "inet", "codeserver"])[0] == 0,
+            "portdaemon_table": run_cmd([nftbin, "list", "table",
+                                         "ip", "port-daemon"])[0] == 0,
+        }
+        return self._ok(out)
+
+    # ── RPC：写操作 ─────────────────────────────────────────────────────────
+    def op_heartbeat(self, uid, req):
+        sid = str(req.get("session_id") or "")
+        s = self.store.get(sid)
+        if not s or s["uid"] != uid:
+            return self._err(3, "not_found")
+        now = now_ts()
+        kw = {"last_hb_socket": now}
+        if s["state"] == ST_SUSPECT:
+            # 心跳恢复 —— 从"网络闪断"回到正常态。作业和 ACL 全程都没动过。
+            kw["state"] = ST_ENROLLED
+            self.audit("suspect_recovered", session=sid, uid=uid)
+        self.store.update(sid, **kw)
+        return self._ok({"state": kw.get("state", s["state"]), "at": now})
+
+    def op_goodbye(self, uid, req):
+        sid = str(req.get("session_id") or "")
+        s = self.store.get(sid)
+        if not s or s["uid"] != uid:
+            return self._err(3, "not_found")
+        if s["state"] in TERMINAL_STATES:
+            return self._ok({"state": s["state"]})
+        if s["job_id"]:
+            self.slurm.cancel(s["job_id"], "goodbye")
+        self.audit("goodbye", session=sid, uid=uid, job=s["job_id"])
+        self.begin_release(s, "goodbye")
+        return self._ok({"state": ST_RELEASING})
+
+    def op_submit(self, uid, req):
+        cfg = self.cfg
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return self._err(3, "unknown_uid", str(uid))
+        home = self.user_home(uid)
+        if not home:
+            return self._err(3, "unknown_uid", str(uid))
+        if self.is_throttled(uid):
+            return self._err(4, "throttled", "请求被拒绝次数过多，请稍后再试")
+
+        purpose_key = str(req.get("purpose") or "code")
+        p = cfg.purposes.get(purpose_key)
+        if not p:
+            return self._err(2, "bad_purpose", purpose_key)
+
+        # 资源参数：全部经白名单/范围校验，绝不把它们拼进 shell
+        try:
+            cpus = int(req.get("cpus") or p.cpus)
+        except (TypeError, ValueError):
+            cpus = p.cpus
+        cpus = max(1, min(cpus, 128))
+        mem = str(req.get("mem") or p.mem)
+        # 注意 --mem=0 在 Slurm 里的含义是"该节点的全部内存"，不是"零" ——
+        # 用户的笔误会让一个开发会话吃掉整台机器。所以显式拒绝。
+        m = re.fullmatch(r"([0-9]+)([KMGTP]?)", mem)
+        if m and int(m.group(1)) > 0:
+            mem = "%s%s" % (int(m.group(1)), m.group(2))
+        else:
+            log.warning("内存参数 %r 不合法（0/负/格式错），回退到用途默认 %s", mem, p.mem)
+            mem = p.mem
+        try:
+            gpus = int(req.get("gpus") or 0)
+        except (TypeError, ValueError):
+            gpus = 0
+        gpus = max(0, min(gpus, 16))
+        gres = ("gpu:%d" % gpus) if gpus > 0 else None
+
+        t = str(req.get("time") or cfg.default_time)
+        try:
+            secs = parse_slurm_time(t)
+        except ValueError:
+            return self._err(2, "bad_time", t)
+        if not secs or secs <= 0:
+            return self._err(2, "bad_time", t)
+        max_secs = parse_slurm_time(cfg.max_time)
+        if max_secs and secs > max_secs:
+            secs = max_secs
+        time_str = fmt_slurm_time(secs)
+
+        if self.store.count_active(uid) >= cfg.max_active_per_user:
+            return self._err(4, "quota_active",
+                             "已有 %d 个活跃会话（上限 %d）"
+                             % (self.store.count_active(uid),
+                                cfg.max_active_per_user))
+        if self.store.count_pending(uid) >= cfg.max_pending_per_user:
+            return self._err(4, "quota_pending", "未完成的提交过多，请稍后再试")
+
+        # 账户：AccountingStorageEnforce 含 associations 时【必须】带 -A
+        acct, why = self.slurm.account_for(user)
+        if not acct:
+            return self._err(4, "no_account", why)
+
+        # 分区权限（二次校验，不只靠客户端过滤）。
+        # 查不到权限时【拒绝】而不是放行 —— 这是安全相关路径，宁可让用户重试。
+        allowed = self.slurm.allowed_partitions(user)
+        if allowed is PARTITIONS_UNKNOWN:
+            return self._err(6, "partitions_unknown",
+                             "暂时无法确认你的分区权限（集群账户服务未响应），请稍后重试")
+        if allowed is not None and p.partition.lower() not in allowed:
+            return self._err(4, "no_partition",
+                             "你的账号没有 %s 分区的权限" % p.partition)
+
+        cands = self.allocate_candidates(cfg.candidates_per_session)
+        if not cands:
+            return self._err(5, "no_port", "端口池暂时没有可用端口")
+
+        # 注意：这里【不】创建用户目录、也【不】写口令文件。
+        # 口令由作业自己生成、写进 0600 的会话文件；用户目录由作业自己
+        # mkdir（它以本人身份运行，权限天然正确）。守护进程在 systemd 下
+        # 把共享家目录挂成只读（见 systemd 单元的 ReadOnlyPaths，由部署脚本
+        # 按站点实际挂载点生成），从不写用户家目录 —— 这样 root 身上
+        # 就没有"写用户文件"这条攻击面。
+        sid = os.urandom(8).hex()
+
+        now = now_ts()
+        self.store.insert(
+            session_id=sid, uid=uid, user=user, purpose=purpose_key,
+            partition=p.partition, account=acct, cpus=cpus, mem=mem, gres=gres,
+            requested_time=time_str, job_id=None, state=ST_RESERVED,
+            candidates=",".join(str(c) for c in cands),
+            auth_mode="password", created_at=now)
+
+        # 口令通过【文件】传递，不经过环境变量（scontrol show job 可能暴露
+        # Environment 字段）。作业读文件、退出时删除。
+        env = {
+            "SLURMATE_SESSION_ID": sid,
+            "SLURMATE_CANDIDATES": ",".join(str(c) for c in cands),
+            "SLURMATE_PURPOSE": purpose_key,
+            "SLURMATE_AUTH_MODE": cfg.auth_mode,
+            "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
+            "SLURMATE_CLUSTER_CIDR": cfg.cluster_cidr,
+            "SLURMATE_CS_BIN": cfg.code_server_bin,
+            "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
+            "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
+            "SLURMATE_PORT_MIN": str(cfg.port_start),
+            "SLURMATE_PORT_MAX": str(cfg.port_end),
+        }
+        sess = self.store.get(sid)
+        job_id, why = self.slurm.submit(sess, env, home, uid, user)
+        if job_id is None:
+            self.store.update(sid, state=ST_REJECTED, ended_at=now_ts(),
+                              note="submit_failed")
+            self.audit("submit_failed", session=sid, uid=uid, detail=why)
+            return self._err(6, "submit_failed", why)
+
+        self.store.update(sid, job_id=job_id, state=ST_SUBMITTED, submitted_at=now_ts())
+        self.audit("submitted", session=sid, uid=uid, job=job_id,
+                   purpose=purpose_key, partition=p.partition, account=acct,
+                   candidates=cands, time=time_str, gpus=gpus)
+        log.info("已提交: uid=%d job=%s purpose=%s partition=%s candidates=%s",
+                 uid, job_id, purpose_key, p.partition, cands)
+        return self._ok({"session_id": sid, "job_id": job_id,
+                         "state": ST_SUBMITTED, "partition": p.partition,
+                         "candidates": cands, "requested_time": time_str})
+
+
+# ==============================================================================
+#  入口
+# ==============================================================================
+
+def main():
+    ap = argparse.ArgumentParser(description="Slurmate 会话守护进程")
+    ap.add_argument("--config", default="/etc/slurmate/slurmate.conf")
+    ap.add_argument("--foreground", action="store_true",
+                    help="前台运行（systemd 下用，日志直接进 journal）")
+    ap.add_argument("--check", action="store_true",
+                    help="只做配置校验与连通性自检，不启动")
+    ap.add_argument("--version", action="version", version=VERSION)
+    args = ap.parse_args()
+
+    log_setup()
+
+    # 先把配置与 --check 走完，这样非 root 也能拿它做诊断（nft 相关项会诚实报 false）
+    try:
+        cfg = Config(args.config)
+    except Exception as e:                                   # noqa: BLE001
+        log.error("读取配置失败 %s: %s", args.config, e)
+        return 1
+
+    errors = cfg.validate()
+    if errors:
+        for e in errors:
+            log.error("配置错误: %s", e)
+        return 1
+
+    if args.check:
+        is_root = os.geteuid() == 0
+        print("配置 OK: %s" % args.config)
+        print("  端口池        : %d-%d" % (cfg.port_start, cfg.port_end))
+        print("  socket        : %s" % cfg.socket_path)
+        print("  数据库        : %s" % cfg.db_path)
+        print("  作业脚本      : %s" % cfg.job_script)
+        print("  集群网段      : %s" % cfg.cluster_cidr)
+        print("  闪断/孤儿阈值 : %ds / %ds" % (cfg.suspect_after, cfg.orphan_after))
+        print("  续期          : %s  阈值 %ds 增量 %s"
+              % ("开" if cfg.renew_enabled else "关", cfg.renew_threshold,
+                 cfg.renew_increment))
+        print("  认证方式      : %s%s" % (cfg.auth_mode,
+              "（作业生成随机口令，客户端自动登录）" if cfg.auth_mode == "password"
+              else "（无认证，保护仅靠 nft ACL —— 同节点其他作业可直连）"))
+        print("  用途          :")
+        for p in cfg.purposes.values():
+            print("    %-10s → 分区 %-9s cpus=%d mem=%-4s gres=%s"
+                  % (p.key, p.partition, p.cpus, p.mem, p.gres or "-"))
+        slurm = Slurm(cfg)
+        print("  accounting 强制: %s（决定 sbatch 是否必须带 -A）"
+              % slurm.is_accounting_enforced())
+        print("  可见分区      : %s" % ", ".join(slurm.partitions()) or "(读不到)")
+        nft = Nft(cfg)
+        print("  nft 表存在    : %s" % nft.table_exists())
+        rules = nft.session_rules()
+        print("  nft 可读规则  : %s%s" % (rules is not None,
+              "" if is_root else "  ← 非 root，无法读取属正常"))
+        if not is_root:
+            print("  [提示] 非 root 运行，nft 相关项仅供参考；完整自检请用 sudo")
+        return 0
+
+    if os.geteuid() != 0:
+        log.error("必须以 root 运行（需要 CAP_NET_ADMIN 维护 nftables，"
+                  "以及 setuid 代表用户提交作业）。诊断用 --check 不需要 root。")
+        return 1
+
+    d = Sessiond(cfg)
+    try:
+        d.start()
+        d.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        d.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

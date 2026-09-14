@@ -1,0 +1,81 @@
+name: release
+
+# 打 tag（v*）时把三个平台的产物挂到一个 draft Release 上。
+#
+# ── 为什么这是一个独立的 workflow，而不是 build.yml 里的一个 job ────────────
+# 因为那个写法【永远不会触发】，而且不会报任何错。
+#
+# GitHub 对 push 事件是把 branches、tags、paths 三者取【与】来求值的。
+# 常见的打 tag 方式是：
+#     git tag v0.1.0 && git push origin v0.1.0
+# 这次 push 推送的是一个【已经存在于远程】的提交，变更文件集为空 ——
+# 于是 paths 过滤器不匹配，整个 workflow 根本不运行，包括那个 if 判断为真的
+# release job。表现为：推了 tag，Actions 页面什么都没发生。
+#
+# 拆出来之后，本文件【不带任何 paths 过滤器】，只按 tag 触发，这才可靠。
+#
+# 而 build.yml 仍然带 paths（它要挡掉只改文档的提交）。两个文件各管一件事。
+#
+# ── 产物是未签名的 ──────────────────────────────────────────────────────────
+# Windows 首次运行 SmartScreen 会拦一次（更多信息 → 仍要运行）；
+# macOS 首次需右键 →「打开」，或 xattr -dr com.apple.quarantine /Applications/Slurmate.app。
+# 消除这一步需要代码签名证书，本项目没有。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write      # action-gh-release 需要写 Release
+
+jobs:
+  # 不依赖 build.yml —— 它可能因为 paths 过滤器没跑，也可能跑在别的 ref 上。
+  # tag 指向的那次提交直接重新构建，保证 Release 上的产物与 tag 一一对应。
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurmate-${{ matrix.os }}
+          # 注意：`defaults.run.working-directory` 对 `uses:` 步骤无效，
+          # 所以这里的路径必须相对仓库根写全。
+          path: |
+            client/dist/*.exe
+            client/dist/*.dmg
+            client/dist/*.AppImage
+            client/dist/*.deb
+            client/dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          # draft: true —— 产物未签名，先让人过一眼再公开发布。
+          files: artifacts/**/*
+          draft: true
+          generate_release_notes: true
