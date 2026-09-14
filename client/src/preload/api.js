@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('slurmate', {
   deleteConnection: (id) => ipcRenderer.invoke('app:deleteConnection', id),
   setActiveConnection: (id) => ipcRenderer.invoke('app:setActiveConnection', id),
   connect: (payload) => ipcRenderer.invoke('app:connect', payload),
+  // 断开这一跳（作业继续在集群上跑，可以再连回来）。会话进行中会被主进程拒绝。
+  disconnect: () => ipcRenderer.invoke('app:disconnect'),
 
   // ── 主机密钥（TOFU）──
   // 第一次连一台主机时主进程会拒绝并回一个指纹，由界面让用户核对后调 trustHostKey。
@@ -31,9 +33,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   // ── 密钥 ──
   publicKey: () => ipcRenderer.invoke('app:publicKey'),
   copyPublicKey: () => ipcRenderer.invoke('app:copyPublicKey'),
-  // mode: 'plain' | 'none'；regenerate=true 表示作废现有密钥重新生成（必须由用户显式发起）
-  setSecretMode: (mode, regenerate) =>
-    ipcRenderer.invoke('app:setSecretMode', { mode, regenerate }),
+  // 作废现有密钥、重新生成一把。会作废已注册到 IDM 的公钥，必须由用户显式发起。
+  // 私钥没有「保存方式」这个选项 —— 永远加密保存。
+  regenerateKey: () => ipcRenderer.invoke('app:regenerateKey'),
 
   // ── 会话 ──
   // resources 是高级选项里的**临时**覆盖：{cpus, mem, gpus, partition}。
@@ -41,7 +43,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   partitions: () => ipcRenderer.invoke('app:partitions'),
   start: (resources) => ipcRenderer.invoke('app:start', resources),
   state: () => ipcRenderer.invoke('app:state'),
-  stop: (mode) => ipcRenderer.invoke('app:stop', mode),
+  // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
+  // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。
+  stop: () => ipcRenderer.invoke('app:stop'),
   doctor: () => ipcRenderer.invoke('app:doctor'),
   reload: () => ipcRenderer.invoke('app:reload'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),

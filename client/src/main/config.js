@@ -11,8 +11,8 @@
  *    mode 参数在文件已存在时不生效 —— 光靠它会让一个曾经 0644 的凭据文件永远是 0644。
  *
  * 2. **凭据存储绝不静默降级**。Linux 上没有 keyring 时 `safeStorage.isEncryptionAvailable()`
- *    返回 false；此时【不能】悄悄改成明文写盘。调用方必须拿到一个明确的结果，由界面
- *    让用户选「明文保存」还是别的。悄悄写明文，正是我们一路在清的那类问题。
+ *    返回 false；此时【不能】悄悄改成明文写盘。调用方必须拿到一个明确的结果，
+ *    由界面如实告诉用户「这台机器存不了密钥」。悄悄写明文，正是我们一路在清的那类问题。
  *
  * 3. **只存推导不出来的东西**。SSH 公钥能从私钥推出来（见 keys.js），所以这里不存它 ——
  *    存两份就可能不一致，而症状只是「认证失败」，指不回根因。
@@ -22,14 +22,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA = 2;   // 2：profile → connections，passwordMode → secretMode
+const SCHEMA = 3;   // 2：profile → connections；3：删掉「私钥保存方式」（永远加密保存）
 
-const SECRET_MODE = {
-  ASK: 'ask',              // 还没决定（首次生成密钥时问用户）
-  NONE: 'none',            // 不保存
-  ENCRYPTED: 'encrypted',  // safeStorage
-  PLAIN: 'plain',          // 明文，0600，用户明确选择过
-};
+// 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
+// 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
+// 别人机器上可能还留着那样一份文件。读得出来就必须读出来：报「读不出来」的后果是
+// 用户以为密钥丢了，跑去重新生成、重新注册。读到时带上 legacy:true，由调用方加密重存。
+const SECRET_ENCRYPTED = 'encrypted';
+const LEGACY_SECRET_PLAIN = 'plain';
 
 const DEFAULTS = {
   schema: SCHEMA,
@@ -41,7 +41,6 @@ const DEFAULTS = {
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
   hostKeys: {},
   slots: {},                // { "1": { port: 18080 } } —— 槽位 → 实际本地端口
-  secretMode: SECRET_MODE.ASK,
 };
 
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
@@ -73,6 +72,14 @@ function readJson(file) {
 function newConnectionId() {
   return 'c' + crypto.randomBytes(6).toString('hex');
 }
+
+/**
+ * 一条连接的身份：同一个人、同一台主机、同一个端口，就是同一条连接。
+ *
+ * ★ 身份**不是** id。id 是本地生成的，同一条连接每存一次都能拿到一个新 id ——
+ *   之前界面上的「保存并连接」正是这样，点几次就攒出几条一模一样的条目。
+ */
+function connectionKey(c) { return `${c.user}@${c.host}:${c.port}`; }
 
 /** 把任意输入规整成一条合法连接；字段不合法则返回 null（由调用方报错，不静默填空）。 */
 function normalizeConnection(raw, fallbackId) {
@@ -111,14 +118,23 @@ function loadConfig(dir) {
   const cfg = structuredClone(DEFAULTS);
   if (raw.slots && typeof raw.slots === 'object') cfg.slots = raw.slots;
   if (raw.hostKeys && typeof raw.hostKeys === 'object') cfg.hostKeys = raw.hostKeys;
-  if (Object.values(SECRET_MODE).includes(raw.secretMode)) cfg.secretMode = raw.secretMode;
 
-  // 连接列表：先取新格式，再补旧格式
+  // 连接列表：先取新格式，再补旧格式。
+  // 去重按**两个**维度：id（同一个条目被写了两遍），以及身份
+  // （user@host:port —— 旧版本每点一次「保存并连接」就新建一条，
+  //   配置里可能已经攒了一串完全一样的条目。这里顺手清掉，
+  //   否则用户升级完看到的还是那一堆，会以为修了个寂寞）。
   const list = [];
   const seen = new Set();
+  const seenAddr = new Set();
   const push = (c) => {
     const n = normalizeConnection(c, c && c.id);
-    if (n && !seen.has(n.id)) { seen.add(n.id); list.push(n); }
+    if (!n) return;
+    const addr = connectionKey(n);
+    if (seen.has(n.id) || seenAddr.has(addr)) return;
+    seen.add(n.id);
+    seenAddr.add(addr);
+    list.push(n);
   };
   if (Array.isArray(raw.connections)) {
     raw.connections.forEach(push);
@@ -141,6 +157,42 @@ function loadConfig(dir) {
     : (list[0] ? list[0].id : null);
 
   return cfg;
+}
+
+/**
+ * 新增一条连接，或复用已有那条一模一样的。
+ *
+ * ★ 这是「相同条目检测」的落点。判断依据是 user@host:port，不是 id：
+ *   界面上不修改任何字段、连点两次「保存并连接」，不该得到两条一样的条目 ——
+ *   列表会越点越长，而用户分不清该点哪一条。
+ *
+ * @returns {{connection:object, created:boolean}|null}  输入不合法时返回 null
+ */
+function upsertConnection(cfg, input) {
+  const conn = normalizeConnection(input, input && input.id);
+  if (!conn) return null;
+
+  const key = connectionKey(conn);
+  const idx = cfg.connections.findIndex((c) => c.id === conn.id || connectionKey(c) === key);
+
+  if (idx < 0) {
+    cfg.connections = [...cfg.connections, conn];
+    return { connection: conn, created: true };
+  }
+
+  const prev = cfg.connections[idx];
+  // 复用旧条目：**id 用回旧的那个**（可能已经被 activeConnectionId 之类引用着）。
+  // label 只在这次给了一个有意义的名字时才覆盖 —— 界面上的表单没有「备注」这一栏，
+  // 传进来的 label 就是 host；拿它把用户手写的「内网」冲掉是静默的信息丢失。
+  const next = {
+    ...prev,
+    user: conn.user,
+    host: conn.host,
+    port: conn.port,
+    label: (conn.label && conn.label !== conn.host) ? conn.label : prev.label,
+  };
+  cfg.connections = cfg.connections.map((c, i) => (i === idx ? next : c));
+  return { connection: next, created: false };
 }
 
 function saveConfig(dir, cfg) {
@@ -202,70 +254,58 @@ function secretPath(dir) { return path.join(dir, 'secrets.json'); }
 /**
  * 存凭据（当前只有一样：SSH 私钥的 PEM 文本）。
  *
+ * **只有加密一种方式。** 界面上不再有「保存方式」这个下拉框 —— 一个需要用户
+ * 在「安全」和「不安全」之间做选择的设计，本身就是设计失败：选明文的那个用户
+ * 并不知道自己在放弃什么，而选加密的那个也不该为此感到庆幸。
+ *
  * @param {object|null} cryptoSafe  Electron 的 safeStorage 封装：
  *                                  { encrypt(str)->Buffer, decrypt(Buffer)->str }
  *                                  传 null 表示这台机器上没有可用的安全存储。
- * @returns {{ok:true, mode:string} | {ok:false, reason:string}}
+ * @returns {{ok:true, mode:'encrypted'} | {ok:false, reason:string}}
  *
- * **调用方必须先读返回值**。mode='plain' 只有在用户明确同意后才允许传入。
+ * **调用方必须先读返回值**：这台机器存不了密钥时，唯一诚实的做法是如实说出来，
+ * 而不是降级成明文让它「看起来存上了」。
  */
-function setSecret(dir, cryptoSafe, mode, value) {
-  if (mode === SECRET_MODE.NONE) {
-    clearSecret(dir);
-    return { ok: true, mode };
+function setSecret(dir, cryptoSafe, value) {
+  if (!cryptoSafe) return { ok: false, reason: 'no_secure_storage' };
+  let buf;
+  try {
+    buf = cryptoSafe.encrypt(value);
+  } catch (e) {
+    return { ok: false, reason: 'encrypt_failed: ' + e.message };
   }
-  if (mode === SECRET_MODE.ENCRYPTED) {
-    if (!cryptoSafe) {
-      // 绝不降级成明文 —— 明确失败，让界面去问用户
-      return { ok: false, reason: 'no_secure_storage' };
-    }
-    let buf;
-    try {
-      buf = cryptoSafe.encrypt(value);
-    } catch (e) {
-      return { ok: false, reason: 'encrypt_failed: ' + e.message };
-    }
-    writeAtomic(secretPath(dir),
-      JSON.stringify({ schema: SCHEMA, mode, data: buf.toString('base64') }), 0o600);
-    return { ok: true, mode };
-  }
-  if (mode === SECRET_MODE.PLAIN) {
-    writeAtomic(secretPath(dir),
-      JSON.stringify({ schema: SCHEMA, mode, data: value }), 0o600);
-    return { ok: true, mode };
-  }
-  return { ok: false, reason: 'bad_mode: ' + mode };
+  writeAtomic(secretPath(dir),
+    JSON.stringify({ schema: SCHEMA, mode: SECRET_ENCRYPTED, data: buf.toString('base64') }), 0o600);
+  return { ok: true, mode: SECRET_ENCRYPTED };
 }
 
 /**
  * 取凭据。
- * @returns {{ok:true, value:string, mode:string} | {ok:false, reason:string}}
+ * @returns {{ok:true, value:string, mode:string, legacy?:true} | {ok:false, reason:string}}
  */
 function getSecret(dir, cryptoSafe) {
   const raw = readJson(secretPath(dir));
   if (!raw || typeof raw !== 'object' || typeof raw.data !== 'string') {
     return { ok: false, reason: 'not_saved' };
   }
-  if (raw.mode === SECRET_MODE.PLAIN) {
-    return { ok: true, value: raw.data, mode: SECRET_MODE.PLAIN };
+  if (raw.mode === LEGACY_SECRET_PLAIN) {
+    // 旧版本写下的明文。现在不再产生这种文件，但已经存在的那一份必须读得出来。
+    // legacy:true 是在告诉调用方：这东西还以明文躺着，有条件就加密重存一遍。
+    return { ok: true, value: raw.data, mode: LEGACY_SECRET_PLAIN, legacy: true };
   }
-  if (raw.mode === SECRET_MODE.ENCRYPTED) {
-    if (!cryptoSafe) {
-      return { ok: false, reason: 'no_secure_storage' };
-    }
-    try {
-      return { ok: true, value: cryptoSafe.decrypt(Buffer.from(raw.data, 'base64')),
-               mode: SECRET_MODE.ENCRYPTED };
-    } catch (e) {
-      // 换过机器、换过用户、keyring 被重置 —— 都会走到这里
-      return { ok: false, reason: 'decrypt_failed: ' + e.message };
-    }
+  if (raw.mode !== SECRET_ENCRYPTED) {
+    return { ok: false, reason: 'bad_mode: ' + raw.mode };
   }
-  return { ok: false, reason: 'bad_mode: ' + raw.mode };
-}
-
-function clearSecret(dir) {
-  try { fs.unlinkSync(secretPath(dir)); } catch { /* 本来就不存在 */ }
+  if (!cryptoSafe) {
+    return { ok: false, reason: 'no_secure_storage' };
+  }
+  try {
+    return { ok: true, value: cryptoSafe.decrypt(Buffer.from(raw.data, 'base64')),
+             mode: SECRET_ENCRYPTED };
+  } catch (e) {
+    // 换过机器、换过用户、keyring 被重置 —— 都会走到这里
+    return { ok: false, reason: 'decrypt_failed: ' + e.message };
+  }
 }
 
 // ── 待补发的 goodbye（见 session.js：断电/kill -9 时 goodbye 一定发不出去）────────
@@ -295,11 +335,12 @@ function removePendingGoodbye(dir, sessionId) {
 }
 
 module.exports = {
-  SCHEMA, DEFAULTS, SECRET_MODE,
+  SCHEMA, DEFAULTS, SECRET_ENCRYPTED,
   loadConfig, saveConfig, slotPort, setSlotPort,
   activeConnection, newConnectionId, normalizeConnection,
+  connectionKey, upsertConnection,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
-  setSecret, getSecret, clearSecret,
+  setSecret, getSecret,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,
   // 导出给测试用
   _internal: { writeAtomic, readJson, configPath, secretPath, pendingGoodbyePath },

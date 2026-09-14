@@ -29,9 +29,66 @@ test('★ RPC 命令行是编译期常量，不含任何插值', () => {
   // （命令串里不能出现 code-server 字面量）。它一旦变成拼出来的字符串，
   // 两条性质同时失效。
   assert.equal(typeof sshBackend.RPC_CMD, 'string');
-  assert.equal(sshBackend.RPC_CMD, '/usr/local/bin/slurmate rpc');
+  assert.equal(sshBackend.RPC_CMD, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
   assert.ok(!/[$`{}]/.test(sshBackend.RPC_CMD), '不得含任何模板/变量语法');
   assert.ok(!/code-server/.test(sshBackend.RPC_CMD), '不得含 code-server 字面量');
+
+  // ★ 解释器必须是钉死的 bash，不能交给登录 shell 去挑。
+  //   sshd 用 `$SHELL -c "<命令串>"` 执行 exec 请求，而 $SHELL 来自 /etc/passwd ——
+  //   HPC 登录节点上常是 zsh，与 bash 并非完全互通。少了这一层，同一份客户端
+  //   在不同集群上会跑出不同结果，且失败时只看得到「认证失败」。
+  assert.match(sshBackend.RPC_CMD, /^\/bin\/bash -c /, '必须显式指定 bash');
+  // 内层命令整体被单引号包住：否则登录 shell 会把参数拆开，`rpc` 会变成 $0
+  assert.match(sshBackend.RPC_CMD, /'[^']+'$/, '内层命令必须整体加引号');
+});
+
+// ── 应答解析：这道缝挡的是「登录节点的 shell 环境不干净」──────────────────────
+//
+// sshd 用登录 shell 解释我们发过去的命令串，所以 rc 文件（zsh 的 ~/.zshenv 连 `-c`
+// 都会读，bash 不会）可能在应答前后打印东西。取「最后一行」是碰巧够用，
+// 规则必须写死并测住。
+
+test('应答解析：干净的输出', () => {
+  const r = sshBackend.pickEnvelope('{"ok":true,"code":0,"data":{"x":1}}\n');
+  assert.equal(r.found, true);
+  assert.equal(r.envelope.data.x, 1);
+});
+
+test('★ 应答解析：rc 文件在【前面】打印了东西也不受影响', () => {
+  // 现场长这样：一句欢迎语 / 一段 module 加载信息，然后才是真正的应答
+  const out = 'Welcome to node01\n'
+            + 'Modules: gcc/12.2 loaded\n'
+            + '{"ok":true,"code":0,"data":{"session_id":"abc"}}\n';
+  const r = sshBackend.pickEnvelope(out);
+  assert.equal(r.found, true, 'rc 的噪声不该让一个合法应答变成「解析失败」');
+  assert.equal(r.envelope.data.session_id, 'abc');
+});
+
+test('★ 应答解析：应答【后面】还有噪声也照样找得到', () => {
+  const r = sshBackend.pickEnvelope('{"ok":true,"code":0,"data":null}\nlogout\n');
+  assert.equal(r.found, true);
+});
+
+test('★ 应答解析：不带布尔 ok 的 JSON 一律不认 —— 那是噪声，不是应答', () => {
+  // rc 文件里打印一段 JSON（配置、状态、随便什么）是真实存在的。
+  // 认了它，它就会被塞进 classify() 当成守护进程的应答，然后被解释成一个
+  // 关于协议的错误 —— 而真正的原因（shell 环境不干净）连提都不会被提到。
+  for (const junk of ['{"theme":"dark"}', '[1,2,3]', '"just a string"', '{}}']) {
+    const r = sshBackend.pickEnvelope(junk + '\n');
+    assert.equal(r.found, false, `${junk} 不该被当成应答`);
+    assert.deepEqual(r.lines, [junk]);
+  }
+});
+
+test('应答解析：完全不是 JSON 时把原始输出带回来（现场比结论重要）', () => {
+  const r = sshBackend.pickEnvelope('bash: /usr/local/bin/slurmate: No such file\n');
+  assert.equal(r.found, false);
+  assert.equal(r.lines.length, 1, '要把原始行给出来，调用方才能报出真正的现场');
+});
+
+test('应答解析：空输出', () => {
+  assert.deepEqual(sshBackend.pickEnvelope(''), { found: false, lines: [] });
+  assert.deepEqual(sshBackend.pickEnvelope('\n  \n'), { found: false, lines: [] });
 });
 
 test('主机密钥指纹与 ssh-keygen -lf 同款：对 blob 取 SHA256', () => {

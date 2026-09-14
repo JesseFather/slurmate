@@ -40,12 +40,36 @@
     <h1>Slurmate</h1>
     <p class="sub" id="app-sub">远程开发会话</p>
 
-    <!-- ── ① 首次设置：公钥 + 连接 ── -->
-    <section id="sec-setup">
-      <h2>① 你的公钥</h2>
+    <!-- ── 登录节点：表面只放已保存的连接 ──
+         公钥和地址表单都折进「新建连接」里 —— 它们是**一次性**的活，
+         而用户每次打开客户端真正要做的事是「连上上次那台」。 -->
+    <section id="sec-connect">
+      <h2>登录节点</h2>
+      <ul id="conn-list" class="conns"></ul>
+      <!-- 文案由 setNewOpen 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
+           再叫用户去点它就成了一条指向不存在的东西的指令。 -->
+      <p class="sub" id="conn-empty">
+        还没有保存任何登录节点。点上面的「新建连接」填一个 ——
+        只需要用户名、主机和端口。
+      </p>
+      <div class="row">
+        <button id="btn-new">新建连接…</button>
+        <button id="btn-probe" class="ghost">探测全部</button>
+      </div>
+    </section>
+
+    <!-- ── 新建连接（含首次使用的公钥注册）── -->
+    <section id="sec-new" class="hidden">
+      <h2>新建连接</h2>
       <p class="sub">
-        把下面这一行加进你的 IDM 账户（这是唯一一次手工步骤）。之后客户端用它登录，
-        不再需要密码。它是一把专用密钥，与你平时 ssh 用的那把互不影响。
+        第一次使用时有两步：把下面的公钥注册到你的 IDM 账户，再填登录节点的地址。
+        公钥只需要注册这一次，之后换机器才需要重来。
+      </p>
+
+      <h3>① 你的公钥</h3>
+      <p class="sub">
+        把下面这一行加进你的 IDM 账户。之后客户端用它登录，不再需要密码。
+        它是一把专用密钥，与你平时 ssh 用的那把互不影响。
       </p>
       <textarea id="f-pubkey" class="keybox" readonly rows="3"
                 spellcheck="false" placeholder="正在生成密钥…"></textarea>
@@ -55,8 +79,9 @@
         <span class="sub mono grow-note" id="key-fp"></span>
       </div>
       <p class="sub bad hidden" id="key-error"></p>
+      <p class="sub bad hidden" id="key-nopersist"></p>
 
-      <h2>② 登录节点</h2>
+      <h3>② 登录节点</h3>
       <div class="row">
         <div><label for="f-user">用户名</label>
              <input type="text" id="f-user" autocomplete="username" spellcheck="false"></div>
@@ -66,35 +91,13 @@
         <div><label for="f-port">端口</label>
              <input type="number" id="f-port" min="1" max="65535" value="10100"></div>
       </div>
-      <div class="row">
+      <div class="row row-spaced">
         <button id="btn-connect">保存并连接</button>
-        <button id="btn-probe" class="ghost">探测已保存的连接</button>
-      </div>
-
-      <div id="conn-wrap" class="hidden">
-        <h2>已保存的连接</h2>
-        <ul id="conn-list" class="conns"></ul>
-        <p class="sub">点一条把它设为当前连接。地址可以有多条 —— 内网、公网域名、跳板机各算一条。</p>
-      </div>
-
-      <div id="sec-secret">
-        <h2>私钥保存方式</h2>
-        <p class="sub" id="securenote"></p>
-        <div class="row">
-          <div class="grow">
-            <label for="f-savemode">在这台电脑上保存私钥的方式</label>
-            <select id="f-savemode" class="full">
-              <option value="encrypted">加密保存（系统凭据库）</option>
-              <option value="plain">明文保存（不推荐）</option>
-              <option value="none">不保存（每次启动重新生成，已注册的公钥会失效）</option>
-            </select>
-          </div>
-          <div><button id="btn-savemode" class="ghost">保存设置</button></div>
-        </div>
+        <button id="btn-cancel-new" class="ghost">取消</button>
       </div>
     </section>
 
-    <!-- ── ② 开始开发（默认零配置，高级选项折叠在下面）── -->
+    <!-- ── 开始开发（默认零配置，高级选项折叠在下面）── -->
     <section id="sec-purpose" class="hidden">
       <h2>开始开发</h2>
       <p class="sub">
@@ -127,17 +130,18 @@
       </div>
     </section>
 
-    <!-- ── ③ 会话进行中 ── -->
+    <!-- ── 会话进行中 ── -->
     <section id="sec-session" class="hidden">
       <h2>当前会话</h2>
       <dl class="kv" id="kv"></dl>
       <div class="row row-spaced">
         <button id="btn-reload" class="ghost">重新加载页面</button>
-        <button id="btn-keep" class="ghost">关闭窗口但保持作业运行</button>
         <button id="btn-end" class="danger">结束会话</button>
       </div>
       <p class="sub row-spaced">
-        会话运行期间，下面的按钮也可以从左上的状态条直接点到。
+        会话运行期间，这两个按钮也可以从左上的状态条直接点到。
+        <strong>关掉窗口同样会结束会话</strong>；但合盖、断网、断电不会 ——
+        那些情况客户端说不上话，作业会被保留，下次打开自动接上。
       </p>
     </section>
 

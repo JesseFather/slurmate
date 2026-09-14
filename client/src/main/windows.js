@@ -41,7 +41,7 @@ const STATUS_BAR_HEIGHT = 30;
 class ShellWindow {
   /**
    * @param {object} opts
-   *   onClose   {(mode:'farewell'|'keep') => void}  用户在关闭弹窗里的选择
+   *   onClose   {() => void}  用户确认关闭窗口（已含确认弹窗）
    *   onAction  {(action:string, payload) => void}  面板上的操作
    */
   constructor(opts = {}) {
@@ -77,14 +77,15 @@ class ShellWindow {
     this._origin = null;
     this._closing = false;
     this._closeConfirmed = false;
+    this._sessionLive = false;     // 由 pushState 更新
     this._overlayText = null;
 
     this.win.on('resize', () => this._layout());
     this.win.on('closed', () => this._destroyViews());
 
-    // 关窗 = 结束会话（默认），但给一个「保持作业运行」的出口。
-    // 不做确认弹窗的话，误点 × 就会 scancel 掉一个跑了 12 小时的作业 ——
-    // 那套 300s/1800s 的容错机制存在的唯一目的正是容忍这种意外。
+    // 关窗 = 结束会话并释放资源（见 _confirmClose）。确认弹窗只为拦误点 ×，
+    // 不是给用户第二条路 —— 保住作业靠的是「客户端没能说上话」时守护进程的
+    // 300s/1800s 容错窗口，而不是一个主动的开关。
     this.win.on('close', (e) => {
       if (this._closeConfirmed) return;
       e.preventDefault();
@@ -231,6 +232,10 @@ class ShellWindow {
   // ── 面板通信 ────────────────────────────────────────────────────────────
   /** 把会话快照推给面板。快照是界面唯一的数据来源。 */
   pushState(snap) {
+    // 关窗确认要用：有会话在跑才值得拦一下误点。快照本来就每次状态变化都推过来，
+    // 顺手记下即可，不必再开一条查询通道。
+    const st = snap && snap.state;
+    this._sessionLive = Boolean(st) && st !== 'idle' && st !== 'ended';
     const wc = this.win.webContents;
     if (wc.isDestroyed()) return;
     wc.send('session:state', snap);
@@ -263,25 +268,41 @@ class ShellWindow {
   }
 
   // ── 关闭 ────────────────────────────────────────────────────────────────
+  /**
+   * 关窗前的确认。
+   *
+   * ★ 只在**真的有会话在跑**时才问。没有会话时关闭是无害的，弹一个「要结束吗？」
+   *   只会训练用户闭着眼睛回车，等到某次真的有作业在跑时，那一下回车就是 12 小时。
+   *
+   * 也没有「保持作业运行」这个选项 —— 关闭就是结束（见 session.js 的 stop()）。
+   * 保留确认这一步不是为了让用户选择要不要结束，而是为了让**误点 × **
+   * 不至于直接毁掉一个正在跑的作业。
+   */
   async _confirmClose() {
     if (this._closing) return;
     this._closing = true;
     try {
+      if (!this._sessionLive) {           // 没有会话语义上的损失，不必打扰
+        this._closeConfirmed = true;
+        this.onClose();
+        return;
+      }
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',
-        buttons: ['结束会话并释放资源', '仅关闭窗口，保持作业运行', '取消'],
-        defaultId: 0,
-        cancelId: 2,
+        buttons: ['结束会话并退出', '取消'],
+        defaultId: 1,                     // 默认停在「取消」：回车不该毁掉作业
+        cancelId: 1,
         title: '关闭 Slurmate',
-        message: '关闭窗口时要结束这个开发会话吗？',
+        message: '关闭窗口会结束这个开发会话。',
         detail:
-          '结束会话会立即取消计算节点上的作业（终端里的进程会被终止）。\n'
-        + '保持运行则不动作业 —— 下次启动 Slurmate 会自动重新接上。',
+          '计算节点上的作业会被立即取消，终端里的进程会被终止。\n'
+        + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
+        + '下次打开会自动接上。）',
         noLink: true,
       });
-      if (response === 2) return;                       // 取消
+      if (response === 1) return;                       // 取消
       this._closeConfirmed = true;
-      this.onClose(response === 0 ? 'farewell' : 'keep');
+      this.onClose();
     } finally {
       this._closing = false;
     }

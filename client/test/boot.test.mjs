@@ -175,7 +175,7 @@ after(async () => {
   try {
     const idx = require('../src/main/index.js');
     const ctl = idx._test.getController();
-    if (ctl) await ctl.stop({ farewell: true });
+    if (ctl) await ctl.stop();
     const b = idx._test.getBackend();
     if (b) await b.close();
   } catch { /* 尽力而为，不要让收尾本身变成失败 */ }
@@ -218,8 +218,12 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 连接管理：地址必须在界面上可填可删 —— 这条曾经是个硬缺口，
                     // extraHosts 只能手改 config.json，面板上根本没有入口。
                     'app:saveConnection', 'app:deleteConnection', 'app:setActiveConnection',
-                    // 密钥与主机密钥
-                    'app:publicKey', 'app:copyPublicKey', 'app:setSecretMode',
+                    // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
+                    // 一律彻底终止（取消作业 + 释放资源），不留下还在烧的作业
+                    'app:disconnect',
+                    // 密钥与主机密钥。密钥只有「重新生成」这一个入口 ——
+                    // 「保存方式」那个下拉框已经删掉，私钥永远加密保存。
+                    'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey',
                     'app:trustHostKey', 'app:forgetHostKey']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
@@ -256,28 +260,23 @@ test('★ 密钥在首次启动时就生成好了，公钥可查（用户要拿�
     '一个字节都不该落盘');
 });
 
-test('★ 没有安全存储时，选择「加密保存」必须明确失败，绝不静默写明文', async (t) => {
+test('★ 没有安全存储时，重新生成密钥要明确报告「存不下来」，绝不静默写明文', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  const r = await invoke('app:setSecretMode', { mode: 'encrypted' });
+  const before = await invoke('app:publicKey');
+  const r = await invoke('app:regenerateKey');
+  // 密钥本身生成出来了 —— 用户此刻正需要拿它去 IDM 注册，不能因为存不了就什么都不给
+  assert.match(r.publicKey, /^ssh-ed25519 /);
+  assert.notEqual(r.publicKey, before.publicKey, '重新生成必须真的换一把');
+  // 但「存下来了」这件事必须明确否认，界面据此如实告知用户
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'no_secure_storage');
   assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
-    '一个字节都不该落盘');
+    '一个字节都不该落盘 —— 私钥没有「明文保存」这条退路了');
 
-  // 换「明文保存」应当成功（用户明确选了），并且**写在演示命名空间里**
-  // （这条同时证明了演示模式确实用了独立目录，而不是靠「目录不存在」间接推断）
-  const pub = await invoke('app:publicKey');
-  const r2 = await invoke('app:setSecretMode', { mode: 'plain' });
-  assert.equal(r2.ok, true);
-  assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'config.json')), true,
-    '演示模式的配置应当写在 demo-config 下');
-  assert.equal(fs.existsSync(path.join(userData, 'config.json')), false,
-    '真配置目录必须保持干净');
-  // 存下去之后公钥不许变 —— 变了意味着用户刚注册的那把作废了
   const after = await invoke('app:publicKey');
-  assert.equal(after.publicKey, pub.publicKey, '选择存储方式不得改变密钥本身');
-  assert.equal(after.persisted, true);
+  assert.equal(after.persisted, false);
+  assert.equal(after.publicKey, r.publicKey, '内存里那把必须换成新的，否则界面显示的公钥是旧的');
 });
 
 test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
@@ -302,10 +301,42 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
     fs.readFileSync(path.join(userData, 'demo-config', 'config.json'), 'utf8'));
   assert.equal(onDisk.connections.length, 1);
 
+  // ★ 相同条目检测：界面上的「保存并连接」不改任何字段再点一次，
+  //   绝不能又冒出一条 —— 用户看到的是列表越点越长，而分不清该点哪条。
+  const again = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100 });
+  assert.equal(again.ok, true);
+  assert.equal(again.created, false, '第二次必须报告「复用了已有的那条」');
+  assert.equal(again.connections.length, 1, '列表里不能出现第二条一样的');
+  assert.equal(again.connection.id, saved.connection.id, '必须复用同一个 id');
+  assert.equal(again.connection.label, '内网', '复用不得把已有的备注冲掉');
+
   const del = await invoke('app:deleteConnection', saved.connection.id);
   assert.equal(del.ok, true);
   assert.deepEqual(del.connections, []);
   assert.equal(del.activeConnectionId, null, '删掉活动连接后不能留一个悬空的 id');
+});
+
+test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  const saved = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100 });
+  const r = await invoke('app:disconnect');
+  assert.equal(r.ok, true);
+
+  // 断开的是「这一跳」，不是「这条连接」—— 配置里必须还在，
+  // 否则用户再点「连接」会发现地址没了，得重填一遍
+  const b = await invoke('app:bootstrap');
+  assert.equal(b.connections.length, 1);
+  assert.equal(b.activeConnectionId, saved.connection.id);
+  assert.equal(b.whoami, null, '断开后不能再声称知道对面是谁');
+
+  // 这个文件里所有用例共用同一个 Electron 实例，演示后端也被真的关掉了 ——
+  // 接回去，否则后面的会话用例会撞上「演示后端尚未 connect()」
+  const back = await invoke('app:connect', { connectionId: saved.connection.id });
+  assert.equal(back.ok, true, '断开之后必须能重新接上，否则「断开」就是个单向门');
+  await invoke('app:deleteConnection', saved.connection.id);
 });
 
 test('★ 地址探测：一条连接都没有时返回空，不回退到任何内置地址', async (t) => {
@@ -397,9 +428,24 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
       + '\n  jars: ' + JSON.stringify(Object.keys(partitionJars)));
   }
 
-  // 收尾：把会话释放掉，免得留下心跳定时器
-  await invoke('app:stop', 'farewell');
-  await new Promise((r) => setTimeout(r, 300));
+  // ★ 主动断开 = 彻底终止。会话跑着的时候点「断开」，必须先取消作业、释放资源，
+  //   而不是把作业留在集群上继续占着节点，界面上却显示「未连接」。
+  const dis = await invoke('app:disconnect');
+  assert.equal(dis.ok, true);
+  assert.ok(dis.released, '断开必须带上是如何释放的，不能只回一句 ok');
+  assert.equal(dis.released.ok, true, '释放请求应当被接受');
+  assert.equal(dis.released.state, 'releasing', '必须真的走释放，作业不能留在集群上');
+
+  // 断开之后不再声称知道对面是谁，但连接条目本身要留着（下次还得连）
+  assert.equal((await invoke('app:bootstrap')).whoami, null);
+
+  // 这个文件里所有用例共用同一个 Electron 实例，演示后端刚被真的关掉了 ——
+  // 接回来，否则后面的用例会撞上「演示后端尚未 connect()」
+  const demoConn = await invoke('app:saveConnection',
+    { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: demoConn.connection.id })).ok, true,
+    '断开之后必须能重新接上，否则「断开」就成了单向门');
+  await invoke('app:deleteConnection', demoConn.connection.id);
 });
 
 test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cookie」的陷阱', async (t) => {

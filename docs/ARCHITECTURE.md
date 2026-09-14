@@ -73,8 +73,13 @@ Slurmate 让用户在 Slurm 集群上跑 code-server 做远程开发。它的核
 JSON（`cluster/slurmate:10-17,208-234`）。客户端必须用**固定 argv** 调用：
 
 ```
-ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com -- /usr/local/bin/slurmate rpc
+ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
+    -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 ```
+
+（外层双引号与内层 `/bin/bash -c` 都是客户端实际发出的形状：sshd 用登录 shell 解释
+exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shell 的 rc 文件仍会执行，
+所以应答解析不能假定 JSON 在最后一行 —— 见 [PROTOCOL.md](PROTOCOL.md)。）
 
 请求体走 stdin，命令行是编译期常量。这样用户输入**从构造上**不可能进入 SSH 命令串 ——
 是消除注入，而不是「记得别拼字符串」。这一点还有第二个必要性：某些集群在 sshd 上
@@ -138,6 +143,15 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
   | `< suspect_after`（默认 300s） | 正常 | 无 |
   | `>= suspect_after` | 网络闪断 | **什么都不做**。作业与 ACL 全部保留，客户端重连即恢复 |
   | `>= orphan_after`（默认 1800s） | 异常退出 | `scancel` 释放资源 → `orphaned` → `releasing` |
+
+  **这张表只覆盖「客户端没能说上话」那一半。** 另一半是客户端主动发 `goodbye`
+  （`op_goodbye`），那条路立即释放，不走任何等待。
+
+  两条路的边界由**能否表达意图**划开，不由「谁触发的」划开：断电、睡眠、网线被拔时
+  客户端根本执行不到代码，于是落进上表的容错窗口；而用户点「断开」「结束会话」
+  或者关掉窗口，都是明确的意思表示，一律走 `goodbye` 彻底终止。
+  客户端里**没有**「关掉界面但让作业继续跑」这种开关 —— 唯一能保住作业的情形，
+  是它连话都没能说上。
 
   从 `suspect` 回到 `enrolled` 只需一次心跳：`op_heartbeat` 把状态改回来即可，
   作业和 ACL 全程没被碰过（`cluster/slurmate-sessiond:1776-1788`）。

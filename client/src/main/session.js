@@ -406,27 +406,30 @@ class SessionController extends EventEmitter {
 
   // ── 停止 ────────────────────────────────────────────────────────────────
   /**
-   * 发 goodbye。
+   * 结束会话并释放资源。**只有一个语义：彻底终止。**
    *
-   * @param {object} opts
-   *   farewell {boolean} true = 结束会话并释放（发 goodbye）
-   *                      false = 只关窗口，作业继续跑（**不发 goodbye**）
-   * @returns {Promise<{ok:boolean, state:string, detail:string}>}
+   * ★ 这里曾经有一条 `farewell=false` 的分支（「只关窗口，作业继续跑」）。它被删掉了。
    *
-   * 关于 farewell=false：那套 `suspect`(300s)/`orphaned`(1800s) 容错机制存在的唯一
-   * 目的就是容忍客户端意外消失。主动 goodbye 会把容忍度降成 0 —— 误点 ×、笔记本
-   * 合盖，都会 scancel 掉一个跑了 12 小时的作业。
+   *   保留一条「不释放」的路径，前提是它能被可靠地触发在正确的时机上。而它不能：
+   *   真正需要保住作业的情形是**客户端没能说上话** —— 断电、睡眠、网线被拔、
+   *   进程被 kill -9。那些情况下根本没有代码会跑到这里来，这条分支在里面
+   *   一次都不会被用到；反过来，能被它命中的只有「用户明确表达了终止意图」。
+   *   于是它成了纯粹的误伤面：用户点了关闭或断开，作业却留在集群上继续占着
+   *   12 小时的资源，而界面上什么都没有。
+   *
+   *   意外消失那条路径由守护进程的 suspect(300s)/orphaned(1800s) 容错窗口覆盖
+   *   （见文件头第 1 条），客户端再提供一个「主动保活」的开关是多余且有害的。
    */
-  async stop({ farewell = true } = {}) {
+  async stop() {
     this._stopped = true;
     this._stopHeartbeat();          // ★ 必须在 goodbye 之前停。
     this._stopStatusPoll();         //    否则残留心跳收到 code:3 会被误判成出错。
 
     await this.tunnel.stop();
 
-    if (!farewell || !this.sessionId) {
+    if (!this.sessionId) {
       this._setState(State.ENDED);
-      return { ok: true, state: 'kept', detail: '已关闭窗口，作业继续运行。' };
+      return { ok: true, state: 'ended', detail: '没有进行中的会话。' };
     }
 
     let resp;
@@ -463,14 +466,6 @@ class SessionController extends EventEmitter {
     };
   }
 
-  /** 进程要退出时的兜底：尽最大努力发一次 goodbye，并把失败落盘待补发。 */
-  async farewellOnQuit() {
-    if (!this.sessionId) return { ok: true };
-    this._stopped = true;
-    this._stopHeartbeat();
-    this._stopStatusPoll();
-    return this.stop({ farewell: true });
-  }
 }
 
 function withTimeout(promise, ms) {

@@ -120,7 +120,7 @@ function bootstrap() {
     win.setBusy(false);
     let res = { ok: true };
     try {
-      res = await controller.farewellOnQuit();
+      res = await controller.stop();
     } catch (err) {
       res = { ok: false, detail: err.message };
     }
@@ -140,7 +140,7 @@ function bootstrap() {
  *
  * ★ 三种「没有可用密钥」的情况必须分开对待 —— 混在一起处理，就会在第三种情况下
  *   悄悄毁掉用户已经注册过的公钥：
- *     not_saved            → 确实还没有，生成一把（放内存，等用户选存储方式）
+ *     not_saved            → 确实还没有，生成一把（放内存，等用户去重新生成）
  *     no_secure_storage    → 文件在，但这台机器没有凭据库，解不开 → **报错，不覆盖**
  *     decrypt_failed       → 文件在，但 keyring 变了 → **报错，不覆盖**
  *     文件在但格式不对      → **报错，不覆盖**
@@ -149,6 +149,16 @@ function loadOrCreateKey() {
   const got = config.getSecret(cfgDir, secureCrypto());
 
   if (got.ok) {
+    // 旧版本允许「明文保存」，磁盘上可能有这么一份。既然已经读出来了，
+    // 就别让它继续以明文躺着 —— 顺手加密重存。存不下去（这台机器没有凭据库）
+    // 也不当作失败：密钥本身是可用的，为一件副产品把用户拦在门外不值当，
+    // 记一个标记，等窗口建好之后再如实告诉他。
+    let legacyPlain = false;
+    let migrated = false;
+    if (got.legacy) {
+      if (config.setSecret(cfgDir, secureCrypto(), got.value).ok) migrated = true;
+      else legacyPlain = true;
+    }
     if (!keys.isUsablePrivatePem(got.value)) {
       return { error: 'bad_key_format',
                detail: '本机保存的私钥无法解析。它可能被截断或改写过。' };
@@ -162,7 +172,8 @@ function loadOrCreateKey() {
       publicKeyLine: line,
       fingerprint: keys.fingerprintOf(line),
       persisted: true,
-      mode: got.mode,
+      legacyPlain,
+      migrated,
     };
   }
 
@@ -171,9 +182,9 @@ function loadOrCreateKey() {
       error: got.reason,
       detail: got.reason === 'no_secure_storage'
         ? '本机保存过一把私钥，但这台机器现在没有可用的凭据库，解不开它。'
-          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后手动选择。'
+          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。'
         : '本机保存的私钥解密失败（凭据库可能被重置过）。'
-          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后手动选择。',
+          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。',
     };
   }
 
@@ -184,23 +195,27 @@ function loadOrCreateKey() {
     publicKeyLine: gen.publicKeyLine,
     fingerprint: gen.fingerprint,
     persisted: false,
-    mode: cfg.secretMode,
   };
-  // 有安全存储就直接加密存盘，不打扰用户。没有则留在内存里，由界面问。
-  if (secureAvailable()) {
-    const res = config.setSecret(cfgDir, secureCrypto(), config.SECRET_MODE.ENCRYPTED, gen.privateKeyPem);
-    if (res.ok) {
-      info.persisted = true;
-      info.mode = config.SECRET_MODE.ENCRYPTED;
-      cfg.secretMode = config.SECRET_MODE.ENCRYPTED;
-      config.saveConfig(cfgDir, cfg);
-    }
-  }
+  // 有安全存储就直接加密存盘，不打扰用户；没有则留在内存里，
+  // 由界面如实说明「这台机器存不了密钥」，而不是换个方式偷偷存下来。
+  const res = config.setSecret(cfgDir, secureCrypto(), gen.privateKeyPem);
+  if (res.ok) info.persisted = true;
   return info;
 }
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
 async function announceBackend() {
+  // 旧版本的「明文保存」留下的痕迹。只在真有这回事时才说话 —— 一条每次都出现的
+  // 提示，和没有提示是一回事。
+  if (keyInfo && keyInfo.migrated) {
+    win.pushNotice('info', '本机保存的私钥此前是明文，已改为加密保存。');
+  }
+  if (keyInfo && keyInfo.legacyPlain) {
+    win.pushNotice('warn',
+      '本机保存的私钥仍是明文：这台机器没有可用的系统凭据库，加密存不了。'
+      + '密钥可以正常使用，但它在磁盘上是可读的。');
+  }
+
   if (backend.kind === 'demo') {
     // ★ 演示后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
     //   曾经这里在演示模式下提前 return，结果是 service_port 恒为 0，
@@ -394,11 +409,18 @@ async function openCodeServer(snap) {
 }
 
 // ── 关闭 ────────────────────────────────────────────────────────────────────
-async function handleWindowClose(mode) {
+/**
+ * 关窗 = 结束会话并释放资源。
+ *
+ * **没有「保留作业」这条分支** —— 见 session.js 的 stop()：真正需要保住作业的
+ * 是「客户端没能说上话」那种情况（断电、睡眠、网线被拔），而那些情况下这里的
+ * 代码根本不会被执行到。能给这条分支投票的只有用户的主动点击，于是它只会误伤。
+ */
+async function handleWindowClose() {
   win.setBusy(false);
   try {
     if (controller) {
-      const res = await controller.stop({ farewell: mode === 'farewell' });
+      const res = await controller.stop();
       if (!res.ok) {
         win.pushNotice('error', res.detail);
         if (controller.sessionId) config.addPendingGoodbye(cfgDir, controller.sessionId);
@@ -476,7 +498,6 @@ function registerIpc() {
     keyError: (keyInfo && keyInfo.error) || null,
     keyErrorDetail: (keyInfo && keyInfo.detail) || null,
     keyPersisted: Boolean(keyInfo && keyInfo.persisted),
-    secretMode: cfg.secretMode,
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
     // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去选明文保存。
     secureStorageAvailable: secureAvailable(),
@@ -488,15 +509,18 @@ function registerIpc() {
 
   // ── 连接条目的增删改 ──
   send('app:saveConnection', async (input) => {
-    const conn = config.normalizeConnection(input, input && input.id);
-    if (!conn) {
+    // created=false 表示这条连接本来就在（同一个人、同一台主机、同一个端口）。
+    // 界面据此说明「已存在，直接用它」，而不是让列表里悄悄多出一条一模一样的。
+    const up = config.upsertConnection(cfg, input);
+    if (!up) {
       return { ok: false, error: '连接信息不完整：用户名、主机、端口（1-65535）都必填。' };
     }
-    const list = cfg.connections.filter((c) => c.id !== conn.id);
-    cfg.connections = [...list, conn];
-    if (!cfg.activeConnectionId) cfg.activeConnectionId = conn.id;
+    if (!cfg.activeConnectionId) cfg.activeConnectionId = up.connection.id;
     config.saveConfig(cfgDir, cfg);
-    return { ok: true, connection: conn, connections: cfg.connections };
+    return {
+      ok: true, connection: up.connection, created: up.created,
+      connections: cfg.connections,
+    };
   });
 
   send('app:deleteConnection', async (id) => {
@@ -527,6 +551,13 @@ function registerIpc() {
       conn = cfg.connections.find((c) => c.id === payload.connectionId) || conn;
     }
     if (!conn) return { ok: false, error: '还没有配置登录节点。', code: 'no_connection' };
+
+    // 显式点名要连哪一条，就是「这条是我要用的」。不跟着改的话，
+    // 下次启动自动重连会连到另一台上去 —— 而用户完全看不出为什么。
+    if (cfg.activeConnectionId !== conn.id) {
+      cfg.activeConnectionId = conn.id;
+      config.saveConfig(cfgDir, cfg);
+    }
 
     const res = await doConnect(conn);
     return { ...res, whoami, partitions };
@@ -564,7 +595,6 @@ function registerIpc() {
     publicKey: (keyInfo && keyInfo.publicKeyLine) || null,
     fingerprint: (keyInfo && keyInfo.fingerprint) || null,
     persisted: Boolean(keyInfo && keyInfo.persisted),
-    mode: (keyInfo && keyInfo.mode) || null,
   }));
 
   send('app:copyPublicKey', async () => {
@@ -574,35 +604,55 @@ function registerIpc() {
   });
 
   /**
-   * 选择的存储方式。两种情形：
-   *   - 密钥还没落盘（内存里那把）：按选择的模式存下来
-   *   - 密钥读不出来（keyError）：先清掉坏文件，再生成全新的
-   * 第二种会作废用户已注册的公钥，所以**必须由用户显式发起**。
+   * 作废现有密钥、重新生成一把，并加密存盘。
+   *
+   * ★ 这是唯一的密钥生成入口，且**必须由用户显式发起**（界面上是一个带确认的按钮）：
+   *   它会作废用户已经注册到 IDM 的那把公钥，一旦悄悄发生，表现只是「认证失败」，
+   *   指不回根因。同理，密钥读不出来（keyError）时也是走这里，不做任何自动覆盖。
    */
-  send('app:setSecretMode', async ({ mode, regenerate }) => {
-    if (regenerate) {
-      const gen = keys.generate();
-      keyInfo = {
-        privateKeyPem: gen.privateKeyPem,
-        publicKeyLine: gen.publicKeyLine,
-        fingerprint: gen.fingerprint,
-        persisted: false,
-        mode,
-      };
+  send('app:regenerateKey', async () => {
+    const gen = keys.generate();
+    const saved = config.setSecret(cfgDir, secureCrypto(), gen.privateKeyPem);
+    keyInfo = {
+      privateKeyPem: gen.privateKeyPem,
+      publicKeyLine: gen.publicKeyLine,
+      fingerprint: gen.fingerprint,
+      persisted: saved.ok,
+      error: null,
+      detail: null,
+    };
+    // 存不下去也要把新公钥给出去：用户此刻正需要把它注册到 IDM，
+    // 至于「这台机器存不了」，由界面另外如实说明。
+    return {
+      ok: saved.ok,
+      reason: saved.ok ? null : saved.reason,
+      publicKey: gen.publicKeyLine,
+      fingerprint: gen.fingerprint,
+    };
+  });
+
+  /**
+   * 主动断开与登录节点的连接。
+   *
+   * ★ 这也是**一次彻底的终止**：只要还有会话（哪怕它已经出错，作业却可能还在
+   *   集群上跑着），就先把作业取消、资源释放掉，再拆连接。
+   *   断开等于「我不要了」，不等于「我先走开，你继续烧着」。
+   *
+   *   注意它与「意外消失」的分工：断电、睡眠、网线被拔时这个方法根本不会被调用，
+   *   那种情况靠守护进程的 suspect/orphaned 容错窗口兜底，客户端下次启动自动接回。
+   */
+  send('app:disconnect', async () => {
+    let released = { ok: true, detail: '' };
+    if (controller && controller.sessionId) {
+      released = await controller.stop();
+      // 释放失败要说出来。守护进程的 released 并不保证作业真的停了
+      // （见 memory cluster-side-defects），所以不能在这里宣布成功。
+      if (!released.ok) win.pushNotice('error', released.detail);
     }
-    if (!keyInfo || !keyInfo.privateKeyPem) {
-      return { ok: false, error: '还没有生成密钥。' };
-    }
-    const res = config.setSecret(cfgDir, secureCrypto(), mode, keyInfo.privateKeyPem);
-    if (res.ok) {
-      keyInfo.persisted = true;
-      keyInfo.mode = mode;
-      keyInfo.error = null;
-      keyInfo.detail = null;
-      cfg.secretMode = mode;
-      config.saveConfig(cfgDir, cfg);
-    }
-    return res.ok ? { ok: true, mode, publicKey: keyInfo.publicKeyLine } : res;
+    await backend.close();
+    whoami = null;
+    partitions = [];
+    return { ok: true, released };
   });
 
   // ── 会话 ──
@@ -620,10 +670,10 @@ function registerIpc() {
     return resp;
   });
 
-  send('app:stop', async (mode) => {
+  // 只有一个语义：结束会话并释放资源。没有「保持作业运行」的开关。
+  send('app:stop', async () => {
     if (!controller) return { ok: true };
-    const res = await controller.stop({ farewell: mode !== 'keep' });
-    return res;
+    return controller.stop();
   });
 
   send('app:reload', async () => { await win.reloadCodeServer(); return { ok: true }; });

@@ -44,10 +44,15 @@
 对客户端而言**只有 `slurmate rpc` 这一个稳定入口**（`cluster/slurmate:10-17`）：
 
 ```
-ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com -- /usr/local/bin/slurmate rpc
+ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
+    -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 ```
 
 - 请求体走 **stdin**，响应走 **stdout**，各一行 JSON。**一次一请求**，请求完即退出。
+- 客户端把命令显式包在 `/bin/bash -c` 里执行（见 [client/README.md](../client/README.md)）——
+  sshd 用登录 shell 解释 exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。
+  但**登录 shell 的 rc 文件仍会执行**（zsh 的 `~/.zshenv` 连 `-c` 都读），
+  所以客户端解析应答时从后往前找第一个合法信封，而不是假定它在最后一行。
 - argv 是编译期常量，用户输入永远不出现在命令串里。这既是防注入，也是穿过
   登录节点上 `ForceCommand` 守卫的必要条件（命令串里不能出现 `code-server` 字面量）。
 - 中文 detail 以字面 UTF-8 输出（`ensure_ascii=False`，`cluster/slurmate:233`）；

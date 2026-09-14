@@ -11,7 +11,10 @@
  *    仓库里**至今没有一条实测结论**，全是推断；第 1、2 条不成立则本文件整个作废：
  *
  *      # 假设 A：sshd 的 ForceCommand（若你的集群装了）放行固定 argv 的 slurmate rpc
- *      ssh -T -p 10100 user@<登录节点> -- /usr/local/bin/slurmate rpc <<< '{"op":"ping"}'
+ *      #   ★ 必须**原样**用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
+ *      #     引号吃掉，ssh 发过去的是另一个命令串，验的就不是客户端真正发的那个了。
+ *      ssh -T -p 10100 user@<登录节点> \
+ *          -- "/bin/bash -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
  *      #   期望：恰好一行 JSON，ok:true，退出码 0。有额外输出就是没直通。
  *      #
  *      #   背景：有些集群会给普通用户的 sshd 装一个 ForceCommand 拦截器来管
@@ -62,8 +65,27 @@ const ssh2 = require('ssh2');
 
 const { Backend, KIND } = require('./backend.js');
 
-/** 固定 argv。**常量**，不接受任何用户输入拼接。 */
-const RPC_CMD = '/usr/local/bin/slurmate rpc';
+/**
+ * 固定 argv。**常量**，不接受任何用户输入拼接。
+ *
+ * ★ 显式走 `/bin/bash -c`，不用「登录 shell 是什么就用什么」。
+ *
+ *   sshd 执行 exec 请求的方式是 `$SHELL -c "<命令串>"`，而 `$SHELL` 来自
+ *   /etc/passwd —— 在 HPC 登录节点上经常是 zsh。zsh 与 bash 并非完全互通，
+ *   同一条命令串在一边能跑、在另一边是语法错误。我们发的是**写死的**命令串，
+ *   一旦它用上某个 shell 的方言，症状会是「在这台机器上能连、换一台就认证失败」
+ *   这类指不回根因的问题。把解释器钉死，等于把这条变量从等式里去掉。
+ *
+ *   ★ 但它**挡不住 rc 文件**，别把这两件事混起来：sshd 仍然先用登录 shell 解释
+ *     整个命令串，所以 zsh 的 `~/.zshenv` 照样会被 source（zsh 连非交互、非登录的
+ *     `-c` 都会读它 —— 这是它与 bash 的一处真实差异，bash 的 `-c` 不读任何 rc）。
+ *     `~/.zshenv` 若往 stdout 打印东西，就会混进 RPC 的应答里。
+ *     那一条由下面的应答解析兜底（从后往前找第一个合法信封），不是靠这里换 shell。
+ *
+ *   `/bin/bash` 在 Linux 上不存在的概率很低；真没有的话，命令会以
+ *   「没有返回可解析的应答」明确失败，而不是静默连上。
+ */
+const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
 
 const READY_TIMEOUT_MS = 20000;
 const KEEPALIVE_INTERVAL_MS = 10000;
@@ -72,6 +94,37 @@ const KEEPALIVE_COUNT_MAX = 6;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+
+/**
+ * 从命令的原始 stdout 里挑出协议应答。
+ *
+ * ★ 这是「这台机器的 shell 环境干不干净」与「协议解析」之间唯一的一道缝，
+ *   所以规则要写死在这里，而不是散在回调里靠运气。
+ *
+ * 规则：**从后往前**找第一个既像 JSON 对象、又带布尔 `ok` 的行。
+ *
+ * - 从后往前：sshd 用**登录 shell** 解释我们发过去的命令串，登录 shell 的 rc 文件
+ *   可能在应答**之前**打印东西（zsh 的 `~/.zshenv` 连 `-c` 都会读）。取「最后一行」
+ *   是个碰巧够用的启发式，从后往前扫才两边都不怕。
+ * - 必须是对象且带布尔 `ok`：只看「是个 JSON 对象」太松。rc 文件里打印一段恰好是
+ *   对象的 JSON，会被当成守护进程的应答送进 classify()，然后被解释成一个关于协议的
+ *   错误 —— 而真正的原因（shell 环境不干净）连提都不会被提到。
+ *
+ * @returns {{found:true, envelope:object} | {found:false, lines:string[]}}
+ */
+function pickEnvelope(stdout) {
+  const lines = String(stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(lines[i]);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)
+          && typeof obj.ok === 'boolean') {
+        return { found: true, envelope: obj };
+      }
+    } catch { /* 这一行不是 JSON，继续往前找 */ }
+  }
+  return { found: false, lines };
+}
 
 /** 读一个 SSH string（uint32 长度 + 内容）。用来从主机密钥 blob 里取算法名。 */
 function readSshString(buf, offset) {
@@ -337,23 +390,22 @@ class SshBackend extends Backend {
         stream.on('exit', () => { gotExit = true; });
         stream.on('error', (e) => finish(transportError('通道出错：' + e.message)));
         stream.on('close', () => {
-          // 判据的选择：**只要有可解析的 JSON 行就用它**，不因为「没收到 exit 事件」
-          // 就把它当成失败 —— 宁可不丢一个合法应答。反过来，stdout 空或不是 JSON
-          // 时，把 stderr 和 exit 情况一并报出来，因为这正是「命令没跑起来」
-          // （守护进程没装、被 guard 拦了、python 崩了）的现场。
-          const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-          const last = lines[lines.length - 1];
-          if (last) {
-            try {
-              const obj = JSON.parse(last);
-              if (obj && typeof obj === 'object') return finish(obj);
-            } catch { /* 落到下面报错 */ }
-          }
+          // 不因为「没收到 exit 事件」就当成失败 —— 宁可不丢一个合法应答。
+          const picked = pickEnvelope(stdout);
+          if (picked.found) return finish(picked.envelope);
+
+          // 一行都没解析出来。把**原始输出**一并报出来，别只留一句「解析失败」——
+          // 这正是「rc 文件污染 / 守护进程没装 / 被 guard 拦了 / python 崩了」
+          // 四种情况的共同现场，而它们的修法完全不同。
           const parts = ['登录节点没有返回可解析的应答'];
           if (!gotExit) parts.push('（命令通道被关闭，未收到退出状态）');
           const errText = stderr.trim().split('\n').slice(0, 3).join(' / ');
           if (errText) parts.push('：' + errText);
-          else if (lines.length === 0) parts.push('（输出为空）');
+          else if (picked.lines.length === 0) parts.push('（输出为空）');
+          else {
+            parts.push(`（收到 ${picked.lines.length} 行输出，都不是协议应答：`
+              + picked.lines.slice(0, 3).join(' / ').slice(0, 200) + '）');
+          }
           finish(transportError(parts.join('')));
         });
 
@@ -401,4 +453,7 @@ function isImplemented() {
   return true;
 }
 
-module.exports = { isImplemented, SshBackend, RPC_CMD, hostKeyFingerprint, hostKeyAlgorithm };
+module.exports = {
+  isImplemented, SshBackend, RPC_CMD, hostKeyFingerprint, hostKeyAlgorithm,
+  pickEnvelope,     // 导出给测试：它是纯函数，规则又值得钉住
+};

@@ -164,7 +164,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.ok(typeof before === 'number' && before < 10000, '启动后应当立刻打过一次心跳');
 
   // ── 释放 ──
-  const res = await ctl.stop({ farewell: true });
+  const res = await ctl.stop();
   assert.equal(res.ok, true);
   // ★ 返回 releasing 而不是「已结束」—— 因为 op_goodbye 的 ok:true 并不保证
   //   scancel 真的成功了（记忆 cluster-side-defects 的 F12/F13）。
@@ -181,7 +181,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.equal(afterStop, 'refused', '释放后本地端口必须立刻拒绝连接（不能挂住）');
 });
 
-test('不 farewell：关窗口但保持作业运行，不发 goodbye', async (t) => {
+test('★ 主动终止就是彻底终止：没有「保持作业运行」这条退路', async (t) => {
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
@@ -189,14 +189,36 @@ test('不 farewell：关窗口但保持作业运行，不发 goodbye', async (t)
   await ctl.start({}, { preferredPort: await freePort() });
   assert.equal(ctl.state, State.RUNNING);
 
+  // 老接口上那个 farewell:false（「只关窗口，作业继续跑」）已经删掉了。
+  // 就算有人照着旧代码传进来，也**必须**被当成一次正常的释放 ——
+  // 一个能被用户点击触发的「不释放」开关，只会误伤：它命中的所有场景
+  // 都是用户明确表达了终止意图的场景。
   const res = await ctl.stop({ farewell: false });
-  assert.equal(res.state, 'kept');
+  assert.equal(res.ok, true);
+  assert.equal(res.state, 'releasing', '必须真的走释放，不能把作业留在集群上');
 
-  // 作业仍在守护进程那边活着 —— 这正是「保持运行」的意义
+  // 守护进程那边确实收到了 goodbye
   const st = await backend.rpc({ op: 'status', session_id: ctl.sessionId });
   assert.equal(st.ok, true);
-  assert.equal(st.data.session.state, 'enrolled', '作业必须仍在运行');
-  assert.ok(st.data.session.tunnel_target, '隧道目标仍应存在，下次启动才能接上');
+  assert.notEqual(st.data.session.state, 'enrolled', '作业不应当还在跑');
+});
+
+test('★ 意外消失（没来得及发 goodbye）时作业必须还在 —— 这才是「保活」唯一该生效的场景', async (t) => {
+  t.after(keepAlive());
+  const backend = await makeBackend(t, { enrollDelayMs: 200 });
+
+  const ctl = new SessionController({ backend, slot: 1 });
+  await ctl.start({}, { preferredPort: await freePort() });
+  assert.equal(ctl.state, State.RUNNING);
+
+  // 模拟断电/网线被拔：进程直接没了，stop() 根本没机会被调用。
+  // 这里只是「不再碰它」，然后从一个新的观察点去看守护进程那边。
+  const st = await backend.rpc({ op: 'status', session_id: ctl.sessionId });
+  assert.equal(st.ok, true);
+  assert.equal(st.data.session.state, 'enrolled', '客户端没说话，作业就必须还活着');
+  assert.ok(st.data.session.tunnel_target, '隧道目标仍应在，下次启动才能接上');
+
+  await ctl.stop();
 });
 
 test('守护进程不可达时：不判定会话结束，且持续重试', async (t) => {
@@ -205,7 +227,7 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
 
   // 心跳间隔压到 150ms，好在测试里观察到「反复失败但不放弃」
   const ctl = new SessionController({ backend, slot: 1, heartbeatMs: 150, statusMs: 150 });
-  t.after(() => ctl.stop({ farewell: false }));
+  t.after(() => ctl.stop());
   await ctl.start({}, { preferredPort: await freePort() });
   assert.equal(ctl.state, State.RUNNING);
 

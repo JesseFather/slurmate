@@ -3,7 +3,11 @@
  * panel.js —— 面板页逻辑。
  *
  * 面板有四种形态，由 session:state 驱动切换：
- *   设置（公钥 + 连接）→ 开始开发 → 会话进行中 → 结束/错误
+ *   登录节点 → 开始开发 → 会话进行中 → 结束/错误
+ *
+ * ★ 登录节点这一屏的第一眼必须是**已保存的连接** —— 用户每次打开客户端要做的事
+ *   是「连上上次那台」，不是「再填一遍地址」。公钥和地址表单折进「新建连接」里，
+ *   那是第一次使用时才走一遍的流程。
  *
  * 会话跑起来之后窗口主体会被 code-server 的 WebContentsView 整个盖住，
  * 所以「重新加载 / 结束会话」这两个必需的操作也放在状态条里 ——
@@ -29,6 +33,7 @@ let boot = null;
 let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
+let newOpen = false;         // 「新建连接」表单是否展开
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
 function fmtLeft(expiresAt) {
@@ -100,13 +105,27 @@ function renderSnapshot(s) {
 
   // 形态切换
   const idle = !s || st === 'idle';
-  $('sec-setup').classList.toggle('hidden', !idle);
+  $('sec-connect').classList.toggle('hidden', !idle);
+  // 会话一起来就把新建表单收掉 —— 它只在「还没连上」这一屏里说得通
+  if (!idle) setNewOpen(false);
   // 「开始开发」只在真的连上之后才出现 —— 连不上就没有分区可挑，
   // 摆一个按不动的按钮只会让人以为客户端坏了。
   $('sec-purpose').classList.toggle('hidden', !(idle && connected));
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
+}
+
+/** 展开／收起「新建连接」。表单开着的时候把入口按钮收起来，免得两块并排。 */
+function setNewOpen(open) {
+  newOpen = open;
+  $('sec-new').classList.toggle('hidden', !open);
+  $('btn-new').classList.toggle('hidden', open);
+  // 一条连接都没有时的引导语要跟着变：表单已经开着的时候还叫用户去点
+  // 「上面的新建连接」，而那个按钮恰好被收起来了 —— 指令指向一个不存在的东西。
+  $('conn-empty').textContent = open
+    ? '还没有保存任何登录节点。填好下面的用户名、主机和端口，点「保存并连接」。'
+    : '还没有保存任何登录节点。点上面的「新建连接」填一个 —— 只需要用户名、主机和端口。';
 }
 
 function renderKv(s) {
@@ -156,13 +175,23 @@ function renderKey(info) {
     err.classList.add('hidden');
   }
 
-  // 密钥没能落盘（这台机器没有凭据库）时，把「保存方式」这一块推到用户眼前 ——
-  // 不静默降级是我们的原则，但如果用户看不见这个选择，原则就等于没实现。
-  $('sec-secret').classList.toggle('hidden', Boolean(boot.keyError));
-  if (!info.persisted && !boot.keyError) {
-    $('securenote').textContent =
-      '注意：这台机器上没有可用的系统凭据库，私钥还没有保存。'
-      + '不保存的话，每次启动都会生成新密钥，你注册到 IDM 的那把会失效。';
+  // 密钥存不下来（这台机器没有凭据库）。必须**说出来**，不能只是没保存成功。
+  //
+  // 这里曾经摆着一个「私钥保存方式」下拉框，让用户在加密／明文／不保存之间选。
+  // 那等于把「你的私钥会以明文躺在磁盘上」包装成一个需要用户自己权衡的选项 ——
+  // 选明文的那个用户并不知道自己在放弃什么。现在只有加密一种方式，
+  // 存不了就如实讲清楚后果，没有第二个选项可以让人选错。
+  const np = $('key-nopersist');
+  const nopersist = !boot.keyError && info.persisted === false;
+  np.classList.toggle('hidden', !nopersist);
+  if (nopersist) {
+    // 「没有凭据库」和「有凭据库但这次写失败了」是两种不同的毛病，
+    // 修法也不同，所以文案要分开 —— 一句笼统的「保存失败」指不回根因。
+    const tail = '本次运行可以正常使用；但下次启动会重新生成一把新密钥，'
+      + '你得把新公钥重新注册到 IDM 一次。';
+    np.textContent = boot.secureStorageAvailable
+      ? '注意：私钥这次没能保存到本机。' + tail
+      : '注意：这台机器上没有可用的系统凭据库，私钥存不下来。' + tail;
   }
 }
 
@@ -170,38 +199,49 @@ function renderKey(info) {
 function renderConnections(list) {
   const box = $('conn-list');
   box.textContent = '';
-  $('conn-wrap').classList.toggle('hidden', list.length === 0);
+  $('conn-empty').classList.toggle('hidden', list.length > 0);
 
   for (const c of list) {
     const li = document.createElement('li');
-    const active = c.id === boot.activeConnectionId;
-    li.className = 'conn' + (active ? ' active' : '');
+    // 「当前」和「已连接」是两回事：断开之后活动连接还是它，但没有连着。
+    const live = c.id === boot.activeConnectionId && connected;
+    li.className = 'conn' + (live ? ' active' : '');
 
-    const probe = lastProbe.find((p) => p.id === c.id);
     const t = document.createElement('span');
     t.className = 't';
-    t.textContent = `${c.label} — ${c.user}@${c.host}:${c.port}`;
+    // label 只在它真的多提供了信息时才显示。表单里没有「备注」这一栏，
+    // label 默认就等于 host —— 照搬会出现
+    // 「198.51.100.10 — alice@198.51.100.10:10100」这种把同一件事说两遍的条目。
+    t.textContent = (c.label && c.label !== c.host)
+      ? `${c.label} · ${c.user}@${c.host}:${c.port}`
+      : `${c.user}@${c.host}:${c.port}`;
+
+    const probe = lastProbe.find((p) => p.id === c.id);
     const m = document.createElement('span');
     m.className = 'm';
-    if (!probe) m.textContent = '未探测';
-    else if (probe.reachable) m.textContent = `可达 · ${probe.rttMs}ms`;
-    else m.textContent = `不可达：${probe.error || '失败'}`;
-    m.classList.toggle('bad', Boolean(probe && !probe.reachable));
+    if (live) {
+      m.textContent = '已连接';
+      m.classList.add('good');
+    } else if (!probe) {
+      m.textContent = '未探测';
+    } else if (probe.reachable) {
+      m.textContent = `可达 · ${probe.rttMs}ms`;
+    } else {
+      m.textContent = `不可达：${probe.error || '失败'}`;
+      m.classList.add('bad');
+    }
 
-    const pick = document.createElement('button');
-    pick.className = 'ghost tiny';
-    pick.textContent = active ? '当前' : '设为当前';
-    pick.disabled = active;
-    pick.onclick = async () => {
-      const r = await window.slurmate.setActiveConnection(c.id);
-      if (!r.ok) return notice('error', r.error);
-      boot.activeConnectionId = c.id;
-      renderConnections(boot.connections);
-    };
+    // 主动断开。断的只是客户端这一跳 —— 作业还在集群上跑着，
+    // 再点「连接」会重新接上它。会话进行中不给断（主进程也会拒）。
+    const main = document.createElement('button');
+    main.className = 'tiny' + (live ? ' ghost danger-ghost' : '');
+    main.textContent = live ? '断开' : '连接';
+    main.onclick = () => (live ? doDisconnect() : doConnectTo(c));
 
     const del = document.createElement('button');
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
+    del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
     del.onclick = async () => {
       const r = await window.slurmate.deleteConnection(c.id);
       if (!r.ok) return notice('error', r.error);
@@ -211,7 +251,7 @@ function renderConnections(list) {
       notice('info', '已删除该连接。');
     };
 
-    li.append(t, m, pick, del);
+    li.append(t, m, main, del);
     box.append(li);
   }
 }
@@ -276,6 +316,7 @@ async function handleConnectResult(res) {
       notice('error', '你的账号尚未分配集群计算权限，请联系管理员 —— 否则提交作业会失败。');
     }
     if (res.partitions) renderPartitions(res.partitions);
+    renderConnections(boot.connections);
     renderSnapshot({ state: 'idle', demo: boot.demo });
     return true;
   }
@@ -307,15 +348,15 @@ async function init() {
     $('app-sub').textContent = boot.backendLabel;
   }
 
-  renderKey(boot);
-  $('f-savemode').value = boot.secretMode === 'plain' ? 'plain'
-    : boot.secretMode === 'none' ? 'none' : 'encrypted';
-  if (!boot.secureStorageAvailable) {
-    // 连「加密保存」这个选项都不该出现在没有凭据库的机器上 ——
-    // 摆在那里只会让用户选了之后收到一句失败。
-    const opt = $('f-savemode').querySelector('option[value="encrypted"]');
-    if (opt) { opt.disabled = true; opt.textContent = '加密保存（这台机器没有系统凭据库）'; }
-  }
+  // bootstrap 的字段名是 keyXxx（那个包里同时还装着连接、分区、版本号一堆东西），
+  // renderKey 要的是密钥本身那几个。**必须显式转一手** —— 此前直接把 boot 整个传进去，
+  // 于是 `info.fingerprint` 一直是 undefined，指纹从来没在首屏出现过；
+  // 「私钥存不下来」的提示也因为 `undefined === false` 不成立而永远不显示。
+  renderKey({
+    publicKey: boot.publicKey,
+    fingerprint: boot.keyFingerprint,
+    persisted: boot.keyPersisted,
+  });
 
   if (boot.connection) {
     $('f-user').value = boot.connection.user;
@@ -324,8 +365,13 @@ async function init() {
   }
   renderConnections(boot.connections);
   renderPartitions(boot.partitions || []);
+  // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
+  if ((boot.connections || []).length === 0) setNewOpen(true);
 
   // ── 事件 ──
+  $('btn-new').onclick = () => setNewOpen(true);
+  $('btn-cancel-new').onclick = () => setNewOpen(false);
+
   $('btn-copykey').onclick = async () => {
     const r = await window.slurmate.copyPublicKey();
     notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : r.error);
@@ -336,27 +382,17 @@ async function init() {
       '重新生成会作废当前这把密钥。\n\n'
       + '你必须把新的公钥重新注册到 IDM，否则连不上。\n\n确定要重新生成吗？');
     if (!yes) return;
-    const mode = $('f-savemode').value;
-    const r = await window.slurmate.setSecretMode(mode, true);
-    if (!r.ok) return notice('error', '重新生成失败：' + (r.reason || r.error));
-    const info = await window.slurmate.publicKey();
+    const r = await window.slurmate.regenerateKey();
+    if (!r || !r.publicKey) return notice('error', '重新生成失败。');
     boot.keyError = null;
-    renderKey({ ...info, publicKey: info.publicKey });
-    notice('warn', '已生成新密钥。请把上面的新公钥重新注册到 IDM，然后重新连接。');
-  };
-
-  $('btn-savemode').onclick = async () => {
-    const mode = $('f-savemode').value;
-    const r = await window.slurmate.setSecretMode(mode, false);
+    renderKey(await window.slurmate.publicKey());
     if (r.ok) {
-      notice('ok', '已保存私钥的保存方式。');
-      const info = await window.slurmate.publicKey();
-      boot.keyPersisted = true;
-      renderKey(info);
-    } else if (r.reason === 'no_secure_storage') {
-      notice('error', '这台机器上没有可用的系统凭据库，无法加密保存。请改选「明文保存」或「不保存」。');
+      notice('warn', '已生成新密钥。请把上面的新公钥重新注册到 IDM，然后重新连接。');
     } else {
-      notice('error', '保存失败：' + (r.reason || r.error));
+      // 存不下去也要说清楚 —— 用户此刻正拿着这把新公钥去注册，
+      // 而它下次启动就会消失，这个后果必须当场讲。
+      notice('error', '已生成新密钥，但它没能保存到本机（没有可用的系统凭据库）——'
+        + '关闭客户端后这把密钥就没了。请先把上面的公钥注册到 IDM。');
     }
   };
 
@@ -366,15 +402,21 @@ async function init() {
     const port = Number($('f-port').value) || 10100;
     if (!user || !host) return notice('error', '请先填写用户名和主机。');
 
-    const saved = await window.slurmate.saveConnection({ user, host, port, label: host });
+    // 不传 label：表单里没有「备注」这一栏，服务端会回落成 host。
+    // 更要紧的是**不传 id** —— 服务端按 user@host:port 判重，
+    // 同一个地址反复点「保存并连接」只会复用已有那条，不会攒出一串一样的条目。
+    const saved = await window.slurmate.saveConnection({ user, host, port });
     if (!saved.ok) return notice('error', saved.error);
-    boot.connections = (boot.connections || []).filter((c) => c.id !== saved.connection.id)
-      .concat(saved.connection);
+    boot.connections = saved.connections;
     boot.activeConnectionId = saved.connection.id;
-    await window.slurmate.setActiveConnection(saved.connection.id);
     renderConnections(boot.connections);
+    notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
 
-    await handleConnectResult(await window.slurmate.connect({ connectionId: saved.connection.id }));
+    setNewOpen(false);
+    const ok = await handleConnectResult(
+      await window.slurmate.connect({ connectionId: saved.connection.id }));
+    // 没连上就把表单放回来，省得用户还要再点一次「新建连接…」
+    if (!ok) setNewOpen(true);
   };
 
   $('btn-probe').onclick = doProbe;
@@ -422,11 +464,6 @@ async function init() {
   $('btn-end').onclick = () => endSession();
   $('sb-end').onclick = () => endSession();
 
-  $('btn-keep').onclick = async () => {
-    const res = await window.slurmate.stop('keep');
-    notice('info', (res && res.detail) || '已关闭，作业继续运行。');
-  };
-
   for (const b of document.querySelectorAll('[data-debug]')) {
     b.onclick = async () => {
       const r = await window.slurmate.debug(b.dataset.debug);
@@ -448,11 +485,51 @@ async function init() {
   // 拉一次当前状态（可能是启动时自动接上的会话）
   const s = await window.slurmate.state();
   if (s && s.state && s.state !== 'idle' && s.state !== 'ended') connected = true;
+  // connected 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
+  // 补一次，否则自动接上会话时那一条不会显示「已连接」
+  renderConnections(boot.connections);
   renderSnapshot(s || { state: 'idle', demo: boot.demo });
 }
 
+/** 连上列表里的某一条。点它就等于把它设为当前连接。 */
+async function doConnectTo(c) {
+  const r = await window.slurmate.setActiveConnection(c.id);
+  if (!r.ok) return notice('error', r.error);
+  boot.activeConnectionId = c.id;
+  renderConnections(boot.connections);
+  await handleConnectResult(await window.slurmate.connect({ connectionId: c.id }));
+}
+
+/**
+ * 主动断开。
+ *
+ * ★ 断开 = **彻底终止**。还有会话的话先取消作业、释放资源，再拆连接。
+ *   「断开」和「结束会话」在这里是同一件事的两种说法，因为对用户来说
+ *   它们的意思本来就一样：我不要了。凡是用户主动表达的终止，都不该留下
+ *   一个还在集群上占着资源的作业。
+ *
+ *   反过来，合盖/断网/断电时这个函数不会被调用 —— 那条路走守护进程的
+ *   suspect/orphaned 容错窗口，客户端下次启动自动接回。
+ */
+async function doDisconnect() {
+  const r = await window.slurmate.disconnect();
+  if (!r || !r.ok) return notice('error', (r && r.error) || '断开失败。');
+  connected = false;
+  whoami = null;
+  const rel = r.released;
+  if (rel && !rel.ok) {
+    notice('error', rel.detail);          // 释放没成功必须说，不能吞掉
+  } else if (rel && rel.state === 'releasing') {
+    notice('info', '已断开连接，并请求释放会话。请以状态条变为「已结束」为准。');
+  } else {
+    notice('info', '已断开与登录节点的连接。');
+  }
+  renderConnections(boot.connections);
+  renderSnapshot({ state: 'idle', demo: boot.demo });
+}
+
 async function endSession() {
-  const res = await window.slurmate.stop('farewell');
+  const res = await window.slurmate.stop();
   if (res && res.ok) {
     notice('info', res.detail || '已请求释放。');
     if (res.state === 'releasing') {
