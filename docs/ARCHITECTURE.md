@@ -114,9 +114,10 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 - **RPC 结果分类**：把「守护进程没回话」和「守护进程说了不行」严格分开
   （`client/src/main/classify.js`，见 [PROTOCOL.md](./PROTOCOL.md)）。
 
-> 当前 `client/src/main/backend-ssh.js` 的 `isImplemented()` 返回 `false`，
-> 真实 SSH 后端尚未实现，应用会以演示后端启动并在界面标注。演示后端不是空壳：
-> 它跑真的隧道代码、真的状态机、真的登录契约（`client/README.md:13-27`）。
+> `client/src/main/backend-ssh.js` 已经实现（专用密钥认证、固定 argv 的 RPC、
+> 主机密钥 TOFU 校验），**但从未在真实登录节点上验证过** —— SSH 握手、exec 通道与
+> `direct-tcpip` 转发都还没有一次真实输出。在那之前，`npm run demo` 仍然可用，
+> 演示后端不是空壳：它跑真的隧道代码、真的状态机、真的登录契约（`client/README.md`）。
 
 ## 二、核心转变：ACL 挂作业，不挂 SSH 会话
 

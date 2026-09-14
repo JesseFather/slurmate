@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <!-- 渲染进程只加载本地资源，不需要任何远程来源。
-     这里用一个严格的 CSP 把这件事钉死：即使将来有人往页面里塞了远程脚本也加载不了。 -->
+     这里用一个严格的 CSP 把这件事钉死：即使将来有人往页面里塞了远程脚本也加载不了。
+
+     ⚠️ 这条 CSP 里没有 'unsafe-inline'，所以**页面里不能出现 style="..." 内联样式**
+     （style-src-attr 回落到 style-src）—— 浏览器会把它们静默丢弃，表现是布局莫名其妙
+     不对，而控制台之外没有任何提示。所有样式都在 app.css 里，用 class 表达。 -->
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
 <title>Slurmate</title>
@@ -36,47 +40,88 @@
     <h1>Slurmate</h1>
     <p class="sub" id="app-sub">远程开发会话</p>
 
-    <!-- ── ① 首次设置 ── -->
+    <!-- ── ① 首次设置：公钥 + 连接 ── -->
     <section id="sec-setup">
-      <h2>登录节点</h2>
+      <h2>① 你的公钥</h2>
+      <p class="sub">
+        把下面这一行加进你的 IDM 账户（这是唯一一次手工步骤）。之后客户端用它登录，
+        不再需要密码。它是一把专用密钥，与你平时 ssh 用的那把互不影响。
+      </p>
+      <textarea id="f-pubkey" class="keybox" readonly rows="3"
+                spellcheck="false" placeholder="正在生成密钥…"></textarea>
       <div class="row">
-        <div><label for="f-user">用户名</label><input type="text" id="f-user" autocomplete="username"></div>
-        <div><label for="f-pass">密码</label><input type="password" id="f-pass" autocomplete="current-password"></div>
-        <div><button id="btn-probe" class="ghost">探测地址</button></div>
+        <button id="btn-copykey" class="ghost">复制公钥</button>
+        <button id="btn-regen" class="ghost danger-ghost">重新生成密钥…</button>
+        <span class="sub mono grow-note" id="key-fp"></span>
       </div>
-      <h2>地址</h2>
+      <p class="sub bad hidden" id="key-error"></p>
+
+      <h2>② 登录节点</h2>
       <div class="row">
-        <div style="flex:1">
-          <label for="f-host">登录节点（内网优先，探测结果决定）</label>
-          <select id="f-host" style="width:100%"></select>
+        <div><label for="f-user">用户名</label>
+             <input type="text" id="f-user" autocomplete="username" spellcheck="false"></div>
+        <div class="grow"><label for="f-host">主机（IP 或域名）</label>
+             <input type="text" id="f-host" class="full" spellcheck="false"
+                    placeholder="login.example.com"></div>
+        <div><label for="f-port">端口</label>
+             <input type="number" id="f-port" min="1" max="65535" value="10100"></div>
+      </div>
+      <div class="row">
+        <button id="btn-connect">保存并连接</button>
+        <button id="btn-probe" class="ghost">探测已保存的连接</button>
+      </div>
+
+      <div id="conn-wrap" class="hidden">
+        <h2>已保存的连接</h2>
+        <ul id="conn-list" class="conns"></ul>
+        <p class="sub">点一条把它设为当前连接。地址可以有多条 —— 内网、公网域名、跳板机各算一条。</p>
+      </div>
+
+      <div id="sec-secret">
+        <h2>私钥保存方式</h2>
+        <p class="sub" id="securenote"></p>
+        <div class="row">
+          <div class="grow">
+            <label for="f-savemode">在这台电脑上保存私钥的方式</label>
+            <select id="f-savemode" class="full">
+              <option value="encrypted">加密保存（系统凭据库）</option>
+              <option value="plain">明文保存（不推荐）</option>
+              <option value="none">不保存（每次启动重新生成，已注册的公钥会失效）</option>
+            </select>
+          </div>
+          <div><button id="btn-savemode" class="ghost">保存设置</button></div>
         </div>
-        <div><button id="btn-connect">测试连接</button></div>
       </div>
-      <h2>密码保存</h2>
-      <div class="row">
-        <div style="flex:1">
-          <label for="f-savepw">在这台电脑上保存密码的方式</label>
-          <select id="f-savepw">
-            <option value="ask">每次询问</option>
-            <option value="encrypted">加密保存（系统凭据库）</option>
-            <option value="none">不保存</option>
-            <option value="plain">明文保存（不推荐）</option>
-          </select>
-        </div>
-        <div><button id="btn-savepw" class="ghost">保存设置</button></div>
-      </div>
-      <p class="sub" id="securenote" style="margin-top:10px"></p>
     </section>
 
-    <!-- ── ② 用途选择 ── -->
+    <!-- ── ② 开始开发（默认零配置，高级选项折叠在下面）── -->
     <section id="sec-purpose" class="hidden">
-      <h2>用途</h2>
+      <h2>开始开发</h2>
       <p class="sub">
-        节点由 Slurm 在分区内自动挑选，端口也自动分配 —— 不用自己拟。
-        会话最长 12 小时，到期前会自动续期。
+        默认 <strong>2 核 / 8G</strong>，分区由集群从你有权限的分区里随机挑一个。
+        节点和端口都自动分配，不用自己拟。会话到期前会自动续期。
       </p>
-      <div class="purposes" id="purposes"></div>
-      <div class="row" style="margin-top:18px">
+
+      <details id="adv">
+        <summary>高级选项</summary>
+        <div class="row">
+          <div><label for="f-cpus">CPU 核数</label>
+               <input type="number" id="f-cpus" min="1" max="64" placeholder="默认 2"></div>
+          <div><label for="f-mem">内存</label>
+               <input type="text" id="f-mem" class="narrow" placeholder="默认 8G" spellcheck="false"></div>
+          <div><label for="f-gpus">GPU 数</label>
+               <input type="number" id="f-gpus" min="0" max="8" placeholder="默认 0"></div>
+          <div class="grow"><label for="f-part">分区</label>
+               <select id="f-part" class="full"><option value="">（随机挑一个有权限的）</option></select></div>
+        </div>
+        <p class="sub adv-note">
+          <strong>留空就用服务端的默认值。</strong>
+          这些设置不会被记住 —— 关掉窗口或下次连接后即恢复默认。
+          唯一的例外是作业没结束时的闪断重连，那时会沿用它。
+        </p>
+      </details>
+
+      <div class="row row-spaced">
         <button id="btn-start">开始开发</button>
         <button id="btn-doctor" class="ghost">体检集群</button>
       </div>
@@ -86,12 +131,12 @@
     <section id="sec-session" class="hidden">
       <h2>当前会话</h2>
       <dl class="kv" id="kv"></dl>
-      <div class="row" style="margin-top:16px">
+      <div class="row row-spaced">
         <button id="btn-reload" class="ghost">重新加载页面</button>
         <button id="btn-keep" class="ghost">关闭窗口但保持作业运行</button>
         <button id="btn-end" class="danger">结束会话</button>
       </div>
-      <p class="sub" style="margin-top:10px">
+      <p class="sub row-spaced">
         会话运行期间，下面的按钮也可以从左上的状态条直接点到。
       </p>
     </section>
@@ -116,6 +161,18 @@
 
   </div>
 </div>
+
+<!-- 主机密钥确认。用 <dialog> 而不是自绘遮罩：它的模态语义、Esc 行为、
+     焦点陷阱都是浏览器给的，自己写一遍只会少几个细节。 -->
+<dialog id="hostkey-dlg">
+  <h2 id="hk-title">确认登录节点身份</h2>
+  <p id="hk-body"></p>
+  <pre id="hk-fp" class="mono fp"></pre>
+  <div class="row">
+    <button id="hk-cancel" class="ghost">取消</button>
+    <button id="hk-trust" class="danger">我核对过了，信任它</button>
+  </div>
+</dialog>
 
 <script src="panel.js"></script>
 </body>

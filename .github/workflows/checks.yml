@@ -22,6 +22,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash tools/check-sanitized.sh
+      # ★ 反向验证：种进三份**真的**私钥（三种真实泄漏形态），断言检查会红。
+      #   没有这一步，上面那条检查就只是一个"永远通过"的仪式 ——
+      #   规则哪天被改松了，没有任何东西会告诉你。
+      - run: bash tools/self-test-sanitized.sh
+
+  # ── 客户端自测 ──────────────────────────────────────────────────────────────
+  # 不需要 Electron：boot.test.mjs 自己桩掉了 electron 模块，其余测试只用 Node。
+  # 这些用例是「静默失败」的回归防线（用例名里带 ★ 的都是），必须在 CI 里跑 ——
+  # 只在开发机上手动跑，等于没有防线。
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
 
   # ── 集群侧自测 ──────────────────────────────────────────────────────────────
   # 注意：有人可能会以为这个测试需要真集群才能跑。**不需要** ——

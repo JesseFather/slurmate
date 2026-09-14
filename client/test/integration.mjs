@@ -109,13 +109,23 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   ctl.on('change', (s) => seen.push(s.state));
 
   // ── 提交并一路推到 running ──
-  const snap = await ctl.start('code', { preferredPort: slotPort });
+  // 不传任何资源 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
+  const snap = await ctl.start({}, { preferredPort: slotPort });
   assert.ok(snap, '启动应当成功');
   assert.equal(ctl.state, State.RUNNING);
   assert.equal(snap.localPort, slotPort, '应当用上槽位绑定的端口');
   assert.equal(snap.origin, `http://127.0.0.1:${slotPort}`);
   assert.match(snap.tunnelTarget, /^127\.0\.0\.1:\d+$/);
   assert.equal(snap.demo, true);
+
+  // ★ 服务端补的默认值必须真的落到会话上 —— 客户端不填，不等于没有值。
+  assert.equal(snap.resources.cpus, 2, '默认 2 核应由服务端填');
+  assert.equal(snap.resources.mem, '8G', '默认 8G 应由服务端填');
+  // ★ 分区是从有权限的列表里随机挑的，所以只能断言「落在合法的那个集合里」，
+  //   不能断言具体是哪一个 —— 那正是这条设计的意思。
+  assert.ok(['2080TI', 'A6000', 'RTX8000'].includes(snap.partition),
+    `分区应当来自有权限的集合，实际：${snap.partition}`);
+  assert.notEqual(snap.partition, 'DEBUG', '没有权限的分区绝不能被选中');
 
   // 状态迁移确实经过了 submitting / queued
   assert.ok(seen.includes('submitting'), '应当经过 submitting');
@@ -176,7 +186,7 @@ test('不 farewell：关窗口但保持作业运行，不发 goodbye', async (t)
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
   const ctl = new SessionController({ backend, slot: 1 });
-  await ctl.start('code', { preferredPort: await freePort() });
+  await ctl.start({}, { preferredPort: await freePort() });
   assert.equal(ctl.state, State.RUNNING);
 
   const res = await ctl.stop({ farewell: false });
@@ -196,7 +206,7 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
   // 心跳间隔压到 150ms，好在测试里观察到「反复失败但不放弃」
   const ctl = new SessionController({ backend, slot: 1, heartbeatMs: 150, statusMs: 150 });
   t.after(() => ctl.stop({ farewell: false }));
-  await ctl.start('code', { preferredPort: await freePort() });
+  await ctl.start({}, { preferredPort: await freePort() });
   assert.equal(ctl.state, State.RUNNING);
 
   // 让守护进程「挂掉」

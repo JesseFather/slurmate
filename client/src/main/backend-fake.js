@@ -4,39 +4,49 @@
  *
  * ── 它不是什么 ─────────────────────────────────────────────────────────────
  * 它不是「随便返回点数据让界面能画出来」的空壳。它的 RPC 响应逐字段照着
- * `cluster/slurmate-sessiond` 的 `session_view`（:1664-1697）和 `op_*` 构造，
- * 状态迁移照着真的状态机（:55-70），并且**真的起一个 HTTP 服务**复刻 code-server
+ * `cluster/slurmate-sessiond` 的 `session_view` 和 `op_*` 构造，
+ * 状态迁移照着真的状态机，并且**真的起一个 HTTP 服务**复刻 code-server
  * 的登录契约、**真的走一遍 tunnel.js**。
  *
  * 唯一被假掉的是 SSH 那一跳。
  *
  * ── 为什么值得这么做 ───────────────────────────────────────────────────────
- * 下一阶段接真集群时，「会话登记超时」「守护进程挂掉」「作业被回收」「口令错」
+ * 接真集群时，「会话登记超时」「守护进程挂掉」「作业被回收」「口令错」
  * 这些状态在真机上极难复现 —— 要等 30 分钟、要故意打错口令、要杀作业。
  * 有了它，这些路径在开发界面的当天就能反复走。
  *
  * ── 必须遵守 ───────────────────────────────────────────────────────────────
  * 演示模式下界面要**醒目**标注「演示模式 · 未连接集群」，用真实模式绝不会出现的
  * 颜色。做了假后端却不标注，正是这个项目一路在清的那类问题：系统声称了不成立的事。
+ *
+ * ── 关于分区与资源 ─────────────────────────────────────────────────────────
+ * 分区不再来自「用途」配置，而是**直接从 Slurm 查**（守护进程侧走
+ * `scontrol show partition` 并与该用户的 association 求交）。所以这里的假数据
+ * 就是一份分区表 —— 字段名必须与守护进程逐字一致，否则界面会针对错误的字段名
+ * 开发，接上真集群才发现对不上。
+ *
+ * 默认资源（2 CPU / 8G）由**服务端**填，客户端不填。演示后端照做：
+ * 请求里没给的键，就用 DEFAULTS。
  */
 
 const net = require('net');
 const { Backend, KIND } = require('./backend.js');
 const { createDemoCodeServer } = require('./demo-server.js');
 
-// 演示用的用途表。字段名必须与 cluster/slurmate.conf.example 的 [purpose:*]
-// 段和守护进程的 session_view 逐字一致 —— 演示数据也得是真的，否则界面会
-// 针对错误的字段名/取值开发，接上真集群才发现对不上。
-//
-// 取的是示例分区名（都是通用 GPU 型号），不是任何特定集群的配置。
-const PURPOSES = [
-  { key: 'code',    label: '纯写代码（不占 GPU）', partition: '2080TI',  gres: 'gpu:0', cpus: 2, mem: '4G', allowed: true },
-  { key: 'a6000',   label: 'A6000 48G 开发',       partition: 'A6000',   gres: 'gpu:0', cpus: 2, mem: '4G', allowed: true },
-  { key: 'rtx8000', label: 'RTX8000 48G 开发',     partition: 'RTX8000', gres: 'gpu:0', cpus: 2, mem: '4G', allowed: true },
-  { key: '2080ti',  label: '2080TI 11G 开发',      partition: '2080TI',  gres: 'gpu:0', cpus: 2, mem: '4G', allowed: true },
+// 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
+// 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
+// 在演示模式下也走得到。
+const PARTITIONS = [
+  { name: '2080TI',  allowed: true,  is_default: true, max_time: '183-00:00:00' },
+  { name: 'A6000',   allowed: true,  max_time: '183-00:00:00' },
+  { name: 'RTX8000', allowed: true,  max_time: '183-00:00:00' },
+  { name: 'DEBUG',   allowed: false, reason: '你的账户没有该分区的权限', max_time: '1:00:00' },
 ];
 
-const DEFAULT_TIME_SECONDS = 12 * 3600;   // 同 slurmate.conf.example 的 default_time
+/** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。 */
+const DEFAULTS = { cpus: 2, mem: '8G' };
+
+const DEFAULT_TIME_SECONDS = 12 * 3600;
 const DEMO_PASSWORD = 'demo-1a2b3c4d5e6f7081';  // 固定值，方便你手动 curl 验证
 
 class FakeBackend extends Backend {
@@ -46,6 +56,7 @@ class FakeBackend extends Backend {
    *                            这个等待可能是 30–60 秒，因为 NFS 属性缓存默认 60s）
    *   rpcLatencyMs   {number}  每次 RPC 的人为延迟，默认 40（贴近真实的 exec channel 开销）
    *   user           {string}  演示用户名
+   *   pickPartition  {function} 覆盖随机挑分区的行为，仅供测试固定结果用
    */
   constructor(opts = {}) {
     super();
@@ -54,6 +65,7 @@ class FakeBackend extends Backend {
     this.enrollDelayMs = Number.isFinite(opts.enrollDelayMs) ? opts.enrollDelayMs : 8000;
     this.rpcLatencyMs = Number.isFinite(opts.rpcLatencyMs) ? opts.rpcLatencyMs : 40;
     this.user = opts.user || 'demo';
+    this._pickPartition = typeof opts.pickPartition === 'function' ? opts.pickPartition : null;
 
     this._server = null;
     this._session = null;        // 当前的会话对象
@@ -112,16 +124,16 @@ class FakeBackend extends Backend {
     }
 
     switch (op) {
-      case 'ping':    return ok({ pong: true, version: '0.1.0-demo', time: nowSec() });
-      case 'whoami':  return this._whoami();
-      case 'purposes':return ok({ purposes: PURPOSES });
-      case 'submit':  return this._submit(req);
-      case 'status':  return this._status(req);
-      case 'list':    return this._list();
-      case 'heartbeat': return this._heartbeat(req);
-      case 'goodbye': return this._goodbye(req);
-      case 'doctor':  return this._doctor();
-      default:        return err(2, 'unknown_op', op);
+      case 'ping':       return ok({ pong: true, version: '0.1.0-demo', time: nowSec() });
+      case 'whoami':     return this._whoami();
+      case 'partitions': return ok({ partitions: this._partitions(), defaults: { ...DEFAULTS } });
+      case 'submit':     return this._submit(req);
+      case 'status':     return this._status(req);
+      case 'list':       return this._list();
+      case 'heartbeat':  return this._heartbeat(req);
+      case 'goodbye':    return this._goodbye(req);
+      case 'doctor':     return this._doctor();
+      default:           return err(2, 'unknown_op', op);
     }
   }
 
@@ -165,6 +177,24 @@ class FakeBackend extends Backend {
     });
   }
 
+  _partitions() {
+    return PARTITIONS.map((p) => ({ ...p }));
+  }
+
+  /**
+   * 缺省分区：**从该用户有权限的分区里随机挑一个**。
+   *
+   * 为什么不是「不带 -p 交给 Slurm」：那样所有默认会话都会落在同一个默认分区，
+   * 而用户明确要的是分散。随机挑的代价是用户事先不知道会落到哪种卡上 ——
+   * 所以 `session_view` 里必须把**实际落到的分区**返回给界面显示出来。
+   */
+  _randPickPartition() {
+    if (this._pickPartition) return this._pickPartition(PARTITIONS);
+    const usable = PARTITIONS.filter((p) => p.allowed);
+    if (usable.length === 0) return null;
+    return usable[Math.floor(Math.random() * usable.length)];
+  }
+
   _submit(req) {
     // 本地 HTTP 服务是在 connect() 里起的。没起就说明调用方漏了 connect ——
     // 那样会产出一个 service_port=0 的会话，隧道目标变成 "127.0.0.1:0"，
@@ -176,7 +206,24 @@ class FakeBackend extends Backend {
       // 与真实守护进程一致：max_active_per_user = 1
       return err(4, 'quota_active', '已有 1 个活跃会话（上限 1）');
     }
-    const purpose = PURPOSES.find((p) => p.key === String(req.purpose || 'code')) || PURPOSES[0];
+
+    // 显式指定了分区 → 必须校验权限（fail-closed）；
+    // 没指定 → 随机挑一个。这与守护进程侧的规则一致。
+    let part;
+    if (req && req.partition) {
+      part = PARTITIONS.find((p) => p.name === String(req.partition));
+      if (!part) return err(2, 'bad_partition', `未知分区：${req.partition}`);
+      if (!part.allowed) return err(4, 'no_partition', part.reason || '没有该分区的权限');
+    } else {
+      part = this._randPickPartition();
+      if (!part) return err(6, 'partitions_unknown', '查不到可用的分区');
+    }
+
+    // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
+    const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 64);
+    const mem = typeof (req && req.mem) === 'string' && req.mem ? req.mem : DEFAULTS.mem;
+    const gpus = req && req.gpus !== undefined && req.gpus !== null ? clampInt(req.gpus, 0, 0, 8) : null;
+
     const sid = 'demo-' + String(++this._seq).padStart(4, '0')
               + Math.random().toString(16).slice(2, 10);
     const now = nowSec();
@@ -185,11 +232,9 @@ class FakeBackend extends Backend {
       session_id: sid,
       job_id: 5700 + this._seq,
       state: 'submitted',
-      purpose: purpose.key,
-      partition: purpose.partition,
+      partition: part.name,
       account: 'myaccount',
-      cpus: purpose.cpus,
-      mem: purpose.mem,
+      resources: { cpus, mem, gpus },
       node: null,
       node_ip: null,
       service_port: 0,
@@ -211,7 +256,7 @@ class FakeBackend extends Backend {
       if (!this._session || this._session.session_id !== sid) return;
       this._session.state = 'enrolled';
       this._session.enrolled_at = nowSec();
-      this._session.node = purpose.partition === '2080TI' ? 'node04' : 'node01';
+      this._session.node = part.name === '2080TI' ? 'node04' : 'node01';
       // 演示里 tunnel_target 指向本地的假 code-server。
       // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
       this._session.node_ip = '127.0.0.1';
@@ -224,7 +269,8 @@ class FakeBackend extends Backend {
 
     return ok({
       session_id: sid, job_id: this._session.job_id, state: 'submitted',
-      partition: purpose.partition,
+      partition: part.name,
+      resources: { cpus, mem, gpus },
       candidates: [55101, 55102, 55103, 55104, 55105, 55106],
       requested_time: '12:00:00',
     });
@@ -284,14 +330,14 @@ class FakeBackend extends Backend {
   // ── 内部 ────────────────────────────────────────────────────────────────
   /**
    * 构造客户端可见的会话视图。
-   * **逐字段对齐 cluster/slurmate-sessiond:1664-1697 的 session_view**，包括
-   * 「expires_at / job_state / time_limit 只在 show_job 成功时才存在」这条 ——
-   * 所以界面必须能处理它们缺失，演示里也照样可能缺。
+   * **逐字段对齐守护进程的 session_view**，包括「expires_at / job_state / time_limit
+   * 只在 show_job 成功时才存在」这条 —— 所以界面必须能处理它们缺失，
+   * 演示里也照样可能缺。
    */
   _view(s) {
     const d = {
       session_id: s.session_id, job_id: s.job_id, state: s.state,
-      purpose: s.purpose, partition: s.partition, node: s.node,
+      partition: s.partition, resources: s.resources, node: s.node,
       node_ip: s.node_ip, service_port: s.service_port,
       created_at: s.created_at, enrolled_at: s.enrolled_at,
       last_hb_at: s.last_hb_at, renew_count: s.renew_count,
@@ -318,7 +364,7 @@ class FakeBackend extends Backend {
   }
 }
 
-// 与守护进程的 _ok / _err 同构（cluster/slurmate-sessiond:1572-1579）
+/** 与守护进程的 _ok / _err 同构 */
 function ok(data) { return { ok: true, code: 0, data, error: null }; }
 function err(code, kind, detail) {
   return { ok: false, code, data: null, error: { kind, detail: detail ?? null } };
@@ -326,4 +372,11 @@ function err(code, kind, detail) {
 function nowSec() { return Math.floor(Date.now() / 1000); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-module.exports = { FakeBackend, PURPOSES, DEMO_PASSWORD };
+/** 服务端侧的钳制：不信客户端送来的数值。 */
+function clampInt(v, fallback, lo, hi) {
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) v = Number(v);
+  if (!Number.isInteger(v)) return fallback;
+  return Math.min(hi, Math.max(lo, v));
+}
+
+module.exports = { FakeBackend, PARTITIONS, DEFAULTS, DEMO_PASSWORD };

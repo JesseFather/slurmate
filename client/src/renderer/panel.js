@@ -3,11 +3,14 @@
  * panel.js —— 面板页逻辑。
  *
  * 面板有四种形态，由 session:state 驱动切换：
- *   设置（未连接）→ 用途选择 → 会话进行中 → 结束/错误
+ *   设置（公钥 + 连接）→ 开始开发 → 会话进行中 → 结束/错误
  *
  * 会话跑起来之后窗口主体会被 code-server 的 WebContentsView 整个盖住，
  * 所以「重新加载 / 结束会话」这两个必需的操作也放在状态条里 ——
  * 那是唯一始终可见的、属于我们自己的区域。
+ *
+ * ★ 这个界面里**没有**任何「打开配置文件」的入口，这是有意的：
+ *   所有条目都在界面上，用户不该为了改一个地址去手编辑 JSON。
  */
 
 const $ = (id) => document.getElementById(id);
@@ -23,8 +26,9 @@ const STATE_TEXT = {
 };
 
 let boot = null;
-let currentPurpose = 'code';
-let lastState = null;
+let connected = false;
+let whoami = null;
+let lastProbe = [];          // 最近一次探测结果，供连接列表显示
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
 function fmtLeft(expiresAt) {
@@ -63,7 +67,6 @@ function notice(kind, text) {
 
 // ── 状态渲染 ────────────────────────────────────────────────────────────────
 function renderSnapshot(s) {
-  lastState = s;
   const bar = $('statusbar');
   const st = s ? s.state : 'idle';
   bar.className = 's-' + st;
@@ -74,6 +77,7 @@ function renderSnapshot(s) {
   if (s) {
     if (st === 'running' || st === 'releasing') {
       const bits = [];
+      if (s.partition) bits.push(s.partition);
       if (s.node) bits.push(s.node);
       if (s.expiresAt !== undefined) bits.push('剩余 ' + fmtLeft(s.expiresAt));
       if (s.renewCount) bits.push('已续期 ' + s.renewCount + ' 次');
@@ -95,19 +99,30 @@ function renderSnapshot(s) {
   $('sb-demo').classList.toggle('hidden', !(s && s.demo));
 
   // 形态切换
-  $('sec-setup').classList.toggle('hidden', Boolean(s) && st !== 'idle');
-  const showPurposes = Boolean(s) && (st === 'idle');
-  $('sec-purpose').classList.toggle('hidden', !showPurposes);
+  const idle = !s || st === 'idle';
+  $('sec-setup').classList.toggle('hidden', !idle);
+  // 「开始开发」只在真的连上之后才出现 —— 连不上就没有分区可挑，
+  // 摆一个按不动的按钮只会让人以为客户端坏了。
+  $('sec-purpose').classList.toggle('hidden', !(idle && connected));
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
 }
 
 function renderKv(s) {
+  const r = s.resources || {};
+  const resText = [
+    r.cpus ? `${r.cpus} 核` : null,
+    r.mem || null,
+    (typeof r.gpus === 'number' && r.gpus > 0) ? `${r.gpus} GPU` : null,
+  ].filter(Boolean).join(' / ') || '—';
+
   const rows = [
     ['会话 ID', s.sessionId || '—'],
     ['作业 ID', s.jobId || '—'],
-    ['用途 / 分区', [s.purpose, s.partition].filter(Boolean).join(' / ') || '—'],
+    // 默认是随机挑分区，所以用户事先不知道会落到哪种卡上 —— 必须显示实际结果
+    ['分区', s.partition || '—'],
+    ['资源', resText],
     ['节点', s.node || '—'],
     ['隧道目标', s.tunnelTarget || '—'],
     ['本地地址', s.origin || '—'],
@@ -127,53 +142,157 @@ function renderKv(s) {
   }
 }
 
-// ── 用途 ────────────────────────────────────────────────────────────────────
-function renderPurposes(list) {
-  const box = $('purposes');
-  box.textContent = '';
-  for (const p of list) {
-    const b = document.createElement('button');
-    b.className = 'purpose';
-    b.setAttribute('role', 'radio');
-    b.setAttribute('aria-checked', String(p.key === currentPurpose));
-    b.disabled = !p.allowed;
+// ── 公钥 ────────────────────────────────────────────────────────────────────
+function renderKey(info) {
+  $('f-pubkey').value = info.publicKey || '';
+  $('key-fp').textContent = info.fingerprint ? `指纹 ${info.fingerprint}` : '';
 
-    const t = document.createElement('span');
-    t.className = 't';
-    t.textContent = p.label;
-    const m = document.createElement('span');
-    m.className = 'm';
-    // gres 是死配置（见记忆 gres-dead-config-deferred）—— 所有用途实际都拿不到 GPU。
-    // 所以这里**不显示** gres，免得标签撒谎。
-    m.textContent = `${p.partition} · ${p.cpus} 核 · ${p.mem}`;
-    b.append(t, m);
+  const err = $('key-error');
+  if (boot.keyError) {
+    err.classList.remove('hidden');
+    err.textContent = (boot.keyErrorDetail || '本机保存的私钥不可用。')
+      + ' 若确认要重新生成（你会需要把新公钥重新注册到 IDM），点上面的「重新生成密钥…」。';
+  } else {
+    err.classList.add('hidden');
+  }
 
-    if (!p.allowed) {
-      const why = document.createElement('span');
-      why.className = 'why';
-      why.textContent = p.reason || '你的账号没有这个分区的权限';
-      b.append(why);
-    }
-    b.onclick = () => { currentPurpose = p.key; renderPurposes(list); };
-    box.append(b);
+  // 密钥没能落盘（这台机器没有凭据库）时，把「保存方式」这一块推到用户眼前 ——
+  // 不静默降级是我们的原则，但如果用户看不见这个选择，原则就等于没实现。
+  $('sec-secret').classList.toggle('hidden', Boolean(boot.keyError));
+  if (!info.persisted && !boot.keyError) {
+    $('securenote').textContent =
+      '注意：这台机器上没有可用的系统凭据库，私钥还没有保存。'
+      + '不保存的话，每次启动都会生成新密钥，你注册到 IDM 的那把会失效。';
   }
 }
 
-// ── 地址表 ──────────────────────────────────────────────────────────────────
-function renderHosts(list) {
-  const sel = $('f-host');
+// ── 连接列表 ────────────────────────────────────────────────────────────────
+function renderConnections(list) {
+  const box = $('conn-list');
+  box.textContent = '';
+  $('conn-wrap').classList.toggle('hidden', list.length === 0);
+
+  for (const c of list) {
+    const li = document.createElement('li');
+    const active = c.id === boot.activeConnectionId;
+    li.className = 'conn' + (active ? ' active' : '');
+
+    const probe = lastProbe.find((p) => p.id === c.id);
+    const t = document.createElement('span');
+    t.className = 't';
+    t.textContent = `${c.label} — ${c.user}@${c.host}:${c.port}`;
+    const m = document.createElement('span');
+    m.className = 'm';
+    if (!probe) m.textContent = '未探测';
+    else if (probe.reachable) m.textContent = `可达 · ${probe.rttMs}ms`;
+    else m.textContent = `不可达：${probe.error || '失败'}`;
+    m.classList.toggle('bad', Boolean(probe && !probe.reachable));
+
+    const pick = document.createElement('button');
+    pick.className = 'ghost tiny';
+    pick.textContent = active ? '当前' : '设为当前';
+    pick.disabled = active;
+    pick.onclick = async () => {
+      const r = await window.slurmate.setActiveConnection(c.id);
+      if (!r.ok) return notice('error', r.error);
+      boot.activeConnectionId = c.id;
+      renderConnections(boot.connections);
+    };
+
+    const del = document.createElement('button');
+    del.className = 'ghost tiny danger-ghost';
+    del.textContent = '删除';
+    del.onclick = async () => {
+      const r = await window.slurmate.deleteConnection(c.id);
+      if (!r.ok) return notice('error', r.error);
+      boot.connections = r.connections;
+      boot.activeConnectionId = r.activeConnectionId;
+      renderConnections(boot.connections);
+      notice('info', '已删除该连接。');
+    };
+
+    li.append(t, m, pick, del);
+    box.append(li);
+  }
+}
+
+// ── 分区 ────────────────────────────────────────────────────────────────────
+function renderPartitions(list) {
+  const sel = $('f-part');
+  const keep = sel.value;
   sel.textContent = '';
-  for (const h of list) {
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '（随机挑一个有权限的）';
+  sel.append(none);
+
+  for (const p of list) {
     const o = document.createElement('option');
-    o.value = `${h.host}:${h.port}`;
-    o.textContent = h.reachable
-      ? `${h.label} — ${h.host}:${h.port}（${h.rttMs}ms）`
-      : `${h.label} — ${h.host}:${h.port}（不可达：${h.error || '失败'}）`;
-    o.disabled = !h.reachable;
+    o.value = p.name;
+    o.textContent = p.allowed ? p.name : `${p.name}（无权限）`;
+    o.disabled = !p.allowed;
+    // 禁用必须给出理由，而不是让用户猜为什么点不动
+    if (!p.allowed && p.reason) o.title = p.reason;
     sel.append(o);
   }
-  const firstOk = list.find((h) => h.reachable);
-  if (firstOk) sel.value = `${firstOk.host}:${firstOk.port}`;
+  sel.value = keep;
+}
+
+// ── 主机密钥确认 ────────────────────────────────────────────────────────────
+function askHostKey(res) {
+  return new Promise((resolve) => {
+    const dlg = $('hostkey-dlg');
+    const changed = res.code === 'host_key_changed';
+
+    $('hk-title').textContent = changed ? '⚠ 登录节点的主机密钥已改变' : '确认登录节点身份';
+    $('hk-body').textContent = changed
+      ? '这与上次连接时记录的不一致。可能是服务器重装过，也可能有人在中间拦截。'
+        + '在弄清原因之前请不要继续 —— 继续就等于把这把私钥的认证交给一个不确定的对端。'
+      : '这是第一次连接到这台登录节点。请核对下面的指纹（应与集群管理员公布的一致），'
+        + '确认后本机才会记住它。';
+    $('hk-fp').textContent = (res.hostKey && res.hostKey.fingerprint) || '（没拿到指纹）';
+    $('hk-trust').textContent = changed ? '我知道服务器重装了，仍然信任' : '我核对过了，信任它';
+
+    const finish = async (trust) => {
+      $('hk-trust').onclick = null;
+      $('hk-cancel').onclick = null;
+      dlg.close();
+      resolve(trust);
+    };
+    $('hk-trust').onclick = () => finish(true);
+    $('hk-cancel').onclick = () => finish(false);
+    dlg.showModal();
+  });
+}
+
+/** 统一的连接结果处理：主机密钥要用户拍板时弹框，其余按结果报错。 */
+async function handleConnectResult(res) {
+  if (res.ok) {
+    connected = true;
+    whoami = res.whoami || null;
+    const acct = whoami && whoami.account;
+    notice('ok', `已连接：${(whoami && whoami.user) || ''}（账户 ${acct || '未分配'}）`);
+    if (!acct) {
+      notice('error', '你的账号尚未分配集群计算权限，请联系管理员 —— 否则提交作业会失败。');
+    }
+    if (res.partitions) renderPartitions(res.partitions);
+    renderSnapshot({ state: 'idle', demo: boot.demo });
+    return true;
+  }
+
+  if (res.code === 'host_key_unknown' || res.code === 'host_key_changed') {
+    const trusted = await askHostKey(res);
+    if (!trusted) {
+      notice('info', '已取消，没有建立连接。');
+      return false;
+    }
+    const again = await window.slurmate.trustHostKey(res.hostKey && res.hostKey.fingerprint);
+    return handleConnectResult(again);
+  }
+
+  connected = false;
+  notice('error', res.error || '连接失败');
+  return false;
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
@@ -188,58 +307,96 @@ async function init() {
     $('app-sub').textContent = boot.backendLabel;
   }
 
-  if (boot.profile && boot.profile.user) $('f-user').value = boot.profile.user;
-  $('f-savepw').value = boot.savePasswordMode || 'ask';
-
+  renderKey(boot);
+  $('f-savemode').value = boot.secretMode === 'plain' ? 'plain'
+    : boot.secretMode === 'none' ? 'none' : 'encrypted';
   if (!boot.secureStorageAvailable) {
-    $('securenote').textContent =
-      '注意：这台机器上没有可用的系统凭据库，因此无法加密保存密码。'
-      + '你可以选择「每次询问」或「不保存」；若一定要保存，只能明文写入（权限 0600）。';
+    // 连「加密保存」这个选项都不该出现在没有凭据库的机器上 ——
+    // 摆在那里只会让用户选了之后收到一句失败。
+    const opt = $('f-savemode').querySelector('option[value="encrypted"]');
+    if (opt) { opt.disabled = true; opt.textContent = '加密保存（这台机器没有系统凭据库）'; }
   }
 
-  renderHosts(boot.addressTable.map((h) => ({ ...h, reachable: true })));
-  await doProbe();
-
-  if (boot.purposes && boot.purposes.length) {
-    renderPurposes(boot.purposes);
-    renderSnapshot({ state: 'idle', demo: boot.demo });
+  if (boot.connection) {
+    $('f-user').value = boot.connection.user;
+    $('f-host').value = boot.connection.host;
+    $('f-port').value = boot.connection.port;
   }
+  renderConnections(boot.connections);
+  renderPartitions(boot.partitions || []);
 
   // ── 事件 ──
-  $('btn-probe').onclick = doProbe;
+  $('btn-copykey').onclick = async () => {
+    const r = await window.slurmate.copyPublicKey();
+    notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : r.error);
+  };
+
+  $('btn-regen').onclick = async () => {
+    const yes = window.confirm(
+      '重新生成会作废当前这把密钥。\n\n'
+      + '你必须把新的公钥重新注册到 IDM，否则连不上。\n\n确定要重新生成吗？');
+    if (!yes) return;
+    const mode = $('f-savemode').value;
+    const r = await window.slurmate.setSecretMode(mode, true);
+    if (!r.ok) return notice('error', '重新生成失败：' + (r.reason || r.error));
+    const info = await window.slurmate.publicKey();
+    boot.keyError = null;
+    renderKey({ ...info, publicKey: info.publicKey });
+    notice('warn', '已生成新密钥。请把上面的新公钥重新注册到 IDM，然后重新连接。');
+  };
+
+  $('btn-savemode').onclick = async () => {
+    const mode = $('f-savemode').value;
+    const r = await window.slurmate.setSecretMode(mode, false);
+    if (r.ok) {
+      notice('ok', '已保存私钥的保存方式。');
+      const info = await window.slurmate.publicKey();
+      boot.keyPersisted = true;
+      renderKey(info);
+    } else if (r.reason === 'no_secure_storage') {
+      notice('error', '这台机器上没有可用的系统凭据库，无法加密保存。请改选「明文保存」或「不保存」。');
+    } else {
+      notice('error', '保存失败：' + (r.reason || r.error));
+    }
+  };
 
   $('btn-connect').onclick = async () => {
-    const [host, port] = ($('f-host').value || '').split(':');
-    if (!host) return notice('error', '请先选择一个可达的登录节点地址。');
-    const password = $('f-pass').value;
-    const res = await window.slurmate.connect({
-      user: $('f-user').value.trim(), host, port: Number(port) || 10100,
-    });
-    if (!res.ok) return notice('error', res.error || '连接失败');
-    if (res.whoami) {
-      notice('ok', `已连接：${res.whoami.user}（账户 ${res.whoami.account || '未分配'}）`);
-      if (!res.whoami.account) {
-        notice('error', '你的账号尚未分配集群计算权限，请联系管理员 —— 否则提交作业会失败。');
-      }
-    }
-    if (res.purposes) renderPurposes(res.purposes);
-    if (password) await window.slurmate.savePassword($('f-savepw').value, password);
-    renderSnapshot({ state: 'idle', demo: boot.demo });
+    const user = $('f-user').value.trim();
+    const host = $('f-host').value.trim();
+    const port = Number($('f-port').value) || 10100;
+    if (!user || !host) return notice('error', '请先填写用户名和主机。');
+
+    const saved = await window.slurmate.saveConnection({ user, host, port, label: host });
+    if (!saved.ok) return notice('error', saved.error);
+    boot.connections = (boot.connections || []).filter((c) => c.id !== saved.connection.id)
+      .concat(saved.connection);
+    boot.activeConnectionId = saved.connection.id;
+    await window.slurmate.setActiveConnection(saved.connection.id);
+    renderConnections(boot.connections);
+
+    await handleConnectResult(await window.slurmate.connect({ connectionId: saved.connection.id }));
   };
 
-  $('btn-savepw').onclick = async () => {
-    const res = await window.slurmate.savePassword($('f-savepw').value, $('f-pass').value);
-    if (res.ok) notice('ok', '已保存密码设置。');
-    else if (res.reason === 'no_secure_storage') {
-      notice('error', '这台机器上没有可用的系统凭据库，无法加密保存。请改选「不保存」或「每次询问」。');
-    } else notice('error', '保存失败：' + res.reason);
-  };
+  $('btn-probe').onclick = doProbe;
 
   $('btn-start').onclick = async () => {
     $('btn-start').disabled = true;
     notice('info', '正在提交开发会话…');
     try {
-      await window.slurmate.start(currentPurpose);
+      // 只带上真正填了的键。留空 = 让服务端用它的默认值 ——
+      // 客户端不自己编默认值，否则一个改过的客户端省略字段就能要到整机。
+      const res = {};
+      const cpus = $('f-cpus').value.trim();
+      const mem = $('f-mem').value.trim();
+      const gpus = $('f-gpus').value.trim();
+      const part = $('f-part').value;
+      if (cpus) res.cpus = Number(cpus);
+      if (mem) res.mem = mem;
+      if (gpus !== '') res.gpus = Number(gpus);
+      if (part) res.partition = part;
+
+      const r = await window.slurmate.start(res);
+      if (r && r.snapshot) renderSnapshot(r.snapshot);
     } finally {
       $('btn-start').disabled = false;
     }
@@ -290,6 +447,7 @@ async function init() {
 
   // 拉一次当前状态（可能是启动时自动接上的会话）
   const s = await window.slurmate.state();
+  if (s && s.state && s.state !== 'idle' && s.state !== 'ended') connected = true;
   renderSnapshot(s || { state: 'idle', demo: boot.demo });
 }
 
@@ -313,13 +471,21 @@ async function doProbe() {
   const old = btn.textContent;
   btn.textContent = '探测中…';
   try {
-    const list = await window.slurmate.probeHosts();
-    renderHosts(list);
-    const reachable = list.filter((h) => h.reachable);
-    if (reachable.length === 0) {
-      notice('error', '三个登录节点地址都不可达。请确认网络，或检查 /etc/hosts 与 DNS。');
+    lastProbe = (await window.slurmate.probeHosts()) || [];
+    renderConnections(boot.connections || []);
+
+    if (lastProbe.length === 0) {
+      // 「一条都没配」和「配了但都不通」是两回事，文案必须分开 ——
+      // 曾经这里写死成「三个地址都不可达」，而候选其实是 0 个。
+      notice('info', '还没有保存任何连接。填好上面的用户名、主机、端口，点「保存并连接」。');
+      return;
+    }
+    const ok = lastProbe.filter((h) => h.reachable);
+    if (ok.length === 0) {
+      notice('error', `${lastProbe.length} 个已保存的连接都不可达。`
+        + '请确认网络，或检查地址与端口是否正确。');
     } else {
-      notice('ok', `可达地址 ${reachable.length} 个，将优先使用「${reachable[0].label}」。`);
+      notice('ok', `${ok.length}/${lastProbe.length} 个连接可达，最快的是「${ok[0].label}」（${ok[0].rttMs}ms）。`);
     }
   } finally {
     btn.disabled = false;

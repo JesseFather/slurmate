@@ -23,12 +23,21 @@
 #  退出码：0 = 干净，1 = 有命中，2 = 检查本身没跑成
 # ==============================================================================
 
+#
+#  --selftest  反向验证：真的种进几份"应当被抓住"的内容，确认检查会红。
+#              一条永远通过的检查比没有检查更糟 —— 它给人虚假的安心。
+#              见文件末尾的实现说明。
+#
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 2
 
 FAILED=0
+
+if [[ "${1:-}" == "--selftest" ]]; then
+    exec "$REPO_ROOT/tools/self-test-sanitized.sh"
+fi
 
 # 扫【已跟踪 + 未跟踪但未被忽略】的文件。
 #
@@ -120,9 +129,49 @@ else
 fi
 
 # ── 4. 凭据特征 ─────────────────────────────────────────────────────────────
-scan "无私钥" \
-     'BEGIN [A-Z ]*PRIVATE KEY' \
+#
+# 「无私钥」这条规则原先只匹配 `BEGIN [A-Z ]*PRIVATE KEY`，也就是**连 PEM 头
+# 文本本身**都算命中。在仓库开始**生成**密钥之后这变成了误报：
+# client/src/main/keys.js 必须写出这个常量（它是编码器），测试里也有故意构造的
+# 无效夹具。一条总在误报的检查等于没有检查 —— 大家会习惯性忽略它。
+#
+# 但**放宽的方式不能是"少查一点"**，而是让规则表达它真正想表达的东西：
+# 私钥的**材料**，而不只是一个标题。所以拆成三条，覆盖三种真实的泄漏形态：
+#
+#   A 整行就是一个 PEM 头      → 一个真的 .pem/.txt/.env 文件
+#   B 头后面直接跟着长 base64  → 单行字符串里塞了一把（\n 转义形式）
+#   C 文件里有 PEM 头，且某行是**纯 base64** → 多行模板字符串里塞了一把
+#
+# 三种之外还漏不掉什么：任何真实的私钥都必然带着它的 base64 主体，
+# 而主体必然落在这三条的某一条里。tools/check-sanitized.sh --selftest
+# 会真的种进三种形态各一份，验证它们都被抓住 —— 这条规则被改松时它就会红。
+scan "无私钥（A 整行 PEM 头）" \
+     '^[[:space:]]*-+BEGIN [A-Z ]*PRIVATE KEY-+[[:space:]]*$' \
      "私钥绝不能进仓库；即使已吊销，也不该出现在公开历史里"
+
+scan "无私钥（B 单行内嵌）" \
+     'BEGIN [A-Z ]*PRIVATE KEY-----\\n?[A-Za-z0-9+/]{60,}' \
+     "私钥绝不能进仓库；即使已吊销，也不该出现在公开历史里"
+
+# C：两段式 —— 先找出含 PEM 头的文件，再看里面有没有**纯 base64 行**。
+# 纯 base64 且长于 60 字符的一整行，在正常源码里几乎不可能出现
+# （正则字面量、断言、注释都会带上别的字符）。
+pem_files="$(printf '%s\n' "$FILES" | tr '\n' '\0' \
+    | xargs -0 grep -IlE 'BEGIN [A-Z ]*PRIVATE KEY' 2>/dev/null || true)"
+c_hits=""
+if [[ -n "$pem_files" ]]; then
+    c_hits="$(printf '%s\n' "$pem_files" | tr '\n' '\0' \
+        | xargs -0 grep -InE '^[A-Za-z0-9+/]{60,}={0,2}$' 2>/dev/null || true)"
+fi
+if [[ -n "$c_hits" ]]; then
+    echo "✗ 无私钥（C 多行内嵌）"
+    printf '%s\n' "$c_hits" | sed -E 's/^(.{150}).*/\1…/' | sed 's/^/    /'
+    echo "    → 含 PEM 头的文件里出现了纯 base64 长行，几乎可以确定是一把真的私钥"
+    echo
+    FAILED=1
+else
+    echo "✓ 无私钥（C 多行内嵌）"
+fi
 
 scan "无 GitHub token 特征" \
      '(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})' \

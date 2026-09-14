@@ -58,7 +58,9 @@ class Backend extends EventEmitter {
 function createBackend(opts = {}) {
   const ssh = require('./backend-ssh.js');
   if (!opts.demo && ssh.isImplemented()) {
-    return new ssh.SshBackend();
+    // ssh 选项（私钥、主机密钥裁决）由 index.js 提供 —— 它们来自配置与 keys.js，
+    // 后端自己不该知道这些东西存在哪里。
+    return new ssh.SshBackend(opts.ssh || {});
   }
   const { FakeBackend } = require('./backend-fake.js');
   return new FakeBackend(opts.demoConfig || {});

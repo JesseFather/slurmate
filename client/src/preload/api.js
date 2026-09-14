@@ -4,30 +4,47 @@
  *
  * contextIsolation 打开，渲染进程拿不到 Node，只能看见这里显式暴露的东西。
  * 暴露面刻意保持窄：只有这些具名方法，没有通用的 invoke/require 通道。
+ *
+ * ★ 这里**没有**任何读写配置文件的入口，界面也不提供。
+ *   所有条目都在界面上，用户不该为了改一个地址去手编辑 JSON。
  */
 
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('slurmate', {
-  // 一次性拉取启动信息（后端种类、地址表、用途列表、安全存储是否可用…）
+  // 一次性拉取启动信息（后端种类、连接列表、分区表、公钥、安全存储是否可用…）
   bootstrap: () => ipcRenderer.invoke('app:bootstrap'),
 
-  // 登录节点地址探测（三个地址并发，SSH banner 校验）
+  // ── 连接条目 ──
   probeHosts: () => ipcRenderer.invoke('app:probeHosts'),
-  connect: (profile) => ipcRenderer.invoke('app:connect', profile),
+  saveConnection: (conn) => ipcRenderer.invoke('app:saveConnection', conn),
+  deleteConnection: (id) => ipcRenderer.invoke('app:deleteConnection', id),
+  setActiveConnection: (id) => ipcRenderer.invoke('app:setActiveConnection', id),
+  connect: (payload) => ipcRenderer.invoke('app:connect', payload),
 
-  purposes: () => ipcRenderer.invoke('app:purposes'),
-  start: (purpose) => ipcRenderer.invoke('app:start', purpose),
+  // ── 主机密钥（TOFU）──
+  // 第一次连一台主机时主进程会拒绝并回一个指纹，由界面让用户核对后调 trustHostKey。
+  // 「变了」的情况**不接受**信任 —— 界面只提供「我知道服务器重装了」这条显式出路。
+  trustHostKey: (fingerprint) => ipcRenderer.invoke('app:trustHostKey', fingerprint),
+  forgetHostKey: () => ipcRenderer.invoke('app:forgetHostKey'),
+
+  // ── 密钥 ──
+  publicKey: () => ipcRenderer.invoke('app:publicKey'),
+  copyPublicKey: () => ipcRenderer.invoke('app:copyPublicKey'),
+  // mode: 'plain' | 'none'；regenerate=true 表示作废现有密钥重新生成（必须由用户显式发起）
+  setSecretMode: (mode, regenerate) =>
+    ipcRenderer.invoke('app:setSecretMode', { mode, regenerate }),
+
+  // ── 会话 ──
+  // resources 是高级选项里的**临时**覆盖：{cpus, mem, gpus, partition}。
+  // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
+  partitions: () => ipcRenderer.invoke('app:partitions'),
+  start: (resources) => ipcRenderer.invoke('app:start', resources),
   state: () => ipcRenderer.invoke('app:state'),
   stop: (mode) => ipcRenderer.invoke('app:stop', mode),
   doctor: () => ipcRenderer.invoke('app:doctor'),
   reload: () => ipcRenderer.invoke('app:reload'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
-
-  // 口令存储。mode: 'none' | 'encrypted' | 'plain'。
-  // 返回 {ok:false, reason:'no_secure_storage'} 时**由界面去问用户**，
-  // 主进程绝不自行降级成明文。
-  savePassword: (mode, password) => ipcRenderer.invoke('app:savePassword', { mode, password }),
 
   // 演示模式的调试开关（真机上极难复现的状态）
   debug: (what) => ipcRenderer.invoke('app:debug', what),

@@ -41,8 +41,15 @@ const State = {
 
 /** 心跳间隔。suspect_after=300s，留 6 倍余量。 */
 const HEARTBEAT_MS = 45000;
-/** 稳定态刷新间隔（剩余时间、续期次数、tunnel_target 变化、被回收检测）。 */
-const STATUS_MS = 30000;
+/**
+ * 稳定态刷新间隔（剩余时间、续期次数、tunnel_target 变化、被回收检测）。
+ *
+ * 60 秒而不是 30：一次 status = 一个 SSH exec channel = sshd fork + PAM session +
+ * bash + python3 冷启动，而守护进程是**单线程同步**的，它的每个 tick 会为所有用户的
+ * 所有会话各 fork 一次 squeue。稳定态下 `tunnel_target` 拿到就不会变，30 秒一次
+ * 纯属给这个循环加压，受害的是所有人。
+ */
+const STATUS_MS = 60000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
 /** submit 超时。**必须比 `slurmate` 内部的 40s socket 超时长**，否则会在守护进程
@@ -105,8 +112,10 @@ class SessionController extends EventEmitter {
       slot: this.slot,
       sessionId: this.sessionId,
       jobId: s.job_id || null,
-      purpose: s.purpose || null,
+      // 本次实际落在哪个分区/节点 —— 因为默认是「从有权限的分区里随机挑」，
+      // 用户事先不知道会落到哪种卡上，界面上必须显示出来。
       partition: s.partition || null,
+      resources: s.resources || null,
       node: s.node || null,
       tunnelTarget: s.tunnel_target || null,
       localPort: this._tunnelPort,
@@ -139,10 +148,14 @@ class SessionController extends EventEmitter {
   // ── 启动 ────────────────────────────────────────────────────────────────
   /**
    * 提交并一路推到 running。
-   * @param {string} purpose
+   *
+   * @param {object} resources 高级选项里的**临时**覆盖：{cpus, mem, gpus, partition, time}
+   *   全部可选。**缺省由服务端填**（2 CPU / 8G / 从有权限的分区里随机挑一个）——
+   *   默认值不由客户端填，否则一个改过的客户端省略字段就能要到整机。
+   *   只传用户**真的填了**的键，不要用 undefined 覆盖服务端的默认值。
    * @param {object} opts { preferredPort }
    */
-  async start(purpose, opts = {}) {
+  async start(resources, opts = {}) {
     if (this.state !== State.IDLE && this.state !== State.ENDED && this.state !== State.ERROR) {
       throw new Error('会话已在进行中');
     }
@@ -151,11 +164,19 @@ class SessionController extends EventEmitter {
     this.warning = null;
     this._setState(State.SUBMITTING);
 
+    // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
+    // 但带 `cpus: null` 不会 —— 而服务端会把 null 当成「用户要了 0 核」。
+    const req = { op: 'submit' };
+    for (const k of ['cpus', 'mem', 'gpus', 'partition', 'time']) {
+      const v = resources && resources[k];
+      if (v !== undefined && v !== null && v !== '') req[k] = v;
+    }
+
     // ── 提交 ──
     let resp;
     try {
       resp = await withTimeout(
-        this.backend.rpc({ op: 'submit', purpose }),
+        this.backend.rpc(req),
         SUBMIT_TIMEOUT_MS);
     } catch (e) {
       // ★ 超时【绝不重试】。改为认领：调一次不带 session_id 的 status，

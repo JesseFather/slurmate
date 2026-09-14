@@ -58,6 +58,14 @@ function classify(resp, ctx) {
     return mk(Action.TRANSPORT, null, 'empty_response',
       '登录节点没有返回任何应答（连接可能已断开）', ctx);
   }
+  // 后端已经判定为传输层失败时，它可以合成一个 kind='transport' 的信封返回
+  // （而不是抛异常 —— 后端的契约是「rpc 不抛异常」）。这里认这个标记，
+  // 好让「命令没跑起来」「stdout 不是 JSON」这类失败带上**具体原因**，
+  // 而不是退化成上面那句笼统的「没有返回任何应答」。
+  if (resp.ok === false && resp.error && resp.error.kind === 'transport') {
+    return mk(Action.TRANSPORT, null, 'transport',
+      resp.error.detail || '与登录节点通信失败', ctx);
+  }
 
   // ── 2. 成功 ──────────────────────────────────────────────────────────────
   if (resp.ok === true) {

@@ -5,6 +5,75 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+> **这一版只有客户端。** 集群侧尚未实现下面的 v0.2 协议，也尚未修「已识别缺陷，
+> 尚未修复」那一节里的三个问题 —— 因为它们全在 `cluster/` 下。**所以两边现在
+> 通不了**：只升客户端的表现是 `submit` 返回 `bad_partition` 这类看起来像参数
+> 写错的错误，而不是「协议不匹配」。版本号暂时不动（三处仍是 0.1.0），等集群侧
+> 跟上再一起升到 0.2.0。
+
+### Changed — **破坏性：RPC 协议 v0.2**（两端的版本必须一起升）
+
+- **删掉「用途」这一层。** 配置里不再有 `[purpose:*]`；`purposes` op 改成
+  `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，全部可选。
+  理由：「用途 → 分区」是**策略**，而 Slurm 已经知道**事实**。多抄一份就多一处
+  会与实际分叉、且分叉了没人会发现的副本。详见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
+- **缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。客户端不自己编
+  默认值 —— 否则一个改过的客户端省略字段就能要到整机。
+- **客户端改用纯公钥认证，不再接受密码**，也不再读 `~/.ssh`。密钥由客户端生成并
+  自托管，公钥在界面上可查可复制，用户注册一次。
+- 客户端不再实现任何身份管理（改密码、设邮箱、查账户）。它从「账户已经配好了」
+  开始 —— 别的集群未必用同一套身份体系。
+
+### Fixed
+
+- **`panel.html` 的内联 `style` 属性被自己的 CSP 静默丢弃**（`style-src 'self'`
+  没有 `'unsafe-inline'`）。布局一律改用 class。
+- **`backend-ssh.js` 的私钥解析失败会抛异常穿出「不抛异常」的契约**，在真机上
+  表现为主进程一个没人处理的 rejection。现在返回 `bad_private_key`。
+- `check-sanitized.sh` 的「无私钥」规则把 **PEM 头文本本身**也算命中，
+  而 `keys.js` 是编码器、必须写出那个常量。不是放宽规则，而是让它表达真正想
+  表达的东西（私钥**材料**），覆盖三种真实泄漏形态；并新增
+  `tools/self-test-sanitized.sh` **反向验证**（真的种进三种形态，断言检查会红）。
+
+### 已识别缺陷，尚未修复（全在集群侧）
+
+排查过程中确认了三个真实缺陷，但**代码一行没改** —— 它们都在 `cluster/` 下，
+而这一版只动客户端。写在这里是为了让它们别在排查记录里丢掉，**不是**说已经修了：
+
+- **`cluster_cidr` 写窄会让全部 ACL 静默失效。** 基础规则 `ip daddr != CIDR accept`
+  在链首、会话 drop 规则追加在链尾，所以 CIDR 漏掉某个节点时，那条流量会被链首
+  放行，而策略是 accept —— 没有任何迹象。默认值还恰好是文档占位网段
+  `192.0.2.0/24`，也就是「漏配」等于「静默无保护」。
+  **现状**：`slurmate-sessiond:215` 默认值仍是 `192.0.2.0/24`，没有前缀长度校验，
+  也没有与 `scontrol show node` 的 `NodeAddr` 交叉核对。要做的三件事一件没做。
+- **配置文件里「留空则用 `shutil.which` 查找」是假的。** 代码里只有
+  `or "/usr/bin/sbatch"` 硬兜底，且 `validate()` 会因它不存在而拒绝启动 ——
+  Slurm 装在 `/opt/slurm/bin` 的集群照抄示例配置直接起不来。
+  **现状**：全文无 `shutil`，`slurmate-sessiond:271` 原样未动。
+  （附带一条实测：本集群的 Slurm 恰好装在 `/usr/bin`，所以这个缺陷在这里复现不出来，
+  只在 `/opt/slurm/bin` 那类集群上才炸。）
+- **`validate()` 漏查 `squeue` 与 `sacctmgr`**：这两个可以是错路径而启动通过，
+  运行时才失败。**现状**：`slurmate-sessiond:325` 仍只查
+  `sbatch`/`scancel`/`scontrol` 三个。
+
+### Added
+
+- **客户端真实 SSH 后端从骨架变成实现**（`client/src/main/backend-ssh.js`）。
+  0.1.0 的头号已知限制就是「`isImplemented()` 返回 `false`，客户端一律落到演示后端」，
+  这一条现在解除：密钥认证（`privateKey`）、固定 argv 的 exec channel、
+  `forwardOut` 端口转发、多路复用一条连接。
+  **但它从未在真实登录节点上跑过** —— 见下方「已知限制」。
+- `tools/self-test-sanitized.sh` —— 脱敏检查的反向验证，已接入 CI
+- CI 新增客户端测试作业（此前 99 个用例只在开发机上手动跑过，等于没有防线）
+- `client/src/main/keys.js` —— 生成并封装 OpenSSH 格式密钥。
+  ssh2 **不认** Node `crypto` 导出的 PKCS#8 PEM，必须手工拼 `openssh-key-v1`；
+  正确性靠密码学断言（签名 → 原生验签）而不是「能解析」
+- 主机密钥 TOFU 校验（已知放行 / 首次确认 / **变更即拒绝**）
+- 客户端连接条目可增删，全部在界面上 —— 此前地址只能手改 `config.json`，
+  而面板上根本没有入口
+
 ## [0.1.0] - 2026-09-14
 
 **首个公开版本。**

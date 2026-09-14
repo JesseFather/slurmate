@@ -2,22 +2,36 @@
 /**
  * index.js —— 主进程入口。
  *
- * 职责：单实例锁、生命周期、后端选择、把 SessionController 和 ShellWindow 接起来、
- * 以及登录（POST /login + 查 cookie jar）。
+ * 职责：单实例锁、生命周期、后端选择、密钥与连接的管理、把 SessionController 和
+ * ShellWindow 接起来、以及 code-server 的自动登录（POST /login + 查 cookie jar）。
  *
- * ── 演示模式的三重互锁 ─────────────────────────────────────────────────────
+ * ── 身份体系：这里不认识任何 IDM ─────────────────────────────────────────────
+ *
+ * 客户端**不知道** FreeIPA / LDAP / Kerberos 的存在，也不该知道 —— 别的集群未必用
+ * 这一套。它只知道「用户名 + 主机 + 端口 + 一把私钥」。首次使用时生成密钥、
+ * 把公钥显示出来让用户自己去注册；改密码、设邮箱那些事归 IDM 自己的网页管，
+ * 客户端从「账户已经配好了」开始。
+ *
+ * ── 密钥的三条纪律 ────────────────────────────────────────────────────────
+ *
+ * 1. **有安全存储就直接加密存盘**，不打扰用户。
+ * 2. **没有安全存储就先放在内存里**，由界面问用户怎么存 —— 绝不静默写明文。
+ * 3. **读不出来的密钥绝不自动覆盖**。文件在但解不开（换机器、keyring 被重置）时，
+ *    生成新密钥会让用户已经注册进 IDM 的那把静默失效，而症状只是「认证失败」。
+ *    这种情况必须报错，让用户自己决定。
+ *
+ * ── 演示模式的三重互锁 ────────────────────────────────────────────────────
  * 做了假后端却不标注，正是这个项目一路在清的那类问题：**系统声称了不成立的事**。
- * 所以演示模式有：
- *   ① 独立的配置命名空间（demo-config，绝不污染真配置）
- *   ② 窗口标题与状态条用真实模式绝不会出现的颜色标注
- *   ③ `--demo` 命令行开关，或真实后端未实现时的明确降级
- * 并且**绝不**在真实后端"出错"时静默退回演示 —— 那才是最坏的情况。
+ * 所以演示模式有：① 独立的配置命名空间（demo-config，绝不污染真配置）
+ * ② 窗口标题与状态条用真实模式绝不会出现的颜色标注
+ * ③ `--demo` 命令行开关。并且**绝不**在真实后端出错时静默退回演示。
  */
 
-const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
 const path = require('path');
 
 const config = require('./config.js');
+const keys = require('./keys.js');
 const hosts = require('./hosts.js');
 const { createBackend } = require('./backend.js');
 const { SessionController, State } = require('./session.js');
@@ -32,8 +46,9 @@ let backend = null;
 let controller = null;
 let cfgDir = null;
 let cfg = null;
+let keyInfo = null;      // { privateKeyPem, publicKeyLine, fingerprint, persisted, mode, error }
 let whoami = null;
-let purposes = [];
+let partitions = [];
 let quitting = false;
 
 // ── 单实例锁 ────────────────────────────────────────────────────────────────
@@ -61,6 +76,8 @@ function bootstrap() {
       ? path.join(app.getPath('userData'), 'demo-config')
       : app.getPath('userData');
     cfg = config.loadConfig(cfgDir);
+
+    keyInfo = loadOrCreateKey();
 
     backend = createBackend({
       demo: DEMO_FLAG,
@@ -116,38 +133,136 @@ function bootstrap() {
   });
 }
 
+// ── 密钥 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 取已有的密钥，没有就生成一把。
+ *
+ * ★ 三种「没有可用密钥」的情况必须分开对待 —— 混在一起处理，就会在第三种情况下
+ *   悄悄毁掉用户已经注册过的公钥：
+ *     not_saved            → 确实还没有，生成一把（放内存，等用户选存储方式）
+ *     no_secure_storage    → 文件在，但这台机器没有凭据库，解不开 → **报错，不覆盖**
+ *     decrypt_failed       → 文件在，但 keyring 变了 → **报错，不覆盖**
+ *     文件在但格式不对      → **报错，不覆盖**
+ */
+function loadOrCreateKey() {
+  const got = config.getSecret(cfgDir, secureCrypto());
+
+  if (got.ok) {
+    if (!keys.isUsablePrivatePem(got.value)) {
+      return { error: 'bad_key_format',
+               detail: '本机保存的私钥无法解析。它可能被截断或改写过。' };
+    }
+    const line = keys.publicKeyLineFromPrivatePem(got.value);
+    if (!line) {
+      return { error: 'bad_key_format', detail: '本机保存的私钥推不出公钥。' };
+    }
+    return {
+      privateKeyPem: got.value,
+      publicKeyLine: line,
+      fingerprint: keys.fingerprintOf(line),
+      persisted: true,
+      mode: got.mode,
+    };
+  }
+
+  if (got.reason === 'no_secure_storage' || got.reason === 'decrypt_failed') {
+    return {
+      error: got.reason,
+      detail: got.reason === 'no_secure_storage'
+        ? '本机保存过一把私钥，但这台机器现在没有可用的凭据库，解不开它。'
+          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后手动选择。'
+        : '本机保存的私钥解密失败（凭据库可能被重置过）。'
+          + '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后手动选择。',
+    };
+  }
+
+  // not_saved：真的还没有。生成一把。
+  const gen = keys.generate();
+  const info = {
+    privateKeyPem: gen.privateKeyPem,
+    publicKeyLine: gen.publicKeyLine,
+    fingerprint: gen.fingerprint,
+    persisted: false,
+    mode: cfg.secretMode,
+  };
+  // 有安全存储就直接加密存盘，不打扰用户。没有则留在内存里，由界面问。
+  if (secureAvailable()) {
+    const res = config.setSecret(cfgDir, secureCrypto(), config.SECRET_MODE.ENCRYPTED, gen.privateKeyPem);
+    if (res.ok) {
+      info.persisted = true;
+      info.mode = config.SECRET_MODE.ENCRYPTED;
+      cfg.secretMode = config.SECRET_MODE.ENCRYPTED;
+      config.saveConfig(cfgDir, cfg);
+    }
+  }
+  return info;
+}
+
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
 async function announceBackend() {
-  // ★ 演示后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
-  //   曾经这里在演示模式下提前 return，结果是 service_port 恒为 0，
-  //   隧道目标变成 "127.0.0.1:0"，会话在「运行中」之后立刻报端口不合法。
-  //   演示模式不等于「不需要初始化」。
-  const res = await backend.connect(cfg.profile);
-
-  if (!res.ok) {
-    win.pushNotice('error', res.error || '无法连接登录节点');
-    win.setTitle('Slurmate — 未连接');
+  if (backend.kind === 'demo') {
+    // ★ 演示后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
+    //   曾经这里在演示模式下提前 return，结果是 service_port 恒为 0，
+    //   隧道目标变成 "127.0.0.1:0"，会话在「运行中」之后立刻报端口不合法。
+    //   演示模式不等于「不需要初始化」。
+    const res = await backend.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
+    if (res.ok) {
+      whoami = res.whoami;
+      await refreshPartitions();
+    }
+    win.pushNotice('demo', '演示模式 · 未连接集群');
+    win.setTitle('Slurmate — 演示模式 · 未连接集群');
     return;
   }
 
-  whoami = res.whoami;
-  await refreshPurposes();
-
-  if (backend.kind === 'demo') {
-    // 三重互锁之二：标题用真实模式绝不会出现的标注
-    win.pushNotice('demo', '演示模式 · 未连接集群');
-    win.setTitle('Slurmate — 演示模式 · 未连接集群');
+  if (keyInfo && keyInfo.error) {
+    win.pushNotice('error', keyInfo.detail);
+    win.setTitle('Slurmate — 私钥不可用');
+    return;
   }
+  const conn = config.activeConnection(cfg);
+  if (!conn) {
+    // 一条连接都没配 —— 这是**真实状态**，不是错误。如实说出来，
+    // 而不是显示一句笼统的「连接失败」让用户去猜。
+    win.pushNotice('info', '还没有配置登录节点。请在下方填写用户名、主机与端口。');
+    win.setTitle('Slurmate — 未配置连接');
+    return;
+  }
+  await doConnect(conn);
 }
 
-async function refreshPurposes() {
-  const resp = await backend.rpc({ op: 'purposes' });
-  if (resp && resp.ok) {
-    purposes = resp.data.purposes || [];
+/** 真正发起一次连接（含主机密钥裁决）。 */
+async function doConnect(conn, extra = {}) {
+  const res = await backend.connect(
+    { user: conn.user, host: conn.host, port: conn.port },
+    {
+      privateKey: keyInfo && keyInfo.privateKeyPem,
+      hostKeyCheck: (fp) => config.checkHostKey(cfg, conn.host, conn.port, fp).status,
+      expectedHostKey: (config.checkHostKey(cfg, conn.host, conn.port, '') || {}).expected,
+      ...extra,
+    });
+
+  if (res.ok) {
+    whoami = res.whoami;
+    await refreshPartitions();
+    win.setTitle(`Slurmate — ${conn.user}@${conn.host}`);
+  } else if (res.code === 'host_key_unknown' || res.code === 'host_key_changed') {
+    // 主机密钥要用户拍板 —— 这不是「连接失败」，是一个待确认的安全决定。
+    // 所以不设成 error 标题，界面会弹一个专门的确认框。
+    win.setTitle('Slurmate — 等待确认主机密钥');
   } else {
-    purposes = [];
+    win.setTitle('Slurmate — 未连接');
   }
-  return purposes;
+  return res;
+}
+
+async function refreshPartitions() {
+  // op 名从 purposes 改成 partitions：新协议里不再有「用途」这一层，
+  // 分区直接来自 Slurm（并与该用户的 association 求交）。
+  const resp = await backend.rpc({ op: 'partitions' });
+  partitions = (resp && resp.ok && resp.data && resp.data.partitions) || [];
+  return partitions;
 }
 
 /**
@@ -185,7 +300,7 @@ async function performLogin(ses, origin, password) {
 }
 
 // ── 会话编排 ────────────────────────────────────────────────────────────────
-async function startSession(purpose) {
+async function startSession(resources) {
   if (!controller || [State.ENDED, State.ERROR, State.IDLE].includes(controller.state)) {
     controller = new SessionController({
       backend,
@@ -201,7 +316,7 @@ async function startSession(purpose) {
   }
 
   const preferredPort = config.slotPort(cfg, 1);
-  const snap = await controller.start(purpose, { preferredPort });
+  const snap = await controller.start(resources, { preferredPort });
   if (!snap) onSessionChange(controller.snapshot());
   return snap;
 }
@@ -312,6 +427,7 @@ function handleWindowAction(action, payload) {
  */
 async function tryReattach() {
   if (backend.kind === 'demo') return;
+  if (!backend._conn) return;          // 没连上就别问了
 
   // 先把上次没发出去的 goodbye 补上
   for (const item of config.listPendingGoodbye(cfgDir)) {
@@ -350,11 +466,17 @@ function registerIpc() {
   send('app:bootstrap', async () => ({
     demo: backend.kind === 'demo',
     backendLabel: backend.label,
-    profile: cfg.profile,
+    connections: cfg.connections,
+    activeConnectionId: cfg.activeConnectionId,
+    connection: config.activeConnection(cfg),
     whoami,
-    purposes,
-    addressTable: hosts.effectiveHosts(cfg.extraHosts),
-    savePasswordMode: cfg.passwordMode,
+    partitions,
+    publicKey: (keyInfo && keyInfo.publicKeyLine) || null,
+    keyFingerprint: (keyInfo && keyInfo.fingerprint) || null,
+    keyError: (keyInfo && keyInfo.error) || null,
+    keyErrorDetail: (keyInfo && keyInfo.detail) || null,
+    keyPersisted: Boolean(keyInfo && keyInfo.persisted),
+    secretMode: cfg.secretMode,
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
     // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去选明文保存。
     secureStorageAvailable: secureAvailable(),
@@ -362,23 +484,132 @@ function registerIpc() {
     version: app.getVersion(),
   }));
 
-  send('app:probeHosts', async () => hosts.probeAll(hosts.effectiveHosts(cfg.extraHosts)));
+  send('app:probeHosts', async () => hosts.probeAll(cfg.connections));
 
-  send('app:connect', async (profile) => {
-    cfg.profile = { ...cfg.profile, ...profile };
-    config.saveConfig(cfgDir, cfg);
-    const res = await backend.connect(cfg.profile);
-    if (res.ok) {
-      whoami = res.whoami;
-      await refreshPurposes();
+  // ── 连接条目的增删改 ──
+  send('app:saveConnection', async (input) => {
+    const conn = config.normalizeConnection(input, input && input.id);
+    if (!conn) {
+      return { ok: false, error: '连接信息不完整：用户名、主机、端口（1-65535）都必填。' };
     }
-    return { ...res, purposes, whoami };
+    const list = cfg.connections.filter((c) => c.id !== conn.id);
+    cfg.connections = [...list, conn];
+    if (!cfg.activeConnectionId) cfg.activeConnectionId = conn.id;
+    config.saveConfig(cfgDir, cfg);
+    return { ok: true, connection: conn, connections: cfg.connections };
   });
 
-  send('app:purposes', async () => ({ ok: true, purposes: await refreshPurposes() }));
+  send('app:deleteConnection', async (id) => {
+    cfg.connections = cfg.connections.filter((c) => c.id !== id);
+    if (cfg.activeConnectionId === id) {
+      cfg.activeConnectionId = cfg.connections[0] ? cfg.connections[0].id : null;
+    }
+    config.saveConfig(cfgDir, cfg);
+    return { ok: true, connections: cfg.connections, activeConnectionId: cfg.activeConnectionId };
+  });
 
-  send('app:start', async (purpose) => {
-    const snap = await startSession(purpose);
+  send('app:setActiveConnection', async (id) => {
+    if (!cfg.connections.some((c) => c.id === id)) {
+      return { ok: false, error: '这条连接不存在。' };
+    }
+    cfg.activeConnectionId = id;
+    config.saveConfig(cfgDir, cfg);
+    return { ok: true, activeConnectionId: id };
+  });
+
+  // ── 连接 ──
+  send('app:connect', async (payload) => {
+    if (keyInfo && keyInfo.error) {
+      return { ok: false, error: keyInfo.detail, code: 'key_unavailable' };
+    }
+    let conn = config.activeConnection(cfg);
+    if (payload && payload.connectionId) {
+      conn = cfg.connections.find((c) => c.id === payload.connectionId) || conn;
+    }
+    if (!conn) return { ok: false, error: '还没有配置登录节点。', code: 'no_connection' };
+
+    const res = await doConnect(conn);
+    return { ...res, whoami, partitions };
+  });
+
+  /**
+   * 用户确认了一个新主机密钥。**记住它**再重连 —— 只记住用户确认的那一个指纹，
+   * 不做「以后都信任这台主机」这种模糊承诺。
+   */
+  send('app:trustHostKey', async (fingerprint) => {
+    const conn = config.activeConnection(cfg);
+    if (!conn) return { ok: false, error: '还没有配置登录节点。' };
+    if (!fingerprint || typeof fingerprint !== 'string') {
+      return { ok: false, error: '缺少要信任的指纹。' };
+    }
+    config.rememberHostKey(cfgDir, cfg, conn.host, conn.port, fingerprint);
+    const res = await doConnect(conn, { trustHostKey: fingerprint });
+    return { ...res, whoami, partitions };
+  });
+
+  /**
+   * 忘掉某台主机已记录的指纹（服务器重装后用）。
+   * 刻意做成一个**显式**动作：默认路径上，指纹变了就是拒绝连接。
+   */
+  send('app:forgetHostKey', async () => {
+    const conn = config.activeConnection(cfg);
+    if (!conn) return { ok: false, error: '还没有配置登录节点。' };
+    config.forgetHostKey(cfgDir, cfg, conn.host, conn.port);
+    return { ok: true };
+  });
+
+  // ── 密钥 ──
+  send('app:publicKey', async () => ({
+    ok: true,
+    publicKey: (keyInfo && keyInfo.publicKeyLine) || null,
+    fingerprint: (keyInfo && keyInfo.fingerprint) || null,
+    persisted: Boolean(keyInfo && keyInfo.persisted),
+    mode: (keyInfo && keyInfo.mode) || null,
+  }));
+
+  send('app:copyPublicKey', async () => {
+    if (!keyInfo || !keyInfo.publicKeyLine) return { ok: false, error: '还没有可用的公钥。' };
+    clipboard.writeText(keyInfo.publicKeyLine);
+    return { ok: true };
+  });
+
+  /**
+   * 选择的存储方式。两种情形：
+   *   - 密钥还没落盘（内存里那把）：按选择的模式存下来
+   *   - 密钥读不出来（keyError）：先清掉坏文件，再生成全新的
+   * 第二种会作废用户已注册的公钥，所以**必须由用户显式发起**。
+   */
+  send('app:setSecretMode', async ({ mode, regenerate }) => {
+    if (regenerate) {
+      const gen = keys.generate();
+      keyInfo = {
+        privateKeyPem: gen.privateKeyPem,
+        publicKeyLine: gen.publicKeyLine,
+        fingerprint: gen.fingerprint,
+        persisted: false,
+        mode,
+      };
+    }
+    if (!keyInfo || !keyInfo.privateKeyPem) {
+      return { ok: false, error: '还没有生成密钥。' };
+    }
+    const res = config.setSecret(cfgDir, secureCrypto(), mode, keyInfo.privateKeyPem);
+    if (res.ok) {
+      keyInfo.persisted = true;
+      keyInfo.mode = mode;
+      keyInfo.error = null;
+      keyInfo.detail = null;
+      cfg.secretMode = mode;
+      config.saveConfig(cfgDir, cfg);
+    }
+    return res.ok ? { ok: true, mode, publicKey: keyInfo.publicKeyLine } : res;
+  });
+
+  // ── 会话 ──
+  send('app:partitions', async () => ({ ok: true, partitions: await refreshPartitions() }));
+
+  send('app:start', async (resources) => {
+    const snap = await startSession(resources);
     return { ok: Boolean(snap), snapshot: controller && controller.snapshot() };
   });
 
@@ -408,13 +639,6 @@ function registerIpc() {
     else if (what === 'reset') backend.debugReset();
     else return { ok: false, error: '未知的调试动作' };
     return { ok: true };
-  });
-
-  // 口令存储：绝不静默降级。安全存储不可用时由界面问用户。
-  send('app:savePassword', async ({ mode, password }) => {
-    const res = config.setPassword(cfgDir, secureCrypto(), mode, password);
-    if (res.ok) { cfg.passwordMode = mode; config.saveConfig(cfgDir, cfg); }
-    return res;
   });
 }
 
@@ -450,5 +674,6 @@ module.exports = {
     getBackend: () => backend,
     getController: () => controller,
     getWindow: () => win,
+    getKeyInfo: () => keyInfo,
   },
 };

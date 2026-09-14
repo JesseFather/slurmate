@@ -1,9 +1,34 @@
 # RPC 协议
 
 客户端与守护进程之间的契约。**契约来源**：`cluster/slurmate`（CLI 侧的信封构造与退出码）
-与 `cluster/slurmate-sessiond:1607-1614`（`_ok`/`_err` 构造点）、
-`cluster/slurmate-sessiond:1634-1661`（`dispatch`），
+与 `cluster/slurmate-sessiond`（`_ok`/`_err` 构造点、`dispatch`），
 客户端的消费逻辑在 `client/src/main/classify.js`。
+
+---
+
+## 〇、协议版本与变更
+
+**当前版本：v0.2。** 三处版本号（`client/package.json`、`cluster/slurmate`、
+`cluster/slurmate-sessiond`）由 `.github/workflows/checks.yml` 断言必须一致。
+
+> ⚠️ **本文是接口契约，不是实现状态。** 客户端已按 v0.2 实现；**集群侧还没有**——
+> `cluster/` 下的代码目前仍是 v0.1（INI 配置、`purposes` op、`purpose` 键），
+> 也没有 bump 版本号。所以**今天这两端是连不上的**，`submit` 会返回
+> `2 bad_partition` 这类看起来像参数写错的错误。集群侧跟上之后，
+> 三处版本号一起升到 0.2.0。
+
+| 版本 | 变更 |
+|---|---|
+| v0.1 | 初版。分区通过「用途」（`[purpose:*]` 配置段）间接指定，`submit` 收 `purpose` 键。 |
+| **v0.2** | **删掉「用途」这一层**。配置里不再有 `[purpose:*]`；`purposes` op 改成 `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，**全部可选，缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。 |
+
+**为什么要删掉「用途」**：它是**策略**（「这个分区是给哪种卡做开发用的」），
+而 Slurm 已经知道**事实**（有哪些分区、用户能用哪些）。把策略额外抄一份到配置文件里，
+就多了一处会与实际分叉、且分叉了没人会发现的副本 —— 比如分区名大小写写错，
+`validate()` 查不出来，只在 `sbatch` 时才炸。
+
+**v0.1 的客户端连不上 v0.2 的守护进程，反之亦然。** 两边必须一起升 ——
+协议变了而只改一边，症状是 `submit` 收到 `2 bad_partition` 之类看起来像参数写错的错误。
 
 ---
 
@@ -54,8 +79,11 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com -- /usr/local/bin/slur
 ### 请求
 
 ```json
-{"op": "submit", "purpose": "code", "cpus": 2, "gpus": 0, "time": "12:00:00"}
+{"op": "submit", "cpus": 2, "mem": "8G", "gpus": 0, "time": "12:00:00"}
 ```
+
+> **v0.2 变更**：`submit` 不再接受 `purpose`，「用途 → 分区」那一层配置被整个删掉了。
+> 见下面的〈协议版本与变更〉。
 
 ### 响应
 
@@ -78,7 +106,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com -- /usr/local/bin/slur
 | code | 含义 | 典型 `kind` | CLI 退出码 |
 |---|---|---|---|
 | `0` | 成功 | — | `0` |
-| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_purpose`、`bad_time` | `2` |
+| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time` | `2` |
 | `3` | 未找到（会话不存在，或 uid 查不到） | `not_found`、`unknown_uid` | `3` |
 | `4` | 被拒绝：配额、权限、账户、熔断 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled` | `4` |
 | `5` | **守护进程不可达**（`daemon_unreachable`）**或**端口池空（`no_port`） | `daemon_unreachable`、`no_port` | `5` |
@@ -217,44 +245,66 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com -- /usr/local/bin/slur
 
 错误：`3 unknown_uid`（`cluster/slurmate-sessiond:1664-1676`）。
 
-### `purposes`
+### `partitions`
 
-请求：`{"op":"purposes"}`
+请求：`{"op":"partitions"}`
 
-成功 data：`{"purposes": [{"key","label","partition","gres","cpus","mem","allowed"}...]}`
+成功 data：
 
-`allowed` 为假时附 `reason`。分区权限查询失败时**所有**条目都带上
-「暂时无法确认分区权限（查询失败）」，并且仍标 `allowed: true` —— 这是
-fail-open 的展示层，真正的把关在 `op_submit` 的二次校验
-（`cluster/slurmate-sessiond:1684-1697,1868-1875`）。
+```json
+{"partitions": [{"name": "2080TI", "allowed": true, "is_default": true,
+                 "max_time": "183-00:00:00"}],
+ "defaults": {"cpus": 2, "mem": "8G"}}
+```
+
+分区列表**从 Slurm 现查**（`scontrol show partition -o`），并与该用户的
+association 求交。客户端不再自己维护一份「用途 → 分区」的声明式配置 ——
+那是策略，而策略不该同时存在于两个地方。
+
+`allowed` 为假时附 `reason`（界面据此禁用并说明原因，而不是让用户猜）。
+`defaults` 是**服务端的默认资源**，客户端不填这些值 —— 见 `submit`。
 
 错误：`3 unknown_uid`。
 
 ### `submit`
 
-请求：
+请求（**全部字段可选**）：
 
-| 字段 | 类型 | 默认 |
+| 字段 | 类型 | 缺省 |
 |---|---|---|
-| `purpose` | 字符串 | `"code"` |
-| `cpus` | 整数 | 用途配置里的 `cpus`（服务端钳制到 1–128） |
-| `mem` | 字符串 | 用途配置里的 `mem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退到用途默认并打 warning） |
-| `gpus` | 整数 | `0`（钳制到 0–16；`0` 时**完全省略** `--gres`） |
-| `time` | Slurm 时间 | 配置的 `default_time`（超过 `max_time` 静默截断） |
+| `cpus` | 整数 | `2`（服务端钳制到 1–上限） |
+| `mem` | 字符串 | `"8G"`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
+| `gpus` | 整数 | 未给 = **完全省略** `--gres`（默认不占 GPU）。给了 `0` 也一样省略 |
+| `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
+| `time` | Slurm 时间 | 配置的 `default_time`（超过分区 `MaxTime` 或 `max_time` 时截断） |
+
+> ★ **默认值一律由服务端填，不由客户端填。** 客户端省略字段是在说「用你的默认」，
+> 不是「我要 0 核」。服务端必须自己填默认值并做上限钳制 ——
+> 否则一个改过的客户端省略字段就能要到整台机器。客户端的「高级选项」
+> 只是**临时覆盖**，不写进任何配置，关掉窗口即失效。
+
+> ★ **随机挑分区的边界**：`allowed_partitions()` 查不到时返回 `PARTITIONS_UNKNOWN`
+> 哨兵。**显式指定**分区的路径继续 fail-closed（用户点了名就必须验，返回 `6`）；
+> **缺省随机**的路径退化为**不带 `-p`**（交给 Slurm 的默认分区）并在响应里带
+> 一个 `warning` —— 此时我们没有对权限做任何声明，而 Slurm 自己会用 association 兜住。
+> 这不是漏判，实现时要写进注释，免得后人误「修」。
 
 成功 data：
 
 ```json
 {"session_id": "9f2c…", "job_id": 12345, "state": "submitted",
- "partition": "2080TI", "candidates": [55001, 55002, ...],
- "requested_time": "12:00:00"}
+ "partition": "2080TI", "resources": {"cpus": 2, "mem": "8G", "gpus": null},
+ "candidates": [55001, 55002, ...], "requested_time": "12:00:00"}
 ```
+
+`partition` 是**实际选中的那个**，必须返回 —— 因为是随机挑的，用户事先
+不知道会落到哪种卡上，界面要显示出来。
 
 错误：
 
 | code | kind | 触发 |
 |---|---|---|
-| `2` | `bad_purpose` | 用途键不在配置里 |
+| `2` | `bad_partition` | 指定的分区名不存在 |
 | `2` | `bad_time` | 时间格式无法解析或 ≤ 0 |
 | `3` | `unknown_uid` | `getpwuid` 失败 |
 | `4` | `throttled` | 该 uid 在熔断静默期内 |
@@ -284,7 +334,7 @@ fail-open 的展示层，真正的把关在 `op_submit` 的二次校验
 
 | 字段 | 说明 |
 |---|---|
-| `session_id`、`job_id`、`state`、`purpose`、`partition` | 基本身份 |
+| `session_id`、`job_id`、`state`、`partition`、`resources` | 基本身份 |
 | `node`、`node_ip`、`service_port` | 作业落点 |
 | `tunnel_target` | **`"<字面 IPv4>:<端口>"`**，或 `null`（还没登记） |
 | `created_at`、`enrolled_at`、`last_hb_at`、`renew_count` | 时间线 |
@@ -369,10 +419,10 @@ fail-open 的展示层，真正的把关在 `op_submit` 的二次校验
    │── {"op":"whoami"} ───────────────────► │── SO_PEERCRED(uid=1001) ────────► │
    │◄─ {"ok":true,"code":0,"data":{…}} ──── │◄──────────────────────────────────│
    │                                        │                                   │
-   │── {"op":"purposes"} ──────────────────► │                                   │
-   │◄─ {"ok":true,…,{"purposes":[…]}} ───── │                                   │
+   │── {"op":"partitions"} ────────────────► │                                   │
+   │◄─ {"ok":true,…,{"partitions":[…]}} ─── │                                   │
    │                                        │                                   │
-   │── {"op":"submit","purpose":"code"} ───► │── 插 reserved 行 ────────────────► │
+   │── {"op":"submit"}（全部字段省略）────► │── 随机挑一个有权限的分区 ────────► │
    │                                        │── sbatch(setuid) ────────────────► │
    │◄─ {"ok":true,…,{"job_id":12345,…}} ─── │◄──────────────────────────────────│
    │                                        │                                   │

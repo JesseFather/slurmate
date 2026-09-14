@@ -138,6 +138,7 @@ const electronStub = {
   },
   shell: { openExternal: async () => {} },
   dialog: { showMessageBox: async () => ({ response: 2 }) },
+  clipboard: { writeText: (t) => { calls.clipboard = t; } },
 };
 
 const origLoad = Module._load;
@@ -211,9 +212,15 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
     '应当向面板推过状态');
 
   // IPC 通道注册齐全
-  for (const ch of ['app:bootstrap', 'app:probeHosts', 'app:connect', 'app:purposes',
+  for (const ch of ['app:bootstrap', 'app:probeHosts', 'app:connect', 'app:partitions',
                     'app:start', 'app:state', 'app:doctor', 'app:stop', 'app:reload',
-                    'app:savePassword', 'app:debug']) {
+                    'app:debug',
+                    // 连接管理：地址必须在界面上可填可删 —— 这条曾经是个硬缺口，
+                    // extraHosts 只能手改 config.json，面板上根本没有入口。
+                    'app:saveConnection', 'app:deleteConnection', 'app:setActiveConnection',
+                    // 密钥与主机密钥
+                    'app:publicKey', 'app:copyPublicKey', 'app:setSecretMode',
+                    'app:trustHostKey', 'app:forgetHostKey']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
 
@@ -228,51 +235,90 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   assert.equal(b.demo, true);
   assert.equal(b.secureStorageAvailable, false);
   assert.equal(b.backendLabel, '演示后端');
-  // 内置地址表【有意为空】—— 登录节点地址是站点私有拓扑，不随源码分发。
-  // 这个断言防的是有人"顺手"往里加回几个真实地址：那样一来每个 clone 走的
-  // 人都带着某个集群的 IP，既泄露又对他们无用。
-  assert.ok(Array.isArray(b.addressTable), 'addressTable 必须是数组');
-  assert.equal(b.addressTable.length, 0,
-    '内置地址表必须为空；地址应来自用户在设置里填写的 extraHosts');
+  // 一条连接都没配 —— 这是**真实状态**，界面上要如实显示「还没有配置登录节点」，
+  // 而不是编一个默认地址出来。断言它：防的是有人"顺手"把某个集群的真实地址
+  // 写回源码，那样每个 clone 的人都会带着那个集群的 IP。
+  assert.ok(Array.isArray(b.connections), 'connections 必须是数组');
+  assert.equal(b.connections.length, 0, '不得有任何内置的登录节点地址');
+  assert.equal(b.connection, null);
 });
 
-test('★ 地址表来自配置，且空配置不会被静默换成别的地址', async (t) => {
+test('★ 密钥在首次启动时就生成好了，公钥可查（用户要拿去注册）', async (t) => {
   t.after(() => { Module._load = origLoad; });
-  const hostsMod = await import('../src/main/hosts.js');
-  const hosts = hostsMod.default || hostsMod;
-
-  // 内置表 + 用户配置，顺序与内容都要如实反映
-  const merged = hosts.effectiveHosts([{ host: 'login.example.com', port: 10100, priority: 1 }]);
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].host, 'login.example.com');
-
-  // 显式传空数组 = "就是没配"，必须如实返回空
-  assert.deepEqual(hosts.effectiveHosts([]), []);
-  assert.deepEqual(hosts.effectiveHosts(undefined), []);
-
-  // probeAll([]) 必须返回空列表，而不是回退到内置表 ——
-  // 回退会让"用户改了配置但没生效"表现为"一切正常"，是最难查的一类问题
-  const probed = await hosts.probeAll([]);
-  assert.deepEqual(probed, [], 'probeAll([]) 应当返回空，不得回退到内置表');
+  const r = await invoke('app:publicKey');
+  assert.equal(r.ok, true);
+  assert.match(r.publicKey, /^ssh-ed25519 [A-Za-z0-9+/]+=* slurmate-\d{8}$/,
+    '公钥必须是 OpenSSH 一行格式，用户要原样粘到 IDM 里');
+  assert.match(r.fingerprint, /^SHA256:/);
+  // 这台机器没有凭据库 —— 密钥只能留在内存里，绝不该悄悄写明文落盘
+  assert.equal(r.persisted, false, '没有安全存储时不得自动落盘');
+  assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
+    '一个字节都不该落盘');
 });
 
-test('★ 没有安全存储时，保存加密口令必须明确失败，绝不静默写明文', async (t) => {
+test('★ 没有安全存储时，选择「加密保存」必须明确失败，绝不静默写明文', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  const r = await invoke('app:savePassword', { mode: 'encrypted', password: 'hunter2' });
+  const r = await invoke('app:setSecretMode', { mode: 'encrypted' });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'no_secure_storage');
   assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
     '一个字节都不该落盘');
 
-  // 换「不保存」应当成功，并且**写在演示命名空间里**（这条同时证明了
-  // 演示模式确实用了独立目录，而不是靠「目录不存在」间接推断）
-  const r2 = await invoke('app:savePassword', { mode: 'none', password: '' });
+  // 换「明文保存」应当成功（用户明确选了），并且**写在演示命名空间里**
+  // （这条同时证明了演示模式确实用了独立目录，而不是靠「目录不存在」间接推断）
+  const pub = await invoke('app:publicKey');
+  const r2 = await invoke('app:setSecretMode', { mode: 'plain' });
   assert.equal(r2.ok, true);
   assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'config.json')), true,
     '演示模式的配置应当写在 demo-config 下');
   assert.equal(fs.existsSync(path.join(userData, 'config.json')), false,
     '真配置目录必须保持干净');
+  // 存下去之后公钥不许变 —— 变了意味着用户刚注册的那把作废了
+  const after = await invoke('app:publicKey');
+  assert.equal(after.publicKey, pub.publicKey, '选择存储方式不得改变密钥本身');
+  assert.equal(after.persisted, true);
+});
+
+test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  const saved = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100, label: '内网' });
+  assert.equal(saved.ok, true);
+  assert.match(saved.connection.id, /^c[0-9a-f]+$/);
+
+  // 不合法的条目必须被拒绝，而不是补个默认值让用户以为存上了
+  const bad = await invoke('app:saveConnection', { user: '', host: 'x', port: 10100 });
+  assert.equal(bad.ok, false);
+
+  const b = await invoke('app:bootstrap');
+  assert.equal(b.connections.length, 1);
+  assert.equal(b.connections[0].host, '198.51.100.10');
+  assert.equal(b.activeConnectionId, saved.connection.id, '第一条应当自动成为活动连接');
+
+  // 落盘了：重新读配置文件也该看到
+  const onDisk = JSON.parse(
+    fs.readFileSync(path.join(userData, 'demo-config', 'config.json'), 'utf8'));
+  assert.equal(onDisk.connections.length, 1);
+
+  const del = await invoke('app:deleteConnection', saved.connection.id);
+  assert.equal(del.ok, true);
+  assert.deepEqual(del.connections, []);
+  assert.equal(del.activeConnectionId, null, '删掉活动连接后不能留一个悬空的 id');
+});
+
+test('★ 地址探测：一条连接都没有时返回空，不回退到任何内置地址', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const hostsMod = await import('../src/main/hosts.js');
+  const hosts = hostsMod.default || hostsMod;
+
+  // probeAll([]) 必须返回空列表 —— 回退会让「用户改了配置但没生效」
+  // 表现为「一切正常」，是最难查的一类问题
+  assert.deepEqual(await hosts.probeAll([]), []);
+  assert.deepEqual(await hosts.probeAll(undefined), []);
+  // 字段不全的条目直接跳过，不猜端口
+  assert.deepEqual(await hosts.probeAll([{ host: 'x' }]), []);
 });
 
 test('app:debug 在演示模式下可用（真机上造不出来的状态）', async (t) => {
@@ -289,21 +335,26 @@ test('app:state 在没开会话时返回 null，而不是崩', async (t) => {
   assert.equal(await invoke('app:state'), null);
 });
 
-test('app:purposes 在演示模式下返回四个用途，且都标了 allowed', async (t) => {
+test('★ 分区来自 Slurm（不是配置里的「用途」），且没权限的要标出来', async (t) => {
   t.after(() => { Module._load = origLoad; });
-  const r = await invoke('app:purposes');
+  const r = await invoke('app:partitions');
   assert.equal(r.ok, true);
-  assert.equal(r.purposes.length, 4);
-  assert.deepEqual(r.purposes.map((p) => p.key).sort(),
-    ['2080ti', 'a6000', 'code', 'rtx8000']);
-  assert.ok(r.purposes.every((p) => p.allowed));
+  // 分区是**查出来的**，客户端不再自己维护一份「用途 → 分区」的声明式配置
+  assert.deepEqual(r.partitions.map((p) => p.name).sort(),
+    ['2080TI', 'A6000', 'DEBUG', 'RTX8000']);
+  // 没权限的分区必须带 allowed:false 与原因，界面据此禁用并说明
+  const denied = r.partitions.find((p) => p.name === 'DEBUG');
+  assert.equal(denied.allowed, false);
+  assert.ok(denied.reason, '禁用必须给出理由，而不是让用户猜');
 });
 
 test('★ 开会话：创建 code-server 视图，并真的自动登录成功', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
   const before = calls.views.length;
-  await invoke('app:start', 'code');
+  // 高级选项的临时覆盖：只传真实填了的键。这里模拟用户填了 4 核，
+  // 内存不填 → 由服务端用自己的默认值（而不是客户端编一个）。
+  await invoke('app:start', { cpus: 4 });
 
   // 等登记完成（演示后端 200ms）+ 建隧道 + 登录
   const view = await (async () => {
