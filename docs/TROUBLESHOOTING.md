@@ -503,7 +503,7 @@ sudo /usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.c
 
 # 会话
 slurmate whoami
-slurmate purposes
+slurmate partitions
 slurmate list
 slurmate status --json
 slurmate doctor

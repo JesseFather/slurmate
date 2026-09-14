@@ -26,14 +26,16 @@ bash 无法 getsockopt(SO_PEERCRED)（身份认证的唯一可信来源），且
 """
 
 import argparse
-import configparser
 import errno
+import ipaddress
 import json
 import logging
 import os
 import pwd
+import random
 import re
 import selectors
+import shutil
 import signal
 import socket
 import sqlite3
@@ -43,12 +45,12 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
 SESSION_FILE_FIELDS = {
-    "schema", "session_id", "job_id", "uid", "user", "purpose", "node", "node_ip",
+    "schema", "session_id", "job_id", "uid", "user", "partition", "node", "node_ip",
     "service_port", "tunnel_target", "state", "job_started_at", "written_at",
     "job_hb_at", "code_server_pid", "auth_mode", "auth_password",
     "slurm_restart_number", "exit_code",
@@ -126,6 +128,34 @@ def fmt_slurm_time(secs):
     return "%02d:%02d:%02d" % (hh, mm, ss)
 
 
+def clamp_int(v, default, lo, hi):
+    """请求里的整数 → 钳制到 [lo, hi]。缺失/非数字用 default。
+
+    钳制而不是报错：用户多要一点资源是常见的、无恶意的，而报错会让他去猜。
+    真正的防线是"上限不由他说了算"，这一句就是那道上限。
+    """
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(n, hi))
+
+
+def sanitize_mem(v, default):
+    """校验内存参数，返回 (值, 是否被回退)。绝不把它拼进 shell。
+
+    ★ `--mem=0` 在 Slurm 里的含义是"该节点的**全部**内存"，不是"零"。
+      用户的笔误会让一个开发会话吃掉整台机器，所以这里显式拒绝并回退。
+      回退这件事要报给用户（调用方负责），不能只写进日志 —— 他填了 0，
+      以为设置生效了，而实际拿到的是默认值。
+    """
+    s = str(v or "").strip()
+    m = re.fullmatch(r"([0-9]+)([KMGTP]?)", s)
+    if m and int(m.group(1)) > 0:
+        return "%s%s" % (int(m.group(1)), m.group(2)), False
+    return default, bool(s)
+
+
 def normalize_ipv4(s):
     """严格校验并规范化 IPv4。返回规范字符串，不合法返回 None。
 
@@ -137,7 +167,6 @@ def normalize_ipv4(s):
     if not isinstance(s, str) or not s or len(s) > 15:
         return None
     try:
-        import ipaddress
         addr = ipaddress.IPv4Address(s)
     except Exception:                                        # noqa: BLE001
         return None
@@ -177,162 +206,421 @@ def now_ts():
     return int(time.time())
 
 
+def crosscheck_cidr(cfg, run=None):
+    """把 cluster_cidr 与 Slurm 的 NodeAddr 全集交叉核对，返回错误列表。
+
+    为什么必须有这一步：cluster_cidr 漏掉一个节点时，去往那个节点的流量会被
+    链首的基础规则 `ip daddr != CIDR accept` 放行 —— 所有会话规则永远匹配不到，
+    而链的 policy 就是 accept，所以既没有报错也没有日志。表现是"IDE 能连上，
+    但那条 drop 规则其实从没生效过"，比连不上危险得多。
+
+    查询失败时【不返回错误】：那多半是控制器抖动（slurmctld 重启、munge 抖动），
+    而不是配置错了。宁可留着（可能不完整的）保护继续服务，也不要因为一次查询
+    失败就拒绝启动 —— 后者会把一次瞬时抖动放大成一次停机。
+    """
+    problem = cfg.cluster_cidr_problem()
+    if problem:
+        return []                     # 配置本身就不合法，交给 validate() 报
+    run = run or run_cmd
+    rc, out, _ = run([cfg.scontrol, "show", "node", "-o"], timeout=15)
+    if rc != 0 or not out.strip():
+        # ★ 这是整个校验里唯一的缺口，所以说得重一点、说清楚缺的是什么：
+        #   「跳过核对」的实质是「cluster_cidr 对不对，这一次没人验」。
+        #   照抄文档示例网段 + 恰好这一次问不到 Slurm，两个条件同时成立时，
+        #   守护进程会带着一份无效的 ACL 起来 —— 而它的表现是"一切正常"。
+        log.warning("取不到 Slurm 节点列表（rc=%s）：本次【没有】核对 cluster_cidr "
+                    "（%s）是否覆盖了全部计算节点。若这个网段是照抄文档示例填的，"
+                    "现在正是它会被漏过去的时候。", rc, cfg.cluster_cidr)
+        return []
+    net = ipaddress.IPv4Network(cfg.cluster_cidr, strict=False)
+    outside = []
+    for m in re.finditer(r"\bNodeAddr=(\S+)", out):
+        ip = m.group(1)
+        # NodeAddr 在有些集群里写的是主机名（由 Slurm 解析）—— 那种情况这里
+        # 无从判断，跳过而不是报错。
+        if is_ipv4(ip) and ipaddress.IPv4Address(ip) not in net:
+            outside.append(ip)
+    if not outside:
+        return []
+    shown = "、".join(outside[:8]) + ("…（共 %d 个）" % len(outside)
+                                      if len(outside) > 8 else "")
+    return ["cluster_cidr = %s 漏掉了 %d 个节点：%s。去往这些节点的流量会被"
+            "基础规则放行，会话的 drop 规则永远匹配不到 —— 而链的 policy 是 "
+            "accept，不会有任何报错。请把网段放大到覆盖全部计算节点。"
+            % (cfg.cluster_cidr, len(outside), shown)]
+
+
 # ==============================================================================
 #  配置
 # ==============================================================================
 
-class Purpose(object):
-    def __init__(self, key, label, partition, gres, cpus, mem):
-        self.key = key
-        self.label = label
-        self.partition = partition
-        self.gres = gres
-        self.cpus = cpus
-        self.mem = mem
+# ── 不再是配置项的常量 ──────────────────────────────────────────────────────
+#
+# 这些值此前都是 slurmate.conf 里的键。它们被收起，是因为**它们只有一种正确
+# 取值，而配置项的存在本身就制造了取错的可能**。
+#
+# 前四条尤其要紧：它们与 systemd 单元的 RuntimeDirectory / StateDirectory /
+# LogsDirectory 一一对应。在配置里改掉它们，单元那边不会跟着改，于是出现
+# 「配置说 A、系统说 B」—— 而症状是状态目录凭空换了个地方、旧数据不见了，
+# 报错里没有一个字提到配置。
+#
+# 作业与超时类的值没有这个对应关系，但同样从没有人改过。一个不会被改的旋钮，
+# 只会在被人第一次拧动时变成故障。
+SOCKET_PATH = "/run/slurmate-session/ctl.sock"
+STATE_DIR = "/var/lib/slurmate-session"
+LOG_DIR = "/var/log/slurmate"
+TICK_SECONDS = 2
 
-    def to_dict(self):
-        return {"key": self.key, "label": self.label, "partition": self.partition,
-                "gres": self.gres, "cpus": self.cpus, "mem": self.mem}
+STARTUP_GRACE_SECONDS = 120
+DEFAULT_TIME = "12:00:00"
+# 用户可请求的时间硬上限。分区自己的 MaxTime 比它小时按分区截断。
+MAX_TIME = "7-00:00:00"
+SUSPECT_AFTER = 300
+ORPHAN_AFTER = 1800
+RESERVED_TTL = 600
+SUBMITTED_TTL = 1800
+RELEASED_KEEP = 600
+# "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
+JOB_MISSING_CONFIRM_TICKS = 3
+
+RENEW_INCREMENT = "12:00:00"
+RENEW_THRESHOLD = 7200
+RENEW_MAX_TOTAL = 604800
+
+PASSWORD_BYTES = 12
+
+MAX_ACTIVE_PER_USER = 1
+MAX_PENDING_PER_USER = 4
+MAX_RPC_PER_SECOND = 10
+REJECT_THRESHOLD = 20
+REJECT_WINDOW = 600
+THROTTLE_SECONDS = 1800
+
+# 服务端默认资源。客户端【不填】这些值 —— 缺省一律由服务端决定，
+# 否则一个改过的客户端省略字段就能要到整机。
+DEFAULT_CPUS = 2
+DEFAULT_MEM = "8G"
+MAX_CPUS_REQUEST = 64
+MAX_GPUS_REQUEST = 8
+
+JOB_LOG_SUBDIR = ".slurmate/logs"
+
+# Slurm 命令的候选目录。配置里留空时按这个顺序找。
+#
+# 为什么不能只靠 PATH：守护进程在 systemd 下运行，而 systemd 的 PATH 是固定的
+# （通常是 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin），
+# 与登录 shell 的 PATH 无关。/opt/slurm/bin 这类源码安装的位置不在其中，
+# 于是"留空则自动查找"会失败，而失败信息看起来像"Slurm 没装"。
+SLURM_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/slurm/bin", "/usr/sbin",
+                  "/bin", "/sbin")
+
+# 配置里允许出现的键。表外的键一律报错 —— 拼错的键被静默忽略，
+# 正是这个项目一路在清的那类问题：文件里写着，而实际什么也没发生。
+CONF_KEYS = frozenset([
+    "cluster_cidr", "readonly_paths",
+    "range_start", "range_end", "reserved_ranges", "candidates_per_session",
+    "auth_mode",
+    "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
+    "code_server_bin",
+])
+
+
+def parse_flat_config(path):
+    """读扁平 `键 = 值` 配置，返回 {键: 值}。
+
+    只有三种行：注释、空行、赋值。行尾的 `# …` 也算注释。
+    重复的键报错（理由见 CONF_KEYS 上方：写两遍说明作者对哪个生效有不同看法）。
+    """
+    out = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if "=" not in line:
+                raise ValueError("第 %d 行不是 `键 = 值` 形式: %r" % (lineno, raw.strip()))
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if not key:
+                raise ValueError("第 %d 行缺少键名: %r" % (lineno, raw.strip()))
+            if key in out:
+                raise ValueError("第 %d 行：键 %r 重复出现" % (lineno, key))
+            out[key] = val.strip()
+    return out
+
+
+def resolve_bin(name, explicit):
+    """把一个外部命令解析成【确实存在】的绝对路径，找不到返回 None。
+
+    explicit 非空 → 原样用它。管理员点名了就必须是它，不做任何猜测 ——
+    猜的后果是"我明明配了另一套 Slurm，跑起来的却是这一套"。
+
+    explicit 为空 → 先查 PATH，再依次查 SLURM_BIN_DIRS。
+    """
+    if explicit:
+        return explicit
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in SLURM_BIN_DIRS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def default_job_script():
+    """作业脚本的位置从【守护进程自身的安装位置】推导。
+
+    安装布局由 deploy.sh 定下：守护进程在 <prefix>/sbin，作业脚本在
+    <prefix>/share/slurmate。两边由同一个前缀推导，就不存在
+    「配置指向 A、实际装在 B」这种只在提交时才炸的不一致。
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.normpath(
+        os.path.join(here, os.pardir, "share", "slurmate", "run.sbatch"))
+
+
+def resolve_code_server(explicit):
+    """code-server 在【计算节点】上的路径。
+
+    ⚠️ 这个函数在登录节点上运行，而 code-server 装在计算节点上。所以它的
+    "找到"只是**推测**，找不到也不代表真的没有 —— 这两件事必须在输出里
+    分开说清楚，否则运维会照着一条错的结论去查（"登录节点上没有，那肯定没装"）。
+
+    留空时：先 which，再退回惯例路径 /usr/local/bin/code-server。
+    """
+    if explicit:
+        return explicit, "配置指定"
+    found = shutil.which("code-server")
+    if found:
+        return found, "本机 PATH 中找到（节点布局通常一致，但未在计算节点上确认）"
+    return "/usr/local/bin/code-server", "惯例路径（本机没有，未在计算节点上确认）"
+
+
+def parse_reserved_ranges(spec):
+    """`"起-止,起-止"` → [(起, 止), …]。格式错误抛 ValueError。"""
+    out = []
+    for item in (spec or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" not in item:
+            raise ValueError("reserved_ranges 的每一项应为 起-止 形式，得到: %r" % item)
+        a, b = item.split("-", 1)
+        try:
+            out.append((int(a), int(b)))
+        except ValueError:
+            raise ValueError("reserved_ranges 的起止必须是数字，得到: %r" % item)
+    return out
 
 
 class Config(object):
     def __init__(self, path):
-        # inline_comment_prefixes：允许 `key = value   # 说明` 这种写法。
-        # 注意这意味着值里不能出现 '#'（本配置文件里的路径/网段/时间都不含）。
-        cp = configparser.ConfigParser(inline_comment_prefixes=("#",))
-        with open(path, "r", encoding="utf-8") as f:
-            cp.read_file(f)
-        self.raw = cp
         self.path = path
+        raw = parse_flat_config(path)
+        # 认不出来的键不在构造时报错，攒着交给 validate() —— --check 要能
+        # 一次把问题列全，而不是让人改一个跑一次。
+        self.unknown_keys = sorted(set(raw) - CONF_KEYS)
 
-        g = cp["general"]
-        self.socket_path = g.get("socket_path", "/run/slurmate-session/ctl.sock")
-        self.state_dir = g.get("state_dir", "/var/lib/slurmate-session")
-        self.db_path = g.get("db_path", os.path.join(self.state_dir, "claims.db"))
-        self.rejected_dir = g.get("rejected_dir", os.path.join(self.state_dir, "rejected"))
-        self.log_dir = g.get("log_dir", "/var/log/slurmate")
-        self.audit_log = g.get("audit_log", os.path.join(self.log_dir, "audit.log"))
-        self.cluster_cidr = g.get("cluster_cidr", "192.0.2.0/24")
-        self.tick_seconds = g.getint("tick_seconds", 2)
-        self.startup_grace_seconds = g.getint("startup_grace_seconds", 120)
+        def get(key, default=""):
+            return raw.get(key, default)
 
-        p = cp["ports"]
-        self.port_start = p.getint("range_start", 55001)
-        self.port_end = p.getint("range_end", 55999)
-        self.candidates_per_session = p.getint("candidates_per_session", 6)
+        def getint(key, default):
+            v = raw.get(key, "")
+            if v == "":
+                return default
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError("%s 必须是整数，得到: %r" % (key, v))
 
-        # 需要避让的其他端口区间，格式 "start-end,start-end"（逗号分隔，可留空）。
-        # 若你的集群上还有别的端口管理系统（某些 guard / DNAT 守护进程之类），
-        # 把它们的区间写在这里，启动时会断言不交 —— nftables 对同 hook 同
-        # priority 的【跨表顺序不给保证】，只有"集合不交"才能让行为确定。
-        # 开源前的旧实现把 "必须 > 55000" 写死在代码里，那是本集群的约定，
-        # 别人的集群用 55000 以下端口时会直接起不来。
-        self.reserved_ranges = []
-        for _item in (p.get("reserved_ranges", "") or "").split(","):
-            _item = _item.strip()
-            if not _item:
-                continue
-            if "-" not in _item:
-                raise ValueError("reserved_ranges 的每一项应为 start-end 形式，得到: %r"
-                                 % _item)
-            _a, _b = _item.split("-", 1)
-            self.reserved_ranges.append((int(_a), int(_b)))
+        # ── 网络 ──
+        self.cluster_cidr = get("cluster_cidr").strip()
+        self.readonly_paths = get("readonly_paths").strip()
 
-        lc = cp["lifecycle"]
-        self.default_time = lc.get("default_time", "12:00:00")
-        self.max_time = lc.get("max_time", "7-00:00:00")
-        self.suspect_after = lc.getint("suspect_after_seconds", 300)
-        self.orphan_after = lc.getint("orphan_after_seconds", 1800)
-        self.reserved_ttl = lc.getint("reserved_ttl_seconds", 600)
-        # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
-        self.job_missing_confirm_ticks = lc.getint("job_missing_confirm_ticks", 3)
-        self.submitted_ttl = lc.getint("submitted_ttl_seconds", 1800)
-        self.released_keep = lc.getint("released_keep_seconds", 600)
+        # ── 端口池 ──
+        self.port_start = getint("range_start", 55001)
+        self.port_end = getint("range_end", 55999)
+        self.candidates_per_session = getint("candidates_per_session", 6)
+        # 需要避让的其他端口区间。若集群上还有别的端口管理系统（某些 guard /
+        # DNAT 守护进程之类），把它们的区间写进配置 —— 启动时会断言不交。
+        # nftables 对同 hook 同 priority 的【跨表顺序不给保证】，只有"集合不交"
+        # 才能让行为确定。开源前的旧实现把"必须 > 55000"写死在代码里，那是本
+        # 集群的约定，别人的集群用 55000 以下端口时会直接起不来。
+        self.reserved_ranges = parse_reserved_ranges(get("reserved_ranges"))
 
-        rn = cp["renew"]
-        self.renew_enabled = rn.getboolean("enabled", True)
-        self.renew_threshold = rn.getint("threshold_seconds", 7200)
-        self.renew_increment = rn.get("increment", "12:00:00")
-        self.renew_max_total = rn.getint("max_total_seconds", 604800)
+        # ── 安全 ──
+        self.auth_mode = (get("auth_mode", "password") or "password").strip().lower()
 
-        sec = cp["security"]
-        self.auth_mode = sec.get("auth_mode", "password").strip().lower()
-        self.password_bytes = sec.getint("password_bytes", 12)
+        # ── 从代码常量来的（见文件上方的理由）──
+        self.socket_path = SOCKET_PATH
+        self.state_dir = STATE_DIR
+        self.db_path = os.path.join(STATE_DIR, "claims.db")
+        self.rejected_dir = os.path.join(STATE_DIR, "rejected")
+        self.log_dir = LOG_DIR
+        self.audit_log = os.path.join(LOG_DIR, "audit.log")
+        self.tick_seconds = TICK_SECONDS
+        self.startup_grace_seconds = STARTUP_GRACE_SECONDS
+        self.default_time = DEFAULT_TIME
+        self.max_time = MAX_TIME
+        self.suspect_after = SUSPECT_AFTER
+        self.orphan_after = ORPHAN_AFTER
+        self.reserved_ttl = RESERVED_TTL
+        self.submitted_ttl = SUBMITTED_TTL
+        self.released_keep = RELEASED_KEEP
+        self.job_missing_confirm_ticks = JOB_MISSING_CONFIRM_TICKS
+        self.renew_enabled = True
+        self.renew_threshold = RENEW_THRESHOLD
+        self.renew_increment = RENEW_INCREMENT
+        self.renew_max_total = RENEW_MAX_TOTAL
+        self.password_bytes = PASSWORD_BYTES
+        self.max_active_per_user = MAX_ACTIVE_PER_USER
+        self.max_pending_per_user = MAX_PENDING_PER_USER
+        self.max_rpc_per_second = MAX_RPC_PER_SECOND
+        self.reject_threshold = REJECT_THRESHOLD
+        self.reject_window = REJECT_WINDOW
+        self.throttle_seconds = THROTTLE_SECONDS
+        self.job_script = default_job_script()
+        self.job_log_subdir = JOB_LOG_SUBDIR
 
-        q = cp["quota"]
-        self.max_active_per_user = q.getint("max_active_per_user", 1)
-        self.max_pending_per_user = q.getint("max_pending_per_user", 4)
-        self.max_rpc_per_second = q.getint("max_rpc_per_second", 10)
-        self.reject_threshold = q.getint("reject_threshold", 20)
-        self.reject_window = q.getint("reject_window_seconds", 600)
-        self.throttle_seconds = q.getint("throttle_seconds", 1800)
+        # ── 外部命令（留空则查找）──
+        self.sbatch = resolve_bin("sbatch", get("sbatch"))
+        self.scancel = resolve_bin("scancel", get("scancel"))
+        self.squeue = resolve_bin("squeue", get("squeue"))
+        self.scontrol = resolve_bin("scontrol", get("scontrol"))
+        self.sacctmgr = resolve_bin("sacctmgr", get("sacctmgr"))
+        self.code_server_bin, self.code_server_src = resolve_code_server(
+            get("code_server_bin"))
 
-        s = cp["slurm"]
-        self.sbatch = s.get("sbatch") or "/usr/bin/sbatch"
-        self.scancel = s.get("scancel") or "/usr/bin/scancel"
-        self.squeue = s.get("squeue") or "/usr/bin/squeue"
-        self.scontrol = s.get("scontrol") or "/usr/bin/scontrol"
-        self.sacctmgr = s.get("sacctmgr") or "/usr/bin/sacctmgr"
-        self.job_script = s.get("job_script", "/usr/local/share/slurmate/run.sbatch")
-        self.code_server_bin = s.get("code_server_bin", "/usr/local/bin/code-server")
-        # 作业日志在用户家目录下的相对路径。Slurm.submit() 用它拼 sbatch 的 -o/-e。
-        #
-        # ⚠️ 这一行曾经【漏掉过】—— 配置项在 slurmate.conf 里写着，Slurm.submit()
-        #    里也读着，唯独 Config 从来没把它从配置里取出来。后果不是"日志路径
-        #    不对"，而是 `AttributeError`，被 dispatch 兜成 code 9 内部错误：
-        #    **每一次提交都失败**，而错误信息里看不出任何与"日志路径"有关的线索。
-        #    教训：配置项要在三处对齐 —— 示例配置、读取处、使用处。少一处就是
-        #    一个只在运行时才炸的洞。
-        self.job_log_subdir = s.get("job_log_subdir", ".slurmate/logs")
+    def cluster_cidr_problem(self):
+        """cluster_cidr 的**形式**问题描述；没问题返回 None。
 
-        self.purposes = {}
-        for sec in cp.sections():
-            if sec.startswith("purpose:"):
-                key = sec.split(":", 1)[1]
-                self.purposes[key] = Purpose(
-                    key=key,
-                    label=cp.get(sec, "label", fallback=key),
-                    partition=cp.get(sec, "partition"),
-                    gres=cp.get(sec, "gres", fallback=""),
-                    cpus=cp.getint(sec, "cpus", fallback=1),
-                    mem=cp.get(sec, "mem", fallback="2G"),
-                )
+        这一项此前只校验了「地址部分是合法 IPv4」，另外两件事一件没做，而它们的
+        失效方向**都是 fail-open**（不报错，只是 ACL 不再生效）：
+          ① 前缀长度不校验 —— `192.0.2.0/99` 能通过自检，在 nft 里却是语法错误；
+          ② 主机位不为 0 的写法（`192.0.2.5/24`）在 nft 里语义含糊。
+
+        至于「这个网段是不是真的覆盖了全部计算节点」—— 那是**内容**问题，不是形式
+        问题，只有问 Slurm 才知道，见 crosscheck_cidr()。
+
+        ★ 这里刻意【没有】「拒绝 RFC 5737 文档网段」那一条，虽然它看起来能一眼抓住
+          「照抄示例忘了改」。理由：那会**拒绝一个完全合法的配置** —— 用 192.0.2.0/24
+          的测试集群是存在的，而软件没有任何依据判定它不是真的。一个不许人填真实值的
+          校验，是软件的错，不是配置的错。而它想防的那件事由 crosscheck_cidr() 覆盖，
+          且报错更精确（它会点名到底是哪几个节点落在外面）。
+        """
+        s = self.cluster_cidr
+        if not s:
+            return ("未配置 cluster_cidr。它是 nft 基础规则 `ip daddr != <CIDR> accept` "
+                    "的几何约束，而它没有安全的默认值 —— 填错的后果不是报错，而是"
+                    "全部 ACL 静默失效。写法：cluster_cidr = <网络地址>/<前缀长度>"
+                    "（例如 192.0.2.0/24 —— 把地址换成你的集群网段）")
+        if "/" not in s:
+            return ("cluster_cidr 必须是 CIDR（<网络地址>/<前缀长度>），当前为 %r" % s)
+        addr, _, plen = s.partition("/")
+        if not is_ipv4(addr):
+            return "cluster_cidr 的地址部分不是合法 IPv4: %r" % s
+        if not plen.isdigit():
+            return "cluster_cidr 的前缀长度不是数字: %r" % s
+        n = int(plen)
+        if not (0 <= n <= 32):
+            return "cluster_cidr 的前缀长度越界: %r（应为 0-32）" % s
+        if n == 0:
+            return ("cluster_cidr 的前缀长度是 0：`ip daddr != 0.0.0.0/0` 恒为假，"
+                    "基础规则等于不存在，实际保护范围远超预期")
+        net = ipaddress.IPv4Network(s, strict=False)
+        if str(net) != s:
+            return ("cluster_cidr 的主机位不为 0（%s）。在 nft 里语义含糊，"
+                    "请改写成网络地址：%s" % (s, net))
+        return None
+
+    def _db_schema_errors(self):
+        """数据库表结构是否还是本版认得的样子。
+
+        只在库文件已存在且读得到时检查：非 root 跑 `--check` 读不到
+        /var/lib/slurmate-session 是正常的，不该因此报错。
+
+        ★ v0.2 删掉了 sessions.purpose 这一列（「用途」这一层没有了）。
+          SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会**改已存在的表，而那一列
+          是 NOT NULL —— 于是旧库上的每一次提交都会以 IntegrityError 失败，被
+          dispatch 兜成 code 9「内部错误」，信息里没有一个字与数据库有关。
+          这里把它变成一条能照着做的启动错误。claims.db 可以放心删：它记的是
+          "这个 job_id 是我代表哪个 uid 提交的"，丢了之后
+          recover_from_rules() 会从 nft 规则重建。
+        """
+        if not os.path.exists(self.db_path):
+            return []
+        try:
+            conn = sqlite3.connect("file:%s?mode=ro" % self.db_path, uri=True,
+                                   timeout=5)
+        except sqlite3.Error:
+            return []                       # 读不到（多半是权限）—— 不当作错误
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+        if not cols:
+            return []                       # 表还不存在，Store 会建
+        if "purpose" in cols:
+            return ["数据库 %s 是 v0.1 的（sessions 表还有 purpose 列，而 v0.2 起"
+                    "不再有「用途」这一层）。它不会被自动改表，旧列是 NOT NULL，"
+                    "留着会让每一次提交都以内部错误失败。删掉它再启动即可 —— "
+                    "会话归属能从 nft 规则重建：rm -f %s" % (self.db_path, self.db_path)]
+        return []
 
     def validate(self):
         """启动时自检。任何一条不满足都拒绝启动 —— 宁可不起，也不要带病运行。"""
         errors = []
+        for k in self.unknown_keys:
+            errors.append("配置里有无法识别的键 %r（拼错了？本版只认：%s）"
+                          % (k, ", ".join(sorted(CONF_KEYS))))
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
-        if self.port_start > self.port_end:
-            errors.append("端口区间起止颠倒: %d-%d" % (self.port_start, self.port_end))
+        if self.port_start < 1 or self.port_start > self.port_end:
+            errors.append("端口区间起止非法: %d-%d" % (self.port_start, self.port_end))
         for _a, _b in self.reserved_ranges:
             if self.port_start <= _b and _a <= self.port_end:
                 errors.append("端口区间 %d-%d 与 reserved_ranges 里的 %d-%d 重叠"
                               % (self.port_start, self.port_end, _a, _b))
         if self.port_end > 65535:
             errors.append("端口区间上界 %d 越界" % self.port_end)
-        # 阈值关系
+        # 阈值关系。这几个现在是代码常量，正常情况下恒成立 —— 留着是因为
+        # "恒成立"这句话本身该由机器来断言，而不是由读代码的人来相信。
         if self.job_missing_confirm_ticks < 1:
             errors.append("job_missing_confirm_ticks 必须 >= 1")
         if self.suspect_after >= self.orphan_after:
             errors.append("suspect_after(%d) 必须小于 orphan_after(%d)"
                           % (self.suspect_after, self.orphan_after))
         if not os.path.exists(self.job_script):
-            errors.append("作业脚本不存在: %s" % self.job_script)
-        if not is_ipv4(self.cluster_cidr.split("/")[0]):
-            errors.append("cluster_cidr 不是 IPv4 网段: %s" % self.cluster_cidr)
-        for want in (self.sbatch, self.scancel, self.scontrol):
-            if not os.path.exists(want):
-                errors.append("Slurm 命令不存在: %s" % want)
-        if not self.purposes:
-            errors.append("没有配置任何 [purpose:*]")
+            errors.append("作业脚本不存在: %s（位置由守护进程自身的安装路径推导，"
+                          "正确安装时应由 deploy.sh 放到 <prefix>/share/slurmate/）"
+                          % self.job_script)
+        cidr_err = self.cluster_cidr_problem()
+        if cidr_err:
+            errors.append(cidr_err)
+        # ★ 五个命令全查。此前只查 sbatch/scancel/scontrol，而 squeue（job_state
+        #   的兜底查询）与 sacctmgr（账户与分区权限）可以是错路径而启动通过，
+        #   运行时才失败 —— 那时报出来的是"查不到作业"或"没有账户"，与真正的
+        #   原因（路径写错）隔了好几层。
+        for name in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
+            path = getattr(self, name)
+            if not path:
+                errors.append("找不到 %s：配置里留空表示自动查找，已在 PATH 与 %s "
+                              "里找过，都没有。请在配置里写明它的绝对路径。"
+                              % (name, "、".join(SLURM_BIN_DIRS)))
+            elif not os.path.exists(path):
+                errors.append("Slurm 命令不存在: %s（配置里 %s 指定）" % (path, name))
         if self.auth_mode not in ("password", "none"):
-            errors.append("security.auth_mode 只能是 password 或 none，当前为 %r"
+            errors.append("auth_mode 只能是 password 或 none，当前为 %r"
                           % self.auth_mode)
         if not (4 <= self.password_bytes <= 64):
-            errors.append("security.password_bytes 应在 4-64 之间，当前为 %d"
+            errors.append("password_bytes 应在 4-64 之间，当前为 %d"
                           % self.password_bytes)
+        errors.extend(self._db_schema_errors())
         return errors
 
 
@@ -345,8 +633,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id      TEXT PRIMARY KEY,
     uid             INTEGER NOT NULL,
     user            TEXT NOT NULL,
-    purpose         TEXT NOT NULL,
-    partition       TEXT NOT NULL,
+    -- v0.2 删掉了 purpose 列（「用途」这一层没有了）。已存在的旧库不会被
+    -- `CREATE TABLE IF NOT EXISTS` 改动，而那一列是 NOT NULL —— 所以启动时会
+    -- 明确拒绝（见 Config._db_schema_errors），而不是等第一次提交时炸成内部错误。
+    --
+    -- partition 允许为空串：分区权限查不到时（sacctmgr 失败），缺省提交会退化为
+    -- 不带 -p，此时"落在哪个分区"在提交那一刻确实无人知晓，而空串是它诚实的
+    -- 表示。作业跑起来之后 session_view 会改用它从 Slurm 查到的实际分区。
+    partition       TEXT NOT NULL DEFAULT '',
     account         TEXT NOT NULL,
     cpus            INTEGER NOT NULL DEFAULT 1,
     mem             TEXT NOT NULL DEFAULT '2G',
@@ -626,6 +920,54 @@ class Nft(object):
 #  Slurm
 # ==============================================================================
 
+def build_sbatch_argv(cfg, sess, env, home):
+    """拼 sbatch 的命令行。**纯函数** —— 不 fork、不切身份，所以可以直接断言。
+
+    ★ 为什么单独拆出来：这个 argv 是「哪些 flag 在什么条件下【不出现】」这条
+      契约的唯一实现，而它的分支错误只有到真集群上、且只在某些分支上才暴露
+      （比如缺了 `-p` 是不是真的落到了 Slurm 的默认分区）。拆出来之后，每一条
+      分支都能在本机断言，而不是靠"上线后看一眼"。
+
+    `-o/-e` 的落点：优先 ~/.slurmate/logs/（作业脚本会在启动早期创建它；实测
+    本集群的 Slurm 也会自动创建 -o 的父目录）。但"Slurm 自动建目录"是版本相关
+    行为，万一哪天不成立，作业会在启动阶段静默失败、用户干等 —— 那是最难排查
+    的故障。所以退一步：目录不存在时把输出放到家目录根下（家目录一定存在）。
+    """
+    logdir = os.path.join(home, cfg.job_log_subdir)
+    if os.path.isdir(logdir):
+        outpat = os.path.join(logdir, "slurm-%j.out")
+    else:
+        outpat = os.path.join(home, "slurm-%j.out")
+
+    # 作业名带会话 id 前 8 位：squeue 里一眼能对上是哪一次会话。
+    # 「用途」没了之后不能再用它，而一个固定名字会让用户的多条作业
+    # 在 squeue 里长得一模一样。
+    argv = [cfg.sbatch, "--parsable",
+            "--job-name=slurmate-%s" % str(sess["session_id"])[:8],
+            "-A", sess["account"],
+            "-c", str(sess["cpus"]),
+            "--mem=%s" % sess["mem"],
+            "--time=%s" % sess["requested_time"],
+            "-o", outpat, "-e", outpat]
+    # 分区可以是空串 —— 见 op_submit 里「缺省随机」那一节的说明：权限查不到时
+    # 我们退化为不带 -p，把选择权交回 Slurm 的默认分区。
+    if sess.get("partition"):
+        argv.extend(["-p", sess["partition"]])
+    # gres 为空 → 【完全省略】--gres，而不是写 gpu:0。默认不占 GPU，
+    # 而在不带 GRES 的分区上写 --gres=gpu:0 会直接被 Slurm 拒绝。
+    if sess.get("gres"):
+        argv.append("--gres=%s" % sess["gres"])
+    # 注意：不写 -w。节点由 Slurm 在分区内自动选择 —— 这既是需求
+    # （自动分配、天然负载均衡），也避免所有用户都写死同一个节点名、
+    # 造成"一台排队到天荒地老、同分区另一台空着"的经典局面。
+    exports = ["ALL"]
+    for k, v in env.items():
+        exports.append("%s=%s" % (k, v))
+    argv.append("--export=%s" % ",".join(exports))
+    argv.append(cfg.job_script)
+    return argv
+
+
 class Slurm(object):
     def __init__(self, cfg):
         self.cfg = cfg
@@ -719,11 +1061,39 @@ class Slurm(object):
                 return cand
         return None
 
-    def partitions(self):
+    def partition_table(self):
+        """`scontrol show partition -o` → {分区名: {"max_time": 秒或 None, "is_default": bool}}
+
+        **None = 查询失败（问不到），{} = 确实一个分区都没有。** 调用方必须用
+        `is None` 区分它们 —— 把"问不到"当成"没有分区"会让默认分区变成随机选择
+        的依据凭空消失，而把"问不到"当成"不限制"更糟：那正是 allowed_partitions()
+        早期版本犯过的错（一个被注释描述为"二次校验"的函数在那里是 fail-open）。
+
+        为什么分区现查而不是配置：「用途 → 分区」是**策略**，而 Slurm 已经知道
+        **事实**。多抄一份就多一处会与实际分叉、且分叉了没人会发现的地方 ——
+        分区改名、加卡、改时间上限，配置里那份都不会跟着变。
+        """
         rc, out, _ = run_cmd([self.cfg.scontrol, "show", "partition", "-o"], timeout=8)
         if rc != 0:
-            return []
-        return re.findall(r"PartitionName=(\S+)", out)
+            return None
+        table = {}
+        for line in out.splitlines():
+            m = re.search(r"\bPartitionName=(\S+)", line)
+            if not m:
+                continue
+            mt = re.search(r"\bMaxTime=(\S+)", line)
+            try:
+                max_time = parse_slurm_time(mt.group(1)) if mt else None
+            except ValueError:
+                # 认不出的时间写法不该让整个分区列表作废 —— 当作"没告诉我们上限"，
+                # 由 MAX_TIME 那道全局上限兜住。
+                max_time = None
+            d = re.search(r"\bDefault=(\S+)", line)
+            table[m.group(1)] = {
+                "max_time": max_time,
+                "is_default": bool(d and d.group(1).upper() in ("YES", "TRUE", "1")),
+            }
+        return table
 
     def is_accounting_enforced(self):
         """AccountingStorageEnforce 里是否含 associations —— 决定 sbatch 必须带 -A。"""
@@ -811,37 +1181,7 @@ class Slurm(object):
         身份切换用 Popen(user=/group=/extra_groups=)（Python 3.9+），
         不走 shell、不做字符串拼接 —— 参数全部是 argv 元素。
         """
-        s = self.cfg
-        # 作业的 stdout/stderr 写到哪里。
-        # 优先 ~/.slurmate/logs/（作业脚本会在启动早期创建它；实测本集群的 Slurm
-        # 也会自动创建 -o 的父目录）。但"Slurm 自动建目录"是版本相关行为，万一
-        # 哪天不成立，作业会在启动阶段静默失败、用户干等 —— 那是最难排查的故障。
-        # 所以这里退一步：目录不存在时就把输出放到家目录根下（家目录一定存在）。
-        logdir = os.path.join(home, s.job_log_subdir)
-        if os.path.isdir(logdir):
-            outpat = os.path.join(logdir, "slurm-%j.out")
-        else:
-            outpat = os.path.join(home, "slurm-%j.out")
-
-        argv = [s.sbatch, "--parsable",
-                "--job-name=slurmate-%s" % sess["purpose"],
-                "-p", sess["partition"],
-                "-A", sess["account"],
-                "-c", str(sess["cpus"]),
-                "--mem=%s" % sess["mem"],
-                "--time=%s" % sess["requested_time"],
-                "-o", outpat, "-e", outpat]
-        if sess.get("gres"):
-            argv.append("--gres=%s" % sess["gres"])
-        # 注意：不写 -w。节点由 Slurm 在分区内自动选择 —— 这既是需求
-        # （按用途选、自动分配），也避免所有用户都写死同一个节点名、
-        # 造成"一台排队到天荒地老、同分区另一台空着"的经典局面。
-        exports = ["ALL"]
-        for k, v in env.items():
-            exports.append("%s=%s" % (k, v))
-        argv.append("--export=%s" % ",".join(exports))
-        argv.append(s.job_script)
-
+        argv = build_sbatch_argv(self.cfg, sess, env, home)
         pw = pwd.getpwnam(user)
         try:
             groups = os.getgrouplist(user, pw.pw_gid)
@@ -939,6 +1279,17 @@ class Sessiond(object):
 
     # ── 启动 ────────────────────────────────────────────────────────────────
     def start(self):
+        """启动。返回 False 表示"拒绝启动"（原因已写进日志，且必须是可照做的）。"""
+        # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对，放在【最前面】：
+        # 网段漏掉一个节点的后果是去往它的流量被链首的基础规则放行，而链的
+        # policy 是 accept —— 没有报错、没有日志、没有任何迹象。这是唯一能在
+        # 装上规则【之前】发现它的地方，等到会话跑起来就晚了。
+        cidr_errors = crosscheck_cidr(self.cfg)
+        if cidr_errors:
+            for e in cidr_errors:
+                log.error("拒绝启动：%s", e)
+            return False
+
         for d in (self.cfg.state_dir, self.cfg.rejected_dir, self.cfg.log_dir):
             os.makedirs(d, exist_ok=True)
         os.chmod(self.cfg.state_dir, 0o700)
@@ -963,6 +1314,7 @@ class Sessiond(object):
         log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds)",
                  VERSION, os.getpid(), self.cfg.port_start, self.cfg.port_end,
                  self.cfg.tick_seconds)
+        return True
 
     def setup_socket(self):
         path = self.cfg.socket_path
@@ -1120,10 +1472,13 @@ class Sessiond(object):
             if not node_ip:
                 continue
             now = now_ts()
+            # cpus/mem 留空：这是**别人**提交的作业（我们没写过它的命令行），
+            # 它当时要了多少资源无从得知。填 0 会看起来像"它只要了 0 核"，
+            # 而 session_view() 把 0 与空串都渲染成"未知"。
             self.store.insert(
                 session_id=os.urandom(8).hex(), uid=uid, user=user,
-                purpose="recovered", partition=job.get("Partition", "?"),
-                account=job.get("Account", "?"), cpus=0, mem="0",
+                partition=job.get("Partition", ""),
+                account=job.get("Account", "?"), cpus=0, mem="",
                 requested_time=job.get("TimeLimit", "?"), job_id=job_id,
                 state=ST_ENROLLED, node=node, node_ip=node_ip,
                 service_port=port, candidates=str(port),
@@ -1650,8 +2005,8 @@ class Sessiond(object):
                                  "time": now_ts()})
             if op == "whoami":
                 return self.op_whoami(uid, gid)
-            if op == "purposes":
-                return self.op_purposes(uid)
+            if op == "partitions":
+                return self.op_partitions(uid)
             if op == "submit":
                 return self.op_submit(uid, req)
             if op == "status":
@@ -1684,33 +2039,65 @@ class Sessiond(object):
             "can_submit": bool(acct),
         })
 
-    def op_purposes(self, uid):
+    def op_partitions(self, uid):
+        """可选分区列表 —— 从 Slurm 现查，与该用户的 association 求交。
+
+        不再有「用途 → 分区」那一层配置：那是**策略**，而 Slurm 已经知道**事实**。
+        见 Slurm.partition_table() 的 docstring。
+        """
         try:
             user = pwd.getpwuid(uid).pw_name
         except KeyError:
             return self._err(3, "unknown_uid", str(uid))
+        table = self.slurm.partition_table()
+        if table is None:
+            # 问不到分区就报错，**不**回一个空列表：空列表的意思是"这台集群没有
+            # 任何分区"，界面会照此禁用一切，而用户会以为是自己的权限问题。
+            return self._err(6, "partitions_unknown",
+                             "暂时无法从 Slurm 取到分区列表，请稍后重试")
         allowed = self.slurm.allowed_partitions(user)
         unknown = (allowed is PARTITIONS_UNKNOWN)
         out = []
-        for p in self.cfg.purposes.values():
-            d = p.to_dict()
+        # 默认分区排在最前（界面按顺序渲染），其余按名字排 —— 顺序稳定，
+        # 用户才不会觉得"上次那个分区这次找不到了"。
+        for name in sorted(table, key=lambda n: (not table[n]["is_default"], n)):
+            info = table[name]
             # 分区比较统一转小写 —— association 里的 Partition 是管理员手填的，
             # 大小写与实际分区名不一致是常见情况，不能因此误判为无权限。
             # 详见 allowed_partitions() 的 docstring，那里解释了为何这不是冗余防御。
-            ok = unknown or (allowed is None) or (p.partition.lower() in allowed)
-            d["allowed"] = ok
+            ok = unknown or (allowed is None) or (name.lower() in allowed)
+            d = {"name": name, "allowed": ok}
+            if info["is_default"]:
+                d["is_default"] = True
+            if info["max_time"] is not None:
+                d["max_time"] = fmt_slurm_time(info["max_time"])
             if not ok:
-                d["reason"] = "你的账号没有 %s 分区的权限" % p.partition
+                d["reason"] = "你的账号没有 %s 分区的权限" % name
             if unknown:
                 d["reason"] = "暂时无法确认分区权限（查询失败）"
             out.append(d)
-        return self._ok({"purposes": out})
+        return self._ok({"partitions": out,
+                         "defaults": {"cpus": DEFAULT_CPUS, "mem": DEFAULT_MEM}})
 
     def session_view(self, s, with_secret=True):
+        gpus = None
+        m = re.fullmatch(r"gpu:(\d+)", str(s["gres"] or ""))
+        if m:
+            gpus = int(m.group(1))
         d = {
             "session_id": s["session_id"], "job_id": s["job_id"],
-            "state": s["state"], "purpose": s["purpose"],
-            "partition": s["partition"], "node": s["node"],
+            "state": s["state"],
+            # 空串 = 提交时分区权限查不到、退化成不带 -p（见 op_submit）。
+            # 那种情况下"落在哪个分区"在提交那一刻确实无人知晓，报 null 比
+            # 编一个出来诚实；作业跑起来之后下面会用 Slurm 的答案补上。
+            "partition": s["partition"] or None,
+            # cpus/mem 为 0/空 = 未知。**这种情况是真实存在的**：从 nft 规则
+            # 恢复出来的会话（别的进程提交的作业）我们没写过它的命令行，
+            # 它当时要了多少资源无从得知。报 null 而不是 0 ——
+            # 0 会被读成"它只要了 0 核"。
+            "resources": {"cpus": s["cpus"] or None, "mem": s["mem"] or None,
+                          "gpus": gpus},
+            "node": s["node"],
             "node_ip": s["node_ip"], "service_port": s["service_port"],
             "created_at": s["created_at"], "enrolled_at": s["enrolled_at"],
             "last_hb_at": s["last_hb_socket"], "renew_count": s["renew_count"],
@@ -1730,6 +2117,10 @@ class Sessiond(object):
                 d["job_state"] = job.get("JobState")
                 d["time_limit"] = job.get("TimeLimit")
                 d["expires_at"] = parse_iso_ts(job.get("EndTime"))
+                # 提交时若没定下分区（权限查不到而退化），Slurm 现在知道答案了。
+                # 用实际的覆盖掉那个 null —— 用户和界面都需要知道落到哪种卡上。
+                if job.get("Partition"):
+                    d["partition"] = job["Partition"]
         if with_secret and s["state"] in ACL_STATES:
             # 口令由【作业自己生成】并写在 0600 的会话文件里（守护进程从不写用户
             # 家目录）。这里只读，复用带全部安全检查的读取路径。
@@ -1821,45 +2212,6 @@ class Sessiond(object):
         if self.is_throttled(uid):
             return self._err(4, "throttled", "请求被拒绝次数过多，请稍后再试")
 
-        purpose_key = str(req.get("purpose") or "code")
-        p = cfg.purposes.get(purpose_key)
-        if not p:
-            return self._err(2, "bad_purpose", purpose_key)
-
-        # 资源参数：全部经白名单/范围校验，绝不把它们拼进 shell
-        try:
-            cpus = int(req.get("cpus") or p.cpus)
-        except (TypeError, ValueError):
-            cpus = p.cpus
-        cpus = max(1, min(cpus, 128))
-        mem = str(req.get("mem") or p.mem)
-        # 注意 --mem=0 在 Slurm 里的含义是"该节点的全部内存"，不是"零" ——
-        # 用户的笔误会让一个开发会话吃掉整台机器。所以显式拒绝。
-        m = re.fullmatch(r"([0-9]+)([KMGTP]?)", mem)
-        if m and int(m.group(1)) > 0:
-            mem = "%s%s" % (int(m.group(1)), m.group(2))
-        else:
-            log.warning("内存参数 %r 不合法（0/负/格式错），回退到用途默认 %s", mem, p.mem)
-            mem = p.mem
-        try:
-            gpus = int(req.get("gpus") or 0)
-        except (TypeError, ValueError):
-            gpus = 0
-        gpus = max(0, min(gpus, 16))
-        gres = ("gpu:%d" % gpus) if gpus > 0 else None
-
-        t = str(req.get("time") or cfg.default_time)
-        try:
-            secs = parse_slurm_time(t)
-        except ValueError:
-            return self._err(2, "bad_time", t)
-        if not secs or secs <= 0:
-            return self._err(2, "bad_time", t)
-        max_secs = parse_slurm_time(cfg.max_time)
-        if max_secs and secs > max_secs:
-            secs = max_secs
-        time_str = fmt_slurm_time(secs)
-
         if self.store.count_active(uid) >= cfg.max_active_per_user:
             return self._err(4, "quota_active",
                              "已有 %d 个活跃会话（上限 %d）"
@@ -1873,15 +2225,80 @@ class Sessiond(object):
         if not acct:
             return self._err(4, "no_account", why)
 
-        # 分区权限（二次校验，不只靠客户端过滤）。
-        # 查不到权限时【拒绝】而不是放行 —— 这是安全相关路径，宁可让用户重试。
-        allowed = self.slurm.allowed_partitions(user)
-        if allowed is PARTITIONS_UNKNOWN:
+        # ── 资源：默认值由【服务端】填，并在这里钳制 ────────────────────────
+        # 客户端省略一个字段是在说"用你的默认"，不是"我要 0 核"。所以默认值
+        # 只能从这里出，不能从 req 里取 —— 否则一个改过的客户端省略 cpus 就能
+        # 拿到它想要的一切。
+        cpus = clamp_int(req.get("cpus"), DEFAULT_CPUS, 1, MAX_CPUS_REQUEST)
+        mem, mem_rejected = sanitize_mem(req.get("mem"), DEFAULT_MEM)
+        gpus = clamp_int(req.get("gpus"), 0, 0, MAX_GPUS_REQUEST)
+        gres = ("gpu:%d" % gpus) if gpus > 0 else None
+        warning = []
+        if mem_rejected:
+            # 此前这条只进日志。用户填了 `--mem 0`（在 Slurm 里是"整机内存"）
+            # 会被静默换成默认值，而他以为自己的设置生效了。
+            warning.append("内存参数无法识别，已改用 %s。" % mem)
+
+        # ── 分区 ────────────────────────────────────────────────────────────
+        table = self.slurm.partition_table()
+        if table is None:
             return self._err(6, "partitions_unknown",
-                             "暂时无法确认你的分区权限（集群账户服务未响应），请稍后重试")
-        if allowed is not None and p.partition.lower() not in allowed:
-            return self._err(4, "no_partition",
-                             "你的账号没有 %s 分区的权限" % p.partition)
+                             "暂时无法从 Slurm 取到分区列表，请稍后重试")
+        allowed = self.slurm.allowed_partitions(user)
+        unknown = (allowed is PARTITIONS_UNKNOWN)
+        want = str(req.get("partition") or "").strip()
+        if want:
+            # 用户**点了名** → fail-closed。查不到权限就拒绝，绝不"先跑了再说"：
+            # 他明确表达了意图，此时沉默地落到别处比拒绝更糟。
+            if want not in table:
+                return self._err(2, "bad_partition", want)
+            if unknown:
+                return self._err(6, "partitions_unknown",
+                                 "暂时无法确认你的分区权限（集群账户服务未响应）。"
+                                 "请稍后重试，或先不指定分区。")
+            if allowed is not None and want.lower() not in allowed:
+                return self._err(4, "no_partition",
+                                 "你的账号没有 %s 分区的权限" % want)
+            partition = want
+        elif unknown:
+            # ★ 缺省这条路径在权限查不到时【退化为不带 -p】，交给 Slurm 的默认
+            #   分区 —— 此时我们没有对权限做任何声明，Slurm 自己会用 association
+            #   兜住。**这不是漏判，别把它"修"成拒绝**：拒绝会让一次 sacctmgr
+            #   抖动变成所有用户都开不了会话，而这里没有任何安全损失。
+            partition = ""
+            warning.append("暂时查不到你的分区权限，本次交给 Slurm 的默认分区。")
+        else:
+            usable = [n for n in table if allowed is None or n.lower() in allowed]
+            if not usable:
+                return self._err(4, "no_partition",
+                                 "你的账号在 %s 这些分区上都没有权限"
+                                 % "、".join(sorted(table)))
+            # 随机挑，不按顺序挑第一个 —— 顺序挑会让所有默认会话落到同一个分区，
+            # 而用户明确要的是分散。代价是他事先不知道会落到哪种卡上，所以
+            # session_view 必须把【实际落到的】分区返回给界面显示。
+            partition = random.choice(sorted(usable))
+        max_time_secs = table[partition]["max_time"] if partition else None
+
+        # ── 时间 ────────────────────────────────────────────────────────────
+        t = str(req.get("time") or cfg.default_time)
+        try:
+            secs = parse_slurm_time(t)
+        except ValueError:
+            return self._err(2, "bad_time", t)
+        if not secs or secs <= 0:
+            return self._err(2, "bad_time", t)
+        # 上限取「代码里的硬上限」与「分区自己的 MaxTime」的较小者。
+        # 这一句替代了原来那个永远写 7 天的配置项：分区上限是 Slurm 知道的事实，
+        # 而配置里那份副本会在管理员调整分区后悄悄过期 —— 那时用户拿到的是
+        # 提交时才被 Slurm 拒绝的错误，与真正的原因隔着一层。
+        ceiling = parse_slurm_time(cfg.max_time)
+        if max_time_secs is not None:
+            ceiling = max_time_secs if ceiling is None else min(ceiling, max_time_secs)
+        if ceiling is not None and secs > ceiling:
+            warning.append("请求的 %s 超过上限 %s，已按上限提交。"
+                           % (t, fmt_slurm_time(ceiling)))
+            secs = ceiling
+        time_str = fmt_slurm_time(secs)
 
         cands = self.allocate_candidates(cfg.candidates_per_session)
         if not cands:
@@ -1897,8 +2314,8 @@ class Sessiond(object):
 
         now = now_ts()
         self.store.insert(
-            session_id=sid, uid=uid, user=user, purpose=purpose_key,
-            partition=p.partition, account=acct, cpus=cpus, mem=mem, gres=gres,
+            session_id=sid, uid=uid, user=user,
+            partition=partition, account=acct, cpus=cpus, mem=mem, gres=gres,
             requested_time=time_str, job_id=None, state=ST_RESERVED,
             candidates=",".join(str(c) for c in cands),
             auth_mode="password", created_at=now)
@@ -1908,7 +2325,12 @@ class Sessiond(object):
         env = {
             "SLURMATE_SESSION_ID": sid,
             "SLURMATE_CANDIDATES": ",".join(str(c) for c in cands),
-            "SLURMATE_PURPOSE": purpose_key,
+            # 可能为空串（权限查不到而退化）。run.sbatch 只把它记进日志与会话
+            # 文件，不做任何判断 —— 空就是"不知道"，不是"没分区"。
+            "SLURMATE_PARTITION": partition,
+            "SLURMATE_CPUS": str(cpus),
+            "SLURMATE_MEM": mem,
+            "SLURMATE_GPUS": str(gpus),
             "SLURMATE_AUTH_MODE": cfg.auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
             "SLURMATE_CLUSTER_CIDR": cfg.cluster_cidr,
@@ -1928,13 +2350,23 @@ class Sessiond(object):
 
         self.store.update(sid, job_id=job_id, state=ST_SUBMITTED, submitted_at=now_ts())
         self.audit("submitted", session=sid, uid=uid, job=job_id,
-                   purpose=purpose_key, partition=p.partition, account=acct,
-                   candidates=cands, time=time_str, gpus=gpus)
-        log.info("已提交: uid=%d job=%s purpose=%s partition=%s candidates=%s",
-                 uid, job_id, purpose_key, p.partition, cands)
-        return self._ok({"session_id": sid, "job_id": job_id,
-                         "state": ST_SUBMITTED, "partition": p.partition,
-                         "candidates": cands, "requested_time": time_str})
+                   partition=partition or None, account=acct,
+                   cpus=cpus, mem=mem, gpus=gpus,
+                   candidates=cands, time=time_str)
+        log.info("已提交: uid=%d job=%s partition=%s cpus=%d mem=%s gpus=%d "
+                 "candidates=%s time=%s",
+                 uid, job_id, partition or "(Slurm 默认)", cpus, mem, gpus,
+                 cands, time_str)
+        out = {"session_id": sid, "job_id": job_id, "state": ST_SUBMITTED,
+               "partition": partition or None,
+               "resources": {"cpus": cpus, "mem": mem, "gpus": gpus or None},
+               "candidates": cands, "requested_time": time_str}
+        if warning:
+            # 服务端替用户做了决定（改了内存、截断了时间、或没按他以为的方式挑
+            # 分区）时必须说出来。**静默地替他决定**正是这个项目一路在清的那类
+            # 问题：他以为自己要到了，而实际不是。
+            out["warning"] = " ".join(warning)
+        return self._ok(out)
 
 
 # ==============================================================================
@@ -1981,14 +2413,35 @@ def main():
         print("  认证方式      : %s%s" % (cfg.auth_mode,
               "（作业生成随机口令，客户端自动登录）" if cfg.auth_mode == "password"
               else "（无认证，保护仅靠 nft ACL —— 同节点其他作业可直连）"))
-        print("  用途          :")
-        for p in cfg.purposes.values():
-            print("    %-10s → 分区 %-9s cpus=%d mem=%-4s gres=%s"
-                  % (p.key, p.partition, p.cpus, p.mem, p.gres or "-"))
+        # 命令路径逐条打印【解析结果】而不是配置里写了什么：配置留空是推荐值，
+        # 而留空之后究竟找没找到、找到的是哪一个，只有这里说得清。
+        print("  外部命令      :")
+        for _n in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
+            _p = getattr(cfg, _n)
+            print("    %-9s %s" % (_n, _p or "【找不到】配置留空且 PATH 与候选目录里都没有"))
+        print("    %-9s %s（%s）" % ("code-server", cfg.code_server_bin,
+                                    cfg.code_server_src))
         slurm = Slurm(cfg)
         print("  accounting 强制: %s（决定 sbatch 是否必须带 -A）"
               % slurm.is_accounting_enforced())
-        print("  可见分区      : %s" % ", ".join(slurm.partitions()) or "(读不到)")
+        table = slurm.partition_table()
+        if table is None:
+            print("  分区          : 【读不到】scontrol show partition 失败")
+        elif not table:
+            print("  分区          : 【一个都没有】")
+        else:
+            print("  分区          :")
+            for _n in sorted(table, key=lambda n: (not table[n]["is_default"], n)):
+                _i = table[_n]
+                print("    %-12s %s%s" % (
+                    _n, "默认  " if _i["is_default"] else "      ",
+                    "无时间上限" if _i["max_time"] is None
+                    else fmt_slurm_time(_i["max_time"])))
+        # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对 —— 这是唯一能发现
+        # 「网段漏掉了某个节点」的地方，而漏掉的后果是静默失效。
+        cidr_errors = crosscheck_cidr(cfg)
+        for _e in cidr_errors:
+            print("  ⚠ %s" % _e)
         nft = Nft(cfg)
         print("  nft 表存在    : %s" % nft.table_exists())
         rules = nft.session_rules()
@@ -1996,6 +2449,13 @@ def main():
               "" if is_root else "  ← 非 root，无法读取属正常"))
         if not is_root:
             print("  [提示] 非 root 运行，nft 相关项仅供参考；完整自检请用 sudo")
+        # 上面那些 ⚠ 不能只是一行字：systemd 的 ExecStartPre 就是跑这个命令，
+        # 退出码非零才会真的拦住服务。交叉核对失败时拒绝启动，与
+        # Sessiond.start() 里的判断是同一条 —— 两处都要有，因为 --check
+        # 才是 systemd 看到的那一道。
+        if cidr_errors:
+            print("配置检查未通过：cluster_cidr 与 Slurm 的节点地址对不上（见上）")
+            return 1
         return 0
 
     if os.geteuid() != 0:
@@ -2004,14 +2464,17 @@ def main():
         return 1
 
     d = Sessiond(cfg)
+    rc = 0
     try:
-        d.start()
-        d.run()
+        if not d.start():
+            rc = 1
+        else:
+            d.run()
     except KeyboardInterrupt:
         pass
     finally:
         d.shutdown()
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

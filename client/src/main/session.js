@@ -199,6 +199,13 @@ class SessionController extends EventEmitter {
       return null;
     }
 
+    // ★ 服务端替我们做了决定时必须说出来：截断了时间上限、把无法识别的内存
+    //   换成了默认值、或者分区权限查不到因而交给了 Slurm 的默认分区。
+    //   这些都不妨碍连上，但用户会以为自己要到了 —— 静默地替他决定，
+    //   正是这个项目一路在清的那类问题。协议里 `warning` 这个字段存在的唯一
+    //   理由就是被显示出来；不接它，它就只是一段写给读代码的人看的注释。
+    if (resp.data.warning) this.warning = resp.data.warning;
+
     this.sessionId = resp.data.session_id;
     this._setState(State.QUEUED);
     return this._afterSubmit(opts);

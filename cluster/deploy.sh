@@ -649,7 +649,7 @@ install_one "${SRC_DIR}/run.sbatch"         "$JOBSH"   644
 install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
 
 # ── slurmate.conf：只在【不存在】时安装 ──
-# 它是站点配置 —— 管理员会在上面改端口区间、用途→分区映射、超时、配额。
+# 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、集群网段。
 # 重复部署时覆盖它等于把站点的调优悄悄抹掉（而且下次重启守护进程才生效，
 # 故障会出现在很久之后）。要重置就手动删掉它再跑。
 if [[ -e "$CONF" ]]; then
@@ -677,7 +677,9 @@ install_one "$UNIT_RENDERED" "$UNIT" 644
 
 # 目录权限必须是 0755，不能是 0700：
 #   - /usr/local/share/slurmate 里的 run.sbatch 由【用户身份】的 sbatch 读取
-#   - /etc/slurmate/slurmate.conf 由【用户身份】的 slurmate CLI 读取（找 socket 路径）
+#   - /etc/slurmate/slurmate.conf 必须可读 —— 部署脚本自己、以及管理员排查时
+#     都会读它。（用户身份的 slurmate CLI 不再读它：socket 路径已是编译期常量，
+#     见 cluster/slurmate 的 socket_path()。）
 # 只有状态目录 /var/lib/slurmate-session 才是 root 专属。
 
 # 语法自检 —— 装完立刻验证，出错立即中止，不留给 systemd 去发现。
@@ -705,10 +707,16 @@ step "阶段 3／6  配置自检（不启动服务）"
 if [[ "$DRYRUN" -eq 1 ]]; then
     info "[演练] 跳过"
 else
+    # 这一条跑的是守护进程【自己的】自检，不是在脚本里另写一份规则 ——
+    # 两套解释器的后果是"预检放行了一份配置，守护进程却起不来"（或者反过来），
+    # 而这个仓库已经因为同一类分叉吃过一次亏（reserved_ranges 的解析）。
+    # 上面那条 log.error 会逐条列出原因，最常见的是 cluster_cidr 还没填。
     if "$DAEMON" --check --config="$CONF"; then
         ok "配置自检通过"
     else
-        die "配置自检失败。未启动服务，未创建任何 nft 规则。"
+        die "配置自检失败（原因见上面的『配置错误: …』）。未启动服务，未创建任何 nft 规则。
+     多半是 ${CONF} 里的 cluster_cidr 还没改成本集群的网段 —— 它没有安全的默认值，
+     留空或仍是文档占位网段都会被拒绝。改完重跑本脚本。"
     fi
 fi
 

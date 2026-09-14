@@ -124,7 +124,7 @@ class FakeBackend extends Backend {
     }
 
     switch (op) {
-      case 'ping':       return ok({ pong: true, version: '0.1.0-demo', time: nowSec() });
+      case 'ping':       return ok({ pong: true, version: '0.2.0-demo', time: nowSec() });
       case 'whoami':     return this._whoami();
       case 'partitions': return ok({ partitions: this._partitions(), defaults: { ...DEFAULTS } });
       case 'submit':     return this._submit(req);

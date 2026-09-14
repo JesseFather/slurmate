@@ -28,9 +28,8 @@ import socket
 import sys
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
-CONF_PATH = "/etc/slurmate/slurmate.conf"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -42,18 +41,20 @@ EXIT_RATELIMIT = 7
 
 
 def socket_path():
-    """优先用配置里的路径；配置读不到就用默认值。"""
-    try:
-        with open(CONF_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.split("#", 1)[0].strip()
-                if line.startswith("socket_path"):
-                    _, _, val = line.partition("=")
-                    val = val.strip()
-                    if val:
-                        return val
-    except OSError:
-        pass
+    """socket 的位置。
+
+    ★ 这里此前会去读 /etc/slurmate/slurmate.conf 找 `socket_path`，用逐行扫描
+      加手工切 `#` 的方式。现在不读了，原因有两条：
+
+      一是那个键没有了 —— socket 路径与 systemd 单元的 RuntimeDirectory 是同一个
+      事实，写在两处就有一处会过期。守护进程那边现在从常量取，这边必须取同一个。
+
+      二是这条路本来就脆弱：CLI 是【用户身份】的进程，它对配置文件的解析能力
+      决定了它能不能连上守护进程，而它用的是与守护进程完全不同的解析器（一个
+      configparser、一个手写扫描）。配置文件末尾多一个空行、注释换一种写法，
+      两边就可能对同一个文件得出不同的结论 —— 而症状只是"连不上守护进程"。
+      客户端只经 `rpc` 进来，它的失败模式必须是确定的。
+    """
     return DEFAULT_SOCKET
 
 
@@ -186,7 +187,11 @@ def print_session(s, verbose=True):
     print("状态      : %s" % human_state(s.get("state")))
     if s.get("job_id"):
         print("作业 ID   : %s" % s.get("job_id"))
-    print("用途/分区 : %s / %s" % (s.get("purpose"), s.get("partition")))
+    res = s.get("resources") or {}
+    print("分区      : %s" % (s.get("partition") or "（Slurm 默认）"))
+    print("资源      : %s 核 / %s%s"
+          % (res.get("cpus") or "?", res.get("mem") or "?",
+             "，GPU %s" % res.get("gpus") if res.get("gpus") else ""))
     if s.get("tunnel_target"):
         print("隧道目标  : %s" % s.get("tunnel_target"))
         print("连          : ssh -N -L <本地端口>:%s ..." % s.get("tunnel_target"))
@@ -252,23 +257,35 @@ def cmd_whoami(args):
     return 0
 
 
-def cmd_purposes(args):
-    r = call({"op": "purposes"}, args.json)
+def cmd_partitions(args):
+    r = call({"op": "partitions"}, args.json)
     if isinstance(r, int):
         return r          # --json 或出错时，call() 已经把退出码算好了
     if not isinstance(r, dict):
         return 1
-    print("%-10s %-9s %-6s %-6s %s" % ("用途", "分区", "核心", "内存", "说明"))
+    d = r["data"]
+    print("%-12s %-8s %-14s %s" % ("分区", "默认", "时间上限", "说明"))
     print("-" * 62)
-    for p in r["data"]["purposes"]:
+    for p in d["partitions"]:
         mark = "" if p.get("allowed") else "  [无权限]"
-        print("%-10s %-9s %-6s %-6s %s%s"
-              % (p["key"], p["partition"], p["cpus"], p["mem"], p["label"], mark))
+        print("%-12s %-8s %-14s %s%s"
+              % (p["name"], "是" if p.get("is_default") else "",
+                 p.get("max_time") or "无上限", p.get("reason", ""), mark))
+    df = d.get("defaults") or {}
+    print()
+    print("缺省资源：%s 核 / %s（由服务端填，客户端不指定）"
+          % (df.get("cpus"), df.get("mem")))
+    print("不指定 --partition 时，会从有权限的分区里随机挑一个。")
     return 0
 
 
 def cmd_submit(args):
-    req = {"op": "submit", "purpose": args.purpose}
+    # 所有字段都是可选的：不传 = 让服务端用它的默认值（2 核 / 8G / 随机分区）。
+    # 这里【不】替服务端填默认值 —— 客户端填了就等于客户端说了算，
+    # 而"省略字段"必须表达"用你的默认"，不是"我要 0 核"。
+    req = {"op": "submit"}
+    if args.partition:
+        req["partition"] = args.partition
     if args.cpus:
         req["cpus"] = args.cpus
     if args.mem:
@@ -283,8 +300,16 @@ def cmd_submit(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
+    res = d.get("resources") or {}
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
-    print("分区 %s，时间上限 %s" % (d.get("partition"), d.get("requested_time")))
+    print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
+                                   d.get("requested_time")))
+    print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
+                                "，GPU %s" % res.get("gpus") if res.get("gpus") else ""))
+    if d.get("warning"):
+        # 服务端替用户做了决定（截断时间、回退内存、没按他以为的方式挑分区）
+        # 时必须说出来 —— 静默地替他决定，他会以为自己要到了。
+        print("[注意] %s" % d["warning"], file=sys.stderr)
     print()
     print("下一步：等待调度完成后即可连接 ——")
     print("  slurmate wait --session %s" % d.get("session_id"))
@@ -473,14 +498,14 @@ def build_parser():
     p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
     p.add_argument("--json", action="store_true")
 
-    p = add("purposes", cmd_purposes, "列出可选的开发用途及其分区/资源")
+    p = add("partitions", cmd_partitions, "列出可用的分区及其时间上限")
     p.add_argument("--json", action="store_true")
 
-    p = add("submit", cmd_submit, "提交一个开发会话")
-    p.add_argument("--purpose", default="code", help="用途（见 slurmate purposes）")
-    p.add_argument("--cpus", type=int, help="CPU 核心数")
-    p.add_argument("--mem", help="内存，如 4G")
-    p.add_argument("--gpus", type=int, help="GPU 数量（默认 0，不占卡）")
+    p = add("submit", cmd_submit, "提交一个开发会话（所有参数都可省略）")
+    p.add_argument("--partition", help="分区（省略则从有权限的分区里随机挑一个）")
+    p.add_argument("--cpus", type=int, help="CPU 核心数（省略 = 服务端默认）")
+    p.add_argument("--mem", help="内存，如 8G（省略 = 服务端默认）")
+    p.add_argument("--gpus", type=int, help="GPU 数量（省略 = 不占卡）")
     p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
     p.add_argument("--json", action="store_true")
 

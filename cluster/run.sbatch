@@ -47,9 +47,17 @@ unset CODE_SERVER_SESSION_SOCKET VSCODE_IPC_HOOK_CLI VSCODE_CWD \
 : "${SLURMATE_SESSION_ID:?缺少 SLURMATE_SESSION_ID}"
 : "${SLURMATE_CANDIDATES:?缺少 SLURMATE_CANDIDATES}"
 
-SLURMATE_PURPOSE="${SLURMATE_PURPOSE:-code}"
+# 分区可能为空串：守护进程在"分区权限查不到"时缺省提交会退化成不带 -p，
+# 由 Slurm 的默认分区兜底。空就是"提交那一刻不知道"，不是"没有分区" ——
+# 作业跑起来之后守护进程会从 scontrol 查到实际的，不需要这里猜。
+SLURMATE_PARTITION="${SLURMATE_PARTITION:-}"
+SLURMATE_CPUS="${SLURMATE_CPUS:-0}"
+SLURMATE_MEM="${SLURMATE_MEM:-}"
+SLURMATE_GPUS="${SLURMATE_GPUS:-0}"
 SLURMATE_AUTH_MODE="${SLURMATE_AUTH_MODE:-password}"
 SLURMATE_PASSWORD_BYTES="${SLURMATE_PASSWORD_BYTES:-12}"
+# 兜底值只是"这个变量不该为空"的防御，不是默认网段 —— 真正的值由守护进程
+# 从配置里传下来，而配置里留空时守护进程根本不会启动。
 SLURMATE_CLUSTER_CIDR="${SLURMATE_CLUSTER_CIDR:-192.0.2.0/24}"
 SLURMATE_CS_BIN="${SLURMATE_CS_BIN:-/usr/local/bin/code-server}"
 SLURMATE_SESS_DIR="${SLURMATE_SESS_DIR:-$HOME/.slurmate/sessions}"
@@ -123,9 +131,9 @@ json_escape() {
 write_session() {
     local state="$1" ec="$2"
     local body
-    body="$(printf '{"schema":1,"session_id":"%s","job_id":%s,"uid":%s,"user":"%s","purpose":"%s","node":"%s","node_ip":"%s","service_port":%s,"tunnel_target":"%s:%s","state":"%s","job_started_at":%s,"written_at":%s,"job_hb_at":%s,"code_server_pid":%s,"auth_mode":"%s","auth_password":"%s","slurm_restart_number":%s,"exit_code":%s}\n' \
+    body="$(printf '{"schema":1,"session_id":"%s","job_id":%s,"uid":%s,"user":"%s","partition":"%s","node":"%s","node_ip":"%s","service_port":%s,"tunnel_target":"%s:%s","state":"%s","job_started_at":%s,"written_at":%s,"job_hb_at":%s,"code_server_pid":%s,"auth_mode":"%s","auth_password":"%s","slurm_restart_number":%s,"exit_code":%s}\n' \
         "$(json_escape "$SLURMATE_SESSION_ID")" "$JOB_ID" "$MY_UID" "$(json_escape "$MY_USER")" \
-        "$(json_escape "$SLURMATE_PURPOSE")" "$(json_escape "$NODE")" "$NODE_IP" \
+        "$(json_escape "$SLURMATE_PARTITION")" "$(json_escape "$NODE")" "$NODE_IP" \
         "${SVC_PORT:-0}" "$NODE_IP" "${SVC_PORT:-0}" "$state" "$STARTED_AT" \
         "$(date +%s)" "$(date +%s)" "${CS_PID:-0}" "$AUTH_MODE" \
         "$(json_escape "$AUTH_PASSWORD")" \
@@ -314,7 +322,8 @@ trap 'log "收到 SIGHUP"; exit 129' HUP
 trap 'log "收到 SIGUSR1：作业即将到期"; [[ -n "$SVC_PORT" ]] && write_session "near_expiry" 0' USR1
 
 # ─── 6. 主流程 ──────────────────────────────────────────────────────────────
-log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE purpose=$SLURMATE_PURPOSE"
+log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
+    "partition=${SLURMATE_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gpus=$SLURMATE_GPUS"
 log "候选端口: $SLURMATE_CANDIDATES"
 
 NODE_IP="$(detect_node_ip)" || {

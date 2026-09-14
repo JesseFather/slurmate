@@ -2,53 +2,60 @@
 #  slurmate.conf — Slurmate 集群侧配置
 # ==============================================================================
 #
-#  被 slurmate-sessiond（root 守护进程）与 slurmate（用户 CLI）共同读取。
+#  格式：扁平 `键 = 值` 单文件。# 起注释（行首与行尾都可以），值里不能含 #。
+#  空行忽略。同一个键写两遍是【错误】—— 写两遍说明作者对哪个生效有不同看法，
+#  而任何"取最后一个"的选择都会让其中一处永远不被执行。拼错的键同样是错误。
+#
+#  读者：
+#    slurmate-sessiond   全部键
+#    cluster/deploy.sh   range_start / range_end / reserved_ranges / readonly_paths
+#    slurmate（用户 CLI）【不读本文件】—— socket 路径是编译期常量，见下。
+#
+#  本文件由 root 拥有（0644）。守护进程把它读到的**所有**值当作可信输入，
+#  但绝不允许用户进程修改它 —— 部署脚本会断言属主与权限。
+#
 #  修改后：systemctl restart slurmate-sessiond
 #
-#  安全注意：本文件由 root 拥有（0644）。守护进程会把它读到的**所有**值当作
-#  可信输入，但绝不允许用户进程修改它 —— 部署脚本会断言属主与权限。
+# ── 这里只有「无法从系统推导」的值 ──────────────────────────────────────────
+#  分区名、分区的时间上限、GPU 型号、默认资源 —— 这些 Slurm 自己知道，写在这里
+#  就是第二份副本。副本会与实际分叉，而分叉了没有任何东西会告诉你。所以它们
+#  全部现查：分区来自 `scontrol show partition`，权限来自 `sacctmgr show assoc`。
 # ==============================================================================
 
-[general]
-# 守护进程的 unix socket。权限 0666 —— 安全性不建立在权限位上，
-# 而是靠 accept() 后立刻 getsockopt(SO_PEERCRED) 取内核提供的 uid/gid。
-socket_path = /run/slurmate-session/ctl.sock
 
-# 状态目录与数据库
-state_dir = /var/lib/slurmate-session
-db_path = /var/lib/slurmate-session/claims.db
-rejected_dir = /var/lib/slurmate-session/rejected
-
-# 日志
-log_dir = /var/log/slurmate
-audit_log = /var/log/slurmate/audit.log
-
-# 集群计算网段。用于 nft 基础规则 `ip daddr != <CIDR> accept`：
-# 即使前面所有校验都被绕过，也不可能影响本网段之外的流量。
+# ── 集群网段 ────────────────────────────────────────────────────────────────
 #
-# ⚠️ 只能写【一个】CIDR。登录节点与计算节点必须在同一个网段内，
-#    且这个网段要能用一个前缀表达。多网段集群目前无法表达，见文档。
-cluster_cidr = 192.0.2.0/24
+# 用于 nft 的基础规则 `ip daddr != <CIDR> accept`：即使前面所有校验都被绕过，
+# 也影响不到本网段之外的流量。
+#
+# ⚠️ 只能写【一个】CIDR，登录节点与计算节点都必须落在里面。多网段集群目前
+#    无法表达，见 docs/DEPLOYMENT.md 的前置条件。
+#
+# ⚠️ 这里【故意留空】，因为它没有安全的默认值。填错的后果不是报错，而是
+#    【全部 ACL 静默失效】：会话的 drop 规则追加在链尾，而链首那条基础规则会把
+#    去往网段外计算节点的流量直接放行 —— 链的 policy 是 accept，没有任何迹象。
+#    所以自检会拒绝启动，而不是替你猜一个。写法：
+#
+#        cluster_cidr = <网络地址>/<前缀长度>      例如 192.0.2.0/24
+#
+#    （上面那个地址是文档示例，**请换成你的集群网段**。自检不拦它 —— 用
+#      192.0.2.0/24 的测试集群是存在的，软件没有依据判定它不是真的 ——
+#      但启动时会与 Slurm 的 NodeAddr 交叉核对，对不上就拒绝启动并点名。）
+cluster_cidr =
 
-# 共享家目录的挂载点。守护进程在 systemd 下把它挂成只读（ReadOnlyPaths）。
-# 多个用空格分隔。deploy.sh 会用这个值渲染 systemd 单元模板。
+# 共享家目录的挂载点，多个用空格分隔。deploy.sh 用它渲染 systemd 单元的
+# ReadOnlyPaths。
 #
 # 为什么可以只读：守护进程【从不写】用户家目录 —— 口令由作业自己生成并写进
 # 0600 的会话文件，会话文件也由作业自己创建。root 身上没有"写用户文件"这条
-# 攻击面。留空则生成的单元不含该行，这层保护随之消失。
+# 攻击面。留空则生成的单元不含该行，这层保护随之消失（deploy.sh 会警告）。
 readonly_paths = /shared/home
 
-# 主循环周期（秒）
-tick_seconds = 2
 
-# 守护进程启动后的静默期：这段时间内不做任何超时判定，
-# 避免重启窗口把在跑的会话误判成孤儿。
-startup_grace_seconds = 120
-
-
-[ports]
-# 服务端口池。范围由你定，唯一的要求是：与集群上【其他端口管理系统】的
-# 区间完全不交，并把那些区间写进下面的 reserved_ranges。
+# ── 端口池 ──────────────────────────────────────────────────────────────────
+#
+# 范围由你定，唯一的要求是：与集群上【其他端口管理系统】的区间完全不交，
+# 并把那些区间写进下面的 reserved_ranges。
 #
 # 为什么必须不交：nftables 对【同 hook 同 priority 的跨表求值顺序没有保证】，
 # 两个表都匹配同一个 dport 时，谁先求值是未定义的。集合不交能让判决与顺序无关。
@@ -68,57 +75,8 @@ reserved_ranges =
 candidates_per_session = 6
 
 
-[lifecycle]
-# 作业的默认时间上限。到期前由守护进程自动续期（普通用户无权增加 TimeLimit，
-# 只有 root 可以，所以续期必须是守护进程的职责）。
-# 起始值取小一些的好处：崩溃/遗忘的会话能更快自然释放。
-default_time = 12:00:00
-
-# 用户可请求的时间上限
-max_time = 7-00:00:00
-
-# 心跳判活（两阈值）
-#   < suspect_after    : 正常
-#   suspect_after 以上 : 判定网络闪断 —— 【什么都不做】，作业与 ACL 都保留，
-#                        客户端重连后自动恢复
-#   orphan_after  以上 : 判定异常退出 —— 自动 scancel 释放资源
-# 网络波动通常 1 分钟内恢复，300 秒的闪断窗口足够宽裕。
-suspect_after_seconds = 300
-orphan_after_seconds = 1800
-
-# "作业查不到"要连续确认多少个 tick 才认定为真的结束。
+# ── 安全 ────────────────────────────────────────────────────────────────────
 #
-# 为什么需要这个：scontrol 查不到作业有两种截然不同的原因 ——
-# 作业真的结束了，或者【只是问不到】（slurmctld 重启中、munge 抖动、
-# 控制器繁忙）。早期实现把两者合并成"查不到即释放"，后果是：控制器
-# 抖一次，所有活跃会话的 ACL 在一秒内全部消失、会话文件被删（再也无法
-# 重新登记），而作业还在跑。连续确认是对"瞬时不可靠"的廉价保险。
-job_missing_confirm_ticks = 3
-
-# 各中间状态的存活上限（超时即回收，防止悬挂）
-reserved_ttl_seconds = 600     # 已分配候选端口但尚未提交成功
-submitted_ttl_seconds = 1800   # 已提交但作业迟迟没跑起来
-
-# released / rejected 记录保留多久后从数据库删除（审计用）
-released_keep_seconds = 600
-
-
-[renew]
-# 到期自动续期。仅对 enrolled（心跳新鲜）的会话生效 ——
-# 客户端已经消失的会话不该再续命。
-enabled = yes
-
-# 剩余时间少于这个值就续期
-threshold_seconds = 7200
-
-# 每次续期的增量（格式同 Slurm：HH:MM:SS 或 D-HH:MM:SS）
-increment = 12:00:00
-
-# 从会话创建起累计最多续到多久，超过则停止续期并通知客户端
-max_total_seconds = 604800
-
-
-[security]
 # code-server 的认证方式。
 #
 #   password  作业自己生成一个随机口令（写进 0600 的会话文件），
@@ -142,88 +100,33 @@ max_total_seconds = 604800
 # 改回 none 之前，请先确认你有别的手段覆盖这个缺口。
 auth_mode = password
 
-# 口令长度（字节的 hex 编码前的随机字节数，12 → 24 个 hex 字符）
-password_bytes = 12
 
-
-[quota]
-# 每用户同时存在的活跃会话上限。默认 1（对应客户端默认只开一个会话），
-# 可放宽到 2-3。
-max_active_per_user = 1
-
-# 每用户未决（reserved/submitted）的提交上限，防止刷端口
-max_pending_per_user = 4
-
-# RPC 速率限制
-max_rpc_per_second = 10
-
-# 拒绝计数熔断：在 reject_window_seconds 内被拒超过 reject_threshold 次，
-# 该 uid 进入 throttle_seconds 的静默期（只记录日志，不建规则）
-reject_threshold = 20
-reject_window_seconds = 600
-throttle_seconds = 1800
-
-
-[slurm]
-# 命令路径。留空则运行时用 shutil.which 查找。
-sbatch = /usr/bin/sbatch
-scancel = /usr/bin/scancel
-squeue = /usr/bin/squeue
-scontrol = /usr/bin/scontrol
-sacctmgr = /usr/bin/sacctmgr
-
-# 作业脚本。root 拥有（0644），用户不可修改 —— 这是防注入的关键：
-# 执行的是这个固定文件，用户可控的只有 sbatch 的命令行 flag。
-job_script = /usr/local/share/slurmate/run.sbatch
-
-# 作业模板里 code-server 的路径（在计算节点上）
-code_server_bin = /usr/local/bin/code-server
-
-# 作业日志写到用户的 ~/.slurmate/logs/ 下
-job_log_subdir = .slurmate/logs
-
-
-# ==============================================================================
-#  用途 → 分区 / 资源的映射
-# ==============================================================================
-#  客户端界面上不问"节点"，只问"用来干什么"，由 Slurm 在分区内挑空闲节点
-#  （不写 -w）。这样既自动，又天然负载均衡。
+# ── Slurm 与作业 ────────────────────────────────────────────────────────────
 #
-#  注意：分区名【大小写敏感】。实测集群里是 A6000 / RTX8000 / 2080TI（全大写）。
+# Slurm 命令的路径。留空 = 运行时自动查找（先查 PATH，再依次查
+# /usr/bin、/usr/local/bin、/opt/slurm/bin、/usr/sbin、/bin、/sbin）。
 #
-#  每个用途可被用户的 association 权限过滤：若用户的 association 限定了
-#  Partition，则不在允许列表里的用途会在客户端上禁用，守护进程也会二次校验。
+# 为什么要能自动查找：Slurm 的安装位置因集群而异 —— 发行版包在 /usr/bin，
+# 源码编译的常在 /opt/slurm/bin。此前"留空"其实是一句谎话（代码里只有
+# `or "/usr/bin/sbatch"` 硬兜底），于是装在 /opt/slurm/bin 的集群照抄本示例
+# 会直接起不来，报的还是"Slurm 命令不存在: /usr/bin/sbatch"。
 #
-#  ⚠️ 关于 gres：默认 gpu:0，与现有 start_code_server 脚本一致 —— 写代码本身
-#     不需要 GPU，把一张卡占满 12 小时是浪费。需要跑 GPU 代码时由用户在客户端
-#     单独指定数量（会作为 --gres=gpu:N 传入）。gpu:0 时守护进程会【完全省略】
-#     --gres 参数，避免在不带 GRES 的分区上出错。
+# 留空是推荐值。只有当自动查找会找错（比如机器上有两套 Slurm）时才写死。
+sbatch =
+scancel =
+squeue =
+scontrol =
+sacctmgr =
 
-[purpose:code]
-label = 纯写代码（不占 GPU）
-partition = 2080TI
-gres = gpu:0
-cpus = 2
-mem = 4G
+# 作业模板里 code-server 的路径（在【计算节点】上）。
+#
+# 留空 = 先在本机 PATH 里找（大多数集群的登录节点与计算节点软件布局一致），
+# 找不到就退回 /usr/local/bin/code-server。
+#
+# ⚠️ 守护进程在登录节点上运行，它【无法确认】计算节点上这个路径是否存在 ——
+#    这是设计上必然的（它没有也不能在计算节点上执行命令）。所以这一项找错了
+#    只会在作业启动时才暴露，`--check` 会把它是否解析得到如实打印出来。
+code_server_bin =
 
-[purpose:a6000]
-label = A6000 48G 开发
-partition = A6000
-gres = gpu:0
-cpus = 2
-mem = 4G
-
-[purpose:rtx8000]
-label = RTX8000 48G 开发
-partition = RTX8000
-gres = gpu:0
-cpus = 2
-mem = 4G
-
-[purpose:2080ti]
-label = 2080TI 11G 开发
-partition = 2080TI
-gres = gpu:0
-cpus = 2
-mem = 4G
-
+# 作业日志写到用户的 ~/.slurmate/logs/ 下。这是与 run.sbatch 的约定，
+# 不是站点参数 —— 改它要让两边同时改，所以它不再是配置项。

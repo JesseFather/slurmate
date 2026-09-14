@@ -39,17 +39,17 @@ nft list chain inet slurmate output
 
 ### 2. 登录节点与全部计算节点在同一 IPv4 网段内，且能用一个 CIDR 表达
 
-**依据**：`cluster_cidr` **只接受一个** CIDR（`cluster/slurmate.conf.example:26-31`），
-配置自检只校验它的地址部分是合法 IPv4（`cluster/slurmate-sessiond:314-315`）。
-这个值被写进基础规则 `ip daddr != <cluster_cidr> accept`
-（`cluster/slurmate-sessiond:554-559`）。
+**依据**：`cluster_cidr` **只接受一个** CIDR，且**没有默认值** —— 留空、写成文档占位
+网段、前缀长度非法、主机位不为 0，都会被自检拒绝启动。这个值被写进基础规则
+`ip daddr != <cluster_cidr> accept`（`Nft.ensure()`）。
 
 **不满足会怎样失败**：如果计算节点落在 `cluster_cidr` 之外，去往它们的流量会先被
 这条基础规则放行，**所有会话规则永远匹配不到**。链的 policy 是 `accept`，
 所以不会有任何报错 —— 表现为「一切正常，只是没有保护」。
 
-**怎么确认**：把登录节点和所有计算节点的 `scontrol show nodes -o` 里的 `NodeAddr`
-列出来，确认全部落在同一个前缀内。`tools/check-cluster.sh` 会打印
+**怎么确认**：不用手工确认 —— 守护进程启动时与 `--check` 时都会拿
+`scontrol show node -o` 的 `NodeAddr` 全集与 CIDR 求交，**发现节点在网段外就拒绝启动**
+并逐个点名。`tools/check-cluster.sh` 也会打印
 `NodeName=/NodeAddr=` 对照表。
 
 ### 3. 共享家目录（NFS 或同类），并且支持服务端原子 rename
@@ -279,10 +279,10 @@ sudo bash cluster/deploy.sh --check
 
 至少要把这两项改成你站点的真实值：
 
-- `[general] cluster_cidr` —— 见前置条件 2；
-- `[general] readonly_paths` —— 见前置条件 3e。
+- `cluster_cidr` —— 见前置条件 2。**它没有默认值，不填服务起不来**；
+- `readonly_paths` —— 见前置条件 3e。
 
-其余项见 [CONFIGURATION.md](./CONFIGURATION.md)。
+配置一共只有 12 个键，全部见 [CONFIGURATION.md](./CONFIGURATION.md)。
 
 ### 步骤 3：演练（可选但推荐）
 
@@ -328,7 +328,7 @@ journalctl -u slurmate-sessiond -f
 
 # 普通用户身份：
 slurmate whoami      # 用户、计算账户、可用分区
-slurmate purposes    # 用途 → 分区映射，无权限的会标注 [无权限]
+slurmate partitions  # 分区列表与各自的时间上限，无权限的会标注 [无权限]
 slurmate doctor      # 守护进程与 nft 规则是否一致
 ```
 
@@ -338,7 +338,7 @@ slurmate doctor      # 守护进程与 nft 规则是否一致
 再做一次真实提交，把整条链路走通：
 
 ```bash
-slurmate submit --purpose code
+slurmate submit                      # 全部参数可省略：缺省由服务端填
 slurmate wait --session <session_id>
 ```
 

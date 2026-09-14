@@ -253,6 +253,35 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
     { what: '心跳恢复后警告清除', timeout: 4000 });
 });
 
+test('服务端替用户做的决定必须显示出来（submit 响应里的 warning）', async (t) => {
+  t.after(keepAlive());
+  const backend = await makeBackend(t, { enrollDelayMs: 200 });
+
+  // 真实守护进程会在这些情况下回 warning：时间被分区 MaxTime 截断、
+  // 填的内存认不出来而回退成默认值、分区权限查不到因而交给了 Slurm 的默认分区。
+  // 演示后端不产生 warning，所以这里把它包一层 —— 测的是**客户端有没有接这个
+  // 字段**，而不是服务端什么时候产生它。
+  const realRpc = backend.rpc.bind(backend);
+  backend.rpc = (req) => realRpc(req).then((resp) => {
+    if (req.op === 'submit' && resp.ok) {
+      resp.data.warning = '请求的 30-00:00:00 超过上限 7-00:00:00，已按上限提交。';
+    }
+    return resp;
+  });
+
+  const slotPort = await freePort();
+  const ctl = new SessionController({ backend, slot: 1 });
+  const snap = await ctl.start({}, { preferredPort: slotPort });
+
+  assert.ok(snap, '启动应当成功 —— 有 warning 不代表失败');
+  assert.equal(ctl.state, State.RUNNING);
+  // ★ 关键：这句话必须到得了界面。协议里 warning 这个字段存在的唯一理由就是
+  //   被显示出来；客户端不接它，它就只是一段写给读代码的人看的注释 ——
+  //   而用户会以为自己真的要到了 30 天。
+  assert.match(ctl.snapshot().warning || '', /超过上限/,
+    'submit 响应里的 warning 必须出现在快照里（界面直接渲染它）');
+});
+
 test('submit 不可重试：守门在 classify，不在调用点', async () => {
   const { Action, classify, shouldRetry } = require('../src/main/classify.js');
   const r = classify(
