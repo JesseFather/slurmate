@@ -1131,8 +1131,13 @@ exit 0
     # 对不上的后果不是崩溃，而是**静默接错**：会话记的 `<id>@<版本>` 在客户端的
     # 插件池里查不到，于是界面只解释、不动作 —— 用户看到的是"作业起来了但界面
     # 一片白"，而根因（守护进程和客户端的清单漂了）一个字都不在里面。
+    #
+    # ★ 插件已经搬去**仓库顶层** `plugins/`（它们不再是客户端"内建"的，而是独立
+    #   项目）。这一条钉子的**含义暂时不变** —— 守护进程的 BUILTIN_PLUGINS 里那
+    #   两条，必须与仓库里那两个插件的清单逐字一致。等守护进程也改成扫描插件
+    #   目录之后（那时两侧不再各写一份常量），这条会重定义成"插件目录的形状"检查。
     _plugdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "..", "client", "src", "main", "plugins")
+                            "..", "plugins")
     _manifests = {}
     if os.path.isdir(_plugdir):
         for _name in sorted(os.listdir(_plugdir)):

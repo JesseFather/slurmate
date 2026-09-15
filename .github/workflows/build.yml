@@ -18,10 +18,15 @@ on:
     branches: [main]
     paths:
       - 'client/**'
+      # ★ 插件是独立项目，但它们与客户端的接口正是最容易悄悄漂掉的东西
+      #   （插件清单里的 id / 版本 / 贡献点，客户端注册表逐字用它们）。漏掉这一条，
+      #   改插件就不会触发客户端构建 —— CI 在最需要的时候不跑。
+      - 'plugins/**'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'client/**'
+      - 'plugins/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 

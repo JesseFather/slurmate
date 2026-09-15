@@ -35,7 +35,8 @@
  * ③ `--demo` 命令行开关。并且**绝不**在真实后端出错时静默退回演示。
  */
 
-const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 const config = require('./config.js');
@@ -45,8 +46,9 @@ const { createBackend } = require('./backend.js');
 const { SessionController, State } = require('./session.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
-const { LOGIN_PATH, PASSWORD_FIELD, SESSION_COOKIE, loginSucceeded } = require('./login.js');
+const weblogin = require('./weblogin.js');
 const plugins = require('./plugins/index.js');
+const pluginInstall = require('./plugins/install.js');
 
 const DEMO_FLAG = process.argv.includes('--demo');
 
@@ -105,6 +107,10 @@ function bootstrap() {
     // ★ 池目录依赖 cfgDir（演示模式尤其），而注册表是在**模块加载期**建的，那时
     //   cfgDir 还是 null。所以拿到真路径之后重新扫一遍 —— 否则演示模式会去读
     //   进程当前目录下的 `./plugins`，而那是谁的地方说不清。
+    //
+    // 建目录在前：**装第一个插件之前，用户得先有个地方放它**，而"池在哪"这个
+    // 问题的答案不能是一个不存在的路径。
+    ensurePoolDir();
     registry.reload();
 
     // 旧版本（schema ≤ 3）只有一把**全局**私钥。搬到新格式：原样复制给每一条已有
@@ -119,6 +125,17 @@ function bootstrap() {
         // 或者反过来跳过它。真实后端完全不读这个。
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEMO_ENROLL_MS))
           ? Number(process.env.SLURMATE_DEMO_ENROLL_MS) : undefined,
+        // ★ 演示站点报哪些插件 = **本机池里装了什么**。演示后端扮演的是一个
+        //   具体的站点，它"装了"的东西必须来自某个真实的地方，而写死一份清单
+        //   会让演示模式永远报着两个本机根本没有的插件。传函数而不是快照：
+        //   用户可以在演示进行中装/卸插件，站点的清单应该跟着变。
+        sitePlugins: () => registry.list().map((p) => ({
+          id: p.id, name: p.name, version: p.version,
+          displayName: p.displayName,
+          surface: p.contributes.surface,
+          submitPubkey: p.contributes.submitPubkey,
+          login: p.contributes.login,
+        })),
       },
     });
 
@@ -538,42 +555,19 @@ function pluginsView() {
     // 以及插件目录里扫到的坏文件。它们被跳过了，客户端照常工作 —— 但必须说出来，
     // 否则用户面对的症状只是"加了插件它就是不生效"。
     errors: registry.errors,
+    // 池**在哪**、里面**有没有东西**。
+    //
+    // ★ 这两条是承重的：本机一个插件都没装时，站点上**每一个**插件都会落进
+    //   `missing`，于是界面会把它们全都说成「本站有而本机没有 —— 升级客户端」。
+    //   而真相是「你还没装插件」—— 那两件事的行动完全不同（去装 vs 去升级）。
+    //   界面靠 `installedCount === 0` 分岔，见 panel.js 的 renderPlugins。
+    poolDir: poolDir(),
+    installedCount: registry.list().length,
   };
 }
 
-/**
- * 登录：POST /login，然后用 **cookie jar** 判定成败。
- *
- * ★ 绝不能看状态码。实测（code-server 4.135.0）：口令错误时返回的是 **HTTP 200**，
- *   只是没有 Set-Cookie。任何 `if (status === 200) 成功` 都会在口令错时报成功，
- *   然后用户看到一个「已登录但满屏登录页」的窗口。
- *
- * ★ 也绝不能解析响应头的 set-cookie：Electron `net` 模块在这件事上不可靠
- *   （electron#20631）。查 jar 既避开这个坑，又更贴近我们真正关心的问题 ——
- *   cookie 到底进没进去。
- */
-async function performLogin(ses, origin, password) {
-  if (!password) return { ok: false, reason: 'no_password' };
-  let status = null;
-  try {
-    const res = await ses.fetch(origin + LOGIN_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ [PASSWORD_FIELD]: password }).toString(),
-      redirect: 'manual',
-    });
-    status = res.status;
-  } catch (e) {
-    return { ok: false, reason: 'fetch_failed: ' + e.message };
-  }
-
-  const cookies = await ses.cookies.get({ name: SESSION_COOKIE, url: origin });
-  if (loginSucceeded(cookies)) return { ok: true, status };
-
-  // 到这儿说明没拿到 cookie。可能是口令错，也可能是 code-server 升级改了端点或字段名。
-  // 两者要分开告诉用户 —— 「密码不对」和「客户端版本不匹配」是完全不同的行动。
-  return { ok: false, reason: 'no_cookie', status };
-}
+// 登录机制（`webLogin`）在 `weblogin.js` 里 —— 它是**通用**的，契约由插件自己的
+// 清单提供。基座这一层不知道任何一个具体网页服务的端点或字段名。
 
 // ── 布局组 ──────────────────────────────────────────────────────────────────
 //
@@ -702,9 +696,19 @@ async function startSession(resources, serviceKind) {
   //   通常就是它。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
   const plugin = pickForSubmit(wanted);
   if (!plugin) {
-    win.pushNotice('error',
-      `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
-      + `本版支持：${registry.list().map((p) => p.displayName).join('、') || '（一个都没有）'}。`);
+    // ★ 「一个插件都没装」与「不认识这个名字」是**两件事**，行动也不同（去装一个
+    //   vs 换个按钮点）。以前这里只印一句「本版支持：（一个都没有）」—— 那既是
+    //   一句错话（本版没有"支持"任何东西，是**你还没装**），也没给出路。
+    if (!registry.list().length) {
+      win.pushNotice('error',
+        '本机还没有安装任何插件，所以没有可以提交的服务。'
+        + `把插件目录放进 ${poolDir() || '插件池'}（界面上的「打开插件目录」能直接打开它），`
+        + '或者用「从目录安装…」挑一个，然后点「重新扫描」。');
+    } else {
+      win.pushNotice('error',
+        `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
+        + `本机装的是：${registry.list().map((p) => p.displayName).join('、')}。`);
+    }
     return null;
   }
   warnVersionDrift(plugin);
@@ -914,27 +918,27 @@ async function _renderSession(snap) {
 }
 
 /**
- * 插件注册表。构造时扫描两个根：内建的（`plugins/` 目录下，随客户端发布）
- * 与**池**（`~/.slurmate/plugins/`，站点分发进来的）。两者走同一条加载路径
- * —— 见那个文件的边界说明。
+ * 插件注册表。**只有一个根：池。**
+ *
+ * ★ 基座自己不带任何插件 —— 一个都没有是**正常状态**，不是安装包坏了。
+ *   `src/main/plugins/` 那个目录是框架（注册表 + ulid.js + 安装器），不是插件目录，
+ *   所以它压根不作为根传进来。
  *
  * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件走，
  * 重建注册表会让用户把已经看过的通知再看一遍。
  */
 const registry = new plugins.Registry([
-  { dir: path.join(__dirname, 'plugins'), source: 'builtin' },
   // 传**函数**而不是路径：cfgDir 要等 app ready 之后才定下来，在这里当场算会算出
   // 一个 null 路径（见 plugins/index.js 的 loadRoot）。
   { dir: poolDir, source: 'pool' },
 ]);
 
 /**
- * **池**目录 —— 站点分发进来的插件都落在这里，不分是被哪个站点引用的。
+ * **池**目录 —— 装进来的插件都落在这里，不分是从哪来的。
  *
- * ★ 一个池而不是按站点分目录，这是有意的：`id` 是铸造出来的全球唯一标识，所以
+ * ★ 一个池而不是按来源分目录，这是有意的：`id` 是铸造出来的全球唯一标识，所以
  *   「同一个插件被两个站点分发」在池里天然就是同一条（只多记一个来源），而
- *   「两个站点各写一个 jupyter」是两条不同的记录，并存、各自标明来源。站点升级
- *   频繁也好、拒绝升级也好，都不会把对方挤掉。
+ *   「两个站点各写一个 jupyter」是两条不同的记录，并存、各自标明来源。
  *
  * ★ 演示模式落在它自己的目录里 —— 演示绝不去读用户真实的那份池。
  */
@@ -947,6 +951,24 @@ function poolDir() {
       ? path.join(cfgDir || '.', 'plugins')
       : path.join(app.getPath('home'), '.slurmate', 'plugins');
   } catch {
+    return null;
+  }
+}
+
+/**
+ * 把池目录建出来（0700）。**装第一个插件之前，用户得先有个地方放它。**
+ *
+ * 以前这里只读不写，所以池目录不存在、界面上也没有任何东西告诉你该往哪放 ——
+ * 「池是安装点」这句话在代码里落不了地。
+ */
+function ensurePoolDir() {
+  const dir = poolDir();
+  if (!dir) return null;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
+  } catch (e) {
+    win && win.pushNotice('warn', `插件目录 ${dir} 建不出来：${e.message}`);
     return null;
   }
 }
@@ -995,19 +1017,31 @@ async function ensureSurface(plugin, snap) {
  *   `await` 可能跨越那个变化。所以 cfg/cfgDir 用 getter 现取，不用快照。
  *
  * ★ `once()` 按插件名分桶：两个插件各记各的"上次值"，共用一个槽会互相冲掉。
+ *
+ * ★ **插件能用的一切都在这里。** 它不能 `require` 客户端的源码 —— 插件装在池里
+ *   （`~/.slurmate/plugins/<id>/<版本>/`），相对路径指不到客户端；就算指得到，
+ *   那种依赖也是无法检查的。所以缺什么就在这里加什么，而不是让插件绕过这份清单。
  */
 function pluginContext(plugin) {
   return {
     win,
     config,
+    /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
+     *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。 */
+    keys,
     get cfg() { return cfg; },
     get cfgDir() { return cfgDir; },
     demo: DEMO_FLAG,
     session: () => (controller && controller.session) || null,
     whoami: () => whoami,
-    /** 写本地文件用的家目录。演示模式必须落在它自己的目录里 —— 见 sshd.js。 */
+    /** 写本地文件用的家目录。演示模式必须落在它自己的目录里 —— 见 sshd 插件。 */
     home: () => (DEMO_FLAG ? cfgDir : app.getPath('home')),
-    login: performLogin,
+    /**
+     * 自动登录。契约由**框架**从当前插件自己的清单里取，不由插件传进来 ——
+     * 插件没法把这个参数传错，也没法去登别人的页面。
+     */
+    login: (ses, origin, password) =>
+      weblogin.webLogin(ses, origin, password, plugin.contributes.login),
     notice: (kind, text) => win.pushNotice(kind, text),
     // 分桶用的是 `id@版本`，不是短名 —— 池里可以并存同一个插件的多个版本，而
     // "这个版本已经说过这句话了"与"那个版本说过了"是两件事。
@@ -1109,8 +1143,11 @@ async function handleWindowClose() {
 
 function handleWindowAction(action, payload) {
   if (action === 'renderer-gone') {
+    // ★ 不写服务名：崩掉的是**框架建的那块视图**，它加载谁的页面取决于当前这个
+    //   会话是哪个插件 —— 对着一个 Jupyter 会话说"code-server 页面崩溃了"，
+    //   用户会去查一个跟这件事无关的东西。
     win.pushNotice('error',
-      `code-server 页面崩溃了（${payload && payload.reason}）。可以点「重新加载页面」恢复。`);
+      `会话页面崩溃了（${payload && payload.reason}）。可以点「重新加载页面」恢复。`);
   }
 }
 
@@ -1594,16 +1631,9 @@ function registerIpc() {
   /**
    * 起一个会话。
    *
-   * @param {object} resources 高级选项的临时覆盖（可省略字段，由服务端填默认值）
-   * @param {'code-server'|'sshd'} [serviceKind] 省略 = code-server，
-   *   与这个参数存在之前的行为一致 —— 老的界面调用（只传 resources）不会因此变样。
-   */
-  /**
-   * 起一个会话。
-   *
    * @param {object} resources 高级选项里的临时覆盖（省略字段 = 用服务端默认）
-   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件** —— 与这个参数存在
-   *        之前的行为完全一致（那时的界面只能起 code-server）。
+   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件**（标了 legacyDefault
+   *        的那一个），与这个参数存在之前的行为一致。
    */
   send('app:start', async (resources, serviceKind) => {
     const snap = await startSession(resources, serviceKind);
@@ -1630,6 +1660,70 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
+  /**
+   * 从**一个目录**装一个插件。不给路径就弹一个选目录的框。
+   *
+   * ★ 这是「池是安装点」的那一半动作。将来站点分发走的是**同一个** installFrom
+   *   —— 区别只在文件从哪来。所以这条路现在就得是通的，否则分发接上来的时候
+   *   会发现底下什么都没有。
+   */
+  send('app:installPlugin', async (srcDir) => {
+    let dir = srcDir;
+    if (!dir) {
+      const r = await dialog.showOpenDialog(win.win, {
+        title: '选择插件目录（里面要有 plugin.json）',
+        buttonLabel: '装这个',
+        properties: ['openDirectory'],
+      });
+      if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+      dir = r.filePaths[0];
+    }
+    const res = pluginInstall.installFrom(ensurePoolDir(), dir);
+    if (!res.ok) {
+      win.pushNotice('error', res.error);
+      return { ok: false, error: res.error };
+    }
+    registry.reload();
+    win.pushNotice('ok', res.already
+      ? `${res.plugin.displayName} ${res.plugin.version} 之前就装过，内容一致，没动它。`
+      : `已装好 ${res.plugin.displayName} ${res.plugin.version}（${res.plugin.name}）。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /**
+   * 从池里拿掉一个版本。
+   *
+   * ★ **不影响正在跑的会话**：会话在创建时就把插件对象攥在手里了（见 controller.plugin），
+   *   之后状态变化都用它、不再查表。所以卸载之后那个会话照常被管理、也停得掉 ——
+   *   这正是"插件增减不许崩"的最后一格。
+   */
+  send('app:uninstallPlugin', async (id, version) => {
+    const res = pluginInstall.uninstall(poolDir(), id, version);
+    if (!res.ok) {
+      win.pushNotice('error', res.error);
+      return { ok: false, error: res.error };
+    }
+    registry.reload();
+    win.pushNotice('info', `已从本机卸掉 ${id}@${version}。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /** 重新扫一遍池。用户手工往里放了东西之后，不用重启客户端。 */
+  send('app:rescanPlugins', async () => {
+    registry.reload();
+    const n = registry.list().length;
+    win.pushNotice('info', `已重新扫描插件目录：本机现在有 ${n} 个插件。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /** 在文件管理器里打开池目录 —— "我该往哪放"这个问题的最终答案。 */
+  send('app:openPluginDir', async () => {
+    const dir = ensurePoolDir();
+    if (!dir) return { ok: false, error: '插件目录拿不到。' };
+    const err = await shell.openPath(dir);
+    return err ? { ok: false, error: err } : { ok: true, path: dir };
+  });
+
   send('app:state', async () => (controller ? controller.snapshot() : null));
 
   send('app:doctor', async () => {
@@ -1648,7 +1742,7 @@ function registerIpc() {
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
 
   // 演示模式的调试控制 —— 复现那些在真机上极难复现的状态
-  send('app:debug', async (what) => {
+  send('app:debug', async (what, arg) => {
     if (backend.kind !== 'demo') return { ok: false, error: '仅演示模式可用' };
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
@@ -1657,7 +1751,47 @@ function registerIpc() {
     // 让演示站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
     // 这两条路是"插件增减不许崩"的验收路径，必须能在演示模式下走到。
     else if (what === 'extra-plugin') backend.debugAddSitePlugin('jupyter', 'JupyterLab');
-    else if (what === 'site-plugin-off') backend.debugDisableSitePlugin('sshd');
+    // 站点关掉**哪一个**插件由调用方指定（不指定就取列表里第一个）—— 基座里
+    // 没有插件名可写。一个都没装时这个开关无事可做，如实说出来，而不是静默地
+    // 什么也没发生。
+    else if (what === 'site-plugin-off') {
+      const target = arg ? registry.list().find((p) => p.name === arg) : registry.list()[0];
+      if (!target) {
+        return { ok: false, error: registry.list().length
+          ? `本机没有装短名为「${arg}」的插件。`
+          : '本机一个插件都没有 —— 先装一个，这个开关才有对象。' };
+      }
+      backend.debugDisableSitePlugin(target.name);
+    }
+    // 把仓库里的示例插件装进演示池。
+    //
+    // ★ 这不是"演示模式自带的假插件"—— 它装的是**真的**那两个插件，走的是真的
+    //   安装路径（installFrom）。演示池为空时，这是本机唯一能看见界面的办法，
+    //   顺带也就把"手工安装"那条路本身验了一遍。
+    //
+    // 打包之后没有仓库目录，所以它只在从源码跑的时候有用 —— 那正是它的用途。
+    else if (what === 'install-samples') {
+      const src = path.join(__dirname, '..', '..', '..', 'plugins');
+      let names;
+      try {
+        names = fs.readdirSync(src).filter((n) => fs.existsSync(path.join(src, n, 'plugin.json')));
+      } catch {
+        return { ok: false, error: `这台机器上找不到示例插件目录 ${src}（打包之后就没有它了）。` };
+      }
+      if (!names.length) return { ok: false, error: `${src} 里一个插件都没有。` };
+      const done = [];
+      for (const n of names) {
+        const r = pluginInstall.installFrom(ensurePoolDir(), path.join(src, n));
+        if (!r.ok) {
+          win.pushNotice('error', r.error);
+          return { ok: false, error: r.error };
+        }
+        done.push(`${r.plugin.name} ${r.plugin.version}${r.already ? '（已有）' : ''}`);
+      }
+      registry.reload();
+      win.pushNotice('ok', `已把示例插件装进演示池：${done.join('、')}。`);
+      return { ok: true, plugins: pluginsView() };
+    }
     else return { ok: false, error: '未知的调试动作' };
     return { ok: true };
   });
@@ -1683,7 +1817,7 @@ function secureCrypto() {
 }
 
 module.exports = {
-  performLogin,
+  webLogin: weblogin.webLogin,
   /**
    * 仅供测试使用的接缝。
    *

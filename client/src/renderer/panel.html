@@ -184,8 +184,15 @@
         </p>
       </details>
 
+      <!--
+        插件是**本机**的东西，与连不连得上集群无关 —— 所以安装与重扫放在这里，
+        只要这一屏露出来就够得着（而本机一个插件都没有时，这一屏一定会露出来，
+        见 panel.js 的 syncPurposeVisibility）。
+      -->
       <div class="row row-spaced">
         <button id="btn-doctor" class="ghost">体检集群</button>
+        <button id="btn-plugin-add" class="ghost">从目录安装插件…</button>
+        <button id="btn-plugin-rescan" class="ghost">重新扫描插件目录</button>
       </div>
     </section>
 

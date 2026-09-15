@@ -1,0 +1,32 @@
+{
+  "id": "01M2JKHTZGKJBFQQTWYXMQMF2V",
+  "name": "code-server",
+  "displayName": "开发环境",
+  "version": "1.0.0",
+  "description": "浏览器里的 VS Code。作业里跑一个 code-server，客户端把它的页面装进窗口并自动登录。",
+  "author": "slurmate",
+  "engines": { "slurmate": ">=0.5.0" },
+  "contributes": {
+    "surface": { "kind": "web", "path": "/" },
+    "login": {
+      "path": "/login",
+      "field": "password",
+      "cookie": "code-server-session"
+    },
+    "layout": true,
+    "submitPubkey": false,
+    "legacyDefault": true
+  },
+  "site": {
+    "defaultCpus": 2,
+    "defaultMem": "8G",
+    "bin": {
+      "env": "SLURMATE_CS_BIN",
+      "discovery": "which",
+      "name": "code-server",
+      "fallback": "/usr/local/bin/code-server"
+    },
+    "blockKeys": ["auth_mode"],
+    "enumKeys": { "auth_mode": ["password", "none"] }
+  }
+}

@@ -31,33 +31,26 @@
 
 const net = require('net');
 const { Backend, KIND } = require('./backend.js');
-const { createDemoCodeServer } = require('./demo-server.js');
+const { createDemoWebService } = require('./demo-server.js');
 
-// 这两个是**协议上的取值**（`service_kind` / 插件名），不是客户端的插件注册表。
-// 注册表扫到的是"这个客户端能接哪些"，而这里是"演示后端扮演的那个**站点**开了
-// 哪些" —— 两者是不同的东西，客户端的插件集合与服务端的插件集合本来就允许不等，
-// 而"不相等时不许崩"正是这次改动的验收标准之一。
-//
-// ★ 演示后端扮演的是一个**具体的**站点，所以集合写死在这里是对的：真实站点的
-//   集合由 `op_plugins` 通报，客户端不该假定任何集合。
-const SERVICE_CODE_SERVER = 'code-server';
-const SERVICE_SSHD = 'sshd';
-
-// ★ 演示站点报的 `(id, 版本)` 与客户端内建插件清单里的是同一对 —— 真实情况下
-//   也是这样：站点分发的就是那个构件。所以演示模式**不会**凭空造出"站点有而
-//   本机没有"的假警报，那种情况由 debugAddSitePlugin 显式制造。
-const SITE_CS_ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
-const SITE_SSHD_ID = '01M2JKHTZGF12N0T9CB3XVK36H';
 // 演示里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 
-const DEMO_SITE_PLUGINS = [
-  { id: SITE_CS_ID, name: SERVICE_CODE_SERVER, version: '1.0.0',
-    title: '开发环境', enabled: true, builtin: true },
-  { id: SITE_SSHD_ID, name: SERVICE_SSHD, version: '1.0.0',
-    title: 'SSH 中转站', enabled: true, builtin: true },
-];
+// ★ **演示站点报的插件 = 本机池里装了什么。**
+//
+//   以前这里写死两个插件（名字与 id 与客户端内建的那两份逐字相同）。基座不再
+//   自带插件之后，那份写死就变成了一句谎话：它会让演示模式永远报着两个本机
+//   根本没有的插件，于是满屏"本站有而本机没有"——一个**故意不带插件的基座**
+//   看起来像坏了。
+//
+//   改成照实报告之后，演示模式反而成了「零插件」那个状态的验证手段：池空就
+//   什么都画不出来（那正是要修的空态），装了就有。
+//
+//   真实站点的集合同样由 `op_plugins` 通报、客户端一个字都不该假定 —— 这一点
+//   现在两边是同构的。
+//
+//   `_sitePluginsOf` 由 index.js 注入（它才知道池里有什么），默认空。
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -115,6 +108,38 @@ class FakeBackend extends Backend {
     this._connected = false;
     /** 调试用：站点多出来的插件（模拟"站点升级了、客户端没跟上"）。 */
     this._extraSitePlugins = [];
+    /**
+     * 演示站点**装了**哪些插件 —— 由 index.js 传进来（它才知道池里有什么）。
+     * 返回 `{id, name, version, displayName}` 的数组。
+     */
+    this._sitePluginsOf = typeof opts.sitePlugins === 'function' ? opts.sitePlugins : () => [];
+    /** 演示站点里被"关掉"的插件（按短名）。原本是直接改那个写死的数组。 */
+    this._siteDisabled = new Set();
+  }
+
+  /**
+   * 演示站点当前报出去的插件清单。
+   *
+   * ★ 每次现算，不缓存：用户可以在演示进行中装/卸插件，而站点"看到"的东西
+   *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
+   */
+  _sitePlugins() {
+    const installed = this._sitePluginsOf().map((p) => ({
+      id: p.id,
+      name: p.name,
+      version: p.version,
+      title: p.displayName || p.name,
+      enabled: !this._siteDisabled.has(p.name),
+      // 站点分发来的，不是客户端自带的 —— 基座已经不认识"内建"这个概念了。
+      builtin: false,
+      // ★ 内部用（决定起不起本地 HTTP 服务、要不要公钥、界面与登录契约是什么）。
+      //   **不进 `plugins` 响应** —— 那两个字段是客户端从清单里自己读的，
+      //   服务端多报一份就是两份真相。见下面的 case 'plugins'。
+      surface: p.surface || null,
+      submitPubkey: Boolean(p.submitPubkey),
+      login: p.login || null,
+    }));
+    return [...installed, ...this._extraSitePlugins];
   }
 
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
@@ -123,7 +148,7 @@ class FakeBackend extends Backend {
   // ── 生命周期 ────────────────────────────────────────────────────────────
   async connect(profile) {
     if (!this._server) {
-      this._server = createDemoCodeServer({ password: DEMO_PASSWORD });
+      this._server = createDemoWebService({ password: DEMO_PASSWORD });
       await this._server.listen();
     }
     this._connected = true;
@@ -170,13 +195,18 @@ class FakeBackend extends Backend {
       case 'partitions': return ok({ partitions: this._partitions() });
       // 默认资源是**按插件**的，所以它跟 `plugins` 走，不再挂在 `partitions` 上
       //（与守护进程逐字一致 —— 那个字段已经删掉了，见 op_partitions）。
+      // 默认资源是**站点设定的策略**，客户端不推导 —— 演示站点一律报 DEFAULTS，
+      // 真实站点报它自己那份（每个插件可以不同，见 slurmate.conf 的插件块）。
+      //
+      // ★ 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
+      //   清单里自己读**的东西，服务端多报一份就是两份真相，而两份迟早会分叉。
+      //   （真实守护进程的 op_plugins 也是这么收口的。）
       case 'plugins':    return ok({
-        plugins: [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins].map((p) => ({
-          ...p, defaults: { ...DEFAULTS },
+        plugins: this._sitePlugins().map((p) => ({
+          id: p.id, name: p.name, version: p.version, title: p.title,
+          enabled: p.enabled, builtin: p.builtin, defaults: { ...DEFAULTS },
         })),
-        // 演示站点默认两个都开着（真实站点默认只开 code-server）。
-        enabled: [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins]
-          .filter((p) => p.enabled).map((p) => p.name),
+        enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
       });
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
@@ -229,8 +259,7 @@ class FakeBackend extends Backend {
   }
   /** 让演示站点把某个插件**关掉**（站点装了但不允许用）。 */
   debugDisableSitePlugin(name) {
-    const p = DEMO_SITE_PLUGINS.find((x) => x.name === name);
-    if (p) p.enabled = false;
+    this._siteDisabled.add(name);
     const e = this._extraSitePlugins.find((x) => x.name === name);
     if (e) e.enabled = false;
   }
@@ -238,7 +267,7 @@ class FakeBackend extends Backend {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
     this._extraSitePlugins.length = 0;
-    DEMO_SITE_PLUGINS.forEach((p) => { p.enabled = true; });
+    this._siteDisabled.clear();
   }
 
   // ── op 实现 ─────────────────────────────────────────────────────────────
@@ -270,13 +299,20 @@ class FakeBackend extends Backend {
   }
 
   _submit(req) {
-    // 服务种类。照抄守护进程的判据：认不出的一律拒绝，绝不悄悄退回 code-server ——
+    // 服务种类。照抄守护进程的判据：认不出的一律拒绝，绝不悄悄退回某一个插件 ——
     // 那会让「我要的是中转站，得到的是一个网页 IDE」变成一个不报错的错误。
-    const kind = (req && req.service_kind) || SERVICE_CODE_SERVER;
+    //
+    // ★ **不写死缺省值**。真实守护进程的缺省来自站点配置（`default_plugin`），
+    //   没配就要求显式给；演示后端没有配置可读，所以它照做同一件事：要求显式给。
+    //   客户端在能解析出缺省插件时本来就会把它显式传上来。
+    const kind = req && req.service_kind;
+    if (!kind) {
+      return err(2, 'bad_service_kind',
+        '这个站点没有设缺省插件，提交时必须显式指定 service_kind');
+    }
     // ★ 按**短名**在演示站点自己的清单里查 —— 短名只在站点内唯一，而演示后端
-    //   扮演的正是"一个站点"。查不到就拒绝，绝不悄悄退回 code-server。
-    const sitePlugin = [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins]
-      .find((p) => p.name === kind);
+    //   扮演的正是"一个站点"。查不到就拒绝。
+    const sitePlugin = this._sitePlugins().find((p) => p.name === kind);
     if (!sitePlugin) {
       return err(2, 'bad_service_kind', `未知的服务类型：${kind}`);
     }
@@ -290,20 +326,27 @@ class FakeBackend extends Backend {
     //   去写，会把客户端的公钥**全部**拒掉；而如果反过来原样收下，那个注释里的
     //   逗号会把 `--export=ALL,k=v,…` 劈成两个变量（守护进程那边这一步是真的，
     //   不是理论问题 —— 见 test-sessiond-logic.py 19.9）。
-    if (kind === SERVICE_SSHD) {
+    // 假服务现在扮演**这个**插件：界面路径与登录契约都来自它的清单。
+    // （服务是在 connect() 里起的，那时还不知道会有哪个会话。）
+    if (this._server) {
+      this._server.setContract({ surface: sitePlugin.surface, login: sitePlugin.login });
+    }
+    // ★ 判据是插件**声明了什么**，不是它叫什么名字 —— 与客户端框架同一条规矩。
+    //   `submitPubkey` 是"提交时要带公钥"，`surface` 是"有一个网页界面"。
+    if (sitePlugin.submitPubkey) {
       const pk = req && req.ssh_pubkey;
       const m = typeof pk === 'string'
         ? /^ssh-ed25519 ([A-Za-z0-9+/]{68})(?:[ \t]+[^\r\n]*)?$/.exec(pk) : null;
       if (!m) {
-        return err(2, 'bad_ssh_pubkey', '中转站会话必须带上一把合法的 ssh-ed25519 公钥');
+        return err(2, 'bad_ssh_pubkey', `「${sitePlugin.title}」的会话必须带上一把合法的 ssh-ed25519 公钥`);
       }
       this._relayPubkey = 'ssh-ed25519 ' + m[1];      // 规范化：注释在这里被丢掉
     }
-    // 本地 HTTP 服务是在 connect() 里起的。没起就说明调用方漏了 connect ——
-    // 那样会产出一个 service_port=0 的会话，隧道目标变成 "127.0.0.1:0"，
-    // 会话在「已登记」之后才炸。宁可在这里响亮地失败。
-    // （中转站不需要它：那个端口后面没有 HTTP 服务。）
-    if (!this._server && kind === SERVICE_CODE_SERVER) {
+    // 有界面的插件要在本地有个 HTTP 服务给它。那个服务是在 connect() 里起的，
+    // 没起就说明调用方漏了 connect —— 那样会产出一个 service_port=0 的会话，
+    // 隧道目标变成 "127.0.0.1:0"，会话在「已登记」之后才炸。宁可在这里响亮地失败。
+    // （没有界面的插件不需要它：那个端口后面不是 HTTP。）
+    if (!this._server && sitePlugin.surface) {
       return err(9, 'internal', '演示后端尚未 connect()，本地服务未启动');
     }
     if (this._session && !['released', 'rejected', 'expired'].includes(this._session.state)) {
@@ -355,9 +398,12 @@ class FakeBackend extends Backend {
       //   仍然是**提交那一刻**那一版。作业侧跑的是那一版的代码，客户端这一半
       //   必须配同一版。
       service_plugin: `${sitePlugin.id}@${sitePlugin.version}`,
-      // 与守护进程一致：中转站走公钥，永远没有口令（有口令才是错的 ——
+      // 与守护进程一致：要公钥的插件走公钥，永远没有口令（有口令才是错的 ——
       // 那会让界面以为可以拿它去 POST 登录）。
-      auth_mode: kind === SERVICE_SSHD ? 'publickey' : 'password',
+      auth_mode: sitePlugin.submitPubkey ? 'publickey' : 'password',
+      // 内部记账：登记时决定端口与主机公钥要用。不进会话视图（_view 逐字段挑）。
+      site_surface: Boolean(sitePlugin.surface),
+      site_pubkey: Boolean(sitePlugin.submitPubkey),
       auth_password: null,
       ssh_host_key: null,
       job_state: 'PENDING',
@@ -374,7 +420,7 @@ class FakeBackend extends Backend {
       // 东西在监听**的端口 —— 那边真正的 sshd 假不出来，见 DEMO_HOST_KEY）。
       // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
       this._session.node_ip = '127.0.0.1';
-      const relay = this._session.service_kind === SERVICE_SSHD;
+      const relay = this._session.site_pubkey;
       this._session.service_port = relay
         ? DEMO_SSHD_PORT : (this._server ? this._server.port : 0);
       this._session.tunnel_target = `127.0.0.1:${this._session.service_port}`;
@@ -466,7 +512,8 @@ class FakeBackend extends Backend {
       tunnel_target: s.tunnel_target,
       // 与守护进程逐字一致：这个字段**总是**存在（可能是 null）。
       // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——
-      // 而"字段不存在"是另一回事（老守护进程），那时按 code-server 走。
+      // 而"字段不存在"是另一回事（老守护进程），那时按标了 legacyDefault 的
+      // 那个插件兜底（本机没装它就只解释、不动作）。
       service_kind: s.service_kind === undefined ? null : s.service_kind,
       // 与守护进程一致：也是**总是存在**（可能是 null）。null = 服务端不知道
       // 这个会话是哪一版的插件，客户端据此拒绝猜测（只解释、不动作）。

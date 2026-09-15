@@ -29,8 +29,11 @@ module.exports = {
 /**
  * 界面已经由框架打开了，这里只做登录。**幂等**，每次状态变化都会调。
  *
- * 判定依据是**分区里有没有 cookie**，不是 HTTP 状态码 —— 理由见 index.js 的
- * performLogin：code-server 在口令错时返回的是 200。
+ * 判定依据是**分区里有没有 cookie**，不是 HTTP 状态码 —— 理由见 weblogin.js：
+ * 这套网页表单登录的协议在口令错时返回的是 200（code-server 4.135.0 实测）。
+ *
+ * ★ 往哪 POST、字段叫什么、看哪个 cookie，全部来自本插件 `plugin.json` 的
+ *   `contributes.login` —— 这个文件里一个都不写死。
  */
 async function attach(ctx, snap) {
   const ses = ctx.win.surfaceSession;

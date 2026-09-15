@@ -100,6 +100,26 @@ function notice(kind, text) {
 }
 
 // ── 状态渲染 ────────────────────────────────────────────────────────────────
+/**
+ * 「开始会话」那一屏露不露出来。
+ *
+ * ★ 两个条件都可能让它出现，而且它们是**独立的**：
+ *   · idle && connected —— 老规矩：连不上就没有分区可挑，摆一堆按不动的按钮
+ *     只会让人以为客户端坏了；
+ *   · **本机一个插件都没装** —— 装插件与连不连得上集群毫无关系（插件是本机的
+ *     东西），而把安装入口藏在一块"要连上才看得见"的区域里，等于用户第一次
+ *     打开客户端时无路可走。
+ *
+ * 两处都会改变这个判定（会话状态变化、插件列表被重扫），所以它单独成函数 ——
+ * 复制一份判断在两个地方，迟早会分叉。
+ */
+function syncPurposeVisibility() {
+  const st = lastSnap ? lastSnap.state : 'idle';
+  const idle = !lastSnap || st === 'idle';
+  const noPlugins = Boolean(lastPlugins && lastPlugins.installedCount === 0);
+  $('sec-purpose').classList.toggle('hidden', !(noPlugins || (idle && connected)));
+}
+
 function renderSnapshot(s) {
   lastSnap = s || null;
   const bar = $('statusbar');
@@ -144,7 +164,11 @@ function renderSnapshot(s) {
   if (!idle) closeForm();
   // 「开始会话」只在真的连上之后才出现 —— 连不上就没有分区可挑，
   // 摆一堆按不动的按钮只会让人以为客户端坏了。
-  $('sec-purpose').classList.toggle('hidden', !(idle && connected));
+  //
+  // ★ 一个例外：**本机一个插件都没装**时，这一屏必须露出来。装插件与连不连得上
+  //   集群毫无关系（插件是本机的东西），而把安装入口藏在一块要连上才看得见的
+  //   区域里，等于用户第一次打开客户端时**无路可走**。见 renderPlugins 的空态。
+  syncPurposeVisibility();
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
@@ -740,9 +764,9 @@ function renderPlugins(pv) {
   lastPlugins = pv;
 
   const list = pv.plugins || [];
-  if (!list.length) {
-    box.append(el('p', 'sub', '这个客户端一个插件都没有 —— 安装包可能不完整。'));
-  }
+  // ★ 空池是**正常状态**，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
+  //   道歉，是给出路：池在哪、怎么装、装完怎么让它出现。
+  if (!list.length) box.append(emptyPool(pv));
 
   for (const p of list) {
     box.append(pluginBlock(p));
@@ -752,14 +776,94 @@ function renderPlugins(pv) {
   for (const e of pv.errors || []) {
     issues.append(issueBox('err', '插件没有加载', e));
   }
-  // ── 站点有而本机没有：这是升级提示的唯一来源 ──
+  // ── 站点有而本机没有 ──
+  //
+  // ★ 「一个都没装」与「版本对不上」在 `missing` 里长得**一模一样**（都是"站点报
+  //   了一个本机查不到的 (id, 版本)"），但要做的事完全不同：去装一个 vs 去换一版。
+  //   判据是**池空不空**。以前这里只有一种说法，于是零插件时它会对着站点上每一个
+  //   插件都喊一遍"升级客户端"，而真相是"你还没装插件"。
   const miss = pv.missing || [];
   if (miss.length) {
     const names = miss.map((m) => (m.version ? `${m.title} ${m.version} 版` : m.title));
-    issues.append(issueBox('warn', '本站有本客户端没有的插件',
-      `${names.join('、')}。\n升级客户端之后就能用它 —— 在那之前，这类会话仍然接得上`
-      + '隧道、也停得掉，只是客户端不知道怎么把它用起来。'));
+    if (pv.installedCount === 0) {
+      issues.append(issueBox('warn', '本站提供的插件，本机一个都没有',
+        `${names.join('、')}。\n本机还没有装任何插件，所以上面一个按钮都没有 —— `
+        + '装好之后它们就会变成可以开始会话的块。'));
+    } else {
+      issues.append(issueBox('warn', '本站报的这几个版本，本机池里对不上',
+        `${names.join('、')}。\n可能你装的是另一个版本，也可能是这一版要求更新的`
+        + '客户端。会话仍然接得上隧道、也停得掉，只是客户端不知道怎么把它用起来。'));
+    }
   }
+}
+
+/**
+ * 池是空的。
+ *
+ * ★ 以前这里写的是「这个客户端一个插件都没有 —— **安装包可能不完整**」。那句话
+ *   把一个**每个客户端都有的初始状态**说成了故障，而且没有给出任何出路：用户知道
+ *   "少了点什么"，但不知道该往哪放、放完怎么让它出现。
+ *
+ * 所以这一段里三件事必须齐：**池在哪**（可复制的路径）、**怎么装**（从目录安装）、
+ * **装完怎么生效**（重新扫描 —— 也可以直接打开目录手工放）。
+ */
+function emptyPool(pv) {
+  const d = document.createElement('div');
+  d.className = 'plug plug-off';
+
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, '本机还没有安装任何插件'));
+  d.append(head);
+
+  d.append(el('p', 'plug-desc',
+    '基座自己不带插件 —— 作业里跑什么由插件决定。装上一个之后，这里会按插件画出一块，'
+    + '每一块有自己的默认资源和开关。'));
+
+  if (pv.poolDir) {
+    const p = document.createElement('p');
+    p.className = 'plug-desc';
+    p.append(document.createTextNode('插件池：'));
+    p.append(el('code', 'plug-id', pv.poolDir));
+    d.append(p);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'plug-meta';
+  row.append(button('从目录安装…', () => installPlugin()));
+  row.append(button('打开插件目录', () => openPluginDir(), 'ghost'));
+  row.append(button('重新扫描', () => rescanPlugins(), 'ghost'));
+  d.append(row);
+
+  return d;
+}
+
+/** 建一个按钮。CSP 里没有 unsafe-inline，所以一律走 class，一个 style 都不能有。 */
+function button(text, onclick, cls) {
+  const b = document.createElement('button');
+  b.textContent = text;
+  if (cls) b.className = cls;
+  b.onclick = onclick;
+  return b;
+}
+
+async function installPlugin() {
+  const r = await window.slurmate.installPlugin();
+  if (r && r.canceled) return;
+  if (!r || !r.ok) { notice('error', (r && r.error) || '没能装这个插件'); return; }
+  renderPlugins(r.plugins);
+  syncPurposeVisibility();
+}
+
+async function openPluginDir() {
+  const r = await window.slurmate.openPluginDir();
+  if (!r || !r.ok) notice('error', (r && r.error) || '打不开插件目录');
+}
+
+async function rescanPlugins() {
+  const r = await window.slurmate.rescanPlugins();
+  if (r && r.ok) { renderPlugins(r.plugins); syncPurposeVisibility(); }
+  else notice('error', (r && r.error) || '重新扫描失败');
 }
 
 function pluginBlock(p) {
@@ -1088,6 +1192,9 @@ async function init() {
 
   $('btn-probe').onclick = doProbe;
 
+
+  $('btn-plugin-add').onclick = () => installPlugin();
+  $('btn-plugin-rescan').onclick = () => rescanPlugins();
 
   $('btn-doctor').onclick = async () => {
     const r = await window.slurmate.doctor();

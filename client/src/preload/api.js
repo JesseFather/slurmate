@@ -24,11 +24,22 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 断开这一跳（作业继续在集群上跑，可以再连回来）。会话进行中会被主进程拒绝。
   disconnect: () => ipcRenderer.invoke('app:disconnect'),
 
+  // ── 插件 ──
+  //
+  // 插件装在**池**里（`~/.slurmate/plugins/`），基座自己不带任何插件 ——
+  // 一个都没有是正常状态。装与卸都在这里，界面把它们摆在"本机没有插件"的空态里，
+  // 那条空态正是用户第一次打开客户端时看到的。
+  installPlugin: (srcDir) => ipcRenderer.invoke('app:installPlugin', srcDir),
+  uninstallPlugin: (id, version) => ipcRenderer.invoke('app:uninstallPlugin', id, version),
+  // 用户手工往池里放了东西之后，不用重启客户端。
+  rescanPlugins: () => ipcRenderer.invoke('app:rescanPlugins'),
+  openPluginDir: () => ipcRenderer.invoke('app:openPluginDir'),
+
   // ── 布局组 ──
   //
-  // 布局 = code-server 的编辑器窗口布局/标签页/登录状态，按**本地监听端口**隔离
+  // 布局 = 那个网页应用自己的窗口布局/标签页/登录状态，按**本地监听端口**隔离
   // （浏览器按 origin 存 localStorage）。一个布局组被若干条连接共用，
-  // 没有任何连接用它的组会被自动回收。
+  // 没有任何连接用它的组会被自动回收。只有声明了 contributes.layout 的插件要它。
   //
   // layoutId 传空 = **新建一个空白布局并落进去，一次原子完成**。刻意不提供独立的
   // 「建组」通道：单独建出来的组引用计数天然是 0，紧接着的回收会把它当场删掉 ——
@@ -65,8 +76,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
   // serviceKind 是**本站的短名**（配置块名、块标题旁边那个 code）。省略 = 缺省
-  // 插件 —— 与这个参数存在之前的行为一致。客户端再按短名找到本机对应的那一份，
-  // 把它的 `<id>@<版本>` 作为解析键交给服务端。
+  // 插件（标了 legacyDefault 的那一个）—— 与这个参数存在之前的行为一致。客户端
+  // 再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。
+  // 本机一个插件都没装时，主进程会拒绝并说清该往哪放。
   start: (resources, serviceKind) =>
     ipcRenderer.invoke('app:start', resources, serviceKind),
   // 本机要不要某个插件。**按 id**（不是短名）：池是全局的，两个站点可以各有一个
@@ -82,7 +94,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
   // 演示模式的调试开关（真机上极难复现的状态）
-  debug: (what) => ipcRenderer.invoke('app:debug', what),
+  debug: (what, arg) => ipcRenderer.invoke('app:debug', what, arg),
 
   // 主进程 → 渲染进程
   onState: (fn) => {

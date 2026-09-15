@@ -3,7 +3,7 @@
  * SSH 中转站的客户端侧。
  *
  * 让原生 VS Code Remote-SSH、codex 这类**要求 ssh 连接**的工具能用上一个跑在
- * 作业里的会话。作业侧起的是一个用户态 sshd（`run.sbatch` 的 `start_sshd`）。
+ * 作业里的会话。作业侧起的是一个用户态 sshd（见 `job/start.sh` 的 `start_sshd`）。
  *
  * ★ `plugin.json` 里没有 `contributes.surface`，所以框架**连一块界面都不会建**
  *   —— 用户要用的东西跑在他自己的机器上，客户端唯一要做的事就是让
@@ -13,7 +13,7 @@
  *   **浏览器的** localStorage 按 origin 隔离，而中转站没有浏览器。
  */
 
-const sshconfig = require('../../../sshconfig.js');
+const sshconfig = require('./sshconfig.js');
 
 module.exports = {
   // 隧道端口：一个固定的基准端口，与布局组无关。别名恒定、端口漂移无害 ——
@@ -40,7 +40,7 @@ module.exports = {
  */
 function prepare(ctx) {
   const home = ctx.home();
-  const k = sshconfig.ensureRelayKey(home);
+  const k = sshconfig.ensureRelayKey(home, ctx.keys);
   if (!k.ok) {
     return { ok: false, message: `无法准备中转站用的密钥：${k.detail}` };
   }

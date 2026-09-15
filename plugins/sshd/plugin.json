@@ -5,10 +5,19 @@
   "version": "1.0.0",
   "description": "作业里跑一个用户态 sshd。原生 VS Code Remote-SSH、codex 这类要求 ssh 连接的工具都从这里接进来。",
   "author": "slurmate",
-  "engines": { "slurmate": ">=0.3.0" },
+  "engines": { "slurmate": ">=0.5.0" },
   "contributes": {
     "layout": false,
     "submitPubkey": true,
     "legacyDefault": false
+  },
+  "site": {
+    "defaultCpus": 1,
+    "defaultMem": "2G",
+    "bin": {
+      "env": "SLURMATE_SSHD_BIN",
+      "discovery": "convention",
+      "fallback": "/usr/sbin/sshd"
+    }
   }
 }

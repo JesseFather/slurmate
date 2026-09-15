@@ -4,22 +4,25 @@
  *
  * 一个**插件** = 一种服务。一个会话提供哪种服务，就由哪个插件负责把它接起来。
  *
- * ── 一个插件是一个目录 ──────────────────────────────────────────────────────
+ * ── 一个插件是一个目录，三半 ────────────────────────────────────────────────
  *
  *   <插件目录>/
- *     plugin.json        清单：身份、版本，以及框架会读的那几条声明
+ *     plugin.json        清单：身份、版本、以及框架会读的那几条声明
  *     client/index.js    客户端侧代码 —— **可有可无**，没有它就是纯声明式插件
+ *     job/start.sh       作业侧代码 —— **客户端不看它**，它由站点的部署脚本
+ *                        编织进作业模板（见 plugins/README.md）
  *
  * ★ **目录名不参与任何判定。** 身份来自清单里的 `id`，版本来自 `version`。
- *   目录名纯粹是给人看的（内建的两个用可读名字，池里的用 `<id>@<版本>`），
- *   所以仓库里一眼能看出哪个是哪个，而加载器只有一条逻辑。
+ *   目录名纯粹是给人看的，所以仓库里一眼能看出哪个是哪个，而加载器只有一条逻辑。
  *
- * ── 两个来源，一个池 ────────────────────────────────────────────────────────
+ * ── 基座不带插件 ────────────────────────────────────────────────────────────
  *
- *   builtin  随客户端发布（本目录下）
- *   pool     ~/.slurmate/plugins/ —— 站点分发进来的
+ * ★ **本目录（`src/main/plugins/`）是框架，不是插件目录** —— 里面只有注册表、
+ *   铸造 id 的 ulid.js、以及安装器。一个插件都没有，这是**正常状态**，不是
+ *   安装包坏了。
  *
- * 两边**走同一条加载路径**。「站点分发的插件」不是一套新机制，只是多看一个目录。
+ *   插件来自**池**：`~/.slurmate/plugins/`。装进去的路径只有一条（install.js），
+ *   而将来站点分发走的也是它 —— 分发只是把文件先落到本地临时目录再调它。
  *
  * ── ★ 身份是「铸造」出来的，不是「起名」出来的 ──────────────────────────────
  *
@@ -68,10 +71,11 @@ const UNKNOWN = 'unknown';
 // `contribution`）不该静默变成一个"配了但不生效"的插件。
 
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
-  'author', 'engines', 'contributes'];
-const CONTRIBUTES_KEYS = ['surface', 'layout', 'submitPubkey', 'legacyDefault'];
+  'author', 'engines', 'contributes', 'site'];
+const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'legacyDefault'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
+const LOGIN_KEYS = ['path', 'field', 'cookie'];
 const CLIENT_HOOKS = ['prepare', 'attach', 'preferredPort', 'closeWarning'];
 
 /**
@@ -226,6 +230,18 @@ function loadDir(dir, source) {
     }
   }
 
+  // site —— **给集群侧读的那一段**：默认资源、可执行文件怎么找、配置块里允许
+  // 哪些键。客户端一个字都不用，但必须**接受**它（否则一份合法清单会被客户端
+  // 判成"认不得的键"）。
+  //
+  // ★ 客户端**不做深究**：一个键名打错（`defualtCpus`）由守护进程在扫描时报错
+  //   并说清是哪个目录 —— 它才是这一段的主人。每一侧只校验自己真正会读的东西，
+  //   否则"客户端先升级、站点后升级"这种次序会变成一地鸡毛。
+  if (mf.site !== undefined && mf.site !== null
+      && (typeof mf.site !== 'object' || Array.isArray(mf.site))) {
+    return { error: `${mfPath}：site 必须是一个对象（集群侧读的那一段）` };
+  }
+
   // contributes —— 框架会读的、关于这个插件的一切声明。
   const mfc = mf.contributes === undefined ? {} : mf.contributes;
   if (!mfc || typeof mfc !== 'object' || Array.isArray(mfc)) {
@@ -254,8 +270,39 @@ function loadDir(dir, source) {
     surface = { kind: s.kind, path: p };
   }
 
+  // login —— 自动登录的**契约值**：往哪个路径 POST、表单字段叫什么、成功之后
+  // 应该多出哪个 cookie。
+  //
+  // ★ 这三个值是**数据**，不是代码，这正是要点。框架实现的是「POST 一个表单、
+  //   然后查 cookie」这个通用机制，具体值是插件自述的 —— 所以基座里不需要知道
+  //   任何一个具体的网页服务长什么样，而任何一个 web 插件都能自动登录。
+  let login = null;
+  if (mfc.login !== undefined && mfc.login !== null) {
+    const l = mfc.login;
+    if (!l || typeof l !== 'object' || Array.isArray(l)) {
+      return { error: `${mfPath}：contributes.login 必须是一个对象` };
+    }
+    why = keysProblem(l, LOGIN_KEYS, 'contributes.login');
+    if (why) return { error: `${mfPath}：${why}` };
+    // 没有界面就没有"登录"可言 —— 这一条多半是清单写错了，而不是刻意为之。
+    if (!surface) {
+      return { error: `${mfPath}：contributes.login 需要同时有 contributes.surface `
+        + '—— 没有界面就无所谓自动登录' };
+    }
+    if (typeof l.path !== 'string' || !l.path.startsWith('/')) {
+      return { error: `${mfPath}：contributes.login.path 必须以 / 开头，`
+        + `现在是 ${JSON.stringify(l.path)}` };
+    }
+    for (const k of ['field', 'cookie']) {
+      if (typeof l[k] !== 'string' || !l[k].trim()) {
+        return { error: `${mfPath}：contributes.login.${k} 必须是非空字符串` };
+      }
+    }
+    login = { path: l.path, field: l.field, cookie: l.cookie };
+  }
+
   for (const k of CONTRIBUTES_KEYS) {
-    if (k === 'surface') continue;
+    if (k === 'surface' || k === 'login') continue;
     if (mfc[k] !== undefined && typeof mfc[k] !== 'boolean') {
       return { error: `${mfPath}：contributes.${k} 必须是 true 或 false` };
     }
@@ -314,6 +361,7 @@ function loadDir(dir, source) {
     author: mf.author || '',
     contributes: {
       surface,
+      login,
       layout: mfc.layout === true,
       submitPubkey: mfc.submitPubkey === true,
       legacyDefault: mfc.legacyDefault === true,
@@ -332,11 +380,56 @@ function loadDir(dir, source) {
   return { plugin };
 }
 
+function isDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
 /**
- * 扫一个根目录下的**每个子目录**。
+ * 找出一个根目录下所有含清单的目录，**最多往下两层**。
  *
- * 根目录不存在**不是错误** —— 池目录（`~/.slurmate/plugins/`）在用户装第一个
- * 插件之前本来就不存在，为一个还没用上的功能天天报一条错是噪音。
+ * 为什么要两层：池同时是两种东西 ——
+ *
+ *   · 用户把插件目录整个拷进去就生效的地方   `<池>/code-server/plugin.json`
+ *   · 同一个插件的**多个版本并存**的地方     `<池>/<id>/<版本>/plugin.json`
+ *
+ * 而同一 `(id, 版本)` 只该有一份（两份内容不同的会撞车，见 reload），所以多版本
+ * 只能靠目录分层来并存。
+ *
+ * ★ 两层的目录名都**不参与任何判定**（身份来自清单里的 `id`），所以这两种布局
+ *   可以混着用，用户不需要知道这个规则、也不需要知道 id 长什么样。
+ */
+function findPluginDirs(base) {
+  const out = [];
+  const level1 = fs.readdirSync(base).sort();
+  for (const n1 of level1) {
+    const d1 = path.join(base, n1);
+    if (!isDir(d1)) continue;                       // index.js、ulid.js 这些自己人
+    if (fs.existsSync(path.join(d1, MANIFEST))) {
+      out.push({ dir: d1, label: n1 });
+      continue;
+    }
+    let level2;
+    try {
+      level2 = fs.readdirSync(d1).sort();
+    } catch {
+      continue;
+    }
+    for (const n2 of level2) {
+      const d2 = path.join(d1, n2);
+      if (isDir(d2) && fs.existsSync(path.join(d2, MANIFEST))) {
+        out.push({ dir: d2, label: `${n1}/${n2}` });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 扫一个根目录。根目录不存在**不是错误**。
+ *
+ * 池目录（`~/.slurmate/plugins/`）在用户装第一个插件之前本来就不存在 —— 为一个
+ * 还没用上的功能天天报一条错是噪音。**客户端一个插件都没装是正常状态**，不是
+ * 安装包坏了。
  */
 function loadRoot(root) {
   const out = [];
@@ -347,26 +440,17 @@ function loadRoot(root) {
     out.push({ error: `插件根目录 ${root.source} 的路径还没准备好` });
     return out;
   }
-  let names;
+  let dirs;
   try {
-    names = fs.readdirSync(base);
+    dirs = findPluginDirs(base);
   } catch (e) {
     if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return out;
     out.push({ error: `读不到插件目录 ${base}：${e.message}` });
     return out;
   }
-  for (const name of names.sort()) {
-    const dir = path.join(base, name);
-    let st;
-    try {
-      st = fs.statSync(dir);
-    } catch {
-      continue;
-    }
-    if (!st.isDirectory()) continue;         // index.js、ulid.js 这些自己人
-    if (!fs.existsSync(path.join(dir, MANIFEST))) continue;   // 不是插件目录
+  for (const { dir, label } of dirs) {
     const r = loadDir(dir, root.source);
-    out.push(r.error ? { error: `${name}：${r.error.replace(`${dir}：`, '')}` } : r.plugin);
+    out.push(r.error ? { error: `${label}：${r.error.replace(`${dir}：`, '')}` } : r.plugin);
   }
   return out;
 }
@@ -374,11 +458,11 @@ function loadRoot(root) {
 class Registry {
   /**
    * @param {Array<{dir:string|Function, source:string}>} [roots]
-   *   省略 = 只用内建根（本目录）。测试会传别的。
+   *   **省略 = 一个插件都没有**，这是诚实默认值：基座自己不带任何插件。
    *   `dir` 可以是函数 —— 池目录要等 app ready 之后才算得出来（见 loadRoot）。
    */
   constructor(roots) {
-    this.roots = (roots && roots.length ? roots : [{ dir: __dirname, source: 'builtin' }])
+    this.roots = (roots || [])
       .filter((r) => r && (typeof r.dir === 'string' || typeof r.dir === 'function'));
     this.plugins = new Map();      // `<id>@<版本>` → plugin
     this.errors = [];
@@ -480,13 +564,17 @@ class Registry {
   }
 
   /**
-   * 老守护进程不返回 `service_plugin` 时兜到哪一个。
+   * 老守护进程不返回 `service_plugin`、连 `service_kind` 都没有时兜到哪一个。
    *
-   * ★ 这是**正确的兜底，不是猜测**：老守护进程只可能产生 code-server 会话
-   *   （那时的作业模板只会起那一种）。所以挑出被标了 `legacyDefault` 的那个
-   *   插件，是还原一个已知事实，而不是在信息缺失时赌一把。
+   * ★ 这是**正确的兜底，不是猜测**：在「插件」这一层做出来之前，作业模板只会起
+   *   一种服务，所以那种守护进程只可能产生被标了 `legacyDefault` 的那个插件的
+   *   会话。挑出它，是还原一个已知事实。
    *
-   * 没人标 `legacyDefault` 时返回 null —— 那时 resolve() 给 UNKNOWN，客户端只
+   * ★ 但**兜不到的时候要说得出为什么**。以前这个位置返回 `why: null`，理由是
+   *   "内建插件一定在"；基座不再自带任何插件之后，这句话就没有依据了 ——
+   *   于是它会静默地退化成一个不解释任何东西的 UNKNOWN。见 resolve()。
+   *
+   * 没人标 `legacyDefault`、或有两个以上都标了，返回 null —— 那时 resolve() 只
    * 解释、不动作。这比错误地兜到某一个插件安全得多。
    */
   defaultPlugin() {
@@ -501,8 +589,7 @@ class Registry {
    *                                     池里查不到   → UNKNOWN（并说清缺什么）
    *   undefined（老守护进程，字段不存在）
    *       + service_kind 也 undefined   → legacyDefault 那个插件
-   *       + service_kind 是短名          → 按短名找**内建**的（老守护进程只可能
-   *                                        产生内建插件的会话 —— 见 defaultPlugin）
+   *       + service_kind 是短名          → 按短名找，**唯一命中才算**（见下）
    *       + service_kind === null        → UNKNOWN，**绝不猜**
    *   其余（含认不出的名字、坏掉的 `<id>@<版本>`）→ UNKNOWN，**不退回缺省**
    *
@@ -530,13 +617,31 @@ class Registry {
 
     if (serviceKind === undefined) {
       const d = this.defaultPlugin();
-      return { plugin: d, why: null };
+      return {
+        plugin: d,
+        why: d ? null
+          : '这个会话来自一个更老的守护进程（它连服务种类都不报）—— 那种守护进程'
+            + '只可能产生标了 legacyDefault 的那个插件的会话，而本机没有装它。',
+      };
     }
 
-    // 老守护进程：只有短名。按短名找**内建**的那个 —— 站点分发的插件不可能来自
-    // 一个不认识 service_plugin 字段的守护进程（那个字段和池是同一批加的）。
-    const p = this.list().find((x) => x.name === serviceKind && x.source === 'builtin');
-    return { plugin: p || null, why: p ? null : null };
+    // 老守护进程：只有一个**短名**，没有 `<id>@<版本>`。
+    //
+    // ★ 早先这里限定「必须是内建的」，理由是"老守护进程只可能产生内建插件的
+    //   会话"。基座不再自带插件之后那句话就不成立了，而按短名在池里找是**有
+    //   歧义的**：池是全局的，两个站点可以各有一个叫 jupyter 的插件，而它们是
+    //   两个不同的东西（各自有各自的 id）。所以判据从"是不是内建"换成
+    //   **"是不是唯一"** —— 命中多个就不猜，说出来让用户自己判断。
+    const hits = this.list().filter((x) => x.name === serviceKind);
+    if (hits.length === 1) return { plugin: hits[0], why: null };
+    return {
+      plugin: null,
+      why: hits.length
+        ? `本机装了 ${hits.length} 个都叫「${serviceKind}」的插件，`
+          + '而它们来自不同的来源，无法判断这个会话用的是哪一个。'
+        : `本机没有装短名为「${serviceKind}」的插件 —— 会话是在别的机器上`
+          + '提交的，或者插件被卸掉了。',
+    };
   }
 
   /**
@@ -569,7 +674,11 @@ class Registry {
  *   新版本一句话都说不出来（它的首次通知被旧版本压掉了）。
  */
 function bucketOf(plugin) {
-  return `${plugin.id}@${plugin.version}`;
+  // 没有插件时给一个**不可能与任何插件撞上**的固定桶。今天到不了这里 ——
+  // `ctx` 只在插件非空时才递给插件，所以 `once()` 的调用方一定手里有插件。
+  // 但这个位置踩上去会是一个 `TypeError`，而不是一句能读的报错，且**将来**
+  // 最容易被踩（框架里任何一处新加的 `plugin &&` 守卫漏写就够了）。
+  return plugin ? `${plugin.id}@${plugin.version}` : 'no-plugin';
 }
 
 module.exports = {

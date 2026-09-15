@@ -2,7 +2,7 @@
  * integration.mjs —— 端到端跑一遍**除 Electron 之外**的全部链路。
  *
  * 覆盖：演示后端 → SessionController 状态机 → Tunnel（真的本地中继）→
- *       演示 code-server（真的 HTTP）→ 登录契约 → goodbye → 释放。
+ *       演示用的假 web 服务（真的 HTTP）→ 登录契约 → goodbye → 释放。
  *
  * 这台机器上没有 Xvfb，Electron 界面跑不了。但界面之下的每一层都能在这里真跑，
  * 所以这一层出问题一定不是「Electron 的锅」—— 这正是分层验证的意义。
@@ -13,10 +13,25 @@ import net from 'node:net';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const fs = require('fs');
+const path = require('path');
 const { FakeBackend, DEMO_PASSWORD } = require('../src/main/backend-fake.js');
 const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/session.js');
 const { Tunnel } = require('../src/main/tunnel.js');
-const { SESSION_COOKIE } = require('../src/main/login.js');
+
+// ★ 演示后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它
+//   （`opts.sitePlugins`）—— 它自己不认识任何插件，基座也不认识。这里给它的是
+//   仓库里真那个 code-server 插件，契约值直接从清单里读，不另抄一份。
+const HERE = path.dirname(new URL(import.meta.url).pathname);
+const CS_MANIFEST = JSON.parse(fs.readFileSync(
+  path.join(HERE, '..', '..', 'plugins', 'code-server', 'plugin.json'), 'utf8'));
+const LOGIN = CS_MANIFEST.contributes.login;
+const SURFACE = CS_MANIFEST.contributes.surface;
+const SESSION_COOKIE = LOGIN.cookie;
+const SITE_PLUGINS = () => [{
+  id: CS_MANIFEST.id, name: CS_MANIFEST.name, version: CS_MANIFEST.version,
+  displayName: CS_MANIFEST.displayName, surface: SURFACE, submitPubkey: false, login: LOGIN,
+}];
 
 const NO_REDIRECT = { redirect: 'manual' };
 
@@ -55,7 +70,7 @@ function keepAlive() {
  * 演示后端那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
  */
 async function makeBackend(t, opts = {}) {
-  const backend = new FakeBackend({ rpcLatencyMs: 0, ...opts });
+  const backend = new FakeBackend({ rpcLatencyMs: 0, sitePlugins: SITE_PLUGINS, ...opts });
   await backend.connect({ user: 'demo' });
   t.after(async () => { await backend.close(); });
   return backend;
@@ -110,7 +125,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
 
   // ── 提交并一路推到 running ──
   // 不传任何资源 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
-  const snap = await ctl.start({}, { preferredPort: layoutPort });
+  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
   assert.ok(snap, '启动应当成功');
   assert.equal(ctl.state, State.RUNNING);
   assert.equal(snap.localPort, layoutPort, '应当用上布局组绑定的端口');
@@ -186,7 +201,7 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
   const ctl = new SessionController({ backend, layoutId: 'l1' });
-  await ctl.start({}, { preferredPort: await freePort() });
+  await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
   // 老接口上那个 farewell:false（「只关窗口，作业继续跑」）已经删掉了。
@@ -208,7 +223,7 @@ test('★ 意外消失（没来得及发 goodbye）时作业必须还在 —— 
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
   const ctl = new SessionController({ backend, layoutId: 'l1' });
-  await ctl.start({}, { preferredPort: await freePort() });
+  await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
   // 模拟断电/网线被拔：进程直接没了，stop() 根本没机会被调用。
@@ -228,7 +243,7 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
   // 心跳间隔压到 150ms，好在测试里观察到「反复失败但不放弃」
   const ctl = new SessionController({ backend, layoutId: 'l1', heartbeatMs: 150, statusMs: 150 });
   t.after(() => ctl.stop());
-  await ctl.start({}, { preferredPort: await freePort() });
+  await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
   // 让守护进程「挂掉」
@@ -290,7 +305,7 @@ test('★ 隧道重建时端口顺移必须写回，localPort 不能失真', asy
     onTunnelPort: (id, port) => ports.push(port),
   });
   t.after(() => ctl.stop());      // 见下方「服务端替用户做的决定」那条的说明
-  const snap = await ctl.start({}, { preferredPort: layoutPort });
+  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
   assert.equal(snap.localPort, layoutPort);
   assert.deepEqual(ports, [layoutPort], '首次监听也应当写回配置');
 
@@ -329,7 +344,7 @@ test('★ 会话被守护进程回收后，本地监听必须一起收掉', asyn
   const layoutPort = await freePort();
   const ctl = new SessionController({ backend, layoutId: 'l1', statusMs: 80 });
   t.after(() => ctl.stop());
-  await ctl.start({}, { preferredPort: layoutPort });
+  await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
   assert.equal(await portState(layoutPort), 'connected', '跑起来时隧道应当通');
 
@@ -367,7 +382,7 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
   //   永远不会空 —— 而 node 18 的 --test **不会**强制退出，于是整个套件挂到超时，
   //   且没有任何测试失败，只有沉默。这条曾经真的漏了。
   t.after(() => ctl.stop());
-  const snap = await ctl.start({}, { preferredPort: layoutPort });
+  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
 
   assert.ok(snap, '启动应当成功 —— 有 warning 不代表失败');
   assert.equal(ctl.state, State.RUNNING);

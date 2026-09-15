@@ -46,7 +46,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const keys = require('./keys.js');
 
 /**
  * 用户在命令行里敲的那个 ssh 主机别名。写进我们那份 ssh 配置的 `Host` 行，
@@ -217,10 +216,17 @@ function ensureInclude(home) {
  * 清的东西：会话跑着的时候把钥匙换掉，症状是「刚才还能连，现在认证失败」，
  * 指不回根因。
  *
+ * ★ `keys` 由**框架**递进来（`ctx.keys`），不在这里 require。插件跑在池里
+ *   （`~/.slurmate/plugins/<id>/<版本>/`），相对路径指不到客户端的源码 ——
+ *   一个插件能用的一切，只能来自 `ctx`。框架那份 `keys.js` 是纯 Node `crypto`
+ *   加 OpenSSH 编码，没有任何"读到客户端自己的私钥"的入口。
+ *
+ * @param {string} home  家目录
+ * @param {object} keys  框架的 SSH 钥匙工具箱（`ctx.keys`）
  * @returns {{ok:true, privateKeyPem:string, publicKeyLine:string, created:boolean}
  *          |{ok:false, error:string, detail:string}}
  */
-function ensureRelayKey(home) {
+function ensureRelayKey(home, keys) {
   const p = pathsFor(home);
   let existing = '';
   try {

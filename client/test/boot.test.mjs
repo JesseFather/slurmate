@@ -28,6 +28,49 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
  */
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 
+// ── 插件池 ──────────────────────────────────────────────────────────────────
+//
+// 演示模式的池 = `<userData>/demo-config/plugins`（见 index.js 的 poolDir）。
+//
+// ★ 装进去的是仓库里**真的**那两个插件（`<repo>/plugins/`），不是测试里合成的
+//   替身。这两个插件与基座的接口正是这次改动反复在动的东西 —— 用替身测等于
+//   测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被真正验过。
+//
+// ★ **必须在 app 起来之前写进去**：注册表是在启动时扫的（那一屏的空态、
+//   按钮由它决定），而 index.js 只 require 一次。
+const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const demoPool = path.join(userData, 'demo-config', 'plugins');
+
+/**
+ * 把池设成指定的几个插件（名字对应 `<repo>/plugins/<名字>`），并重扫。
+ *
+ * 传空数组 = **一个插件都没有** —— 那是基座的正常状态，也得能被测到。
+ */
+function setPool(names) {
+  fs.rmSync(demoPool, { recursive: true, force: true });
+  fs.mkdirSync(demoPool, { recursive: true });
+  for (const n of names) {
+    fs.cpSync(path.join(REPO, 'plugins', n), path.join(demoPool, n), { recursive: true });
+  }
+  require('../src/main/index.js')._test.getRegistry().reload();
+}
+
+/** 跑一段需要一个特定插件集合的代码，跑完恢复成两个都装。 */
+async function withPool(names, fn) {
+  setPool(names);
+  try {
+    return await fn();
+  } finally {
+    setPool(['code-server', 'sshd']);
+  }
+}
+
+// 全套件的缺省：两个插件都装着。单个用例要别的组合就用 withPool。
+fs.mkdirSync(demoPool, { recursive: true });
+for (const n of ['code-server', 'sshd']) {
+  fs.cpSync(path.join(REPO, 'plugins', n), path.join(demoPool, n), { recursive: true });
+}
+
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
@@ -608,15 +651,24 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
 
 test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cookie」的陷阱', async (t) => {
   t.after(() => { Module._load = origLoad; });
-  const { performLogin } = require('../src/main/index.js');
+  const idx = require('../src/main/index.js');
+  const { webLogin } = idx;
 
-  // 造一个「状态码 200 但 jar 里没有 cookie」的 session，模拟真实 code-server
-  // 对口令错误的响应。任何靠状态码判断的写法都会在这里报成功。
+  // ★ 契约现在由**插件**给，不由基座写死。这份契约直接从装着的那个插件清单里取
+  //   —— 测试因此钉住的是"真插件声明的值"，而不是测试里另抄一份（抄的那份迟早
+  //   会与清单分叉，而分叉的表现是"登录莫名其妙失败"）。
+  const cs = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  assert.ok(cs, '这个用例要先装上 code-server 插件（见文件头的池设置）');
+  const contract = cs.contributes.login;
+  assert.ok(contract, 'code-server 的清单里必须有 contributes.login');
+
+  // 造一个「状态码 200 但 jar 里没有 cookie」的 session，模拟真实服务对口令错误的
+  // 响应。任何靠状态码判断的写法都会在这里报成功。
   const ses = {
     fetch: async () => ({ status: 200 }),
     cookies: { get: async () => [] },
   };
-  const res = await performLogin(ses, 'http://127.0.0.1:1', 'wrong-password');
+  const res = await webLogin(ses, 'http://127.0.0.1:1', 'wrong-password', contract);
   assert.equal(res.ok, false, '没有 cookie 就是没登录成功，不管状态码是多少');
   assert.equal(res.reason, 'no_cookie');
   assert.equal(res.status, 200);
@@ -626,7 +678,23 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
     fetch: async () => ({ status: 200 }),
     cookies: { get: async () => [{ name: 'code-server-session', value: 'x' }] },
   };
-  assert.equal((await performLogin(ses2, 'http://127.0.0.1:1', 'pw')).ok, true);
+  assert.equal((await webLogin(ses2, 'http://127.0.0.1:1', 'pw', contract)).ok, true);
+
+  // ★ 契约换一个服务就整套换掉 —— 字段名与 cookie 名都来自它，基座一个字不知道。
+  const other = { path: '/auth', field: 'token', cookie: 'jupyter-session' };
+  const ses3 = {
+    fetch: async (url, opts) => {
+      assert.match(url, /\/auth$/, 'POST 的路径必须来自契约');
+      assert.match(String(opts.body), /^token=/, '表单字段名必须来自契约');
+      return { status: 302 };
+    },
+    cookies: { get: async ({ name }) => (name === 'jupyter-session' ? [{ name, value: 'x' }] : []) },
+  };
+  assert.equal((await webLogin(ses3, 'http://127.0.0.1:1', 'pw', other)).ok, true,
+    '换一份契约就该按那份契约登录 —— 基座里没有"哪个服务"这个概念');
+
+  // 没有契约时明确失败，而不是猜一个默认端点
+  assert.equal((await webLogin(ses3, 'http://127.0.0.1:1', 'pw', null)).reason, 'no_contract');
 });
 
 // ── 默认资源：服务端通报，客户端只读地用 ────────────────────────────────────
@@ -756,19 +824,35 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
   const u = require('../src/main/plugins/ulid.js');
-  const reg = new Registry();
+  // ★ 用**真的池**（装着仓库里那两个插件），不是 `new Registry()` —— 后者现在
+  //   是"一个插件都没有"，而这一条测的是解析语义，得有东西可解析。
+  const reg = new Registry([{ dir: demoPool, source: 'pool' }]);
   const cs = reg.list().find((p) => p.name === 'code-server');
+  assert.ok(cs, '前置条件：池里有 code-server');
   const ref = `${cs.id}@${cs.version}`;
 
   assert.equal(reg.resolve(cs.id, ref).plugin.name, 'code-server', '解析键查得到就是它');
 
-  // ★ `service_plugin` 字段**不存在**（部署的守护进程还是旧版本）：那时候集群上
-  //   只可能有**内建**插件的会话，按短名找那个内建的，与升级前一致。不这样兜的话，
-  //   升级客户端会让所有已有会话都变成「服务类型未知」—— 用户眼前的功能凭空消失。
+  // ★ `service_plugin` 字段**不存在**（部署的守护进程还是旧版本，那时还没有
+  //   "插件"这一层，作业模板只会起一种服务）：按**短名**找。
+  //
+  //   早先这里还限定"必须是内建的"，理由是"老守护进程只可能产生内建插件的会话"。
+  //   基座不再自带插件之后那句前提没有了，而按短名在池里找是**有歧义**的 ——
+  //   判据因此换成**"是不是唯一"**。见下面那条。
   assert.equal(reg.resolve('code-server', undefined).plugin.name, 'code-server',
-    '老守护进程没有解析键时，按短名认内建的那个');
+    '老守护进程没有解析键时，按短名找 —— 唯一命中才算');
   assert.equal(reg.resolve(undefined, undefined).plugin.name, 'code-server',
     '连服务种类都没有时兜到标了 legacyDefault 的那个');
+  // ★ **命中多个就不猜。** 池是全局的，两个站点可以各有一个叫同一个名字的插件，
+  //   而它们是两个不同的东西。挑一个的后果是拿另一个插件的代码去对接这个作业。
+  const tmpSame = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-same-'));
+  writePlugin(tmpSame, 'x1', { name: 'twins', displayName: '孪生甲' }, 'module.exports = {};\n');
+  writePlugin(tmpSame, 'x2', { name: 'twins', displayName: '孪生乙' }, 'module.exports = {};\n');
+  const regTwin = new Registry([{ dir: tmpSame, source: 'pool' }]);
+  const twin = regTwin.resolve('twins', undefined);
+  assert.equal(twin.plugin, null,
+    '★ 两个同名的插件在池里时，短名**不足以定位** —— 绝不挑一个');
+  assert.match(twin.why || '', /2/, `要说清有几个同名的：${twin.why}`);
   // ★ `service_kind` 是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
   //   这时**绝不能猜** —— 猜 code-server 会拿口令去 POST 一个 SSH 端口，
   //   猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
@@ -813,11 +897,17 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
 test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry, bucketOf } = require('../src/main/plugins/index.js');
-  const reg = new Registry();
+  const reg = new Registry([{ dir: demoPool, source: 'pool' }]);
   const cs = reg.list().find((p) => p.name === 'code-server');
   const ss = reg.list().find((p) => p.name === 'sshd');
+  assert.ok(cs && ss, '前置条件：池里两个插件都在');
   const b1 = bucketOf(cs);
   const b2 = bucketOf(ss);
+
+  // ★ `bucketOf(null)` 不能抛 —— 今天到不了（ctx 只在插件非空时递给插件），
+  //   但那是框架里**最容易漏写一个守卫**的位置，而踩上去的报错会是一个
+  //   `TypeError`，读不出任何线索。
+  assert.doesNotThrow(() => bucketOf(null), 'bucketOf 必须能接住 null');
 
   // 状态变化很频繁（心跳、隧道重建、每次 status 回来都会走到渲染），而插件的
   // attach() 多半在写文件或弹通知 —— 不去重用户每 45 秒收到一条一模一样的通知。
@@ -867,7 +957,7 @@ function mintId() {
 function sshdId() {
   const idx = require('../src/main/index.js');
   const p = idx._test.getRegistry().list().find((x) => x.name === 'sshd');
-  assert.ok(p, '内建的 sshd 插件必须在');
+  assert.ok(p, '这个用例要先装上 sshd 插件（见文件头的池设置）');
   return p.id;
 }
 
@@ -1022,6 +1112,138 @@ test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被�
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+// ── ★ 池是安装点：装得进、卸得掉、两者都不许绕过撞车规则 ────────────────────
+
+test('★ 安装器：装进池、幂等、以及**绝不覆盖**内容不同的同一版', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { installFrom, uninstall } = require('../src/main/plugins/install.js');
+  const { Registry } = require('../src/main/plugins/index.js');
+  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-inst-'));
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src-'));
+
+  const id = mintId();
+  writePlugin(src, 'thing', { id, name: 'thing', displayName: '东西' }, 'module.exports = {};\n');
+  const srcDir = path.join(src, 'thing');      // 装的是**插件目录**，不是装着它的那个
+
+  const a = installFrom(pool, srcDir);
+  assert.equal(a.ok, true, JSON.stringify(a));
+  assert.equal(a.already, false);
+  // 落在 `<池>/<id>/<版本>/` —— 两层的布局让同一个插件的多个版本并存。
+  assert.equal(a.dest, path.join(pool, id, '1.0.0'));
+
+  // 再装一次：内容一样就是同一个构件，幂等，不报错也不改动
+  const b = installFrom(pool, srcDir);
+  assert.equal(b.ok, true);
+  assert.equal(b.already, true, '同样内容的第二次安装应当是幂等的');
+
+  // ★ 同一 `(id, 版本)` 而**内容不同** —— 这不是"更新"，是两个东西在抢同一个
+  //   身份。安装器绝不能变成绕过那条规则的覆写后门：那会让某个会话静默地拿到
+  //   另一个插件的代码。要更新就升版本号。
+  const evil = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-evil-'));
+  writePlugin(evil, 'thing', { id, name: 'thing', displayName: '冒牌' }, 'module.exports = {};\n');
+  const c = installFrom(pool, path.join(evil, 'thing'));
+  assert.equal(c.ok, false, '★ 同一 (id, 版本) 而内容不同必须**拒绝安装**，不是覆盖');
+  assert.match(c.error || '', /版本/, `要说清该怎么办（升版本号）：${c.error}`);
+  // 原样的那一份必须**一个字都没被动过**
+  const reg = new Registry([{ dir: pool, source: 'pool' }]);
+  assert.equal(reg.get(id, '1.0.0').displayName, '东西', '被拒绝的安装不许留下任何痕迹');
+
+  // 装一个坏目录：明确失败，不留下半份插件
+  const junk = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-junk-'));
+  fs.writeFileSync(path.join(junk, 'plugin.json'), '{ not json');
+  const d = installFrom(pool, junk);
+  assert.equal(d.ok, false);
+  assert.match(d.error || '', /plugin\.json|JSON/, `要说清坏在哪：${d.error}`);
+
+  // ★ **删之前先读一遍**：这个函数会 `rm -rf` 一个由 id/版本 拼出来的路径。
+  //   先造一个"目录名与里面那份清单对不上"的现场（`<id>/2.0.0/` 里的清单自报
+  //   1.0.0）—— 这时绝不能动手，因为路径是按调用方说的拼的，而内容不是它要的。
+  //   （这一步必须在真卸载**之前**做 —— 卸载会把 a.dest 删掉，拷不出来了。）
+  const mislabeled = path.join(pool, id, '2.0.0');
+  fs.cpSync(a.dest, mislabeled, { recursive: true });
+  const u3 = uninstall(pool, id, '2.0.0');
+  assert.equal(u3.ok, false, '★ 目录里的插件自报的身份与要卸的不符时，不许删它');
+  assert.match(u3.error || '', /2\.0\.0/, `要说清看到的是什么：${u3.error}`);
+  assert.equal(fs.existsSync(mislabeled), true, '它必须还在');
+
+  // 卸载：删之前先确认那个目录真的是它
+  const u = uninstall(pool, id, '1.0.0');
+  assert.equal(u.ok, true, JSON.stringify(u));
+  assert.equal(fs.existsSync(a.dest), false, '卸掉之后目录要真的没了');
+  const u2 = uninstall(pool, id, '1.0.0');
+  assert.equal(u2.ok, false, '再卸一次要明确失败，而不是静静地成功');
+  // 还剩一个版本时，`<id>/` 那一层目录**不能**被收掉
+  assert.equal(fs.existsSync(path.join(pool, id)), true,
+    '同一个 id 还有别的版本在时，不能把那一层目录删掉');
+
+  for (const d2 of [pool, src, evil, junk]) fs.rmSync(d2, { recursive: true, force: true });
+});
+
+test('★ 池扫两层：用户拷一个目录进去能用，同一个插件的多版本也能并存', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry } = require('../src/main/plugins/index.js');
+  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-two-'));
+
+  // 一层：用户手工 `cp -r 插件目录 池/` 得到的形状
+  const flat = mintId();
+  writePlugin(pool, 'readable-name', { id: flat, name: 'flat', displayName: '一层' });
+
+  // 两层：安装器写出来的形状，同一 id 两个版本并存
+  //
+  // ★ `version` 必须**显式写**（writePlugin 的缺省是 1.0.0）。少了它，两个目录
+  //   里的清单就是"同一个 (id, 版本) 而内容不同"—— 撞车规则会正确地**两个都不
+  //   加载**，而这条用例就会红在一个与它要测的东西无关的地方。（第一次就是这么
+  //   红的，而失败信息长得像"两层没扫到"。）
+  const deep = mintId();
+  writePlugin(path.join(pool, deep), '1.0.0',
+    { id: deep, name: 'deep', version: '1.0.0', displayName: '两层旧' });
+  writePlugin(path.join(pool, deep), '2.0.0',
+    { id: deep, name: 'deep', version: '2.0.0', displayName: '两层新' });
+
+  const reg = new Registry([{ dir: pool, source: 'pool' }]);
+  assert.deepEqual(reg.list().map((p) => `${p.name}@${p.version}`).sort(),
+    ['deep@1.0.0', 'deep@2.0.0', 'flat@1.0.0'],
+    '两种布局都要扫到 —— 目录名不参与判定，深浅也不参与');
+  assert.equal(reg.get(deep, '1.0.0').displayName, '两层旧', '两个版本各是各的');
+
+  fs.rmSync(pool, { recursive: true, force: true });
+});
+
+test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装包坏了"', async (t) => {
+  t.after(async () => {
+    Module._load = origLoad;
+    setPool(['code-server', 'sshd']);
+  });
+  await withPool([], async () => {
+    const r = await invoke('app:partitions');
+    const pv = r.plugins;
+
+    assert.deepEqual(pv.plugins, [], '一个按钮都不该画出来');
+    // ★ 这两条是承重的：界面靠它们把「你还没装插件」与「站点升级了而本机是旧的」
+    //   分开 —— 而这两种情况在 `missing` 里长得一模一样。没有它们，零插件时
+    //   界面对站点上每一个插件都会喊"升级客户端"。
+    assert.equal(pv.installedCount, 0, '要能分辨"池是空的"');
+    assert.ok(pv.poolDir && pv.poolDir.length > 0, '要给出池在哪 —— 那是"我该往哪放"的答案');
+    assert.ok(pv.errors.length === 0, '池空不是错误');
+
+    // ★ 演示站点**照实报告池里有什么**（见 backend-fake 的 sitePlugins），所以
+    //   池空时站点也就什么都没报 —— `missing` 因此是空的，这是诚实的。
+    //   "站点有而本机没有"那条路要靠 debugAddSitePlugin 显式造出来，见下面那段：
+    //   那才是界面上"你还没装"与"版本对不上"要分岔的地方。
+    assert.deepEqual(pv.missing, [], '演示站点报的就是池里的东西，池空则它也没得报');
+
+    // ★ 一个插件都没有时，提交必须被**明确拦住**并给出路，而不是起一个
+    //   看起来起来了但连不上的作业，也不是一句"本版支持：（一个都没有）"。
+    const started = await invoke('app:start', {}, 'code-server');
+    assert.equal(started.ok, false, '没有插件就起不了会话 —— 必须在提交前拦住');
+    const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
+      .map((n) => n.text).join('\n');
+    assert.match(notices, /还没有安装任何插件/, `要说清是"还没装"：${notices}`);
+    assert.match(notices, new RegExp(pv.poolDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      '要告诉用户往哪放');
+  });
+});
+
 // ── ★ 插件增减不许把客户端带崩（这次改动的验收标准）────────────────────────
 
 test('★ 站点装了客户端不认识的插件：不崩，而且说得出该怎么办', async (t) => {
@@ -1057,7 +1279,7 @@ test('★ 站点关掉一个插件：客户端看得见它、但起不了 ——
   let sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
   assert.equal(sshd.runnable, true, '站点开着、本机也没关 → 能起');
 
-  await invoke('app:debug', 'site-plugin-off');
+  await invoke('app:debug', 'site-plugin-off', 'sshd');
   try {
     r = await invoke('app:partitions');
     sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
@@ -1102,7 +1324,7 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
 
 test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const sshc = require('../src/main/sshconfig.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-'));
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
@@ -1148,18 +1370,18 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
 
 test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙、known_hosts）', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const sshc = require('../src/main/sshconfig.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg2-'));
   const p = sshc.pathsFor(home);
 
   // 一次性钥匙：只生成一次，之后必须复用（换了钥匙 = 「刚才还能连，现在认证失败」）
-  const k1 = sshc.ensureRelayKey(home);
+  const k1 = sshc.ensureRelayKey(home, require('../src/main/keys.js'));
   assert.equal(k1.ok, true, k1.detail || '');
   assert.equal(k1.created, true);
   assert.match(k1.publicKeyLine, /^ssh-ed25519 [A-Za-z0-9+/]{68} slurmate-\d{8}-\d{4}$/,
     `公钥形状要能被控制节点的规则接受：${k1.publicKeyLine}`);
-  const k2 = sshc.ensureRelayKey(home);
+  const k2 = sshc.ensureRelayKey(home, require('../src/main/keys.js'));
   assert.equal(k2.created, false);
   assert.equal(k2.publicKeyLine, k1.publicKeyLine, '第二次必须复用同一把');
 
@@ -1206,7 +1428,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
 
 test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄坏', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const sshc = require('../src/main/sshconfig.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // `~/.ssh/config -> ~/dotfiles/config` 是常见做法。而 rename(2) **不跟随目标上的
   // 符号链接** —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
@@ -1233,7 +1455,7 @@ test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄�
 
 test('★ 读不出用户的 ssh 配置时，连碰都不能碰它', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const sshc = require('../src/main/sshconfig.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // root 能读任何文件，这条造不出来 —— 明说跳过，而不是让它静默地「全绿」。
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
@@ -1370,7 +1592,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
 test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
-  const sshc = require('../src/main/sshconfig.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // 等上一个用例的会话真的被释放。演示后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
   // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是**上一个用例**的会话，
