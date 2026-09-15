@@ -46,7 +46,7 @@ class FakeWebContents {
 class FakeWebContentsView {
   constructor(opts = {}) {
     this.webContents = new FakeWebContents();
-    // code-server 视图必须跑在自己的 partition 里（persist:slot-N）。
+    // code-server 视图必须跑在自己的 partition 里（persist:layout-<布局组 id>）。
     // 登录要在这个 partition 的 cookie jar 里查 —— 所以桩也得把 session 接上。
     this.webContents.session =
       electronStub.session.fromPartition(opts.webPreferences && opts.webPreferences.partition);
@@ -225,7 +225,11 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 以及用户显式发起的 app:regenerateKey —— 「保存方式」那个
                     // 下拉框已经删掉，私钥永远加密保存。
                     'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey', 'app:newKey',
-                    'app:trustHostKey', 'app:forgetHostKey']) {
+                    'app:trustHostKey', 'app:forgetHostKey',
+                    // 布局组：一条连接指到一个组（多对一），组被引用计数回收。
+                    // 切走一个「独占」的组会让它被删掉，所以主进程会先回
+                    // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
+                    'app:setConnectionLayout', 'app:renameLayout']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
 
@@ -455,7 +459,10 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   // 视图必须加载**字面 127.0.0.1** 的地址 —— 用 localhost 会是另一个 origin，
   // localStorage 不共享，而且可能解析成 ::1。
   assert.match(view.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
-  assert.equal(view._opts.webPreferences.partition, 'persist:slot-1');
+  // ★ partition 按**布局组 id**命名，不按端口 —— 按端口命名会让「A 组被回收后端口
+  //   被新组复用」时，新组的「空白布局」继承 A 的 localStorage 与登录 cookie。
+  const partition = view._opts.webPreferences.partition;
+  assert.match(partition, /^persist:layout-l[0-9a-f]{12}$/, `实际：${partition}`);
   // 演示模式才注入 preload；真实模式注入会污染 IDE
   assert.match(String(view._opts.webPreferences.preload || ''), /demo\.js$/);
   assert.equal(view._opts.webPreferences.backgroundThrottling, false,
@@ -463,7 +470,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
 
   // ★ 登录成功的判据是 **cookie jar 里有没有 cookie**，不是 HTTP 状态码。
   //   注意要**等** —— 视图的 loadURL 在自动登录之前就返回了，立刻断言会撞上竞态。
-  const jar = partitionJars['persist:slot-1'];
+  const jar = partitionJars[partition];
   const ok = await (async () => {
     const deadline = Date.now() + 8000;
     for (;;) {
@@ -497,6 +504,93 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   assert.equal((await invoke('app:connect', { connectionId: demoConn.connection.id })).ok, true,
     '断开之后必须能重新接上，否则「断开」就成了单向门');
   await invoke('app:deleteConnection', demoConn.connection.id);
+});
+
+/** 等一个新的 code-server 视图出现。loadURL 在自动登录之前就返回了，所以只能轮询。 */
+async function waitForView(fromIndex, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = calls.views[fromIndex];
+    if (v && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(v.webContents._url)) return v;
+    if (Date.now() > deadline) {
+      assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(await invoke('app:state'))}`);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+test('★ 运行中切换布局组：只换本地端口与存储分区，作业一动不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // 这个文件里所有用例共用同一个 Electron 实例，状态是累加的 ——
+  // 所以自己保证「有一条连接、而且是活跃的」。
+  let boot = await invoke('app:bootstrap');
+  if (!boot.connections.length) {
+    await invoke('app:saveConnection',
+      { user: 'demo', host: '198.51.100.10', port: 10100, label: '布局' });
+    boot = await invoke('app:bootstrap');
+  }
+  const conn = boot.connections.find((c) => c.id === boot.activeConnectionId)
+            || boot.connections[0];
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
+    '演示后端应当连得上');
+
+  const idx = require('../src/main/index.js');
+  // 上一个用例「断开」时演示后端被 close()，而它那个 1.6 秒的释放定时器在 close() 里
+  // 被清掉了 —— 于是演示会话卡在 releasing，_submit 会以 quota_active 拒绝。
+  // 真集群上守护进程的 phase_release 会自己收掉它（最多一个 tick），这里手动收。
+  idx._test.getBackend().debugReap();
+
+  const before = calls.views.length;
+  const started = await invoke('app:start', {});
+  assert.equal(started.ok, true, `开会话应当成功：${JSON.stringify(started)}`);
+  const view1 = await waitForView(before);
+
+  const ctl = idx._test.getController();
+  const sessionId = ctl.sessionId;
+  const jobId = ctl.snapshot().jobId;
+  const oldGroupId = ctl.snapshot().layoutId;
+  const oldPartition = view1._opts.webPreferences.partition;
+  const oldWc = view1.webContents;
+
+  // ① 切走一个「独占」的组（它只被这一条连接用）→ 主进程必须先回 would_discard，
+  //    并且**配置一个字都不动**。判定权在主进程：界面手里那份 refCount 随时可能
+  //    已经陈旧（另一条连接刚被删），它只负责弹确认。
+  const ask = await invoke('app:setConnectionLayout', { connectionId: conn.id, layoutId: null });
+  assert.equal(ask.ok, false);
+  assert.equal(ask.code, 'would_discard', '切走独占的组必须先要一次确认');
+  assert.equal(ctl.snapshot().layoutId, oldGroupId, '没确认之前什么都不该发生');
+  assert.equal(calls.views.length, before + 1, '没确认之前不该重建视图');
+
+  // ② 确认之后再切。这一段里数一数发了多少次 RPC —— 这是「作业没动」的可证明形式。
+  const backend = idx._test.getBackend();
+  const realRpc = backend.rpc.bind(backend);
+  let rpcCount = 0;
+  backend.rpc = (req) => { rpcCount += 1; return realRpc(req); };
+  const r = await invoke('app:setConnectionLayout',
+    { connectionId: conn.id, layoutId: null, confirmDiscard: true });
+  backend.rpc = realRpc;
+
+  assert.equal(r.ok, true, JSON.stringify(r));
+  // ★ 全程不碰 submit / heartbeat / status / goodbye —— Slurm 作业、控制节点那边的
+  //   session、sessionId、tunnel_target 都不变，变的只有浏览器这一侧。
+  assert.equal(rpcCount, 0, '切换布局组不该向守护进程说任何话');
+
+  // ③ partition 是**构造期属性**，所以换组必须销毁重建 ——
+  //   只 loadURL 是没用的，页面会继续跑在旧的存储分区里而看不出来。
+  assert.equal(calls.views.length, before + 2, '换 partition 必须重建视图');
+  const view2 = calls.views[calls.views.length - 1];
+  assert.match(view2._opts.webPreferences.partition, /^persist:layout-l[0-9a-f]{12}$/);
+  assert.notEqual(view2._opts.webPreferences.partition, oldPartition);
+  assert.equal(oldWc.isDestroyed(), true, '旧视图必须真的被销毁，不能只是换下去');
+
+  // ④ 会话本身一动不动
+  assert.equal(ctl.sessionId, sessionId, 'sessionId 不能变');
+  assert.equal(ctl.snapshot().jobId, jobId, '作业号不能变');
+  assert.equal(ctl.state, 'running');
+  assert.notEqual(ctl.snapshot().layoutId, oldGroupId, '控制器要跟着换组');
+
+  await invoke('app:disconnect');
 });
 
 test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cookie」的陷阱', async (t) => {

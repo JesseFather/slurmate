@@ -40,6 +40,10 @@ let boot = null;
 let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
+let lastSnap = null;         // 最近一次会话快照，供状态条里的布局选择器读当前布局
+
+/** 布局下拉里「新建一个空白布局」那一项的值。不是布局 id，别混。 */
+const NEW_LAYOUT = '__new__';
 
 /**
  * 「新建／编辑」表单的状态。
@@ -87,6 +91,7 @@ function notice(kind, text) {
 
 // ── 状态渲染 ────────────────────────────────────────────────────────────────
 function renderSnapshot(s) {
+  lastSnap = s || null;
   const bar = $('statusbar');
   const st = s ? s.state : 'idle';
   bar.className = 's-' + st;
@@ -117,6 +122,10 @@ function renderSnapshot(s) {
   $('sb-reload').classList.toggle('hidden', !running);
   $('sb-end').classList.toggle('hidden', !running);
   $('sb-demo').classList.toggle('hidden', !(s && s.demo));
+  // 布局选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
+  // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」布局，没有连接就没有对象。
+  $('sb-layout-wrap').classList.toggle(
+    'hidden', !(running && boot && boot.activeConnectionId));
 
   // 形态切换
   const idle = !s || st === 'idle';
@@ -129,6 +138,11 @@ function renderSnapshot(s) {
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
+
+  renderLayoutSelectors();
+  // 上面刚把 sec-connect 显示/隐藏过，映射图的几何位置到这一帧结束后才是最终的。
+  // rAF 里重画一次，比在这里硬算可靠（字体、滚动条、换行都还没定下来）。
+  requestAnimationFrame(drawLayoutLines);
 }
 
 /**
@@ -311,6 +325,8 @@ function renderConnections(list) {
   const box = $('conn-list');
   box.textContent = '';
   $('conn-empty').classList.toggle('hidden', list.length > 0);
+  // 映射图与列表同生共死：没有连接就没有可映射的东西
+  $('sec-layouts').classList.toggle('hidden', list.length === 0);
 
   for (const c of list) {
     const li = document.createElement('li');
@@ -341,6 +357,21 @@ function renderConnections(list) {
       m.textContent = `不可达：${probe.error || '失败'}`;
       m.classList.add('bad');
     }
+
+    // 布局组下拉。文案必须说清「切走会发生什么」—— 切走一个只被自己用着的布局
+    // 就等于把它删掉（连同里面的标签页和登录状态），这是不可逆的，
+    // 只写一个布局名了事会让用户在毫无预告的情况下丢东西。
+    const lay = document.createElement('select');
+    lay.className = 'lay-pick';
+    lay.title = '这条连接用哪个布局（编辑器窗口布局、打开的标签页、登录状态）';
+    fillLayoutOptions(lay, c.layoutId, c.id);
+    lay.onchange = async () => {
+      const v = lay.value;
+      const r = await applyLayout(c.id, v === NEW_LAYOUT ? null : v);
+      // 失败必须把下拉拨回去 —— 停在一个并未生效的选择上，
+      // 界面就在显示一件不成立的事。
+      if (!r.ok) lay.value = c.layoutId;
+    };
 
     // 主动断开。断的只是客户端这一跳 —— 作业还在集群上跑着，
     // 再点「连接」会重新接上它。会话进行中不给断（主进程也会拒）。
@@ -379,9 +410,282 @@ function renderConnections(list) {
         : '已删除该连接。');
     };
 
-    li.append(t, m, main, edit, del);
+    li.append(t, m, lay, main, edit, del);
     box.append(li);
   }
+
+  renderLayoutMap();
+}
+
+// ── 布局组 ──────────────────────────────────────────────────────────────────
+/**
+ * 一条连接只用一个布局，一个布局可以被多条连接共用；没有任何连接在用的布局
+ * 会被主进程回收。
+ *
+ * ★ 这一段**不做任何推导**。`boot.layouts` 是主进程用 layoutPlan() 算好的
+ *   （每组带 members / refCount / soleOwnerId），界面只负责渲染。
+ *   理由不是懒：界面手里那份随时可能已经陈旧（另一条连接刚被删），而
+ *   「切走会不会把这个布局删掉」是一个**不可逆**的判断，必须由主进程说了算。
+ */
+
+function layoutById(id) {
+  return (boot.layouts || []).find((l) => l.id === id) || null;
+}
+
+/** 连接的名字。布局的说明文字里要引用成员，用同一条规则取名才不会两处对不上。 */
+function connName(id) {
+  const c = (boot.connections || []).find((x) => x.id === id);
+  return c ? (c.label || `${c.user}@${c.host}`) : '另一条连接';
+}
+
+/** 一个布局组后面跟的那句说明。 */
+function layoutNote(l, connId) {
+  if (!l) return '';
+  if (l.refCount === 0) return '（空）';
+  if (l.refCount === 1) {
+    // 自己独占：要把「切走就会被丢弃」说出来，这是用户按下去之前唯一的机会
+    return l.soleOwnerId === connId
+      ? '（只有这一条连接在用 —— 切走就会被丢弃）'
+      : `（${connName(l.soleOwnerId)} 独占）`;
+  }
+  return `（${l.refCount} 条连接共用）`;
+}
+
+/** 当前活跃连接的布局组 id。 */
+function activeConnLayoutId() {
+  const id = boot && boot.activeConnectionId;
+  const c = (boot && boot.connections || []).find((x) => x.id === id);
+  return c ? c.layoutId : null;
+}
+
+/**
+ * 把一个布局下拉填满。每条连接行一个、状态条一个，**共用同一份 boot.layouts**。
+ *
+ * `keep` 是应当选中的那个组。**找不到就不选**（宁可空着）—— 让下拉停在一个
+ * 并不生效的值上，用户会以为自己已经切过去了。
+ *
+ * `sig` 是给状态条用的：它在每次快照推送时都会被重填，而重建 <select> 会把用户
+ * 正在展开的列表收起来。内容没变就不动 DOM。
+ */
+function fillLayoutOptions(sel, keep, connId) {
+  const list = boot.layouts || [];
+  const sig = connId + '|' + JSON.stringify(
+    list.map((l) => [l.id, l.name, l.refCount, l.soleOwnerId]));
+  if (sel.dataset.sig !== sig) {
+    sel.textContent = '';
+    for (const l of list) {
+      const o = document.createElement('option');
+      o.value = l.id;
+      o.textContent = `${l.name}${layoutNote(l, connId)}`;
+      sel.append(o);
+    }
+    const nu = document.createElement('option');
+    nu.value = NEW_LAYOUT;
+    nu.textContent = '＋ 新建空白布局…';
+    sel.append(nu);
+    sel.dataset.sig = sig;
+  }
+  sel.value = list.some((l) => l.id === keep) ? keep : '';
+}
+
+/** 状态条里那个选择器。它改的是**当前活跃连接**的布局组。 */
+function renderLayoutSelectors() {
+  const sel = $('sb-layout');
+  if (!sel) return;
+  // 运行期间以快照为准（那才是会话真正跑着的布局）；没有会话时用连接自己的标记。
+  const cur = (lastSnap && lastSnap.layoutId) || activeConnLayoutId();
+  fillLayoutOptions(sel, cur, boot && boot.activeConnectionId);
+}
+
+/**
+ * 切走一个独占布局之前的二次确认。
+ *
+ * 文案里必须出现「未保存的编辑内容会丢失」—— 这比「布局变了」严重得多：
+ * 换布局 = 换 origin，浏览器是在**重新加载**那个页面，终端里没保存的东西就没了。
+ * 用户有权在按下去之前知道这一条。
+ */
+function confirmDiscard(name) {
+  const live = lastSnap && lastSnap.state
+    && lastSnap.state !== 'idle' && lastSnap.state !== 'ended';
+  return window.confirm(
+    `「${name}」现在只有这一条连接在用，切走之后它会被删除。\n\n`
+    + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，而且找不回来。\n'
+    + (live ? '\n★ 当前页面会重新加载到新布局，未保存的编辑内容会丢失。\n' : '')
+    + '\n确定要切换吗？');
+}
+
+/**
+ * 把一条连接切到另一个布局组。**三条入口共用这一条**（连接行下拉、状态条、
+ * 映射图上的改名按钮改的是名字，不走这里）。
+ *
+ * @param {string} connectionId
+ * @param {string|null} layoutId  null = 新建一个空白布局并落进去
+ * @returns {Promise<{ok:boolean}>} 失败时调用方应把下拉拨回原值
+ *
+ * ★ 「切走会不会把旧布局删掉」的判定权在**主进程**，不在这里。先照常提交，
+ *   主进程若回 would_discard，我们拿它的原话去问用户，确认了再带 confirmDiscard
+ *   重来一次。这样无论界面手里那份 refCount 有多陈旧，问出来的问题都是真的。
+ */
+async function applyLayout(connectionId, layoutId) {
+  let r = await window.slurmate.setConnectionLayout({ connectionId, layoutId });
+
+  if (!r.ok && r.code === 'would_discard') {
+    if (!confirmDiscard(r.layoutName)) return { ok: false };
+    r = await window.slurmate.setConnectionLayout(
+      { connectionId, layoutId, confirmDiscard: true });
+  }
+  if (!r.ok) {
+    notice('error', r.error || '切换布局失败。');
+    return { ok: false };
+  }
+
+  // 会话活着时，这一句要说清「作业没动」—— 用户看到页面重新加载，
+  // 最容易的联想是「我的作业是不是被重启了」。它没有。
+  const wasRunning = lastSnap && lastSnap.state === 'running';
+  boot.layouts = r.layouts || boot.layouts;
+  boot.connections = r.connections || boot.connections;
+  renderConnections(boot.connections);
+  notice('info', wasRunning
+    ? '已切换布局。页面会重新加载一次；计算节点上的作业没有受影响，仍然在跑。'
+    : '已切换布局。');
+  // 拉一次权威快照：controller 的 layoutId 刚变，界面手里那份还是旧的，
+  // 而状态条正是拿它显示当前布局的 —— 不拉就会继续显示上一个。
+  const s = await window.slurmate.state();
+  if (s && s.state) renderSnapshot(s);
+  return { ok: true };
+}
+
+// ── 映射图 ──────────────────────────────────────────────────────────────────
+// 画线时要拿节点的几何位置，所以渲染出来的节点按 id 存着。
+const mapNodes = { conn: new Map(), layout: new Map() };
+
+function renderLayoutMap() {
+  const connsCol = $('lmap-conns');
+  const laysCol = $('lmap-layouts');
+  if (!connsCol || !laysCol) return;
+  connsCol.textContent = '';
+  laysCol.textContent = '';
+  $('lmap-lines').textContent = '';
+  mapNodes.conn.clear();
+  mapNodes.layout.clear();
+
+  for (const c of boot.connections || []) {
+    const n = document.createElement('div');
+    n.className = 'lnode' + (c.id === boot.activeConnectionId ? ' cur' : '');
+    n.title = `${c.user}@${c.host}:${c.port}`;
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = c.label || `${c.user}@${c.host}`;
+    n.append(nm);
+    connsCol.append(n);
+    mapNodes.conn.set(c.id, n);
+  }
+
+  const runtime = lastSnap && lastSnap.layoutId;
+  for (const l of boot.layouts || []) {
+    const n = document.createElement('div');
+    n.className = 'lnode lay' + (l.id === runtime ? ' cur' : '');
+
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = l.name;
+
+    // 引用计数直接摆出来 —— 「这个布局还有谁在用」正是这张图存在的理由
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = l.refCount === 0 ? '没人用'
+      : l.refCount === 1 ? '1 条连接' : `${l.refCount} 条连接`;
+
+    const rn = document.createElement('button');
+    rn.className = 'ghost tiny';
+    rn.textContent = '改名';
+    rn.onclick = () => startRename(l, nm);
+
+    n.append(nm, meta, rn);
+    laysCol.append(n);
+    mapNodes.layout.set(l.id, n);
+  }
+
+  requestAnimationFrame(drawLayoutLines);
+}
+
+/**
+ * 画连线。
+ *
+ * ★ 用 SVG 的 <path d="…">：`d` 是**几何**属性，不在那条 CSP 的管辖范围内
+ *   （它禁的是 style="…" 内联样式）。线的粗细颜色走 app.css 的 .edge 类。
+ *   坐标全部由 getBoundingClientRect 现算 —— 所以任何一次布局变化之后都要重画。
+ */
+function drawLayoutLines() {
+  const box = $('layout-map');
+  const svg = $('lmap-lines');
+  if (!box || !svg) return;
+  if (box.classList.contains('hidden') || $('sec-layouts').classList.contains('hidden')) return;
+  svg.textContent = '';
+  const base = box.getBoundingClientRect();
+  if (!base.width || !base.height) return;      // 这一屏还没被布局出来
+  svg.setAttribute('viewBox', `0 0 ${base.width} ${base.height}`);
+  svg.setAttribute('width', String(base.width));
+  svg.setAttribute('height', String(base.height));
+
+  for (const c of boot.connections || []) {
+    const a = mapNodes.conn.get(c.id);
+    const b = mapNodes.layout.get(c.layoutId);
+    if (!a || !b) continue;                     // 只有一头在，宁可不画也不画半条
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    const x1 = ra.right - base.left;
+    const y1 = ra.top + ra.height / 2 - base.top;
+    const x2 = rb.left - base.left;
+    const y2 = rb.top + rb.height / 2 - base.top;
+    const dx = Math.max(16, (x2 - x1) / 2);     // 三次贝塞尔，看着像一根松垂的线
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d',
+      `M ${x1.toFixed(1)} ${y1.toFixed(1)} `
+      + `C ${(x1 + dx).toFixed(1)} ${y1.toFixed(1)}, `
+      + `${(x2 - dx).toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`);
+    // className 在 SVG 元素上是只读的，只能走 setAttribute
+    p.setAttribute('class', c.id === boot.activeConnectionId ? 'edge cur' : 'edge');
+    svg.append(p);
+  }
+}
+
+/**
+ * 就地改名。
+ *
+ * ★ 不用 window.prompt —— 它在 Electron 里**直接抛异常**
+ *   （`prompt() is and will not be supported`），而不是返回 null。
+ *   所以要自己在页面里摆一个 <input>。
+ */
+function startRename(l, nm) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename';
+  input.value = l.name;
+  input.maxLength = 40;
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;                 // 先置位：replaceWith 会触发 blur，不挡住会递归
+    input.replaceWith(nm);
+    if (!save) return;
+    const name = input.value.trim();
+    if (!name || name === l.name) return;
+    const r = await window.slurmate.renameLayout({ layoutId: l.id, name });
+    if (!r.ok) return notice('error', r.error || '改名失败。');
+    boot.layouts = r.layouts || boot.layouts;
+    renderConnections(boot.connections);   // 三处入口用的是同一份数据，一起重画
+  };
+
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+  nm.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 // ── 分区 ────────────────────────────────────────────────────────────────────
@@ -611,6 +915,18 @@ async function init() {
   $('sb-reload').onclick = () => window.slurmate.reload();
   $('btn-end').onclick = () => endSession();
   $('sb-end').onclick = () => endSession();
+
+  // 状态条里的布局选择器 —— 会话跑起来之后唯一够得着的入口。
+  // 它改的是当前活跃连接的布局组（会话正跑在它上面，所以会立刻换端口重连隧道，
+  // 而集群上的作业一动不动）。
+  $('sb-layout').onchange = async () => {
+    const v = $('sb-layout').value;
+    const r = await applyLayout(boot.activeConnectionId, v === NEW_LAYOUT ? null : v);
+    if (!r.ok) renderLayoutSelectors();     // 拨回真正的当前值
+  };
+
+  // 窗口大小变了，连线的坐标就全变了。rAF 里重画，等布局定下来。
+  window.addEventListener('resize', () => requestAnimationFrame(drawLayoutLines));
 
   for (const b of document.querySelectorAll('[data-debug]')) {
     b.onclick = async () => {

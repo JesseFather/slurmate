@@ -23,6 +23,15 @@
   <span class="sep" id="sb-sep1">|</span>
   <span id="sb-detail"></span>
   <span class="spacer"></span>
+  <!-- 布局选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
+       连接列表和映射图都够不着，这是运行期间唯一还能改布局的入口。
+       它改的是**当前活跃连接**的布局组（没有连接时整个藏起来 —— 它改的是
+       「当前连接的」布局，没有连接就没有对象，摆一个选了也没用的下拉是在骗人）。 -->
+  <span id="sb-layout-wrap" class="sb-pick hidden">
+    <span class="sep">|</span>
+    <span class="sb-lbl">布局</span>
+    <select id="sb-layout" class="sb-sel"></select>
+  </span>
   <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 code-server
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
   <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
@@ -58,6 +67,27 @@
         还没有保存任何登录节点。点右上角的「新建连接」填一个 ——
         只需要用户名、主机和端口。
       </p>
+
+      <!-- ── 连接 ↔ 布局 的映射图 ──
+           左列是连接，右列是布局，一条连线表示「这条连接用这个布局」。
+           一条连接的出边恒为 1（它只用一个布局），一个布局的入边不限
+           （可以被多条连接共用）—— 这件事看图比看下拉框直观。
+           连线用 SVG 的 <path d="…">：`d` 是**几何**属性，不在文件头那条 CSP
+           的管辖范围内（它禁的是 style="…"）。所以线的外观一律走 app.css 的
+           class，坐标由 panel.js 现算（见 drawLayoutLines）。 -->
+      <div id="sec-layouts" class="hidden">
+        <h3>连接与布局</h3>
+        <p class="sub">
+          一条连接只用一个布局，一个布局可以被多条连接共用。
+          <strong>没有任何连接在用的布局会被自动删掉</strong> ——
+          它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。
+        </p>
+        <div id="layout-map" class="lmap">
+          <svg id="lmap-lines" class="lmap-lines"></svg>
+          <div class="lmap-col" id="lmap-conns"></div>
+          <div class="lmap-col" id="lmap-layouts"></div>
+        </div>
+      </div>
     </section>
 
     <!-- ── 新建 / 编辑连接 ──

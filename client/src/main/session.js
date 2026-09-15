@@ -61,15 +61,22 @@ const HB_STALE_SLACK_MS = 90000;
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
-   *   backend, slot, onTunnelPort
+   *   backend, layoutId, onTunnelPort
+   *   getExcludedPorts {() => Set<number>}  「别的布局组占着的端口」，由 index.js
+   *                                        提供 —— 控制器不认识 config，所以注入。
    *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
+   *
+   * layoutId 是**布局组**的 id（见 config.js）：它决定本地监听端口、从而决定
+   * 浏览器 origin 与存储分区。控制器自己不解释它，只原样带给 onTunnelPort。
    */
-  constructor({ backend, slot, onTunnelPort, heartbeatMs, statusMs, queuedPollMs }) {
+  constructor({ backend, layoutId, onTunnelPort, getExcludedPorts,
+                heartbeatMs, statusMs, queuedPollMs }) {
     super();
     this.backend = backend;
-    this.slot = slot;
+    this.layoutId = layoutId;
     this.onTunnelPort = onTunnelPort || (() => {});
+    this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
     this.statusMs = statusMs || STATUS_MS;
     this.queuedPollMs = queuedPollMs || QUEUED_POLL_MS;
@@ -109,7 +116,7 @@ class SessionController extends EventEmitter {
     const s = this.session || {};
     return {
       state: this.state,
-      slot: this.slot,
+      layoutId: this.layoutId,
       sessionId: this.sessionId,
       jobId: s.job_id || null,
       // 本次实际落在哪个分区/节点 —— 因为默认是「从有权限的分区里随机挑」，
@@ -288,10 +295,11 @@ class SessionController extends EventEmitter {
       const { port, shifted } = await this.tunnel.start({
         preferredPort: preferredPort || 18080,
         target,
+        excludePorts: this.getExcludedPorts(),
       });
       this._tunnelPort = port;
       this._lastTarget = target;
-      this.onTunnelPort(this.slot, port);
+      this.onTunnelPort(this.layoutId, port);
       if (shifted) {
         // 换端口意味着 origin 变了，code-server 存在 localStorage 里的编辑器布局会重置。
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
@@ -306,6 +314,62 @@ class SessionController extends EventEmitter {
     this._startHeartbeat();
     this._startStatusPoll();
     return this.snapshot();
+  }
+
+  // ── 换布局组（运行中）────────────────────────────────────────────────────
+  /**
+   * 只把本地监听挪到另一个端口。**不碰会话、不碰心跳、不发任何 RPC。**
+   *
+   * 这就是「运行中切换布局组」的全部机制：Slurm 作业、控制节点那边的 session、
+   * sessionId、tunnel_target 全程不变 —— 变的只有浏览器这一侧的 origin 与存储分区。
+   * 所以它是可断言的：切换前后 sessionId/state 不变，且 RPC 调用数增量为 0。
+   *
+   * **失败必须回滚**：先 stop 再 start，中间失败时用**空排除集**把原来的端口绑回来
+   * （不能带原来的排除集 —— 里面含着自己旧组的端口，那会把它跳过）。
+   * 回滚也失败就进 ERROR 态：绝不留在「状态是 running、实际没有监听」那种状态，
+   * 那会让界面显示一切正常而页面根本打不开。
+   */
+  async relisten(newLayoutId, preferredPort, excludePorts) {
+    const target = this.session && this.session.tunnel_target;
+    if (!target) return { ok: false, error: '还没有隧道目标，无法切换布局组。' };
+    const prevLayout = this.layoutId;
+    const prevPort = this._tunnelPort;
+
+    await this.tunnel.stop();
+    try {
+      const { port, shifted } = await this.tunnel.start({
+        preferredPort, target, excludePorts });
+      // ★ 先把 layoutId 换成新的，再写回端口 —— onTunnelPort 是拿 layoutId 当键的，
+      //   顺序反了会把新端口记到**旧**组名下，于是两个组的端口互相错位，
+      //   下次启动各自绑到对方的 origin 上。
+      this.layoutId = newLayoutId;
+      this._tunnelPort = port;
+      this.onTunnelPort(newLayoutId, port);
+      this._emit();
+      return { ok: true, port, shifted };
+    } catch (e) {
+      try {
+        // 回滚：原来的端口和原来的组都放回去（同理，先还原 layoutId 再写回）
+        const back = await this.tunnel.start({ preferredPort: prevPort, target });
+        this.layoutId = prevLayout;
+        this._tunnelPort = back.port;
+        this.onTunnelPort(prevLayout, back.port);
+        this._emit();
+      } catch (e2) {
+        this._setState(State.ERROR, {
+          error: `切换布局组失败，且原端口 ${prevPort} 也绑不回来了：${e2.message}。`
+               + '作业未受影响，请重新连接。',
+        });
+        return { ok: false, error: e.message, fatal: true };
+      }
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /** 换一个布局组 id。**只改标记与快照**，端口由 relisten 负责。 */
+  setLayout(layoutId) {
+    this.layoutId = layoutId;
+    this._emit();
   }
 
   // ── 心跳 ────────────────────────────────────────────────────────────────
@@ -361,9 +425,23 @@ class SessionController extends EventEmitter {
           if (s.tunnel_target && s.tunnel_target !== this._lastTarget) {
             this.warning = `隧道目标已变更（${this._lastTarget} → ${s.tunnel_target}），正在重建。`;
             this._lastTarget = s.tunnel_target;
+            const prevPort = this._tunnelPort;
             try {
               await this.tunnel.stop();
-              await this.tunnel.start({ preferredPort: this._tunnelPort, target: s.tunnel_target });
+              // ★ 必须**接住返回值**。丢掉它的后果是 this._tunnelPort 停在旧值，
+              //   于是 snapshot().localPort 从此指向一个没人监听的端口 ——
+              //   界面上「本地地址」那一栏是死的，而没有任何报错。
+              const { port, shifted } = await this.tunnel.start({
+                preferredPort: prevPort, target: s.tunnel_target,
+                excludePorts: this.getExcludedPorts() });
+              this._tunnelPort = port;
+              // 端口顺移必须**写回配置**：origin 就是端口，配置里那份一旦与实际分叉，
+              // 下次启动会绑回配置的端口、布局跟着重置一次，而用户不知道为什么。
+              this.onTunnelPort(this.layoutId, port);
+              if (shifted) {
+                this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
+                             + `浏览器按端口隔离本地存储，编辑器布局会重置一次。`;
+              }
             } catch (e) {
               this.warning = '隧道重建失败：' + e.message;
             }
@@ -373,6 +451,11 @@ class SessionController extends EventEmitter {
           if (['released', 'rejected', 'expired'].includes(s.state)) {
             this._stopHeartbeat();
             this._stopStatusPoll();
+            // ★ 会话结束了，本地监听必须一起收掉。留着它的后果不是「多占一个端口」：
+            //   浏览器仍然连得上本地端口，却会被 dial 接到一个已经不存在的目标上 ——
+            //   表现是「页面打不开，但也不报错」。端口只在 stop() 里释放是不够的，
+            //   会话被守护进程回收（超时、孤儿、被拒）时根本不会走到 stop()。
+            await this.tunnel.stop();
             this._setState(State.ENDED);
             return;
           }
@@ -396,6 +479,7 @@ class SessionController extends EventEmitter {
       } else if (c.action === Action.SESSION_GONE) {
         this._stopHeartbeat();
         this._stopStatusPoll();
+        await this.tunnel.stop();     // 同上：会话都没了，监听没有理由留着
         this._setState(State.ERROR, { error: '会话已不存在。' });
         return;
       } else if (![Action.DAEMON_DOWN, Action.TRANSPORT, Action.RATE_LIMITED].includes(c.action)) {

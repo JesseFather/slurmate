@@ -22,7 +22,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA = 4;   // 2：profile → connections；3：永远加密保存；4：**每条连接一把密钥**
+const SCHEMA = 5;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
+                    // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
 
 // 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
 // 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
@@ -48,12 +49,14 @@ const DEFAULTS = {
   schema: SCHEMA,
   // 登录节点连接条目。支持多条是因为同一个登录节点常有多个入口
   // （内网、公网域名、跳板机），换网络环境时不该重新填一遍。
-  connections: [],          // [{ id, label, user, host, port }]
+  connections: [],          // [{ id, label, user, host, port, layoutId }]
   activeConnectionId: null,
   // 主机密钥指纹（TOFU）。键是 "host:port"，值是 "SHA256:…"。
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
   hostKeys: {},
-  slots: {},                // { "1": { port: 18080 } } —— 槽位 → 实际本地端口
+  // 布局组。一组 = 一个**永不复用**的存储身份 = 一条 code-server 的编辑器布局。
+  // 数组顺序即界面顺序（映射图的列序、下拉的选项序都靠它）。
+  layouts: [],              // [{ id, name, port }]
 };
 
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
@@ -114,7 +117,230 @@ function normalizeConnection(raw, fallbackId) {
     id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newConnectionId()),
     label: label === host ? '' : label,
     user, host, port,
+    // 指向哪个布局组。这里**绝不凭空造一个 id** —— 「连到哪个组」是调用方的决定，
+    // 不是规整函数该猜的（与上面 label 那条同一个道理）。指向不存在的组由
+    // loadLayouts 收束，不留 null 让界面去处理。
+    layoutId: (typeof raw.layoutId === 'string' && raw.layoutId) ? raw.layoutId : null,
   };
+}
+
+// ── 布局组 ──────────────────────────────────────────────────────────────────
+//
+// 一个布局组 = 一份浏览器存储 = 一份 code-server 的编辑器布局。
+//
+// 为什么需要「组」这一层：code-server（VS Code web）把 UI 布局存在浏览器 localStorage 里，
+// 而 localStorage 按 **origin**（scheme://host:port）隔离 —— 客户端用隧道的本地监听端口
+// 构造 origin，所以「端口不同」就等于「布局不同」。布局组把「哪条连接用哪个端口」变成
+// 用户可控的映射：左侧连接条目、右侧布局组，多对一，引用计数归零即回收。
+
+const LAYOUT_PORT_BASE = 18080;   // 与旧 slotPort 的 base 一致 —— 升级不换端口
+
+/**
+ * 迁移出来的那个布局组的保留 id。
+ *
+ * ★ 必须是**字面量**，不能是随机值：loadConfig 自己不写盘（见文件头原则三条），若这里
+ *   合成随机 id，那么「读完配置、一次都没保存就退出」→ 下次启动换一个 id → 换 partition
+ *   → 上一轮刚攒的布局凭空消失。这个坑很隐蔽，症状只是「布局又没了」。
+ */
+const LEGACY_LAYOUT_ID = 'legacy-1';
+
+/**
+ * 迁移出来的那个组的浏览器存储身份，以及 partition 名的**唯一例外**。
+ *
+ * partition 名就是 Electron 的存储目录名，所以「新 id → 新目录 → 天然空白」是
+ * 「新建空白布局真的空白」的全部依据 —— 若按端口命名，A 组被回收后端口被新组 B 复用，
+ * B 就会继承 A 的 localStorage 和登录 cookie。所以新组一律用 persist:layout-<id>。
+ *
+ * 但迁移出来的那个组**不改名**：用户的编辑器布局就躺在 persist:slot-1 里，改名等于把
+ * 布局扔掉一次，而这个代价没有任何必要。
+ *
+ * 这不是「两套命名规则并存」：slot-1 只可能被这一个组用（loadLayouts 只在磁盘上还没有
+ * layouts、且有 slots 时才合成它，一旦保存过就再也不会），而新组的 id 是 `l` + 随机 hex，
+ * 永远撞不上 legacy-1。所以旧数据不可能被复活到新组头上。
+ * 与 LEGACY_SECRET_PLAIN（旧明文密钥必须读得出来）、PENDING_ID 是同一类东西：
+ * 一个为期永久的兼容别名。
+ */
+const LEGACY_PARTITION = 'persist:slot-1';
+
+function partitionForLayout(id) {
+  return id === LEGACY_LAYOUT_ID ? LEGACY_PARTITION : 'persist:layout-' + id;
+}
+
+/** 随机、**永不复用**。复用会让一个已回收组的存储复活到新组头上。 */
+function newLayoutId() {
+  return 'l' + crypto.randomBytes(6).toString('hex');
+}
+
+/** 规整一个布局组；字段不合法则返回 null（与 normalizeConnection 同规矩，不静默填空）。 */
+function normalizeLayout(raw, fallbackId) {
+  if (!raw || typeof raw !== 'object') return null;
+  const port = Number(raw.port);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newLayoutId()),
+    name: String(raw.name || '').trim().slice(0, 40),
+    port,
+  };
+}
+
+function findLayout(cfg, id) {
+  return ((cfg && cfg.layouts) || []).find((l) => l.id === id) || null;
+}
+
+/** 已被**其他**布局组占用的端口。给隧道的端口顺移用 —— 见 tunnel.js 的 excludePorts。 */
+function usedLayoutPorts(cfg, exceptId) {
+  const s = new Set();
+  for (const l of ((cfg && cfg.layouts) || [])) {
+    if (l && l.id !== exceptId) s.add(l.port);
+  }
+  return s;
+}
+
+/**
+ * 下一个可用端口：从 18080 起，跳过已被占用的。**确定性**，不探测 OS。
+ *
+ * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
+ * 那就等于每次启动都可能换 origin。EADDRINUSE 交给隧道顺移 + 写回来处理。
+ */
+function nextLayoutPort(cfg) {
+  const used = usedLayoutPorts(cfg, null);
+  let p = LAYOUT_PORT_BASE;
+  while (p <= 65535 && used.has(p)) p += 1;
+  return p;
+}
+
+/** 「布局 N」，N 取当前没被占用的最小正整数。确定性、不撞名。 */
+function nextLayoutName(cfg) {
+  const taken = new Set(((cfg && cfg.layouts) || [])
+    .map((l) => /^布局 (\d+)$/.exec((l && l.name) || ''))
+    .filter(Boolean).map((m) => Number(m[1])));
+  let n = 1;
+  while (taken.has(n)) n += 1;
+  return `布局 ${n}`;
+}
+
+/** 取一个组配置的端口。组不存在时回落基址 —— 调用方应先确认组存在。 */
+function layoutPort(cfg, id) {
+  const l = findLayout(cfg, id);
+  return l ? l.port : LAYOUT_PORT_BASE;
+}
+
+/**
+ * 端口变了 origin 就变，code-server 的编辑器布局会全部重置 —— 所以必须持久化。
+ * 与旧的 setSlotPort 理由完全相同（那个函数就是为这件事存在的）。
+ *
+ * 注意：这里自己 saveConfig 是**安全**的。端口写回只可能发生在「正在被某个连接指着的组」
+ * 上（引用计数 ≥ 1），所以它不会与 pruneLayouts 冲突。改 hostKeys 的两个函数同理。
+ * 会改变**引用计数**的改动才必须走 index.js 的 commitConfig()。
+ */
+function setLayoutPort(dir, cfg, id, port) {
+  cfg.layouts = (cfg.layouts || []).map((l) => (l.id === id ? { ...l, port } : l));
+  saveConfig(dir, cfg);
+}
+
+/** 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。 */
+function setConnectionLayout(cfg, connId, layoutId) {
+  if (!(cfg.connections || []).some((c) => c.id === connId)) {
+    return { ok: false, error: '这条连接不存在。' };
+  }
+  if (layoutId && !findLayout(cfg, layoutId)) {
+    return { ok: false, error: '这个布局组不存在。' };
+  }
+  cfg.connections = cfg.connections.map(
+    (c) => (c.id === connId ? { ...c, layoutId } : c));
+  return { ok: true };
+}
+
+/**
+ * 回收引用计数归零的组。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
+ * （commitConfig）—— 漏掉一处的后果是某个组永远不被回收。
+ *
+ * @returns {{removed: string[]}} 被删掉的组 id（调用方据此清理它们的浏览器存储）
+ */
+function pruneLayouts(cfg) {
+  // ★ 一条连接都没有时**不回收**。演示模式（以及「全新安装、还没配任何连接」）
+  //   会有一个不属于任何连接的布局组 —— 它是那次会话的布局身份。在这里把它删掉，
+  //   下次开会话又会造一个新的，而 id 一变 partition 就变，布局白重置一次。
+  //   没有任何映射关系要维护的时候，「回收」无事可做。
+  if (!(cfg.connections || []).length) return { removed: [] };
+
+  const counts = new Map();
+  for (const c of (cfg.connections || [])) {
+    if (c.layoutId) counts.set(c.layoutId, (counts.get(c.layoutId) || 0) + 1);
+  }
+  const removed = [];
+  cfg.layouts = (cfg.layouts || []).filter((l) => {
+    if ((counts.get(l.id) || 0) > 0) return true;
+    removed.push(l.id);
+    return false;
+  });
+  return { removed };
+}
+
+/**
+ * 给界面用的**已推导**结构。renderer 只渲染、不做任何推导 ——
+ * 它手里那份 refCount 随时可能已经陈旧（另一条连接刚被删），
+ * 所以「要不要二次确认」的判定权必须在主进程。
+ *
+ * @returns {[{id, name, port, refCount, members:string[], soleOwnerId:string|null}]}
+ *   soleOwnerId 非 null 表示「这个布局只被这一条连接使用，切走就会被丢弃」。
+ */
+function layoutPlan(cfg) {
+  return ((cfg && cfg.layouts) || []).map((l) => {
+    const members = (cfg.connections || [])
+      .filter((c) => c.layoutId === l.id).map((c) => c.id);
+    return {
+      id: l.id, name: l.name, port: l.port,
+      refCount: members.length,
+      members,
+      soleOwnerId: members.length === 1 ? members[0] : null,
+    };
+  });
+}
+
+/** schema ≤ 4 的槽位 1 端口。沿用旧 slotPort 的校验；非法/缺失回落基址。 */
+function legacySlotPort(slots) {
+  const s = slots && slots['1'];
+  return (s && Number.isInteger(s.port) && s.port >= 1024 && s.port <= 65535)
+    ? s.port : LAYOUT_PORT_BASE;
+}
+
+/**
+ * 解析布局组列表。三种来源，优先级从高到低。
+ *
+ * ★ 迁移这一路的两条要求，缺一条老用户的布局就会丢一次：
+ *   ① 组 id 用**字面量** LEGACY_LAYOUT_ID（见上，确定性）；
+ *   ② 端口**原样继承** slots["1"].port（不是回落 18080）—— 端口是 origin 的一半。
+ */
+function loadLayouts(raw, connections) {
+  const out = [];
+  const seen = new Set();
+  if (Array.isArray(raw.layouts)) {
+    for (const l of raw.layouts) {
+      const n = normalizeLayout(l, l && l.id);
+      if (!n || seen.has(n.id)) continue;
+      // 端口撞车就地挪开 —— 两个组声称同一个端口会让它们每次启动互相抢，
+      // 布局在两个 origin 之间反复横跳，而界面上一切正常。
+      if (out.some((x) => x.port === n.port)) n.port = nextLayoutPort({ layouts: out });
+      seen.add(n.id);
+      out.push(n);
+    }
+  } else if (raw.slots && typeof raw.slots === 'object') {
+    // schema ≤ 4。全仓只有槽位 1 被用过（index.js 里三处写死 slot: 1）。
+    out.push({ id: LEGACY_LAYOUT_ID, name: '默认布局', port: legacySlotPort(raw.slots) });
+  }
+  // 兜底：有连接却一个组都没有（手改过配置，或从更旧、没有槽位的版本上来）。
+  // 这里用随机 id 更安全 —— 绝不能复活 legacy-1。
+  if (out.length === 0 && connections.length > 0) {
+    out.push({ id: newLayoutId(), name: '默认布局', port: LAYOUT_PORT_BASE });
+  }
+  // 每条连接都必须落在一个**存在**的组里。指向不存在的组 = 界面上一片空白，
+  // 而用户看不出为什么。在这里收束掉，而不是让 UI 去处理 null。
+  const first = out[0] ? out[0].id : null;
+  for (const c of connections) {
+    if (!out.some((l) => l.id === c.layoutId)) c.layoutId = first;
+  }
+  return out;
 }
 
 // ── 配置 ────────────────────────────────────────────────────────────────────
@@ -137,7 +363,6 @@ function loadConfig(dir) {
   // 将来读这份配置的人（包括三个月后的我们）会以为它们还有用，去代码里找一个
   // 早就不存在的行为。
   const cfg = structuredClone(DEFAULTS);
-  if (raw.slots && typeof raw.slots === 'object') cfg.slots = raw.slots;
   if (raw.hostKeys && typeof raw.hostKeys === 'object') cfg.hostKeys = raw.hostKeys;
 
   // 连接列表：先取新格式，再补旧格式。
@@ -177,6 +402,11 @@ function loadConfig(dir) {
     ? raw.activeConnectionId
     : (list[0] ? list[0].id : null);
 
+  // 布局组必须在连接之后解析：迁移那一路要读 connections 才能把每条连接收束到一个
+  // 存在的组里，而 connections 侧的去重可能已经剔掉了几条。
+  // 旧的 slots 到这里自然消失（只认已知键，不写回），不需要显式删除。
+  cfg.layouts = loadLayouts(raw, list);
+
   return cfg;
 }
 
@@ -187,11 +417,19 @@ function loadConfig(dir) {
  *   界面上不修改任何字段、连点两次「保存并连接」，不该得到两条一样的条目 ——
  *   列表会越点越长，而用户分不清该点哪一条。
  *
+ * @param {object} opts
+ *   allowLayoutChange {boolean} 复用已有条目时是否允许改它的 layoutId。默认**不许**：
+ *                               按地址命中另一条（用户没带 id）却把它的布局组改掉，
+ *                               是一次完全看不见的副作用。
+ *
+ * 新建的那条**不在这里**决定布局组：`layoutId` 留 null，由 index.js 的
+ * ensureConnectionLayout 统一分配（它需要 cfg 才能建新组）。两处都做会让
+ * 「新连接落到哪个组」这条策略有两个说法。
  * @returns {{connection:object, created:boolean}
  *          | {conflict:object}
  *          | null}  输入不合法时返回 null
  */
-function upsertConnection(cfg, input) {
+function upsertConnection(cfg, input, opts = {}) {
   const conn = normalizeConnection(input, input && input.id);
   if (!conn) return null;
 
@@ -220,7 +458,10 @@ function upsertConnection(cfg, input) {
   }
 
   // 复用旧条目：**id 用回旧的那个**（可能已经被 activeConnectionId 之类引用着）。
+  // layoutId 由 ...prev 原样带过来 —— 「按地址命中已有条目」这条路径不该顺手改它的
+  // 布局组，那是一次完全看不见的副作用。要改必须显式传 allowLayoutChange。
   const next = { ...prev, user: conn.user, host: conn.host, port: conn.port };
+  if (opts.allowLayoutChange && conn.layoutId) next.layoutId = conn.layoutId;
 
   // 备注按两条不同的语义处理，因为**空备注在这两条路径上意思不同**：
   //   · 编辑（输入带了 id）—— 表单里那一栏就是当前值，清空即清空，必须写回去；
@@ -238,21 +479,6 @@ function saveConfig(dir, cfg) {
 
 function activeConnection(cfg) {
   return (cfg.connections || []).find((c) => c.id === cfg.activeConnectionId) || null;
-}
-
-/**
- * 取槽位的本地端口。**必须持久化** —— 端口变了 origin 就变，code-server 存在
- * localStorage 里的编辑器布局会全部重置。所以这里不做「每次重算」，而是记住。
- */
-function slotPort(cfg, slot, base = 18080) {
-  const s = cfg.slots[String(slot)];
-  if (s && Number.isInteger(s.port) && s.port >= 1024 && s.port <= 65535) return s.port;
-  return base + (slot - 1);
-}
-
-function setSlotPort(dir, cfg, slot, port) {
-  cfg.slots = { ...cfg.slots, [String(slot)]: { port } };
-  saveConfig(dir, cfg);
 }
 
 // ── 主机密钥指纹（TOFU）──────────────────────────────────────────────────────
@@ -456,7 +682,12 @@ function removePendingGoodbye(dir, sessionId) {
 
 module.exports = {
   SCHEMA, DEFAULTS, SECRET_ENCRYPTED, LEGACY_SECRET_PLAIN, PENDING_ID,
-  loadConfig, saveConfig, slotPort, setSlotPort,
+  loadConfig, saveConfig,
+  // 布局组
+  LAYOUT_PORT_BASE, LEGACY_LAYOUT_ID, LEGACY_PARTITION, partitionForLayout,
+  newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
+  nextLayoutName, layoutPort, setLayoutPort, setConnectionLayout,
+  pruneLayouts, layoutPlan,
   activeConnection, newConnectionId, normalizeConnection,
   connectionKey, upsertConnection,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,

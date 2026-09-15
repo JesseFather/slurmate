@@ -136,6 +136,49 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 .conn .m.bad { color: var(--err); }
 .conn .m.good { color: var(--ok); font-weight: 600; }
 
+/* ── 布局组 ──
+   一条连接只用一个布局，一个布局可以被多条连接共用。下拉框里那句说明
+   （「只有这一条连接在用 —— 切走就会被丢弃」）比布局名本身更要紧，
+   所以给它留足宽度，别让浏览器把它截掉。 */
+.lay-pick { max-width: 280px; font-size: 11px; padding: 3px 6px; }
+
+/* 状态条里那个。状态条只有 30px 高，默认 input/select 的 6px 内边距会把它撑破，
+   所以单独收紧 —— 撑破的表现是状态条被顶高，而下方 code-server 视图是按写死的
+   30px 定位的，于是页面顶部会被切掉一条。 */
+#statusbar .sb-pick { display: flex; align-items: center; gap: 6px; flex: none; }
+#statusbar .sb-lbl { color: var(--fg-dim); }
+#statusbar .sb-sel {
+  font: inherit; font-size: 11px; padding: 1px 4px; height: 20px;
+  max-width: 200px; border-radius: 3px;
+}
+
+/* 连接 ↔ 布局 的映射图：两列，连线是盖在上面的 SVG。
+   CSP 里没有 unsafe-inline，所以这里全走 class，一个 style="…" 都不能有。 */
+.lmap {
+  position: relative;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 56px;
+  margin: 4px 0 6px;
+}
+.lmap-lines { position: absolute; left: 0; top: 0; pointer-events: none; }
+.lmap-lines .edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
+.lmap-lines .edge.cur { stroke: var(--accent-hover); stroke-width: 2; }
+.lmap-col { display: flex; flex-direction: column; gap: 6px; }
+/* 右列不拉伸：布局节点按内容定宽、左边缘对齐，线才落在同一个 x 上 */
+.lmap-col:last-child { align-items: flex-start; }
+.lnode {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px; min-height: 26px;
+  border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg-alt); font-size: 12px;
+}
+.lnode .nm {
+  font-family: ui-monospace, Consolas, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lnode.cur { border-color: var(--accent); background: #0e3a5c; }
+.lnode.lay .meta { color: var(--fg-dim); font-size: 11px; flex: none; }
+.lnode input.rename { width: 130px; padding: 1px 6px; font-size: 12px; }
+
 /* ── 高级选项 ── */
 details { border: 1px solid var(--border); border-radius: 4px; padding: 10px 14px; }
 summary { cursor: pointer; color: #9cdcfe; font-weight: 600; font-size: 12px; }

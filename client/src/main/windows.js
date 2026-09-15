@@ -75,6 +75,8 @@ class ShellWindow {
     this.codeView = null;
     this.overlayView = null;
     this._origin = null;
+    this._partition = null;        // 见 codePartition getter
+    this._destroyingCodeView = false;   // 见 _destroyCodeView / render-process-gone
     this._closing = false;
     this._closeConfirmed = false;
     this._sessionLive = false;     // 由 pushState 更新
@@ -97,12 +99,19 @@ class ShellWindow {
   /**
    * 显式加载 code-server 页面。
    * @param {string} origin  形如 http://127.0.0.1:18080（**字面 127.0.0.1**）
-   * @param {string} partition 形如 'persist:slot-1'
+   * @param {string} partition 形如 'persist:layout-<布局组 id>'
    * @param {boolean} demo    true 时注入 demo.js preload 用于快捷键对照。
    *                          **真实模式绝不注入任何 preload** —— 那会污染 IDE。
    */
   async showCodeServer(origin, partition, demo = false) {
+    // ★ WebContentsView 的 partition **只在构造时读一次**（就是下面那个 new）。
+    //   所以「换布局组」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
+    //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
+    //   而界面上完全看不出区别。
+    if (this.codeView && this._partition !== partition) this._destroyCodeView();
+
     this._origin = origin;
+    this._partition = partition;
     if (!this.codeView) {
       this.codeView = new WebContentsView({
         webPreferences: {
@@ -117,9 +126,9 @@ class ShellWindow {
         },
       });
       this.win.contentView.addChildView(this.codeView);
-      // 监听器**只装一次**。origin 由 this._origin 提供，这样换端口时不需要
-      // 重新装一遍 —— will-navigate / render-process-gone 是累加的，
-      // 每次重建都装一遍会让同一件事被处理 N 次。
+      // 「只装一次」是针对**同一个 webContents 对象**说的：origin 由 this._origin
+      // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是**新对象**，
+      // 必须重新装一遍 —— 否则新视图的 will-navigate 不设防、崩溃也不报错。
       this._wireCodeView(this.codeView.webContents);
       await this.codeView.webContents.loadURL(origin + '/');
     } else if (this.codeView.webContents.getURL().split('/').slice(0, 3).join('/') !== origin) {
@@ -143,13 +152,54 @@ class ShellWindow {
     });
     // IDE 是最容易 OOM 的页面。挂了要能提示并重载，而不是留一块白。
     wc.on('render-process-gone', (_e, details) => {
+      // ★ 我们自己拆视图（换布局组）也会走到这里。不区分的话，用户每切一次布局
+      //   就会看到一条「code-server 页面崩溃了」的**假警报** —— 系统报告了一件
+      //   没发生的事，正是这个项目一路在清的那类。
+      if (this._destroyingCodeView) return;
       this.onAction('renderer-gone', { reason: details && details.reason });
     });
+  }
+
+  /**
+   * 销毁 code-server 视图。**换布局组时必须走这条** —— partition 是构造期属性，
+   * 不重建就换不了存储分区。
+   *
+   * 顺序照文件头那条写死：removeChildView → webContents.close() → 引用置 null，
+   * 每一步 isDestroyed() 兜底。`removeChildView()` 自己不销毁 webContents。
+   */
+  _destroyCodeView() {
+    const v = this.codeView;
+    if (!v) return;
+    // 立旗子：这是我们自己要拆的，不是页面崩了（见 _wireCodeView）
+    this._destroyingCodeView = true;
+    try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
+    try {
+      if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
+    } catch { /* 同上 */ }
+    this.codeView = null;
+    this._partition = null;
+    this._destroyingCodeView = false;
   }
 
   /** 取当前 code-server 页面用的 session（登录要在同一个分区里发请求）。 */
   get codeSession() {
     return this.codeView ? this.codeView.webContents.session : null;
+  }
+
+  /**
+   * 当前 code-server 页面跑在哪个存储分区里。
+   *
+   * 回收一个布局组时要清它的浏览器存储 —— 而那**绝不能**发生在正被这个视图用着的
+   * 那个分区上，否则用户当前的 IDE 会连 cookie 带 localStorage 一起被抽掉，
+   * 症状只是「页面莫名其妙坏了」。
+   */
+  get codePartition() {
+    return this._partition;
+  }
+
+  /** 当前 code-server 页面加载的 origin（隧道换端口后它会变）。 */
+  get codeOrigin() {
+    return this._origin;
   }
 
   hasCodeView() { return Boolean(this.codeView); }
@@ -239,10 +289,10 @@ class ShellWindow {
     const wc = this.win.webContents;
     if (wc.isDestroyed()) return;
     wc.send('session:state', snap);
-    if (snap && snap.origin && this.codeView
-        && this._origin && snap.origin !== this._origin) {
-      this.retarget(snap.origin);
-    }
+    // ★ 这里曾经有一条「origin 变了就 loadURL」的自动 retarget。删掉了：
+    //   它是第二条改 origin 的通路，而且只会 loadURL —— **不换 partition、
+    //   也不重跑登录**。换布局组要的恰恰是前者，于是两条路必然分叉。
+    //   现在统一由 index.js 的 ensureCodeServer 判定（它同时看 origin 和 partition）。
   }
 
   /** 把被外壳吞掉的按键推给演示页（仅演示模式用，用于对照）。 */
@@ -319,15 +369,16 @@ class ShellWindow {
   }
 
   _destroyViews() {
-    for (const key of ['codeView', 'overlayView']) {
-      const v = this[key];
-      if (!v) continue;
-      try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
-      try {
-        if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
-      } catch { /* 同上 */ }
-      this[key] = null;
-    }
+    // codeView 走它自己那条（还要清 _partition、立 _destroyingCodeView 旗子）
+    this._destroyCodeView();
+    // overlayView 与 partition 无关，照旧走通用清理
+    const v = this.overlayView;
+    if (!v) return;
+    try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
+    try {
+      if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
+    } catch { /* 同上 */ }
+    this.overlayView = null;
   }
 }
 

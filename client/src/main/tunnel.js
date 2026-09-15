@@ -70,11 +70,18 @@ class Tunnel extends EventEmitter {
    * 开始监听。
    *
    * @param {object} opts
-   *   preferredPort {number} 优先端口（槽位绑定的端口）
-   *   target        {string} "IPv4:端口"
+   *   preferredPort {number}   优先端口（布局组绑定的端口）
+   *   target        {string}   "IPv4:端口"
+   *   excludePorts  {Set|Array} **别的布局组占着的端口**，顺移时必须跳过。
+   *                            不跳的后果不是「换了个端口」：两个组会在配置里同时
+   *                            声称同一个端口，每次启动谁先绑谁赢，布局在两个 origin
+   *                            之间反复横跳，而界面上一切正常。
+   *                            调用方**必须**把目标组自己排除在外（用
+   *                            usedLayoutPorts(cfg, 目标组id)），否则它自己的端口
+   *                            会被当成「别人的」而永远绑不上。
    * @returns {Promise<{port:number, shifted:boolean}>} shifted=true 表示首选端口被占，换过了
    */
-  async start({ preferredPort, target }) {
+  async start({ preferredPort, target, excludePorts }) {
     const parsed = Tunnel.parseTarget(target);   // 先校验，再动手
     this.target = parsed;
 
@@ -85,18 +92,27 @@ class Tunnel extends EventEmitter {
       return { port: this.port, shifted: false };
     }
 
-    const { port, shifted } = await this._listen(preferredPort);
+    const { port, shifted } = await this._listen(preferredPort, excludePorts);
     this.port = port;
     this.state = 'listening';
     this.emit('state', { state: this.state, port, shifted });
     return { port, shifted };
   }
 
-  async _listen(preferredPort) {
+  async _listen(preferredPort, excludePorts) {
+    const reserved = excludePorts instanceof Set
+      ? excludePorts : new Set(excludePorts || []);
     let lastErr = null;
     for (let i = 0; i < PORT_SCAN_LIMIT; i++) {
       const p = preferredPort + i;
       if (p > 65535) break;
+      // ★ 绝不落到**别的布局组**的端口上。落上去的后果不是「换了个端口」：
+      //   两个组会在配置里同时声称同一个端口，下次启动谁先绑谁赢、另一个再顺移，
+      //   于是每次启动布局都在两个 origin 之间反复横跳 —— 而界面一切正常。
+      if (reserved.has(p)) {
+        lastErr = new Error(`端口 ${p} 属于另一个布局组`);
+        continue;
+      }
       try {
         await this._listenOn(p);
         return { port: p, shifted: i > 0 };
@@ -110,6 +126,7 @@ class Tunnel extends EventEmitter {
     }
     throw new Error(
       `本地端口 ${preferredPort}–${preferredPort + PORT_SCAN_LIMIT - 1} 都不可用` +
+      (reserved.size ? `（已跳过 ${[...reserved].join('、')}：属于其他布局组）` : '') +
       (lastErr ? `（最后一个错误：${lastErr.code || lastErr.message}）` : ''));
   }
 

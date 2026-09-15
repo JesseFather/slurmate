@@ -24,6 +24,23 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 断开这一跳（作业继续在集群上跑，可以再连回来）。会话进行中会被主进程拒绝。
   disconnect: () => ipcRenderer.invoke('app:disconnect'),
 
+  // ── 布局组 ──
+  //
+  // 布局 = code-server 的编辑器窗口布局/标签页/登录状态，按**本地监听端口**隔离
+  // （浏览器按 origin 存 localStorage）。一个布局组被若干条连接共用，
+  // 没有任何连接用它的组会被自动回收。
+  //
+  // layoutId 传空 = **新建一个空白布局并落进去，一次原子完成**。刻意不提供独立的
+  // 「建组」通道：单独建出来的组引用计数天然是 0，紧接着的回收会把它当场删掉 ——
+  // 用户点了会没反应。
+  //
+  // 返回 { ok, layouts, connections }；被拒绝时 code 是 'would_discard'
+  // （切走会把旧布局删掉，需要带 confirmDiscard 重来）或 'relisten_failed'
+  // （换端口失败，配置一个字没动）。
+  setConnectionLayout: (payload) => ipcRenderer.invoke('app:setConnectionLayout', payload),
+  // 改名。名字只是给人看的 —— 身份永远是 id（它决定存储分区，永不复用）。
+  renameLayout: (payload) => ipcRenderer.invoke('app:renameLayout', payload),
+
   // ── 主机密钥（TOFU）──
   // 第一次连一台主机时主进程会拒绝并回一个指纹，由界面让用户核对后调 trustHostKey。
   // 「变了」的情况**不接受**信任 —— 界面只提供「我知道服务器重装了」这条显式出路。

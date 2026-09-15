@@ -420,23 +420,138 @@ async function performLogin(ses, origin, password) {
   return { ok: false, reason: 'no_cookie', status };
 }
 
+// ── 布局组 ──────────────────────────────────────────────────────────────────
+//
+// 一个组 = 一个本地端口 = 一个 origin = 一份 code-server 的编辑器布局。
+// 模型与纯函数在 config.js 的「布局组」一节；这里只做编排：
+// 谁指向谁、什么时候回收、回收时清理什么。
+
+/** 当前活跃连接所属的布局组 id。没有连接时为 null。 */
+function activeLayoutId() {
+  const conn = config.activeConnection(cfg);
+  return conn ? conn.layoutId : null;
+}
+
+/**
+ * 这次会话该用哪个布局组。
+ *
+ * 有活跃连接就用它的组（正常路径）。但**演示模式一个连接都没有**，那里也必须能
+ * 开会话 —— 所以退回到「已有的第一个组，没有就建一个」。
+ * （pruneLayouts 对「一条连接都没有」的情形不回收，正是为了让这一步造出来的组
+ *   能活过下一次 commitConfig，否则每次开会话都会换一个 partition。）
+ */
+function layoutForSession() {
+  const id = activeLayoutId();
+  if (id) return id;
+  if (cfg.layouts[0]) return cfg.layouts[0].id;
+  const layout = {
+    id: config.newLayoutId(),
+    name: config.nextLayoutName(cfg),
+    port: config.nextLayoutPort(cfg),
+  };
+  cfg.layouts = [...cfg.layouts, layout];
+  config.saveConfig(cfgDir, cfg);
+  return layout.id;
+}
+
+/**
+ * 保证这条连接落在一个**存在**的布局组里。
+ *
+ * 新建的连接默认落到**当前活跃连接所在的组**（用户拍板的行为）；
+ * 那也为空时（第一条连接、或活跃连接指向的组已经没了）才给它建一个新的空白组。
+ */
+function ensureConnectionLayout(conn) {
+  if (conn.layoutId && config.findLayout(cfg, conn.layoutId)) return conn.layoutId;
+
+  const active = config.activeConnection(cfg);
+  if (active && active.id !== conn.id && config.findLayout(cfg, active.layoutId)) {
+    config.setConnectionLayout(cfg, conn.id, active.layoutId);
+    return active.layoutId;
+  }
+  const layout = {
+    id: config.newLayoutId(),
+    name: config.nextLayoutName(cfg),   // 必须在入列之前算，否则会把自己算进去
+    port: config.nextLayoutPort(cfg),
+  };
+  cfg.layouts = [...cfg.layouts, layout];
+  config.setConnectionLayout(cfg, conn.id, layout.id);
+  return layout.id;
+}
+
+/**
+ * **所有会改变引用计数的改动都必须走这里**，而不是直接 config.saveConfig。
+ * 漏掉一处的后果是某个组永远不被回收 —— 它占着一个端口和一份浏览器存储。
+ *
+ * 反过来，setLayoutPort / rememberHostKey / forgetHostKey 内部自己 saveConfig 是安全的：
+ * 端口写回只可能发生在引用计数 ≥ 1 的组上，改主机密钥更与计数无关。**那不是漏改。**
+ */
+function commitConfig() {
+  const { removed } = config.pruneLayouts(cfg);
+  try {
+    config.saveConfig(cfgDir, cfg);
+  } catch (e) {
+    // 界面显示「已保存」而磁盘上没写，正是这个项目一路在清的那类问题。
+    win.pushNotice('error',
+      '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
+  }
+  for (const id of removed) clearLayoutStorage(id);
+  return removed;
+}
+
+/**
+ * 回收一个布局组之后的卫生清理。
+ *
+ * **不是正确性必需** —— partition 名永不复用，残留数据永远不会被新的组读到。
+ * 是隐私：那个目录里躺着 code-server 的登录 cookie。
+ *
+ * ★ 有且只有一条致命前提：**绝不能对正在被 codeView 用着的那个 partition 做**。
+ *   那会把用户当前的 IDE 连 cookie 带 localStorage 一起抽掉，而症状只是
+ *   「页面莫名其妙坏了」。所以先跟窗口对一下现在用的是哪个。
+ *
+ * 不 await：删一个组不该因为磁盘慢而卡住界面。
+ */
+function clearLayoutStorage(layoutId) {
+  const partition = config.partitionForLayout(layoutId);
+  if (win && win.codePartition === partition) return;
+  try {
+    electronSession.fromPartition(partition).clearStorageData()
+      .catch((e) => win.pushNotice('warn',
+        `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`));
+  } catch (e) {
+    win.pushNotice('warn', `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`);
+  }
+}
+
 // ── 会话编排 ────────────────────────────────────────────────────────────────
 async function startSession(resources) {
-  if (!controller || [State.ENDED, State.ERROR, State.IDLE].includes(controller.state)) {
+  const layoutId = layoutForSession();
+
+  // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
+  //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会**复用**那个
+  //   controller，接着 controller.start() 抛「会话已在进行中」—— 于是「断开」成了
+  //   一道单向门，用户必须重启客户端才能再开会话。
+  //   让新会话拿一个新 controller 之后，若旧作业还没被守护进程收掉，用户会拿到
+  //   服务端那句准确的「已有 1 个活跃会话（上限 1）」，而不是一句指不回根因的话。
+  if (!controller
+      || [State.ENDED, State.ERROR, State.IDLE, State.RELEASING].includes(controller.state)) {
     controller = new SessionController({
       backend,
-      slot: 1,
-      onTunnelPort: (slot, port) => {
+      layoutId,
+      onTunnelPort: (id, port) => {
         // 端口要**持久化** —— 变了 origin 就变，code-server 存在 localStorage 里的
         // 编辑器布局会重置。记住它，下次还用同一个。
-        config.setSlotPort(cfgDir, cfg, slot, port);
+        config.setLayoutPort(cfgDir, cfg, id, port);
       },
+      // 端口顺移时必须跳过别的布局组占着的端口，否则两个组会声称同一个端口，
+      // 每次启动谁先绑谁赢，布局在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
+      // 不然自己那个端口会被当成「别人的」而永远绑不上。
+      getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
     });
     controller.on('change', onSessionChange);
     controller.on('retarget', () => onSessionChange(controller.snapshot()));
   }
 
-  const preferredPort = config.slotPort(cfg, 1);
+  const preferredPort = config.layoutPort(cfg, layoutId);
   const snap = await controller.start(resources, { preferredPort });
   if (!snap) onSessionChange(controller.snapshot());
   return snap;
@@ -460,9 +575,7 @@ async function onSessionChange(snap) {
 async function _renderSession(snap) {
   win.pushState(snap);
 
-  if (snap.state === State.RUNNING && snap.origin && !win.hasCodeView()) {
-    await openCodeServer(snap);
-  }
+  if (snap.state === State.RUNNING && snap.origin) await ensureCodeServer(snap);
   if (snap.state === State.RUNNING && snap.warning) {
     await win.showOverlay(snap.warning);
     win.setBusy(true);
@@ -481,10 +594,32 @@ async function _renderSession(snap) {
   win.setTitle(demoPrefix + 'Slurmate — ' + (titles[snap.state] || snap.node || '就绪'));
 }
 
+/**
+ * 让窗口里的 code-server 视图与快照一致。**幂等**，每次状态变化都可以调。
+ *
+ * 判定三件事：视图在不在、origin 变没变、partition 变没变。
+ * 前两者只需重新 loadURL；**第三者必须销毁重建** —— partition 是构造期属性
+ * （见 windows.js 的 showCodeServer）。
+ *
+ * ★ 这是唯一的入口。windows.js 的 pushState 里那条「origin 变了就 loadURL」的
+ *   自动 retarget 已经删掉了：它不换 partition、也不重跑登录，两条路并存必然分叉。
+ */
+async function ensureCodeServer(snap) {
+  const partition = config.partitionForLayout(snap.layoutId);
+  if (win.hasCodeView() && win.codeOrigin === snap.origin && win.codePartition === partition) {
+    return;
+  }
+  const rebuild = win.hasCodeView() && win.codePartition !== partition;
+  await openCodeServer(snap);
+  if (rebuild) win.pushNotice('info', '已切换到新的布局组，编辑器页面已重新加载。');
+}
+
 async function openCodeServer(snap) {
   // 演示模式下给 code-server 页面注入一个只读的小桥，用来接收「被外壳吞掉的按键」，
   // 好让你在同一屏里对照验证快捷键。**真实模式绝不注入** —— 那会污染 IDE。
-  const partition = 'persist:slot-' + snap.slot;
+  // ★ partition 名按**布局组 id** 命名，不按端口。按端口命名会让「组 A 被回收后
+  //   端口被新组 B 复用」时，B 的所谓「空白布局」继承 A 的 localStorage 与登录 cookie。
+  const partition = config.partitionForLayout(snap.layoutId);
   await win.showCodeServer(snap.origin, partition, snap.demo);
 
   const ses = win.codeSession;
@@ -571,15 +706,18 @@ async function tryReattach() {
   if (!s || !s.tunnel_target) return;
 
   win.pushNotice('info', `发现仍在运行的会话（作业 ${s.job_id}），正在重新接上。`);
+  const layoutId = activeLayoutId();
+  if (!layoutId) return;               // 没配置连接，接不上
   controller = new SessionController({
-    backend, slot: 1,
-    onTunnelPort: (slot, port) => config.setSlotPort(cfgDir, cfg, slot, port),
+    backend, layoutId,
+    onTunnelPort: (id, port) => config.setLayoutPort(cfgDir, cfg, id, port),
+    getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
   });
   controller.on('change', onSessionChange);
   controller.sessionId = s.session_id;
   controller.session = s;
   controller.state = State.RUNNING;
-  const preferredPort = config.slotPort(cfg, 1);
+  const preferredPort = config.layoutPort(cfg, layoutId);
   await controller._bringUpTunnel(preferredPort);
   await openCodeServer(controller.snapshot());
 }
@@ -606,7 +744,11 @@ function registerIpc() {
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
     // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去找一个不存在的开关。
     secureStorageAvailable: secureAvailable(),
-    slotPort: config.slotPort(cfg, 1),
+    // 布局组：**已推导**好的结构（每组带 members / refCount / soleOwnerId）。
+    // 界面只渲染、不做推导 —— 它手里那份随时可能已经陈旧（另一条连接刚被删），
+    // 而「切走这个组会不会把它删掉」必须由主进程说了算。
+    // 注意与上面的 `partitions` 不是一个东西：那是 Slurm 的分区，同词不同义。
+    layouts: config.layoutPlan(cfg),
     version: app.getVersion(),
   }));
 
@@ -652,27 +794,42 @@ function registerIpc() {
     }
 
     if (!cfg.activeConnectionId) cfg.activeConnectionId = up.connection.id;
-    config.saveConfig(cfgDir, cfg);
+    // 新连接要落进一个布局组 —— 默认是**当前活跃连接所在的组**，没有就建一个空白组。
+    // 复用已有条目那条路径走不到这里（它的 layoutId 由 upsertConnection 原样带过来）。
+    if (up.created) ensureConnectionLayout(up.connection);
+    commitConfig();
     return {
       ok: true, connection: up.connection, created: up.created,
       connections: cfg.connections,
+      layouts: config.layoutPlan(cfg),
       key: keyView(up.connection.id),
     };
   });
 
   send('app:deleteConnection', async (id) => {
+    // ★ 正在跑的那条不许删。删掉它的后果不是「少一条配置」：它所属的布局组会
+    //   引用计数归零 → 被回收 → 浏览器存储被清 —— 而用户当前的页面正在用那份存储。
+    //   界面已经禁用了按钮，这里只是把它变成**权威**。
+    if (controller && cfg.activeConnectionId === id
+        && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state)) {
+      return { ok: false, code: 'in_use', error: '这条连接正在使用中，请先断开再删除。' };
+    }
+
     cfg.connections = cfg.connections.filter((c) => c.id !== id);
     if (cfg.activeConnectionId === id) {
       cfg.activeConnectionId = cfg.connections[0] ? cfg.connections[0].id : null;
     }
-    config.saveConfig(cfgDir, cfg);
+    // commitConfig 而不是 saveConfig：删掉最后一条指向它的连接之后，
+    // 它的布局组引用计数归零，必须被回收（并清掉它的浏览器存储）。
+    commitConfig();
     // 这条连接的密钥跟着走 —— 留着它既无用，又会在界面上留下一条看不见的凭据。
     // 两处都要清：落盘的那份，以及「这台机器没有凭据库」时留在内存里的那份。
     const gone = config.deleteKey(cfgDir, id).removed;
     const memGone = memKeys.delete(id);
     return {
       ok: true, connections: cfg.connections,
-      activeConnectionId: cfg.activeConnectionId, keyDeleted: gone || memGone,
+      activeConnectionId: cfg.activeConnectionId,
+      layouts: config.layoutPlan(cfg), keyDeleted: gone || memGone,
     };
   });
 
@@ -681,8 +838,93 @@ function registerIpc() {
       return { ok: false, error: '这条连接不存在。' };
     }
     cfg.activeConnectionId = id;
+    // 这里**不动引用计数**（连接还是指向原来那个组），所以直接 saveConfig 即可 ——
+    // 不是漏改。
     config.saveConfig(cfgDir, cfg);
     return { ok: true, activeConnectionId: id };
+  });
+
+  // ── 布局组 ──
+  /**
+   * 把一条连接指到另一个布局组。
+   *
+   * `layoutId` 为空 = **新建一个空白组并落进去**，一次原子完成。单独建出来的组
+   * 引用计数天然是 0，紧接着的 commitConfig 会把它当场回收，用户点了会没反应 ——
+   * 所以不提供独立的「建组」通道。
+   *
+   * ★ 步骤顺序是刻意钉死的：**先做会失败的那一步（换端口），成功了才动配置**。
+   *   反过来的话，一旦换端口失败，配置说「在 B 组」而窗口还跑在 A 组的 origin 上，
+   *   而 A 组的引用计数已经是 0 → 会被回收 → 浏览器存储被清 ——
+   *   **把用户当前的页面连同登录 cookie 一起抽掉**。这是整块改动里最危险的路径。
+   */
+  send('app:setConnectionLayout', async (payload = {}) => {
+    const { connectionId, layoutId, confirmDiscard } = payload;
+    const conn = cfg.connections.find((c) => c.id === connectionId);
+    if (!conn) return { ok: false, error: '这条连接不存在。' };
+
+    let target = layoutId ? config.findLayout(cfg, layoutId) : null;
+    if (layoutId && !target) return { ok: false, error: '这个布局组不存在。' };
+    if (!target) {
+      target = {
+        id: config.newLayoutId(),
+        name: config.nextLayoutName(cfg),
+        port: config.nextLayoutPort(cfg),
+      };
+    }
+    if (target.id === conn.layoutId) {
+      return { ok: true, layouts: config.layoutPlan(cfg), connections: cfg.connections };
+    }
+
+    // 切走之后旧组的引用计数会归零 —— 也就是被删除。这正是「独占」那行提示要说的事。
+    // ★ 判定权在这里，不在界面：界面手里那份 refCount 随时可能已经陈旧
+    //   （另一条连接刚被删），它只负责弹确认。
+    const old = config.layoutPlan(cfg).find((l) => l.id === conn.layoutId);
+    if (old && old.soleOwnerId === conn.id && !confirmDiscard) {
+      return {
+        ok: false, code: 'would_discard',
+        layoutId: old.id, layoutName: old.name,
+        error: `「${old.name}」只有这一条连接在用，切走之后它会被删除。`,
+      };
+    }
+
+    const existed = Boolean(config.findLayout(cfg, target.id));
+    if (!existed) cfg.layouts = [...cfg.layouts, target];   // 只为算排除集，还没落盘
+
+    const isActive = cfg.activeConnectionId === connectionId;
+    const sessionLive = controller
+      && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state);
+
+    if (isActive && controller && sessionLive) {
+      const excluded = config.usedLayoutPorts(cfg, target.id);
+      const r = await controller.relisten(target.id, target.port, excluded);
+      if (!r.ok) {
+        if (!existed) cfg.layouts = cfg.layouts.filter((l) => l.id !== target.id);
+        return {
+          ok: false, code: 'relisten_failed',
+          error: '换端口失败，布局组没有改动：' + r.error,
+        };
+      }
+      target.port = r.port;                 // 可能顺移过
+    } else if (isActive && controller) {
+      controller.setLayout(target.id);      // 没有会话在跑：只改标记，下次开会话就用它
+    }
+
+    config.setConnectionLayout(cfg, connectionId, target.id);
+    commitConfig();
+    return { ok: true, layouts: config.layoutPlan(cfg), connections: cfg.connections };
+  });
+
+  /** 给布局组改名。名字只是给人看的 —— 身份永远是 id（它决定 partition，绝不复用）。 */
+  send('app:renameLayout', async (payload = {}) => {
+    const { layoutId, name } = payload;
+    if (!config.findLayout(cfg, layoutId)) {
+      return { ok: false, error: '这个布局组不存在。' };
+    }
+    const clean = String(name || '').trim().slice(0, 40);
+    if (!clean) return { ok: false, error: '名字不能为空。' };
+    cfg.layouts = cfg.layouts.map((l) => (l.id === layoutId ? { ...l, name: clean } : l));
+    commitConfig();
+    return { ok: true, layouts: config.layoutPlan(cfg) };
   });
 
   // ── 连接 ──
