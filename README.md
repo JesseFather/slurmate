@@ -1,7 +1,10 @@
 # Slurmate
 
-在 Slurm 集群上跑 code-server，把网络 ACL 的登记簿**挂在作业上**而不是 SSH 会话上 ——
-于是 SSH 闪断不再丢会话。
+在 Slurm 集群上用远程开发环境，把网络 ACL 的登记簿**挂在作业上**而不是 SSH 会话上
+—— 于是 SSH 闪断不再丢会话。
+
+作业里跑什么由**插件**决定，而插件是**独立的项目**（[`plugins/`](plugins/)）：
+基座两端都不带任何插件，**一个都不装是合法状态**。
 
 ---
 
@@ -11,17 +14,16 @@
 
 | 部分 | 状态 |
 |---|---|
-| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 168 项、比对器自测 23 项全过（这 168 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
-| **客户端**（Electron） | 代码完整：真实 SSH 后端已实现（专用密钥认证、固定 argv 的 RPC、主机密钥 TOFU 校验）。**但从未连过真集群** —— SSH 握手、exec 通道与端口转发都还没有一次真实输出 |
+| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 **319 项**、比对器自测 23 项全过（这 319 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
+| **客户端**（Electron） | 代码完整，测试 171 项全过：真实 SSH 后端已实现（专用密钥认证、固定 argv 的 RPC、主机密钥 TOFU 校验）。**但从未连过真集群** —— SSH 握手、exec 通道与端口转发都还没有一次真实输出 |
 
 也就是说：**现在把它装到集群上，客户端仍然连不上** —— 但原因和以前不一样了。
-两端现在**都**是 v0.2（协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），缺的不再是功能
-或协议同步，而是**一次真实的握手**：登录节点是否放行公钥认证、`ForceCommand` 是否放行
-固定 argv、`direct-tcpip` 能否转发 —— 这三条至今只有推断，没有一次真实输出。
+两端协议已经同步（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），缺的不再是功能或协议，
+而是**一次真实的握手**：登录节点是否放行公钥认证、`ForceCommand` 是否放行固定 argv、
+`direct-tcpip` 能否转发 —— 这三条至今只有推断，没有一次真实输出。
 
-还有三条前置假设**仓库里连一次真实输出都没有**，全是推断：登录节点放行公钥认证、
-`ForceCommand` 放行固定 argv、`direct-tcpip` 可以转发。任何一条不成立，
-客户端那一跳都要换方案。见 [client/README.md](client/README.md)。
+任何一条不成立，客户端那一跳都要换方案。见 [client/README.md](client/README.md)，
+以及 [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) 的〈从未实测过的〉一节。
 
 我们选择把这一切如实写在这里，而不是等你自己发现 —— 做了假后端却在界面上不标注，
 正是这个项目一路在消灭的那类问题。
@@ -30,7 +32,8 @@
 
 ## 它要解决什么
 
-现有的 code-server 用法通常是这样一条命令：
+在计算节点上开一个远程开发环境（仓库里那个现成的插件起的是 code-server），
+现有的用法通常是这样一条命令：
 
 ```bash
 ssh -L <端口>:<节点>:<端口> -t "srun ... code-server --auth none"
@@ -66,10 +69,10 @@ Slurmate 的做法是把**作业**变成唯一的生命周期锚点：
     ├── slurmate-sessiond（root，systemd）   ← 按作业维护 nft ACL、判活、续期、释放
     ├── /run/slurmate-session/ctl.sock       ← CLI 与守护进程的通道（SO_PEERCRED 认证）
     └── 共享家目录（NFS 或同类）
-          ~/.slurmate/sessions/job-<id>.json  ← 会话身份、隧道目标、code-server 口令
+          ~/.slurmate/sessions/job-<id>.json  ← 会话身份、隧道目标、口令、插件的附加字段
     ▼
   计算节点（由 Slurm 在分区内自动挑选，不写 -w）
-    └── sbatch 作业 → code-server --auth password --bind-addr <节点IP>:<端口>
+    └── sbatch 作业 → 插件起的服务，绑在 <节点IP>:<端口>
 ```
 
 核心是 **nft 规则与作业一一对应**。守护进程持有这份对应关系，每 2 秒对账一次：
@@ -97,7 +100,7 @@ plugins/          ★ 两个插件的**独立项目** —— 基座不依赖它�
                     code-server/  浏览器里的 VS Code
                     sshd/         作业内的用户态 ssh
                   一个都没有是**合法状态**，见 plugins/README.md
-docs/             架构、部署、配置、协议、排障
+docs/             架构、部署、配置、协议、排障、**已知问题**
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
 ```
 
@@ -110,11 +113,17 @@ tools/            check-cluster.sh（部署前环境自检）、check-sanitized.
 ```bash
 cd client
 npm ci
-npm run demo        # 演示模式：本地起一个假的 code-server，界面完整可用
+npm run demo        # 演示模式：本地起一个假的网页服务，界面完整可用
 ```
 
-演示模式会**真的**起一个本地 HTTP 服务复刻 code-server 的登录契约，并**真的**走一遍
-隧道逻辑 —— 唯一被假掉的是 SSH 那一跳。界面与窗口标题会明确标注「演示模式」。
+演示模式会**真的**起一个本地 HTTP 服务。**它是通用的** —— 页面路径、登录路径、
+表单字段名、cookie 名全部取自当前会话那个插件的清单（`contributes.login`），
+所以这个假服务里没有任何一个具体网页服务的名字。它**真的**走一遍隧道逻辑，
+唯一被假掉的是 SSH 那一跳。界面与窗口标题会明确标注「演示模式」。
+
+> 装一个插件到池里（`~/.slurmate/plugins/`）、连一次演示会话，就能看到整条路：
+> 提交 → 排队 → 登记 → 建隧道 → 自动登录。**池里一个插件都没有也是正常状态**，
+> 那一屏会给出安装指引。
 
 > **不要在 NFS/SMB 挂载的目录里跑 `npm ci`。** `node_modules` 是几万个小文件，
 > 走网络文件系统会慢到不可用。先把仓库克隆到本地磁盘。
@@ -155,7 +164,12 @@ sudo bash cluster/deploy.sh              # 部署
   返回 200 且不带 `Set-Cookie` 是常见形态（code-server 4.135.0 实测如此），
   `if (status === 200)` 会在口令错时报成功。所以这条判据留在基座，而端点/字段名/
   cookie 名三条**具体值**由插件的清单自述。
-- **文档**里每条约束都对应一个具体故障，而不是泛泛的"建议这样做"。
+- **每次剥离插件，都会顺手挖出几个既有缺陷** —— 因为它们此前躲在"那个插件反正
+  在这儿"的阴影里。今天未修的、未实测的、以及已经想清楚但还没动手的，全部记在
+  [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)。**那不是一份愿望清单**：里面每一条
+  都写清了后果与修法，一条离开它的唯一方式是修掉并附上一条能真的红的用例。
+- **文档**里每条约束都对应一个具体故障，而不是泛泛的"建议这样做"；指路一律按
+  **符号名**，不写行号（理由见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 如果你要给它贡献代码，请保持这条线：**新增的检查必须能真的失败**。
 一条永远通过的检查比没有检查更糟。见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -198,6 +212,10 @@ sudo bash cluster/deploy.sh              # 部署
 - **`slurmate rpc` 一次一请求**，每次调用都是一个完整的 SSH exec channel。
   稳定态下客户端每 90 秒开 3 个，这对单线程的守护进程是有压力的。
   根治要给 CLI 加 `--stream`（argv 仍是常量），尚未实现。
+- **仓库里还有几个已核实的缺陷没修**（`goodbye` 回 `ok:true` 而作业可能还在跑、
+  提交配额拦不住并发的第二个、线上那份守护进程要重新部署才带上日志路径的修复）。
+  它们**都在 [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) 里**，每条写了后果与修法
+  —— 请不要在别处重新发现一遍。
 
 ---
 

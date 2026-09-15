@@ -132,3 +132,59 @@ test('新增的两个布局通道同时登记在 preload 与 panel.js 两侧', (
   assert.ok(bridgeCalls().has('setConnectionLayout'), 'panel.js 没有调用 setConnectionLayout');
   assert.ok(bridgeCalls().has('renameLayout'), 'panel.js 没有调用 renameLayout');
 });
+
+/**
+ * 去掉 JS 里的注释，字符串原样留下。
+ *
+ * ★ 必须去注释，否则**解释这条禁令的那段注释本身**会让检查红掉 —— 这个文件里
+ *   上面那条 `style=` 的检查就踩过同一个坑（它对 HTML 先剥了注释）。
+ *   括号与引号按出现顺序配对，够用；不认识的形态只会让检查**多红一次**
+ *   （看得见），不会让它悄悄变绿。
+ */
+function stripJsComments(src) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      out += c; i++;
+      while (i < src.length) {
+        if (src[i] === '\\') { out += src[i] + (src[i + 1] || ''); i += 2; continue; }
+        out += src[i];
+        if (src[i] === c) { i++; break; }
+        i++;
+      }
+      continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
+test('panel.js 不按 source 给插件贴来源标签 —— 本版只有一个来源', () => {
+  // ★ 这条不是洁癖，是拦一句**假话**。
+  //
+  //   基座不再自带任何插件之后，客户端只注册了**一个** root（池，见
+  //   `src/main/index.js` 里那个 `new plugins.Registry([...])`）。于是
+  //   `source === 'pool'` **恒为真** —— 用户自己从本地目录装进去的插件，
+  //   也会被贴上「站点分发」这个标签。
+  //
+  //   一个永远显示、并且永远说错的标签，比没有标签更糟：它让人以为自己看到的是
+  //   两条不同的来源，而界面上每一个插件都带着它。
+  //
+  //   将来真的有了「从站点取插件」那条路（会有第二个 root），这个检查会红 ——
+  //   那时**正确的做法不是删掉这条检查**，而是按当时的 `sources` 把标签加回来
+  //   （只有真的来自多个来源时才区分得开东西），再把它改成一条正面用例。
+  const code = stripJsComments(js);
+  assert.equal(/\bp\.source\b/.test(code), false,
+    'panel.js 在按 source 分支 —— 本版池是唯一的来源，那种分支恒为真、'
+    + '说出来的话恒为假。要贴来源标签，先有第二个 root。');
+});

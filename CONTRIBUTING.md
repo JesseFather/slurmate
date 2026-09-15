@@ -1,13 +1,16 @@
 # 贡献指南
 
-Slurmate 让你在 Slurm 集群上跑 code-server 远程开发。核心设计只有一句话：**把网络
+Slurmate 让你在 Slurm 集群上用远程开发环境。核心设计只有一句话：**把网络
 ACL 的登记簿从「SSH 会话」改挂到「Slurm 作业」上** —— 于是 SSH 闪断不再丢会话。
 
-仓库分成两半：
+仓库分成三部分：
 
 - **集群侧（`cluster/`）** —— root 守护进程 `slurmate-sessiond`、用户 CLI `slurmate`、
   作业模板 `run.sbatch`、部署脚本 `deploy.sh`、配置示例 `slurmate.conf.example`
 - **客户端（`client/`）** —— Electron 桌面应用
+- **插件（`plugins/`）** —— **独立项目**，基座两端都不依赖它们。契约见
+  [plugins/README.md](plugins/README.md)。**一个插件都不装是合法状态**，所以基座里
+  不许出现任何插件的名字、也不许出现「至少得有一个插件」的假设。
 
 > **如果你只读一节，读[《检查必须能真的失败》](#检查必须能真的失败)。**
 > 这个项目对「静默失败」有近乎偏执的关注 —— 系统报告成功而事情没成，是它要消灭的
@@ -43,7 +46,8 @@ npm config set ELECTRON_MIRROR https://npmmirror.com/mirrors/electron/
 
 - `cluster/slurmate-sessiond`、`cluster/slurmate`、`cluster/nft-compare.py` 是 Python 3，
   只用标准库
-- `cluster/deploy.sh`、`cluster/run.sbatch` 是 bash
+- `cluster/deploy.sh` 是 bash；`cluster/run.sbatch` 是一份**模板**，`deploy.sh`
+  把插件的作业侧**编织**进去之后才成品
 
 注意前两个**没有 `.py` 后缀** —— 它们最终要安装成 `/usr/local/sbin/slurmate-sessiond`
 和 `/usr/local/bin/slurmate`。`.editorconfig` 里为它们单独写了规则，别以为漏了。
@@ -170,6 +174,28 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
 
 「通过」和「未参与校验」是两种不同的结论 —— 前者可以据以决策，后者不能。
 上面 `deploy.sh` 那句 `[INFO] ... 未参与校验` 就是照这个写的。
+
+---
+
+## 文档：指路按符号名，不写行号
+
+**`文件:行号` 形式的引用一律不要写。** 写「`cluster/slurmate-sessiond` 的
+`load_session_file()`」，不写「`cluster/slurmate-sessiond:1373-1431`」。
+
+理由不是洁癖，是 0.5.0 那次剥离留下的教训：插件从基座里搬出去之后，
+`cluster/slurmate-sessiond` 整体下移了一千多行、`cluster/run.sbatch` 从 748 行
+降到 498 行，文档里**一百多条行号引用几乎全部失效**。
+
+**而失效的行号比没有行号更危险**：没有行号，读者按名字搜；行号指错，读者会翻到
+一个**看起来像那么回事**的地方，然后按错误的前提理解代码 —— 这正是本项目一路在
+清的那类"系统说了一件它并不知道的事"，只不过这次说话的是文档。
+
+同理：
+
+- 行号也不要写进**源码注释**里（`session.js:1767-1895` 这类），除非它指的是同一个
+  文件里几行之内的东西；
+- 想引用一个**具体的故障**，引它的**编号与文件**（`docs/KNOWN-ISSUES.md` 的 F13），
+  不要引行号 —— 编号是稳定的，行号不是。
 
 ---
 

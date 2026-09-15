@@ -80,20 +80,25 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 
 ## ⚠️ 当前状态
 
-客户端**已完成**，集群侧尚未跟进到 v0.2 协议（见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md) 的
-〈协议版本与变更〉）。**真实的 SSH 握手、exec channel 与端口转发尚未在真集群上验证过** ——
-那需要先用系统 `ssh` 跑一遍 Phase 0 的三条实测（见 `src/main/backend-ssh.js` 的文件头）。
+客户端与集群侧**协议已经同步**（见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md) 的
+〈协议版本与变更〉）。**真实的 SSH 握手、exec channel 与端口转发尚未在真集群上
+验证过** —— 那需要先用系统 `ssh` 跑一遍 Phase 0 的三条实测（见
+`src/main/backend-ssh.js` 的文件头）。
+
+★ 本仓库所有**从未实测过**的东西（不止这一条）都记在
+[`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的〈从未实测过的〉一节。
 
 `npm run demo` 会用**演示后端**启动，并在界面三处标注「演示模式 · 未连接集群」。
 
 演示后端**不是空壳**：它包含一个真的本地 HTTP 服务，按**当前会话那个插件声明的
-登录契约**（`contributes.login`）提供页面与表单，并且真的走一遍隧道代码。所以下面
-这些路径是真的在跑：
+登录契约**（`contributes.login`）提供页面与表单，并且真的走一遍隧道代码。
+**那个假服务是通用的** —— 端点、字段名、cookie 名全部来自清单，它里面没有任何一个
+具体网页服务的名字。所以下面这些路径是真的在跑：
 
 - 会话状态机（提交 → 排队 → 登记 → 运行 → 释放）
 - 本地端口槽位绑定与占用回退
 - 隧道中继（真的 TCP 转发，真的只监听 127.0.0.1）
-- 登录契约（`POST /login` + cookie jar 判定）
+- 登录契约（`POST <清单里的路径>` + cookie jar 判定）
 - 快捷键接管与诊断
 
 **唯一被假掉的是 SSH 那一跳。**
@@ -131,7 +136,7 @@ npm config set ELECTRON_MIRROR https://npmmirror.com/mirrors/electron/
 
 | 按什么 | 期望 |
 |---|---|
-| `Ctrl+W` | **出现在左栏**（到达页面，由 code-server 处理「关闭编辑器」） |
+| `Ctrl+W` | **出现在左栏**（到达页面 —— 在外壳这一侧这就够了，那个键该怎么用是插件的事） |
 | `Ctrl+N` / `F5` | **出现在左栏** |
 | `Ctrl+Shift+I` / `F12` / `F11` | **出现在右栏**（被外壳吞掉，不打开开发者工具/全屏） |
 | 中文输入法打拼音 | **两栏都不出现**（组合期间必须放行给输入法，否则输入法会被吃掉） |
@@ -187,7 +192,7 @@ src/main/
   backend.js       后端接口 + 选择器
   backend-ssh.js   真实后端（专用密钥认证 + 固定 argv 的 RPC + 主机密钥 TOFU 校验）
   backend-fake.js  演示后端
-  demo-server.js   演示用的假 web 服务（纯 Node，可脱离 Electron 测）
+  demo-server.js   演示用的假 web 服务（**通用**：契约来自当前插件的清单；纯 Node，可脱离 Electron 测）
   session.js       会话状态机 + 心跳
   tunnel.js        槽位中继 + 直连通道
   shortcuts.js     最小菜单 + 按键黑名单
@@ -213,7 +218,9 @@ test/              classify / contract / config / integration
 
 3. **`goodbye` 返回 `ok:true` 不代表作业被取消了。**
    集群侧的 `op_goodbye` 丢弃了 `scancel` 的返回值，`phase_release` 也不确认作业是否
-   真的没了。所以界面把「正在释放」和「已结束」当成两个状态。见 `session.js` 的 `stop()`。
+   真的没了（编号 F12 / F13，见 [`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md)）。
+   所以界面把「正在释放」和「已结束」当成两个状态。见 `session.js` 的 `stop()`。
+   **这一条对应的缺陷还没修** —— 客户端这边的两个状态是它的应对，不是它的修复。
 
 ---
 

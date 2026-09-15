@@ -116,8 +116,8 @@ function classify(resp, ctx) {
 
   // ── 7. Slurm 侧失败 ──────────────────────────────────────────────────────
   // submit 在这里【必须】不可重试：op_submit 每次调用都生成新 sid、插新行、提交新
-  // 作业（cluster/slurmate-sessiond:1767-1895），而 count_active 只数 ACL_STATES，
-  // 拦不住并发的第二个（见记忆 cluster-side-defects 的 F14）。一次超时重试就是两个作业。
+  // 作业（cluster/slurmate-sessiond 的 op_submit），而 count_active 只数 ACL_STATES，
+  // 拦不住并发的第二个（见 docs/KNOWN-ISSUES.md 的 F14）。一次超时重试就是两个作业。
   if (code === 6) {
     if (op === 'submit') {
       return mk(Action.FATAL, code, kind, message, ctx);

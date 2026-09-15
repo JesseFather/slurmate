@@ -1009,17 +1009,17 @@ test('★ 身份是铸造出来的：同一个构件合并、抢同一个身份�
 
   // ── 同一个构件被两个来源分发 → 合并成一条，只是多记一个来源 ──
   //   关键在于两边的**目录名完全不同**：目录名不参与任何判定，身份来自清单。
-  const builtinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-b-'));
+  const siteRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-s-'));
   const poolRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-p-'));
   const id = mintId();
-  writePlugin(builtinRoot, 'readable-name', { id, name: 'jup', displayName: 'J' }, src);
+  writePlugin(siteRoot, 'readable-name', { id, name: 'jup', displayName: 'J' }, src);
   writePlugin(poolRoot, `${id}@1.0.0`, { id, name: 'jup', displayName: 'J' }, src);
 
-  let reg = new Registry([{ dir: builtinRoot, source: 'builtin' },
+  let reg = new Registry([{ dir: siteRoot, source: 'site' },
     { dir: poolRoot, source: 'pool' }]);
   let jup = reg.list().filter((p) => p.id === id);
   assert.equal(jup.length, 1, '同一个 (id, 版本) + 同一份内容 = 一条，不是两条');
-  assert.deepEqual(jup[0].sources, ['builtin', 'pool'], '但要记下两个来源');
+  assert.deepEqual(jup[0].sources, ['pool', 'site'], '但要记下两个来源');
   assert.equal(reg.errors.length, 0, `合并不该报错：${JSON.stringify(reg.errors)}`);
 
   // ── 同 (id, 版本) 而内容不同 → 两个都不加载 ──
@@ -1028,7 +1028,7 @@ test('★ 身份是铸造出来的：同一个构件合并、抢同一个身份�
   //   **看得见**的。
   writePlugin(poolRoot, 'impostor', { id, name: 'jup', displayName: 'J' },
     'module.exports = { attach() {} };\n');          // 内容不同 → 摘要不同
-  reg = new Registry([{ dir: builtinRoot, source: 'builtin' },
+  reg = new Registry([{ dir: siteRoot, source: 'site' },
     { dir: poolRoot, source: 'pool' }]);
   assert.equal(reg.get(id, '1.0.0'), null,
     '★ 内容不同的两份在抢同一个身份 → 两个都不加载，绝不挑一个');
@@ -1053,7 +1053,7 @@ test('★ 身份是铸造出来的：同一个构件合并、抢同一个身份�
   assert.notEqual(bucketOf(reg.get(id, '1.0.0')), bucketOf(reg.get(id, '2.0.0')),
     '★ 去重桶必须区分同一插件的不同版本');
 
-  for (const d of [tmp, builtinRoot, poolRoot, root2]) {
+  for (const d of [tmp, siteRoot, poolRoot, root2]) {
     fs.rmSync(d, { recursive: true, force: true });
   }
 });

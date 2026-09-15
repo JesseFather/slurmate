@@ -469,7 +469,7 @@ class FakeBackend extends Backend {
     this._session.note = 'goodbye';
     // 真实守护进程会回 releasing，然后下一个 tick（最多 2 秒）才置 released。
     // 演示照做 —— 界面必须把「正在释放」和「已结束」当成两个状态，
-    // 因为 scancel 有可能静默失败（见记忆 cluster-side-defects 的 F12/F13）。
+    // 因为 scancel 有可能静默失败（见 docs/KNOWN-ISSUES.md 的 F12 / F13）。
     this._releaseTimer = setTimeout(() => {
       if (!this._session) return;
       this._session.state = 'released';

@@ -878,7 +878,12 @@ function pluginBlock(p) {
   head.append(el('h3', null, p.title));
   head.append(el('code', 'plug-id', p.name));
   head.append(el('span', 'plug-ver', 'v' + p.version));
-  if (p.source === 'pool') head.append(el('span', 'plug-ver', '站点分发'));
+  // ★ 这里此前有一句 `if (p.source === 'pool') … '站点分发'`。**基座不再自带任何
+  //   插件之后那句话恒为真、而且恒为假话** —— 池是唯一的来源，用户从本地目录装
+  //   进去的插件也会被标成"站点分发"。一个永远显示、且永远说错的标签，比没有标签
+  //   更糟：它让人以为自己在看两条不同的来源。
+  //   将来真的有了从站点取插件那条路（客户端会有第二个 root），再按当时的
+  //   `p.sources` 把标签加回来 —— 那时它才区分得开东西。
   if (!p.hasClientCode) head.append(el('span', 'plug-ver', '声明式'));
   d.append(head);
 

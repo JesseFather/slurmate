@@ -368,7 +368,7 @@ function loadDir(dir, source) {
     },
     // ── 加载记录 ──
     dir,
-    source,                                  // 'builtin' | 'pool'
+    source,                                  // 本版只有 'pool'；见下面 loadRoot 的说明
     hasClientCode,
     digest: digestOf(raw, clientRaw).slice(0, 16),
     // ── 客户端代码的钩子（全都可以没有）──

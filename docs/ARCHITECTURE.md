@@ -3,17 +3,23 @@
 > 本文的骨架来自 `cluster/slurmate-sessiond` 的文件头注释。那里已经把设计意图
 > 写清楚了，这里把它展开成一份独立文档，并补上规则形态、对账、信任模型与边界条件。
 >
-> ⚠️ **文中的 `文件:行号` 引用会随代码漂移。** 插件那两次重构（0.3.0 的结构、
-> 0.4.0 的身份与池）让 `cluster/slurmate-sessiond` 长了 600 多行，
-> 此前写下的行号因此整体偏移。
-> 引用是给"上哪儿找"用的指路牌，**不是**判据 —— 判据永远是代码本身与它的用例。
-> 看到对不上的，按函数名/常量名搜，不要按行号。
+> ⚠️ **本文按「文件名 + 符号名」指路，不写行号。** 这不是风格偏好：0.5.0 那次剥离
+> 让 `cluster/slurmate-sessiond` 与 `cluster/run.sbatch` 都大改过，此前写下的一百
+> 多条行号引用**几乎全部失效** —— 而失效的行号比没有行号更危险，它会指着一个**看
+> 起来像那么回事**的地方。所以指路一律写成「`cluster/slurmate-sessiond` 的
+> `load_session_file()`」这种形式，读者按符号名搜。同理见
+> [CONTRIBUTING.md](../CONTRIBUTING.md) 的〈文档〉一节。
+>
+> **指路牌不是判据** —— 判据永远是代码本身与它的用例。
 
 ## 一句话
 
-Slurmate 让用户在 Slurm 集群上跑 code-server 做远程开发。它的核心动作是：
+Slurmate 让用户在 Slurm 集群上用远程开发环境。它的核心动作是：
 **把「谁能连我端口」这份网络 ACL 的登记簿，从「SSH 会话」改挂到「Slurm 作业」上。**
 于是 SSH 闪断不再等于会话终结 —— 作业还在跑，ACL 还在，重连即恢复。
+
+作业里跑什么由**插件**决定，而插件是**独立项目**（[`plugins/`](../plugins/)）：
+基座两端都不带任何插件，一个都不装是合法状态。见〈插件〉那一节。
 
 ## 一、五个组件
 
@@ -23,7 +29,7 @@ Slurmate 让用户在 Slurm 集群上跑 code-server 做远程开发。它的核
 | 用户 CLI | `cluster/slurmate` | 普通用户 | 与守护进程对话；对客户端暴露 `slurmate rpc` 这一个稳定入口 |
 | 作业模板 | `cluster/run.sbatch` | 提交后以用户身份运行 | 在计算节点上挑端口、调 `plugin_call start` **分派给插件**、写会话文件与作业侧心跳 |
 | nft 表 | `inet slurmate`（运行时创建） | 内核 | 承载 ACL 的唯一实体，寿命 = 作业寿命 |
-| 桌面客户端 | `client/`（Electron） | 用户机器 | 提交、等待、建隧道、自动登录 code-server、发心跳 |
+| 桌面客户端 | `client/`（Electron） | 用户机器 | 提交、等待、建隧道、按插件的清单自动登录、发心跳 |
 
 五者的关系可以这样读：
 
@@ -41,42 +47,41 @@ Slurmate 让用户在 Slurm 集群上跑 code-server 做远程开发。它的核
  └──────────────┘                              └──────────────┼─────────┘
                                                               ▼
                                                      计算节点 node01
-                                                     run.sbatch → code-server
+                                                     run.sbatch → 插件起的服务
 ```
 
 ### 1. `slurmate-sessiond`（root 守护进程）
 
-职责写在 `cluster/slurmate-sessiond:6-14`，逐条对应到代码：
+职责写在 `cluster/slurmate-sessiond` 的文件头，逐条对应到代码：
 
-1. **代表用户提交作业**（`Slurm.submit()`，`cluster/slurmate-sessiond:799-857`）：
+1. **代表用户提交作业**（`Slurm.submit()`）：
    `fork + setuid + sbatch`，并记住「这个 `job_id` 是我代表哪个 uid 提交的」——
    这是整个防伪造体系的支点（见本文第五节）。
 2. **发现作业落点**：从用户家目录的会话文件读出「作业实际在哪台节点、哪个端口」
-   （`load_session_file()`，`cluster/slurmate-sessiond:1373-1431`）。
+   （`load_session_file()`）。
 3. **按作业维度维护 ACL**：独立的 `inet slurmate` 表，规则寿命 = 作业寿命
-   （`Nft`，`cluster/slurmate-sessiond:487-613`）。
-4. **判活 / 续期 / 释放 / 崩溃恢复**：`tick()` 的五个阶段
-   （`cluster/slurmate-sessiond:1018-1025`）。
+   （`Nft` 类）。
+4. **判活 / 续期 / 释放 / 崩溃恢复**：`tick()` 的五个阶段。
 5. **提供 RPC**：unix socket，身份取自内核的 `SO_PEERCRED`
-   （`handle_client()`，`cluster/slurmate-sessiond:1568-1604`）。
+   （`handle_client()`）。
 
-它与既有系统的关系是**零耦合**（`cluster/slurmate-sessiond:16-20`）：不碰
+它与既有系统的关系是**零耦合**（见那个文件头）：不碰
 `inet codeserver` 表、`ip port-daemon` 表、`/tmp/codeserver-ports`、
 `/usr/local/bin/codeserver-*`、sshd 配置、sudoers、`user@.service`。
 独立表、独立端口区间、独立状态目录、独立 systemd 单元。部署脚本把这条原则
 升级成可验证的判据：部署前后各取一次 nft 规则集快照，剥掉 `inet slurmate`
-之后必须逐条一致，否则判失败并提示回滚（`cluster/deploy.sh:14-16,767-807`）。
+之后必须逐条一致，否则判失败并提示回滚（`cluster/deploy.sh`）。
 
 为什么是 Python：bash 拿不到 `getsockopt(SO_PEERCRED)`（身份认证的唯一可信来源），
-而用 `sed` 解析文本正是最脆弱的地方（`cluster/slurmate-sessiond:22-25`）。
+而用 `sed` 解析文本正是最脆弱的地方。
 
 ### 2. `slurmate`（用户 CLI）
 
 以普通用户身份运行，**不发送任何身份信息** —— 身份完全由守护进程侧的内核凭据决定
-（`cluster/slurmate:7-8`）。
+（`cluster/slurmate`）。
 
 它对客户端暴露的稳定接口是 `slurmate rpc`：从 stdin 读一行 JSON，向 stdout 写一行
-JSON（`cluster/slurmate:10-17,208-234`）。客户端必须用**固定 argv** 调用：
+JSON（`cluster/slurmate`）。客户端必须用**固定 argv** 调用：
 
 ```
 ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
@@ -90,12 +95,12 @@ exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shel
 请求体走 stdin，命令行是编译期常量。这样用户输入**从构造上**不可能进入 SSH 命令串 ——
 是消除注入，而不是「记得别拼字符串」。这一点还有第二个必要性：某些集群在 sshd 上
 挂了 `ForceCommand` 守卫，命令串里不能出现 `code-server` 字面量，固定 argv 天然满足
-（`client/src/main/backend-ssh.js:14-29`）。
+（`client/src/main/backend-ssh.js`）。
 
 ### 3. `run.sbatch`（作业模板）
 
 由守护进程以目标用户身份提交，**文件本身 root 拥有、0644、用户不可写**：执行的是
-这个固定文件，用户可控的只有 `sbatch` 的命令行 flag（`cluster/run.sbatch:6-8`）。
+这个固定文件，用户可控的只有 `sbatch` 的命令行 flag（`cluster/run.sbatch`）。
 
 ★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：`deploy.sh` 把每个插件
 的 `job/start.sh` 拼在模板里那个 `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
@@ -126,11 +131,11 @@ slurmd 从**自己的 spool** 取脚本执行 —— 本系统从来没有让计
 ### 4. `inet slurmate`（nft 表）
 
 ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`Nft.ensure()`，
-`cluster/slurmate-sessiond:518-561`），规则本身见本文第四节。
+`cluster/slurmate-sessiond`），规则本身见本文第四节。
 
 ### 5. Electron 客户端
 
-`client/README.md:1-9` 概括了它解决的五个问题。其中与集群侧强相关的三个是：
+`client/README.md` 概括了它解决的五个问题。其中与集群侧强相关的三个是：
 
 - **会话状态机与心跳**（`client/src/main/session.js`）；
 - **隧道**：本地 `127.0.0.1:<槽位端口>` → 计算节点的 `tunnel_target`
@@ -147,8 +152,6 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 一个**插件** = 一种服务，是**一个目录**，三半：
 
-| 半边 | 在哪 | 谁读 |
-|---|---|---|
 | 半边 | 在哪 | 谁读它 | 什么时候读 |
 |---|---|---|---|
 | 身份与声明 | `<插件目录>/plugin.json` | 两侧（**一份清单，一个 schema**） | 客户端启动 / 守护进程启动 / deploy.sh |
@@ -201,8 +204,9 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 **框架不认识任何插件名。** 守护进程、`session.js`、`windows.js`、`run.sbatch` 的
 生命周期部分，做的事全都与"哪个插件"无关：提交、端口分配、ACL、状态机、判活、
-续期、对账、心跳、停止。唯一的例外是几处**注册表**：`PLUGIN_BY_NAME`、
-`plugins/index.js`。
+续期、对账、心跳、停止。唯一的例外是几处**注册表**：守护进程的
+`scan_plugins(dir)` 与客户端的 `plugins/index.js` —— 它们**扫**出插件表，
+表里有什么完全取决于磁盘上放了什么。
 
 插件只回答一个问题：**这个会话该怎么用。** code-server 自动登录；sshd 把本地 ssh
 配好。它们拿到的是框架显式递过去的一组能力（客户端那边叫 `ctx`），而不是整个模块
@@ -297,9 +301,9 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 - 作业由 Slurm 管，不随 SSH 会话生死；
 - 守护进程是**唯一**把 `(uid, job_id) → 端口` 这条映射写进数据库的实体，
   用户自己写的会话文件只是「登记提示」，不是授权来源
-  （`validate_session()`，`cluster/slurmate-sessiond:1433-1478`）；
+  （`validate_session()`，`cluster/slurmate-sessiond`）；
 - 客户端消失 ≠ 作业消失。守护进程用**两阈值心跳**区分这两种情况
-  （`phase_heartbeat()`，`cluster/slurmate-sessiond:1296-1323`）：
+  （`phase_heartbeat()`，`cluster/slurmate-sessiond`）：
 
   | 心跳中断时长 | 判定 | 动作 |
   |---|---|---|
@@ -317,15 +321,15 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
   是它连话都没能说上。
 
   从 `suspect` 回到 `enrolled` 只需一次心跳：`op_heartbeat` 把状态改回来即可，
-  作业和 ACL 全程没被碰过（`cluster/slurmate-sessiond:1776-1788`）。
+  作业和 ACL 全程没被碰过（`cluster/slurmate-sessiond`）。
 
 判活的依据只有客户端经 unix socket 发来的 `last_hb_socket`。作业侧写的 `.jobhb`
-文件**不参与判活**（`client/README.md:164-165`），它的作用是别的：区分「是客户端掉了
+文件**不参与判活**（`client/README.md`），它的作用是别的：区分「是客户端掉了
 还是作业没了」。
 
 ## 三、状态机
 
-定义在 `cluster/slurmate-sessiond:57-70`：
+定义在 `cluster/slurmate-sessiond`：
 
 ```
                         ┌──────────── reserved_ttl 到期 ──────────► expired
@@ -348,31 +352,31 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 
 | 状态 | 含义 | 谁把它推进来 |
 |---|---|---|
-| `reserved` | 已分配候选端口，尚未提交 | `op_submit` 插行时（`cluster/slurmate-sessiond:1890-1895`） |
-| `submitted` | `sbatch` 已返回 `job_id` | `op_submit` 提交成功后（:1920） |
-| `enrolled` | 作业在跑、会话文件校验通过、**ACL 已装** | `try_enroll()`（:1190-1229） |
-| `suspect` | 心跳丢失 > `suspect_after`：判定网络闪断，什么都不做 | `phase_heartbeat()`（:1308-1312） |
-| `orphaned` | 心跳丢失 > `orphan_after`：判定异常退出，已发 `scancel` | `phase_heartbeat()`（:1313-1323） |
-| `releasing` | 正在拆除 | `begin_release()`（:1325-1327） |
-| `released` | 终态 | `phase_release()`（:1329-1348） |
-| `rejected` | 终态（校验失败） | `reject()`（:1480-1508） |
+| `reserved` | 已分配候选端口，尚未提交 | `op_submit` 插行时（`cluster/slurmate-sessiond`） |
+| `submitted` | `sbatch` 已返回 `job_id` | `op_submit` 提交成功后 |
+| `enrolled` | 作业在跑、会话文件校验通过、**ACL 已装** | `try_enroll()` |
+| `suspect` | 心跳丢失 > `suspect_after`：判定网络闪断，什么都不做 | `phase_heartbeat()` |
+| `orphaned` | 心跳丢失 > `orphan_after`：判定异常退出，已发 `scancel` | `phase_heartbeat()` |
+| `releasing` | 正在拆除 | `begin_release()` |
+| `released` | 终态 | `phase_release()` |
+| `rejected` | 终态（校验失败） | `reject()` |
 | `expired` | 终态（TTL 到期仍未登记） | `phase_pending()` / `try_enroll()` |
 
 两条不变量：
 
-- `TERMINAL_STATES = (released, rejected, expired)`（:68）；
-- `ACL_STATES = (enrolled, suspect, orphaned, releasing)`（:70）——
+- `TERMINAL_STATES = (released, rejected, expired)`；
+- `ACL_STATES = (enrolled, suspect, orphaned, releasing)` ——
   **这个集合与「nft 里应该存在哪些规则」严格一一对应**。`reconcile()` 用它算期望集合，
   `phase_release()` 保证「`released` 之前规则一定在，之后规则一定不在」
-  （`cluster/slurmate-sessiond:1330-1333`）。
+  （`cluster/slurmate-sessiond`）。
 
 另有三个记录在数据库 `trust` 字段上的特殊值。`recovered` 表示这条记录是从 nft 规则
-反推出来的（见第六节），它**永不参与自动 `scancel`**（:1314-1316, 1069-1070）——
+反推出来的（见第六节），它**永不参与自动 `scancel`** ——
 对「用户是否还连着」没有可靠信息时，误杀在跑的作业比多留一会儿更糟。
 
 ## 四、nft 规则为什么写成单条 `meta skuid != UID drop`
 
-规则形态（`cluster/slurmate-sessiond:490-492,579-594`）：
+规则形态（`cluster/slurmate-sessiond`）：
 
 ```
 ip daddr <节点IP> tcp dport <端口> ct state new \
@@ -380,7 +384,7 @@ ip daddr <节点IP> tcp dport <端口> ct state new \
 ```
 
 对比另一种常见写法：「先无条件 `drop`，再对属主 `accept`」的一对规则。单条写法有三个
-具体好处，写在 `Nft` 的类文档里（`cluster/slurmate-sessiond:494-499`）：
+具体好处，写在 `Nft` 的类文档里（`cluster/slurmate-sessiond`）：
 
 1. **爆炸半径锁死在「该 UID 自己」。** 配对写法里的无条件 `drop` 一旦被误注册
    （端口算错、规则残留），打死的是这个端口上的**所有**用户；单条写法最坏也只是
@@ -392,14 +396,14 @@ ip daddr <节点IP> tcp dport <端口> ct state new \
    连接不会断。
 
 规则的 `comment` 编码了 `(uid, job_id, port)`，格式由 `comment_for()` 固定
-（`cluster/slurmate-sessiond:575-577`）。它同时是三条路径的索引：删除
+（`cluster/slurmate-sessiond`）。它同时是三条路径的索引：删除
 （`del_by_comment()`）、对账（`session_rules()` 解析出 `{comment: handle}`）、
 以及数据库丢失后的反向恢复（第六节）。
 
 ### 基础规则与「几何约束」
 
 除了会话规则，链上还有两条基础规则，用 `insert`（而不是 `add`）放在链首
-（`cluster/slurmate-sessiond:542-561`）：
+（`cluster/slurmate-sessiond`）：
 
 | comment | 规则 | 作用 |
 |---|---|---|
@@ -407,7 +411,7 @@ ip daddr <节点IP> tcp dport <端口> ct state new \
 | `slurmate-base-offcluster` | `ip daddr != <cluster_cidr> accept` | **最后一道几何约束**：本网段之外的流量一律放行 |
 
 第二条是防御性设计：即使前面所有校验都被绕过，也影响不到集群网段之外
-（`cluster/slurmate-sessiond:555-556`）。它同时决定了部署的一个硬性前提 ——
+（`cluster/slurmate-sessiond`）。它同时决定了部署的一个硬性前提 ——
 登录节点与计算节点必须能被**一个** CIDR 覆盖（否则计算节点的流量会被这条规则
 提前放行，会话规则永远匹配不到，ACL 静默失效）。详见
 [DEPLOYMENT.md](./DEPLOYMENT.md) 的「前置条件」第 2 条。
@@ -417,17 +421,17 @@ ip daddr <节点IP> tcp dport <端口> ct state new \
 nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两个表都匹配同一个
 `dport` 时，谁先求值是未定义的。所以 Slurmate 不试图去控制顺序，而是从构造上
 让顺序无关紧要：**端口区间与集群上其他端口管理系统的区间完全不交**
-（`cluster/slurmate.conf.example:52-64`）。
+（`cluster/slurmate.conf.example`）。
 
 这个约束在两处被强制执行：
 
 - 配置自检：`Config.validate()` 断言端口池与 `reserved_ranges` 不重叠，不满足则
-  **拒绝启动**（`cluster/slurmate-sessiond:300-303,292-293`）；
+  **拒绝启动**（`cluster/slurmate-sessiond`）；
 - 部署预检：`deploy.sh` 读同一份配置做同样的区间比对，重叠即中止部署
-  （`cluster/deploy.sh:371-410`）。
+  （`cluster/deploy.sh`）。
 
 要注意的是这里**没有**用「端口必须 > 55000」之类的硬编码约定。那是某个具体站点的
-习惯，写死在代码里会让用低位端口的集群直接装不上（`cluster/slurmate-sessiond:228-229`）。
+习惯，写死在代码里会让用低位端口的集群直接装不上（`cluster/slurmate-sessiond`）。
 要避让哪些区间由站点的 `reserved_ranges` 决定。
 
 ## 五、信任模型
@@ -435,21 +439,21 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 ### 身份：`SO_PEERCRED`，不是命令行参数
 
 守护进程在**读任何数据之前**先取 `getsockopt(SO_PEERCRED)`
-（`cluster/slurmate-sessiond:1568-1576`）。uid 由内核在 `connect()` 时填充，
+（`cluster/slurmate-sessiond`）。uid 由内核在 `connect()` 时填充，
 用户态不可伪造；pid 不可信（会复用），所以不用它。
 
 socket 权限是 `0666`，但**安全性不建立在这个权限位上**
-（`cluster/slurmate-sessiond:969-970`）。任何本地用户都能连上它，但只能以
+（`cluster/slurmate-sessiond`）。任何本地用户都能连上它，但只能以
 **自己的**身份说话。
 
 ### 会话文件是「登记提示」，不是授权来源
 
 一个用户可以在自己家目录里写任意内容的 `job-<id>.json`。所以真正的授权是：
 **这个 `job_id` 在数据库里，且由本守护进程代表该 uid 提交过**
-（`cluster/slurmate-sessiond:1434-1435`）。
+（`cluster/slurmate-sessiond`）。
 
 在此之上，会话文件的每一项都对应一个具体攻击（`validate_session()`，
-`cluster/slurmate-sessiond:1433-1478`）：
+`cluster/slurmate-sessiond`）：
 
 | 检查 | 挡住的攻击 |
 |---|---|
@@ -462,55 +466,63 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 | `node` 与 Slurm 的 `NodeList` 一致 | 让守护进程为**任意集群内 IP** 装规则（虽被限制在自己候选端口内，仍足以对其他用户造成定向丢包） |
 | `node_ip` 与 Slurm 的 `NodeAddr` 一致 | 同上 |
 
-读取路径本身也是安全关键（`load_session_file()`，`cluster/slurmate-sessiond:1373-1431`）：
+读取路径本身也是安全关键（`load_session_file()`，`cluster/slurmate-sessiond`）：
 逐级 `lstat` 目录链（非符号链接、属主是本人或 root、组/其他不可写）、
 `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` 打开、`fstat` 而非 `stat`（防 TOCTOU）、
 要求常规文件 / 属主正确 / 模式为 `0600` / 大小上限 / `st_nlink == 1`。
 
 用户家目录一律用 `pwd.getpwuid(uid).pw_dir` 取，**绝不拼「家目录前缀 + 用户名」** ——
 用户名与目录名不保证一致，前缀本身也是站点配置（`user_home()`，
-`cluster/slurmate-sessiond:1358-1371`）。
+`cluster/slurmate-sessiond`）。
 
 ### root 不写用户家目录
 
 口令由**作业自己生成**并写进 `0600` 的会话文件；守护进程全程只读用户家目录，
 并且 systemd 单元把共享存储挂成只读（`ReadOnlyPaths=`，由 `deploy.sh` 按
-`readonly_paths` 渲染，`cluster/slurmate-sessiond.service.in:44-49`）。
+`readonly_paths` 渲染，`cluster/slurmate-sessiond.service.in`）。
 
 这样 root 身上没有「写用户文件」这条攻击面，也避免了 root 被符号链接诱骗
-（`cluster/run.sbatch:21-24`）。代价是守护进程不能替用户创建目录 —— 它也不创建：
-`op_submit` 只插数据库行、组环境变量、调 `sbatch`（`cluster/slurmate-sessiond:1881-1887`）。
+（`cluster/run.sbatch`）。代价是守护进程不能替用户创建目录 —— 它也不创建：
+`op_submit` 只插数据库行、组环境变量、调 `sbatch`（`cluster/slurmate-sessiond`）。
 
-### 为什么 `[plugin:code-server] auth_mode` 默认是 `password`
+### 为什么 `auth_mode` 默认是 `password`
 
 `nft` ACL 的 hook 点是**登录节点的 output 链**（`Nft.CHAIN`，
-`cluster/slurmate-sessiond:503`；建链语句在 :537-538）。它拦得住「登录节点上的其他
-用户连你的端口」，拦不住「另一个作业恰好被调度到同一台计算节点之后直接 curl 你的
-端口」—— 那条流量根本不经过登录节点。
+`cluster/slurmate-sessiond` 的 `Nft` 类）。它拦得住「登录节点上的其他用户连你的
+端口」，拦不住「另一个作业恰好被调度到同一台计算节点之后直接 curl 你的端口」
+—— 那条流量根本不经过登录节点。
 
-这不是某个集群的配置问题，而是这个架构的固有边界（`cluster/slurmate.conf.example:128-143`）。
-共享家目录 `0700` 之类的保护恰好被绕过，因为攻击者用的是你的身份。所以默认
-`auth_mode = password`，`run.sbatch` 甚至明确拒绝在拿不到口令时静默降级为
-`auth=none`（`cluster/run.sbatch:355-361`）。
+这不是某个集群的配置问题，而是这个架构的固有边界。共享家目录 `0700` 之类的保护
+恰好被绕过，因为攻击者用的是你的身份。
+
+所以 **code-server 插件在清单的 `site.enumKeys` 里把 `auth_mode` 的缺省声明成
+`password`**（`plugins/code-server/plugin.json`），而宿主的作业模板明确拒绝在
+拿不到口令时静默降级为 `auth=none`（`cluster/run.sbatch` 的 `case "$SLURMATE_AUTH_MODE"`
+分支，`exit 23`）。
+
+★ **这个缺省值住在插件里，不在基座里** —— 基座只知道"认证方式是一个由插件声明的
+字符串"，认得的三种（`password` / `publickey` / `none`）之外一律 `exit 24`，
+由插件自己在 `start_<短名>` 里实现。理由：`password` 是不是安全的缺省，取决于那个
+服务能不能接受一个口令 —— 那是插件的知识，不是宿主的。
 
 ## 六、对账与自愈
 
 链的 policy 是 `accept`，规则没了不会报错，只会**悄悄失去保护**。所以 `tick()` 的
-第一步就是对账（`reconcile()`，`cluster/slurmate-sessiond:1027-1063`），每个 tick
+第一步就是对账（`reconcile()`，`cluster/slurmate-sessiond`），每个 tick
 （默认 2 秒）跑一次：
 
 1. `nft.ensure()` 逐项补齐**表、链、两条基础规则**。它不能只判「表是否存在」——
    如果有人只删了链而表还在，早期实现会直接返回成功，之后所有 `add rule` 都失败，
    对账每 tick 提前返回，**后续所有清理阶段被跳过**：新会话拿不到 ACL、孤儿规则
-   永远不删，而进程看起来「健康」、不会重启（`cluster/slurmate-sessiond:519-527`）。
+   永远不删，而进程看起来「健康」、不会重启（`cluster/slurmate-sessiond`）。
 2. 算出期望集合（`ACL_STATES` 里每条记录对应的 comment）。
 3. **多出来的规则 → 删**（fail-secure：宁可少放行）。
 4. **缺失的规则 → 补**。
 
 启动时还有一步 `recover_from_rules()`：从规则 comment 反推出 `(uid, job_id, port)`，
 配合 `scontrol` 确认作业仍在 `RUNNING` 且属主相符，就把记录重建出来，标
-`trust='recovered'`（`cluster/slurmate-sessiond:1065-1128`）。顺序很重要：**先恢复
-再对账**，否则对账会把它们当孤儿删掉（`cluster/slurmate-sessiond:943-944`）。
+`trust='recovered'`（`cluster/slurmate-sessiond`）。顺序很重要：**先恢复
+再对账**，否则对账会把它们当孤儿删掉（`cluster/slurmate-sessiond`）。
 
 不实现这一步的后果：数据库一丢，`reconcile()` 会把所有规则当孤儿删掉，在跑的会话
 瞬间失去防护，而且因为数据库里没有 `job_id` 归属，它们**永远无法重新登记**
@@ -525,31 +537,31 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 `scontrol` 查不到作业有两种截然不同的原因：作业真的结束了，或者**只是问不到**
 （`slurmctld` 重启中、`munge` 抖动、控制器繁忙）。两者无法用返回码区分，所以
 `Slurm.job_state()` 靠的是**控制器本身是否可达**（`scontrol ping`），返回三态：
-`JOB_OK` / `JOB_MISSING` / `JOB_UNKNOWN`（`cluster/slurmate-sessiond:639-681`）。
+`JOB_OK` / `JOB_MISSING` / `JOB_UNKNOWN`（`cluster/slurmate-sessiond`）。
 
 - `JOB_UNKNOWN`：**什么都不做**，只记日志。
 - `JOB_MISSING`：还要连续确认 `job_missing_confirm_ticks` 次（默认 3）才认账
-  （`cluster/slurmate-sessiond:1161-1172`）。
+  （`cluster/slurmate-sessiond`）。
 
 早期实现把两者合并成 `None`，后果是控制器抖一次，所有活跃会话的 ACL 在一秒内
 全部消失、会话文件被删（再也无法重新登记），而作业还在跑
-（`cluster/slurmate-sessiond:642-653`）。
+（`cluster/slurmate-sessiond`）。
 
 ### 启动静默期
 
 守护进程重启后的 `startup_grace_seconds`（默认 120 秒）内不做任何超时判定 ——
-否则重启窗口会把在跑的会话误判成孤儿（`cluster/slurmate-sessiond:913-914,1303-1304`）。
+否则重启窗口会把在跑的会话误判成孤儿（`cluster/slurmate-sessiond`）。
 
 ### 退出时不删 nft 规则
 
 规则代表的是**作业**的存在，而作业是 Slurm 管的、不随守护进程生死。重启后靠对账
-收敛（`cluster/slurmate-sessiond:1005-1006`）。
+收敛（`cluster/slurmate-sessiond`）。
 
 ### 目标变化时重装 ACL
 
 已登记的会话在作业重启/重排后可能换节点或端口，`refresh_enrollment()` 会跟着更新
 规则；但**会话文件暂时读不到时绝不拆规则**（NFS 抖动、作业正在重启都可能造成），
-因为那会打断正在用的隧道（`cluster/slurmate-sessiond:1231-1257`）。
+因为那会打断正在用的隧道（`cluster/slurmate-sessiond`）。
 
 ## 八、部署拓扑与进程加固
 
@@ -558,16 +570,16 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 
 | 指令 | 为什么 |
 |---|---|
-| `ProtectSystem=full` | 必须是 `full` 而不是 `strict`：`strict` 会把 `/run` 也挂成只读，切断 munge 的 socket，`scontrol`/`scancel` 全部失败（:41-43） |
-| `ReadOnlyPaths=@READONLY_PATHS@` | 共享存储只读挂载（:44-49） |
-| `PartOf=nftables.service` | `nftables.service` 的 `ExecReload` 是 `nft 'flush ruleset; include ...'`，会连本服务的表一起清掉；`PartOf` 让本服务跟着重启，保证表被重建。**不能用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来（:20-23） |
-| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | nft 走 netlink；`scontrol`/`scancel` 走 AF_UNIX（munge）+ AF_INET（slurmctld）（:72-73） |
-| `CapabilityBoundingSet` | `CAP_NET_ADMIN`（nft）、`CAP_SETUID/SETGID`（setuid 提交）、`CAP_DAC_READ_SEARCH`/`CAP_DAC_OVERRIDE`（读 0600 会话文件）、`CAP_KILL`（回收子进程）（:75-82） |
-| `StartLimitIntervalSec=0` + `Restart=always` | 永不放弃重启（:24-25,33-34） |
+| `ProtectSystem=full` | 必须是 `full` 而不是 `strict`：`strict` 会把 `/run` 也挂成只读，切断 munge 的 socket，`scontrol`/`scancel` 全部失败 |
+| `ReadOnlyPaths=@READONLY_PATHS@` | 共享存储只读挂载 |
+| `PartOf=nftables.service` | `nftables.service` 的 `ExecReload` 是 `nft 'flush ruleset; include ...'`，会连本服务的表一起清掉；`PartOf` 让本服务跟着重启，保证表被重建。**不能用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来 |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | nft 走 netlink；`scontrol`/`scancel` 走 AF_UNIX（munge）+ AF_INET（slurmctld） |
+| `CapabilityBoundingSet` | `CAP_NET_ADMIN`（nft）、`CAP_SETUID/SETGID`（setuid 提交）、`CAP_DAC_READ_SEARCH`/`CAP_DAC_OVERRIDE`（读 0600 会话文件）、`CAP_KILL`（回收子进程） |
+| `StartLimitIntervalSec=0` + `Restart=always` | 永不放弃重启 |
 
 单元是**模板**（`.service.in`），`deploy.sh` 安装时把 `@READONLY_PATHS@` 替换成站点
 的真实挂载点；`readonly_paths` 为空时整行被删除，同时打印警告
-（`cluster/deploy.sh:651-665`）。
+（`cluster/deploy.sh`）。
 
 ## 九、已知边界
 
@@ -576,20 +588,22 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 1. **单一登录节点。** 规则挂在守护进程所在那台机器的 output 链上。多登录节点集群
    中，用户落到另一台登录节点时那条链上没有规则，保护静默消失。
 2. **登录节点与计算节点必须能用同一个 CIDR 表达。** 多网段集群目前无法表达
-   （`cluster/slurmate.conf.example:29-30`）。
+   （`cluster/slurmate.conf.example`）。
 3. **计算节点上没有 per-user 网络隔离时，ACL 覆盖不到同节点内的横向访问。**
-   这是 `[plugin:code-server]` 的 `auth_mode` 默认取 `password` 的原因
-（`cluster/slurmate.conf.example` 里那个块上方的整段说明）。
+   这是 code-server 插件的 `auth_mode` 默认取 `password` 的原因
+   （`plugins/code-server/README.md`）。
 4. **`op_submit` 非幂等**：每次调用都生成新 `sid`、插新行、提交新作业。而
    `count_active()` 只数 `ACL_STATES`，`submitted` 不在内 —— `max_active_per_user`
    拦不住并发的第二个提交（上限退化为 `max_pending_per_user`）。所以客户端在
    `submit` 超时时**绝不重试**，改为用不带 `session_id` 的 `status` 去认领
-   （`client/src/main/session.js:19-23,156-173`）。
+   （`client/src/main/session.js`）。**未修，编号 F14。**
 5. **`goodbye` 返回 `ok:true` 不代表作业被取消了。** `op_goodbye` 丢弃
-   `scancel` 的返回值，`phase_release` 也不确认作业是否真的没了
-   （`cluster/slurmate-sessiond:1790-1801,1329-1348`）。所以客户端把「正在释放」和
-   「已结束」当成两个状态（`client/src/main/session.js:24-25`）。详见
-   [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)。
+   `scancel` 的返回值，`phase_release` 也不确认作业是否真的没了。所以客户端把
+   「正在释放」和「已结束」当成两个状态（`client/src/main/session.js`）。
+   **未修，编号 F12 / F13。**
+
+★ 第 4、5 两条是**当前代码里的缺陷**，不是设计上的取舍 —— 连同其余未修项、
+未实测项与结构性欠账，全部记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。
 
 ## 延伸阅读
 
@@ -597,3 +611,5 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 - 配置项参考：[CONFIGURATION.md](./CONFIGURATION.md)
 - RPC 契约与错误码：[PROTOCOL.md](./PROTOCOL.md)
 - 常见故障：[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)
+- **未修的缺陷、未实测的假设、结构性的欠账：[KNOWN-ISSUES.md](./KNOWN-ISSUES.md)**
+- 写一个插件：[plugins/README.md](../plugins/README.md)

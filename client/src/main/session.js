@@ -21,7 +21,7 @@
  *    → 超时 45s（比 CLI 内部的 40s 长）、**超时绝不重试**、用 status 认领。
  *
  * 3. **`released` 不代表作业已停**。守护进程的 `phase_release` 只删规则、删文件、
- *    置 released，从不确认 `scancel` 真的成功（见记忆 cluster-side-defects 的 F12/F13）。
+ *    置 released，从不确认 `scancel` 真的成功（`docs/KNOWN-ISSUES.md` 的 F12 / F13）。
  *    所以「正在释放」和「已结束」必须是两个状态，且不能自己宣布成功。
  */
 
@@ -659,7 +659,7 @@ class SessionController extends EventEmitter {
     const c = classify(resp, { op: 'goodbye' });
     if (c.action === Action.OK) {
       // ★ 注意：ok:true **不等于作业真的被取消了**。
-      //   守护进程的 op_goodbye 丢弃 scancel 的返回值（记忆 cluster-side-defects F12），
+      //   守护进程的 op_goodbye 丢弃 scancel 的返回值（docs/KNOWN-ISSUES.md 的 F12），
       //   而 phase_release 从不确认作业是否真的没了（F13）。所以这里只能说「已请求释放」。
       this._setState(State.RELEASING);
       return { ok: true, state: 'releasing', detail: '已请求释放，等待控制节点确认。' };

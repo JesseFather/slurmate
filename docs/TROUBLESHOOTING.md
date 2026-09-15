@@ -25,7 +25,7 @@ ls -l ~/.slurmate/logs/job-*.log
 tail -100 ~/.slurmate/logs/job-<job_id>.log
 ```
 
-审计日志里的事件名是最快的线索（`audit()`，`cluster/slurmate-sessiond:918-929`）：
+审计日志里的事件名是最快的线索（`audit()`，`cluster/slurmate-sessiond`）：
 `submitted` / `enrolled` / `suspect` / `suspect_recovered` / `orphaned` / `releasing` /
 `released` / `rejected` / `expired` / `renewed` / `renew_failed` / `renew_exhausted` /
 `job_query_failed` / `acl_orphan_removed` / `acl_reinstalled` / `throttled` / `recovered`。
@@ -37,7 +37,7 @@ tail -100 ~/.slurmate/logs/job-<job_id>.log
 **症状**：客户端停在「排队中 · 作业 12345 · 等待调度与登记」，一直不出隧道目标。
 
 **先分清三件事**。守护进程只在会话文件校验通过、ACL 装好之后才给 `tunnel_target`
-（`try_enroll()`，`cluster/slurmate-sessiond:1190-1229`），所以卡住的原因只有三类：
+（`try_enroll()`，`cluster/slurmate-sessiond`），所以卡住的原因只有三类：
 
 ### 1a. 作业根本没在跑（还在排队，或已经死了）
 
@@ -47,7 +47,7 @@ scontrol show job <job_id>
 ```
 
 `PENDING` / `CONFIGURING` 时守护进程**刻意什么都不做** —— 重排队不释放
-（`cluster/slurmate-sessiond:1178-1179`）。若 `squeue` 已经查不到，那是在走
+（`cluster/slurmate-sessiond`）。若 `squeue` 已经查不到，那是在走
 「作业查不到要连续确认」的路径（见第六节）。分区满、`QOSMaxJobsPerUserLimit`、
 资源不足都会让作业长时间挂在 `PD`，这属于 Slurm 侧的问题，不是 Slurmate 的问题。
 
@@ -55,7 +55,7 @@ scontrol show job <job_id>
 
 这是**最常见也最容易被误判**的一类。作业在计算节点上写好了文件，守护进程在登录
 节点上通过 NFS 读，而目录属性的缓存默认是 `acdirmax=60s` —— **会话登记最多延迟
-60 秒**（`tools/check-cluster.sh:483-491` 会专门就这一项给 WARN）。
+60 秒**（`tools/check-cluster.sh` 会专门就这一项给 WARN）。
 
 **怎么区分**：在**登录节点**上看文件到底在不在：
 
@@ -66,14 +66,14 @@ ls -l /shared/home/alice/.slurmate/sessions/
 - 文件**已经在**，只是守护进程还没登记 → 就是属性缓存，等一下即可，不是故障。
 - 文件**不在**，但计算节点上能看到 → 同样的原因，或者共享存储没挂全。
 - 两边都没有 → 作业没写成功，去看作业日志里有没有
-  「警告：写会话文件失败（NFS 不可写？）」（`cluster/run.sbatch:367,375`）。
+  「警告：写会话文件失败（NFS 不可写？）」（`cluster/run.sbatch`）。
 
 想缩短首连的等待，就往挂载参数里加 `actimeo=5` 之类的显式值。
 
 ### 1c. 会话文件写了，但校验不通过
 
 守护进程对每一项校验都有细粒度原因（`load_session_file()` 与
-`validate_session()`，`cluster/slurmate-sessiond:1373-1478`）。校验失败会走
+`validate_session()`，`cluster/slurmate-sessiond`）。校验失败会走
 `reject()`：日志里立刻有一行 `拒绝会话 … : <原因>`，审计记 `rejected`，并且
 **留一份取证副本**在 `rejected_dir`（默认 `/var/lib/slurmate-session/rejected/<uid>/`），
 权限 `0600`、root 只读。
@@ -100,7 +100,7 @@ slurmate status --json      # 看 note 字段，形如 enroll_timeout:not_yet
 
 超时的处置是记 `expired` **并 `scancel` 掉作业** —— 因为 `expired` 不在
 `phase_running` 的扫描集合里，不取消的话没人会再回收它
-（`cluster/slurmate-sessiond:1194-1204`）。
+（`cluster/slurmate-sessiond`）。
 
 **若这就是你要的**（比如只想看看到底为什么），可以盯审计日志与守护进程的
 warning 行，它们在 `rejected` 与 `expired` 时都会说话。
@@ -117,17 +117,17 @@ warning 行，它们在 `rejected` 与 `expired` 时都会说话。
 原因链条：
 
 1. `op_goodbye` 调 `scancel`，但**丢弃了它的返回值**
-   （`cluster/slurmate-sessiond:1797-1798`；`Slurm.cancel()` 在失败时只写一行
-   warning，`:859-864`）；
+   （`cluster/slurmate-sessiond`；`Slurm.cancel()` 在失败时只写一行
+   warning）；
 2. `phase_release` 只做「删规则 → 删会话文件 → 置 `released`」，
-   **从不确认作业是否真的没了**（`cluster/slurmate-sessiond:1329-1348`）；
+   **从不确认作业是否真的没了**（`cluster/slurmate-sessiond`）；
 3. 记录在 `released_keep_seconds`（默认 600 秒）后被 GC 删掉
-   （`phase_gc()`，:1350-1355），此后没有任何人会再想起这个作业；
-4. 续期只对 `enrolled` 且心跳新鲜的会话生效（`maybe_renew()`，:1259-1264），
+   （`phase_gc()`），此后没有任何人会再想起这个作业；
+4. 续期只对 `enrolled` 且心跳新鲜的会话生效（`maybe_renew()`），
    所以它也不会被续命。
 
 **最终结果**：作业会一直占着节点，直到它的 `TimeLimit` 到期被 Slurm 自然杀死。
-`--no-requeue` 已经写在作业模板里（`cluster/run.sbatch:29`），所以不会重排队。
+`--no-requeue` 已经写在作业模板里（`cluster/run.sbatch`），所以不会重排队。
 
 **怎么做**：
 
@@ -143,10 +143,11 @@ scancel <job_id>                                 # 手工收尾
 
 **客户端为什么不能自己宣布成功**：`released` 只代表「守护进程那边拆干净了」，
 不代表「作业停了」。所以界面把「正在释放」和「已结束」当成两个状态，
-并且在超时/失败时明确说「作业可能仍在运行」（`client/src/main/session.js:24-25,424-442`）。
+并且在超时/失败时明确说「作业可能仍在运行」（`client/src/main/session.js`）。
 
-**根治**需要在 `op_goodbye` 或 `phase_release` 里确认作业已停 —— 这属于集群侧的
-已知缺陷，不在本文范围内。
+**根治**需要在 `op_goodbye` 或 `phase_release` 里确认作业已停 —— 这是集群侧的
+已核实缺陷，**编号 F12 / F13**，后果与修法写在
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md)。本文不重复那两条，只讲怎么分辨与收尾。
 
 ---
 
@@ -154,19 +155,19 @@ scancel <job_id>                                 # 手工收尾
 
 **症状**：`slurmate doctor` 报「规则与会话一致 ✗」，或者 `rules_count` 小于
 `active_sessions`。**用户本人通常毫无感觉** —— 因为规则的策略是 `accept`，
-规则没了只会**悄悄失去保护**，不会报错（`reconcile()` 的注释，`cluster/slurmate-sessiond:1027-1032`）。
+规则没了只会**悄悄失去保护**，不会报错（`reconcile()` 的注释，`cluster/slurmate-sessiond`）。
 
 **三个常见成因**：
 
 1. **`nftables.service` 被 reload。** 它的 `ExecReload` 是
    `nft 'flush ruleset; include ...'` —— 会清掉**整台机器上所有表**的规则集，
-   包括本服务的（`cluster/slurmate-sessiond.service.in:20-22`）。这也可能是
+   包括本服务的（`cluster/slurmate-sessiond.service.in`）。这也可能是
    `systemctl restart nftables`、或有人手工 `nft flush ruleset` 造成的。
 2. **有人只删了链**（`nft delete chain inet slurmate output`）而表还在。早期实现
    在这种情况下会直接返回「表在，不用管」，之后所有 `add rule` 都失败、对账每 tick
    提前返回、**后续所有清理阶段被跳过** —— 新会话拿不到 ACL、孤儿规则永远不删，
    而进程看起来「健康」、不会重启。现在 `ensure()` 逐项补齐表/链/基础规则
-   （`cluster/slurmate-sessiond:518-561`）。
+   （`cluster/slurmate-sessiond`）。
 3. **有人手工 `nft delete table inet slurmate`。** 卸载流程不会这么干（它先确认
    服务已停），但手工排障时有可能。
 
@@ -181,15 +182,15 @@ sudo systemctl restart slurmate-sessiond            # 自愈：先反推恢复�
 自愈机制本身是自动的，正常情况下你不需要动手：
 
 - 单元里有 `PartOf=nftables.service`，nftables 重启时本服务会跟着重启，表被重建
-  （:20-23）。**刻意不用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来。
+  。**刻意不用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来。
 - 每个 tick 都跑一次对账：多出来的规则删掉（fail-secure，宁可少放行），缺失的规则补上
-  （`cluster/slurmate-sessiond:1049-1062`）。
+  （`cluster/slurmate-sessiond`）。
 - 启动时先 `recover_from_rules()` 从规则 comment 反推重建记录，**再**对账 ——
-  顺序反了的话对账会把它们当孤儿删掉（:943-948,1065-1128）。反推出来的记录标
-  `trust='recovered'`，**永不参与自动 `scancel`**（:1314-1316）。
+  顺序反了的话对账会把它们当孤儿删掉。反推出来的记录标
+  `trust='recovered'`，**永不参与自动 `scancel`**。
 
 **预防**：部署脚本**绝不**执行 `nft flush ruleset`，也绝不 reload/restart
-`nftables.service`（`cluster/deploy.sh:12-13`）。`tools/check-cluster.sh:148-161`
+`nftables.service`（`cluster/deploy.sh`）。`tools/check-cluster.sh`
 会检查 `/etc/nftables.conf`（RHEL 9 上是 `/etc/sysconfig/nftables.conf`）里有没有
 `flush ruleset`，有就给出 WARN。
 
@@ -200,13 +201,19 @@ sudo systemctl restart slurmate-sessiond            # 自愈：先反推恢复�
 **症状**：隧道通了、页面出来了，但立刻跳回登录表单；或者提示
 「自动登录失败（HTTP 200，未拿到会话 cookie）」。
 
-**原因**：code-server 在**口令错误时返回的是 HTTP 200**，只是没有 `Set-Cookie`。
+**原因**：这个服务在**口令错误时返回的是 HTTP 200**，只是没有 `Set-Cookie`。
 任何 `if (status === 200) 成功` 的写法都会在口令错时报成功
-（`client/src/main/login.js:9-13`，`client/src/main/index.js:156-162`）。
+（`client/src/main/weblogin.js`）。
 
 所以判定成败**只能看 cookie jar**，不能看状态码，也不能解析响应头的
 `set-cookie`（Electron `net` 模块在这件事上不可靠，查 jar 既避开这个坑，
-又更贴近真正关心的问题 —— cookie 到底进没进去，`client/src/main/login.js:20-29`）。
+又更贴近真正关心的问题 —— cookie 到底进没进去，`client/src/main/weblogin.js`）。
+
+★ **这条判据留在框架里，而不是插件里**：它不是 code-server 的性质，是**网页表单
+登录这一类协议**的陷阱 —— 换个服务（Jupyter 那一类）一模一样。所以基座实现的是
+「POST 一个表单、然后查 cookie」这个通用机制，而**往哪 POST / 字段叫什么 / 看哪个
+cookie 这三条具体值**由插件清单里的 `contributes.login` 自述。基座一个字都不知道
+code-server 是什么。
 
 **怎么做**：
 
@@ -227,14 +234,14 @@ curl -i -X POST -d 'password=<口令>' http://127.0.0.1:<本地端口>/login
 
 | 现象 | 原因 | 怎么做 |
 |---|---|---|
-| 两个口令一致，但仍然登不上 | code-server 升级改动了 `/login` 端点或表单字段名 | 客户端与 code-server 的版本耦合面**只有**这两样（`/login` 与 `password`），改 `client/src/main/login.js` 的常量 |
+| 两个口令一致，但仍然登不上 | 那个服务升级后改动了登录端点、表单字段名或 cookie 名 | 客户端与它的版本耦合面**只有**这三样。改的是**插件的清单**（`contributes.login` 的 `path` / `field` / `cookie`），**不是客户端源码** —— 见 [`plugins/code-server/README.md`](../plugins/code-server/README.md) |
 | 守护进程返回的口令与作业文件里的不一致 | 作业重启过（`slurm_restart_number`），或会话文件被重新写过 | 用文件里的那份；必要时重启会话 |
-| 守护进程**不返回** `auth_password` | 会话不在 `ACL_STATES`（`cluster/slurmate-sessiond:1724-1732`），或 NFS 抖动导致读不到 | 等一个 tick；若持续，按第一节排查会话文件 |
+| 守护进程**不返回** `auth_password` | 会话不在 `ACL_STATES`（`cluster/slurmate-sessiond`），或 NFS 抖动导致读不到 | 等一个 tick；若持续，按第一节排查会话文件 |
 
 **还有一个容易搞混的情况**：`auth_mode = none` 时客户端**不发** `POST /login`
-（`client/src/main/index.js:260-263`）。若服务端实际是 `password` 而客户端以为是
-`none`，用户就会看到一个没人替他登录的登录页。核对两边的
-`security.auth_mode` 与 `status` 返回里的 `auth_mode` 字段。
+（`plugins/code-server/client/index.js` 的 `attach`）。若服务端实际是 `password`
+而客户端以为是 `none`，用户就会看到一个没人替他登录的登录页。核对两边的
+`[plugin:<短名>]` 块里的 `auth_mode` 与 `status` 返回里的 `auth_mode` 字段。
 
 ---
 
@@ -245,9 +252,9 @@ curl -i -X POST -d 'password=<口令>' http://127.0.0.1:<本地端口>/login
 **最可能的原因：`tunnel_target` 变了，客户端还在往旧目标转发。**
 
 作业重启/重排后可能换节点或换端口。守护进程会跟着把 ACL 换到新目标
-（`refresh_enrollment()`，`cluster/slurmate-sessiond:1231-1257`），客户端也会在状态
+（`refresh_enrollment()`，`cluster/slurmate-sessiond`），客户端也会在状态
 轮询里重建隧道。**不做这件事的表现正是「页面卡住、没有任何报错」**
-（`client/src/main/session.js:331-333`）。
+（`client/src/main/session.js`）。
 
 **怎么做**：
 
@@ -272,15 +279,15 @@ curl -i http://127.0.0.1:<本地端口>/healthz
 
 - **code-server 页面进程崩了。** 面板会提示
   「code-server 页面崩溃了（<reason>）」，点「重新加载页面」恢复
-  （`client/src/main/windows.js:154-160`，`client/src/main/index.js:680-683`）。
+  （`client/src/main/windows.js`，`client/src/main/index.js`）。
 - **换过本地端口。** 端口变了 `origin` 就变，浏览器按端口隔离本地存储，
   编辑器的布局与最近打开的文件会重置一次。客户端会明确告诉你这一点，而不是让你
-  自己纳闷「怎么布局又乱了」（`client/src/main/session.js:302-310`）。
+  自己纳闷「怎么布局又乱了」（`client/src/main/session.js`）。
   端口只会因为两个原因变：**它被别的程序占走了**（客户端向后顺移，顺移时会跳过
   其他布局组占着的端口），或者**你在界面上把这条连接切到了另一个布局**
   （见下节「布局组」）。
 - **兜底：重新加载页面**（`Ctrl+Shift+R`，这是外壳自己占用的键，
-  `client/src/main/shortcuts.js:49-52`）。
+  `client/src/main/shortcuts.js`）。
 
 ---
 
@@ -292,7 +299,7 @@ curl -i http://127.0.0.1:<本地端口>/healthz
 
 **原因：焦点。** 遮罩（隧道断线提示）移除后必须把焦点还给 code-server 视图，
 否则用户打字没反应 —— 又一个「看起来正常但就是不工作」的静默失败
-（`client/src/main/windows.js:200-204`）。
+（`client/src/main/windows.js`）。
 
 **怎么做**：用鼠标点一下编辑区；或点状态条上的「重新加载页面」。
 如果点了编辑区就恢复正常，那就是这一条。
@@ -300,9 +307,9 @@ curl -i http://127.0.0.1:<本地端口>/healthz
 ### 6b. 拼音组合被吃掉（候选框不出现，或出现即消失）
 
 **原因：按键拦截器没有放行组合状态。** 拦截器的第一行**必须**是
-`if (input.isComposing) return;`（`client/src/main/shortcuts.js:122-125`）——
+`if (input.isComposing) return;`（`client/src/main/shortcuts.js`）——
 否则拼音输入过程中的按键会被吞掉，中文输入法直接废掉。这是这类拦截器最经典的
-事故（`client/src/main/shortcuts.js:25-28`）。
+事故（`client/src/main/shortcuts.js`）。
 
 **怎么自查**：
 
@@ -313,13 +320,13 @@ curl -i http://127.0.0.1:<本地端口>/healthz
 | 中文输入法打拼音 | **什么都不能被吞** —— 组合期间一律放行 |
 | `Ctrl+W` / `Ctrl+P` / `F5` | 直达页面，由 code-server 处理 |
 
-演示模式下有一个按键回显页，可以直接左右对照（`client/README.md:56-70`）：
+演示模式下有一个按键回显页，可以直接左右对照（`client/README.md`）：
 中文输入法打拼音时**两栏都不该出现**。
 
 **改这条代码时的纪律**：黑名单**默认方向是放行**，每加一条就多一份吃掉输入法或
 抢走编辑器快捷键的风险。刻意不加缩放键（`Ctrl+=` / `Ctrl+-` / `Ctrl+0`，
 VS Code 自己绑了它们），也不加 `Ctrl+P` / `Ctrl+W` / `Ctrl+R` / `F5`
-（`client/src/main/shortcuts.js:33-40`）。
+（`client/src/main/shortcuts.js`）。
 
 ---
 
@@ -356,7 +363,7 @@ journalctl -u slurmate-sessiond | grep -A 30 'RPC .* 处理异常'
 ### 提交报「端口池暂时没有可用端口」（code 5 / `no_port`）
 
 端口池被活跃会话的**整个候选集**占满了。记住 `active_ports()` 把每个会话的
-`candidates_per_session` 个候选**全部**算作占用（`cluster/slurmate-sessiond:431-440`），
+`candidates_per_session` 个候选**全部**算作占用（`cluster/slurmate-sessiond`），
 所以粗略下限是 `池大小 >= 并发会话数 × candidates_per_session`。
 
 ```bash
@@ -372,7 +379,7 @@ nft list chain inet slurmate output
 ### 作业起来了但立刻失败，会话变 `expired` / `rejected`
 
 去看作业日志，它把失败原因分成了可区分的几类（`pick_port_and_start()`，
-`cluster/run.sbatch:238-261`）：
+`cluster/run.sbatch`）：
 
 ```
 候选端口全部失败: 共 6 个（区间外 0 / 被占用 6 / 启动失败 0）
@@ -381,12 +388,15 @@ nft list chain inet slurmate output
 - **区间外** 不为 0 → 候选端口不在 `SLURMATE_PORT_MIN/MAX` 之内（配置不一致）。
 - **被占用** 占多数 → 同节点上有别的作业占着这些端口。正常情况应该自动试下一个；
   全部被占说明候选太少或池太小。
-- **启动失败** 占多数 → 看上面的行里 code-server 的报错。常见两类：
-  - 可执行文件路径不对（`[slurm] code_server_bin` 要写**计算节点上**的路径）；
-  - 日志里只有一句语焉不详的 IPC 报错 —— 那是环境变量让它去附着到已有实例而不是
-    启动新进程（`cluster/run.sbatch:35-44` 会清掉那些变量，正常路径下不该出现）。
+- **启动失败** 占多数 → 看上面的行里那个服务自己的报错。**这一段是插件的**，
+  宿主只负责把端口逐个试过去，所以具体报错格式取决于哪个插件：
+  - 可执行文件路径不对（站点的 `[plugin:<短名>] bin` 要写**计算节点上**的路径）；
+  - 日志里只有一句语焉不详的 IPC 报错 —— 那是 code-server 的环境变量让它去附着到
+    已有实例而不是启动新进程（`plugins/code-server/job/start.sh` 会清掉那些变量，
+    正常路径下不该出现）。
 - **每个候选都白等 45 秒**再失败 → `curl` 不在计算节点上
-  （`cluster/run.sbatch:213-218`）。
+  （`plugins/code-server/job/start.sh` 的就绪探测要用它）。sshd 插件的等待窗口
+  是 20 秒，不需要 `curl`。
 
 ### 提交超时之后出现了两个作业
 
@@ -394,7 +404,7 @@ nft list chain inet slurmate output
 而 `count_active()` 只数 `ACL_STATES`，`submitted` 不在内 —— `max_active_per_user`
 拦不住并发的第二个提交。
 
-**正确做法**（客户端已经这么做了，`client/src/main/session.js:156-173`）：
+**正确做法**（客户端已经这么做了，`client/src/main/session.js`）：
 `submit` 超时**绝不重试**，改为调一次**不带 `session_id`** 的 `status` 认领
 已创建的会话。
 
@@ -432,15 +442,15 @@ sudo tail -200 /var/log/slurmate/audit.log | grep renew_failed
 `renew_failed` 说明 `scontrol update JobId=… TimeLimit=+…` 没成功。
 最常见的原因是**守护进程的 root 没有 Slurm operator 权限** ——
 增加 `TimeLimit` 只有 root/Slurm 管理员能做，这正是续期必须由守护进程承担的
-原因（`cluster/slurmate-sessiond:866-877`）。
+原因（`cluster/slurmate-sessiond`）。
 
-注意续期有 **300 秒冷却**，失败时不会每 tick 重试刷屏（:1267-1268），
+注意续期有 **300 秒冷却**，失败时不会每 tick 重试刷屏，
 所以日志里不会很密集。另外 `TimeLimit=UNLIMITED` 的作业不会被续期，
 超过 `renew_max_total_seconds` 之后会记一条 `renew_exhausted` 并停止。
 
 ### 「控制节点记录的心跳已过期 N 秒」
 
-这是客户端做的一条交叉校验（`client/src/main/session.js:52,357-366`）：
+这是客户端做的一条交叉校验（`client/src/main/session.js`）：
 `status` 返回的 `last_hb_at` 落后本地最近一次成功心跳超过 90 秒，
 说明**心跳根本没落地**（比如守护进程在写数据库之前崩了）。
 
@@ -477,20 +487,20 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 
 先解决**被拒的原因**（见第一节的 1c 表格）—— 静默期只是防止刷屏的熔断，
 不是根因。客户端的处理是退避重试（60000 ms），不弹错给用户
-（`client/src/main/classify.js:101-107`）。
+（`client/src/main/classify.js`）。
 
 ### 面板上「剩余时间」显示「未知」
 
 这是**如实反映**而不是 bug。守护进程在 `show_job` 失败时会让
 `expires_at` / `job_state` / `time_limit` 这几个键**整个不存在**
-（`cluster/slurmate-sessiond:1718-1723`），界面必须容忍 `undefined` 并显示「未知」，
+（`cluster/slurmate-sessiond`），界面必须容忍 `undefined` 并显示「未知」，
 而不是显示 `0` 或 `NaN` —— 后者会让人以为会话要到期了
-（`client/src/renderer/panel.js:58-68`）。
+（`client/src/renderer/panel.js`）。
 
 ### 本地监听端口不是首选端口
 
 `tunnel.js` 在首选端口被占时会向后试最多 20 个
-（`client/src/main/tunnel.js:33,102-131`）。换端口意味着 `origin` 变了，
+（`client/src/main/tunnel.js`）。换端口意味着 `origin` 变了，
 编辑器布局会重置一次，客户端会明确告诉你原因。
 在 Windows 上 `EACCES` 很常见（Hyper-V/WSL 会保留大段端口），
 所以它对 `EADDRINUSE` 和 `EACCES` 一视同仁地继续试。
@@ -748,3 +758,15 @@ sudo tail -100 /var/log/slurmate/audit.log
    区分开了，比一句「连不上」有用得多）。
 
 > 汇报时请遵守仓库的脱敏约定：不要贴真实 IP、域名、用户名、账户名与节点名。
+
+---
+
+## 排查不出来时
+
+有些现象的根因是**已知的、但还没修**——它们记在
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md)，每条写了位置、后果与修法。先扫一眼那里，
+免得把一个已经写下来的缺陷重新发现一遍。
+
+另外：**`goodbye` 回 `ok:true` 不代表作业被取消了**，`phase_release` 也不确认作业
+是否真的停了（F12 / F13）。所以「用户点了结束会话，但节点上还有作业」这个现象
+**是已知的**，不是你排错了方向。
