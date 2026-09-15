@@ -23,6 +23,7 @@
 | **v0.2** | **删掉「用途」这一层**。配置里不再有 `[purpose:*]`；`purposes` op 改成 `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，**全部可选，缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。 |
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
+| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **编织**进作业模板（不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**。 |
 
 **为什么要删掉「用途」**：它是**策略**（「这个分区是给哪种卡做开发用的」），
 而 Slurm 已经知道**事实**（有哪些分区、用户能用哪些）。把策略额外抄一份到配置文件里，
@@ -285,12 +286,18 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 ```json
 {"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
               "name": "code-server", "title": "开发环境", "enabled": true,
-              "builtin": true, "defaults": {"cpus": 2, "mem": "8G"}},
+              "defaults": {"cpus": 2, "mem": "8G"}},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
-              "builtin": true, "defaults": {"cpus": 1, "mem": "2G"}}],
+              "defaults": {"cpus": 1, "mem": "2G"}}],
  "enabled": ["code-server"]}
 ```
+
+> ★ **v0.5 删掉了每一项里的 `builtin`。** 它从前恒为 `true`（插件的代码随本项目一起
+> 发布），而没有任何客户端代码读它 —— 一个永远为真、谁也不看的字段，只会让下一个
+> 读的人问"什么时候是 false"。现在**没有内建这回事**：两端都只认"装了的插件"，
+> 而"装"是站点的一个动作（集群侧 `deploy.sh --plugins-src`，客户端是往池里放一个
+> 目录）。
 
 客户端据此决定画哪些按钮、以及每个按钮上"默认 2 核 / 8G"该写多少。
 
@@ -324,10 +331,10 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 | 字段 | 类型 | 缺省 |
 |---|---|---|
-| `service_kind` | **本站的短名**（配置块名） | `code-server`（与这个字段存在之前完全一致） |
-| `ssh_pubkey` | 一行公钥 | 需要公钥的插件（`sshd`）**必填**，否则 `2 bad_ssh_pubkey` |
-| `cpus` | 整数 | **该插件块里的** `default_cpus`（服务端钳制到 1–上限） |
-| `mem` | 字符串 | `"8G"`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
+| `service_kind` | **本站的短名**（配置块名） | 配置里的 `default_plugin`；**没配就是必填**，否则 `2 missing_service_kind` |
+| `ssh_pubkey` | 一行公钥 | 清单里 `contributes.submitPubkey` 为真的插件**必填**，否则 `2 bad_ssh_pubkey` |
+| `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在 `[plugin:<名字>]` 块里覆盖；服务端钳制到 1–上限） |
+| `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
 | `gpus` | 整数 | 未给 = **完全省略** `--gres`（默认不占 GPU）。给了 `0` 也一样省略 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
 | `time` | Slurm 时间 | `12:00:00`（超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断） |
@@ -377,7 +384,8 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `2` | `bad_time` | 时间格式无法解析或 ≤ 0 |
 | `3` | `unknown_uid` | `getpwuid` 失败 |
 | `4` | `throttled` | 该 uid 在熔断静默期内 |
-| `2` | `bad_service_kind` | 这个插件名本版不认识（客户端太新，或名字打错） |
+| `2` | `missing_service_kind` | 没给 `service_kind`，而本站也没配 `default_plugin` |
+| `2` | `bad_service_kind` | 本站**没有装**这个短名的插件（客户端太新，或名字打错） |
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
 | `4` | `quota_active` | 活跃会话数已达 `max_active_per_user` |
@@ -388,8 +396,9 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `6` | `partitions_unknown` | 分区权限**查不到**（安全路径上宁可拒绝） |
 | `6` | `submit_failed` | `sbatch` 失败 |
 
-> ★ **「不认识」与「认得但本站没开」必须是两种错误**，不能合并成一句话：
-> 前者是客户端版本太新、或者名字打错了（**该升级客户端 / 该改参数**），
+> ★ **这三种必须是三种错误**，不能合并成一句话：**没给而本站也没配缺省**是调用方
+> 的问题（补上 `service_kind` 即可）；**本站没装这个名字**是客户端版本太新、或者
+> 名字打错了（**该升级客户端 / 该改参数**），
 > 后者是站点的一个决定（**该找管理员**）。合并了，用户就无从知道该做哪一件。
 
 > ★ 客户端**不填**默认资源。省略一个字段是在说「用你的默认」，不是「我要 0 核」——

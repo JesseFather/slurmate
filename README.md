@@ -86,12 +86,17 @@ Slurm 说作业没了，就拆规则；nft 规则被人删了（例如 `systemct
 cluster/          集群侧（部署到登录节点）
   slurmate-sessiond        root 守护进程
   slurmate                 用户 CLI（也是客户端调用的 RPC 入口）
-  run.sbatch               作业模板（root 拥有，用户不可改）
+  run.sbatch               作业模板（root 拥有，用户不可改；deploy.sh 把插件的
+                           作业侧编织进来，装出来的是一份单文件成品）
   slurmate.conf.example    配置示例 —— 复制到 /etc/slurmate/slurmate.conf 再改
   deploy.sh                一键部署 / 卸载
   nft-compare.py           非干扰比对器（带自测）
   test-sessiond-logic.py   守护进程自测
 client/           Electron 桌面客户端
+plugins/          ★ 两个插件的**独立项目** —— 基座不依赖它们，客户端打包不含它们
+                    code-server/  浏览器里的 VS Code
+                    sshd/         作业内的用户态 ssh
+                  一个都没有是**合法状态**，见 plugins/README.md
 docs/             架构、部署、配置、协议、排障
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
 ```
@@ -145,8 +150,11 @@ sudo bash cluster/deploy.sh              # 部署
 - **守护进程**把「作业查不到」分成三态：查到了 / 确认不存在 / **问不到**。
   早期实现把后两者合并，后果是 slurmctld 抖一次，所有活跃会话的 ACL 在一秒内
   全部消失、会话文件被删（再也无法重新登记），而作业还在跑。
-- **客户端**用 `code-server-session` cookie 是否真的进了 cookie jar 来判断登录成败，
-  **不看 HTTP 状态码** —— code-server 对错误口令返回的是 200。
+- **客户端**判定 web 登录成败时只看 cookie jar 里有没有那个 cookie，**不看 HTTP
+  状态码**。这不是某个插件的性质，是**网页表单登录这一类协议**的陷阱：口令错误时
+  返回 200 且不带 `Set-Cookie` 是常见形态（code-server 4.135.0 实测如此），
+  `if (status === 200)` 会在口令错时报成功。所以这条判据留在基座，而端点/字段名/
+  cookie 名三条**具体值**由插件的清单自述。
 - **文档**里每条约束都对应一个具体故障，而不是泛泛的"建议这样做"。
 
 如果你要给它贡献代码，请保持这条线：**新增的检查必须能真的失败**。
@@ -165,17 +173,23 @@ sudo bash cluster/deploy.sh              # 部署
   写错的失效方向是**静默**的（ACL 全部失效而不报错），所以它没有默认值、且启动时会与
   Slurm 的 `NodeAddr` 交叉核对，对不上就拒绝启动。
 - **产物未签名**：Windows 首次运行会被 SmartScreen 拦，macOS 需要右键 →「打开」。
-- **基座不带任何插件**。装完客户端，作业里能跑什么都还没有 —— 插件装在**池**里
-  （`~/.slurmate/plugins/`），由界面上的「从目录安装…」放进去。仓库里的
-  [`plugins/`](plugins/) 下有两个可以拿它装：`code-server` 与 `sshd`。
-  一个插件都不装是**正常状态**，不是安装包坏了。
+- **基座不带任何插件**，两端都是。作业里能跑什么由**插件**决定，而插件是**独立的
+  项目**（[`plugins/`](plugins/)），基座里没有任何一个插件的名字：
+  - 客户端：插件装在**池**里（`~/.slurmate/plugins/`），由界面上的「从目录安装…」
+    放进去；
+  - 集群侧：插件装在 `<prefix>/share/slurmate/plugins/`，由
+    `deploy.sh --plugins-src DIR` 装进去，并**编织**进作业模板。
+
+  一个插件都不装是**正常状态**：基座照常启动、已有会话照常能查能停，只是没有可
+  提交的服务。加一个插件 = 放一个目录 + 跑一次 deploy.sh，**不用改基座的源码**。
+  契约见 [plugins/README.md](plugins/README.md)。
 - **站点分发插件的机制还没实现**。本版做了**安装点**：一个插件目录放进池就生效
   （`install.js`），而将来站点分发走的是**同一个函数** —— 区别只在文件从哪来。
   现在还没有"从集群取插件文件"那个 op。见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
   的插件分节。
-- **插件的作业侧那一半还在基座的仓库里**：`cluster/run.sbatch` 仍然内建了
-  `code-server` 与 `sshd` 的启动逻辑，守护进程也仍然有一张写死的插件表。把它们也
-  搬成"站点扫插件目录 + 部署时编织作业脚本"是下一阶段的事。
+- **插件跑在主进程里**，没有签名、没有钉公钥、没有逐插件同意、没有进程隔离。
+  今天这四条还不是前提，因为唯一的路是「用户自己放进去的东西」；**一旦有一条
+  从远端来的路，它们就是前提**。
 - **客户端只用 SSH 公钥认证，不接受密码**。私钥由客户端自己生成并保管（不读 `~/.ssh`），
   公钥需要用户手工注册到自己的账户里一次。这是刻意的：口令路径会引入保存明文口令、
   向第三方身份服务传口令这类问题，而公钥认证只需要一次性的人工步骤。

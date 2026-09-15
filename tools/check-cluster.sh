@@ -541,27 +541,63 @@ echo "  --- sshd 相关配置（AllowTcpForwarding / ForceCommand / PubkeyAuthen
 run bash -c "sshd -T 2>/dev/null | grep -iE '^(allowtcpforwarding|permitopen|x11forwarding|pubkeyauthentication|passwordauthentication|gatewayports|permitlisten|forcecommand|allowagentforwarding)' | sed 's/^/    /'"
 
 # ==============================================================================
-sec "code-server"
+sec "插件"
 # ==============================================================================
-if [[ -x /usr/local/bin/code-server ]]; then
-    r PASS "/usr/local/bin/code-server 存在"
-    run bash -c '/usr/local/bin/code-server --version 2>&1 | head -3' | sed 's/^/    /'
+#
+# ★ 本脚本**不假设装了哪个插件** —— 插件是独立项目，站点装了什么由它自己决定。
+#   要查的是两件事：
+#     ① 插件安装目录里有什么（守护进程扫的就是它）
+#     ② 配置里的 default_plugin 指向谁（它决定 bin 去哪个插件的块里找）
+#
+# 作业里可执行文件的路径**只能在计算节点上确认**：登录节点上有没有这个文件，
+# 对计算节点不是证据。这里能做的只是把配置里解析出来的值如实打出来，让你拿着
+# 它去计算节点核对。
+_plugdir="/usr/local/share/slurmate/plugins"
+if [[ -d "$_plugdir" ]]; then
+    n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+    if (( n_pl == 0 )); then
+        r INFO "${_plugdir} 存在但是空的 —— 本站没有安装任何插件"
+        r INFO "  这是合法状态（会话能查、能停，只是没有可提交的服务）"
+    else
+        r PASS "${_plugdir} 里有 ${n_pl} 个插件目录"
+        run bash -c "find '$_plugdir' -mindepth 1 -maxdepth 1 -type d | sed 's/^/    /'"
+        echo "  --- 各插件的身份与作业侧入口 ---"
+        run bash -c "for d in '$_plugdir'/*/; do
+            [ -f \"\$d/plugin.json\" ] || continue
+            n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
+            v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
+            j='（无）'; [ -f \"\$d/job/start.sh\" ] && j='有'
+            printf '    %-16s %-9s 作业侧 %s\\n' \"\$n\" \"\$v\" \"\$j\"
+        done"
+    fi
 else
-    r INFO "/usr/local/bin/code-server 不存在（登录节点不跑它，属正常）"
+    r INFO "${_plugdir} 不存在 —— 还没部署，或本站没有安装任何插件"
 fi
-echo "  --- 计算节点上的 code-server 路径 ---"
-# 登录节点通常不装 code-server，所以这里查不到是正常的。
-# 真正的权威值是 slurmate.conf 里 [plugin:code-server] 块的 bin，作业启动时用它。
-# 若不确定，就在计算节点上 `which code-server` 确认一次，再对照配置。
-# v0.3 起它在 [plugin:code-server] 块里，键名是 bin。**不能再用行首 sed** ——
-# `bin` 这个名字每个插件块都有，行首匹配会抓到第一个（可能是别插件的）。
-# 所以按块切：只在 [plugin:code-server] 到下一个块头之间找。
-_csbin="$(awk '
-    /^[[:space:]]*\[/ { inblock = ($0 ~ /^[[:space:]]*\[plugin:code-server\]/) ; next }
-    inblock && /^[[:space:]]*bin[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }
+
+echo "  --- 配置里的 default_plugin ---"
+_default_plugin="$(awk '
+    /^[[:space:]]*\[/ { next }
+    /^[[:space:]]*default_plugin[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }
 ' "$_cf" 2>/dev/null)"
-r INFO "配置里 [plugin:code-server] 的 bin = ${_csbin:-（留空，按惯例找）}"
-r INFO "请在计算节点上确认该路径存在：ls -l ${_csbin:-/usr/local/bin/code-server}"
+if [[ -z "$_default_plugin" ]]; then
+    r INFO "default_plugin 留空 —— 提交时必须显式给 service_kind（推荐值）"
+else
+    r INFO "default_plugin = ${_default_plugin}"
+    # bin 只在**那个插件的块**里找。`bin` 这个名字每个插件块都有，行首匹配会
+    # 抓到第一个（可能是别的插件的）—— 所以按块切。
+    _csbin="$(awk -v want="[plugin:${_default_plugin}]" '
+        /^[[:space:]]*\[/ { inblock = ($0 ~ ("^[[:space:]]*" want "[[:space:]]*$")) ; next }
+        inblock && /^[[:space:]]*bin[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }
+    ' "$_cf" 2>/dev/null)"
+    if [[ -n "$_csbin" ]]; then
+        r INFO "配置里 [plugin:${_default_plugin}] 的 bin = ${_csbin}"
+    else
+        r INFO "配置里没有 [plugin:${_default_plugin}] 块或它没写 bin"
+        r INFO "  → 用插件清单 plugin.json 里 site.bin 声明的那个（--check 会打印解析结果）"
+    fi
+    r INFO "请在**计算节点**上确认该路径存在：ls -l <那个路径>"
+    r INFO "  登录节点上有没有它，对计算节点不是证据 —— 所以这里不做判断。"
+fi
 
 # ==============================================================================
 echo

@@ -21,7 +21,7 @@ Slurmate 让用户在 Slurm 集群上跑 code-server 做远程开发。它的核
 |---|---|---|---|
 | 会话守护进程 | `cluster/slurmate-sessiond` | root（systemd） | 代表用户提交作业、维护 nft ACL、判活、续期、对账、对外提供 RPC |
 | 用户 CLI | `cluster/slurmate` | 普通用户 | 与守护进程对话；对客户端暴露 `slurmate rpc` 这一个稳定入口 |
-| 作业模板 | `cluster/run.sbatch` | 提交后以用户身份运行 | 在计算节点上挑端口、起**插件**、写会话文件与作业侧心跳 |
+| 作业模板 | `cluster/run.sbatch` | 提交后以用户身份运行 | 在计算节点上挑端口、调 `plugin_call start` **分派给插件**、写会话文件与作业侧心跳 |
 | nft 表 | `inet slurmate`（运行时创建） | 内核 | 承载 ACL 的唯一实体，寿命 = 作业寿命 |
 | 桌面客户端 | `client/`（Electron） | 用户机器 | 提交、等待、建隧道、自动登录 code-server、发心跳 |
 
@@ -97,18 +97,31 @@ exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shel
 由守护进程以目标用户身份提交，**文件本身 root 拥有、0644、用户不可写**：执行的是
 这个固定文件，用户可控的只有 `sbatch` 的命令行 flag（`cluster/run.sbatch:6-8`）。
 
-它做四件事：
+★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：`deploy.sh` 把每个插件
+的 `job/start.sh` 拼在模板里那个 `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
+`<prefix>/share/slurmate/run.sbatch` 的是一份**编织后的单文件成品**。见
+[plugins/README.md](../plugins/README.md)〈作业侧契约〉。
 
-- 清理一组会让 code-server 附着到已有实例而不是启动新进程的环境变量
-  （`cluster/run.sbatch:35-44`）；
-- 在候选端口里逐个试，起 code-server 并以 `/healthz`（或任意 HTTP 响应）判就绪
-  （`cluster/run.sbatch:188-261`）；
-- 把会话身份、隧道目标、以及**自己生成的口令**写进 `0600` 的会话文件
-  （`cluster/run.sbatch:120-134,335-365`）；
-- 每 60 秒写一次作业侧心跳文件，并在退出前写「墓碑」（`state=exited`）
-  （`cluster/run.sbatch:136-141,280-284`）。
+宿主（模板部分）做的事**全都与"哪个插件"无关**：
 
-它只读 `SLURMATE_*` 环境变量，不接受 argv（`cluster/run.sbatch:10-14`）。
+- 在候选端口里逐个试，每个端口调一次 `plugin_call start`（分派到
+  `start_<短名>`）；插件返回非 0 就换下一个候选；
+- 把会话身份、隧道目标、以及**自己生成的口令**写进 `0600` 的会话文件。插件的
+  附加字段走 `PLUGIN_SESSION_FIELDS`，**转义由宿主统一做** —— 让每个插件自己拼
+  JSON 片段等于把转义责任推给每一个插件，而转义写错的下场是整份会话文件解析不了；
+- 每 60 秒写一次作业侧心跳文件，并在退出前写「墓碑」（`state=exited`）；
+- `cleanup` 里调一次 `plugin_call cleanup`，**位置在 NFS 补写之前** —— 否则
+  插件自己的日志进不了 NFS（"认证被拒"这类只有那个服务知道的事实在作业结束后就
+  永远消失了）。
+
+它只读 `SLURMATE_*` 环境变量，不接受 argv。
+
+★ **「失败点前移」是编织的全部理由。** `sbatch` 拿到的是路径，但计算节点上的
+slurmd 从**自己的 spool** 取脚本执行 —— 本系统从来没有让计算节点打开过
+`<prefix>/share/slurmate/` 里任何一个文件。改成运行时 `source` 会引入本项目
+**有史以来第一个**「共享目录对计算节点可见」的前置条件，而那个事实**在登录节点上
+永远验证不出来**（文件在那儿必然存在）。编织让不确定性归零：一个语法错的插件脚本
+让 `deploy.sh` 当场中止，而不是变成用户的一次失败会话。
 
 ### 4. `inet slurmate`（nft 表）
 
@@ -136,21 +149,26 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 | 半边 | 在哪 | 谁读 |
 |---|---|---|
-| 身份与声明 | `<插件目录>/plugin.json` | 两侧（**一份清单，一个 schema**） |
-| 客户端 | `<插件目录>/client/index.js` | 客户端的注册表 —— **可以没有**（那就是声明式插件） |
-| 作业侧 | `<插件目录>/job/start.sh` | 作业模板 —— **可以没有** |
-| 站点策略 | `slurmate.conf` 里的 `[plugin:<短名>]` 块（开不开、默认资源、可执行文件） | 守护进程 |
+| 半边 | 在哪 | 谁读它 | 什么时候读 |
+|---|---|---|---|
+| 身份与声明 | `<插件目录>/plugin.json` | 两侧（**一份清单，一个 schema**） | 客户端启动 / 守护进程启动 / deploy.sh |
+| 客户端 | `<插件目录>/client/index.js` | 客户端的注册表 —— **可以没有**（那就是声明式插件） | 客户端启动时扫池 |
+| 作业侧 | `<插件目录>/job/start.sh` | **没有任何运行时读者** | deploy.sh 部署时**编织**进作业模板 |
+| 站点策略 | `slurmate.conf` 里的 `[plugin:<短名>]` 块（开不开、默认资源、可执行文件） | 守护进程 | 守护进程启动 |
 
-★ **基座不带任何插件**：`client/src/main/plugins/` 里只有框架（注册表、铸造 id 的
-`ulid.js`、安装器）。插件装在**池**（`~/.slurmate/plugins/`）里，装与卸都走
-`plugins/install.js`。一个都不装是**正常状态**。
+★ **基座不带任何插件，两端都是。** 客户端那边 `client/src/main/plugins/` 里只有框架
+（注册表、铸造 id 的 `ulid.js`、安装器），插件装在**池**里（`~/.slurmate/plugins/`），
+装与卸都走 `plugins/install.js`；集群那边守护进程里**一个插件名都没有**，表是
+**扫出来的**（`<prefix>/share/slurmate/plugins/`），作业侧是**编织**进去的。
+一个都不装是**正常状态**。
 
-★ **集群侧那两半还是写死的**（`run.sbatch` 的 `start_*` 函数 + 守护进程的
-`BUILTIN_PLUGINS`）—— 见本文末尾「加一个新插件要动哪几处」。
+★ 于是「加一个插件」在两侧都只是**放一个目录**，再加一次安装动作（客户端是「从
+目录安装…」，集群是 `deploy.sh --plugins-src`）。**不用改基座的任何一行源码。**
 
 仓库顶层 [`plugins/`](../plugins/) 下有两个现成的：`code-server`（浏览器里的 IDE）
 与 `sshd`（用户态 ssh，给原生 VS Code Remote-SSH / codex 这类**要求 ssh 连接**的
-工具用）。见 [CONFIGURATION.md](CONFIGURATION.md) 的插件一节。
+工具用）。契约见 [plugins/README.md](../plugins/README.md)，站点侧配置见
+[CONFIGURATION.md](CONFIGURATION.md) 的插件一节。
 
 ### ★ 一个插件有三样身份，别把它们合并
 
@@ -229,24 +247,22 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 ### 加一个新插件要动哪几处
 
-**框架一行都不用改**（`index.js` / `session.js` / `windows.js` / 守护进程的生命周期
-逻辑都不认识任何插件名）。客户端那一侧只剩一件事，集群侧还是三件：
+**框架一行都不用改**（`index.js` / `session.js` / `windows.js` / 守护进程的提交与
+生命周期逻辑都不认识任何插件名）。要动的只有这三处，全是"放东西"，没有一处是改代码：
 
-| # | 在哪 | 加什么 | 状态 |
-|---|---|---|---|
-| 1 | 仓库顶层 `plugins/<任意名>/` | `plugin.json`（**铸一个新的 ULID** 当 id）+ `client/index.js` + `job/start.sh` | **本版** |
-| 2 | 客户端界面「从目录安装…」 | 把这个目录放进池 | **本版** |
-| 3 | `cluster/run.sbatch` | 一个 `start_<短名>` 函数，以及 `start_service` 的 `case` 里一个分支 | 下一阶段改成钩子 |
-| 4 | `cluster/slurmate-sessiond` 的 `BUILTIN_PLUGINS` | 一条 `PluginSpec` | 下一阶段改成扫插件目录 |
-| 5 | `/etc/slurmate/slurmate.conf` | 一个 `[plugin:<短名>]` 块。**这是站点的决定**，不进仓库 | **本版** |
+| # | 在哪 | 加什么 |
+|---|---|---|
+| 1 | 你的插件目录（**可以在另一个仓库**） | `plugin.json`（**铸一个新的 ULID** 当 id）+ `client/index.js`（可无）+ `job/start.sh`（可无） |
+| 2 | 客户端界面「从目录安装…」 | 把这个目录放进池（`~/.slurmate/plugins/`） |
+| 3 | `sudo bash cluster/deploy.sh --plugins-src <那个目录的父目录>` | 装进站点 + 编织进作业模板 |
+| 4 | `/etc/slurmate/slurmate.conf`（可选） | 一个 `[plugin:<短名>]` 块。**这是站点的决定**，不进仓库；不写就用清单里的缺省 |
 
-★ #3 与 #4 是**基座里最后两块插件的代码**：作业侧的启动逻辑与守护进程的插件表都还
-写死在集群侧。把它们也搬成"部署时把 `job/start.sh` 编织进作业模板、守护进程扫
-`<prefix>/share/slurmate/plugins/`"是下一阶段的事 —— 做完之后 #3、#4 就消失了，
-「加一个插件」在两侧都只剩"放一个目录"。
+★ #1 到 #3 就是全部。"加一个插件不用改基座"这句话是**可机检的**：守护进程里没有
+任何插件的名字，作业模板里也没有（`test-sessiond-logic.py` 第 21 节逐字断言后者，
+第 19.0c 节用一个守护进程**从没听说过**的合成插件走了一遍完整的提交路径）。
 
-★ 客户端侧之所以能只剩一件事：它**从来没有**一张插件表。插件的身份来自清单里的
-`id`，能力来自清单里的 `contributes`，而装与卸都只是往池里放/拿一个目录。
+★ 客户端侧之所以只需要"放一个目录"：它**从来没有**一张插件表。插件的身份来自清单
+里的 `id`，能力来自清单里的 `contributes`，而装与卸都只是往池里放/拿一个目录。
 
 ### 插件从哪来（分层）
 

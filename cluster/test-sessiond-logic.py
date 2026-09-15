@@ -44,6 +44,13 @@ CONF = os.path.join(HERE, "slurmate.conf.example")
 # 运行用户，所以这里只能取 os.getuid()。
 UID = os.getuid()
 
+# 仓库里那两个真插件的**短名**。它们**不是**守护进程的常量 —— 守护进程里现在
+# 一个插件名都没有，表是扫出来的。这里写死是因为下面的用例要指名道姓地引用
+# 「code-server 那个插件」「sshd 那个插件」，而它们来自 make_config 装进去的
+# 那两份真清单。
+CS = "code-server"
+SSHD = "sshd"
+
 PASS = 0
 FAIL = 0
 
@@ -98,7 +105,15 @@ def make_config(mod, tmpdir):
         text = f.read()
     # 示例配置里 cluster_cidr 故意留空（它没有安全的默认值），测试里填一个
     # 合法网段 —— 同时后面还有专门一节验证"留空会被拒绝"。
-    text = re.sub(r"(?m)^cluster_cidr\s*=.*$", "cluster_cidr = 192.0.2.0/24", text)
+    #
+    # 顺便补上 default_plugin：示例配置里它是**注释掉的**（推荐值），而这一份测试
+    # 配置要的是「一个升级前的老站点」的样子 —— 那时不带 service_kind 的提交落到
+    # code-server。第 19 节用**不带这一项**的另一份配置测"没配就该被明确拒绝"。
+    # 写在 cluster_cidr 那一行后面而不是文件末尾：通用键落在 [plugin:*] 块之后
+    # 是硬错误（见 parse_config 的说明），而"块一旦开始就没有回头路"这条对测试
+    # 夹具同样成立。
+    text = re.sub(r"(?m)^cluster_cidr\s*=.*$",
+                  "cluster_cidr = 192.0.2.0/24\ndefault_plugin = code-server", text)
     for name in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
         stub = write_stub(os.path.join(bindir, name), "exit 0\n")
         text = re.sub(r"(?m)^%s\s*=.*$" % name, "%s = %s" % (name, stub), text)
@@ -110,6 +125,14 @@ def make_config(mod, tmpdir):
     mod.LOG_DIR = os.path.join(tmpdir, "log")
     mod.SOCKET_PATH = os.path.join(tmpdir, "ctl.sock")
     mod.default_job_script = lambda: os.path.join(HERE, "run.sbatch")
+    # 4. **插件目录** —— 与作业脚本同理，由守护进程自身的安装位置推导，开发机上
+    #    还没部署。这里指向**仓库顶层**的 plugins/，也就是 deploy.sh 会装进去的那
+    #    两个真插件。
+    #
+    #    ★ 刻意用**真的那两个**而不是合成替身：插件与基座的接口正是这一版反复在
+    #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
+    mod.default_plugins_dir = lambda: os.path.normpath(
+        os.path.join(HERE, os.pardir, "plugins"))
     return mod.Config(p)
 
 
@@ -181,6 +204,17 @@ def with_stub(mod, fake, fn):
         return fn()
     finally:
         mod.run_cmd = real
+
+
+def _read_logs(home):
+    """读一个假 HOME 下 NFS 日志目录里的全部内容（作业脚本的产物）。"""
+    d = os.path.join(home, ".slurmate", "logs")
+    out = ""
+    if os.path.isdir(d):
+        for fn in sorted(os.listdir(d)):
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                out += f.read()
+    return out
 
 
 def main():
@@ -771,6 +805,7 @@ exit 0
     # 不会改已存在的表。不拦的话，旧库上的每一次提交都会以内部错误失败。
     print("\n── 16. 数据库表结构 ──")
     import sqlite3 as _sq
+    import signal as _sig
     old_db = os.path.join(tmpdir, "old-claims.db")
     c = _sq.connect(old_db)
     c.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, uid INTEGER, "
@@ -926,15 +961,261 @@ exit 0
 
     # ── 19. 服务种类（code-server / sshd）───────────────────────────────────
     #
-    # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的 start_service 结构性地
+    # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的分派结构性地
     # 保证。这里测的是守护进程这一侧：缺省、开关、公钥、以及"从 nft 规则恢复出来
     # 的会话不许猜自己是什么服务"。
-    print("\n── 19. 服务种类（code-server / sshd）──")
+    print("\n── 19. 插件（服务种类）──")
 
-    # 19.1 插件块（代替了从前那一行 `service_kinds = a,b`）
+    # 19.0 ★★ 插件表是**扫出来的**，不是代码里写死的
     #
-    # ★ 这一节的核心是**向后兼容**：一个块都没有的老配置必须仍然只开 code-server。
-    #   它是整个改动能不能升级的支点 —— 少了它，所有现有站点升级后会一个服务都
+    # 这一节是全节的支点。守护进程里**没有任何一个插件的名字** —— 表来自
+    # <prefix>/share/slurmate/plugins/*/plugin.json，由 deploy.sh 装进去。
+    # 加一个插件因此是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
+    print("\n  -- 19.0 扫出来的插件表 --")
+    check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
+          sorted(cfg.plugin_by_name) == [CS, SSHD], str(sorted(cfg.plugin_by_name)))
+    check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
+    check("每个 spec 都记得自己是从哪个目录扫出来的（只用于报错）",
+          all(s.source_dir for s in cfg.plugin_specs))
+    check("★ job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
+          cfg.plugin_by_name[CS].job_entry == "start_code_server"
+          and cfg.plugin_by_name[SSHD].job_entry == "start_sshd",
+          "%s / %s" % (cfg.plugin_by_name[CS].job_entry,
+                       cfg.plugin_by_name[SSHD].job_entry))
+    check("★ 每个插件的作业侧实现都在（没有 job/start.sh 的插件会在用户排完队之后才失败）",
+          all(s.needs_job for s in cfg.plugin_specs),
+          str([(s.name, s.needs_job) for s in cfg.plugin_specs]))
+
+    # 坏掉的插件目录：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
+    # 带走整个站点 —— 而静默跳过同样不行（"我明明装了啊"会变成一句谁也答不上来的话）。
+    _baddir = os.path.join(tmpdir, "plugins-broken")
+    os.makedirs(os.path.join(_baddir, "good"), exist_ok=True)
+    os.makedirs(os.path.join(_baddir, "bad-json"), exist_ok=True)
+    os.makedirs(os.path.join(_baddir, "missing-manifest"), exist_ok=True)
+    shutil.copy(os.path.join(HERE, os.pardir, "plugins", CS, "plugin.json"),
+                os.path.join(_baddir, "good", "plugin.json"))
+    with open(os.path.join(_baddir, "bad-json", "plugin.json"), "w",
+              encoding="utf-8") as _f:
+        _f.write("{ 这不是 JSON")
+    _specs2, _probs2 = mod.scan_plugins(_baddir)
+    check("★ 一个坏目录不会让守护进程起不来（跳过它，其余照常）",
+          [s.name for s in _specs2] == [CS], str([s.name for s in _specs2]))
+    check("★ 但它必须被**报出来**，而且点名是哪个目录",
+          len(_probs2) == 2 and any("bad-json" in p for p in _probs2)
+          and any("missing-manifest" in p for p in _probs2),
+          str(_probs2))
+
+    # 零插件：**合法状态**，不是"安装包坏了"。
+    _emptydir = os.path.join(tmpdir, "plugins-empty")
+    os.makedirs(_emptydir, exist_ok=True)
+    _specs3, _probs3 = mod.scan_plugins(_emptydir)
+    check("★ 一个插件都没装是合法状态（空表、且不是错误）",
+          _specs3 == () and _probs3 == (), "%s / %s" % (_specs3, _probs3))
+    check("目录根本不存在时同样返回空表、不报错（全新安装就是这个样子）",
+          mod.scan_plugins(os.path.join(tmpdir, "no-such-dir")) == ((), ()))
+
+    # 19.0b 清单的形状（跨语言的那几条）
+    #
+    # 守护进程是 Python、客户端是 JS，两边各自实现同一套清单规则。规则漂了的后果
+    # 不是崩溃，而是**一边收下、一边拒了**，而报错只会说"清单不合法"。
+    def _manifest(text):
+        # 布局是 <扫描目录>/<任意目录名>/plugin.json —— **目录名不参与身份判定**，
+        # 所以这里故意用一个与短名无关的名字。
+        d = os.path.join(tmpdir, "mf-%d" % time.time_ns(), "whatever")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "plugin.json"), "w", encoding="utf-8") as f:
+            f.write(text)
+        return mod.scan_plugins(os.path.dirname(d))
+
+    _okmf = json.dumps({
+        "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup", "version": "1.0.0",
+        "displayName": "J", "site": {"defaultCpus": 1, "defaultMem": "1G"}})
+    _s, _p = _manifest(_okmf)
+    check("一份最小的合法清单被收下", len(_s) == 1 and _p == (), "%s / %s" % (_s, _p))
+    if _s:
+        check("没写的地方用框架的缺省：不需要公钥、缺省不开、没有 bin",
+              _s[0].needs_pubkey is False and _s[0].default_enabled is False
+              and _s[0].bin_env is None)
+        check("displayName 缺了就退回短名（它不影响任何判定，不该因此拒收）",
+              mod.parse_plugin_manifest("x/plugin.json",
+                                        {"id": _s[0].id, "name": "jup",
+                                         "version": "1.0.0",
+                                         "site": {"defaultCpus": 1,
+                                                  "defaultMem": "1G"}})[0].title
+              == "jup")
+
+    for _txt, _why, _kw in (
+            (json.dumps({"id": "short", "name": "jup", "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G"}}),
+             "id 不是 26 字符的 ULID", "id"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "Jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G"}}),
+             "短名有大写", "name"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G"}}),
+             "版本号不是 x.y.z", "version"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0"}),
+             "缺 site.defaultCpus / defaultMem", "defaultCpus"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "0"}}),
+             "defaultMem 写成 Slurm 的整机内存", "defaultMem"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0", "engines": {"slurmate": ">=99.0.0"},
+                         "site": {"defaultCpus": 1, "defaultMem": "1G"}}),
+             "要求一个这边还没有的框架版本", "slurmate"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "bin": {"env": "PATH", "fallback": "/x"}}}),
+             "bin.env 想覆盖一个不属于本系统的变量", "SLURMATE_"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "bin": {"env": "SLURMATE_X",
+                                          "discovery": "which"}}}),
+             "discovery=which 却没给 name", "name"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "enumKeys": {"mode": {"choices": ["a", "b"],
+                                                        "default": "c"}}}}),
+             "enumKeys 的 default 不在 choices 里", "default")):
+        _s2, _p2 = _manifest(_txt)
+        _msg2 = " ".join(_p2)
+        # 断言的是"**一个都没收下** + 报错里点到了那一项"，不是"函数返回了 None" ——
+        # scan_plugins 的契约是 (specs, problems)，坏清单的 specs 是空元组。
+        check("清单：%s → 被拦下" % _why, _s2 == () and _kw in _msg2,
+              (_msg2[:130] or str(_s2)))
+
+    # 短名撞车：两个目录抢一个短名 —— **两个都不收**。挑一个的后果是"哪个生效"
+    # 取决于目录名的字典序，而那是没人会想到去查的地方。
+    _dupdir = os.path.join(tmpdir, "plugins-dup")
+    for _sub, _ver in (("a", "1.0.0"), ("b", "2.0.0")):
+        os.makedirs(os.path.join(_dupdir, _sub), exist_ok=True)
+        with open(os.path.join(_dupdir, _sub, "plugin.json"), "w",
+                  encoding="utf-8") as _f:
+            _f.write(json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                                 "version": _ver,
+                                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}))
+    _s3, _p3 = mod.scan_plugins(_dupdir)
+    check("★ 两个目录抢一个短名 → 两个都不加载（挑一个等于让目录名决定行为）",
+          _s3 == () and any("重复" in p for p in _p3), "%s / %s" % (_s3, _p3))
+
+    # 19.0c ★★ 加一个插件**不需要改守护进程的任何一行**
+    #
+    # 这是「插件是独立项目」在集群侧的落点，所以它必须有一条**跑的**用例，而不是
+    # 一句注释。这里合成一个全新的插件（仓库里没有它、守护进程更没听说过它），
+    # 然后走一遍：扫描 → 配置块 → 提交 → 环境变量 → op_plugins。
+    _thirddir = os.path.join(tmpdir, "plugins-third")
+    os.makedirs(os.path.join(_thirddir, "jup"), exist_ok=True)
+    with open(os.path.join(_thirddir, "jup", "plugin.json"), "w",
+              encoding="utf-8") as _f:
+        _f.write(json.dumps({
+            "id": "01M2JKHTZGKJBFQQTWYXMQMF2X", "name": "jup",
+            "version": "2.1.0", "displayName": "Jupyter",
+            "engines": {"slurmate": ">=0.5.0"},
+            "contributes": {"submitPubkey": False},
+            "site": {"defaultCpus": 3, "defaultMem": "6G", "defaultEnabled": False,
+                     "bin": {"env": "SLURMATE_JUP_BIN", "discovery": "convention",
+                             "fallback": "/usr/local/bin/jupyter"},
+                     "enumKeys": {"token_mode": {"choices": ["auto", "none"],
+                                                 "default": "auto"}}},
+        }))
+    _specs4, _probs4 = mod.scan_plugins(_thirddir)
+    check("★ 一个守护进程从没听说过的插件被扫进来，一行代码都没改",
+          _probs4 == () and [x.name for x in _specs4] == ["jup"], str(_probs4))
+    _jup = _specs4[0]
+    check("它的元数据全部来自清单（默认资源 / bin / 取值受限的键）",
+          _jup.default_cpus == 3 and _jup.default_mem == "6G"
+          and _jup.bin_env == "SLURMATE_JUP_BIN"
+          and _jup.enum_default("token_mode") == "auto",
+          "%s/%s/%s" % (_jup.default_cpus, _jup.default_mem, _jup.bin_env))
+    check("★ 它的配置块允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
+          "（没有第二份清单可以跟它矛盾）",
+          _jup.block_keys() == ("enabled", "default_cpus", "default_mem",
+                                "bin", "token_mode"),
+          str(_jup.block_keys()))
+    check("它的作业侧入口是按短名推出来的（与 run.sbatch 的 plugin_call 同一条规则）",
+          _jup.job_entry == "start_jup", _jup.job_entry)
+
+    _saved_plugins = cfg.plugins
+    _saved_by = cfg.plugin_by_name
+    _saved_specs = cfg.plugin_specs
+    _saved_kinds = cfg.enabled_kinds
+    try:
+        cfg.plugin_specs = tuple(list(_saved_specs) + [_jup])
+        cfg.plugin_by_name = dict(_saved_by, jup=_jup)
+        cfg.plugins = dict(_saved_plugins)
+        cfg.plugins["jup"] = mod.PluginConfig(_jup, {"enabled": "yes"}, True)
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+
+        _r5, _sess5, _env5 = run_submit({"op": "submit", "service_kind": "jup"})
+        check("★ 新插件能被提交，资源缺省来自**它自己的清单**（不是全局常量）",
+              _r5.get("ok") and _sess5["cpus"] == 3 and _sess5["mem"] == "6G",
+              str(_r5)[:160])
+        check("它声明的那个变量名与解析出来的路径传给了作业",
+              _env5.get("SLURMATE_JUP_BIN") == "/usr/local/bin/jupyter",
+              repr(_env5.get("SLURMATE_JUP_BIN")))
+        check("会话记住的解析键是 <id>@<版本>",
+              _sess5.get("service_plugin") == "%s@%s" % (_jup.id, _jup.version),
+              repr(_sess5.get("service_plugin")))
+        check("站点没在块里写的那几个枚举键，取清单声明的缺省",
+              cfg.plugins["jup"].enum.get("token_mode") == "auto",
+              repr(cfg.plugins["jup"].enum))
+
+        _pj = d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
+        _pnames = {x["name"] for x in (_pj.get("data") or {}).get("plugins", [])}
+        check("op_plugins 也照实报出它（客户端据此画按钮）",
+              "jup" in _pnames, str(sorted(_pnames)))
+    finally:
+        cfg.plugins = _saved_plugins
+        cfg.plugin_by_name = _saved_by
+        cfg.plugin_specs = _saved_specs
+        cfg.enabled_kinds = _saved_kinds
+
+    # 19.0d ★ 零插件：不是"坏掉的安装包"，而是"外壳"本身
+    #
+    # ★ 这三条是 client/src/main/plugins 那套崩溃安全不变量的集群侧对应物。
+    #   客户端那半已经在 boot.test.mjs 里验过"卸掉插件不影响跑着的会话"，这里验
+    #   的是**服务端**在零插件时的行为：能启动、能说清、明确拒绝 —— 而不是崩溃、
+    #   不是静默。
+    _sz, _bz, _pz, _kz, _dz = (cfg.plugin_specs, cfg.plugin_by_name,
+                               cfg.plugins, cfg.enabled_kinds, cfg.default_plugin)
+    try:
+        cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins = (), {}, {}
+        cfg.enabled_kinds, cfg.default_plugin = (), ""
+        # 上面的 run_submit 用完就把库关掉了（每个用例一个临时库），重开一个。
+        d.store = mod.Store(os.path.join(tmpdir, "zero-plugin.db"))
+        check("★ 零插件时配置自检**通过**（以前这里是一条让守护进程 100% 起不来的错误）",
+              cfg.validate() == [], str(cfg.validate())[:160])
+        _r6 = d.dispatch(UID, os.getgid(), {"op": "submit"})
+        check("★ 不带 service_kind 的提交被明确拦住，并说清本站没配 default_plugin",
+              not _r6.get("ok") and _r6["code"] == 2
+              and _r6["error"]["kind"] == "missing_service_kind",
+              str(_r6.get("error"))[:160])
+        _r7 = d.dispatch(UID, os.getgid(), {"op": "submit",
+                                            "service_kind": CS})
+        check("★ 点了名的也被拦住（bad_service_kind，不是静默失败）",
+              not _r7.get("ok") and _r7["code"] == 2
+              and _r7["error"]["kind"] == "bad_service_kind",
+              str(_r7.get("error"))[:160])
+        _pz2 = d.dispatch(UID, os.getgid(), {"op": "plugins"})
+        check("op_plugins 回一个空表（界面据此显示安装指引，而不是一个错误）",
+              (_pz2.get("data") or {}).get("plugins") == []
+              and (_pz2.get("data") or {}).get("enabled") == [],
+              str(_pz2.get("data")))
+    finally:
+        (cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins,
+         cfg.enabled_kinds, cfg.default_plugin) = _sz, _bz, _pz, _kz, _dz
+
+    # 19.1 配置块
+    #
+    # ★ 这一节的核心是**向后兼容**：一个块都没有的老配置必须仍然只开 code-server
+    #   （它标了 site.defaultEnabled）。少了这条，所有现有站点升级后会一个服务都
     #   开不出来，而配置里一个字都不像有问题。
 
     def pcfg(text, name="plug.conf"):
@@ -942,32 +1223,38 @@ exit 0
 
     _c = pcfg("")
     check("★ 一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
-          _c.enabled_kinds == (mod.SVC_CODE_SERVER,), str(_c.enabled_kinds))
+          _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
-          _c.plugins[mod.SVC_SSHD].present is False
-          and _c.plugins[mod.SVC_SSHD].enabled is False)
+          _c.plugins[SSHD].present is False
+          and _c.plugins[SSHD].enabled is False)
 
     _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
     check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
-          _c.enabled_kinds == (mod.SVC_CODE_SERVER,), str(_c.enabled_kinds))
+          _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("块里写的默认资源生效；没写的用插件自己的内建值",
-          _c.plugins[mod.SVC_SSHD].default_cpus == 4
-          and _c.plugins[mod.SVC_SSHD].default_mem == "2G",
-          "%s / %s" % (_c.plugins[mod.SVC_SSHD].default_cpus,
-                       _c.plugins[mod.SVC_SSHD].default_mem))
+          _c.plugins[SSHD].default_cpus == 4
+          and _c.plugins[SSHD].default_mem == "2G",
+          "%s / %s" % (_c.plugins[SSHD].default_cpus,
+                       _c.plugins[SSHD].default_mem))
 
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
     check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
-          _c.enabled_kinds == (mod.SVC_CODE_SERVER, mod.SVC_SSHD),
+          _c.enabled_kinds == (CS, SSHD),
           str(_c.enabled_kinds))
 
     _c = pcfg("[plugin:code-server]\nenabled = no\n[plugin:sshd]\nenabled = yes\n")
     check("显式关掉 code-server 是合法的（站点只留中转站）",
-          _c.enabled_kinds == (mod.SVC_SSHD,), str(_c.enabled_kinds))
+          _c.enabled_kinds == (SSHD,), str(_c.enabled_kinds))
 
     _c = pcfg("[plugin:code-server]\nenabled = no\n")
-    check("★ 一个插件都不开 → 自检说得出话（否则界面一个按钮都没有而配置看着正常）",
-          any("插件" in e for e in _c.validate()), str(_c.validate())[:120])
+    check("★ 一个插件都不开是**合法**的（「外壳」的定义：基座不因插件的有无而缺一块）",
+          _c.enabled_kinds == () and _c.validate() == [], str(_c.validate())[:140])
+    # ★ 但 default_plugin 指向一个**没装的**插件仍然是硬错误：那不是"本站没开
+    #   某个服务"，而是"配置指向一个不存在的东西"—— 两者该做什么完全不同。
+    _c = pcfg("default_plugin = nosuchplugin\n")
+    check("★ default_plugin 指向没装的插件 → 启动就拒绝（不是等到用户提交才报错）",
+          any("nosuchplugin" in e for e in _c.validate()),
+          str(_c.validate())[:160])
 
     # 各种错法：一律**报错**，不能静默忽略 —— 静默忽略的后果是
     # 「文件里写着，而实际什么也没发生」，正是本项目一路在清的那类问题。
@@ -996,6 +1283,34 @@ exit 0
     check("★ 而且要说清是「通用键写到了块之后」，不是一句泛泛的「认不出这个键」",
           "通用键" in _msg and "块之前" in _msg, _msg[:140])
 
+    # 19.0e ★ 缺省插件来自配置，不是写死的名字
+    #
+    # 这条与 19.3（`make_config` 那份配置里 default_plugin = code-server）合起来
+    # 才完整：只测"缺省是 code-server"的话，一个把 code-server 写死的实现照样全绿
+    # —— 而"写死一个缺省插件名"正是这一版要从基座里拿掉的东西。
+    _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
+    check("default_plugin 被解析出来，且指向已装的插件时不是错误",
+          _c.default_plugin == "sshd" and _c.validate() == [],
+          "%r / %s" % (_c.default_plugin, _c.validate()[:1]))
+    # ★ 但只查这个属性是**不够**的：把 `kind = cfg.default_plugin` 改成写死的
+    #   `kind = "code-server"` 时它照样全绿 —— 而"写死一个缺省插件名"正是这一版
+    #   要从基座里拿掉的东西。所以下面真的走一遍提交，看落到哪个插件上。
+    _pub8 = ("ssh-ed25519 "
+             "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
+    _sd, _sk = cfg.default_plugin, cfg.enabled_kinds
+    _se = cfg.plugins[SSHD].enabled
+    try:
+        cfg.default_plugin = SSHD
+        cfg.plugins[SSHD].enabled = True
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        _r8, _s8, _ = run_submit({"op": "submit", "ssh_pubkey": _pub8})
+        check("★ 不带 service_kind 时**真的**落到配置里那个插件上（不是写死的名字）",
+              _r8.get("ok") and _s8.get("service_kind") == SSHD,
+              "%s / %s" % (str(_r8.get("error"))[:90], _s8.get("service_kind")))
+    finally:
+        cfg.default_plugin, cfg.enabled_kinds = _sd, _sk
+        cfg.plugins[SSHD].enabled = _se
+
     # 19.2 公钥的解析（纯函数）。ed25519 的 blob 恒为 51 字节，形状可以卡死。
     _pub = ("ssh-ed25519 "
             "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
@@ -1021,9 +1336,9 @@ exit 0
     # 19.3 缺省仍然是 code-server —— 与本功能引入前完全一致
     r, sess, env = run_submit({"op": "submit"})
     check("不传 service_kind 时缺省是 code-server",
-          sess["service_kind"] == mod.SVC_CODE_SERVER, str(sess.get("service_kind")))
+          sess["service_kind"] == CS, str(sess.get("service_kind")))
     check("环境变量把服务种类传给了作业",
-          env.get("SLURMATE_SERVICE_KIND") == mod.SVC_CODE_SERVER, str(env))
+          env.get("SLURMATE_SERVICE_KIND") == CS, str(env))
 
     # 19.4 站点没开 sshd 时必须明确拒绝 —— 而不是起一个"看起来起来了但连不上"的作业
     r, _s, _e = run_submit({"op": "submit", "service_kind": "sshd",
@@ -1037,15 +1352,15 @@ exit 0
           and r["error"]["kind"] == "bad_service_kind", str(r.get("error")))
 
     # 19.5 站点开启之后
-    _saved = cfg.plugins[mod.SVC_SSHD].enabled
-    cfg.plugins[mod.SVC_SSHD].enabled = True
+    _saved = cfg.plugins[SSHD].enabled
+    cfg.plugins[SSHD].enabled = True
     cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
     try:
         r, sess, env = run_submit({"op": "submit", "service_kind": "sshd",
                                    "ssh_pubkey": _pub})
         check("开了之后 sshd 提交成功", r.get("ok"), str(r))
         check("会话记住了服务种类（界面据此决定「连接」做什么）",
-              sess["service_kind"] == mod.SVC_SSHD, str(sess.get("service_kind")))
+              sess["service_kind"] == SSHD, str(sess.get("service_kind")))
         check("sshd 会话的 auth_mode 是 publickey，不是 password",
               sess["auth_mode"] == "publickey", sess["auth_mode"])
         check("缺公钥 → code 2 bad_ssh_pubkey",
@@ -1056,9 +1371,12 @@ exit 0
         check("公钥（连注释）传给了作业，且已规范化",
               env.get("SLURMATE_SSH_PUBKEY") == _pub,
               repr(env.get("SLURMATE_SSH_PUBKEY")))
-        check("sshd 路径与主机密钥目录也传下去了",
-              env.get("SLURMATE_SSHD_BIN") == cfg.plugins[mod.SVC_SSHD].bin
-              and env.get("SLURMATE_SSH_DIR", "").endswith("/.slurmate/ssh"),
+        # ★ 守护进程**不**下发主机密钥目录之类"插件自己的路径"了：那是插件内部
+        #   的事（sshd 插件的 job/start.sh 里写着 $HOME/.slurmate/ssh）。守护进程
+        #   只下发插件的**清单**里声明过的那个 bin_env。
+        check("守护进程按插件清单声明的变量名下发可执行文件路径",
+              env.get("SLURMATE_SSHD_BIN") == cfg.plugins[SSHD].bin
+              and "SLURMATE_SSH_DIR" not in env,
               "%s / %s" % (env.get("SLURMATE_SSHD_BIN"),
                            env.get("SLURMATE_SSH_DIR")))
         # ★ 公钥的注释被丢掉了，所以它不可能把逗号带进 --export。
@@ -1072,7 +1390,7 @@ exit 0
                    ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
                     "SLURMATE_SSHD_BIN")}))
     finally:
-        cfg.plugins[mod.SVC_SSHD].enabled = _saved
+        cfg.plugins[SSHD].enabled = _saved
         cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
 
     # 19.5b ★ 默认资源是**按插件**的 —— 这是"插件块里放插件的策略"最直接的体现
@@ -1080,10 +1398,10 @@ exit 0
     # 从前它是两个代码常量（DEFAULT_CPUS / DEFAULT_MEM），所有服务共用一个值；
     # 而在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。现在它是块里
     # 的一项，缺失时才回落到插件自己的内建值。
-    _saved_cfg = cfg.plugins[mod.SVC_SSHD]
+    _saved_cfg = cfg.plugins[SSHD]
     try:
-        cfg.plugins[mod.SVC_SSHD] = mod.PluginConfig(
-            mod.PLUGIN_BY_NAME[mod.SVC_SSHD],
+        cfg.plugins[SSHD] = mod.PluginConfig(
+            cfg.plugin_by_name[SSHD],
             {"enabled": "yes", "default_cpus": "7", "default_mem": "5G"}, True)
         cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
 
@@ -1101,7 +1419,7 @@ exit 0
         check("显式给的资源仍然覆盖块里的默认值",
               _sess2["cpus"] == 3, str(_sess2.get("cpus")))
     finally:
-        cfg.plugins[mod.SVC_SSHD] = _saved_cfg
+        cfg.plugins[SSHD] = _saved_cfg
         cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
 
     # 19.5c op_plugins：客户端据此决定画哪些按钮、每个按钮写多少资源
@@ -1109,35 +1427,34 @@ exit 0
     _data = _resp.get("data") or {}
     _by = {p["name"]: p for p in (_data.get("plugins") or [])}
     check("op_plugins 报出全部插件（含没启用的）",
-          set(_by) == {mod.SVC_CODE_SERVER, mod.SVC_SSHD}, str(sorted(_by)))
+          set(_by) == {CS, SSHD}, str(sorted(_by)))
     check("每个插件带自己的默认资源",
-          _by[mod.SVC_CODE_SERVER]["defaults"]["cpus"] == 2
-          and _by[mod.SVC_SSHD]["defaults"]["cpus"] == 1,
+          _by[CS]["defaults"]["cpus"] == 2
+          and _by[SSHD]["defaults"]["cpus"] == 1,
           str({k: v.get("defaults") for k, v in _by.items()}))
     check("enabled 如实反映站点决定（sshd 默认关着）",
-          _by[mod.SVC_CODE_SERVER]["enabled"] is True
-          and _by[mod.SVC_SSHD]["enabled"] is False,
+          _by[CS]["enabled"] is True
+          and _by[SSHD]["enabled"] is False,
           str({k: v.get("enabled") for k, v in _by.items()}))
     check("★ 也报出没启用的插件 —— 「装了但停用」与「本站没有」是两回事",
-          mod.SVC_SSHD in _by)
+          SSHD in _by)
     check("★ 不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
           all("name" in p and "title" in p for p in _by.values()))
 
-    # 19.5d ★★ 身份是「铸造」出来的，而且**跨语言必须逐字一致** ─────────────
+    # 19.5d ★★ 插件目录的形状（跨语言契约，重定义为"两边读的是同一份东西"）
     #
-    # 守护进程是 Python、客户端是 JS，两边各自写死了同一对 id。两处写死是不可
-    # 避免的（它们必须能独立启动），所以靠**这一条用例**钉住，而不是靠"记得改"。
+    # 从前这一节钉的是「守护进程里那张写死的表」与「客户端清单」逐字一致 ——
+    # 因为那时守护进程**自己也写了一份** id/版本。现在它一个插件名都不写了：表是
+    # 扫出来的，而它扫的正是仓库里那两个真插件。于是这条钉子的含义变成了：
     #
-    # 对不上的后果不是崩溃，而是**静默接错**：会话记的 `<id>@<版本>` 在客户端的
-    # 插件池里查不到，于是界面只解释、不动作 —— 用户看到的是"作业起来了但界面
-    # 一片白"，而根因（守护进程和客户端的清单漂了）一个字都不在里面。
+    #     仓库 plugins/<目录>/plugin.json 是**唯一**的真相来源，
+    #     守护进程读到的必须与文件里的逐字一致。
     #
-    # ★ 插件已经搬去**仓库顶层** `plugins/`（它们不再是客户端"内建"的，而是独立
-    #   项目）。这一条钉子的**含义暂时不变** —— 守护进程的 BUILTIN_PLUGINS 里那
-    #   两条，必须与仓库里那两个插件的清单逐字一致。等守护进程也改成扫描插件
-    #   目录之后（那时两侧不再各写一份常量），这条会重定义成"插件目录的形状"检查。
-    _plugdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "..", "plugins")
+    # ★ 这仍然值得一条用例，而且理由与从前一样：客户端那一半也是从同一份清单读
+    #   身份（它扫自己的池）。清单漂了不会崩溃，只会**静默接错** —— 会话记的
+    #   `<id>@<版本>` 在客户端的池里查不到，界面只解释、不动作，用户看到的是
+    #   "作业起来了但界面一片白"，而根因一个字都不在里面。
+    _plugdir = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
     _manifests = {}
     if os.path.isdir(_plugdir):
         for _name in sorted(os.listdir(_plugdir)):
@@ -1145,32 +1462,42 @@ exit 0
             if os.path.isfile(_mf):
                 with open(_mf, encoding="utf-8") as _f:
                     _manifests[_name] = json.load(_f)
-    check("找得到客户端的内建插件清单（找不到的话下面几条是空断言）",
+    check("找得到仓库里的插件清单（找不到的话下面几条是空断言）",
           len(_manifests) >= 2, str(sorted(_manifests)))
 
-    for _spec in mod.BUILTIN_PLUGINS:
+    for _spec in cfg.plugin_specs:
         _mf = _manifests.get(_spec.name)
-        check("内建插件 %s：两边都有" % _spec.name, _mf is not None,
+        check("插件 %s：仓库的 plugins/ 下有它" % _spec.name, _mf is not None,
               str(sorted(_manifests)))
         if _mf is None:
             continue
-        check("★ %s 的 id 与客户端逐字一致" % _spec.name,
+        check("★ %s 的 id 与清单逐字一致" % _spec.name,
               _mf.get("id") == _spec.id,
-              "守护进程 %s / 客户端 %s" % (_spec.id, _mf.get("id")))
-        check("★ %s 的版本与客户端一致" % _spec.name,
+              "扫出来的 %s / 清单里的 %s" % (_spec.id, _mf.get("id")))
+        check("★ %s 的版本与清单一致" % _spec.name,
               _mf.get("version") == _spec.version,
-              "守护进程 %s / 客户端 %s" % (_spec.version, _mf.get("version")))
-        check("%s 的短名与客户端一致" % _spec.name,
+              "扫出来的 %s / 清单里的 %s" % (_spec.version, _mf.get("version")))
+        check("%s 的短名与清单一致" % _spec.name,
               _mf.get("name") == _spec.name,
-              "守护进程 %s / 客户端 %s" % (_spec.name, _mf.get("name")))
-        check("★ %s 的 id 是 26 字符的 ULID（不是随手编的名字）"
-              % _spec.name,
+              "扫出来的 %s / 清单里的 %s" % (_spec.name, _mf.get("name")))
+        check("★ %s 的 id 是 26 字符的 ULID（不是随手编的名字）" % _spec.name,
               isinstance(_spec.id, str) and len(_spec.id) == 26
-              and all(c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-                      for c in _spec.id),
+              and all(c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ" for c in _spec.id),
               repr(_spec.id))
-        check("%s 的 id 互不相同（两个插件抢一个 id 会静默取错）" % _spec.name,
-              len({q.id for q in mod.BUILTIN_PLUGINS}) == len(mod.BUILTIN_PLUGINS))
+        # ★ 三个半边都要在。客户端那一半（client/index.js）可以由插件自己决定有
+        #   没有（没有就是纯声明式插件），但作业侧那一半**必须有** —— 一个有界面
+        #   却没有任何作业侧代码的插件，用户点下去只会拿到一个起不来的会话。
+        check("★ %s 有作业侧 job/start.sh" % _spec.name,
+              os.path.isfile(os.path.join(_plugdir, _spec.name, "job", "start.sh")),
+              os.path.join(_plugdir, _spec.name, "job", "start.sh"))
+        check("★ %s 的目录里没有多余的东西（清单、客户端、作业侧 —— 就这三样）"
+              % _spec.name,
+              not (set(os.listdir(os.path.join(_plugdir, _spec.name)))
+                   - {"plugin.json", "client", "job", "README.md"}),
+              str(sorted(os.listdir(os.path.join(_plugdir, _spec.name)))))
+
+    check("★ 两个插件的 id 互不相同（两个插件抢一个 id 会让客户端静默取错）",
+          len({q.id for q in cfg.plugin_specs}) == len(cfg.plugin_specs))
 
     check("op_plugins 报出 id 与版本（客户端的解析键）",
           all(isinstance(p.get("id"), str) and len(p.get("id")) == 26
@@ -1183,7 +1510,7 @@ exit 0
     # 旧的那一版代码（作业侧与客户端侧是配套的两半）。如果服务端在读取会话时按
     # "站点当前清单"现算，客户端就会把**新版本**的客户端代码接到**旧版本**的作业
     # 实现上 —— 而站点更新频繁正是这个项目要支持的现实。
-    _cs_spec = mod.PLUGIN_BY_NAME[mod.SVC_CODE_SERVER]
+    _cs_spec = cfg.plugin_by_name[CS]
     _old_ver = _cs_spec.version
     _before = None
     try:
@@ -1204,7 +1531,7 @@ exit 0
               "起时 %r，升级后报 %r（现算的话这一条会红）"
               % (_before, _now.get("service_plugin")))
         check("短名不变（它只是站点内的名字，与版本无关）",
-              _now.get("service_kind") == mod.SVC_CODE_SERVER,
+              _now.get("service_kind") == CS,
               repr(_now.get("service_kind")))
         _st2.close()
     finally:
@@ -1222,7 +1549,7 @@ exit 0
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
                    candidates="55001", created_at=mod.now_ts(),
-                   service_kind=mod.SVC_SSHD)
+                   service_kind=SSHD)
     d.store.insert(session_id="s-unknown", uid=UID, user="alice",
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
@@ -1231,7 +1558,7 @@ exit 0
     # 文件。这里要验的只是 service_kind 的渲染，与口令无关。
     check("session_view 报出 service_kind",
           d.session_view(d.store.get("s-known"), with_secret=False)["service_kind"]
-          == mod.SVC_SSHD)
+          == SSHD)
     check("★ 数据库里没有时报 None，不许猜一个默认值 —— 猜错会让界面拿口令去打 SSH 端口",
           d.session_view(d.store.get("s-unknown"), with_secret=False)["service_kind"]
           is None)
@@ -1344,7 +1671,7 @@ exit 0
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
                    candidates="55003", created_at=mod.now_ts(),
-                   service_kind=mod.SVC_SSHD)
+                   service_kind=SSHD)
     _real_load, _real_slurm = d.load_session_file, d.slurm
     d.slurm = _FakeSlurmNoJob()
     try:
@@ -1403,8 +1730,15 @@ exit 0
         try:
             _funcs = "\n".join(_grab(n) for n in
                                ("write_atomic", "json_escape", "write_session"))
+            # 插件往会话文件里加的字段靠这个**宿主声明的**关联数组传递。它是
+            # `declare -A`，在函数外面声明（插件在 start_* 里往它写、write_session
+            # 读）。抽出来一起跑 —— 宿主把这一行删掉的话，下面的 write_session
+            # 会在 set -u 下报 unbound variable，而这条用例当场红。
+            _decl = next(l for l in _rblines
+                         if l.startswith("declare -A PLUGIN_SESSION_FIELDS"))
         except StopIteration:
-            _skip = "run.sbatch 里找不到 write_atomic/json_escape/write_session"
+            _skip = ("run.sbatch 里找不到 write_atomic/json_escape/write_session"
+                     " 或 declare -A PLUGIN_SESSION_FIELDS")
     if _skip is None:
         # 抽出来的东西自己得先是合法 shell，否则下面那次运行失败的原因与被测逻辑无关
         _syn = subprocess.run(["bash", "-n", "-c", _funcs], capture_output=True, text=True)
@@ -1424,7 +1758,10 @@ exit 0
             "SVC_PORT=55003", "STARTED_AT=1700000000",
             "SLURMATE_SERVICE_KIND=sshd", "SVC_PID=4242",
             "AUTH_MODE=publickey", 'AUTH_PASSWORD=""',
-            'SSH_HOST_PUB="%s"' % _hk,
+            _decl,
+            # 插件侧的写法就是这样：往那个数组里写一个键。宿主不认识
+            # `ssh_host_key` 这个名字 —— 它只负责**转义**并写进 JSON。
+            'PLUGIN_SESSION_FIELDS[ssh_host_key]="%s"' % _hk,
             "SLURM_RESTART_NUMBER=0",
             'SESS_FILE="%s"' % os.path.join(tmpdir, "job-12345.json"),
             _funcs,
@@ -1448,7 +1785,7 @@ exit 0
             check("★ 它写出来的每个键都在守护进程的白名单里"
                   "（漏登记 = 那个字段被静默丢弃，谁都不会报错）",
                   _unknown == [], "没登记的键：%s" % _unknown)
-            check("★ 字段没有错位（printf 参数与格式串一一对应）",
+            check("★ 插件加的字段被写进去了，而且宿主统一做了转义（键名跨语言契约）",
                   _parsed.get("ssh_host_key") == _hk
                   and _parsed.get("service_pid") == 4242
                   and _parsed.get("service_kind") == "sshd"
@@ -1461,6 +1798,287 @@ exit 0
             check("schema 与守护进程认的那一个一致",
                   _parsed.get("schema") == mod.SCHEMA_VERSION,
                   "%s vs %s" % (_parsed.get("schema"), mod.SCHEMA_VERSION))
+
+    # ── 21. 作业侧契约：宿主与插件之间只有一条接口，就是**函数名** ──────────
+    #
+    #     plugin_call <动词>  →  <动词>_<短名>（短名里的 - 写成 _）
+    #
+    # 这条契约漂了的症状是：用户排完队、作业跑起来，然后在日志里读到"候选端口
+    # 全部失败" —— 一句话指不回根因，而根因是一个函数名拼错了。
+    #
+    # 所以这里**真的编织一遍**（照 deploy.sh 的做法，同一个标记、同一段 awk），
+    # 再真的调一次分派。
+    print("\n── 21. 作业侧契约（宿主 ↔ 插件的唯一接口：函数名）──")
+    _tpl = open(_rb, encoding="utf-8").read()
+    _blocks = "\n".join(
+        "\n# ─── 插件 %s ───\n%s" % (sp.name,
+                                    open(os.path.join(sp.source_dir, "job", "start.sh"),
+                                         encoding="utf-8").read())
+        for sp in cfg.plugin_specs)
+    _woven = os.path.join(tmpdir, "woven.sbatch")
+    with open(os.path.join(tmpdir, "blocks.sh"), "w", encoding="utf-8") as _f:
+        _f.write(_blocks)
+    _awk = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven, "w", encoding="utf-8") as _f:
+        _f.write(_awk.stdout)
+    # ★ 数的是**整行**的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
+    #   于是"替换成功"这件事看起来永远不成立 —— deploy.sh 里那条同理。
+    check("★ 模板里的拼接标记恰好一处，编织后一处不剩（照 deploy.sh 的做法）",
+          _awk.returncode == 0
+          and len(re.findall(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _tpl)) == 1
+          and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _awk.stdout),
+          _awk.stderr[:200])
+    _wsyn = subprocess.run(["bash", "-n", _woven], capture_output=True, text=True)
+    check("编织后的作业脚本是合法 shell（这一条挡的就是语法错的插件脚本）",
+          _wsyn.returncode == 0, _wsyn.stderr[:300])
+
+    for _sp in cfg.plugin_specs:
+        _suffix = _sp.name.replace("-", "_")
+        check("★ 插件 %s 的 job/start.sh 里定义了 %s（宿主就是按这个分派）"
+              % (_sp.name, _sp.job_entry),
+              re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _blocks) is not None)
+        check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）"
+              % (),
+              re.search(r"(?m)^#!|^[ \t]*#SBATCH",
+                        open(os.path.join(_sp.source_dir, "job", "start.sh"),
+                             encoding="utf-8").read()) is None)
+
+    # ★ 宿主里不许出现任何插件的名字。这是"外壳"的定义，而且是可机检的 ——
+    #   注释里也不行：注释里的插件名会让下一个读的人以为宿主认识它。
+    for _sp in cfg.plugin_specs:
+        check("★ 宿主（run.sbatch 模板）里没有出现插件名 %r —— 一个字都没有"
+              % _sp.name, _sp.name not in _tpl)
+
+    # 真的调一次分派：三种结果必须分得开（有 / 没有 / 失败了）
+    _dfuncs = "\n".join(_grab(n) for n in
+                         ("plugin_call", "host_start_service", "plugin_names"))
+    _dharness = "\n".join([
+        "set -u",
+        "SLURMATE_SERVICE_KIND=code-server",
+        _dfuncs,
+        'start_code_server() { printf "START %s\\n" "$1"; }',
+        'precheck_code_server() { printf "PRECHECK\\n"; return 7; }',
+        'host_start_service 55001; printf "rc_start=%s\\n" "$?"',
+        'plugin_call precheck; printf "rc_pre=%s\\n" "$?"',
+        'plugin_call cleanup; printf "rc_cleanup=%s\\n" "$?"',
+        "SLURMATE_SERVICE_KIND=nosuch",
+        'plugin_call start 1; printf "rc_unknown=%s\\n" "$?"',
+        'printf "names=%s\\n" "$(plugin_names)"',
+    ])
+    _dr = subprocess.run(["bash", "-c", _dharness], capture_output=True, text=True)
+    _out = _dr.stdout
+    check("★ plugin_call start 分派到 start_code_server（短名里的 - 写成 _）",
+          "START 55001" in _out and "rc_start=0" in _out, _out[:200])
+    check("★ 插件自己的钩子失败时**返回码原样透出**（7，不是被吞成 0/1）",
+          "PRECHECK" in _out and "rc_pre=7" in _out, _out[:200])
+    check("★ 没定义的钩子返回 3 —— 「没有这个钩子」与「钩子失败了」必须分得开",
+          "rc_cleanup=3" in _out, _out[:200])
+    check("★ 服务种类本站没有作业侧实现时也返回 3（宿主据此以 24 结束会话）",
+          "rc_unknown=3" in _out, _out[:200])
+    check("plugin_names 能列出作业侧有实现的插件（错误信息靠它说清楚）",
+          "names=code_server" in _out, _out[:200])
+
+    # ── 22. 真的把编织出来的作业脚本跑起来 ──────────────────────────────────
+    #
+    # 第 21 节验的是**分派**（抽函数出来调）。这一节验的是**主流程**：那个脚本真的
+    # 被执行时，会走到哪一条路、写什么日志、以什么退出码结束。
+    #
+    # ★ 为什么值得单独一节：`run.sbatch` 没有 .sh 后缀，checks.yml 的语法扫描清单
+    #   里不含它；它又只可能在计算节点上跑，而本机不是计算节点。所以除了这里，没有
+    #   任何东西在看它的控制流。变异验证发现过这个洞：把"本站没有作业侧实现"那道
+    #   检查改成 `if false`，当时**全绿** —— 因为没有任何用例执行到那一行。
+    print("\n── 22. run.sbatch 的主流程（真的跑一遍）──")
+
+    def run_jobsh(script, kind, home, extra_env=None):
+        """在一个假的计算节点环境里跑作业脚本。返回 (退出码, 日志文本)。"""
+        fakebin = os.path.join(home, "bin")
+        os.makedirs(fakebin, exist_ok=True)
+        # detect_node_ip 优先问 scontrol；这里给它一个字面 IPv4（ACL 依赖它，
+        # 而它是这条路上唯一一个必须真的能拿到的东西）。
+        write_stub(os.path.join(fakebin, "scontrol"),
+                   'echo "NodeName=node01 NodeAddr=192.0.2.20 State=IDLE"\n')
+        env = {
+            "PATH": fakebin + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home,
+            "SLURM_JOB_ID": "424242",
+            "SLURMD_NODENAME": "node01",
+            "SLURMATE_SESSION_ID": "sess-jobsh-1",
+            "SLURMATE_CANDIDATES": "55001;55002",
+            "SLURMATE_SERVICE_KIND": kind,
+            "SLURMATE_AUTH_MODE": "publickey",
+            "SLURMATE_CLUSTER_CIDR": "192.0.2.0/24",
+            "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
+            "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
+            "SLURMATE_PORT_MIN": "55001",
+            "SLURMATE_PORT_MAX": "55999",
+        }
+        env.update(extra_env or {})
+        r = subprocess.run(["bash", script], capture_output=True, text=True,
+                           env=env, timeout=120)
+        logs = ""
+        d_ = os.path.join(home, ".slurmate", "logs")
+        if os.path.isdir(d_):
+            for fn in sorted(os.listdir(d_)):
+                with open(os.path.join(d_, fn), encoding="utf-8") as f:
+                    logs += f.read()
+        return r.returncode, (logs or (r.stdout + r.stderr))
+
+    # ── 22a 本站没有作业侧实现了这个插件 ──
+    # 守护进程在提交时已经拒过一次，这里是**第二道** —— 手工提交、或者两端版本
+    # 不一致时，唯一的替代是作业跑完所有候选端口之后报一句"候选端口全部失败"，
+    # 那句话指不回根因。
+    _h1 = os.path.join(tmpdir, "jobsh-unknown")
+    os.makedirs(_h1, exist_ok=True)
+    _rc, _log = run_jobsh(_woven, "nosuchplugin", _h1)
+    check("★ 作业脚本对「本站没有作业侧实现」的服务种类以 24 结束（不是跑完候选端口才失败）",
+          _rc == 24, "rc=%s 日志=%s" % (_rc, _log[-300:]))
+    check("★ 而且它说清了**本站有实现的是哪些**（错误信息要能照着做）",
+          "没有作业侧实现" in _log and "code_server" in _log, _log[-400:])
+
+    # ── 22b 零插件编织出来的脚本 ──
+    # 一个插件都没有是**合法状态**，但用户提交时得到的必须是一句人话，而不是
+    # 一句"候选端口全部失败"。
+    _woven0 = os.path.join(tmpdir, "woven-zero.sbatch")
+    with open(os.path.join(tmpdir, "blocks0.sh"), "w", encoding="utf-8") as _f:
+        _f.write("# 本站没有安装任何插件\n")
+    _awk0 = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks0.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven0, "w", encoding="utf-8") as _f:
+        _f.write(_awk0.stdout)
+    _syn0 = subprocess.run(["bash", "-n", _woven0], capture_output=True, text=True)
+    check("零插件编织出来的作业脚本也是合法 shell",
+          _awk0.returncode == 0 and _syn0.returncode == 0, _syn0.stderr[:200])
+    _h2 = os.path.join(tmpdir, "jobsh-zero")
+    os.makedirs(_h2, exist_ok=True)
+    _rc0, _log0 = run_jobsh(_woven0, "code-server", _h2)
+    check("★ 零插件的作业脚本同样以 24 明确结束（不是跑完候选端口才失败）",
+          _rc0 == 24, "rc=%s 日志=%s" % (_rc0, _log0[-300:]))
+    check("★ 它的日志里「有作业侧实现的是」那一项是空的（括号里什么都没有）",
+          "有实现的是：（" in _log0, _log0[-500:])
+
+    # ── 22c 插件自己的 precheck 没过 → 24，且**开始挑端口之前**就结束 ──
+    _woven_pre = os.path.join(tmpdir, "woven-pre.sbatch")
+    with open(os.path.join(tmpdir, "blocks_p.sh"), "w", encoding="utf-8") as _f:
+        _f.write("start_thing() { log '不该走到这里'; SVC_PID=$$; return 0; }\n"
+                 "precheck_thing() { log 'PRECHECK-拒绝了'; return 1; }\n")
+    _awkp = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_p.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven_pre, "w", encoding="utf-8") as _f:
+        _f.write(_awkp.stdout)
+    _h3 = os.path.join(tmpdir, "jobsh-pre")
+    os.makedirs(_h3, exist_ok=True)
+    _rc3, _log3 = run_jobsh(_woven_pre, "thing", _h3)
+    check("★ 插件的 precheck 没过 → 作业以 24 结束，且那道检查真的被调了",
+          _rc3 == 24 and "PRECHECK-拒绝了" in _log3,
+          "rc=%s 日志=%s" % (_rc3, _log3[-300:]))
+    check("★ 预检没过时**不会**开始挑端口（服务一次都没被启动）",
+          "不该走到这里" not in _log3, _log3[-300:])
+
+    # ── 22d ★ 作业日志：我们自己的行**恰好一次**，插件的行**带得上去** ─────
+    #
+    # 这一段是本项目里最容易写成"看起来对"的地方，所以它有三条独立的断言。
+    # 契约（plugins/README.md〈服务进程的输出、以及作业日志〉）：
+    #
+    #   · log() 双写（本地 + NFS），作业结束时的补写只补**水位之后**的部分
+    #   · 服务进程的输出走它**自己的**文件，由 `cleanup_<短名>` 并进 LOCAL_LOG
+    #   · `cleanup_<短名>` 在宿主最后一行**之后**被调，所以并进来的行天然在水位
+    #     之后、会被补写带上去
+    #
+    # 变异验证发现的：写这一节时随手让假插件直接 printf 到 LOCAL_LOG，于是日志末尾
+    # 出现了**两行**"清理完成 rc=24" —— 因为水位那时记的是"log() 调过几次"，
+    # 而服务进程的插话让它错位了。
+    _woven_raw = os.path.join(tmpdir, "woven-raw.sbatch")
+    with open(os.path.join(tmpdir, "blocks_r.sh"), "w", encoding="utf-8") as _f:
+        _f.write(
+            # 服务进程的输出 → 它自己的文件（契约要求的形状）
+            "start_thing() {\n"
+            "    _thing_log=\"$LOCAL_LOG_DIR/thing.log\"\n"
+            "    ( printf '服务自己的第 1 行\\n'; printf '服务自己的第 2 行\\n';"
+            " sleep 60 ) >> \"$_thing_log\" 2>&1 &\n"
+            "    SVC_PID=$!\n"
+            # ★ 这一行是**故意违规**的：契约说服务进程的输出不该直接写 LOCAL_LOG。
+            #   它同时是水位那条断言的试金石 —— 它插在两次 log() **中间**，
+            #   于是"水位记行号"与"水位记 log() 次数"两种实现会给出不同的答案。
+            "    printf '水位之前偷偷写的一行\\n' >> \"$LOCAL_LOG\"\n"
+            "    log '插件用 log() 写的一行'\n"
+            "    return 0\n"
+            "}\n"
+            "cleanup_thing() { tail -n 200 \"$_thing_log\" >> \"$LOCAL_LOG\" 2>/dev/null || true; }\n")
+    _awk_r = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_r.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven_raw, "w", encoding="utf-8") as _f:
+        _f.write(_awk_r.stdout)
+    _syn_r = subprocess.run(["bash", "-n", _woven_raw], capture_output=True, text=True)
+    check("按契约写的插件编织后仍是合法 shell",
+          _awk_r.returncode == 0 and _syn_r.returncode == 0, _syn_r.stderr[:200])
+
+    _hr = os.path.join(tmpdir, "jobsh-raw")
+    _fakebin = os.path.join(_hr, "bin")
+    os.makedirs(_fakebin, exist_ok=True)
+    write_stub(os.path.join(_fakebin, "scontrol"),
+               'echo "NodeName=node01 NodeAddr=192.0.2.20 State=IDLE"\n')
+    _env_full = dict(os.environ)
+    _env_full.update({
+        "PATH": _fakebin + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": _hr, "SLURM_JOB_ID": "777001", "SLURMD_NODENAME": "node01",
+        "SLURMATE_SESSION_ID": "sess-raw-1", "SLURMATE_CANDIDATES": "55001",
+        "SLURMATE_SERVICE_KIND": "thing", "SLURMATE_AUTH_MODE": "none",
+        "SLURMATE_CLUSTER_CIDR": "192.0.2.0/24",
+        "SLURMATE_SESS_DIR": os.path.join(_hr, ".slurmate", "sessions"),
+        "SLURMATE_LOG_DIR": os.path.join(_hr, ".slurmate", "logs"),
+        "SLURMATE_PORT_MIN": "55001", "SLURMATE_PORT_MAX": "55999",
+    })
+    _p = subprocess.Popen(["bash", _woven_raw], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, env=_env_full)
+    # 等它真的到 running（"会话就绪"落盘）再发 SIGTERM —— 那正是"作业被 scancel"
+    # 的形状，也是 cleanup 与插件钩子唯一会走的那条路。
+    _rlog = ""
+    for _ in range(60):
+        time.sleep(0.5)
+        _rlog = _read_logs(_hr)
+        if "会话就绪" in _rlog:
+            break
+    _p.send_signal(_sig.SIGTERM)
+    try:
+        _p.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        _p.kill()
+        _p.wait()
+    _rlog = _read_logs(_hr)
+    _rlines = [x for x in _rlog.split("\n") if x.strip()]
+    _dupes = sorted({x for x in _rlines if _rlines.count(x) > 1})
+    check("★ 会话确实跑到了 running（下面几条不是在一个早退的作业上验的）",
+          any("会话就绪" in x for x in _rlines), _rlog[-400:])
+    check("★ 宿主自己的日志行在 NFS 里**恰好出现一次**（水位不许错位）",
+          _dupes == [], "重复了：%s" % [x[-70:] for x in _dupes])
+    check("★ 插件在 cleanup_<短名> 里并进来的服务日志确实上了 NFS",
+          any("服务自己的第 1 行" in x for x in _rlines)
+          and any("服务自己的第 2 行" in x for x in _rlines),
+          _rlog[-500:])
+    check("★ 而在 start_<短名> 里直接写 LOCAL_LOG 的行进不了 NFS"
+          "（这正是契约要禁止那种写法的原因 —— 它是静默丢失）",
+          not any("水位之前偷偷写的一行" in x for x in _rlines), _rlog[-500:])
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

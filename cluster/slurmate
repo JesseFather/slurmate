@@ -293,7 +293,19 @@ def cmd_plugins(args):
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
                  p.get("version") or "?",
                  "%s 核 / %s" % (df.get("cpus"), df.get("mem")),
-                 "" if p.get("builtin") else "站点分发"))
+                 p.get("title") or ""))
+    if not d["plugins"]:
+        # ★ 零插件是**合法状态**，不是"这台机器坏了"。所以这里给的是出路，
+        #   不是故障描述 —— 而 99% 的人看到"一个都没有"时的第一个问题是"那我
+        #   该往哪放"，所以答案必须在这一屏里。
+        print("  （本站没有安装任何插件）")
+        print()
+        print("这是合法状态：守护进程照常运行，已有会话照常能查、能停，")
+        print("只是没有可提交的服务。装插件：把插件目录放进集群上的")
+        print("  <prefix>/share/slurmate/plugins/")
+        print("再跑一次 deploy.sh（它会把插件的作业侧编织进作业模板）。")
+        print("仓库顶层的 plugins/ 下有两个现成的。")
+        return 0
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
     print("缺省资源由服务端定并在提交时钳制 —— 客户端不填这些值。")
@@ -330,7 +342,7 @@ def cmd_submit(args):
     d = r["data"]
     res = d.get("resources") or {}
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
-    print("插件 %s" % (req.get("service_kind") or "code-server"))
+    print("插件 %s" % (req.get("service_kind") or "（本站的 default_plugin）"))
     print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
                                    d.get("requested_time")))
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
@@ -544,11 +556,12 @@ def build_parser():
     p.add_argument("--gpus", type=int, help="GPU 数量（省略 = 不占卡）")
     p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
     p.add_argument("--service-kind",
-                   help="插件名（省略 = code-server）。见 `slurmate plugins`；"
-                        "站点没开的插件会被明确拒绝")
+                   help="插件名。见 `slurmate plugins`。省略时用配置里的 "
+                        "default_plugin；没配就是必填（没有内建缺省 —— 隐式缺省"
+                        "会让装/卸一个插件悄悄改变行为）")
     p.add_argument("--ssh-pubkey",
-                   help="一行 ssh-ed25519 公钥。需要公钥的插件（如 sshd）必填，"
-                        "否则服务端回 code 2")
+                   help="一行 ssh-ed25519 公钥。清单元数据里要求公钥的插件"
+                        "（contributes.submitPubkey）必填，否则服务端回 code 2")
     p.add_argument("--json", action="store_true")
 
     p = add("status", cmd_status, "查看会话状态")

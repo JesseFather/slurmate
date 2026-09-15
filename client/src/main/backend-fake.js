@@ -130,8 +130,6 @@ class FakeBackend extends Backend {
       version: p.version,
       title: p.displayName || p.name,
       enabled: !this._siteDisabled.has(p.name),
-      // 站点分发来的，不是客户端自带的 —— 基座已经不认识"内建"这个概念了。
-      builtin: false,
       // ★ 内部用（决定起不起本地 HTTP 服务、要不要公钥、界面与登录契约是什么）。
       //   **不进 `plugins` 响应** —— 那两个字段是客户端从清单里自己读的，
       //   服务端多报一份就是两份真相。见下面的 case 'plugins'。
@@ -204,7 +202,7 @@ class FakeBackend extends Backend {
       case 'plugins':    return ok({
         plugins: this._sitePlugins().map((p) => ({
           id: p.id, name: p.name, version: p.version, title: p.title,
-          enabled: p.enabled, builtin: p.builtin, defaults: { ...DEFAULTS },
+          enabled: p.enabled, defaults: { ...DEFAULTS },
         })),
         enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
       });
@@ -253,8 +251,7 @@ class FakeBackend extends Backend {
   debugAddSitePlugin(name, title = null) {
     if (!this._extraSitePlugins.some((p) => p.name === name)) {
       this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name, version: '1.0.0',
-                                    title: title || name, enabled: true,
-                                    builtin: false });
+                                    title: title || name, enabled: true });
     }
   }
   /** 让演示站点把某个插件**关掉**（站点装了但不允许用）。 */

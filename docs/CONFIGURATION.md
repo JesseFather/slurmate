@@ -5,7 +5,7 @@
 
 | 读者 | 怎么读 | 读到之后 |
 |---|---|---|
-| `slurmate-sessiond` | `parse_config()`，`键 = 值` + `[plugin:名字]` 块 | 全部键 |
+| `slurmate-sessiond` | `parse_config()`，`键 = 值` + `[plugin:名字]` 块 | 全部键（外加它自己扫 `<prefix>/share/slurmate/plugins/` 得到的插件表） |
 | `cluster/deploy.sh` | `sed` 抽取 `range_start` / `range_end` / `reserved_ranges` / `readonly_paths` | 用于预检与渲染 systemd 单元 |
 
 `slurmate`（用户 CLI）**不读这个文件**（见下方「不再是配置项的东西」）。
@@ -22,7 +22,9 @@ cluster_cidr = 192.0.2.0/24     # 站点通用键。【必须写在所有块之�
 range_start  = 55001
 ...
 
-[plugin:code-server]            # 插件块。块存在 = 这个插件装上了
+default_plugin = code-server    # 提交时不带 service_kind 用哪个（可留空）
+
+[plugin:code-server]            # 插件块。**可选的** —— 不写就用插件清单里的缺省
 enabled      = yes              #            enabled = yes 才是真的开着
 default_cpus = 2
 default_mem  = 8G
@@ -37,7 +39,7 @@ default_mem  = 8G
 
 ---
 
-## 一、站点通用键。一共 11 个。
+## 一、站点通用键。一共 12 个。
 
 这是 v0.2 的收缩，v0.3 又把它推进了一步：**能从 Slurm 查到的，一律不再写一份；
 只属于某个插件的，搬进那个插件的块。**
@@ -63,6 +65,7 @@ default_mem  = 8G
 | `reserved_ranges` | `起-止,起-止` | 空（无） | 要避让的其他区间。见下方专节 |
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
 | `sbatch` / `scancel` / `squeue` / `scontrol` / `sacctmgr` | 路径 | 空 = 自动查找 | 见下方专节 |
+| `default_plugin` | 短名 | **空**（无默认值） | 提交时不带 `service_kind` 用哪个插件。**留空 = 必填**，见〈一之二〉 |
 
 ### 为什么 `auth_mode` 和 `code_server_bin` 不在这里了
 
@@ -72,28 +75,40 @@ default_mem  = 8G
 是 **code-server 的**路径。中转站用的是公钥，那两个键对它一个字都不适用 ——
 从前它们摆在顶层，是因为那时只有一个插件。
 
-现在每个插件块里有同样的三项：`enabled` / `default_cpus` / `default_mem`，
-外加它自己认得的几个（code-server 是 `bin` 与 `auth_mode`，sshd 是 `bin`）。
+现在每个插件块里有同样的四项：`enabled` / `default_cpus` / `default_mem` / `bin`，
+外加它**自己在清单里声明的**那几个取值受限的键（code-server 是 `auth_mode`；
+清单里没声明就一个都没有）。
+
+★ 「外加的那几个」不在代码里，在插件的 `plugin.json` 的 `site.enumKeys` 里 ——
+于是加一个插件不需要改守护进程的任何一行，也就不存在"守护进程认得两个键、插件
+声明了三个"这种分叉。**没有单独的"额外键"清单**：取值受限的键**就是**额外键，
+两份清单可以互相矛盾，一份不能。
 
 ---
 
 ## 一之二、插件块
 
-一个块 = 一个**已安装的**插件。现在有两个：
+★ **插件是一个独立的项目**，装在集群上的 `<prefix>/share/slurmate/plugins/` 里，
+由 `deploy.sh` 装进去（`--plugins-src DIR`，缺省是仓库顶层的 `plugins/`）。
 
-| 插件 | 是什么 |
-|---|---|
-| `code-server` | 浏览器里的 IDE |
-| `sshd` | 用户态 ssh，供原生 VS Code Remote-SSH、codex 这类**要求 ssh 连接**的工具用 |
+**加一个插件 = 放一个目录 + 跑一次 deploy.sh。** 不需要改守护进程的源码，连本配置
+文件都不需要动 —— 下面那些块全是**可选的**，不写就用插件清单里的缺省。
+契约见 [plugins/README.md](../plugins/README.md)。
 
-块内的键：
+块内的键（每个插件都认这四个）：
 
 | 键 | 含义 |
 |---|---|
-| `enabled` | 开不开。**不写就是不按块里这份配置开** —— 见下 |
+| `enabled` | 开不开。**不写就用插件自己声明的缺省** —— 见下 |
 | `default_cpus` / `default_mem` | **这个插件**的默认资源。客户端省略 cpus/mem 时用这一组 |
-| `bin` | 作业在**计算节点**上执行的那个可执行文件。留空 = 按插件各自的惯例找 |
-| `auth_mode`（只有 code-server） | `password` 或 `none` |
+| `bin` | 作业在**计算节点**上执行的那个可执行文件。留空 = 按插件清单里声明的 `discovery` 找 |
+
+外加**该插件自己在清单里声明的**那几个取值受限的键。仓库里的两个现成的：
+
+| 插件 | 从清单来的额外键 |
+|---|---|
+| `code-server` | `auth_mode`（`password` / `none`） |
+| `sshd` | （没有） |
 
 块名就是插件的**短名**（`service_kind`），它只需要**本站内唯一**。插件的身份另有
 一个**铸造出来的全球唯一 `id`**（ULID，写在插件清单里、永不改变）—— 那一层是给
@@ -103,18 +118,20 @@ default_mem  = 8G
 ### 「装了」和「开着」是两件事
 
 ```
-块在不在    →  这个插件装没装（决定它的配置从哪来）
-enabled     →  它开没开（决定用户能不能提交它）
+插件目录在不在   →  这个插件装没装（决定它的配置从哪来）
+enabled          →  它开没开（决定用户能不能提交它）
 ```
 
 规则只有一条：
 
 ```
 插件的 enabled = 块里写了就用块里的
-              否则 = (这个插件的名字在不在"缺省开启清单"里)
+              否则 = 插件清单里的 site.defaultEnabled（缺省 false）
 ```
 
-缺省开启清单是 `(code-server,)`。于是：
+`site.defaultEnabled` 为 `true` 的只有一种插件：**它就是升级前那个唯一可用的服务**
+（历史上是 code-server）。那条标记存在的**全部理由**是「升级不改变现有站点的
+行为」，而不是"这个插件比较重要"。于是：
 
 - **一个块都没有**（老配置）→ 只开 code-server，**与升级前完全一致**；
 - 写一个 `[plugin:sshd]` 块**不会**顺手把 code-server 关掉 —— 那正是最危险的那类
@@ -123,8 +140,33 @@ enabled     →  它开没开（决定用户能不能提交它）
   `default_cpus = 1` 在没有任何显式同意的情况下开出一条交互式 ssh 的路。
   **想开就写 `enabled = yes`。**
 
-将来新增内建插件时**不要**往缺省清单里加名字：那等于给所有站点在升级时静默多开
-一个能力。让站点自己写。
+★ **新插件的清单里不要写 `site.defaultEnabled: true`。** 那等于给所有站点在升级时
+静默多开一个能力。让站点自己写 `enabled = yes`。
+
+### 一个插件都没装 / 一个都没开
+
+**两种都是合法状态。** 守护进程照常启动，已有会话照常能查、能停 —— 只是没有可提交
+的服务。`slurmate plugins` 与 `slurmate-sessiond --check` 都会照实说出来，并给出
+插件安装目录的路径。
+
+（v0.4 及以前，一个插件都没启用是一条**启动错误** —— 那等于把"框架"和"插件"绑死，
+而按设计基座不该知道有没有插件。）
+
+### 提交时的缺省插件
+
+```ini
+default_plugin = code-server
+```
+
+提交时的请求不带 `service_kind` 就用它。**留空 = 提交时必须显式指定**，否则
+`2 missing_service_kind`。
+
+★ 为什么**不**选"表里唯一那个"当缺省：隐式缺省会让**装一个插件 / 卸一个插件**这种
+配置之外的动作悄悄改变行为 —— 今天提交成功的那条命令，明天可能落到另一个服务上。
+这一层要的是可预测，所以缺省必须是你写下来的。
+
+★ `default_plugin` 指向一个**没装的**插件是**启动错误**（不是等到用户提交才报错）：
+那不是"本站没开某个服务"，而是"配置指向一个不存在的东西"。
 
 ### 块里认不出的键同样报错
 

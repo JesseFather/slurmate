@@ -14,6 +14,7 @@
   "site": {
     "defaultCpus": 1,
     "defaultMem": "2G",
+    "defaultEnabled": false,
     "bin": {
       "env": "SLURMATE_SSHD_BIN",
       "discovery": "convention",

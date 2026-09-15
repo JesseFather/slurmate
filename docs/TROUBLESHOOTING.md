@@ -513,7 +513,7 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 
 | 现象 | 原因 | 该做什么 |
 |---|---|---|
-| 按钮在，但灰着 / 点了被拒 | **站点没开**（`enabled = no`，或压根没有那个块） | 找管理员 |
+| 按钮在，但灰着 / 点了被拒 | **站点装了但没开**（`enabled = no`） | 找管理员 |
 | 按钮根本不在，而站点确实开着 | **本客户端不认识**这个插件 | 升级客户端 |
 | 按钮不在，别的机器上有 | **本机把它关掉了**（`~/.slurmate/config.json` 的 `plugins` 段） | 自己打开 |
 
@@ -524,13 +524,54 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 > "你用不了它"，而且更常见 —— 站点升级了插件而你的客户端还是旧的。这时界面上会
 > 明说"站点用的是 1.2.0 版，本机这一份是 1.0.0 版"。
 
-### 守护进程起不来，报「[plugin:xxx] 是未知的插件」
+### 守护进程起不来，报「[plugin:xxx] 是个未知的插件」
 
-块名打错了（`[plugin:ssh]` 少一个 d 也算）。报错里会列出本版认得的名字。
+两种原因，报错里会**分开说**，因为它们对应两种完全不同的行动：
+
+| 报错里说 | 原因 | 该做什么 |
+|---|---|---|
+| 「本站**装了**的是：…」 | 块名打错了（`[plugin:ssh]` 少一个 d 也算），或那个插件**没装** | 改块名 / 把插件装上去 |
+| 「本站**一个插件都没装**」 | 插件安装目录是空的 | 把插件目录放进去，再跑一次 `deploy.sh` |
+
 守护进程**故意**不静默忽略 —— 静默忽略的后果是「配置里写着，而实际什么也没开」。
 
-> 站点分发插件（用 `id` 而不是内建短名标识的那些）是**下一阶段**的事，本版还写不了。
-> 现在能写进块里的只有内建那两个。
+```bash
+# 看装了什么（守护进程自己扫出来的那一份）
+sudo /usr/local/sbin/slurmate-sessiond --check-plugins
+```
+
+### 守护进程起不来，报「default_plugin = xxx 在本站**没有装**」
+
+配置文件里的 `default_plugin` 指向一个没装的插件。**这是启动错误，不是等到用户提交
+才报错** —— 那不是"本站没开某个服务"，而是"配置指向一个不存在的东西"，两者的
+后果完全不同。改掉它，或者留空（留空 = 提交时必须显式给 `service_kind`）。
+
+### 用户提交时报「本站没有设置 default_plugin，提交时必须显式指定 service_kind」
+
+配置里没写 `default_plugin`（这是**推荐值**）。要么写上一个：
+
+```ini
+default_plugin = code-server
+```
+
+要么让调用方显式给：`slurmate submit --service-kind code-server`。
+
+★ 守护进程**故意**没有内建缺省，也**故意**不选"表里唯一那个"当缺省：隐式缺省会让
+**装一个插件 / 卸一个插件**这种配置之外的动作悄悄改变行为 —— 今天提交成功的那条
+命令，明天可能落到另一个服务上。
+
+### 作业起来了，日志里有「本站没有作业侧实现了 'xxx' 的插件」
+
+那个插件**没有 `job/start.sh`**，或者它的 `job/start.sh` 里没有定义 `start_<短名>`。
+
+正常情况下这件事**在部署期就会被拦住**（deploy.sh 编织前对每个插件脚本断言三条：
+无 shebang/`#SBATCH`、定义了 `start_<短名>`、函数名都带命名空间）。所以看到这条
+的错误通常意味着：手工提交了作业、或者跑作业的模板是别人装的旧版本。
+
+```bash
+# 重新部署一次，让 deploy.sh 重新编织
+sudo bash cluster/deploy.sh
+```
 
 ### 守护进程起不来，报「块里有 'cluster_cidr'，它是站点通用键」
 
@@ -542,10 +583,27 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 
 ### 升级之后一个插件都不见了
 
-**先确认配置里没有把 code-server 关掉。** 一个 `[plugin:*]` 块都没有时默认开的是
-code-server（与升级前一致）；但只要你写了 `[plugin:code-server] enabled = no`
-（或者只写了 `[plugin:sshd] enabled = yes` 并**同时**关了 code-server），那就只剩
-中转站。自检在"一个插件都没开"时会明确说一句，`--check` 里能看到：
+**先确认插件目录还在。** 插件是**独立项目**，装在
+`/usr/local/share/slurmate/plugins/` 里，由 `deploy.sh` 装进去 —— 目录里空了
+（比如有人手工删了，或者部署时 `--plugins-src` 指到了别处），自然一个都没有。
+
+```bash
+ls -l /usr/local/share/slurmate/plugins/
+```
+
+装了什么都在那儿，每个目录里有一份 `plugin.json`。要装新的就：
+
+```bash
+sudo bash cluster/deploy.sh --plugins-src <插件目录的父目录>
+```
+
+**再确认配置里没有把它关掉。** 一个 `[plugin:*]` 块都没有时，缺省取插件清单里的
+`site.defaultEnabled`（code-server 是 true，与升级前一致）；但只要你写了
+`[plugin:code-server] enabled = no`（或者只写了 `[plugin:sshd] enabled = yes`
+并**同时**关了 code-server），那就只剩中转站。
+
+★ **装了但一个都没开**、以及**一个都没装**，两种都是**合法状态**（守护进程照常
+启动，已有会话照常能查能停），但 `--check` 会把它们明确说出来：
 
 ```
 sudo /usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.conf

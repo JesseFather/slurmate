@@ -20,13 +20,15 @@
   "site": {
     "defaultCpus": 2,
     "defaultMem": "8G",
+    "defaultEnabled": true,
     "bin": {
       "env": "SLURMATE_CS_BIN",
       "discovery": "which",
       "name": "code-server",
       "fallback": "/usr/local/bin/code-server"
     },
-    "blockKeys": ["auth_mode"],
-    "enumKeys": { "auth_mode": ["password", "none"] }
+    "enumKeys": {
+      "auth_mode": { "choices": ["password", "none"], "default": "password" }
+    }
   }
 }

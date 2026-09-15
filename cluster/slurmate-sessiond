@@ -6,8 +6,10 @@ slurmate-sessiond — Slurmate 会话守护进程
 
 职责
 ----
-1. 代表用户提交 code-server 作业（fork + setuid + sbatch），并记住"这个 job_id
-   是我代表哪个 uid 提交的"—— 这是整个防伪造体系的支点。
+1. 代表用户提交**作业**（fork + setuid + sbatch），并记住"这个 job_id 是我代表
+   哪个 uid 提交的"—— 这是整个防伪造体系的支点。作业里跑什么由**插件**决定，
+   而插件是**扫出来的**（`<prefix>/share/slurmate/plugins/`），本文件里没有
+   任何一个插件的名字。
 2. 从用户家目录的会话文件发现作业实际落在哪个节点、哪个端口。
 3. 按【作业】维度维护 nftables ACL（独立的 inet slurmate 表），寿命 = 作业寿命。
 4. 心跳判活、到期续期、孤儿释放、崩溃恢复。
@@ -302,17 +304,20 @@ MAX_ACTIVE_PER_USER = 1
 MAX_PENDING_PER_USER = 4
 
 # ── 插件 ────────────────────────────────────────────────────────────────────
-# 一个「服务种类」就是一个**插件**：两侧各有一半实现，客户端在
-# client/src/main/plugins/<名字>.js，作业侧在 run.sbatch 的一个 start_* 函数。
-# 守护进程自己不认识任何具体插件，它只认下面那张 PluginSpec 表。
+# 一个「服务种类」就是一个**插件**，一个插件是**一个目录**、三半：
 #
-# 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的 start_service 用
-# `case` 结构性地保证（只有一个变量、一次分派，"两个都起来"这个状态写不出来）。
-SVC_CODE_SERVER = "code-server"
-SVC_SSHD = "sshd"
-
-# 插件表本体在资源常量之后（它引用 DEFAULT_CPUS/DEFAULT_MEM，而 Python 的模块级
-# 代码是自上而下求值的）。见 BUILTIN_PLUGINS。
+#     <插件目录>/
+#       plugin.json        身份（铸造的 id）、版本、以及两侧会读的那几条声明
+#       client/index.js    客户端侧代码 —— 守护进程不看它
+#       job/start.sh       作业侧代码 —— deploy.sh 把它编织进 run.sbatch
+#
+# ★ **守护进程里没有任何一个插件的名字。** 表是**扫出来的**：deploy.sh 把插件装到
+#   `<prefix>/share/slurmate/plugins/<任意目录名>/`，守护进程启动时扫那一个目录。
+#   加一个插件因此是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」——
+#   这是「插件是独立项目」这句话在集群侧的落点。
+#
+# ★ 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的分派结构性
+#   地保证（只有一个变量、一次分派，"两个都起来"这个状态写不出来）。
 
 # 客户端带上来的一行公钥。
 #
@@ -358,37 +363,79 @@ REJECT_THRESHOLD = 20
 REJECT_WINDOW = 600
 THROTTLE_SECONDS = 1800
 
-# 服务端默认资源。客户端【不填】这些值 —— 缺省一律由服务端决定，
+# 服务端默认资源的上限。客户端【不填】cpus/mem —— 缺省一律由服务端决定，
 # 否则一个改过的客户端省略字段就能要到整机。
 #
-# 这两个是 **code-server 插件的内建默认**。默认资源是**按插件**的（在中转站里跑
-# 一个 shell 和在 IDE 里跑语言服务器不是一回事），所以站点可以在插件块里覆盖它。
-# 而它**不是** Slurm 事实 —— 分区名、分区时间上限那些才该现查，这个是策略。
-DEFAULT_CPUS = 2
-DEFAULT_MEM = "8G"
+# ★ 具体**缺省值**不在这里：它是**按插件**的（在中转站里跑一个 shell 和在 IDE 里
+#   跑语言服务器不是一回事），所以它写在插件的 plugin.json 的 `site.defaultCpus` /
+#   `site.defaultMem` 里，站点可以在 `[plugin:<名字>]` 块里覆盖它。
+#   这里只有"绝不能超过多少"这一条 —— 那是**框架**的策略，不是插件能自选的。
 MAX_CPUS_REQUEST = 64
 MAX_GPUS_REQUEST = 8
 
 
+def _ver_tuple(s):
+    m = PLUGIN_VERSION_RE.match(str(s or "").strip())
+    return tuple(int(x) for x in m.group(0).split(".")) if m else None
+
+
+def version_satisfies(version, rng):
+    """`version` 满不满足 `rng`（形如 `>=0.5.0 <0.7.0`）。返回 (bool, 原因)。
+
+    ★ 与客户端 `plugins/index.js` 的 `satisfies()` **必须逐条一致**。两边规则不同
+      的后果是一个插件在一侧被收下、在另一侧被拒 —— 而报错只会说"清单不合法"。
+
+    支持 `>= > <= < =`，空格分隔，**全部满足**才算通过。故意不支持 `^` / `~` /
+    `||` —— 那些的语义各自都有坑，而这里要的是"装之前就能判定"，不是"尽量满足"。
+    """
+    v = _ver_tuple(version)
+    if v is None:
+        return False, "版本号 %r 不是 x.y.z 形式" % version
+    parts = [p for p in str(rng or "").strip().split() if p]
+    if not parts:
+        return False, "范围是空的"
+    for p in parts:
+        m = re.match(r"^(>=|<=|>|<|=)?(\d+\.\d+\.\d+)$", p)
+        if not m:
+            return False, "看不懂的范围片段 %r" % p
+        c = _ver_tuple(m.group(2))
+        op = m.group(1) or "="
+        ok = {">=": v >= c, "<=": v <= c, ">": v > c,
+              "<": v < c, "=": v == c}[op]
+        if not ok:
+            return False, "%s 不满足 %s" % (version, p)
+    return True, ""
+
+
 PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem")
+
+MANIFEST_NAME = "plugin.json"
+PLUGIN_JOB_ENTRY = os.path.join("job", "start.sh")
+
+# 站点短名与版本号的字符集 —— 与客户端的 `plugins/index.js` 里那两条**必须一致**。
+# 短名进配置块名（`[plugin:<名字>]`）、进会话文件、进日志与报错文案；版本号进解析键
+# （`<id>@<版本>`）。两边规则不一致的后果是"客户端收下了、守护进程拒了"，而报错
+# 只会说"清单不合法"。
+PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
+PLUGIN_ID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 
 
 class PluginSpec(object):
-    """一个插件在【服务端】的元数据。
-
-    「内建」= 代码随本项目一起发布：作业侧是 run.sbatch 里的一个函数，客户端侧随
-    客户端发布。站点分发的插件（第 2/3 层）走**同一条注册路径**，只是它们的元数据
-    来自 `<prefix>/share/slurmate/plugins/<名字>/plugin.json`。
+    """一个插件在【服务端】的元数据 —— 由 `<prefix>/share/slurmate/plugins/` 下
+    某个目录里的 `plugin.json` **扫出来**，不是代码里写死的。
 
     ★ 这里刻意不写任何 `if name == "sshd"` 之类的分支。守护进程需要知道的关于一个
-      插件的一切都在这个对象上；加第三个插件不该要求改守护进程的任何逻辑。
+      插件的一切都在这个对象上；**加一个插件不该要求改守护进程的任何一行**。
     """
 
-    def __init__(self, plugin_id, name, version, title, job_entry,
+    def __init__(self, plugin_id, name, version, title,
                  default_cpus, default_mem,
-                 needs_pubkey=False, bin_env=None, bin_discovery="convention",
-                 bin_name=None, bin_fallback=None, extra_keys=(), enum_keys=(),
-                 builtin=True):
+                 default_enabled=False, needs_pubkey=False,
+                 bin_env=None, bin_discovery="convention",
+                 bin_name=None, bin_fallback=None, enum_keys=(),
+                 source_dir=None, needs_job=False):
         # ── 身份有两层，别把它们合并 ────────────────────────────────────────
         #
         # `id` 是**铸造出来的**全球唯一标识符（ULID，26 字符，见
@@ -411,33 +458,49 @@ class PluginSpec(object):
         # 配置校验保证），不需要全球唯一 —— 全球唯一是上面那个 id 的事。
         self.name = name
         self.title = title
-        # 内建 = 代码随本项目一起发布（作业侧在 run.sbatch，客户端侧随客户端）。
-        # 站点分发的插件是 False —— 客户端据此决定"要不要问用户装它"。
-        self.builtin = builtin
-        # 作业侧的处理函数名。**只用于文档与自检输出** —— 真正的分派在 run.sbatch
-        # 的 start_service 里（bash 侧的 case 就是它的插件表），这里留一份是为了
-        # 让「这个插件对应哪段作业代码」在服务端也查得到。
-        self.job_entry = job_entry
+        # 这个插件安装时所在的目录。**只用于报错**（"哪个目录里的清单坏了"），
+        # 不参与任何判定 —— 目录名不参与身份，这一点与客户端一致。
+        self.source_dir = source_dir
+        # 它有没有作业侧实现（`job/start.sh`）。没有的话守护进程允许提交，而作业
+        # 会在 run.sbatch 里以 24 明确失败 —— 但**部署时** deploy.sh 就会断言每个
+        # 插件都有这一半，所以正常路径下这个字段永远是 True（保留它是为了自检能
+        # 把"这个插件没有作业侧"单独说出来）。
+        self.needs_job = needs_job
         self.default_cpus = default_cpus
         self.default_mem = default_mem
-        # 需要客户端随提交带一行公钥（作业内的 sshd 用它写 authorized_keys）。
+        # ★ 装上了是不是就等于开着。绝大多数插件是 False：装一个插件是一次**显式
+        #   的决定**，但升级是另一回事 —— 站点从旧版本升上来时，新装进来的插件
+        #   不该在没有任何人同意的情况下多出一个能力。
+        #
+        #   为 True 的只有一种插件：它**就是升级前那个唯一可用的服务**（历史上是
+        #   code-server）。这条标记存在的全部理由就是「升级不改变现有站点的行为」，
+        #   而不是「这个插件比较重要」。新插件**不要**标它。
+        self.default_enabled = default_enabled
+        # 需要客户端随提交带一行公钥（作业内的插件把它写进 authorized_keys 之类）。
         self.needs_pubkey = needs_pubkey
         # 承载该插件可执行文件的 SLURMATE_* 环境变量名。
         self.bin_env = bin_env
         # 二进制怎么找：`which` = 先查 PATH 再查候选目录；`convention` = 只用惯例
-        # 路径。差别是真实的 —— 守护进程在**登录节点**上跑，而 code-server 装在
-        # 计算节点上，所以 which 的结果只是推测；sshd 的惯例路径反而比"登录节点上
-        # 恰好有这个文件"更可信。
+        # 路径。差别是真实的 —— 守护进程在**登录节点**上跑，而作业跑在计算节点上，
+        # 所以 which 的结果只是推测；惯例路径反而比"登录节点上恰好有这个文件"更可信。
         self.bin_discovery = bin_discovery
         # bin_discovery == "which" 时，去 PATH 里找的可执行文件名。
         self.bin_name = bin_name
         self.bin_fallback = bin_fallback
-        # 该插件的块**额外**允许的键。enabled / default_cpus / default_mem / bin
-        # 是每个插件都有的，不列在这里。
-        self.extra_keys = tuple(extra_keys)
         # 取值只能是固定几种的键：(键名, 允许值, 缺省值)。放在这里而不是写一段
         # `if 插件名 == "code-server"` —— 校验规则属于插件的元数据。
         self.enum_keys = tuple(enum_keys)
+
+    @property
+    def job_entry(self):
+        """作业侧的处理函数名。
+
+        ★ 这是个**真契约**，不是文档：`run.sbatch` 的 `plugin_call` 就是这个拼法
+          （短名里的 `-` 写成 `_`），deploy.sh 在编织时会断言每个插件的
+          `job/start.sh` 里确实定义了这个函数。名字对不上时作业会在运行时才报
+          "本站没有作业侧实现了 X 的插件"，而那是一个用户排完队之后才看到的错误。
+        """
+        return "start_" + self.name.replace("-", "_")
 
     def enum_default(self, key):
         for k, choices, default in self.enum_keys:
@@ -452,68 +515,244 @@ class PluginSpec(object):
         raise KeyError(key)
 
     def block_keys(self):
-        return PLUGIN_COMMON_KEYS + ("bin",) + self.extra_keys
+        """这个插件的配置块里允许出现的键。
+
+        ★ 没有一份单独的"额外键"清单：取值受枚举约束的键**就是**额外键。两份清单
+          的后果是它们可以互相矛盾 —— 一个键在 `enumKeys` 里却不在 `blockKeys` 里，
+          表现是"校验规则写了，但用户永远写不进去"。
+        """
+        return PLUGIN_COMMON_KEYS + ("bin",) + tuple(k for k, _c, _d in self.enum_keys)
 
 
-BUILTIN_PLUGINS = (
-    PluginSpec(
-        # ★ 这两个 id 是**铸造**出来的、此后永不改变，客户端随包发布的
-        #   plugin.json 里写的是同一对。它们必须逐字一致 ——
-        #   test-sessiond-logic.py 里有一条用例逐字比对两边，改了这里而没改那边
-        #   会红。（两处写死是不可避免的：守护进程是 Python、客户端是 JS，
-        #   而它们必须独立启动。所以靠一条用例钉住，而不是靠"记得改"。）
-        plugin_id="01M2JKHTZGKJBFQQTWYXMQMF2V",
-        version="1.0.0",
-        name=SVC_CODE_SERVER,
-        title="开发环境",
-        job_entry="start_code_server",
-        default_cpus=DEFAULT_CPUS,
-        default_mem=DEFAULT_MEM,
-        needs_pubkey=False,
-        bin_env="SLURMATE_CS_BIN",
-        bin_discovery="which",
-        bin_name="code-server",
-        bin_fallback="/usr/local/bin/code-server",
-        extra_keys=("auth_mode",),
-        enum_keys=(("auth_mode", ("password", "none"), "password"),),
-    ),
-    PluginSpec(
-        plugin_id="01M2JKHTZGF12N0T9CB3XVK36H",
-        version="1.0.0",
-        name=SVC_SSHD,
-        title="SSH 中转站",
-        job_entry="start_sshd",
-        default_cpus=1,
-        default_mem="2G",
-        needs_pubkey=True,
-        bin_env="SLURMATE_SSHD_BIN",
-        # ★ 不做 which：登录节点上有没有 /usr/sbin/sshd 对计算节点不是证据。
-        #   写错了由作业侧明确失败（run.sbatch 会 log 出"不存在或不可执行"）。
-        bin_discovery="convention",
-        bin_fallback="/usr/sbin/sshd",
-    ),
-)
+def parse_plugin_manifest(where, raw):
+    """一份 plugin.json → `(PluginSpec, [问题…])`。
 
-PLUGIN_BY_NAME = {p.name: p for p in BUILTIN_PLUGINS}
+    问题一次列全，不是遇到第一个就停 —— 「改一个跑一次」是最烦人的那种自检，
+    而插件清单是人手写的，一次写对三处的概率不高。
+    """
+    problems = []
+    if not isinstance(raw, dict):
+        return None, ["%s：清单的顶层必须是一个 JSON 对象，得到 %s"
+                      % (where, type(raw).__name__)]
 
-# 一个插件的**缺省开关状态**。规则只有一条：
-#
-#     插件的 enabled = 块里的 enabled（如果写了）
-#                   否则 = (这个插件的名字在不在这张表里)
-#
-# ★ 这张表的选择标准只有一条：**与升级前的行为完全一致**。升级不改变任何现有
-#   站点的行为，这是硬要求 —— 老配置（一个 [plugin:*] 块都没有）必须仍然只开
-#   code-server。
-#
-# ★ 反过来说，写一个 [plugin:sshd] 块**不会**顺手把 code-server 关掉，也不会
-#   因为"块在那儿"就自动把 sshd 打开。前者是最危险的那类静默改变（管理员只想开
-#   一个中转站，结果所有人的 IDE 没了）；后者会让一句 `default_cpus = 1` 在没有
-#   任何显式同意的情况下开出一条「交互式 ssh 进计算节点」的路。
-#   想开就写 `enabled = yes`，想关就写 `enabled = no`。
-#
-# ★ 将来新增内建插件时**不要**往这张表里加名字：那等于给所有站点在升级时静默
-#   多开一个能力。让站点自己写 enabled = yes。
-DEFAULT_ENABLED_PLUGINS = (SVC_CODE_SERVER,)
+    def bad(msg):
+        problems.append("%s：%s" % (where, msg))
+        return None
+
+    def need_str(key, pattern=None, what=""):
+        v = raw.get(key)
+        if not isinstance(v, str) or not v.strip():
+            return bad("缺少非空字符串 %r" % key)
+        v = v.strip()
+        if pattern is not None and not pattern.match(v):
+            return bad("%r 的取值 %r 不合法%s" % (key, v, what))
+        return v
+
+    pid = need_str("id", PLUGIN_ID_RE,
+                   "（应为一个 26 字符的 ULID，全大写 Crockford base32。"
+                   "它是**铸造**出来的、此后永不改变，不是随手起的名字）")
+    name = need_str("name", PLUGIN_NAME_RE,
+                    "（短名：小写字母开头，只含小写字母/数字/连字符，最长 32。"
+                    "它进配置块名 `[plugin:<名字>]`，也是作业侧函数名的后缀）")
+    version = need_str("version", PLUGIN_VERSION_RE, "（应为 x.y.z）")
+
+    # displayName 只用于界面与报错文案，缺了就退回短名 —— 它不影响任何判定，
+    # 所以不必为它拒绝整个插件。
+    title = raw.get("displayName")
+    if not isinstance(title, str) or not title.strip():
+        title = name or where
+    else:
+        title = title.strip()
+
+    # engines.slurmate：这个插件要求的最低框架版本。客户端那一侧也会查一遍。
+    # 守护进程也要查 —— 一个要求 >=0.6.0 的插件被 0.5.0 的守护进程收下，后果是
+    # 它在作业侧用了一个这边还没有的宿主能力，而症状是运行到一半才失败。
+    eng = raw.get("engines")
+    if isinstance(eng, dict):
+        rng = eng.get("slurmate")
+        if isinstance(rng, str) and rng.strip():
+            ok, why = version_satisfies(VERSION, rng)
+            if not ok:
+                bad("要求 slurmate %s，而本站的守护进程是 %s（%s）"
+                    % (rng.strip(), VERSION, why))
+
+    site = raw.get("site")
+    if site is None:
+        site = {}
+    if not isinstance(site, dict):
+        return None, problems + ["%s：`site` 必须是一个对象" % where]
+
+    default_cpus = None
+    v = site.get("defaultCpus")
+    if not isinstance(v, int) or isinstance(v, bool):
+        bad("`site.defaultCpus` 必须是整数")
+    elif not (1 <= v <= MAX_CPUS_REQUEST):
+        bad("`site.defaultCpus` 应在 1-%d 之间，当前为 %d" % (MAX_CPUS_REQUEST, v))
+    else:
+        default_cpus = v
+
+    default_mem = None
+    v = site.get("defaultMem")
+    if not isinstance(v, str) or not v.strip():
+        bad("缺少 `site.defaultMem`（形如 8G / 512M）")
+    else:
+        mem, rejected = sanitize_mem(v.strip(), None)
+        if rejected:
+            # ★ 这里**不**回退一个默认值，直接拒绝：插件清单里写错必须当场发现。
+            #   「文件里写着 0，而所有人实际拿到 8G」会一直没人发现。
+            bad("`site.defaultMem` 无法识别: %r（形如 8G / 512M。注意 0 在 Slurm 里"
+                "表示整台节点的内存，不是「零内存」）" % v)
+        else:
+            default_mem = mem
+
+    default_enabled = site.get("defaultEnabled", False)
+    if not isinstance(default_enabled, bool):
+        bad("`site.defaultEnabled` 必须是 true / false")
+
+    contrib = raw.get("contributes")
+    if contrib is None:
+        contrib = {}
+    needs_pubkey = False
+    if not isinstance(contrib, dict):
+        bad("`contributes` 必须是一个对象")
+    else:
+        needs_pubkey = contrib.get("submitPubkey", False)
+        if not isinstance(needs_pubkey, bool):
+            bad("`contributes.submitPubkey` 必须是 true / false")
+
+    # ── 可执行文件 ──────────────────────────────────────────────────────────
+    bin_env = bin_name = bin_fallback = None
+    bin_discovery = "convention"
+    b = site.get("bin")
+    if b is not None:
+        if not isinstance(b, dict):
+            bad("`site.bin` 必须是一个对象")
+        else:
+            bin_env = b.get("env")
+            if not isinstance(bin_env, str) or not bin_env.strip():
+                bad("`site.bin.env` 必须是一个非空的环境变量名")
+                bin_env = None
+            elif not bin_env.startswith("SLURMATE_"):
+                # 这个名字会被塞进作业的环境变量表，前缀是本系统的领地 ——
+                # 不限制的话一个插件能覆盖掉宿主自己读的变量。
+                bad("`site.bin.env` 必须以 SLURMATE_ 开头，得到 %r" % bin_env)
+                bin_env = None
+            else:
+                bin_env = bin_env.strip()
+            bin_discovery = b.get("discovery", "convention")
+            if bin_discovery not in ("which", "convention"):
+                bad("`site.bin.discovery` 只能是 which 或 convention，得到 %r"
+                    % bin_discovery)
+                bin_discovery = "convention"
+            bin_fallback = b.get("fallback")
+            if not isinstance(bin_fallback, str) or not bin_fallback.strip():
+                bad("`site.bin.fallback` 必须是一个非空路径")
+                bin_fallback = None
+            else:
+                bin_fallback = bin_fallback.strip()
+            if bin_discovery == "which":
+                bin_name = b.get("name")
+                if not isinstance(bin_name, str) or not bin_name.strip():
+                    bad("`site.bin.discovery` 是 which 时必须给 `site.bin.name`"
+                        "（去 PATH 里找的那个可执行文件名）")
+                    bin_name = None
+                else:
+                    bin_name = bin_name.strip()
+
+    # ── 取值受限的键 ────────────────────────────────────────────────────────
+    enum_keys = []
+    ek = site.get("enumKeys")
+    if ek is not None:
+        if not isinstance(ek, dict):
+            bad("`site.enumKeys` 必须是一个对象（键 → {choices, default}）")
+        else:
+            for key in sorted(ek):
+                if not PLUGIN_NAME_RE.match(str(key).replace("_", "-")):
+                    bad("`site.enumKeys` 里的键名 %r 不像一个配置键" % key)
+                    continue
+                spec = ek[key]
+                if not isinstance(spec, dict):
+                    bad("`site.enumKeys.%s` 必须是 {choices, default} 形式的对象" % key)
+                    continue
+                choices = spec.get("choices")
+                if (not isinstance(choices, list) or not choices
+                        or not all(isinstance(c, str) and c.strip() for c in choices)):
+                    bad("`site.enumKeys.%s.choices` 必须是一个非空的字符串数组" % key)
+                    continue
+                choices = [c.strip().lower() for c in choices]
+                dflt = spec.get("default", choices[0])
+                if not isinstance(dflt, str) or dflt.strip().lower() not in choices:
+                    bad("`site.enumKeys.%s.default`（%r）不在 choices 里"
+                        % (key, dflt))
+                    continue
+                enum_keys.append((key, tuple(choices), dflt.strip().lower()))
+
+    if problems:
+        return None, problems
+
+    jobsh = os.path.join(os.path.dirname(where), PLUGIN_JOB_ENTRY)
+    spec = PluginSpec(
+        plugin_id=pid, name=name, version=version, title=title,
+        default_cpus=default_cpus, default_mem=default_mem,
+        default_enabled=default_enabled, needs_pubkey=needs_pubkey,
+        bin_env=bin_env, bin_discovery=bin_discovery, bin_name=bin_name,
+        bin_fallback=bin_fallback, enum_keys=tuple(enum_keys),
+        source_dir=os.path.dirname(where), needs_job=os.path.isfile(jobsh))
+    return spec, []
+
+
+def scan_plugins(plugins_dir):
+    """扫插件目录，返回 `(specs, problems)`。
+
+        <plugins_dir>/<任意目录名>/plugin.json
+
+    ★ **目录名不参与任何判定**（身份来自清单里的 `id`），所以这里只扫**一层**：
+      这个目录是 deploy.sh 建的、布局由它定。
+      客户端那边扫两层，因为用户会自己 `cp -r` 一个目录进去 —— 两处不同不是
+      疏忽，是"谁往这里写"不同。
+
+    ★ 坏掉的目录**跳过并报出来**，绝不让守护进程起不来：一个插件坏了不该带走整个
+      站点。但它若在配置里有 `[plugin:<名字>]` 块，那条仍然是硬错误（那个块现在
+      指向一个不存在的插件）—— 装了但坏掉、与配置指向一个不存在的东西，症状相同，
+      报错也该相同。
+
+    目录不存在时返回**空的**、且**不是错误** —— 一个插件都没装是合法状态。
+    """
+    specs, problems = [], []
+    if not os.path.isdir(plugins_dir):
+        return (), ()
+    for entry in sorted(os.listdir(plugins_dir)):
+        if entry.startswith("."):
+            continue
+        d = os.path.join(plugins_dir, entry)
+        if not os.path.isdir(d):
+            continue
+        mf = os.path.join(d, MANIFEST_NAME)
+        if not os.path.isfile(mf):
+            problems.append("%s：这是一个插件目录，但里面没有 %s"
+                            % (d, MANIFEST_NAME))
+            continue
+        try:
+            with open(mf, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            problems.append("%s：读不出来或不是合法 JSON（%s）" % (mf, e))
+            continue
+        spec, probs = parse_plugin_manifest(mf, raw)
+        if spec is None:
+            problems.extend(probs)
+            continue
+        dup = next((s for s in specs if s.name == spec.name), None)
+        if dup is not None:
+            # 短名必须站点内唯一：它是配置块名，也是作业侧函数名的后缀。
+            # 两个目录抢一个短名时**两个都不收** —— 挑一个的后果是"哪个生效"取决于
+            # 目录名的字典序，而那是没人会想到去查的地方。
+            problems.append("%s：短名 %r 与 %s 里的那个重复了，两个都不加载"
+                            % (mf, spec.name, dup.source_dir))
+            specs = [s for s in specs if s.name != spec.name]
+            continue
+        specs.append(spec)
+    return tuple(sorted(specs, key=lambda s: s.name)), tuple(problems)
 
 JOB_LOG_SUBDIR = ".slurmate/logs"
 
@@ -536,6 +775,9 @@ GLOBAL_KEYS = frozenset([
     "cluster_cidr", "readonly_paths",
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
+    # 提交时不带 service_kind 时用哪个插件。**没有内建缺省值** —— 见 Config 里
+    # 那段说明：隐式缺省会让"装/卸一个插件"这种配置之外的动作悄悄改变行为。
+    "default_plugin",
 ])
 
 SECTION_PREFIX = "plugin:"
@@ -647,10 +889,33 @@ def default_job_script():
         os.path.join(here, os.pardir, "share", "slurmate", "run.sbatch"))
 
 
+def default_plugins_dir():
+    """插件安装目录，同样从守护进程自身的安装位置推导。
+
+    ★ **它是唯一的真相来源** —— 两个读者：
+        deploy.sh  读它 + 各插件的 job/start.sh，编织成 run.sbatch
+        本守护进程 启动时扫它，建出 PluginSpec 表
+
+      加一个插件于是是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
+      这正是「插件是独立项目」在集群侧的落点：守护进程仍然要 root 重部署一次，
+      但那是**安装动作**，不是**改代码**。
+
+    ★ 它**不是**配置项：一个能配的路径与"实际装在哪"可以不一致，而症状是守护进程
+      报的插件表与作业模板里编织的插件是两套 —— 用户看得见按钮、点了却起不来。
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.normpath(
+        os.path.join(here, os.pardir, "share", "slurmate", "plugins"))
+
+
 class PluginConfig(object):
     """一个插件的**生效配置**：元数据（PluginSpec）+ 站点在它的块里写的东西。
 
-    ★ 行为只看 `enabled`，**不看块在不在**（理由见 DEFAULT_ENABLED_PLUGINS 上方）。
+    ★ 行为只看 `enabled`，**不看块在不在**：
+        写一个 `[plugin:sshd]` 块**不会**顺手把别的插件关掉（管理员只想开一个
+        中转站、结果所有人的 IDE 没了，是最危险的那类静默改变），也不会因为
+        "块在那儿"就自动把它打开（一句 `default_cpus = 1` 在没有任何显式同意的
+        情况下开出一条交互式 ssh 进计算节点的路）。
       `present` 只用于自检输出，让运维分得清「没写这个块」与「写了但关着」——
       这两种状态的**行为**可能相同，但**该做什么**完全不同。
     """
@@ -662,8 +927,11 @@ class PluginConfig(object):
         self.present = present
         self.raw = dict(raw)
 
+        # 缺省开关状态由**插件自己**声明（`site.defaultEnabled`）。为 true 的只有
+        # 一种：它就是升级前那个唯一可用的服务 —— 那条标记的全部理由是「升级不改变
+        # 现有站点的行为」，不是「这个插件比较重要」。见 PluginSpec.default_enabled。
         self.enabled = parse_yes_no(
-            raw.get("enabled"), spec.name in DEFAULT_ENABLED_PLUGINS,
+            raw.get("enabled"), spec.default_enabled,
             "[plugin:%s] 的 enabled" % spec.name)
 
         # ── 默认资源（缺省 = 该插件代码里的内建值）──
@@ -743,39 +1011,51 @@ class PluginConfig(object):
         return self.enum.get("auth_mode") or "none"
 
 
-def build_plugin_configs(sections):
-    """把配置里的块摊成 {插件名: PluginConfig}。**每个内建插件都有一项**，
+def build_plugin_configs(specs, sections):
+    """把配置里的块摊成 {插件名: PluginConfig}。**每个装了的插件都有一项**，
     哪怕站点没写它的块 —— 因为「没写」和「写着但关掉了」在行为上等价，
     但在自检输出里必须分得开。
     """
     out = {}
-    for spec in BUILTIN_PLUGINS:
+    for spec in specs:
         raw = sections.get(spec.name)
         out[spec.name] = PluginConfig(spec, raw or {}, raw is not None)
     return out
 
 
-def section_names_problem(sections):
+def section_names_problem(sections, by_name):
     """块名有没有认不出的。返回错误串列表（空 = 没问题）。
 
     ★ 报错而不是忽略：写成 `[plugin:ssh]`（少个 d）被静默忽略，症状是
       「配了但它就是不生效」—— 与未知键那条要防的是同一类问题。
+
+    ★ 一个插件都没装时这句话要说**安装**，不是"名字写错了"：那是两种完全不同的
+      行动（去装一个 vs 去改一个字），而它们在配置里长得一模一样。
     """
     errors = []
     for name in sorted(sections):
-        if name not in PLUGIN_BY_NAME:
+        if name in by_name:
+            continue
+        if by_name:
             errors.append(
-                "[plugin:%s] 是未知的插件。本版认得的是：%s。"
-                "（站点分发的插件要到装进 <prefix>/share/slurmate/plugins/ 之后"
-                "才认得。）" % (name, "、".join(sorted(PLUGIN_BY_NAME))))
+                "[plugin:%s] 是个未知的插件。本站**装了**的是：%s。"
+                "（装了的才认得 —— 装插件是放一个目录到插件安装目录再跑一次 "
+                "deploy.sh，见 plugins/README.md。）"
+                % (name, "、".join(sorted(by_name))))
+        else:
+            errors.append(
+                "[plugin:%s] 指向一个插件，而本站**一个插件都没装**。"
+                "插件安装目录是空的，所以任何 [plugin:*] 块都不可能生效。"
+                "把插件目录放进去再跑一次 deploy.sh 即可（见 plugins/README.md）。"
+                % name)
     return errors
 
 
-def block_keys_problem(sections):
+def block_keys_problem(sections, by_name):
     """块内的键有没有认不出的。返回错误串列表（空 = 没问题）。"""
     errors = []
     for name in sorted(sections):
-        spec = PLUGIN_BY_NAME.get(name)
+        spec = by_name.get(name)
         if spec is None:
             continue                    # 块名本身就不认识，那条错误已经报过了
         allowed = spec.block_keys()
@@ -815,11 +1095,18 @@ class Config(object):
     def __init__(self, path):
         self.path = path
         raw, sections = parse_config(path)
+
+        # ── 插件：表是**扫出来的**，不是代码里写死的 ────────────────────────
+        # 先扫盘 —— 配置里的 [plugin:*] 块要对照它才知道认不认识。顺序不能反。
+        self.plugins_dir = default_plugins_dir()
+        self.plugin_specs, self.plugin_problems = scan_plugins(self.plugins_dir)
+        self.plugin_by_name = {s.name: s for s in self.plugin_specs}
+
         # 认不出来的键/块/块内键不在构造时报错，攒着交给 validate() —— --check
         # 要能一次把问题列全，而不是让人改一个跑一次。
         self.unknown_keys = sorted(set(raw) - GLOBAL_KEYS)
-        self.bad_sections = section_names_problem(sections)
-        self.bad_block_keys = block_keys_problem(sections)
+        self.bad_sections = section_names_problem(sections, self.plugin_by_name)
+        self.bad_block_keys = block_keys_problem(sections, self.plugin_by_name)
 
         def get(key, default=""):
             return raw.get(key, default)
@@ -849,14 +1136,20 @@ class Config(object):
         self.reserved_ranges = parse_reserved_ranges(get("reserved_ranges"))
 
         # ── 插件 ──
-        # 每个内建插件都有一项，哪怕站点没写它的块（见 build_plugin_configs）。
-        # 默认资源、可执行文件路径、auth_mode 这些**插件的策略**住在这里，
-        # 而不是像以前那样在站点通用配置里排成一排。
-        self.plugins = build_plugin_configs(sections)
+        # 每个【装了的】插件都有一项，哪怕站点没写它的块（见 build_plugin_configs）。
+        # 默认资源、可执行文件路径、auth_mode 这些**插件的策略**住在这里的块里，
+        # 而它们的缺省值来自插件自己的清单（plugin.json 的 site 段）。
+        self.plugins = build_plugin_configs(self.plugin_specs, sections)
         # 已启用的插件名，按名字排序 —— 稳定顺序，界面与日志才不会每次都不一样。
         # ★ enabled_kinds 才是"本站开了哪些"，**不是**"配置里有哪些块"。
         self.enabled_kinds = tuple(sorted(
             n for n, p in self.plugins.items() if p.enabled))
+
+        # ── 提交时的缺省服务种类 ────────────────────────────────────────────
+        # ★ 刻意**没有**硬编码的缺省，也刻意**不**用"表里唯一的那个"当缺省：
+        #   隐式缺省会让"改配置之外的动作"（装一个插件、卸一个插件）悄悄改变行为，
+        #   而这一层要的恰恰是可预测。没配就要求调用方显式给，报错里说清为什么。
+        self.default_plugin = get("default_plugin").strip()
 
         # ── 从代码常量来的（见文件上方的理由）──
         self.socket_path = SOCKET_PATH
@@ -985,12 +1278,21 @@ class Config(object):
                           % (k, ", ".join(sorted(GLOBAL_KEYS))))
         errors.extend(self.bad_sections)
         errors.extend(self.bad_block_keys)
-        # 一个插件都没开是**合法**的（站点可能只想留框架），但要说得出来 ——
-        # 否则表现是"客户端上一个按钮都没有"，而配置里一个字都不像有问题。
-        if not self.enabled_kinds:
-            errors.append("配置里没有任何已启用的插件。每个 [plugin:<名字>] 块都要写 "
-                          "enabled = yes 才会开；一个块都没有时默认开的是 %s。"
-                          % "、".join(DEFAULT_ENABLED_PLUGINS))
+        # ★ **一个插件都没装、或一个都没开，都是合法的** —— 那正是"外壳"的定义：
+        #   基座的功能不因为插件的有无而缺一块。以前这里把零插件判成错误、让守护
+        #   进程 100% 起不来，那是把"框架"和"插件"绑死了。
+        #   但它必须**说得出来**：否则表现是"客户端上一个按钮都没有"，而配置里
+        #   一个字都不像有问题。所以它进的是 --check 的提示，不是错误。
+        #
+        # 插件目录坏了**同样不是**启动错误：一个插件坏了不该带走整个站点。它由
+        # --check 逐条打印，也在 start() 里进日志。
+        if self.default_plugin and self.default_plugin not in self.plugin_by_name:
+            errors.append(
+                "配置里的 default_plugin = %r 在本站**没有装**。装了的插件是：%s。"
+                "（装插件是放一个目录到插件安装目录 %s 再跑一次 deploy.sh。）"
+                % (self.default_plugin,
+                   "、".join(sorted(self.plugin_by_name)) or "（一个都没有）",
+                   self.plugins_dir))
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -1759,10 +2061,26 @@ class Sessiond(object):
             log.exception("从规则恢复会话时异常（继续启动，对账会收敛）")
         self.setup_socket()
         self.audit("daemon_start", version=VERSION, pid=os.getpid(),
-                   port_range=[self.cfg.port_start, self.cfg.port_end])
-        log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds)",
+                   port_range=[self.cfg.port_start, self.cfg.port_end],
+                   plugins=list(self.cfg.enabled_kinds))
+
+        # 插件：坏掉的目录在这里逐条说出来。**不是启动错误** —— 一个插件坏了不该
+        # 带走整个站点，而其余插件照常工作。但静默跳过是绝对不能接受的：那会让
+        # "我明明装了啊"变成一句谁也答不上来的话。
+        for p in self.cfg.plugin_problems:
+            log.error("插件目录有问题（已跳过，其余插件照常工作）：%s", p)
+        if not self.cfg.plugins:
+            log.warning("本站没有安装任何插件（%s）—— 会话能查、能停，"
+                        "但没有可提交的服务。这是合法状态。", self.cfg.plugins_dir)
+        elif not self.cfg.enabled_kinds:
+            log.warning("装了 %d 个插件，但没有一个启用（%s）",
+                        len(self.cfg.plugins), self.cfg.plugins_dir)
+
+        log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds, "
+                 "插件 %s)",
                  VERSION, os.getpid(), self.cfg.port_start, self.cfg.port_end,
-                 self.cfg.tick_seconds)
+                 self.cfg.tick_seconds,
+                 "、".join(self.cfg.enabled_kinds) or "（无）")
         return True
 
     def setup_socket(self):
@@ -2527,7 +2845,6 @@ class Sessiond(object):
                 "name": p.name,
                 "title": p.title,
                 "enabled": p.enabled,
-                "builtin": p.spec.builtin,
                 # 默认资源是**按插件**的，客户端不自己定一份（两份真相的老问题）。
                 "defaults": {"cpus": p.default_cpus, "mem": p.default_mem},
             })
@@ -2744,18 +3061,30 @@ class Sessiond(object):
             return self._err(4, "no_account", why)
 
         # ── 插件（服务种类）────────────────────────────────────────────────
-        # 缺省 = code-server，与本功能引入前完全一致。站点没开的插件会被**明确
-        # 拒绝**，而不是起一个"看起来起来了但连不上"的作业。
+        # ★ **没有硬编码的缺省**。缺省值要么来自站点配置的 `default_plugin`，
+        #   要么就要求调用方显式给 —— 因为「表里唯一那个」这种隐式缺省会让
+        #   **装/卸一个插件**这种配置之外的动作悄悄改变行为，而这一层要的恰恰是
+        #   可预测。不配 default_plugin 是推荐值：让每一次提交都写明它要什么。
         #
-        # ★ 「不认识的名字」与「认得但本站没开」是两种错误，必须分开报：
-        #   前者是客户端版本太新或名字打错，后者是站点的一个决定。合并成一句话，
-        #   用户就分不清该升级客户端还是该找管理员。
-        kind = str(req.get("service_kind") or SVC_CODE_SERVER).strip()
-        spec = PLUGIN_BY_NAME.get(kind)
+        # ★ 三种错误必须分开报，因为它们对应三种完全不同的行动：
+        #     没给、而本站也没配缺省  → 调用方的问题（补上 service_kind）
+        #     给了个本站没有的名字    → 名字打错 / 客户端太新
+        #     认得但本站没开          → 站点的一个决定，去找管理员
+        kind = str(req.get("service_kind") or "").strip()
+        if not kind:
+            if not cfg.default_plugin:
+                return self._err(2, "missing_service_kind",
+                                 "本站没有设置 default_plugin，提交时必须显式指定"
+                                 " service_kind。本站装了：%s。"
+                                 % ("、".join(sorted(cfg.plugins))
+                                    or "（一个插件都没有）"))
+            kind = cfg.default_plugin
+        spec = cfg.plugin_by_name.get(kind)
         if spec is None:
             return self._err(2, "bad_service_kind",
-                             "未知的服务种类 %r（本版认得：%s）"
-                             % (kind, "、".join(sorted(PLUGIN_BY_NAME))))
+                             "本站没有装名为 %r 的插件（装了的是：%s）"
+                             % (kind, "、".join(sorted(cfg.plugin_by_name))
+                                or "（一个都没有）"))
         pcfg = cfg.plugins[kind]
         if not pcfg.enabled:
             return self._err(4, "service_kind_disabled",
@@ -2778,11 +3107,11 @@ class Sessiond(object):
             ssh_pubkey = parse_ssh_pubkey(req.get("ssh_pubkey")) or ""
             if not ssh_pubkey:
                 return self._err(2, "bad_ssh_pubkey",
-                                 "sshd 服务需要一行 ssh-ed25519 公钥（客户端会随提交"
-                                 "带上来）。只接受「算法名 + 一段 base64 + 可选注释」；"
-                                 "选项前缀（command=、cert-authority…）与多行一律"
-                                 "不接受 —— 它们会被原样写进一份 sshd 信任的 "
-                                 "authorized_keys。")
+                                 "「%s」的会话必须带一行 ssh-ed25519 公钥（客户端会"
+                                 "随提交带上来）。只接受「算法名 + 一段 base64 + 可选"
+                                 "注释」；选项前缀（command=、cert-authority…）与多行"
+                                 "一律不接受 —— 它们会被原样写进一份被 sshd 信任的 "
+                                 "authorized_keys。" % spec.title)
 
         # ── 资源：默认值由【服务端】填，并在这里钳制 ────────────────────────
         # 客户端省略一个字段是在说"用你的默认"，不是"我要 0 核"。所以默认值
@@ -2920,8 +3249,11 @@ class Sessiond(object):
             # 公钥**可以**走环境变量：它不是秘密（与"口令绝不走环境变量"是两回事，
             # 那条的理由是 scontrol show job 会显示 Environment）。这个区别要留着，
             # 否则下一个人会把它当成同类问题"修掉"。
+            #
+            # ★ 这个变量名是**框架**的，不是某个插件的：需要公钥的插件在清单里写
+            #   `contributes.submitPubkey: true`，上面那段就把它校验好传下来。
+            #   作业侧谁读它、拿它做什么，由那个插件自己决定 —— 守护进程不知道。
             "SLURMATE_SSH_PUBKEY": ssh_pubkey,
-            "SLURMATE_SSH_DIR": os.path.join(home, ".slurmate", "ssh"),
         }
         sess = self.store.get(sid)
         job_id, why = self.slurm.submit(sess, env, home, uid, user)
@@ -2963,10 +3295,46 @@ def main():
                     help="前台运行（systemd 下用，日志直接进 journal）")
     ap.add_argument("--check", action="store_true",
                     help="只做配置校验与连通性自检，不启动")
+    ap.add_argument("--check-plugins", action="store_true",
+                    help="只扫插件目录并校验每份 plugin.json，不读配置、不启动。"
+                         "deploy.sh 在编织作业脚本之前用它 —— 校验规则只有这"
+                         "一份，不在部署脚本里另写一套")
+    ap.add_argument("--plugins-dir", default="",
+                    help="配合 --check-plugins：改扫这个目录而不是安装目录。"
+                         "部署前的体检用它校验**还没装进去**的源目录")
     ap.add_argument("--version", action="version", version=VERSION)
     args = ap.parse_args()
 
     log_setup()
+
+    # ── 只扫插件（deploy.sh 用）────────────────────────────────────────────
+    # ★ 它跑的是**守护进程自己的**扫描器，不是在部署脚本里另写一份规则。
+    #   两套解释器的后果是"预检放行了、守护进程起不来"（或者反过来），而这个
+    #   仓库已经因为同一类分叉吃过一次亏（reserved_ranges 的解析）。
+    if args.check_plugins:
+        where = args.plugins_dir or default_plugins_dir()
+        specs, problems = scan_plugins(where)
+        for p in problems:
+            print("插件错误: %s" % p)
+        if problems:
+            return 1
+        if not specs:
+            print("插件目录 %s 是空的 —— 本站没有安装任何插件。" % where)
+            print("  这是合法状态：守护进程照常启动、会话照常能停，只是没有可提交的服务。")
+            return 0
+        print("插件目录 %s 里有 %d 个插件：" % (where, len(specs)))
+        for s in specs:
+            print("  %-16s %s@%s  %s  作业侧入口 %s%s"
+                  % (s.name, s.id, s.version,
+                     "启用" if s.default_enabled else "停用",
+                     s.job_entry,
+                     "" if s.needs_job else "  ⚠ 没有 job/start.sh，作业会在运行时失败"))
+        # deploy.sh 要逐个处理这些目录，所以最后给一行**机器可读**的。
+        # 用制表符而不是空格：短名里不允许空格，也不允许制表符。
+        print("plugin-dirs:")
+        for s in specs:
+            print("%s\t%s" % (s.name, s.source_dir))
+        return 0
 
     # 先把配置与 --check 走完，这样非 root 也能拿它做诊断（nft 相关项会诚实报 false）
     try:
@@ -2988,6 +3356,9 @@ def main():
         print("  socket        : %s" % cfg.socket_path)
         print("  数据库        : %s" % cfg.db_path)
         print("  作业脚本      : %s" % cfg.job_script)
+        print("  插件目录      : %s" % cfg.plugins_dir)
+        print("  缺省插件      : %s" % (cfg.default_plugin or
+              "（未设置 —— 提交时必须显式给 service_kind）"))
         print("  集群网段      : %s" % cfg.cluster_cidr)
         print("  闪断/孤儿阈值 : %ds / %ds" % (cfg.suspect_after, cfg.orphan_after))
         print("  续期          : %s  阈值 %ds 增量 %s"
@@ -3002,20 +3373,33 @@ def main():
         # 插件逐个打印：开没开、默认资源、可执行文件解析到了哪里。
         # ★ 同样打印【解析结果】：`bin` 留空是推荐值，而留空之后落在了哪个路径上，
         #   以及那个路径是"配置指定的"还是"猜的"，只有这里说得清。
+        # 坏掉的插件目录：**报告但不算错误**。一个插件坏了不该带走整个站点，
+        # 但它必须被看见 —— 否则表现是"我明明装了啊"，而日志里一个字都没有。
+        for _p in cfg.plugin_problems:
+            print("  ⚠ 插件目录有问题（已跳过，其余插件照常工作）：%s" % _p)
+
         print("  插件          :")
+        if not cfg.plugins:
+            # ★ 零插件是**合法状态**，不是"安装包坏了"。所以这里给的是出路，
+            #   不是故障描述。
+            print("    【本站没有安装任何插件】")
+            print("      这是合法状态：守护进程照常启动，已有会话照常能查、能停，")
+            print("      只是没有可提交的服务。装插件就是把插件目录放进")
+            print("      %s 再跑一次 deploy.sh（见 plugins/README.md）。" % cfg.plugins_dir)
         for _n in sorted(cfg.plugins):
             _p = cfg.plugins[_n]
             print("    %-12s %s  默认 %s 核 / %s%s"
                   % (_p.name, "已启用" if _p.enabled else "已停用",
                      _p.default_cpus, _p.default_mem,
-                     "" if _p.present else "（配置里没有这个块，这里是缺省值）"))
+                     "" if _p.present else "（配置里没有这个块，这里是插件清单里的缺省值）"))
+            print("      %-11s %s@%s" % ("id@版本", _p.spec.id, _p.spec.version))
             if _p.spec.bin_env:
                 print("      %-11s %s（%s）"
                       % (_p.spec.bin_env, _p.bin, _p.bin_src))
             for _k in sorted(_p.enum):
                 print("      %-11s %s" % (_k, _p.enum[_k]))
-        if not cfg.enabled_kinds:
-            print("    【一个插件都没启用】客户端上将没有任何可用的服务")
+        if cfg.plugins and not cfg.enabled_kinds:
+            print("    【装了，但一个都没启用】客户端上将没有任何可用的服务")
         slurm = Slurm(cfg)
         print("  accounting 强制: %s（决定 sbatch 是否必须带 -A）"
               % slurm.is_accounting_enforced())
