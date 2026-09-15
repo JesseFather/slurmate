@@ -171,6 +171,8 @@ process.env.SLURMATE_DEMO_ENROLL_MS = '200';
  * 所以测试自己撑一根。
  */
 const keeper = setInterval(() => {}, 500);
+const T0 = Date.now();
+setInterval(() => console.error('PROBE', Date.now() - T0), 2000).unref?.();
 
 /**
  * 收尾。
@@ -180,6 +182,7 @@ const keeper = setInterval(() => {}, 500);
  * （表现为：本文件的 8 个用例全过，然后没有 summary、没有退出）。
  */
 after(async () => {
+  console.error('PROBE-after-start', Date.now() - T0);
   clearInterval(keeper);
   Module._load = origLoad;
   try {
@@ -722,47 +725,116 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
 // 能连进来。所以这一节的断言几乎全部落在文件上：写出来的 ssh 配置对不对、
 // 有没有动用户别的东西、以及**有没有建一个不该建的视图**。
 
+test('ULID：铸造出来的标识符，不是名字', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const u = require('../src/main/plugins/ulid.js');
+
+  const a = u.mint();
+  assert.equal(a.length, 26, '26 个字符');
+  assert.ok(u.isId(a), '铸出来的要通过自己的校验');
+  assert.equal(u.isId(a.toLowerCase()), false,
+    '小写不合法 —— 字母表是大写的 Crockford base32，允许小写会让"同一个 id"有两种写法');
+
+  // ★ 字母表刻意去掉了 I / L / O / U：手抄或口头念给管理员听时不会和 1 / 0 混。
+  for (const bad of ['I', 'L', 'O', 'U']) {
+    assert.equal(u.isId(bad.repeat(26)), false, `${bad} 不在字母表里`);
+  }
+  assert.equal(u.isId(a.slice(0, 25)), false, '短一位不合法');
+  assert.equal(u.isId(a + 'X'), false, '长一位不合法');
+
+  // ★ 时间在前、随机在后 → **字典序 = 铸造序**。池里的目录列表靠它天然有序。
+  assert.ok(u.mint(1700000000000) < u.mint(1700000000001), '毫秒递增 → 字典序递增');
+  assert.ok(u.mintedAt(a) > Date.UTC(2020, 0, 1), '反解出来的铸造时间要合理');
+
+  // ★「生成即唯一」靠的是随机位，不是协调。同一毫秒里铸的也必须互不相同 ——
+  //   否则批量铸造（比如一次装一批插件）会撞。
+  const batch = Array.from({ length: 200 }, () => u.mint(1700000000000));
+  assert.equal(new Set(batch).size, 200, '同一毫秒内铸 200 个不能重样');
+});
+
 test('插件注册表：四种输入四种答案，尤其「不知道」不能猜', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
+  const u = require('../src/main/plugins/ulid.js');
   const reg = new Registry();
+  const cs = reg.list().find((p) => p.name === 'code-server');
+  const ref = `${cs.id}@${cs.version}`;
 
-  assert.equal(reg.route('sshd'), 'sshd');
-  assert.equal(reg.route('code-server'), 'code-server');
-  // ★ 字段**不存在**（部署的守护进程还是旧版本）：那时候集群上只可能有
-  //   code-server 的会话，按它走与升级前一致。不这样兜的话，升级客户端会让
-  //   所有已有会话都变成「服务类型未知」—— 用户眼前的功能凭空消失。
-  assert.equal(reg.route(undefined), 'code-server',
-    '老守护进程没有这个字段时，不能把它读成「未知」');
-  // ★ 字段存在且是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
+  assert.equal(reg.resolve(cs.id, ref).plugin.name, 'code-server', '解析键查得到就是它');
+
+  // ★ `service_plugin` 字段**不存在**（部署的守护进程还是旧版本）：那时候集群上
+  //   只可能有**内建**插件的会话，按短名找那个内建的，与升级前一致。不这样兜的话，
+  //   升级客户端会让所有已有会话都变成「服务类型未知」—— 用户眼前的功能凭空消失。
+  assert.equal(reg.resolve('code-server', undefined).plugin.name, 'code-server',
+    '老守护进程没有解析键时，按短名认内建的那个');
+  assert.equal(reg.resolve(undefined, undefined).plugin.name, 'code-server',
+    '连服务种类都没有时兜到标了 legacyDefault 的那个');
+  // ★ `service_kind` 是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
   //   这时**绝不能猜** —— 猜 code-server 会拿口令去 POST 一个 SSH 端口，
   //   猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
-  assert.equal(reg.route(null), 'unknown',
+  assert.equal(reg.resolve(null, undefined).plugin, null,
     '守护进程明说不知道时绝不能猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
-  assert.equal(reg.route('ssh'), 'unknown', '认不出的值也不许退回默认');
+  assert.equal(reg.resolve('ssh', undefined).plugin, null, '认不出的短名也不许退回默认');
+  assert.equal(reg.resolve('code-server', 'garbage').plugin, null, '坏掉的解析键不许退回默认');
+
+  // ★ 认得出 id、但**本机没有那一版** —— 这是"站点升级了插件而客户端还没跟上"的
+  //   形态，也是用户最需要一句话的时候。必须说得出缺的是哪一版，而不是笼统的"未知"。
+  const miss = reg.resolve(cs.id, `${cs.id}@99.0.0`);
+  // ★ 这条断言**必须自己带 message**：不带的话失败块里只有一段对象 diff，
+  //   看不出是"解析键查不到"这一条红的 —— 而"红了，但看不出为什么红"与
+  //   "因为错误的理由红"在排查时一样难用。（同一个坑这个项目里踩过一次。）
+  assert.equal(miss.plugin, null,
+    '★ 解析键查不到时**不许退回缺省插件** —— 那等于系统声称了一件它并不知道的事，'
+    + '而症状是客户端拿另一个插件的代码去对接这个作业');
+  assert.match(miss.why || '', /99\.0\.0/, `要说清缺的是哪一版：${miss.why}`);
+  assert.match(miss.why || '', /1\.0\.0/, `也要说清本机有哪一版：${miss.why}`);
+
+  // 完全没见过的 id 也要有话说
+  assert.match(reg.resolve(u.mint(), `${u.mint()}@1.0.0`).why || '', /没有/,
+    '本机根本没有这个 id 时，要说"没有这个插件"，而不是"版本不对"');
+
+  // ★ 缺省插件靠的是清单里那个 legacyDefault 标记，**不是"列表里第一个"**。
+  //   内建这两个恰好同名序与标记重合（code-server 字母序在前、也正是它标了
+  //   legacyDefault），所以只测内建的注册表分辨不出这两种实现。加一个名字排序
+  //   在前的插件，答案就会分叉。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-def-'));
+  writePlugin(tmp, 'aaa', { name: 'aaa', displayName: '排在前面的' },
+    'module.exports = {};\n');
+  writePlugin(tmp, 'zzz', { name: 'zzz', displayName: '真正的缺省',
+    contributes: { legacyDefault: true } }, 'module.exports = {};\n');
+  const reg2 = new Registry([{ dir: tmp, source: 'pool' }]);
+  assert.deepEqual(reg2.list().map((p) => p.name), ['aaa', 'zzz'], '前置条件：顺序');
+  assert.equal(reg2.defaultPlugin().name, 'zzz',
+    '★ 缺省插件是**标了 legacyDefault 的那一个**，不是列表里第一个 —— '
+    + '按"第一个"取的话，加一个名字排序在前的插件就会把老守护进程的会话认错');
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const { Registry } = require('../src/main/plugins/index.js');
+  const { Registry, bucketOf } = require('../src/main/plugins/index.js');
   const reg = new Registry();
+  const cs = reg.list().find((p) => p.name === 'code-server');
+  const ss = reg.list().find((p) => p.name === 'sshd');
+  const b1 = bucketOf(cs);
+  const b2 = bucketOf(ss);
 
   // 状态变化很频繁（心跳、隧道重建、每次 status 回来都会走到渲染），而插件的
   // attach() 多半在写文件或弹通知 —— 不去重用户每 45 秒收到一条一模一样的通知。
-  assert.equal(reg.once('code-server', 'k1'), true, '第一次要放行');
-  assert.equal(reg.once('code-server', 'k1'), false, '同一个键再来一次要拦住');
-  // ★ 关键的一条，而且**必须紧接着上面**：此刻 code-server 的槽里正是 'k1'，
+  assert.equal(reg.once(b1, 'k1'), true, '第一次要放行');
+  assert.equal(reg.once(b1, 'k1'), false, '同一个桶同一个键再来一次要拦住');
+  // ★ 关键的一条，而且**必须紧接着上面**：此刻 b1 的槽里正是 'k1'，
   //   所以另一个插件拿**同一个键**来问必须放行。共用一个槽的话它会拿到 false ——
   //   症状是其中一个插件的通知永远不出现。
   //   （顺序不能挪：先让槽里换成别的键再问这一条，共享槽也会通过，这条断言就退化成
   //     走过场了。变异验证 C6 第一次就是这么活下来的。）
-  assert.equal(reg.once('sshd', 'k1'), true, '别的插件有自己的槽，同一个键也要放行');
-  assert.equal(reg.once('sshd', 'k1'), false, '同一个插件同一个键才拦');
+  assert.equal(reg.once(b2, 'k1'), true, '别的插件有自己的槽，同一个键也要放行');
+  assert.equal(reg.once(b2, 'k1'), false, '同一个桶同一个键才拦');
 
-  assert.equal(reg.once('code-server', 'k2'), true, '换了键要放行');
+  assert.equal(reg.once(b1, 'k2'), true, '换了键要放行');
   // 重新扫描（模拟装/卸插件）不能把去重状态清掉，否则用户会重看一遍通知。
   reg.reload();
-  assert.equal(reg.once('code-server', 'k2'), false, '重新扫描后去重状态还在');
+  assert.equal(reg.once(b1, 'k2'), false, '重新扫描后去重状态还在');
 });
 
 // ── ★ 装一个插件、卸一个插件，客户端都不许崩 ─────────────────────────────────
@@ -771,29 +843,154 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
 // 「站点分发的插件」，逐条验四件事：坏文件不拖垮别人、装上就认得、
 // 卸掉之后会话仍然能管（这是"通用层"的核心断言）、名字与文件不一致时宁可跳过。
 
-test('★ 插件目录：坏文件只影响它自己，其余插件照常工作', (t) => {
+/** 在一个临时根目录下造一个插件目录。返回它的路径。 */
+function writePlugin(root, dirName, over = {}, clientSrc = undefined) {
+  const dir = path.join(root, dirName);
+  fs.mkdirSync(dir, { recursive: true });
+  const mf = {
+    id: mintId(), name: 'temp', displayName: '临时', version: '1.0.0', ...over,
+  };
+  fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(mf, null, 2));
+  if (clientSrc !== undefined) {
+    fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'client', 'index.js'), clientSrc);
+  }
+  return dir;
+}
+let _ulidMod = null;
+function mintId() {
+  if (!_ulidMod) _ulidMod = require('../src/main/plugins/ulid.js');
+  return _ulidMod.mint();
+}
+
+/** 内建 sshd 插件的 id。开关按 id 记，所以测试得拿得到它。 */
+function sshdId() {
+  const idx = require('../src/main/index.js');
+  const p = idx._test.getRegistry().list().find((x) => x.name === 'sshd');
+  assert.ok(p, '内建的 sshd 插件必须在');
+  return p.id;
+}
+
+test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
-  fs.writeFileSync(path.join(tmp, 'good.js'),
-    "module.exports = { name: 'good', title: '好的', attach() {} };\n");
-  fs.writeFileSync(path.join(tmp, 'broken.js'), 'this is not javascript at all(((()\n');
-  fs.writeFileSync(path.join(tmp, 'empty.js'), 'module.exports = {};\n');
-  // 文件名才是身份（service_kind 就是它），不一致时宁可跳过 ——
-  // 否则「改了 A 文件、生效的是 B」永远说不清。
-  fs.writeFileSync(path.join(tmp, 'mismatch.js'),
-    "module.exports = { name: 'other', title: 'x', attach() {} };\n");
 
-  const reg = new Registry(tmp);
+  writePlugin(tmp, 'good', { name: 'good', displayName: '好的' }, 'module.exports = {};\n');
+  // 客户端代码语法错
+  writePlugin(tmp, 'broken', { name: 'broken' }, 'this is not javascript at all((((\n');
+  // 清单不是合法 JSON
+  fs.mkdirSync(path.join(tmp, 'badjson'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'badjson', 'plugin.json'), '{ not json');
+  // id 不是 ULID —— 身份是铸造出来的，编一个名字冒充不了
+  writePlugin(tmp, 'badid', { id: 'code-server', name: 'badid' });
+  // 未知键：打错一个键名不该静默变成"配了但不生效"
+  writePlugin(tmp, 'badkey', { contribution: {} });
+  // 客户端代码导出里打错了一个钩子名
+  writePlugin(tmp, 'badhook', { name: 'badhook' }, 'module.exports = { attch() {} };\n');
+  // 不是插件目录（没有清单）—— 应当被**静静跳过**，不是报错
+  fs.mkdirSync(path.join(tmp, 'not-a-plugin'), { recursive: true });
+
+  const reg = new Registry([{ dir: tmp, source: 'pool' }]);
 
   assert.deepEqual(reg.list().map((p) => p.name), ['good'],
-    '只有形状完整、且名字与文件名一致的那个被收下');
-  assert.equal(reg.errors.length, 3, `三个坏文件各记一条：${JSON.stringify(reg.errors)}`);
+    '只有形状完整的那个被收下');
+  assert.equal(reg.errors.length, 5, `五个坏插件各记一条：${JSON.stringify(reg.errors, null, 2)}`);
   assert.ok(reg.errors.every((e) => typeof e === 'string' && e.length > 0),
-    '每条都要说得出是哪个文件、坏在哪');
+    '每条都要说得出是哪个目录、坏在哪');
+  // ★ 报错必须**指名道姓**。含糊的一句"有插件加载失败"等于没有报错 ——
+  //   症状是"加了插件它就是不生效"，而这是用户唯一的线索来源。
+  const all = reg.errors.join('\n');
+  for (const [what, re] of [['语法错', /broken/], ['清单坏', /badjson/],
+    ['id 不合法', /badid/], ['未知键', /badkey/], ['钩子名打错', /badhook/]]) {
+    assert.match(all, re, `${what} 那条报错要说得出是哪个目录：${all}`);
+  }
   // ★ 关键：注册表本身可用 —— 一个坏插件不能把客户端带崩。
-  assert.equal(reg.route('good'), 'good');
-  assert.equal(reg.route('broken'), 'unknown');
+  assert.equal(reg.latestByName('good').name, 'good');
+  assert.equal(reg.resolve('broken', undefined).plugin, null);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('★ 身份是铸造出来的：同一个构件合并、抢同一个身份的一个都不加载', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry } = require('../src/main/plugins/index.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
+  const src = 'module.exports = {};\n';
+
+  // ── 同一个构件被两个来源分发 → 合并成一条，只是多记一个来源 ──
+  //   关键在于两边的**目录名完全不同**：目录名不参与任何判定，身份来自清单。
+  const builtinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-b-'));
+  const poolRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-p-'));
+  const id = mintId();
+  writePlugin(builtinRoot, 'readable-name', { id, name: 'jup', displayName: 'J' }, src);
+  writePlugin(poolRoot, `${id}@1.0.0`, { id, name: 'jup', displayName: 'J' }, src);
+
+  let reg = new Registry([{ dir: builtinRoot, source: 'builtin' },
+    { dir: poolRoot, source: 'pool' }]);
+  let jup = reg.list().filter((p) => p.id === id);
+  assert.equal(jup.length, 1, '同一个 (id, 版本) + 同一份内容 = 一条，不是两条');
+  assert.deepEqual(jup[0].sources, ['builtin', 'pool'], '但要记下两个来源');
+  assert.equal(reg.errors.length, 0, `合并不该报错：${JSON.stringify(reg.errors)}`);
+
+  // ── 同 (id, 版本) 而内容不同 → 两个都不加载 ──
+  //   这是池模型唯一的危险处：挑一个错的后果是会话的解析键指过去、客户端静默地
+  //   跑了另一个插件的代码，而用户完全看不出来。宁可暂时不可用 —— 那种失败是
+  //   **看得见**的。
+  writePlugin(poolRoot, 'impostor', { id, name: 'jup', displayName: 'J' },
+    'module.exports = { attach() {} };\n');          // 内容不同 → 摘要不同
+  reg = new Registry([{ dir: builtinRoot, source: 'builtin' },
+    { dir: poolRoot, source: 'pool' }]);
+  assert.equal(reg.get(id, '1.0.0'), null,
+    '★ 内容不同的两份在抢同一个身份 → 两个都不加载，绝不挑一个');
+  assert.equal(reg.errors.length, 1, '而且要说出来');
+  assert.match(reg.errors[0], /抢同一个 id/, `报错要说清是什么问题：${reg.errors[0]}`);
+  assert.match(reg.errors[0], /摘要/, '还要给出判据（摘要），用户才分得清哪份是哪份');
+
+  // ── 同 id 不同版本 → **并存**。站点升级频繁也好、拒绝升级也好，都不挤掉对方 ──
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-v-'));
+  writePlugin(root2, 'v1', { id, name: 'jup', displayName: 'J', version: '1.0.0' }, src);
+  writePlugin(root2, 'v2', { id, name: 'jup', displayName: 'J', version: '2.0.0' }, src);
+  reg = new Registry([{ dir: root2, source: 'pool' }]);
+  assert.deepEqual(reg.list().map((p) => p.version), ['1.0.0', '2.0.0'],
+    '同一个插件的多个版本并存');
+  assert.equal(reg.latestByName('jup').version, '2.0.0', '按短名取时给最高的那一版');
+  assert.equal(reg.get(id, '1.0.0').version, '1.0.0', '按解析键取时给的就是那一版');
+
+  // ★ 去重桶要**带上版本**：池里并存同一个插件的多个版本是常态（站点更新频繁、
+  //   也可能拒绝更新）。只按 id 分桶的话，刚装上的新版本那句话会被旧版本压掉 ——
+  //   而"这个版本已经说过这句话了"与"那个版本说过了"是两件事。
+  const { bucketOf } = require('../src/main/plugins/index.js');
+  assert.notEqual(bucketOf(reg.get(id, '1.0.0')), bucketOf(reg.get(id, '2.0.0')),
+    '★ 去重桶必须区分同一插件的不同版本');
+
+  for (const d of [tmp, builtinRoot, poolRoot, root2]) {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个角落炸', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry, satisfies, hostVersion } = require('../src/main/plugins/index.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-eng-'));
+  const host = hostVersion();
+
+  writePlugin(tmp, 'future', { name: 'future', engines: { slurmate: '>=99.0.0' } });
+  writePlugin(tmp, 'ok', { name: 'ok', engines: { slurmate: '>=0.0.1 <99.0.0' } });
+  writePlugin(tmp, 'badrange', { name: 'badrange', engines: { slurmate: '^1.2.3' } });
+
+  const reg = new Registry([{ dir: tmp, source: 'pool' }]);
+  assert.deepEqual(reg.list().map((p) => p.name), ['ok'],
+    `只有引擎范围满足的那个被收下（本客户端 ${host}）`);
+  assert.equal(reg.errors.length, 2);
+  const all = reg.errors.join('\n');
+  assert.match(all, /future/, '要说是哪个插件');
+  assert.match(all, new RegExp(host.replace(/\./g, '\\.')), '要说清本客户端是哪一版');
+  assert.match(all, /badrange/, '看不懂的范围片段也要报错，不能当成"没限制"');
+
+  // 判定函数本身：比较符 + 空格分隔的合取
+  assert.equal(satisfies('1.5.0', '>=1.0.0 <2.0.0').ok, true);
+  assert.equal(satisfies('2.0.0', '>=1.0.0 <2.0.0').ok, false, '上界是开区间');
+  assert.equal(satisfies('1.0.0', '>=1.0.0 <2.0.0').ok, true, '下界是闭区间');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -801,16 +998,16 @@ test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被�
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
-  const file = path.join(tmp, 'temp.js');
-  fs.writeFileSync(file,
-    "module.exports = { name: 'temp', title: '临时', attach() {} };\n");
+  const id = mintId();
+  writePlugin(tmp, 'temp', { id, name: 'temp', displayName: '临时' },
+    'module.exports = {};\n');
 
-  const reg = new Registry(tmp);
-  assert.equal(reg.route('temp'), 'temp', '装上之后认得');
+  const reg = new Registry([{ dir: tmp, source: 'pool' }]);
+  assert.equal(reg.get(id, '1.0.0').name, 'temp', '装上之后认得');
 
-  fs.rmSync(file);
+  fs.rmSync(path.join(tmp, 'temp'), { recursive: true, force: true });
   reg.reload();
-  assert.equal(reg.route('temp'), 'unknown',
+  assert.equal(reg.get(id, '1.0.0'), null,
     '卸掉之后认不出来 —— 而"认不出来"的归宿是"只解释、不动作"，不是崩溃');
   // ★ 会话本身不受影响：状态/心跳/停止只认 session_id，一次都不查插件。
   //   这条断言是"卸载插件之后用户仍然能停掉作业"的全部依据。
@@ -840,8 +1037,9 @@ test('★ 站点装了客户端不认识的插件：不崩，而且说得出该�
       ['code-server', 'sshd']);
     // ★ 认不出的那个**要被报出来**，而不是被过滤掉 —— 它是升级提示的唯一来源。
     //   过滤掉的话，用户面对的就是"按钮凭空少了一个"，而没有任何地方解释为什么。
-    assert.deepEqual(r.plugins.unknownToClient.map((p) => p.name), ['jupyter'],
-      '站点有而客户端没有的插件必须列出来');
+    const miss = r.plugins.missing.map((p) => p.name);
+    assert.deepEqual(miss, ['jupyter'],
+      '站点有而本机池里没有那一版的插件必须列出来');
 
     // 而且它绝不能出现在"能起会话"的那一类里 —— 客户端不知道怎么接它。
     assert.ok(!r.plugins.plugins.some((p) => p.name === 'jupyter'));
@@ -878,14 +1076,14 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
   t.after(async () => {
     Module._load = origLoad;
     const idx = require('../src/main/index.js');
-    await invoke('app:setPluginEnabled', 'sshd', true);
+    await invoke('app:setPluginEnabled', sshdId(), true);
     void idx;
   });
   await invoke('app:debug', 'reset');
   await invoke('app:partitions');
 
-  const off = await invoke('app:setPluginEnabled', 'sshd', false);
-  assert.equal(off.ok, true);
+  const off = await invoke('app:setPluginEnabled', sshdId(), false);
+  assert.equal(off.ok, true, JSON.stringify(off));
 
   const r = await invoke('app:partitions');
   const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
@@ -893,9 +1091,13 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
   assert.equal(sshd.siteEnabled, true, '★ 站点那边一点没动 —— 两件事');
   assert.equal(sshd.runnable, false);
 
-  // 认不出的插件名要被拒绝，而不是静静写进配置
+  // ★ 开关按 **id** 记，不按短名：池是全局的，两个站点可以各有一个叫 `jupyter`
+  //   的插件而它们是两个不同的东西（两个 id）。按短名记会让一个站点的开关管到
+  //   另一个站点的那个。
+  const byName = await invoke('app:setPluginEnabled', 'sshd', false);
+  assert.equal(byName.ok, false, '传短名要被拒绝 —— 短名不是身份');
   const bad = await invoke('app:setPluginEnabled', 'no-such-plugin', false);
-  assert.equal(bad.ok, false);
+  assert.equal(bad.ok, false, '认不出的 id 要被拒绝，而不是静静写进配置');
 });
 
 test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
@@ -1069,16 +1271,16 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
   const w = idx._test.getWindow();
   await invoke('app:start', null, 'code-server');
-  await waitUntil(() => (w.codeView && !w.codeView.webContents.isDestroyed()
-    && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(w.codeView.webContents._url)
-    ? w.codeView : null), 'code-server 视图');
+  await waitUntil(() => (w.surfaceView && !w.surfaceView.webContents.isDestroyed()
+    && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(w.surfaceView.webContents._url)
+    ? w.surfaceView : null), '插件声明的那块界面');
 
   // 结束会话。★ 用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
   //   就是死的 —— 而状态要等下一次 status 轮询（60 秒）才可能从 releasing 变成
   //   ended。所以收起视图必须发生在 releasing，不能等 ended：否则用户还要盯着
   //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
   await invoke('app:stop');
-  assert.equal(w.hasCodeView(), false,
+  assert.equal(w.hasSurface(), false,
     '★ 会话结束后必须销毁 code-server 视图 —— 它是原生层、覆在面板上方，'
     + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
 });
@@ -1093,6 +1295,77 @@ async function waitUntil(fn, what, ms = 15000) {
     await new Promise((r) => setTimeout(r, 120));
   }
 }
+
+test('★ 声明式插件：没有一行客户端代码，照样开界面', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = idx._test.getBackend();
+  await waitUntil(async () => !b._session
+    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+
+  // ★ 这一条测的是**框架与插件的分工**，也是下一阶段（站点分发声明式插件）的形状：
+  //   界面由**框架**按 `contributes.surface` 打开，不由插件代码打开。所以一个
+  //   **没有 `client/index.js`** 的插件也能开界面 —— 开界面本来就不需要代码。
+  //
+  //   没有这一条的话，「按 contributes.surface 分派」与「按插件有没有 attach 分派」
+  //   在内建的两个插件上**行为完全一样**（两个都有 attach，而 sshd 的 surface 是
+  //   空、两种写法都不建视图），于是那条分派线根本没有被验到。
+  const pool = path.join(userData, 'demo-config', 'plugins');
+  const dir = path.join(pool, 'jupyter');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify({
+    id: '01M2JKM1M1M1M1M1M1M1M1M1M1',
+    name: 'jupyter',
+    displayName: 'Jupyter',
+    version: '1.0.0',
+    description: '没有客户端代码的声明式插件。',
+    // layout: false → 用**按插件**的存储分区（persist:plugin-<id>），而不是布局组。
+    // 那一条分支在内建的两个插件上走不到（一个要布局组，一个不要界面）。
+    contributes: { surface: { kind: 'web', path: '/lab' }, layout: false },
+  }, null, 2));
+  idx._test.getRegistry().reload();
+
+  const p = idx._test.getRegistry().get('01M2JKM1M1M1M1M1M1M1M1M1M1', '1.0.0');
+  assert.ok(p, '池里的插件要被扫到');
+  assert.equal(p.hasClientCode, false, '前置条件：它没有客户端代码');
+  assert.equal(p.attach, null, '所以也没有 attach 钩子');
+  assert.deepEqual(p.contributes.surface, { kind: 'web', path: '/lab' },
+    '但它**声明了**一块界面');
+
+  await invoke('app:debug', 'reset');
+  await invoke('app:debug', 'extra-plugin');          // 演示站点"也开了它"
+  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
+
+  const w = idx._test.getWindow();
+  const started = await invoke('app:start', null, 'jupyter');
+  assert.equal(started.ok, true, `提交失败：${JSON.stringify(started.snapshot || started)}`);
+  const ctl = idx._test.getController();
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin, '会话进入 running', 20000);
+
+  // ★ 界面开了，而且开的是**声明里那个路径** —— 框架读的是 contributes，不是插件名。
+  await waitUntil(() => (w.surfaceView && !w.surfaceView.webContents.isDestroyed()
+    && /\/lab$/.test(w.surfaceView.webContents._url) ? w.surfaceView : null),
+  '声明式插件的界面');
+  assert.match(w.surfaceView.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
+    'URL = 隧道 origin + 声明里的 path');
+  // ★ 分区按**插件**走（它没要布局组）—— 一个网页应用自己的状态该跟它自己走。
+  assert.match(w.surfacePartition || '', /^persist:plugin-01M2JKM/,
+    `没有布局组的插件要用按插件的分区，实际是 ${w.surfacePartition}`);
+
+  // ★ 而没有客户端代码就**没有登录那一步**。证据看它那个存储分区里的 cookie jar：
+  //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架**不会去猜**一个
+  //   口令该怎么用 —— 它手里根本没有"这个插件要 POST 什么"的知识。
+  const jar = partitionJars[w.surfacePartition];
+  assert.equal(jar ? jar.size : 0, 0,
+    '没有客户端代码的插件不该有任何登录 —— 没人告诉过框架该拿什么去登录');
+
+  await invoke('app:stop');
+  await waitUntil(async () => !b._session
+    || ['released', 'rejected', 'expired'].includes(b._session.state), '会话释放', 20000);
+  fs.rmSync(path.join(pool, 'jupyter'), { recursive: true, force: true });
+  idx._test.getRegistry().reload();
+});
 
 test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {
   t.after(() => { Module._load = origLoad; });
@@ -1237,49 +1510,62 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
 
   await invoke('app:debug', 'extra-plugin');
   await invoke('app:partitions');
+  // 演示站点"装了 jupyter，而本客户端没有它" —— 拿它的 id 当作那个会话的解析键。
+  const siteJup = idx._test.getBackend()._extraSitePlugins.find((p) => p.name === 'jupyter');
+  assert.ok(siteJup, '前置条件：演示站点要有一个客户端不认识的插件');
+  const ref = `${siteJup.id}@${siteJup.version}`;
 
-  // 把窗口恢复成"刚启动"的样子：客户端重启后本来就没有视图。不这么做的话，
-  // 下面那条"没建视图"会被上一个会话留下的旧视图蒙混过去。
-  w.hideCodeView();
+  // ── ★ 不变量一：跑了之后**改站点状态也不影响这个会话** ──
+  //
+  // 插件对象是在**会话创建时捕获**的，之后所有状态变化都用它、不再查注册表。
+  // 所以就算这个会话的 service_kind 凭空变成别的，客户端也照旧按它起时那个插件
+  // 渲染 —— 这正是"站点升级插件不该弄坏正在跑的会话"的落点。
+  w.hideSurface();
   const viewsBefore = calls.views.length;
+  b._session.service_kind = 'jupyter';
+  b._session.service_plugin = ref;
+  ctl.session.service_kind = 'jupyter';
+  ctl.session.service_plugin = ref;
+  ctl.emit('change', ctl.snapshot());
+  await new Promise((r) => setTimeout(r, 300));
+  // ★ 判据必须是**行为**（界面还按不按那个插件渲染），不能只看 `controller.plugin`
+  //   那个字段：在"捕获了但不用"的实现里那个字段照样是对的，于是断言会因为错误的
+  //   理由变绿。所以强的那一条放在前面。
+  assert.equal(calls.views.length, viewsBefore + 1,
+    '★ 会话跑起来之后改这些字段不该换掉它的插件 —— 框架用的仍是它起时捕获的那一个'
+    + '（那个插件声明了 surface，所以界面会被重新建起来）');
+  assert.equal(ctl.plugin && ctl.plugin.name, 'code-server', '而且攥着的确实还是它');
+  w.hideSurface();
+
+  // ── ★ 不变量二：走**客户端重启**那条路时，认不出的插件要接隧道、不建视图 ──
+  //
+  // 这才是"站点装了新插件而客户端没跟上"在现实里的样子：会话是别人提交的，
+  // 客户端是刚启动的。上一段用的 controller 隧道是现成的，那条"隧道在"的断言
+  // 会因为错误的理由变绿；这一段把 controller 清掉重建，隧道必须**由这条路**
+  // 接起来。
+  const viewsNow = calls.views.length;
   // 通知走的是 webContents 的 'ui:notice' 通道（外壳把它渲染成提示条），
   // 不是 calls.notices —— 后者是别处用的记录。
   const notices = calls.windows[0].webContents.handlers['send:ui:notice'] || [];
   const before = notices.length;
 
-  // ★ 两处都要改：controller.session 是后端响应的一份**副本**（session_view 每
-  //   次都新构造一个对象），而 reattach 会重新问一次后端。只改一处的话，
-  //   下面那段"走重启那条路"拿到的仍然是 code-server，于是它建视图、
-  //   断言因为错误的理由变红。
-  b._session.service_kind = 'jupyter';
-  ctl.session.service_kind = 'jupyter';
-  ctl.emit('change', ctl.snapshot());
-  await new Promise((r) => setTimeout(r, 300));
-
-  assert.equal(calls.views.length, viewsBefore,
-    '认不出的插件绝不能**新建**一个 WebView 去加载它');
-  assert.equal(w.hasCodeView(), false, '窗口里不该留下任何视图');
-
-  // ★ 再走一遍**客户端重启**那条路：这才是"站点装了新插件而客户端没跟上"在
-  //   现实里的样子（会话是别人提交的，客户端是刚启动的）。上面那次 emit 用的
-  //   是已经在跑的 controller，它的隧道是现成的 —— 那条"隧道在"的断言会因为
-  //   错误的理由变绿。这一遍把 controller 清掉重建，隧道必须**由这条路**接起来。
   await idx._test.reattach();
   const ctl2 = idx._test.getController();
   assert.notEqual(ctl2, null, '接上已有会话这条路不能因为插件认不出就放弃');
+  assert.equal(ctl2.plugin, null, '认不出的插件应当**明说**认不出（null），不是硬塞一个');
   await waitUntil(() => ctl2.snapshot().origin, '认不出的会话也把隧道接起来', 20000);
-  assert.equal(calls.views.length, viewsBefore,
-    '走重启那条路也一样：不会为认不出的插件建视图');
+  assert.equal(calls.views.length, viewsNow,
+    '认不出的插件绝不能**新建**一个 WebView 去加载它 —— 那个端口上可能是任何东西');
+  assert.equal(w.hasSurface(), false, '窗口里不该留下任何视图');
 
   const said = notices.slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
   // ★ 要害二：**点名**是哪个插件、并说清该怎么办。用户该升级客户端，不是找管理员 ——
   //   不说这一句，他只能去猜。
-  assert.match(said, /jupyter/, `提示里要点名是哪个插件：${said}`);
+  assert.match(said, /jupyter/i, `提示里要点名是哪个插件：${said}`);
   assert.match(said, /升级客户端/, `而且要说出该怎么办：${said}`);
   // ★ 要害三：隧道**在**（用户有出路）。
-  assert.ok(ctl.snapshot().origin, '隧道要接起来，否则用户连那个端口都够不着');
+  assert.ok(ctl2.snapshot().origin, '隧道要接起来，否则用户连那个端口都够不着');
 
-  ctl.session.service_kind = 'code-server';
   await invoke('app:stop');
   await waitUntil(dead, '会话释放', 20000);
 });

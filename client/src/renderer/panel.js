@@ -3,7 +3,7 @@
  * panel.js —— 面板页逻辑。
  *
  * 面板有四种形态，由 session:state 驱动切换：
- *   登录节点 → 开始开发 → 会话进行中 → 结束/错误
+ *   登录节点 → 开始会话 → 会话进行中 → 结束/错误
  *
  * ★ 登录节点这一屏的第一眼必须是**已保存的连接** —— 用户每次打开客户端要做的事
  *   是「连上上次那台」，不是「再填一遍地址」。公钥和地址表单折进「新建连接」里，
@@ -16,7 +16,11 @@
  * ★ 地址栏永远不预填。预填上一个连接的地址，用户不改直接点保存，得到的只是
  *   「又存了一条一样的」，而他以为自己新建了一条。
  *
- * 会话跑起来之后窗口主体会被 code-server 的 WebContentsView 整个盖住，
+ * ★ 「开始会话」那一段**一个插件名都不写**：站点装了哪些、本机认得哪些，都是
+ *   运行期才知道的（见 renderPlugins）。写死的话，「站点卸掉一个插件」在界面上
+ *   就变成了"点了报错"，而不是"那一块不见了"。
+ *
+ * 会话跑起来之后窗口主体会被插件声明的那块界面整个盖住，
  * 所以「重新加载 / 结束会话」这两个必需的操作也放在状态条里 ——
  * 那是唯一始终可见的、属于我们自己的区域。
  *
@@ -41,6 +45,12 @@ let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
 let lastSnap = null;         // 最近一次会话快照，供状态条里的布局选择器读当前布局
+/**
+ * 最近一次的插件清单。界面里有**两处**需要知道"这个会话的插件声明了界面没有"，
+ * 而快照本身是插件无关的（session.js 不认识任何插件）—— 所以在这里留一份，
+ * 按 `serviceKind`（站点短名）去查。
+ */
+let lastPlugins = null;
 
 /** 布局下拉里「新建一个空白布局」那一项的值。不是布局 id，别混。 */
 const NEW_LAYOUT = '__new__';
@@ -132,8 +142,8 @@ function renderSnapshot(s) {
   $('sec-connect').classList.toggle('hidden', !idle);
   // 会话一起来就把表单收掉 —— 它只在「还没连上」这一屏里说得通
   if (!idle) closeForm();
-  // 「开始开发」只在真的连上之后才出现 —— 连不上就没有分区可挑，
-  // 摆一个按不动的按钮只会让人以为客户端坏了。
+  // 「开始会话」只在真的连上之后才出现 —— 连不上就没有分区可挑，
+  // 摆一堆按不动的按钮只会让人以为客户端坏了。
   $('sec-purpose').classList.toggle('hidden', !(idle && connected));
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
@@ -221,6 +231,26 @@ function renderConnEmpty() {
     : '还没有保存任何登录节点。点右上角的「新建连接」填一个 —— 只需要用户名、主机和端口。';
 }
 
+/**
+ * 「本地地址」那一行该写什么。
+ *
+ * ★ 从前这里无条件写 `s.origin`，也就是 `http://127.0.0.1:PORT` —— 对**中转站**
+ *   会话那是一句**假话**：那个端口后面是 SSH，不是 HTTP。用户照着这一行去浏览器里
+ *   打开，只会得到一张空白页，而他会以为是客户端坏了。
+ *
+ * 判据是插件声明的 `contributes.surface`，不是"是不是某个插件"：
+ * 声明了界面的写 URL，没声明的写裸 TCP 地址。认不出这个会话是哪来的（站点装了
+ * 本机没有的插件）时也写裸地址 —— 我们确实不知道那头是什么。
+ */
+function localAddressText(s) {
+  if (!s.localPort) return '—';
+  const p = ((lastPlugins && lastPlugins.plugins) || [])
+    .find((x) => x.name === s.serviceKind);
+  return (p && p.surface)
+    ? `http://127.0.0.1:${s.localPort}`
+    : `127.0.0.1:${s.localPort}（TCP，不是网址）`;
+}
+
 function renderKv(s) {
   const r = s.resources || {};
   const resText = [
@@ -237,7 +267,7 @@ function renderKv(s) {
     ['资源', resText],
     ['节点', s.node || '—'],
     ['隧道目标', s.tunnelTarget || '—'],
-    ['本地地址', s.origin || '—'],
+    ['本地地址', localAddressText(s)],
     ['剩余时间', fmtLeft(s.expiresAt)],
     ['作业状态', s.jobState || '—'],
     ['上次心跳', fmtAge(s.hbAgeMs)],
@@ -688,6 +718,187 @@ function startRename(l, nm) {
   input.select();
 }
 
+// ── 插件 ────────────────────────────────────────────────────────────────────
+/**
+ * 画插件块。
+ *
+ * ★ 这个函数里**一个插件名都没有** —— 画什么完全由服务端通报的清单与本机注册表
+ *   求交决定（见 index.js 的 pluginsView）。写死一个「开始开发」按钮的话，
+ *   「站点卸载一个插件」在界面上就变成了"点了报错"，而不是"按钮不见了"。
+ *
+ * ★ 三个条件必须**分开显示**，因为它们要做的事不同：
+ *     站点没开 → 找管理员       本机关了 → 自己打开就行
+ *     本机没有 → 升级客户端     池里撞车 → 删掉多余的那一份
+ *   糊成一句"不可用"，用户就只能去猜。
+ */
+function renderPlugins(pv) {
+  const box = $('plugin-blocks');
+  const issues = $('plugin-issues');
+  box.textContent = '';
+  issues.textContent = '';
+  if (!pv) return;
+  lastPlugins = pv;
+
+  const list = pv.plugins || [];
+  if (!list.length) {
+    box.append(el('p', 'sub', '这个客户端一个插件都没有 —— 安装包可能不完整。'));
+  }
+
+  for (const p of list) {
+    box.append(pluginBlock(p));
+  }
+
+  // ── 池里的问题：被跳过的东西必须说出来 ──
+  for (const e of pv.errors || []) {
+    issues.append(issueBox('err', '插件没有加载', e));
+  }
+  // ── 站点有而本机没有：这是升级提示的唯一来源 ──
+  const miss = pv.missing || [];
+  if (miss.length) {
+    const names = miss.map((m) => (m.version ? `${m.title} ${m.version} 版` : m.title));
+    issues.append(issueBox('warn', '本站有本客户端没有的插件',
+      `${names.join('、')}。\n升级客户端之后就能用它 —— 在那之前，这类会话仍然接得上`
+      + '隧道、也停得掉，只是客户端不知道怎么把它用起来。'));
+  }
+}
+
+function pluginBlock(p) {
+  const d = document.createElement('div');
+  d.className = 'plug' + (p.runnable ? '' : ' plug-off');
+
+  // ── 第一行：这是哪个插件 ──
+  //   id 与版本都要露出来：池里可以**并存同一个插件的多个版本**（站点更新频繁、
+  //   也可能拒绝更新），只显示名字的话用户分不清自己看到的是哪一版。
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, p.title));
+  head.append(el('code', 'plug-id', p.name));
+  head.append(el('span', 'plug-ver', 'v' + p.version));
+  if (p.source === 'pool') head.append(el('span', 'plug-ver', '站点分发'));
+  if (!p.hasClientCode) head.append(el('span', 'plug-ver', '声明式'));
+  d.append(head);
+
+  if (p.description) d.append(el('p', 'plug-desc', p.description));
+
+  // ── 第二行：四个分开的事实 ──
+  const meta = document.createElement('div');
+  meta.className = 'plug-meta';
+
+  const site = document.createElement('span');
+  site.append(el('span', 'k', '站点：'));
+  site.append(document.createTextNode(
+    !p.siteKnown ? '（这个守护进程不通报插件清单）'
+      : p.siteEnabled ? '已启用' : '未启用'));
+  if (p.siteEnabled && p.siteVersion && p.siteVersion !== p.version) {
+    site.append(el('span', 'k', `（站点那边是 ${p.siteVersion} 版）`));
+  }
+  meta.append(site);
+
+  const def = p.defaults;
+  meta.append(el('span', null, def
+    ? `默认 ${def.cpus} 核 / ${def.mem}`
+    : '默认资源由服务端定'));
+
+  // 本机开关。它能点，是因为"本机要不要"是用户自己的决定，与站点无关。
+  const lab = document.createElement('label');
+  lab.className = 'plug-toggle';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = p.locallyEnabled !== false;
+  cb.onchange = async () => {
+    cb.disabled = true;
+    try {
+      // ★ 按 **id** 提交，不按短名：池是全局的，两个站点可以各有一个叫
+      //   `jupyter` 的插件而它们是两个不同的东西。
+      const r = await window.slurmate.setPluginEnabled(p.id, cb.checked);
+      if (r && r.ok) renderPlugins(r.plugins);
+      else notice('error', (r && r.error) || '没能保存这个开关');
+    } finally {
+      cb.disabled = false;
+    }
+  };
+  lab.append(cb);
+  lab.append(document.createTextNode('本机启用'));
+  meta.append(lab);
+
+  d.append(meta);
+
+  // ── 起不来的原因：一句话说清该做什么 ──
+  if (!p.runnable) {
+    const why = !p.siteEnabled
+      ? (p.siteKnown ? '本站没有开放这个插件 —— 要开的话得找管理员。'
+        : '这个守护进程不通报插件清单，所以客户端不知道站点开没开它。')
+      : '你在本机把它关掉了 —— 勾上左边那个开关就能用。';
+    d.append(el('p', 'why', why));
+  } else if (p.siteEnabled && p.siteVersion && p.siteVersion !== p.version) {
+    // ★ 两半代码是配套的，版本对不上要说在前面。不说的话用户看到的是
+    //   "作业起来了但界面一片白"，而根因一个字都不在里面。
+    d.append(el('p', 'why',
+      `站点用的是 ${p.siteVersion} 版，而本机这一份是 ${p.version} 版。`
+      + '会话仍然起得来，但界面可能连不上 —— 升级客户端通常就好了。'));
+  }
+
+  const btn = document.createElement('button');
+  btn.textContent = '开始会话';
+  btn.disabled = !p.runnable;
+  btn.onclick = () => startWith(p.name, btn);
+  d.append(btn);
+  return d;
+}
+
+function issueBox(kind, head, body) {
+  const d = document.createElement('div');
+  d.className = 'issue ' + kind;
+  d.append(el('span', 'h', head + '：'));
+  d.append(document.createTextNode(body));
+  return d;
+}
+
+/** 建一个元素的小工具（内联 style 会被 CSP 丢掉，所以一律走 class）。 */
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+/**
+ * 起一个会话。
+ *
+ * ★ `serviceKind` 传的是**本站的短名**（块标题旁边那个）。主进程按它在本机找到
+ *   对应那一份插件 —— 池里可能并存同一个插件的多个版本，取版本最高的。
+ *
+ * ★ 高级选项里**只带上真正填了的键**。留空 = 让服务端用它的默认值 —— 客户端不
+ *   自己编默认值，否则默认值就成了两份真相：界面显示 2 核 / 8G，而实际拿到的是
+ *   别的，且没有任何地方会为此报错。默认资源是**管理员的策略**，不是用户偏好。
+ */
+async function startWith(serviceKind, btn) {
+  btn.disabled = true;
+  notice('info', '正在提交会话…');
+  try {
+    const res = {};
+    const cpus = $('f-cpus').value.trim();
+    const mem = $('f-mem').value.trim();
+    const gpus = $('f-gpus').value.trim();
+    const part = $('f-part').value;
+    if (cpus) res.cpus = Number(cpus);
+    if (mem) res.mem = mem;
+    if (gpus !== '') res.gpus = Number(gpus);
+    if (part) res.partition = part;
+
+    const r = await window.slurmate.start(res, serviceKind);
+    if (r && r.snapshot) renderSnapshot(r.snapshot);
+    // 提交失败（比如版本对不上被服务端拒了）时把清单刷新一遍 —— 那句话要落到
+    // 界面上，不能只在日志里。
+    if (r && !r.ok) {
+      const pv = await window.slurmate.partitions();
+      if (pv && pv.plugins) renderPlugins(pv.plugins);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── 分区 ────────────────────────────────────────────────────────────────────
 function renderPartitions(list) {
   const sel = $('f-part');
@@ -748,6 +959,9 @@ async function handleConnectResult(res) {
       notice('error', '你的账号尚未分配集群计算权限，请联系管理员 —— 否则提交作业会失败。');
     }
     if (res.partitions) renderPartitions(res.partitions);
+    // ★ 插件清单也是连上之后才有的（`op_plugins` 走这条路）—— 不在这里刷的话，
+    //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
+    if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
     renderSnapshot({ state: 'idle', demo: boot.demo });
     return true;
@@ -786,6 +1000,7 @@ async function init() {
   //   现在那条路径整个不存在了，每个字段都是问出来的、当场渲染的。
   renderConnections(boot.connections);
   renderPartitions(boot.partitions || []);
+  renderPlugins(boot.plugins);
   renderConnEmpty();
   // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
   if ((boot.connections || []).length === 0) await openNewForm();
@@ -873,28 +1088,6 @@ async function init() {
 
   $('btn-probe').onclick = doProbe;
 
-  $('btn-start').onclick = async () => {
-    $('btn-start').disabled = true;
-    notice('info', '正在提交开发会话…');
-    try {
-      // 只带上真正填了的键。留空 = 让服务端用它的默认值 ——
-      // 客户端不自己编默认值，否则一个改过的客户端省略字段就能要到整机。
-      const res = {};
-      const cpus = $('f-cpus').value.trim();
-      const mem = $('f-mem').value.trim();
-      const gpus = $('f-gpus').value.trim();
-      const part = $('f-part').value;
-      if (cpus) res.cpus = Number(cpus);
-      if (mem) res.mem = mem;
-      if (gpus !== '') res.gpus = Number(gpus);
-      if (part) res.partition = part;
-
-      const r = await window.slurmate.start(res);
-      if (r && r.snapshot) renderSnapshot(r.snapshot);
-    } finally {
-      $('btn-start').disabled = false;
-    }
-  };
 
   $('btn-doctor').onclick = async () => {
     const r = await window.slurmate.doctor();

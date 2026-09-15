@@ -3,104 +3,384 @@
  * plugins/index.js —— 插件注册表。
  *
  * 一个**插件** = 一种服务。一个会话提供哪种服务，就由哪个插件负责把它接起来。
- * 两侧各有一半实现：服务端在 `cluster/run.sbatch` 的一个 `start_*` 函数里
- * （连同 `slurmate-sessiond` 的 `PluginSpec`），客户端就是这个目录下的一个模块。
  *
- * ── 框架 / 插件的边界（这是本文件存在的理由）────────────────────────────────
+ * ── 一个插件是一个目录 ──────────────────────────────────────────────────────
  *
- * 框架（index.js / session.js / windows.js / tunnel.js）**不认识任何插件名**。
- * 它只管与"哪个插件"无关的事：提交、状态机、心跳、隧道、停止、连接与布局管理、
- * 窗口。这些事**一次也不查 service_kind** —— 唯一的例外就是本文件这个注册表。
+ *   <插件目录>/
+ *     plugin.json        清单：身份、版本，以及框架会读的那几条声明
+ *     client/index.js    客户端侧代码 —— **可有可无**，没有它就是纯声明式插件
  *
- * 插件只管"这个会话该怎么用"：建视图并自动登录（code-server），或者把本地 ssh
- * 配好（sshd）。插件拿到的是 `ctx` —— 框架显式递给它的一组能力。
+ * ★ **目录名不参与任何判定。** 身份来自清单里的 `id`，版本来自 `version`。
+ *   目录名纯粹是给人看的（内建的两个用可读名字，池里的用 `<id>@<版本>`），
+ *   所以仓库里一眼能看出哪个是哪个，而加载器只有一条逻辑。
  *
- * ★ 这条边界的用处是让「卸载一个插件」成为一件**有定义**的事。没有它，插件一旦
- *   离开，散落在框架各处的 `if (是它)` 就会连同那个功能一起烂掉，而症状是"删掉
- *   插件之后客户端在某条路径上莫名其妙地不动了"。
+ * ── 两个来源，一个池 ────────────────────────────────────────────────────────
+ *
+ *   builtin  随客户端发布（本目录下）
+ *   pool     ~/.slurmate/plugins/ —— 站点分发进来的
+ *
+ * 两边**走同一条加载路径**。「站点分发的插件」不是一套新机制，只是多看一个目录。
+ *
+ * ── ★ 身份是「铸造」出来的，不是「起名」出来的 ──────────────────────────────
+ *
+ * 一个插件的 `id` 是诞生时铸一次的 ULID（见 ulid.js），此后永不改变。名字可以
+ * 随时改，`id` 不行。于是：
+ *
+ *   · **同一个插件**被两个站点分发 → 两边 `id` 相同 → 池里合并成一条，只多记一个
+ *     来源站点。这不是因为谁记得把名字拼对了，而是因为它们本来就是同一个构件。
+ *   · **两个站点各写一个 jupyter** → 两个不同的 `id` → **并存**，各自标明来源。
+ *     站点升级频繁也好、拒绝升级也好，都不会把对方挤掉。
+ *
+ * ── ★ 池里 `(id, 版本)` 撞了怎么办 ──────────────────────────────────────────
+ *
+ * 这是池模型唯一的危险处。按站点分目录时，两个同名插件各在各的目录，客户端
+ * **永远不会取错**，撞名最多浪费几十 KB。池里只有一份，取错就是**静默地跑了
+ * 另一个插件的代码**，而用户完全看不出来。
+ *
+ * 规则一条：**同 `(id, 版本)` 而内容摘要不同 → 两个都不加载，并报错。**
+ * 绝不挑一个。摘要相同则是同一个构件，合并（多来源）。
+ *
+ * ★ 这条防**意外**，不防**恶意**：它保证"撞了会被发现并说出来"，不保证"撞不上"。
+ *   随机位已经让意外撞上的概率可忽略，而剩下的那种（有人抄了别人的 id）要靠
+ *   站点签名 —— 那在 `plugin.json.sig` 那一层，不在这里。
  *
  * ── 坏插件不许把客户端带崩 ──────────────────────────────────────────────────
  *
- * 扫到的每个模块都要过一遍形状校验；不合规的**跳过它并记一条**，其余插件照常
- * 工作。这不是防御性编程，这是需求：「不能因为后来加入或者移除了某个插件而导致
- * 崩溃」。加一个写坏的插件文件，客户端必须还能起来、还能用别的插件。
+ * 每个目录单独 try/catch，不合规的**跳过它并记一条**，其余插件照常工作。这不是
+ * 防御性编程，这是需求：「不能因为后来加入或者移除了某个插件而导致崩溃」。
  */
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const ulid = require('./ulid.js');
 
-// 一个插件模块必须导出这些。
-const REQUIRED = [
-  ['name', (v) => typeof v === 'string' && v.length > 0, '字符串'],
-  ['title', (v) => typeof v === 'string' && v.length > 0, '字符串'],
-  ['attach', (v) => typeof v === 'function', '函数'],
-];
+const MANIFEST = 'plugin.json';
+const CLIENT_ENTRY = path.join('client', 'index.js');
 
-// route() 在认不出来时的答案。**不是**一个能提交的服务，只是客户端内部的一个
-// 判定结果 —— 所以它不可能与任何插件的名字撞上（插件名里不允许出现它）。
+/** route() 认不出来时的答案。**不是**一个能提交的服务，只是客户端内部的一个
+ *  判定结果 —— 所以它不可能与任何插件的名字撞上（短名里不允许出现它）。 */
 const UNKNOWN = 'unknown';
 
-/**
- * 扫一个目录，返回 `{ plugins: Map<名字, 模块>, errors: string[] }`。
- *
- * ★ 文件名就是插件的身份：会话里的 `service_kind` 就是它，服务端的 `PluginSpec`
- *   也是它。所以导出里的 `name` 与文件名不一致时宁可跳过 —— 那种不一致会让
- *   "哪个文件对应哪个插件"永远说不清，而症状是改了 A 文件、生效的是 B。
- *
- * ★ 每个文件单独 try/catch：一个插件抛出异常（语法错、require 了不存在的东西）
- *   只影响它自己。
- */
-function loadFrom(dir) {
-  const plugins = new Map();
-  const errors = [];
-  let names;
-  try {
-    names = fs.readdirSync(dir);
-  } catch (e) {
-    errors.push(`读不到插件目录 ${dir}：${e.message}`);
-    return { plugins, errors };
-  }
-  for (const file of names.sort()) {
-    if (!file.endsWith('.js') || file === 'index.js') continue;
-    const full = path.join(dir, file);
-    if (!fs.statSync(full).isFile()) continue;
+// ── 清单里允许出现的东西 ────────────────────────────────────────────────────
+//
+// **未知键报错而不是忽略**，沿用 v0.2 定下的规矩：打错一个键名（比如
+// `contribution`）不该静默变成一个"配了但不生效"的插件。
 
+const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
+  'author', 'engines', 'contributes'];
+const CONTRIBUTES_KEYS = ['surface', 'layout', 'submitPubkey', 'legacyDefault'];
+const SURFACE_KEYS = ['kind', 'path'];
+const SURFACE_KINDS = ['web'];
+const CLIENT_HOOKS = ['prepare', 'attach', 'preferredPort', 'closeWarning'];
+
+/**
+ * 站点短名的字符集。它进配置块名、进会话文件、进日志与报错文案 —— 宽松的字符集
+ * 会在这些地方变成一个说不清的问题（空格、斜杠、大小写）。
+ *
+ * ★ 短名只需要**站点内唯一**（守护进程保证），不需要全球唯一 —— 全球唯一是 `id`
+ *   的事。两个站点各有一个 `jupyter` 指的是两个不同的 `id`，客户端按来源连接区分。
+ */
+const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+// ── 版本比较 ────────────────────────────────────────────────────────────────
+
+function parseVer(s) {
+  const m = VERSION_RE.exec(String(s === undefined ? '' : s).trim());
+  return m ? s.trim().split('.').map(Number) : null;
+}
+
+function cmpVer(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * `engines.slurmate` 的范围判定。
+ *
+ * 支持 `>= > <= < =` 这几种比较符，空格分隔，**全部满足**才算通过。
+ * （`>=0.3.0 <0.5.0` 这种就够用了；故意不支持 `^` / `~` / `||` —— 那些的语义
+ * 各自都有坑，而这里要的是"装之前就能判定"，不是"尽量满足"。）
+ */
+function satisfies(version, range) {
+  const v = parseVer(version);
+  if (!v) return { ok: false, why: `版本号 ${JSON.stringify(version)} 不是 x.y.z 形式` };
+  const parts = String(range).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { ok: false, why: '范围是空的' };
+  for (const p of parts) {
+    const m = /^(>=|<=|>|<|=)?(\d+\.\d+\.\d+)$/.exec(p);
+    if (!m) return { ok: false, why: `看不懂的范围片段 ${JSON.stringify(p)}` };
+    const c = cmpVer(v, parseVer(m[2]));
+    const op = m[1] || '=';
+    const ok = op === '>=' ? c >= 0 : op === '<=' ? c <= 0
+      : op === '>' ? c > 0 : op === '<' ? c < 0 : c === 0;
+    if (!ok) return { ok: false, why: `本客户端是 ${version}，不满足 ${range}` };
+  }
+  return { ok: true };
+}
+
+/** 本客户端的版本（`engines.slurmate` 拿它比）。读不到就跳过这项检查。 */
+function hostVersion() {
+  try {
+    return require('../../../package.json').version;   // client/package.json
+  } catch {
+    return null;
+  }
+}
+
+// ── 加载 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 内容摘要：清单 + 客户端代码。
+ *
+ * 这是「同一个构件」的判据。**不包含目录名**（目录名不参与判定）、不包含
+ * 站点签名（签名的内容正是这个摘要）。池里两条摘要相同的记录是同一个东西，
+ * 摘要不同就是两个东西在抢同一个 `(id, 版本)`。
+ */
+function digestOf(manifestRaw, clientRaw) {
+  const h = crypto.createHash('sha256');
+  h.update('manifest\0'); h.update(manifestRaw); h.update('\0');
+  h.update('client\0'); h.update(clientRaw === null ? '' : clientRaw);
+  return h.digest('hex');
+}
+
+function keysProblem(obj, allowed, what) {
+  const bad = Object.keys(obj).filter((k) => !allowed.includes(k));
+  return bad.length ? `${what}里有认不得的键：${bad.join('、')}（认识的只有 ${allowed.join('、')}）` : null;
+}
+
+/**
+ * 读一个插件目录。返回 `{ plugin }` 或 `{ error }`。
+ *
+ * ★ 每一步失败都**说清是哪个文件的哪个键**。这个函数的报错是"加了插件它就是不
+ *   生效"这个症状的**唯一**线索来源，含糊的报错等于没有报错。
+ */
+function loadDir(dir, source) {
+  const mfPath = path.join(dir, MANIFEST);
+  let raw;
+  try {
+    raw = fs.readFileSync(mfPath, 'utf8');
+  } catch (e) {
+    return { error: `读不到 ${mfPath}：${e.message}` };
+  }
+
+  let mf;
+  try {
+    mf = JSON.parse(raw);
+  } catch (e) {
+    return { error: `${mfPath} 不是合法的 JSON：${e.message}` };
+  }
+  if (!mf || typeof mf !== 'object' || Array.isArray(mf)) {
+    return { error: `${mfPath} 的顶层必须是一个对象` };
+  }
+
+  let why = keysProblem(mf, MANIFEST_KEYS, MANIFEST);
+  if (why) return { error: `${mfPath}：${why}` };
+
+  // id —— 铸造出来的全球唯一标识。见 ulid.js 的文件头。
+  if (!ulid.isId(mf.id)) {
+    return { error: `${mfPath}：id 必须是 26 个字符的 ULID（见 plugins/ulid.js），`
+      + `现在是 ${JSON.stringify(mf.id)}` };
+  }
+
+  // name —— 站点内用的短名。配置块名、会话里的 service_kind 都是它。
+  if (typeof mf.name !== 'string' || !NAME_RE.test(mf.name)) {
+    return { error: `${mfPath}：name 必须匹配 ${NAME_RE}（小写字母开头，`
+      + `只含小写字母/数字/连字符），现在是 ${JSON.stringify(mf.name)}` };
+  }
+  if (mf.name === UNKNOWN) {
+    return { error: `${mfPath}：name 不能是 ${UNKNOWN} —— 那是"认不出来"的保留值` };
+  }
+
+  if (typeof mf.displayName !== 'string' || !mf.displayName.trim()) {
+    return { error: `${mfPath}：displayName 必须是非空字符串` };
+  }
+  if (typeof mf.version !== 'string' || !VERSION_RE.test(mf.version)) {
+    return { error: `${mfPath}：version 必须是 x.y.z 形式，`
+      + `现在是 ${JSON.stringify(mf.version)}` };
+  }
+
+  for (const k of ['description', 'author']) {
+    if (mf[k] !== undefined && typeof mf[k] !== 'string') {
+      return { error: `${mfPath}：${k} 必须是字符串` };
+    }
+  }
+
+  // engines —— 装之前就判定，而不是装上之后在某个角落炸。
+  const host = hostVersion();
+  if (mf.engines !== undefined) {
+    if (!mf.engines || typeof mf.engines !== 'object' || Array.isArray(mf.engines)) {
+      return { error: `${mfPath}：engines 必须是一个对象，如 {"slurmate": ">=0.3.0"}` };
+    }
+    why = keysProblem(mf.engines, ['slurmate'], 'engines');
+    if (why) return { error: `${mfPath}：${why}` };
+    if (mf.engines.slurmate !== undefined && host) {
+      const r = satisfies(host, mf.engines.slurmate);
+      if (!r.ok) {
+        return { error: `${mfPath}：这个插件用不了 —— ${r.why}。`
+          + '引擎范围是插件自己声明的，升级客户端之后才能装它' };
+      }
+    }
+  }
+
+  // contributes —— 框架会读的、关于这个插件的一切声明。
+  const mfc = mf.contributes === undefined ? {} : mf.contributes;
+  if (!mfc || typeof mfc !== 'object' || Array.isArray(mfc)) {
+    return { error: `${mfPath}：contributes 必须是一个对象` };
+  }
+  why = keysProblem(mfc, CONTRIBUTES_KEYS, 'contributes');
+  if (why) return { error: `${mfPath}：${why}` };
+
+  let surface = null;
+  if (mfc.surface !== undefined && mfc.surface !== null) {
+    const s = mfc.surface;
+    if (!s || typeof s !== 'object' || Array.isArray(s)) {
+      return { error: `${mfPath}：contributes.surface 必须是一个对象` };
+    }
+    why = keysProblem(s, SURFACE_KEYS, 'contributes.surface');
+    if (why) return { error: `${mfPath}：${why}` };
+    if (!SURFACE_KINDS.includes(s.kind)) {
+      return { error: `${mfPath}：contributes.surface.kind 只能是 `
+        + `${SURFACE_KINDS.join('、')}，现在是 ${JSON.stringify(s.kind)}` };
+    }
+    const p = s.path === undefined ? '/' : s.path;
+    if (typeof p !== 'string' || !p.startsWith('/')) {
+      return { error: `${mfPath}：contributes.surface.path 必须以 / 开头，`
+        + `现在是 ${JSON.stringify(s.path)}` };
+    }
+    surface = { kind: s.kind, path: p };
+  }
+
+  for (const k of CONTRIBUTES_KEYS) {
+    if (k === 'surface') continue;
+    if (mfc[k] !== undefined && typeof mfc[k] !== 'boolean') {
+      return { error: `${mfPath}：contributes.${k} 必须是 true 或 false` };
+    }
+  }
+
+  // 客户端代码 —— 可有可无。没有它就是**纯声明式插件**：框架按 contributes
+  // 打开界面，不需要执行任何来自插件的代码。
+  const clientPath = path.join(dir, CLIENT_ENTRY);
+  let clientRaw = null;
+  let hooks = {};
+  let hasClientCode = false;
+  try {
+    clientRaw = fs.readFileSync(clientPath, 'utf8');
+    hasClientCode = true;
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      return { error: `读不到 ${clientPath}：${e.message}` };
+    }
+  }
+  if (hasClientCode) {
     let mod;
     try {
       // 每次都重新加载：注册表可能在同一次运行里被重建（测试会这么用），
       // 而 require 的缓存会让"删掉插件文件"在进程内看起来毫无效果。
-      delete require.cache[require.resolve(full)];
-      mod = require(full);
+      delete require.cache[require.resolve(clientPath)];
+      mod = require(clientPath);
     } catch (e) {
-      errors.push(`${file}：加载失败（${e.message}）—— 这一个已跳过，其余插件不受影响`);
-      continue;
+      return { error: `${clientPath}：加载失败（${e.message}）` };
     }
-
-    const missing = REQUIRED.filter(([k, ok]) => !mod || !ok(mod[k]))
-      .map(([k, , what]) => `${k}（${what}）`);
-    if (missing.length) {
-      errors.push(`${file}：缺少 ${missing.join('、')} —— 这一个已跳过，其余插件不受影响`);
-      continue;
+    if (!mod || typeof mod !== 'object' || Array.isArray(mod)) {
+      return { error: `${clientPath}：必须导出一个对象（可以一个钩子都不写）` };
     }
-    const stem = path.basename(file, '.js');
-    if (mod.name !== stem) {
-      errors.push(`${file}：导出的 name 是 ${JSON.stringify(mod.name)}，与文件名不一致。`
-        + '文件名才是它的身份（会话里的 service_kind 就是它），所以这一个已跳过');
-      continue;
+    why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
+    if (why) return { error: `${clientPath}：${why}` };
+    for (const k of ['prepare', 'attach', 'preferredPort']) {
+      if (mod[k] !== undefined && typeof mod[k] !== 'function') {
+        return { error: `${clientPath}：${k} 必须是一个函数` };
+      }
     }
-    if (mod.name === UNKNOWN) {
-      errors.push(`${file}：插件名不能是 ${UNKNOWN} —— 那是"认不出来"的保留值`);
-      continue;
+    if (mod.closeWarning !== undefined) {
+      const cw = mod.closeWarning;
+      if (!cw || typeof cw.message !== 'string' || typeof cw.detail !== 'string') {
+        return { error: `${clientPath}：closeWarning 必须是 {message, detail} 两个字符串` };
+      }
     }
-    plugins.set(mod.name, mod);
+    hooks = mod;
   }
-  return { plugins, errors };
+
+  const plugin = {
+    // ── 清单（身份与声明）──
+    id: mf.id,
+    name: mf.name,
+    displayName: mf.displayName,
+    version: mf.version,
+    description: mf.description || '',
+    author: mf.author || '',
+    contributes: {
+      surface,
+      layout: mfc.layout === true,
+      submitPubkey: mfc.submitPubkey === true,
+      legacyDefault: mfc.legacyDefault === true,
+    },
+    // ── 加载记录 ──
+    dir,
+    source,                                  // 'builtin' | 'pool'
+    hasClientCode,
+    digest: digestOf(raw, clientRaw).slice(0, 16),
+    // ── 客户端代码的钩子（全都可以没有）──
+    prepare: hooks.prepare || null,
+    attach: hooks.attach || null,
+    preferredPort: hooks.preferredPort || null,
+    closeWarning: hooks.closeWarning || null,
+  };
+  return { plugin };
+}
+
+/**
+ * 扫一个根目录下的**每个子目录**。
+ *
+ * 根目录不存在**不是错误** —— 池目录（`~/.slurmate/plugins/`）在用户装第一个
+ * 插件之前本来就不存在，为一个还没用上的功能天天报一条错是噪音。
+ */
+function loadRoot(root) {
+  const out = [];
+  // 根的路径**可以是函数**：客户端的池目录依赖「配置目录」，而那个要等 app ready
+  // 之后才知道 —— 在模块加载期就算出来的话，第一次运行会算出一个 null 路径。
+  const base = typeof root.dir === 'function' ? root.dir() : root.dir;
+  if (typeof base !== 'string' || !base) {
+    out.push({ error: `插件根目录 ${root.source} 的路径还没准备好` });
+    return out;
+  }
+  let names;
+  try {
+    names = fs.readdirSync(base);
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return out;
+    out.push({ error: `读不到插件目录 ${base}：${e.message}` });
+    return out;
+  }
+  for (const name of names.sort()) {
+    const dir = path.join(base, name);
+    let st;
+    try {
+      st = fs.statSync(dir);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;         // index.js、ulid.js 这些自己人
+    if (!fs.existsSync(path.join(dir, MANIFEST))) continue;   // 不是插件目录
+    const r = loadDir(dir, root.source);
+    out.push(r.error ? { error: `${name}：${r.error.replace(`${dir}：`, '')}` } : r.plugin);
+  }
+  return out;
 }
 
 class Registry {
-  constructor(dir) {
-    this.dir = dir || __dirname;
-    this.plugins = new Map();
+  /**
+   * @param {Array<{dir:string|Function, source:string}>} [roots]
+   *   省略 = 只用内建根（本目录）。测试会传别的。
+   *   `dir` 可以是函数 —— 池目录要等 app ready 之后才算得出来（见 loadRoot）。
+   */
+  constructor(roots) {
+    this.roots = (roots && roots.length ? roots : [{ dir: __dirname, source: 'builtin' }])
+      .filter((r) => r && (typeof r.dir === 'string' || typeof r.dir === 'function'));
+    this.plugins = new Map();      // `<id>@<版本>` → plugin
     this.errors = [];
     /** 每个插件**各自**的上次通知键。见 once()。 */
     this.notices = new Map();
@@ -110,64 +390,153 @@ class Registry {
   /**
    * 重新扫描。**构造时自动调用**，也可以在运行中调（测试用它模拟装/卸插件）。
    *
-   * 关键性质：重新扫描**不会**清掉 notices —— 去重状态跟着插件名走，不跟着
+   * 关键性质：重新扫描**不会**清掉 notices —— 去重状态跟着插件走，不跟着
    * 这一次的对象走。否则重新扫描会让用户把已经看过的通知再看一遍。
    */
   reload() {
-    const { plugins, errors } = loadFrom(this.dir);
+    const found = [];
+    const errors = [];
+    for (const root of this.roots) {
+      for (const item of loadRoot(root)) {
+        if (item.error) errors.push(item.error);
+        else found.push(item);
+      }
+    }
+
+    // ── 池：按 `(id, 版本)` 归并 ──
+    //
+    // 同键同摘要 = 同一个构件的多个来源 → 合并（只多记一个来源）。
+    // 同键不同摘要 = 两个不同的东西在抢同一个身份 → **两个都不加载**并报错。
+    //   绝不挑一个：挑错的后果是会话的解析键指过去、客户端静默地跑了另一个
+    //   插件的代码，而用户完全看不出来。宁可让这个插件暂时不可用 ——
+    //   那种失败是**看得见**的（会话变成"未知服务"，仍然接得上隧道、停得掉）。
+    const byKey = new Map();
+    for (const p of found) {
+      const key = `${p.id}@${p.version}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(p);
+    }
+
+    const plugins = new Map();
+    for (const [key, group] of [...byKey.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const digests = [...new Set(group.map((p) => p.digest))];
+      if (digests.length > 1) {
+        const where = group.map((p) => `${p.dir}（摘要 ${p.digest}）`).join('、');
+        errors.push(`${key}：有 ${group.length} 份内容不同的副本在抢同一个 id 和版本`
+          + ` —— 都没有加载。${where}。`
+          + '这多半是有人抄了别人的 id，或者改了插件却没升版本号。'
+          + '删掉多余的那一份，或者给改过的那份换一个新 id 再试。');
+        continue;
+      }
+      // 摘要一致 → 同一构件。保留第一个（roots 顺序：内建在前），记下全部来源。
+      const first = group[0];
+      plugins.set(key, {
+        ...first,
+        sources: [...new Set(group.map((p) => p.source))].sort(),
+      });
+    }
+
     this.plugins = plugins;
     this.errors = errors;
     return this;
   }
 
-  /** 全部插件，按名字排序（顺序稳定，界面与日志才不会每次都不一样）。 */
+  /**
+   * 全部插件，按短名再按版本排序（顺序稳定，界面与日志才不会每次都不一样）。
+   *
+   * ★ 同一个短名可能有多条（池里同一个插件的多个版本）。**不要**在这里替调用方
+   *   去重 —— 用户需要看到"我这儿有两个版本"，那正是他决定升级/回退的依据。
+   */
   list() {
-    return [...this.plugins.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return [...this.plugins.values()].sort((a, b) =>
+      a.name.localeCompare(b.name) || cmpVer(parseVer(a.version), parseVer(b.version)));
   }
 
-  get(name) {
-    return (typeof name === 'string' && this.plugins.get(name)) || null;
+  /** 按 `(id, 版本)` 取 —— 这是**会话解析**唯一该用的查法。 */
+  get(id, version) {
+    return (typeof id === 'string' && typeof version === 'string'
+      && this.plugins.get(`${id}@${version}`)) || null;
+  }
+
+  /** 按 `(id, 版本)` 取，取不到时返回一条能直接说给用户听的解释。 */
+  missing(id, version) {
+    const sameId = this.list().filter((p) => p.id === id);
+    if (!sameId.length) {
+      return `这个客户端里没有 ${id} 这个插件`;
+    }
+    return `这个客户端里只有 ${id} 的 `
+      + `${sameId.map((p) => p.version).join('、')} 版，而会话用的是 ${version} 版`;
   }
 
   /**
-   * 缺省插件：老守护进程不返回 `service_kind` 时兜到哪一个。
+   * 按**短名**取（同一个短名有多个版本时取版本最高的那个）。
+   *
+   * ★ 这**不是**一条会话解析路径 —— 解析永远走 `(id, 版本)`。它只有两个用处：
+   *   给界面画"当前版本"，以及老守护进程的兜底（见 resolve）。
+   */
+  latestByName(name) {
+    const hit = this.list().filter((p) => p.name === name);
+    return hit.length ? hit[hit.length - 1] : null;
+  }
+
+  /**
+   * 老守护进程不返回 `service_plugin` 时兜到哪一个。
    *
    * ★ 这是**正确的兜底，不是猜测**：老守护进程只可能产生 code-server 会话
-   *   （那时的作业模板只会起那一种）。所以按名字挑出被标了 `defaultFor` 的
-   *   那个插件，是还原一个已知事实，而不是在信息缺失时赌一把。
+   *   （那时的作业模板只会起那一种）。所以挑出被标了 `legacyDefault` 的那个
+   *   插件，是还原一个已知事实，而不是在信息缺失时赌一把。
    *
-   * 没人标 `defaultFor` 时返回 null —— 那时 route() 给 UNKNOWN，客户端只解释、
-   * 不动作。这比错误地兜到某一个插件安全得多。
+   * 没人标 `legacyDefault` 时返回 null —— 那时 resolve() 给 UNKNOWN，客户端只
+   * 解释、不动作。这比错误地兜到某一个插件安全得多。
    */
   defaultPlugin() {
-    return this.list().find((p) => p.defaultFor === true) || null;
+    const all = this.list().filter((p) => p.contributes.legacyDefault);
+    return all.length === 1 ? all[0] : null;
   }
 
   /**
-   * 把一个裸的 `service_kind` 归一成插件名。
+   * 把一个会话归一成插件。**四种输入，四种答案，一种都不能合并**：
    *
-   * 四种输入，四种答案，一种都不能合并：
+   *   service_plugin 是 `<id>@<版本>`   池里查得到   → 它
+   *                                     池里查不到   → UNKNOWN（并说清缺什么）
+   *   undefined（老守护进程，字段不存在）
+   *       + service_kind 也 undefined   → legacyDefault 那个插件
+   *       + service_kind 是短名          → 按短名找**内建**的（老守护进程只可能
+   *                                        产生内建插件的会话 —— 见 defaultPlugin）
+   *       + service_kind === null        → UNKNOWN，**绝不猜**
+   *   其余（含认不出的名字、坏掉的 `<id>@<版本>`）→ UNKNOWN，**不退回缺省**
    *
-   *   'code-server' / 'sshd' / …   表里认得        → 它自己
-   *   undefined                    字段**不存在**  → 缺省插件（老守护进程）
-   *   null                         守护进程明说不知道 → UNKNOWN，**绝不猜**
-   *   其余（含表里没见过的名字）                      → UNKNOWN，**不退回缺省**
+   * ★ 认不出的**不退回缺省**：那等于系统声称一件它并不知道的事。
    *
-   * ★ `undefined` 与 `null` 的分野是承重的，别合并：前者是"这个字段还不存在"
-   *   （版本旧），后者是"服务端明确告诉你它不知道"（会话是从 nft 规则恢复出来的）。
-   *   合并的后果是升级客户端之后，所有恢复出来的会话都被当成 code-server，
-   *   于是客户端拿口令去 POST 一个可能是 SSH 的端口。
+   * ★ `null` 与 `undefined` 的分野是承重的，别合并：前者是"服务端明确告诉你它
+   *   不知道"（会话是从 nft 规则恢复出来的），后者是"这个字段还不存在"（版本旧）。
    *
-   * ★ 认不出的名字**不退回缺省**：那等于系统声称一件它并不知道的事。
+   * @returns {{plugin: object|null, why: string|null}}
+   *   `why` 只在"明确要某个插件而它不在"时非空 —— 那是一句能直接说给用户听的话。
    */
-  route(raw) {
-    if (raw === undefined) {
-      const d = this.defaultPlugin();
-      return d ? d.name : UNKNOWN;
+  resolve(serviceKind, servicePlugin) {
+    if (typeof servicePlugin === 'string' && servicePlugin) {
+      const at = servicePlugin.lastIndexOf('@');
+      const id = at > 0 ? servicePlugin.slice(0, at) : '';
+      const version = at > 0 ? servicePlugin.slice(at + 1) : '';
+      if (ulid.isId(id) && VERSION_RE.test(version)) {
+        const p = this.get(id, version);
+        return p ? { plugin: p, why: null } : { plugin: null, why: this.missing(id, version) };
+      }
+      return { plugin: null, why: `控制节点给的插件标识 ${JSON.stringify(servicePlugin)} 认不出来` };
     }
-    if (raw === null) return UNKNOWN;
-    const p = this.get(raw);
-    return p ? p.name : UNKNOWN;
+
+    if (serviceKind === null) return { plugin: null, why: null };
+
+    if (serviceKind === undefined) {
+      const d = this.defaultPlugin();
+      return { plugin: d, why: null };
+    }
+
+    // 老守护进程：只有短名。按短名找**内建**的那个 —— 站点分发的插件不可能来自
+    // 一个不认识 service_plugin 字段的守护进程（那个字段和池是同一批加的）。
+    const p = this.list().find((x) => x.name === serviceKind && x.source === 'builtin');
+    return { plugin: p || null, why: p ? null : null };
   }
 
   /**
@@ -180,12 +549,29 @@ class Registry {
    *
    * ★ 它由框架提供而不是各插件自己实现：这是**框架级的关心**（别烦用户），
    *   而且键必须按插件分桶 —— 两个插件各有各的"上次值"，共用一个槽会互相冲掉。
+   *
+   * @param {string} bucket 分桶用的插件标识（见 bucketOf）
+   * @param {string} key    插件自己的"上次值"
    */
-  once(name, key) {
-    if (this.notices.get(name) === key) return false;
-    this.notices.set(name, key);
+  once(bucket, key) {
+    const k = `${bucket}|${key}`;
+    if (this.notices.has(k)) return false;
+    this.notices.set(k, true);
     return true;
   }
 }
 
-module.exports = { Registry, UNKNOWN, loadFrom };
+/**
+ * 去重桶的名字。
+ *
+ * ★ 带上**版本**，不是只用 id：池里可以并存同一个插件的多个版本，而"这个版本的
+ *   插件已经说过这句话了"与"那个版本说过了"是两件事 —— 共用一桶会让刚装上的
+ *   新版本一句话都说不出来（它的首次通知被旧版本压掉了）。
+ */
+function bucketOf(plugin) {
+  return `${plugin.id}@${plugin.version}`;
+}
+
+module.exports = {
+  Registry, UNKNOWN, bucketOf, loadDir, satisfies, cmpVer, parseVer, hostVersion,
+};

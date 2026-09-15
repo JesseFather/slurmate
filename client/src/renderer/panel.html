@@ -139,35 +139,52 @@
       </div>
     </section>
 
-    <!-- ── 开始开发（默认零配置，高级选项折叠在下面）── -->
+    <!-- ── 开始会话（每个插件一块，高级选项折叠在下面）── -->
     <section id="sec-purpose" class="hidden">
-      <h2>开始开发</h2>
-      <p class="sub">
-        默认 <strong>2 核 / 8G</strong>，分区由集群从你有权限的分区里随机挑一个。
-        节点和端口都自动分配，不用自己拟。会话到期前会自动续期。
+      <h2>开始会话</h2>
+      <p class="sub" id="purpose-hint">
+        分区由集群从你有权限的分区里随机挑一个，节点和端口都自动分配。
+        会话到期前会自动续期。<strong>默认资源按插件不同</strong>，见每一块里那行。
       </p>
+
+      <!--
+        每个插件一块，由 pluginsView() 画出来。这里**一个插件名都不写** ——
+        站点装了哪些、本机认得哪些，都是运行期知道的（见 panel.js 的 renderPlugins）。
+        写死一个按钮的话，「卸载一个插件」在界面上就变成了"那个按钮点了报错"。
+      -->
+      <div id="plugin-blocks"></div>
+
+      <!--
+        插件池里的问题：同一个 (id, 版本) 撞了、清单坏了、引擎不兼容。
+        它们都被**跳过**了（客户端照常工作），但必须说出来 ——
+        不说的话，症状只是"加了插件它就是不生效"，而用户没有任何线索。
+      -->
+      <div id="plugin-issues"></div>
 
       <details id="adv">
         <summary>高级选项</summary>
         <div class="row">
+          <!--
+            占位符**不写具体数字**：默认资源现在按插件不同（跑 IDE 和跑中转站不是
+            一回事），写一个数字就是在替另一个插件说话。真实默认值在每一块里那行。
+          -->
           <div><label for="f-cpus">CPU 核数</label>
-               <input type="number" id="f-cpus" min="1" max="64" placeholder="默认 2"></div>
+               <input type="number" id="f-cpus" min="1" max="64" placeholder="留空 = 默认"></div>
           <div><label for="f-mem">内存</label>
-               <input type="text" id="f-mem" class="narrow" placeholder="默认 8G" spellcheck="false"></div>
+               <input type="text" id="f-mem" class="narrow" placeholder="留空 = 默认" spellcheck="false"></div>
           <div><label for="f-gpus">GPU 数</label>
                <input type="number" id="f-gpus" min="0" max="8" placeholder="默认 0"></div>
           <div class="grow"><label for="f-part">分区</label>
                <select id="f-part" class="full"><option value="">（随机挑一个有权限的）</option></select></div>
         </div>
         <p class="sub adv-note">
-          <strong>留空就用服务端的默认值。</strong>
+          <strong>留空就用服务端的默认值</strong>（每个插件各有一份，见上面每一块里那行）。
           这些设置不会被记住 —— 关掉窗口或下次连接后即恢复默认。
           唯一的例外是作业没结束时的闪断重连，那时会沿用它。
         </p>
       </details>
 
       <div class="row row-spaced">
-        <button id="btn-start">开始开发</button>
         <button id="btn-doctor" class="ghost">体检集群</button>
       </div>
     </section>

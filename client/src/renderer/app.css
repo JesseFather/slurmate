@@ -202,6 +202,51 @@ p.alarm {
   padding: 9px 12px; margin: 0 0 12px;
 }
 
+/* ── 插件块 ──
+   一个插件一块。块里那几行分别回答四个不同的问题，所以视觉上也要分得开：
+   这是**哪个**插件（名字 + id + 版本）、站点**开没开**、本机**要不要**、
+   以及起得来起不来。把它们糊成一行，用户就分不清"按钮灰着"该找谁。 */
+.plug {
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-alt);
+  padding: 12px 14px; margin: 0 0 10px;
+}
+/* 起不来的那一块用**虚线边框**标记，而不是整体调暗 —— 整块 opacity 会把里面那个
+   本机开关一起调暗，而那个开关恰恰是用户此刻唯一能动的东西（"站点没开"那种情况
+   除外，但那时它也是"下一个动作"的入口）。 */
+.plug-off { border-style: dashed; }
+.plug-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.plug-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.plug-id, .plug-ver {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  color: var(--fg-dim);
+}
+.plug-ver { border: 1px solid var(--border); border-radius: 3px; padding: 0 5px; }
+.plug-desc { color: var(--fg-dim); font-size: 12px; margin: 6px 0 8px; }
+.plug-meta {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+  font-size: 12px; margin-bottom: 10px;
+}
+.plug-meta .k { color: var(--fg-dim); }
+.plug-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer;
+               user-select: none; }
+.plug-toggle input { margin: 0; cursor: pointer; }
+.plug .why { font-size: 12px; color: var(--warn); margin: 0 0 10px; }
+
+/* 插件池的问题（撞车 / 坏清单 / 引擎不兼容）与「站点有而本机没有」。
+   前者是**错误**（那个插件没被加载），后者是**提示**（该升级客户端了）——
+   两者都会让用户少一个按钮，但要做的事完全不同，所以颜色也分开。 */
+.issues { margin: 0 0 14px; }
+.issue {
+  border-left: 3px solid var(--border); border-radius: 0 3px 3px 0;
+  background: var(--bg-alt);
+  padding: 7px 11px; margin: 0 0 6px; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.issue.err { border-left-color: var(--err); }
+.issue.warn { border-left-color: var(--warn); }
+.issue .h { color: var(--fg); font-weight: 600; }
+
 /* ── 主机密钥确认框 ── */
 dialog {
   color: var(--fg); background: var(--bg-alt);

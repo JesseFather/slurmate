@@ -28,7 +28,7 @@ import socket
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 
 EXIT_OK = 0
@@ -284,17 +284,22 @@ def cmd_plugins(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    print("%-14s %-8s %-14s %s" % ("插件", "状态", "缺省资源", "说明"))
-    print("-" * 64)
+    print("%-14s %-8s %-9s %-14s %s"
+          % ("插件", "状态", "版本", "缺省资源", "说明"))
+    print("-" * 78)
     for p in d["plugins"]:
         df = p.get("defaults") or {}
-        print("%-14s %-8s %-14s %s"
+        print("%-14s %-8s %-9s %-14s %s"
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
+                 p.get("version") or "?",
                  "%s 核 / %s" % (df.get("cpus"), df.get("mem")),
                  "" if p.get("builtin") else "站点分发"))
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
     print("缺省资源由服务端定并在提交时钳制 —— 客户端不填这些值。")
+    print()
+    print("id 是这个插件的全球唯一标识（铸造出来、永不改变），客户端靠它 + 版本")
+    print("在自己的插件池里找配套的那一半。名字只是本站的短名，日志和配置块用它。")
     return 0
 
 

@@ -64,7 +64,15 @@ contextBridge.exposeInMainWorld('slurmate', {
   // resources 是高级选项里的**临时**覆盖：{cpus, mem, gpus, partition}。
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
-  start: (resources) => ipcRenderer.invoke('app:start', resources),
+  // serviceKind 是**本站的短名**（配置块名、块标题旁边那个 code）。省略 = 缺省
+  // 插件 —— 与这个参数存在之前的行为一致。客户端再按短名找到本机对应的那一份，
+  // 把它的 `<id>@<版本>` 作为解析键交给服务端。
+  start: (resources, serviceKind) =>
+    ipcRenderer.invoke('app:start', resources, serviceKind),
+  // 本机要不要某个插件。**按 id**（不是短名）：池是全局的，两个站点可以各有一个
+  // 叫 jupyter 的插件而它们是两个不同的东西。不影响服务端。
+  setPluginEnabled: (id, enabled) =>
+    ipcRenderer.invoke('app:setPluginEnabled', id, enabled),
   state: () => ipcRenderer.invoke('app:state'),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
   // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。

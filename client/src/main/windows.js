@@ -7,9 +7,9 @@
  *   ┌──────────────────────────────────────────┐
  *   │  BrowserWindow 自己的 webContents         │  ← 面板：状态条 + 设置/排队/重连/已结束
  *   │  ├── 顶部状态条（30px）                    │
- *   │  └── 下方留空，由 code-server 视图覆盖      │
+ *   │  └── 下方留空，由**界面**覆盖               │
  *   ├──────────────────────────────────────────┤
- *   │  WebContentsView（懒创建）                 │  ← code-server 页面
+ *   │  WebContentsView（懒创建）                 │  ← 插件声明的那块界面
  *   └──────────────────────────────────────────┘
  *
  * 为什么不把状态条也做成独立的 WebContentsView（即 BaseWindow + 2 views）：
@@ -17,9 +17,19 @@
  * close 的 webContents，就少一处泄漏面。何况状态条与面板本来就是同一个页面的两块 DOM，
  * 不需要在两个 renderer 之间走 IPC。
  *
- * ── 隧道未就绪时不需要「不污染 code-server 页面」的技巧 ─────────────────────
- * 因为那个页面**根本还没被创建**。未就绪期间窗口里只有面板自己。code-server 视图
- * 在拿到 tunnel_target 之后才懒创建 —— 提前建会白养一个 renderer 进程，还可能闪一下
+ * ── ★ 这个文件里没有 IDE，也没有任何插件名 ─────────────────────────────────
+ *
+ * 它只知道一件事：**有一块原生视图盖在面板上，它加载某个 URL，它属于某个存储分区**。
+ * URL 后面是 VS Code、是 Jupyter、还是别的什么，这里一概不知道 —— 那是插件在
+ * `plugin.json` 的 `contributes.surface` 里声明的，由 index.js 读出来之后调
+ * `showSurface({url, partition})`。
+ *
+ * 这条边界不是洁癖：它让"换一个插件"不需要动这个文件一个字，也让一个**没有客户端
+ * 代码**的声明式插件照样能开界面（开界面本来就不需要代码，只需要一句声明）。
+ *
+ * ── 隧道未就绪时不需要「不污染界面」的技巧 ─────────────────────────────────
+ * 因为那块视图**根本还没被创建**。未就绪期间窗口里只有面板自己。视图在拿到
+ * tunnel_target 之后才懒创建 —— 提前建会白养一个 renderer 进程，还可能闪一下
  * about:blank。
  *
  * ── 清理必须写死 ───────────────────────────────────────────────────────────
@@ -28,15 +38,30 @@
  * 所以顺序必须是：removeChildView → webContents.close() → 引用置 null，
  * 且每一步都要 isDestroyed() 兜底。
  *
- * ── 绝不往 code-server 页面里注入 DOM ──────────────────────────────────────
- * `executeJavaScript` 塞 DOM 会在下一次 code-server 升级后碎掉，还会污染 VS Code
- * 的 webview 状态。遮罩是独立的 webContents，物理隔离 —— 这是唯一正确的做法。
+ * ── 绝不往视图里注入 DOM ───────────────────────────────────────────────────
+ * `executeJavaScript` 塞 DOM 会在那款软件下一次升级后碎掉，还会污染它自己的
+ * webview 状态。遮罩是独立的 webContents，物理隔离 —— 这是唯一正确的做法。
  */
 
 const path = require('path');
 const { BrowserWindow, WebContentsView, dialog, shell } = require('electron');
 
 const STATUS_BAR_HEIGHT = 30;
+
+/**
+ * 从一个 URL 里取出 origin（`http://127.0.0.1:18080`）。取不出来返回 null。
+ *
+ * 只用于那条"点外链不能把界面顶掉"的导航锁 —— 判据是"这个新 URL 还在不在同一个
+ * 隧道端口上"。隧道换端口时这个值会跟着变，所以它每次都由 `showSurface` 重算，
+ * 而不是插件给的常量。
+ */
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 没有插件信息时关窗确认的文案。
@@ -84,11 +109,11 @@ class ShellWindow {
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'panel.html'));
     this.win.once('ready-to-show', () => this.win.show());
 
-    this.codeView = null;
+    this.surfaceView = null;
     this.overlayView = null;
     this._origin = null;
-    this._partition = null;        // 见 codePartition getter
-    this._destroyingCodeView = false;   // 见 _destroyCodeView / render-process-gone
+    this._partition = null;        // 见 surfacePartition getter
+    this._destroyingSurface = false;   // 见 _destroySurface / render-process-gone
     this._closing = false;
     this._closeConfirmed = false;
     this._sessionLive = false;     // 由 pushState 更新
@@ -110,50 +135,56 @@ class ShellWindow {
     });
   }
 
-  // ── code-server 视图 ────────────────────────────────────────────────────
+  // ── 界面（插件声明的那块原生视图）───────────────────────────────────────
   /**
-   * 显式加载 code-server 页面。
-   * @param {string} origin  形如 http://127.0.0.1:18080（**字面 127.0.0.1**）
+   * 把插件声明的那块界面显示出来。
+   *
+   * @param {string} url       完整 URL，形如 http://127.0.0.1:18080/lab
+   *                           （主机部分**字面 127.0.0.1**，隧道在这一头）
    * @param {string} partition 形如 'persist:layout-<布局组 id>'
-   * @param {boolean} demo    true 时注入 demo.js preload 用于快捷键对照。
-   *                          **真实模式绝不注入任何 preload** —— 那会污染 IDE。
+   * @param {boolean} demo     true 时注入 demo.js preload 用于快捷键对照。
+   *                           **真实模式绝不注入任何 preload** —— 那会污染那款软件。
+   *
+   * ★ 这里**只看 url 和 partition**，不看是谁。`origin` 这个字眼在本文件里已经
+   *   没有意义：URL 的路径部分由插件声明（`contributes.surface.path`），所以
+   *   "同一个隧道端口、不同路径"也是合法的。
    */
-  async showCodeServer(origin, partition, demo = false) {
+  async showSurface({ url, partition, demo = false }) {
     // ★ WebContentsView 的 partition **只在构造时读一次**（就是下面那个 new）。
     //   所以「换布局组」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
     //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
     //   而界面上完全看不出区别。
-    if (this.codeView && this._partition !== partition) this._destroyCodeView();
+    if (this.surfaceView && this._partition !== partition) this._destroySurface();
 
-    this._origin = origin;
+    this._origin = originOf(url);
     this._partition = partition;
-    if (!this.codeView) {
-      this.codeView = new WebContentsView({
+    if (!this.surfaceView) {
+      this.surfaceView = new WebContentsView({
         webPreferences: {
           partition,
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
-          // IDE 是最不该被 Chromium 节流的页面：后台标签页限速会让终端和
+          // 这类页面是最不该被 Chromium 节流的：后台标签页限速会让终端和
           // 语言服务器看起来「卡住」，而且没有任何报错。
           backgroundThrottling: false,
           ...(demo ? { preload: path.join(__dirname, '..', 'preload', 'demo.js') } : {}),
         },
       });
-      this.win.contentView.addChildView(this.codeView);
+      this.win.contentView.addChildView(this.surfaceView);
       // 「只装一次」是针对**同一个 webContents 对象**说的：origin 由 this._origin
       // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是**新对象**，
       // 必须重新装一遍 —— 否则新视图的 will-navigate 不设防、崩溃也不报错。
-      this._wireCodeView(this.codeView.webContents);
-      await this.codeView.webContents.loadURL(origin + '/');
-    } else if (this.codeView.webContents.getURL().split('/').slice(0, 3).join('/') !== origin) {
-      await this.codeView.webContents.loadURL(origin + '/');
+      this._wireSurface(this.surfaceView.webContents);
+      await this.surfaceView.webContents.loadURL(url);
+    } else if (this.surfaceView.webContents.getURL() !== url) {
+      await this.surfaceView.webContents.loadURL(url);
     }
     this._layout();
   }
 
-  _wireCodeView(wc) {
-    // 锁死导航：点外链不能把整个 IDE 界面顶掉（而窗口里没有后退按钮）。
+  _wireSurface(wc) {
+    // 锁死导航：点外链不能把整个界面顶掉（而窗口里没有后退按钮）。
     // 用 this._origin 而不是捕获参数 —— 隧道换端口后 origin 会变。
     wc.setWindowOpenHandler(({ url }) => {
       if (/^https?:/.test(url)) shell.openExternal(url);
@@ -165,98 +196,98 @@ class ShellWindow {
         if (/^https?:/.test(url)) shell.openExternal(url);
       }
     });
-    // IDE 是最容易 OOM 的页面。挂了要能提示并重载，而不是留一块白。
+    // 这类页面最容易 OOM。挂了要能提示并重载，而不是留一块白。
     wc.on('render-process-gone', (_e, details) => {
       // ★ 我们自己拆视图（换布局组）也会走到这里。不区分的话，用户每切一次布局
-      //   就会看到一条「code-server 页面崩溃了」的**假警报** —— 系统报告了一件
-      //   没发生的事，正是这个项目一路在清的那类。
-      if (this._destroyingCodeView) return;
+      //   就会看到一条「页面崩溃了」的**假警报** —— 系统报告了一件没发生的事，
+      //   正是这个项目一路在清的那类。
+      if (this._destroyingSurface) return;
       this.onAction('renderer-gone', { reason: details && details.reason });
     });
   }
 
   /**
-   * 销毁 code-server 视图。**换布局组时必须走这条** —— partition 是构造期属性，
-   * 不重建就换不了存储分区。
+   * 销毁视图。**换布局组时必须走这条** —— partition 是构造期属性，不重建就换不了
+   * 存储分区。
    *
    * 顺序照文件头那条写死：removeChildView → webContents.close() → 引用置 null，
    * 每一步 isDestroyed() 兜底。`removeChildView()` 自己不销毁 webContents。
    */
-  _destroyCodeView() {
-    const v = this.codeView;
+  _destroySurface() {
+    const v = this.surfaceView;
     if (!v) return;
-    // 立旗子：这是我们自己要拆的，不是页面崩了（见 _wireCodeView）
-    this._destroyingCodeView = true;
+    // 立旗子：这是我们自己要拆的，不是页面崩了（见 _wireSurface）
+    this._destroyingSurface = true;
     try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
     try {
       if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
     } catch { /* 同上 */ }
-    this.codeView = null;
+    this.surfaceView = null;
     this._partition = null;
-    this._destroyingCodeView = false;
+    this._destroyingSurface = false;
   }
 
-  /** 取当前 code-server 页面用的 session（登录要在同一个分区里发请求）。 */
-  get codeSession() {
-    return this.codeView ? this.codeView.webContents.session : null;
+  /** 取当前界面用的 session（要在同一个分区里发请求才能带上它的 cookie）。 */
+  get surfaceSession() {
+    return this.surfaceView ? this.surfaceView.webContents.session : null;
   }
 
   /**
-   * 当前 code-server 页面跑在哪个存储分区里。
+   * 当前界面跑在哪个存储分区里。
    *
    * 回收一个布局组时要清它的浏览器存储 —— 而那**绝不能**发生在正被这个视图用着的
-   * 那个分区上，否则用户当前的 IDE 会连 cookie 带 localStorage 一起被抽掉，
+   * 那个分区上，否则用户当前的界面会连 cookie 带 localStorage 一起被抽掉，
    * 症状只是「页面莫名其妙坏了」。
    */
-  get codePartition() {
+  get surfacePartition() {
     return this._partition;
   }
 
-  /** 当前 code-server 页面加载的 origin（隧道换端口后它会变）。 */
-  get codeOrigin() {
+  /** 当前界面加载的 origin（隧道换端口后它会变）。 */
+  get surfaceOrigin() {
     return this._origin;
   }
 
-  hasCodeView() { return Boolean(this.codeView); }
+  hasSurface() { return Boolean(this.surfaceView); }
 
   /**
-   * 收起 code-server 视图，把窗口主体还给面板。
+   * 收起界面，把窗口主体还给面板。
    *
    * ★ 两处必须调用，缺一个都会留下同一类症状：**用户看着一个打不开的页面，
-   *   而唯一能救他的按钮被那块页面盖住了**（codeView 是原生层，覆在面板上方，
+   *   而唯一能救他的按钮被那块页面盖住了**（surfaceView 是原生层，覆在面板上方，
    *   面板那 30px 状态条以下的部分全在它底下）。
    *
    *   1. 会话结束时（ended / error）。那个页面背后的服务器已经没了 —— 隧道停了、
    *      作业也快没了 —— 留着它只有坏处。此前**没有任何地方**调用这个收尾，
    *      于是「结束会话」之后用户看到的是一张加载不出来的网页，出路只剩重启客户端。
-   *   2. 起中转站会话时。中转站压根不用这个视图（它什么都不显示，只在面板上
-   *      告诉你 ssh 怎么连），上一个会话留下的视图必须让开。
+   *   2. 起一个**不声明 surface** 的会话时（比如中转站）。上一个会话留下的视图
+   *      必须让开，否则它盖在面板上，而新会话根本不需要它。
    *
    * 是**销毁**而不是 setVisible(false)：唤醒一个已经死掉的页面没有意义，而且
-   * ensureCodeServer 是按 (origin, partition) 判定要不要重建的，一个被藏起来的
+   * ensureSurface 是按 (url, partition) 判定要不要重建的，一个被藏起来的
    * 旧页面会正好命中「没变」而永远不再加载。销毁之后下次一定是干净的新页面。
    */
-  hideCodeView() {
-    if (!this.codeView) return;
-    this._destroyCodeView();
+  hideSurface() {
+    if (!this.surfaceView) return;
+    this._destroySurface();
     this.hideOverlay();
     this._layout();
   }
 
-  async reloadCodeServer() {
-    if (this.codeView && !this.codeView.webContents.isDestroyed()) {
-      this.codeView.webContents.reload();
+  async reloadSurface() {
+    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
+      this.surfaceView.webContents.reload();
     }
   }
 
   /**
-   * 重新加载到新的 origin（隧道换了端口时用）。
+   * 重新加载到新的 URL（隧道换了端口时用）。
    */
-  async retarget(origin) {
-    if (!this.codeView || this.codeView.webContents.isDestroyed()) return;
-    // 只更新 this._origin —— 监听器已经装过了，不重复装（见 _wireCodeView 的注释）
-    this._origin = origin;
-    await this.codeView.webContents.loadURL(origin + '/');
+  async retarget(url) {
+    if (!this.surfaceView || this.surfaceView.webContents.isDestroyed()) return;
+    // 只更新 this._origin —— 监听器已经装过了，不重复装（见 _wireSurface 的注释）
+    this._origin = originOf(url);
+    await this.surfaceView.webContents.loadURL(url);
   }
 
   // ── 遮罩（断线提示）────────────────────────────────────────────────────
@@ -287,10 +318,10 @@ class ShellWindow {
   hideOverlay() {
     this._overlayText = null;
     if (this.overlayView) this.overlayView.setVisible(false);
-    // ★ 移除遮罩后必须把焦点还给 code-server 视图，否则用户打字没反应 ——
+    // ★ 移除遮罩后必须把焦点还给界面那块视图，否则用户打字没反应 ——
     //   又一个「看起来正常但就是不工作」的静默失败。
-    if (this.codeView && !this.codeView.webContents.isDestroyed()) {
-      this.codeView.webContents.focus();
+    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
+      this.surfaceView.webContents.focus();
     }
     this._layout();
   }
@@ -310,8 +341,8 @@ class ShellWindow {
     const top = STATUS_BAR_HEIGHT;
     const body = Math.max(0, h - top);
     // 用 setBounds 而不是靠 CSS —— WebContentsView 是原生层，不参与页面布局
-    if (this.codeView && !this.codeView.webContents.isDestroyed()) {
-      this.codeView.setBounds({ x: 0, y: top, width: w, height: body });
+    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
+      this.surfaceView.setBounds({ x: 0, y: top, width: w, height: body });
     }
     if (this.overlayView && !this.overlayView.webContents.isDestroyed()) {
       this.overlayView.setBounds({ x: 0, y: top, width: w, height: body });
@@ -340,15 +371,15 @@ class ShellWindow {
     if (wc.isDestroyed()) return;
     wc.send('session:state', snap);
     // ★ 这里曾经有一条「origin 变了就 loadURL」的自动 retarget。删掉了：
-    //   它是第二条改 origin 的通路，而且只会 loadURL —— **不换 partition、
+    //   它是第二条改 URL 的通路，而且只会 loadURL —— **不换 partition、
     //   也不重跑登录**。换布局组要的恰恰是前者，于是两条路必然分叉。
-    //   现在统一由 index.js 的 ensureCodeServer 判定（它同时看 origin 和 partition）。
+    //   现在统一由 index.js 的 ensureSurface 判定（它同时看 url 和 partition）。
   }
 
   /** 把被外壳吞掉的按键推给演示页（仅演示模式用，用于对照）。 */
   pushSwallowed(desc) {
-    if (!this.codeView || this.codeView.webContents.isDestroyed()) return;
-    this.codeView.webContents.send('demo:swallowed', desc);
+    if (!this.surfaceView || this.surfaceView.webContents.isDestroyed()) return;
+    this.surfaceView.webContents.send('demo:swallowed', desc);
   }
 
   pushNotice(kind, text) {
@@ -388,7 +419,7 @@ class ShellWindow {
         return;
       }
       // 不同插件被掐断的东西不一样，所以话也得不一样：中转站那边窗口里什么都
-      // 没有，用户真正在用的东西在他的终端里、在 codex 里，照搬 code-server 那句
+      // 没有，用户真正在用的东西在他的终端里、在 codex 里。照搬浏览器里那句
       // 「编辑器里没保存的改动会丢失」指的是另一回事 —— 而这一下点错，断掉的是
       // 他正在跑的编译或对话。
       //
@@ -427,8 +458,8 @@ class ShellWindow {
   }
 
   _destroyViews() {
-    // codeView 走它自己那条（还要清 _partition、立 _destroyingCodeView 旗子）
-    this._destroyCodeView();
+    // surfaceView 走它自己那条（还要清 _partition、立 _destroyingSurface 旗子）
+    this._destroySurface();
     // overlayView 与 partition 无关，照旧走通用清理
     const v = this.overlayView;
     if (!v) return;

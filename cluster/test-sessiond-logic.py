@@ -1123,6 +1123,88 @@ exit 0
     check("★ 不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
           all("name" in p and "title" in p for p in _by.values()))
 
+    # 19.5d ★★ 身份是「铸造」出来的，而且**跨语言必须逐字一致** ─────────────
+    #
+    # 守护进程是 Python、客户端是 JS，两边各自写死了同一对 id。两处写死是不可
+    # 避免的（它们必须能独立启动），所以靠**这一条用例**钉住，而不是靠"记得改"。
+    #
+    # 对不上的后果不是崩溃，而是**静默接错**：会话记的 `<id>@<版本>` 在客户端的
+    # 插件池里查不到，于是界面只解释、不动作 —— 用户看到的是"作业起来了但界面
+    # 一片白"，而根因（守护进程和客户端的清单漂了）一个字都不在里面。
+    _plugdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "client", "src", "main", "plugins")
+    _manifests = {}
+    if os.path.isdir(_plugdir):
+        for _name in sorted(os.listdir(_plugdir)):
+            _mf = os.path.join(_plugdir, _name, "plugin.json")
+            if os.path.isfile(_mf):
+                with open(_mf, encoding="utf-8") as _f:
+                    _manifests[_name] = json.load(_f)
+    check("找得到客户端的内建插件清单（找不到的话下面几条是空断言）",
+          len(_manifests) >= 2, str(sorted(_manifests)))
+
+    for _spec in mod.BUILTIN_PLUGINS:
+        _mf = _manifests.get(_spec.name)
+        check("内建插件 %s：两边都有" % _spec.name, _mf is not None,
+              str(sorted(_manifests)))
+        if _mf is None:
+            continue
+        check("★ %s 的 id 与客户端逐字一致" % _spec.name,
+              _mf.get("id") == _spec.id,
+              "守护进程 %s / 客户端 %s" % (_spec.id, _mf.get("id")))
+        check("★ %s 的版本与客户端一致" % _spec.name,
+              _mf.get("version") == _spec.version,
+              "守护进程 %s / 客户端 %s" % (_spec.version, _mf.get("version")))
+        check("%s 的短名与客户端一致" % _spec.name,
+              _mf.get("name") == _spec.name,
+              "守护进程 %s / 客户端 %s" % (_spec.name, _mf.get("name")))
+        check("★ %s 的 id 是 26 字符的 ULID（不是随手编的名字）"
+              % _spec.name,
+              isinstance(_spec.id, str) and len(_spec.id) == 26
+              and all(c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+                      for c in _spec.id),
+              repr(_spec.id))
+        check("%s 的 id 互不相同（两个插件抢一个 id 会静默取错）" % _spec.name,
+              len({q.id for q in mod.BUILTIN_PLUGINS}) == len(mod.BUILTIN_PLUGINS))
+
+    check("op_plugins 报出 id 与版本（客户端的解析键）",
+          all(isinstance(p.get("id"), str) and len(p.get("id")) == 26
+              and isinstance(p.get("version"), str) for p in _by.values()),
+          str({k: (v.get("id"), v.get("version")) for k, v in _by.items()}))
+
+    # 19.5e ★ 会话把 `<id>@<版本>` **记下来**，而不是每次现算 ──────────────
+    #
+    # 这一条是整个解析键设计存在的理由。站点一升级插件，已经跑着的作业用的仍是
+    # 旧的那一版代码（作业侧与客户端侧是配套的两半）。如果服务端在读取会话时按
+    # "站点当前清单"现算，客户端就会把**新版本**的客户端代码接到**旧版本**的作业
+    # 实现上 —— 而站点更新频繁正是这个项目要支持的现实。
+    _cs_spec = mod.PLUGIN_BY_NAME[mod.SVC_CODE_SERVER]
+    _old_ver = _cs_spec.version
+    _before = None
+    try:
+        r, sess, _e = run_submit({"op": "submit"})
+        check("提交后会话视图里带解析键",
+              sess.get("service_plugin") == "%s@%s" % (_cs_spec.id, _old_ver),
+              repr(sess.get("service_plugin")))
+        _before = sess["service_plugin"]
+        _sid = sess["session_id"]
+        # run_submit 用完就把它的库关掉了（每个用例一个临时库），所以这里重开一个
+        # 只读的连接 —— 要验的正是"**从库里读出来的**那一行不随升级而变"。
+        _st2 = mod.Store(os.path.join(tmpdir, "submit-%d.db" % seq[0]))
+        # 站点"升级"了这个插件
+        _cs_spec.version = "9.9.9"
+        _now = d.session_view(_st2.get(_sid), with_secret=False)
+        check("★★ 站点升级插件之后，已跑的会话仍然报**它起时那一版**",
+              _now.get("service_plugin") == _before,
+              "起时 %r，升级后报 %r（现算的话这一条会红）"
+              % (_before, _now.get("service_plugin")))
+        check("短名不变（它只是站点内的名字，与版本无关）",
+              _now.get("service_kind") == mod.SVC_CODE_SERVER,
+              repr(_now.get("service_kind")))
+        _st2.close()
+    finally:
+        _cs_spec.version = _old_ver
+
     # op_partitions 不再带全局 defaults —— 留一个在那里就是两份真相
     _presp = d.dispatch(os.getuid(), os.getgid(), {"op": "partitions"})
     check("★ op_partitions 不再返回全局 defaults（默认资源已经按插件走）",
@@ -1185,6 +1267,12 @@ exit 0
     if rows:
         check("★ 恢复态的服务种类是 NULL，不是 'code-server'",
               rows[0]["service_kind"] is None, repr(rows[0]["service_kind"]))
+        # ★ 解析键同理。而且这里**尤其**不能拿短名去反查一个出来 —— 短名是 NULL，
+        #   反查只会得到"随便挑一个同名的"，而那个作业可能根本不是它起的。
+        check("★ 恢复态的解析键也是 NULL（不知道是哪一版的代码在跑）",
+              rows[0]["service_plugin"] is None, repr(rows[0]["service_plugin"]))
+        check("恢复态的会话视图把解析键原样报成 None",
+              d.session_view(rows[0], with_secret=False)["service_plugin"] is None)
     d.store.close()
 
     # 19.8 老库补列：加一个**可空**列是纯加法，直接迁移；不像删 NOT NULL 列那次
@@ -1204,6 +1292,11 @@ exit 0
     _cols = {r[1] for r in _st.conn.execute("PRAGMA table_info(sessions)")}
     check("★ 老库（没有 service_kind 列）被自动补上",
           "service_kind" in _cols, str(sorted(_cols))[:120])
+    check("★ 老库（没有 service_plugin 列）也被自动补上",
+          "service_plugin" in _cols, str(sorted(_cols))[:120])
+    check("补出来的解析键是 NULL —— 老库里的会话确实不知道自己是哪一版",
+          _st.get("kept") is not None and _st.get("kept")["service_plugin"] is None,
+          repr((_st.get("kept") or {}).get("service_plugin")))
     check("补列不动已有的数据",
           _st.get("kept") is not None and _st.get("kept")["uid"] == 2002)
     _st.close()

@@ -42,9 +42,21 @@ const { createDemoCodeServer } = require('./demo-server.js');
 //   集合由 `op_plugins` 通报，客户端不该假定任何集合。
 const SERVICE_CODE_SERVER = 'code-server';
 const SERVICE_SSHD = 'sshd';
+
+// ★ 演示站点报的 `(id, 版本)` 与客户端内建插件清单里的是同一对 —— 真实情况下
+//   也是这样：站点分发的就是那个构件。所以演示模式**不会**凭空造出"站点有而
+//   本机没有"的假警报，那种情况由 debugAddSitePlugin 显式制造。
+const SITE_CS_ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
+const SITE_SSHD_ID = '01M2JKHTZGF12N0T9CB3XVK36H';
+// 演示里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
+// 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
+const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
+
 const DEMO_SITE_PLUGINS = [
-  { name: SERVICE_CODE_SERVER, title: '开发环境', enabled: true, builtin: true },
-  { name: SERVICE_SSHD, title: 'SSH 中转站', enabled: true, builtin: true },
+  { id: SITE_CS_ID, name: SERVICE_CODE_SERVER, version: '1.0.0',
+    title: '开发环境', enabled: true, builtin: true },
+  { id: SITE_SSHD_ID, name: SERVICE_SSHD, version: '1.0.0',
+    title: 'SSH 中转站', enabled: true, builtin: true },
 ];
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
@@ -210,7 +222,8 @@ class FakeBackend extends Backend {
    */
   debugAddSitePlugin(name, title = null) {
     if (!this._extraSitePlugins.some((p) => p.name === name)) {
-      this._extraSitePlugins.push({ name, title: title || name, enabled: true,
+      this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name, version: '1.0.0',
+                                    title: title || name, enabled: true,
                                     builtin: false });
     }
   }
@@ -260,8 +273,15 @@ class FakeBackend extends Backend {
     // 服务种类。照抄守护进程的判据：认不出的一律拒绝，绝不悄悄退回 code-server ——
     // 那会让「我要的是中转站，得到的是一个网页 IDE」变成一个不报错的错误。
     const kind = (req && req.service_kind) || SERVICE_CODE_SERVER;
-    if (kind !== SERVICE_CODE_SERVER && kind !== SERVICE_SSHD) {
+    // ★ 按**短名**在演示站点自己的清单里查 —— 短名只在站点内唯一，而演示后端
+    //   扮演的正是"一个站点"。查不到就拒绝，绝不悄悄退回 code-server。
+    const sitePlugin = [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins]
+      .find((p) => p.name === kind);
+    if (!sitePlugin) {
       return err(2, 'bad_service_kind', `未知的服务类型：${kind}`);
+    }
+    if (!sitePlugin.enabled) {
+      return err(4, 'service_kind_disabled', `本站没有开放「${sitePlugin.title}」`);
     }
     // 中转站必须带公钥，且形状要对 —— 规则与守护进程的 parse_ssh_pubkey **逐字一致**。
     //
@@ -330,6 +350,11 @@ class FakeBackend extends Backend {
       requested_time: '12:00:00',
       note: null,
       service_kind: kind,
+      // ★ 会话的**解析键**：`<id>@<版本>`。守护进程在提交时从它自己那份插件
+      //   清单里抄下来 —— 而"抄下来"是关键：站点之后升级了插件，这个字段
+      //   仍然是**提交那一刻**那一版。作业侧跑的是那一版的代码，客户端这一半
+      //   必须配同一版。
+      service_plugin: `${sitePlugin.id}@${sitePlugin.version}`,
       // 与守护进程一致：中转站走公钥，永远没有口令（有口令才是错的 ——
       // 那会让界面以为可以拿它去 POST 登录）。
       auth_mode: kind === SERVICE_SSHD ? 'publickey' : 'password',
@@ -443,6 +468,9 @@ class FakeBackend extends Backend {
       // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——
       // 而"字段不存在"是另一回事（老守护进程），那时按 code-server 走。
       service_kind: s.service_kind === undefined ? null : s.service_kind,
+      // 与守护进程一致：也是**总是存在**（可能是 null）。null = 服务端不知道
+      // 这个会话是哪一版的插件，客户端据此拒绝猜测（只解释、不动作）。
+      service_plugin: s.service_plugin === undefined ? null : s.service_plugin,
     };
     // 主机公钥只在有值时才出现 —— 与守护进程一致（空值不放进响应里，
     // 否则客户端会把它读成"公钥是空的"，那是个没法处理的输入）。

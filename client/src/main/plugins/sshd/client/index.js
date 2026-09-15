@@ -1,32 +1,21 @@
 'use strict';
 /**
- * plugins/sshd.js —— SSH 中转站。
+ * SSH 中转站的客户端侧。
  *
  * 让原生 VS Code Remote-SSH、codex 这类**要求 ssh 连接**的工具能用上一个跑在
  * 作业里的会话。作业侧起的是一个用户态 sshd（`run.sbatch` 的 `start_sshd`）。
  *
- * ★ 这个插件在客户端这边**没有视图**：用户要用的东西跑在他自己的机器上，客户端
- *   唯一要做的事就是让 `ssh slurmate` 这个名字能连进来 —— 也就是维护那两个文件
- *   （见 sshconfig.js）。所以「建立会话」在这里的全部内容就是：写文件、告诉用户
- *   怎么用。
+ * ★ `plugin.json` 里没有 `contributes.surface`，所以框架**连一块界面都不会建**
+ *   —— 用户要用的东西跑在他自己的机器上，客户端唯一要做的事就是让
+ *   `ssh slurmate` 这个名字能连进来（见 sshconfig.js）。
  *
- * ★ 它也不需要布局组。布局组存在的理由是**浏览器的** localStorage 按 origin
- *   隔离，而中转站没有浏览器。
+ * ★ 它也不需要布局组（`contributes.layout = false`）。布局组存在的理由是
+ *   **浏览器的** localStorage 按 origin 隔离，而中转站没有浏览器。
  */
 
-const sshconfig = require('../sshconfig.js');
+const sshconfig = require('../../../sshconfig.js');
 
 module.exports = {
-  name: 'sshd',
-  title: 'SSH 中转站',
-
-  hasView: false,
-  needsLayout: false,
-
-  // 作业内的 sshd 用客户端带上来的那把公钥写 authorized_keys，
-  // 所以提交时**必须**带一行公钥（服务端会校验，不合格直接回 code 2）。
-  needsPubkey: true,
-
   // 隧道端口：一个固定的基准端口，与布局组无关。别名恒定、端口漂移无害 ——
   // 中转站没有 origin 语义（与 code-server 恰好相反）。
   preferredPort(ctx) {

@@ -46,7 +46,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -384,10 +384,31 @@ class PluginSpec(object):
       插件的一切都在这个对象上；加第三个插件不该要求改守护进程的任何逻辑。
     """
 
-    def __init__(self, name, title, job_entry, default_cpus, default_mem,
+    def __init__(self, plugin_id, name, version, title, job_entry,
+                 default_cpus, default_mem,
                  needs_pubkey=False, bin_env=None, bin_discovery="convention",
                  bin_name=None, bin_fallback=None, extra_keys=(), enum_keys=(),
                  builtin=True):
+        # ── 身份有两层，别把它们合并 ────────────────────────────────────────
+        #
+        # `id` 是**铸造出来的**全球唯一标识符（ULID，26 字符，见
+        # client/src/main/plugins/ulid.js）。一个插件诞生时铸一次，此后永不改变。
+        # 它**不是名字** —— 名字（displayName）可以随便改，它不行。
+        #
+        # 为什么要有它：插件由**站点**分发，没有市场能在线升级，而站点更新频繁、
+        # 也可能长期不更新。于是同一个插件在不同站点上可能叫不同的名字、可能是
+        # 不同的版本。要靠名字认出"这是同一个东西"是做不到的；靠铸造出来的 id 才
+        # 能。客户端据此把两个站点分发的同一个构件合成一条（只多记一个来源），
+        # 又把两个不同的插件分开存放（各自标明来源）。
+        #
+        # `version` 是这一版的号。**会话必须把 `id@版本` 一起记下来**：作业侧与
+        # 客户端侧是配套的两半，而站点一升级插件，已经跑着的作业用的仍是旧的那
+        # 一版 —— 按"站点当前的版本"去解析一个已跑的会话会接错。
+        self.id = plugin_id
+        self.version = version
+        # `name` 是**站点内**用的短名：配置块名（`[plugin:<name>]`）、提交时的
+        # `service_kind`、日志与报错文案里出现的都是它。它只需要站点内唯一（由
+        # 配置校验保证），不需要全球唯一 —— 全球唯一是上面那个 id 的事。
         self.name = name
         self.title = title
         # 内建 = 代码随本项目一起发布（作业侧在 run.sbatch，客户端侧随客户端）。
@@ -436,6 +457,13 @@ class PluginSpec(object):
 
 BUILTIN_PLUGINS = (
     PluginSpec(
+        # ★ 这两个 id 是**铸造**出来的、此后永不改变，客户端随包发布的
+        #   plugin.json 里写的是同一对。它们必须逐字一致 ——
+        #   test-sessiond-logic.py 里有一条用例逐字比对两边，改了这里而没改那边
+        #   会红。（两处写死是不可避免的：守护进程是 Python、客户端是 JS，
+        #   而它们必须独立启动。所以靠一条用例钉住，而不是靠"记得改"。）
+        plugin_id="01M2JKHTZGKJBFQQTWYXMQMF2V",
+        version="1.0.0",
         name=SVC_CODE_SERVER,
         title="开发环境",
         job_entry="start_code_server",
@@ -450,6 +478,8 @@ BUILTIN_PLUGINS = (
         enum_keys=(("auth_mode", ("password", "none"), "password"),),
     ),
     PluginSpec(
+        plugin_id="01M2JKHTZGF12N0T9CB3XVK36H",
+        version="1.0.0",
         name=SVC_SSHD,
         title="SSH 中转站",
         job_entry="start_sshd",
@@ -1039,6 +1069,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     --   那时报 NULL 比编一个 'code-server' 诚实（与 cpus/mem 在恢复态报 null 而不是 0
     --   是同一条原则）。老库上这一列由 Store._migrate 补上。
     service_kind    TEXT,
+    -- 这个会话用的是**哪一个插件、哪一版** —— `"<id>@<版本>"`。
+    -- ★ 与 service_kind 一样**可空**，NULL = 不知道（从 nft 规则恢复出来的会话）。
+    --   但两者记的是不同的事：service_kind 是站点内的短名（给人读），
+    --   而这一列是解析键。
+    -- ★ 它必须是**提交那一刻**的值，不能在读取时按站点当前清单现算：作业侧跑的
+    --   是那一版的代码，站点升级插件之后现算会把新版本的客户端代码接到旧版本的
+    --   作业实现上。
+    service_plugin  TEXT,
     created_at      INTEGER NOT NULL,
     submitted_at    INTEGER,
     enrolled_at     INTEGER,
@@ -1101,7 +1139,7 @@ class Store(object):
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(sessions)")}
         if not cols:
             return                       # 表刚建出来，SCHEMA_SQL 已经带上了所有列
-        for name, decl in (("service_kind", "TEXT"),):
+        for name, decl in (("service_kind", "TEXT"), ("service_plugin", "TEXT")):
             if name not in cols:
                 self.conn.execute(
                     "ALTER TABLE sessions ADD COLUMN %s %s" % (name, decl))
@@ -2481,6 +2519,11 @@ class Sessiond(object):
         for name in sorted(self.cfg.plugins):
             p = self.cfg.plugins[name]
             out.append({
+                # `id` + `version` 是**解析键**：客户端拿它去自己的插件池里找
+                # 配套的那一半。`name` 只是**站点内**的短名，用于配置块与日志 ——
+                # 两个站点可以各有一个叫 jupyter 的插件而它们是两个不同的东西。
+                "id": p.spec.id,
+                "version": p.spec.version,
                 "name": p.name,
                 "title": p.title,
                 "enabled": p.enabled,
@@ -2559,6 +2602,10 @@ class Sessiond(object):
             # NULL = 不知道（从 nft 规则恢复出来的会话），界面要如实显示，
             # 不要猜一个默认值 —— 猜错会让界面拿口令去打一个 SSH 端口。
             "service_kind": s["service_kind"],
+            # 会话的**解析键**（`<id>@<版本>`）。同样是三态：字段总是存在，
+            # NULL = 不知道（从 nft 规则恢复出来的会话），而"字段不存在"是另一回事
+            # （老守护进程），那时客户端按内建插件的短名兜底。
+            "service_plugin": s["service_plugin"],
             "node": s["node"],
             "node_ip": s["node_ip"], "service_port": s["service_port"],
             "created_at": s["created_at"], "enrolled_at": s["enrolled_at"],
@@ -2835,7 +2882,10 @@ class Sessiond(object):
             # 这里只是登记那一刻的初值，作业跑起来后会用它自己写进会话文件的那份
             # 覆盖。初值就跟服务种类一致，免得中间态自相矛盾。
             auth_mode=pcfg.session_auth_mode,
-            service_kind=kind, created_at=now)
+            service_kind=kind,
+            # 解析键在这里定下来，此后不再变 —— 站点之后升级插件也不影响这一行。
+            service_plugin="%s@%s" % (spec.id, spec.version),
+            created_at=now)
 
         # 口令通过【文件】传递，不经过环境变量（scontrol show job 可能暴露
         # Environment 字段）。作业读文件、退出时删除。

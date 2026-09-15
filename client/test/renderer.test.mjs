@@ -77,6 +77,24 @@ test('panel.js 调用的每个桥方法 preload 都暴露了', () => {
   assert.ok(exposed.size > 10, '抽取到的桥方法太少，正则多半没匹配上');
 });
 
+test('★ 界面里不许写死任何插件名 —— 按钮必须由清单画出来', () => {
+  // ★ 这一条守的是这次改动的要点：**站点装了哪些插件是运行期才知道的**。
+  //   写死一个「开始开发」按钮的话，「站点卸掉那个插件」在界面上就变成了
+  //   "点了报错"，而不是"那一块不见了" —— 而后者才是用户能正确理解的那件事。
+  //
+  //   查的是**带引号的字面量**（`'code-server'`），不是裸词：文件头和注释里出现
+  //   插件名是在**解释**这套机制，不是在违反它（`panel.html` 顶部那条 CSP 的
+  //   检查也是同样的处理）。
+  for (const [what, src] of [['panel.js', js], ['panel.html', html]]) {
+    for (const name of ['code-server', 'sshd']) {
+      const lit = new RegExp(`['"\`]${name}['"\`]`);
+      assert.equal(lit.test(src), false,
+        `${what} 里出现了插件名的字面量 ${JSON.stringify(name)} —— `
+        + '插件块必须从 pluginsView() 画出来，不能写死');
+    }
+  }
+});
+
 test('panel.html 里没有内联 style —— CSP 会静默丢掉它', () => {
   // 先把注释去掉：文件头那段注释里就写着 `style="..."` 这几个字，
   // 它是在**解释**这条禁令，不是在违反它。

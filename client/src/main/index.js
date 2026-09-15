@@ -102,6 +102,11 @@ function bootstrap() {
       : app.getPath('userData');
     cfg = config.loadConfig(cfgDir);
 
+    // ★ 池目录依赖 cfgDir（演示模式尤其），而注册表是在**模块加载期**建的，那时
+    //   cfgDir 还是 null。所以拿到真路径之后重新扫一遍 —— 否则演示模式会去读
+    //   进程当前目录下的 `./plugins`，而那是谁的地方说不清。
+    registry.reload();
+
     // 旧版本（schema ≤ 3）只有一把**全局**私钥。搬到新格式：原样复制给每一条已有
     // 连接 —— 那正是升级前的事实，复制完每条的行为都不变，用户也不必重新去 IDM
     // 注册一遍。一条连接都没有时它会被留在原地，等有了第一条再搬。
@@ -132,7 +137,7 @@ function bootstrap() {
     //   被我们**吞掉**的键（F12 之类）仍然照报：那是在解释「为什么按了没反应」，
     //   是用户自己触发的、想问的问题。
     attachKeyGuard(win.win.webContents, {
-      onOwned: (action) => { if (action === 'reload') win.reloadCodeServer(); },
+      onOwned: (action) => { if (action === 'reload') win.reloadSurface(); },
       onBlocked: (desc) => {
         win.pushNotice('key-blocked', desc);
         if (backend.kind === 'demo') win.pushSwallowed(desc);
@@ -481,15 +486,29 @@ function pluginsView() {
   //   不认得 → 该升级。三种都过滤掉，用户面对的就是"按钮凭空少了一个"。
   const plugins = registry.list().map((plugin) => {
     const s = site.get(plugin.name) || null;
-    const locallyEnabled = config.pluginEnabledLocally(cfg, plugin.name);
+    // 本机开关按 **id** 记 —— 理由见 app:setPluginEnabled。
+    const locallyEnabled = config.pluginEnabledLocally(cfg, plugin.id);
     // 站点清单**拿不到**时（守护进程太旧，没有这个 op）按"站点没说"算 true。
     // 算 false 的话，升级客户端会让老服务端的用户一个按钮都看不到。
     const siteEnabled = siteKnown ? Boolean(s && s.enabled) : true;
     return {
+      // 身份：`id` 是铸造出来的全球唯一标识，`version` 是这一版的号。界面把两者
+      // 都显示出来 —— 池里可以并存同一个插件的多个版本，只显示名字的话用户分不清
+      // 自己看到的是哪一版。
+      id: plugin.id,
+      version: plugin.version,
+      // 站点内用的短名。配置块名、提交时的 service_kind 都是它。
       name: plugin.name,
       // 客户端认得的插件用**它自己的**标题：那个才对应它实际会做的事。
-      // 站点给的标题是给不认识它的客户端看的（见 unknownToClient）。
-      title: plugin.title,
+      title: plugin.displayName,
+      description: plugin.description,
+      source: plugin.source,
+      sources: plugin.sources,
+      hasClientCode: plugin.hasClientCode,
+      surface: plugin.contributes.surface,
+      // 站点那边报的是哪一版。**这是"站点升级了而本机还是旧的"的唯一线索** ——
+      // 两半代码是配套的，对不上时必须让用户看得见。
+      siteVersion: (s && s.version) || null,
       siteEnabled,
       siteKnown,
       locallyEnabled,
@@ -502,15 +521,22 @@ function pluginsView() {
     };
   });
 
+  // 站点报了、而本客户端**池里没有对应那一版**的。按 `(id, 版本)` 算，不是按名字
+  // —— 名字对得上而版本对不上，同样是"你用不了它"，而按名字判会把它当成有。
+  const missing = [...site.values()]
+    .filter((p) => !(p.id && p.version && registry.get(p.id, p.version)))
+    .map((p) => ({
+      name: p.name, title: p.title, id: p.id || null, version: p.version || null,
+      enabled: p.enabled !== false,
+    }));
+
   return {
     plugins,
-    // 本站有、而本客户端没有实现的。**这是升级提示的唯一来源** ——
-    // 过滤掉它们，用户就永远不知道自己少了什么。
-    unknownToClient: [...site.values()]
-      .filter((p) => !registry.get(p.name))
-      .map((p) => ({ name: p.name, title: p.title, enabled: p.enabled !== false })),
-    // 插件目录里扫到的坏文件（语法错、缺字段、名字与文件名不一致）。
-    // 它们被跳过了，客户端照常工作 —— 但必须说出来，否则"加了插件它就是不生效"。
+    // **这是升级提示的唯一来源** —— 过滤掉它们，用户就永远不知道自己少了什么。
+    missing,
+    // 池里同 `(id, 版本)` 撞了（两个不同的东西在抢同一个身份）而被全部跳过的，
+    // 以及插件目录里扫到的坏文件。它们被跳过了，客户端照常工作 —— 但必须说出来，
+    // 否则用户面对的症状只是"加了插件它就是不生效"。
     errors: registry.errors,
   };
 }
@@ -633,15 +659,15 @@ function commitConfig() {
  * **不是正确性必需** —— partition 名永不复用，残留数据永远不会被新的组读到。
  * 是隐私：那个目录里躺着 code-server 的登录 cookie。
  *
- * ★ 有且只有一条致命前提：**绝不能对正在被 codeView 用着的那个 partition 做**。
- *   那会把用户当前的 IDE 连 cookie 带 localStorage 一起抽掉，而症状只是
+ * ★ 有且只有一条致命前提：**绝不能对正被那块界面用着的那个 partition 做**。
+ *   那会把用户当前的会话连 cookie 带 localStorage 一起抽掉，而症状只是
  *   「页面莫名其妙坏了」。所以先跟窗口对一下现在用的是哪个。
  *
  * 不 await：删一个组不该因为磁盘慢而卡住界面。
  */
 function clearLayoutStorage(layoutId) {
   const partition = config.partitionForLayout(layoutId);
-  if (win && win.codePartition === partition) return;
+  if (win && win.surfacePartition === partition) return;
   try {
     electronSession.fromPartition(partition).clearStorageData()
       .catch((e) => win.pushNotice('warn',
@@ -671,18 +697,22 @@ async function startSession(resources, serviceKind) {
   const wanted = serviceKind === undefined
     ? (registry.defaultPlugin() || {}).name
     : serviceKind;
-  const plugin = registry.get(wanted);
+  // ★ 提交时只知道**短名**（配置块名、界面按钮上那个）。短名是站点内唯一的，
+  //   而本机可能并存同一个插件的多个版本 —— 取版本最高的那一个：站点那边跑的
+  //   通常就是它。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
+  const plugin = pickForSubmit(wanted);
   if (!plugin) {
     win.pushNotice('error',
       `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
-      + `本版支持：${registry.list().map((p) => p.title).join('、') || '（一个都没有）'}。`);
+      + `本版支持：${registry.list().map((p) => p.displayName).join('、') || '（一个都没有）'}。`);
     return null;
   }
+  warnVersionDrift(plugin);
 
   // ★ 布局组是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
   //   编辑器布局），不跑浏览器的不给 —— 给它一个组只会凭空造出一个永远不会被
   //   创建的存储分区，并让「运行中切布局」去挪一个正在用的隧道端口。
-  const layoutId = plugin.needsLayout ? layoutForSession() : null;
+  const layoutId = plugin.contributes.layout ? layoutForSession() : null;
 
   // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
   // 这次提交，而那要花掉一整趟往返）。**先备好再提交**是硬要求。
@@ -730,6 +760,15 @@ async function startSession(resources, serviceKind) {
     controller.on('change', onSessionChange);
     controller.on('retarget', () => onSessionChange(controller.snapshot()));
   }
+  // ★ **在这里捕获插件对象**，之后所有状态变化都用它，不再查注册表。
+  //
+  //   站点升级插件之后池里会有同一个 id 的新版本，而一个**已经跑着**的会话用的是
+  //   它起时那一版 —— 作业侧与客户端侧是配套的两半，中途换掉这一半，轻则行为诡异、
+  //   重则对接不上。捕获之后，**升级插件对正在跑的会话完全没有影响**。
+  //
+  //   顺带得到一个好性质：把一个插件从池里卸掉，正在跑的会话也完全不受影响 ——
+  //   它手里已经攥着那个对象了。
+  controller.plugin = plugin;
   // ★ 这里**没有** else 分支。走到 else 的唯一可能是「已经有一个会话在跑」，
   //   而那种情况下 controller.start() 会抛「会话已在进行中」—— 这正是双击
   //   「开始」时该有的表现。在 else 里顺手改一下运行中会话的 layoutId 是纯副作用：
@@ -743,11 +782,54 @@ async function startSession(resources, serviceKind) {
   const snap = await controller.start(resources, {
     preferredPort,
     serviceKind: plugin.name,
-    needsPubkey: Boolean(plugin.needsPubkey),
+    needsPubkey: plugin.contributes.submitPubkey,
     sshPubkey,
   });
   if (!snap) onSessionChange(controller.snapshot());
   return snap;
+}
+
+/**
+ * 提交时该用本机的哪一个插件。
+ *
+ * ★ **优先按站点报的 `(id, 版本)` 挑**，而不是"同名里版本最高的那个"：那个才是
+ *   这个会话真会跑的那一版，而客户端的 `prepare()`、`preferredPort()` 必须与服务端
+ *   即将起的那份**配套**。同名多 id 只可能出现在"站点分发的插件覆盖了内建同名插件"
+ *   这种情形上，那时按名字挑纯属碰运气。
+ *
+ * 站点没报（老守护进程、或还没连上）时才退回按短名取版本最高的那个。
+ */
+function pickForSubmit(name) {
+  const s = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.name === name);
+  if (s && s.id && s.version) {
+    const hit = registry.get(s.id, s.version);
+    if (hit) return hit;
+  }
+  return registry.latestByName(name);
+}
+
+/**
+ * 站点那边的版本和本机这一份对不上时，**说出来但放行**。
+ *
+ * ★ 为什么放行：站点升级插件不该让所有人的客户端当场变成砖头。而作业侧与客户端侧
+ *   是配套的两半，真的对不上时会话起来之后**解析不到那一版**，那时会有另一句更
+ *   准确的话（"站点用的是 X 版，本机只有 Y 版"）—— 用户仍然接得上隧道、停得掉
+ *   会话，只是用不了那个界面。
+ *
+ * ★ 为什么还是要说：不说的话，用户看到的是"点了开始、作业起来了、界面一片白"，
+ *   而根因一个字都不在里面。这正是这个项目一路在清的那类症状。
+ *
+ * 老守护进程不报版本（`siteVersion` 为 null）时不说话 —— 那不是漂移，是信息缺失。
+ */
+function warnVersionDrift(plugin) {
+  const site = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.name === plugin.name);
+  const siteVersion = site && site.version;
+  if (!siteVersion || siteVersion === plugin.version) return;
+  if (!registry.once(`${plugin.id}@${siteVersion}`, 'version-drift')) return;
+  win.pushNotice('warn',
+    `站点那边的「${plugin.displayName}」是 ${siteVersion} 版，本机这一份是 `
+    + `${plugin.version} 版。会话仍然会起，但作业侧和客户端侧是配套的两半，`
+    + '对不上的话界面可能连不上 —— 升级客户端通常就好了。');
 }
 
 /**
@@ -777,22 +859,41 @@ async function _renderSession(snap) {
   //   变成 ended。只收 ENDED 的话，用户点了「结束会话」之后还要盯着一块打不开的
   //   页面最多一分钟。
   if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
-    win.hideCodeView();
+    win.hideSurface();
   }
 
   // ── 唯一的服务分派点 ──
+  //
+  // ★ 插件对象是在**会话创建时捕获**的（见 startSession / tryReattach），这里只用
+  //   它，**不再查注册表**。查了会坏事：站点升级插件之后池里会出现同一个 id 的新
+  //   版本，而一个**已经跑着**的会话用的是它起时那一版 —— 作业侧与客户端侧是配套
+  //   的两半，中途换掉客户端这一半，轻则行为诡异、重则对接不上。捕获之后，
+  //   **站点升级插件对一个正在跑的会话完全没有影响**。
   //
   // ★ 不分流的后果不是崩溃，而是**误导**：跑在浏览器里的那条路会拿会话口令去
   //   POST 一个 SSH 端口，然后弹一句语义完全错误的「自动登录失败」；反过来
   //   另一边会去建一个 WebContentsView 加载一个根本不说 HTTP 的端口。
   //
-  // ★ 这里**没有**任何插件名。注册表只回答"表里有没有这一个"，所以加第三个
-  //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个文件。
-  const plugin = registry.get(registry.route(snap.serviceKind));
+  // ★ 这里**没有**任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
+  //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个目录。
+  const plugin = (controller && controller.plugin) || null;
   win.setSessionService(plugin);        // 关窗文案要用（见 windows.js）
   if (snap.state === State.RUNNING && snap.origin) {
-    if (plugin) await plugin.attach(pluginContext(plugin), snap);
-    else await warnUnknownService(snap);
+    if (!plugin) {
+      // 未知服务：**绝不建界面**（那个端口上跑的可能是任何东西），也绝不 POST 口令。
+      // 但上一个会话留下的那块界面必须收掉 —— 它盖在面板上，用户会以为那还是
+      // 自己的会话。
+      win.hideSurface();
+      await warnUnknownService(snap);
+    } else if (plugin.contributes.surface) {
+      await ensureSurface(plugin, snap);
+      if (plugin.attach) await plugin.attach(pluginContext(plugin), snap);
+    } else {
+      // 这个插件不要界面（比如中转站）：把上一个会话留下的那块收掉，否则它盖在
+      // 面板上，而用户在这个会话里根本不需要它。
+      win.hideSurface();
+      if (plugin.attach) await plugin.attach(pluginContext(plugin), snap);
+    }
   }
   if (snap.state === State.RUNNING && snap.warning) {
     await win.showOverlay(snap.warning);
@@ -813,22 +914,75 @@ async function _renderSession(snap) {
 }
 
 /**
- * 让窗口里的 code-server 视图与快照一致。**幂等**，每次状态变化都可以调。
+ * 插件注册表。构造时扫描两个根：内建的（`plugins/` 目录下，随客户端发布）
+ * 与**池**（`~/.slurmate/plugins/`，站点分发进来的）。两者走同一条加载路径
+ * —— 见那个文件的边界说明。
  *
- * 判定三件事：视图在不在、origin 变没变、partition 变没变。
- * 前两者只需重新 loadURL；**第三者必须销毁重建** —— partition 是构造期属性
- * （见 windows.js 的 showCodeServer）。
- *
- * ★ 这是唯一的入口。windows.js 的 pushState 里那条「origin 变了就 loadURL」的
- *   自动 retarget 已经删掉了：它不换 partition、也不重跑登录，两条路并存必然分叉。
- */
-/**
- * 插件注册表。构造时扫描 `plugins/` 目录 —— 见那个文件的边界说明。
- *
- * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件名走，
+ * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件走，
  * 重建注册表会让用户把已经看过的通知再看一遍。
  */
-const registry = new plugins.Registry();
+const registry = new plugins.Registry([
+  { dir: path.join(__dirname, 'plugins'), source: 'builtin' },
+  // 传**函数**而不是路径：cfgDir 要等 app ready 之后才定下来，在这里当场算会算出
+  // 一个 null 路径（见 plugins/index.js 的 loadRoot）。
+  { dir: poolDir, source: 'pool' },
+]);
+
+/**
+ * **池**目录 —— 站点分发进来的插件都落在这里，不分是被哪个站点引用的。
+ *
+ * ★ 一个池而不是按站点分目录，这是有意的：`id` 是铸造出来的全球唯一标识，所以
+ *   「同一个插件被两个站点分发」在池里天然就是同一条（只多记一个来源），而
+ *   「两个站点各写一个 jupyter」是两条不同的记录，并存、各自标明来源。站点升级
+ *   频繁也好、拒绝升级也好，都不会把对方挤掉。
+ *
+ * ★ 演示模式落在它自己的目录里 —— 演示绝不去读用户真实的那份池。
+ */
+function poolDir() {
+  // ★ 整个包在 try 里：这个函数是在**模块加载期**被调用的（见下面 registry 的构造），
+  //   而那时 app 可能还没 ready。真抛出来就不是"池扫不到"，而是**整个客户端起不来** ——
+  //   为了一个次要功能赌上启动路径不值当。拿不到就当没有池（loadRoot 会记一条）。
+  try {
+    return DEMO_FLAG
+      ? path.join(cfgDir || '.', 'plugins')
+      : path.join(app.getPath('home'), '.slurmate', 'plugins');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 让窗口里那块界面与快照一致。**幂等**，每次状态变化都可以调。
+ *
+ * ★ 这是**框架**的事，不是插件的事 —— URL 来自 `contributes.surface.path`，
+ *   存储分区来自框架的布局组。这个分工的用处很具体：一个**没有客户端代码**的
+ *   声明式插件照样能开界面，因为开界面本来就不需要代码，只需要一句声明。
+ *
+ * 判定两件事：url 变没变、partition 变没变。前者只需重新 loadURL；**后者必须
+ * 销毁重建** —— partition 是构造期属性（见 windows.js 的 showSurface）。
+ *
+ * ★ 这也是唯一的入口。windows.js 的 pushState 里那条「origin 变了就 loadURL」的
+ *   自动 retarget 已经删掉了：它不换 partition、也不重跑登录，两条路并存必然分叉。
+ */
+async function ensureSurface(plugin, snap) {
+  const surface = plugin.contributes.surface;
+  if (!surface) return;
+
+  // 分区：要布局组的用布局组的分区（同一个组的若干条连接共用一份 localStorage，
+  // 这是布局组存在的全部理由）；不要的用**按插件**的一份 —— 一个网页应用自己的
+  // 状态该跟它自己走，跟会话走会在每次重开时重置。
+  const partition = plugin.contributes.layout
+    ? config.partitionForLayout(snap.layoutId)
+    : `persist:plugin-${plugin.id}`;
+
+  // 换布局组 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局重置了）必须
+  // 说出来，否则他只会觉得"我的设置莫名其妙没了"。
+  const rebuilt = win.hasSurface() && win.surfacePartition !== partition;
+  await win.showSurface({ url: snap.origin + surface.path, partition, demo: DEMO_FLAG });
+  if (rebuilt) {
+    win.pushNotice('info', '已切换到新的布局组，页面已重新加载。');
+  }
+}
 
 /**
  * 递给插件的**全部能力**。
@@ -855,7 +1009,9 @@ function pluginContext(plugin) {
     home: () => (DEMO_FLAG ? cfgDir : app.getPath('home')),
     login: performLogin,
     notice: (kind, text) => win.pushNotice(kind, text),
-    once: (key) => registry.once(plugin.name, key),
+    // 分桶用的是 `id@版本`，不是短名 —— 池里可以并存同一个插件的多个版本，而
+    // "这个版本已经说过这句话了"与"那个版本说过了"是两件事。
+    once: (key) => registry.once(plugins.bucketOf(plugin), key),
   };
 }
 
@@ -874,15 +1030,53 @@ function pluginContext(plugin) {
 async function warnUnknownService(snap) {
   const key = `unknown|${snap.sessionId}`;
   if (!registry.once('__unknown__', key)) return;
-  const known = registry.list().map((p) => p.name);
-  const names = ((sitePlugins && sitePlugins.plugins) || [])
-    .map((p) => p.name).filter((n) => n && !known.includes(n));
-  const why = names.length
-    ? `本站开了这个客户端不认识的插件：${names.join('、')}。升级客户端之后就能用它。`
-    : '它多半是别的进程提交的，控制节点没有关于它的记录。';
+
   win.pushNotice('warn',
-    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${why}\n`
-    + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。');
+    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${unknownWhy(snap)}\n`
+    + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。'
+    + '（能结束、能看，是因为状态、心跳和结束这三件事**从不查插件** —— 只认会话号。）');
+}
+
+/**
+ * 「为什么用不了它」，按**具体到什么程度**从高到低挑一句。
+ *
+ * ★ 第一档最要紧：站点正在分发的那个插件，本机缺的正是**它需要的那一版**。
+ *   这时能说出"本站的「Jupyter」是 2.0.0 版，本机没有这一版" —— 用户照着升级
+ *   客户端就行了。这一档要拿**会话自己带的解析键**去站点清单里找，而不是泛泛地
+ *   列一遍本站有哪些插件。
+ *
+ * ★ 而会话带的那个键**必须**是权威：站点会升级，所以"现在再看一眼站点有哪些插件"
+ *   可能已经和这个会话提交时不是一回事了。所以站点清单只用来把 id 翻成人看的标题，
+ *   判定始终以会话自带的 `(id, 版本)` 为准。
+ */
+function unknownWhy(snap) {
+  const missing = pluginsView().missing;
+  const ref = typeof snap.servicePlugin === 'string' ? snap.servicePlugin : null;
+  const at = ref ? ref.lastIndexOf('@') : -1;
+  const id = at > 0 ? ref.slice(0, at) : null;
+
+  if (id) {
+    const hit = missing.find((p) => p.id === id);
+    if (hit) {
+      return `本站的「${hit.title}」是 ${hit.version} 版，而本机没有这一版`
+        + ' —— 升级客户端之后就能用它。';
+    }
+    const known = registry.list().filter((p) => p.id === id);
+    if (known.length) {
+      const versions = known.map((p) => p.version).join('、');
+      return `这个会话要在 ${ref.slice(at + 1)} 版上跑，而本机只有 ${versions} 版。`
+        + '作业侧与客户端侧是配套的两半，对不上就用不了 —— 升级客户端通常就好了。';
+    }
+    return `这个会话来自一个本机没有的插件（${id}）。`;
+  }
+
+  if (missing.length) {
+    const names = missing.map((p) => (p.version ? `${p.title} ${p.version} 版` : p.title));
+    return `本站开了这个客户端没有的插件：${names.join('、')}。升级客户端之后就能用它。`;
+  }
+  // 最后才用解析那一刻留下的说法（它只有 id，没有标题）。
+  if (controller && controller.pluginWhy) return `${controller.pluginWhy}。`;
+  return '它多半是别的进程提交的，控制节点没有关于它的记录。';
 }
 
 
@@ -947,11 +1141,14 @@ async function tryReattach() {
   const s = resp.data && resp.data.session;
   if (!s) return;                      // 没有活跃会话，正常路径
 
-  // ★ 用**注册表**归一，而不是在会话对象上直接判。这一步同时兜住两种老情况：
-  //   守护进程太旧、会话视图里根本没有 `service_kind` 这个键 → 缺省插件
-  //   （那时的作业只可能是它）；会话是从 nft 规则恢复出来的、服务端明说不知道
-  //   → 未知，于是下面跳过建隧道，只让用户看见并能结束它。
-  const plugin = registry.get(registry.route(s.service_kind));
+  // ★ 用**注册表**归一，而不是在会话对象上直接判。四种输入四种答案，理由见
+  //   plugins/index.js 的 resolve()：`<id>@<版本>` 查池；老守护进程没有这个字段
+  //   时按短名找内建的；服务端明说不知道（null）时**绝不猜**。
+  //
+  //   `why` 是"明确要某一版而它不在"时的一句人话，一路带到 warnUnknownService ——
+  //   在这里重新推一遍是不行的，站点会升级，那时的站点清单已经和这个会话提交时
+  //   不是一回事了。
+  const { plugin, why } = registry.resolve(s.service_kind, s.service_plugin);
 
   // ★ 认不出的插件**照样要把隧道接起来**，这一条是承重的。
   //
@@ -965,8 +1162,8 @@ async function tryReattach() {
   //
   // 不跑浏览器的插件不走布局组（见 startSession）。这里**不需要**有连接也能接上，
   // 因为它的端口不是布局端口，没有「该用哪个组」这个问题。
-  const layoutId = (plugin && plugin.needsLayout) ? activeLayoutId() : null;
-  if (plugin && plugin.needsLayout && !layoutId) return;   // 没配置连接，接不上
+  const layoutId = (plugin && plugin.contributes.layout) ? activeLayoutId() : null;
+  if (plugin && plugin.contributes.layout && !layoutId) return;   // 没配置连接，接不上
 
   // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
   //   此前这里写的是 `if (!s || !s.tunnel_target) return;` —— 于是「作业还在队列里」
@@ -990,13 +1187,18 @@ async function tryReattach() {
     onRelayPort: () => onSessionChange(controller.snapshot()),
     getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
     // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
-    // 认不出时**原样**记下，于是 _renderSession 里的 route() 仍然得出「未知」。
+    // 认不出时**原样**记下，于是界面仍然得出「未知」。
     requestedKind: plugin ? plugin.name : s.service_kind,
-    needsPubkey: Boolean(plugin && plugin.needsPubkey),
+    needsPubkey: Boolean(plugin && plugin.contributes.submitPubkey),
   });
   controller.on('change', onSessionChange);
   controller.sessionId = s.session_id;
   controller.session = s;
+  // ★ 与 startSession 同一件事：**在这里捕获**，之后状态变化都用它，不再查注册表。
+  //   对"接上一个上次没关干净的会话"这条路径尤其要紧 —— 站点可能就在这中间升级了
+  //   插件，而那个作业跑的还是旧版。
+  controller.plugin = plugin;
+  controller.pluginWhy = why;
 
   // 认不出的插件用**非布局组**的基准端口：它的端口绝不能落进任何布局组（否则会与
   // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。
@@ -1412,14 +1614,19 @@ function registerIpc() {
    * 本机要不要这个插件。**不影响服务端** —— 站点仍然可以提交那个插件的会话
    * （用户自己用 CLI 就行），这里只是让客户端不再给出那个按钮。
    */
-  send('app:setPluginEnabled', async (name, enabled) => {
-    if (typeof name !== 'string' || !registry.get(name)) {
-      return { ok: false, error: `本客户端没有叫 ${JSON.stringify(name)} 的插件。` };
+  // ★ 开关按 **id** 记，不按短名。池是全局的：两个站点可以各有一个叫 `jupyter`
+  //   的插件而它们是两个不同的东西（两个 id），按短名记会让一个站点的开关管到
+  //   另一个站点的那个。而"我要不要这个插件"针对的是**插件本身**，不是某个站点
+  //   给它起的名字。代价是 config.json 里那个键是一个 ULID —— 那个文件由界面改，
+  //   不需要人去认它。
+  send('app:setPluginEnabled', async (id, enabled) => {
+    if (typeof id !== 'string' || !registry.list().some((p) => p.id === id)) {
+      return { ok: false, error: `本客户端的插件里没有 id 为 ${JSON.stringify(id)} 的。` };
     }
     if (typeof enabled !== 'boolean') {
       return { ok: false, error: 'enabled 必须是 true 或 false。' };
     }
-    config.setPluginEnabled(cfgDir, cfg, name, enabled);
+    config.setPluginEnabled(cfgDir, cfg, id, enabled);
     return { ok: true, plugins: pluginsView() };
   });
 
@@ -1436,7 +1643,7 @@ function registerIpc() {
     return controller.stop();
   });
 
-  send('app:reload', async () => { await win.reloadCodeServer(); return { ok: true }; });
+  send('app:reload', async () => { await win.reloadSurface(); return { ok: true }; });
 
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
 
@@ -1497,8 +1704,19 @@ module.exports = {
      *
      * 它只在启动时被调用一次，所以不重新触发就没法验证。先把 controller 清掉是
      * **还原现场**而不是绕过什么 —— 启动那一刻它本来就是 null。
+     *
+     * ★ 但光把引用清掉还不够：真机上重启时**这个进程整个没了**，它的监听套接字、
+     *   轮询、心跳跟着一起消失；只在同一个进程里换个引用的话，模拟出来的现场是
+     *   **两个客户端同时在跑** —— 旧的那个还占着端口在监听、还在轮询状态，收尾时
+     *   进程退不掉（症状是整个测试文件凭空多花几十秒，而每条用例自己都是绿的）。
+     *   所以旧的先 `abandon()` —— 只释放本地资源，一个字都不发给服务端。
      */
-    reattach: () => { controller = null; return tryReattach(); },
+    reattach: async () => {
+      const old = controller;
+      controller = null;
+      if (old) await old.abandon();
+      return tryReattach();
+    },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
     getRegistry: () => registry,
     /** 界面会看到的插件视图（三方求交的结果）。 */

@@ -152,6 +152,24 @@ class SessionController extends EventEmitter {
     return 'service_kind' in s ? s.service_kind : this._requestedKind;
   }
 
+  /**
+   * 本次会话用的插件**是哪一版** —— `"<id>@<版本>"`。这是会话的解析键。
+   *
+   * ★ 三态与 `serviceKind()` 完全一样，而且同样承重：
+   *     `undefined` 老守护进程没有这个字段（那时的会话只可能来自内建插件）
+   *     `null`      守护进程**明说**它不知道
+   *     字符串       解析键
+   *
+   * ★ 为什么必须是**会话**带着版本、而不是客户端去问站点"现在是哪一版"：
+   *   `op_plugins` 报的是站点**当前**的清单，而一个跑着的作业用的是它**提交时**
+   *   那一版 —— 作业侧与客户端侧是配套的两半。站点一升级插件，按"当前清单"解析
+   *   已跑的会话就会把新版本的客户端代码接到旧版本的作业实现上。
+   */
+  servicePlugin() {
+    const s = this.session || {};
+    return 'service_plugin' in s ? s.service_plugin : undefined;
+  }
+
   // ── 对外快照（界面唯一的数据来源）─────────────────────────────────────────
   snapshot() {
     const s = this.session || {};
@@ -162,6 +180,8 @@ class SessionController extends EventEmitter {
       // 已归一的三种取值之一。界面据此决定「连接」该做什么，**不要**自己猜：
       // null（服务端明说不知道）与 'code-server' 是完全不同的两件事。
       serviceKind: this.serviceKind(),
+      // 会话的**解析键**（`<id>@<版本>`）。同样是三态，理由见 servicePlugin()。
+      servicePlugin: this.servicePlugin(),
       sshHostKey: typeof s.ssh_host_key === 'string' ? s.ssh_host_key : null,
       sessionId: this.sessionId,
       jobId: s.job_id || null,
@@ -578,6 +598,24 @@ class SessionController extends EventEmitter {
   }
 
   // ── 停止 ────────────────────────────────────────────────────────────────
+  /**
+   * **只释放本地资源，一个字都不发给服务端。**
+   *
+   * ★ 这不是给用户的第二条路 —— 那条"只关窗口、作业继续跑"的路被明确删掉了
+   *   （见下面 stop() 的说明）。它只有一个用处：**模拟客户端重启**。
+   *
+   *   真机上重启时这个进程整个没了，它的监听套接字、轮询、心跳跟着一起消失；
+   *   而测试是在**同一个进程里**把 controller 换掉，不显式关掉旧的那份资源，
+   *   模拟出来的现场就变成了**两个客户端同时在跑**：旧的那个还占着一个端口在
+   *   监听、还在轮询状态，收尾时进程退不掉（表现为整个测试文件多花几十秒）。
+   */
+  async abandon() {
+    this._stopped = true;
+    this._stopHeartbeat();
+    this._stopStatusPoll();
+    await this.tunnel.stop();
+  }
+
   /**
    * 结束会话并释放资源。**只有一个语义：彻底终止。**
    *
