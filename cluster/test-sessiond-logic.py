@@ -16,12 +16,14 @@ test-sessiond-logic.py — slurmate-sessiond 的单元/集成测试
   现在所有会碰宿主机的输入（状态目录、作业脚本、Slurm 命令）都在
   make_config() 里被摘掉，见那里的说明。
 """
+import base64
 import importlib.machinery
 import importlib.util
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -915,6 +917,344 @@ exit 0
 
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"})
     d.store.close()
+
+    # ── 19. 服务种类（code-server / sshd）───────────────────────────────────
+    #
+    # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的 start_service 结构性地
+    # 保证。这里测的是守护进程这一侧：缺省、开关、公钥、以及"从 nft 规则恢复出来
+    # 的会话不许猜自己是什么服务"。
+    print("\n── 19. 服务种类（code-server / sshd）──")
+
+    # 19.1 站点白名单的解析（纯函数）
+    _k, _e = mod.parse_service_kinds("")
+    check("service_kinds 留空 = 只有 code-server（留空必须是安全的那个方向）",
+          _k == (mod.SVC_CODE_SERVER,) and _e is None, "%s / %s" % (_k, _e))
+    _k, _e = mod.parse_service_kinds("code-server,sshd")
+    check("正常解析两种服务",
+          _k == (mod.SVC_CODE_SERVER, mod.SVC_SSHD) and _e is None, str(_k))
+    _k, _e = mod.parse_service_kinds(" sshd , sshd ,code-server ")
+    check("空白忽略、重复项去掉", _k == (mod.SVC_SSHD, mod.SVC_CODE_SERVER), str(_k))
+    _k, _e = mod.parse_service_kinds("code-server，sshd")
+    check("全角逗号也认（配置以中文注释为主，手滑很常见）",
+          _k == (mod.SVC_CODE_SERVER, mod.SVC_SSHD), str(_k))
+    _k, _e = mod.parse_service_kinds("ssh")
+    check("★ 少一个字母的名字必须报错，不能静默忽略 —— 否则「配了但不生效」",
+          _e is not None and "ssh" in _e, str(_e))
+    _k, _e = mod.parse_service_kinds(",")
+    check("只有分隔符也算空 → 报错（不是静默变成「允许全部」）",
+          _e is not None and "空" in _e, str(_e))
+
+    # 19.2 公钥的解析（纯函数）。ed25519 的 blob 恒为 51 字节，形状可以卡死。
+    _pub = ("ssh-ed25519 "
+            "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
+    check("裸公钥通过", mod.parse_ssh_pubkey(_pub) == _pub)
+    check("★ 客户端实际发的形态（带注释）通过，且注释被丢掉",
+          mod.parse_ssh_pubkey(_pub + " slurmate-20260915-1145") == _pub,
+          repr(mod.parse_ssh_pubkey(_pub + " slurmate-20260915-1145")))
+    check("★ 注释里的逗号被丢掉 —— 它会把 --export 的一个变量劈成两个",
+          mod.parse_ssh_pubkey(_pub + " a,b@example.com") == _pub,
+          repr(mod.parse_ssh_pubkey(_pub + " a,b@example.com")))
+    check("追加第二条公钥（多行）被拒",
+          mod.parse_ssh_pubkey(_pub + "\n" + _pub) is None)
+    check("选项前缀 command= 被拒（会被原样写进 authorized_keys）",
+          mod.parse_ssh_pubkey('command="/bin/false" ' + _pub) is None)
+    check("选项前缀 cert-authority 被拒",
+          mod.parse_ssh_pubkey("cert-authority " + _pub) is None)
+    check("非 ed25519 被拒", mod.parse_ssh_pubkey("ssh-rsa AAAAB3NzaC1yc2E") is None)
+    check("★ 68 个合法 base64 字符但不是密钥 → 被拒（形状对、内容不对）",
+          mod.parse_ssh_pubkey(
+              "ssh-ed25519 " + base64.b64encode(b"\x00" * 51).decode()) is None)
+    check("空串被拒", mod.parse_ssh_pubkey("") is None)
+
+    # 19.3 缺省仍然是 code-server —— 与本功能引入前完全一致
+    r, sess, env = run_submit({"op": "submit"})
+    check("不传 service_kind 时缺省是 code-server",
+          sess["service_kind"] == mod.SVC_CODE_SERVER, str(sess.get("service_kind")))
+    check("环境变量把服务种类传给了作业",
+          env.get("SLURMATE_SERVICE_KIND") == mod.SVC_CODE_SERVER, str(env))
+
+    # 19.4 站点没开 sshd 时必须明确拒绝 —— 而不是起一个"看起来起来了但连不上"的作业
+    r, _s, _e = run_submit({"op": "submit", "service_kind": "sshd",
+                            "ssh_pubkey": _pub})
+    check("★ 站点没开 sshd → code 4 service_kind_disabled",
+          not r.get("ok") and r["code"] == 4
+          and r["error"]["kind"] == "service_kind_disabled", str(r.get("error")))
+    r, _s, _e = run_submit({"op": "submit", "service_kind": "telnet"})
+    check("未知的服务种类 → code 2 bad_service_kind",
+          not r.get("ok") and r["code"] == 2
+          and r["error"]["kind"] == "bad_service_kind", str(r.get("error")))
+
+    # 19.5 站点开启之后
+    _saved_kinds = cfg.service_kinds
+    cfg.service_kinds = (mod.SVC_CODE_SERVER, mod.SVC_SSHD)
+    try:
+        r, sess, env = run_submit({"op": "submit", "service_kind": "sshd",
+                                   "ssh_pubkey": _pub})
+        check("开了之后 sshd 提交成功", r.get("ok"), str(r))
+        check("会话记住了服务种类（界面据此决定「连接」做什么）",
+              sess["service_kind"] == mod.SVC_SSHD, str(sess.get("service_kind")))
+        check("sshd 会话的 auth_mode 是 publickey，不是 password",
+              sess["auth_mode"] == "publickey", sess["auth_mode"])
+        check("缺公钥 → code 2 bad_ssh_pubkey",
+              (lambda q: not q[0].get("ok") and q[0]["code"] == 2
+               and q[0]["error"]["kind"] == "bad_ssh_pubkey")(
+                   run_submit({"op": "submit", "service_kind": "sshd"})),
+              "（见下一条的返回值）")
+        check("公钥（连注释）传给了作业，且已规范化",
+              env.get("SLURMATE_SSH_PUBKEY") == _pub,
+              repr(env.get("SLURMATE_SSH_PUBKEY")))
+        check("sshd 路径与主机密钥目录也传下去了",
+              env.get("SLURMATE_SSHD_BIN") == cfg.sshd_bin
+              and env.get("SLURMATE_SSH_DIR", "").endswith("/.slurmate/ssh"),
+              "%s / %s" % (env.get("SLURMATE_SSHD_BIN"),
+                           env.get("SLURMATE_SSH_DIR")))
+        # ★ 公钥的注释被丢掉了，所以它不可能把逗号带进 --export。
+        #   注意这里**只查我们自己新加的三个变量** —— `SLURMATE_CANDIDATES`
+        #   本来就是逗号分隔的端口表，那是既有设计，不在这条断言的范围内。
+        check("★ 新加的三个变量都不含逗号（--export 的分隔符）",
+              all("," not in str(env.get(k, "")) for k in
+                  ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
+                   "SLURMATE_SSHD_BIN")),
+              str({k: env.get(k) for k in
+                   ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
+                    "SLURMATE_SSHD_BIN")}))
+    finally:
+        cfg.service_kinds = _saved_kinds
+
+    # 19.6 session_view 要如实报出服务种类，未知就是 None
+    d.store = mod.Store(os.path.join(tmpdir, "svc-view.db"))
+    d.store.insert(session_id="s-known", uid=UID, user="alice",
+                   partition="A6000", account="acct", cpus=2, mem="8G",
+                   requested_time="1:00:00", state=mod.ST_ENROLLED,
+                   candidates="55001", created_at=mod.now_ts(),
+                   service_kind=mod.SVC_SSHD)
+    d.store.insert(session_id="s-unknown", uid=UID, user="alice",
+                   partition="A6000", account="acct", cpus=2, mem="8G",
+                   requested_time="1:00:00", state=mod.ST_ENROLLED,
+                   candidates="55002", created_at=mod.now_ts())
+    # with_secret=False：这两行的 job_id 是空的，而取口令那条路要按 job_id 读会话
+    # 文件。这里要验的只是 service_kind 的渲染，与口令无关。
+    check("session_view 报出 service_kind",
+          d.session_view(d.store.get("s-known"), with_secret=False)["service_kind"]
+          == mod.SVC_SSHD)
+    check("★ 数据库里没有时报 None，不许猜一个默认值 —— 猜错会让界面拿口令去打 SSH 端口",
+          d.session_view(d.store.get("s-unknown"), with_secret=False)["service_kind"]
+          is None)
+
+    # 19.7 ★ 从 nft 规则恢复出来的会话不许猜自己的服务种类
+    #     nft 规则里没有任何东西能说明那个端口上跑的是 code-server 还是 sshd。
+    class _FakeNft(object):
+        def session_rules(self):
+            return ["slurmate-sess-%d-%d-%d" % (UID, 99999, 55555)]
+
+        def del_by_comment(self, _c):
+            pass
+
+    class _FakeSlurm(object):
+        JOB_OK = mod.Slurm.JOB_OK
+
+        def job_state(self, _jid):
+            return self.JOB_OK, {"JobState": "RUNNING", "UserId": UID,
+                                 "NodeList": "node01", "Partition": "A6000",
+                                 "Account": "acct", "TimeLimit": "1:00:00"}
+
+        def expand_node(self, _n):
+            return "node01"
+
+        def node_ip(self, _n):
+            return "192.0.2.11"
+
+    d.store = mod.Store(os.path.join(tmpdir, "svc-recover.db"))
+    _real_nft, _real_slurm = d.nft, d.slurm
+    d.nft, d.slurm = _FakeNft(), _FakeSlurm()
+    try:
+        n = d.recover_from_rules()
+    finally:
+        d.nft, d.slurm = _real_nft, _real_slurm
+    rows = d.store.by_state((mod.ST_ENROLLED,))
+    check("恢复用例本身要真的恢复出一行（否则下面那条是空断言）",
+          n == 1 and len(rows) == 1, "n=%s rows=%s" % (n, len(rows)))
+    if rows:
+        check("★ 恢复态的服务种类是 NULL，不是 'code-server'",
+              rows[0]["service_kind"] is None, repr(rows[0]["service_kind"]))
+    d.store.close()
+
+    # 19.8 老库补列：加一个**可空**列是纯加法，直接迁移；不像删 NOT NULL 列那次
+    #     只能拒绝启动。不补的后果是旧库上守护进程照常启动，直到第一次用到新列
+    #     才抛 no such column，被兜成 code 9「内部错误」。
+    old_db2 = os.path.join(tmpdir, "old-nosvc.db")
+    _c = _sq.connect(old_db2)
+    # 夹具要带上 SCHEMA_SQL 里那几条索引引用的列 —— `CREATE TABLE IF NOT EXISTS`
+    # 不会改建好的表，但 `CREATE INDEX IF NOT EXISTS ... ON sessions(state)` 会
+    # 因为缺列直接报错。
+    _c.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, uid INTEGER, "
+                "state TEXT, job_id INTEGER, node_ip TEXT, service_port INTEGER)")
+    _c.execute("INSERT INTO sessions (session_id, uid) VALUES ('kept', 2002)")
+    _c.commit()
+    _c.close()
+    _st = mod.Store(old_db2)
+    _cols = {r[1] for r in _st.conn.execute("PRAGMA table_info(sessions)")}
+    check("★ 老库（没有 service_kind 列）被自动补上",
+          "service_kind" in _cols, str(sorted(_cols))[:120])
+    check("补列不动已有的数据",
+          _st.get("kept") is not None and _st.get("kept")["uid"] == 2002)
+    _st.close()
+    check("补列是幂等的（再开一次不报错）", mod.Store(old_db2).close() is None)
+
+    # 19.9 ★ 候选端口表的分隔符
+    # 实测（在计算节点上）：`--export=ALL,SLURMATE_CANDIDATES=55001,55002,55003,AFTER=ok`
+    # 传给作业的 SLURMATE_CANDIDATES 是 **55001** —— Slurm 按逗号切 --export，
+    # 后两段被当成"要导出的变量名"、未设置于是丢掉。六个候选端口有五个静默消失，
+    # 那个仅剩的端口恰好被占时作业就以"候选端口全部失败"退出。
+    _r, _s, _e = run_submit({"op": "submit"})
+    _cands_env = _e.get("SLURMATE_CANDIDATES", "")
+    check("★ 候选端口表用分号分隔（逗号会被 sbatch 的 --export 切碎，只剩第一个）",
+          ";" in _cands_env and "," not in _cands_env, repr(_cands_env))
+    check("★ 候选个数没被截断成一个",
+          len(_cands_env.split(";")) == len(_s["candidates"].split(",")),
+          "%d 个 vs 数据库里 %d 个"
+          % (len(_cands_env.split(";")), len(_s["candidates"].split(","))))
+
+    # 19.10 ★ 作业内 sshd 的主机公钥
+    # 客户端拿它把这一条【预先】写进 known_hosts，从而能用 StrictHostKeyChecking yes
+    # 连进来。没有它，那边只能 accept-new（首次信任），而"首次"在这条通路上是可以
+    # 被抢的：端口来自候选表，同节点另一个用户理论上能先占住它，客户端第一次连过去
+    # 就信任了他的密钥。
+    #
+    # ★ 这一条单独存在是有理由的：SESSION_FILE_FIELDS 是**白名单**，它会静默丢弃
+    #   未登记的字段。漏了 ssh_host_key，作业照常写、这边照常启动，只是主机公钥
+    #   凭空消失 —— 而症状是"客户端连不上，说主机密钥未知"，指不回这一行。
+    check("★ 会话文件白名单里有 ssh_host_key（漏了会静默丢弃）",
+          "ssh_host_key" in mod.SESSION_FILE_FIELDS)
+
+    class _FakeSlurmNoJob(object):
+        def show_job(self, _jid):
+            return None
+
+    _hk = "ssh-ed25519 " + "A" * 68
+    d.store = mod.Store(os.path.join(tmpdir, "svc-hostkey.db"))
+    d.store.insert(session_id="s-hostkey", uid=UID, user="alice", job_id=777,
+                   node_ip="192.0.2.20", service_port=55003,
+                   partition="A6000", account="acct", cpus=2, mem="8G",
+                   requested_time="1:00:00", state=mod.ST_ENROLLED,
+                   candidates="55003", created_at=mod.now_ts(),
+                   service_kind=mod.SVC_SSHD)
+    _real_load, _real_slurm = d.load_session_file, d.slurm
+    d.slurm = _FakeSlurmNoJob()
+    try:
+        d.load_session_file = lambda uid, jid: ({"ssh_host_key": _hk}, None)
+        _v = d.session_view(d.store.get("s-hostkey"))
+        d.load_session_file = lambda uid, jid: ({"ssh_host_key": "   "}, None)
+        _v_blank = d.session_view(d.store.get("s-hostkey"))
+        d.load_session_file = lambda uid, jid: ({}, None)
+        _v_none = d.session_view(d.store.get("s-hostkey"))
+    finally:
+        d.load_session_file, d.slurm = _real_load, _real_slurm
+    check("session_view 带出主机公钥", _v.get("ssh_host_key") == _hk,
+          repr(_v.get("ssh_host_key")))
+    # 「没有这个字段」和「有这个字段但是空」对客户端是两件事：后者会被读成
+    # "主机公钥是空的"，而空公钥没有任何合法处理方式。
+    check("★ 空白的主机公钥不出现在响应里",
+          "ssh_host_key" not in _v_blank, repr(_v_blank.get("ssh_host_key")))
+    check("没有这一项时也不出现（code-server 的作业就是这样）",
+          "ssh_host_key" not in _v_none, repr(_v_none.get("ssh_host_key")))
+    d.store.close()
+
+    # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
+    #
+    # 这两个文件之间有一条**跨语言的契约**：作业用 printf 拼一段 JSON 出来，守护
+    # 进程按 SESSION_FILE_FIELDS 这个白名单去读，**未登记的字段一律静默丢弃**。
+    # 于是「作业加了一个字段、这边忘了登记」的症状是：作业照常跑、守护进程照常起、
+    # 那个字段凭空消失，而**没有任何地方会报错** —— 正是本项目一路在清的那类问题。
+    #
+    # 所以这里把契约变成可执行的：真的把 write_session 跑一遍，再要求
+    #   ① 它输出的每一个键都在白名单里（漏登记当场红）
+    #   ② 那份 JSON 能被守护进程解析（printf 的参数个数错了就解析不了）
+    #   ③ 逐字段对上（参数错位会让 ssh_host_key 里躺着别的值）
+    # 这一节是 run.sbatch 在本文件里唯一的自动化防线 —— 它没有 .sh 后缀，
+    # checks.yml 的语法扫描清单里不含它，改动后只有 `bash -n` 和这里在看着。
+    print("\n── 20. run.sbatch 写出来的会话文件 ──")
+    _rb = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sbatch")
+    _skip = None
+    try:
+        with open(_rb, encoding="utf-8") as f:
+            _rblines = f.read().split("\n")
+    except OSError as e:
+        _rblines, _skip = None, "读不到 run.sbatch：%s" % e
+
+    def _grab(name):
+        """按花括号配平抽出一个 shell 函数的原文。"""
+        start = next(i for i, l in enumerate(_rblines) if l.startswith(name + "()"))
+        depth, out = 0, []
+        for l in _rblines[start:]:
+            out.append(l)
+            depth += l.count("{") - l.count("}")
+            if depth == 0 and len(out) > 1:
+                break
+        return "\n".join(out)
+
+    if _skip is None:
+        try:
+            _funcs = "\n".join(_grab(n) for n in
+                               ("write_atomic", "json_escape", "write_session"))
+        except StopIteration:
+            _skip = "run.sbatch 里找不到 write_atomic/json_escape/write_session"
+    if _skip is None:
+        # 抽出来的东西自己得先是合法 shell，否则下面那次运行失败的原因与被测逻辑无关
+        _syn = subprocess.run(["bash", "-n", "-c", _funcs], capture_output=True, text=True)
+        if _syn.returncode != 0:
+            _skip = "抽出来的函数不是合法 shell（抽取逻辑要跟着改）：%s" % _syn.stderr.strip()
+
+    check("run.sbatch 的会话文件可以被自动检查（抽取失败就是这一条红）",
+          _skip is None, _skip or "")
+
+    if _skip is None:
+        _hk = "ssh-ed25519 " + "K" * 68
+        _harness = "\n".join([
+            "set -u",
+            'SLURMATE_SESSION_ID="sess-abc123"', "JOB_ID=12345",
+            "MY_UID=$(id -u)", "MY_USER=$(id -un)",
+            "SLURMATE_PARTITION=A6000", "NODE=node01", "NODE_IP=192.0.2.20",
+            "SVC_PORT=55003", "STARTED_AT=1700000000",
+            "SLURMATE_SERVICE_KIND=sshd", "SVC_PID=4242",
+            "AUTH_MODE=publickey", 'AUTH_PASSWORD=""',
+            'SSH_HOST_PUB="%s"' % _hk,
+            "SLURM_RESTART_NUMBER=0",
+            'SESS_FILE="%s"' % os.path.join(tmpdir, "job-12345.json"),
+            _funcs,
+            'write_session "running" null',
+        ])
+        _run = subprocess.run(["bash", "-c", _harness], capture_output=True, text=True)
+        _path = os.path.join(tmpdir, "job-12345.json")
+        _parsed = None
+        if _run.returncode == 0 and os.path.exists(_path):
+            try:
+                with open(_path, encoding="utf-8") as f:
+                    _parsed = json.load(f)
+            except ValueError as e:
+                _parsed = None
+                _run.stderr += "\nJSON 解析失败：%s" % e
+        check("write_session 能跑通并写出合法 JSON（printf 的参数个数错了就红）",
+              _parsed is not None,
+              (_run.stderr or _run.stdout or "").strip()[:300])
+        if _parsed is not None:
+            _unknown = sorted(set(_parsed.keys()) - mod.SESSION_FILE_FIELDS)
+            check("★ 它写出来的每个键都在守护进程的白名单里"
+                  "（漏登记 = 那个字段被静默丢弃，谁都不会报错）",
+                  _unknown == [], "没登记的键：%s" % _unknown)
+            check("★ 字段没有错位（printf 参数与格式串一一对应）",
+                  _parsed.get("ssh_host_key") == _hk
+                  and _parsed.get("service_pid") == 4242
+                  and _parsed.get("service_kind") == "sshd"
+                  and _parsed.get("auth_mode") == "publickey"
+                  and _parsed.get("tunnel_target") == "192.0.2.20:55003"
+                  and _parsed.get("exit_code") is None,
+                  repr({k: _parsed.get(k) for k in
+                        ("ssh_host_key", "service_pid", "service_kind",
+                         "tunnel_target", "exit_code")}))
+            check("schema 与守护进程认的那一个一致",
+                  _parsed.get("schema") == mod.SCHEMA_VERSION,
+                  "%s vs %s" % (_parsed.get("schema"), mod.SCHEMA_VERSION))
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

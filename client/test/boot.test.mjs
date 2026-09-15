@@ -17,6 +17,16 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
+/**
+ * 假的「家目录」。
+ *
+ * ★ 不能用 os.tmpdir()：真正模式下的中转站会往 `app.getPath('home')` 写
+ *   `~/.ssh/config`，而 `os.tmpdir()` 是一个**大家共用、且会被之前的运行留下东西**
+ *   的目录 —— 拿它当断言目标，「演示模式没碰真家目录」这条会变成一个看运气的用例
+ *   （跑过一次真写之后，后面每次都会红）。给一个每次全新的空目录，这条断言就
+ *   真的在断言「我们没往那儿写」，而不是在断言「这个目录恰好不存在」。
+ */
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [] };
@@ -90,7 +100,7 @@ class FakeBrowserWindow {
 
 const electronStub = {
   app: {
-    getPath: (k) => (k === 'userData' ? userData : os.tmpdir()),
+    getPath: (k) => (k === 'userData' ? userData : fakeHome),
     getVersion: () => '0.1.0-test',
     on: () => {},
     // 立刻 resolve：index.js 的启动链挂在 whenReady().then(...) 上，
@@ -614,4 +624,380 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
     cookies: { get: async () => [{ name: 'code-server-session', value: 'x' }] },
   };
   assert.equal((await performLogin(ses2, 'http://127.0.0.1:1', 'pw')).ok, true);
+});
+
+// ── 默认资源：服务端通报，客户端只读地用 ────────────────────────────────────
+
+test('★ 服务端通报的默认资源要真的送到界面上，不能又在客户端硬编码一份', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // op:partitions 的响应里一直带着 defaults（cluster/slurmate-sessiond:2080），
+  // 而主进程此前只取 .partitions，把它整个丢掉了 —— 界面于是只能把「2 核 / 8G」
+  // 写死在文案里，管理员改了默认值界面照样显示旧数字，且没有任何地方会报错。
+  const r = await invoke('app:partitions');
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.resourceDefaults, { cpus: 2, mem: '8G' },
+    '服务端通报的默认资源必须原样带回来');
+
+  const boot = await invoke('app:bootstrap');
+  assert.deepEqual(boot.resourceDefaults, { cpus: 2, mem: '8G' },
+    'bootstrap 也要带 —— 界面首次渲染时还没有别的机会拿到它');
+});
+
+test('★ 取不到分区时必须说出来，不能谎报「这台集群没有分区」', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+
+  // 让演示后端假装守护进程不可达
+  await invoke('app:debug', 'daemon-down');
+  try {
+    const r = await invoke('app:partitions');
+    assert.equal(r.ok, false, '查询失败就不能报 ok');
+    assert.ok(r.error, '必须给出原因 —— 否则界面只能显示一个空列表');
+    assert.match(r.error, /分区列表/, `错误里要说清是取分区列表失败：${r.error}`);
+    assert.deepEqual(r.partitions, [], '失败时列表为空，但区别在 error 上');
+    assert.equal(r.resourceDefaults, null);
+
+    // 而且不能悄悄留着上一次的值当成本次的结果
+    const notices = calls.windows[0].webContents.handlers['send:ui:notice'] || [];
+    assert.ok(notices.some((n) => n.kind === 'error' && /分区列表/.test(n.text)),
+      '失败要推一条 error 通知，而不是让用户去猜为什么没有分区');
+  } finally {
+    await invoke('app:debug', 'reset');
+    void idx;
+  }
+});
+
+test('★ 还在排队的会话必须被接上，而不是当成「没有会话」', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+
+  // 造一个会话，但**不经过 controller** —— 这样测试结束时不会留下别的定时器。
+  const b = idx._test.getBackend();
+  await invoke('app:debug', 'reset');
+  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true,
+    '前置条件：要先连上 —— 没连上时 tryReattach 会（正确地）直接返回');
+  await b.rpc({ op: 'submit', cpus: 2, mem: '8G' });
+  await new Promise((r) => setTimeout(r, 400));      // 演示后端 200ms 登记
+  const sid = b._session && b._session.session_id;
+  assert.ok(sid, '前置条件：要有一个会话');
+
+  // 把它改回「作业还在队列里」的样子：没有 tunnel_target。
+  // 这正是「换了电脑、或客户端重启时作业还没跑起来」的形态。
+  b._session.tunnel_target = null;
+  b._session.state = 'submitted';
+
+  // 重跑启动时那条路。注意不能 await —— 它会一直等登记，而这里永远不会登记。
+  const p = idx._test.reattach().catch(() => {});
+  await new Promise((r) => setTimeout(r, 600));
+
+  const ctl = idx._test.getController();
+  assert.ok(ctl,
+    '排队中的会话也必须被接管 —— 否则界面照常显示「启动」，用户一点就提交了'
+    + '第二个作业，而第一个还在队列里');
+  assert.equal(ctl.sessionId, sid, '接上的必须是同一个会话，不能另开一个');
+  assert.notEqual(ctl.state, 'running',
+    '还没有 tunnel_target，不能假装已经跑起来了');
+
+  // 收尾：结束这个会话，让 _waitForEnroll 的轮询自己走到终态停下
+  await invoke('app:stop');
+  await Promise.race([p, new Promise((r) => setTimeout(r, 5000))]);
+  await invoke('app:deleteConnection', conn.connection.id);
+  await invoke('app:debug', 'reset');
+});
+
+// ── SSH 中转站 ──────────────────────────────────────────────────────────────
+//
+// 这个功能的界面在**用户的终端里**，客户端这边唯一要做的事就是让 `ssh slurmate`
+// 能连进来。所以这一节的断言几乎全部落在文件上：写出来的 ssh 配置对不对、
+// 有没有动用户别的东西、以及**有没有建一个不该建的视图**。
+
+test('serviceRoute：三种输入各有各的答案，尤其「不知道」不能猜', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { serviceRoute } = require('../src/main/service.js');
+
+  assert.equal(serviceRoute('sshd'), 'sshd');
+  assert.equal(serviceRoute('code-server'), 'code-server');
+  // ★ 字段**不存在**（部署的守护进程还是旧版本）：那时候集群上只可能有
+  //   code-server 的会话，按它走与升级前一致。不这样兜的话，升级客户端会让
+  //   所有已有会话都变成「服务类型未知」—— 用户眼前的功能凭空消失。
+  assert.equal(serviceRoute(undefined), 'code-server',
+    '老守护进程没有这个字段时，不能把它读成「未知」');
+  // ★ 字段存在且是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
+  //   这时**绝不能猜** —— 猜 code-server 会拿口令去 POST 一个 SSH 端口，
+  //   猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
+  assert.equal(serviceRoute(null), 'unknown');
+  assert.equal(serviceRoute('ssh'), 'unknown', '认不出的值也不许退回默认');
+});
+
+test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../src/main/sshconfig.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-'));
+  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
+  const userCfg = path.join(home, '.ssh', 'config');
+  const original = 'Host myserver\n    HostName example.com\n\nHost *\n    ServerAliveInterval 60\n';
+  fs.writeFileSync(userCfg, original, { mode: 0o600 });
+
+  const r1 = sshc.ensureInclude(home);
+  assert.equal(r1.ok, true, r1.detail || '');
+  assert.equal(r1.changed, true);
+  const after1 = fs.readFileSync(userCfg, 'utf8');
+  assert.ok(after1.startsWith('# slurmate:include'),
+    '必须加在**最上面**：ssh 对每个参数取第一个获得的值，用户那份里常见的'
+    + ' `Host *` 块若排在前面，它的 Port/User 会赢过我们这一份');
+  assert.ok(after1.includes(`Include ${sshc.pathsFor(home).config}`));
+  assert.ok(after1.includes(original), '用户原有的内容必须逐字保留');
+  assert.equal(after1.endsWith(original), true, '而且必须排在我们那两行之后');
+
+  // 幂等：第二次连文件都不该动（mtime 也不动 —— 反复惊动用户的同步/杀毒软件
+  // 本身就是一种副作用）
+  const r2 = sshc.ensureInclude(home);
+  assert.equal(r2.ok, true);
+  assert.equal(r2.changed, false, '第二次不该再动这个文件');
+  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1);
+
+  // 家目录搬走之后自愈：旧路径那一行要被**替换**掉，而不是并排留着两份
+  // （并排留着的话，第一条仍然生效，而且指向一个不存在的地方）
+  fs.writeFileSync(userCfg,
+    after1.replace(sshc.pathsFor(home).config, '/old/home/.slurmate/ssh/config'));
+  const r3 = sshc.ensureInclude(home);
+  assert.equal(r3.changed, true, '路径变了要改回来');
+  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1,
+    '旧的那一行要被换掉，不能两份并存');
+
+  // ★ 读不出来时**绝不能**当作空文件往下写 —— 那会把用户**全部**的 ssh 配置抹掉，
+  //   而这是整个客户端里后果最严重的一次写盘。
+  const bad = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-bad-'));
+  fs.mkdirSync(path.join(bad, '.ssh', 'config'), { recursive: true });   // 是个目录
+  const r4 = sshc.ensureInclude(bad);
+  assert.equal(r4.ok, false, '读不出来就必须报错');
+  assert.ok(r4.detail, '要给出原因，好让界面告诉用户手工加哪一行');
+});
+
+test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙、known_hosts）', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../src/main/sshconfig.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg2-'));
+  const p = sshc.pathsFor(home);
+
+  // 一次性钥匙：只生成一次，之后必须复用（换了钥匙 = 「刚才还能连，现在认证失败」）
+  const k1 = sshc.ensureRelayKey(home);
+  assert.equal(k1.ok, true, k1.detail || '');
+  assert.equal(k1.created, true);
+  assert.match(k1.publicKeyLine, /^ssh-ed25519 [A-Za-z0-9+/]{68} slurmate-\d{8}-\d{4}$/,
+    `公钥形状要能被控制节点的规则接受：${k1.publicKeyLine}`);
+  const k2 = sshc.ensureRelayKey(home);
+  assert.equal(k2.created, false);
+  assert.equal(k2.publicKeyLine, k1.publicKeyLine, '第二次必须复用同一把');
+
+  const hostKey = 'ssh-ed25519 ' + 'A'.repeat(68);
+  const w = sshc.writeRelayConfig({ home, port: 18090, user: 'alice', hostKey });
+  assert.equal(w.ok, true, w.detail || '');
+  assert.equal(w.strict, true);
+
+  const cfg = fs.readFileSync(p.config, 'utf8');
+  assert.match(cfg, /^Host slurmate$/m, '别名必须恒定 —— codex 那一侧认的就是这一个词');
+  assert.match(cfg, /^\s+Port 18090$/m);
+  assert.match(cfg, /^\s+User alice$/m);
+  assert.match(cfg, /^\s+HostName 127\.0\.0\.1$/m);
+  assert.match(cfg, /^\s+IdentityFile .*id_ed25519$/m);
+  // ★ 不写这一条的话，ssh 会先把 agent 里的、~/.ssh 下的每一把都试一遍，
+  //   失败会计进 MaxAuthTries（默认 6）—— 钥匙一多，还没轮到我们这把就被断开了，
+  //   症状是一句「认证失败」，指不回根因。
+  assert.match(cfg, /^\s+IdentitiesOnly yes$/m);
+  assert.match(cfg, /^\s+StrictHostKeyChecking yes$/m,
+    '拿到了主机公钥就该严格核对，而不是首次信任');
+  assert.equal(fs.statSync(p.config).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(p.identity).mode & 0o777, 0o600);
+
+  // known_hosts：非 22 端口必须写成 [地址]:端口，方括号不能省
+  assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
+    `[127.0.0.1]:18090 ${hostKey}\n`);
+
+  // 拿不到主机公钥（守护进程还是旧版本）时退回首次信任 —— **能用但降级**
+  // 好过写出一个 ssh 直接拒绝连接的配置。
+  const w2 = sshc.writeRelayConfig({ home, port: 18091, user: 'alice', hostKey: null });
+  assert.equal(w2.ok, true);
+  assert.equal(w2.strict, false);
+  const cfg2 = fs.readFileSync(p.config, 'utf8');
+  assert.match(cfg2, /^\s+Port 18091$/m, '端口要跟着隧道走');
+  assert.match(cfg2, /^\s+StrictHostKeyChecking accept-new$/m);
+  // 形状不对的"主机公钥"绝不能被写进 known_hosts：一行一个条目，
+  // 值里的换行能让它变成**两行**，也就是凭空多出一个主机条目。
+  assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
+    `[127.0.0.1]:18090 ${hostKey}\n`, '没有可信公钥时不许动 known_hosts');
+  const evil = sshc.writeRelayConfig({ home, port: 18092, user: 'alice',
+    hostKey: 'ssh-ed25519 ' + 'A'.repeat(68) + '\nevil.example ssh-ed25519 ' + 'B'.repeat(68) });
+  assert.equal(evil.strict, false, '带换行的值必须被当成非法');
+});
+
+test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄坏', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../src/main/sshconfig.js');
+
+  // `~/.ssh/config -> ~/dotfiles/config` 是常见做法。而 rename(2) **不跟随目标上的
+  // 符号链接** —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
+  // ~/dotfiles/config 不再影响 ssh，两边从此各说各话，且没有任何地方会报错。
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-'));
+  const dotfiles = path.join(home, 'dotfiles');
+  fs.mkdirSync(dotfiles, { recursive: true });
+  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
+  const real = path.join(dotfiles, 'config');
+  fs.writeFileSync(real, 'Host from-dotfiles\n    HostName example.com\n', { mode: 0o600 });
+  fs.symlinkSync(real, path.join(home, '.ssh', 'config'));
+
+  const r = sshc.ensureInclude(home);
+  assert.equal(r.ok, true, r.detail || '');
+
+  const linkPath = path.join(home, '.ssh', 'config');
+  assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true,
+    '★ 那条符号链接必须还在 —— 被换成普通文件就等于用户的 dotfiles 工作流静默失效');
+  assert.ok(fs.readFileSync(real, 'utf8').includes('Include ' + sshc.pathsFor(home).config),
+    '内容要写进链接**指向**的那个文件');
+  assert.ok(fs.readFileSync(real, 'utf8').includes('Host from-dotfiles'),
+    '用户原有的内容照旧保留');
+});
+
+test('★ 读不出用户的 ssh 配置时，连碰都不能碰它', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../src/main/sshconfig.js');
+
+  // root 能读任何文件，这条造不出来 —— 明说跳过，而不是让它静默地「全绿」。
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('  （以 root 运行：跳过「读不出来」这条用例，它在本环境无法构造）');
+    return;
+  }
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshperm-'));
+  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
+  const cfg = path.join(home, '.ssh', 'config');
+  const precious = 'Host keepme\n    HostName important.example.com\n';
+  fs.writeFileSync(cfg, precious, { mode: 0o000 });
+
+  const r = sshc.ensureInclude(home);
+  assert.equal(r.ok, false, '读不出来就必须报错');
+  assert.ok(r.detail, '要给出原因，好让界面告诉用户手工加哪一行');
+  fs.chmodSync(cfg, 0o600);
+  assert.equal(fs.readFileSync(cfg, 'utf8'), precious,
+    '★ 读不出来时**绝不能**当作空文件往下写 —— 那会把用户全部的 ssh 配置抹掉，'
+    + '是整个客户端里后果最严重的一次写盘');
+});
+
+test('★ 会话一结束就要收起 code-server 视图，把面板还给用户', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = idx._test.getBackend();
+
+  // 等上一个用例的会话真的被释放（演示后端要 1.6 秒，而配额是 1）
+  await waitUntil(async () => !b._session
+    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+
+  // ★ 盯**窗口当前那一个视图**，不去数 calls.views 的下标。
+  //   数下标的话，如果中途有一次「视图被复用了、没有新建」，这个用例会以
+  //   「等待超时」收场 —— 红的理由和它想验的事情毫无关系，而真正想验的那条
+  //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
+  const w = idx._test.getWindow();
+  await invoke('app:start', null, 'code-server');
+  await waitUntil(() => (w.codeView && !w.codeView.webContents.isDestroyed()
+    && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(w.codeView.webContents._url)
+    ? w.codeView : null), 'code-server 视图');
+
+  // 结束会话。★ 用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
+  //   就是死的 —— 而状态要等下一次 status 轮询（60 秒）才可能从 releasing 变成
+  //   ended。所以收起视图必须发生在 releasing，不能等 ended：否则用户还要盯着
+  //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
+  await invoke('app:stop');
+  assert.equal(w.hasCodeView(), false,
+    '★ 会话结束后必须销毁 code-server 视图 —— 它是原生层、覆在面板上方，'
+    + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
+});
+
+/** 轮询等一个条件成立。失败时把最后看到的东西说出来，而不是干等超时。 */
+async function waitUntil(fn, what, ms = 15000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > deadline) assert.fail(`等待「${what}」超时`);
+    await new Promise((r) => setTimeout(r, 120));
+  }
+}
+
+test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const sshc = require('../src/main/sshconfig.js');
+
+  // 等上一个用例的会话真的被释放。演示后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
+  // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是**上一个用例**的会话，
+  // 排查起来会以为是中转站本身的问题。
+  const b = idx._test.getBackend();
+  await waitUntil(async () => !b._session
+    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+
+  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
+
+  const viewsBefore = calls.views.length;
+  const started = await invoke('app:start', null, 'sshd');
+  assert.equal(started.ok, true, `提交中转站会话失败：${JSON.stringify(started.snapshot)}`);
+
+  // 等它跑到 running（演示后端 200ms 登记）
+  let snap = null;
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    snap = await invoke('app:state');
+    if (snap && snap.state === 'running') break;
+    if (Date.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(snap && snap.state === 'running', `没跑到 running：${JSON.stringify(snap)}`);
+  assert.equal(snap.serviceKind, 'sshd');
+  // 客户端发上去的是 OpenSSH 的**一整行**（带注释，那正是用户能分辨「哪把是哪把」
+  // 的唯一依据），由服务端规范化掉注释 —— 注释里的逗号会劈开 `--export=ALL,k=v,…`，
+  // 而那是服务端那边要挡的事（见 test-sessiond-logic.py 19.9）。
+  assert.match(idx._test.getBackend()._relayPubkey, /^ssh-ed25519 [A-Za-z0-9+/]{68}$/,
+    '公钥到了服务端要已经规范化：只有类型和 base64，注释被丢掉');
+  assert.equal(snap.layoutId, null,
+    '中转站不分配布局组：它是给浏览器用的（端口 = origin = 一份编辑器布局），'
+    + '而中转站没有浏览器');
+  assert.ok(snap.localPort > 0, '隧道必须真的在监听');
+
+  // ★ 这一条是整节的重点：中转站**不该**建 code-server 视图。
+  //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西（ssh 怎么连）
+  //   恰好写在被盖住的那块面板上。
+  assert.equal(calls.views.length, viewsBefore,
+    '中转站不需要 WebContentsView —— 用户要看的东西在他自己的终端里');
+
+  // ★ 先查「有没有碰不该碰的地方」，再查「有没有写出该写的东西」。
+  //   顺序有讲究：反过来写的话，一个「把配置写进真家目录」的改动会先被
+  //   「演示目录里没有文件」那条拦下，而报出来的原因和真正的问题不是一回事。
+  assert.equal(fs.existsSync(path.join(fakeHome, '.slurmate')), false,
+    '★ 演示模式绝不能往真正的家目录里写东西');
+  assert.equal(fs.existsSync(path.join(fakeHome, '.ssh')), false,
+    '★ 尤其不能碰 ~/.ssh/config —— 那是用户**全部** ssh 都要经过的地方，'
+    + '比 config.json 严重得多');
+
+  // 演示模式必须落在**它自己的**配置目录里
+  const home = path.join(userData, 'demo-config');
+  assert.equal(fs.existsSync(sshc.pathsFor(home).config), true,
+    '演示模式下 ssh 配置要写在演示配置目录里');
+
+  const cfg = fs.readFileSync(sshc.pathsFor(home).config, 'utf8');
+  assert.match(cfg, new RegExp(`^\\s+Port ${snap.localPort}$`, 'm'),
+    '端口必须是隧道**实际**在监听的那一个（可能从 18090 顺移过）');
+  assert.match(cfg, /^\s+User demo$/m, '用户名取自这条连接');
+  assert.match(fs.readFileSync(sshc.pathsFor(home).userConfig, 'utf8'),
+    new RegExp(`Include ${sshc.pathsFor(home).config.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    '用户的 ssh 配置里要有一行 Include');
+  assert.equal(fs.readFileSync(sshc.pathsFor(home).knownHosts, 'utf8'),
+    `[127.0.0.1]:${snap.localPort} ssh-ed25519 ${'A'.repeat(68)}\n`,
+    '作业带回来的主机公钥要被钉进 known_hosts');
+
+  // 收尾
+  await invoke('app:stop');
 });

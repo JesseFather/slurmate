@@ -199,11 +199,20 @@ class SshBackend extends Backend {
     this._profile = null;
     this._whoami = null;
     this._connecting = null;
+    // 调用方（index.js 的启动接续）问的是「有没有连上」，不是「你的私有字段叫什么」。
+    // 见 backend.js 接口注释。连接中途断开时 `_conn` 会被置回 null（:309、:501），
+    // 所以这个 getter 跟着它就是准的。
     this._closed = false;
     this._reconnectTimer = null;
     this._attempt = 0;
     this._lastHostKey = null;   // { fingerprint, algorithm } —— 供界面展示
   }
+
+  /**
+   * 调用方（index.js 的启动接续）问的是「有没有连上」，不是「你的私有字段叫什么」。
+   * 见 backend.js 的接口注释。连接中途断开时 `_conn` 会被置回 null，所以跟着它就是准的。
+   */
+  get connected() { return Boolean(this._conn); }
 
   /**
    * 建立连接。

@@ -9,6 +9,11 @@
  *
  *   kind                   'demo' | 'ssh'
  *   label                  给界面显示的名字
+ *   connected              {boolean}  当前是不是连着。**两个后端必须都实现它** ——
+ *                          调用方（index.js 的启动接续）此前直接摸 SSH 后端的私有
+ *                          字段 `_conn`，而演示后端用的是另一个名字，于是那个判断
+ *                          在演示模式下恒为假、整条启动接续被静默关掉。
+ *                          要「有没有连上」就问后端，别去猜它的内部字段叫什么。
  *   connect(profile)       → { ok, error?, whoami? }   建立连接（演示后端在这里起 HTTP 服务）
  *   rpc(req)               → 守护进程风格的响应对象；**不抛异常**（传输失败由 classify 处理）
  *   dial(host, port)       → Promise<Duplex>  建立一条到目标的数据通道
@@ -29,6 +34,12 @@ class Backend extends EventEmitter {
     super();
     if (new.target === Backend) throw new Error('Backend 是抽象类');
   }
+
+  /**
+   * 抛异常而不是返回 false。少实现在这里会**静默**变成「永远没连上」，于是调用方
+   * （启动接续）什么都不做，而没有任何地方报错 —— 那正是这个接缝此前的老毛病。
+   */
+  get connected() { throw new Error('未实现 connected'); }
 
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }

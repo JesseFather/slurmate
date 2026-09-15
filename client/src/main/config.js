@@ -136,6 +136,23 @@ function normalizeConnection(raw, fallbackId) {
 const LAYOUT_PORT_BASE = 18080;   // 与旧 slotPort 的 base 一致 —— 升级不换端口
 
 /**
+ * 中转站隧道**优先**用的本地端口。
+ *
+ * ★ 它不是布局组端口，也**不进 config.json**。布局组的存在理由是「浏览器按 origin
+ *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 —— 它的
+ *   「接口」是 ssh 配置里那个恒定别名，端口只是底下的一个实现细节，写在那边那份
+ *   配置的 Port 行里。
+ *
+ * 所以这个值只是个**起手式**：真被占了（或撞上了某个布局组的端口 —— 排除集里
+ * 有全部布局端口，见 index.js 的 getExcludedPorts）隧道会顺移，然后把**实际**
+ * 端口写进 ssh 配置。用户看到的永远是 `ssh slurmate` 这一个名字。
+ *
+ * 取 18090 而不再往上堆：布局组从 18080 起按需递增，两边各占一段，
+ * 日常看不到的碰撞由上面那条排除集兜住。
+ */
+const RELAY_PORT_BASE = 18090;
+
+/**
  * 迁移出来的那个布局组的保留 id。
  *
  * ★ 必须是**字面量**，不能是随机值：loadConfig 自己不写盘（见文件头原则三条），若这里
@@ -684,7 +701,7 @@ module.exports = {
   SCHEMA, DEFAULTS, SECRET_ENCRYPTED, LEGACY_SECRET_PLAIN, PENDING_ID,
   loadConfig, saveConfig,
   // 布局组
-  LAYOUT_PORT_BASE, LEGACY_LAYOUT_ID, LEGACY_PARTITION, partitionForLayout,
+  LAYOUT_PORT_BASE, RELAY_PORT_BASE, LEGACY_LAYOUT_ID, LEGACY_PARTITION, partitionForLayout,
   newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
   nextLayoutName, layoutPort, setLayoutPort, setConnectionLayout,
   pruneLayouts, layoutPlan,

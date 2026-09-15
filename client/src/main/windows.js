@@ -35,6 +35,7 @@
 
 const path = require('path');
 const { BrowserWindow, WebContentsView, dialog, shell } = require('electron');
+const { SERVICE_SSHD } = require('./service.js');
 
 const STATUS_BAR_HEIGHT = 30;
 
@@ -80,6 +81,7 @@ class ShellWindow {
     this._closing = false;
     this._closeConfirmed = false;
     this._sessionLive = false;     // 由 pushState 更新
+    this._sessionService = null;   // 同上（'code-server' / 'sshd' / 'unknown' / null）
     this._overlayText = null;
 
     this.win.on('resize', () => this._layout());
@@ -204,6 +206,30 @@ class ShellWindow {
 
   hasCodeView() { return Boolean(this.codeView); }
 
+  /**
+   * 收起 code-server 视图，把窗口主体还给面板。
+   *
+   * ★ 两处必须调用，缺一个都会留下同一类症状：**用户看着一个打不开的页面，
+   *   而唯一能救他的按钮被那块页面盖住了**（codeView 是原生层，覆在面板上方，
+   *   面板那 30px 状态条以下的部分全在它底下）。
+   *
+   *   1. 会话结束时（ended / error）。那个页面背后的服务器已经没了 —— 隧道停了、
+   *      作业也快没了 —— 留着它只有坏处。此前**没有任何地方**调用这个收尾，
+   *      于是「结束会话」之后用户看到的是一张加载不出来的网页，出路只剩重启客户端。
+   *   2. 起中转站会话时。中转站压根不用这个视图（它什么都不显示，只在面板上
+   *      告诉你 ssh 怎么连），上一个会话留下的视图必须让开。
+   *
+   * 是**销毁**而不是 setVisible(false)：唤醒一个已经死掉的页面没有意义，而且
+   * ensureCodeServer 是按 (origin, partition) 判定要不要重建的，一个被藏起来的
+   * 旧页面会正好命中「没变」而永远不再加载。销毁之后下次一定是干净的新页面。
+   */
+  hideCodeView() {
+    if (!this.codeView) return;
+    this._destroyCodeView();
+    this.hideOverlay();
+    this._layout();
+  }
+
   async reloadCodeServer() {
     if (this.codeView && !this.codeView.webContents.isDestroyed()) {
       this.codeView.webContents.reload();
@@ -286,6 +312,8 @@ class ShellWindow {
     // 顺手记下即可，不必再开一条查询通道。
     const st = snap && snap.state;
     this._sessionLive = Boolean(st) && st !== 'idle' && st !== 'ended';
+    // 关窗文案要用：中转站模式下被掐断的不是一个网页，是用户**正在用的终端**。
+    this._sessionService = (snap && snap.serviceKind) || null;
     const wc = this.win.webContents;
     if (wc.isDestroyed()) return;
     wc.send('session:state', snap);
@@ -337,15 +365,23 @@ class ShellWindow {
         this.onClose();
         return;
       }
+      // 中转站模式下要掐断的东西不一样，所以话也得不一样：那边窗口里什么都没有，
+      // 用户真正在用的东西在他的终端里、在 codex 里。照搬 code-server 那句
+      // 「终端里的进程会被终止」，指的不是他手上那个终端 —— 而这一下点错，
+      // 断掉的是他正在跑的编译或对话。
+      const relay = this._sessionService === SERVICE_SSHD;
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',
         buttons: ['结束会话并退出', '取消'],
         defaultId: 1,                     // 默认停在「取消」：回车不该毁掉作业
         cancelId: 1,
         title: '关闭 Slurmate',
-        message: '关闭窗口会结束这个开发会话。',
-        detail:
-          '计算节点上的作业会被立即取消，终端里的进程会被终止。\n'
+        message: relay ? '关闭窗口会结束这个 SSH 中转会话。'
+                       : '关闭窗口会结束这个开发会话。',
+        detail: (relay
+          ? '计算节点上的作业会被立即取消 —— 你用 ssh slurmate 连上去的终端、'
+          + 'VS Code 远程窗口和 codex 会话都会当场断开。\n'
+          : '计算节点上的作业会被立即取消，终端里的进程会被终止。\n')
         + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
         + '下次打开会自动接上。）',
         noLink: true,

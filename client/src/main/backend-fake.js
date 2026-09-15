@@ -32,6 +32,7 @@
 const net = require('net');
 const { Backend, KIND } = require('./backend.js');
 const { createDemoCodeServer } = require('./demo-server.js');
+const { SERVICE_CODE_SERVER, SERVICE_SSHD } = require('./service.js');
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -48,6 +49,16 @@ const DEFAULTS = { cpus: 2, mem: '8G' };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
 const DEMO_PASSWORD = 'demo-1a2b3c4d5e6f7081';  // 固定值，方便你手动 curl 验证
+
+/** 演示里「作业内 sshd」听在哪个端口。**没有真的 sshd** —— 见 _submit 的说明。 */
+const DEMO_SSHD_PORT = 55901;
+/**
+ * 演示用的主机公钥。**这不是一把真钥匙** —— 只是一串形状正确的 base64。
+ * 客户端会把它写进 known_hosts（形状校验是真的），但演示里那个端口后面没有
+ * 任何东西在监听，所以 `ssh slurmate` 会在连接阶段就失败。这是诚实的：
+ * 演示模式假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的 sshd 也是假的。
+ */
+const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
 
 class FakeBackend extends Backend {
   /**
@@ -78,6 +89,9 @@ class FakeBackend extends Backend {
     this._tunnelDownUntil = 0;
     this._connected = false;
   }
+
+  /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
+  get connected() { return this._connected; }
 
   // ── 生命周期 ────────────────────────────────────────────────────────────
   async connect(profile) {
@@ -196,10 +210,33 @@ class FakeBackend extends Backend {
   }
 
   _submit(req) {
+    // 服务种类。照抄守护进程的判据：认不出的一律拒绝，绝不悄悄退回 code-server ——
+    // 那会让「我要的是中转站，得到的是一个网页 IDE」变成一个不报错的错误。
+    const kind = (req && req.service_kind) || SERVICE_CODE_SERVER;
+    if (kind !== SERVICE_CODE_SERVER && kind !== SERVICE_SSHD) {
+      return err(2, 'bad_service_kind', `未知的服务类型：${kind}`);
+    }
+    // 中转站必须带公钥，且形状要对 —— 规则与守护进程的 parse_ssh_pubkey **逐字一致**。
+    //
+    // ★ 注释要允许并**丢掉**。客户端发上来的就是 OpenSSH 的一整行，而它天然带注释
+    //   （`ssh-ed25519 AAAA… slurmate-20260915-1030`）。照着「68 个字符后必须结束」
+    //   去写，会把客户端的公钥**全部**拒掉；而如果反过来原样收下，那个注释里的
+    //   逗号会把 `--export=ALL,k=v,…` 劈成两个变量（守护进程那边这一步是真的，
+    //   不是理论问题 —— 见 test-sessiond-logic.py 19.9）。
+    if (kind === SERVICE_SSHD) {
+      const pk = req && req.ssh_pubkey;
+      const m = typeof pk === 'string'
+        ? /^ssh-ed25519 ([A-Za-z0-9+/]{68})(?:[ \t]+[^\r\n]*)?$/.exec(pk) : null;
+      if (!m) {
+        return err(2, 'bad_ssh_pubkey', '中转站会话必须带上一把合法的 ssh-ed25519 公钥');
+      }
+      this._relayPubkey = 'ssh-ed25519 ' + m[1];      // 规范化：注释在这里被丢掉
+    }
     // 本地 HTTP 服务是在 connect() 里起的。没起就说明调用方漏了 connect ——
     // 那样会产出一个 service_port=0 的会话，隧道目标变成 "127.0.0.1:0"，
     // 会话在「已登记」之后才炸。宁可在这里响亮地失败。
-    if (!this._server) {
+    // （中转站不需要它：那个端口后面没有 HTTP 服务。）
+    if (!this._server && kind === SERVICE_CODE_SERVER) {
       return err(9, 'internal', '演示后端尚未 connect()，本地服务未启动');
     }
     if (this._session && !['released', 'rejected', 'expired'].includes(this._session.state)) {
@@ -245,8 +282,12 @@ class FakeBackend extends Backend {
       renew_count: 0,
       requested_time: '12:00:00',
       note: null,
-      auth_mode: 'password',
+      service_kind: kind,
+      // 与守护进程一致：中转站走公钥，永远没有口令（有口令才是错的 ——
+      // 那会让界面以为可以拿它去 POST 登录）。
+      auth_mode: kind === SERVICE_SSHD ? 'publickey' : 'password',
       auth_password: null,
+      ssh_host_key: null,
       job_state: 'PENDING',
       time_limit: '12:00:00',
       expires_at: now + DEFAULT_TIME_SECONDS,
@@ -257,12 +298,19 @@ class FakeBackend extends Backend {
       this._session.state = 'enrolled';
       this._session.enrolled_at = nowSec();
       this._session.node = part.name === '2080TI' ? 'node04' : 'node01';
-      // 演示里 tunnel_target 指向本地的假 code-server。
+      // 演示里 tunnel_target 指向本地的假 code-server（中转站则指向一个**没有
+      // 东西在监听**的端口 —— 那边真正的 sshd 假不出来，见 DEMO_HOST_KEY）。
       // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
       this._session.node_ip = '127.0.0.1';
-      this._session.service_port = this._server ? this._server.port : 0;
+      const relay = this._session.service_kind === SERVICE_SSHD;
+      this._session.service_port = relay
+        ? DEMO_SSHD_PORT : (this._server ? this._server.port : 0);
       this._session.tunnel_target = `127.0.0.1:${this._session.service_port}`;
-      this._session.auth_password = DEMO_PASSWORD;
+      if (relay) {
+        this._session.ssh_host_key = DEMO_HOST_KEY;
+      } else {
+        this._session.auth_password = DEMO_PASSWORD;
+      }
       this._session.job_state = 'RUNNING';
       this._emitState(true, '会话已登记');
     }, this.enrollDelayMs).unref?.();
@@ -344,7 +392,16 @@ class FakeBackend extends Backend {
       requested_time: s.requested_time, note: s.note,
       auth_mode: s.auth_mode, account: s.account,
       tunnel_target: s.tunnel_target,
+      // 与守护进程逐字一致：这个字段**总是**存在（可能是 null）。
+      // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——
+      // 而"字段不存在"是另一回事（老守护进程），那时按 code-server 走。
+      service_kind: s.service_kind === undefined ? null : s.service_kind,
     };
+    // 主机公钥只在有值时才出现 —— 与守护进程一致（空值不放进响应里，
+    // 否则客户端会把它读成"公钥是空的"，那是个没法处理的输入）。
+    if (typeof s.ssh_host_key === 'string' && s.ssh_host_key) {
+      d.ssh_host_key = s.ssh_host_key;
+    }
     if (s.job_state) {
       d.job_state = s.job_state;
       d.time_limit = s.time_limit;

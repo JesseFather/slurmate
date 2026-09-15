@@ -41,11 +41,14 @@ const path = require('path');
 const config = require('./config.js');
 const keys = require('./keys.js');
 const hosts = require('./hosts.js');
+const sshconfig = require('./sshconfig.js');
 const { createBackend } = require('./backend.js');
 const { SessionController, State } = require('./session.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const { LOGIN_PATH, PASSWORD_FIELD, SESSION_COOKIE, loginSucceeded } = require('./login.js');
+const { SERVICE_CODE_SERVER, SERVICE_SSHD, SERVICE_UNKNOWN,
+        SSH_ALIAS, serviceRoute } = require('./service.js');
 
 const DEMO_FLAG = process.argv.includes('--demo');
 
@@ -56,6 +59,20 @@ let cfgDir = null;
 let cfg = null;
 let whoami = null;
 let partitions = [];
+/**
+ * 服务端通报的**默认资源**（`{cpus, mem}`）。
+ *
+ * ★ 它是**管理员设定的策略**，不是用户偏好。所以界面只读地显示它，并且每次启动都
+ *   用它 —— 靠的是提交时【省略】cpus/mem 字段让服务端填当下那份默认值，而不是把
+ *   这里收到的值再发回去。两者不等价：管理员把默认从 2 核改成 4 核之后，回发旧值的
+ *   客户端会把它永远钉死在 2 核，而「省略」永远拿到当下的默认。
+ *   只有用户当场点开「高级选项」，才发明确值。
+ *
+ * ★ 服务端一直在 `op:partitions` 的响应里返回它（cluster/slurmate-sessiond:2080），
+ *   而这里此前把它整个丢掉了 —— 于是界面只能把「2 核 / 8G」硬编码在文案里，
+ *   管理员改了默认值，界面照样显示旧数字，而且没有任何地方会报错。
+ */
+let resourceDefaults = null;
 let quitting = false;
 
 /**
@@ -378,12 +395,44 @@ async function doConnect(conn, extra = {}) {
   return res;
 }
 
+/**
+ * 取分区列表与默认资源。**不碰全局状态、不弹通知** —— 纯查询，好测。
+ *
+ * op 名从 purposes 改成 partitions：新协议里不再有「用途」这一层，
+ * 分区直接来自 Slurm（并与该用户的 association 求交）。
+ *
+ * ★ 失败必须**说出来**。此前这里是 `resp.ok && resp.data.partitions || []` ——
+ *   守护进程不可达或权限不足时静默得到空数组，界面于是显示「这台集群没有任何分区」，
+ *   而真正的原因（连不上控制节点）一个字都没留下。用户会去查自己的分区权限，
+ *   查一个根本不存在的问题。
+ *
+ * @returns {Promise<{ok:boolean, partitions:Array, defaults:object|null, error:string|null}>}
+ */
+async function loadPartitions() {
+  let resp;
+  try {
+    resp = await backend.rpc({ op: 'partitions' });
+  } catch (e) {
+    return { ok: false, partitions: [], defaults: null,
+             error: `取分区列表失败：${e.message}` };
+  }
+  if (!resp || !resp.ok) {
+    const detail = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
+    return { ok: false, partitions: [], defaults: null,
+             error: `取分区列表失败：${detail}` };
+  }
+  const data = resp.data || {};
+  return { ok: true, partitions: data.partitions || [],
+           defaults: data.defaults || null, error: null };
+}
+
+/** 刷新全局的分区列表与默认资源。失败时推一条 error 通知，并把 ok:false 传出去。 */
 async function refreshPartitions() {
-  // op 名从 purposes 改成 partitions：新协议里不再有「用途」这一层，
-  // 分区直接来自 Slurm（并与该用户的 association 求交）。
-  const resp = await backend.rpc({ op: 'partitions' });
-  partitions = (resp && resp.ok && resp.data && resp.data.partitions) || [];
-  return partitions;
+  const r = await loadPartitions();
+  partitions = r.partitions;
+  resourceDefaults = r.defaults;
+  if (!r.ok && win) win.pushNotice('error', r.error);
+  return r;
 }
 
 /**
@@ -523,8 +572,37 @@ function clearLayoutStorage(layoutId) {
 }
 
 // ── 会话编排 ────────────────────────────────────────────────────────────────
-async function startSession(resources) {
-  const layoutId = layoutForSession();
+/**
+ * 起一个会话。
+ *
+ * @param {object} resources 高级选项里的临时覆盖（见 session.js 的 start）
+ * @param {'code-server'|'sshd'} serviceKind 这一次要哪种服务
+ */
+async function startSession(resources, serviceKind) {
+  const relay = serviceKind === SERVICE_SSHD;
+  // ★ 中转站**不分配布局组**：布局组是给浏览器用的（端口 = origin = 一份编辑器
+  //   布局），而中转站没有浏览器。给它一个组只会凭空造出一个永远不会被创建的
+  //   存储分区，并且让「运行中切布局」那条路去挪一个 ssh 隧道正在用的端口。
+  const layoutId = relay ? null : layoutForSession();
+
+  // 中转站要一把公钥交给作业。**先备好再提交** —— 没有它守护进程会拒绝这次提交
+  // （code 2），而那要花掉一整趟往返。
+  let sshPubkey = null;
+  if (relay) {
+    const home = relayHome();
+    const k = sshconfig.ensureRelayKey(home);
+    if (!k.ok) {
+      win.pushNotice('error', `无法准备中转站用的密钥：${k.detail}`);
+      return null;
+    }
+    sshPubkey = k.publicKeyLine;
+    if (k.created) {
+      win.pushNotice('info',
+        `已为中转站生成一把一次性密钥，存在 ${sshconfig.pathsFor(home).identity}。`
+        + '它只被写进你自己作业的 authorized_keys —— 任何登录入口都不认它，'
+        + '所以要连进来仍然需要你自己那把 IDM 密钥。');
+    }
+  }
 
   // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
   //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会**复用**那个
@@ -540,19 +618,36 @@ async function startSession(resources) {
       onTunnelPort: (id, port) => {
         // 端口要**持久化** —— 变了 origin 就变，code-server 存在 localStorage 里的
         // 编辑器布局会重置。记住它，下次还用同一个。
+        // （中转站走的是下面那条 onRelayPort，它的端口属于 ssh 配置，不进这里。）
+        if (!id) return;                // 中转站没有布局组，没有东西可记
         config.setLayoutPort(cfgDir, cfg, id, port);
       },
+      // 中转站的端口写进用户的 ssh 配置，不写进 config.json（见 sshconfig.js）。
+      // 这里只需要「重新渲染一次」，配置由 ensureSshRelay 按当前端口重写；
+      // 端口和主机公钥都没变时它会自己跳过（那正是它幂等的依据）。
+      onRelayPort: () => onSessionChange(controller.snapshot()),
       // 端口顺移时必须跳过别的布局组占着的端口，否则两个组会声称同一个端口，
       // 每次启动谁先绑谁赢，布局在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
       // 不然自己那个端口会被当成「别人的」而永远绑不上。
+      //
+      // 中转站的 layoutId 是 null，于是这里排除掉**全部**布局端口 —— 正是要的：
+      // 它绝不能落到某个布局组的端口上。
       getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
     });
     controller.on('change', onSessionChange);
     controller.on('retarget', () => onSessionChange(controller.snapshot()));
   }
+  // ★ 这里**没有** else 分支。走到 else 的唯一可能是「已经有一个会话在跑」，
+  //   而那种情况下 controller.start() 会抛「会话已在进行中」—— 这正是双击
+  //   「开始」时该有的表现。在 else 里顺手改一下运行中会话的 layoutId 是纯副作用：
+  //   它会把这个正在跑的会话挪到另一个布局组上，而用户什么都没要求。
 
-  const preferredPort = config.layoutPort(cfg, layoutId);
-  const snap = await controller.start(resources, { preferredPort });
+  const preferredPort = relay
+    ? config.RELAY_PORT_BASE
+    : config.layoutPort(cfg, layoutId);
+  const snap = await controller.start(resources, {
+    preferredPort, serviceKind: relay ? SERVICE_SSHD : SERVICE_CODE_SERVER, sshPubkey,
+  });
   if (!snap) onSessionChange(controller.snapshot());
   return snap;
 }
@@ -575,7 +670,28 @@ async function onSessionChange(snap) {
 async function _renderSession(snap) {
   win.pushState(snap);
 
-  if (snap.state === State.RUNNING && snap.origin) await ensureCodeServer(snap);
+  // 会话没有了（结束/出错/正在释放），或者压根还没起来：窗口里那个 code-server
+  // 页面背后的服务器已经不存在了 —— 隧道在 stop() 的最开头就停了 —— 收起它，
+  // 把窗口主体还给面板，而面板上正是「重新开始」那几个按钮。
+  //
+  // ★ RELEASING 也要算在内，而且它才是在真机上**最先到达**的那一个：stop() 发出
+  //   goodbye 之后状态就是 releasing，而它要等下一次 status 轮询（60 秒）才可能
+  //   变成 ended。只收 ENDED 的话，用户点了「结束会话」之后还要盯着一块打不开的
+  //   页面最多一分钟。
+  if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
+    win.hideCodeView();
+  }
+
+  // ── 唯一的服务分派点 ──
+  //
+  // ★ 不分流的后果不是崩溃，而是**误导**：code-server 那条路会拿会话口令去
+  //   POST 一个 SSH 端口，然后弹一句语义完全错误的「自动登录失败」；反过来
+  //   中转站那边会去建一个 WebContentsView 加载一个根本不是说 HTTP 的端口。
+  if (snap.state === State.RUNNING && snap.origin) {
+    if (snap.serviceKind === SERVICE_SSHD) await ensureSshRelay(snap);
+    else if (snap.serviceKind === SERVICE_CODE_SERVER) await ensureCodeServer(snap);
+    else if (snap.serviceKind === SERVICE_UNKNOWN) await warnUnknownService(snap);
+  }
   if (snap.state === State.RUNNING && snap.warning) {
     await win.showOverlay(snap.warning);
     win.setBusy(true);
@@ -612,6 +728,116 @@ async function ensureCodeServer(snap) {
   const rebuild = win.hasCodeView() && win.codePartition !== partition;
   await openCodeServer(snap);
   if (rebuild) win.pushNotice('info', '已切换到新的布局组，编辑器页面已重新加载。');
+}
+
+// ── SSH 中转站 ──────────────────────────────────────────────────────────────
+//
+// 中转站**没有视图**：用户要用的东西（原生 VS Code Remote-SSH、codex）跑在他自己
+// 的机器上，客户端这边唯一要做的事就是让 `ssh slurmate` 这个名字能连进来 ——
+// 也就是维护那两个文件（见 sshconfig.js）。
+//
+// 于是「建立会话」这件事在这里的全部内容就是：写文件、告诉用户怎么用。
+
+/**
+ * 上一次**已经就服务本身通知过**的那组值（端口|用户名|主机公钥，或 unknown|会话 id）。
+ *
+ * 两件事靠它：值没变就不重写 ssh 配置、也不重复报同一条通知。
+ * 状态变化是**频繁**的 —— 心跳告警、隧道重建、每次 status 回来都会走到渲染 ——
+ * 没有这个去重，用户每 45 秒会收到一条一模一样的「中转站已就绪」，等于没有通知；
+ * 顺带每次心跳都重写一遍 ssh 配置，白白惊动用户的同步/杀毒软件。
+ */
+let lastServiceNotice = null;
+
+/**
+ * 写 ssh 配置时用的「家目录」。
+ *
+ * ★ 演示模式**必须**落在它自己的配置目录里，绝不能碰真的 `~/.ssh/config` ——
+ *   演示模式的一条硬纪律是「不产生任何真实副作用」（config.json 也是这么隔离的），
+ *   而 `~/.ssh/config` 是用户**全部** ssh 都要经过的地方，比 config.json 严重得多。
+ */
+function relayHome() {
+  return DEMO_FLAG ? cfgDir : app.getPath('home');
+}
+
+/**
+ * 中转站就绪：把本地 ssh 配好。
+ *
+ * **幂等**，每次状态变化都会调（心跳告警、隧道重建都会触发）。所以：
+ * 值没变就直接返回 —— 否则用户每 45 秒收到一条一模一样的通知，等于没有通知，
+ * 而每次心跳都重写一遍 ssh 配置也是白白惊动用户的杀毒/同步软件。
+ */
+async function ensureSshRelay(snap) {
+  const port = snap.localPort;
+  if (!port) return;                       // 还没监听，还轮不到写配置
+
+  // 登录节点上的用户名。用连接里那个 —— 它是用户亲手填的，而 whoami 要等一次
+  // RPC 回来才有（重连上来时可能还没有）。
+  const conn = config.activeConnection(cfg);
+  const user = (conn && conn.user) || (whoami && whoami.user);
+  if (!user) {
+    win.pushNotice('error', '中转站已就绪，但不知道要用哪个用户名写 ssh 配置。');
+    return;
+  }
+
+  const key = `${port}|${user}|${snap.sshHostKey || ''}`;
+  if (lastServiceNotice === key) return;
+
+  const home = relayHome();
+  const inc = sshconfig.ensureInclude(home);
+  const w = sshconfig.writeRelayConfig({
+    home, port, user, hostKey: snap.sshHostKey,
+  });
+
+  if (!w.ok) {
+    win.pushNotice('error',
+      `中转站已就绪，但没能写出 ssh 配置（${w.detail || w.error}）。`
+      + `你仍然可以直接连 127.0.0.1:${port} 使用它。`);
+    return;
+  }
+  lastServiceNotice = key;
+
+  // Include 没加上时**照样**把我们自己那份配置写好了：用户可以手工加那一行，
+  // 也可以自己 ssh -F <路径>。但必须说出来 —— 不说的话他敲 `ssh slurmate` 会得到
+  // 「Could not resolve hostname」，而根因是我们没能改他的文件。
+  if (!inc.ok) {
+    win.pushNotice('warn',
+      `没能把 Include 加进 ${inc.path}（${inc.detail}）。`
+      + `请手工在那个文件的**最上面**加一行：\nInclude ${sshconfig.pathsFor(home).config}`);
+  } else if (inc.changed) {
+    win.pushNotice('info',
+      `已在 ${inc.path} 最上面加了一行 Include，指向 Slurmate 自己的 ssh 配置。`
+      + '（只加了这一行，你原有的内容一个字都没动。）');
+  }
+
+  if (!w.strict) {
+    win.pushNotice('warn',
+      '这次没能拿到作业内 sshd 的主机公钥（控制节点没返回它 —— 守护进程可能还是'
+      + '旧版本），本次连接按「首次信任」处理。它只影响第一次连接，之后会一直核对。');
+  }
+
+  win.pushNotice('ok',
+    `SSH 中转站已就绪。在终端里执行 ssh ${SSH_ALIAS}，或用 VS Code 的远程连接填 `
+    + `${SSH_ALIAS}（主机名就是这一个词，端口和用户名都已经配好了）。\n`
+    + `会话结束前它一直有效；作业里的东西跑在作业的 cgroup 里，作业一停全部回收。`);
+}
+
+/**
+ * 服务种类未知（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
+ *
+ * ★ 这里**什么都不做**，正是要害。这台端口上跑的可能是 code-server 也可能是
+ *   sshd，而两种做法用错都是系统在声称一件它并不知道的事：拿口令去 POST 一个
+ *   SSH 端口，或者拿主机公钥去配一个 HTTP 端口。用户看到的是莫名其妙的报错，
+ *   而根因（这个会话是别的进程提交的、我们没写过它的命令行）一个字都不在里面。
+ *   所以如实说出来，并且**只留「结束会话」这一条路**。
+ */
+async function warnUnknownService(snap) {
+  const key = `unknown|${snap.sessionId}`;
+  if (lastServiceNotice === key) return;
+  lastServiceNotice = key;
+  win.pushNotice('warn',
+    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— 它多半是别的进程提交的，`
+    + '控制节点没有关于它的记录，所以客户端不知道该怎么连上去。\n'
+    + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。');
 }
 
 async function openCodeServer(snap) {
@@ -689,8 +915,13 @@ function handleWindowAction(action, payload) {
  * 有活着的会话就自动接上 —— 这正是「仅关闭窗口，保持作业运行」那条路的意义所在。
  */
 async function tryReattach() {
-  if (backend.kind === 'demo') return;
-  if (!backend._conn) return;          // 没连上就别问了
+  // 「有没有连上」问后端，不去猜它的私有字段叫什么。
+  // 此前这里写的是 `backend._conn` —— 那是 SSH 后端的内部名字，演示后端用的是
+  // 另一个（`_connected`），于是这一行在演示模式下恒为真地提前返回；上面还有一行
+  // `kind === 'demo'` 也直接 return。两重保险合起来，让整条「接上已有会话」的路
+  // 在**唯一能测它的地方**完全不可达 —— 而「上次没关干净的会话」恰恰是演示后端
+  // 存在的理由（真机上要造出这个状态极难）。
+  if (!backend.connected) return;
 
   // 先把上次没发出去的 goodbye 补上
   for (const item of config.listPendingGoodbye(cfgDir)) {
@@ -703,23 +934,55 @@ async function tryReattach() {
   const resp = await backend.rpc({ op: 'status' });
   if (!resp || !resp.ok) return;
   const s = resp.data && resp.data.session;
-  if (!s || !s.tunnel_target) return;
+  if (!s) return;                      // 没有活跃会话，正常路径
 
-  win.pushNotice('info', `发现仍在运行的会话（作业 ${s.job_id}），正在重新接上。`);
-  const layoutId = activeLayoutId();
-  if (!layoutId) return;               // 没配置连接，接不上
+  // 中转站会话不走布局组（见 startSession）。这里**不需要**有连接也能接上，
+  // 因为它的端口不是布局端口，没有「该用哪个组」这个问题。
+  const relay = serviceRoute(s.service_kind) === SERVICE_SSHD;
+  const layoutId = relay ? null : activeLayoutId();
+  if (!relay && !layoutId) return;     // 没配置连接，接不上
+
+  // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
+  //   此前这里写的是 `if (!s || !s.tunnel_target) return;` —— 于是「作业还在队列里」
+  //   这种最需要说出来的情况反而完全看不见：界面照常显示「启动 code-server」，
+  //   用户一点就提交了**第二个**作业，而第一个还在排队。这既正是「单一启动」要防的
+  //   资源占用，又恰好是「换了电脑 / 上次没关干净」最常见的形态 —— 重启客户端时
+  //   作业往往还没跑起来。
+  //   （不带 session_id 的 status 返回的是 (reserved, submitted, enrolled, suspect,
+  //     orphaned, releasing) 里最新的那条，所以走到这里的一定是「占着名额」的会话。）
+  const queued = !s.tunnel_target;
+  win.pushNotice('info', queued
+    ? `发现一个还在排队的会话（作业 ${s.job_id}），正在重新接上。`
+    : `发现仍在运行的会话（作业 ${s.job_id}），正在重新接上。`);
+
   controller = new SessionController({
     backend, layoutId,
-    onTunnelPort: (id, port) => config.setLayoutPort(cfgDir, cfg, id, port),
+    onTunnelPort: (id, port) => {
+      if (!id) return;                 // 中转站没有布局组，没有东西可记
+      config.setLayoutPort(cfgDir, cfg, id, port);
+    },
+    onRelayPort: () => onSessionChange(controller.snapshot()),
     getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
   });
   controller.on('change', onSessionChange);
   controller.sessionId = s.session_id;
   controller.session = s;
+
+  const preferredPort = relay ? config.RELAY_PORT_BASE : config.layoutPort(cfg, layoutId);
+  if (queued) {
+    // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
+    // 会自己把视图/ssh 配置建起来，界面标题也已经有「排队中 — 作业 N」那一档）。
+    controller.state = State.QUEUED;
+    await controller._afterSubmit({ preferredPort });
+    return;
+  }
+
   controller.state = State.RUNNING;
-  const preferredPort = config.layoutPort(cfg, layoutId);
   await controller._bringUpTunnel(preferredPort);
-  await openCodeServer(controller.snapshot());
+  // ★ 走**同一个**渲染入口，而不是像以前那样直接调 openCodeServer。
+  //   以前那条直路只服务 code-server 一种会话，而接上一个中转站会话时它会把
+  //   隧道指向的 SSH 端口当成一个网页去加载。分派只有一个地方，就是 _renderSession。
+  await onSessionChange(controller.snapshot());
 }
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
@@ -741,6 +1004,9 @@ function registerIpc() {
     //   预填进「新建」表单，而那个行为正是要删掉的（不改就保存 = 又存一条一样的）。
     whoami,
     partitions,
+    // 服务端通报的默认资源（管理员设定）。界面**只读地**显示它，并且提交时
+    // 靠【省略】cpus/mem 来使用它 —— 不是把这两个数字发回去。理由见变量声明处。
+    resourceDefaults,
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
     // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去找一个不存在的开关。
     secureStorageAvailable: secureAvailable(),
@@ -893,8 +1159,13 @@ function registerIpc() {
     const isActive = cfg.activeConnectionId === connectionId;
     const sessionLive = controller
       && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state);
+    // ★ 中转站会话**不参与布局**：它的端口是我们自己的 (RELAY_PORT_BASE)，不在任何
+    //   布局组里。让它走下面那条 relisten，就会去挪一个用户正在用 ssh 连着的端口 ——
+    //   而 ssh 配置里那一行是我们在隧道起来时才写的，挪完端口那一瞬间
+    //   `ssh slurmate` 连的是一个没人监听的端口。所以这里只改配置、不动会话。
+    const relayLive = sessionLive && controller.serviceKind() === SERVICE_SSHD;
 
-    if (isActive && controller && sessionLive) {
+    if (isActive && controller && sessionLive && !relayLive) {
       const excluded = config.usedLayoutPorts(cfg, target.id);
       const r = await controller.relisten(target.id, target.port, excluded);
       if (!r.ok) {
@@ -905,9 +1176,11 @@ function registerIpc() {
         };
       }
       target.port = r.port;                 // 可能顺移过
-    } else if (isActive && controller) {
+    } else if (isActive && controller && !relayLive) {
       controller.setLayout(target.id);      // 没有会话在跑：只改标记，下次开会话就用它
     }
+    // relayLive 时两条都不走：配置照改（下次起 code-server 就用新组了），
+    // 但这个正在跑的中转站会话不受任何影响 —— 它的 layoutId 保持 null。
 
     config.setConnectionLayout(cfg, connectionId, target.id);
     commitConfig();
@@ -943,7 +1216,7 @@ function registerIpc() {
     }
 
     const res = await doConnect(conn);
-    return { ...res, whoami, partitions };
+    return { ...res, whoami, partitions, resourceDefaults };
   });
 
   /**
@@ -958,7 +1231,7 @@ function registerIpc() {
     }
     config.rememberHostKey(cfgDir, cfg, conn.host, conn.port, fingerprint);
     const res = await doConnect(conn, { trustHostKey: fingerprint });
-    return { ...res, whoami, partitions };
+    return { ...res, whoami, partitions, resourceDefaults };
   });
 
   /**
@@ -1067,14 +1340,28 @@ function registerIpc() {
     await backend.close();
     whoami = null;
     partitions = [];
+    resourceDefaults = null;      // 断开之后就没有「服务端通报的默认值」可谈了
     return { ok: true, released };
   });
 
   // ── 会话 ──
-  send('app:partitions', async () => ({ ok: true, partitions: await refreshPartitions() }));
+  // ok 现在**如实反映查询本身成不成功**（此前恒为 true，失败被吞成空分区列表）。
+  // partitions 仍然是数组，空数组表示「取不到」而不是「没有分区」—— 区别在 error 里。
+  send('app:partitions', async () => {
+    const r = await refreshPartitions();
+    return { ok: r.ok, partitions: r.partitions,
+             resourceDefaults: r.defaults, error: r.error };
+  });
 
-  send('app:start', async (resources) => {
-    const snap = await startSession(resources);
+  /**
+   * 起一个会话。
+   *
+   * @param {object} resources 高级选项的临时覆盖（可省略字段，由服务端填默认值）
+   * @param {'code-server'|'sshd'} [serviceKind] 省略 = code-server，
+   *   与这个参数存在之前的行为一致 —— 老的界面调用（只传 resources）不会因此变样。
+   */
+  send('app:start', async (resources, serviceKind) => {
+    const snap = await startSession(resources, serviceKind);
     return { ok: Boolean(snap), snapshot: controller && controller.snapshot() };
   });
 
@@ -1143,5 +1430,12 @@ module.exports = {
     getKey: (id) => resolveKey(id || config.PENDING_ID),
     getCfg: () => cfg,
     getCfgDir: () => cfgDir,
+    /**
+     * 重跑「启动时接上已有会话」那条路（`tryReattach`）。
+     *
+     * 它只在启动时被调用一次，所以不重新触发就没法验证。先把 controller 清掉是
+     * **还原现场**而不是绕过什么 —— 启动那一刻它本来就是 null。
+     */
+    reattach: () => { controller = null; return tryReattach(); },
   },
 };

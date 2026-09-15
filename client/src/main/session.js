@@ -28,6 +28,7 @@
 const { EventEmitter } = require('events');
 const { Action, classify, shouldRetry } = require('./classify.js');
 const { Tunnel } = require('./tunnel.js');
+const { SERVICE_CODE_SERVER, SERVICE_SSHD, serviceRoute } = require('./service.js');
 
 const State = {
   IDLE: 'idle',
@@ -61,7 +62,7 @@ const HB_STALE_SLACK_MS = 90000;
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
-   *   backend, layoutId, onTunnelPort
+   *   backend, layoutId, onTunnelPort, onRelayPort
    *   getExcludedPorts {() => Set<number>}  「别的布局组占着的端口」，由 index.js
    *                                        提供 —— 控制器不认识 config，所以注入。
    *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
@@ -69,13 +70,20 @@ class SessionController extends EventEmitter {
    *
    * layoutId 是**布局组**的 id（见 config.js）：它决定本地监听端口、从而决定
    * 浏览器 origin 与存储分区。控制器自己不解释它，只原样带给 onTunnelPort。
+   *
+   * ★ 中转站会话的 layoutId 是 **null**。布局组存在的全部理由是「浏览器按 origin
+   *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 ——
+   *   给它分配一个布局组，等于凭空造出一个永远不会被创建的存储分区，还会让
+   *   「运行中切布局」那条路去挪一个 ssh 隧道在用的端口。所以中转站的端口不走
+   *   onTunnelPort，走 onRelayPort（见 _announcePort）。
    */
-  constructor({ backend, layoutId, onTunnelPort, getExcludedPorts,
+  constructor({ backend, layoutId, onTunnelPort, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs }) {
     super();
     this.backend = backend;
     this.layoutId = layoutId;
     this.onTunnelPort = onTunnelPort || (() => {});
+    this.onRelayPort = onRelayPort || (() => {});
     this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
     this.statusMs = statusMs || STATUS_MS;
@@ -88,6 +96,8 @@ class SessionController extends EventEmitter {
     this.error = null;
     this.warning = null;
 
+    /** 本次会话请求的服务种类。服务端一旦回答了就以**它**为准（见 serviceKind）。 */
+    this._requestedKind = SERVICE_CODE_SERVER;
     this._tunnelPort = null;
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
     this._hbTimer = null;
@@ -111,12 +121,30 @@ class SessionController extends EventEmitter {
     });
   }
 
+  // ── 服务种类 ────────────────────────────────────────────────────────────
+  /**
+   * 本次会话提供的是哪种服务，**已归一**成 'code-server' / 'sshd' / 'unknown'
+   * （见 service.js 的 serviceRoute）。
+   *
+   * 服务端一旦回答了就以它为准：`_requestedKind` 只是「还没拿到 status 之前」
+   * 的临时答案，而唯一权威的来源是会话视图里的 `service_kind`。
+   */
+  serviceKind() {
+    const s = this.session || {};
+    return serviceRoute('service_kind' in s ? s.service_kind : this._requestedKind);
+  }
+
   // ── 对外快照（界面唯一的数据来源）─────────────────────────────────────────
   snapshot() {
     const s = this.session || {};
     return {
       state: this.state,
+      // 中转站会话是 null（见构造函数的说明）。
       layoutId: this.layoutId,
+      // 已归一的三种取值之一。界面据此决定「连接」该做什么，**不要**自己猜：
+      // null（服务端明说不知道）与 'code-server' 是完全不同的两件事。
+      serviceKind: this.serviceKind(),
+      sshHostKey: typeof s.ssh_host_key === 'string' ? s.ssh_host_key : null,
       sessionId: this.sessionId,
       jobId: s.job_id || null,
       // 本次实际落在哪个分区/节点 —— 因为默认是「从有权限的分区里随机挑」，
@@ -160,7 +188,7 @@ class SessionController extends EventEmitter {
    *   全部可选。**缺省由服务端填**（2 CPU / 8G / 从有权限的分区里随机挑一个）——
    *   默认值不由客户端填，否则一个改过的客户端省略字段就能要到整机。
    *   只传用户**真的填了**的键，不要用 undefined 覆盖服务端的默认值。
-   * @param {object} opts { preferredPort }
+   * @param {object} opts { preferredPort, serviceKind, sshPubkey }
    */
   async start(resources, opts = {}) {
     if (this.state !== State.IDLE && this.state !== State.ENDED && this.state !== State.ERROR) {
@@ -169,6 +197,8 @@ class SessionController extends EventEmitter {
     this._stopped = false;
     this.error = null;
     this.warning = null;
+    this._requestedKind = opts.serviceKind === SERVICE_SSHD
+      ? SERVICE_SSHD : SERVICE_CODE_SERVER;
     this._setState(State.SUBMITTING);
 
     // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
@@ -177,6 +207,19 @@ class SessionController extends EventEmitter {
     for (const k of ['cpus', 'mem', 'gpus', 'partition', 'time']) {
       const v = resources && resources[k];
       if (v !== undefined && v !== null && v !== '') req[k] = v;
+    }
+
+    // 服务种类与中转站的公钥。**先校验再提交** —— 服务端也会校验（回 code 2），
+    // 但走到那里已经花掉一次 sbatch 往返，而这里缺公钥只可能是调用方写错了。
+    if (this._requestedKind === SERVICE_SSHD) {
+      req.service_kind = SERVICE_SSHD;
+      if (!opts.sshPubkey) {
+        this._setState(State.ERROR, {
+          error: '内部错误：请求中转站会话时没有带上公钥，已阻止提交。',
+        });
+        return null;
+      }
+      req.ssh_pubkey = opts.sshPubkey;
     }
 
     // ── 提交 ──
@@ -288,6 +331,19 @@ class SessionController extends EventEmitter {
     });
   }
 
+  /**
+   * 本地端口变了，通知外面去把它记下来。**两条路，语义完全不同**：
+   *
+   *   code-server → 端口就是 origin，必须写回布局组（config.json），否则下次启动
+   *                 会绑回旧端口、浏览器布局跟着重置一次。
+   *   sshd        → 端口要写进**用户那份 ssh 配置**的 Port 那一行。它不进
+   *                 config.json：中转站没有布局组（见构造函数）。
+   */
+  _announcePort(port) {
+    if (this.serviceKind() === SERVICE_SSHD) this.onRelayPort(port);
+    else this.onTunnelPort(this.layoutId, port);
+  }
+
   /** 建立隧道并开始心跳。 */
   async _bringUpTunnel(preferredPort) {
     const target = this.session.tunnel_target;
@@ -299,10 +355,11 @@ class SessionController extends EventEmitter {
       });
       this._tunnelPort = port;
       this._lastTarget = target;
-      this.onTunnelPort(this.layoutId, port);
-      if (shifted) {
+      this._announcePort(port);
+      if (shifted && this.serviceKind() !== SERVICE_SSHD) {
         // 换端口意味着 origin 变了，code-server 存在 localStorage 里的编辑器布局会重置。
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
+        // ★ 中转站不适用：那边没有浏览器，别名恒定，端口在底下漂移是无害的。
         this.warning = `首选端口被占用，已改用 ${port}。`
                      + `由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。`;
       }
@@ -435,10 +492,11 @@ class SessionController extends EventEmitter {
                 preferredPort: prevPort, target: s.tunnel_target,
                 excludePorts: this.getExcludedPorts() });
               this._tunnelPort = port;
-              // 端口顺移必须**写回配置**：origin 就是端口，配置里那份一旦与实际分叉，
-              // 下次启动会绑回配置的端口、布局跟着重置一次，而用户不知道为什么。
-              this.onTunnelPort(this.layoutId, port);
-              if (shifted) {
+              // 端口顺移必须**写回去**：code-server 那边 origin 就是端口，配置里
+              // 那份一旦与实际分叉，下次启动会绑回配置的端口、布局跟着重置一次，
+              // 而用户不知道为什么；中转站那边则是 ssh 配置里的 Port 行。
+              this._announcePort(port);
+              if (shifted && this.serviceKind() !== SERVICE_SSHD) {
                 this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
                              + `浏览器按端口隔离本地存储，编辑器布局会重置一次。`;
               }

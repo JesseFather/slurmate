@@ -27,6 +27,7 @@ bash 无法 getsockopt(SO_PEERCRED)（身份认证的唯一可信来源），且
 
 import argparse
 import errno
+import base64
 import ipaddress
 import json
 import logging
@@ -54,6 +55,14 @@ SESSION_FILE_FIELDS = {
     "service_port", "tunnel_target", "state", "job_started_at", "written_at",
     "job_hb_at", "code_server_pid", "auth_mode", "auth_password",
     "slurm_restart_number", "exit_code",
+    # 服务的种类与它的 pid。`code_server_pid` 保留在上面是给**滚动升级期间还在跑的
+    # 旧作业**用的：它们写的还是那个名字，而这个白名单会静默丢弃没登记的字段 ——
+    # 漏了它，那些作业的 pid 会凭空消失，且没有任何地方会报错。
+    "service_kind", "service_pid",
+    # 作业内 sshd 的主机公钥。客户端把它写进自己的 known_hosts 再连，
+    # 这样那边就能用 StrictHostKeyChecking yes 而不是首次信任。
+    # code-server 的作业写的是空串（它没有主机密钥）。
+    "ssh_host_key",
 }
 
 # 会话状态机
@@ -291,6 +300,66 @@ PASSWORD_BYTES = 12
 
 MAX_ACTIVE_PER_USER = 1
 MAX_PENDING_PER_USER = 4
+
+# ── 服务种类 ────────────────────────────────────────────────────────────────
+# 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的 start_service 结构性地保证。
+SVC_CODE_SERVER = "code-server"
+SVC_SSHD = "sshd"
+ALL_SERVICE_KINDS = (SVC_CODE_SERVER, SVC_SSHD)
+
+# 站点允许用户提交的服务种类。**默认只有 code-server** —— 也就是说 sshd 是
+# **按站点显式开启**的能力，升级不会悄悄多出一个。
+#
+# 为什么要做成开关而不是直接开：sshd 分支会在计算节点上起一个用户态 ssh，而它
+# **读不到站点的 ssh 准入白名单**（非 root 的 sshd 只能 UsePAM no，于是 pam_access
+# 从不执行）。它并不因此逃出监管 —— 会话整个在作业的 cgroup 里，作业一结束就被回收，
+# 这一点有实测 —— 但它确实给用户开了一条「交互式 ssh 进计算节点」的路，而有些站点
+# 的政策明令禁止这件事。让它是站点的一个**看得见的决定**，而不是一个默认行为。
+DEFAULT_SERVICE_KINDS = (SVC_CODE_SERVER,)
+
+# sshd 分支用的 sshd 可执行文件。写死而不是在登录节点 which —— 那台机器上的路径
+# 对计算节点不是证据（与 code_server_bin 同一条理由）。
+DEFAULT_SSHD_BIN = "/usr/sbin/sshd"
+
+# 客户端带上来的一行公钥。
+#
+# ★ 这条正则是**安全关键**，不是格式校验：authorized_keys 允许选项前缀
+#   （command=、environment=、cert-authority…）与任意多行，而这一段文本会被写进
+#   一份被 sshd 信任的文件里。这里只放行「算法名 + 空格 + 恰好 68 个 base64 字符
+#   (+ 可选注释)」，一次性排除掉选项前缀与"追加第二条公钥"。
+# ★ **允许带注释**（客户端生成的就是 `ssh-ed25519 <b64> slurmate-20260915-1145`），
+#   但注释会被整个丢掉、不参与任何校验。不这么做的话整条路是堵死的 —— 客户端的
+#   公钥行本来就带注释。而注释里可以有**逗号**，守护进程又是用
+#   `--export=ALL,k=v,…` 传环境变量的，一个逗号就能把一个变量劈成两个 ——
+#   所以正确做法是「收下、只校验 base64 那一段、把注释丢掉」，不是「拒绝带注释的」。
+#   `[^\r\n]*` 让注释不能跨行，于是多行输入（追加第二条公钥）仍然被拒。
+SSH_PUBKEY_RE = re.compile(
+    r"^ssh-ed25519 ([A-Za-z0-9+/]{68})(?:[ \t]+[^\r\n]*)?$")
+
+# 一把 ed25519 公钥解出来恒为 51 字节：4 + 11("ssh-ed25519") + 4 + 32。
+SSH_ED25519_BLOB_LEN = 51
+
+
+def parse_ssh_pubkey(raw):
+    """把一行公钥收成规范形态 `ssh-ed25519 <base64>`；不合法返回 None。
+
+    除了形状，还**真的解一次 base64** 确认它是一把 ed25519 公钥。形状对但内容
+    不是密钥的输入（随便 68 个 base64 字符）会被这一步挡住，而不是等到认证失败
+    才暴露 —— 那时用户看到的只有一句"认证失败"，根因在计算节点上。
+    """
+    m = SSH_PUBKEY_RE.match(str(raw or "").strip())
+    if not m:
+        return None
+    b64 = m.group(1)
+    try:
+        blob = base64.b64decode(b64, validate=True)
+    except (ValueError, TypeError):
+        return None
+    if len(blob) != SSH_ED25519_BLOB_LEN or blob[4:15] != b"ssh-ed25519":
+        return None
+    if struct.unpack(">I", blob[15:19])[0] != 32:
+        return None
+    return "ssh-ed25519 " + b64
 MAX_RPC_PER_SECOND = 10
 REJECT_THRESHOLD = 20
 REJECT_WINDOW = 600
@@ -322,6 +391,7 @@ CONF_KEYS = frozenset([
     "auth_mode",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
     "code_server_bin",
+    "sshd_bin", "service_kinds",
 ])
 
 
@@ -379,6 +449,34 @@ def default_job_script():
     here = os.path.dirname(os.path.realpath(__file__))
     return os.path.normpath(
         os.path.join(here, os.pardir, "share", "slurmate", "run.sbatch"))
+
+
+def parse_service_kinds(raw):
+    """解析 `service_kinds = code-server,sshd`。返回 (kinds, error_or_None)。
+
+    ★ 未知的名字**报错而不是忽略**。写成 `service_kind = ssh`（少个 d）却被静默
+      忽略，症状是"配了但它就是不生效" —— 与 CONF_KEYS 那条注释要防的是同一类问题：
+      文件里写着，而实际什么也没发生。
+    ★ 留空 = 用默认（**只有 code-server**），不是"允许全部"。留空必须是安全的那个方向。
+    """
+    if raw is None or not str(raw).strip():
+        return tuple(DEFAULT_SERVICE_KINDS), None
+    out = []
+    for tok in str(raw).replace("，", ",").split(","):
+        name = tok.strip()
+        if not name:
+            continue
+        if name not in ALL_SERVICE_KINDS:
+            return tuple(DEFAULT_SERVICE_KINDS), (
+                "service_kinds 里有未知的服务种类 %r。可用的只有：%s"
+                % (name, "、".join(ALL_SERVICE_KINDS)))
+        if name not in out:
+            out.append(name)
+    if not out:
+        return tuple(DEFAULT_SERVICE_KINDS), (
+            "service_kinds 解析后是空的。要么删掉这一行用默认（%s），"
+            "要么至少写一个" % "、".join(DEFAULT_SERVICE_KINDS))
+    return tuple(out), None
 
 
 def resolve_code_server(explicit):
@@ -492,6 +590,12 @@ class Config(object):
         self.sacctmgr = resolve_bin("sacctmgr", get("sacctmgr"))
         self.code_server_bin, self.code_server_src = resolve_code_server(
             get("code_server_bin"))
+        # sshd 分支的二进制。**不做 which 兜底**：登录节点上的 /usr/sbin/sshd 对
+        # 计算节点不是证据。留空就用惯例路径，写错了由作业侧明确失败（run.sbatch
+        # 会 log 出"$SLURMATE_SSHD_BIN 不存在或不可执行"而不是静默）。
+        self.sshd_bin = (get("sshd_bin") or "").strip() or DEFAULT_SSHD_BIN
+        self.service_kinds, self.service_kinds_error = parse_service_kinds(
+            get("service_kinds"))
 
     def cluster_cidr_problem(self):
         """cluster_cidr 的**形式**问题描述；没问题返回 None。
@@ -577,6 +681,8 @@ class Config(object):
         for k in self.unknown_keys:
             errors.append("配置里有无法识别的键 %r（拼错了？本版只认：%s）"
                           % (k, ", ".join(sorted(CONF_KEYS))))
+        if self.service_kinds_error:
+            errors.append(self.service_kinds_error)
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -653,6 +759,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     service_port    INTEGER,
     candidates      TEXT NOT NULL,
     auth_mode       TEXT NOT NULL DEFAULT 'password',
+    -- 这个会话提供哪种服务（'code-server' / 'sshd'）。
+    -- ★ **可空**，NULL = 未知 —— 从 nft 规则恢复出来的会话不知道自己是什么服务，
+    --   那时报 NULL 比编一个 'code-server' 诚实（与 cpus/mem 在恢复态报 null 而不是 0
+    --   是同一条原则）。老库上这一列由 Store._migrate 补上。
+    service_kind    TEXT,
     created_at      INTEGER NOT NULL,
     submitted_at    INTEGER,
     enrolled_at     INTEGER,
@@ -694,6 +805,31 @@ class Store(object):
         self.conn.execute("PRAGMA synchronous=FULL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate()
+
+    def _migrate(self):
+        """把**已经存在**的旧库补齐到当前表结构。
+
+        ★ 为什么这里只加列、不改列：`CREATE TABLE IF NOT EXISTS` 不会改已存在的表，
+          所以新列的缺失只发生在老库上。加一个**可空**列是纯加法、幂等、零数据损失，
+          可以直接做。
+          而 v0.1→v0.2 那次是**删**一个 NOT NULL 列，那个没法安全自动做，所以那次的
+          选择是「拒绝启动 + 让管理员删库」（见 Config._db_schema_errors）。两者不是
+          同一种变更，不要照抄。
+
+        ★ 为什么必须在**这里**补齐：`_db_schema_errors` 只检查「多了一列」，**没有**
+          「少了一列」这条反向规则 —— 于是旧库上守护进程**照常启动**，直到第一次
+          SELECT/INSERT 碰到新列才抛 `no such column`，被 dispatch 兜成 code 9
+          「内部错误」，信息里没有一个字与数据库有关。SCHEMA_SQL 上面那段注释记的就是
+          这个失败形态（只是方向反过来）。所以补齐只能在这里做，不能指望别处报错。
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(sessions)")}
+        if not cols:
+            return                       # 表刚建出来，SCHEMA_SQL 已经带上了所有列
+        for name, decl in (("service_kind", "TEXT"),):
+            if name not in cols:
+                self.conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN %s %s" % (name, decl))
 
     def close(self):
         try:
@@ -1475,6 +1611,12 @@ class Sessiond(object):
             # cpus/mem 留空：这是**别人**提交的作业（我们没写过它的命令行），
             # 它当时要了多少资源无从得知。填 0 会看起来像"它只要了 0 核"，
             # 而 session_view() 把 0 与空串都渲染成"未知"。
+            #
+            # service_kind 同理，而且这里连 **不传** 都是刻意的：nft 规则里没有
+            # 任何东西能说明那个端口上跑的是 code-server 还是 sshd，所以这一列会是
+            # NULL = 未知。**绝不要**在这里填 'code-server' 当默认 —— 猜错会让界面
+            # 拿口令去 POST 一个 SSH 端口，弹出一句语义完全错误的"自动登录失败"。
+            # （service_kind 不在下面的参数里，所以它天然是 NULL；写下来是防后人"顺手补全"。）
             self.store.insert(
                 session_id=os.urandom(8).hex(), uid=uid, user=user,
                 partition=job.get("Partition", ""),
@@ -2097,6 +2239,12 @@ class Sessiond(object):
             # 0 会被读成"它只要了 0 核"。
             "resources": {"cpus": s["cpus"] or None, "mem": s["mem"] or None,
                           "gpus": gpus},
+            # 这个会话提供的是哪种服务。界面据此决定「连接」该做什么 ——
+            # code-server 要建视图并自动登录，sshd 只是把隧道指向它、让用户拿
+            # 原生 VS Code / codex 去连，客户端不做任何 HTTP 的事。
+            # NULL = 不知道（从 nft 规则恢复出来的会话），界面要如实显示，
+            # 不要猜一个默认值 —— 猜错会让界面拿口令去打一个 SSH 端口。
+            "service_kind": s["service_kind"],
             "node": s["node"],
             "node_ip": s["node_ip"], "service_port": s["service_port"],
             "created_at": s["created_at"], "enrolled_at": s["enrolled_at"],
@@ -2130,6 +2278,15 @@ class Sessiond(object):
                 if isinstance(pw, str) and pw:
                     d["auth_password"] = pw
                 d["auth_mode"] = info.get("auth_mode", d.get("auth_mode"))
+                # 作业内 sshd 的主机公钥（不是秘密，但和口令一起读最省一次文件 IO）。
+                # 客户端用它把这一条预先写进 known_hosts —— 没有它，那边的 ssh 只能
+                # 首次信任，而"首次"在这条通路上是可以被抢的（见 run.sbatch 里那段）。
+                # 空串 = 这个作业没有 sshd（code-server 分支），此时**不放进 d**：
+                # 「没有这个字段」和「有这个字段但是空」对客户端是两件事，
+                # 后者会被读成"主机公钥是空的"，那是个没法处理的输入。
+                hk = info.get("ssh_host_key")
+                if isinstance(hk, str) and hk.strip():
+                    d["ssh_host_key"] = hk.strip()
         return d
 
     def op_status(self, uid, req):
@@ -2225,6 +2382,37 @@ class Sessiond(object):
         if not acct:
             return self._err(4, "no_account", why)
 
+        # ── 服务种类 ────────────────────────────────────────────────────────
+        # 缺省 = code-server，与本功能引入前完全一致。站点没开 sshd 时提交 sshd
+        # 会被**明确拒绝**，而不是起一个"看起来起来了但连不上"的作业。
+        kind = str(req.get("service_kind") or SVC_CODE_SERVER).strip()
+        if kind not in ALL_SERVICE_KINDS:
+            return self._err(2, "bad_service_kind",
+                             "未知的服务种类 %r（可用：%s）"
+                             % (kind, "、".join(ALL_SERVICE_KINDS)))
+        if kind not in cfg.service_kinds:
+            return self._err(4, "service_kind_disabled",
+                             "本站点没有开启 %s 服务（service_kinds = %s）"
+                             % (kind, "、".join(cfg.service_kinds)))
+
+        # sshd 用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
+        # ★ 为什么必须丢掉注释：OpenSSH 公钥的注释里可以有**逗号**，而守护进程是用
+        #   `--export=ALL,k=v,…` 把环境变量传给 sbatch 的 —— 一个逗号就能把一个环境
+        #   变量劈成两个，提交变成畸形 argv。（这个系统里"攻击者"和"受害者"是同一个
+        #   uid，所以它不是可用漏洞；但它是个真实存在的畸形输入，而且在这里拒绝比
+        #   等作业起来了再失败清楚得多。）
+        # ★ 这里是第一道，run.sbatch 里那条同款正则是第二道。
+        ssh_pubkey = ""
+        if kind == SVC_SSHD:
+            ssh_pubkey = parse_ssh_pubkey(req.get("ssh_pubkey")) or ""
+            if not ssh_pubkey:
+                return self._err(2, "bad_ssh_pubkey",
+                                 "sshd 服务需要一行 ssh-ed25519 公钥（客户端会随提交"
+                                 "带上来）。只接受「算法名 + 一段 base64 + 可选注释」；"
+                                 "选项前缀（command=、cert-authority…）与多行一律"
+                                 "不接受 —— 它们会被原样写进一份 sshd 信任的 "
+                                 "authorized_keys。")
+
         # ── 资源：默认值由【服务端】填，并在这里钳制 ────────────────────────
         # 客户端省略一个字段是在说"用你的默认"，不是"我要 0 核"。所以默认值
         # 只能从这里出，不能从 req 里取 —— 否则一个改过的客户端省略 cpus 就能
@@ -2318,13 +2506,23 @@ class Sessiond(object):
             partition=partition, account=acct, cpus=cpus, mem=mem, gres=gres,
             requested_time=time_str, job_id=None, state=ST_RESERVED,
             candidates=",".join(str(c) for c in cands),
-            auth_mode="password", created_at=now)
+            # 这里只是登记那一刻的初值，作业跑起来后会用它自己写进会话文件的那份
+            # 覆盖。初值就跟服务种类一致，免得中间态自相矛盾。
+            auth_mode="publickey" if kind == SVC_SSHD else "password",
+            service_kind=kind, created_at=now)
 
         # 口令通过【文件】传递，不经过环境变量（scontrol show job 可能暴露
         # Environment 字段）。作业读文件、退出时删除。
         env = {
             "SLURMATE_SESSION_ID": sid,
-            "SLURMATE_CANDIDATES": ",".join(str(c) for c in cands),
+            # ★ 分隔符是**分号**，不是逗号。实测（计算节点上，Slurm 的 --export）：
+            #     --export=ALL,SLURMATE_CANDIDATES=55001,55002,55003,AFTER=ok
+            #   作业收到的 SLURMATE_CANDIDATES 是 **55001** —— Slurm 按逗号切
+            #   --export，后面那两段被当成"要导出的变量名"（未设置 → 丢掉）。
+            #   于是**六个候选端口有五个静默消失**，pick_port_and_start 只试一个，
+            #   那个端口恰好被占用时作业就以"候选端口全部失败"退出 —— 一条指向
+            #   错误方向的错误信息，而且时有时无。分号实测可以完好穿过 --export。
+            "SLURMATE_CANDIDATES": ";".join(str(c) for c in cands),
             # 可能为空串（权限查不到而退化）。run.sbatch 只把它记进日志与会话
             # 文件，不做任何判断 —— 空就是"不知道"，不是"没分区"。
             "SLURMATE_PARTITION": partition,
@@ -2339,6 +2537,14 @@ class Sessiond(object):
             "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
             "SLURMATE_PORT_MIN": str(cfg.port_start),
             "SLURMATE_PORT_MAX": str(cfg.port_end),
+            # ── 服务种类与它需要的东西 ──
+            "SLURMATE_SERVICE_KIND": kind,
+            # 公钥**可以**走环境变量：它不是秘密（与"口令绝不走环境变量"是两回事，
+            # 那条的理由是 scontrol show job 会显示 Environment）。这个区别要留着，
+            # 否则下一个人会把它当成同类问题"修掉"。
+            "SLURMATE_SSH_PUBKEY": ssh_pubkey,
+            "SLURMATE_SSH_DIR": os.path.join(home, ".slurmate", "ssh"),
+            "SLURMATE_SSHD_BIN": cfg.sshd_bin,
         }
         sess = self.store.get(sid)
         job_id, why = self.slurm.submit(sess, env, home, uid, user)
@@ -2352,7 +2558,7 @@ class Sessiond(object):
         self.audit("submitted", session=sid, uid=uid, job=job_id,
                    partition=partition or None, account=acct,
                    cpus=cpus, mem=mem, gpus=gpus,
-                   candidates=cands, time=time_str)
+                   candidates=cands, time=time_str, service_kind=kind)
         log.info("已提交: uid=%d job=%s partition=%s cpus=%d mem=%s gpus=%d "
                  "candidates=%s time=%s",
                  uid, job_id, partition or "(Slurm 默认)", cpus, mem, gpus,
