@@ -193,7 +193,7 @@ def main():
     os.makedirs(os.path.join(tmpdir, "state"), exist_ok=True)
     os.makedirs(os.path.join(tmpdir, "log"), exist_ok=True)
 
-    # ── 1. 配置解析（扁平 Key=Value）────────────────────────────────────────
+    # ── 1. 配置解析（通用键 + [plugin:*] 块）───────────────────────────────
     print("── 1. 配置解析 ──")
     check("端口池解析", cfg.port_start == 55001 and cfg.port_end == 55999,
           "%d-%d" % (cfg.port_start, cfg.port_end))
@@ -210,18 +210,24 @@ def main():
         return p
 
     def parse(text, name="parse.conf"):
-        return mod.parse_flat_config(write_conf(text, name))
+        return mod.parse_config(write_conf(text, name))
 
     check("行尾 # 注释被切掉",
-          parse("range_start = 55001  # 端口池下界\n") == {"range_start": "55001"})
+          parse("range_start = 55001  # 端口池下界\n")[0] == {"range_start": "55001"})
     check("整行注释与空行被跳过",
-          parse("# 说明\n\n   \nrange_end = 5\n") == {"range_end": "5"})
+          parse("# 说明\n\n   \nrange_end = 5\n")[0] == {"range_end": "5"})
     check("值两端空白被去掉",
-          parse("readonly_paths =   /shared/home  \n")
+          parse("readonly_paths =   /shared/home  \n")[0]
           == {"readonly_paths": "/shared/home"})
+    check("块被分出来，通用键留在全局段",
+          parse("range_end = 5\n[plugin:sshd]\nenabled = yes\ndefault_cpus = 3\n")
+          == ({"range_end": "5"}, {"sshd": {"enabled": "yes", "default_cpus": "3"}}))
     for i, (bad, why) in enumerate((("range_start = 1\nrange_start = 2\n", "重复键"),
                                     ("这不是赋值\n", "缺等号"),
-                                    ("= 5\n", "缺键名"))):
+                                    ("= 5\n", "缺键名"),
+                                    ("[plugin:sshd]\n[plugin:sshd]\n", "重复块"),
+                                    ("[plugin:sshd\n", "块头没闭合"),
+                                    ("[cluster]\nx = 1\n", "不是 plugin 的块头"))):
         try:
             parse(bad, "bad-%d.conf" % i)
             check("%s → 报错" % why, False, "竟然通过了")
@@ -925,24 +931,70 @@ exit 0
     # 的会话不许猜自己是什么服务"。
     print("\n── 19. 服务种类（code-server / sshd）──")
 
-    # 19.1 站点白名单的解析（纯函数）
-    _k, _e = mod.parse_service_kinds("")
-    check("service_kinds 留空 = 只有 code-server（留空必须是安全的那个方向）",
-          _k == (mod.SVC_CODE_SERVER,) and _e is None, "%s / %s" % (_k, _e))
-    _k, _e = mod.parse_service_kinds("code-server,sshd")
-    check("正常解析两种服务",
-          _k == (mod.SVC_CODE_SERVER, mod.SVC_SSHD) and _e is None, str(_k))
-    _k, _e = mod.parse_service_kinds(" sshd , sshd ,code-server ")
-    check("空白忽略、重复项去掉", _k == (mod.SVC_SSHD, mod.SVC_CODE_SERVER), str(_k))
-    _k, _e = mod.parse_service_kinds("code-server，sshd")
-    check("全角逗号也认（配置以中文注释为主，手滑很常见）",
-          _k == (mod.SVC_CODE_SERVER, mod.SVC_SSHD), str(_k))
-    _k, _e = mod.parse_service_kinds("ssh")
-    check("★ 少一个字母的名字必须报错，不能静默忽略 —— 否则「配了但不生效」",
-          _e is not None and "ssh" in _e, str(_e))
-    _k, _e = mod.parse_service_kinds(",")
-    check("只有分隔符也算空 → 报错（不是静默变成「允许全部」）",
-          _e is not None and "空" in _e, str(_e))
+    # 19.1 插件块（代替了从前那一行 `service_kinds = a,b`）
+    #
+    # ★ 这一节的核心是**向后兼容**：一个块都没有的老配置必须仍然只开 code-server。
+    #   它是整个改动能不能升级的支点 —— 少了它，所有现有站点升级后会一个服务都
+    #   开不出来，而配置里一个字都不像有问题。
+
+    def pcfg(text, name="plug.conf"):
+        return mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n" + text, name))
+
+    _c = pcfg("")
+    check("★ 一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
+          _c.enabled_kinds == (mod.SVC_CODE_SERVER,), str(_c.enabled_kinds))
+    check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
+          _c.plugins[mod.SVC_SSHD].present is False
+          and _c.plugins[mod.SVC_SSHD].enabled is False)
+
+    _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
+    check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
+          _c.enabled_kinds == (mod.SVC_CODE_SERVER,), str(_c.enabled_kinds))
+    check("块里写的默认资源生效；没写的用插件自己的内建值",
+          _c.plugins[mod.SVC_SSHD].default_cpus == 4
+          and _c.plugins[mod.SVC_SSHD].default_mem == "2G",
+          "%s / %s" % (_c.plugins[mod.SVC_SSHD].default_cpus,
+                       _c.plugins[mod.SVC_SSHD].default_mem))
+
+    _c = pcfg("[plugin:sshd]\nenabled = yes\n")
+    check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
+          _c.enabled_kinds == (mod.SVC_CODE_SERVER, mod.SVC_SSHD),
+          str(_c.enabled_kinds))
+
+    _c = pcfg("[plugin:code-server]\nenabled = no\n[plugin:sshd]\nenabled = yes\n")
+    check("显式关掉 code-server 是合法的（站点只留中转站）",
+          _c.enabled_kinds == (mod.SVC_SSHD,), str(_c.enabled_kinds))
+
+    _c = pcfg("[plugin:code-server]\nenabled = no\n")
+    check("★ 一个插件都不开 → 自检说得出话（否则界面一个按钮都没有而配置看着正常）",
+          any("插件" in e for e in _c.validate()), str(_c.validate())[:120])
+
+    # 各种错法：一律**报错**，不能静默忽略 —— 静默忽略的后果是
+    # 「文件里写着，而实际什么也没发生」，正是本项目一路在清的那类问题。
+    for _txt, _why, _kw in (
+            ("[plugin:ssh]\nenabled = yes\n", "未知的插件名", "ssh"),
+            ("[plugin:sshd]\ndefualt_cpus = 1\n", "块内拼错的键", "defualt_cpus"),
+            ("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n",
+             "通用键写到了块之后", "cluster_cidr"),
+            ("[plugin:code-server]\nauth_mode = passwd\n", "auth_mode 取值非法",
+             "auth_mode"),
+            ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
+             "default_mem")):
+        try:
+            _errs = " ".join(pcfg(_txt).validate())
+        except ValueError as _ex:
+            _errs = str(_ex)
+        check("%s → 被拦下" % _why, _kw in _errs, _errs[:110])
+
+    # ★ 顺序陷阱的报错必须**指得回根因**。只断言"被拒了"是不够的：通用键落进块里
+    #   时，块内键白名单那条**也会**拒绝它（它本来就不在允许列表里），于是"拒绝了"
+    #   这件事两种实现都满足 —— 而这个分支存在的全部理由是那句话。
+    #   变异验证发现：把 `if key in GLOBAL_KEYS` 改成 `if False`，上面那条断言照样
+    #   绿。这一条就是补那个洞的。
+    _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n")
+                    .validate())
+    check("★ 而且要说清是「通用键写到了块之后」，不是一句泛泛的「认不出这个键」",
+          "通用键" in _msg and "块之前" in _msg, _msg[:140])
 
     # 19.2 公钥的解析（纯函数）。ed25519 的 blob 恒为 51 字节，形状可以卡死。
     _pub = ("ssh-ed25519 "
@@ -985,8 +1037,9 @@ exit 0
           and r["error"]["kind"] == "bad_service_kind", str(r.get("error")))
 
     # 19.5 站点开启之后
-    _saved_kinds = cfg.service_kinds
-    cfg.service_kinds = (mod.SVC_CODE_SERVER, mod.SVC_SSHD)
+    _saved = cfg.plugins[mod.SVC_SSHD].enabled
+    cfg.plugins[mod.SVC_SSHD].enabled = True
+    cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
     try:
         r, sess, env = run_submit({"op": "submit", "service_kind": "sshd",
                                    "ssh_pubkey": _pub})
@@ -1004,7 +1057,7 @@ exit 0
               env.get("SLURMATE_SSH_PUBKEY") == _pub,
               repr(env.get("SLURMATE_SSH_PUBKEY")))
         check("sshd 路径与主机密钥目录也传下去了",
-              env.get("SLURMATE_SSHD_BIN") == cfg.sshd_bin
+              env.get("SLURMATE_SSHD_BIN") == cfg.plugins[mod.SVC_SSHD].bin
               and env.get("SLURMATE_SSH_DIR", "").endswith("/.slurmate/ssh"),
               "%s / %s" % (env.get("SLURMATE_SSHD_BIN"),
                            env.get("SLURMATE_SSH_DIR")))
@@ -1019,7 +1072,62 @@ exit 0
                    ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
                     "SLURMATE_SSHD_BIN")}))
     finally:
-        cfg.service_kinds = _saved_kinds
+        cfg.plugins[mod.SVC_SSHD].enabled = _saved
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+
+    # 19.5b ★ 默认资源是**按插件**的 —— 这是"插件块里放插件的策略"最直接的体现
+    #
+    # 从前它是两个代码常量（DEFAULT_CPUS / DEFAULT_MEM），所有服务共用一个值；
+    # 而在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。现在它是块里
+    # 的一项，缺失时才回落到插件自己的内建值。
+    _saved_cfg = cfg.plugins[mod.SVC_SSHD]
+    try:
+        cfg.plugins[mod.SVC_SSHD] = mod.PluginConfig(
+            mod.PLUGIN_BY_NAME[mod.SVC_SSHD],
+            {"enabled": "yes", "default_cpus": "7", "default_mem": "5G"}, True)
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+
+        _r, _sess, _env = run_submit({"op": "submit", "service_kind": "sshd",
+                                      "ssh_pubkey": _pub})
+        check("★ 省略 cpus/mem 时用【这个插件块里】的默认值，不是全局那两个常量",
+              _sess["cpus"] == 7 and _sess["mem"] == "5G",
+              "%s / %s" % (_sess.get("cpus"), _sess.get("mem")))
+        check("同一组默认值也传给了作业",
+              _env.get("SLURMATE_CPUS") == "7" and _env.get("SLURMATE_MEM") == "5G",
+              "%s / %s" % (_env.get("SLURMATE_CPUS"), _env.get("SLURMATE_MEM")))
+
+        _r, _sess2, _ = run_submit({"op": "submit", "service_kind": "sshd",
+                                    "ssh_pubkey": _pub, "cpus": 3})
+        check("显式给的资源仍然覆盖块里的默认值",
+              _sess2["cpus"] == 3, str(_sess2.get("cpus")))
+    finally:
+        cfg.plugins[mod.SVC_SSHD] = _saved_cfg
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+
+    # 19.5c op_plugins：客户端据此决定画哪些按钮、每个按钮写多少资源
+    _resp = d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
+    _data = _resp.get("data") or {}
+    _by = {p["name"]: p for p in (_data.get("plugins") or [])}
+    check("op_plugins 报出全部插件（含没启用的）",
+          set(_by) == {mod.SVC_CODE_SERVER, mod.SVC_SSHD}, str(sorted(_by)))
+    check("每个插件带自己的默认资源",
+          _by[mod.SVC_CODE_SERVER]["defaults"]["cpus"] == 2
+          and _by[mod.SVC_SSHD]["defaults"]["cpus"] == 1,
+          str({k: v.get("defaults") for k, v in _by.items()}))
+    check("enabled 如实反映站点决定（sshd 默认关着）",
+          _by[mod.SVC_CODE_SERVER]["enabled"] is True
+          and _by[mod.SVC_SSHD]["enabled"] is False,
+          str({k: v.get("enabled") for k, v in _by.items()}))
+    check("★ 也报出没启用的插件 —— 「装了但停用」与「本站没有」是两回事",
+          mod.SVC_SSHD in _by)
+    check("★ 不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
+          all("name" in p and "title" in p for p in _by.values()))
+
+    # op_partitions 不再带全局 defaults —— 留一个在那里就是两份真相
+    _presp = d.dispatch(os.getuid(), os.getgid(), {"op": "partitions"})
+    check("★ op_partitions 不再返回全局 defaults（默认资源已经按插件走）",
+          "defaults" not in ((_presp.get("data") or {})),
+          str((_presp.get("data") or {}).keys()))
 
     # 19.6 session_view 要如实报出服务种类，未知就是 None
     d.store = mod.Store(os.path.join(tmpdir, "svc-view.db"))

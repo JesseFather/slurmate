@@ -57,7 +57,36 @@ const DEFAULTS = {
   // 布局组。一组 = 一个**永不复用**的存储身份 = 一条 code-server 的编辑器布局。
   // 数组顺序即界面顺序（映射图的列序、下拉的选项序都靠它）。
   layouts: [],              // [{ id, name, port }]
+  // 插件在本机的开关：{ 插件名: { enabled: bool } }。
+  //
+  // ★ 这是「安装/卸载」在客户端那一半。**缺省是"跟着站点走"**：名字不在表里
+  //   = 没表过态 = 用站点说了算。所以升级不会因为多出这个字段而改变任何行为，
+  //   而用户关掉一个插件之后，重启客户端它还是关着的。
+  // ★ 它**不**影响服务端：站点仍然可以提交那个插件的会话（用户自己用 CLI 就行），
+  //   客户端只是不再给出那个按钮。两边是两件事，见 plugins/index.js 的边界说明。
+  plugins: {},              // { [name]: { enabled: boolean } }
 };
+
+/** 这个插件在本机开着吗？没表过态 → true（跟着站点走）。 */
+function pluginEnabledLocally(cfg, name) {
+  const p = (cfg && cfg.plugins && cfg.plugins[name]) || null;
+  if (!p || typeof p.enabled !== 'boolean') return true;
+  return p.enabled;
+}
+
+/**
+ * 记下「本机要不要这个插件」。
+ *
+ * 只存布尔值与插件名 —— 插件名来自**注册表扫到的插件**，不是用户输入，
+ * 所以这里不需要担心把任意字符串写进配置。
+ */
+function setPluginEnabled(dir, cfg, name, enabled) {
+  if (!cfg.plugins || typeof cfg.plugins !== 'object') cfg.plugins = {};
+  if (typeof enabled !== 'boolean') delete cfg.plugins[name];
+  else cfg.plugins[name] = { enabled };
+  saveConfig(dir, cfg);
+  return cfg.plugins;
+}
 
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
 function ensureDir(dir, mode) {
@@ -381,6 +410,14 @@ function loadConfig(dir) {
   // 早就不存在的行为。
   const cfg = structuredClone(DEFAULTS);
   if (raw.hostKeys && typeof raw.hostKeys === 'object') cfg.hostKeys = raw.hostKeys;
+  // 插件开关。**只收布尔值**：配置文件是用户可以手改的，而一个 `"enabled": "no"`
+  // （字符串）会让 `if (p.enabled)` 判真 —— 用户以为关掉了，实际开着。
+  // 认不出的形状直接丢掉 = 回到"跟着站点走"，那是安全的那一侧。
+  if (raw.plugins && typeof raw.plugins === 'object' && !Array.isArray(raw.plugins)) {
+    for (const [name, v] of Object.entries(raw.plugins)) {
+      if (v && typeof v.enabled === 'boolean') cfg.plugins[name] = { enabled: v.enabled };
+    }
+  }
 
   // 连接列表：先取新格式，再补旧格式。
   // 去重按**两个**维度：id（同一个条目被写了两遍），以及身份
@@ -707,6 +744,8 @@ module.exports = {
   pruneLayouts, layoutPlan,
   activeConnection, newConnectionId, normalizeConnection,
   connectionKey, upsertConnection,
+  // 插件在本机的开关
+  pluginEnabledLocally, setPluginEnabled,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
   setKey, getKey, deleteKey, hasKey, migrateLegacySecret, readSecretFile,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,

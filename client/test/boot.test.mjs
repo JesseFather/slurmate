@@ -631,16 +631,23 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
 test('★ 服务端通报的默认资源要真的送到界面上，不能又在客户端硬编码一份', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // op:partitions 的响应里一直带着 defaults（cluster/slurmate-sessiond:2080），
-  // 而主进程此前只取 .partitions，把它整个丢掉了 —— 界面于是只能把「2 核 / 8G」
-  // 写死在文案里，管理员改了默认值界面照样显示旧数字，且没有任何地方会报错。
+  // ★ 默认资源现在是**按插件**的，所以它跟 `op:plugins` 走，不再挂在 `partitions`
+  //   的响应上（那个 `defaults` 字段已经从协议里删掉了 —— 留一个全局的在那里就是
+  //   两份真相：界面显示 2 核 / 8G，而实际提交中转站会话拿到的是 1 核 / 2G，
+  //   且没有任何地方会为此报错）。
+  //
+  //   客户端**不自己定一份**：界面只读地显示它，提交时靠【省略】cpus/mem 让服务端
+  //   填当下那份默认值。回发旧值的客户端会把管理员的改动永远钉死。
   const r = await invoke('app:partitions');
   assert.equal(r.ok, true);
-  assert.deepEqual(r.resourceDefaults, { cpus: 2, mem: '8G' },
+  const codeServer = r.plugins.plugins.find((p) => p.name === 'code-server');
+  assert.ok(codeServer, '代码宿主插件必须出现在可用的插件里');
+  assert.deepEqual(codeServer.defaults, { cpus: 2, mem: '8G' },
     '服务端通报的默认资源必须原样带回来');
 
   const boot = await invoke('app:bootstrap');
-  assert.deepEqual(boot.resourceDefaults, { cpus: 2, mem: '8G' },
+  const cs2 = boot.plugins.plugins.find((p) => p.name === 'code-server');
+  assert.deepEqual(cs2.defaults, { cpus: 2, mem: '8G' },
     'bootstrap 也要带 —— 界面首次渲染时还没有别的机会拿到它');
 });
 
@@ -656,7 +663,9 @@ test('★ 取不到分区时必须说出来，不能谎报「这台集群没有�
     assert.ok(r.error, '必须给出原因 —— 否则界面只能显示一个空列表');
     assert.match(r.error, /分区列表/, `错误里要说清是取分区列表失败：${r.error}`);
     assert.deepEqual(r.partitions, [], '失败时列表为空，但区别在 error 上');
-    assert.equal(r.resourceDefaults, null);
+    // 插件清单拿不到时**不能**当成"一个插件都没开"—— 那会让升级客户端的用户
+    // 突然一个按钮都看不到。这里只要求它不谎报。
+    assert.ok(r.plugins, '插件视图始终要有，界面靠它决定画哪些按钮');
 
     // 而且不能悄悄留着上一次的值当成本次的结果
     const notices = calls.windows[0].webContents.handlers['send:ui:notice'] || [];
@@ -713,22 +722,180 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
 // 能连进来。所以这一节的断言几乎全部落在文件上：写出来的 ssh 配置对不对、
 // 有没有动用户别的东西、以及**有没有建一个不该建的视图**。
 
-test('serviceRoute：三种输入各有各的答案，尤其「不知道」不能猜', (t) => {
+test('插件注册表：四种输入四种答案，尤其「不知道」不能猜', (t) => {
   t.after(() => { Module._load = origLoad; });
-  const { serviceRoute } = require('../src/main/service.js');
+  const { Registry } = require('../src/main/plugins/index.js');
+  const reg = new Registry();
 
-  assert.equal(serviceRoute('sshd'), 'sshd');
-  assert.equal(serviceRoute('code-server'), 'code-server');
+  assert.equal(reg.route('sshd'), 'sshd');
+  assert.equal(reg.route('code-server'), 'code-server');
   // ★ 字段**不存在**（部署的守护进程还是旧版本）：那时候集群上只可能有
   //   code-server 的会话，按它走与升级前一致。不这样兜的话，升级客户端会让
   //   所有已有会话都变成「服务类型未知」—— 用户眼前的功能凭空消失。
-  assert.equal(serviceRoute(undefined), 'code-server',
+  assert.equal(reg.route(undefined), 'code-server',
     '老守护进程没有这个字段时，不能把它读成「未知」');
   // ★ 字段存在且是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
   //   这时**绝不能猜** —— 猜 code-server 会拿口令去 POST 一个 SSH 端口，
   //   猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
-  assert.equal(serviceRoute(null), 'unknown');
-  assert.equal(serviceRoute('ssh'), 'unknown', '认不出的值也不许退回默认');
+  assert.equal(reg.route(null), 'unknown',
+    '守护进程明说不知道时绝不能猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
+  assert.equal(reg.route('ssh'), 'unknown', '认不出的值也不许退回默认');
+});
+
+test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry } = require('../src/main/plugins/index.js');
+  const reg = new Registry();
+
+  // 状态变化很频繁（心跳、隧道重建、每次 status 回来都会走到渲染），而插件的
+  // attach() 多半在写文件或弹通知 —— 不去重用户每 45 秒收到一条一模一样的通知。
+  assert.equal(reg.once('code-server', 'k1'), true, '第一次要放行');
+  assert.equal(reg.once('code-server', 'k1'), false, '同一个键再来一次要拦住');
+  // ★ 关键的一条，而且**必须紧接着上面**：此刻 code-server 的槽里正是 'k1'，
+  //   所以另一个插件拿**同一个键**来问必须放行。共用一个槽的话它会拿到 false ——
+  //   症状是其中一个插件的通知永远不出现。
+  //   （顺序不能挪：先让槽里换成别的键再问这一条，共享槽也会通过，这条断言就退化成
+  //     走过场了。变异验证 C6 第一次就是这么活下来的。）
+  assert.equal(reg.once('sshd', 'k1'), true, '别的插件有自己的槽，同一个键也要放行');
+  assert.equal(reg.once('sshd', 'k1'), false, '同一个插件同一个键才拦');
+
+  assert.equal(reg.once('code-server', 'k2'), true, '换了键要放行');
+  // 重新扫描（模拟装/卸插件）不能把去重状态清掉，否则用户会重看一遍通知。
+  reg.reload();
+  assert.equal(reg.once('code-server', 'k2'), false, '重新扫描后去重状态还在');
+});
+
+// ── ★ 装一个插件、卸一个插件，客户端都不许崩 ─────────────────────────────────
+//
+// 这是这次改动的验收标准，也是整块重构存在的理由。用一个临时目录模拟
+// 「站点分发的插件」，逐条验四件事：坏文件不拖垮别人、装上就认得、
+// 卸掉之后会话仍然能管（这是"通用层"的核心断言）、名字与文件不一致时宁可跳过。
+
+test('★ 插件目录：坏文件只影响它自己，其余插件照常工作', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry } = require('../src/main/plugins/index.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
+  fs.writeFileSync(path.join(tmp, 'good.js'),
+    "module.exports = { name: 'good', title: '好的', attach() {} };\n");
+  fs.writeFileSync(path.join(tmp, 'broken.js'), 'this is not javascript at all(((()\n');
+  fs.writeFileSync(path.join(tmp, 'empty.js'), 'module.exports = {};\n');
+  // 文件名才是身份（service_kind 就是它），不一致时宁可跳过 ——
+  // 否则「改了 A 文件、生效的是 B」永远说不清。
+  fs.writeFileSync(path.join(tmp, 'mismatch.js'),
+    "module.exports = { name: 'other', title: 'x', attach() {} };\n");
+
+  const reg = new Registry(tmp);
+
+  assert.deepEqual(reg.list().map((p) => p.name), ['good'],
+    '只有形状完整、且名字与文件名一致的那个被收下');
+  assert.equal(reg.errors.length, 3, `三个坏文件各记一条：${JSON.stringify(reg.errors)}`);
+  assert.ok(reg.errors.every((e) => typeof e === 'string' && e.length > 0),
+    '每条都要说得出是哪个文件、坏在哪');
+  // ★ 关键：注册表本身可用 —— 一个坏插件不能把客户端带崩。
+  assert.equal(reg.route('good'), 'good');
+  assert.equal(reg.route('broken'), 'unknown');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被管', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const { Registry } = require('../src/main/plugins/index.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
+  const file = path.join(tmp, 'temp.js');
+  fs.writeFileSync(file,
+    "module.exports = { name: 'temp', title: '临时', attach() {} };\n");
+
+  const reg = new Registry(tmp);
+  assert.equal(reg.route('temp'), 'temp', '装上之后认得');
+
+  fs.rmSync(file);
+  reg.reload();
+  assert.equal(reg.route('temp'), 'unknown',
+    '卸掉之后认不出来 —— 而"认不出来"的归宿是"只解释、不动作"，不是崩溃');
+  // ★ 会话本身不受影响：状态/心跳/停止只认 session_id，一次都不查插件。
+  //   这条断言是"卸载插件之后用户仍然能停掉作业"的全部依据。
+  const { SessionController } = require('../src/main/session.js');
+  const sess = new SessionController({
+    backend: { rpc: async () => ({ ok: true, data: {} }), dial: async () => {}, close() {} },
+    requestedKind: 'temp',
+  });
+  sess.sessionId = 'sid-1';
+  assert.equal(sess.snapshot().state, 'idle');
+  await sess.stop();          // 卸载之后照样停得掉（它只发 session_id）
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// ── ★ 插件增减不许把客户端带崩（这次改动的验收标准）────────────────────────
+
+test('★ 站点装了客户端不认识的插件：不崩，而且说得出该怎么办', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  await invoke('app:debug', 'reset');
+  await invoke('app:debug', 'extra-plugin');
+  try {
+    const r = await invoke('app:partitions');
+    assert.equal(r.ok, true, '站点有客户端不认识的插件，不影响任何别的查询');
+
+    // 客户端认识的那两个照常
+    assert.deepEqual(r.plugins.plugins.map((p) => p.name).sort(),
+      ['code-server', 'sshd']);
+    // ★ 认不出的那个**要被报出来**，而不是被过滤掉 —— 它是升级提示的唯一来源。
+    //   过滤掉的话，用户面对的就是"按钮凭空少了一个"，而没有任何地方解释为什么。
+    assert.deepEqual(r.plugins.unknownToClient.map((p) => p.name), ['jupyter'],
+      '站点有而客户端没有的插件必须列出来');
+
+    // 而且它绝不能出现在"能起会话"的那一类里 —— 客户端不知道怎么接它。
+    assert.ok(!r.plugins.plugins.some((p) => p.name === 'jupyter'));
+  } finally {
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  }
+});
+
+test('★ 站点关掉一个插件：客户端看得见它、但起不了 —— 三种状态分得开', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  await invoke('app:debug', 'reset');
+  await invoke('app:partitions');
+  let r = await invoke('app:partitions');
+  let sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+  assert.equal(sshd.runnable, true, '站点开着、本机也没关 → 能起');
+
+  await invoke('app:debug', 'site-plugin-off');
+  try {
+    r = await invoke('app:partitions');
+    sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+    assert.equal(sshd.siteEnabled, false, '站点关掉了');
+    assert.equal(sshd.runnable, false, '站点关了就不能起');
+    // ★ 但**仍然列出来**：把它藏掉，用户看到的是"按钮少了一个"，
+    //   而不知道该找管理员。留着它，界面才能说清是站点没开。
+    assert.ok(sshd, '站点关掉的插件仍然要在表里，只是不能起');
+  } finally {
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  }
+});
+
+test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮', async (t) => {
+  t.after(async () => {
+    Module._load = origLoad;
+    const idx = require('../src/main/index.js');
+    await invoke('app:setPluginEnabled', 'sshd', true);
+    void idx;
+  });
+  await invoke('app:debug', 'reset');
+  await invoke('app:partitions');
+
+  const off = await invoke('app:setPluginEnabled', 'sshd', false);
+  assert.equal(off.ok, true);
+
+  const r = await invoke('app:partitions');
+  const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+  assert.equal(sshd.locallyEnabled, false, '本机关了');
+  assert.equal(sshd.siteEnabled, true, '★ 站点那边一点没动 —— 两件事');
+  assert.equal(sshd.runnable, false);
+
+  // 认不出的插件名要被拒绝，而不是静静写进配置
+  const bad = await invoke('app:setPluginEnabled', 'no-such-plugin', false);
+  assert.equal(bad.ok, false);
 });
 
 test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
@@ -1000,4 +1167,119 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
 
   // 收尾
   await invoke('app:stop');
+});
+
+
+// ── ★ 未知服务的会话：接上隧道，但只解释、不动作 ──────────────────────────────
+//
+// 这条是"站点装了本客户端不认识的插件"在**会话层**的表现。它要同时成立两件看起来
+// 相反的事：隧道**要**接起来（那是用户唯一的出路 —— 他能直接连上去看看那是什么，
+// 也能结束它），而"怎么用它"**一件都不能做**（那个端口上跑的可能是任何东西，
+// 拿口令去 POST 或者给它配主机公钥都是在声称一件我们并不知道的事）。
+
+test('配置里认不出的 enabled 值按「跟着站点走」处理，不读成「关掉」', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const config = require('../src/main/config.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-cfg-'));
+  fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
+    schema: config.SCHEMA,
+    plugins: { sshd: { enabled: 'no' }, 'code-server': { enabled: true } },
+  }));
+  const cfg = config.loadConfig(tmp);
+
+  // ★ 认不出的形状（这里是字符串 'no'）**丢掉**，回到"跟着站点走" ——
+  //   而"跟着站点走"是 true。读成 false 的话，配置文件里一个笔误就让一个功能
+  //   凭空消失，而界面上只会少一个按钮、没有任何地方解释为什么。
+  assert.equal(config.pluginEnabledLocally(cfg, 'sshd'), true,
+    '认不出的值按「跟着站点走」处理，不读成「关掉」');
+  // 认得出的照旧生效
+  assert.equal(config.pluginEnabledLocally(cfg, 'code-server'), true);
+  assert.equal(config.pluginEnabledLocally(cfg, '从没听过的插件'), true,
+    '没表过态 = 跟着站点走');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('★ 未知服务的会话：接上隧道、不建视图，并说清该升级客户端', async (t) => {
+  t.after(async () => {
+    Module._load = origLoad;
+    // ★ 这一条不只是打扫卫生：如果 tryReattach 提前返回（正是 C10 那个变异），
+    //   controller 会是 null 而隧道还活着 —— 事件循环被它撑住，
+    //   整轮 `node --test` 不会结束。收尾要能覆盖"没有 controller"那种情况。
+    const c = idx._test.getController();
+    if (c) { try { await c.stop(); } catch (e) { /* 收尾失败不该改变结论 */ } }
+    await invoke('app:debug', 'reset');   // 它会把演示站点那两个插件恢复成开着的
+  });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  const b = idx._test.getBackend();
+
+  // 先把上一个用例可能留下的会话收干净 —— 「单一启动」是服务端强制的，
+  // 带着一个在跑的会话去开新的只会拿到「已有 1 个活跃会话」。
+  // 演示后端的 _goodbye 只把 state 置成 released、不把对象清掉（真守护进程也是
+  // 这样：终态记录会留着），所以判据是**状态**而不是对象在不在。
+  const dead = () => !b._session
+    || ['released', 'rejected', 'expired'].includes(b._session.state);
+  if (!dead()) {
+    await invoke('app:stop');
+    await waitUntil(dead, '上一个会话释放', 20000);
+  }
+
+  // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个**真的在监听**
+  // 的端口。起完再把这个会话的 service_kind 换成客户端不认识的名字，正是
+  // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
+  const started = await invoke('app:start', { cpus: 2 });
+  assert.equal(started.ok, true,
+    `开会话失败：${JSON.stringify(started.snapshot || started)}`);
+  // ★ controller 要在 start 之后取：上面那个会话若停在终态，start 会换一个新的。
+  const ctl = idx._test.getController();
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin,
+    '会话进入 running', 20000);
+
+  await invoke('app:debug', 'extra-plugin');
+  await invoke('app:partitions');
+
+  // 把窗口恢复成"刚启动"的样子：客户端重启后本来就没有视图。不这么做的话，
+  // 下面那条"没建视图"会被上一个会话留下的旧视图蒙混过去。
+  w.hideCodeView();
+  const viewsBefore = calls.views.length;
+  // 通知走的是 webContents 的 'ui:notice' 通道（外壳把它渲染成提示条），
+  // 不是 calls.notices —— 后者是别处用的记录。
+  const notices = calls.windows[0].webContents.handlers['send:ui:notice'] || [];
+  const before = notices.length;
+
+  // ★ 两处都要改：controller.session 是后端响应的一份**副本**（session_view 每
+  //   次都新构造一个对象），而 reattach 会重新问一次后端。只改一处的话，
+  //   下面那段"走重启那条路"拿到的仍然是 code-server，于是它建视图、
+  //   断言因为错误的理由变红。
+  b._session.service_kind = 'jupyter';
+  ctl.session.service_kind = 'jupyter';
+  ctl.emit('change', ctl.snapshot());
+  await new Promise((r) => setTimeout(r, 300));
+
+  assert.equal(calls.views.length, viewsBefore,
+    '认不出的插件绝不能**新建**一个 WebView 去加载它');
+  assert.equal(w.hasCodeView(), false, '窗口里不该留下任何视图');
+
+  // ★ 再走一遍**客户端重启**那条路：这才是"站点装了新插件而客户端没跟上"在
+  //   现实里的样子（会话是别人提交的，客户端是刚启动的）。上面那次 emit 用的
+  //   是已经在跑的 controller，它的隧道是现成的 —— 那条"隧道在"的断言会因为
+  //   错误的理由变绿。这一遍把 controller 清掉重建，隧道必须**由这条路**接起来。
+  await idx._test.reattach();
+  const ctl2 = idx._test.getController();
+  assert.notEqual(ctl2, null, '接上已有会话这条路不能因为插件认不出就放弃');
+  await waitUntil(() => ctl2.snapshot().origin, '认不出的会话也把隧道接起来', 20000);
+  assert.equal(calls.views.length, viewsBefore,
+    '走重启那条路也一样：不会为认不出的插件建视图');
+
+  const said = notices.slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
+  // ★ 要害二：**点名**是哪个插件、并说清该怎么办。用户该升级客户端，不是找管理员 ——
+  //   不说这一句，他只能去猜。
+  assert.match(said, /jupyter/, `提示里要点名是哪个插件：${said}`);
+  assert.match(said, /升级客户端/, `而且要说出该怎么办：${said}`);
+  // ★ 要害三：隧道**在**（用户有出路）。
+  assert.ok(ctl.snapshot().origin, '隧道要接起来，否则用户连那个端口都够不着');
+
+  ctl.session.service_kind = 'code-server';
+  await invoke('app:stop');
+  await waitUntil(dead, '会话释放', 20000);
 });

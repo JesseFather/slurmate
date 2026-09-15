@@ -35,9 +35,20 @@
 
 const path = require('path');
 const { BrowserWindow, WebContentsView, dialog, shell } = require('electron');
-const { SERVICE_SSHD } = require('./service.js');
 
 const STATUS_BAR_HEIGHT = 30;
+
+/**
+ * 没有插件信息时关窗确认的文案。
+ *
+ * 这不是"兜底文案"，而是**未知服务**那个情形的正确文案：我们不知道那个会话是
+ * 什么，就不该替它说"你的终端会断"或者"你的编辑器会丢改动"—— 两句都可能是假的。
+ * 说得出确定的那一部分（作业会被取消）就够了。
+ */
+const NEUTRAL_CLOSE_WARNING = {
+  message: '关闭窗口会结束这个会话。',
+  detail: '计算节点上的作业会被立即取消。\n',
+};
 
 class ShellWindow {
   /**
@@ -81,7 +92,9 @@ class ShellWindow {
     this._closing = false;
     this._closeConfirmed = false;
     this._sessionLive = false;     // 由 pushState 更新
-    this._sessionService = null;   // 同上（'code-server' / 'sshd' / 'unknown' / null）
+    // 当前会话由哪个插件在接 —— 由 setSessionService 设。**窗口不认识任何插件**，
+    // 它只要一份「关窗会掐断什么」的说法（见 _confirmClose）。
+    this._sessionPlugin = null;
     this._overlayText = null;
 
     this.win.on('resize', () => this._layout());
@@ -307,13 +320,22 @@ class ShellWindow {
 
   // ── 面板通信 ────────────────────────────────────────────────────────────
   /** 把会话快照推给面板。快照是界面唯一的数据来源。 */
+  /**
+   * 告诉窗口「这个会话由哪个插件在接」。传 null = 不知道（未知服务，或没有会话）。
+   *
+   * 窗口只用到其中的 `closeWarning`（关窗确认要说清楚会掐断什么）。传整个插件
+   * 对象而不是一句文案，是为了让窗口在将来需要别的插件信息时不必再开一个方法 ——
+   * 但它**不**应该去读 `attach` 之类的东西：那是框架与插件之间的事。
+   */
+  setSessionService(plugin) {
+    this._sessionPlugin = plugin || null;
+  }
+
   pushState(snap) {
     // 关窗确认要用：有会话在跑才值得拦一下误点。快照本来就每次状态变化都推过来，
     // 顺手记下即可，不必再开一条查询通道。
     const st = snap && snap.state;
     this._sessionLive = Boolean(st) && st !== 'idle' && st !== 'ended';
-    // 关窗文案要用：中转站模式下被掐断的不是一个网页，是用户**正在用的终端**。
-    this._sessionService = (snap && snap.serviceKind) || null;
     const wc = this.win.webContents;
     if (wc.isDestroyed()) return;
     wc.send('session:state', snap);
@@ -365,23 +387,23 @@ class ShellWindow {
         this.onClose();
         return;
       }
-      // 中转站模式下要掐断的东西不一样，所以话也得不一样：那边窗口里什么都没有，
-      // 用户真正在用的东西在他的终端里、在 codex 里。照搬 code-server 那句
-      // 「终端里的进程会被终止」，指的不是他手上那个终端 —— 而这一下点错，
-      // 断掉的是他正在跑的编译或对话。
-      const relay = this._sessionService === SERVICE_SSHD;
+      // 不同插件被掐断的东西不一样，所以话也得不一样：中转站那边窗口里什么都
+      // 没有，用户真正在用的东西在他的终端里、在 codex 里，照搬 code-server 那句
+      // 「编辑器里没保存的改动会丢失」指的是另一回事 —— 而这一下点错，断掉的是
+      // 他正在跑的编译或对话。
+      //
+      // ★ 文案由**插件**提供（见 plugins/*.js 的 closeWarning），窗口不认识任何
+      //   插件名。没有插件信息时用中性的那句 —— 见 NEUTRAL_CLOSE_WARNING。
+      const cw = (this._sessionPlugin && this._sessionPlugin.closeWarning)
+        || NEUTRAL_CLOSE_WARNING;
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',
         buttons: ['结束会话并退出', '取消'],
         defaultId: 1,                     // 默认停在「取消」：回车不该毁掉作业
         cancelId: 1,
         title: '关闭 Slurmate',
-        message: relay ? '关闭窗口会结束这个 SSH 中转会话。'
-                       : '关闭窗口会结束这个开发会话。',
-        detail: (relay
-          ? '计算节点上的作业会被立即取消 —— 你用 ssh slurmate 连上去的终端、'
-          + 'VS Code 远程窗口和 codex 会话都会当场断开。\n'
-          : '计算节点上的作业会被立即取消，终端里的进程会被终止。\n')
+        message: cw.message,
+        detail: cw.detail
         + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
         + '下次打开会自动接上。）',
         noLink: true,

@@ -32,7 +32,20 @@
 const net = require('net');
 const { Backend, KIND } = require('./backend.js');
 const { createDemoCodeServer } = require('./demo-server.js');
-const { SERVICE_CODE_SERVER, SERVICE_SSHD } = require('./service.js');
+
+// 这两个是**协议上的取值**（`service_kind` / 插件名），不是客户端的插件注册表。
+// 注册表扫到的是"这个客户端能接哪些"，而这里是"演示后端扮演的那个**站点**开了
+// 哪些" —— 两者是不同的东西，客户端的插件集合与服务端的插件集合本来就允许不等，
+// 而"不相等时不许崩"正是这次改动的验收标准之一。
+//
+// ★ 演示后端扮演的是一个**具体的**站点，所以集合写死在这里是对的：真实站点的
+//   集合由 `op_plugins` 通报，客户端不该假定任何集合。
+const SERVICE_CODE_SERVER = 'code-server';
+const SERVICE_SSHD = 'sshd';
+const DEMO_SITE_PLUGINS = [
+  { name: SERVICE_CODE_SERVER, title: '开发环境', enabled: true, builtin: true },
+  { name: SERVICE_SSHD, title: 'SSH 中转站', enabled: true, builtin: true },
+];
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -88,6 +101,8 @@ class FakeBackend extends Backend {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
     this._connected = false;
+    /** 调试用：站点多出来的插件（模拟"站点升级了、客户端没跟上"）。 */
+    this._extraSitePlugins = [];
   }
 
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
@@ -140,7 +155,17 @@ class FakeBackend extends Backend {
     switch (op) {
       case 'ping':       return ok({ pong: true, version: '0.2.0-demo', time: nowSec() });
       case 'whoami':     return this._whoami();
-      case 'partitions': return ok({ partitions: this._partitions(), defaults: { ...DEFAULTS } });
+      case 'partitions': return ok({ partitions: this._partitions() });
+      // 默认资源是**按插件**的，所以它跟 `plugins` 走，不再挂在 `partitions` 上
+      //（与守护进程逐字一致 —— 那个字段已经删掉了，见 op_partitions）。
+      case 'plugins':    return ok({
+        plugins: [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins].map((p) => ({
+          ...p, defaults: { ...DEFAULTS },
+        })),
+        // 演示站点默认两个都开着（真实站点默认只开 code-server）。
+        enabled: [...DEMO_SITE_PLUGINS, ...this._extraSitePlugins]
+          .filter((p) => p.enabled).map((p) => p.name),
+      });
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
       case 'list':       return this._list();
@@ -176,9 +201,31 @@ class FakeBackend extends Backend {
     this._emitState(false, '会话已被回收');
     return true;
   }
+  /**
+   * 让演示站点"开了某个插件但本客户端不认识它"。
+   *
+   * 这是**必须能演**的一种情况：站点升级了、装了新插件，而用户的客户端还没升级。
+   * 没有它，"未知服务"那条路在演示模式下永远走不到，而那正是最需要用户看懂的一条
+   * 提示（他该升级客户端，不是该找管理员）。
+   */
+  debugAddSitePlugin(name, title = null) {
+    if (!this._extraSitePlugins.some((p) => p.name === name)) {
+      this._extraSitePlugins.push({ name, title: title || name, enabled: true,
+                                    builtin: false });
+    }
+  }
+  /** 让演示站点把某个插件**关掉**（站点装了但不允许用）。 */
+  debugDisableSitePlugin(name) {
+    const p = DEMO_SITE_PLUGINS.find((x) => x.name === name);
+    if (p) p.enabled = false;
+    const e = this._extraSitePlugins.find((x) => x.name === name);
+    if (e) e.enabled = false;
+  }
   debugReset() {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
+    this._extraSitePlugins.length = 0;
+    DEMO_SITE_PLUGINS.forEach((p) => { p.enabled = true; });
   }
 
   // ── op 实现 ─────────────────────────────────────────────────────────────

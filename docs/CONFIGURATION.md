@@ -5,7 +5,7 @@
 
 | 读者 | 怎么读 | 读到之后 |
 |---|---|---|
-| `slurmate-sessiond` | `parse_flat_config()`，扁平 `键 = 值` | 全部键 |
+| `slurmate-sessiond` | `parse_config()`，`键 = 值` + `[plugin:名字]` 块 | 全部键 |
 | `cluster/deploy.sh` | `sed` 抽取 `range_start` / `range_end` / `reserved_ranges` / `readonly_paths` | 用于预检与渲染 systemd 单元 |
 
 `slurmate`（用户 CLI）**不读这个文件**（见下方「不再是配置项的东西」）。
@@ -15,9 +15,32 @@
 
 ---
 
-## 一、这里只有「无法从系统推导」的键。一共 12 个。
+## 〇、两种行形态
 
-这是 v0.2 的收缩：**能从 Slurm 查到的，一律不再写一份。**
+```ini
+cluster_cidr = 192.0.2.0/24     # 站点通用键。【必须写在所有块之前】
+range_start  = 55001
+...
+
+[plugin:code-server]            # 插件块。块存在 = 这个插件装上了
+enabled      = yes              #            enabled = yes 才是真的开着
+default_cpus = 2
+default_mem  = 8G
+```
+
+**块一旦开始就没有回头路**：块之后写的通用键会落进那个块，然后被拒。报错会点明
+「这是站点通用键，要写在块之前」—— 因为「把 cluster_cidr 追加到文件末尾」是个很
+容易犯、而症状完全指错方向的错。
+
+（`deploy.sh` 用 `sed` 抓的那四个键都按行首匹配，所以它们必须待在文件上半部分 ——
+与上面这条规则一致。）
+
+---
+
+## 一、站点通用键。一共 11 个。
+
+这是 v0.2 的收缩，v0.3 又把它推进了一步：**能从 Slurm 查到的，一律不再写一份；
+只属于某个插件的，搬进那个插件的块。**
 
 分区名、分区的时间上限、GPU 型号、默认资源 —— Slurm 自己知道。写在这里就是第二份
 副本，而副本会与实际分叉（分区改名、加卡、管理员调 MaxTime），**分叉了没有任何东西会
@@ -39,9 +62,76 @@
 | `range_start` / `range_end` | 整数 | `55001` / `55999` | 服务端口池 |
 | `reserved_ranges` | `起-止,起-止` | 空（无） | 要避让的其他区间。见下方专节 |
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
-| `auth_mode` | `password` \| `none` | `password` | code-server 的认证方式。只能是这两个值 |
 | `sbatch` / `scancel` / `squeue` / `scontrol` / `sacctmgr` | 路径 | 空 = 自动查找 | 见下方专节 |
-| `code_server_bin` | 路径 | 空 = 自动查找 | 作业在**计算节点**上执行的 code-server 路径 |
+
+### 为什么 `auth_mode` 和 `code_server_bin` 不在这里了
+
+它们搬进了 `[plugin:code-server]` 块。判据是同一句话：**它是不是"站点的事实"。**
+
+`auth_mode` 是 **code-server 的**认证方式（`--auth password|none`），`code_server_bin`
+是 **code-server 的**路径。中转站用的是公钥，那两个键对它一个字都不适用 ——
+从前它们摆在顶层，是因为那时只有一个插件。
+
+现在每个插件块里有同样的三项：`enabled` / `default_cpus` / `default_mem`，
+外加它自己认得的几个（code-server 是 `bin` 与 `auth_mode`，sshd 是 `bin`）。
+
+---
+
+## 一之二、插件块
+
+一个块 = 一个**已安装的**插件。现在有两个：
+
+| 插件 | 是什么 |
+|---|---|
+| `code-server` | 浏览器里的 IDE |
+| `sshd` | 用户态 ssh，供原生 VS Code Remote-SSH、codex 这类**要求 ssh 连接**的工具用 |
+
+块内的键：
+
+| 键 | 含义 |
+|---|---|
+| `enabled` | 开不开。**不写就是不按块里这份配置开** —— 见下 |
+| `default_cpus` / `default_mem` | **这个插件**的默认资源。客户端省略 cpus/mem 时用这一组 |
+| `bin` | 作业在**计算节点**上执行的那个可执行文件。留空 = 按插件各自的惯例找 |
+| `auth_mode`（只有 code-server） | `password` 或 `none` |
+
+### 「装了」和「开着」是两件事
+
+```
+块在不在    →  这个插件装没装（决定它的配置从哪来）
+enabled     →  它开没开（决定用户能不能提交它）
+```
+
+规则只有一条：
+
+```
+插件的 enabled = 块里写了就用块里的
+              否则 = (这个插件的名字在不在"缺省开启清单"里)
+```
+
+缺省开启清单是 `(code-server,)`。于是：
+
+- **一个块都没有**（老配置）→ 只开 code-server，**与升级前完全一致**；
+- 写一个 `[plugin:sshd]` 块**不会**顺手把 code-server 关掉 —— 那正是最危险的那类
+  静默改变（管理员只想开中转站，结果所有人的 IDE 没了）；
+- 写一个 `[plugin:sshd]` 块也**不会**因为"块在那儿"就自动开启 sshd —— 那会让一句
+  `default_cpus = 1` 在没有任何显式同意的情况下开出一条交互式 ssh 的路。
+  **想开就写 `enabled = yes`。**
+
+将来新增内建插件时**不要**往缺省清单里加名字：那等于给所有站点在升级时静默多开
+一个能力。让站点自己写。
+
+### 块里认不出的键同样报错
+
+写成 `defualt_cpus` 不能被静默忽略 ——「文件里写着，而实际什么也没发生」正是本项目
+一路在清的那类问题。块名也一样：`[plugin:ssh]`（少个 d）在启动时就会报错并列出
+本版认得的名字。
+
+一个都开不了（全关掉）是**合法**的，但自检会说一句 —— 否则表现是"客户端一个按钮
+都没有"，而配置文件里一个字都不像有问题。
+
+**守护进程和客户端都不认识、由站点分发的插件**（声明式 / 代码分发）属于后续版本，
+装到 `<prefix>/share/slurmate/plugins/` 之后才会被认得。
 
 ### 格式上的三个约束
 
@@ -156,7 +246,7 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 不够分配时 `allocate_candidates()` 返回空列表，`op_submit` 返回 code 5 `no_port`，
 客户端会退避后重试。
 
-## `auth_mode`
+## `[plugin:code-server] auth_mode`
 
 | 值 | 含义 |
 |---|---|
@@ -183,7 +273,7 @@ per-user 网络隔离（cgroup 没有 `net_cls`/`net_prio`，主机防火墙也�
 作业模板的态度是配合而不是妥协：`auth_mode=password` 时**拿不到口令就拒绝启动
 （`exit 23`）**，绝不静默降级为 `auth=none`。
 
-## Slurm 命令与 code-server
+## Slurm 命令、以及插件各自的 `bin`
 
 ### 五个 Slurm 命令：留空是推荐值
 
@@ -209,13 +299,25 @@ per-user 网络隔离（cgroup 没有 `net_cls`/`net_prio`，主机防火墙也�
 是「查不到作业」或「没有账户」，与真正的原因（路径写错）隔了好几层。现在五个全查，
 且区分配置留空自动查找失败与显式指定的路径不存在两种情况。
 
-### `code_server_bin`
+### 插件块里的 `bin`
 
-留空 = 先在本机 `PATH` 里找，找不到就退回惯例路径 `/usr/local/bin/code-server`。
+**code-server**：留空 = 先在本机 `PATH` 里找，找不到就退回惯例路径
+`/usr/local/bin/code-server`。
 
-⚠️ 守护进程在**登录节点**上运行，而 code-server 装在**计算节点**上。所以这里的
+**sshd**：留空 = **直接**用惯例路径 `/usr/sbin/sshd`，**不做 PATH 查找**。
+两者不同是有理由的 —— 见下。
+
+⚠️ 守护进程在**登录节点**上运行，而这两个程序都装在**计算节点**上。所以这里的
 「找到」只是**推测**，找不到也不代表真的没有 —— 它没有也不能在计算节点上执行命令，
-这是设计上必然的。`--check` 会把解析结果与它的来源（配置指定 / 本机 PATH 中找到 /
+这是设计上必然的。
+
+**两个插件的差别正在这里**：code-server 做 PATH 查找，而 sshd **不做**。理由不是
+风格不一致，而是"登录节点上恰好有这个文件"对计算节点**不是证据** ——
+`/usr/sbin/sshd` 在任何一台 Linux 上都存在，而它很可能不是计算节点上那个。
+写错了由作业侧明确失败（`run.sbatch` 会 log 出「不存在或不可执行」），
+而不是在这里猜一个看起来合理的路径。
+
+`--check` 会把**每个插件**的解析结果与它的来源（配置指定 / 本机 PATH 中找到 /
 惯例路径）一起打印出来，就是为了让这句推测与事实分得开。
 
 ---
@@ -235,6 +337,10 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `[renew] enabled` / `threshold_seconds` / `max_total_seconds` | 常量 | 同上 |
 | `security.password_bytes` | `PASSWORD_BYTES` | 同上 |
 | `[quota]` 全部 | 各自的常量 | 同上 |
+| `service_kinds` | **已删除** | v0.3 起「站点开了哪些插件」由**有没有那个 `[plugin:*]` 块**表达，见上 |
+| `code_server_bin` / `sshd_bin` | 各自的插件块里的 `bin` | 它们是**插件的**路径，不是站点事实 |
+| `auth_mode` | `[plugin:code-server]` 块的 `auth_mode` | 同上：它是 code-server 的认证方式 |
+| 默认资源（曾经是 `DEFAULT_CPUS`/`DEFAULT_MEM` 两个常量） | 每个插件块的 `default_cpus`/`default_mem` | 在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事 —— 它是**插件的策略** |
 | `job_script` | `default_job_script()` | 从守护进程**自身的安装位置**推导 |
 | `job_log_subdir` | `JOB_LOG_SUBDIR` | 与 `run.sbatch` 的约定，不是站点参数 |
 | `[purpose:*]` 整节 | 已删除 | 见下 |
@@ -303,7 +409,10 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 | 作业脚本存在（由安装位置推导） | 作业无法提交 |
 | `cluster_cidr` 四项校验全过 | 见上，全部 fail-open |
 | **五个** Slurm 命令都能解析到 | 无法提交、查状态或查权限 |
-| `auth_mode ∈ {password, none}` | 无法决定 code-server 启动参数 |
+| 每个插件块里的键都认得（块名、块内键） | 拼错的键/块名会被静默忽略 |
+| 块里的 `enabled` 是 yes/no、`default_cpus` 在 1-64、`default_mem` 可解析 | 认不出时拒绝启动，**不回退默认值** |
+| 至少有一个插件是开着的 | 客户端上一个按钮都不会有 |
+| `[plugin:code-server] auth_mode ∈ {password, none}` | 无法决定 code-server 启动参数 |
 | 数据库表结构是本版的 | 旧库的 `NOT NULL purpose` 列会让每次提交都以内部错误失败 |
 
 此外 `main()` 还会做一次 **`cluster_cidr` × `NodeAddr` 交叉核对**，

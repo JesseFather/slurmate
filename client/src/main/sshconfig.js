@@ -47,7 +47,17 @@
 const fs = require('fs');
 const path = require('path');
 const keys = require('./keys.js');
-const { SSH_ALIAS } = require('./service.js');
+
+/**
+ * 用户在命令行里敲的那个 ssh 主机别名。写进我们那份 ssh 配置的 `Host` 行，
+ * 也是 sshd 插件的用户提示文案里出现的那个词。
+ *
+ * ★ 它是一个**常量**，而且必须一直是：用户在他自己的 `~/.ssh/config` 里写
+ *   `Host slurmate`，在 VS Code 的远程连接里填 `slurmate`，在 codex 的配置里
+ *   也写 `slurmate` —— 这些地方都在我们的程序之外，我们改一个字就让它们全废。
+ *   底下的端口可以随便漂移（别名不变，用户无感），这个名字不能。
+ */
+const SSH_ALIAS = 'slurmate';
 
 /** 我们那一行 Include 的标识。改文案可以，但**这个 token 不要动** —— 靠它做替换。 */
 const INCLUDE_MARK =
@@ -335,5 +345,5 @@ function writeKnownHost(p, hostKey, port) {
 
 module.exports = {
   pathsFor, ensureInclude, ensureRelayKey, writeRelayConfig,
-  isHostKeyLine, INCLUDE_MARK,
+  isHostKeyLine, INCLUDE_MARK, SSH_ALIAS,
 };

@@ -46,7 +46,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -301,25 +301,18 @@ PASSWORD_BYTES = 12
 MAX_ACTIVE_PER_USER = 1
 MAX_PENDING_PER_USER = 4
 
-# ── 服务种类 ────────────────────────────────────────────────────────────────
-# 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的 start_service 结构性地保证。
+# ── 插件 ────────────────────────────────────────────────────────────────────
+# 一个「服务种类」就是一个**插件**：两侧各有一半实现，客户端在
+# client/src/main/plugins/<名字>.js，作业侧在 run.sbatch 的一个 start_* 函数。
+# 守护进程自己不认识任何具体插件，它只认下面那张 PluginSpec 表。
+#
+# 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的 start_service 用
+# `case` 结构性地保证（只有一个变量、一次分派，"两个都起来"这个状态写不出来）。
 SVC_CODE_SERVER = "code-server"
 SVC_SSHD = "sshd"
-ALL_SERVICE_KINDS = (SVC_CODE_SERVER, SVC_SSHD)
 
-# 站点允许用户提交的服务种类。**默认只有 code-server** —— 也就是说 sshd 是
-# **按站点显式开启**的能力，升级不会悄悄多出一个。
-#
-# 为什么要做成开关而不是直接开：sshd 分支会在计算节点上起一个用户态 ssh，而它
-# **读不到站点的 ssh 准入白名单**（非 root 的 sshd 只能 UsePAM no，于是 pam_access
-# 从不执行）。它并不因此逃出监管 —— 会话整个在作业的 cgroup 里，作业一结束就被回收，
-# 这一点有实测 —— 但它确实给用户开了一条「交互式 ssh 进计算节点」的路，而有些站点
-# 的政策明令禁止这件事。让它是站点的一个**看得见的决定**，而不是一个默认行为。
-DEFAULT_SERVICE_KINDS = (SVC_CODE_SERVER,)
-
-# sshd 分支用的 sshd 可执行文件。写死而不是在登录节点 which —— 那台机器上的路径
-# 对计算节点不是证据（与 code_server_bin 同一条理由）。
-DEFAULT_SSHD_BIN = "/usr/sbin/sshd"
+# 插件表本体在资源常量之后（它引用 DEFAULT_CPUS/DEFAULT_MEM，而 Python 的模块级
+# 代码是自上而下求值的）。见 BUILTIN_PLUGINS。
 
 # 客户端带上来的一行公钥。
 #
@@ -367,10 +360,130 @@ THROTTLE_SECONDS = 1800
 
 # 服务端默认资源。客户端【不填】这些值 —— 缺省一律由服务端决定，
 # 否则一个改过的客户端省略字段就能要到整机。
+#
+# 这两个是 **code-server 插件的内建默认**。默认资源是**按插件**的（在中转站里跑
+# 一个 shell 和在 IDE 里跑语言服务器不是一回事），所以站点可以在插件块里覆盖它。
+# 而它**不是** Slurm 事实 —— 分区名、分区时间上限那些才该现查，这个是策略。
 DEFAULT_CPUS = 2
 DEFAULT_MEM = "8G"
 MAX_CPUS_REQUEST = 64
 MAX_GPUS_REQUEST = 8
+
+
+PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem")
+
+
+class PluginSpec(object):
+    """一个插件在【服务端】的元数据。
+
+    「内建」= 代码随本项目一起发布：作业侧是 run.sbatch 里的一个函数，客户端侧随
+    客户端发布。站点分发的插件（第 2/3 层）走**同一条注册路径**，只是它们的元数据
+    来自 `<prefix>/share/slurmate/plugins/<名字>/plugin.json`。
+
+    ★ 这里刻意不写任何 `if name == "sshd"` 之类的分支。守护进程需要知道的关于一个
+      插件的一切都在这个对象上；加第三个插件不该要求改守护进程的任何逻辑。
+    """
+
+    def __init__(self, name, title, job_entry, default_cpus, default_mem,
+                 needs_pubkey=False, bin_env=None, bin_discovery="convention",
+                 bin_name=None, bin_fallback=None, extra_keys=(), enum_keys=(),
+                 builtin=True):
+        self.name = name
+        self.title = title
+        # 内建 = 代码随本项目一起发布（作业侧在 run.sbatch，客户端侧随客户端）。
+        # 站点分发的插件是 False —— 客户端据此决定"要不要问用户装它"。
+        self.builtin = builtin
+        # 作业侧的处理函数名。**只用于文档与自检输出** —— 真正的分派在 run.sbatch
+        # 的 start_service 里（bash 侧的 case 就是它的插件表），这里留一份是为了
+        # 让「这个插件对应哪段作业代码」在服务端也查得到。
+        self.job_entry = job_entry
+        self.default_cpus = default_cpus
+        self.default_mem = default_mem
+        # 需要客户端随提交带一行公钥（作业内的 sshd 用它写 authorized_keys）。
+        self.needs_pubkey = needs_pubkey
+        # 承载该插件可执行文件的 SLURMATE_* 环境变量名。
+        self.bin_env = bin_env
+        # 二进制怎么找：`which` = 先查 PATH 再查候选目录；`convention` = 只用惯例
+        # 路径。差别是真实的 —— 守护进程在**登录节点**上跑，而 code-server 装在
+        # 计算节点上，所以 which 的结果只是推测；sshd 的惯例路径反而比"登录节点上
+        # 恰好有这个文件"更可信。
+        self.bin_discovery = bin_discovery
+        # bin_discovery == "which" 时，去 PATH 里找的可执行文件名。
+        self.bin_name = bin_name
+        self.bin_fallback = bin_fallback
+        # 该插件的块**额外**允许的键。enabled / default_cpus / default_mem / bin
+        # 是每个插件都有的，不列在这里。
+        self.extra_keys = tuple(extra_keys)
+        # 取值只能是固定几种的键：(键名, 允许值, 缺省值)。放在这里而不是写一段
+        # `if 插件名 == "code-server"` —— 校验规则属于插件的元数据。
+        self.enum_keys = tuple(enum_keys)
+
+    def enum_default(self, key):
+        for k, choices, default in self.enum_keys:
+            if k == key:
+                return default
+        raise KeyError(key)
+
+    def enum_choices(self, key):
+        for k, choices, default in self.enum_keys:
+            if k == key:
+                return choices
+        raise KeyError(key)
+
+    def block_keys(self):
+        return PLUGIN_COMMON_KEYS + ("bin",) + self.extra_keys
+
+
+BUILTIN_PLUGINS = (
+    PluginSpec(
+        name=SVC_CODE_SERVER,
+        title="开发环境",
+        job_entry="start_code_server",
+        default_cpus=DEFAULT_CPUS,
+        default_mem=DEFAULT_MEM,
+        needs_pubkey=False,
+        bin_env="SLURMATE_CS_BIN",
+        bin_discovery="which",
+        bin_name="code-server",
+        bin_fallback="/usr/local/bin/code-server",
+        extra_keys=("auth_mode",),
+        enum_keys=(("auth_mode", ("password", "none"), "password"),),
+    ),
+    PluginSpec(
+        name=SVC_SSHD,
+        title="SSH 中转站",
+        job_entry="start_sshd",
+        default_cpus=1,
+        default_mem="2G",
+        needs_pubkey=True,
+        bin_env="SLURMATE_SSHD_BIN",
+        # ★ 不做 which：登录节点上有没有 /usr/sbin/sshd 对计算节点不是证据。
+        #   写错了由作业侧明确失败（run.sbatch 会 log 出"不存在或不可执行"）。
+        bin_discovery="convention",
+        bin_fallback="/usr/sbin/sshd",
+    ),
+)
+
+PLUGIN_BY_NAME = {p.name: p for p in BUILTIN_PLUGINS}
+
+# 一个插件的**缺省开关状态**。规则只有一条：
+#
+#     插件的 enabled = 块里的 enabled（如果写了）
+#                   否则 = (这个插件的名字在不在这张表里)
+#
+# ★ 这张表的选择标准只有一条：**与升级前的行为完全一致**。升级不改变任何现有
+#   站点的行为，这是硬要求 —— 老配置（一个 [plugin:*] 块都没有）必须仍然只开
+#   code-server。
+#
+# ★ 反过来说，写一个 [plugin:sshd] 块**不会**顺手把 code-server 关掉，也不会
+#   因为"块在那儿"就自动把 sshd 打开。前者是最危险的那类静默改变（管理员只想开
+#   一个中转站，结果所有人的 IDE 没了）；后者会让一句 `default_cpus = 1` 在没有
+#   任何显式同意的情况下开出一条「交互式 ssh 进计算节点」的路。
+#   想开就写 `enabled = yes`，想关就写 `enabled = no`。
+#
+# ★ 将来新增内建插件时**不要**往这张表里加名字：那等于给所有站点在升级时静默
+#   多开一个能力。让站点自己写 enabled = yes。
+DEFAULT_ENABLED_PLUGINS = (SVC_CODE_SERVER,)
 
 JOB_LOG_SUBDIR = ".slurmate/logs"
 
@@ -383,29 +496,64 @@ JOB_LOG_SUBDIR = ".slurmate/logs"
 SLURM_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/slurm/bin", "/usr/sbin",
                   "/bin", "/sbin")
 
-# 配置里允许出现的键。表外的键一律报错 —— 拼错的键被静默忽略，
+# 配置里允许出现的**站点通用**键。表外的键一律报错 —— 拼错的键被静默忽略，
 # 正是这个项目一路在清的那类问题：文件里写着，而实际什么也没发生。
-CONF_KEYS = frozenset([
+#
+# ★ 插件自己的键**不在这里**，见 PluginSpec.block_keys()。`auth_mode`、`bin`
+#   这些东西是**插件的**策略（code-server 的认证方式、sshd 的可执行文件路径），
+#   不是站点的事实 —— 所以它们各自住在 [plugin:<名字>] 块里，而不是在顶层排成一排。
+GLOBAL_KEYS = frozenset([
     "cluster_cidr", "readonly_paths",
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
-    "auth_mode",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
-    "code_server_bin",
-    "sshd_bin", "service_kinds",
 ])
 
+SECTION_PREFIX = "plugin:"
 
-def parse_flat_config(path):
-    """读扁平 `键 = 值` 配置，返回 {键: 值}。
 
-    只有三种行：注释、空行、赋值。行尾的 `# …` 也算注释。
-    重复的键报错（理由见 CONF_KEYS 上方：写两遍说明作者对哪个生效有不同看法）。
+def parse_config(path):
+    """读配置，返回 `({站点通用键: 值}, {插件名: {块内键: 值}})`。
+
+    两种行形态：
+
+        键 = 值            ← 站点通用。**必须写在所有块之前**
+        [plugin:名字]      ← 其后直到下一个块头的键，都属于这个插件
+
+    行尾的 `# …` 也算注释（所以值里不能出现 `#`）。空行忽略。
+    重复的键、重复的块都报错 —— 写两遍说明作者对哪个生效有不同看法，而任何
+    「取最后一个」的选择都会让其中一处永远不被执行。
+
+    ★ 块一旦开始就没有回头路：块之后写的通用键会落进那个块，然后在块内键白名单
+      那一步被拒。那一步的错误消息会点明「这是站点通用键，要写在块之前」——
+      因为「把 cluster_cidr 追加到文件末尾」是个很容易犯、而症状完全指错方向的错。
     """
-    out = {}
+    global_out = {}
+    sections = {}
+    section_line = {}
+    cur = None                          # None = 全局段，否则是插件名
     with open(path, "r", encoding="utf-8") as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.split("#", 1)[0].strip()
             if not line:
+                continue
+            if line.startswith("["):
+                if not line.endswith("]"):
+                    raise ValueError("第 %d 行：块头缺少闭合的 `]`: %r"
+                                     % (lineno, raw.strip()))
+                head = line[1:-1].strip()
+                if not head.startswith(SECTION_PREFIX):
+                    raise ValueError(
+                        "第 %d 行：认不出的块头 %r。本版只有 [plugin:名字] 一种块。"
+                        % (lineno, line))
+                name = head[len(SECTION_PREFIX):].strip()
+                if not name:
+                    raise ValueError("第 %d 行：块头里没有插件名: %r" % (lineno, line))
+                if name in sections:
+                    raise ValueError("第 %d 行：[plugin:%s] 出现了两次（第 %d 行"
+                                     "已经出现过）" % (lineno, name, section_line[name]))
+                sections[name] = {}
+                section_line[name] = lineno
+                cur = name
                 continue
             if "=" not in line:
                 raise ValueError("第 %d 行不是 `键 = 值` 形式: %r" % (lineno, raw.strip()))
@@ -413,10 +561,28 @@ def parse_flat_config(path):
             key = key.strip()
             if not key:
                 raise ValueError("第 %d 行缺少键名: %r" % (lineno, raw.strip()))
-            if key in out:
-                raise ValueError("第 %d 行：键 %r 重复出现" % (lineno, key))
-            out[key] = val.strip()
-    return out
+            target = global_out if cur is None else sections[cur]
+            where = "全局段" if cur is None else "[plugin:%s] 块" % cur
+            if key in target:
+                raise ValueError("第 %d 行：%s 里键 %r 重复出现" % (lineno, where, key))
+            target[key] = val.strip()
+    return global_out, sections
+
+
+def parse_yes_no(raw, default, what):
+    """解析 yes/no 形式的开关。**认不出的值报错，不退回默认。**
+
+    静默退回默认的后果是「文件里写着 no，而它实际是开的」—— 对一个控制
+    「要不要在计算节点上开一条 ssh」的开关来说，这是最不能接受的一种失败。
+    """
+    if raw is None or not str(raw).strip():
+        return default
+    v = str(raw).strip().lower()
+    if v in ("yes", "true", "on", "1"):
+        return True
+    if v in ("no", "false", "off", "0"):
+        return False
+    raise ValueError("%s 只能是 yes 或 no，得到: %r" % (what, raw))
 
 
 def resolve_bin(name, explicit):
@@ -451,49 +617,151 @@ def default_job_script():
         os.path.join(here, os.pardir, "share", "slurmate", "run.sbatch"))
 
 
-def parse_service_kinds(raw):
-    """解析 `service_kinds = code-server,sshd`。返回 (kinds, error_or_None)。
+class PluginConfig(object):
+    """一个插件的**生效配置**：元数据（PluginSpec）+ 站点在它的块里写的东西。
 
-    ★ 未知的名字**报错而不是忽略**。写成 `service_kind = ssh`（少个 d）却被静默
-      忽略，症状是"配了但它就是不生效" —— 与 CONF_KEYS 那条注释要防的是同一类问题：
-      文件里写着，而实际什么也没发生。
-    ★ 留空 = 用默认（**只有 code-server**），不是"允许全部"。留空必须是安全的那个方向。
+    ★ 行为只看 `enabled`，**不看块在不在**（理由见 DEFAULT_ENABLED_PLUGINS 上方）。
+      `present` 只用于自检输出，让运维分得清「没写这个块」与「写了但关着」——
+      这两种状态的**行为**可能相同，但**该做什么**完全不同。
     """
-    if raw is None or not str(raw).strip():
-        return tuple(DEFAULT_SERVICE_KINDS), None
-    out = []
-    for tok in str(raw).replace("，", ",").split(","):
-        name = tok.strip()
-        if not name:
-            continue
-        if name not in ALL_SERVICE_KINDS:
-            return tuple(DEFAULT_SERVICE_KINDS), (
-                "service_kinds 里有未知的服务种类 %r。可用的只有：%s"
-                % (name, "、".join(ALL_SERVICE_KINDS)))
-        if name not in out:
-            out.append(name)
-    if not out:
-        return tuple(DEFAULT_SERVICE_KINDS), (
-            "service_kinds 解析后是空的。要么删掉这一行用默认（%s），"
-            "要么至少写一个" % "、".join(DEFAULT_SERVICE_KINDS))
-    return tuple(out), None
+
+    def __init__(self, spec, raw, present):
+        self.spec = spec
+        self.name = spec.name
+        self.title = spec.title
+        self.present = present
+        self.raw = dict(raw)
+
+        self.enabled = parse_yes_no(
+            raw.get("enabled"), spec.name in DEFAULT_ENABLED_PLUGINS,
+            "[plugin:%s] 的 enabled" % spec.name)
+
+        # ── 默认资源（缺省 = 该插件代码里的内建值）──
+        v = (raw.get("default_cpus") or "").strip()
+        if v:
+            try:
+                self.default_cpus = int(v)
+            except ValueError:
+                raise ValueError("[plugin:%s] 的 default_cpus 必须是整数，得到: %r"
+                                 % (spec.name, v))
+        else:
+            self.default_cpus = spec.default_cpus
+        if not (1 <= self.default_cpus <= MAX_CPUS_REQUEST):
+            raise ValueError("[plugin:%s] 的 default_cpus 应在 1-%d 之间，当前为 %d"
+                             % (spec.name, MAX_CPUS_REQUEST, self.default_cpus))
+
+        v = (raw.get("default_mem") or "").strip()
+        if v:
+            self.default_mem, bad = sanitize_mem(v, None)
+            if bad:
+                # ★ 这里**不**回退默认值，直接报错。请求里的 mem 写错可以回退
+                #   （用户会拿到 warning），而配置里写错必须当场拒绝 —— 否则
+                #   「文件里写着 0，而所有人实际拿到 8G」会一直没人发现。
+                raise ValueError(
+                    "[plugin:%s] 的 default_mem 无法识别: %r（形如 8G / 512M。"
+                    "注意 0 在 Slurm 里表示整台节点的内存，不是「零内存」）"
+                    % (spec.name, v))
+        else:
+            self.default_mem = spec.default_mem
+
+        # ── 可执行文件 ──
+        explicit = (raw.get("bin") or "").strip()
+        if explicit:
+            self.bin, self.bin_src = explicit, "配置指定"
+        elif spec.bin_discovery == "which":
+            found = shutil.which(spec.bin_name) if spec.bin_name else None
+            if found:
+                self.bin, self.bin_src = found, ("本机 PATH 中找到（节点布局通常"
+                                                 "一致，但未在计算节点上确认）")
+            else:
+                self.bin, self.bin_src = spec.bin_fallback, ("惯例路径（本机没有，"
+                                                             "未在计算节点上确认）")
+        else:
+            # ★ 不做 PATH 查找。这一项在**登录节点**上求值，而真正的执行发生在
+            #   **计算节点**上 —— 登录节点上恰好有这个文件，对计算节点不是证据。
+            #   写错了由作业侧明确失败（run.sbatch 会 log 出"不存在或不可执行"），
+            #   而不是在这里猜一个看起来合理的路径。
+            self.bin, self.bin_src = (spec.bin_fallback, "惯例路径（本机不做查找："
+                                                         "登录节点上的结果对计算节点不是证据）")
+
+        # ── 取值受限的键（如 code-server 的 auth_mode）──
+        self.enum = {}
+        for key, choices, default in spec.enum_keys:
+            val = (raw.get(key) or "").strip().lower() or default
+            if val not in choices:
+                raise ValueError("[plugin:%s] 的 %s 只能是 %s 之一，当前为 %r"
+                                 % (spec.name, key, " 或 ".join(choices), val))
+            self.enum[key] = val
+
+    def get(self, key):
+        """取一个 enums 键的生效值。"""
+        return self.enum[key]
+
+    @property
+    def session_auth_mode(self):
+        """这个插件的会话用什么认证方式 —— 会写进会话文件、交给客户端。
+
+        需要公钥的插件：`publickey`。作业内的 sshd 用客户端带上来的那把公钥认证，
+        会话文件里**根本没有口令**（run.sbatch 那条分支不生成口令）。
+
+        其余插件：用块里那个 enum 键（code-server 的 `auth_mode`）。插件一个
+        enum 键都没有时是 `none` —— 那表示「框架不知道有什么客户端侧的认证步骤」，
+        而不是「不需要认证」；具体怎么接由插件自己在客户端侧声明。
+        """
+        if self.spec.needs_pubkey:
+            return "publickey"
+        return self.enum.get("auth_mode") or "none"
 
 
-def resolve_code_server(explicit):
-    """code-server 在【计算节点】上的路径。
-
-    ⚠️ 这个函数在登录节点上运行，而 code-server 装在计算节点上。所以它的
-    "找到"只是**推测**，找不到也不代表真的没有 —— 这两件事必须在输出里
-    分开说清楚，否则运维会照着一条错的结论去查（"登录节点上没有，那肯定没装"）。
-
-    留空时：先 which，再退回惯例路径 /usr/local/bin/code-server。
+def build_plugin_configs(sections):
+    """把配置里的块摊成 {插件名: PluginConfig}。**每个内建插件都有一项**，
+    哪怕站点没写它的块 —— 因为「没写」和「写着但关掉了」在行为上等价，
+    但在自检输出里必须分得开。
     """
-    if explicit:
-        return explicit, "配置指定"
-    found = shutil.which("code-server")
-    if found:
-        return found, "本机 PATH 中找到（节点布局通常一致，但未在计算节点上确认）"
-    return "/usr/local/bin/code-server", "惯例路径（本机没有，未在计算节点上确认）"
+    out = {}
+    for spec in BUILTIN_PLUGINS:
+        raw = sections.get(spec.name)
+        out[spec.name] = PluginConfig(spec, raw or {}, raw is not None)
+    return out
+
+
+def section_names_problem(sections):
+    """块名有没有认不出的。返回错误串列表（空 = 没问题）。
+
+    ★ 报错而不是忽略：写成 `[plugin:ssh]`（少个 d）被静默忽略，症状是
+      「配了但它就是不生效」—— 与未知键那条要防的是同一类问题。
+    """
+    errors = []
+    for name in sorted(sections):
+        if name not in PLUGIN_BY_NAME:
+            errors.append(
+                "[plugin:%s] 是未知的插件。本版认得的是：%s。"
+                "（站点分发的插件要到装进 <prefix>/share/slurmate/plugins/ 之后"
+                "才认得。）" % (name, "、".join(sorted(PLUGIN_BY_NAME))))
+    return errors
+
+
+def block_keys_problem(sections):
+    """块内的键有没有认不出的。返回错误串列表（空 = 没问题）。"""
+    errors = []
+    for name in sorted(sections):
+        spec = PLUGIN_BY_NAME.get(name)
+        if spec is None:
+            continue                    # 块名本身就不认识，那条错误已经报过了
+        allowed = spec.block_keys()
+        for key in sorted(sections[name]):
+            if key in allowed:
+                continue
+            if key in GLOBAL_KEYS:
+                errors.append(
+                    "[plugin:%s] 块里有 %r，它是**站点通用键** —— 通用键必须写在"
+                    "所有 [plugin:*] 块之前。块一旦开始就没有回头路，"
+                    "把它挪到文件顶部即可。" % (name, key))
+            else:
+                errors.append(
+                    "[plugin:%s] 块里有无法识别的键 %r（本版这个块只认：%s）"
+                    % (name, key, ", ".join(allowed)))
+    return errors
 
 
 def parse_reserved_ranges(spec):
@@ -516,10 +784,12 @@ def parse_reserved_ranges(spec):
 class Config(object):
     def __init__(self, path):
         self.path = path
-        raw = parse_flat_config(path)
-        # 认不出来的键不在构造时报错，攒着交给 validate() —— --check 要能
-        # 一次把问题列全，而不是让人改一个跑一次。
-        self.unknown_keys = sorted(set(raw) - CONF_KEYS)
+        raw, sections = parse_config(path)
+        # 认不出来的键/块/块内键不在构造时报错，攒着交给 validate() —— --check
+        # 要能一次把问题列全，而不是让人改一个跑一次。
+        self.unknown_keys = sorted(set(raw) - GLOBAL_KEYS)
+        self.bad_sections = section_names_problem(sections)
+        self.bad_block_keys = block_keys_problem(sections)
 
         def get(key, default=""):
             return raw.get(key, default)
@@ -548,8 +818,15 @@ class Config(object):
         # 集群的约定，别人的集群用 55000 以下端口时会直接起不来。
         self.reserved_ranges = parse_reserved_ranges(get("reserved_ranges"))
 
-        # ── 安全 ──
-        self.auth_mode = (get("auth_mode", "password") or "password").strip().lower()
+        # ── 插件 ──
+        # 每个内建插件都有一项，哪怕站点没写它的块（见 build_plugin_configs）。
+        # 默认资源、可执行文件路径、auth_mode 这些**插件的策略**住在这里，
+        # 而不是像以前那样在站点通用配置里排成一排。
+        self.plugins = build_plugin_configs(sections)
+        # 已启用的插件名，按名字排序 —— 稳定顺序，界面与日志才不会每次都不一样。
+        # ★ enabled_kinds 才是"本站开了哪些"，**不是**"配置里有哪些块"。
+        self.enabled_kinds = tuple(sorted(
+            n for n, p in self.plugins.items() if p.enabled))
 
         # ── 从代码常量来的（见文件上方的理由）──
         self.socket_path = SOCKET_PATH
@@ -588,14 +865,9 @@ class Config(object):
         self.squeue = resolve_bin("squeue", get("squeue"))
         self.scontrol = resolve_bin("scontrol", get("scontrol"))
         self.sacctmgr = resolve_bin("sacctmgr", get("sacctmgr"))
-        self.code_server_bin, self.code_server_src = resolve_code_server(
-            get("code_server_bin"))
-        # sshd 分支的二进制。**不做 which 兜底**：登录节点上的 /usr/sbin/sshd 对
-        # 计算节点不是证据。留空就用惯例路径，写错了由作业侧明确失败（run.sbatch
-        # 会 log 出"$SLURMATE_SSHD_BIN 不存在或不可执行"而不是静默）。
-        self.sshd_bin = (get("sshd_bin") or "").strip() or DEFAULT_SSHD_BIN
-        self.service_kinds, self.service_kinds_error = parse_service_kinds(
-            get("service_kinds"))
+    def plugin(self, name):
+        """取一个插件的生效配置。名字不认识返回 None（调用方负责报错）。"""
+        return self.plugins.get(name)
 
     def cluster_cidr_problem(self):
         """cluster_cidr 的**形式**问题描述；没问题返回 None。
@@ -680,9 +952,15 @@ class Config(object):
         errors = []
         for k in self.unknown_keys:
             errors.append("配置里有无法识别的键 %r（拼错了？本版只认：%s）"
-                          % (k, ", ".join(sorted(CONF_KEYS))))
-        if self.service_kinds_error:
-            errors.append(self.service_kinds_error)
+                          % (k, ", ".join(sorted(GLOBAL_KEYS))))
+        errors.extend(self.bad_sections)
+        errors.extend(self.bad_block_keys)
+        # 一个插件都没开是**合法**的（站点可能只想留框架），但要说得出来 ——
+        # 否则表现是"客户端上一个按钮都没有"，而配置里一个字都不像有问题。
+        if not self.enabled_kinds:
+            errors.append("配置里没有任何已启用的插件。每个 [plugin:<名字>] 块都要写 "
+                          "enabled = yes 才会开；一个块都没有时默认开的是 %s。"
+                          % "、".join(DEFAULT_ENABLED_PLUGINS))
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -720,9 +998,6 @@ class Config(object):
                               % (name, "、".join(SLURM_BIN_DIRS)))
             elif not os.path.exists(path):
                 errors.append("Slurm 命令不存在: %s（配置里 %s 指定）" % (path, name))
-        if self.auth_mode not in ("password", "none"):
-            errors.append("auth_mode 只能是 password 或 none，当前为 %r"
-                          % self.auth_mode)
         if not (4 <= self.password_bytes <= 64):
             errors.append("password_bytes 应在 4-64 之间，当前为 %d"
                           % self.password_bytes)
@@ -2149,6 +2424,8 @@ class Sessiond(object):
                 return self.op_whoami(uid, gid)
             if op == "partitions":
                 return self.op_partitions(uid)
+            if op == "plugins":
+                return self.op_plugins(uid)
             if op == "submit":
                 return self.op_submit(uid, req)
             if op == "status":
@@ -2180,6 +2457,39 @@ class Sessiond(object):
             "allowed_partitions": sorted(allowed) if allowed else None,
             "can_submit": bool(acct),
         })
+
+    def op_plugins(self, uid):
+        """本站有哪些插件、各自开没开、默认资源是多少。
+
+        客户端据此决定画哪些按钮、以及每个按钮上写"默认 2 核 / 8G"该写多少。
+
+        ★ 通报**全部**插件，包括 `enabled=false` 的 —— 「装了但停用」与「本站没有
+          这个东西」是两回事，界面该能分开显示，运维该能一眼看出自己关了什么。
+
+        ★ 也**不替客户端过滤**它可能不认识的名字。把它认识的挑出来再发，运维就
+          永远看不到「站点开了个我这版客户端不认识的插件」—— 而那正是升级提示的
+          唯一来源。认不认识是客户端的事。
+
+        ★ 这里不发 `needs_pubkey` 之类"这个插件在客户端上会做什么"的字段：那些是
+          客户端自己的事（它的插件模块里写着），由服务端下发只会让客户端有机会
+          相信一个关于**自己**的错误描述。
+
+        `title` 的用途是**兜底标签**：客户端认得这个插件时用它自己的名字（那才
+        对应它实际会做的事）；不认得时至少能显示"站点提供了一个叫 X 的东西"。
+        """
+        out = []
+        for name in sorted(self.cfg.plugins):
+            p = self.cfg.plugins[name]
+            out.append({
+                "name": p.name,
+                "title": p.title,
+                "enabled": p.enabled,
+                "builtin": p.spec.builtin,
+                # 默认资源是**按插件**的，客户端不自己定一份（两份真相的老问题）。
+                "defaults": {"cpus": p.default_cpus, "mem": p.default_mem},
+            })
+        return self._ok({"plugins": out,
+                         "enabled": list(self.cfg.enabled_kinds)})
 
     def op_partitions(self, uid):
         """可选分区列表 —— 从 Slurm 现查，与该用户的 association 求交。
@@ -2218,8 +2528,12 @@ class Sessiond(object):
             if unknown:
                 d["reason"] = "暂时无法确认分区权限（查询失败）"
             out.append(d)
-        return self._ok({"partitions": out,
-                         "defaults": {"cpus": DEFAULT_CPUS, "mem": DEFAULT_MEM}})
+        # ★ 这里此前还返回一个 `defaults`（全局的 2 核 / 8G）。默认资源现在是
+        #   **按插件**的 —— 在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是
+        #   一回事 —— 所以它跟着插件走，由 `op_plugins` 通报。留一个全局的
+        #   `defaults` 在这里就是**两份真相**：界面显示 2 核/8G，而实际提交
+        #   中转站会话拿到的是 1 核/2G，且没有任何地方会为此报错。
+        return self._ok({"partitions": out})
 
     def session_view(self, s, with_secret=True):
         gpus = None
@@ -2382,18 +2696,26 @@ class Sessiond(object):
         if not acct:
             return self._err(4, "no_account", why)
 
-        # ── 服务种类 ────────────────────────────────────────────────────────
-        # 缺省 = code-server，与本功能引入前完全一致。站点没开 sshd 时提交 sshd
-        # 会被**明确拒绝**，而不是起一个"看起来起来了但连不上"的作业。
+        # ── 插件（服务种类）────────────────────────────────────────────────
+        # 缺省 = code-server，与本功能引入前完全一致。站点没开的插件会被**明确
+        # 拒绝**，而不是起一个"看起来起来了但连不上"的作业。
+        #
+        # ★ 「不认识的名字」与「认得但本站没开」是两种错误，必须分开报：
+        #   前者是客户端版本太新或名字打错，后者是站点的一个决定。合并成一句话，
+        #   用户就分不清该升级客户端还是该找管理员。
         kind = str(req.get("service_kind") or SVC_CODE_SERVER).strip()
-        if kind not in ALL_SERVICE_KINDS:
+        spec = PLUGIN_BY_NAME.get(kind)
+        if spec is None:
             return self._err(2, "bad_service_kind",
-                             "未知的服务种类 %r（可用：%s）"
-                             % (kind, "、".join(ALL_SERVICE_KINDS)))
-        if kind not in cfg.service_kinds:
+                             "未知的服务种类 %r（本版认得：%s）"
+                             % (kind, "、".join(sorted(PLUGIN_BY_NAME))))
+        pcfg = cfg.plugins[kind]
+        if not pcfg.enabled:
             return self._err(4, "service_kind_disabled",
-                             "本站点没有开启 %s 服务（service_kinds = %s）"
-                             % (kind, "、".join(cfg.service_kinds)))
+                             "本站点没有开启「%s」服务（已开启的是：%s）"
+                             % (pcfg.title,
+                                "、".join(cfg.plugins[n].title
+                                          for n in cfg.enabled_kinds) or "（无）"))
 
         # sshd 用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
         # ★ 为什么必须丢掉注释：OpenSSH 公钥的注释里可以有**逗号**，而守护进程是用
@@ -2403,7 +2725,9 @@ class Sessiond(object):
         #   等作业起来了再失败清楚得多。）
         # ★ 这里是第一道，run.sbatch 里那条同款正则是第二道。
         ssh_pubkey = ""
-        if kind == SVC_SSHD:
+        # 「这个插件要不要公钥」是插件的元数据，不是一段 `if kind == "sshd"` ——
+        # 加第三个插件不该要求改这里。
+        if spec.needs_pubkey:
             ssh_pubkey = parse_ssh_pubkey(req.get("ssh_pubkey")) or ""
             if not ssh_pubkey:
                 return self._err(2, "bad_ssh_pubkey",
@@ -2417,8 +2741,10 @@ class Sessiond(object):
         # 客户端省略一个字段是在说"用你的默认"，不是"我要 0 核"。所以默认值
         # 只能从这里出，不能从 req 里取 —— 否则一个改过的客户端省略 cpus 就能
         # 拿到它想要的一切。
-        cpus = clamp_int(req.get("cpus"), DEFAULT_CPUS, 1, MAX_CPUS_REQUEST)
-        mem, mem_rejected = sanitize_mem(req.get("mem"), DEFAULT_MEM)
+        # 缺省值来自**这个插件**的配置，不是全局常量 —— 站点可以给中转站和 IDE
+        # 配不同的默认资源，而客户端省略字段永远是在说"用你的默认"。
+        cpus = clamp_int(req.get("cpus"), pcfg.default_cpus, 1, MAX_CPUS_REQUEST)
+        mem, mem_rejected = sanitize_mem(req.get("mem"), pcfg.default_mem)
         gpus = clamp_int(req.get("gpus"), 0, 0, MAX_GPUS_REQUEST)
         gres = ("gpu:%d" % gpus) if gpus > 0 else None
         warning = []
@@ -2508,7 +2834,7 @@ class Sessiond(object):
             candidates=",".join(str(c) for c in cands),
             # 这里只是登记那一刻的初值，作业跑起来后会用它自己写进会话文件的那份
             # 覆盖。初值就跟服务种类一致，免得中间态自相矛盾。
-            auth_mode="publickey" if kind == SVC_SSHD else "password",
+            auth_mode=pcfg.session_auth_mode,
             service_kind=kind, created_at=now)
 
         # 口令通过【文件】传递，不经过环境变量（scontrol show job 可能暴露
@@ -2529,10 +2855,12 @@ class Sessiond(object):
             "SLURMATE_CPUS": str(cpus),
             "SLURMATE_MEM": mem,
             "SLURMATE_GPUS": str(gpus),
-            "SLURMATE_AUTH_MODE": cfg.auth_mode,
+            "SLURMATE_AUTH_MODE": pcfg.session_auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
             "SLURMATE_CLUSTER_CIDR": cfg.cluster_cidr,
-            "SLURMATE_CS_BIN": cfg.code_server_bin,
+            # 可执行文件走**插件自己声明的**那个变量名（code-server 是
+            # SLURMATE_CS_BIN，sshd 是 SLURMATE_SSHD_BIN）。加第三个插件不用动这里。
+            **({spec.bin_env: pcfg.bin} if spec.bin_env else {}),
             "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
             "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
             "SLURMATE_PORT_MIN": str(cfg.port_start),
@@ -2544,7 +2872,6 @@ class Sessiond(object):
             # 否则下一个人会把它当成同类问题"修掉"。
             "SLURMATE_SSH_PUBKEY": ssh_pubkey,
             "SLURMATE_SSH_DIR": os.path.join(home, ".slurmate", "ssh"),
-            "SLURMATE_SSHD_BIN": cfg.sshd_bin,
         }
         sess = self.store.get(sid)
         job_id, why = self.slurm.submit(sess, env, home, uid, user)
@@ -2616,17 +2943,29 @@ def main():
         print("  续期          : %s  阈值 %ds 增量 %s"
               % ("开" if cfg.renew_enabled else "关", cfg.renew_threshold,
                  cfg.renew_increment))
-        print("  认证方式      : %s%s" % (cfg.auth_mode,
-              "（作业生成随机口令，客户端自动登录）" if cfg.auth_mode == "password"
-              else "（无认证，保护仅靠 nft ACL —— 同节点其他作业可直连）"))
         # 命令路径逐条打印【解析结果】而不是配置里写了什么：配置留空是推荐值，
         # 而留空之后究竟找没找到、找到的是哪一个，只有这里说得清。
         print("  外部命令      :")
         for _n in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
             _p = getattr(cfg, _n)
             print("    %-9s %s" % (_n, _p or "【找不到】配置留空且 PATH 与候选目录里都没有"))
-        print("    %-9s %s（%s）" % ("code-server", cfg.code_server_bin,
-                                    cfg.code_server_src))
+        # 插件逐个打印：开没开、默认资源、可执行文件解析到了哪里。
+        # ★ 同样打印【解析结果】：`bin` 留空是推荐值，而留空之后落在了哪个路径上，
+        #   以及那个路径是"配置指定的"还是"猜的"，只有这里说得清。
+        print("  插件          :")
+        for _n in sorted(cfg.plugins):
+            _p = cfg.plugins[_n]
+            print("    %-12s %s  默认 %s 核 / %s%s"
+                  % (_p.name, "已启用" if _p.enabled else "已停用",
+                     _p.default_cpus, _p.default_mem,
+                     "" if _p.present else "（配置里没有这个块，这里是缺省值）"))
+            if _p.spec.bin_env:
+                print("      %-11s %s（%s）"
+                      % (_p.spec.bin_env, _p.bin, _p.bin_src))
+            for _k in sorted(_p.enum):
+                print("      %-11s %s" % (_k, _p.enum[_k]))
+        if not cfg.enabled_kinds:
+            print("    【一个插件都没启用】客户端上将没有任何可用的服务")
         slurm = Slurm(cfg)
         print("  accounting 强制: %s（决定 sbatch 是否必须带 -A）"
               % slurm.is_accounting_enforced())

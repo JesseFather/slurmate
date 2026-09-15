@@ -28,7 +28,7 @@ import socket
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 
 EXIT_OK = 0
@@ -271,11 +271,30 @@ def cmd_partitions(args):
         print("%-12s %-8s %-14s %s%s"
               % (p["name"], "是" if p.get("is_default") else "",
                  p.get("max_time") or "无上限", p.get("reason", ""), mark))
-    df = d.get("defaults") or {}
     print()
-    print("缺省资源：%s 核 / %s（由服务端填，客户端不指定）"
-          % (df.get("cpus"), df.get("mem")))
     print("不指定 --partition 时，会从有权限的分区里随机挑一个。")
+    print("缺省资源是**按插件**的，见 `slurmate plugins`。")
+    return 0
+
+
+def cmd_plugins(args):
+    r = call({"op": "plugins"}, args.json)
+    if isinstance(r, int):
+        return r          # --json 或出错时，call() 已经把退出码算好了
+    if not isinstance(r, dict):
+        return 1
+    d = r["data"]
+    print("%-14s %-8s %-14s %s" % ("插件", "状态", "缺省资源", "说明"))
+    print("-" * 64)
+    for p in d["plugins"]:
+        df = p.get("defaults") or {}
+        print("%-14s %-8s %-14s %s"
+              % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
+                 "%s 核 / %s" % (df.get("cpus"), df.get("mem")),
+                 "" if p.get("builtin") else "站点分发"))
+    print()
+    print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
+    print("缺省资源由服务端定并在提交时钳制 —— 客户端不填这些值。")
     return 0
 
 
@@ -294,6 +313,10 @@ def cmd_submit(args):
         req["gpus"] = args.gpus
     if args.time:
         req["time"] = args.time
+    if args.service_kind:
+        req["service_kind"] = args.service_kind
+    if args.ssh_pubkey:
+        req["ssh_pubkey"] = args.ssh_pubkey
     r = call(req, args.json)
     if isinstance(r, int):
         return r          # --json 或出错时，call() 已经把退出码算好了
@@ -302,6 +325,7 @@ def cmd_submit(args):
     d = r["data"]
     res = d.get("resources") or {}
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
+    print("插件 %s" % (req.get("service_kind") or "code-server"))
     print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
                                    d.get("requested_time")))
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
@@ -381,7 +405,10 @@ def cmd_wait(args):
                 print()
                 print("就绪：隧道目标 %s" % s["tunnel_target"])
                 if s.get("auth_password"):
-                    print("code-server 口令 %s" % s["auth_password"])
+                    # 只有需要口令的插件才有这个字段（中转站走公钥，永远没有口令）。
+                    # 这里不写死插件名 —— 加第三个插件时它不该变成一句谎话。
+                    print("会话口令 %s（%s）"
+                          % (s["auth_password"], s.get("service_kind") or "?"))
             return 0
         if st in ("released", "rejected", "expired", "orphaned"):
             if args.json:
@@ -501,12 +528,22 @@ def build_parser():
     p = add("partitions", cmd_partitions, "列出可用的分区及其时间上限")
     p.add_argument("--json", action="store_true")
 
+    p = add("plugins", cmd_plugins, "列出本站的插件、开关状态与缺省资源")
+    p.add_argument("--json", action="store_true")
+
     p = add("submit", cmd_submit, "提交一个开发会话（所有参数都可省略）")
     p.add_argument("--partition", help="分区（省略则从有权限的分区里随机挑一个）")
-    p.add_argument("--cpus", type=int, help="CPU 核心数（省略 = 服务端默认）")
-    p.add_argument("--mem", help="内存，如 8G（省略 = 服务端默认）")
+    p.add_argument("--cpus", type=int,
+                   help="CPU 核心数（省略 = 该插件的服务端默认）")
+    p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")
     p.add_argument("--gpus", type=int, help="GPU 数量（省略 = 不占卡）")
     p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
+    p.add_argument("--service-kind",
+                   help="插件名（省略 = code-server）。见 `slurmate plugins`；"
+                        "站点没开的插件会被明确拒绝")
+    p.add_argument("--ssh-pubkey",
+                   help="一行 ssh-ed25519 公钥。需要公钥的插件（如 sshd）必填，"
+                        "否则服务端回 code 2")
     p.add_argument("--json", action="store_true")
 
     p = add("status", cmd_status, "查看会话状态")

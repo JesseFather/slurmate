@@ -5,11 +5,98 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.3.0] — 未发布
 
 > 三处版本号（`client/package.json`、`cluster/slurmate`、`cluster/slurmate-sessiond`）
-> 仍都是 0.2.0 —— CI 要求三者一致，而这次**集群侧一行未动**，所以不单独跳版本。
-> 下次动集群侧时一并升到 0.3.0。
+> 现在都是 **0.3.0**。**两端协议不兼容，必须一起升。**
+
+### Changed — 「服务种类」变成「插件」，站点可增删
+
+`code-server` 与 `sshd` 从两个硬编码的特例变成**插件**：两侧各有一半实现，站点
+在配置里用 `[plugin:<名字>]` 块决定装不装、开不开、默认给多少资源。
+
+**配置格式变了**（`slurmate.conf`）：
+
+```ini
+# 站点通用键（必须写在所有块之前）
+cluster_cidr = 192.0.2.0/24
+...
+
+[plugin:code-server]
+enabled      = yes
+default_cpus = 2
+default_mem  = 8G
+bin          =
+auth_mode    = password
+
+[plugin:sshd]
+enabled      = no
+default_cpus = 1
+default_mem  = 2G
+bin          =
+```
+
+- **`service_kinds` 这一行没有了**（它是 0.2.0 里刚加、从未部署过的键，所以没有
+  迁移负担）：「站点开了哪些插件」现在由**有没有那个块 + `enabled`** 表达。
+- **`code_server_bin` / `sshd_bin` / `auth_mode` 从顶层搬进各自的块。**
+- **一个 `[plugin:*]` 块都没有的老配置仍然只开 code-server** —— 与升级前完全一致，
+  这一条有专门的用例钉住，它是升级能否平滑的支点。
+- 写一个 `[plugin:sshd]` 块**不会**顺手把 code-server 关掉，也**不会**因为"块在那儿"
+  就自动开启 sshd：想开必须写 `enabled = yes`。让开启是一条看得见的决定。
+- 默认资源从两个代码常量变成**按插件**的一项。在 IDE 里跑语言服务器和在 shell 里
+  跑 codex 不是一回事。
+
+**协议变了**：新增 `plugins` op；`partitions` 的响应**删掉 `defaults`**（默认资源
+只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。
+
+### Added — ★ 插件增减不许把客户端带崩
+
+这是这次改动的验收标准，四条不变量各有用例：
+
+1. **会话的状态 / 心跳 / 停止永不看插件**（只认 `session_id`）—— 这是「卸载插件之后
+   用户仍然能停掉作业」的全部依据；
+2. 服务端不认识的插件名 → 提交被**明确拒绝**，不是起一个连不上的作业；
+3. 客户端不认识的插件 → **只解释、不动作**，但隧道**接起来**（那是用户唯一的出路）；
+4. 客户端插件目录里的坏文件 → 跳过、记一条、其余照常。
+
+### Added — 客户端插件注册表
+
+`client/src/main/plugins/` 一个插件一个模块文件，注册表**扫描目录**而不是手写一张表。
+文件名就是插件的身份（会话里的 `service_kind` 就是它），导出里的 `name` 与文件名不
+一致时宁可跳过 —— 那种不一致会让"改了 A 文件、生效的是 B"永远说不清。
+
+框架（`index.js` / `session.js` / `windows.js`）**不认识任何插件名**：判据一律是
+"有没有布局组""两个开关开没开"这类**框架的事实**，不是"是哪个插件"。
+
+### Added — 本机插件开关
+
+`config.json` 的 `plugins` 段记「本机要不要这个插件」，与服务端的 `enabled` 是
+**两件事**：站点决定允不允许，用户决定自己要不要。两者都开，界面上才会出现那个
+按钮。认不出的值按「跟着站点走」处理，不读成「关掉」—— 一个笔误不该让功能凭空消失。
+
+### Fixed — 会话结束后用户出不来（既有缺陷）
+
+code-server 视图是**原生层**，覆在面板上方，而没有**任何地方**销毁它。会话结束、
+隧道已停、页面已经打不开，那块死页面还盖在面板上，而面板上正是「重新开始」那几个
+按钮 —— 用户唯一的出路是关掉客户端重开。现在在 `RELEASING/ENDED/ERROR/IDLE` 时
+收起它。**`RELEASING` 是关键那一档**：`stop()` 一发出状态就是 releasing，而它要等
+下一次 status 轮询（60 秒）才可能变 ended。
+
+### Fixed — `slurmate submit` 起不了中转站会话
+
+`cmd_submit` 从来没有 `--service-kind`，于是「提交一个 sshd 会话」这条路只能靠手写
+`rpc` 的 JSON。现在有了 `--service-kind` 与 `--ssh-pubkey`，另加 `slurmate plugins`
+列出本站的插件与各自的缺省资源。
+
+### 已知未验证
+
+- `run.sbatch` 的 sshd 分支**本机验不了**：需要部署到控制节点后手工提交一个
+  `service_kind=sshd` 的会话，从登录节点 `ssh -W` 连一次。
+- 界面对 `service_kind` 仍然**零感知**（按约定，界面在插件结构定型后统一做）。
+
+---
+
+## [未发布] — 布局组
 
 ### Added — 布局组：一个「布局」可以被多条连接共用
 

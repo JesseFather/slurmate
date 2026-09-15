@@ -28,7 +28,6 @@
 const { EventEmitter } = require('events');
 const { Action, classify, shouldRetry } = require('./classify.js');
 const { Tunnel } = require('./tunnel.js');
-const { SERVICE_CODE_SERVER, SERVICE_SSHD, serviceRoute } = require('./service.js');
 
 const State = {
   IDLE: 'idle',
@@ -78,7 +77,8 @@ class SessionController extends EventEmitter {
    *   onTunnelPort，走 onRelayPort（见 _announcePort）。
    */
   constructor({ backend, layoutId, onTunnelPort, onRelayPort, getExcludedPorts,
-                heartbeatMs, statusMs, queuedPollMs }) {
+                heartbeatMs, statusMs, queuedPollMs,
+                requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
     this.layoutId = layoutId;
@@ -96,8 +96,16 @@ class SessionController extends EventEmitter {
     this.error = null;
     this.warning = null;
 
-    /** 本次会话请求的服务种类。服务端一旦回答了就以**它**为准（见 serviceKind）。 */
-    this._requestedKind = SERVICE_CODE_SERVER;
+    /**
+     * 本次会话请求的服务种类。服务端一旦回答了就以**它**为准（见 serviceKind）。
+     *
+     * ★ 这里**不能**有默认值。从前它默认 `'code-server'`，那是在这个文件里写死
+     *   了一个插件名；而"什么都不请求"和"请求 code-server"是两回事，前者根本
+     *   不该产生一个会话。`start()` 一定会赋值。
+     */
+    this._requestedKind = requestedKind || null;
+    /** 这个插件提交时要不要公钥。由调用方从插件元数据里取，这里不认插件名。 */
+    this._needsPubkey = Boolean(needsPubkey);
     this._tunnelPort = null;
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
     this._hbTimer = null;
@@ -123,15 +131,25 @@ class SessionController extends EventEmitter {
 
   // ── 服务种类 ────────────────────────────────────────────────────────────
   /**
-   * 本次会话提供的是哪种服务，**已归一**成 'code-server' / 'sshd' / 'unknown'
-   * （见 service.js 的 serviceRoute）。
+   * 本次会话提供的是哪种服务 —— **原样**，不归一、不认名字。
+   *
+   * ★ 归一（`undefined` → 缺省插件、认不出的名字 → 未知）是**注册表**的事，
+   *   见 plugins/index.js 的 `route()`。这里保持原样有两个理由：
+   *
+   *   一是这个文件不该认识任何插件名 —— 它对"服务种类"的全部知识就是"有这么
+   *   一个字符串"，以及（下面）"这个插件用不用布局组"。加第三个插件时它一行
+   *   都不用改。
+   *
+   *   二是 `undefined`（老守护进程没有这个字段）与 `null`（守护进程**明说**
+   *   它不知道）**必须一路分开传下去**。在这里提前归一，这个区分就没了，而
+   *   注册表正是靠它决定「兜到缺省插件」还是「拒绝猜测」。
    *
    * 服务端一旦回答了就以它为准：`_requestedKind` 只是「还没拿到 status 之前」
    * 的临时答案，而唯一权威的来源是会话视图里的 `service_kind`。
    */
   serviceKind() {
     const s = this.session || {};
-    return serviceRoute('service_kind' in s ? s.service_kind : this._requestedKind);
+    return 'service_kind' in s ? s.service_kind : this._requestedKind;
   }
 
   // ── 对外快照（界面唯一的数据来源）─────────────────────────────────────────
@@ -197,8 +215,8 @@ class SessionController extends EventEmitter {
     this._stopped = false;
     this.error = null;
     this.warning = null;
-    this._requestedKind = opts.serviceKind === SERVICE_SSHD
-      ? SERVICE_SSHD : SERVICE_CODE_SERVER;
+    this._requestedKind = opts.serviceKind || null;
+    this._needsPubkey = Boolean(opts.needsPubkey);
     this._setState(State.SUBMITTING);
 
     // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
@@ -209,13 +227,14 @@ class SessionController extends EventEmitter {
       if (v !== undefined && v !== null && v !== '') req[k] = v;
     }
 
-    // 服务种类与中转站的公钥。**先校验再提交** —— 服务端也会校验（回 code 2），
+    // 服务种类与公钥。**先校验再提交** —— 服务端也会校验（回 code 2），
     // 但走到那里已经花掉一次 sbatch 往返，而这里缺公钥只可能是调用方写错了。
-    if (this._requestedKind === SERVICE_SSHD) {
-      req.service_kind = SERVICE_SSHD;
+    // 「要不要公钥」由调用方从插件元数据里取（`needsPubkey`），这里不认插件名。
+    if (this._requestedKind) req.service_kind = this._requestedKind;
+    if (this._needsPubkey) {
       if (!opts.sshPubkey) {
         this._setState(State.ERROR, {
-          error: '内部错误：请求中转站会话时没有带上公钥，已阻止提交。',
+          error: '内部错误：这个服务需要公钥，但调用方没有准备，已阻止提交。',
         });
         return null;
       }
@@ -334,14 +353,18 @@ class SessionController extends EventEmitter {
   /**
    * 本地端口变了，通知外面去把它记下来。**两条路，语义完全不同**：
    *
-   *   code-server → 端口就是 origin，必须写回布局组（config.json），否则下次启动
-   *                 会绑回旧端口、浏览器布局跟着重置一次。
-   *   sshd        → 端口要写进**用户那份 ssh 配置**的 Port 那一行。它不进
-   *                 config.json：中转站没有布局组（见构造函数）。
+   *   有布局组 → 端口就是 origin，必须写回布局组（config.json），否则下次启动
+   *              会绑回旧端口、浏览器布局跟着重置一次。
+   *   没有布局组 → 端口要写进**用户那份 ssh 配置**的 Port 那一行。它不进
+   *              config.json（那个插件没有布局组，见构造函数）。
+   *
+   * ★ 判据是 `this.layoutId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
+   *   等价（跑在浏览器里的插件才需要布局组），但前者是框架的事实，后者是一个
+   *   插件名 —— 用名字判，加第三个插件时这里就得改。
    */
   _announcePort(port) {
-    if (this.serviceKind() === SERVICE_SSHD) this.onRelayPort(port);
-    else this.onTunnelPort(this.layoutId, port);
+    if (this.layoutId) this.onTunnelPort(this.layoutId, port);
+    else this.onRelayPort(port);
   }
 
   /** 建立隧道并开始心跳。 */
@@ -356,10 +379,11 @@ class SessionController extends EventEmitter {
       this._tunnelPort = port;
       this._lastTarget = target;
       this._announcePort(port);
-      if (shifted && this.serviceKind() !== SERVICE_SSHD) {
-        // 换端口意味着 origin 变了，code-server 存在 localStorage 里的编辑器布局会重置。
+      if (shifted && this.layoutId) {
+        // 换端口意味着 origin 变了，浏览器存在 localStorage 里的编辑器布局会重置。
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
-        // ★ 中转站不适用：那边没有浏览器，别名恒定，端口在底下漂移是无害的。
+        // ★ 没有布局组的插件不适用：那边没有浏览器，名字恒定，端口在底下漂移
+        //   是无害的 —— 对它报"布局会重置"是一句纯粹的错误信息。
         this.warning = `首选端口被占用，已改用 ${port}。`
                      + `由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。`;
       }
@@ -496,7 +520,7 @@ class SessionController extends EventEmitter {
               // 那份一旦与实际分叉，下次启动会绑回配置的端口、布局跟着重置一次，
               // 而用户不知道为什么；中转站那边则是 ssh 配置里的 Port 行。
               this._announcePort(port);
-              if (shifted && this.serviceKind() !== SERVICE_SSHD) {
+              if (shifted && this.layoutId) {
                 this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
                              + `浏览器按端口隔离本地存储，编辑器布局会重置一次。`;
               }

@@ -156,7 +156,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 
 | 命令 | 用在哪 | 缺失后的表现 |
 |---|---|---|
-| `code-server` | `cluster/run.sbatch:54,188-200`（路径取自 `[slurm] code_server_bin`） | 每个候选端口都在启动后立刻退出 → `pick_port_and_start` 全部失败 → 写 `failed` 并 `exit 22` |
+| `code-server` | `cluster/run.sbatch:54,188-200`（路径取自 `[plugin:code-server]` 块的 `bin`） | 每个候选端口都在启动后立刻退出 → `pick_port_and_start` 全部失败 → 写 `failed` 并 `exit 22` |
 | `curl` | `cluster/run.sbatch:213-218` 的就绪判定 | `/healthz` 与 HTTP 兜底探测都拿不到结果 → **每个候选端口白等 45 秒** → 默认 6 个候选共约 4.5 分钟后全部失败 |
 | `python3` | `cluster/run.sbatch:173-184` 真正 bind 一次确认端口空闲 | 少一道校验，`ss` 看不到的占用会被漏掉；最终由 code-server 的提前退出检测兜住（`:208-212`） |
 | `ss` | `cluster/run.sbatch:169-170` 端口占用快查 | 退化为只靠 bind 探测（若 `python3` 也缺失，`port_free` 恒返回空闲） |

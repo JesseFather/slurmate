@@ -41,14 +41,12 @@ const path = require('path');
 const config = require('./config.js');
 const keys = require('./keys.js');
 const hosts = require('./hosts.js');
-const sshconfig = require('./sshconfig.js');
 const { createBackend } = require('./backend.js');
 const { SessionController, State } = require('./session.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const { LOGIN_PATH, PASSWORD_FIELD, SESSION_COOKIE, loginSucceeded } = require('./login.js');
-const { SERVICE_CODE_SERVER, SERVICE_SSHD, SERVICE_UNKNOWN,
-        SSH_ALIAS, serviceRoute } = require('./service.js');
+const plugins = require('./plugins/index.js');
 
 const DEMO_FLAG = process.argv.includes('--demo');
 
@@ -60,19 +58,14 @@ let cfg = null;
 let whoami = null;
 let partitions = [];
 /**
- * 服务端通报的**默认资源**（`{cpus, mem}`）。
+ * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
+ * 不支持这个 op）—— 那时按"站点没说"处理，而不是当成"一个都没有"。
  *
- * ★ 它是**管理员设定的策略**，不是用户偏好。所以界面只读地显示它，并且每次启动都
- *   用它 —— 靠的是提交时【省略】cpus/mem 字段让服务端填当下那份默认值，而不是把
- *   这里收到的值再发回去。两者不等价：管理员把默认从 2 核改成 4 核之后，回发旧值的
- *   客户端会把它永远钉死在 2 核，而「省略」永远拿到当下的默认。
- *   只有用户当场点开「高级选项」，才发明确值。
- *
- * ★ 服务端一直在 `op:partitions` 的响应里返回它（cluster/slurmate-sessiond:2080），
- *   而这里此前把它整个丢掉了 —— 于是界面只能把「2 核 / 8G」硬编码在文案里，
- *   管理员改了默认值，界面照样显示旧数字，而且没有任何地方会报错。
+ * ★ 界面上的按钮由**三方求交**决定：客户端扫到的插件 ∩ 站点开着的 ∩ 用户在本机
+ *   没关掉的。三者各自是不同人的决定，所以见 pluginsView() —— 那里把三个条件
+ *   分别报给界面、由界面决定怎么画，而不是在这里合并成一个布尔。
  */
-let resourceDefaults = null;
+let sitePlugins = null;
 let quitting = false;
 
 /**
@@ -406,33 +399,120 @@ async function doConnect(conn, extra = {}) {
  *   而真正的原因（连不上控制节点）一个字都没留下。用户会去查自己的分区权限，
  *   查一个根本不存在的问题。
  *
- * @returns {Promise<{ok:boolean, partitions:Array, defaults:object|null, error:string|null}>}
+ * @returns {Promise<{ok:boolean, partitions:Array, error:string|null}>}
  */
 async function loadPartitions() {
   let resp;
   try {
     resp = await backend.rpc({ op: 'partitions' });
   } catch (e) {
-    return { ok: false, partitions: [], defaults: null,
-             error: `取分区列表失败：${e.message}` };
+    return { ok: false, partitions: [], error: `取分区列表失败：${e.message}` };
   }
   if (!resp || !resp.ok) {
     const detail = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
-    return { ok: false, partitions: [], defaults: null,
-             error: `取分区列表失败：${detail}` };
+    return { ok: false, partitions: [], error: `取分区列表失败：${detail}` };
   }
-  const data = resp.data || {};
-  return { ok: true, partitions: data.partitions || [],
-           defaults: data.defaults || null, error: null };
+  return { ok: true, partitions: (resp.data && resp.data.partitions) || [], error: null };
 }
 
-/** 刷新全局的分区列表与默认资源。失败时推一条 error 通知，并把 ok:false 传出去。 */
+/**
+ * 取本站点的插件清单（`op_plugins`）。
+ *
+ * ★ **它失败不是错误**，所以这里不推通知：守护进程比客户端旧时（v0.2 及以前）
+ *   根本没有这个 op，会回 `unknown_op`。那时按"站点没说"处理 —— 界面回落到
+ *   "只画客户端自己认识、且用户没关掉的那些"，也就是这次升级之前的行为。
+ *   为一件"你的服务端版本旧"弹一条 error，是把升级的节奏问题说成故障。
+ *
+ * @returns {Promise<{ok:boolean, plugins:Array|null, error:string|null}>}
+ */
+async function loadPlugins() {
+  let resp;
+  try {
+    resp = await backend.rpc({ op: 'plugins' });
+  } catch (e) {
+    return { ok: false, plugins: null, error: e.message };
+  }
+  if (!resp || !resp.ok) {
+    const detail = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
+    return { ok: false, plugins: null, error: detail };
+  }
+  return { ok: true, plugins: (resp.data && resp.data.plugins) || [], error: null };
+}
+
+/**
+ * 刷新全局的分区列表与插件清单。
+ *
+ * ★ 分区失败要**说出来**（此前 `resp.ok && resp.data.partitions || []` 会把失败
+ *   静默成一个空列表，界面显示「这台集群没有任何分区」—— 一句系统并不知道的话）。
+ *   插件失败则不必，理由见 loadPlugins()。
+ */
 async function refreshPartitions() {
   const r = await loadPartitions();
   partitions = r.partitions;
-  resourceDefaults = r.defaults;
   if (!r.ok && win) win.pushNotice('error', r.error);
+
+  const p = await loadPlugins();
+  // null（问到但站点没返回清单 / 问不到）与 []（站点真的一个插件都没有）不同，
+  // 但对界面是同一件事：没有站点信息可用。留 null 让调用方能分辨。
+  sitePlugins = p.ok ? { plugins: p.plugins || [] } : null;
   return r;
+}
+
+/**
+ * 递给界面的插件视图。**界面不做任何推导** —— 它手里那份随时可能已经陈旧，
+ * 而"哪些按钮该出现"是三个不同人的决定求交出来的结果（见 pluginsView）。
+ *
+ * ★ `defaults` 是**管理员设定的策略**，不是用户偏好。界面只读地显示它，提交时
+ *   靠【省略】cpus/mem 字段让服务端填当下那份默认值 —— 不是把这两个数字发回去。
+ *   两者不等价：管理员把默认从 2 核改成 4 核之后，回发旧值的客户端会把它**永远
+ *   钉死**在 2 核，而"省略"永远拿到当下的默认。只有用户当场点开「高级选项」，
+ *   才发明确值。
+ */
+function pluginsView() {
+  const site = new Map(((sitePlugins && sitePlugins.plugins) || [])
+    .filter((x) => x && typeof x.name === 'string')
+    .map((x) => [x.name, x]));
+  const siteKnown = Boolean(sitePlugins && Array.isArray(sitePlugins.plugins));
+
+  // ★ 一张表，每条带**两个**开关，界面自己决定怎么画。
+  //
+  //   不在这里替界面过滤掉任何一条：**"看不见"与"看得见但灰着"告诉用户的事
+  //   完全不同** —— 站点没开 → 去找管理员；本机关了 → 自己打开就行；客户端
+  //   不认得 → 该升级。三种都过滤掉，用户面对的就是"按钮凭空少了一个"。
+  const plugins = registry.list().map((plugin) => {
+    const s = site.get(plugin.name) || null;
+    const locallyEnabled = config.pluginEnabledLocally(cfg, plugin.name);
+    // 站点清单**拿不到**时（守护进程太旧，没有这个 op）按"站点没说"算 true。
+    // 算 false 的话，升级客户端会让老服务端的用户一个按钮都看不到。
+    const siteEnabled = siteKnown ? Boolean(s && s.enabled) : true;
+    return {
+      name: plugin.name,
+      // 客户端认得的插件用**它自己的**标题：那个才对应它实际会做的事。
+      // 站点给的标题是给不认识它的客户端看的（见 unknownToClient）。
+      title: plugin.title,
+      siteEnabled,
+      siteKnown,
+      locallyEnabled,
+      // 默认资源是**管理员设定的策略**，不是用户偏好。界面只读地显示它，提交时靠
+      // 【省略】cpus/mem 让服务端填当下那份默认值 —— 不是把这两个数字发回去。
+      // 回发旧值的客户端会把管理员的改动**永远钉死**。拿不到就是 null，不编一个。
+      defaults: (s && s.defaults) || null,
+      // 能不能真的起一个会话 —— 两个开关都开。界面画"启动"按钮时看这个。
+      runnable: siteEnabled && locallyEnabled,
+    };
+  });
+
+  return {
+    plugins,
+    // 本站有、而本客户端没有实现的。**这是升级提示的唯一来源** ——
+    // 过滤掉它们，用户就永远不知道自己少了什么。
+    unknownToClient: [...site.values()]
+      .filter((p) => !registry.get(p.name))
+      .map((p) => ({ name: p.name, title: p.title, enabled: p.enabled !== false })),
+    // 插件目录里扫到的坏文件（语法错、缺字段、名字与文件名不一致）。
+    // 它们被跳过了，客户端照常工作 —— 但必须说出来，否则"加了插件它就是不生效"。
+    errors: registry.errors,
+  };
 }
 
 /**
@@ -576,32 +656,44 @@ function clearLayoutStorage(layoutId) {
  * 起一个会话。
  *
  * @param {object} resources 高级选项里的临时覆盖（见 session.js 的 start）
- * @param {'code-server'|'sshd'} serviceKind 这一次要哪种服务
+ * @param {string} serviceKind 这一次要哪个**插件**（注册表里的名字）。
+ *        省略 = 缺省插件 —— 与这个参数存在之前的行为一致。
  */
 async function startSession(resources, serviceKind) {
-  const relay = serviceKind === SERVICE_SSHD;
-  // ★ 中转站**不分配布局组**：布局组是给浏览器用的（端口 = origin = 一份编辑器
-  //   布局），而中转站没有浏览器。给它一个组只会凭空造出一个永远不会被创建的
-  //   存储分区，并且让「运行中切布局」那条路去挪一个 ssh 隧道正在用的端口。
-  const layoutId = relay ? null : layoutForSession();
+  // ★ 认不出的服务种类**在提交之前**就拦住。走到提交再让服务端回一句
+  //   `bad_service_kind` 也行，但那要花掉一整趟往返，而且用户看到的是一个
+  //   关于"服务种类"的错误、而他刚才点的可能是一个界面上的按钮。
+  //
+  // ★ 省略 serviceKind = **缺省插件**，不是"未知"。这与这个参数存在之前的行为
+  //   完全一致（那时的界面只能起一个插件），所以老界面、老测试、以及任何还在用
+  //   单参数调用的地方都不会因此坏掉。而传一个**认不出的名字**是另一回事 ——
+  //   那是明确的错误，必须拦住。
+  const wanted = serviceKind === undefined
+    ? (registry.defaultPlugin() || {}).name
+    : serviceKind;
+  const plugin = registry.get(wanted);
+  if (!plugin) {
+    win.pushNotice('error',
+      `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
+      + `本版支持：${registry.list().map((p) => p.title).join('、') || '（一个都没有）'}。`);
+    return null;
+  }
 
-  // 中转站要一把公钥交给作业。**先备好再提交** —— 没有它守护进程会拒绝这次提交
-  // （code 2），而那要花掉一整趟往返。
+  // ★ 布局组是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
+  //   编辑器布局），不跑浏览器的不给 —— 给它一个组只会凭空造出一个永远不会被
+  //   创建的存储分区，并让「运行中切布局」去挪一个正在用的隧道端口。
+  const layoutId = plugin.needsLayout ? layoutForSession() : null;
+
+  // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
+  // 这次提交，而那要花掉一整趟往返）。**先备好再提交**是硬要求。
   let sshPubkey = null;
-  if (relay) {
-    const home = relayHome();
-    const k = sshconfig.ensureRelayKey(home);
-    if (!k.ok) {
-      win.pushNotice('error', `无法准备中转站用的密钥：${k.detail}`);
+  if (plugin.prepare) {
+    const pre = plugin.prepare(pluginContext(plugin));
+    if (!pre || !pre.ok) {
+      win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
       return null;
     }
-    sshPubkey = k.publicKeyLine;
-    if (k.created) {
-      win.pushNotice('info',
-        `已为中转站生成一把一次性密钥，存在 ${sshconfig.pathsFor(home).identity}。`
-        + '它只被写进你自己作业的 authorized_keys —— 任何登录入口都不认它，'
-        + '所以要连进来仍然需要你自己那把 IDM 密钥。');
-    }
+    sshPubkey = pre.sshPubkey || null;
   }
 
   // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
@@ -616,22 +708,23 @@ async function startSession(resources, serviceKind) {
       backend,
       layoutId,
       onTunnelPort: (id, port) => {
-        // 端口要**持久化** —— 变了 origin 就变，code-server 存在 localStorage 里的
+        // 端口要**持久化** —— 变了 origin 就变，浏览器存在 localStorage 里的
         // 编辑器布局会重置。记住它，下次还用同一个。
-        // （中转站走的是下面那条 onRelayPort，它的端口属于 ssh 配置，不进这里。）
-        if (!id) return;                // 中转站没有布局组，没有东西可记
+        // （没有布局组的插件走下面那条 onRelayPort，它的端口属于别的地方。）
+        if (!id) return;
         config.setLayoutPort(cfgDir, cfg, id, port);
       },
-      // 中转站的端口写进用户的 ssh 配置，不写进 config.json（见 sshconfig.js）。
-      // 这里只需要「重新渲染一次」，配置由 ensureSshRelay 按当前端口重写；
-      // 端口和主机公钥都没变时它会自己跳过（那正是它幂等的依据）。
+      // 没有布局组的插件：端口不由我们记，交给插件自己的 attach() 去处理
+      // （sshd 把它写进用户那份 ssh 配置，见 sshconfig.js）。
+      // 这里只需要「重新渲染一次」，插件按当前端口重写它那份配置；
+      // 端口和主机公钥都没变时它会自己跳过（那正是 ctx.once() 的用处）。
       onRelayPort: () => onSessionChange(controller.snapshot()),
       // 端口顺移时必须跳过别的布局组占着的端口，否则两个组会声称同一个端口，
       // 每次启动谁先绑谁赢，布局在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
       // 不然自己那个端口会被当成「别人的」而永远绑不上。
       //
-      // 中转站的 layoutId 是 null，于是这里排除掉**全部**布局端口 —— 正是要的：
-      // 它绝不能落到某个布局组的端口上。
+      // 没有布局组的插件 layoutId 是 null，于是这里排除掉**全部**布局端口 ——
+      // 正是要的：它绝不能落到某个布局组的端口上。
       getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
     });
     controller.on('change', onSessionChange);
@@ -642,11 +735,16 @@ async function startSession(resources, serviceKind) {
   //   「开始」时该有的表现。在 else 里顺手改一下运行中会话的 layoutId 是纯副作用：
   //   它会把这个正在跑的会话挪到另一个布局组上，而用户什么都没要求。
 
-  const preferredPort = relay
-    ? config.RELAY_PORT_BASE
-    : config.layoutPort(cfg, layoutId);
+  // 首选端口也是**按插件**的：跑浏览器的用工位组的端口，其余用它自己声明的那个。
+  // 插件没声明时给 0，交给隧道模块自己顺移。
+  const preferredPort = plugin.preferredPort
+    ? plugin.preferredPort(pluginContext(plugin), layoutId)
+    : 0;
   const snap = await controller.start(resources, {
-    preferredPort, serviceKind: relay ? SERVICE_SSHD : SERVICE_CODE_SERVER, sshPubkey,
+    preferredPort,
+    serviceKind: plugin.name,
+    needsPubkey: Boolean(plugin.needsPubkey),
+    sshPubkey,
   });
   if (!snap) onSessionChange(controller.snapshot());
   return snap;
@@ -684,13 +782,17 @@ async function _renderSession(snap) {
 
   // ── 唯一的服务分派点 ──
   //
-  // ★ 不分流的后果不是崩溃，而是**误导**：code-server 那条路会拿会话口令去
+  // ★ 不分流的后果不是崩溃，而是**误导**：跑在浏览器里的那条路会拿会话口令去
   //   POST 一个 SSH 端口，然后弹一句语义完全错误的「自动登录失败」；反过来
-  //   中转站那边会去建一个 WebContentsView 加载一个根本不是说 HTTP 的端口。
+  //   另一边会去建一个 WebContentsView 加载一个根本不说 HTTP 的端口。
+  //
+  // ★ 这里**没有**任何插件名。注册表只回答"表里有没有这一个"，所以加第三个
+  //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个文件。
+  const plugin = registry.get(registry.route(snap.serviceKind));
+  win.setSessionService(plugin);        // 关窗文案要用（见 windows.js）
   if (snap.state === State.RUNNING && snap.origin) {
-    if (snap.serviceKind === SERVICE_SSHD) await ensureSshRelay(snap);
-    else if (snap.serviceKind === SERVICE_CODE_SERVER) await ensureCodeServer(snap);
-    else if (snap.serviceKind === SERVICE_UNKNOWN) await warnUnknownService(snap);
+    if (plugin) await plugin.attach(pluginContext(plugin), snap);
+    else await warnUnknownService(snap);
   }
   if (snap.state === State.RUNNING && snap.warning) {
     await win.showOverlay(snap.warning);
@@ -720,160 +822,69 @@ async function _renderSession(snap) {
  * ★ 这是唯一的入口。windows.js 的 pushState 里那条「origin 变了就 loadURL」的
  *   自动 retarget 已经删掉了：它不换 partition、也不重跑登录，两条路并存必然分叉。
  */
-async function ensureCodeServer(snap) {
-  const partition = config.partitionForLayout(snap.layoutId);
-  if (win.hasCodeView() && win.codeOrigin === snap.origin && win.codePartition === partition) {
-    return;
-  }
-  const rebuild = win.hasCodeView() && win.codePartition !== partition;
-  await openCodeServer(snap);
-  if (rebuild) win.pushNotice('info', '已切换到新的布局组，编辑器页面已重新加载。');
-}
-
-// ── SSH 中转站 ──────────────────────────────────────────────────────────────
-//
-// 中转站**没有视图**：用户要用的东西（原生 VS Code Remote-SSH、codex）跑在他自己
-// 的机器上，客户端这边唯一要做的事就是让 `ssh slurmate` 这个名字能连进来 ——
-// 也就是维护那两个文件（见 sshconfig.js）。
-//
-// 于是「建立会话」这件事在这里的全部内容就是：写文件、告诉用户怎么用。
+/**
+ * 插件注册表。构造时扫描 `plugins/` 目录 —— 见那个文件的边界说明。
+ *
+ * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件名走，
+ * 重建注册表会让用户把已经看过的通知再看一遍。
+ */
+const registry = new plugins.Registry();
 
 /**
- * 上一次**已经就服务本身通知过**的那组值（端口|用户名|主机公钥，或 unknown|会话 id）。
+ * 递给插件的**全部能力**。
  *
- * 两件事靠它：值没变就不重写 ssh 配置、也不重复报同一条通知。
- * 状态变化是**频繁**的 —— 心跳告警、隧道重建、每次 status 回来都会走到渲染 ——
- * 没有这个去重，用户每 45 秒会收到一条一模一样的「中转站已就绪」，等于没有通知；
- * 顺带每次心跳都重写一遍 ssh 配置，白白惊动用户的同步/杀毒软件。
- */
-let lastServiceNotice = null;
-
-/**
- * 写 ssh 配置时用的「家目录」。
+ * ★ 插件拿到的是这个对象，而不是整个模块作用域。这不是洁癖：它把"一个插件能
+ *   碰什么"变成一份看得见的清单，而 Phase 3 的进程隔离就是把这份清单变成一条
+ *   IPC 协议。
  *
- * ★ 演示模式**必须**落在它自己的配置目录里，绝不能碰真的 `~/.ssh/config` ——
- *   演示模式的一条硬纪律是「不产生任何真实副作用」（config.json 也是这么隔离的），
- *   而 `~/.ssh/config` 是用户**全部** ssh 都要经过的地方，比 config.json 严重得多。
- */
-function relayHome() {
-  return DEMO_FLAG ? cfgDir : app.getPath('home');
-}
-
-/**
- * 中转站就绪：把本地 ssh 配好。
+ * ★ 每次调用都**新建**一个 —— `cfg` 是会变的（换一条连接就换一份），而插件里的
+ *   `await` 可能跨越那个变化。所以 cfg/cfgDir 用 getter 现取，不用快照。
  *
- * **幂等**，每次状态变化都会调（心跳告警、隧道重建都会触发）。所以：
- * 值没变就直接返回 —— 否则用户每 45 秒收到一条一模一样的通知，等于没有通知，
- * 而每次心跳都重写一遍 ssh 配置也是白白惊动用户的杀毒/同步软件。
+ * ★ `once()` 按插件名分桶：两个插件各记各的"上次值"，共用一个槽会互相冲掉。
  */
-async function ensureSshRelay(snap) {
-  const port = snap.localPort;
-  if (!port) return;                       // 还没监听，还轮不到写配置
-
-  // 登录节点上的用户名。用连接里那个 —— 它是用户亲手填的，而 whoami 要等一次
-  // RPC 回来才有（重连上来时可能还没有）。
-  const conn = config.activeConnection(cfg);
-  const user = (conn && conn.user) || (whoami && whoami.user);
-  if (!user) {
-    win.pushNotice('error', '中转站已就绪，但不知道要用哪个用户名写 ssh 配置。');
-    return;
-  }
-
-  const key = `${port}|${user}|${snap.sshHostKey || ''}`;
-  if (lastServiceNotice === key) return;
-
-  const home = relayHome();
-  const inc = sshconfig.ensureInclude(home);
-  const w = sshconfig.writeRelayConfig({
-    home, port, user, hostKey: snap.sshHostKey,
-  });
-
-  if (!w.ok) {
-    win.pushNotice('error',
-      `中转站已就绪，但没能写出 ssh 配置（${w.detail || w.error}）。`
-      + `你仍然可以直接连 127.0.0.1:${port} 使用它。`);
-    return;
-  }
-  lastServiceNotice = key;
-
-  // Include 没加上时**照样**把我们自己那份配置写好了：用户可以手工加那一行，
-  // 也可以自己 ssh -F <路径>。但必须说出来 —— 不说的话他敲 `ssh slurmate` 会得到
-  // 「Could not resolve hostname」，而根因是我们没能改他的文件。
-  if (!inc.ok) {
-    win.pushNotice('warn',
-      `没能把 Include 加进 ${inc.path}（${inc.detail}）。`
-      + `请手工在那个文件的**最上面**加一行：\nInclude ${sshconfig.pathsFor(home).config}`);
-  } else if (inc.changed) {
-    win.pushNotice('info',
-      `已在 ${inc.path} 最上面加了一行 Include，指向 Slurmate 自己的 ssh 配置。`
-      + '（只加了这一行，你原有的内容一个字都没动。）');
-  }
-
-  if (!w.strict) {
-    win.pushNotice('warn',
-      '这次没能拿到作业内 sshd 的主机公钥（控制节点没返回它 —— 守护进程可能还是'
-      + '旧版本），本次连接按「首次信任」处理。它只影响第一次连接，之后会一直核对。');
-  }
-
-  win.pushNotice('ok',
-    `SSH 中转站已就绪。在终端里执行 ssh ${SSH_ALIAS}，或用 VS Code 的远程连接填 `
-    + `${SSH_ALIAS}（主机名就是这一个词，端口和用户名都已经配好了）。\n`
-    + `会话结束前它一直有效；作业里的东西跑在作业的 cgroup 里，作业一停全部回收。`);
+function pluginContext(plugin) {
+  return {
+    win,
+    config,
+    get cfg() { return cfg; },
+    get cfgDir() { return cfgDir; },
+    demo: DEMO_FLAG,
+    session: () => (controller && controller.session) || null,
+    whoami: () => whoami,
+    /** 写本地文件用的家目录。演示模式必须落在它自己的目录里 —— 见 sshd.js。 */
+    home: () => (DEMO_FLAG ? cfgDir : app.getPath('home')),
+    login: performLogin,
+    notice: (kind, text) => win.pushNotice(kind, text),
+    once: (key) => registry.once(plugin.name, key),
+  };
 }
 
 /**
- * 服务种类未知（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
+ * 这个会话的插件我们**不认识** —— 站点开了它，而本客户端的注册表里没有。
  *
- * ★ 这里**什么都不做**，正是要害。这台端口上跑的可能是 code-server 也可能是
- *   sshd，而两种做法用错都是系统在声称一件它并不知道的事：拿口令去 POST 一个
- *   SSH 端口，或者拿主机公钥去配一个 HTTP 端口。用户看到的是莫名其妙的报错，
- *   而根因（这个会话是别的进程提交的、我们没写过它的命令行）一个字都不在里面。
+ * ★ 这里**什么都不做**，正是要害。那个端口上跑的可能是任何东西，而任何做法都是
+ *   系统在声称一件它并不知道的事：拿口令去 POST 一个 SSH 端口，或者给一个 HTTP
+ *   端口配主机公钥。用户看到的是莫名其妙的报错，而根因一个字都不在里面。
  *   所以如实说出来，并且**只留「结束会话」这一条路**。
+ *
+ * ★ 这一条同时是"站点装了新插件而客户端没跟上"的**唯一提示来源** —— 说清楚是
+ *   哪种情况，用户才知道该升级客户端还是该找管理员。所以它会把站点那边认得的
+ *   名字列出来。
  */
 async function warnUnknownService(snap) {
   const key = `unknown|${snap.sessionId}`;
-  if (lastServiceNotice === key) return;
-  lastServiceNotice = key;
+  if (!registry.once('__unknown__', key)) return;
+  const known = registry.list().map((p) => p.name);
+  const names = ((sitePlugins && sitePlugins.plugins) || [])
+    .map((p) => p.name).filter((n) => n && !known.includes(n));
+  const why = names.length
+    ? `本站开了这个客户端不认识的插件：${names.join('、')}。升级客户端之后就能用它。`
+    : '它多半是别的进程提交的，控制节点没有关于它的记录。';
   win.pushNotice('warn',
-    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— 它多半是别的进程提交的，`
-    + '控制节点没有关于它的记录，所以客户端不知道该怎么连上去。\n'
+    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${why}\n`
     + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。');
 }
 
-async function openCodeServer(snap) {
-  // 演示模式下给 code-server 页面注入一个只读的小桥，用来接收「被外壳吞掉的按键」，
-  // 好让你在同一屏里对照验证快捷键。**真实模式绝不注入** —— 那会污染 IDE。
-  // ★ partition 名按**布局组 id** 命名，不按端口。按端口命名会让「组 A 被回收后
-  //   端口被新组 B 复用」时，B 的所谓「空白布局」继承 A 的 localStorage 与登录 cookie。
-  const partition = config.partitionForLayout(snap.layoutId);
-  await win.showCodeServer(snap.origin, partition, snap.demo);
-
-  const ses = win.codeSession;
-  if (!ses) return;
-
-  const password = controller.session && controller.session.auth_password;
-  const authMode = (controller.session && controller.session.auth_mode) || 'password';
-
-  if (authMode === 'none') {
-    // auth_mode 可能是 none（配置改一行就能退回）。此时不要 POST /login。
-    return;
-  }
-
-  const res = await performLogin(ses, snap.origin, password);
-  if (res.ok) {
-    win.pushNotice('ok', '已自动登录 code-server。');
-    await win.reloadCodeServer();
-  } else if (res.reason === 'no_cookie') {
-    win.pushNotice('error',
-      `自动登录失败（HTTP ${res.status}，未拿到会话 cookie）。`
-      + `可能是会话口令已变化，或 code-server 升级后改动了登录端点。`);
-  } else if (res.reason === 'no_password') {
-    win.pushNotice('error',
-      '控制节点还没返回会话口令。可能需要稍等片刻，或查看「状态」。');
-  } else {
-    win.pushNotice('error', '自动登录出错：' + res.reason);
-  }
-}
 
 // ── 关闭 ────────────────────────────────────────────────────────────────────
 /**
@@ -936,11 +947,26 @@ async function tryReattach() {
   const s = resp.data && resp.data.session;
   if (!s) return;                      // 没有活跃会话，正常路径
 
-  // 中转站会话不走布局组（见 startSession）。这里**不需要**有连接也能接上，
+  // ★ 用**注册表**归一，而不是在会话对象上直接判。这一步同时兜住两种老情况：
+  //   守护进程太旧、会话视图里根本没有 `service_kind` 这个键 → 缺省插件
+  //   （那时的作业只可能是它）；会话是从 nft 规则恢复出来的、服务端明说不知道
+  //   → 未知，于是下面跳过建隧道，只让用户看见并能结束它。
+  const plugin = registry.get(registry.route(s.service_kind));
+
+  // ★ 认不出的插件**照样要把隧道接起来**，这一条是承重的。
+  //
+  //   不接的话：服务端明明有一个会话在跑（占着那个名额，于是"单一启动"会拒绝
+  //   下一次提交），而客户端表现得像什么都没有 —— 用户既看不到它、也不知道为什么
+  //   下一个起不来。接起来之后他至少有一条出路：直接连 127.0.0.1:端口 看看那
+  //   到底是什么，或者把它结束掉。
+  //
+  //   而"客户端不知道该怎么**用**它"这件事由 _renderSession 去说 —— 那里对未知
+  //   服务只解释、不动作（绝不建 WebView、绝不 POST 口令）。
+  //
+  // 不跑浏览器的插件不走布局组（见 startSession）。这里**不需要**有连接也能接上，
   // 因为它的端口不是布局端口，没有「该用哪个组」这个问题。
-  const relay = serviceRoute(s.service_kind) === SERVICE_SSHD;
-  const layoutId = relay ? null : activeLayoutId();
-  if (!relay && !layoutId) return;     // 没配置连接，接不上
+  const layoutId = (plugin && plugin.needsLayout) ? activeLayoutId() : null;
+  if (plugin && plugin.needsLayout && !layoutId) return;   // 没配置连接，接不上
 
   // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
   //   此前这里写的是 `if (!s || !s.tunnel_target) return;` —— 于是「作业还在队列里」
@@ -958,17 +984,25 @@ async function tryReattach() {
   controller = new SessionController({
     backend, layoutId,
     onTunnelPort: (id, port) => {
-      if (!id) return;                 // 中转站没有布局组，没有东西可记
+      if (!id) return;                 // 没有布局组的插件，没有东西可记
       config.setLayoutPort(cfgDir, cfg, id, port);
     },
     onRelayPort: () => onSessionChange(controller.snapshot()),
     getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
+    // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
+    // 认不出时**原样**记下，于是 _renderSession 里的 route() 仍然得出「未知」。
+    requestedKind: plugin ? plugin.name : s.service_kind,
+    needsPubkey: Boolean(plugin && plugin.needsPubkey),
   });
   controller.on('change', onSessionChange);
   controller.sessionId = s.session_id;
   controller.session = s;
 
-  const preferredPort = relay ? config.RELAY_PORT_BASE : config.layoutPort(cfg, layoutId);
+  // 认不出的插件用**非布局组**的基准端口：它的端口绝不能落进任何布局组（否则会与
+  // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。
+  const preferredPort = (plugin && plugin.preferredPort)
+    ? plugin.preferredPort(pluginContext(plugin), layoutId)
+    : config.RELAY_PORT_BASE;
   if (queued) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
     // 会自己把视图/ssh 配置建起来，界面标题也已经有「排队中 — 作业 N」那一档）。
@@ -1006,7 +1040,7 @@ function registerIpc() {
     partitions,
     // 服务端通报的默认资源（管理员设定）。界面**只读地**显示它，并且提交时
     // 靠【省略】cpus/mem 来使用它 —— 不是把这两个数字发回去。理由见变量声明处。
-    resourceDefaults,
+    plugins: pluginsView(),
     // 方法名是 isEncryptionAvailable，不是 isAvailable。
     // 写错的表现是「明明有凭据库却报告没有」，用户会被误导去找一个不存在的开关。
     secureStorageAvailable: secureAvailable(),
@@ -1159,13 +1193,16 @@ function registerIpc() {
     const isActive = cfg.activeConnectionId === connectionId;
     const sessionLive = controller
       && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state);
-    // ★ 中转站会话**不参与布局**：它的端口是我们自己的 (RELAY_PORT_BASE)，不在任何
-    //   布局组里。让它走下面那条 relisten，就会去挪一个用户正在用 ssh 连着的端口 ——
-    //   而 ssh 配置里那一行是我们在隧道起来时才写的，挪完端口那一瞬间
-    //   `ssh slurmate` 连的是一个没人监听的端口。所以这里只改配置、不动会话。
-    const relayLive = sessionLive && controller.serviceKind() === SERVICE_SSHD;
+    // ★ 不参与布局的插件（没有布局组的那些）**不能走 relisten**：它的端口不在任何
+    //   布局组里，relisten 会去挪一个正在被使用的隧道端口 —— 而它对外的那份配置是
+    //   隧道起来时才写的，挪完那一瞬间用户手上的连接指向一个没人监听的端口。
+    //   所以那种会话只改配置、不动会话本身。
+    //
+    //   判据是 layoutId 有没有（框架的事实），不是"是哪个插件"（那是插件名）。
+    const sessionInLayout = sessionLive && controller.layoutId !== null;
+    const outsideLayout = sessionLive && !sessionInLayout;
 
-    if (isActive && controller && sessionLive && !relayLive) {
+    if (isActive && controller && sessionLive && !outsideLayout) {
       const excluded = config.usedLayoutPorts(cfg, target.id);
       const r = await controller.relisten(target.id, target.port, excluded);
       if (!r.ok) {
@@ -1176,10 +1213,10 @@ function registerIpc() {
         };
       }
       target.port = r.port;                 // 可能顺移过
-    } else if (isActive && controller && !relayLive) {
+    } else if (isActive && controller && !outsideLayout) {
       controller.setLayout(target.id);      // 没有会话在跑：只改标记，下次开会话就用它
     }
-    // relayLive 时两条都不走：配置照改（下次起 code-server 就用新组了），
+    // outsideLayout 时两条都不走：配置照改（下次起 code-server 就用新组了），
     // 但这个正在跑的中转站会话不受任何影响 —— 它的 layoutId 保持 null。
 
     config.setConnectionLayout(cfg, connectionId, target.id);
@@ -1216,7 +1253,7 @@ function registerIpc() {
     }
 
     const res = await doConnect(conn);
-    return { ...res, whoami, partitions, resourceDefaults };
+    return { ...res, whoami, partitions, plugins: pluginsView() };
   });
 
   /**
@@ -1231,7 +1268,7 @@ function registerIpc() {
     }
     config.rememberHostKey(cfgDir, cfg, conn.host, conn.port, fingerprint);
     const res = await doConnect(conn, { trustHostKey: fingerprint });
-    return { ...res, whoami, partitions, resourceDefaults };
+    return { ...res, whoami, partitions, plugins: pluginsView() };
   });
 
   /**
@@ -1340,7 +1377,7 @@ function registerIpc() {
     await backend.close();
     whoami = null;
     partitions = [];
-    resourceDefaults = null;      // 断开之后就没有「服务端通报的默认值」可谈了
+    sitePlugins = null;           // 断开之后就没有「站点开了哪些插件」可谈了
     return { ok: true, released };
   });
 
@@ -1349,8 +1386,7 @@ function registerIpc() {
   // partitions 仍然是数组，空数组表示「取不到」而不是「没有分区」—— 区别在 error 里。
   send('app:partitions', async () => {
     const r = await refreshPartitions();
-    return { ok: r.ok, partitions: r.partitions,
-             resourceDefaults: r.defaults, error: r.error };
+    return { ok: r.ok, partitions: r.partitions, plugins: pluginsView(), error: r.error };
   });
 
   /**
@@ -1360,9 +1396,31 @@ function registerIpc() {
    * @param {'code-server'|'sshd'} [serviceKind] 省略 = code-server，
    *   与这个参数存在之前的行为一致 —— 老的界面调用（只传 resources）不会因此变样。
    */
+  /**
+   * 起一个会话。
+   *
+   * @param {object} resources 高级选项里的临时覆盖（省略字段 = 用服务端默认）
+   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件** —— 与这个参数存在
+   *        之前的行为完全一致（那时的界面只能起 code-server）。
+   */
   send('app:start', async (resources, serviceKind) => {
     const snap = await startSession(resources, serviceKind);
     return { ok: Boolean(snap), snapshot: controller && controller.snapshot() };
+  });
+
+  /**
+   * 本机要不要这个插件。**不影响服务端** —— 站点仍然可以提交那个插件的会话
+   * （用户自己用 CLI 就行），这里只是让客户端不再给出那个按钮。
+   */
+  send('app:setPluginEnabled', async (name, enabled) => {
+    if (typeof name !== 'string' || !registry.get(name)) {
+      return { ok: false, error: `本客户端没有叫 ${JSON.stringify(name)} 的插件。` };
+    }
+    if (typeof enabled !== 'boolean') {
+      return { ok: false, error: 'enabled 必须是 true 或 false。' };
+    }
+    config.setPluginEnabled(cfgDir, cfg, name, enabled);
+    return { ok: true, plugins: pluginsView() };
   });
 
   send('app:state', async () => (controller ? controller.snapshot() : null));
@@ -1389,6 +1447,10 @@ function registerIpc() {
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
     else if (what === 'reap') backend.debugReap();
     else if (what === 'reset') backend.debugReset();
+    // 让演示站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
+    // 这两条路是"插件增减不许崩"的验收路径，必须能在演示模式下走到。
+    else if (what === 'extra-plugin') backend.debugAddSitePlugin('jupyter', 'JupyterLab');
+    else if (what === 'site-plugin-off') backend.debugDisableSitePlugin('sshd');
     else return { ok: false, error: '未知的调试动作' };
     return { ok: true };
   });
@@ -1437,5 +1499,11 @@ module.exports = {
      * **还原现场**而不是绕过什么 —— 启动那一刻它本来就是 null。
      */
     reattach: () => { controller = null; return tryReattach(); },
+    /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
+    getRegistry: () => registry,
+    /** 界面会看到的插件视图（三方求交的结果）。 */
+    getPluginsView: () => pluginsView(),
+    /** 站点通报的插件清单（op_plugins 的原始响应）。 */
+    getSitePlugins: () => sitePlugins,
   },
 };
