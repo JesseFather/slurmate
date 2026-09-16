@@ -63,9 +63,13 @@ let partitions = [];
  * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
  * 不支持这个 op）—— 那时按"站点没说"处理，而不是当成"一个都没有"。
  *
- * ★ 界面上的按钮由**三方求交**决定：客户端扫到的插件 ∩ 站点开着的 ∩ 用户在本机
- *   没关掉的。三者各自是不同人的决定，所以见 pluginsView() —— 那里把三个条件
+ * ★ 界面上的按钮由**四个条件的求交**决定：客户端扫到的插件 ∩ 站点装着且开着 ∩
+ *   用户在本机没关掉 ∩ 站点为它装了作业侧。所以见 pluginsView() —— 那里把条件
  *   分别报给界面、由界面决定怎么画，而不是在这里合并成一个布尔。
+ *
+ *   四个条件来自**三方**（客户端 / 站点 / 用户），其中站点占了两个 —— 而那两个
+ *   要做的**事**不一样（一个是管理员的开关，一个是部署有没有跟上），所以界面上
+ *   也必须是两句不同的话。
  */
 let sitePlugins = null;
 let quitting = false;
@@ -481,8 +485,29 @@ async function refreshPartitions() {
 }
 
 /**
+ * 演示调试开关要作用在池里的**哪一个**插件上：调用方给短名，不给就取列表里第一个。
+ * 基座里没有插件名可写，所以"是哪一个"只可能由调用方说。
+ *
+ * 一个都没装时**如实返回一条 error**，而不是静默地什么也没发生 —— 后者会让调试的人
+ * 以为是界面没刷新，然后去查一个不存在的问题。
+ *
+ * @returns {{plugin: object}|{error: string}}
+ */
+function pickPoolPlugin(name) {
+  const list = registry.list();
+  const plugin = name ? list.find((p) => p.name === name) : list[0];
+  if (plugin) return { plugin };
+  return {
+    error: list.length
+      ? `本机没有装短名为「${name}」的插件。`
+      : '本机一个插件都没有 —— 先装一个，这个开关才有对象。',
+  };
+}
+
+/**
  * 递给界面的插件视图。**界面不做任何推导** —— 它手里那份随时可能已经陈旧，
- * 而"哪些按钮该出现"是三个不同人的决定求交出来的结果（见 pluginsView）。
+ * 而"哪些按钮该出现"是四个条件的求交（见 pluginsView）—— 它们来自三方，其中
+ * 站点占两个。
  *
  * ★ `defaults` 是**管理员设定的策略**，不是用户偏好。界面只读地显示它，提交时
  *   靠【省略】cpus/mem 字段让服务端填当下那份默认值 —— 不是把这两个数字发回去。
@@ -508,6 +533,15 @@ function pluginsView() {
     // 站点清单**拿不到**时（守护进程太旧，没有这个 op）按"站点没说"算 true。
     // 算 false 的话，升级客户端会让老服务端的用户一个按钮都看不到。
     const siteEnabled = siteKnown ? Boolean(s && s.enabled) : true;
+    // 站点侧「现在提交得出去吗」—— 开了 **且** 有作业侧实现。守护进程把这两件事
+    // 合成**一个**字段发下来（它是唯一同时知道两者的那一方），客户端**不自己拿
+    // `enabled` 推** —— 要推的话还得知道"这个插件有没有 job/start.sh"，而客户端
+    // 根本看不见那件事（它不读池里那一半）。
+    //
+    // ★ 同一条三态纪律，同一个理由：**缺席 ≠ 否**。老守护进程不报这个字段
+    //   （`undefined !== false`）⇒ 按"站点没说"算可以提交。反过来算的话，升级
+    //   客户端会让所有老服务端的插件按钮在某一刻同时变灰。
+    const canSubmit = siteKnown ? Boolean(!s || s.can_submit !== false) : true;
     return {
       // 身份：`id` 是铸造出来的全球唯一标识，`version` 是这一版的号。界面把两者
       // 都显示出来 —— 池里可以并存同一个插件的多个版本，只显示名字的话用户分不清
@@ -529,12 +563,18 @@ function pluginsView() {
       siteEnabled,
       siteKnown,
       locallyEnabled,
+      // 站点装了它、也开着，但**没有作业侧实现** ⇒ 提交必被拒（守护进程回
+      // code 4 / service_kind_no_job）。界面据此把按钮置灰并给出那一句话 ——
+      // 目标是不让用户在**提交失败时**才第一次知道。
+      canSubmit,
       // 默认资源是**管理员设定的策略**，不是用户偏好。界面只读地显示它，提交时靠
       // 【省略】cpus/mem 让服务端填当下那份默认值 —— 不是把这两个数字发回去。
       // 回发旧值的客户端会把管理员的改动**永远钉死**。拿不到就是 null，不编一个。
       defaults: (s && s.defaults) || null,
-      // 能不能真的起一个会话 —— 两个开关都开。界面画"启动"按钮时看这个。
-      runnable: siteEnabled && locallyEnabled,
+      // 能不能真的起一个会话 —— 三个条件都成立。界面画"启动"按钮时看这个。
+      // 三个条件各有各的主语（站点 / 用户 / 站点的部署状态），所以界面上那三句
+      // 解释也必须是三句不同的话。
+      runnable: siteEnabled && locallyEnabled && canSubmit,
     };
   });
 
@@ -1751,18 +1791,21 @@ function registerIpc() {
     // 让演示站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
     // 这两条路是"插件增减不许崩"的验收路径，必须能在演示模式下走到。
     else if (what === 'extra-plugin') backend.debugAddSitePlugin('jupyter', 'JupyterLab');
-    // 站点关掉**哪一个**插件由调用方指定（不指定就取列表里第一个）—— 基座里
-    // 没有插件名可写。一个都没装时这个开关无事可做，如实说出来，而不是静默地
-    // 什么也没发生。
-    else if (what === 'site-plugin-off') {
-      const target = arg ? registry.list().find((p) => p.name === arg) : registry.list()[0];
-      if (!target) {
-        return { ok: false, error: registry.list().length
-          ? `本机没有装短名为「${arg}」的插件。`
-          : '本机一个插件都没有 —— 先装一个，这个开关才有对象。' };
-      }
-      backend.debugDisableSitePlugin(target.name);
+    // ★ 站点侧那三个开关作用在**哪一个**插件上由调用方指定（不指定就取列表里
+    //   第一个）—— 基座里没有插件名可写。一个都没装时这些开关无事可做，如实
+    //   说出来，而不是静默地什么也没发生。
+    else if (what === 'site-plugin-off' || what === 'site-plugin-no-job') {
+      const picked = pickPoolPlugin(arg);
+      if (picked.error) return { ok: false, error: picked.error };
+      // 这两件事**不一样**，所以是两个开关、两个 debug 方法：`off` 是管理员的
+      // 开关（界面说"本站没开放它，找管理员"）；`no-job` 是本站部署没跟上
+      // （界面说"装了它，但它没有作业侧实现"—— 管理员去开一下开关没用）。
+      if (what === 'site-plugin-off') backend.debugDisableSitePlugin(picked.plugin.name);
+      else backend.debugSitePluginNoJob(picked.plugin.name);
     }
+    // 演示「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
+    // 都是缺的，而客户端的纪律是"缺席 ≠ 否"。
+    else if (what === 'old-daemon') backend.debugOldDaemon(true);
     // 把仓库里的示例插件装进演示池。
     //
     // ★ 这不是"演示模式自带的假插件"—— 它装的是**真的**那两个插件，走的是真的
@@ -1853,7 +1896,7 @@ module.exports = {
     },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
     getRegistry: () => registry,
-    /** 界面会看到的插件视图（三方求交的结果）。 */
+    /** 界面会看到的插件视图（四个条件求交的结果，见 pluginsView）。 */
     getPluginsView: () => pluginsView(),
     /** 站点通报的插件清单（op_plugins 的原始响应）。 */
     getSitePlugins: () => sitePlugins,

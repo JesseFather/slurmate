@@ -2049,7 +2049,7 @@ exit 0
           "PRECHECK" in _out and "rc_pre=7" in _out, _out[:200])
     check("★ 没定义的钩子返回 3 —— 「没有这个钩子」与「钩子失败了」必须分得开",
           "rc_cleanup=3" in _out, _out[:200])
-    check("★ 服务种类本站没有作业侧实现时也返回 3（宿主据此以 24 结束会话）",
+    check("★ 这份脚本里没有请求的那个服务时也返回 3（宿主据此以 24 结束会话）",
           "rc_unknown=3" in _out, _out[:200])
     check("plugin_names 能列出作业侧有实现的插件（错误信息靠它说清楚）",
           "names=code_server" in _out, _out[:200])
@@ -2061,8 +2061,9 @@ exit 0
     #
     # ★ 为什么值得单独一节：`run.sbatch` 没有 .sh 后缀，checks.yml 的语法扫描清单
     #   里不含它；它又只可能在计算节点上跑，而本机不是计算节点。所以除了这里，没有
-    #   任何东西在看它的控制流。变异验证发现过这个洞：把"本站没有作业侧实现"那道
-    #   检查改成 `if false`，当时**全绿** —— 因为没有任何用例执行到那一行。
+    #   任何东西在看它的控制流。变异验证发现过这个洞：把作业脚本开头那道
+    #   `declare -F start_<kind>` 守卫改成 `if false`，当时**全绿** —— 因为没有任何
+    #   用例执行到那一行。
     print("\n── 22. run.sbatch 的主流程（真的跑一遍）──")
 
     def run_jobsh(script, kind, home, extra_env=None):
@@ -2118,8 +2119,8 @@ exit 0
     # ── 22b 零块（宿主-only）的脚本 ──
     # 一个插件都没装是**合法状态**；而"一份没有任何插件块的脚本"在运行时的表现
     # 必须是一句人话。**注意**：一个插件一份之后，正常部署不会产出这种文件 ——
-    # 零插件时 `jobs/` 里一份都没有，提交在守护进程那一层就被 service_kind 的
-    # 三种错误挡住了。这条留着是因为**模板本身就是这个样子**，而模板是可以被
+    # 零插件时 `jobs/` 里一份都没有，提交在守护进程那一层就被 service_kind 那一族
+    # 错误挡住了。这条留着是因为**模板本身就是这个样子**，而模板是可以被
     # 手工 sbatch 的（排查时有人会这么干）。
     _woven0 = os.path.join(tmpdir, "woven-zero.sbatch")
     with open(os.path.join(tmpdir, "blocks0.sh"), "w", encoding="utf-8") as _f:

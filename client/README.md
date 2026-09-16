@@ -17,7 +17,8 @@
 <插件目录>/
   plugin.json        身份（铸造出来的 `id`）、版本、以及框架会读的那几条声明
   client/index.js    客户端侧代码 —— 可有可无，没有它就是一个纯声明式插件
-  job/start.sh       作业侧代码 —— **客户端不看它**，由站点的部署脚本编织进作业模板
+  job/start.sh       作业侧代码 —— **客户端不看它**，由站点的部署脚本为它织一份
+                     `<prefix>/share/slurmate/jobs/<ULID>.sbatch`（一个插件一份）
 ```
 
 `plugin.json` 里的 `id` 是一个 **ULID**（`ulid.js` 铸的，26 字符），**诞生时铸一次、

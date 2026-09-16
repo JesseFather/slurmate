@@ -46,6 +46,20 @@ squeue -j <job_id>            # 看 ST 列：PD / R / 空
 scontrol show job <job_id>
 ```
 
+**★ 从作业回到会话：`squeue` 的 NAME 列给不出会话 ID。** 作业名是
+`sj-<插件短名>`（例如 `sj-code-server`），`squeue` 默认只显示 8 个字符宽，所以同一
+个人同时开两个同插件的会话时，那两行**长得一模一样**。要认人只能反过来查：
+
+```bash
+slurmate list                 # 会话 ID ↔ 作业 ID 的对应关系在这里
+slurmate status --json | python3 -c 'import json,sys
+for s in json.load(sys.stdin)["sessions"]: print(s["sid"], s.get("job_id"), s.get("service_kind"))'
+```
+
+这是**已知的取舍**：作业名要一眼看出是哪个插件（`slurmate-code-server` 被截成
+`slurmate`，等于什么都没说），就装不下会话的可辨认性。要同时看名字和作业 ID 用
+`squeue -o "%.10i %.16j %.8T"`。
+
 `PENDING` / `CONFIGURING` 时守护进程**刻意什么都不做** —— 重排队不释放
 （`cluster/slurmate-sessiond`）。若 `squeue` 已经查不到，那是在走
 「作业查不到要连续确认」的路径（见第六节）。分区满、`QOSMaxJobsPerUserLimit`、
@@ -570,18 +584,44 @@ default_plugin = code-server
 **装一个插件 / 卸一个插件**这种配置之外的动作悄悄改变行为 —— 今天提交成功的那条
 命令，明天可能落到另一个服务上。
 
-### 作业起来了，日志里有「本站没有作业侧实现了 'xxx' 的插件」
+### 提交被拒：「本站装了「X」，但它没有作业侧实现」
 
-那个插件**没有 `job/start.sh`**，或者它的 `job/start.sh` 里没有定义 `start_<短名>`。
+守护进程回 `code 4 / service_kind_no_job`（[PROTOCOL.md](PROTOCOL.md)），客户端上
+那个插件的按钮是灰的，并且就写着这一句。**这是合法状态，不是坏掉的插件**：那个插件
+装上了、看得见、就是提交不了。
 
-正常情况下这件事**在部署期就会被拦住**（deploy.sh 编织前对每个插件脚本断言三条：
-无 shebang/`#SBATCH`、定义了 `start_<短名>`、函数名都带命名空间）。所以看到这条
-的错误通常意味着：手工提交了作业、或者跑作业的模板是别人装的旧版本。
+成因是**部署不完整** —— 它没有 `job/start.sh`（所以在 `plugins/` 里有、在
+`jobs/` 里没有对应那一份），或者有而 deploy.sh 那次没跑到它。
 
 ```bash
-# 重新部署一次，让 deploy.sh 重新编织
+# 1. 看它到底有没有作业侧
+ls /usr/local/share/slurmate/plugins/*/job/start.sh
+# 2. 有就重新部署一次，让 deploy.sh 为它织一份 <ULID>.sbatch
 sudo bash cluster/deploy.sh
 ```
+
+★ **这与"站点没开这个插件"是两件事，两句话也不同。** 那种情况报的是
+`service_kind_disabled`，解除办法是管理员把配置块里的 `enabled` 打开；而这一条
+**打开 `enabled` 没有用**，缺的是作业脚本。
+
+### 作业起来了，日志里说「这份作业脚本提供的是 Y，而请求的是 X」
+
+拿到**别的插件**的作业脚本了。这是 `deploy.sh` 部署出了问题（`jobs/` 与 `plugins/`
+对不上），**不是插件本身的问题** —— 作业会以 **24** 退出而不是跑错服务。
+
+```bash
+# 逐个核对：每个插件的 ULID 在 jobs/ 里是不是恰好有一份
+python3 /usr/local/sbin/slurmate-sessiond --check-plugins \
+  --plugins-dir /usr/local/share/slurmate/plugins
+ls /usr/local/share/slurmate/jobs/
+sudo bash cluster/deploy.sh          # 重跑一次会清掉陈旧的、补上缺的
+```
+
+正常情况下这件事**在部署期就会被拦住**：deploy.sh 对每个 `job/start.sh` 断言三条
+（无 shebang/`#SBATCH`、定义了 `start_<短名>`、函数名都带命名空间），任何一条不过
+当场中止部署。所以看到这条通常意味着：**手工提交了作业**，或者 `jobs/` 是别人装剩
+下的。注意 deploy.sh **不会**因为插件没有 `job/start.sh` 而中止 —— 那是合法的
+（见上一条）。
 
 ### 守护进程起不来，报「块里有 'cluster_cidr'，它是站点通用键」
 

@@ -115,6 +115,17 @@ class FakeBackend extends Backend {
     this._sitePluginsOf = typeof opts.sitePlugins === 'function' ? opts.sitePlugins : () => [];
     /** 演示站点里被"关掉"的插件（按短名）。原本是直接改那个写死的数组。 */
     this._siteDisabled = new Set();
+    /**
+     * 演示站点里**装了但没有作业侧实现**的插件（按短名）。
+     *
+     * ★ 默认是空的：一个正常部署的站点，装了的插件就有作业脚本。这个集合是**故意
+     *   造**那第四格状态的开关。真机上那件事来自 `deploy.sh` 有没有为这个插件生成
+     *   `<ULID>.sbatch`，**客户端看不见** —— 所以它只可能由站点侧合成后报下来
+     *   （`op_plugins` 的 `can_submit`）。
+     */
+    this._siteNoJob = new Set();
+    /** 演示「守护进程太旧，根本没有 plugins 这个 op」。见 _dispatch。 */
+    this._noPluginsOp = false;
   }
 
   /**
@@ -130,6 +141,10 @@ class FakeBackend extends Backend {
       version: p.version,
       title: p.displayName || p.name,
       enabled: !this._siteDisabled.has(p.name),
+      // ★ 与真实守护进程逐字同一个合成方式：`enabled and needs_job`。**服务端才是
+      //   同时知道这两件事的那一方** —— 让客户端自己拿 enabled 去推，就多出一份
+      //   会漂的推理，而多出来的那一位（有没有作业侧）客户端根本看不见。
+      can_submit: !this._siteDisabled.has(p.name) && !this._siteNoJob.has(p.name),
       // ★ 内部用（决定起不起本地 HTTP 服务、要不要公钥、界面与登录契约是什么）。
       //   **不进 `plugins` 响应** —— 那两个字段是客户端从清单里自己读的，
       //   服务端多报一份就是两份真相。见下面的 case 'plugins'。
@@ -199,13 +214,21 @@ class FakeBackend extends Backend {
       // ★ 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
       //   清单里自己读**的东西，服务端多报一份就是两份真相，而两份迟早会分叉。
       //   （真实守护进程的 op_plugins 也是这么收口的。）
-      case 'plugins':    return ok({
-        plugins: this._sitePlugins().map((p) => ({
-          id: p.id, name: p.name, version: p.version, title: p.title,
-          enabled: p.enabled, defaults: { ...DEFAULTS },
-        })),
-        enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
-      });
+      //
+      //   `can_submit` 不违反上面那条：它说的是**站点这一侧**的事实（本站提交得出去
+      //   吗），客户端无从推导 —— 见 pluginsView 里那段三态说明。
+      //
+      // 老守护进程**根本没有这个 op**，客户端拿到的是 unknown_op。这一态必须能造：
+      // 那条路上**每一个**字段都是缺的，而"缺"必须与"否"分得开。
+      case 'plugins':
+        if (this._noPluginsOp) return err(2, 'unknown_op', op);
+        return ok({
+          plugins: this._sitePlugins().map((p) => ({
+            id: p.id, name: p.name, version: p.version, title: p.title,
+            enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
+          })),
+          enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
+        });
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
       case 'list':       return this._list();
@@ -251,20 +274,37 @@ class FakeBackend extends Backend {
   debugAddSitePlugin(name, title = null) {
     if (!this._extraSitePlugins.some((p) => p.name === name)) {
       this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name, version: '1.0.0',
-                                    title: title || name, enabled: true });
+                                    title: title || name, enabled: true,
+                                    can_submit: true });
     }
   }
   /** 让演示站点把某个插件**关掉**（站点装了但不允许用）。 */
   debugDisableSitePlugin(name) {
     this._siteDisabled.add(name);
     const e = this._extraSitePlugins.find((x) => x.name === name);
-    if (e) e.enabled = false;
+    if (e) { e.enabled = false; e.can_submit = false; }
   }
+  /**
+   * 让演示站点报告「这个插件装了，但没有作业侧实现」。
+   *
+   * ★ 与 `debugDisableSitePlugin` 是**两件事**，界面上的两句话也不同：那个说
+   *   "本站没开放它，去找管理员"；这个说"本站装了它，但它没有作业侧实现"。
+   *   合成一个开关的话，第四条分支永远走不到，而那句话是这次新加的。
+   */
+  debugSitePluginNoJob(name) {
+    this._siteNoJob.add(name);
+    const e = this._extraSitePlugins.find((x) => x.name === name);
+    if (e) e.can_submit = false;
+  }
+  /** 让演示站点装扮成**不认识 `plugins` 这个 op** 的老守护进程。 */
+  debugOldDaemon(on = true) { this._noPluginsOp = on; }
   debugReset() {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
     this._extraSitePlugins.length = 0;
     this._siteDisabled.clear();
+    this._siteNoJob.clear();
+    this._noPluginsOp = false;
   }
 
   // ── op 实现 ─────────────────────────────────────────────────────────────

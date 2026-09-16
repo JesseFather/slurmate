@@ -106,10 +106,85 @@
 
 `run.sbatch` 的 `pick_port_and_start` 在**每一个**候选端口都失败时的行为（写
 `failed` 墓碑 + `exit 22`）在仓库里没有任何一条用例覆盖 —— 第 22 节跑的是
-「没有作业侧实现」「零插件」「precheck 没过」这三条路，不包括这一条。
+「作业脚本与 `service_kind` 对不上」「只有宿主、没有插件块」「precheck 没过」
+这三条路，不包括这一条。
 
 不是缺陷，是**防线上的一个洞**：这条路径正是「计算节点上没装 code-server」时的
 表现，而 deploy.sh 的 `bin` 解析在登录节点上做的，**猜不到计算节点**。
+
+> 📝 **这一条的主体在 v0.5 里没变，但上面那句"第 22 节跑的是哪三条路"改过。**
+> 它原先列的是「没有作业侧实现」「零插件」「precheck 没过」—— 一插件一份之后，
+> 第一条那条**路径不存在了**（现在由 `op_submit` 在**提交期**回
+> `4 service_kind_no_job` 拦住，而不是等到作业在计算节点上跑起来才发现）。
+> 第 22 节现在跑的是「脚本与 `service_kind` 对不上」「只有宿主、没有插件块」
+> 「precheck 没过」。
+>
+> **洞本身一点没动**：`pick_port_and_start` 逐个候选端口都失败那条路仍然零覆盖。
+> 一条已经失效的账目不该默默留着 —— 留着它，下一个人会去找一段并不存在的代码；
+> 反过来，把"描述改了"当成"已经修了"，则会让一个真的洞从账本上消失。
+
+### F17 — `default_plugin` 只查"装没装"，不查"开没开"
+
+`Config.validate()` 断言 `default_plugin` 指向的短名**在插件表里**，但**不看那个
+插件块的 `enabled`**。于是这个组合能通过 `--check`、守护进程能正常起来：
+
+```ini
+default_plugin = sshd
+[plugin:sshd]
+enabled = no
+```
+
+此后**每一次省略 `service_kind` 的提交**都拿到 `4 service_kind_disabled`，而
+错误消息说的是「本站没开「SSH 中转站」」—— 它**不会提**这是 `default_plugin` 配
+错了。用户看到的是"站点好像不支持 sshd"，而真相是"站点把缺省指到了一个关着的
+插件上"。管理员的排查方向因此是错的。
+
+**修法**：`validate()` 里补一条 —— `default_plugin` 指向的插件必须是
+`enabled`。它是**配置自相矛盾**（不是"合法状态"），所以进 `validate()` 是对的，
+与 F16 上面那段说的「没有作业侧不进 validate」不冲突：那条是**插件形态**，这条是
+**配置里两处互相打架**。
+
+**这条要能真的红**：造一个 `default_plugin` 指向 `enabled = no` 的配置，
+断言 `validate()` 返回错误、且消息里点名 `default_plugin`。
+
+### F18 — 插件摘要只覆盖两个文件，改第三个文件不会被发现
+
+客户端注册表的 `digestOf(manifestRaw, clientRaw)` 只把 **`plugin.json`** 与
+**`client/index.js`** 这两份内容算进摘要。而插件目录里可以有**别的文件** ——
+sshd 的 `client/sshconfig.js`（17.5 KB，被 `index.js` `require`）就是现成的一例。
+
+后果链：改 `sshconfig.js` 而不动 `plugin.json` ⇒ 摘要**一个字都没变** ⇒ 安装器
+判「同一个 `(id, 版本)`、内容相同」⇒ 报告**幂等成功**，而池里那份**是旧的**。
+它不是报错，它是**每次都说成功**。
+
+今天这条路还走不到（唯一的安装路径是用户自己从本地目录装），但它是**将来"站点
+分发"会被击穿的地方**：那时同一个 `(id, 版本)` 会从远端反复下发，而"内容变了但
+摘要没变"意味着**升级静默地不生效**。
+
+**修法**：摘要覆盖插件目录里**除清单自述之外的全部文件**（至少是 `client/` 整棵
+子树），按路径排序后逐个入哈希。只改一个文件而摘要不变，就成了一件做不到的事。
+
+**这条要能真的红**：两个目录 `(id, 版本)` 相同、`plugin.json` 与 `index.js` 相同、
+只有一个**额外文件**不同 —— 断言它们的摘要不同。
+
+### F19 — 模板里的 `#SBATCH --export=ALL` 同样从来没生效过
+
+**观测，不是缺陷 —— 今天没有任何行为差别。** 记在这里是因为它与刚被删掉的
+`#SBATCH --job-name=slurmate` 是**同一件事**：`cluster/run.sbatch` 里写着
+`#SBATCH --export=ALL`，而 `build_sbatch_argv` **无条件**在命令行上传
+`--export=ALL,SLURMATE_*=…` —— 命令行选项覆盖脚本里的 `#SBATCH`，所以那一行
+从头到尾没被读过。
+
+两条值恰好都是 `ALL`，所以**行为上分毫不差**，今天不动它。真正的风险在于它是一句
+**假信号**：下一个读这份模板的人会以为"环境变量是靠这一行传进去的"，而调
+`build_sbatch_argv` 时就会漏掉那些 `SLURMATE_*`。
+
+**修法**（想清楚了，只是这次不动）：删掉那一行，并照 `--job-name` 那段的样子加一句
+注释说明它为什么不在这里。**不要**反过来删 argv 上的 `--export` —— 那会把
+`SLURMATE_AUTH_MODE` / `SLURMATE_SSH_PUBKEY` 之类一起弄丢。
+
+**这条要能真的红**：断言 `build_sbatch_argv` 的返回值里含
+`--export=ALL,SLURMATE_…`，并且模板里**不出现** `#SBATCH --export`。
 
 ---
 
@@ -136,14 +211,22 @@ SSH 握手、exec channel、`direct-tcpip` 端口转发 —— 三条都没有�
 
 **第一次真机部署要重点看的**：
 
-- 编织后的成品是 902 行（479 行模板 + 插件块），`bash -n` 过了没有；
-- `<prefix>/share/slurmate/plugins/` 的属主与权限对不对（root 拥有、组/其他不可写）；
-- 卸载时插件目录被清干净了没有（卸载读删除标记，删之前先读）。
+- `<prefix>/share/slurmate/jobs/` 下**有几份**、与 `plugins/` 里那几个 ULID
+  **能不能一一对上**（多一份少一份都说明编织那一步出了问题），`bash -n` 过了没有；
+- `plugins/` 与 `jobs/` 的属主与权限对不对（root 拥有、组/其他不可写；
+  `jobs/` 是 0755、每份成品 0644 —— 后者的原因是**提交用户**要去读它）；
+- 卸载时两个目录都被清干净了没有（卸载读删除标记，删之前先读。
+  注意 `jobs/` 里那些文件名是 ULID、**不含 `slurmate`**，所以那道"内容里必须有
+  `slurmate`"的归属闸门对它们看的是**脚本内容**）。
 
 ### U3 — 编织出来的作业脚本从没在真集群上执行过
 
 `test-sessiond-logic.py` 第 22 节是**真执行**，但环境是假的（假 HOME、桩
 `scontrol`）。真机上作业会被 Slurm 接管、有 `KillWait` 窗口、有真实的计算节点。
+
+一插件一份之后这一条**没有变**，只是多了一个要看的点：真机上 `sbatch` 拿到的是
+`<prefix>/share/slurmate/jobs/<ULID>.sbatch` 这条**路径**，而它由**提交用户**的
+身份读 —— 权限少一个读位就是"读不到文件"，而那句话里没有一个字提到权限。
 
 ### U4 — sshd 会话的端到端没验过
 
@@ -240,6 +323,10 @@ slurmate submit  →  slurmate wait --session <id>  →  nft list chain inet slu
 | `[purpose:*]` 段的 `gres` 是死配置（被解析、被展示、从不参与提交） | v0.2 把整节删掉了。原先的问题以 F15 的形状活着 |
 | `job_log_subdir` 没被 `Config.__init__` 读出来 | 已修（见 U6）。线上实例仍需重新部署 |
 | `test-sessiond-logic.py` 里的 `slurm_stub()` 是死代码（77 行、0 删除） | 已接上：`mod.run_cmd = slurm_stub` 在夹具里，`run_cmd` 默认路径也走它 |
-| `cluster/run.sbatch` 里内建着 code-server / sshd 的代码 | v0.5 全部搬去 `plugins/*/job/start.sh`，改成部署时编织 |
+| `cluster/run.sbatch` 里内建着 code-server / sshd 的代码 | v0.5 全部搬去 `plugins/*/job/start.sh`，改成部署时**逐插件织一份** `<jobs>/<ULID>.sbatch` |
+| 所有插件的作业侧共处一份成品，于是一个插件的**顶层语句**在每个作业里都执行 | v0.5 拆成一插件一份，危害的来源消掉。第 22 节真的跑两个插件钉这一条 |
+| `run.sbatch` 因为**没有 `.sh` 后缀**而不在 CI 的 shell 语法扫描清单里 | v0.5 修：`git ls-files` 加上了 `'*.sbatch'`。此前那是唯一一份没被扫过的 shell |
+| 模板里那行 `#SBATCH --job-name=slurmate` 从来没有生效过（命令行覆盖 `#SBATCH`） | v0.5 删掉，作业名改由守护进程按插件定（`sj-<短名>`） |
+| `plugins/README.md` 与 `docs/ARCHITECTURE.md` 说 `job/start.sh` "可以没有"，而 `deploy.sh` 会因此**中止部署** | v0.5 让代码跟上文档：「没有作业侧」成为**合法状态**，一路说得出来（`service_kind_no_job` / `can_submit` / `--check` 的 ⚠） |
 | NFS 日志补写的水位错位（服务进程往 `LOCAL_LOG` 里插话） | v0.5 修：水位改记**行号**，服务输出写自己的文件并由 `cleanup_<短名>` 并回 |
 | 「卸载插件不影响跑着的会话」这条不变量没有用例 | **写这份文件时我一度这么以为，那是错的。** 两侧都有：客户端是 `client/test/boot.test.mjs` 里那条「卸载一个插件：立刻认不出来，但已有会话仍然能被管」（它真的调一次 `sess.stop()`），集群侧是 `test-sessiond-logic.py` 第 19.0d 节。★ **教训**：往这份文件里写"某某没有覆盖"之前，先 `grep` 一遍用例名 —— 一条错误的待办会把别人的时间花在已经做完的事上 |

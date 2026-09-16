@@ -391,6 +391,10 @@ sudo bash cluster/deploy.sh --uninstall --purge-state
   早期版本在这里无条件 `rm -f`，在一台从未部署过 Slurmate 的机器上执行会删掉同名
   的他人文件（`cluster/deploy.sh`）。
 
+  ★ `<prefix>/share/slurmate/jobs/` 里那些文件**文件名里没有 `slurmate`**（是插件的
+  ULID），所以那道闸门对它们看的是**脚本内容** —— 里面必然有 `SLURMATE_*`。
+  卸载后这个目录里留下的东西就是"内容里连一个 `slurmate` 都没有"的，那不是我们放的。
+
 ---
 
 ## 部署后仍会长期存在的运维事项
@@ -412,7 +416,8 @@ sudo bash cluster/deploy.sh --uninstall --purge-state
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。其中与部署直接相关的两条：
 
 - **`deploy.sh` 整条从来没有在真机上跑过**（本仓库的所有验证都是等价方式做的）。
-  第一次真机部署值得重点看编织后的成品行数、插件目录的属主与权限、以及卸载是否
-  清干净了。
+  第一次真机部署值得重点看三件事：`<prefix>/share/slurmate/jobs/` 下**有几份**、
+  它们与 `plugins/` 里那几个 ULID **能不能一一对上**（多一份少一份都说明编织那一
+  步出了问题）、插件目录与作业脚本的属主与权限，以及卸载是否清干净了。
 - **线上那份守护进程比仓库新**（它带着一个让 `submit` 必然失败的旧缺陷）。
   重新部署之后，**提交会第一次真正创建 Slurm 作业** —— 那是行为变化，不是回归。

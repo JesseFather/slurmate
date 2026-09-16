@@ -24,7 +24,7 @@
 | **v0.2** | **删掉「用途」这一层**。配置里不再有 `[purpose:*]`；`purposes` op 改成 `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，**全部可选，缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。 |
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
-| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **编织**进作业模板（不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**。 |
+| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
 
 ★ **v0.3 与 v0.4 从未发布、从未部署过** —— 它们是同一条路上的中间站，内容全部并进了
 v0.5。所以协议表的读法是「v0.2 → v0.5 之间隔了三个不兼容的版本」，而不是三段可以
@@ -286,17 +286,41 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 请求：`{"op":"plugins"}`
 
+> ⚠️ **这个 op 本身是 v0.3 才有的。** v0.2 的守护进程回 `2 unknown_op` —— 客户端
+> 那时**必须**按"站点没说"处理（按钮照画），而不是把它当成"本站一个插件都没有"。
+> 同一份纪律也适用于这个响应里**个别字段**的缺席，见下面 `can_submit`。
+
 成功 data：
 
 ```json
 {"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
               "name": "code-server", "title": "开发环境", "enabled": true,
+              "can_submit": true,
               "defaults": {"cpus": 2, "mem": "8G"}},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
+              "can_submit": false,
               "defaults": {"cpus": 1, "mem": "2G"}}],
  "enabled": ["code-server"]}
 ```
+
+> ★ **`can_submit` = 「现在提交得出去吗」= `enabled` **且** 本站有它的作业侧实现。**
+>
+> ★ 两个事实合成**一个**字段，是因为**服务端才是同时知道这两件事的那一方**。让客户端
+> 自己拿 `enabled` 去推，就多出一份会漂的推理 —— 而多出来的那一位（这个插件有没有
+> `job/start.sh`）客户端**根本看不见**：那一半客户端从来不读。
+>
+> 它与 `enabled` **不是重复的**，因为两句话对应两个该做的事：`enabled=false` 该说
+> 「本站没开放它，去找管理员」；`enabled=true` 而 `can_submit=false` 该说「本站装了
+> 它，但它没有作业侧实现」—— 后者**打开那个开关没有用**，得重新部署。
+>
+> ⚠️ **老守护进程不报这个字段，那不等于「否」。** 客户端必须按"站点没说"处理
+> （缺省当作可以提交），否则升级一次客户端会让所有老服务端的插件按钮同时变灰。
+> 这与 `plugins` 整个 op 缺席是同一条纪律（见本节开头那段）。
+>
+> ★ **`can_submit` 不违反"不发 `needs_pubkey` 那类字段"的原则。** 那条原则管的是
+> "这个插件**在客户端上**会做什么"（客户端自己的事）；`can_submit` 说的是**站点
+> 这一侧**的事实，客户端无从推导。
 
 > ★ **v0.5 删掉了每一项里的 `builtin`。** 它从前恒为 `true`（插件的代码随本项目一起
 > 发布），而没有任何客户端代码读它 —— 一个永远为真、谁也不看的字段，只会让下一个
@@ -392,6 +416,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `2` | `missing_service_kind` | 没给 `service_kind`，而本站也没配 `default_plugin` |
 | `2` | `bad_service_kind` | 本站**没有装**这个短名的插件（客户端太新，或名字打错） |
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
+| `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**（部署不完整，`plugins/` 里有而 `jobs/` 里没有对应那一份） |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
 | `4` | `quota_active` | 活跃会话数已达 `max_active_per_user` |
 | `4` | `quota_pending` | 未决提交数已达 `max_pending_per_user` |
@@ -401,10 +426,18 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `6` | `partitions_unknown` | 分区权限**查不到**（安全路径上宁可拒绝） |
 | `6` | `submit_failed` | `sbatch` 失败 |
 
-> ★ **这三种必须是三种错误**，不能合并成一句话：**没给而本站也没配缺省**是调用方
-> 的问题（补上 `service_kind` 即可）；**本站没装这个名字**是客户端版本太新、或者
-> 名字打错了（**该升级客户端 / 该改参数**），
-> 后者是站点的一个决定（**该找管理员**）。合并了，用户就无从知道该做哪一件。
+> ★ **`service_kind` 这一族必须是四种错误**，不能合并成一句话 —— 分开它们的**不是
+> 严重程度，是"这件事该谁去做"**：
+>
+> | kind | 谁的错 | 该怎么办 |
+> |---|---|---|
+> | `missing_service_kind` | 调用方 | 补上 `service_kind` |
+> | `bad_service_kind` | 客户端版本 / 参数 | 升级客户端，或改掉打错的名字 |
+> | `service_kind_disabled` | **站点**（管理员的开关） | 找管理员打开那个配置块 |
+> | `service_kind_no_job` | **站点**（部署不完整） | 找管理员**重新部署** |
+>
+> 后两条**都是"找管理员"，但管理员要做的事完全不同** —— 后者去翻配置开关是白费
+> 功夫，缺的是 `jobs/<ULID>.sbatch`。合并了，用户就只能一个个试。
 
 > ★ 客户端**不填**默认资源。省略一个字段是在说「用你的默认」，不是「我要 0 核」——
 > 服务端必须自己填默认值并做上限钳制，否则一个改过的客户端省略字段就能要到整机。

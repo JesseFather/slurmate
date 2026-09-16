@@ -402,7 +402,7 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `code_server_bin` / `sshd_bin` | 各自的插件块里的 `bin` | 它们是**插件的**路径，不是站点事实 |
 | `auth_mode` | `[plugin:code-server]` 块的 `auth_mode` | 同上：它是 code-server 的认证方式 |
 | 默认资源（曾经是 `DEFAULT_CPUS`/`DEFAULT_MEM` 两个常量） | 每个插件块的 `default_cpus`/`default_mem` | 在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事 —— 它是**插件的策略** |
-| `job_script` | `default_job_script()` | 从守护进程**自身的安装位置**推导 |
+| `job_script` / `jobs_dir` | `default_jobs_dir()` | 从守护进程**自身的安装位置**推导（`<prefix>/share/slurmate/jobs`）。里面是**每个插件一份** `<ULID>.sbatch` |
 | `job_log_subdir` | `JOB_LOG_SUBDIR` | 与 `run.sbatch` 的约定，不是站点参数 |
 | `[purpose:*]` 整节 | 已删除 | 见下 |
 
@@ -467,7 +467,6 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 | `port_end <= 65535` | 端口区间上界越界 |
 | `job_missing_confirm_ticks >= 1` | 连续确认机制被关掉 |
 | `suspect_after < orphan_after` | 闪断窗口与孤儿判定重合 |
-| 作业脚本存在（由安装位置推导） | 作业无法提交 |
 | `cluster_cidr` 四项校验全过 | 见上，全部 fail-open |
 | **五个** Slurm 命令都能解析到 | 无法提交、查状态或查权限 |
 | 每个插件块里的键都认得（块名、块内键） | 拼错的键/块名会被静默忽略 |
@@ -475,6 +474,13 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 | 至少有一个插件是开着的 | 客户端上一个按钮都不会有 |
 | `[plugin:code-server] auth_mode ∈ {password, none}` | 无法决定 code-server 启动参数 |
 | 数据库表结构是本版的 | 旧库的 `NOT NULL purpose` 列会让每次提交都以内部错误失败 |
+
+> 📌 **这张表里没有「作业脚本存在」那一条**，虽然它在 v0.5 之前有过。
+> 作业脚本现在是**一个插件一份**（`<prefix>/share/slurmate/jobs/<ULID>.sbatch`），
+> 而一个插件**没有作业侧实现是合法状态**（装得上、看得见、提交不了）。
+> `validate()` 没有警告通道，往里加一条就是「一个这样的插件让整个站点起不来」——
+> 那连停掉正在跑的会话都做不到。它改走和 `plugin_problems` 同一条路：
+> `--check` 打印 `⚠`、启动时记一条 `log.error`，**但不拦启动**。
 
 此外 `main()` 还会做一次 **`cluster_cidr` × `NodeAddr` 交叉核对**，
 `--check` 与守护进程启动**都会**因此拒绝（前者正是 systemd 的 `ExecStartPre`）。
@@ -498,7 +504,8 @@ rm -f /var/lib/slurmate-session/claims.db
 
 ### `--check` 还会打印
 
-端口池、socket、数据库、作业脚本、集群网段、闪断/孤儿阈值、续期设置、认证方式、
+端口池、socket、数据库、作业脚本目录（以及**逐个插件**解析到 `<ULID>.sbatch` 的哪一份）、
+集群网段、闪断/孤儿阈值、续期设置、认证方式、
 **五个外部命令各自解析到的路径**、code-server 的路径与它的来源、分区表（含默认分区与
 `MaxTime`）、`AccountingStorageEnforce` 是否含 `associations`（决定 `sbatch` 是否必须
 带 `-A`）、nft 表是否存在，以及 `cluster_cidr` 交叉核对的结果。

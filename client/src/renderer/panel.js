@@ -750,10 +750,11 @@ function startRename(l, nm) {
  *   求交决定（见 index.js 的 pluginsView）。写死一个「开始开发」按钮的话，
  *   「站点卸载一个插件」在界面上就变成了"点了报错"，而不是"按钮不见了"。
  *
- * ★ 三个条件必须**分开显示**，因为它们要做的事不同：
- *     站点没开 → 找管理员       本机关了 → 自己打开就行
- *     本机没有 → 升级客户端     池里撞车 → 删掉多余的那一份
- *   糊成一句"不可用"，用户就只能去猜。
+ * ★ 起不来的每一条原因都必须**分开显示**，因为它们要做的事不同：
+ *     站点没开 → 找管理员          本机关了 → 自己打开就行
+ *     站点没装作业侧 → 找管理员**重新部署**（开那个开关没用）
+ *     本机没有 → 升级客户端        池里撞车 → 删掉多余的那一份
+ *   糊成一句"不可用"，用户就只能去猜。那四句话在 WHY_NOT_RUNNABLE 里。
  */
 function renderPlugins(pv) {
   const box = $('plugin-blocks');
@@ -866,6 +867,38 @@ async function rescanPlugins() {
   else notice('error', (r && r.error) || '重新扫描失败');
 }
 
+/**
+ * 「这个插件起不来」的四条原因 —— 一个原因一句话，写在**一起**。
+ *
+ * ★ 四句话必须互不相同：分开它们的是"这件事该谁去做"。合并成一句「这个插件用不了」
+ *   的话，用户就只能一个个试 —— 而其中两条**都要找管理员**，但**是两件不同的事**
+ *   （一个是开关没开，管理员开一下就好；一个是本站部署没跟上，管理员去开开关没用）。
+ *   `test/renderer.test.mjs` 钉着"四句互不相同、且都不是空话"这一条。
+ *
+ * `noJob` 里的 `%s` 是插件名（用 `replace` 而不是模板串，是为了让那四句话在这个
+ * 字面量里各自完整 —— 检查才做得成）。
+ */
+const WHY_NOT_RUNNABLE = {
+  siteUnknown: '这个守护进程不通报插件清单，所以客户端不知道站点开没开它。',
+  siteOff: '本站没有开放这个插件 —— 要开的话得找管理员。',
+  localOff: '你在本机把它关掉了 —— 勾上左边那个开关就能用。',
+  noJob: '本站装了「%s」，但它没有作业侧实现 —— 提交不了，得找管理员重新部署。',
+};
+
+/**
+ * 这个插件为什么起不来。四选一，见 WHY_NOT_RUNNABLE。
+ *
+ * `runnable` 是三个条件的求交（站点开没开 / 本机关没关 / 站点有没有作业侧），
+ * 分支顺序与之对应 —— **先说的那个是"最外层"的原因**，也正是用户最该先去解决的那件。
+ */
+function whyNotRunnable(p) {
+  if (!p.siteEnabled) {
+    return p.siteKnown ? WHY_NOT_RUNNABLE.siteOff : WHY_NOT_RUNNABLE.siteUnknown;
+  }
+  if (p.locallyEnabled === false) return WHY_NOT_RUNNABLE.localOff;
+  return WHY_NOT_RUNNABLE.noJob.replace('%s', p.title);
+}
+
 function pluginBlock(p) {
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
@@ -934,11 +967,7 @@ function pluginBlock(p) {
 
   // ── 起不来的原因：一句话说清该做什么 ──
   if (!p.runnable) {
-    const why = !p.siteEnabled
-      ? (p.siteKnown ? '本站没有开放这个插件 —— 要开的话得找管理员。'
-        : '这个守护进程不通报插件清单，所以客户端不知道站点开没开它。')
-      : '你在本机把它关掉了 —— 勾上左边那个开关就能用。';
-    d.append(el('p', 'why', why));
+    d.append(el('p', 'why', whyNotRunnable(p)));
   } else if (p.siteEnabled && p.siteVersion && p.siteVersion !== p.version) {
     // ★ 两半代码是配套的，版本对不上要说在前面。不说的话用户看到的是
     //   "作业起来了但界面一片白"，而根因一个字都不在里面。

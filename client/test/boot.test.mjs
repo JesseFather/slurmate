@@ -1322,6 +1322,83 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
   assert.equal(bad.ok, false, '认不出的 id 要被拒绝，而不是静静写进配置');
 });
 
+test('★ 站点装了它但没有作业侧实现：看得见、开着的、就是提交不了', async (t) => {
+  // 这一格与上一条**不是同一件事**：那条是管理员的开关没开（开一下就好），
+  // 这条是本站的部署没跟上（管理员去开开关**没有用**，得重新跑 deploy.sh）。
+  // 合成一格的话，其中一句话就永远走不到，而用户会照着错的那句去行动。
+  t.after(async () => {
+    Module._load = origLoad;
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  });
+  await invoke('app:debug', 'reset');
+  await invoke('app:partitions');
+
+  let r = await invoke('app:partitions');
+  let sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+  assert.equal(sshd.canSubmit, true, '正常站点上装了的插件就是提交得出去的');
+
+  await invoke('app:debug', 'site-plugin-no-job', 'sshd');
+  r = await invoke('app:partitions');
+  sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+
+  assert.equal(sshd.siteKnown, true, '站点是答话了的');
+  assert.equal(sshd.siteEnabled, true, '★ 站点**开着**它 —— 这一点必须没变');
+  assert.equal(sshd.locallyEnabled, true, '★ 本机也开着它 —— 这一点也必须没变');
+  assert.equal(sshd.canSubmit, false, '站点说：装了，但没有作业侧实现');
+  assert.equal(sshd.runnable, false, '所以按钮是灰的');
+  // 仍然要列出来：把它藏掉，用户看到的是"按钮凭空少了一个"。
+  assert.ok(sshd, '提交不了的插件仍然要在表里，只是不能起');
+});
+
+test('★ 三态纪律：老守护进程不报 can_submit ⇒ 缺席，不是"否"', async (t) => {
+  // 两种"缺席"都要能过：
+  //   (a) 老守护进程**根本没报这个字段**（op 在，字段不在）；
+  //   (b) 老守护进程**连这个 op 都没有**（客户端连站点清单都拿不到）。
+  //
+  // ★ 反过来算（缺席即否）的话，升级一次客户端就会让所有老服务端的插件按钮
+  //   在某一刻同时变灰 —— 而用户完全不知道为什么，服务端那边一个字都没变。
+  t.after(async () => {
+    Module._load = origLoad;
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  });
+  await invoke('app:debug', 'reset');
+  await invoke('app:partitions');
+
+  const idx = require('../src/main/index.js');
+  const backend = idx._test.getBackend();
+
+  // (a) op 在、字段不在：把 can_submit 从**每一份**响应里抹掉
+  const origSite = backend._sitePlugins.bind(backend);
+  backend._sitePlugins = () => origSite().map((p) => {
+    const { can_submit: _drop, ...rest } = p;
+    return rest;
+  });
+  try {
+    const r = await invoke('app:partitions');
+    const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+    assert.equal(sshd.siteKnown, true, '站点清单本身是拿得到的');
+    assert.equal(sshd.canSubmit, true, '★ 字段缺席 ⇒ 按"站点没说"算可以提交');
+    assert.equal(sshd.runnable, true);
+  } finally {
+    backend._sitePlugins = origSite;
+  }
+
+  // (b) 整个 op 都没有
+  await invoke('app:debug', 'old-daemon');
+  try {
+    const r = await invoke('app:partitions');
+    const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+    assert.equal(sshd.siteKnown, false, '老守护进程连清单都报不出来');
+    assert.equal(sshd.canSubmit, true, '★ 拿不到站点清单 ⇒ 不能因此判它提交不了');
+    assert.equal(sshd.runnable, true, '老服务端的用户一个按钮都不能少');
+  } finally {
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  }
+});
+
 test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
   t.after(() => { Module._load = origLoad; });
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
