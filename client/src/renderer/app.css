@@ -232,6 +232,26 @@ p.alarm {
                user-select: none; }
 .plug-toggle input { margin: 0; cursor: pointer; }
 .plug .why { font-size: 12px; color: var(--warn); margin: 0 0 10px; }
+/* 来源标签（「站点分发 + 本机安装」）。**只有真的有两个来源时才贴** —— 判定在
+   主进程，见 index.js 的 sourceLabelOf。 */
+.plug-src {
+  font-size: 11px; color: var(--fg-dim);
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 5px;
+}
+
+/* ── 待同意 ──
+   独立的一块，不是"起不来"的第五档：那四句话说的是"这个插件**起不来**的原因"，
+   而"还没同意"是"**还没到手**"。用警示色，因为它等的是一个**安全决定**。 */
+.plug-consent { border-left: 3px solid var(--warn); }
+.plug-consent-item {
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px;
+}
+.plug-consent-item:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+
+/* 站点池里的版本 → 哪些站点在要它。这是那一栏唯一值得显示的东西：它解释了
+   「为什么这台机器上会有两个版本」。 */
+.plug-vers { margin: 4px 0 8px; padding-left: 18px; font-size: 12px; color: var(--fg-dim); }
+.plug-vers li { margin: 2px 0; }
 
 /* 插件池的问题（撞车 / 坏清单 / 引擎不兼容）与「站点有而本机没有」。
    前者是**错误**（那个插件没被加载），后者是**提示**（该升级客户端了）——

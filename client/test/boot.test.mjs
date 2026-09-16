@@ -1226,11 +1226,15 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     assert.ok(pv.poolDir && pv.poolDir.length > 0, '要给出池在哪 —— 那是"我该往哪放"的答案');
     assert.ok(pv.errors.length === 0, '池空不是错误');
 
-    // ★ 演示站点**照实报告池里有什么**（见 backend-fake 的 sitePlugins），所以
-    //   池空时站点也就什么都没报 —— `missing` 因此是空的，这是诚实的。
-    //   "站点有而本机没有"那条路要靠 debugAddSitePlugin 显式造出来，见下面那段：
-    //   那才是界面上"你还没装"与"版本对不上"要分岔的地方。
-    assert.deepEqual(pv.missing, [], '演示站点报的就是池里的东西，池空则它也没得报');
+    // ★ 站点分发接上来之后，这一条**变强了**：演示站点报的不再是"本机池里有什么"
+    //   （那样「站点有而本机没有」在演示里永远走不到），而是仓库里那两个**真插件**
+    //   （见 backend-fake 的 _siteIndex）。于是池空 + 本机没有它们 ⇒ `missing`
+    //   里就是它们，而且每一份都**带着文件清单**（`distributed: true`）——
+    //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
+    assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['code-server', 'sshd'],
+      '站点照实报了它要分发的两个插件，而本机一个都没有');
+    assert.ok(pv.missing.every((m) => m.distributed === true),
+      `每一份都要标出"站点会发它"：${JSON.stringify(pv.missing)}`);
 
     // ★ 一个插件都没有时，提交必须被**明确拦住**并给出路，而不是起一个
     //   看起来起来了但连不上的作业，也不是一句"本版支持：（一个都没有）"。
@@ -1238,10 +1242,167 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     assert.equal(started.ok, false, '没有插件就起不了会话 —— 必须在提交前拦住');
     const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
       .map((n) => n.text).join('\n');
-    assert.match(notices, /还没有安装任何插件/, `要说清是"还没装"：${notices}`);
-    assert.match(notices, new RegExp(pv.poolDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-      '要告诉用户往哪放');
+    assert.match(notices, /还没有装上任何插件/, `要说清是"还没装"：${notices}`);
+    // ★ 出路**取决于站点说了什么**：站点会分发 ⇒ 说"去同步"；不会 ⇒ 说"把目录放进
+    //   池里、并把开发者模式打开"。说错方向的后果是用户去干一件没有用的事。
+    assert.match(notices, /本站会分发插件/, `站点会分发时要说去同步：${notices}`);
   });
+});
+
+// ── ★ 站点分发：端到端走一遍（下载 → 同意 → 换入 → 加载）────────────────────
+
+test('★★ 站点分发端到端：下来了但**没同意就不加载**，同意之后才装上', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    // ★ 收尾必须把**站点池**也清掉：这台机器上的其余用例共用同一个 userData，
+    //   留下一个装好的站点插件会让它们的 `missing` / `installedCount` 断言
+    //   因为错误的理由通过或失败。同一条规矩见文件头的池设置那一段。
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+    idx._test.getBackend().debugReset();
+  });
+  await invoke('app:debug', 'reset');
+  await withPool([], async () => {
+    // 池子空、开发者模式在演示下恒开 ⇒ 本机一个插件都没有，而站点报了两个
+    // **真文件**（仓库里的 plugins/，见 backend-fake 的 _siteIndex）。
+    const r = await invoke('app:syncPlugins');
+    assert.equal(r.ok, true, JSON.stringify(r));
+
+    const siteSync = idx._test.getSiteSync();
+    assert.equal(siteSync.supported, true, '演示站点会分发插件');
+    const pending = idx._test.getPendingConsent();
+    assert.equal(pending.length, 2, `站点那两个插件都要先过同意闸：${JSON.stringify(r.plugins.consent)}`);
+
+    // ★ 换入**还没发生** —— 站点池里一个版本都不该有。
+    const sitePool = idx._test.getSitePoolDir();
+    for (const p of pending) {
+      assert.equal(fs.existsSync(path.join(sitePool, p.id, p.version)), false,
+        '★ 没同意的插件不许进站点池 —— 同意闸的落点在"换入之前"');
+    }
+    // ★ 而且它**没有被加载**（同意闸的全部意义）：池子空着，而它还没换入，
+    //   所以注册表里根本查不到它。
+    for (const p of pending) {
+      assert.equal(idx._test.getRegistry().get(p.id, p.version), null,
+        '★ 没同意的插件不许出现在注册表里 —— 出现了就意味着代码已经被加载过');
+    }
+
+    // ── 点一下同意 ──
+    const first = pending[0];
+    const c = await invoke('app:consentPlugin', first.id, first.version);
+    assert.equal(c.ok, true, `同意应当成功：${JSON.stringify(c)}`);
+    const landed = idx._test.getRegistry().get(first.id, first.version);
+    assert.ok(landed, '同意之后要真的装上');
+    assert.notEqual(landed.active, false, '而且要是**带钩子**的那一份');
+    assert.equal(fs.existsSync(path.join(sitePool, first.id, first.version)), true,
+      '同意之后它才进站点池');
+    // ★ 台账里要有它，而且存的是**全长摘要**（64 位）—— 拿 16 位当键就是个碰撞面。
+    const led = idx._test.getCfg().trustedPlugins[`${first.id}@${first.version}`];
+    assert.ok(led, '同意要写进台账');
+    assert.equal(led.digest.length, 64, '★ 台账里的摘要必须是全长的，截断只留给显示');
+
+    // ── 不同意的那一个：暂存里那一份要被删掉，站点那边不受影响 ──
+    const second = pending[1];
+    const rej = await invoke('app:rejectPlugin', second.id, second.version);
+    assert.equal(rej.ok, true);
+    assert.equal(fs.existsSync(first.stagedDir), false, '同意过的暂存目录要收掉');
+    assert.equal(idx._test.getPendingConsent().length, 0, '两个都处理完了');
+    assert.equal(idx._test.getRegistry().get(second.id, second.version), null,
+      '不同意的那个不许装上');
+  });
+});
+
+test('★ F18 回归：改了 client/ 下的文件而不动 plugin.json，摘要必须变', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  // ★ 改之前这条会红：摘要只算了「清单 + client/index.js」两个文件，于是
+  //   `client/sshconfig.js` 被换掉、摘要纹丝不动 —— 而它是**真的代码**。
+  const P = require('../src/main/plugins/index.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-f18-'));
+  writePlugin(root, 'a', { name: 'a', displayName: 'A' }, 'module.exports = {};\n');
+  fs.writeFileSync(path.join(root, 'a', 'client', 'sshconfig.js'), '// 第一版\n');
+  const d1 = P.digestOf(P.readPluginFiles(path.join(root, 'a')));
+  fs.writeFileSync(path.join(root, 'a', 'client', 'sshconfig.js'), '// 第二版\n');
+  const d2 = P.digestOf(P.readPluginFiles(path.join(root, 'a')));
+  assert.notEqual(d1, d2, '★ 只改 client/ 下的一个文件，摘要也必须变（F18）');
+
+  // ★ 而"摘要相同 ⇒ 树相同"的另一半：一条符号链接与一个内容恰好等于链接目标串
+  //   的普通文件，**摘要必须不同**（前者加载 y.js，后者导出一个字符串）。
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sym-'));
+  const a = path.join(root2, 'a'); const b = path.join(root2, 'b');
+  for (const d of [a, b]) {
+    fs.mkdirSync(path.join(d, 'client'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'plugin.json'), '{"id":"x"}');
+  }
+  fs.writeFileSync(path.join(a, 'client', 'y.js'), 'module.exports = 1;\n');
+  fs.symlinkSync('../y.js', path.join(a, 'client', 'x.js'));
+  fs.writeFileSync(path.join(b, 'client', 'y.js'), 'module.exports = 1;\n');
+  fs.writeFileSync(path.join(b, 'client', 'x.js'), '../y.js');
+  assert.notEqual(P.digestOf(P.readPluginFiles(a)), P.digestOf(P.readPluginFiles(b)),
+    '★ 链接与"内容等于目标串的普通文件"必须是不同的树');
+
+  // 空目录也要进摘要，否则"只差一个空目录"的两棵树摘要相同
+  fs.mkdirSync(path.join(b, 'empty'));
+  assert.notEqual(P.digestOf(P.readPluginFiles(a)), P.digestOf(P.readPluginFiles(b)));
+
+  for (const d of [root, root2]) fs.rmSync(d, { recursive: true, force: true });
+});
+
+test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', async (t) => {
+  t.after(async () => {
+    Module._load = origLoad;
+    const idx = require('../src/main/index.js');
+    idx._test.getBackend().debugReset();
+  });
+  const idx = require('../src/main/index.js');
+  await invoke('app:debug', 'reset');
+  await withPool([], async () => {
+    // ★ **先把站点池清空**。不清的话，前面那条端到端用例已经同意并装上了
+    //   code-server，`registry.get()` 查得到它 —— 于是这条用例会**因为错误的理由**
+    //   通过（"本机已经有它"而不是"站点关掉的不算数"），变异验证 M12 就是这样
+    //   漏过去的。
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+
+    const r0 = await invoke('app:partitions');
+    assert.ok(r0.plugins.missing.map((m) => m.name).includes('code-server'),
+      '前置：清空之后站点开着、本机没有 ⇒ 它必须在 missing 里');
+
+    // 站点把 code-server 关掉。`op_plugins` 按协议**必须报它**（带 enabled:false），
+    // 而 `missing` 以前不过滤 —— 于是管理员关掉一个插件，界面上会**永远**挂着
+    // 一句"站点有而本机没有 ⇒ 升级客户端"。
+    idx._test.getBackend().debugDisableSitePlugin('code-server');
+    const r = await invoke('app:partitions');
+    const names = r.plugins.missing.map((m) => m.name);
+    assert.equal(names.includes('code-server'), false,
+      `★ 站点关掉的插件不该出现在 missing 里：${JSON.stringify(names)}`);
+    assert.ok(names.includes('sshd'), '而站点开着、本机没有的那个仍然要在');
+  });
+});
+
+test('★ 来源标签：只有一个来源时不贴，有两个时才贴', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const P = require('../src/main/plugins/index.js');
+  const id = mintId();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src-'));
+  writePlugin(root, 'x', { id, name: 'onlysite' }, 'module.exports = {};\n');
+  const one = new P.Registry([{ dir: root, source: 'site' }]);
+  assert.equal(one.list()[0].sources.length, 1, '前置');
+  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src2-'));
+  writePlugin(pool, id, { id, name: 'onlysite' }, 'module.exports = {};\n');
+  const two = new P.Registry([{ dir: root, source: 'site' }, { dir: pool, source: 'pool' }]);
+  assert.deepEqual(two.list()[0].sources, ['pool', 'site'], '前置：两个来源合并成一条');
+
+  const r = await invoke('app:partitions');
+  // 单来源的那些：一条标签都不该有
+  const single = r.plugins.plugins.filter((p) => (p.sources || []).length === 1);
+  assert.ok(single.length > 0, '前置：演示里至少有一个单来源的插件');
+  for (const p of single) {
+    assert.equal(p.sourceLabel, null,
+      '★ 只有一个来源时标签什么也没说，还让人以为看到的是两条不同的来路');
+  }
+  assert.ok(require('../src/main/index.js'), '（idx 已加载）');
+  for (const d of [root, pool]) fs.rmSync(d, { recursive: true, force: true });
 });
 
 // ── ★ 插件增减不许把客户端带崩（这次改动的验收标准）────────────────────────

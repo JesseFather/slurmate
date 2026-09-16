@@ -30,8 +30,12 @@
  */
 
 const net = require('net');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const { Backend, KIND } = require('./backend.js');
 const { createDemoWebService } = require('./demo-server.js');
+const pluginFiles = require('./plugins/index.js');
 
 // 演示里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
@@ -51,6 +55,18 @@ const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 //   现在两边是同构的。
 //
 //   `_sitePluginsOf` 由 index.js 注入（它才知道池里有什么），默认空。
+//
+// ★ **分发接上来之后，演示站点多了一个独立的来源**：仓库里的 `<repo>/plugins/`。
+//   这不是"为了演示好看"—— 它解决的是上一段那个注释自己留下的死角：站点报的就是
+//   本机池里那些，于是「站点有而本机没有」这条**最重要的**路径在演示里永远走不到，
+//   而演示模式恰恰是这个项目里唯一能造出那些状态的地方。
+//
+//   现在：站点从仓库里读**真文件**（真的 sha256、真的字节），客户端真的走一遍
+//   下载 → 暂存校验 → 同意闸 → 换入。池空 + 开发者模式关着的时候，界面上是
+//   「本站要给你两个插件，但都还没经过你的同意」—— 那是一条真话。
+//
+//   打包之后没有仓库目录，`_sitePluginDir` 返回 null，站点回落到只报池里那些
+//   （`files` 缺席 ⇒ 客户端按"这个站点不分发插件"处理）。这一条要写在界面上。
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -77,6 +93,16 @@ const DEMO_SSHD_PORT = 55901;
  * 演示模式假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的 sshd 也是假的。
  */
 const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
+
+/** 演示站点自称的单文件上限。**故意与守护进程那个默认值一样** —— 免得演示里
+ *  一个 200 KiB 的文件在真机上通不过。故意报得**比客户端硬上限宽松**，好让
+ *  "服务端只能收紧、客户端取更严的那个"这条在演示里也走得到。 */
+const DEMO_FILE_BYTES = 512 * 1024;
+
+/** 一份字节的 sha256。演示后端自己也算一遍，不看清单里那个自称的值。 */
+function sha256(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
 
 class FakeBackend extends Backend {
   /**
@@ -113,6 +139,18 @@ class FakeBackend extends Backend {
      * 返回 `{id, name, version, displayName}` 的数组。
      */
     this._sitePluginsOf = typeof opts.sitePlugins === 'function' ? opts.sitePlugins : () => [];
+    /**
+     * 演示站点的**分发源**：仓库里的 `plugins/` 目录。
+     *
+     * 传函数而不是路径 —— 打包之后那个目录不存在，而"不存在"必须是**每次现算**
+     * 的结果（从源码跑与从安装包跑是两个事实）。
+     */
+    this._sitePluginDir = typeof opts.sitePluginDir === 'function'
+      ? opts.sitePluginDir : () => null;
+    /** 调试用：让站点报一个**超过单文件上限**的文件。/ 让某个文件报错。 */
+    this._bloatPlugin = null;
+    /** 调试用：让站点在 `plugin_file` 上回 rate_limited 若干次。 */
+    this._rateLimitBurst = 0;
     /** 演示站点里被"关掉"的插件（按短名）。原本是直接改那个写死的数组。 */
     this._siteDisabled = new Set();
     /**
@@ -126,6 +164,8 @@ class FakeBackend extends Backend {
     this._siteNoJob = new Set();
     /** 演示「守护进程太旧，根本没有 plugins 这个 op」。见 _dispatch。 */
     this._noPluginsOp = false;
+    /** 演示「有 plugins 这个 op，但不会发文件」（v0.5 的守护进程）。 */
+    this._noDistribute = false;
   }
 
   /**
@@ -134,12 +174,74 @@ class FakeBackend extends Backend {
    * ★ 每次现算，不缓存：用户可以在演示进行中装/卸插件，而站点"看到"的东西
    *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
    */
+  /**
+   * 演示站点的**分发索引**：`(id@版本) → {dir, files}`，来自仓库里的 `plugins/`。
+   *
+   * ★ 建一次就**不再失效** —— 与守护进程侧那个"启动快照"索引逐字同一个语义
+   *   （见 `cluster/slurmate-sessiond` 的 `plugin_index`）。这样演示模式也能演
+   *   "管理员就地换了文件"那件事：清单与文件永远描述**同一棵树**。
+   */
+  _siteIndex() {
+    if (this._indexCache) return this._indexCache;
+    const cache = new Map();
+    const base = this._sitePluginDir();
+    if (base) {
+      let names = [];
+      try { names = fs.readdirSync(base).sort(); } catch { names = []; }
+      for (const n of names) {
+        const dir = path.join(base, n);
+        try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
+        let mf;
+        try {
+          mf = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf8'));
+        } catch { continue; }                       // 坏清单：站点不报它（与守护进程一致）
+        if (!mf || typeof mf.id !== 'string' || typeof mf.version !== 'string') continue;
+        let files;
+        try {
+          // 只报**普通文件**：符号链接与空目录不进清单（客户端没法原样重建一个链接，
+          // 而清单只描述文件）。这与守护进程的 `plugin_file_index` 是同一个口径。
+          files = pluginFiles.readPluginFiles(dir)
+            .filter((f) => f.kind === 'f')
+            .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
+        } catch { continue; }
+        const c = (mf.contributes && typeof mf.contributes === 'object') ? mf.contributes : {};
+        cache.set(`${mf.id}@${mf.version}`, {
+          dir, files, name: mf.name, title: mf.displayName || mf.name,
+          // 内部用，**不进 `plugins` 响应**（见下面 case 'plugins' 的逐字段挑）。
+          surface: c.surface || null,
+          submitPubkey: c.submitPubkey === true,
+          login: c.login || null,
+        });
+      }
+    }
+    this._indexCache = cache;
+    return cache;
+  }
+
   _sitePlugins() {
-    const installed = this._sitePluginsOf().map((p) => ({
+    // ── 分发源：仓库里的真文件 ──
+    const distributed = [...this._siteIndex().entries()].map(([key, v]) => ({
+      id: key.slice(0, key.lastIndexOf('@')),
+      version: key.slice(key.lastIndexOf('@') + 1),
+      name: v.name,
+      title: v.title,
+      files: this._bloatPlugin === key
+        ? [...v.files, { path: 'bloat.bin', size: 999999, sha256: 'f'.repeat(64) }]
+        : v.files,
+      enabled: !this._siteDisabled.has(v.name),
+      can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name),
+      surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
+    }));
+    // ── 池里那些**没被仓库覆盖**的（打包版没有仓库目录，演示池就是唯一来源）──
+    const known = new Set(distributed.map((p) => p.id));
+    const installed = this._sitePluginsOf().filter((p) => !known.has(p.id)).map((p) => ({
       id: p.id,
       name: p.name,
       version: p.version,
       title: p.displayName || p.name,
+      // ★ 没有 `files` = **这个站点不分发这一份**。客户端据此把它算进
+      //   「站点有而本机没有」，而不是当成一次下载失败。
+      files: null,
       enabled: !this._siteDisabled.has(p.name),
       // ★ 与真实守护进程逐字同一个合成方式：`enabled and needs_job`。**服务端才是
       //   同时知道这两件事的那一方** —— 让客户端自己拿 enabled 去推，就多出一份
@@ -152,7 +254,7 @@ class FakeBackend extends Backend {
       submitPubkey: Boolean(p.submitPubkey),
       login: p.login || null,
     }));
-    return [...installed, ...this._extraSitePlugins];
+    return [...distributed, ...installed, ...this._extraSitePlugins];
   }
 
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
@@ -220,15 +322,67 @@ class FakeBackend extends Backend {
       //
       // 老守护进程**根本没有这个 op**，客户端拿到的是 unknown_op。这一态必须能造：
       // 那条路上**每一个**字段都是缺的，而"缺"必须与"否"分得开。
-      case 'plugins':
+      case 'plugins': {
         if (this._noPluginsOp) return err(2, 'unknown_op', op);
+        // ── 演示站点的**分发能力** ──
+        //
+        // ★ 与守护进程逐字同一条纪律：`limits` 在 = 这个站点会发文件；不在 = 老
+        //   守护进程。客户端**只看这个**，不看"这次下没下下来"。
+        //   `debugOldDaemon` 走的是上面那条 `unknown_op`，而这一条是更细的一档：
+        //   有 `plugins` 却没有 `limits`（v0.5 的守护进程）。
+        if (this._noDistribute) {
+          return ok({
+            plugins: this._sitePlugins().map((p) => ({
+              id: p.id, name: p.name, version: p.version, title: p.title,
+              enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
+            })),
+            enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
+          });
+        }
         return ok({
           plugins: this._sitePlugins().map((p) => ({
             id: p.id, name: p.name, version: p.version, title: p.title,
             enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
+            // `files: null` 的那几条**不带这个字段**（见 _sitePlugins 的说明）。
+            ...(Array.isArray(p.files) ? { files: p.files } : {}),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
+          limits: { file_bytes: DEMO_FILE_BYTES, total_bytes: 1 << 20, max_files: 256 },
         });
+      }
+      // 一份一份取。**与守护进程同一个口径**：`path` 只是那张索引表的键，
+      // 它绝不参与拼路径 —— 于是"路径穿越"这个词从等式里消失，而不是被过滤掉。
+      case 'plugin_file': {
+        if (this._noDistribute || this._noPluginsOp) return err(2, 'unknown_op', op);
+        if (this._rateLimitBurst > 0) {
+          this._rateLimitBurst -= 1;
+          return err(7, 'rate_limited', '演示模式：故意打满限流桶');
+        }
+        const key = `${req.id}@${req.version}`;
+        const entry = this._siteIndex().get(key);
+        if (!entry) return err(3, 'plugin_unknown', `演示站点没有 ${key} 这个插件`);
+        const hit = entry.files.find((f) => f.path === req.path);
+        if (!hit) return err(3, 'plugin_file_unknown', String(req.path));
+        if (hit.size > DEMO_FILE_BYTES) {
+          return err(4, 'plugin_file_too_large',
+            `${hit.path} 有 ${hit.size} 字节，超过本站的单文件上限 ${DEMO_FILE_BYTES} 字节。`);
+        }
+        let data;
+        try {
+          data = fs.readFileSync(path.join(entry.dir, ...hit.path.split('/')));
+        } catch (e) {
+          return err(3, 'plugin_file_unknown', hit.path);
+        }
+        // ★ 索引是**启动快照**（见 _siteIndex），所以"管理员就地换了文件"在这里
+        //   有了名字。把对不上的字节发出去就等于谎报 —— 客户端拿到的内容会与
+        //   清单里那份声明永远不一致，而症状是一句说不清的"校验失败"。
+        if (data.length !== hit.size || sha256(data) !== hit.sha256) {
+          return err(9, 'plugin_file_changed',
+            `${hit.path} 在演示站点启动之后被换过。请重新同步一次。`);
+        }
+        return ok({ path: hit.path, size: hit.size, sha256: hit.sha256,
+                    data: data.toString('base64') });
+      }
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
       case 'list':       return this._list();
@@ -298,6 +452,32 @@ class FakeBackend extends Backend {
   }
   /** 让演示站点装扮成**不认识 `plugins` 这个 op** 的老守护进程。 */
   debugOldDaemon(on = true) { this._noPluginsOp = on; }
+
+  /**
+   * 让演示站点装扮成「有 `plugins`、但没有 `limits`」的那一档 —— 文件分发是
+   * v0.6 才有的能力。
+   *
+   * ★ 与 `debugOldDaemon` 是**两件事**，而客户端对它们的处理**必须一样**
+   *   （都走回退），却又是两条不同的代码路径（一个 `unknown_op`，一个字段缺席）。
+   *   只造其中一条的话，另一条上的退化没人看得见。
+   */
+  debugOldDistribute(on = true) { this._noDistribute = on; }
+
+  /** 让演示站点报一个**超过单文件上限**的文件（造"这份装不上"）。 */
+  debugBloatPlugin(key = null) {
+    this._bloatPlugin = key || [...this._siteIndex().keys()][0] || null;
+    return this._bloatPlugin;
+  }
+
+  /** 让接下来的 N 次 `plugin_file` 回 `rate_limited` —— 造限流。 */
+  debugRateLimit(n = 3) { this._rateLimitBurst = n; }
+
+  // ★ 这里**没有**"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
+  //   原因很具体：演示站点的分发源是**仓库里的 `plugins/`** —— 真文件。往那里
+  //   写一个字节等于改用户的仓库，而那是一个调试开关绝不该有的副作用。
+  //   那条路径（`9 plugin_file_changed`）由集群侧自己的用例覆盖，见
+  //   `cluster/test-sessiond-logic.py` 的 19.11。
+
   debugReset() {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
@@ -305,6 +485,9 @@ class FakeBackend extends Backend {
     this._siteDisabled.clear();
     this._siteNoJob.clear();
     this._noPluginsOp = false;
+    this._noDistribute = false;
+    this._bloatPlugin = null;
+    this._rateLimitBurst = 0;
   }
 
   // ── op 实现 ─────────────────────────────────────────────────────────────

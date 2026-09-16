@@ -49,6 +49,10 @@ const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
 const plugins = require('./plugins/index.js');
 const pluginInstall = require('./plugins/install.js');
+const sitePluginSync = require('./site-plugins.js');
+// ★ 从模块上摘下来，而不是在函数里写 `plugins.shortDigest` —— `pluginsView()` 里
+//   有一个同名的局部数组（那些插件记录），函数内写 `plugins.` 会指到它身上。
+const shortDigest = plugins.shortDigest;
 
 const DEMO_FLAG = process.argv.includes('--demo');
 
@@ -73,6 +77,30 @@ let partitions = [];
  */
 let sitePlugins = null;
 let quitting = false;
+
+/**
+ * 上一次站点对账的结果。`null` = 还没同步过。
+ *
+ * ★ 它是**三态**的载体，别把它压成一个布尔：`supported: false` 与
+ *   `supported: true && failed.length` 是两件完全不同的事（一个是"这个站点的
+ *   守护进程太旧"，一个是"它答应发但这次没发成"），而"本机没有这个插件"在界面上
+ *   长得都一样。压成一个布尔之后，后两种会被合并成一句笼统的"同步失败"。
+ */
+let siteSync = null;
+
+/**
+ * 待同意的那些（暂存树还在磁盘上，等用户点）。
+ *
+ * ★ 换连接、断开、重新对账都会把它清掉 —— 它描述的是**这一次连接**的现场。
+ */
+let pendingConsent = [];
+
+/**
+ * 连接世代号。**世代守卫**：用户在下载途中切连接/断开，下载回调仍在跑，
+ * 最后 `reload()` 一次 —— A 站点的插件会被当成 B 站点的写进台账。每次对账
+ * 带一个世代号，回调里比对，不匹配整个丢弃。
+ */
+let connectGeneration = 0;
 
 /**
  * 这台机器没有凭据库时，密钥只能留在内存里 —— 按 id 记着。
@@ -129,10 +157,19 @@ function bootstrap() {
         // 或者反过来跳过它。真实后端完全不读这个。
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEMO_ENROLL_MS))
           ? Number(process.env.SLURMATE_DEMO_ENROLL_MS) : undefined,
-        // ★ 演示站点报哪些插件 = **本机池里装了什么**。演示后端扮演的是一个
-        //   具体的站点，它"装了"的东西必须来自某个真实的地方，而写死一份清单
-        //   会让演示模式永远报着两个本机根本没有的插件。传函数而不是快照：
-        //   用户可以在演示进行中装/卸插件，站点的清单应该跟着变。
+        // ★ 演示站点的**分发源** = 仓库里的 `plugins/`。那是一份**独立于本机池**
+        //   的真实文件（真的 sha256、真的字节），于是「站点有而本机没有」这条最
+        //   重要的路径在演示里真的走得到：池空 + 开发者模式关着，站点照样报两个
+        //   插件，对账真的把它们取下来、真的要求同意。
+        //   打包之后没有仓库目录 ⇒ 返回 null ⇒ 站点回落到"只报池里那些，且不发
+        //   文件"，界面会说明这一点。
+        sitePluginDir: () => {
+          const d = path.join(__dirname, '..', '..', '..', 'plugins');
+          try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
+        },
+        // ★ 演示站点报哪些插件，兜底那份 = **本机池里装了什么**。只在仓库目录
+        //   不存在时才用得上（打包版）。传函数而不是快照：用户可以在演示进行中
+        //   装/卸插件，站点的清单应该跟着变。
         sitePlugins: () => registry.list().map((p) => ({
           id: p.id, name: p.name, version: p.version,
           displayName: p.displayName,
@@ -352,6 +389,8 @@ async function announceBackend() {
     if (res.ok) {
       whoami = res.whoami;
       await refreshPartitions();
+      // 演示站点也真的走一遍分发（分发源是仓库里的 `plugins/`，见 backend-fake）。
+      reconcileSitePlugins();
     }
     win.pushNotice('demo', '演示模式 · 未连接集群');
     win.setTitle('Slurmate — 演示模式 · 未连接集群');
@@ -371,6 +410,10 @@ async function announceBackend() {
 
 /** 真正发起一次连接（含主机密钥裁决）。 */
 async function doConnect(conn, extra = {}) {
+  // ★ 先把世代号推一格：上一次连接的插件对账可能还在后台取文件，而它带回来的
+  //   东西属于**上一个**站点。见 reconcileSitePlugins 的世代守卫。
+  connectGeneration += 1;
+  pendingConsent = [];
   // 这条连接自己的那把私钥。没有就生成一把 —— 但**读不出来时绝不生成**
   // （见 ensureKey）：那会作废用户已经注册到 IDM 的公钥，而症状只是「认证失败」。
   const key = ensureKey(conn.id);
@@ -403,6 +446,8 @@ async function doConnect(conn, extra = {}) {
   if (res.ok) {
     whoami = res.whoami;
     await refreshPartitions();
+    // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
+    reconcileSitePlugins();
     win.setTitle(`Slurmate — ${conn.user}@${conn.host}`);
   } else if (res.code === 'host_key_unknown' || res.code === 'host_key_changed') {
     // 主机密钥要用户拍板 —— 这不是「连接失败」，是一个待确认的安全决定。
@@ -484,6 +529,121 @@ async function refreshPartitions() {
   return r;
 }
 
+// ── 站点分发 ────────────────────────────────────────────────────────────────
+
+/** 上一次对账的 promise。**只给测试用**（真机上没人等它）。 */
+let siteSyncPromise = null;
+
+/**
+ * 和站点对一次账：把该分发的插件取下来、该回收的回收。
+ *
+ * ★ **不挂在 `refreshPartitions()` 旁边。** 那是热路径（`doConnect` / `app:connect` /
+ *   `app:partitions` 都调它），界面每刷一次分区就会跑一遍全目录哈希。这里只在
+ *   **每次连接一次**。
+ *
+ * ★ **不 await**：真集群上每一份文件都是一次独立的 `ssh` exec，十几份就是几秒 ——
+ *   让"连接"这个动作卡在插件下载上，是把一个后台的事变成前台的事。跑完推一份
+ *   新的视图给界面（见 `pushPlugins`）。
+ *
+ * ★ **下载失败绝不回退到本机池**（见 site-plugins.js 的文件头）。开发者模式的开关
+ *   是**用户的设置**，不是站点的能力 —— 关着的时候一个插件都没有，那是正确的、
+ *   必须如实说出来的结果。
+ */
+function reconcileSitePlugins() {
+  const gen = ++connectGeneration;
+  siteSyncPromise = (async () => {
+    const conn = config.activeConnection(cfg);
+    if (!conn || !backend || !backend.connected) return null;
+    const key = sitePluginSync.siteKeyOf(conn);
+    const label = sitePluginSync.siteLabelOf(conn);
+    const siteRoot = ensureSitePoolDir();
+    const stagingRoot = siteStagingDir();
+    if (!siteRoot || !stagingRoot) {
+      siteSync = { supported: false, reason: 'no_dir', syncedAt: Date.now(), label,
+                   error: '本机建不出站点插件目录，所以这个站点的插件装不下来。' };
+      return siteSync;
+    }
+
+    let r;
+    try {
+      r = await sitePluginSync.sync({
+        rpc: (req) => backend.rpc(req),
+        siteKey: key,
+        siteLabel: label,
+        siteRoot,
+        stagingRoot,
+        trusted: (id, version, digest) => config.isTrusted(cfg, id, version, digest),
+        generation: gen,
+        stale: () => gen !== connectGeneration,
+        // ★ 「文件都下来了」**不等于**「装上了」：`reload()` 从不抛，坏插件进
+        //   `errors`。所以换入之后逐个复查 —— 拿得到才算成功。
+        verify: (landed) => {
+          if (gen !== connectGeneration) return [];
+          registry.reload();
+          const failed = [];
+          for (const e of landed) {
+            const p = registry.get(e.id, e.version);
+            if (!p) {
+              failed.push({ ...e, why: '文件都下来了，但注册表没有收下它 —— '
+                + '多半是清单或客户端代码不合法，看下面「插件没有加载」那几条。' });
+            } else if (p.active === false) {
+              failed.push({ ...e, why: '文件都下来了，但它的代码还没有经过你的同意。' });
+            }
+          }
+          return failed;
+        },
+      });
+    } catch (e) {
+      siteSync = { supported: false, reason: 'internal', syncedAt: Date.now(), label,
+                   error: `站点插件对账时出错：${e.message}` };
+      win && win.pushNotice('error', siteSync.error);
+      return siteSync;
+    }
+
+    // ★ 世代守卫：连接已经换了一条 ⇒ 这一次的结果整个丢弃（界面上的东西也会被
+    //   下一次对账覆盖），一个通知都不推。
+    if (gen !== connectGeneration) return null;
+
+    pendingConsent = r.pendingConsent || [];
+    siteSync = {
+      supported: r.supported,
+      reason: r.reason,
+      error: r.error,
+      label,
+      key,
+      syncedAt: Date.now(),
+      limits: r.limits,
+      added: r.added, kept: r.kept, reclaimed: r.reclaimed, failed: r.failed,
+      recordOk: Boolean(r.record && r.record.ok),
+      recordWhy: (r.record && r.record.why) || null,
+      notices: r.notices || [],
+    };
+
+    if (r.error) win && win.pushNotice('warn', r.error);
+    for (const n of (r.notices || [])) win && win.pushNotice('warn', n);
+    for (const f of (r.failed || [])) {
+      win && win.pushNotice('error', `没能装上「${f.title || f.name || f.id}」：${f.why}`);
+    }
+    if (r.reclaimed && r.reclaimed.length) {
+      win && win.pushNotice('info',
+        `站点不再需要的 ${r.reclaimed.length} 个插件版本已经清掉了。`);
+    }
+    if (pendingConsent.length) {
+      win && win.pushNotice('warn',
+        `本站要给你 ${pendingConsent.length} 个插件，每一个都要你先点一下同意`
+        + '（它们的客户端代码会在你这台机器上运行）。见插件那一栏。');
+    }
+    win && win.pushPlugins(pluginsView());
+    return siteSync;
+  })().catch((e) => {
+    // 兜底：对账自己出错不该把任何东西带崩，也不该变成一个没人处理的 rejection。
+    siteSync = { supported: false, reason: 'internal', syncedAt: Date.now(),
+                 error: `站点插件对账时出错：${e.message}` };
+    return siteSync;
+  });
+  return siteSyncPromise;
+}
+
 /**
  * 演示调试开关要作用在池里的**哪一个**插件上：调用方给短名，不给就取列表里第一个。
  * 基座里没有插件名可写，所以"是哪一个"只可能由调用方说。
@@ -526,7 +686,13 @@ function pluginsView() {
   //   不在这里替界面过滤掉任何一条：**"看不见"与"看得见但灰着"告诉用户的事
   //   完全不同** —— 站点没开 → 去找管理员；本机关了 → 自己打开就行；客户端
   //   不认得 → 该升级。三种都过滤掉，用户面对的就是"按钮凭空少了一个"。
-  const plugins = registry.list().map((plugin) => {
+  // ★ **不带钩子的那些不进这一列**（`active === false`）：它们是"代码还没过同意闸"
+  //   的站点插件，界面上由**待同意**那一块专门画（见 panel.js 的 renderConsent）。
+  //   两处都画的话，用户会看到同一个插件两个块，而其中一块说不出自己为什么灰着 ——
+  //   `WHY_NOT_RUNNABLE` 那四句话说的是"起不来"，而"还没同意"是"还没到手"，
+  //   硬塞进去就把两件事糊在一起了（`test/renderer.test.mjs` 正钉着那四句话）。
+  const records = registry.list();
+  const plugins = records.filter((p) => p.active !== false).map((plugin) => {
     const s = site.get(plugin.name) || null;
     // 本机开关按 **id** 记 —— 理由见 app:setPluginEnabled。
     const locallyEnabled = config.pluginEnabledLocally(cfg, plugin.id);
@@ -555,6 +721,15 @@ function pluginsView() {
       description: plugin.description,
       source: plugin.source,
       sources: plugin.sources,
+      // ★ **来源标签在主进程算，不在界面里算。**
+      //
+      //   在此之前界面里有一句 `p.source === 'pool' ? '站点分发' : …`，而池曾经是
+      //   唯一的来源 —— 那句话恒为真、且恒为假话（用户自己从本地目录装进去的插件
+      //   也会被标成"站点分发"）。一个永远显示、并且永远说错的标签，比没有标签更糟。
+      //
+      //   现在真的有两个来源了，判据换成"**是不是真的有两个**"：只有一个来源时
+      //   返回 null（不贴），贴着只会让人以为自己看到的是两条不同的来路。
+      sourceLabel: sourceLabelOf(plugin.sources),
       hasClientCode: plugin.hasClientCode,
       surface: plugin.contributes.surface,
       // 站点那边报的是哪一版。**这是"站点升级了而本机还是旧的"的唯一线索** ——
@@ -580,11 +755,21 @@ function pluginsView() {
 
   // 站点报了、而本客户端**池里没有对应那一版**的。按 `(id, 版本)` 算，不是按名字
   // —— 名字对得上而版本对不上，同样是"你用不了它"，而按名字判会把它当成有。
+  //
+  // ★ **只看 `enabled` 的那些。** `op_plugins` 按协议**必须报全部插件、包括
+  //   `enabled:false` 的**，而这里以前不过滤 —— 于是"站点关掉一个插件"会被界面说成
+  //   "站点有而本机没有 ⇒ 升级客户端"，**永远挂着**。管理员关掉它是它不该出现，
+  //   不是客户端缺了东西。
   const missing = [...site.values()]
+    .filter((p) => p.enabled !== false)
     .filter((p) => !(p.id && p.version && registry.get(p.id, p.version)))
     .map((p) => ({
       name: p.name, title: p.title, id: p.id || null, version: p.version || null,
-      enabled: p.enabled !== false,
+      enabled: true,
+      // ★ 站点**愿不愿意发**这一份，与"本机有没有"是两件事，而它们的出路不同：
+      //   愿意发 ⇒ 等对账/点同意；不愿意发 ⇒ 这一版你只能自己想办法（升级客户端，
+      //   或者问管理员为什么这个插件没有文件清单）。
+      distributed: Array.isArray(p.files),
     }));
 
   return {
@@ -602,8 +787,102 @@ function pluginsView() {
     //   而真相是「你还没装插件」—— 那两件事的行动完全不同（去装 vs 去升级）。
     //   界面靠 `installedCount === 0` 分岔，见 panel.js 的 renderPlugins。
     poolDir: poolDir(),
-    installedCount: registry.list().length,
+    // ★ 只数**能用的**那些。把待同意的也算进去的话，「一个插件都没装」的空态再也
+    //   走不到 —— 而那个空态正是用户第一次打开客户端时要看的那块地方。
+    installedCount: plugins.length,
+    // 池里有、但**还没过同意闸**的。它与"没装"必须分得开：一个是去点同意，
+    // 一个是去同步/去装。
+    inertCount: records.length - plugins.length,
+
+    // ── 站点分发那一节 ──
+    //
+    // ★ 三条「你没有这个插件」的理由**必须分开报**，因为它们要做的事不同：
+    //     站点守护进程太旧   → 找管理员升级站点
+    //     站点支持但没下来    → 看下面 `failed` 里那一句（可能是网络、可能是配置）
+    //     开发者模式关着而池里有 → 自己勾一下开发模式（**只在第三条成立时才能这么说**）
+    //   合并成一句"同步失败"的话，用户就只能一个个试。
+    site: siteSync ? {
+      supported: siteSync.supported,
+      reason: siteSync.reason || null,
+      error: siteSync.error || null,
+      label: siteSync.label || null,
+      syncedAt: siteSync.syncedAt || null,
+      failed: siteSync.failed || [],
+      reclaimed: (siteSync.reclaimed || []).length,
+      recordOk: siteSync.recordOk !== false,
+      // 池里每个版本**被哪些站点要** —— 这是那一栏唯一值得显示的东西，它解释了
+      // "为什么这台机器上有两个版本"。读自快照表（`.sites.json`）。
+      versions: siteVersions(),
+    } : null,
+    dev: {
+      on: devMode(),
+      // ★ 演示模式恒开，而那是因为"从源码跑演示的人就在写插件"—— 如实说出来，
+      //   别让用户以为自己勾过。
+      forced: DEMO_FLAG,
+      poolDir: poolDir(),
+      poolCount: (() => {
+        try { return registry.list().filter((p) => p.source === 'pool').length; }
+        catch { return 0; }
+      })(),
+      sitePoolDir: sitePoolDir(),
+    },
+    // 待同意的：**不下发暂存路径** —— 那是主进程的现场，界面不需要知道它在哪。
+    consent: pendingConsent.map((p) => ({
+      id: p.id, version: p.version, name: p.name, title: p.title,
+      digest: shortDigest(p.digest), fullDigest: p.digest,
+      siteLabel: p.siteLabel, fileCount: (p.files || []).length,
+      // 同 (id, 版本) 以前同意过吗？—— 有的话这一次**内容变了**，界面上要说出来。
+      previous: (() => {
+        const e = cfg && cfg.trustedPlugins && cfg.trustedPlugins[config.trustKey(p.id, p.version)];
+        return e ? { digest: shortDigest(e.digest), at: e.at } : null;
+      })(),
+    })),
   };
+}
+
+/**
+ * 来源翻成人话。**只在真的有两个来源时才用得上**（见 sourceLabelOf）。
+ */
+const SOURCE_LABEL = {
+  site: '站点分发',
+  pool: '本机安装',
+};
+
+/**
+ * 给插件贴的来源标签 —— 单来源时是 `null`（**不贴**）。
+ *
+ * ★ 判据是"来源数 > 1"，不是"来源是谁"：只有一个来源时，标签描述的是**每一块
+ *   都有的那件事**，说了等于没说，还让人以为自己看到的是两条不同的来路。
+ */
+function sourceLabelOf(sources) {
+  const s = Array.isArray(sources) ? sources : [];
+  if (s.length < 2) return null;
+  return s.map((x) => SOURCE_LABEL[x] || x).join(' + ');
+}
+
+/**
+ * 池里每个 `<id>/<版本>` 被**哪些站点**要 —— 读自快照表。
+ *
+ * ★ 读不出来就返回空数组，并且**不编**。它只有显示用途（"为什么这台机器上有两个
+ *   版本"），而回收那条路自己会去判"记录读不出来就不回收"。
+ */
+function siteVersions() {
+  const root = sitePoolDir();
+  if (!root) return [];
+  const rr = sitePluginSync.readRecord(sitePluginSync.recordPathOf(root));
+  if (!rr.ok) return [];
+  const wanters = new Map();
+  for (const [key, s] of Object.entries(rr.record.sites || {})) {
+    for (const [id, v] of Object.entries((s && s.wants) || {})) {
+      const k = `${id}@${v}`;
+      if (!wanters.has(k)) wanters.set(k, []);
+      wanters.get(k).push((s && s.label) || key);
+    }
+  }
+  return sitePluginSync.listPooled(root).map((it) => ({
+    id: it.id, version: it.version,
+    wantedBy: wanters.get(`${it.id}@${it.version}`) || [],
+  }));
 }
 
 // 登录机制（`webLogin`）在 `weblogin.js` 里 —— 它是**通用**的，契约由插件自己的
@@ -739,11 +1018,30 @@ async function startSession(resources, serviceKind) {
     // ★ 「一个插件都没装」与「不认识这个名字」是**两件事**，行动也不同（去装一个
     //   vs 换个按钮点）。以前这里只印一句「本版支持：（一个都没有）」—— 那既是
     //   一句错话（本版没有"支持"任何东西，是**你还没装**），也没给出路。
-    if (!registry.list().length) {
+    // ★ 第三种情况：**它就在本机，只是还没同意**。与"没有这个插件"必须分得开 ——
+    //   一个是去点同意，一个是去同步/去装。含糊的一句"不认识这种服务"会让用户
+    //   跑去重新同步，而同步本来就已经成功了。
+    const held = registry.list().find((p) => p.name === wanted && p.active === false);
+    if (held) {
       win.pushNotice('error',
-        '本机还没有安装任何插件，所以没有可以提交的服务。'
-        + `把插件目录放进 ${poolDir() || '插件池'}（界面上的「打开插件目录」能直接打开它），`
-        + '或者用「从目录安装…」挑一个，然后点「重新扫描」。');
+        `「${held.displayName}」${held.version} 已经取回本机了，但它的客户端代码`
+        + '还没有经过你的同意，所以没有加载。到插件那一栏点一下同意再试。');
+      return null;
+    }
+    // `active !== false` 的那些才算"装上了"：只剩待同意的插件时，用户面对的
+    // 就是"一个能用的都没有"，走下面那条空态才对。
+    if (!registry.list().some((p) => p.active !== false)) {
+      // ★ 出路取决于**站点说了什么**，不是取决于我们猜。站点支持分发而本机还没有
+      //   那些插件 ⇒ "去同步/去同意"；站点不分发 ⇒ 只能自己装（而默认不加载本机池，
+      //   所以要先把开发者模式打开）。
+      const canSync = Boolean(siteSync && siteSync.supported);
+      win.pushNotice('error',
+        '本机还没有装上任何插件，所以没有可以提交的服务。'
+        + (canSync
+          ? '本站会分发插件 —— 用插件那一栏的「重新同步」取一次，'
+            + '带客户端代码的要你点一下同意。'
+          : `把插件目录放进 ${poolDir() || '插件池'}（界面上的「打开插件目录」能直接打开它），`
+            + '再到插件那一栏把「也加载本机插件目录」勾上。'));
     } else {
       win.pushNotice('error',
         `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
@@ -846,10 +1144,24 @@ async function startSession(resources, serviceKind) {
 function pickForSubmit(name) {
   const s = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.name === name);
   if (s && s.id && s.version) {
-    const hit = registry.get(s.id, s.version);
+    const hit = usable(registry.get(s.id, s.version));
     if (hit) return hit;
   }
-  return registry.latestByName(name);
+  return usable(registry.latestByName(name));
+}
+
+/**
+ * 这一份**能不能拿去开会话**。
+ *
+ * ★ `active === false`（站点分发的、代码还没过同意闸的那一份）**绝不能**出手 ——
+ *   它一个钩子都没有，拿它去接一个会话等于用半个插件去对接一个作业。`resolve()`
+ *   在"接回旧会话"那条路上已经拒了，这里是**提交**那条路，两条都得拒。
+ *
+ * ★ 它出现在 `list()` 里是**有意的**（用户要看得见它才能点同意），所以每个"从
+ *   注册表取一个来用"的地方都要过这一道 —— 见 pickForSubmit 与 startSession。
+ */
+function usable(p) {
+  return (p && p.active !== false) ? p : null;
 }
 
 /**
@@ -958,20 +1270,47 @@ async function _renderSession(snap) {
 }
 
 /**
- * 插件注册表。**只有一个根：池。**
+ * 插件注册表。**两个根**，两条来路。
+ *
+ *   `site`  站点池 —— 站点分发的插件落在这里（见 site-plugins.js）。**恒在**。
+ *   `pool`  本机池 —— 用户自己装的那些。**要开发者模式开关才加载**（`dir()` 返回
+ *           null 就是"这次不加载"，那是一个静默的合法状态）。
  *
  * ★ 基座自己不带任何插件 —— 一个都没有是**正常状态**，不是安装包坏了。
  *   `src/main/plugins/` 那个目录是框架（注册表 + ulid.js + 安装器），不是插件目录，
  *   所以它压根不作为根传进来。
  *
- * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件走，
- * 重建注册表会让用户把已经看过的通知再看一遍。
+ * ★ 两个根**不是洁癖**：回收只该删站点拥有的那些，而用户手装的那一份不在任何站点
+ *   记录里、引用数天然是 0 —— 合并成一个目录就等于"回收会把用户自己的东西删掉"。
+ *
+ * ★ 根的**集合**固定，能变的只有"这次加不加载"（`dir` 是个函数）。所以切开发者
+ *   模式只需要 `registry.reload()`，**不重建 Registry** —— 重建会清掉 `notices`，
+ *   用户会把已经看过的通知重看一遍。
+ *
+ * 放在模块级是因为它**跨会话存活**：去重槽（`once`）跟着插件走。
  */
 const registry = new plugins.Registry([
   // 传**函数**而不是路径：cfgDir 要等 app ready 之后才定下来，在这里当场算会算出
-  // 一个 null 路径（见 plugins/index.js 的 loadRoot）。
-  { dir: poolDir, source: 'pool' },
-]);
+  // 一个 null 路径（见 plugins/index.js 的 scanRoot）。
+  { dir: sitePoolDir, source: 'site' },
+  { dir: () => (devMode() ? poolDir() : null), source: 'pool' },
+], {
+  /**
+   * 同意闸。**带客户端代码的站点插件，没同意过就不加载。**
+   *
+   * ★ 只对 `source === 'site'` 问。本机池那一份是**用户自己**从本地目录拷进去的
+   *   —— 让用户"同意自己刚放进去的东西"是一句空话，只会训练他闭着眼睛点同意。
+   *
+   * ★ 判据是**全长摘要**（见 config.isTrusted）。这里拿到的是 `inspectDir` 从
+   *   磁盘上算出来的那个值，不是站点自报的。
+   *
+   * ★ `cfg` 在模块加载期还是 null（注册表在那一刻就构造了）—— 那时一个插件都
+   *   加载不了，与"没同意"同归一处，是正确的默认。
+   */
+  allows: (entry) => entry.source !== 'site'
+    || !cfg
+    || config.isTrusted(cfg, entry.plugin.id, entry.plugin.version, entry.digest),
+});
 
 /**
  * **池**目录 —— 装进来的插件都落在这里，不分是从哪来的。
@@ -991,6 +1330,54 @@ function poolDir() {
       ? path.join(cfgDir || '.', 'plugins')
       : path.join(app.getPath('home'), '.slurmate', 'plugins');
   } catch {
+    return null;
+  }
+}
+
+/**
+ * **站点池** —— 站点分发的插件落在这里。与用户自己的池分开，理由见 registry 的注释。
+ *
+ * ★ 演示模式落在它自己的目录里（与 poolDir 同一个道理）：演示绝不去读、更不去
+ *   写用户真实的那份站点池。
+ */
+function sitePoolDir() {
+  try {
+    return DEMO_FLAG
+      ? path.join(cfgDir || '.', 'site-plugins')
+      : path.join(app.getPath('home'), '.slurmate', 'site-plugins');
+  } catch {
+    // ★ 拿不到就返回 null，而 null 在那条路上意味着"这个根这次不加载"。
+    //   把一个次要功能的失败变成**整个客户端起不来**不值当（与 poolDir 同理）。
+    return null;
+  }
+}
+
+/** 暂存根：站点池的**兄弟目录**（换入用的 `rename` 要求同一个文件系统）。 */
+function siteStagingDir() {
+  const pool = sitePoolDir();
+  return pool ? path.join(path.dirname(pool), '.site-staging') : null;
+}
+
+/**
+ * 开发者模式：**本机池加不加载**。
+ *
+ * ★ 它是**用户的设置**，不是站点的能力 —— 所以老守护进程 + 关着开关 = 一个插件
+ *   都没有。那是正确的、必须如实说出来的结果，不是需要被"兜"掉的失败。
+ * ★ 演示模式**恒开**：从源码跑的人就是在写插件，而演示池里那几个就是他要看的东西。
+ */
+function devMode() {
+  return DEMO_FLAG || Boolean(cfg && cfg.devPlugins);
+}
+
+/** 把站点池建出来（0700）。对账之前得先有个地方放东西。 */
+function ensureSitePoolDir() {
+  const dir = sitePoolDir();
+  if (!dir) return null;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
+  } catch (e) {
+    win && win.pushNotice('warn', `站点插件目录 ${dir} 建不出来：${e.message}`);
     return null;
   }
 }
@@ -1657,6 +2044,13 @@ function registerIpc() {
     whoami = null;
     partitions = [];
     sitePlugins = null;           // 断开之后就没有「站点开了哪些插件」可谈了
+    // 待同意的那些是**这一次连接**的现场：换代 + 丢掉它们的暂存树（那是**我们
+    // 自己的**草稿纸，删它不算"删站点的东西"）。不清的话，用户会看到一个来自
+    // 已经断掉的站点的"同意"按钮。
+    connectGeneration += 1;
+    for (const p of pendingConsent) sitePluginSync.discardStaged(p.stagedDir);
+    pendingConsent = [];
+    siteSync = null;
     return { ok: true, released };
   });
 
@@ -1756,6 +2150,96 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
+  // ── 站点分发 ──
+
+  /** 手动重新对一次账（界面上那个「重新同步」）。 */
+  send('app:syncPlugins', async () => {
+    if (!backend || !backend.connected) {
+      return { ok: false, error: '还没连上站点 —— 插件是从站点取回来的。' };
+    }
+    const r = await reconcileSitePlugins();
+    if (!r) return { ok: false, error: '这次对账已经作废了（连接换了一条）。' };
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /**
+   * 同意一个待分发的插件。
+   *
+   * ★ **落点是有讲究的**：下载后、暂存里验完、`rename` 之前。见 site-plugins.js。
+   *
+   * ★ **写台账在激活之前。** 反过来（先激活后写）崩在中间 ⇒ 下次启动它是"没同意"
+   *   而用户明明点过 ⇒ 会反复问，或者被后来的人"修"成默认同意。选前者。
+   *
+   * ★ **同意动作绑定到摘要值**：`acceptStaged` 会再核一遍暂存里那份的摘要与对话框
+   *   里那个值相同，不同就拒绝 —— 用户同意的是他看到的那个摘要，不是"这个
+   *   (id, 版本) 上碰巧躺着的东西"。
+   */
+  send('app:consentPlugin', async (id, version) => {
+    const hit = pendingConsent.find((p) => p.id === id && p.version === version);
+    if (!hit) return { ok: false, error: '没有这个待同意的插件（可能已经同意过、或者重新同步过了）。' };
+
+    const mv = sitePluginSync.acceptStaged({
+      stagedDir: hit.stagedDir, siteRoot: sitePoolDir(),
+      id, version, digest: hit.digest,
+    });
+    if (!mv.ok) {
+      win.pushNotice('error', mv.error);
+      return { ok: false, error: mv.error };
+    }
+    // 换入成功之后再记台账：记完之后它才会被 allows() 放行（下一次 reload）。
+    const t = config.trustPlugin(cfgDir, cfg, id, version, mv.digest, hit.siteLabel);
+    if (!t.ok) {
+      win.pushNotice('error', t.error);
+      return { ok: false, error: t.error };
+    }
+    // ★ **同意这一步也要记进引用表**，不只是"装上"那一步。不记的话，在"刚同意、
+    //   还没重新对账"这段窗口里它在引用表上不存在 —— 换到另一个站点时会被按
+    //   "没人要它"回收掉。理由见 site-plugins.js 的 noteConsent。
+    const nc = sitePluginSync.noteConsent({
+      siteRoot: sitePoolDir(), siteKey: hit.siteKey, siteLabel: hit.siteLabel,
+      id, version,
+    });
+    if (!nc.ok) win.pushNotice('warn', `插件装上了，但引用表没能更新（${nc.why}）。`);
+    pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));
+    registry.reload();
+    const p = registry.get(id, version);
+    if (!p || p.active === false) {
+      const why = `同意之后它仍然没有被加载 —— 看「插件没有加载」那几条。`;
+      win.pushNotice('error', why);
+      return { ok: false, error: why, plugins: pluginsView() };
+    }
+    win.pushNotice('ok', `已同意并装上「${p.displayName}」${p.version}。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /** 不同意。**删掉的是暂存里那一份**（我们自己的草稿纸），站点那一份一个字节没动。 */
+  send('app:rejectPlugin', async (id, version) => {
+    const hit = pendingConsent.find((p) => p.id === id && p.version === version);
+    if (!hit) return { ok: false, error: '没有这个待同意的插件。' };
+    sitePluginSync.discardStaged(hit.stagedDir);
+    pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));
+    win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /**
+   * 开发者模式：本机池加不加载。
+   *
+   * ★ 它是**用户的设置，不是站点的能力** —— 所以"关着 + 老守护进程 = 一个插件都
+   *   没有"是正确结果，不是需要被兜掉的失败（见 site-plugins.js 的文件头）。
+   */
+  send('app:setDevPlugins', async (on) => {
+    if (typeof on !== 'boolean') return { ok: false, error: 'on 必须是 true 或 false。' };
+    if (DEMO_FLAG) return { ok: false, error: '演示模式下这一项恒开。' };
+    config.setDevPlugins(cfgDir, cfg, on);
+    registry.reload();
+    const n = registry.list().filter((p) => p.source === 'pool').length;
+    win.pushNotice('info', on
+      ? `开发者模式已打开：本机插件目录里有 ${n} 个插件被加载了。`
+      : '开发者模式已关掉：本机插件目录不再加载，插件只认站点分发的那一份。');
+    return { ok: true, plugins: pluginsView() };
+  });
+
   /** 在文件管理器里打开池目录 —— "我该往哪放"这个问题的最终答案。 */
   send('app:openPluginDir', async () => {
     const dir = ensurePoolDir();
@@ -1806,6 +2290,14 @@ function registerIpc() {
     // 演示「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
     // 都是缺的，而客户端的纪律是"缺席 ≠ 否"。
     else if (what === 'old-daemon') backend.debugOldDaemon(true);
+    // ★ 与上一条是**两件事**：这一档有 `plugins`、但没有 `limits`（v0.5 的守护
+    //   进程）。客户端的处理必须一样（回退），但代码路径不同（一个是 unknown_op，
+    //   一个是字段缺席）—— 只造其中一条的话，另一条上的退化没人看得见。
+    else if (what === 'old-distribute') backend.debugOldDistribute(true);
+    // 站点报了一个超过单文件上限的文件 ⇒ 「站点支持分发，但这一份装不上」。
+    else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
+    // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
+    else if (what === 'rate-limited') backend.debugRateLimit(Number(arg) || 3);
     // 把仓库里的示例插件装进演示池。
     //
     // ★ 这不是"演示模式自带的假插件"—— 它装的是**真的**那两个插件，走的是真的
@@ -1900,5 +2392,20 @@ module.exports = {
     getPluginsView: () => pluginsView(),
     /** 站点通报的插件清单（op_plugins 的原始响应）。 */
     getSitePlugins: () => sitePlugins,
+    /**
+     * 等这一次站点对账跑完。
+     *
+     * ★ 真机上**没有人等它**（它是后台的，跑完推一份视图给界面就完了）。测试必须
+     *   等 —— 不等的话断言的是"下载还没跑完的那一刻"，而那种用例红或绿都说明不了
+     *   任何事。
+     */
+    awaitSiteSync: () => (siteSyncPromise || Promise.resolve(null)),
+    /** 上一次对账的结果（三态的原样）。 */
+    getSiteSync: () => siteSync,
+    /** 待同意的那些。 */
+    getPendingConsent: () => pendingConsent,
+    /** 站点池与暂存目录在哪（测试要直接看盘上的东西）。 */
+    getSitePoolDir: () => sitePoolDir(),
+    getSiteStagingDir: () => siteStagingDir(),
   },
 };

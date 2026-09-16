@@ -22,8 +22,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const SCHEMA = 5;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
+const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
                     // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
+                    // 6：**站点分发**（trustedPlugins 同意台账 + devPlugins 开关）
 
 // 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
 // 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
@@ -64,7 +65,25 @@ const DEFAULTS = {
   //   而用户关掉一个插件之后，重启客户端它还是关着的。
   // ★ 它**不**影响服务端：站点仍然可以提交那个插件的会话（用户自己用 CLI 就行），
   //   客户端只是不再给出那个按钮。两边是两件事，见 plugins/index.js 的边界说明。
-  plugins: {},              // { [name]: { enabled: boolean } }
+  // 键是插件的 **id**（那个铸造出来的 ULID），**不是短名**。
+  // ★ 这个文件头里以前写的是"插件名" —— 而 `pluginsView()` 与 `app:setPluginEnabled`
+  //   从头到尾用的是 `plugin.id`。按那句注释去写代码，得到的是一个"开关莫名失效"
+  //   的症状（池是全局的，两个站点可以各有一个叫 jupyter 的插件而它们是两个东西）。
+  plugins: {},              // { [id]: { enabled: boolean } }
+  // 本机池（`~/.slurmate/plugins/`）加不加载。
+  //
+  // ★ 缺省 **false**：插件默认**只认站点分发的那一份**（`site-plugins/`）。打开它
+  //   是「开发者模式」—— 那是给写插件的人自己用的，界面上在一个单独的一节里，
+  //   勾上之后才出现「从目录安装…」那几个入口。演示模式恒开（见 index.js）。
+  devPlugins: false,
+  // 同意台账（TOFU 一致性）。`{ "<id>@<版本>": { digest, site, at } }`
+  //
+  // ★ 键里带**版本**：同一个插件的新版本是**另一份构件**，要重新同意一次。
+  // ★ `digest` 是**全长 64 位**，由客户端**自己从磁盘上的字节算出来**。它是
+  //   **一致性**判据（"和我上次同意的是不是同一份"），不是认证判据（"这是不是
+  //   我以为的那个人做的"）—— 后者要签名，见 SECURITY.md。
+  //   挡得住"事后偷换"，挡不住"第一次给的就是坏的"。
+  trustedPlugins: {},       // { ["<id>@<版本>"]: { digest, site, at } }
 };
 
 /** 这个插件在本机开着吗？没表过态 → true（跟着站点走）。 */
@@ -86,6 +105,45 @@ function setPluginEnabled(dir, cfg, name, enabled) {
   else cfg.plugins[name] = { enabled };
   saveConfig(dir, cfg);
   return cfg.plugins;
+}
+
+/** 开发者模式：本机池加不加载。**用户的设置，不是站点的能力** —— 见 plugins/index.js。 */
+function setDevPlugins(dir, cfg, on) {
+  cfg.devPlugins = Boolean(on);
+  saveConfig(dir, cfg);
+  return cfg.devPlugins;
+}
+
+// ── 同意台账（站点分发的插件）────────────────────────────────────────────────
+//
+// 与 `hostKeys` 同一先例：一个我自己算出来的值，记在本地，下次拿它比对。
+//
+// ★ **一致性，不是认证。** 它挡得住"事后偷换"（同一个 id 和版本，这次的内容与
+//   我上次同意的那份不一样），挡不住"第一次给的就是坏的"。要挡后者得靠签名，而
+//   这一版没有 —— 论证写在 SECURITY.md 里，别把这两件事写在同一个句子里。
+
+function trustKey(id, version) { return `${id}@${version}`; }
+
+/**
+ * 台账里有这个 `(id, 版本)` 且摘要相符吗？
+ *
+ * ★ 判据必须是**全长的**摘要。`plugin.digest` 以前是截断到 16 位的，拿它当信任
+ *   台账的键就是一个 64 位的碰撞面 —— 截断只留给显示。
+ */
+function isTrusted(cfg, id, version, digest) {
+  const e = (cfg && cfg.trustedPlugins && cfg.trustedPlugins[trustKey(id, version)]) || null;
+  return Boolean(e && e.digest === digest);
+}
+
+/** 记下一次同意。**由调用方保证写台账发生在激活之前**（见 index.js 的同意动作）。 */
+function trustPlugin(dir, cfg, id, version, digest, site) {
+  if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+    return { ok: false, error: '摘要必须是全长的 64 位十六进制 —— 台账不接受自报的短摘要。' };
+  }
+  if (!cfg.trustedPlugins || typeof cfg.trustedPlugins !== 'object') cfg.trustedPlugins = {};
+  cfg.trustedPlugins[trustKey(id, version)] = { digest, site: String(site || ''), at: Date.now() };
+  saveConfig(dir, cfg);
+  return { ok: true };
 }
 
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
@@ -418,6 +476,23 @@ function loadConfig(dir) {
       if (v && typeof v.enabled === 'boolean') cfg.plugins[name] = { enabled: v.enabled };
     }
   }
+  if (typeof raw.devPlugins === 'boolean') cfg.devPlugins = raw.devPlugins;
+
+  // 同意台账。**只收形状完整的条目**：`digest` 必须是全长 64 位十六进制。
+  //
+  // ★ 一个残缺的条目（短摘要、缺 digest）在这里丢掉**比留着安全**：留着的话它
+  //   会被当成"已经同意过"，而真正的那份内容从来没被核对过。丢掉 = 回到"要重新
+  //   点一次同意"，那是安全的那一侧。
+  if (raw.trustedPlugins && typeof raw.trustedPlugins === 'object'
+      && !Array.isArray(raw.trustedPlugins)) {
+    for (const [key, v] of Object.entries(raw.trustedPlugins)) {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      if (typeof v.digest !== 'string' || !/^[0-9a-f]{64}$/.test(v.digest)) continue;
+      if (typeof v.site !== 'string' || !v.site) continue;
+      cfg.trustedPlugins[key] = { digest: v.digest, site: v.site,
+                                  at: Number.isFinite(v.at) ? v.at : 0 };
+    }
+  }
 
   // 连接列表：先取新格式，再补旧格式。
   // 去重按**两个**维度：id（同一个条目被写了两遍），以及身份
@@ -744,8 +819,9 @@ module.exports = {
   pruneLayouts, layoutPlan,
   activeConnection, newConnectionId, normalizeConnection,
   connectionKey, upsertConnection,
-  // 插件在本机的开关
-  pluginEnabledLocally, setPluginEnabled,
+  // 插件在本机的开关，与站点分发的同意台账
+  pluginEnabledLocally, setPluginEnabled, setDevPlugins,
+  trustKey, isTrusted, trustPlugin,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
   setKey, getKey, deleteKey, hasKey, migrateLegacySecret, readSecretFile,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,

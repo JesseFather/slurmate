@@ -161,6 +161,29 @@
       -->
       <div id="plugin-issues"></div>
 
+      <!--
+        ── 站点分发 ──
+        插件默认**只认站点分发的那一份**。这一节说的是"站点给了什么、我这儿有哪几版、
+        每一版被哪个站点要"。最后那一句是这一节唯一值得显示的东西 —— 它解释了
+        「为什么这台机器上会有两个版本」。
+      -->
+      <div id="site-plugins"></div>
+
+      <!--
+        ── 待同意 ──
+        **独立的一块，不是"起不来"的第五档。** 那四句话说的是"这个插件**起不来**的
+        原因"，而"还没同意"是"**还没到手**" —— 与"本机没有"同一类。塞进那四句会把
+        两件事糊在一起，而 test/renderer.test.mjs 正钉着"四句互不相同"。
+      -->
+      <div id="plugin-consent"></div>
+
+      <!--
+        ── 开发者模式 ──
+        勾上之后才出现「从目录安装…」「打开插件目录」「重新扫描」—— 于是"禁止自装"
+        在默认路径上是真的，而本机开发仍有一条说得出来的路。
+      -->
+      <div id="plugin-dev"></div>
+
       <details id="adv">
         <summary>高级选项</summary>
         <div class="row">
@@ -184,15 +207,8 @@
         </p>
       </details>
 
-      <!--
-        插件是**本机**的东西，与连不连得上集群无关 —— 所以安装与重扫放在这里，
-        只要这一屏露出来就够得着（而本机一个插件都没有时，这一屏一定会露出来，
-        见 panel.js 的 syncPurposeVisibility）。
-      -->
       <div class="row row-spaced">
         <button id="btn-doctor" class="ghost">体检集群</button>
-        <button id="btn-plugin-add" class="ghost">从目录安装插件…</button>
-        <button id="btn-plugin-rescan" class="ghost">重新扫描插件目录</button>
       </div>
     </section>
 

@@ -127,15 +127,18 @@ jobs:
         #   （cluster/test-sessiond-logic.py 的 19.12 有一条同样意思的用例，本地跑得
         #   到；这里再来一条是因为 CI 上的 lint 是**最外层**的那道网，它不依赖测试
         #   脚本被正确地调用。）
+        # ★ 抽的是 `client/src/main/plugins/index.js` —— 那个集合**全客户端只有一份**，
+        #   安装器（install.js）从它引，摘要（digestOf）也用它。以前它在 install.js
+        #   里，两份实现各自持有一份，正是这条 lint 要防的那种分家。
         run: |
           a=$(sed -nE "s/^const COPY_SKIP = new Set\(\[([^]]*)\]\).*/\1/p" \
-                client/src/main/plugins/install.js \
+                client/src/main/plugins/index.js \
               | tr ',' '\n' | grep -oE "'[^']*'" | tr -d "'" | sort)
           b=$(sed -nE "s/^PLUGIN_COPY_SKIP = \((.*)\)$/\1/p" \
                 cluster/slurmate-sessiond \
               | tr ',' '\n' | grep -oE '"[^"]*"' | tr -d '"' | sort)
-          echo "客户端 install.js : $(echo $a)"
-          echo "守护进程          : $(echo $b)"
+          echo "客户端 plugins/index.js : $(echo $a)"
+          echo "守护进程                : $(echo $b)"
           if [ -n "$a" ] && [ "$a" = "$b" ]; then
             echo "✓ 两端一致"
           else

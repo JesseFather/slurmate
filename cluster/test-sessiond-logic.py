@@ -2115,19 +2115,22 @@ exit 0
 
     # ── 19.12 ★ 跨语言契约：跳过表两边必须逐字一致 ──────────────────────────
     #
-    # PLUGIN_COPY_SKIP（本文件所在的守护进程）与 COPY_SKIP（客户端 install.js）
-    # 分别在 Python 与 JS 里，没有任何共享机制。漂开的后果是"客户端算出来的摘要
-    # 与站点报的永远对不上"，而报错里一个字都不会提到是这两个集合分家了 ——
+    # PLUGIN_COPY_SKIP（本文件所在的守护进程）与 COPY_SKIP（客户端）分别在
+    # Python 与 JS 里，没有任何共享机制。漂开的后果是"客户端算出来的摘要与站点报的
+    # 永远对不上"，而报错里一个字都不会提到是这两个集合分家了 ——
     # 症状只会是"同步一直失败"。照"三处版本号必须一致"那条的先例钉住它。
+    #
+    # ★ 抠的是 `plugins/index.js` 那一份 —— 它在**客户端里只有一份**（安装器从它
+    #   引，算摘要也用它）。以前它在 install.js 里，而那是"两个地方各持一份"的开端。
     #
     # 抠的是**字面量本身**，不是"跑一遍 JS" —— 本机不一定有 node，而这条契约要的
     # 是"两份声明写的是同一组名字"。checks.yml 的 lint 作业里有同一条。
-    _install_js = os.path.join(HERE, os.pardir, "client", "src", "main",
-                               "plugins", "install.js")
-    with open(os.path.abspath(_install_js), encoding="utf-8") as _f:
+    _copy_skip_js = os.path.join(HERE, os.pardir, "client", "src", "main",
+                                 "plugins", "index.js")
+    with open(os.path.abspath(_copy_skip_js), encoding="utf-8") as _f:
         _js = _f.read()
     _m = re.search(r"const COPY_SKIP = new Set\(\[([^\]]*)\]\)", _js)
-    check("客户端 install.js 里那份 COPY_SKIP 找得到（找不到说明它改了形状）",
+    check("客户端 plugins/index.js 里那份 COPY_SKIP 找得到（找不到说明它改了形状）",
           _m is not None)
     if _m:
         _js_set = sorted(re.findall(r"'([^']*)'", _m.group(1)))

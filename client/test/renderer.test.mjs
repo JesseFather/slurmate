@@ -190,22 +190,55 @@ function stripJsComments(src) {
   return out;
 }
 
-test('panel.js 不按 source 给插件贴来源标签 —— 本版只有一个来源', () => {
-  // ★ 这条不是洁癖，是拦一句**假话**。
+test('★ 来源标签：界面只画，判定在主进程 —— 而且单来源时不贴', () => {
+  // ★ 这条检查**翻过面了**，按它自己当年写下的方式翻的。
   //
-  //   基座不再自带任何插件之后，客户端只注册了**一个** root（池，见
-  //   `src/main/index.js` 里那个 `new plugins.Registry([...])`）。于是
-  //   `source === 'pool'` **恒为真** —— 用户自己从本地目录装进去的插件，
-  //   也会被贴上「站点分发」这个标签。
+  //   上一版它断言"panel.js 里不许出现 `p.source`"，理由是那时的客户端只注册了
+  //   一个 root（池），于是 `source === 'pool'` **恒为真** —— 一个永远显示、
+  //   并且永远说错的标签比没有标签更糟。它当年把话说完了：将来真的有了第二个
+  //   root，**正确的做法不是删掉这条检查**，而是把标签按那时的 `sources` 加回来，
+  //   再改成一条正面用例。现在（站点分发 + 本机池）就是那个时候。
   //
-  //   一个永远显示、并且永远说错的标签，比没有标签更糟：它让人以为自己看到的是
-  //   两条不同的来源，而界面上每一个插件都带着它。
-  //
-  //   将来真的有了「从站点取插件」那条路（会有第二个 root），这个检查会红 ——
-  //   那时**正确的做法不是删掉这条检查**，而是按当时的 `sources` 把标签加回来
-  //   （只有真的来自多个来源时才区分得开东西），再把它改成一条正面用例。
+  //   ★ 判定**搬到了主进程**（`pluginsView()` 的 `sourceLabel`），因为判据是
+  //     "有几个来源"，而只有主进程知道注册表挂了几个 root。界面留在文本检查层面
+  //     能验的东西只有"它只画、不判"。
   const code = stripJsComments(js);
+
+  // ① 界面**不再**自己按来源分支 —— 那种分支曾经恒为真。
   assert.equal(/\bp\.source\b/.test(code), false,
-    'panel.js 在按 source 分支 —— 本版池是唯一的来源，那种分支恒为真、'
-    + '说出来的话恒为假。要贴来源标签，先有第二个 root。');
+    'panel.js 又在自己判来源了 —— 判定归主进程（pluginsView 的 sourceLabel），'
+    + '界面只负责画');
+  assert.equal(/\bp\.sources\b/.test(code), false,
+    'panel.js 在读 sources —— 它拿不到"有几个 root"这个事实，判定会与它分家');
+
+  // ② 但它**必须画**那个标签（否则第二个来源进来时界面上什么也看不出来）。
+  assert.match(code, /p\.sourceLabel/, 'panel.js 没有画 sourceLabel —— 有两个来源时用户分不清哪一份是谁给的');
+  assert.ok(/['"]plug-src['"]/.test(code), 'sourceLabel 那个 <span> 的 class 不见了');
+});
+
+test('★ 站点分发那四条桥同时登记在 preload 与 panel.js 两侧', () => {
+  // 少一边都是「点了没反应」：preload 少了 → 调不到方法；panel.js 少了 → 没有入口。
+  for (const m of ['syncPlugins', 'consentPlugin', 'rejectPlugin', 'setDevPlugins', 'onPlugins']) {
+    assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
+  }
+  assert.ok(bridgeCalls().has('syncPlugins'), 'panel.js 没有调用 syncPlugins');
+  assert.ok(bridgeCalls().has('consentPlugin'), 'panel.js 没有调用 consentPlugin');
+  assert.ok(bridgeCalls().has('rejectPlugin'), 'panel.js 没有调用 rejectPlugin');
+  assert.ok(bridgeCalls().has('setDevPlugins'), 'panel.js 没有调用 setDevPlugins');
+  assert.ok(bridgeCalls().has('onPlugins'), 'panel.js 没有订阅 onPlugins');
+});
+
+test('★ 同意界面必须把「你不会得到什么保护」说出来', () => {
+  // ★ 这不是文案洁癖，是**这一版唯一的安全边界**：进程隔离（S2）还没做，所以
+  //   同意一个带客户端代码的插件 = 把工作站的代码执行权交给集群管理员。含糊的
+  //   「是否信任此插件」会让用户以为自己在同意 A 而实际同意了 B。
+  //
+  //   文字检查只能验"那句话还在"，验不了它够不够清楚 —— 那是人读的。
+  const code = stripJsComments(js);
+  assert.match(code, /没有进程隔离/,
+    '同意那一块必须说清"目前没有进程隔离" —— 那是用户在做决定时唯一缺的那条信息');
+  assert.match(code, /在你这台机器上运行/,
+    '同意那一块必须说清客户端代码会在本机运行');
+  // 第二次之后的同意要显示**变了什么**，只显示一个新摘要等于什么也没说。
+  assert.match(code, /与上次同意的一致|变成了/, '同意的界面要能说出"内容变了"');
 });

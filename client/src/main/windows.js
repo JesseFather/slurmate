@@ -387,6 +387,18 @@ class ShellWindow {
     if (!wc.isDestroyed()) wc.send('ui:notice', { kind, text });
   }
 
+  /**
+   * 主动推一份新的插件视图。
+   *
+   * ★ 站点对账是**后台**跑的（连上之后才开始取文件，一次一份，真集群上一份就是
+   *   一次 `ssh` exec）。不推的话，用户看到的是连接那一刻的旧视图 —— 而"插件
+   *   明明是站点说要给的，界面上却什么都没有"正是这个功能最该避免的那句话。
+   */
+  pushPlugins(view) {
+    const wc = this.win.webContents;
+    if (!wc.isDestroyed()) wc.send('ui:plugins', view);
+  }
+
   setTitle(t) {
     if (!this.win.isDestroyed()) this.win.setTitle(t);
   }

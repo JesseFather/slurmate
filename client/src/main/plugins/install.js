@@ -7,9 +7,16 @@
  * 加载器（index.js）只读。在它之前，池目录甚至不会被创建 —— 于是「池是安装点」
  * 这句话在代码里落不了地：用户不知道该往哪放，也没有任何东西告诉他放对没有。
  *
- * ★ **这个函数就是将来站点分发要走的那条路。** 分发不是另一套机制，它只是把
- *   插件的文件先落到本地某个临时目录，再调这里同一个 `installFrom`。区别只在
- *   文件从哪来（网络 vs 用户挑的目录），后面每一步都一样。
+ * ★ **站点分发不走这条路。** 这一条以前写着"将来分发会复用同一个 installFrom"，
+ *   现在分发已经有了，而它落在**另一个根**上（`~/.slurmate/site-plugins/`，见
+ *   site-plugins.js），因为两者的语义在三个地方正好相反：
+ *
+ *     · 谁来定：这里由**用户**挑目录；分发由**站点**说了算，还要按引用计数回收。
+ *     · 换入前：这里直接拷；分发要先过**同意闸**（带代码的插件第一次要用户点一下）。
+ *     · 撞车时：这里**拒绝**；分发也拒绝，但理由是"站点改了内容却没升版本号"。
+ *
+ *   照旧注释去复用 `installFrom` 的人，会把"拒绝覆盖内容不同的同版本"当成一个
+ *   bug 去修 —— 而那正是这个文件下面那一段在防的事。
  *
  * ── ★ 绝不用安装来"覆盖" ────────────────────────────────────────────────────
  *
@@ -23,10 +30,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { loadDir } = require('./index.js');
-
-/** 复制一个插件目录时**不带过去**的东西。都是版本控制的内部状态，不是插件的组成。 */
-const COPY_SKIP = new Set(['.git', '.github', '.gitignore', '.gitattributes', 'node_modules']);
+// COPY_SKIP 从 index.js 引 —— **全仓只有那一份**。它同时决定"安装器拷哪些"与
+// "摘要算哪些"，两处不一致的症状是安装器永远说"内容不一样"，而原因指不出来。
+// 依赖方向不变（install → index），而且这条路上不会回指。
+const { inspectDir, shortDigest, COPY_SKIP } = require('./index.js');
 
 function copyTree(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -59,9 +66,12 @@ function installFrom(pool, srcDir) {
 
   // 先把它当插件**读一遍** —— 校验、算摘要，全部走加载器那一套。装的时候和
   // 加载的时候用同一个判定，否则装进去的东西可能在下次启动时才被拒。
-  const r = loadDir(srcDir, 'pool');
+  //
+  // ★ 用 `inspectDir` 不用 `loadDir`：这里只需要清单与摘要，**不需要执行**用户
+  //   挑的那个目录里的代码。装的时候不跑它，加载的时候才跑 —— 那是两件事。
+  const r = inspectDir(srcDir, 'pool');
   if (r.error) return { ok: false, error: `这个目录不是一个能用的插件：${r.error}` };
-  const p = r.plugin;
+  const p = r.entry.plugin;
 
   // 落到 `<池>/<id>/<版本>/`：两层的布局让**同一个插件的多个版本并存**，而两层的
   // 目录名都不参与判定（身份来自清单，见 index.js 的 findPluginDirs）。
@@ -69,18 +79,18 @@ function installFrom(pool, srcDir) {
   const dest = path.join(idDir, p.version);
 
   if (fs.existsSync(dest)) {
-    const have = loadDir(dest, 'pool');
+    const have = inspectDir(dest, 'pool');
     if (have.error) {
       return { ok: false, error: `${dest} 已经存在，但它不是一个能用的插件（${have.error}）。`
         + '安装不会去覆盖一个来路不明的目录 —— 请先自己确认并清掉它。' };
     }
-    if (have.plugin.digest === p.digest) {
+    if (have.entry.digest === p.digest) {
       return { ok: true, plugin: p, dest, already: true };   // 同一个构件：幂等
     }
     return { ok: false,
       error: `${p.name} ${p.version}（id ${p.id}）已经装过一份，而这一份的内容不一样。`
-        + `\n装的是：${dest}（摘要 ${have.plugin.digest}）`
-        + `\n这一份：${srcDir}（摘要 ${p.digest}）`
+        + `\n装的是：${dest}（摘要 ${shortDigest(have.entry.digest)}）`
+        + `\n这一份：${srcDir}（摘要 ${shortDigest(p.digest)}）`
         + '\n同一个 id 和版本只能对应一份内容 —— 装错了就是静默地跑另一个插件的代码。'
         + '\n改过的那一份请升版本号（或换一个新 id）再装。' };
   }
@@ -116,11 +126,11 @@ function uninstall(pool, id, version) {
   const idDir = path.join(pool, id);
   const dest = path.join(idDir, version);
 
-  const have = loadDir(dest, 'pool');
+  const have = inspectDir(dest, 'pool');
   if (have.error) return { ok: false, error: `${dest} 不是一个能用的插件，没有动它：${have.error}` };
-  if (have.plugin.id !== id || have.plugin.version !== version) {
+  if (have.entry.plugin.id !== id || have.entry.plugin.version !== version) {
     return { ok: false, error: `${dest} 里的插件自报的是 `
-      + `${have.plugin.id}@${have.plugin.version}，与要卸载的 ${id}@${version} 不一致，`
+      + `${have.entry.plugin.id}@${have.entry.plugin.version}，与要卸载的 ${id}@${version} 不一致，`
       + '没有动它。' };
   }
 

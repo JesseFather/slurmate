@@ -764,6 +764,11 @@ function renderPlugins(pv) {
   if (!pv) return;
   lastPlugins = pv;
 
+  // 站点分发那一栏、待同意那一段、开发者模式那一节 —— 与插件块一起重画。
+  renderSitePlugins(pv);
+  renderConsent(pv);
+  renderDev(pv);
+
   const list = pv.plugins || [];
   // ★ 空池是**正常状态**，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
   //   道歉，是给出路：池在哪、怎么装、装完怎么让它出现。
@@ -785,28 +790,58 @@ function renderPlugins(pv) {
   //   插件都喊一遍"升级客户端"，而真相是"你还没装插件"。
   const miss = pv.missing || [];
   if (miss.length) {
-    const names = miss.map((m) => (m.version ? `${m.title} ${m.version} 版` : m.title));
-    if (pv.installedCount === 0) {
-      issues.append(issueBox('warn', '本站提供的插件，本机一个都没有',
-        `${names.join('、')}。\n本机还没有装任何插件，所以上面一个按钮都没有 —— `
-        + '装好之后它们就会变成可以开始会话的块。'));
-    } else {
-      issues.append(issueBox('warn', '本站报的这几个版本，本机池里对不上',
-        `${names.join('、')}。\n可能你装的是另一个版本，也可能是这一版要求更新的`
-        + '客户端。会话仍然接得上隧道、也停得掉，只是客户端不知道怎么把它用起来。'));
+    // ★ 三条出路**必须分开说**，因为它们要做的事不同。合并成一句"本站有而本机
+    //   没有 —— 升级客户端"的话，其中两条会被指错方向。
+    const bySync = miss.filter((m) => m.distributed);
+    const byHand = miss.filter((m) => !m.distributed);
+    const names = (list) => list.map((m) => (m.version ? `${m.title} ${m.version} 版` : m.title)).join('、');
+
+    if (bySync.length) {
+      const site = pv.site || {};
+      if (site.supported === false && site.reason === 'old_daemon') {
+        issues.append(issueBox('warn', '本站提供的插件，本机没有',
+          `${names(bySync)}。\n这个站点的守护进程太旧，不支持插件分发 —— `
+          + '要让客户端自动取回它们，得请管理员升级站点上的守护进程。'));
+      } else if (site.supported === false) {
+        issues.append(issueBox('warn', '本站提供的插件，本机没有',
+          `${names(bySync)}。\n${site.error || '这次没能从站点问到插件。'}`));
+      } else if (pv.installedCount === 0) {
+        issues.append(issueBox('warn', '本站提供的插件，本机一个都没有',
+          `${names(bySync)}。\n本机还没有装上任何插件，所以上面一个按钮都没有 —— `
+          + '点「重新同步」把它们取回来（带客户端代码的要你点一下同意）就会变成可以开始会话的块。'));
+      } else {
+        issues.append(issueBox('warn', '本站报的这几个版本，本机对不上',
+          `${names(bySync)}。\n可能你装的是另一个版本，也可能同步还没跑到。`
+          + '用上面的「重新同步」取一次。'));
+      }
+    }
+    if (byHand.length) {
+      issues.append(issueBox('warn', '本站报了这一版，但它没有文件清单',
+        `${names(byHand)}。\n这一份装不上：站点没有报出它的文件，所以客户端无从取回。`
+        + '请管理员确认这个插件是不是部署完整了。'));
+    }
+
+    // ★ 第三条出路**只在它成立的时候**才说：开发者模式关着，而本机池里其实有东西。
+    //   不成立时说它就是一句凭空的猜测。
+    const dev = pv.dev || {};
+    if (dev.on === false && dev.poolCount > 0) {
+      issues.append(issueBox('info', '本机插件目录里有东西，但没被加载',
+        `那里有 ${dev.poolCount} 个插件，而「开发者模式」是关着的 —— `
+        + '插件默认只认站点分发的那一份。要加载本机那一份，见下面最后那一节。'));
     }
   }
 }
 
 /**
- * 池是空的。
+ * 本机一个插件都没有。
  *
  * ★ 以前这里写的是「这个客户端一个插件都没有 —— **安装包可能不完整**」。那句话
- *   把一个**每个客户端都有的初始状态**说成了故障，而且没有给出任何出路：用户知道
- *   "少了点什么"，但不知道该往哪放、放完怎么让它出现。
+ *   把一个**每个客户端都有的初始状态**说成了故障，而且没有给出任何出路。
  *
- * 所以这一段里三件事必须齐：**池在哪**（可复制的路径）、**怎么装**（从目录安装）、
- * **装完怎么生效**（重新扫描 —— 也可以直接打开目录手工放）。
+ * ★ 现在出路**变了，而且是变简单了**：插件默认由站点分发，所以这个空态的答案是
+ *   "连上站点、点重新同步"，而不是"自己去找一个插件目录装进去"。以前那个
+ *   「从目录安装…」的入口现在落在开发者模式那一节里 —— 默认路径上"禁止自装"
+ *   必须是真的。
  */
 function emptyPool(pv) {
   const d = document.createElement('div');
@@ -814,29 +849,253 @@ function emptyPool(pv) {
 
   const head = document.createElement('div');
   head.className = 'plug-head';
-  head.append(el('h3', null, '本机还没有安装任何插件'));
+  head.append(el('h3', null, '本机还没有装上任何插件'));
   d.append(head);
 
-  d.append(el('p', 'plug-desc',
-    '基座自己不带插件 —— 作业里跑什么由插件决定。装上一个之后，这里会按插件画出一块，'
-    + '每一块有自己的默认资源和开关。'));
-
-  if (pv.poolDir) {
-    const p = document.createElement('p');
-    p.className = 'plug-desc';
-    p.append(document.createTextNode('插件池：'));
-    p.append(el('code', 'plug-id', pv.poolDir));
-    d.append(p);
+  const site = pv.site || {};
+  if (site.supported === false && site.reason === 'old_daemon') {
+    d.append(el('p', 'plug-desc',
+      '基座自己不带插件 —— 作业里跑什么由插件决定。而这个站点的守护进程太旧，'
+      + '不支持插件分发，所以客户端没地方去取。请管理员升级站点上的守护进程。'));
+  } else if (site.supported === false) {
+    d.append(el('p', 'plug-desc',
+      '基座自己不带插件 —— 作业里跑什么由插件决定。'
+      + (site.error || '还没连上站点，所以还不知道本站有没有插件要给你。')));
+  } else {
+    d.append(el('p', 'plug-desc',
+      '基座自己不带插件 —— 作业里跑什么由插件决定。本站会分发插件，'
+      + '连上之后它们会出现在这里；带客户端代码的每一个都要你先点一下同意。'));
   }
 
   const row = document.createElement('div');
   row.className = 'plug-meta';
-  row.append(button('从目录安装…', () => installPlugin()));
-  row.append(button('打开插件目录', () => openPluginDir(), 'ghost'));
-  row.append(button('重新扫描', () => rescanPlugins(), 'ghost'));
+  row.append(button('重新同步', () => syncPlugins()));
   d.append(row);
 
   return d;
+}
+
+/**
+ * ── 站点分发那一栏 ────────────────────────────────────────────────────────
+ *
+ * ★ 这里唯一值得显示的东西是**每个版本被哪些站点要** —— 它是"为什么这台机器上
+ *   会有两个版本"这个问题的答案。没有它，用户面对两个同名的块只能猜。
+ */
+function renderSitePlugins(pv) {
+  const box = $('site-plugins');
+  box.textContent = '';
+  const site = pv.site;
+  const dev = pv.dev || {};
+  if (!site && !dev.sitePoolDir) return;
+
+  const d = document.createElement('div');
+  d.className = 'plug plug-off';
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, '站点分发'));
+  d.append(head);
+
+  if (!site) {
+    d.append(el('p', 'plug-desc', '还没连上站点。插件是从站点取回来的 —— 连上之后这里会显示详情。'));
+  } else {
+    const bits = [];
+    bits.push(site.label ? `站点 ${site.label}` : '本站');
+    if (site.syncedAt) bits.push(`上次同步 ${new Date(site.syncedAt).toLocaleTimeString()}`);
+    d.append(el('p', 'plug-desc', bits.join(' · ')));
+
+    if (site.reason === 'old_daemon') {
+      d.append(el('p', 'why', '这个站点的守护进程太旧，不支持插件分发。'));
+    } else if (site.error) {
+      d.append(el('p', 'why', site.error));
+    } else {
+      const st = site.supported
+        ? '本站支持分发插件。'
+        : '本站没有说它支不支持分发插件。';
+      d.append(el('p', 'plug-desc',
+        st + (site.failed && site.failed.length
+          ? `这一轮有 ${site.failed.length} 个没装上，见下面的报错。` : '')));
+    }
+    // 记录读不出来 ⇒ **一个版本都不会被回收**。这是用户该知道的一件事：
+    // 他可能发现池子越来越大，而原因在这里。
+    if (site.recordOk === false) {
+      d.append(el('p', 'why',
+        '站点的插件记录读不出来（或者写不下去），所以这一轮**没有回收任何旧版本** —— '
+        + '不知道谁在引用的时候，唯一安全的动作是什么都不删。'));
+    }
+
+    const vs = site.versions || [];
+    if (vs.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'plug-vers';
+      for (const v of vs) {
+        const li = document.createElement('li');
+        li.append(el('code', 'plug-id', v.version));
+        li.append(document.createTextNode(v.wantedBy.length
+          ? `被 ${v.wantedBy.join('、')} 要`
+          : '没有任何站点要它（下次同步时会被回收）'));
+        ul.append(li);
+      }
+      d.append(el('p', 'plug-desc', '本机站点池里的版本：'));
+      d.append(ul);
+    }
+  }
+
+  const row = document.createElement('div');
+  row.className = 'plug-meta';
+  row.append(button('重新同步', () => syncPlugins()));
+  d.append(row);
+  box.append(d);
+}
+
+/**
+ * ── 待同意 ────────────────────────────────────────────────────────────────
+ *
+ * ★ **不是 `runnable` 的第五档。** WHY_NOT_RUNNABLE 那四句话说的是"这个插件
+ *   **起不来**的原因"，而"还没同意"是"**还没到手**" —— 与 `missing` 同一类。
+ *
+ * ★ **同意界面的措辞就是这一版唯一的安全边界**（进程隔离还没做）。所以它必须把
+ *   话说满：同意一个带客户端代码的插件 = 把你这台工作站的代码执行权交给集群管理员。
+ *   含糊的"是否信任此插件"会让用户以为自己在同意 A 而实际同意了 B —— 那正是这个
+ *   项目最恨的那类问题换了个地方出现。
+ */
+function renderConsent(pv) {
+  const box = $('plugin-consent');
+  box.textContent = '';
+  const list = pv.consent || [];
+  if (!list.length) return;
+
+  const d = document.createElement('div');
+  d.className = 'plug plug-consent';
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, `本站要给你 ${list.length} 个插件`));
+  d.append(head);
+  d.append(el('p', 'plug-desc',
+    '它们已经取回到本机并逐份核对过了，但**还没有装上去** —— 要你先点一下同意。'));
+
+  for (const c of list) {
+    const one = document.createElement('div');
+    one.className = 'plug-consent-item';
+    const h = document.createElement('div');
+    h.className = 'plug-head';
+    h.append(el('h3', null, c.title || c.name));
+    h.append(el('code', 'plug-id', c.name));
+    h.append(el('span', 'plug-ver', 'v' + c.version));
+    one.append(h);
+
+    const who = document.createElement('p');
+    who.className = 'why';
+    who.textContent = `来自 ${c.siteLabel || '本站'}，共 ${c.fileCount} 份文件。`;
+    one.append(who);
+
+    // ★ 第二次之后的同意要显示**变了什么**。只显示一个摘要等于什么也没说。
+    const digestLine = document.createElement('p');
+    digestLine.className = 'plug-desc';
+    if (c.previous) {
+      digestLine.textContent = c.previous.digest === c.digest
+        ? `内容摘要 ${c.digest}（与上次同意的一致）`
+        : `⚠ 内容摘要从 ${c.previous.digest} 变成了 ${c.digest} —— `
+          + '同一个版本号下的内容变了。请确认这是你要的，再决定。';
+    } else {
+      digestLine.textContent = `内容摘要 ${c.digest}`;
+    }
+    one.append(digestLine);
+
+    const warn = document.createElement('p');
+    warn.className = 'why';
+    warn.textContent = '同意之后，这个插件的客户端代码会在你这台机器上运行'
+      + '（与客户端同一个进程、同样的权限，目前**没有进程隔离**）。'
+      + '不确定来源时不要同意 —— 不同意的话，它在暂存里那一份会被删掉，站点上那份不受影响。';
+    one.append(warn);
+
+    const row = document.createElement('div');
+    row.className = 'plug-meta';
+    row.append(button('同意并装上', () => consentPlugin(c.id, c.version)));
+    row.append(button('不同意', () => rejectPlugin(c.id, c.version), 'ghost'));
+    one.append(row);
+    d.append(one);
+  }
+  box.append(d);
+}
+
+/**
+ * ── 开发者模式 ────────────────────────────────────────────────────────────
+ *
+ * ★ 勾上之后才出现「从目录安装…」「打开插件目录」「重新扫描」。于是"禁止自装"
+ *   在默认路径上是**真的**，而本机开发仍有一条说得出来的路。
+ */
+function renderDev(pv) {
+  const box = $('plugin-dev');
+  box.textContent = '';
+  const dev = pv.dev;
+  if (!dev) return;
+
+  const d = document.createElement('div');
+  d.className = 'plug plug-off';
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, '开发者'));
+  d.append(head);
+  d.append(el('p', 'plug-desc',
+    '插件默认**只认站点分发的那一份**。要自己写插件、从本地目录装，就打开下面这一项。'));
+
+  const lab = document.createElement('label');
+  lab.className = 'plug-toggle';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = dev.on !== false;
+  cb.disabled = Boolean(dev.forced);
+  cb.onchange = async () => {
+    cb.disabled = true;
+    try {
+      const r = await window.slurmate.setDevPlugins(cb.checked);
+      if (r && r.ok) renderPlugins(r.plugins);
+      else notice('error', (r && r.error) || '没能保存这个开关');
+    } finally {
+      cb.disabled = Boolean(dev.forced);
+    }
+  };
+  lab.append(cb);
+  lab.append(document.createTextNode('也加载本机插件目录（开发用）'));
+  d.append(lab);
+  if (dev.forced) {
+    d.append(el('p', 'plug-desc', '演示模式下这一项恒开。'));
+  }
+
+  if (dev.on && dev.poolDir) {
+    const p = document.createElement('p');
+    p.className = 'plug-desc';
+    p.append(document.createTextNode('本机插件目录：'));
+    p.append(el('code', 'plug-id', dev.poolDir));
+    d.append(p);
+    const row = document.createElement('div');
+    row.className = 'plug-meta';
+    row.append(button('从目录安装…', () => installPlugin()));
+    row.append(button('打开插件目录', () => openPluginDir(), 'ghost'));
+    row.append(button('重新扫描', () => rescanPlugins(), 'ghost'));
+    d.append(row);
+  }
+  box.append(d);
+}
+
+async function syncPlugins() {
+  const r = await window.slurmate.syncPlugins();
+  if (r && r.plugins) renderPlugins(r.plugins);
+  else notice('error', (r && r.error) || '重新同步失败');
+  syncPurposeVisibility();
+}
+
+async function consentPlugin(id, version) {
+  const r = await window.slurmate.consentPlugin(id, version);
+  if (r && r.plugins) renderPlugins(r.plugins);
+  if (!r || !r.ok) notice('error', (r && r.error) || '没能同意这个插件');
+  syncPurposeVisibility();
+}
+
+async function rejectPlugin(id, version) {
+  const r = await window.slurmate.rejectPlugin(id, version);
+  if (r && r.plugins) renderPlugins(r.plugins);
+  if (!r || !r.ok) notice('error', (r && r.error) || '没能处理这个插件');
 }
 
 /** 建一个按钮。CSP 里没有 unsafe-inline，所以一律走 class，一个 style 都不能有。 */
@@ -911,12 +1170,11 @@ function pluginBlock(p) {
   head.append(el('h3', null, p.title));
   head.append(el('code', 'plug-id', p.name));
   head.append(el('span', 'plug-ver', 'v' + p.version));
-  // ★ 这里此前有一句 `if (p.source === 'pool') … '站点分发'`。**基座不再自带任何
-  //   插件之后那句话恒为真、而且恒为假话** —— 池是唯一的来源，用户从本地目录装
-  //   进去的插件也会被标成"站点分发"。一个永远显示、且永远说错的标签，比没有标签
-  //   更糟：它让人以为自己在看两条不同的来源。
-  //   将来真的有了从站点取插件那条路（客户端会有第二个 root），再按当时的
-  //   `p.sources` 把标签加回来 —— 那时它才区分得开东西。
+  // ★ 来源标签：**由主进程算好**（`p.sourceLabel`），界面只画。
+  //   判定放在这里的话，它会和"有几个 root"这件事分家 —— 而那个判定曾经在只有
+  //   一个 root 的时候恒为真、且恒为假话（用户自己装进去的插件也标成"站点分发"）。
+  //   现在单来源时它是 null，于是**什么也不贴**。
+  if (p.sourceLabel) head.append(el('span', 'plug-src', p.sourceLabel));
   if (!p.hasClientCode) head.append(el('span', 'plug-ver', '声明式'));
   d.append(head);
 
@@ -1227,8 +1485,17 @@ async function init() {
   $('btn-probe').onclick = doProbe;
 
 
-  $('btn-plugin-add').onclick = () => installPlugin();
-  $('btn-plugin-rescan').onclick = () => rescanPlugins();
+  // ★ 「从目录安装…」「打开插件目录」「重新扫描」**不在这里绑** —— 它们只在
+  //   开发者模式那一节里出现（见 renderDev）。默认路径上"禁止自装"因此是真的。
+
+  // ★ 站点对账是后台跑的，跑完**主动推**一份新视图过来。不接这条的话，用户看到的
+  //   永远是连接那一刻的旧视图 —— 而"插件明明是站点说要给的、界面上却什么都没有"
+  //   正是这个功能最该避免的那句话。
+  window.slurmate.onPlugins((pv) => {
+    if (!pv) return;
+    renderPlugins(pv);
+    syncPurposeVisibility();
+  });
 
   $('btn-doctor').onclick = async () => {
     const r = await window.slurmate.doctor();

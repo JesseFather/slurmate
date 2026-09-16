@@ -26,14 +26,23 @@ contextBridge.exposeInMainWorld('slurmate', {
 
   // ── 插件 ──
   //
-  // 插件装在**池**里（`~/.slurmate/plugins/`），基座自己不带任何插件 ——
-  // 一个都没有是正常状态。装与卸都在这里，界面把它们摆在"本机没有插件"的空态里，
-  // 那条空态正是用户第一次打开客户端时看到的。
+  // ★ 插件默认**只认站点分发的那一份**：连上站点之后由 `syncPlugins` 取回来，
+  //   落在 `~/.slurmate/site-plugins/`。本机自己的池（`~/.slurmate/plugins/`）
+  //   要 `setDevPlugins(true)` 打开开发者模式才加载 —— 下面那三个入口是**开发者
+  //   模式专用**的，界面上勾上之后才出现。
+  //
+  // ★ 带客户端代码的站点插件要用户点一次同意才加载（`consentPlugin`）。同意闸的
+  //   落点在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
   installPlugin: (srcDir) => ipcRenderer.invoke('app:installPlugin', srcDir),
   uninstallPlugin: (id, version) => ipcRenderer.invoke('app:uninstallPlugin', id, version),
   // 用户手工往池里放了东西之后，不用重启客户端。
   rescanPlugins: () => ipcRenderer.invoke('app:rescanPlugins'),
   openPluginDir: () => ipcRenderer.invoke('app:openPluginDir'),
+  // 站点分发：手动对一次账 / 同意 / 不同意 / 开发者模式开关。
+  syncPlugins: () => ipcRenderer.invoke('app:syncPlugins'),
+  consentPlugin: (id, version) => ipcRenderer.invoke('app:consentPlugin', id, version),
+  rejectPlugin: (id, version) => ipcRenderer.invoke('app:rejectPlugin', id, version),
+  setDevPlugins: (on) => ipcRenderer.invoke('app:setDevPlugins', on),
 
   // ── 布局组 ──
   //
@@ -106,5 +115,13 @@ contextBridge.exposeInMainWorld('slurmate', {
     const h = (_e, notice) => fn(notice);
     ipcRenderer.on('ui:notice', h);
     return () => ipcRenderer.removeListener('ui:notice', h);
+  },
+  // ★ 站点对账是**后台**跑的（连上之后才开始，一次一份，真集群上一份就是一次
+  //   `ssh` exec）。不推的话，用户看到的是连接那一刻的旧视图 —— 而"插件明明是
+  //   站点说要给的、界面上却什么都没有"正是这个功能最该避免的那句话。
+  onPlugins: (fn) => {
+    const h = (_e, view) => fn(view);
+    ipcRenderer.on('ui:plugins', h);
+    return () => ipcRenderer.removeListener('ui:plugins', h);
   },
 });

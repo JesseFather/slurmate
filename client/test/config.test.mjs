@@ -47,7 +47,7 @@ const conn = (over = {}) => ({
 test('空目录加载出默认配置', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 5);
+  assert.equal(cfg.schema, 6);
   assert.deepEqual(cfg.connections, []);
   assert.equal(cfg.activeConnectionId, null);
   assert.deepEqual(cfg.hostKeys, {});
@@ -76,7 +76,7 @@ test('损坏的配置文件回落到默认值而不是崩溃', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), '{ 这不是 JSON');
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 5);
+  assert.equal(cfg.schema, 6);
   assert.deepEqual(cfg.connections, []);
 });
 
@@ -391,7 +391,7 @@ test('★ 升级：旧的 slots 迁移成**一个**组，所有连接都指着�
   // 旧字段自然消失（只认已知键，不写回）。留着它，将来读这份配置的人
   // 会以为它还有用，去代码里找一个早就不存在的行为。
   assert.equal(cfg.slots, undefined);
-  assert.equal(cfg.schema, 5);
+  assert.equal(cfg.schema, 6);
 });
 
 /** 丢掉模块缓存再 require 一次 —— 模拟「重启客户端」。 */
@@ -655,7 +655,7 @@ test('★ 旧版本的**全局**密钥被搬到每一条连接上（用户不必
 
   // 旧格式那两个字段不再留着，否则每读一次都会以为还有一份没搬完
   const raw = JSON.parse(fs.readFileSync(secretsOf(dir), 'utf8'));
-  assert.equal(raw.schema, 5);
+  assert.equal(raw.schema, 6);
   assert.equal(raw.data, undefined);
   assert.equal(raw.mode, undefined);
 });
@@ -730,4 +730,65 @@ test('原子写：写入过程中不会留下半截文件', () => {
   config.saveConfig(dir, cfg);
   const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.tmp.'));
   assert.deepEqual(leftovers, [], '不应当留下临时文件');
+});
+
+// ── 站点分发的配置：台账 + 开发者模式（schema 6）─────────────────────────────
+
+test('★ 同意台账只收**形状完整**的条目 —— 残缺的丢掉比留着安全', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 6,
+    trustedPlugins: {
+      'good@1.0.0': { digest: 'a'.repeat(64), site: 'u@h:22', at: 1 },
+      // 短摘要：**绝不能**被当成"已经同意过" —— 那样真正的那份内容从来没被核对过
+      'short@1.0.0': { digest: 'a'.repeat(16), site: 'u@h:22', at: 1 },
+      // 缺 digest
+      'nodigest@1.0.0': { site: 'u@h:22' },
+      // 对面自报的、根本不是十六进制的东西
+      'weird@1.0.0': { digest: 'Z'.repeat(64), site: 'u@h:22' },
+      // 没有来源站点
+      'nosrc@1.0.0': { digest: 'b'.repeat(64) },
+      'notobj@1.0.0': 'yes',
+    },
+  }));
+  const cfg = config.loadConfig(dir);
+  assert.deepEqual(Object.keys(cfg.trustedPlugins), ['good@1.0.0'],
+    '★ 只留形状完整的那一条 —— 丢掉 = 回到"要重新点一次同意"，那是安全的那一侧');
+  assert.equal(config.isTrusted(cfg, 'good', '1.0.0', 'a'.repeat(64)), true);
+  assert.equal(config.isTrusted(cfg, 'good', '1.0.0', 'b'.repeat(64)), false,
+    '摘要对不上就是不认识');
+  assert.equal(config.isTrusted(cfg, 'good', '2.0.0', 'a'.repeat(64)), false,
+    '★ 键里带**版本**：新版本是另一份构件，要重新同意');
+});
+
+test('★ 写台账：摘要必须是全长的，短的要被拒', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  assert.deepEqual(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'short', 's').ok, false,
+    '★ 台账不接受自报的短摘要 —— 拿 16 位当键就是一个 64 位的碰撞面');
+  assert.deepEqual(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'A'.repeat(64), 's').ok, false,
+    '大写十六进制也不收（判据要逐字符一样）');
+  assert.equal(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'c'.repeat(64), 's').ok, true);
+  // 落盘了才算数 —— 不落盘的话下次启动会再问一遍
+  const again = config.loadConfig(dir);
+  assert.equal(config.isTrusted(again, 'x', '1.0.0', 'c'.repeat(64)), true);
+});
+
+test('★ 开发者模式：缺省**关着**，且只认布尔值', () => {
+  const dir = tmpdir();
+  assert.equal(config.DEFAULTS.devPlugins, false,
+    '★ 缺省必须是 false —— 插件默认只认站点分发的那一份');
+  assert.equal(config.loadConfig(dir).devPlugins, false);
+
+  // 配置文件是用户可以手改的，而 `"devPlugins": "no"` 这样的字符串会被 `if (x)` 判真
+  fs.writeFileSync(path.join(dir, 'config.json'),
+    JSON.stringify({ schema: 6, devPlugins: 'no' }));
+  assert.equal(config.loadConfig(dir).devPlugins, false, '认不出的形状丢掉 = 回到安全的那一侧');
+
+  const cfg = config.loadConfig(tmpdir());
+  const d2 = tmpdir();
+  config.setDevPlugins(d2, cfg, true);
+  assert.equal(config.loadConfig(d2).devPlugins, true, '打开要落盘');
+  config.setDevPlugins(d2, cfg, false);
+  assert.equal(config.loadConfig(d2).devPlugins, false);
 });

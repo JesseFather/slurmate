@@ -23,8 +23,21 @@
  *   铸造 id 的 ulid.js、以及安装器。一个插件都没有，这是**正常状态**，不是
  *   安装包坏了。
  *
- *   插件来自**池**：`~/.slurmate/plugins/`。装进去的路径只有一条（install.js），
- *   而将来站点分发走的也是它 —— 分发只是把文件先落到本地临时目录再调它。
+ * ── 两个根，两条来路 ─────────────────────────────────────────────────────────
+ *
+ *   `~/.slurmate/site-plugins/`   站点池。**站点拥有的**：文件由站点的 `plugin_file`
+ *                                 一个一个取回来（见 site-plugins.js），对账时会按
+ *                                 引用计数回收不再被任何站点要的版本。
+ *   `~/.slurmate/plugins/`        本机池。**用户拥有的**：安装器（install.js）写进去，
+ *                                 或者用户直接拷进去。默认**不加载**，要开发模式开关。
+ *
+ * ★ 两个根不是洁癖：回收只该删**站点拥有的**那些，而用户手装的那一份不在任何站点
+ *   记录里、引用数天然是 0 —— 合并成一个目录就等于"回收会把用户自己的东西删掉"。
+ *
+ * ★ 分发**不走** `installFrom`。那个函数的语义是"用户挑的目录装进用户自己的池"，
+ *   与分发的语义（站点说了算、按引用计数回收、换入前要过同意闸）相反。分发落在
+ *   **另一个根**上，走 site-plugins.js 那条路。照这条注释去复用 installFrom 的人，
+ *   会把"拒绝覆盖内容不同的同版本"当成一个 bug。
  *
  * ── ★ 身份是「铸造」出来的，不是「起名」出来的 ──────────────────────────────
  *
@@ -58,10 +71,25 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const vm = require('vm');
 const ulid = require('./ulid.js');
 
 const MANIFEST = 'plugin.json';
 const CLIENT_ENTRY = path.join('client', 'index.js');
+
+/**
+ * 一个插件目录里**不算插件**的东西：版本控制的内部状态，以及"依赖"那一类。
+ *
+ * ★ **这个集合全仓只有这一份。** 安装器（install.js）从这里引，因为它要靠同一份
+ *   集合决定"拷哪些过去"；而摘要（digestOf）也靠它决定"算哪些"——两边不一致的
+ *   症状是安装器永远说"内容不一样"，而原因一个字都指不出来。
+ *
+ * ★ 它还与**集群侧**那一份逐字对应（`cluster/slurmate-sessiond` 的
+ *   `PLUGIN_COPY_SKIP`）。两处分别在 JS 和 Python 里，没有共享机制 —— 所以
+ *   `.github/workflows/checks.yml` 里有一条 lint 逐项比对。不上 CI 的话，这条
+ *   约定会在第一次有人加一个 `.vscode` 的时候断掉，而症状是"同步永远失败"。
+ */
+const COPY_SKIP = new Set(['.git', '.github', '.gitignore', '.gitattributes', 'node_modules']);
 
 /** route() 认不出来时的答案。**不是**一个能提交的服务，只是客户端内部的一个
  *  判定结果 —— 所以它不可能与任何插件的名字撞上（短名里不允许出现它）。 */
@@ -140,16 +168,80 @@ function hostVersion() {
 // ── 加载 ────────────────────────────────────────────────────────────────────
 
 /**
- * 内容摘要：清单 + 客户端代码。
+ * 走一遍插件目录，列出它的**组成**。**不执行任何代码。**
  *
- * 这是「同一个构件」的判据。**不包含目录名**（目录名不参与判定）、不包含
- * 站点签名（签名的内容正是这个摘要）。池里两条摘要相同的记录是同一个东西，
- * 摘要不同就是两个东西在抢同一个 `(id, 版本)`。
+ * 返回按相对路径（`/` 分隔）排序的数组，每项：
+ *   `{path, kind:'f'|'l'|'d', mode, size, sha256, link}`
+ *
+ * ★ 这是摘要的原料，也是"这两棵树是不是同一棵"的唯一判据，所以规格必须写死：
+ *
+ *   · **`COPY_SKIP` 里的东西不进清单** —— 与安装器拷什么、与集群侧发什么，三处
+ *     靠同一个集合对齐（见 COPY_SKIP）。
+ *   · **符号链接进去，但不跟随**：记的是 `readlink` 那个**目标字符串**。跟随的话
+ *     "A 里是链接、B 里是内容恰好等于目标串的普通文件"这两棵树会算出同一个摘要，
+ *     而它们的行为天差地别（一个加载 y.js，一个导出一个字符串）。
+ *   · **权限位进摘要**（`0644` vs `0755`）。不记的话"摘要相同 ⇒ 树相同"就是假的。
+ *   · **空目录也进清单**（kind `d`）。否则"只差一个空目录"的两棵树摘要相同 ——
+ *     而安装器的 `copyTree` 会把它建出来，两边对不上。
+ *
+ * ★ 读不动就**抛**，不吞。吞掉的后果是"一棵树的摘要"变成"一棵残树的摘要"——
+ *   那正是这个项目里反复出现的那类谎话，而且它在摘要这一层最不容易被发现。
  */
-function digestOf(manifestRaw, clientRaw) {
+function readPluginFiles(dir) {
+  const out = [];
+  const walk = (abs, rel) => {
+    for (const name of fs.readdirSync(abs).sort()) {
+      if (COPY_SKIP.has(name)) continue;
+      const full = path.join(abs, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = fs.lstatSync(full);
+      if (st.isSymbolicLink()) {
+        out.push({ path: r, kind: 'l', mode: st.mode & 0o7777, size: 0,
+                   sha256: null, link: fs.readlinkSync(full) });
+      } else if (st.isDirectory()) {
+        const before = out.length;
+        walk(full, r);
+        if (out.length === before) {
+          out.push({ path: r, kind: 'd', mode: st.mode & 0o7777, size: 0,
+                     sha256: null, link: null });
+        }
+      } else if (st.isFile()) {
+        const buf = fs.readFileSync(full);
+        out.push({ path: r, kind: 'f', mode: st.mode & 0o7777, size: buf.length,
+                   sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+                   link: null });
+      }
+    }
+  };
+  walk(dir, '');
+  out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return out;
+}
+
+/**
+ * 整目录的内容摘要 —— 「同一个构件」的判据。
+ *
+ * ★ 它从"清单 + 客户端代码两个文件"变成"整棵目录"是有硬理由的：只比那两个文件
+ *   时，**多出来一个文件摘要不变**。两棵这样的树会被判成同一个构件而合并，于是
+ *   "用户同意的"与"实际加载的"可以不是同一棵树。
+ *
+ * 字段之间用 `\0` 分隔而不是空格：路径里可以有空格，用空格分字段的话
+ * `"a 644 3 x"` 这样的路径名能让两条不同的记录拼出同一个串。
+ * 路径里不可能有 `\0`（它来自 `readdir`），所以 `\0` 分隔是无歧义的。
+ *
+ * ★ **不包含目录名**（目录名不参与任何判定）、不包含站点签名（签名的内容正是
+ *   这个摘要）。池里两条摘要相同的记录是同一个东西，摘要不同就是两个东西在抢
+ *   同一个 `(id, 版本)`。
+ */
+function digestOf(files) {
   const h = crypto.createHash('sha256');
-  h.update('manifest\0'); h.update(manifestRaw); h.update('\0');
-  h.update('client\0'); h.update(clientRaw === null ? '' : clientRaw);
+  for (const f of files) {
+    h.update(f.kind); h.update('\0');
+    h.update(f.path); h.update('\0');
+    h.update(String(f.mode)); h.update('\0');
+    h.update(String(f.size)); h.update('\0');
+    h.update(f.sha256 || f.link || ''); h.update('\n');
+  }
   return h.digest('hex');
 }
 
@@ -159,12 +251,23 @@ function keysProblem(obj, allowed, what) {
 }
 
 /**
- * 读一个插件目录。返回 `{ plugin }` 或 `{ error }`。
+ * 读一个插件目录的**组成**（清单 + 文件清单 + 摘要）。返回 `{ entry }` 或 `{ error }`。
+ *
+ * ★ **这个函数绝不执行插件代码。** 它读清单、逐字段校验，把 `client/index.js`
+ *   读成文本并**只做语法检查**（`vm.Script` 编译，不运行），再走一遍目录算摘要。
+ *   真正的 `require()` 在 `activatePlugin()` 里。
+ *
+ *   ★ 两趟分开**不是整洁，是同意闸能成立的前提**。这个函数曾经在读到
+ *     `client/index.js` 时当场 `delete require.cache[...]; require(clientPath)` ——
+ *     于是"对账结束才 reload()、没同意的不激活"这句话是**空的**：只要末尾调了
+ *     `reload()`，远端代码在用户看到对话框之前就已经在主进程里跑完了，点"不同意"
+ *     什么也拦不住。所以 `inspectDir` 可以跑在**任何**目录上（包括没同意的），
+ *     而 `activatePlugin` 只跑在过了闸的那些上。
  *
  * ★ 每一步失败都**说清是哪个文件的哪个键**。这个函数的报错是"加了插件它就是不
  *   生效"这个症状的**唯一**线索来源，含糊的报错等于没有报错。
  */
-function loadDir(dir, source) {
+function inspectDir(dir, source) {
   const mfPath = path.join(dir, MANIFEST);
   let raw;
   try {
@@ -312,9 +415,10 @@ function loadDir(dir, source) {
 
   // 客户端代码 —— 可有可无。没有它就是**纯声明式插件**：框架按 contributes
   // 打开界面，不需要执行任何来自插件的代码。
+  //
+  // ★ 这里**只读、只编译，不 require**。见函数头的说明。
   const clientPath = path.join(dir, CLIENT_ENTRY);
   let clientRaw = null;
-  let hooks = {};
   let hasClientCode = false;
   try {
     clientRaw = fs.readFileSync(clientPath, 'utf8');
@@ -325,33 +429,23 @@ function loadDir(dir, source) {
     }
   }
   if (hasClientCode) {
-    let mod;
+    // 语法错要在**装之前**就查出来。放到 activatePlugin 里查的话，"文件都下来了"
+    // 会被当成对账成功，而真正的失败要等到 reload 才以一句"加载失败"出现 ——
+    // 那时用户面对的是"同步完成了但插件没出现"，两件事分不开。
     try {
-      // 每次都重新加载：注册表可能在同一次运行里被重建（测试会这么用），
-      // 而 require 的缓存会让"删掉插件文件"在进程内看起来毫无效果。
-      delete require.cache[require.resolve(clientPath)];
-      mod = require(clientPath);
+      new vm.Script(clientRaw, { filename: clientPath });
     } catch (e) {
-      return { error: `${clientPath}：加载失败（${e.message}）` };
+      return { error: `${clientPath}：语法错（${e.message}）` };
     }
-    if (!mod || typeof mod !== 'object' || Array.isArray(mod)) {
-      return { error: `${clientPath}：必须导出一个对象（可以一个钩子都不写）` };
-    }
-    why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
-    if (why) return { error: `${clientPath}：${why}` };
-    for (const k of ['prepare', 'attach', 'preferredPort']) {
-      if (mod[k] !== undefined && typeof mod[k] !== 'function') {
-        return { error: `${clientPath}：${k} 必须是一个函数` };
-      }
-    }
-    if (mod.closeWarning !== undefined) {
-      const cw = mod.closeWarning;
-      if (!cw || typeof cw.message !== 'string' || typeof cw.detail !== 'string') {
-        return { error: `${clientPath}：closeWarning 必须是 {message, detail} 两个字符串` };
-      }
-    }
-    hooks = mod;
   }
+
+  let files;
+  try {
+    files = readPluginFiles(dir);
+  } catch (e) {
+    return { error: `读不到 ${dir} 里的文件：${e.message}` };
+  }
+  const digest = digestOf(files);
 
   const plugin = {
     // ── 清单（身份与声明）──
@@ -370,16 +464,89 @@ function loadDir(dir, source) {
     },
     // ── 加载记录 ──
     dir,
-    source,                                  // 本版只有 'pool'；见下面 loadRoot 的说明
+    source,
     hasClientCode,
-    digest: digestOf(raw, clientRaw).slice(0, 16),
+    // ★ **全长** 64 位。截断只留给显示（见 shortDigest）—— 摘要在台账里是判据，
+    //   拿 64 位当键就是一个 64 位的碰撞面。
+    digest,
+    /**
+     * 这个插件的代码**现在允不允许加载**。
+     *
+     * `false` = 它出现在 `list()` 里（用户要看得见、要能点同意），但**不带任何钩子**，
+     * 也**绝不进会话解析路径**（`resolve()` 会拒绝它）。见 Registry 的 allows。
+     */
+    active: true,
     // ── 客户端代码的钩子（全都可以没有）──
-    prepare: hooks.prepare || null,
-    attach: hooks.attach || null,
-    preferredPort: hooks.preferredPort || null,
-    closeWarning: hooks.closeWarning || null,
+    prepare: null, attach: null, preferredPort: null, closeWarning: null,
   };
-  return { plugin };
+  return { entry: { plugin, dir, source, files, digest,
+                    clientPath: hasClientCode ? clientPath : null } };
+}
+
+/** 显示用的短摘要。**只用于显示** —— 判据一律用全长的那个。 */
+function shortDigest(d) {
+  return typeof d === 'string' ? d.slice(0, 16) : String(d);
+}
+
+/**
+ * 第二趟：真的把 `client/index.js` `require()` 进来，建出带钩子的插件对象。
+ *
+ * ★ **这一趟就是执行。** 它只允许跑在过了同意闸（或本来就不需要闸）的目录上 ——
+ *   调用点见 Registry.reload。
+ *
+ * ★ 单项失败**不抛**，返回 `{error}`：一个坏插件不许把整次扫描带崩。
+ */
+function activatePlugin(entry) {
+  if (!entry.clientPath) return { plugin: entry.plugin };
+
+  let mod;
+  try {
+    // 每次都重新加载：注册表可能在同一次运行里被重建（测试会这么用），
+    // 而 require 的缓存会让"删掉插件文件"在进程内看起来毫无效果。
+    delete require.cache[require.resolve(entry.clientPath)];
+    mod = require(entry.clientPath);
+  } catch (e) {
+    return { error: `${entry.clientPath}：加载失败（${e.message}）` };
+  }
+  if (!mod || typeof mod !== 'object' || Array.isArray(mod)) {
+    return { error: `${entry.clientPath}：必须导出一个对象（可以一个钩子都不写）` };
+  }
+  const why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
+  if (why) return { error: `${entry.clientPath}：${why}` };
+  for (const k of ['prepare', 'attach', 'preferredPort']) {
+    if (mod[k] !== undefined && typeof mod[k] !== 'function') {
+      return { error: `${entry.clientPath}：${k} 必须是一个函数` };
+    }
+  }
+  if (mod.closeWarning !== undefined) {
+    const cw = mod.closeWarning;
+    if (!cw || typeof cw.message !== 'string' || typeof cw.detail !== 'string') {
+      return { error: `${entry.clientPath}：closeWarning 必须是 {message, detail} 两个字符串` };
+    }
+  }
+  return {
+    plugin: {
+      ...entry.plugin,
+      prepare: mod.prepare || null,
+      attach: mod.attach || null,
+      preferredPort: mod.preferredPort || null,
+      closeWarning: mod.closeWarning || null,
+    },
+  };
+}
+
+/**
+ * 读 + 激活，一趟做完。
+ *
+ * ★ 只给**完全信得过**的调用方：安装器读"用户自己挑的那一个目录"、卸载前核对
+ *   目录里到底是什么。**分发的路径不许用它** —— 那条路上第一趟与第二趟之间夹着
+ *   一个同意对话框。
+ */
+function loadDir(dir, source) {
+  const r = inspectDir(dir, source);
+  if (r.error) return r;
+  const a = activatePlugin(r.entry);
+  return a.error ? a : { plugin: a.plugin, entry: r.entry };
 }
 
 function isDir(p) {
@@ -427,21 +594,35 @@ function findPluginDirs(base) {
 }
 
 /**
- * 扫一个根目录。根目录不存在**不是错误**。
+ * 扫一个根目录，返回 `[{plugin}|{error}]`。根目录不存在**不是错误**。
  *
  * 池目录（`~/.slurmate/plugins/`）在用户装第一个插件之前本来就不存在 —— 为一个
  * 还没用上的功能天天报一条错是噪音。**客户端一个插件都没装是正常状态**，不是
  * 安装包坏了。
+ *
+ * @param {Function} allows  `allows(entry) → boolean`：这个目录现在允许加载吗。
+ *
+ *   ★ **对每一个目录都问，没有例外。** 不给"纯声明式插件免同意"开口子：一个恶意
+ *     的 `plugin.json` 也在往这台机器上放东西（`contributes.login` 能让客户端往
+ *     一个 URL POST 一个口令 —— 那是**数据**不是代码，但仍然是站点的指令），
+ *     而**规则一有分支，绕过它的路就会长出来**。
  */
-function loadRoot(root) {
+function scanRoot(root, allows) {
   const out = [];
   // 根的路径**可以是函数**：客户端的池目录依赖「配置目录」，而那个要等 app ready
   // 之后才知道 —— 在模块加载期就算出来的话，第一次运行会算出一个 null 路径。
   const base = typeof root.dir === 'function' ? root.dir() : root.dir;
+
+  // ★ `null` = **这个根这次不加载**，是一个静默的合法状态（本机池要开发者模式
+  //   开关才加载）。它与"路径还没准备好"是两件事，别合并：`''` / 未定义是一次
+  //   **真的没算出来**（要报），`null` 是**有意为之**（报了就是噪音，而且会让
+  //   默认配置看起来像坏的）。
+  if (base === null) return out;
   if (typeof base !== 'string' || !base) {
     out.push({ error: `插件根目录 ${root.source} 的路径还没准备好` });
     return out;
   }
+
   let dirs;
   try {
     dirs = findPluginDirs(base);
@@ -451,21 +632,46 @@ function loadRoot(root) {
     return out;
   }
   for (const { dir, label } of dirs) {
-    const r = loadDir(dir, root.source);
-    out.push(r.error ? { error: `${label}：${r.error.replace(`${dir}：`, '')}` } : r.plugin);
+    const r = inspectDir(dir, root.source);
+    if (r.error) {
+      out.push({ error: `${label}：${r.error.replace(`${dir}：`, '')}` });
+      continue;
+    }
+    // ★ 同意闸的落点。**没被允许 ⇒ 停在第一趟**：插件照样出现在 list() 里
+    //   （用户要看得见它、要能点同意），但**一个钩子都没有**，`active` 为 false，
+    //   于是 `resolve()` 会拒绝它 —— 宁可不做，也不能拿半个插件去接一个会话。
+    if (!allows(r.entry)) {
+      out.push({ plugin: { ...r.entry.plugin, active: false }, label });
+      continue;
+    }
+    const a = activatePlugin(r.entry);
+    out.push(a.error
+      ? { error: `${label}：${a.error.replace(`${dir}：`, '')}` }
+      : { plugin: a.plugin, label });
   }
   return out;
 }
 
 class Registry {
   /**
-   * @param {Array<{dir:string|Function, source:string}>} [roots]
+   * @param {Array<{dir:string|Function|null, source:string}>} [roots]
    *   **省略 = 一个插件都没有**，这是诚实默认值：基座自己不带任何插件。
-   *   `dir` 可以是函数 —— 池目录要等 app ready 之后才算得出来（见 loadRoot）。
+   *
+   *   `dir` 可以是函数，而且**可以返回 `null`** —— 那表示"这个根这次不加载"
+   *   （见 scanRoot）。本机池就靠它挂在开发者模式开关上。
+   *
+   *   ★ 根的**集合**是构造期固定下来的，能变的只有"这次加不加载"。所以增删一个
+   *     根不需要 `setRoots` 那种入口 —— 也不该重建 Registry：重建会清掉 `notices`，
+   *     用户会把已经看过的通知重看一遍。
+   *
+   * @param {object} [opts]
+   *   allows {Function} `allows(entry) → boolean`：这个目录的代码现在允许加载吗。
+   *   **默认恒真** —— 本机池、安装器、测试都不受影响；只有站点分发那条路会传它。
    */
-  constructor(roots) {
+  constructor(roots, opts = {}) {
     this.roots = (roots || [])
       .filter((r) => r && (typeof r.dir === 'string' || typeof r.dir === 'function'));
+    this.allows = typeof opts.allows === 'function' ? opts.allows : () => true;
     this.plugins = new Map();      // `<id>@<版本>` → plugin
     this.errors = [];
     /** 每个插件**各自**的上次通知键。见 once()。 */
@@ -483,9 +689,9 @@ class Registry {
     const found = [];
     const errors = [];
     for (const root of this.roots) {
-      for (const item of loadRoot(root)) {
+      for (const item of scanRoot(root, this.allows)) {
         if (item.error) errors.push(item.error);
-        else found.push(item);
+        else found.push(item.plugin);
       }
     }
 
@@ -507,15 +713,19 @@ class Registry {
     for (const [key, group] of [...byKey.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
       const digests = [...new Set(group.map((p) => p.digest))];
       if (digests.length > 1) {
-        const where = group.map((p) => `${p.dir}（摘要 ${p.digest}）`).join('、');
+        const where = group.map((p) => `${p.dir}（摘要 ${shortDigest(p.digest)}）`).join('、');
         errors.push(`${key}：有 ${group.length} 份内容不同的副本在抢同一个 id 和版本`
           + ` —— 都没有加载。${where}。`
           + '这多半是有人抄了别人的 id，或者改了插件却没升版本号。'
           + '删掉多余的那一份，或者给改过的那份换一个新 id 再试。');
         continue;
       }
-      // 摘要一致 → 同一构件。保留第一个（roots 顺序：内建在前），记下全部来源。
-      const first = group[0];
+      // 摘要一致 → 同一构件，合并成一条（只多记一个来源）。
+      //
+      // 保留哪一个：优先**带钩子的**那个。摘要相同意味着两棵树的字节一样，所以
+      // "哪一份"在内容上无所谓；但它们在**闸门**上可能不同 —— 站点池那一份可能
+      // 还在等同意，而本机池那一份早就激活了。挑错了会把一个能用的插件变成不可用。
+      const first = group.find((p) => p.active !== false) || group[0];
       plugins.set(key, {
         ...first,
         sources: [...new Set(group.map((p) => p.source))].sort(),
@@ -610,7 +820,10 @@ class Registry {
       const version = at > 0 ? servicePlugin.slice(at + 1) : '';
       if (ulid.isId(id) && VERSION_RE.test(version)) {
         const p = this.get(id, version);
-        return p ? { plugin: p, why: null } : { plugin: null, why: this.missing(id, version) };
+        if (!p) return { plugin: null, why: this.missing(id, version) };
+        return p.active === false
+          ? { plugin: null, why: inertWhy(p) }
+          : { plugin: p, why: null };
       }
       return { plugin: null, why: `控制节点给的插件标识 ${JSON.stringify(servicePlugin)} 认不出来` };
     }
@@ -635,7 +848,11 @@ class Registry {
     //   两个不同的东西（各自有各自的 id）。所以判据从"是不是内建"换成
     //   **"是不是唯一"** —— 命中多个就不猜，说出来让用户自己判断。
     const hits = this.list().filter((x) => x.name === serviceKind);
-    if (hits.length === 1) return { plugin: hits[0], why: null };
+    if (hits.length === 1) {
+      return hits[0].active === false
+        ? { plugin: null, why: inertWhy(hits[0]) }
+        : { plugin: hits[0], why: null };
+    }
     return {
       plugin: null,
       why: hits.length
@@ -669,6 +886,18 @@ class Registry {
 }
 
 /**
+ * 「这个插件在，但它的代码不许加载」那句话。
+ *
+ * ★ 与「本机没有这个插件」**必须分得开**：一个是"去装/去同步"，一个是"去点同意"，
+ *   而它们在界面上、在这个函数里长得都很像。含糊的一句"未知服务"会让用户以为
+ *   插件没装上，跑去重新同步 —— 而同步本来就已经成功了。
+ */
+function inertWhy(p) {
+  return `本机有 ${p.displayName} ${p.version}（${p.name}），但它的客户端代码`
+    + '还没有经过你的同意，所以没有加载。在插件那一栏点一下同意就能用它。';
+}
+
+/**
  * 去重桶的名字。
  *
  * ★ 带上**版本**，不是只用 id：池里可以并存同一个插件的多个版本，而"这个版本的
@@ -685,4 +914,6 @@ function bucketOf(plugin) {
 
 module.exports = {
   Registry, UNKNOWN, bucketOf, loadDir, satisfies, cmpVer, parseVer, hostVersion,
+  // ── 站点分发那条路要用的（见 site-plugins.js）──
+  COPY_SKIP, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
 };
