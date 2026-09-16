@@ -42,12 +42,27 @@
 #        plugin.json                   清单：身份、版本、站点侧声明
 #        job/start.sh                  作业侧代码
 #
-#  安装 + 校验（用守护进程自己的扫描器）+ **编织**进 run.sbatch，都在这里做完。
-#  ★ 编织是刻意的：作业模板装到 <prefix>/share/slurmate/ 之后是**单文件、零运行时
+#  安装 + 校验（用守护进程自己的扫描器）+ **逐插件编织**，都在这里做完。
+#
+#  ★ **一个插件一份作业脚本**，装到：
+#
+#      <prefix>/share/slurmate/jobs/<ULID>.sbatch
+#
+#    文件名是插件清单里的 `id`（ULID）—— 它是插件的**身份**，全球唯一、铸造
+#    出来就不变；短名只是本站的标签，可以改。目录列表里那一串 ULID 各自对应哪个
+#    插件，看完成摘要那张表，或让 `slurmate-sessiond --check` 再打印一遍。
+#
+#    为什么一插件一份、不是所有插件织进同一份：同处一个文件时，插件里任何一行
+#    **不在函数里**的代码都会待在主流程中间，在**每一个**作业里执行，不管用的是
+#    哪个插件。拆开之后，一个插件的代码连"被另一个插件的作业解析到"的机会都没有。
+#
+#  ★ 编织（而不是运行时 source）是刻意的：装出来的每一份都是**单文件、零运行时
 #    依赖**，计算节点不需要能看见那个目录。理由与失败形态见 cluster/run.sbatch 的
-#    文件头。
+#    文件头。**拆成 N 份没有改变这一点** —— 仍然是部署期把内容写进文件。
 #
 #  一个插件都没有是**合法状态**：传一个空目录给 --plugins-src 即可。
+#  一个插件**没有 job/start.sh** 也是合法的：它装得上、看得见，但提交不了
+#  （守护进程在提交时报 service_kind_no_job），本脚本跳过它、不生成作业脚本。
 #
 # ==============================================================================
 
@@ -74,7 +89,17 @@ SCRIPT_PATH="${SLURMATE_ORIG_SCRIPT:-$SELF_SCRIPT}"
 DAEMON="/usr/local/sbin/slurmate-sessiond"
 CLI="/usr/local/bin/slurmate"
 SHARE_DIR="/usr/local/share/slurmate"
-JOBSH="${SHARE_DIR}/run.sbatch"
+# 作业脚本目录。守护进程按**自己的安装位置**推导出同一个路径
+# （slurmate-sessiond 的 default_jobs_dir），两边由同一个前缀推导。
+#
+# ★ 里面是**一插件一份**的编织成品，文件名是插件的 ULID：`<ULID>.sbatch`。
+#   本目录 100% 由本脚本生成，没有任何人写的东西 —— 所以陈旧文件的清理可以
+#   直接按"不在这次的集合里"删掉，与 PLUGINS_DIR 不同（那里要更小心，因为
+#   插件目录是别人 clone 来的项目）。
+#
+# ★ 权限必须是 0755（见下面 chmod 那一处）：里面的脚本由**提交作业的用户**
+#   身份的 sbatch 读取。0700 的表现是 sbatch 报"读不到文件"，指不回权限。
+JOBS_DIR="${SHARE_DIR}/jobs"
 # 插件安装目录。守护进程按**自己的安装位置**推导出同一个路径
 # （slurmate-sessiond 的 default_plugins_dir），两边由同一个前缀推导，
 # 就不存在「守护进程扫 A、作业脚本编织的是 B」这种只在提交时才炸的不一致。
@@ -83,6 +108,10 @@ PLUGINS_DIR="${SHARE_DIR}/plugins"
 # 否则「把插件目录移走再部署」这个最自然的卸载动作会**静默无效**，而用户看到的
 # 是"它还在"。
 PLUGINS_MARKER="${PLUGINS_DIR}/.deployed"
+# 同上，但记的是本脚本生成过哪几份作业脚本（每行一个 ULID）。插件的源目录没了、
+# 插件被拿走了，对应那份 <ULID>.sbatch 要跟着删掉 —— 否则它会留下一份**无主的、
+# 仍然可以被提交的**脚本，而没有任何东西能把它们对上号。
+JOBS_MARKER="${JOBS_DIR}/.deployed"
 CONF_DIR="/etc/slurmate"
 CONF="${CONF_DIR}/slurmate.conf"
 UNIT="/etc/systemd/system/slurmate-sessiond.service"
@@ -265,11 +294,41 @@ if [[ "$MODE" == "uninstall" ]]; then
         rmdir "$PLUGINS_DIR" 2>/dev/null || true
     fi
 
+    # 作业脚本目录：里面的每一份都是本脚本生成的，删除的判据因此比插件目录**更强**
+    # —— 不再需要逐份读内容确认，只要它带着本脚本的部署标记，整个目录都是我们的。
+    #
+    # ★ 沿用 `grep -qi slurmate` 那道内容闸门作为**第二道**：ULID 文件名里没有
+    #   "slurmate" 这个词，所以文件名本身提供不了任何归属证据；内容里有
+    #   （模板头就是）。两道都过才删。
+    if [[ -d "$JOBS_DIR" ]]; then
+        if [[ -f "$JOBS_MARKER" ]]; then
+            while IFS= read -r j; do
+                [[ -n "$j" ]] || continue
+                jf="${JOBS_DIR}/${j}"
+                [[ -f "$jf" ]] || continue
+                if grep -qi "slurmate" "$jf" 2>/dev/null; then
+                    rm -f "$jf" && ok "已删除作业脚本 ${j}"
+                else
+                    warn "跳过 $jf —— 内容不含 \"slurmate\"，不像本系统装的，不敢删"
+                fi
+            done < "$JOBS_MARKER"
+            rm -f "$JOBS_MARKER" && ok "已删除作业脚本部署标记"
+        elif [[ -n "$(ls -A "$JOBS_DIR" 2>/dev/null)" ]]; then
+            warn "${JOBS_DIR} 里有东西，但没有本脚本的部署标记 —— 不是我们装的，一律不删"
+            warn "      如确认要删请人工执行：rm -rf '${JOBS_DIR}'"
+        fi
+        rmdir "$JOBS_DIR" 2>/dev/null || true
+    fi
+
     # 删文件前逐项确认"这确实是本系统装的文件"。
     # 早期版本在这里无条件 rm -f，而脚本又反复提示用 --uninstall 做回滚 ——
     # 于是在一台从未部署过 Slurmate 的机器上执行它，会删掉同名的他人文件。
     # 注意：这是 root 的 rm，不设防的代价是别人的东西。
-    for f in "$DAEMON" "$CLI" "$JOBSH" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py"; do
+    # ★ 这里此前有一项 "$JOBSH"（那份单文件成品）。现在一个插件一份、按 ULID
+    #   命名，名字在部署时才知道，所以它不在这张"写死的文件"清单里 ——
+    #   上面的 JOBS_DIR 那一段负责它。**顺序也重要**：先清空 JOBS_DIR，
+    #   下面这句 rmdir "$SHARE_DIR" 才可能真的成功（目录非空时它是静默失败的）。
+    for f in "$DAEMON" "$CLI" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py"; do
         if [[ ! -e "$f" ]]; then
             continue
         fi
@@ -586,7 +645,9 @@ info "提示：端口池 ${PORT_MIN}-${PORT_MAX} 未加入 ip_local_reserved_por
 info "      这只会让作业偶尔多试几个候选端口；nft 规则匹配 dport，不受影响。"
 
 # ── 目标位置是否已被非本系统的文件占用 ──
-for dst in "$DAEMON" "$CLI" "$JOBSH" "$CONF" "$UNIT"; do
+# 作业脚本不在这张表里：它按 ULID 命名，名字要到扫完插件才知道；而 JOBS_DIR
+# 那一层有自己的守卫（有东西、却没有 .deployed 标记 → 中止），见下面安装那一段。
+for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
     if [[ -e "$dst" ]]; then
         if ! grep -qi "slurmate" "$dst" 2>/dev/null; then
             die "目标文件已存在且不属于 Slurmate：
@@ -794,7 +855,7 @@ install_one() {
 
 # 确保所有目标文件的父目录存在（真实系统上这些目录本来就在，但不能依赖这个前提）
 for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
-         "$(dirname "$UNIT")" "$STATE_DIR" "$PLUGINS_DIR"; do
+         "$(dirname "$UNIT")" "$STATE_DIR" "$PLUGINS_DIR" "$JOBS_DIR"; do
     if [[ ! -d "$d" ]]; then
         run mkdir -p "$d"
         if [[ "$DRYRUN" -eq 1 ]]; then
@@ -804,7 +865,11 @@ for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
         fi
     fi
 done
-[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR" "$PLUGINS_DIR"
+# ★ JOBS_DIR 必须 0755，与 SHARE_DIR / PLUGINS_DIR 同一个理由：里面的脚本由
+#   **提交作业的用户**身份的 sbatch 读取（守护进程 fork + setuid 之后 exec 它）。
+#   0770 或 0700 的表现是 sbatch 报「读不到文件」—— 而那句话指不回权限，
+#   会让人去查脚本是不是生成失败了。
+[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR" "$PLUGINS_DIR" "$JOBS_DIR"
 [[ "$DRYRUN" -eq 1 ]] || chmod 700 "$STATE_DIR"
 
 install_one "${SRC_DIR}/slurmate-sessiond"  "$DAEMON"  755
@@ -932,8 +997,15 @@ check_plugin_jobsh() {
     fi
 
     # ③ 其余函数必须带 _<短名>_ 前缀。
-    #    编织之后**所有插件共处一个文件**，固定名会互相覆盖 —— 而覆盖是静默的，
-    #    症状是"装了第二个插件之后第一个就坏了"，指不回任何一个文件。
+    #
+    #  ★ 这条断言的**理由**在"一个插件一份脚本"之后变了，规则本身留着 ——
+    #    下文同步重写过，别把它当成旧理由的残留。
+    #    旧理由：「编织后所有插件共处一个文件，固定名会互相覆盖」—— 那是真的，
+    #    但那个形状已经不在了。
+    #    新理由：**不许遮蔽宿主自己的函数**（log / cleanup / write_session /
+    #    pick_port_and_start …）。一份脚本里只有一个插件，所以插件**之间**不会
+    #    再撞；但插件盖掉宿主的函数仍然是**静默**的 —— 症状是"清理没跑"
+    #    「日志少了几行」这类指不回任何一个文件的现象。
     while IFS= read -r fn; do
         [[ -n "$fn" ]] || continue
         case "$fn" in
@@ -945,15 +1017,28 @@ check_plugin_jobsh() {
              | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*).*/\1/')
     if [[ -n "$offenders" ]]; then
         die "${pf} 里定义了没有命名空间的函数：${offenders}
-     编织后所有插件共处一个文件，固定名会互相覆盖（而且是静默覆盖）。
+     它会被拼进作业脚本，而宿主自己的函数（log / cleanup / write_session /
+     pick_port_and_start …）都是**没有后缀**的动词 —— 一个同名的插件函数会
+     把它们**静默**盖掉，症状是"清理没跑""日志少了几行"，指不回这个文件。
      规则：契约钩子用 <动词>_${suffix}，其余一律用 _${suffix}_ 前缀。"
     fi
     return 0
 }
 
-# ── 2b.3 编织：模板 + 各插件的 job/start.sh → 成品 run.sbatch ────────────────
+# ── 2b.3 编织：模板 + **一个**插件的 job/start.sh → 那个插件的一份成品 ──────
+#
+# ★ 一插件一份，文件名是插件的 ULID。两份收益，都不在"好看"这一层：
+#     ① 插件里任何一行**不在函数里**的代码都只会出现在它自己那份脚本里 ——
+#        不可能被另一个插件的作业解析到（同处一份文件时，那种行会在**每一个**
+#        作业里执行，不管用的是哪个插件）；
+#     ② 一个插件的语法错只影响它自己那一份的 bash -n，报错直接指向一份文件。
+#
+# ★ **两遍式**：先把 N 份全部生成并逐份验语法，**全过了才开始装**。
+#   这保住了原来那句承诺「要么换成新的、要么一份都不动」。要诚实说明的是：
+#   N 次 install 之间不是原子的（窗口是毫秒级，且每份各自完整）—— 而它换来的是
+#   "半新半旧的那一批"里不会出现**语法错的**脚本，因为语法检查在安装之前。
 if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 跳过编织（${JOBSH} 不会被改写）"
+    info "[演练] 跳过编织（${JOBS_DIR} 下不会写出任何作业脚本）"
 else
     # ★ 数的是**整行**的标记，不是子串：模板的文件头注释里也提到了这个标记（读
     #   代码的人需要知道它叫什么），而子串匹配会把那句注释也算成一处。
@@ -964,53 +1049,110 @@ else
      标记是整行： # @@SLURMATE_PLUGIN_BLOCKS@@"
     fi
 
-    BLOCKS="${BACKUP_DIR}/plugin-blocks.sh"
-    : > "$BLOCKS"
-    if [[ -z "$PLUGIN_LIST" ]]; then
-        # 零插件是**合法状态**。这里必须留下话，否则成品里那个标记凭空消失，
-        # 下一个人读作业脚本时会以为"插件那一块被谁删了"。
-        {
-            echo "# 本站没有安装任何插件 —— 这份作业模板里只有宿主，没有任何服务实现。"
-            echo "# 宿主对任何 service_kind 都会以 24 明确结束，并在日志里说清这一点。"
-            echo "# 装插件：把插件目录放进插件源目录再跑一次 deploy.sh（见 plugins/README.md）。"
-        } >> "$BLOCKS"
+    mkdir -p "$JOBS_DIR"
+    # JOBS_DIR 里全是本脚本生成的东西，但仍要走一遍与 PLUGINS_DIR 同样的守卫：
+    # 目录里有东西、却没有本脚本的标记 → 那不可能是我们装的，中止而不是删。
+    if [[ -z "$(ls -A "$JOBS_DIR" 2>/dev/null)" || -f "$JOBS_MARKER" ]]; then
+        :
+    else
+        die "作业脚本目录 ${JOBS_DIR} 里已经有东西，但它不是本脚本装的
+     （没有 ${JOBS_MARKER} 这个部署标记）。为避免删掉别人的文件，部署中止。
+     确认里面确实没有你要保留的东西之后，人工执行：
+       rm -rf '${JOBS_DIR}'"
     fi
-    while IFS=$'\t' read -r pname pdir; do
-        [[ -n "${pname:-}" && -n "${pdir:-}" ]] || continue
+
+    WEAVE_DIR="${BACKUP_DIR}/jobs"
+    mkdir -p "$WEAVE_DIR"
+    : > "${JOBS_DIR}/.tmp-marker.$$"
+    JOBS_DONE=""
+
+    # ── 第一遍：全部生成 + 逐份验语法，一份都不装 ──
+    while IFS=$'\t' read -r pname pdir pid; do
+        [[ -n "${pname:-}" && -n "${pdir:-}" && -n "${pid:-}" ]] || continue
+        # ★ ULID 是**路径分量**，所以要先断言它的形状。PLUGIN_ID_RE 已经保证了
+        #   （`^[0-9A-HJKMNP-TV-Z]{26}$`，没有点、没有斜杠），这里是第二道：
+        #   deploy.sh 拿它拼 `<JOBS_DIR>/<ULID>.sbatch`，一个形状不对的值意味着
+        #   上游出了别的问题，宁可不部署。
+        if [[ ! "$pid" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+            die "插件 ${pname} 的 id 不是合法的 ULID：${pid}
+     作业脚本按 <ULID>.sbatch 命名，一个形状不对的 id 会拼出一个失控的路径。
+     这多半意味着 --check-plugins 的输出被改过 —— 那里的格式是跨脚本契约。"
+        fi
         pf="${pdir}/job/start.sh"
         if [[ ! -f "$pf" ]]; then
-            die "插件 ${pname} 没有作业侧实现：${pf} 不存在。
-     一个有客户端界面、却没有任何作业侧代码的插件，用户点下去只会拿到一个
-     起不来的会话。要么补上 job/start.sh，要么把它从插件源目录里移走。"
+            # ★ 「没有作业侧」是**合法状态**，不是错误：一个只有客户端那一半的
+            #   插件允许存在。它装得上、看得见，但**提交不了** —— 守护进程在
+            #   提交时报 service_kind_no_job（code 4），界面上那个按钮是灰的。
+            #   从前这里 die，那等于让一个插件的形态问题中止整个站点的部署。
+            warn "插件 ${pname} 没有 job/start.sh —— 跳过，不生成作业脚本。
+          这个插件装得上、看得见，但提交不了（合法状态）。要让它能提交，
+          就在 ${pdir}/job/start.sh 里定义 start_${pname//-/_}。"
+            continue
         fi
         check_plugin_jobsh "$pname" "$pf"
+        BLOCKS="${WEAVE_DIR}/${pid}.blocks.sh"
         {
             echo
-            echo "# ─── 插件 ${pname} ──────────────────────────────────────────"
+            echo "# ─── 插件 ${pname}（id ${pid}）──────────────────────────────"
             cat "$pf"
             echo
-        } >> "$BLOCKS"
-        ok "插件 ${pname}：作业侧三道断言通过（无 shebang/#SBATCH、定义了 start_${pname//-/_}、函数名都有命名空间）"
+        } > "$BLOCKS"
+        WEAVE="${WEAVE_DIR}/${pid}.sbatch"
+        awk -v blocks="$BLOCKS" '
+            /^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {
+                while ((getline line < blocks) > 0) print line
+                close(blocks); found = 1; next
+            }
+            { print }
+            END { if (!found) exit 9 }
+        ' "${SRC_DIR}/run.sbatch" > "$WEAVE" || die "编织失败（拼接标记没有被替换？）"
+        if grep -q '^# @@SLURMATE_PLUGIN_BLOCKS@@$' "$WEAVE"; then
+            die "编织 ${pname} 的作业脚本后仍有拼接标记行 —— 说明模板里有不止一处。"
+        fi
+        bash -n "$WEAVE" || die "插件 ${pname} 的作业脚本语法检查失败（多半是
+     ${pf} 里有语法错误，见上面的行号）。已中止，${JOBS_DIR} 一份都没有改动。"
+        JOBS_DONE="${JOBS_DONE} ${pid}"
+        ok "插件 ${pname}：三道断言通过（无 shebang/#SBATCH、定义了 start_${pname//-/_}、函数名都有命名空间），编织成 $(wc -l < "$WEAVE") 行的作业脚本"
     done <<< "$PLUGIN_LIST"
 
-    WEAVE="${BACKUP_DIR}/run.sbatch.woven"
-    awk -v blocks="$BLOCKS" '
-        /^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {
-            while ((getline line < blocks) > 0) print line
-            close(blocks); found = 1; next
-        }
-        { print }
-        END { if (!found) exit 9 }
-    ' "${SRC_DIR}/run.sbatch" > "$WEAVE" || die "编织失败（拼接标记没有被替换？）"
-    if grep -q '^# @@SLURMATE_PLUGIN_BLOCKS@@$' "$WEAVE"; then
-        die "编织后的作业脚本里仍有拼接标记行 —— 说明模板里有不止一处。"
+    # ── 第二遍：全部验过了，才开始装 ──
+    for pid in $JOBS_DONE; do
+        install_one "${WEAVE_DIR}/${pid}.sbatch" "${JOBS_DIR}/${pid}.sbatch" 644
+        printf '%s\n' "${pid}.sbatch" >> "${JOBS_DIR}/.tmp-marker.$$"
+    done
+
+    # ── 清掉不再属于任何插件的那些 ──
+    # 「把一个插件目录从源里拿走再部署」必须真的生效，否则会留下一份**无主的、
+    # 仍然可以被提交的**脚本。判据是文件在不在这次的集合里，不是内容 ——
+    # 这个目录 100% 是本脚本生成的。
+    if [[ -f "$JOBS_MARKER" ]]; then
+        while IFS= read -r old; do
+            [[ -n "$old" ]] || continue
+            # 这次生成了的 ULID 集合是空格分隔的（两头的空格让整词匹配成立）。
+            case " ${JOBS_DONE} " in
+                *" ${old%.sbatch} "*) continue ;;
+            esac
+            rm -f "${JOBS_DIR:?}/${old}" && info "已移除不再需要的作业脚本：${old}"
+        done < "$JOBS_MARKER"
     fi
-    # ★ 在**覆盖已装的 run.sbatch 之前**先验语法：一个语法错的插件脚本必须让部署
-    #   当场中止，而不是把一份能跑的作业脚本换掉、再让用户的每一个会话都起不来。
-    bash -n "$WEAVE" || die "编织后的作业脚本语法检查失败（多半是某个插件的
-     job/start.sh 里有语法错误，见上面的行号）。已中止，${JOBSH} 未被改动。"
-    install_one "$WEAVE" "$JOBSH" 644
-    ok "已编织进 ${JOBSH}（$(wc -l < "$WEAVE") 行，其中插件块 $(grep -c '^# ─── 插件 ' "$BLOCKS" || true) 个）"
+
+    # ★ 标记只在这次真的写成了才覆盖（与 PLUGINS_DIR 那一段同一条规矩）：
+    #   写失败时保留旧的那一份，否则下次部署就不会移除已经拿走的插件脚本。
+    if sort -o "${JOBS_DIR}/.tmp-marker.$$" "${JOBS_DIR}/.tmp-marker.$$" 2>/dev/null; then
+        chmod 644 "${JOBS_DIR}/.tmp-marker.$$" 2>/dev/null || true
+        if ! mv -f "${JOBS_DIR}/.tmp-marker.$$" "$JOBS_MARKER" 2>/dev/null; then
+            warn "无法更新作业脚本部署标记 ${JOBS_MARKER} —— 下次部署不会移除已拿走的插件脚本"
+            rm -f "${JOBS_DIR}/.tmp-marker.$$"
+        fi
+    else
+        warn "无法整理作业脚本部署标记 —— 保留上一次的那一份"
+        rm -f "${JOBS_DIR}/.tmp-marker.$$"
+    fi
+
+    if [[ -z "$JOBS_DONE" ]]; then
+        info "本站没有任何插件的作业脚本 —— 合法状态：守护进程照常启动、会话照常能停，"
+        info "  只是没有可提交的服务。装插件：见 plugins/README.md。"
+    fi
 fi
 
 # ── slurmate.conf：只在【不存在】时安装 ──
@@ -1059,10 +1201,17 @@ compile(src, sys.argv[1], "exec")' "$1" 2>&1
     }
     syntax_check "$DAEMON" || die "守护进程语法检查失败，已中止（未启动服务）"
     syntax_check "$CLI"    || die "CLI 语法检查失败，已中止"
-    bash -n "$JOBSH"       || die "作业脚本语法检查失败，已中止"
+    # 对**已经装好的**每一份作业脚本再验一次语法（编织那一段验的是临时副本）。
+    # 一个都没装时不循环 —— 零插件是合法状态，不是"少了点什么"。
+    for _jf in "$JOBS_DIR"/*.sbatch; do
+        [[ -f "$_jf" ]] || continue
+        bash -n "$_jf" || die "已安装的作业脚本语法检查失败：${_jf}，已中止"
+    done
     comparator_selftest "${SHARE_DIR}/nft-compare.py" \
         || die "已安装的比对器自测未通过（项数下限 ${COMPARATOR_MIN_TESTS}），已中止"
     ok "语法自检通过（守护进程 / CLI / 作业脚本 / 比对器）"
+    _jf_n="$(ls -1 "$JOBS_DIR"/*.sbatch 2>/dev/null | grep -c . || true)"
+    info "作业脚本文法自检覆盖 ${_jf_n} 份（${JOBS_DIR}）"
 fi
 
 # ==============================================================================
@@ -1292,16 +1441,25 @@ ${DRYRUN_BANNER}
 ${DONE_TITLE}
     ${DAEMON}
     ${CLI}
-    ${JOBSH}          ← 模板 + 各插件的 job/start.sh **编织**出来的成品
     ${CONF}
     ${UNIT}
     ${SHARE_DIR}/nft-compare.py
+    ${JOBS_DIR}/    ← 每个插件一份作业脚本，文件名是它的 ULID（见下表）
 
   插件（源 ${PLUGINS_SRC}）：
 $(if [[ "$DRYRUN" -eq 1 ]]; then echo "    （演练：上面那个源目录里的插件将被装到 ${PLUGINS_DIR}）"; \
   elif [[ -n "$PLUGIN_LIST" ]]; then \
-      while IFS=$'\t' read -r _n _d; do [[ -n "$_n" ]] && echo "    ${_n}  → ${_d}"; done <<< "$PLUGIN_LIST"; \
+      while IFS=$'\t' read -r _n _d _i; do \
+          [[ -n "$_n" ]] || continue; \
+          if [[ -f "${_d}/job/start.sh" ]]; then echo "    ${_n}  → ${_d}"; \
+          else echo "    ${_n}  → ${_d}   【没有 job/start.sh：装得上、看得见，但提交不了】"; fi; \
+          echo "        ${JOBS_DIR}/${_i}.sbatch"; \
+      done <<< "$PLUGIN_LIST"; \
   else echo "    （本站没有安装任何插件 —— 合法状态。装：把插件目录放进插件源目录再跑一次本脚本）"; fi)
+
+  ★ 上面每一行「短名 → 目录 → <ULID>.sbatch」就是 jobs/ 那一串 ULID 的**对照表**。
+    它是**算出来的**、不是另存一份账 —— 任何时候要再打印一遍：
+      ${DAEMON} --check | grep -A2 作业脚本
 
   端口池：${PORT_MIN}-${PORT_MAX}${RESERVED_RANGES:+（与 reserved_ranges
           ${RESERVED_RANGES} 严格不交，跨表行为因此与顺序无关）}

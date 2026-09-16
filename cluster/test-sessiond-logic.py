@@ -81,6 +81,31 @@ def write_stub(path, body):
     return path
 
 
+def weave_one(tpl_path, plugin_dir, name, ulid, out_path):
+    """照 deploy.sh 的做法，把**一个**插件的 job/start.sh 织进模板。
+
+    ★ 一个插件一份：这里与 deploy.sh 是同一段 awk、同一个标记、同样只放一个块。
+      这里分叉的后果是"用例全绿、部署到真机上炸" —— 而部署脚本没法在本机跑。
+      返回 awk 的 CompletedProcess（调用方要断言 returncode）。
+    """
+    blocks = out_path + ".blocks"
+    with open(os.path.join(plugin_dir, "job", "start.sh"), encoding="utf-8") as f:
+        body = f.read()
+    with open(blocks, "w", encoding="utf-8") as f:
+        f.write("\n# ─── 插件 %s（id %s）──────────────────────────────\n%s\n"
+                % (name, ulid, body))
+    r = subprocess.run(
+        ["awk", "-v", "blocks=" + blocks,
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', tpl_path],
+        capture_output=True, text=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(r.stdout)
+    return r
+
+
 def make_config(mod, tmpdir):
     """基于【随仓库分发的示例配置】生成一份指向临时目录、且自洽的测试配置。
 
@@ -89,8 +114,12 @@ def make_config(mod, tmpdir):
       1. **状态 / 日志 / socket 目录** —— 它们现在是代码常量（不再是可以从配置
          里改的键），所以直接在模块上覆盖。不覆盖的后果不只是"测试污染真实
          目录"，还包括 `_db_schema_errors()` 会去读真实部署的 claims.db。
-      2. **作业脚本路径** —— 由守护进程自身的安装位置推导（`<prefix>/share/
-         slurmate/run.sbatch`），而开发机上还没部署，于是指向仓库里的副本。
+      2. **作业脚本目录** —— 由守护进程自身的安装位置推导（`<prefix>/share/
+         slurmate/jobs/`），而开发机上还没部署。这里**真织一遍**：把仓库顶层
+         那两个真插件的 job/start.sh 各织一份进临时目录，文件名用它们的 ULID ——
+         与 deploy.sh 做的是同一件事。指向一个空目录或手写的替身都不行：
+         那样 `build_sbatch_argv` 的末项、`plugin_job_missing` 全是空的，
+         而这两样正是这次要测的东西。
       3. **Slurm 命令** —— `validate()` 会检查它们【在宿主机上】存在，而 CI
          runner 上没有 Slurm。这里在临时目录里造一个可执行的桩，把五个路径都
          指过去。**这条是 CI 那个挂了四个 commit 的失败的直接原因。**
@@ -124,15 +153,27 @@ def make_config(mod, tmpdir):
     mod.STATE_DIR = os.path.join(tmpdir, "state")
     mod.LOG_DIR = os.path.join(tmpdir, "log")
     mod.SOCKET_PATH = os.path.join(tmpdir, "ctl.sock")
-    mod.default_job_script = lambda: os.path.join(HERE, "run.sbatch")
     # 4. **插件目录** —— 与作业脚本同理，由守护进程自身的安装位置推导，开发机上
     #    还没部署。这里指向**仓库顶层**的 plugins/，也就是 deploy.sh 会装进去的那
     #    两个真插件。
     #
     #    ★ 刻意用**真的那两个**而不是合成替身：插件与基座的接口正是这一版反复在
     #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
-    mod.default_plugins_dir = lambda: os.path.normpath(
-        os.path.join(HERE, os.pardir, "plugins"))
+    plugins_dir = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
+    mod.default_plugins_dir = lambda: plugins_dir
+
+    # 5. **作业脚本目录** —— 按各插件的 ULID 真织一遍（见上面第 2 条的说明）。
+    #    只给**有作业侧**的插件织；没有 job/start.sh 的插件本来就该没有那一份，
+    #    而"没有"这一态由第 19 节的合成插件专门覆盖。
+    jobs_dir = os.path.join(tmpdir, "jobs")
+    os.makedirs(jobs_dir, exist_ok=True)
+    _specs, _problems = mod.scan_plugins(plugins_dir)
+    for _s in _specs:
+        if not _s.needs_job:
+            continue
+        weave_one(os.path.join(HERE, "run.sbatch"), _s.source_dir, _s.name, _s.id,
+                  os.path.join(jobs_dir, _s.id + ".sbatch"))
+    mod.default_jobs_dir = lambda: jobs_dir
     return mod.Config(p)
 
 
@@ -827,22 +868,44 @@ exit 0
                  "cpus": 2, "mem": "8G", "requested_time": "12:00:00",
                  "partition": "2080TI", "gres": None}
 
+    # 作业脚本与短名现在是**显式入参**（见 build_sbatch_argv 的 docstring）——
+    # 这条链路是"到底提交了哪一份"的唯一落点，所以它必须能被纯函数钉住。
     def argv_of(**over):
-        return mod.build_sbatch_argv(cfg, dict(base_sess, **over), {"A": "1"}, home)
+        js = over.pop("job_script", "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch")
+        sk = over.pop("service_kind", "code-server")
+        return mod.build_sbatch_argv(cfg, dict(base_sess, **over), {"A": "1"},
+                                     home, js, sk)
 
     a = argv_of()
     check("指定了分区 → 带 -p", "-p" in a and "2080TI" in a, str(a))
     check("没 GPU → 完全省略 --gres（不是 gpu:0）",
           not any(x.startswith("--gres") for x in a), str(a))
     check("默认不写 -w（节点由 Slurm 在分区内挑）", "-w" not in a, str(a))
-    check("作业名带会话 id 前 8 位", "--job-name=slurmate-9f2c4a1b" in a, str(a))
+    check("★ 作业名是 sj-<插件短名>（不再是会话 id）",
+          "--job-name=sj-code-server" in a, str(a))
+    check("★ 作业脚本路径是 argv 的**末项**（操作数在选项之后）",
+          a[-1] == "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch", str(a))
+
+    # ★ 每个真插件都提交**它自己**那一份作业脚本。
+    #
+    # 这一条堵的是「提交了 code-server、跑起来的是 sshd」—— 一个插件一份成品之后，
+    # 脚本路径由 op_submit 按 spec.id 算出来，而那个算错**在真机上隔着作业日志**，
+    # 本仓库此前对这条链路零覆盖（第 18 节的 submit 是打桩的，看不见 argv）。
+    for _sp in cfg.plugin_specs:
+        _a = argv_of(service_kind=_sp.name,
+                     job_script=os.path.join(cfg.jobs_dir, _sp.id + ".sbatch"))
+        check("★ 插件 %s 提交的是它自己的那一份（末项 = <它的 ULID>.sbatch）"
+              % _sp.name,
+              _a[-1] == os.path.join(cfg.jobs_dir, _sp.id + ".sbatch")
+              and "--job-name=sj-%s" % _sp.name in _a, str(_a[-1]))
 
     a = argv_of(partition="")
     check("分区为空串 → 不带 -p（交给 Slurm 的默认分区）",
           "-p" not in a, str(a))
     a = argv_of(gres="gpu:2")
     check("指定了 GPU → 带 --gres=gpu:2", "--gres=gpu:2" in a, str(a))
-    a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, tmpdir)
+    a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, tmpdir,
+                              "/tmp/j.sbatch", "code-server")
     check("家目录下没有日志子目录时回退到家目录根",
           any(x.endswith("slurm-%j.out") and tmpdir in x for x in a), str(a))
 
@@ -859,9 +922,14 @@ exit 0
         d.slurm = mod.Slurm(cfg)
         captured.clear()
 
-        def _sub(sess, env, h, u, usr):
+        def _sub(sess, env, h, u, usr, job_script, service_kind):
             captured["sess"] = dict(sess)
             captured["env"] = dict(env)
+            # ★ 顺带记下这一节唯一看得见作业脚本的地方：submit 被打桩之后，
+            #   argv 根本不生成，所以"选了哪一份"只能从这里看。第 17 节的纯函数
+            #   用例负责断言路径算得对，这里只保证**传下来了**。
+            captured["job_script"] = job_script
+            captured["service_kind"] = service_kind
             return 12345, None
         d.slurm.submit = _sub
 
@@ -950,7 +1018,8 @@ exit 0
           "默认分区" in r["data"].get("warning", ""), str(r["data"].get("warning")))
     check("退化时 sbatch 不带 -p",
           "-p" not in mod.build_sbatch_argv(cfg, dict(sess, session_id="x"),
-                                            env, home))
+                                            env, home, "/tmp/j.sbatch",
+                                            "code-server"))
 
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"}, allowed="dead")
     check("权限查不到 + 点名了分区 → 拒绝（fail-closed）",
@@ -982,9 +1051,20 @@ exit 0
           and cfg.plugin_by_name[SSHD].job_entry == "start_sshd",
           "%s / %s" % (cfg.plugin_by_name[CS].job_entry,
                        cfg.plugin_by_name[SSHD].job_entry))
-    check("★ 每个插件的作业侧实现都在（没有 job/start.sh 的插件会在用户排完队之后才失败）",
+    # ★ 「有没有作业侧」现在是**一个事实**，不是一条合法性判据：两个真插件都有，
+    #   而没有的那种是**合法**的（见 19.0e）。所以这里断言的是"这两个有"，
+    #   不是"所有插件都必须有"。
+    check("★ 两个真插件都有作业侧实现，且守护进程认得这件事",
           all(s.needs_job for s in cfg.plugin_specs),
           str([(s.name, s.needs_job) for s in cfg.plugin_specs]))
+    check("★ 每个插件的作业脚本都在（<jobs_dir>/<ULID>.sbatch）",
+          cfg.plugin_job_missing == [],
+          str([s.name for s in cfg.plugin_job_missing]))
+    for _s in cfg.plugin_specs:
+        check("★ %s 的作业脚本文件确实存在，且里面只有它自己"
+              % _s.name,
+              os.path.isfile(os.path.join(cfg.jobs_dir, _s.id + ".sbatch")),
+              os.path.join(cfg.jobs_dir, _s.id + ".sbatch"))
 
     # 坏掉的插件目录：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
     # 带走整个站点 —— 而静默跳过同样不行（"我明明装了啊"会变成一句谁也答不上来的话）。
@@ -1111,7 +1191,12 @@ exit 0
     # 一句注释。这里合成一个全新的插件（仓库里没有它、守护进程更没听说过它），
     # 然后走一遍：扫描 → 配置块 → 提交 → 环境变量 → op_plugins。
     _thirddir = os.path.join(tmpdir, "plugins-third")
-    os.makedirs(os.path.join(_thirddir, "jup"), exist_ok=True)
+    os.makedirs(os.path.join(_thirddir, "jup", "job"), exist_ok=True)
+    # 作业侧那一半。**必须真的写一份**：没有它这个插件就是"合法但提交不了"，
+    # 而这一节要验的恰恰是"能提交"。没有作业侧那一态由 19.0e 专门覆盖。
+    with open(os.path.join(_thirddir, "jup", "job", "start.sh"), "w",
+              encoding="utf-8") as _f:
+        _f.write("start_jup() { :; }\n")
     with open(os.path.join(_thirddir, "jup", "plugin.json"), "w",
               encoding="utf-8") as _f:
         _f.write(json.dumps({
@@ -1171,11 +1256,89 @@ exit 0
         _pnames = {x["name"] for x in (_pj.get("data") or {}).get("plugins", [])}
         check("op_plugins 也照实报出它（客户端据此画按钮）",
               "jup" in _pnames, str(sorted(_pnames)))
+        # ★ can_submit：服务端把「开了 **且** 有作业侧」合成一个答案发出去，
+        #   客户端据此画灰按钮。两个事实客户端只看得到前一个。
+        _jup_row = next(x for x in _pj["data"]["plugins"] if x["name"] == "jup")
+        check("★ op_plugins 报出 can_submit=true（开了 + 有作业侧）",
+              _jup_row.get("can_submit") is True, str(_jup_row))
     finally:
         cfg.plugins = _saved_plugins
         cfg.plugin_by_name = _saved_by
         cfg.plugin_specs = _saved_specs
         cfg.enabled_kinds = _saved_kinds
+
+    # 19.0e ★★ 没有作业侧：**合法状态**，但它提交不了，而且必须说得出来
+    #
+    # 一个只有客户端那一半的插件是允许存在的（它装得上、看得见）。它在三个地方
+    # 必须被说清楚，缺一个就是一个死胡同：
+    #   · 配置自检**通过** —— 一个插件的形态不该让整个站点起不来；
+    #   · `op_submit` 明确拒绝（code 4 / service_kind_no_job），不是排完队才失败；
+    #   · `op_plugins` 的 can_submit=false —— 界面据此画灰按钮，用户不必点了才知道。
+    _nojdir = os.path.join(tmpdir, "plugins-nojob")
+    os.makedirs(os.path.join(_nojdir, "decl"), exist_ok=True)
+    with open(os.path.join(_nojdir, "decl", "plugin.json"), "w",
+              encoding="utf-8") as _f:
+        _f.write(json.dumps({
+            "id": "01M2JKHTZGKJBFQQTWYXMQMF30", "name": "decl",
+            "version": "1.0.0", "displayName": "声明式",
+            "engines": {"slurmate": ">=0.5.0"},
+            "site": {"defaultCpus": 1, "defaultMem": "2G"}}))
+    _specs5, _probs5 = mod.scan_plugins(_nojdir)
+    check("★ 没有 job/start.sh 的插件能被扫进来（合法，不是坏清单）",
+          _probs5 == () and [x.name for x in _specs5] == ["decl"], str(_probs5))
+    _decl = _specs5[0]
+    check("★ 它被记为「没有作业侧」，而不是「坏掉的插件」",
+          _decl.needs_job is False, str(_decl.needs_job))
+
+    _sj, _bj, _pj2, _kj, _dj = (cfg.plugin_specs, cfg.plugin_by_name,
+                                cfg.plugins, cfg.enabled_kinds, cfg.default_plugin)
+    _saved_missing = cfg.plugin_job_missing
+    try:
+        cfg.plugin_specs = tuple(list(_sj) + [_decl])
+        cfg.plugin_by_name = dict(_bj, decl=_decl)
+        cfg.plugins = dict(_pj2)
+        cfg.plugins["decl"] = mod.PluginConfig(_decl, {"enabled": "yes"}, True)
+        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        # 它没有作业脚本，所以**不该**出现在 plugin_job_missing 里 —— 那个列表
+        # 说的是"有作业侧却找不到脚本"（部署不完整），与"本来就没有作业侧"是
+        # 两件完全不同的事。合并它们会让这条合法的状态被报成故障。
+        cfg.plugin_job_missing = [s for s in cfg.plugin_specs
+                                  if s.needs_job and not os.path.isfile(
+                                      os.path.join(cfg.jobs_dir, s.id + ".sbatch"))]
+        check("★ 没有作业侧的插件不进 plugin_job_missing（那是「部署不完整」，"
+              "与它无关）",
+              [s.name for s in cfg.plugin_job_missing] == [],
+              str([s.name for s in cfg.plugin_job_missing]))
+        check("★ 而且它不让配置自检失败（一个插件不该带走整个站点）",
+              cfg.validate() == [], str(cfg.validate())[:160])
+
+        d.store = mod.Store(os.path.join(tmpdir, "nojob.db"))
+        _r8 = d.dispatch(UID, os.getgid(), {"op": "submit", "service_kind": "decl"})
+        check("★ 提交它被明确拒绝：code 4 / service_kind_no_job",
+              not _r8.get("ok") and _r8["code"] == 4
+              and _r8["error"]["kind"] == "service_kind_no_job",
+              str(_r8.get("error"))[:200])
+        check("★ 而且错误信息说清是「没有作业侧」，不是「没开」"
+              "（两句话对应两个完全不同的行动）",
+              "没有作业侧实现" in (_r8["error"].get("detail") or "")
+              and "没有开启" not in (_r8["error"].get("detail") or ""),
+              str(_r8["error"].get("detail"))[:200])
+        check("★ 错误信息里给出了出路：装了作业侧实现的插件是哪些",
+              CS in (_r8["error"].get("detail") or ""),
+              str(_r8["error"].get("detail"))[:200])
+
+        _pj3 = d.dispatch(UID, os.getgid(), {"op": "plugins"})
+        _decl_row = next(x for x in _pj3["data"]["plugins"] if x["name"] == "decl")
+        check("★ op_plugins 报出 can_submit=false —— 界面据此画灰按钮，"
+              "用户不必点下去才知道",
+              _decl_row.get("can_submit") is False, str(_decl_row))
+        check("★ 但它同时 enabled=true（「本站关了它」与「它没有作业侧」"
+              "是两句话，客户端要能分辨）",
+              _decl_row.get("enabled") is True, str(_decl_row))
+    finally:
+        (cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins,
+         cfg.enabled_kinds, cfg.default_plugin) = _sj, _bj, _pj2, _kj, _dj
+        cfg.plugin_job_missing = _saved_missing
 
     # 19.0d ★ 零插件：不是"坏掉的安装包"，而是"外壳"本身
     #
@@ -1810,44 +1973,51 @@ exit 0
     # 再真的调一次分派。
     print("\n── 21. 作业侧契约（宿主 ↔ 插件的唯一接口：函数名）──")
     _tpl = open(_rb, encoding="utf-8").read()
-    _blocks = "\n".join(
-        "\n# ─── 插件 %s ───\n%s" % (sp.name,
-                                    open(os.path.join(sp.source_dir, "job", "start.sh"),
-                                         encoding="utf-8").read())
-        for sp in cfg.plugin_specs)
-    _woven = os.path.join(tmpdir, "woven.sbatch")
-    with open(os.path.join(tmpdir, "blocks.sh"), "w", encoding="utf-8") as _f:
-        _f.write(_blocks)
-    _awk = subprocess.run(
-        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks.sh"),
-         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
-         ' while ((getline line < blocks) > 0) print line;'
-         ' close(blocks); found = 1; next }'
-         ' { print } END { if (!found) exit 9 }', _rb],
-        capture_output=True, text=True)
-    with open(_woven, "w", encoding="utf-8") as _f:
-        _f.write(_awk.stdout)
+    # ★ **一个插件一份**：照 deploy.sh 逐插件织，而不是把所有插件织进一份。
+    #   这一节的分叉后果是"用例绿了、部署到真机上炸" —— 而 deploy.sh 本机跑不了。
+    _woven_of = {}
+    _awk = None
+    for _sp in cfg.plugin_specs:
+        _out = os.path.join(tmpdir, "woven-%s.sbatch" % _sp.name)
+        _awk = weave_one(_rb, _sp.source_dir, _sp.name, _sp.id, _out)
+        _woven_of[_sp.name] = _out
+    _woven = _woven_of[CS]        # 22a 用它，见下
     # ★ 数的是**整行**的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
     #   于是"替换成功"这件事看起来永远不成立 —— deploy.sh 里那条同理。
     check("★ 模板里的拼接标记恰好一处，编织后一处不剩（照 deploy.sh 的做法）",
-          _awk.returncode == 0
+          _awk is not None and _awk.returncode == 0
           and len(re.findall(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _tpl)) == 1
           and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _awk.stdout),
-          _awk.stderr[:200])
-    _wsyn = subprocess.run(["bash", "-n", _woven], capture_output=True, text=True)
-    check("编织后的作业脚本是合法 shell（这一条挡的就是语法错的插件脚本）",
-          _wsyn.returncode == 0, _wsyn.stderr[:300])
+          (_awk.stderr[:200] if _awk else "没有插件"))
 
     for _sp in cfg.plugin_specs:
+        _w = _woven_of[_sp.name]
+        _wtxt = open(_w, encoding="utf-8").read()
         _suffix = _sp.name.replace("-", "_")
+        _wsyn = subprocess.run(["bash", "-n", _w], capture_output=True, text=True)
+        check("★ 插件 %s 那一份编织出来是合法 shell（挡的是语法错的插件脚本）"
+              % _sp.name, _wsyn.returncode == 0, _wsyn.stderr[:300])
         check("★ 插件 %s 的 job/start.sh 里定义了 %s（宿主就是按这个分派）"
               % (_sp.name, _sp.job_entry),
-              re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _blocks) is not None)
-        check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）"
-              % (),
+              re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _wtxt) is not None)
+        check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）",
               re.search(r"(?m)^#!|^[ \t]*#SBATCH",
                         open(os.path.join(_sp.source_dir, "job", "start.sh"),
                              encoding="utf-8").read()) is None)
+        # ★★ 这一节的核心：**那份脚本里只有它自己**。
+        #
+        # 同处一份文件时，插件里任何一行不在函数里的代码都待在主流程中间，会在
+        # **每一个**作业里执行 —— 不管用的是哪个插件。拆开之后这条断言钉住的是
+        # 那个危害的来源已经不在：别的插件连"被解析到"的机会都没有。
+        _others = [o.name.replace("-", "_") for o in cfg.plugin_specs
+                   if o.name != _sp.name]
+        check("★★ 插件 %s 那份脚本里有且只有它自己的服务（别的插件一个都不在）"
+              % _sp.name,
+              len(re.findall(r"(?m)^start_[A-Za-z0-9_]+\s*\(\)", _wtxt)) == 1
+              and not any(re.search(r"(?m)^(start|precheck|cleanup)_%s\s*\(\)"
+                                    % _o, _wtxt) for _o in _others),
+              "start_ 函数：%s" % re.findall(r"(?m)^start_([A-Za-z0-9_]+)\s*\(\)",
+                                            _wtxt))
 
     # ★ 宿主里不许出现任何插件的名字。这是"外壳"的定义，而且是可机检的 ——
     #   注释里也不行：注释里的插件名会让下一个读的人以为宿主认识它。
@@ -1929,21 +2099,28 @@ exit 0
                     logs += f.read()
         return r.returncode, (logs or (r.stdout + r.stderr))
 
-    # ── 22a 本站没有作业侧实现了这个插件 ──
-    # 守护进程在提交时已经拒过一次，这里是**第二道** —— 手工提交、或者两端版本
-    # 不一致时，唯一的替代是作业跑完所有候选端口之后报一句"候选端口全部失败"，
-    # 那句话指不回根因。
+    # ── 22a 脚本与 service_kind 对不上 ──
+    #
+    # ★ 这一条在新形状下换了角色。从前它验的是"本站没有作业侧实现了 X"；现在
+    #   一个插件一份，"本站"这个概念在作业里没有了。剩下要兜的是**部署期选错了
+    #   脚本**（提交了 A、跑起来的是 B）—— 守护进程那边由第 17 节的纯函数用例
+    #   保证不选错，这里是万一漏了之后的最后一道网：以 24 明确结束，而不是拿
+    #   错误的实现去跑、或者跑完所有候选端口才报一句"候选端口全部失败"。
     _h1 = os.path.join(tmpdir, "jobsh-unknown")
     os.makedirs(_h1, exist_ok=True)
     _rc, _log = run_jobsh(_woven, "nosuchplugin", _h1)
-    check("★ 作业脚本对「本站没有作业侧实现」的服务种类以 24 结束（不是跑完候选端口才失败）",
+    check("★ 请求的服务不在脚本里 → 以 24 结束（不是跑完候选端口才失败）",
           _rc == 24, "rc=%s 日志=%s" % (_rc, _log[-300:]))
-    check("★ 而且它说清了**本站有实现的是哪些**（错误信息要能照着做）",
-          "没有作业侧实现" in _log and "code_server" in _log, _log[-400:])
+    check("★ 而且它说清**这份脚本里到底有些什么**（错误信息要能照着做）",
+          "这份作业脚本里没有服务" in _log and "code_server" in _log,
+          _log[-400:])
 
-    # ── 22b 零插件编织出来的脚本 ──
-    # 一个插件都没有是**合法状态**，但用户提交时得到的必须是一句人话，而不是
-    # 一句"候选端口全部失败"。
+    # ── 22b 零块（宿主-only）的脚本 ──
+    # 一个插件都没装是**合法状态**；而"一份没有任何插件块的脚本"在运行时的表现
+    # 必须是一句人话。**注意**：一个插件一份之后，正常部署不会产出这种文件 ——
+    # 零插件时 `jobs/` 里一份都没有，提交在守护进程那一层就被 service_kind 的
+    # 三种错误挡住了。这条留着是因为**模板本身就是这个样子**，而模板是可以被
+    # 手工 sbatch 的（排查时有人会这么干）。
     _woven0 = os.path.join(tmpdir, "woven-zero.sbatch")
     with open(os.path.join(tmpdir, "blocks0.sh"), "w", encoding="utf-8") as _f:
         _f.write("# 本站没有安装任何插件\n")
@@ -1957,15 +2134,15 @@ exit 0
     with open(_woven0, "w", encoding="utf-8") as _f:
         _f.write(_awk0.stdout)
     _syn0 = subprocess.run(["bash", "-n", _woven0], capture_output=True, text=True)
-    check("零插件编织出来的作业脚本也是合法 shell",
+    check("没有任何插件块时织出来的脚本也是合法 shell",
           _awk0.returncode == 0 and _syn0.returncode == 0, _syn0.stderr[:200])
     _h2 = os.path.join(tmpdir, "jobsh-zero")
     os.makedirs(_h2, exist_ok=True)
     _rc0, _log0 = run_jobsh(_woven0, "code-server", _h2)
-    check("★ 零插件的作业脚本同样以 24 明确结束（不是跑完候选端口才失败）",
+    check("★ 它同样以 24 明确结束（不是跑完候选端口才失败）",
           _rc0 == 24, "rc=%s 日志=%s" % (_rc0, _log0[-300:]))
-    check("★ 它的日志里「有作业侧实现的是」那一项是空的（括号里什么都没有）",
-          "有实现的是：（" in _log0, _log0[-500:])
+    check("★ 它的日志里「这份脚本里有的是」那一项是空的（括号里什么都没有）",
+          "这份脚本里有的是：（" in _log0, _log0[-500:])
 
     # ── 22c 插件自己的 precheck 没过 → 24，且**开始挑端口之前**就结束 ──
     _woven_pre = os.path.join(tmpdir, "woven-pre.sbatch")
@@ -2079,6 +2256,52 @@ exit 0
     check("★ 而在 start_<短名> 里直接写 LOCAL_LOG 的行进不了 NFS"
           "（这正是契约要禁止那种写法的原因 —— 它是静默丢失）",
           not any("水位之前偷偷写的一行" in x for x in _rlines), _rlog[-500:])
+
+    # ── 22e ★★ 一个插件的顶层语句**不会**在别的插件的作业里执行 ──────────────
+    #
+    # **这条是这次拆文件的全部理由。** 同处一份文件时，插件里任何一行不在函数
+    # 里的代码都待在主流程中间 —— bash 自上而下解析整个文件，那一行于是在
+    # **每一个**作业里执行，不管用的是哪个插件。一个插件的笔误因此可以改变
+    # 所有其他插件的作业行为，而症状指不回任何一个文件。
+    #
+    # 观测手段是"顶层语句写一个文件"：可判定，而且与真实的危害同形（顶层代码有
+    # 副作用，副作用落在别处）。
+    _tld = os.path.join(tmpdir, "plugins-toplevel")
+    _tl_def = (("loud", "01M2JKHTZGKJBFQQTWYXMQMF40",
+                'start_loud() { return 1; }\n'
+                ': > "$HOME/toplevel-ran"\n'),
+               ("quiet", "01M2JKHTZGKJBFQQTWYXMQMF41",
+                'start_quiet() { return 1; }\n'))
+    for _n, _i, _body in _tl_def:
+        os.makedirs(os.path.join(_tld, _n, "job"), exist_ok=True)
+        with open(os.path.join(_tld, _n, "job", "start.sh"), "w",
+                  encoding="utf-8") as _f:
+            _f.write(_body)
+        with open(os.path.join(_tld, _n, "plugin.json"), "w",
+                  encoding="utf-8") as _f:
+            _f.write(json.dumps({"id": _i, "name": _n, "version": "1.0.0",
+                                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}))
+    _tl_specs, _tl_probs = mod.scan_plugins(_tld)
+    check("顶层语句的假插件被扫进来（这条用例自己的前提）",
+          sorted(s.name for s in _tl_specs) == ["loud", "quiet"], str(_tl_probs))
+    _tl_by = {s.name: s for s in _tl_specs}
+    # ★ 这里逐插件织 —— **与 deploy.sh 同一个形状**。如果哪天退回"共处一份"，
+    #   下面第二条会立刻红，而红的方式正是它要防的那件事。
+    _tl_home = {}
+    for _n in ("loud", "quiet"):
+        _o = os.path.join(tmpdir, "tl-%s.sbatch" % _n)
+        weave_one(_rb, _tl_by[_n].source_dir, _n, _tl_by[_n].id, _o)
+        _tl_home[_n] = os.path.join(tmpdir, "jobsh-tl-%s" % _n)
+        os.makedirs(_tl_home[_n], exist_ok=True)
+        run_jobsh(_o, _n, _tl_home[_n])
+    check("★ 「loud」自己的作业里，它那行顶层语句确实执行了"
+          "（这条保证下一条不是假绿 —— 标记本身是能被写出来的）",
+          os.path.exists(os.path.join(_tl_home["loud"], "toplevel-ran")),
+          os.listdir(_tl_home["loud"]))
+    check("★★ 而「loud」的顶层语句在「quiet」的作业里**没有**执行"
+          " —— 拆成一份一份的全部理由就在这里",
+          not os.path.exists(os.path.join(_tl_home["quiet"], "toplevel-ran")),
+          os.listdir(_tl_home["quiet"]))
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

@@ -79,7 +79,12 @@ jobs:
       - name: Shell 语法
         run: |
           fail=0
-          for f in $(git ls-files '*.sh' cluster/deploy.sh tools/*.sh); do
+          # ★ '*.sbatch' 必须在这里。作业模板与（部署之后）每插件一份的作业脚本
+          #   都是 .sbatch，没有 .sh 后缀 —— 而它们恰恰是**用户真的会执行**的
+          #   那两份 shell。此前 run.sbatch 就是从这个清单里漏掉的。
+          #   仓库里只有模板（成品在 <prefix>/share/slurmate/jobs/，不进仓库），
+          #   所以这条扫的是模板；成品那一份的语法由 deploy.sh 的 bash -n 挡。
+          for f in $(git ls-files '*.sh' '*.sbatch' cluster/deploy.sh tools/*.sh); do
             [ -f "$f" ] || continue
             if bash -n "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
           done

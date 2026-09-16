@@ -877,16 +877,25 @@ def resolve_bin(name, explicit):
     return None
 
 
-def default_job_script():
-    """作业脚本的位置从【守护进程自身的安装位置】推导。
+def default_jobs_dir():
+    """作业脚本目录，从【守护进程自身的安装位置】推导。
 
     安装布局由 deploy.sh 定下：守护进程在 <prefix>/sbin，作业脚本在
-    <prefix>/share/slurmate。两边由同一个前缀推导，就不存在
+    <prefix>/share/slurmate/jobs。两边由同一个前缀推导，就不存在
     「配置指向 A、实际装在 B」这种只在提交时才炸的不一致。
+
+    ★ **一个插件一份**，文件名是这个插件清单里的 ULID（`<ULID>.sbatch`）。
+      ULID 是插件的**身份**（全球唯一、铸造出来就不变），短名只是本站的标签。
+      文档与排查里要认哪一份，看 `<jobs_dir>/<ULID>.sbatch` 与
+      `<plugins_dir>/*/plugin.json` 里的 `id` 对不对得上。
+
+    ★ 为什么是一插件一份、不是所有插件织进同一份：见 plugins/README.md。
+      一句话 —— 同处一个文件时，插件里任何一行**不在函数里**的代码都会待在
+      主流程中间，在**每一个**作业里执行，不管用的是哪个插件。
     """
     here = os.path.dirname(os.path.realpath(__file__))
     return os.path.normpath(
-        os.path.join(here, os.pardir, "share", "slurmate", "run.sbatch"))
+        os.path.join(here, os.pardir, "share", "slurmate", "jobs"))
 
 
 def default_plugins_dir():
@@ -1179,8 +1188,27 @@ class Config(object):
         self.reject_threshold = REJECT_THRESHOLD
         self.reject_window = REJECT_WINDOW
         self.throttle_seconds = THROTTLE_SECONDS
-        self.job_script = default_job_script()
+        self.jobs_dir = default_jobs_dir()
         self.job_log_subdir = JOB_LOG_SUBDIR
+
+        # ── 「有作业侧、却找不到那份脚本」的插件 ──────────────────────────
+        # 它**不是**启动错误，**也不进 validate()** —— 理由有两条，都写在这里
+        # 免得下一个人"顺手"把它挪进去：
+        #
+        #   ① `validate()` 只有 errors 一条通道（任何一条都让守护进程拒绝启动），
+        #      所以往里加任何东西都等于「让整个站点起不来」。而这条描述的是一个
+        #      **部署不完整**，不是「这份配置错了」—— 一个站点不该因为少了一份
+        #      作业脚本就拒绝为所有人服务，那会连"停掉正在跑的会话"都做不到。
+        #   ② 与它同族的 `plugin_problems`（清单坏掉的插件目录）走的就是这条路：
+        #      `--check` 里打 ⚠、`start()` 里 log.error，其余一切照常。
+        #
+        # 判据用 `needs_job`（插件目录里有没有 job/start.sh），所以**没有作业侧
+        # 的插件不在这个列表里** —— 那种插件是合法的，它只是不能提交，
+        # 由 op_submit 的 service_kind_no_job 说清楚。
+        self.plugin_job_missing = [
+            s for s in self.plugin_specs
+            if s.needs_job
+            and not os.path.isfile(os.path.join(self.jobs_dir, s.id + ".sbatch"))]
 
         # ── 外部命令（留空则查找）──
         self.sbatch = resolve_bin("sbatch", get("sbatch"))
@@ -1311,10 +1339,13 @@ class Config(object):
         if self.suspect_after >= self.orphan_after:
             errors.append("suspect_after(%d) 必须小于 orphan_after(%d)"
                           % (self.suspect_after, self.orphan_after))
-        if not os.path.exists(self.job_script):
-            errors.append("作业脚本不存在: %s（位置由守护进程自身的安装路径推导，"
-                          "正确安装时应由 deploy.sh 放到 <prefix>/share/slurmate/）"
-                          % self.job_script)
+        # ★ 这里此前有一条 `if not os.path.exists(self.job_script)` —— 那时作业
+        #   脚本是**一份**编织成品，不在就等于整个系统不能提交，判成启动错误是
+        #   合理的。现在一个插件一份，缺失的语义变成了「这个插件的部署不完整」：
+        #   **一个插件的问题不该让整个站点起不来**（起不来连"停掉正在跑的会话"
+        #   都做不到）。所以它改走 `plugin_job_missing` + `--check` 的 ⚠ 与
+        #   `start()` 的 log.error，与 `plugin_problems` 同一条路。
+        #   **不要再把它加回这里** —— `validate()` 没有 warnings 通道。
         cidr_err = self.cluster_cidr_problem()
         if cidr_err:
             errors.append(cidr_err)
@@ -1671,8 +1702,13 @@ class Nft(object):
 #  Slurm
 # ==============================================================================
 
-def build_sbatch_argv(cfg, sess, env, home):
+def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
     """拼 sbatch 的命令行。**纯函数** —— 不 fork、不切身份，所以可以直接断言。
+
+    `job_script` 与 `service_kind` 由调用方显式传入（`op_submit` 从 `spec` 取），
+    **不从 `sess["service_plugin"]` 拆字符串** —— 这一个是「到底提交了哪一份作业
+    脚本」的唯一落点，而"选错插件脚本"在真机上的表现是「用户提交了 A，跑起来的是
+    B」，隔着一层作业日志。显式传参让它可以被一条纯函数用例直接钉住。
 
     ★ 为什么单独拆出来：这个 argv 是「哪些 flag 在什么条件下【不出现】」这条
       契约的唯一实现，而它的分支错误只有到真集群上、且只在某些分支上才暴露
@@ -1690,11 +1726,18 @@ def build_sbatch_argv(cfg, sess, env, home):
     else:
         outpat = os.path.join(home, "slurm-%j.out")
 
-    # 作业名带会话 id 前 8 位：squeue 里一眼能对上是哪一次会话。
-    # 「用途」没了之后不能再用它，而一个固定名字会让用户的多条作业
-    # 在 squeue 里长得一模一样。
+    # 作业名 `sj-<插件短名>`：squeue 里一眼看得出这是本系统的作业、而且是哪个插件。
+    #
+    # ★ 这里此前是 `slurmate-<会话 id 前 8 位>`，理由是"多开时在 squeue 里分得清"。
+    #   换成插件短名之后，**同一用户同时开两个同插件的会话，squeue 里两行会完全
+    #   相同** —— 这是有意的取舍，不是遗漏：squeue 的 NAME 列默认只显示 8 个字符，
+    #   装不下「插件名 + 会话 id」两样。要分清哪一行是哪一次会话，看
+    #   `slurmate list`（它列会话 ID ↔ 作业 ID），或 `squeue -o "%.10i %.16j"`。
+    #
+    #   短名有 PLUGIN_NAME_RE 管着（`[a-z0-9-]`），所以它是安全的 argv 元素 ——
+    #   没有空格、没有逗号、不可能被当成另一个 flag。
     argv = [cfg.sbatch, "--parsable",
-            "--job-name=slurmate-%s" % str(sess["session_id"])[:8],
+            "--job-name=sj-%s" % service_kind,
             "-A", sess["account"],
             "-c", str(sess["cpus"]),
             "--mem=%s" % sess["mem"],
@@ -1715,7 +1758,8 @@ def build_sbatch_argv(cfg, sess, env, home):
     for k, v in env.items():
         exports.append("%s=%s" % (k, v))
     argv.append("--export=%s" % ",".join(exports))
-    argv.append(cfg.job_script)
+    # 操作数放最后（posix 惯例：选项在前）。这是「提交了哪一份」的落点。
+    argv.append(job_script)
     return argv
 
 
@@ -1926,13 +1970,16 @@ class Slurm(object):
         self._part_cache[user] = (now_ts(), result)
         return result
 
-    def submit(self, sess, env, home, uid, user):
+    def submit(self, sess, env, home, uid, user, job_script, service_kind):
         """以目标用户身份提交作业。返回 (job_id, None) 或 (None, 错误)。
 
         身份切换用 Popen(user=/group=/extra_groups=)（Python 3.9+），
         不走 shell、不做字符串拼接 —— 参数全部是 argv 元素。
+
+        `job_script` / `service_kind` 一路显式传下来，见 build_sbatch_argv。
         """
-        argv = build_sbatch_argv(self.cfg, sess, env, home)
+        argv = build_sbatch_argv(self.cfg, sess, env, home,
+                                 job_script, service_kind)
         pw = pwd.getpwnam(user)
         try:
             groups = os.getgrouplist(user, pw.pw_gid)
@@ -2069,6 +2116,11 @@ class Sessiond(object):
         # "我明明装了啊"变成一句谁也答不上来的话。
         for p in self.cfg.plugin_problems:
             log.error("插件目录有问题（已跳过，其余插件照常工作）：%s", p)
+        # 「有作业侧、却找不到那份作业脚本」—— 同上，**不是启动错误**。
+        # 会走到的情形：deploy.sh 在插件装上之前跑过，或者拷贝/安装失败。
+        for s in self.cfg.plugin_job_missing:
+            log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
+                      "不了。重跑一次 deploy.sh 会生成它。", s.name, self.cfg.jobs_dir)
         if not self.cfg.plugins:
             log.warning("本站没有安装任何插件（%s）—— 会话能查、能停，"
                         "但没有可提交的服务。这是合法状态。", self.cfg.plugins_dir)
@@ -2830,6 +2882,12 @@ class Sessiond(object):
           客户端自己的事（它的插件模块里写着），由服务端下发只会让客户端有机会
           相信一个关于**自己**的错误描述。
 
+        ★ 加上去的 `can_submit` **不违反上面那条**：它说的是**本站**这一侧的事实
+          （这个插件现在提交得出去吗），不是"客户端该做什么"。客户端据此把按钮
+          置灰，用户就不必点下去、拿到一个错误码才知道。
+          **下一个人别按上面那条把它删掉** —— 判据是「这个事实归谁」，不是「字段
+          看起来像不像给客户端用的」。
+
         `title` 的用途是**兜底标签**：客户端认得这个插件时用它自己的名字（那才
         对应它实际会做的事）；不认得时至少能显示"站点提供了一个叫 X 的东西"。
         """
@@ -2845,6 +2903,16 @@ class Sessiond(object):
                 "name": p.name,
                 "title": p.title,
                 "enabled": p.enabled,
+                # 「现在提交得出去吗」= 开了 **且** 有作业侧实现。
+                #
+                # ★ 两个事实合成一个答案，是因为**服务端才是同时知道这两件事的
+                #   那一方**。让客户端自己拿 `enabled` 去推，就多出一份会漂的
+                #   推理 —— 而这里多出来的那一位（`needs_job`）客户端根本看不见。
+                #
+                # 与 `enabled` 不是重复的：`enabled=false` 该说「本站没开放它，
+                # 找管理员」；`enabled=true` 而 `can_submit=false` 该说「本站装了
+                # 它，但它没有作业侧实现」—— **两句话、两个该做的事**。
+                "can_submit": bool(p.enabled and p.spec.needs_job),
                 # 默认资源是**按插件**的，客户端不自己定一份（两份真相的老问题）。
                 "defaults": {"cpus": p.default_cpus, "mem": p.default_mem},
             })
@@ -3066,10 +3134,12 @@ class Sessiond(object):
         #   **装/卸一个插件**这种配置之外的动作悄悄改变行为，而这一层要的恰恰是
         #   可预测。不配 default_plugin 是推荐值：让每一次提交都写明它要什么。
         #
-        # ★ 三种错误必须分开报，因为它们对应三种完全不同的行动：
+        # ★ 四种错误必须分开报，因为它们对应四种完全不同的行动：
         #     没给、而本站也没配缺省  → 调用方的问题（补上 service_kind）
         #     给了个本站没有的名字    → 名字打错 / 客户端太新
         #     认得但本站没开          → 站点的一个决定，去找管理员
+        #     开着但没有作业侧实现    → 这个插件的部署还不完整（补 job/start.sh
+        #                              再跑一次 deploy.sh），同样是找管理员
         kind = str(req.get("service_kind") or "").strip()
         if not kind:
             if not cfg.default_plugin:
@@ -3092,6 +3162,29 @@ class Sessiond(object):
                              % (pcfg.title,
                                 "、".join(cfg.plugins[n].title
                                           for n in cfg.enabled_kinds) or "（无）"))
+
+        # 「装了、也开着，但没有作业侧实现」—— 这个插件**合法**（一个只有客户端
+        # 那一半的插件是允许存在的），但它提交不出去：作业脚本里没有 start_<短名>，
+        # 真提交了也是排完队之后以 24 失败。
+        #
+        # ★ 放在这里而不是 `validate()` 里：一个插件的状态不该让整个站点起不来
+        #   （见 Config.__init__ 里 plugin_job_missing 那一段的说明）。
+        # ★ 放在 `enabled` 之后：停用是更靠前的、更该先解决的原因；两个都不满足时
+        #   报「没开」比报「没有作业侧」更接近管理员该做的第一件事。
+        # ★ code 用 4 而不是 2：这不是调用方写错了请求（他写的名字完全正确），
+        #   是**站点这一侧**的一个事实 —— 与 `service_kind_disabled` 同一族。
+        if not spec.needs_job:
+            # 措辞的两半各自对齐最近的同类，而且各自是那个位置上最有用的东西：
+            #   · 主语用 `title` —— 与上面 `service_kind_disabled` 一致，中文读得通；
+            #   · 可照做的那份清单用**短名** —— 用户传进来的就是短名，给他一串
+            #     标题等于让他自己猜「开发环境」对应哪个 `--service-kind`。
+            #     `missing_service_kind` 与 `bad_service_kind` 报的也是短名。
+            return self._err(4, "service_kind_no_job",
+                             "本站装了「%s」，但它没有作业侧实现（插件目录里没有 "
+                             "job/start.sh），所以提交不了。现在能提交的是：%s。"
+                             % (pcfg.title,
+                                "、".join(sorted(s.name for s in cfg.plugin_specs
+                                                 if s.needs_job)) or "（无）"))
 
         # sshd 用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
         # ★ 为什么必须丢掉注释：OpenSSH 公钥的注释里可以有**逗号**，而守护进程是用
@@ -3256,7 +3349,12 @@ class Sessiond(object):
             "SLURMATE_SSH_PUBKEY": ssh_pubkey,
         }
         sess = self.store.get(sid)
-        job_id, why = self.slurm.submit(sess, env, home, uid, user)
+        # 这个插件对应的那一份作业脚本。**一个插件一份**，文件名是它的 ULID ——
+        # ULID 有 PLUGIN_ID_RE 管着（`[0-9A-HJKMNP-TV-Z]{26}`），所以它是安全的
+        # 路径分量，不可能拼出 `../`。
+        job_script = os.path.join(cfg.jobs_dir, spec.id + ".sbatch")
+        job_id, why = self.slurm.submit(sess, env, home, uid, user,
+                                        job_script, kind)
         if job_id is None:
             self.store.update(sid, state=ST_REJECTED, ended_at=now_ts(),
                               note="submit_failed")
@@ -3324,16 +3422,25 @@ def main():
             return 0
         print("插件目录 %s 里有 %d 个插件：" % (where, len(specs)))
         for s in specs:
-            print("  %-16s %s@%s  %s  作业侧入口 %s%s"
+            if s.needs_job:
+                note = "  作业侧入口 %s" % s.job_entry
+            else:
+                # ★ 这**不是**故障，是一种合法状态：插件可以只有客户端那一半。
+                #   所以措辞是"不能提交"，不是"会失败" —— 它连提交都到不了。
+                #   要给它加作业侧，就补一份 job/start.sh 再跑一次 deploy.sh。
+                note = "  ⚠ 没有 job/start.sh —— 本插件不能提交（合法状态）"
+            print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
-                     "启用" if s.default_enabled else "停用",
-                     s.job_entry,
-                     "" if s.needs_job else "  ⚠ 没有 job/start.sh，作业会在运行时失败"))
+                     "启用" if s.default_enabled else "停用", note))
         # deploy.sh 要逐个处理这些目录，所以最后给一行**机器可读**的。
         # 用制表符而不是空格：短名里不允许空格，也不允许制表符。
+        #
+        # ★ 三列，**第三列是 id（ULID）**：deploy.sh 用它给每个插件的作业脚本命名
+        #   （`<ULID>.sbatch`）。少发这一列，部署脚本就只能拿短名当文件名 ——
+        #   而短名是本站的标签、可以改，ULID 才是身份。两列都不够，所以是三列。
         print("plugin-dirs:")
         for s in specs:
-            print("%s\t%s" % (s.name, s.source_dir))
+            print("%s\t%s\t%s" % (s.name, s.source_dir, s.id))
         return 0
 
     # 先把配置与 --check 走完，这样非 root 也能拿它做诊断（nft 相关项会诚实报 false）
@@ -3355,7 +3462,7 @@ def main():
         print("  端口池        : %d-%d" % (cfg.port_start, cfg.port_end))
         print("  socket        : %s" % cfg.socket_path)
         print("  数据库        : %s" % cfg.db_path)
-        print("  作业脚本      : %s" % cfg.job_script)
+        print("  作业脚本目录  : %s" % cfg.jobs_dir)
         print("  插件目录      : %s" % cfg.plugins_dir)
         print("  缺省插件      : %s" % (cfg.default_plugin or
               "（未设置 —— 提交时必须显式给 service_kind）"))
@@ -3377,6 +3484,13 @@ def main():
         # 但它必须被看见 —— 否则表现是"我明明装了啊"，而日志里一个字都没有。
         for _p in cfg.plugin_problems:
             print("  ⚠ 插件目录有问题（已跳过，其余插件照常工作）：%s" % _p)
+        # 「有作业侧、却找不到那份作业脚本」—— 同样是**报告但不算错误**。
+        # 它说明这个插件的部署不完整（deploy.sh 跑在插件装上之前？拷贝失败了？），
+        # 而症状是提交时被拒。不说出来的话，运维只会看到"本站没有开启"之类
+        # 与真正原因隔了一层的话。修法是重跑一次 deploy.sh。
+        for _s in cfg.plugin_job_missing:
+            print("  ⚠ 插件「%s」的作业脚本不在：%s（重跑一次 deploy.sh 会生成它）"
+                  % (_s.name, os.path.join(cfg.jobs_dir, _s.id + ".sbatch")))
 
         print("  插件          :")
         if not cfg.plugins:
@@ -3393,6 +3507,11 @@ def main():
                      _p.default_cpus, _p.default_mem,
                      "" if _p.present else "（配置里没有这个块，这里是插件清单里的缺省值）"))
             print("      %-11s %s@%s" % ("id@版本", _p.spec.id, _p.spec.version))
+            if not _p.spec.needs_job:
+                print("      %-11s 【没有 job/start.sh —— 合法状态，但本插件提交不了】"
+                      % "作业侧")
+            print("      %-11s %s" % ("作业脚本",
+                                      os.path.join(cfg.jobs_dir, _p.spec.id + ".sbatch")))
             if _p.spec.bin_env:
                 print("      %-11s %s（%s）"
                       % (_p.spec.bin_env, _p.bin, _p.bin_src))

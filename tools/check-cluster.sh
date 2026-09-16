@@ -561,13 +561,35 @@ if [[ -d "$_plugdir" ]]; then
     else
         r PASS "${_plugdir} 里有 ${n_pl} 个插件目录"
         run bash -c "find '$_plugdir' -mindepth 1 -maxdepth 1 -type d | sed 's/^/    /'"
-        echo "  --- 各插件的身份与作业侧入口 ---"
+        # ★ 这里同时打 **id（ULID）** 和它在 jobs/ 里那一份作业脚本**在不在**。
+        #
+        #   为什么非要打 id：作业脚本一个插件一份，文件名就是 ULID —— 而 ULID 是
+        #   一串随机字符，光看 jobs/ 的目录列表认不出谁是谁。这张表就是那份对照，
+        #   没有它，"作业脚本到底装齐了没有"在一台真机上无法核对。
+        #
+        #   「作业侧 （无）」**不是**故障：那种插件装得上、看得见，但提交不了
+        #   （守护进程报 service_kind_no_job）。它对应的状态是合法的。
+        _jobsdir="/usr/local/share/slurmate/jobs"
+        echo "  --- 各插件的身份 / 作业侧 / 对应的作业脚本 ---"
         run bash -c "for d in '$_plugdir'/*/; do
             [ -f \"\$d/plugin.json\" ] || continue
             n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
             v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
-            j='（无）'; [ -f \"\$d/job/start.sh\" ] && j='有'
-            printf '    %-16s %-9s 作业侧 %s\\n' \"\$n\" \"\$v\" \"\$j\"
+            i=\$(sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
+            if [ -f \"\$d/job/start.sh\" ]; then j='有'; else j='（无）'; fi
+            s='（没有那份脚本）'
+            [ -f '$_jobsdir/'\$i'.sbatch' ] && s='在'
+            printf '    %-16s %-9s %-24s 作业侧 %-6s 作业脚本 %s\\n' \"\$n\" \"\$v\" \"\$i\" \"\$j\" \"\$s\"
+        done"
+        _nj="\$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
+        r INFO "${_jobsdir} 里有 ${_nj} 份作业脚本（应当等于上面「作业侧 有」的个数）"
+        # 无主脚本：jobs/ 里有、但没有任何插件的 id 对得上。它仍然是可以被提交的 ——
+        # 所以必须被看见，而不是留在那儿等某天有人问"这份是哪个插件的"。
+        run bash -c "for jf in '$_jobsdir'/*.sbatch; do
+            [ -f \"\$jf\" ] || continue
+            b=\$(basename \"\$jf\" .sbatch)
+            grep -rql \"\\\"id\\\"[[:space:]]*:[[:space:]]*\\\"\$b\\\"\" '$_plugdir' 2>/dev/null \
+              || printf '    ⚠ 无主的作业脚本（没有插件认领）：%s\\n' \"\$jf\"
         done"
     fi
 else

@@ -14,7 +14,7 @@
 
 | 部分 | 状态 |
 |---|---|
-| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 **319 项**、比对器自测 23 项全过（这 319 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
+| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 **341 项**、比对器自测 23 项全过（这 341 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
 | **客户端**（Electron） | 代码完整，测试 171 项全过：真实 SSH 后端已实现（专用密钥认证、固定 argv 的 RPC、主机密钥 TOFU 校验）。**但从未连过真集群** —— SSH 握手、exec 通道与端口转发都还没有一次真实输出 |
 
 也就是说：**现在把它装到集群上，客户端仍然连不上** —— 但原因和以前不一样了。
@@ -89,8 +89,9 @@ Slurm 说作业没了，就拆规则；nft 规则被人删了（例如 `systemct
 cluster/          集群侧（部署到登录节点）
   slurmate-sessiond        root 守护进程
   slurmate                 用户 CLI（也是客户端调用的 RPC 入口）
-  run.sbatch               作业模板（root 拥有，用户不可改；deploy.sh 把插件的
-                           作业侧编织进来，装出来的是一份单文件成品）
+  run.sbatch               作业**模板**（仓库里的这一份不提交；deploy.sh 对每个
+                           插件用它织一次，装到 <prefix>/share/slurmate/jobs/
+                           <ULID>.sbatch —— 一个插件一份）
   slurmate.conf.example    配置示例 —— 复制到 /etc/slurmate/slurmate.conf 再改
   deploy.sh                一键部署 / 卸载
   nft-compare.py           非干扰比对器（带自测）
@@ -192,10 +193,15 @@ sudo bash cluster/deploy.sh              # 部署
   - 客户端：插件装在**池**里（`~/.slurmate/plugins/`），由界面上的「从目录安装…」
     放进去；
   - 集群侧：插件装在 `<prefix>/share/slurmate/plugins/`，由
-    `deploy.sh --plugins-src DIR` 装进去，并**编织**进作业模板。
+    `deploy.sh --plugins-src DIR` 装进去，并把它的作业侧**逐插件编织**成
+    `<prefix>/share/slurmate/jobs/<ULID>.sbatch` —— **一个插件一份**。
+    一份一个插件是刻意的：同处一份文件时，插件里任何一行不在函数里的代码都会
+    在**每一个**作业里执行，不管用的是哪个插件。
 
   一个插件都不装是**正常状态**：基座照常启动、已有会话照常能查能停，只是没有可
-  提交的服务。加一个插件 = 放一个目录 + 跑一次 deploy.sh，**不用改基座的源码**。
+  提交的服务。**一个插件没有 `job/start.sh` 也是合法状态**：它装得上、看得见，
+  但提交不了（守护进程报 `service_kind_no_job`，界面上那个按钮是灰的）。
+  加一个插件 = 放一个目录 + 跑一次 deploy.sh，**不用改基座的源码**。
   契约见 [plugins/README.md](plugins/README.md)。
 - **站点分发插件的机制还没实现**。本版做了**安装点**：一个插件目录放进池就生效
   （`install.js`），而将来站点分发走的是**同一个函数** —— 区别只在文件从哪来。
