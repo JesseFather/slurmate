@@ -2138,6 +2138,92 @@ exit 0
               _js_set == sorted(mod.PLUGIN_COPY_SKIP),
               "客户端 %s vs 守护进程 %s" % (_js_set, sorted(mod.PLUGIN_COPY_SKIP)))
 
+    # ── 19.13 ★ 部署的信任门 ⊇ 站点会分发的文件 ─────────────────────────────
+    #
+    # `deploy.sh` 的 `source_is_trusted()` 会拒绝安装"源里有人能改写"的文件。
+    # 那一圈名单（`plugin_src_files()`）**以前只列 plugin.json 与 job/start.sh**，
+    # 理由是"插件目录里其余的都不装、也不读"。站点分发接上之后那句话不成立了：
+    # `client/` 整棵子树会被 `plugins` / `plugin_files` 发到**每一台客户端**上，
+    # 并在用户的 Electron 主进程里 `require()`。于是"某个普通用户能改写它"的后果
+    # 从"没什么后果"变成了"他的代码在每个用户的工作站上跑"。
+    #
+    # 这一节钉的就是这条包含关系：**守护进程会分发的每一份文件，都必须在部署的
+    # 信任门里**。它此前是红的（client/index.js、client/sshconfig.js、README.md
+    # 三份都不在名单里）。
+    #
+    # ★ 为什么是把 `plugin_src_files()` **抠出来真跑**，而不是在用例里照抄一遍：
+    #   照抄的那一份永远不会跟着 deploy.sh 改，于是"用例绿了、真机上炸了" ——
+    #   而 deploy.sh 本机跑不了（要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）。
+    #   抠出来跑是这里唯一能真的验到那个函数的地方。
+    print("\n── 19.13. 部署的信任门 ⊇ 站点会分发的文件 ──")
+    _dep = os.path.join(HERE, "deploy.sh")
+    with open(_dep, encoding="utf-8") as _f:
+        _dep_src = _f.read()
+    _m = re.search(r"^plugin_src_files\(\) \{\n.*?^\}$", _dep_src, re.M | re.S)
+    check("★ deploy.sh 里那个 plugin_src_files() 找得到（找不到说明它改了形状）",
+          _m is not None)
+    if _m:
+
+        def _gated(plugins_src):
+            """在真 bash 里跑一遍那个函数，返回它列出来的路径集合。"""
+            r = subprocess.run(
+                ["bash", "-c",
+                 'PLUGINS_SRC="$1"\n%s\nplugin_src_files\n' % _m.group(0),
+                 "bash", plugins_src],
+                capture_output=True, text=True)
+            return {l for l in r.stdout.split("\n") if l}
+
+        # ① 真树：仓库里那两个插件，逐份比对
+        _real = os.path.abspath(os.path.join(HERE, os.pardir, "plugins"))
+        _gated_real = _gated(_real)
+        for _name in sorted(os.listdir(_real)):
+            _pdir = os.path.join(_real, _name)
+            if not os.path.isfile(os.path.join(_pdir, "plugin.json")):
+                continue
+            _will_send = {os.path.join(_pdir, _rel)
+                          for _rel in mod.plugin_file_index(_pdir)}
+            _missing = sorted(_will_send - _gated_real)
+            check("★★ 插件「%s」会分发的每一份文件都过了部署的信任门" % _name,
+                  not _missing,
+                  "没进名单的是：%s" % _missing)
+            _js = sorted(p for p in _will_send
+                         if p.endswith(".js")
+                         and (os.sep + "client" + os.sep) in p)
+            check("★ 而它客户端那一半也在名单里（%d 份 .js）" % len(_js),
+                  bool(_js) and set(_js) <= _gated_real,
+                  repr(_js))
+        check("★ 客户端代码真的进了名单（不是恰好都对的空集）",
+              any((os.sep + "client" + os.sep) in p for p in _gated_real),
+              repr(sorted(_gated_real))[:160])
+
+        # ② 合成树：不是插件的目录整个不进名单 —— 防的是源目录里一个恰好存在的
+        #    `.git`（或任何没 plugin.json 的目录）被当成插件目录，把整个对象库
+        #    拖进信任检查里（那会让部署在一个跟插件无关的理由上失败）。
+        _tmp = tempfile.mkdtemp(prefix="slurmate-gate-")
+        try:
+            os.makedirs(os.path.join(_tmp, "real", "client"))
+            with open(os.path.join(_tmp, "real", "plugin.json"), "w") as _f:
+                _f.write("{}")
+            with open(os.path.join(_tmp, "real", "client", "index.js"), "w") as _f:
+                _f.write("// x\n")
+            os.makedirs(os.path.join(_tmp, ".git"))
+            with open(os.path.join(_tmp, ".git", "HEAD"), "w") as _f:
+                _f.write("ref: refs/heads/main\n")
+            os.makedirs(os.path.join(_tmp, "halfbaked", "job"))
+            with open(os.path.join(_tmp, "halfbaked", "job", "start.sh"),
+                      "w") as _f:
+                _f.write("start_x() { :; }\n")
+            _got = _gated(_tmp)
+            check("★ 插件目录里的每一个文件都被列出来了（含 client/ 下的）",
+                  _got == {os.path.join(_tmp, "real", "plugin.json"),
+                           os.path.join(_tmp, "real", "client", "index.js")},
+                  repr(sorted(_got)))
+            check("★★ 不是插件的目录（没有 plugin.json）整个不进名单", not _got or
+                  not any("halfbaked" in p or ".git" in p for p in _got),
+                  repr(sorted(_got)))
+        finally:
+            shutil.rmtree(_tmp, ignore_errors=True)
+
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #
     # 这两个文件之间有一条**跨语言的契约**：作业用 printf 拼一段 JSON 出来，守护

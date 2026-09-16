@@ -8,15 +8,25 @@
 
 ## 〇、协议版本与变更
 
-**当前版本：v0.5。** 三处版本号（`client/package.json`、`cluster/slurmate`、
+**当前版本：v0.6。** 三处版本号（`client/package.json`、`cluster/slurmate`、
 `cluster/slurmate-sessiond`）由 `.github/workflows/checks.yml` 断言必须一致。
 
-> ✅ **两端都已按 v0.5 实现**，三处版本号都是 0.5.0。此前这里挂着一条警告说集群侧
+> ✅ **两端都已按 v0.6 实现**，三处版本号都是 0.6.0。此前这里挂着一条警告说集群侧
 > 还停在 v0.1、两端连不上 —— 那条现在不成立了，所以删掉：留着一条已经不成立的警告，
 > 与留一条已经失效的注释是同一类问题。
 >
-> ⚠️ **跨版本的两端仍然连不上**。v0.2 / v0.3 / v0.4 的客户端连不上 v0.5 的守护进程，
-> 反之亦然 —— 升级时两边要一起升。
+> ⚠️ **v0.2 → v0.5 之间不兼容，升级时两边要一起升。**
+>
+> ★ **v0.5 → v0.6 是例外，两个方向都能通 —— 这是设计出来的，不是碰巧。**
+> v0.6 只**加**东西（`plugins` 里多两个字段、多一个 op），老客户端不认识它们、
+> 也不会去调那个 op。反方向靠的是客户端的一条纪律：**站点不支持分发这件事，判据是
+> "响应里没有 `files`"（能力缺席，一个稳定的协议事实），不是"这次下载失败了"
+> （瞬时事实）**。老守护进程因此被明确认成"太旧、不支持分发"，客户端说一句话、
+> 然后什么也不做。
+>
+> ⚠️ 但**能力**上仍然不一致，而且必须说清楚：v0.5 的客户端拿不到站点分发的插件
+> （它不认识那个池，只扫自己的 `~/.slurmate/plugins/`）。所以"能连上"不等于
+> "行为一样" —— 升级仍然应该两端一起。
 
 | 版本 | 变更 |
 |---|---|
@@ -25,6 +35,7 @@
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
 | **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
+| **v0.6** | **插件文件可以从站点取回来。** `plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）、顶层多了 `limits`（本站的上限，**自述**）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）；三个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`（外加 `9 plugin_file_changed`，见下）。**全部是加法**，见上面那段兼容性说明。 |
 
 ★ **v0.3 与 v0.4 从未发布、从未部署过** —— 它们是同一条路上的中间站，内容全部并进了
 v0.5。所以协议表的读法是「v0.2 → v0.5 之间隔了三个不兼容的版本」，而不是三段可以
@@ -119,16 +130,27 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 | code | 含义 | 典型 `kind` | CLI 退出码 |
 |---|---|---|---|
 | `0` | 成功 | — | `0` |
-| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time` | `2` |
-| `3` | 未找到（会话不存在，或 uid 查不到） | `not_found`、`unknown_uid` | `3` |
-| `4` | 被拒绝：配额、权限、账户、熔断 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled` | `4` |
+| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
+| `3` | 未找到（会话不存在，uid 查不到，或本站没有这个东西） | `not_found`、`unknown_uid`、`plugin_unknown`、`plugin_file_unknown` | `3` |
+| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_file_too_large` | `4` |
 | `5` | **守护进程不可达**（`daemon_unreachable`）**或**端口池空（`no_port`） | `daemon_unreachable`、`no_port` | `5` |
 | `6` | Slurm 侧失败 | `partitions_unknown`、`submit_failed` | `6` |
 | `7` | 触发限流 | `rate_limited` | `7` |
-| `9` | 守护进程内部异常 | `internal` | `1`（不在映射表内，落到默认值） |
+| `9` | 守护进程内部异常 | `internal`、`plugin_file_changed` | `1`（不在映射表内，落到默认值） |
 
 退出码映射见 `SLURMATE` 的 `_code_to_exit()`（`cluster/slurmate`）；
 `9` 不在其中，所以返回 `1`。CLI 自己的退出码约定写在 `cluster/slurmate`。
+
+> 📝 **v0.6 把 v0.5 漏掉的三个 kind 补进了这张表**：`missing_service_kind`、
+> `service_kind_disabled`、`service_kind_no_job`。它们从 v0.3 / v0.5 起就在代码里、
+> 就在用户会看到的报错里，只是从来没被登记 —— 而这张表是**实现者的唯一依据**：
+> 一个只读这张表的人会以为"站点没开这个插件"没有机器可读的 kind，于是回去靠
+> `detail` 的文案分支。表不全的症状是**下一个人照着错的表写代码**，不是某个用例变红。
+>
+> ★ `9 plugin_file_changed` 是**故意**用 9 的：它不是"客户端请求错了"，而是
+> "本站自己脚下的文件在服务期间被换掉了"（管理员就地改了插件目录）。归到 `2`
+> 会让客户端把它当成自己的 bug 去重试，归到 `3` 会让用户以为要换个插件 —— 它
+> 实际要的是**站点重新部署**，只有 `9`（内部异常）不会把人指向错误的方向。
 
 **`code 5` 有两种含义，这是本协议最容易写错的地方。** 见下一节。
 
@@ -296,13 +318,27 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 {"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
               "name": "code-server", "title": "开发环境", "enabled": true,
               "can_submit": true,
-              "defaults": {"cpus": 2, "mem": "8G"}},
+              "defaults": {"cpus": 2, "mem": "8G"},
+              "files": [{"path": "README.md",      "size": 7423, "sha256": "…"},
+                        {"path": "client/index.js","size": 2609, "sha256": "…"},
+                        {"path": "job/start.sh",   "size": 7917, "sha256": "…"},
+                        {"path": "plugin.json",    "size": 923,  "sha256": "…"}]},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
               "can_submit": false,
-              "defaults": {"cpus": 1, "mem": "2G"}}],
- "enabled": ["code-server"]}
+              "defaults": {"cpus": 1, "mem": "2G"},
+              "files": [{"path": "README.md",           "size": 13159, "sha256": "…"},
+                        {"path": "client/index.js",     "size": 4944,  "sha256": "…"},
+                        {"path": "client/sshconfig.js","size": 17559, "sha256": "…"},
+                        {"path": "job/start.sh",        "size": 16560, "sha256": "…"},
+                        {"path": "plugin.json",         "size": 636,   "sha256": "…"}]}],
+ "enabled": ["code-server"],
+ "limits": {"file_bytes": 262144, "total_bytes": 1048576, "max_files": 256}}
 ```
+
+> ★ 上面这两段的 `size` 是仓库里那两个插件的**真实字节数**，顺序就是协议要求的
+> 顺序（按 `path` 排序）。注意 **`plugin.json` 自己也在清单里** —— 站点分发发的是
+> **整个目录**，不是只挑客户端会执行的那一份。README 也一样会被发下去。
 
 > ★ **`can_submit` = 「现在提交得出去吗」= `enabled` **且** 本站有它的作业侧实现。**
 >
@@ -353,6 +389,68 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 的错误描述。
 
 错误：`3 unknown_uid`。
+
+#### `files` 与 `limits`（v0.6）—— 站点分发
+
+这两样是**可选**的加法。老守护进程不报它们，客户端必须按"站点没有这个能力"处理
+（见〈三态区分〉）。
+
+- **`files` 在不在，就是"本站支不支持分发"的唯一判据。** 一个空数组与"字段缺席"
+  是两件事：前者是"这个插件的清单是空的"（真的一无所有），后者是"这个守护进程
+  还不认识这回事"。**下载失败、超时、校验不过都不构成判据** —— 那是瞬时事实，
+  拿它当判据等于给一个能让下载失败的人（断流、丢包、中间人）一个把用户降级到
+  别处的开关。
+- **`files[].sha256` 是本站自述的，不能拿它当判据。** 客户端按 `plugin_file` 一份
+  一份取回来之后，必须**从磁盘上重算** sha256，再与**上一轮 `plugins` 记下的**这个
+  值比。拿响应里自带的 sha 去校验同一份响应里的 `data`，等于让被告当法官。
+- **比对必须是双向的**：声明了而没收到 ⇒ 失败；收到了而没声明 ⇒ **也失败**。
+  只比一个总摘要抓不到"多出来一个文件"。
+- **`limits` 也是自述**，客户端取"本站报的"与"客户端自己的硬上限"中**更严**的
+  那个。一个站点（或一次中间人）报 10 万个 1 字节的文件，客户端会跑很久、耗尽
+  inode、把家目录塞满 —— 上限不能由被审计方单方面决定。
+- **`path` 只是一个键。** 守护进程那一侧它是索引表的键（`plugin_file_index()`），
+  从不参与拼路径 —— 于是"路径穿越"这个词从等式里消失了：不认识的字符串**无论
+  长什么样**都只是"查不到"。客户端那一侧仍然要**再判一遍**（服务端也可能被换过），
+  任何一条不过就**拒绝整份**。
+- **符号链接与空目录不进清单**。客户端收到的是一份逐文件的清单，它没有办法原样
+  重建一个链接 —— 进了清单就会变成"内容永远对不上"。空目录同理（重建出来的树里
+  不会有它）。两端的规则是同一份。
+- **分不发由站点的 `enabled` 决定。** 本站关着的插件照样*报*（上面那条契约：
+  报出全部插件），但客户端只分发 `enabled: true` 的那些。
+
+### `plugin_file`
+
+请求：`{"op":"plugin_file", "id": "<ULID>", "version": "1.0.0", "path": "client/index.js"}`
+
+> ⚠️ **这个 op 是 v0.6 才有的。** v0.5 的守护进程回 `2 unknown_op`。
+
+成功 data：
+
+```json
+{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
+ "path": "client/index.js", "size": 12043, "sha256": "…",
+ "data": "<base64>"}
+```
+
+一次一份文件，`data` 是 base64。**串行取、不并发** —— 守护进程是单线程的，
+而限流桶（每 uid 每秒 `max_rpc_per_second` 次）是按"人点一下按钮"设计的：
+一次对账是 1 次 `plugins` + 1 次 `list` + 每个文件一次 `plugin_file`，两个插件
+加起来就压到了桶边上。所以客户端**自己让路**：串行取，收到 `7 rate_limited`
+视作"等一下再来"（退避重试，有上限），**不是失败**。
+
+错误：
+
+| code | kind | 什么时候 |
+|---|---|---|
+| `3` | `plugin_unknown` | 这个 `(id, 版本)` 本站没有 |
+| `3` | `plugin_file_unknown` | 这个 `path` 不在清单里 —— **含一切穿越尝试**，也含跳过表里的路径（`.git/config`、`node_modules/x.js`） |
+| `4` | `plugin_file_too_large` | 单文件超过 `limits.file_bytes` |
+| `9` | `plugin_file_changed` | 文件在守护进程起来**之后**被换过（清单里的 sha 与磁盘上的对不上）。**必须拒绝，绝不截断、绝不"就用清单里那个值"** |
+
+> ★ **绝不截断。** 截断与明确失败的差别，就是"谎报成功"与"说得出来"的差别。
+>
+> ★ `plugin_file_changed` 要客户端做的是**重新对一次账**（那时会拿到新的清单），
+> 而不是重试同一个请求 —— 重试一万次也是同一个结果。
 
 ### `submit`
 
@@ -628,3 +726,10 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
     把新版本的客户端代码接到旧版本的作业实现上 —— 而作业侧与客户端侧是配套的
     两半。捕获一次之后，**升级插件对一个正在跑的会话完全没有影响**，把一个插件
     从池里卸掉也一样不影响它。
+14. **"站点支持分发吗"只能由 `files` 字段在不在来判。** 下载失败、超时、校验
+    不过**都不是**判据。把两者合并，等于把"改内容"的攻击成本降到"让下载失败"。
+15. **`files[].sha256` 与 `limits` 都是对方的自述**，不是事实。前者用来与**自己
+    从磁盘重算**的值比；后者只用来**收紧**自己那份硬上限。
+16. **装插件之前要拿到用户的同意**，而且同意要绑在**自己算出来的整目录摘要**上、
+    键里带版本号。这条不在协议里（它完全是客户端本地的事），但它是 v0.6 存在的
+    前提：`plugin_file` 是这台机器上第一条**从远端来、且会变成可执行代码**的路。

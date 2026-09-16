@@ -242,3 +242,19 @@ test('★ 同意界面必须把「你不会得到什么保护」说出来', () =
   // 第二次之后的同意要显示**变了什么**，只显示一个新摘要等于什么也没说。
   assert.match(code, /与上次同意的一致|变成了/, '同意的界面要能说出"内容变了"');
 });
+
+test('★ 演示调试的每个按钮在主进程里都有对应的动作', () => {
+  // 真机上「按钮点了没反应」与「这个动作根本不存在」长得一模一样：控制台安静，
+  // 界面不动。而演示调试存在的**全部理由**就是造出真集群上造不出来的状态 ——
+  // 一个哑按钮直接让那条状态退回"造不出来"，而这一点在本机看不出来（没有图形环境）。
+  //
+  // ★ 站点分发那几个尤其要紧：它们的**回退方式互不相同**（老守护进程退回本机池、
+  //   不支持分发只说一句话、插件太大与限流各自走另一条路），少一个就少验一条路。
+  const main = fs.readFileSync(path.join(here, '..', 'src', 'main', 'index.js'), 'utf8');
+  const buttons = new Set([...html.matchAll(/data-debug="([^"]+)"/g)].map((m) => m[1]));
+  assert.ok(buttons.size >= 4, '演示调试的按钮一个都没找到？');
+  const handled = new Set([...main.matchAll(/what === '([^']+)'/g)].map((m) => m[1]));
+  const missing = [...buttons].filter((b) => !handled.has(b));
+  assert.deepEqual(missing, [],
+    `这些按钮在主进程里没有对应的动作：${missing.join('、')}`);
+});

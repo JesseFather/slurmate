@@ -307,6 +307,19 @@ sudo bash cluster/deploy.sh --check
 
 配置一共只有 12 个键，全部见 [CONFIGURATION.md](./CONFIGURATION.md)。
 
+★ **插件要不要开、开哪几个，也在这一步决定。** `enabled = yes` 的插件会被
+**分发到每一台连上来的客户端**（v0.6）—— 不只是"用户可以提交它"。所以
+`[plugin:*]` 块现在是一个**对外的**动作：
+
+```ini
+[plugin:code-server]
+enabled = yes          # ← 这一行同时也意味着"把它发到用户的工作站上"
+```
+
+不写任何 `[plugin:*]` 块时行为与以前完全一样（缺省取插件清单里的
+`site.defaultEnabled`），所以**升级本身不会静默多发一个插件出去**。
+逐条见 [CONFIGURATION.md](./CONFIGURATION.md) 的〈一之二、插件块〉。
+
 ### 步骤 3：演练（可选但推荐）
 
 ```bash
@@ -371,6 +384,25 @@ slurmate wait --session <session_id>
 ssh -N -L 18080:<tunnel_target> alice@node01.example.com
 curl -i http://127.0.0.1:18080/healthz
 ```
+
+**分发这一条也要单独验一次**（v0.6 新增，而且它有一个只在这里才看得见的失败形态）：
+
+```bash
+# 1. 守护进程自己解析到的文件清单 —— 这就是客户端会去取的那一份
+sudo /usr/local/sbin/slurmate-sessiond --check-plugins
+# 2. 真的取一份回来，逐字节比（这一步用的是 CLI，不经过客户端）
+slurmate rpc <<< '{"op":"plugin_file","id":"<ULID>","version":"1.0.0","path":"client/index.js"}'
+```
+
+第 2 步的输出里 `data` 是 base64，`size` 与 `sha256` 要与你本地那份**自己算**的
+一样。若它回 `9 plugin_file_changed`，说明守护进程**起来之后**有人动过插件目录
+（就地改了文件而没重新部署）—— 那要重跑一次 deploy.sh，而不是重试这个请求。
+
+★ **客户端那一侧只有在一台真的客户端上才验得到**：连上去之后应该出现
+「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
+**这件事到今天为止一次都没在真集群上跑过** —— 见
+[docs/KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 U7，那里列着第一次跑要看什么
+（最要紧的是 1 MiB 那条响应上限够不够）。
 
 ### 步骤 6：卸载
 

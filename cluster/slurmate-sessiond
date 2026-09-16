@@ -49,7 +49,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。

@@ -240,6 +240,15 @@
         <button class="ghost" data-debug="reap">模拟会话被回收</button>
         <button class="ghost" data-debug="reset">复位</button>
       </div>
+      <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
+           限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
+           混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
+      <div class="row">
+        <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
+        <button class="ghost" data-debug="plugin-too-big">插件太大</button>
+        <button class="ghost" data-debug="rate-limited">站点在限流</button>
+        <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+      </div>
     </section>
 
     <h2>日志</h2>
