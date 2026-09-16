@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
 /**
@@ -1064,9 +1065,9 @@ test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个�
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-eng-'));
   const host = hostVersion();
 
-  writePlugin(tmp, 'future', { name: 'future', engines: { slurmate: '>=99.0.0' } });
-  writePlugin(tmp, 'ok', { name: 'ok', engines: { slurmate: '>=0.0.1 <99.0.0' } });
-  writePlugin(tmp, 'badrange', { name: 'badrange', engines: { slurmate: '^1.2.3' } });
+  writePlugin(tmp, 'future', { name: 'future', engines: { slurmate: '>=99.0' } });
+  writePlugin(tmp, 'ok', { name: 'ok', engines: { slurmate: '>=0.0 <99.0' } });
+  writePlugin(tmp, 'badrange', { name: 'badrange', engines: { slurmate: '^1.2' } });
 
   const reg = new Registry([{ dir: tmp, source: 'pool' }]);
   assert.deepEqual(reg.list().map((p) => p.name), ['ok'],
@@ -1078,10 +1079,94 @@ test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个�
   assert.match(all, /badrange/, '看不懂的范围片段也要报错，不能当成"没限制"');
 
   // 判定函数本身：比较符 + 空格分隔的合取
-  assert.equal(satisfies('1.5.0', '>=1.0.0 <2.0.0').ok, true);
-  assert.equal(satisfies('2.0.0', '>=1.0.0 <2.0.0').ok, false, '上界是开区间');
-  assert.equal(satisfies('1.0.0', '>=1.0.0 <2.0.0').ok, true, '下界是闭区间');
+  assert.equal(satisfies('1.5', '>=1.0 <2.0').ok, true);
+  assert.equal(satisfies('2.0', '>=1.0 <2.0').ok, false, '上界是开区间');
+  assert.equal(satisfies('1.0', '>=1.0 <2.0').ok, true, '下界是闭区间');
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/**
+ * ★★ 版本号：两套方案，一条比较规则 —— 夹具与 Python 读的是**同一份**。
+ *
+ * 这个仓库里有**两套**版本号，它们长得像、纪律共用，但**不是一回事**：
+ *   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号
+ *     （`client/package.json` 的 version）。运行期唯一的用途是下面
+ *     `engines.slurmate` 那条范围判定；两侧之间**没有**任何版本握手。
+ *   · **插件版本** `x.y.z` —— 清单里的 `version`，`(id, 版本)` 那个槽位的键。
+ *
+ * ★ 夹具在 `tools/version-fixtures.json`，`cluster/test-sessiond-logic.py` 的
+ *   19.0b2 节读的是同一个文件。两套实现各写一遍规则，"逐条一致"靠两份抄本
+ *   加一条比对 lint 是**抓不到漂的**（lint 只看得见已经漂了的那部分）。
+ */
+test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对上共用夹具', () => {
+  const M = require('../src/main/plugins/index.js');
+  const fxPath = fileURLToPath(new URL('../../tools/version-fixtures.json', import.meta.url));
+  const fx = JSON.parse(fs.readFileSync(fxPath, 'utf8'));
+
+  // 1) 形状。两套方案的形状不同（`0.6` 合法、`0.6.0` 不合法；反过来在插件那边），
+  //    所以夹具分两张表，用的正则也是两条。
+  for (const [scheme, re] of [['framework', M.FRAMEWORK_VERSION_RE],
+    ['plugin', M.VERSION_RE]]) {
+    for (const v of fx[scheme].valid) {
+      assert.ok(re.test(v), `${scheme} 版本 ${JSON.stringify(v)} 应当合法`);
+    }
+    for (const v of fx[scheme].invalid) {
+      assert.ok(!re.test(v), `${scheme} 版本 ${JSON.stringify(v)} 应当被拒`);
+    }
+  }
+
+  // 2) 大小。插件那条走**生产路径**（`Registry.list()` 用的就是 cmpPluginVer）；
+  //    框架那条没有对外比较器，用 satisfies 的两个闭区间把它夹出来 ——
+  //    「谁大谁小」的信息全在 >= 与 <= 的真值组合里，不必再导出半个比较器。
+  const rel = (a, b) => {
+    const ge = M.satisfies(a, `>=${b}`).ok;
+    const le = M.satisfies(a, `<=${b}`).ok;
+    return ge && le ? 'eq' : (ge ? 'gt' : (le ? 'lt' : '?'));
+  };
+  for (const [a, b, want] of fx.order.plugin) {
+    const got = M.cmpPluginVer(a, b);
+    assert.equal(got, { lt: -1, eq: 0, gt: 1 }[want],
+      `插件版本 ${a} 与 ${b}：夹具说 ${want}，得到 ${got}`);
+  }
+  for (const [a, b, want] of fx.order.framework) {
+    assert.equal(rel(a, b), want, `框架版本 ${a} 与 ${b}`);
+  }
+
+  // 3) 范围。★ 后半段是「被拒绝的形状」（`>=0.5.0`、`^0.5`、`||`……），它们与
+  //    「不满足」都返回 ok:false，但都**不能**被当成"没限制"放过去。
+  for (const c of fx.ranges.cases) {
+    assert.equal(M.satisfies(c.host, c.range).ok, c.ok,
+      `host=${JSON.stringify(c.host)} range=${JSON.stringify(c.range)}`);
+  }
+
+  // 4) ★ 两条"不许静静通过"的路径。
+  //    段数不同 ⇒ 抛，而不是把 `0.6` 与 `0.6.0` 比出一个"相等"来；
+  //    插件版本不合形状 ⇒ 抛（走到那里说明清单校验漏了）。
+  assert.throws(() => M.cmpVer(['0', '6'], ['0', '6', '0']), /段数不同/);
+  assert.throws(() => M.cmpPluginVer('1.0', '1.0.0'), /不合形状/);
+
+  // 5) ★ 本客户端自己的版本号必须合框架版本的形状 —— 忘了改 package.json 时
+  //    这条会红在本地，而不是等到 CI。（集群侧 19.0b2 有一条同样的。）
+  assert.ok(M.FRAMEWORK_VERSION_RE.test(M.hostVersion()),
+    `client/package.json 的版本 ${JSON.stringify(M.hostVersion())} 必须是 x.y`);
+
+  // 6) ★ 上面那张表测的是**正则**，而"清单里的版本号按**原串**匹配"是**另一条
+  //    规则** —— 它住在 parseVer / inspectDir 里，而夹具表抓不到它：只要有人先
+  //    trim 一下，`" 1.0.0 "` 当然就过正则了（变异验证里这一条**真的**没红）。
+  //    所以这里走一遍**真的清单加载**。Python 侧同一件事在 19.0b2 的 need_str
+  //    那一条上 —— 那一侧从前正是**先 strip 再匹配**的。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-ver-'));
+  try {
+    const badVersions = [' 1.0.0', '1.0.0 ', '1.0.0\n', '1.0'];
+    badVersions.forEach((v, i) => writePlugin(tmp, `bad${i}`, { name: `bad${i}`, version: v }));
+    const reg = new M.Registry([{ dir: tmp, source: 'pool' }]);
+    assert.deepEqual(reg.list().map((p) => p.version), [],
+      '带空白 / 少一段的版本号一个都不许收下');
+    assert.equal(reg.errors.length, badVersions.length, '每一个都要有一条自己的报错');
+    assert.ok(reg.errors.every((e) => /version/.test(e)), reg.errors.join(' / '));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被管', async (t) => {

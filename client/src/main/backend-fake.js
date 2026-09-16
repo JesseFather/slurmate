@@ -305,7 +305,10 @@ class FakeBackend extends Backend {
     }
 
     switch (op) {
-      case 'ping':       return ok({ pong: true, version: '0.2.0-demo', time: nowSec() });
+      // 版本号这里写的是一个**明显是假**的值：演示后端不是任何一版守护进程，
+      // 报一个真版本号会让人以为"我连上 0.6 了"。形状跟着框架版本走（x.y），
+      // 免得有人照着它去写解析。
+      case 'ping':       return ok({ pong: true, version: '0.6-demo', time: nowSec() });
       case 'whoami':     return this._whoami();
       case 'partitions': return ok({ partitions: this._partitions() });
       // 默认资源是**按插件**的，所以它跟 `plugins` 走，不再挂在 `partitions` 上

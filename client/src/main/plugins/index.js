@@ -116,41 +116,127 @@ const CLIENT_HOOKS = ['prepare', 'attach', 'preferredPort', 'closeWarning'];
  *   的事。两个站点各有一个 `jupyter` 指的是两个不同的 `id`，客户端按来源连接区分。
  */
 const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+// ── 版本号：两套方案，一条比较规则 ──────────────────────────────────────────
+//
+// ★ 这个仓库里有**两套**版本号。它们长得像、纪律共用，但**不是一回事**：
+//
+//   · **框架版本** `x.y` —— 客户端、守护进程、协议**三合一的那个号**。四处声明
+//     由 CI 比对（.github/workflows/checks.yml 的「版本号」那一步）。**运行期
+//     两侧之间没有任何版本握手** —— 客户端从不拿自己的版本去比守护进程的版本。
+//     它运行期唯一的用途是 `engines.slurmate` 那条**插件自己声明**的范围。
+//   · **插件版本** `x.y.z` —— `(id, 版本)` 那个槽位的键，进摘要台账、进会话键。
+//
+// ★ 以前这里只有一个 `parseVer`，同时伺候两者（`satisfies` 拿它解析框架版本、
+//   `list()` 拿它解析插件版本）。框架版本少一段之后那样写就再也说不通了：
+//   `0.6` 会变成 `[0, 6]`，而它与 `[0, 6, 0]` 既不能比、也不**该**比。
+//
+// 两套共用的纪律（与 docs/PLUGIN-SPEC.md §2.3 逐条对应）：
+//   · **禁止前导零** —— 下面两条正则已经把它挡在外面；
+//   · `minor` 那一段 ∈ `0..255` 用 `SEG_BYTE` 表达，`major` 无上限用 `SEG_ANY`；
+//   · **逐段按十进制字符串比较**（先比长度、再比字典序），**禁止转机器整数**
+//     —— IEEE 754 双精度在 2^53 以上失精，会让 `9007199254740993.0.0` 与
+//     `…992.0.0` 判等，而 Python 那边的 `int` 不失精 ⇒ **两侧不一致**。
+//
+// ★ **只校验，不归一化**：谁都不许把 `1.256.0` 改写成 `2.0.0`。那是静默改版本号，
+//   与 §2.4「一个 `(id, 版本)` 只有一份内容」直接冲突 —— 用户同意过的那个版本号
+//   会在他没看见的情况下变成另一个，而"改了内容就升版本号"这条纪律就断了。
+//
+// ★ 结论写在 tools/version-fixtures.json 里，JS 与 Python 的用例**读同一份** ——
+//   两套实现的规则必须逐条一致，而"只有一份"比"两份抄本 + 一条比对 lint"结实。
+
+/** 一段 `0..255`，无前导零。`25[0-5] | 2[0-4]\d | 1\d\d | [1-9]\d | \d` 恰好是 0..255。 */
+const SEG_BYTE = '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])';
+/** 一段**无上限**的十进制数，无前导零。 */
+const SEG_ANY = '(?:0|[1-9][0-9]*)';
+
+const FRAMEWORK_VERSION_RE = new RegExp(`^${SEG_ANY}\\.${SEG_BYTE}$`);
+/** 插件版本。名字沿用旧的：清单校验、`loadDir`、报错文案都指着它。 */
+const VERSION_RE = new RegExp(`^${SEG_ANY}\\.${SEG_BYTE}\\.${SEG_BYTE}$`);
 
 // ── 版本比较 ────────────────────────────────────────────────────────────────
 
-function parseVer(s) {
-  const m = VERSION_RE.exec(String(s === undefined ? '' : s).trim());
-  return m ? s.trim().split('.').map(Number) : null;
+/**
+ * 解析一个版本号，返回**十进制字符串**的段数组；不合形状返回 `null`。
+ *
+ * ★ 返回字符串而不是数字，是这套规则的全部要点（见上面关于 2^53 的那段）。
+ * ★ **不 trim**：`" 1.0"`、`"1.0\n"` 都不是合法版本号。**校验用的是原串** ——
+ *   清单那一层是 `inspectDir` 的 `VERSION_RE.test(mf.version)`（Python 侧是
+ *   `need_str`）。Python 那边曾经先 `strip()` 再匹配，于是"带空格的版本号"在
+ *   一侧被收下、在另一侧被拒 —— 同一份夹具里那几条带空白的用例钉的就是它。
+ *
+ * ★ 这里是**第三处**同样的纪律，而它今天是**不可观测的**：所有调用方喂进来的串
+ *   都已经过了上面那道门（`hostVersion()` 读的是 `package.json`，范围片段被
+ *   `split(/\\s+/)` 切过，`cmpPluginVer` 的两个参数来自已校验的清单）。留着它是
+ *   为了不让这里悄悄变成一个**更松的入口** —— 也正因为它不可观测，夹具钉不住它，
+ *   **别把它当成防线**（变异验证里把这一行改成 `.trim()` 不会让任何用例变红）。
+ */
+function parseVer(s, re) {
+  const t = typeof s === 'string' ? s : '';
+  return re.test(t) ? t.split('.') : null;
 }
 
+/** 一段的十进制字符串比较：**先比长度，再比字典序**（等价数值序，且不失精）。 */
+function cmpSeg(a, b) {
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * 逐段比较两个**同形状**的版本。参数是 `parseVer` 出来的段数组。
+ *
+ * ★ 段数不同**抛**，不返回 0：那只可能是一个 bug（把框架版本与插件版本比了），
+ *   而返回"相等"会让它静默通过 —— 排序看着正常，只是顺序没有意义。
+ */
 function cmpVer(a, b) {
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+    throw new Error(`版本段数不同，不能比：${JSON.stringify(a)} / ${JSON.stringify(b)}`);
+  }
+  for (let i = 0; i < a.length; i++) {
+    const c = cmpSeg(a[i], b[i]);
+    if (c) return c;
   }
   return 0;
 }
 
 /**
- * `engines.slurmate` 的范围判定。
+ * 两个**插件版本串**的大小（`Registry.list()` 的排序用）。
+ *
+ * ★ 不合形状就抛：走到这里说明清单校验漏了（`version` 在 `inspectDir` 里已经
+ *   按 `VERSION_RE` 查过一遍）。悄悄当成相等会让"同一短名的两个版本"顺序随机。
+ */
+function cmpPluginVer(a, b) {
+  const pa = parseVer(a, VERSION_RE);
+  const pb = parseVer(b, VERSION_RE);
+  if (!pa || !pb) {
+    throw new Error(`插件版本号不合形状：${JSON.stringify(a)} / ${JSON.stringify(b)}`);
+  }
+  return cmpVer(pa, pb);
+}
+
+/**
+ * `engines.slurmate` 的范围判定 —— 比的是**框架版本**（`x.y`）。
  *
  * 支持 `>= > <= < =` 这几种比较符，空格分隔，**全部满足**才算通过。
- * （`>=0.3.0 <0.5.0` 这种就够用了；故意不支持 `^` / `~` / `||` —— 那些的语义
+ * （`>=0.5 <0.7` 这种就够用了；故意不支持 `^` / `~` / `||` —— 那些的语义
  * 各自都有坑，而这里要的是"装之前就能判定"，不是"尽量满足"。）
+ *
+ * ★ 范围串本身**两侧都 trim**（它是人写的表达式，不是版本号），而片段里的
+ *   版本号**一律不许 trim** —— `">= 0.5"` 是一个看不懂的片段，不是 `>=0.5`。
  */
 function satisfies(version, range) {
-  const v = parseVer(version);
-  if (!v) return { ok: false, why: `版本号 ${JSON.stringify(version)} 不是 x.y.z 形式` };
+  const v = parseVer(version, FRAMEWORK_VERSION_RE);
+  if (!v) return { ok: false, why: `版本号 ${JSON.stringify(version)} 不是 x.y 形式` };
   const parts = String(range).trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return { ok: false, why: '范围是空的' };
   for (const p of parts) {
-    const m = /^(>=|<=|>|<|=)?(\d+\.\d+\.\d+)$/.exec(p);
-    if (!m) return { ok: false, why: `看不懂的范围片段 ${JSON.stringify(p)}` };
-    const c = cmpVer(v, parseVer(m[2]));
+    const m = /^(>=|<=|>|<|=)?(.*)$/.exec(p);
+    const c = m && parseVer(m[2], FRAMEWORK_VERSION_RE);
+    if (!c) return { ok: false, why: `看不懂的范围片段 ${JSON.stringify(p)}（版本号是 x.y 形式）` };
+    const d = cmpVer(v, c);
     const op = m[1] || '=';
-    const ok = op === '>=' ? c >= 0 : op === '<=' ? c <= 0
-      : op === '>' ? c > 0 : op === '<' ? c < 0 : c === 0;
+    const ok = op === '>=' ? d >= 0 : op === '<=' ? d <= 0
+      : op === '>' ? d > 0 : op === '<' ? d < 0 : d === 0;
     if (!ok) return { ok: false, why: `本客户端是 ${version}，不满足 ${range}` };
   }
   return { ok: true };
@@ -322,7 +408,7 @@ function inspectDir(dir, source) {
   const host = hostVersion();
   if (mf.engines !== undefined) {
     if (!mf.engines || typeof mf.engines !== 'object' || Array.isArray(mf.engines)) {
-      return { error: `${mfPath}：engines 必须是一个对象，如 {"slurmate": ">=0.3.0"}` };
+      return { error: `${mfPath}：engines 必须是一个对象，如 {"slurmate": ">=0.5"}` };
     }
     why = keysProblem(mf.engines, ['slurmate'], 'engines');
     if (why) return { error: `${mfPath}：${why}` };
@@ -745,7 +831,7 @@ class Registry {
    */
   list() {
     return [...this.plugins.values()].sort((a, b) =>
-      a.name.localeCompare(b.name) || cmpVer(parseVer(a.version), parseVer(b.version)));
+      a.name.localeCompare(b.name) || cmpPluginVer(a.version, b.version));
   }
 
   /** 按 `(id, 版本)` 取 —— 这是**会话解析**唯一该用的查法。 */
@@ -913,7 +999,9 @@ function bucketOf(plugin) {
 }
 
 module.exports = {
-  Registry, UNKNOWN, bucketOf, loadDir, satisfies, cmpVer, parseVer, hostVersion,
+  Registry, UNKNOWN, bucketOf, loadDir, satisfies, hostVersion,
+  // 版本号那两套（框架 / 插件）—— 用例直接对着 tools/version-fixtures.json 跑
+  VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer,
   // ── 站点分发那条路要用的（见 site-plugins.js）──
   COPY_SKIP, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
 };

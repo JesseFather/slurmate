@@ -1145,7 +1145,7 @@ exit 0
                          "site": {"defaultCpus": 1, "defaultMem": "0"}}),
              "defaultMem 写成 Slurm 的整机内存", "defaultMem"),
             (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
-                         "version": "1.0.0", "engines": {"slurmate": ">=99.0.0"},
+                         "version": "1.0.0", "engines": {"slurmate": ">=99.0"},
                          "site": {"defaultCpus": 1, "defaultMem": "1G"}}),
              "要求一个这边还没有的框架版本", "slurmate"),
             (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
@@ -1186,6 +1186,70 @@ exit 0
     check("★ 两个目录抢一个短名 → 两个都不加载（挑一个等于让目录名决定行为）",
           _s3 == () and any("重复" in p for p in _p3), "%s / %s" % (_s3, _p3))
 
+    # 19.0b2 ★★ 版本号：两套方案，一条比较规则 —— 夹具与**客户端读的是同一份**
+    #
+    # 这个仓库里有**两套**版本号，它们长得像、纪律共用，但**不是一回事**：
+    #   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号（就是本
+    #     文件的 `VERSION`）。两侧之间**没有**任何版本握手；它运行期唯一的用途
+    #     就是下面那条 `engines.slurmate` 判定。
+    #   · **插件版本** `x.y.z` —— 清单里的 `version`，`(id, 版本)` 槽位的键。
+    #
+    # ★ 为什么两边读同一份文件（tools/version-fixtures.json）：规则在 JS 与
+    #   Python 里各写了一遍，而"逐条一致"靠两份抄本加一条比对 lint 是**抓不到
+    #   漂的** —— lint 只看得见已经漂了的那部分。夹具只有一份：谁跟不上谁红。
+    print("\n  -- 19.0b2 版本号（两套方案，夹具与客户端共用）--")
+    with open(os.path.join(os.path.dirname(HERE), "tools",
+                           "version-fixtures.json"), encoding="utf-8") as _fv:
+        _fx = json.load(_fv)
+
+    check("★ 守护进程自己的 VERSION 合框架版本的形状（忘改成 x.y 时红在本地）",
+          mod.FRAMEWORK_VERSION_RE.match(mod.VERSION) is not None, repr(mod.VERSION))
+
+    for _scheme, _re_ in (("framework", mod.FRAMEWORK_VERSION_RE),
+                          ("plugin", mod.PLUGIN_VERSION_RE)):
+        _good, _bad = _fx[_scheme]["valid"], _fx[_scheme]["invalid"]
+        _wrong = [repr(x) for x in _good if not _re_.match(x)]
+        _wrong += [repr(x) for x in _bad if _re_.match(x)]
+        check("★ %s 版本：%d 条合法 + %d 条不合法，逐条对上夹具"
+              % (_scheme, len(_good), len(_bad)), not _wrong, ", ".join(_wrong[:6]))
+
+    # 大小。本文件里**没有**"比较两个插件版本"的需求（守护进程既不排序、也不挑
+    # 最新版），所以这条是拿两个原语拼出来跑夹具 —— 钉的是"两侧对同一对版本号
+    # 得出同一个符号"，客户端那边对应的是 `cmpPluginVer()`。
+    def _order(_scheme, _a, _b):
+        _r = mod.PLUGIN_VERSION_RE if _scheme == "plugin" else mod.FRAMEWORK_VERSION_RE
+        return mod._cmp_ver(mod._ver_segments(_a, _r), mod._ver_segments(_b, _r))
+
+    for _scheme in ("framework", "plugin"):
+        _cases = _fx["order"][_scheme]
+        _wrong = []
+        for _a, _b, _want in _cases:
+            _got = _order(_scheme, _a, _b)
+            if _got != {"lt": -1, "eq": 0, "gt": 1}[_want]:
+                _wrong.append("%s ? %s = %d（夹具说 %s）" % (_a, _b, _got, _want))
+        check("★ %s 版本的大小：%d 组逐组对上（含 1.9<1.10 与 2^53 那两组）"
+              % (_scheme, len(_cases)), not _wrong, "; ".join(_wrong[:4]))
+
+    _wrong = []
+    for _c in _fx["ranges"]["cases"]:
+        _ok, _why = mod.version_satisfies(_c["host"], _c["range"])
+        if _ok != _c["ok"]:
+            _wrong.append("host=%r range=%r → %s（夹具说 %s：%s）"
+                          % (_c["host"], _c["range"], _ok, _c["ok"], _why))
+    check("★ engines.slurmate 的范围：%d 条逐条对上夹具（含 `>=0.5.0` 这类被拒的形状）"
+          % len(_fx["ranges"]["cases"]), not _wrong, "; ".join(_wrong[:3]))
+
+    # ★ 清单里的版本号用**原串**匹配：`" 1.0.0 "` 不是合法版本号。从前这里先
+    #   strip 再匹配，于是它在这边被收下、在客户端被拒 —— 而客户端拿的是原串
+    #   （`VERSION_RE.test(mf.version)`）。夹具里那几条带空白的用例说的是同一个
+    #   事实，但只有走一遍 need_str 才验得到**清单这条路**。
+    for _bad_v in (" 1.0.0", "1.0.0 ", "1.0.0\n"):
+        _s4, _p4 = _manifest(json.dumps(
+            {"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+             "version": _bad_v, "site": {"defaultCpus": 1, "defaultMem": "1G"}}))
+        check("清单里 version=%r 被拒（不许悄悄 strip）" % _bad_v,
+              _s4 == (), str(_p4)[:140])
+
     # 19.0c ★★ 加一个插件**不需要改守护进程的任何一行**
     #
     # 这是「插件是独立项目」在集群侧的落点，所以它必须有一条**跑的**用例，而不是
@@ -1203,7 +1267,7 @@ exit 0
         _f.write(json.dumps({
             "id": "01M2JKHTZGKJBFQQTWYXMQMF2X", "name": "jup",
             "version": "2.1.0", "displayName": "Jupyter",
-            "engines": {"slurmate": ">=0.5.0"},
+            "engines": {"slurmate": ">=0.5"},
             "contributes": {"submitPubkey": False},
             "site": {"defaultCpus": 3, "defaultMem": "6G", "defaultEnabled": False,
                      "bin": {"env": "SLURMATE_JUP_BIN", "discovery": "convention",
@@ -1282,7 +1346,7 @@ exit 0
         _f.write(json.dumps({
             "id": "01M2JKHTZGKJBFQQTWYXMQMF30", "name": "decl",
             "version": "1.0.0", "displayName": "声明式",
-            "engines": {"slurmate": ">=0.5.0"},
+            "engines": {"slurmate": ">=0.5"},
             "site": {"defaultCpus": 1, "defaultMem": "2G"}}))
     _specs5, _probs5 = mod.scan_plugins(_nojdir)
     check("★ 没有 job/start.sh 的插件能被扫进来（合法，不是坏清单）",
@@ -2118,7 +2182,10 @@ exit 0
     # PLUGIN_COPY_SKIP（本文件所在的守护进程）与 COPY_SKIP（客户端）分别在
     # Python 与 JS 里，没有任何共享机制。漂开的后果是"客户端算出来的摘要与站点报的
     # 永远对不上"，而报错里一个字都不会提到是这两个集合分家了 ——
-    # 症状只会是"同步一直失败"。照"三处版本号必须一致"那条的先例钉住它。
+    # 症状只会是"同步一直失败"。照 checks.yml 那条"版本号：四处逐字一致"的先例
+    # 钉住它。（版本号那对也有同一形状的用例，见 19.0b2 —— 但那一对现在读的是
+    # **同一份夹具**，不需要 lint 了；这里这两个集合在**生产代码**里，跨语言没法
+    # 共用一份，只能靠 lint 守。）
     #
     # ★ 抠的是 `plugins/index.js` 那一份 —— 它在**客户端里只有一份**（安装器从它
     #   引，算摘要也用它）。以前它在 install.js 里，而那是"两个地方各持一份"的开端。

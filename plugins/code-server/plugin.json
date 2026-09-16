@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "浏览器里的 VS Code。作业里跑一个 code-server，客户端把它的页面装进窗口并自动登录。",
   "author": "slurmate",
-  "engines": { "slurmate": ">=0.5.0" },
+  "engines": { "slurmate": ">=0.5" },
   "contributes": {
     "surface": { "kind": "web", "path": "/" },
     "login": {

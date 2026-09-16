@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "作业里跑一个用户态 sshd。原生 VS Code Remote-SSH、codex 这类要求 ssh 连接的工具都从这里接进来。",
   "author": "slurmate",
-  "engines": { "slurmate": ">=0.5.0" },
+  "engines": { "slurmate": ">=0.5" },
   "contributes": {
     "layout": false,
     "submitPubkey": true,

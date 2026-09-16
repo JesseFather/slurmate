@@ -49,7 +49,10 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.0"
+# ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
+#   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
+#   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
+VERSION = "0.6"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -375,34 +378,105 @@ MAX_CPUS_REQUEST = 64
 MAX_GPUS_REQUEST = 8
 
 
-def _ver_tuple(s):
-    m = PLUGIN_VERSION_RE.match(str(s or "").strip())
-    return tuple(int(x) for x in m.group(0).split(".")) if m else None
+# ── 版本号：两套方案，一条比较规则 ─────────────────────────────────────────
+#
+# ★ 与客户端 `plugins/index.js` 里那一段**逐条对应**，改一处就要改两处。规则分家
+#   的后果是"一侧收下、另一侧拒了"，而报错只会说"清单不合法"。
+#
+#   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议**三合一的那个号**（即本文件的
+#     `VERSION`）。**两侧之间没有任何版本握手**；它在本文件里唯一的用途就是下面
+#     `engines.slurmate` 那条范围判定。
+#   · **插件版本** `x.y.z` —— 清单里的 `version`，进 `(id, 版本)` 槽位与会话键。
+#
+# ★ 本文件里**没有**"比较两个插件版本"的需求（守护进程不排序、也不挑最新版），
+#   所以 `_ver_segments` 只被 `version_satisfies` 用；客户端那边有（`list()` 排序）。
+#
+# ★ 共用的纪律：**禁止前导零**；`minor` 那一段 ∈ `0..255`；**逐段按十进制字符串
+#   比较**（先比长度、再比字典序），**禁止转机器整数** —— Python 的 `int()` 不会
+#   失精，而 JS 的 `Number` 在 2^53 以上会，于是这类错**只有一侧会犯**，而那正是
+#   最难查的一种（另一侧永远是对的）。
+#
+# ★ **只校验，不归一化**：谁都不许把 `1.256.0` 改写成 `2.0.0`（见 §2.4）。
+#
+# ★ 结论写在 tools/version-fixtures.json 里，本文件与客户端的用例**读同一份**。
+#
+# ★ `\Z` 不是 `$`：Python 的 `$` 还匹配"末尾换行之前"，于是 `"1.0.0\n"` 在这边
+#   合法、在 JS 那边不合法（JS 不加 `m` 时 `$` 是严格末尾）。凡是"整串必须匹配"
+#   的地方一律用 `\A … \Z`。
+_SEG_BYTE = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])"
+_SEG_ANY = r"(?:0|[1-9][0-9]*)"
+
+FRAMEWORK_VERSION_RE = re.compile(r"\A%s\.%s\Z" % (_SEG_ANY, _SEG_BYTE))
+PLUGIN_VERSION_RE = re.compile(
+    r"\A%s\.%s\.%s\Z" % (_SEG_ANY, _SEG_BYTE, _SEG_BYTE))
+# ★ 下面这两条也**与客户端 `plugins/index.js` 的 `ulid.isId` / `NAME_RE` 逐字一致**，
+#   理由与上面完全一样（一侧收下、另一侧拒了）。它们跟着版本号一起用 `\A … \Z`：
+#   `"code-server\n"` 那种值从前在这边是合法的。
+# 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
+PLUGIN_ID_RE = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
+# 站点短名进配置块名（`[plugin:<名字>]`）、进会话文件、进日志与报错文案。
+PLUGIN_NAME_RE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
+
+
+def _ver_segments(s, pattern):
+    """版本号 → **十进制字符串**的段数组；不合形状返回 None。
+
+    ★ 返回字符串而不是整数，是这套规则的全部要点（见上面关于 2^53 的那段）。
+    ★ **不 strip**：`" 1.0"`、`"1.0\\n"` 都不是合法版本号。**校验用的是原串** ——
+      清单那一层是 `need_str`（客户端侧是 `inspectDir` 的 `VERSION_RE.test`）。
+      这里从前先 `.strip()` 再匹配，于是"带空格的版本号"在这边被收下、在客户端
+      被拒 —— 19.0b2 里那三条走 `_manifest` 的用例钉的就是它。
+    ★ 在本文件里这一层同样**不可观测**（调用方喂进来的都过了 `need_str` 那道门），
+      所以别把它当防线；真正的门在 `need_str`，那里的用例是红的。
+    """
+    t = s if isinstance(s, str) else ""
+    return t.split(".") if pattern.match(t) else None
+
+
+def _cmp_seg(a, b):
+    """一段的十进制字符串比较：**先比长度，再比字典序**（等价数值序，且不失精）。"""
+    if len(a) != len(b):
+        return -1 if len(a) < len(b) else 1
+    return 0 if a == b else (-1 if a < b else 1)
+
+
+def _cmp_ver(a, b):
+    """逐段比较两个**同形状**的版本。段数不同 ⇒ 抛（那只可能是一个 bug）。"""
+    if len(a) != len(b):
+        raise ValueError("版本段数不同，不能比：%r / %r" % (a, b))
+    for x, y in zip(a, b):
+        c = _cmp_seg(x, y)
+        if c:
+            return c
+    return 0
 
 
 def version_satisfies(version, rng):
-    """`version` 满不满足 `rng`（形如 `>=0.5.0 <0.7.0`）。返回 (bool, 原因)。
+    """`version` 满不满足 `rng`（形如 `>=0.5 <0.7`）。返回 (bool, 原因)。
 
-    ★ 与客户端 `plugins/index.js` 的 `satisfies()` **必须逐条一致**。两边规则不同
-      的后果是一个插件在一侧被收下、在另一侧被拒 —— 而报错只会说"清单不合法"。
+    ★ 与客户端 `plugins/index.js` 的 `satisfies()` **必须逐条一致**。
 
     支持 `>= > <= < =`，空格分隔，**全部满足**才算通过。故意不支持 `^` / `~` /
     `||` —— 那些的语义各自都有坑，而这里要的是"装之前就能判定"，不是"尽量满足"。
+
+    ★ 范围串本身两侧都 trim（它是人写的表达式，不是版本号），而片段里的版本号
+      **一律不许 trim** —— `">= 0.5"` 是一个看不懂的片段，不是 `>=0.5`。
     """
-    v = _ver_tuple(version)
+    v = _ver_segments(version, FRAMEWORK_VERSION_RE)
     if v is None:
-        return False, "版本号 %r 不是 x.y.z 形式" % version
+        return False, "版本号 %r 不是 x.y 形式" % version
     parts = [p for p in str(rng or "").strip().split() if p]
     if not parts:
         return False, "范围是空的"
     for p in parts:
-        m = re.match(r"^(>=|<=|>|<|=)?(\d+\.\d+\.\d+)$", p)
-        if not m:
-            return False, "看不懂的范围片段 %r" % p
-        c = _ver_tuple(m.group(2))
+        m = re.match(r"^(>=|<=|>|<|=)?(.*)\Z", p)
+        c = _ver_segments(m.group(2), FRAMEWORK_VERSION_RE) if m else None
+        if c is None:
+            return False, "看不懂的范围片段 %r（版本号是 x.y 形式）" % p
+        d = _cmp_ver(v, c)
         op = m.group(1) or "="
-        ok = {">=": v >= c, "<=": v <= c, ">": v > c,
-              "<": v < c, "=": v == c}[op]
+        ok = {">=": d >= 0, "<=": d <= 0, ">": d > 0,
+              "<": d < 0, "=": d == 0}[op]
         if not ok:
             return False, "%s 不满足 %s" % (version, p)
     return True, ""
@@ -413,14 +487,9 @@ PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem")
 MANIFEST_NAME = "plugin.json"
 PLUGIN_JOB_ENTRY = os.path.join("job", "start.sh")
 
-# 站点短名与版本号的字符集 —— 与客户端的 `plugins/index.js` 里那两条**必须一致**。
-# 短名进配置块名（`[plugin:<名字>]`）、进会话文件、进日志与报错文案；版本号进解析键
-# （`<id>@<版本>`）。两边规则不一致的后果是"客户端收下了、守护进程拒了"，而报错
-# 只会说"清单不合法"。
-PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
-# 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
-PLUGIN_ID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+# ★ 站点短名 / 版本号 / id 那三条正则现在住在上面「版本号：两套方案」那一段里 ——
+#   它们和 `version_satisfies` 是同一份约定（`\A…\Z`、禁止前导零、`0..255`），
+#   分开放就会有人只改一处。改它们之前先看那一段的说明。
 
 # ── 站点分发：把插件的文件发出去 ────────────────────────────────────────────
 #
@@ -579,10 +648,15 @@ def parse_plugin_manifest(where, raw):
         v = raw.get(key)
         if not isinstance(v, str) or not v.strip():
             return bad("缺少非空字符串 %r" % key)
-        v = v.strip()
+        # ★ 有 pattern 的字段（id / name / version）**拿原串匹配**，只有返回值 strip。
+        #   清单是 JSON，`"version"` 就是它自己那串字符 —— 客户端那边也是拿原串
+        #   （`VERSION_RE.test(mf.version)`），从前这里先 strip 再匹配，于是
+        #   `" 1.0.0 "` 变成了"守护进程收下、客户端拒了"。报错里给**原串**，
+        #   否则那句"取值不合法"会指着看上去完全正常的 `1.0.0`。
+        #   strip 只留给没有 pattern 的字段（displayName 这类给人看的文本）。
         if pattern is not None and not pattern.match(v):
             return bad("%r 的取值 %r 不合法%s" % (key, v, what))
-        return v
+        return v.strip()
 
     pid = need_str("id", PLUGIN_ID_RE,
                    "（应为一个 26 字符的 ULID，全大写 Crockford base32。"
@@ -600,9 +674,10 @@ def parse_plugin_manifest(where, raw):
     else:
         title = title.strip()
 
-    # engines.slurmate：这个插件要求的最低框架版本。客户端那一侧也会查一遍。
-    # 守护进程也要查 —— 一个要求 >=0.6.0 的插件被 0.5.0 的守护进程收下，后果是
-    # 它在作业侧用了一个这边还没有的宿主能力，而症状是运行到一半才失败。
+    # engines.slurmate：这个插件要求的最低框架版本（**框架版本是 x.y**，就是
+    # 本文件的 VERSION）。客户端那一侧也会查一遍。守护进程也要查 —— 一个要求
+    # >=0.6 的插件被 0.5 的守护进程收下，后果是它在作业侧用了一个这边还没有的
+    # 宿主能力，而症状是运行到一半才失败。
     eng = raw.get("engines")
     if isinstance(eng, dict):
         rng = eng.get("slurmate")

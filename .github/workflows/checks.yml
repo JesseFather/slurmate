@@ -99,23 +99,58 @@ jobs:
           done
           exit $fail
 
-      - name: 三处版本号必须一致
-        # client/package.json、cluster/slurmate、cluster/slurmate-sessiond 各自
-        # 声明版本，没有任何机制保证它们同步。不一致的后果是：
-        # 安装包叫 0.2.0，而它在联系的服务端自称 0.1.0，排查时无从对起。
+      - name: 版本号：四处逐字一致，且形状是 x.y
+        # 协议版本、客户端版本、服务端版本**是同一个号** —— 它落在四个文件里
+        # （client/package.json、client/package-lock.json、cluster/slurmate、
+        # cluster/slurmate-sessiond），没有任何机制保证它们同步。
+        #
+        # ★ **第四处是真的漏过一次的**：client/package-lock.json 从前停在 0.2.0，
+        #   而 package.json 已经走到 0.6.0 —— 因为 `npm ci` **不比较**lock 里那个
+        #   根 version 字段，所以它一直没人发现。不一致的后果是：安装包叫 0.6，
+        #   而它在联系的服务端自称 0.5，排查时无从对起。
+        #
+        # ★ **形状那一半不在这里重写一遍正则。** 正则的第二个抄本正是这条 lint
+        #   要防的那种漂；这里从守护进程 import 那一份（它与客户端
+        #   `plugins/index.js` 的 FRAMEWORK_VERSION_RE 由
+        #   tools/version-fixtures.json 与两边的用例对齐）。
         run: |
-          v_pkg=$(python3 -c "import json;print(json.load(open('client/package.json'))['version'])")
-          v_cli=$(sed -nE 's/^VERSION *= *"([^"]+)".*/\1/p' cluster/slurmate | head -1)
-          v_dmn=$(sed -nE 's/^VERSION *= *"([^"]+)".*/\1/p' cluster/slurmate-sessiond | head -1)
-          echo "client/package.json : $v_pkg"
-          echo "cluster/slurmate    : $v_cli"
-          echo "cluster/slurmate-sessiond: $v_dmn"
-          if [ "$v_pkg" = "$v_cli" ] && [ "$v_cli" = "$v_dmn" ] && [ -n "$v_pkg" ]; then
-            echo "✓ 三者一致"
-          else
-            echo "✗ 版本号不一致。改版本时三处都要改（或改成本 workflow 从单一来源派生）。"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util, json, re, sys
+
+          ldr = importlib.machinery.SourceFileLoader("d", "cluster/slurmate-sessiond")
+          mod = importlib.util.module_from_spec(
+              importlib.util.spec_from_loader("d", ldr))
+          ldr.exec_module(mod)
+          SHAPE = mod.FRAMEWORK_VERSION_RE
+
+          def daemon_version(path):
+              src = open(path, encoding="utf-8").read()
+              m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M)
+              return m.group(1) if m else ""
+
+          def from_json(path):
+              return json.load(open(path, encoding="utf-8")).get("version") or ""
+
+          places = [
+              ("client/package.json", from_json("client/package.json")),
+              ("client/package-lock.json", from_json("client/package-lock.json")),
+              ("cluster/slurmate", daemon_version("cluster/slurmate")),
+              ("cluster/slurmate-sessiond", daemon_version("cluster/slurmate-sessiond")),
+          ]
+          bad = 0
+          for name, v in places:
+              ok = bool(v) and SHAPE.match(v) is not None
+              print("  %-26s %-10s %s" % (name, v or "(空)", "ok" if ok else "FAIL 不是 x.y"))
+              if not ok:
+                  bad = 1
+          if len({v for _n, v in places}) > 1:
+              print("✗ 四处版本号不一致：%s" % sorted(v for _n, v in places))
+              print("  改版本时四处都要改（或改成本 workflow 从单一来源派生）。")
+              bad = 1
+          if bad:
+              sys.exit(1)
+          print("✓ 四处一致，且都是 x.y")
+          PY
 
       - name: 插件的跳过表两端必须一致
         # ★ 站点分发时，客户端按**自己算的**摘要与站点报的逐份 sha256 比对。两边的
@@ -123,7 +158,7 @@ jobs:
         #   机制** —— 漂开之后症状是"同步一直失败"，而报错里一个字都不会提到是这两
         #   个集合分家了。
         #
-        #   与上面那条"三处版本号"同一个先例：靠约定维持的跨文件一致性，要有东西钉住。
+        #   与上面那条"版本号"同一个先例：靠约定维持的跨文件一致性，要有东西钉住。
         #   （cluster/test-sessiond-logic.py 的 19.12 有一条同样意思的用例，本地跑得
         #   到；这里再来一条是因为 CI 上的 lint 是**最外层**的那道网，它不依赖测试
         #   脚本被正确地调用。）
