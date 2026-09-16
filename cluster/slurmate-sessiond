@@ -30,6 +30,7 @@ bash 无法 getsockopt(SO_PEERCRED)（身份认证的唯一可信来源），且
 import argparse
 import errno
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
@@ -421,6 +422,38 @@ PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 # 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
 PLUGIN_ID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 
+# ── 站点分发：把插件的文件发出去 ────────────────────────────────────────────
+#
+# 客户端**不自己装插件**（见 plugins/README.md）：它连上站点之后，按这里报出去的
+# 清单一份一份把文件取走。守护进程于是多了一个"文件服务"的角色，而它的唯一入口是
+# `plugin_file_index()` 那张**按声明路径建的索引表** —— 请求里的 path 只是表的键，
+# 不是一个待拼接的路径片段。
+
+# 单文件上限。**按链路里最窄的那一节反推**，不是拍的：
+#   cluster/slurmate 的 rpc() 读响应的上限是 1 MiB，而 data 是 base64（膨胀 4/3）
+#   ⇒ 256 KiB 的文件变成约 342 KiB，再加信封，余量约三倍。
+#   （客户端那一侧是 4 MiB，不是瓶颈。守护进程读**请求**的 65536 与这里无关 ——
+#     plugin_file 的请求只有几十字节。）
+#
+# 今天最大的一份是 sshd 的 client/sshconfig.js（17.5 KB），余量 15 倍。
+PLUGIN_FILE_MAX_BYTES = 256 * 1024
+
+# 一份插件**整体**的上限。守护进程**只通报、不拦截** —— 客户端自己有一份硬上限，
+# 取两者中更严的那个。理由：这几个数字是**本站自述**的，用它去放宽客户端的限制
+# 等于让被告自己定刑期。它们在这里的用处是让运维在部署时看得见自己装了个多大的东西
+# （`--check-plugins` 会对超过的插件打 ⚠）。
+PLUGIN_TOTAL_MAX_BYTES = 1 << 20
+PLUGIN_MAX_FILES = 256
+
+# 分发与算摘要时**不看**的目录名。
+#
+# ★ 这是一条**跨语言契约**：客户端的 client/src/main/plugins/install.js 里有一份
+#   逐字相同的 `COPY_SKIP`。两边漂开的后果是"客户端算出来的摘要与站点报的永远对
+#   不上"，而报错里一个字都不会提到是这两个集合分家了 —— 症状只会是"同步一直失败"。
+#   .github/workflows/checks.yml 的 lint 作业逐项比对它们（照"三处版本号必须一致"
+#   那条的先例）。
+PLUGIN_COPY_SKIP = (".git", ".github", ".gitignore", ".gitattributes", "node_modules")
+
 
 class PluginSpec(object):
     """一个插件在【服务端】的元数据 —— 由 `<prefix>/share/slurmate/plugins/` 下
@@ -458,8 +491,11 @@ class PluginSpec(object):
         # 配置校验保证），不需要全球唯一 —— 全球唯一是上面那个 id 的事。
         self.name = name
         self.title = title
-        # 这个插件安装时所在的目录。**只用于报错**（"哪个目录里的清单坏了"），
-        # 不参与任何判定 —— 目录名不参与身份，这一点与客户端一致。
+        # 这个插件安装时所在的目录。
+        #
+        # ★ **它是承重字段**：站点分发的每一个字节都从这里读（见 plugin_file_index），
+        #   而这个目录的**名字**仍然不参与任何判定 —— 身份来自上面那个 id。两件事
+        #   分开记着：目录是"文件在哪"，名字是"这是谁"。
         self.source_dir = source_dir
         # 它有没有作业侧实现（`job/start.sh`）。没有的话守护进程允许提交，而作业
         # 会在 run.sbatch 里以 24 明确失败 —— 但**部署时** deploy.sh 就会断言每个
@@ -915,6 +951,90 @@ def default_plugins_dir():
     here = os.path.dirname(os.path.realpath(__file__))
     return os.path.normpath(
         os.path.join(here, os.pardir, "share", "slurmate", "plugins"))
+
+
+def human_bytes(n):
+    """给人看的字节数。界面与自检输出用 —— 协议里一律是整数，不做这种转换。"""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%d B" % n if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024.0
+
+
+def plugin_file_index(source_dir):
+    """一个插件目录的**索引表**：`声明路径 → (绝对路径, 字节数, sha256)`。
+
+    这是站点分发的**唯一**入口。`op_plugin_file` 只认这张表的键 —— 请求里的
+    `path` 绝不参与拼路径。于是"路径穿越"这个词从等式里消失了：一个不在表里的
+    字符串，**无论它长什么样**，都只是"查不到"。要求"先拼路径再过滤"的设计，
+    本质上是在给一个本可以不存在的攻击面写过滤器。
+
+    ★ **符号链接不进表**（文件与目录都是）。客户端拿到的是一份逐文件的清单，
+      而它没有办法原样重建一个链接 —— 进了清单就会变成"内容永远对不上"。
+      `--check-plugins` 会对含链接的插件打 ⚠：那不是故障，是"这个插件分发不了"。
+
+    ★ **键一律用正斜杠分隔**。`os.path.relpath` 在 Windows 上给的是反斜杠，那一侧
+      拼出来的清单与客户端拼出来的不是同一个字符串（而客户端是发三平台的）。值是
+      `os.path.join` 拼回来的绝对路径 —— 与键一一对应，不做二次解析。
+
+    ★ **只描述文件**：空目录不进表（客户端重建出来的树里不会有它）。这一条与客户端
+      `readPluginFiles()` 的规则是同一份，两边必须一致。
+
+    ★ 这个函数每次调用都**真的走一遍磁盘**（它不缓存）。缓存住在 `Sessiond` 上，
+      见 `Sessiond.plugin_index()` —— 那里解释了为什么"不失效"才是对的。
+    """
+    idx = {}
+    if not source_dir or not os.path.isdir(source_dir):
+        return idx
+    for root, dirs, names in os.walk(source_dir):
+        # 跳过的名字与符号链接目录都不下去。followlinks 默认是假的，所以链接目录
+        # 本来就不会被走进去 —— 这里显式滤掉是为了让"链接一律不进表"这条规则
+        # 在代码里看得见，而不是靠一个默认值。
+        dirs[:] = sorted(d for d in dirs
+                         if d not in PLUGIN_COPY_SKIP
+                         and not os.path.islink(os.path.join(root, d)))
+        for name in sorted(names):
+            # ★ 跳过表对**文件**同样生效，不只是目录。少了这一行，`.gitignore`
+            #   这类文件会进清单，而客户端的 copyTree 会跳过它 —— 于是两端对
+            #   "这个插件由哪些文件组成"各执一词：客户端下回来一份自己不算数的
+            #   文件。更实际一点的后果是 `.git/config`（可能带远端地址）被发到
+            #   每一个用户的机器上。
+            #
+            #   客户端的 COPY_SKIP 是 `copyTree` 里对**任何条目**的判定，所以这边
+            #   必须对称。
+            if name in PLUGIN_COPY_SKIP:
+                continue
+            full = os.path.join(root, name)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            rel = os.path.relpath(full, source_dir).replace(os.sep, "/")
+            try:
+                with open(full, "rb") as f:
+                    data = f.read()
+            except OSError:
+                # 读不出来就当它不在。**不猜** —— 它在清单里出现、而 op_plugin_file
+                # 又打不开它，那才是"报告成功而事情没成"。
+                continue
+            idx[rel] = (full, len(data), hashlib.sha256(data).hexdigest())
+    return idx
+
+
+def plugin_symlinks(source_dir):
+    """这个插件目录里的符号链接（相对路径，`/` 分隔）。只给 `--check-plugins` 用。"""
+    out = []
+    if not source_dir or not os.path.isdir(source_dir):
+        return out
+    for root, dirs, names in os.walk(source_dir):
+        for d in list(dirs):
+            full = os.path.join(root, d)
+            if os.path.islink(full):
+                out.append(os.path.relpath(full, source_dir).replace(os.sep, "/"))
+        for name in names:
+            full = os.path.join(root, name)
+            if os.path.islink(full):
+                out.append(os.path.relpath(full, source_dir).replace(os.sep, "/"))
+    out.sort()
+    return out
 
 
 class PluginConfig(object):
@@ -2056,6 +2176,10 @@ class Sessiond(object):
         # 作业状态查询的连续计数（见 phase_running 里的说明）
         self.job_missing = {}       # session_id -> 连续"查不到"次数
         self.job_unknown = {}       # session_id -> 连续"查不了"次数
+        # 插件目录的索引表缓存：source_dir -> {声明路径: (绝对路径, 字节数, sha256)}。
+        # **刻意不失效** —— 守护进程对插件的认知本来就是启动那一刻的快照，
+        # 而文件服务必须描述同一棵树。见 plugin_index() 的 docstring。
+        self._plugin_index_cache = {}
         self.startup_at = now_ts()
         # 启动静默期：这段时间内不做任何超时判定，避免重启窗口把在跑的会话误判成孤儿
         self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
@@ -2834,6 +2958,8 @@ class Sessiond(object):
                 return self.op_partitions(uid)
             if op == "plugins":
                 return self.op_plugins(uid)
+            if op == "plugin_file":
+                return self.op_plugin_file(uid, req)
             if op == "submit":
                 return self.op_submit(uid, req)
             if op == "status":
@@ -2915,9 +3041,124 @@ class Sessiond(object):
                 "can_submit": bool(p.enabled and p.spec.needs_job),
                 # 默认资源是**按插件**的，客户端不自己定一份（两份真相的老问题）。
                 "defaults": {"cpus": p.default_cpus, "mem": p.default_mem},
+                # ── 站点分发：这个插件由哪些文件组成 ──
+                #
+                # ★ 这个数组**在不在**就是"本站支不支持分发"的判据（三态纪律，
+                #   与 can_submit 同一条）：老守护进程不报它 ⇒ 客户端按"站点没这个
+                #   能力"处理，而不是"这个插件没有文件"。
+                #
+                # ★ 这里报的 sha256 是**本站自述**的。客户端**不能**拿它当判据去
+                #   校验 plugin_file 发回来的字节（那等于让被告当法官）—— 它必须
+                #   自己从磁盘上重算，再与这里的值比。协议文档里写着这一条。
+                "files": [{"path": rel, "size": size, "sha256": sha}
+                          for rel, (_f, size, sha)
+                          in sorted(self.plugin_index(p.spec.source_dir).items())],
             })
-        return self._ok({"plugins": out,
-                         "enabled": list(self.cfg.enabled_kinds)})
+        return self._ok({
+            "plugins": out,
+            "enabled": list(self.cfg.enabled_kinds),
+            # 上限也是**自述**：客户端取"它自己的硬上限"与"这里报的"中更严的那个。
+            # 名字叫 limits 而不是 policy，是因为它不是本站定的策略，是本站的能力。
+            "limits": {"file_bytes": PLUGIN_FILE_MAX_BYTES,
+                       "total_bytes": PLUGIN_TOTAL_MAX_BYTES,
+                       "max_files": PLUGIN_MAX_FILES},
+        })
+
+    def plugin_index(self, source_dir):
+        """这个插件目录的索引表。**进程内缓存，而且刻意不失效。**
+
+        ★ 为什么"不失效"才是对的：守护进程对插件的认知**本来就是启动那一刻的快照**
+          （`Config.__init__` 里跑一次 `scan_plugins()`，之后再不重扫）。所以文件服务
+          必须描述**同一棵树**，否则 `op_plugins` 报出去的 sha256 与 `op_plugin_file`
+          发出去的字节会来自两个不同的时刻 —— 而客户端拿前者校验后者，于是它会在
+          **那边**失败，并把这件本该由本站说清的事（"管理员就地换了文件"）报成
+          "校验不过"。
+
+          缓存之后，这个场景在这里就有了名字：`plugin_file_changed`，附带一句
+          "重跑一次 deploy.sh"。要换插件内容，本来就该升版本号 + 重跑部署 ——
+          就地改文件从来不是一条被支持的路径。
+
+        ★ 与它配套的纪律：`plugin_file_index()` 没有副作用，`--check-plugins` 直接调
+          它（那时还没有 Sessiond），所以自检看到的是**当下**的磁盘，而运行中的服务
+          看到的是启动那一刻。两者不一致，正是 `plugin_file_changed` 要报的事。
+        """
+        key = source_dir or ""
+        idx = self._plugin_index_cache.get(key)
+        if idx is None:
+            idx = plugin_file_index(source_dir)
+            self._plugin_index_cache[key] = idx
+        return idx
+
+    def _plugin_by_key(self, plugin_id, version):
+        """按 `(id, 版本)` 找那个插件的生效配置。找不到返回 None。
+
+        ★ 按 **id** 找而不是按短名：短名是本站的标签、可以改，而客户端手里只有
+          从 `op_plugins` 拿到的 `(id, 版本)`。按短名找会让"改了个名字"变成
+          "客户端突然取不到文件"。
+        """
+        for name in sorted(self.cfg.plugins):
+            c = self.cfg.plugins[name]
+            if c.spec.id == plugin_id and c.spec.version == version:
+                return c
+        return None
+
+    def op_plugin_file(self, uid, req):
+        """把一个插件的**一份文件**发给客户端（base64）。
+
+        客户端不自己装插件：它连上站点之后按 `op_plugins` 报的清单逐份取文件。
+
+        ── 这里只有一条规矩，而它挡住了整类问题 ──────────────────────────────
+
+        `path` **只是 `plugin_file_index()` 那张表的键**，不是一个待拼接的路径片段。
+        不在表里的字符串 —— `../plugin.json`、`/etc/passwd`、`a/../../b`、空串、
+        带 NUL 的、带反斜杠的 —— 全都只是"查不到"，走同一条出口。于是不需要一个
+        "路径过滤器"，也就没有一个过滤器可以写错。
+
+        ★ **不截断。** 超过单文件上限就是明确的错误。截断与明确失败的差别，正是
+          「客户端装上一份坏文件而以为成功」与「说出来」的差别。
+
+        ★ 读完之后**再比一次**自己表里的字节数与摘要。文件在扫描之后被换过的话，
+          这里发出去的字节就与 `op_plugins` 报出去的 sha256 对不上 —— 而客户端
+          会（正确地）拒收。与其让它到那边才失败，不如在这里说清是本站的树变了。
+        """
+        plugin_id = str(req.get("id") or "")
+        version = str(req.get("version") or "")
+        rel = req.get("path")
+
+        p = self._plugin_by_key(plugin_id, version)
+        if p is None:
+            return self._err(3, "plugin_unknown",
+                             "本站没有 %s@%s 这个插件" % (plugin_id, version))
+
+        if not isinstance(rel, str) or not rel:
+            return self._err(3, "plugin_file_unknown",
+                             "path 必须是一个非空字符串")
+
+        hit = self.plugin_index(p.spec.source_dir).get(rel)
+        if hit is None:
+            return self._err(3, "plugin_file_unknown",
+                             "%s 不在 %s@%s 的清单里"
+                             % (rel, plugin_id, version))
+
+        full, size, sha = hit
+        if size > PLUGIN_FILE_MAX_BYTES:
+            return self._err(4, "plugin_file_too_large",
+                             "%s 有 %d 字节，超过本站的单文件上限 %d 字节。"
+                             % (rel, size, PLUGIN_FILE_MAX_BYTES))
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return self._err(9, "plugin_file_changed",
+                             "%s 打不开了（%s）—— 本站的插件树与启动时扫到的那份"
+                             "对不上，重跑一次 deploy.sh 再试" % (rel, e.strerror or e))
+        if len(data) != size or hashlib.sha256(data).hexdigest() != sha:
+            return self._err(9, "plugin_file_changed",
+                             "%s 在扫描之后被改过（表里 %d 字节 / %s）—— 本站的插件树"
+                             "与启动时扫到的那份对不上，重跑一次 deploy.sh 再试"
+                             % (rel, size, sha[:16]))
+        return self._ok({"path": rel, "size": size, "sha256": sha,
+                         "data": base64.b64encode(data).decode("ascii")})
 
     def op_partitions(self, uid):
         """可选分区列表 —— 从 Slurm 现查，与该用户的 association 求交。
@@ -3432,6 +3673,30 @@ def main():
             print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
                      "启用" if s.default_enabled else "停用", note))
+            # 分发是**另一个读者**：客户端连上之后按这份清单逐份把文件取走，所以
+            # 这里的份数与字节数就是它要下的量。有问题的三种情形都**只报不拦** ——
+            # 它们不是部署错误，是"这个插件分发不了"。
+            _idx = plugin_file_index(s.source_dir)
+            _total = sum(v[1] for v in _idx.values())
+            _big = max([v[1] for v in _idx.values()] or [0])
+            _links = plugin_symlinks(s.source_dir)
+            print("                  分发 %d 份文件 / %s"
+                  % (len(_idx), human_bytes(_total)))
+            if _links:
+                print("                  ⚠ 有 %d 个符号链接（%s）—— 链接不进清单，"
+                      "客户端重建不出来，这个插件分发不了"
+                      % (len(_links), "、".join(_links[:3])))
+            if len(_idx) > PLUGIN_MAX_FILES:
+                print("                  ⚠ %d 份文件超过本站通报的上限 %d —— "
+                      "客户端会拒收它" % (len(_idx), PLUGIN_MAX_FILES))
+            if _total > PLUGIN_TOTAL_MAX_BYTES:
+                print("                  ⚠ 共 %s 超过本站通报的上限 %s —— "
+                      "客户端会拒收它"
+                      % (human_bytes(_total), human_bytes(PLUGIN_TOTAL_MAX_BYTES)))
+            if _big > PLUGIN_FILE_MAX_BYTES:
+                print("                  ⚠ 最大的一份有 %s，超过单文件上限 %s —— "
+                      "客户端取不走它"
+                      % (human_bytes(_big), human_bytes(PLUGIN_FILE_MAX_BYTES)))
         # deploy.sh 要逐个处理这些目录，所以最后给一行**机器可读**的。
         # 用制表符而不是空格：短名里不允许空格，也不允许制表符。
         #
@@ -3512,6 +3777,17 @@ def main():
                       % "作业侧")
             print("      %-11s %s" % ("作业脚本",
                                       os.path.join(cfg.jobs_dir, _p.spec.id + ".sbatch")))
+            # 站点分发的量：客户端连上之后要逐份取走的那些文件。**启用才有人来取**
+            # —— 停用的插件仍然报文件清单（协议要求报全部插件），但客户端不去拿它。
+            _idx = plugin_file_index(_p.spec.source_dir)
+            _total = sum(v[1] for v in _idx.values())
+            _links = plugin_symlinks(_p.spec.source_dir)
+            print("      %-11s %d 份 / %s%s"
+                  % ("分发", len(_idx), human_bytes(_total),
+                     "" if _p.enabled else "（本站没启用它，客户端不会来取）"))
+            if _links:
+                print("      %-11s ⚠ 有符号链接 %s —— 链接不进清单，客户端重建不出来"
+                      % ("", "、".join(_links[:3])))
             if _p.spec.bin_env:
                 print("      %-11s %s（%s）"
                       % (_p.spec.bin_env, _p.bin, _p.bin_src))

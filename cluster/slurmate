@@ -93,6 +93,19 @@ def rpc(req, timeout=40.0):
             s.close()
         except OSError:
             pass
+    # ★ 先说"读不下了"，再说"解析不了"。这两件事的症状一样（`json.loads` 都失败），
+    #   但原因差得远：截断的那一份报出来会是「响应不是合法 JSON」，于是下一次有人
+    #   会去查守护进程为什么不响应 —— 而真正的原因是**这个响应本来就很大**。
+    #
+    #   什么响应会这么大：插件的文件清单（`plugins` op 每个插件带一份逐文件的
+    #   sha256）。所以这里给的出路是"少装几个插件 / 让每个插件目录小一点"，不是
+    #   "重启守护进程"。
+    if b"\n" not in buf and len(buf) >= (1 << 20):
+        raise RpcError(EXIT_SLURM,
+                       "守护进程的响应超过了 %d 字节，这一条读不完整。\n"
+                       "多半是插件的文件清单太大（每个插件的每一份文件都在里面）。\n"
+                       "这不是守护进程没响应 —— 是这一条应答本身超出了 CLI 的读取上限。"
+                       % (1 << 20))
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
         raise RpcError(EXIT_NODAEMON, "守护进程返回了空响应")
@@ -150,6 +163,20 @@ def _code_to_exit(resp):
     if code == 7:
         return EXIT_RATELIMIT
     return 1
+
+
+def _human_bytes(n):
+    """给人看的字节数。守护进程那一侧有一份同名的，两边都是给人看输出的 —— 它们是
+    两个独立安装的程序（CLI 在 <prefix>/bin，守护进程在 <prefix>/sbin），不共享模块，
+    所以这点重复是布局带来的，不是抄漏了。"""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%d B" % n if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024.0
 
 
 def human_state(state):
@@ -284,16 +311,20 @@ def cmd_plugins(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    print("%-14s %-8s %-9s %-14s %s"
-          % ("插件", "状态", "版本", "缺省资源", "说明"))
-    print("-" * 78)
+    print("%-14s %-8s %-9s %-14s %-10s %s"
+          % ("插件", "状态", "版本", "缺省资源", "分发", "说明"))
+    print("-" * 88)
     for p in d["plugins"]:
         df = p.get("defaults") or {}
-        print("%-14s %-8s %-9s %-14s %s"
+        # 分发那一列：客户端连上之后要逐份取走的文件数。**空的不是 0，是"这一版
+        # 守护进程压根不报这个字段"**（老版本），所以显示成 `—` 而不是 `0 份`。
+        files = p.get("files")
+        nfiles = "%d 份" % len(files) if isinstance(files, list) else "—"
+        print("%-14s %-8s %-9s %-14s %-10s %s"
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
                  p.get("version") or "?",
                  "%s 核 / %s" % (df.get("cpus"), df.get("mem")),
-                 p.get("title") or ""))
+                 nfiles, p.get("title") or ""))
     if not d["plugins"]:
         # ★ 零插件是**合法状态**，不是"这台机器坏了"。所以这里给的是出路，
         #   不是故障描述 —— 而 99% 的人看到"一个都没有"时的第一个问题是"那我
@@ -309,6 +340,14 @@ def cmd_plugins(args):
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
     print("缺省资源由服务端定并在提交时钳制 —— 客户端不填这些值。")
+    # 「分发」那一列的口径写出来：它**只对已启用的插件有意义**（客户端只来取
+    # 启用的那些），而 `—` 表示这一版守护进程不支持分发，不是一个数字。
+    if isinstance(d.get("limits"), dict):
+        print("「分发」= 客户端连上之后要逐份取走的文件数（只取已启用的）。")
+        print("  单份上限 %s，另有份数与总量上限；客户端取两边的更严者。"
+              % _human_bytes(d["limits"].get("file_bytes")))
+    else:
+        print("「分发」显示为 — ：这一版守护进程不报文件清单（客户端不会来取）。")
     print()
     print("id 是这个插件的全球唯一标识（铸造出来、永不改变），客户端靠它 + 版本")
     print("在自己的插件池里找配套的那一半。名字只是本站的短名，日志和配置块用它。")
