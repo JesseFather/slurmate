@@ -15,7 +15,8 @@ node slurmate-packer.js inspect your-plugin-1.0.0.splug
 产出的 `.splug` 发布到你的网站 / GitHub；站点管理员下载下来交给安装器。
 **服务器上从头到尾没有源码树** —— 打包发生在你的机器上。
 
-规范：`docs/PLUGIN-SPEC.md`（尤其 §2 身份、§3 包、§4 签名、**附录 A 容器格式**）。
+规范：`docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名）与 `docs/PLUGIN-CONTAINER.md`
+（容器格式，即那份规范的**附录 A**）。
 
 ## 六个动词
 

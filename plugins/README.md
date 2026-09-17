@@ -329,9 +329,16 @@ deploy.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一条不
 ### 作业脚本：一个插件一份
 
 ```
-<prefix>/share/slurmate/plugins/<目录名>/job/start.sh     ← 源
-        └─ deploy.sh 逐插件织一次 ─→ <prefix>/share/slurmate/jobs/<ULID>.sbatch
+作者机器上那棵树里的 job/start.sh
+        └─ packer build ─→ <你的插件>.splug ─→ 安装器 ─→ <prefix>/share/slurmate/plugins/<ULID>.splug
+                                                              └─ deploy.sh 逐插件织一次
+                                                                 ─→ <prefix>/share/slurmate/jobs/<ULID>.sbatch
 ```
+
+★ **站点上从头到尾没有源码树**（从前这一段写的是 `<prefix>/share/slurmate/plugins/
+<目录名>/job/start.sh  ← 源`，那是"插件是一棵目录树"那个形状，v0.7 起不存在了）。
+作业侧的源是**你仓库里那份** `job/start.sh`，它先被打进包，再由 `deploy.sh` 从
+**包里的记录表**读出来、织成一份作业脚本。
 
 **文件名是这个插件清单里的 `id`（ULID）**，不是短名 —— ULID 是插件的**身份**
 （全球唯一、铸造出来就不变），短名只是本站的标签、可以改。目录列表里那一串 ULID
@@ -396,13 +403,15 @@ node packer/slurmate-packer.js inspect <那个 .splug>
 
 ★ **本仓库这两个插件要跑一次 `init --adopt`。** 它们的 id 铸在血统表存在之前，
 所以血统表不认识它们，而 `build` 会（正确地）停下来问 —— `--adopt` 就是那次问的
-第二个答案（"这是同一个插件，只是记录不在了"）。★ 这一步**还没有做**：
-"一个插件是一个包"那条安装路径整个还没切过来，见下面。
+第二个答案（"这是同一个插件，只是记录不在了"）。**这一步还没有做** ——
+所以 `plugins/` 下现在仍然是源码树，没有 `.splug`（账本里的 S8）。
 
-★ **这个仓库里的安装路径现在仍然收目录**（`deploy.sh --plugins-src`）：
-"一个插件是一个包"那一步还没切过来。但**包的格式已经定死了**（
-[docs/PLUGIN-SPEC.md](../docs/PLUGIN-SPEC.md) 附录 A），打包器与两种语言的读方
-都在，而它们读的是**同一份符合性向量**（[`tools/conformance/`](../tools/conformance/)）。
+> ★ **这一段从前跟着一句已经不成立的话**：「这个仓库里的安装路径现在仍然收目录，
+> 『一个插件是一个包』那一步还没切过来」。**那一步已经切过来了** ——
+> `--plugins-src` 指的是**放 `.splug` 的目录**，缺省那个 `plugins/` 是源码树，
+> 所以直接部署会在预检那一步停下来告诉你要先 `packer build`。
+> 留着这次更正，是因为那句话当时读起来像一条"已知限制"，而它其实已经过期了 ——
+> 过期的话比没有话更坏：它会让人以为包那条路还没通。
 
 ### 分发出去之后，作者要知道的四条
 
@@ -422,8 +431,9 @@ node packer/slurmate-packer.js inspect <那个 .splug>
 单文件 256 KiB、整个插件 1 MiB、最多 256 份 —— 另外整个包文件还有一条 2 MiB 的
 链路上限，那是"一次取整包"这条路的能力边界）。
 
-**符号链接根本进不了包**：格式里的负载是一条条 `路径 | 字节`（`docs/PLUGIN-SPEC.md`
-附录 A.3），链接**表达不出来**，所以 `packer build` 会拒绝它，而**不是**打一个 ⚠。
+**符号链接根本进不了包**：格式里的负载是一条条 `路径 | 字节`
+（[`docs/PLUGIN-CONTAINER.md`](../docs/PLUGIN-CONTAINER.md) 的 A.1），链接**表达不出来**，
+所以 `packer build` 会拒绝它，而**不是**打一个 ⚠。
 从前那句"含链接的插件 `--check-plugins` 会打 ⚠"随"插件是一个包"一起失效了 ——
 能表达出来的东西才谈得上警告。
 

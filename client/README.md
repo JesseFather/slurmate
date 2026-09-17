@@ -213,20 +213,22 @@ npm config set ELECTRON_MIRROR https://npmmirror.com/mirrors/electron/
 - **模拟守护进程挂掉** —— 验证客户端**不会**因此判定会话结束
 - **模拟隧道断开** —— 验证遮罩出现、重连提示、恢复后焦点回到编辑器
 - **模拟会话被回收** —— 验证「作业被 scancel 了」这条路径
-- **站点不支持分发**（`old-distribute`）—— 让假后端报插件但**不报文件清单**。
+- **站点不支持分发**（`old-distribute`）—— 让假后端报插件但**不报顶层 `limits`**。
   回退必须是那一句「本站的守护进程太旧」，而**不是**退回本机池
-- **插件太大**（`plugin-too-big`）—— 让一份文件超过 256 KiB，验证客户端**拒绝**
-  而不是截断
+- **插件太大**（`plugin-too-big`）—— 往某一份的**包里**塞一个超过单文件上限的文件，
+  验证客户端**拒绝**而不是截断
 - **站点在限流**（`rate-limited`）—— 让假后端先回几次 `7 rate_limited`，验证客户端
   **退避重试**，而不是把它报成"同步失败"
 - **站点有个本机没有的插件**（`extra-plugin`）—— 「站点有而本机没有 ⇒ 升级客户端」
   那条提示的唯一来源
 - **复位**
 
-> ★ 还有几个动作只有 IPC 没有按钮（`old-daemon` / `site-plugin-off` /
-> `site-plugin-no-job`），在 DevTools 里 `window.slurmate.debug('old-daemon')`。
-> **它们造的是不同的状态**（老守护进程那条要退回本机池，站点关掉那个**不**退），
-> 别把那几个混着用。
+> ★ 还有几个动作只有 IPC 没有按钮 —— `old-daemon` / `site-plugin-off` /
+> `site-plugin-no-job` / `daemon-version`（后三个可以带参数），在 DevTools 里
+> `window.slurmate.debug('old-daemon')`、`window.slurmate.debug('daemon-version', '2.5')`。
+> **它们造的是不同的状态**（老守护进程那条要退回本机池，站点关掉那个**不**退；
+> `daemon-version` 造的是版本握手那两态里真机上造不出来的：站点比客户端新、
+> 以及两个大版本之间），别把那几个混着用。
 
 ---
 
@@ -265,6 +267,7 @@ src/main/
   weblogin.js      「POST 表单 + 查 cookie」这个**通用**登录机制（纯函数）
   keys.js          SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）—— 也是插件的能力之一
   plugins/         插件**框架**：注册表 + 铸造 id + 安装器（不是插件目录）
+  plugin-package.js **读包**：解析 `.splug` 容器、逐份校 sha256、重算内容摘要、验签（纯 Node，可脱离 Electron 测）
   site-plugins.js  **站点分发**：对账、引用计数、同意闸、暂存与换入（纯 Node，可脱离 Electron 测）
   backend.js       后端接口 + 选择器
   backend-ssh.js   真实后端（专用密钥认证 + 固定 argv 的 RPC + 主机密钥 TOFU 校验）
@@ -277,7 +280,9 @@ src/main/
 src/preload/       contextIsolation 下的三个桥（面板 / 遮罩 / 演示页）
 src/renderer/      面板、状态条、遮罩
 src/demo/          演示后端服务的两个页面
-test/              classify / contract / config / site-plugins / boot（端到端，含演示后端）
+test/              classify / config / keys / shortcuts / renderer / backend-ssh /
+                   plugin-package / site-plugins / contract（契约）/ integration /
+                   boot（端到端，含演示后端）
 ```
 
 ### 四条不要改坏的约束

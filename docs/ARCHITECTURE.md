@@ -334,7 +334,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 | 那一半 | 在哪 |
 |---|---|
-| 容器格式（规范性） | [PLUGIN-SPEC.md](PLUGIN-SPEC.md) **附录 A** |
+| 容器格式（规范性） | [PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md)（`PLUGIN-SPEC.md` 的**附录 A**） |
 | 打包器（作者的工具，跑在作者的机器上） | `packer/` —— **服务器上从头到尾没有源码树** |
 | 读包：客户端 | `client/src/main/plugin-package.js` |
 | 读包：集群侧 | 守护进程的 `package_parse()` / `package_extract()`、`--extract-package` |
@@ -357,22 +357,19 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 ★ 代价写在 PROTOCOL.md 的〈协议版本与变更〉里：v0.6 时"这个包用的是我读不懂的格式"
 可以**退回逐份取**，现在只能是一条**明确的失败** —— 用户能做的事只有升级客户端。
 
-**四道护栏，逐条对账**（论证在 [SECURITY.md](../SECURITY.md)，不是只写在这一版里）：
+**四道护栏，逐条对账。** ★ **那张表只有一份**，在
+[SECURITY.md](../SECURITY.md) 的〈站点分发的插件：四条护栏的对账〉里 ——
+它记的不只是"做了哪几条"，还有**没做的那一条用什么替代了**、以及欠着的那件事
+在界面上是怎么说出口的。这里的摘要只有一句：**前三条（逐插件同意、钉公钥、签名）
+都做了，第四条（进程隔离）还欠着**，而且它**需要一次重构**。
 
-| 护栏 | 状态 |
-|---|---|
-| **逐插件同意** | ✅ 做了。每个 `(id + 版本 + 整目录摘要)` 第一次都要点一次，**没有例外** —— 不给"纯声明式插件免同意"开口子（一个恶意 `plugin.json` 也在往你机器上放东西：`contributes.login` 能让客户端往一个 URL POST 一个口令。那是**数据**不是代码，但仍然是站点的指令） |
-| **钉公钥** | ✅ **接上了**：`~/.slurmate/pinned-keys.json`（键是 **`id`**）+ `keyVerdict`，在用户点同意的那一刻钉（`pinPluginKey`），此后每一份都过判据。★ v0.6 时逐份那条路**也判**（它发的是散装字节、证不了签名者 ⇒ 钉过的 id 一律拒）；v0.7 把那条路删掉之后，这个缺口关在了**结构**里。★ 它挡"事后偷换"与"第一次给的就是坏的"两者；一致性台账（`cfg.trustedPlugins`）仍管前者，两件事不写在同一个句子里 |
-| **签名** | ✅ 做了：`packer` 的 `keygen` / `sign`、跟着源码树走的**血统表**（§2.5）、上面那张按 id 的钉表，以及**站点侧的验签**（安装器接系统 openssl + 按 `id` 记住签名者，规范 §6.4）。★ 原先"不做站得住"的条件是三个前提，而**其中两条已经不成立** —— 论证见 [SECURITY.md](../SECURITY.md) |
-| **进程隔离** | ❌ **还欠着 —— 四条里只剩它**。`client/index.js` 仍然 `require()` 进 Electron 主进程，完整 Node 权限、没有沙箱 |
+★ 在那之前，**同意界面的措辞就是唯一的安全边界** —— 所以它把话说满了：没有进程
+隔离、那段代码会在你这台机器上跑、以及第二次之后旧摘要 → 新摘要的对照。
 
-★ **四条里没做的只剩一条**（进程隔离），而它**需要一次重构**。在那之前，
-**同意界面的措辞就是唯一的安全边界** —— 所以它把话说满了：没有进程隔离、那段代码
-会在你这台机器上跑、以及第二次之后旧摘要 → 新摘要的对照。
-
-★ **这张表改过两次，两次都是往下更正**，所以它下面的话值得留着：v0.6 发布时
-"签名"那一行写着"没做，并给出了不做站得住的条件"（三个前提：单站点 / 站点即作者 /
-站点上那份是 root 从源码装的）。**后来那个条件被两件事先后推翻**：
+★ **SECURITY.md 里那张对账表改过两次，两次都是往下更正**，所以下面这段史值得
+留着：v0.6 发布时"签名"那一行写着"没做，并给出了不做站得住的条件"（三个前提：
+单站点 / 站点即作者 / 站点上那份是 root 从源码装的）。**后来那个条件被两件事
+先后推翻**：
 
 1. [PLUGIN-SPEC.md](PLUGIN-SPEC.md) 的 **§5.4** 把签名（以"钉公钥"的形式）写成
    客户端**必须履行**的一条保证 —— 因为发现了三个前提射程之外的第四个场景：
@@ -608,13 +605,12 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 
 ### 为什么 `auth_mode` 默认是 `password`
 
-`nft` ACL 的 hook 点是**登录节点的 output 链**（`Nft.CHAIN`，
-`cluster/slurmate-sessiond` 的 `Nft` 类）。它拦得住「登录节点上的其他用户连你的
-端口」，拦不住「另一个作业恰好被调度到同一台计算节点之后直接 curl 你的端口」
-—— 那条流量根本不经过登录节点。
-
-这不是某个集群的配置问题，而是这个架构的固有边界。共享家目录 `0700` 之类的保护
-恰好被绕过，因为攻击者用的是你的身份。
+**一句话**：`nft` ACL 的 hook 点是**登录节点的 output 链**（`Nft.CHAIN`，
+`cluster/slurmate-sessiond` 的 `Nft` 类），所以它拦得住「登录节点上的其他用户连你
+的端口」，拦不住「另一个作业恰好被调度到同一台计算节点之后直接 curl 你的端口」。
+**完整的论证只有一份**，在 [SECURITY.md](../SECURITY.md) 的〈nft ACL 拦不住同一台
+计算节点上的共租户〉—— 那里说清了为什么它不是某个集群的配置问题、以及为什么
+`0700` 之类的保护恰好被绕过。这里不重抄。
 
 所以 **code-server 插件在清单的 `site.enumKeys` 里把 `auth_mode` 的缺省声明成
 `password`**（`plugins/code-server/plugin.json`），而宿主的作业模板明确拒绝在
@@ -713,27 +709,30 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 3. **计算节点上没有 per-user 网络隔离时，ACL 覆盖不到同节点内的横向访问。**
    这是 code-server 插件的 `auth_mode` 默认取 `password` 的原因
    （`plugins/code-server/README.md`）。
-4. **`op_submit` 非幂等**：每次调用都生成新 `sid`、插新行、提交新作业。而
-   `count_active()` 只数 `ACL_STATES`，`submitted` 不在内 —— `max_active_per_user`
-   拦不住并发的第二个提交（上限退化为 `max_pending_per_user`）。所以客户端在
-   `submit` 超时时**绝不重试**，改为用不带 `session_id` 的 `status` 去认领
-   （`client/src/main/session.js`）。**未修，编号 F14。**
-5. **`goodbye` 返回 `ok:true` 不代表作业被取消了。** `op_goodbye` 丢弃
-   `scancel` 的返回值，`phase_release` 也不确认作业是否真的没了。所以客户端把
-   「正在释放」和「已结束」当成两个状态（`client/src/main/session.js`）。
-   **未修，编号 F12 / F13。**
+4. **`op_submit` 非幂等，而配额检查漏掉了 `submitted` 那一档** —— 并发的第二个
+   提交因此拦不住。客户端的应对是 `submit` 超时时**绝不重试**，改用不带
+   `session_id` 的 `status` 去认领（`client/src/main/session.js`）。
+   **未修，编号 F14** —— 机理与两条修法在账本里。
+5. **`goodbye` 返回 `ok:true` 不代表作业被取消了** —— 所以客户端把「正在释放」和
+   「已结束」当成两个状态（`client/src/main/session.js`）。**未修，编号 F12 / F13。**
 
 ★ 第 4、5 两条是**当前代码里的缺陷**，不是设计上的取舍 —— 连同其余未修项、
 未实测项与结构性欠账，全部记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。
 
 ## 延伸阅读
 
-- 安装与前置条件：[DEPLOYMENT.md](./DEPLOYMENT.md)
-- 配置项参考：[CONFIGURATION.md](./CONFIGURATION.md)
-- RPC 契约与错误码：[PROTOCOL.md](./PROTOCOL.md)
-- 常见故障：[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)
+★ **完整的文档索引在 [docs/README.md](./README.md)**（按"你是谁"分三组）。
+下面只列几份，因为它们是**从这一篇直接接下去**的：
+
+- RPC 契约与错误码：[PROTOCOL.md](./PROTOCOL.md)；写一个新后端从
+  [IMPLEMENTING.md](./IMPLEMENTING.md) 开始。
+- 安装与前置条件：[DEPLOYMENT.md](./DEPLOYMENT.md)；配置项参考：
+  [CONFIGURATION.md](./CONFIGURATION.md)。
+- 常见故障：[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)（会话与客户端）、
+  [PLUGIN-TROUBLESHOOTING.md](./PLUGIN-TROUBLESHOOTING.md)（插件与分发）。
 - **未修的缺陷、未实测的假设、结构性的欠账：[KNOWN-ISSUES.md](./KNOWN-ISSUES.md)**
-- 写一个插件：[plugins/README.md](../plugins/README.md)
-- ★ **插件规范（契约；打包器 / 客户端 / 分发端各自必须做什么）：[PLUGIN-SPEC.md](./PLUGIN-SPEC.md)** ——
-  动插件相关的任何东西之前先读它。它是**契约**不是说明：正文里**没有**实现进度那一栏，
-  进度各自记在自己的 README 与 `KNOWN-ISSUES.md` 里
+  —— 那是唯一的账本。
+- 写一个插件：[plugins/README.md](../plugins/README.md)，契约是
+  [PLUGIN-SPEC.md](./PLUGIN-SPEC.md)。**动插件相关的任何东西之前先读它。** 它是
+  **契约**不是说明：正文里**没有**实现进度那一栏，进度各自记在自己的 README 与
+  `KNOWN-ISSUES.md` 里。

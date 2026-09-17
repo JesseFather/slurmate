@@ -9,9 +9,13 @@
 ```
 code-server/
   plugin.json        清单
-  client/index.js    自动登录（61 行）
-  job/start.sh       作业侧（135 行）
+  client/index.js    自动登录
+  job/start.sh       作业侧
 ```
+
+★ 这里**不写每个文件有几行**（从前写过，还有一条已经不对）—— 行数是行号的另一种
+写法，改一行代码它就开始说错话，而没有任何东西会因此变红。理由见
+[CONTRIBUTING.md](../../CONTRIBUTING.md) 的〈文档：指路按符号名，不写行号〉。
 
 ---
 
@@ -55,7 +59,7 @@ Slurmate 的 nft ACL 挂在**登录节点**的 output 链上。它拦得住「�
 
 ---
 
-## 客户端侧（`client/index.js`，61 行）
+## 客户端侧（`client/index.js`）
 
 只有一件事：**自动登录**。
 
@@ -88,7 +92,7 @@ Slurmate 的 nft ACL 挂在**登录节点**的 output 链上。它拦得住「�
 
 ---
 
-## 作业侧（`job/start.sh`，135 行）
+## 作业侧（`job/start.sh`）
 
 ### 必须做的
 

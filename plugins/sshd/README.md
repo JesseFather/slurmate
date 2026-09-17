@@ -10,10 +10,14 @@
 ```
 sshd/
   plugin.json            清单
-  client/index.js        准备密钥 + 写 ~/.ssh/config（113 行）
-  client/sshconfig.js    让用户自己的 ssh 认出一个恒定别名（355 行）
-  job/start.sh           作业侧的用户态 sshd（305 行）
+  client/index.js        准备密钥 + 写 ~/.ssh/config
+  client/sshconfig.js    让用户自己的 ssh 认出一个恒定别名
+  job/start.sh           作业侧的用户态 sshd
 ```
+
+★ 这里**不写每个文件有几行**（从前写过）—— 行数是行号的另一种写法，改一行代码它
+就开始说错话，而没有任何东西会因此变红。理由见
+[CONTRIBUTING.md](../../CONTRIBUTING.md) 的〈文档：指路按符号名，不写行号〉。
 
 ---
 
@@ -116,7 +120,7 @@ IDM 或集群的登录入口都不认识它**。
 
 ---
 
-## 作业侧（`job/start.sh`，305 行）
+## 作业侧（`job/start.sh`）
 
 ### 三个钩子都用上了
 
