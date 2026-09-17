@@ -86,6 +86,21 @@ def load_module():
     return mod
 
 
+def load_cli():
+    """加载 `cluster/slurmate` 那个 CLI（它没有 .py 后缀，所以只能这样加载）。
+
+    ★ 加载它是安全的：那个文件的顶层只有 import 与常量定义，`main()` 在
+      `if __name__ == "__main__"` 里。这里要的只是它那几个常量 —— 19.11d 那条
+      跨文件不变量读的是它与守护进程各写一遍的那两个数。
+    """
+    path = os.path.join(HERE, "slurmate")
+    loader = importlib.machinery.SourceFileLoader("slurmate_cli", path)
+    spec = importlib.util.spec_from_loader("slurmate_cli", loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    return cli
+
+
 def write_stub(path, body):
     """在临时目录里造一个可执行的小脚本，用来当外部命令的替身。"""
     with open(path, "w", encoding="utf-8") as f:
@@ -2169,10 +2184,14 @@ exit 0
           and _pdata["limits"].get("file_bytes") == mod.PLUGIN_FILE_MAX_BYTES,
           str(_pdata.get("limits")))
 
-    for _n, _dir in ((CS, _p2[CS]), (SSHD, _p2[SSHD])):
+    # ★ 全部走 `.get(...) or []`：变异验证时"这一项不见了 / `files` 整个不报"正是
+    #   被测的那件事，而裸下标会抛 KeyError 把脚本**带崩** —— 崩了与"一条都不红"
+    #   在输出上分不开（见 CHANGELOG 里那条反复回来的说明）。
+    for _n, _dir in ((CS, _p2.get(CS) or {}), (SSHD, _p2.get(SSHD) or {})):
         _spec = cfg.plugin_by_name[_n]
         _real = mod.plugin_file_index(_spec.source_package)
-        _got = [(f["path"], f["size"], f["sha256"]) for f in _dir["files"]]
+        _got = [(f["path"], f["size"], f["sha256"])
+                for f in (_dir.get("files") or [])]
         check("★ 「%s」的清单与**包里的记录表**逐项相符（自己重算一遍 sha256）" % _n,
               _got == [(r, s, h) for r, (s, h) in sorted(_real.items())],
               "%d 项 vs %d 项" % (len(_got), len(_real)))
@@ -2185,7 +2204,7 @@ exit 0
     _cs_spec = cfg.plugin_by_name[CS]
     _cs_blob = mod.package_read_file(_cs_spec.source_package)["data"]
     _nfile = 0
-    for _path in [f["path"] for f in _p2[CS]["files"]]:
+    for _path in [f["path"] for f in ((_p2.get(CS) or {}).get("files") or [])]:
         _fr = _pf({"op": "plugin_file", "id": _cs_spec.id,
                    "version": _cs_spec.version, "path": _path})
         check("取 %s 成功" % _path, _fr.get("ok"), str(_fr)[:160])
@@ -2203,8 +2222,8 @@ exit 0
     # ★ `next(..., None)` 而不是裸 `next()`：变异验证时"清单是空的"正是被测的
     #   那件事，而裸 next 会抛 StopIteration 把脚本**带崩** —— 崩了与"一条都不红"
     #   在输出上分不开（见第 18 节那个 _Captured 的说明）。
-    _declared = next((f for f in _p2[CS]["files"] if f["path"] == "plugin.json"),
-                     None)
+    _declared = next((f for f in ((_p2.get(CS) or {}).get("files") or [])
+                      if f["path"] == "plugin.json"), None)
     # ★ 全部走 `.get`：变异验证时"取不到"与"清单是空的"正是被测的那件事，
     #   而裸下标会抛 TypeError 把脚本**带崩**（崩了与"一条都不红"在输出上分不开）。
     _one_data = (_one.get("data") or {})
@@ -2264,12 +2283,12 @@ exit 0
     _saved_src = _cs_spec.source_package
     try:
         _cs_spec.source_package = _fx_pkg
-        _d2._plugin_index_cache.clear()
+        _d2._plugin_cache.clear()
 
         _fx_paths = [f["path"]
                      for x in (_pf({"op": "plugins"}).get("data") or {}).get(
                          "plugins", [])
-                     if x["name"] == CS for f in x["files"]]
+                     if x.get("name") == CS for f in (x.get("files") or [])]
         check("对照：包里那些文件都在清单里（下面几条不是「一律为空」）",
               {"plugin.json", "client/index.js", "client/sshconfig.js",
                "job/start.sh", "small.bin"} <= set(_fx_paths), str(_fx_paths))
@@ -2341,15 +2360,16 @@ exit 0
         _sha_now = next((f["sha256"]
                          for x in (_pf({"op": "plugins"}).get("data") or {}).get(
                              "plugins", [])
-                         if x["name"] == CS
-                         for f in x["files"] if f["path"] == "small.bin"), None)
+                         if x.get("name") == CS
+                         for f in (x.get("files") or [])
+                         if f["path"] == "small.bin"), None)
         check("★★ 索引是**启动快照**：改完之后 op_plugins 报的还是当初那一份",
               _sha_now == hashlib.sha256(b"y" * 16).hexdigest(),
               "%s（包现在是 %s）"
               % (_sha_now, hashlib.sha256(b"z" * 32).hexdigest()))
     finally:
         _cs_spec.source_package = _saved_src
-        _d2._plugin_index_cache.clear()
+        _d2._plugin_cache.clear()
     _d2.store.close()
 
     # ── 19.11b ★ 限流：这条路会撞上它，而客户端必须自己让路 ───────────────────
@@ -2360,7 +2380,8 @@ exit 0
     # 这条今天才暴露，是因为**从来没有一个 op 是"批量传输"**：限流是按"人点一下
     # 按钮"设计的。写这条断言是因为客户端那边"串行取 + 撞上就退避"的理由就长在
     # 这里 —— 谁要是调大了插件里的文件数、或者抬高了桶，这里会先响。
-    _n_files = sum(len(_p2[n]["files"]) for n in (CS, SSHD))
+    _n_files = sum(len(((_p2.get(n) or {}).get("files") or []))
+                   for n in (CS, SSHD))
     _budget = _n_files + 2                     # plugins + list + 每份文件一次
     check("★ 一次对账的 RPC 次数已经贴上限流阈值（客户端必须串行 + 退避）",
           _budget >= mod.MAX_RPC_PER_SECOND - 2,
@@ -2381,6 +2402,212 @@ exit 0
           _hit is None or _hit[0] == mod.MAX_RPC_PER_SECOND + 1,
           repr(_hit))
     _d3.store.close()
+
+    # ── 19.11c ★ 整包那条路：一次 RPC 换 N 份文件 ────────────────────────────
+    #
+    # 两条投递方式报的是**同一份内容**，但它们不是"快与慢"的关系：整包那条发出去的
+    # 是**容器本身**，客户端因此能自己解析、自己重算内容摘要、自己验签 —— 于是本站
+    # 报的 `digest` 与本站转发的字节成了**分开的两件事**，客户端有办法发现它们对
+    # 不上。逐份取那边做不到：只有一份一份的字节，拼不出一个能被签名的东西。
+    #
+    # 这一节钉三件事：
+    #   ① `digest` 是**内容摘要**（§3.4），不是容器字节的 sha256；
+    #   ② 发出去的字节逐字节等于盘上那一份，包被换过时两个出口都说出来；
+    #   ③ 负载那三个上限（自述）与整包那个上限（链路）是**两笔账**。
+    _d4 = mod.Sessiond(cfg)
+
+    def _pp(req):
+        """发一条 RPC。清限流计数的理由与 19.11 的 `_pf` 相同。"""
+        _d4.rpc_hits.clear()
+        return _d4.dispatch(UID, os.getgid(), req)
+
+    def _plug_of(name):
+        """`plugins` 里那一个插件，找不到返回 None（变异下不许崩）。"""
+        return next((x for x in
+                     ((_pp({"op": "plugins"}).get("data") or {}).get("plugins") or [])
+                     if x.get("name") == name), None)
+
+    _cs4 = cfg.plugin_by_name[CS]
+    _pk4 = {n: _plug_of(n) for n in (CS, SSHD)}
+    check("★★ 两条投递方式**同时**在（加法过渡的形状）：每个插件既有 files 也有 "
+          "package —— 老客户端只看 files，照旧逐份取，一个新字段都不用认",
+          all(isinstance((x or {}).get("files"), list)
+              and (x or {}).get("package") is not None for x in _pk4.values()),
+          str({k: (type((v or {}).get("files")).__name__,
+                   (v or {}).get("package")) for k, v in _pk4.items()})[:200])
+
+    for _n in (CS, SSHD):
+        _spec = cfg.plugin_by_name[_n]
+        _info = (_pk4.get(_n) or {}).get("package") or {}
+        _disk = mod.package_read_file(_spec.source_package)
+        check("★★ op_plugins 报的 package 三样事实与**盘上那一份包**相符（「%s」）" % _n,
+              _info.get("format") == mod.PACKAGE_FORMAT
+              and _info.get("bytes") == len(_disk.get("data") or b"")
+              and _info.get("digest") == _disk.get("digest")
+              and _info.get("digest"),
+              "%s vs format=%s bytes=%s digest=%s"
+              % (_info, _disk.get("format"), len(_disk.get("data") or b""),
+                 _disk.get("digest")))
+
+    _lim4 = ((_pp({"op": "plugins"}).get("data") or {}).get("limits") or {})
+    check("★ limits 里多报了 package_bytes（那是**链路**约束，与负载那三个不同口径）",
+          _lim4.get("package_bytes") == mod.PLUGIN_PACKAGE_MAX_BYTES,
+          str(_lim4))
+    check("★ 而它是一个**独立**的数字：整包上限比总字节上限大（两笔账，不是一个）",
+          _lim4.get("package_bytes") != _lim4.get("total_bytes"),
+          str(_lim4))
+
+    # ★★ `digest` 是**内容摘要**（§3.4），不是容器字节的 sha256。这一条分辨不出来
+    #    的话，"给同一个负载补一个签名块"（§4.2 明文允许的动作：摘要不变 ⇒ 还是
+    #    同一份构件）会让客户端自己算出来的摘要与本站报的对不上 —— 而两边都没错。
+    #    先在最底层分辨一次，再**走一遍 op** 分辨一次（下面那一段）。
+    _dg_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
+                                 b'"version":"1.0.0"}' % _cs4.id.encode()),
+                 ("client/index.js", b"module.exports = {};\n")]
+    _sigblock = b"\x01" + b"\x11" * 32 + b"\x22" * 64
+    _plain_bytes = build_package(_dg_files)
+    _signed_bytes = build_package(_dg_files, _sigblock)
+    _plain = mod.package_parse(_plain_bytes)
+    _signed = mod.package_parse(_signed_bytes)
+    check("这条用例自己的前提：两份都能解析，而**容器字节**确实不同",
+          _plain.get("ok") and _signed.get("ok") and _plain_bytes != _signed_bytes,
+          "ok=%s/%s 相同=%s" % (_plain.get("ok"), _signed.get("ok"),
+                              _plain_bytes == _signed_bytes))
+    check("★★ 内容摘要**不看信封**：同一个负载补一个签名块 ⇒ 摘要不变（§4.2）",
+          _plain.get("digest") == _signed.get("digest") and _plain.get("digest"),
+          "%s vs %s" % (_plain.get("digest"), _signed.get("digest")))
+    check("★ 而容器字节的 sha256 是变的（上面那条不是「两边都是常量」）",
+          hashlib.sha256(_plain_bytes).hexdigest()
+          != hashlib.sha256(_signed_bytes).hexdigest())
+
+    _fx4 = os.path.join(tmpdir, "siteplug-pkgpath")
+    os.makedirs(_fx4, exist_ok=True)
+    _dg_name = "01M2JKHTZGKJBFQQTWYXMQMFDG.splug"
+    _saved_src4 = _cs4.source_package
+    try:
+        _dg_a = put_package(_fx4, _dg_files, filename=_dg_name)
+        _cs4.source_package = _dg_a
+        _d4._plugin_cache.clear()          # 清缓存 = 模拟"守护进程重启一次"
+        _a_pkg = (_plug_of(CS) or {}).get("package") or {}
+
+        # 同一个负载、换成一个**带签名块**的包（容器字节变长 97 字节）
+        put_package(_fx4, _dg_files, sig_block=_sigblock, filename=_dg_name)
+        _d4._plugin_cache.clear()
+        _b_plug = _plug_of(CS) or {}
+        _b_pkg = _b_plug.get("package") or {}
+        check("★★ op_plugins 报出去的也是**内容摘要**：补上签名块之后整包字节数变了、"
+              "摘要**一个字都没变**",
+              _a_pkg.get("bytes") != _b_pkg.get("bytes")
+              and _a_pkg.get("digest") == _b_pkg.get("digest") and _a_pkg.get("digest"),
+              "%s vs %s" % (_a_pkg, _b_pkg))
+
+        # ── 整包取：字节逐字节等于盘上那一份 ──
+        _pr = _pp({"op": "plugin_package", "id": _cs4.id, "version": _cs4.version})
+        _pd = _pr.get("data") or {}
+        _got = base64.b64decode(_pd.get("data") or "")
+        _cur = mod.package_read_file(_cs4.source_package)
+        check("★★ op_plugin_package 发回来的字节与盘上那份包**逐字节全等**",
+              _got == (_cur.get("data") or b"") and len(_got) > 0,
+              "%d vs %d 字节" % (len(_got), len(_cur.get("data") or b"")))
+        check("★ 报回的 format/bytes/digest 与 op_plugins 那一轮报的**同一个值**",
+              (_pd.get("format"), _pd.get("bytes"), _pd.get("digest"))
+              == (_b_pkg.get("format"), _b_pkg.get("bytes"), _b_pkg.get("digest")),
+              "%s vs %s" % (_pd, _b_pkg))
+        check("★★ 而客户端拿这份**下载到的字节**自己重算一遍，得到的就是本站报的那个 "
+              "—— 这是 digest 唯一正确的用法（本站自述，不是判据）",
+              mod.package_parse(_got).get("digest") == _pd.get("digest"),
+              "%s vs %s" % (mod.package_parse(_got).get("digest"),
+                            _pd.get("digest")))
+
+        # ── 认不出的 (id, 版本)：与逐份取**同一个出口** ──
+        _uc4, _uk4, _ud4 = _kindof(_pp({"op": "plugin_package", "id": "0" * 26,
+                                        "version": "1.0.0"}))
+        check("★ 认不出的 (id, 版本) 是 3 plugin_unknown（两条路一个出口）",
+              _uc4 == 3 and _uk4 == "plugin_unknown",
+              "code=%s kind=%s detail=%s" % (_uc4, _uk4, _ud4[:60]))
+
+        # ★ 启动之后包被换过：**两个出口都要说出来**，而不是把对不上的字节发出去
+        #   让客户端去报"校验不过"（那是同一个事实，但会让运维去查错的地方）。
+        put_package(_fx4, _dg_files, filename=_dg_name)     # 换回不带签名的那一份
+        _cc4, _ck4, _cd4 = _kindof(_pp({"op": "plugin_package",
+                                        "id": _cs4.id, "version": _cs4.version}))
+        check("★★ 包在本次启动之后被换过 ⇒ 9 plugin_package_changed",
+              _cc4 == 9 and _ck4 == "plugin_package_changed",
+              "code=%s kind=%s detail=%s" % (_cc4, _ck4, _cd4[:80]))
+        check("★ 而且那句话指向「重跑一次 deploy.sh」，不是指回客户端",
+              "deploy.sh" in _cd4, repr(_cd4[:140]))
+        _after = (_plug_of(CS) or {}).get("package") or {}
+        check("★★ 快照是**启动那一刻**：换完之后 op_plugins 报的还是当初那一个"
+              "（两个出口因此永远描述同一份包）",
+              _after.get("digest") == _b_pkg.get("digest")
+              and _after.get("bytes") == _b_pkg.get("bytes"),
+              "%s vs %s" % (_after, _b_pkg))
+
+        # ── 超过整包上限：明确拒绝，**不把 2 MiB 硬塞进一条应答** ──
+        #    正常部署下安装器已经拦住了这种包；这一条拦的是绕过安装器放进来的一份。
+        _big_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
+                                      b'"version":"1.0.0"}' % _cs4.id.encode()),
+                      ("big.bin", b"x" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 1))]
+        put_package(_fx4, _big_files, filename=_dg_name)
+        _d4._plugin_cache.clear()
+        _lc4, _lk4, _ld4 = _kindof(_pp({"op": "plugin_package",
+                                        "id": _cs4.id, "version": _cs4.version}))
+        check("★★ 超过整包上限 ⇒ 4 plugin_package_too_large（不是截断了发出来）",
+              _lc4 == 4 and _lk4 == "plugin_package_too_large",
+              "code=%s kind=%s detail=%s" % (_lc4, _lk4, _ld4[:80]))
+        check("★ 而且一个字节都没发（错误应答里没有 data）",
+              "data" not in (_pp({"op": "plugin_package", "id": _cs4.id,
+                                  "version": _cs4.version}).get("data") or {}))
+        # ★ 这个上限**报得出来**才有意义：客户端要先知道它才谈得上"取不回来"。
+        check("★ 上限那个数在错误信息里（运维要照着调）",
+              str(mod.PLUGIN_PACKAGE_MAX_BYTES) in _ld4, repr(_ld4[:140]))
+
+        # ── 包**不见了**：`package` 是 null，而**能力仍然在** ──
+        #
+        # ★ 这两件事必须分得开：「这一份现在给不出来」是瞬时的、是这一份的事；
+        #   「本站没有这个能力」是协议事实（顶层没有 limits）。合成一个信号的话，
+        #   一次误删文件会让客户端把整站降级。
+        _cs4.source_package = os.path.join(_fx4, "被删掉了.splug")
+        _d4._plugin_cache.clear()
+        _gone = _plug_of(CS) or {}
+        check("★★ 包不见了 ⇒ package 是 **null**（不是把这个键省掉）",
+              "package" in _gone and _gone.get("package") is None,
+              "键在=%s 值=%r" % ("package" in _gone, _gone.get("package")))
+        check("对照：顶层 limits 照旧报（缺席的不是**能力**，是这一份的内容）",
+              isinstance(((_pp({"op": "plugins"}).get("data") or {})
+                          .get("limits")), dict))
+        _gc4, _gk4, _gd4 = _kindof(_pp({"op": "plugin_package",
+                                        "id": _cs4.id, "version": _cs4.version}))
+        check("★ 整包取那条路回 9 plugin_package_changed（不是 3/4 —— 它刚才还在，"
+              "而「刚才还在」正是这句话要说的事）",
+              _gc4 == 9 and _gk4 == "plugin_package_changed",
+              "code=%s kind=%s detail=%s" % (_gc4, _gk4, _gd4[:80]))
+    finally:
+        _cs4.source_package = _saved_src4
+        _d4._plugin_cache.clear()
+    _d4.store.close()
+
+    # ── 19.11d ★ 跨文件不变量：CLI 读得下本站能发出去的最大一条应答 ──────────
+    #
+    # 这是那两个数字**唯一**的守方。它们是从两侧各写一遍的（守护进程的
+    # `PLUGIN_PACKAGE_MAX_BYTES` 与 CLI 的 `RPC_MAX_RESPONSE_BYTES`），而漂开的
+    # 症状会是**最容易被认错的那一种**：CLI 报"响应太大"，客户端把它归成
+    # `daemon_unreachable`（code 5）并退避重试 —— 一次"文件太大"被报成"控制节点上
+    # 的守护进程没有响应"，排查方向整整错一层。
+    #
+    # ★ 从前这里就是错的：CLI 上限 1 MiB，而站点通报的**总量**上限也是 1 MiB ⇒
+    #   "整包一次发"那个数是一句假话（1 MiB 的负载 base64 之后 1.33 MiB）。
+    #   这条用例存在的意义就是让那种状态**不可能悄悄回来**。
+    _cli = load_cli()
+    _wire = len(base64.b64encode(b"\x00" * mod.PLUGIN_PACKAGE_MAX_BYTES))
+    check("★★ CLI 的读上限装得下本站能发出去的那条最大的应答（base64 之后还要"
+          "加一层 JSON 信封）",
+          _wire + 1024 < _cli.RPC_MAX_RESPONSE_BYTES,
+          "包的 base64 是 %d 字节，CLI 上限 %d" % (_wire, _cli.RPC_MAX_RESPONSE_BYTES))
+    check("★ 而反过来也留了余量、没有把上限抬成一句空话（不超过包上限的 4 倍）",
+          _cli.RPC_MAX_RESPONSE_BYTES <= mod.PLUGIN_PACKAGE_MAX_BYTES * 4,
+          "CLI 上限 %d，包上限 %d" % (_cli.RPC_MAX_RESPONSE_BYTES,
+                                    mod.PLUGIN_PACKAGE_MAX_BYTES))
 
     # ── 19.12 ★ 跨语言契约：跳过表两边必须逐字一致 ──────────────────────────
     #
@@ -2956,6 +3183,25 @@ exit 0
         check("★ 但它**不中止**（守护进程仍然照常起来 —— 一条记录不符不该带走整个站点）",
               _crun.returncode == 0, "rc=%d %r" % (_crun.returncode,
                                                    _crun.stderr[-200:]))
+
+        # ── ⑨a ★ 自检要报**内容摘要** ──
+        #
+        # 服务器上**没有源码树可对照**：能回答"我装上去的这一份是不是作者发布的那
+        # 一份"的，只有这个数与作者 `packer inspect` 报的那个。所以它必须打全、
+        # 而且必须是**内容摘要**（§3.4）—— 报成容器字节的 sha256 的话，"补了个签名块"
+        # 会被读成"换了一份包"，而按 §4.2 那还是同一份构件：管理员会得出**相反**的
+        # 结论。
+        _pk_path = os.path.join(_bypass, _UID_A + ".splug")
+        _want_digest = mod.package_read_file(_pk_path)["digest"]
+        with open(_pk_path, "rb") as _pf2:
+            _container_sha = hashlib.sha256(_pf2.read()).hexdigest()
+        check("★★ 自检报出**完整的内容摘要**（拿它去与作者报的那个逐个字符比）",
+              ("内容摘要 %s" % _want_digest) in _crun.stdout,
+              repr(_crun.stdout[-400:]))
+        check("★ 而它**不是**容器字节的 sha256（补一个签名块不该动这个数）",
+              _want_digest != _container_sha
+              and ("内容摘要 %s" % _container_sha) not in _crun.stdout,
+              "%s vs %s" % (_want_digest[:16], _container_sha[:16]))
 
         # ── ⑨b `--check-plugins` 的机器可读那一段（**跨脚本契约**）──
         #

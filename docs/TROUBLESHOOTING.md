@@ -708,9 +708,9 @@ sudo slurmate plugin install --replace-key <报出来的旧指纹> <包>
 ★ 而这一条**客户端那一侧还会再拦一次**：钉过公钥的用户钉的是**旧**那一把，他们会
 拒绝新包，除非各自重新钉。所以"换了钥匙"从来不是一个能悄悄做完的动作。
 
-★ **包被换过之后没重新部署**：守护进程在**启动那一刻**记下每一份的内容，
-发出去的字节与那份记录对不上时会回 `9 plugin_file_changed` —— 那一句指回
-`deploy.sh`，不是指回客户端。
+★ **包被换过之后没重新部署**：守护进程在**启动那一刻**记下每一份的内容与摘要，
+对不上时两条路各回一句：整包取回 `9 plugin_package_changed`、逐份取回
+`9 plugin_file_changed` —— 两句都指回 `deploy.sh`，不是指回客户端。
 
 ### 升级之后一个插件都不见了
 
@@ -884,6 +884,8 @@ ls -l ~/.slurmate/site-plugins/*/*/                      # 客户端取回来的
 cat ~/.slurmate/site-plugins/.sites.json                 # 哪个站点要哪个版本（回收只看它）
 # 取一份文件回来逐字节比（data 是 base64）：
 slurmate rpc <<< '{"op":"plugin_file","id":"<ULID>","version":"1.0.0","path":"plugin.json"}'
+# 或者整包一次取回来（data 是整个 .splug 的 base64，digest 是内容摘要）：
+slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 
 # 作业侧（计算节点上写，登录节点上也能通过共享家目录看）
 ls -l ~/.slurmate/sessions/

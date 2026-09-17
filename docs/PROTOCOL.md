@@ -38,9 +38,10 @@
 > ⚠️ **v0.2 → v0.5 之间不兼容，升级时两边要一起升。**
 >
 > ★ **v0.5 → v0.6 是例外，两个方向都能通 —— 这是设计出来的，不是碰巧。**
-> v0.6 只**加**东西（`plugins` 里多两个字段、多一个 op），老客户端不认识它们、
-> 也不会去调那个 op。反方向靠的是客户端的一条纪律：**站点不支持分发这件事，判据是
-> "响应里没有 `files`"（能力缺席，一个稳定的协议事实），不是"这次下载失败了"
+> v0.6 只**加**东西（`plugins` 里多两个字段与一个 `package`、顶层 `limits` 多一个
+> `package_bytes`、多两个 op：`plugin_file` 与 `plugin_package`），老客户端不认识
+> 它们、也不会去调那两个 op。反方向靠的是客户端的一条纪律：**站点不支持分发这件事，
+> 判据是"响应里没有 `files`"（能力缺席，一个稳定的协议事实），不是"这次下载失败了"
 > （瞬时事实）**。老守护进程因此被明确认成"太旧、不支持分发"，客户端说一句话、
 > 然后什么也不做。
 >
@@ -55,7 +56,7 @@
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
 | **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
-| **v0.6** | **插件文件可以从站点取回来。** `plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）、顶层多了 `limits`（本站的上限，**自述**）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）；三个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`（外加 `9 plugin_file_changed`，见下）。**全部是加法**，见上面那段兼容性说明。 |
+| **v0.6** | **插件文件可以从站点取回来**，而且同一份内容有**两条投递方式**。`plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）与 `package`（`{format, bytes, digest}`）、顶层多了 `limits`（本站的上限，**自述**，含 `package_bytes`）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）与 `plugin_package`（`id` / `version` → **整个包**，base64）；四个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`、`4 plugin_package_too_large`（外加 `9 plugin_file_changed` 与 `9 plugin_package_changed`，见下）。**全部是加法**，见上面那段兼容性说明。 |
 
 ★ **`files` 这份清单的来源换过一次，而那一次不是协议变更。** 站点上的插件从
 "一棵目录树"变成了"一个包文件"（`<prefix>/share/slurmate/plugins/<ULID>.splug`），
@@ -64,9 +65,12 @@
 `slurmate plugin install <包>`（安装器会验签并按 `id` 记住签名者，
 见 [PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）。
 
-★ **这一步没有新 op。**"整包一次取回来"（`op_plugin_package`）排在后面那一段，
-而它会**同时**删掉 `files` 与 `plugin_file` —— 那才是一次协议变更，也是这一版仍然
-逐份取文件、因而仍然贴着限流桶边的原因（见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 S7）。
+★ **`files` 与 `package` 现在同时在**，它们报的是**同一份包**。逐份取（`plugin_file`）
+是给已经发出去的老客户端的，整包取（`plugin_package`）是新的那条路：一次对账从
+1 + 1 + N 次 RPC 降到 1 + 1 + 1 次。**删掉 `files` 与 `plugin_file` 排在后面那一段** ——
+那才是一次真正的不兼容变更。在那之前，这一版的守护进程仍然两条路都通，而**今天的
+客户端仍然走逐份取**（它还不认识 `package`），所以限流桶边那条账还在
+（见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 S7）。
 
 ★ **v0.3 与 v0.4 从未发布、从未部署过** —— 它们是同一条路上的中间站，内容全部并进了
 v0.5。所以协议表的读法是「v0.2 → v0.5 之间隔了三个不兼容的版本」，而不是三段可以
@@ -107,8 +111,13 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
   登录节点上 `ForceCommand` 守卫的必要条件（命令串里不能出现 `code-server` 字面量）。
 - 中文 detail 以字面 UTF-8 输出（`ensure_ascii=False`，`cluster/slurmate`）；
   解析失败时报「守护进程返回的响应不是合法 JSON」（`cluster/slurmate`）。
-- 上限：CLI 侧最多读 1 MiB 或读到第一个换行（`cluster/slurmate`）；
-  守护进程侧最多读 64 KiB 或读到第一个换行（`cluster/slurmate-sessiond`）。
+- 上限：CLI 侧最多读 4 MiB 或读到第一个换行（`cluster/slurmate` 的
+  `RPC_MAX_RESPONSE_BYTES`）；守护进程侧最多读 64 KiB 或读到第一个换行
+  （`cluster/slurmate-sessiond`）。★ 4 MiB 不是随手定的：整包那条路一次最多发
+  `limits.package_bytes`（2 MiB），base64 膨胀 4/3 ⇒ 约 2.7 MiB 再加信封。
+  **这两个数有对应用例钉着**（`cluster/test-sessiond-logic.py` 的 19.11d）——
+  它们是从两侧各写一遍的，漂开之后 CLI 会报"响应太大"，而客户端把它归成
+  `daemon_unreachable`（code 5）**并退避重试**。
 
 人类可读的子命令（`submit` / `status` / `wait` / …）**不保证输出 JSON**，
 只在加 `--json` 时才打印信封。客户端应始终走 `slurmate rpc`。
@@ -163,11 +172,11 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 | `0` | 成功 | — | `0` |
 | `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
 | `3` | 未找到（会话不存在，uid 查不到，或本站没有这个东西） | `not_found`、`unknown_uid`、`plugin_unknown`、`plugin_file_unknown` | `3` |
-| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_file_too_large` | `4` |
+| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_file_too_large`、`plugin_package_too_large` | `4` |
 | `5` | **守护进程不可达**（`daemon_unreachable`）**或**端口池空（`no_port`） | `daemon_unreachable`、`no_port` | `5` |
 | `6` | Slurm 侧失败 | `partitions_unknown`、`submit_failed` | `6` |
 | `7` | 触发限流 | `rate_limited` | `7` |
-| `9` | 守护进程内部异常 | `internal`、`plugin_file_changed` | `1`（不在映射表内，落到默认值） |
+| `9` | 守护进程内部异常 | `internal`、`plugin_file_changed`、`plugin_package_changed` | `1`（不在映射表内，落到默认值） |
 
 退出码映射见 `SLURMATE` 的 `_code_to_exit()`（`cluster/slurmate`）；
 `9` 不在其中，所以返回 `1`。CLI 自己的退出码约定写在 `cluster/slurmate`。
@@ -178,10 +187,11 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 > 一个只读这张表的人会以为"站点没开这个插件"没有机器可读的 kind，于是回去靠
 > `detail` 的文案分支。表不全的症状是**下一个人照着错的表写代码**，不是某个用例变红。
 >
-> ★ `9 plugin_file_changed` 是**故意**用 9 的：它不是"客户端请求错了"，而是
-> "本站自己脚下的字节在服务期间被换掉了"（管理员就地换了插件包）。归到 `2`
-> 会让客户端把它当成自己的 bug 去重试，归到 `3` 会让用户以为要换个插件 —— 它
-> 实际要的是**站点重新部署**，只有 `9`（内部异常）不会把人指向错误的方向。
+> ★ `9 plugin_file_changed` 与 `9 plugin_package_changed` 是**故意**用 9 的：
+> 它们不是"客户端请求错了"，而是"本站自己脚下的字节在服务期间被换掉了"（管理员
+> 就地换了插件包）。归到 `2` 会让客户端把它当成自己的 bug 去重试，归到 `3` 会让
+> 用户以为要换个插件 —— 它实际要的是**站点重新部署**，只有 `9`（内部异常）不会把
+> 人指向错误的方向。
 
 **`code 5` 有两种含义，这是本协议最容易写错的地方。** 见下一节。
 
@@ -353,7 +363,8 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
               "files": [{"path": "README.md",      "size": 7423, "sha256": "…"},
                         {"path": "client/index.js","size": 2609, "sha256": "…"},
                         {"path": "job/start.sh",   "size": 7917, "sha256": "…"},
-                        {"path": "plugin.json",    "size": 923,  "sha256": "…"}]},
+                        {"path": "plugin.json",    "size": 923,  "sha256": "…"}],
+              "package": {"format": 1, "bytes": 19416, "digest": "…"}},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
               "can_submit": false,
@@ -362,14 +373,23 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
                         {"path": "client/index.js",     "size": 4944,  "sha256": "…"},
                         {"path": "client/sshconfig.js","size": 17559, "sha256": "…"},
                         {"path": "job/start.sh",        "size": 16560, "sha256": "…"},
-                        {"path": "plugin.json",         "size": 636,   "sha256": "…"}]}],
+                        {"path": "plugin.json",         "size": 636,   "sha256": "…"}],
+              "package": {"format": 1, "bytes": 40000, "digest": "…"}}],
  "enabled": ["code-server"],
- "limits": {"file_bytes": 262144, "total_bytes": 1048576, "max_files": 256}}
+ "limits": {"file_bytes": 262144, "total_bytes": 1048576, "max_files": 256,
+            "package_bytes": 2097152}}
 ```
 
 > ★ 上面这两段的 `size` 是仓库里那两个插件的**真实字节数**，顺序就是协议要求的
 > 顺序（按 `path` 排序）。注意 **`plugin.json` 自己也在清单里** —— 站点分发发的是
 > **整个包**，不是只挑客户端会执行的那一份。README 也一样会被发下去。
+>
+> ★ `package` 里那三个数是**示意值**：本仓库那两个插件还没有包（要作者先
+> `packer init` / `keygen` / `build`，见 [plugins/README.md](../plugins/README.md)）。
+> `format` 是**容器**格式版本（附录 A 里那个 `format`，不是插件的版本号），
+> `bytes` 是**整个包文件**的字节数（客户端要下载的就是这么多），
+> `digest` 是**内容摘要**（§3.4 —— 签名盖的就是它、插件的身份就是它），
+> **不是**容器字节的 sha256。
 
 > ★ **`can_submit` = 「现在提交得出去吗」= `enabled` **且** 本站有它的作业侧实现。**
 >
@@ -421,9 +441,9 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 错误：`3 unknown_uid`。
 
-#### `files` 与 `limits`（v0.6）—— 站点分发
+#### `files` / `package` / `limits`（v0.6）—— 站点分发
 
-这两样是**可选**的加法。老守护进程不报它们，客户端必须按"站点没有这个能力"处理
+这三样是**可选**的加法。老守护进程不报它们，客户端必须按"站点没有这个能力"处理
 （见〈三态区分〉）。
 
 - **`files` 在不在，就是"本站支不支持分发"的唯一判据。** 一个空数组与"字段缺席"
@@ -431,6 +451,17 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
   还不认识这回事"。**下载失败、超时、校验不过都不构成判据** —— 那是瞬时事实，
   拿它当判据等于给一个能让下载失败的人（断流、丢包、中间人）一个把用户降级到
   别处的开关。
+- **`package` 是同一份内容的另一种投递方式**（`{format, bytes, digest}`，
+  配合 `plugin_package` 一次取整包）。两条路报的是**同一份包**：老客户端只看
+  `files`，新客户端看 `package`。
+  - **`digest` 是内容摘要（§3.4），不是容器字节的 sha256。** 给同一个负载补一个
+    签名块，容器字节变了而它**一个字都不变** —— 这正是"摘要不变 ⇒ 还是同一份
+    构件"（§2.4/§4.2）在协议里的样子。客户端拿它的唯一正确用法是"与**我自己
+    从下载到的字节重算出来的**那个比"。
+  - **`package: null` 是一个真实的状态，不是"本站没有这个能力"。** 它说的是
+    "这一份现在给不出来"（包在守护进程启动之后不见了）—— 那时 `files` 也会是空的。
+    能力在不在，判据是**顶层有没有 `limits`**。两件事必须分得开：合成一个信号的话，
+    一次误删文件会让客户端把整站降级。
 - **`files[].sha256` 是本站自述的，不能拿它当判据。** 客户端按 `plugin_file` 一份
   一份取回来之后，必须**从磁盘上重算** sha256，再与**上一轮 `plugins` 记下的**这个
   值比。拿响应里自带的 sha 去校验同一份响应里的 `data`，等于让被告当法官。
@@ -443,6 +474,10 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 - **`limits` 也是自述**，客户端取"本站报的"与"客户端自己的硬上限"中**更严**的
   那个。一个站点（或一次中间人）报 10 万个 1 字节的文件，客户端会跑很久、耗尽
   inode、把家目录塞满 —— 上限不能由被审计方单方面决定。
+- ★ **`limits` 里有两笔不同的账，别混。** `file_bytes` / `total_bytes` /
+  `max_files` 是**负载内**的规则（解出来的那些文件）；`package_bytes` 是**链路**上的
+  （整包 base64 之后要能装进一条应答）。一个插件可以三个负载数字都合格、而整个包
+  仍然太大 —— 那时客户端连一次都取不回来，所以这一条必须单独报。
 - **`path` 只是一个键。** 守护进程那一侧它是索引表的键（`plugin_file_index()`），
   从不参与拼路径 —— 于是"路径穿越"这个词从等式里消失了：不认识的字符串**无论
   长什么样**都只是"查不到"。客户端那一侧仍然要**再判一遍**（服务端也可能被换过），
@@ -473,12 +508,16 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 加起来就压到了桶边上。所以客户端**自己让路**：串行取，收到 `7 rate_limited`
 视作"等一下再来"（退避重试，有上限），**不是失败**。
 
+> ★ **整包那条路（`plugin_package`）就是为了这件事**：一次 RPC 换 N 份文件，
+> 一次对账从 1 + 1 + N 降到 1 + 1 + 1。今天这条路只有服务端那一半（客户端还在
+> 逐份取），所以上面那条"串行 + 退避"的纪律**现在仍然必须遵守**。
+
 错误：
 
 | code | kind | 什么时候 |
 |---|---|---|
 | `3` | `plugin_unknown` | 这个 `(id, 版本)` 本站没有 |
-| `3` | `plugin_file_unknown` | 这个 `path` 不在清单里 —— **含一切穿越尝试**。跳过表里的路径（`.git/config`、`node_modules/x.js`）在 v0.7 之后进不了包，所以它们连"进不进清单"这个问题都不存在了 |
+| `3` | `plugin_file_unknown` | 这个 `path` 不在清单里 —— **含一切穿越尝试**。跳过表里的路径（`.git/config`、`node_modules/x.js`）**进不了包**（解析器直接拒绝，§3.3），所以它们连"进不进清单"这个问题都不存在了 |
 | `4` | `plugin_file_too_large` | 单文件超过 `limits.file_bytes` |
 | `9` | `plugin_file_changed` | 那一份在守护进程起来**之后**被换过（清单里的 sha 与包里的对不上），或者那个包已经被换成了另一份。**必须拒绝，绝不截断、绝不"就用清单里那个值"** |
 
@@ -486,6 +525,43 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 >
 > ★ `plugin_file_changed` 要客户端做的是**重新对一次账**（那时会拿到新的清单），
 > 而不是重试同一个请求 —— 重试一万次也是同一个结果。
+
+### `plugin_package`
+
+请求：`{"op":"plugin_package", "id": "<ULID>", "version": "1.0.0"}`
+
+> ⚠️ **这个 op 是 v0.6 才有的。** v0.5 的守护进程回 `2 unknown_op`。
+
+成功 data：
+
+```json
+{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
+ "format": 1, "bytes": 19416, "digest": "…", "data": "<base64>"}
+```
+
+**一次把整个包取回来**，`data` 是那个 `.splug` 文件本身（附录 A 的容器）的 base64。
+`format` / `bytes` / `digest` 与 `plugins` 里那一份**必须逐字相同**（客户端据此判断
+"这一轮清单说的"与"我拿到的"是不是同一个东西）。
+
+> ★ **这条路发出去的是容器本身，不是"照着清单拼出来的字节"。** 这一点是它与
+> `plugin_file` 最要紧的差别：客户端拿到整包之后能**自己**解析、自己重算内容摘要、
+> 自己验签（§4.2 / §6.1）—— 于是本站报的 `digest` 与本站转发的字节是**分开的两件
+> 事**，客户端有办法发现它们对不上。逐份取那条路做不到：那边只有一份一份的字节，
+> 拼不出一个能被签名的东西。
+>
+> ★ **鉴权口径与 `plugin_file` 完全一样**：不因为是"整包"就多一层信任。发出去的是
+> 站点自己的字节，客户端仍然要自己验。
+
+错误：
+
+| code | kind | 什么时候 |
+|---|---|---|
+| `3` | `plugin_unknown` | 这个 `(id, 版本)` 本站没有（与 `plugin_file` 一个出口） |
+| `4` | `plugin_package_too_large` | 整个包超过 `limits.package_bytes`。**必须拒绝**：截断发出去等于客户端拿到一个解不开的容器，而它会在那边报成"包坏了" |
+| `9` | `plugin_package_changed` | 这个包在守护进程起来**之后**被换过（字节数、内容摘要或容器格式对不上启动那一刻的快照），或者它已经不见了 |
+
+> ★ 正常部署下 `plugin_package_too_large` **拦不到东西** —— 安装器在装的时候就拒绝
+> 了超过这个上限的包（装了也发不出去）。它拦住的是绕过安装器放进来的一份。
 
 ### `submit`
 
@@ -763,8 +839,11 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
     从池里卸掉也一样不影响它。
 14. **"站点支持分发吗"只能由 `files` 字段在不在来判。** 下载失败、超时、校验
     不过**都不是**判据。把两者合并，等于把"改内容"的攻击成本降到"让下载失败"。
-15. **`files[].sha256` 与 `limits` 都是对方的自述**，不是事实。前者用来与**自己
-    从磁盘重算**的值比；后者只用来**收紧**自己那份硬上限。
+15. **`files[].sha256`、`package.digest` 与 `limits` 都是对方的自述**，不是事实。
+    前两者用来与**自己从拿到的字节重算**的值比；`limits` 只用来**收紧**自己那份
+    硬上限。★ 整包那条路多给了一样东西：客户端拿到的是一整个**可以被签名覆盖**的
+    构件，所以它能自己验签 —— 逐份取那条路做不到，那边只有一份一份的字节。
 16. **装插件之前要拿到用户的同意**，而且同意要绑在**自己算出来的整目录摘要**上、
     键里带版本号。这条不在协议里（它完全是客户端本地的事），但它是 v0.6 存在的
-    前提：`plugin_file` 是这台机器上第一条**从远端来、且会变成可执行代码**的路。
+    前提：`plugin_file` / `plugin_package` 是这台机器上第一条**从远端来、且会变成
+    可执行代码**的路。

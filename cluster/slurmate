@@ -45,6 +45,21 @@ EXIT_SLURM = 6
 EXIT_RATELIMIT = 7
 
 
+# 一条应答最多读多少字节。
+#
+# ★ 这是**链路**上最窄的那一节，协议里那几个上限都是从它反推的（不是反过来）：
+#   守护进程一次最多发一个 `PLUGIN_PACKAGE_MAX_BYTES`（2 MiB）的包，base64 膨胀
+#   4/3 ⇒ 约 2.7 MiB，再加一层 JSON 信封 —— 4 MiB 是约 1.5 倍余量。
+#
+# ★ 这个数与守护进程的 PLUGIN_PACKAGE_MAX_BYTES **是从两侧各写一遍的**，所以有一条
+#   用例钉着两者的关系（`cluster/test-sessiond-logic.py` 的 19.11d）。从前这里是
+#   1 MiB，而站点通报的**总量**上限恰好也是 1 MiB —— 于是"整包一次发"那个数是一句
+#   假话：1 MiB 的负载 base64 之后是 1.33 MiB，根本读不完。症状还会被认错：这里报
+#   "响应太大"，而客户端把它归成 `daemon_unreachable`（code 5）并**退避重试** ——
+#   一次"文件太大"会被报成"控制节点上的守护进程没有响应"。
+RPC_MAX_RESPONSE_BYTES = 4 << 20
+
+
 def socket_path():
     """socket 的位置。
 
@@ -138,7 +153,7 @@ def rpc(req, timeout=40.0):
     try:
         s.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
         buf = b""
-        while b"\n" not in buf and len(buf) < 1 << 20:
+        while b"\n" not in buf and len(buf) < RPC_MAX_RESPONSE_BYTES:
             chunk = s.recv(65536)
             if not chunk:
                 break
@@ -158,15 +173,19 @@ def rpc(req, timeout=40.0):
     #   但原因差得远：截断的那一份报出来会是「响应不是合法 JSON」，于是下一次有人
     #   会去查守护进程为什么不响应 —— 而真正的原因是**这个响应本来就很大**。
     #
-    #   什么响应会这么大：插件的文件清单（`plugins` op 每个插件带一份逐文件的
-    #   sha256）。所以这里给的出路是"少装几个插件 / 让每个插件目录小一点"，不是
-    #   "重启守护进程"。
-    if b"\n" not in buf and len(buf) >= (1 << 20):
+    #   什么响应会这么大：`plugin_package` 一次发一整个包（base64 之后还要大三分
+    #   之一），或者插件多得那份逐文件的清单本身就装不下。所以出路是"少装几个插件
+    #   / 让作者把包做小"，不是"重启守护进程"。
+    if b"\n" not in buf and len(buf) >= RPC_MAX_RESPONSE_BYTES:
         raise RpcError(EXIT_SLURM,
                        "守护进程的响应超过了 %d 字节，这一条读不完整。\n"
-                       "多半是插件的文件清单太大（每个插件的每一份文件都在里面）。\n"
-                       "这不是守护进程没响应 —— 是这一条应答本身超出了 CLI 的读取上限。"
-                       % (1 << 20))
+                       "多半是插件的整包太大（`plugin_package` 一次发一整个包，"
+                       "base64 之后还要大三分之一）。\n"
+                       "这不是守护进程没响应 —— 是这一条应答本身超出了 CLI 的读取"
+                       "上限。\n"
+                       "要真的放宽，得同时抬这里的 RPC_MAX_RESPONSE_BYTES 与守护"
+                       "进程的 PLUGIN_PACKAGE_MAX_BYTES —— 只抬一边等于把这句话往后"
+                       "挪一格。" % RPC_MAX_RESPONSE_BYTES)
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
         raise RpcError(EXIT_NODAEMON, "守护进程返回了空响应")
@@ -393,10 +412,13 @@ def cmd_plugins(args):
         print("  （本站没有安装任何插件）")
         print()
         print("这是合法状态：守护进程照常运行，已有会话照常能查、能停，")
-        print("只是没有可提交的服务。装插件：把插件目录放进集群上的")
-        print("  <prefix>/share/slurmate/plugins/")
-        print("再跑一次 deploy.sh（它会把插件的作业侧编织进作业模板）。")
-        print("仓库顶层的 plugins/ 下有两个现成的。")
+        print("只是没有可提交的服务。装插件：")
+        print("  sudo slurmate plugin install <作者发布的 .splug>")
+        print("或者把包放进 deploy.sh 的 --plugins-src 目录，再跑一次 deploy.sh。")
+        # ★ 这里从前写的是"把插件目录放进 plugins/" —— 那是**源码树布局**时代的
+        #   说法，现在放进去的东西会（正确地）被拒绝：站点上的插件只能是一个包。
+        print("站点上的插件只能是**一个包文件**（.splug）：源码树放上去会被拒绝，")
+        print("包要在作者那边用 packer build 打出来（deploy.sh 永不打包）。")
         return 0
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
@@ -404,9 +426,17 @@ def cmd_plugins(args):
     # 「分发」那一列的口径写出来：它**只对已启用的插件有意义**（客户端只来取
     # 启用的那些），而 `—` 表示这一版守护进程不支持分发，不是一个数字。
     if isinstance(d.get("limits"), dict):
-        print("「分发」= 客户端连上之后要逐份取走的文件数（只取已启用的）。")
+        print("「分发」= 客户端连上之后要取走的文件数（只取已启用的）。")
         print("  单份上限 %s，另有份数与总量上限；客户端取两边的更严者。"
               % _human_bytes(d["limits"].get("file_bytes")))
+        # ★ 同一个内容有**两条投递方式**，所以这两个口径都要说出来：逐份取是老
+        #   客户端走的路（N 次 RPC），整包取是新客户端走的路（1 次）。只报前者会
+        #   让人以为"这个界面上的份数就是链路上的次数"。
+        _pb = d["limits"].get("package_bytes")
+        if isinstance(_pb, int):
+            print("  同一份内容也可以**整包一次取走**（上限 %s）。新版客户端走那条路："
+                  % _human_bytes(_pb))
+            print("  一次对账的 RPC 因此从 N 次降到 1 次（才不贴着限流桶的边）。")
     else:
         print("「分发」显示为 — ：这一版守护进程不报文件清单（客户端不会来取）。")
     print()

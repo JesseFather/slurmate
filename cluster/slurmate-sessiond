@@ -515,7 +515,8 @@ PLUGIN_JOB_ENTRY = "job/start.sh"
 #   目录树。产出它的是**作者**的打包器（`packer/`），装上服务器的是**安装器**
 #   （`slurmate plugin install`，见本文件的 `--install-plugins`）；服务器上从头到
 #   尾没有源码树。守护进程于是有两个角色：从包里读出插件表（`scan_plugins`），
-#   以及把内容发给客户端（`op_plugins` / `op_plugin_file`）。
+#   以及把内容发给客户端（`op_plugins` 报清单、`op_plugin_package` 整包一次发、
+#   `op_plugin_file` 逐份发 —— 后两条是同一个内容的两种投递方式，见下）。
 #
 #   为什么不是"一棵目录树"：那样"是不是同一份内容"只能靠**整棵树的摘要**，而它
 #   要求规范把符号链接、权限位、空目录、遍历顺序四件事都钉死 —— 每一条都是一次
@@ -529,11 +530,19 @@ PLUGIN_JOB_ENTRY = "job/start.sh"
 PLUGIN_PACKAGE_SUFFIX = ".splug"
 
 # 一个包文件的**整体**上限。这是一条**链路**约束：客户端要一次把整个包取回去
-# （`op_plugin_package`，base64 膨胀 4/3），而 cluster/slurmate 读响应的上限是
-# 4 MiB ⇒ 2 MiB 的包变成约 2.7 MiB，再加信封，余量约 1.4 倍。
+# （`op_plugin_package`，base64 膨胀 4/3），而 CLI 读响应的上限是
+# `cluster/slurmate` 里的 `RPC_MAX_RESPONSE_BYTES`（4 MiB）⇒ 2 MiB 的包变成
+# 约 2.7 MiB，再加信封，余量约 1.5 倍。
+#
+# ★ 这笔账**有对应用例**（19.11d 那条跨文件不变量读的是两个文件里的这两个数）。
+#   从前的毛病正是"数字改了、另一侧没跟上"：那时 CLI 的上限是 1 MiB，而本站通报
+#   的总量上限就是 1 MiB ⇒ **整包一次发时那个数是假的**（1 MiB 的负载 base64 之后
+#   1.33 MiB，读不完）。症状还会被认错：CLI 报"响应太大"，而客户端把它归成
+#   `daemon_unreachable` 并退避重试 —— 一句"文件太大"变成"守护进程没响应"。
 #
 # ★ 它是**拦得住**的：安装器拒绝装一个超过它的包（装了也发不出去，客户端永远
-#   取不回来）。从前那个"只通报、不拦截"的口径属于下面三个**自述**的数字。
+#   取不回来），`op_plugin_package` 也再判一次（拦住绕过安装器放进来的）。
+#   下面三个**负载内**的数字才是"只通报、不拦截"的那一类。
 PLUGIN_PACKAGE_MAX_BYTES = 2 << 20
 
 # 单文件上限。在包模式里它是**负载内**的规则（打包器与客户端读方执行），但它仍然
@@ -547,6 +556,10 @@ PLUGIN_FILE_MAX_BYTES = 256 * 1024
 # 不拦截** —— 客户端自己有一份硬上限，取两者中更严的那个。理由：这几个数字是
 # **本站自述**的，用它去放宽客户端的限制等于让被告自己定刑期。它们在这里的用处是
 # 让运维在部署时看得见自己装了个多大的东西（`--check-plugins` 会对超过的打 ⚠）。
+#
+# ★ 这个 1 MiB 说的是**负载**（解出来的那些文件的字节和），不是应答有多大 ——
+#   应答那笔账归 `PLUGIN_PACKAGE_MAX_BYTES`，两者别混。包里还有记录表与签名块
+#   （每个路径 2 + 路径长 + 8 + 32 字节），所以"负载 1 MiB"的包比 1 MiB 略大。
 PLUGIN_TOTAL_MAX_BYTES = 1 << 20
 PLUGIN_MAX_FILES = 256
 
@@ -1121,10 +1134,12 @@ def human_bytes(n):
 def plugin_file_index(source_package):
     """一个插件**包**的索引表：`包内路径 → (字节数, sha256)`。
 
-    这是站点分发的**唯一**入口。`op_plugin_file` 只认这张表的键 —— 请求里的
-    `path` 绝不参与拼路径。于是"路径穿越"这个词从等式里消失了：一个不在表里的
-    字符串，**无论它长什么样**，都只是"查不到"。要求"先拼路径再过滤"的设计，
-    本质上是在给一个本可以不存在的攻击面写过滤器。
+    这是**逐份取**那条路（`op_plugin_file`）的唯一入口 —— 它与**整包取**
+    （`op_plugin_package`）发的是同一份内容，只是一个解成一份份、一个原样转发。
+    `op_plugin_file` 只认这张表的键 —— 请求里的 `path` 绝不参与拼路径。于是
+    "路径穿越"这个词从等式里消失了：一个不在表里的字符串，**无论它长什么样**，
+    都只是"查不到"。要求"先拼路径再过滤"的设计，本质上是在给一个本可以不存在的
+    攻击面写过滤器。
 
     ★ **它就是包自己的记录表**，不重新走一遍内容：包在打包时已经逐份算过 sha256
       并把份数、字节数、路径的合法性全部卡死了（§3.2/§3.3）。所以这里**没有**一份
@@ -1138,7 +1153,8 @@ def plugin_file_index(source_package):
       那个路径已经不存在了。
 
     ★ 这个函数每次调用都**真的读一遍包**（它不缓存）。缓存住在 `Sessiond` 上，
-      见 `Sessiond.plugin_index()` —— 那里解释了为什么"不失效"才是对的。
+      见 `Sessiond.plugin_snapshot()` —— 那里解释了为什么"不失效"才是对的，
+      也解释了为什么缓存的是**四样事实**而不是一张表。
     """
     r = package_read_file(source_package) if source_package else {"ok": False}
     if not r["ok"]:
@@ -3042,10 +3058,11 @@ class Sessiond(object):
         # 作业状态查询的连续计数（见 phase_running 里的说明）
         self.job_missing = {}       # session_id -> 连续"查不到"次数
         self.job_unknown = {}       # session_id -> 连续"查不了"次数
-        # 插件包的索引表缓存：包路径 -> {包内路径: (字节数, sha256)}。
+        # 插件包的快照缓存：包路径 -> {files: {包内路径: (字节数, sha256)},
+        #                                package: {format, bytes, digest} | None}。
         # **刻意不失效** —— 守护进程对插件的认知本来就是启动那一刻的快照，
-        # 而文件服务必须描述同一份包。见 plugin_index() 的 docstring。
-        self._plugin_index_cache = {}
+        # 而两个取内容的出口都必须描述同一份包。见 plugin_snapshot() 的 docstring。
+        self._plugin_cache = {}
         self.startup_at = now_ts()
         # 启动静默期：这段时间内不做任何超时判定，避免重启窗口把在跑的会话误判成孤儿
         self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
@@ -3826,6 +3843,8 @@ class Sessiond(object):
                 return self.op_plugins(uid)
             if op == "plugin_file":
                 return self.op_plugin_file(uid, req)
+            if op == "plugin_package":
+                return self.op_plugin_package(uid, req)
             if op == "submit":
                 return self.op_submit(uid, req)
             if op == "status":
@@ -3919,41 +3938,95 @@ class Sessiond(object):
                 "files": [{"path": rel, "size": size, "sha256": sha}
                           for rel, (size, sha)
                           in sorted(self.plugin_index(p.spec.source_package).items())],
+                # ── 站点分发：这个插件作为**一个包** ──
+                #
+                # `files` 是**逐份取**那条路（`plugin_file`），`package` 是**整包一次取**
+                # 那条路（`op_plugin_package`）。两条路报的是**同一份包**，所以两个都在：
+                # 已经发出去的老客户端只看 `files`，新客户端看 `package` —— 一次对账
+                # 从 1 + 1 + N 次 RPC 降到 1 + 1 + 1 次（N 是文件数，见 KNOWN-ISSUES S7）。
+                #
+                # ★ `digest` 是**内容摘要**（§3.4 —— 签名盖的就是它、插件的身份就是它），
+                #   **不是**容器字节的 sha256：容器怎么编那张记录表、有没有签名块，
+                #   都不该动它。给同一个负载加一个签名块，容器字节变了而它**不变**。
+                #
+                # ★ 它与 `files[].sha256` 是同一个口径：**本站自述**。客户端拿它的唯一
+                #   正确用法是"与我**自己从下载到的字节重算出来的**那个比"，而不是
+                #   "拿它去校本站发回来的字节"。
+                #
+                # ★ `null` 是一个**真实的状态**，不是"本站没有这个能力"：这个插件的包
+                #   在本次启动之后不见了（那时 `files` 也会是空的）。能力在不在，判据
+                #   是顶层**有没有 `limits`** —— 两者必须分得开（三态纪律）。
+                "package": self.plugin_package(p.spec.source_package),
             })
         return self._ok({
             "plugins": out,
             "enabled": list(self.cfg.enabled_kinds),
             # 上限也是**自述**：客户端取"它自己的硬上限"与"这里报的"中更严的那个。
             # 名字叫 limits 而不是 policy，是因为它不是本站定的策略，是本站的能力。
+            #
+            # ★ 前三个是**负载内**的规则（解出来的那些文件），`package_bytes` 是**链路**
+            #   上的（base64 之后要能装进一条应答）。两个口径别混：一个插件可以三个
+            #   负载数字都合格、而整个包仍然太大 —— 那时客户端连一次都取不回来。
             "limits": {"file_bytes": PLUGIN_FILE_MAX_BYTES,
                        "total_bytes": PLUGIN_TOTAL_MAX_BYTES,
-                       "max_files": PLUGIN_MAX_FILES},
+                       "max_files": PLUGIN_MAX_FILES,
+                       "package_bytes": PLUGIN_PACKAGE_MAX_BYTES},
         })
 
-    def plugin_index(self, source_package):
-        """这个插件包的索引表。**进程内缓存，而且刻意不失效。**
+    def plugin_snapshot(self, source_package):
+        """**启动那一刻**这个包长什么样：索引表 + 容器格式 + 整包字节数 + 内容摘要。
 
         ★ 为什么"不失效"才是对的：守护进程对插件的认知**本来就是启动那一刻的快照**
-          （`Config.__init__` 里跑一次 `scan_plugins()`，之后再不重扫）。所以文件服务
-          必须描述**同一份包**，否则 `op_plugins` 报出去的 sha256 与 `op_plugin_file`
-          发出去的字节会来自两个不同的时刻 —— 而客户端拿前者校验后者，于是它会在
-          **那边**失败，并把这件本该由本站说清的事（"管理员就地换了包"）报成
-          "校验不过"。
+          （`Config.__init__` 里跑一次 `scan_plugins()`，之后再不重扫）。所以两个取
+          内容的出口必须描述**同一份包**，否则 `op_plugins` 报出去的 sha256/digest 与
+          `op_plugin_file` / `op_plugin_package` 发出去的字节会来自两个不同的时刻 ——
+          而客户端拿前者校验后者，于是它会在**那边**失败，并把这件本该由本站说清的
+          事（"管理员就地换了包"）报成"校验不过"。
 
-          缓存之后，这个场景在这里就有了名字：`plugin_file_changed`，附带一句
-          "重跑一次 deploy.sh"。要换插件内容，本来就该升版本号 + 重跑部署 ——
-          就地改文件从来不是一条被支持的路径。
+          缓存之后，这个场景在这里就有了名字：`plugin_file_changed` /
+          `plugin_package_changed`，附带一句"重跑一次 deploy.sh"。要换插件内容，
+          本来就该升版本号 + 重跑部署 —— 就地改文件从来不是一条被支持的路径。
+
+        ★ **四样事实装在一个缓存里**（而不是"索引表一个、摘要一个"）：它们必须出自
+          同一次解析。分开放的话，两次解析之间包被换掉，报出去的摘要与发出去的字节
+          就能各说各话 —— 那正是上面那条要防的事，而它会从一个更难发现的入口进来。
+
+        ★ 这里**不缓存字节**：三个出口每次都现读、现与快照比对。缓存住字节等于把
+          "包被换过"这件事一起缓存掉了，而那正是它们要报的东西。
 
         ★ 与它配套的纪律：`plugin_file_index()` 没有副作用，`--check-plugins` 直接调
           它（那时还没有 Sessiond），所以自检看到的是**当下**的包，而运行中的服务
-          看到的是启动那一刻。两者不一致，正是 `plugin_file_changed` 要报的事。
+          看到的是启动那一刻。两者不一致，正是那两个 `*_changed` 要报的事。
         """
         key = source_package or ""
-        idx = self._plugin_index_cache.get(key)
-        if idx is None:
-            idx = plugin_file_index(source_package)
-            self._plugin_index_cache[key] = idx
-        return idx
+        snap = self._plugin_cache.get(key)
+        if snap is None:
+            r = package_read_file(source_package) if source_package else {"ok": False}
+            if r["ok"]:
+                snap = {"files": {f["path"]: (f["size"], f["sha256"])
+                                  for f in r["files"]},
+                        "package": {"format": r["format"],
+                                    "bytes": len(r["data"]),
+                                    "digest": r["digest"]}}
+            else:
+                # 读不动。这个插件在启动时会被 `scan_plugins()` 拒掉，所以走到这里
+                # 只有一种成因：**包在启动之后不见了**。
+                #
+                # ★ 两个出口都如实回答"没有"（`files: {}` / `package: null`），不编一个
+                #   空的形状出来 —— `{files: [], package: {...零字节...}}` 会被读成
+                #   "这个插件真的一份文件都没有"，那是另一件事。
+                snap = {"files": {}, "package": None}
+            self._plugin_cache[key] = snap
+        return snap
+
+    def plugin_index(self, source_package):
+        """这个插件包的索引表：`包内路径 → (字节数, sha256)`。见 plugin_snapshot()。"""
+        return self.plugin_snapshot(source_package)["files"]
+
+    def plugin_package(self, source_package):
+        """这个插件包作为**一个整体**的三样事实：`{format, bytes, digest}`，或者
+        `None`（包读不动）。见 plugin_snapshot()。"""
+        return self.plugin_snapshot(source_package)["package"]
 
     def _plugin_by_key(self, plugin_id, version):
         """按 `(id, 版本)` 找那个插件的生效配置。找不到返回 None。
@@ -4031,6 +4104,75 @@ class Sessiond(object):
                              "与启动时扫到的那一份对不上，重跑一次 deploy.sh 再试"
                              % (rel, size, sha[:16]))
         return self._ok({"path": rel, "size": size, "sha256": sha,
+                         "data": base64.b64encode(data).decode("ascii")})
+
+    def op_plugin_package(self, uid, req):
+        """把一个插件的**整个包**发给客户端（base64）—— 与 `op_plugin_file` 并列的
+        第二条投递方式。
+
+        ★ 发出去的是**容器本身**，不是"照着清单拼出来的字节"。这一点是这两条路最
+          要紧的差别：客户端拿到整包之后能**自己**解析、自己重算内容摘要、自己验签
+          （§4.2 / §6.1），于是本站报的 `digest` 与本站转发的字节是**分开的两件事**，
+          客户端有办法发现它们对不上。逐份取那条路做不到这一点：那边只有"一份一份
+          的字节"，客户端拼不出一份能被签名的东西。
+
+        ★ 一条 RPC 换 N 份文件：一次对账从 1 + 1 + N 次降到 1 + 1 + 1 次。这不是
+          省事，是**限流**：桶是按"人点一下按钮"设计的（每 uid 每秒 10 次），而两个
+          插件逐份取就是 11 次 —— 正好压在桶边上。
+
+        ★ **不截断、不重拼**，与 `op_plugin_file` 同一条纪律：宁可明确地失败。
+
+        ★ 这条路会**再活一段**：客户端改成优先走它之后，逐份取那条路要等到
+          `plugin_file` 与 `files` 一起被删掉（那是下一次协议变更）才消失。现在两条
+          都在，正是加法过渡的形状。
+        """
+        plugin_id = str(req.get("id") or "")
+        version = str(req.get("version") or "")
+
+        p = self._plugin_by_key(plugin_id, version)
+        if p is None:
+            return self._err(3, "plugin_unknown",
+                             "本站没有 %s@%s 这个插件" % (plugin_id, version))
+
+        info = self.plugin_package(p.spec.source_package)
+        if info is None:
+            return self._err(9, "plugin_package_changed",
+                             "%s@%s 的包在扫描之后不见了 —— 本站的插件包与启动时"
+                             "扫到的那一份对不上，重跑一次 deploy.sh 再试"
+                             % (plugin_id, version))
+
+        # ★ 上限**先判**：超限的包连读都不读（读它只是白花内存再原样丢掉）。
+        #   正常部署下这一条拦不到东西 —— 安装器在装的时候就拒绝了超过它的包。
+        #   它拦住的是**绕过安装器**放进来的一份（root 的 cp、或者手工覆盖）。
+        if info["bytes"] > PLUGIN_PACKAGE_MAX_BYTES:
+            return self._err(4, "plugin_package_too_large",
+                             "%s@%s 的包有 %d 字节，超过本站通报的整包上限 %d 字节"
+                             "（limits.package_bytes）。它发不出去 —— 让作者把包做小，"
+                             "或者把上限抬上去之前先看清楚那条链路上还有谁。"
+                             % (plugin_id, version, info["bytes"],
+                                PLUGIN_PACKAGE_MAX_BYTES))
+
+        r = package_read_file(p.spec.source_package)
+        if not r["ok"]:
+            return self._err(9, "plugin_package_changed",
+                             "%s@%s 的包读不动了（%s）—— 本站的插件包与启动时扫到的"
+                             "那一份对不上，重跑一次 deploy.sh 再试"
+                             % (plugin_id, version, r["code"]))
+        data = r["data"]
+        # 与**启动那一刻**的快照逐项比。三样都比：字节数、内容摘要、容器格式。
+        # 摘要是"内容"的，格式是"信封"的，两者互补 —— 只比摘要的话，一个记录表被
+        # 重排过的包会溜过去（内容一样、容器不一样），而客户端解析它得到的东西
+        # 与本站报的那些字段就可能对不上。
+        if (len(data) != info["bytes"] or r["digest"] != info["digest"]
+                or r["format"] != info["format"]):
+            return self._err(9, "plugin_package_changed",
+                             "%s@%s 的包在扫描之后被换过（启动时 %d 字节 / %s，"
+                             "现在是 %d 字节 / %s）—— 重跑一次 deploy.sh 再试"
+                             % (plugin_id, version, info["bytes"],
+                                info["digest"][:16], len(data), r["digest"][:16]))
+        return self._ok({"id": plugin_id, "version": version,
+                         "format": info["format"], "bytes": info["bytes"],
+                         "digest": info["digest"],
                          "data": base64.b64encode(data).decode("ascii")})
 
     def op_partitions(self, uid):
@@ -4603,15 +4745,31 @@ def main():
             print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
                      "启用" if s.default_enabled else "停用", note))
-            # 分发是**另一个读者**：客户端连上之后按这份清单逐份把文件取走（老
-            # 客户端）或整包取走（那条路还没接上）。下面三项都**只报不拦** —— 它们不是
-            # 部署错误，是"这个插件分发不了"。
-            _idx = plugin_file_index(s.source_package)
+            # 分发是**另一个读者**：客户端连上之后整包取走（一次 RPC），或者按这份
+            # 清单逐份取走（N 次 RPC）。下面四项都**只报不拦** —— 它们不是部署错误，
+            # 是"这个插件分发不了"。
+            #
+            # ★ 包在本节里**只读一遍**：这一屏要的是"这一次读到的全部事实"，分两次
+            #   读就多出一个"两次之间被换掉"的窗口 —— 那时打印出来的字节数与摘要会
+            #   来自两份不同的包，而这一屏正是给人拿去与作者那边对照的。
+            _now = package_read_file(s.source_package)
+            if not _now["ok"]:
+                # `scan_plugins()` 刚刚才把这个包读通过（读不通的根本进不了 specs），
+                # 所以走到这里只有一种成因：这两步之间它被换掉了。
+                print("                  ⚠ 包读不动了（%s）—— 刚才还是好的，"
+                      "是这两步之间被换掉的吗？" % _now["code"])
+                continue
+            _idx = {f["path"]: (f["size"], f["sha256"]) for f in _now["files"]}
             _total = sum(v[0] for v in _idx.values())
             _big = max([v[0] for v in _idx.values()] or [0])
-            _pkg_bytes = os.path.getsize(s.source_package)
+            _pkg_bytes = len(_now["data"])
             print("                  包 %s / %d 份文件（负载 %s）"
                   % (human_bytes(_pkg_bytes), len(_idx), human_bytes(_total)))
+            # ★ 内容摘要打**全 64 位十六进制，不截断**：它是这个包的身份（§3.4），
+            #   而这一行的用处就是让人拿它与作者发布时 `packer inspect` 报的那个
+            #   **逐个字符**比。"装上去的那一份是不是作者发布的那一份"，在服务器上
+            #   只有这两个数能回答（那里没有源码树可对照）。
+            print("                  内容摘要 %s" % _now["digest"])
             if _pkg_bytes > PLUGIN_PACKAGE_MAX_BYTES:
                 print("                  ⚠ 包有 %s，超过本站通报的整包上限 %s —— "
                       "客户端取不走它" % (human_bytes(_pkg_bytes),
@@ -4637,8 +4795,8 @@ def main():
             #   ⚠ 而不是中止：守护进程因为一条安装记录不符就起不来，等于让一个
             #   可以人工复核的问题带走整个站点。真正会拒绝的是客户端。
             _rec = _all_keys.get(s.id)
-            _now = package_read_file(s.source_package)
-            _signer = (_now.get("sig") or {}).get("fingerprint") if _now["ok"] else None
+            # 用的是上面那一次读的结果（包在这一节里只读一遍，理由见那里）。
+            _signer = (_now.get("sig") or {}).get("fingerprint")
             # ★ **两个方向都算不符**：记着 K1 而包上是 K2 固然要报，记着 K1 而
             #   这一份**没有签名**同样要报 —— 摘掉签名正是"降级到不用验"的那一步。
             if isinstance(_rec, dict) and _rec.get("fingerprint") != _signer:
