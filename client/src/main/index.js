@@ -931,9 +931,10 @@ function pluginsView() {
     // ★ 只数**能用的**那些。把待同意的也算进去的话，「一个插件都没装」的空态再也
     //   走不到 —— 而那个空态正是用户第一次打开客户端时要看的那块地方。
     installedCount: plugins.length,
-    // 池里有、但**还没过同意闸**的。它与"没装"必须分得开：一个是去点同意，
-    // 一个是去同步/去装。
-    inertCount: records.length - plugins.length,
+    // ★ 从前这里还有一个 `inertCount`（`records.length - plugins.length`），
+    //   **删了**：界面一次都没读过它（`panel.js` 里零次出现）。真正要画的是下面
+    //   那个 `inert` 列表 —— 一个数说不出"是哪一个、为什么"，而这一段修的那个洞
+    //   恰恰需要说出是哪一个。
     // ★ 而这一列是**那些没能走进"待同意"的**：站点此刻不报它们，所以连点同意的
     //   入口都没有。界面必须把它们画出来并给一个出口（删掉本机那一份）。
     inert,
@@ -956,7 +957,10 @@ function pluginsView() {
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
       daemonVersionVerdict: versionVerdict,
       failed: siteSync.failed || [],
-      reclaimed: (siteSync.reclaimed || []).length,
+      // ★ 从前这里还有一个 `reclaimed`（回收掉几个版本的**数**）。**删了**：
+      //   `siteSync.reclaimed` 只被 `index.js` 的同步结果处理读过（那里用它
+      //   推一条通知），视图这一份没有任何界面读它。回收的后果用户看得到的是
+      //   下面 `versions` 那一栏 —— 哪几个版本还在、还被谁要。
       // §5.3：本机那一份不在了 ⇒ 同意作废。**只报数**，文案在界面里 ——
       // 而那条文案绝不断言是谁删的（客户端不知道原因）。
       withdrawn: (siteSync.withdrawn || []).length,
@@ -980,6 +984,9 @@ function pluginsView() {
     // 待同意的：**不下发暂存路径** —— 那是主进程的现场，界面不需要知道它在哪。
     consent: pendingConsent.map((p) => ({
       id: p.id, version: p.version, name: p.name, title: p.title,
+      // `digest` 是给人一眼分得开的**短形**；`fullDigest` 是**不截断的 64 位**，
+      // 界面把它整串画出来（见 panel.js 那一处）—— 它是用户与站点 `--check-plugins`
+      // 报的那一串逐个字符核对的凭据，也是同意闸唯一能给的证据。
       digest: shortDigest(p.digest), fullDigest: p.digest,
       // ★ 这个摘要**是哪一个公式**算出来的。界面拿它比对上一次那条的 `alg` ——
       //   不同就说明"我们换了一把尺子"，那是**另一件事**，不能说成"内容变了"。
@@ -2270,9 +2277,12 @@ function registerIpc() {
   });
 
   /**
-   * 从**一个目录**装一个插件。不给路径就弹一个选目录的框。
+   * 从**一个 `.splug` 包**装一个插件。不给路径就弹一个选文件的框。
    *
    * ★ 这是**本机池**那一半动作，走的是界面上的「开发者」一节（默认关着）。
+   *   ★ 这里从前写的是"从**一个目录**装"—— 而代码弹的一直是"选择一个插件包
+   *     （.splug）"那个文件框，§5.1 也只允许"安装一个包"这一个动作。对着一个
+   *     目录点"安装"是另一件看起来差不多的事，说成一样会让人以为这条路还在。
    *
    * ★ **站点分发不走这里。** 那条注释以前写着"将来分发走的是同一个 installFrom"
    *   —— 现在分发接上了，而它**没有**复用这个函数：这个函数的语义是"用户挑的
@@ -2620,6 +2630,14 @@ module.exports = {
    * 为什么需要它：演示后端会起一个真的在监听的 HTTP 服务，测试进程如果关不掉它
    * 就不会退出（`node --test` 会一直等下去）。生产代码不依赖这里任何东西 ——
    * 生产路径靠 `handleWindowClose` / `before-quit` 里的 `backend.close()`。
+   *
+   * ★ **判据：这里只留今天真有用例踩着的入口。** 一个接缝成员被零个用例用到，
+   *   就是"意图写了、测试没写"—— 它让下一个人以为某条用例正踩着这里，而实际上
+   *   没有人守着它。v0.7 因此删掉了四个（`getCfgDir`、`getSitePlugins`、
+   *   `awaitSiteSync`、`getSiteStagingDir`）：最后一个尤其像那么回事，而
+   *   `awaitSiteSync` 的注释还写着"测试必须等它"—— 事实上没有一条用例等过它，
+   *   因为 `app:syncPlugins` 那个 IPC 处理器自己就是 await 到对账跑完才返回的。
+   *   （那条注释描述的需要**曾经**是真的，只是处理器改成 await 之后就没了。）
    */
   _test: {
     getBackend: () => backend,
@@ -2628,7 +2646,6 @@ module.exports = {
     /** 一条连接的密钥（读不到就返回错误对象）。测试用它核对「按连接隔离」。 */
     getKey: (id) => resolveKey(id || config.PENDING_ID),
     getCfg: () => cfg,
-    getCfgDir: () => cfgDir,
     /** 钉子表（按 id 记的公钥指纹，§5.4）。它在**另一个文件**里，不是 cfg 的一部分。 */
     getPinnedKeys: () => pins,
     /**
@@ -2653,22 +2670,11 @@ module.exports = {
     getRegistry: () => registry,
     /** 界面会看到的插件视图（四个条件求交的结果，见 pluginsView）。 */
     getPluginsView: () => pluginsView(),
-    /** 站点通报的插件清单（op_plugins 的原始响应）。 */
-    getSitePlugins: () => sitePlugins,
-    /**
-     * 等这一次站点对账跑完。
-     *
-     * ★ 真机上**没有人等它**（它是后台的，跑完推一份视图给界面就完了）。测试必须
-     *   等 —— 不等的话断言的是"下载还没跑完的那一刻"，而那种用例红或绿都说明不了
-     *   任何事。
-     */
-    awaitSiteSync: () => (siteSyncPromise || Promise.resolve(null)),
     /** 上一次对账的结果（三态的原样）。 */
     getSiteSync: () => siteSync,
     /** 待同意的那些。 */
     getPendingConsent: () => pendingConsent,
-    /** 站点池与暂存目录在哪（测试要直接看盘上的东西）。 */
+    /** 站点池在哪（测试要直接看盘上的东西）。 */
     getSitePoolDir: () => sitePoolDir(),
-    getSiteStagingDir: () => siteStagingDir(),
   },
 };

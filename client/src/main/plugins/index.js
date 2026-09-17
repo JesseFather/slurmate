@@ -61,7 +61,11 @@
  *
  * ★ 这条防**意外**，不防**恶意**：它保证"撞了会被发现并说出来"，不保证"撞不上"。
  *   随机位已经让意外撞上的概率可忽略，而剩下的那种（有人抄了别人的 id）要靠
- *   站点签名 —— 那在 `plugin.json.sig` 那一层，不在这里。
+ *   **站点签名** —— 那在 `.splug` 的签名块那一层（§4、以及客户端的钉子表 §5.4），
+ *   不在这里。
+ *   ★ 这里从前写的是"那在 `plugin.json.sig` 那一层" —— **没有这个文件**。签名是
+ *     包信封的一部分（格式见 docs/PLUGIN-SPEC.md 附录 A），与清单不在一个地方，
+ *     而且一个裸的清单本来就没有地方放它。
  *
  * ── 坏插件不许把客户端带崩 ──────────────────────────────────────────────────
  *
@@ -1186,8 +1190,12 @@ function bucketOf(plugin) {
   return plugin ? `${plugin.id}@${plugin.version}` : 'no-plugin';
 }
 
+// ★ **导出表就是这个模块对外的承诺**，所以这里只留今天真有人读的名字 ——
+//   `UNKNOWN` 从前也在这里，而除本文件之外一个读者都没有（它是一个保留值，
+//   只在 `resolve()` 的返回值里出现，不是给别人比对的常量）。留着一个没人读的
+//   导出，与 `plugin_payload_index()` 是同一件事：意图写了，而没有任何东西守着它。
 module.exports = {
-  Registry, UNKNOWN, bucketOf, loadDir, satisfies, hostVersion,
+  Registry, bucketOf, loadDir, satisfies, hostVersion,
   // 版本号那两套（框架 / 插件）—— 用例直接对着 tools/version-fixtures.json 跑
   VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer, cmpFramework,
   // 两侧必须逐条一致的两条规则（判据在夹具里，措辞各写各的）

@@ -1226,8 +1226,10 @@ exit 0
     # 19.0 ★★ 插件表是**扫出来的**，不是代码里写死的
     #
     # 这一节是全节的支点。守护进程里**没有任何一个插件的名字** —— 表来自
-    # <prefix>/share/slurmate/plugins/*/plugin.json，由 deploy.sh 装进去。
-    # 加一个插件因此是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
+    # <prefix>/share/slurmate/plugins/<ULID>.splug，由安装器装进去（deploy.sh
+    # 只是把包交给它）。加一个插件因此是「放一个包 + 跑一次 deploy.sh」，
+    # 不是「改守护进程的源码」。
+    # ★ 这里从前写的是 `*/plugin.json` + "放一个目录" —— 那是 v0.6 的布局。
     print("\n  -- 19.0 扫出来的插件表 --")
     check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
           sorted(cfg.plugin_by_name) == [CS, SSHD], str(sorted(cfg.plugin_by_name)))
@@ -1690,6 +1692,15 @@ exit 0
         check("★ 错误信息里给出了出路：装了作业侧实现的插件是哪些",
               CS in (_r8["error"].get("detail") or ""),
               str(_r8["error"].get("detail"))[:200])
+        # ★★ 而它必须说**包**，不能说"插件目录里没有 job/start.sh"。
+        #   那句话说错了对象：服务器上**没有源码树**，`job/start.sh` 在这边只以
+        #   "包里的一条负载记录"的形式存在（`needs_job` 就是这么来的）。按那句话
+        #   去找的人会在插件安装目录里翻一个根本不存在的文件，而正确的动作是回去
+        #   让作者补一份、重新打包。
+        _d8 = _r8["error"].get("detail") or ""
+        check("★★ 而且它说的对象是**包**，不是插件安装目录里的一个文件"
+              "（服务器上没有源码树）",
+              "包" in _d8 and "插件目录" not in _d8, _d8[:200])
 
         _pj3 = d.dispatch(UID, os.getgid(), {"op": "plugins"})
         _decl_row = next((x for x in (_pj3.get("data") or {}).get("plugins", [])
@@ -1810,6 +1821,15 @@ exit 0
                     .validate())
     check("★ 而且要说清是「通用键写到了块之后」，不是一句泛泛的「认不出这个键」",
           "通用键" in _msg and "块之前" in _msg, _msg[:140])
+
+    # ★★ 同一个形状再来一条：**未知块名**那句话必须说清"装插件"是**放一个包**，
+    #   而不是"放一个目录"。这一句是管理员唯一会照着做的那句话，说错了对象就
+    #   等于把他指到一个不存在的动作上（见 `section_names_problem` 的 docstring：
+    #   零插件与"名字写错了"是两种行动，而它们在配置里长得一模一样）。
+    _um = " ".join(pcfg("[plugin:ssh]\nenabled = yes\n").validate())
+    check("★★ 未知块名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
+          ".splug" in _um and "目录放" not in _um and "放一个目录" not in _um,
+          _um[:220])
 
     # 19.0e ★ 缺省插件来自配置，不是写死的名字
     #
@@ -2717,6 +2737,71 @@ exit 0
                   % len(re.findall(r'ALL_SRC_FILES\+=\("\$f"\)', _dep_src)))
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)
+
+    # ── 19.13b ★ 完成摘要那张插件表：四列，第四列说话 ────────────────────────
+    #
+    # 这一段是**抠出来真跑**的（与 19.13 同一个理由：deploy.sh 本机跑不了全套，
+    # 只有那段命令替换是自足的）。
+    #
+    # ★ 它钉的是一个**已经发生过**的错误：那一行从前写的是
+    #   `if [[ -f "${_d}/job/start.sh" ]]`，而 `_d` 早就是**包的路径**（一个
+    #   `.splug` 文件）—— 于是这个判断**永远为假**，完成摘要把**每一个**插件都
+    #   说成"没有作业侧"，包括明明有 job/start.sh 的那些。它不报错、不改行为，
+    #   只是每次部署都对管理员说一句假话。
+    #   修法是去读 `--check-plugins` 的**第 4 列**（`has_job` / `no_job`）——
+    #   那一列是守护进程给的、明确的一位，不是靠"取一次试试"推出来的。
+    #
+    # ★ 为什么不是一条 `grep` 源码的形状检查：那样只能钉住"没写回 `-f`"，
+    #   钉不住"四列读对没有"。下面这几条是真的把那段 bash 跑一遍看输出。
+    _m = re.search(r'\$\(if \[\[ "\$DRYRUN" -eq 1 \]\]; then echo .*?\n.*?fi\)',
+                   _dep_src, re.S)
+    check("★ deploy.sh 的完成摘要那段命令替换找得到（找不到说明它改了形状）",
+          _m is not None)
+    if _m:
+        _inner = _m.group(0)[2:-1]          # 剥掉最外那对 $( )
+        # ★ 前提取自 `--check-plugins` 的真实格式：`<短名>\t<包路径>\t<ULID>\t<job>`。
+        _plist = ("jupyter\t/opt/slurmate/share/slurmate/plugins/01ABC.splug"
+                  "\t01ABC\tno_job\n"
+                  "sshd\t/opt/slurmate/share/slurmate/plugins/01DEF.splug"
+                  "\t01DEF\thas_job")
+        _r = subprocess.run(
+            ["bash", "-c",
+             'PLUGIN_LIST="$1"\nDRYRUN=0\nPLUGINS_SRC=/tmp/src\n'
+             'PLUGINS_DIR=/tmp/pd\nJOBS_DIR=/tmp/jd\n'
+             'printf "%s\\n" "$(' + _inner + ')"',
+             "bash", _plist],
+            capture_output=True, text=True)
+        _lines = [l for l in _r.stdout.split("\n") if l.strip()]
+        # 每个插件两行（一行"短名 → 包"，一行"作业脚本"或者"没有"）。
+        _by_name = {}
+        _cur = None
+        for _l in _lines:
+            _t = _l.strip()
+            if _t.startswith("jupyter") or _t.startswith("sshd"):
+                _cur = _t.split()[0]
+                _by_name[_cur] = [_t]
+            elif _cur:
+                _by_name[_cur].append(_t)
+
+        check("★★ 那段摘要跑得起来（rc=0）", _r.returncode == 0,
+              "rc=%d stderr=%r" % (_r.returncode, _r.stderr[:300]))
+        check("★★ 两个插件都被列出来了（第 4 列不认识时不能静默少一行）",
+              set(_by_name) == {"jupyter", "sshd"}, repr(_by_name))
+        _jup = "\n".join(_by_name.get("jupyter", []))
+        _ssh = "\n".join(_by_name.get("sshd", []))
+        check("★★ 有作业侧的那个**没有**被说成「包里没有 job/start.sh」"
+              "（从前那个 `-f ${包路径}/job/start.sh` 恒为假，于是每个插件都被"
+              "这么说一遍）",
+              "【包里没有 job/start.sh" not in _ssh, repr(_ssh))
+        check("★ 而没有作业侧的那个**仍然**被如实点名"
+              "（改判断不能把这一句一起改没）",
+              "【包里没有 job/start.sh" in _jup, repr(_jup))
+        check("★★ 有作业侧的报出它那份作业脚本，没有作业侧的不报",
+              "/tmp/jd/01DEF.sbatch" in _ssh and "/tmp/jd/01ABC.sbatch" not in _jup,
+              repr(_by_name))
+        check("★ 印出来的是**第 2 列那个包的路径**（不是一个目录）",
+              "plugins/01DEF.splug" in _ssh and "plugins/01ABC.splug" in _jup,
+              repr(_by_name))
 
     # ── 19.14 ★★ 读一个 .splug：三端共用同一份符合性向量 ────────────────────
     #

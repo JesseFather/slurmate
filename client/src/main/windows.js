@@ -483,4 +483,4 @@ class ShellWindow {
   }
 }
 
-module.exports = { ShellWindow, STATUS_BAR_HEIGHT };
+module.exports = { ShellWindow };

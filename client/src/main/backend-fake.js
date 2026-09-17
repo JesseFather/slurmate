@@ -254,12 +254,6 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 演示站点当前报出去的插件清单。
-   *
-   * ★ 每次现算，不缓存：用户可以在演示进行中装/卸插件，而站点"看到"的东西
-   *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
-   */
-  /**
    * 演示站点的**分发索引**：`(id@版本) → {dir, files}`，来自仓库里的 `plugins/`。
    *
    * ★ 这里那个 `files` 是**包里的记录表**（打包时要喂给打包器的负载清单），
@@ -286,8 +280,9 @@ class FakeBackend extends Backend {
         let files;
         try {
           // 只取**普通文件**：符号链接与空目录进不了负载（格式里表达不出来），
-          // 而打包器的负载只描述文件。这与守护进程的 `plugin_payload_index` 同一个
-          // 口径 —— 两边都是"包里的记录表说了算"。
+          // 而打包器的负载只描述文件。这与守护进程读**包**时同一个口径 ——
+          // 那边是 `package_read_file()` 读出来的记录表说了算，链接与目录在
+          // 格式里根本表达不出来，不是"被跳过"。
           files = pluginFiles.readPluginFiles(dir)
             .filter((f) => f.kind === 'f')
             .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
@@ -306,6 +301,16 @@ class FakeBackend extends Backend {
     return cache;
   }
 
+  /**
+   * 演示站点当前报出去的插件清单。
+   *
+   * ★ 每次现算，不缓存：用户可以在演示进行中装/卸插件，而站点"看到"的东西
+   *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
+   *
+   * ★ 这一段注释**从前挂在 `_siteIndex` 上**（两份 JSDoc 挨在一起，第一份成了
+   *   孤儿）。而它说的"不缓存"恰好是 `_siteIndex` 的**反面** —— 那个函数建的
+   *   索引就是**建一次不再失效**的。挂错地方等于把两件事都说反了。
+   */
   _sitePlugins() {
     // ── 分发源：仓库里的真文件 ──
     const distributed = [...this._siteIndex().entries()].map(([key, v]) => ({
@@ -908,4 +913,6 @@ function clampInt(v, fallback, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 
-module.exports = { FakeBackend, PARTITIONS, DEFAULTS, DEMO_PASSWORD };
+// ★ 只导出真有人读的：`PARTITIONS` 从前也在这里，而它只在**本文件内**被用
+//   （测试要看分区表时走的是 `app:partitions` 那条真路，不是这个常量）。
+module.exports = { FakeBackend, DEFAULTS, DEMO_PASSWORD };

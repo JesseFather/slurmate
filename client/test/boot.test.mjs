@@ -470,7 +470,15 @@ test('app:debug 在演示模式下可用（真机上造不出来的状态）', a
     const r = await invoke('app:debug', what);
     assert.equal(r.ok, true, `${what} 应当可用，实际：${JSON.stringify(r)}`);
   }
-  assert.equal((await invoke('app:debug', 'nonsense')).ok, false);
+  // ★ 认不出的动作必须**说它认不出**，而且要连着那句措辞一起钉住：这一条防的是
+  //   一种已经发生过的残留 —— 调用方写了一个**已经被删掉**的动作、又不看返回值，
+  //   于是那一行一直绿着、什么都没做（`boot.test.mjs` 里原来那行 `'packages'`
+  //   就是这个形状）。只断言 `ok === false` 不够：有人把兜底改成别的话时，
+  //   "认不出"与"临时不可用"会变成同一句话，而它们要用户做的事完全不同。
+  const unknown = await invoke('app:debug', 'nonsense');
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.error, '未知的调试动作',
+    `认不出的调试动作要明说是认不出，实际：${JSON.stringify(unknown)}`);
 });
 
 test('app:state 在没开会话时返回 null，而不是崩', async (t) => {
@@ -1653,8 +1661,12 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     idx._test.getBackend().debugReset();
   });
   await invoke('app:debug', 'reset');
-  // 整包那条路：验签与钉钉子（§5.4）**只在它上面存在**。
-  await invoke('app:debug', 'packages');
+  // ★ 这里从前还有一行 `await invoke('app:debug', 'packages')`，注释写着"整包那条路：
+  //   验签与钉钉子只在它上面存在"。**它是个空操作** —— `packages` 这个动作早就不
+  //   存在了（v0.7 只剩包这一条投递方式），于是它落进"未知的调试动作"分支、
+  //   回一个 `ok:false`，而这一行**不看返回值**。于是它一直绿着、什么都没做，
+  //   同时让读代码的人以为这一条用例依赖一次"切到整包模式"的准备步骤。
+  //   （整包那条路不需要切换：v0.7 之后它就是唯一的路。）
 
   await withPool([], async () => {
     const r = await invoke('app:syncPlugins');

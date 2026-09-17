@@ -841,7 +841,7 @@ function renderPlugins(pv) {
  *
  * ★ 现在出路**变了，而且是变简单了**：插件默认由站点分发，所以这个空态的答案是
  *   "连上站点、点重新同步"，而不是"自己去找一个插件目录装进去"。以前那个
- *   「从目录安装…」的入口现在落在开发者模式那一节里 —— 默认路径上"禁止自装"
+ *   「从一个包安装…」的入口现在落在开发者模式那一节里 —— 默认路径上"禁止自装"
  *   必须是真的。
  */
 function emptyPool(pv) {
@@ -1068,6 +1068,19 @@ function renderConsent(pv) {
       digestLine.textContent = `内容摘要 ${c.digest}（算法 v${c.digestAlg}）`;
     }
     one.append(digestLine);
+    // ★ 上面那一句里的是**短形**（16 位，人一眼分得开就行），而**完整 64 位也
+    //   画出来**：它与守护进程 `--check-plugins` 那一屏报的、作者那边
+    //   `packer inspect` 报的是同一个数，而那两处都**刻意不截断**（理由写在
+    //   `--check-plugins` 那一段：服务器上没有源码树，只有这两个数能回答"装上去
+    //   的这一份是不是作者发布的那一份"）。同意闸问的正是"你信不信这一份"，而
+    //   唯一能拿去逐个字符核对的凭据就是这个数 —— 只给前 16 位等于在最需要它的
+    //   地方把它藏起来。
+    if (typeof c.fullDigest === 'string' && c.fullDigest) {
+      const fullLine = document.createElement('p');
+      fullLine.className = 'plug-desc';
+      fullLine.append(el('code', 'plug-id', c.fullDigest));
+      one.append(fullLine);
+    }
 
     // §5.4：这一份是谁签的。**没有签名也是一句必须说的话** —— 留白会被读成
     // "还没显示出来"。
@@ -1628,7 +1641,7 @@ async function init() {
   $('btn-probe').onclick = doProbe;
 
 
-  // ★ 「从目录安装…」「打开插件目录」「重新扫描」**不在这里绑** —— 它们只在
+  // ★ 「从一个包安装…」「打开插件目录」「重新扫描」**不在这里绑** —— 它们只在
   //   开发者模式那一节里出现（见 renderDev）。默认路径上"禁止自装"因此是真的。
 
   // ★ 站点对账是后台跑的，跑完**主动推**一份新视图过来。不接这条的话，用户看到的

@@ -289,9 +289,16 @@ function isValidPublicKeyLine(line) {
   return Boolean(raw && raw.value.length === RAW_KEY_LEN);
 }
 
+// ★ 只导出真有人读的。从前这里还有 `KEY_TYPE` / `RAW_KEY_LEN` / `defaultComment`
+//   三个常量与函数，以及 `_internal` 里的 `readString` / `readUInt32` /
+//   `publicBlobOf` / `encodePrivate` / `extractRawKeys` —— 它们**全部只在本文件内
+//   被用**（`readString` 那一处尤其容易看错：`keys.test.mjs` 里有一个**同名**的
+//   本地实现，它跟这里这个没有关系）。
+//   `_internal` 留下的两个是**真有人读**的：`sshString`（`backend-ssh.test.mjs`
+//   拿它拼 SSH 公钥 blob）与 `decodePrivate`（`keys.test.mjs` 拿它验证手工封装的
+//   openssh-key-v1 —— 那正是本文件最该被守住的一段）。
 module.exports = {
-  KEY_TYPE, RAW_KEY_LEN,
-  defaultComment, generate, publicKeyLine,
+  generate, publicKeyLine,
   publicKeyLineFromPrivatePem, isUsablePrivatePem, fingerprintOf, isValidPublicKeyLine,
-  _internal: { sshString, readString, readUInt32, publicBlobOf, encodePrivate, decodePrivate, extractRawKeys },
+  _internal: { sshString, decodePrivate },
 };

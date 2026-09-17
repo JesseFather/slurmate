@@ -309,17 +309,21 @@ MAX_ACTIVE_PER_USER = 1
 MAX_PENDING_PER_USER = 4
 
 # ── 插件 ────────────────────────────────────────────────────────────────────
-# 一个「服务种类」就是一个**插件**，一个插件是**一个目录**、三半：
+# 一个「服务种类」就是一个**插件**，而站点上的一个插件是**一个包文件**：
 #
-#     <插件目录>/
-#       plugin.json        身份（铸造的 id）、版本、以及两侧会读的那几条声明
-#       client/index.js    客户端侧代码 —— 守护进程不看它
-#       job/start.sh       作业侧代码 —— deploy.sh 把它编织进 run.sbatch
+#     <插件安装目录>/<ULID>.splug
 #
-# ★ **守护进程里没有任何一个插件的名字。** 表是**扫出来的**：deploy.sh 把插件装到
-#   `<prefix>/share/slurmate/plugins/<任意目录名>/`，守护进程启动时扫那一个目录。
-#   加一个插件因此是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」——
+# ★ **守护进程里没有任何一个插件的名字。** 表是**扫出来的**：安装器把作者打好的
+#   包放进 `<prefix>/share/slurmate/plugins/`，守护进程启动时扫那一个目录。
+#   加一个插件因此是「放一个包 + 跑一次 deploy.sh」，不是「改守护进程的源码」——
 #   这是「插件是独立项目」这句话在集群侧的落点。
+#
+# ★ **这一段从前写的是「一个插件是一个目录、三半」**（`plugin.json` /
+#   `client/index.js` / `job/start.sh` 三个文件）。它说的四件事今天全不对：形状
+#   是包不是目录、落点由安装器改名成 `<ULID>.splug`、扫法是**读包**不是列目录、
+#   而"放一个目录"那个动作也不再存在（作者 `packer build` 出包，deploy.sh 永不
+#   打包）。**那三样东西仍然是插件的三半**，只是它们在一个包的负载里 —— 见下面
+#   「站点侧的一个插件是【一个包文件】」那一段与 docs/PLUGIN-SPEC.md 附录 A。
 #
 # ★ 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的分派结构性
 #   地保证（只有一个变量、一次分派，"两个都起来"这个状态写不出来）。
@@ -1208,11 +1212,12 @@ def default_jobs_dir():
 def default_plugins_dir():
     """插件安装目录，同样从守护进程自身的安装位置推导。
 
-    ★ **它是唯一的真相来源** —— 两个读者：
-        deploy.sh  读它 + 各插件的 job/start.sh，编织成 run.sbatch
-        本守护进程 启动时扫它，建出 PluginSpec 表
+    ★ **它是唯一的真相来源** —— 三个读者：
+        安装器（`--install-plugins`）  把包按 `<ULID>.splug` 的名字放进来
+        deploy.sh                     读它 + 包里那一份 job/start.sh，编织 run.sbatch
+        本守护进程                     启动时扫它，建出 PluginSpec 表
 
-      加一个插件于是是「放一个目录 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
+      加一个插件于是是「放一个包 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
       这正是「插件是独立项目」在集群侧的落点：守护进程仍然要 root 重部署一次，
       但那是**安装动作**，不是**改代码**。
 
@@ -2121,14 +2126,15 @@ def section_names_problem(sections, by_name):
         if by_name:
             errors.append(
                 "[plugin:%s] 是个未知的插件。本站**装了**的是：%s。"
-                "（装了的才认得 —— 装插件是放一个目录到插件安装目录再跑一次 "
-                "deploy.sh，见 plugins/README.md。）"
+                "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录、"
+                "再跑一次 deploy.sh，见 plugins/README.md。）"
                 % (name, "、".join(sorted(by_name))))
         else:
             errors.append(
                 "[plugin:%s] 指向一个插件，而本站**一个插件都没装**。"
                 "插件安装目录是空的，所以任何 [plugin:*] 块都不可能生效。"
-                "把插件目录放进去再跑一次 deploy.sh 即可（见 plugins/README.md）。"
+                "把一个 .splug 包放进去再跑一次 deploy.sh 即可"
+                "（见 plugins/README.md）。"
                 % name)
     return errors
 
@@ -2272,12 +2278,17 @@ class Config(object):
         #      所以往里加任何东西都等于「让整个站点起不来」。而这条描述的是一个
         #      **部署不完整**，不是「这份配置错了」—— 一个站点不该因为少了一份
         #      作业脚本就拒绝为所有人服务，那会连"停掉正在跑的会话"都做不到。
-        #   ② 与它同族的 `plugin_problems`（清单坏掉的插件目录）走的就是这条路：
+        #   ② 与它同族的 `plugin_problems`（坏插件：不是一个包，或者清单读不出来）
+        #      走的就是这条路：
         #      `--check` 里打 ⚠、`start()` 里 log.error，其余一切照常。
         #
-        # 判据用 `needs_job`（插件目录里有没有 job/start.sh），所以**没有作业侧
-        # 的插件不在这个列表里** —— 那种插件是合法的，它只是不能提交，
-        # 由 op_submit 的 service_kind_no_job 说清楚。
+        # 判据用 `needs_job`（**包的负载里**有没有 `PLUGIN_JOB_ENTRY` 那一份），
+        # 所以**没有作业侧的插件不在这个列表里** —— 那种插件是合法的，它只是
+        # 不能提交，由 op_submit 的 service_kind_no_job 说清楚。
+        #
+        # ★ 这里从前写的是"插件目录里有没有 job/start.sh"。**服务器上没有源码树**
+        #   —— `job/start.sh` 在我们这边只以"包里的一条负载记录"的形式存在
+        #   （见 `scan_plugins` 里 `has_job` 那一段）。
         self.plugin_job_missing = [
             s for s in self.plugin_specs
             if s.needs_job
@@ -2385,12 +2396,13 @@ class Config(object):
         #   但它必须**说得出来**：否则表现是"客户端上一个按钮都没有"，而配置里
         #   一个字都不像有问题。所以它进的是 --check 的提示，不是错误。
         #
-        # 插件目录坏了**同样不是**启动错误：一个插件坏了不该带走整个站点。它由
+        # 插件坏了**同样不是**启动错误：一个插件坏了不该带走整个站点。它由
         # --check 逐条打印，也在 start() 里进日志。
         if self.default_plugin and self.default_plugin not in self.plugin_by_name:
             errors.append(
                 "配置里的 default_plugin = %r 在本站**没有装**。装了的插件是：%s。"
-                "（装插件是放一个目录到插件安装目录 %s 再跑一次 deploy.sh。）"
+                "（装插件是把一个 .splug 包放进插件安装目录 %s 再跑一次 "
+                "deploy.sh。）"
                 % (self.default_plugin,
                    "、".join(sorted(self.plugin_by_name)) or "（一个都没有）",
                    self.plugins_dir))
@@ -3193,7 +3205,7 @@ class Sessiond(object):
         # 带走整个站点，而其余插件照常工作。但静默跳过是绝对不能接受的：那会让
         # "我明明装了啊"变成一句谁也答不上来的话。
         for p in self.cfg.plugin_problems:
-            log.error("插件目录有问题（已跳过，其余插件照常工作）：%s", p)
+            log.error("插件有问题（已跳过，其余插件照常工作）：%s", p)
         # 「有作业侧、却找不到那份作业脚本」—— 同上，**不是启动错误**。
         # 会走到的情形：deploy.sh 在插件装上之前跑过，或者拷贝/安装失败。
         for s in self.cfg.plugin_job_missing:
@@ -4434,8 +4446,8 @@ class Sessiond(object):
             #     标题等于让他自己猜「开发环境」对应哪个 `--service-kind`。
             #     `missing_service_kind` 与 `bad_service_kind` 报的也是短名。
             return self._err(4, "service_kind_no_job",
-                             "本站装了「%s」，但它没有作业侧实现（插件目录里没有 "
-                             "job/start.sh），所以提交不了。现在能提交的是：%s。"
+                             "本站装了「%s」，但它没有作业侧实现（这个插件的包里没有 "
+                             "job/start.sh 那一半），所以提交不了。现在能提交的是：%s。"
                              % (pcfg.title,
                                 "、".join(sorted(s.name for s in cfg.plugin_specs
                                                  if s.needs_job)) or "（无）"))
@@ -4743,9 +4755,11 @@ def main():
             print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
                      "启用" if s.default_enabled else "停用", note))
-            # 分发是**另一个读者**：客户端连上之后整包取走（一次 RPC），或者按这份
-            # 清单逐份取走（N 次 RPC）。下面四项都**只报不拦** —— 它们不是部署错误，
-            # 是"这个插件分发不了"。
+            # 分发是**另一个读者**：客户端连上之后**整包一次取走**（一次 RPC）。
+            # ★ 这里从前还写着"或者按这份清单逐份取走（N 次 RPC）"—— **那条路在
+            #   v0.7 删掉了**（`op_plugin_file`，见上面"站点分发"那一段）。所以
+            #   下面这几项报的仍然是"这个插件分发不了"，但**已经没有第二条路**可退。
+            # 下面四项都**只报不拦** —— 它们不是部署错误，是"这个插件分发不了"。
             #
             # ★ 包在本节里**只读一遍**：这一屏要的是"这一次读到的全部事实"，分两次
             #   读就多出一个"两次之间被换掉"的窗口 —— 那时打印出来的字节数与摘要会
@@ -4863,10 +4877,10 @@ def main():
         # 插件逐个打印：开没开、默认资源、可执行文件解析到了哪里。
         # ★ 同样打印【解析结果】：`bin` 留空是推荐值，而留空之后落在了哪个路径上，
         #   以及那个路径是"配置指定的"还是"猜的"，只有这里说得清。
-        # 坏掉的插件目录：**报告但不算错误**。一个插件坏了不该带走整个站点，
+        # 坏掉的插件：**报告但不算错误**。一个插件坏了不该带走整个站点，
         # 但它必须被看见 —— 否则表现是"我明明装了啊"，而日志里一个字都没有。
         for _p in cfg.plugin_problems:
-            print("  ⚠ 插件目录有问题（已跳过，其余插件照常工作）：%s" % _p)
+            print("  ⚠ 插件有问题（已跳过，其余插件照常工作）：%s" % _p)
         # 「有作业侧、却找不到那份作业脚本」—— 同样是**报告但不算错误**。
         # 它说明这个插件的部署不完整（deploy.sh 跑在插件装上之前？拷贝失败了？），
         # 而症状是提交时被拒。不说出来的话，运维只会看到"本站没有开启"之类

@@ -208,4 +208,4 @@ class Tunnel extends EventEmitter {
   }
 }
 
-module.exports = { Tunnel, PORT_SCAN_LIMIT };
+module.exports = { Tunnel };

@@ -207,4 +207,4 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(ba, bb);
 }
 
-module.exports = { createDemoWebService, NO_CONTRACT };
+module.exports = { createDemoWebService };

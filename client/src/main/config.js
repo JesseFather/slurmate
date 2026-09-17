@@ -74,7 +74,7 @@ const DEFAULTS = {
   //
   // ★ 缺省 **false**：插件默认**只认站点分发的那一份**（`site-plugins/`）。打开它
   //   是「开发者模式」—— 那是给写插件的人自己用的，界面上在一个单独的一节里，
-  //   勾上之后才出现「从目录安装…」那几个入口。演示模式恒开（见 index.js）。
+  //   勾上之后才出现「从一个包安装…」那几个入口。演示模式恒开（见 index.js）。
   devPlugins: false,
   // 同意台账（TOFU 一致性）。`{ "<id>@<版本>": { digest, site, at } }`
   //
@@ -961,25 +961,37 @@ function removePendingGoodbye(dir, sessionId) {
   }
 }
 
+// ★ **导出表是这个模块对外的承诺**，所以这里只留今天真有人读的名字。
+//
+//   v0.7 之前它长得多，其中这一批**一个外部读者都没有**（谁在读它，是靠
+//   "整个仓库搜一遍这个标识符"量出来的，不是靠感觉）：`SECRET_ENCRYPTED`、
+//   `LEGACY_SECRET_PLAIN`、`LAYOUT_PORT_BASE`、`LEGACY_LAYOUT_ID`、
+//   `LEGACY_PARTITION`、`newConnectionId`、`normalizeConnection`、
+//   `connectionKey`、`hostKeyId`、`readSecretFile`。它们都还在文件里、还在被
+//   本文件用着，只是不再**承诺**给别人。
+//
+//   ★ 一起删掉的还有整个 `_internal`（`writeAtomic` / `readJson` / `configPath` /
+//     `secretPath` / `pendingGoodbyePath` / `pinnedKeysPath` / `PINNED_SCHEMA`）——
+//     它的注释写着"导出给测试用"，而 `config.test.mjs` **一个都没用过**。那句话
+//     就是"意图写了、测试没写"的原文：留着一个没人读的接缝，读代码的人会以为
+//     某条用例正踩着它。`config.test.mjs` 走的是这个模块的**公开面**
+//     （`loadConfig` / `saveConfig` / `setKey` / `loadPinnedKeys` …），那才是它
+//     该走的路；真需要某个内部函数时，加回一行就是一次**看得出来**的动作。
 module.exports = {
-  SCHEMA, DEFAULTS, SECRET_ENCRYPTED, LEGACY_SECRET_PLAIN, PENDING_ID,
+  SCHEMA, DEFAULTS, PENDING_ID,
   loadConfig, saveConfig,
   // 布局组
-  LAYOUT_PORT_BASE, RELAY_PORT_BASE, LEGACY_LAYOUT_ID, LEGACY_PARTITION, partitionForLayout,
+  RELAY_PORT_BASE, partitionForLayout,
   newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
   nextLayoutName, layoutPort, setLayoutPort, setConnectionLayout,
   pruneLayouts, layoutPlan,
-  activeConnection, newConnectionId, normalizeConnection,
-  connectionKey, upsertConnection,
+  activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled, setDevPlugins,
   trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,
   // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
-  checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
-  setKey, getKey, deleteKey, hasKey, migrateLegacySecret, readSecretFile,
+  checkHostKey, rememberHostKey, forgetHostKey,
+  setKey, getKey, deleteKey, hasKey, migrateLegacySecret,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,
-  // 导出给测试用
-  _internal: { writeAtomic, readJson, configPath, secretPath, pendingGoodbyePath,
-               pinnedKeysPath, PINNED_SCHEMA },
 };

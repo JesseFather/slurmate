@@ -45,7 +45,7 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 
 ★ **三半都会被分发到客户端**（站点分发发的是整个包，不是只挑 `client/`）——
 所以"哪个文件会被执行"与"哪个文件会被传输"是两件事。后者由**包里的记录表**定
-（`plugin_payload_index()` 读的就是它），前者只有 `client/index.js` 那一份。
+（`package_read_file()` 读的就是它），前者只有 `client/index.js` 那一份。
 
 **没有 `job/start.sh` 会怎样**（上面那个「可以没有」指的就是它）：插件照常安装、
 照常在 `slurmate plugins` 与客户端界面上出现，但**提交不了** —— 守护进程在提交时

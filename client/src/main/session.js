@@ -689,4 +689,6 @@ function withTimeout(promise, ms) {
   });
 }
 
-module.exports = { SessionController, State, HEARTBEAT_MS, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS };
+// ★ `HEARTBEAT_MS` 删了：它只是构造函数的**缺省值**（`heartbeatMs || HEARTBEAT_MS`），
+//   而用例要调心跳节奏时走的是构造参数，不是这个常量。
+module.exports = { SessionController, State, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS };

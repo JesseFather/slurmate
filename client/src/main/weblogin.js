@@ -79,4 +79,4 @@ function isLoginPath(url, path) {
   }
 }
 
-module.exports = { webLogin, isLoginPath, FORM_TYPE };
+module.exports = { webLogin, isLoginPath };

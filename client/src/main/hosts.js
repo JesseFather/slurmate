@@ -89,4 +89,6 @@ async function pickHost(entries, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return results.find((r) => r.reachable) || null;
 }
 
-module.exports = { DEFAULT_TIMEOUT_MS, probeHost, probeAll, pickHost };
+// ★ 只留 `probeAll` —— 用例踩的是它。`DEFAULT_TIMEOUT_MS` / `probeHost` /
+//   `pickHost` 只在本文件内被用（`probeAll` 与 `pickHost` 各自调 `probeHost`）。
+module.exports = { probeAll };

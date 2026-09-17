@@ -1281,7 +1281,7 @@ else
     done
 
     # ── 清掉不再属于任何插件的那些 ──
-    # 「把一个插件目录从源里拿走再部署」必须真的生效，否则会留下一份**无主的、
+    # 「把一个插件包从源里拿走再部署」必须真的生效，否则会留下一份**无主的、
     # 仍然可以被提交的**脚本。判据是文件在不在这次的集合里，不是内容 ——
     # 这个目录 100% 是本脚本生成的。
     if [[ -f "$JOBS_MARKER" ]]; then
@@ -1603,20 +1603,23 @@ ${DONE_TITLE}
     ${CONF}
     ${UNIT}
     ${SHARE_DIR}/nft-compare.py
-    ${JOBS_DIR}/    ← 每个插件一份作业脚本，文件名是它的 ULID（见下表）
+    ${JOBS_DIR}/    ← **有作业侧**的插件每份一个作业脚本，文件名是它的 ULID（见下表）
 
   插件（源 ${PLUGINS_SRC}）：
 $(if [[ "$DRYRUN" -eq 1 ]]; then echo "    （演练：上面那个源目录里的插件将被装到 ${PLUGINS_DIR}）"; \
   elif [[ -n "$PLUGIN_LIST" ]]; then \
-      while IFS=$'\t' read -r _n _d _i; do \
+      while IFS=$'\t' read -r _n _p _i _j; do \
           [[ -n "$_n" ]] || continue; \
-          if [[ -f "${_d}/job/start.sh" ]]; then echo "    ${_n}  → ${_d}"; \
-          else echo "    ${_n}  → ${_d}   【没有 job/start.sh：装得上、看得见，但提交不了】"; fi; \
-          echo "        ${JOBS_DIR}/${_i}.sbatch"; \
+          if [[ "${_j}" == "has_job" ]]; then echo "    ${_n}  → ${_p}"; \
+          else echo "    ${_n}  → ${_p}   【包里没有 job/start.sh：装得上、看得见，但提交不了】"; fi; \
+          if [[ "${_j}" == "has_job" ]]; then echo "        ${JOBS_DIR}/${_i}.sbatch"; \
+          else echo "        （没有作业脚本 —— 就是上面说的那个「提交不了」）"; fi; \
       done <<< "$PLUGIN_LIST"; \
-  else echo "    （本站没有安装任何插件 —— 合法状态。装：把插件目录放进插件源目录再跑一次本脚本）"; fi)
+  else echo "    （本站没有安装任何插件 —— 合法状态。装：把 .splug 包放进插件源目录再跑一次本脚本）"; fi)
 
-  ★ 上面每一行「短名 → 目录 → <ULID>.sbatch」就是 jobs/ 那一串 ULID 的**对照表**。
+  ★ 上面每一行「短名 → 包 → <ULID>.sbatch」就是 jobs/ 那一串 ULID 的**对照表**。
+    没有作业侧的插件**没有**那第三段 —— 它的包里没有 job/start.sh，所以本脚本
+    不给它生成作业脚本（那一行于是只说它"提交不了"，不说它有一份脚本）。
     它是**算出来的**、不是另存一份账 —— 任何时候要再打印一遍：
       ${DAEMON} --check | grep -A2 作业脚本
 

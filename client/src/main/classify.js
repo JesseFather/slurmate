@@ -162,4 +162,6 @@ function shouldRetry(result) {
       || result.action === Action.RETRY_BACKOFF;
 }
 
-module.exports = { Action, classify, shouldRetry, BACKOFF_MS };
+// ★ `BACKOFF_MS` 从导出表里删掉了：它只被本文件用（`classify` 拿它填
+//   `retryAfterMs`），仓库里没有任何外部读者。
+module.exports = { Action, classify, shouldRetry };

@@ -1600,15 +1600,24 @@ if (require.main === module) {
   process.exit(main(process.argv.slice(2)));
 }
 
+// ★ 这个文件的**身份是一个 CLI**（六个动词，见文件头），而导出表只服务两种读者：
+//   演示后端（`client/src/main/backend-fake.js` 拿它现打一个真包）与
+//   `test-packer.mjs` / `tools/conformance/` 的向量。所以这里留的是**包格式那一层**
+//   （常量、解析/构造、规范化）。
+//
+//   而**钥匙库与血统表那一组**（`LINEAGE_FILE` / `LINEAGE_SCHEMA` / `mintUlid` /
+//   `insertId` / `replaceId` / `packerHome` / `keyFilePath` / `releasesPath` /
+//   `saveKey` / `loadKey` / `readLineage` / `lineageEntry` / `writeLineage` /
+//   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）**从导出表里删掉了**
+//   —— 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
+//   仍然被那些动词用着；只是不再对外承诺。这与 `plugin_payload_index()` 是同一条
+//   纪律：一个没人读的导出就是一句没人守的承诺。
 module.exports = {
   MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, R,
-  COPY_SKIP, PLUGIN_VERSION_RE, FRAMEWORK_VERSION_RE, ULID_RE, LINEAGE_FILE,
-  LINEAGE_SCHEMA, enginesShapeProblem,
+  COPY_SKIP, PLUGIN_VERSION_RE, FRAMEWORK_VERSION_RE, ULID_RE,
+  enginesShapeProblem,
   checkRelPath, foldAscii, contentDigest, sortByPathBytes,
   buildPackage, parsePackage, fingerprint, verifyEd25519,
-  mintUlid, insertId, replaceId,
-  packerHome, keyFilePath, releasesPath, rawPubOf, saveKey, loadKey,
-  readLineage, lineageEntry, writeLineage, lineageEntryOfPackage,
-  readReleases, writeReleases,
+  rawPubOf,
   ED25519_SPKI_PREFIX,
 };
