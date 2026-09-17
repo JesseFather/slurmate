@@ -36,13 +36,31 @@
 #
 #  关于插件
 #  ───────
-#  作业里能跑什么由**插件**决定，本脚本是唯一的安装点：
+#  作业里能跑什么由**插件**决定。★ 而插件是一个**成品包**，不是一棵源码树：
 #
-#      <repo>/plugins/<名字>/          ← 源（可以用 --plugins-src 指向别处）
-#        plugin.json                   清单：身份、版本、站点侧声明
-#        job/start.sh                  作业侧代码
+#      --plugins-src DIR/              ← 放下载来的 .splug 的地方
+#        01M2JKHTZGKJBFQQTWYXMQMF2V.splug   作者用 packer/ 打出来的
 #
-#  安装 + 校验（用守护进程自己的扫描器）+ **逐插件编织**，都在这里做完。
+#  ★ **本脚本永不打包**（仓库里没有 Node 的依赖，也不该有）。作者在他的机器上
+#    `packer build`，把 `.splug` 发布到网站 / GitHub；管理员下载下来，放进
+#    `--plugins-src` 指的目录，然后跑本脚本。**服务器上从头到尾没有源码树。**
+#
+#  本脚本这一步只做三件事，每件都有它自己的负责人：
+#      · **信任门**：这些包在"root 下载完到安装器读"之间不能被普通用户换掉；
+#      · **交给安装器**（`slurmate-sessiond --install-plugins`）：解析、验签、
+#        同 id 检查、旧布局迁移 —— 规则只有那一份实现；
+#      · **逐插件编织**作业脚本：把包里的 `job/start.sh` 织进作业模板。
+#
+#  ★ 缺省 `--plugins-src` 是仓库顶层的 `plugins/`。而那里放的是**源码树**
+#    （它们是仓库的一部分，要能逐行评审），所以直接跑本脚本会在信任门那一步
+#    停下来，并告诉你先 `packer build`。那个失败是刻意的：**包是构建产物，
+#    不进 git**（二进制进 git 等于代码评审死掉），所以"装这个仓库自己的插件"
+#    也要先打一次包。
+#
+#  一个包都没有是**合法状态**：传一个空目录给 --plugins-src 即可。
+#  一个插件**包里的负载没有 job/start.sh** 也是合法的：它装得上、看得见，
+#  但提交不了（守护进程在提交时报 service_kind_no_job），本脚本跳过它、
+#  不给它生成作业脚本。
 #
 #  ★ **一个插件一份作业脚本**，装到：
 #
@@ -60,10 +78,6 @@
 #    依赖**，计算节点不需要能看见那个目录。理由与失败形态见 cluster/run.sbatch 的
 #    文件头。**拆成 N 份没有改变这一点** —— 仍然是部署期把内容写进文件。
 #
-#  一个插件都没有是**合法状态**：传一个空目录给 --plugins-src 即可。
-#  一个插件**没有 job/start.sh** 也是合法的：它装得上、看得见，但提交不了
-#  （守护进程在提交时报 service_kind_no_job），本脚本跳过它、不生成作业脚本。
-#
 # ==============================================================================
 
 set -uo pipefail
@@ -73,9 +87,13 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SELF_DIR}"
 
-# 插件源目录。**可参数化**：缺省是仓库顶层的 plugins/，而「从别处 clone 来的
-# 独立插件项目」可以用 --plugins-src 指过去 —— 那正是"插件是独立项目"这句话的
-# 用法。指向一个空目录 = 本站不装任何插件（合法状态）。
+# 插件**包**的来源目录：里面放的是一个或多个 `<ULID>.splug`（作者发布、
+# 管理员下载）。**可参数化**：缺省是仓库顶层的 plugins/，而"从网站下载来的一批
+# 包"可以用 --plugins-src 指过去。指向一个空目录 = 本站不装任何插件（合法状态）。
+#
+# ★ 语义变过一次：从前它是"插件的**源码**目录"。现在目录里只该有 `.splug`
+#   —— 别的东西（子目录、随手放的文件）会在预检那一步被点名，见 scan_plugins()
+#   与下面 plugin_src_files() 的说明。
 PLUGINS_SRC=""
 PLUGINS_SRC_GIVEN=0
 
@@ -95,7 +113,7 @@ SHARE_DIR="/usr/local/share/slurmate"
 # ★ 里面是**一插件一份**的编织成品，文件名是插件的 ULID：`<ULID>.sbatch`。
 #   本目录 100% 由本脚本生成，没有任何人写的东西 —— 所以陈旧文件的清理可以
 #   直接按"不在这次的集合里"删掉，与 PLUGINS_DIR 不同（那里要更小心，因为
-#   插件目录是别人 clone 来的项目）。
+#   插件包是别人下载来的构件）。
 #
 # ★ 权限必须是 0755（见下面 chmod 那一处）：里面的脚本由**提交作业的用户**
 #   身份的 sbatch 读取。0700 的表现是 sbatch 报"读不到文件"，指不回权限。
@@ -103,11 +121,19 @@ JOBS_DIR="${SHARE_DIR}/jobs"
 # 插件安装目录。守护进程按**自己的安装位置**推导出同一个路径
 # （slurmate-sessiond 的 default_plugins_dir），两边由同一个前缀推导，
 # 就不存在「守护进程扫 A、作业脚本编织的是 B」这种只在提交时才炸的不一致。
+#
+# ★ 里面是**一插件一个包**：`<ULID>.splug`。文件名就是包的 `id` —— 所以两个
+#   同 id 的包会落在同一个文件名上，而**互相覆盖是静默的**。§6.4 的那条检查因此
+#   落在安装器里（它手里同时拿着这一次要装的全部包），不在本脚本里另写一份。
 PLUGINS_DIR="${SHARE_DIR}/plugins"
-# deploy.sh 记下自己装过哪些插件目录。重复部署时，源里已经删掉的插件要跟着删掉 ——
-# 否则「把插件目录移走再部署」这个最自然的卸载动作会**静默无效**，而用户看到的
-# 是"它还在"。
-PLUGINS_MARKER="${PLUGINS_DIR}/.deployed"
+# deploy.sh 记下自己装过哪几个包（每行一个 `<ULID>.splug`）。重复部署时，源里已经
+# 拿走的插件要跟着删掉 —— 否则「把包移走再部署」这个最自然的卸载动作会**静默
+# 无效**，而用户看到的是"它还在"。
+#
+# ★ 名字从 `.deployed` 换成了 `.installed`，因为**记的东西换了**：从前是"目录名"，
+#   现在是"包文件名"。旧的那个文件由**安装器**读一次、用来迁移（见
+#   slurmate-sessiond 的 PLUGIN_LEGACY_MARKER），本脚本不再写它。
+PLUGINS_MARKER="${PLUGINS_DIR}/.installed"
 # 同上，但记的是本脚本生成过哪几份作业脚本（每行一个 ULID）。插件的源目录没了、
 # 插件被拿走了，对应那份 <ULID>.sbatch 要跟着删掉 —— 否则它会留下一份**无主的、
 # 仍然可以被提交的**脚本，而没有任何东西能把它们对上号。
@@ -273,22 +299,52 @@ if [[ "$MODE" == "uninstall" ]]; then
         info "nft 表 inet slurmate 不存在，跳过"
     fi
 
-    # 插件目录：**只删部署标记里记着的那些**，每个删之前先确认它确实是一个插件
-    # 目录（里面还有 plugin.json）。按名字拼出来的路径，删之前先读一遍 ——
+    # 插件目录：**只删部署标记里记着的那几个包**，每个删之前先确认它确实是一个
+    # 插件包（开头那 8 个字节是魔数）。按名字拼出来的路径，删之前先读一遍 ——
     # 与客户端 install.js 的 uninstall 是同一条规矩。
+    #
+    # ★ 两个标记都要看，因为**两次布局可能同时存在**（更早那版的旧目录还没被那次
+    #   迁移清掉时就卸载了）：`.installed` 记的是包（本版），`.deployed` 记的是
+    #   目录（更早的那种布局）。只看前者的话，旧目录会**留在盘上而没有东西记得
+    #   它曾经是插件** —— 正是这一版要消灭的那种残留。
     if [[ -d "$PLUGINS_DIR" ]]; then
         if [[ -f "$PLUGINS_MARKER" ]]; then
             while IFS= read -r p; do
                 [[ -n "$p" ]] || continue
-                if [[ -f "${PLUGINS_DIR}/${p}/plugin.json" ]]; then
-                    rm -rf "${PLUGINS_DIR:?}/${p:?}" && ok "已删除插件 ${p}"
+                case "$p" in
+                    */*|.|..) warn "跳过标记里那条形状不对的记录：${p}"; continue ;;
+                esac
+                if [[ -f "${PLUGINS_DIR}/${p}" ]] \
+                   && head -c 8 "${PLUGINS_DIR}/${p}" 2>/dev/null | grep -q '^splug'; then
+                    rm -f "${PLUGINS_DIR:?}/${p}" && ok "已删除插件包 ${p}"
                 else
-                    warn "跳过 ${PLUGINS_DIR}/${p} —— 它不像一个插件目录，不敢删"
+                    warn "跳过 ${PLUGINS_DIR}/${p} —— 它不像一个插件包，不敢删"
                 fi
             done < "$PLUGINS_MARKER"
             rm -f "$PLUGINS_MARKER" && ok "已删除插件部署标记"
-        elif [[ -n "$(ls -A "$PLUGINS_DIR" 2>/dev/null)" ]]; then
-            warn "${PLUGINS_DIR} 里有东西，但没有本脚本的部署标记 —— 不是我们装的，一律不删"
+        fi
+        if [[ -f "${PLUGINS_DIR}/.deployed" ]]; then
+            info "还发现一个更早布局的标记（.deployed）—— 一并清掉"
+            while IFS= read -r p; do
+                [[ -n "$p" ]] || continue
+                case "$p" in
+                    */*|.|..) continue ;;
+                esac
+                if [[ -f "${PLUGINS_DIR}/${p}/plugin.json" ]]; then
+                    rm -rf "${PLUGINS_DIR:?}/${p:?}" && ok "已删除旧布局的插件目录 ${p}"
+                else
+                    warn "跳过 ${PLUGINS_DIR}/${p} —— 它不像一个插件目录，不敢删"
+                fi
+            done < "${PLUGINS_DIR}/.deployed"
+            rm -f "${PLUGINS_DIR}/.deployed" && ok "已删除旧布局标记"
+        fi
+        # 钥匙记录：它是**站点侧的记忆**（"这个 id 上一次是哪把钥匙签的"）。
+        # 卸载 = 这个站点不再有插件，记忆跟着走；留下它反而会让下次装同一个包时
+        # 撞上一句"签名者变了"——而那时没有任何东西能告诉管理员上一次是谁签的。
+        rm -f "${PLUGINS_DIR}/.keys.json" && ok "已删除站点侧的钥匙记录"
+        if [[ ! -f "$PLUGINS_MARKER" ]] \
+           && [[ -n "$(ls -A "$PLUGINS_DIR" 2>/dev/null)" ]]; then
+            warn "${PLUGINS_DIR} 里还有东西，但它们不在本脚本的部署标记里 —— 不是我们装的，一律不删"
             warn "      如确认要删请人工执行：rm -rf '${PLUGINS_DIR}'"
         fi
         rmdir "$PLUGINS_DIR" 2>/dev/null || true
@@ -364,44 +420,49 @@ for f in "${SRC_FILES[@]}"; do
 done
 ok "源文件齐备（${SRC_DIR}）"
 
-# ── 插件源文件 ──
-# ★ **插件目录里的每一个文件**都进信任检查与哈希基线。这里的判据不是"谁读它"，
-#   而是**它会到谁的机器上、以谁的身份跑**：
+# ── 插件包 ──
+# ★ **每一个会被装进去的 `.splug`** 都进信任检查与哈希基线。
 #
-#     plugin.json      守护进程（root）读它，它决定作业怎么被提交
-#     job/start.sh     被编织进一份 root 拥有、**所有用户**都会执行的作业脚本
-#     client/**.js     ★ **会被分发到每一台客户端，在用户的 Electron 主进程里跑**
-#     README / 其余   随插件目录一起被分发到客户端（数据，不执行）
+# ★ 判据换了形，而**理由也换了**，这一点必须写清楚（免得下一个人以为它还是
+#   原来那条）：
 #
-# ★ 为什么**不再**只列两个文件：站点分发接上之后，`client/` 整棵子树多了一条
-#   以前没有的去处 —— 它会经由 `plugins` / `plugin_file` 两个 op 落到用户的
-#   工作站上并被 `require()`。那与 `job/start.sh` 是**同一类**东西（别人的代码
-#   以你的身份跑），只是跑在更远的地方。所以它必须过同一道门：
-#   "root 拥有 + 组/其他不可写"这两个判据，一个都不能少。
+#     从前  源目录里任何一个文件都能被普通用户改写 ⇒ 他改一行 `client/**.js`，
+#           那行代码就在**每个用户的工作站上**以用户身份跑。
+#     现在  包是一个**成品**：管理员下载下来、root 放好，安装器才去读它。
+#           所以防的是**下载完到安装器读之间**那个窗口 —— 别人（或别的进程）
+#           在那一段里把文件换掉，而 root 会照着换过的那一份去解析、验签、装。
 #
-# ★ 这里取的是**超集**：守护进程真正分发的东西少一些（它跳过 `.git` /
-#   `node_modules` 那几个名字，见 `PLUGIN_COPY_SKIP`）。部署脚本**不重复那份
-#   定义** —— 复制一份跨语言常量进来，就要再有一条 CI lint 钉着它们不漂开，
-#   而多管几个不参与执行的文件不会让部署变危险，漏掉一个会被执行的文件会。
+#   两个形状挡的是**同一类事**：以 root 的身份安装一个别人能改的字节串。
+#   判据（root 拥有 + 组/其他不可写）一个字没变。
+#
+# ★ 为什么这里只列 `*.splug`、不列目录里别的东西：**别的东西不该在这儿**，
+#   而"报出来"这件事已经有一条实现（`scan_plugins` 会把目录与散落的文件逐条
+#   点名），预检那一步跑的就是它。这里是**信任门**，不是清单校验器 —— 两件事
+#   分开，才不会出现"两套解释器说不同的话"。
 plugin_src_files() {
-    local d
+    local f
     [[ -n "$PLUGINS_SRC" && -d "$PLUGINS_SRC" ]] || return 0
-    for d in "$PLUGINS_SRC"/*/; do
-        [[ -d "$d" ]] || continue
-        # 「是不是一个插件目录」的判据与下面安装那一圈逐字相同（有 plugin.json）。
-        # 少了它，源目录里一个恰好存在的 `.git` 会被当成插件目录、把整个对象库
-        # 拖进信任检查里。
-        [[ -f "${d}plugin.json" ]] || continue
-        # 排序：这个列表会参与"拷贝前后哈希一致"的比对，两次遍历必须是同一个顺序。
-        find "$d" -type f 2>/dev/null | LC_ALL=C sort
-    done
+    for f in "$PLUGINS_SRC"/*.splug; do
+        # 通配符没匹配上时它原样留着，所以这一行不能省。
+        # `-f` 而不是 `-e`：**符号链接不算**（`-f` 会跟随链接，所以还要显式排掉
+        # 链接本身）—— 一个叫 `x.splug` 的链接能指向任何地方，而它随时可以换目标。
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        printf '%s\n' "$f"
+    done | LC_ALL=C sort
 }
 
 # 所有源文件的【绝对路径】。两处用它：信任检查、以及"拷贝前后哈希一致"。
 ALL_SRC_FILES=()
+# 插件包单独留一份：安装器要的正是这一批，见下面 2b.1。
+PLUGIN_PKGS=()
+while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    PLUGIN_PKGS+=("$f")
+    ALL_SRC_FILES+=("$f")
+done < <(plugin_src_files)
 while IFS= read -r f; do
     [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
-done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done; plugin_src_files)
+done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
 
 # ── 源文件可信性 ──
 # 本脚本会以 root 身份【安装并执行】这些文件。若它们能被普通用户改写，
@@ -501,9 +562,15 @@ else
     SRC_DIR="${SECURE_DIR}/cluster"
     PLUGINS_SRC="${SECURE_DIR}/plugins"
     ALL_SRC_FILES=()
+    PLUGIN_PKGS=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        PLUGIN_PKGS+=("$f")
+        ALL_SRC_FILES+=("$f")
+    done < <(plugin_src_files)
     while IFS= read -r f; do
         [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
-    done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done; plugin_src_files)
+    done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
 
     chown -R root:root "$SECURE_DIR" || die "无法把拷贝的源码改为 root 所有，拒绝继续"
     chmod -R go-w "$SECURE_DIR" || die "无法收紧拷贝源码的权限，拒绝继续"
@@ -536,6 +603,15 @@ else
              "$@" --plugins-src "${SECURE_DIR}/plugins"
 fi
 info "源文件哈希（可记录备查）：$(for f in "${ALL_SRC_FILES[@]}"; do sha256sum "$f" 2>/dev/null | awk '{printf "%s ", substr($1,1,12)}'; done)"
+
+# 源码里的那一份守护进程。**装插件、校验插件、从包里取文件走的都是它** ——
+# 不是刚装到 ${DAEMON} 的那一份。
+#
+# ★ 为什么用源码里这一份：`${DAEMON}` 在"第一次部署"时还不存在，而在"升级部署"
+#   时它是**上一个版本**。用旧版本去校验新格式的插件包，失败方式会是一句看不懂
+#   的报错（或者更糟：它恰好收下了）。源码这一份永远与本次部署的规则同源。
+#   放在这里而不是文件开头：上面那条自拷贝分支会把 SRC_DIR 改掉。
+DAEMON_SRC="${SRC_DIR}/slurmate-sessiond"
 
 # 非干扰比对器自身先自测 —— 依赖一个判定器之前，先证明它是对的
 if comparator_selftest "${SRC_DIR}/nft-compare.py"; then
@@ -813,24 +889,26 @@ if [[ "$MODE" == "check" ]]; then
     step "只体检模式（--check）：不安装任何东西"
     info "源文件与目标位置检查通过。"
 
-    # 插件：校验的是**还没装进去的源目录**（--check 不安装任何东西，
+    # 插件：校验的是**还没装进去的包目录**（--check 不安装任何东西，
     # 所以不能去看安装目录 —— 那里面是上一次部署留下的东西）。
-    # ★ 跑的还是守护进程自己的扫描器，只是在源目录上跑。
+    # ★ 跑的还是守护进程自己的扫描器，只是在源目录上跑。它同时管两件事：每个包
+    #   能不能解析，以及**目录里除 .splug 之外有没有别的东西**（那些东西不会被
+    #   安装，所以不在这里说的话就是静默忽略）。
     if [[ "$DRYRUN" -eq 1 ]]; then
         info "[演练] 跳过插件体检"
-    elif ! "$PY" "${SRC_DIR}/slurmate-sessiond" --check-plugins \
+    elif ! "$PY" "$DAEMON_SRC" --check-plugins \
              --plugins-dir "$PLUGINS_SRC" > "${BACKUP_DIR}/plugins-check.txt" 2>&1; then
-        bad "插件源目录 ${PLUGINS_SRC} 里有不合法的东西："
+        bad "插件包目录 ${PLUGINS_SRC} 里有不合法的东西："
         sed 's/^/        /' "${BACKUP_DIR}/plugins-check.txt" >&2
         bad "  真正部署会被中止。修好再跑。"
     else
-        n_pl="$(sed -n '/^plugin-dirs:$/,$p' "${BACKUP_DIR}/plugins-check.txt" \
+        n_pl="$(sed -n '/^plugin-packages:$/,$p' "${BACKUP_DIR}/plugins-check.txt" \
                 | tail -n +2 | grep -c . || true)"
         if (( n_pl == 0 )); then
-            info "插件源目录 ${PLUGINS_SRC} 里没有插件 —— 部署后会是一个"
+            info "插件包目录 ${PLUGINS_SRC} 里没有 .splug —— 部署后会是一个"
             info "  **零插件**的基座（合法状态：会话能查、能停，只是没有可提交的服务）"
         else
-            ok "插件源目录 ${PLUGINS_SRC} 里有 ${n_pl} 个合法插件"
+            ok "插件包目录 ${PLUGINS_SRC} 里有 ${n_pl} 个合法的包"
             sed -n '/^插件目录 /,$p' "${BACKUP_DIR}/plugins-check.txt" | sed 's/^/        /'
         fi
     fi
@@ -895,55 +973,110 @@ install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
 step "阶段 2b／6  安装插件并编织作业脚本"
 # ==============================================================================
 
-# ── 2b.1 把插件装进 <prefix>/share/slurmate/plugins/ ────────────────────────
+# ── 2b.1 把插件包装进 <prefix>/share/slurmate/plugins/ ─────────────────────
 #
-# 目录名用源目录的名字（**不参与身份判定**，只为了人看着方便 —— 守护进程认的是
-# 清单里的 id）。先装、后校验：校验跑的是**装完之后**的那份，也就是守护进程和
-# 编织真正会读的那份。
-plugin_dirs_now() {
-    local d
-    for d in "$PLUGINS_SRC"/*/; do
-        [[ -d "$d" && -f "${d}plugin.json" ]] || continue
-        printf '%s\n' "$(basename "$d")"
+# ★ 装的动作**全部交给安装器**（`slurmate-sessiond --install-plugins`）：解析包、
+#   验签、§6.4 的同 id 检查、旧布局迁移、写站点侧的钥匙记录 —— 都在它里面，而
+#   那些判据在守护进程那一侧本来就要有（它要读同一批包）。本脚本再抄一遍的失效
+#   方式是"部署放行了、守护进程不认"，而症状要到用户点提交时才出现。
+#
+# ★ 本脚本自己只做**集合**这一件事：源里已经拿走的插件要真的从站点上删掉。
+#   那是"这次部署想装哪几个"的知识，只有部署脚本有。
+plugin_pkgs_now() {
+    local f
+    for f in "$PLUGINS_SRC"/*.splug; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        printf '%s\n' "$(basename "$f")"
     done | sort
 }
 
 if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 将安装插件：$(plugin_dirs_now | tr '\n' ' ')"
+    info "[演练] 将安装插件包：$(plugin_pkgs_now | tr '\n' ' ')"
 else
-    # ── 先删掉**上次部署装过、这次源里没有了**的那些 ──
-    # 「把一个插件目录从源里移走再部署」是最自然的卸载动作，它必须真的生效。
-    # 只删标记文件里记着的目录，且**删之前先确认它确实是一个插件目录**（里面有
-    # plugin.json）—— 与客户端的 uninstall 同一条规矩：按 id/名字拼出来的路径，
-    # 删之前先读一遍，对不上就不动它。
+    # ── 2b.1a 预检**源目录** ──
+    # ★ 它管两件事，都不是"装完之后"能补上的：
+    #     ① 每个包都能解析（下载坏了、传丢了、放错文件）；
+    #     ② **目录里除 `.splug` 之外没有别的东西** —— 那些东西不会被安装
+    #        （`plugin_src_files()` 只列包），所以不在这里说的话，它们会被
+    #        **静默忽略**。源码树放错地方就是这一种：管理员以为装上去了。
+    SRC_PLUGIN_LIST=""
+    if [[ -n "$PLUGINS_SRC" && -d "$PLUGINS_SRC" ]]; then
+        if ! "$PY" "$DAEMON_SRC" --check-plugins \
+                 --plugins-dir "$PLUGINS_SRC" > "${BACKUP_DIR}/plugins-src.txt" 2>&1; then
+            sed 's/^/        /' "${BACKUP_DIR}/plugins-src.txt" >&2
+            die "插件包目录 ${PLUGINS_SRC} 里有不合法的东西（原因见上）。一个字节都没装。
+     ★ 「源码树」放错地方是最常见的一种：站点只收 .splug，包要先在**作者机器上**
+       用 packer/ 打出来（本脚本永不打包，见文件头）。"
+        fi
+        sed 's/^/        /' "${BACKUP_DIR}/plugins-src.txt"
+        # 机器可读的那一段后面还要用（标记文件按它写：装进去的文件名就是 ULID）。
+        SRC_PLUGIN_LIST="$(sed -n '/^plugin-packages:$/,$p' \
+                           "${BACKUP_DIR}/plugins-src.txt" | tail -n +2)"
+    fi
+
+    # ── 2b.1b 先删掉**上次部署装过、这次源里没有了**的包 ──
+    # 「把一个包从源里移走再部署」是最自然的卸载动作，它必须真的生效。
+    # 只删标记文件里记着的文件名，且**删之前先确认它确实是一个插件包** —— 与
+    # 客户端的 uninstall 同一条规矩：按名字拼出来的路径，删之前先读一遍，对不上
+    # 就不动它。
     if [[ -f "$PLUGINS_MARKER" ]]; then
         while IFS= read -r old; do
             [[ -n "$old" ]] || continue
-            plugin_dirs_now | grep -qx "$old" && continue
-            if [[ -f "${PLUGINS_DIR}/${old}/plugin.json" ]]; then
-                rm -rf "${PLUGINS_DIR:?}/${old:?}" && info "已移除不再装着的插件：${old}"
+            # `-F`：标记里的那一行是一个**字面量**，不是模式 —— 少了它会拿
+            # `01M2….splug` 里的那个 `.` 当通配符，于是一条"碰巧对得上"的记录
+            # 会让这个包**不被删掉**（而那是静默的）。
+            plugin_pkgs_now | grep -qxF "$old" && continue
+            # 标记里的每一行都是我们自己写进去的 `<ULID>.splug`，但删之前仍然
+            # 断言一次形状 —— 这个文件在两次部署之间躺在一个人人可读的目录里，
+            # 而"按名字拼出来的路径删东西"是这个脚本里唯一一处 rm -f。
+            case "$old" in
+                */*|.|..|"") warn "跳过标记里那条形状不对的记录：${old}"; continue ;;
+            esac
+            if [[ -f "${PLUGINS_DIR}/${old}" ]] && \
+               head -c 8 "${PLUGINS_DIR}/${old}" 2>/dev/null | grep -q '^splug'; then
+                rm -f "${PLUGINS_DIR:?}/${old}" && info "已移除不再装着的插件包：${old}"
             else
-                warn "跳过 ${PLUGINS_DIR}/${old} —— 它不像一个插件目录（没有 plugin.json），不敢删"
+                warn "跳过 ${PLUGINS_DIR}/${old} —— 它不像一个插件包，不敢删"
             fi
         done < "$PLUGINS_MARKER"
     fi
 
     mkdir -p "$PLUGINS_DIR"
-    : > "${PLUGINS_DIR}/.tmp-marker.$$"
-    for d in "$PLUGINS_SRC"/*/; do
-        [[ -d "$d" && -f "${d}plugin.json" ]] || continue
-        name="$(basename "$d")"
-        rm -rf "${PLUGINS_DIR:?}/${name:?}"
-        cp -a "$d" "${PLUGINS_DIR}/${name}" || die "安装插件失败：${d}"
-        chown -R root:root "${PLUGINS_DIR}/${name}" || die "无法把插件改为 root 所有"
-        chmod -R go-w "${PLUGINS_DIR}/${name}" || die "无法收紧插件目录的权限"
-        printf '%s\n' "$name" >> "${PLUGINS_DIR}/.tmp-marker.$$"
-        ok "插件 ${name} → ${PLUGINS_DIR}/${name}"
-    done
+    if (( ${#PLUGIN_PKGS[@]} > 0 )); then
+        # ★ 参数取自 `PLUGIN_PKGS` —— 而它**就是**信任门过的那一批
+        #   （`plugin_src_files()` 的输出，见上面）。两处用同一个来源，是因为
+        #   "装了但没验"这种缺口只会从两个列表分家那里长出来。
+        "$PY" "$DAEMON_SRC" --install-plugins "${PLUGIN_PKGS[@]}" \
+            --plugins-dir "$PLUGINS_DIR" \
+            || die "安装插件包失败（原因见上）。已有的包没有被改动。
+     修好之后重跑本脚本即可。"
+    else
+        info "本次没有要装的插件包（${PLUGINS_SRC} 下没有 .splug）"
+    fi
+
+    # ★ 标记记的是**本脚本这一次装了什么**：每个源包的 ULID（第 3 列）+ 后缀。
+    #   装进去的文件名就是它（安装器按 id 命名，§6.4 保证不会有两个包抢一个名字）。
+    #
+    #   ★ 为什么**不**记"插件目录里现在有哪些包"：那样一来，管理员用
+    #     `slurmate plugin install` 单独装的那个包会出现在标记里，而下一次部署
+    #     会把它当成"源里已经拿走的"**删掉**。手动装是显式动作，不该被一次
+    #     集合同步悄悄撤销。
+    #
     # ★ 标记文件只在这次真的写成了才覆盖。写失败时**保留旧的那一份** ——
     #   清空它等于"忘了自己装过什么"，那下一次部署就不会移除已经从源里拿走的
     #   插件，而这个失败是静默的（用户看到的是"它还在"）。
-    if sort -o "${PLUGINS_DIR}/.tmp-marker.$$" "${PLUGINS_DIR}/.tmp-marker.$$" 2>/dev/null; then
+    : > "${PLUGINS_DIR}/.tmp-marker.$$"
+    while IFS=$'\t' read -r _pn _pp _pid _pj; do
+        [[ -n "${_pid:-}" ]] || continue
+        # 与编织那一段同一条断言：ULID 是**路径分量**，形状不对就不往下拼。
+        if [[ ! "$_pid" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+            die "插件 ${_pn} 的 id 不是合法的 ULID：${_pid}
+     标记文件按 <ULID>.splug 记，一个形状不对的 id 会拼出一个失控的路径。
+     这多半意味着 --check-plugins 的输出被改过 —— 那里的格式是跨脚本契约。"
+        fi
+        printf '%s\n' "${_pid}.splug" >> "${PLUGINS_DIR}/.tmp-marker.$$"
+    done <<< "$SRC_PLUGIN_LIST"
+    if sort -u -o "${PLUGINS_DIR}/.tmp-marker.$$" "${PLUGINS_DIR}/.tmp-marker.$$" 2>/dev/null; then
         chmod 644 "${PLUGINS_DIR}/.tmp-marker.$$" 2>/dev/null || true
         if ! mv -f "${PLUGINS_DIR}/.tmp-marker.$$" "$PLUGINS_MARKER" 2>/dev/null; then
             warn "无法更新插件部署标记 ${PLUGINS_MARKER} —— 下次部署不会移除已拿走的插件"
@@ -954,7 +1087,10 @@ else
         rm -f "${PLUGINS_DIR}/.tmp-marker.$$"
     fi
     if [[ ! -s "$PLUGINS_MARKER" ]]; then
-        info "本站没有安装任何插件（${PLUGINS_SRC} 下没有插件目录）—— 这是合法状态"
+        # ★ 说的是**本脚本这次装了什么**，不是"站点上一个插件都没有" ——
+        #   后者可能不成立（管理员可以用 `slurmate plugin install` 单独装过）。
+        #   一句话把两件事混起来，排查的人会去查一个根本不存在的"没装"。
+        info "本次部署没有装任何插件包（${PLUGINS_SRC} 下没有 .splug）—— 这是合法状态"
     fi
 fi
 
@@ -971,15 +1107,14 @@ else
     if ! "$DAEMON" --check-plugins > "${BACKUP_DIR}/plugins.txt" 2>&1; then
         sed 's/^/        /' "${BACKUP_DIR}/plugins.txt" >&2
         die "插件校验未通过（原因见上）。未安装作业脚本、未启动服务。
-     修好 plugin.json 再重跑本脚本即可。"
+     修好再重跑本脚本即可。"
     fi
     sed 's/^/        /' "${BACKUP_DIR}/plugins.txt"
     ok "插件校验通过（用守护进程自己的扫描器，规则只有一份）"
-    # 后面要逐个断言 job/start.sh，所以留下「短名<TAB>安装目录」这两列。
-    # ★ 目录名与短名**不是一回事**（目录名不参与身份判定），所以两列都得留着：
-    #   短名用来算函数名，目录名用来找文件。混用会得到一个"文件找不到"或
-    #   "函数名对不上"的假错误。
-    PLUGIN_LIST="$(sed -n '/^plugin-dirs:$/,$p' "${BACKUP_DIR}/plugins.txt" \
+    # 后面要逐个断言作业侧，所以留下 `<短名>\t<包路径>\t<ULID>\t<has_job|no_job>`。
+    # ★ 四列各管一件事，混用就会得到一个假错误：短名算函数名、包路径取文件、
+    #   ULID 命名作业脚本、第 4 列回答"要不要取作业侧那一份"。
+    PLUGIN_LIST="$(sed -n '/^plugin-packages:$/,$p' "${BACKUP_DIR}/plugins.txt" \
                    | tail -n +2)"
 fi
 
@@ -1081,8 +1216,8 @@ else
     JOBS_DONE=""
 
     # ── 第一遍：全部生成 + 逐份验语法，一份都不装 ──
-    while IFS=$'\t' read -r pname pdir pid; do
-        [[ -n "${pname:-}" && -n "${pdir:-}" && -n "${pid:-}" ]] || continue
+    while IFS=$'\t' read -r pname pkg pid hasjob; do
+        [[ -n "${pname:-}" && -n "${pkg:-}" && -n "${pid:-}" ]] || continue
         # ★ ULID 是**路径分量**，所以要先断言它的形状。PLUGIN_ID_RE 已经保证了
         #   （`^[0-9A-HJKMNP-TV-Z]{26}$`，没有点、没有斜杠），这里是第二道：
         #   deploy.sh 拿它拼 `<JOBS_DIR>/<ULID>.sbatch`，一个形状不对的值意味着
@@ -1092,16 +1227,26 @@ else
      作业脚本按 <ULID>.sbatch 命名，一个形状不对的 id 会拼出一个失控的路径。
      这多半意味着 --check-plugins 的输出被改过 —— 那里的格式是跨脚本契约。"
         fi
-        pf="${pdir}/job/start.sh"
-        if [[ ! -f "$pf" ]]; then
-            # ★ 「没有作业侧」是**合法状态**，不是错误：一个只有客户端那一半的
-            #   插件允许存在。它装得上、看得见，但**提交不了** —— 守护进程在
-            #   提交时报 service_kind_no_job（code 4），界面上那个按钮是灰的。
-            #   从前这里 die，那等于让一个插件的形态问题中止整个站点的部署。
-            warn "插件 ${pname} 没有 job/start.sh —— 跳过，不生成作业脚本。
-          这个插件装得上、看得见，但提交不了（合法状态）。要让它能提交，
-          就在 ${pdir}/job/start.sh 里定义 start_${pname//-/_}。"
+        # ★ 「有没有作业侧」现在是**明确的一列**，不是靠"取一次试试"推出来的：
+        #   没有作业侧是**合法状态**（只有客户端那一半的插件允许存在），而
+        #   "取不出来"还可能是包坏了 —— 用一个退出码同时表达这两件事，就会把
+        #   后果不同的两种情况并成一条路。见守护进程里 TSV 那一段的说明。
+        if [[ "${hasjob:-}" != "has_job" ]]; then
+            warn "插件 ${pname} 的包里没有 job/start.sh —— 跳过，不生成作业脚本。
+          这个插件装得上、看得见，但提交不了（合法状态）。要让它能提交：
+          在**源码树**里补一份 job/start.sh、升版本号，重新 packer build 再装一次。"
             continue
+        fi
+        # 作业侧那一份从**包里**取出来（服务器上没有源码树可以读），取到一个临时
+        # 文件里再走下面同样那三道断言。★ `--extract-package` 是集群侧读包的
+        # 唯一入口，所以"包怎么读"仍然只有 Python 那一份实现。
+        pf="${WEAVE_DIR}/${pid}.jobstart.sh"
+        if ! "$PY" "$DAEMON_SRC" --extract-package "$pkg" job/start.sh \
+                 > "$pf" 2>"${pf}.err"; then
+            sed 's/^/        /' "${pf}.err" >&2
+            die "从 ${pkg} 里取 job/start.sh 失败（原因见上）。
+     该包的记录表里**有**这一份（--check-plugins 是这么报的），所以这多半意味着
+     包在安装之后被换过 —— 重跑一次本脚本。"
         fi
         check_plugin_jobsh "$pname" "$pf"
         BLOCKS="${WEAVE_DIR}/${pid}.blocks.sh"

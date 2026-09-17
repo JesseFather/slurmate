@@ -277,16 +277,57 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 > 以及最后 `exec` 那一行。它们用的是相对于 `SECURE_DIR` 的位置，脚本名走
 > `basename "$0"` 所以改名字不受影响，但子目录层级变了要同步。
 
+### 步骤 0.5：把插件打成包（要装插件的话）
+
+★ **站点上的插件是一个包文件（`.splug`），不是一棵源码树。**
+服务器上从头到尾没有源码 —— 打包发生在**作者的机器**上：
+
+```bash
+# 在插件的源码树里（可以是另一个仓库）
+node packer/slurmate-packer.js init  path/to/your-plugin     # 铸一个 id（只做一次）
+node packer/slurmate-packer.js keygen path/to/your-plugin    # 想签名才需要（只做一次）
+git commit -am "铸一个 id"
+node packer/slurmate-packer.js build path/to/your-plugin     # → your-plugin-1.0.0.splug
+node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 §6.4
+```
+
+把那几个 `.splug` 收集到一个目录（就是下面 `--plugins-src` 要指的目录），
+拷到登录节点上，然后部署：
+
+```bash
+sudo bash cluster/deploy.sh --plugins-src ~/下载的插件
+```
+
+★ **`deploy.sh` 永不打包**（`cluster/deploy.sh`）：它只收成品。所以对本仓库
+自带的 `plugins/` 直接部署会在预检那一步**停下来**并告诉你要先 `packer build`
+—— 那个失败是刻意的：包是**构建产物**，不进 git（二进制进 git 等于代码评审死掉）。
+
+★ 装插件也可以不在部署里做，用一个动词：
+
+```bash
+sudo slurmate plugin install ~/下载的插件/foo-1.0.0.splug
+```
+
+它做四件事，每一件都会**说给人听**：验签（§6.4）、把包里有什么打一屏出来、
+按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装进
+`<prefix>/share/slurmate/plugins/<ULID>.splug`。
+
+**服务器上没有源码可以对照**，所以那一屏是管理员手上唯一的依据 —— 它也是这条
+路上已知的取舍之一，见 `README.md` 的〈已知限制〉。
+
 ### 步骤 1：先 `--check`
 
 ```bash
-sudo bash cluster/deploy.sh --check
+sudo bash cluster/deploy.sh --check --plugins-src ~/下载的插件
 ```
 
 `--check` 承诺零改动：不安装文件、不启动服务、不改动 nftables，快照也只写到
 `/tmp`（`cluster/deploy.sh`）。它把所有预检跑一遍并打印一份可存档的
 报告 —— 警告与失败都走 stdout，就是为了让报告能整份重定向保存
 （`cluster/deploy.sh`）。
+
+它同时会校验 `--plugins-src` 下的每一个包，并且**指出那里除 `.splug` 之外的
+任何东西** —— 那些东西不会被安装，所以不在这里说的话就是静默忽略。
 
 ### 步骤 2：准备站点配置
 
@@ -385,18 +426,23 @@ ssh -N -L 18080:<tunnel_target> alice@node01.example.com
 curl -i http://127.0.0.1:18080/healthz
 ```
 
-**分发这一条也要单独验一次**（v0.6 新增，而且它有一个只在这里才看得见的失败形态）：
+**分发这一条也要单独验一次**（而且它有一个只在这里才看得见的失败形态）：
 
 ```bash
-# 1. 守护进程自己解析到的文件清单 —— 这就是客户端会去取的那一份
+# 1. 守护进程从包里读出来的那份清单 —— 这就是客户端会去取的那一份
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 # 2. 真的取一份回来，逐字节比（这一步用的是 CLI，不经过客户端）
 slurmate rpc <<< '{"op":"plugin_file","id":"<ULID>","version":"1.0.0","path":"client/index.js"}'
 ```
 
 第 2 步的输出里 `data` 是 base64，`size` 与 `sha256` 要与你本地那份**自己算**的
-一样。若它回 `9 plugin_file_changed`，说明守护进程**起来之后**有人动过插件目录
-（就地改了文件而没重新部署）—— 那要重跑一次 deploy.sh，而不是重试这个请求。
+一样。若它回 `9 plugin_file_changed`，说明守护进程**起来之后**有人动过那些包
+（就地换了包而没重新部署）—— 那要重跑一次 deploy.sh，而不是重试这个请求。
+
+★ 第 1 步的输出里还有一行「包 N 字节 / M 份文件」和一个**机器可读的**
+`plugin-packages:` 段（`<短名>\t<包路径>\t<ULID>\t<has_job|no_job>`）。
+后者是 `deploy.sh` 拿来编织作业脚本的**跨脚本契约** —— 它的形状变了，
+编织那一段会立刻跟着坏。
 
 ★ **客户端那一侧只有在一台真的客户端上才验得到**：连上去之后应该出现
 「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
@@ -449,7 +495,8 @@ sudo bash cluster/deploy.sh --uninstall --purge-state
 
 - **`deploy.sh` 整条从来没有在真机上跑过**（本仓库的所有验证都是等价方式做的）。
   第一次真机部署值得重点看三件事：`<prefix>/share/slurmate/jobs/` 下**有几份**、
-  它们与 `plugins/` 里那几个 ULID **能不能一一对上**（多一份少一份都说明编织那一
-  步出了问题）、插件目录与作业脚本的属主与权限，以及卸载是否清干净了。
+  它们与 `<prefix>/share/slurmate/plugins/` 里那几个 ULID **能不能一一对上**
+  （多一份少一份都说明编织那一步出了问题）、插件目录与作业脚本的属主与权限，
+  以及卸载是否清干净了。
 - **线上那份守护进程比仓库新**（它带着一个让 `submit` 必然失败的旧缺陷）。
   重新部署之后，**提交会第一次真正创建 Slurm 作业** —— 那是行为变化，不是回归。

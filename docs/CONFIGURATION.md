@@ -89,10 +89,12 @@ default_mem  = 8G
 ## 一之二、插件块
 
 ★ **插件是一个独立的项目**，装在集群上的 `<prefix>/share/slurmate/plugins/` 里，
-由 `deploy.sh` 装进去（`--plugins-src DIR`，缺省是仓库顶层的 `plugins/`）。
+由**安装器**装进去：`deploy.sh --plugins-src DIR`，或者 `slurmate plugin install <包>`。
+★ 那个目录里放的是**成品包**（`.splug`），不是源码树 —— 缺省的
+`<repo>/plugins` 里是源码，直接部署会在预检那一步停下来并告诉你要先打包。
 
-**加一个插件 = 放一个目录 + 跑一次 deploy.sh。** 不需要改守护进程的源码，连本配置
-文件都不需要动 —— 下面那些块全是**可选的**，不写就用插件清单里的缺省。
+**加一个插件 = 放一个 `.splug` + 跑一次 deploy.sh。** 不需要改守护进程的源码，连
+本配置文件都不需要动 —— 下面那些块全是**可选的**，不写就用插件清单里的缺省。
 契约见 [plugins/README.md](../plugins/README.md)。
 
 块内的键（每个插件都认这四个）：
@@ -119,7 +121,7 @@ default_mem  = 8G
 ### 「装了」和「开着」是两件事
 
 ```
-插件目录在不在   →  这个插件装没装（决定它的配置从哪来）
+插件在不在       →  这个插件装没装（决定它的配置从哪来）
 enabled          →  它开没开（决定用户能不能提交它）
 ```
 
@@ -181,14 +183,15 @@ default_plugin = code-server
 **能写进块里的，是本站**装了的**那些插件。** 块名必须与某个已安装插件的短名
 （清单里的 `name`）一致 —— 写一个没装的名字会在启动时报错并列出本站装了什么。
 
-装了什么由 `<prefix>/share/slurmate/plugins/` 决定，由 `deploy.sh` 装进去：
+装了什么由 `<prefix>/share/slurmate/plugins/` 里的那些 `<ULID>.splug` 决定，
+由安装器装进去：
 
 ```bash
-sudo bash cluster/deploy.sh --plugins-src DIR     # 装 DIR 下的插件
+sudo bash cluster/deploy.sh --plugins-src DIR     # 装 DIR 下的 .splug（成品包）
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins   # 看现在装了哪些
 ```
 
-★ **加一个插件 = 放一个目录 + 跑一次 `deploy.sh`**，不用改守护进程的源码。
+★ **加一个插件 = 放一个 `.splug` + 跑一次 `deploy.sh`**，不用改守护进程的源码。
 契约见 [plugins/README.md](../plugins/README.md)。
 
 **站点分发的插件**：`enabled = yes` 的插件，客户端连上之后会自己取回来

@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -33,6 +34,7 @@ import time
 #   由 .github/workflows/checks.yml 断言。
 VERSION = "0.6"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
+DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -59,6 +61,62 @@ def socket_path():
       客户端只经 `rpc` 进来，它的失败模式必须是确定的。
     """
     return DEFAULT_SOCKET
+
+
+def sessiond_path():
+    """守护进程那个脚本在哪。
+
+    ★ 为什么 CLI 要去找它：**安装器长在那份脚本里**，不在这里。读一个 `.splug`、
+      验签、判断包里有没有作业侧 —— 这几件事守护进程本来就要做，而且各自只能有
+      一份实现。这里再抄一份的失效方式是这一版最想避免的那种：**装得上、守护进程
+      不认**，症状要到用户点提交时才出现。
+
+    所以 `plugin install` 只是一层壳：找到那份脚本、把参数原样转发过去。
+    与 deploy.sh 调 `--check-plugins` 是同一个路子（它也是直接跑那份脚本）。
+
+    ★ 覆盖用的环境变量叫 `SLURMATE_SESSIOND`：部署脚本把守护进程装在
+      `<prefix>/sbin/slurmate-sessiond`，而前缀可以改，所以留一个出口。
+    """
+    return os.environ.get("SLURMATE_SESSIOND") or DEFAULT_SESSIOND
+
+
+def cmd_plugin_install(args):
+    """`slurmate plugin install <文件…>` —— 把作者发布的 `.splug` 装到本站。
+
+    ★ 与这台机器上的 `slurmate` 其余动词不同，它**不经 socket、不连守护进程**：
+      它是一个管理动作（要以 root 跑，写的是 `<prefix>/share/slurmate/plugins/`），
+      与"这台机器上的守护进程此刻在不在"无关。
+    """
+    if os.geteuid() != 0:
+        # 早说。装进去的包会成为**每一个用户提交的作业**的一部分，所以这件事
+        # 只能 root 做 —— 让它在写文件那一刻以 EACCES 失败，报出来的会是一句
+        # 权限错误，而管理员要的是"该加 sudo"。
+        print("装插件要以 root 运行：包会落到 <prefix>/share/slurmate/plugins/，\n"
+              "而它的作业侧会被编织进每一个用户提交的作业。\n"
+              "  sudo slurmate plugin install %s"
+              % " ".join(args.files), file=sys.stderr)
+        return EXIT_REJECTED
+
+    exe = sessiond_path()
+    if not os.path.isfile(exe):
+        print("找不到守护进程脚本 %s —— 安装器在它里面。\n"
+              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+              "指过去；\n"
+              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+        return EXIT_NOTFOUND
+
+    argv = [sys.executable, exe, "--install-plugins"] + list(args.files)
+    if args.plugins_dir:
+        argv += ["--plugins-dir", args.plugins_dir]
+    if args.replace_key:
+        argv += ["--replace-key", args.replace_key]
+    # ★ 不用 os.execv：留一层能让退出码原样传上去，也让这条路在用例里跑得动
+    #   （execv 会把跑用例的那个进程换掉）。
+    try:
+        return subprocess.run(argv).returncode
+    except OSError as e:
+        print("启动安装器失败（%s）：%s" % (exe, e), file=sys.stderr)
+        return EXIT_NODAEMON
 
 
 def rpc(req, timeout=40.0):
@@ -580,6 +638,20 @@ def build_parser():
         return p
 
     p = add("rpc", cmd_rpc, "从 stdin 读 JSON 请求、向 stdout 写 JSON 响应（客户端入口）")
+
+    # `plugin` 是一个**管理**动词（要 root），与其余那些用户动词不是一类 ——
+    # 所以它有自己的一层子命令，而不是 `slurmate install-plugin` 这样一个动词名。
+    p = add("plugin", None, "管理本站的插件（装包；要 root）")
+    psub = p.add_subparsers(dest="plugin_cmd")
+    pi = psub.add_parser("install", help="把作者发布的 .splug 装到本站")
+    pi.add_argument("files", nargs="+", metavar="包",
+                    help="一个或多个 .splug 文件（作者 `packer build` 的产物）")
+    pi.add_argument("--plugins-dir", default="",
+                    help="装到这个目录而不是安装目录（排查用）")
+    pi.add_argument("--replace-key", default=None, metavar="旧指纹",
+                    help="确认「这个 id 换了签名者」（§2.5）。取值必须是记录里"
+                         "那把旧指纹 —— 确认要有依据，不是随手加一个开关")
+    pi.set_defaults(func=cmd_plugin_install)
 
     p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
     p.add_argument("--json", action="store_true")

@@ -19,11 +19,13 @@ test-sessiond-logic.py — slurmate-sessiond 的单元/集成测试
 import base64
 import hashlib
 import importlib.machinery
+import io
 import importlib.util
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -66,11 +68,21 @@ def check(desc, cond, detail=""):
         print("  [FAIL] %s  %s" % (desc, detail))
 
 
+# 被测模块的句柄。`main()` 里装配一次，之后全文件用它。
+#
+# ★ 为什么不留成"每个函数自己收一个参数"：夹具辅助函数（build_package /
+#   put_package / weave_one …）散在几十处调用点上，而它们都要解析包或从包里取
+#   文件。逐个传参会让"这里传的是哪个模块"变成一件要读每一行才知道的事。
+MOD = None
+
+
 def load_module():
+    global MOD
     loader = importlib.machinery.SourceFileLoader("slurmate_sessiond", DAEMON)
     spec = importlib.util.spec_from_loader("slurmate_sessiond", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    MOD = mod
     return mod
 
 
@@ -82,16 +94,142 @@ def write_stub(path, body):
     return path
 
 
-def weave_one(tpl_path, plugin_dir, name, ulid, out_path):
+# ── 夹具：编一个 .splug ─────────────────────────────────────────────────────
+#
+# ★ 集群侧的生产路径上**没有**写包的代码（包是作者用 `packer/` 打的），这里是
+#   **用例专用的第三个写方**。它不需要"写得对"到能发布 —— 它需要的是产出一个
+#   解析器收得下的包，而"包该长什么样"由 19.14 说了算：那一节拿打包器**真的产出**
+#   的那份字节去验解析器。于是这里的正确性不靠自己证明，靠那条链子。
+PKG_MAGIC = b"splug\x1a\r\n"
+PKG_HEADER_BYTES = 20
+PKG_SIG_BYTES = 97
+
+
+def build_package(files, sig_block=b""):
+    """`[(路径, 字节), …]` → 包的字节（附录 A 那个容器）。
+
+    路径**在这里排序**（UTF-8 字节序）—— 与 §3.4 算摘要时的排序同一条规则。
+    一个手写的包可以把记录按任意次序排，但那样"记录表次序"与"摘要次序"就成了
+    两件事，用例里没有理由去制造这种分歧。
+    """
+    files = sorted(files, key=lambda x: x[0].encode("utf-8"))
+    recs = b""
+    for p, blob in files:
+        pb = p.encode("utf-8")
+        recs += (struct.pack(">H", len(pb)) + pb
+                 + struct.pack(">Q", len(blob)) + hashlib.sha256(blob).digest())
+    return (PKG_MAGIC + struct.pack(">III", 1, len(files), len(sig_block))
+            + recs + sig_block + b"".join(b for _p, b in files))
+
+
+def plugin_files_of(dirpath, skip=()):
+    """一个插件**目录** → `[(相对路径, 字节), …]`，跳过集里的名字不进。
+
+    ★ 打包器是从**一个提交**打的（不是工作树），而这里读的是磁盘上的目录 ——
+      差别只在"哪一份字节"，不影响这一节要测的东西（插件表从包里读出来的形状）。
+    """
+    out = []
+    for root, dirs, names in os.walk(dirpath):
+        dirs[:] = sorted(d for d in dirs if d not in skip)
+        for n in sorted(names):
+            if n in skip:
+                continue
+            full = os.path.join(root, n)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            with open(full, "rb") as f:
+                out.append((os.path.relpath(full, dirpath).replace(os.sep, "/"),
+                            f.read()))
+    return out
+
+
+def put_package(out_dir, files, sig_block=b"", filename=None):
+    """把一份包写进 out_dir，文件名默认是 `<包里的 id>.splug`。返回那个路径。"""
+    blob = build_package(files, sig_block)
+    if filename is None:
+        mf = next((b for p, b in files if p == "plugin.json"), b"{}")
+        filename = json.loads(mf.decode("utf-8"))["id"] + ".splug"
+    path = os.path.join(out_dir, filename)
+    with open(path, "wb") as f:
+        f.write(blob)
+    return path
+
+
+def openssl_bin():
+    """系统 openssl 的路径；没有返回 None。"""
+    return shutil.which("openssl")
+
+
+def openssl_make_key(tmpdir, name="k"):
+    """现场生成一把 Ed25519 钥匙。返回 `(pem 路径, 32 字节裸公钥)`；失败返回 None。
+
+    ★ 为什么要真的生成：安装器验的是**真签名**。"换了一把钥匙 ⇒ 拒绝"这条判据
+      必须拿两把真的钥匙来测 —— 用两个随手编的十六进制串测，测的是字符串比较。
+    """
+    exe = openssl_bin()
+    if not exe:
+        return None
+    pem = os.path.join(tmpdir, name + ".pem")
+    r = subprocess.run([exe, "genpkey", "-algorithm", "ed25519", "-out", pem],
+                       capture_output=True)
+    if r.returncode != 0:
+        return None
+    r = subprocess.run([exe, "pkey", "-in", pem, "-pubout", "-outform", "DER"],
+                       capture_output=True)
+    if r.returncode != 0:
+        return None
+    der = r.stdout
+    if len(der) != 12 + 32:
+        return None
+    return pem, der[12:]
+
+
+def openssl_sign(pem, message):
+    """用一把私钥签一段字节。返回 64 字节签名；失败返回 None。"""
+    exe = openssl_bin()
+    if not exe:
+        return None
+    d = tempfile.mkdtemp(prefix="slurmate-sign-")
+    try:
+        mp = os.path.join(d, "m")
+        with open(mp, "wb") as f:
+            f.write(message)
+        r = subprocess.run([exe, "pkeyutl", "-sign", "-rawin", "-inkey", pem,
+                            "-in", mp], capture_output=True)
+        return r.stdout if r.returncode == 0 and len(r.stdout) == 64 else None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def sign_files(files, pem, pubkey):
+    """给一份 `[(路径, 字节)]` 签上名，返回**带签名块的那个包**的字节。
+
+    ★ 两步：先编一个不带签名的包（签名盖的是**内容摘要**，与信封无关），拿它的
+      摘要去签，然后把签名块插进信封重编一次 —— 摘要不变，所以签名仍然成立。
+      与打包器 `sign` 的做法完全一样（§4.2：签名不改内容摘要）。
+    """
+    bare = build_package(files)
+    r = MOD.package_parse(bare)
+    if not r["ok"]:
+        return None
+    sig = openssl_sign(pem, bytes.fromhex(r["digest"]))
+    if sig is None:
+        return None
+    return build_package(files, bytes([1]) + pubkey + sig)
+
+
+def weave_one(tpl_path, plugin_pkg, name, ulid, out_path):
     """照 deploy.sh 的做法，把**一个**插件的 job/start.sh 织进模板。
 
     ★ 一个插件一份：这里与 deploy.sh 是同一段 awk、同一个标记、同样只放一个块。
       这里分叉的后果是"用例全绿、部署到真机上炸" —— 而部署脚本没法在本机跑。
       返回 awk 的 CompletedProcess（调用方要断言 returncode）。
+
+    ★ 作业侧那一份现在是从**包里**取的（`--extract-package`），与 deploy.sh 走
+      同一条路 —— 服务器上没有源码树可以读。
     """
     blocks = out_path + ".blocks"
-    with open(os.path.join(plugin_dir, "job", "start.sh"), encoding="utf-8") as f:
-        body = f.read()
+    body = MOD.package_extract(plugin_pkg, "job/start.sh").decode("utf-8")
     with open(blocks, "w", encoding="utf-8") as f:
         f.write("\n# ─── 插件 %s（id %s）──────────────────────────────\n%s\n"
                 % (name, ulid, body))
@@ -155,12 +293,22 @@ def make_config(mod, tmpdir):
     mod.LOG_DIR = os.path.join(tmpdir, "log")
     mod.SOCKET_PATH = os.path.join(tmpdir, "ctl.sock")
     # 4. **插件目录** —— 与作业脚本同理，由守护进程自身的安装位置推导，开发机上
-    #    还没部署。这里指向**仓库顶层**的 plugins/，也就是 deploy.sh 会装进去的那
-    #    两个真插件。
+    #    还没部署。这里**现场把仓库顶层 plugins/ 下那两个真插件打成包**，装进一个
+    #    临时目录 —— 正是 deploy.sh 会做的事（它也只是把 `.splug` 交给安装器）。
     #
     #    ★ 刻意用**真的那两个**而不是合成替身：插件与基座的接口正是这一版反复在
     #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
-    plugins_dir = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
+    #    ★ 也是**真的打包**（走 build_package 那个容器），不是绕过包直接摆一棵树：
+    #      "插件是一个包"正是这一版要测的东西，夹具绕过它就等于没测。
+    plugins_src = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
+    plugins_dir = os.path.join(tmpdir, "plugins")
+    os.makedirs(plugins_dir, exist_ok=True)
+    for _name in sorted(os.listdir(plugins_src)):
+        _d = os.path.join(plugins_src, _name)
+        if not os.path.isfile(os.path.join(_d, "plugin.json")):
+            continue
+        put_package(plugins_dir,
+                    plugin_files_of(_d, skip=mod.PLUGIN_COPY_SKIP))
     mod.default_plugins_dir = lambda: plugins_dir
 
     # 5. **作业脚本目录** —— 按各插件的 ULID 真织一遍（见上面第 2 条的说明）。
@@ -172,8 +320,8 @@ def make_config(mod, tmpdir):
     for _s in _specs:
         if not _s.needs_job:
             continue
-        weave_one(os.path.join(HERE, "run.sbatch"), _s.source_dir, _s.name, _s.id,
-                  os.path.join(jobs_dir, _s.id + ".sbatch"))
+        weave_one(os.path.join(HERE, "run.sbatch"), _s.source_package, _s.name,
+                  _s.id, os.path.join(jobs_dir, _s.id + ".sbatch"))
     mod.default_jobs_dir = lambda: jobs_dir
     return mod.Config(p)
 
@@ -916,6 +1064,19 @@ exit 0
     captured = {}
     seq = [0]
 
+    class _Captured(dict):
+        """`captured` 里那两个容器：**缺键时给 None，不抛**。
+
+        ★ 这不是"把用例放松一点"。这一节每一条断言的前提都是"上面某一条成立"，
+          而变异验证时那个前提**就是不成立的**。缺键时抛 `KeyError` 会让脚本
+          **崩掉**，于是它后面几十条一条都不跑 —— 而"崩掉"与"一条都不红"在输出
+          上长得一模一样，一次变异会把别的洞一起遮住（这个仓库在这上面栽过三次，
+          见 CHANGELOG 的〈两处**测试自己**的脆弱〉）。给 None 则让那些断言
+          **红掉**，那才是它们该做的事。
+        """
+        def __missing__(self, key):
+            return None
+
     def run_submit(req, allowed="normal"):
         """跑一次 op_submit。返回 (响应, 记下来的 sess/env)。"""
         seq[0] += 1
@@ -924,8 +1085,8 @@ exit 0
         captured.clear()
 
         def _sub(sess, env, h, u, usr, job_script, service_kind):
-            captured["sess"] = dict(sess)
-            captured["env"] = dict(env)
+            captured["sess"] = _Captured(sess)
+            captured["env"] = _Captured(env)
             # ★ 顺带记下这一节唯一看得见作业脚本的地方：submit 被打桩之后，
             #   argv 根本不生成，所以"选了哪一份"只能从这里看。第 17 节的纯函数
             #   用例负责断言路径算得对，这里只保证**传下来了**。
@@ -958,7 +1119,10 @@ exit 0
         finally:
             mod.run_cmd = real
         d.store.close()
-        return resp, captured.get("sess", {}), captured.get("env", {})
+        # ★ 默认值也要是 _Captured：提交**失败**时 `_sub` 根本不会被调用，
+        #   `captured` 里什么都没有 —— 那时给一个普通 `{}` 就会在下一行
+        #   `sess["cpus"]` 上抛 KeyError，把脚本带崩。
+        return resp, captured.get("sess", _Captured()), captured.get("env", _Captured())
 
     r, sess, env = run_submit({"op": "submit"})
     check("缺省提交成功", r.get("ok"), str(r))
@@ -967,9 +1131,10 @@ exit 0
     check("缺省分区是从有权限的列表里挑的（不是空）",
           sess["partition"] in ("A6000", "RTX8000", "2080TI"), sess["partition"])
     check("响应里带回实际选中的分区（用户事先不知道）",
-          r["data"]["partition"] == sess["partition"], str(r["data"]))
+          (r.get("data") or {}).get("partition") == sess.get("partition"), str(r.get("data")))
     check("缺省无 warning（服务端没替用户改任何东西）",
-          "warning" not in r["data"], str(r["data"].get("warning")))
+          "warning" not in (r.get("data") or {}),
+          str((r.get("data") or {}).get("warning")))
     check("环境变量带上了分区与资源",
           env.get("SLURMATE_PARTITION") == sess["partition"]
           and env.get("SLURMATE_CPUS") == "2", str(env))
@@ -980,8 +1145,8 @@ exit 0
 
     r, sess, _ = run_submit({"op": "submit", "mem": "0"})
     check("mem=0 被回退到默认，且【告知】用户",
-          sess["mem"] == "8G" and "内存" in r["data"].get("warning", ""),
-          str(r["data"].get("warning")))
+          sess["mem"] == "8G" and "内存" in (r.get("data") or {}).get("warning", ""),
+          str((r.get("data") or {}).get("warning")))
 
     r, sess, _ = run_submit({"op": "submit", "partition": "2080TI"})
     check("显式分区被尊重", sess["partition"] == "2080TI", sess["partition"])
@@ -1000,8 +1165,8 @@ exit 0
     r, sess, _ = run_submit({"op": "submit", "time": "183-00:00:00"})
     check("超过分区 MaxTime 与硬上限的时间被截断",
           sess["requested_time"] == "7-00:00:00", sess["requested_time"])
-    check("截断时间会告知用户", "上限" in r["data"].get("warning", ""),
-          str(r["data"].get("warning")))
+    check("截断时间会告知用户", "上限" in (r.get("data") or {}).get("warning", ""),
+          str((r.get("data") or {}).get("warning")))
 
     r, sess, env = run_submit({"op": "submit", "time": "nonsense"})
     check("无法解析的时间 → bad_time(code 2)",
@@ -1016,11 +1181,18 @@ exit 0
     check("权限查不到 + 没点名分区 → 仍然成功（退化）", r.get("ok"), str(r))
     check("退化时 partition 为空串", sess["partition"] == "", repr(sess["partition"]))
     check("退化会告知用户实际交给了 Slurm",
-          "默认分区" in r["data"].get("warning", ""), str(r["data"].get("warning")))
-    check("退化时 sbatch 不带 -p",
-          "-p" not in mod.build_sbatch_argv(cfg, dict(sess, session_id="x"),
-                                            env, home, "/tmp/j.sbatch",
-                                            "code-server"))
+          "默认分区" in (r.get("data") or {}).get("warning", ""), str((r.get("data") or {}).get("warning")))
+    # ★ 包一层 try：这一条要断言的是"那份 argv 里没有 -p"，而**上一句失败时
+    #   `sess` 是空的**（变异验证里"提交根本没成功"正是被测的那件事）——
+    #   让它抛出去会把整个脚本带崩，而崩了与"一条都不红"在输出上分不开。
+    #   拿不到 argv 就当成一条红的，那才是它该有的结果。
+    try:
+        _argv_dead = mod.build_sbatch_argv(cfg, dict(sess, session_id="x"),
+                                           env, home, "/tmp/j.sbatch",
+                                           "code-server")
+    except Exception as _e:                                  # noqa: BLE001
+        _argv_dead = ["<拼不出 argv：%s>" % _e]
+    check("退化时 sbatch 不带 -p", "-p" not in _argv_dead, str(_argv_dead))
 
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"}, allowed="dead")
     check("权限查不到 + 点名了分区 → 拒绝（fail-closed）",
@@ -1045,8 +1217,10 @@ exit 0
     check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
           sorted(cfg.plugin_by_name) == [CS, SSHD], str(sorted(cfg.plugin_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
-    check("每个 spec 都记得自己是从哪个目录扫出来的（只用于报错）",
-          all(s.source_dir for s in cfg.plugin_specs))
+    check("每个 spec 都记得自己的**包**在哪（分发与报错都用它）",
+          all(s.source_package and s.source_package.endswith(mod.PLUGIN_PACKAGE_SUFFIX)
+              for s in cfg.plugin_specs),
+          str([s.source_package for s in cfg.plugin_specs]))
     check("★ job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
           cfg.plugin_by_name[CS].job_entry == "start_code_server"
           and cfg.plugin_by_name[SSHD].job_entry == "start_sshd",
@@ -1067,24 +1241,47 @@ exit 0
               os.path.isfile(os.path.join(cfg.jobs_dir, _s.id + ".sbatch")),
               os.path.join(cfg.jobs_dir, _s.id + ".sbatch"))
 
-    # 坏掉的插件目录：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
+    # 坏掉的包：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
     # 带走整个站点 —— 而静默跳过同样不行（"我明明装了啊"会变成一句谁也答不上来的话）。
     _baddir = os.path.join(tmpdir, "plugins-broken")
-    os.makedirs(os.path.join(_baddir, "good"), exist_ok=True)
-    os.makedirs(os.path.join(_baddir, "bad-json"), exist_ok=True)
-    os.makedirs(os.path.join(_baddir, "missing-manifest"), exist_ok=True)
-    shutil.copy(os.path.join(HERE, os.pardir, "plugins", CS, "plugin.json"),
-                os.path.join(_baddir, "good", "plugin.json"))
-    with open(os.path.join(_baddir, "bad-json", "plugin.json"), "w",
-              encoding="utf-8") as _f:
-        _f.write("{ 这不是 JSON")
+    os.makedirs(_baddir, exist_ok=True)
+    with open(os.path.join(HERE, os.pardir, "plugins", CS, "plugin.json"),
+              "rb") as _f:
+        _cs_manifest = _f.read()
+    put_package(_baddir, [("plugin.json", _cs_manifest)])          # 好的那一份
+    # 坏①：根本不是包（下载了一半的字节）
+    with open(os.path.join(_baddir, "half-download.splug"), "wb") as _f:
+        _f.write(b"splug\x1a\r\n\x00\x00")
+    # 坏②：是一个能解析的包，但负载里没有 plugin.json
+    put_package(_baddir, [("README.md", b"x\n")],
+                filename="01M2JKHTZGQ7X8V4T5R6N7B8C9.splug")
+    # 坏③：**旧布局的目录**（更早那版布局）。它不是"跳过"，是一条明确的错误 ——
+    #       因为它意味着 root 拥有的一整套副本还留在盘上、而守护进程不会去读它。
+    os.makedirs(os.path.join(_baddir, "old-layout"), exist_ok=True)
+    with open(os.path.join(_baddir, "old-layout", "plugin.json"), "wb") as _f:
+        _f.write(_cs_manifest)
     _specs2, _probs2 = mod.scan_plugins(_baddir)
-    check("★ 一个坏目录不会让守护进程起不来（跳过它，其余照常）",
+    check("★ 一个坏包不会让守护进程起不来（跳过它，其余照常）",
           [s.name for s in _specs2] == [CS], str([s.name for s in _specs2]))
-    check("★ 但它必须被**报出来**，而且点名是哪个目录",
-          len(_probs2) == 2 and any("bad-json" in p for p in _probs2)
-          and any("missing-manifest" in p for p in _probs2),
+    check("★ 但它必须被**报出来**，而且点名是哪一个",
+          len(_probs2) == 3 and any("half-download" in p for p in _probs2)
+          and any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p for p in _probs2)
+          and any("old-layout" in p for p in _probs2),
           str(_probs2))
+    # ★ 旧布局报出来的那句话必须指回 deploy.sh —— 它不是"你自己想办法"，而是
+    #   "跑一次部署，安装器会按 .deployed 标记清掉它"。
+    check("★★ 旧布局目录那条错误指回 deploy.sh（否则运维不知道该做什么）",
+          any("old-layout" in p and "deploy.sh" in p for p in _probs2),
+          str([p[:80] for p in _probs2]))
+    # ★ 而**非包非目录**的普通文件同样报出来：`PLUGINS_SRC` 里放错东西时，
+    #   预检就该红，而不是等到守护进程扫完一圈什么都不说。
+    _stray = os.path.join(tmpdir, "plugins-stray")
+    os.makedirs(_stray, exist_ok=True)
+    with open(os.path.join(_stray, "notes.txt"), "w", encoding="utf-8") as _f:
+        _f.write("随手放在这儿的东西\n")
+    _sx, _px = mod.scan_plugins(_stray)
+    check("★ 目录里一个普通的文件也被点名（不是悄悄忽略）",
+          _sx == () and len(_px) == 1 and "notes.txt" in _px[0], str(_px))
 
     # 零插件：**合法状态**，不是"安装包坏了"。
     _emptydir = os.path.join(tmpdir, "plugins-empty")
@@ -1099,14 +1296,13 @@ exit 0
     #
     # 守护进程是 Python、客户端是 JS，两边各自实现同一套清单规则。规则漂了的后果
     # 不是崩溃，而是**一边收下、一边拒了**，而报错只会说"清单不合法"。
-    def _manifest(text):
-        # 布局是 <扫描目录>/<任意目录名>/plugin.json —— **目录名不参与身份判定**，
-        # 所以这里故意用一个与短名无关的名字。
-        d = os.path.join(tmpdir, "mf-%d" % time.time_ns(), "whatever")
+    def _manifest(text, name="whatever.splug"):
+        # 一份清单编成一个包再扫 —— **包的文件名不参与身份判定**，所以这里故意用
+        # 一个与短名无关的名字。
+        d = os.path.join(tmpdir, "mf-%d" % time.time_ns())
         os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "plugin.json"), "w", encoding="utf-8") as f:
-            f.write(text)
-        return mod.scan_plugins(os.path.dirname(d))
+        put_package(d, [("plugin.json", text.encode("utf-8"))], filename=name)
+        return mod.scan_plugins(d)
 
     _okmf = json.dumps({
         "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup", "version": "1.0.0",
@@ -1118,7 +1314,7 @@ exit 0
               _s[0].needs_pubkey is False and _s[0].default_enabled is False
               and _s[0].bin_env is None)
         check("displayName 缺了就退回短名（它不影响任何判定，不该因此拒收）",
-              mod.parse_plugin_manifest("x/plugin.json",
+              mod.parse_plugin_manifest("x.splug:plugin.json",
                                         {"id": _s[0].id, "name": "jup",
                                          "version": "1.0.0",
                                          "site": {"defaultCpus": 1,
@@ -1172,18 +1368,22 @@ exit 0
         check("清单：%s → 被拦下" % _why, _s2 == () and _kw in _msg2,
               (_msg2[:130] or str(_s2)))
 
-    # 短名撞车：两个目录抢一个短名 —— **两个都不收**。挑一个的后果是"哪个生效"
-    # 取决于目录名的字典序，而那是没人会想到去查的地方。
+    # 短名撞车：两个包抢一个短名 —— **两个都不收**。挑一个的后果是"哪个生效"
+    # 取决于文件名的字典序，而那是没人会想到去查的地方。
+    #
+    # ★ 它们的 **id 不同**（真实世界里同 id 的两个包会落到同一个文件名上、由
+    #   安装器在装的那一刻拦掉，见 19.15）。这里要测的是短名这一条判据本身：
+    #   `scan_plugins` 是守护进程**启动时**的最后一道，它必须在包已经在盘上之后
+    #   仍然拦得住。
     _dupdir = os.path.join(tmpdir, "plugins-dup")
-    for _sub, _ver in (("a", "1.0.0"), ("b", "2.0.0")):
-        os.makedirs(os.path.join(_dupdir, _sub), exist_ok=True)
-        with open(os.path.join(_dupdir, _sub, "plugin.json"), "w",
-                  encoding="utf-8") as _f:
-            _f.write(json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
-                                 "version": _ver,
-                                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}))
+    os.makedirs(_dupdir, exist_ok=True)
+    for _sub, _ver, _uid in (("a", "1.0.0", "01M2JKHTZGKJBFQQTWYXMQMF2V"),
+                             ("b", "2.0.0", "01M2JKHTZGKJBFQQTWYXMQMF3A")):
+        put_package(_dupdir, [("plugin.json", json.dumps(
+            {"id": _uid, "name": "jup", "version": _ver,
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
     _s3, _p3 = mod.scan_plugins(_dupdir)
-    check("★ 两个目录抢一个短名 → 两个都不加载（挑一个等于让目录名决定行为）",
+    check("★ 两个包抢一个短名 → 两个都不加载（挑一个等于让文件名决定行为）",
           _s3 == () and any("重复" in p for p in _p3), "%s / %s" % (_s3, _p3))
 
     # 19.0b2 ★★ 版本号：两套方案，一条比较规则 —— 夹具与**客户端读的是同一份**
@@ -1256,15 +1456,12 @@ exit 0
     # 一句注释。这里合成一个全新的插件（仓库里没有它、守护进程更没听说过它），
     # 然后走一遍：扫描 → 配置块 → 提交 → 环境变量 → op_plugins。
     _thirddir = os.path.join(tmpdir, "plugins-third")
-    os.makedirs(os.path.join(_thirddir, "jup", "job"), exist_ok=True)
-    # 作业侧那一半。**必须真的写一份**：没有它这个插件就是"合法但提交不了"，
-    # 而这一节要验的恰恰是"能提交"。没有作业侧那一态由 19.0e 专门覆盖。
-    with open(os.path.join(_thirddir, "jup", "job", "start.sh"), "w",
-              encoding="utf-8") as _f:
-        _f.write("start_jup() { :; }\n")
-    with open(os.path.join(_thirddir, "jup", "plugin.json"), "w",
-              encoding="utf-8") as _f:
-        _f.write(json.dumps({
+    os.makedirs(_thirddir, exist_ok=True)
+    put_package(_thirddir, [
+        # 作业侧那一半。**必须真的放一份**：没有它这个插件就是"合法但提交不了"，
+        # 而这一节要验的恰恰是"能提交"。没有作业侧那一态由 19.0e 专门覆盖。
+        ("job/start.sh", b"start_jup() { :; }\n"),
+        ("plugin.json", json.dumps({
             "id": "01M2JKHTZGKJBFQQTWYXMQMF2X", "name": "jup",
             "version": "2.1.0", "displayName": "Jupyter",
             "engines": {"slurmate": ">=0.5"},
@@ -1274,7 +1471,8 @@ exit 0
                              "fallback": "/usr/local/bin/jupyter"},
                      "enumKeys": {"token_mode": {"choices": ["auto", "none"],
                                                  "default": "auto"}}},
-        }))
+        }).encode("utf-8")),
+    ])
     _specs4, _probs4 = mod.scan_plugins(_thirddir)
     check("★ 一个守护进程从没听说过的插件被扫进来，一行代码都没改",
           _probs4 == () and [x.name for x in _specs4] == ["jup"], str(_probs4))
@@ -1323,7 +1521,8 @@ exit 0
               "jup" in _pnames, str(sorted(_pnames)))
         # ★ can_submit：服务端把「开了 **且** 有作业侧」合成一个答案发出去，
         #   客户端据此画灰按钮。两个事实客户端只看得到前一个。
-        _jup_row = next(x for x in _pj["data"]["plugins"] if x["name"] == "jup")
+        _jup_row = next((x for x in (_pj.get("data") or {}).get("plugins", [])
+                         if x["name"] == "jup"), {})
         check("★ op_plugins 报出 can_submit=true（开了 + 有作业侧）",
               _jup_row.get("can_submit") is True, str(_jup_row))
     finally:
@@ -1340,20 +1539,22 @@ exit 0
     #   · `op_submit` 明确拒绝（code 4 / service_kind_no_job），不是排完队才失败；
     #   · `op_plugins` 的 can_submit=false —— 界面据此画灰按钮，用户不必点了才知道。
     _nojdir = os.path.join(tmpdir, "plugins-nojob")
-    os.makedirs(os.path.join(_nojdir, "decl"), exist_ok=True)
-    with open(os.path.join(_nojdir, "decl", "plugin.json"), "w",
-              encoding="utf-8") as _f:
-        _f.write(json.dumps({
-            "id": "01M2JKHTZGKJBFQQTWYXMQMF30", "name": "decl",
-            "version": "1.0.0", "displayName": "声明式",
-            "engines": {"slurmate": ">=0.5"},
-            "site": {"defaultCpus": 1, "defaultMem": "2G"}}))
+    os.makedirs(_nojdir, exist_ok=True)
+    put_package(_nojdir, [("plugin.json", json.dumps({
+        "id": "01M2JKHTZGKJBFQQTWYXMQMF30", "name": "decl",
+        "version": "1.0.0", "displayName": "声明式",
+        "engines": {"slurmate": ">=0.5"},
+        "site": {"defaultCpus": 1, "defaultMem": "2G"}}).encode("utf-8"))])
     _specs5, _probs5 = mod.scan_plugins(_nojdir)
-    check("★ 没有 job/start.sh 的插件能被扫进来（合法，不是坏清单）",
+    check("★ 包里没有 job/start.sh 的插件能被扫进来（合法，不是坏包）",
           _probs5 == () and [x.name for x in _specs5] == ["decl"], str(_probs5))
     _decl = _specs5[0]
     check("★ 它被记为「没有作业侧」，而不是「坏掉的插件」",
           _decl.needs_job is False, str(_decl.needs_job))
+    check("★ 判据来自**包里的记录表**（服务器上没有磁盘上的 job/start.sh 可查）",
+          "job/start.sh" not in [f["path"] for f in
+                                 mod.package_read_file(_decl.source_package)["files"]],
+          _decl.source_package)
 
     _sj, _bj, _pj2, _kj, _dj = (cfg.plugin_specs, cfg.plugin_by_name,
                                 cfg.plugins, cfg.enabled_kinds, cfg.default_plugin)
@@ -1393,7 +1594,8 @@ exit 0
               str(_r8["error"].get("detail"))[:200])
 
         _pj3 = d.dispatch(UID, os.getgid(), {"op": "plugins"})
-        _decl_row = next(x for x in _pj3["data"]["plugins"] if x["name"] == "decl")
+        _decl_row = next((x for x in (_pj3.get("data") or {}).get("plugins", [])
+                          if x["name"] == "decl"), {})
         check("★ op_plugins 报出 can_submit=false —— 界面据此画灰按钮，"
               "用户不必点下去才知道",
               _decl_row.get("can_submit") is False, str(_decl_row))
@@ -1753,7 +1955,11 @@ exit 0
         _st2 = mod.Store(os.path.join(tmpdir, "submit-%d.db" % seq[0]))
         # 站点"升级"了这个插件
         _cs_spec.version = "9.9.9"
-        _now = d.session_view(_st2.get(_sid), with_secret=False)
+        # ★ 提交失败时 `_sid` 是 None（`_Captured` 给的是 None），而
+        #   `session_view(None)` 会在守护进程里抛 —— 那会把脚本带崩，于是
+        #   "崩了"与"一条都不红"分不开。取不到那一行就当成一条红的。
+        _row = _st2.get(_sid) if _sid else None
+        _now = d.session_view(_row, with_secret=False) if _row else {}
         check("★★ 站点升级插件之后，已跑的会话仍然报**它起时那一版**",
               _now.get("service_plugin") == _before,
               "起时 %r，升级后报 %r（现算的话这一条会红）"
@@ -1871,10 +2077,13 @@ exit 0
     _cands_env = _e.get("SLURMATE_CANDIDATES", "")
     check("★ 候选端口表用分号分隔（逗号会被 sbatch 的 --export 切碎，只剩第一个）",
           ";" in _cands_env and "," not in _cands_env, repr(_cands_env))
+    # ★ 全部走 `.get`：提交失败时 `_s` 是那个"缺键给 None"的容器，裸下标会抛
+    #   AttributeError 把脚本带崩（见第 18 节 `_Captured` 那段说明）。
+    _db_cands = (_s.get("candidates") or "")
     check("★ 候选个数没被截断成一个",
-          len(_cands_env.split(";")) == len(_s["candidates"].split(",")),
+          bool(_cands_env) and len(_cands_env.split(";")) == len(_db_cands.split(",")),
           "%d 个 vs 数据库里 %d 个"
-          % (len(_cands_env.split(";")), len(_s["candidates"].split(","))))
+          % (len(_cands_env.split(";")), len(_db_cands.split(","))))
 
     # 19.10 ★ 作业内 sshd 的主机公钥
     # 客户端拿它把这一条【预先】写进 known_hosts，从而能用 StrictHostKeyChecking yes
@@ -1962,31 +2171,28 @@ exit 0
 
     for _n, _dir in ((CS, _p2[CS]), (SSHD, _p2[SSHD])):
         _spec = cfg.plugin_by_name[_n]
-        _real = mod.plugin_file_index(_spec.source_dir)
+        _real = mod.plugin_file_index(_spec.source_package)
         _got = [(f["path"], f["size"], f["sha256"]) for f in _dir["files"]]
-        check("★ 「%s」的清单与磁盘逐项相符（自己重算一遍 sha256，不信任何缓存）" % _n,
-              _got == [(r, s, h) for r, (_f, s, h) in sorted(_real.items())],
+        check("★ 「%s」的清单与**包里的记录表**逐项相符（自己重算一遍 sha256）" % _n,
+              _got == [(r, s, h) for r, (s, h) in sorted(_real.items())],
               "%d 项 vs %d 项" % (len(_got), len(_real)))
-        check("清单按路径排序（同一棵树每次报出来的顺序必须一样）",
+        check("清单按路径排序（同一份包每次报出来的顺序必须一样）",
               [x[0] for x in _got] == sorted(x[0] for x in _got),
               str([x[0] for x in _got]))
-        check("★ 清单里没有符号链接（客户端重建不出来一份链接）",
-              all(not os.path.islink(os.path.join(_spec.source_dir, p))
-                  for p, _s, _h in _got))
 
-    # 逐个文件取回来，与磁盘**逐字节**比。清单报的 sha256 与 data 是同一份自述，
-    # 客户端不能拿它当判据 —— 但守护进程**发**的字节必须真的就是盘上那一份。
+    # 逐个文件取回来，与**包里的那一份**逐字节比。清单报的 sha256 与 data 是同一份
+    # 自述，客户端不能拿它当判据 —— 但守护进程**发**的字节必须真的就是包里那一份。
     _cs_spec = cfg.plugin_by_name[CS]
+    _cs_blob = mod.package_read_file(_cs_spec.source_package)["data"]
     _nfile = 0
     for _path in [f["path"] for f in _p2[CS]["files"]]:
         _fr = _pf({"op": "plugin_file", "id": _cs_spec.id,
                    "version": _cs_spec.version, "path": _path})
         check("取 %s 成功" % _path, _fr.get("ok"), str(_fr)[:160])
-        _bytes = base64.b64decode(_fr["data"]["data"])
-        with open(os.path.join(_cs_spec.source_dir, _path), "rb") as _f:
-            _disk = _f.read()
-        check("★ %s 取回来的字节与磁盘全等" % _path, _bytes == _disk,
-              "%d vs %d 字节" % (len(_bytes), len(_disk)))
+        _bytes = base64.b64decode((_fr.get("data") or {}).get("data") or "")
+        _disk = mod.package_extract(_cs_spec.source_package, _path)
+        check("★ %s 取回来的字节与包里那一份全等" % _path, _bytes == _disk,
+              "%d vs %d 字节" % (len(_bytes), len(_disk or b"")))
         _nfile += 1
     check("这一组用例真的取过文件（否则上面那些是空断言）", _nfile >= 4,
           "取了 %d 份" % _nfile)
@@ -1994,11 +2200,18 @@ exit 0
     # 那一轮记下的值比），但两者应该是一致的 —— 不一致说明这里有 bug。
     _one = _pf({"op": "plugin_file", "id": _cs_spec.id,
                 "version": _cs_spec.version, "path": "plugin.json"})
-    _declared = next(f for f in _p2[CS]["files"] if f["path"] == "plugin.json")
+    # ★ `next(..., None)` 而不是裸 `next()`：变异验证时"清单是空的"正是被测的
+    #   那件事，而裸 next 会抛 StopIteration 把脚本**带崩** —— 崩了与"一条都不红"
+    #   在输出上分不开（见第 18 节那个 _Captured 的说明）。
+    _declared = next((f for f in _p2[CS]["files"] if f["path"] == "plugin.json"),
+                     None)
+    # ★ 全部走 `.get`：变异验证时"取不到"与"清单是空的"正是被测的那件事，
+    #   而裸下标会抛 TypeError 把脚本**带崩**（崩了与"一条都不红"在输出上分不开）。
+    _one_data = (_one.get("data") or {})
     check("plugin_file 回带的 size/sha256 与清单里那一份相同",
-          _one["data"]["size"] == _declared["size"]
-          and _one["data"]["sha256"] == _declared["sha256"],
-          "%s vs %s" % (_one["data"], _declared))
+          _one_data.get("size") == (_declared or {}).get("size")
+          and _one_data.get("sha256") == (_declared or {}).get("sha256"),
+          "%s vs %s" % (_one_data, _declared))
 
     def _kindof(resp):
         """把一条应答归一成 `(code, kind, detail)`，**永不抛**。
@@ -2010,68 +2223,61 @@ exit 0
         e = (resp or {}).get("error") or {}
         return ((resp or {}).get("code"), e.get("kind"), e.get("detail") or "")
 
-    # ── 夹具：一个「什么邪门东西都有」的插件目录 ─────────────────────────────
+    # ── 夹具：一个「什么邪门东西都有」的插件**包** ───────────────────────────
     #
     # ★ 它必须在**第一次索引之前**就造好。索引是进程内缓存的（启动快照的语义），
-    #   而"文件建在索引之后"会让跳过表看起来生效 —— 其实只是没赶上那次缓存。
-    #   变异验证抓到的正是这一点：把跳过表改坏，用例照样绿。
-    _fx = os.path.join(tmpdir, "siteplug")
-    for _sub in ("client", "job", "node_modules", ".git"):
-        os.makedirs(os.path.join(_fx, _sub), exist_ok=True)
+    #   而"内容改在索引之后"会让用例看起来在测别的东西 —— 其实只是没赶上缓存。
+    #
+    # ★ 这个夹具**瘦了一圈**，是这一版的正经收益、不是漏测：从前这里要摆
+    #   `.gitignore`、`node_modules/`、两个符号链接，来演"哪些东西不该进清单"。
+    #   现在这些**在包里表达不出来** ——
+    #     · 跳过集里的名字是**解析器的拒绝规则**（§3.3），见 19.14 的坏包
+    #       「路径落在跳过集合里」；
+    #     · 负载里没有"链接"这种条目（附录 A.3 是一条 `路径 | 字节`），所以
+    #       「客户端重建不出来一份链接」这一态**不存在**了，`plugin_symlinks()`
+    #       也随之删掉。
+    #   于是这一段从"证明过滤器写对了"变成"证明那些东西**根本进不来**"。
+    _fx = os.path.join(tmpdir, "siteplug-pkgs")
+    os.makedirs(_fx, exist_ok=True)
+    _fx_files = [
+        ("plugin.json", b'{"id":"%s","name":"siteplug","displayName":"x","version":"1.0.0"}'
+         % _cs_spec.id.encode()),
+        ("client/index.js", b"module.exports = {};\n"),
+        ("client/sshconfig.js", "// 插件的自有模块\n".encode("utf-8")),
+        ("job/start.sh", b"start_siteplug() { :; }\n"),
+        ("huge.bin", b"x" * (mod.PLUGIN_FILE_MAX_BYTES + 1)),
+        ("small.bin", b"y" * 16),
+    ]
+    _fx_pkg = put_package(_fx, _fx_files, filename="01M2JKHTZGKJBFQQTWYXMQMFZZ.splug")
+    # ★ 而这些**编不进包**：跳过集里的名字会被解析器拒掉，符号链接连表达都表达不出来。
+    _fx_probe = os.path.join(tmpdir, "siteplug-probe")
+    os.makedirs(_fx_probe, exist_ok=True)
+    _pfx_is_pkg = {
+        _p: mod.package_parse(build_package([(nm, blob) for nm, blob in _fx_files]
+                                            + [(_p, b"x\n")]))["ok"]
+        for _p in (".gitignore", "node_modules/x.js", "client/.git/config")}
+    check("★★ 跳过集里的路径**编不成一个合法的包**（它在解析器那里就被拒）",
+          not any(_pfx_is_pkg.values()), str(_pfx_is_pkg))
+    check("★ 而且对照：同样这些内容、不加那一条，就是一个能解析的包",
+          mod.package_parse(build_package(_fx_files))["ok"])
 
-    def _w(rel, blob):
-        with open(os.path.join(_fx, rel), "wb") as _f:
-            _f.write(blob)
-
-    _w("plugin.json", b'{"id":"%s","name":"siteplug","displayName":"x","version":"1.0.0"}'
-       % _cs_spec.id.encode())
-    _w("client/index.js", b"module.exports = {};\n")
-    _w("client/sshconfig.js", "// 插件的自有模块\n".encode("utf-8"))
-    _w("job/start.sh", b"start_siteplug() { :; }\n")
-    _w(".gitignore", b"*.log\n")                     # 跳过表里的**文件**
-    _w(".git/config", b"[remote \"origin\"]\n")      # 跳过表里的**目录**
-    _w("node_modules/x.js", "// 谁都不该看见这个\n".encode("utf-8"))
-    _w("huge.bin", b"x" * (mod.PLUGIN_FILE_MAX_BYTES + 1))
-    _w("small.bin", b"y" * 16)
-    os.symlink("client/index.js", os.path.join(_fx, "link.js"))     # 文件链接
-    os.symlink("client", os.path.join(_fx, "dirlink"))              # 目录链接
-
-    _saved_src = _cs_spec.source_dir
+    _saved_src = _cs_spec.source_package
     try:
-        _cs_spec.source_dir = _fx
+        _cs_spec.source_package = _fx_pkg
         _d2._plugin_index_cache.clear()
 
-        # ── 跳过表对**文件**同样生效 ──
-        #
-        # 客户端的 COPY_SKIP 是 copyTree 里对**任何条目**的判定。这边只过滤目录
-        # 不过滤文件的话，两端对"这个插件由哪些文件组成"就各执一词：客户端下回来
-        # 一份自己不算数的文件；而 `.git/config`（可能带远端地址）会被发到每一个
-        # 用户的机器上。变异验证 M3 抓到过这一条。
         _fx_paths = [f["path"]
-                     for x in _pf({"op": "plugins"})["data"]["plugins"]
+                     for x in (_pf({"op": "plugins"}).get("data") or {}).get(
+                         "plugins", [])
                      if x["name"] == CS for f in x["files"]]
-        check("★★ 跳过表里的**文件**不进清单（.gitignore）",
-              ".gitignore" not in _fx_paths, str(_fx_paths))
-        check("★★ 跳过表里的**目录**整棵不进清单（.git / node_modules）",
-              not any(p.startswith((".git/", "node_modules/")) for p in _fx_paths),
-              str(_fx_paths))
-        check("★ 符号链接不进清单（文件链接与目录链接都不进）",
-              "link.js" not in _fx_paths
-              and not any(p.startswith("dirlink/") for p in _fx_paths),
-              str(_fx_paths))
-        check("对照：普通的那些文件都在清单里（上面几条不是「一律为空」）",
+        check("对照：包里那些文件都在清单里（下面几条不是「一律为空」）",
               {"plugin.json", "client/index.js", "client/sshconfig.js",
-               "job/start.sh"} <= set(_fx_paths), str(_fx_paths))
-        check("plugin_symlinks 把两个链接都报出来了（--check-plugins 靠它打 ⚠）",
-              mod.plugin_symlinks(_fx) == ["dirlink", "link.js"],
-              str(mod.plugin_symlinks(_fx)))
+               "job/start.sh", "small.bin"} <= set(_fx_paths), str(_fx_paths))
 
         # ── 白名单：全部走同一条出口 ──
         #
         # 每一条都必须 `3 plugin_file_unknown` —— 而不是 `9 internal`（被 dispatch
-        # 的兜底吃掉）、也不是"恰好读到了"。中间那几条是**磁盘上真的存在、却没有
-        # 进清单**的东西：它们证明"不在清单里"是真的在起作用，而不是"这些名字碰巧
-        # 都不存在"。
+        # 的兜底吃掉）、也不是"恰好读到了"。
         _bad_paths = [
             ("相对上跳", "../plugin.json"),
             ("绝对路径", "/etc/passwd"),
@@ -2079,12 +2285,8 @@ exit 0
             ("空串", ""),
             ("NUL", "plugin.json\x00.txt"),
             ("反斜杠", "client\\index.js"),
-            ("跳过表里的文件（磁盘上真有）", ".gitignore"),
-            ("跳过表里的目录（磁盘上真有）", ".git/config"),
-            ("跳过表里的目录", "node_modules/x.js"),
-            ("符号链接（磁盘上真有）", "link.js"),
-            ("目录链接里的一份（磁盘上真有）", "dirlink/index.js"),
             ("同类不同名", "plugin.json.bak"),
+            ("包里有同名的一份、但前缀不同", "client/index.js.bak"),
         ]
         for _why, _bad in _bad_paths:
             _bc, _bk, _bd = _kindof(_pf({"op": "plugin_file", "id": _cs_spec.id,
@@ -2119,14 +2321,16 @@ exit 0
         check("★ 报出来的那句话里有实际字节数与上限（运维要照着调）",
               str(mod.PLUGIN_FILE_MAX_BYTES) in _ld and str(len(b"x") *
                   (mod.PLUGIN_FILE_MAX_BYTES + 1)) in _ld, repr(_ld[:120]))
-        check("同目录下没超限的那一份照常取得到（不是整个目录被拒）",
+        check("同一份包里没超限的那一份照常取得到（不是整包被拒）",
               _pf({"op": "plugin_file", "id": _cs_spec.id,
                    "version": _cs_spec.version, "path": "small.bin"}).get("ok"))
 
-        # ★ 本进程启动之后文件被换过 ⇒ 这里就要说出来，而不是把对不上的字节发出去
+        # ★ 本进程启动之后**包被换过** ⇒ 这里就要说出来，而不是把对不上的字节发出去
         #   让客户端去报"校验不过"。要换插件内容，就该升版本号 + 重跑部署 ——
         #   就地改文件从来不是一条被支持的路径。
-        _w("small.bin", b"z" * 32)
+        put_package(_fx, [(nm, b"z" * 32 if nm == "small.bin" else blob)
+                          for nm, blob in _fx_files],
+                    filename="01M2JKHTZGKJBFQQTWYXMQMFZZ.splug")
         _cc, _ck, _cd = _kindof(_pf({"op": "plugin_file", "id": _cs_spec.id,
                                      "version": _cs_spec.version, "path": "small.bin"}))
         check("★★ 文件在本次启动之后被换过 ⇒ 9 plugin_file_changed",
@@ -2134,16 +2338,17 @@ exit 0
               "code=%s kind=%s" % (_cc, _ck))
         check("★ 而且那句话指向「重跑一次 deploy.sh」，不是指回客户端",
               "deploy.sh" in _cd, repr(_cd[:120]))
-        _sha_now = next(f["sha256"]
-                        for x in _pf({"op": "plugins"})["data"]["plugins"]
-                        if x["name"] == CS
-                        for f in x["files"] if f["path"] == "small.bin")
+        _sha_now = next((f["sha256"]
+                         for x in (_pf({"op": "plugins"}).get("data") or {}).get(
+                             "plugins", [])
+                         if x["name"] == CS
+                         for f in x["files"] if f["path"] == "small.bin"), None)
         check("★★ 索引是**启动快照**：改完之后 op_plugins 报的还是当初那一份",
               _sha_now == hashlib.sha256(b"y" * 16).hexdigest(),
-              "%s（盘上现在是 %s）"
+              "%s（包现在是 %s）"
               % (_sha_now, hashlib.sha256(b"z" * 32).hexdigest()))
     finally:
-        _cs_spec.source_dir = _saved_src
+        _cs_spec.source_package = _saved_src
         _d2._plugin_index_cache.clear()
     _d2.store.close()
 
@@ -2222,7 +2427,7 @@ exit 0
     #   照抄的那一份永远不会跟着 deploy.sh 改，于是"用例绿了、真机上炸了" ——
     #   而 deploy.sh 本机跑不了（要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）。
     #   抠出来跑是这里唯一能真的验到那个函数的地方。
-    print("\n── 19.13. 部署的信任门 ⊇ 站点会分发的文件 ──")
+    print("\n── 19.13. 部署的信任门 ⊇ 会被安装的那一批包 ──")
     _dep = os.path.join(HERE, "deploy.sh")
     with open(_dep, encoding="utf-8") as _f:
         _dep_src = _f.read()
@@ -2240,54 +2445,65 @@ exit 0
                 capture_output=True, text=True)
             return {l for l in r.stdout.split("\n") if l}
 
-        # ① 真树：仓库里那两个插件，逐份比对
-        _real = os.path.abspath(os.path.join(HERE, os.pardir, "plugins"))
-        _gated_real = _gated(_real)
-        for _name in sorted(os.listdir(_real)):
-            _pdir = os.path.join(_real, _name)
-            if not os.path.isfile(os.path.join(_pdir, "plugin.json")):
-                continue
-            _will_send = {os.path.join(_pdir, _rel)
-                          for _rel in mod.plugin_file_index(_pdir)}
-            _missing = sorted(_will_send - _gated_real)
-            check("★★ 插件「%s」会分发的每一份文件都过了部署的信任门" % _name,
-                  not _missing,
-                  "没进名单的是：%s" % _missing)
-            _js = sorted(p for p in _will_send
-                         if p.endswith(".js")
-                         and (os.sep + "client" + os.sep) in p)
-            check("★ 而它客户端那一半也在名单里（%d 份 .js）" % len(_js),
-                  bool(_js) and set(_js) <= _gated_real,
-                  repr(_js))
-        check("★ 客户端代码真的进了名单（不是恰好都对的空集）",
-              any((os.sep + "client" + os.sep) in p for p in _gated_real),
-              repr(sorted(_gated_real))[:160])
-
-        # ② 合成树：不是插件的目录整个不进名单 —— 防的是源目录里一个恰好存在的
-        #    `.git`（或任何没 plugin.json 的目录）被当成插件目录，把整个对象库
-        #    拖进信任检查里（那会让部署在一个跟插件无关的理由上失败）。
+        # ── ① 合成目录：**只有 `.splug` 进名单，而且是普通文件的那种** ──
+        #
+        # ★ 这里比从前**更容易写错**，所以要逐种排除：「一个包」现在是一个文件，
+        #   而文件名可以随便起 —— 包括起成 `x.splug` 却是一个**符号链接**。
+        #   链接能指向任何地方、还能随时换目标，所以它必须像别的东西一样被挡在
+        #   门外。`-f` 会跟随链接，所以判据里那一句 `! -L` 是承重的。
         _tmp = tempfile.mkdtemp(prefix="slurmate-gate-")
         try:
-            os.makedirs(os.path.join(_tmp, "real", "client"))
-            with open(os.path.join(_tmp, "real", "plugin.json"), "w") as _f:
-                _f.write("{}")
-            with open(os.path.join(_tmp, "real", "client", "index.js"), "w") as _f:
-                _f.write("// x\n")
-            os.makedirs(os.path.join(_tmp, ".git"))
-            with open(os.path.join(_tmp, ".git", "HEAD"), "w") as _f:
-                _f.write("ref: refs/heads/main\n")
-            os.makedirs(os.path.join(_tmp, "halfbaked", "job"))
-            with open(os.path.join(_tmp, "halfbaked", "job", "start.sh"),
-                      "w") as _f:
-                _f.write("start_x() { :; }\n")
+            def _touch(rel, blob=b"x\n"):
+                p = os.path.join(_tmp, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "wb") as _f:
+                    _f.write(blob)
+                return p
+
+            _real_pkg = _touch("vendor-1.0.0.splug", b"splug\x1a\r\n" + b"\0" * 12)
+            _touch("notes.txt")                    # 随手放的文件
+            _touch("README")                       # 说明文件
+            _touch("old/plugin.json", b"{}")       # 更早那版布局留下的插件目录
+            _touch("nested/deep.splug")            # 子目录里的包（不扫第二层）
+            os.symlink(_real_pkg, os.path.join(_tmp, "linked.splug"))
+            os.symlink("/etc/passwd", os.path.join(_tmp, "passwd.splug"))
             _got = _gated(_tmp)
-            check("★ 插件目录里的每一个文件都被列出来了（含 client/ 下的）",
-                  _got == {os.path.join(_tmp, "real", "plugin.json"),
-                           os.path.join(_tmp, "real", "client", "index.js")},
-                  repr(sorted(_got)))
-            check("★★ 不是插件的目录（没有 plugin.json）整个不进名单", not _got or
-                  not any("halfbaked" in p or ".git" in p for p in _got),
-                  repr(sorted(_got)))
+            check("★★ 信任门**恰好**列出那一个真正的包文件",
+                  _got == {_real_pkg}, repr(sorted(_got))[:200])
+            check("★★ 符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
+                  not any("linked.splug" in p or "passwd.splug" in p for p in _got),
+                  repr(sorted(_got))[:200])
+            check("★ 旧布局目录、散落的文件、子目录里的包都不进名单"
+                  "（它们**不该在这儿**，由 --check-plugins 逐条点名）",
+                  not any("old/" in p or "notes.txt" in p or "README" in p
+                          or "nested" in p for p in _got),
+                  repr(sorted(_got))[:200])
+
+            # ── ② ⊇：安装器拿到的就是信任门过的那一批 ──
+            #
+            # ★ 这条是**接线检查**（两个列表分家才会长出"装了但没验"的缺口），
+            #   所以它抠的是 deploy.sh 的源码：安装器的参数必须来自
+            #   `${PLUGIN_PKGS[@]}`，而那个数组必须由 `plugin_src_files()` 填。
+            #   ★ 不强求它是别的形状：这段代码只有 root 能跑（见 KNOWN-ISSUES 的
+            #     U2），在用例里没有第二种验法。
+            check("★★ 安装器的参数取自 ${PLUGIN_PKGS[@]}（不是另列一份）",
+                  re.search(r'--install-plugins"?\s*"?\$\{PLUGIN_PKGS\[@\]\}',
+                            _dep_src) is not None,
+                  "没找到 `--install-plugins \"${PLUGIN_PKGS[@]}\"`")
+            #    ★ 两处各有一份（本脚本开头、以及自拷贝之后重建路径那一处）——
+            #      少一处就会出现"从非 root 目录部署时信任门是空的"这种只在
+            #      一种部署方式下成立的假绿，所以数它个个数。
+            check("★★ PLUGIN_PKGS 的两处填充都来自 plugin_src_files()（同一个来源）",
+                  len(re.findall(r'PLUGIN_PKGS\+=\("\$f"\)', _dep_src)) == 2
+                  and len(re.findall(r"done < <\(plugin_src_files\)", _dep_src)) == 2,
+                  "填充点 %d 个 / 来源 %d 个"
+                  % (len(re.findall(r'PLUGIN_PKGS\+=\("\$f"\)', _dep_src)),
+                     len(re.findall(r"done < <\(plugin_src_files\)", _dep_src))))
+            check("★ 而它们都进 ALL_SRC_FILES（信任门与哈希基线看的是那一份）",
+                  len(re.findall(r'ALL_SRC_FILES\+=\("\$f"\)', _dep_src)) == 4,
+                  "ALL_SRC_FILES 的填充点 %d 个（4 = PLUGIN_PKGS 的两处 + "
+                  "SRC_FILES 的两处，少一处就有一批文件没进信任门）"
+                  % len(re.findall(r'ALL_SRC_FILES\+=\("\$f"\)', _dep_src)))
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)
 
@@ -2330,7 +2546,7 @@ exit 0
               _r["manifest"].get("id") == "01M2JKHTZGQ7X8V4T5R6N7B8C9",
               repr(_r["manifest"].get("id")))
         check("★ 包字节数就是夹具里那个（没有多出来的字节）",
-              len(_r["data"]) == _exp["package"]["bytes"])
+              len(_r.get("data") or b"") == _exp["package"]["bytes"])
 
         # 摘要与"喂进去的次序"无关 —— 排序是摘要的一部分（§3.4）
         _rev = mod.package_content_digest(list(reversed(_r["files"])))
@@ -2453,6 +2669,331 @@ exit 0
               and b"magic" in _badrun.stderr, repr(_badrun.stderr[:200]))
     finally:
         shutil.rmtree(os.path.dirname(_pkgfile), ignore_errors=True)
+
+    # ── 19.15 ★★ 安装器：装一个包进站点（`slurmate plugin install`）──────────
+    #
+    # 这一节是"服务器开始收外面的包"这件事**唯一**的自动化防线（deploy.sh 本机
+    # 跑不了：要 root 加一台控制节点，见 KNOWN-ISSUES 的 U2）。它钉三组判据：
+    #
+    #   ① **输入**：只收 root 控制得住、别人换不掉的普通文件；
+    #   ② **包的验证**：能解析 + 签名自洽 + 整包大小在发得出去的范围内；
+    #   ③ **与站点自己的记忆比**（§2.5 在站点这一侧的落点）：同一个 id 换了
+    #      签名者（或者从"有签名"变成"没签名"）⇒ **停下来问**，不替你选。
+    print("\n── 19.15. 安装器（装一个 .splug 进站点）──")
+
+    _ins_home = tempfile.mkdtemp(prefix="slurmate-install-")
+    try:
+        def _install(pkgs, pdir, **kw):
+            """跑一遍安装器，返回 `(退出码, 它打印的全部内容)`。
+
+            ★ 关键字参数**必须转发下去**：这里是安装器唯一的口子，而
+              `replace_key` 是一个"我确认过了"的开关 —— 夹具把它丢掉，测出来的
+              就是"确认了也没用"，而那是另一条判据。
+            """
+            buf = io.StringIO()
+            rc = mod.install_plugins(list(pkgs), pdir, say=lambda *a: buf.write(
+                (" ".join(str(x) for x in a) + "\n")), **kw)
+            return rc, buf.getvalue()
+
+        def _pkg_of(uid, name, ver="1.0.0", extra=(), sig=None, out=None):
+            """造一个最小的包；`sig=(pem, 公钥)` 时给它签名。返回它的路径。"""
+            files = [("plugin.json", json.dumps(
+                {"id": uid, "name": name, "version": ver,
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]
+            files += list(extra)
+            blob = (sign_files(files, sig[0], sig[1]) if sig
+                    else build_package(files))
+            p = os.path.join(out or _ins_home, "%s-%s.splug" % (name, ver))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(blob)
+            return p
+
+        _UID_A = "01M2JKHTZGKJBFQQTWYXMQMF50"
+        _UID_B = "01M2JKHTZGKJBFQQTWYXMQMF51"
+        _INSDIR = os.path.join(_ins_home, "plugins")
+        os.makedirs(_INSDIR, exist_ok=True)
+
+        # ── ① 输入那一关：三种"别人能在这中间把它换掉"的输入都要被拒 ──
+        #
+        # ★ 属主那一条在本机（非 root）**造不出来** —— 只有 root 能造一个属于
+        #   别人的文件。所以判据被写成一个纯函数（package_input_problem），
+        #   这里用一个**伪造的 stat 结果**把那一支走通。造不出来的检查等于没有
+        #   检查，而这一条是这三个里最要紧的（属主能随时改写自己拥有的文件）。
+        _probe = _pkg_of(_UID_A, "probe")
+
+        # 造一个"看起来像那个文件、但属主是别人"的 stat 结果。
+        # os.stat_result 的字段是 (mode, ino, dev, nlink, uid, gid, size, atime,
+        # mtime, ctime)。
+        def _st_with_uid(u):
+            return os.stat_result((0o100644, 1, 1, 1, u, u, 10, 0, 0, 0))
+
+        _alien = mod.package_input_problem(_probe, want_uid=UID, st=_st_with_uid(0))
+        check("★★ 属主不是安装器自己 ⇒ 拒绝（属主能随时改写自己拥有的文件）",
+              _alien is not None and "属于" in _alien, repr(_alien))
+        check("★ 对照：同一个文件、属主是自己 ⇒ 放行（上一条不是恒真）",
+              mod.package_input_problem(_probe, want_uid=UID,
+                                        st=_st_with_uid(UID)) is None,
+              repr(mod.package_input_problem(_probe, want_uid=UID,
+                                             st=_st_with_uid(UID))))
+
+        _link = os.path.join(_ins_home, "link.splug")
+        os.symlink(_probe, _link)
+        _rc, _out = _install([_link], _INSDIR)
+        check("★★ 符号链接冒充 `.splug` ⇒ 拒绝（目标随时可以换）",
+              _rc == 1 and "符号链接" in _out and os.listdir(_INSDIR) == [],
+              "rc=%d %r" % (_rc, _out[:160]))
+
+        _loose = _pkg_of(_UID_A, "loose")
+        os.chmod(_loose, 0o666)
+        _rc, _out = _install([_loose], _INSDIR)
+        check("★★ 组/其他人可写的包 ⇒ 拒绝（022 位）",
+              _rc == 1 and "可写" in _out and os.listdir(_INSDIR) == [],
+              "rc=%d %r" % (_rc, _out[:160]))
+        os.chmod(_loose, 0o644)
+
+        # ── ② 验签 ──
+        if not openssl_bin():
+            check("★★ 本机没有 openssl —— 安装器的验签这一路**测不了**"
+                  "（不是「跳过」，是这一节的核心没被验到）", False,
+                  "装一个 openssl 再跑")
+        else:
+            _k1 = openssl_make_key(_ins_home, "k1")
+            check("测试用的第一把 Ed25519 钥匙造出来了", _k1 is not None)
+            _signed = _pkg_of(_UID_A, "alpha", sig=_k1)
+            _rc, _out = _install([_signed], _INSDIR)
+            check("★★ 签名验过了 ⇒ 装上，而且**说出来了**",
+                  _rc == 0 and "签名验过了" in _out
+                  and os.path.isfile(os.path.join(_INSDIR, _UID_A + ".splug")),
+                  "rc=%d %r" % (_rc, _out[:300]))
+            check("★ 落地文件名是**包里的 id**（不是下载时那个文件名）",
+                  [x for x in os.listdir(_INSDIR) if x.endswith(".splug")]
+                  == [_UID_A + ".splug"], str(os.listdir(_INSDIR)))
+            check("★ 站点侧记下了「这个 id 是哪把钥匙签的」",
+                  mod.read_plugin_keys(_INSDIR, strict=True).get(
+                      _UID_A, {}).get("fingerprint")
+                  == hashlib.sha256(_k1[1]).hexdigest(),
+                  str(mod.read_plugin_keys(_INSDIR)))
+
+            # 装完之后守护进程真的认它 —— 装得上、扫不出，是最坏的那种失败。
+            _ispecs, _iprobs = mod.scan_plugins(_INSDIR)
+            check("★★ 装进去的那个包，守护进程扫得出来（装得上就得认得出）",
+                  _iprobs == () and [s.name for s in _ispecs] == ["alpha"],
+                  "%s / %s" % ([s.name for s in _ispecs], _iprobs))
+
+            # 签名被改了一位 ⇒ 拒绝，并且**一个字节都不写**。
+            #
+            # ★ 改的必须是签名块里那 64 个字节：改**负载**任何一个字节会被
+            #   `content` 那条判据先抓住（记录里的 sha256 对不上），那是另一条
+            #   判据 —— 拿它当"验签失败"测，测的是一个根本没走到验签的包。
+            _bare_files = [("plugin.json", json.dumps(
+                {"id": _UID_A, "name": "alpha", "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]
+            _bare_blob = build_package(_bare_files)
+            _sig64 = openssl_sign(_k1[0], bytes.fromhex(
+                mod.package_parse(_bare_blob)["digest"]))
+            _flipped = bytes([_sig64[0] ^ 0x01]) + _sig64[1:]
+            _tp = os.path.join(_ins_home, "tampered.splug")
+            with open(_tp, "wb") as _f:
+                _f.write(build_package(_bare_files,
+                                       bytes([1]) + _k1[1] + _flipped))
+            _before = sorted(os.listdir(_INSDIR))
+            _rc, _out = _install([_tp], _INSDIR)
+            check("★★ 签名对不上（内容被改过）⇒ 拒绝，且一个字节都不写",
+                  _rc == 1 and "签名验不过" in _out
+                  and sorted(os.listdir(_INSDIR)) == _before,
+                  "rc=%d %r" % (_rc, _out[:200]))
+
+            # ★ 验不了 ≠ 验过了。把 openssl 从 PATH 上拿掉（这里靠改常量模拟），
+            #   有签名的包必须**拒绝** —— 而报出来的话要说清是"验不了"。
+            _saved_ossl = mod.PLUGIN_OPENSSL
+            mod.PLUGIN_OPENSSL = "slurmate-no-such-openssl"
+            try:
+                _rc, _out = _install([_signed], _INSDIR)
+                check("★★ 本机验不了签名 ⇒ **拒绝**（不装一个没验过的包）",
+                      _rc == 1 and "验不了" in _out, "rc=%d %r" % (_rc, _out[:240]))
+                check("★ 而且那句话指路（装上 openssl 再试），不是一句「失败了」",
+                      "openssl" in _out and "pkeyutl" in _out, repr(_out[:240]))
+            finally:
+                mod.PLUGIN_OPENSSL = _saved_ossl
+
+            # ── ③ 与站点自己的记忆比（§2.5 在站点这一侧）──
+            _k2 = openssl_make_key(_ins_home, "k2")
+            _fk1 = hashlib.sha256(_k1[1]).hexdigest()
+            _other = _pkg_of(_UID_A, "alpha", ver="2.0.0", sig=_k2)
+            _rc, _out = _install([_other], _INSDIR)
+            check("★★ 同一个 id 换了签名者 ⇒ **拒绝**（§2.5 的机械判据）",
+                  _rc == 1 and "上一次不是这么签的" in _out,
+                  "rc=%d %r" % (_rc, _out[:240]))
+            check("★★ 而且把**两把指纹**都报出来（运维要拿它去核对）",
+                  _fk1[:16] in _out
+                  and hashlib.sha256(_k2[1]).hexdigest()[:16] in _out, repr(_out[:400]))
+            check("★★ 并且给出两条有后果的出路（换签名者 / 分身），不替你选",
+                  "replace-key" in _out and "--fork" in _out, repr(_out[:400]))
+            check("★ 拒绝之后站点上还是原来那一份（没被换掉）",
+                  mod.read_plugin_keys(_INSDIR)["%s" % _UID_A]["version"] == "1.0.0",
+                  str(mod.read_plugin_keys(_INSDIR)))
+
+            # 显式确认：值必须是**记录里那把旧指纹** —— 随手加个开关不算确认
+            _rc, _out = _install([_other], _INSDIR, replace_key="0" * 64)
+            check("★★ --replace-key 给的值与记录不符 ⇒ 仍然拒绝（确认要有依据）",
+                  _rc == 1 and "上一次不是这么签的" in _out, "rc=%d" % _rc)
+            _rc, _out = _install([_other], _INSDIR, replace_key=_fk1)
+            check("★★ --replace-key 给对了 ⇒ 装上，并且**说出来**这是显式确认",
+                  _rc == 0 and "换成了" in _out
+                  and mod.read_plugin_keys(_INSDIR)[_UID_A]["fingerprint"]
+                  == hashlib.sha256(_k2[1]).hexdigest(),
+                  "rc=%d %r" % (_rc, _out[:240]))
+
+            # ★ 反方向同样要拦：记着"上一份是 K2 签的"，这次来一份**没签名的**。
+            #   摘掉签名正是"降级到不用验"的那一步，而它的后果与换钥匙一样。
+            _bare = _pkg_of(_UID_A, "alpha", ver="3.0.0")
+            _rc, _out = _install([_bare], _INSDIR)
+            check("★★ 记着有签名、这次来了个没签名的 ⇒ 拒绝（摘签名 = 降级）",
+                  _rc == 1 and "（这一份没有签名）" in _out,
+                  "rc=%d %r" % (_rc, _out[:240]))
+
+            # 首次安装一个**没签名**的包是允许的（§4.1 签名可选），但必须**大声说**
+            _rc, _out = _install([_pkg_of(_UID_B, "beta")], _INSDIR)
+            check("★ 首次装一个没签名的包 ⇒ 允许，但必须**说出来**",
+                  _rc == 0 and "没有签名" in _out, "rc=%d %r" % (_rc, _out[:240]))
+            check("★ 而且落地时最后再提醒一次（这一屏是管理员唯一的依据）",
+                  "没有源码可对照" in _out or "没签名的包" in _out, repr(_out[-300:]))
+
+            # ── ④ §6.4：两个包同一个 id ──
+            _dup1 = _pkg_of(_UID_B, "beta", ver="9.0.0", out=_ins_home)
+            _dup2 = os.path.join(_ins_home, "beta-again.splug")
+            with open(_dup2, "wb") as _f:
+                _f.write(build_package([("plugin.json", json.dumps(
+                    {"id": _UID_B, "name": "beta2", "version": "9.1.0",
+                     "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]))
+            _rc, _out = _install([_dup1, _dup2], _INSDIR)
+            check("★★ 两个包同一个 id ⇒ 两个都不装（§6.4；按 id 命名会互相覆盖）",
+                  _rc == 1 and "同一个插件" in _out, "rc=%d %r" % (_rc, _out[:240]))
+            check("★ 而且原来那一份没有被改动（两遍式的第一遍只读）",
+                  mod.read_plugin_keys(_INSDIR)[_UID_B]["version"] == "1.0.0",
+                  str(mod.read_plugin_keys(_INSDIR)[_UID_B]))
+
+            # ── ⑤ 一整批里有一个坏的 ⇒ 一个都不装 ──
+            _good_batch = _pkg_of(_UID_B, "beta", ver="4.0.0",
+                                  out=os.path.join(_ins_home, "batch"))
+            _broken = os.path.join(_ins_home, "broken.splug")
+            with open(_broken, "wb") as _f:
+                _f.write(b"splug\x1a\r\n" + b"\0" * 40)
+            _rc, _out = _install([_good_batch, _broken], _INSDIR)
+            check("★★ 一批里有一个坏的 ⇒ **一个字节都不写**（两遍式）",
+                  _rc == 1 and "一个字节都没有写" in _out
+                  and mod.read_plugin_keys(_INSDIR)[_UID_B]["version"] == "1.0.0",
+                  "rc=%d %r" % (_rc, _out[:300]))
+
+            # ── ⑥ 整包大小：装了也发不出去的，不装 ──
+            _fat = _pkg_of(_UID_B, "beta", ver="5.0.0", extra=[
+                ("big.bin", b"z" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 16))],
+                out=os.path.join(_ins_home, "batch"))
+            _rc, _out = _install([_fat], _INSDIR)
+            check("★★ 超过整包上限 ⇒ 拒绝（它装上去客户端也取不回来）",
+                  _rc == 1 and "超过本站的整包上限" in _out, "rc=%d %r" % (_rc, _out[:200]))
+
+            # ── ⑦ 站点侧那把钥匙的记录坏了 ⇒ **不收**（不能当成"没记住"）──
+            with open(os.path.join(_INSDIR, ".keys.json"), "w",
+                      encoding="utf-8") as _f:
+                _f.write("{ 这不是 JSON")
+            _rc, _out = _install([_signed], _INSDIR)
+            check("★★ 钥匙记录读不出来 ⇒ 拒绝（当成空的会让换钥匙静默放行）",
+                  _rc == 1 and "钥匙记录" in _out, "rc=%d %r" % (_rc, _out[:240]))
+            os.unlink(os.path.join(_INSDIR, ".keys.json"))
+
+        # ── ⑧ 旧布局迁移 ──
+        _mig = os.path.join(_ins_home, "migrate")
+        os.makedirs(os.path.join(_mig, "code-server", "job"))
+        with open(os.path.join(_mig, "code-server", "plugin.json"), "w",
+                  encoding="utf-8") as _f:
+            _f.write('{"id":"x"}')
+        os.makedirs(os.path.join(_mig, "someone-elses"))
+        with open(os.path.join(_mig, "someone-elses", "notes.txt"), "w") as _f:
+            _f.write("别人的东西\n")
+        with open(os.path.join(_mig, ".deployed"), "w", encoding="utf-8") as _f:
+            _f.write("code-server\n")
+        _rc, _out = _install([_pkg_of(_UID_A, "alpha", out=_ins_home)], _mig)
+        check("★★ 旧布局的插件目录被清掉了（它含客户端代码、而守护进程不会去读）",
+              _rc == 0 and not os.path.exists(os.path.join(_mig, "code-server"))
+              and "清掉了旧布局" in _out, "rc=%d %r" % (_rc, _out[:300]))
+        check("★ 而**不是我们装的**那个目录原样留着（不猜、不顺手删）",
+              os.path.exists(os.path.join(_mig, "someone-elses", "notes.txt")))
+        check("★ 旧标记也一并删掉（否则每次部署都会再找一遍那些目录）",
+              not os.path.exists(os.path.join(_mig, ".deployed")))
+        # ★ 而那个不是我们装的目录**仍然是一条要报出来的问题**（它不是静默跳过的）：
+        #   站点上的插件只能是 `.splug`，一个躺在那儿的目录要么是没迁干净的旧布局、
+        #   要么是放错地方的源码树 —— 两种都要有人看一眼。守护进程因此**不会**
+        #   把这个目录当成"没有插件"而安静地过去。
+        _mig_specs, _mig_probs = mod.scan_plugins(_mig)
+        check("★ 迁移之后守护进程扫这个目录：包认得出来，剩下的那个目录被点名",
+              [s.name for s in _mig_specs] == ["alpha"]
+              and len(_mig_probs) == 1 and "someone-elses" in _mig_probs[0],
+              "%s / %s" % ([s.name for s in _mig_specs], _mig_probs))
+
+        # ── ⑨ 有人绕过安装器把包放了进去 ⇒ 自检要说出来 ──
+        #
+        # ★ 这一条是"安装器是唯一写方"那句话的落点：如果 .keys.json 记的是 K1
+        #   而包上是 K2，那只可能是有人直接往目录里放了东西 —— 装的时候没人会
+        #   放过它（见 ③）。守护进程**不因此起不来**（那会带走整个站点），但
+        #   `--check-plugins` 必须说。
+        _bypass = os.path.join(_ins_home, "bypass")
+        os.makedirs(_bypass, exist_ok=True)
+        os.chmod(_bypass, 0o755)
+        mod.write_plugin_keys(_bypass, {_UID_A: {"fingerprint": "a" * 64,
+                                                 "name": "alpha",
+                                                 "version": "1.0.0"}})
+        with open(os.path.join(_bypass, _UID_A + ".splug"), "wb") as _f:
+            _f.write(build_package([("plugin.json", json.dumps(
+                {"id": _UID_A, "name": "alpha", "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]))
+        _crun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
+                                "--plugins-dir", _bypass],
+                               capture_output=True, text=True)
+        check("★★ 包上的签名者与安装记录不符 ⇒ 自检点名（绕过安装器放包的形状）",
+              "签名者与安装记录不符" in _crun.stdout, repr(_crun.stdout[-400:]))
+        check("★ 但它**不中止**（守护进程仍然照常起来 —— 一条记录不符不该带走整个站点）",
+              _crun.returncode == 0, "rc=%d %r" % (_crun.returncode,
+                                                   _crun.stderr[-200:]))
+
+        # ── ⑨b `--check-plugins` 的机器可读那一段（**跨脚本契约**）──
+        #
+        # ★ 这一段是 `deploy.sh` 拿来找包、给作业脚本命名的唯一依据。它的形状变了，
+        #   编织那一段会立刻跟着坏 —— 而坏法是"找不到文件"或"函数名对不上"，
+        #   指不回这里。所以形状本身要有用例。
+        _tsvdir = os.path.join(_ins_home, "tsv")
+        os.makedirs(_tsvdir, exist_ok=True)
+        _tsv_a = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF60", "withjob",
+                         extra=[("job/start.sh", b"start_withjob() { :; }\n")],
+                         out=_tsvdir)
+        os.rename(_tsv_a, os.path.join(_tsvdir,
+                                       "01M2JKHTZGKJBFQQTWYXMQMF60.splug"))
+        _tsv_b = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF61", "nojob", out=_tsvdir)
+        os.rename(_tsv_b, os.path.join(_tsvdir,
+                                       "01M2JKHTZGKJBFQQTWYXMQMF61.splug"))
+        _trun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
+                                "--plugins-dir", _tsvdir],
+                               capture_output=True, text=True)
+        _tlines = _trun.stdout.split("plugin-packages:")[-1].strip().split("\n")
+        _trows = [l.split("\t") for l in _tlines if l.strip()]
+        check("★★ 机器可读那一段是**四列**（deploy.sh 的跨脚本契约）",
+              len(_trows) == 2 and all(len(r) == 4 for r in _trows), repr(_trows))
+        check("★★ 第 4 列如实回答包里有没有 `job/start.sh`（判据是记录表，不是磁盘）",
+              sorted(r[3] for r in _trows) == ["has_job", "no_job"]
+              and {r[0]: r[3] for r in _trows} == {"withjob": "has_job",
+                                                   "nojob": "no_job"},
+              repr(_trows))
+        check("★ 第 2 列是**包在哪**、第 3 列是 id（作业脚本按它命名）",
+              all(r[1].endswith(r[2] + ".splug") and len(r[2]) == 26
+                  for r in _trows), repr(_trows))
+
+        # ── ⑩ 用法错误：一个包都没给 ──
+        _rc, _out = _install([], _INSDIR)
+        check("★ 一个包都没给 ⇒ 用法错误（code 2），不是静默成功",
+              _rc == 2 and "用法" in _out, "rc=%d %r" % (_rc, _out[:120]))
+    finally:
+        shutil.rmtree(_ins_home, ignore_errors=True)
 
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #
@@ -2577,7 +3118,7 @@ exit 0
     _awk = None
     for _sp in cfg.plugin_specs:
         _out = os.path.join(tmpdir, "woven-%s.sbatch" % _sp.name)
-        _awk = weave_one(_rb, _sp.source_dir, _sp.name, _sp.id, _out)
+        _awk = weave_one(_rb, _sp.source_package, _sp.name, _sp.id, _out)
         _woven_of[_sp.name] = _out
     _woven = _woven_of[CS]        # 22a 用它，见下
     # ★ 数的是**整行**的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
@@ -2600,8 +3141,8 @@ exit 0
               re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _wtxt) is not None)
         check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）",
               re.search(r"(?m)^#!|^[ \t]*#SBATCH",
-                        open(os.path.join(_sp.source_dir, "job", "start.sh"),
-                             encoding="utf-8").read()) is None)
+                        mod.package_extract(_sp.source_package,
+                                            "job/start.sh").decode("utf-8")) is None)
         # ★★ 这一节的核心：**那份脚本里只有它自己**。
         #
         # 同处一份文件时，插件里任何一行不在函数里的代码都待在主流程中间，会在
@@ -2871,15 +3412,14 @@ exit 0
                 ': > "$HOME/toplevel-ran"\n'),
                ("quiet", "01M2JKHTZGKJBFQQTWYXMQMF41",
                 'start_quiet() { return 1; }\n'))
+    os.makedirs(_tld, exist_ok=True)
     for _n, _i, _body in _tl_def:
-        os.makedirs(os.path.join(_tld, _n, "job"), exist_ok=True)
-        with open(os.path.join(_tld, _n, "job", "start.sh"), "w",
-                  encoding="utf-8") as _f:
-            _f.write(_body)
-        with open(os.path.join(_tld, _n, "plugin.json"), "w",
-                  encoding="utf-8") as _f:
-            _f.write(json.dumps({"id": _i, "name": _n, "version": "1.0.0",
-                                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}))
+        put_package(_tld, [
+            ("job/start.sh", _body.encode("utf-8")),
+            ("plugin.json", json.dumps(
+                {"id": _i, "name": _n, "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+        ])
     _tl_specs, _tl_probs = mod.scan_plugins(_tld)
     check("顶层语句的假插件被扫进来（这条用例自己的前提）",
           sorted(s.name for s in _tl_specs) == ["loud", "quiet"], str(_tl_probs))
@@ -2889,7 +3429,7 @@ exit 0
     _tl_home = {}
     for _n in ("loud", "quiet"):
         _o = os.path.join(tmpdir, "tl-%s.sbatch" % _n)
-        weave_one(_rb, _tl_by[_n].source_dir, _n, _tl_by[_n].id, _o)
+        weave_one(_rb, _tl_by[_n].source_package, _n, _tl_by[_n].id, _o)
         _tl_home[_n] = os.path.join(tmpdir, "jobsh-tl-%s" % _n)
         os.makedirs(_tl_home[_n], exist_ok=True)
         run_jobsh(_o, _n, _tl_home[_n])

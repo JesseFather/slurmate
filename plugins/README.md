@@ -17,17 +17,25 @@ plugins/
 
 ---
 
-## 一个插件是一个目录，三半
+## 一个插件的**源码树**是三半，而**发出去的是一个包**
 
 ```
-<插件目录>/
+<插件目录>/                      ← 你的源码树（可以在另一个仓库）
   plugin.json        身份（铸造的 id）、版本、以及两侧会读的那几条声明   ← 必须有
   client/index.js    客户端侧代码                                     ← 可以没有
   job/start.sh       作业侧代码                                       ← 可以没有（见下）
 ```
 
+```bash
+node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0.splug
+```
+
+★ **分发与安装在服务器上的那一个是 `.splug`（一个文件），不是这棵树。**
+`deploy.sh` 永不打包 —— 打包是**作者**的事。服务器上从头到尾没有源码树。
+
 **目录名不参与任何判定。** 身份来自清单里的 `id`，版本来自 `version`，站点内的短名
-来自 `name`。目录名纯粹是给人看的。
+来自 `name`。目录名纯粹是给人看的（包的文件名也不参与判定 —— 安装器按 `id` 给它
+改名）。
 
 | 半边 | 谁读它 | 什么时候读 |
 |---|---|---|
@@ -35,17 +43,17 @@ plugins/
 | `client/index.js` | 客户端注册表 | 客户端启动时扫池（**站点分发的那一份由对账取回来**，过了同意闸才加载） |
 | `job/start.sh` | **没有任何运行时读者** | deploy.sh 部署时**编织**成一份作业脚本 |
 
-★ **三半都会被分发到客户端**（站点分发发的是整个目录，不是只挑 `client/`）——
-所以"哪个文件会被执行"与"哪个文件会被传输"是两件事。后者由守护进程的
-`plugin_file_index()` 定，前者只有 `client/index.js` 那一份。
+★ **三半都会被分发到客户端**（站点分发发的是整个包，不是只挑 `client/`）——
+所以"哪个文件会被执行"与"哪个文件会被传输"是两件事。后者由**包里的记录表**定
+（`plugin_file_index()` 读的就是它），前者只有 `client/index.js` 那一份。
 
 **没有 `job/start.sh` 会怎样**（上面那个「可以没有」指的就是它）：插件照常安装、
 照常在 `slurmate plugins` 与客户端界面上出现，但**提交不了** —— 守护进程在提交时
 报 `service_kind_no_job`（code 4），`op_plugins` 里那个插件的 `can_submit` 是
 `false`，所以界面上的按钮是灰的、并且说清了原因。**这是合法状态，不是坏掉的插件。**
 
-要让它能提交，就在 `<插件目录>/job/start.sh` 里定义 `start_<短名>`，再跑一次
-`deploy.sh` —— 那一次会为它生成 `<ULID>.sbatch`。
+要让它能提交，就在源码树里补一份 `job/start.sh`、**升版本号**、重新
+`packer build`，再装一次 —— 部署那一步会为它生成 `<ULID>.sbatch`。
 
 ★ 它们是**同一个构件的三半**，靠 `id@版本` 认亲：一个会话把它起时那一刻的
 `<id>@<版本>` 记进会话文件，客户端拿它去自己的池里找配套的那一半。站点升级插件
@@ -58,29 +66,51 @@ plugins/
 ### 集群侧
 
 ```
-<prefix>/share/slurmate/plugins/<任意目录名>/
+<prefix>/share/slurmate/plugins/<ULID>.splug     ← 一个插件一个包，文件名就是它的 id
 ```
 
-`<prefix>` 通常是 `/usr/local`。**这是唯一需要放东西的地方**：
+`<prefix>` 通常是 `/usr/local`。**这是唯一需要放东西的地方**，而放进去的是**包**：
 
 ```bash
-sudo bash cluster/deploy.sh                       # 从 <repo>/plugins/ 装
-sudo bash cluster/deploy.sh --plugins-src DIR     # 从别处 clone 来的独立项目
-sudo bash cluster/deploy.sh --plugins-src EMPTY   # 一个都不装（合法状态）
+# ① 把下载来的 .splug 收在一个目录里，然后部署
+sudo bash cluster/deploy.sh --plugins-src DIR
+# ② 或者一个动词装一个包（它做的是同一件事）
+sudo slurmate plugin install DIR/your-plugin-1.0.0.splug
+# ③ 一个都不装（合法状态）
+sudo bash cluster/deploy.sh --plugins-src EMPTY
 ```
 
-deploy.sh 会做四件事，缺一不可：
+★ **缺省 `--plugins-src` 是仓库顶层的 `plugins/`**，而那里放的是**源码树** ——
+所以直接 `sudo bash cluster/deploy.sh` 会在预检那一步停下来，告诉你先
+`packer build`。那个失败是刻意的（包是构建产物，不进 git）。
 
-1. 把插件目录拷进 `<prefix>/share/slurmate/plugins/`（root 所有、组/其他不可写）；
-2. 用**守护进程自己的扫描器**（`slurmate-sessiond --check-plugins`）校验每一份
-   `plugin.json` —— 校验规则只有一份，不在部署脚本里另写一套；
-3. 对每个有 `job/start.sh` 的插件**单独织一份**作业脚本，装到
+安装器做这些事（`slurmate plugin install` 会一件件说给人听）：
+
+1. **输入**必须是普通文件、非符号链接、属主是 root、组/其他不可写 —— 防的是
+   "下载完到安装器读"之间被换掉；
+2. 包**能解析**（§3.2/§3.3/§3.4 全部从文件本身可判），清单过**守护进程自己那个**
+   校验器 —— 所以"装得上但守护进程不认"在装的那一刻就会红；
+3. **验签**（§6.4）—— 有签名就必须验过；验不了（没装 openssl）也**不装**；
+4. 按 `id` 记住签名者。同一个 id 换了钥匙（或从"有签名"变成"没签名"）⇒
+   **停下来问**，两条路连同后果一起说，不替你选；
+5. **两个包同一个 id ⇒ 两个都不装**（§6.4：按 id 命名会互相覆盖，而覆盖是静默的）；
+6. 装进 `<ULID>.splug`（root 所有、0644），并清掉更早那版布局留下的插件目录。
+
+然后是 `deploy.sh` 的活：
+
+7. 用守护进程自己的扫描器校验装完之后那一份；
+8. 对每个**包里有 `job/start.sh` 的**插件**单独织一份**作业脚本，装到
    `<prefix>/share/slurmate/jobs/<ULID>.sbatch`；没有的跳过（合法）；
-4. 对每个插件脚本做三条硬断言（见〈作业侧契约〉）。任何一条不过，部署当场中止。
+9. 对每份脚本做三条硬断言（见〈作业侧契约〉）。任何一条不过，部署当场中止。
    缺 `job/start.sh` **不在**中止之列 —— 那是合法状态。
 
-★ **加一个插件 = 放一个目录 + 跑一次 deploy.sh。** 不需要改守护进程的源码，也
+★ **加一个插件 = 放一个 `.splug` + 跑一次 deploy.sh。** 不需要改守护进程的源码，也
 不需要改配置文件。守护进程仍然要 root 重部署一次，但那是**安装动作**，不是改代码。
+
+★ **本仓库自带的两个插件还没有自己的包。** 它们的 id 铸在打包器存在之前，所以
+血统表里没有它们那一条，`packer build` 会按 §2.5 停下来问 —— 答案是一次
+`packer init --adopt`（「这是同一个插件，只是记录不在了」），然后提交、`keygen`、
+`build`。**这一步还没有做**：`plugins/` 下现在是源码树，没有 `.splug`。
 
 ★ **客户端那一侧一步人工动作都不需要**（v0.6 起）：连上站点之后，客户端自己把
 `enabled = yes` 的插件取回来 —— 落在 `~/.slurmate/site-plugins/`，过一道用户同意
@@ -106,7 +136,7 @@ deploy.sh 会做四件事，缺一不可：
 两种布局能混着用。
 
 ★ 客户端**不读** `job/start.sh`。作业侧那一半只对集群有意义（不过它会跟着一起被
-分发下去 —— 清单描述的是整个目录）。
+分发下去 —— 清单描述的是整个包）。
 
 ---
 

@@ -553,14 +553,18 @@ sec "插件"
 # 对计算节点不是证据。这里能做的只是把配置里解析出来的值如实打出来，让你拿着
 # 它去计算节点核对。
 _plugdir="/usr/local/share/slurmate/plugins"
+_daemon="/usr/local/sbin/slurmate-sessiond"
+# ★ 站点上的插件是一个**包文件**（`<ULID>.splug`），不是一个目录 —— 所以这里
+#   列的是包，而"包里有什么"要靠守护进程那份读包实现来取（`--extract-package`）。
+#   本脚本**不自己解析那个格式**：三份实现共用一份符合性向量，第四份抄本只会漂。
 if [[ -d "$_plugdir" ]]; then
-    n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+    n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -name '*.splug' -type f 2>/dev/null | wc -l)"
     if (( n_pl == 0 )); then
-        r INFO "${_plugdir} 存在但是空的 —— 本站没有安装任何插件"
+        r INFO "${_plugdir} 里没有 .splug —— 本站没有安装任何插件"
         r INFO "  这是合法状态（会话能查、能停，只是没有可提交的服务）"
     else
-        r PASS "${_plugdir} 里有 ${n_pl} 个插件目录"
-        run bash -c "find '$_plugdir' -mindepth 1 -maxdepth 1 -type d | sed 's/^/    /'"
+        r PASS "${_plugdir} 里有 ${n_pl} 个插件包"
+        run bash -c "ls -1 '$_plugdir'/*.splug 2>/dev/null | sed 's/^/    /'"
         # ★ 这里同时打 **id（ULID）** 和它在 jobs/ 里那一份作业脚本**在不在**。
         #
         #   为什么非要打 id：作业脚本一个插件一份，文件名就是 ULID —— 而 ULID 是
@@ -571,15 +575,27 @@ if [[ -d "$_plugdir" ]]; then
         #   （守护进程报 service_kind_no_job）。它对应的状态是合法的。
         _jobsdir="/usr/local/share/slurmate/jobs"
         echo "  --- 各插件的身份 / 作业侧 / 对应的作业脚本 ---"
-        run bash -c "for d in '$_plugdir'/*/; do
-            [ -f \"\$d/plugin.json\" ] || continue
-            n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
-            v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
-            i=\$(sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$d/plugin.json\" | head -1)
-            if [ -f \"\$d/job/start.sh\" ]; then j='有'; else j='（无）'; fi
+        if [[ ! -x "$_daemon" ]]; then
+            r INFO "读不出包里的清单：${_daemon} 不在（还没部署？）"
+            r INFO "  文件名就是 id，可以拿它对着 ${_jobsdir}/<ULID>.sbatch 看"
+        fi
+        run bash -c "for f in '$_plugdir'/*.splug; do
+            [ -f \"\$f\" ] || continue
+            i=\$(basename \"\$f\" .splug)
+            if [ -x '$_daemon' ]; then
+                mf=\$(mktemp); '$_daemon' --extract-package \"\$f\" plugin.json > \"\$mf\" 2>/dev/null || true
+                n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
+                v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
+                ii=\$(sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
+                rm -f \"\$mf\"
+                [ -n \"\$ii\" ] && i=\"\$ii\"
+                if '$_daemon' --extract-package \"\$f\" job/start.sh >/dev/null 2>&1; then j='有'; else j='（无）'; fi
+            else
+                n='（读不出）'; v='（读不出）'; j='（读不出）'
+            fi
             s='（没有那份脚本）'
             [ -f '$_jobsdir/'\$i'.sbatch' ] && s='在'
-            printf '    %-16s %-9s %-24s 作业侧 %-6s 作业脚本 %s\\n' \"\$n\" \"\$v\" \"\$i\" \"\$j\" \"\$s\"
+            printf '    %-16s %-9s %-24s 作业侧 %-8s 作业脚本 %s\\n' \"\$n\" \"\$v\" \"\$i\" \"\$j\" \"\$s\"
         done"
         _nj="\$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
         r INFO "${_jobsdir} 里有 ${_nj} 份作业脚本（应当等于上面「作业侧 有」的个数）"
@@ -588,37 +604,23 @@ if [[ -d "$_plugdir" ]]; then
         run bash -c "for jf in '$_jobsdir'/*.sbatch; do
             [ -f \"\$jf\" ] || continue
             b=\$(basename \"\$jf\" .sbatch)
-            grep -rql \"\\\"id\\\"[[:space:]]*:[[:space:]]*\\\"\$b\\\"\" '$_plugdir' 2>/dev/null \
+            [ -f '$_plugdir/'\$b'.splug' ] \\
               || printf '    ⚠ 无主的作业脚本（没有插件认领）：%s\\n' \"\$jf\"
         done"
     fi
+    # ★ **不该在这儿的东西**：一个目录（更早那版布局留下的，或放错地方的源码树）、
+    #   或者一个散落的文件。守护进程只读 `.splug`，所以那些东西既不会被分发、
+    #   也不会被扫到 —— 留着它们的后果是"一份 root 拥有的、含客户端代码的副本
+    #   永久残留而界面上看不见"。`deploy.sh` 会因此拒绝部署，这里先把它们点出来。
+    _stray="$(find "$_plugdir" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name '*.splug' 2>/dev/null)"
+    if [[ -n "$_stray" ]]; then
+        r FAIL "${_plugdir} 里有不是插件包的东西（站点只认 .splug）："
+        printf '%s\n' "$_stray" | sed 's/^/      /'
+        r INFO "  目录多半是更早那版布局留下的 —— 跑一次 deploy.sh 会按 .deployed 标记迁掉；"
+        r INFO "  如果是插件的**源码树**，那要先在作者机器上 packer build 打成包。"
+    fi
 else
     r INFO "${_plugdir} 不存在 —— 还没部署，或本站没有安装任何插件"
-fi
-
-echo "  --- 配置里的 default_plugin ---"
-_default_plugin="$(awk '
-    /^[[:space:]]*\[/ { next }
-    /^[[:space:]]*default_plugin[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }
-' "$_cf" 2>/dev/null)"
-if [[ -z "$_default_plugin" ]]; then
-    r INFO "default_plugin 留空 —— 提交时必须显式给 service_kind（推荐值）"
-else
-    r INFO "default_plugin = ${_default_plugin}"
-    # bin 只在**那个插件的块**里找。`bin` 这个名字每个插件块都有，行首匹配会
-    # 抓到第一个（可能是别的插件的）—— 所以按块切。
-    _csbin="$(awk -v want="[plugin:${_default_plugin}]" '
-        /^[[:space:]]*\[/ { inblock = ($0 ~ ("^[[:space:]]*" want "[[:space:]]*$")) ; next }
-        inblock && /^[[:space:]]*bin[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }
-    ' "$_cf" 2>/dev/null)"
-    if [[ -n "$_csbin" ]]; then
-        r INFO "配置里 [plugin:${_default_plugin}] 的 bin = ${_csbin}"
-    else
-        r INFO "配置里没有 [plugin:${_default_plugin}] 块或它没写 bin"
-        r INFO "  → 用插件清单 plugin.json 里 site.bin 声明的那个（--check 会打印解析结果）"
-    fi
-    r INFO "请在**计算节点**上确认该路径存在：ls -l <那个路径>"
-    r INFO "  登录节点上有没有它，对计算节点不是证据 —— 所以这里不做判断。"
 fi
 
 # ==============================================================================

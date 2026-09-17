@@ -584,9 +584,9 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 
 | 报错里出现 | 原因 | 该做什么 |
 |---|---|---|
-| 「守护进程太旧，不支持插件分发」 | 集群侧那份没有 `files` 字段 | 让管理员重新部署。**这一条不是客户端的问题** |
+| 「守护进程太旧，不支持插件分发」 | 集群侧那份没有 `files` / `package` 字段 | 让管理员重新部署。**这一条不是客户端的问题** |
 | 「取 xx 失败：…」 | 那份文件没下来（断流、超时、守护进程限流重试到头） | 点「重新同步」。**它不会退回本机池那一份** —— 见下 |
-| 「内容与声明的 sha256 不符」 | 传输被改，或者站点在服务期间换了文件 | 点「重新同步」；反复出现就让管理员重跑 deploy.sh |
+| 「内容与声明的 sha256 不符」 | 传输被改，或者站点在服务期间换了包 | 点「重新同步」；反复出现就让管理员重跑 deploy.sh |
 | 「本机已有 X，但它的内容与站点现在报的不一样」 | **站点改了内容却没升版本号** | 让管理员升版本号。**客户端拒绝覆盖是对的** |
 | 「已经有一次对账在跑」 | 上一次还没收尾 | 等一会儿再点 |
 | 「读不到站点的插件记录」 | `.sites.json` 丢了或坏了 | **这一次不会回收任何东西**（这是刻意的），其余照常 |
@@ -606,7 +606,7 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 | 报错里说 | 原因 | 该做什么 |
 |---|---|---|
 | 「本站**装了**的是：…」 | 块名打错了（`[plugin:ssh]` 少一个 d 也算），或那个插件**没装** | 改块名 / 把插件装上去 |
-| 「本站**一个插件都没装**」 | 插件安装目录是空的 | 把插件目录放进去，再跑一次 `deploy.sh` |
+| 「本站**一个插件都没装**」 | 插件目录是空的 | 把 `.splug` 放进 `--plugins-src` 指的目录，再跑一次 `deploy.sh`（包要在作者机器上用 `packer build` 打出来，见 `packer/README.md`） |
 
 守护进程**故意**不静默忽略 —— 静默忽略的后果是「配置里写着，而实际什么也没开」。
 
@@ -641,12 +641,12 @@ default_plugin = code-server
 那个插件的按钮是灰的，并且就写着这一句。**这是合法状态，不是坏掉的插件**：那个插件
 装上了、看得见、就是提交不了。
 
-成因是**部署不完整** —— 它没有 `job/start.sh`（所以在 `plugins/` 里有、在
-`jobs/` 里没有对应那一份），或者有而 deploy.sh 那次没跑到它。
+成因是**部署不完整** —— 它的包里没有 `job/start.sh`（所以在 `plugins/` 里有这个包、
+在 `jobs/` 里没有对应那一份），或者有而 deploy.sh 那次没跑到它。
 
 ```bash
-# 1. 看它到底有没有作业侧
-ls /usr/local/share/slurmate/plugins/*/job/start.sh
+# 1. 看它到底有没有作业侧（判据是**包里的记录表**，不是磁盘上的一个文件）
+sudo /usr/local/sbin/slurmate-sessiond --check-plugins      # 看那一行的「作业侧」
 # 2. 有就重新部署一次，让 deploy.sh 为它织一份 <ULID>.sbatch
 sudo bash cluster/deploy.sh
 ```
@@ -682,21 +682,57 @@ sudo bash cluster/deploy.sh          # 重跑一次会清掉陈旧的、补上�
 （`deploy.sh` 用 `sed` 抓的 `range_start` / `range_end` / `reserved_ranges` /
 `readonly_paths` 也是按行首匹配的，所以它们同样必须待在文件上半部分。）
 
+### 安装器拒绝了我下载的包
+
+`slurmate plugin install`（`deploy.sh` 走同一条路）**一条都不装**时会说清是哪一条。
+按报错里的字样对：
+
+| 报错里出现 | 是什么 | 该做什么 |
+|---|---|---|
+| 「不是一个合法的插件包」 | 下载坏了、传丢了，或者那不是包 | 重新下载。★ 别拿**源码树**去装 —— 站点只收 `.splug`，包要在作者机器上 `packer build` |
+| 「**签名验不过**」 | 包在下载或存放的过程中被改过（或作者发出来的就是坏的） | 重新下载一次；还是这样就让作者查 |
+| 「本站**验不了**」 | 这台机器上没有 `openssl`，而这个包带签名 | 装上 openssl 再试。**不装是对的** —— "验不了"与"验过了"是两回事 |
+| 「这个 id **上一次不是这么签的**」 | 换了签名者（§2.5）。**这是最要紧的一条** | 看下面 |
+| 「超过本站的整包上限」 | 包装上去了也发不出去 | 让作者把插件做小一点 |
+| 「**没有签名**」 | 不是错误，是提醒 | 装得上；但客户端上钉过公钥的用户会拒绝它 |
+
+★ **「上一次不是这么签的」不要急着加 `--replace-key`。** 它意味着两件后果相反的事
+之一：作者**换了钥匙**（而 §4.1 说丢了私钥只能 fork 自己，所以这不该发生），或者
+**有人把包换掉了**。安装器判不了是哪一个，所以它停下来，把两把指纹都报出来让你去
+核对。确认是前者之后：
+
+```bash
+sudo slurmate plugin install --replace-key <报出来的旧指纹> <包>
+```
+
+★ 而这一条**客户端那一侧还会再拦一次**：钉过公钥的用户钉的是**旧**那一把，他们会
+拒绝新包，除非各自重新钉。所以"换了钥匙"从来不是一个能悄悄做完的动作。
+
+★ **包被换过之后没重新部署**：守护进程在**启动那一刻**记下每一份的内容，
+发出去的字节与那份记录对不上时会回 `9 plugin_file_changed` —— 那一句指回
+`deploy.sh`，不是指回客户端。
+
 ### 升级之后一个插件都不见了
 
 **先确认插件目录还在。** 插件是**独立项目**，装在
-`/usr/local/share/slurmate/plugins/` 里，由 `deploy.sh` 装进去 —— 目录里空了
+`/usr/local/share/slurmate/plugins/` 里，由安装器装进去 —— 目录里空了
 （比如有人手工删了，或者部署时 `--plugins-src` 指到了别处），自然一个都没有。
 
 ```bash
-ls -l /usr/local/share/slurmate/plugins/
+ls -l /usr/local/share/slurmate/plugins/          # 应该是一串 <ULID>.splug
 ```
 
-装了什么都在那儿，每个目录里有一份 `plugin.json`。要装新的就：
+★ 每个文件都是一个**包**（作者用 `packer build` 打的），文件名是这个插件的
+**id**。要装新的：把包放进一个目录，然后
 
 ```bash
-sudo bash cluster/deploy.sh --plugins-src <插件目录的父目录>
+sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>
 ```
+
+★ **装第一个包时，旧布局 `<名字>/plugin.json` 会被自动清掉**（安装器按
+`.deployed` 标记迁移）。如果迁移之后这里**还有目录**，`--check-plugins` 会逐条
+点名 —— 那种目录含有一整套客户端代码，而守护进程只读包，留着它等于一份
+**看不见的副本**。确认无用之后人工删掉。
 
 **再确认配置里没有把它关掉。** 一个 `[plugin:*]` 块都没有时，缺省取插件清单里的
 `site.defaultEnabled`（code-server 是 true，与升级前一致）；但只要你写了
@@ -841,8 +877,9 @@ scontrol show node <node>
 scontrol ping
 
 # 插件与站点分发
-sudo /usr/local/sbin/slurmate-sessiond --check-plugins   # 装了哪些、各自解析到哪些文件
-ls -l /usr/local/share/slurmate/plugins/*/               # 站点那一棵树（root 所有）
+sudo /usr/local/sbin/slurmate-sessiond --check-plugins   # 装了哪些、各自包里有什么
+ls -l /usr/local/share/slurmate/plugins/*.splug          # 站点上那几个包（root 所有）
+cat /usr/local/share/slurmate/plugins/.keys.json         # 各 id 上一次是哪把钥匙签的
 ls -l ~/.slurmate/site-plugins/*/*/                      # 客户端取回来的那一份
 cat ~/.slurmate/site-plugins/.sites.json                 # 哪个站点要哪个版本（回收只看它）
 # 取一份文件回来逐字节比（data 是 base64）：
