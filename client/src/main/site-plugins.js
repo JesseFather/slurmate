@@ -149,12 +149,17 @@ function checkRelPath(rel, maxDepth) {
  * ★ 真正的坑在**落盘之后**：macOS / Windows 的文件系统不区分大小写，两个只差
  *   大小写的声明会互相覆盖，而摘要是**写入之后的磁盘上**算的 —— 于是用户"同意"
  *   的是一棵与站点那棵不同的树。所以在**写入之前**（就在这张清单上）判。
+ *
+ * ★ 折叠用 `plugins.foldAscii`，**不是 `p.toLowerCase()`** —— 后者是全 Unicode 的，
+ *   会把 `İ` 与 `K`(U+212A) 折到一起去。这里是一条**拒绝**规则：折叠口径不一致
+ *   就会出现"一边收、一边拒"，也就是同一个插件在一台机器上装得上、在另一台上
+ *   装不上 —— 而报错里一个字都不会提到大小写。§3.3 钉死了是 ASCII-only。
  */
 function caseCollisions(paths) {
   const seen = new Map();
   const out = [];
   for (const p of paths) {
-    const k = p.toLowerCase();
+    const k = plugins.foldAscii(p);
     if (seen.has(k)) out.push([seen.get(k), p]);
     else seen.set(k, p);
   }

@@ -101,8 +101,11 @@ plugins/          ★ 两个插件的**独立项目** —— 基座不依赖它�
                     code-server/  浏览器里的 VS Code
                     sshd/         作业内的用户态 ssh
                   一个都没有是**合法状态**，见 plugins/README.md
-docs/             架构、部署、配置、协议、排障、**已知问题**
+packer/           ★ 插件**作者**的打包器（单文件、零依赖）—— 它跑在你的机器上，
+                   产出 .splug；服务器上从头到尾没有源码树，deploy.sh 永不打包
+docs/             架构、部署、配置、协议、插件规范、排障、**已知问题**
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
+  conformance/    三份实现共用的符合性向量（输入树 + 期望的包字节 + 坏包 + 签名夹具）
 ```
 
 ---

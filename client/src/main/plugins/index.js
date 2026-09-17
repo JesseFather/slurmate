@@ -199,6 +199,30 @@ function cmpVer(a, b) {
   return 0;
 }
 
+// ── 大小写折叠：**ASCII-only** ──────────────────────────────────────────────
+//
+// §3.3 有一条"同一个包里两条路径禁止只差大小写"，而判据是"折叠之后相等"。
+// ★ 折叠**必须**只折叠 `A..Z`，**禁止**用 `String.prototype.toLowerCase()`：
+//   后者是全 Unicode 的，会把 `İ`（U+0130）折成 `i̇`、把 `K`（U+212A KELVIN）
+//   折成 `k` —— 于是两个实现可以在同一条路径上给出相反的答案，而这是一条
+//   **拒绝**规则：一边收、一边拒，症状是"同一个包在一台机器上装得上、在另一台
+//   上装不上"，而报错里一个字都不会提到大小写折叠。
+//
+// ★ ASCII-only 的折叠在 JS / Python / Node 打包器里逐字节相同：没有区域设置，
+//   没有 Unicode 版本差异（`toLowerCase` 的结果会随 ICU 版本变）。
+//
+// ★ 它住在**这里**而不是 site-plugins.js：`COPY_SKIP` 在这里，两者都是 §3.3 的
+//   规则，全客户端各只有一份。分发（site-plugins）与读包（plugin-package）都引它。
+function foldAscii(s) {
+  const t = typeof s === 'string' ? s : '';
+  let out = '';
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    out += c >= 0x41 && c <= 0x5a ? String.fromCharCode(c + 32) : t[i];
+  }
+  return out;
+}
+
 /**
  * 两个**插件版本串**的大小（`Registry.list()` 的排序用）。
  *
@@ -1003,5 +1027,5 @@ module.exports = {
   // 版本号那两套（框架 / 插件）—— 用例直接对着 tools/version-fixtures.json 跑
   VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer,
   // ── 站点分发那条路要用的（见 site-plugins.js）──
-  COPY_SKIP, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
+  COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
 };

@@ -1,0 +1,14 @@
+{
+  "id": "01M2JKHTZGQ7X8V4T5R6N7B8C9",
+  "name": "conformance",
+  "displayName": "符合性向量",
+  "version": "1.0.0",
+  "description": "**不是一个真插件** —— 这是三份实现共用的那份输入树，见 tools/conformance/README.md。",
+  "author": "slurmate",
+  "engines": { "slurmate": ">=0.5" },
+  "contributes": {
+    "layout": false,
+    "submitPubkey": false,
+    "legacyDefault": false
+  }
+}

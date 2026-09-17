@@ -336,6 +336,26 @@ bash 自上而下解析整个文件，那一行于是在**每一个**作业里�
 7. **客户端侧不用做任何事** —— 用户连上站点之后会自己取回来（开发时想在本机试，
    见〈客户端侧（开发用）〉）。
 
+### 打成一个包（`.splug`）
+
+插件最终以**一个文件**分发：`<id>-<版本>.splug`，由 [`packer/`](../packer/) 打出来
+（单文件、零依赖，跑在**你的**机器上）：
+
+```sh
+node packer/slurmate-packer.js init  <插件目录>   # 铸 id 并插入写回 plugin.json
+git commit -am "铸一个 id"                        # 打包的输入必须是一个提交
+node packer/slurmate-packer.js build <插件目录>
+node packer/slurmate-packer.js inspect <那个 .splug>
+```
+
+`init` 与 `build` 是两条命令，因为前者会弄脏源码树而后者要求树干净 ——
+§2.1 与 §3.5 的要求合起来只能是两条。
+
+★ **这个仓库里的安装路径现在仍然收目录**（`deploy.sh --plugins-src`）：
+"一个插件是一个包"那一步还没切过来。但**包的格式已经定死了**（
+[docs/PLUGIN-SPEC.md](../docs/PLUGIN-SPEC.md) 附录 A），打包器与两种语言的读方
+都在，而它们读的是**同一份符合性向量**（[`tools/conformance/`](../tools/conformance/)）。
+
 ### 分发出去之后，作者要知道的四条
 
 **① 改了内容就必须升 `version`。** 同一个 `(id, 版本)` 只能对应**一份**内容，而

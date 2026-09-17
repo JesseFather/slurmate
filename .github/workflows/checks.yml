@@ -66,6 +66,38 @@ jobs:
         # nft-compare.py 自带用例，验证"非干扰比对"这个安全保证本身是有效的
         run: python3 cluster/nft-compare.py --selftest
 
+  # ── 符合性向量：三份实现对同一批字节必须得出同一个答案 ──────────────────────
+  # 三份实现分别在 JS（打包器）、Python（守护进程）、JS（客户端）里。它们漂开的
+  # 后果是**同一个包，打包器说它合规、客户端说它不合规** —— 而用户看到的是
+  # "作者说打好了、我就是装不上"。
+  #
+  # 钉住它们的是 tools/conformance/：一份固定的输入树、一份期望的包字节、一批
+  # 坏包（每条带一个期望的**理由词**）。三端的用例各自读同一批十六进制。
+  #
+  # ★ 两个方向都要跑：
+  #   · 生成器跑一遍必须**不产生 diff** —— 否则夹具与输入树/生成器已经对不上了，
+  #     而三端会一起错得一样（"三端一致"变成"三端一起过时"）。
+  #   · 打包器的用例（它顺带把客户端那一份读方拉进来对答案）。
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 用例
+        run: node packer/test-packer.mjs
+      - name: 夹具与生成器一致
+        run: |
+          node tools/conformance/generate.mjs > /dev/null
+          if ! git diff --exit-code -- tools/conformance/; then
+            echo "✗ expected.json / bad.json 与输入树或生成器对不上了。"
+            echo "  重跑一次 node tools/conformance/generate.mjs 并提交，别手改那两个文件。"
+            exit 1
+          fi
+          echo "✓ 夹具与输入树一致"
+
   # ── 语法与一致性 ────────────────────────────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
@@ -152,7 +184,7 @@ jobs:
           print("✓ 四处一致，且都是 x.y")
           PY
 
-      - name: 插件的跳过表两端必须一致
+      - name: 插件的跳过表三端必须一致
         # ★ 站点分发时，客户端按**自己算的**摘要与站点报的逐份 sha256 比对。两边的
         #   跳过表（哪些目录名不算插件内容）分别在 JS 与 Python 里，**没有任何共享
         #   机制** —— 漂开之后症状是"同步一直失败"，而报错里一个字都不会提到是这两
@@ -165,6 +197,16 @@ jobs:
         # ★ 抽的是 `client/src/main/plugins/index.js` —— 那个集合**全客户端只有一份**，
         #   安装器（install.js）从它引，摘要（digestOf）也用它。以前它在 install.js
         #   里，两份实现各自持有一份，正是这条 lint 要防的那种分家。
+        #
+        # ★ **从两端变成三端**：打包器（packer/slurmate-packer.js）现在也有自己
+        #   一份，而那是没办法的 —— 它要"下载这个文件夹就能用"，所以 import 不到
+        #   客户端里的常量。这条 lint 就是那份代价的对价。
+        #   ★ 它与规范 §3.3 里"禁止出现下列跳过集合里的任何一段"是**同一条规则的
+        #   两种用法**：打包器**排除**它们，读方**拒绝**含它们的包。
+        #
+        #   同一条意思在 packer/test-packer.mjs 与 cluster/test-sessiond-logic.py
+        #   的 19.12 里各有一条（本地跑得到）；这里再来一条是因为 CI 上的 lint 是
+        #   **最外层**的那道网，它不依赖测试脚本被正确地调用。
         run: |
           a=$(sed -nE "s/^const COPY_SKIP = new Set\(\[([^]]*)\]\).*/\1/p" \
                 client/src/main/plugins/index.js \
@@ -172,12 +214,17 @@ jobs:
           b=$(sed -nE "s/^PLUGIN_COPY_SKIP = \((.*)\)$/\1/p" \
                 cluster/slurmate-sessiond \
               | tr ',' '\n' | grep -oE '"[^"]*"' | tr -d '"' | sort)
+          c=$(sed -nE "s/^const COPY_SKIP = new Set\(\[([^]]*)\]\).*/\1/p" \
+                packer/slurmate-packer.js \
+              | tr ',' '\n' | grep -oE "'[^']*'" | tr -d "'" | sort)
           echo "客户端 plugins/index.js : $(echo $a)"
           echo "守护进程                : $(echo $b)"
-          if [ -n "$a" ] && [ "$a" = "$b" ]; then
-            echo "✓ 两端一致"
+          echo "打包器                  : $(echo $c)"
+          if [ -n "$a" ] && [ "$a" = "$b" ] && [ "$b" = "$c" ]; then
+            echo "✓ 三端一致"
           else
-            echo "✗ 两端的跳过表不一致（或有一边没抽出来）。"
-            echo "  它们必须逐字相同：客户端算的摘要要与站点报的对得上。"
+            echo "✗ 三端的跳过表不一致（或有一边没抽出来）。"
+            echo "  它们必须逐字相同：客户端算的摘要要与站点报的对得上，"
+            echo "  而打包器排除的那些必须正好是读方拒绝的那些。"
             exit 1
           fi

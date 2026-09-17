@@ -2291,6 +2291,169 @@ exit 0
         finally:
             shutil.rmtree(_tmp, ignore_errors=True)
 
+    # ── 19.14 ★★ 读一个 .splug：三端共用同一份符合性向量 ────────────────────
+    #
+    # 这一节读的是 `tools/conformance/expected.json` 与 `bad.json` —— **与客户端
+    # `client/test/plugin-package.test.mjs`、打包器 `packer/test-packer.mjs` 读的是
+    # 同一批十六进制**。三份实现（打包器 / 守护进程 / 客户端）各自解析同一个包、
+    # 同一批坏包，必须得出同一个内容摘要与同一个拒绝理由。
+    #
+    # ★ 这一版**没有调用方**（见守护进程里「读一个 .splug」那一节的开头）。它现在
+    #   是安装器与"集群侧切包"那两段的前置：读包的能力必须先于"服务器开始收包"
+    #   落地，否则中间会开一个"客户端把读不懂的字节当校验不过"的窗口。
+    #
+    # ★ 判**的次序**也在这条契约里（附录 A.4）：一个包同时犯两条时，先判哪条决定
+    #   了拿到哪个理由词。所以下面断言的是**逐条相等的词**，不只是"拒了"。
+    print("\n── 19.14. 读一个 .splug（三端共用一份符合性向量）──")
+    _conf = os.path.abspath(os.path.join(HERE, os.pardir, "tools", "conformance"))
+    with open(os.path.join(_conf, "expected.json"), encoding="utf-8") as _f:
+        _exp = json.load(_f)
+    with open(os.path.join(_conf, "bad.json"), encoding="utf-8") as _f:
+        _bad = json.load(_f)
+    _unhex = lambda lines: bytes.fromhex("".join(lines))
+    _good = _unhex(_exp["package"]["hex"])
+    _signed = _unhex(_exp["signed"]["hex"])
+
+    _r = mod.package_parse(_good)
+    check("★ 符合性向量：好包能解析（%s）" % (_r.get("why", "") if not _r["ok"] else "ok"),
+          _r["ok"])
+    if _r["ok"]:
+        check("★★ 内容摘要是夹具里那个（它也是客户端会算出来的那个）",
+              _r["digest"] == _exp["digest"], _r["digest"])
+        check("★ 记录表读出来的逐份 path/size/sha256 与夹具**逐条、按序**相同",
+              [{"path": f["path"], "size": f["size"], "sha256": f["sha256"]}
+               for f in _r["files"]] == _exp["files"],
+              repr([f["path"] for f in _r["files"]])[:200])
+        check("★ 没有签名时 sig 是 None（不是 {} —— 缺席与空要分得开）",
+              _r["sig"] is None)
+        check("★ 清单从负载里读出来了（id 与夹具一致）",
+              _r["manifest"].get("id") == "01M2JKHTZGQ7X8V4T5R6N7B8C9",
+              repr(_r["manifest"].get("id")))
+        check("★ 包字节数就是夹具里那个（没有多出来的字节）",
+              len(_r["data"]) == _exp["package"]["bytes"])
+
+        # 摘要与"喂进去的次序"无关 —— 排序是摘要的一部分（§3.4）
+        _rev = mod.package_content_digest(list(reversed(_r["files"])))
+        check("★ 倒着喂进去算出同一个摘要（排序按路径字节，不是按进去的先后）",
+              _rev == _exp["digest"], _rev)
+
+    _s = mod.package_parse(_signed)
+    check("★ 带签名的包也解析得动，而且**摘要与不带签名的那份逐字相同**", _s["ok"] and
+          _s["digest"] == _exp["digest"],
+          "%s %s" % (_s.get("code"), _s.get("why")))
+    if _s["ok"] and _s["sig"]:
+        check("★ 公钥指纹与夹具一致（给人核对的那一串，§4.1）",
+              _s["sig"]["fingerprint"] == _exp["signed"]["fingerprint"],
+              _s["sig"]["fingerprint"])
+        check("★ 公钥字节就是夹具里那 32 个字节",
+              _s["sig"]["pubkey"].hex() == _exp["signed"]["publicKeyHex"])
+
+    # ★★ 站点**不验签**，这是一条**有断言的**事实，不是一件被忘掉的事。
+    #
+    #    §6 没有给站点任何一条验签义务 —— 验签是客户端的事（§5.4「客户端会钉住
+    #    你的公钥」）。这一节解析签名块、把签名者报出来给管理员看，但不判它成不
+    #    成立。所以夹具里那两条"只有会验签的一端才拒得了"的坏包，在这里**预期会
+    #    被收下** —— 下面这一条把它断言成事实。
+    #
+    #    ★ 换成在 Python 里手写一个 Ed25519 验签器的代价是：给一个以 root 跑在
+    #      集群上的进程加一份自己实现的密码学，而它挡的那件事本来就发生在客户端
+    #      那一侧。（安装器那一侧要不要验、以及"没验就别说验过了"的措辞，是切包
+    #      那一段的事 —— 见 KNOWN-ISSUES。）
+    _needs_verify = [c for c in _bad["cases"] if c.get("needs") == "verify"]
+    check("★ 夹具里至少有两条是「只有会验签的一端才拒得了」的",
+          len(_needs_verify) >= 2, repr([c["name"] for c in _needs_verify]))
+    for _c in _needs_verify:
+        _g = mod.package_parse(_unhex(_c["hex"]))
+        check("★★ 守护进程**收下**它（%s）—— 站点不验签，这是设计不是漏洞" % _c["name"],
+              _g["ok"], "却被拒了：%s %s" % (_g.get("code"), _g.get("why")))
+
+    _wrong = []
+    for _c in _bad["cases"]:
+        if _c.get("needs") == "verify":
+            continue
+        _g = mod.package_parse(_unhex(_c["hex"]))
+        _got = "ok" if _g["ok"] else _g["code"]
+        if _got != _c["code"]:
+            _wrong.append("%s：%s→%s" % (_c["name"], _c["code"], _got))
+    check("★★ %d 条坏包逐条对上夹具里的理由词（词表与判的次序是三端共用的契约）"
+          % (len(_bad["cases"]) - len(_needs_verify)), not _wrong,
+          "；".join(_wrong))
+
+    _covered = {c["code"] for c in _bad["cases"]}
+    _vocab = [mod.PACKAGE_LENGTH, mod.PACKAGE_MAGIC_BAD, mod.PACKAGE_FORMAT_BAD,
+              mod.PACKAGE_RECORD, mod.PACKAGE_PATH, mod.PACKAGE_DUPLICATE,
+              mod.PACKAGE_CONTENT, mod.PACKAGE_MANIFEST, mod.PACKAGE_SIGNATURE]
+    check("★ 词表里每一个词都有坏包钉住（有一个没人守就是一条没人守的判据）",
+          not [v for v in _vocab if v not in _covered],
+          repr([v for v in _vocab if v not in _covered]))
+
+    # ★ 截断到任何一个长度都不许抛 —— 一个只读解析器唯一的合法反应是"说它不长这样"。
+    #   抛出在集群侧意味着一个以 root 跑的进程带着 traceback 退出。
+    _threw = None
+    _codes = set()
+    for _n in range(len(_good)):
+        try:
+            _g = mod.package_parse(_good[:_n])
+        except Exception as _e:                                  # noqa: BLE001
+            _threw = "%d 字节时抛了 %r" % (_n, _e)
+            break
+        if _g["ok"]:
+            _threw = "%d 字节时居然通过了" % _n
+            break
+        _codes.add(_g["code"])
+    check("★★ 截断到任何一个长度都不抛、不通过（%d 种理由）" % len(_codes),
+          _threw is None, _threw or "")
+    check("★ 而且截断确实产生了不止一种理由（只有一种说明检查太粗）",
+          len(_codes) >= 2, repr(sorted(_codes)))
+
+    # ★ 大小写折叠是 ASCII-only：`İ`（U+0130）与 `K`（U+212A）是全 Unicode 折叠
+    #   **会**折到 ASCII、而 ASCII-only **不**折的两个。这是一条**拒绝**规则，
+    #   折叠口径不一致就会出现"一边收、一边拒"。
+    check("★ 大小写折叠是 ASCII-only（全 Unicode 的 lower() 会在这两个字符上分家）",
+          mod.package_fold_ascii("ABC") == "abc"
+          and mod.package_fold_ascii("İ") != "i"
+          and mod.package_fold_ascii("K") != "k"
+          and mod.package_fold_ascii("A中B") == "a中b",
+          "%r %r %r" % (mod.package_fold_ascii("İ"),
+                        mod.package_fold_ascii("K"),
+                        mod.package_fold_ascii("A中B")))
+    check("★ 而且 `str.lower()` 真的会分家 —— 这一条说明上一条不是在防一个假想",
+          "K".lower() == "k" and len("İ".lower()) == 2)
+
+    # ★ `--extract-package`：集群侧读包的**唯一**入口，也是部署脚本织作业脚本要用
+    #   的那个。它的输出必须是**逐字节**那一份文件 —— 标准输出上多一行日志，取回来
+    #   的 job/start.sh 里就混进了一行日志，而那是"部署成功了但作业起不来"。
+    _pkgfile = os.path.join(tempfile.mkdtemp(prefix="slurmate-pkg-"), "x.splug")
+    try:
+        with open(_pkgfile, "wb") as _f:
+            _f.write(_good)
+        _want = None
+        for _f in _r["files"]:
+            if _f["path"] == "job/start.sh":
+                _want = _good[_f["offset"]:_f["offset"] + _f["size"]]
+        _run = subprocess.run([sys.executable, DAEMON, "--extract-package",
+                               _pkgfile, "job/start.sh"],
+                              capture_output=True)
+        check("★★ --extract-package 的输出**逐字节**等于包里那一份（多一行日志就废了）",
+              _run.returncode == 0 and _run.stdout == _want,
+              "rc=%d，stdout %d 字节（期望 %d），stderr=%r"
+              % (_run.returncode, len(_run.stdout), len(_want or b""),
+                 _run.stderr[:200]))
+        _miss = subprocess.run([sys.executable, DAEMON, "--extract-package",
+                                _pkgfile, "job/nope.sh"], capture_output=True)
+        check("★ 包里没有那一份时明确失败（不是安静地输出空）",
+              _miss.returncode != 0 and _miss.stdout == b"", repr(_miss.stdout[:80]))
+        _badpkg = os.path.join(os.path.dirname(_pkgfile), "bad.splug")
+        with open(_badpkg, "wb") as _f:
+            _f.write(_unhex([c for c in _bad["cases"] if c["code"] == "magic"][0]["hex"]))
+        _badrun = subprocess.run([sys.executable, DAEMON, "--extract-package",
+                                  _badpkg, "job/start.sh"], capture_output=True)
+        check("★ 包本身不成立时，错误走 stderr、stdout 一个字节都不出",
+              _badrun.returncode != 0 and _badrun.stdout == b""
+              and b"magic" in _badrun.stderr, repr(_badrun.stderr[:200]))
+    finally:
+        shutil.rmtree(os.path.dirname(_pkgfile), ignore_errors=True)
+
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #
     # 这两个文件之间有一条**跨语言的契约**：作业用 printf 拼一段 JSON 出来，守护

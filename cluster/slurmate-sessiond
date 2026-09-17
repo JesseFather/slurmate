@@ -1112,6 +1112,301 @@ def plugin_symlinks(source_dir):
     return out
 
 
+# ==============================================================================
+#  读一个 .splug（docs/PLUGIN-SPEC.md 附录 A）
+# ==============================================================================
+#
+# ★ 这一节现在**没有调用方**（与客户端那一份 `plugin-package.js` 同步）。它是
+#   安装器（`slurmate plugin install`）与集群侧切包那一段的前置：读包的能力必须
+#   先于"服务器开始收包"落地，否则中间会开一个"客户端把读不懂的字节当校验不过"
+#   的窗口。用例有、调用方没有，是过渡期的正常状态。
+#
+# ★ **它是三份实现里的第三份。** 钉住它们的是 `tools/conformance/`：一份固定的
+#   输入树、一份期望的包字节、一批坏包（每条带一个期望的理由词）。所以下面这个
+#   词表与判**的次序**必须与 `packer/slurmate-packer.js` 和客户端
+#   `plugin-package.js` 逐字一致 —— 次序也是规范的一部分（附录 A.4）：一个包
+#   同时犯两条时，先判哪条决定了拿到哪个词。
+#
+# ★ **这里不验签。** 验签是客户端的事（§5.4「客户端会钉住你的公钥」），§6 没有
+#   给站点任何一条验签义务。站点需要做的是**把签名者报出来**给管理员看 ——
+#   所以这一节解析签名块、算指纹，但不判它成不成立。★ 这不是一条省掉的检查：
+#   在 Python 里手写一个 Ed25519 验签器，等于给一个以 root 跑在集群上的进程
+#   加一份自己实现的密码学，而它挡的那件事（作者是不是我以为的那个人）本来就
+#   发生在客户端那一侧。
+
+PACKAGE_MAGIC = b"splug\x1a\r\n"
+PACKAGE_FORMAT = 1
+PACKAGE_HEADER_BYTES = 20
+PACKAGE_SIG_BYTES = 97               # alg(u8) | 公钥(32) | 签名(64)
+PACKAGE_SIG_ALG_ED25519 = 1
+PACKAGE_MAX_DEPTH = 8
+
+# 拒绝的理由词表。与另外两份实现**字面相同**。
+PACKAGE_LENGTH = "length"            # 长度对不上：尾随字节、截断、Σsize 与负载不符
+PACKAGE_MAGIC_BAD = "magic"          # 魔数不对
+PACKAGE_FORMAT_BAD = "format"        # format 不是本实现认识的那个（「站点太新」的来源）
+PACKAGE_RECORD = "record"            # 记录表本身读不完整
+PACKAGE_PATH = "path"                # 某条路径不合 §3.3
+PACKAGE_DUPLICATE = "duplicate"      # 两条路径重复（逐字，或只差 ASCII 大小写）
+PACKAGE_CONTENT = "content"          # 某一份的字节与记录里的 sha256 不符
+PACKAGE_MANIFEST = "manifest"        # 负载里没有可解析的 plugin.json
+PACKAGE_SIGNATURE = "signature"      # 签名块不合形状
+
+# Windows 上不合法或会被静默改名的东西。与客户端 site-plugins.js 那一对逐字相同。
+_PKG_WIN_BAD_CHARS = re.compile(r'[:*?"<>|]')
+_PKG_WIN_RESERVED = re.compile(r"(?i)\A(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?\Z")
+
+
+def package_fold_ascii(s):
+    """★ ASCII-only 的大小写折叠（§3.3 的"只差大小写"判据）。
+
+    **不能**用 `str.lower()`：它是全 Unicode 的，`"İ".lower()` 是两个码元的
+    `"i̇"`、`"K".lower()` 就是 `"k"`。这是一条**拒绝**规则，折叠口径不一致
+    就会出现"一边收、一边拒"。ASCII-only 的折叠在三种语言里逐字节相同。
+    """
+    out = []
+    for ch in s:
+        o = ord(ch)
+        out.append(chr(o + 32) if 0x41 <= o <= 0x5A else ch)
+    return "".join(out)
+
+
+def package_path_problem(rel, max_depth):
+    """一条相对路径合不合 §3.3。返回 `None`（可以）或一句为什么不行。
+
+    ★ 与 `packer/slurmate-packer.js` 的 `checkRelPath`、客户端
+      `site-plugins.js` 的 `checkRelPath` 是**同一条规则的三份实现** ——
+      钉住它们的是符合性向量里那几条 `path` 坏包。
+    """
+    if not isinstance(rel, str) or not rel:
+        return "路径是空的"
+    if "\0" in rel:
+        return "路径里有 NUL"
+    if "\\" in rel:
+        return "路径里有反斜杠（不翻译成 / —— 一侧翻译另一侧不翻译就是歧义）"
+    if rel.startswith("/"):
+        return "路径是绝对的"
+    if rel.endswith("/"):
+        return "路径以 / 结尾"
+    if "//" in rel:
+        return "路径里有连续的两个 /"
+    segs = rel.split("/")
+    if len(segs) > max_depth:
+        return "路径有 %d 层，超过上限 %d" % (len(segs), max_depth)
+    for s in segs:
+        if not s or s == "." or s == "..":
+            return '路径里有空的、"." 或 ".." 这一段'
+        if len(s.encode("utf-8")) > 255:
+            return "路径里有一段超过 255 字节"
+        if _PKG_WIN_BAD_CHARS.search(s):
+            return "路径里有 Windows 上不合法的字符（: * ? \" < > |）"
+        if _PKG_WIN_RESERVED.match(s):
+            return "%r 是 Windows 的保留名" % s
+        if s[-1] in " .":
+            return "路径里有一段以空格或点结尾（Windows 上会被静默改名）"
+        if s in PLUGIN_COPY_SKIP:
+            return "%r 不在分发范围内" % s
+    return None
+
+
+def package_content_digest(files):
+    """内容摘要（§3.4）。
+
+    = sha256( 按**路径的 UTF-8 字节**排序后，逐份拼接
+              「路径 UTF-8 ‖ 0x00 ‖ sha256(内容) 的小写十六进制 ‖ 0x0A」 )
+
+    ★ **不含**容器字节、信封头、签名、时间戳、打包器版本、目录名。
+    ★ Python 的 `bytes` 比较天然是字节序，所以这里 `sorted(key=...)` 就够了 ——
+      而 JS 那边必须显式用 `Buffer.compare`（它的 `<` 比 UTF-16 码元）。
+    """
+    h = hashlib.sha256()
+    for f in sorted(files, key=lambda x: x["path"].encode("utf-8")):
+        h.update(f["path"].encode("utf-8"))
+        h.update(b"\x00")
+        h.update(f["sha256"].encode("ascii"))
+        h.update(b"\x0a")
+    return h.hexdigest()
+
+
+def package_signature_fingerprint(pubkey):
+    """公钥指纹 = sha256(32 字节裸公钥) 的小写十六进制（§4.1 给人核对的那一串）。"""
+    return hashlib.sha256(pubkey).hexdigest()
+
+
+# ★ 与客户端那一份一样，这个读方**不**执行"单文件多少字节 / 一共几份／整包多大"
+#   那三个上限。理由写在客户端 plugin-package.js 的同一段注记里（一份推理，两处
+#   指向它）：份数被长度方程夹住，而"整包多大"是**链路**约束，跟着 `package_bytes`
+#   一起进来 —— 那时安装器与客户端读方要一起收它。
+
+
+def package_parse(data):
+    """严格解析一个包。**按附录 A.4 的次序判**。
+
+    返回 `{"ok": True, "files": [...], "manifest": {...}, "digest": ..., "sig": ...}`
+    或 `{"ok": False, "code": ..., "why": ...}`。
+
+    ★ **不抛**：调用方（安装器、部署脚本）要能把"这个包不成立"当成一个正常结果
+      处理。一个畸形文件不该让一个以 root 跑的进程带着 traceback 退出。
+    """
+    def bad(code, why):
+        return {"ok": False, "code": code, "why": why}
+
+    if not isinstance(data, (bytes, bytearray)):
+        return bad(PACKAGE_LENGTH, "不是一段字节")
+    data = bytes(data)
+
+    # 1 长度不足以放下头部
+    if len(data) < PACKAGE_HEADER_BYTES:
+        return bad(PACKAGE_LENGTH, "只有 %d 字节，连 %d 字节的头都放不下"
+                   % (len(data), PACKAGE_HEADER_BYTES))
+    # 2 魔数
+    if data[:8] != PACKAGE_MAGIC:
+        return bad(PACKAGE_MAGIC_BAD, "魔数不对，这不是一个 .splug")
+    # 3 format
+    fmt = int.from_bytes(data[8:12], "big")
+    if fmt != PACKAGE_FORMAT:
+        return bad(PACKAGE_FORMAT_BAD, "format = %d，本实现只认识 %d"
+                   % (fmt, PACKAGE_FORMAT))
+    file_count = int.from_bytes(data[12:16], "big")
+    sig_len = int.from_bytes(data[16:20], "big")
+
+    # 4 记录表读得完吗
+    files = []
+    off = PACKAGE_HEADER_BYTES
+    for i in range(file_count):
+        if off + 2 > len(data):
+            return bad(PACKAGE_RECORD, "第 %d 条记录的表头就越过了文件末尾" % i)
+        pathlen = int.from_bytes(data[off:off + 2], "big")
+        end = off + 2 + pathlen + 8 + 32
+        if end > len(data):
+            return bad(PACKAGE_RECORD, "第 %d 条记录（路径 %d 字节）越过了文件末尾"
+                       % (i, pathlen))
+        raw = data[off + 2:off + 2 + pathlen]
+        # ★ 不合法的 UTF-8 必须**拒绝**，不能 `errors="replace"` —— 那会把坏字节
+        #   悄悄换成 U+FFFD，而摘要把那个替换字符算进去 ⇒ 两端算的不是同一份东西。
+        try:
+            p = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return bad(PACKAGE_PATH, "第 %d 条记录的路径不是合法的 UTF-8" % i)
+        size = int.from_bytes(data[off + 2 + pathlen:off + 2 + pathlen + 8], "big")
+        files.append({
+            "path": p,
+            "size": size,
+            "sha256": data[off + 2 + pathlen + 8:end].hex(),
+            "offset": 0,                      # 第 8 步再填
+        })
+        off = end
+
+    # 5 长度必须**精确**
+    total = sum(f["size"] for f in files)
+    want = off + sig_len + total
+    if want != len(data):
+        return bad(PACKAGE_LENGTH,
+                   "头部+记录表+签名块+Σsize = %d 字节，而文件是 %d 字节%s"
+                   % (want, len(data),
+                      "（多出来的字节**没有任何声明** —— 信封里不许有白送的字节，§3.6）"
+                      if want < len(data) else "（负载被截断了）"))
+
+    # 6 路径规则（§3.3，收包方**再判一遍**）
+    for f in files:
+        why = package_path_problem(f["path"], PACKAGE_MAX_DEPTH)
+        if why:
+            return bad(PACKAGE_PATH, "%r：%s" % (f["path"], why))
+
+    # 7 重复路径
+    seen = {}
+    for f in files:
+        k = package_fold_ascii(f["path"])
+        if k in seen:
+            prev = seen[k]
+            if prev == f["path"]:
+                return bad(PACKAGE_DUPLICATE,
+                           "%r 出现了两次 —— 解出来的树是歧义的" % f["path"])
+            return bad(PACKAGE_DUPLICATE,
+                       "%r 与 %r 只差大小写 —— 落盘时会互相覆盖，而摘要按落盘之后算，"
+                       "于是\"同意的\"与\"装上的\"可以不是同一棵树" % (prev, f["path"]))
+        seen[k] = f["path"]
+
+    # 8 逐份用记录里的 sha256 校字节
+    pay = off + sig_len
+    for f in files:
+        f["offset"] = pay
+        got = hashlib.sha256(data[pay:pay + f["size"]]).hexdigest()
+        if got != f["sha256"]:
+            return bad(PACKAGE_CONTENT,
+                       "%r 的字节与记录里的 sha256 不符（记录 %s，实际 %s）"
+                       % (f["path"], f["sha256"], got))
+        pay += f["size"]
+
+    # 9 负载里必须有 plugin.json，且是合法的 JSON **对象**
+    mf = None
+    for f in files:
+        if f["path"] == MANIFEST_NAME:
+            mf = f
+            break
+    if mf is None:
+        return bad(PACKAGE_MANIFEST, "负载里没有 %s" % MANIFEST_NAME)
+    try:
+        manifest = json.loads(data[mf["offset"]:mf["offset"] + mf["size"]]
+                              .decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        return bad(PACKAGE_MANIFEST, "%s 不是合法的 JSON：%s" % (MANIFEST_NAME, e))
+    if not isinstance(manifest, dict):
+        return bad(PACKAGE_MANIFEST, "%s 的最外层不是一个 JSON 对象" % MANIFEST_NAME)
+
+    # 10 签名块：**只解析、不验签**（见本节开头那段）
+    sig = None
+    if sig_len != 0:
+        block = data[off:off + sig_len]
+        if len(block) != PACKAGE_SIG_BYTES or block[0] != PACKAGE_SIG_ALG_ED25519:
+            return bad(PACKAGE_SIGNATURE,
+                       "签名块 %d 字节，不是一个合法的 Ed25519 签名块"
+                       "（本格式是 %d 字节、alg=1）" % (sig_len, PACKAGE_SIG_BYTES))
+        sig = {
+            "alg": block[0],
+            "pubkey": block[1:33],
+            "signature": block[33:97],
+            "fingerprint": package_signature_fingerprint(block[1:33]),
+        }
+
+    return {
+        "ok": True,
+        "format": fmt,
+        "file_count": file_count,
+        "files": files,
+        "sig": sig,
+        "manifest": manifest,
+        "digest": package_content_digest(files),
+        "data": data,
+    }
+
+
+def package_read_file(path):
+    """从磁盘读一个包。读不动是 `{"ok": False, ...}` 而不是抛。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return {"ok": False, "code": PACKAGE_LENGTH, "why": "读不到 %s：%s" % (path, e)}
+    return package_parse(data)
+
+
+def package_extract(path, inner):
+    """取出包里的**一份**文件，返回字节；没有那一份返回 `None`。
+
+    ★ 这是集群侧读包的**唯一**入口。部署脚本要插件里的 `job/start.sh` 去织作业
+      脚本时走它，于是"包怎么读"只有 Python 这一份实现，两遍编织的结构一个字都
+      不用改。见 deploy.sh 的插件那一节。
+    """
+    r = package_read_file(path)
+    if not r["ok"]:
+        raise ValueError("%s 不是一个能读的包（%s）：%s" % (path, r["code"], r["why"]))
+    for f in r["files"]:
+        if f["path"] == inner:
+            return r["data"][f["offset"]:f["offset"] + f["size"]]
+    return None
+
+
 class PluginConfig(object):
     """一个插件的**生效配置**：元数据（PluginSpec）+ 站点在它的块里写的东西。
 
@@ -3716,8 +4011,31 @@ def main():
     ap.add_argument("--plugins-dir", default="",
                     help="配合 --check-plugins：改扫这个目录而不是安装目录。"
                          "部署前的体检用它校验**还没装进去**的源目录")
+    ap.add_argument("--extract-package", nargs=2, metavar=("包", "包内路径"),
+                    help="从 .splug 里取出**一份**文件写到标准输出，然后退出。"
+                         "集群侧读包只有这一个入口 —— 部署脚本用它取插件里的 "
+                         "job/start.sh 去织作业脚本，于是'包怎么读'只有 Python "
+                         "这一份实现（见 deploy.sh 的插件那一节）")
     ap.add_argument("--version", action="version", version=VERSION)
     args = ap.parse_args()
+
+    # ── 从包里取一份文件（deploy.sh 用）────────────────────────────────────
+    # ★ 它**不读配置、不连 Slurm、不写日志到标准输出** —— 它的输出是一段二进制，
+    #   任何一行多余的打印都会变成"取回来的 job/start.sh 里混进了日志"。
+    #   所以它排在 `log_setup()` 与 `Config()` 之前。
+    if args.extract_package:
+        pkg, inner = args.extract_package
+        try:
+            data = package_extract(pkg, inner)
+        except ValueError as e:
+            sys.stderr.write("错误: %s\n" % e)
+            return 1
+        if data is None:
+            sys.stderr.write("错误: %s 里没有 %s\n" % (pkg, inner))
+            return 1
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        return 0
 
     log_setup()
 
