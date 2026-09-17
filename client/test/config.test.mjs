@@ -792,3 +792,90 @@ test('★ 开发者模式：缺省**关着**，且只认布尔值', () => {
   config.setDevPlugins(d2, cfg, false);
   assert.equal(config.loadConfig(d2).devPlugins, false);
 });
+
+// ── 钉子：按 id 记的签名公钥（§5.4）─────────────────────────────────────────
+
+test('★ 钉子表是**单独一个文件** —— 旧版本不认识它，也就抹不掉它', () => {
+  const dir = tmpdir();
+  const FP = 'a'.repeat(64);
+  assert.deepEqual(config.loadPinnedKeys(dir), {}, '还没钉过 ⇒ 空表');
+
+  const pins = config.loadPinnedKeys(dir);
+  assert.equal(config.pinPluginKey(dir, pins, 'PLUG', FP).ok, true);
+  assert.equal(fs.existsSync(path.join(dir, 'pinned-keys.json')), true);
+  // ★ 关键的一条：它**不在** config.json 里。放进那里的话，一个只认已知键的旧版本
+  //   读一遍再存一遍就会把它抹掉 —— 而丢掉钉子 = 静默回到"首次即信任"。
+  assert.equal(fs.existsSync(path.join(dir, 'config.json')), false,
+    '钉一件事不该顺手写出一份 config.json');
+
+  const again = config.loadPinnedKeys(dir);
+  assert.equal(config.pinnedKeyOf(again, 'PLUG'), FP);
+  assert.equal(mode(path.join(dir, 'pinned-keys.json')), 0o600, '钉子表是 0600');
+});
+
+test('★★ 钉子只能钉一次：换一把 ⇒ 拒绝（§5.4，这里没有"重新钉"这条路）', () => {
+  const dir = tmpdir();
+  const A = 'a'.repeat(64);
+  const B = 'b'.repeat(64);
+  const pins = config.loadPinnedKeys(dir);
+  config.pinPluginKey(dir, pins, 'PLUG', A);
+
+  assert.equal(config.pinPluginKey(dir, pins, 'PLUG', A).unchanged, true, '同一个值 ⇒ 无操作');
+  const r = config.pinPluginKey(dir, pins, 'PLUG', B);
+  assert.equal(r.ok, false);
+  assert.match(r.error, new RegExp(A), '错误里必须**说出**原来那一把');
+  assert.match(r.error, new RegExp(B), '也要说出想换成的这一把');
+  assert.equal(config.pinnedKeyOf(config.loadPinnedKeys(dir), 'PLUG'), A, '钉还是原来那一把');
+
+  const bad = config.pinPluginKey(dir, pins, 'OTHER', 'not-a-fingerprint');
+  assert.equal(bad.ok, false, '指纹不合形状 ⇒ 拒绝，不写一条用不了的记录');
+  assert.equal(config.pinnedKeyOf(config.loadPinnedKeys(dir), 'OTHER'), undefined);
+});
+
+test('★★ 一条读不动的钉子**留在表里**，返回 `\'\'` 而不是 `undefined`', () => {
+  // 这一条与同意台账**相反**：台账里一条残缺条目丢掉 = 重新问一次（安全的那侧）；
+  // 钉子丢掉 = 下次"首次即信任"（不安全的那侧）。所以两者必须分得开：
+  //   undefined = 从来没钉过（首次即信任）
+  //   ''        = 钉过，但那一份读不出来（必须拒绝）
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'pinned-keys.json'), JSON.stringify({
+    schema: 1,
+    pinnedKeys: {
+      GOOD: { fingerprint: 'c'.repeat(64), at: 1 },
+      SHORT: { fingerprint: 'abc', at: 1 },
+      MISSING: { at: 1 },
+      JUNK: 'not-an-object',
+    },
+  }));
+
+  const pins = config.loadPinnedKeys(dir);
+  assert.equal(config.pinnedKeyOf(pins, 'GOOD'), 'c'.repeat(64));
+  assert.equal(config.pinnedKeyOf(pins, 'SHORT'), 'abc',
+    '读不动的那一份**原样留着** —— 它既不是 undefined（那会变成"没钉过"），也不是它自己');
+  assert.equal(config.pinnedKeyOf(pins, 'MISSING'), '', '连指纹字段都没有的那一条 ⇒ 空串');
+  assert.equal(config.pinnedKeyOf(pins, 'JUNK'), '', '那一条根本不是对象 ⇒ 空串');
+  assert.equal(config.pinnedKeyOf(pins, 'NEVER'), undefined, '这个 id 是真没钉过');
+  // ★ 判它读不读得动的地方**只有一处**：`keyVerdict` 那个全长十六进制的正则。
+  //   所以这里能说的就是"它留在表里、而且不是 undefined"；「一律拒绝」由
+  //   plugin-package.test.mjs 断言（那边有真的包可以喂进去）。
+  assert.notEqual(config.pinnedKeyOf(pins, 'SHORT'), undefined);
+});
+
+test('钉子在同意台账旁边活得很好：两张表互不影响', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  const pins = config.loadPinnedKeys(dir);
+  config.trustPlugin(dir, cfg, 'PLUG', '1.0.0', 'd'.repeat(64), 'site');
+  config.pinPluginKey(dir, pins, 'PLUG', 'e'.repeat(64));
+
+  // §5.3 说删掉构件 = 撤回同意；而**拔钉子**不许跟着发生（承重·六）。
+  // 这条断言把"两张表各写各的文件"钉住：动一张不会碰到另一张。
+  const cfg2 = config.loadConfig(dir);
+  assert.equal(config.isTrusted(cfg2, 'PLUG', '1.0.0', 'd'.repeat(64)), true);
+  assert.equal(config.pinnedKeyOf(config.loadPinnedKeys(dir), 'PLUG'), 'e'.repeat(64));
+
+  const before = fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8');
+  config.trustPlugin(dir, cfg2, 'PLUG', '1.0.1', 'f'.repeat(64), 'site');
+  assert.equal(fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8'), before,
+    '写同意台账不许碰钉子表一个字节');
+});

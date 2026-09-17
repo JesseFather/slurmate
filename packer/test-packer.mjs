@@ -46,6 +46,13 @@ function check(desc, cond, detail = '') {
     FAIL++; console.log(`  [FAIL] ${desc}  ${detail}`);
   }
 }
+/** 读一份 JSON，读不到就返回 `null` —— **别让读不动把整个脚本带崩**。
+ *  ★ 一条把测试跑挂的防线，与一条不存在的防线，在输出上长得一模一样：
+ *    崩溃之后**后面每一条用例都不再执行**，而报告里只看得到一个红。 */
+function readJsonOrNull(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
 function section(t) { console.log(`\n── ${t} ──`); }
 
 // ==============================================================================
@@ -78,23 +85,41 @@ function mkRepo(files, opts = {}) {
   git('init', '-q', '-b', 'main');
   git('add', '-A');
   git('commit', '-qm', 't');
-  return { base, plug, git };
+  // ★ 一棵夹具树配一个打包器的"家"：发布表按 (id, 版本) 记，而这一组用例里
+  //   每棵小树都用同一个夹具 id —— 共用一个家的话，第二棵树一打包就会撞上
+  //   §2.4 那条拒绝（那**是对的**：两棵内容不同的树自称同一个 (id, 版本)）。
+  HOME_TMP = path.join(base, 'home');
+  fs.mkdirSync(HOME_TMP, { recursive: true });
+  return { base, plug, git, home: HOME_TMP };
 }
 
-/** 跑一次打包器 CLI，返回 `{code, out, err}`。 */
+/**
+ * 跑一次打包器 CLI，返回 `{code, out, err}`。
+ *
+ * ★ 每次都把 `$SLURMATE_PACKER_HOME` 指到一个临时目录。**这不是讲究卫生**：
+ *   打包器会往那儿写私钥与发布表，而发布表会在"同一个 (id, 版本) 算出第二个
+ *   摘要"时拒绝打包（§2.4）—— 不隔开的话，这一组用例第一次跑还能过，
+ *   第二次跑就在一堆与它无关的地方红。
+ */
+let HOME_TMP = null;
 function packer(...args) {
+  if (!HOME_TMP) { HOME_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-')); TMP.push(HOME_TMP); }
   try {
-    const out = execFileSync(process.execPath, [PACKER].concat(args),
-      { encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = execFileSync(process.execPath, [PACKER].concat(args), {
+      encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, SLURMATE_PACKER_HOME: HOME_TMP },
+    });
     return { code: 0, out, err: '' };
   } catch (e) {
     return { code: e.status == null ? -1 : e.status, out: e.stdout || '', err: e.stderr || '' };
   }
 }
 
+const MF_ID = '01M2JKHTZGQ7X8V4T5R6N7B8C9';
+
 /** 一个最小的、合法的清单。 */
 const mf = (over = {}) => `${JSON.stringify({
-  id: '01M2JKHTZGQ7X8V4T5R6N7B8C9',
+  id: MF_ID,
   name: 'plug',
   displayName: '插件',
   version: '1.0.0',
@@ -104,8 +129,16 @@ const mf = (over = {}) => `${JSON.stringify({
   ...over,
 }, null, 2)}\n`;
 
-const baseFiles = () => ({
-  'plugin.json': mf(),
+/**
+ * 血统表（§2.5）。★ 它与 `plugin.json` 是一对：**一棵树带着 id，就必须有它那一条**，
+ * 否则 `build` / `init` 会停下来问（那正是这一组用例要验的事之一）。所以夹具里
+ * 两者必须一起造 —— 只造清单不造表，得到的是一个"手滑复制了 plugin.json"的形状。
+ */
+const lin = (id, key = null) => `${JSON.stringify({ schema: 1, lineage: { [id]: { key } } }, null, 2)}\n`;
+
+const baseFiles = (over = {}) => ({
+  'plugin.json': mf(over),
+  'lineage.json': lin(over.id || MF_ID),
   'client/index.js': 'module.exports = {};\n',
   'job/start.sh': '#!/bin/bash\necho hi\n',
 });
@@ -435,6 +468,313 @@ section('6. 命令行出口码');
 }
 
 // ==============================================================================
+//  7. 血统表与 §2.5 的"停下来问"
+// ==============================================================================
+
+section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来问');
+
+{
+  // 手滑的现场：把 plugin.json 从一个插件复制到另一棵树（那棵树有它自己的表）。
+  const { plug, base } = mkRepo({ ...baseFiles(), 'lineage.json': lin('01AAAAAAAAAAAAAAAAAAAAAAAA') });
+  const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+  check('★★ 血统表不认识这个 id ⇒ **拒绝打包**（不是静默沿用）',
+    r.code !== 0 && /§2\.5/.test(r.err), r.err.slice(0, 200));
+  check('★ 而且把两条路都说了：真分身（--fork）与记录不在了',
+    /--fork/.test(r.err) && /另一个东西/.test(r.err) && /同一个插件/.test(r.err), r.err);
+  check('★ 两条路的后果也说了（重新同意一次）', /重新同意/.test(r.err), r.err);
+  check('★ 包一个字节都没写出来', !fs.existsSync(path.join(base, 'o.splug')));
+
+  const i = packer('init', plug);
+  check('★★ init 也停下来问（§2.5 说的是"打包器"，而 init 就是它铸 id 的那个动词）',
+    i.code !== 0 && /§2\.5/.test(i.err), i.err.slice(0, 200));
+}
+
+{
+  // 表整个不存在 —— 与"表在、但没有这一条"是同一件事的两种形状。
+  const files = baseFiles();
+  delete files['lineage.json'];
+  const { plug, base } = mkRepo(files);
+  const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+  check('★★ 血统表整个不在 ⇒ 同样拒绝，并在消息里说清是哪种不在',
+    r.code !== 0 && /§2\.5/.test(r.err) && /没有这份文件/.test(r.err), r.err.slice(0, 240));
+}
+
+{
+  // 新树：init 铸 id，**同时**给血统表记一条。
+  const { plug, base } = mkRepo({ 'plugin.json': mf({ id: undefined }), 'client/index.js': 'x\n' });
+  const r = packer('init', plug);
+  check('init：铸了 id 并写回', r.code === 0 && /铸了一个 id/.test(r.out), r.err);
+  const after = fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8');
+  const mfObj = readJsonOrNull(path.join(plug, 'plugin.json'));
+  check('★ init 写回的是一份合法的 JSON（写回是文本插入，最容易在这里手滑）',
+    Boolean(mfObj), JSON.stringify(after.slice(0, 200)));
+  const id = (mfObj || {}).id;
+  const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
+  check('★ 血统表里出现了这个 id，而且是 `key: null`（还没定钥匙）',
+    l.schema === 1 && l.lineage && l.lineage[id] && l.lineage[id].key === null, JSON.stringify(l));
+  check('★ 写回只多了一行：`\\u` 转义与数字写法一个都没动',
+    /"displayName": "插件"/.test(after) && !after.includes('\\u'), '');
+  check('★ 提示里说清了"先提交再打包"', /提交/.test(r.out), '');
+  check('★ 而且要往哪儿提交也说了（血统表也要进那一次提交）',
+    /lineage\.json/.test(r.out), r.out.slice(-200));
+}
+
+{
+  // --fork：承认这是另一个东西。
+  const { plug, base } = mkRepo({ ...baseFiles(), 'lineage.json': lin('01AAAAAAAAAAAAAAAAAAAAAAAA') });
+  const r = packer('init', plug, '--fork');
+  check('--fork：换了 id 并写回', r.code === 0 && /分身/.test(r.out), r.err);
+  const obj = readJsonOrNull(path.join(plug, 'plugin.json')) || {};
+  const l = readJsonOrNull(path.join(plug, 'lineage.json')) || { lineage: {} };
+  check('★★ 差异只有 id 那一处（清单里其余字节一个没动）',
+    obj.name === 'plug' && obj.displayName === '插件' && JSON.stringify(obj.engines) === '{"slurmate":">=0.5"}',
+    JSON.stringify(obj));
+  check('★ 旧 id **留在表里**（那是它的祖先），新 id 也在', l.lineage['01AAAAAAAAAAAAAAAAAAAAAAAA']
+    && l.lineage[obj.id] && l.lineage[obj.id].key === null, JSON.stringify(l));
+  check('★ 代价说在明处：所有用户重新同意一次', /重新同意/.test(r.out), '');
+  // 提交之后这次 build 不再停下来问：表里现在**认识**这个 id 了（§2.5 满足了）。
+  gitOf(base)('add', '-A');
+  gitOf(base)('commit', '-qm', 'fork');
+  const b = packer('build', plug, '--out', path.join(base, 'o.splug'));
+  check('★★ --fork 之后 build 不再停下来问（表里现在认识这个 id 了）',
+    b.code === 0, b.err);
+}
+
+// ==============================================================================
+//  8. keygen 与 sign
+// ==============================================================================
+
+section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
+
+{
+  const { plug, base, home } = mkRepo(baseFiles());
+  const id = MF_ID;
+  const kg = packer('keygen', plug);
+  check('keygen：铸了钥匙', kg.code === 0, kg.err);
+  const fp = (kg.out.match(/\b[0-9a-f]{64}\b/) || [])[0];
+  check('★ 打出了指纹（公钥必须以可复制的形式暴露给用户，§4.1）', Boolean(fp), kg.out);
+  const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
+  check('★ 公钥写进了血统表', l.lineage[id].key && l.lineage[id].key.length === 64, JSON.stringify(l));
+  const pem = path.join(home, 'keys', `${id}.pem`);
+  check('★ 私钥落在**树外**的钥匙库里，0600',
+    fs.existsSync(pem) && (fs.statSync(pem).mode & 0o777) === 0o600, pem);
+  check('★ 私钥没进树（进了就会被提交，而提交一次就等于泄露一次）',
+    !fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8').includes('PRIVATE'), '');
+
+  check('★ keygen 第二次 ⇒ 拒绝（一个 id 一次机会，§4.1）',
+    packer('keygen', plug).code !== 0, '');
+
+  // ★ "换机器"那条路（§4.1）：新机器上**没有**血统表那一行、**有**复制过来的 .pem。
+  //   这条必须在另一个"家"里跑，否则用的是上面那把钥匙。
+  {
+    const { plug: p2, base: b2, home: h2 } = mkRepo(baseFiles());
+    const key2 = crypto.generateKeyPairSync('ed25519').privateKey;
+    const raw2 = P.rawPubOf(key2);
+    fs.mkdirSync(path.join(h2, 'keys'), { recursive: true });
+    fs.writeFileSync(path.join(h2, 'keys', `${MF_ID}.pem`),
+      key2.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+    const k2 = packer('keygen', p2);
+    check('★★ 库里已经有一把（复制过来的）⇒ **认它**，不铸新的',
+      k2.code === 0 && /没有\*\*铸新的/.test(k2.out), k2.err + k2.out.slice(0, 200));
+    const l2 = readJsonOrNull(path.join(p2, 'lineage.json')) || {};
+    check('★ 记进血统表的是**库里那把**的公钥（指纹对得上）',
+      l2.lineage && l2.lineage[MF_ID] && l2.lineage[MF_ID].key === raw2.toString('hex'),
+      JSON.stringify(l2));
+    void b2;
+  }
+  check('★★ 而且拒绝时说的两条路是"找回备份"与"--fork"，不是"再铸一把"',
+    /--fork/.test(packer('keygen', plug).err), packer('keygen', plug).err);
+  // ★ keygen 把血统表改脏了 —— 那正是下一个块里要 `git commit` 的原因（§3.5）。
+  check('★ keygen 弄脏了树，并且说了要提交（与 init 同一条纪律）',
+    /提交/.test(kg.out) && /lineage\.json/.test(kg.out), kg.out.slice(-200));
+}
+
+{
+  const { plug, base, home } = mkRepo(baseFiles());
+  packer('keygen', plug);
+  const g = gitOf(base);
+  g('add', '-A');
+  g('commit', '-qm', 'keygen');
+
+  const out = path.join(base, 'o.splug');
+  const b = packer('build', plug, '--out', out);
+  check('build 成功', b.code === 0, b.err);
+  check('★ build 的输出说"还没签"，并给出下一步（它是两个动词，别让人以为少了一步）',
+    /还没签/.test(b.out) && /sign/.test(b.out), b.out.slice(-200));
+  const digestBefore = P.parsePackage(fs.readFileSync(out)).digest;
+  const sizeBefore = fs.statSync(out).size;
+
+  const s = packer('sign', out);
+  check('sign：签好了', s.code === 0, s.err);
+  const signed = fs.readFileSync(out);
+  const r = P.parsePackage(signed);
+  check('★★ 签名**不改内容摘要**（§4.2：签名盖的是摘要，不覆盖信封）',
+    r.ok && r.digest === digestBefore, r.ok ? `${r.digest} vs ${digestBefore}` : r.why);
+  check('★ 信封只长了 97 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
+    signed.length === sizeBefore + 97, `${signed.length} vs ${sizeBefore}`);
+  check('★ 说清了"原地"这件事（未签名的那份被换掉了）', /原地/.test(s.out), s.out);
+  check('★ 也说了它为什么合法：摘要没变 ⇒ 还是同一份构件（§2.4）', /§2\.4/.test(s.out), s.out);
+
+  // Ed25519 是确定性签名 ⇒ 同一个包同一把钥匙签两次，逐字节相同。
+  const first = Buffer.from(signed);
+  const s2 = packer('sign', out);
+  check('★★ 签两次 ⇒ 逐字节相同（Ed25519 是确定性的，sign 不需要随机源）',
+    s2.code === 0 && fs.readFileSync(out).equals(first), s2.err);
+
+  const v = packer('verify', out, '--expect-signer', fpOf(base, home));
+  check('★ 签出来的包 verify 得动，签名者就是 keygen 报的那一把', v.code === 0, v.out + v.err);
+}
+
+{
+  // 血统表说"不签名" ⇒ sign 只按血统表办事。
+  const { plug, base } = mkRepo(baseFiles());
+  const out = path.join(base, 'o.splug');
+  packer('build', plug, '--out', out);
+  const s = packer('sign', out);
+  check('★★ 血统表说这个 id 不签名 ⇒ 拒绝，并说清"本来就不签"与"现在想开始签"两条路',
+    s.code !== 0 && /不签名/.test(s.err) && /keygen/.test(s.err), s.err.slice(0, 300));
+  check('★ 而且指出"已经发出去的版本不能这样补"（血统表在负载里 ⇒ 会换摘要 ⇒ §2.4）',
+    /§2\.4/.test(s.err), s.err);
+}
+
+{
+  // 本机没有私钥（换了机器、或者钥匙库被清过）。
+  const { plug, base, home } = mkRepo(baseFiles());
+  packer('keygen', plug);
+  gitOf(base)('add', '-A');
+  gitOf(base)('commit', '-qm', 'keygen');
+  const out = path.join(base, 'o.splug');
+  packer('build', plug, '--out', out);
+  fs.rmSync(path.join(home, 'keys'), { recursive: true, force: true });
+
+  const s = packer('sign', out);
+  check('★★ 本机没有这把私钥 ⇒ 拒绝，并说清两条路：找回备份 / --fork',
+    s.code !== 0 && /没有这个 id 的私钥/.test(s.err) && /--fork/.test(s.err), s.err.slice(0, 300));
+  check('★ 而且点破了那个想当然的错法：在这里另铸一把没有用（客户端钉的是旧那一把）',
+    /另铸一把新钥匙没有用/.test(s.err), s.err);
+
+  // 把另一把钥匙冒充进去 ⇒ 也要拦（两份记录分家了）。
+  const other = crypto.generateKeyPairSync('ed25519').privateKey;
+  fs.mkdirSync(path.join(home, 'keys'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'keys', `${MF_ID}.pem`),
+    other.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const s2 = packer('sign', out);
+  check('★★ 钥匙库里那把与血统表里的不是同一把 ⇒ 拒绝，并**不覆盖任何一份**',
+    s2.code !== 0 && /不是同一把/.test(s2.err) && /不要.*覆盖/.test(s2.err), s2.err.slice(0, 300));
+}
+
+{
+  // ★ 一个**表里说归 K1、而实际由 K2 签**的包：`verify` 是唯一还能查它的地方。
+  const files = walkTree(path.join(CONF, 'tree')).map(([p, data]) => ({
+    path: p, data, sha256: crypto.createHash('sha256').update(data).digest('hex'),
+  }));
+  const otherPub = crypto.generateKeyPairSync('ed25519').publicKey;
+  const otherRaw = Buffer.from(otherPub.export({ format: 'der', type: 'spki' })).subarray(12);
+  const lie = Buffer.from(`${JSON.stringify({ schema: 1, lineage: { [MF_ID]: { key: otherRaw.toString('hex') } } }, null, 2)}\n`);
+  const swapped = files.map((f) => (f.path === 'lineage.json'
+    ? { path: f.path, data: lie, sha256: crypto.createHash('sha256').update(lie).digest('hex') } : f));
+  const sorted = P.sortByPathBytes(swapped);
+  const mine = crypto.generateKeyPairSync('ed25519').privateKey;
+  const myRaw = P.rawPubOf(mine);
+  const sig = crypto.sign(null, Buffer.from(P.contentDigest(sorted), 'hex'), mine);
+  const pkg = P.buildPackage(sorted, Buffer.concat([Buffer.from([1]), myRaw, sig]));
+
+  const { base } = mkRepo(baseFiles());     // 只是要一个临时目录放这个包
+  const f = path.join(base, 'lie.splug');
+  fs.writeFileSync(f, pkg);
+  const fp = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
+  const v = packer('verify', f);
+  check('★★ verify：包里那份血统表说归 K1、而签名者是 K2 ⇒ 非零退出，并说出**两把**指纹（§2.5）',
+    v.code !== 0 && /§2\.5/.test(v.err) && v.err.includes(fp(otherRaw))
+      && v.err.includes(fp(myRaw)) && /断了血统/.test(v.err), v.err.slice(0, 300));
+  check('★ 而同一个包 inspect 得动（它合规，只是"人不对"——两件事必须分得开）',
+    packer('inspect', f).code === 0, '');
+}
+
+// ==============================================================================
+//  8b. --adopt：§2.5 那次"停下来问"的第二个答案
+// ==============================================================================
+
+section('8b. --adopt：承认这个 id 归这棵树（记录丢了的那种情形）');
+
+{
+  // 里屋的形状：id 是在血统表存在之前铸的 —— 本仓库自己那两个插件就是这样。
+  const files = baseFiles();
+  delete files['lineage.json'];
+  const { plug, base } = mkRepo(files);
+  check('★★ 没有血统表时 init 停下来问（前提）', packer('init', plug).code !== 0, '');
+  check('★ 而那两条答案里给了 --adopt（否则"这是同一个插件"这个答案没有可执行的形式）',
+    /--adopt/.test(packer('init', plug).err), '');
+
+  const r = packer('init', plug, '--adopt');
+  check('--adopt：补上了那一条', r.code === 0 && /--adopt/.test(r.out), r.err);
+  const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
+  check('★ 血统表里有了这个 id，`key: null`', l.lineage && l.lineage[MF_ID]
+    && l.lineage[MF_ID].key === null, JSON.stringify(l));
+  check('★ 它把"这记下的是你的一次声明"说在明处（不许读成"证明"）',
+    /你的一次声明/.test(r.out) && /不\*\*证明/.test(r.out), r.out.slice(-320));
+  check('★ 也指出了真正守这件事的是客户端那张钉表（§5.4）', /§5\.4/.test(r.out), '');
+
+  check('★ 再 --adopt 一次是"什么都不做"（不重复写、不报错）',
+    packer('init', plug, '--adopt').code === 0, '');
+  gitOf(base)('add', '-A');
+  gitOf(base)('commit', '-qm', 'adopt');
+  check('★ --adopt 之后 build 不再停下来问',
+    packer('build', plug, '--out', path.join(base, 'o.splug')).code === 0, '');
+}
+
+// ==============================================================================
+//  9. §2.4：同一个 (id, 版本) 不许有第二份内容
+// ==============================================================================
+
+section('9. §2.4 的手滑闸：发布表');
+
+{
+  const { plug, base, home } = mkRepo(baseFiles());
+  const g = gitOf(base);
+  const out = path.join(base, 'o.splug');
+  check('第一次打包成功', packer('build', plug, '--out', out).code === 0, '');
+  check('★ 同一棵树、同一个版本再打一次 ⇒ 照样成功（摘要相同，不是"第二份内容"）',
+    packer('build', plug, '--out', out).code === 0, '');
+  check('★ 发布表落在了家目录里（不进树 —— 进树就把树弄脏，与 §3.5 打架）',
+    fs.existsSync(path.join(home, 'releases.json')), home);
+
+  // 往树里加一份文件 —— 这是最容易被忘掉的一种"改了内容"。
+  fs.writeFileSync(path.join(plug, 'client', 'more.js'), 'x\n');
+  g('add', '-A');
+  g('commit', '-qm', '加了一份文件');
+
+  const r = packer('build', plug, '--out', out);
+  check('★★ 同一个版本号而摘要变了 ⇒ 拒绝，并说清"必须升版本号"（§2.4）',
+    r.code !== 0 && /§2\.4/.test(r.err) && /升版本号/.test(r.err), r.err.slice(0, 300));
+  check('★ 提示里给了那条唯一的例外（从来没发出去过 ⇒ --reuse-version）',
+    /--reuse-version/.test(r.err), '');
+  check('★ 拒绝时**不产出**包（先判后写）', !fs.existsSync(out) === false, '');
+  check('★ 而 --reuse-version 之后照常打',
+    packer('build', plug, '--out', out, '--reuse-version').code === 0, '');
+
+  // 升了版本号就没人拦你 —— 那才是修法。
+  fs.writeFileSync(path.join(plug, 'plugin.json'), mf({ version: '1.0.1' }));
+  g('add', '-A');
+  g('commit', '-qm', '1.0.1');
+  check('★ 升了版本号 ⇒ 过（这道闸拦的是"同一版本两份内容"，不是"不许改"）',
+    packer('build', plug, '--out', out).code === 0, '');
+}
+
+// ==============================================================================
+
+/** 拿到一棵夹具树的 git 句柄（`mkRepo` 返回的那个，测试里用得上）。 */
+function gitOf(base) {
+  return (...a) => execFileSync('git', ['-C', base, '-c', 'user.email=t@example.com',
+    '-c', 'user.name=t', '-c', 'commit.gpgsign=false'].concat(a), { encoding: 'utf8' });
+}
+
+/** keygen 这一次用的指纹：从血统表里读回来（那是唯一的一份记录）。 */
+function fpOf(base, home) {
+  const l = readJsonOrNull(path.join(base, 'plug', 'lineage.json')) || { lineage: {} };
+  return crypto.createHash('sha256')
+    .update(Buffer.from(l.lineage[MF_ID].key, 'hex')).digest('hex');
+}
 
 function walkTree(dir, prefix = '') {
   const out = [];

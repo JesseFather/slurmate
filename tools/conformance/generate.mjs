@@ -60,8 +60,12 @@ function buildPackageBytes() {
   git('add', '-A');
   git('commit', '-qm', 'conformance tree');
   const out = path.join(tmp, 'out.splug');
+  // ★ `--home` 指向临时目录（而不是作者的家目录）：打包器会往那儿写一张发布表，
+  //   而那张表会在"同一个 (id, 版本) 算出第二个摘要"时拒绝打包（§2.4）。
+  //   夹具树**故意**会变，所以不隔开的话，第二次跑 `generate.mjs` 当场就会红。
   const text = sh(process.execPath, [path.join(ROOT, 'packer', 'slurmate-packer.js'),
-    'build', plug, '--commit', 'HEAD', '--out', out], { encoding: 'utf8' });
+    'build', plug, '--commit', 'HEAD', '--out', out, '--home', path.join(tmp, 'home')],
+  { encoding: 'utf8' });
   const buf = fs.readFileSync(out);
   fs.rmSync(tmp, { recursive: true, force: true });
   return { buf, text };
@@ -263,7 +267,7 @@ const CASES = [
   {
     name: '记录表里 pathlen 越界',
     code: 'record',
-    change: '第 0 条记录的 pathlen 从 11 改成 65535',
+    change: '第 0 条记录的 pathlen 改成 65535',
     why: '记录表本身读不下来。',
     apply: (b) => {
       const o = Buffer.from(b);
@@ -272,12 +276,15 @@ const CASES = [
     },
   },
   {
-    name: 'file_count 说 12 但只有 11 条',
+    name: 'file_count 比真实的条数多 1',
     code: 'record',
-    change: '头里偏移 12 的 file_count 从 11 改成 12',
+    // ★ 相对量，不是写死的 12：夹具树**加一份文件**是常有的事（比如给老插件补一张
+    //   血统表），而写死的话那一次改动会**悄悄把这一条变成合法包** —— 于是这个
+    //   用例从此什么都不验，而输出里看不出来（它仍然"通过"，只是不再是一条坏包）。
+    change: '头里偏移 12 的 file_count 加一',
     why: '★ 多出来的那一条会从**负载**里读表 —— 于是路径是几 KB 的二进制乱码。'
       + '这一条钉住"记录表读不读得完"必须先于别的一切判。',
-    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(12, 12); return o; },
+    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(o.readUInt32BE(12) + 1, 12); return o; },
   },
   {
     name: '空负载',

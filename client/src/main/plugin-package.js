@@ -8,6 +8,10 @@
  * 算内容摘要（§3.4）、验签（§4.2）。它**不执行任何东西**，也**不落盘** ——
  * 把负载写出来是调用方的事，那一步要与同意闸绑在一起（§5.2）。
  *
+ * ★ 它还带着 `keyVerdict` —— §5.4 那条"签名者与钉住的那一把是不是同一把"。
+ *   它判、**不写**：钉住发生在用户点同意的那一刻（调用方 `config.js` 的
+ *   `pinPluginKey`）。这两个函数的**判据与写点分开**是故意的，见 `keyVerdict` 的注释。
+ *
  * ── ★ 这个阶段它没有调用方，这是刻意的 ──────────────────────────────────────
  *
  * 读包的能力**必须先于任何一条线落地**。反过来（先让站点开始发包、再让客户端
@@ -147,6 +151,73 @@ function verifyEd25519(raw32, msg, sig) {
   } catch {
     return false;
   }
+}
+
+/**
+ * §5.4 那三个判词。★ 它们**不是** `R` 里那九个 —— 那些是**格式**的理由
+ * （包本身合不合规），这三个是**信任**的理由：包可以完全合规，而这一份不能收。
+ * 混在一起会让"这个包坏了"与"这个包换人了"看起来是同一件事。
+ */
+const PIN = {
+  UNSIGNED: 'unsigned',   // 钉过密钥，而这一份**没有签名**
+  CHANGED: 'changed',     // 签名者换了人
+  BROKEN: 'broken',       // 钉子表里那一条读不出来 —— 一律拒绝（见 config.js 那段）
+};
+
+/**
+ * §5.4：这个包的签名者，与本机钉住的那一把是同一把吗。
+ *
+ * `pinned` 是 `config.js` 的 `pinnedKeyOf(pins, id)`：**`undefined` = 从没钉过**
+ * （首次即信任），其余一律是"钉过、值是这个"—— 其中**不是全长十六进制的那些**
+ * 表示那条记录读不动（见下）。
+ *
+ * 返回 `{ok:true, first, fingerprint}` 或 `{ok:false, code, pinned, got, why}`。
+ * ★ `why` 是**给用户看的那句话**的原材料：它必须把两把指纹都说出来（§5.4），
+ *   而且要能直接放进同意界面 —— 另写一套文案迟早与这里的判据分家。
+ *
+ * ★ 首次即信任（`first:true`）：调用方在这时**才**该 `pinPluginKey`。这里只判，
+ *   不写 —— 写的时机与同意闸绑在一起（§5.2：先写台账、后激活）。
+ *   而 `first` 时 `fingerprint` 可能是 `null`（这一份没签名）：那就**什么都不钉**，
+ *   于是一个作者"先发不带签名的版本、后来开始签"不会被这里拒绝 —— 该被拒绝的是
+ *   反过来的顺序（钉过之后又收到不带签名的）。
+ */
+function keyVerdict(pinned, pkg) {
+  const got = (pkg && pkg.sig) ? pkg.sig.fingerprint : null;
+  if (pinned === undefined || pinned === null) {
+    return { ok: true, first: true, fingerprint: got };
+  }
+  if (!/^[0-9a-f]{64}$/.test(pinned)) {
+    return {
+      ok: false,
+      code: PIN.BROKEN,
+      pinned,
+      got,
+      why: '这个 id 的钉子读不出来（`pinned-keys.json` 里那一条的指纹不是全长十六进制）。'
+        + '一条读不动的钉子只能往拒绝那一侧倒 —— 把它当成"没钉过"就等于静默地'
+        + '重新"首次即信任"一次，而那正是 §2.5 的分身判定要挡的事。',
+    };
+  }
+  if (!got) {
+    return {
+      ok: false,
+      code: PIN.UNSIGNED,
+      pinned,
+      got: null,
+      why: `这个 id 你以前同意过一份**带签名**的构件（签名者 ${pinned}），`
+        + '而这一份没有签名。§5.4：此后这个 id 的每一份都必须由同一把钥匙签 ——'
+        + '一份不带签名的构件没法证明它是同一个人做的，所以只能拒绝。',
+    };
+  }
+  if (got === pinned) return { ok: true, first: false, fingerprint: pinned };
+  return {
+    ok: false,
+    code: PIN.CHANGED,
+    pinned,
+    got,
+    why: `这个 id 你以前同意的是 ${pinned} 签的，而这一份是 ${got} 签的。`
+      + '内容可能与上次一模一样，但**签名的人换了** —— §5.4 要求这必须是同一个人。'
+      + '（丢了私钥的作者只能给插件铸一个新 id，所以这不是一次正常的升级。）',
+  };
 }
 
 /** 从一块签名块里取出 `{alg, pubkey, sig}`；不合形状返回 `null`。 */
@@ -328,7 +399,7 @@ function readPackageFile(file) {
 }
 
 module.exports = {
-  MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, MAX_DEPTH, MANIFEST, R,
+  MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, MAX_DEPTH, MANIFEST, R, PIN,
   contentDigest, parsePackage, dataOf, readPackageFile,
-  parseSigBlock, fingerprint, verifyEd25519,
+  parseSigBlock, fingerprint, verifyEd25519, keyVerdict,
 };

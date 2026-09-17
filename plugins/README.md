@@ -342,14 +342,21 @@ bash 自上而下解析整个文件，那一行于是在**每一个**作业里�
 （单文件、零依赖，跑在**你的**机器上）：
 
 ```sh
-node packer/slurmate-packer.js init  <插件目录>   # 铸 id 并插入写回 plugin.json
-git commit -am "铸一个 id"                        # 打包的输入必须是一个提交
-node packer/slurmate-packer.js build <插件目录>
+node packer/slurmate-packer.js init   <插件目录>   # 铸 id、写回 plugin.json、记一条血统
+node packer/slurmate-packer.js keygen <插件目录>   # 想签名才需要这一步
+git commit -am "铸一个 id（和一把钥匙）"           # 打包的输入必须是一个提交
+node packer/slurmate-packer.js build  <插件目录>
+node packer/slurmate-packer.js sign   <那个 .splug>
 node packer/slurmate-packer.js inspect <那个 .splug>
 ```
 
-`init` 与 `build` 是两条命令，因为前者会弄脏源码树而后者要求树干净 ——
-§2.1 与 §3.5 的要求合起来只能是两条。
+写树的动词与打包的动词是两条命令，因为前者会弄脏源码树而后者要求树干净 ——
+§2.1 / §2.5 与 §3.5 的要求合起来只能是两条。
+
+★ **本仓库这两个插件要跑一次 `init --adopt`。** 它们的 id 铸在血统表存在之前，
+所以血统表不认识它们，而 `build` 会（正确地）停下来问 —— `--adopt` 就是那次问的
+第二个答案（"这是同一个插件，只是记录不在了"）。★ 这一步**还没有做**：
+"一个插件是一个包"那条安装路径整个还没切过来，见下面。
 
 ★ **这个仓库里的安装路径现在仍然收目录**（`deploy.sh --plugins-src`）：
 "一个插件是一个包"那一步还没切过来。但**包的格式已经定死了**（

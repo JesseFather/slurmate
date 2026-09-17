@@ -146,6 +146,97 @@ function trustPlugin(dir, cfg, id, version, digest, site) {
   return { ok: true };
 }
 
+// ── 钉子：按 **id** 记的签名公钥（§5.4）─────────────────────────────────────
+//
+// ★ 它与同意台账是**两张表**、而且是**两个文件**，因为它们的生命周期不同：
+//
+//   | 表 | 放哪 | 键 | 丢了会怎样 |
+//   |---|---|---|---|
+//   | 同意台账 | `config.json` 的 `trustedPlugins` | `(id, 版本)` | 重新问一次 —— **安全的那一侧** |
+//   | 钉子 | `pinned-keys.json` | `id` | 静默回到"首次即信任" —— **不安全的那一侧** |
+//
+// ★ 钉子**不能**放进 `config.json`。`loadConfig` 只认已知键（那条纪律的用意见那段
+//   注释），于是**旧版本**读一遍再存一遍就会把 `pinnedKeys` 抹掉：用户降级一次，
+//   钉子全没了 —— 那就等于 §2.5 的机械判据有了一个重置按钮，只是按钮拿在另一个
+//   版本手里。单独一个文件，旧版本不认识它，也就不会动它。
+//
+// ★ **这里没有"拔钉子"的函数，这是故意的。** §5.4 是"首次即信任"，此后只能相符；
+//   一个正常的取消钉住入口会把"分身判定"变成一次点击。§5.4 自己写着这条弱点
+//   **没有**本地解法，本模块不假装有（想拔只能手改那个文件 —— 那是一次明确的动作）。
+
+const PINNED_FILE = 'pinned-keys.json';
+const PINNED_SCHEMA = 1;
+
+function pinnedKeysPath(dir) { return path.join(dir, PINNED_FILE); }
+
+/**
+ * 读钉子表。返回 `{ [id]: {fingerprint, at} }`。
+ *
+ * ★ **一条读不动的钉子留在表里**（`fingerprint: null`），而不是被丢掉 —— 这一条
+ *   与上面那张表**恰好相反**：`trustedPlugins` 里一条残缺条目丢掉 = 重新问一次
+ *   （安全的那一侧），而这里丢掉 = 下次"首次即信任"（不安全的那一侧）。
+ */
+function loadPinnedKeys(dir) {
+  const raw = readJson(pinnedKeysPath(dir));
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const table = (raw.pinnedKeys && typeof raw.pinnedKeys === 'object'
+    && !Array.isArray(raw.pinnedKeys)) ? raw.pinnedKeys : {};
+  for (const [id, v] of Object.entries(table)) {
+    if (!id) continue;
+    // ★ 形状认不出的那一条**也留在表里**（指纹记成 `null`）。`continue` 掉它是错的，
+    //   而且错在最坏的那一侧：那个 id 会退回"从来没钉过"，于是下一次收到什么都算
+    //   "首次即信任"。留在表里则相反 —— `pinnedKeyOf` 给出的既不是 `undefined`
+    //   也不是一个全长指纹，而 `keyVerdict` 对那样的值一律拒绝。
+    const shaped = Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+    out[id] = {
+      fingerprint: shaped && typeof v.fingerprint === 'string' ? v.fingerprint : null,
+      at: shaped && Number.isFinite(v.at) ? v.at : 0,
+    };
+  }
+  return out;
+}
+
+/**
+ * 这个 id 钉住的公钥指纹。
+ *
+ * ★ **`undefined` 表示"从来没钉过"**，别的一律表示"钉过，值是这个"——
+ *   两者必须分得开，因为调用方对它们的处理**相反**：前者是首次即信任，
+ *   后者必须**相符**（而一个读不动的值永远不可能相符）。
+ *
+ * ★ 判"读不读得动"的地方**只有一处**，是 `plugin-package.js` 的 `keyVerdict`
+ *   （那条全长十六进制的正则）。这个函数**只负责取出记录**，不做判断 ——
+ *   两处都判的话，口径分家的那天没人会发现。
+ */
+function pinnedKeyOf(pins, id) {
+  if (!pins || !Object.prototype.hasOwnProperty.call(pins, id)) return undefined;
+  const e = pins[id];
+  return (e && typeof e.fingerprint === 'string') ? e.fingerprint : '';
+}
+
+/**
+ * 钉住一个公钥指纹。**只在第一次**（此后同一个值是无操作，不同的值被拒绝）。
+ *
+ * @returns {{ok:true, unchanged?:boolean} | {ok:false, error:string}}
+ */
+function pinPluginKey(dir, pins, id, fingerprint) {
+  if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+    return { ok: false, error: '指纹必须是全长的 64 位十六进制（= sha256(32 字节裸公钥)）。' };
+  }
+  const cur = pinnedKeyOf(pins, id);
+  if (cur === fingerprint) return { ok: true, unchanged: true };
+  if (cur !== undefined) {
+    // 这一条**不是**"再钉一次"：§5.4 的判据就是"与上一次是同一把钥匙"，而换钥匙
+    // 意味着作者丢了私钥、只能铸新 id（§4.1）—— 所以这里没有正当的换法。
+    return { ok: false, error: `这个 id 已经钉在 ${cur || '（一条读不动的记录）'} 上了，`
+      + `不接受换成 ${fingerprint} —— §5.4：首次即信任，此后只能相符。` };
+  }
+  pins[id] = { fingerprint, at: Date.now() };
+  writeAtomic(pinnedKeysPath(dir),
+    JSON.stringify({ schema: PINNED_SCHEMA, pinnedKeys: pins }, null, 2), 0o600);
+  return { ok: true };
+}
+
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
 function ensureDir(dir, mode) {
   fs.mkdirSync(dir, { recursive: true, mode });
@@ -822,9 +913,12 @@ module.exports = {
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled, setDevPlugins,
   trustKey, isTrusted, trustPlugin,
+  // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
+  loadPinnedKeys, pinnedKeyOf, pinPluginKey,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,
   setKey, getKey, deleteKey, hasKey, migrateLegacySecret, readSecretFile,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,
   // 导出给测试用
-  _internal: { writeAtomic, readJson, configPath, secretPath, pendingGoodbyePath },
+  _internal: { writeAtomic, readJson, configPath, secretPath, pendingGoodbyePath,
+               pinnedKeysPath, PINNED_SCHEMA },
 };
