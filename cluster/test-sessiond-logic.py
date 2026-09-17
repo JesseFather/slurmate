@@ -2145,92 +2145,37 @@ exit 0
           "ssh_host_key" not in _v_none, repr(_v_none.get("ssh_host_key")))
     d.store.close()
 
-    # ── 19.11 站点分发：守护进程把插件的文件发出去 ──────────────────────────
+    # ── 19.11 站点分发：守护进程把插件作为一个**包**发出去 ────────────────────
     #
-    # 客户端**不自己装插件**：它连上站点之后，按 op_plugins 报的清单逐份取文件。
-    # 于是守护进程多了一个"文件服务"的角色，而这一节要钉的就是它的两条边界：
+    # 客户端**不自己装插件**：它连上站点之后，按 op_plugins 报的清单把**整个包**
+    # 取回来 —— 一次 RPC。
     #
-    #   ① **path 只是索引表的键**，不是一个待拼接的路径片段。于是"路径穿越"不是
-    #      被过滤掉的，而是**不存在** —— 一个不在表里的字符串，无论长什么样，都
-    #      只是"查不到"。
-    #   ② 超过单文件上限是**明确的错误**，绝不截断。截断的后果是客户端装上一份
-    #      坏文件而以为成功 —— 那正是这个项目一路在清的那一类失败。
+    # ★ v0.6 还有一条旁路：`files`（清单）+ `plugin_file`（一份文件一次 RPC）。
+    #   **v0.7 把它删掉了**，而这一节现在钉的就是"删干净了没有"，两件：
+    #
+    #   ① `files` 与 `plugin_file` **真的不在了** —— 不是"还留着但不报"。
+    #      留着 `plugin_file` 不只是多一条代码路径，是多一条**验签绕得过去**的路：
+    #      它发的是散装字节，客户端拼不出一个能被签名的东西（见 op_plugin_package
+    #      的注释）。所以"它还在"必须是一条会红的用例，而不是一句注释里的承诺。
+    #   ② 那条路的判据**换了**：「本站支不支持分发」从前看"这一项里有没有 `files`"，
+    #      现在看顶层**有没有 `limits`**。
+    #
+    # ★ 这一节从前还测了逐份取的三条边界（路径白名单 / 单文件上限 / 启动后被换过）。
+    #   它们**跟着 op 一起走了**，不是丢了：前两条今天由客户端读方执行
+    #   （`checkDeclared` 的 `file_bytes`，见 client/test/site-plugins.test.mjs），
+    #   第三条由 `plugin_package_changed` 在 19.11c 里原样守着。
     _d2 = mod.Sessiond(cfg)
+    _cs_spec = cfg.plugin_by_name[CS]
 
     def _pf(req):
         """发一条 RPC。
 
-        ★ 每次先清空限流计数 —— 而这个夹具本身说明了这个功能的一个真实约束：
-          守护进程的限流是**每个 uid 每秒 10 次**（`MAX_RPC_PER_SECOND`），它按
-          "人点一下按钮"设计，而这里走的是**批量取文件**这条新路：两个插件一次
-          对账就是 1 次 plugins + 1 次 list + 每份文件一次 plugin_file，正好压在
-          桶边上。真实客户端因此必须**自己让路**（串行取、撞上 7 rate_limited 就
-          退避重试，而不是当成失败）。
-
-          这里清计数不是"绕过被测的东西"：这一节测的是路径白名单与字节一致性，
-          与那个桶无关；桶本身有自己的用例（见下一节）。
+        ★ 每次先清空限流计数 —— 守护进程的限流是**每个 uid 每秒 10 次**
+          （`MAX_RPC_PER_SECOND`）。这里清计数不是"绕过被测的东西"：这一节测的是
+          清单的形状与"删除删干净了没有"，与那个桶无关；桶本身有自己的用例（19.11b）。
         """
         _d2.rpc_hits.clear()
         return _d2.dispatch(UID, os.getgid(), req)
-
-    _pj2 = _pf({"op": "plugins"})
-    _pdata = _pj2.get("data") or {}
-    _p2 = {x["name"]: x for x in (_pdata.get("plugins") or [])}
-    check("op_plugins 每项都带 files（这是「本站支不支持分发」的判据）",
-          all(isinstance(_p2[n].get("files"), list) for n in (CS, SSHD)),
-          str({k: type(v.get("files")).__name__ for k, v in _p2.items()}))
-    check("op_plugins 顶层带 limits（客户端取它与自己那份中更严的）",
-          isinstance(_pdata.get("limits"), dict)
-          and _pdata["limits"].get("file_bytes") == mod.PLUGIN_FILE_MAX_BYTES,
-          str(_pdata.get("limits")))
-
-    # ★ 全部走 `.get(...) or []`：变异验证时"这一项不见了 / `files` 整个不报"正是
-    #   被测的那件事，而裸下标会抛 KeyError 把脚本**带崩** —— 崩了与"一条都不红"
-    #   在输出上分不开（见 CHANGELOG 里那条反复回来的说明）。
-    for _n, _dir in ((CS, _p2.get(CS) or {}), (SSHD, _p2.get(SSHD) or {})):
-        _spec = cfg.plugin_by_name[_n]
-        _real = mod.plugin_file_index(_spec.source_package)
-        _got = [(f["path"], f["size"], f["sha256"])
-                for f in (_dir.get("files") or [])]
-        check("★ 「%s」的清单与**包里的记录表**逐项相符（自己重算一遍 sha256）" % _n,
-              _got == [(r, s, h) for r, (s, h) in sorted(_real.items())],
-              "%d 项 vs %d 项" % (len(_got), len(_real)))
-        check("清单按路径排序（同一份包每次报出来的顺序必须一样）",
-              [x[0] for x in _got] == sorted(x[0] for x in _got),
-              str([x[0] for x in _got]))
-
-    # 逐个文件取回来，与**包里的那一份**逐字节比。清单报的 sha256 与 data 是同一份
-    # 自述，客户端不能拿它当判据 —— 但守护进程**发**的字节必须真的就是包里那一份。
-    _cs_spec = cfg.plugin_by_name[CS]
-    _cs_blob = mod.package_read_file(_cs_spec.source_package)["data"]
-    _nfile = 0
-    for _path in [f["path"] for f in ((_p2.get(CS) or {}).get("files") or [])]:
-        _fr = _pf({"op": "plugin_file", "id": _cs_spec.id,
-                   "version": _cs_spec.version, "path": _path})
-        check("取 %s 成功" % _path, _fr.get("ok"), str(_fr)[:160])
-        _bytes = base64.b64decode((_fr.get("data") or {}).get("data") or "")
-        _disk = mod.package_extract(_cs_spec.source_package, _path)
-        check("★ %s 取回来的字节与包里那一份全等" % _path, _bytes == _disk,
-              "%d vs %d 字节" % (len(_bytes), len(_disk or b"")))
-        _nfile += 1
-    check("这一组用例真的取过文件（否则上面那些是空断言）", _nfile >= 4,
-          "取了 %d 份" % _nfile)
-    # plugin_file 自己带回来的 size/sha256 **不算判据**（客户端只用 op_plugins
-    # 那一轮记下的值比），但两者应该是一致的 —— 不一致说明这里有 bug。
-    _one = _pf({"op": "plugin_file", "id": _cs_spec.id,
-                "version": _cs_spec.version, "path": "plugin.json"})
-    # ★ `next(..., None)` 而不是裸 `next()`：变异验证时"清单是空的"正是被测的
-    #   那件事，而裸 next 会抛 StopIteration 把脚本**带崩** —— 崩了与"一条都不红"
-    #   在输出上分不开（见第 18 节那个 _Captured 的说明）。
-    _declared = next((f for f in ((_p2.get(CS) or {}).get("files") or [])
-                      if f["path"] == "plugin.json"), None)
-    # ★ 全部走 `.get`：变异验证时"取不到"与"清单是空的"正是被测的那件事，
-    #   而裸下标会抛 TypeError 把脚本**带崩**（崩了与"一条都不红"在输出上分不开）。
-    _one_data = (_one.get("data") or {})
-    check("plugin_file 回带的 size/sha256 与清单里那一份相同",
-          _one_data.get("size") == (_declared or {}).get("size")
-          and _one_data.get("sha256") == (_declared or {}).get("sha256"),
-          "%s vs %s" % (_one_data, _declared))
 
     def _kindof(resp):
         """把一条应答归一成 `(code, kind, detail)`，**永不抛**。
@@ -2242,12 +2187,42 @@ exit 0
         e = (resp or {}).get("error") or {}
         return ((resp or {}).get("code"), e.get("kind"), e.get("detail") or "")
 
+    _pj2 = _pf({"op": "plugins"})
+    _pdata = _pj2.get("data") or {}
+    _p2 = {x["name"]: x for x in (_pdata.get("plugins") or [])}
+    # ★ 全部走 `.get(...)`：变异验证时"这一项不见了 / 那个字段整个不报"正是被测的
+    #   那件事，而裸下标会抛 KeyError 把脚本**带崩** —— 崩了与"一条都不红"在输出上
+    #   分不开（见 CHANGELOG 里那条反复回来的说明）。
+    check("★★ op_plugins 每一项**都不再有** files（v0.7 删掉了那条投递方式）",
+          bool(_p2) and all("files" not in x for x in _p2.values()),
+          str({k: sorted(v.keys()) for k, v in _p2.items()}))
+    check("★ 而每一项仍然有 package（清单的另一半，v0.6 加的）",
+          all(isinstance(x.get("package"), dict)
+              and x["package"].get("format") == mod.PACKAGE_FORMAT
+              for x in _p2.values()),
+          str({k: (v or {}).get("package") for k, v in _p2.items()})[:200])
+    check("★★ op_plugins 顶层带 limits —— 这**现在**是「本站支不支持分发」唯一的"
+          "判据（从前那个判据 files 已经不在了）",
+          isinstance(_pdata.get("limits"), dict)
+          and _pdata["limits"].get("file_bytes") == mod.PLUGIN_FILE_MAX_BYTES,
+          str(_pdata.get("limits")))
+
+    # ★★ 那个 op 真的没了。判据是 `2 unknown_op`（dispatch 的兜底），**不是**
+    #    "客户端不去调它" —— 协议里留着一条没人调的路，下一个人会以为它能用。
+    _gc1, _gk1, _gd1 = _kindof(_pf({"op": "plugin_file", "id": "0" * 26,
+                                    "version": "1.0.0", "path": "plugin.json"}))
+    check("★★ plugin_file 这个 op 已经不在了（2 unknown_op，不是 3/9）",
+          _gc1 == 2 and _gk1 == "unknown_op",
+          "code=%s kind=%s detail=%s" % (_gc1, _gk1, _gd1[:60]))
+    _gp1, _gp2, _gp3 = _kindof(_pf({"op": "plugin_package", "id": _cs_spec.id,
+                                    "version": _cs_spec.version}))
+    check("对照：plugin_package 这个 op 还在（上面那条不是「所有 op 都不认得」）",
+          _gp1 == 0 and _gp2 is None,
+          "code=%s kind=%s" % (_gp1, _gp2))
+
     # ── 夹具：一个「什么邪门东西都有」的插件**包** ───────────────────────────
     #
-    # ★ 它必须在**第一次索引之前**就造好。索引是进程内缓存的（启动快照的语义），
-    #   而"内容改在索引之后"会让用例看起来在测别的东西 —— 其实只是没赶上缓存。
-    #
-    # ★ 这个夹具**瘦了一圈**，是这一版的正经收益、不是漏测：从前这里要摆
+    # ★ 这个夹具**瘦了一圈**，是这一版的收益、不是漏测：从前这里要摆
     #   `.gitignore`、`node_modules/`、两个符号链接，来演"哪些东西不该进清单"。
     #   现在这些**在包里表达不出来** ——
     #     · 跳过集里的名字是**解析器的拒绝规则**（§3.3），见 19.14 的坏包
@@ -2256,21 +2231,14 @@ exit 0
     #       「客户端重建不出来一份链接」这一态**不存在**了，`plugin_symlinks()`
     #       也随之删掉。
     #   于是这一段从"证明过滤器写对了"变成"证明那些东西**根本进不来**"。
-    _fx = os.path.join(tmpdir, "siteplug-pkgs")
-    os.makedirs(_fx, exist_ok=True)
     _fx_files = [
         ("plugin.json", b'{"id":"%s","name":"siteplug","displayName":"x","version":"1.0.0"}'
          % _cs_spec.id.encode()),
         ("client/index.js", b"module.exports = {};\n"),
         ("client/sshconfig.js", "// 插件的自有模块\n".encode("utf-8")),
         ("job/start.sh", b"start_siteplug() { :; }\n"),
-        ("huge.bin", b"x" * (mod.PLUGIN_FILE_MAX_BYTES + 1)),
         ("small.bin", b"y" * 16),
     ]
-    _fx_pkg = put_package(_fx, _fx_files, filename="01M2JKHTZGKJBFQQTWYXMQMFZZ.splug")
-    # ★ 而这些**编不进包**：跳过集里的名字会被解析器拒掉，符号链接连表达都表达不出来。
-    _fx_probe = os.path.join(tmpdir, "siteplug-probe")
-    os.makedirs(_fx_probe, exist_ok=True)
     _pfx_is_pkg = {
         _p: mod.package_parse(build_package([(nm, blob) for nm, blob in _fx_files]
                                             + [(_p, b"x\n")]))["ok"]
@@ -2280,113 +2248,17 @@ exit 0
     check("★ 而且对照：同样这些内容、不加那一条，就是一个能解析的包",
           mod.package_parse(build_package(_fx_files))["ok"])
 
-    _saved_src = _cs_spec.source_package
-    try:
-        _cs_spec.source_package = _fx_pkg
-        _d2._plugin_cache.clear()
-
-        _fx_paths = [f["path"]
-                     for x in (_pf({"op": "plugins"}).get("data") or {}).get(
-                         "plugins", [])
-                     if x.get("name") == CS for f in (x.get("files") or [])]
-        check("对照：包里那些文件都在清单里（下面几条不是「一律为空」）",
-              {"plugin.json", "client/index.js", "client/sshconfig.js",
-               "job/start.sh", "small.bin"} <= set(_fx_paths), str(_fx_paths))
-
-        # ── 白名单：全部走同一条出口 ──
-        #
-        # 每一条都必须 `3 plugin_file_unknown` —— 而不是 `9 internal`（被 dispatch
-        # 的兜底吃掉）、也不是"恰好读到了"。
-        _bad_paths = [
-            ("相对上跳", "../plugin.json"),
-            ("绝对路径", "/etc/passwd"),
-            ("折叠的穿越", "client/../../plugin.json"),
-            ("空串", ""),
-            ("NUL", "plugin.json\x00.txt"),
-            ("反斜杠", "client\\index.js"),
-            ("同类不同名", "plugin.json.bak"),
-            ("包里有同名的一份、但前缀不同", "client/index.js.bak"),
-        ]
-        for _why, _bad in _bad_paths:
-            _bc, _bk, _bd = _kindof(_pf({"op": "plugin_file", "id": _cs_spec.id,
-                                         "version": _cs_spec.version, "path": _bad}))
-            check("★ 路径白名单挡住「%s」（%r）" % (_why, _bad),
-                  _bc == 3 and _bk == "plugin_file_unknown",
-                  "code=%s kind=%s detail=%s" % (_bc, _bk, _bd[:60]))
-        _okr = _pf({"op": "plugin_file", "id": _cs_spec.id,
-                    "version": _cs_spec.version, "path": "plugin.json"})
-        check("对照：清单里那一个照常取得到（上面那组不是「一律拒绝」）",
-              _okr.get("ok"), str(_okr)[:160])
-        # 反斜杠**不做翻译**：不翻译的话它是文件名里一个合法字符，翻译了它就变成
-        # 分隔符。两种解释同时存在就是歧义的来源，而客户端要发 Windows 包。
-        check("★ 反斜杠没有被翻译成正斜杠（翻译了等于有两种解释）",
-              not _pf({"op": "plugin_file", "id": _cs_spec.id,
-                       "version": _cs_spec.version,
-                       "path": "client\\index.js"}).get("ok"))
-
-        # ── 认不出的 (id, 版本) ──
-        _uc, _uk, _ud = _kindof(_pf({"op": "plugin_file", "id": "0" * 26,
-                                     "version": "1.0.0", "path": "plugin.json"}))
-        check("★ 认不出的 (id, 版本) 是 3 plugin_unknown（不是「文件找不到」）",
-              _uc == 3 and _uk == "plugin_unknown",
-              "code=%s kind=%s" % (_uc, _uk))
-
-        # ── 单文件上限：明确拒绝，**绝不截断** ──
-        _lc, _lk, _ld = _kindof(_pf({"op": "plugin_file", "id": _cs_spec.id,
-                                     "version": _cs_spec.version, "path": "huge.bin"}))
-        check("★★ 超过单文件上限是 code 4 / plugin_file_too_large（不是把字节截断了发出来）",
-              _lc == 4 and _lk == "plugin_file_too_large",
-              "code=%s kind=%s" % (_lc, _lk))
-        check("★ 报出来的那句话里有实际字节数与上限（运维要照着调）",
-              str(mod.PLUGIN_FILE_MAX_BYTES) in _ld and str(len(b"x") *
-                  (mod.PLUGIN_FILE_MAX_BYTES + 1)) in _ld, repr(_ld[:120]))
-        check("同一份包里没超限的那一份照常取得到（不是整包被拒）",
-              _pf({"op": "plugin_file", "id": _cs_spec.id,
-                   "version": _cs_spec.version, "path": "small.bin"}).get("ok"))
-
-        # ★ 本进程启动之后**包被换过** ⇒ 这里就要说出来，而不是把对不上的字节发出去
-        #   让客户端去报"校验不过"。要换插件内容，就该升版本号 + 重跑部署 ——
-        #   就地改文件从来不是一条被支持的路径。
-        put_package(_fx, [(nm, b"z" * 32 if nm == "small.bin" else blob)
-                          for nm, blob in _fx_files],
-                    filename="01M2JKHTZGKJBFQQTWYXMQMFZZ.splug")
-        _cc, _ck, _cd = _kindof(_pf({"op": "plugin_file", "id": _cs_spec.id,
-                                     "version": _cs_spec.version, "path": "small.bin"}))
-        check("★★ 文件在本次启动之后被换过 ⇒ 9 plugin_file_changed",
-              _cc == 9 and _ck == "plugin_file_changed",
-              "code=%s kind=%s" % (_cc, _ck))
-        check("★ 而且那句话指向「重跑一次 deploy.sh」，不是指回客户端",
-              "deploy.sh" in _cd, repr(_cd[:120]))
-        _sha_now = next((f["sha256"]
-                         for x in (_pf({"op": "plugins"}).get("data") or {}).get(
-                             "plugins", [])
-                         if x.get("name") == CS
-                         for f in (x.get("files") or [])
-                         if f["path"] == "small.bin"), None)
-        check("★★ 索引是**启动快照**：改完之后 op_plugins 报的还是当初那一份",
-              _sha_now == hashlib.sha256(b"y" * 16).hexdigest(),
-              "%s（包现在是 %s）"
-              % (_sha_now, hashlib.sha256(b"z" * 32).hexdigest()))
-    finally:
-        _cs_spec.source_package = _saved_src
-        _d2._plugin_cache.clear()
-    _d2.store.close()
-
-    # ── 19.11b ★ 限流：这条路会撞上它，而客户端必须自己让路 ───────────────────
+    # ── 19.11b ★ 限流：桶本身 ────────────────────────────────────────────────
     #
-    # `MAX_RPC_PER_SECOND = 10`，按 uid。一次对账是 **1 次 plugins + 1 次 list +
-    # 每份文件一次 plugin_file** —— 两个插件就是 11 次，**正好压在桶边上**。
+    # `MAX_RPC_PER_SECOND = 10`，按 uid。
     #
-    # 这条今天才暴露，是因为**从来没有一个 op 是"批量传输"**：限流是按"人点一下
-    # 按钮"设计的。写这条断言是因为客户端那边"串行取 + 撞上就退避"的理由就长在
-    # 这里 —— 谁要是调大了插件里的文件数、或者抬高了桶，这里会先响。
-    _n_files = sum(len(((_p2.get(n) or {}).get("files") or []))
-                   for n in (CS, SSHD))
-    _budget = _n_files + 2                     # plugins + list + 每份文件一次
-    check("★ 一次对账的 RPC 次数已经贴上限流阈值（客户端必须串行 + 退避）",
-          _budget >= mod.MAX_RPC_PER_SECOND - 2,
-          "%d 次 vs 每秒 %d 次" % (_budget, mod.MAX_RPC_PER_SECOND))
-
+    # ★ 这里从前还有一条"一次对账 1 + 1 + N 次，正好压在桶边上"的断言。它**删了**，
+    #   理由是它**永远绿**：N 是客户端的行为（客户端那边数得清，见
+    #   client/test/site-plugins.test.mjs 里对 `pkgCalls` / `fileCalls` 的那几条），
+    #   而它在这里是从一个常量算出来的一个常量 —— 一条不会红的用例比没有更糟，
+    #   它会让下一个人以为"贴边"这件事有人守。删掉逐份取之后是 1 + 1 + 1 = 3 次，
+    #   离桶很远；**要守的是"别把批量传输再引进来"**，而那条由上面
+    #   `plugin_file ⇒ 2 unknown_op` 那条用例守着。
     _d3 = mod.Sessiond(cfg)
     _d3.rpc_hits.clear()
     _hit = None
@@ -2402,17 +2274,20 @@ exit 0
           _hit is None or _hit[0] == mod.MAX_RPC_PER_SECOND + 1,
           repr(_hit))
     _d3.store.close()
+    _d2.store.close()
 
-    # ── 19.11c ★ 整包那条路：一次 RPC 换 N 份文件 ────────────────────────────
+    # ── 19.11c ★ 整包那条路：一次 RPC 把整个包发回去 ────────────────────────
     #
-    # 两条投递方式报的是**同一份内容**，但它们不是"快与慢"的关系：整包那条发出去的
-    # 是**容器本身**，客户端因此能自己解析、自己重算内容摘要、自己验签 —— 于是本站
-    # 报的 `digest` 与本站转发的字节成了**分开的两件事**，客户端有办法发现它们对
-    # 不上。逐份取那边做不到：只有一份一份的字节，拼不出一个能被签名的东西。
+    # 发出去的是**容器本身**，不是"照着清单拼出来的字节"。这一点是承重的：客户端
+    # 因此能自己解析、自己重算内容摘要、自己验签 —— 于是本站报的 `digest` 与本站
+    # 转发的字节成了**分开的两件事**，客户端有办法发现它们对不上。
+    #
+    # ★ v0.6 那条"逐份取"的旁路做不到这一点（只有一份一份的字节，拼不出一个能被
+    #   签名的东西），这正是 v0.7 删掉它的**理由**，不只是"少一条路"。
     #
     # 这一节钉三件事：
     #   ① `digest` 是**内容摘要**（§3.4），不是容器字节的 sha256；
-    #   ② 发出去的字节逐字节等于盘上那一份，包被换过时两个出口都说出来；
+    #   ② 发出去的字节逐字节等于盘上那一份，包被换过时说出来；
     #   ③ 负载那三个上限（自述）与整包那个上限（链路）是**两笔账**。
     _d4 = mod.Sessiond(cfg)
 
@@ -2429,12 +2304,12 @@ exit 0
 
     _cs4 = cfg.plugin_by_name[CS]
     _pk4 = {n: _plug_of(n) for n in (CS, SSHD)}
-    check("★★ 两条投递方式**同时**在（加法过渡的形状）：每个插件既有 files 也有 "
-          "package —— 老客户端只看 files，照旧逐份取，一个新字段都不用认",
-          all(isinstance((x or {}).get("files"), list)
-              and (x or {}).get("package") is not None for x in _pk4.values()),
-          str({k: (type((v or {}).get("files")).__name__,
-                   (v or {}).get("package")) for k, v in _pk4.items()})[:200])
+    check("★★ 加法过渡**结束了**：每条只剩 package，`files` 那个键不在 "
+          "（v0.6 两条同时在，v0.7 只留这一条）",
+          bool(_pk4) and all("files" not in (x or {})
+                             and (x or {}).get("package") is not None
+                             for x in _pk4.values()),
+          str({k: sorted((v or {}).keys()) for k, v in _pk4.items()})[:200])
 
     for _n in (CS, SSHD):
         _spec = cfg.plugin_by_name[_n]
@@ -2519,14 +2394,14 @@ exit 0
               "%s vs %s" % (mod.package_parse(_got).get("digest"),
                             _pd.get("digest")))
 
-        # ── 认不出的 (id, 版本)：与逐份取**同一个出口** ──
+        # ── 认不出的 (id, 版本)：还是那个出口（`3 plugin_unknown`）──
         _uc4, _uk4, _ud4 = _kindof(_pp({"op": "plugin_package", "id": "0" * 26,
                                         "version": "1.0.0"}))
         check("★ 认不出的 (id, 版本) 是 3 plugin_unknown（两条路一个出口）",
               _uc4 == 3 and _uk4 == "plugin_unknown",
               "code=%s kind=%s detail=%s" % (_uc4, _uk4, _ud4[:60]))
 
-        # ★ 启动之后包被换过：**两个出口都要说出来**，而不是把对不上的字节发出去
+        # ★ 启动之后包被换过：**要说出来**，而不是把对不上的字节发出去
         #   让客户端去报"校验不过"（那是同一个事实，但会让运维去查错的地方）。
         put_package(_fx4, _dg_files, filename=_dg_name)     # 换回不带签名的那一份
         _cc4, _ck4, _cd4 = _kindof(_pp({"op": "plugin_package",
@@ -2538,7 +2413,7 @@ exit 0
               "deploy.sh" in _cd4, repr(_cd4[:140]))
         _after = (_plug_of(CS) or {}).get("package") or {}
         check("★★ 快照是**启动那一刻**：换完之后 op_plugins 报的还是当初那一个"
-              "（两个出口因此永远描述同一份包）",
+              "（快照与这一条回答的是同一份包）",
               _after.get("digest") == _b_pkg.get("digest")
               and _after.get("bytes") == _b_pkg.get("bytes"),
               "%s vs %s" % (_after, _b_pkg))
@@ -2582,6 +2457,32 @@ exit 0
               "而「刚才还在」正是这句话要说的事）",
               _gc4 == 9 and _gk4 == "plugin_package_changed",
               "code=%s kind=%s detail=%s" % (_gc4, _gk4, _gd4[:80]))
+
+        # ── ★ 包在**两次读之间**消失（快照说在、现读说读不动）──
+        #
+        # `op_plugin_package` 读两次：第一次经**启动快照**（`plugin_package()`，
+        # 那是缓存的），第二次**现读**（`package_read_file()`）。上一条走的是
+        # "快照里就没有"那个出口；这一条走的是**另一个**出口 —— 快照里还在，
+        # 而现读时它没了。两句都是 `9 plugin_package_changed`，但说的是两件事，
+        # 而**第二句从前一条用例都没有**（这一条是补的，见 CHANGELOG 的〈三处〉）。
+        #
+        # ★ 顺序是承重的：**先问一次 `op_plugins`**（那一步会把快照填上），再删文件。
+        #   反过来的话快照本身就是"不在"，于是走到的是上面那个出口 —— 那这一条
+        #   看起来绿了，而其实什么都没测到。
+        put_package(_fx4, _dg_files, filename=_dg_name)
+        _cs4.source_package = os.path.join(_fx4, _dg_name)
+        _d4._plugin_cache.clear()
+        _live = _plug_of(CS) or {}
+        check("这条用例自己的前提：快照里那个包**是在的**",
+              isinstance(_live.get("package"), dict), repr(_live.get("package")))
+        os.remove(os.path.join(_fx4, _dg_name))
+        _rc4, _rk4, _rd4 = _kindof(_pp({"op": "plugin_package",
+                                        "id": _cs4.id, "version": _cs4.version}))
+        check("★★ 包在两次读之间消失 ⇒ 9 plugin_package_changed（说的是「读不动」）",
+              _rc4 == 9 and _rk4 == "plugin_package_changed" and "读不动" in _rd4,
+              "code=%s kind=%s detail=%s" % (_rc4, _rk4, _rd4[:100]))
+        check("★ 而它没有被兜成 9 internal（那句话指不回包，运维会去查别的地方）",
+              _rk4 != "internal", repr(_rk4))
     finally:
         _cs4.source_package = _saved_src4
         _d4._plugin_cache.clear()
@@ -2642,7 +2543,7 @@ exit 0
     # `deploy.sh` 的 `source_is_trusted()` 会拒绝安装"源里有人能改写"的文件。
     # 那一圈名单（`plugin_src_files()`）**以前只列 plugin.json 与 job/start.sh**，
     # 理由是"插件目录里其余的都不装、也不读"。站点分发接上之后那句话不成立了：
-    # `client/` 整棵子树会被 `plugins` / `plugin_files` 发到**每一台客户端**上，
+    # `client/` 整棵子树会被 `plugins` / `plugin_package` 发到**每一台客户端**上，
     # 并在用户的 Electron 主进程里 `require()`。于是"某个普通用户能改写它"的后果
     # 从"没什么后果"变成了"他的代码在每个用户的工作站上跑"。
     #
@@ -3233,6 +3134,12 @@ exit 0
         check("★ 第 2 列是**包在哪**、第 3 列是 id（作业脚本按它命名）",
               all(r[1].endswith(r[2] + ".splug") and len(r[2]) == 26
                   for r in _trows), repr(_trows))
+        # ★ 那一行「分发 N 字节 / M 份文件」读的是 `plugin_payload_index()` ——
+        #   而它**只剩这一个调用方**（v0.7 删掉逐份取之后它不再走线）。它必须与
+        #   **包里的记录表**一致：报少了运维以为这个插件很小，报多了是在吓人。
+        check("★★ 自检报出的份数就是**包里那张记录表**的份数（2 份 / 1 份）",
+              "2 份文件" in _trun.stdout and "1 份文件" in _trun.stdout,
+              repr(_trun.stdout[-300:]))
 
         # ── ⑩ 用法错误：一个包都没给 ──
         _rc, _out = _install([], _INSDIR)

@@ -40,7 +40,7 @@ const path = require('path');
 // 依赖方向不变（install → index），而且这条路上不会回指。
 const { inspectDir, shortDigest, COPY_SKIP } = require('./index.js');
 /**
- * 站点分发那一半：`fileListOf`（包里的记录 → 与逐份清单同形的三元组）与
+ * 站点分发那一半：`fileListOf`（包里的记录 → `{path, size, sha256}` 三元组）与
  * `verifyStaged`（**写下去之后**从磁盘读回来两向比一遍）。
  *
  * ★ 顶层 require 是安全的：`site-plugins.js` 的顶层只依赖 `plugins/index.js`，

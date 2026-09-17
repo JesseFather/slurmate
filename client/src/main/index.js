@@ -790,9 +790,9 @@ function pluginsView() {
       //   愿意发 ⇒ 等对账/点同意；不愿意发 ⇒ 这一版你只能自己想办法（升级客户端，
       //   或者问管理员为什么这个站点不分发它）。
       //
-      // ❗ 判据是**两条投递方式里有没有一条能走**，所以它必须问 `deliveryOf` ——
-      //    以前这里写的是 `Array.isArray(p.files)`，而"站点只发包、不发文件"
-      //    的那一天，每个插件都会被说成"站点没有报出它的文件"。
+      // ❗ 判据必须**问 `deliveryOf`**，不能在这里现写一个。它变过两次：最早是
+      //    `Array.isArray(p.files)`；v0.6 两条投递方式都在，于是"能走一条就算"；
+      //    v0.7 只剩包那一条。「能不能分发」这个问题只有一处答案，而它在那里。
       distributed: Boolean(sitePluginSync.deliveryOf(p, sitePluginSync.HARD_LIMITS).mode),
     }));
 
@@ -898,6 +898,10 @@ function pluginsView() {
       // 而不是留白（留白会被读成"还没显示出来"）。
       fingerprint: p.fingerprint || null,
       siteLabel: p.siteLabel, fileCount: (p.files || []).length,
+      // ★ 这一份**核到什么程度**。本机只有树、包不在了时是 `false` —— 那一次
+      //   只核了内容摘要，没法逐份比对。少做的那一半要在用户点同意的那一屏说
+      //   出来：一次"只核了一半"的核对，不许看起来与做全了的那次一样。
+      compared: p.compared !== false,
       // 同 (id, 版本) 以前同意过吗？—— 有的话这一次**内容变了**，界面上要说出来。
       previous: (() => {
         const e = cfg && cfg.trustedPlugins && cfg.trustedPlugins[config.trustKey(p.id, p.version)];
@@ -2455,13 +2459,6 @@ function registerIpc() {
     else if (what === 'old-distribute') backend.debugOldDistribute(true);
     // 站点报了一个超过单文件上限的文件 ⇒ 「站点支持分发，但这一份装不上」。
     else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
-    // ★ 让演示站点**也**用整包投递。默认关着：逐份取那条路（已部署的 v0.6 站点
-    //   走的那条）要有东西在测；打开之后走包那条 —— 验签与钉钉子（§5.4）只在
-    //   那条路上存在。
-    else if (what === 'packages') backend.debugPackages(true);
-    // ★ 与上一条成对：那个是"多发一条路"（整包），这个是"少发一条路"（逐份）。
-    //   "站点只发包"是 v0.8 的形状，客户端在那一刻的样子要能演。
-    else if (what === 'hide-files') backend.debugHideFiles(true);
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
     else if (what === 'rate-limited') backend.debugRateLimit(Number(arg) || 3);
     // 把仓库里的示例插件装进演示池。

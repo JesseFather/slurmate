@@ -39,24 +39,22 @@
  *   人（断流、丢包、MITM）一个把用户降级到旧本地副本的开关 —— 攻击成本从"改内容"
  *   降到"让下载失败"，而后者便宜得多。
  *
- * ── 两条投递方式，同一份内容 ────────────────────────────────────────────────
- *
- * 站点可以把一个插件发下来**两条路**：
+ * ── 一条投递方式：整个包 ────────────────────────────────────────────────────
  *
  *   `package` + `plugin_package`   一次 RPC 拿到整个 `.splug`（容器的字节）
- *   `files`   + `plugin_file`      一份一份取（N 次 RPC）
  *
- * ★ **优先走包，但不是因为"快"** —— 快只是顺带。理由是**包才是作者发布的那个
- *   构件**：它是签名的载体（§4.2），它的内容摘要（§3.4）是"是不是同一份东西"的
- *   判据，而逐份取回来的那堆字节谁也证明不了什么。客户端要能**自己**解析、自己
- *   重算摘要、自己验签（§6.4 那一半在客户端这一侧的形状），手里就必须有容器本身。
+ * ★ **拿的是包，不是"照着清单拼出来的字节"，这不是"快"的问题。** 包才是作者发布
+ *   的那个构件：它是签名的载体（§4.2），它的内容摘要（§3.4）是"是不是同一份东西"
+ *   的判据。客户端要能**自己**解析、自己重算摘要、自己验签，手里就必须有容器本身
+ *   —— 一堆散装字节谁也证明不了什么。
  *
- * ★ **两条路都留着，而且回退只在一个方向上开。** `files` 那条路一个字没动 ——
- *   它是已部署的 v0.6 站点与老客户端共用的那条。回退**只在**"这个包是用一种本
- *   客户端读不懂的说法写的"（`package.format` 比认识的**新**）时发生：那不是
- *   "这个包坏了"，是格式演进本身，而格式演进必须能加法过渡（PROTOCOL.md）。
- *   **其余每一条读包的失败都不回退** —— 一个验不过的包加上一条能绕过它的路，
- *   等于把验签降级成一句建议。
+ * ★ v0.6 曾经有**第二条**路（`files` 清单 + `plugin_file` 一份一次，N 次 RPC），
+ *   那是加法过渡的形状：老客户端只看 `files`，新客户端看 `package`。**它在 v0.7
+ *   被删掉了**，两侧一起。删它的理由不是省事 —— 留着它不只是多一条代码路径，
+ *   是多一条**验签绕得过去**的路。今天这一份实现只在"包是用读不懂的格式写的"
+ *   （`package.format` 比认识的**新**）时失败，而**没有退路可退**：那个变化在
+ *   v0.6 是"退回逐份取"，今天只能明确地拒绝并让用户升级客户端。这是删掉第二条
+ *   路的**代价**，写在这里而不是含糊过去。
  *
  * ★ 池里一个版本是**两样挨着**：
  *
@@ -117,11 +115,19 @@ const RECORD_VERSION = 1;
  *   它说的是**链路上**——整包一次发，base64 之后还要大三分之一，得装得进一条应答。
  *   所以它不能由 `total_bytes` 推出来，只能各报各的。
  *
- *   这个数取 4 MiB，与守护进程的 `PLUGIN_PACKAGE_MAX_BYTES` 和 CLI 的
- *   `RPC_MAX_RESPONSE_BYTES` **同一个数**（那两处的关系有一条跨文件用例钉着）。
- *   客户端这一份必须**不小于**它们：小了就等于客户端单方面拒绝一个合规站点发得
- *   出来的包。三处分别在 JS / Python 里，没有共享机制 —— 所以这里写的是判断，
- *   不是抄写：4 MiB 是"1 MiB 负载 × 4/3 的 base64 + 记录表与签名块，再留一半余量"。
+ *   这个数取 4 MiB。★ **它不是"三处同一个数"** —— 这句话从前写在这里，而它是错的：
+ *   守护进程的 `PLUGIN_PACKAGE_MAX_BYTES` 是 **2 MiB**，CLI 的
+ *   `RPC_MAX_RESPONSE_BYTES` 是 **4 MiB**，而这里也是 4 MiB。真正的关系只有两条，
+ *   而且方向不同：
+ *
+ *     · **本站通报的那个 ≤ 客户端这个**（2 MiB ≤ 4 MiB）。客户端这一份必须
+ *       **不小于**站点报得出来的那个，小了就等于单方面拒绝一个合规站点发得出来
+ *       的包。它是一道**兜底**，不是判据 —— 判据是 `limits.package_bytes`。
+ *     · **包上限 × 4/3 + 信封 ≤ CLI 的读上限**（约 2.7 MiB ≤ 4 MiB，余量约 1.5 倍）。
+ *       那一条由 `cluster/test-sessiond-logic.py` 的 19.11d **跨文件**钉着。
+ *
+ *   三处分别在 JS / Python 里，没有共享机制 —— 所以上面这两条是**要人看图**
+ *   的关系，不是抄写。
  */
 const HARD_LIMITS = {
   file_bytes: 256 * 1024,
@@ -141,8 +147,11 @@ const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
  * 退避重试的等待。**限流不是失败。**
  *
  * 守护进程的桶是 `MAX_RPC_PER_SECOND = 10`（按 uid），而**一次对账是 1 次
- * `plugins` + 1 次 `list` + 每份文件一次 `plugin_file`** —— 两个插件就是 11 次，
- * 正好压在桶边上。这条限流是按"人点一下按钮"设计的，从来没有一个 op 是批量传输。
+ * `plugins` + 1 次 `list` + 每个待装的插件一次 `plugin_package`** —— 今天离桶还
+ * 很远。★ 但这条退避**不能因此删掉**：v0.6 时一次对账是 `1 + 1 + N`（每份文件一次
+ * `plugin_file`），两个插件就是 11 次，**正好压在桶边上** —— 那是这条纪律被写下来
+ * 的原因，而桶是按"人点一下按钮"设计的，从来没有一个 op 是批量传输。谁要是引回
+ * 一条按份数伸缩的路，这条退避就是唯一还站着的东西。
  *
  * ★ 撞上 `7 rate_limited` 要**等一下再来**，不是记进 `failed`：记进去的话用户看到
  *   的是一句"同步失败"，而根因与服务端一点关系都没有。桶本身不动 —— 它是 DoS
@@ -238,14 +247,14 @@ function caseCollisions(paths) {
  * @returns {{ok:true, files:Array<{path,size,sha256}>} | {ok:false, why:string}}
  */
 function checkDeclared(files, limits) {
-  if (!Array.isArray(files)) return { ok: false, why: '站点没有报出这个插件的文件清单' };
+  if (!Array.isArray(files)) return { ok: false, why: '这一份里没有可读的文件清单' };
   if (files.length > limits.max_files) {
-    return { ok: false, why: `站点要发 ${files.length} 份文件，超过上限 ${limits.max_files} 份` };
+    return { ok: false, why: `这一份有 ${files.length} 份文件，超过上限 ${limits.max_files} 份` };
   }
   const out = [];
   let total = 0;
   for (const f of files) {
-    if (!f || typeof f !== 'object') return { ok: false, why: '文件清单里有一项不是对象' };
+    if (!f || typeof f !== 'object') return { ok: false, why: '清单里有一项不是对象' };
     const bad = checkRelPath(f.path, limits.max_depth);
     if (bad) return { ok: false, why: `${JSON.stringify(f.path)}：${bad}` };
     if (!Number.isInteger(f.size) || f.size < 0) {
@@ -329,29 +338,32 @@ function packageMetaProblem(pkg, limits) {
 }
 
 /**
- * 这一份**走哪条路**。**界面也用这个判据**（`missing[].distributed`），所以它导出。
+ * 这一份**能不能取**。**界面也用这个判据**（`missing[].distributed`），所以它导出。
  *
  * ★ 判据全是**协议事实**，与"这次下载失败了"毫无关系（见文件头第三个「不」）：
  *
- *   · `p.package` 是一个形状说得通的对象 ⇒ 站点会发包
- *   · `p.files` 是一个数组             ⇒ 站点会发文件
+ *   · `p.package` 是一个形状说得通的对象 ⇒ 这一份分发得出来
  *   · `p.package === null` ⇒ 站点**此刻**生产不出这一份（比如包在它启动之后被换掉
  *     了）—— 这**不是**"这个站点没有这个能力"，后者由顶层有没有 `limits` 回答。
  *     三态纪律：缺席（`undefined`）≠ 否（`null`），别把两者读成同一件事。
- *   · 两个都没有 ⇒ 这一份不分发（跳过它，**不是**记一条失败）
+ *   · 这个键根本不出现 ⇒ 这一份不分发（跳过它，**不是**记一条失败）
  *
- * @returns {{mode:'package'|'files'|null, why?:string, notice?:string}}
+ * ★ **返回值里那个 `mode` 只剩一个可能的值**，而它留着是因为调用方判的是
+ *   `del.mode` 真不真：v0.6 它是 `'package' | 'files' | null` 三态，今天是两态。
+ *   名字改成 `mode` 之外的东西会动到三处调用方与界面那个判据，而它没有换来
+ *   任何东西 —— 那两态的形状仍然需要**一个**字段来表达。
+ *
+ * @returns {{mode:'package'|null, why?:string}}
  */
 function deliveryOf(p, limits) {
-  const hasFiles = Array.isArray(p.files);
   const hasPkg = p.package !== undefined && p.package !== null;
-  if (!hasFiles && !hasPkg) return { mode: null };
-  if (!hasPkg) return { mode: 'files' };
+  if (!hasPkg) return { mode: null };
   const bad = packageMetaProblem(p.package, limits);
   if (!bad) return { mode: 'package' };
-  // 格式太新是**唯一**回退的情形，而且只在还有 `files` 可走的时候。
-  if (bad.tooNew && hasFiles) return { mode: 'files', notice: bad.why };
-  return { mode: null, why: bad.why };
+  // ★ v0.6 这里还有一条退路：「格式太新」时退回逐份取。**没有退路了** ——
+  //   `files` 那条路已经删掉。所以"站点比客户端新"从一条**提示**升级成一条
+  //   **明确的失败**：用户能做的事只有升级客户端，而界面必须这么说。
+  return { mode: null, why: bad.why, tooNew: bad.tooNew === true };
 }
 
 /**
@@ -359,20 +371,12 @@ function deliveryOf(p, limits) {
  *
  * ★ `parsePackage` 已经把这些 size 逐个夹在 `Number.MAX_SAFE_INTEGER` 之内了
  *   （超了就是 `length`，它当场拒绝），所以这里的 `Number()` 不会失精。
- *   下游（`checkDeclared`、`verifyStaged`）与逐份那条路吃的是同一种形状 ——
- *   **两条投递方式共用一套校验**，这正是它必须同形的原因。
+ *   下游（`checkDeclared`、`verifyStaged`）吃的是同一种形状，而这不是碰巧：
+ *   `verifyStaged` 是对着**磁盘上那棵树**核，`checkDeclared` 是对着**包里的记录**
+ *   核，两者要比出"同一份东西"来，前提就是这里的形状与它们一致。
  */
 function fileListOf(pkg) {
   return pkg.files.map((f) => ({ path: f.path, size: Number(f.size), sha256: f.sha256 }));
-}
-
-/** 两份文件清单是不是同一份东西（顺序无关）。交叉判据用，见 sync。 */
-function sameFileSet(a, b) {
-  if (a.length !== b.length) return false;
-  const key = (f) => `${f.path} ${f.size} ${f.sha256}`;
-  const x = a.map(key).sort();
-  const y = b.map(key).sort();
-  return x.every((v, i) => v === y[i]);
 }
 
 // ── 快照表 ──────────────────────────────────────────────────────────────────
@@ -513,76 +517,46 @@ function clearStaging(stagingRoot, lock) {
   }
 }
 
-/** 一份一份取。**串行** —— 见 RATE_BACKOFF_MS 那段。 */
-async function fetchFiles(rpc, p, declared, destDir, limits, ctx) {
-  let total = 0;
-  for (const f of declared) {
-    if (ctx.stale()) return { ok: false, why: '连接已经换了一条，这次对账作废' };
-    const resp = await rpcWithBackoff(rpc, {
-      op: 'plugin_file', id: p.id, version: p.version, path: f.path,
-    });
-    if (!resp || !resp.ok) {
-      const d = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
-      return { ok: false, why: `取 ${f.path} 失败：${d}` };
-    }
-    const data = resp.data || {};
-    if (typeof data.data !== 'string') {
-      return { ok: false, why: `取 ${f.path} 的响应里没有 data` };
-    }
-    const buf = Buffer.from(data.data, 'base64');
-    // ★ **逐步用自己算出来的字节与上一轮记下的"声明值"比**，不拿响应自带的
-    //   size/sha256 做判据 —— 那等于让被告当法官。
-    if (buf.length !== f.size) {
-      return { ok: false, why: `${f.path} 收到 ${buf.length} 字节，而声明的是 ${f.size} 字节` };
-    }
-    if (sha256(buf) !== f.sha256) {
-      return { ok: false, why: `${f.path} 的内容与声明的 sha256 不符` };
-    }
-    total += buf.length;
-    if (total > limits.total_bytes) {
-      return { ok: false, why: `这些文件加起来超过总字节上限 ${limits.total_bytes} 字节` };
-    }
-    const full = path.join(destDir, ...f.path.split('/'));
-    fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(full, buf, { mode: 0o644 });
-    // 显式 chmod：writeFileSync 的 mode 会被 umask 削，而**摘要里有权限位** ——
-    // 不显式设的话，同一份内容在两台 umask 不同的机器上算出不同的摘要。
-    try { fs.chmodSync(full, 0o644); } catch { /* Windows */ }
-  }
-  return { ok: true, total };
-}
-
 /**
  * 暂存里的四道校验。**通过了才换入。**
  *
  * ★ 顺序错了就没救：先 `rename` 再校验的话，一棵已经进了站点目录的坏树按"站点
  *   不会主动删东西"那条规则就只能让它躺着。
+ *
+ * ★ `declared` 可以是 `null` —— 那是"**没有另一份可比的清单**"，只发生在一种
+ *   情况下：本机那一份**只有解出来的树、包不在了**（见 sync 第 3 步）。那时
+ *   ①② 跳过，只剩 ③④，而"内容有没有被动过"由**台账里那个摘要**回答（摘要是
+ *   从磁盘上算的）。返回值里带 `compared:false`，让调用方能如实说出来 ——
+ *   一次"少做了一半校验"的核对，不许看起来与做全了的那次一样。
  */
 function verifyStaged(destDir, declared, expect) {
-  // ① **从磁盘重新读回来**算，不是核对手里那些 Buffer —— 那是"校验我收到的"当成
-  //    "校验我写下的"，而 `writeFileSync` 在磁盘满时会留下部分文件然后抛错。
-  let files;
-  try {
-    files = plugins.readPluginFiles(destDir);
-  } catch (e) {
-    return { ok: false, why: `写下去的东西读不回来：${e.message}` };
-  }
-  // ② **双向**比对。只比一个总摘要抓不到"多出来一个文件"，而只比"声明了的都在"
-  //    抓不到"磁盘上多出来的那些"。
-  const have = new Map(files.filter((f) => f.kind === 'f').map((f) => [f.path, f]));
-  const want = new Map(declared.map((f) => [f.path, f]));
-  const missing = [...want.keys()].filter((p) => !have.has(p));
-  const extra = [...have.keys()].filter((p) => !want.has(p));
-  const differs = [...want.keys()].filter((p) => have.has(p)
-    && (have.get(p).sha256 !== want.get(p).sha256 || have.get(p).size !== want.get(p).size));
-  const odd = files.filter((f) => f.kind !== 'f').map((f) => f.path);
-  if (missing.length || extra.length || differs.length || odd.length) {
-    const bits = [];
-    if (missing.length) bits.push(`少 ${missing.join('、')}`);
-    if (extra.length) bits.push(`多 ${extra.join('、')}`);
-    if (differs.length) bits.push(`对不上 ${differs.join('、')}`);
-    if (odd.length) bits.push(`非普通文件 ${odd.join('、')}`);
-    return { ok: false, why: `写下去之后与声明的不一致：${bits.join('；')}` };
+  const want = Array.isArray(declared) ? declared : null;
+  if (want) {
+    // ① **从磁盘重新读回来**算，不是核对手里那些 Buffer —— 那是"校验我收到的"当成
+    //    "校验我写下的"，而 `writeFileSync` 在磁盘满时会留下部分文件然后抛错。
+    let files;
+    try {
+      files = plugins.readPluginFiles(destDir);
+    } catch (e) {
+      return { ok: false, why: `写下去的东西读不回来：${e.message}` };
+    }
+    // ② **双向**比对。只比一个总摘要抓不到"多出来一个文件"，而只比"声明了的都在"
+    //    抓不到"磁盘上多出来的那些"。
+    const have = new Map(files.filter((f) => f.kind === 'f').map((f) => [f.path, f]));
+    const wantMap = new Map(want.map((f) => [f.path, f]));
+    const missing = [...wantMap.keys()].filter((p) => !have.has(p));
+    const extra = [...have.keys()].filter((p) => !wantMap.has(p));
+    const differs = [...wantMap.keys()].filter((p) => have.has(p)
+      && (have.get(p).sha256 !== wantMap.get(p).sha256 || have.get(p).size !== wantMap.get(p).size));
+    const odd = files.filter((f) => f.kind !== 'f').map((f) => f.path);
+    if (missing.length || extra.length || differs.length || odd.length) {
+      const bits = [];
+      if (missing.length) bits.push(`少 ${missing.join('、')}`);
+      if (extra.length) bits.push(`多 ${extra.join('、')}`);
+      if (differs.length) bits.push(`对不上 ${differs.join('、')}`);
+      if (odd.length) bits.push(`非普通文件 ${odd.join('、')}`);
+      return { ok: false, why: `写下去之后与声明的不一致：${bits.join('；')}` };
+    }
   }
   // ③ 清单级校验 —— **但不执行代码**（`inspectDir` 只编译）。
   //    于是"清单合法而 client/index.js 有语法错"会在这里就被抓到。
@@ -594,11 +568,11 @@ function verifyStaged(destDir, declared, expect) {
     return { ok: false, why: `这份自报的是 ${r.entry.plugin.id}@${r.entry.plugin.version}，`
       + `而站点说的是 ${expect.id}@${expect.version}` };
   }
-  return { ok: true, entry: r.entry };
+  return { ok: true, entry: r.entry, compared: Boolean(want) };
 }
 
 /**
- * 整包一次取 —— 另一条投递方式。**一条 RPC**，而逐份那条是 N 条。
+ * 整包一次取。**一条 RPC**（v0.6 那条逐份取的路是 N 条，已删）。
  *
  * ★ 这里做的每一件事都是"**自己算一遍**"：自己数字节、自己解析容器、自己逐份校
  *   sha256、自己重算内容摘要、自己验签。站点自述的那几个数一个都不当判据 ——
@@ -646,8 +620,10 @@ async function fetchPackage(rpc, p, meta, dir, pkgFile, limits, ctx) {
       + `而这一份包算出来是 ${parsed.digest}` };
   }
   // 负载内部那几条上限（单文件多大、一共几份、加起来多少、路径多深）在这里执行。
-  // ★ 与逐份那条路**同一个函数**（`checkDeclared`）：两条投递方式对"这一份合不
-  //   合规"必须给出同一个答案，否则"同一份内容走哪条路"会变成一个有意义的差别。
+  // ★ **这是它们今天唯一的执行点。** v0.6 时守护进程在 `plugin_file` 那一条上也
+  //   执行一次（超了回 code 4）；那条路删掉之后，本站**只通报、不拦截**这几个数
+  //   （唯一拦得住的是整包上限 `package_bytes`）。所以一个负载超限的包**装得上、
+  //   发得出**，而每一个客户端都会在**这里**拒收 —— `--check-plugins` 会对它打 ⚠。
   const chk = checkDeclared(fileListOf(parsed), limits);
   if (!chk.ok) return { ok: false, why: `这一份包里的内容不合规：${chk.why}` };
 
@@ -677,10 +653,15 @@ async function fetchPackage(rpc, p, meta, dir, pkgFile, limits, ctx) {
 /**
  * §5.4：这一份的签名者，与本机钉住的那把是同一把吗。
  *
- * ★ `pkg` 为 `null` 表示"这一份**不是以一个包的形式来的**"（逐份那条路）—— 那时
- *   `keyVerdict` 对钉过的 id 给出 `unsigned`，也就是**拒绝**。这是对的：钉过之后
- *   每一份都必须能证明是同一把钥匙签的，而一堆散装字节证明不了任何事。
- *   （钉子是**首次即信任**，所以从没钉过的 id 在这里永远是 `first`，不受影响。）
+ * ★ `pkg` 为 `null` 表示"这一份**不是以一个包的形式来的**"。今天调用的两处都
+ *   一定拿得到包（唯一那条路就是取整包），所以 `null` 只在**调用方手里那个包读不动**
+ *   时出现；而 `keyVerdict` 那时对钉过的 id 给出 `unsigned`，也就是**拒绝** ——
+ *   这是对的。
+ *
+ *   ★ v0.6 时这个 `null` 有第二个来源：逐份取那条路**根本没有包**。那条路同时是
+ *     §5.4 的一个**绕过口**（拿散装字节冒充一个"没签名"的构件），所以当时它在
+ *     这里被判拒 —— 而 v0.7 把那条路整个删掉了，这个缺口因此**关在结构里**，
+ *     不再靠这一句判断挡着。
  */
 function pinVerdict(o, p, pkg) {
   const pinned = (typeof o.pinnedKey === 'function') ? o.pinnedKey(p.id) : undefined;
@@ -849,7 +830,7 @@ async function sync(o) {
         id: p.id, version: p.version, name: p.name, title: p.title, why,
       });
 
-      // ── 1. 这一份走哪条路（整包 / 逐份 / 不分发）──
+      // ── 1. 这一份分发得出来吗 ──
       const del = deliveryOf(p, out.limits);
       if (!del.mode) {
         // ★ 站点报了这个插件、却没给它任何可分发的东西 ⇒ **这一份不分发**，跳过它。
@@ -857,25 +838,20 @@ async function sync(o) {
         //   （老守护进程、或者调试里造的那种条目就长这样）。记成失败的话，用户会
         //   看到一条"没能装上 X"，而其实站点从来没有说要发它。
         //   界面用 `missing[].distributed` 把这两种情况分开说。
-        if (del.why) fail(`站点报的这一份不能用：${del.why}`);
+        //
+        // ★ 而 `del.why` 非空时它是**一条真失败**：说的是"站点报了这一份，而我们
+        //   读不懂它"（格式比客户端新、自述的三个数不自洽……）。v0.6 这一格里还有
+        //   "退回逐份取"那条路，所以其中一种（站点太新）只是**一句提示**；今天没有
+        //   退路了，它和其他几种一样是失败 —— 但**要分开说**，因为用户能做的事
+        //   完全不同（升级客户端 vs 找管理员）。
+        if (del.why) {
+          if (del.tooNew && !out.reason) out.reason = 'site_too_new';
+          fail(`站点报的这一份不能用：${del.why}`);
+        }
         continue;
       }
-      if (del.notice) {
-        // ★ 「站点太新」是**站点级**的事实（格式是守护进程的属性），见到一次记一次；
-        //   逐份那条路照旧走，所以它不是一次失败，而是一条要说出来的话。
-        if (!out.reason) out.reason = 'site_too_new';
-        out.notices.push(`${label}：${del.notice}。这一次退回逐份取那一份清单。`);
-      }
 
-      // ── 2. 站点报的逐份清单（有就校验；包模式下它仍然是**交叉判据**）──
-      let want = null;
-      if (Array.isArray(p.files)) {
-        const chk = checkDeclared(p.files, out.limits);
-        if (!chk.ok) { fail(`站点报的这一份不能用：${chk.why}`); continue; }
-        want = chk.files;
-      }
-
-      // ── 3. 本机那一份不在了 ⇒ 同意作废（§5.3，见文件头那一节）──
+      // ── 2. 本机那一份不在了 ⇒ 同意作废（§5.3，见文件头那一节）──
       const exists = fs.existsSync(dest);
       if (!exists) {
         const w = forgetTrust(p.id, p.version);
@@ -886,26 +862,39 @@ async function sync(o) {
         }
       }
 
-      // ── 4. **已经有一份** —— 增量。逐文件比，对得上就不重下 ──
+      // ── 3. **已经有一份** —— 增量。逐文件比，对得上就不重下 ──
       if (exists) {
-        // 核对的判据：站点这一轮报的逐份清单；站点只报包的时候（`files` 那条路
-        // 它已经不发了）退到**本机那个包** —— 它是上一次下来、逐份校过的那一份。
+        // ★ 核对的判据是**本机那个包** —— 它是上一次下来、逐份校过的那一份。
+        //
+        //   v0.6 这里先看站点这一轮报的逐份清单（`p.files`），本机没有包时才退到
+        //   磁盘上那个。**今天只剩后一半**：`files` 那个字段没有了，而这里本来
+        //   也不该信它 —— 拿站点这一轮的自述去核**磁盘上**那一份，是让"对面说的"
+        //   当"本机有的"的判据。本机那个包是**上一次真下载到、逐字节校过**的东西，
+        //   它才是这里的正确答案。
         const rd = fs.existsSync(pkgDest) ? PP().readPackageFile(pkgDest) : null;
         const pkgOnDisk = (rd && rd.ok) ? rd : null;
         if (rd && !rd.ok) {
           out.notices.push(`本机那一份 ${label} 旁边的 ${p.version}.splug 读不出来`
             + `（${rd.why}）—— 树本身照样核，但那个包已经不能当来路凭证了。`);
         }
-        let decl = want;
-        if (!decl) {
-          if (!pkgOnDisk) {
-            fail(`本机已有 ${label}，但站点这一版只报了一个包，而本机连那个包也不在了`
-              + `（只剩解出来的树）—— 没法核对它是不是同一份。`
-              + `把 ${dest} 删掉再重新同步一次。`);
-            continue;
-          }
-          decl = fileListOf(pkgOnDisk);
+        // ★ 包不在了**不算撤回**（见文件头）：能加载的是树，包是它的来路凭证。
+        //   那时没有"另一份清单"可比（`decl = null`），于是"内容有没有被动过"
+        //   只剩**台账里那个摘要**回答 —— 摘要是从**磁盘上**算的，动过就变，
+        //   对不上就会走进下面的待同意（原地认领）。**少做的那一半要说得出来**。
+        if (!pkgOnDisk) {
+          out.notices.push(`本机那一份 ${label} 旁边没有它的包（只剩解出来的树）——`
+            + '这一次只能核内容摘要，没法逐份比对。');
         }
+        const decl = pkgOnDisk ? fileListOf(pkgOnDisk) : null;
+        // 给**界面**看的那份清单。没有包时从树上现读一份出来 —— 它只用来画那个
+        // "你要同意的是这几份文件"，**不参与任何判定**（所以它是另一个变量）。
+        // 读不出来就是空列表：那是显示上的缺省，不是一条校验结论。
+        const display = decl || (() => {
+          try {
+            return plugins.readPluginFiles(dest).filter((f) => f.kind === 'f')
+              .map((f) => ({ path: f.path }));
+          } catch { return []; }
+        })();
 
         const r = verifyStaged(dest, decl, { id: p.id, version: p.version });
         if (r.ok && o.trusted(p.id, p.version, r.entry.digest)) {
@@ -941,12 +930,14 @@ async function sync(o) {
           stagedDir: dest, stagedPkg: null,
           fingerprint: pv.fingerprint,
           siteKey: o.siteKey, siteLabel: o.siteLabel,
-          files: decl.map((f) => f.path),
+          files: display.map((f) => f.path),
+          // ★ 让界面能说出"这一份我们只核了摘要"—— 少做的那一半不能瞒着。
+          compared: r.compared,
         });
         continue;
       }
 
-      // ── 5. **没有** —— 下载到暂存 ──
+      // ── 4. **没有** —— 把整个包取到暂存 ──
       const staged = path.join(stagingDir, p.id, p.version);
       const stagedPkg = path.join(stagingDir, p.id, `${p.version}.splug`);
       try {
@@ -956,26 +947,16 @@ async function sync(o) {
         continue;
       }
 
-      let decl;
-      let pkg = null;
-      if (del.mode === 'package') {
-        const got = await fetchPackage(o.rpc, p, p.package, staged, stagedPkg, out.limits, ctx);
-        if (!got.ok) { fail(got.why); continue; }
-        pkg = got.pkg;
-        decl = got.files;
-        // ★ **交叉判据**：站点在同一个响应里给了两份说法（逐份清单与整包），它们
-        //   必须描述同一份东西。不判的话，"客户端按哪一份理解"就成了一件取决于
-        //   实现细节的事 —— 而两份说法分家的那一天，谁也不该装作没看见。
-        if (want && !sameFileSet(want, decl)) {
-          fail('站点给的逐份清单与整包说的不是同一份东西 —— 两份说法对不上，'
-            + '没法判断该信哪一个。请管理员查一下这个插件在站点上的部署。');
-          continue;
-        }
-      } else {
-        const got = await fetchFiles(o.rpc, p, want, staged, out.limits, ctx);
-        if (!got.ok) { fail(got.why); continue; }
-        decl = want;
-      }
+      // ★ v0.6 这里是一个二选一（整包 / 逐份），而逐份那条路上还有一条**交叉
+      //   判据**：站点在 `op_plugins` 里给的那份清单必须与整包说的描述同一份东西。
+      //   今天只剩一条路，那份清单也没有了 —— 于是这一处**只剩下"自己算一遍"**：
+      //   `fetchPackage` 自己数字节、自己解析、自己逐份校 sha256、自己重算摘要。
+      //   丢掉的那条交叉判据**不是损失**：它防的是"两份自述互相矛盾"，而矛盾需要
+      //   两个来源；今天本站的每一个说法都拿去与**我们算出来的那个**比了。
+      const got = await fetchPackage(o.rpc, p, p.package, staged, stagedPkg, out.limits, ctx);
+      if (!got.ok) { fail(got.why); continue; }
+      const pkg = got.pkg;
+      const decl = got.files;
 
       const vr = verifyStaged(staged, decl, { id: p.id, version: p.version });
       if (!vr.ok) { fail(vr.why); continue; }
@@ -996,7 +977,7 @@ async function sync(o) {
         out.pendingConsent.push({
           id: p.id, version: p.version, name: p.name, title: p.title,
           digest, stagedDir: staged,
-          stagedPkg: pkg ? stagedPkg : null,
+          stagedPkg,
           existing: false,
           fingerprint: pv.fingerprint,
           siteKey: o.siteKey, siteLabel: o.siteLabel,
@@ -1006,7 +987,7 @@ async function sync(o) {
       }
 
       const mv = acceptStaged({
-        stagedDir: staged, stagedPkg: pkg ? stagedPkg : null, siteRoot,
+        stagedDir: staged, stagedPkg, siteRoot,
         id: p.id, version: p.version, digest,
       });
       if (!mv.ok) { fail(mv.error); continue; }
@@ -1251,6 +1232,6 @@ module.exports = {
   siteKeyOf, siteLabelOf,
   readRecord, writeJsonAtomic, recordPathOf, listPooled, pkgPathOf,
   checkRelPath, checkDeclared, caseCollisions, effectiveLimits,
-  deliveryOf, packageMetaProblem, fileListOf, sameFileSet, pinVerdict, verifyStaged,
+  deliveryOf, packageMetaProblem, fileListOf, pinVerdict, verifyStaged,
   HARD_LIMITS, RECORD_NAME, LOCK_NAME,
 };

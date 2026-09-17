@@ -48,20 +48,21 @@ function makeSite() {
   const state = {
     limits: true,
     rateBurst: 0,
-    lieAboutSha: null,
-    hideFiles: new Set(),      // 这些 (id@版本) 不带 `files`（站点不分发它）
+    noPackage: new Set(),      // 这些 (id@版本) 不带 `package`（站点不分发它）
     disabled: new Set(),       // 这些不带 `enabled: true`
     extra: [],                 // 站点多报的（客户端不认识的）
     sessions: [],
-    // ── 整包那条路（默认关：逐份那条路要有东西在测）──
-    packages: false,
+    // ── 唯一那条投递方式 ──
     pkgFormat: 1,              // `op_plugins` 里报出去的格式
     pkgByteDelta: 0,           // 报出去的字节数偏离真实值多少
     pkgDigestLie: false,       // 报出去的内容摘要是假的
     pkgCorrupt: false,         // `plugin_package` 发出来的字节被改了一位
+    pkgTruncate: 0,            // 发出去之前把包截短几个字节（链表与负载对不上）
+    pkgExtra: null,            // 往包里**追加**这几条负载 —— 造坏包用（见 pkgOf）
+    pkgSign: true,             // 这一份包签不签名
     pkgKey: null,              // 签名钥匙（每造一个站点一把，所以两个站点不同）
-    pkgCalls: 0,               // 整包那条路被打了几次（用来验"一条 RPC"）
-    fileCalls: 0,
+    pkgCalls: 0,               // 被打了几次（用来验"一条 RPC 取完"）
+    fileCalls: 0,              // ★ 恒为 0：`plugin_file` 已经删了，见下面那个出口
   };
   const byKey = new Map();
 
@@ -104,18 +105,49 @@ function makeSite() {
   function pkgOf(key2) {
     if (pkgCache.has(key2)) return pkgCache.get(key2);
     const e = byKey.get(key2);
+    // ★ `pkgExtra` 是**造坏包**用的：负载本来是磁盘上那一棵，这里往后再接几条
+    //   —— 那些形状在磁盘上摆不出来（穿越路径、只差大小写的两条、一条超限的……
+    //   `readPluginFiles` 会先跳过它们），而在**包里**它们表达得出来，正是解析器
+    //   或读方该拒的东西。
     const files = declared(key2).map((f) => ({
       path: f.path,
       data: fs.readFileSync(path.join(e.dir, ...f.path.split('/'))),
       sha256: f.sha256,
-    }));
+    })).concat(state.pkgExtra || []);
     const digest = PACKER.contentDigest(files);
     const k = key();
-    const sig = crypto.sign(null, Buffer.from(digest, 'hex'), k.priv);
-    const buf = PACKER.buildPackage(files, Buffer.concat([Buffer.from([1]), k.pub, sig]));
-    const out = { buf, digest, fingerprint: k.fingerprint };
+    // ★ 不签名的那一档：§5.4 要判"钉过之后收到一份没有签名的构件"。
+    const sigBlock = state.pkgSign
+      ? Buffer.concat([Buffer.from([1]), k.pub,
+                       crypto.sign(null, Buffer.from(digest, 'hex'), k.priv)])
+      : Buffer.alloc(0);
+    const buf = PACKER.buildPackage(files, sigBlock);
+    const out = { buf, digest, fingerprint: state.pkgSign ? k.fingerprint : null };
     pkgCache.set(key2, out);
     return out;
+  }
+
+  /**
+   * 链路上真正发出去的那串字节。
+   *
+   * ★ 与 `pkgOf` 分开是有意的：`op_plugins` 报的 `bytes` 与 `plugin_package` 发的
+   *   字节**必须描述同一份东西**（真守护进程那边由"启动快照"保证）。`pkgTruncate`
+   *   同时改这两处，所以客户端会一路走到**解析器**才失败 —— 那正是这条用例要测的
+   *   那一层；只改一处的话，它会在"字节数与自述对不上"那一条上就停住。
+   */
+  function wireBuf(key2) {
+    const p = pkgOf(key2);
+    return state.pkgTruncate ? p.buf.subarray(0, p.buf.length - state.pkgTruncate) : p.buf;
+  }
+
+  /** 把这一份的包**直接摆进池子**（连同树）—— 造"上次已经装过"用。 */
+  function poolPut(env, p) {
+    const dest = path.join(env.siteRoot, p.id, p.version);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.cpSync(p.dir, dest, { recursive: true });
+    fs.writeFileSync(path.join(env.siteRoot, p.id, `${p.version}.splug`),
+      pkgOf(`${p.id}@${p.version}`).buf);
+    return dest;
   }
 
   async function rpc(req) {
@@ -126,12 +158,11 @@ function makeSite() {
           id: e.mf.id, name: e.mf.name, version: e.mf.version, title: e.mf.displayName,
           enabled: !state.disabled.has(key2), can_submit: true, defaults: { cpus: 2, mem: '8G' },
         };
-        if (!state.hideFiles.has(key2)) out.files = declared(key2);
-        if (state.packages) {
+        if (!state.noPackage.has(key2)) {
           const p = pkgOf(key2);
           out.package = {
             format: state.pkgFormat,
-            bytes: p.buf.length + state.pkgByteDelta,
+            bytes: wireBuf(key2).length + state.pkgByteDelta,
             digest: state.pkgDigestLie ? 'f'.repeat(64) : p.digest,
           };
         }
@@ -141,8 +172,8 @@ function makeSite() {
       const data = { plugins, enabled: plugins.filter((p) => p.enabled).map((p) => p.name) };
       // ★ 能力信号是**协议事实**：顶层有没有 `limits`。老守护进程整个字段都没有。
       if (state.limits) {
-        data.limits = { file_bytes: 256 * 1024, total_bytes: 1 << 20, max_files: 256 };
-        if (state.packages) data.limits.package_bytes = 4 << 20;
+        data.limits = { file_bytes: 256 * 1024, total_bytes: 1 << 20, max_files: 256,
+                        package_bytes: 4 << 20 };
       }
       return { ok: true, data };
     }
@@ -158,45 +189,25 @@ function makeSite() {
         return { ok: false, code: 3, error: { kind: 'plugin_unknown', detail: key2 } };
       }
       const p = pkgOf(key2);
-      let buf = p.buf;
+      let buf = wireBuf(key2);
       if (state.pkgCorrupt) {
         // 改**负载里**的一个字节 ⇒ 逐份校验必须抓到（改的是字节，不是那张表）。
         buf = Buffer.from(buf);
         buf[buf.length - 1] ^= 0xff;
       }
       return { ok: true,
-               data: { format: 1, bytes: p.buf.length, digest: p.digest,
+               data: { format: 1, bytes: buf.length, digest: p.digest,
                        data: buf.toString('base64') } };
     }
-    if (req.op === 'plugin_file') {
-      state.fileCalls += 1;
-      if (state.rateBurst > 0) {
-        state.rateBurst -= 1;
-        return { ok: false, code: 7, error: { kind: 'rate_limited', detail: '演示：打满桶' } };
-      }
-      const key2 = `${req.id}@${req.version}`;
-      if (!byKey.has(key2)) {
-        return { ok: false, code: 3, error: { kind: 'plugin_unknown', detail: key2 } };
-      }
-      const hit = declared(key2).find((f) => f.path === req.path);
-      if (!hit) {
-        return { ok: false, code: 3, error: { kind: 'plugin_file_unknown', detail: req.path } };
-      }
-      const buf = fs.readFileSync(path.join(byKey.get(key2).dir, ...req.path.split('/')));
-      return {
-        ok: true,
-        data: {
-          path: hit.path, size: hit.size,
-          // ★ 自报的那个 sha256 —— 客户端**不许**拿它做判据（见下面那条用例）。
-          sha256: state.lieAboutSha || hit.sha256,
-          data: buf.toString('base64'),
-        },
-      };
-    }
+    // ★ `plugin_file` **不在这里** —— v0.7 把它从协议里删掉了，真守护进程回的是
+    //   `2 unknown_op`（走下面那一行）。假站点也必须这样：一个"只在这个假站点里
+    //   存在"的 op 会让用例测着一条真机上没有的路。
+    //   `state.fileCalls` 留着是**故意的**：它现在是"客户端有没有偷偷退回逐份取"
+    //   的证据，而它只可能是 0。
     return { ok: false, code: 2, error: { kind: 'unknown_op', detail: req.op } };
   }
 
-  return { src, state, add, declared, rpc, byKey, pkgOf };
+  return { src, state, add, declared, rpc, byKey, pkgOf, poolPut, wireBuf };
 }
 
 /** 一次对账的环境：站点池 + 暂存 + 台账 + 钉子。 */
@@ -326,39 +337,39 @@ test('★ 摘要是从**磁盘上的字节**算的，不是对面自报的那个
 
 // ── 逐文件校验 ──────────────────────────────────────────────────────────────
 
-test('★ 声明了而磁盘上没有 ⇒ 失败', async () => {
+test('★★ 包声明了而负载里没有 ⇒ 根本编不出来（结构性的，不靠一条对照规则）', async () => {
+  // ★ v0.6 这条用例走的是"站点报的清单里多一份、而它取不到"，那时客户端得靠
+  //   **一条双向比对**把这件事抓住。v0.7 之后它**编不出来**了：容器的长度必须
+  //   精确等于 `头 + Σ size`，短一个字节就是 `length` —— 于是"声明了而没送到"
+  //   从"一条要记得写的规则"变成了"一个说不出来的形状"。
+  //
+  //   用例留着，断的是那条**结构性**：把一个合法的包截短一个字节，客户端必须在
+  //   **解析**那一步就拒掉，而不是装上一棵缺一份的树。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  // 声明里多一份根本取不到的文件
-  const orig = site.rpc;
-  const rpc = async (req) => {
-    const r = await orig(req);
-    if (req.op === 'plugins') {
-      r.data.plugins[0].files = [...r.data.plugins[0].files,
-        { path: 'ghost.js', size: 4, sha256: 'a'.repeat(64) }];
-    }
-    return r;
-  };
-  const r = await S.sync({
-    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
-    trusted: () => true, protectedVersions: [],
-  });
+  site.state.pkgTruncate = 1;                    // 负载末尾少一个字节
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0, '读不动的包不许走进同意闸');
   assert.equal(r.failed.length, 1, `要报失败：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /ghost\.js/, `要点名是哪一份：${r.failed[0].why}`);
+  assert.match(r.failed[0].why, /读不了|长度|length/, `要说清是包读不了：${r.failed[0].why}`);
   assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
     '★ 失败之后站点池里**根本不能有**那个目录 —— 半份比没有更坏');
+  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+    '★ 连那个包也不许留下 —— 它是半个容器，解不开');
 });
 
-test('★ 磁盘上有而声明里没有 ⇒ 也失败（双向比对）', async () => {
+test('★ 本机那一份多出文件来 ⇒ 也失败（双向比对）', async () => {
   // ★ 只比一个总摘要抓不到"多出来一个文件" —— 这正是 F18 的形态。
   //   而只比"声明了的都在"抓不到"磁盘上多出来的那些"。两个方向都要判。
+  //
+  // ★ v0.7 之后被比的另一方是**本机那个包**（上一次下来、逐字节校过的那一份），
+  //   不是站点这一轮的自述 —— 拿对面说的去核本机有的，那是让被告当法官。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const dest = path.join(env.siteRoot, p.id, '1.0.0');
-  fs.cpSync(p.dir, dest, { recursive: true });
-  fs.writeFileSync(path.join(dest, 'extra.js'), '// 站点没报过这一份\n');
+  const dest = site.poolPut(env, p);
+  fs.writeFileSync(path.join(dest, 'extra.js'), '// 包里的记录表没有这一份\n');
 
   const r = await callSync(site, env);
   assert.equal(r.kept.length, 0, '磁盘上多出来一份就不算"已经有一份"');
@@ -372,8 +383,7 @@ test('★ 同一个版本号下内容变了 ⇒ 明确失败，**绝不静默覆
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const dest = path.join(env.siteRoot, p.id, '1.0.0');
-  fs.cpSync(p.dir, dest, { recursive: true });
+  const dest = site.poolPut(env, p);
   fs.writeFileSync(path.join(dest, 'client', 'index.js'), 'module.exports = { attach() {} };\n');
   const before = fs.readFileSync(path.join(dest, 'client', 'index.js'));
 
@@ -392,6 +402,10 @@ test('★ 写下去之后再从磁盘读回来验 —— 不能拿手里的 Buff
   const p = site.add('a', { name: 'a' },
     { 'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\necho hi\n' });
 
+  // ★ v0.6 这里拦的是 `fetchFiles` 的 `writeFileSync`；v0.7 铺树的是
+  //   `plugin-package.js` 的 `unpackTo`，而它写的**还是** `fs.writeFileSync` ——
+  //   所以这条用例一个字没改，只是它现在拦的是另一条路的那一次写。
+  //   （写一半这件事与"哪条路把字节铺下来"无关，它测的是"核的是我写下的"。）
   const realWrite = fs.writeFileSync;
   fs.writeFileSync = function patched(file, data, opts) {
     const s = String(file);
@@ -485,28 +499,26 @@ test('★★ 路径穿越：六种坏 path 全部**整份拒绝**', async () => 
   assert.equal(S.checkRelPath('client/index.js', 8), null, '正常路径要放行');
   assert.equal(S.checkRelPath('job/start.sh', 8), null, '两层也要放行');
 
-  // 端到端：站点报一个穿越路径 ⇒ **整份**拒绝（不是"跳过那一份"）
+  // 端到端：站点发的**包里带一条穿越路径** ⇒ **整份**拒绝（不是"跳过那一份"）
+  //
+  // ★ v0.6 它走的是"站点在那份清单里多报一条穿越路径"（客户端判 `checkDeclared`）。
+  //   v0.7 之后清单没有了，而这条形状**在包里仍然表达得出来** —— 于是判它的
+  //   变成了**解析器**（§3.3 是一条拒绝规则，不是"遍历时跳过"）。用例的落脚点
+  //   从"客户端的过滤器写对了"变成"这个形状根本进不来"。
   const site = makeSite();
   const env = makeEnv();
   const pl = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const orig = site.rpc;
-  const rpc = async (req) => {
-    const r = await orig(req);
-    if (req.op === 'plugins') {
-      r.data.plugins[0].files = [...r.data.plugins[0].files,
-        { path: '../escape.js', size: 1, sha256: 'a'.repeat(64) }];
-    }
-    return r;
-  };
-  const r = await S.sync({
-    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
-    trusted: () => true, protectedVersions: [],
-  });
+  site.state.pkgExtra = [
+    { path: '../escape.js', data: Buffer.from('x'), sha256: sha256hex(Buffer.from('x')) },
+  ];
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0, '说不清的包不许走进同意闸');
   assert.equal(r.failed.length, 1);
   assert.match(r.failed[0].why, /\.\./, `要说清哪一条不对：${r.failed[0].why}`);
   assert.equal(fs.existsSync(path.join(env.siteRoot, pl.id, '1.0.0')), false,
-    '★ 一个说不清的清单本身就是"这份东西不能信"');
+    '★ 一个说不清的包本身就是"这份东西不能信"');
   assert.equal(fs.existsSync(path.join(env.siteRoot, 'escape.js')), false, '更不能写到池外面去');
+  assert.equal(fs.existsSync(path.join(env.stagingRoot, '..', 'escape.js')), false);
 });
 
 test('★ 两份只差大小写的声明 ⇒ 拒绝整个插件', async () => {
@@ -515,21 +527,13 @@ test('★ 两份只差大小写的声明 ⇒ 拒绝整个插件', async () => {
   const site = makeSite();
   const env = makeEnv();
   const pl = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const orig = site.rpc;
-  const rpc = async (req) => {
-    const r = await orig(req);
-    if (req.op === 'plugins') {
-      r.data.plugins[0].files = [
-        { path: 'client/index.js', size: 1, sha256: 'a'.repeat(64) },
-        { path: 'client/INDEX.js', size: 1, sha256: 'b'.repeat(64) },
-      ];
-    }
-    return r;
-  };
-  const r = await S.sync({
-    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
-    trusted: () => true, protectedVersions: [],
-  });
+  // 包里那两条记录只差大小写 —— 磁盘上摆不出来（同一个目录里放不下两个这样的
+  // 文件名，在 Linux 上也摆不出来"会互相覆盖"这件事），而在**包里**它表达得出来，
+  // 所以判它的地方是客户端读包那一步（`checkDeclared` 的折叠检查）。
+  site.state.pkgExtra = [
+    { path: 'client/INDEX.js', data: Buffer.from('b'), sha256: sha256hex(Buffer.from('b')) },
+  ];
+  const r = await callSync(site, env);
   assert.equal(r.failed.length, 1, `要拒：${JSON.stringify(r)}`);
   assert.match(r.failed[0].why, /大小写/, `要说清原因：${r.failed[0].why}`);
   assert.equal(fs.existsSync(path.join(env.siteRoot, pl.id, '1.0.0')), false);
@@ -858,23 +862,16 @@ test('★ 服务端报的上限只能**收紧**客户端那份硬上限', () => 
   assert.equal(S.effectiveLimits(undefined).file_bytes, hard.file_bytes, '缺席 = 用自己那份');
 });
 
-test('★ 站点报一个超过单文件上限的文件 ⇒ 明确拒绝，不是截断', async () => {
+test('★ 包里的某一份超过单文件上限 ⇒ 明确拒绝，不是截断', async () => {
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const orig = site.rpc;
-  const rpc = async (req) => {
-    const r = await orig(req);
-    if (req.op === 'plugins') {
-      r.data.plugins[0].files = [...r.data.plugins[0].files,
-        { path: 'big.bin', size: S.HARD_LIMITS.file_bytes + 1, sha256: 'c'.repeat(64) }];
-    }
-    return r;
-  };
-  const r = await S.sync({
-    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
-    trusted: () => true, protectedVersions: [],
-  });
+  // ★ v0.6 时这条塞的是**清单**里的一行（守护进程在 `plugin_file` 那一条上也拦）。
+  //   逐份取删掉之后，这几个负载上限**唯一的执行点**就是客户端读包那一步
+  //   （`checkDeclared`）—— 所以造它就得造在**包里**，否则测的是一个没人走的入口。
+  const big = Buffer.alloc(S.HARD_LIMITS.file_bytes + 1, 0x78);
+  site.state.pkgExtra = [{ path: 'big.bin', data: big, sha256: sha256hex(big) }];
+  const r = await callSync(site, env);
   assert.equal(r.failed.length, 1);
   assert.match(r.failed[0].why, /超过/, `要说清是超限，而不是一句"失败了"：${r.failed[0].why}`);
   assert.match(r.failed[0].why, new RegExp(String(S.HARD_LIMITS.file_bytes)),
@@ -902,74 +899,66 @@ test('★ 连接换了一条 ⇒ 这一次对账整个作废，一个字节都�
   assert.deepEqual(r.failed, [], '★ 作废不是失败 —— 报成失败会让用户看到一条假故障');
 
   // 中途换代的那条路：第一份取回来了，第二份还没取
+  //
+  // ★ **两个插件** —— 一个插件的话"中途"根本表达不出来（对账每一轮只有一次
+  //   下载），这条用例会退化成"一开始就换代"，而那一条上面已经有了。
   const site2 = makeSite();
-  const p2 = site2.add('b', { name: 'b' }, {
-    'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\n',
-  });
+  const pa = site2.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const pb = site2.add('b', { name: 'b' }, { 'client/index.js': 'module.exports = {};\n' });
   let calls = 0;
+  // 每轮：循环开头问一次、取包之前再问一次。第 4 次是第二个插件取包之前。
   const r2 = await callSync(site2, env, { trusted: () => true, stale: () => (calls += 1) > 3 });
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p2.id, '1.0.0')), false,
-    '★ 取到一半换代 ⇒ 暂存里那半棵树绝不能进站点池');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, pa.id, '1.0.0')), true,
+    '互换代之前那一份是拿到了的 —— 不然下面那条"第二个没下来"什么都没证明');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, pb.id, '1.0.0')), false,
+    '★ 取到一半换代 ⇒ 第二个绝不能进站点池');
   assert.ok(r2.failed.some((f) => /作废/.test(f.why)),
     `中途换代要说得出这一份为什么没下来：${JSON.stringify(r2.failed)}`);
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-//  整包：同一个内容的两条投递方式
+//  整包：唯一那条投递方式
 // ══════════════════════════════════════════════════════════════════════════
 //
-// ★ 这一组要钉住的是一件很具体的事：**走哪条路不该改变"装上了什么"**。
-//   所以第一条用例就是把同一份内容两条路各装一遍，然后比摘要 —— 差一个字节
-//   都说明两条路在描述两棵不同的树。
+// ★ v0.6 这一组的第一条是"同一份内容走两条路装出来的东西逐字节相同"。**那条
+//   用例连同它防的东西一起走了**：只剩一条路，"走哪条路"就不再是一个变量，
+//   没有两条路可以比。留下来的是它真正在防的那件事的下半句 ——
+//   **装出来的树必须与站点那一棵逐字节相同**，而那是另一条用例（"取回来的
+//   每一份都与站点磁盘上逐字节相同"）。
 
-test('★★ 两条投递方式装出来的东西**逐字节相同**（包那条路一条 RPC 取完）', async () => {
-  // 同一个插件、两个站点，一个只发文件、一个也发整包。
-  const byFiles = makeSite();
-  const pf = byFiles.add('a', { name: 'a' },
+test('★★ 一条 RPC 把整个包取回来 —— 而且一次都不许再走逐份那条路', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' },
     { 'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\n' });
-  // ★ 第二个站点必须造出**逐字节相同**的插件（同一个 id 与内容）——
-  //   拿第一个站点的目录当模板。
-  const byPkg = makeSite();
-  const pp = byPkg.add('a', { id: pf.id, name: 'a', version: '1.0.0' },
-    { 'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\n' });
-  byPkg.state.packages = true;
 
-  const env1 = makeEnv();
-  const env2 = makeEnv();
-  const r1 = await callSync(byFiles, env1);
-  const r2 = await callSync(byPkg, env2);
-  assert.equal(r1.pendingConsent.length, 1, JSON.stringify(r1.failed));
-  assert.equal(r2.pendingConsent.length, 1, JSON.stringify(r2.failed));
-  assert.equal(r1.pendingConsent[0].digest, r2.pendingConsent[0].digest,
-    '★ 同一个内容走两条路必须算出同一个摘要 —— 不然"你同意的"与"装上的"会各说各的');
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 1, JSON.stringify(r.failed));
+  assert.equal(site.state.pkgCalls, 1, '★ 一个插件一次：整包只该问一次');
+  assert.equal(site.state.fileCalls, 0,
+    '★ `plugin_file` 这个 op 已经删了 —— 它只可能是 0，而这条断言钉的就是'
+    + '"客户端没有偷偷退回逐份取"');
 
-  // ★ 一条 RPC 取完 vs 一份一份取：这是这两条路唯一的**行为**差别。
-  assert.equal(byPkg.state.pkgCalls, 1, '整包只该问一次');
-  assert.equal(byPkg.state.fileCalls, 0, '★ 有包就不该再逐份取 —— 两条路都走等于白跑一趟');
-  assert.ok(byFiles.state.fileCalls >= 2, `逐份那条路要一份一次：${byFiles.state.fileCalls}`);
-  assert.equal(byFiles.state.pkgCalls, 0, '只发文件的站点不该被问整包');
-
-  consentAll(env2, r2);
+  consentAll(env, r);
   // 池里**两样挨着**：解出来的树 + 那个包。
-  const tree = path.join(env2.siteRoot, pp.id, '1.0.0');
-  const pkgFile = S.pkgPathOf(env2.siteRoot, pp.id, '1.0.0');
+  const tree = path.join(env.siteRoot, p.id, '1.0.0');
+  const pkgFile = S.pkgPathOf(env.siteRoot, p.id, '1.0.0');
   assert.equal(fs.existsSync(tree), true, '树要进池（require 用的是它）');
   assert.equal(fs.existsSync(pkgFile), true, '★ 包也要进池 —— 它是这一份的来路凭证');
-  assert.equal(S.listPooled(env2.siteRoot)[0].hasPackage, true);
+  assert.equal(S.listPooled(env.siteRoot)[0].hasPackage, true);
 
-  // 池里那两样与站点发出来的包**逐字节相同**。
+  // 池里那个包与站点发出来的**逐字节相同**，而且它的签名者就是站点那把钥匙。
   const onDisk = fs.readFileSync(pkgFile);
   const parsed = PP.parsePackage(onDisk);
   assert.equal(parsed.ok, true, parsed.why);
-  assert.equal(parsed.digest, byPkg.pkgOf(`${pp.id}@1.0.0`).digest);
-  assert.equal(parsed.sig.fingerprint, byPkg.state.pkgKey.fingerprint,
+  assert.equal(parsed.digest, site.pkgOf(`${p.id}@1.0.0`).digest);
+  assert.equal(parsed.sig.fingerprint, site.state.pkgKey.fingerprint,
     '池里那个包自带的签名者就是站点那把钥匙');
 });
 
 test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒绝，绝不换入', async () => {
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   site.state.pkgDigestLie = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r = await callSync(site, env);
@@ -986,7 +975,6 @@ test('★ 包里的字节被改过 ⇒ 拒绝，而且**绝不退回逐份那条
   //   就获得了一次投递未验签内容的机会。那不是"降级"，那是把验签变成一句建议。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   site.state.pkgCorrupt = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r = await callSync(site, env);
@@ -998,58 +986,39 @@ test('★ 包里的字节被改过 ⇒ 拒绝，而且**绝不退回逐份那条
   assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
 });
 
-test('★ 包格式比客户端认得的新 ⇒ **退回逐份那条路**（而且说出来）', async () => {
-  // ★ 与上一条**方向相反**，所以两条必须都在：那一条是"这个包坏了"（拒绝），
-  //   这一条是"这个包是用一种我读不懂的说法写的"（格式演进，必须能加法过渡）。
+test('★★ 包格式比客户端认得的新 ⇒ 明确失败，**而且没有退路可退**', async () => {
+  // ★ 这条用例在 v0.6 断的是**反面**：那时它要求"退回逐份取那条路，而且说出来"。
+  //   逐份取没了，所以它断的东西整个翻了过来 —— 而这条**翻转**是该写下来的，
+  //   因为它正是"删掉第二条路"的代价：格式演进从"能加法过渡"变成"只能拒绝"。
+  //
+  //   与上一条（"包坏了"）仍然是**两件事**，所以两条都在：
+  //     · 上一条：这个包与它自己的说法对不上 ⇒ 拒绝（谁在说谎是清楚的）；
+  //     · 这一条：这个包说得清清楚楚，只是用的是**我读不懂的说法** ⇒ 拒绝，
+  //       而该做的事是**升级客户端**，不是去找管理员。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   site.state.pkgFormat = 2;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r = await callSync(site, env);
-  assert.equal(r.pendingConsent.length, 1, `回退要把东西装上：${JSON.stringify(r.failed)}`);
+  assert.equal(r.pendingConsent.length, 0, '读不懂的包不许走进同意闸');
   assert.equal(site.state.pkgCalls, 0, '★ 读不懂的格式，一次都不该去取');
-  assert.ok(site.state.fileCalls >= 1, '退回逐份取');
+  assert.equal(site.state.fileCalls, 0, '★ 而且**没有逐份取那条路**可以退回去');
   assert.equal(r.reason, 'site_too_new', '要有一态说明"站点比客户端新"');
-  assert.ok(r.notices.some((n) => /格式/.test(n)), JSON.stringify(r.notices));
-
-  // 而**没有退路**的时候（站点只发包、不发文件）它是一条失败，不是静默跳过。
-  const site2 = makeSite();
-  const env2 = makeEnv();
-  site2.state.packages = true;
-  site2.state.pkgFormat = 2;
-  const p2 = site2.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  site2.state.hideFiles.add(`${p2.id}@1.0.0`);
-  site2.state.pkgFormat = 2;
-  const r2 = await callSync(site2, env2);
-  assert.equal(r2.failed.length, 1, JSON.stringify(r2.failed));
-  assert.match(r2.failed[0].why, /只认识 1/, r2.failed[0].why);
-});
-
-test('★ 逐份清单与整包说的不是同一份东西 ⇒ 拒绝（两份说法对不上）', async () => {
-  const site = makeSite();
-  const env = makeEnv();
-  site.state.packages = true;
-  const p = site.add('a', { name: 'a' },
-    { 'client/index.js': 'module.exports = {};\n', 'x.txt': '一' });
-  const orig = site.rpc;
-  const rpc = async (req) => {
-    const r = await orig(req);
-    if (req.op === 'plugins') {
-      // 清单里多报一份包里没有的文件 —— 老客户端会照着它去取、并且失败。
-      r.data.plugins[0].files = [...r.data.plugins[0].files,
-        { path: 'ghost.txt', size: 1, sha256: 'a'.repeat(64) }];
-    }
-    return r;
-  };
-  const r = await S.sync({
-    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
-    trusted: () => true, protectedVersions: [],
-  });
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
-  assert.match(r.failed[0].why, /两份说法对不上/, r.failed[0].why);
+  assert.match(r.failed[0].why, /只认识 1|格式/, r.failed[0].why);
   assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  // ★ 而它说的是"升级**这个客户端**"——方向对了用户才知道该做什么。
+  assert.match(r.failed[0].why, /守护进程比这个客户端新|客户端/, r.failed[0].why);
 });
+
+// ★ 这里从前还有一条：『逐份清单与整包说的不是同一份东西 ⇒ 拒绝』。
+//   **它跟着那份清单一起走了。** 两条投递方式并存时，站点在同一个响应里给了两份
+//   说法（清单与包），而它们分家的那一天谁也不该装作没看见 —— 那条用例断的就是
+//   这件事。今天只有一份说法，所以"两份说法互相矛盾"这个形状**表达不出来**。
+//
+//   ★ 而它防的东西**没有全走**：本站报的每一个数，客户端仍然拿去与**自己算出来的
+//   那个**比（`fetchPackage` 里那三条：字节数、内容摘要、响应自报的那两个数）。
+//   消失的是"两个来源互相比"，留下的是"自述 vs 事实"。
 
 test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async () => {
   // ★ 客户端**没法**在取之前知道真包多大，所以这一条只能取回来之后判 —— 判据是
@@ -1057,7 +1026,6 @@ test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async ()
   //   什么"与"它实际发的是什么"不是一回事。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   site.state.pkgByteDelta = 7;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r = await callSync(site, env);
@@ -1069,16 +1037,18 @@ test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async ()
     '★ 对不上就不许进池 —— 连那个包也不许');
 });
 
-test('★ 包里的内容超过站点自报的上限 ⇒ 拒绝（两条路同一套上限）', async () => {
+test('★ 包里的内容超过**站点自报**的上限 ⇒ 拒绝（自述只能收紧）', async () => {
+  // ★ 站点自报一个比客户端硬上限更严的 `file_bytes` —— 客户端必须采纳**更严的
+  //   那个**，所以一个 300 KB 的文件在"这个站点说 1024 字节"之下必须被拒。
+  //
+  //   ★ v0.6 时这条要先把 `files` 藏起来才测得到包那一条路（那份清单会**先**被
+  //   `checkDeclared` 拦下，于是包里那一次根本没执行到 —— 一条会绿着放走 bug 的
+  //   用例）。清单没了，藏不藏都不存在了，而这条用例断的东西一个字没变。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
-  const p = site.add('a', { name: 'a' },
-    { 'client/index.js': 'module.exports = {};\n', 'big.txt': 'x'.repeat(300 * 1024) });
-  // ★ 把 `files` 藏起来是**承重的**：不藏的话，站点报的那份逐份清单会**先**被
-  //   `checkDeclared` 拦下（那一条也在测，但测的是另一个入口），于是"包里的负载
-  //   有没有过上限"这件事根本没被执行到 —— 那条用例会在实现被改坏时照样绿。
-  site.state.hideFiles.add(`${p.id}@1.0.0`);
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const big = Buffer.alloc(300 * 1024, 0x78);
+  site.state.pkgExtra = [{ path: 'big.txt', data: big, sha256: sha256hex(big) }];
   const orig = site.rpc;
   const rpc = async (req) => {
     const r = await orig(req);
@@ -1100,7 +1070,6 @@ test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', a
   //   拿负载上限去推链路上限，正是这一版之前算错的那笔账。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const orig = site.rpc;
   const rpc = async (req) => {
@@ -1118,19 +1087,24 @@ test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', a
   assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
 });
 
-test('★ 「站点愿不愿意发这一份」的判据是**两条路里有没有一条能走**', () => {
+test('★ 「站点愿不愿意发这一份」的判据，与"这一份此刻生产不生产得出来"是两件事', () => {
   // ★ 界面拿它分"本站有而本机没有，等同步/点同意"与"本站根本没打算发这一版"。
-  //   判据写成"有没有 `files`"的话，一个**只发包**的站点（v0.8 的形状）会被
-  //   说成"站点没有报出它的文件"—— 而它明明发了。
+  //
+  //   这个判据**换过两次**，而三次都是同一个理由：它必须是**协议事实**，不能是
+  //   "这次下没下下来"。最早是`Array.isArray(p.files)`；v0.6 两条路并存时是
+  //   "有没有一条能走"；v0.7 只剩一条，于是就是"`package` 在不在"。
   const fp = 'a'.repeat(64);
   const meta = { format: 1, bytes: 100, digest: fp };
-  assert.equal(S.deliveryOf({ files: null, package: meta }, S.HARD_LIMITS).mode, 'package',
-    '只发包也算"愿意发"');
-  assert.equal(S.deliveryOf({ files: [{ path: 'x', size: 1, sha256: fp }] }, S.HARD_LIMITS).mode,
-    'files', '只发文件也算');
-  assert.equal(S.deliveryOf({ files: null, package: null }, S.HARD_LIMITS).mode, null,
-    '★ 两个都没有 = 这一份不分发（`package: null` 是"此刻生产不出来"，不是"没有这个能力"）');
-  assert.equal(S.deliveryOf({}, S.HARD_LIMITS).mode, null, '缺席也是不分发');
+  assert.equal(S.deliveryOf({ package: meta }, S.HARD_LIMITS).mode, 'package', '有包 = 愿意发');
+  assert.equal(S.deliveryOf({ package: null }, S.HARD_LIMITS).mode, null,
+    '★ `package: null` 是"此刻生产不出来"（包在守护进程启动之后不见了）——'
+    + '它不是"没有这个能力"，能力由顶层有没有 `limits` 回答');
+  assert.equal(S.deliveryOf({}, S.HARD_LIMITS).mode, null, '★ 缺席（`undefined`）≠ 否（`null`）');
+  // 而"读不懂的格式"是一条**失败**，不是"不分发" —— 两者在界面上说的话完全不同。
+  const tooNew = S.deliveryOf({ package: { ...meta, format: 99 } }, S.HARD_LIMITS);
+  assert.equal(tooNew.mode, null);
+  assert.equal(tooNew.tooNew, true, '★ 它要带着"站点比客户端新"这一态出去');
+  assert.match(tooNew.why, /只认识/, tooNew.why);
 });
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1140,7 +1114,6 @@ test('★ 「站点愿不愿意发这一份」的判据是**两条路里有没�
 test('★★ 钉过之后签名者换了人 ⇒ 拒绝，并把**两把**指纹都说出来', async () => {
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
 
   // 第一次：没钉过 ⇒ 首次即信任，指纹随待同意项一起交到界面上。
@@ -1151,7 +1124,6 @@ test('★★ 钉过之后签名者换了人 ⇒ 拒绝，并把**两把**指纹�
 
   // ★ 而**签名者换了人、内容一个字没变**：另一个站点用另一把钥匙发同一份内容。
   const other = makeSite();
-  other.state.packages = true;
   other.add('a', { id: p.id, name: 'a', version: '1.0.0' },
     { 'client/index.js': 'module.exports = {};\n' });
   const env2 = makeEnv();
@@ -1164,12 +1136,17 @@ test('★★ 钉过之后签名者换了人 ⇒ 拒绝，并把**两把**指纹�
   assert.match(why, new RegExp(other.state.pkgKey.fingerprint), '★ 也要说出**这一份的**');
 });
 
-test('★ 钉过之后收到一份**没有签名**的（逐份那条路）⇒ 拒绝', async () => {
-  // ★ 逐份那条路发的是散装字节，证不了它是同一个人做的 —— 钉过之后就不能收。
-  //   不这么判的话，"让整包那条路失败"就成了一个绕开钉子的开关。
+test('★ 钉过之后收到一份**没有签名**的包 ⇒ 拒绝', async () => {
+  // ★ §5.4：钉过之后这个 id 的**每一份**都必须由同一把钥匙签。一份不带签名的
+  //   构件证明不了它是同一个人做的，所以只能拒绝。
+  //
+  //   ★ v0.6 时这条走的是**逐份那条路**（那边根本没有包，`pinVerdict` 拿到
+  //   `null`）。那条路删掉之后这个形状**在结构上不存在了** —— 但这一态本身还在
+  //   （一个作者可以先发不带签名的一版），所以用例换成"站点发一个没签名的**包**"。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  site.state.pkgSign = false;
   env.pinned.set(p.id, 'a'.repeat(64));
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 0);
@@ -1181,7 +1158,6 @@ test('★ 钉过之后收到一份**没有签名**的（逐份那条路）⇒ �
 test('★ 一条读不动的钉子 ⇒ 拒绝（绝不静默重新"首次即信任"一次）', async () => {
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   env.pinned.set(p.id, '');            // config.pinnedKeyOf 对读不动的记录给的就是这个
   const r = await callSync(site, env);
@@ -1195,7 +1171,6 @@ test('★ 池里已有那一份、台账对不上，而钉子对不上 ⇒ 拒�
   //   绕开 §5.4 的入口 —— 用户会看到一个正常的同意对话框，而签名者已经换了。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
   consentAll(env, r1);            // 同意过 ⇒ 池里有那一份，而且钉过一把钥匙
@@ -1340,7 +1315,6 @@ test('★ 只对**本站这一轮报出来的**那些判撤回（别的站点的
 test('★ 回收一个版本时，包跟着一起走（不留没树的 .splug）', async () => {
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
   consentAll(env, r1);
@@ -1361,7 +1335,6 @@ test('★ 回收一个版本时，包跟着一起走（不留没树的 .splug）
 test('★ 列举只认目录：旁边的 <版本>.splug 不是另一份插件', async () => {
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
   consentAll(env, r1);
@@ -1377,24 +1350,45 @@ test('★ 列举只认目录：旁边的 <版本>.splug 不是另一份插件', 
   const r2 = await callSync(site, env);
   assert.equal(r2.kept.length, 1, '★ 包单独不在了**不构成撤回**');
   assert.deepEqual(r2.withdrawn, []);
+  // ★ 但它**要说出来**：从"两向比对"退化成"只核摘要"是**少做了一半校验**，
+  //   而一次少做了的核对绝不许看起来与做全了的那次一样。
+  assert.ok(r2.notices.some((n) => /没有它的包/.test(n)),
+    `包不在了要如实说：${JSON.stringify(r2.notices)}`);
+
+  // ★ 再换一格：树在、包不在、而**台账也对不上** ⇒ 它要重新问一次。而这时
+  //   **钉子还在**（上一次同意时钉的），于是 §5.4 判出一条很具体的话：
+  //   这一份证不了签名者。★ 这条是删掉包**之后**才可能出现的一态，值得钉住 ——
+  //   它说的是"你把来路凭证删了，于是我们没法再确认这一份是谁做的"。
+  env.trusted.clear();
+  const r3 = await callSync(site, env);
+  assert.equal(r3.pendingConsent.length, 0, '钉过之后，一份证不了签名者的构件不能进同意闸');
+  assert.equal(r3.failed.length, 1, JSON.stringify(r3.failed));
+  assert.match(r3.failed[0].why, /没有签名/, r3.failed[0].why);
+
+  // ★ 而没有钉过（或者钉子被清掉）时，它走**待同意**，并且带上 `compared: false`
+  //   —— 用户正在为"这一份"点同意，他有权知道我们核到了什么程度。
+  env.pinned.clear();
+  const r4 = await callSync(site, env);
+  assert.equal(r4.pendingConsent.length, 1, JSON.stringify(r4.failed));
+  assert.equal(r4.pendingConsent[0].existing, true, '这一份已经在池里 ⇒ 原地认领');
+  assert.equal(r4.pendingConsent[0].compared, false,
+    '★ 少做的那一半必须一路传到界面上（没有包 ⇒ 只核了摘要，没法逐份比对）');
+  assert.ok(r4.pendingConsent[0].files.length > 0,
+    '★ 而"你要同意的是哪几份文件"仍然要给出来（那是**显示**，不是判据）');
 });
 
-test('★ 站点只发包、不发文件（v0.8 的形状）⇒ 照样装得上', async () => {
-  // ★ 加法过渡的另一头：`files` 那条路迟早要删（阶段 6），而这一天客户端必须
-  //   已经能只靠包工作 —— 否则"删掉 files"会变成一次断电式的切换。
+test('★ 站点**不报** `package` 的那一条 ⇒ 不分发，不是失败', async () => {
+  // ★ 判据是**键在不在**，不是"这次下没下下来"。池里装过、仓库里没有的那些插件
+  //   就长这样 —— 站点说"本站装了它"而"不分发它"，客户端该做的是把它算进
+  //   「本站有而本机没有」，而不是记一条"没能装上 X"。
   const site = makeSite();
   const env = makeEnv();
-  site.state.packages = true;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  site.state.hideFiles.add(`${p.id}@1.0.0`);
-  const r1 = await callSync(site, env);
-  assert.equal(r1.pendingConsent.length, 1, JSON.stringify(r1.failed));
-  assert.equal(r1.pendingConsent[0].files.length >= 2, true, '文件清单从包里来');
-  consentAll(env, r1);
-
-  // 第二次对账：树在、包在，判据退到**本机那个包**（站点没有 files 可报）。
-  const r2 = await callSync(site, env);
-  assert.deepEqual(r2.failed, []);
-  assert.equal(r2.kept.length, 1, JSON.stringify(r2));
-  assert.equal(site.state.pkgCalls, 1, '第二次不该再取一遍整包');
+  site.state.noPackage.add(`${p.id}@1.0.0`);
+  const r = await callSync(site, env);
+  assert.deepEqual(r.failed, [], '不分发不是失败 —— 记成失败会让用户看到一条假故障');
+  assert.deepEqual(r.pendingConsent, [], '也不该有东西等着同意');
+  assert.equal(site.state.pkgCalls, 0, '★ 自述就说没有，白跑一次传输没意义');
+  assert.equal(r.supported, true, '★ 而**能力**还在（顶层有 limits）—— 两件事必须分得开');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
 });

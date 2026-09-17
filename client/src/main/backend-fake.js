@@ -42,12 +42,13 @@ const pluginFiles = require('./plugins/index.js');
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 
 /**
- * ── 演示站点的**整包**投递（默认关着）────────────────────────────────────────
+ * ── 演示站点的**整包**投递 ──────────────────────────────────────────────────
  *
- * 真实的守护进程**两条投递方式都报**（`files` 与 `package`），客户端优先走包。
- * 演示站点默认只发 `files` —— 那是刻意的：两条路都要有东西在测，而默认关着的那
- * 一条（逐份取）正是已部署的 v0.6 站点走的、也是最容易在改动里悄悄烂掉的那条。
- * `debugPackages(true)` 把整包那条路打开。
+ * 真实的守护进程发的是**一个包**（`package` + `plugin_package`），演示站点照着
+ * 它来。★ v0.6 演示站点默认只发 `files`、整包那条挂在 `debugPackages` 后面，
+ * 理由是"两条路都要有东西在测"；**v0.7 只剩一条了**，所以那两个开关
+ * （`debugPackages` / `debugHideFiles`）跟着删掉 —— 留一个只能打开唯一那条路的
+ * 开关，比没有它更糟。
  *
  * ★ 包是拿**仓库里那个打包器**（`packer/slurmate-packer.js`）现打的，不是手搓的
  *   字节：手搓一份就等于在演示里又实现了一遍容器格式，而它与真格式分家的那天，
@@ -89,7 +90,7 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 //   「本站要给你两个插件，但都还没经过你的同意」—— 那是一条真话。
 //
 //   打包之后没有仓库目录，`_sitePluginDir` 返回 null，站点回落到只报池里那些
-//   （`files` 缺席 ⇒ 客户端按"这个站点不分发插件"处理）。这一条要写在界面上。
+//   （`package` 缺席 ⇒ 客户端按"这个站点不分发这一份"处理）。这一条要写在界面上。
 
 // 演示用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -121,11 +122,6 @@ const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
  *  一个 200 KiB 的文件在真机上通不过。故意报得**比客户端硬上限宽松**，好让
  *  "服务端只能收紧、客户端取更严的那个"这条在演示里也走得到。 */
 const DEMO_FILE_BYTES = 512 * 1024;
-
-/** 一份字节的 sha256。演示后端自己也算一遍，不看清单里那个自称的值。 */
-function sha256(buf) {
-  return crypto.createHash('sha256').update(buf).digest('hex');
-}
 
 class FakeBackend extends Backend {
   /**
@@ -170,9 +166,9 @@ class FakeBackend extends Backend {
      */
     this._sitePluginDir = typeof opts.sitePluginDir === 'function'
       ? opts.sitePluginDir : () => null;
-    /** 调试用：让站点报一个**超过单文件上限**的文件。/ 让某个文件报错。 */
+    /** 调试用：让某一份的**包**里多一个超过单文件上限的文件。见 debugBloatPlugin。 */
     this._bloatPlugin = null;
-    /** 调试用：让站点在 `plugin_file` 上回 rate_limited 若干次。 */
+    /** 调试用：让站点在 `plugin_package` 上回 rate_limited 若干次。 */
     this._rateLimitBurst = 0;
     /** 演示站点里被"关掉"的插件（按短名）。原本是直接改那个写死的数组。 */
     this._siteDisabled = new Set();
@@ -187,12 +183,8 @@ class FakeBackend extends Backend {
     this._siteNoJob = new Set();
     /** 演示「守护进程太旧，根本没有 plugins 这个 op」。见 _dispatch。 */
     this._noPluginsOp = false;
-    /** 演示「有 plugins 这个 op，但不会发文件」（v0.5 的守护进程）。 */
+    /** 演示「有 plugins 这个 op，但不会分发」（v0.5 的守护进程）。 */
     this._noDistribute = false;
-    /** 演示**整包投递**（默认关：逐份那条路要有东西在测，见 DEMO_PKG_SEED 那段）。 */
-    this._packages = false;
-    /** 演示"站点只发包、不发文件"（v0.8 的形状：`files` 那条路被删掉之后）。 */
-    this._hideFiles = false;
     /** 打好的包，按 `(id@版本)` 缓存 —— 见 _pkgOf。 */
     this._pkgCache = new Map();
   }
@@ -216,6 +208,14 @@ class FakeBackend extends Backend {
         const data = fs.readFileSync(path.join(entry.dir, ...f.path.split('/')));
         return { path: f.path, data, sha256: f.sha256 };
       });
+      // ★ `debugBloatPlugin` 造的那一份：往**包里**塞一个装不下的文件。
+      //   客户端读包时执行那几条负载上限（`checkDeclared`），所以它会在那里被拒
+      //   —— 演示的正是"站点支持分发，但这一份装不上"。
+      if (this._bloatPlugin === key) {
+        const big = Buffer.alloc(DEMO_FILE_BYTES + 1, 0x78);
+        files.push({ path: 'bloat.bin', data: big,
+                     sha256: crypto.createHash('sha256').update(big).digest('hex') });
+      }
       const digest = packer.contentDigest(files);
       const priv = crypto.createPrivateKey({
         key: Buffer.concat([PKCS8_ED25519_PREFIX, DEMO_PKG_SEED]),
@@ -249,9 +249,11 @@ class FakeBackend extends Backend {
   /**
    * 演示站点的**分发索引**：`(id@版本) → {dir, files}`，来自仓库里的 `plugins/`。
    *
-   * ★ 建一次就**不再失效** —— 与守护进程侧那个"启动快照"索引逐字同一个语义
-   *   （见 `cluster/slurmate-sessiond` 的 `plugin_index`）。这样演示模式也能演
-   *   "管理员就地换了文件"那件事：清单与文件永远描述**同一棵树**。
+   * ★ 这里那个 `files` 是**包里的记录表**（打包时要喂给打包器的负载清单），
+   *   **不是**协议里那个已经删掉的 `files` 字段 —— 两件事同名，所以写清楚。
+   *
+   * ★ 建一次就**不再失效** —— 与守护进程侧的启动快照逐字同一个语义。这样演示模式
+   *   也能演"管理员就地换了文件"那件事：清单与包永远描述**同一棵树**。
    */
   _siteIndex() {
     if (this._indexCache) return this._indexCache;
@@ -270,8 +272,9 @@ class FakeBackend extends Backend {
         if (!mf || typeof mf.id !== 'string' || typeof mf.version !== 'string') continue;
         let files;
         try {
-          // 只报**普通文件**：符号链接与空目录不进清单（客户端没法原样重建一个链接，
-          // 而清单只描述文件）。这与守护进程的 `plugin_file_index` 是同一个口径。
+          // 只取**普通文件**：符号链接与空目录进不了负载（格式里表达不出来），
+          // 而打包器的负载只描述文件。这与守护进程的 `plugin_payload_index` 同一个
+          // 口径 —— 两边都是"包里的记录表说了算"。
           files = pluginFiles.readPluginFiles(dir)
             .filter((f) => f.kind === 'f')
             .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
@@ -297,11 +300,6 @@ class FakeBackend extends Backend {
       version: key.slice(key.lastIndexOf('@') + 1),
       name: v.name,
       title: v.title,
-      // ★ "只发包、不发文件"那一档：`files` 缺席（不是 `null` —— `null` 在协议里
-      //   是"这一份此刻生产不出来"，两者不是一件事）。
-      files: this._hideFiles ? null : (this._bloatPlugin === key
-        ? [...v.files, { path: 'bloat.bin', size: 999999, sha256: 'f'.repeat(64) }]
-        : v.files),
       enabled: !this._siteDisabled.has(v.name),
       can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name),
       surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
@@ -313,9 +311,11 @@ class FakeBackend extends Backend {
       name: p.name,
       version: p.version,
       title: p.displayName || p.name,
-      // ★ 没有 `files` = **这个站点不分发这一份**。客户端据此把它算进
-      //   「站点有而本机没有」，而不是当成一次下载失败。
-      files: null,
+      // ★ **没有 `package`** = 这个站点不分发这一份（池里装的、仓库里没有的那些
+      //   就长这样）。客户端据此把它算进「站点有而本机没有」，而不是当成一次
+      //   下载失败 —— 判据是**键在不在**，不是"这次下没下下来"。
+      //   ★ 而 `package: null` 是**另一件事**（这一份此刻生产不出来），别混。
+      noPackage: true,
       enabled: !this._siteDisabled.has(p.name),
       // ★ 与真实守护进程逐字同一个合成方式：`enabled and needs_job`。**服务端才是
       //   同时知道这两件事的那一方** —— 让客户端自己拿 enabled 去推，就多出一份
@@ -403,7 +403,7 @@ class FakeBackend extends Backend {
         if (this._noPluginsOp) return err(2, 'unknown_op', op);
         // ── 演示站点的**分发能力** ──
         //
-        // ★ 与守护进程逐字同一条纪律：`limits` 在 = 这个站点会发文件；不在 = 老
+        // ★ 与守护进程逐字同一条纪律：`limits` 在 = 这个站点会分发；不在 = 老
         //   守护进程。客户端**只看这个**，不看"这次下没下下来"。
         //   `debugOldDaemon` 走的是上面那条 `unknown_op`，而这一条是更细的一档：
         //   有 `plugins` 却没有 `limits`（v0.5 的守护进程）。
@@ -420,20 +420,22 @@ class FakeBackend extends Backend {
           plugins: this._sitePlugins().map((p) => ({
             id: p.id, name: p.name, version: p.version, title: p.title,
             enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
-            // `files: null` 的那几条**不带这个字段**（见 _sitePlugins 的说明）。
-            ...(Array.isArray(p.files) ? { files: p.files } : {}),
-            // ★ 两条投递方式**同时**报（真实守护进程也是这么做的）：老客户端只看
-            //   `files`，新客户端优先 `package` —— 两边都不用认一个新字段。
-            ...(this._packages ? (() => {
+            // ★ `noPackage` 的那几条**不带 `package` 这个键**（见 _sitePlugins）。
+            //   用 `delete` 之外的办法（展开）是因为这里在造一个**新对象**：
+            //   挑字段而不是 `...p` 是有意的，见上面那段"逐字段挑"。
+            ...(p.noPackage ? {} : (() => {
               const k = this._pkgOf(`${p.id}@${p.version}`);
-              return k ? { package: k.meta } : { package: null };
-            })() : {}),
+              // ★ 包在（打得出来）就是那个自述；打不出来（打包器不在、或包没了）
+              //   就是 `null` —— 那是**这一份此刻生产不出来**，不是"本站没这个
+              //   能力"。两者必须分得开，见 deliveryOf。
+              return { package: k ? k.meta : null };
+            })()),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
           limits: {
             file_bytes: DEMO_FILE_BYTES, total_bytes: 1 << 20, max_files: 256,
-            // 链路那一笔账（base64 之后要装得进一条应答），只在会发包的时候才有意义。
-            ...(this._packages ? { package_bytes: 4 << 20 } : {}),
+            // 链路那一笔账（base64 之后要装得进一条应答）。
+            package_bytes: 4 << 20,
           },
         });
       }
@@ -445,7 +447,7 @@ class FakeBackend extends Backend {
        *   由 `site-plugins.test.mjs` 的假 rpc 覆盖（那里造一个谎报只要一行）。
        */
       case 'plugin_package': {
-        if (!this._packages || this._noDistribute || this._noPluginsOp) {
+        if (this._noDistribute || this._noPluginsOp) {
           return err(2, 'unknown_op', op);
         }
         if (this._rateLimitBurst > 0) {
@@ -457,39 +459,9 @@ class FakeBackend extends Backend {
         return ok({ format: pkg.meta.format, bytes: pkg.meta.bytes, digest: pkg.meta.digest,
                     data: pkg.buf.toString('base64') });
       }
-      // 一份一份取。**与守护进程同一个口径**：`path` 只是那张索引表的键，
-      // 它绝不参与拼路径 —— 于是"路径穿越"这个词从等式里消失，而不是被过滤掉。
-      case 'plugin_file': {
-        if (this._noDistribute || this._noPluginsOp) return err(2, 'unknown_op', op);
-        if (this._rateLimitBurst > 0) {
-          this._rateLimitBurst -= 1;
-          return err(7, 'rate_limited', '演示模式：故意打满限流桶');
-        }
-        const key = `${req.id}@${req.version}`;
-        const entry = this._siteIndex().get(key);
-        if (!entry) return err(3, 'plugin_unknown', `演示站点没有 ${key} 这个插件`);
-        const hit = entry.files.find((f) => f.path === req.path);
-        if (!hit) return err(3, 'plugin_file_unknown', String(req.path));
-        if (hit.size > DEMO_FILE_BYTES) {
-          return err(4, 'plugin_file_too_large',
-            `${hit.path} 有 ${hit.size} 字节，超过本站的单文件上限 ${DEMO_FILE_BYTES} 字节。`);
-        }
-        let data;
-        try {
-          data = fs.readFileSync(path.join(entry.dir, ...hit.path.split('/')));
-        } catch (e) {
-          return err(3, 'plugin_file_unknown', hit.path);
-        }
-        // ★ 索引是**启动快照**（见 _siteIndex），所以"管理员就地换了文件"在这里
-        //   有了名字。把对不上的字节发出去就等于谎报 —— 客户端拿到的内容会与
-        //   清单里那份声明永远不一致，而症状是一句说不清的"校验失败"。
-        if (data.length !== hit.size || sha256(data) !== hit.sha256) {
-          return err(9, 'plugin_file_changed',
-            `${hit.path} 在演示站点启动之后被换过。请重新同步一次。`);
-        }
-        return ok({ path: hit.path, size: hit.size, sha256: hit.sha256,
-                    data: data.toString('base64') });
-      }
+      // ★ 这里从前还有一条 `plugin_file`（一份文件一次 RPC）。**v0.7 删掉了它，
+      //   演示后端跟着删** —— 一个"只在这个假后端里存在"的 op，比没有更糟：
+      //   它会让人以为真站点上还有那条路。
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
       case 'list':       return this._list();
@@ -534,9 +506,13 @@ class FakeBackend extends Backend {
    */
   debugAddSitePlugin(name, title = null) {
     if (!this._extraSitePlugins.some((p) => p.name === name)) {
+      // ★ `noPackage`：**这个站点不分发它**。三态里那个 `undefined` 与 `null`
+      //   （"此刻生产不出来"）是两件事，而这个假插件属于前者 —— 它压根没有包。
+      //   两者今天的行为碰巧一样（都跳过），但把它们写成同一个形状，等于让这个
+      //   演示再也演不出那个区别。
       this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name, version: '1.0.0',
                                     title: title || name, enabled: true,
-                                    can_submit: true });
+                                    can_submit: true, noPackage: true });
     }
   }
   /** 让演示站点把某个插件**关掉**（站点装了但不允许用）。 */
@@ -570,32 +546,23 @@ class FakeBackend extends Backend {
    */
   debugOldDistribute(on = true) { this._noDistribute = on; }
 
-  /** 让演示站点报一个**超过单文件上限**的文件（造"这份装不上"）。 */
+  /**
+   * 让某一份的**包里**多一个**超过单文件上限**的文件（造"这一份装不上"）。
+   *
+   * ★ v0.6 时它是往 `files` 那份清单里加一条假的（清单里报一个装不下的文件）；
+   *   清单删掉之后它改成加进**包**里 —— 而这一改让它在语义上更准：客户端今天
+   *   只在**读包**的时候执行那几条负载上限（`checkDeclared`），所以"站点报了一个
+   *   装不下的东西"这件事本来就该发生在包里。清单里报一个、包里没有，今天根本
+   *   表达不出来。
+   */
   debugBloatPlugin(key = null) {
     this._bloatPlugin = key || [...this._siteIndex().keys()][0] || null;
+    this._pkgCache.clear();          // 包是缓存出来的，改了负载就得重打
     return this._bloatPlugin;
   }
 
-  /** 让接下来的 N 次 `plugin_file` 回 `rate_limited` —— 造限流。 */
+  /** 让接下来的 N 次 `plugin_package` 回 `rate_limited` —— 造限流。 */
   debugRateLimit(n = 3) { this._rateLimitBurst = n; }
-
-  /**
-   * 让演示站点**也**用整包投递（默认关着，见 DEMO_PKG_SEED 那一段）。
-   *
-   * ★ 两条路都要有东西在测，所以默认**关**：逐份取那条路是已部署的 v0.6 站点走
-   *   的，也是最容易在改动里悄悄烂掉的一条。打开它则走包那条 —— 包括验签与
-   *   钉钉子（§5.4），那两件事**只有包那条路上才有**。
-   */
-  debugPackages(on = true) { this._packages = on; }
-
-  /**
-   * 演示"站点**只发包、不发文件**" —— v0.8 的形状（`files` 那条路被删掉之后）。
-   *
-   * ★ 与 `debugPackages` 是**两件事**，而且必须能分开造：前者是"多发一条路"，
-   *   这个是"少发一条路"。合成一个开关的话，客户端在"站点只会发包"时的表现
-   *   （比如"这个站点愿不愿意发这一份"那句话）永远走不到。
-   */
-  debugHideFiles(on = true) { this._hideFiles = on; }
 
   // ★ 这里**没有**"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
   //   原因很具体：演示站点的分发源是**仓库里的 `plugins/`** —— 真文件。往那里
@@ -611,9 +578,8 @@ class FakeBackend extends Backend {
     this._siteNoJob.clear();
     this._noPluginsOp = false;
     this._noDistribute = false;
-    this._packages = false;
-    this._hideFiles = false;
     this._bloatPlugin = null;
+    this._pkgCache.clear();
     this._rateLimitBurst = 0;
   }
 

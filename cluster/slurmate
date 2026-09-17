@@ -32,7 +32,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate-sessiond、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。
-VERSION = "0.6"
+VERSION = "0.7"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 
