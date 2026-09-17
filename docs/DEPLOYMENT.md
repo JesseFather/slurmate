@@ -433,7 +433,7 @@ curl -i http://127.0.0.1:18080/healthz
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 # 2. **整包**一次取回来（新版客户端走的就是这条路）
 slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
-# 3. 老客户端走的那条路：一份文件一次
+# 3. 另一条路：一份文件一次（老客户端一直走这条；新客户端**只在**"包格式太新"时退回它）
 slurmate rpc <<< '{"op":"plugin_file","id":"<ULID>","version":"1.0.0","path":"client/index.js"}'
 ```
 
@@ -452,6 +452,14 @@ slurmate rpc <<< '{"op":"plugin_file","id":"<ULID>","version":"1.0.0","path":"cl
 
 ★ **客户端那一侧只有在一台真的客户端上才验得到**：连上去之后应该出现
 「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
+点完同意之后看一眼池子 —— 每个版本应该是**两样挨着**：
+
+```bash
+ls -l ~/.slurmate/site-plugins/<ULID>/     # 一个 <版本>/ 目录 + 一个 <版本>.splug
+```
+
+那个 `.splug` 是这一份的**来路凭证**（也是验签的原料）。它单独不在了不构成撤回，
+但界面上会如实写"只有解出来的树，没有包"。
 **这件事到今天为止一次都没在真集群上跑过** —— 见
 [docs/KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 U7，那里列着第一次跑要看什么
 （最要紧的是那 4 MiB 的响应余量够不够 —— 它现在同时罩着"整包一次取"与

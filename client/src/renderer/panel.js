@@ -764,9 +764,10 @@ function renderPlugins(pv) {
   if (!pv) return;
   lastPlugins = pv;
 
-  // 站点分发那一栏、待同意那一段、开发者模式那一节 —— 与插件块一起重画。
+  // 站点分发那一栏、待同意那一段、没加载的那些、开发者模式那一节 —— 与插件块一起重画。
   renderSitePlugins(pv);
   renderConsent(pv);
+  renderInert(pv);
   renderDev(pv);
 
   const list = pv.plugins || [];
@@ -905,6 +906,12 @@ function renderSitePlugins(pv) {
 
     if (site.reason === 'old_daemon') {
       d.append(el('p', 'why', '这个站点的守护进程太旧，不支持插件分发。'));
+    } else if (site.reason === 'site_too_new') {
+      // ★ 与「守护进程太旧」**不是同一件事**，方向正好相反：那一个是站点落后于
+      //   客户端，这一个是**客户端落后于站点** —— 该做的是升级这个客户端。
+      //   两者合并成一句"版本对不上"的话，用户会去找管理员，而管理员那边一切正常。
+      d.append(el('p', 'why', '这个站点发的插件包用的是更新的格式，而这个客户端还不认识。'
+        + '这一次它退回了逐份取那条路（能装上就好）—— 但要完全用上，得升级这个客户端。'));
     } else if (site.error) {
       d.append(el('p', 'why', site.error));
     } else {
@@ -923,6 +930,15 @@ function renderSitePlugins(pv) {
         + '不知道谁在引用的时候，唯一安全的动作是什么都不删。'));
     }
 
+    // §5.3：本机那一份不在了 ⇒ 同意作废，本轮会重新问一次。
+    // ★ **不说"是你删的"** —— 客户端不知道原因（可能是他删的，可能是别的什么）。
+    if (site.withdrawn) {
+      d.append(el('p', 'why',
+        `有 ${site.withdrawn} 个插件本机那一份已经不在了，所以它们上一次的同意已经作废 —— `
+        + '本轮会重新问一次。删掉本机一份就等于撤回同意：不这么算的话，下一次对账会'
+        + '按"摘要与上次一致"把它**静默装回来**。'));
+    }
+
     const vs = site.versions || [];
     if (vs.length) {
       const ul = document.createElement('ul');
@@ -933,6 +949,12 @@ function renderSitePlugins(pv) {
         li.append(document.createTextNode(v.wantedBy.length
           ? `被 ${v.wantedBy.join('、')} 要`
           : '没有任何站点要它（下次同步时会被回收）'));
+        // ★ 包单独不在了要**如实说**：它是这一份的来路凭证，而用户打开那个目录
+        //   就会发现少了一个文件。它**不构成撤回**（能加载的是树），也不会被
+        //   静默取回来 —— 所以这里只说事实，不给一个"修一下"的按钮。
+        if (!v.hasPackage) {
+          li.append(document.createTextNode('（只有解出来的树，没有包）'));
+        }
         ul.append(li);
       }
       d.append(el('p', 'plug-desc', '本机站点池里的版本：'));
@@ -970,8 +992,18 @@ function renderConsent(pv) {
   head.className = 'plug-head';
   head.append(el('h3', null, `本站要给你 ${list.length} 个插件`));
   d.append(head);
+  // ★ 两种情形的说法**必须不同**，因为它们的出路不同：
+  //   一份还在暂存里等换入（同意 = 装上去，不同意 = 丢掉草稿），
+  //   另一份**已经在池子里**、只是台账对不上（同意 = 原地认领，不同意 = 删掉那一份）。
+  //   共用一句的话，用户在第二种情形下会以为自己面对的是"还没下来的东西"。
+  const anyNew = list.some((c) => !c.existing);
+  const anyHere = list.some((c) => c.existing);
   d.append(el('p', 'plug-desc',
-    '它们已经取回到本机并逐份核对过了，但**还没有装上去** —— 要你先点一下同意。'));
+    (anyNew ? '它们已经取回到本机并逐份核对过了，但**还没有装上去** —— 要你先点一下同意。' : '')
+    + (anyNew && anyHere ? '\n' : '')
+    + (anyHere ? '另外有几个**本机已经有一份**，而它没有在同意台账里（你换过机器、'
+      + '删过配置、或者上一次的同意已经作废）。它们的客户端代码没有在跑 —— '
+      + '同意就是认领本机那一份，不同意就是把它从本机删掉。' : '')));
 
   for (const c of list) {
     const one = document.createElement('div');
@@ -985,21 +1017,42 @@ function renderConsent(pv) {
 
     const who = document.createElement('p');
     who.className = 'why';
-    who.textContent = `来自 ${c.siteLabel || '本站'}，共 ${c.fileCount} 份文件。`;
+    who.textContent = `来自 ${c.siteLabel || '本站'}，共 ${c.fileCount} 份文件。`
+      + (c.existing ? '这一份已经在你的本机上了。' : '');
     one.append(who);
 
     // ★ 第二次之后的同意要显示**变了什么**。只显示一个摘要等于什么也没说。
+    //
+    // ★ 而"变了什么"有**两种**，绝不能混成一句：内容变了（同一个版本号下换了一份
+    //   东西 —— 那是要警惕的），与**换算法了**（我们换了一把尺子 —— 那条老记录
+    //   上的值与这个新值本来就不该放在一起比）。合并的话，一次客户端升级会对每个
+    //   每个插件喊一句"内容变了"，而那正是"狼来了"。
     const digestLine = document.createElement('p');
     digestLine.className = 'plug-desc';
-    if (c.previous) {
+    const algChanged = c.previous && c.previous.alg !== c.digestAlg;
+    if (c.previous && !algChanged) {
       digestLine.textContent = c.previous.digest === c.digest
         ? `内容摘要 ${c.digest}（与上次同意的一致）`
         : `⚠ 内容摘要从 ${c.previous.digest} 变成了 ${c.digest} —— `
           + '同一个版本号下的内容变了。请确认这是你要的，再决定。';
+    } else if (c.previous) {
+      digestLine.textContent = `内容摘要 ${c.digest}（本机记的那一条是另一种算法算的，`
+        + '两者不可比 —— 所以这一次要你重新确认一遍。这不是"内容变了"）';
     } else {
-      digestLine.textContent = `内容摘要 ${c.digest}`;
+      digestLine.textContent = `内容摘要 ${c.digest}（算法 v${c.digestAlg}）`;
     }
     one.append(digestLine);
+
+    // §5.4：这一份是谁签的。**没有签名也是一句必须说的话** —— 留白会被读成
+    // "还没显示出来"。
+    const who2 = document.createElement('p');
+    who2.className = 'why';
+    who2.textContent = c.fingerprint
+      ? `签名者指纹 ${c.fingerprint}。本机第一次接受这个 id 时会记下它，`
+        + '此后同一个 id 的每一份都必须由同一把钥匙签 —— 换了人就会拒绝。'
+      : '这一份**没有签名**。签名在插件规范里是可选的（§4.1），所以这不是错误；'
+        + '但它意味着"内容与上次一致"是这里唯一能给你的保证。';
+    one.append(who2);
 
     const warn = document.createElement('p');
     warn.className = 'why';
@@ -1010,8 +1063,60 @@ function renderConsent(pv) {
 
     const row = document.createElement('div');
     row.className = 'plug-meta';
-    row.append(button('同意并装上', () => consentPlugin(c.id, c.version)));
-    row.append(button('不同意', () => rejectPlugin(c.id, c.version), 'ghost'));
+    row.append(button(c.existing ? '同意，用它' : '同意并装上', () => consentPlugin(c.id, c.version)));
+    row.append(button(c.existing ? '不同意，删掉本机这一份' : '不同意',
+      () => rejectPlugin(c.id, c.version), 'ghost'));
+    one.append(row);
+    d.append(one);
+  }
+  box.append(d);
+}
+
+/**
+ * ── 池里那些**没被加载**的 ────────────────────────────────────────────────
+ *
+ * ★ 这一块是补一个**真的洞**（不是美化）：在它之前，"池里有一份、台账对不上"的
+ *   站点插件**两条路都不在** —— 插件那一列把 `active === false` 的滤掉了，
+ *   而"本站有而本机没有"那一列要求注册表里**查不到**它（它恰恰查得到，只是没有
+ *   钩子）。于是界面上彻底看不见，连一个能点的东西都没有，重新同步也救不回来。
+ *   摘要换一次公式就会对**每个用户的每个插件**成立 —— 集体消失、无从恢复。
+ *
+ * ★ 为什么不给"同意"按钮：这一块里的那些**站点此刻没有在报它们**，所以没有一个
+ *   说得出口的"要不要装这一份"可问。能做而且该做的是一个**出口** —— 删掉本机
+ *   这一份（§5.3：删掉 = 撤回同意，于是下次对账重新问）。在此之前连那个都没有。
+ */
+function renderInert(pv) {
+  const box = $('plugin-inert');
+  box.textContent = '';
+  const list = pv.inert || [];
+  if (!list.length) return;
+
+  const d = document.createElement('div');
+  d.className = 'plug plug-off';
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, `本机有 ${list.length} 个插件没有被加载`));
+  d.append(head);
+  d.append(el('p', 'plug-desc',
+    '它们已经在你的本机上了（是站点分发下来的），而它们的客户端代码没有在跑。'
+    + '原因只有一个：**你还没有同意过这一份**，而本站此刻没有在报它们 ——'
+    + '所以暂时没有"同意"这个入口（管理员把插件关掉了的时候就是这样）。'));
+  d.append(el('p', 'plug-desc',
+    '它们不会被加载，也不会被回收：**站点不报一个插件不构成删除它的理由** ——'
+    + '它随时可能再打开。把你不要的那一份删掉就行，下一次对账会重新问你一次。'));
+
+  for (const p of list) {
+    const one = document.createElement('div');
+    one.className = 'plug-consent-item';
+    const h = document.createElement('div');
+    h.className = 'plug-head';
+    h.append(el('h3', null, p.title || p.name));
+    h.append(el('code', 'plug-id', p.name));
+    h.append(el('span', 'plug-ver', 'v' + p.version));
+    one.append(h);
+    const row = document.createElement('div');
+    row.className = 'plug-meta';
+    row.append(button('删掉本机这一份', () => dropPluginVersion(p.id, p.version), 'ghost'));
     one.append(row);
     d.append(one);
   }
@@ -1021,8 +1126,12 @@ function renderConsent(pv) {
 /**
  * ── 开发者模式 ────────────────────────────────────────────────────────────
  *
- * ★ 勾上之后才出现「从目录安装…」「打开插件目录」「重新扫描」。于是"禁止自装"
+ * ★ 勾上之后才出现「从一个包安装…」「打开插件目录」「重新扫描」。于是"禁止自装"
  *   在默认路径上是**真的**，而本机开发仍有一条说得出来的路。
+ *
+ * ★ 那个入口选的是**一个 `.splug` 文件**，不是一个目录（§5.1：插件进池子只有
+ *   "安装一个包"这一个动作）。对着一个目录点"安装"，等于把那份规范里唯一的动作
+ *   换成另一件看起来差不多的事 —— 而两者的校验强度不一样。
  */
 function renderDev(pv) {
   const box = $('plugin-dev');
@@ -1070,7 +1179,7 @@ function renderDev(pv) {
     d.append(p);
     const row = document.createElement('div');
     row.className = 'plug-meta';
-    row.append(button('从目录安装…', () => installPlugin()));
+    row.append(button('从一个包安装…', () => installPlugin()));
     row.append(button('打开插件目录', () => openPluginDir(), 'ghost'));
     row.append(button('重新扫描', () => rescanPlugins(), 'ghost'));
     d.append(row);
@@ -1096,6 +1205,14 @@ async function rejectPlugin(id, version) {
   const r = await window.slurmate.rejectPlugin(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
   if (!r || !r.ok) notice('error', (r && r.error) || '没能处理这个插件');
+}
+
+/** §5.3：删掉本机那一份 = 撤回同意。下一次对账会重新问一次。 */
+async function dropPluginVersion(id, version) {
+  const r = await window.slurmate.dropPluginVersion(id, version);
+  if (r && r.plugins) renderPlugins(r.plugins);
+  if (!r || !r.ok) notice('error', (r && r.error) || '没能删掉本机那一份');
+  syncPurposeVisibility();
 }
 
 /** 建一个按钮。CSP 里没有 unsafe-inline，所以一律走 class，一个 style 都不能有。 */

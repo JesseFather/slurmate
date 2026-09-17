@@ -879,3 +879,80 @@ test('钉子在同意台账旁边活得很好：两张表互不影响', () => {
   assert.equal(fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8'), before,
     '写同意台账不许碰钉子表一个字节');
 });
+
+// ── 台账的算法版本（`alg`）──────────────────────────────────────────────────
+
+test('★ 台账记下**是哪一个公式**算的那个摘要，而不同公式的值不许互相作证', () => {
+  // ★ 摘要是**一个函数的结果**。函数换了公式之后，把新值与旧值放在一起比就是
+  //   一句假话 —— 界面上那句"内容摘要从 X 变成了 Y"会说"内容变了"，而真相是
+  //   "我们换了一把尺子"。
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  config.trustPlugin(dir, cfg, 'P', '1.0.0', 'a'.repeat(64), 'site');
+  assert.equal(cfg.trustedPlugins['P@1.0.0'].alg, config.TRUST_ALG,
+    '★ 写下去的时候必须带上当前公式的版本');
+
+  // 落盘之后再读回来，`alg` 要活着（否则它只在内存里有效，那等于没有）。
+  const back = config.loadConfig(dir);
+  assert.equal(back.trustedPlugins['P@1.0.0'].alg, config.TRUST_ALG);
+  assert.equal(config.isTrusted(back, 'P', '1.0.0', 'a'.repeat(64)), true);
+
+  // ★ 而一条**不同公式**的记录：摘要就算**逐字节相同**也不许通过。
+  //   这一条是这套字段的全部要点 —— 值相同而尺子不同，仍然不可比。
+  const cfg2 = config.loadConfig(dir);
+  cfg2.trustedPlugins['P@1.0.0'].alg = config.TRUST_ALG + 1;
+  assert.equal(config.isTrusted(cfg2, 'P', '1.0.0', 'a'.repeat(64)), false,
+    '★ 换过公式的记录不能给新公式算出来的值作证 —— 那会变成"静默地沿用一次旧同意"');
+});
+
+test('★ 老的台账条目（没有 alg）按**当时那个公式**解释，不是"当前公式"', () => {
+  // ★ 这个字段是在公式**没变**的那一版里加进来的，所以"没有 alg"只能解释成
+  //   "当时那个公式"。默认成"当前公式"的话，换公式那天所有老条目都会被读成新
+  //   公式 —— 而那正是这套字段要防的事（一次静默的沿用）。
+  const dir = tmpdir();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 6,
+    trustedPlugins: {
+      'OLD@1.0.0': { digest: 'b'.repeat(64), site: 'site', at: 1 },
+      'WEIRD@1.0.0': { digest: 'c'.repeat(64), site: 'site', at: 1, alg: '二' },
+    },
+  }));
+  const cfg = config.loadConfig(dir);
+  assert.equal(cfg.trustedPlugins['OLD@1.0.0'].alg, config.TRUST_ALG_LEGACY);
+  assert.equal(cfg.trustedPlugins['WEIRD@1.0.0'].alg, config.TRUST_ALG_LEGACY,
+    'alg 认不出的**保留条目**（丢掉会让界面只会说"没同意过"），但按老公式解释');
+  // 而只要当前公式还是 1，它们就照旧有效 —— 加这个字段**不**让任何一条旧同意失效。
+  assert.equal(config.isTrusted(cfg, 'OLD', '1.0.0', 'b'.repeat(64)), true,
+    '★ 加一个字段不该让用户重新同意一遍');
+});
+
+test('★★ §5.3 撤回同意：删掉台账那一条，且**如实报告**删没删到', () => {
+  const dir = tmpdir();
+  const cfg = config.loadConfig(dir);
+  config.trustPlugin(dir, cfg, 'P', '1.0.0', 'a'.repeat(64), 'site');
+  config.trustPlugin(dir, cfg, 'P', '1.0.1', 'b'.repeat(64), 'site');
+
+  const r = config.forgetPlugin(dir, cfg, 'P', '1.0.0');
+  assert.deepEqual(r, { ok: true, had: true });
+  assert.equal(config.isTrusted(cfg, 'P', '1.0.0', 'a'.repeat(64)), false,
+    '★ 撤回之后它必须重新走一遍同意闸');
+  assert.equal(config.isTrusted(cfg, 'P', '1.0.1', 'b'.repeat(64)), true,
+    '只动那一条，别的版本不受影响');
+
+  // 落盘了才算数（不落盘的话，重启之后"它自己回来了"）。
+  assert.equal(config.isTrusted(config.loadConfig(dir), 'P', '1.0.0', 'a'.repeat(64)), false);
+
+  // ★ 本来就有的那条**不在了** ⇒ `had: false`。调用方拿它区分"用户撤回了"与
+  //   "本来就没人同意过" —— 后者不该产生一句"你的同意作废了"。
+  assert.deepEqual(config.forgetPlugin(dir, cfg, 'P', '9.9.9'), { ok: true, had: false });
+  assert.deepEqual(config.forgetPlugin(dir, cfg, 'NOPE', '1.0.0'), { ok: true, had: false });
+
+  // ★ 而撤回**不许**碰钉子表（承重·六：合并两者 = 分身判据有了一个重置按钮）。
+  const pins = config.loadPinnedKeys(dir);
+  config.pinPluginKey(dir, pins, 'P', 'e'.repeat(64));
+  const before = fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8');
+  config.forgetPlugin(dir, cfg, 'P', '1.0.1');
+  assert.equal(fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8'), before,
+    '★ 撤回同意一个字节都不许动钉子');
+});

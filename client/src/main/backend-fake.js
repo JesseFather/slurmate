@@ -41,6 +41,29 @@ const pluginFiles = require('./plugins/index.js');
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 
+/**
+ * ── 演示站点的**整包**投递（默认关着）────────────────────────────────────────
+ *
+ * 真实的守护进程**两条投递方式都报**（`files` 与 `package`），客户端优先走包。
+ * 演示站点默认只发 `files` —— 那是刻意的：两条路都要有东西在测，而默认关着的那
+ * 一条（逐份取）正是已部署的 v0.6 站点走的、也是最容易在改动里悄悄烂掉的那条。
+ * `debugPackages(true)` 把整包那条路打开。
+ *
+ * ★ 包是拿**仓库里那个打包器**（`packer/slurmate-packer.js`）现打的，不是手搓的
+ *   字节：手搓一份就等于在演示里又实现了一遍容器格式，而它与真格式分家的那天，
+ *   演示反而会说"一切正常"。打包器导出 `buildPackage`/`contentDigest`，够用了。
+ *
+ * ★ **签名钥匙由一个写死的种子推出来**，不是随机生成的。理由不是"简单"：
+ *   客户端在用户第一次同意时会**钉住这把公钥**（§5.4），此后同一个 id 的每一份
+ *   都必须由同一把钥匙签。每次进程启动换一把钥匙的话，第二次启动时那把钉子就会
+ *   把演示站点自己的插件拒掉 —— 演示会坏在一个看起来像 bug 的地方。
+ *   它是**演示数据**，不是密钥。
+ */
+const DEMO_PKG_SEED = Buffer.from('slurmate-demo-package-key-v1!!!!', 'utf8');
+/** PKCS#8 里 Ed25519 私钥的头部（RFC 8410），后面接 32 字节种子。 */
+const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
+
 // ★ **演示站点报的插件 = 本机池里装了什么。**
 //
 //   以前这里写死两个插件（名字与 id 与客户端内建的那两份逐字相同）。基座不再
@@ -166,6 +189,55 @@ class FakeBackend extends Backend {
     this._noPluginsOp = false;
     /** 演示「有 plugins 这个 op，但不会发文件」（v0.5 的守护进程）。 */
     this._noDistribute = false;
+    /** 演示**整包投递**（默认关：逐份那条路要有东西在测，见 DEMO_PKG_SEED 那段）。 */
+    this._packages = false;
+    /** 演示"站点只发包、不发文件"（v0.8 的形状：`files` 那条路被删掉之后）。 */
+    this._hideFiles = false;
+    /** 打好的包，按 `(id@版本)` 缓存 —— 见 _pkgOf。 */
+    this._pkgCache = new Map();
+  }
+
+  /**
+   * 这一份的包（现打、缓存）。返回 `{buf, meta, fingerprint}` 或 `null`。
+   *
+   * ★ 缓存**不失效**，与 `_siteIndex` 同一个语义：那一份索引是启动快照，而包的
+   *   摘要与字节必须描述**同一棵树**。真守护进程那边正是这么做的
+   *   （`Sessiond._plugin_cache`），"管理员就地换了文件"在两边都变成同一件事：
+   *   清单、文件、包三者说的还是同一份东西，而客户端会拿到 `..._changed`。
+   */
+  _pkgOf(key) {
+    if (this._pkgCache.has(key)) return this._pkgCache.get(key);
+    const entry = this._siteIndex().get(key);
+    if (!entry) return null;
+    let out = null;
+    try {
+      const packer = require('../../../packer/slurmate-packer.js');
+      const files = entry.files.map((f) => {
+        const data = fs.readFileSync(path.join(entry.dir, ...f.path.split('/')));
+        return { path: f.path, data, sha256: f.sha256 };
+      });
+      const digest = packer.contentDigest(files);
+      const priv = crypto.createPrivateKey({
+        key: Buffer.concat([PKCS8_ED25519_PREFIX, DEMO_PKG_SEED]),
+        format: 'der', type: 'pkcs8',
+      });
+      const pub = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' })
+        .subarray(-32);
+      const sig = crypto.sign(null, Buffer.from(digest, 'hex'), priv);
+      const buf = packer.buildPackage(files,
+        Buffer.concat([Buffer.from([1]), pub, sig]));
+      out = {
+        buf,
+        meta: { format: 1, bytes: buf.length, digest },
+        fingerprint: crypto.createHash('sha256').update(pub).digest('hex'),
+      };
+    } catch {
+      // 打包器不在（打包之后的安装包里没有 `packer/`）⇒ 这个站点**不发包**。
+      // 与 `_sitePluginDir` 返回 null 是同一种降级：不是错误，是"这里没有它"。
+      out = null;
+    }
+    this._pkgCache.set(key, out);
+    return out;
   }
 
   /**
@@ -225,9 +297,11 @@ class FakeBackend extends Backend {
       version: key.slice(key.lastIndexOf('@') + 1),
       name: v.name,
       title: v.title,
-      files: this._bloatPlugin === key
+      // ★ "只发包、不发文件"那一档：`files` 缺席（不是 `null` —— `null` 在协议里
+      //   是"这一份此刻生产不出来"，两者不是一件事）。
+      files: this._hideFiles ? null : (this._bloatPlugin === key
         ? [...v.files, { path: 'bloat.bin', size: 999999, sha256: 'f'.repeat(64) }]
-        : v.files,
+        : v.files),
       enabled: !this._siteDisabled.has(v.name),
       can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name),
       surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
@@ -348,10 +422,40 @@ class FakeBackend extends Backend {
             enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
             // `files: null` 的那几条**不带这个字段**（见 _sitePlugins 的说明）。
             ...(Array.isArray(p.files) ? { files: p.files } : {}),
+            // ★ 两条投递方式**同时**报（真实守护进程也是这么做的）：老客户端只看
+            //   `files`，新客户端优先 `package` —— 两边都不用认一个新字段。
+            ...(this._packages ? (() => {
+              const k = this._pkgOf(`${p.id}@${p.version}`);
+              return k ? { package: k.meta } : { package: null };
+            })() : {}),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
-          limits: { file_bytes: DEMO_FILE_BYTES, total_bytes: 1 << 20, max_files: 256 },
+          limits: {
+            file_bytes: DEMO_FILE_BYTES, total_bytes: 1 << 20, max_files: 256,
+            // 链路那一笔账（base64 之后要装得进一条应答），只在会发包的时候才有意义。
+            ...(this._packages ? { package_bytes: 4 << 20 } : {}),
+          },
         });
+      }
+      /**
+       * 整包一次发 —— 与守护进程的 `op_plugin_package` 同一个形状。
+       *
+       * ★ 站点自述的那三个数（format/bytes/digest）**不是判据**，客户端会自己
+       *   数、自己解析、自己重算。"站点自报的摘要与它实际发的字节对不上"那一条
+       *   由 `site-plugins.test.mjs` 的假 rpc 覆盖（那里造一个谎报只要一行）。
+       */
+      case 'plugin_package': {
+        if (!this._packages || this._noDistribute || this._noPluginsOp) {
+          return err(2, 'unknown_op', op);
+        }
+        if (this._rateLimitBurst > 0) {
+          this._rateLimitBurst -= 1;
+          return err(7, 'rate_limited', '演示模式：故意打满限流桶');
+        }
+        const pkg = this._pkgOf(`${req.id}@${req.version}`);
+        if (!pkg) return err(3, 'plugin_unknown', `${req.id}@${req.version}`);
+        return ok({ format: pkg.meta.format, bytes: pkg.meta.bytes, digest: pkg.meta.digest,
+                    data: pkg.buf.toString('base64') });
       }
       // 一份一份取。**与守护进程同一个口径**：`path` 只是那张索引表的键，
       // 它绝不参与拼路径 —— 于是"路径穿越"这个词从等式里消失，而不是被过滤掉。
@@ -475,6 +579,24 @@ class FakeBackend extends Backend {
   /** 让接下来的 N 次 `plugin_file` 回 `rate_limited` —— 造限流。 */
   debugRateLimit(n = 3) { this._rateLimitBurst = n; }
 
+  /**
+   * 让演示站点**也**用整包投递（默认关着，见 DEMO_PKG_SEED 那一段）。
+   *
+   * ★ 两条路都要有东西在测，所以默认**关**：逐份取那条路是已部署的 v0.6 站点走
+   *   的，也是最容易在改动里悄悄烂掉的一条。打开它则走包那条 —— 包括验签与
+   *   钉钉子（§5.4），那两件事**只有包那条路上才有**。
+   */
+  debugPackages(on = true) { this._packages = on; }
+
+  /**
+   * 演示"站点**只发包、不发文件**" —— v0.8 的形状（`files` 那条路被删掉之后）。
+   *
+   * ★ 与 `debugPackages` 是**两件事**，而且必须能分开造：前者是"多发一条路"，
+   *   这个是"少发一条路"。合成一个开关的话，客户端在"站点只会发包"时的表现
+   *   （比如"这个站点愿不愿意发这一份"那句话）永远走不到。
+   */
+  debugHideFiles(on = true) { this._hideFiles = on; }
+
   // ★ 这里**没有**"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
   //   原因很具体：演示站点的分发源是**仓库里的 `plugins/`** —— 真文件。往那里
   //   写一个字节等于改用户的仓库，而那是一个调试开关绝不该有的副作用。
@@ -489,6 +611,8 @@ class FakeBackend extends Backend {
     this._siteNoJob.clear();
     this._noPluginsOp = false;
     this._noDistribute = false;
+    this._packages = false;
+    this._hideFiles = false;
     this._bloatPlugin = null;
     this._rateLimitBurst = 0;
   }

@@ -119,20 +119,50 @@ function setDevPlugins(dir, cfg, on) {
 // 与 `hostKeys` 同一先例：一个我自己算出来的值，记在本地，下次拿它比对。
 //
 // ★ **一致性，不是认证。** 它挡得住"事后偷换"（同一个 id 和版本，这次的内容与
-//   我上次同意的那份不一样），挡不住"第一次给的就是坏的"。要挡后者得靠签名，而
-//   这一版没有 —— 论证写在 SECURITY.md 里，别把这两件事写在同一个句子里。
+//   我上次同意的那份不一样），挡不住"第一次给的就是坏的"。要挡后者得靠签名
+//   （`pinned-keys.json` 那张表 + plugin-package.js 的 keyVerdict），别把这两件事
+//   写在同一个句子里。
+//
+// ── `alg`：这个摘要是**哪一个公式**算出来的 ────────────────────────────────
+//
+// ★ 台账里存的是**摘要值**，而摘要是一个**函数**的结果。函数换了公式之后，两个
+//   值放在一起比就是一句假话 —— 界面上那句"内容摘要从 X 变成了 Y"会说"内容变了"，
+//   而真相是"我们换了一把尺子"。
+//
+// ★ 所以条目里记下算它的那个公式的版本，而 `isTrusted` **要求版本相同**：不同
+//   公式算出来的值本来就不该互相作证。于是换公式那天的行为是"重新问一次"（安全
+//   的那一侧），而界面能如实说"这是换算法，不是内容变了"。
+//
+// ★ `TRUST_ALG_LEGACY` 与 `TRUST_ALG` 是**两个**常量，别合并：这个字段是在公式
+//   **没变**的那一版里加进来的，所以"条目里没有 `alg`"只能解释成"当时那个公式"
+//   = 1。把它默认成"当前公式"的话，换公式那天所有老条目都会被读成新公式 ——
+//   而那正是这套字段要防的事。
+
+/** 当前这个公式的版本。1 = 整棵目录的 `plugins.digestOf`。 */
+const TRUST_ALG = 1;
+/** 条目里没有 `alg` 时按哪个公式解释。**改公式时这一个不会跟着变。** */
+const TRUST_ALG_LEGACY = 1;
 
 function trustKey(id, version) { return `${id}@${version}`; }
+
+/** 一条台账条目的算法版本（缺省见 TRUST_ALG_LEGACY）。 */
+function trustAlgOf(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return Number.isInteger(entry.alg) && entry.alg > 0 ? entry.alg : TRUST_ALG_LEGACY;
+}
 
 /**
  * 台账里有这个 `(id, 版本)` 且摘要相符吗？
  *
  * ★ 判据必须是**全长的**摘要。`plugin.digest` 以前是截断到 16 位的，拿它当信任
  *   台账的键就是一个 64 位的碰撞面 —— 截断只留给显示。
+ *
+ * ★ **算法版本也必须相符。** 见上面那一段：不同公式算出来的两个值本来就不可比，
+ *   让它们互相作证等于把"换了尺子"读成"东西变了"。
  */
 function isTrusted(cfg, id, version, digest) {
   const e = (cfg && cfg.trustedPlugins && cfg.trustedPlugins[trustKey(id, version)]) || null;
-  return Boolean(e && e.digest === digest);
+  return Boolean(e && e.digest === digest && trustAlgOf(e) === TRUST_ALG);
 }
 
 /** 记下一次同意。**由调用方保证写台账发生在激活之前**（见 index.js 的同意动作）。 */
@@ -141,9 +171,34 @@ function trustPlugin(dir, cfg, id, version, digest, site) {
     return { ok: false, error: '摘要必须是全长的 64 位十六进制 —— 台账不接受自报的短摘要。' };
   }
   if (!cfg.trustedPlugins || typeof cfg.trustedPlugins !== 'object') cfg.trustedPlugins = {};
-  cfg.trustedPlugins[trustKey(id, version)] = { digest, site: String(site || ''), at: Date.now() };
+  cfg.trustedPlugins[trustKey(id, version)] = {
+    digest, alg: TRUST_ALG, site: String(site || ''), at: Date.now(),
+  };
   saveConfig(dir, cfg);
   return { ok: true };
+}
+
+/**
+ * 把这个 `(id, 版本)` 的同意**撤销** —— §5.3：本机那一份不在了，同意就作废。
+ *
+ * ★ 只有这一个动词，没有"拔钉子"的对应物：同意是**每一次都要重新给的**
+ *   （安全的那一侧），而钉子一旦钉上就只能相符（§5.4，见下面那一段）。
+ *
+ * ★ 删一个**不存在**的条目是合法的无操作，但要**如实报告 `had`** ——
+ *   调用方（对账）拿它区分"用户删了本机那一份"与"本来就没人同意过"，
+ *   而后者不该产生一条"你的同意作废了"的通知。
+ *
+ * ★ 只有条目真的变了才落盘。每一次对账都写一遍 `config.json` 是没必要的，
+ *   而且会让"配置文件什么时候被改的"变成一条没有意义的线索。
+ */
+function forgetPlugin(dir, cfg, id, version) {
+  const key = trustKey(id, version);
+  if (!cfg || !cfg.trustedPlugins || !Object.prototype.hasOwnProperty.call(cfg.trustedPlugins, key)) {
+    return { ok: true, had: false };
+  }
+  delete cfg.trustedPlugins[key];
+  saveConfig(dir, cfg);
+  return { ok: true, had: true };
 }
 
 // ── 钉子：按 **id** 记的签名公钥（§5.4）─────────────────────────────────────
@@ -574,6 +629,11 @@ function loadConfig(dir) {
   // ★ 一个残缺的条目（短摘要、缺 digest）在这里丢掉**比留着安全**：留着的话它
   //   会被当成"已经同意过"，而真正的那份内容从来没被核对过。丢掉 = 回到"要重新
   //   点一次同意"，那是安全的那一侧。
+  //
+  // ★ `alg` 认不出的**保留条目**而不是丢掉，但把算法记成 `null`：
+  //   `isTrusted` 于是不可能通过（版本对不上），而那与"丢掉"在行为上是同一件事
+  //   —— 重新问一次。差别在**界面**上：留着才能说清"是换算法了"，丢掉就只剩
+  //   一句"没有同意过"，而那句话把一次可解释的升级说成了一次从零开始。
   if (raw.trustedPlugins && typeof raw.trustedPlugins === 'object'
       && !Array.isArray(raw.trustedPlugins)) {
     for (const [key, v] of Object.entries(raw.trustedPlugins)) {
@@ -581,6 +641,7 @@ function loadConfig(dir) {
       if (typeof v.digest !== 'string' || !/^[0-9a-f]{64}$/.test(v.digest)) continue;
       if (typeof v.site !== 'string' || !v.site) continue;
       cfg.trustedPlugins[key] = { digest: v.digest, site: v.site,
+                                  alg: trustAlgOf(v),
                                   at: Number.isFinite(v.at) ? v.at : 0 };
     }
   }
@@ -912,7 +973,7 @@ module.exports = {
   connectionKey, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled, setDevPlugins,
-  trustKey, isTrusted, trustPlugin,
+  trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,
   // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
   checkHostKey, rememberHostKey, forgetHostKey, hostKeyId,

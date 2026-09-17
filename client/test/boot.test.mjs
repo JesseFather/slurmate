@@ -1264,6 +1264,75 @@ test('★ 安装器：装进池、幂等、以及**绝不覆盖**内容不同的
   for (const d2 of [pool, src, evil, junk]) fs.rmSync(d2, { recursive: true, force: true });
 });
 
+test('★★ 从一个包安装（开发者模式那个入口）：解开、建树、走**同一个**安装器', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const crypto = require('node:crypto');
+  const { installFromPackage } = require('../src/main/plugins/install.js');
+  const PACKER = require('../../packer/slurmate-packer.js');
+  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkgpool-'));
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkgsrc-'));
+
+  const id = mintId();
+  const dir = writePlugin(src, 'thing', { id, name: 'thing', displayName: '东西' },
+    'module.exports = {};\n');
+  fs.mkdirSync(path.join(dir, 'job'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'job', 'start.sh'), '#!/bin/sh\n');
+
+  // 拿仓库里那个打包器**现打一个真包**（不是手搓字节 —— 手搓就等于在这里又
+  // 实现了一遍容器格式，而它与真格式分家的那天，这条用例反而会说"一切正常"）。
+  const files = fs.readdirSync(dir).flatMap(function walk(rel) {
+    const full = path.join(dir, rel);
+    if (fs.statSync(full).isDirectory()) {
+      return fs.readdirSync(full).map((n) => path.join(rel, n)).flatMap(walk);
+    }
+    const data = fs.readFileSync(full);
+    return [{ path: rel.split(path.sep).join('/'), data,
+              sha256: crypto.createHash('sha256').update(data).digest('hex') }];
+  }, '');
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32);
+  const digest = PACKER.contentDigest(files);
+  const sig = crypto.sign(null, Buffer.from(digest, 'hex'), privateKey);
+  const buf = PACKER.buildPackage(files, Buffer.concat([Buffer.from([1]), pub, sig]));
+  const pkgFile = path.join(src, 'thing.splug');
+  fs.writeFileSync(pkgFile, buf);
+  const fp = crypto.createHash('sha256').update(pub).digest('hex');
+
+  const a = installFromPackage(pool, pkgFile);
+  assert.equal(a.ok, true, JSON.stringify(a));
+  assert.equal(a.dest, path.join(pool, id, '1.0.0'));
+  assert.equal(a.fingerprint, fp, '★ 签名者要如实报出来给用户看');
+  assert.equal(fs.existsSync(path.join(a.dest, 'job', 'start.sh')), true,
+    '包里的每一份都要铺出来（包括客户端不看的那一半）');
+
+  // 幂等：同一个包再装一次，内容一样 ⇒ 同一个构件。
+  assert.deepEqual(installFromPackage(pool, pkgFile), { ...a, already: true });
+
+  // 装完之后**走的是同一个安装器**，"绝不覆盖内容不同的同一版"照旧成立。
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkg2-'));
+  const dir2 = writePlugin(other, 'thing', { id, name: 'thing', displayName: '冒牌' },
+    'module.exports = {};\n');
+  const files2 = [{ path: 'plugin.json', data: fs.readFileSync(path.join(dir2, 'plugin.json')),
+                    sha256: crypto.createHash('sha256')
+                      .update(fs.readFileSync(path.join(dir2, 'plugin.json'))).digest('hex') }];
+  const buf2 = PACKER.buildPackage(files2, Buffer.alloc(0));
+  const pkg2 = path.join(other, 'thing.splug');
+  fs.writeFileSync(pkg2, buf2);
+  const c = installFromPackage(pool, pkg2);
+  assert.equal(c.ok, false, '★ 同一个 (id, 版本) 而内容不同 ⇒ 拒绝，不是覆盖');
+  assert.equal(fs.existsSync(path.join(pool, id, '1.0.0', 'job', 'start.sh')), true,
+    '被拒绝的那一次不许留下任何痕迹');
+
+  // 一个读不了的包：明确失败，而且**临时目录里不许留下半棵树**。
+  const junk = path.join(src, 'junk.splug');
+  fs.writeFileSync(junk, Buffer.concat([buf.subarray(0, 40), Buffer.from([1, 2, 3])]));
+  const d = installFromPackage(pool, junk);
+  assert.equal(d.ok, false);
+  assert.match(d.error || '', /读不了|字节/, `要说清为什么：${d.error}`);
+
+  for (const x of [pool, src, other]) fs.rmSync(x, { recursive: true, force: true });
+});
+
 test('★ 池扫两层：用户拷一个目录进去能用，同一个插件的多版本也能并存', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
@@ -1394,6 +1463,230 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
     assert.equal(idx._test.getPendingConsent().length, 0, '两个都处理完了');
     assert.equal(idx._test.getRegistry().get(second.id, second.version), null,
       '不同意的那个不许装上');
+  });
+});
+
+test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问一次（绝不静默装回来）', async (t) => {
+  // §5.3。★ 不这么做的话，用户删掉池里那一份之后，下一次对账会按"摘要与台账相符"
+  //   **静默装回来、一个字都不问** —— 那不是"当作从来没有过"，那是"用户想让它
+  //   消失，它自己回来了"。
+  const idx = require('../src/main/index.js');
+  const sitePlugin = require('../src/main/site-plugins.js');
+  // ★ 钉子表是**模块级**的、而且是**跨用例**活着的（它在另一个文件里，不在
+  //   cfg 里）。这一条会往里塞一把假钥匙，所以跑完必须把整张表还原 —— 不然
+  //   下一条用例会拿到一把不属于它的钉子，而症状是"莫名其妙说签名者换了人"。
+  const pinsBefore = { ...idx._test.getPinnedKeys() };
+  t.after(async () => {
+    Module._load = origLoad;
+    const pins = idx._test.getPinnedKeys();
+    for (const k of Object.keys(pins)) delete pins[k];
+    Object.assign(pins, pinsBefore);
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+    idx._test.getBackend().debugReset();
+  });
+  await invoke('app:debug', 'reset');
+  // 整包那条路：验签与钉钉子（§5.4）**只在它上面存在**。
+  await invoke('app:debug', 'packages');
+
+  await withPool([], async () => {
+    const r = await invoke('app:syncPlugins');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const first = idx._test.getPendingConsent()[0];
+    assert.ok(first, '站点要发两个插件下来');
+    assert.ok(first.fingerprint, '★ 演示站点发的包是签过名的，指纹要交到界面上');
+
+    const c = await invoke('app:consentPlugin', first.id, first.version);
+    assert.equal(c.ok, true, JSON.stringify(c));
+
+    // §5.4：同意那一刻要**钉住**签名者。它在**另一个文件**里（不是 config.json）。
+    const pins = idx._test.getPinnedKeys();
+    assert.equal(pins[first.id] && pins[first.id].fingerprint, first.fingerprint,
+      '★ 同意一个签过名的构件 = 记下它的公钥，此后只能相符');
+
+    // 池里**两样挨着**：解出来的树 + 那个包本身。
+    const sitePool = idx._test.getSitePoolDir();
+    assert.equal(fs.existsSync(path.join(sitePool, first.id, first.version)), true);
+    assert.equal(fs.existsSync(sitePlugin.pkgPathOf(sitePool, first.id, first.version)), true,
+      '★ 包要跟着一起进池 —— 它是这一份的来路凭证（也是验签的原料）');
+
+    // ── 用户把它删了 ──
+    fs.rmSync(path.join(sitePool, first.id, first.version), { recursive: true, force: true });
+    const r2 = await invoke('app:syncPlugins');
+    assert.equal(r2.ok, true, JSON.stringify(r2));
+    assert.equal(idx._test.getCfg().trustedPlugins[`${first.id}@${first.version}`], undefined,
+      '★ 台账那条必须消失 —— 留着就等于"静默装回来"');
+    const again = idx._test.getPendingConsent().find((p) => p.id === first.id);
+    assert.ok(again, '★ 而且它要**重新走一遍同意闸**，不是自己回来');
+    assert.equal(again.existing, false, '这一份是新取回来的草稿（池里那份已经被删了）');
+
+    // ── 同意 → 撤回 → 再同意：这条路必须是通的 ──
+    const c2 = await invoke('app:consentPlugin', again.id, again.version);
+    assert.equal(c2.ok, true, `撤回之后必须还能再同意一次：${JSON.stringify(c2)}`);
+
+    // ── §5.4：钉住的那把钥匙与这一份的签名者不符 ⇒ 拒绝，而且两份指纹都说出来 ──
+    // ★ 这一条钉的是**主进程那一边的接线**（`pinnedKey` 有没有真的接进对账）。
+    //   site-plugins 那一层自己注入这个回调，所以它测不到"index.js 忘了传"。
+    const bogus = 'b'.repeat(64);
+    idx._test.getPinnedKeys()[first.id] = { fingerprint: bogus, at: 1 };
+    delete idx._test.getCfg().trustedPlugins[`${first.id}@${first.version}`];
+    idx._test.getRegistry().reload();
+    const r3 = await invoke('app:syncPlugins');
+    const bad = (r3.plugins.site && r3.plugins.site.failed || [])
+      .find((f) => f.id === first.id);
+    assert.ok(bad, `★ 签名者对不上就必须失败，不能只是"再问一次"：${JSON.stringify(r3.plugins.consent)}`);
+    assert.match(bad.why, new RegExp(bogus), `要说清钉住的是哪一把：${bad.why}`);
+    assert.match(bad.why, new RegExp(first.fingerprint), `也要说清这一份是谁签的：${bad.why}`);
+    assert.equal(idx._test.getPendingConsent().some((p) => p.id === first.id), false,
+      '签名者对不上时**连同意按钮都不该出现** —— 用户同意什么都改不了这一条');
+
+    // ── 而"不同意"那一份：删的是**池里那一份**（如果它已经在池里）──
+    const rest = idx._test.getPendingConsent();
+    for (const p of rest) {
+      const rej = await invoke('app:rejectPlugin', p.id, p.version);
+      assert.equal(rej.ok, true, JSON.stringify(rej));
+    }
+    assert.equal(idx._test.getPendingConsent().length, 0);
+  });
+});
+
+test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能点同意（那个洞）', async (t) => {
+  // ★ 在这条路补上之前：插件在注册表里（`active: false`），于是"本站有而本机没有"
+  //   那一列不认领它（那边要求注册表里**查不到**），而插件那一列又滤掉了它 ——
+  //   界面上彻底看不见，连"点同意"的入口都没有，重新同步也救不回来。
+  //   摘要换一次公式，这件事会对**每个用户的每个插件**同时成立。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+    idx._test.getBackend().debugReset();
+  });
+  await invoke('app:debug', 'reset');
+  await withPool([], async () => {
+    await invoke('app:syncPlugins');
+    const first = idx._test.getPendingConsent()[0];
+    await invoke('app:consentPlugin', first.id, first.version);
+
+    // 台账那一条不见了（用户换过机器 / 删过配置 / 换过摘要公式）。
+    const cfg = idx._test.getCfg();
+    delete cfg.trustedPlugins[`${first.id}@${first.version}`];
+    idx._test.getRegistry().reload();
+
+    // ★ 洞的样子：它在注册表里，但没有钩子；而"本机没有"那一列也不认领它。
+    const p = idx._test.getRegistry().get(first.id, first.version);
+    assert.ok(p, '它还在注册表里（这正是"本机没有"那一列不认领它的原因）');
+    assert.equal(p.active, false, '而没有钩子 —— 它的代码不许跑');
+
+    const r = await invoke('app:syncPlugins');
+    const view = r.plugins;
+    const consent = (view.consent || []).find((x) => x.id === first.id);
+    assert.ok(consent, `★★ 它必须出现在待同意那一列里 —— 这就是那个洞：${JSON.stringify(view.consent)}`);
+    assert.equal(consent.existing, true, '★ 而且要标明"本机已经有一份"（出路与草稿不同）');
+
+    // 点同意 ⇒ 原地认领，不重下。
+    const c = await invoke('app:consentPlugin', first.id, first.version);
+    assert.equal(c.ok, true, JSON.stringify(c));
+    assert.equal(fs.existsSync(path.join(idx._test.getSitePoolDir(), first.id, first.version)), true,
+      '★ 原地认领不能把那一份弄没了');
+    assert.notEqual(idx._test.getRegistry().get(first.id, first.version).active, false,
+      '认领之后它要真的被加载');
+
+    // ── 再来一次，这回点"不同意"：删的必须是**池里那一份** ──
+    // ★ 不删的话它就是一个"用户在界面上拒绝了、却仍然躺在磁盘上"的插件，而且
+    //   下次对账会以同一个形状回来 —— 用户点一百次不同意也去不掉它。
+    // 埋一条**摘要对不上**的旧记录：于是"不同意"那一步除了删构件，还该把它清掉
+    // （留着的话，下次对账会按"摘要与台账相符"把这一份静默装回来）。
+    cfg.trustedPlugins[`${first.id}@${first.version}`] =
+      { digest: 'e'.repeat(64), alg: 1, site: 'old', at: 1 };
+    idx._test.getRegistry().reload();
+    const r2 = await invoke('app:syncPlugins');
+    const again = (r2.plugins.consent || []).find((x) => x.id === first.id);
+    assert.equal(again && again.existing, true, JSON.stringify(r2.plugins.consent));
+    const rej = await invoke('app:rejectPlugin', first.id, first.version);
+    assert.equal(rej.ok, true, JSON.stringify(rej));
+    assert.equal(fs.existsSync(path.join(idx._test.getSitePoolDir(), first.id, first.version)), false,
+      '★ 对"已经在池里"的那一份点不同意，删的就是池里那一份');
+    assert.equal(cfg.trustedPlugins[`${first.id}@${first.version}`], undefined,
+      '★ 而且台账里那条（哪怕摘要对不上）也要一并消失 —— 留着就是"静默装回来"');
+  });
+});
+
+test('★ §5.1③：往站点池里手放一份合法的树 ⇒ 不出现、也不加载；但**看得见**', async (t) => {
+  // ★ 「本机有一份，但**没有任何站点报过它**」是三条"你没有这个插件"里的一条，
+  //   而它与另外两条要做的事不同。手工放进去的东西**禁止**被加载（§5.1），
+  //   但它也**禁止**被藏起来 —— 用户会问"我放的那个东西去哪了"。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+    idx._test.getBackend().debugReset();
+  });
+  await invoke('app:debug', 'reset');
+  await withPool([], async () => {
+    // 站点只报仓库里那两个（见 backend-fake 的 _siteIndex），所以这一份站点不会报。
+    const id = mintId();
+    // ★ 先在台账里埋一条**摘要对不上**的旧记录：这正是"池里有一份、台账对不上"
+    //   的形状。删掉本机那一份时它必须一起没 —— 留着的话，下次对账会按"摘要与
+    //   台账相符"把这一份**静默装回来**（§5.3）。
+    idx._test.getCfg().trustedPlugins[`${id}@1.0.0`] = {
+      digest: 'e'.repeat(64), alg: 1, site: 'old', at: 1,
+    };
+    const dir = path.join(idx._test.getSitePoolDir(), id, '1.0.0');
+    fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(
+      { id, name: 'handmade', displayName: '手放的', version: '1.0.0' }, null, 2));
+    fs.writeFileSync(path.join(dir, 'client', 'index.js'), 'module.exports = {};\n');
+    idx._test.getRegistry().reload();
+
+    const p = idx._test.getRegistry().get(id, '1.0.0');
+    assert.ok(p, '它在注册表里（要看得见）');
+    assert.equal(p.active, false, '★ 但**不许加载** —— 装插件只有"安装一个包"这一条路');
+    assert.equal(p.attach, null, '一个钩子都不能有');
+
+    const view = idx._test.getPluginsView();
+    assert.equal((view.plugins || []).some((x) => x.id === id), false, '不进"可用"那一列');
+    assert.equal((view.missing || []).some((x) => x.id === id), false, '也不在"站点有而本机没有"里');
+    assert.ok((view.inert || []).some((x) => x.id === id),
+      `★★ 必须有一个地方看得见它 —— 否则用户面对的是"我放的东西凭空消失"：${JSON.stringify(view.inert)}`);
+
+    // 出口：删掉本机这一份。
+    const d = await invoke('app:dropPluginVersion', id, '1.0.0');
+    assert.equal(d.ok, true, JSON.stringify(d));
+    assert.equal(fs.existsSync(dir), false);
+    assert.equal(idx._test.getCfg().trustedPlugins[`${id}@1.0.0`], undefined,
+      '★ 删掉本机那一份 = 撤回同意：台账里那条（哪怕摘要对不上）也必须消失');
+  });
+});
+
+test('★ 站点**只发包、不发文件**（v0.8 的形状）⇒ 客户端照样认得它愿意发', async (t) => {
+  // ★ "这个站点愿不愿意发这一份"是界面上分开两种出路的那条判据（一个去同步、
+  //   一个去问管理员）。判据写成"有没有 `files`"的话，一个只发包的站点会被说成
+  //   "站点没有报出它的文件"—— 而它明明发了。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
+    idx._test.getRegistry().reload();
+    idx._test.getBackend().debugReset();
+  });
+  await invoke('app:debug', 'reset');
+  await invoke('app:debug', 'packages');
+  await invoke('app:debug', 'hide-files');
+  // ★ `pluginsView()` 里那份"站点有哪些插件"来自**连接时**的 `op:plugins`
+  //   （`refreshPartitions`），不是对账那一轮 —— 所以开关改完要重新问一次，
+  //   否则断言的是一个开关改之前就取到的清单（那样这条用例永远绿）。
+  await invoke('app:partitions');
+  await withPool([], async () => {
+    const r = await invoke('app:syncPlugins');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(idx._test.getPendingConsent().length, 2,
+      `只发包也要能取回来：${JSON.stringify(r.plugins.site && r.plugins.site.failed)}`);
+    for (const m of (r.plugins.missing || [])) {
+      assert.equal(m.distributed, true, `★ 站点愿意发它（只是本机还没同意）：${JSON.stringify(m)}`);
+    }
+    assert.ok((r.plugins.missing || []).length > 0, '前置：本机一个都还没同意，所以它们都在 missing 里');
   });
 });
 

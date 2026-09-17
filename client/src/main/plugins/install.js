@@ -1,18 +1,22 @@
 'use strict';
 /**
- * plugins/install.js —— 把**一个插件目录**装进池，以及从池里拿掉。
+ * plugins/install.js —— 把**一个插件**装进本机池，以及从池里拿掉。
  *
- * ── 为什么安装是一个动作，而不是"你自己 cp 过去" ────────────────────────────
+ * ── 两个入口，一个动作 ──────────────────────────────────────────────────────
  *
- * 加载器（index.js）只读。在它之前，池目录甚至不会被创建 —— 于是「池是安装点」
- * 这句话在代码里落不了地：用户不知道该往哪放，也没有任何东西告诉他放对没有。
+ *   `installFrom(pool, dir)`          从一个**目录**装（测试与内部用）
+ *   `installFromPackage(pool, file)`  从**一个包**（`.splug`）装 —— 开发者模式那个
+ *                                     「从一个包安装…」走的就是这里
  *
- * ★ **站点分发不走这条路。** 这一条以前写着"将来分发会复用同一个 installFrom"，
+ * 后者把包解开到临时目录，然后**走同一个 `installFrom`**：池的布局、幂等、以及
+ * "绝不覆盖内容不同的同一版"那几条只有一份实现。
+ *
+ * ★ **站点分发不走这两条路。** 这一条以前写着"将来分发会复用同一个 installFrom"，
  *   现在分发已经有了，而它落在**另一个根**上（`~/.slurmate/site-plugins/`，见
  *   site-plugins.js），因为两者的语义在三个地方正好相反：
  *
- *     · 谁来定：这里由**用户**挑目录；分发由**站点**说了算，还要按引用计数回收。
- *     · 换入前：这里直接拷；分发要先过**同意闸**（带代码的插件第一次要用户点一下）。
+ *     · 谁来定：这里由**用户**挑；分发由**站点**说了算，还要按引用计数回收。
+ *     · 换入前：这里直接装；分发要先过**同意闸**（带代码的插件第一次要用户点一下）。
  *     · 撞车时：这里**拒绝**；分发也拒绝，但理由是"站点改了内容却没升版本号"。
  *
  *   照旧注释去复用 `installFrom` 的人，会把"拒绝覆盖内容不同的同版本"当成一个
@@ -29,11 +33,21 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 // COPY_SKIP 从 index.js 引 —— **全仓只有那一份**。它同时决定"安装器拷哪些"与
 // "摘要算哪些"，两处不一致的症状是安装器永远说"内容不一样"，而原因指不出来。
 // 依赖方向不变（install → index），而且这条路上不会回指。
 const { inspectDir, shortDigest, COPY_SKIP } = require('./index.js');
+/**
+ * 站点分发那一半：`fileListOf`（包里的记录 → 与逐份清单同形的三元组）与
+ * `verifyStaged`（**写下去之后**从磁盘读回来两向比一遍）。
+ *
+ * ★ 顶层 require 是安全的：`site-plugins.js` 的顶层只依赖 `plugins/index.js`，
+ *   而它反过来要的 `plugin-package.js` 是**延迟**取的（见那边的 PP()）。这个方向
+ *   上没有环。
+ */
+const SP = require('../site-plugins.js');
 
 function copyTree(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -107,6 +121,71 @@ function installFrom(pool, srcDir) {
 }
 
 /**
+ * 从**一个包**装进池 —— 开发者模式那个「从一个包安装…」走的就是这里。
+ *
+ * ★ 与 `installFrom` 的关系：它把包解开到一个临时目录，然后**走同一个安装器**。
+ *   池的布局（`<池>/<id>/<版本>/`）、幂等、以及"绝不覆盖内容不同的同一版"那几条
+ *   一个字都不用重写 —— 也就不会各写一遍、各漂一次。
+ *
+ * ★ **解开之前先解析**（`readPackageFile` 会逐份校 sha256、验签、算内容摘要）。
+ *   一个读不了的包在这里就退出去，绝不会有半棵树落到临时目录再被拷进池子。
+ *
+ * ★ 本机池**不存那个 `.splug`**：站点池存包是因为那里一个版本就是"站点分发的
+ *   那个构件"（要能被回收、要能当来路凭证），而本机池是**用户自己**的目录 ——
+ *   他怎么放、放什么，那半个文件帮不上任何忙，只会在"同一个插件多个版本并存"
+ *   的那层目录里多一个说不清是什么的文件。
+ *
+ * ★ **不查钉子**（§5.4）：见 index.js 的 app:installPlugin 那段注释。
+ */
+function installFromPackage(pool, file) {
+  if (!pool) return { ok: false, error: '插件池目录还没准备好（客户端可能还没起来）。' };
+  if (typeof file !== 'string' || !file) return { ok: false, error: '没有指定要装哪个包。' };
+
+  // 要求的模块放在函数里取：`plugin-package.js` 与 `site-plugins.js` 互相 require
+  // 构成一个环（见 site-plugins.js 的 PP()），在模块加载期取会拿到半份 exports。
+  const PP = () => require('../plugin-package.js');
+
+  let buf;
+  try {
+    buf = fs.readFileSync(file);
+  } catch (e) {
+    return { ok: false, error: `读不到 ${file}：${e.message}` };
+  }
+  const parsed = PP().parsePackage(buf);
+  if (!parsed.ok) {
+    return { ok: false, error: `这个包读不了（${parsed.code}）：${parsed.why}` };
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-'));
+  let res;
+  try {
+    const u = PP().unpackTo(parsed, buf, tmp);
+    if (!u.ok) return { ok: false, error: u.why };
+    // ★ 写完之后**从磁盘读回来、与包里的记录**两向比一遍才交给安装器 ——
+    //   "校验我收到的"不等于"校验我写下的"（磁盘满时 `writeFileSync` 会留下半份
+    //   文件然后抛错）。用的是站点分发那条路的**同一个函数**（`verifyStaged`）：
+    //   两处各写一遍的话，"什么算对上了"会长出两个口径。
+    const vr = SP.verifyStaged(tmp, SP.fileListOf(parsed), {
+      id: parsed.manifest.id, version: parsed.manifest.version,
+    });
+    if (!vr.ok) {
+      return { ok: false, error: `解出来的树与包里的记录对不上 —— 写下去的东西不是`
+        + `收到的那一份：${vr.why}` };
+    }
+    res = installFrom(pool, tmp);
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 临时目录 */ }
+  }
+  if (!res.ok) return res;
+  // ★ `installFrom` 是在**临时目录**上跑的那一趟，所以它返回的 `plugin.dir` 指向
+  //   一个马上要被删掉的路径。这里改成真装着它的地方 —— 一个指向已经不存在的
+  //   目录的对象，比没有那个字段更坏。
+  return { ...res, plugin: { ...res.plugin, dir: res.dest },
+           fingerprint: parsed.sig ? parsed.sig.fingerprint : null,
+           digest: parsed.digest };
+}
+
+/**
  * 从池里拿掉一个版本。**删之前先确认那个目录真的是它。**
  *
  * ★ 校验不是多余的：这个函数会 `rm -rf` 一个路径，而那个路径是由 `id` 和
@@ -146,4 +225,4 @@ function uninstall(pool, id, version) {
   return { ok: true, dest };
 }
 
-module.exports = { installFrom, uninstall, copyTree, COPY_SKIP };
+module.exports = { installFrom, installFromPackage, uninstall, copyTree, COPY_SKIP };

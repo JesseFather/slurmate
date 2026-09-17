@@ -61,6 +61,16 @@ let backend = null;
 let controller = null;
 let cfgDir = null;
 let cfg = null;
+/**
+ * 钉子表：`id → 公钥指纹`（§5.4）。**单独一个文件**，见 config.js 那一段。
+ *
+ * ★ 它**不是** `cfg` 的一部分，所以这里单独持有一份。`pinPluginKey` 就地改这个
+ *   对象并且落盘 —— 也就是注册表那边（`allows`）看到的永远是当下的那一份。
+ *
+ * ★ 模块加载期是 `{}`（空表）：那时 `cfgDir` 还没定下来。空表 = "从没钉过"，
+ *   而在能拿到真表之前一个插件都加载不了，两者同归一处。
+ */
+let pins = {};
 let whoami = null;
 let partitions = [];
 /**
@@ -135,6 +145,10 @@ function bootstrap() {
       ? path.join(app.getPath('userData'), 'demo-config')
       : app.getPath('userData');
     cfg = config.loadConfig(cfgDir);
+    // ★ 钉子在**另一个文件**里（见 config.js 那一段）：旧版本读一遍 `config.json`
+    //   再存一遍就会把不认识的那张表抹掉，而"钉子全没了"= §2.5 的分身判据有了一
+    //   个重置按钮。所以它自己一个文件、自己一次读。
+    pins = config.loadPinnedKeys(cfgDir);
 
     // ★ 池目录依赖 cfgDir（演示模式尤其），而注册表是在**模块加载期**建的，那时
     //   cfgDir 还是 null。所以拿到真路径之后重新扫一遍 —— 否则演示模式会去读
@@ -573,6 +587,11 @@ function reconcileSitePlugins() {
         siteRoot,
         stagingRoot,
         trusted: (id, version, digest) => config.isTrusted(cfg, id, version, digest),
+        // §5.3：本机那一份不在了 ⇒ 台账那条一并消失 ⇒ 同一个对账里它走进待同意。
+        // **删就删在信任判定的前面**，所以"静默装回来"这条路结构上不存在。
+        forgetTrust: (id, version) => config.forgetPlugin(cfgDir, cfg, id, version),
+        // §5.4：本机钉住的那把公钥。`undefined` = 从没钉过（首次即信任）。
+        pinnedKey: (id) => config.pinnedKeyOf(pins, id),
         generation: gen,
         stale: () => gen !== connectGeneration,
         // ★ 「文件都下来了」**不等于**「装上了」：`reload()` 从不抛，坏插件进
@@ -614,6 +633,7 @@ function reconcileSitePlugins() {
       syncedAt: Date.now(),
       limits: r.limits,
       added: r.added, kept: r.kept, reclaimed: r.reclaimed, failed: r.failed,
+      withdrawn: r.withdrawn || [],
       recordOk: Boolean(r.record && r.record.ok),
       recordWhy: (r.record && r.record.why) || null,
       notices: r.notices || [],
@@ -768,8 +788,39 @@ function pluginsView() {
       enabled: true,
       // ★ 站点**愿不愿意发**这一份，与"本机有没有"是两件事，而它们的出路不同：
       //   愿意发 ⇒ 等对账/点同意；不愿意发 ⇒ 这一版你只能自己想办法（升级客户端，
-      //   或者问管理员为什么这个插件没有文件清单）。
-      distributed: Array.isArray(p.files),
+      //   或者问管理员为什么这个站点不分发它）。
+      //
+      // ❗ 判据是**两条投递方式里有没有一条能走**，所以它必须问 `deliveryOf` ——
+      //    以前这里写的是 `Array.isArray(p.files)`，而"站点只发包、不发文件"
+      //    的那一天，每个插件都会被说成"站点没有报出它的文件"。
+      distributed: Boolean(sitePluginSync.deliveryOf(p, sitePluginSync.HARD_LIMITS).mode),
+    }));
+
+  // ── 池里那些**没被加载**的（`active: false`）───────────────────────────────
+  //
+  // ★ 这一段以前只算了一个**数**（`inertCount`），而那个数**从来没有被渲染过**
+  //   （`panel.js` 里零次出现）。后果是一个真的洞：
+  //
+  //     `plugins` 那一列把 `active === false` 的滤掉了；`missing` 又要求
+  //     `registry.get` **取不到**它 —— 而它恰恰在注册表里（`active: false` 的那
+  //     一条）。于是"池里有一份、台账对不上"的站点插件**两条路都不在**：
+  //     界面上彻底看不见，连"点同意"的入口都没有，重新同步也救不回来。
+  //
+  //   ★ 摘要换一次公式，这条路会**一次性对每个用户的每个插件成立** ——
+  //     集体消失、无从恢复。所以它不是美化项。
+  //
+  // ★ 待同意的那些**不在这里**：它们由 `consent` 那一块专门画（那里有"同意"
+  //   按钮）。两处都画的话，用户会看到同一个插件两个块，而各自说着一半的话。
+  const pendingKeys = new Set(pendingConsent.map((p) => `${p.id}@${p.version}`));
+  const inert = records
+    .filter((p) => p.active === false && !pendingKeys.has(`${p.id}@${p.version}`))
+    .map((p) => ({
+      id: p.id, version: p.version, name: p.name, title: p.displayName,
+      source: p.source,
+      // 为什么它没被加载。今天只有一种：**代码还没过同意闸**，而站点此刻没有在
+      // 报它（所以没有"同意"这个入口）。写成字段而不是让界面去猜 —— 界面手里
+      // 那份视图随时可能陈旧。
+      why: 'unconsented',
     }));
 
   return {
@@ -793,6 +844,9 @@ function pluginsView() {
     // 池里有、但**还没过同意闸**的。它与"没装"必须分得开：一个是去点同意，
     // 一个是去同步/去装。
     inertCount: records.length - plugins.length,
+    // ★ 而这一列是**那些没能走进"待同意"的**：站点此刻不报它们，所以连点同意的
+    //   入口都没有。界面必须把它们画出来并给一个出口（删掉本机那一份）。
+    inert,
 
     // ── 站点分发那一节 ──
     //
@@ -809,6 +863,9 @@ function pluginsView() {
       syncedAt: siteSync.syncedAt || null,
       failed: siteSync.failed || [],
       reclaimed: (siteSync.reclaimed || []).length,
+      // §5.3：本机那一份不在了 ⇒ 同意作废。**只报数**，文案在界面里 ——
+      // 而那条文案绝不断言是谁删的（客户端不知道原因）。
+      withdrawn: (siteSync.withdrawn || []).length,
       recordOk: siteSync.recordOk !== false,
       // 池里每个版本**被哪些站点要** —— 这是那一栏唯一值得显示的东西，它解释了
       // "为什么这台机器上有两个版本"。读自快照表（`.sites.json`）。
@@ -830,11 +887,21 @@ function pluginsView() {
     consent: pendingConsent.map((p) => ({
       id: p.id, version: p.version, name: p.name, title: p.title,
       digest: shortDigest(p.digest), fullDigest: p.digest,
+      // ★ 这个摘要**是哪一个公式**算出来的。界面拿它比对上一次那条的 `alg` ——
+      //   不同就说明"我们换了一把尺子"，那是**另一件事**，不能说成"内容变了"。
+      digestAlg: config.TRUST_ALG,
+      // ★ 本机**已经**有一份（只是台账对不上），还是刚取回来的一份草稿：
+      //   前者点同意是"原地认领"、点不同意是"删掉池里那一份"；后者是"换入"与
+      //   "丢掉草稿"。两件事，文案与后果都不同，所以界面必须分得开。
+      existing: Boolean(p.existing),
+      // §5.4：这一份是谁签的。`null` = 没有签名 —— 那句话必须说清"没有签名"，
+      // 而不是留白（留白会被读成"还没显示出来"）。
+      fingerprint: p.fingerprint || null,
       siteLabel: p.siteLabel, fileCount: (p.files || []).length,
       // 同 (id, 版本) 以前同意过吗？—— 有的话这一次**内容变了**，界面上要说出来。
       previous: (() => {
         const e = cfg && cfg.trustedPlugins && cfg.trustedPlugins[config.trustKey(p.id, p.version)];
-        return e ? { digest: shortDigest(e.digest), at: e.at } : null;
+        return e ? { digest: shortDigest(e.digest), at: e.at, alg: config.trustAlgOf(e) } : null;
       })(),
     })),
   };
@@ -881,6 +948,10 @@ function siteVersions() {
   }
   return sitePluginSync.listPooled(root).map((it) => ({
     id: it.id, version: it.version,
+    // 旁边那个 `<版本>.splug` 在不在。**如实报**（见 site-plugins.js 的文件头）：
+    // 包单独不在了不构成撤回，也不会被静默取回来 —— 但用户打开那个目录就会发现
+    // 少了一个文件，所以不能瞒着不说。
+    hasPackage: Boolean(it.hasPackage),
     wantedBy: wanters.get(`${it.id}@${it.version}`) || [],
   }));
 }
@@ -2047,8 +2118,13 @@ function registerIpc() {
     // 待同意的那些是**这一次连接**的现场：换代 + 丢掉它们的暂存树（那是**我们
     // 自己的**草稿纸，删它不算"删站点的东西"）。不清的话，用户会看到一个来自
     // 已经断掉的站点的"同意"按钮。
+    //
+    // ★ `existing` 的那些**一个字节都不许动**：它们指向的是**池里那一份**，
+    //   不是草稿。断开一次就把它删掉，等于"断个网就丢了用户已经同意的插件"。
     connectGeneration += 1;
-    for (const p of pendingConsent) sitePluginSync.discardStaged(p.stagedDir);
+    for (const p of pendingConsent) {
+      if (!p.existing) sitePluginSync.discardStaged(p.stagedDir, p.stagedPkg);
+    }
     pendingConsent = [];
     siteSync = null;
     return { ok: true, released };
@@ -2106,26 +2182,34 @@ function registerIpc() {
    *   当成一个 bug —— 而那正是分发**要**的行为（站点换了内容就得重新同意）。
    *   分发在 site-plugins.js，落另一个根。
    */
-  send('app:installPlugin', async (srcDir) => {
-    let dir = srcDir;
-    if (!dir) {
+  send('app:installPlugin', async (file) => {
+    let p = file;
+    if (!p) {
       const r = await dialog.showOpenDialog(win.win, {
-        title: '选择插件目录（里面要有 plugin.json）',
+        title: '选择一个插件包（.splug）',
         buttonLabel: '装这个',
-        properties: ['openDirectory'],
+        properties: ['openFile'],
+        filters: [{ name: '插件包', extensions: ['splug'] }],
       });
       if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
-      dir = r.filePaths[0];
+      p = r.filePaths[0];
     }
-    const res = pluginInstall.installFrom(ensurePoolDir(), dir);
+    const res = pluginInstall.installFromPackage(ensurePoolDir(), p);
     if (!res.ok) {
       win.pushNotice('error', res.error);
       return { ok: false, error: res.error };
     }
     registry.reload();
+    // ★ 签名者**如实报出来**。本机池这条路**不查钉子**（§5.4）：钉子防的是"远端的
+    //   某个站点把一个 id 换成了别人做的构件"，而这里是**用户自己在自己的机器上
+    //   挑了一个文件** —— 他对这台机器有完全的权限，可以改 JS、可以换文件，
+    //   一条钉不住他自己。把签名者显示出来，是让他有能力自己看一眼。
+    const signer = res.fingerprint
+      ? `签名者 ${res.fingerprint}`
+      : '这个包没有签名（§4.1 里签名是可选的 —— 装之前请自己确认它的来路）';
     win.pushNotice('ok', res.already
       ? `${res.plugin.displayName} ${res.plugin.version} 之前就装过，内容一致，没动它。`
-      : `已装好 ${res.plugin.displayName} ${res.plugin.version}（${res.plugin.name}）。`);
+      : `已装好 ${res.plugin.displayName} ${res.plugin.version}（${res.plugin.name}）。\n${signer}`);
     return { ok: true, plugins: pluginsView() };
   });
 
@@ -2183,9 +2267,28 @@ function registerIpc() {
     const hit = pendingConsent.find((p) => p.id === id && p.version === version);
     if (!hit) return { ok: false, error: '没有这个待同意的插件（可能已经同意过、或者重新同步过了）。' };
 
+    // ── ① 钉住签名者（§5.4）。**写在最前面，在任何文件移动之前。** ──
+    //
+    //   放在前面是为了让"钉不上"这件事**什么也没做**就退出去：`pinPluginKey` 只在
+    //   "这个 id 已经钉在另一把钥匙上"时失败，而那本来就不该走到这里（`keyVerdict`
+    //   在对话框出现之前就该拦下它）。真发生了，最不该做的事是"先把构件装上去，
+    //   再报告钉子不对"。
+    //
+    //   ★ 没签名的那一份（`fingerprint` 是 null）**什么都不钉** —— §5.4 是"记下它的
+    //     签名公钥"，而没有公钥可记。于是"作者先是裸发、后来开始签名"不会被拒绝；
+    //     该被拒绝的是反过来的顺序。
+    if (hit.fingerprint) {
+      const pr = config.pinPluginKey(cfgDir, pins, id, hit.fingerprint);
+      if (!pr.ok) {
+        win.pushNotice('error', pr.error);
+        return { ok: false, error: pr.error, plugins: pluginsView() };
+      }
+    }
+
+    // ── ② 收下这一份（换入，或者对已在池里的那一份"原地认领"）──
     const mv = sitePluginSync.acceptStaged({
-      stagedDir: hit.stagedDir, siteRoot: sitePoolDir(),
-      id, version, digest: hit.digest,
+      stagedDir: hit.stagedDir, stagedPkg: hit.stagedPkg || null, siteRoot: sitePoolDir(),
+      id, version, digest: hit.digest, existing: Boolean(hit.existing),
     });
     if (!mv.ok) {
       win.pushNotice('error', mv.error);
@@ -2217,13 +2320,64 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
-  /** 不同意。**删掉的是暂存里那一份**（我们自己的草稿纸），站点那一份一个字节没动。 */
+  /**
+   * 不同意。
+   *
+   * ★ 两种情形的出路**不同**，因为"待同意的那一份"是两样东西：
+   *
+   *   `existing: false` 它是一份**草稿**（刚取回来、在暂存里）⇒ 删掉草稿。
+   *                     站点那一份一个字节没动。
+   *   `existing: true`  它**已经在池里**（上一次下来过、只是台账对不上）⇒ 删掉
+   *                     池里那一份。
+   *
+   *   后者必须真的删：留着的话它就是一个"用户在界面上拒绝了、却仍然躺在磁盘上"
+   *   的插件，而且下次对账会**以同一个形状回来**（台账里没有它、树还在）——
+   *   用户点一百次不同意也去不掉它。
+   *
+   * ★ 同样**不**在文案里断言是他删的：这里是他点的，但"同不同意的判据"与
+   *   "为什么本机没有那一份"是两件事，后者客户端不知道。
+   */
   send('app:rejectPlugin', async (id, version) => {
     const hit = pendingConsent.find((p) => p.id === id && p.version === version);
     if (!hit) return { ok: false, error: '没有这个待同意的插件。' };
-    sitePluginSync.discardStaged(hit.stagedDir);
+    if (hit.existing) {
+      const d = sitePluginSync.dropPooledVersion(sitePoolDir(), id, version);
+      if (!d.ok) { win.pushNotice('error', d.error); return { ok: false, error: d.error }; }
+      // 台账里那条也一并清掉（通常是本来就没有），理由见 dropPluginVersion。
+      config.forgetPlugin(cfgDir, cfg, id, version);
+      registry.reload();
+      win.pushNotice('info', `没有同意「${hit.title || hit.name}」，本机这一份已经删掉了。`
+        + '站点上那份不受影响 —— 它还在的话，下次同步会再问你一次。');
+    } else {
+      sitePluginSync.discardStaged(hit.stagedDir, hit.stagedPkg);
+      win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
+    }
     pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));
-    win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
+    return { ok: true, plugins: pluginsView() };
+  });
+
+  /**
+   * 删掉本机池里的一个版本 —— §5.3「删掉本机那一份 = 撤回同意」。
+   *
+   * ★ 界面上这个按钮挂在**没被加载的那些**上面（见 pluginsView 的 `inert`）。
+   *   那些是"池里有一份、而台账对不上"的站点插件，它们没有"同意"的入口 ——
+   *   因为站点此刻没有在报它们。所以对它们来说，"不要了"是唯一可做的动作，而
+   *   在此之前**连这个动作都没有**：界面上一片空白。
+   *
+   * ★ 删完还要 `forgetPlugin`：台账里那条（如果有）一并消失。不删的话，下次对账
+   *   会按"摘要与台账相符"**静默装回来、一个字都不问** —— 而那正是 §5.3 要防的
+   *   那一件事。删掉之后它走进待同意，用户重新点一次。
+   */
+  send('app:dropPluginVersion', async (id, version) => {
+    if (typeof id !== 'string' || typeof version !== 'string') {
+      return { ok: false, error: 'id 与版本都必须是字符串。' };
+    }
+    const d = sitePluginSync.dropPooledVersion(sitePoolDir(), id, version);
+    if (!d.ok) { win.pushNotice('error', d.error); return { ok: false, error: d.error }; }
+    config.forgetPlugin(cfgDir, cfg, id, version);
+    registry.reload();
+    win.pushNotice('info', `本机那一份 ${version} 已经删掉了。`
+      + '站点还在分发它的话，下一次同步会重新问你一次。');
     return { ok: true, plugins: pluginsView() };
   });
 
@@ -2301,6 +2455,13 @@ function registerIpc() {
     else if (what === 'old-distribute') backend.debugOldDistribute(true);
     // 站点报了一个超过单文件上限的文件 ⇒ 「站点支持分发，但这一份装不上」。
     else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
+    // ★ 让演示站点**也**用整包投递。默认关着：逐份取那条路（已部署的 v0.6 站点
+    //   走的那条）要有东西在测；打开之后走包那条 —— 验签与钉钉子（§5.4）只在
+    //   那条路上存在。
+    else if (what === 'packages') backend.debugPackages(true);
+    // ★ 与上一条成对：那个是"多发一条路"（整包），这个是"少发一条路"（逐份）。
+    //   "站点只发包"是 v0.8 的形状，客户端在那一刻的样子要能演。
+    else if (what === 'hide-files') backend.debugHideFiles(true);
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
     else if (what === 'rate-limited') backend.debugRateLimit(Number(arg) || 3);
     // 把仓库里的示例插件装进演示池。
@@ -2373,6 +2534,8 @@ module.exports = {
     getKey: (id) => resolveKey(id || config.PENDING_ID),
     getCfg: () => cfg,
     getCfgDir: () => cfgDir,
+    /** 钉子表（按 id 记的公钥指纹，§5.4）。它在**另一个文件**里，不是 cfg 的一部分。 */
+    getPinnedKeys: () => pins,
     /**
      * 重跑「启动时接上已有会话」那条路（`tryReattach`）。
      *

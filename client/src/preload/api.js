@@ -33,7 +33,10 @@ contextBridge.exposeInMainWorld('slurmate', {
   //
   // ★ 带客户端代码的站点插件要用户点一次同意才加载（`consentPlugin`）。同意闸的
   //   落点在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
-  installPlugin: (srcDir) => ipcRenderer.invoke('app:installPlugin', srcDir),
+  //
+  // ★ 装的是**一个 `.splug` 文件**，不是一个目录：插件进池子只有"安装一个包"
+  //   这一个动作（§5.1），而对着一个目录点"安装"是另一件看起来差不多的事。
+  installPlugin: (file) => ipcRenderer.invoke('app:installPlugin', file),
   uninstallPlugin: (id, version) => ipcRenderer.invoke('app:uninstallPlugin', id, version),
   // 用户手工往池里放了东西之后，不用重启客户端。
   rescanPlugins: () => ipcRenderer.invoke('app:rescanPlugins'),
@@ -42,6 +45,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   syncPlugins: () => ipcRenderer.invoke('app:syncPlugins'),
   consentPlugin: (id, version) => ipcRenderer.invoke('app:consentPlugin', id, version),
   rejectPlugin: (id, version) => ipcRenderer.invoke('app:rejectPlugin', id, version),
+  // §5.3：删掉本机那一份 = 撤回同意（下一次对账重新问）。给的是"没被加载的那些"
+  // 唯一的出口 —— 见 panel.js 的 renderInert。
+  dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
   setDevPlugins: (on) => ipcRenderer.invoke('app:setDevPlugins', on),
 
   // ── 布局组 ──

@@ -14,9 +14,9 @@
  *   打包器读**同一批十六进制**，所以"三端对同一个包得出同一个答案"这句话是有
  *   内容的 —— 而不是三份各自写一遍、各自说自己对。
  *
- * ★ 这一版 reader **没有调用方**（见 plugin-package.js 的文件头）。所以这里
- *   全部是直接对 reader 的断言：等某个线来接它的时候，这些用例就是那条线的
- *   契约。用例在、调用方不在，是过渡期的正常状态。
+ * ★ 这一版起它**有调用方了**（站点分发那条路，与开发者模式的"从一个包安装"）。
+ *   所以除了下面这些直接对 reader 的断言，site-plugins.test.mjs 那边还有一组
+ *   端到端的（真的包、真的换入、真的验签与钉钉子）。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -227,4 +227,46 @@ test('★★ 钉子本身读不动 ⇒ 一律拒绝，绝不退化成"首次即�
   }
   // 大写不算"同一把"：指纹是**全小写十六进制**（附录 A.3 那句话的形状），
   // 而一个大小写不敏感的比对会让两个不同的字符串看起来一样。
+});
+
+// ── 把负载铺到磁盘上（`unpackTo`）────────────────────────────────────────────
+
+test('★ unpackTo 铺出来的树与包里的记录**逐字节相同**，权限位是 0644', () => {
+  // ★ 权限位**进摘要**（plugins.digestOf 里有 mode），所以"铺出来的文件是 0644"
+  //   不是一件风格问题：两份实现（或者一次 umask 差异）漂开的那天，同一份内容会
+  //   在机器上算出两个摘要，而症状是"明明装好了却一直说内容不一样"。
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-'));
+  const r = PP.parsePackage(SIGNED);
+  assert.equal(r.ok, true);
+  const u = PP.unpackTo(r, SIGNED, dir);
+  assert.equal(u.ok, true, u.why);
+
+  const got = P.readPluginFiles(dir);
+  // ★ 两边**各自按自己的口径排过序**（`readPluginFiles` 用 JS 的 `<`，包里的记录
+  //   是容器次序 = UTF-8 字节序），所以这里必须按同一个键重排了再比 —— 直接
+  //   `deepEqual` 会在那条非 BMP 路径上红，而那是**排序口径**的差别，不是内容。
+  const byBytes = (a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8'));
+  const norm = (list) => list.map((f) => ({ path: f.path, size: Number(f.size), sha256: f.sha256 }))
+    .sort(byBytes);
+  assert.deepEqual(norm(got), norm(r.files),
+    '铺出来的树必须与包里的记录逐条对得上');
+  assert.equal(got.filter((f) => f.kind !== 'f').length, 0,
+    '★ 只有普通文件 —— 格式里没有链接、没有空目录，铺出来也不许有');
+  for (const f of got) {
+    assert.equal(f.mode, 0o644, `★ 权限位由格式定死：${f.path} 是 ${f.mode.toString(8)}`);
+  }
+});
+
+test('★ 客户端收得下的包，必须装得下它**自己允许的最大负载**', () => {
+  // ★ 跨语言那一条（客户端这份上限 vs 守护进程的 PLUGIN_PACKAGE_MAX_BYTES）由
+  //   集群侧的用例 19.11d 钉着；这里钉的是客户端**自己**的那笔账：一个合法到
+  //   极点的包（负载刚好顶到 total_bytes）base64 之后 + 记录表与签名块，
+  //   必须仍然塞得进 package_bytes。不然客户端会单方面拒绝一个合规站点发得出来
+  //   的包，而症状是"站点说它发了，我就是收不到"。
+  const S = require('../src/main/site-plugins.js');
+  const wire = Math.ceil(S.HARD_LIMITS.total_bytes * 4 / 3) + (1 << 16);
+  assert.ok(S.HARD_LIMITS.package_bytes >= wire,
+    `package_bytes=${S.HARD_LIMITS.package_bytes} 装不下最大合法负载的 base64（约 ${wire} 字节）`);
 });

@@ -12,15 +12,6 @@
  *   它判、**不写**：钉住发生在用户点同意的那一刻（调用方 `config.js` 的
  *   `pinPluginKey`）。这两个函数的**判据与写点分开**是故意的，见 `keyVerdict` 的注释。
  *
- * ── ★ 这个阶段它没有调用方，这是刻意的 ──────────────────────────────────────
- *
- * 读包的能力**必须先于任何一条线落地**。反过来（先让站点开始发包、再让客户端
- * 学会认包）中间会开一个窗口：那个窗口里客户端拿到的是它读不懂的字节，而它
- * 唯一能说的话是"校验不过"—— 一句既不准确、又指不回根因的话。
- *
- * 所以这一版只落 reader 与用例；`site-plugins.js` 走 `files` 那条老路**一个字
- * 没动**。★ reader 有用例、没有调用方，是**过渡期的正常状态**，不是半成品。
- *
  * ── ★ 它与 `packer/slurmate-packer.js` 是同一条规则的**两份实现** ──────────
  *
  * 这是没办法的事：打包器要"下载这个文件夹就能用"，所以它不 import 客户端里的
@@ -36,13 +27,23 @@
  *
  * `checkRelPath` 在客户端侧是**再判一遍**：服务端可能被换过，"对面已经判过"
  * 不构成省略的理由（与 `validate_session()` 对会话文件的态度同源）。
+ *
+ * ── 谁在用这一份 ────────────────────────────────────────────────────────────
+ *
+ *   `site-plugins.js`  站点分发那条路：`plugin_package` 取回来的字节在这里解析、
+ *                      验签、重算摘要，再 `unpackTo` 铺成树（见那边的 fetchPackage）
+ *   `plugins/install.js` 开发者模式的「从一个包安装」：用户自己挑一个 `.splug`
+ *
+ * ★ 而 `keyVerdict`（§5.4 那三个判词）**只有站点分发那条路在用**：钉子防的是
+ *   远端把一个 id 换成别人做的构件，而"用户自己在自己机器上挑了一个文件"钉不住
+ *   （他本来就能改这台机器上的任何东西）。见 index.js 的 app:installPlugin。
  */
 
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const plugins = require('./plugins/index.js');
 const sitePlugins = require('./site-plugins.js');
-
 // ==============================================================================
 //  容器常量（附录 A）
 // ==============================================================================
@@ -65,18 +66,17 @@ const MAX_DEPTH = 8;
 
 // ── ★ 这个读方**不**执行"单文件多少字节 / 一共几份"那三个上限 ──────────────
 //
-// 那三个数在**协议**里是站点自述的 `limits`（客户端取两者中更严的）。包模式下的
-// 规矩是它们变成**负载内**规则、由打包器与读方执行、不再走线。
+// 那三个数在**协议**里是站点自述的 `limits`。包模式下它们变成**负载内**规则：
+// 由打包器与**调用方**执行（`site-plugins.js` 的 `fetchPackage` 拿包里的记录去走
+// `checkDeclared` —— 与逐份那条路**同一个函数**），不再需要走线。
 //
-// ★ **服务端那一半已经就位**：`limits` 里多了 `package_bytes`（链路约束），
-//   `plugin_package` 整包一次发。缺的是**这个客户端改走按包收**那一步 —— 在它
-//   做到之前，那三个数仍然走线（站点报、客户端取更严的）。
+// ★ 为什么不在**这里**执行：这一层只回答"这些字节是不是一个合规的包"，而"这个
+//   站点发的东西我收不收得下"是调用方的 DoS 护栏（`HARD_LIMITS` 与站点自述两者
+//   取更严）。两件事混在一起，`parsePackage` 就会需要一个它不该知道的参数。
 //
-// ★ 今天不收它们**不是**一个敞口，理由是可推的：`file_count` 被长度方程夹住了
-//   （每条记录至少 42 字节，而整张记录表必须放得进这个文件），所以一个包能声明的
-//   份数天然不超过 `(文件长度 − 20) / 42`；而这个函数吃的是一段**已经在内存里**的
-//   字节，它的规模由调用方决定。真正需要"份数上限"的是**收下来的包文件**有多大 ——
-//   那是链路约束，跟着 `package_bytes` 一起进来。
+// ★ 而这一层不吃它们**不是**一个敞口：`file_count` 被长度方程夹住了（每条记录至少
+//   42 字节，整张记录表必须放得进这个文件），真正需要"份数上限"的是**收下来的包
+//   文件**有多大 —— 那是链路约束，跟着 `package_bytes` 一起判。
 
 /**
  * 拒绝的理由词表。**三份实现字面相同**（见文件头）。
@@ -388,6 +388,36 @@ function dataOf(buf, f) {
 }
 
 /**
+ * 把解析出来的负载**写到磁盘上**。
+ *
+ * ★ 这是这个模块里**唯一**落盘的地方，而且它是给调用方用的 —— 上面那句"它不落盘"
+ *   说的是解析本身。放在这里而不是各调用方自己写，理由是"把字节铺成一棵树"这条
+ *   规则要有**一份实现**：权限位（`0644`）在这里定死，而权限位**进摘要** ——
+ *   两份实现漂开的那天，同一份内容会在两台机器上算出两个摘要。
+ *
+ * ★ **不跟随、不链接、不建空目录**：格式里就没有这些东西（附录 A），所以这里
+ *   只有普通文件与 `mkdir -p`。
+ *
+ * ★ 调用方**必须**在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` +
+ *   `digestOf`，或重新 `parsePackage` 那个包文件）—— "校验我收到的"不等于
+ *   "校验我写下的"，磁盘满的时候 `writeFileSync` 会留下半份文件然后抛错。
+ */
+function unpackTo(parsed, buf, dir) {
+  try {
+    for (const f of parsed.files) {
+      const full = path.join(dir, ...f.path.split('/'));
+      fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(full, dataOf(buf, f), { mode: 0o644 });
+      // 显式 chmod：writeFileSync 的 mode 会被 umask 削，而**摘要里有权限位**。
+      try { fs.chmodSync(full, 0o644); } catch { /* Windows */ }
+    }
+  } catch (e) {
+    return { ok: false, why: `写到 ${dir} 失败：${e.message}` };
+  }
+  return { ok: true };
+}
+
+/**
  * 从磁盘读一个包文件。读不动是 `{ok:false, code:'length'}` 而不是抛 ——
  * 调用方（同意界面、对账）一律按"这个包不成立"处理，不写 try/catch。
  */
@@ -403,6 +433,6 @@ function readPackageFile(file) {
 
 module.exports = {
   MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, MAX_DEPTH, MANIFEST, R, PIN,
-  contentDigest, parsePackage, dataOf, readPackageFile,
+  contentDigest, parsePackage, dataOf, readPackageFile, unpackTo,
   parseSigBlock, fingerprint, verifyEd25519, keyVerdict,
 };

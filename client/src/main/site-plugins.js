@@ -38,12 +38,67 @@
  *   `limits`），不能是"这次失败了"（瞬时事实）。合并两者等于给一个能让下载失败的
  *   人（断流、丢包、MITM）一个把用户降级到旧本地副本的开关 —— 攻击成本从"改内容"
  *   降到"让下载失败"，而后者便宜得多。
+ *
+ * ── 两条投递方式，同一份内容 ────────────────────────────────────────────────
+ *
+ * 站点可以把一个插件发下来**两条路**：
+ *
+ *   `package` + `plugin_package`   一次 RPC 拿到整个 `.splug`（容器的字节）
+ *   `files`   + `plugin_file`      一份一份取（N 次 RPC）
+ *
+ * ★ **优先走包，但不是因为"快"** —— 快只是顺带。理由是**包才是作者发布的那个
+ *   构件**：它是签名的载体（§4.2），它的内容摘要（§3.4）是"是不是同一份东西"的
+ *   判据，而逐份取回来的那堆字节谁也证明不了什么。客户端要能**自己**解析、自己
+ *   重算摘要、自己验签（§6.4 那一半在客户端这一侧的形状），手里就必须有容器本身。
+ *
+ * ★ **两条路都留着，而且回退只在一个方向上开。** `files` 那条路一个字没动 ——
+ *   它是已部署的 v0.6 站点与老客户端共用的那条。回退**只在**"这个包是用一种本
+ *   客户端读不懂的说法写的"（`package.format` 比认识的**新**）时发生：那不是
+ *   "这个包坏了"，是格式演进本身，而格式演进必须能加法过渡（PROTOCOL.md）。
+ *   **其余每一条读包的失败都不回退** —— 一个验不过的包加上一条能绕过它的路，
+ *   等于把验签降级成一句建议。
+ *
+ * ★ 池里一个版本是**两样挨着**：
+ *
+ *   <站点池>/<id>/<版本>/        解出来的树 —— `require()` 用的是它
+ *   <站点池>/<id>/<版本>.splug   包本身 —— 它与树一起换入，也一起被回收
+ *
+ *   "删掉本机那一份"（§5.3）= **树**不在了 ⇒ 同意作废（见下一节）。包文件单独
+ *   不在了**不算**撤回：能加载的是树，包是它的来路凭证；那件事会被如实报出来
+ *   （`listPooled` 的 `hasPackage`），但既不会让用户重新同意一遍，也不会被
+ *   **静默取回来**。
+ *
+ * ── 删除 = 撤回同意（§5.3）──────────────────────────────────────────────────
+ *
+ * ★ 对账时发现"台账里信任着这个 `(id, 版本)`，而池里没有它" ⇒ **台账那条必须
+ *   消失**，于是同一个对账里它自然走进待同意 —— 不需要另写一条"撤回"的规则，
+ *   它就是"没有台账条目"那一格。
+ *
+ *   不这么做的话：用户删掉池里那一份，下一次对账会按"摘要与台账相符"**静默装
+ *   回来、一个字都不问**。那不是"当作从来没有过"，那是"用户想让它消失，它自己
+ *   回来了"。
+ *
+ * ★ 也**绝不**在文案里断言是用户删的：客户端不知道原因（可能是我们自己回收的、
+ *   可能是同步失败、可能是他删的），它只知道"不在了"。
+ *
+ * ★ 只对**本站点这一轮报出来的**那些判 —— 别的站点的台账条目这一轮管不着。
  */
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const plugins = require('./plugins/index.js');
+
+/**
+ * 延迟取读包那一半。
+ *
+ * ★ 这两个模块**互相 require**（`plugin-package.js` 要用 `checkRelPath`，理由写在
+ *   那边文件头），构成一个环。Node 的环在 `module.exports = {...}` 那一刻是会咬人
+ *   的：先加载的那个拿到的可能是**稍后会被整个替换掉**的 exports 对象，于是
+ *   `PP.parsePackage` 是 `undefined` —— 而报错会出现在一个看起来毫无关系的地方。
+ *   在**调用时**才取，就一定是在两边都加载完之后。
+ */
+function PP() { return require('./plugin-package.js'); }
 
 /** 快照表。放在站点池**里面**：清掉那个目录 = 记录与内容一起没，两者不可能各漂各的。 */
 const RECORD_NAME = '.sites.json';
@@ -57,12 +112,23 @@ const RECORD_VERSION = 1;
  * ★ `limits` 是**被审计方的自述**，所以只能收紧不能放宽（见 effectiveLimits）。
  *   理由很具体：一个站点（或一次 MITM）可以报 10 万个 1 字节的文件，客户端会跑很
  *   久、耗尽 inode、把 `~/.slurmate` 塞满。
+ *
+ * ★ `package_bytes` 是**另一笔账**：前面四个数说的是**负载内部**（解出来那些），
+ *   它说的是**链路上**——整包一次发，base64 之后还要大三分之一，得装得进一条应答。
+ *   所以它不能由 `total_bytes` 推出来，只能各报各的。
+ *
+ *   这个数取 4 MiB，与守护进程的 `PLUGIN_PACKAGE_MAX_BYTES` 和 CLI 的
+ *   `RPC_MAX_RESPONSE_BYTES` **同一个数**（那两处的关系有一条跨文件用例钉着）。
+ *   客户端这一份必须**不小于**它们：小了就等于客户端单方面拒绝一个合规站点发得
+ *   出来的包。三处分别在 JS / Python 里，没有共享机制 —— 所以这里写的是判断，
+ *   不是抄写：4 MiB 是"1 MiB 负载 × 4/3 的 base64 + 记录表与签名块，再留一半余量"。
  */
 const HARD_LIMITS = {
   file_bytes: 256 * 1024,
   total_bytes: 1 << 20,
   max_files: 256,
   max_depth: 8,
+  package_bytes: 4 << 20,
 };
 
 const MAX_SEGMENT_BYTES = 255;
@@ -218,6 +284,97 @@ function effectiveLimits(reported) {
   return out;
 }
 
+// ── 整包：第二条投递方式 ────────────────────────────────────────────────────
+//
+// 站点在 `op_plugins` 的每一项上多报一个 `package`（`{format, bytes, digest}`），
+// 顶层 `limits` 多报一个 `package_bytes`。三个字段都是**站点自述**，所以客户端
+// 全部要自己再算一遍（见 fetchPackage）—— 这里做的只是"按自述先把明显不成立的
+// 挡在外面"，省掉一次注定失败的传输。
+
+/**
+ * 站点自述的那个 `package` 说得通吗？
+ *
+ * @returns {null|{why:string, tooNew?:boolean}} `null` = 说得通。
+ */
+function packageMetaProblem(pkg, limits) {
+  const bad = (why, tooNew) => ({ why, tooNew: tooNew === true });
+  if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
+    return bad('package 不是一个对象');
+  }
+  if (!Number.isInteger(pkg.format) || pkg.format < 1) {
+    return bad(`package.format 是 ${JSON.stringify(pkg.format)}，不是正整数`);
+  }
+  const FORMAT = PP().FORMAT;
+  // ★ 两个方向**不是同一件事**，所以不合并：
+  //   比认识的新 ⇒ 格式演进了，客户端落后 —— 这是**可以回退**的那一种（见文件头）；
+  //   比认识的旧/不认识 ⇒ 站点发了一个本实现根本没有过的说法，说不清它是什么。
+  if (pkg.format > FORMAT) {
+    return bad(`这一份包用的是格式 ${pkg.format}，而本客户端只认识 ${FORMAT} ——`
+      + '站点的守护进程比这个客户端新', true);
+  }
+  if (pkg.format < FORMAT) {
+    return bad(`package.format = ${pkg.format}，本客户端不认识（只认识 ${FORMAT}）`);
+  }
+  if (!Number.isInteger(pkg.bytes) || pkg.bytes <= 0) {
+    return bad(`package.bytes 是 ${JSON.stringify(pkg.bytes)}，不是正的字节数`);
+  }
+  if (pkg.bytes > limits.package_bytes) {
+    return bad(`站点说它这个包有 ${pkg.bytes} 字节，超过本客户端收得下的 `
+      + `${limits.package_bytes} 字节`);
+  }
+  if (typeof pkg.digest !== 'string' || !/^[0-9a-f]{64}$/.test(pkg.digest)) {
+    return bad('package.digest 不是 64 位十六进制的内容摘要');
+  }
+  return null;
+}
+
+/**
+ * 这一份**走哪条路**。**界面也用这个判据**（`missing[].distributed`），所以它导出。
+ *
+ * ★ 判据全是**协议事实**，与"这次下载失败了"毫无关系（见文件头第三个「不」）：
+ *
+ *   · `p.package` 是一个形状说得通的对象 ⇒ 站点会发包
+ *   · `p.files` 是一个数组             ⇒ 站点会发文件
+ *   · `p.package === null` ⇒ 站点**此刻**生产不出这一份（比如包在它启动之后被换掉
+ *     了）—— 这**不是**"这个站点没有这个能力"，后者由顶层有没有 `limits` 回答。
+ *     三态纪律：缺席（`undefined`）≠ 否（`null`），别把两者读成同一件事。
+ *   · 两个都没有 ⇒ 这一份不分发（跳过它，**不是**记一条失败）
+ *
+ * @returns {{mode:'package'|'files'|null, why?:string, notice?:string}}
+ */
+function deliveryOf(p, limits) {
+  const hasFiles = Array.isArray(p.files);
+  const hasPkg = p.package !== undefined && p.package !== null;
+  if (!hasFiles && !hasPkg) return { mode: null };
+  if (!hasPkg) return { mode: 'files' };
+  const bad = packageMetaProblem(p.package, limits);
+  if (!bad) return { mode: 'package' };
+  // 格式太新是**唯一**回退的情形，而且只在还有 `files` 可走的时候。
+  if (bad.tooNew && hasFiles) return { mode: 'files', notice: bad.why };
+  return { mode: null, why: bad.why };
+}
+
+/**
+ * 包里那些记录 → `(path, size, sha256)` 三元组，`size` 是**数**不是 BigInt。
+ *
+ * ★ `parsePackage` 已经把这些 size 逐个夹在 `Number.MAX_SAFE_INTEGER` 之内了
+ *   （超了就是 `length`，它当场拒绝），所以这里的 `Number()` 不会失精。
+ *   下游（`checkDeclared`、`verifyStaged`）与逐份那条路吃的是同一种形状 ——
+ *   **两条投递方式共用一套校验**，这正是它必须同形的原因。
+ */
+function fileListOf(pkg) {
+  return pkg.files.map((f) => ({ path: f.path, size: Number(f.size), sha256: f.sha256 }));
+}
+
+/** 两份文件清单是不是同一份东西（顺序无关）。交叉判据用，见 sync。 */
+function sameFileSet(a, b) {
+  if (a.length !== b.length) return false;
+  const key = (f) => `${f.path} ${f.size} ${f.sha256}`;
+  const x = a.map(key).sort();
+  const y = b.map(key).sort();
+  return x.every((v, i) => v === y[i]);
+}
+
 // ── 快照表 ──────────────────────────────────────────────────────────────────
 
 function recordPathOf(siteRoot) { return path.join(siteRoot, RECORD_NAME); }
@@ -281,7 +438,13 @@ function siteEntry(record, key, label) {
   return fresh;
 }
 
-/** 池里每一个 `<id>/<版本>`，以及谁在要它。 */
+/**
+ * 池里每一个 `<id>/<版本>`，以及谁在要它。
+ *
+ * ★ `hasPackage` = 旁边那个 `<版本>.splug` 在不在。它只用于**如实报告**（见文件头
+ *   那一段）：包单独不在了不构成撤回，也不会被静默取回来 —— 但它是一件用户看得见
+ *   的事实（他打开那个目录就会发现少了一个文件），所以不能瞒着。
+ */
 function listPooled(siteRoot) {
   const out = [];
   let level1;
@@ -298,11 +461,17 @@ function listPooled(siteRoot) {
     if (!st.isDirectory()) continue;
     for (const version of fs.readdirSync(idDir).sort()) {
       const dir = path.join(idDir, version);
+      // ★ 只认**目录**：旁边的 `<版本>.splug` 是这一份的包，不是另一份插件。
       try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
-      out.push({ id, version, dir });
+      out.push({ id, version, dir, hasPackage: fs.existsSync(pkgPathOf(siteRoot, id, version)) });
     }
   }
   return out;
+}
+
+/** 池里那一份包的位置 —— **一个函数**，写与读、换入与回收都走它。 */
+function pkgPathOf(siteRoot, id, version) {
+  return path.join(siteRoot, id, `${version}.splug`);
 }
 
 // ── 对账 ────────────────────────────────────────────────────────────────────
@@ -428,7 +597,99 @@ function verifyStaged(destDir, declared, expect) {
   return { ok: true, entry: r.entry };
 }
 
-/** 一次 RPC，撞上限流就退避重试。**限流不是失败。** */
+/**
+ * 整包一次取 —— 另一条投递方式。**一条 RPC**，而逐份那条是 N 条。
+ *
+ * ★ 这里做的每一件事都是"**自己算一遍**"：自己数字节、自己解析容器、自己逐份校
+ *   sha256、自己重算内容摘要、自己验签。站点自述的那几个数一个都不当判据 ——
+ *   它们只用来**比对**：对不上就说明"站点说它发的是什么"与"它实际发的是什么"
+ *   不是一回事，那种时候唯一正确的动作是拒绝。
+ *
+ * ★ 解出来的树与包**都落到暂存**，一起等着过闸或换入（见 acceptStaged）。
+ */
+async function fetchPackage(rpc, p, meta, dir, pkgFile, limits, ctx) {
+  if (ctx.stale()) return { ok: false, why: '连接已经换了一条，这次对账作废' };
+  const resp = await rpcWithBackoff(rpc, { op: 'plugin_package', id: p.id, version: p.version });
+  if (!resp || !resp.ok) {
+    const d = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
+    return { ok: false, why: `取整包失败：${d}` };
+  }
+  const data = resp.data || {};
+  if (typeof data.data !== 'string') {
+    return { ok: false, why: '取整包的响应里没有 data' };
+  }
+  const buf = Buffer.from(data.data, 'base64');
+  // 与上一轮 `op_plugins` 里记下的那个数比 —— 那是**两个独立时刻的两个说法**。
+  if (buf.length !== meta.bytes) {
+    return { ok: false,
+      why: `整包收到 ${buf.length} 字节，而站点在插件清单里报的是 ${meta.bytes} 字节` };
+  }
+  const parsed = PP().parsePackage(buf);
+  if (!parsed.ok) return { ok: false, why: `这一份包读不了（${parsed.code}）：${parsed.why}` };
+  // ★ 内容摘要必须与站点自述的一致。**这不是在比容器字节的 sha256** —— 摘要盖的是
+  //   内容（§3.4）：给同一份负载补一个签名块会改变容器长度而摘要一个字都不变，
+  //   那正是"摘要不变 ⇒ 还是同一份构件"这条规则的样子。
+  if (parsed.digest !== meta.digest) {
+    return { ok: false, why: `整包的内容摘要是 ${parsed.digest}，而站点报的是 `
+      + `${meta.digest} —— 这两次说的不是同一份东西` };
+  }
+  // ★ 响应**自己报的那两个数**也要核 —— 它是关于同一份东西的**第三个说法**
+  //   （`op_plugins` 里一次、这次响应里一次、以及我们自己算出来的）。三次说法
+  //   不一致 = 这个站点讲不圆自己的故事，而那种时候该做的事是拒绝，不是挑一个信。
+  //   缺席 = 这个版本的守护进程不报它（三态纪律：缺席 ≠ 否），那就跳过。
+  if (Number.isInteger(data.bytes) && data.bytes !== buf.length) {
+    return { ok: false, why: `取整包的响应里说它发了 ${data.bytes} 字节，实际是 `
+      + `${buf.length} 字节` };
+  }
+  if (typeof data.digest === 'string' && data.digest !== parsed.digest) {
+    return { ok: false, why: `取整包的响应里报的内容摘要是 ${data.digest}，`
+      + `而这一份包算出来是 ${parsed.digest}` };
+  }
+  // 负载内部那几条上限（单文件多大、一共几份、加起来多少、路径多深）在这里执行。
+  // ★ 与逐份那条路**同一个函数**（`checkDeclared`）：两条投递方式对"这一份合不
+  //   合规"必须给出同一个答案，否则"同一份内容走哪条路"会变成一个有意义的差别。
+  const chk = checkDeclared(fileListOf(parsed), limits);
+  if (!chk.ok) return { ok: false, why: `这一份包里的内容不合规：${chk.why}` };
+
+  try {
+    // ★ 铺树用 `unpackTo` —— **只有那一份实现**（权限位 `0644` 在这里定死，
+    //   而权限位进摘要：两份实现漂开的那天，同一份内容会算出两个摘要）。
+    const u = PP().unpackTo(parsed, buf, dir);
+    if (!u.ok) return { ok: false, why: u.why };
+    fs.writeFileSync(pkgFile, buf, { mode: 0o644 });
+  } catch (e) {
+    return { ok: false, why: `写到暂存失败：${e.message}` };
+  }
+
+  // ★ **校验我写下的，不是校验我收到的。** 与 verifyStaged 同一个理由：磁盘满的
+  //   时候 `writeFileSync` 会留下半份文件然后抛错，而不抛的那种更坏。
+  const again = PP().readPackageFile(pkgFile);
+  if (!again.ok) return { ok: false, why: `写下去的包读不回来：${again.why}` };
+  if (again.digest !== parsed.digest) {
+    return { ok: false,
+      why: `写下去的包与收到的那一份不是同一份（${again.digest} ≠ ${parsed.digest}）` };
+  }
+  return { ok: true, files: chk.files, pkg: parsed };
+}
+
+/** 某一份包记录的字节由 `plugin-package.js` 的 `dataOf` 取（**只有那一份实现**）。 */
+
+/**
+ * §5.4：这一份的签名者，与本机钉住的那把是同一把吗。
+ *
+ * ★ `pkg` 为 `null` 表示"这一份**不是以一个包的形式来的**"（逐份那条路）—— 那时
+ *   `keyVerdict` 对钉过的 id 给出 `unsigned`，也就是**拒绝**。这是对的：钉过之后
+ *   每一份都必须能证明是同一把钥匙签的，而一堆散装字节证明不了任何事。
+ *   （钉子是**首次即信任**，所以从没钉过的 id 在这里永远是 `first`，不受影响。）
+ */
+function pinVerdict(o, p, pkg) {
+  const pinned = (typeof o.pinnedKey === 'function') ? o.pinnedKey(p.id) : undefined;
+  return PP().keyVerdict(pinned, pkg);
+}
+
+/**
+ * 一次 RPC，撞上限流就退避重试。**限流不是失败。**
+ */
 async function rpcWithBackoff(rpc, req) {
   let last = null;
   for (let i = 0; i <= RATE_BACKOFF_MS.length; i++) {
@@ -453,6 +714,11 @@ async function rpcWithBackoff(rpc, req) {
  *   siteRoot           {string} 站点池（绝对路径）
  *   stagingRoot        {string} 暂存根（绝对路径，**站点池的兄弟目录**）
  *   trusted            {Function} `(id, version, digest) → boolean`
+ *   forgetTrust        {Function} `(id, version) → {had:boolean}`：把这个 `(id, 版本)`
+ *                      的同意台账条目**删掉**。§5.3：本机那一份不在了 ⇒ 同意作废。
+ *                      只在"池里没有这一份"时被调用；没有条目时返回 `had:false`。
+ *   pinnedKey          {Function} `(id) → string|undefined`：本机钉住的公钥指纹
+ *                      （§5.4）。`undefined` = 从没钉过。见 config.pinnedKeyOf。
  *   protectedVersions  {Set<string>} 活会话引用的 `<id>@<版本>`（来自 `op:list`）
  *   generation         {number}  这次对账属于哪一代连接
  *   stale              {Function} `() → boolean`：连接是否已经换了一条
@@ -462,13 +728,15 @@ async function rpcWithBackoff(rpc, req) {
 async function sync(o) {
   const now = typeof o.now === 'function' ? o.now : () => Date.now();
   const stale = typeof o.stale === 'function' ? o.stale : () => false;
+  const forgetTrust = typeof o.forgetTrust === 'function'
+    ? o.forgetTrust : () => ({ had: false });
   const ctx = { stale };
   const siteRoot = o.siteRoot;
   const stagingRoot = o.stagingRoot;
 
   const out = {
     supported: false, reason: null, error: null,
-    added: [], kept: [], pendingConsent: [], reclaimed: [], failed: [],
+    added: [], kept: [], pendingConsent: [], reclaimed: [], failed: [], withdrawn: [],
     notices: [], record: null, limits: { ...HARD_LIMITS },
   };
 
@@ -576,65 +844,148 @@ async function sync(o) {
       if (stale()) break;
       const label = `${p.title || p.name || p.id} ${p.version}`;
       const dest = path.join(siteRoot, p.id, p.version);
+      const pkgDest = pkgPathOf(siteRoot, p.id, p.version);
+      const fail = (why) => out.failed.push({
+        id: p.id, version: p.version, name: p.name, title: p.title, why,
+      });
 
-      // ★ 站点报了这个插件、却没给它文件清单 ⇒ **这一份不分发**，跳过它。
-      //   这不是失败：`op_plugins` 报的是"本站装了哪些插件"，而分发是**另一件事**
-      //   （老守护进程、或者调试里造的那种条目就长这样）。记成失败的话，用户会
-      //   看到一条"没能装上 X"，而其实站点从来没有说要发它。
-      //   界面用 `missing[].distributed` 把这两种情况分开说。
-      if (p.files === undefined || p.files === null) continue;
-
-      const chk = checkDeclared(p.files, out.limits);
-      if (!chk.ok) {
-        out.failed.push({ id: p.id, version: p.version, name: p.name, title: p.title,
-                          why: `站点报的这一份不能用：${chk.why}` });
+      // ── 1. 这一份走哪条路（整包 / 逐份 / 不分发）──
+      const del = deliveryOf(p, out.limits);
+      if (!del.mode) {
+        // ★ 站点报了这个插件、却没给它任何可分发的东西 ⇒ **这一份不分发**，跳过它。
+        //   这不是失败：`op_plugins` 报的是"本站装了哪些插件"，而分发是**另一件事**
+        //   （老守护进程、或者调试里造的那种条目就长这样）。记成失败的话，用户会
+        //   看到一条"没能装上 X"，而其实站点从来没有说要发它。
+        //   界面用 `missing[].distributed` 把这两种情况分开说。
+        if (del.why) fail(`站点报的这一份不能用：${del.why}`);
         continue;
       }
-      const declared = chk.files;
+      if (del.notice) {
+        // ★ 「站点太新」是**站点级**的事实（格式是守护进程的属性），见到一次记一次；
+        //   逐份那条路照旧走，所以它不是一次失败，而是一条要说出来的话。
+        if (!out.reason) out.reason = 'site_too_new';
+        out.notices.push(`${label}：${del.notice}。这一次退回逐份取那一份清单。`);
+      }
 
-      // **已经有一份** —— 增量。逐文件比，对得上就跳过。
-      if (fs.existsSync(dest)) {
-        const r = verifyStaged(dest, declared, { id: p.id, version: p.version });
-        if (r.ok) {
+      // ── 2. 站点报的逐份清单（有就校验；包模式下它仍然是**交叉判据**）──
+      let want = null;
+      if (Array.isArray(p.files)) {
+        const chk = checkDeclared(p.files, out.limits);
+        if (!chk.ok) { fail(`站点报的这一份不能用：${chk.why}`); continue; }
+        want = chk.files;
+      }
+
+      // ── 3. 本机那一份不在了 ⇒ 同意作废（§5.3，见文件头那一节）──
+      const exists = fs.existsSync(dest);
+      if (!exists) {
+        const w = forgetTrust(p.id, p.version);
+        if (w && w.had) {
+          out.withdrawn.push({ id: p.id, version: p.version, name: p.name, title: p.title });
+          out.notices.push(`本机那一份 ${label} 不在了，它上一次的同意已经作废 ——`
+            + '下面会重新问你一次。');
+        }
+      }
+
+      // ── 4. **已经有一份** —— 增量。逐文件比，对得上就不重下 ──
+      if (exists) {
+        // 核对的判据：站点这一轮报的逐份清单；站点只报包的时候（`files` 那条路
+        // 它已经不发了）退到**本机那个包** —— 它是上一次下来、逐份校过的那一份。
+        const rd = fs.existsSync(pkgDest) ? PP().readPackageFile(pkgDest) : null;
+        const pkgOnDisk = (rd && rd.ok) ? rd : null;
+        if (rd && !rd.ok) {
+          out.notices.push(`本机那一份 ${label} 旁边的 ${p.version}.splug 读不出来`
+            + `（${rd.why}）—— 树本身照样核，但那个包已经不能当来路凭证了。`);
+        }
+        let decl = want;
+        if (!decl) {
+          if (!pkgOnDisk) {
+            fail(`本机已有 ${label}，但站点这一版只报了一个包，而本机连那个包也不在了`
+              + `（只剩解出来的树）—— 没法核对它是不是同一份。`
+              + `把 ${dest} 删掉再重新同步一次。`);
+            continue;
+          }
+          decl = fileListOf(pkgOnDisk);
+        }
+
+        const r = verifyStaged(dest, decl, { id: p.id, version: p.version });
+        if (r.ok && o.trusted(p.id, p.version, r.entry.digest)) {
           out.kept.push({ id: p.id, version: p.version, name: p.name, title: p.title, dir: dest });
-        } else {
+          continue;
+        }
+        if (!r.ok) {
           // ★ **绝不静默覆盖。** 站点改了内容却没升版本号是**站点的错**，而覆盖的
           //   后果是一条正在跑的旧会话配上新的客户端那一半 —— 正是 PROTOCOL.md 里
           //   "两半是配套的"那条注释在防的事。
-          out.failed.push({
-            id: p.id, version: p.version, name: p.name, title: p.title,
-            why: `本机已有 ${label}，但它的内容与站点现在报的不一样（${r.why}）。`
-              + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。',
-          });
+          fail(`本机已有 ${label}，但它的内容与站点现在报的不一样（${r.why}）。`
+            + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。');
+          continue;
         }
+
+        // ★ **同意闸的第二个落点：本机已经有一份、而台账对不上。**
+        //
+        //   这一段以前不存在，而它不在的后果是**这个插件在界面上彻底看不见**：
+        //   它进了池子（`active:false`），于是 `missing` 不认领它（那边要求
+        //   `registry.get` 取不到）；它又在 `plugins` 那一列之外。两条路都不在，
+        //   用户连"点同意"的入口都没有，重新同步也救不回来。
+        //
+        //   摘要换一次公式、或者用户删过 `config.json` 里那一条，这条路就会对
+        //   **每一个**站点的**每一个**插件成立 —— 集体消失、无从恢复。
+        const pv = pinVerdict(o, p, pkgOnDisk);
+        if (!pv.ok) { fail(pv.why); continue; }
+        out.pendingConsent.push({
+          id: p.id, version: p.version, name: p.name, title: p.title,
+          digest: r.entry.digest,
+          // ★ `existing`：这一份**已经在池里**，点同意时是"原地认领"而不是换入
+          //   （见 acceptStaged），点不同意时删的也是池里那一份（见 index.js）。
+          existing: true,
+          stagedDir: dest, stagedPkg: null,
+          fingerprint: pv.fingerprint,
+          siteKey: o.siteKey, siteLabel: o.siteLabel,
+          files: decl.map((f) => f.path),
+        });
         continue;
       }
 
-      // **没有** —— 下载到暂存。
+      // ── 5. **没有** —— 下载到暂存 ──
       const staged = path.join(stagingDir, p.id, p.version);
+      const stagedPkg = path.join(stagingDir, p.id, `${p.version}.splug`);
       try {
         fs.mkdirSync(staged, { recursive: true, mode: 0o700 });
       } catch (e) {
-        out.failed.push({ id: p.id, version: p.version, name: p.name, title: p.title,
-                          why: `暂存目录建不出来：${e.message}` });
+        fail(`暂存目录建不出来：${e.message}`);
         continue;
       }
-      const got = await fetchFiles(o.rpc, p, declared, staged, out.limits, ctx);
-      if (!got.ok) {
-        out.failed.push({ id: p.id, version: p.version, name: p.name, title: p.title,
-                          why: got.why });
-        continue;
+
+      let decl;
+      let pkg = null;
+      if (del.mode === 'package') {
+        const got = await fetchPackage(o.rpc, p, p.package, staged, stagedPkg, out.limits, ctx);
+        if (!got.ok) { fail(got.why); continue; }
+        pkg = got.pkg;
+        decl = got.files;
+        // ★ **交叉判据**：站点在同一个响应里给了两份说法（逐份清单与整包），它们
+        //   必须描述同一份东西。不判的话，"客户端按哪一份理解"就成了一件取决于
+        //   实现细节的事 —— 而两份说法分家的那一天，谁也不该装作没看见。
+        if (want && !sameFileSet(want, decl)) {
+          fail('站点给的逐份清单与整包说的不是同一份东西 —— 两份说法对不上，'
+            + '没法判断该信哪一个。请管理员查一下这个插件在站点上的部署。');
+          continue;
+        }
+      } else {
+        const got = await fetchFiles(o.rpc, p, want, staged, out.limits, ctx);
+        if (!got.ok) { fail(got.why); continue; }
+        decl = want;
       }
-      const vr = verifyStaged(staged, declared, { id: p.id, version: p.version });
-      if (!vr.ok) {
-        out.failed.push({ id: p.id, version: p.version, name: p.name, title: p.title,
-                          why: vr.why });
-        continue;
-      }
+
+      const vr = verifyStaged(staged, decl, { id: p.id, version: p.version });
+      if (!vr.ok) { fail(vr.why); continue; }
       const digest = vr.entry.digest;
 
+      const pv = pinVerdict(o, p, pkg);
+      if (!pv.ok) { fail(pv.why); continue; }
+
       if (!o.trusted(p.id, p.version, digest)) {
-        // ★ **同意闸的落点：下载后、暂存验完、rename 之前。**
+        // ★ **同意闸的主落点：下载后、暂存验完、rename 之前。**
         //
         //   下载**前**问不行：那时手里只有 (id, 版本, 名字)，**没有摘要** ——
         //   摘要是从字节算出来的，于是"内容变了要重新同意"这条需求直接无法实现。
@@ -644,19 +995,21 @@ async function sync(o) {
         //   （max_files / total_bytes 之下，暂存目录 0700）。见 SECURITY.md。
         out.pendingConsent.push({
           id: p.id, version: p.version, name: p.name, title: p.title,
-          digest, stagedDir: staged, siteKey: o.siteKey, siteLabel: o.siteLabel,
-          files: declared.map((f) => f.path),
+          digest, stagedDir: staged,
+          stagedPkg: pkg ? stagedPkg : null,
+          existing: false,
+          fingerprint: pv.fingerprint,
+          siteKey: o.siteKey, siteLabel: o.siteLabel,
+          files: decl.map((f) => f.path),
         });
         continue;
       }
 
-      const mv = acceptStaged({ stagedDir: staged, siteRoot, id: p.id,
-                                version: p.version, digest });
-      if (!mv.ok) {
-        out.failed.push({ id: p.id, version: p.version, name: p.name, title: p.title,
-                          why: mv.error });
-        continue;
-      }
+      const mv = acceptStaged({
+        stagedDir: staged, stagedPkg: pkg ? stagedPkg : null, siteRoot,
+        id: p.id, version: p.version, digest,
+      });
+      if (!mv.ok) { fail(mv.error); continue; }
       out.added.push({ id: p.id, version: p.version, name: p.name, title: p.title,
                        dir: mv.dir, digest });
     }
@@ -719,6 +1072,10 @@ async function sync(o) {
         if (out.pendingConsent.some((x) => x.id === it.id && x.version === it.version)) continue;
         try {
           fs.rmSync(it.dir, { recursive: true, force: true });
+          // ★ 包是与树**一起**换入的，所以回收时也一起走。留下一个没有树的
+          //   `<版本>.splug` 就是池里一份**谁也看不见**的残留（`listPooled` 只认
+          //   目录）—— 用户打开那个目录会看到一个说不清是什么的文件。
+          fs.rmSync(pkgPathOf(siteRoot, it.id, it.version), { force: true });
           try { fs.rmdirSync(path.dirname(it.dir)); } catch { /* 还有别的版本 */ }
           out.reclaimed.push({ id: it.id, version: it.version });
         } catch (e) {
@@ -741,17 +1098,42 @@ async function sync(o) {
 }
 
 /**
- * 把一份**验过的暂存树**换入站点池。**同意动作走的就是这里。**
+ * 把一份**验过的**构件收下。**同意动作走的就是这里。**
  *
- * ★ 换入这一步的目标永远是**一个全新的键**（版本不可变 ⇒ 同名版本已经存在是
- *   "拒绝"，不是"覆盖"），所以 `rename` 覆盖的是一个不存在的目标 —— POSIX 与
- *   Windows 都成立。需要"旧的先 rename 走、新的再 rename 进来"那种两步的只有
- *   删旧，而删旧是独立的收尾步骤。
+ * 两种情形，写法不同而判据相同：
  *
- * ★ **换入之前再核一遍摘要与对话框里那个值相同。** 用户同意的是他看到的那个摘要，
- *   不是"这个 (id, 版本) 上碰巧躺着的东西"。
+ *   ① **换入**（`existing` 假）：暂存里那一棵树 `rename` 进池子，包跟着一起。
+ *      目标是**一个全新的键**（版本不可变 ⇒ 同名版本已经存在是"拒绝"，
+ *      不是"覆盖"），所以 `rename` 覆盖的是一个不存在的目标 —— POSIX 与
+ *      Windows 都成立。需要"旧的先 rename 走、新的再 rename 进来"那种两步的
+ *      只有删旧，而删旧是独立的收尾步骤。
+ *
+ *   ② **原地认领**（`existing` 真）：树**已经在池里**（它上一次下来过、只是台账
+ *      对不上，见 sync 的第 4 步）。这时源与目标是同一个路径，没有 `rename` 可做
+ *      ——要做的只有一件事：**再核一遍摘要**。
+ *
+ * ★ 两种情形都**必须**在收下之前再核一遍摘要与对话框里那个值相同。用户同意的是
+ *   他看到的那个摘要，不是"这个 (id, 版本) 上碰巧躺着的东西"。
  */
 function acceptStaged(o) {
+  if (o.existing) {
+    let st;
+    try { st = fs.statSync(o.stagedDir); } catch {
+      return { ok: false, error: '本机那一份已经不在了 —— 请重新同步一次。' };
+    }
+    if (!st.isDirectory()) return { ok: false, error: '本机那一份不是一个目录。' };
+    const r = plugins.inspectDir(o.stagedDir, 'site');
+    if (r.error) return { ok: false, error: `本机那一份用不了：${r.error}` };
+    if (r.entry.plugin.id !== o.id || r.entry.plugin.version !== o.version) {
+      return { ok: false, error: `本机那一份自报的是 ${r.entry.plugin.id}@${r.entry.plugin.version}，`
+        + `与要同意的 ${o.id}@${o.version} 不一致。` };
+    }
+    if (o.digest && r.entry.digest !== o.digest) {
+      return { ok: false, error: '本机那一份在你点同意之后变过了 —— 请重新同步一次再决定。' };
+    }
+    return { ok: true, dir: o.stagedDir, digest: r.entry.digest };
+  }
+
   let st;
   try { st = fs.statSync(o.stagedDir); } catch { return { ok: false, error: '暂存的那一份已经不在了 —— 请重新同步一次。' }; }
   if (!st.isDirectory()) return { ok: false, error: '暂存的那一份不是一个目录。' };
@@ -771,6 +1153,14 @@ function acceptStaged(o) {
     return { ok: false, error: `${dest} 已经存在 —— 同一个版本只装一份，` + '要么它已经装好了，要么站点该升版本号。' };
   }
   try {
+    // ★ **包先落，树后落。** 反过来（先树后包）在包那一步失败时，池里会留下一棵
+    //   **没有来路凭证**的树，而收尾只剩两条路：删掉刚下来的东西，或者留着一个
+    //   半份。这个顺序下最坏的结果是池里多一个孤儿 `.splug` —— 它谁也看不见
+    //   （`listPooled` 只认目录），而下一次同步会把包 `rename` 覆盖过去。
+    if (o.stagedPkg) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+      fs.renameSync(o.stagedPkg, pkgPathOf(o.siteRoot, o.id, o.version));
+    }
     fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
     fs.renameSync(o.stagedDir, dest);
   } catch (e) {
@@ -817,20 +1207,50 @@ function noteConsent(o) {
   return { ok: true };
 }
 
-/** 不要一份待同意的树了（用户点了"不同意"，或者它已经作废）。 */
-function discardStaged(stagedDir) {
+/** 不要一份待同意的草稿了（用户点了"不同意"，或者它已经作废）。 */
+function discardStaged(stagedDir, stagedPkg) {
   if (typeof stagedDir !== 'string' || !stagedDir) return { ok: false, error: '没有指定要丢掉哪一份。' };
   try {
     fs.rmSync(stagedDir, { recursive: true, force: true });
+    // 整包下来的那一份草稿也一起走 —— 留着它就是暂存里一份没人认领的字节，
+    // 而暂存目录每次对账开头都会整个清掉（clearStaging），所以它本来也活不过一轮。
+    if (typeof stagedPkg === 'string' && stagedPkg) fs.rmSync(stagedPkg, { force: true });
   } catch (e) {
     return { ok: false, error: `删不掉 ${stagedDir}：${e.message}` };
   }
   return { ok: true };
 }
 
+/**
+ * 不要**池里**那一份了（用户对一个"已在本机"的待同意项点了"不同意"）。
+ *
+ * ★ 与 `discardStaged` 是两件事，别合并：那个删的是我们自己的**草稿纸**，这个删的
+ *   是**池里的一个构件**。留下的后果是反过来的 —— 草稿留着只是占地方，而池里那
+ *   一份留着就是"一个用户在界面上拒绝了、却仍然躺在磁盘上的插件"，而且它下次还会
+ *   以同一个形状回来（台账里没有它，树还在）⇒ 用户点一百次不同意也去不掉。
+ *
+ * ★ 删**树与包两样**。站点那一份一个字节没动 —— 下一次对账还会把它取回来、
+ *   再问一次。这正是 §5.3 要的：删除是一个没说出口的决定，而对账不认识它。
+ */
+function dropPooledVersion(siteRoot, id, version) {
+  if (typeof id !== 'string' || typeof version !== 'string' || !id || !version) {
+    return { ok: false, error: 'id 与版本都必须是字符串。' };
+  }
+  try {
+    fs.rmSync(path.join(siteRoot, id, version), { recursive: true, force: true });
+    fs.rmSync(pkgPathOf(siteRoot, id, version), { force: true });
+    try { fs.rmdirSync(path.join(siteRoot, id)); } catch { /* 还有别的版本 */ }
+  } catch (e) {
+    return { ok: false, error: `删不掉 ${path.join(siteRoot, id, version)}：${e.message}` };
+  }
+  return { ok: true };
+}
+
 module.exports = {
-  sync, acceptStaged, discardStaged, noteConsent, siteKeyOf, siteLabelOf,
-  readRecord, writeJsonAtomic, recordPathOf, listPooled,
+  sync, acceptStaged, discardStaged, dropPooledVersion, noteConsent,
+  siteKeyOf, siteLabelOf,
+  readRecord, writeJsonAtomic, recordPathOf, listPooled, pkgPathOf,
   checkRelPath, checkDeclared, caseCollisions, effectiveLimits,
+  deliveryOf, packageMetaProblem, fileListOf, sameFileSet, pinVerdict, verifyStaged,
   HARD_LIMITS, RECORD_NAME, LOCK_NAME,
 };

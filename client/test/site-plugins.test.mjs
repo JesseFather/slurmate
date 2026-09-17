@@ -20,16 +20,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const S = require('../src/main/site-plugins.js');
 const P = require('../src/main/plugins/index.js');
+const PP = require('../src/main/plugin-package.js');
 const ulid = require('../src/main/plugins/ulid.js');
+// 演示/测试用的包**由仓库里那个打包器现打**，不手搓字节：手搓一份就是在这里又
+// 实现了一遍容器格式，而它与真格式分家的那天，测试反而会说"一切正常"。
+const PACKER = require('../../packer/slurmate-packer.js');
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
+
+const sha256hex = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
 // ── 一个"站点" ──────────────────────────────────────────────────────────────
 //
@@ -46,6 +53,15 @@ function makeSite() {
     disabled: new Set(),       // 这些不带 `enabled: true`
     extra: [],                 // 站点多报的（客户端不认识的）
     sessions: [],
+    // ── 整包那条路（默认关：逐份那条路要有东西在测）──
+    packages: false,
+    pkgFormat: 1,              // `op_plugins` 里报出去的格式
+    pkgByteDelta: 0,           // 报出去的字节数偏离真实值多少
+    pkgDigestLie: false,       // 报出去的内容摘要是假的
+    pkgCorrupt: false,         // `plugin_package` 发出来的字节被改了一位
+    pkgKey: null,              // 签名钥匙（每造一个站点一把，所以两个站点不同）
+    pkgCalls: 0,               // 整包那条路被打了几次（用来验"一条 RPC"）
+    fileCalls: 0,
   };
   const byKey = new Map();
 
@@ -72,38 +88,101 @@ function makeSite() {
       .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
   }
 
+  /** 这个站点的签名钥匙。**每个站点一把**，所以"签名者换了人"造得出来。 */
+  function key() {
+    if (!state.pkgKey) {
+      const { privateKey } = crypto.generateKeyPairSync('ed25519');
+      const pub = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' })
+        .subarray(-32);
+      state.pkgKey = { priv: privateKey, pub, fingerprint: sha256hex(pub) };
+    }
+    return state.pkgKey;
+  }
+
+  /** 现打一个包（缓存 —— 真实守护进程也是"启动快照"，见 Sessiond._plugin_cache）。 */
+  const pkgCache = new Map();
+  function pkgOf(key2) {
+    if (pkgCache.has(key2)) return pkgCache.get(key2);
+    const e = byKey.get(key2);
+    const files = declared(key2).map((f) => ({
+      path: f.path,
+      data: fs.readFileSync(path.join(e.dir, ...f.path.split('/'))),
+      sha256: f.sha256,
+    }));
+    const digest = PACKER.contentDigest(files);
+    const k = key();
+    const sig = crypto.sign(null, Buffer.from(digest, 'hex'), k.priv);
+    const buf = PACKER.buildPackage(files, Buffer.concat([Buffer.from([1]), k.pub, sig]));
+    const out = { buf, digest, fingerprint: k.fingerprint };
+    pkgCache.set(key2, out);
+    return out;
+  }
+
   async function rpc(req) {
     if (req.op === 'plugins') {
-      const plugins = [...byKey.keys()].map((key) => {
-        const e = byKey.get(key);
+      const plugins = [...byKey.keys()].map((key2) => {
+        const e = byKey.get(key2);
         const out = {
           id: e.mf.id, name: e.mf.name, version: e.mf.version, title: e.mf.displayName,
-          enabled: !state.disabled.has(key), can_submit: true, defaults: { cpus: 2, mem: '8G' },
+          enabled: !state.disabled.has(key2), can_submit: true, defaults: { cpus: 2, mem: '8G' },
         };
-        if (!state.hideFiles.has(key)) out.files = declared(key);
+        if (!state.hideFiles.has(key2)) out.files = declared(key2);
+        if (state.packages) {
+          const p = pkgOf(key2);
+          out.package = {
+            format: state.pkgFormat,
+            bytes: p.buf.length + state.pkgByteDelta,
+            digest: state.pkgDigestLie ? 'f'.repeat(64) : p.digest,
+          };
+        }
         return out;
       });
       for (const x of state.extra) plugins.push(x);
       const data = { plugins, enabled: plugins.filter((p) => p.enabled).map((p) => p.name) };
       // ★ 能力信号是**协议事实**：顶层有没有 `limits`。老守护进程整个字段都没有。
-      if (state.limits) data.limits = { file_bytes: 256 * 1024, total_bytes: 1 << 20, max_files: 256 };
+      if (state.limits) {
+        data.limits = { file_bytes: 256 * 1024, total_bytes: 1 << 20, max_files: 256 };
+        if (state.packages) data.limits.package_bytes = 4 << 20;
+      }
       return { ok: true, data };
     }
     if (req.op === 'list') return { ok: true, data: { sessions: state.sessions } };
-    if (req.op === 'plugin_file') {
+    if (req.op === 'plugin_package') {
+      state.pkgCalls += 1;
       if (state.rateBurst > 0) {
         state.rateBurst -= 1;
         return { ok: false, code: 7, error: { kind: 'rate_limited', detail: '演示：打满桶' } };
       }
-      const key = `${req.id}@${req.version}`;
-      if (!byKey.has(key)) {
-        return { ok: false, code: 3, error: { kind: 'plugin_unknown', detail: key } };
+      const key2 = `${req.id}@${req.version}`;
+      if (!byKey.has(key2)) {
+        return { ok: false, code: 3, error: { kind: 'plugin_unknown', detail: key2 } };
       }
-      const hit = declared(key).find((f) => f.path === req.path);
+      const p = pkgOf(key2);
+      let buf = p.buf;
+      if (state.pkgCorrupt) {
+        // 改**负载里**的一个字节 ⇒ 逐份校验必须抓到（改的是字节，不是那张表）。
+        buf = Buffer.from(buf);
+        buf[buf.length - 1] ^= 0xff;
+      }
+      return { ok: true,
+               data: { format: 1, bytes: p.buf.length, digest: p.digest,
+                       data: buf.toString('base64') } };
+    }
+    if (req.op === 'plugin_file') {
+      state.fileCalls += 1;
+      if (state.rateBurst > 0) {
+        state.rateBurst -= 1;
+        return { ok: false, code: 7, error: { kind: 'rate_limited', detail: '演示：打满桶' } };
+      }
+      const key2 = `${req.id}@${req.version}`;
+      if (!byKey.has(key2)) {
+        return { ok: false, code: 3, error: { kind: 'plugin_unknown', detail: key2 } };
+      }
+      const hit = declared(key2).find((f) => f.path === req.path);
       if (!hit) {
         return { ok: false, code: 3, error: { kind: 'plugin_file_unknown', detail: req.path } };
       }
-      const buf = fs.readFileSync(path.join(byKey.get(key).dir, ...req.path.split('/')));
+      const buf = fs.readFileSync(path.join(byKey.get(key2).dir, ...req.path.split('/')));
       return {
         ok: true,
         data: {
@@ -117,15 +196,17 @@ function makeSite() {
     return { ok: false, code: 2, error: { kind: 'unknown_op', detail: req.op } };
   }
 
-  return { src, state, add, declared, rpc, byKey };
+  return { src, state, add, declared, rpc, byKey, pkgOf };
 }
 
-/** 一次对账的环境：站点池 + 暂存 + 台账。 */
+/** 一次对账的环境：站点池 + 暂存 + 台账 + 钉子。 */
 function makeEnv() {
   const siteRoot = tmp('slurmate-sitepool-');
   const stagingRoot = tmp('slurmate-staging-');
   const trusted = new Map();          // `<id>@<版本>` → 摘要（模拟 cfg.trustedPlugins）
-  return { siteRoot, stagingRoot, trusted };
+  const pinned = new Map();           // id → 公钥指纹（模拟 pinned-keys.json）
+  const forgotten = [];               // 被撤回同意的那些
+  return { siteRoot, stagingRoot, trusted, pinned, forgotten };
 }
 
 function callSync(site, env, over = {}) {
@@ -136,6 +217,15 @@ function callSync(site, env, over = {}) {
     siteRoot: env.siteRoot,
     stagingRoot: env.stagingRoot,
     trusted: over.trusted || ((id, v, d) => env.trusted.get(`${id}@${v}`) === d),
+    // ★ §5.3 的撤回：与 config.forgetPlugin 同一个语义 —— 删掉那一条、如实报告
+    //   有没有删到东西。**它发生在信任判定之前**，所以"静默装回来"结构上不存在。
+    forgetTrust: over.forgetTrust || ((id, v) => {
+      const k = `${id}@${v}`;
+      const had = env.trusted.delete(k);
+      if (had) env.forgotten.push(k);
+      return { had };
+    }),
+    pinnedKey: over.pinnedKey || ((id) => env.pinned.get(id)),
     protectedVersions: over.protectedVersions || [],
     stale: over.stale || (() => false),
     now: over.now || (() => 1700000000000),
@@ -146,14 +236,16 @@ function callSync(site, env, over = {}) {
 /**
  * 把一次对账里所有待同意的都"点一下同意"。
  *
- * ★ 走的是**界面上那个动作的同一段代码**（`acceptStaged` + `noteConsent` + 台账），
- *   不是测试自己另发明一套 —— 否则测的就是另一个实现。
+ * ★ 走的是**界面上那个动作的同一段代码**（`acceptStaged` + `noteConsent` + 台账 +
+ *   钉钉子），不是测试自己另发明一套 —— 否则测的就是另一个实现。
  */
 function consentAll(env, r, over = {}) {
   for (const p of r.pendingConsent) {
     const mv = S.acceptStaged({
-      stagedDir: p.stagedDir, siteRoot: env.siteRoot,
+      stagedDir: p.stagedDir, stagedPkg: p.stagedPkg || null, siteRoot: env.siteRoot,
       id: p.id, version: p.version, digest: p.digest,
+      // ★ 「已经在池里」那一份是**原地认领**，不是换入 —— 见 acceptStaged。
+      existing: Boolean(p.existing),
     });
     assert.equal(mv.ok, true, `同意 ${p.id}@${p.version} 应当成功：${mv.error}`);
     const nc = S.noteConsent({
@@ -162,6 +254,9 @@ function consentAll(env, r, over = {}) {
     });
     assert.equal(nc.ok, true, `同意要同时记进引用表：${nc.why}`);
     env.trusted.set(`${p.id}@${p.version}`, p.digest);
+    // §5.4：钉住签名者 —— 与 index.js 的 app:consentPlugin 同一个动作、同一个时机
+    // （台账写完之后）。没签名的那一份什么都不钉。
+    if (p.fingerprint) env.pinned.set(p.id, p.fingerprint);
   }
   assert.equal(over.count === undefined ? true : over.count === r.pendingConsent.length, true);
   return r.pendingConsent.length;
@@ -698,9 +793,12 @@ test('★★ 写记录**真的**发生在回收之前（记下副作用的先后
     fs.renameSync = realRename;
     fs.rmSync = realRm;
   }
+  // ★ 回收一个版本现在是**两下** `rmSync`（解出来的树 + 旁边那个包），所以这里
+  //   把连续重复的合成一下。被断言的性质一个字没变：**第一次回收**必须晚于写记录。
+  const seq = order.filter((x, i) => i === 0 || x !== order[i - 1]);
   assert.deepEqual(r.reclaimed.map((x) => x.version), ['1.0.0'],
     `前置：这一轮真的要回收一个版本：${JSON.stringify(r.reclaimed)}`);
-  assert.deepEqual(order, ['写记录', '回收'],
+  assert.deepEqual(seq, ['写记录', '回收'],
     '★ 写记录必须在回收之前 —— 反过来的话，回收按的是一份**旧**引用表，'
     + '而"按旧表动手"就是这个设计里唯一会真正丢数据的地方');
 });
@@ -814,4 +912,489 @@ test('★ 连接换了一条 ⇒ 这一次对账整个作废，一个字节都�
     '★ 取到一半换代 ⇒ 暂存里那半棵树绝不能进站点池');
   assert.ok(r2.failed.some((f) => /作废/.test(f.why)),
     `中途换代要说得出这一份为什么没下来：${JSON.stringify(r2.failed)}`);
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  整包：同一个内容的两条投递方式
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★ 这一组要钉住的是一件很具体的事：**走哪条路不该改变"装上了什么"**。
+//   所以第一条用例就是把同一份内容两条路各装一遍，然后比摘要 —— 差一个字节
+//   都说明两条路在描述两棵不同的树。
+
+test('★★ 两条投递方式装出来的东西**逐字节相同**（包那条路一条 RPC 取完）', async () => {
+  // 同一个插件、两个站点，一个只发文件、一个也发整包。
+  const byFiles = makeSite();
+  const pf = byFiles.add('a', { name: 'a' },
+    { 'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\n' });
+  // ★ 第二个站点必须造出**逐字节相同**的插件（同一个 id 与内容）——
+  //   拿第一个站点的目录当模板。
+  const byPkg = makeSite();
+  const pp = byPkg.add('a', { id: pf.id, name: 'a', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = {};\n', 'job/start.sh': '#!/bin/sh\n' });
+  byPkg.state.packages = true;
+
+  const env1 = makeEnv();
+  const env2 = makeEnv();
+  const r1 = await callSync(byFiles, env1);
+  const r2 = await callSync(byPkg, env2);
+  assert.equal(r1.pendingConsent.length, 1, JSON.stringify(r1.failed));
+  assert.equal(r2.pendingConsent.length, 1, JSON.stringify(r2.failed));
+  assert.equal(r1.pendingConsent[0].digest, r2.pendingConsent[0].digest,
+    '★ 同一个内容走两条路必须算出同一个摘要 —— 不然"你同意的"与"装上的"会各说各的');
+
+  // ★ 一条 RPC 取完 vs 一份一份取：这是这两条路唯一的**行为**差别。
+  assert.equal(byPkg.state.pkgCalls, 1, '整包只该问一次');
+  assert.equal(byPkg.state.fileCalls, 0, '★ 有包就不该再逐份取 —— 两条路都走等于白跑一趟');
+  assert.ok(byFiles.state.fileCalls >= 2, `逐份那条路要一份一次：${byFiles.state.fileCalls}`);
+  assert.equal(byFiles.state.pkgCalls, 0, '只发文件的站点不该被问整包');
+
+  consentAll(env2, r2);
+  // 池里**两样挨着**：解出来的树 + 那个包。
+  const tree = path.join(env2.siteRoot, pp.id, '1.0.0');
+  const pkgFile = S.pkgPathOf(env2.siteRoot, pp.id, '1.0.0');
+  assert.equal(fs.existsSync(tree), true, '树要进池（require 用的是它）');
+  assert.equal(fs.existsSync(pkgFile), true, '★ 包也要进池 —— 它是这一份的来路凭证');
+  assert.equal(S.listPooled(env2.siteRoot)[0].hasPackage, true);
+
+  // 池里那两样与站点发出来的包**逐字节相同**。
+  const onDisk = fs.readFileSync(pkgFile);
+  const parsed = PP.parsePackage(onDisk);
+  assert.equal(parsed.ok, true, parsed.why);
+  assert.equal(parsed.digest, byPkg.pkgOf(`${pp.id}@1.0.0`).digest);
+  assert.equal(parsed.sig.fingerprint, byPkg.state.pkgKey.fingerprint,
+    '池里那个包自带的签名者就是站点那把钥匙');
+});
+
+test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒绝，绝不换入', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  site.state.pkgDigestLie = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0, '对不上的东西不许走进同意闸');
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /说的不是同一份东西/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+    '★ 一个字节都不许进池');
+});
+
+test('★ 包里的字节被改过 ⇒ 拒绝，而且**绝不退回逐份那条路**', async () => {
+  // ★ 这条是这一组里最承重的一条。逐份那条路**没有签名**（它发的是散装字节），
+  //   所以"包验不过就改用文件"等于给出一条绕过验签的路 —— 一个能让包验不过的人
+  //   就获得了一次投递未验签内容的机会。那不是"降级"，那是把验签变成一句建议。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  site.state.pkgCorrupt = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0);
+  assert.equal(site.state.fileCalls, 0,
+    '★ 包读不了的时候**一次 `plugin_file` 都不许发** —— 那就是回退');
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /读不了|不符/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+});
+
+test('★ 包格式比客户端认得的新 ⇒ **退回逐份那条路**（而且说出来）', async () => {
+  // ★ 与上一条**方向相反**，所以两条必须都在：那一条是"这个包坏了"（拒绝），
+  //   这一条是"这个包是用一种我读不懂的说法写的"（格式演进，必须能加法过渡）。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  site.state.pkgFormat = 2;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 1, `回退要把东西装上：${JSON.stringify(r.failed)}`);
+  assert.equal(site.state.pkgCalls, 0, '★ 读不懂的格式，一次都不该去取');
+  assert.ok(site.state.fileCalls >= 1, '退回逐份取');
+  assert.equal(r.reason, 'site_too_new', '要有一态说明"站点比客户端新"');
+  assert.ok(r.notices.some((n) => /格式/.test(n)), JSON.stringify(r.notices));
+
+  // 而**没有退路**的时候（站点只发包、不发文件）它是一条失败，不是静默跳过。
+  const site2 = makeSite();
+  const env2 = makeEnv();
+  site2.state.packages = true;
+  site2.state.pkgFormat = 2;
+  const p2 = site2.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  site2.state.hideFiles.add(`${p2.id}@1.0.0`);
+  site2.state.pkgFormat = 2;
+  const r2 = await callSync(site2, env2);
+  assert.equal(r2.failed.length, 1, JSON.stringify(r2.failed));
+  assert.match(r2.failed[0].why, /只认识 1/, r2.failed[0].why);
+});
+
+test('★ 逐份清单与整包说的不是同一份东西 ⇒ 拒绝（两份说法对不上）', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' },
+    { 'client/index.js': 'module.exports = {};\n', 'x.txt': '一' });
+  const orig = site.rpc;
+  const rpc = async (req) => {
+    const r = await orig(req);
+    if (req.op === 'plugins') {
+      // 清单里多报一份包里没有的文件 —— 老客户端会照着它去取、并且失败。
+      r.data.plugins[0].files = [...r.data.plugins[0].files,
+        { path: 'ghost.txt', size: 1, sha256: 'a'.repeat(64) }];
+    }
+    return r;
+  };
+  const r = await S.sync({
+    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
+    trusted: () => true, protectedVersions: [],
+  });
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /两份说法对不上/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+});
+
+test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async () => {
+  // ★ 客户端**没法**在取之前知道真包多大，所以这一条只能取回来之后判 —— 判据是
+  //   自己数出来的字节数，不是响应里那个 `bytes`。数字对不上说明"站点说它发的是
+  //   什么"与"它实际发的是什么"不是一回事。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  site.state.pkgByteDelta = 7;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.equal(site.state.pkgCalls, 1, '取一次才知道对不对');
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /字节/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+    '★ 对不上就不许进池 —— 连那个包也不许');
+});
+
+test('★ 包里的内容超过站点自报的上限 ⇒ 拒绝（两条路同一套上限）', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' },
+    { 'client/index.js': 'module.exports = {};\n', 'big.txt': 'x'.repeat(300 * 1024) });
+  // ★ 把 `files` 藏起来是**承重的**：不藏的话，站点报的那份逐份清单会**先**被
+  //   `checkDeclared` 拦下（那一条也在测，但测的是另一个入口），于是"包里的负载
+  //   有没有过上限"这件事根本没被执行到 —— 那条用例会在实现被改坏时照样绿。
+  site.state.hideFiles.add(`${p.id}@1.0.0`);
+  const orig = site.rpc;
+  const rpc = async (req) => {
+    const r = await orig(req);
+    if (req.op === 'plugins') r.data.limits.file_bytes = 1024;   // 站点自报更严
+    return r;
+  };
+  const r = await S.sync({
+    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
+    trusted: () => true, protectedVersions: [],
+  });
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /1024/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+});
+
+test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', async () => {
+  // ★ `package_bytes` 是**另一笔账**：前面那几个数说的是"解出来那些有多大"，
+  //   它说的是"整包 base64 之后装不装得进一条应答"。所以它必须**单独判** ——
+  //   拿负载上限去推链路上限，正是这一版之前算错的那笔账。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const orig = site.rpc;
+  const rpc = async (req) => {
+    const r = await orig(req);
+    if (req.op === 'plugins') r.data.limits.package_bytes = 100;   // 站点自报更严
+    return r;
+  };
+  const r = await S.sync({
+    rpc, siteKey: 'k', siteLabel: 'l', siteRoot: env.siteRoot, stagingRoot: env.stagingRoot,
+    trusted: () => true, protectedVersions: [],
+  });
+  assert.equal(site.state.pkgCalls, 0, '★ 自述就说不成立，白跑一次传输没意义');
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /100/, r.failed[0].why);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+});
+
+test('★ 「站点愿不愿意发这一份」的判据是**两条路里有没有一条能走**', () => {
+  // ★ 界面拿它分"本站有而本机没有，等同步/点同意"与"本站根本没打算发这一版"。
+  //   判据写成"有没有 `files`"的话，一个**只发包**的站点（v0.8 的形状）会被
+  //   说成"站点没有报出它的文件"—— 而它明明发了。
+  const fp = 'a'.repeat(64);
+  const meta = { format: 1, bytes: 100, digest: fp };
+  assert.equal(S.deliveryOf({ files: null, package: meta }, S.HARD_LIMITS).mode, 'package',
+    '只发包也算"愿意发"');
+  assert.equal(S.deliveryOf({ files: [{ path: 'x', size: 1, sha256: fp }] }, S.HARD_LIMITS).mode,
+    'files', '只发文件也算');
+  assert.equal(S.deliveryOf({ files: null, package: null }, S.HARD_LIMITS).mode, null,
+    '★ 两个都没有 = 这一份不分发（`package: null` 是"此刻生产不出来"，不是"没有这个能力"）');
+  assert.equal(S.deliveryOf({}, S.HARD_LIMITS).mode, null, '缺席也是不分发');
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  §5.4 钉子：签名者必须是同一把钥匙
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★ 钉过之后签名者换了人 ⇒ 拒绝，并把**两把**指纹都说出来', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+
+  // 第一次：没钉过 ⇒ 首次即信任，指纹随待同意项一起交到界面上。
+  const r1 = await callSync(site, env);
+  assert.equal(r1.pendingConsent.length, 1, JSON.stringify(r1.failed));
+  const fp1 = r1.pendingConsent[0].fingerprint;
+  assert.equal(fp1, site.state.pkgKey.fingerprint, '指纹要从**包本身**算，不是站点自报');
+
+  // ★ 而**签名者换了人、内容一个字没变**：另一个站点用另一把钥匙发同一份内容。
+  const other = makeSite();
+  other.state.packages = true;
+  other.add('a', { id: p.id, name: 'a', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = {};\n' });
+  const env2 = makeEnv();
+  env2.pinned.set(p.id, fp1);
+  const r2 = await callSync(other, env2);
+  assert.equal(r2.pendingConsent.length, 0, '★ 换人不能只是"再问一次"');
+  assert.equal(r2.failed.length, 1, JSON.stringify(r2.failed));
+  const why = r2.failed[0].why;
+  assert.match(why, new RegExp(fp1), '★ 必须说出**钉住的那一把**：运维要拿它去核对');
+  assert.match(why, new RegExp(other.state.pkgKey.fingerprint), '★ 也要说出**这一份的**');
+});
+
+test('★ 钉过之后收到一份**没有签名**的（逐份那条路）⇒ 拒绝', async () => {
+  // ★ 逐份那条路发的是散装字节，证不了它是同一个人做的 —— 钉过之后就不能收。
+  //   不这么判的话，"让整包那条路失败"就成了一个绕开钉子的开关。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  env.pinned.set(p.id, 'a'.repeat(64));
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0);
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /没有签名/, r.failed[0].why);
+  assert.match(r.failed[0].why, new RegExp('a'.repeat(64)), '要说清钉的是哪一把');
+});
+
+test('★ 一条读不动的钉子 ⇒ 拒绝（绝不静默重新"首次即信任"一次）', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  env.pinned.set(p.id, '');            // config.pinnedKeyOf 对读不动的记录给的就是这个
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0);
+  assert.match(r.failed[0].why, /钉子读不出来/, r.failed[0].why);
+});
+
+test('★ 池里已有那一份、台账对不上，而钉子对不上 ⇒ 拒绝（不是"再问一次"）', async () => {
+  // ★ 那条路上**也要判钉子**：它是"本机有一份、要重新问一次"的那条路，而
+  //   "再问一次"不等于"可以换个人"。不判的话，一次改摘要（或者删配置）就成了
+  //   绕开 §5.4 的入口 —— 用户会看到一个正常的同意对话框，而签名者已经换了。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);            // 同意过 ⇒ 池里有那一份，而且钉过一把钥匙
+
+  env.trusted.clear();            // 台账对不上（换机器、换公式、手删配置）
+  const bogus = 'c'.repeat(64);
+  env.pinned.set(p.id, bogus);    // 而钉子上是**另一把**
+  const r2 = await callSync(site, env);
+  assert.equal(r2.pendingConsent.length, 0, '★ 签名者对不上时连同意按钮都不该出现');
+  assert.equal(r2.failed.length, 1, JSON.stringify(r2.failed));
+  assert.match(r2.failed[0].why, new RegExp(bogus), '要说清钉住的是哪一把');
+  assert.match(r2.failed[0].why, new RegExp(site.state.pkgKey.fingerprint),
+    '也要说清这一份是谁签的');
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  那个洞：池里已经有一份，而台账对不上
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★ 池里有一份、台账对不上 ⇒ 进待同意（**不能消失**），同意是"原地认领"', async () => {
+  // ★ 这一段以前不存在，而它不在的后果是：插件在注册表里（`active: false`），
+  //   于是 `missing` 不认领它（那边要求查不到），而 `plugins` 那一列又滤掉了它
+  //   —— 界面上彻底看不见，连"点同意"的入口都没有。摘要换一次公式就会对
+  //   **每个用户的每个插件**成立。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+
+  // 第一次：正常下来、正常同意。
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), true);
+
+  // ★ 台账那一条不见了（用户换过机器 / 删过配置 / 换过摘要公式）。
+  env.trusted.clear();
+  const r2 = await callSync(site, env);
+  assert.deepEqual(r2.kept, [], '台账对不上就不算"已经有了"');
+  assert.equal(r2.pendingConsent.length, 1,
+    `★★ 它必须走进待同意 —— 这就是那个洞：${JSON.stringify(r2)}`);
+  const item = r2.pendingConsent[0];
+  assert.equal(item.existing, true, '★ 要标明"本机已经有一份"（出路与草稿不同）');
+  assert.equal(item.stagedDir, path.join(env.siteRoot, p.id, '1.0.0'),
+    '指向的是**池里那一份**，不是暂存里的草稿');
+
+  // ── 点同意 ⇒ 原地认领：不 rename、不重下、直接记台账 ──
+  const mv = S.acceptStaged({
+    stagedDir: item.stagedDir, siteRoot: env.siteRoot, id: p.id, version: '1.0.0',
+    digest: item.digest, existing: true,
+  });
+  assert.equal(mv.ok, true, mv.error);
+  assert.equal(fs.existsSync(item.stagedDir), true, '★ 原地认领不能把那一份弄没了');
+  env.trusted.set(`${p.id}@1.0.0`, item.digest);
+  const r3 = await callSync(site, env);
+  assert.deepEqual(r3.pendingConsent, []);
+  assert.equal(r3.kept.length, 1, '认领之后它就回到"已经有了"');
+});
+
+test('★★ 对"已在池里"的那一份点不同意 ⇒ **删掉池里那一份**，不是留着', async () => {
+  // 留着的话它就是一个"用户在界面上拒绝了、却仍然躺在磁盘上"的插件，而且下次
+  // 对账会**以同一个形状回来**（台账里没有它、树还在）—— 用户点一百次也去不掉。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  env.trusted.clear();
+  const r2 = await callSync(site, env);
+  assert.equal(r2.pendingConsent[0].existing, true);
+
+  const d = S.dropPooledVersion(env.siteRoot, p.id, '1.0.0');
+  assert.equal(d.ok, true, d.error);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+
+  // 再对一次账：**重新问**（不是静默装回来，也不是"什么都没有"）。
+  const r3 = await callSync(site, env);
+  assert.equal(r3.pendingConsent.length, 1, '★ 站点还在发它，所以重新问一次');
+  assert.equal(r3.pendingConsent[0].existing, false, '这一份是**新取回来的草稿**');
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  §5.3 删除 = 撤回同意
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★ 删掉本机那一份 ⇒ 台账那条一并消失 ⇒ 下一次**重新问**（绝不静默装回来）', async () => {
+  // ★ 不这么做的话，用户删掉池里那一份之后，下一次对账会按"摘要与台账相符"
+  //   **静默装回来、一个字都不问** —— 那不是"当作从来没有过"，那是"用户想让它
+  //   消失，它自己回来了"。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  assert.equal(env.trusted.size, 1, '前置：同意过一份');
+
+  // 用户把它删了（在文件管理器里、或者点了界面上那个按钮）。
+  fs.rmSync(path.join(env.siteRoot, p.id, '1.0.0'), { recursive: true, force: true });
+
+  const r2 = await callSync(site, env);
+  assert.equal(env.trusted.size, 0, '★ 同意必须作废 —— 只删内容、留着台账就等于静默装回来');
+  assert.equal(r2.withdrawn.length, 1, JSON.stringify(r2.withdrawn));
+  assert.equal(r2.pendingConsent.length, 1, '★ 而且它这一次要**重新走一遍同意闸**');
+  assert.ok(r2.notices.some((n) => /不在了/.test(n)),
+    `要说一句为什么又问一次：${JSON.stringify(r2.notices)}`);
+  assert.ok(!r2.notices.some((n) => /你删的|用户删除/.test(n)),
+    '★ 绝不断言是谁删的 —— 客户端不知道原因，它只知道"不在了"');
+});
+
+test('★ 台账里本来就没有这一条 ⇒ 不算"撤回"，也不推一条通知', async () => {
+  // 首次安装走的就是这条路（池里没有、台账里也没有）。把"没有台账条目"读成
+  // "用户撤回了"的话，每一次首次安装都会多出一句莫名其妙的话。
+  const site = makeSite();
+  const env = makeEnv();
+  site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.deepEqual(r.withdrawn, []);
+  assert.deepEqual(env.forgotten, []);
+  assert.ok(!r.notices.some((n) => /不在了/.test(n)), JSON.stringify(r.notices));
+});
+
+test('★ 只对**本站这一轮报出来的**那些判撤回（别的站点的条目管不着）', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const a = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const b = site.add('b', { name: 'b' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  assert.equal(env.trusted.size, 2);
+
+  // b 被站点关掉了，同时 a 的本机那一份被删了。
+  site.state.disabled.add(`${b.id}@1.0.0`);
+  fs.rmSync(path.join(env.siteRoot, a.id, '1.0.0'), { recursive: true, force: true });
+  const r2 = await callSync(site, env);
+  assert.deepEqual(r2.withdrawn.map((x) => x.id), [a.id], '只有 a 是"这一轮报出来的"');
+  assert.equal(env.trusted.has(`${b.id}@1.0.0`), true,
+    '★ 站点不报 b 了，所以这一轮没资格判它 —— 它随时可能再打开');
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  回收、列举
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★ 回收一个版本时，包跟着一起走（不留没树的 .splug）', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), true, '前置');
+
+  site.state.disabled.add(`${p.id}@1.0.0`);
+  site.add('b', { id: p.id, name: 'a', version: '1.1.0' },
+    { 'client/index.js': 'module.exports = {};\n' });
+  const r2 = await callSync(site, env);
+  consentAll(env, r2);
+  const r3 = await callSync(site, env);
+  assert.deepEqual(r3.reclaimed.map((x) => x.version), ['1.0.0'], JSON.stringify(r3.reclaimed));
+  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+    '★ 包要一起回收 —— 留下一个没有树的 .splug 就是池里一份谁也看不见的残留');
+  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.1.0')), true);
+});
+
+test('★ 列举只认目录：旁边的 <版本>.splug 不是另一份插件', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  const out = S.listPooled(env.siteRoot);
+  assert.deepEqual(out.map((x) => `${x.id}@${x.version}`), [`${p.id}@1.0.0`]);
+  assert.equal(out[0].hasPackage, true);
+
+  // 把包删掉：**不算撤回**（能加载的是树），但必须如实报出来。
+  fs.rmSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0'));
+  const out2 = S.listPooled(env.siteRoot);
+  assert.equal(out2.length, 1, '树还在 ⇒ 这一份还在');
+  assert.equal(out2[0].hasPackage, false, '★ 包不在了要如实说，不能瞒着');
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 1, '★ 包单独不在了**不构成撤回**');
+  assert.deepEqual(r2.withdrawn, []);
+});
+
+test('★ 站点只发包、不发文件（v0.8 的形状）⇒ 照样装得上', async () => {
+  // ★ 加法过渡的另一头：`files` 那条路迟早要删（阶段 6），而这一天客户端必须
+  //   已经能只靠包工作 —— 否则"删掉 files"会变成一次断电式的切换。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.packages = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  site.state.hideFiles.add(`${p.id}@1.0.0`);
+  const r1 = await callSync(site, env);
+  assert.equal(r1.pendingConsent.length, 1, JSON.stringify(r1.failed));
+  assert.equal(r1.pendingConsent[0].files.length >= 2, true, '文件清单从包里来');
+  consentAll(env, r1);
+
+  // 第二次对账：树在、包在，判据退到**本机那个包**（站点没有 files 可报）。
+  const r2 = await callSync(site, env);
+  assert.deepEqual(r2.failed, []);
+  assert.equal(r2.kept.length, 1, JSON.stringify(r2));
+  assert.equal(site.state.pkgCalls, 1, '第二次不该再取一遍整包');
 });
