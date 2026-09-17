@@ -1090,8 +1090,10 @@ test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个�
  *
  * 这个仓库里有**两套**版本号，它们长得像、纪律共用，但**不是一回事**：
  *   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号
- *     （`client/package.json` 的 version）。运行期唯一的用途是下面
- *     `engines.slurmate` 那条范围判定；两侧之间**没有**任何版本握手。
+ *     （`client/package.json` 的 version）。`x` 是"可以不兼容"那一档，`y` 是
+ *     "加东西但不破坏兼容"那一档 —— 所以**同 x 且客户端不低于服务端 ⇒ 保证
+ *     兼容**。运行期有**一条版本握手**（客户端连上时问一次 `ping`），判定在
+ *     `plugins.versionCheck` 里，闸在 index.js 的 `applyVersionGate`。
  *   · **插件版本** `x.y.z` —— 清单里的 `version`，`(id, 版本)` 那个槽位的键。
  *
  * ★ 夹具在 `tools/version-fixtures.json`，`cluster/test-sessiond-logic.py` 的
@@ -1115,21 +1117,19 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
     }
   }
 
-  // 2) 大小。插件那条走**生产路径**（`Registry.list()` 用的就是 cmpPluginVer）；
-  //    框架那条没有对外比较器，用 satisfies 的两个闭区间把它夹出来 ——
-  //    「谁大谁小」的信息全在 >= 与 <= 的真值组合里，不必再导出半个比较器。
-  const rel = (a, b) => {
-    const ge = M.satisfies(a, `>=${b}`).ok;
-    const le = M.satisfies(a, `<=${b}`).ok;
-    return ge && le ? 'eq' : (ge ? 'gt' : (le ? 'lt' : '?'));
-  };
+  // 2) 大小。两条都走**生产路径**的对外比较器（`Registry.list()` 用 cmpPluginVer，
+  //    握手用 cmpFramework）。★ 框架那一条从前是**用 `satisfies` 的两个闭区间夹
+  //    出来的** —— 也就是"拿范围判定去测大小比较"：排序规则一旦写错，夹具跟着
+  //    一起错，而它看不出来。现在两侧都有真的比较器了。
   for (const [a, b, want] of fx.order.plugin) {
     const got = M.cmpPluginVer(a, b);
     assert.equal(got, { lt: -1, eq: 0, gt: 1 }[want],
       `插件版本 ${a} 与 ${b}：夹具说 ${want}，得到 ${got}`);
   }
   for (const [a, b, want] of fx.order.framework) {
-    assert.equal(rel(a, b), want, `框架版本 ${a} 与 ${b}`);
+    const got = M.cmpFramework(a, b);
+    assert.equal(got, { lt: -1, eq: 0, gt: 1 }[want],
+      `框架版本 ${a} 与 ${b}：夹具说 ${want}，得到 ${got}`);
   }
 
   // 3) 范围。★ 后半段是「被拒绝的形状」（`>=0.5.0`、`^0.5`、`||`……），它们与
@@ -1138,6 +1138,44 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
     assert.equal(M.satisfies(c.host, c.range).ok, c.ok,
       `host=${JSON.stringify(c.host)} range=${JSON.stringify(c.range)}`);
   }
+
+  // 3b) ★★ engines 这个键的**字段级**规则 —— 与守护进程 `engines_problem`
+  //     逐条一致。从前这里是分家的：守护进程只认「dict 且 slurmate 是非空
+  //     字符串」，其余形状**静默跳过**（当成没有限制），而客户端全拒 ——
+  //     一侧收下、另一侧拒了，正是这个仓库点名过的最坏形状。
+  //     ★ `ranges` 那一段钉不住它：那一段喂的是 `host + range`，不构造清单。
+  fx.engines.cases.forEach((c, i) => {
+    const where = `engines 夹具第 ${i} 条：${JSON.stringify(c)}`;
+    // 键不出现 = JS 的 undefined（它是**通过**），null 是**出现过的值**（拒）。
+    const mf = 'engines' in c ? { engines: c.engines } : {};
+    const ret = M.enginesProblem(mf, c.host);
+    assert.equal(ret === null, c.ok, `${where} 夹具说 ok=${c.ok}，得到 ${JSON.stringify(ret)}`);
+    // ★ kind 一并断言。只断言 ok 的话，"读不懂的范围串"（`^0.5`）与"不满足"
+    //   会被混成一件事 —— 而它们对作者的含义完全不同：前者是"你这行写错了"
+    //   （打包器当场就该拦住），后者才是"这个站点版本低"。
+    if (!c.ok) assert.equal(ret.kind, c.kind, `${where} 夹具说 kind=${c.kind}，得到 ${ret.kind}`);
+  });
+
+  // 3c) ★ 握手：客户端版本 × 服务端版本 → 一个态。**只有客户端读这一段**
+  //     （守护进程不执行这条检查，它拿不到客户端的版本 —— 见 PROTOCOL）。
+  for (const c of fx.check.cases) {
+    const client = 'client' in c ? c.client : null;
+    // ★ 键不写 = JS 的 undefined："答了，但里面没有一个能用的版本号"。
+    //   它与 null（"没问到"）是**两件事**，而夹具里两条都有。
+    const server = 'server' in c ? c.server : undefined;
+    const g = M.versionCheck(client, server);
+    const where = `握手夹具 ${JSON.stringify(c)}`;
+    assert.equal(g.verdict, c.verdict, `${where} 夹具说 ${c.verdict}，得到 ${g.verdict}`);
+    assert.equal(g.blocked, c.blocked, `${where} 夹具说 blocked=${c.blocked}，得到 ${g.blocked}`);
+  }
+  // ★ 内测期那条例外必须**明确地**红一次：`0.y` 里 client_behind 不拦人。
+  //   1.0 发布时那条例外要删掉，而"删掉一行 if"与"手滑删掉一行 if"在代码里
+  //   长得一模一样 —— 这条断言就是那个区别。
+  assert.equal(M.versionCheck('0.6', '0.7').blocked, false,
+    '0.y 是内测期，不受版本约束：那时客户端落后只说明、不拦');
+  assert.equal(M.versionCheck('2.4', '2.5').blocked, true,
+    '★ 同 x 内客户端落后要拦 —— 这条与上面那条是同一个判定的两半，'
+    + '删掉内测例外时这一条必须仍然红');
 
   // 4) ★ 两条"不许静静通过"的路径。
   //    段数不同 ⇒ 抛，而不是把 `0.6` 与 `0.6.0` 比出一个"相等"来；
@@ -1167,6 +1205,135 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+
+  // 7) ★ 上面 3b 钉的是**纯函数**。这一条钉它**真的接在清单那条路上** ——
+  //    函数写了却没人调（或者调用点被换回从前那段内联逻辑），3b 那一类是**绿的**。
+  //    这个仓库里"一行包装 + 一份没人验的注释"已经出现过不止一次。
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-eng-'));
+  try {
+    const cases = [
+      [{ engines: { slurmate: '>=0.0' } }, true, '满足 ⇒ 收下'],
+      [{ engines: {}, }, true, '空对象 ⇒ 没有范围要判 ⇒ 收下'],
+      [{}, true, '根本没有这个键 ⇒ 收下'],
+      [{ engines: { slurmate: '>=99.0' } }, false, '不满足 ⇒ 拒'],
+      [{ engines: { slurmate: '^0.5' } }, false, '读不懂的范围串 ⇒ 拒'],
+      [{ engines: 'slurmate' }, false, 'engines 是字符串 ⇒ 拒'],
+      [{ engines: { node: '>=18' } }, false, '认不得的键 ⇒ 拒'],
+      [{ engines: null }, false, 'null 是**出现过的值** ⇒ 拒（不是"没写"）'],
+    ];
+    cases.forEach(([over, , ], i) => writePlugin(tmp2, `e${i}`, { name: `e${i}`, ...over }));
+    const names = new Set(new M.Registry([{ dir: tmp2, source: 'pool' }]).list().map((p) => p.name));
+    cases.forEach(([over, want, why], i) => {
+      assert.equal(names.has(`e${i}`), want,
+        `走清单那一路：engines=${JSON.stringify(over.engines)} ⇒ ${why}`);
+    });
+  } finally {
+    fs.rmSync(tmp2, { recursive: true, force: true });
+  }
+});
+
+test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪一项检查没做"', (t) => {
+  // ★ 这一格从前是 fail-open，而且比"跳过一项检查"更糟：`inspectDir` 里的短路
+  //   （`&& host`）在 host 读不到时**同时跳过了两项**（形状检查与范围检查），
+  //   于是 `engines: "slurmate"`（一个字符串）也会被收下。
+  //
+  // ★ 它还有一句话必须说对：这是**客户端自己**的安装问题（读不到 package.json），
+  //   不是插件的问题。说成"这个插件用不了"会把用户指去找作者或管理员，而他们
+  //   什么也做不了。
+  const origLoad = Module._load;
+  Module._load = function (req, parent, isMain) {
+    if (String(req).includes('package.json')) throw new Error('故意造：读不到 package.json');
+    return origLoad.call(this, req, parent, isMain);
+  };
+  t.after(() => { Module._load = origLoad; });
+
+  // 重新加载，让 hostVersion 走到那条 catch 上（模块级没有缓存这个值）。
+  delete require.cache[require.resolve('../src/main/plugins/index.js')];
+  const M = require('../src/main/plugins/index.js');
+  assert.equal(M.hostVersion(), null, '这条用例自己的前提：这时候真的读不到版本号');
+
+  const r = M.enginesProblem({ engines: { slurmate: '>=0.0' } }, M.hostVersion());
+  assert.notEqual(r, null,
+    '★ 判不了就必须拒 —— `>=0.0` 对任何真实 host 都成立，所以它失败的原因是'
+    + '"判不了"，而"判不了"绝不许长得像"通过"');
+  assert.equal(r.kind, 'unknown_host', JSON.stringify(r));
+  assert.match(r.why, /读不到自己的版本号/);
+  assert.ok(!/这个插件用不了/.test(r.why),
+    '★ 这是客户端这一侧的安装问题，说成"插件用不了"会把用户指去找作者');
+
+  // 反侧：**没有** engines 的插件照样收下 —— 读不到自己的版本不该把能做的事也拦掉。
+  assert.equal(M.enginesProblem({}, null), null, '没有这个键 ⇒ 没有范围要判 ⇒ 收下');
+  assert.equal(M.enginesProblem({ engines: {} }, null), null, '空对象 ⇒ 同上');
+
+  delete require.cache[require.resolve('../src/main/plugins/index.js')];
+});
+
+/**
+ * ★★ 版本闸：同 x 内客户端落后 ⇒ 拦住，一次会话都不建。
+ *
+ * ★ 为什么要把 `package.json` 桩掉：今天客户端是 `0.y`，而 **`0.y` 是内测期、
+ *   不受版本约束**（`versionCheck` 里那条带到期条件的例外）。所以"拦住"那一格
+ *   用真版本号**走不到** —— 而它恰恰是这条规则唯一会拦人的一格。
+ *   规则本身（含那条例外）在上一条用例里按夹具逐条钉着；这一条钉的是**接线**：
+ *   index.js 真的调了它、真的在 `blocked` 时停了下来。
+ */
+test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放行但出声', async (t) => {
+  const realLoad = Module._load;
+  Module._load = function (req, parent, isMain) {
+    if (String(req).endsWith('package.json')) return { version: '2.4' };
+    return realLoad.call(this, req, parent, isMain);
+  };
+  t.after(() => { Module._load = realLoad; });
+
+  const idx = require('../src/main/index.js');
+  const conn = await invoke('app:saveConnection',
+    { user: 'demo', host: '203.0.113.9', port: 10100, label: '版本闸' });
+
+  // ★ 这个文件里的用例共用一个 Electron 实例，所以"一次会话都不许建"要拿
+  //   **前后对比**来说：直接断言 `app:state` 是 null 会被上一个用例留下的那个
+  //   `releasing` 会话判红 —— 而那与这道闸无关。
+  const sidBefore = (await invoke('app:state'))?.sessionId ?? null;
+
+  // ① 服务端更新、**同一个大版本** —— 那条要求咬人的那一格。
+  await invoke('app:debug', 'daemon-version', '2.5');
+  const r = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(r.ok, false, `客户端落后必须被拦住：${JSON.stringify(r)}`);
+  assert.equal(r.code, 'client_behind', JSON.stringify(r));
+  // ★ 两个版本号都要在：用户唯一能做的动作是升级客户端，他得知道升到哪一版。
+  assert.match(r.error, /2\.5/, r.error);
+  assert.match(r.error, /2\.4/, r.error);
+  assert.equal(idx._test.getBackend().connected, false,
+    '★ 拦住时连接必须已经关掉 —— 不许留一条"连上了、但不许用"的连接占着守护进程');
+  assert.equal((await invoke('app:state'))?.sessionId ?? null, sidBefore,
+    '★ 一次会话都不许建 —— 判定只在连接期做，会话一个字都不该被动到');
+  // 注：`whoami` 不能用来说这件事 —— 它是模块级的，上一个用例早就把它填上了。
+  // "这道闸真的跑过"由上面的 `code === 'client_behind'` 保证：那个 code 只有
+  // `applyVersionGate` 产得出来。
+
+  // ② 反方向：同 x 而客户端**更新** —— 这是被承诺过的那一格，必须放行。
+  await invoke('app:debug', 'daemon-version', '2.3');
+  const r2 = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(r2.ok, true,
+    `同 x 且客户端更新 ⇒ 必须放行（"同 x 保证兼容"承诺的就是这一格）：${JSON.stringify(r2)}`);
+
+  // ③ 跨大版本：**不拦**，但要说出来。
+  await invoke('app:debug', 'daemon-version', '1.28');
+  const r3 = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(r3.ok, true,
+    '跨大版本**不判为不兼容**（"不一定，不是绝对不"）—— 拦住它等于把"我们不知道"说成"不行"');
+
+  // ④ 而"答了却没有能用的版本号"是另一件事：不拦，但绝不许被当成"旧"。
+  await invoke('app:debug', 'daemon-version', '');
+  const r4 = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(r4.ok, true, JSON.stringify(r4));
+
+  // 还原现场：这个文件里所有用例共用同一个 Electron 实例。
+  await invoke('app:debug', 'daemon-version', null);
+  const back = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(back.ok, true, `还原现场失败（后面的用例都假定连着）：${JSON.stringify(back)}`);
+  await invoke('app:deleteConnection', conn.connection.id);
+  assert.equal(idx._test.getBackend().connected, true,
+    '收尾之后演示后端必须还是连着的 —— 这个文件里后面的用例没做重连');
 });
 
 test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被管', async (t) => {

@@ -1405,8 +1405,11 @@ exit 0
     #
     # 这个仓库里有**两套**版本号，它们长得像、纪律共用，但**不是一回事**：
     #   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号（就是本
-    #     文件的 `VERSION`）。两侧之间**没有**任何版本握手；它运行期唯一的用途
-    #     就是下面那条 `engines.slurmate` 判定。
+    #     文件的 `VERSION`）。`x` 是"可以不兼容"那一档，`y` 是"加东西但不破坏
+    #     兼容"那一档。★ 运行期**有一条版本握手**（客户端连上时问一次 `ping`），
+    #     但**本文件不执行它** —— 它拿不到客户端的版本（老客户端不带）。所以
+    #     夹具的 `check` 段这一段用例**不读**：为"三端都读"而写一个没人调的
+    #     `version_check`，正是这个仓库最忌的那种死代码。
     #   · **插件版本** `x.y.z` —— 清单里的 `version`，`(id, 版本)` 槽位的键。
     #
     # ★ 为什么两边读同一份文件（tools/version-fixtures.json）：规则在 JS 与
@@ -1428,20 +1431,18 @@ exit 0
         check("★ %s 版本：%d 条合法 + %d 条不合法，逐条对上夹具"
               % (_scheme, len(_good), len(_bad)), not _wrong, ", ".join(_wrong[:6]))
 
-    # 大小。本文件里**没有**"比较两个插件版本"的需求（守护进程既不排序、也不挑
-    # 最新版），所以这条是拿两个原语拼出来跑夹具 —— 钉的是"两侧对同一对版本号
-    # 得出同一个符号"，客户端那边对应的是 `cmpPluginVer()`。
-    def _order(_scheme, _a, _b):
-        _r = mod.PLUGIN_VERSION_RE if _scheme == "plugin" else mod.FRAMEWORK_VERSION_RE
-        return mod._cmp_ver(mod._ver_segments(_a, _r), mod._ver_segments(_b, _r))
-
-    for _scheme in ("framework", "plugin"):
+    # 大小。★ 走**真的比较器**，不是拿 `_cmp_ver` 现拼一个：`cmp_framework` 是
+    # 后补的（在那之前，这一段是靠 `version_satisfies` 的两个闭区间夹出来的 ——
+    # 也就是"用范围判定去测大小比较"，排序规则一旦写错，夹具跟着一起错）。
+    # `plugin_version_cmp` 则是安装器报"升级 / 降级"用的那一个。
+    for _scheme, _cmp in (("framework", mod.cmp_framework),
+                          ("plugin", mod.plugin_version_cmp)):
         _cases = _fx["order"][_scheme]
         _wrong = []
         for _a, _b, _want in _cases:
-            _got = _order(_scheme, _a, _b)
+            _got = _cmp(_a, _b)
             if _got != {"lt": -1, "eq": 0, "gt": 1}[_want]:
-                _wrong.append("%s ? %s = %d（夹具说 %s）" % (_a, _b, _got, _want))
+                _wrong.append("%s ? %s = %s（夹具说 %s）" % (_a, _b, _got, _want))
         check("★ %s 版本的大小：%d 组逐组对上（含 1.9<1.10 与 2^53 那两组）"
               % (_scheme, len(_cases)), not _wrong, "; ".join(_wrong[:4]))
 
@@ -1453,6 +1454,88 @@ exit 0
                           % (_c["host"], _c["range"], _ok, _c["ok"], _why))
     check("★ engines.slurmate 的范围：%d 条逐条对上夹具（含 `>=0.5.0` 这类被拒的形状）"
           % len(_fx["ranges"]["cases"]), not _wrong, "; ".join(_wrong[:3]))
+
+    # ★★ engines 这个键的**字段级**规则 —— 与客户端 `enginesProblem` 逐条一致。
+    #
+    # 从前这里是分家的：守护进程只认「engines 是 dict 且 slurmate 是非空字符串」，
+    # 其余形状**静默跳过**（当成没有限制），而客户端全拒。夹具的 `ranges` 段钉不住
+    # 它 —— 那一段喂的是 `host + range`，根本不构造一份清单。
+    #
+    # ★ 断言**两件事**：收不收下（`ok`），以及不收下时**是哪一种不收下**（`kind`）。
+    #   只断言 ok 的话，"读不懂的范围串"与"不满足"会被混成一件事 —— 而它们对
+    #   作者的含义完全不同：前者是"你这行写错了"（打包器当场就该拦住），后者才是
+    #   "这个站点版本低"。夹具里 `^0.5` 那一条正是为此而设。
+    _wrong = []
+    for _i, _c in enumerate(_fx["engines"]["cases"]):
+        _ret = mod.engines_problem(_c, _c.get("host"))
+        if (_ret is None) != _c["ok"]:
+            _wrong.append("#%d %s → %s（夹具说 ok=%s）"
+                          % (_i, json.dumps(_c, ensure_ascii=False), _ret, _c["ok"]))
+        elif not _c["ok"] and _ret[0] != _c["kind"]:
+            _wrong.append("#%d %s → kind=%s（夹具说 %s）"
+                          % (_i, json.dumps(_c, ensure_ascii=False), _ret[0], _c["kind"]))
+    check("★★ engines 的字段级规则：%d 条逐条对上夹具（含 kind —— 读不懂的范围串"
+          "是**形状**问题，不是「本站版本低」）" % len(_fx["engines"]["cases"]),
+          not _wrong, "; ".join(_wrong[:3]))
+
+    # ★ 上面那条钉的是**纯函数**。这一条钉它**真的接在清单那条路上** —— 函数写了
+    #   但没人调（或者调用点被换成旧的那段内联逻辑），上一类是绿的。
+    for _mf_eng, _want_ok in (({"slurmate": ">=0.5"}, True),
+                              ({"slurmate": ">=99.0"}, False),
+                              ({"slurmate": "^0.5"}, False),
+                              ("slurmate", False),
+                              ({"node": ">=18"}, False)):
+        _s5, _p5 = _manifest(json.dumps(
+            {"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup", "version": "1.0.0",
+             "engines": _mf_eng,
+             "site": {"defaultCpus": 1, "defaultMem": "1G",
+                      "bin": {"env": "SLURMATE_X_BIN", "discovery": "which",
+                              "name": "x", "fallback": "/usr/bin/x"}}}))
+        _got_ok = _s5 != ()
+        check("★ 走清单那一路：engines=%s ⇒ %s"
+              % (json.dumps(_mf_eng, ensure_ascii=False),
+                 "收下" if _want_ok else "**拒**"),
+              _got_ok == _want_ok, str(_p5)[:160])
+
+    # ★★ 一个 engines 不满足的包**装不上**（不是"装上了、只是不出现"）。
+    #
+    # 这一条要单独钉，因为"装上了但列表里没有"是这个仓库反复出现的那类谎话的
+    # 形状：文件在盘上，而没有任何地方说得出它为什么不在列表里。安装器与
+    # `scan_plugins` 共用 `parse_plugin_manifest`，所以判据只有一个 —— 但**后果**
+    # 分两处（装：拒绝写入；扫：跳过并报一条 problem），两处都要验。
+    _engdir = os.path.join(tmpdir, "plugins-engines")
+    os.makedirs(_engdir, exist_ok=True)
+    _engpkg = put_package(
+        tmpdir, [("job/start.sh", b"start_e() { :; }\n"),
+                 ("plugin.json", json.dumps({
+                     "id": "01M2JKHTZGKJBFQQTWYXMQMF2W", "name": "eng",
+                     "displayName": "要新基座", "version": "1.0.0",
+                     "engines": {"slurmate": ">=99.0"},
+                     "site": {"defaultCpus": 1, "defaultMem": "1G",
+                              "bin": {"env": "SLURMATE_E_BIN", "discovery": "which",
+                                      "name": "e", "fallback": "/usr/bin/e"}}})
+                    .encode("utf-8"))],
+        filename="engines-too-new.splug")
+    _say = []
+    _rc = mod.install_plugins([_engpkg], _engdir,
+                              say=lambda *a: _say.append(" ".join(str(x) for x in a)))
+    _out = "\n".join(_say)
+    _dest = os.path.join(_engdir, "01M2JKHTZGKJBFQQTWYXMQMF2W.splug")
+    # ★ 两条断言合成一条，是**故意的**：`rc != 0` 单独看会被"输入那一关"假绿
+    #   （不是 root、组可写……任何一条都会让它非零），而"理由里有 >=99.0"只有在
+    #   **真的走到 engines 那条判据**时才成立。分开写，前一条就是一句空话。
+    check("★★ engines 不满足 ⇒ 安装器**拒绝**，且理由是 engines（不是输入那一关）",
+          _rc != 0 and not os.path.exists(_dest) and ">=99.0" in _out,
+          "rc=%s dest存在=%s\n%s" % (_rc, os.path.exists(_dest), _out[:400]))
+    check("★ 拒绝时**两个版本号都说了出来**（管理员据此做决定：升本站，还是让作者放宽）",
+          ">=99.0" in _out and mod.VERSION in _out, _out[:400])
+
+    # 手放进目录（绕过安装器）的那一份：`scan_plugins` **跳过并报一条**，
+    # 而不是让守护进程起不来 —— 一个插件坏了不该带走整个站点。
+    shutil.copyfile(_engpkg, _dest)
+    _specs6, _probs6 = mod.scan_plugins(_engdir)
+    check("★ 手放进目录的同一个包：扫的时候**跳过并报一条 problem**（不带走整个站点）",
+          _specs6 == () and any(">=99.0" in p for p in _probs6), str(_probs6)[:300])
 
     # ★ 清单里的版本号用**原串**匹配：`" 1.0.0 "` 不是合法版本号。从前这里先
     #   strip 再匹配，于是它在这边被收下、在客户端被拒 —— 而客户端拿的是原串

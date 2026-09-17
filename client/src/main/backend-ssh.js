@@ -199,6 +199,14 @@ class SshBackend extends Backend {
     this._profile = null;
     this._whoami = null;
     this._connecting = null;
+    /**
+     * 握手问到的基座版本（三态，见 `connect()` 的接口注释）。
+     *
+     * ★ 它是**这一条连接**的事实，所以要跟 `_conn` 同生共死：断开时清掉，
+     *   否则下一条连接会把上一条的版本号报出去 —— 而"上一条是哪一台"这件事
+     *   在两条连接之间没有任何保证。
+     */
+    this._daemonVersion = null;
     // 调用方（index.js 的启动接续）问的是「有没有连上」，不是「你的私有字段叫什么」。
     // 见 backend.js 接口注释。连接中途断开时 `_conn` 会被置回 null（:309、:501），
     // 所以这个 getter 跟着它就是准的。
@@ -277,7 +285,15 @@ class SshBackend extends Backend {
   }
 
   _open() {
-    if (this._conn) return Promise.resolve({ ok: true, whoami: this._whoami });
+    // ★ 短路这一支**也必须带上 `daemonVersion`**。少了它，调用方（index.js 的
+    //   版本闸）在"已经连着、再连一次"时会拿到 `undefined`，而 `undefined` 在
+    //   那条判定的三态里是"答了却没有版本号" ⇒ 每一次重连都误报一句
+    //   "对面不是我们的守护进程"。它连的明明就是上一次那一台。
+    if (this._conn) {
+      return Promise.resolve({
+        ok: true, whoami: this._whoami, daemonVersion: this._daemonVersion,
+      });
+    }
     if (this._connecting) return this._connecting;
     // ★ `.catch` 是兜底：ssh2 有几处在**同步**路径上抛异常（比如私钥格式），
     //   而 Promise 执行器里同步抛出的东西会变成 rejection。少了这一层，
@@ -302,13 +318,50 @@ class SshBackend extends Backend {
         this._attempt = 0;
         this._emitState(true, `${user}@${host}:${port}`);
 
+        // ★ 版本握手 —— **在 whoami 之前**问一次 ping。
+        //
+        //   `ping` 与它返回的 `version` **自初始提交起就在**，所以这一问对
+        //   **每一个曾经部署过的守护进程**都有效 —— 这正是"客户端要能兼容老版本
+        //   服务端"那条要求能成立的前提。反过来（让守护进程问客户端）做不到：
+        //   老客户端不带版本，见 docs/PROTOCOL.md。
+        //
+        //   ★ **判定不在这里**：规则在 plugins/index.js 的 `versionCheck` 里，
+        //     闸在 index.js —— 演示后端也要过同一道闸，而 index.js 是这两个后端
+        //     唯一的交汇点。这里只负责"把版本问出来"，以及把"问不到"的几种情况
+        //     分开（它们是三个不同的结论，不是一个）。
+        const ping = await this.rpc({ op: 'ping' });
+        const noPing = Boolean(ping && !ping.ok && ping.error
+          && ping.error.kind === 'unknown_op');
+        // 三态（`undefined` ≠ `null`，本仓库的老纪律）：
+        //   字符串    —— 问到了；
+        //   null      —— 没问到（对面根本没有 `ping` 这个 op）；
+        //   undefined —— 答了一个对象，但里面没有 `version`。
+        // 后两者都不是"旧"，`versionCheck` 会给它们各自一个名字。
+        let daemonVersion = null;
+        if (ping && ping.ok) {
+          daemonVersion = (ping.data || {}).version;
+        } else if (!noPing) {
+          // 问不到、也不是"对面没有这个 op" ⇒ 这条链路本身有问题。
+          // 与下面 whoami 的失败走同一条路：**如实报告**，别以为连上了。
+          const why = (ping && ping.error && (ping.error.detail || ping.error.kind))
+            || '未知原因';
+          try { client.end(); } catch { /* 尽力 */ }
+          this._conn = null;
+          return done({
+            ok: false,
+            code: 'rpc_unavailable',
+            error: `已连上 ${host}，但无法执行 \`${RPC_CMD}\`：${why}`,
+          });
+        }
+
         // 顺手拿一次 whoami：它既验证「RPC 这条链路真的通」（而不只是 SSH 握手成功），
         // 又给界面提供账户与分区权限。**失败要如实报告** —— 这条链路不通时，
         // 界面必须知道，而不是以为连上了。
         const resp = await this.rpc({ op: 'whoami' });
         if (resp && resp.ok) {
           this._whoami = resp.data;
-          return done({ ok: true, whoami: resp.data });
+          this._daemonVersion = daemonVersion;
+          return done({ ok: true, whoami: resp.data, daemonVersion });
         }
         const detail = (resp && resp.error && resp.error.detail)
           || (resp && resp.error && resp.error.kind) || '未知原因';
@@ -347,6 +400,7 @@ class SshBackend extends Backend {
         if (this._conn === client) {
           this._conn = null;
           this._whoami = null;
+          this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
           this._emitState(false, '连接已断开');
           this._scheduleReconnect();
         }
@@ -509,6 +563,7 @@ class SshBackend extends Backend {
     const c = this._conn;
     this._conn = null;
     this._whoami = null;
+    this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
     if (c) { try { c.end(); } catch { /* 尽力而为 */ } }
   }
 }

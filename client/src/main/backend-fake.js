@@ -181,6 +181,19 @@ class FakeBackend extends Backend {
      *   （`op_plugins` 的 `can_submit`）。
      */
     this._siteNoJob = new Set();
+    /**
+     * 演示站点**报出去的基座版本**（`ping` 的 `version`）。
+     *
+     * ★ `null` = 跟着本客户端的版本走（也就是"版本一致、判定通过"）。
+     *   要造"站点比客户端新"或"跨大版本"那两态，就用 `app:debug daemon-version`。
+     *
+     * ★ 从前这里写死一个 `'0.6-demo'`，而它**不合 `x.y` 的形状**——那条注释
+     *   自己也写着"形状跟着框架版本走（x.y）"，写反了。那时没人读 `ping` 的
+     *   `version`，所以是一个睡着的错；版本握手一做，它当场就会醒。
+     *   现在"报一个明显假的值"这件事仍然可以造，但它搬到了调试开关里 ——
+     *   报一个假版本号是有用的，只是不该是**默认**行为。
+     */
+    this._daemonVersion = null;
     /** 演示「守护进程太旧，根本没有 plugins 这个 op」。见 _dispatch。 */
     this._noPluginsOp = false;
     /** 演示「有 plugins 这个 op，但不会分发」（v0.5 的守护进程）。 */
@@ -352,6 +365,9 @@ class FakeBackend extends Backend {
         account_error: null,
         allowed_partitions: null,     // null = 不限，与 op_whoami 的语义一致
       },
+      // 与真实后端同一个形状：握手要的那个版本号。见 backend.js 的接口注释。
+      daemonVersion: this._daemonVersion === null
+        ? pluginFiles.hostVersion() : this._daemonVersion,
     };
   }
 
@@ -379,10 +395,16 @@ class FakeBackend extends Backend {
     }
 
     switch (op) {
-      // 版本号这里写的是一个**明显是假**的值：演示后端不是任何一版守护进程，
-      // 报一个真版本号会让人以为"我连上 0.6 了"。形状跟着框架版本走（x.y），
-      // 免得有人照着它去写解析。
-      case 'ping':       return ok({ pong: true, version: '0.6-demo', time: nowSec() });
+      // ★ 版本号今天**是被读的**（连接期的那次握手），所以默认报本客户端的版本
+      //   —— 演示模式的默认状态是"版本一致"，而不是"版本不明"。
+      //   要造"站点更新"或"跨大版本"就用 `app:debug daemon-version <x.y>`；
+      //   要造"对面答的不像我们的守护进程"，就把它设成一个不合 x.y 的值。
+      case 'ping':
+        return ok({
+          pong: true,
+          version: this._daemonVersion === null ? hostVersion() : this._daemonVersion,
+          time: nowSec(),
+        });
       case 'whoami':     return this._whoami();
       case 'partitions': return ok({ partitions: this._partitions() });
       // 默认资源是**按插件**的，所以它跟 `plugins` 走，不再挂在 `partitions` 上
@@ -535,6 +557,21 @@ class FakeBackend extends Backend {
   }
   /** 让演示站点装扮成**不认识 `plugins` 这个 op** 的老守护进程。 */
   debugOldDaemon(on = true) { this._noPluginsOp = on; }
+
+  /**
+   * 让演示站点报一个**指定的基座版本**（`ping` 的 `version`）。传 `null` 恢复成
+   * "跟着本客户端走"。
+   *
+   * ★ 版本握手那几态里，有两态**只有这里能造**：
+   *   · `client_behind`（站点比客户端新，比如 0.9 对 0.7）—— 它是唯一会拦人的
+   *     那一态，而真机上要造它得先让管理员升一次服务端；
+   *   · `cross_major`（1.28 对 2.5）—— 用户举的就是这个例子。
+   *   值原样透传（包括**不合 x.y 形状**的值）："答话的不像我们的守护进程"
+   *   同样是必须能复现的一态。
+   */
+  debugDaemonVersion(v) {
+    this._daemonVersion = (v === null || v === undefined) ? null : String(v);
+  }
 
   /**
    * 让演示站点装扮成「有 `plugins`、但没有 `limits`」的那一档 —— 文件分发是

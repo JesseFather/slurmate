@@ -14,7 +14,14 @@
  *                          字段 `_conn`，而演示后端用的是另一个名字，于是那个判断
  *                          在演示模式下恒为假、整条启动接续被静默关掉。
  *                          要「有没有连上」就问后端，别去猜它的内部字段叫什么。
- *   connect(profile)       → { ok, error?, whoami? }   建立连接（演示后端在这里起 HTTP 服务）
+ *   connect(profile)       → { ok, error?, code?, whoami?, daemonVersion? }
+ *                            建立连接（演示后端在这里起 HTTP 服务）
+ *                            ★ `daemonVersion` 是**握手要的那个号**，三态：
+ *                              字符串 = 问到了；`null` = 对面没有 `ping` 这个 op；
+ *                              `undefined` = 答了却没有 `version`。
+ *                              后两者不是同一件事，判定见 plugins/index.js 的
+ *                              `versionCheck`（三个缺席各有名字）。两个后端都必须
+ *                              报它 —— 版本闸在 index.js，它只看这一个字段。
  *   rpc(req)               → 守护进程风格的响应对象；**不抛异常**（传输失败由 classify 处理）
  *   dial(host, port)       → Promise<Duplex>  建立一条到目标的数据通道
  *   close()                → 拆除

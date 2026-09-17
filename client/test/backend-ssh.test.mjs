@@ -254,3 +254,30 @@ test('缺字段时不抛异常，而是如实说「未知」', () => {
   assert.match(msg, /指纹 未知/);
   assert.match(msg, /没能取到公钥/);
 });
+
+test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVersion', async () => {
+  // ★ 这一格是握手落地时才浮出来的真缺陷：`_open()` 在"已经连着"时**短路返回**，
+  //   而那一支没有 `daemonVersion` —— 于是调用方（index.js 的版本闸）拿到
+  //   `undefined`，而 `undefined` 在那条判定的三态里是"答了却没有版本号" ⇒
+  //   **每一次重连都误报一句"对面不是我们的守护进程"**。它连的明明就是上一次
+  //   那一台，而这个误报还会顺带把用户的注意力引到链路上（那句话不谈版本）。
+  const b = new sshBackend.SshBackend({});
+  b._conn = {};                       // 假装连着（这一支不碰网络）
+  b._whoami = { user: 'x' };
+  b._daemonVersion = '2.5';
+  const r = await b._open();
+  assert.equal(r.ok, true);
+  assert.equal(r.daemonVersion, '2.5',
+    '短路那一支漏了 daemonVersion ⇒ 每次重连都误报"对面不是我们的守护进程"');
+});
+
+test('★ 断开之后 daemonVersion 跟着清掉（下一条连接不许报上一条的号）', async () => {
+  // 它是**这一条连接**的事实，所以要与 `_conn` 同生共死：留着的话，下一条连接
+  // 会拿着上一条的版本号去做判定 —— 而"上一条是哪一台"在两条连接之间没有任何保证。
+  const b = new sshBackend.SshBackend({});
+  b._conn = {};
+  b._daemonVersion = '2.5';
+  await b.close();
+  assert.equal(b._daemonVersion, null, '断开之后它必须回到"不知道"');
+  assert.equal(b.connected, false);
+});

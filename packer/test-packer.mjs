@@ -359,6 +359,43 @@ section('4. 跨文件的常量');
     + `不合法 ${fx.plugin.invalid.length} 条）`,
   !badValid.length && !badInvalid.length,
   `该收没收 ${JSON.stringify(badValid)}；该拒没拒 ${JSON.stringify(badInvalid)}`);
+
+  // ★★ engines 的**形状**规则。打包器**判不了"满不满足"**（那取决于目标站点是
+  //    哪一版，而打包时那个站点还不存在），所以它只读 `kind` 不是那两种的条目。
+  //    ★ 但它**必须**判形状：`^0.5` 这种读不懂的范围串是**规范**的拒绝，在这里
+  //    拦住，作者当场就能改；不拦的话，拒绝要等包发到别人站点上才出现，还长得
+  //    像一句"本站版本低" —— 一个形状错误被说成一个版本问题。
+  const shapeCases = fx.engines.cases
+    .filter((c) => c.kind !== 'unsatisfied' && c.kind !== 'unknown_host');
+  const wrongShape = shapeCases.filter((c) => (P.enginesShapeProblem(c) === null) !== c.ok);
+  check(`★ 打包器的 engines 形状规则对上夹具（判得了的 ${shapeCases.length} 条；`
+    + `不满足与判不了的那 ${fx.engines.cases.length - shapeCases.length} 条它判不了）`,
+  !wrongShape.length,
+  wrongShape.map((c) => `${JSON.stringify(c)} → ${JSON.stringify(P.enginesShapeProblem(c))}`).join('；'));
+
+  // ★ 上面那条钉的是**纯函数**。这一条钉它**真的接在 build 的校验里** ——
+  //   函数写了却没人调，上一条是绿的，而 `packer build` 照样能产出一个两端都拒的包。
+  const wrongKey = P.enginesShapeProblem({ engines: { node: '>=18' } });
+  check('★ 认不得的键要报出来（照抄规范的措辞，不另起一句）',
+    typeof wrongKey === 'string' && /node/.test(wrongKey), String(wrongKey));
+  check('★ 没有 engines 的清单不报错（可选字段）',
+    P.enginesShapeProblem({}) === null && P.enginesShapeProblem({ engines: {} }) === null);
+}
+
+{
+  // ★ 上面几条钉的是纯函数与常量。这两条是**验收**：真正的 `packer build`。
+  //   删掉 build 里那道检查 ⇒ 第一条会**成功产包** ⇒ 它红。
+  const a = mkRepo(baseFiles({ engines: { node: '>=18' } }));
+  const ra = packer('build', a.plug, '--out', path.join(a.base, 'a.splug'));
+  check('★★ engines 里有认不得的键 ⇒ build **拒绝**（不是产出一个两端都会拒的包）',
+    ra.code !== 0 && /engines/.test(ra.err) && /node/.test(ra.err), ra.err.slice(0, 300));
+
+  // ★ 反侧必须**放行**：同一个包装到 0.6 的站点上是好的、装到 0.4 上就装不上，
+  //   而打包时那个站点还不存在。拦住它等于把一个部署期的问题说成作者的错。
+  const b = mkRepo(baseFiles({ engines: { slurmate: '>=99.0' } }));
+  const rb = packer('build', b.plug, '--out', path.join(b.base, 'b.splug'));
+  check('★ 而"要求一个很高的版本"照常打得出来（满足与否取决于目标站点，打包器判不了）',
+    rb.code === 0, rb.err.slice(0, 300));
 }
 
 {

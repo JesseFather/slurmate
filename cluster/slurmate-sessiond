@@ -385,12 +385,17 @@ MAX_GPUS_REQUEST = 8
 #   的后果是"一侧收下、另一侧拒了"，而报错只会说"清单不合法"。
 #
 #   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议**三合一的那个号**（即本文件的
-#     `VERSION`）。**两侧之间没有任何版本握手**；它在本文件里唯一的用途就是下面
-#     `engines.slurmate` 那条范围判定。
+#     `VERSION`）。`x` 是"可以不兼容"那一档，`y` 是"加东西但不破坏兼容"那一档。
 #   · **插件版本** `x.y.z` —— 清单里的 `version`，进 `(id, 版本)` 槽位与会话键。
 #
-# ★ 本文件里**没有**"比较两个插件版本"的需求（守护进程不排序、也不挑最新版），
-#   所以 `_ver_segments` 只被 `version_satisfies` 用；客户端那边有（`list()` 排序）。
+# ★ **运行期有一条版本握手，而它不在这里。** 客户端连上时问一次 `ping`（本文件的
+#   `dispatch` 会回 `{"pong": …, "version": VERSION}`），然后由客户端判「同 `x` 且
+#   客户端不低于服务端」。**本文件不执行这条检查** —— 它拿不到客户端的版本：请求
+#   信封里没有这个字段，而老客户端也不会带。一条只对新客户端生效的检查属于客户端。
+#   见 docs/PROTOCOL.md 的〈协议版本与变更〉。
+#
+# ★ 本文件里用到"比较两个插件版本"的地方只有一处：安装器报"升级 / **降级**"
+#   （`plugin_version_cmp`）。守护进程自己不排序、也不挑最新版。
 #
 # ★ 共用的纪律：**禁止前导零**；`minor` 那一段 ∈ `0..255`；**逐段按十进制字符串
 #   比较**（先比长度、再比字典序），**禁止转机器整数** —— Python 的 `int()` 不会
@@ -480,21 +485,105 @@ def version_satisfies(version, rng):
     v = _ver_segments(version, FRAMEWORK_VERSION_RE)
     if v is None:
         return False, "版本号 %r 不是 x.y 形式" % version
-    parts = [p for p in str(rng or "").strip().split() if p]
-    if not parts:
-        return False, "范围是空的"
-    for p in parts:
-        m = re.match(r"^(>=|<=|>|<|=)?(.*)\Z", p)
-        c = _ver_segments(m.group(2), FRAMEWORK_VERSION_RE) if m else None
-        if c is None:
-            return False, "看不懂的范围片段 %r（版本号是 x.y 形式）" % p
+    parts, why = range_problem(rng)
+    if parts is None:
+        return False, why
+    for op, c, text in parts:
         d = _cmp_ver(v, c)
-        op = m.group(1) or "="
         ok = {">=": d >= 0, "<=": d <= 0, ">": d > 0,
               "<": d < 0, "=": d == 0}[op]
         if not ok:
-            return False, "%s 不满足 %s" % (version, p)
+            return False, "%s 不满足 %s" % (version, text)
     return True, ""
+
+
+def range_problem(rng):
+    """把范围串拆成片段，**只校验形状**（与 host 无关）。返回 `(parts, why)`。
+
+    `parts` 里每项是 `(op, 段数组, 原片段文本)`；`parts is None` 表示形状就不对。
+
+    ★ 与 `version_satisfies` 分开，不是为了复用，是因为**它俩回答的问题不同**：
+      `version_satisfies` 把"读不懂这个范围串"与"看得懂但不满足"合并成同一个
+      `False`（对它的调用方后果确实相同：这个插件不收下）。而 `engines_problem`
+      必须把这两件事**分开**（`malformed` 与 `unsatisfied`），**打包器**更要分开
+      —— 读不懂的范围串是**形状**问题，作者在自己机器上就该看见它，而不是等包
+      装到别人的站点上，才变成一句听起来像"本站版本低"的拒绝。
+
+    ★ `^0.5` 是一个具体的现场：规范（§2.3.1）明令不支持 `^`，而它在
+      `version_satisfies` 里与"不满足"长得一模一样。夹具 `engines` 段里那一条
+      把它钉成 `malformed`，正是为了不让它被当成"不满足"混过去。
+    """
+    raw = [p for p in str(rng or "").strip().split() if p]
+    if not raw:
+        return None, "范围是空的"
+    parts = []
+    for p in raw:
+        m = re.match(r"^(>=|<=|>|<|=)?(.*)\Z", p)
+        c = _ver_segments(m.group(2), FRAMEWORK_VERSION_RE) if m else None
+        if c is None:
+            return None, "看不懂的范围片段 %r（版本号是 x.y 形式）" % p
+        parts.append((m.group(1) or "=", c, p))
+    return parts, ""
+
+
+def cmp_framework(a, b):
+    """两个**框架版本串**的大小：`a < b` ⇒ -1、相等 ⇒ 0、`a > b` ⇒ 1。
+
+    ★ 不合形状就**抛**，与 `plugin_version_cmp` 返回 `None` 不同 —— 两者的调用
+      场景不一样：插件版本来自人手写的清单，可能不合法，所以"比不了"是一个要
+      如实报出来的结果；框架版本来自 `VERSION` 常量与对端的应答，不合形状说明
+      调用方漏了一道门，静默当成相等会让整条判定失去意义。
+    """
+    va = _ver_segments(a, FRAMEWORK_VERSION_RE)
+    vb = _ver_segments(b, FRAMEWORK_VERSION_RE)
+    if va is None or vb is None:
+        raise ValueError("框架版本号不合形状：%r / %r" % (a, b))
+    return _cmp_ver(va, vb)
+
+
+def engines_problem(manifest, host_version):
+    """`engines` 这个键**字段级**的判定：收下 ⇒ `None`，不收 ⇒ `(kind, why)`。
+
+    ★ 与客户端 `plugins/index.js` 的 `enginesProblem()` **必须逐条一致**：
+      判据两边共用（tools/version-fixtures.json 的 `engines` 段），措辞各写各的
+      —— 这边说"本站的守护进程是…"，那边说"本客户端是…"。
+
+    ★ 从前这里只认「`engines` 是 dict 且 `slurmate` 是非空字符串」，其余五种形状
+      **静默跳过**（当成没有限制），而客户端**全拒** —— 一侧收下、另一侧拒了，
+      正是这个项目点名过的最坏形状。现在统一到**严格的那一侧**：严格的那一侧
+      已经在拒，所以收紧不可能制造出新的分家，只会让拒绝来得更早
+      （`scan_plugins` 扫描时、`plugin install` 安装时）。
+
+    ★ 参数是**整份清单**，不是 `engines` 那个值：`manifest.get("engines")` 对
+      「键不在」与「键是 null」返回同一个 `None`，而这两件事的处置**正好相反**
+      （通过 / 拒）。分不出来的话，那一格就永远测不了。
+    """
+    if "engines" not in manifest:
+        return None
+    eng = manifest.get("engines")
+    if not isinstance(eng, dict):
+        return ("malformed", "engines 必须是一个对象，如 {\"slurmate\": \">=0.5\"}")
+    extra = sorted(k for k in eng if k != "slurmate")
+    if extra:
+        return ("malformed", "engines 里有认不得的键：%s（认识的只有 slurmate）"
+                % "、".join(repr(k) for k in extra))
+    if "slurmate" not in eng:
+        return None
+    rng = eng.get("slurmate")
+    if not isinstance(rng, str) or not rng.strip():
+        return ("malformed", "engines.slurmate 必须是一个非空字符串，如 \">=0.5\"")
+    # 形状先于满足：读不懂的范围串是 `malformed`，只有当它是**规范写得出**的
+    # 范围、而 host 够不着时，才是 `unsatisfied`。
+    parts, shape_why = range_problem(rng)
+    if parts is None:
+        return ("malformed", shape_why)
+    if host_version is None:
+        return ("unknown_host", "本站读不到自己的版本号，所以判不了 "
+                "engines.slurmate = %r 满不满足它" % rng)
+    ok, why = version_satisfies(host_version, rng)
+    if ok:
+        return None
+    return ("unsatisfied", "%s（engines.slurmate 是插件自己声明的）" % why)
 
 
 PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem")
@@ -766,14 +855,20 @@ def parse_plugin_manifest(where, raw, source_package=None, needs_job=False):
     # 本文件的 VERSION）。客户端那一侧也会查一遍。守护进程也要查 —— 一个要求
     # >=0.6 的插件被 0.5 的守护进程收下，后果是它在作业侧用了一个这边还没有的
     # 宿主能力，而症状是运行到一半才失败。
-    eng = raw.get("engines")
-    if isinstance(eng, dict):
-        rng = eng.get("slurmate")
-        if isinstance(rng, str) and rng.strip():
-            ok, why = version_satisfies(VERSION, rng)
-            if not ok:
-                bad("要求 slurmate %s，而本站的守护进程是 %s（%s）"
-                    % (rng.strip(), VERSION, why))
+    #
+    # ★ 判定在 `engines_problem` 里，与客户端 **逐条一致**（判据共用一份夹具）；
+    #   措辞在这一侧组装，因为该说的那句话两边不同（这边"本站的守护进程是…"、
+    #   那边"本客户端是…"）。
+    # ★ 服务端版本低**不是故障**：它的后果只是"不认识某些新插件"。所以这句话
+    #   要写得像一个**决定**（升本站，还是让作者放宽），而不是一条错误。
+    eng = engines_problem(raw, VERSION)
+    if eng:
+        kind, why = eng
+        if kind == "unsatisfied":
+            bad("这个包要求 slurmate %s，而本站的守护进程是 %s"
+                % (raw["engines"]["slurmate"].strip(), VERSION))
+        else:
+            bad(why)
 
     site = raw.get("site")
     if site is None:

@@ -97,6 +97,14 @@ let quitting = false;
  *   长得都一样。压成一个布尔之后，后两种会被合并成一句笼统的"同步失败"。
  */
 let siteSync = null;
+/**
+ * 连接期那次版本判定的结论（`applyVersionGate` 填，见那里）。
+ *
+ * ★ 它是一个**连接级**的事实，不是每一轮同步的事实 —— 所以不塞进 `siteSync`
+ *   （那是"这一轮同步看到了什么"），而是与它并列地进视图。
+ * ★ 断开时清掉：它说的是"这一条连接对面是谁"，连着的那条没了它就不再成立。
+ */
+let versionVerdict = null;
 
 /**
  * 待同意的那些（暂存树还在磁盘上，等用户点）。
@@ -401,6 +409,15 @@ async function announceBackend() {
     //   演示模式不等于「不需要初始化」。
     const res = await backend.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
     if (res.ok) {
+      // ★ 演示模式也要过这道闸 —— 否则"版本不符会怎样"在界面上的样子没有地方能
+      //   先看一遍，而它恰恰是用户会遇到、开发者却很难复现的状态。
+      //   用 `app:debug daemon-version` 造。
+      const gated = await applyVersionGate(res);
+      if (!gated.ok) {
+        win.pushNotice('error', gated.error);
+        win.setTitle('Slurmate — 演示模式 · 未连接集群');
+        return;
+      }
       whoami = res.whoami;
       await refreshPartitions();
       // 演示站点也真的走一遍分发（分发源是仓库里的 `plugins/`，见 backend-fake）。
@@ -420,6 +437,72 @@ async function announceBackend() {
     return;
   }
   await doConnect(conn);
+}
+
+/**
+ * 版本闸 —— **唯一一处**执行「服务端要求客户端不低于它自己」的地方。
+ *
+ * ★ 它住在这里（而不是两个后端各自的 `connect` 里），因为这里（index.js）是
+ *   演示后端与真实后端**唯一的交汇点**。同一条规则写在两处，下一次就会漂成
+ *   "演示模式说得通、真机上不生效"，而演示模式的全部价值就是它说的是同一件事。
+ *
+ * ★ 判定在 `plugins/index.js` 的 `versionCheck` 里 —— 规则只有那一份书面形式，
+ *   判据是 `tools/version-fixtures.json` 的 `check` 段。
+ *
+ * ★ **它发生在任何会话之前**，这一点是"拦住"能成立的全部理由：连接没成就从来
+ *   没有 `submit` ⇒ 没有 `session_id` ⇒ 没有心跳 ⇒ 于是也不会经由 `orphan_after`
+ *   把用户正在跑的作业 scancel 掉。★ **判定只在连接时做一次，绝不在会话进行中
+ *   重新判定**（守护进程被就地升级会断开连接 ⇒ 走重连 ⇒ 那时再判，那才是对的
+ *   时机；在心跳那条路上判会把用户的作业判没）。
+ *
+ * ★ 只有 `client_behind` 拦人。另外四种态各自**大声说明**，但都放行 —— 它们
+ *   要么是"缺席"（没问到 / 读不到自己），要么是两个大版本之间**不保证、也不
+ *   断言**不兼容。把它们也拦掉，就等于把"我们不知道"说成"不行"。
+ */
+async function applyVersionGate(res) {
+  const mine = plugins.hostVersion();
+  const g = plugins.versionCheck(mine, res.daemonVersion);
+  const theirs = JSON.stringify(res.daemonVersion);
+  // 记下来给界面用（`site_too_new` 那一句要拿它说准，见 panel.js）。
+  versionVerdict = g.verdict;
+
+  if (g.blocked) {
+    // 先把连接关掉：绝不留一条"连上了、但不许用"的连接在那儿占着守护进程的
+    // 配额与端口池。close() 会把重连也停掉（它置 _closed），所以不会变成
+    // 每隔几秒敲一次守护进程的循环。
+    await backend.close();
+    return {
+      ok: false,
+      code: 'client_behind',
+      error: `集群上的服务端是 ${res.daemonVersion}，而这个客户端是 ${mine} —— `
+        + '同一个大版本内，服务端要求客户端不低于它自己（两端是一起升的，'
+        + '而这个客户端不保证读得懂更新的一版）。请升级客户端之后重连。',
+    };
+  }
+
+  if (g.verdict === 'cross_major') {
+    win.pushNotice('warn',
+      `这个集群的服务端是 ${res.daemonVersion}，本客户端是 ${mine} —— 两端**大版本不同**。`
+      + (g.order < 0
+        ? '服务端更新，本客户端不一定兼容它。'
+        : '这个集群是更老的一代；本客户端不一定兼容它。')
+      + '（大版本不同不等于不兼容，所以这一次照常连。多个集群之间大版本不同是正常的。）');
+  } else if (g.verdict === 'unknown_server') {
+    win.pushNotice('info',
+      `没有问到站点的基座版本（对面的守护进程没有 \`ping\` 这个 op，也就是比本客户端旧），`
+      + '所以这一次**没有做版本判定**。这不会让判定变松：一个连 `ping` 都没有的'
+      + '守护进程不可能比本客户端新。');
+  } else if (g.verdict === 'not_our_daemon') {
+    win.pushNotice('warn',
+      `站点答的版本号 ${theirs} 不合 x.y 的形状 —— 这条链路上答话的恐怕不是 `
+      + 'Slurmate 的守护进程。这一次**没有做版本判定**：那不是"通过了"，是"没判"。');
+  } else if (g.verdict === 'unknown_host') {
+    win.pushNotice('warn',
+      '本客户端读不到自己的版本号（client/package.json），所以这一次没有做版本判定。'
+      + '插件仍然可以同步，但**一个都装不上** —— 装之前要拿本客户端的版本去比'
+      + '插件声明的引擎范围，而那个版本现在读不到。');
+  }
+  return res;
 }
 
 /** 真正发起一次连接（含主机密钥裁决）。 */
@@ -458,6 +541,13 @@ async function doConnect(conn, extra = {}) {
     });
 
   if (res.ok) {
+    // ★ 版本闸在最前面：不通过就到这里为止，一次会话都不建。
+    const gated = await applyVersionGate(res);
+    if (!gated.ok) {
+      win.pushNotice('error', gated.error);
+      win.setTitle('Slurmate — 未连接');
+      return gated;
+    }
     whoami = res.whoami;
     await refreshPartitions();
     // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
@@ -861,6 +951,10 @@ function pluginsView() {
       error: siteSync.error || null,
       label: siteSync.label || null,
       syncedAt: siteSync.syncedAt || null,
+      // 连接期那次版本判定（见 applyVersionGate）。界面用它把 `site_too_new`
+      // 那一句说准 —— 那是**唯一**一处界面的说法取决于握手结论的地方，理由见
+      // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
+      daemonVersionVerdict: versionVerdict,
       failed: siteSync.failed || [],
       reclaimed: (siteSync.reclaimed || []).length,
       // §5.3：本机那一份不在了 ⇒ 同意作废。**只报数**，文案在界面里 ——
@@ -2131,6 +2225,7 @@ function registerIpc() {
     }
     pendingConsent = [];
     siteSync = null;
+    versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
     return { ok: true, released };
   });
 
@@ -2450,6 +2545,9 @@ function registerIpc() {
       if (what === 'site-plugin-off') backend.debugDisableSitePlugin(picked.plugin.name);
       else backend.debugSitePluginNoJob(picked.plugin.name);
     }
+    // 让演示站点报一个指定的基座版本 —— 造版本握手那几态里真机上造不出来的两态
+    // （站点比客户端新、以及两个大版本之间）。不传参数 = 恢复成"跟着本客户端走"。
+    else if (what === 'daemon-version') backend.debugDaemonVersion(arg);
     // 演示「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
     // 都是缺的，而客户端的纪律是"缺席 ≠ 否"。
     else if (what === 'old-daemon') backend.debugOldDaemon(true);

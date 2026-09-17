@@ -624,6 +624,50 @@ const ULID_RE = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$/;
 const MAX_TIME = 2 ** 48 - 1;
 /** 插件版本：三段（§2.3 的前半段）。 */
 const PLUGIN_VERSION_RE = /^(?:0|[1-9][0-9]*)\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+/** 框架版本：两段（§2.3.1）。`engines.slurmate` 比的就是它。 */
+const FRAMEWORK_VERSION_RE = /^(?:0|[1-9][0-9]*)\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+
+/**
+ * `engines.slurmate` 的**形状**判定：没有形状问题返回 `null`，否则一句话。
+ *
+ * ★ 打包器**只判形状，不判满足**。满足性取决于"目标站点是哪一版"，而打包时那个
+ *   站点还不存在 —— 同一个包装到 0.6 的站点上是好的，装到 0.4 上就装不上。
+ *   所以这个函数**没有 host 参数**，也永远不会说"不满足"。
+ *
+ * ★ 但形状**必须**在这里判，因为读不懂的范围串（`^0.5`、`>=0.5.0`）是**规范**的
+ *   拒绝（§2.3.1 明令不支持 `^` / `~` / `||` / 逗号 / 三段）。不拦的话，作者
+ *   一路绿灯把包发出去，而拒绝要等到**别人的站点**上才出现，还长得像一句
+ *   "本站版本低" —— 一个形状错误被说成一个版本问题。
+ *
+ * ★ 判据必须与另外两端**逐条一致**（客户端 `enginesProblem`、守护进程
+ *   `engines_problem`），共用 tools/version-fixtures.json 的 `engines` 段。
+ *   各写各的下一次就会漂成"同一个包，打包器说行、客户端说不行" —— 那正是
+ *   规范 §0.2 承诺"三端同一个答案"要防的事。
+ */
+function enginesShapeProblem(manifest) {
+  if (!manifest || typeof manifest !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(manifest, 'engines')) return null;
+  const eng = manifest.engines;
+  if (!eng || typeof eng !== 'object' || Array.isArray(eng)) {
+    return 'engines 必须是一个对象，如 {"slurmate": ">=0.5"}';
+  }
+  const extra = Object.keys(eng).filter((k) => k !== 'slurmate');
+  if (extra.length) {
+    return `engines 里有认不得的键：${extra.join('、')}（认识的只有 slurmate）`;
+  }
+  if (!Object.prototype.hasOwnProperty.call(eng, 'slurmate')) return null;
+  const rng = eng.slurmate;
+  if (typeof rng !== 'string' || !rng.trim()) {
+    return 'engines.slurmate 必须是一个非空字符串，如 ">=0.5"';
+  }
+  for (const p of rng.trim().split(/\s+/)) {
+    const m = /^(>=|<=|>|<|=)?(.*)$/.exec(p);
+    if (!(m && FRAMEWORK_VERSION_RE.test(m[2]))) {
+      return `看不懂的范围片段 ${JSON.stringify(p)}（版本号是 x.y 形式）`;
+    }
+  }
+  return null;
+}
 
 /** 铸一个 ULID。与 `client/src/main/plugins/ulid.js` 同一个编码，两份实现的用例同一组夹具。 */
 function mintUlid(now) {
@@ -1099,12 +1143,19 @@ function cmdBuild(dir, opts) {
   } catch (e) {
     throw new Error(`${MANIFEST} 不是合法的 JSON：${e.message}`);
   }
-  if (!ULID_RE.test(String(manifest.id || ''))) {
+  // ★ 这两条**拿原串比**，不 `String(...)` 强转。强转是一个假入口：
+  //   `["1.0.0"]` 经 `String()` 变成 `"1.0.0"` 于是**打包器收下**，而客户端
+  //   （`typeof mf.version !== 'string'`）与守护进程（`need_str`）都会拒 ——
+  //   又一个"一侧收下、另一侧拒了"，而且它只在包真的发出去之后才发作。
+  //   与 §2.3「只校验，不归一化」是同一条纪律。
+  if (typeof manifest.id !== 'string' || !ULID_RE.test(manifest.id)) {
     throw new Error(`${MANIFEST} 里的 id ${JSON.stringify(manifest.id)} 不是一个 ULID —— 先跑 init（§2.1）`);
   }
-  if (!PLUGIN_VERSION_RE.test(String(manifest.version || ''))) {
+  if (typeof manifest.version !== 'string' || !PLUGIN_VERSION_RE.test(manifest.version)) {
     throw new Error(`${MANIFEST} 里的 version ${JSON.stringify(manifest.version)} 不合 x.y.z 的形状（§2.3）`);
   }
+  const engWhy = enginesShapeProblem(manifest);
+  if (engWhy) throw new Error(`${MANIFEST} 里的 ${engWhy}（§2.3.1）`);
 
   // §2.5：这个 id 得在这棵树**这个提交**的血统表里。表从提交里读（不是从盘上）——
   // 于是"我们判的那张表"与"进负载的那张表"是同一次读出来的同一份字节。
@@ -1551,7 +1602,8 @@ if (require.main === module) {
 
 module.exports = {
   MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, R,
-  COPY_SKIP, PLUGIN_VERSION_RE, ULID_RE, LINEAGE_FILE, LINEAGE_SCHEMA,
+  COPY_SKIP, PLUGIN_VERSION_RE, FRAMEWORK_VERSION_RE, ULID_RE, LINEAGE_FILE,
+  LINEAGE_SCHEMA, enginesShapeProblem,
   checkRelPath, foldAscii, contentDigest, sortByPathBytes,
   buildPackage, parsePackage, fingerprint, verifyEd25519,
   mintUlid, insertId, replaceId,

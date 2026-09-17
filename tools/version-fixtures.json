@@ -2,7 +2,15 @@
   "_": [
     "两份实现共用的版本号夹具 —— 规则在这里只有这一份书面形式。",
     "",
-    "读它的两份用例：client/test/boot.test.mjs（JS）与 cluster/test-sessiond-logic.py（Python）。",
+    "读它的三份用例，各读各判得了的那几段：",
+    "  · client/test/boot.test.mjs（JS）—— 全部六段；",
+    "  · cluster/test-sessiond-logic.py（Python）—— 前五段（framework / plugin /",
+    "    order / ranges / engines）。**它不读 check 段**：那条检查由客户端执行，",
+    "    守护进程不执行它（它拿不到客户端的版本），所以 Python 侧没有对应的函数 ——",
+    "    为「三端都读」而写一个没人调的 version_check，就是这个仓库最忌的那种死代码。",
+    "  · packer/test-packer.mjs（Node）—— plugin / engines 两段，**且只判形状那一半**",
+    "    （打包器不知道目标站点是哪一版，所以 engines 里的 unsatisfied / unknown_host",
+    "    它判不了，见那一段的 note）。",
     "为什么是一份而不是各一份：两套实现的规则必须逐条一致，而「逐条一致」最结实的形式",
     "不是「两份抄本 + 一条比对 lint」，是只有一份 —— 抄本会漂，lint 只抓得到已经漂了的。",
     "（与 COPY_SKIP / PLUGIN_COPY_SKIP 那一对分工不同：那两个是生产代码里的常量，",
@@ -160,6 +168,126 @@
       {"host": "0.6", "range": "", "ok": false},
       {"host": "0.6", "range": "   ", "ok": false},
       {"host": "0.6.0", "range": ">=0.5", "ok": false}
+    ]
+  },
+
+  "engines": {
+    "note": [
+      "engines 这个键的**字段级**规则：整个值（不是范围串）→ 收下 / 拒。",
+      "★ 与 ranges 段分工不同：那一段钉 version_satisfies 这一个**函数**，这一段钉",
+      "  清单里那一段**逻辑** —— 「这个键在不在、是不是对象、有没有认不得的键、值是不是",
+      "  非空字符串」。两侧今天在这一层**分家**（守护进程静默跳过、客户端拒绝），而",
+      "  分家最阴的那一格（engines 写成字符串）落在两者之间的空档里：ranges 夹具喂不进",
+      "  去（它不构造 plugin.json），措辞断言也抓不到（那是字段行为，不是措辞）。",
+      "",
+      "★ kind 是机器可读的分类，不是措辞（措辞各自断言）：",
+      "  absent       —— 这个键整个不出现（可选字段，通过）",
+      "  ok           —— 形状合法，且没有范围要判、或者 host 满足它",
+      "  malformed    —— 形状就不合法（**打包器判得了这一档**）",
+      "  unsatisfied  —— 形状合法，但 host 不满足（只有拿得到 host 的两端判得了）",
+      "  unknown_host —— 有一个范围要判，而 host 是 null（客户端读不到自己的",
+      "                  package.json）。★ 这一档存在的理由：`>=0.0` 对**任何**真实",
+      "                  host 都成立，所以它不是靠「不满足」失败的 —— 失败的原因是",
+      "                  「判不了」，而那正是「不许把跳过伪装成通过」要钉住的一格。",
+      "",
+      "★ kind 与 ok 冗余是**有意**的：改坏一条，三端里至少一端会红。",
+      "★ absent 用「键不出现」表达，**不要**用 null —— null 是一个**出现过的**值，",
+      "  而它的正确处置恰好是「拒」。这两种情况必须能被夹具分开。"
+    ],
+    "cases": [
+      {"note": "不写这个键", "kind": "absent", "host": "0.6", "ok": true},
+      {"kind": "absent", "host": null, "ok": true},
+
+      {"kind": "ok", "engines": {}, "host": "0.6", "ok": true},
+      {"kind": "ok", "engines": {}, "host": null, "ok": true},
+      {"kind": "ok", "engines": {"slurmate": ">=0.5"}, "host": "0.6", "ok": true},
+      {"kind": "ok", "engines": {"slurmate": ">=0.5 <0.7"}, "host": "0.6", "ok": true},
+      {"kind": "ok", "engines": {"slurmate": ">=0.5"}, "host": "0.5", "ok": true},
+
+      {"kind": "malformed", "engines": null, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": [], "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": "slurmate", "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": 5, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"node": ">=18"}, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"slurmate": ">=0.5", "node": ">=18"},
+       "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"slurmate": 18}, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"slurmate": ""}, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"slurmate": "   "}, "host": "0.6", "ok": false},
+      {"kind": "malformed", "engines": {"slurmate": "^0.5"}, "host": "0.6", "ok": false},
+      {"note": "形状错就是错，判不了 host 也一样", "kind": "malformed",
+       "engines": {"slurmate": 18}, "host": null, "ok": false},
+
+      {"kind": "unsatisfied", "engines": {"slurmate": ">=0.7"}, "host": "0.6", "ok": false},
+      {"kind": "unsatisfied", "engines": {"slurmate": ">=0.5 <0.6"}, "host": "0.6",
+       "ok": false},
+      {"note": "host 读不到 ⇒ 判不了 ⇒ 拒。**不是**因为不满足",
+       "kind": "unknown_host", "engines": {"slurmate": ">=0.5"}, "host": null, "ok": false},
+
+      {"note": "★ 它对任何真实 host 都成立，只因为 host 读不到才失败",
+       "kind": "unknown_host", "engines": {"slurmate": ">=0.0"}, "host": null, "ok": false}
+    ]
+  },
+
+  "check": {
+    "note": [
+      "握手的判定：客户端版本 × 服务端版本 → 态。",
+      "★ 规则（docs/PROTOCOL.md 的〈协议版本与变更〉里有同一份书面形式）：",
+      "  · 两个 x 相同 ⇒ **保证兼容**，前提是客户端不低于服务端；",
+      "  · 同 x 而客户端更低 ⇒ 服务端要求客户端不低于它自己 ⇒ 要求用户升级；",
+      "  · 两个 x 不同 ⇒ **不判为不兼容**（「不一定，不是绝对不」），但要明确说明。",
+      "",
+      "★ `blocked` 与 `verdict` 分开，是因为它们共用同一条判定但**后果不同**：",
+      "  · x == 0 是**内测期**，不受版本约束 —— 那时 client_behind 只说明、不拦。",
+      "    这一条是**例外**：它写在代码里一处，带一句到期条件（1.0 发布时删掉）。",
+      "    删掉它会让下面 blocked:false 的那几条红 ⇒ 摘除例外是一次刻意的动作，",
+      "    而不是一次手滑。（S11 那条教训的形状：改坏了没人管。）",
+      "  · cross_major 两个方向都不拦。",
+      "",
+      "★ 三种缺席都必须钉住 —— 缺席 ≠ 否，也不许是「静默通过」：",
+      "  · server 是 null：对面**没有 ping 这个 op** ⇒ **它不可能比客户端新** ⇒",
+      "    放行（并说明「这次没问到版本号、结论为什么仍然成立」）。缺席的是",
+      "    **探测手段**，不是那条要求；",
+      "  · server 答了却没有一个能用的版本号（含 undefined）⇒ not_our_daemon。",
+      "    ★ 这**不是「旧」** —— 它说明这条链路上答话的东西不像 Slurmate 的守护进程，",
+      "    所以一个字都不许谈版本；",
+      "  · client 读不到 / 读不懂自己的 package.json ⇒ 连接照常（读不到自己版本不该",
+      "    把用户打死），但**插件安装要拒** —— 那一半在 engines 段里钉。",
+      "  三种都不是「拒」，也都不是「通过」：它们各自是一个**自成一态**的名字。",
+      "  ★ 参数三态沿用这个仓库的老纪律（undefined ≠ null）：字符串=问到了、",
+      "    null=没问到、其它一切=答了但没有能用的版本号。",
+      "",
+      "★ 今天只有客户端读这一段：守护进程不执行这条检查，它拿不到客户端版本",
+      "（老客户端不带），见 docs/PROTOCOL.md。所以它不是「三端共用」，是「一份书面形式」。"
+    ],
+    "cases": [
+      {"client": "0.7", "server": "0.7", "verdict": "ok", "blocked": false},
+      {"client": "0.8", "server": "0.7", "verdict": "ok", "blocked": false},
+      {"note": "0.y 内测期：该拦的降级成说明", "client": "0.6", "server": "0.7",
+       "verdict": "client_behind", "blocked": false},
+
+      {"client": "2.5", "server": "2.5", "verdict": "ok", "blocked": false},
+      {"note": "★ 这是被承诺过的那一格：同 x，客户端更新", "client": "2.6",
+       "server": "2.5", "verdict": "ok", "blocked": false},
+      {"client": "2.255", "server": "2.0", "verdict": "ok", "blocked": false},
+      {"note": "★ 服务端要求客户端不低于它自己", "client": "2.4", "server": "2.5",
+       "verdict": "client_behind", "blocked": true},
+      {"client": "1.255", "server": "2.0", "verdict": "cross_major", "blocked": false},
+      {"note": "★ 用户举的那个例子：2.x 的客户端不一定兼容 1.28", "client": "2.6",
+       "server": "1.28", "verdict": "cross_major", "blocked": false},
+      {"client": "1.28", "server": "2.5", "verdict": "cross_major", "blocked": false},
+
+      {"client": "0.7", "server": null, "verdict": "unknown_server", "blocked": false},
+      {"client": null, "server": "0.7", "verdict": "unknown_host", "blocked": false},
+      {"client": null, "server": null, "verdict": "unknown_server", "blocked": false},
+
+      {"note": "★ 这一条是演示后端从前真的报过的那个值（'0.6-demo'）",
+       "client": "0.7", "server": "0.6-demo", "verdict": "not_our_daemon", "blocked": false},
+      {"client": "0.7", "server": "0.6.0", "verdict": "not_our_daemon", "blocked": false},
+      {"client": "0.7", "server": "", "verdict": "not_our_daemon", "blocked": false},
+      {"note": "★ 故意不写 server 键 = JS 的 undefined：对面答了对象却没有 version。它同样不是「旧」。Python 表达不出 undefined，所以它不读这一段", "client": "0.7", "verdict": "not_our_daemon", "blocked": false},
+      {"note": "两边都读不懂时，先说对面（它才是那个外来者）",
+       "client": "x", "server": "0.6-demo", "verdict": "not_our_daemon", "blocked": false}
     ]
   }
 }

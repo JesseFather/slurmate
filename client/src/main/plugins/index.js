@@ -123,9 +123,14 @@ const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 // ★ 这个仓库里有**两套**版本号。它们长得像、纪律共用，但**不是一回事**：
 //
 //   · **框架版本** `x.y` —— 客户端、守护进程、协议**三合一的那个号**。四处声明
-//     由 CI 比对（.github/workflows/checks.yml 的「版本号」那一步）。**运行期
-//     两侧之间没有任何版本握手** —— 客户端从不拿自己的版本去比守护进程的版本。
-//     它运行期唯一的用途是 `engines.slurmate` 那条**插件自己声明**的范围。
+//     由 CI 比对（.github/workflows/checks.yml 的「版本号」那一步）。
+//     `x` 是"可以不兼容"那一档，`y` 是"加东西但不破坏兼容"那一档 ——
+//     所以 **同 `x` 且客户端不低于服务端 ⇒ 保证兼容**，见 `versionCheck`。
+//
+//     ★ 运行期**有一条版本握手**：客户端连上时问一次 `ping`（它自初始提交起就
+//       报 `version`，所以这条规则对每一个曾经部署过的守护进程都有效），拿双方
+//       版本判一个态。★ **守护进程那一侧不做这条检查** —— 它拿不到客户端的版本
+//       （老客户端不带），所以那半条要求只能由客户端自己执行。见 docs/PROTOCOL.md。
 //   · **插件版本** `x.y.z` —— `(id, 版本)` 那个槽位的键，进摘要台账、进会话键。
 //
 // ★ 以前这里只有一个 `parseVer`，同时伺候两者（`satisfies` 拿它解析框架版本、
@@ -252,19 +257,182 @@ function cmpPluginVer(a, b) {
 function satisfies(version, range) {
   const v = parseVer(version, FRAMEWORK_VERSION_RE);
   if (!v) return { ok: false, why: `版本号 ${JSON.stringify(version)} 不是 x.y 形式` };
-  const parts = String(range).trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return { ok: false, why: '范围是空的' };
-  for (const p of parts) {
-    const m = /^(>=|<=|>|<|=)?(.*)$/.exec(p);
-    const c = m && parseVer(m[2], FRAMEWORK_VERSION_RE);
-    if (!c) return { ok: false, why: `看不懂的范围片段 ${JSON.stringify(p)}（版本号是 x.y 形式）` };
-    const d = cmpVer(v, c);
-    const op = m[1] || '=';
-    const ok = op === '>=' ? d >= 0 : op === '<=' ? d <= 0
-      : op === '>' ? d > 0 : op === '<' ? d < 0 : d === 0;
+  const r = rangeProblem(range);
+  if (r.why) return { ok: false, why: r.why };
+  for (const p of r.parts) {
+    const d = cmpVer(v, p.ver);
+    const ok = p.op === '>=' ? d >= 0 : p.op === '<=' ? d <= 0
+      : p.op === '>' ? d > 0 : p.op === '<' ? d < 0 : d === 0;
     if (!ok) return { ok: false, why: `本客户端是 ${version}，不满足 ${range}` };
   }
   return { ok: true };
+}
+
+/**
+ * 把范围串拆成片段，**只校验形状**（与 host 无关）。返回 `{parts:[{op, ver}]}`
+ * 或 `{why}`。
+ *
+ * ★ 与 `satisfies` 分开，不是为了复用，是因为**它俩要回答的问题不同**：
+ *   `satisfies` 把"看不懂这个范围串"与"看得懂但不满足"合并成同一个 `ok:false`
+ *   —— 对它的调用方而言后果确实相同（这个插件不收下）。但 `enginesProblem`
+ *   必须把这两件事**分开**（`malformed` 与 `unsatisfied`），而**打包器**更要
+ *   分开：一个读不懂的范围串是**形状**问题，作者在自己机器上就该看见它，
+ *   而不是等包装到别人的站点上，才变成一句听起来像"本站版本低"的拒绝。
+ *
+ * ★ `^0.5` 是一个具体的现场：它在 `version_satisfies` 里与"不满足"长得一模一样，
+ *   而它是**规范的**拒绝（§2.3.1 明令不支持 `^`）。夹具 `engines` 段里那一条
+ *   把它钉成 `malformed`，正是为了不让它被当成"不满足"混过去。
+ */
+function rangeProblem(range) {
+  const raw = String(range).trim().split(/\s+/).filter(Boolean);
+  if (!raw.length) return { why: '范围是空的' };
+  const parts = [];
+  for (const p of raw) {
+    const m = /^(>=|<=|>|<|=)?(.*)$/.exec(p);
+    const c = m && parseVer(m[2], FRAMEWORK_VERSION_RE);
+    if (!c) return { why: `看不懂的范围片段 ${JSON.stringify(p)}（版本号是 x.y 形式）` };
+    parts.push({ op: m[1] || '=', ver: c });
+  }
+  return { parts };
+}
+
+/**
+ * 两个**框架版本串**的大小。
+ *
+ * ★ 这个比较器是后补的：在那之前，`order.framework` 那六条夹具是靠 `satisfies`
+ *   的两个闭区间夹出来的（`>=b` 且 `<=b`），也就是"用范围判定去测大小比较"——
+ *   排序规则一旦写错，夹具跟着一起错，而它看不出来。现在两侧都有真的比较器。
+ *
+ * 不合形状就抛，理由同 `cmpPluginVer`：走到这里说明调用方漏了一道门。
+ */
+function cmpFramework(a, b) {
+  const pa = parseVer(a, FRAMEWORK_VERSION_RE);
+  const pb = parseVer(b, FRAMEWORK_VERSION_RE);
+  if (!pa || !pb) {
+    throw new Error(`框架版本号不合形状：${JSON.stringify(a)} / ${JSON.stringify(b)}`);
+  }
+  return cmpVer(pa, pb);
+}
+
+/**
+ * `engines` 这个键**字段级**的判定：收下 ⇒ `null`，不收 ⇒ 一句为什么。
+ *
+ * ★ 这一条**两侧必须逐条一致**，而它从前是分家的：守护进程只认「`engines` 是个
+ *   dict 且 `slurmate` 是非空字符串」，其余五种形状**静默跳过**；客户端全拒。
+ *   于是 `"engines": ">=0.5"`（把对象写成了字符串）**一侧收下、另一侧拒了** ——
+ *   那个项目点名过的最坏形状，而且它恰好落在夹具够不着的空档里（`inspectDir`
+ *   要读文件系统，`ranges` 那一段喂不进去）。
+ *
+ * ★ 抽成纯函数**不是为了整洁**，是为了让它可被夹具喂：规则要一致的两侧，判据必须
+ *   能脱离文件系统被调用。见 tools/version-fixtures.json 的 `engines` 段。
+ *
+ * 规则：
+ *   · **不出现** ⇒ 通过（可选字段）；
+ *   · **出现** ⇒ 必须是普通对象（不是 null / 数组 / 标量）、**只允许 `slurmate`**
+ *     这一个键、值必须是非空字符串、且能被范围解析并全部满足；
+ *   · 有范围要判而 `host` 是 `null` ⇒ **拒**。★ 不是"跳过"：`>=0.0` 对任何真实
+ *     host 都成立，所以它失败的原因是"判不了"，而"判不了"绝不许长得像"通过"。
+ *     这一格在真实路径里对应"客户端读不到自己的 package.json"。
+ *
+ * ★ 返回值是 `{kind, why}` 而不是一句话：`kind` 就是夹具里那个 `kind`
+ *   （`malformed` / `unsatisfied` / `unknown_host`），**判定**拿它对齐，
+ *   **措辞**由各侧自己写 —— 客户端说"本客户端是…"，守护进程说"本站的守护进程是…"。
+ *   把措辞塞进共用函数，等于逼两侧说同一句不该相同的话。
+ *
+ * ★ 参数是**整份清单**，不是 `engines` 那个值。理由：Python 那边
+ *   `raw.get("engines")` 对「键不在」与「键是 null」返回同一个 `None`，而这两件事
+ *   的处置**正好相反**（通过 / 拒）—— 分不出来的话，那一格就永远测不了。
+ *   传整份清单，两边都能问"这个键在不在"，而夹具的那一条可以直接当清单喂进去。
+ */
+function enginesProblem(manifest, host) {
+  const engines = manifest && typeof manifest === 'object' ? manifest.engines : undefined;
+  if (engines === undefined) return null;
+  if (!engines || typeof engines !== 'object' || Array.isArray(engines)) {
+    return { kind: 'malformed', why: 'engines 必须是一个对象，如 {"slurmate": ">=0.5"}' };
+  }
+  const why = keysProblem(engines, ['slurmate'], 'engines');
+  if (why) return { kind: 'malformed', why };
+  const rng = engines.slurmate;
+  if (rng === undefined) return null;          // 有 engines，但里面没有范围要判
+  if (typeof rng !== 'string' || !rng.trim()) {
+    return { kind: 'malformed', why: 'engines.slurmate 必须是一个非空字符串，如 ">=0.5"' };
+  }
+  // 形状先于满足：读不懂的范围串是 `malformed`，只有当它是**规范写得出**的
+  // 范围、而 host 够不着时，才是 `unsatisfied`。
+  const shape = rangeProblem(rng);
+  if (shape.why) return { kind: 'malformed', why: shape.why };
+  if (host === null || host === undefined) {
+    return {
+      kind: 'unknown_host',
+      why: '本客户端读不到自己的版本号（client/package.json），所以判不了 '
+        + `engines.slurmate = ${JSON.stringify(rng)} 满不满足它`,
+    };
+  }
+  const r = satisfies(host, rng);
+  if (r.ok) return null;
+  return {
+    kind: 'unsatisfied',
+    why: `${r.why}（engines.slurmate 是插件自己声明的，升级客户端之后才能装它）`,
+  };
+}
+
+/**
+ * 握手的判定：**客户端版本 × 服务端版本 → 一个态**。
+ *
+ * ★ 规则只有这一处书面形式（另一处在 docs/PROTOCOL.md 的〈协议版本与变更〉，
+ *   夹具 tools/version-fixtures.json 的 `check` 段是它们的判据）：
+ *
+ *   · 两个 `x` 相同 ⇒ **保证兼容**，前提是客户端不低于服务端。这一格是承诺本身。
+ *   · 同 `x` 而客户端更低 ⇒ 服务端要求客户端不低于它自己 ⇒ 要求用户升级。
+ *     ★ 这一格**从来没有被承诺过**，所以拦它不与上面那条承诺打架 ——
+ *     2.5 的服务端停 2.4 的客户端，而它承诺的是 2.5 与 2.6 一定行。
+ *   · 两个 `x` 不同 ⇒ **不判为不兼容**，两个方向都放行，但都要**明确说明**。
+ *     理由是一个人可能连多个集群（1.28 一个、2.5 一个），2.x 的客户端不一定
+ *     兼容 1.28 ——「不一定，不是绝对不」。
+ *
+ * ★ `blocked` 与 `verdict` 分开，是因为它们共用同一条判定而**后果不同**：
+ *   `x == 0` 是**内测期，不受版本约束**（用户明确定下），该拦的降级成说明。
+ *
+ * ★ 缺席不是"否"，也**不许**是"静默通过"——每一种缺席都有自己的名字：
+ *   · 服务端版本 `null`（对面根本**没有** `ping` 这个 op）⇒ `unknown_server`。
+ *     **它不可能比客户端新**，所以放行是对的；但要说明"这次没问到版本号、
+ *     结论为什么仍然成立"。缺席的是**探测手段**，不是那条要求。
+ *   · 服务端答了、但里面没有一个能用的版本号（含 `undefined`：答了对象却没有
+ *     `version` 键）⇒ `not_our_daemon`。★ 这**不是"旧"** —— 它说明这条链路上
+ *     答话的东西不像 Slurmate 的守护进程，所以**一个字都不许谈版本**。
+ *   · 客户端版本读不到 / 读不懂（`null`，或不合形状）⇒ `unknown_host`。
+ *     **连接照常** —— 读不到自己的版本不该把用户整个打死；但**插件安装要拒**，
+ *     那一半在 `enginesProblem` 里（它拿不到 host 就拒）。
+ *
+ * ★ 参数的三态沿用这个仓库的老纪律（`undefined` ≠ `null`）：
+ *   `serverVersion` 是**字符串**=问到了；`null`=没问到（对面没有 `ping`）；
+ *   **其它一切**（含 `undefined`）=答了，但里面没有一个能用的版本号。
+ *   分不开这几件事，"不许把跳过伪装成通过"就变成一句空话。
+ */
+function versionCheck(clientVersion, serverVersion) {
+  if (serverVersion === null) {
+    return { verdict: 'unknown_server', blocked: false, order: 0 };
+  }
+  const b = typeof serverVersion === 'string'
+    ? parseVer(serverVersion, FRAMEWORK_VERSION_RE) : null;
+  if (!b) return { verdict: 'not_our_daemon', blocked: false, order: 0 };
+  if (typeof clientVersion !== 'string'
+      || !parseVer(clientVersion, FRAMEWORK_VERSION_RE)) {
+    return { verdict: 'unknown_host', blocked: false, order: 0 };
+  }
+  const order = cmpFramework(clientVersion, serverVersion);
+  const major = parseVer(serverVersion, FRAMEWORK_VERSION_RE)[0];
+  if (parseVer(clientVersion, FRAMEWORK_VERSION_RE)[0] !== major) {
+    return { verdict: 'cross_major', blocked: false, order };
+  }
+  if (order >= 0) return { verdict: 'ok', blocked: false, order };
+  // ★ 例外：`x == 0` 是内测期，不受版本约束 —— 每一次更新都可能有重大架构变动，
+  //   所以这个阶段"客户端落后"只说明、不拦。见 docs/PROTOCOL.md。
+  //   ★ 到期条件：**1.0 发布时删掉这一行**（连同 `blocked` 那个表达式），
+  //     删掉会让 boot.test.mjs 里 `check` 段那两条 `blocked:false` 的红 ——
+  //     于是摘除例外是一次刻意的动作，而不是一次手滑。
+  const devPeriod = major === '0';
+  return { verdict: 'client_behind', blocked: !devPeriod, order };
 }
 
 /** 本客户端的版本（`engines.slurmate` 拿它比）。读不到就跳过这项检查。 */
@@ -430,21 +598,16 @@ function inspectDir(dir, source) {
   }
 
   // engines —— 装之前就判定，而不是装上之后在某个角落炸。
-  const host = hostVersion();
-  if (mf.engines !== undefined) {
-    if (!mf.engines || typeof mf.engines !== 'object' || Array.isArray(mf.engines)) {
-      return { error: `${mfPath}：engines 必须是一个对象，如 {"slurmate": ">=0.5"}` };
-    }
-    why = keysProblem(mf.engines, ['slurmate'], 'engines');
-    if (why) return { error: `${mfPath}：${why}` };
-    if (mf.engines.slurmate !== undefined && host) {
-      const r = satisfies(host, mf.engines.slurmate);
-      if (!r.ok) {
-        return { error: `${mfPath}：这个插件用不了 —— ${r.why}。`
-          + '引擎范围是插件自己声明的，升级客户端之后才能装它' };
-      }
-    }
-  }
+  //
+  // ★ 判定本身在 `enginesProblem` 里，与守护进程的 `engines_problem` **逐条一致**，
+  //   判据两边共用（tools/version-fixtures.json 的 `engines` 段），措辞各写各的。
+  //   从前这一段是内联的，而内联的规则**夹具喂不进去**（本函数要读文件系统）——
+  //   于是"两侧必须逐条一致"的那一条，恰恰是夹具钉不住的那一条。
+  //
+  // ★ 注意"判不了"（读不到自己的版本号）与"不满足"是**两句不同的话**：
+  //   前者是客户端这一侧的安装问题，说成"这个插件用不了"会把用户指去找作者。
+  const engProblem = enginesProblem(mf, hostVersion());
+  if (engProblem) return { error: `${mfPath}：${engProblem.why}` };
 
   // site —— **给集群侧读的那一段**：默认资源、可执行文件怎么找、配置块里允许
   // 哪些键。客户端一个字都不用，但必须**接受**它（否则一份合法清单会被客户端
@@ -1026,7 +1189,10 @@ function bucketOf(plugin) {
 module.exports = {
   Registry, UNKNOWN, bucketOf, loadDir, satisfies, hostVersion,
   // 版本号那两套（框架 / 插件）—— 用例直接对着 tools/version-fixtures.json 跑
-  VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer,
+  VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer, cmpFramework,
+  // 两侧必须逐条一致的两条规则（判据在夹具里，措辞各写各的）
+  enginesProblem,      // engines 的字段级判定（守护进程侧是 engines_problem）
+  versionCheck,        // 握手：客户端版本 × 服务端版本 → 一个态
   // ── 站点分发那条路要用的（见 site-plugins.js）──
   COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
 };
