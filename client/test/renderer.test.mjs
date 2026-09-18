@@ -190,41 +190,66 @@ function stripJsComments(src) {
   return out;
 }
 
-test('★ 来源标签：界面只画，判定在主进程 —— 而且单来源时不贴', () => {
-  // ★ 这条检查**翻过面了**，按它自己当年写下的方式翻的。
+test('★ 来源标签整个没了：界面不许自己按来源分支', () => {
+  // ★ 这条检查翻过两次面，两次都是按它自己当年写下的方式翻的，把过程留着：
   //
-  //   上一版它断言"panel.js 里不许出现 `p.source`"，理由是那时的客户端只注册了
-  //   一个 root（池），于是 `source === 'pool'` **恒为真** —— 一个永远显示、
-  //   并且永远说错的标签比没有标签更糟。它当年把话说完了：将来真的有了第二个
-  //   root，**正确的做法不是删掉这条检查**，而是把标签按那时的 `sources` 加回来，
-  //   再改成一条正面用例。现在（站点分发 + 本机池）就是那个时候。
+  //   ① 最早它断言"panel.js 里不许出现 `p.source`" —— 那时只注册了一个 root，
+  //      于是 `source === 'pool'` **恒为真**：一个永远显示、并且永远说错的标签
+  //      比没有标签更糟。它当年把话说完了 —— 将来真的有了第二个 root，**正确的
+  //      做法不是删掉这条检查**，而是把标签按那时的 `sources` 加回来。
+  //   ② 后来真有了第二个 root（站点分发 + 本机池），判定搬到了主进程
+  //      （`pluginsView()` 的 `sourceLabel`），这条改成"界面只画、不判"。
+  //   ③ 现在**第二个 root 也没了** —— 本机池整个删掉，只剩站点池一个。于是那个
+  //      数组恒为一项、那个标签恒为 `null`，`sourceLabelOf` 恒返回 null。
+  //      **留着一套永远说不出话的字段，与留一个永远说错的标签是同一类东西。**
+  //      所以标签连同它那半判定一起删了。
   //
-  //   ★ 判定**搬到了主进程**（`pluginsView()` 的 `sourceLabel`），因为判据是
-  //     "有几个来源"，而只有主进程知道注册表挂了几个 root。界面留在文本检查层面
-  //     能验的东西只有"它只画、不判"。
+  //   ★ 而这条检查**留着**，因为它的理由还在：界面不许自己按"这份东西从哪来"
+  //     分支。哪天有人把来源标签加回界面，它必须红 —— 那时正确的做法是先回答
+  //     "有几个根、它们各自凭什么免同意"（§5.2 禁止任何例外）。
   const code = stripJsComments(js);
 
-  // ① 界面**不再**自己按来源分支 —— 那种分支曾经恒为真。
-  assert.equal(/\bp\.source\b/.test(code), false,
-    'panel.js 又在自己判来源了 —— 判定归主进程（pluginsView 的 sourceLabel），'
-    + '界面只负责画');
-  assert.equal(/\bp\.sources\b/.test(code), false,
-    'panel.js 在读 sources —— 它拿不到"有几个 root"这个事实，判定会与它分家');
+  for (const bad of [/\bp\.source\b/, /\bp\.sources\b/, /\bp\.sourceLabel\b/, /plug-src/]) {
+    assert.equal(bad.test(code), false,
+      `panel.js 又在按来源分支了（${bad}）—— 客户端只有一个插件根（站点池），`
+      + '来源不是一个可以拿来分支的事实');
+  }
+});
 
-  // ② 但它**必须画**那个标签（否则第二个来源进来时界面上什么也看不出来）。
-  assert.match(code, /p\.sourceLabel/, 'panel.js 没有画 sourceLabel —— 有两个来源时用户分不清哪一份是谁给的');
-  assert.ok(/['"]plug-src['"]/.test(code), 'sourceLabel 那个 <span> 的 class 不见了');
+test('★ 本机池那几个入口从 preload / panel.js / panel.html 三处一起删干净了', () => {
+  // ★ 与前面那条「panel.js 调用的每个桥方法 preload 都暴露了」是**一对**：
+  //   那边查"面板调了而桥没了"，这边查"桥还在而面板已经不调了" —— 而后者在那边
+  //   是**静默的**（单向检查看不见它）。本机池那五个入口整个删掉了，两边都不该
+  //   再有任何一处留着。
+  for (const m of ['installPlugin', 'uninstallPlugin', 'rescanPlugins',
+                   'openPluginDir', 'setDevPlugins']) {
+    assert.equal(bridgeMethods().has(m), false,
+      `preload 还暴露着 ${m} —— 本机池那五个入口整个删掉了`);
+  }
+
+  const code = stripJsComments(js);
+  for (const s of ['从一个包安装', '打开插件目录', '重新扫描',
+                   '本机插件目录', '也加载本机插件目录', '开发者模式']) {
+    assert.equal(code.includes(s), false,
+      `panel.js 里还有「${s}」—— 那个入口（或者那句教用户去做的话）不存在了`);
+  }
+  // ★ 查的是**有没有那个元素**，不是文件里有没有那串字 —— panel.html 里留了一段
+  //   注释解释它去哪了，而注释里当然写着那个 id。
+  const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.equal(htmlBare.includes('plugin-dev'), false,
+    'panel.html 里还留着 #plugin-dev 那个容器');
 });
 
 test('★ 站点分发那四条桥同时登记在 preload 与 panel.js 两侧', () => {
+  // ★ 标题里的"四条"从前是**错的**：列表里有五项（多出一个 setDevPlugins）。
+  //   那个开关随本机池删掉之后，这个标题第一次是真的。
   // 少一边都是「点了没反应」：preload 少了 → 调不到方法；panel.js 少了 → 没有入口。
-  for (const m of ['syncPlugins', 'consentPlugin', 'rejectPlugin', 'setDevPlugins', 'onPlugins']) {
+  for (const m of ['syncPlugins', 'consentPlugin', 'rejectPlugin', 'onPlugins']) {
     assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
   }
   assert.ok(bridgeCalls().has('syncPlugins'), 'panel.js 没有调用 syncPlugins');
   assert.ok(bridgeCalls().has('consentPlugin'), 'panel.js 没有调用 consentPlugin');
   assert.ok(bridgeCalls().has('rejectPlugin'), 'panel.js 没有调用 rejectPlugin');
-  assert.ok(bridgeCalls().has('setDevPlugins'), 'panel.js 没有调用 setDevPlugins');
   assert.ok(bridgeCalls().has('onPlugins'), 'panel.js 没有订阅 onPlugins');
 });
 

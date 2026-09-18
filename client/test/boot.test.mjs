@@ -29,48 +29,169 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
  */
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 
-// ── 插件池 ──────────────────────────────────────────────────────────────────
+// ── 插件池（**站点池**，唯一的一个）────────────────────────────────────────
 //
-// 演示模式的池 = `<userData>/demo-config/plugins`（见 index.js 的 poolDir）。
+// 演示模式的站点池 = `<userData>/demo-config/site-plugins`（见 index.js 的 sitePoolDir）。
 //
 // ★ 装进去的是仓库里**真的**那两个插件（`<repo>/plugins/`），不是测试里合成的
 //   替身。这两个插件与基座的接口正是这次改动反复在动的东西 —— 用替身测等于
 //   测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被真正验过。
 //
-// ★ **必须在 app 起来之前写进去**：注册表是在启动时扫的（那一屏的空态、
-//   按钮由它决定），而 index.js 只 require 一次。
+// ★ **布局是 `<id>/<版本>/`** —— 站点池唯一的形状，也就是安装器写出来的形状。
+//   一层布局（`<池>/<名字>/plugin.json`）是"把插件目录拷进去"那个旧形状，
+//   `PLUGIN-SPEC` §5.1 明文禁止它产生任何效果。要造那个现场的是 §5.1 那条用例，
+//   它**故意**造一层 —— 夹具这里不许再造。
+//
+// ★ **而且台账里要记一条。** 这里从前填的是**本机池**，而那一根**不过同意闸**，
+//   所以插件拷进去就能用。今天只剩站点池，它**每一份都过闸**，所以夹具必须像
+//   "用户点过同意"那样把台账写上 —— 否则那两个插件会以 `active: false` 进来，
+//   而症状是几十条会话用例各红一次在"解析不到插件"上（离夹具十万八千里）。
+//
+// ★ **必须在 app 起来之前写进去**：注册表在启动时扫一次，而 `loadConfig` 在
+//   bootstrap 里也只跑一次（index.js 只 require 一次）。
 const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
-const demoPool = path.join(userData, 'demo-config', 'plugins');
+const DEMO_CFG = path.join(userData, 'demo-config');
+const SITE_POOL = path.join(DEMO_CFG, 'site-plugins');
+const SAMPLE_PLUGINS = ['code-server', 'sshd'];
+
+const require = createRequire(import.meta.url);
 
 /**
- * 把池设成指定的几个插件（名字对应 `<repo>/plugins/<名字>`），并重扫。
+ * 把站点池设成指定的几个插件（名字对应 `<repo>/plugins/<名字>`），并重扫。
  *
- * 传空数组 = **一个插件都没有** —— 那是基座的正常状态，也得能被测到。
+ * 传空数组 = **一个插件都没有、也什么都没同意过** —— 那是基座的正常状态，
+ * 也得能被测到。
+ *
+ * ★ 池与台账**一起清、一起写**：只清池不清台账的话，站点分发那几条用例会看到
+ *   "这两个早就同意过了"，于是 `pendingConsent` 是 0 —— 而失败信息长得像
+ *   "同意闸没问"。
+ *
+ * ★ 台账走 **`config.trustPlugin`（产品里那个动词）**，不在这里手搓一个对象：
+ *   它自己校验"摘要必须是 64 位十六进制"并返回 `{ok, error}`，写坏了当场就红。
+ *   手搓的话写错一个字段会被 `loadConfig` **静默丢掉**，症状同样是"两个插件都是
+ *   active:false"，而原因完全指不出来。
  */
-function setPool(names) {
-  fs.rmSync(demoPool, { recursive: true, force: true });
-  fs.mkdirSync(demoPool, { recursive: true });
+function setSitePlugins(names) {
+  const config = require('../src/main/config.js');
+  const P = require('../src/main/plugins/index.js');
+
+  fs.rmSync(SITE_POOL, { recursive: true, force: true });
+  fs.mkdirSync(SITE_POOL, { recursive: true });
+
+  // ★ **必须改 index.js 手里那一个 cfg 对象**，不能另 `loadConfig` 一份来改。
+  //   同意闸的闭包读的是**模块里那个变量**指向的对象；另取一份的话磁盘上写对了，
+  //   而注册表看不见 —— 症状是"两个插件都 `active: false`"，几十条会话用例各红
+  //   一次在"解析不到插件"上，而原因指不出来。
+  //
+  //   还没 require index.js 的时候（文件顶层那一次）它当然不在，那时 loadConfig
+  //   一份正好 —— bootstrap 之后会用同一份磁盘内容重建 cfg。
+  const entry = require.cache[require.resolve('../src/main/index.js')];
+  const cfg = entry ? entry.exports._test.getCfg() : config.loadConfig(DEMO_CFG);
+
+  // 台账**整个清空再重记**。逐条删会漏掉将来可能存在的第二种键。
+  cfg.trustedPlugins = {};
+  config.saveConfig(DEMO_CFG, cfg);
+
   for (const n of names) {
-    fs.cpSync(path.join(REPO, 'plugins', n), path.join(demoPool, n), { recursive: true });
+    const src = path.join(REPO, 'plugins', n);
+    const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
+    const dest = path.join(SITE_POOL, mf.id, mf.version);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.cpSync(src, dest, { recursive: true });
+
+    // ★ 摘要**在目标那棵树上**算，不是在源上 —— 闸门那一趟算的是目标那棵树。
+    //   两处各算各的话，哪天摘要公式或拷贝行为变了（权限位、符号链接）会分叉，
+    //   而症状是"插件明明装着，却要你重新同意"。
+    const r = P.inspectDir(dest, 'site');
+    assert.ok(!r.error, `夹具铺出去的插件自己不合法：${r.error}`);
+    const t = config.trustPlugin(DEMO_CFG, cfg, mf.id, mf.version, r.entry.digest, '测试夹具');
+    assert.ok(t.ok, `台账没记上：${t.error}`);
   }
-  require('../src/main/index.js')._test.getRegistry().reload();
+
+  // ★ 只在 index.js **已经加载过**的时候重扫。夹具是在文件顶层被调用的，而那时
+  //   Electron 桩还没装、index.js 也还没被 require —— 直接 require 它会用一个
+  //   不存在的 electron 环境启动整个客户端。
+  if (entry) entry.exports._test.getRegistry().reload();
 }
 
 /** 跑一段需要一个特定插件集合的代码，跑完恢复成两个都装。 */
-async function withPool(names, fn) {
-  setPool(names);
+async function withSitePlugins(names, fn) {
+  setSitePlugins(names);
   try {
     return await fn();
   } finally {
-    setPool(['code-server', 'sshd']);
+    setSitePlugins(SAMPLE_PLUGINS);
   }
 }
 
-// 全套件的缺省：两个插件都装着。单个用例要别的组合就用 withPool。
-fs.mkdirSync(demoPool, { recursive: true });
-for (const n of ['code-server', 'sshd']) {
-  fs.cpSync(path.join(REPO, 'plugins', n), path.join(demoPool, n), { recursive: true });
+/**
+ * ★ 收尾用：把夹具恢复成缺省。**每一条动过站点池的用例都要调它。**
+ *
+ * `withSitePlugins` 的 `finally` 已经恢复过一次，但 `t.after` 是在它**之后**跑的
+ * —— 收尾那一步如果自己删池子而不恢复，从那条用例起后面**所有**会话用例都会红在
+ * "没有可以提交的服务"上，而失败点离夹具十万八千里。
+ */
+function resetFixture() { setSitePlugins(SAMPLE_PLUGINS); }
+
+/**
+ * 收尾：**把夹具恢复成缺省**，并复位演示后端。
+ *
+ * ★ 这个函数是唯一允许动站点池收尾的地方。**不许裸着写
+ *   `fs.rmSync(idx._test.getSitePoolDir(), …)`** —— 删完不恢复的话，从那条用例起
+ *   后面**所有**会话用例都会红在"没有可以提交的服务"上，而失败点离夹具十万八千里。
+ */
+function cleanupSiteState(idx) {
+  resetFixture();
+  idx._test.getBackend().debugReset();
 }
+
+/** index.js 已经加载过吗（没加载过就不能碰注册表，也不能碰它手里那个 cfg）。 */
+function idxLoaded() {
+  return require.cache[require.resolve('../src/main/index.js')] || null;
+}
+
+/**
+ * 在台账里记一条"用户同意过这一份"。摘要**从磁盘上那棵树**算 —— 与闸门那一趟
+ * 算的是同一棵树（分两处算的话，公式一漂，症状是"插件明明装着却要重新同意"）。
+ */
+function trustSitePlugin(dir, id, version) {
+  const config = require('../src/main/config.js');
+  const P = require('../src/main/plugins/index.js');
+  const entry = idxLoaded();
+  assert.ok(entry, 'trustSitePlugin 只能用在 index.js 起来之后（它要改它手里那个 cfg）');
+  const r = P.inspectDir(dir, 'site');
+  assert.ok(!r.error, `这一份自己不合法：${r.error}`);
+  const t = config.trustPlugin(DEMO_CFG, entry.exports._test.getCfg(), id, version,
+    r.entry.digest, '测试夹具');
+  assert.ok(t.ok, `台账没记上：${t.error}`);
+}
+
+/**
+ * 往**站点池**里放一份插件，并（默认）记一条台账 —— 于是它立刻可用。
+ *
+ * ★ 摆的是**合法的那一层**（`<id>/<版本>/`）。要造 §5.1 说的**非法**形状
+ *   （`<池>/<任意名>/plugin.json`）不要用这个函数 —— 那条用例自己摆，因为
+ *   "摆错了会发生什么"正是它要测的东西。
+ *
+ * `trust: false` 用来造"有内容、但用户没同意过"的现场（§5.2 那条要用）。
+ */
+function putSitePlugin({ id, name, version = '1.0.0', over = {}, clientSrc, trust = true }) {
+  const dir = path.join(SITE_POOL, id, version);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plugin.json'),
+    JSON.stringify({ id, name, displayName: name, version, ...over }, null, 2));
+  if (clientSrc !== undefined) {
+    fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'client', 'index.js'), clientSrc);
+  }
+  if (trust) trustSitePlugin(dir, id, version);
+  const entry = idxLoaded();
+  if (entry) entry.exports._test.getRegistry().reload();
+  return dir;
+}
+
+// 全套件的缺省：两个插件都装着，而且**都过了同意闸**。
+setSitePlugins(SAMPLE_PLUGINS);
 
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [] };
@@ -200,8 +321,6 @@ Module._load = function (request, ...rest) {
   if (request === 'electron') return electronStub;
   return origLoad.call(this, request, ...rest);
 };
-
-const require = createRequire(import.meta.url);
 
 // 演示模式：让 createBackend 走演示后端，避免走「未实现」的 SSH 后端
 process.argv.push('--demo');
@@ -835,7 +954,12 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   const u = require('../src/main/plugins/ulid.js');
   // ★ 用**真的池**（装着仓库里那两个插件），不是 `new Registry()` —— 后者现在
   //   是"一个插件都没有"，而这一条测的是解析语义，得有东西可解析。
-  const reg = new Registry([{ dir: demoPool, source: 'pool' }]);
+  //
+  // ★ 这里传 `source: 'site'` 是**安全的**，而且理由要说清：**同意闸是构造参数**，
+  //   不传就恒真（见 `Registry` 的文档）；`index.js` 那一个传了闸，所以它走台账。
+  //   ★ 这两件事**不能互相类推** —— 把 `index.js` 那个根的 source 改成 site 而
+  //   不管台账，会让池里每一份都变成 `active: false`。
+  const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
   const cs = reg.list().find((p) => p.name === 'code-server');
   assert.ok(cs, '前置条件：池里有 code-server');
   const ref = `${cs.id}@${cs.version}`;
@@ -906,7 +1030,7 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
 test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry, bucketOf } = require('../src/main/plugins/index.js');
-  const reg = new Registry([{ dir: demoPool, source: 'pool' }]);
+  const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
   const cs = reg.list().find((p) => p.name === 'code-server');
   const ss = reg.list().find((p) => p.name === 'sshd');
   assert.ok(cs && ss, '前置条件：池里两个插件都在');
@@ -942,13 +1066,26 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
 // 「站点分发的插件」，逐条验四件事：坏文件不拖垮别人、装上就认得、
 // 卸掉之后会话仍然能管（这是"通用层"的核心断言）、名字与文件不一致时宁可跳过。
 
-/** 在一个临时根目录下造一个插件目录。返回它的路径。 */
+/**
+ * 在一个临时根目录下造一个插件。返回它的路径。
+ *
+ * ★ 造的是**两层**：`<root>/<目录名>/<版本>/plugin.json`。那是站点池唯一的形状，
+ *   也是删掉「扫两层」第一层之后**唯一**被认的形状。一层布局
+ *   （`<root>/<目录名>/plugin.json`）是"把插件目录拷进池里"那个旧形状，
+ *   §5.1 明文禁止它产生任何效果 —— 所以夹具也不许再造它。要造那个现场的是
+ *   §5.1 那条用例，它**故意**造一层。
+ *
+ * ★ 版本目录名取 `over.version` 里**合形状**的那一个，不合形状就用 `1.0.0`：
+ *   有几条用例正是要喂坏版本号（`' 1.0.0'`、`'1.0.0\n'` 之类），拿它当目录名
+ *   会造出带空格或换行的目录。
+ */
 function writePlugin(root, dirName, over = {}, clientSrc = undefined) {
-  const dir = path.join(root, dirName);
-  fs.mkdirSync(dir, { recursive: true });
   const mf = {
     id: mintId(), name: 'temp', displayName: '临时', version: '1.0.0', ...over,
   };
+  const vdir = /^\d+\.\d+\.\d+$/.test(String(mf.version)) ? String(mf.version) : '1.0.0';
+  const dir = path.join(root, dirName, vdir);
+  fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(mf, null, 2));
   if (clientSrc !== undefined) {
     fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
@@ -978,9 +1115,11 @@ test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) 
   writePlugin(tmp, 'good', { name: 'good', displayName: '好的' }, 'module.exports = {};\n');
   // 客户端代码语法错
   writePlugin(tmp, 'broken', { name: 'broken' }, 'this is not javascript at all((((\n');
-  // 清单不是合法 JSON
-  fs.mkdirSync(path.join(tmp, 'badjson'), { recursive: true });
-  fs.writeFileSync(path.join(tmp, 'badjson', 'plugin.json'), '{ not json');
+  // 清单不是合法 JSON。★ 手写这一份时也要按**两层**摆 —— 一层布局是 §5.1 禁止
+  //   的那个形状，摆错了它会被静静跳过，而这条用例会红在"五个坏插件只报出四个"
+  //   上，看起来像扫描器漏了。
+  fs.mkdirSync(path.join(tmp, 'badjson', '1.0.0'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'badjson', '1.0.0', 'plugin.json'), '{ not json');
   // id 不是 ULID —— 身份是铸造出来的，编一个名字冒充不了
   writePlugin(tmp, 'badid', { id: 'code-server', name: 'badid' });
   // 未知键：打错一个键名不该静默变成"配了但不生效"
@@ -1010,61 +1149,54 @@ test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) 
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('★ 身份是铸造出来的：同一个构件合并、抢同一个身份的一个都不加载', (t) => {
+test('★ 身份是铸造出来的：目录名不参与判定，抢同一个身份的一个都不加载', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
   const src = 'module.exports = {};\n';
-
-  // ── 同一个构件被两个来源分发 → 合并成一条，只是多记一个来源 ──
-  //   关键在于两边的**目录名完全不同**：目录名不参与任何判定，身份来自清单。
-  const siteRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-s-'));
-  const poolRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-p-'));
   const id = mintId();
-  writePlugin(siteRoot, 'readable-name', { id, name: 'jup', displayName: 'J' }, src);
-  writePlugin(poolRoot, `${id}@1.0.0`, { id, name: 'jup', displayName: 'J' }, src);
-
-  let reg = new Registry([{ dir: siteRoot, source: 'site' },
-    { dir: poolRoot, source: 'pool' }]);
-  let jup = reg.list().filter((p) => p.id === id);
-  assert.equal(jup.length, 1, '同一个 (id, 版本) + 同一份内容 = 一条，不是两条');
-  assert.deepEqual(jup[0].sources, ['pool', 'site'], '但要记下两个来源');
-  assert.equal(reg.errors.length, 0, `合并不该报错：${JSON.stringify(reg.errors)}`);
 
   // ── 同 (id, 版本) 而内容不同 → 两个都不加载 ──
   //   这是池模型唯一的危险处：挑一个错的后果是会话的解析键指过去、客户端静默地
   //   跑了另一个插件的代码，而用户完全看不出来。宁可暂时不可用 —— 那种失败是
   //   **看得见**的。
-  writePlugin(poolRoot, 'impostor', { id, name: 'jup', displayName: 'J' },
+  //
+  //   ★ 这件事**不需要两个根**就能发生，而且删掉本机池之后也照样能发生：两个
+  //     目录名完全不同的目录，只要清单里写着同一个 id 与同一个版本，就撞上了。
+  //     （从前这一段用的是"站点池 + 本机池各放一份"，那只是撞车的一种来路。）
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
+  writePlugin(root, 'what-the-author-called-it', { id, name: 'jup', displayName: 'J' }, src);
+  writePlugin(root, 'another-name-entirely', { id, name: 'jup', displayName: 'J' },
     'module.exports = { attach() {} };\n');          // 内容不同 → 摘要不同
-  reg = new Registry([{ dir: siteRoot, source: 'site' },
-    { dir: poolRoot, source: 'pool' }]);
+
+  let reg = new Registry([{ dir: root, source: 'site' }]);
   assert.equal(reg.get(id, '1.0.0'), null,
     '★ 内容不同的两份在抢同一个身份 → 两个都不加载，绝不挑一个');
   assert.equal(reg.errors.length, 1, '而且要说出来');
   assert.match(reg.errors[0], /抢同一个 id/, `报错要说清是什么问题：${reg.errors[0]}`);
   assert.match(reg.errors[0], /摘要/, '还要给出判据（摘要），用户才分得清哪份是哪份');
+  // ★ 目录名一个都不许出现在判定里：报错该说清单里的 id，不该说目录名。
+  assert.match(reg.errors[0], new RegExp(id),
+    '报错要指到**清单里的 id**（身份），目录名不参与判定');
 
   // ── 同 id 不同版本 → **并存**。站点升级频繁也好、拒绝升级也好，都不挤掉对方 ──
   const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-v-'));
-  writePlugin(root2, 'v1', { id, name: 'jup', displayName: 'J', version: '1.0.0' }, src);
-  writePlugin(root2, 'v2', { id, name: 'jup', displayName: 'J', version: '2.0.0' }, src);
-  reg = new Registry([{ dir: root2, source: 'pool' }]);
+  const id2 = mintId();
+  writePlugin(root2, 'v1', { id: id2, name: 'jup2', displayName: 'J', version: '1.0.0' }, src);
+  writePlugin(root2, 'v2', { id: id2, name: 'jup2', displayName: 'J', version: '2.0.0' }, src);
+  reg = new Registry([{ dir: root2, source: 'site' }]);
   assert.deepEqual(reg.list().map((p) => p.version), ['1.0.0', '2.0.0'],
     '同一个插件的多个版本并存');
-  assert.equal(reg.latestByName('jup').version, '2.0.0', '按短名取时给最高的那一版');
-  assert.equal(reg.get(id, '1.0.0').version, '1.0.0', '按解析键取时给的就是那一版');
+  assert.equal(reg.latestByName('jup2').version, '2.0.0', '按短名取时给最高的那一版');
+  assert.equal(reg.get(id2, '1.0.0').version, '1.0.0', '按解析键取时给的就是那一版');
 
   // ★ 去重桶要**带上版本**：池里并存同一个插件的多个版本是常态（站点更新频繁、
   //   也可能拒绝更新）。只按 id 分桶的话，刚装上的新版本那句话会被旧版本压掉 ——
   //   而"这个版本已经说过这句话了"与"那个版本说过了"是两件事。
   const { bucketOf } = require('../src/main/plugins/index.js');
-  assert.notEqual(bucketOf(reg.get(id, '1.0.0')), bucketOf(reg.get(id, '2.0.0')),
+  assert.notEqual(bucketOf(reg.get(id2, '1.0.0')), bucketOf(reg.get(id2, '2.0.0')),
     '★ 去重桶必须区分同一插件的不同版本');
 
-  for (const d of [tmp, siteRoot, poolRoot, root2]) {
-    fs.rmSync(d, { recursive: true, force: true });
-  }
+  for (const d of [root, root2]) fs.rmSync(d, { recursive: true, force: true });
 });
 
 test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个角落炸', (t) => {
@@ -1372,178 +1504,15 @@ test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被�
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-// ── ★ 池是安装点：装得进、卸得掉、两者都不许绕过撞车规则 ────────────────────
 
-test('★ 安装器：装进池、幂等、以及**绝不覆盖**内容不同的同一版', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const { installFrom, uninstall } = require('../src/main/plugins/install.js');
-  const { Registry } = require('../src/main/plugins/index.js');
-  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-inst-'));
-  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src-'));
 
-  const id = mintId();
-  writePlugin(src, 'thing', { id, name: 'thing', displayName: '东西' }, 'module.exports = {};\n');
-  const srcDir = path.join(src, 'thing');      // 装的是**插件目录**，不是装着它的那个
-
-  const a = installFrom(pool, srcDir);
-  assert.equal(a.ok, true, JSON.stringify(a));
-  assert.equal(a.already, false);
-  // 落在 `<池>/<id>/<版本>/` —— 两层的布局让同一个插件的多个版本并存。
-  assert.equal(a.dest, path.join(pool, id, '1.0.0'));
-
-  // 再装一次：内容一样就是同一个构件，幂等，不报错也不改动
-  const b = installFrom(pool, srcDir);
-  assert.equal(b.ok, true);
-  assert.equal(b.already, true, '同样内容的第二次安装应当是幂等的');
-
-  // ★ 同一 `(id, 版本)` 而**内容不同** —— 这不是"更新"，是两个东西在抢同一个
-  //   身份。安装器绝不能变成绕过那条规则的覆写后门：那会让某个会话静默地拿到
-  //   另一个插件的代码。要更新就升版本号。
-  const evil = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-evil-'));
-  writePlugin(evil, 'thing', { id, name: 'thing', displayName: '冒牌' }, 'module.exports = {};\n');
-  const c = installFrom(pool, path.join(evil, 'thing'));
-  assert.equal(c.ok, false, '★ 同一 (id, 版本) 而内容不同必须**拒绝安装**，不是覆盖');
-  assert.match(c.error || '', /版本/, `要说清该怎么办（升版本号）：${c.error}`);
-  // 原样的那一份必须**一个字都没被动过**
-  const reg = new Registry([{ dir: pool, source: 'pool' }]);
-  assert.equal(reg.get(id, '1.0.0').displayName, '东西', '被拒绝的安装不许留下任何痕迹');
-
-  // 装一个坏目录：明确失败，不留下半份插件
-  const junk = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-junk-'));
-  fs.writeFileSync(path.join(junk, 'plugin.json'), '{ not json');
-  const d = installFrom(pool, junk);
-  assert.equal(d.ok, false);
-  assert.match(d.error || '', /plugin\.json|JSON/, `要说清坏在哪：${d.error}`);
-
-  // ★ **删之前先读一遍**：这个函数会 `rm -rf` 一个由 id/版本 拼出来的路径。
-  //   先造一个"目录名与里面那份清单对不上"的现场（`<id>/2.0.0/` 里的清单自报
-  //   1.0.0）—— 这时绝不能动手，因为路径是按调用方说的拼的，而内容不是它要的。
-  //   （这一步必须在真卸载**之前**做 —— 卸载会把 a.dest 删掉，拷不出来了。）
-  const mislabeled = path.join(pool, id, '2.0.0');
-  fs.cpSync(a.dest, mislabeled, { recursive: true });
-  const u3 = uninstall(pool, id, '2.0.0');
-  assert.equal(u3.ok, false, '★ 目录里的插件自报的身份与要卸的不符时，不许删它');
-  assert.match(u3.error || '', /2\.0\.0/, `要说清看到的是什么：${u3.error}`);
-  assert.equal(fs.existsSync(mislabeled), true, '它必须还在');
-
-  // 卸载：删之前先确认那个目录真的是它
-  const u = uninstall(pool, id, '1.0.0');
-  assert.equal(u.ok, true, JSON.stringify(u));
-  assert.equal(fs.existsSync(a.dest), false, '卸掉之后目录要真的没了');
-  const u2 = uninstall(pool, id, '1.0.0');
-  assert.equal(u2.ok, false, '再卸一次要明确失败，而不是静静地成功');
-  // 还剩一个版本时，`<id>/` 那一层目录**不能**被收掉
-  assert.equal(fs.existsSync(path.join(pool, id)), true,
-    '同一个 id 还有别的版本在时，不能把那一层目录删掉');
-
-  for (const d2 of [pool, src, evil, junk]) fs.rmSync(d2, { recursive: true, force: true });
-});
-
-test('★★ 从一个包安装（开发者模式那个入口）：解开、建树、走**同一个**安装器', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const crypto = require('node:crypto');
-  const { installFromPackage } = require('../src/main/plugins/install.js');
-  const PACKER = require('../../packer/slurmate-packer.js');
-  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkgpool-'));
-  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkgsrc-'));
-
-  const id = mintId();
-  const dir = writePlugin(src, 'thing', { id, name: 'thing', displayName: '东西' },
-    'module.exports = {};\n');
-  fs.mkdirSync(path.join(dir, 'job'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'job', 'start.sh'), '#!/bin/sh\n');
-
-  // 拿仓库里那个打包器**现打一个真包**（不是手搓字节 —— 手搓就等于在这里又
-  // 实现了一遍容器格式，而它与真格式分家的那天，这条用例反而会说"一切正常"）。
-  const files = fs.readdirSync(dir).flatMap(function walk(rel) {
-    const full = path.join(dir, rel);
-    if (fs.statSync(full).isDirectory()) {
-      return fs.readdirSync(full).map((n) => path.join(rel, n)).flatMap(walk);
-    }
-    const data = fs.readFileSync(full);
-    return [{ path: rel.split(path.sep).join('/'), data,
-              sha256: crypto.createHash('sha256').update(data).digest('hex') }];
-  }, '');
-  const { privateKey } = crypto.generateKeyPairSync('ed25519');
-  const pub = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32);
-  const digest = PACKER.contentDigest(files);
-  const sig = crypto.sign(null, Buffer.from(digest, 'hex'), privateKey);
-  const buf = PACKER.buildPackage(files, Buffer.concat([Buffer.from([1]), pub, sig]));
-  const pkgFile = path.join(src, 'thing.splug');
-  fs.writeFileSync(pkgFile, buf);
-  const fp = crypto.createHash('sha256').update(pub).digest('hex');
-
-  const a = installFromPackage(pool, pkgFile);
-  assert.equal(a.ok, true, JSON.stringify(a));
-  assert.equal(a.dest, path.join(pool, id, '1.0.0'));
-  assert.equal(a.fingerprint, fp, '★ 签名者要如实报出来给用户看');
-  assert.equal(fs.existsSync(path.join(a.dest, 'job', 'start.sh')), true,
-    '包里的每一份都要铺出来（包括客户端不看的那一半）');
-
-  // 幂等：同一个包再装一次，内容一样 ⇒ 同一个构件。
-  assert.deepEqual(installFromPackage(pool, pkgFile), { ...a, already: true });
-
-  // 装完之后**走的是同一个安装器**，"绝不覆盖内容不同的同一版"照旧成立。
-  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pkg2-'));
-  const dir2 = writePlugin(other, 'thing', { id, name: 'thing', displayName: '冒牌' },
-    'module.exports = {};\n');
-  const files2 = [{ path: 'plugin.json', data: fs.readFileSync(path.join(dir2, 'plugin.json')),
-                    sha256: crypto.createHash('sha256')
-                      .update(fs.readFileSync(path.join(dir2, 'plugin.json'))).digest('hex') }];
-  const buf2 = PACKER.buildPackage(files2, Buffer.alloc(0));
-  const pkg2 = path.join(other, 'thing.splug');
-  fs.writeFileSync(pkg2, buf2);
-  const c = installFromPackage(pool, pkg2);
-  assert.equal(c.ok, false, '★ 同一个 (id, 版本) 而内容不同 ⇒ 拒绝，不是覆盖');
-  assert.equal(fs.existsSync(path.join(pool, id, '1.0.0', 'job', 'start.sh')), true,
-    '被拒绝的那一次不许留下任何痕迹');
-
-  // 一个读不了的包：明确失败，而且**临时目录里不许留下半棵树**。
-  const junk = path.join(src, 'junk.splug');
-  fs.writeFileSync(junk, Buffer.concat([buf.subarray(0, 40), Buffer.from([1, 2, 3])]));
-  const d = installFromPackage(pool, junk);
-  assert.equal(d.ok, false);
-  assert.match(d.error || '', /读不了|字节/, `要说清为什么：${d.error}`);
-
-  for (const x of [pool, src, other]) fs.rmSync(x, { recursive: true, force: true });
-});
-
-test('★ 池扫两层：用户拷一个目录进去能用，同一个插件的多版本也能并存', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const { Registry } = require('../src/main/plugins/index.js');
-  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-two-'));
-
-  // 一层：用户手工 `cp -r 插件目录 池/` 得到的形状
-  const flat = mintId();
-  writePlugin(pool, 'readable-name', { id: flat, name: 'flat', displayName: '一层' });
-
-  // 两层：安装器写出来的形状，同一 id 两个版本并存
-  //
-  // ★ `version` 必须**显式写**（writePlugin 的缺省是 1.0.0）。少了它，两个目录
-  //   里的清单就是"同一个 (id, 版本) 而内容不同"—— 撞车规则会正确地**两个都不
-  //   加载**，而这条用例就会红在一个与它要测的东西无关的地方。（第一次就是这么
-  //   红的，而失败信息长得像"两层没扫到"。）
-  const deep = mintId();
-  writePlugin(path.join(pool, deep), '1.0.0',
-    { id: deep, name: 'deep', version: '1.0.0', displayName: '两层旧' });
-  writePlugin(path.join(pool, deep), '2.0.0',
-    { id: deep, name: 'deep', version: '2.0.0', displayName: '两层新' });
-
-  const reg = new Registry([{ dir: pool, source: 'pool' }]);
-  assert.deepEqual(reg.list().map((p) => `${p.name}@${p.version}`).sort(),
-    ['deep@1.0.0', 'deep@2.0.0', 'flat@1.0.0'],
-    '两种布局都要扫到 —— 目录名不参与判定，深浅也不参与');
-  assert.equal(reg.get(deep, '1.0.0').displayName, '两层旧', '两个版本各是各的');
-
-  fs.rmSync(pool, { recursive: true, force: true });
-});
 
 test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装包坏了"', async (t) => {
   t.after(async () => {
     Module._load = origLoad;
-    setPool(['code-server', 'sshd']);
+    resetFixture();
   });
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     const r = await invoke('app:partitions');
     const pv = r.plugins;
 
@@ -1552,8 +1521,11 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     //   分开 —— 而这两种情况在 `missing` 里长得一模一样。没有它们，零插件时
     //   界面对站点上每一个插件都会喊"升级客户端"。
     assert.equal(pv.installedCount, 0, '要能分辨"池是空的"');
-    assert.ok(pv.poolDir && pv.poolDir.length > 0, '要给出池在哪 —— 那是"我该往哪放"的答案');
     assert.ok(pv.errors.length === 0, '池空不是错误');
+    // ★ 这里从前还断言 `pv.poolDir` 必须是"我该往哪放"的答案。**池没了，那个问题
+    //   也没了** —— 插件只有站点分发一条来的路，用户没有任何"往目录里放东西"的
+    //   场合。所以这条改成断言**它的反面**：界面上不许再教用户去做那件事。
+    assert.equal(pv.poolDir, undefined, '本机池的路径不该再下发给界面');
 
     // ★ 站点分发接上来之后，这一条**变强了**：演示站点报的不再是"本机池里有什么"
     //   （那样「站点有而本机没有」在演示里永远走不到），而是仓库里那两个**真插件**
@@ -1572,9 +1544,12 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
       .map((n) => n.text).join('\n');
     assert.match(notices, /还没有装上任何插件/, `要说清是"还没装"：${notices}`);
-    // ★ 出路**取决于站点说了什么**：站点会分发 ⇒ 说"去同步"；不会 ⇒ 说"把目录放进
-    //   池里、并把开发者模式打开"。说错方向的后果是用户去干一件没有用的事。
+    // ★ 出路只有一条：站点分发。这里从前还有一支 —— 站点不分发时说"把插件目录
+    //   放进池里，再把开发者模式打开"，而**那三样东西今天都不存在了**。所以除了
+    //   "去同步"要说对，还要钉住**不许再出现**那句让用户去干没用的事的话。
     assert.match(notices, /本站会分发插件/, `站点会分发时要说去同步：${notices}`);
+    assert.doesNotMatch(notices, /插件目录|打开插件目录|开发者模式|放进去|勾上/,
+      `★ 本机池没了，任何一句"把目录放进去"都是一句让用户去干没用的事的话：${notices}`);
   });
 });
 
@@ -1584,15 +1559,13 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    // ★ 收尾必须把**站点池**也清掉：这台机器上的其余用例共用同一个 userData，
+    // ★ 收尾必须把**站点池**恢复成缺省：这台机器上的其余用例共用同一个 userData，
     //   留下一个装好的站点插件会让它们的 `missing` / `installedCount` 断言
     //   因为错误的理由通过或失败。同一条规矩见文件头的池设置那一段。
-    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
-    idx._test.getRegistry().reload();
-    idx._test.getBackend().debugReset();
+    cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     // 池子空、开发者模式在演示下恒开 ⇒ 本机一个插件都没有，而站点报了两个
     // **真文件**（仓库里的 plugins/，见 backend-fake 的 _siteIndex）。
     const r = await invoke('app:syncPlugins');
@@ -1656,9 +1629,7 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     const pins = idx._test.getPinnedKeys();
     for (const k of Object.keys(pins)) delete pins[k];
     Object.assign(pins, pinsBefore);
-    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
-    idx._test.getRegistry().reload();
-    idx._test.getBackend().debugReset();
+    cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
   // ★ 这里从前还有一行 `await invoke('app:debug', 'packages')`，注释写着"整包那条路：
@@ -1668,7 +1639,7 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
   //   同时让读代码的人以为这一条用例依赖一次"切到整包模式"的准备步骤。
   //   （整包那条路不需要切换：v0.7 之后它就是唯一的路。）
 
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     const r = await invoke('app:syncPlugins');
     assert.equal(r.ok, true, JSON.stringify(r));
     const first = idx._test.getPendingConsent()[0];
@@ -1737,12 +1708,10 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
-    idx._test.getRegistry().reload();
-    idx._test.getBackend().debugReset();
+    cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     await invoke('app:syncPlugins');
     const first = idx._test.getPendingConsent()[0];
     await invoke('app:consentPlugin', first.id, first.version);
@@ -1791,6 +1760,121 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
   });
 });
 
+test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布局）⇒ 什么也不发生', async (t) => {
+  // ★ 这条**从前不存在，而它对面有一条**：〈池扫两层：用户拷一个目录进去能用〉
+  //   —— 那条断言的是反面，而且是绿的，所以两边都"通过"。而
+  //   `docs/PLUGIN-SPEC.md` §5.1 写着：
+  //
+  //     「往池目录里手工放置内容**必须**不产生任何效果：那些内容**禁止**出现在
+  //       插件列表里、**禁止**被加载，**禁止**被当作"某个站点要给你装的东西"
+  //       呈现给用户。」
+  //
+  //   一整条规范性条款，一条正向用例都没有。这条补上它。
+  //
+  //   ★ 同一个形状在**站点**那一侧是**明令报错**的（守护进程的 `scan_plugins`：
+  //     见到目录要指名道姓地说出来）—— 因为那边那些目录是**我们自己的安装器**
+  //     留下的、root 拥有的一整套副本，不说就永远没人知道。两边读者不同，判断
+  //     也不同，理由写在 `plugins/index.js` 的 `findPluginDirs` 上。
+  const idx = require('../src/main/index.js');
+  t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
+  await invoke('app:debug', 'reset');
+
+  await withSitePlugins([], async () => {
+    // 造一份**完全合法**的插件：真 id、真版本、真的 `client/index.js`。
+    // 唯一的"错"是层次 —— 这正是"用户把插件目录整个拷进去"得到的那个形状。
+    const id = mintId();
+    const dir = path.join(SITE_POOL, 'my-plugin');       // ← 一层：名字直接挂在池下
+    fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify({
+      id, name: 'handplaced', displayName: '手放的', version: '1.0.0',
+    }, null, 2));
+    fs.writeFileSync(path.join(dir, 'client', 'index.js'), 'module.exports = {};\n');
+
+    const reg = idx._test.getRegistry();
+    reg.reload();
+
+    assert.equal(reg.get(id, '1.0.0'), null,
+      '§5.1 第一句：手放的内容**禁止**出现在插件列表里');
+    assert.equal(reg.list().filter((p) => p.name === 'handplaced').length, 0,
+      '连"看得见"都不许 —— 一层布局不是站点池的形状');
+
+    const pv = (await invoke('app:partitions')).plugins;
+    for (const [what, list] of [['可用的', pv.plugins], ['没加载的', pv.inert],
+      ['站点没有的', pv.missing]]) {
+      assert.equal((list || []).some((p) => p.name === 'handplaced'), false,
+        `手放的那一份不许出现在「${what}」那一列里（§5.1 第二、三句）`);
+    }
+
+    // ★ 也**不许报错**。它不是坏插件，它是**不存在的东西** —— 为它报一条错，等于
+    //   在界面上承认"这个形状有意义"。§5.1 的措辞正是「不产生任何效果」。
+    assert.equal(reg.errors.some((e) => /handplaced|my-plugin/.test(e)), false,
+      `手放的东西不该产生任何效果，包括一条报错：${JSON.stringify(reg.errors)}`);
+  });
+});
+
+test('★★ §5.2：客户端只挂一个根，而那个根上的每一份都必须过同意闸', async (t) => {
+  // ★ 这里钉的是 §5.2 最后那句：「**禁止**给任何一类插件开免同意的口子」。
+  //   从前这句话在代码里是**假的** —— 同意闸写着 `entry.source !== 'site' || …`，
+  //   本机池那一整类免同意。豁免的理由（"用户自己刚放进去的，让他同意自己是空话"）
+  //   在池存在时看着成立，代价却是把一条**没有分支的规则**变成一条**有例外的
+  //   规则**，而 §5.2 紧跟那句禁令写着理由：「规则一有分支，绕过它的路就会长出来」。
+  const idx = require('../src/main/index.js');
+  t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
+  await invoke('app:debug', 'reset');
+
+  // ① 根的**集合**。少一个不少，多一个就多一条绕过的路。
+  assert.deepEqual(idx._test.getRegistry().roots.map((r) => r.source), ['site'],
+    '★ 多挂一个根就多一条绕过同意闸的路 —— §5.2 禁止任何例外。加之前先回答：'
+    + '它上面每一份凭什么免同意？');
+
+  // ② ★ 而**"按来源开豁免"这个形状本身**也要钉住 —— 退一步做一次**文本检查**。
+  //
+  //   为什么行为用例够不着：只剩一个根之后，`entry.source !== 'site'` 这样的句子
+  //   **永远不会生效**（每一份都是 site），所以把它加回去，一条行为用例都不会红
+  //   —— 变异验证实测过，加回去之后 51 条用例全绿。
+  //
+  //   可它正是 §5.2 禁止的那件事的**全部形态**：口子就是这么开出来的（先有一句
+  //   `|| entry.source !== 'site'`，然后那个来源就长出来了）。而 §5.2 自己写着
+  //   理由：「规则一有分支，绕过它的路就会长出来」。
+  //
+  //   ★ 这条检查不优雅，它拦的是一个**今天不可达、明天会长出路**的分支。这个仓库
+  //     在别处也这么做（`renderer.test.mjs` 整套都是文本检查）—— 判据是"行为够
+  //     不着，而它真的会漂"。
+  const mainSrc = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+  const at = mainSrc.indexOf('allows:');
+  assert.ok(at > 0, '同意闸的落点找不到了 —— 这条文本检查要跟着它改');
+  assert.equal(/entry\.source/.test(mainSrc.slice(at, at + 400)), false,
+    '★ 同意闸里又出现了 `entry.source` —— 那正是 §5.2 禁止的口子（按来源开豁免）。'
+    + '要加一个来源，先回答"它上面每一份凭什么免同意？"');
+
+  // ② 没台账 ⇒ 不加载（**新用户的默认状态**就是这一格）。
+  // ③ 补上台账 ⇒ 加载。
+  //    ★ **两半都要。** 只有 ② 的话，一个"永远不加载"的实现全绿 —— 而那是把
+  //      插件分发整个关掉，不是"同意闸生效"。
+  await withSitePlugins([], async () => {
+    const id = mintId();
+    // ★ 客户端代码**带一个 attach** —— 只有这样"接上了没有"才是可观测的。
+    //   给一个空模块的话，`attach` 本来就是 null，两半断言都会过，而这条用例
+    //   就退化成走过场（它要钉的恰恰是"钩子挂上了没有"）。
+    const dir = putSitePlugin({ id, name: 'gated', trust: false,
+      clientSrc: 'module.exports = { attach() {} };\n' });
+    const reg = idx._test.getRegistry();
+
+    const before = reg.get(id, '1.0.0');
+    assert.ok(before, '它在注册表里 —— 用户要看得见它、要能点同意');
+    assert.equal(before.active, false, '★ 没同意过 ⇒ 不加载');
+    assert.equal(before.attach, null, '而且一个钩子都不许挂上（宁可不做，也不能拿半个插件去接会话）');
+
+    trustSitePlugin(dir, id, '1.0.0');
+    reg.reload();
+    const after = reg.get(id, '1.0.0');
+    assert.notEqual(after.active, false,
+      '★ 同意过 ⇒ 要加载。这一半是这条用例的全部价值 —— 少了它，'
+      + '一个"永远不加载"的实现也是绿的');
+    assert.ok(after.attach, '同意之后客户端代码真的接上了');
+  });
+});
+
 test('★ §5.1③：往站点池里手放一份合法的树 ⇒ 不出现、也不加载；但**看得见**', async (t) => {
   // ★ 「本机有一份，但**没有任何站点报过它**」是三条"你没有这个插件"里的一条，
   //   而它与另外两条要做的事不同。手工放进去的东西**禁止**被加载（§5.1），
@@ -1798,12 +1882,10 @@ test('★ §5.1③：往站点池里手放一份合法的树 ⇒ 不出现、也
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
-    idx._test.getRegistry().reload();
-    idx._test.getBackend().debugReset();
+    cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     // 站点只报仓库里那两个（见 backend-fake 的 _siteIndex），所以这一份站点不会报。
     const id = mintId();
     // ★ 先在台账里埋一条**摘要对不上**的旧记录：这正是"池里有一份、台账对不上"
@@ -1850,16 +1932,14 @@ test('★ 「站点愿不愿意发这一份」：有 `package` 就算，而且**
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
-    idx._test.getRegistry().reload();
-    idx._test.getBackend().debugReset();
+    cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
   // ★ `pluginsView()` 里那份"站点有哪些插件"来自**连接时**的 `op:plugins`
   //   （`refreshPartitions`），不是对账那一轮 —— 所以开关改完要重新问一次，
   //   否则断言的是一个开关改之前就取到的清单（那样这条用例永远绿）。
   await invoke('app:partitions');
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     const r = await invoke('app:syncPlugins');
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(idx._test.getPendingConsent().length, 2,
@@ -1877,11 +1957,13 @@ test('★ F18 回归：改了 client/ 下的文件而不动 plugin.json，摘要
   //   `client/sshconfig.js` 被换掉、摘要纹丝不动 —— 而它是**真的代码**。
   const P = require('../src/main/plugins/index.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-f18-'));
-  writePlugin(root, 'a', { name: 'a', displayName: 'A' }, 'module.exports = {};\n');
-  fs.writeFileSync(path.join(root, 'a', 'client', 'sshconfig.js'), '// 第一版\n');
-  const d1 = P.digestOf(P.readPluginFiles(path.join(root, 'a')));
-  fs.writeFileSync(path.join(root, 'a', 'client', 'sshconfig.js'), '// 第二版\n');
-  const d2 = P.digestOf(P.readPluginFiles(path.join(root, 'a')));
+  // ★ 用 `writePlugin` 的**返回值**，不要自己拼路径 —— 布局是 `<名字>/<版本>/`，
+  //   拼错了会红在一个与摘要无关的地方（"文件不存在"）。
+  const aDir = writePlugin(root, 'a', { name: 'a', displayName: 'A' }, 'module.exports = {};\n');
+  fs.writeFileSync(path.join(aDir, 'client', 'sshconfig.js'), '// 第一版\n');
+  const d1 = P.digestOf(P.readPluginFiles(aDir));
+  fs.writeFileSync(path.join(aDir, 'client', 'sshconfig.js'), '// 第二版\n');
+  const d2 = P.digestOf(P.readPluginFiles(aDir));
   assert.notEqual(d1, d2, '★ 只改 client/ 下的一个文件，摘要也必须变（F18）');
 
   // ★ 而"摘要相同 ⇒ 树相同"的另一半：一条符号链接与一个内容恰好等于链接目标串
@@ -1914,7 +1996,7 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
   });
   const idx = require('../src/main/index.js');
   await invoke('app:debug', 'reset');
-  await withPool([], async () => {
+  await withSitePlugins([], async () => {
     // ★ **先把站点池清空**。不清的话，前面那条端到端用例已经同意并装上了
     //   code-server，`registry.get()` 查得到它 —— 于是这条用例会**因为错误的理由**
     //   通过（"本机已经有它"而不是"站点关掉的不算数"），变异验证 M12 就是这样
@@ -1938,33 +2020,6 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
   });
 });
 
-test('★ 来源标签：只有一个来源时不贴，有两个时才贴', async (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const idx = require('../src/main/index.js');
-  const P = require('../src/main/plugins/index.js');
-  const id = mintId();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src-'));
-  writePlugin(root, 'x', { id, name: 'onlysite' }, 'module.exports = {};\n');
-  const one = new P.Registry([{ dir: root, source: 'site' }]);
-  assert.equal(one.list()[0].sources.length, 1, '前置');
-  const pool = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-src2-'));
-  writePlugin(pool, id, { id, name: 'onlysite' }, 'module.exports = {};\n');
-  const two = new P.Registry([{ dir: root, source: 'site' }, { dir: pool, source: 'pool' }]);
-  assert.deepEqual(two.list()[0].sources, ['pool', 'site'], '前置：两个来源合并成一条');
-
-  const r = await invoke('app:partitions');
-  // 单来源的那些：一条标签都不该有
-  const single = r.plugins.plugins.filter((p) => (p.sources || []).length === 1);
-  assert.ok(single.length > 0, '前置：演示里至少有一个单来源的插件');
-  for (const p of single) {
-    assert.equal(p.sourceLabel, null,
-      '★ 只有一个来源时标签什么也没说，还让人以为看到的是两条不同的来路');
-  }
-  assert.ok(require('../src/main/index.js'), '（idx 已加载）');
-  for (const d of [root, pool]) fs.rmSync(d, { recursive: true, force: true });
-});
-
-// ── ★ 插件增减不许把客户端带崩（这次改动的验收标准）────────────────────────
 
 test('★ 站点装了客户端不认识的插件：不崩，而且说得出该怎么办', async (t) => {
   t.after(() => { Module._load = origLoad; });
@@ -2329,20 +2384,23 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   //   没有这一条的话，「按 contributes.surface 分派」与「按插件有没有 attach 分派」
   //   在内建的两个插件上**行为完全一样**（两个都有 attach，而 sshd 的 surface 是
   //   空、两种写法都不建视图），于是那条分派线根本没有被验到。
-  const pool = path.join(userData, 'demo-config', 'plugins');
-  const dir = path.join(pool, 'jupyter');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify({
+  // ★ 装进**站点池**（`<id>/<版本>/`）并记一条台账 —— 池里每一份都过同意闸，
+  //   没有台账的会以 `active: false` 进来，而这条用例要的是它能真的跑起来。
+  //
+  //   ★ 这一条测的是**框架与插件的分工**，与"它是怎么装进来的"无关 —— 从前这里
+  //     往本机池里拷一棵树，顺带也就证明了"手工拷进去能用"，而那正是 §5.1 禁止的
+  //     那件事（见下面 §5.1 那条用例）。装法换成走闸，测的东西一个字没变。
+  putSitePlugin({
     id: '01M2JKM1M1M1M1M1M1M1M1M1M1',
     name: 'jupyter',
-    displayName: 'Jupyter',
-    version: '1.0.0',
-    description: '没有客户端代码的声明式插件。',
-    // layout: false → 用**按插件**的存储分区（persist:plugin-<id>），而不是布局组。
-    // 那一条分支在内建的两个插件上走不到（一个要布局组，一个不要界面）。
-    contributes: { surface: { kind: 'web', path: '/lab' }, layout: false },
-  }, null, 2));
-  idx._test.getRegistry().reload();
+    over: {
+      displayName: 'Jupyter',
+      description: '没有客户端代码的声明式插件。',
+      // layout: false → 用**按插件**的存储分区（persist:plugin-<id>），而不是布局组。
+      // 那一条分支在内建的两个插件上走不到（一个要布局组，一个不要界面）。
+      contributes: { surface: { kind: 'web', path: '/lab' }, layout: false },
+    },
+  });
 
   const p = idx._test.getRegistry().get('01M2JKM1M1M1M1M1M1M1M1M1M1', '1.0.0');
   assert.ok(p, '池里的插件要被扫到');
@@ -2382,8 +2440,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   await invoke('app:stop');
   await waitUntil(async () => !b._session
     || ['released', 'rejected', 'expired'].includes(b._session.state), '会话释放', 20000);
-  fs.rmSync(path.join(pool, 'jupyter'), { recursive: true, force: true });
-  idx._test.getRegistry().reload();
+  cleanupSiteState(idx);
 });
 
 test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {

@@ -232,12 +232,8 @@ p.alarm {
                user-select: none; }
 .plug-toggle input { margin: 0; cursor: pointer; }
 .plug .why { font-size: 12px; color: var(--warn); margin: 0 0 10px; }
-/* 来源标签（「站点分发 + 本机安装」）。**只有真的有两个来源时才贴** —— 判定在
-   主进程，见 index.js 的 sourceLabelOf。 */
-.plug-src {
-  font-size: 11px; color: var(--fg-dim);
-  border: 1px solid var(--border); border-radius: 3px; padding: 0 5px;
-}
+/* ★ 这里从前有一条 `.plug-src`（来源标签：「站点分发 + 本机安装」）。池只剩一个
+   之后每个插件都是站点分发的，那条标签恒为空，所以样式跟着一起删了。 */
 
 /* ── 待同意 ──
    独立的一块，不是"起不来"的第五档：那四句话说的是"这个插件**起不来**的原因"，

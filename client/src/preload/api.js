@@ -26,29 +26,24 @@ contextBridge.exposeInMainWorld('slurmate', {
 
   // ── 插件 ──
   //
-  // ★ 插件默认**只认站点分发的那一份**：连上站点之后由 `syncPlugins` 取回来，
-  //   落在 `~/.slurmate/site-plugins/`。本机自己的池（`~/.slurmate/plugins/`）
-  //   要 `setDevPlugins(true)` 打开开发者模式才加载 —— 下面那三个入口是**开发者
-  //   模式专用**的，界面上勾上之后才出现。
+  // ★ 插件**只有一条来的路**：站点分发。连上站点之后由 `syncPlugins` 取回来，
+  //   落在 `~/.slurmate/site-plugins/`。
   //
-  // ★ 带客户端代码的站点插件要用户点一次同意才加载（`consentPlugin`）。同意闸的
-  //   落点在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
+  // ★ 带客户端代码的插件要用户点一次同意才加载（`consentPlugin`）。同意闸的落点
+  //   在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
   //
-  // ★ 装的是**一个 `.splug` 文件**，不是一个目录：插件进池子只有"安装一个包"
-  //   这一个动作（§5.1），而对着一个目录点"安装"是另一件看起来差不多的事。
-  installPlugin: (file) => ipcRenderer.invoke('app:installPlugin', file),
-  uninstallPlugin: (id, version) => ipcRenderer.invoke('app:uninstallPlugin', id, version),
-  // 用户手工往池里放了东西之后，不用重启客户端。
-  rescanPlugins: () => ipcRenderer.invoke('app:rescanPlugins'),
-  openPluginDir: () => ipcRenderer.invoke('app:openPluginDir'),
-  // 站点分发：手动对一次账 / 同意 / 不同意 / 开发者模式开关。
+  // ★ **这里从前还有五个入口**：`installPlugin` / `uninstallPlugin` /
+  //   `rescanPlugins` / `openPluginDir` / `setDevPlugins`。它们服务的是"本机池"
+  //   —— 用户自己挑一个包、或者干脆拷一个插件目录进去，那条路**不过同意闸**。
+  //   它连同 `src/main/plugins/install.js` 整个文件一起删掉了（§5.1/§5.2）。
+  //
+  // 站点分发：手动对一次账 / 同意 / 不同意。
   syncPlugins: () => ipcRenderer.invoke('app:syncPlugins'),
   consentPlugin: (id, version) => ipcRenderer.invoke('app:consentPlugin', id, version),
   rejectPlugin: (id, version) => ipcRenderer.invoke('app:rejectPlugin', id, version),
   // §5.3：删掉本机那一份 = 撤回同意（下一次对账重新问）。给的是"没被加载的那些"
   // 唯一的出口 —— 见 panel.js 的 renderInert。
   dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
-  setDevPlugins: (on) => ipcRenderer.invoke('app:setDevPlugins', on),
 
   // ── 布局组 ──
   //

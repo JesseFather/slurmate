@@ -196,8 +196,10 @@ jobs:
         #   到；这里再来一条是因为 CI 上的 lint 是**最外层**的那道网，它不依赖测试
         #   脚本被正确地调用。）
         # ★ 抽的是 `client/src/main/plugins/index.js` —— 那个集合**全客户端只有一份**，
-        #   安装器（install.js）从它引，摘要（digestOf）也用它。以前它在 install.js
-        #   里，两份实现各自持有一份，正是这条 lint 要防的那种分家。
+        #   摘要（digestOf / readPluginFiles）与站点分发那条路都从它引。以前它在
+        #   install.js 里，两份实现各自持有一份，正是这条 lint 要防的那种分家。
+        #   （install.js 那个文件已经随"本机池"一起删掉了，这条 lint 照旧 —— 它抽的
+        #   常量不在那个文件里。）
         #
         # ★ **从两端变成三端**：打包器（packer/slurmate-packer.js）现在也有自己
         #   一份，而那是没办法的 —— 它要"下载这个文件夹就能用"，所以 import 不到

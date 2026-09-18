@@ -28,10 +28,13 @@ const CS_MANIFEST = JSON.parse(fs.readFileSync(
 const LOGIN = CS_MANIFEST.contributes.login;
 const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
-const SITE_PLUGINS = () => [{
-  id: CS_MANIFEST.id, name: CS_MANIFEST.name, version: CS_MANIFEST.version,
-  displayName: CS_MANIFEST.displayName, surface: SURFACE, submitPubkey: false, login: LOGIN,
-}];
+// ★ 演示站点的**分发源**：仓库里的 `plugins/` 目录 —— 与 app 在演示模式下用的是
+//   同一个（见 index.js 的 `sitePluginDir`）。后端自己从那棵树上读清单、现打真包。
+//
+//   ★ 这里从前是"把一份插件描述直接注入给后端"（`opts.sitePlugins`）。那个入口
+//     随本机池一起删掉了 —— 它当初的用途是"让站点报客户端池里装了什么"，而那正是
+//     要消灭的那条路。现在两边走的是**同一条**：站点报的是它自己发得出来的东西。
+const SITE_PLUGIN_DIR = () => path.join(HERE, '..', '..', 'plugins');
 
 const NO_REDIRECT = { redirect: 'manual' };
 
@@ -70,7 +73,9 @@ function keepAlive() {
  * 演示后端那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
  */
 async function makeBackend(t, opts = {}) {
-  const backend = new FakeBackend({ rpcLatencyMs: 0, sitePlugins: SITE_PLUGINS, ...opts });
+  const backend = new FakeBackend({
+    rpcLatencyMs: 0, sitePluginDir: SITE_PLUGIN_DIR, ...opts,
+  });
   await backend.connect({ user: 'demo' });
   t.after(async () => { await backend.close(); });
   return backend;

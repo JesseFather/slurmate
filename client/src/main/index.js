@@ -35,7 +35,7 @@
  * ③ `--demo` 命令行开关。并且**绝不**在真实后端出错时静默退回演示。
  */
 
-const { app, BrowserWindow, dialog, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -48,7 +48,6 @@ const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
 const plugins = require('./plugins/index.js');
-const pluginInstall = require('./plugins/install.js');
 const sitePluginSync = require('./site-plugins.js');
 // ★ 从模块上摘下来，而不是在函数里写 `plugins.shortDigest` —— `pluginsView()` 里
 //   有一个同名的局部数组（那些插件记录），函数内写 `plugins.` 会指到它身上。
@@ -158,13 +157,10 @@ function bootstrap() {
     //   个重置按钮。所以它自己一个文件、自己一次读。
     pins = config.loadPinnedKeys(cfgDir);
 
-    // ★ 池目录依赖 cfgDir（演示模式尤其），而注册表是在**模块加载期**建的，那时
-    //   cfgDir 还是 null。所以拿到真路径之后重新扫一遍 —— 否则演示模式会去读
-    //   进程当前目录下的 `./plugins`，而那是谁的地方说不清。
-    //
-    // 建目录在前：**装第一个插件之前，用户得先有个地方放它**，而"池在哪"这个
-    // 问题的答案不能是一个不存在的路径。
-    ensurePoolDir();
+    // ★ 池目录依赖 cfgDir，而注册表是在**模块加载期**建的，那时 cfgDir 还是 null。
+    //   所以拿到真路径之后重新扫一遍 —— 否则开发者模式会去读进程当前目录下的
+    //   `./site-plugins`，而那是谁的地方说不清。
+    ensureSitePoolDir();
     registry.reload();
 
     // 旧版本（schema ≤ 3）只有一把**全局**私钥。搬到新格式：原样复制给每一条已有
@@ -179,26 +175,19 @@ function bootstrap() {
         // 或者反过来跳过它。真实后端完全不读这个。
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEMO_ENROLL_MS))
           ? Number(process.env.SLURMATE_DEMO_ENROLL_MS) : undefined,
-        // ★ 演示站点的**分发源** = 仓库里的 `plugins/`。那是一份**独立于本机池**
-        //   的真实文件（真的 sha256、真的字节），于是「站点有而本机没有」这条最
-        //   重要的路径在演示里真的走得到：池空 + 开发者模式关着，站点照样报两个
-        //   插件，对账真的把它们取下来、真的要求同意。
-        //   打包之后没有仓库目录 ⇒ 返回 null ⇒ 站点回落到"只报池里那些，且不发
-        //   文件"，界面会说明这一点。
+        // ★ 演示站点的**分发源** = 仓库里的 `plugins/`。那是一份真实文件（真的
+        //   sha256、真的字节），于是「站点有而本机没有」这条最重要的路径在演示里
+        //   真的走得到：池空的时候站点照样报两个插件，对账真的把它们取下来、
+        //   真的要求同意。
+        //
+        // ★ 打包之后没有仓库目录 ⇒ 返回 null ⇒ 这个站点**一个插件都不报**。
+        //   这是有代价的，别再往回加一个"兜底源"：这里从前有一条兜底，读的是
+        //   **本机池里装了什么** —— 那让演示站点的清单变成"客户端自己的池"，
+        //   等于把一条要删掉的来路又重新接回演示里。账本里记着这条降级。
         sitePluginDir: () => {
           const d = path.join(__dirname, '..', '..', '..', 'plugins');
           try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
         },
-        // ★ 演示站点报哪些插件，兜底那份 = **本机池里装了什么**。只在仓库目录
-        //   不存在时才用得上（打包版）。传函数而不是快照：用户可以在演示进行中
-        //   装/卸插件，站点的清单应该跟着变。
-        sitePlugins: () => registry.list().map((p) => ({
-          id: p.id, name: p.name, version: p.version,
-          displayName: p.displayName,
-          surface: p.contributes.surface,
-          submitPubkey: p.contributes.submitPubkey,
-          login: p.contributes.login,
-        })),
       },
     });
 
@@ -206,6 +195,14 @@ function bootstrap() {
       onClose: handleWindowClose,
       onAction: handleWindowAction,
     });
+
+    // ★ **本机池那个目录不再被读了，说一句。** 它从前是 `~/.slurmate/plugins`，
+    //   用户自己装插件的地方；那条路连同"免同意"一起删掉了。**目录不删** ——
+    //   0.2.0 是最后一个公开版本，而它带着本机池，所以升级上来的人那里可能真的
+    //   躺着东西（那是他们自己的文件，删它是另一回事）。
+    //   ★ 只在**真的有东西**时说：空目录、或者从来没用过本机池的人，不该看见一条
+    //     关于它的话 —— 那是噪音，而且会让人以为自己做错了什么。
+    warnLegacyPool();
 
     // 快捷键拦截：黑名单 + 诊断。
     //
@@ -755,15 +752,18 @@ function reconcileSitePlugins() {
 }
 
 /**
- * 演示调试开关要作用在池里的**哪一个**插件上：调用方给短名，不给就取列表里第一个。
+ * 调试开关要作用在**哪一个**插件上：调用方给短名，不给就取列表里第一个。
  * 基座里没有插件名可写，所以"是哪一个"只可能由调用方说。
+ *
+ * ★ 名字从前是 `pickPoolPlugin`（"池"指本机池）。池只剩一个之后，那个名字会让人
+ *   以为它跟某个已经不存在的第二条来路有关系 —— 它做的只是"从注册表里挑一个"。
  *
  * 一个都没装时**如实返回一条 error**，而不是静默地什么也没发生 —— 后者会让调试的人
  * 以为是界面没刷新，然后去查一个不存在的问题。
  *
  * @returns {{plugin: object}|{error: string}}
  */
-function pickPoolPlugin(name) {
+function pickPlugin(name) {
   const list = registry.list();
   const plugin = name ? list.find((p) => p.name === name) : list[0];
   if (plugin) return { plugin };
@@ -830,16 +830,11 @@ function pluginsView() {
       title: plugin.displayName,
       description: plugin.description,
       source: plugin.source,
-      sources: plugin.sources,
-      // ★ **来源标签在主进程算，不在界面里算。**
-      //
-      //   在此之前界面里有一句 `p.source === 'pool' ? '站点分发' : …`，而池曾经是
-      //   唯一的来源 —— 那句话恒为真、且恒为假话（用户自己从本地目录装进去的插件
-      //   也会被标成"站点分发"）。一个永远显示、并且永远说错的标签，比没有标签更糟。
-      //
-      //   现在真的有两个来源了，判据换成"**是不是真的有两个**"：只有一个来源时
-      //   返回 null（不贴），贴着只会让人以为自己看到的是两条不同的来路。
-      sourceLabel: sourceLabelOf(plugin.sources),
+      // ★ **这里从前还有一个 `sources`（数组）与一个 `sourceLabel`。** 它们回答的
+      //   是"这一份是哪个池给的" —— 而客户端**只剩一个池**（站点池）之后，那个
+      //   数组恒为一项、标签恒为 `null`（`sourceLabelOf` 的判据是"来源数 > 1"）。
+      //   留着一套永远说不出话的字段，与留一条永远显示、并且永远说错的标签是
+      //   同一类东西：看的人会以为自己看到的是两条来路。
       hasClientCode: plugin.hasClientCode,
       surface: plugin.contributes.surface,
       // 站点那边报的是哪一版。**这是"站点升级了而本机还是旧的"的唯一线索** ——
@@ -921,15 +916,20 @@ function pluginsView() {
     // 以及插件目录里扫到的坏文件。它们被跳过了，客户端照常工作 —— 但必须说出来，
     // 否则用户面对的症状只是"加了插件它就是不生效"。
     errors: registry.errors,
-    // 池**在哪**、里面**有没有东西**。
+    // 池**在哪** —— 站点分发那一栏用它判断"要不要画那一块"（见 panel.js 的
+    // renderSitePlugins）。它在这里而不是在 `site` 里面：**站点连不上时那一栏
+    // 照样得画**，因为池里可能已经有东西了。
     //
-    // ★ 这两条是承重的：本机一个插件都没装时，站点上**每一个**插件都会落进
+    // ★ 从前这里还有一个 `poolDir`（本机池在哪），而它同时是"我该往哪放"那个
+    //   问题的答案。**那个问题现在没有答案，也不该有** —— 插件只有一条来的路
+    //   （站点分发），用户没有任何需要往目录里放东西的场合（§5.1）。
+    sitePoolDir: sitePoolDir(),
+    // ★ 这一条是**承重的**：本机一个插件都没装时，站点上**每一个**插件都会落进
     //   `missing`，于是界面会把它们全都说成「本站有而本机没有 —— 升级客户端」。
-    //   而真相是「你还没装插件」—— 那两件事的行动完全不同（去装 vs 去升级）。
+    //   而真相是「你还没装插件」—— 那两件事的行动完全不同（去拿 vs 去升级）。
     //   界面靠 `installedCount === 0` 分岔，见 panel.js 的 renderPlugins。
-    poolDir: poolDir(),
-    // ★ 只数**能用的**那些。把待同意的也算进去的话，「一个插件都没装」的空态再也
-    //   走不到 —— 而那个空态正是用户第一次打开客户端时要看的那块地方。
+    //   ★ 只数**能用的**那些。把待同意的也算进去的话，「一个插件都没装」的空态
+    //   再也走不到 —— 而那个空态正是用户第一次打开客户端时要看的那块地方。
     installedCount: plugins.length,
     // ★ 从前这里还有一个 `inertCount`（`records.length - plugins.length`），
     //   **删了**：界面一次都没读过它（`panel.js` 里零次出现）。真正要画的是下面
@@ -941,11 +941,13 @@ function pluginsView() {
 
     // ── 站点分发那一节 ──
     //
-    // ★ 三条「你没有这个插件」的理由**必须分开报**，因为它们要做的事不同：
+    // ★ 两条「你没有这个插件」的理由**必须分开报**，因为它们要做的事不同：
     //     站点守护进程太旧   → 找管理员升级站点
     //     站点支持但没下来    → 看下面 `failed` 里那一句（可能是网络、可能是配置）
-    //     开发者模式关着而池里有 → 自己勾一下开发模式（**只在第三条成立时才能这么说**）
     //   合并成一句"同步失败"的话，用户就只能一个个试。
+    //
+    // ★ **从前这里还有第三条**（「本机池里有、但开发者模式关着 → 自己去勾一下」），
+    //   它随本机池一起删掉了。今天池里有什么就加载什么，没有"关着不加载"这一态。
     site: siteSync ? {
       supported: siteSync.supported,
       reason: siteSync.reason || null,
@@ -969,18 +971,6 @@ function pluginsView() {
       // "为什么这台机器上有两个版本"。读自快照表（`.sites.json`）。
       versions: siteVersions(),
     } : null,
-    dev: {
-      on: devMode(),
-      // ★ 演示模式恒开，而那是因为"从源码跑演示的人就在写插件"—— 如实说出来，
-      //   别让用户以为自己勾过。
-      forced: DEMO_FLAG,
-      poolDir: poolDir(),
-      poolCount: (() => {
-        try { return registry.list().filter((p) => p.source === 'pool').length; }
-        catch { return 0; }
-      })(),
-      sitePoolDir: sitePoolDir(),
-    },
     // 待同意的：**不下发暂存路径** —— 那是主进程的现场，界面不需要知道它在哪。
     consent: pendingConsent.map((p) => ({
       id: p.id, version: p.version, name: p.name, title: p.title,
@@ -1010,26 +1000,6 @@ function pluginsView() {
       })(),
     })),
   };
-}
-
-/**
- * 来源翻成人话。**只在真的有两个来源时才用得上**（见 sourceLabelOf）。
- */
-const SOURCE_LABEL = {
-  site: '站点分发',
-  pool: '本机安装',
-};
-
-/**
- * 给插件贴的来源标签 —— 单来源时是 `null`（**不贴**）。
- *
- * ★ 判据是"来源数 > 1"，不是"来源是谁"：只有一个来源时，标签描述的是**每一块
- *   都有的那件事**，说了等于没说，还让人以为自己看到的是两条不同的来路。
- */
-function sourceLabelOf(sources) {
-  const s = Array.isArray(sources) ? sources : [];
-  if (s.length < 2) return null;
-  return s.map((x) => SOURCE_LABEL[x] || x).join(' + ');
 }
 
 /**
@@ -1207,17 +1177,19 @@ async function startSession(resources, serviceKind) {
     // `active !== false` 的那些才算"装上了"：只剩待同意的插件时，用户面对的
     // 就是"一个能用的都没有"，走下面那条空态才对。
     if (!registry.list().some((p) => p.active !== false)) {
-      // ★ 出路取决于**站点说了什么**，不是取决于我们猜。站点支持分发而本机还没有
-      //   那些插件 ⇒ "去同步/去同意"；站点不分发 ⇒ 只能自己装（而默认不加载本机池，
-      //   所以要先把开发者模式打开）。
+      // ★ 出路只有**一条**：站点分发。这里从前是二分的 —— 站点不分发时，那句话
+      //   教用户"把插件目录放进 `~/.slurmate/plugins`，再到插件那一栏把「也加载
+      //   本机插件目录」勾上"。那三样东西（本机池、那个按钮、那个开关）已经一起
+      //   删掉了，所以那一支今天必须**如实说"这条路走不通"**，而不是给一个用户
+      //   照着做也做不到的动作（§5.1 那条 ★ 说的正是这件事）。
       const canSync = Boolean(siteSync && siteSync.supported);
       win.pushNotice('error',
         '本机还没有装上任何插件，所以没有可以提交的服务。'
         + (canSync
           ? '本站会分发插件 —— 用插件那一栏的「重新同步」取一次，'
             + '带客户端代码的要你点一下同意。'
-          : `把插件目录放进 ${poolDir() || '插件池'}（界面上的「打开插件目录」能直接打开它），`
-            + '再到插件那一栏把「也加载本机插件目录」勾上。'));
+          : '而这个站点**不分发**插件 —— 插件只能由站点发下来，所以客户端这一侧'
+            + '没有别的办法。请联系这个站点的管理员。'));
     } else {
       win.pushNotice('error',
         `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
@@ -1468,53 +1440,48 @@ async function _renderSession(snap) {
 const registry = new plugins.Registry([
   // 传**函数**而不是路径：cfgDir 要等 app ready 之后才定下来，在这里当场算会算出
   // 一个 null 路径（见 plugins/index.js 的 scanRoot）。
+  //
+  // ★ **只有一个根，这是这次删除的结论，不是"暂时只剩一个"。** 从前还有第二个根
+  //   （`~/.slurmate/plugins`，"本机池"），它让用户从本机挑一个包装进去、或者干脆
+  //   拷一个插件目录进去 —— 那条路**整类绕过同意闸**，而 `docs/PLUGIN-SPEC.md`
+  //   §5.2 明文写着「**禁止**给任何一类插件开免同意的口子」。要多加一个根，
+  //   先回答 §5.2 那个问题：它上面每一份凭什么免同意？答不上来就不许加。
   { dir: sitePoolDir, source: 'site' },
-  { dir: () => (devMode() ? poolDir() : null), source: 'pool' },
 ], {
   /**
-   * 同意闸。**带客户端代码的站点插件，没同意过就不加载。**
+   * 同意闸。**每一个插件、每一条来路，没同意过就不加载。**
    *
-   * ★ 只对 `source === 'site'` 问。本机池那一份是**用户自己**从本地目录拷进去的
-   *   —— 让用户"同意自己刚放进去的东西"是一句空话，只会训练他闭着眼睛点同意。
+   * ★ 这里从前有一句 `entry.source !== 'site' || …` —— 本机池那一份不问。
+   *   豁免的理由（"用户自己刚放进去的，让他同意自己是空话"）在池存在时看着成立，
+   *   但它的代价是把一条**没有分支的规则**变成一条**有例外的规则**，而 §5.2 紧跟
+   *   着那句禁令写了理由：「规则一有分支，绕过它的路就会长出来」。池就是那个分支，
+   *   所以它连同豁免一起删掉了。
    *
    * ★ 判据是**全长摘要**（见 config.isTrusted）。这里拿到的是 `inspectDir` 从
    *   磁盘上算出来的那个值，不是站点自报的。
    *
-   * ★ `cfg` 在模块加载期还是 null（注册表在那一刻就构造了）—— 那时一个插件都
-   *   加载不了，与"没同意"同归一处，是正确的默认。
+   * ★ `cfg` 在模块加载期还是 null（注册表在那一刻就构造了）—— 那时**一个插件都
+   *   加载不了**。这里从前写的是 `!cfg ||` 也就是**放行**，与它上面那句注释正好
+   *   相反；今天不出事只是因为那一刻算出来的路径（`sitePoolDir()` 依赖 cfgDir，
+   *   而 cfgDir 那时还是 null）几乎必然不存在。删掉池之后它就是这条闸上唯一的
+   *   缺口，所以一并收成 **fail-closed**：读不到台账 = 没同意过。
    */
-  allows: (entry) => entry.source !== 'site'
-    || !cfg
-    || config.isTrusted(cfg, entry.plugin.id, entry.plugin.version, entry.digest),
+  allows: (entry) => Boolean(cfg)
+    && config.isTrusted(cfg, entry.plugin.id, entry.plugin.version, entry.digest),
 });
 
 /**
- * **池**目录 —— 装进来的插件都落在这里，不分是从哪来的。
+ * **池**目录 —— 装进来的插件都落在这里。**今天只有一条来路：站点分发。**
  *
- * ★ 一个池而不是按来源分目录，这是有意的：`id` 是铸造出来的全球唯一标识，所以
- *   「同一个插件被两个站点分发」在池里天然就是同一条（只多记一个来源），而
- *   「两个站点各写一个 jupyter」是两条不同的记录，并存、各自标明来源。
+ * ★ 这里从前有两个目录：这一个，加上 `~/.slurmate/plugins`（"本机池"，用户自己
+ *   挑一个包装进去、或者拷一个插件目录进去的地方）。本机池连同它那条**免同意**
+ *   的路一起删掉了，理由见 registry 的注释。
  *
- * ★ 演示模式落在它自己的目录里 —— 演示绝不去读用户真实的那份池。
- */
-function poolDir() {
-  // ★ 整个包在 try 里：这个函数是在**模块加载期**被调用的（见下面 registry 的构造），
-  //   而那时 app 可能还没 ready。真抛出来就不是"池扫不到"，而是**整个客户端起不来** ——
-  //   为了一个次要功能赌上启动路径不值当。拿不到就当没有池（loadRoot 会记一条）。
-  try {
-    return DEMO_FLAG
-      ? path.join(cfgDir || '.', 'plugins')
-      : path.join(app.getPath('home'), '.slurmate', 'plugins');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * **站点池** —— 站点分发的插件落在这里。与用户自己的池分开，理由见 registry 的注释。
+ * ★ `~/.slurmate/plugins` 那个目录**不删** —— 0.2.0 是最后一个公开版本，而它带着
+ *   本机池，所以升级上来的用户那里可能真的躺着东西。删用户的文件是另一回事；
+ *   今天的处理是"不再读它"，并在启动时说一句（见 bootstrap）。
  *
- * ★ 演示模式落在它自己的目录里（与 poolDir 同一个道理）：演示绝不去读、更不去
- *   写用户真实的那份站点池。
+ * ★ 开发者模式落在独立命名空间里：拿假后端跑**绝不去读、更不去写**用户真实的那份池。
  */
 function sitePoolDir() {
   try {
@@ -1523,26 +1490,44 @@ function sitePoolDir() {
       : path.join(app.getPath('home'), '.slurmate', 'site-plugins');
   } catch {
     // ★ 拿不到就返回 null，而 null 在那条路上意味着"这个根这次不加载"。
-    //   把一个次要功能的失败变成**整个客户端起不来**不值当（与 poolDir 同理）。
+    //   把一个次要功能的失败变成**整个客户端起不来**不值当。
     return null;
   }
+}
+
+/**
+ * 说一句：`~/.slurmate/plugins`（从前的"本机池"）**不再被读了**。
+ *
+ * ★ 只在那个目录**真的有东西**时说。空目录、或者从来没用过本机池的人，不该看见
+ *   一条关于它的通知 —— 那是噪音，而且会让人以为自己做错了什么。
+ *
+ * ★ 措辞只说**事实**：那个东西不再生效了、里面的文件还在原处。不许断言"是谁放的、
+ *   为什么"，也不许建议"可以删掉" —— 客户端不知道，而且那是用户自己的目录。
+ *
+ * ★ 这是 v0.2.0 之后唯一一处还知道本机池存在过的地方。等哪天确定没人再从那版
+ *   升上来了，这个函数连同它的调用点一起删。
+ */
+function warnLegacyPool() {
+  let dir;
+  try {
+    dir = path.join(app.getPath('home'), '.slurmate', 'plugins');
+  } catch {
+    return;
+  }
+  try {
+    if (fs.readdirSync(dir).length === 0) return;   // 空目录没什么好说的
+  } catch {
+    return;                                        // 不存在 ⇒ 更没什么好说的
+  }
+  win && win.pushNotice('info',
+    `${dir} 里的东西不再被加载了 —— 客户端现在只认站点分发的插件。`
+    + '那个目录没有被动过，里面的文件还在原处。');
 }
 
 /** 暂存根：站点池的**兄弟目录**（换入用的 `rename` 要求同一个文件系统）。 */
 function siteStagingDir() {
   const pool = sitePoolDir();
   return pool ? path.join(path.dirname(pool), '.site-staging') : null;
-}
-
-/**
- * 开发者模式：**本机池加不加载**。
- *
- * ★ 它是**用户的设置**，不是站点的能力 —— 所以老守护进程 + 关着开关 = 一个插件
- *   都没有。那是正确的、必须如实说出来的结果，不是需要被"兜"掉的失败。
- * ★ 演示模式**恒开**：从源码跑的人就是在写插件，而演示池里那几个就是他要看的东西。
- */
-function devMode() {
-  return DEMO_FLAG || Boolean(cfg && cfg.devPlugins);
 }
 
 /** 把站点池建出来（0700）。对账之前得先有个地方放东西。 */
@@ -1554,24 +1539,6 @@ function ensureSitePoolDir() {
     return dir;
   } catch (e) {
     win && win.pushNotice('warn', `站点插件目录 ${dir} 建不出来：${e.message}`);
-    return null;
-  }
-}
-
-/**
- * 把池目录建出来（0700）。**装第一个插件之前，用户得先有个地方放它。**
- *
- * 以前这里只读不写，所以池目录不存在、界面上也没有任何东西告诉你该往哪放 ——
- * 「池是安装点」这句话在代码里落不了地。
- */
-function ensurePoolDir() {
-  const dir = poolDir();
-  if (!dir) return null;
-  try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    return dir;
-  } catch (e) {
-    win && win.pushNotice('warn', `插件目录 ${dir} 建不出来：${e.message}`);
     return null;
   }
 }
@@ -2276,77 +2243,15 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
-  /**
-   * 从**一个 `.splug` 包**装一个插件。不给路径就弹一个选文件的框。
-   *
-   * ★ 这是**本机池**那一半动作，走的是界面上的「开发者」一节（默认关着）。
-   *   ★ 这里从前写的是"从**一个目录**装"—— 而代码弹的一直是"选择一个插件包
-   *     （.splug）"那个文件框，§5.1 也只允许"安装一个包"这一个动作。对着一个
-   *     目录点"安装"是另一件看起来差不多的事，说成一样会让人以为这条路还在。
-   *
-   * ★ **站点分发不走这里。** 那条注释以前写着"将来分发走的是同一个 installFrom"
-   *   —— 现在分发接上了，而它**没有**复用这个函数：这个函数的语义是"用户挑的
-   *   目录装进用户自己的池"，与分发（站点说了算、按引用计数回收、换入前要过
-   *   同意闸）**相反**。照那句旧注释去复用的人，会把"拒绝覆盖内容不同的同版本"
-   *   当成一个 bug —— 而那正是分发**要**的行为（站点换了内容就得重新同意）。
-   *   分发在 site-plugins.js，落另一个根。
-   */
-  send('app:installPlugin', async (file) => {
-    let p = file;
-    if (!p) {
-      const r = await dialog.showOpenDialog(win.win, {
-        title: '选择一个插件包（.splug）',
-        buttonLabel: '装这个',
-        properties: ['openFile'],
-        filters: [{ name: '插件包', extensions: ['splug'] }],
-      });
-      if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
-      p = r.filePaths[0];
-    }
-    const res = pluginInstall.installFromPackage(ensurePoolDir(), p);
-    if (!res.ok) {
-      win.pushNotice('error', res.error);
-      return { ok: false, error: res.error };
-    }
-    registry.reload();
-    // ★ 签名者**如实报出来**。本机池这条路**不查钉子**（§5.4）：钉子防的是"远端的
-    //   某个站点把一个 id 换成了别人做的构件"，而这里是**用户自己在自己的机器上
-    //   挑了一个文件** —— 他对这台机器有完全的权限，可以改 JS、可以换文件，
-    //   一条钉不住他自己。把签名者显示出来，是让他有能力自己看一眼。
-    const signer = res.fingerprint
-      ? `签名者 ${res.fingerprint}`
-      : '这个包没有签名（§4.1 里签名是可选的 —— 装之前请自己确认它的来路）';
-    win.pushNotice('ok', res.already
-      ? `${res.plugin.displayName} ${res.plugin.version} 之前就装过，内容一致，没动它。`
-      : `已装好 ${res.plugin.displayName} ${res.plugin.version}（${res.plugin.name}）。\n${signer}`);
-    return { ok: true, plugins: pluginsView() };
-  });
-
-  /**
-   * 从池里拿掉一个版本。
-   *
-   * ★ **不影响正在跑的会话**：会话在创建时就把插件对象攥在手里了（见 controller.plugin），
-   *   之后状态变化都用它、不再查表。所以卸载之后那个会话照常被管理、也停得掉 ——
-   *   这正是"插件增减不许崩"的最后一格。
-   */
-  send('app:uninstallPlugin', async (id, version) => {
-    const res = pluginInstall.uninstall(poolDir(), id, version);
-    if (!res.ok) {
-      win.pushNotice('error', res.error);
-      return { ok: false, error: res.error };
-    }
-    registry.reload();
-    win.pushNotice('info', `已从本机卸掉 ${id}@${version}。`);
-    return { ok: true, plugins: pluginsView() };
-  });
-
-  /** 重新扫一遍池。用户手工往里放了东西之后，不用重启客户端。 */
-  send('app:rescanPlugins', async () => {
-    registry.reload();
-    const n = registry.list().length;
-    win.pushNotice('info', `已重新扫描插件目录：本机现在有 ${n} 个插件。`);
-    return { ok: true, plugins: pluginsView() };
-  });
+  // ★ **这里从前有五个本机池的入口**：`app:installPlugin`（从一个 `.splug` 装）、
+  //   `app:uninstallPlugin`、`app:rescanPlugins`、`app:setDevPlugins`、
+  //   `app:openPluginDir`。它们连同 `plugins/install.js` 整个文件一起删掉了。
+  //
+  //   ★ 值得记一笔它们各自的下场，因为**其中两个已经在界面上消失了很久**：
+  //     · `uninstallPlugin` 渲染层零调用 —— 桥还留着，没有按钮。
+  //     · `rescanPlugins` 的用途是"用户手工往池里放了东西之后重扫一遍"，而
+  //       §5.1 恰恰要求那件事**不产生任何效果**，所以它连存在的理由都没有了。
+  //   这就是"免同意的口子"那个分支的完整形状：**它长出来的东西比它自己多**。
 
   // ── 站点分发 ──
 
@@ -2490,32 +2395,6 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
-  /**
-   * 开发者模式：本机池加不加载。
-   *
-   * ★ 它是**用户的设置，不是站点的能力** —— 所以"关着 + 老守护进程 = 一个插件都
-   *   没有"是正确结果，不是需要被兜掉的失败（见 site-plugins.js 的文件头）。
-   */
-  send('app:setDevPlugins', async (on) => {
-    if (typeof on !== 'boolean') return { ok: false, error: 'on 必须是 true 或 false。' };
-    if (DEMO_FLAG) return { ok: false, error: '演示模式下这一项恒开。' };
-    config.setDevPlugins(cfgDir, cfg, on);
-    registry.reload();
-    const n = registry.list().filter((p) => p.source === 'pool').length;
-    win.pushNotice('info', on
-      ? `开发者模式已打开：本机插件目录里有 ${n} 个插件被加载了。`
-      : '开发者模式已关掉：本机插件目录不再加载，插件只认站点分发的那一份。');
-    return { ok: true, plugins: pluginsView() };
-  });
-
-  /** 在文件管理器里打开池目录 —— "我该往哪放"这个问题的最终答案。 */
-  send('app:openPluginDir', async () => {
-    const dir = ensurePoolDir();
-    if (!dir) return { ok: false, error: '插件目录拿不到。' };
-    const err = await shell.openPath(dir);
-    return err ? { ok: false, error: err } : { ok: true, path: dir };
-  });
-
   send('app:state', async () => (controller ? controller.snapshot() : null));
 
   send('app:doctor', async () => {
@@ -2547,7 +2426,7 @@ function registerIpc() {
     //   第一个）—— 基座里没有插件名可写。一个都没装时这些开关无事可做，如实
     //   说出来，而不是静默地什么也没发生。
     else if (what === 'site-plugin-off' || what === 'site-plugin-no-job') {
-      const picked = pickPoolPlugin(arg);
+      const picked = pickPlugin(arg);
       if (picked.error) return { ok: false, error: picked.error };
       // 这两件事**不一样**，所以是两个开关、两个 debug 方法：`off` 是管理员的
       // 开关（界面说"本站没开放它，找管理员"）；`no-job` 是本站部署没跟上
@@ -2569,35 +2448,14 @@ function registerIpc() {
     else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
     else if (what === 'rate-limited') backend.debugRateLimit(Number(arg) || 3);
-    // 把仓库里的示例插件装进演示池。
+    // ★ 这里从前还有一个 `install-samples`：把仓库里那两个示例插件**直接用
+    //   `installFrom` 装进演示池**。它随本机池一起删掉了。
     //
-    // ★ 这不是"演示模式自带的假插件"—— 它装的是**真的**那两个插件，走的是真的
-    //   安装路径（installFrom）。演示池为空时，这是本机唯一能看见界面的办法，
-    //   顺带也就把"手工安装"那条路本身验了一遍。
-    //
-    // 打包之后没有仓库目录，所以它只在从源码跑的时候有用 —— 那正是它的用途。
-    else if (what === 'install-samples') {
-      const src = path.join(__dirname, '..', '..', '..', 'plugins');
-      let names;
-      try {
-        names = fs.readdirSync(src).filter((n) => fs.existsSync(path.join(src, n, 'plugin.json')));
-      } catch {
-        return { ok: false, error: `这台机器上找不到示例插件目录 ${src}（打包之后就没有它了）。` };
-      }
-      if (!names.length) return { ok: false, error: `${src} 里一个插件都没有。` };
-      const done = [];
-      for (const n of names) {
-        const r = pluginInstall.installFrom(ensurePoolDir(), path.join(src, n));
-        if (!r.ok) {
-          win.pushNotice('error', r.error);
-          return { ok: false, error: r.error };
-        }
-        done.push(`${r.plugin.name} ${r.plugin.version}${r.already ? '（已有）' : ''}`);
-      }
-      registry.reload();
-      win.pushNotice('ok', `已把示例插件装进演示池：${done.join('、')}。`);
-      return { ok: true, plugins: pluginsView() };
-    }
+    //   它的注释写着"演示池为空时，这是本机唯一能看见界面的办法，顺带也就把
+    //   手工安装那条路本身验了一遍"—— 而那正是问题：它让**测试的对照组**依赖
+    //   一条马上要删掉的路。今天要让演示里有插件，走的是**站点分发**那条真路
+    //   （假站点从仓库的 `plugins/` 读真文件、客户端真的下载→校验→同意→换入）。
+    //   ★ 它零个用例踩过（用例只查"按钮 → 处理器"这一个方向，而它没有按钮）。
     else return { ok: false, error: '未知的调试动作' };
     return { ok: true };
   });

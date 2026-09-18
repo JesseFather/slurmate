@@ -764,11 +764,10 @@ function renderPlugins(pv) {
   if (!pv) return;
   lastPlugins = pv;
 
-  // 站点分发那一栏、待同意那一段、没加载的那些、开发者模式那一节 —— 与插件块一起重画。
+  // 站点分发那一栏、待同意那一段、没加载的那些 —— 与插件块一起重画。
   renderSitePlugins(pv);
   renderConsent(pv);
   renderInert(pv);
-  renderDev(pv);
 
   const list = pv.plugins || [];
   // ★ 空池是**正常状态**，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
@@ -822,14 +821,9 @@ function renderPlugins(pv) {
         + '请管理员确认这个插件是不是部署完整了。'));
     }
 
-    // ★ 第三条出路**只在它成立的时候**才说：开发者模式关着，而本机池里其实有东西。
-    //   不成立时说它就是一句凭空的猜测。
-    const dev = pv.dev || {};
-    if (dev.on === false && dev.poolCount > 0) {
-      issues.append(issueBox('info', '本机插件目录里有东西，但没被加载',
-        `那里有 ${dev.poolCount} 个插件，而「开发者模式」是关着的 —— `
-        + '插件默认只认站点分发的那一份。要加载本机那一份，见下面最后那一节。'));
-    }
+    // ★ **这里从前还有第三条出路**：「本机插件目录里有东西，但没被加载 —— 去把
+    //   开发者模式打开」。它随本机池一起删掉了。今天池里有什么就加载什么，
+    //   "有东西但没加载"这一态不存在。
   }
 }
 
@@ -886,8 +880,9 @@ function renderSitePlugins(pv) {
   const box = $('site-plugins');
   box.textContent = '';
   const site = pv.site;
-  const dev = pv.dev || {};
-  if (!site && !dev.sitePoolDir) return;
+  // 站点连不上时也要画 —— 池里可能已经有东西了，而"每个版本被谁要"是那一栏
+  // 唯一值得显示的东西。池的路径在主进程给（`pv.sitePoolDir`）。
+  if (!site && !pv.sitePoolDir) return;
 
   const d = document.createElement('div');
   d.className = 'plug plug-off';
@@ -1162,69 +1157,15 @@ function renderInert(pv) {
   box.append(d);
 }
 
-/**
- * ── 开发者模式 ────────────────────────────────────────────────────────────
- *
- * ★ 勾上之后才出现「从一个包安装…」「打开插件目录」「重新扫描」。于是"禁止自装"
- *   在默认路径上是**真的**，而本机开发仍有一条说得出来的路。
- *
- * ★ 那个入口选的是**一个 `.splug` 文件**，不是一个目录（§5.1：插件进池子只有
- *   "安装一个包"这一个动作）。对着一个目录点"安装"，等于把那份规范里唯一的动作
- *   换成另一件看起来差不多的事 —— 而两者的校验强度不一样。
- */
-function renderDev(pv) {
-  const box = $('plugin-dev');
-  box.textContent = '';
-  const dev = pv.dev;
-  if (!dev) return;
-
-  const d = document.createElement('div');
-  d.className = 'plug plug-off';
-  const head = document.createElement('div');
-  head.className = 'plug-head';
-  head.append(el('h3', null, '开发者'));
-  d.append(head);
-  d.append(el('p', 'plug-desc',
-    '插件默认**只认站点分发的那一份**。要自己写插件、从本地目录装，就打开下面这一项。'));
-
-  const lab = document.createElement('label');
-  lab.className = 'plug-toggle';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.checked = dev.on !== false;
-  cb.disabled = Boolean(dev.forced);
-  cb.onchange = async () => {
-    cb.disabled = true;
-    try {
-      const r = await window.slurmate.setDevPlugins(cb.checked);
-      if (r && r.ok) renderPlugins(r.plugins);
-      else notice('error', (r && r.error) || '没能保存这个开关');
-    } finally {
-      cb.disabled = Boolean(dev.forced);
-    }
-  };
-  lab.append(cb);
-  lab.append(document.createTextNode('也加载本机插件目录（开发用）'));
-  d.append(lab);
-  if (dev.forced) {
-    d.append(el('p', 'plug-desc', '演示模式下这一项恒开。'));
-  }
-
-  if (dev.on && dev.poolDir) {
-    const p = document.createElement('p');
-    p.className = 'plug-desc';
-    p.append(document.createTextNode('本机插件目录：'));
-    p.append(el('code', 'plug-id', dev.poolDir));
-    d.append(p);
-    const row = document.createElement('div');
-    row.className = 'plug-meta';
-    row.append(button('从一个包安装…', () => installPlugin()));
-    row.append(button('打开插件目录', () => openPluginDir(), 'ghost'));
-    row.append(button('重新扫描', () => rescanPlugins(), 'ghost'));
-    d.append(row);
-  }
-  box.append(d);
-}
+// ★ **这里从前有一节「开发者」，装着「也加载本机插件目录（开发用）」那个复选框
+//   和「从一个包安装…」「打开插件目录」「重新扫描」三个按钮。** 它随本机池一起
+//   删掉了，连同 `#plugin-dev` 那个容器。
+//
+//   值得记一笔的是它当初的形状：**那些入口默认是藏起来的**，理由写在注释里 ——
+//   "于是'禁止自装'在默认路径上是**真的**"。那句自我描述其实已经把问题说出来了：
+//   一个需要靠"默认藏起来"才成立的禁令，不是禁令，是一个开关。而
+//   `docs/PLUGIN-SPEC.md` §5.2 要的是**没有分支**（"禁止给任何一类插件开免同意
+//   的口子"）。今天池子只有一条来的路，所以这里没有开关可藏。
 
 async function syncPlugins() {
   const r = await window.slurmate.syncPlugins();
@@ -1261,25 +1202,6 @@ function button(text, onclick, cls) {
   if (cls) b.className = cls;
   b.onclick = onclick;
   return b;
-}
-
-async function installPlugin() {
-  const r = await window.slurmate.installPlugin();
-  if (r && r.canceled) return;
-  if (!r || !r.ok) { notice('error', (r && r.error) || '没能装这个插件'); return; }
-  renderPlugins(r.plugins);
-  syncPurposeVisibility();
-}
-
-async function openPluginDir() {
-  const r = await window.slurmate.openPluginDir();
-  if (!r || !r.ok) notice('error', (r && r.error) || '打不开插件目录');
-}
-
-async function rescanPlugins() {
-  const r = await window.slurmate.rescanPlugins();
-  if (r && r.ok) { renderPlugins(r.plugins); syncPurposeVisibility(); }
-  else notice('error', (r && r.error) || '重新扫描失败');
 }
 
 /**
@@ -1326,11 +1248,9 @@ function pluginBlock(p) {
   head.append(el('h3', null, p.title));
   head.append(el('code', 'plug-id', p.name));
   head.append(el('span', 'plug-ver', 'v' + p.version));
-  // ★ 来源标签：**由主进程算好**（`p.sourceLabel`），界面只画。
-  //   判定放在这里的话，它会和"有几个 root"这件事分家 —— 而那个判定曾经在只有
-  //   一个 root 的时候恒为真、且恒为假话（用户自己装进去的插件也标成"站点分发"）。
-  //   现在单来源时它是 null，于是**什么也不贴**。
-  if (p.sourceLabel) head.append(el('span', 'plug-src', p.sourceLabel));
+  // ★ **这里从前会贴一个来源标签**（"站点分发" / "本机安装"）。池只剩一个之后
+  //   它恒为空 —— 每一块都是站点分发，贴上去是一句说了等于没说的话。所以连同
+  //   主进程那半（`pluginsView` 的 `sourceLabel`）一起删了。
   if (!p.hasClientCode) head.append(el('span', 'plug-ver', '声明式'));
   d.append(head);
 
@@ -1641,8 +1561,9 @@ async function init() {
   $('btn-probe').onclick = doProbe;
 
 
-  // ★ 「从一个包安装…」「打开插件目录」「重新扫描」**不在这里绑** —— 它们只在
-  //   开发者模式那一节里出现（见 renderDev）。默认路径上"禁止自装"因此是真的。
+  // ★ 这里从前有一句：「『从一个包安装…』『打开插件目录』『重新扫描』**不在这里
+  //   绑** —— 它们只在开发者模式那一节里出现，默认路径上"禁止自装"因此是真的」。
+  //   那三个按钮已经不存在了。
 
   // ★ 站点对账是后台跑的，跑完**主动推**一份新视图过来。不接这条的话，用户看到的
   //   永远是连接那一刻的旧视图 —— 而"插件明明是站点说要给的、界面上却什么都没有"

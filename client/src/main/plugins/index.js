@@ -19,26 +19,24 @@
  *
  * ── 基座不带插件 ────────────────────────────────────────────────────────────
  *
- * ★ **本目录（`src/main/plugins/`）是框架，不是插件目录** —— 里面只有注册表、
- *   铸造 id 的 ulid.js、以及安装器。一个插件都没有，这是**正常状态**，不是
- *   安装包坏了。
+ * ★ **本目录（`src/main/plugins/`）是框架，不是插件目录** —— 里面只有注册表与
+ *   铸造 id 的 ulid.js。一个插件都没有，这是**正常状态**，不是安装包坏了。
  *
- * ── 两个根，两条来路 ─────────────────────────────────────────────────────────
+ * ── 一个根，一条来路 ─────────────────────────────────────────────────────────
  *
- *   `~/.slurmate/site-plugins/`   站点池。**站点拥有的**：一个版本是**两样挨着的**
+ *   `~/.slurmate/site-plugins/`   站点池。**唯一的**池：一个版本是**两样挨着的**
  *                                 —— 解出来的树 + 那个 `.splug`（一次 `plugin_package`
  *                                 取回来，见 site-plugins.js），对账时会按引用计数
  *                                 回收不再被任何站点要的版本。
- *   `~/.slurmate/plugins/`        本机池。**用户拥有的**：安装器（install.js）写进去，
- *                                 或者用户直接拷进去。默认**不加载**，要开发模式开关。
  *
- * ★ 两个根不是洁癖：回收只该删**站点拥有的**那些，而用户手装的那一份不在任何站点
- *   记录里、引用数天然是 0 —— 合并成一个目录就等于"回收会把用户自己的东西删掉"。
+ * ★ **这里从前有两个根。** 第二个是 `~/.slurmate/plugins/`（"本机池"）—— 用户自己
+ *   挑一个包装进去、或者干脆**拷一个插件目录进去**的地方。它整类**绕过同意闸**，
+ *   而 `docs/PLUGIN-SPEC.md` §5.2 明文写着「**禁止**给任何一类插件开免同意的口子」，
+ *   理由是「规则一有分支，绕过它的路就会长出来」。所以池与那个分支一起删掉了：
+ *   §5.1 要「往池目录里手工放置内容**必须**不产生任何效果」，今天那句才成立。
  *
- * ★ 分发**不走** `installFrom`。那个函数的语义是"用户挑的目录装进用户自己的池"，
- *   与分发的语义（站点说了算、按引用计数回收、换入前要过同意闸）相反。分发落在
- *   **另一个根**上，走 site-plugins.js 那条路。照这条注释去复用 installFrom 的人，
- *   会把"拒绝覆盖内容不同的同版本"当成一个 bug。
+ * ★ **加一个新根之前先回答 §5.2 那个问题**：它上面每一份凭什么免同意？答不上来
+ *   就不许加 —— 而这正是 `boot.test.mjs` 里那条 `roots` 用例钉着的东西。
  *
  * ── ★ 身份是「铸造」出来的，不是「起名」出来的 ──────────────────────────────
  *
@@ -161,7 +159,7 @@ const SEG_BYTE = '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])';
 const SEG_ANY = '(?:0|[1-9][0-9]*)';
 
 const FRAMEWORK_VERSION_RE = new RegExp(`^${SEG_ANY}\\.${SEG_BYTE}$`);
-/** 插件版本。名字沿用旧的：清单校验、`loadDir`、报错文案都指着它。 */
+/** 插件版本。名字沿用旧的：清单校验、报错文案都指着它。 */
 const VERSION_RE = new RegExp(`^${SEG_ANY}\\.${SEG_BYTE}\\.${SEG_BYTE}$`);
 
 // ── 版本比较 ────────────────────────────────────────────────────────────────
@@ -813,48 +811,38 @@ function activatePlugin(entry) {
   };
 }
 
-/**
- * 读 + 激活，一趟做完。
- *
- * ★ 只给**完全信得过**的调用方：安装器读"用户自己挑的那一个目录"、卸载前核对
- *   目录里到底是什么。**分发的路径不许用它** —— 那条路上第一趟与第二趟之间夹着
- *   一个同意对话框。
- */
-function loadDir(dir, source) {
-  const r = inspectDir(dir, source);
-  if (r.error) return r;
-  const a = activatePlugin(r.entry);
-  return a.error ? a : { plugin: a.plugin, entry: r.entry };
-}
-
 function isDir(p) {
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
 /**
- * 找出一个根目录下所有含清单的目录，**最多往下两层**。
+ * 找出一个根目录下所有含清单的目录 —— **只认 `<根>/<任意名>/<版本>/plugin.json` 这一种形状**。
  *
- * 为什么要两层：池同时是两种东西 ——
+ * ★ **这里从前扫两层，第一层是"把插件目录整个拷进去就生效"那个旧形状**
+ *   （`<池>/code-server/plugin.json`）。它已经不存在了，而且**不许**存在：
+ *   插件进池子只有"安装一个包"这一个动作（`docs/PLUGIN-SPEC.md` §5.1），
+ *   而"同意闸没有例外"要求池里每一份都过闸（§5.2）。留着第一层就是留一条
+ *   绕过同意闸的路 —— 用户往目录里拷一份东西，它自己就生效了，一个字都不问。
  *
- *   · 用户把插件目录整个拷进去就生效的地方   `<池>/code-server/plugin.json`
- *   · 同一个插件的**多个版本并存**的地方     `<池>/<id>/<版本>/plugin.json`
+ * ★ 池里唯一的写方是安装器（`site-plugins.js` 的 `acceptStaged`），它一律写成
+ *   `<id>/<版本>/`。所以**这一层不是"允许的两种布局之一"，是安装器写出来的形状**：
+ *   多版本并存靠的正是多出来这一层（同一个 `(id, 版本)` 只该有一份，两份内容
+ *   不同的会撞车，见 reload）。
  *
- * 而同一 `(id, 版本)` 只该有一份（两份内容不同的会撞车，见 reload），所以多版本
- * 只能靠目录分层来并存。
+ * ★ 两个目录名**都不参与任何判定**（身份来自清单里的 `id`），所以用户不需要知道
+ *   这个规则、也不需要知道 id 长什么样。
  *
- * ★ 两层的目录名都**不参与任何判定**（身份来自清单里的 `id`），所以这两种布局
- *   可以混着用，用户不需要知道这个规则、也不需要知道 id 长什么样。
+ * ★ **第一层那份东西被读到时会「什么都不发生」—— 不报错，是刻意的。** 这个目录是
+ *   客户端自己的工作区，往里面拷东西从来不是一条被支持的动作；为它报一条错等于
+ *   在界面上承认"这个形状有意义"。§5.1 的措辞正是「必须不产生任何效果」。
+ *   （服务端那边相反：`scan_plugins` 见到目录要**明确报错**，因为那是**我们自己的
+ *   安装器**留下的、root 拥有的一整套副本。两边读者不同，判断也不同。）
  */
 function findPluginDirs(base) {
   const out = [];
-  const level1 = fs.readdirSync(base).sort();
-  for (const n1 of level1) {
+  for (const n1 of fs.readdirSync(base).sort()) {
     const d1 = path.join(base, n1);
-    if (!isDir(d1)) continue;                       // index.js、ulid.js 这些自己人
-    if (fs.existsSync(path.join(d1, MANIFEST))) {
-      out.push({ dir: d1, label: n1 });
-      continue;
-    }
+    if (!isDir(d1)) continue;                 // index.js、ulid.js 这些自己人
     let level2;
     try {
       level2 = fs.readdirSync(d1).sort();
@@ -1195,7 +1183,7 @@ function bucketOf(plugin) {
 //   只在 `resolve()` 的返回值里出现，不是给别人比对的常量）。留着一个没人读的
 //   导出，与 `plugin_payload_index()` 是同一件事：意图写了，而没有任何东西守着它。
 module.exports = {
-  Registry, bucketOf, loadDir, satisfies, hostVersion,
+  Registry, bucketOf, satisfies, hostVersion,
   // 版本号那两套（框架 / 插件）—— 用例直接对着 tools/version-fixtures.json 跑
   VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer, cmpFramework,
   // 两侧必须逐条一致的两条规则（判据在夹具里，措辞各写各的）

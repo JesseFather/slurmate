@@ -774,23 +774,27 @@ test('★ 写台账：摘要必须是全长的，短的要被拒', () => {
   assert.equal(config.isTrusted(again, 'x', '1.0.0', 'c'.repeat(64)), true);
 });
 
-test('★ 开发者模式：缺省**关着**，且只认布尔值', () => {
+test('★ 老配置里的 `devPlugins` 不再有任何效果（那条路已经删了）', () => {
   const dir = tmpdir();
-  assert.equal(config.DEFAULTS.devPlugins, false,
-    '★ 缺省必须是 false —— 插件默认只认站点分发的那一份');
-  assert.equal(config.loadConfig(dir).devPlugins, false);
+  // ★ 这一条换掉的是「开发者模式：缺省关着，且只认布尔值」。那个开关守的是
+  //   **本机池**（`~/.slurmate/plugins/`）加不加载，而本机池连同它那条**免同意**
+  //   的路一起删掉了（§5.2 禁止给任何一类插件开免同意的口子）。
+  //
+  //   ★ 留这一条而不是删干净，是因为**老 config.json 里那一条还在**：0.2.0 是
+  //     最后一个公开版本，而它带着本机池。要钉住的是"读到它等于没读到" ——
+  //     既不生效，也不报错，也不让 `loadConfig` 多出一个字段来。
+  assert.equal(Object.prototype.hasOwnProperty.call(config.DEFAULTS, 'devPlugins'), false,
+    '★ 缺省表里不该再有这个键 —— 它没有读者了');
+  assert.equal(config.loadConfig(dir).devPlugins, undefined, '缺省下它不该出现');
 
-  // 配置文件是用户可以手改的，而 `"devPlugins": "no"` 这样的字符串会被 `if (x)` 判真
+  // 用户手改的配置里留着一条 `"devPlugins": true`（升级上来的人就是这样）。
   fs.writeFileSync(path.join(dir, 'config.json'),
-    JSON.stringify({ schema: 6, devPlugins: 'no' }));
-  assert.equal(config.loadConfig(dir).devPlugins, false, '认不出的形状丢掉 = 回到安全的那一侧');
-
-  const cfg = config.loadConfig(tmpdir());
-  const d2 = tmpdir();
-  config.setDevPlugins(d2, cfg, true);
-  assert.equal(config.loadConfig(d2).devPlugins, true, '打开要落盘');
-  config.setDevPlugins(d2, cfg, false);
-  assert.equal(config.loadConfig(d2).devPlugins, false);
+    JSON.stringify({ schema: 6, devPlugins: true }));
+  const cfg = config.loadConfig(dir);
+  assert.equal(cfg.devPlugins, undefined,
+    '★ 读进来就该是 undefined —— 留着它会让下一个人以为这个开关还有用，然后把它接回某条路上');
+  // 而它**不是错误**：老配置不该让客户端起不来，也不该报一条用户看不懂的错。
+  assert.equal(cfg.schema, 6, 'schema 照常读出来，配置本身是好的');
 });
 
 // ── 钉子：按 id 记的签名公钥（§5.4）─────────────────────────────────────────

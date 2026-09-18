@@ -25,6 +25,11 @@ const crypto = require('crypto');
 const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
                     // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
                     // 6：**站点分发**（trustedPlugins 同意台账 + devPlugins 开关）
+                    //
+                    // ★ 6 之后**删掉过一个键**：`devPlugins`（本机池加不加载）。
+                    //   **没有升号**，因为删键不需要迁移 —— 老 config.json 里那一条
+                    //   今天没有任何读者，下一次 saveConfig 顺手就把它丢了。升号是
+                    //   给"必须搬一次"的改动用的，不是给"少了一个键"用的。
 
 // 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
 // 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
@@ -70,12 +75,10 @@ const DEFAULTS = {
   //   从头到尾用的是 `plugin.id`。按那句注释去写代码，得到的是一个"开关莫名失效"
   //   的症状（池是全局的，两个站点可以各有一个叫 jupyter 的插件而它们是两个东西）。
   plugins: {},              // { [id]: { enabled: boolean } }
-  // 本机池（`~/.slurmate/plugins/`）加不加载。
-  //
-  // ★ 缺省 **false**：插件默认**只认站点分发的那一份**（`site-plugins/`）。打开它
-  //   是「开发者模式」—— 那是给写插件的人自己用的，界面上在一个单独的一节里，
-  //   勾上之后才出现「从一个包安装…」那几个入口。演示模式恒开（见 index.js）。
-  devPlugins: false,
+  // ★ 这里从前还有一个 `devPlugins`（"本机池加不加载"）。它随本机池一起删掉了 ——
+  //   那个开关打开之后，`~/.slurmate/plugins/` 里**用户自己放进去的东西**会被加载，
+  //   而且是**不过同意闸**的。`docs/PLUGIN-SPEC.md` §5.2 明文禁止给任何一类插件开
+  //   免同意的口子，所以它连同它守着的那条路一起没了。今天池里有什么就加载什么。
   // 同意台账（TOFU 一致性）。`{ "<id>@<版本>": { digest, site, at } }`
   //
   // ★ 键里带**版本**：同一个插件的新版本是**另一份构件**，要重新同意一次。
@@ -105,13 +108,6 @@ function setPluginEnabled(dir, cfg, name, enabled) {
   else cfg.plugins[name] = { enabled };
   saveConfig(dir, cfg);
   return cfg.plugins;
-}
-
-/** 开发者模式：本机池加不加载。**用户的设置，不是站点的能力** —— 见 plugins/index.js。 */
-function setDevPlugins(dir, cfg, on) {
-  cfg.devPlugins = Boolean(on);
-  saveConfig(dir, cfg);
-  return cfg.devPlugins;
 }
 
 // ── 同意台账（站点分发的插件）────────────────────────────────────────────────
@@ -622,7 +618,9 @@ function loadConfig(dir) {
       if (v && typeof v.enabled === 'boolean') cfg.plugins[name] = { enabled: v.enabled };
     }
   }
-  if (typeof raw.devPlugins === 'boolean') cfg.devPlugins = raw.devPlugins;
+  // ★ 老 config.json 里可能还有 `devPlugins`。**不读它** —— 那个开关守的那条路
+  //   已经删了。这里不要"读进来但不用"：一个没有读者的字段留在这里，下一个人会
+  //   以为它还有用，然后把它接回某条路上。
 
   // 同意台账。**只收形状完整的条目**：`digest` 必须是全长 64 位十六进制。
   //
@@ -987,7 +985,7 @@ module.exports = {
   pruneLayouts, layoutPlan,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
-  pluginEnabledLocally, setPluginEnabled, setDevPlugins,
+  pluginEnabledLocally, setPluginEnabled,
   trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,
   // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
