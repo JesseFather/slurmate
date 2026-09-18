@@ -59,7 +59,7 @@
 
 | 在哪 | 讲什么 |
 |---|---|
-| [`client/README.md`](../client/README.md) | 客户端：认证模型、演示模式与那些调试开关、打包、代码结构，以及**四条不要改坏的约束** |
+| [`client/README.md`](../client/README.md) | 客户端：认证模型、开发者模式与那些调试开关、打包、代码结构，以及**四条不要改坏的约束** |
 | [`plugins/README.md`](../plugins/README.md) | 插件怎么做（目录形状、清单每个键、作业侧钩子、打包命令） |
 | [`packer/README.md`](../packer/README.md) | 打包器的每个动词（`init` / `keygen` / `build` / `sign` / `verify` / `inspect`） |
 | [`tools/conformance/README.md`](../tools/conformance/README.md) | 三份实现在同一批字节上的对账（输入树、期望的包字节、坏包、签名夹具） |

@@ -288,6 +288,55 @@ function pinPluginKey(dir, pins, id, fingerprint) {
   return { ok: true };
 }
 
+// ── 开发者模式的两个设置：**不在 config.json 里** ────────────────────────────
+//
+// ★ **为什么单独一个文件**：`developerMode` 这个键要回答的是"这次启动读**哪一份**
+//   配置"（用户自己那份，还是沙盒那一份）。把它放进 `config.json`，就先得知道读
+//   哪一份、才能知道读哪一份 —— 鸡生蛋。放进一个**不属于任何一份配置**的文件里，
+//   这个问题不存在。
+//
+// ★ 顺带避掉另一个坑：那样一来这个键会在**两份**配置里都出现（同一个 DEFAULTS），
+//   而只有用户那份里的值有读者。沙盒那一份会是一个没人读的 `false`，下一个人会
+//   拿它去判断"开发者模式开没开"—— 而那正是这个仓库一路上在删的那种东西。
+//
+// ★ 形状认不出时一律按**关着**算。这是安全的那一侧：用户回到自己那份配置（看得见、
+//   能干活），而不是被扔进一个连不上集群的沙盒里，还不知道为什么。
+//
+// ★ 与 `pinned-keys.json` 同一类东西：一个独立的小状态文件，键少、原子写、0600。
+const DEV_FILE = 'dev-mode.json';
+
+function devSettingsPath(dir) { return path.join(dir, DEV_FILE); }
+
+/**
+ * 读开发者模式的设置。
+ *
+ * @returns {{developerMode:boolean, pluginDir:string|null}}
+ *   `pluginDir` = **假站点的插件来源**（插件作者指向自己那棵树用的）。`null`
+ *   = 用默认的（仓库里的 `plugins/`）。见 index.js 的 devPluginSourceDir。
+ */
+function loadDevSettings(dir) {
+  const raw = readJson(devSettingsPath(dir));
+  const shaped = Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw);
+  return {
+    developerMode: shaped && raw.developerMode === true,
+    pluginDir: (shaped && typeof raw.pluginDir === 'string' && raw.pluginDir)
+      ? raw.pluginDir : null,
+  };
+}
+
+/**
+ * 写开发者模式的设置，返回**规整之后**的那一份 —— 调用方拿它更新自己手里那份，
+ * 免得"我写下去的是什么"与"盘上是什么"有两份算法。
+ */
+function saveDevSettings(dir, s) {
+  const next = {
+    developerMode: Boolean(s && s.developerMode),
+    pluginDir: (s && typeof s.pluginDir === 'string' && s.pluginDir) ? s.pluginDir : null,
+  };
+  writeAtomic(devSettingsPath(dir), JSON.stringify(next, null, 2), 0o600);
+  return next;
+}
+
 // ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
 function ensureDir(dir, mode) {
   fs.mkdirSync(dir, { recursive: true, mode });
@@ -989,6 +1038,8 @@ module.exports = {
   trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,
   // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
+  // 开发者模式的两个设置 —— 也单独一个文件，理由见那一段（**次序**）
+  loadDevSettings, saveDevSettings,
   checkHostKey, rememberHostKey, forgetHostKey,
   setKey, getKey, deleteKey, hasKey, migrateLegacySecret,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,

@@ -36,14 +36,16 @@
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
   <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
   <button id="sb-end" class="danger tiny hidden">结束会话</button>
-  <span id="sb-demo" class="demo-tag hidden">演示模式 · 未连接集群</span>
+  <span id="sb-dev" class="dev-tag hidden">开发者模式 · 未连接集群</span>
 </div>
 
 <div id="panel">
   <div class="wrap">
 
-    <div id="demo-banner" class="banner-demo hidden">
-      演示模式 · 未连接集群 —— 下面的会话是一个本地的模拟服务，不是真实的计算节点。
+    <!-- ★ 三重互锁的第二重：真实模式里绝不会出现的一种颜色（洋红）。做了假后端却
+         不标注，正是这个项目一路在清的那类问题 —— 系统声称了不成立的事。 -->
+    <div id="dev-banner" class="banner-dev hidden">
+      开发者模式 · 未连接集群 —— 下面的会话是一个本地的模拟服务，不是真实的计算节点。
     </div>
 
     <h1>Slurmate</h1>
@@ -186,9 +188,14 @@
       <div id="plugin-inert"></div>
 
       <!--
-        ★ 这里从前是「开发者模式」那一节（`#plugin-dev`）：一个复选框加三个按钮
-        （从一个包安装… / 打开插件目录 / 重新扫描）。它随本机池一起删掉了 ——
-        插件只有一条来的路，所以没有"装"这个动作需要藏起来，也没有开关可勾。
+        ★ 这里从前是**插件**那一节里的「开发者模式」（`#plugin-dev`）：一个复选框加
+        三个按钮（从一个包安装… / 打开插件目录 / 重新扫描）。它随本机池一起删掉了 ——
+        插件只有一条来的路，所以没有"装"这个动作需要藏起来。
+
+        ★ 今天另有一个**同名但不同事**的「开发者模式」，在面板最下面单独一节
+        （`#sec-dev`）：那个开关换的是**整个后端**（不连集群、改用本地模拟站点），
+        与"多加载一个插件目录"没有关系。两者的区别值得记一笔 —— 同名而不同事，
+        正是最容易把下一个人带偏的那种重名。
       -->
 
       <details id="adv">
@@ -234,27 +241,73 @@
       </p>
     </section>
 
-    <!-- ── 演示模式的调试开关 ── -->
-    <section id="sec-debug" class="debug hidden">
-      <h2>演示调试</h2>
+    <!-- ── 开发者模式 ──
+         这一节**永远露出来**（不像从前那样只在演示模式下露）：开关必须够得着，
+         否则打开了就再也关不掉。打开之后它里面那两块配置才出现。 -->
+    <section id="sec-dev">
+      <h2>开发者模式</h2>
       <p>
-        下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
-        这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+        打开之后，客户端<strong>不连集群</strong>，改用本地一个模拟的站点：真的 HTTP
+        服务、真的分发插件、真的走同意闸，只有 SSH 那一跳是假的。它有自己的配置
+        （连接、密钥、插件、同意台账），<strong>绝不会碰上面那些真配置</strong>。
       </p>
+      <p class="sub">
+        它是给写插件的人和改客户端的人用的。普通用户不需要它 —— 关着的时候客户端
+        与它完全无关。
+      </p>
+
       <div class="row">
-        <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
-        <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
-        <button class="ghost" data-debug="reap">模拟会话被回收</button>
-        <button class="ghost" data-debug="reset">复位</button>
+        <label class="check">
+          <input type="checkbox" id="dev-on"> 打开开发者模式
+        </label>
       </div>
-      <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
-           限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
-           混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
+      <!-- ★ 「重启后生效」必须说出来。静默的半生效（界面变了、后端没换）正是这个
+           项目一路上在清的那类问题。 -->
+      <p id="dev-pending" class="sub hidden"></p>
       <div class="row">
-        <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
-        <button class="ghost" data-debug="plugin-too-big">插件太大</button>
-        <button class="ghost" data-debug="rate-limited">站点在限流</button>
-        <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+        <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
+      </div>
+
+      <div id="dev-src" class="hidden">
+        <h3>假站点的插件来源</h3>
+        <p class="sub">
+          假站点从这里读插件：<strong>每个子目录是一个插件</strong>（里面有
+          plugin.json）。默认是仓库里的 <code>plugins/</code>；插件作者可以把它
+          指到自己那棵树上。
+        </p>
+        <p>当前：<code id="dev-src-path" class="mono"></code></p>
+        <p id="dev-src-count" class="sub"></p>
+        <div class="row">
+          <button id="dev-pick" class="ghost">选择目录…</button>
+          <button id="dev-reset-src" class="ghost">恢复默认</button>
+        </div>
+        <p class="sub">
+          它与真的守护进程一样，插件清单是<strong>启动时的快照</strong> ——
+          所以换了目录也要重启。
+        </p>
+      </div>
+
+      <div id="dev-debug" class="debug hidden">
+        <h3>调试开关</h3>
+        <p class="sub">
+          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
+          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+        </p>
+        <div class="row">
+          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
+          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
+          <button class="ghost" data-debug="reap">模拟会话被回收</button>
+          <button class="ghost" data-debug="reset">复位</button>
+        </div>
+        <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
+             限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
+             混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
+        <div class="row">
+          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
+          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
+          <button class="ghost" data-debug="rate-limited">站点在限流</button>
+          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+        </div>
       </div>
     </section>
 

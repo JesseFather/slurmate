@@ -11,8 +11,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const sshBackend = require('../src/main/backend-ssh.js');
 const keys = require('../src/main/keys.js');
@@ -200,8 +204,28 @@ test('★ 私钥解析不了时返回明确的错误，而不是抛异常穿出�
   assert.notEqual(r2.code, 'bad_private_key', '合法私钥不该被判成格式错误');
 });
 
-test('已实现（isImplemented 为真）—— 客户端不该再退回演示后端', () => {
+test('已实现（isImplemented 为真）—— 后端选择没有"退回假后端"这一支', () => {
+  // ★ 这一条守的是 `createBackend` 的**形状**：假后端只由开发者模式开关进入，
+  //   而"真后端没实现"不再是一条静默的退路（那句兜底与它旁边的注释正好相反：
+  //   真发生的时候，用户会以为连上了集群、其实在跟一个本地假服务打交道）。
+  //   今天 `isImplemented()` 恒为真，所以那一支是死的 —— 但死的那一支也要
+  //   说得出它为什么死，而这一条就是它被翻出来时会红的地方。
   assert.equal(sshBackend.isImplemented(), true);
+
+  // ★ 同时钉住**选择器的形状**（本机跑不起真集群，所以这一条只能读源码文本）：
+  //   一个没有 SSH 后端的构建必须**响亮地坏**，而不是悄悄给一个假后端。
+  //   `isImplemented()` 恒为真 ⇒ 那条兜底今天走不到 ⇒ 没有任何行为用例抓得到它，
+  //   而它一旦回来，症状是"用户以为连上了集群、其实在跟一个本地假服务打交道"。
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'backend.js'), 'utf8');
+  assert.equal((src.match(/new FakeBackend/g) || []).length, 1,
+    '假后端只许在一个地方被构造');
+  const atDev = src.indexOf('if (opts.dev) {');
+  const atFake = src.indexOf('new FakeBackend');
+  assert.ok(atDev > 0 && atFake > atDev,
+    '假后端必须只由 `opts.dev`（开发者模式）那一支进来 —— 它是唯一一条路');
+  const tail = src.slice(src.indexOf('if (!ssh.isImplemented())'));
+  assert.match(tail, /throw new Error/,
+    '没有 SSH 后端时要**响亮地坏**，不许静默退回假后端');
 });
 
 // ── 传输层失败的信封 ─────────────────────────────────────────────────────────

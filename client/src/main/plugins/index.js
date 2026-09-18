@@ -860,6 +860,51 @@ function findPluginDirs(base) {
 }
 
 /**
+ * 扫一个**插件集合目录**：`<集合>/<任意名>/plugin.json` —— 每个子目录是一个插件。
+ *
+ * ★ 它与 `findPluginDirs` **不是同一个形状，别混**：
+ *
+ *   | | 扫的是 | 形状 | 谁在用 |
+ *   |---|---|---|---|
+ *   | `findPluginDirs` | **池**（客户端存插件的地方） | `<id>/<版本>/` | 注册表 |
+ *   | 这个函数 | **源目录**（一棵插件树） | `<名字>/` | 打包器、假站点 |
+ *
+ *   差的那一层是**版本**：池要按 `(id, 版本)` 存，多版本要能并存；而一棵源树里
+ *   一个插件就是一个目录，版本写在清单里。仓库的 `plugins/` 就是后者的样子。
+ *
+ * ★ 清单读不动的**不在这里报错**，而是记进 `skipped`：调用方分两种。假站点照着
+ *   守护进程的样子**静默跳过**（那边坏清单就是发不出来的一份东西）；而开发者模式
+ *   那个「插件来源」要在界面上**如实说**"这个目录里 3 个目录，只有 1 个能用"——
+ *   不然插件作者看到的是一句"一个插件都没有"，而原因在他的清单里。
+ *
+ * @returns {{plugins:[{dir,name,manifest}], skipped:[{dir,name,why}]}}
+ */
+function scanPluginCollection(base) {
+  const plugins = [];
+  const skipped = [];
+  if (typeof base !== 'string' || !base) return { plugins, skipped };
+  let names = [];
+  try { names = fs.readdirSync(base).sort(); } catch { return { plugins, skipped }; }
+  for (const n of names) {
+    const dir = path.join(base, n);
+    if (!isDir(dir)) continue;
+    let mf;
+    try {
+      mf = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST), 'utf8'));
+    } catch (e) {
+      skipped.push({ dir, name: n, why: `读不到 ${MANIFEST}：${e.message}` });
+      continue;
+    }
+    if (!mf || typeof mf.id !== 'string' || typeof mf.version !== 'string') {
+      skipped.push({ dir, name: n, why: `${MANIFEST} 里没有 id/version（形状不对）` });
+      continue;
+    }
+    plugins.push({ dir, name: typeof mf.name === 'string' ? mf.name : n, manifest: mf });
+  }
+  return { plugins, skipped };
+}
+
+/**
  * 扫一个根目录，返回 `[{plugin}|{error}]`。根目录不存在**不是错误**。
  *
  * 池目录（`~/.slurmate/plugins/`）在用户装第一个插件之前本来就不存在 —— 为一个
@@ -1191,4 +1236,6 @@ module.exports = {
   versionCheck,        // 握手：客户端版本 × 服务端版本 → 一个态
   // ── 站点分发那条路要用的（见 site-plugins.js）──
   COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
+  // ── 读一棵**源**插件树（不是池）—— 打包器与开发者模式的假站点用 ──
+  scanPluginCollection,
 };

@@ -23,7 +23,7 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
  *
  * ★ 不能用 os.tmpdir()：真正模式下的中转站会往 `app.getPath('home')` 写
  *   `~/.ssh/config`，而 `os.tmpdir()` 是一个**大家共用、且会被之前的运行留下东西**
- *   的目录 —— 拿它当断言目标，「演示模式没碰真家目录」这条会变成一个看运气的用例
+ *   的目录 —— 拿它当断言目标，「开发者模式没碰真家目录」这条会变成一个看运气的用例
  *   （跑过一次真写之后，后面每次都会红）。给一个每次全新的空目录，这条断言就
  *   真的在断言「我们没往那儿写」，而不是在断言「这个目录恰好不存在」。
  */
@@ -31,7 +31,7 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 
 // ── 插件池（**站点池**，唯一的一个）────────────────────────────────────────
 //
-// 演示模式的站点池 = `<userData>/demo-config/site-plugins`（见 index.js 的 sitePoolDir）。
+// 开发者模式的站点池 = `<userData>/dev-sandbox/site-plugins`（见 index.js 的 sitePoolDir）。
 //
 // ★ 装进去的是仓库里**真的**那两个插件（`<repo>/plugins/`），不是测试里合成的
 //   替身。这两个插件与基座的接口正是这次改动反复在动的东西 —— 用替身测等于
@@ -50,8 +50,8 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 // ★ **必须在 app 起来之前写进去**：注册表在启动时扫一次，而 `loadConfig` 在
 //   bootstrap 里也只跑一次（index.js 只 require 一次）。
 const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
-const DEMO_CFG = path.join(userData, 'demo-config');
-const SITE_POOL = path.join(DEMO_CFG, 'site-plugins');
+const DEV_CFG = path.join(userData, 'dev-sandbox');
+const SITE_POOL = path.join(DEV_CFG, 'site-plugins');
 const SAMPLE_PLUGINS = ['code-server', 'sshd'];
 
 const require = createRequire(import.meta.url);
@@ -86,11 +86,11 @@ function setSitePlugins(names) {
   //   还没 require index.js 的时候（文件顶层那一次）它当然不在，那时 loadConfig
   //   一份正好 —— bootstrap 之后会用同一份磁盘内容重建 cfg。
   const entry = require.cache[require.resolve('../src/main/index.js')];
-  const cfg = entry ? entry.exports._test.getCfg() : config.loadConfig(DEMO_CFG);
+  const cfg = entry ? entry.exports._test.getCfg() : config.loadConfig(DEV_CFG);
 
   // 台账**整个清空再重记**。逐条删会漏掉将来可能存在的第二种键。
   cfg.trustedPlugins = {};
-  config.saveConfig(DEMO_CFG, cfg);
+  config.saveConfig(DEV_CFG, cfg);
 
   for (const n of names) {
     const src = path.join(REPO, 'plugins', n);
@@ -104,7 +104,7 @@ function setSitePlugins(names) {
     //   而症状是"插件明明装着，却要你重新同意"。
     const r = P.inspectDir(dest, 'site');
     assert.ok(!r.error, `夹具铺出去的插件自己不合法：${r.error}`);
-    const t = config.trustPlugin(DEMO_CFG, cfg, mf.id, mf.version, r.entry.digest, '测试夹具');
+    const t = config.trustPlugin(DEV_CFG, cfg, mf.id, mf.version, r.entry.digest, '测试夹具');
     assert.ok(t.ok, `台账没记上：${t.error}`);
   }
 
@@ -134,7 +134,7 @@ async function withSitePlugins(names, fn) {
 function resetFixture() { setSitePlugins(SAMPLE_PLUGINS); }
 
 /**
- * 收尾：**把夹具恢复成缺省**，并复位演示后端。
+ * 收尾：**把夹具恢复成缺省**，并复位假后端。
  *
  * ★ 这个函数是唯一允许动站点池收尾的地方。**不许裸着写
  *   `fs.rmSync(idx._test.getSitePoolDir(), …)`** —— 删完不恢复的话，从那条用例起
@@ -161,7 +161,7 @@ function trustSitePlugin(dir, id, version) {
   assert.ok(entry, 'trustSitePlugin 只能用在 index.js 起来之后（它要改它手里那个 cfg）');
   const r = P.inspectDir(dir, 'site');
   assert.ok(!r.error, `这一份自己不合法：${r.error}`);
-  const t = config.trustPlugin(DEMO_CFG, entry.exports._test.getCfg(), id, version,
+  const t = config.trustPlugin(DEV_CFG, entry.exports._test.getCfg(), id, version,
     r.entry.digest, '测试夹具');
   assert.ok(t.ok, `台账没记上：${t.error}`);
 }
@@ -322,10 +322,19 @@ Module._load = function (request, ...rest) {
   return origLoad.call(this, request, ...rest);
 };
 
-// 演示模式：让 createBackend 走演示后端，避免走「未实现」的 SSH 后端
-process.argv.push('--demo');
+// ── 让这次启动进开发者模式 ────────────────────────────────────────────────
+//
+// ★ **写的是产品那条路。** 从前这里是 `process.argv.push('--demo')` —— 一个只有
+//   测试和命令行用户知道的旁门。今天那条命令行开关整个没有了：开发者模式是
+//   `<userData>/dev-mode.json` 里的一个设置，界面上的开关写的是同一个文件。
+//   于是这一句与"用户在界面上勾了一下、然后重启"**是同一件事**，而不是给测试
+//   单开的一条路。
+//
+// ★ 必须在 `require` index.js **之前**写：那个文件在模块加载期只读一次。
+fs.writeFileSync(path.join(userData, 'dev-mode.json'),
+  JSON.stringify({ developerMode: true, pluginDir: null }, null, 2));
 // 把「等待登记」压到 200ms，好在测试里走到 running 态。真实后端不读这个。
-process.env.SLURMATE_DEMO_ENROLL_MS = '200';
+process.env.SLURMATE_DEV_ENROLL_MS = '200';
 
 /**
  * session.js 里的定时器全都 unref 了 —— 在 Electron 里这是对的（窗口/应用撑着事件
@@ -340,7 +349,7 @@ setInterval(() => console.error('PROBE', Date.now() - T0), 2000).unref?.();
 /**
  * 收尾。
  *
- * 必须把演示后端关掉 —— 它有一个**真的在监听的 HTTP 服务**，不关的话
+ * 必须把假后端关掉 —— 它有一个**真的在监听的 HTTP 服务**，不关的话
  * `node --test` 会一直等这个子进程退出，整个套件就挂住了
  * （表现为：本文件的 8 个用例全过，然后没有 summary、没有退出）。
  */
@@ -380,9 +389,9 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
   assert.equal(calls.windows.length >= 1, true, '应当创建了窗口');
 
   const joined = calls.titles.join(' | ');
-  assert.match(joined, /演示模式/, '演示模式必须在窗口标题里标注出来');
+  assert.match(joined, /开发者模式/, '开发者模式必须在窗口标题里标注出来');
 
-  // 演示后端启动时会推一条 demo 通知，面板据此显示横幅
+  // 假后端启动时会推一条 dev 通知，面板据此显示横幅
   const win = calls.windows[0];
   assert.ok((win.webContents.handlers['send:session:state'] || []).length >= 1,
     '应当向面板推过状态');
@@ -405,21 +414,27 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 布局组：一条连接指到一个组（多对一），组被引用计数回收。
                     // 切走一个「独占」的组会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
-                    'app:setConnectionLayout', 'app:renameLayout']) {
+                    'app:setConnectionLayout', 'app:renameLayout',
+                    // 开发者模式那三个设置动词 + 重启。它们的**行为**在
+                    // devmode.test.mjs 里验（那个文件跑的是"关着"那一半：这个文件
+                    // 整个跑在"开着"那一半里）；这里只查通道在不在 —— 这台机器上
+                    // 界面上那几个按钮就指着它们。
+                    'app:setDeveloperMode', 'app:pickDevPluginDir',
+                    'app:clearDevPluginDir', 'app:restart']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
 
-  // 演示模式必须用独立的配置命名空间 —— 否则演示里配的用户名/端口会污染真连接
+  // 开发者模式必须用独立的配置命名空间 —— 否则沙盒里配的用户名/端口会污染真连接
   assert.equal(fs.existsSync(path.join(userData, 'config.json')), false,
-    '演示模式绝不能往真配置目录里写东西');
+    '开发者模式绝不能往真配置目录里写东西');
 });
 
 test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const b = await invoke('app:bootstrap');
-  assert.equal(b.demo, true);
+  assert.equal(b.dev, true);
   assert.equal(b.secureStorageAvailable, false);
-  assert.equal(b.backendLabel, '演示后端');
+  assert.equal(b.backendLabel, '本地模拟站点');
   // 一条连接都没配 —— 这是**真实状态**，界面上要如实显示「还没有配置登录节点」，
   // 而不是编一个默认地址出来。断言它：防的是有人"顺手"把某个集群的真实地址
   // 写回源码，那样每个 clone 的人都会带着那个集群的 IP。
@@ -438,7 +453,7 @@ test('★ 点开「新建」密钥就已经生成好了，公钥可查（用户�
   assert.equal(r.generated, true, '第一次问当然要真的生成一把');
   // 这台机器没有凭据库 —— 密钥只能留在内存里，绝不该悄悄写明文落盘
   assert.equal(r.key.persisted, false, '没有安全存储时不得自动落盘');
-  assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
+  assert.equal(fs.existsSync(path.join(userData, 'dev-sandbox', 'secrets.json')), false,
     '一个字节都不该落盘');
 
   // ★ 幂等。每次点开「新建」就换一把的话，用户刚复制去 IDM 注册的那把公钥
@@ -459,7 +474,7 @@ test('★ 没有安全存储时，重新生成密钥要明确报告「存不下�
   // 但「存下来了」这件事必须明确否认，界面据此如实告知用户
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'no_secure_storage');
-  assert.equal(fs.existsSync(path.join(userData, 'demo-config', 'secrets.json')), false,
+  assert.equal(fs.existsSync(path.join(userData, 'dev-sandbox', 'secrets.json')), false,
     '一个字节都不该落盘 —— 私钥没有「明文保存」这条退路了');
 
   const after = await invoke('app:publicKey');
@@ -518,7 +533,7 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
 
   // 落盘了：重新读配置文件也该看到
   const onDisk = JSON.parse(
-    fs.readFileSync(path.join(userData, 'demo-config', 'config.json'), 'utf8'));
+    fs.readFileSync(path.join(userData, 'dev-sandbox', 'config.json'), 'utf8'));
   assert.equal(onDisk.connections.length, 1);
 
   // ★ 相同条目检测：界面上的「保存并连接」不改任何字段再点一次，
@@ -563,8 +578,8 @@ test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉'
   assert.equal(b.activeConnectionId, saved.connection.id);
   assert.equal(b.whoami, null, '断开后不能再声称知道对面是谁');
 
-  // 这个文件里所有用例共用同一个 Electron 实例，演示后端也被真的关掉了 ——
-  // 接回去，否则后面的会话用例会撞上「演示后端尚未 connect()」
+  // 这个文件里所有用例共用同一个 Electron 实例，假后端也被真的关掉了 ——
+  // 接回去，否则后面的会话用例会撞上「假后端尚未 connect()」
   const back = await invoke('app:connect', { connectionId: saved.connection.id });
   assert.equal(back.ok, true, '断开之后必须能重新接上，否则「断开」就是个单向门');
   await invoke('app:deleteConnection', saved.connection.id);
@@ -583,7 +598,7 @@ test('★ 地址探测：一条连接都没有时返回空，不回退到任何�
   assert.deepEqual(await hosts.probeAll([{ host: 'x' }]), []);
 });
 
-test('app:debug 在演示模式下可用（真机上造不出来的状态）', async (t) => {
+test('app:debug 在开发者模式下可用（真机上造不出来的状态）', async (t) => {
   t.after(() => { Module._load = origLoad; });
   for (const what of ['daemon-down', 'tunnel-down', 'reap', 'reset']) {
     const r = await invoke('app:debug', what);
@@ -626,7 +641,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   // 内存不填 → 由服务端用自己的默认值（而不是客户端编一个）。
   await invoke('app:start', { cpus: 4 });
 
-  // 等登记完成（演示后端 200ms）+ 建隧道 + 登录
+  // 等登记完成（假后端 200ms）+ 建隧道 + 登录
   const view = await (async () => {
     const deadline = Date.now() + 15000;
     for (;;) {
@@ -647,7 +662,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   //   被新组复用」时，新组的「空白布局」继承 A 的 localStorage 与登录 cookie。
   const partition = view._opts.webPreferences.partition;
   assert.match(partition, /^persist:layout-l[0-9a-f]{12}$/, `实际：${partition}`);
-  // 演示模式才注入 preload；真实模式注入会污染 IDE
+  // 开发者模式才注入 preload（按键对照）；真实模式注入会污染 IDE
   assert.match(String(view._opts.webPreferences.preload || ''), /demo\.js$/);
   assert.equal(view._opts.webPreferences.backgroundThrottling, false,
     'IDE 不能被 Chromium 节流 —— 那会让终端看起来「卡住」且没有报错');
@@ -681,8 +696,8 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   // 断开之后不再声称知道对面是谁，但连接条目本身要留着（下次还得连）
   assert.equal((await invoke('app:bootstrap')).whoami, null);
 
-  // 这个文件里所有用例共用同一个 Electron 实例，演示后端刚被真的关掉了 ——
-  // 接回来，否则后面的用例会撞上「演示后端尚未 connect()」
+  // 这个文件里所有用例共用同一个 Electron 实例，假后端刚被真的关掉了 ——
+  // 接回来，否则后面的用例会撞上「假后端尚未 connect()」
   const demoConn = await invoke('app:saveConnection',
     { user: 'demo', host: '127.0.0.1', port: 1 });
   assert.equal((await invoke('app:connect', { connectionId: demoConn.connection.id })).ok, true,
@@ -717,11 +732,11 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   const conn = boot.connections.find((c) => c.id === boot.activeConnectionId)
             || boot.connections[0];
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
-    '演示后端应当连得上');
+    '假后端应当连得上');
 
   const idx = require('../src/main/index.js');
-  // 上一个用例「断开」时演示后端被 close()，而它那个 1.6 秒的释放定时器在 close() 里
-  // 被清掉了 —— 于是演示会话卡在 releasing，_submit 会以 quota_active 拒绝。
+  // 上一个用例「断开」时假后端被 close()，而它那个 1.6 秒的释放定时器在 close() 里
+  // 被清掉了 —— 于是那个会话卡在 releasing，_submit 会以 quota_active 拒绝。
   // 真集群上守护进程的 phase_release 会自己收掉它（最多一个 tick），这里手动收。
   idx._test.getBackend().debugReap();
 
@@ -854,7 +869,7 @@ test('★ 取不到分区时必须说出来，不能谎报「这台集群没有�
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
 
-  // 让演示后端假装守护进程不可达
+  // 让假后端假装守护进程不可达
   await invoke('app:debug', 'daemon-down');
   try {
     const r = await invoke('app:partitions');
@@ -887,7 +902,7 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
   assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true,
     '前置条件：要先连上 —— 没连上时 tryReattach 会（正确地）直接返回');
   await b.rpc({ op: 'submit', cpus: 2, mem: '8G' });
-  await new Promise((r) => setTimeout(r, 400));      // 演示后端 200ms 登记
+  await new Promise((r) => setTimeout(r, 400));      // 假后端 200ms 登记
   const sid = b._session && b._session.session_id;
   assert.ok(sid, '前置条件：要有一个会话');
 
@@ -1473,7 +1488,7 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   assert.equal(back.ok, true, `还原现场失败（后面的用例都假定连着）：${JSON.stringify(back)}`);
   await invoke('app:deleteConnection', conn.connection.id);
   assert.equal(idx._test.getBackend().connected, true,
-    '收尾之后演示后端必须还是连着的 —— 这个文件里后面的用例没做重连');
+    '收尾之后假后端必须还是连着的 —— 这个文件里后面的用例没做重连');
 });
 
 test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被管', async (t) => {
@@ -1527,8 +1542,8 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     //   场合。所以这条改成断言**它的反面**：界面上不许再教用户去做那件事。
     assert.equal(pv.poolDir, undefined, '本机池的路径不该再下发给界面');
 
-    // ★ 站点分发接上来之后，这一条**变强了**：演示站点报的不再是"本机池里有什么"
-    //   （那样「站点有而本机没有」在演示里永远走不到），而是仓库里那两个**真插件**
+    // ★ 站点分发接上来之后，这一条**变强了**：假站点报的不再是"本机池里有什么"
+    //   （那样「站点有而本机没有」在这里永远走不到），而是仓库里那两个**真插件**
     //   （见 backend-fake 的 _siteIndex）。于是池空 + 本机没有它们 ⇒ `missing`
     //   里就是它们，而且每一份都**带着文件清单**（`distributed: true`）——
     //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
@@ -1548,7 +1563,12 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     //   放进池里，再把开发者模式打开"，而**那三样东西今天都不存在了**。所以除了
     //   "去同步"要说对，还要钉住**不许再出现**那句让用户去干没用的事的话。
     assert.match(notices, /本站会分发插件/, `站点会分发时要说去同步：${notices}`);
-    assert.doesNotMatch(notices, /插件目录|打开插件目录|开发者模式|放进去|勾上/,
+    // ★ 这一串里**从前有「开发者模式」**：那时它指的是"也加载本机插件目录"那个
+    //   复选框，而那句"把插件目录放进池里、再勾上开发者模式"是一句让用户去干
+    //   没用的事的话（三样东西一个都不存在）。**那四个字今天回来了，但指的是
+    //   另一件事**（换掉整个后端，见 devmode.test.mjs），所以它不再是禁词；
+    //   禁的是"往目录里放东西"这一类句子。
+    assert.doesNotMatch(notices, /插件目录|打开插件目录|放进去|勾上/,
       `★ 本机池没了，任何一句"把目录放进去"都是一句让用户去干没用的事的话：${notices}`);
   });
 });
@@ -1566,13 +1586,13 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
   });
   await invoke('app:debug', 'reset');
   await withSitePlugins([], async () => {
-    // 池子空、开发者模式在演示下恒开 ⇒ 本机一个插件都没有，而站点报了两个
+    // 池子空、开发者模式开着 ⇒ 本机一个插件都没有，而站点报了两个
     // **真文件**（仓库里的 plugins/，见 backend-fake 的 _siteIndex）。
     const r = await invoke('app:syncPlugins');
     assert.equal(r.ok, true, JSON.stringify(r));
 
     const siteSync = idx._test.getSiteSync();
-    assert.equal(siteSync.supported, true, '演示站点会分发插件');
+    assert.equal(siteSync.supported, true, '假站点会分发插件');
     const pending = idx._test.getPendingConsent();
     assert.equal(pending.length, 2, `站点那两个插件都要先过同意闸：${JSON.stringify(r.plugins.consent)}`);
 
@@ -1644,7 +1664,7 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     assert.equal(r.ok, true, JSON.stringify(r));
     const first = idx._test.getPendingConsent()[0];
     assert.ok(first, '站点要发两个插件下来');
-    assert.ok(first.fingerprint, '★ 演示站点发的包是签过名的，指纹要交到界面上');
+    assert.ok(first.fingerprint, '★ 假站点发的包是签过名的，指纹要交到界面上');
 
     const c = await invoke('app:consentPlugin', first.id, first.version);
     assert.equal(c.ok, true, JSON.stringify(c));
@@ -2335,7 +2355,7 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   const idx = require('../src/main/index.js');
   const b = idx._test.getBackend();
 
-  // 等上一个用例的会话真的被释放（演示后端要 1.6 秒，而配额是 1）
+  // 等上一个用例的会话真的被释放（假后端要 1.6 秒，而配额是 1）
   await waitUntil(async () => !b._session
     || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
 
@@ -2410,7 +2430,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     '但它**声明了**一块界面');
 
   await invoke('app:debug', 'reset');
-  await invoke('app:debug', 'extra-plugin');          // 演示站点"也开了它"
+  await invoke('app:debug', 'extra-plugin');          // 假站点"也开了它"
   const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
   assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
 
@@ -2448,7 +2468,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   const idx = require('../src/main/index.js');
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
-  // 等上一个用例的会话真的被释放。演示后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
+  // 等上一个用例的会话真的被释放。假后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
   // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是**上一个用例**的会话，
   // 排查起来会以为是中转站本身的问题。
   const b = idx._test.getBackend();
@@ -2462,7 +2482,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   const started = await invoke('app:start', null, 'sshd');
   assert.equal(started.ok, true, `提交中转站会话失败：${JSON.stringify(started.snapshot)}`);
 
-  // 等它跑到 running（演示后端 200ms 登记）
+  // 等它跑到 running（假后端 200ms 登记）
   let snap = null;
   const deadline = Date.now() + 15000;
   for (;;) {
@@ -2491,17 +2511,17 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
 
   // ★ 先查「有没有碰不该碰的地方」，再查「有没有写出该写的东西」。
   //   顺序有讲究：反过来写的话，一个「把配置写进真家目录」的改动会先被
-  //   「演示目录里没有文件」那条拦下，而报出来的原因和真正的问题不是一回事。
+  //   「沙盒目录里没有文件」那条拦下，而报出来的原因和真正的问题不是一回事。
   assert.equal(fs.existsSync(path.join(fakeHome, '.slurmate')), false,
-    '★ 演示模式绝不能往真正的家目录里写东西');
+    '★ 开发者模式绝不能往真正的家目录里写东西');
   assert.equal(fs.existsSync(path.join(fakeHome, '.ssh')), false,
     '★ 尤其不能碰 ~/.ssh/config —— 那是用户**全部** ssh 都要经过的地方，'
     + '比 config.json 严重得多');
 
-  // 演示模式必须落在**它自己的**配置目录里
-  const home = path.join(userData, 'demo-config');
+  // 开发者模式必须落在**它自己的**配置目录里
+  const home = path.join(userData, 'dev-sandbox');
   assert.equal(fs.existsSync(sshc.pathsFor(home).config), true,
-    '演示模式下 ssh 配置要写在演示配置目录里');
+    '开发者模式下 ssh 配置要写在沙盒目录里');
 
   const cfg = fs.readFileSync(sshc.pathsFor(home).config, 'utf8');
   assert.match(cfg, new RegExp(`^\\s+Port ${snap.localPort}$`, 'm'),
@@ -2556,7 +2576,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
     //   整轮 `node --test` 不会结束。收尾要能覆盖"没有 controller"那种情况。
     const c = idx._test.getController();
     if (c) { try { await c.stop(); } catch (e) { /* 收尾失败不该改变结论 */ } }
-    await invoke('app:debug', 'reset');   // 它会把演示站点那两个插件恢复成开着的
+    await invoke('app:debug', 'reset');   // 它会把假站点那两个插件恢复成开着的
   });
   const idx = require('../src/main/index.js');
   const w = idx._test.getWindow();
@@ -2564,7 +2584,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
 
   // 先把上一个用例可能留下的会话收干净 —— 「单一启动」是服务端强制的，
   // 带着一个在跑的会话去开新的只会拿到「已有 1 个活跃会话」。
-  // 演示后端的 _goodbye 只把 state 置成 released、不把对象清掉（真守护进程也是
+  // 假后端的 _goodbye 只把 state 置成 released、不把对象清掉（真守护进程也是
   // 这样：终态记录会留着），所以判据是**状态**而不是对象在不在。
   const dead = () => !b._session
     || ['released', 'rejected', 'expired'].includes(b._session.state);
@@ -2586,9 +2606,9 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
 
   await invoke('app:debug', 'extra-plugin');
   await invoke('app:partitions');
-  // 演示站点"装了 jupyter，而本客户端没有它" —— 拿它的 id 当作那个会话的解析键。
+  // 假站点"装了 jupyter，而本客户端没有它" —— 拿它的 id 当作那个会话的解析键。
   const siteJup = idx._test.getBackend()._extraSitePlugins.find((p) => p.name === 'jupyter');
-  assert.ok(siteJup, '前置条件：演示站点要有一个客户端不认识的插件');
+  assert.ok(siteJup, '前置条件：假站点要有一个客户端不认识的插件');
   const ref = `${siteJup.id}@${siteJup.version}`;
 
   // ── ★ 不变量一：跑了之后**改站点状态也不影响这个会话** ──

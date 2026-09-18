@@ -206,7 +206,13 @@ class SessionController extends EventEmitter {
       backendKind: this.backend.kind,
       error: this.error,
       warning: this.warning,
-      demo: this.backend.kind === 'demo',
+      // ★ 「这一次会话不是在真集群上跑的」。界面据此挂那条横幅与状态条标记。
+      //
+      //   判据是**后端身份**，不是"用户开着那个开关"—— `fake` 只可能由开发者模式
+      //   进来（见 backend.js 的 createBackend），两者今天恒等；但开关是**要重启
+      //   才生效**的，而界面手里那份开关状态可能是"刚改过、还没重启"。拿它去判的话，
+      //   改了开关还没重启的那段时间里，界面会对着一个真集群说"这是假的"。
+      dev: this.backend.kind === 'fake',
     };
   }
 

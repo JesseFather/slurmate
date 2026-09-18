@@ -1,12 +1,12 @@
 'use strict';
 /**
- * demo-server.js —— 演示模式下站在「计算节点上那个服务」的位置上的**假 web 服务**。
+ * demo-server.js —— 开发者模式下站在「计算节点上那个服务」的位置上的**假 web 服务**。
  *
  * ★ 它是**通用**的：契约（界面路径、登录路径/字段/cookie）由当前会话那个插件的
  *   清单给，见 `setContract`。这个文件里没有任何一个具体网页服务的名字或常量 ——
  *   以前它叫「假 code-server」，而那意味着基座里躺着一份 code-server 的实现假设。
  *
- * ── 为什么演示后端要包含一个**真的 HTTP 服务**，而不是一个空壳 mock ─────────
+ * ── 为什么假后端要包含一个**真的 HTTP 服务**，而不是一个空壳 mock ─────────
  *
  * 登录这一段是整个客户端里最容易猜错、也最难在真机上复现的地方：
  *   · `GET <界面路径>` 未登录时 302 到登录页
@@ -40,7 +40,7 @@ function readAsset(name) {
 
 /**
  * @param {object} opts
- *   password  {string}  作业生成的随机口令（演示里由调用方给一个固定值）
+ *   password  {string}  作业生成的随机口令（假站点里由调用方给一个固定值）
  *   host      {string}  绑定地址，默认 127.0.0.1
  *   port      {number}  端口，0 = 让系统分配（测试用）
  */
@@ -152,7 +152,7 @@ function createDemoWebService({ password, host = '127.0.0.1', port = 0 } = {}) {
 
   return {
     /**
-     * 这个假服务现在扮演哪一个插件。**提交时**由演示后端按解析出来的插件设置 ——
+     * 这个假服务现在扮演哪一个插件。**提交时**由假后端按解析出来的插件设置 ——
      * 服务是在 `connect()` 里起的，那时还不知道会有哪个会话。
      */
     setContract(c) {
@@ -195,7 +195,7 @@ function readBody(req, cb) {
   req.on('end', () => cb(body));
 }
 
-/** 定长比较，避免用 === 比口令。演示代码也照做，免得被抄进正式路径。 */
+/** 定长比较，避免用 === 比口令。假站点也照做，免得被抄进正式路径。 */
 function timingSafeEqual(a, b) {
   const ba = Buffer.from(String(a));
   const bb = Buffer.from(String(b));

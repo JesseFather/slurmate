@@ -90,7 +90,7 @@ function notice(kind, text) {
   el.className = 'notice ' + kind;
   const tag = document.createElement('span');
   tag.className = 'tag';
-  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息', demo: '演示' }[kind] || kind;
+  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息', dev: '开发' }[kind] || kind;
   const body = document.createElement('span');
   body.className = 'body';
   body.textContent = text;              // textContent：绝不把外部文本当 HTML 插进去
@@ -151,7 +151,7 @@ function renderSnapshot(s) {
   const running = (st === 'running' || st === 'releasing');
   $('sb-reload').classList.toggle('hidden', !running);
   $('sb-end').classList.toggle('hidden', !running);
-  $('sb-demo').classList.toggle('hidden', !(s && s.demo));
+  $('sb-dev').classList.toggle('hidden', !(s && s.dev));
   // 布局选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
   // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」布局，没有连接就没有对象。
   $('sb-layout-wrap').classList.toggle(
@@ -1435,7 +1435,7 @@ async function handleConnectResult(res) {
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
     if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
-    renderSnapshot({ state: 'idle', demo: boot.demo });
+    renderSnapshot({ state: 'idle', dev: boot.dev });
     return true;
   }
 
@@ -1454,17 +1454,85 @@ async function handleConnectResult(res) {
   return false;
 }
 
+// ── 开发者模式 ──────────────────────────────────────────────────────────────
+
+/** 现在有会话在跑吗（提交中/排队/运行/释放中都算）。 */
+function sessionBusy() {
+  const st = lastSnap && lastSnap.state;
+  return Boolean(st) && st !== 'idle' && st !== 'ended';
+}
+
+/** 上一次从主进程拿到的开发者模式设置。**只由 renderDevMode 更新**。 */
+let devState = null;
+
+/**
+ * 画开发者模式那一节。传参 = 用主进程刚回的那一份（三个动词都会回）。
+ *
+ * ★ **`on` 与 `saved` 是两件事，这一节全靠它撑起来**：
+ *
+ *   | 画什么 | 跟谁走 | 为什么 |
+ *   |---|---|---|
+ *   | 复选框 | `saved` | 用户刚点的就是它。跟着 `on` 走的话，点完它会自己弹回去 |
+ *   | 「重启后生效」那一行 | 两者是否相等 | 不相等就是有改动悬着 |
+ *   | 插件来源那一段 | `saved` | 同上：刚选完就要看见 |
+ *   | 调试开关那一块 | `on` | 假后端没在跑的话，那些按钮点了只会报"仅开发者模式可用" |
+ *
+ *   全都跟着 `on` 走的话，点了开关**界面上什么都不会发生** —— 而那正是"点了没反应"
+ *   这一类问题里最难查的一种：其实它生效了，只是要重启。
+ */
+function renderDevMode(dm) {
+  if (dm) devState = dm;
+  const d = devState;
+  if (!d) return;
+
+  $('dev-on').checked = Boolean(d.saved);
+
+  // 有改动等着重启：说得出来，并且给一个按得下去的按钮（不然用户只能自己去
+  // 关掉再打开 —— 那正是命令行开关那种"你得知道怎么做"的体验）。
+  const pending = (d.saved !== d.on) || (d.pluginDirSaved !== d.pluginDir);
+  $('dev-pending').classList.toggle('hidden', !pending);
+  if (pending) {
+    $('dev-pending').textContent = '有改动等着重启 —— 这个客户端现在跑的还是'
+      + (d.on ? '开发者模式' : '真集群那一份配置') + '。';
+  }
+  $('dev-restart').classList.toggle('hidden', !pending);
+
+  // 插件来源：路径跟 `saved`（用户要的那个），**数目只在两者相同时才敢报** ——
+  // 主进程给的数目是**生效**那棵树扫出来的，拿它去配一个新选还没生效的路径，
+  // 就是一句对不上号的话。
+  $('dev-src').classList.toggle('hidden', !d.saved);
+  const wantDir = d.pluginDirSaved || d.defaultPluginDir;
+  $('dev-src-path').textContent = wantDir || '（默认那个位置不存在：仓库里的 plugins/）';
+  const cnt = $('dev-src-count');
+  if (d.pluginDirSaved !== d.pluginDir) {
+    cnt.textContent = '重启之后才会按这个来源读。';
+  } else if (d.source.plugins.length) {
+    cnt.textContent = `读到 ${d.source.plugins.length} 个插件：`
+      + d.source.plugins.join('、')
+      + (d.source.skipped.length
+        ? `（另有 ${d.source.skipped.length} 个目录读不出清单，假站点不会报它们）` : '');
+  } else if (d.source.skipped.length) {
+    cnt.textContent = `一个插件都没有 —— ${d.source.skipped.length} 个目录都读不出清单：`
+      + `${d.source.skipped[0].name}：${d.source.skipped[0].why}`;
+  } else {
+    cnt.textContent = '一个插件都没有 —— 每个子目录应该是一个插件（里面有 plugin.json）。';
+  }
+
+  // 调试开关跟 **`on`**：假后端没在跑，那些按钮按下去只会回一句"仅开发者模式可用"。
+  $('dev-debug').classList.toggle('hidden', !d.on);
+}
+
 // ── 启动 ────────────────────────────────────────────────────────────────────
 async function init() {
   boot = await window.slurmate.bootstrap();
 
-  if (boot.demo) {
-    $('demo-banner').classList.remove('hidden');
-    $('sec-debug').classList.remove('hidden');
-    $('app-sub').textContent = '演示模式 · 未连接集群';
+  if (boot.dev) {
+    $('dev-banner').classList.remove('hidden');
+    $('app-sub').textContent = '开发者模式 · 未连接集群';
   } else if (boot.backendLabel) {
     $('app-sub').textContent = boot.backendLabel;
   }
+  renderDevMode(boot.developerMode);
 
   // ★ bootstrap 里**没有**公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
   //   单独去问（app:publicKey / app:newKey）。曾经这里从 bootstrap 读全局的
@@ -1609,13 +1677,46 @@ async function init() {
   for (const b of document.querySelectorAll('[data-debug]')) {
     b.onclick = async () => {
       const r = await window.slurmate.debug(b.dataset.debug);
-      notice(r.ok ? 'demo' : 'error', r.ok ? '已触发：' + b.textContent : r.error);
+      notice(r.ok ? 'dev' : 'error', r.ok ? '已触发：' + b.textContent : r.error);
     };
   }
 
+  // ── 开发者模式那三个动词 ──
+  // 三个都会**改一个要重启才生效的东西**，所以三个都不在这里"假装已经生效"：
+  // 主进程回一份新的设置，照它重画（那一行「重启后生效」就是重画的产物）。
+  $('dev-on').onchange = async () => {
+    const r = await window.slurmate.setDeveloperMode($('dev-on').checked);
+    if (!r.ok) { notice('error', r.error || '改不了开发者模式。'); renderDevMode(); return; }
+    renderDevMode(r.developerMode);
+  };
+
+  $('dev-pick').onclick = async () => {
+    const r = await window.slurmate.pickDevPluginDir();
+    if (r.cancelled) return;
+    // 失败（目录里读不出插件）时主进程**没有**保存，也没有推通知 —— 那句话由这里说，
+    // 它带着"为什么"，而用户正盯着这个按钮。
+    if (!r.ok) { notice('error', r.error); return; }
+    renderDevMode(r.developerMode);
+  };
+
+  $('dev-reset-src').onclick = async () => {
+    const r = await window.slurmate.clearDevPluginDir();
+    if (!r.ok) { notice('error', r.error || '改不回来。'); return; }
+    renderDevMode(r.developerMode);
+  };
+
+  $('dev-restart').onclick = async () => {
+    // ★ 重启会先结束会话 —— 与关窗口同一套收尾。那是一次**明确的终止**（集群上的
+    //   作业会被取消），所以必须先问一句：用户点的是"让设置生效"，不是"取消作业"。
+    if (sessionBusy() && !window.confirm(
+      '重启会先结束当前会话，集群上的作业会被取消。确定吗？')) return;
+    const r = await window.slurmate.restart();
+    if (r && !r.ok) notice('error', r.error || '重启失败。');
+  };
+
   window.slurmate.onState(renderSnapshot);
   window.slurmate.onNotice((n) => {
-    if (n.kind === 'demo') { $('demo-banner').classList.remove('hidden'); return; }
+    if (n.kind === 'dev') { $('dev-banner').classList.remove('hidden'); return; }
     if (n.kind === 'key-seen' || n.kind === 'key-blocked') {
       // 快捷键诊断：刻意记进日志，便于在真机上核对「哪些键到了页面、哪些被吞了」
       notice('info', (n.kind === 'key-blocked' ? '已拦截：' : '已放行：') + n.text);
@@ -1630,7 +1731,7 @@ async function init() {
   // connected 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
   // 补一次，否则自动接上会话时那一条不会显示「已连接」
   renderConnections(boot.connections);
-  renderSnapshot(s || { state: 'idle', demo: boot.demo });
+  renderSnapshot(s || { state: 'idle', dev: boot.dev });
 }
 
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
@@ -1667,7 +1768,7 @@ async function doDisconnect() {
     notice('info', '已断开与登录节点的连接。');
   }
   renderConnections(boot.connections);
-  renderSnapshot({ state: 'idle', demo: boot.demo });
+  renderSnapshot({ state: 'idle', dev: boot.dev });
 }
 
 async function endSession() {

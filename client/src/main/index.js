@@ -28,21 +28,39 @@
  * （存在 PENDING_ID 这个保留位上），因为用户必须先把公钥拿去 IDM 注册、
  * 回来再填地址。否则「保存并连接」的第一次尝试必然认证失败。
  *
- * ── 演示模式的三重互锁 ────────────────────────────────────────────────────
- * 做了假后端却不标注，正是这个项目一路在清的那类问题：**系统声称了不成立的事**。
- * 所以演示模式有：① 独立的配置命名空间（demo-config，绝不污染真配置）
- * ② 窗口标题与状态条用真实模式绝不会出现的颜色标注
- * ③ `--demo` 命令行开关。并且**绝不**在真实后端出错时静默退回演示。
+ * ── 开发者模式：怎么进、怎么标注、为什么要有 ──────────────────────────────
+ *
+ * 打开它之后客户端**不连集群**，改用 `backend-fake.js` 那个本地模拟站点。
+ *
+ * ★ **它是给谁的**：写插件的人、改这个客户端的人。普通用户不需要它，所以它是一个
+ *   摆在界面上的开关，**默认关着、未配置时也不会自己打开**。
+ *
+ * ★ **入口是开关，不是命令行。** 从前是 `electron . --demo`（`package.json` 里那个
+ *   `demo` 脚本）。那等于说"Windows 用户请去开一个终端"—— 而这是一个图形应用，
+ *   而且它给人的感觉是"必须在安装时选好"。今天它在界面里，随时可开可关。
+ *
+ * ★ **三重互锁**（做了假后端却不标注，正是这个项目一路在清的那类问题：
+ *   **系统声称了不成立的事**）：
+ *     ① 独立的数据命名空间（`<userData>/dev-sandbox/`，**绝不**碰用户自己那份配置）
+ *     ② 窗口标题、状态条标记、面板横幅，用真实模式绝不会出现的颜色（洋红）
+ *     ③ 启动时那一次选择：`dev` 为真才走假后端，没有第二条路，也不会在真后端
+ *        出错时静默退回来（见 backend.js 的 createBackend）。
+ *
+ * ★ **两个设置都是"重启后生效"**：换后端要重建整个客户端；插件来源改的是一棵树的
+ *   快照。界面上明说，并且给一个「立即重启」的按钮 —— 不做静默的半生效。
  */
 
-const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard,
+        dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
 const config = require('./config.js');
 const keys = require('./keys.js');
 const hosts = require('./hosts.js');
-const { createBackend } = require('./backend.js');
+// ★ `KIND` 也引进来：主进程里有好几处要问"这是不是那个假后端"。写字面量
+//   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
+const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State } = require('./session.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
@@ -53,7 +71,24 @@ const sitePluginSync = require('./site-plugins.js');
 //   有一个同名的局部数组（那些插件记录），函数内写 `plugins.` 会指到它身上。
 const shortDigest = plugins.shortDigest;
 
-const DEMO_FLAG = process.argv.includes('--demo');
+/**
+ * 开发者模式：**生效值**与**盘上那个值**。
+ *
+ * ★ 两者必须分开，它们回答的是两个不同的问题：
+ *     `on`    这次进程在不在开发者模式。启动时读一次，**之后不再变**（换后端要
+ *             重建整个客户端，见 createBackend）。
+ *     `saved` 用户在界面上要的是哪一个。改开关只动它。
+ *   两者不同 = 有改动等着重启 —— 界面据此说「重启后生效」，而不是让人以为点了没反应。
+ *   ★ 判据只有一个：**别拿 `saved` 去决定这次进程怎么跑**。
+ *
+ * ★ `pluginDir` 是**假站点的插件来源**（插件作者指向自己那棵树用的）。`null` =
+ *   用默认的（仓库里的 `plugins/`）。同样有生效值/盘上值两份，理由同上。
+ *
+ * ★ 模块加载期是"关着"的：真值要等 app ready 之后读得到 userData 才知道，而
+ *   `registry` 是在模块加载期构造的 —— 那一刻看到一个"关着"的世界是对的。
+ */
+let dev = { developerMode: false, pluginDir: null };
+let devSaved = { developerMode: false, pluginDir: null };
 
 let win = null;
 let backend = null;
@@ -122,7 +157,7 @@ let connectGeneration = 0;
 /**
  * 这台机器没有凭据库时，密钥只能留在内存里 —— 按 id 记着。
  *
- * 少了它，演示模式（safeStorage 不可用）下每连一次就会换一把钥匙，
+ * 少了它，开发者模式（测试桩里 safeStorage 一律不可用）下每连一次就会换一把钥匙，
  * 而用户明明刚从界面上把上一把复制去注册过。症状仍然只是「认证失败」。
  */
 const memKeys = new Map();
@@ -147,10 +182,19 @@ function bootstrap() {
   app.whenReady().then(async () => {
     installMenu();
 
-    // 演示模式用独立目录 —— 否则演示里配的用户名/端口会污染真连接
-    cfgDir = DEMO_FLAG
-      ? path.join(app.getPath('userData'), 'demo-config')
-      : app.getPath('userData');
+    // ★ **先读开发者模式那两个设置，再决定读哪一份配置。** 次序不能反 —— 这个开关
+    //   回答的正是"这次启动读哪一份"，所以它自己**不在任何一份配置里**（见
+    //   config.js 的 devSettingsPath）。
+    const userData = app.getPath('userData');
+    devSaved = config.loadDevSettings(userData);
+    dev = { ...devSaved };
+
+    // 开发者模式用独立目录 —— 否则沙盒里配的用户名/端口会污染真连接。
+    // ★ 名字里没有"demo"了：那个概念整个不存在，而这是一个**沙盒**（它持久，
+    //   但不是用户真正在用的那一份数据）。
+    cfgDir = dev.developerMode
+      ? path.join(userData, 'dev-sandbox')
+      : userData;
     cfg = config.loadConfig(cfgDir);
     // ★ 钉子在**另一个文件**里（见 config.js 那一段）：旧版本读一遍 `config.json`
     //   再存一遍就会把不认识的那张表抹掉，而"钉子全没了"= §2.5 的分身判据有了一
@@ -169,25 +213,20 @@ function bootstrap() {
     config.migrateLegacySecret(cfgDir, cfg.connections.map((c) => c.id));
 
     backend = createBackend({
-      demo: DEMO_FLAG,
-      demoConfig: {
-        // 只影响演示后端「登记」要等多久，好让你（和测试）能看到排队态，
+      dev: dev.developerMode,
+      fake: {
+        // 只影响假站点「登记」要等多久，好让你（和测试）能看到排队态，
         // 或者反过来跳过它。真实后端完全不读这个。
-        enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEMO_ENROLL_MS))
-          ? Number(process.env.SLURMATE_DEMO_ENROLL_MS) : undefined,
-        // ★ 演示站点的**分发源** = 仓库里的 `plugins/`。那是一份真实文件（真的
-        //   sha256、真的字节），于是「站点有而本机没有」这条最重要的路径在演示里
-        //   真的走得到：池空的时候站点照样报两个插件，对账真的把它们取下来、
-        //   真的要求同意。
+        enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEV_ENROLL_MS))
+          ? Number(process.env.SLURMATE_DEV_ENROLL_MS) : undefined,
+        // ★ 假站点的**分发源**：默认是仓库里的 `plugins/`，插件作者可以在界面上
+        //   改成自己那棵树（见 devPluginSourceDir）。那是一份真实文件（真的
+        //   sha256、真的字节），于是「站点有而本机没有」这条最重要的路径真的走得到：
+        //   池空的时候站点照样报那些插件，对账真的把它们取下来、真的要求同意。
         //
-        // ★ 打包之后没有仓库目录 ⇒ 返回 null ⇒ 这个站点**一个插件都不报**。
-        //   这是有代价的，别再往回加一个"兜底源"：这里从前有一条兜底，读的是
-        //   **本机池里装了什么** —— 那让演示站点的清单变成"客户端自己的池"，
-        //   等于把一条要删掉的来路又重新接回演示里。账本里记着这条降级。
-        sitePluginDir: () => {
-          const d = path.join(__dirname, '..', '..', '..', 'plugins');
-          try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
-        },
+        // ★ 传**函数**而不是路径：来源可以在运行期被改（重启后生效），而"这个目录
+        //   现在在哪"必须是每次现算的结果。
+        sitePluginDir: devPluginSourceDir,
       },
     });
 
@@ -203,11 +242,15 @@ function bootstrap() {
     //   ★ 只在**真的有东西**时说：空目录、或者从来没用过本机池的人，不该看见一条
     //     关于它的话 —— 那是噪音，而且会让人以为自己做错了什么。
     warnLegacyPool();
+    // ★ 假站点的插件来源一个插件都读不出来时**说一句**。这一步不是美化：来源可能
+    //   是"安装包里根本没有仓库的 plugins/"，也可能是作者刚选错了一个目录 ——
+    //   两种情况的症状都是"假站点一个插件都不报"，而界面上那句话说不清是为什么。
+    warnDevPluginSource();
 
     // 快捷键拦截：黑名单 + 诊断。
     //
-    // ★ 诊断**只装在演示模式**。它的用途是「验证按键到底有没有直达页面」，而那件
-    //   事只在拿演示后端做对照时才需要看；真实模式里用户是在干活，不是在校验外壳。
+    // ★ 诊断**只装在开发者模式**。它的用途是「验证按键到底有没有直达页面」，而那件
+    //   事只在拿假后端做对照时才需要看；真实模式里用户是在干活，不是在校验外壳。
     //   常开的代价很具体：每按一次带修饰键的键、每按一次 F 键都往日志里写一行，
     //   而按住 Ctrl 时操作系统会**连续**产生 keyDown —— 日志会被
     //   「已放行：Ctrl+Control」刷满，把真正要紧的消息顶掉。
@@ -217,9 +260,9 @@ function bootstrap() {
       onOwned: (action) => { if (action === 'reload') win.reloadSurface(); },
       onBlocked: (desc) => {
         win.pushNotice('key-blocked', desc);
-        if (backend.kind === 'demo') win.pushSwallowed(desc);
+        if (backend.kind === KIND.FAKE) win.pushSwallowed(desc);
       },
-      ...(backend.kind === 'demo'
+      ...(backend.kind === KIND.FAKE
         ? { onSeen: (desc) => win.pushNotice('key-seen', desc) }
         : {}),
     });
@@ -399,29 +442,30 @@ function regenerateKey(id) {
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
 async function announceBackend() {
-  if (backend.kind === 'demo') {
-    // ★ 演示后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
-    //   曾经这里在演示模式下提前 return，结果是 service_port 恒为 0，
+  if (backend.kind === KIND.FAKE) {
+    // ★ 假后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
+    //   曾经这里提前 return，结果是 service_port 恒为 0，
     //   隧道目标变成 "127.0.0.1:0"，会话在「运行中」之后立刻报端口不合法。
-    //   演示模式不等于「不需要初始化」。
+    //   开发者模式不等于「不需要初始化」。
     const res = await backend.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
     if (res.ok) {
-      // ★ 演示模式也要过这道闸 —— 否则"版本不符会怎样"在界面上的样子没有地方能
+      // ★ 假后端也要过这道闸 —— 否则"版本不符会怎样"在界面上的样子没有地方能
       //   先看一遍，而它恰恰是用户会遇到、开发者却很难复现的状态。
       //   用 `app:debug daemon-version` 造。
       const gated = await applyVersionGate(res);
       if (!gated.ok) {
         win.pushNotice('error', gated.error);
-        win.setTitle('Slurmate — 演示模式 · 未连接集群');
+        win.setTitle('Slurmate — 开发者模式 · 未连接集群');
         return;
       }
       whoami = res.whoami;
       await refreshPartitions();
-      // 演示站点也真的走一遍分发（分发源是仓库里的 `plugins/`，见 backend-fake）。
+      // 假站点也真的走一遍分发（分发源见 devPluginSourceDir）。
       reconcileSitePlugins();
     }
-    win.pushNotice('demo', '演示模式 · 未连接集群');
-    win.setTitle('Slurmate — 演示模式 · 未连接集群');
+    // ★ 通知 kind `'dev'`：界面据它挂那条洋红横幅（三重互锁的第二重）。
+    win.pushNotice('dev', '开发者模式 · 未连接集群');
+    win.setTitle('Slurmate — 开发者模式 · 未连接集群');
     return;
   }
 
@@ -440,8 +484,8 @@ async function announceBackend() {
  * 版本闸 —— **唯一一处**执行「服务端要求客户端不低于它自己」的地方。
  *
  * ★ 它住在这里（而不是两个后端各自的 `connect` 里），因为这里（index.js）是
- *   演示后端与真实后端**唯一的交汇点**。同一条规则写在两处，下一次就会漂成
- *   "演示模式说得通、真机上不生效"，而演示模式的全部价值就是它说的是同一件事。
+ *   假后端与真实后端**唯一的交汇点**。同一条规则写在两处，下一次就会漂成
+ *   "开发者模式里说得通、真机上不生效"，而这个假后端全部的价值就是它演的是同一件事。
  *
  * ★ 判定在 `plugins/index.js` 的 `versionCheck` 里 —— 规则只有那一份书面形式，
  *   判据是 `tools/version-fixtures.json` 的 `check` 段。
@@ -1049,7 +1093,7 @@ function activeLayoutId() {
 /**
  * 这次会话该用哪个布局组。
  *
- * 有活跃连接就用它的组（正常路径）。但**演示模式一个连接都没有**，那里也必须能
+ * 有活跃连接就用它的组（正常路径）。但**开发者模式里一个连接都没有**，那里也必须能
  * 开会话 —— 所以退回到「已有的第一个组，没有就建一个」。
  * （pruneLayouts 对「一条连接都没有」的情形不回收，正是为了让这一步造出来的组
  *   能活过下一次 commitConfig，否则每次开会话都会换一个 partition。）
@@ -1413,8 +1457,8 @@ async function _renderSession(snap) {
     [State.RELEASING]: '正在释放…',
     [State.ENDED]: '已结束',
   };
-  const demoPrefix = snap.demo ? '[演示] ' : '';
-  win.setTitle(demoPrefix + 'Slurmate — ' + (titles[snap.state] || snap.node || '就绪'));
+  const devPrefix = snap.dev ? '[开发] ' : '';
+  win.setTitle(devPrefix + 'Slurmate — ' + (titles[snap.state] || snap.node || '就绪'));
 }
 
 /**
@@ -1485,7 +1529,7 @@ const registry = new plugins.Registry([
  */
 function sitePoolDir() {
   try {
-    return DEMO_FLAG
+    return dev.developerMode
       ? path.join(cfgDir || '.', 'site-plugins')
       : path.join(app.getPath('home'), '.slurmate', 'site-plugins');
   } catch {
@@ -1522,6 +1566,82 @@ function warnLegacyPool() {
   win && win.pushNotice('info',
     `${dir} 里的东西不再被加载了 —— 客户端现在只认站点分发的插件。`
     + '那个目录没有被动过，里面的文件还在原处。');
+}
+
+// ── 开发者模式：假站点的插件来源 ────────────────────────────────────────────
+
+/**
+ * 假站点默认分发哪棵树 —— **仓库里的 `plugins/`**。
+ *
+ * ★ 传函数而不是路径的地方（backend-fake）看的是**每次现算**：从源码跑与从安装包
+ *   跑是两个事实。返回 `null` = 这个目录不存在（安装包里没有它）。
+ */
+function defaultDevPluginSourceDir() {
+  const d = path.join(__dirname, '..', '..', '..', 'plugins');
+  try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
+}
+
+/**
+ * 假站点这次从哪个目录读插件：用户选过的那个，没选过就是默认那棵。
+ *
+ * ★ 用的是**生效值**（`dev`），不是盘上那个值（`devSaved`）—— 换来源要重启，
+ *   理由与那个开关一样：假站点和真的守护进程一样，插件清单是**启动时的快照**。
+ */
+function devPluginSourceDir() {
+  return dev.pluginDir || defaultDevPluginSourceDir();
+}
+
+/**
+ * 「这个目录里有几个插件」—— 给界面上那个选择目录的按钮报数用。
+ *
+ * ★ 报的是**扫描结果**，不是站点最终报出去的清单：坏清单在这里要说出来（作者的
+ *   清单里少一个字段，他要看到的是"3 个目录只有 1 个能用"，而不是一句"一个都没有"）。
+ *   站点那边照守护进程的样子**静默跳过**坏清单，那是另一件事。
+ *
+ * @returns {{dir:string|null, plugins:string[], skipped:object[]}}
+ */
+function devSourceReport(dir) {
+  const target = dir === undefined ? devPluginSourceDir() : dir;
+  const r = plugins.scanPluginCollection(target || '');
+  return {
+    dir: target || null,
+    plugins: r.plugins.map((p) => p.name),
+    skipped: r.skipped.map((s) => ({ name: s.name, why: s.why })),
+  };
+}
+
+/**
+ * 开发者模式那一组字段，给界面用。**一处形状**：bootstrap 与那三个动词共用它 ——
+ * 各拼一份的话，`on` 与 `saved` 迟早有一处写错，而那个错的症状是"点了一下没反应"。
+ */
+function devView() {
+  return {
+    on: dev.developerMode,
+    saved: devSaved.developerMode,
+    pluginDir: dev.pluginDir,
+    pluginDirSaved: devSaved.pluginDir,
+    defaultPluginDir: defaultDevPluginSourceDir(),
+    source: devSourceReport(),
+  };
+}
+
+/** 开发者模式下，假站点的插件来源一个插件都读不出来时**说一句**。 */
+function warnDevPluginSource() {
+  if (!dev.developerMode) return;
+  const rep = devSourceReport();
+  if (rep.plugins.length) return;                 // 有东西就什么都不说
+  const where = rep.dir ? `「${rep.dir}」` : '默认的位置';
+  const why = rep.skipped.length
+    ? `那里有 ${rep.skipped.length} 个目录，但没有一个读得出清单：`
+      + `${rep.skipped[0].name}：${rep.skipped[0].why}`
+    : (rep.dir
+      ? '那个目录里一个子目录都没有（每个子目录应该是一个插件，里面有 plugin.json）。'
+      // ★ 只说**事实**（那个位置不存在），不断言"为什么" —— 那个位置的来历是
+      //   "仓库里的 `plugins/`"，而不存在的原因可能是打包、可能是被人挪走了。
+      : '默认那个位置（仓库里的 `plugins/`）不存在。');
+  win && win.pushNotice('warn',
+    `开发者模式：假站点从 ${where} 一个插件都读不出来 —— ${why}`
+    + '要让它有东西分发，就在下面「插件来源」里选一个你自己的插件目录。');
 }
 
 /** 暂存根：站点池的**兄弟目录**（换入用的 `rename` 要求同一个文件系统）。 */
@@ -1570,7 +1690,10 @@ async function ensureSurface(plugin, snap) {
   // 换布局组 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局重置了）必须
   // 说出来，否则他只会觉得"我的设置莫名其妙没了"。
   const rebuilt = win.hasSurface() && win.surfacePartition !== partition;
-  await win.showSurface({ url: snap.origin + surface.path, partition, demo: DEMO_FLAG });
+  // `demo` 这个参数是 windows.js 的：true 时给那块视图注入 `preload/demo.js`，
+  // 好把「被外壳吞掉的按键」推回面板（对照用）。只有假后端才要这份诊断 ——
+  // 判据跟着**这次会话的后端**走（`snap.dev`），不是跟着那个开关走。
+  await win.showSurface({ url: snap.origin + surface.path, partition, demo: snap.dev });
   if (rebuilt) {
     win.pushNotice('info', '已切换到新的布局组，页面已重新加载。');
   }
@@ -1601,11 +1724,11 @@ function pluginContext(plugin) {
     keys,
     get cfg() { return cfg; },
     get cfgDir() { return cfgDir; },
-    demo: DEMO_FLAG,
+    dev: dev.developerMode,
     session: () => (controller && controller.session) || null,
     whoami: () => whoami,
-    /** 写本地文件用的家目录。演示模式必须落在它自己的目录里 —— 见 sshd 插件。 */
-    home: () => (DEMO_FLAG ? cfgDir : app.getPath('home')),
+    /** 写本地文件用的家目录。开发者模式必须落在它自己的目录里 —— 见 sshd 插件。 */
+    home: () => (dev.developerMode ? cfgDir : app.getPath('home')),
     /**
      * 自动登录。契约由**框架**从当前插件自己的清单里取，不由插件传进来 ——
      * 插件没法把这个参数传错，也没法去登别人的页面。
@@ -1692,7 +1815,14 @@ function unknownWhy(snap) {
  * 是「客户端没能说上话」那种情况（断电、睡眠、网线被拔），而那些情况下这里的
  * 代码根本不会被执行到。能给这条分支投票的只有用户的主动点击，于是它只会误伤。
  */
-async function handleWindowClose() {
+/**
+ * 收尾：结束会话（如果还在跑）+ 拆掉后端。
+ *
+ * ★ **关窗口与「立即重启」都走这里**，不各写一份。「关掉窗口同样会结束会话」是
+ *   给用户的承诺，而重启是同一个承诺的另一种说法 —— 两处各写一遍的话，下一次
+ *   改了一处，另一处会静默地不同（比如少了那句 `addPendingGoodbye`）。
+ */
+async function shutdown() {
   win.setBusy(false);
   try {
     if (controller) {
@@ -1703,10 +1833,14 @@ async function handleWindowClose() {
       }
     }
   } finally {
-    // 后端的收尾也要做：演示后端有一个真的在监听的 HTTP 服务，
+    // 后端的收尾也要做：假后端有一个真的在监听的 HTTP 服务，
     // 不关的话进程里会留着一个没人管的监听套接字。
     try { await backend.close(); } catch { /* 尽力而为 */ }
   }
+}
+
+async function handleWindowClose() {
+  await shutdown();
   win.forceClose();
   app.quit();
 }
@@ -1728,10 +1862,10 @@ function handleWindowAction(action, payload) {
  */
 async function tryReattach() {
   // 「有没有连上」问后端，不去猜它的私有字段叫什么。
-  // 此前这里写的是 `backend._conn` —— 那是 SSH 后端的内部名字，演示后端用的是
-  // 另一个（`_connected`），于是这一行在演示模式下恒为真地提前返回；上面还有一行
+  // 此前这里写的是 `backend._conn` —— 那是 SSH 后端的内部名字，假后端用的是
+  // 另一个（`_connected`），于是这一行在假后端上恒为真地提前返回；上面还有一行
   // `kind === 'demo'` 也直接 return。两重保险合起来，让整条「接上已有会话」的路
-  // 在**唯一能测它的地方**完全不可达 —— 而「上次没关干净的会话」恰恰是演示后端
+  // 在**唯一能测它的地方**完全不可达 —— 而「上次没关干净的会话」恰恰是假后端
   // 存在的理由（真机上要造出这个状态极难）。
   if (!backend.connected) return;
 
@@ -1839,7 +1973,11 @@ function registerIpc() {
   //   单独问（app:publicKey / app:newKey）。全局一份公钥的写法会让人以为
   //   「注册一次，所有连接都用它」—— 那是上一个版本的行为。
   send('app:bootstrap', async () => ({
-    demo: backend.kind === 'demo',
+    dev: backend.kind === KIND.FAKE,
+    // 开发者模式那两个设置。**`on` 与 `saved` 是两个问题**（见模块顶上的注释）：
+    // `on` 是这次进程在不在开发者模式，`saved` 是用户在界面上要的是哪一个，
+    // 两者不同 = 有改动等着重启。界面据此画那个复选框与「重启后生效」那一行。
+    developerMode: devView(),
     backendLabel: backend.label,
     connections: cfg.connections,
     activeConnectionId: cfg.activeConnectionId,
@@ -2412,15 +2550,106 @@ function registerIpc() {
 
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
 
-  // 演示模式的调试控制 —— 复现那些在真机上极难复现的状态
+  // ── 开发者模式 ────────────────────────────────────────────────────────────
+  //
+  // ★ 这三个动词都**只写那个小文件**（`<userData>/dev-mode.json`，见 config.js），
+  //   不碰 `cfg` —— 那个开关回答的是"这次启动读哪一份配置"，它自己不属于任何一份。
+  //
+  // ★ 它们都**不立即生效**。界面必须说清「重启后生效」，并且给一个重启的按钮；
+  //   静默的半生效（后端没换、配置换了）是这个仓库一路上在清的那类问题。
+
+  /**
+   * 打开/关闭开发者模式。
+   *
+   * ★ 关掉时**不删沙盒**。里面是那个人的连接、密钥、插件与同意台账 —— 下次打开
+   *   还在。它是**持久**的（这正是它叫开发者模式而不是演示的原因），而删用户的
+   *   数据从来不是这个开关的职责。
+   */
+  send('app:setDeveloperMode', async (on) => {
+    const want = Boolean(on);
+    devSaved = config.saveDevSettings(app.getPath('userData'),
+      { developerMode: want, pluginDir: devSaved.pluginDir });
+    if (want === dev.developerMode) {
+      // 改回了生效值（或者本来就想要这个）—— 没有悬着的改动，就不提"重启"那件事。
+      win.pushNotice('info', want ? '开发者模式是开着的。' : '开发者模式是关着的。');
+      return { ok: true, developerMode: devView() };
+    }
+    win.pushNotice('warn', (want ? '已打开开发者模式' : '已关闭开发者模式')
+      + ' —— 重启客户端之后生效。'
+      + (want ? '沙盒里的一切（连接、密钥、插件）留在本机，下次打开还在。' : ''));
+    return { ok: true, developerMode: devView() };
+  });
+
+  /**
+   * 选一个目录当假站点的插件来源（插件作者那条轻路径）。
+   *
+   * ★ **选完当场报"这个目录里读到几个插件"。** 不报的话，选错了的症状是
+   *   "重启之后假站点一个插件都不报"，而那句话指不回原因 —— 作者会去查插件本身，
+   *   而问题在他选的那个目录。
+   *
+   * ★ 一个插件都读不出来 ⇒ **不保存**，并如实说明。存下去的话它会一路生效到
+   *   界面上那句"本站不分发插件"，而用户已经忘了自己选过什么。
+   */
+  send('app:pickDevPluginDir', async () => {
+    const r = await dialog.showOpenDialog(win.win, {
+      title: '选一个目录当假站点的插件来源',
+      message: '每个子目录是一个插件（里面有 plugin.json）',
+      properties: ['openDirectory'],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, cancelled: true };
+    const dir = r.filePaths[0];
+    const rep = devSourceReport(dir);
+    if (!rep.plugins.length) {
+      return { ok: false, dir, error: rep.skipped.length
+        ? `「${dir}」里有 ${rep.skipped.length} 个目录，但没有一个读得出清单：`
+          + `${rep.skipped[0].name}：${rep.skipped[0].why}`
+        : `「${dir}」里一个插件都没有 —— 每个子目录应该是一个插件（里面有 plugin.json）。`
+          + '没有保存。' };
+    }
+    devSaved = config.saveDevSettings(app.getPath('userData'),
+      { developerMode: devSaved.developerMode, pluginDir: dir });
+    win.pushNotice('info',
+      `假站点的插件来源已改成「${dir}」（读到 ${rep.plugins.length} 个插件：`
+      + `${rep.plugins.join('、')}）。重启客户端之后生效。`);
+    return { ok: true, dir, plugins: rep.plugins, skipped: rep.skipped,
+             developerMode: devView() };
+  });
+
+  /** 插件的来源改回默认（仓库里的 `plugins/`）。 */
+  send('app:clearDevPluginDir', async () => {
+    devSaved = config.saveDevSettings(app.getPath('userData'),
+      { developerMode: devSaved.developerMode, pluginDir: null });
+    const rep = devSourceReport(defaultDevPluginSourceDir());
+    win.pushNotice('info', rep.dir
+      ? `假站点的插件来源已改回默认的「${rep.dir}」。重启客户端之后生效。`
+      : '已改回默认来源 —— 但那个位置（仓库里的 `plugins/`）不存在，所以假站点'
+        + '依旧一个插件都发不出来。重启客户端之后生效。');
+    return { ok: true, developerMode: devView() };
+  });
+
+  /**
+   * 立即重启客户端（让上面那几个设置生效）。
+   *
+   * ★ 走的是与**关窗口同一套收尾**：会话还在跑就先结束它。用户点的是"重启"，
+   *   那是一次明确的终止，不是断电 —— 不该指望守护进程的容错窗口替他保住作业。
+   */
+  send('app:restart', async () => {
+    await shutdown();
+    // relaunch + exit：`exit` 跳过 before-quit（那里面还会再做一遍收尾）。
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  });
+
+  // 开发者模式的调试控制 —— 复现那些在真机上极难复现的状态
   send('app:debug', async (what, arg) => {
-    if (backend.kind !== 'demo') return { ok: false, error: '仅演示模式可用' };
+    if (backend.kind !== KIND.FAKE) return { ok: false, error: '仅开发者模式可用' };
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
     else if (what === 'reap') backend.debugReap();
     else if (what === 'reset') backend.debugReset();
-    // 让演示站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
-    // 这两条路是"插件增减不许崩"的验收路径，必须能在演示模式下走到。
+    // 让假站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
+    // 这两条路是"插件增减不许崩"的验收路径，必须能在开发者模式里走到。
     else if (what === 'extra-plugin') backend.debugAddSitePlugin('jupyter', 'JupyterLab');
     // ★ 站点侧那三个开关作用在**哪一个**插件上由调用方指定（不指定就取列表里
     //   第一个）—— 基座里没有插件名可写。一个都没装时这些开关无事可做，如实
@@ -2434,10 +2663,10 @@ function registerIpc() {
       if (what === 'site-plugin-off') backend.debugDisableSitePlugin(picked.plugin.name);
       else backend.debugSitePluginNoJob(picked.plugin.name);
     }
-    // 让演示站点报一个指定的基座版本 —— 造版本握手那几态里真机上造不出来的两态
+    // 让假站点报一个指定的基座版本 —— 造版本握手那几态里真机上造不出来的两态
     // （站点比客户端新、以及两个大版本之间）。不传参数 = 恢复成"跟着本客户端走"。
     else if (what === 'daemon-version') backend.debugDaemonVersion(arg);
-    // 演示「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
+    // 造出「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
     // 都是缺的，而客户端的纪律是"缺席 ≠ 否"。
     else if (what === 'old-daemon') backend.debugOldDaemon(true);
     // ★ 与上一条是**两件事**：这一档有 `plugins`、但没有 `limits`（v0.5 的守护
@@ -2449,11 +2678,11 @@ function registerIpc() {
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
     else if (what === 'rate-limited') backend.debugRateLimit(Number(arg) || 3);
     // ★ 这里从前还有一个 `install-samples`：把仓库里那两个示例插件**直接用
-    //   `installFrom` 装进演示池**。它随本机池一起删掉了。
+    //   `installFrom` 装进池**。它随本机池一起删掉了。
     //
-    //   它的注释写着"演示池为空时，这是本机唯一能看见界面的办法，顺带也就把
+    //   它的注释写着"池为空时，这是本机唯一能看见界面的办法，顺带也就把
     //   手工安装那条路本身验了一遍"—— 而那正是问题：它让**测试的对照组**依赖
-    //   一条马上要删掉的路。今天要让演示里有插件，走的是**站点分发**那条真路
+    //   一条马上要删掉的路。今天要让假站点有插件，走的是**站点分发**那条真路
     //   （假站点从仓库的 `plugins/` 读真文件、客户端真的下载→校验→同意→换入）。
     //   ★ 它零个用例踩过（用例只查"按钮 → 处理器"这一个方向，而它没有按钮）。
     else return { ok: false, error: '未知的调试动作' };
@@ -2485,7 +2714,7 @@ module.exports = {
   /**
    * 仅供测试使用的接缝。
    *
-   * 为什么需要它：演示后端会起一个真的在监听的 HTTP 服务，测试进程如果关不掉它
+   * 为什么需要它：假后端会起一个真的在监听的 HTTP 服务，测试进程如果关不掉它
    * 就不会退出（`node --test` 会一直等下去）。生产代码不依赖这里任何东西 ——
    * 生产路径靠 `handleWindowClose` / `before-quit` 里的 `backend.close()`。
    *

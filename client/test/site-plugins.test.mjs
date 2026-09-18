@@ -28,7 +28,7 @@ const S = require('../src/main/site-plugins.js');
 const P = require('../src/main/plugins/index.js');
 const PP = require('../src/main/plugin-package.js');
 const ulid = require('../src/main/plugins/ulid.js');
-// 演示/测试用的包**由仓库里那个打包器现打**，不手搓字节：手搓一份就是在这里又
+// 测试用的包**由仓库里那个打包器现打**，不手搓字节：手搓一份就是在这里又
 // 实现了一遍容器格式，而它与真格式分家的那天，测试反而会说"一切正常"。
 const PACKER = require('../../packer/slurmate-packer.js');
 
@@ -182,7 +182,7 @@ function makeSite() {
       state.pkgCalls += 1;
       if (state.rateBurst > 0) {
         state.rateBurst -= 1;
-        return { ok: false, code: 7, error: { kind: 'rate_limited', detail: '演示：打满桶' } };
+        return { ok: false, code: 7, error: { kind: 'rate_limited', detail: '打满桶' } };
       }
       const key2 = `${req.id}@${req.version}`;
       if (!byKey.has(key2)) {
@@ -750,7 +750,7 @@ test('★★ 写记录失败 ⇒ 什么都不回收（顺序反了会真丢数�
     { 'client/index.js': 'module.exports = {};\n' });
   const realRename = fs.renameSync;
   fs.renameSync = function patched(a, b) {
-    if (String(b).endsWith(S.RECORD_NAME)) throw new Error('演示：磁盘满了');
+    if (String(b).endsWith(S.RECORD_NAME)) throw new Error('磁盘满了');
     return realRename.call(fs, a, b);
   };
   try {

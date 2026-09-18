@@ -376,7 +376,7 @@ class ShellWindow {
     //   现在统一由 index.js 的 ensureSurface 判定（它同时看 url 和 partition）。
   }
 
-  /** 把被外壳吞掉的按键推给演示页（仅演示模式用，用于对照）。 */
+  /** 把被外壳吞掉的按键推给那个假页面（仅开发者模式用，用于对照）。 */
   pushSwallowed(desc) {
     if (!this.surfaceView || this.surfaceView.webContents.isDestroyed()) return;
     this.surfaceView.webContents.send('demo:swallowed', desc);

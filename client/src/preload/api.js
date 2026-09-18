@@ -103,7 +103,22 @@ contextBridge.exposeInMainWorld('slurmate', {
   reload: () => ipcRenderer.invoke('app:reload'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
-  // 演示模式的调试开关（真机上极难复现的状态）
+  // ── 开发者模式 ──
+  //
+  // 客户端不连集群、改用一个本地的模拟站点。它是给**插件作者与改客户端的人**用的，
+  // 所以入口是界面上一个开关，不是命令行参数 —— 那等于说"Windows 用户请去开终端"。
+  //
+  // ★ 三个设置动词都**不立即生效**：换后端要重建整个客户端，换插件来源换的是一棵
+  //   树的启动快照。界面必须说清「重启后生效」，`restart` 是那条路上的那一步。
+  setDeveloperMode: (on) => ipcRenderer.invoke('app:setDeveloperMode', on),
+  // 选一个目录当假站点的插件来源。**选完当场报"读到几个插件"** —— 选错了的症状
+  // 是"重启之后一个插件都不报"，而那句话指不回原因。读不出插件则**不保存**。
+  pickDevPluginDir: () => ipcRenderer.invoke('app:pickDevPluginDir'),
+  clearDevPluginDir: () => ipcRenderer.invoke('app:clearDevPluginDir'),
+  // 立即重启（让上面那几个设置生效）。会话还在跑的话会先结束它，与关窗口同一套收尾。
+  restart: () => ipcRenderer.invoke('app:restart'),
+
+  // 开发者模式的调试开关（真机上极难复现的状态）。不在开发者模式时主进程会拒绝。
   debug: (what, arg) => ipcRenderer.invoke('app:debug', what, arg),
 
   // 主进程 → 渲染进程

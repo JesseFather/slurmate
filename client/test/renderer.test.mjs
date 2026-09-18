@@ -228,8 +228,13 @@ test('★ 本机池那几个入口从 preload / panel.js / panel.html 三处一�
   }
 
   const code = stripJsComments(js);
+  // ★ 这一串里**从前有「开发者模式」**（旧那一个：一个"也加载本机插件目录"的
+  //   复选框）。它随本机池一起没了 —— 而后来**另一个**开发者模式在同一个位置上
+  //   长了出来（见「★ 开发者模式的三个动词」那一条）：它换的是整个后端，不是
+  //   多加载一个目录。所以这四个字今天出现在 panel.js 里是**对的**；真正的判据是
+  //   "有没有那个教用户往目录里放东西的入口"，也就是下面这几串。
   for (const s of ['从一个包安装', '打开插件目录', '重新扫描',
-                   '本机插件目录', '也加载本机插件目录', '开发者模式']) {
+                   '本机插件目录', '也加载本机插件目录']) {
     assert.equal(code.includes(s), false,
       `panel.js 里还有「${s}」—— 那个入口（或者那句教用户去做的话）不存在了`);
   }
@@ -238,6 +243,42 @@ test('★ 本机池那几个入口从 preload / panel.js / panel.html 三处一�
   const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
   assert.equal(htmlBare.includes('plugin-dev'), false,
     'panel.html 里还留着 #plugin-dev 那个容器');
+});
+
+test('★ 开发者模式那四个入口同时登记在 preload / panel.js / panel.html 三侧', () => {
+  // 与前面那两条同一个道理：少一边就是"点了没反应"（桥没暴露 ⇒ 调不到方法；
+  // 面板没调 ⇒ 没有入口；HTML 里没那个 id ⇒ 面板一上来就 TypeError 白屏）。
+  //
+  // ★ 这四个动词是这一版**新加**的，而且它们的"没反应"格外难查：开关点了之后
+  //   界面本来就不该有变化（要重启才生效），所以"点了没反应"与"正常"长得一样。
+  for (const m of ['setDeveloperMode', 'pickDevPluginDir', 'clearDevPluginDir', 'restart']) {
+    assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
+    assert.ok(bridgeCalls().has(m), `panel.js 没有调用 ${m}`);
+  }
+  const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
+  for (const id of ['dev-on', 'dev-pick', 'dev-reset-src', 'dev-restart',
+                    'dev-pending', 'dev-src-count']) {
+    assert.ok(htmlBare.includes(`id="${id}"`), `panel.html 缺少 #${id}`);
+  }
+});
+
+test('★ 开发者模式：「想要的」与「生效的」在界面上必须分得开', () => {
+  // ★ 这一节的全部难点就是两个值不是一回事（见主进程里 `dev` / `devSaved` 那段）：
+  //   复选框画的是**用户要的那个**（画生效值的话，点完它会自己弹回去，看起来像
+  //   开关坏了），而调试开关那一块画的是**生效值**（假后端没在跑，那些按钮按下去
+  //   只会回一句"仅开发者模式可用"）。
+  //
+  //   把两处对调，或者全都用一个值：界面上都**不会报错**，只会"点了没反应"或者
+  //   "有按钮但按下去就报错"。本机跑不起 panel.js，所以这一条只能钉住那两行文本 ——
+  //   断言失败时会指回是哪一个错了。
+  const code = stripJsComments(js);
+  assert.match(code, /\$\('dev-on'\)\.checked = Boolean\(d\.saved\)/,
+    '复选框要画 **saved**（用户要的那个），不是 on');
+  assert.match(code, /\$\('dev-debug'\)\.classList\.toggle\('hidden', !d\.on\)/,
+    '调试开关那一块要画 **on**（这次进程真的在不在开发者模式）');
+  assert.match(code, /有改动等着重启/,
+    '两侧不一致时必须说出来 —— 不说的话，用户勾了开关、界面没变，'
+    + '他会以为功能坏了（更糟的是他以为没生效，重启之后进了沙盒对着假集群干活）');
 });
 
 test('★ 站点分发那四条桥同时登记在 preload 与 panel.js 两侧', () => {
@@ -268,16 +309,16 @@ test('★ 同意界面必须把「你不会得到什么保护」说出来', () =
   assert.match(code, /与上次同意的一致|变成了/, '同意的界面要能说出"内容变了"');
 });
 
-test('★ 演示调试的每个按钮在主进程里都有对应的动作', () => {
+test('★ 开发者模式里的每个调试按钮在主进程里都有对应的动作', () => {
   // 真机上「按钮点了没反应」与「这个动作根本不存在」长得一模一样：控制台安静，
-  // 界面不动。而演示调试存在的**全部理由**就是造出真集群上造不出来的状态 ——
+  // 界面不动。而这些调试开关存在的**全部理由**就是造出真集群上造不出来的状态 ——
   // 一个哑按钮直接让那条状态退回"造不出来"，而这一点在本机看不出来（没有图形环境）。
   //
-  // ★ 站点分发那几个尤其要紧：它们的**回退方式互不相同**（老守护进程退回本机池、
-  //   不支持分发只说一句话、插件太大与限流各自走另一条路），少一个就少验一条路。
+  // ★ 站点分发那几个尤其要紧：它们的**回退方式互不相同**（不支持分发只说一句话、
+  //   插件太大与限流各自走另一条路），少一个就少验一条路。
   const main = fs.readFileSync(path.join(here, '..', 'src', 'main', 'index.js'), 'utf8');
   const buttons = new Set([...html.matchAll(/data-debug="([^"]+)"/g)].map((m) => m[1]));
-  assert.ok(buttons.size >= 4, '演示调试的按钮一个都没找到？');
+  assert.ok(buttons.size >= 4, '调试开关的按钮一个都没找到？');
   const handled = new Set([...main.matchAll(/what === '([^']+)'/g)].map((m) => m[1]));
   const missing = [...buttons].filter((b) => !handled.has(b));
   assert.deepEqual(missing, [],

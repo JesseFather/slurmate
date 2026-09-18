@@ -1,8 +1,8 @@
 /**
  * integration.mjs —— 端到端跑一遍**除 Electron 之外**的全部链路。
  *
- * 覆盖：演示后端 → SessionController 状态机 → Tunnel（真的本地中继）→
- *       演示用的假 web 服务（真的 HTTP）→ 登录契约 → goodbye → 释放。
+ * 覆盖：假后端 → SessionController 状态机 → Tunnel（真的本地中继）→
+ *       模拟用的假 web 服务（真的 HTTP）→ 登录契约 → goodbye → 释放。
  *
  * 这台机器上没有 Xvfb，Electron 界面跑不了。但界面之下的每一层都能在这里真跑，
  * 所以这一层出问题一定不是「Electron 的锅」—— 这正是分层验证的意义。
@@ -19,7 +19,7 @@ const { FakeBackend, DEMO_PASSWORD } = require('../src/main/backend-fake.js');
 const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/session.js');
 const { Tunnel } = require('../src/main/tunnel.js');
 
-// ★ 演示后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它
+// ★ 假后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它
 //   （`opts.sitePlugins`）—— 它自己不认识任何插件，基座也不认识。这里给它的是
 //   仓库里真那个 code-server 插件，契约值直接从清单里读，不另抄一份。
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -28,7 +28,7 @@ const CS_MANIFEST = JSON.parse(fs.readFileSync(
 const LOGIN = CS_MANIFEST.contributes.login;
 const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
-// ★ 演示站点的**分发源**：仓库里的 `plugins/` 目录 —— 与 app 在演示模式下用的是
+// ★ 假站点的**分发源**：仓库里的 `plugins/` 目录 —— 与 app 在开发者模式下用的是
 //   同一个（见 index.js 的 `sitePluginDir`）。后端自己从那棵树上读清单、现打真包。
 //
 //   ★ 这里从前是"把一份插件描述直接注入给后端"（`opts.sitePlugins`）。那个入口
@@ -68,9 +68,9 @@ function keepAlive() {
 }
 
 /**
- * 起一个演示后端，并**把清理注册到 t.after**。
+ * 起一个假后端，并**把清理注册到 t.after**。
  * 必须在 after 里清理而不是在测试体末尾：断言失败会抛异常，末尾的清理就跑不到，
- * 演示后端那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
+ * 那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
  */
 async function makeBackend(t, opts = {}) {
   const backend = new FakeBackend({
@@ -136,7 +136,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.equal(snap.localPort, layoutPort, '应当用上布局组绑定的端口');
   assert.equal(snap.origin, `http://127.0.0.1:${layoutPort}`);
   assert.match(snap.tunnelTarget, /^127\.0\.0\.1:\d+$/);
-  assert.equal(snap.demo, true);
+  assert.equal(snap.dev, true);
 
   // ★ 服务端补的默认值必须真的落到会话上 —— 客户端不填，不等于没有值。
   assert.equal(snap.resources.cpus, 2, '默认 2 核应由服务端填');
@@ -371,7 +371,7 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
 
   // 真实守护进程会在这些情况下回 warning：时间被分区 MaxTime 截断、
   // 填的内存认不出来而回退成默认值、分区权限查不到因而交给了 Slurm 的默认分区。
-  // 演示后端不产生 warning，所以这里把它包一层 —— 测的是**客户端有没有接这个
+  // 假后端不产生 warning，所以这里把它包一层 —— 测的是**客户端有没有接这个
   // 字段**，而不是服务端什么时候产生它。
   const realRpc = backend.rpc.bind(backend);
   backend.rpc = (req) => realRpc(req).then((resp) => {
