@@ -217,7 +217,7 @@ function ensureInclude(home) {
  * 指不回根因。
  *
  * ★ `keys` 由**框架**递进来（`ctx.keys`），不在这里 require。插件跑在池里
- *   （`~/.slurmate/plugins/<id>/<版本>/`），相对路径指不到客户端的源码 ——
+ *   （`~/.slurmate/site-plugins/<id>/<版本>/`），相对路径指不到客户端的源码 ——
  *   一个插件能用的一切，只能来自 `ctx`。框架那份 `keys.js` 是纯 Node `crypto`
  *   加 OpenSSH 编码，没有任何"读到客户端自己的私钥"的入口。
  *

@@ -1936,8 +1936,11 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
     #    含客户端代码的一整套副本**永久残留且界面上看不见**。
     #
     #    只删 `.deployed` 里记着的那些，且删之前确认它确实是一个插件目录
-    #    （里面还有 plugin.json）—— 与客户端 uninstall 同一条规矩：按名字拼出来
-    #    的路径，删之前先读一遍。
+    #    （里面还有 plugin.json）：**按名字拼出来的路径，删之前先读一遍。**
+    #
+    #    ★ 这条规矩从前在客户端有一个孪生兄弟（`plugins/install.js` 的 `uninstall`），
+    #      注释里的交叉引用指的是它。那个文件随本机安装那条路在 v0.7 删掉了 ——
+    #      规矩本身留下，因为它与"客户端有没有第二份"无关。
     legacy = os.path.join(plugins_dir, PLUGIN_LEGACY_MARKER)
     if os.path.isfile(legacy):
         try:

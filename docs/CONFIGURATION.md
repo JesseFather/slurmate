@@ -207,9 +207,24 @@ sudo /usr/local/sbin/slurmate-sessiond --check-plugins   # 看现在装了哪些
 行为完全和以前一样（缺省取清单里的 `site.defaultEnabled`）。**是"开一个插件"这件事
 本身意味着分发**，不是"装上就发"。
 
-★ 客户端那两样本地设置（`~/.slurmate/config.json` 里的 `devPlugins` 开发者模式开关、
-`trustedPlugins` 同意台账）**不在这个文件里** —— 它属于客户端的本地配置，
-且**不对用户暴露**（界面上没有任何"打开配置文件"的入口，同意也是点出来的）。
+★ **客户端那份本地配置不在这个文件里，也不在这个目录下**，它在
+`<userData>/config.json` —— Linux `~/.config/slurmate/`、macOS
+`~/Library/Application Support/slurmate/`、Windows `%APPDATA%\slurmate\`
+（`<userData>` 就是 Electron 的 `app.getPath('userData')`）。
+里面是连接、密钥、`hostKeys`、`plugins` 段（**本机**把哪个插件关掉）与
+`trustedPlugins` 同意台账。它**不对用户暴露**：界面上没有任何"打开配置文件"的入口，
+同意也是点出来的。
+
+> ★ 这里从前写的是 `~/.slurmate/config.json`。**那个路径不存在** —— 客户端从来
+> 没有把配置写在 `~/.slurmate/` 下（那个目录只有 `site-plugins/` 一个东西是它的）。
+> 照着那句去找文件的人会找到一个空目录，而"配置在哪"这件事上没有任何别的线索。
+
+★ **开发者模式那两个设置（开关 + 假站点的插件来源）在第三个文件里**：
+`<userData>/dev-mode.json`。它**刻意不放进 `config.json`**，理由不是洁癖 ——
+`developerMode` 这个键要回答的正是"这次启动读**哪一份**配置"（用户自己那份，还是
+沙箱那份），放进 `config.json` 就等于"得先知道读哪一份，才知道读哪一份"。顺带还
+避掉第二个坑：那样一来这个键会在**两份**配置里都出现，而只有一份有读者。
+两个设置都**重启后生效**（换后端要重建整个客户端），界面上会明说，不静默地半生效。
 
 ★ **改了插件的内容就必须升版本号。** 同一个 `(id, 版本)` 只能对应一份内容：
 客户端的池里那个槽位只有**一个**位置，内容是站点报的、摘要是客户端自己算的。
