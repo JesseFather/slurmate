@@ -130,11 +130,13 @@ PLUGINS_DIR="${SHARE_DIR}/plugins"
 # 拿走的插件要跟着删掉 —— 否则「把包移走再部署」这个最自然的卸载动作会**静默
 # 无效**，而用户看到的是"它还在"。
 #
+# ★ 作业脚本目录里也有一份**同名**的 `.installed`：两个标记记的是同一件事 ——
+#   本脚本往这个目录里放过哪些文件。同一件事不要有两个名字。
 PLUGINS_MARKER="${PLUGINS_DIR}/.installed"
 # 同上，但记的是本脚本生成过哪几份作业脚本（每行一个 ULID）。插件的源目录没了、
 # 插件被拿走了，对应那份 <ULID>.sbatch 要跟着删掉 —— 否则它会留下一份**无主的、
 # 仍然可以被提交的**脚本，而没有任何东西能把它们对上号。
-JOBS_MARKER="${JOBS_DIR}/.deployed"
+JOBS_MARKER="${JOBS_DIR}/.installed"
 CONF_DIR="/etc/slurmate"
 CONF="${CONF_DIR}/slurmate.conf"
 UNIT="/etc/systemd/system/slurmate-sessiond.service"
@@ -713,7 +715,7 @@ info "      这只会让作业偶尔多试几个候选端口；nft 规则匹配 
 
 # ── 目标位置是否已被非本系统的文件占用 ──
 # 作业脚本不在这张表里：它按 ULID 命名，名字要到扫完插件才知道；而 JOBS_DIR
-# 那一层有自己的守卫（有东西、却没有 .deployed 标记 → 中止），见下面安装那一段。
+# 那一层有自己的守卫（有东西、却没有 .installed 标记 → 中止），见下面安装那一段。
 for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
     if [[ -e "$dst" ]]; then
         if ! grep -qi "slurmate" "$dst" 2>/dev/null; then
