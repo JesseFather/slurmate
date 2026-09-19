@@ -541,8 +541,6 @@ test('指向不存在的组时收束到第一个组，而不是留个悬空引�
 // 按连接存，才能做到「重新生成一把钥匙只作废那一条连接」，而不是把整个客户端打断。
 
 const secretsOf = (dir) => path.join(dir, 'secrets.json');
-/** 造一份「加密后的数据」该长的样子（fakeCrypto 的密文 = 'ENC:' + 明文）。 */
-const encrypted = (s) => fakeCrypto().encrypt(s).toString('base64');
 
 test('★ 机器没有安全存储 → 明确失败，且绝不写明文', () => {
   const dir = tmpdir();
@@ -570,7 +568,6 @@ test('加密保存：有安全存储时正常往返', () => {
   assert.equal(got.ok, true);
   assert.equal(got.value, 'PRIVATE-KEY-PEM');
   assert.equal(got.mode, 'encrypted');
-  assert.equal(got.legacy, undefined, '新写下去的不是 legacy');
 });
 
 test('★ 密钥按连接隔离：各是各的，删一条不动另一条', () => {
@@ -613,76 +610,28 @@ test('换过机器 / keyring 被重置：解密失败要明确报错，不能当
   assert.equal(config.getKey(dir, null, 'c1').reason, 'no_secure_storage');
 });
 
-test('★ 旧版本留下的明文私钥必须读得出来，并标记成 legacy', () => {
+test('★ 旧版本留下的明文私钥**不再被读出来** —— 报 bad_mode，而不是继续用它', () => {
   const dir = tmpdir();
-  // schema 2 及更早允许用户选「明文保存」，磁盘上可能就留着这么一份
+  // v0.7 之前这里读得出来，并带 legacy:true 让调用方加密重存。那条路删掉了：
+  // 一份能被继续沿用的明文私钥，最该做的是被**发现**，而"顺手加密重存"等于让它
+  // 再活一轮（见 config.js 里 SECRET_ENCRYPTED 那段）。所以它今天与别的认不出的
+  // mode 走同一条路。
   fs.writeFileSync(secretsOf(dir), JSON.stringify({
-    schema: 2, mode: 'plain', data: 'PRIVATE-KEY-PEM',
+    schema: 6, keys: { c1: { mode: 'plain', data: 'PRIVATE-KEY-PEM' } },
   }));
-  config.migrateLegacySecret(dir, ['c1']);
 
   const got = config.getKey(dir, fakeCrypto(), 'c1');
-  assert.equal(got.ok, true, '读不出来会让用户以为密钥丢了，跑去重新生成、重新注册');
-  assert.equal(got.value, 'PRIVATE-KEY-PEM');
-  assert.equal(got.legacy, true, 'legacy:true 是在告诉调用方「有条件就加密重存一遍」');
+  assert.equal(got.ok, false, '读出来就等于让那份明文再活一轮');
+  assert.match(got.reason, /bad_mode: plain/, '错误里要带上是哪种 mode');
 
-  // 调用方看到 legacy 后加密重存一遍，明文就没了
-  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('"plain"'), true, '前置条件');
-  assert.equal(config.setKey(dir, fakeCrypto(), 'c1', got.value).ok, true);
-  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('"plain"'), false,
-    '重存之后不该还是明文');
-  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8').includes('PRIVATE-KEY-PEM'), false,
-    '落盘的必须是密文');
-  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').legacy, undefined);
-
-  // 而没有凭据库的机器上，重存这一步会失败 —— 那就只能维持原样，
-  // 由界面把它当作「明文存放」如实告知，而不是假装加密了
-  assert.equal(config.setKey(dir, null, 'c1', 'x').reason, 'no_secure_storage');
-});
-
-test('★ 旧版本的**全局**密钥被搬到每一条连接上（用户不必重新注册）', () => {
-  const dir = tmpdir();
-  fs.writeFileSync(secretsOf(dir), JSON.stringify({
-    schema: 3, mode: 'encrypted', data: encrypted('ONLY-KEY'),
+  // 而**更旧**的那种形态（一份全局密钥、根本没有 keys 表）读作「没保存过」：
+  // 界面据此生成一把新的，用户重新注册一次。0.y 不考虑兼容性，这就是预定的结局
+  // —— 所以这里把**实际发生的事**钉住，免得下一个人以为它还读得出来。
+  const dir2 = tmpdir();
+  fs.writeFileSync(secretsOf(dir2), JSON.stringify({
+    schema: 2, mode: 'plain', data: 'PRIVATE-KEY-PEM',
   }));
-
-  const r = config.migrateLegacySecret(dir, ['c1', 'c2']);
-  assert.equal(r.migrated, true);
-  assert.equal(r.count, 2);
-  // 升级前它服务所有连接，升级后每条都拿到同一把 —— 那正是升级前的事实
-  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').value, 'ONLY-KEY');
-  assert.equal(config.getKey(dir, fakeCrypto(), 'c2').value, 'ONLY-KEY');
-
-  // 旧格式那两个字段不再留着，否则每读一次都会以为还有一份没搬完
-  const raw = JSON.parse(fs.readFileSync(secretsOf(dir), 'utf8'));
-  assert.equal(raw.schema, 6);
-  assert.equal(raw.data, undefined);
-  assert.equal(raw.mode, undefined);
-});
-
-test('★ 还没有任何连接时先不搬 —— 那份密钥必须原样留着', () => {
-  const dir = tmpdir();
-  fs.writeFileSync(secretsOf(dir), JSON.stringify({
-    schema: 3, mode: 'encrypted', data: encrypted('ONLY-KEY'),
-  }));
-
-  const r = config.migrateLegacySecret(dir, []);
-  assert.equal(r.migrated, false);
-  assert.equal(r.deferred, true, '必须报告「推迟了」，而不是「没有可搬的」');
-  // 删掉它等于让用户已经注册过的公钥凭空消失
-  assert.equal(JSON.parse(fs.readFileSync(secretsOf(dir), 'utf8')).data, encrypted('ONLY-KEY'));
-
-  // 等第一条连接出现，它就该落到那条连接上
-  assert.equal(config.migrateLegacySecret(dir, ['c1']).migrated, true);
-  assert.equal(config.getKey(dir, fakeCrypto(), 'c1').value, 'ONLY-KEY');
-});
-
-test('已经是新格式时迁移是空操作', () => {
-  const dir = tmpdir();
-  config.setKey(dir, fakeCrypto(), 'c1', 'PEM-C1');
-  const before = fs.readFileSync(secretsOf(dir), 'utf8');
-  assert.equal(config.migrateLegacySecret(dir, ['c1', 'c2']).migrated, false);
-  assert.equal(fs.readFileSync(secretsOf(dir), 'utf8'), before, '不该动它');
+  assert.equal(config.getKey(dir2, fakeCrypto(), 'c1').reason, 'not_saved');
 });
 
 test('认不出的 mode 明确报错，不当成空值', () => {

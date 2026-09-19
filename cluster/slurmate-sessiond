@@ -2308,18 +2308,27 @@ class Config(object):
         return None
 
     def _db_schema_errors(self):
-        """数据库表结构是否还是本版认得的样子。
+        """数据库表结构是否还是本版认得的样子 —— **两头都查**。
 
         只在库文件已存在且读得到时检查：非 root 跑 `--check` 读不到
         /var/lib/slurmate-session 是正常的，不该因此报错。
 
-        ★ v0.2 删掉了 sessions.purpose 这一列（「用途」这一层没有了）。
-          SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会**改已存在的表，而那一列
-          是 NOT NULL —— 于是旧库上的每一次提交都会以 IntegrityError 失败，被
-          dispatch 兜成 code 9「内部错误」，信息里没有一个字与数据库有关。
-          这里把它变成一条能照着做的启动错误。claims.db 可以放心删：它记的是
-          "这个 job_id 是我代表哪个 uid 提交的"，丢了之后
-          recover_from_rules() 会从 nft 规则重建。
+        ★ SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会**改已存在的表，所以库里
+          的 sessions 与本版的 SCHEMA_SQL 只要对不上，接下来一定有东西坏掉，而
+          两种方向都是同一个难看的死法：
+            · **多一列**（v0.1 的 purpose 是 NOT NULL）⇒ 每一次提交以
+              IntegrityError 失败；
+            · **少一列**（service_kind / service_plugin）⇒ 第一次用到它时抛
+              `no such column`。
+          两者都被 dispatch 兜成 code 9「内部错误」，信息里没有一个字与数据库
+          有关。所以这里在**启动时**把它变成一条能照着做的错误：表结构对不上的
+          库一律拒绝启动，人来删。claims.db 可以放心删：它记的是"这个 job_id 是
+          我代表哪个 uid 提交的"，丢了之后 recover_from_rules() 会从 nft 规则重建。
+
+        ★ 判据是**从 SCHEMA_SQL 现算**的（见 _required_session_columns），不是手写
+          一张列清单：清单会漂，而漂了之后的表现是"合法的库被拒绝启动"。代价是
+          **加列从此要删库** —— 这是刻意的，本版不留"自动补列"那条路（它在旧库上
+          跑，而旧库不存在；见 0.y 的判据）。
         """
         if not os.path.exists(self.db_path):
             return []
@@ -2336,12 +2345,20 @@ class Config(object):
             conn.close()
         if not cols:
             return []                       # 表还不存在，Store 会建
-        if "purpose" in cols:
-            return ["数据库 %s 是 v0.1 的（sessions 表还有 purpose 列，而 v0.2 起"
-                    "不再有「用途」这一层）。它不会被自动改表，旧列是 NOT NULL，"
-                    "留着会让每一次提交都以内部错误失败。删掉它再启动即可 —— "
-                    "会话归属能从 nft 规则重建：rm -f %s" % (self.db_path, self.db_path)]
-        return []
+        required = _required_session_columns()
+        missing = sorted(required - cols)
+        extra = sorted(cols - required)
+        if not missing and not extra:
+            return []
+        diff = []
+        if missing:
+            diff.append("少 %s" % "、".join(missing))
+        if extra:
+            diff.append("多 %s" % "、".join(extra))
+        return ["数据库 %s 的 sessions 表与本版对不上（%s）。SQLite 不会改已存在的"
+                "表，而两种方向的错都只会在第一次用到时才炸成一个不提数据库的"
+                "「内部错误」。删掉它再启动即可 —— 会话归属能从 nft 规则重建："
+                "rm -f %s" % (self.db_path, "；".join(diff), self.db_path)]
 
     def validate(self):
         """启动时自检。任何一条不满足都拒绝启动 —— 宁可不起，也不要带病运行。"""
@@ -2446,7 +2463,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- 这个会话提供哪种服务（'code-server' / 'sshd'）。
     -- ★ **可空**，NULL = 未知 —— 从 nft 规则恢复出来的会话不知道自己是什么服务，
     --   那时报 NULL 比编一个 'code-server' 诚实（与 cpus/mem 在恢复态报 null 而不是 0
-    --   是同一条原则）。老库上这一列由 Store._migrate 补上。
+    --   是同一条原则）。
     service_kind    TEXT,
     -- 这个会话用的是**哪一个插件、哪一版** —— `"<id>@<版本>"`。
     -- ★ 与 service_kind 一样**可空**，NULL = 不知道（从 nft 规则恢复出来的会话）。
@@ -2488,6 +2505,21 @@ CREATE INDEX IF NOT EXISTS idx_rejects_uid ON rejects(uid, at);
 """
 
 
+def _required_session_columns():
+    """本版 sessions 表应有的列 —— **从 SCHEMA_SQL 现算**，不手写清单。
+
+    做法是把它喂给一个内存库再读回来：`CREATE TABLE IF NOT EXISTS` 对空库就是
+    建表，所以这里的答案与真库刚建出来时**必然是**同一个 —— 手写清单会漂，而
+    漂了之后的表现是"合法的库被拒绝启动"。
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(SCHEMA_SQL)
+        return frozenset(r[1] for r in conn.execute("PRAGMA table_info(sessions)"))
+    finally:
+        conn.close()
+
+
 class Store(object):
     def __init__(self, path):
         self.path = path
@@ -2497,31 +2529,6 @@ class Store(object):
         self.conn.execute("PRAGMA synchronous=FULL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA_SQL)
-        self._migrate()
-
-    def _migrate(self):
-        """把**已经存在**的旧库补齐到当前表结构。
-
-        ★ 为什么这里只加列、不改列：`CREATE TABLE IF NOT EXISTS` 不会改已存在的表，
-          所以新列的缺失只发生在老库上。加一个**可空**列是纯加法、幂等、零数据损失，
-          可以直接做。
-          而 v0.1→v0.2 那次是**删**一个 NOT NULL 列，那个没法安全自动做，所以那次的
-          选择是「拒绝启动 + 让管理员删库」（见 Config._db_schema_errors）。两者不是
-          同一种变更，不要照抄。
-
-        ★ 为什么必须在**这里**补齐：`_db_schema_errors` 只检查「多了一列」，**没有**
-          「少了一列」这条反向规则 —— 于是旧库上守护进程**照常启动**，直到第一次
-          SELECT/INSERT 碰到新列才抛 `no such column`，被 dispatch 兜成 code 9
-          「内部错误」，信息里没有一个字与数据库有关。SCHEMA_SQL 上面那段注释记的就是
-          这个失败形态（只是方向反过来）。所以补齐只能在这里做，不能指望别处报错。
-        """
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(sessions)")}
-        if not cols:
-            return                       # 表刚建出来，SCHEMA_SQL 已经带上了所有列
-        for name, decl in (("service_kind", "TEXT"), ("service_plugin", "TEXT")):
-            if name not in cols:
-                self.conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN %s %s" % (name, decl))
 
     def close(self):
         try:

@@ -31,12 +31,14 @@ const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4�
                     //   今天没有任何读者，下一次 saveConfig 顺手就把它丢了。升号是
                     //   给"必须搬一次"的改动用的，不是给"少了一个键"用的。
 
-// 私钥在磁盘上的存放形态。**只有一种能写**：encrypted。
-// 'plain' 只是读取兼容 —— 旧版本的界面上有一个「明文保存（不推荐）」的选项，
-// 别人机器上可能还留着那样一份文件。读得出来就必须读出来：报「读不出来」的后果是
-// 用户以为密钥丢了，跑去重新生成、重新注册。读到时带上 legacy:true，由调用方加密重存。
+// 私钥在磁盘上的存放形态。**只有一种能写、也只有一种能读**：encrypted。
+//
+// ★ v0.7 之前还有 'plain' —— 旧界面上有一个「明文保存（不推荐）」的选项，于是
+//   磁盘上可能留着一份明文。读它的那条路删掉了。理由：一份能被读出来继续用的明文
+//   私钥，最该做的事是**被发现**，而"顺手把它加密重存"等于让它再活一轮；在没有旧
+//   部署的前提下（0.y），那条路只有成本。今天遇到它，与遇到别的认不出的 mode 是
+//   同一条路：报 bad_mode。
 const SECRET_ENCRYPTED = 'encrypted';
-const LEGACY_SECRET_PLAIN = 'plain';
 
 /**
  * 「新建连接」时先于连接存在的那把密钥，占一个保留 id。
@@ -452,8 +454,7 @@ const LEGACY_LAYOUT_ID = 'legacy-1';
  * 这不是「两套命名规则并存」：slot-1 只可能被这一个组用（loadLayouts 只在磁盘上还没有
  * layouts、且有 slots 时才合成它，一旦保存过就再也不会），而新组的 id 是 `l` + 随机 hex，
  * 永远撞不上 legacy-1。所以旧数据不可能被复活到新组头上。
- * 与 LEGACY_SECRET_PLAIN（旧明文密钥必须读得出来）、PENDING_ID 是同一类东西：
- * 一个为期永久的兼容别名。
+ * 与 PENDING_ID 是同一类东西：一个为期永久的兼容别名。
  */
 const LEGACY_PARTITION = 'persist:slot-1';
 
@@ -850,7 +851,8 @@ function forgetHostKey(dir, cfg, host, port) {
 // 磁盘形态（一个文件装全部，0600）：
 //   { schema: 4, keys: { "<连接 id 或 PENDING_ID>": { mode, data } } }
 //
-// 旧形态（schema ≤ 3）是 { schema, mode, data } 一份全局密钥，见 migrateLegacySecret。
+// 旧形态（schema ≤ 3）是 { schema, mode, data } 一份全局密钥。**不再读它** ——
+// 它读作"没有这条密钥"（见 SECRET_ENCRYPTED 那段）。
 
 function secretPath(dir) { return path.join(dir, 'secrets.json'); }
 
@@ -887,17 +889,15 @@ function setKey(dir, cryptoSafe, id, value) {
   const raw = readSecretFile(dir);
   const keys = (raw && raw.keys && typeof raw.keys === 'object') ? { ...raw.keys } : {};
   keys[id] = { mode: SECRET_ENCRYPTED, data: buf.toString('base64') };
-  // 写下去的就是新格式。旧格式那两个字段（data/mode）**不保留** ——
-  // 能走到「已经写下新格式、旧格式那份还躺着」这一步，只可能是「有密钥但没有
-  // 任何连接」的配置，而旧版本的界面根本不让人在没有连接的情况下配密钥。
-  // 真正有可能带旧格式的用户，在 bootstrap 时就已经被 migrateLegacySecret 搬完了。
+  // 写下去的就是当前格式：这个文件里**只有** keys 一张表。更旧的那两个顶层字段
+  // （data/mode，一份全局密钥）不保留 —— 它已经没有任何读者了。
   writeSecretFile(dir, { schema: SCHEMA, keys });
   return { ok: true, mode: SECRET_ENCRYPTED };
 }
 
 /**
  * 取一条密钥。
- * @returns {{ok:true, value:string, mode:string, legacy?:true} | {ok:false, reason:string}}
+ * @returns {{ok:true, value:string, mode:string} | {ok:false, reason:string}}
  */
 function getKey(dir, cryptoSafe, id) {
   const raw = readSecretFile(dir);
@@ -905,11 +905,6 @@ function getKey(dir, cryptoSafe, id) {
   const entry = raw.keys && raw.keys[id];
   if (!entry || typeof entry !== 'object' || typeof entry.data !== 'string') {
     return { ok: false, reason: 'not_saved' };
-  }
-  if (entry.mode === LEGACY_SECRET_PLAIN) {
-    // 旧版本写下的明文。现在不再产生这种文件，但已经存在的那一份必须读得出来。
-    // legacy:true 是在告诉调用方：这东西还以明文躺着，有条件就加密重存一遍。
-    return { ok: true, value: entry.data, mode: LEGACY_SECRET_PLAIN, legacy: true };
   }
   if (entry.mode !== SECRET_ENCRYPTED) {
     return { ok: false, reason: 'bad_mode: ' + entry.mode };
@@ -948,40 +943,6 @@ function hasKey(dir, id) {
   return Boolean(raw && raw.keys && raw.keys[id]);
 }
 
-/**
- * 把旧版本那份**全局**密钥搬到新格式里。
- *
- * 旧格式里一把密钥服务所有连接，所以这里把它原样复制给每一条已有连接 ——
- * 那正是升级前的事实，复制之后每一条的行为都不变，用户也不必重新注册。
- * 之后各条可以各自「重新生成」，互不影响。
- *
- * 一条连接都没有时**什么也不做**（把文件留着），等有了第一条再搬 ——
- * 那时它会被交给那条连接。删掉它则等于让用户已经注册过的公钥凭空消失。
- *
- * @returns {{migrated:boolean, count?:number, deferred?:boolean}}
- */
-function migrateLegacySecret(dir, ids) {
-  const raw = readSecretFile(dir);
-  if (!raw || typeof raw.data !== 'string') return { migrated: false };
-  if (raw.mode !== SECRET_ENCRYPTED && raw.mode !== LEGACY_SECRET_PLAIN) {
-    return { migrated: false };
-  }
-  if (!Array.isArray(ids) || ids.length === 0) return { migrated: false, deferred: true };
-
-  // 保留文件里已有的条目（正常情况下不会有 —— 见 setKey 的注释），只补缺的那些。
-  // 手改过的文件不该因为一次迁移就丢掉别的密钥。
-  const keys = (raw.keys && typeof raw.keys === 'object') ? { ...raw.keys } : {};
-  let added = 0;
-  for (const id of ids) {
-    if (keys[id]) continue;
-    keys[id] = { mode: raw.mode, data: raw.data };
-    added += 1;
-  }
-  if (added === 0) return { migrated: false };
-  writeSecretFile(dir, { schema: SCHEMA, keys });
-  return { migrated: true, count: added };
-}
-
 // ── 待补发的 goodbye（见 session.js：断电/kill -9 时 goodbye 一定发不出去）────────
 function pendingGoodbyePath(dir) { return path.join(dir, 'pending-goodbye.json'); }
 
@@ -1012,7 +973,7 @@ function removePendingGoodbye(dir, sessionId) {
 //
 //   v0.7 之前它长得多，其中这一批**一个外部读者都没有**（谁在读它，是靠
 //   "整个仓库搜一遍这个标识符"量出来的，不是靠感觉）：`SECRET_ENCRYPTED`、
-//   `LEGACY_SECRET_PLAIN`、`LAYOUT_PORT_BASE`、`LEGACY_LAYOUT_ID`、
+//   `LAYOUT_PORT_BASE`、`LEGACY_LAYOUT_ID`、
 //   `LEGACY_PARTITION`、`newConnectionId`、`normalizeConnection`、
 //   `connectionKey`、`hostKeyId`、`readSecretFile`。它们都还在文件里、还在被
 //   本文件用着，只是不再**承诺**给别人。
@@ -1041,6 +1002,6 @@ module.exports = {
   // 开发者模式的两个设置 —— 也单独一个文件，理由见那一段（**次序**）
   loadDevSettings, saveDevSettings,
   checkHostKey, rememberHostKey, forgetHostKey,
-  setKey, getKey, deleteKey, hasKey, migrateLegacySecret,
+  setKey, getKey, deleteKey, hasKey,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,
 };

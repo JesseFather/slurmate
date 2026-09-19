@@ -524,7 +524,7 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 | 块里的 `enabled` 是 yes/no、`default_cpus` 在 1-64、`default_mem` 可解析 | 认不出时拒绝启动，**不回退默认值** |
 | 至少有一个插件是开着的 | 客户端上一个按钮都不会有 |
 | `[plugin:code-server] auth_mode ∈ {password, none}` | 无法决定 code-server 启动参数 |
-| 数据库表结构是本版的 | 旧库的 `NOT NULL purpose` 列会让每次提交都以内部错误失败 |
+| 数据库表结构是本版的 | 少一列或多一列都只会在第一次用到时炸成「内部错误」 |
 
 > 📌 **这张表里没有「作业脚本存在」那一条**，虽然它在 v0.5 之前有过。
 > 作业脚本现在是**一个插件一份**（`<prefix>/share/slurmate/jobs/<ULID>.sbatch`），
@@ -538,16 +538,28 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 
 ### 数据库表结构那一项
 
-v0.2 删掉了 `sessions.purpose` 列。SQLite 的 `CREATE TABLE IF NOT EXISTS`
-**不会**改已存在的表，而那一列是 `NOT NULL` —— 旧库上的每一次提交都会以
-`IntegrityError` 失败，被 `dispatch` 兜成 code 9「内部错误」，信息里没有一个字与数据库
-有关。
+判据是「库里 `sessions` 表的列集合 == 本版 `SCHEMA_SQL` 建出来的那一个」，**两头都查**。
+SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会**改已存在的表，于是两种方向都会坏，而且
+死在同一个地方：
 
-所以启动时会明确拒绝，并给出修法：
+| 方向 | 例子 | 死法 |
+|---|---|---|
+| 库**多**一列 | v0.1 的 `purpose`（`NOT NULL`） | 每次提交以 `IntegrityError` 失败 |
+| 库**少**一列 | 没有 `service_kind` / `service_plugin` | 第一次用到时抛 `no such column` |
+
+两者都被 `dispatch` 兜成 code 9「内部错误」，信息里没有一个字与数据库有关。所以启动时
+明确拒绝，并给出修法：
 
 ```bash
 rm -f /var/lib/slurmate-session/claims.db
 ```
+
+报错会**点名**差在哪几列 —— 只说「对不上」等于让运维自己去 diff 一张二十多列的表。
+
+> 📌 **不要给它加回「自动补列」。** v0.7 之前有一段 `Store._migrate()`，它给旧库自动
+> `ALTER TABLE sessions ADD COLUMN`。删掉了：那条路只在旧库上跑，而旧库不存在（0.y
+> 不考虑兼容性，见 `CHANGELOG.md`）。留在那儿的代价是**加一列从此有两种走法**，而
+> 两种走法的区别没有任何东西会告诉你。今天的规矩只有一条：**表结构对不上就删库**。
 
 **这个删除是安全的**：`claims.db` 记的是「这个 job_id 是我代表哪个 uid 提交的」，
 丢了之后 `recover_from_rules()` 会从 nft 规则把它重建出来（标 `trust='recovered'`，

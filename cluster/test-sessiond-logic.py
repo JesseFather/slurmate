@@ -1022,6 +1022,12 @@ exit 0
     errs = old_cfg._db_schema_errors()
     check("旧库（有 purpose 列）被拒绝并给出可照做的修法",
           len(errs) == 1 and "rm -f" in errs[0], str(errs))
+    # ★ 两个方向都要**点名**：只说"对不上"等于让运维自己去 diff 一张二十多列的
+    #   表，而这是他半夜在机房唯一能拿到的东西。
+    check("★ 多出来的那一列被点名（v0.1 的 purpose）",
+          bool(errs) and "多 purpose" in errs[0], str(errs))
+    check("★ 少掉的列也被点名（多与少是同一个判据的两头）",
+          bool(errs) and "少 " in errs[0], str(errs))
     old_cfg.__dict__["db_path"] = os.path.join(tmpdir, "nosuch.db")
     check("库还不存在时不报错（Store 会建）", old_cfg._db_schema_errors() == [])
 
@@ -2160,32 +2166,52 @@ exit 0
               d.session_view(rows[0], with_secret=False)["service_plugin"] is None)
     d.store.close()
 
-    # 19.8 老库补列：加一个**可空**列是纯加法，直接迁移；不像删 NOT NULL 列那次
-    #     只能拒绝启动。不补的后果是旧库上守护进程照常启动，直到第一次用到新列
-    #     才抛 no such column，被兜成 code 9「内部错误」。
-    old_db2 = os.path.join(tmpdir, "old-nosvc.db")
-    _c = _sq.connect(old_db2)
-    # 夹具要带上 SCHEMA_SQL 里那几条索引引用的列 —— `CREATE TABLE IF NOT EXISTS`
-    # 不会改建好的表，但 `CREATE INDEX IF NOT EXISTS ... ON sessions(state)` 会
-    # 因为缺列直接报错。
-    _c.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, uid INTEGER, "
-                "state TEXT, job_id INTEGER, node_ip TEXT, service_port INTEGER)")
-    _c.execute("INSERT INTO sessions (session_id, uid) VALUES ('kept', 2002)")
-    _c.commit()
-    _c.close()
-    _st = mod.Store(old_db2)
-    _cols = {r[1] for r in _st.conn.execute("PRAGMA table_info(sessions)")}
-    check("★ 老库（没有 service_kind 列）被自动补上",
-          "service_kind" in _cols, str(sorted(_cols))[:120])
-    check("★ 老库（没有 service_plugin 列）也被自动补上",
-          "service_plugin" in _cols, str(sorted(_cols))[:120])
-    check("补出来的解析键是 NULL —— 老库里的会话确实不知道自己是哪一版",
-          _st.get("kept") is not None and _st.get("kept")["service_plugin"] is None,
-          repr((_st.get("kept") or {}).get("service_plugin")))
-    check("补列不动已有的数据",
-          _st.get("kept") is not None and _st.get("kept")["uid"] == 2002)
-    _st.close()
-    check("补列是幂等的（再开一次不报错）", mod.Store(old_db2).close() is None)
+    # 19.8 库的表结构与本版对不上 ⇒ **启动时就拒绝**（不再有"自动补列"那条路）
+    #
+    # v0.7 删掉了 `Store._migrate()` —— 它给旧库自动 ALTER TABLE ADD COLUMN，
+    # 而那条路只在旧库上跑，旧库不存在（见 0.y 的判据）。删掉之后，
+    # `Config._db_schema_errors` 就是**唯一**接住"表结构对不上"的地方，所以它
+    # 必须两头都查：少一列和多一列今天都只会在第一次用到时炸成一个不提数据库的
+    # code 9。
+    #
+    # ★ 断言打的是 `validate()`，不是那个私有函数自己 —— 少一行
+    #   `errors.extend(self._db_schema_errors())` 的话，私有函数照样报，
+    #   而守护进程照样起得来。这里要钉的正是"起不来"。
+    #
+    # ★ 夹具从**真的**建表语句里删掉一行 —— 于是它"只少一列"，而不是随手编一张
+    #   缺一堆列的表；缺的是哪一列由断言点名，人肉维护的列清单会漂。
+    _fresh = os.path.join(tmpdir, "fresh-schema.db")
+    _fc = _sq.connect(_fresh)
+    _fc.executescript(mod.SCHEMA_SQL)
+    _create_sql = _fc.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'"
+    ).fetchone()[0]
+    _fc.close()
+
+    _lines_all = _create_sql.splitlines()
+    _lines_less = [ln for ln in _lines_all
+                   if not ln.strip().startswith("service_kind")]
+    check("夹具真的从建表语句里删掉了一行（否则下面测的是别的东西）",
+          len(_lines_less) == len(_lines_all) - 1,
+          "%d -> %d 行" % (len(_lines_all), len(_lines_less)))
+
+    _old_db3 = os.path.join(tmpdir, "old-missing-one.db")
+    _c3 = _sq.connect(_old_db3)
+    _c3.execute("\n".join(_lines_less))
+    _c3.commit()
+    _c3.close()
+
+    _cfg3 = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
+    _cfg3.__dict__["db_path"] = _old_db3
+    _e3 = _cfg3.validate()
+    check("★ 少一列的库让守护进程**起不来**（validate 就报错，不是运行时才炸）",
+          len(_e3) == 1 and "rm -f" in _e3[0], str(_e3))
+    check("★ 而且报出**缺的是哪一列**（只说「对不上」等于让人去猜）",
+          bool(_e3) and "少 service_kind" in _e3[0], str(_e3))
+
+    _cfg3.__dict__["db_path"] = _fresh
+    check("★ 本版刚建出来的库**不**被拒绝 —— 判据漂了就会误杀合法库",
+          _cfg3.validate() == [], str(_cfg3.validate()))
 
     # 19.9 ★ 候选端口表的分隔符
     # 实测（在计算节点上）：`--export=ALL,SLURMATE_CANDIDATES=55001,55002,55003,AFTER=ok`

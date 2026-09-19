@@ -207,11 +207,6 @@ function bootstrap() {
     ensureSitePoolDir();
     registry.reload();
 
-    // 旧版本（schema ≤ 3）只有一把**全局**私钥。搬到新格式：原样复制给每一条已有
-    // 连接 —— 那正是升级前的事实，复制完每条的行为都不变，用户也不必重新去 IDM
-    // 注册一遍。一条连接都没有时它会被留在原地，等有了第一条再搬。
-    config.migrateLegacySecret(cfgDir, cfg.connections.map((c) => c.id));
-
     backend = createBackend({
       dev: dev.developerMode,
       fake: {
@@ -335,16 +330,8 @@ function resolveKey(id) {
     return { ok: false, error: got.reason, detail: keyErrorDetail(got.reason) };
   }
 
-  // 旧版本允许「明文保存」，磁盘上可能有这么一份。既然已经读出来了，
-  // 就别让它继续以明文躺着 —— 顺手加密重存。存不下去（这台机器没有凭据库）
-  // 也不当作失败：密钥本身是可用的，为一件副产品把用户拦在门外不值当，
-  // 记一个标记，由调用方如实告诉他。
-  let legacyPlain = false;
-  let migrated = false;
-  if (got.legacy) {
-    if (config.setKey(cfgDir, secureCrypto(), id, got.value).ok) migrated = true;
-    else legacyPlain = true;
-  }
+  // 旧版本那份**明文**密钥不再读（理由见 config.js 里 SECRET_ENCRYPTED 那段）：
+  // 它今天与别的认不出的 mode 走同一条路，报 bad_mode。
 
   if (!keys.isUsablePrivatePem(got.value)) {
     return { ok: false, error: 'bad_key_format',
@@ -362,8 +349,6 @@ function resolveKey(id) {
     publicKeyLine: line,
     fingerprint: keys.fingerprintOf(line),
     persisted: true,
-    legacyPlain,
-    migrated,
   };
 }
 
@@ -395,17 +380,7 @@ function generateKey(id) {
  */
 function ensureKey(id) {
   const r = resolveKey(id);
-  if (r.ok) {
-    // 旧版本留下的痕迹。只在真有这回事时才说话 —— 一条每次都出现的提示，
-    // 和没有提示是一回事。
-    if (r.migrated) win.pushNotice('info', '本机保存的私钥此前是明文，已改为加密保存。');
-    if (r.legacyPlain) {
-      win.pushNotice('warn',
-        '本机保存的私钥仍是明文：这台机器没有可用的系统凭据库，加密存不了。'
-        + '密钥可以正常使用，但它在磁盘上是可读的。');
-    }
-    return r;
-  }
+  if (r.ok) return r;
   if (r.error !== 'not_saved') return r;
   return generateKey(id);
 }
@@ -2034,12 +2009,6 @@ function registerIpc() {
       if (mem) memKeys.set(up.connection.id, { ...mem });
       config.deleteKey(cfgDir, config.PENDING_ID);
       memKeys.delete(config.PENDING_ID);
-
-      // 没有「新建位」的密钥，说明这是从更旧的版本上来的第一条连接 ——
-      // 把旧格式那份全局密钥交给它，用户不必重新注册。
-      if (!pending.ok && !mem) {
-        config.migrateLegacySecret(cfgDir, [up.connection.id]);
-      }
     }
 
     if (!cfg.activeConnectionId) cfg.activeConnectionId = up.connection.id;
