@@ -247,10 +247,10 @@ ls -l /usr/local/share/slurmate/plugins/          # 应该是一串 <ULID>.splug
 sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>
 ```
 
-★ **装第一个包时，旧布局 `<名字>/plugin.json` 会被自动清掉**（安装器按
-`.deployed` 标记迁移）。如果迁移之后这里**还有目录**，`--check-plugins` 会逐条
-点名 —— 那种目录含有一整套客户端代码，而守护进程只读包，留着它等于一份
-**看不见的副本**。确认无用之后人工删掉。
+★ **这里应该只有 `.splug`。** 出现目录或别的文件时，`--check-plugins` 会逐条点名
+—— 它们既不会被分发、也不会被读到，留着就是一份**看不见的副本**（`root` 拥有的
+那种最要紧）。**没有任何东西会自动清它们**：是某个插件的源码树就先在作者机器上
+`packer build` 打成包，别的什么确认无用之后人工删掉。
 
 **再确认配置里没有把它关掉。** 一个 `[plugin:*]` 块都没有时，缺省取插件清单里的
 `site.defaultEnabled`（code-server 是 true，与升级前一致）；但只要你写了

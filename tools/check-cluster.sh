@@ -616,8 +616,8 @@ if [[ -d "$_plugdir" ]]; then
     if [[ -n "$_stray" ]]; then
         r FAIL "${_plugdir} 里有不是插件包的东西（站点只认 .splug）："
         printf '%s\n' "$_stray" | sed 's/^/      /'
-        r INFO "  目录多半是更早那版布局留下的 —— 跑一次 deploy.sh 会按 .deployed 标记迁掉；"
-        r INFO "  如果是插件的**源码树**，那要先在作者机器上 packer build 打成包。"
+        r INFO "  如果是插件的**源码树**，那要先在作者机器上 packer build 打成包；"
+        r INFO "  别的什么都要人工确认后删掉 —— 没有任何东西会自动清它们。"
     fi
 else
     r INFO "${_plugdir} 不存在 —— 还没部署，或本站没有安装任何插件"

@@ -1272,8 +1272,8 @@ exit 0
     # 坏②：是一个能解析的包，但负载里没有 plugin.json
     put_package(_baddir, [("README.md", b"x\n")],
                 filename="01M2JKHTZGQ7X8V4T5R6N7B8C9.splug")
-    # 坏③：**旧布局的目录**（更早那版布局）。它不是"跳过"，是一条明确的错误 ——
-    #       因为它意味着 root 拥有的一整套副本还留在盘上、而守护进程不会去读它。
+    # 坏③：**一个目录**（不是包）。它不是"跳过"，是一条明确的错误 ——
+    #       因为目录既不会被分发、也不会被读到，留着就是一份看不见的副本。
     os.makedirs(os.path.join(_baddir, "old-layout"), exist_ok=True)
     with open(os.path.join(_baddir, "old-layout", "plugin.json"), "wb") as _f:
         _f.write(_cs_manifest)
@@ -1285,10 +1285,11 @@ exit 0
           and any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p for p in _probs2)
           and any("old-layout" in p for p in _probs2),
           str(_probs2))
-    # ★ 旧布局报出来的那句话必须指回 deploy.sh —— 它不是"你自己想办法"，而是
-    #   "跑一次部署，安装器会按 .deployed 标记清掉它"。
-    check("★★ 旧布局目录那条错误指回 deploy.sh（否则运维不知道该做什么）",
-          any("old-layout" in p and "deploy.sh" in p for p in _probs2),
+    # ★ 报出来必须**给出下一步** —— 只诊断不指出路，等于把"这怎么办"留给运维猜。
+    #   现在没有任何东西会去清它（自动迁移在 v0.7 删掉了），所以这两条是全部的出口。
+    check("★★ 目录那条错误给出下一步（打包或删掉），不是只诊断",
+          any("old-layout" in p and "packer build" in p and "删掉" in p
+              for p in _probs2),
           str([p[:80] for p in _probs2]))
     # ★ 而**非包非目录**的普通文件同样报出来：`PLUGINS_SRC` 里放错东西时，
     #   预检就该红，而不是等到守护进程扫完一圈什么都不说。
@@ -2694,7 +2695,7 @@ exit 0
             _real_pkg = _touch("vendor-1.0.0.splug", b"splug\x1a\r\n" + b"\0" * 12)
             _touch("notes.txt")                    # 随手放的文件
             _touch("README")                       # 说明文件
-            _touch("old/plugin.json", b"{}")       # 更早那版布局留下的插件目录
+            _touch("old/plugin.json", b"{}")       # 一个目录（站点只认包）
             _touch("nested/deep.splug")            # 子目录里的包（不扫第二层）
             os.symlink(_real_pkg, os.path.join(_tmp, "linked.splug"))
             os.symlink("/etc/passwd", os.path.join(_tmp, "passwd.splug"))
@@ -2704,7 +2705,7 @@ exit 0
             check("★★ 符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
                   not any("linked.splug" in p or "passwd.splug" in p for p in _got),
                   repr(sorted(_got))[:200])
-            check("★ 旧布局目录、散落的文件、子目录里的包都不进名单"
+            check("★ 目录、散落的文件、子目录里的包都不进名单"
                   "（它们**不该在这儿**，由 --check-plugins 逐条点名）",
                   not any("old/" in p or "notes.txt" in p or "README" in p
                           or "nested" in p for p in _got),
@@ -3198,35 +3199,6 @@ exit 0
             check("★★ 钥匙记录读不出来 ⇒ 拒绝（当成空的会让换钥匙静默放行）",
                   _rc == 1 and "钥匙记录" in _out, "rc=%d %r" % (_rc, _out[:240]))
             os.unlink(os.path.join(_INSDIR, ".keys.json"))
-
-        # ── ⑧ 旧布局迁移 ──
-        _mig = os.path.join(_ins_home, "migrate")
-        os.makedirs(os.path.join(_mig, "code-server", "job"))
-        with open(os.path.join(_mig, "code-server", "plugin.json"), "w",
-                  encoding="utf-8") as _f:
-            _f.write('{"id":"x"}')
-        os.makedirs(os.path.join(_mig, "someone-elses"))
-        with open(os.path.join(_mig, "someone-elses", "notes.txt"), "w") as _f:
-            _f.write("别人的东西\n")
-        with open(os.path.join(_mig, ".deployed"), "w", encoding="utf-8") as _f:
-            _f.write("code-server\n")
-        _rc, _out = _install([_pkg_of(_UID_A, "alpha", out=_ins_home)], _mig)
-        check("★★ 旧布局的插件目录被清掉了（它含客户端代码、而守护进程不会去读）",
-              _rc == 0 and not os.path.exists(os.path.join(_mig, "code-server"))
-              and "清掉了旧布局" in _out, "rc=%d %r" % (_rc, _out[:300]))
-        check("★ 而**不是我们装的**那个目录原样留着（不猜、不顺手删）",
-              os.path.exists(os.path.join(_mig, "someone-elses", "notes.txt")))
-        check("★ 旧标记也一并删掉（否则每次部署都会再找一遍那些目录）",
-              not os.path.exists(os.path.join(_mig, ".deployed")))
-        # ★ 而那个不是我们装的目录**仍然是一条要报出来的问题**（它不是静默跳过的）：
-        #   站点上的插件只能是 `.splug`，一个躺在那儿的目录要么是没迁干净的旧布局、
-        #   要么是放错地方的源码树 —— 两种都要有人看一眼。守护进程因此**不会**
-        #   把这个目录当成"没有插件"而安静地过去。
-        _mig_specs, _mig_probs = mod.scan_plugins(_mig)
-        check("★ 迁移之后守护进程扫这个目录：包认得出来，剩下的那个目录被点名",
-              [s.name for s in _mig_specs] == ["alpha"]
-              and len(_mig_probs) == 1 and "someone-elses" in _mig_probs[0],
-              "%s / %s" % ([s.name for s in _mig_specs], _mig_probs))
 
         # ── ⑨ 有人绕过安装器把包放了进去 ⇒ 自检要说出来 ──
         #

@@ -669,16 +669,8 @@ PLUGIN_MAX_FILES = 256
 #                部署」这个最自然的卸载动作会**静默无效**。
 #   .keys.json   站点侧记住的「这个 id 上一次是哪把钥匙签的」。见 install_plugins()
 #                里 §2.5 那一段：同一个 id 换了签名者 ⇒ 停下来问。
-#
-# 还有一个**旧布局**的标记，只读一次、只为了迁移：
-#
-#   .deployed    **更早的布局**：plugins_dir 下每个插件是一个**目录**，这个文件
-#                记着它们的名字。改成一插件一个包之后，那批目录必须被显式清掉 —— 否则
-#                plugins_dir 里同时躺着旧目录与新包，而守护进程只扫包 ⇒ **root
-#                拥有的、含客户端代码的一整套副本永久残留且不可见**。
 PLUGIN_INSTALLED_MARKER = ".installed"
 PLUGIN_KEYS_FILE = ".keys.json"
-PLUGIN_LEGACY_MARKER = ".deployed"
 
 # 进不了负载的名字（§3.3）。**两个读者**，都不是"遍历时跳过"：
 #
@@ -1012,10 +1004,9 @@ def scan_plugins(plugins_dir):
       指向一个不存在的插件）—— 装了但坏掉、与配置指向一个不存在的东西，症状相同，
       报错也该相同。
 
-    ★ **旧布局的目录是一个明确的错误，不是"跳过"**。跳过它等于让 root 拥有的、
-      含客户端代码的一整套副本**永久残留在磁盘上而界面上看不见** —— 那正是这一版
-      要消灭的形状。迁移由安装器做（它会读 `.deployed` 标记、只删自己装过的），
-      这里只负责把它**说出来**：见到一个目录就报一条，指回 deploy.sh。
+    ★ **一个目录是一条明确的错误，不是"跳过"**。它既不会被分发、也不会被读到，
+      所以留在那儿就等于一份**看不见的副本**（含客户端代码的那种最要紧）。
+      报出来是它唯一的出口 —— 见到一个就报一条。
 
     目录不存在时返回**空的**、且**不是错误** —— 一个插件都没装是合法状态。
     """
@@ -1027,16 +1018,15 @@ def scan_plugins(plugins_dir):
             continue
         full = os.path.join(plugins_dir, entry)
         if not entry.endswith(PLUGIN_PACKAGE_SUFFIX):
-            # 目录与别的文件都走这一条。两个成因、两种出路，所以两句话都说：
-            # 「旧布局」跑一次 deploy.sh 就会被安装器清掉；「源码树」要先打包。
+            # 目录与别的文件都走这一条。**报出来必须给出下一步** —— 只诊断、
+            # 不指出路，等于把"这怎么办"留给运维去猜。
             what = "一个目录" if os.path.isdir(full) else "一个文件"
             problems.append(
                 "%s：这是一个%s，不是一个插件包。站点上的插件只能是 %s 文件"
-                "（docs/PLUGIN-SPEC.md 附录 A）。\n"
-                "        两种情况：① 更早那版布局装进来的**目录** ⇒ 跑一次 "
-                "deploy.sh，安装器会按 .deployed 标记把它们清掉；\n"
-                "        ② 有人把**源码树**放到了这里 ⇒ 要先在作者机器上 "
-                "`packer build` 打成包（deploy.sh 永不打包，见它的文件头）。"
+                "（docs/PLUGIN-SPEC.md 附录 A）—— 它们既不会被分发、也不会被读到。\n"
+                "        两种情况：① 它是某个插件的**源码树** ⇒ 在作者机器上 "
+                "`packer build` 打成包（deploy.sh 永不打包，见它的文件头）；\n"
+                "        ② 别的什么 ⇒ 人工确认后删掉。"
                 % (full, what, "*" + PLUGIN_PACKAGE_SUFFIX))
             continue
         r = package_read_file(full)
@@ -1736,7 +1726,6 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
        （同一个包传两遍也算），因为跨次调用时后一次本来就是"替换"。
     ④ **签名的验证与"谁签的"**（§4.1/§2.5）。见下面那两段。
     ⑤ **整包大小**：装了也发不出去的包不装（`PLUGIN_PACKAGE_MAX_BYTES`）。
-    ⑥ **旧布局的目录**：按 `.deployed` 标记清掉（见 PLUGIN_LEGACY_MARKER）。
 
     ★ 第二遍里**钥匙记录先写、包后写**，那个次序是刻意的 —— 理由写在那一段。
     """
@@ -1930,37 +1919,6 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
     except OSError as e:
         say("✗ 建不了插件目录 %s：%s（要以 root 跑吗？）" % (plugins_dir, e))
         return 1
-
-    # ⑥ 旧布局：更早的形态是每个插件一个**目录**。必须显式清掉 —— 否则
-    #    plugins_dir 里同时躺着旧目录与新包，而守护进程只扫包 ⇒ root 拥有的、
-    #    含客户端代码的一整套副本**永久残留且界面上看不见**。
-    #
-    #    只删 `.deployed` 里记着的那些，且删之前确认它确实是一个插件目录
-    #    （里面还有 plugin.json）：**按名字拼出来的路径，删之前先读一遍。**
-    #
-    #    ★ 这条规矩从前在客户端有一个孪生兄弟（`plugins/install.js` 的 `uninstall`），
-    #      注释里的交叉引用指的是它。那个文件随本机安装那条路在 v0.7 删掉了 ——
-    #      规矩本身留下，因为它与"客户端有没有第二份"无关。
-    legacy = os.path.join(plugins_dir, PLUGIN_LEGACY_MARKER)
-    if os.path.isfile(legacy):
-        try:
-            with open(legacy, encoding="utf-8") as f:
-                olds = [l.strip() for l in f if l.strip()]
-        except OSError as e:
-            say("✗ 读不了旧布局标记 %s：%s" % (legacy, e))
-            return 1
-        for old in olds:
-            d = os.path.join(plugins_dir, old)
-            if os.path.isfile(os.path.join(d, MANIFEST_NAME)):
-                shutil.rmtree(d)
-                say("  ✓ 清掉了旧布局的插件目录 %s（更早的那种形状）" % d)
-            else:
-                say("  ⚠ 跳过了 %s —— 它不像一个插件目录，不敢删" % d)
-        try:
-            os.unlink(legacy)
-            say("  ✓ 已删除旧布局标记 %s" % PLUGIN_LEGACY_MARKER)
-        except OSError as e:
-            say("  ⚠ 删不掉旧布局标记 %s：%s" % (legacy, e))
 
     try:
         # ★ **记录先写、包后写。** 两个都可能失败，但失败之后留下的状态不一样：
@@ -4674,7 +4632,7 @@ def main():
                     default=None,
                     help="把一个或多个 .splug 装进插件目录，然后退出。"
                          "`slurmate plugin install` 就是它；deploy.sh 也走这条路。"
-                         "验签、同 id、旧布局迁移都在这里（见 install_plugins）")
+                         "验签、同 id 检查都在这里（见 install_plugins）")
     ap.add_argument("--replace-key", default=None, metavar="旧指纹",
                     help="配合 --install-plugins：确认「这个 id 换了签名者」（§2.5）。"
                          "取值必须是**记录里那把旧指纹** —— 确认是一次有依据的动作，"

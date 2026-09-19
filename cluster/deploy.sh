@@ -48,7 +48,7 @@
 #  本脚本这一步只做三件事，每件都有它自己的负责人：
 #      · **信任门**：这些包在"root 下载完到安装器读"之间不能被普通用户换掉；
 #      · **交给安装器**（`slurmate-sessiond --install-plugins`）：解析、验签、
-#        同 id 检查、旧布局迁移 —— 规则只有那一份实现；
+#        同 id 检查 —— 规则只有那一份实现；
 #      · **逐插件编织**作业脚本：把包里的 `job/start.sh` 织进作业模板。
 #
 #  ★ 缺省 `--plugins-src` 是仓库顶层的 `plugins/`。而那里放的是**源码树**
@@ -130,9 +130,6 @@ PLUGINS_DIR="${SHARE_DIR}/plugins"
 # 拿走的插件要跟着删掉 —— 否则「把包移走再部署」这个最自然的卸载动作会**静默
 # 无效**，而用户看到的是"它还在"。
 #
-# ★ 名字从 `.deployed` 换成了 `.installed`，因为**记的东西换了**：从前是"目录名"，
-#   现在是"包文件名"。旧的那个文件由**安装器**读一次、用来迁移（见
-#   slurmate-sessiond 的 PLUGIN_LEGACY_MARKER），本脚本不再写它。
 PLUGINS_MARKER="${PLUGINS_DIR}/.installed"
 # 同上，但记的是本脚本生成过哪几份作业脚本（每行一个 ULID）。插件的源目录没了、
 # 插件被拿走了，对应那份 <ULID>.sbatch 要跟着删掉 —— 否则它会留下一份**无主的、
@@ -303,11 +300,6 @@ if [[ "$MODE" == "uninstall" ]]; then
     # 插件包（开头那 8 个字节是魔数）。按名字拼出来的路径，删之前先读一遍 ——
     # 这条规矩从前在客户端有个孪生兄弟（`plugins/install.js` 的 `uninstall`），
     # 那个文件随本机安装那条路在 v0.7 删掉了；规矩留下。
-    #
-    # ★ 两个标记都要看，因为**两次布局可能同时存在**（更早那版的旧目录还没被那次
-    #   迁移清掉时就卸载了）：`.installed` 记的是包（本版），`.deployed` 记的是
-    #   目录（更早的那种布局）。只看前者的话，旧目录会**留在盘上而没有东西记得
-    #   它曾经是插件** —— 正是这一版要消灭的那种残留。
     if [[ -d "$PLUGINS_DIR" ]]; then
         if [[ -f "$PLUGINS_MARKER" ]]; then
             while IFS= read -r p; do
@@ -323,21 +315,6 @@ if [[ "$MODE" == "uninstall" ]]; then
                 fi
             done < "$PLUGINS_MARKER"
             rm -f "$PLUGINS_MARKER" && ok "已删除插件部署标记"
-        fi
-        if [[ -f "${PLUGINS_DIR}/.deployed" ]]; then
-            info "还发现一个更早布局的标记（.deployed）—— 一并清掉"
-            while IFS= read -r p; do
-                [[ -n "$p" ]] || continue
-                case "$p" in
-                    */*|.|..) continue ;;
-                esac
-                if [[ -f "${PLUGINS_DIR}/${p}/plugin.json" ]]; then
-                    rm -rf "${PLUGINS_DIR:?}/${p:?}" && ok "已删除旧布局的插件目录 ${p}"
-                else
-                    warn "跳过 ${PLUGINS_DIR}/${p} —— 它不像一个插件目录，不敢删"
-                fi
-            done < "${PLUGINS_DIR}/.deployed"
-            rm -f "${PLUGINS_DIR}/.deployed" && ok "已删除旧布局标记"
         fi
         # 钥匙记录：它是**站点侧的记忆**（"这个 id 上一次是哪把钥匙签的"）。
         # 卸载 = 这个站点不再有插件，记忆跟着走；留下它反而会让下次装同一个包时
@@ -977,7 +954,7 @@ step "阶段 2b／6  安装插件并编织作业脚本"
 # ── 2b.1 把插件包装进 <prefix>/share/slurmate/plugins/ ─────────────────────
 #
 # ★ 装的动作**全部交给安装器**（`slurmate-sessiond --install-plugins`）：解析包、
-#   验签、§6.4 的同 id 检查、旧布局迁移、写站点侧的钥匙记录 —— 都在它里面，而
+#   验签、§6.4 的同 id 检查、写站点侧的钥匙记录 —— 都在它里面，而
 #   那些判据在守护进程那一侧本来就要有（它要读同一批包）。本脚本再抄一遍的失效
 #   方式是"部署放行了、守护进程不认"，而症状要到用户点提交时才出现。
 #
