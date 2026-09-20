@@ -401,7 +401,7 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     'app:start', 'app:state', 'app:doctor', 'app:stop', 'app:reload',
                     'app:debug',
                     // 连接管理：地址必须在界面上可填可删 —— 这条曾经是个硬缺口，
-                    // extraHosts 只能手改 config.json，面板上根本没有入口。
+                    // 那时地址只能手改 config.json，面板上根本没有入口。
                     'app:saveConnection', 'app:deleteConnection', 'app:setActiveConnection',
                     // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
                     // 一律彻底终止（取消作业 + 释放资源），不留下还在烧的作业

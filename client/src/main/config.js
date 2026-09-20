@@ -413,7 +413,7 @@ function normalizeConnection(raw, fallbackId) {
 // 构造 origin，所以「端口不同」就等于「布局不同」。布局组把「哪条连接用哪个端口」变成
 // 用户可控的映射：左侧连接条目、右侧布局组，多对一，引用计数归零即回收。
 
-const LAYOUT_PORT_BASE = 18080;   // 与旧 slotPort 的 base 一致 —— 升级不换端口
+const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上按需递增
 
 /**
  * 中转站隧道**优先**用的本地端口。
@@ -433,33 +433,18 @@ const LAYOUT_PORT_BASE = 18080;   // 与旧 slotPort 的 base 一致 —— 升�
 const RELAY_PORT_BASE = 18090;
 
 /**
- * 迁移出来的那个布局组的保留 id。
+ * 一个布局组在浏览器里的存储身份（partition 名 = Electron 的存储目录名）。
  *
- * ★ 必须是**字面量**，不能是随机值：loadConfig 自己不写盘（见文件头原则三条），若这里
- *   合成随机 id，那么「读完配置、一次都没保存就退出」→ 下次启动换一个 id → 换 partition
- *   → 上一轮刚攒的布局凭空消失。这个坑很隐蔽，症状只是「布局又没了」。
+ * ★ 按**组 id** 命名，而 id 是随机的、**永不复用**的（见 newLayoutId）。这是「新建
+ *   空白布局真的空白」的全部依据 —— 若按端口命名，A 组被回收后端口被新组 B 复用，B
+ *   就会继承 A 的 localStorage 和登录 cookie。
+ *
+ * ★ 规则只有这一条，**没有例外**。从前有一个：迁移出来的那个组沿用旧的
+ *   `persist:slot-1`，好让 0.2.0 及更早的用户不丢编辑器布局。那条路随"读旧配置"
+ *   一起删掉了（0.y 不考虑兼容性，见 CHANGELOG 的 0.7 那一节）。
  */
-const LEGACY_LAYOUT_ID = 'legacy-1';
-
-/**
- * 迁移出来的那个组的浏览器存储身份，以及 partition 名的**唯一例外**。
- *
- * partition 名就是 Electron 的存储目录名，所以「新 id → 新目录 → 天然空白」是
- * 「新建空白布局真的空白」的全部依据 —— 若按端口命名，A 组被回收后端口被新组 B 复用，
- * B 就会继承 A 的 localStorage 和登录 cookie。所以新组一律用 persist:layout-<id>。
- *
- * 但迁移出来的那个组**不改名**：用户的编辑器布局就躺在 persist:slot-1 里，改名等于把
- * 布局扔掉一次，而这个代价没有任何必要。
- *
- * 这不是「两套命名规则并存」：slot-1 只可能被这一个组用（loadLayouts 只在磁盘上还没有
- * layouts、且有 slots 时才合成它，一旦保存过就再也不会），而新组的 id 是 `l` + 随机 hex，
- * 永远撞不上 legacy-1。所以旧数据不可能被复活到新组头上。
- * 与 PENDING_ID 是同一类东西：一个为期永久的兼容别名。
- */
-const LEGACY_PARTITION = 'persist:slot-1';
-
 function partitionForLayout(id) {
-  return id === LEGACY_LAYOUT_ID ? LEGACY_PARTITION : 'persist:layout-' + id;
+  return 'persist:layout-' + id;
 }
 
 /** 随机、**永不复用**。复用会让一个已回收组的存储复活到新组头上。 */
@@ -594,19 +579,12 @@ function layoutPlan(cfg) {
   });
 }
 
-/** schema ≤ 4 的槽位 1 端口。沿用旧 slotPort 的校验；非法/缺失回落基址。 */
-function legacySlotPort(slots) {
-  const s = slots && slots['1'];
-  return (s && Number.isInteger(s.port) && s.port >= 1024 && s.port <= 65535)
-    ? s.port : LAYOUT_PORT_BASE;
-}
-
 /**
- * 解析布局组列表。三种来源，优先级从高到低。
+ * 解析布局组列表。
  *
- * ★ 迁移这一路的两条要求，缺一条老用户的布局就会丢一次：
- *   ① 组 id 用**字面量** LEGACY_LAYOUT_ID（见上，确定性）；
- *   ② 端口**原样继承** slots["1"].port（不是回落 18080）—— 端口是 origin 的一半。
+ * 组只有**一条来路**：磁盘上的 `layouts[]`。一个都没有而有连接时，就地补一个默认组。
+ * （0.2.0 及更早的 `slots` 那一路 —— 一个槽位、端口从配置里继承 —— 随"读旧配置"
+ * 一起删掉了，见 CHANGELOG 的 0.7 那一节。）
  */
 function loadLayouts(raw, connections) {
   const out = [];
@@ -621,12 +599,8 @@ function loadLayouts(raw, connections) {
       seen.add(n.id);
       out.push(n);
     }
-  } else if (raw.slots && typeof raw.slots === 'object') {
-    // schema ≤ 4。全仓只有槽位 1 被用过（index.js 里三处写死 slot: 1）。
-    out.push({ id: LEGACY_LAYOUT_ID, name: '默认布局', port: legacySlotPort(raw.slots) });
   }
-  // 兜底：有连接却一个组都没有（手改过配置，或从更旧、没有槽位的版本上来）。
-  // 这里用随机 id 更安全 —— 绝不能复活 legacy-1。
+  // 兜底：有连接却一个组都没有（手改过配置，或第一次配连接就写下了连接）。
   if (out.length === 0 && connections.length > 0) {
     out.push({ id: newLayoutId(), name: '默认布局', port: LAYOUT_PORT_BASE });
   }
@@ -643,11 +617,8 @@ function loadLayouts(raw, connections) {
 function configPath(dir) { return path.join(dir, 'config.json'); }
 
 /**
- * 读配置。
- *
- * 含一处**一次性迁移**：schema 1 的 `profile` + `extraHosts` 合并成 `connections`。
- * 不迁移的后果不是数据丢失那么明显 —— 是用户打开界面发现「之前填的地址没了」，
- * 而没有任何提示说为什么。
+ * 读配置。**只认已知键**（见下面那段），而且**只认当前格式** —— 旧格式不再有读取
+ * 路径，它们读作"没有配过"（0.y 不考虑兼容性，见 CHANGELOG 的 0.7 那一节）。
  */
 function loadConfig(dir) {
   const raw = readJson(configPath(dir));
@@ -694,11 +665,11 @@ function loadConfig(dir) {
     }
   }
 
-  // 连接列表：先取新格式，再补旧格式。
-  // 去重按**两个**维度：id（同一个条目被写了两遍），以及身份
-  // （user@host:port —— 旧版本每点一次「保存并连接」就新建一条，
-  //   配置里可能已经攒了一串完全一样的条目。这里顺手清掉，
-  //   否则用户升级完看到的还是那一堆，会以为修了个寂寞）。
+  // 连接列表。去重按**两个**维度：
+  //   · id —— 同一个条目被写了两遍；
+  //   · 身份（user@host:port）—— 一条连接的**身份就是这个三元组**，所以两条一模
+  //     一样的条目是同一条连接。手改过的配置可能攒出一串，留着的话用户看到的是
+  //     一堆重复项，而它们指向同一个地方。
   const list = [];
   const seen = new Set();
   const seenAddr = new Set();
@@ -713,17 +684,6 @@ function loadConfig(dir) {
   };
   if (Array.isArray(raw.connections)) {
     raw.connections.forEach(push);
-  } else {
-    // schema 1 的模型是「一个账号 + 若干备用地址」：账号在 profile 里，
-    // extraHosts 只描述地址（没有 user 字段）。
-    // 所以迁移时必须把 user/port **继承**过去 —— 否则这些条目会因为缺用户名
-    // 被 normalizeConnection 判为不合法而丢掉，而用户看到的只是「我配的地址没了」，
-    // 没有任何提示说为什么。
-    const base = (raw.profile && typeof raw.profile === 'object') ? raw.profile : null;
-    if (base && base.host) push(base);
-    if (Array.isArray(raw.extraHosts)) {
-      raw.extraHosts.forEach((h) => push(base ? { ...base, ...h } : h));
-    }
   }
 
   cfg.connections = list;
@@ -731,9 +691,8 @@ function loadConfig(dir) {
     ? raw.activeConnectionId
     : (list[0] ? list[0].id : null);
 
-  // 布局组必须在连接之后解析：迁移那一路要读 connections 才能把每条连接收束到一个
-  // 存在的组里，而 connections 侧的去重可能已经剔掉了几条。
-  // 旧的 slots 到这里自然消失（只认已知键，不写回），不需要显式删除。
+  // 布局组必须在连接之后解析：loadLayouts 要读 connections 才能把每条连接收束到一个
+  // 存在的组里，而连接侧的去重可能已经剔掉了几条。
   cfg.layouts = loadLayouts(raw, list);
 
   return cfg;
@@ -973,8 +932,7 @@ function removePendingGoodbye(dir, sessionId) {
 //
 //   v0.7 之前它长得多，其中这一批**一个外部读者都没有**（谁在读它，是靠
 //   "整个仓库搜一遍这个标识符"量出来的，不是靠感觉）：`SECRET_ENCRYPTED`、
-//   `LAYOUT_PORT_BASE`、`LEGACY_LAYOUT_ID`、
-//   `LEGACY_PARTITION`、`newConnectionId`、`normalizeConnection`、
+//   `LAYOUT_PORT_BASE`、`newConnectionId`、`normalizeConnection`、
 //   `connectionKey`、`hostKeyId`、`readSecretFile`。它们都还在文件里、还在被
 //   本文件用着，只是不再**承诺**给别人。
 //

@@ -275,7 +275,7 @@ test('duplicate id 被去掉，保留先出现的', () => {
   assert.equal(back.connections[0].label, '甲');
 });
 
-test('★ 旧格式（schema 1 的 profile + extraHosts）迁移成连接列表', () => {
+test('★ 旧格式不再被读：schema 1 的 profile + extraHosts 读作"没有配过"', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 1,
@@ -285,12 +285,13 @@ test('★ 旧格式（schema 1 的 profile + extraHosts）迁移成连接列表'
     maxSessions: 1,
   }));
 
+  // 从前这里把它们合成两条连接（user/port 从 profile 继承过去）。那条路删掉了
+  // （0.y 不考虑兼容性）—— 所以这条钉的是**实际发生的事**：一条连接都没有，
+  // 用户在界面上重新填一次。写"应该会怎样"没有意义，写清楚"就是这样"才有。
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.connections.length, 2, 'profile 与 extraHosts 都要迁进来');
-  assert.equal(cfg.connections[0].host, '198.51.100.10');
-  assert.equal(cfg.connections[1].label, '公网');
-  assert.equal(cfg.activeConnectionId, cfg.connections[0].id);
-  // 旧字段不再出现在新配置里
+  assert.deepEqual(cfg.connections, []);
+  // 旧字段不会跟着活下去（只认已知键，不写回）。留着它们，将来读这份配置的人
+  // 会以为它们还有用，去代码里找一个早就不存在的行为。
   assert.equal(cfg.profile, undefined);
   assert.equal(cfg.maxSessions, undefined);
 });
@@ -344,21 +345,6 @@ test('忘记主机密钥后回到 new', () => {
 //
 // 一个组 = 一个本地端口 = 一个 origin = 一份 code-server 的编辑器布局。
 
-/** 写一份 schema 4 的旧配置（有 slots、没有 layouts）。 */
-function legacyDir(slots = { 1: { port: 18093 } }) {
-  const dir = tmpdir();
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    schema: 4,
-    connections: [
-      { id: 'c1', label: '内网', user: 'alice', host: '198.51.100.10', port: 10100 },
-      { id: 'c2', label: '公网', user: 'alice', host: '203.0.113.7', port: 10100 },
-    ],
-    activeConnectionId: 'c1',
-    slots,
-  }));
-  return dir;
-}
-
 test('布局组：端口持久化，换过之后必须记住', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
@@ -380,58 +366,41 @@ test('布局组：端口越界就整条不合法，不补默认值', () => {
   assert.equal(config.normalizeLayout({ id: 'd', port: 18080 }).port, 18080);
 });
 
-test('★ 升级：旧的 slots 迁移成**一个**组，所有连接都指着它', () => {
-  const cfg = config.loadConfig(legacyDir());
+test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有布局"，就地补一个空白组', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 4,
+    connections: [
+      { id: 'c1', label: '内网', user: 'alice', host: '198.51.100.10', port: 10100 },
+      { id: 'c2', label: '公网', user: 'alice', host: '203.0.113.7', port: 10100 },
+    ],
+    activeConnectionId: 'c1',
+    slots: { 1: { port: 18093 } },
+  }));
 
-  assert.equal(cfg.layouts.length, 1, 'schema ≤ 4 只可能有一个槽位');
-  assert.equal(cfg.connections.length, 2);
-  for (const c of cfg.connections) {
-    assert.equal(c.layoutId, cfg.layouts[0].id, `${c.id} 必须落在那一个组里`);
-  }
+  // 从前这里把 slots 迁成**一个**组、沿用 18093 端口与 `persist:slot-1`，好让 0.2.0
+  // 及更早的用户不丢编辑器布局。那条路删掉了（0.y 不考虑兼容性）—— 所以这条钉的是
+  // **实际发生的事**：一个全新的空白组，端口回落到基址，存储是另一个目录。
+  const cfg = config.loadConfig(dir);
+  assert.equal(cfg.layouts.length, 1);
+  assert.equal(cfg.layouts[0].port, 18080, '不再继承 slots["1"].port');
   // 旧字段自然消失（只认已知键，不写回）。留着它，将来读这份配置的人
   // 会以为它还有用，去代码里找一个早就不存在的行为。
   assert.equal(cfg.slots, undefined);
   assert.equal(cfg.schema, 6);
+  // 两条连接收束到那一个组里 —— 这条与迁移无关，是 loadLayouts 自己的收束规则：
+  // 指向不存在的组 = 界面上一片空白，而用户看不出为什么。
+  for (const c of cfg.connections) {
+    assert.equal(c.layoutId, cfg.layouts[0].id, `${c.id} 必须落在那一个组里`);
+  }
 });
 
-/** 丢掉模块缓存再 require 一次 —— 模拟「重启客户端」。 */
-function reloadConfigModule() {
-  const p = require.resolve('../src/main/config.js');
-  delete require.cache[p];
-  const m = require('../src/main/config.js');
-  delete require.cache[p];          // 别把重载后的那一份留给后面的测试用
-  return m;
-}
-
-test('★ 升级必须**确定性**：重启客户端后组 id 必须还是同一个', () => {
-  const dir = legacyDir();
-  const first = config.loadConfig(dir).layouts[0].id;
-
-  // ★ 必须**真的重新加载模块**，否则这条测试什么也测不到。
-  //   同一进程里读两次当然一样 —— 而真正的失败模式在重启之后：loadConfig 自己
-  //   不写盘，所以「读完配置、一次都没保存就退出」再打开时，若 id 是当场随机
-  //   合成的，就会换一个 id；而 id 决定 partition，也就是决定布局存在哪。
-  //   于是一份刚攒下的布局凭空消失，且没有任何报错。
-  //   （这条测试第一版就是同一进程读两次，变异测试证明它抓不到这个 bug。）
-  const afterRestart = reloadConfigModule().loadConfig(dir);
-  assert.equal(afterRestart.layouts[0].id, first, '组 id 必须与「第几次启动」无关');
-});
-
-test('★ 升级不丢布局：迁移出来的组沿用旧端口与旧的 partition 名', () => {
-  const cfg = config.loadConfig(legacyDir({ 1: { port: 18093 } }));
-  const L = cfg.layouts[0];
-
-  // 这两条缺任何一条，老用户的编辑器布局就会重置一次：
-  //   · 端口是 origin 的一半（http://127.0.0.1:<端口>）
-  //   · partition 名是存储目录名
-  assert.equal(L.port, 18093, '端口必须原样继承，不能回落 18080');
-  assert.equal(config.partitionForLayout(L.id), 'persist:slot-1',
-    '迁移出来的组必须沿用旧的 partition 名，改名等于把布局扔掉一次');
-
-  // 而**新建**的组必须是另一套名字 —— 否则「新建空白布局」会继承旧组的存储。
+test('★ 每个组一个独立的存储目录，且 id 不复用', () => {
+  // id 决定 partition（Electron 的存储目录名），所以「新建空白布局真的空白」靠的是
+  // id **永不复用**：若按端口命名，A 组被回收后端口被新组 B 复用，B 就会继承 A 的
+  // localStorage 和登录 cookie。这条规则**没有例外**（从前有一个，见 partitionForLayout）。
   const fresh = config.newLayoutId();
   assert.match(fresh, /^l[0-9a-f]{12}$/);
-  assert.notEqual(config.partitionForLayout(fresh), 'persist:slot-1');
   assert.equal(config.partitionForLayout(fresh), 'persist:layout-' + fresh);
 });
 
@@ -519,7 +488,6 @@ test('★ 往返：保存再读，布局组与连接指向都不能丢', () => {
   const back = config.loadConfig(dir);
   assert.deepEqual(back.layouts, [{ id: 'lxyz', name: '生产集群', port: 18091 }]);
   assert.equal(back.connections[0].layoutId, 'lxyz');
-  assert.equal(back.slots, undefined);
 });
 
 test('指向不存在的组时收束到第一个组，而不是留个悬空引用', () => {
