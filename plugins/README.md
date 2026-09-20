@@ -175,7 +175,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
     "login": { "path": "/login", "field": "password", "cookie": "code-server-session" },
     "layout": true,
     "submitPubkey": false,
-    "legacyDefault": true
+    "defaultService": true
   },
 
   "site": {
@@ -219,7 +219,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | `login` | `{ path, field, cookie }`。**这是数据，不是代码** —— 基座实现的是「POST 一个表单、然后查 cookie」这个通用机制，端点/字段名/cookie 名三条具体值由插件自述。有了它，基座一个字都不知道 code-server 是什么，而任何 web 插件都能自动登录。 |
 | `layout` | 这个插件的会话能不能共用布局。 |
 | `submitPubkey` | 提交时客户端要随请求带一行 ssh 公钥。**这一条两侧都读**：客户端据此取公钥，守护进程据此校验并下发 `SLURMATE_SSH_PUBKEY`。 |
-| `legacyDefault` | 老守护进程（连服务种类都不报）产生的会话，只能由标了它的插件接手。只有"升级前那个唯一可用的服务"该标 —— 见下面 `defaultEnabled` 的说明。 |
+| `defaultService` | **不指定服务种类时用哪一个**。只有本站人人都要用的那个服务该标 —— 今天只有 code-server。标了它的插件在界面上就是"不挑就用它"的那一个。没人标、或两个以上都标，就没有缺省（提交时必须写明要哪个）。 |
 
 ### `site` —— 集群侧
 
@@ -230,9 +230,9 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | `bin` | | 作业里那个可执行文件在哪。`env` 是传给作业的环境变量名（**必须以 `SLURMATE_` 开头** —— 那个名字会被塞进作业的环境变量表，前缀是本系统的领地）；`discovery` 是 `which`（先查 PATH）或 `convention`（只用惯例路径）；`name` 是 `which` 时要找的文件名；`fallback` 是找不到时的路径。 |
 | `enumKeys` | | 取值只能固定的配置键：`{ 键名: { choices: [...], default: "..." } }`。它们同时**就是**这个插件块里允许出现的额外键。 |
 
-★ **`defaultEnabled` 只有一种插件该标 `true`**：它就是升级前那个唯一可用的服务。
-那条标记存在的**全部理由**是「升级不改变现有站点的行为」，而不是"这个插件比较
-重要"。新插件标了它，等于给所有站点在升级时静默多开一个能力。
+★ **`defaultEnabled` 只有一种插件该标 `true`**：**本站人人都要用的那个服务**（今天
+只有 code-server）。它的用处是让「一个 `[plugin:*]` 块都没写的站点」装完就能用上它 ——
+而不是"这个插件比较重要"。新插件标了它，等于给所有站点静默多开一个能力。
 
 ★ `bin.discovery` 的差别是真实的：守护进程在**登录节点**上跑，而作业跑在**计算
 节点**上。`which` 的结果只是推测；`convention` 反而比"登录节点上恰好有这个文件"

@@ -9,7 +9,7 @@
   "contributes": {
     "layout": false,
     "submitPubkey": true,
-    "legacyDefault": false
+    "defaultService": false
   },
   "site": {
     "defaultCpus": 1,

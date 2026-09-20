@@ -9,6 +9,6 @@
   "contributes": {
     "layout": false,
     "submitPubkey": false,
-    "legacyDefault": false
+    "defaultService": false
   }
 }

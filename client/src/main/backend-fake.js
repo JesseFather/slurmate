@@ -838,8 +838,7 @@ class FakeBackend extends Backend {
       tunnel_target: s.tunnel_target,
       // 与守护进程逐字一致：这个字段**总是**存在（可能是 null）。
       // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——
-      // 而"字段不存在"是另一回事（老守护进程），那时按标了 legacyDefault 的
-      // 那个插件兜底（本机没装它就只解释、不动作）。
+      // 而"字段不存在"（更旧的守护进程）在客户端那边落到同一个答案：也不猜。
       service_kind: s.service_kind === undefined ? null : s.service_kind,
       // 与守护进程一致：也是**总是存在**（可能是 null）。null = 服务端不知道
       // 这个会话是哪一版的插件，客户端据此拒绝猜测（只解释、不动作）。

@@ -15,7 +15,7 @@
     },
     "layout": true,
     "submitPubkey": false,
-    "legacyDefault": true
+    "defaultService": true
   },
   "site": {
     "defaultCpus": 2,

@@ -4223,7 +4223,7 @@ class Sessiond(object):
             "service_kind": s["service_kind"],
             # 会话的**解析键**（`<id>@<版本>`）。同样是三态：字段总是存在，
             # NULL = 不知道（从 nft 规则恢复出来的会话），而"字段不存在"是另一回事
-            # （老守护进程），那时客户端按内建插件的短名兜底。
+            # （更旧的守护进程）。后两种在客户端那边是同一个答案：**不猜**。
             "service_plugin": s["service_plugin"],
             "node": s["node"],
             "node_ip": s["node_ip"], "service_port": s["service_port"],

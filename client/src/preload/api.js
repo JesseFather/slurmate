@@ -86,8 +86,8 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
   // serviceKind 是**本站的短名**（配置块名、块标题旁边那个 code）。省略 = 缺省
-  // 插件（标了 legacyDefault 的那一个）—— 与这个参数存在之前的行为一致。客户端
-  // 再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。
+  // 插件（清单里标了 defaultService 的那一个）—— 与这个参数存在之前的行为一致。
+  // 客户端再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。
   // 本机一个插件都没装时，主进程会拒绝并说清该往哪放。
   start: (resources, serviceKind) =>
     ipcRenderer.invoke('app:start', resources, serviceKind),

@@ -132,19 +132,19 @@ enabled          →  它开没开（决定用户能不能提交它）
               否则 = 插件清单里的 site.defaultEnabled（缺省 false）
 ```
 
-`site.defaultEnabled` 为 `true` 的只有一种插件：**它就是升级前那个唯一可用的服务**
-（历史上是 code-server）。那条标记存在的**全部理由**是「升级不改变现有站点的
-行为」，而不是"这个插件比较重要"。于是：
+`site.defaultEnabled` 为 `true` 的只有一种插件：**本站人人都要用的那个服务**
+（今天只有 code-server）。那条标记的用处是让「**一个 `[plugin:*]` 块都没写的站点**」
+装完就能用上它 —— 而不是"这个插件比较重要"。于是：
 
-- **一个块都没有**（老配置）→ 只开 code-server，**与升级前完全一致**；
+- **一个块都没有** → 只开 code-server（那正是"零配置也能用"）；
 - 写一个 `[plugin:sshd]` 块**不会**顺手把 code-server 关掉 —— 那正是最危险的那类
   静默改变（管理员只想开中转站，结果所有人的 IDE 没了）；
 - 写一个 `[plugin:sshd]` 块也**不会**因为"块在那儿"就自动开启 sshd —— 那会让一句
   `default_cpus = 1` 在没有任何显式同意的情况下开出一条交互式 ssh 的路。
   **想开就写 `enabled = yes`。**
 
-★ **新插件的清单里不要写 `site.defaultEnabled: true`。** 那等于给所有站点在升级时
-静默多开一个能力。让站点自己写 `enabled = yes`。
+★ **新插件的清单里不要写 `site.defaultEnabled: true`。** 那等于给所有站点静默多开
+一个能力。让站点自己写 `enabled = yes`。
 
 ### 一个插件都没装 / 一个都没开
 

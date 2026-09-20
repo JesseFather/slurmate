@@ -96,7 +96,7 @@ const CLIENT_ENTRY = path.join('client', 'index.js');
  */
 const COPY_SKIP = new Set(['.git', '.github', '.gitignore', '.gitattributes', 'node_modules']);
 
-/** route() 认不出来时的答案。**不是**一个能提交的服务，只是客户端内部的一个
+/** resolve() 认不出来时的答案。**不是**一个能提交的服务，只是客户端内部的一个
  *  判定结果 —— 所以它不可能与任何插件的名字撞上（短名里不允许出现它）。 */
 const UNKNOWN = 'unknown';
 
@@ -107,7 +107,7 @@ const UNKNOWN = 'unknown';
 
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
   'author', 'engines', 'contributes', 'site'];
-const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'legacyDefault'];
+const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
 const LOGIN_KEYS = ['path', 'field', 'cookie'];
@@ -738,7 +738,7 @@ function inspectDir(dir, source) {
       login,
       layout: mfc.layout === true,
       submitPubkey: mfc.submitPubkey === true,
-      legacyDefault: mfc.legacyDefault === true,
+      defaultService: mfc.defaultService === true,
     },
     // ── 加载记录 ──
     dir,
@@ -1088,8 +1088,9 @@ class Registry {
   /**
    * 按**短名**取（同一个短名有多个版本时取版本最高的那个）。
    *
-   * ★ 这**不是**一条会话解析路径 —— 解析永远走 `(id, 版本)`。它只有两个用处：
-   *   给界面画"当前版本"，以及老守护进程的兜底（见 resolve）。
+   * ★ 这**不是**一条会话解析路径 —— 解析永远走 `(id, 版本)`（见 resolve）。它只有
+   *   两个用处：给界面画"当前版本"，以及**站点没报插件标识**时挑一份去提交
+   *   （`index.js` 的 `pickForSubmit`）。
    */
   latestByName(name) {
     const hit = this.list().filter((p) => p.name === name);
@@ -1097,39 +1098,36 @@ class Registry {
   }
 
   /**
-   * 老守护进程不返回 `service_plugin`、连 `service_kind` 都没有时兜到哪一个。
+   * **不指定服务种类时**用哪一个 —— 清单里标了 `defaultService` 的那一个。
    *
-   * ★ 这是**正确的兜底，不是猜测**：在「插件」这一层做出来之前，作业模板只会起
-   *   一种服务，所以那种守护进程只可能产生被标了 `legacyDefault` 的那个插件的
-   *   会话。挑出它，是还原一个已知事实。
+   * ★ 这是**缺省**，不是**猜测**，两者别混：它只用在**提交**那条路上
+   *   （`startSession` 省略 serviceKind 时），而"用哪一个"是本站自己的约定，写在
+   *   清单里。**接手一个已经存在的会话**是另一回事 —— 那时服务端说了才算，绝不
+   *   兜底，见 resolve()。
    *
-   * ★ 但**兜不到的时候要说得出为什么**。以前这个位置返回 `why: null`，理由是
-   *   "内建插件一定在"；基座不再自带任何插件之后，这句话就没有依据了 ——
-   *   于是它会静默地退化成一个不解释任何东西的 UNKNOWN。见 resolve()。
-   *
-   * 没人标 `legacyDefault`、或有两个以上都标了，返回 null —— 那时 resolve() 只
-   * 解释、不动作。这比错误地兜到某一个插件安全得多。
+   * 没人标、或有两个以上都标了，返回 null。多个都标是清单写错了，这里不替它挑。
    */
   defaultPlugin() {
-    const all = this.list().filter((p) => p.contributes.legacyDefault);
+    const all = this.list().filter((p) => p.contributes.defaultService);
     return all.length === 1 ? all[0] : null;
   }
 
   /**
-   * 把一个会话归一成插件。**四种输入，四种答案，一种都不能合并**：
+   * 把一个会话归一成插件。**三种输入，三种答案，一种都不能合并**：
    *
    *   service_plugin 是 `<id>@<版本>`   池里查得到   → 它
    *                                     池里查不到   → UNKNOWN（并说清缺什么）
-   *   undefined（老守护进程，字段不存在）
-   *       + service_kind 也 undefined   → legacyDefault 那个插件
-   *       + service_kind 是短名          → 按短名找，**唯一命中才算**（见下）
-   *       + service_kind === null        → UNKNOWN，**绝不猜**
-   *   其余（含认不出的名字、坏掉的 `<id>@<版本>`）→ UNKNOWN，**不退回缺省**
+   *   service_kind 是 `null`／键不存在                → UNKNOWN，**绝不猜**（见下）
+   *   其余（认不出的名字、坏掉的 `<id>@<版本>`）→ UNKNOWN，**不退回缺省**
    *
-   * ★ 认不出的**不退回缺省**：那等于系统声称一件它并不知道的事。
+   * ★ 认不出的**不退回缺省**：那等于系统声称一件它并不知道的事，而症状是客户端
+   *   拿另一个插件的代码去对接这个作业。
    *
-   * ★ `null` 与 `undefined` 的分野是承重的，别合并：前者是"服务端明确告诉你它
-   *   不知道"（会话是从 nft 规则恢复出来的），后者是"这个字段还不存在"（版本旧）。
+   * ★ 服务端**没说**是哪一种服务时一律 UNKNOWN，`null`（从 nft 规则恢复出来的会话，
+   *   服务端也不知道）与"这个键根本不存在"在这里是同一件事。从前后者会兜到标了
+   *   `legacyDefault` 的插件上，理由是"那种守护进程只可能起一种服务" —— 那说的是
+   *   **插件这一层做出来之前**的守护进程，而那个组合今天不存在（0.y 不考虑兼容性）。
+   *   而且那条兜底本身就违反这里的三态纪律：**缺席不等于可以猜**。
    *
    * @returns {{plugin: object|null, why: string|null}}
    *   `why` 只在"明确要某个插件而它不在"时非空 —— 那是一句能直接说给用户听的话。
@@ -1149,39 +1147,14 @@ class Registry {
       return { plugin: null, why: `控制节点给的插件标识 ${JSON.stringify(servicePlugin)} 认不出来` };
     }
 
-    if (serviceKind === null) return { plugin: null, why: null };
+    if (serviceKind === null || serviceKind === undefined) return { plugin: null, why: null };
 
-    if (serviceKind === undefined) {
-      const d = this.defaultPlugin();
-      return {
-        plugin: d,
-        why: d ? null
-          : '这个会话来自一个更老的守护进程（它连服务种类都不报）—— 那种守护进程'
-            + '只可能产生标了 legacyDefault 的那个插件的会话，而本机没有装它。',
-      };
-    }
-
-    // 老守护进程：只有一个**短名**，没有 `<id>@<版本>`。
-    //
-    // ★ 早先这里限定「必须是内建的」，理由是"老守护进程只可能产生内建插件的
-    //   会话"。基座不再自带插件之后那句话就不成立了，而按短名在池里找是**有
-    //   歧义的**：池是全局的，两个站点可以各有一个叫 jupyter 的插件，而它们是
-    //   两个不同的东西（各自有各自的 id）。所以判据从"是不是内建"换成
-    //   **"是不是唯一"** —— 命中多个就不猜，说出来让用户自己判断。
-    const hits = this.list().filter((x) => x.name === serviceKind);
-    if (hits.length === 1) {
-      return hits[0].active === false
-        ? { plugin: null, why: inertWhy(hits[0]) }
-        : { plugin: hits[0], why: null };
-    }
-    return {
-      plugin: null,
-      why: hits.length
-        ? `本机装了 ${hits.length} 个都叫「${serviceKind}」的插件，`
-          + '而它们来自不同的来源，无法判断这个会话用的是哪一个。'
-        : `本机没有装短名为「${serviceKind}」的插件 —— 会话是在别的机器上`
-          + '提交的，或者插件被卸掉了。',
-    };
+    // 到这儿只剩一种形状：报了**短名**、却没有可用的 `<id>@<版本>`。短名在池里是
+    // **有歧义的**（两个站点可以各有一个同名插件而它们是两个不同的东西），不足以
+    // 定位一个会话用的是哪一份 —— 所以不猜，把话说出来。
+    return { plugin: null,
+             why: `控制节点只报了一个短名 ${JSON.stringify(serviceKind)}，`
+                  + '没有报它是哪个插件、哪一版 —— 无法确定这个会话用的是哪一份代码' };
   }
 
   /**

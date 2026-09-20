@@ -1859,9 +1859,9 @@ async function tryReattach() {
   const s = resp.data && resp.data.session;
   if (!s) return;                      // 没有活跃会话，正常路径
 
-  // ★ 用**注册表**归一，而不是在会话对象上直接判。四种输入四种答案，理由见
-  //   plugins/index.js 的 resolve()：`<id>@<版本>` 查池；老守护进程没有这个字段
-  //   时按短名找内建的；服务端明说不知道（null）时**绝不猜**。
+  // ★ 用**注册表**归一，而不是在会话对象上直接判。三种输入三种答案，理由见
+  //   plugins/index.js 的 resolve()：`<id>@<版本>` 查池；服务端**没说**是哪一种
+  //   服务（`null`，或这个键根本不存在）时**绝不猜**。
   //
   //   `why` 是"明确要某一版而它不在"时的一句人话，一路带到 warnUnknownService ——
   //   在这里重新推一遍是不行的，站点会升级，那时的站点清单已经和这个会话提交时
@@ -2324,8 +2324,8 @@ function registerIpc() {
    * 起一个会话。
    *
    * @param {object} resources 高级选项里的临时覆盖（省略字段 = 用服务端默认）
-   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件**（标了 legacyDefault
-   *        的那一个），与这个参数存在之前的行为一致。
+   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件**（清单里标了
+   *        `defaultService` 的那一个），与这个参数存在之前的行为一致。
    */
   send('app:start', async (resources, serviceKind) => {
     const snap = await startSession(resources, serviceKind);

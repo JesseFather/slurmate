@@ -253,7 +253,7 @@ sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>
 `packer build` 打成包，别的什么确认无用之后人工删掉。
 
 **再确认配置里没有把它关掉。** 一个 `[plugin:*]` 块都没有时，缺省取插件清单里的
-`site.defaultEnabled`（code-server 是 true，与升级前一致）；但只要你写了
+`site.defaultEnabled`（code-server 是 true）；但只要你写了
 `[plugin:code-server] enabled = no`（或者只写了 `[plugin:sshd] enabled = yes`
 并**同时**关了 code-server），那就只剩中转站。
 

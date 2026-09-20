@@ -981,31 +981,25 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
 
   assert.equal(reg.resolve(cs.id, ref).plugin.name, 'code-server', '解析键查得到就是它');
 
-  // ★ `service_plugin` 字段**不存在**（部署的守护进程还是旧版本，那时还没有
-  //   "插件"这一层，作业模板只会起一种服务）：按**短名**找。
+  // ★ **服务端没说**是哪一种服务时，一律不猜 —— 而且是**两种"没说"同一个答案**：
+  //     · `null`     守护进程**明说**它不知道（会话是从 nft 规则恢复出来的）
+  //     · 键不存在   更旧的守护进程根本没有这个字段
   //
-  //   早先这里还限定"必须是内建的"，理由是"老守护进程只可能产生内建插件的会话"。
-  //   基座不再自带插件之后那句前提没有了，而按短名在池里找是**有歧义**的 ——
-  //   判据因此换成**"是不是唯一"**。见下面那条。
-  assert.equal(reg.resolve('code-server', undefined).plugin.name, 'code-server',
-    '老守护进程没有解析键时，按短名找 —— 唯一命中才算');
-  assert.equal(reg.resolve(undefined, undefined).plugin.name, 'code-server',
-    '连服务种类都没有时兜到标了 legacyDefault 的那个');
-  // ★ **命中多个就不猜。** 池是全局的，两个站点可以各有一个叫同一个名字的插件，
-  //   而它们是两个不同的东西。挑一个的后果是拿另一个插件的代码去对接这个作业。
-  const tmpSame = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-same-'));
-  writePlugin(tmpSame, 'x1', { name: 'twins', displayName: '孪生甲' }, 'module.exports = {};\n');
-  writePlugin(tmpSame, 'x2', { name: 'twins', displayName: '孪生乙' }, 'module.exports = {};\n');
-  const regTwin = new Registry([{ dir: tmpSame, source: 'pool' }]);
-  const twin = regTwin.resolve('twins', undefined);
-  assert.equal(twin.plugin, null,
-    '★ 两个同名的插件在池里时，短名**不足以定位** —— 绝不挑一个');
-  assert.match(twin.why || '', /2/, `要说清有几个同名的：${twin.why}`);
-  // ★ `service_kind` 是 null（守护进程明说不知道：会话是从 nft 规则恢复出来的）。
-  //   这时**绝不能猜** —— 猜 code-server 会拿口令去 POST 一个 SSH 端口，
-  //   猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
+  //   从前后者会兜到标了 `legacyDefault` 的插件上，理由是"插件这一层做出来之前的
+  //   守护进程只可能起一种服务"。那条路删掉了：0.y 不支持那个组合，而且它本身就
+  //   违反这个协议的三态纪律 —— **缺席不等于可以猜**。
+  //
+  //   ★ 这里的"不猜"是承重的：猜 code-server 会拿口令去 POST 一个 SSH 端口，
+  //     猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
+  assert.equal(reg.resolve(undefined, undefined).plugin, null,
+    '键不存在时绝不猜（从前会兜到 legacyDefault 那个插件上）');
   assert.equal(reg.resolve(null, undefined).plugin, null,
-    '守护进程明说不知道时绝不能猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
+    '守护进程明说不知道时绝不猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
+  // ★ 只给了**短名**、没有解析键，也**不足以定位**：池是全局的，两个站点可以各有
+  //   一个叫同一个名字的插件，而它们是两个不同的东西。哪怕短名唯一命中也不猜 ——
+  //   命中唯一只说明"本机只有一个叫这个名字的"，没说明这个会话用的是哪一版。
+  assert.equal(reg.resolve('code-server', undefined).plugin, null,
+    '★ 只有短名时绝不猜 —— 它没有说清这个会话用的是哪一份代码');
   assert.equal(reg.resolve('ssh', undefined).plugin, null, '认不出的短名也不许退回默认');
   assert.equal(reg.resolve('code-server', 'garbage').plugin, null, '坏掉的解析键不许退回默认');
 
@@ -1025,20 +1019,20 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   assert.match(reg.resolve(u.mint(), `${u.mint()}@1.0.0`).why || '', /没有/,
     '本机根本没有这个 id 时，要说"没有这个插件"，而不是"版本不对"');
 
-  // ★ 缺省插件靠的是清单里那个 legacyDefault 标记，**不是"列表里第一个"**。
+  // ★ 缺省插件靠的是清单里那个 defaultService 标记，**不是"列表里第一个"**。
   //   内建这两个恰好同名序与标记重合（code-server 字母序在前、也正是它标了
-  //   legacyDefault），所以只测内建的注册表分辨不出这两种实现。加一个名字排序
+  //   defaultService），所以只测内建的注册表分辨不出这两种实现。加一个名字排序
   //   在前的插件，答案就会分叉。
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-def-'));
   writePlugin(tmp, 'aaa', { name: 'aaa', displayName: '排在前面的' },
     'module.exports = {};\n');
   writePlugin(tmp, 'zzz', { name: 'zzz', displayName: '真正的缺省',
-    contributes: { legacyDefault: true } }, 'module.exports = {};\n');
+    contributes: { defaultService: true } }, 'module.exports = {};\n');
   const reg2 = new Registry([{ dir: tmp, source: 'pool' }]);
   assert.deepEqual(reg2.list().map((p) => p.name), ['aaa', 'zzz'], '前置条件：顺序');
   assert.equal(reg2.defaultPlugin().name, 'zzz',
-    '★ 缺省插件是**标了 legacyDefault 的那一个**，不是列表里第一个 —— '
-    + '按"第一个"取的话，加一个名字排序在前的插件就会把老守护进程的会话认错');
+    '★ 缺省插件是**标了 defaultService 的那一个**，不是列表里第一个 —— '
+    + '按"第一个"取的话，加一个名字排序在前的插件就会把真正的缺省顶掉');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
