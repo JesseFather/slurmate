@@ -56,6 +56,7 @@ const fs = require('fs');
 const path = require('path');
 
 const config = require('./config.js');
+const pluginData = require('./plugin-data.js');
 const keys = require('./keys.js');
 const hosts = require('./hosts.js');
 // ★ `KIND` 也引进来：主进程里有好几处要问"这是不是那个假后端"。写字面量
@@ -1144,14 +1145,39 @@ function commitConfig() {
  * 不 await：删一个组不该因为磁盘慢而卡住界面。
  */
 function clearLayoutStorage(layoutId) {
-  const partition = config.partitionForLayout(layoutId);
-  if (win && win.surfacePartition === partition) return;
-  try {
-    electronSession.fromPartition(partition).clearStorageData()
-      .catch((e) => win.pushNotice('warn',
-        `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`));
-  } catch (e) {
-    win.pushNotice('warn', `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`);
+  // 哪些插件的存储挂在这个组上：**有界面、而且声明了分实例**的那些。
+  //   · 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）；
+  //   · 没声明分实例 ⇒ 只有一份存储，它不属于任何一个组 —— 跟着某个组一起清掉
+  //     就是把这个插件唯一的那份数据删了。判据只能看声明，不能看"哪个插件在跑"：
+  //     一个今天没在跑的插件，它的存储照样在这个组里。
+  const partitions = registry.list()
+    .filter((p) => p.contributes.surface && pluginData.hasInstance(p))
+    .map((p) => pluginData.partitionOf(pluginData.identityOf(p, layoutId)));
+
+  for (const partition of partitions) {
+    // ★ 正被那块界面用着的分区**不能碰**（抽掉它会把用户当前那份数据连 cookie
+    //   一起弄坏，而症状只是「页面莫名其妙坏了」）。从前这里是 `return` —— 那时
+    //   只有一个分区，跳过它就等于跳过整件事；多份之后跳过**这一个**才是它本来的
+    //   意思。
+    //
+    //   ★ 这一条今天**够不着**，写在这里免得下一个人把它当成一道正在生效的防线：
+    //     界面还在的时候，它那个分区必定属于一个引用计数 ≥ 1 的组（跑着的会话就是
+    //     那条连接），而回收只删引用计数为 0 的；界面不在的时候 `_destroySurface()`
+    //     已经把 `surfacePartition` 清成 null 了。它留着是因为它守的那条不变量是
+    //     **约定**而不是类型 —— `setConnectionLayout` 那条"先 relisten、成功了才动
+    //     配置"的次序一旦被改坏，这里就是最后一道。（与 plugins/index.js 的
+    //     `parseVer` 同一类：留着一个不可观测的守卫，并且**明说**它不可观测。）
+    //
+    //   ★ 跳过仍然是**静默**的（既不删也不报）。那一格 —— 清了一半、剩下一份谁也
+    //     不知道的残留 —— 属于"生命周期"那一阶段要做的事。
+    if (win && win.surfacePartition === partition) continue;
+    try {
+      electronSession.fromPartition(partition).clearStorageData()
+        .catch((e) => win.pushNotice('warn',
+          `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`));
+    } catch (e) {
+      win.pushNotice('warn', `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`);
+    }
   }
 }
 
@@ -1657,12 +1683,17 @@ async function ensureSurface(plugin, snap) {
   const surface = plugin.contributes.surface;
   if (!surface) return;
 
-  // 分区：要布局组的用布局组的分区（同一个组的若干条连接共用一份 localStorage，
-  // 这是布局组存在的全部理由）；不要的用**按插件**的一份 —— 一个网页应用自己的
-  // 状态该跟它自己走，跟会话走会在每次重开时重置。
-  const partition = plugin.contributes.layout
-    ? config.partitionForLayout(snap.layoutId)
-    : `persist:plugin-${plugin.id}`;
+  // 分区：**由插件自己声明的身份长出来**（见 plugin-data.js）。声明了分实例的插件
+  // 按布局组分（同一个组的若干条连接共用一份 localStorage，那正是布局组存在的
+  // 理由）；没声明的只有一份 —— 一个网页应用自己的状态该跟它自己走，跟会话走会在
+  // 每次重开时重置。
+  //
+  // ★ 这里从前是一个三元表达式（`layout` 为真走 `persist:layout-<组 id>`，否则走
+  //   `persist:plugin-<插件 id>`）。那两半都**硬编码**在这一个表达式里：跨版本共享
+  //   与否、按不按实例分，作者一句话都说不上，而"加一个作者写了却没人读的字段"
+  //   正是这个仓库一路在删的形状。
+  const partition = pluginData.partitionOf(
+    pluginData.identityOf(plugin, snap.layoutId));
 
   // 换布局组 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局重置了）必须
   // 说出来，否则他只会觉得"我的设置莫名其妙没了"。

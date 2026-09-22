@@ -76,6 +76,7 @@ const path = require('path');
 const crypto = require('crypto');
 const vm = require('vm');
 const ulid = require('./ulid.js');
+const pluginData = require('../plugin-data.js');
 
 const MANIFEST = 'plugin.json';
 const CLIENT_ENTRY = path.join('client', 'index.js');
@@ -107,7 +108,9 @@ const UNKNOWN = 'unknown';
 
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
   'author', 'engines', 'contributes', 'site'];
-const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService'];
+const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService', 'data'];
+/** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头（两条轴、两个缺省）。 */
+const DATA_KEYS = ['inherit', 'perInstance'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
 const LOGIN_KEYS = ['path', 'field', 'cookie'];
@@ -685,10 +688,48 @@ function inspectDir(dir, source) {
   }
 
   for (const k of CONTRIBUTES_KEYS) {
-    if (k === 'surface' || k === 'login') continue;
+    if (k === 'surface' || k === 'login' || k === 'data') continue;
     if (mfc[k] !== undefined && typeof mfc[k] !== 'boolean') {
       return { error: `${mfPath}：contributes.${k} 必须是 true 或 false` };
     }
+  }
+
+  // data —— **给客户端自己读的那一段**：这个插件的运行时数据存在哪儿、和谁共用。
+  //
+  // ★ 它与 `site` 那一段正好相对，而**判据是同一条**：每一侧只校验自己真正会读的
+  //   东西。`site` 是集群侧读的，客户端只查形状、**不做深究**（打错一个键名由守护
+  //   进程在扫描时报错）；`data` 是客户端自己读的，所以客户端要**深究到底**。谁读
+  //   决定了谁深究，而不是"哪一段更重要"。
+  //
+  // ★ 深究到什么程度：组的字符集（它进分区名 = 磁盘目录名）、两个值各自的类型、
+  //   以及**一个组合** —— 见下面 perInstance 那一条。
+  let data = null;
+  if (mfc.data !== undefined && mfc.data !== null) {
+    const d = mfc.data;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) {
+      return { error: `${mfPath}：contributes.data 必须是一个对象` };
+    }
+    why = keysProblem(d, DATA_KEYS, 'contributes.data');
+    if (why) return { error: `${mfPath}：${why}` };
+    if (d.inherit !== undefined
+        && (typeof d.inherit !== 'string' || !pluginData.GROUP_RE.test(d.inherit))) {
+      return { error: `${mfPath}：contributes.data.inherit 必须匹配 `
+        + `${pluginData.GROUP_RE}（小写字母开头，只含小写字母/数字/连字符），`
+        + `现在是 ${JSON.stringify(d.inherit)}` };
+    }
+    if (d.perInstance !== undefined && typeof d.perInstance !== 'boolean') {
+      return { error: `${mfPath}：contributes.data.perInstance 必须是 true 或 false` };
+    }
+    // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：实例键今天只有一个来源
+    //   —— 布局组（一条连接挂在一个组上）。没有布局组就没有"每个实例一份"可指，
+    //   而"声明了却指不出来"只会在开会话时变成一个说不清的下场。
+    //   判在**装之前**，与 `engines` 同一条纪律。
+    if (d.perInstance === true && mfc.layout !== true) {
+      return { error: `${mfPath}：contributes.data.perInstance 要求同时有 `
+        + 'contributes.layout: true —— 实例键就是布局组，没有布局组就没有"每个实例"'
+        + '（这只是各自一份，而它已经是缺省了）' };
+    }
+    data = { inherit: d.inherit || null, perInstance: d.perInstance === true };
   }
 
   // 客户端代码 —— 可有可无。没有它就是**纯声明式插件**：框架按 contributes
@@ -739,6 +780,10 @@ function inspectDir(dir, source) {
       layout: mfc.layout === true,
       submitPubkey: mfc.submitPubkey === true,
       defaultService: mfc.defaultService === true,
+      // ★ 那两条缺省在这里**不落成具体的值**：`null` 表示"这个插件没声明"，
+      //   而"回落成版本号 / 不分成实例"是 plugin-data.js 的 identityOf 干的事。
+      //   在这一层就把缺省填实，等于把那条规则抄成第二份。
+      data,
     },
     // ── 加载记录 ──
     dir,

@@ -15,7 +15,11 @@
     },
     "layout": true,
     "submitPubkey": false,
-    "defaultService": true
+    "defaultService": true,
+    "data": {
+      "inherit": "editor",
+      "perInstance": true
+    }
   },
   "site": {
     "defaultCpus": 2,

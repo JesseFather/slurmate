@@ -141,7 +141,8 @@ class ShellWindow {
    *
    * @param {string} url       完整 URL，形如 http://127.0.0.1:18080/lab
    *                           （主机部分**字面 127.0.0.1**，隧道在这一头）
-   * @param {string} partition 形如 'persist:layout-<布局组 id>'
+   * @param {string} partition 形如 'persist:<插件 id>@<共享组>[@<实例>]'
+   *                           （结构见 plugin-data.js 的文件头）
    * @param {boolean} demo     true 时注入 demo.js preload 用于快捷键对照。
    *                           **真实模式绝不注入任何 preload** —— 那会污染那款软件。
    *

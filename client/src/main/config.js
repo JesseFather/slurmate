@@ -412,6 +412,11 @@ function normalizeConnection(raw, fallbackId) {
 // 而 localStorage 按 **origin**（scheme://host:port）隔离 —— 客户端用隧道的本地监听端口
 // 构造 origin，所以「端口不同」就等于「布局不同」。布局组把「哪条连接用哪个端口」变成
 // 用户可控的映射：左侧连接条目、右侧布局组，多对一，引用计数归零即回收。
+//
+// ★ 组还担着第二个角色：它是插件运行时数据的**实例键**（见 plugin-data.js 的文件头
+//   那两条轴）。两件事能共用同一个 id，正是因为它们要的是同一样东西 ——「这几条连接
+//   算同一个」这件事由用户说了算，而不是某个组件自己判。这一节只管组本身（端口、
+//   引用计数、回收），"一份数据落在哪个分区"在 plugin-data.js 里。
 
 const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上按需递增
 
@@ -433,32 +438,44 @@ const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上�
 const RELAY_PORT_BASE = 18090;
 
 /**
- * 一个布局组在浏览器里的存储身份（partition 名 = Electron 的存储目录名）。
+ * 布局组 id 的**形状**。
  *
- * ★ 按**组 id** 命名，而 id 是随机的、**永不复用**的（见 newLayoutId）。这是「新建
- *   空白布局真的空白」的全部依据 —— 若按端口命名，A 组被回收后端口被新组 B 复用，B
- *   就会继承 A 的 localStorage 和登录 cookie。
+ * ★ 它进分区名，而分区名就是磁盘上的目录名（见 plugin-data.js 的 partitionOf）——
+ *   所以字符集必须钉死。`config.json` 是**用户能手改的**，在补上这一条之前
+ *   `"id": "../x"` 会一路走到路径里：`normalizeLayout` 当时只查了"非空字符串"。
+ *   （`persist:plugin-<ULID>` 那条之所以没事，是因为 ULID 有自己的白名单，
+ *   **不是这一层在管**。）
  *
- * ★ 规则只有这一条，**没有例外**。从前有一个：迁移出来的那个组沿用旧的
- *   `persist:slot-1`，好让 0.2.0 及更早的用户不丢编辑器布局。那条路随"读旧配置"
- *   一起删掉了（0.y 不考虑兼容性，见 CHANGELOG 的 0.7 那一节）。
+ * ★ 这是**补上从前的洞**，不是新规矩：它钉的就是 `newLayoutId` 铸出来的那个形状。
+ *
+ * ★ 新模型还要往同一个字符串里再塞一个作者写的组名（清单里的
+ *   `contributes.data.inherit`），所以这一格必须先关上。
  */
-function partitionForLayout(id) {
-  return 'persist:layout-' + id;
-}
+const LAYOUT_ID_RE = /^l[0-9a-f]{12}$/;
 
-/** 随机、**永不复用**。复用会让一个已回收组的存储复活到新组头上。 */
+/** 随机、**永不复用**。复用会让一个已回收组的存储复活到新组头上。
+ *  ——「新建空白布局真的空白」的全部依据：若按端口命名，A 组被回收后端口被新组 B
+ *  复用，B 就会继承 A 的 localStorage 和登录 cookie。 */
 function newLayoutId() {
   return 'l' + crypto.randomBytes(6).toString('hex');
 }
 
-/** 规整一个布局组；字段不合法则返回 null（与 normalizeConnection 同规矩，不静默填空）。 */
+/**
+ * 规整一个布局组；字段不合法则返回 null（与 normalizeConnection 同规矩，不静默填空）。
+ *
+ * ★ id 也要查形状（见 LAYOUT_ID_RE）。不合法的 id **丢掉整个组**，与其它字段不合法
+ *   时一致 —— `loadLayouts` 会跳过它，并把原来指着它的连接收束到第一个组上。不这样
+ *   做的话，一个手改出来的 id 会变成磁盘上一个谁也清不掉的目录。
+ */
 function normalizeLayout(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
   const port = Number(raw.port);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  const id = typeof raw.id === 'string' && raw.id ? raw.id
+    : (typeof fallbackId === 'string' && fallbackId ? fallbackId : newLayoutId());
+  if (!LAYOUT_ID_RE.test(id)) return null;
   return {
-    id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newLayoutId()),
+    id,
     name: String(raw.name || '').trim().slice(0, 40),
     port,
   };
@@ -947,7 +964,7 @@ module.exports = {
   SCHEMA, DEFAULTS, PENDING_ID,
   loadConfig, saveConfig,
   // 布局组
-  RELAY_PORT_BASE, partitionForLayout,
+  RELAY_PORT_BASE,
   newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
   nextLayoutName, layoutPort, setLayoutPort, setConnectionLayout,
   pruneLayouts, layoutPlan,

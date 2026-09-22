@@ -70,7 +70,8 @@ class FakeWebContents {
 class FakeWebContentsView {
   constructor(opts = {}) {
     this.webContents = new FakeWebContents();
-    // code-server 视图必须跑在自己的 partition 里（persist:layout-<布局组 id>）。
+    // code-server 视图必须跑在自己的 partition 里（= 它那份运行时数据的身份，
+    // 见 plugin-data.js）。
     // 登录要在这个 partition 的 cookie jar 里查 —— 所以桩也得把 session 接上。
     this.webContents.session =
       electronStub.session.fromPartition(opts.webPreferences && opts.webPreferences.partition);

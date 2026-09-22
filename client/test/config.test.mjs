@@ -21,10 +21,20 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const config = require('../src/main/config.js');
+const pluginData = require('../src/main/plugin-data.js');
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-cfg-'));
 }
+
+/**
+ * 一个**合法形状**的布局组 id（见 config.js 的 LAYOUT_ID_RE）。
+ *
+ * ★ 用例里 `gid(1)` 比一串随机十六进制好读，而**它不能省**：id 进磁盘路径，所以
+ *   `normalizeLayout` 会丢掉形状不对的那些 —— 从前这里写的是 `'la'` / `'lxyz'`，
+ *   那些值之所以能用，正是因为当时**没有任何东西在查它们**。
+ */
+const gid = (n) => 'l' + String(n).padStart(12, '0');
 
 /** 假的 safeStorage。真实现只在 Electron 里存在，测试不该依赖它。 */
 function fakeCrypto() {
@@ -351,19 +361,43 @@ test('布局组：端口持久化，换过之后必须记住', () => {
   assert.deepEqual(cfg.layouts, [], '一条连接都没有时不该有布局组');
 
   // 端口变了 origin 就变，编辑器布局会全部重置 —— 所以必须记住，不是每次重算。
-  cfg.layouts = [{ id: 'l1', name: '布局 1', port: 18080 }];
-  config.setLayoutPort(dir, cfg, 'l1', 18093);
-  assert.equal(config.layoutPort(config.loadConfig(dir), 'l1'), 18093);
+  cfg.layouts = [{ id: gid(1), name: '布局 1', port: 18080 }];
+  config.setLayoutPort(dir, cfg, gid(1), 18093);
+  assert.equal(config.layoutPort(config.loadConfig(dir), gid(1)), 18093);
 });
 
 test('布局组：端口越界就整条不合法，不补默认值', () => {
   // 与连接条目同规矩。补一个默认端口会让用户以为这个组还能用，
   // 而它其实指向一份永远不会被打开的存储。
-  assert.equal(config.normalizeLayout({ id: 'a', port: 80 }), null, '特权端口');
-  assert.equal(config.normalizeLayout({ id: 'b', port: 99999 }), null, '越界端口');
-  assert.equal(config.normalizeLayout({ id: 'c', port: 'x' }), null, '非数字');
+  assert.equal(config.normalizeLayout({ id: gid(1), port: 80 }), null, '特权端口');
+  assert.equal(config.normalizeLayout({ id: gid(2), port: 99999 }), null, '越界端口');
+  assert.equal(config.normalizeLayout({ id: gid(3), port: 'x' }), null, '非数字');
   assert.equal(config.normalizeLayout(null), null);
-  assert.equal(config.normalizeLayout({ id: 'd', port: 18080 }).port, 18080);
+  assert.equal(config.normalizeLayout({ id: gid(4), port: 18080 }).port, 18080);
+});
+
+test('★ 布局组 id 的形状也要查 —— 它进磁盘路径', () => {
+  // ★ 这一格从前**没有任何东西在查**：`normalizeLayout` 只问了"是不是非空字符串"，
+  //   而这个 id 会被拼成分区名 = Electron 的存储目录名 —— 于是 `config.json` 里
+  //   手写一个 `"id": "../x"` 就一路走到了路径里。（`persist:plugin-<ULID>` 那条
+  //   之所以没事，是因为 ULID 有自己的白名单，不是这一层在管。）
+  //   现在新模型还要往同一个字符串里再塞一个作者写的组名，所以这一格必须先关上。
+  for (const bad of ['../x', 'la', 'l' + 'g'.repeat(12), 'l' + '0'.repeat(11),
+    '../../etc', 'l0123456789ab/../x']) {
+    assert.equal(config.normalizeLayout({ id: bad, port: 18080 }), null,
+      `${JSON.stringify(bad)} 不是合法的布局组 id，必须整条丢掉`);
+  }
+  // ★ **写了一个形状不对的 id ⇒ 整条丢掉**；而**根本没写 id** 走的是原来那条路
+  //   （补一个新的）。两者不是一回事，也不该合并：前者是一个**会进路径的字符串**
+  //   （必须拦），后者只是"这个组还没有身份"—— 拦下来只会让一份手写的配置整组消失。
+  assert.match(config.normalizeLayout({ port: 18080 }).id, /^l[0-9a-f]{12}$/,
+    '没写 id 的组补一个新的');
+  // 合法的那一个（`newLayoutId` 铸出来的形状）要收下 —— 否则上面那几条会因为
+  // "什么都拒"而全绿。
+  assert.equal(config.normalizeLayout({ id: gid(7), port: 18080 }).id, gid(7));
+  assert.match(config.newLayoutId(), /^l[0-9a-f]{12}$/,
+    '★ 铸出来的 id 与查的形状必须是同一条规则（两边分家的话，用户每次新建组都会'
+    + '在下次启动时丢掉它）');
 });
 
 test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有布局"，就地补一个空白组', () => {
@@ -396,35 +430,45 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有布局"，
 });
 
 test('★ 每个组一个独立的存储目录，且 id 不复用', () => {
-  // id 决定 partition（Electron 的存储目录名），所以「新建空白布局真的空白」靠的是
-  // id **永不复用**：若按端口命名，A 组被回收后端口被新组 B 复用，B 就会继承 A 的
-  // localStorage 和登录 cookie。这条规则**没有例外**（从前有一个，见 partitionForLayout）。
-  const fresh = config.newLayoutId();
-  assert.match(fresh, /^l[0-9a-f]{12}$/);
-  assert.equal(config.partitionForLayout(fresh), 'persist:layout-' + fresh);
+  // 组 id 是 partition 的**末段**，而整个 partition 名就是 Electron 的存储目录名 ——
+  // 「新建空白布局真的空白」靠的是 id **永不复用**：若按端口命名，A 组被回收后端口
+  // 被新组 B 复用，B 就会继承 A 的 localStorage 和登录 cookie。
+  const cs = { id: '01M2JKHTZGKJBFQQTWYXMQMF2V', name: 'code-server', version: '1.0.0',
+    contributes: { layout: true, data: { inherit: 'editor', perInstance: true } } };
+  const of = (layoutId) => pluginData.partitionOf(pluginData.identityOf(cs, layoutId));
+
+  const a = config.newLayoutId();
+  const b = config.newLayoutId();
+  assert.match(a, /^l[0-9a-f]{12}$/);
+  assert.notEqual(a, b, 'id 永不复用');
+  assert.notEqual(of(a), of(b), '两个组必须是两份存储');
+  // ★ 整个身份都在里面：插件 id @ 共享组 @ 实例。从前只有末段（`persist:layout-<id>`），
+  //   于是"两个插件共用同一个组"会读写同一份存储 —— 今天只有一个这样的插件，
+  //   所以那是一个还没炸的洞。
+  assert.equal(of(a), `persist:${cs.id}@editor@${a}`);
 });
 
 test('回收：只删引用计数为 0 的组，并报出删了哪些', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.layouts = [
-    { id: 'la', name: 'A', port: 18080 },
-    { id: 'lb', name: 'B', port: 18081 },
-    { id: 'lc', name: 'C', port: 18082 },
+    { id: gid(1), name: 'A', port: 18080 },
+    { id: gid(2), name: 'B', port: 18081 },
+    { id: gid(3), name: 'C', port: 18082 },
   ];
   cfg.connections = [
-    { id: 'c1', user: 'a', host: 'h', port: 1, layoutId: 'la' },
-    { id: 'c2', user: 'b', host: 'h', port: 1, layoutId: 'lb' },
-    { id: 'c3', user: 'c', host: 'h', port: 1, layoutId: 'la' },
+    { id: 'c1', user: 'a', host: 'h', port: 1, layoutId: gid(1) },
+    { id: 'c2', user: 'b', host: 'h', port: 1, layoutId: gid(2) },
+    { id: 'c3', user: 'c', host: 'h', port: 1, layoutId: gid(1) },
   ];
 
   const r = config.pruneLayouts(cfg);
-  assert.deepEqual(r.removed, ['lc'], '只有 0 引用的那个该被删');
-  assert.deepEqual(cfg.layouts.map((l) => l.id), ['la', 'lb'], '顺序必须保持');
+  assert.deepEqual(r.removed, [gid(3)], '只有 0 引用的那个该被删');
+  assert.deepEqual(cfg.layouts.map((l) => l.id), [gid(1), gid(2)], '顺序必须保持');
 });
 
 test('回收：一条连接都没有时**不**回收 —— 演示模式的那个组必须活下来', () => {
   const cfg = config.loadConfig(tmpdir());
-  cfg.layouts = [{ id: 'ldemo', name: '演示布局', port: 18080 }];
+  cfg.layouts = [{ id: gid(9), name: '演示布局', port: 18080 }];
   cfg.connections = [];
 
   // 演示模式一个连接都没有，而它照样要开会话 —— 那个组是那次会话的布局身份。
@@ -432,19 +476,19 @@ test('回收：一条连接都没有时**不**回收 —— 演示模式的那�
   // 布局白重置一次，而用户看到的是「演示模式里布局老是丢」。
   const r = config.pruneLayouts(cfg);
   assert.deepEqual(r.removed, [], '没有映射关系要维护时，回收无事可做');
-  assert.deepEqual(cfg.layouts.map((l) => l.id), ['ldemo']);
+  assert.deepEqual(cfg.layouts.map((l) => l.id), [gid(9)]);
 });
 
 test('layoutPlan：把「这个组只被谁用」推导出来，renderer 不自己算', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.layouts = [
-    { id: 'la', name: '公用', port: 18080 },
-    { id: 'lb', name: '独占', port: 18081 },
+    { id: gid(1), name: '公用', port: 18080 },
+    { id: gid(2), name: '独占', port: 18081 },
   ];
   cfg.connections = [
-    { id: 'c1', user: 'a', host: 'h', port: 1, layoutId: 'la' },
-    { id: 'c2', user: 'b', host: 'h', port: 1, layoutId: 'la' },
-    { id: 'c3', user: 'c', host: 'h', port: 1, layoutId: 'lb' },
+    { id: 'c1', user: 'a', host: 'h', port: 1, layoutId: gid(1) },
+    { id: 'c2', user: 'b', host: 'h', port: 1, layoutId: gid(1) },
+    { id: 'c3', user: 'c', host: 'h', port: 1, layoutId: gid(2) },
   ];
 
   const plan = config.layoutPlan(cfg);
@@ -463,22 +507,22 @@ test('端口分配：从 18080 起，跳过已被占用的', () => {
   assert.equal(config.nextLayoutPort(cfg), 18080, '空配置从基址开始');
 
   cfg.layouts = [
-    { id: 'la', name: 'A', port: 18080 },
-    { id: 'lb', name: 'B', port: 18081 },
-    { id: 'lc', name: 'C', port: 18083 },
+    { id: gid(1), name: 'A', port: 18080 },
+    { id: gid(2), name: 'B', port: 18081 },
+    { id: gid(3), name: 'C', port: 18083 },
   ];
   assert.equal(config.nextLayoutPort(cfg), 18082, '必须填中间的空洞');
   // usedLayoutPorts 要能用 exceptId 把自己摘出去 —— 端口的顺移靠它，
   // 不摘的话目标组自己的端口会被当成「别人的」而永远绑不上。
-  assert.deepEqual([...config.usedLayoutPorts(cfg, 'lb')].sort(), [18080, 18083]);
+  assert.deepEqual([...config.usedLayoutPorts(cfg, gid(2))].sort(), [18080, 18083]);
 });
 
 test('★ 往返：保存再读，布局组与连接指向都不能丢', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
-  cfg.layouts = [{ id: 'lxyz', name: '生产集群', port: 18091 }];
+  cfg.layouts = [{ id: gid(11), name: '生产集群', port: 18091 }];
   cfg.connections = [
-    { id: 'c1', label: '', user: 'alice', host: '198.51.100.10', port: 10100, layoutId: 'lxyz' },
+    { id: 'c1', label: '', user: 'alice', host: '198.51.100.10', port: 10100, layoutId: gid(11) },
   ];
   config.saveConfig(dir, cfg);
 
@@ -486,21 +530,21 @@ test('★ 往返：保存再读，布局组与连接指向都不能丢', () => {
   // 是每次启动都丢掉全部布局组，所有连接塌回一个默认组，
   // 而用户看到的只是「我配的映射关系没了」。
   const back = config.loadConfig(dir);
-  assert.deepEqual(back.layouts, [{ id: 'lxyz', name: '生产集群', port: 18091 }]);
-  assert.equal(back.connections[0].layoutId, 'lxyz');
+  assert.deepEqual(back.layouts, [{ id: gid(11), name: '生产集群', port: 18091 }]);
+  assert.equal(back.connections[0].layoutId, gid(11));
 });
 
 test('指向不存在的组时收束到第一个组，而不是留个悬空引用', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 5,
-    layouts: [{ id: 'la', name: 'A', port: 18080 }],
+    layouts: [{ id: gid(1), name: 'A', port: 18080 }],
     connections: [{ id: 'c1', user: 'a', host: '198.51.100.10', port: 10100, layoutId: '不存在' }],
     activeConnectionId: 'c1',
   }));
   const cfg = config.loadConfig(dir);
   // 悬空引用在界面上表现为「这条连接不属于任何布局」，而用户看不出为什么。
-  assert.equal(cfg.connections[0].layoutId, 'la');
+  assert.equal(cfg.connections[0].layoutId, gid(1));
 });
 
 // ── 凭据（SSH 私钥）：**每条连接一把** ──────────────────────────────────────

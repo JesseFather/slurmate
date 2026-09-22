@@ -194,7 +194,9 @@ function putSitePlugin({ id, name, version = '1.0.0', over = {}, clientSrc, trus
 setSitePlugins(SAMPLE_PLUGINS);
 
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
-const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [] };
+const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [],
+  /** 被 `clearStorageData()` 清过的 partition，按先后顺序。 */
+  cleared: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
 
@@ -221,7 +223,8 @@ class FakeWebContents {
 class FakeWebContentsView {
   constructor(opts = {}) {
     this.webContents = new FakeWebContents();
-    // code-server 视图必须跑在自己的 partition 里（persist:layout-<布局组 id>）。
+    // code-server 视图必须跑在自己的 partition 里（= 它那份运行时数据的身份，
+    // 见 plugin-data.js）。
     // 登录要在这个 partition 的 cookie jar 里查 —— 所以桩也得把 session 接上。
     this.webContents.session =
       electronStub.session.fromPartition(opts.webPreferences && opts.webPreferences.partition);
@@ -294,6 +297,10 @@ const electronStub = {
         cookies: {
           get: async ({ name }) => (jar.has(name) ? [{ name, value: jar.get(name) }] : []),
         },
+        // 回收一个布局组之后的卫生清理。★ 桩里从前**没有**这个方法，于是那条路
+        // 每次都抛进 catch 里变成一条没人看的警告 —— 而"清理"正是最容易做错的一格
+        // （清错一个分区就是把用户当前那份数据抽掉）。
+        clearStorageData: async () => { calls.cleared.push(partition); },
         fetch: async (url, opts) => {
           const res = await fetch(url, opts);
           const sc = res.headers.get('set-cookie');
@@ -658,10 +665,17 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   // 视图必须加载**字面 127.0.0.1** 的地址 —— 用 localhost 会是另一个 origin，
   // localStorage 不共享，而且可能解析成 ::1。
   assert.match(view.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
-  // ★ partition 按**布局组 id**命名，不按端口 —— 按端口命名会让「A 组被回收后端口
-  //   被新组复用」时，新组的「空白布局」继承 A 的 localStorage 与登录 cookie。
+  // ★ partition = **这个插件的完整身份**（见 plugin-data.js 的文件头）：插件 id @
+  //   共享组 @ 实例。三样缺一不可：
+  //   · 末段是**布局组 id**，不是端口 —— 按端口命名会让「A 组被回收后端口被新组
+  //     复用」时，新组的「空白布局」继承 A 的 localStorage 与登录 cookie；
+  //   · 中间那段是清单里写的 `editor`（写死了几个版本共用一份，这正是 code-server
+  //     升级不丢布局的原因，也是它从前**硬编码**在 ensureSurface 里的那件事）；
+  //   · 头一段是插件 id —— 少了它，两个都声明了 layout 的插件共用一个布局组时
+  //     会读写同一份存储（今天只有一个这样的插件，所以那是个还没炸的洞）。
   const partition = view._opts.webPreferences.partition;
-  assert.match(partition, /^persist:layout-l[0-9a-f]{12}$/, `实际：${partition}`);
+  assert.match(partition, /^persist:[0-9A-HJKMNP-TV-Z]{26}@editor@l[0-9a-f]{12}$/,
+    `实际：${partition}`);
   // 开发者模式才注入 preload（按键对照）；真实模式注入会污染 IDE
   assert.match(String(view._opts.webPreferences.preload || ''), /demo\.js$/);
   assert.equal(view._opts.webPreferences.backgroundThrottling, false,
@@ -751,6 +765,9 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   const oldGroupId = ctl.snapshot().layoutId;
   const oldPartition = view1._opts.webPreferences.partition;
   const oldWc = view1.webContents;
+  // 清单件是一条**累积**的记录（前面几条用例回收组时也清过），所以这里只看这一
+  // 步新产生的那几条。
+  const clearedBefore = calls.cleared.length;
 
   // ① 切走一个「独占」的组（它只被这一条连接用）→ 主进程必须先回 would_discard，
   //    并且**配置一个字都不动**。判定权在主进程：界面手里那份 refCount 随时可能
@@ -779,7 +796,8 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   //   只 loadURL 是没用的，页面会继续跑在旧的存储分区里而看不出来。
   assert.equal(calls.views.length, before + 2, '换 partition 必须重建视图');
   const view2 = calls.views[calls.views.length - 1];
-  assert.match(view2._opts.webPreferences.partition, /^persist:layout-l[0-9a-f]{12}$/);
+  assert.match(view2._opts.webPreferences.partition,
+    /^persist:[0-9A-HJKMNP-TV-Z]{26}@editor@l[0-9a-f]{12}$/);
   assert.notEqual(view2._opts.webPreferences.partition, oldPartition);
   assert.equal(oldWc.isDestroyed(), true, '旧视图必须真的被销毁，不能只是换下去');
 
@@ -788,6 +806,17 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   assert.equal(ctl.snapshot().jobId, jobId, '作业号不能变');
   assert.equal(ctl.state, 'running');
   assert.notEqual(ctl.snapshot().layoutId, oldGroupId, '控制器要跟着换组');
+
+  // ⑤ 被回收的那个组的存储要清掉（它的分区里躺着登录 cookie），换过去的那个不能清。
+  //    ★ 判据是**两个方向**：清对了哪一个，且没清新那个。只钉一边的话，"什么都清"
+  //      与"什么都不清"各能骗过一条。
+  //    ★ 这一条钉**不是**那条"别清正在被界面用着的分区"的守卫 —— 那条守卫今天
+  //      够不着（见 clearLayoutStorage 的注释），删掉它这里照样是绿的。
+  const cleared = calls.cleared.slice(clearedBefore);
+  assert.deepEqual(cleared, [oldPartition],
+    `只该清掉被回收那个组的存储，实际清了 ${JSON.stringify(cleared)}`);
+  assert.ok(!cleared.includes(view2._opts.webPreferences.partition),
+    '正在显示的那个分区绝不能被清');
 
   await invoke('app:disconnect');
 });
@@ -2410,8 +2439,9 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     over: {
       displayName: 'Jupyter',
       description: '没有客户端代码的声明式插件。',
-      // layout: false → 用**按插件**的存储分区（persist:plugin-<id>），而不是布局组。
-      // 那一条分支在内建的两个插件上走不到（一个要布局组，一个不要界面）。
+      // 没声明 contributes.data.perInstance → 身份里**没有实例段**，于是它只有一份
+      // 存储，与布局组无关。那一条分支在内建的两个插件上走不到（一个声明了要按实例
+      // 分，另一个根本不要界面）。
       contributes: { surface: { kind: 'web', path: '/lab' }, layout: false },
     },
   });
@@ -2440,9 +2470,12 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   '声明式插件的界面');
   assert.match(w.surfaceView.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
     'URL = 隧道 origin + 声明里的 path');
-  // ★ 分区按**插件**走（它没要布局组）—— 一个网页应用自己的状态该跟它自己走。
-  assert.match(w.surfacePartition || '', /^persist:plugin-01M2JKM/,
-    `没有布局组的插件要用按插件的分区，实际是 ${w.surfacePartition}`);
+  // ★ 分区按**插件**走 —— 一个网页应用自己的状态该跟它自己走。它没声明分实例，
+  //   所以身份是两段：插件 id @ 版本。★ 那一段**是版本号**而不是常量，也就是
+  //   "这个插件没声明跨版本共享 ⇒ 升一次版本换一份干净存储"这条缺省在这里的样子。
+  assert.match(w.surfacePartition || '',
+    /^persist:01M2JKM1M1M1M1M1M1M1M1M1M1@1\.0\.0$/,
+    `没声明分实例的插件要用按插件的分区，实际是 ${w.surfacePartition}`);
 
   // ★ 而没有客户端代码就**没有登录那一步**。证据看它那个存储分区里的 cookie jar：
   //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架**不会去猜**一个
