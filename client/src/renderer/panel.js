@@ -1157,6 +1157,92 @@ function renderInert(pv) {
   box.append(d);
 }
 
+/**
+ * 「本机的插件数据」那一块。
+ *
+ * 主进程已经把"没人用的"算好了（`app:pluginData`），这里只画。**在用的那些不列** ——
+ * 它们不是"问题"，而且那件事有更好的走法：换一个布局组（`＋ 新建空白布局…`）会换
+ * 分区、重建视图、由插件重新登录，那正是"重置"。
+ *
+ * ★ 两种"什么都没有"要分开：
+ *   · **查过了、真没有** ⇒ 整节收起来（与 `#plugin-inert` 同一个形状）；
+ *   · **这一次没能查**（`diskChecked:false`）⇒ **要画出来**。不说"查不了"就等于说
+ *     "没有"，而那是两件事 —— 这个界面里到处都是这条纪律。
+ */
+function renderPluginData(d) {
+  const sec = $('sec-data');
+  const box = $('plugin-data');
+  box.textContent = '';
+
+  const rows = (d && d.rows) || [];
+  if (d && d.ok === false) {
+    sec.classList.remove('hidden');
+    box.append(el('p', 'plug-desc', d.error || '本机的插件数据没能列出来。'));
+    return;
+  }
+  if (!rows.length && d && d.diskChecked) {
+    sec.classList.add('hidden');
+    return;
+  }
+  sec.classList.remove('hidden');
+
+  const wrap = document.createElement('div');
+  wrap.className = 'plug plug-off';
+  const head = document.createElement('div');
+  head.className = 'plug-head';
+  head.append(el('h3', null, rows.length
+    ? `本机有 ${rows.length} 份插件数据没人在用`
+    : '本机的插件数据'));
+  wrap.append(head);
+
+  if (!d || !d.diskChecked) {
+    wrap.append(el('p', 'plug-desc', (d && d.why)
+      || '这一次没能去看磁盘上还剩哪些，所以这里没有东西可列。'));
+  } else {
+    wrap.append(el('p', 'plug-desc',
+      '插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在本机，'
+      + '一份 = 一个插件 + 共享组 + 布局组。下面这些**没有任何连接在用**：它们要么'
+      + '属于一个已经删掉的布局组，要么属于一个已经不在本机的插件版本。'));
+    wrap.append(el('p', 'plug-desc',
+      '★ 删掉一份**找不回来** —— 那个插件下次打开会是一份全新的空白存储。'
+      + '想重置**正在用**的那一份，用布局下拉里的「＋ 新建空白布局…」。'));
+  }
+
+  for (const r of rows) {
+    const one = document.createElement('div');
+    one.className = 'plug-consent-item';
+    const h = document.createElement('div');
+    h.className = 'plug-head';
+    h.append(el('h3', null, r.label));
+    one.append(h);
+    one.append(el('p', 'plug-desc', r.why));
+    if (r.deletable) {
+      const row = document.createElement('div');
+      row.className = 'plug-meta';
+      row.append(button('删掉这一份', () => dropPluginData(r), 'ghost'));
+      one.append(row);
+    }
+    wrap.append(one);
+  }
+  box.append(wrap);
+}
+
+/** 删掉一份插件数据。**不可逆**，所以先问一句（照「删除连接」那条的语气）。 */
+async function dropPluginData(r) {
+  const sure = window.confirm(
+    `删掉「${r.label}」？\n\n`
+    + '那是它在本机攒下的编辑器布局、打开的标签页和登录状态，删掉之后**找不回来** ——'
+    + '那个插件下次打开会是一份全新的空白存储。\n\n确定要删吗？');
+  if (!sure) return;
+  const res = await window.slurmate.deletePluginData({ partition: r.partition });
+  if (!res || !res.ok) {
+    // `in_use` / `stale` 都由主进程给一句能直接读的话（判定权在它那儿）。
+    return notice('error', (res && res.error) || '没能删掉。');
+  }
+  notice('info', `已删掉「${res.label || r.label}」。`);
+  renderPluginData(res);
+}
+
 // ★ **这里从前有一节「开发者」，装着「也加载本机插件目录（开发用）」那个复选框
 //   和「从一个包安装…」「打开插件目录」「重新扫描」三个按钮。** 它随本机池一起
 //   删掉了，连同 `#plugin-dev` 那个容器。
@@ -1542,6 +1628,13 @@ async function init() {
   renderPartitions(boot.partitions || []);
   renderPlugins(boot.plugins);
   renderConnEmpty();
+  // 本机的插件数据是一次**单独的对账**（它要读磁盘、还问一次 Electron 分区目录在
+  // 哪儿）。★ **不 await 在首屏里**：让它挡住首屏就是把"面板画出来"与"磁盘快不快"
+  // 绑在一起。回来之后再画那一块（它与 `bootstrap` 的关系见 index.js 的注释）。
+  window.slurmate.pluginData().then(renderPluginData, (e) => {
+    notice('error', '本机的插件数据没能列出来：'
+      + ((e && e.message) ? e.message : e));
+  });
   // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
   if ((boot.connections || []).length === 0) await openNewForm();
 
@@ -1722,7 +1815,11 @@ async function init() {
       notice('info', (n.kind === 'key-blocked' ? '已拦截：' : '已放行：') + n.text);
       return;
     }
-    notice(n.kind === 'ok' ? 'ok' : n.kind === 'error' ? 'error' : 'info', n.text);
+    // ★ `warn` **要留住**：`notice()` 的标签表里 `warn: '注意'` 一直都在，而这里从前
+    //   把它折成了 `info` —— 于是主进程发来的每一条警告（例如"布局组已删除，但它那份
+    //   浏览器存储没能清干净"）在日志里都长成「信息」。一条显示成信息的失败，与一条
+    //   被吞掉的失败是同一件事。
+    notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);
   });
 
   // 拉一次当前状态（可能是启动时自动接上的会话）

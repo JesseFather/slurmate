@@ -266,9 +266,17 @@ class FakeBrowserWindow {
   destroy() { this._destroyed = true; }
 }
 
+/** 下面那个 `getStoragePath` 桩要用它折叠分区名（磁盘上的目录名是折叠过的）。 */
+const P = require('../src/main/plugins/index.js');
+
 const electronStub = {
   app: {
-    getPath: (k) => (k === 'userData' ? userData : fakeHome),
+    // ★ `sessionData` 必须**显式**支持：Electron 里"分区目录住在哪儿"问的就是它
+    //   （`DIR_SESSION_DATA` + `Partitions`），而它的默认值**就是** `userData`
+    //   ——没人调过 `app.setPath`。这个桩从前对认不得的键**静默**返回 `fakeHome`：
+    //   于是 `app.getPath('sessionData')` 拿到一个和分区毫无关系的目录，而症状是
+    //   "本机的插件数据"那一块永远列不出东西（不报错，只是空）。
+    getPath: (k) => ((k === 'userData' || k === 'sessionData') ? userData : fakeHome),
     getVersion: () => '0.1.0-test',
     on: () => {},
     // 立刻 resolve：index.js 的启动链挂在 whenReady().then(...) 上，
@@ -300,7 +308,16 @@ const electronStub = {
         // 回收一个布局组之后的卫生清理。★ 桩里从前**没有**这个方法，于是那条路
         // 每次都抛进 catch 里变成一条没人看的警告 —— 而"清理"正是最容易做错的一格
         // （清错一个分区就是把用户当前那份数据抽掉）。
-        clearStorageData: async () => { calls.cleared.push(partition); },
+        //
+        // ★ 顺手把 jar 也清掉。不清的话，「删掉之后那份数据还在」这个**真机症状**
+        //   在桩里根本不存在（登录仍然是登录、布局仍然是布局）—— 于是一整类错误
+        //   测不出来，而"删了却还在"正是最该被测到的那一类。
+        clearStorageData: async () => { calls.cleared.push(partition); jar.clear(); },
+        // 分区在磁盘上的目录。★ 名字是**折叠过**的（`MakePartitionName`，见
+        // plugin-data.js 的文件头）—— 桩要如实模拟这一步，否则"拿分区名直接拼路径"
+        // 这种错在测试里永远是绿的。
+        getStoragePath: () => path.join(userData, 'Partitions',
+          P.foldAscii(String(partition).replace(/^persist:/, ''))),
         fetch: async (url, opts) => {
           const res = await fetch(url, opts);
           const sc = res.headers.get('set-cookie');
@@ -2691,4 +2708,32 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
 
   await invoke('app:stop');
   await waitUntil(dead, '会话释放', 20000);
+});
+
+test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说清为什么', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  require('../src/main/index.js');
+  await new Promise((r) => setTimeout(r, 400));
+
+  // 在**真实**的分区目录里放两份东西（一份三段身份、一份 0.7 之前的旧形状）。
+  // 开发者模式那份配置与它们不可比（沙箱里的布局组 id 与真实那一份对不上），
+  // 所以**一个都不该被列出来** —— 而这是这条用例唯一有意义的形状：不是"清单恰好
+  // 是空的"，是"我们没去认它"。认了的话，用户会照着这份清单把自己的真实数据删掉。
+  const parts = path.join(userData, 'Partitions');
+  const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab';
+  fs.mkdirSync(path.join(parts, live), { recursive: true });
+  fs.mkdirSync(path.join(parts, 'slot-1'), { recursive: true });
+
+  const d = await invoke('app:pluginData');
+  assert.equal(d.ok, true);
+  assert.deepEqual(d.rows, [], '开发者模式下不许拿沙箱那份配置去认真实的分区');
+  // ★ 这一格是"我没去看"，不是"没有" —— 界面按它换一句话（缺席 ≠ 否）。
+  assert.equal(d.diskChecked, false);
+  assert.match(d.why, /开发者模式/, '要如实说清为什么没看');
+
+  // 没被列出来的东西也删不掉：判定要**重新对一遍账**，而这一次它没看到它。
+  const r = await invoke('app:deletePluginData', { partition: 'slot-1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'stale');
+  assert.equal(fs.existsSync(path.join(parts, 'slot-1')), true, '一个字都不许动');
 });

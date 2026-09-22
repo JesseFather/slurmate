@@ -1,0 +1,318 @@
+'use strict';
+/**
+ * plugin-data-audit.js —— 本机的插件运行时数据：**还剩几份、哪一份没人用**。
+ *
+ * `plugin-data.js` 回答"一份数据存在哪儿"。这里回答下一个问题：**它现在还在不在、
+ * 还有没有主人**。在此之前，这件事在客户端**没有任何判据** —— 引用计数只活在
+ * 配置里（`pruneLayouts`），而磁盘上到底躺着几份、哪几份是没人认领的，没有任何
+ * 代码看过。
+ *
+ * ── ★ 判据是"正向算 + 两边折叠做差"，不是"逆向解析磁盘名" ────────────────────
+ *
+ *     该有的 = { 折叠(身份) : 有分区的插件 × 配置里的布局组 }
+ *              ∪ { 折叠(身份) : 有分区的插件、没声明分实例 }
+ *     孤儿   = 磁盘上的目录名 − 该有的
+ *
+ * ★ **反过来做会删掉活数据**，两个坑各自都够：
+ *
+ *   · `identityOf` 的第二段**可以是版本号**（`inherit` 缺席时它就是版本号），
+ *     所以"第二段不匹配 `GROUP_RE`"根本不意味着"这不是我们的东西"；
+ *   · 磁盘上的名字是**折叠过**的（`MakePartitionName` = `EscapePath(ToLowerASCII(…))`，
+ *     ULID 段落盘是小写）。
+ *
+ *   两次变形叠加之后，"我解析不出来"与"这是老垃圾"就分家了 —— 而分错的代价是
+ *   界面给一份**活着的** cookie 一个删除按钮。
+ *   所以 `identityOfDiskName` 在这里**只用来写一句人能读的解释**，不当判据。
+ *
+ * ── ★ 折叠只用于比较，绝不用来拼路径 ────────────────────────────────────────
+ *
+ * 路径一律由 `readdir` 拿到的**原始名字**拼（见 `index.js` 里那条删除路径）。
+ * 这样"Electron 折不折叠"两种情况下都对，而且界面上给的字符串**永远进不了路径**。
+ *
+ * ── ★ 一行 = 一个分区 ──────────────────────────────────────────────────────
+ *
+ * 这一层不按"插件"或"布局组"分组：**一份数据 = 一个身份 = 一个分区**（见
+ * plugin-data.js 的文件头）。所以"一个没人用的布局组"会在这一层展开成
+ * 每个有分区的插件各一行 —— 那正是可删除的单位。
+ *
+ * ── ★ 认不出的目录：只列，不给删除按钮 ──────────────────────────────────────
+ *
+ * 每一行都必须是"认得出是我们的"才提供删除。这不是洁癖：分区目录的根是**推出来**
+ * 的（见 `partitionRoot`），万一推错了，这个列表就会把 `secrets.json`、`dev-sandbox`
+ * 之类的东西摆上删除按钮。认得出的形状有两类：三段身份（第一段是折叠过的 ULID），
+ * 以及 0.7 之前那三种旧形状（`slot-…` / `layout-…` / `plugin-…`）。
+ *
+ * ── ★ 开发者模式不查磁盘 ────────────────────────────────────────────────────
+ *
+ * 这一层不知道开发者模式（调用方传 `names: null` + 一句 `why`）。理由写在调用点：
+ * 沙箱那份配置里的布局组 id 与真实那一份对不上，照它去认，真实的数据会整片看起来
+ * 像孤儿 —— 而删掉它们就是毁掉真实那一份。
+ */
+
+const fs = require('fs');
+const path = require('path');
+const pluginData = require('./plugin-data.js');
+
+/** `partitionOf` 的前缀。磁盘上的目录名**没有**它。 */
+const PREFIX = 'persist:';
+
+/**
+ * 0.7 之前的分区名形状。
+ *
+ * 三种都来自旧的两半硬编码表达式（见 `index.js` 的 `ensureSurface` 那段注释）：
+ * `persist:slot-<槽位>`（0.2.0 及更早）、`persist:layout-<组 id>`、`persist:plugin-<id>`。
+ * 它们**认得出是我们的**，所以可以删 —— 留着只有坏处：那里面是没人再读的登录 cookie。
+ */
+const LEGACY_RE = /^(?:slot|layout|plugin)-/;
+
+/**
+ * 分区目录（`Partitions/`）在哪儿，**并且当场核对一遍命名约定**。
+ *
+ * @param {object} o
+ * @param {object} o.session      Electron 的 `session` 模块
+ * @param {string} [o.probe]      一个**该有的**分区名（`persist:…`）。省略 = 没得问
+ * @param {string} o.fallbackRoot `app.getPath('sessionData')` + `Partitions`
+ * @returns {{root: string|null, verified: boolean, why: string|null}}
+ *          `root === null` ⇒ **查不了**（`why` 说得出原因）：调用方要如实说"查不了"，
+ *          而不是说"没有"。`verified === false`（而 `root` 有值）⇒ 用的是文档里那条
+ *          路径，**没能当场核对** —— 那一格由"认得出的才给删"兜着。
+ *
+ * ★ 为什么根是 `sessionData` 而不是 `userData`：Electron 源码里那一步是
+ *   `PathService::Get(DIR_SESSION_DATA)` + `"Partitions"`。**两者今天相同**（没人调过
+ *   `app.setPath`），所以这是一处**恰好对** —— 正因为恰好对，它特别容易被下一个人
+ *   顺手改成 `userData`，所以理由写在这里。
+ *
+ * ★ 为什么探针必须是**该有的**身份：`fromPartition` 可能把目录建出来。用一个编造的
+ *   名字去问，就等于凭空造一个**不在"该有的"清单里**的目录 ⇒ 用户下一次打开客户端
+ *   会多看到一行"没人用的数据"，而那一行是我们自己造的。
+ */
+function partitionRoot({ session, probe, fallbackRoot }) {
+  if (probe && typeof probe === 'string' && probe.startsWith(PREFIX)
+      && session && typeof session.fromPartition === 'function') {
+    try {
+      const ses = session.fromPartition(probe);
+      const p = ses && typeof ses.getStoragePath === 'function' ? ses.getStoragePath() : null;
+      if (typeof p === 'string' && p) {
+        const want = probe.slice(PREFIX.length);
+        const base = path.basename(p);
+        // 折叠过的那一份与没折叠的那一份都收 —— 我们对"Electron 折不折叠"不设前提，
+        // 只要求它落在这两者之一（否则就是约定变了，见下）。
+        if (base === want || base === pluginData.foldAscii(want)) {
+          return { root: path.dirname(p), verified: true, why: null };
+        }
+        return {
+          root: null, verified: false,
+          why: `Electron 把这个分区的目录放在 ${base}，而按名字算它应该是 ${want} —— `
+            + '分区目录的命名约定与我们知道的不一样，所以这一次**没有**去认磁盘上的东西。',
+        };
+      }
+    } catch {
+      // 问不出来（老 Electron、没有这个方法、app 还没 ready…）不是错误：落到下面
+      // 那条文档里写着的路径上去。这一步是**加固**，不是前提。
+    }
+  }
+  return { root: fallbackRoot || null, verified: false, why: null };
+}
+
+/**
+ * 磁盘上真实存在的分区目录名。
+ *
+ * ★ 只认**目录**：`Partitions/` 下偶尔会有别的东西（谁手放的文件），而一个文件不是
+ *   一份存储。它们也不会进列表 —— 那不是"认不出的目录"，那是"根本不是目录"。
+ *
+ * @returns {{names: string[]|null, why: string|null}} `names` 为 null ⇒ 查不了
+ */
+function listPartitions(root) {
+  if (!root) return { names: null, why: '找不到本机的分区目录，所以这一次没有去认它。' };
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (e) {
+    // 目录不存在 = **本机一份插件数据都没有**（全新安装就是这个样子）。这是一个
+    // 肯定的答案，不是"查不了" —— 两者在界面上是完全不同的话。
+    if (e && e.code === 'ENOENT') return { names: [], why: null };
+    return { names: null, why: `读不到插件数据目录 ${root}：${e.message}` };
+  }
+  return {
+    names: entries.filter((d) => d.isDirectory()).map((d) => d.name).sort(),
+    why: null,
+  };
+}
+
+/**
+ * 把"该有的"与"磁盘上有的"对一遍。
+ *
+ * @param {object} o
+ * @param {Array} o.plugins      注册表里的全部插件（`registry.list()`）
+ * @param {Array} o.layouts      `cfg.layouts`
+ * @param {Array} o.connections  `cfg.connections`（算引用计数）
+ * @param {string[]|null} o.names 磁盘上的目录名；`null` = 没查磁盘
+ * @param {string} [o.why]       没查磁盘的原因（原样带给界面）
+ * @returns {{rows: Array, diskChecked: boolean, why: string|null}}
+ */
+function audit({ plugins, layouts, connections, names, why }) {
+  const diskChecked = Array.isArray(names);
+  const list = Array.isArray(names) ? names : [];
+  const layoutsArr = Array.isArray(layouts) ? layouts : [];
+
+  // ── 该有的：正向算出来，折叠 ──
+  //
+  // ★ 入口条件是 `hasSurface`（**有没有界面**），**不是** `hasLayoutStorage`
+  //   （有界面 + 声明了分实例）。两者差的那一类 —— 有界面、没声明分实例 —— 照样
+  //   有一份分区（`ensureSurface` 不看声明就建），只是它不按布局组分。用后一条当
+  //   入口，会让**它们活着的那一份**看起来像孤儿。
+  const surface = (plugins || []).filter(pluginData.hasSurface);
+  const expected = new Map();                 // 折叠过的名字 → {plugin, layoutId|null}
+  for (const p of surface) {
+    if (pluginData.hasInstance(p)) {
+      for (const l of layoutsArr) {
+        if (!l || !l.id) continue;
+        expected.set(pluginData.diskNameOf(pluginData.identityOf(p, l.id)),
+          { plugin: p, layoutId: l.id });
+      }
+    } else {
+      expected.set(pluginData.diskNameOf(pluginData.identityOf(p)),
+        { plugin: p, layoutId: null });
+    }
+  }
+
+  // ── 引用计数：有几条连接指着这个布局组 ──
+  const refs = new Map();
+  for (const c of (connections || [])) {
+    if (c && c.layoutId) refs.set(c.layoutId, (refs.get(c.layoutId) || 0) + 1);
+  }
+  const layoutName = new Map(layoutsArr.filter((l) => l && l.id)
+    .map((l) => [l.id, l.name || l.id]));
+
+  // 认插件用**折叠过**的 id（磁盘上那个就是折叠过的）。
+  const byId = new Map(surface.map((p) => [pluginData.foldAscii(p.id), p]));
+
+  const rows = [];
+  for (const name of list) {
+    const hit = expected.get(pluginData.foldAscii(name));
+
+    if (hit) {
+      // 在"该有的"里 ⇒ 不是孤儿。只有一种情况值得说出来：
+      // **没有任何连接指着它那个布局组**（数据在、没人用）。
+      //   没有实例段的那种存储不属于任何组（它本来就一直只有一份），不列。
+      if (hit.layoutId === null) continue;
+      if ((refs.get(hit.layoutId) || 0) > 0) continue;
+      rows.push({
+        partition: name,
+        kind: 'unused',
+        label: `${hit.plugin.displayName} 的一份数据`,
+        why: `它在布局组「${layoutName.get(hit.layoutId) || hit.layoutId}」上，`
+          + '而那个布局组现在没有任何连接在用。',
+        deletable: true,
+      });
+      continue;
+    }
+
+    // ── 不在"该有的"里 ⇒ 孤儿 ──
+    const parts = pluginData.identityOfDiskName(name);
+    if (parts) {
+      const known = byId.get(parts.id);
+      if (known) {
+        rows.push(parts.instance
+          ? {
+            partition: name, kind: 'orphan',
+            label: `${known.displayName} 的一份数据`,
+            why: `第三段是 ${parts.instance}，而配置里已经没有这个布局组了。`,
+            deletable: true,
+          }
+          : {
+            partition: name, kind: 'orphan',
+            label: `${known.displayName} 的一份旧数据`,
+            why: `它记的是「${parts.group}」，而这个插件现在的版本号是 `
+              + `${known.version}${declaredGroupOf(known)}。`,
+            deletable: true,
+          });
+        continue;
+      }
+      rows.push({
+        partition: name, kind: 'orphan',
+        label: `插件 ${parts.id} 的数据（本机已经没有这个插件）`,
+        why: parts.instance
+          ? `第三段是 ${parts.instance}。`
+          : `第二段是「${parts.group}」。`,
+        deletable: true,
+      });
+      continue;
+    }
+
+    if (LEGACY_RE.test(name)) {
+      rows.push({
+        partition: name, kind: 'legacy',
+        label: '0.7 之前的旧分区',
+        why: `它的名字是 ${name.split('-')[0]}-… 那种形状 —— 这份数据的身份被改成`
+          + '「插件 id / 共享组 / 实例」三段之前留下的。**它不会再被任何东西读到**，'
+          + '而里面躺着当年的登录 cookie。',
+        deletable: true,
+      });
+      continue;
+    }
+
+    rows.push({
+      partition: name, kind: 'unknown',
+      label: `认不出的目录「${name}」`,
+      why: '它在这个目录里，而它的名字既不像一份插件数据（三段身份），也不像更早'
+        + '版本留下的那几种形状。**所以这里不提供删除** —— 一份我不认识的东西，'
+        + '删掉它就不是"收拾"而是"猜"。',
+      deletable: false,
+    });
+  }
+
+  // 顺序稳定（界面与日志才不会每次都不一样）：可删的在前面，认不出的那堆在最后。
+  const order = { unused: 0, orphan: 1, legacy: 2, unknown: 3 };
+  rows.sort((a, b) => (order[a.kind] - order[b.kind]) || a.label.localeCompare(b.label));
+
+  return { rows, diskChecked, why: why || null };
+}
+
+/** 那个插件自己声明的共享组（没声明就返回空串）—— 只用来把话说完整。 */
+function declaredGroupOf(plugin) {
+  const d = plugin && plugin.contributes && plugin.contributes.data;
+  const g = d && typeof d.inherit === 'string' ? d.inherit : '';
+  return g ? `、声明的共享组是「${g}」` : '';
+}
+
+/**
+ * 删这一份行不行 —— **主进程的判定**，界面只负责把原话拿去问。
+ *
+ * ★ 判定权必须在这里：界面手里那份清单随时可能已经陈旧（刚连上、刚改过配置、
+ *   刚装/卸了插件），而它只负责弹一个确认框。所以调用方要**重新对一遍账**，
+ *   把新算出来的 `rows` 交给这个函数 —— 不要拿界面回传的行来判。
+ *
+ * ★ 返回的 `row` 是**这次算出来的那一行**（不是界面给的那个字符串匹配到的对象）：
+ *   接下来拼路径用的是它里面的 `partition` —— 也就是 `readdir` 读到的那个名字。
+ *
+ * @param {object} o
+ * @param {Array} o.rows              这次对账算出来的行
+ * @param {string} o.partition        界面点的那一行的 `partition`
+ * @param {string} [o.surfacePartition] 窗口此刻显示的那个分区（`persist:…`）
+ * @returns {{ok: true, row: object}|{ok: false, code: string, error: string}}
+ */
+function deletionVerdict({ rows, partition, surfacePartition }) {
+  const row = (rows || []).find((r) => r.partition === partition && r.deletable);
+  if (!row) {
+    return {
+      ok: false, code: 'stale',
+      error: '这一份数据现在不在「没人用」的清单里了 —— 多半是配置或插件刚变过。'
+        + '重新看一下再决定。',
+    };
+  }
+  // ★ 这一格**够得着**，不是"理论上"：正在显示的那份数据，它所属的插件**被从本机
+  //   拿掉了**（站点回收、或者用户在本机删掉了那一版）—— 那一刻它既"在用"、
+  //   又"不在该有的清单里"，于是一眼看过去就是一份没人要的孤儿。少了这一格，
+  //   用户会把眼前那个页面脚下的存储抽掉，而症状只是「页面莫名其妙坏了」。
+  if (surfacePartition && pluginData.samePartition(surfacePartition, row.partition)) {
+    return {
+      ok: false, code: 'in_use',
+      error: '这一份数据正被当前页面用着，删掉它会让那个页面在下次刷新时报错。'
+        + '想重置它，用「＋ 新建空白布局…」换一个布局组（页面会重新加载）。',
+    };
+  }
+  return { ok: true, row };
+}
+
+module.exports = { partitionRoot, listPartitions, audit, deletionVerdict, LEGACY_RE };

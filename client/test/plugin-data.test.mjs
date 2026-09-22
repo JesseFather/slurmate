@@ -117,6 +117,102 @@ test('★ 声明了 perInstance 却拿不到实例 ⇒ 抛，不回落成两段'
   assert.throws(() => pluginData.identityOf(p, null), /code-server/);
 });
 
+// ── 磁盘上的那个名字（对账要读它）────────────────────────────────────────────
+
+test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 那一段是小写）', () => {
+  // Electron 44 的 `MakePartitionName` = `EscapePath(ToLowerASCII(分区名))`。
+  assert.equal(pluginData.foldAscii('01M2ABC'), '01m2abc', 'A-Z 各减 32，别的原样');
+  assert.equal(pluginData.diskNameOf(['01M2ABC', 'editor', 'l0123456789ab']),
+    '01m2abc@editor@l0123456789ab');
+  // ★ 折叠是对**整个字符串**做的（`MakePartitionName` 就是这样），而合法的那三段里
+  //   只有 id 会变 —— 另外两段的字符集本来就只允许小写。这里钉的是"折叠本身作用于
+  //   整串"，免得有人以为它只折第一段，然后按"只折第一段"去改它。
+  assert.equal(pluginData.diskNameOf(['01M2ABC', 'EDITOR', 'L0ABCDEF1234']),
+    '01m2abc@editor@l0abcdef1234');
+});
+
+test('★ foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-export）', () => {
+  assert.equal(P.foldAscii, pluginData.foldAscii);
+  // ★ 只折 `A..Z`。`İ`（U+0130）与 `K`（U+212A KELVIN）必须原样 —— 用
+  //   `toLowerCase()` 会把它们折成别的字符，于是"同一个包在另一台机器上装不上"。
+  assert.equal(P.foldAscii('AİK'), 'aİK');
+});
+
+/** 磁盘上那一份 id：小写、26 个字符（`ULID` 的折叠形态）。手写，不用被测函数算。 */
+const DISK_ID = '01m2jkhtzgkjbfqqtwyxmqmf2v';
+
+test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段，认不出残缺的', () => {
+  assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@editor@l0123456789ab`),
+    { id: DISK_ID, group: 'editor', instance: 'l0123456789ab' });
+  // ★ 第二段**可以是版本号**（`inherit` 缺席时它就是版本号），而 `1.0.0` 不匹配
+  //   `GROUP_RE` —— 这正是"拿逆向解析当判据"会删掉活数据的那条路：一个没声明
+  //   `inherit` 的插件，它**当前**那一份存储会被判成"认不出来"。
+  assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@1.0.0`),
+    { id: DISK_ID, group: '1.0.0', instance: null });
+
+  for (const bad of [
+    '', '..', 'editor@l0123456789ab',                    // 第一段不是 ULID
+    '01m2abc@editor',                                    // 第一段长度不对
+    `${DISK_ID}@editor@l1@l2`, `${DISK_ID}@editor@l1@l2@l3`,   // 段数不对
+    `${DISK_ID}@`, `${DISK_ID}@@l0123456789ab`,          // 空段
+    DISK_ID,                                             // 只有一段
+    `${ID}@editor`,                                      // 大写：磁盘上不会是大写（折叠过）
+  ]) {
+    assert.equal(pluginData.identityOfDiskName(bad), null,
+      `${JSON.stringify(bad)} 不该被认成一份身份`);
+  }
+});
+
+test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', () => {
+  const a = pluginData.identityOf(perInstance(), 'l0123456789ab');
+  const back = pluginData.identityOfDiskName(pluginData.diskNameOf(a));
+  assert.deepEqual([back.id, back.group, back.instance],
+    [DISK_ID, 'editor', 'l0123456789ab']);
+
+  // 两段的那一种（没声明分实例、也没声明 inherit ⇒ 第二段是版本号）
+  const b = pluginData.identityOf({ id: ID, version: '2.3.4', contributes: {} });
+  const back2 = pluginData.identityOfDiskName(pluginData.diskNameOf(b));
+  assert.deepEqual([back2.id, back2.group, back2.instance], [DISK_ID, '2.3.4', null]);
+});
+
+test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会**恒为假**', () => {
+  const id = pluginData.identityOf(perInstance(), 'l0123456789ab');
+  const partition = pluginData.partitionOf(id);
+  assert.equal(pluginData.samePartition(partition, pluginData.diskNameOf(id)), true);
+  // 没折叠的那一份也认（磁盘上不会出现，但判据不该因此漏掉一整格）。
+  assert.equal(pluginData.samePartition(partition, `${ID}@editor@l0123456789ab`), true);
+  // ★ 这一条是这道判据存在的理由：正被界面用着的那一份**最不能误判**
+  //   （当成"没人用"就会把它抽掉，而症状只是「页面莫名其妙坏了」）。
+  assert.equal(pluginData.samePartition(partition, 'l0123456789ab'), false);
+  assert.equal(pluginData.samePartition('editor@x', 'editor@x'), false, '不是 persist: 前缀');
+  assert.equal(pluginData.samePartition(null, 'x'), false);
+  assert.equal(pluginData.samePartition(partition, null), false);
+});
+
+test('★ 两条判据不是一回事：hasSurface（有没有界面）与 hasLayoutStorage（按不按组）', () => {
+  const data = { inherit: 'editor', perInstance: true };
+  const surface = { kind: 'web', path: '/' };
+  const cases = [
+    // [contributes, hasSurface, hasLayoutStorage]
+    [{ surface, layout: true, data }, true, true],
+    // 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）
+    [{ layout: true, data }, false, false],
+    // ★ 有界面、但**没**声明分实例：它**照样有一份分区**，只是不按布局组分。
+    //   回收一个组时不该清它（那是它唯一的一份），而对账必须把它算进"该有的"
+    //   —— 用 hasLayoutStorage 当对账的入口，会让**它活着的那一份**看起来像孤儿，
+    //   而界面上会给它一个删除按钮。
+    [{ surface, layout: true, data: { inherit: 'editor' } }, true, false],
+    [{ surface, layout: true, data: null }, true, false],
+  ];
+  for (const [contributes, wantSurface, wantLayout] of cases) {
+    const p = { id: ID, version: '1.0.0', contributes };
+    assert.equal(pluginData.hasSurface(p), wantSurface, JSON.stringify(contributes));
+    assert.equal(pluginData.hasLayoutStorage(p), wantLayout, JSON.stringify(contributes));
+  }
+  assert.equal(pluginData.hasSurface(null), false);
+  assert.equal(pluginData.hasLayoutStorage(null), false);
+});
+
 // ── 清单校验：contributes.data ──────────────────────────────────────────────
 
 /** 一份最小合法清单，`over` 里的东西直接盖上去。 */
@@ -132,7 +228,7 @@ function manifest(over = {}) {
 function inspect(mf) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-pd-'));
   fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(mf, null, 2));
-  return P.inspectDir(dir, 'test');
+  return P.inspectDir(dir);
 }
 
 /** 一份**有界面、要布局**的清单，只换 `data` 那一段。 */

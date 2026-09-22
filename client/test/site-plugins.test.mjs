@@ -238,6 +238,7 @@ function callSync(site, env, over = {}) {
     }),
     pinnedKey: over.pinnedKey || ((id) => env.pinned.get(id)),
     protectedVersions: over.protectedVersions || [],
+    keepSites: over.keepSites,
     stale: over.stale || (() => false),
     now: over.now || (() => 1700000000000),
     verify: over.verify,
@@ -657,6 +658,45 @@ test('★ 引用计数：A 要 1.0.0、B 要 1.1.0 ⇒ 两份并存，各升各�
   assert.equal(rec.sites.aaaa.wants[v1.id], '1.2.0');
   assert.equal(rec.sites.bbbb.wants[v1.id], '1.1.0');
   assert.ok(v2 && v3, '（占位：上面两个目录确实造出来了）');
+});
+
+test('★★ 连接没了的站点条目要跟着删 —— 否则它的 `wants` 会把那一版永久钉住', async () => {
+  // 站点键是 `sha256(user@host:port)`：**改一次主机名/端口/用户名就是另一个键**。
+  // 旧条目留着的后果很具体：它的 `wants` 继续为那些版本计引用 ⇒ 那一版**永远不会
+  // 被回收**，而界面上永远显示「被 <旧标签> 要」。
+  const site = makeSite();
+  const env = makeEnv();
+  const a = site.add('v1', { name: 'a', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = {};\n' });
+  const b = site.add('v2', { name: 'b', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = {};\n' });
+
+  // A 站点要 a；B 站点要 b。
+  site.state.disabled.add(`${b.id}@1.0.0`);
+  let r = await callSync(site, env, { siteKey: 'aaaa', siteLabel: 'A' });
+  consentAll(env, r);
+  site.state.disabled.clear();
+  site.state.disabled.add(`${a.id}@1.0.0`);
+  r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B' });
+  consentAll(env, r);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, a.id, '1.0.0')), true);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, b.id, '1.0.0')), true);
+  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
+
+  // ★ 省略 `keepSites` = **不知道** ⇒ 一条都不删（与"读不到记录就不回收"同一条纪律）。
+  r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B' });
+  assert.deepEqual(r.forgotSites, [], '不知道就不删');
+  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
+
+  // A 那条连接被删掉（或者主机名改了）⇒ 现在只有 bbbb。
+  //   `aaaa` 那一份 `wants` 一没，a 就只有"没有任何站点要它"了 ⇒ 同一个对账里回收。
+  r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B', keepSites: ['bbbb'] });
+  assert.deepEqual(r.forgotSites, ['aaaa']);
+  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites), ['bbbb']);
+  assert.equal(fs.existsSync(path.join(env.siteRoot, a.id, '1.0.0')), false,
+    '★ 回收发生在**同一次**对账里 —— 站点表在第 5 步删、回收在第 6 步');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, b.id, '1.0.0')), true,
+    'B 还活着，它要的那一份一个字都不该动');
 });
 
 test('★★ 站点**关掉**或**不再报**一个插件 ⇒ 留着不删（决定 3）', async () => {

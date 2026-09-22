@@ -57,6 +57,7 @@ const path = require('path');
 
 const config = require('./config.js');
 const pluginData = require('./plugin-data.js');
+const dataAudit = require('./plugin-data-audit.js');
 const keys = require('./keys.js');
 const hosts = require('./hosts.js');
 // ★ `KIND` 也引进来：主进程里有好几处要问"这是不是那个假后端"。写字面量
@@ -693,6 +694,11 @@ function reconcileSitePlugins() {
         siteLabel: label,
         siteRoot,
         stagingRoot,
+        // ★ **全部**连接的站点键，不是只有当前这一条：池是公共的，另一条连接要的
+        //   版本也得留着。对账据此把记录里那些"连接已经没了"的站点条目删掉 ——
+        //   站点键含 `user@host:port`，所以改一次主机名就是另一个键，而旧条目留着
+        //   会让它那些版本**永远不会被回收**（见 site-plugins.js 第 5 步）。
+        keepSites: (cfg.connections || []).map((c) => sitePluginSync.siteKeyOf(c)),
         trusted: (id, version, digest) => config.isTrusted(cfg, id, version, digest),
         // §5.3：本机那一份不在了 ⇒ 台账那条一并消失 ⇒ 同一个对账里它走进待同意。
         // **删就删在信任判定的前面**，所以"静默装回来"这条路结构上不存在。
@@ -849,12 +855,11 @@ function pluginsView() {
       // 客户端认得的插件用**它自己的**标题：那个才对应它实际会做的事。
       title: plugin.displayName,
       description: plugin.description,
-      source: plugin.source,
-      // ★ **这里从前还有一个 `sources`（数组）与一个 `sourceLabel`。** 它们回答的
-      //   是"这一份是哪个池给的" —— 而客户端**只剩一个池**（站点池）之后，那个
-      //   数组恒为一项、标签恒为 `null`（`sourceLabelOf` 的判据是"来源数 > 1"）。
-      //   留着一套永远说不出话的字段，与留一条永远显示、并且永远说错的标签是
-      //   同一类东西：看的人会以为自己看到的是两条来路。
+      // ★ 这里从前有 `source` / `sources` / `sourceLabel` 三个字段（回答"这一份是
+      //   哪个池给的"）。客户端**只剩一个池**（站点池）之后它们恒为一项 / 恒为
+      //   `null`，v0.7 把它们连同注册表里那个 `source` 字段一起删了 —— 一句永远
+      //   说不出话的字段与一条永远说错的标签是同一类东西：看的人会以为自己看到的
+      //   是两条来路。（账本 S20。）
       hasClientCode: plugin.hasClientCode,
       surface: plugin.contributes.surface,
       // 站点那边报的是哪一版。**这是"站点升级了而本机还是旧的"的唯一线索** ——
@@ -921,7 +926,6 @@ function pluginsView() {
     .filter((p) => p.active === false && !pendingKeys.has(`${p.id}@${p.version}`))
     .map((p) => ({
       id: p.id, version: p.version, name: p.name, title: p.displayName,
-      source: p.source,
       // 为什么它没被加载。今天只有一种：**代码还没过同意闸**，而站点此刻没有在
       // 报它（所以没有"同意"这个入口）。写成字段而不是让界面去猜 —— 界面手里
       // 那份视图随时可能陈旧。
@@ -1120,6 +1124,9 @@ function ensureConnectionLayout(conn) {
  * 端口写回只可能发生在引用计数 ≥ 1 的组上，改主机密钥更与计数无关。**那不是漏改。**
  */
 function commitConfig() {
+  // ★ 组的**名字**要在 pruneLayouts 之前记下来：它一删，`cfg` 里就没有这个名字了，
+  //   而清理失败时那句话要说清是**哪一个**组（"某个布局组"对用户没有用）。
+  const names = new Map((cfg.layouts || []).map((l) => [l.id, l.name]));
   const { removed } = config.pruneLayouts(cfg);
   try {
     config.saveConfig(cfgDir, cfg);
@@ -1128,7 +1135,7 @@ function commitConfig() {
     win.pushNotice('error',
       '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
   }
-  for (const id of removed) clearLayoutStorage(id);
+  for (const id of removed) clearLayoutStorage(id, names.get(id));
   return removed;
 }
 
@@ -1143,18 +1150,34 @@ function commitConfig() {
  *   「页面莫名其妙坏了」。所以先跟窗口对一下现在用的是哪个。
  *
  * 不 await：删一个组不该因为磁盘慢而卡住界面。
+ *
+ * @param {string} layoutId
+ * @param {string} [layoutName] 那个组的名字。只为了失败时说清是**哪一份** ——
+ *   `pruneLayouts` 已经把它从配置里删掉了，所以这个名字由调用方在删之前记下来。
  */
-function clearLayoutStorage(layoutId) {
+function clearLayoutStorage(layoutId, layoutName) {
+  const label = layoutName ? `布局组「${layoutName}」` : '那个布局组';
   // 哪些插件的存储挂在这个组上：**有界面、而且声明了分实例**的那些。
   //   · 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）；
   //   · 没声明分实例 ⇒ 只有一份存储，它不属于任何一个组 —— 跟着某个组一起清掉
   //     就是把这个插件唯一的那份数据删了。判据只能看声明，不能看"哪个插件在跑"：
   //     一个今天没在跑的插件，它的存储照样在这个组里。
+  //
+  // ★ 判据收在 pluginData.hasLayoutStorage 里：**"有界面 + 按布局组分"缺一不可**。
+  //   回收一个组时要清的是"属于这一个组"的那些存储；没声明分实例的插件只有一份，
+  //   它不属于任何组（对账那一侧用的是另一条 —— `hasSurface`）。
   const partitions = registry.list()
-    .filter((p) => p.contributes.surface && pluginData.hasInstance(p))
-    .map((p) => pluginData.partitionOf(pluginData.identityOf(p, layoutId)));
+    .filter(pluginData.hasLayoutStorage)
+    .map((p) => {
+      const id = pluginData.identityOf(p, layoutId);
+      // ★ 两个名字**都要**，它们不是一回事：分区名给 Electron，磁盘名给路径。
+      //   分区名里插件 id 那一段是**大写**的，而磁盘上的目录是**折叠过**的 ——
+      //   拿分区名去拼路径会静默落空（`force` 把 ENOENT 吞了，于是"删成功"而目录还在）。
+      return { partition: pluginData.partitionOf(id), disk: pluginData.diskNameOf(id) };
+    });
+  const root = partitionsRoot().root;
 
-  for (const partition of partitions) {
+  for (const { partition, disk } of partitions) {
     // ★ 正被那块界面用着的分区**不能碰**（抽掉它会把用户当前那份数据连 cookie
     //   一起弄坏，而症状只是「页面莫名其妙坏了」）。从前这里是 `return` —— 那时
     //   只有一个分区，跳过它就等于跳过整件事；多份之后跳过**这一个**才是它本来的
@@ -1168,17 +1191,118 @@ function clearLayoutStorage(layoutId) {
     //     配置"的次序一旦被改坏，这里就是最后一道。（与 plugins/index.js 的
     //     `parseVer` 同一类：留着一个不可观测的守卫，并且**明说**它不可观测。）
     //
-    //   ★ 跳过仍然是**静默**的（既不删也不报）。那一格 —— 清了一半、剩下一份谁也
-    //     不知道的残留 —— 属于"生命周期"那一阶段要做的事。
+    //   ★ 跳过仍然是**静默**的，但那不等于"清理在瞒着用户"：这条路是"开关布局组 /
+    //     删连接"带出来的，而那两步在动手之前都已经问过用户了（`would_discard`
+    //     那个确认框）。**用户主动发起**的删除是另一条路（`app:deletePluginData`），
+    //     那一条碰到同样的情形会**明确拒绝**并说清原因 —— 静默只在这一条路上关掉。
     if (win && win.surfacePartition === partition) continue;
-    try {
-      electronSession.fromPartition(partition).clearStorageData()
-        .catch((e) => win.pushNotice('warn',
-          `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`));
-    } catch (e) {
-      win.pushNotice('warn', `布局组已删除，但它的浏览器存储没能清干净（${e.message}）。`);
-    }
+    clearOnePartition(partition, disk, root).then((r) => {
+      if (!r.ok) {
+        win.pushNotice('error',
+          `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
+      }
+    });
   }
+}
+
+// ── 本机的插件数据：对账与删除 ──────────────────────────────────────────────
+/**
+ * 分区目录的根（并顺带核对一遍命名约定）。
+ *
+ * ★ 探针必须是**该有的**身份：`fromPartition` 可能把目录建出来，而编造一个名字
+ *   去问，就等于凭空造一份**不在"该有的"清单里**的目录 —— 用户下次打开客户端会
+ *   多看到一行"没人用的数据"，而那一行是我们自己造的。
+ */
+function partitionsRoot() {
+  const layouts = (cfg && cfg.layouts) || [];
+  const probePlugin = registry.list().find(pluginData.hasSurface);
+  let probe = null;
+  if (probePlugin) {
+    if (!pluginData.hasInstance(probePlugin)) {
+      probe = pluginData.partitionOf(pluginData.identityOf(probePlugin));
+    } else if (layouts.length) {
+      probe = pluginData.partitionOf(pluginData.identityOf(probePlugin, layouts[0].id));
+    }
+    // 声明了分实例、而一个布局组都没有 ⇒ **没有该有的身份可问**：不探，用兜底那条路。
+  }
+  let fallbackRoot = null;
+  try {
+    fallbackRoot = path.join(app.getPath('sessionData'), 'Partitions');
+  } catch { /* 老 Electron 上没有这个键：那就没有根 */ }
+  return dataAudit.partitionRoot({ session: electronSession, probe, fallbackRoot });
+}
+
+/**
+ * 本机插件数据的对账：**谁在用、还剩几份**。只读，不改任何东西。
+ *
+ * ★ 它**不塞进 `app:bootstrap`**：那一次载荷是"启动信息"，而这里要做磁盘 I/O、
+ *   还包含一次可能失败的探测 —— 挂上去会让"面板打不开"与"磁盘慢"变成同一件事。
+ *   界面进来之后单独拉一次（`app:pluginData`）。
+ */
+function auditPluginData() {
+  const layouts = (cfg && cfg.layouts) || [];
+  const pr = partitionsRoot();
+  let names = null;
+  let why = pr.why || null;
+  if (dev.developerMode) {
+    why = '开发者模式不查磁盘：这里用的是一份沙箱配置，它里面的布局组 id 与真实那一份'
+      + '对不上 —— 照它去认，真实那一份数据会整片看起来像孤儿，而删掉它们就是毁掉'
+      + '真实的那一份。';
+  } else if (pr.root) {
+    const r = dataAudit.listPartitions(pr.root);
+    names = r.names;
+    why = r.why || why;
+  }
+  return {
+    ...dataAudit.audit({
+      plugins: registry.list(), layouts, connections: cfg.connections, names, why,
+    }),
+    root: pr.root,
+  };
+}
+
+/**
+ * 清掉一份插件数据：**先让它松手，再把目录删掉**。
+ *
+ * ★ 两件事都要做，而它们分工不同。`clearStorageData()` 的作用**不是**"清干净"
+ *   （它连 HTTP 缓存都不碰 —— `storages` 里没有 `cache`），而是让 Chromium 手里
+ *   那个**仍被缓存的 context 先松手**：本进程用过的分区，它的 context 会一直留着
+ *   —— 那是常态，不是例外。**目录的消失是 `rmSync` 干的**：只清不删的话，那一行会
+ *   永远留在对账的清单里，而用户会以为自己点了没反应。
+ *
+ * ★ 删完**复核**：Windows 上有句柄时 `rm` 会删一半然后抛（`force` 只吞 `ENOENT`），
+ *   Linux 上删掉之后 Chromium 可能把目录再写出来。所以这里如实返回"到底删干净没有"。
+ *
+ * @param {string} partition 完整的 `persist:…`（给 Electron 的那个名字）
+ * @param {string|null} diskName 磁盘上的目录名（**折叠过**的那一份）。给不出来就只清存储、不删目录。
+ * @param {string|null} root 分区目录的根
+ * @returns {Promise<{ok: boolean, error: string|null}>}
+ */
+function clearOnePartition(partition, diskName, root) {
+  return new Promise((resolve) => {
+    let p;
+    try {
+      p = electronSession.fromPartition(partition).clearStorageData();
+    } catch (e) {
+      resolve({ ok: false, error: e.message });
+      return;
+    }
+    Promise.resolve(p).then(() => {
+      // ★ 路径**只由根 + 磁盘上的那个名字拼** —— 界面给的字符串**永远进不了路径**
+      //   （它们只用来**匹配**清单里的某一行，见 `app:deletePluginData`）。
+      const dir = root && diskName ? path.join(root, diskName) : null;
+      if (!dir) return resolve({ ok: true, error: null });
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch (e) {
+        return resolve({ ok: false, error: `目录没能删掉：${e.message}` });
+      }
+      // 报成功而它还在，下一次对账会把同一行再列出来 —— 用户会以为"我明明删过了"。
+      return resolve(fs.existsSync(dir)
+        ? { ok: false, error: '目录删了又还在（多半有别的进程正拿着它）' }
+        : { ok: true, error: null });
+    }, (e) => resolve({ ok: false, error: e.message }));
+  });
 }
 
 // ── 会话编排 ────────────────────────────────────────────────────────────────
@@ -2184,6 +2308,46 @@ function registerIpc() {
     cfg.layouts = cfg.layouts.map((l) => (l.id === layoutId ? { ...l, name: clean } : l));
     commitConfig();
     return { ok: true, layouts: config.layoutPlan(cfg) };
+  });
+
+  // ── 本机的插件数据 ──
+  //
+  // 与 `app:bootstrap` 分开的**一次单独的对账**（理由见 auditPluginData 的注释）。
+  // 只读：它不清理、不回收，只回答"本机还剩几份、哪一份没人用"。
+  send('app:pluginData', async () => {
+    const a = auditPluginData();
+    return { ok: true, rows: a.rows, diskChecked: a.diskChecked, why: a.why };
+  });
+
+  /**
+   * 删掉一份插件数据。**不可逆** —— 那里面是那个插件的编辑器布局、打开的标签页和
+   * 登录状态，所以界面必须先问过用户。
+   */
+  send('app:deletePluginData', async (payload = {}) => {
+    const { partition } = payload;
+    // ★ **判定权在这里**（照 `app:setConnectionLayout` 那条形状）：界面手里那份清单
+    //   随时可能已经陈旧（刚连上、刚改过配置、刚装了插件），所以**重新对一遍账**，
+    //   只认这一次算出来的那一条。判据本身在 plugin-data-audit.js 的 deletionVerdict
+    //   （两句话都说得出原因的那两格：`stale` 与 `in_use`）。
+    //   ★ 于是路径**只由根 + 磁盘上的目录名拼**，而 `partition` 这个字符串只用来
+    //   **匹配**某一行 —— `{partition: 'persist:../../..'}` 匹配不上任何一行。
+    const fresh = auditPluginData();
+    const verdict = dataAudit.deletionVerdict({
+      rows: fresh.rows, partition, surfacePartition: win && win.surfacePartition,
+    });
+    if (!verdict.ok) return verdict;
+    const row = verdict.row;
+    // 磁盘上的名字就是删除路径的依据；分区名由它推出来（Electron 自己会折叠，两边
+    // 指向同一个存储目录）。
+    const r = await clearOnePartition(`persist:${row.partition}`, row.partition, fresh.root);
+    if (!r.ok) {
+      return { ok: false, code: 'failed', error: `没能清干净：${r.error}` };
+    }
+    const after = auditPluginData();
+    return {
+      ok: true, rows: after.rows, diskChecked: after.diskChecked, why: after.why,
+      label: row.label,
+    };
   });
 
   // ── 连接 ──

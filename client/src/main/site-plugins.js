@@ -560,7 +560,7 @@ function verifyStaged(destDir, declared, expect) {
   }
   // ③ 清单级校验 —— **但不执行代码**（`inspectDir` 只编译）。
   //    于是"清单合法而 client/index.js 有语法错"会在这里就被抓到。
-  const r = plugins.inspectDir(destDir, 'site');
+  const r = plugins.inspectDir(destDir);
   if (r.error) return { ok: false, why: `这份插件用不了：${r.error}` };
   // ④ 身份要对得上：这一份必须**自报**是站点说的那个 `(id, 版本)`。
   //    `dest` 那条路径是拿 id/版本拼出来的，而拼出来的路径与目录里的东西是两回事。
@@ -701,6 +701,10 @@ async function rpcWithBackoff(rpc, req) {
  *   pinnedKey          {Function} `(id) → string|undefined`：本机钉住的公钥指纹
  *                      （§5.4）。`undefined` = 从没钉过。见 config.pinnedKeyOf。
  *   protectedVersions  {Set<string>} 活会话引用的 `<id>@<版本>`（来自 `op:list`）
+ *   keepSites          {string[]} 现在**还存在**的那些连接的站点键（见 `siteKeyOf`）。
+ *                      给出它就顺手把记录里已经不在其中的站点条目删掉（第 5 步）。
+ *                      ★ **省略 ≠ 空**：省略 = 不知道（一条都不删）—— 与
+ *                      "读不到记录就不回收"同一条纪律，因为删条目会让版本失去引用。
  *   generation         {number}  这次对账属于哪一代连接
  *   stale              {Function} `() → boolean`：连接是否已经换了一条
  *   verify             {Function} `(entries) → failed[]`：换入之后复查注册表
@@ -718,7 +722,7 @@ async function sync(o) {
   const out = {
     supported: false, reason: null, error: null,
     added: [], kept: [], pendingConsent: [], reclaimed: [], failed: [], withdrawn: [],
-    notices: [], record: null, limits: { ...HARD_LIMITS },
+    forgotSites: [], notices: [], record: null, limits: { ...HARD_LIMITS },
   };
 
   // ── 1. 站点清单 ──
@@ -1023,6 +1027,27 @@ async function sync(o) {
       // `distributes` **只增不减**：它的用处是把话说清楚（"这个插件你以前从 X 站
       // 装过，X 现在不报它了"），不参与回收判定。
       cur.distributes = [...new Set([...cur.distributes, ...seenIds])].sort();
+
+      // ── 站点表**不是只增的**：连接没了的条目，连它的 `wants` 一起删掉 ──
+      //
+      // ★ 站点键是 `sha256(user@host:port)`，所以**改一次主机名/端口/用户名就是另一个
+      //   键**。旧条目留在这里的后果很具体：它的 `wants` 继续为那些版本计引用 ⇒
+      //   那一版**永远不会被回收**，而面板上永远显示「被 `<旧标签>` 要」。
+      //
+      // ★ 这与上面那条"指针只前进、绝不清空"**不是同一件事**，别合并：那一条说的是
+      //   「**同一个站点**这一轮没报某个插件，不构成删除它的理由」（它随时可能再打开）；
+      //   这里删的是**站点本身** —— 它对应的连接已经不在配置里，没有任何东西还会来问
+      //   它要插件。★ 调用方算的是**全部**连接（不是只有当前这一条），所以当前这个站点
+      //   一定在 `keepSites` 里；不成立的话这一行会把刚写好的那一条当场删掉。
+      if (Array.isArray(o.keepSites)) {
+        const keep = new Set(o.keepSites);
+        for (const k of Object.keys(record.sites)) {
+          if (keep.has(k)) continue;
+          out.forgotSites.push(k);
+          delete record.sites[k];
+        }
+      }
+
       record.version = RECORD_VERSION;
       try {
         writeJsonAtomic(recordPathOf(siteRoot), record);
@@ -1103,7 +1128,7 @@ function acceptStaged(o) {
       return { ok: false, error: '本机那一份已经不在了 —— 请重新同步一次。' };
     }
     if (!st.isDirectory()) return { ok: false, error: '本机那一份不是一个目录。' };
-    const r = plugins.inspectDir(o.stagedDir, 'site');
+    const r = plugins.inspectDir(o.stagedDir);
     if (r.error) return { ok: false, error: `本机那一份用不了：${r.error}` };
     if (r.entry.plugin.id !== o.id || r.entry.plugin.version !== o.version) {
       return { ok: false, error: `本机那一份自报的是 ${r.entry.plugin.id}@${r.entry.plugin.version}，`

@@ -214,27 +214,16 @@ function cmpVer(a, b) {
 
 // ── 大小写折叠：**ASCII-only** ──────────────────────────────────────────────
 //
-// §3.3 有一条"同一个包里两条路径禁止只差大小写"，而判据是"折叠之后相等"。
-// ★ 折叠**必须**只折叠 `A..Z`，**禁止**用 `String.prototype.toLowerCase()`：
-//   后者是全 Unicode 的，会把 `İ`（U+0130）折成 `i̇`、把 `K`（U+212A KELVIN）
-//   折成 `k` —— 于是两个实现可以在同一条路径上给出相反的答案，而这是一条
-//   **拒绝**规则：一边收、一边拒，症状是"同一个包在一台机器上装得上、在另一台
-//   上装不上"，而报错里一个字都不会提到大小写折叠。
+// ★ 它**搬到 plugin-data.js 去了**：身份的**磁盘落点**是折叠过的
+//   （`MakePartitionName` = `EscapePath(ToLowerASCII(分区名))`），所以折叠从
+//   "§3.3 的一条路径规则"变成了"身份字符串与磁盘上的名字之间的那道变换"，它必须
+//   住在依赖图的下面那一层（这一层本来就 require 那个文件；反过来就是循环 require）。
+//   原来那段长篇理由（为什么**禁止** `toLowerCase()`）跟着搬了过去。
 //
-// ★ ASCII-only 的折叠在 JS / Python / Node 打包器里逐字节相同：没有区域设置，
-//   没有 Unicode 版本差异（`toLowerCase` 的结果会随 ICU 版本变）。
-//
-// ★ 它住在**这里**而不是 site-plugins.js：`COPY_SKIP` 在这里，两者都是 §3.3 的
-//   规则，全客户端各只有一份。分发（site-plugins）与读包（plugin-package）都引它。
-function foldAscii(s) {
-  const t = typeof s === 'string' ? s : '';
-  let out = '';
-  for (let i = 0; i < t.length; i++) {
-    const c = t.charCodeAt(i);
-    out += c >= 0x41 && c <= 0x5a ? String.fromCharCode(c + 32) : t[i];
-  }
-  return out;
-}
+// ★ 这里只 re-export 一份：`COPY_SKIP` 与 §3.3 那条"同一个包里两条路径禁止只差
+//   大小写"仍然住在这个文件里，而分发（site-plugins）与读包（plugin-package）引的是
+//   `plugins.foldAscii` —— 调用点一个都没变，规则也仍然只有一份实现。
+const foldAscii = pluginData.foldAscii;
 
 /**
  * 两个**插件版本串**的大小（`Registry.list()` 的排序用）。
@@ -552,8 +541,14 @@ function keysProblem(obj, allowed, what) {
  *
  * ★ 每一步失败都**说清是哪个文件的哪个键**。这个函数的报错是"加了插件它就是不
  *   生效"这个症状的**唯一**线索来源，含糊的报错等于没有报错。
+ *
+ * ★ 第二个参数（`source`）**已经删掉了**，连同插件对象上的 `source` 字段与
+ *   `reload()` 里那个 `sources` 数组（账本 S20）。它们回答的是"这一份是哪个池给的"
+ *   —— 而客户端**只剩一个池**（站点池）之后，那个数组恒为一项、没有任何读者。
+ *   留着它就是留一条"看起来有两条来路"的线索。★ 根上的 `source` **留着**：它是
+ *   出错时说清"哪个根"的诊断标签（见 `scanRoot`）。
  */
-function inspectDir(dir, source) {
+function inspectDir(dir) {
   const mfPath = path.join(dir, MANIFEST);
   let raw;
   try {
@@ -787,7 +782,6 @@ function inspectDir(dir, source) {
     },
     // ── 加载记录 ──
     dir,
-    source,
     hasClientCode,
     // ★ **全长** 64 位。截断只留给显示（见 shortDigest）—— 摘要在台账里是判据，
     //   拿 64 位当键就是一个 64 位的碰撞面。
@@ -802,7 +796,7 @@ function inspectDir(dir, source) {
     // ── 客户端代码的钩子（全都可以没有）──
     prepare: null, attach: null, preferredPort: null, closeWarning: null,
   };
-  return { entry: { plugin, dir, source, files, digest,
+  return { entry: { plugin, dir, files, digest,
                     clientPath: hasClientCode ? clientPath : null } };
 }
 
@@ -991,7 +985,7 @@ function scanRoot(root, allows) {
     return out;
   }
   for (const { dir, label } of dirs) {
-    const r = inspectDir(dir, root.source);
+    const r = inspectDir(dir);
     if (r.error) {
       out.push({ error: `${label}：${r.error.replace(`${dir}：`, '')}` });
       continue;
@@ -1057,11 +1051,16 @@ class Registry {
 
     // ── 池：按 `(id, 版本)` 归并 ──
     //
-    // 同键同摘要 = 同一个构件的多个来源 → 合并（只多记一个来源）。
+    // 同键 = 同一个构件的多个来源 → 合并成一条。
     // 同键不同摘要 = 两个不同的东西在抢同一个身份 → **两个都不加载**并报错。
     //   绝不挑一个：挑错的后果是会话的解析键指过去、客户端静默地跑了另一个
     //   插件的代码，而用户完全看不出来。宁可让这个插件暂时不可用 ——
     //   那种失败是**看得见**的（会话变成"未知服务"，仍然接得上隧道、停得掉）。
+    //
+    // ★ 「多个来源」今天是**够不着**的（只剩一个根，一棵树里同一个 `(id, 版本)`
+    //   只可能有一份）—— 这一半留着，因为下面那条"撞车"的分支是**账本 F20 的
+    //   落点**：它是"本机一个槽位只能有一份内容"这句话在注册表这一侧的守卫，
+    //   而身份里不带摘要正是靠那句话才成立（见 plugin-data.js 的文件头）。
     const byKey = new Map();
     for (const p of found) {
       const key = `${p.id}@${p.version}`;
@@ -1092,10 +1091,7 @@ class Registry {
       //   答案；而这一行的语义是"按闸门状态挑"，不是"按顺序挑"。真加回第二个根
       //   的那天，它就该重新有意义。
       const first = group.find((p) => p.active !== false) || group[0];
-      plugins.set(key, {
-        ...first,
-        sources: [...new Set(group.map((p) => p.source))].sort(),
-      });
+      plugins.set(key, first);
     }
 
     this.plugins = plugins;

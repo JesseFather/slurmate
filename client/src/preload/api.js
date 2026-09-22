@@ -62,6 +62,18 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 改名。名字只是给人看的 —— 身份永远是 id（它决定存储分区，永不复用）。
   renameLayout: (payload) => ipcRenderer.invoke('app:renameLayout', payload),
 
+  // ── 本机的插件数据 ──
+  //
+  // 插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在浏览器的
+  // 存储分区里，一份 = 一个插件 + 共享组 + 布局组。这一对方法回答"还剩几份、哪一份
+  // 没人用"，以及**删掉其中一份**。
+  //
+  // ★ 删除**不可逆**（那个插件下次打开会是一份全新的空白存储），所以界面必须先问过
+  //   用户。被拒绝时 code 是 `in_use`（正被当前页面用着）或 `stale`（配置或插件刚
+  //   变过，界面手里那份清单已经不作数）；删除成功时把重算过的清单一起回来。
+  pluginData: () => ipcRenderer.invoke('app:pluginData'),
+  deletePluginData: (payload) => ipcRenderer.invoke('app:deletePluginData', payload),
+
   // ── 主机密钥（TOFU）──
   // 第一次连一台主机时主进程会拒绝并回一个指纹，由界面让用户核对后调 trustHostKey。
   // 「变了」的情况**不接受**信任 —— 界面只提供「我知道服务器重装了」这条显式出路。

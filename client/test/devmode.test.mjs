@@ -43,9 +43,13 @@ function readDevFile() {
 //   被 50 多条用例踩着，动它的风险与这里的重复不成比例 —— 两处的桩各自只有几十行、
 //   改起来一眼看得完。真要抽，等第三个文件需要它的时候。
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0,
-                windows: [], views: [], relaunch: 0, exit: false };
+                windows: [], views: [], relaunch: 0, exit: false,
+                /** 被 `clearStorageData()` 清过的分区，按先后顺序。 */
+                cleared: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
+/** 桩里折叠分区名要用它（磁盘上的目录名是折叠过的）。 */
+const P = require('../src/main/plugins/index.js');
 
 class FakeWebContents {
   constructor() { this.handlers = {}; this._destroyed = false; this._url = ''; }
@@ -115,7 +119,10 @@ class FakeBrowserWindow {
 
 const electronStub = {
   app: {
-    getPath: (k) => (k === 'userData' ? userData : fakeHome),
+    // ★ `sessionData` 必须**显式**支持：分区目录住在哪儿问的就是它，而它的默认值
+    //   就是 `userData`。认不得的键从前**静默**返回 `fakeHome` —— 于是那一块永远
+    //   列不出东西，还不报错。
+    getPath: (k) => ((k === 'userData' || k === 'sessionData') ? userData : fakeHome),
     getVersion: () => '0.1.0-test',
     on: () => {},
     // 立刻 resolve：index.js 的启动链挂在 whenReady().then(...) 上，
@@ -145,6 +152,12 @@ const electronStub = {
         cookies: {
           get: async ({ name }) => (jar.has(name) ? [{ name, value: jar.get(name) }] : []),
         },
+        // 与 boot.test.mjs 的桩同一形状（两处各自几十行，见文件头）。
+        // ★ 分区在磁盘上的目录名是**折叠过**的；顺手把 jar 也清掉 —— 不清的话
+        //   「删掉之后那份数据还在」这个真机症状在桩里根本不存在。
+        clearStorageData: async () => { calls.cleared.push(partition); jar.clear(); },
+        getStoragePath: () => path.join(userData, 'Partitions',
+          P.foldAscii(String(partition).replace(/^persist:/, ''))),
         fetch: async (url, opts) => {
           const res = await fetch(url, opts);
           const sc = res.headers.get('set-cookie');
@@ -288,6 +301,57 @@ test('★ 插件来源：选完当场报"读到几个"，读不出插件就**不
   const reset = await invoke('app:clearDevPluginDir');
   assert.equal(reset.ok, true);
   assert.equal(readDevFile().pluginDir, null);
+});
+
+test('★★ 本机的插件数据：真的去认磁盘，认得出的删得掉，认不出的不给删', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  require('../src/main/index.js');
+  await new Promise((r) => setTimeout(r, 400));
+
+  // 一台**没配过任何东西**的机器：没有插件、也没有布局组 ⇒ 分区目录里的东西一份都
+  // 不该"有主"。这正是"插件卸载之后留下的那堆"的形状。
+  const parts = path.join(userData, 'Partitions');
+  const orphan = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab';
+  fs.mkdirSync(path.join(parts, orphan), { recursive: true });
+  fs.writeFileSync(path.join(parts, orphan, 'Cookies'), 'x');
+  fs.mkdirSync(path.join(parts, 'slot-1'), { recursive: true });
+  // 一个**认不出**的目录：要列出来，但**不能**有删除按钮。
+  //   （万一分区目录的根取错了，这个列表会把这样的名字摆上删除按钮 —— 那是最坏的一种。）
+  fs.mkdirSync(path.join(parts, 'dev-sandbox'), { recursive: true });
+
+  const d = await invoke('app:pluginData');
+  assert.equal(d.ok, true);
+  assert.equal(d.diskChecked, true, '真实模式要看磁盘');
+  assert.deepEqual(d.rows.map((r) => r.partition).sort(),
+    ['slot-1', orphan, 'dev-sandbox'].sort(),
+    '三份都该列出来（一个都不许瞒着）');
+  const by = new Map(d.rows.map((r) => [r.partition, r]));
+  assert.equal(by.get(orphan).kind, 'orphan');
+  assert.equal(by.get(orphan).deletable, true);
+  assert.equal(by.get('slot-1').kind, 'legacy');
+  assert.equal(by.get('slot-1').deletable, true, '0.7 之前的残留该能删掉');
+  assert.equal(by.get('dev-sandbox').deletable, false, '★ 认不出的不给删除按钮');
+
+  // ★ 界面给的字符串**永远进不了路径**：这个形状就是一次任意目录递归删除。
+  const bad = await invoke('app:deletePluginData', { partition: 'persist:../../../tmp' });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'stale', '匹配不上任何一行 ⇒ 拒绝，而不是照它去拼路径');
+  assert.equal(fs.existsSync(path.join(userData, 'Partitions')), true);
+
+  // 删掉一份：**目录要真的没了**，而且回来的清单里也不该再有它。
+  const ok = await invoke('app:deletePluginData', { partition: orphan });
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(fs.existsSync(path.join(parts, orphan)), false,
+    '★ 只清存储不删目录的话，这一行会永远留在清单里 —— 用户会以为点了没反应');
+  assert.equal(ok.rows.some((r) => r.partition === orphan), false);
+  assert.equal(calls.cleared.includes(`persist:${orphan}`), true,
+    'clearStorageData 也要走到（它是让 Chromium 手里那个 context 松手的那一步）');
+
+  // 删不掉的仍然删不掉：认不出的那一份点了也只会拿到"不在清单里"。
+  const no = await invoke('app:deletePluginData', { partition: 'dev-sandbox' });
+  assert.equal(no.ok, false);
+  assert.equal(no.code, 'stale');
+  assert.equal(fs.existsSync(path.join(parts, 'dev-sandbox')), true);
 });
 
 test('★ 「立即重启」走的是与关窗口同一套收尾', async (t) => {

@@ -38,6 +38,64 @@
 > **`files` 与 `plugin_file` 被删掉了**，而 v0.6 的客户端判"站点支不支持分发"
 > 用的正是 `files`。
 
+### Added — ★ 本机的插件数据现在**看得见、删得掉**
+
+**一、在此之前，"还剩几份、哪一份没人用"在客户端没有任何判据。** 磁盘上的分区目录
+**没有一行代码读过**，`pruneLayouts` 的引用计数只活在配置里。于是"插件卸载之后留下的
+那堆"一直躺在那儿：升级换下来的旧版本、0.7 之前那三种旧形状（`slot-…` / `layout-…` /
+`plugin-…`）、以及被删掉的布局组 —— **里面有登录 cookie**。
+
+**二、判据是「正向算 + 两边折叠做差」，不是「逆向解析那个目录名」。** 后者有两个坑，
+各自都够把**活着的**一份判成垃圾并给出删除按钮：`inherit` 缺席时身份的第二段**就是
+版本号**（`1.0.0` 不匹配组名的形状），而磁盘上的名字是**折叠过**的。所以"我解析不出来"
+与"这是老垃圾"必须分家 —— 逆向解析只用来写一句人能读的解释。
+
+**三、界面上多了一块「本机的插件数据」**（`#sec-data`，独立一节）：只列**没有任何连接
+在用**的那些，一份数据一行，一行一个「删掉这一份」。删掉**不可逆**（那个插件下次打开
+是一份全新的空白存储），所以先问一句；而**认不出**的目录也会列出来、但**不给删除
+按钮** —— 分区目录的根是推出来的，万一推错，那一列会是 `secrets.json` 之类的东西。
+★ **"查不了"会画出来**：不说"查不了"就等于说"没有"，而那是两件事。
+
+**四、顺手三件**（都是这一轮核查查出来的）
+
+- **`plugin.source` / `plugins[].sources` 删掉了**（账本 S20 结清）：客户端只剩一个
+  插件池之后它们恒为一项 / 恒为 `null`。连带 `inspectDir` 的第二个参数一起删 ——
+  "这一份是哪个池给的"不再是这个仓库里的一条轴。★ 根上的 `source` 留着：它是出错时
+  说清"哪个根"的诊断标签。
+- **站点表不再是只增的**：站点键是 `sha256(user@host:port)`，所以**改一次主机名/端口/
+  用户名就是另一个键**，而旧条目留着的后果是它的 `wants` 继续为那些版本计引用 ⇒
+  那一版**永远不会被回收**，面板上永远显示「被 `<旧标签>` 要」。现在对账会把"连接已经
+  没了"的站点条目连它的 `wants` 一起删掉。★ 省略那个参数 = 不知道 ⇒ 一条都不删。
+- **主进程发来的 `warn` 不再被折成「信息」**：`notice()` 的标签表里 `warn: '注意'` 一直
+  是一段死代码，于是"布局组已删除，但它的浏览器存储没能清干净"这条**警告**在日志里长成
+  了「信息」。一条显示成信息的失败，与一条被吞掉的失败是同一件事。★ 回收失败的文案
+  现在也**点名是哪个布局组**了。
+
+**跟着改的**：新模块 `client/src/main/plugin-data-audit.js`（三个导出：`partitionRoot` /
+`listPartitions` / `audit`，外加纯判定 `deletionVerdict`）；`plugin-data.js` 补
+`diskNameOf` / `identityOfDiskName` / `samePartition` / `hasSurface` / `hasLayoutStorage`
+（`foldAscii` 从 `plugins/index.js` 搬到这一层，那边 re-export，调用点一个没改）；
+`index.js`（`clearLayoutStorage` 走同一个"清 + 删目录"的帮手、两条新 IPC、
+`partitionsRoot()`、`auditPluginData()`）；`preload/api.js` 两个方法；`panel.html` /
+`panel.js`（新一节 + `renderPluginData` + `dropPluginData`）；`site-plugins.js`
+（`keepSites`）；用例：**新 `client/test/plugin-data-audit.test.mjs`**（判据那条正向钉子
+在这里）、`plugin-data.test.mjs`、`boot.test.mjs` 与 `devmode.test.mjs`（两个桩都补了
+`getPath('sessionData')` / `getStoragePath`，`clearStorageData` 顺手清 cookie jar）、
+`site-plugins.test.mjs`、`renderer.test.mjs`；文档：`docs/PLUGIN-SPEC.md` §2.7 的注记、
+`docs/ARCHITECTURE.md` 的〈还有第四样身份〉、`docs/TROUBLESHOOTING.md` 三行、
+`plugins/README.md`、账本 S17 / S21 / S22 与 F20 的一段注。
+
+★ **账本新增两条**：**S21**（`protectedVersions` 含**已经结束**的会话 ⇒ 那些版本永远
+不会被回收）、**S22**（对账只在打开客户端时跑一次，没有周期性对账）。★ **S17 没修**
+（兜底布局组的随机 id）：它现在**看得见**了、也能删，但每次启动仍会多一行残留 —— 还是
+"用户还没表态"。
+
+★ **三条核实出来的事实写进了文档，没有写进账本**（账本记的是"还没修的"）：磁盘目录名
+被 **ASCII 折叠**过（`EscapePath` 不逃 `@` —— 所以 `@` 当分隔符能活着到磁盘上，这一条
+顺带结清了上一节留下的那句"本机验不了"）；分区目录的根是 **`sessionData`** 而不是
+`userData`（两者今天相同，所以这是一处"恰好对"）；以及**「一个站点一个 `id` 只可能有一
+个版本」是结构性的**（包文件名就是 id），池里的"多版本"来自另三件真实的事。
+
 ### Changed — ★ 插件运行时数据的身份由插件自己声明；编辑器布局**重置一次**
 
 **一、`contributes.data`：插件自己说"我这份数据跨版本共不共享、按不按实例分"**
