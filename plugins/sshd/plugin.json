@@ -9,7 +9,8 @@
   "contributes": {
     "layout": false,
     "submitPubkey": true,
-    "defaultService": false
+    "defaultService": false,
+    "data": { "inherit": "relay" }
   },
   "site": {
     "defaultCpus": 1,

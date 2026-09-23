@@ -24,11 +24,14 @@
  *    致命错误**，ssh 会忽略它继续读后面的内容，所以用户其余的 ssh 完全不受影响，
  *    重新启动一次会话即可自愈（见 ensureInclude 的替换逻辑）。
  *
- * ── 我们自己那两个文件 ─────────────────────────────────────────────────────
+ * ── 我们自己那三个文件 ─────────────────────────────────────────────────────
  *
- *   ~/.slurmate/ssh/config        整体由我们重写（它就是我们自己的文件）
- *   ~/.slurmate/ssh/known_hosts   同上
- *   ~/.slurmate/ssh/id_ed25519    中转站用的那把钥匙（见 ensureRelayKey）
+ *   它们住在**框架给的插件数据目录**里（`ctx.dataDir()`），三个名字见 `pathsFor`：
+ *   配置、known_hosts、以及中转站那把钥匙。★ 这里**刻意不写出绝对路径** —— 那是
+ *   框架算出来的（一个插件一份），写死一份字面路径就会跟着漂开。
+ *
+ *   ★ 从前它们住在 `~/.slurmate/ssh/` —— 那是这个插件**自己发明**的位置。搬家的
+ *     理由与旧文件的清理见 `pathsFor`、`legacyPaths`、`dropLegacyFiles`。
  *
  * ── 这把钥匙为什么可以躺在磁盘上（而其它私钥必须加密）──────────────────────
  *
@@ -63,15 +66,54 @@ const INCLUDE_MARK =
   '# slurmate:include —— 由 Slurmate 客户端添加，删掉本行与下面一行即可取消';
 
 /** 绝对路径，一律正斜杠。ssh 在 Windows 上也认正斜杠，反斜杠反而会被当转义。 */
-function pathsFor(home) {
+function to(p) { return p.split(path.sep).join('/'); }
+
+/**
+ * **我们自己那三个文件**在哪儿。★ **只有一个根** —— 框架给的插件数据目录
+ * （`ctx.dataDir()`：按插件身份分，一个插件一份，而用户看得见、也删得掉）。
+ *
+ * ★ 从前它们的根是**家目录**（`~/.slurmate/ssh/`），那是这个插件**自己发明**的
+ *   位置。而"插件自己发明位置"正是基座不该允许的事：基座既不知道它在哪儿，也没法
+ *   把"这个插件在你机器上留了东西"列给用户看。搬家之后落点由身份算出来。
+ *
+ * ★ **用户的 `~/.ssh/config` 不在这里**（见 `userConfigPath`）：那是**用户的东西**，
+ *   不属于这个插件、也不属于任何插件。
+ */
+function pathsFor(dataDir) {
+  return {
+    dir: to(dataDir),
+    config: to(path.join(dataDir, 'config')),
+    knownHosts: to(path.join(dataDir, 'known_hosts')),
+    identity: to(path.join(dataDir, 'id_ed25519')),
+  };
+}
+
+/**
+ * 用户**自己**那份 ssh 配置。★ 名字里就写着它归谁 —— 这个根不是我们的。
+ *
+ * ★ 它必须留在那儿，一个字节都不能搬：`ssh slurmate` 这个名字得由**用户自己的 ssh**
+ *   认出来（他还在 VS Code 的远程连接、在 codex 的配置里写着它），而客户端**没有
+ *   第二条路**能把一个别名交给 ssh。我们只往这个文件**最上面**加两行 Include。
+ */
+function userConfigPath(home) {
+  return to(path.join(home, '.ssh', 'config'));
+}
+
+/**
+ * **搬家前**那三个文件在哪儿 —— 只用来删（见 `dropLegacyFiles`）。
+ *
+ * ★ **绝不删目录本身。** 集群侧 `job/start.sh` 把作业 sshd 的主机密钥写在**同一个**
+ *   `$HOME/.slurmate/ssh/` 里，而客户端的家目录与集群账号的家目录在 HPC 上**常常
+ *   就是同一个**（共享 NFS 家目录）。`rm -rf` 那个目录会把作业侧的主机密钥一起删掉
+ *   —— 换了主机密钥，客户端会判定为中间人攻击，而症状是"昨天还能用，今天连不上"。
+ */
+function legacyPaths(home) {
   const dir = path.join(home, '.slurmate', 'ssh');
-  const to = (p) => p.split(path.sep).join('/');
   return {
     dir: to(dir),
     config: to(path.join(dir, 'config')),
     knownHosts: to(path.join(dir, 'known_hosts')),
     identity: to(path.join(dir, 'id_ed25519')),
-    userConfig: to(path.join(home, '.ssh', 'config')),
   };
 }
 
@@ -94,12 +136,21 @@ function fail(error, detail) { return { ok: false, error, detail: detail || null
  * 完整的新版本或者完整的旧版本。
  *
  * mode 只在**创建**时生效，所以临时文件必须带着目标权限建出来再改名。
+ *
+ * ★ **这一份是框架那一份（`client/src/main/atomic-write.js`）的对齐副本，删不得。**
+ *   插件跑在池里（`~/.slurmate/site-plugins/<id>/<版本>/`），require 不到客户端的
+ *   源码 —— 这是 `plugins/README.md` 里那条"插件不能 require 框架"的直接后果。
+ *   两份**同形**这件事由 `client/test/boot.test.mjs` 里那条"同一张场景表喂两份实现"
+ *   的用例守着：改一边而不改另一边会红。逐条对齐的清单是：临时名（前导点 + 随机
+ *   后缀 —— `pid + Date.now()` 在同一毫秒内的两次写会撞名，而撞名的后果是另一份
+ *   内容的半截文件被 rename 上去）、两步失败都清理临时文件、rename 之后补一次
+ *   chmod（有些平台会继承旧文件的 mode）。
  */
 function writeAtomic(file, content, mode) {
   const tmp = path.join(path.dirname(file),
     '.' + path.basename(file) + '.tmp.' + process.pid + '.' + Math.random().toString(16).slice(2));
   try {
-    fs.writeFileSync(tmp, content, { mode });
+    fs.writeFileSync(tmp, content, { encoding: 'utf8', mode });
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch { /* 尽力而为 */ }
     return fail('write_failed', e.message);
@@ -110,6 +161,7 @@ function writeAtomic(file, content, mode) {
     try { fs.unlinkSync(tmp); } catch { /* 尽力而为 */ }
     return fail('rename_failed', e.message);
   }
+  try { fs.chmodSync(file, mode); } catch { /* Windows */ }
   return { ok: true };
 }
 
@@ -154,57 +206,118 @@ function ensureDir(dir) {
 
 // ── 用户 ~/.ssh/config 里的那一行 Include ───────────────────────────────────
 
-/** 指向我们那一份配置的 Include 行（路径可比对的部分）。 */
+/**
+ * 指向我们那一份配置的 Include 行 —— 认得的是**搬家前那个形状**（路径里含
+ * `.slurmate/ssh/config`）。它管的是"用户把标记行删了、却留着那条 Include"。
+ *
+ * ★ **不要**把新根的名字（`plugin-data`）也写进这条正则。那会让根名有**两份实现**
+ *   —— 一份在框架算根的地方，一份在这里认根 —— 而插件 require 不到框架源码，
+ *   于是哪天改了根名就是一边动一边不动，症状是用户文件里留着一条我们**再也删不掉**
+ *   的悬空 Include。跟着标记行走才是那条不依赖根名的路，见 `ensureInclude`。
+ */
 const INCLUDE_LINE_RE = /^\s*Include\s+\S*\.slurmate[\\/]ssh[\\/]config\s*$/i;
+/** 任何一条 `Include <一个路径>`。只用在"紧跟在标记行后面"那一格上。 */
+const INCLUDE_ANY_RE = /^\s*Include\s+\S+\s*$/;
 const MARK_RE = /^\s*#\s*slurmate:include/i;
 
 /**
  * 把我们的 Include 放到用户 ~/.ssh/config 的**最上面**。幂等。
  *
- * 同一时刻只保留一份：旧版本留下的（或家目录搬走后的）那条会被**替换**掉，
- * 所以它自己会修好自己，不会越积越多。
+ * 同一时刻只保留一份：旧版本留下的、上一次搬家的、或者家目录搬走之后的那条，都会被
+ * **替换**掉 —— 所以它自己会修好自己，不会越积越多。
  *
+ * ★ 怎么认出"那是我们写的"：靠 `INCLUDE_MARK` 那行注释（它是**唯一的权威标记**），
+ *   以及"紧跟在标记行后面的那一条 Include"。★ 刻意**不**按路径里的根名去认 —— 那会
+ *   把根名变成两份实现（见 `INCLUDE_LINE_RE` 上面的注释）。`INCLUDE_LINE_RE` 留着，
+ *   它管的是"用户把标记行删了、却留着搬家前那条 Include"。
+ *
+ * @param {object} o
+ * @param {string} o.dataDir 我们那份配置所在的目录（`ctx.dataDir()`）
+ * @param {string} o.home    用户的家目录（`~/.ssh/config` 在它下面）
  * @returns {{ok:boolean, changed:boolean, path:string, error?:string, detail?:string}}
  *   ok:false 时**什么都不要做** —— 调用方要如实告诉用户去手工加这一行，
  *   而不是假装中转站配好了。
  */
-function ensureInclude(home) {
-  const p = pathsFor(home);
+function ensureInclude({ dataDir, home }) {
+  const userConfig = userConfigPath(home);
+  const includeLine = `Include ${pathsFor(dataDir).config}`;
   let original = '';
   try {
-    original = fs.readFileSync(p.userConfig, 'utf8');
+    original = fs.readFileSync(userConfig, 'utf8');
   } catch (e) {
     if (e.code !== 'ENOENT') {
       // 读不出来（权限、是目录…）时**绝不能**当作空的往下写 —— 那会把用户的
       // 全部 ssh 配置抹掉。这正是这个文件最危险的一条路径。
-      return { ...fail('read_failed', `${p.userConfig}：${e.message}`), changed: false,
-               path: p.userConfig };
+      return { ...fail('read_failed', `${userConfig}：${e.message}`), changed: false,
+               path: userConfig };
     }
   }
 
-  const lines = original.split('\n');
-  const kept = lines.filter((l) => !MARK_RE.test(l) && !INCLUDE_LINE_RE.test(l));
-  const block = [INCLUDE_MARK, `Include ${p.config}`];
+  // ★ 逐行走一遍，而不是 `filter`：因为"标记行下面那一条 Include"要**看着上一条**
+  //   才知道该不该删。用 filter 的话，搬家之后标记行被删掉、而它下面那条**新路径**的
+  //   Include 谁也认不出来（新路径不含 `.slurmate/`）—— 于是留下一条悬空的旧行，
+  //   而**悬空的 Include 不致命**（ssh 会忽略它继续读后面的内容），也就是说改错了
+  //   **没有任何症状**。这正是它值得多写三行的理由。
+  const kept = [];
+  let afterMark = false;
+  for (const l of original.split('\n')) {
+    if (MARK_RE.test(l)) { afterMark = true; continue; }
+    if (afterMark && INCLUDE_ANY_RE.test(l)) { afterMark = false; continue; }
+    afterMark = false;
+    if (INCLUDE_LINE_RE.test(l)) continue;
+    kept.push(l);
+  }
+  const block = [INCLUDE_MARK, includeLine];
   // 原本是空文件时 split 会给出 ['']，拼起来会多一个空行 —— 无所谓，但既然是
   // 我们自己写进去的，就别留它。
   const body = kept.join('\n').replace(/^\n+/, '');
   const next = block.join('\n') + '\n' + (body.trim() ? body : '');
 
-  if (next === original) return { ok: true, changed: false, path: p.userConfig };
+  if (next === original) return { ok: true, changed: false, path: userConfig };
 
-  const userSshDir = path.dirname(p.userConfig);
+  const userSshDir = path.dirname(userConfig);
   if (!fs.existsSync(userSshDir)) {
     const r = ensureDir(userSshDir);
-    if (!r.ok) return { ...r, changed: false, path: p.userConfig };
+    if (!r.ok) return { ...r, changed: false, path: userConfig };
   }
   // 我们自己创建的 ~/.ssh/config 必须是 0600；用户已有的那份**不动它的权限**
   // （ssh 只在它可被组/其他人写时才报警告，只读不是问题，而改用户的权限位
   //   属于我们没被要求做的事）。
-  const existed = fs.existsSync(p.userConfig);
-  const mode = existed ? (fs.statSync(p.userConfig).mode & 0o777) : 0o600;
-  const w = writeAtomic(resolveWriteTarget(p.userConfig), next, mode);
-  if (!w.ok) return { ...w, changed: false, path: p.userConfig };
-  return { ok: true, changed: true, path: p.userConfig };
+  const existed = fs.existsSync(userConfig);
+  const mode = existed ? (fs.statSync(userConfig).mode & 0o777) : 0o600;
+  const w = writeAtomic(resolveWriteTarget(userConfig), next, mode);
+  if (!w.ok) return { ...w, changed: false, path: userConfig };
+  return { ok: true, changed: true, path: userConfig };
+}
+
+/**
+ * 搬家：把**旧位置**那三个文件删掉。★ 只在我们自己那份配置**已经写成功之后**才调 ——
+ * 顺序反了的话，用户会落到"新位置写了但没成、旧位置又已经被删"的中间态。
+ *
+ * ★ **逐文件 `unlinkSync`，绝不删目录** —— 理由见 `legacyPaths` 的注释（集群侧那份
+ *   主机密钥住在同一个目录里，而两侧的家目录在 HPC 上常常就是同一个）。
+ * ★ 不碰用户的 `~/.ssh/config`：我们只往里加过两行，而"撤掉那两行"是 `ensureInclude`
+ *   的事 —— 而且我们从不撤（留着一条悬空的 Include 是安全的，ssh 会忽略它）。
+ *
+ * 文件本来就不在（`ENOENT`）不算失败：那正是"已经搬完了"的样子，而每一次 `attach`
+ * 都会调进来一次。
+ *
+ * @returns {{deleted: string[], failed: Array<{file: string, reason: string}>}}
+ */
+function dropLegacyFiles(home) {
+  const p = legacyPaths(home);
+  const deleted = [];
+  const failed = [];
+  for (const file of [p.config, p.knownHosts, p.identity]) {
+    try {
+      fs.unlinkSync(file);
+      deleted.push(file);
+    } catch (e) {
+      if (e.code === 'ENOENT') continue;
+      failed.push({ file, reason: e.message });
+    }
+  }
+  return { deleted, failed };
 }
 
 // ── 那把一次性的钥匙 ────────────────────────────────────────────────────────
@@ -221,13 +334,13 @@ function ensureInclude(home) {
  *   一个插件能用的一切，只能来自 `ctx`。框架那份 `keys.js` 是纯 Node `crypto`
  *   加 OpenSSH 编码，没有任何"读到客户端自己的私钥"的入口。
  *
- * @param {string} home  家目录
- * @param {object} keys  框架的 SSH 钥匙工具箱（`ctx.keys`）
+ * @param {string} dataDir 插件数据目录（`ctx.dataDir()`）—— 钥匙住在那儿
+ * @param {object} keys    框架的 SSH 钥匙工具箱（`ctx.keys`）
  * @returns {{ok:true, privateKeyPem:string, publicKeyLine:string, created:boolean}
  *          |{ok:false, error:string, detail:string}}
  */
-function ensureRelayKey(home, keys) {
-  const p = pathsFor(home);
+function ensureRelayKey(dataDir, keys) {
+  const p = pathsFor(dataDir);
   let existing = '';
   try {
     existing = fs.readFileSync(p.identity, 'utf8');
@@ -267,7 +380,7 @@ function ensureRelayKey(home, keys) {
  * 写 ~/.slurmate/ssh/config，并把它需要的 known_hosts 一起准备好。
  *
  * @param {object} o
- *   home    {string}  家目录
+ *   dataDir {string}  插件数据目录（`ctx.dataDir()`）—— 配置与 known_hosts 住在那儿
  *   port    {number}  隧道**实际**在监听的本地端口（不是首选端口 —— 可能顺移过）
  *   user    {string}  登录节点上的用户名
  *   hostKey {string|null} 作业里那个 sshd 的主机公钥（`ssh-ed25519 AAAA…`）
@@ -275,8 +388,8 @@ function ensureRelayKey(home, keys) {
  * @returns {{ok:boolean, path:string, strict:boolean, error?:string, detail?:string}}
  *   strict=false 表示**没能**钉住主机密钥、退回到了首次信任（见下）。
  */
-function writeRelayConfig({ home, port, user, hostKey }) {
-  const p = pathsFor(home);
+function writeRelayConfig({ dataDir, port, user, hostKey }) {
+  const p = pathsFor(dataDir);
   const d = ensureDir(p.dir);
   if (!d.ok) return { ...d, path: p.config };
 
@@ -350,6 +463,7 @@ function writeKnownHost(p, hostKey, port) {
 }
 
 module.exports = {
-  pathsFor, ensureInclude, ensureRelayKey, writeRelayConfig,
+  pathsFor, userConfigPath, legacyPaths, dropLegacyFiles,
+  ensureInclude, ensureRelayKey, writeRelayConfig,
   isHostKeyLine, INCLUDE_MARK, SSH_ALIAS,
 };

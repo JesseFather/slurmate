@@ -131,6 +131,44 @@ test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 
     '01m2abc@editor@l0abcdef1234');
 });
 
+// ── 插件数据目录的那个名字（对账的第二个根要读它）────────────────────────────
+
+test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份身份因此永远是兄弟', () => {
+  const two = pluginData.dataDirNameOf(['01M2ABC', 'editor']);
+  const three = pluginData.dataDirNameOf(['01M2ABC', 'editor', 'l0123456789ab']);
+  assert.equal(two, '01m2abc@editor');
+  assert.equal(three, '01m2abc@editor@l0123456789ab');
+  // ★ 这条断言就是全部。名字里没有分隔符 ⇒ `path.join(根, 名字)` 得到的两个目录
+  //   落在**同一个父目录**下。而如果改成三层目录（`<id>/<组>/<实例>`），`three`
+  //   就会落在 `two` **里面** —— 而这两份身份**真的会同时存在**：同一个插件 1.0.0
+  //   声明 `{inherit:'editor'}`（两段）、2.0.0 声明 `{inherit:'editor',perInstance}`
+  //   （三段），`inherit` 的语义正是"这几个版本共享一份"。那时"删掉没人用的
+  //   editor 那一份"会把 2.0.0 那份**正在用的**连根删掉，而两边都不报错。
+  assert.ok(!two.includes('/') && !two.includes('\\'), '名字里不能有路径分隔符');
+  assert.ok(!three.includes('/') && !three.includes('\\'), '名字里不能有路径分隔符');
+});
+
+test('★ 两个根下的同一个身份必须同名（对账只有一张"该有的"表）', () => {
+  for (const id of [['01M2ABC'], ['01M2ABC', 'editor'],
+    ['01M2ABC', 'editor', 'l0123456789ab']]) {
+    assert.equal(pluginData.dataDirNameOf(id), pluginData.diskNameOf(id),
+      '分区根与数据根下的同一个身份必须叫同一个名字 —— 对账把两个根放在一起做差，'
+      + '靠的就是它。这条红了说明有人只改了其中一个函数。');
+  }
+});
+
+test('★ 折叠是单射：两个不同的 ULID 折不出同一个名字', () => {
+  // 不区分大小写的文件系统（macOS / Windows）上，两个身份折成同一个名字就会
+  // **共用一个目录**。`ulid.ENCODING` 只有大写，而折叠对"大写字母+数字"是单射，
+  // 所以两个不同的 ULID 折不出同一个串 —— 后两段的字符集本来就只允许小写，折不动。
+  assert.notEqual(
+    pluginData.dataDirNameOf(['01M2JKHTZGF12N0T9CB3XVK36H', 'relay']),
+    pluginData.dataDirNameOf(['01M2JKHTZGF12N0T9CB3XVK36W', 'relay']));
+  // 而且它是**折叠过**的：拿它再折一次必须不变（幂等）。
+  const n = pluginData.dataDirNameOf(['01M2ABC', 'EDITOR']);
+  assert.equal(pluginData.foldAscii(n), n);
+});
+
 test('★ foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-export）', () => {
   assert.equal(P.foldAscii, pluginData.foldAscii);
   // ★ 只折 `A..Z`。`İ`（U+0130）与 `K`（U+212A KELVIN）必须原样 —— 用

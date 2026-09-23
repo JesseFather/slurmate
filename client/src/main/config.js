@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const atomicWrite = require('./atomic-write.js');
 
 const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
                     // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
@@ -339,21 +340,20 @@ function saveDevSettings(dir, s) {
   return next;
 }
 
-// ── 底层：原子写 + 显式权限 ──────────────────────────────────────────────────
-function ensureDir(dir, mode) {
-  fs.mkdirSync(dir, { recursive: true, mode });
-  try { fs.chmodSync(dir, mode); } catch { /* Windows 上会失败，可忽略 */ }
-}
-
-function writeAtomic(file, text, mode) {
-  ensureDir(path.dirname(file), 0o700);
-  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, text, { encoding: 'utf8', mode });
-  try { fs.chmodSync(tmp, mode); } catch { /* Windows */ }
-  fs.renameSync(tmp, file);
-  // rename 之后权限已经是对的，但有些平台会继承旧文件的 mode —— 再确保一次
-  try { fs.chmodSync(file, mode); } catch { /* Windows */ }
-}
+// ── 底层：原子写 ────────────────────────────────────────────────────────────
+//
+// ★ 实现搬去了 `atomic-write.js`（框架里唯一的那一份 —— 这个文件与
+//   `site-plugins.js` 从前各有一份，逐字差别好几处，而且都会漂开）。
+//
+// ★ 留下这个三行的适配，是因为**"配置写不下去必须炸"是配置模块的策略，不是写盘的
+//   策略**：通用实现只返回结构化结果（它还要服务那些"失败了就如实告诉用户"的调用
+//   点），而下面那 6 个调用点一直靠抛异常把失败传到 IPC 处理器。所以外部契约一个字
+//   没变 —— 这是一次纯内部重构。
+//
+// ★ 顺手修掉的一个洞：从前这里有一个 `ensureDir`，它对**已经存在**的目录也
+//   `chmodSync(dir, 0o700)` —— 也就是每次写配置都会去 chmod 那个 `userData`。
+//   通用实现只在"这个目录是我刚建的"时设权限（`mkdirSync` 的 `mode` 天生如此）。
+const writeAtomic = (file, text, mode) => atomicWrite.writeAtomicOrThrow(file, text, { mode });
 
 function readJson(file) {
   try {

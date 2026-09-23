@@ -2239,43 +2239,57 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-'));
+  // ★ 两个根了：`dataDir` 是**插件自己的**落点（框架给的），`home` 是**用户的**
+  //   家目录（`~/.ssh/config` 在那儿 —— 那是他的东西，我们只借两行）。
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-data-'));
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
-  const userCfg = path.join(home, '.ssh', 'config');
+  const userCfg = sshc.userConfigPath(home);
   const original = 'Host myserver\n    HostName example.com\n\nHost *\n    ServerAliveInterval 60\n';
   fs.writeFileSync(userCfg, original, { mode: 0o600 });
 
-  const r1 = sshc.ensureInclude(home);
+  const r1 = sshc.ensureInclude({ dataDir, home });
   assert.equal(r1.ok, true, r1.detail || '');
   assert.equal(r1.changed, true);
   const after1 = fs.readFileSync(userCfg, 'utf8');
   assert.ok(after1.startsWith('# slurmate:include'),
     '必须加在**最上面**：ssh 对每个参数取第一个获得的值，用户那份里常见的'
     + ' `Host *` 块若排在前面，它的 Port/User 会赢过我们这一份');
-  assert.ok(after1.includes(`Include ${sshc.pathsFor(home).config}`));
+  assert.ok(after1.includes(`Include ${sshc.pathsFor(dataDir).config}`));
   assert.ok(after1.includes(original), '用户原有的内容必须逐字保留');
   assert.equal(after1.endsWith(original), true, '而且必须排在我们那两行之后');
 
   // 幂等：第二次连文件都不该动（mtime 也不动 —— 反复惊动用户的同步/杀毒软件
   // 本身就是一种副作用）
-  const r2 = sshc.ensureInclude(home);
+  const r2 = sshc.ensureInclude({ dataDir, home });
   assert.equal(r2.ok, true);
   assert.equal(r2.changed, false, '第二次不该再动这个文件');
   assert.equal(fs.readFileSync(userCfg, 'utf8'), after1);
 
-  // 家目录搬走之后自愈：旧路径那一行要被**替换**掉，而不是并排留着两份
+  // 自愈之一：**搬家前那个形状**的路径要被换掉，而不是并排留着两份
   // （并排留着的话，第一条仍然生效，而且指向一个不存在的地方）
   fs.writeFileSync(userCfg,
-    after1.replace(sshc.pathsFor(home).config, '/old/home/.slurmate/ssh/config'));
-  const r3 = sshc.ensureInclude(home);
+    after1.replace(sshc.pathsFor(dataDir).config, '/old/home/.slurmate/ssh/config'));
+  const r3 = sshc.ensureInclude({ dataDir, home });
   assert.equal(r3.changed, true, '路径变了要改回来');
   assert.equal(fs.readFileSync(userCfg, 'utf8'), after1,
     '旧的那一行要被换掉，不能两份并存');
+
+  // ★ 自愈之二：**标记行下面那一条 Include**，不管它指向哪儿。这一条是搬家带来的：
+  //   新路径不含 `.slurmate/`，所以上面那条按路径形状认的判据认不出它 —— 靠的是
+  //   "紧跟在标记行后面"这件事本身。少了它，旧行会**幸存**，留下一条悬空的 Include，
+  //   而悬空**不致命**（ssh 会忽略它继续读后面的内容）—— 也就是说改错了**没有任何
+  //   症状**，这正是它必须有用例钉着的原因。
+  const elsewhere = path.join(path.dirname(dataDir), 'plugin-data', 'X@relay', 'config');
+  fs.writeFileSync(userCfg, after1.replace(sshc.pathsFor(dataDir).config, elsewhere));
+  const r5 = sshc.ensureInclude({ dataDir, home });
+  assert.equal(r5.changed, true, '换了根之后那一条也要被替换掉');
+  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1, '不能两份并存');
 
   // ★ 读不出来时**绝不能**当作空文件往下写 —— 那会把用户**全部**的 ssh 配置抹掉，
   //   而这是整个客户端里后果最严重的一次写盘。
   const bad = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-bad-'));
   fs.mkdirSync(path.join(bad, '.ssh', 'config'), { recursive: true });   // 是个目录
-  const r4 = sshc.ensureInclude(bad);
+  const r4 = sshc.ensureInclude({ dataDir, home: bad });
   assert.equal(r4.ok, false, '读不出来就必须报错');
   assert.ok(r4.detail, '要给出原因，好让界面告诉用户手工加哪一行');
 });
@@ -2284,21 +2298,21 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   t.after(() => { Module._load = origLoad; });
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg2-'));
-  const p = sshc.pathsFor(home);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg2-'));
+  const p = sshc.pathsFor(dataDir);
 
   // 一次性钥匙：只生成一次，之后必须复用（换了钥匙 = 「刚才还能连，现在认证失败」）
-  const k1 = sshc.ensureRelayKey(home, require('../src/main/keys.js'));
+  const k1 = sshc.ensureRelayKey(dataDir, require('../src/main/keys.js'));
   assert.equal(k1.ok, true, k1.detail || '');
   assert.equal(k1.created, true);
   assert.match(k1.publicKeyLine, /^ssh-ed25519 [A-Za-z0-9+/]{68} slurmate-\d{8}-\d{4}$/,
     `公钥形状要能被控制节点的规则接受：${k1.publicKeyLine}`);
-  const k2 = sshc.ensureRelayKey(home, require('../src/main/keys.js'));
+  const k2 = sshc.ensureRelayKey(dataDir, require('../src/main/keys.js'));
   assert.equal(k2.created, false);
   assert.equal(k2.publicKeyLine, k1.publicKeyLine, '第二次必须复用同一把');
 
   const hostKey = 'ssh-ed25519 ' + 'A'.repeat(68);
-  const w = sshc.writeRelayConfig({ home, port: 18090, user: 'alice', hostKey });
+  const w = sshc.writeRelayConfig({ dataDir, port: 18090, user: 'alice', hostKey });
   assert.equal(w.ok, true, w.detail || '');
   assert.equal(w.strict, true);
 
@@ -2317,13 +2331,20 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   assert.equal(fs.statSync(p.config).mode & 0o777, 0o600);
   assert.equal(fs.statSync(p.identity).mode & 0o777, 0o600);
 
+  // ★ **两处路径都必须在新位置。** 搬家最容易犯的错是改漏一条 —— 那时 `IdentityFile`
+  //   或 `UserKnownHostsFile` 还指着旧目录（而那里的文件刚被删掉），症状是"昨天还能
+  //   用，今天连不上"，而 ssh 只会给一句 `Permission denied`，完全指不到这里。
+  assert.ok(cfg.includes(p.identity), 'IdentityFile 必须指向插件的落点');
+  assert.ok(cfg.includes(p.knownHosts), 'UserKnownHostsFile 必须指向插件的落点');
+  assert.ok(!cfg.includes('.slurmate'), '★ 配置里不能再出现搬家前的那条路径');
+
   // known_hosts：非 22 端口必须写成 [地址]:端口，方括号不能省
   assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
     `[127.0.0.1]:18090 ${hostKey}\n`);
 
   // 拿不到主机公钥（守护进程还是旧版本）时退回首次信任 —— **能用但降级**
   // 好过写出一个 ssh 直接拒绝连接的配置。
-  const w2 = sshc.writeRelayConfig({ home, port: 18091, user: 'alice', hostKey: null });
+  const w2 = sshc.writeRelayConfig({ dataDir, port: 18091, user: 'alice', hostKey: null });
   assert.equal(w2.ok, true);
   assert.equal(w2.strict, false);
   const cfg2 = fs.readFileSync(p.config, 'utf8');
@@ -2333,7 +2354,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   // 值里的换行能让它变成**两行**，也就是凭空多出一个主机条目。
   assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
     `[127.0.0.1]:18090 ${hostKey}\n`, '没有可信公钥时不许动 known_hosts');
-  const evil = sshc.writeRelayConfig({ home, port: 18092, user: 'alice',
+  const evil = sshc.writeRelayConfig({ dataDir, port: 18092, user: 'alice',
     hostKey: 'ssh-ed25519 ' + 'A'.repeat(68) + '\nevil.example ssh-ed25519 ' + 'B'.repeat(68) });
   assert.equal(evil.strict, false, '带换行的值必须被当成非法');
 });
@@ -2346,6 +2367,7 @@ test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄�
   // 符号链接** —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
   // ~/dotfiles/config 不再影响 ssh，两边从此各说各话，且没有任何地方会报错。
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-data-'));
   const dotfiles = path.join(home, 'dotfiles');
   fs.mkdirSync(dotfiles, { recursive: true });
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
@@ -2353,13 +2375,13 @@ test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄�
   fs.writeFileSync(real, 'Host from-dotfiles\n    HostName example.com\n', { mode: 0o600 });
   fs.symlinkSync(real, path.join(home, '.ssh', 'config'));
 
-  const r = sshc.ensureInclude(home);
+  const r = sshc.ensureInclude({ dataDir, home });
   assert.equal(r.ok, true, r.detail || '');
 
-  const linkPath = path.join(home, '.ssh', 'config');
+  const linkPath = sshc.userConfigPath(home);
   assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true,
     '★ 那条符号链接必须还在 —— 被换成普通文件就等于用户的 dotfiles 工作流静默失效');
-  assert.ok(fs.readFileSync(real, 'utf8').includes('Include ' + sshc.pathsFor(home).config),
+  assert.ok(fs.readFileSync(real, 'utf8').includes('Include ' + sshc.pathsFor(dataDir).config),
     '内容要写进链接**指向**的那个文件');
   assert.ok(fs.readFileSync(real, 'utf8').includes('Host from-dotfiles'),
     '用户原有的内容照旧保留');
@@ -2376,18 +2398,91 @@ test('★ 读不出用户的 ssh 配置时，连碰都不能碰它', (t) => {
   }
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshperm-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshperm-data-'));
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
-  const cfg = path.join(home, '.ssh', 'config');
+  const cfg = sshc.userConfigPath(home);
   const precious = 'Host keepme\n    HostName important.example.com\n';
   fs.writeFileSync(cfg, precious, { mode: 0o000 });
 
-  const r = sshc.ensureInclude(home);
+  const r = sshc.ensureInclude({ dataDir, home });
   assert.equal(r.ok, false, '读不出来就必须报错');
   assert.ok(r.detail, '要给出原因，好让界面告诉用户手工加哪一行');
   fs.chmodSync(cfg, 0o600);
   assert.equal(fs.readFileSync(cfg, 'utf8'), precious,
     '★ 读不出来时**绝不能**当作空文件往下写 —— 那会把用户全部的 ssh 配置抹掉，'
     + '是整个客户端里后果最严重的一次写盘');
+});
+
+// ── 搬家：从 ~/.slurmate/ssh/ 挪到框架给的那个数据目录 ──────────────────────
+
+test('★ 搬家的清理：只删我们那三个文件，目录里的别的东西一个不碰', (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move-'));
+  const old = sshc.legacyPaths(home);
+  fs.mkdirSync(old.dir, { recursive: true, mode: 0o700 });
+  for (const [f, c] of [[old.config, '# 旧的\n'], [old.knownHosts, '[127.0.0.1]:1234 x\n'],
+    [old.identity, '旧的钥匙\n']]) {
+    fs.writeFileSync(f, c, { mode: 0o600 });
+  }
+  // ★ 集群侧的作业 sshd 把主机密钥写在**同一个目录**里（`plugins/sshd/job/start.sh`），
+  //   而客户端的家目录与集群账号的家目录在 HPC 上**常常就是同一个**（共享 NFS）。
+  //   所以这里放一个"别人的文件"，钉住"清理只认那三个名字"。
+  const jobKey = path.join(old.dir, 'host_ed25519');
+  fs.writeFileSync(jobKey, '作业侧的主机密钥\n', { mode: 0o600 });
+
+  const clean = sshc.dropLegacyFiles(home);
+  assert.deepEqual(clean.deleted.slice().sort(),
+    [old.config, old.identity, old.knownHosts].slice().sort());
+  assert.deepEqual(clean.failed, []);
+  assert.equal(fs.existsSync(jobKey), true,
+    '★ 绝不删目录、也绝不删不认识的文件 —— 删掉作业侧那个主机密钥，客户端会把它'
+    + '判定为中间人攻击，而症状是"昨天还能用，今天连不上"');
+
+  // 每一次 attach 都会调它，所以第二次必须无害（ENOENT 不是失败）。
+  assert.deepEqual(sshc.dropLegacyFiles(home).deleted, []);
+  assert.deepEqual(sshc.dropLegacyFiles(home).failed, []);
+});
+
+test('★★ 时序：新位置**写成功**才清旧的；写失败时旧的**一个都不能少**', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
+  const relay = require('../../plugins/sshd/client/index.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move2-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move2-data-'));
+  const old = sshc.legacyPaths(home);
+  fs.mkdirSync(old.dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(old.config, '# 旧的\n', { mode: 0o600 });
+
+  const notices = [];
+  // ★ 本仓库的第一个假 ctx。它存在的理由只有一个：这条**时序**只能从 `attach`
+  //   那一层测（写盘的成功与失败各跑一遍），而 `attach` 的入口就是一个 ctx。
+  const ctx = {
+    config: { activeConnection: () => ({ user: 'alice' }) },
+    whoami: () => ({ user: 'alice' }),
+    cfg: {},
+    dataDir: () => dataDir,
+    home: () => home,
+    once: () => true,               // "第一次"（那道闸的语义见 pluginContext 的 once）
+    notice: (kind, text) => notices.push({ kind, text }),
+  };
+  const snap = { localPort: 18090, sshHostKey: 'ssh-ed25519 ' + 'A'.repeat(68) };
+
+  // ① 写不进去（数据目录只读）⇒ 旧的**必须原封不动**。
+  fs.chmodSync(dataDir, 0o500);
+  t.after(() => { try { fs.chmodSync(dataDir, 0o700); } catch { /* 尽力而为 */ } });
+  await relay.attach(ctx, snap);
+  assert.equal(fs.existsSync(old.config), true,
+    '★ 新位置没写成时**绝不能**删旧的 —— 否则用户落到"两边都没有"，而 `ssh slurmate`'
+    + '谁也不认');
+  assert.ok(notices.some((n) => n.kind === 'error'), '而且必须如实说出来');
+
+  // ② 能写了 ⇒ 旧的才清掉。
+  fs.chmodSync(dataDir, 0o700);
+  await relay.attach(ctx, snap);
+  assert.equal(fs.existsSync(old.config), false, '新位置写成功之后，旧的才清');
 });
 
 test('★ 会话一结束就要收起 code-server 视图，把面板还给用户', async (t) => {
@@ -2562,19 +2657,30 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
     '★ 尤其不能碰 ~/.ssh/config —— 那是用户**全部** ssh 都要经过的地方，'
     + '比 config.json 严重得多');
 
-  // 开发者模式必须落在**它自己的**配置目录里
+  // 开发者模式必须落在**它自己的**配置目录里。两个根**都在沙盒里**：
+  //   · `home`    —— 沙盒根（用户的 `~/.ssh/config` 在它下面）
+  //   · `dataDir` —— 沙盒里的**插件数据目录**，框架按身份算出来的
+  // ★ 这条断言用的路径是**从框架现算的**（`getPluginDataRoot` + 身份），而插件是
+  //   通过 `ctx.dataDir()` 写的 —— 两边算出来必须是同一个目录，否则"界面上说没有、
+  //   插件却在写"这件事会从这里开始。
+  const P = require('../src/main/plugin-data.js');
   const home = path.join(userData, 'dev-sandbox');
-  assert.equal(fs.existsSync(sshc.pathsFor(home).config), true,
-    '开发者模式下 ssh 配置要写在沙盒目录里');
+  const dataRoot = idx._test.getPluginDataRoot();
+  assert.ok(dataRoot.startsWith(home),
+    '插件数据目录也要落在沙盒里 —— 拿假后端跑绝不能读写用户真实的那一份');
+  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
+  const dataDir = path.join(dataRoot, P.dataDirNameOf(P.identityOf(sshdPlugin)));
+  assert.equal(fs.existsSync(sshc.pathsFor(dataDir).config), true,
+    'ssh 配置要写在框架给的那个数据目录里');
 
-  const cfg = fs.readFileSync(sshc.pathsFor(home).config, 'utf8');
+  const cfg = fs.readFileSync(sshc.pathsFor(dataDir).config, 'utf8');
   assert.match(cfg, new RegExp(`^\\s+Port ${snap.localPort}$`, 'm'),
     '端口必须是隧道**实际**在监听的那一个（可能从 18090 顺移过）');
   assert.match(cfg, /^\s+User demo$/m, '用户名取自这条连接');
-  assert.match(fs.readFileSync(sshc.pathsFor(home).userConfig, 'utf8'),
-    new RegExp(`Include ${sshc.pathsFor(home).config.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
-    '用户的 ssh 配置里要有一行 Include');
-  assert.equal(fs.readFileSync(sshc.pathsFor(home).knownHosts, 'utf8'),
+  assert.match(fs.readFileSync(sshc.userConfigPath(home), 'utf8'),
+    new RegExp(`Include ${sshc.pathsFor(dataDir).config.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    '用户的 ssh 配置里要有一行 Include，而且指向**新位置**');
+  assert.equal(fs.readFileSync(sshc.pathsFor(dataDir).knownHosts, 'utf8'),
     `[127.0.0.1]:${snap.localPort} ssh-ed25519 ${'A'.repeat(68)}\n`,
     '作业带回来的主机公钥要被钉进 known_hosts');
 

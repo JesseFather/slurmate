@@ -1200,8 +1200,9 @@ function renderPluginData(d) {
       || '这一次没能去看磁盘上还剩哪些，所以这里没有东西可列。'));
   } else {
     wrap.append(el('p', 'plug-desc',
-      '插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在本机，'
-      + '一份 = 一个插件 + 共享组 + 布局组。下面这些**没有任何连接在用**：它们要么'
+      '插件在运行中攒下的东西按**份**存在本机，一份 = 一个插件 + 共享组 + 布局组。'
+      + '一份数据有两个落点：**浏览器里的存储**（编辑器布局、打开的标签页、登录状态），'
+      + '以及**插件自己写在磁盘上的文件**。下面这些**没有任何连接在用**：它们要么'
       + '属于一个已经删掉的布局组，要么属于一个已经不在本机的插件版本。'));
     wrap.append(el('p', 'plug-desc',
       '★ 删掉一份**找不回来** —— 那个插件下次打开会是一份全新的空白存储。'
@@ -1216,6 +1217,8 @@ function renderPluginData(d) {
     h.append(el('h3', null, r.label));
     one.append(h);
     one.append(el('p', 'plug-desc', r.why));
+    // ★ 说清**删掉的是什么**：这一份可能在浏览器里、在磁盘上、或者两处都有。
+    one.append(el('p', 'plug-meta', placesText(r.places)));
     if (r.deletable) {
       const row = document.createElement('div');
       row.className = 'plug-meta';
@@ -1227,14 +1230,32 @@ function renderPluginData(d) {
   box.append(wrap);
 }
 
+/**
+ * 这一份数据在哪儿 —— ★ 删除按钮的确认框要靠它说清**删掉的是什么**。
+ *
+ * 两个落点不能混成一句：浏览器里那份是布局/标签页/登录状态，而磁盘上那份是插件
+ * 自己写的东西 —— 后者正是作者最可能放"重建不出来"的东西的地方（sshd 就把它的
+ * ssh 配置与一把钥匙放在那儿）。两者都不可逆，但**用户能预期的东西不同**。
+ */
+function placesText(places) {
+  const p = (places || []).includes('partition');
+  const d = (places || []).includes('data');
+  if (p && d) return '它有两部分：浏览器里的存储（布局、标签页、登录状态），'
+    + '以及那个插件**写在磁盘上的文件**。';
+  if (d) return '它是那个插件**写在磁盘上的文件**。';
+  return '它在浏览器里（那个插件没有另外往磁盘上写东西）。';
+}
+
 /** 删掉一份插件数据。**不可逆**，所以先问一句（照「删除连接」那条的语气）。 */
 async function dropPluginData(r) {
+  const parts = (r.places || []).includes('data')
+    ? '其中包括那个插件**写在磁盘上的文件**，它下次会从零开始'
+    : '那是它在本机攒下的编辑器布局、打开的标签页和登录状态';
   const sure = window.confirm(
     `删掉「${r.label}」？\n\n`
-    + '那是它在本机攒下的编辑器布局、打开的标签页和登录状态，删掉之后**找不回来** ——'
-    + '那个插件下次打开会是一份全新的空白存储。\n\n确定要删吗？');
+    + `${parts}，删掉之后**找不回来**。\n\n确定要删吗？`);
   if (!sure) return;
-  const res = await window.slurmate.deletePluginData({ partition: r.partition });
+  const res = await window.slurmate.deletePluginData({ name: r.name });
   if (!res || !res.ok) {
     // `in_use` / `stale` 都由主进程给一句能直接读的话（判定权在它那儿）。
     return notice('error', (res && res.error) || '没能删掉。');

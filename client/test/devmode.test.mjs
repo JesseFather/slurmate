@@ -228,6 +228,11 @@ test('★ 一台没配过任何东西的机器**不会**自己进开发者模式
   //   的 userData 里多出一个目录，而他永远不知道那是干什么的。
   assert.equal(fs.existsSync(SANDBOX), false, '没开开发者模式就不该建沙盒目录');
   assert.equal(fs.existsSync(DEV_FILE), false, '没动过开关就不该有那个文件');
+  // ★ 插件数据目录那一根同样一个都不该建：**框架不建目录**，它只在插件真的要写
+  //   东西的时候才出现（见 `ctx.dataDir()` 的注释）。
+  assert.equal(fs.existsSync(path.join(userData, 'plugin-data')), false,
+    '没人写过东西就不该有插件数据目录 —— 建了的话，一个有洁癖的用户什么都'
+    + '没干就在自己的配置目录里多出一个他不知道干什么用的目录');
 
   // 标题里也不该出现开发者模式的标注（三重互锁的第二重：它只对假后端成立）
   assert.equal(calls.titles.some((x) => /开发者模式/.test(x)), false,
@@ -311,6 +316,7 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出的删得掉�
   // 一台**没配过任何东西**的机器：没有插件、也没有布局组 ⇒ 分区目录里的东西一份都
   // 不该"有主"。这正是"插件卸载之后留下的那堆"的形状。
   const parts = path.join(userData, 'Partitions');
+  const dataRoot = path.join(userData, 'plugin-data');
   const orphan = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab';
   fs.mkdirSync(path.join(parts, orphan), { recursive: true });
   fs.writeFileSync(path.join(parts, orphan, 'Cookies'), 'x');
@@ -318,37 +324,45 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出的删得掉�
   // 一个**认不出**的目录：要列出来，但**不能**有删除按钮。
   //   （万一分区目录的根取错了，这个列表会把这样的名字摆上删除按钮 —— 那是最坏的一种。）
   fs.mkdirSync(path.join(parts, 'dev-sandbox'), { recursive: true });
+  // ★ 第二个根：同一份身份在插件数据目录里也有另一半（插件自己写在磁盘上的文件）。
+  //   它会和分区那一半**合成一行** —— 用户不该为了同一份数据删两次。
+  fs.mkdirSync(path.join(dataRoot, orphan), { recursive: true });
+  fs.writeFileSync(path.join(dataRoot, orphan, 'config'), 'x');
 
   const d = await invoke('app:pluginData');
   assert.equal(d.ok, true);
   assert.equal(d.diskChecked, true, '真实模式要看磁盘');
-  assert.deepEqual(d.rows.map((r) => r.partition).sort(),
-    ['slot-1', orphan, 'dev-sandbox'].sort(),
+  assert.deepEqual(d.rows.map((r) => r.name).sort(),
+    [orphan, 'slot-1', 'dev-sandbox'].sort(),
     '三份都该列出来（一个都不许瞒着）');
-  const by = new Map(d.rows.map((r) => [r.partition, r]));
+  const by = new Map(d.rows.map((r) => [r.name, r]));
   assert.equal(by.get(orphan).kind, 'orphan');
   assert.equal(by.get(orphan).deletable, true);
+  assert.deepEqual(by.get(orphan).places, ['partition', 'data'],
+    '★ 同一份身份的两个落点合成**一行**，并把两处都标出来');
   assert.equal(by.get('slot-1').kind, 'legacy');
   assert.equal(by.get('slot-1').deletable, true, '0.7 之前的残留该能删掉');
   assert.equal(by.get('dev-sandbox').deletable, false, '★ 认不出的不给删除按钮');
 
   // ★ 界面给的字符串**永远进不了路径**：这个形状就是一次任意目录递归删除。
-  const bad = await invoke('app:deletePluginData', { partition: 'persist:../../../tmp' });
+  const bad = await invoke('app:deletePluginData', { name: '../../../tmp' });
   assert.equal(bad.ok, false);
   assert.equal(bad.code, 'stale', '匹配不上任何一行 ⇒ 拒绝，而不是照它去拼路径');
   assert.equal(fs.existsSync(path.join(userData, 'Partitions')), true);
 
-  // 删掉一份：**目录要真的没了**，而且回来的清单里也不该再有它。
-  const ok = await invoke('app:deletePluginData', { partition: orphan });
+  // 删掉一份：**两个根下的目录都要真的没了**，而且回来的清单里也不该再有它。
+  const ok = await invoke('app:deletePluginData', { name: orphan });
   assert.equal(ok.ok, true, ok.error);
   assert.equal(fs.existsSync(path.join(parts, orphan)), false,
     '★ 只清存储不删目录的话，这一行会永远留在清单里 —— 用户会以为点了没反应');
-  assert.equal(ok.rows.some((r) => r.partition === orphan), false);
+  assert.equal(fs.existsSync(path.join(dataRoot, orphan)), false,
+    '★ 磁盘上那一半也要删 —— 只删一半的话，下一轮对账会把同一行再带回来');
+  assert.equal(ok.rows.some((r) => r.name === orphan), false);
   assert.equal(calls.cleared.includes(`persist:${orphan}`), true,
     'clearStorageData 也要走到（它是让 Chromium 手里那个 context 松手的那一步）');
 
   // 删不掉的仍然删不掉：认不出的那一份点了也只会拿到"不在清单里"。
-  const no = await invoke('app:deletePluginData', { partition: 'dev-sandbox' });
+  const no = await invoke('app:deletePluginData', { name: 'dev-sandbox' });
   assert.equal(no.ok, false);
   assert.equal(no.code, 'stale');
   assert.equal(fs.existsSync(path.join(parts, 'dev-sandbox')), true);

@@ -39,14 +39,21 @@ module.exports = {
  * 返回 `{ ok: true, sshPubkey }` 或 `{ ok: false, message }`。
  */
 function prepare(ctx) {
-  const home = ctx.home();
-  const k = sshconfig.ensureRelayKey(home, ctx.keys);
+  // ★ 钥匙住在**框架给的插件数据目录**里，不再往家目录里发明位置（见 sshconfig.js）。
+  //   算不出根来会抛 —— 那在这里是一件"提交不下去、但说得出原因"的事。
+  let dataDir;
+  try {
+    dataDir = ctx.dataDir();
+  } catch (e) {
+    return { ok: false, message: `没法确定中转站的数据放在哪儿：${e.message}` };
+  }
+  const k = sshconfig.ensureRelayKey(dataDir, ctx.keys);
   if (!k.ok) {
     return { ok: false, message: `无法准备中转站用的密钥：${k.detail}` };
   }
   if (k.created) {
     ctx.notice('info',
-      `已为中转站生成一把一次性密钥，存在 ${sshconfig.pathsFor(home).identity}。`
+      `已为中转站生成一把一次性密钥，存在 ${sshconfig.pathsFor(dataDir).identity}。`
       + '它只被写进你自己作业的 authorized_keys —— 任何登录入口都不认它，'
       + '所以要连进来仍然需要你自己那把 IDM 密钥。');
   }
@@ -75,9 +82,19 @@ async function attach(ctx, snap) {
 
   if (!ctx.once(`${port}|${user}|${snap.sshHostKey || ''}`)) return;
 
+  // 两个根都要，而且它们**不是一回事**：`dataDir()` 是这个插件自己的落点，
+  // `home()` 是**用户自己的**家目录（`~/.ssh/config` 在那儿 —— 那是他的东西，
+  // 我们只借两行）。见 sshconfig 里那两个函数的分工。
+  let dataDir;
+  try {
+    dataDir = ctx.dataDir();
+  } catch (e) {
+    ctx.notice('error', `中转站已就绪，但没能确定它该把配置写在哪儿：${e.message}`);
+    return;
+  }
   const home = ctx.home();
-  const inc = sshconfig.ensureInclude(home);
-  const w = sshconfig.writeRelayConfig({ home, port, user, hostKey: snap.sshHostKey });
+  const inc = sshconfig.ensureInclude({ dataDir, home });
+  const w = sshconfig.writeRelayConfig({ dataDir, port, user, hostKey: snap.sshHostKey });
 
   if (!w.ok) {
     ctx.notice('error',
@@ -86,13 +103,33 @@ async function attach(ctx, snap) {
     return;
   }
 
+  // ── 搬家：新位置**写成功之后**，才把旧位置那三个文件清掉 ──
+  //   ★ 顺序是承重的：反过来的话，写新位置失败时用户会落到"两边都没有"。
+  //   ★ 这一句话在 `ctx.once` 那道闸之后，所以正常情况下只发生一次。
+  const clean = sshconfig.dropLegacyFiles(home);
+  if (clean.deleted.length) {
+    ctx.notice('info',
+      `中转站的本地配置搬到了新位置（${sshconfig.pathsFor(dataDir).dir}），`
+      + `旧那三个文件已经从 ${sshconfig.legacyPaths(home).dir} 清掉了。`);
+  }
+  if (clean.failed.length) {
+    const dir = sshconfig.legacyPaths(home).dir;
+    // ★ 只提示一次：读不到的家目录是**永久失败**，每次心跳都报一遍等于没有提示。
+    if (ctx.once(`legacy-cleanup|${dir}`)) {
+      ctx.notice('warn',
+        `${dir} 里那三个旧文件没能删掉（${clean.failed[0].reason}）。`
+        + '它们已经不再被用到了 —— 删不掉不影响使用，你也可以自己删掉它们。');
+    }
+  }
+
   // Include 没加上时**照样**把我们自己那份配置写好了：用户可以手工加那一行，
   // 也可以自己 ssh -F <路径>。但必须说出来 —— 不说的话他敲 `ssh slurmate` 会得到
   // 「Could not resolve hostname」，而根因是我们没能改他的文件。
   if (!inc.ok) {
     ctx.notice('warn',
       `没能把 Include 加进 ${inc.path}（${inc.detail}）。`
-      + `请手工在那个文件的**最上面**加一行：\nInclude ${sshconfig.pathsFor(home).config}`);
+      + '请手工在那个文件的**最上面**加一行：\n'
+      + `Include ${sshconfig.pathsFor(dataDir).config}`);
   } else if (inc.changed) {
     ctx.notice('info',
       `已在 ${inc.path} 最上面加了一行 Include，指向 Slurmate 自己的 ssh 配置。`

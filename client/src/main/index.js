@@ -1196,7 +1196,7 @@ function clearLayoutStorage(layoutId, layoutName) {
     //     那个确认框）。**用户主动发起**的删除是另一条路（`app:deletePluginData`），
     //     那一条碰到同样的情形会**明确拒绝**并说清原因 —— 静默只在这一条路上关掉。
     if (win && win.surfacePartition === partition) continue;
-    clearOnePartition(partition, disk, root).then((r) => {
+    clearPartitionStorage(partition, disk, root).then((r) => {
       if (!r.ok) {
         win.pushNotice('error',
           `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
@@ -1233,7 +1233,26 @@ function partitionsRoot() {
 }
 
 /**
+ * 基座给插件的数据目录的根（`ctx.dataDir()` 与对账**必须同源**）。
+ *
+ * ★ 一个表达式覆盖两种模式：真实模式下 `cfgDir` **就是** `userData`，开发者模式下
+ *   它是 `<userData>/dev-sandbox` —— 沙盒分岔于是自动跟着走，与 `sitePoolDir()` 同一个
+ *   理由（拿假后端跑，**绝不去读、更不去写**用户真实的那一份）。
+ * ★ 根名 `plugin-data` **只有这一处**。给插件的那条路与对账这一条各算一遍，正是这个
+ *   仓库最怕的那类漂移：两边会慢慢变成两个目录，而症状是"界面上说没有，插件却在写"。
+ *
+ * @returns {string|null} `null` = 还不知道（配置目录还没定下来）—— 见 `ctx.dataDir()`
+ */
+function pluginDataRoot() {
+  return cfgDir ? path.join(cfgDir, 'plugin-data') : null;
+}
+
+/**
  * 本机插件数据的对账：**谁在用、还剩几份**。只读，不改任何东西。
+ *
+ * ★ **两个根一起查**：Electron 的存储分区，以及基座给插件的数据目录。一份身份可能
+ *   在两个根下各有一半（浏览器攒的那半 + 插件自己写的那半），所以行由两个根的名字
+ *   并起来算（见 `plugin-data-audit.js`）。
  *
  * ★ 它**不塞进 `app:bootstrap`**：那一次载荷是"启动信息"，而这里要做磁盘 I/O、
  *   还包含一次可能失败的探测 —— 挂上去会让"面板打不开"与"磁盘慢"变成同一件事。
@@ -1242,27 +1261,59 @@ function partitionsRoot() {
 function auditPluginData() {
   const layouts = (cfg && cfg.layouts) || [];
   const pr = partitionsRoot();
+  const dataRoot = pluginDataRoot();
   let names = null;
   let why = pr.why || null;
+  let dataNames = null;
+  let dataWhy = null;
   if (dev.developerMode) {
-    why = '开发者模式不查磁盘：这里用的是一份沙箱配置，它里面的布局组 id 与真实那一份'
-      + '对不上 —— 照它去认，真实那一份数据会整片看起来像孤儿，而删掉它们就是毁掉'
-      + '真实的那一份。';
-  } else if (pr.root) {
-    const r = dataAudit.listPartitions(pr.root);
-    names = r.names;
-    why = r.why || why;
+    const sandboxWhy = '开发者模式不查磁盘：这里用的是一份沙箱配置，它里面的布局组 id 与'
+      + '真实那一份对不上 —— 照它去认，真实那一份数据会整片看起来像孤儿，而删掉它们'
+      + '就是毁掉真实的那一份。';
+    why = sandboxWhy;
+    dataWhy = sandboxWhy;
+  } else {
+    if (pr.root) {
+      const r = dataAudit.listDirs(pr.root);
+      names = r.names;
+      why = r.why || why;
+    }
+    if (dataRoot) {
+      const r = dataAudit.listDirs(dataRoot);
+      dataNames = r.names;
+      dataWhy = r.why;
+    }
   }
   return {
     ...dataAudit.audit({
-      plugins: registry.list(), layouts, connections: cfg.connections, names, why,
+      plugins: registry.list(), layouts, connections: cfg.connections,
+      names, why, dataNames, dataWhy,
     }),
-    root: pr.root,
+    // ★ 两根都给出去：删除要按行的 `places` 分派，而它需要知道每一根在哪。
+    roots: { partition: pr.root, data: dataRoot },
   };
 }
 
 /**
- * 清掉一份插件数据：**先让它松手，再把目录删掉**。
+ * 删一个目录，并**复核**它真的不在了。
+ *
+ * ★ 复核不是多余的：Windows 上有句柄时 `rm` 会删一半然后抛（`force` 只吞 `ENOENT`），
+ *   Linux 上删掉之后 Chromium 可能把同一个目录再写出来。报成功而它还在的话，下一次
+ *   对账会把同一行再列出来 —— 用户会以为"我明明删过了"。
+ */
+function removeDirChecked(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (e) {
+    return { ok: false, error: `目录没能删掉：${e.message}` };
+  }
+  return fs.existsSync(dir)
+    ? { ok: false, error: '目录删了又还在（多半有别的进程正拿着它）' }
+    : { ok: true, error: null };
+}
+
+/**
+ * 清掉一个**分区**（Electron 那一侧）：**先让它松手，再把目录删掉**。
  *
  * ★ 两件事都要做，而它们分工不同。`clearStorageData()` 的作用**不是**"清干净"
  *   （它连 HTTP 缓存都不碰 —— `storages` 里没有 `cache`），而是让 Chromium 手里
@@ -1270,15 +1321,16 @@ function auditPluginData() {
  *   —— 那是常态，不是例外。**目录的消失是 `rmSync` 干的**：只清不删的话，那一行会
  *   永远留在对账的清单里，而用户会以为自己点了没反应。
  *
- * ★ 删完**复核**：Windows 上有句柄时 `rm` 会删一半然后抛（`force` 只吞 `ENOENT`），
- *   Linux 上删掉之后 Chromium 可能把目录再写出来。所以这里如实返回"到底删干净没有"。
+ * ★ 两条路都调它：对账里用户主动删那一行（`clearOneRow`），以及一个布局组被回收
+ *   （`clearLayoutStorage`）。后者**只**清分区那一侧 —— 插件写在磁盘上的文件不跟着
+ *   一个布局组走（那可能是它攒了很久、重建不出来的东西），它留给对账去列、由用户决定。
  *
  * @param {string} partition 完整的 `persist:…`（给 Electron 的那个名字）
  * @param {string|null} diskName 磁盘上的目录名（**折叠过**的那一份）。给不出来就只清存储、不删目录。
  * @param {string|null} root 分区目录的根
  * @returns {Promise<{ok: boolean, error: string|null}>}
  */
-function clearOnePartition(partition, diskName, root) {
+function clearPartitionStorage(partition, diskName, root) {
   return new Promise((resolve) => {
     let p;
     try {
@@ -1292,17 +1344,32 @@ function clearOnePartition(partition, diskName, root) {
       //   （它们只用来**匹配**清单里的某一行，见 `app:deletePluginData`）。
       const dir = root && diskName ? path.join(root, diskName) : null;
       if (!dir) return resolve({ ok: true, error: null });
-      try {
-        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-      } catch (e) {
-        return resolve({ ok: false, error: `目录没能删掉：${e.message}` });
-      }
-      // 报成功而它还在，下一次对账会把同一行再列出来 —— 用户会以为"我明明删过了"。
-      return resolve(fs.existsSync(dir)
-        ? { ok: false, error: '目录删了又还在（多半有别的进程正拿着它）' }
-        : { ok: true, error: null });
+      return resolve(removeDirChecked(dir));
     }, (e) => resolve({ ok: false, error: e.message }));
   });
+}
+
+/**
+ * 清掉**一行**插件数据 —— 按它的 `places` 分派到各个落点。
+ *
+ * ★ 一份数据的两个落点是**一起删**的：只删浏览器那一半的话，下一次对账会把同一行
+ *   再带回来（`places` 里还剩 `data`），而用户会以为"我明明删过了"。
+ *
+ * @param {object} row   `audit` 算出来的那一行（用它里面的 `name` 与 `places`）
+ * @param {{partition: string|null, data: string|null}} roots 两个根
+ * @returns {Promise<{ok: boolean, error: string|null}>}
+ */
+async function clearOneRow(row, roots) {
+  const places = Array.isArray(row.places) ? row.places : [];
+  if (places.includes('partition') && roots && roots.partition) {
+    const r = await clearPartitionStorage(`persist:${row.name}`, row.name, roots.partition);
+    if (!r.ok) return r;
+  }
+  if (places.includes('data') && roots && roots.data) {
+    const r = removeDirChecked(path.join(roots.data, row.name));
+    if (!r.ok) return r;
+  }
+  return { ok: true, error: null };
 }
 
 // ── 会话编排 ────────────────────────────────────────────────────────────────
@@ -1859,8 +1926,43 @@ function pluginContext(plugin) {
     dev: dev.developerMode,
     session: () => (controller && controller.session) || null,
     whoami: () => whoami,
-    /** 写本地文件用的家目录。开发者模式必须落在它自己的目录里 —— 见 sshd 插件。 */
+    /**
+     * **用户自己的**家目录。开发者模式必须落在沙盒里 —— 见 sshd 插件。
+     *
+     * ★ 搬家之后它的**含义收窄了**：从前它是"插件写文件用的地方"，而现在插件该写的
+     *   是 `dataDir()`；这一条留给"要碰**用户自己的**文件"的场合 —— sshd 往
+     *   `~/.ssh/config` 加那一行 Include 就是唯一的例子。★ 别拿它当数据目录用：
+     *   它是**所有插件共用的一个根**，两个插件会在里面撞上。
+     */
     home: () => (dev.developerMode ? cfgDir : app.getPath('home')),
+
+    /**
+     * **这个插件自己的**数据目录（绝对路径）。★ **目录可能还不存在** —— 由第一次
+     * 写它的那次写盘建出来（`atomic-write.js` 的 `mkdir` 默认开着）。
+     *
+     * ★ 与 `home()` 的分工：那个是"用户的家目录"（所有插件共用），这个是"你的落点"
+     *   （按身份分：插件 id / 共享组 / 可选实例）。★ 插件要存自己的东西，用这个 ——
+     *   自己发明一个位置（从前 sshd 就是那样干 `~/.slurmate/ssh/` 的）会让基座既不知道
+     *   它在哪儿、也没法把它列给用户看。
+     *
+     * ★ 路径由**身份**算出来（`plugin-data.js` 的第三个落点），所以它和对账看到的是
+     *   同一个目录 —— 那是"用户看得见、删得掉"的前提。
+     *
+     * ★ `instanceId` 与 `identityOf` 同签名：声明了 `contributes.data.perInstance`
+     *   的插件**必须**给（不给会抛 —— 两个实例共用一份数据是"两边都以为自己写进去了"
+     *   的那种静默损坏）。今天唯一的消费者 sshd 没声明分实例，所以它不传。
+     *
+     * ★ 算不出根来的时候**抛**，不返回 null：一个 null 会让插件拼出一个**相对路径**
+     *   （落进进程的 cwd 里），那比抛严重得多。
+     */
+    dataDir: (instanceId) => {
+      const root = pluginDataRoot();
+      if (!root) {
+        throw new Error('还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。');
+      }
+      return path.join(root,
+        pluginData.dataDirNameOf(pluginData.identityOf(plugin, instanceId)));
+    },
     /**
      * 自动登录。契约由**框架**从当前插件自己的清单里取，不由插件传进来 ——
      * 插件没法把这个参数传错，也没法去登别人的页面。
@@ -2324,25 +2426,25 @@ function registerIpc() {
    * 登录状态，所以界面必须先问过用户。
    */
   send('app:deletePluginData', async (payload = {}) => {
-    const { partition } = payload;
+    const { name } = payload;
     // ★ **判定权在这里**（照 `app:setConnectionLayout` 那条形状）：界面手里那份清单
     //   随时可能已经陈旧（刚连上、刚改过配置、刚装了插件），所以**重新对一遍账**，
     //   只认这一次算出来的那一条。判据本身在 plugin-data-audit.js 的 deletionVerdict
     //   （两句话都说得出原因的那两格：`stale` 与 `in_use`）。
-    //   ★ 于是路径**只由根 + 磁盘上的目录名拼**，而 `partition` 这个字符串只用来
-    //   **匹配**某一行 —— `{partition: 'persist:../../..'}` 匹配不上任何一行。
+    //   ★ 于是路径**只由 根 + 磁盘上的目录名 拼**，而 `name` 这个字符串只用来
+    //   **匹配**某一行 —— `{name: '../../..'}` 匹配不上任何一行。
     const fresh = auditPluginData();
     const verdict = dataAudit.deletionVerdict({
-      rows: fresh.rows, partition, surfacePartition: win && win.surfacePartition,
+      rows: fresh.rows, name, surfacePartition: win && win.surfacePartition,
     });
     if (!verdict.ok) return verdict;
-    const row = verdict.row;
-    // 磁盘上的名字就是删除路径的依据；分区名由它推出来（Electron 自己会折叠，两边
-    // 指向同一个存储目录）。
-    const r = await clearOnePartition(`persist:${row.partition}`, row.partition, fresh.root);
+    // 删哪几个落点由**这一行**说了算（`places`）—— 一份数据的浏览器那一半与磁盘
+    // 那一半是一起删的，只删一半的话下一次对账会把同一行再带回来。
+    const r = await clearOneRow(verdict.row, fresh.roots);
     if (!r.ok) {
       return { ok: false, code: 'failed', error: `没能清干净：${r.error}` };
     }
+    const row = verdict.row;
     const after = auditPluginData();
     return {
       ok: true, rows: after.rows, diskChecked: after.diskChecked, why: after.why,
@@ -2899,6 +3001,12 @@ module.exports = {
     /** 一条连接的密钥（读不到就返回错误对象）。测试用它核对「按连接隔离」。 */
     getKey: (id) => resolveKey(id || config.PENDING_ID),
     getCfg: () => cfg,
+    /**
+     * 插件数据目录的根。端到端用例靠它断言"插件写出来的那三个文件落在哪儿、而真正的
+     * 家目录一个字节都没被碰过"。★ 它与 `ctx.dataDir()` 同源（都走 `pluginDataRoot`）
+     *   —— 各算一遍的话，用例就会守着一个用户永远拿不到的路径。
+     */
+    getPluginDataRoot: () => pluginDataRoot(),
     /** 钉子表（按 id 记的公钥指纹，§5.4）。它在**另一个文件**里，不是 cfg 的一部分。 */
     getPinnedKeys: () => pins,
     /**

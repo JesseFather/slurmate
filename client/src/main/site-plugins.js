@@ -86,6 +86,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const plugins = require('./plugins/index.js');
+const atomicWrite = require('./atomic-write.js');
 
 /**
  * 延迟取读包那一半。
@@ -383,13 +384,16 @@ function fileListOf(pkg) {
 
 function recordPathOf(siteRoot) { return path.join(siteRoot, RECORD_NAME); }
 
-/** 原子写。**不用 `writeFileSync` 直接覆盖** —— 半份记录会让池子的引用表凭空变少。 */
-function writeJsonAtomic(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
-}
+/**
+ * 原子写快照表。**不用 `writeFileSync` 直接覆盖** —— 半份记录会让池子的引用表凭空变少。
+ *
+ * ★ 实现搬去了 `atomic-write.js`（框架里唯一的那一份）。留下这个三行的适配，与
+ *   `config.js` 里那一个同形，理由也一样：**"写不下去必须炸"是这里的策略** ——
+ *   下面两个调用点都 `try/catch` 了它，并拿 `e.message` 去告诉用户"这一次不会回收
+ *   任何版本"。通用实现只返回结构化结果，不替调用方决定这件事。
+ */
+const writeJsonAtomic = (file, obj) => atomicWrite.writeAtomicOrThrow(
+  file, JSON.stringify(obj, null, 2), { mode: 0o600 });
 
 /**
  * 读快照表。**读不出来是一种必须被区分的状态**，不是"没有站点要它们"。
