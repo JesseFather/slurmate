@@ -28,6 +28,7 @@
 const { EventEmitter } = require('events');
 const { Action, classify, shouldRetry } = require('./classify.js');
 const { Tunnel } = require('./tunnel.js');
+const { jobText } = require('./jobstate.js');
 
 const State = {
   IDLE: 'idle',
@@ -198,7 +199,7 @@ class SessionController extends EventEmitter {
   // ── 对外快照（界面唯一的数据来源）─────────────────────────────────────────
   snapshot() {
     const s = this.session || {};
-    return {
+    const snap = {
       state: this.state,
       // 中转站会话是 null（见构造函数的说明）。
       layoutId: this.layoutId,
@@ -223,6 +224,13 @@ class SessionController extends EventEmitter {
       // 界面显示「剩余时间未知」而不是 0。
       expiresAt: typeof s.expires_at === 'number' ? s.expires_at : null,
       jobState: s.job_state || null,
+      // ★ 判定由**守护进程**给（`job_terminal`），客户端只照着念 ——
+      //   见 jobstate.js 顶上那一段（一个判据两处实现会漂）。
+      //   老站点不发这个字段时是 `undefined`，jobText() 会退回去印状态原文。
+      jobTerminal: typeof s.job_terminal === 'boolean' ? s.job_terminal : undefined,
+      jobReason: s.job_reason || null,
+      jobExitCode: s.job_exit_code || null,
+      jobRestarts: s.job_restarts || null,
       timeLimit: s.time_limit || null,
       renewCount: typeof s.renew_count === 'number' ? s.renew_count : null,
       lastHbAt: s.last_hb_at || null,
@@ -239,6 +247,11 @@ class SessionController extends EventEmitter {
       //   改了开关还没重启的那段时间里，界面会对着一个真集群说"这是假的"。
       dev: this.backend.kind === 'fake',
     };
+    // 作业状态那一行**已经译好**，界面直接印。译法与理由是 jobstate.js 的事 ——
+    // 放在主进程是因为界面那一侧没有测试（panel.js 在本机跑不起来），
+    // 而这一句里有两处会静默说错话的地方（终态判定、Reason 的措辞）。
+    snap.jobText = jobText(snap);
+    return snap;
   }
 
   _emit() { this.emit('change', this.snapshot()); }

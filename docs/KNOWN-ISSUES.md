@@ -247,6 +247,33 @@ enabled = no
 
 ---
 
+### F27 — 作业永远排不上队时，会话永远占着一个配额位（没有任何 TTL）
+
+**位置**：`try_enroll()` 里那一句 `submitted_ttl` 判定，与 `phase_running()` 的分派。
+
+**机理**：`submitted_ttl`（缺省 1800 秒）**只在 `try_enroll()` 里**被检查，而
+`try_enroll()` **只在作业是 `RUNNING` 时**被调用（`phase_running()` 的分派）。所以
+一个**始终没跑起来**的作业（`PENDING` 排很久、`SUSPENDED`、`REQUEUED`、被 hold 住）
+对应的会话会**永远停在 `submitted`**：没有任何阶段看它 —— `phase_pending()` 只收
+`reserved`，`phase_heartbeat()` 只收 `enrolled`/`suspect`，`phase_gc()` 只收终态。
+
+**后果**：那一行**占着位置**。`OCCUPYING_STATES` 含 `submitted`（F14 修完之后的
+唯一定义），所以它占着一个**候选端口**和用户的一个**配额名额** ——
+`max_sessions_per_user`（缺省 1）下，那个用户从此**再也开不了新会话**，而界面上他
+只有一条"排队中"的会话，看不出问题在哪。要恢复只能人工删那一行。
+
+**这不是 v0.8 阶段 1 引入的**（从前 `PENDING`/`CONFIGURING` 同样保留），但那一版把
+**保留的状态集合扩大了**（`SUSPENDED`/`REQUEUED`/`STAGE_OUT`/… 从前会被释放），
+所以走到这一格的路径变多了。**零用例覆盖。**
+
+**修法需要先做一个产品决定**："队列里等了 30 分钟"与"作业坏了没写会话文件"是两回事，
+而今天那个常量只有后者的语义（它的注解与审计名都是 `enroll_timeout`）。可能的形状：
+按作业状态分两种 TTL（`RUNNING` 但没有会话文件 ⇒ 沿用 1800；**一直在排队** ⇒ 另一个
+更长、或者干脆只**提醒不回收**，由用户自己决定）。**不要**直接给 `submitted` 加一个
+一刀切的 TTL —— 那会在一个繁忙集群上**自动取消用户在排队的作业**。
+
+---
+
 ## 二、从未实测过的
 
 这些不是"代码有问题"，是**这些事实至今只有推断，没有一次真实输出**。
@@ -839,6 +866,9 @@ v0.7 把 `engines` 的字段级规则统一了（从前守护进程静默跳过�
 | 曾经的问题 | 现状 |
 |---|---|
 | **S24 — 同一个插件不能同时开两份** | **v0.7 修掉。** 分两步：**声明**（`contributes.concurrent`，必填，见 PLUGIN-SPEC §2.8）与**机制**（**认领** + **临时实例**）。开局那一刻那个组上没有活会话 ⇒ 它是**持有者**（用连接那个组，与从前逐字相同）；已经有 ⇒ 它拿一个**只在内存里**的临时组 + 持有者那份数据的**快照** + 一个新的本地端口（⇒ 一份空的浏览器存储）。已经开着的那几份**永不晋升**，下一个**新开**的会话才认领持有者。临时实例的一切在会话结束时回收。★ 代价如实记着：**多开时只有一份能攒数据**，而「哪一份」是「开局那一刻谁先来」决定的；接回来的临时实例拿到的是**新** id（见 S26 那一格）。★ 它顺带解掉了 `slotOf` 注释里那条「今天够不到」的推论。 |
+| **F25 — 非终态的 Slurm 作业状态被当成"作业结束了"** | **v0.8 修掉（阶段 1）。** 判据从 `if jstate not in ("PENDING","CONFIGURING","RUNNING")` 换成 **`job_is_terminal(job)`** —— 只认**真终态**（与 Slurm 自己的 `is_job_terminal_state()` 逐条对应），其余一律保留，**不认识的状态也保留**。★★ 两个方向的代价不对称：`begin_release()` 只是两行，真正的拆除在下一个 tick 的 `phase_release()` 里，而**没有任何路径能改回去** ⇒ 判错一次就没了（作业还在跑，防护已经拆掉）；反向判错有 `JOB_MISSING` 在 3 个 tick 后兜住。★ 顺带补上 Slurm 那条**附加条件**：`PREEMPTED` / `TIMEOUT` 只有 `Requeue=0` 才算终态 —— 会把作业重新排队的抢占，从前被当成"结束"，而"回来的那一个"面对的是一套已经拆掉的防护。★ 非终态停留超过 `stuck_job_seconds` 写一条 `job_stuck` 审计（**不释放**）。用例：`cluster/test-sessiond-logic.py` 第 24 节（26 个状态一次 tick 全喂进去；把判据改回当年那句 ⇒ 31 条红） |
+| **F26 — `UserId=hfu(2002)` 让 `recover_from_rules()` 一条都恢复不出来** | **v0.8 修掉（阶段 1）。** 真集群 `scontrol show job <id> -o` 给的是 **`name(uid)`** 形式，而那一行是 `int(job.get("UserId", -1))` ⇒ `ValueError` ⇒ 被 `except` 静默跳过 ⇒ **DB 一丢，`reconcile()` 把所有在跑的作业的规则当成孤儿删掉**（那个函数自己的 docstring 写着这个后果）。修法是 `parse_slurm_uid()`：两种形态都认，**认不出来返回 `None` 而不是 `-1`**（`-1` 是合法整数，会一路走进 `!= uid` 的比较里，看上去像"确认过不是这个人"），并且认不出来时**说话**（从前是静默 `continue`）。★★ **它藏了这么久的原因值得记**：测试桩喂的是**纯数字** `UserId` —— 假桩比真集群"干净"，于是真缺陷在用例里完全隐形。夹具已改成真形状。用例：同第 24.6 节（改回 `int()` ⇒ 立刻红） |
+| **`StartTime` / `JobName` / `RestartCnt` 是死键或零消费者** | **v0.8 删掉（阶段 1）。** `RestartCnt` 从来没命中过任何东西 —— 真机输出里那一项叫 **`Restarts=`**（死键）；`StartTime` / `JobName` 解析了但**零消费者**。★ 它们与"错误"不同：它们是**死重量**，让下一个人以为有人在读那个字段。同一次改动**读回来**三样真有用的：`Reason`（排队原因，用户最想知道的那句话）、`ExitCode`、`Restarts`。用例：第 24.7 节，判据是**解析出来的键恰好是哪些**（不是"源码里出现过哪个字符串"—— 第一版那么写，两条断言全红在注释上） |
 | **F14 — `max_active_per_user` 拦不住并发的第二个提交** | **v0.7 修掉（`737ec85` 之后那一个）。** 「占着位置」只留**一个定义**（`OCCUPYING_STATES` = `reserved` + `submitted` + `ACL_STATES`），配额与端口避让**共用**它 —— 从前两处各写各的，而差额恰恰是那个洞。`quota_pending` / `count_pending` / `MAX_PENDING_PER_USER` **整个删掉**（它们挡的正是那个洞本身）。★ 修法是**完备**的，唯一依据是守护进程**单线程串行**，所以两次 `submit` 不可能交错。★ 上限变成配置键 `max_sessions_per_user`（缺省 1，站点可配）—— **不是反复**，理由见 `docs/CONFIGURATION.md` 的〈`max_sessions_per_user` 为什么回来了〉。用例：`cluster/test-sessiond-logic.py` 第 23 节（★ 还原成当年那个写法，那条立刻红） |
 
 | **S1 — 站点分发插件还没有**（没有"从集群取插件文件"那个 op） | **v0.6 修掉。** 守护进程新增 `package`/`limits`（`plugins`）与 `plugin_package`；客户端新增 `site-plugins.js`（对账）、站点池 `~/.slurmate/site-plugins/`、引用计数回收、同意闸。（v0.6 当时还有一份 `files` 清单与 `plugin_file` 那个 op —— v0.7 把它们删了，见 S7。）用例：`client/test/site-plugins.test.mjs` + `client/test/boot.test.mjs` 里那条端到端同意。★ 但**真集群上一次都没跑过** —— 见 U7，别把"修掉了"读成"验过了" |

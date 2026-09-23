@@ -3878,6 +3878,555 @@ exit 0
         check("★ 守护进程里不再有 %s" % _dead,
               _q_src.count(_dead) == 0, "出现 %d 次" % _q_src.count(_dead))
 
+    # ── 24. 作业状态：只有真终态才释放 ───────────────────────────────────────
+    #
+    # 这一节测的是**两条轴的相交处**：会话状态（ST_*，我们自己的）与 Slurm 的
+    # 作业状态（集群的）。判定规则只有一条 —— 真终态才释放，其余一律保留。
+    #
+    # ★ 这一整条链路此前**零覆盖**：`phase` 这个词在本文件里一次都没出现过，
+    #   `tick()` 一次都没被调用过。四个释放原因（job_gone / job_<状态> /
+    #   orphaned / goodbye）、确认阈值、PENDING 保留、"非 RUNNING 就释放" ——
+    #   全都没有用例。于是"REQUEUED 被当成作业结束"这件事没有任何东西挡着。
+    print("\n── 24. 作业状态（非终态一律保留）──")
+
+    # 两张表**在这里独立列一遍**，不从被测模块里抄。抄过来的话，
+    # "把某个真终态从集合里删掉"这种变异会让表与集合一起变，用例永远是绿的。
+    #
+    # 依据是 Slurm 的 `is_job_terminal_state()`（src/common/job_state.c），
+    # 不是 manpage —— manpage 只列状态码，不写"算不算结束"。
+    # 非终态这一张的名字取自 `man squeue` 的 JOB STATE CODES 一节（本机 23.11.4），
+    # 加上源码/更新版本认得而本机 manpage 还没列的那一个（POWER_UP_NODE）。
+    # ★ 多列一个不存在的状态是无害的 —— 它验的是"这个函数对任何非终态都不释放"，
+    #   而漏测一个真的会让一条路径没有人守。
+    _NONTERMINAL = [
+        # 排队
+        "PENDING", "CONFIGURING", "REQUEUE_HOLD", "REQUEUE_FED", "POWER_UP_NODE",
+        "RESV_DEL_HOLD",
+        # 在跑
+        "RUNNING", "RESIZING", "SIGNALING", "STAGE_OUT", "COMPLETING",
+        # 暂停
+        "SUSPENDED", "STOPPED",
+        # 会回来
+        "REQUEUED", "SPECIAL_EXIT",
+    ]
+    _TERMINAL = [
+        "COMPLETED", "CANCELLED", "FAILED", "NODE_FAIL", "BOOT_FAIL", "DEADLINE",
+        "OUT_OF_MEMORY", "LAUNCH_FAILED", "REVOKED",
+    ]
+    # ★ 这两个是**有条件**的终态，判据是 `Requeue=`。把它们当无条件终态，
+    #   症状是"被抢占的作业几秒后自己回来了，而防护已经拆了"。
+    _CONDITIONAL = ["PREEMPTED", "TIMEOUT"]
+
+    for _st in _NONTERMINAL:
+        check("非终态 %s ⇒ 不释放" % _st,
+              mod.job_is_terminal({"JobState": _st, "Requeue": "0"}) is False)
+    for _st in _TERMINAL:
+        check("真终态 %s ⇒ 释放" % _st,
+              mod.job_is_terminal({"JobState": _st, "Requeue": "1"}) is True)
+    for _st in _CONDITIONAL:
+        check("★ %s 且 Requeue=1 ⇒ **不**释放（作业会自己回来）" % _st,
+              mod.job_is_terminal({"JobState": _st, "Requeue": "1"}) is False)
+        check("★ %s 且 Requeue=0 ⇒ 释放" % _st,
+              mod.job_is_terminal({"JobState": _st, "Requeue": "0"}) is True)
+        # 字段缺失时缺省落在保留侧 —— 与整个函数的缺省一致。
+        check("★ %s 但拿不到 Requeue ⇒ 不释放（缺省在安全侧）" % _st,
+              mod.job_is_terminal({"JobState": _st}) is False)
+    # ★ 守护进程不认识的 Slurm 状态。Slurm 加一个新状态时，这里必须是"保留" ——
+    #   判成释放就等于"集群升级一次，所有人的防护被拆一遍"。
+    check("★ 没见过的 Slurm 状态 ⇒ 保留（默认在安全侧，不是释放）",
+          mod.job_is_terminal({"JobState": "SOME_FUTURE_STATE"}) is False)
+    check("拿不到状态（空 / None / 没有这个键）⇒ 保留",
+          mod.job_is_terminal({}) is False
+          and mod.job_is_terminal({"JobState": ""}) is False
+          and mod.job_is_terminal(None) is False)
+    check("★ 状态名大小写不敏感（Slurm 给的是大写，但判据不该靠它）",
+          mod.job_is_terminal({"JobState": "completed"}) is True
+          and mod.job_is_terminal({"JobState": " pending "}) is False)
+
+    # ── 24.1 `parse_slurm_uid`：两种真形态 ──────────────────────────────────
+    #
+    # ★ 这条缺陷是**在真集群上实测出来的**，而测试桩当年喂的是纯数字，
+    #   所以用例一直绿。桩改成真形状之后这条才有意义。
+    check("UserId 的纯数字形态", mod.parse_slurm_uid("2002") == 2002)
+    check("★★ UserId 的 name(uid) 形态 —— 本机 `scontrol show job -o` 给的就是这样",
+          mod.parse_slurm_uid("litao(1019)") == 1019)
+    check("★ 认不出来时返回 None，**不是** -1（-1 是合法整数，会被读成"
+          "「确认过不是这个人」）",
+          mod.parse_slurm_uid("(null)") is None
+          and mod.parse_slurm_uid("") is None
+          and mod.parse_slurm_uid(None) is None
+          and mod.parse_slurm_uid("litao") is None)
+    check("★ 认不出来的那些**都不等于**任何一个真 uid",
+          all(mod.parse_slurm_uid(_v) != -1
+              for _v in ("(null)", "", None, "litao")))
+
+    # ── 24.2 跑**一整个 tick**：所有状态一次喂进去 ───────────────────────────
+    #
+    # 一次 tick、一次遍历，就能同时验两件事：非终态的一个都没少，终态的一个都没留。
+    # 分开跑的话，"遍历到一半 return"这类缺陷会漏掉 —— 而它恰恰是最可能的形态。
+    class _RecNft(object):
+        """真的记账的 nft 替身：规则集合能加能删，删了什么记下来。"""
+
+        def __init__(self):
+            self.rules = {}
+            self.removed = []
+
+        def ensure(self):
+            return True
+
+        def session_rules(self):
+            return dict(self.rules)
+
+        # ★ 真 `Nft.comment_for` 是 staticmethod，替身必须一样 —— 写成普通方法
+        #   会让它多吃一个 self，而报错是 `takes 3 positional arguments but 4 were
+        #   given`，一句与"注释格式"毫无关系的话。
+        comment_for = staticmethod(mod.Nft.comment_for)
+
+        def del_by_comment(self, c):
+            if c in self.rules:
+                del self.rules[c]
+                self.removed.append(c)
+                return True
+            return False
+
+        def add_session_rule(self, node_ip, port, uid, job_id):
+            c = mod.Nft.comment_for(uid, job_id, port)
+            self.rules[c] = (node_ip, port)
+            return True, c
+
+    class _JobSlurm(object):
+        """可以喂任意 `JobState` / `Requeue` 的桩，按 job_id 分辨。
+
+        ★ 字段**照抄真形状**（含 `UserId=litao(1019)` 那种带括号的写法）：
+          喂理想化的字段正是 UserId 那条缺陷藏了这么久的原因。
+        """
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def __init__(self):
+            self.jobs = {}          # job_id -> dict or None(missing)
+            self.calls = []
+
+        def job_state(self, jid):
+            self.calls.append(jid)
+            j = self.jobs.get(int(jid), "absent")
+            if j == "absent":
+                return self.JOB_MISSING, None
+            if j is None:
+                return self.JOB_UNKNOWN, None
+            return self.JOB_OK, dict(j)
+
+        def show_job(self, jid):
+            j = self.jobs.get(int(jid), "absent")
+            return dict(j) if isinstance(j, dict) else None
+
+        def expand_node(self, _n):
+            return "node01"
+
+        def node_ip(self, _n):
+            return "192.0.2.11"
+
+        def renew(self, *_a, **_k):
+            return True, ""
+
+        def cancel(self, *_a, **_k):
+            return True, ""
+
+    _js_uid = UID
+    _js_nft, _js_slurm = _RecNft(), _JobSlurm()
+    _js_clock = [1700000000]
+    _js_events = []
+    _real_nft, _real_slurm = d.nft, d.slurm
+    _real_now, _real_audit = mod.now_ts, d.audit
+    _real_enroll = (d.try_enroll, d.refresh_enrollment, d.maybe_renew)
+    # 这一节要跑**完整 tick**，而 tick 里每一条对账都会写一行日志（补齐规则、
+    # 在跑的作业在干什么……）。这里要断言的事情全部走 `d.audit` 的记录器与数据库，
+    # 一行日志都不靠 —— 关掉它们只是为了让输出里剩下的全是断言。
+    _real_level = mod.log.level
+    mod.log.setLevel(50)                       # CRITICAL
+    _js_calls = []
+    d.nft, d.slurm = _js_nft, _js_slurm
+    mod.now_ts = lambda: _js_clock[0]
+    d.audit = lambda ev, **kw: _js_events.append(dict(kw, event=ev))
+    d.try_enroll = lambda s, j: _js_calls.append(("enroll", s["session_id"]))
+    d.refresh_enrollment = lambda s, j: _js_calls.append(("refresh", s["session_id"]))
+    d.maybe_renew = lambda s, j: _js_calls.append(("renew", s["session_id"]))
+    try:
+        d.store.close()
+        d.store = mod.Store(os.path.join(tmpdir, "jobstate.db"))
+        _js_want = {}                 # session_id -> 期望最终还在不在
+        _jid = 8000
+        for _st in _NONTERMINAL:
+            _jid += 1
+            _sid = "js-%s" % _st.lower()
+            d.store.insert(session_id=_sid, uid=_js_uid, user="alice",
+                           job_id=_jid, partition="A6000", account="acct",
+                           cpus=2, mem="8G", requested_time="1:00:00",
+                           state=mod.ST_ENROLLED, node="node01",
+                           node_ip="192.0.2.11", service_port=55000 + (_jid % 100),
+                           candidates="55000", created_at=_js_clock[0],
+                           enrolled_at=_js_clock[0],
+                           last_hb_socket=_js_clock[0], trust="recovered")
+            # Requeue=1 是集群上最常见的取值（见真机输出），所以非终态一律用它 ——
+            # 只有它才能把"条件终态被当成无条件终态"这件事照出来。
+            _js_slurm.jobs[_jid] = {"JobState": _st, "Requeue": "1",
+                                    "UserId": "alice(%d)" % _js_uid}
+            _js_want[_sid] = True
+        for _st in _TERMINAL:
+            _jid += 1
+            _sid = "js-%s" % _st.lower()
+            d.store.insert(session_id=_sid, uid=_js_uid, user="alice",
+                           job_id=_jid, partition="A6000", account="acct",
+                           cpus=2, mem="8G", requested_time="1:00:00",
+                           state=mod.ST_ENROLLED, node="node01",
+                           node_ip="192.0.2.11", service_port=55000 + (_jid % 100),
+                           candidates="55000", created_at=_js_clock[0],
+                           enrolled_at=_js_clock[0],
+                           last_hb_socket=_js_clock[0], trust="recovered")
+            _js_slurm.jobs[_jid] = {"JobState": _st, "Requeue": "0",
+                                    "UserId": "alice(%d)" % _js_uid}
+            _js_want[_sid] = False
+        for _st in _CONDITIONAL:
+            _jid += 1
+            _sid = "js-%s" % _st.lower()
+            d.store.insert(session_id=_sid, uid=_js_uid, user="alice",
+                           job_id=_jid, partition="A6000", account="acct",
+                           cpus=2, mem="8G", requested_time="1:00:00",
+                           state=mod.ST_ENROLLED, node="node01",
+                           node_ip="192.0.2.11", service_port=55000 + (_jid % 100),
+                           candidates="55000", created_at=_js_clock[0],
+                           enrolled_at=_js_clock[0],
+                           last_hb_socket=_js_clock[0], trust="recovered")
+            _js_slurm.jobs[_jid] = {"JobState": _st, "Requeue": "1",
+                                    "UserId": "alice(%d)" % _js_uid}
+            _js_want[_sid] = True       # ★ Requeue=1 ⇒ 会回来 ⇒ 保留
+
+        _js_total = len(_js_want)
+        check("夹具真的造了一堆会话（否则下面全是空断言）",
+              _js_total == len(_NONTERMINAL) + len(_TERMINAL) + len(_CONDITIONAL)
+              and _js_total > 20, str(_js_total))
+
+        d.tick()
+
+        _js_alive = {s["session_id"]: s["state"]
+                     for s in d.store.by_state(
+                         (mod.ST_SUBMITTED, mod.ST_ENROLLED, mod.ST_SUSPECT,
+                          mod.ST_ORPHANED))}
+        # ★ 判据用**数据库里那一行的状态**，不是"我们记下来的审计事件"：
+        #   审计是"它说了什么"，状态是"它做了什么"，两者都要，但不能互相顶替。
+        _js_left = {s["session_id"] for s in d.store.by_state((mod.ST_RELEASED,))}
+        for _st in _NONTERMINAL:
+            _sid = "js-%s" % _st.lower()
+            check("★ tick 之后 %s 的会话**还在**，且没被标成释放" % _st,
+                  _js_alive.get(_sid) == mod.ST_ENROLLED and _sid not in _js_left,
+                  "state=%r released=%s" % (_js_alive.get(_sid), _sid in _js_left))
+        for _st in _TERMINAL:
+            _sid = "js-%s" % _st.lower()
+            check("%s ⇒ 释放，且原因是 job_%s" % (_st, _st.lower()),
+                  _sid in _js_left, "state=%r" % _js_alive.get(_sid))
+            _n = [e for e in _js_events if e.get("event") == "releasing"
+                  and e.get("session") == _sid]
+            check("   %s 的释放原因写的是那个状态名" % _st,
+                  len(_n) == 1 and _n[0].get("reason") == "job_%s" % _st.lower(),
+                  str(_n))
+
+        # ★ 规则也一样：非终态的规则一条都不许少。
+        #   只判"会话还在"是不够的 —— 防护是规则，不是数据库那一行。
+        _js_rules = set(_js_nft.rules)
+        _missing_rules = []
+        for _st in _NONTERMINAL + _CONDITIONAL:
+            _sid = "js-%s" % _st.lower()
+            _row = d.store.get(_sid)
+            if _row and _row["node_ip"]:
+                _c = mod.Nft.comment_for(_js_uid, _row["job_id"], _row["service_port"])
+                if _c not in _js_rules:
+                    _missing_rules.append(_st)
+        check("★★ 非终态的 nft 规则**一条都没少**（防护是规则，不是数据库那一行）",
+              _missing_rules == [], str(_missing_rules))
+        _js_removed_terminal = all(
+            mod.Nft.comment_for(_js_uid, d.store.get("js-%s" % _st.lower())["job_id"],
+                                d.store.get("js-%s" % _st.lower())["service_port"])
+            in _js_nft.removed for _st in _TERMINAL)
+        check("终态的规则都删掉了", _js_removed_terminal, str(sorted(_js_nft.removed)))
+
+        # ── 24.3 RUNNING 走原来的登记 / 续期，一步都没变 ────────────────────
+        _js_calls[:] = []
+        _js_slurm.jobs[9101] = {"JobState": "RUNNING", "Requeue": "0",
+                                "UserId": "alice(%d)" % _js_uid}
+        d.store.insert(session_id="js-run-sub", uid=_js_uid, user="alice",
+                       job_id=9101, partition="A6000", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_SUBMITTED, node="node01",
+                       node_ip="192.0.2.11", service_port=55401,
+                       candidates="55401", created_at=_js_clock[0],
+                       submitted_at=_js_clock[0], trust="owned")
+        _js_slurm.jobs[9102] = {"JobState": "RUNNING", "Requeue": "0",
+                                "UserId": "alice(%d)" % _js_uid}
+        d.store.insert(session_id="js-run-enr", uid=_js_uid, user="alice",
+                       job_id=9102, partition="A6000", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_ENROLLED, node="node01",
+                       node_ip="192.0.2.11", service_port=55402,
+                       candidates="55402", created_at=_js_clock[0],
+                       enrolled_at=_js_clock[0], last_hb_socket=_js_clock[0],
+                       trust="owned")
+        d.phase_running()
+        check("RUNNING 且未登记 ⇒ 走 try_enroll（与从前一样）",
+              ("enroll", "js-run-sub") in _js_calls, str(_js_calls))
+        check("RUNNING 且已登记 ⇒ 走 refresh_enrollment + maybe_renew（与从前一样）",
+              ("refresh", "js-run-enr") in _js_calls
+              and ("renew", "js-run-enr") in _js_calls, str(_js_calls))
+        # ★ 判据用 `job_stuck`：只有"非终态但不在 RUNNING"那条路会往里记。
+        #   RUNNING 掉进去的话，它就会**保留但永远不推进**（不登记、不续期）——
+        #   而那是个静默故障：作业在跑，ACL 没装上，续期也没了。
+        check("★★ RUNNING 不会掉进「保留但不推进」那条路（进去就不登记也不续期了）",
+              "js-run-sub" not in d.job_stuck and "js-run-enr" not in d.job_stuck,
+              str(sorted(d.job_stuck)))
+
+        # ── 24.4 查不到 / 查不了：两条路都不许碰在跑的会话 ─────────────────
+        _js_slurm.jobs[9201] = None            # JOB_UNKNOWN
+        d.store.insert(session_id="js-unknown", uid=_js_uid, user="alice",
+                       job_id=9201, partition="A6000", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_ENROLLED, node="node01",
+                       node_ip="192.0.2.11", service_port=55403,
+                       candidates="55403", created_at=_js_clock[0],
+                       enrolled_at=_js_clock[0], last_hb_socket=_js_clock[0],
+                       trust="recovered")
+        _js_slurm.jobs.pop(9301, None)         # JOB_MISSING
+        d.store.insert(session_id="js-missing", uid=_js_uid, user="alice",
+                       job_id=9301, partition="A6000", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_ENROLLED, node="node01",
+                       node_ip="192.0.2.11", service_port=55404,
+                       candidates="55404", created_at=_js_clock[0],
+                       enrolled_at=_js_clock[0], last_hb_socket=_js_clock[0],
+                       trust="recovered")
+        for _i in range(1, cfg.job_missing_confirm_ticks):
+            d.phase_running()
+            check("★ 查不到第 %d 次（阈值 %d）⇒ 一个字都不许动"
+                  % (_i, cfg.job_missing_confirm_ticks),
+                  d.store.get("js-missing")["state"] == mod.ST_ENROLLED
+                  and d.store.get("js-unknown")["state"] == mod.ST_ENROLLED,
+                  str(d.store.get("js-missing")["state"]))
+        d.phase_running()
+        check("★ 查不到达到阈值 ⇒ 释放（这一条挡住「干脆永不释放」那种假保守）",
+              d.store.get("js-missing")["state"] == mod.ST_RELEASING,
+              str(d.store.get("js-missing")["state"]))
+        check("★★ 同一次里「查不了」的那个**仍然没被动** —— 一次命令失败绝不能"
+              "拆在跑的作业（这条路径上最贵的那个误判）",
+              d.store.get("js-unknown")["state"] == mod.ST_ENROLLED,
+              str(d.store.get("js-unknown")["state"]))
+
+        # ── 24.5 非终态停太久：提醒，但**不释放** ─────────────────────────
+        _js_events[:] = []
+        _js_stuck_ticks = 0
+        _js_clock[0] += cfg.stuck_job_seconds + 1
+        for _st in _NONTERMINAL:
+            d.store.update("js-%s" % _st.lower(), state=mod.ST_ENROLLED)
+        d.tick()
+        _js_stuck_ev = [e for e in _js_events if e.get("event") == "job_stuck"]
+        check("★ 非终态停太久 ⇒ 有 job_stuck 审计（会说话，不是静默等待）",
+              len(_js_stuck_ev) >= 1, str(len(_js_stuck_ev)))
+        check("★★ 而它**一个会话都没有释放**（释放是不可逆的那一步，要由人来点）",
+              all(d.store.get("js-%s" % _st.lower())["state"] == mod.ST_ENROLLED
+                  for _st in _NONTERMINAL
+                  if d.store.get("js-%s" % _st.lower())),
+              str([(_st, d.store.get("js-%s" % _st.lower())["state"])
+                   for _st in _NONTERMINAL
+                   if d.store.get("js-%s" % _st.lower())][:4]))
+        check("★ 提醒不写进 note 列（那一列有主人：释放原因 / renew_exhausted）",
+              all(d.store.get("js-%s" % _st.lower())["note"] is None
+                  for _st in _NONTERMINAL
+                  if d.store.get("js-%s" % _st.lower())),
+              str([d.store.get("js-%s" % _st.lower())["note"]
+                   for _st in _NONTERMINAL][:4]))
+
+        # ── 24.6 recover_from_rules：真形状的 UserId 必须能恢复 ────────────
+        #
+        # ★ 这条用例**此前是红的**（而没有人知道）：桩喂纯数字 UserId，
+        #   而真集群给的是 `name(uid)`，于是 int() 抛 ValueError、函数静默跳过、
+        #   一条都恢复不出来。它自己的 docstring 写着后果：DB 一丢，
+        #   reconcile() 会把在跑的作业的规则全当成孤儿删掉。
+        _rv_uid = _js_uid
+        _rv_job = 97001
+        _rv_comment = mod.Nft.comment_for(_rv_uid, _rv_job, 55777)
+        _rv_nft = _RecNft()
+        _rv_nft.rules[_rv_comment] = ("192.0.2.11", 55777)
+        _rv_slurm = _JobSlurm()
+        _rv_slurm.jobs[_rv_job] = {"JobState": "RUNNING", "Requeue": "0",
+                                   "UserId": "alice(%d)" % _rv_uid,
+                                   "NodeList": "node01", "Partition": "A6000",
+                                   "Account": "acct", "TimeLimit": "1:00:00"}
+        d.nft, d.slurm = _rv_nft, _rv_slurm
+        _rv_n = d.recover_from_rules()
+        _rv_rows = [s for s in d.store.by_state(mod.ACL_STATES)
+                    if s["job_id"] == _rv_job]
+        check("★★ UserId 是 `name(uid)` 形式时 recover_from_rules **真的恢复出一行**"
+              "（改回 int() 这条立刻红）",
+              _rv_n == 1 and len(_rv_rows) == 1,
+              "n=%s rows=%s" % (_rv_n, len(_rv_rows)))
+        # 反向：属主不是他 ⇒ 不许恢复（否则任何用户都能凭一条规则认领别人的作业）
+        _rv_slurm.jobs[97002] = {"JobState": "RUNNING", "Requeue": "0",
+                                 "UserId": "bob(%d)" % (_rv_uid + 1),
+                                 "NodeList": "node01", "Partition": "A6000",
+                                 "Account": "acct", "TimeLimit": "1:00:00"}
+        _rv_nft.rules[mod.Nft.comment_for(_rv_uid, 97002, 55778)] = ("192.0.2.11", 55778)
+        check("★ 作业属主不是这个 uid ⇒ 不恢复",
+              d.recover_from_rules() == 0,
+              str([s["job_id"] for s in d.store.by_state(mod.ST_ENROLLED)]))
+        # 反向：UserId 认不出来 ⇒ 不恢复（**也**不能认领）
+        _rv_slurm.jobs[97003] = {"JobState": "RUNNING", "Requeue": "0",
+                                 "UserId": "(null)",
+                                 "NodeList": "node01", "Partition": "A6000",
+                                 "Account": "acct", "TimeLimit": "1:00:00"}
+        _rv_nft.rules[mod.Nft.comment_for(_rv_uid, 97003, 55779)] = ("192.0.2.11", 55779)
+        check("★ UserId 认不出来 ⇒ 不恢复（认不出来 ≠ 是我的）",
+              d.recover_from_rules() == 0,
+              str([s["job_id"] for s in d.store.by_state(mod.ST_ENROLLED)]))
+
+    finally:
+        d.nft, d.slurm = _real_nft, _real_slurm
+        mod.now_ts = _real_now
+        d.audit = _real_audit
+        mod.log.setLevel(_real_level)
+        (d.try_enroll, d.refresh_enrollment, d.maybe_renew) = _real_enroll
+
+    # ── 24.7 job_state 的字段表：拿**真机输出**钉住 ─────────────────────────
+    #
+    # 这一节的理由是两条真实的教训：
+    #
+    #   ① `RestartCnt` 是个**死键** —— Slurm 输出里那一项的真名是 `Restarts=`，
+    #      于是那条正则从来没命中过任何东西。没人发现，因为"解析不到"和
+    #      "解析到了但没人读"在代码里长得一模一样（都是 `d` 里少一个键）。
+    #   ② `StartTime` / `JobName` 解析了但**零消费者**。它们不是错误，是死重量：
+    #      让下一个人以为有人在读。
+    #
+    # ★ 判据是**解析结果恰好是哪些键**，不是"源码里出现过哪个字符串" ——
+    #   后者会被注释里的名字骗过去（第一版就是这么写的，两条断言全红在注释上）。
+    # 两行都是真机 `scontrol show job <id> -o` 的形状（站点私有值换成通用前缀）。
+    # ★ 两行**都要**：`NodeList=` 在排队时是**空的**，而那个正则要求至少一个非空白
+    #   字符 —— 于是排队中的作业**根本不会有 NodeList 这个键**。这是真的，
+    #   要钉住它，而不是拿一行"字段都填满"的理想输出把这件事盖掉。
+    _JS_LINE_PENDING = (
+        "JobId=5746 JobName=some_job UserId=alice(1234) GroupId=alice(1234) "
+        "MCS_label=N/A Priority=0 Nice=0 Account=myaccount QOS=normal "
+        "JobState=PENDING Reason=JobHeldUser Dependency=afterok:5705_*(unfulfilled) "
+        "Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0 RunTime=00:00:00 "
+        "TimeLimit=01:00:00 TimeMin=N/A SubmitTime=2026-09-17T16:44:37 "
+        "EligibleTime=Unknown AccrueTime=Unknown StartTime=Unknown EndTime=Unknown "
+        "Deadline=N/A Partition=A6000 NodeList= NumNodes=1-1 NumCPUs=2 NumTasks=1 "
+        "Command=/opt/slurmate/jobs/run.sbatch WorkDir=/home/alice "
+    )
+    _JS_LINE_RUNNING = (
+        "JobId=5747 JobName=some_job UserId=alice(1234) GroupId=alice(1234) "
+        "MCS_label=N/A Priority=0 Nice=0 Account=myaccount QOS=normal "
+        "JobState=RUNNING Reason=None Dependency=(null) "
+        "Requeue=0 Restarts=2 BatchFlag=1 Reboot=0 ExitCode=0:0 RunTime=00:12:34 "
+        "TimeLimit=01:00:00 TimeMin=N/A SubmitTime=2026-09-17T16:44:37 "
+        "EligibleTime=2026-09-17T16:44:38 AccrueTime=2026-09-17T16:44:38 "
+        "StartTime=2026-09-17T16:44:39 EndTime=2026-09-17T17:44:39 "
+        "Deadline=N/A Partition=A6000 NodeList=node01 NumNodes=1-1 NumCPUs=2 "
+        "Command=/opt/slurmate/jobs/run.sbatch WorkDir=/home/alice "
+    )
+    check("夹具用的是**真形状**的 scontrol 输出（真机那两行，去掉站点私有值）",
+          "UserId=alice(1234)" in _JS_LINE_PENDING
+          and "Requeue=0 Restarts=2" in _JS_LINE_RUNNING)
+
+    def _js_parse(line):
+        """把一行输出喂给真的 job_state()，返回它解析出来的 dict。"""
+        def _raw(argv, timeout=10, check=False):
+            if "show job" in " ".join(str(a) for a in argv):
+                return 0, line, ""
+            return slurm_stub(argv, timeout, check)
+
+        # ★ 结果必须在 with_stub **里面**取出来：桩只在那个上下文里生效，在外面
+        #   再调一次拿到的是宿主机的真命令（这里是"查不到"，于是判 JOB_UNKNOWN）。
+        _st, _d = with_stub(mod, _raw, lambda: mod.Slurm(cfg).job_state(5746))
+        return _st, _d
+
+    _js_status, _js_run = _js_parse(_JS_LINE_RUNNING)
+    check("真形状那一行解析成功",
+          _js_status == mod.Slurm.JOB_OK and bool(_js_run),
+          "%r / %r" % (_js_status, _js_run))
+    check("★ 解析出来的恰好是这 11 个键 —— 多一个就是又冒出一个没人读的字段，"
+          "少一个就是判定拿不到输入",
+          set(_js_run) == {"JobState", "NodeList", "UserId", "TimeLimit", "EndTime",
+                           "Partition", "Account", "Reason", "ExitCode", "Requeue",
+                           "Restarts"},
+          str(sorted(_js_run)))
+    check("★★ 死键 RestartCnt 与零消费者的 StartTime / JobName 都不在结果里",
+          not ({"RestartCnt", "StartTime", "JobName"} & set(_js_run)),
+          str(sorted(set(_js_run) & {"RestartCnt", "StartTime", "JobName"})))
+    check("★ 真名 Restarts 解析出来了，值是 2（重启过 —— 界面要能说出这件事）",
+          _js_run.get("Restarts") == "2", repr(_js_run.get("Restarts")))
+    check("★ ExitCode 拿到了", _js_run.get("ExitCode") == "0:0",
+          repr(_js_run.get("ExitCode")))
+    check("★ Requeue 拿到了 —— 上面那两条条件终态的判定全靠它",
+          _js_run.get("Requeue") == "0", repr(_js_run.get("Requeue")))
+    check("RUNNING 且 Requeue=0 ⇒ 终态判定为假（RUNNING 永远不是终态）",
+          mod.job_is_terminal(_js_run) is False, str(_js_run))
+
+    _js_status2, _js_pend = _js_parse(_JS_LINE_PENDING)
+    check("排队那一行也解析成功",
+          _js_status2 == mod.Slurm.JOB_OK and bool(_js_pend), str(_js_status2))
+    check("★ Reason 拿到了 —— 界面上「为什么还没跑」就是这一句",
+          _js_pend.get("Reason") == "JobHeldUser", repr(_js_pend.get("Reason")))
+    check("★★ 排队中 `NodeList=` 是空的 ⇒ 结果里**没有** NodeList 这个键"
+          "（那条正则要求至少一个非空白字符）",
+          "NodeList" not in _js_pend, str(sorted(_js_pend)))
+    check("而它只少这一个键，其余照常解析",
+          set(_js_run) - set(_js_pend) == {"NodeList"}, str(sorted(_js_pend)))
+    check("★★ 这一行被判成「非终态」—— Reason=JobHeldUser 的作业**永远不会开始**，"
+          "但它还在队列里 ⇒ 保留（这正是从前被当成「结束」的那一类）",
+          mod.job_is_terminal(_js_pend) is False, str(_js_pend))
+
+    # ── 24.8 会话视图：把这三样交给客户端 ───────────────────────────────────
+    #
+    # ★ 判定在守护进程这边，**说话**在客户端那边。所以这里传的是 Slurm 的原话
+    #   （`JobHeldUser` / `0:0` / `2`），译成中文是客户端的事。
+    #   唯一的例外是 `Reason=None` —— 那是 Slurm 的"没有原因"，原样发出去客户端
+    #   会把它渲染成字面的 "None"，所以它在**用户可见的那一层**必须消失。
+    _js_row = d.store.get("js-pending")
+    check("夹具：拿得到一行活着的会话（否则下面几条是空断言）",
+          bool(_js_row) and _js_row["state"] == mod.ST_ENROLLED, str(_js_row))
+
+    def _view_with(line):
+        def _raw(argv, timeout=10, check=False):
+            if "show job" in " ".join(str(a) for a in argv):
+                return 0, line, ""
+            return slurm_stub(argv, timeout, check)
+
+        _real = d.slurm
+        d.slurm = mod.Slurm(cfg)
+        try:
+            return with_stub(mod, _raw,
+                             lambda: d.session_view(_js_row, with_secret=False))
+        finally:
+            d.slurm = _real
+
+    _v_pend = _view_with(_JS_LINE_PENDING)
+    _v_run = _view_with(_JS_LINE_RUNNING)
+    check("★ 排队原因传给了客户端 —— 那是用户最想知道的那一句话",
+          _v_pend.get("job_reason") == "JobHeldUser", repr(_v_pend.get("job_reason")))
+    check("★ 而 `Reason=None`（没有原因）**不出现在**视图里",
+          "job_reason" not in _v_run, repr(_v_run.get("job_reason")))
+    check("★ 退出码与重启次数**原样**传出去（该不该显示是客户端的判断）",
+          _v_run.get("job_exit_code") == "0:0" and _v_run.get("job_restarts") == "2",
+          "%r / %r" % (_v_run.get("job_exit_code"), _v_run.get("job_restarts")))
+    # ★★ 发出去的是**判定**，不是 `Requeue=` 那个原始字段：判"终不终态"的规则
+    #    （含 PREEMPTED / TIMEOUT 的附加条件）只有守护进程这一份。
+    #    把 `Requeue` 发过去等于让客户端再实现一遍 —— 而"一个判据两处实现会漂"，
+    #    漂的方向是界面说"已结束（被抢占）"而作业几分钟后又回来了。
+    check("★★ 会话视图带出的是判定 job_terminal，**不是**原始字段 Requeue",
+          _v_run.get("job_terminal") is False and "Requeue" not in repr(_v_run)
+          and "requeue" not in repr(_v_run),
+          "job_terminal=%r / 视图里那些键=%s"
+          % (_v_run.get("job_terminal"), sorted(_v_run)))
+    check("★ 排队中那一行同样带判定（false = 还没结束）",
+          _v_pend.get("job_terminal") is False, repr(_v_pend.get("job_terminal")))
+
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("  通过 %d  失败 %d" % (PASS, FAIL))

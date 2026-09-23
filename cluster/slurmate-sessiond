@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.7"
+VERSION = "0.8"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -211,6 +211,54 @@ def is_ipv4(s):
     return normalize_ipv4(s) is not None
 
 
+def parse_slurm_uid(v):
+    """Slurm 的 `UserId` → 数字 uid；认不出来返回 None。
+
+    ★ 两种真实形态：`1234` 与 `name(1234)`。本机实测（slurm-wlm 23.11.4，
+      `scontrol show job <id> -o`）给的是**后者**：
+
+          UserId=litao(1019) JobState=PENDING Reason=JobHeldUser …
+
+    ★ 这一条从前是 `int(job.get("UserId", -1))`，于是带括号的形态抛 ValueError，
+      而唯一的调用点（recover_from_rules）把它当"这条规则不归我"跳过去 ——
+      结果是 DB 一丢就从 nft 规则恢复**不出任何一行**，静默，症状是
+      `reconcile()` 把在跑的作业的规则全当成孤儿删掉（见那个函数的 docstring）。
+      ★ 它之所以一直没被发现，是因为测试桩喂的是**纯数字**的 UserId。
+
+    ★ 反过来，认不出来时**必须返回 None 而不是 -1**：-1 是个合法整数，会一路
+      走进 `!= uid` 的比较里，看上去像"确认过不是这个人"。
+    """
+    s = str(v if v is not None else "").strip()
+    if not s:
+        return None
+    m = re.fullmatch(r"[^(]*\((\d+)\)", s)
+    if m:
+        return int(m.group(1))
+    if s.isdigit():
+        return int(s)
+    return None
+
+
+def job_is_terminal(info):
+    """这个作业的状态是不是**真终态**（不会再跑）？
+
+    与 Slurm 的 `is_job_terminal_state()` 对应，包含它对 PREEMPTED / TIMEOUT 的
+    那条附加条件：**会被重新排队的作业不算结束**。
+
+    ★ 认不出来的状态一律返回 False（= 保留）。理由见 TERMINAL_JOB_STATES 上面
+      那一段 —— 两个方向的判错代价不对称。
+    """
+    st = str((info or {}).get("JobState") or "").strip().upper()
+    if not st:
+        return False
+    if st in TERMINAL_JOB_STATES:
+        return True
+    if st in CONDITIONAL_TERMINAL_JOB_STATES:
+        # 字段缺失时**不算**终态（缺省在保留侧）。
+        return str((info or {}).get("Requeue", "")).strip() == "0"
+    return False
+
+
 def run_cmd(argv, timeout=10, check=False):
     """执行命令，返回 (rc, stdout, stderr)。永不抛异常。"""
     try:
@@ -311,6 +359,40 @@ SUBMITTED_TTL = 1800
 RELEASED_KEEP = 600
 # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
 JOB_MISSING_CONFIRM_TICKS = 3
+
+# ── Slurm 作业状态：两条轴，别混 ────────────────────────────────────────────
+#
+# 会话状态（ST_*）是**我们**的状态机，作业状态是**集群**的。两者只在一处相交
+# （phase_running），而那里的判定规则只有一条：
+#
+#     只有**真终态**才释放，其余一律保留。
+#
+# ★ 为什么缺省必须落在"保留"：begin_release() 只改状态，真正的拆除在下一个 tick
+#   的 phase_release() 里（删 nft 规则 + 删用户家目录里的会话文件），而**没有任何
+#   路径能改回去**。判错一次就没了 —— 作业还在跑，防护已经拆掉。
+#   反过来的判错（该释放的没释放）有 JOB_MISSING 那条路在 3 个 tick 之后兜住。
+#   两个方向的代价不对称，所以缺省在安全侧。
+#
+# ★ 下表与 Slurm 自己的 `is_job_terminal_state()`（src/common/job_state.c）逐条
+#   对应。它比 manpage 准：**manpage 只列状态码，而"这个状态算不算结束"写在源码里**
+#   —— 本机的 `man squeue`（23.11.4）里就既没有 `LAUNCH_FAILED`、也没有
+#   `POWER_UP_NODE`。多列一个不存在的状态是无害的（它永远不出现），
+#   漏掉一个真终态才会出事，所以这一侧宁可宽一点。
+TERMINAL_JOB_STATES = frozenset((
+    "COMPLETED", "CANCELLED", "FAILED", "NODE_FAIL", "BOOT_FAIL", "DEADLINE",
+    "OUT_OF_MEMORY", "LAUNCH_FAILED", "REVOKED",
+))
+
+# ★ 这两个是**有条件**的终态：只有作业**不会**被重新排队时才算结束，判据是
+#   `scontrol show job` 的 `Requeue=`（0 = 不重排）。
+#   把它们当无条件终态，症状是"被抢占的作业几秒后自己回来了，而防护已经拆了" ——
+#   而且回来的那一个**没有 ACL**，用户连不上，也没有人会去 scancel 它。
+CONDITIONAL_TERMINAL_JOB_STATES = frozenset(("PREEMPTED", "TIMEOUT"))
+
+# 非终态停留多久提醒一次。**只提醒，不释放** —— 见 note_nonterminal()。
+# 只持续几秒的那几个暂态（COMPLETING / STAGE_OUT / SIGNALING / RESIZING）正常
+# 不会触发它；会触发的是 epilog 挂住、或者作业被 held 住永远排不上。
+STUCK_JOB_SECONDS = 1800
 
 RENEW_INCREMENT = "12:00:00"
 RENEW_THRESHOLD = 7200
@@ -2242,6 +2324,7 @@ class Config(object):
         self.submitted_ttl = SUBMITTED_TTL
         self.released_keep = RELEASED_KEEP
         self.job_missing_confirm_ticks = JOB_MISSING_CONFIRM_TICKS
+        self.stuck_job_seconds = STUCK_JOB_SECONDS
         self.renew_enabled = True
         self.renew_threshold = RENEW_THRESHOLD
         self.renew_increment = RENEW_INCREMENT
@@ -2896,8 +2979,13 @@ class Slurm(object):
                              timeout=8)
         if rc == 0 and out.strip():
             d = {}
+            # ★ 只留**有人读**的字段。"解析了没人用"和死键一样是死重量，所以
+            #   StartTime / JobName 删掉了（零消费者），`RestartCnt` 也删掉了 ——
+            #   它是个**死键**：Slurm 输出里那一项的真名是 `Restarts=`，
+            #   于是那条正则从来没有命中过任何东西（本机实测）。
             for key in ("JobState", "NodeList", "UserId", "TimeLimit", "EndTime",
-                        "StartTime", "Partition", "Account", "JobName", "RestartCnt"):
+                        "Partition", "Account", "Reason", "ExitCode", "Requeue",
+                        "Restarts"):
                 m = re.search(r"\b%s=(\S+)" % key, out)
                 if m:
                     d[key] = m.group(1)
@@ -3147,6 +3235,10 @@ class Sessiond(object):
         # 作业状态查询的连续计数（见 phase_running 里的说明）
         self.job_missing = {}       # session_id -> 连续"查不到"次数
         self.job_unknown = {}       # session_id -> 连续"查不了"次数
+        # session_id -> 第一次看到"非终态且不在 RUNNING"的时刻。
+        # 存**时刻**而不是计数：tick 之间有别的活（查询、fork），按 tick 数算会把
+        # 一个跑了 8 秒的 tick 当成 2 秒。
+        self.job_stuck = {}
         # 插件包的快照缓存：包路径 -> {files: {包内路径: (字节数, sha256)},
         #                                package: {format, bytes, digest} | None}。
         # **刻意不失效** —— 守护进程对插件的认知本来就是启动那一刻的快照，
@@ -3372,11 +3464,16 @@ class Sessiond(object):
                 continue                      # 查不到 —— 留给对账去删
             if job.get("JobState") != "RUNNING":
                 continue
-            try:
-                if int(job.get("UserId", -1)) != uid:
-                    log.warning("规则 %s 的 uid 与作业属主不符，不予恢复", comment)
-                    continue
-            except (TypeError, ValueError):
+            owner = parse_slurm_uid(job.get("UserId"))
+            if owner is None:
+                # 认不出属主 → 不恢复（留给对账去删），但**要说话**。
+                # 静默跳过正是这条路上出过的毛病：带括号的 UserId 让这里一条都恢复
+                # 不出来，而日志里什么都没有。
+                log.warning("规则 %s 的 UserId 认不出来（%r），不予恢复",
+                            comment, job.get("UserId"))
+                continue
+            if owner != uid:
+                log.warning("规则 %s 的 uid 与作业属主不符，不予恢复", comment)
                 continue
             try:
                 user = pwd.getpwuid(uid).pw_name
@@ -3460,17 +3557,80 @@ class Sessiond(object):
             jstate = job.get("JobState") if job else None
             if not jstate:
                 continue                      # 拿不到状态，保守跳过
-            if jstate in ("PENDING", "CONFIGURING"):
-                continue                      # 还没跑起来，保留（重排队不释放）
-            if jstate != "RUNNING":
+
+            # ── 唯一的释放判据：这是个**真终态**吗 ──────────────────────────
+            #
+            # ★ 判据是"是不是终态"，不是"是不是 RUNNING"。从前这里写的是
+            #   `if jstate != "RUNNING": begin_release(...)`，于是 PENDING 与
+            #   CONFIGURING 之外的一切都被当成"作业结束了" —— 而其中
+            #   REQUEUED / SUSPENDED / STOPPED / PREEMPTED / COMPLETING /
+            #   STAGE_OUT … 都是**作业还在或还会回来**的状态。判错的后果见
+            #   TERMINAL_JOB_STATES 上面那一段。
+            if job_is_terminal(job):
+                self.job_stuck.pop(s["session_id"], None)
                 self.begin_release(s, "job_%s" % jstate.lower())
                 continue
 
-            if s["state"] == ST_SUBMITTED:
-                self.try_enroll(s, job)
-            else:
-                self.refresh_enrollment(s, job)
-                self.maybe_renew(s, job)
+            # ── 非终态：一律保留 ────────────────────────────────────────────
+            if jstate == "RUNNING":
+                self.job_stuck.pop(s["session_id"], None)
+                if s["state"] == ST_SUBMITTED:
+                    self.try_enroll(s, job)
+                else:
+                    self.refresh_enrollment(s, job)
+                    self.maybe_renew(s, job)
+                continue
+
+            self.note_nonterminal(s, jstate, now)
+
+    def note_nonterminal(self, s, jstate, now):
+        """作业处在非终态、但不在 RUNNING —— 保留防护，只在停太久时提醒。
+
+        ★★ **这里没有任何释放路径，是刻意的。** 会走到这里的状态分四档，
+        而我们对**一档都做不了什么**（作业是集群的，不是我们的）：
+
+            排队    PENDING / CONFIGURING / REQUEUE_HOLD / REQUEUE_FED /
+                    RESV_DEL_HOLD
+            暂停    SUSPENDED / STOPPED
+            暂态    COMPLETING / STAGE_OUT / SIGNALING / RESIZING
+            会回来  REQUEUED / SPECIAL_EXIT
+
+        ★ **上面这个列举不是判据**，只是"这些都会走到这里"的说明 —— 判据只有
+          `job_is_terminal()` 一处，而它没列到的状态（包括 Slurm 将来新增的、
+          以及本站这个版本还没出现过的）落在**同一侧**：保留。
+          这份名表取自 `man squeue` 的 JOB STATE CODES 一节（本机 23.11.4），
+          加上 Slurm 源码里 `is_job_terminal_state()` 认得的那几个。
+
+        排队与暂停停几个小时是正常的；暂态正常只持续几秒，停住说明 epilog 挂住了
+        （那也要管理员去处理，不是我们拆防护的理由）。
+
+        ★ 提醒**不写进数据库的 note 列**：那一列已经有主人（释放原因 /
+          renew_exhausted / recovered_from_rule），而"停太久"这件事客户端本来就
+          看得出来 —— 它手上的 `job_state` 就是 PENDING/SUSPENDED。
+          写进去只会覆盖掉一条更重要的信息。
+        """
+        sid = s["session_id"]
+        t0 = self.job_stuck.get(sid)
+        if t0 is None:
+            self.job_stuck[sid] = now
+            # ★ 只在**不是** PENDING / CONFIGURING 时说一句。那两档是每个会话刚
+            #   提交时必经的普通等待，每个会话都报一行是纯噪音；而其余几档
+            #   （暂停 / 暂态 / 会回来）从前会被判成"作业结束了"，现在改成保留 ——
+            #   那正是运维需要看见的一行。
+            if jstate not in ("PENDING", "CONFIGURING"):
+                log.info("会话 %s（job=%s）的作业处于 %s，保留防护（不再当成结束）",
+                         sid, s["job_id"], jstate)
+            return
+        if now - t0 < self.cfg.stuck_job_seconds:
+            return
+        # 到期提醒一次，并把计时拨到此刻 —— 提醒频率因此是"每 stuck_job_seconds
+        # 一次"，而不是每个 tick 一次。
+        self.job_stuck[sid] = now
+        log.warning("会话 %s（job=%s）的作业已在 %s 停留 %d 秒，防护仍然保留；"
+                    "若它不会自己回来，请手动结束会话",
+                    sid, s["job_id"], jstate, now - t0)
+        self.audit("job_stuck", session=sid, job=s["job_id"], job_state=jstate,
+                   seconds=now - t0)
 
     def try_enroll(self, s, job):
         now = now_ts()
@@ -3628,6 +3788,12 @@ class Sessiond(object):
             # 2) 口令文件
             # 3) 会话文件（只在能被安全确认属于该用户时才删）
             self.remove_session_file(s)
+            # 4) 三个按 session_id 记账的观察表一起清掉。
+            #    不清的话它们会随**每一个曾经存在过的会话**一直长下去 —— 这是
+            #    守护进程里唯一没有上限的容器，而它的症状是"跑几个月之后内存
+            #    慢慢涨"，指不回任何一行。
+            for _t in (self.job_missing, self.job_unknown, self.job_stuck):
+                _t.pop(s["session_id"], None)
             self.store.update(s["session_id"], state=ST_RELEASED, ended_at=now)
             self.audit("released", session=s["session_id"], job=s["job_id"],
                        reason=s.get("note"))
@@ -4287,6 +4453,26 @@ class Sessiond(object):
                 # 用实际的覆盖掉那个 null —— 用户和界面都需要知道落到哪种卡上。
                 if job.get("Partition"):
                     d["partition"] = job["Partition"]
+                # 排队原因。`Reason=None` 是 Slurm 的"没有原因"，**不能原样发出去** ——
+                # 客户端会把它渲染成字面的 "None"。其余值原样传，由客户端译成中文
+                # （那是**给用户看的话**，不是判定，判定一律在守护进程这边）。
+                r = str(job.get("Reason") or "").strip()
+                if r and r not in ("None", "N/A"):
+                    d["job_reason"] = r
+                # 退出码（`143:0` = 被 SIGTERM 干掉，`0:0` = 正常）与原样重启次数。
+                # ★ 这两个**不过滤**：它们在"作业还没结束时"也各有一个合法取值
+                #   （`0:0` / `0`），而"该不该显示"是客户端的判断 —— 它知道作业
+                #   是不是结束了。守护进程只负责把 Slurm 说的话搬过来。
+                if job.get("ExitCode"):
+                    d["job_exit_code"] = job["ExitCode"]
+                if job.get("Restarts"):
+                    d["job_restarts"] = job["Restarts"]
+                # ★★ 发的是**判定**，不是 `Requeue=` 那个原始字段。
+                #   判"终不终态"的规则（含 PREEMPTED / TIMEOUT 的附加条件）只有
+                #   这一份，客户端照着念就行 —— 把 `Requeue` 发过去等于让客户端
+                #   再实现一遍，而"一个判据两处实现会漂"，漂的方向是界面说
+                #   "已结束（被抢占）"而作业几分钟后又回来了。
+                d["job_terminal"] = job_is_terminal(job)
         if with_secret and s["state"] in ACL_STATES:
             # 口令由【作业自己生成】并写在 0600 的会话文件里（守护进程从不写用户
             # 家目录）。这里只读，复用带全部安全检查的读取路径。

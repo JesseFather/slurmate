@@ -28,6 +28,68 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.8] — 未发布
+
+> 四处版本号（`client/package.json`、`client/package-lock.json`、
+> `cluster/slurmate`、`cluster/slurmate-sessiond`）现在都是 **0.8**。
+>
+> ★ **这一版转向集群那一侧。** 前面几版走的是**插件**那条线（打包规范、运行时数据、
+> 多开），而基座是建在 Slurm 上的，它对 Slurm 的了解一直只有十来个字段。这一版补的
+> 就是这一块，分五件事（作业状态 / GRES 通用化 / 常驻通道 / 多客户端 / 集群信息），
+> **下面只记已经做完的那些**。
+
+### Fixed — ★★ 非终态的作业状态被当成「作业结束了」
+
+会话状态（`ST_*`）是**我们**的状态机，Slurm 的 `JobState` 是**集群**的。两者只在一处
+相交（`phase_running()`），而那里的判据从前写的是
+`if jstate not in ("PENDING", "CONFIGURING", "RUNNING"): 释放` —— 于是
+`SUSPENDED` / `STOPPED` / `REQUEUED` / `PREEMPTED` / `COMPLETING` / `STAGE_OUT` …
+**全部**被当成"作业结束了"：删 nft 规则、删用户家目录里的会话文件、客户端放手，
+**而那作业还在或还会回来**。
+
+- 判据换成 **`job_is_terminal()`** —— 只认**真终态**，其余一律保留，
+  **不认识的状态也保留**。真终态表与 Slurm 自己的 `is_job_terminal_state()`
+  逐条对应（**不是**与 manpage 对应：manpage 只列状态码，而"算不算结束"写在源码里）。
+- ★★ **两个方向的代价不对称，所以缺省落在"保留"**：`begin_release()` 只是两行，
+  真正的拆除在**下一个 tick** 的 `phase_release()` 里，而**没有任何路径能改回去** ⇒
+  判错一次就没了；反方向的判错有「查不到要连续确认 3 次」那条路兜住。
+- ★ 补上 Slurm 那条**附加条件**：`PREEMPTED` / `TIMEOUT` 只有 `Requeue=0` 才算终态。
+  会把作业重新排队的抢占从前被当成结束，而"回来的那一个"面对的是一套已经拆掉的
+  防护 —— 用户连不上，也没有人再去 `scancel` 它。
+- 非终态连着停留超过 `stuck_job_seconds`（缺省 1800）写一条 `job_stuck` 审计。
+  ★ **它不释放任何东西** —— 作业是集群的，而我们拆掉的防护是不可逆的。
+- 这一整条链路在此之前**零覆盖**（`tick()` 一次都没被调用过，
+  `phase_running` 的四个释放原因一条用例都没有）。
+
+### Fixed — ★★ `UserId=litao(1019)`：`recover_from_rules()` 一条都恢复不出来
+
+真集群 `scontrol show job <id> -o` 给的是 **`name(uid)`** 形式，而那一行是
+`int(job.get("UserId", -1))` ⇒ `ValueError` ⇒ 被 `except` **静默**跳过。后果写在那个
+函数自己的 docstring 里：**DB 一丢，`reconcile()` 会把所有在跑的作业的规则当成孤儿
+删掉**，而那些会话永远无法重新登记。
+
+- `parse_slurm_uid()`：两种形态都认；**认不出来返回 `None` 而不是 `-1`**
+  （`-1` 是合法整数，会一路走进 `!= uid` 的比较里，看上去像"确认过不是这个人"），
+  并且认不出来时**说话**（从前是静默 `continue`）。
+- ★★ **它藏了这么久的原因值得记**：测试桩喂的是**纯数字** `UserId` —— 假桩比真集群
+  "干净"，于是真缺陷在用例里完全隐形。夹具已改成真形状。
+
+### Changed — 作业状态的字段：删三个死的，读回来三个有用的
+
+- **删**：`RestartCnt` 是个**死键**（真机输出里那一项叫 `Restarts=`，那条正则从来没
+  命中过任何东西）；`StartTime` / `JobName` 解析了但**零消费者**。它们不是错误，
+  是死重量 —— 让下一个人以为有人在读。
+- **读回来**：`Reason`（排队原因，排队的人最想知道的那句话）、`ExitCode`、`Restarts`。
+- 会话视图多四个字段（见 [docs/PROTOCOL.md](docs/PROTOCOL.md) 的 `status`）：
+  `job_terminal` / `job_reason` / `job_exit_code` / `job_restarts`。
+- ★★ **`job_terminal` 是判定，客户端不许自己判。** "算不算结束"取决于状态**以及**
+  `Requeue`，而客户端手上没有 `Requeue` —— 把判定发过去而不是把原始字段发过去，
+  否则两处判据会漂，漂的方向是界面说"已结束（被抢占）"而作业几分钟后又回来了。
+  客户端那边新增 `client/src/main/jobstate.js`：它**只把 Slurm 的原话译成中文**
+  （四档措辞 + 原因表），"等下去没有用"的那几类原因（被 hold、到限额）会明说。
+  老守护进程不发 `job_terminal` 时它**印状态原文**，不猜。
+- 界面不再印 Slurm 的原文大写枚举（`OUT_OF_MEMORY` / `REQUEUE_HOLD`）。
+
 ## [0.7] — 未发布
 
 > 四处版本号（`client/package.json`、`client/package-lock.json`、

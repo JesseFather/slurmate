@@ -375,7 +375,9 @@ function renderKv(s) {
     ['隧道目标', s.tunnelTarget || '—'],
     ['本地地址', localAddressText(s)],
     ['剩余时间', fmtLeft(s.expiresAt)],
-    ['作业状态', s.jobState || '—'],
+    // 这一句由主进程译好（`jobstate.js`）—— 界面只印。从前印的是 Slurm 的原文
+    // 大写枚举（`OUT_OF_MEMORY`），那是说给管理员听的话。
+    ['作业状态', s.jobText || '—'],
     ['上次心跳', fmtAge(s.hbAgeMs)],
     ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState] || s.tunnelState],
   ];

@@ -767,6 +767,16 @@ class FakeBackend extends Backend {
       auth_password: null,
       ssh_host_key: null,
       job_state: 'PENDING',
+      // 判定随状态一起来（守护进程那边是 `job_is_terminal()`）。
+      // ★ 假站点**必须**有这个字段：没有的话客户端会走"老守护进程"那条退路，
+      //   于是开发模式里看到的是状态原文，而真集群上看到的是译文 ——
+      //   "开发模式验不了的那条路"正是这一版反复在清的东西。
+      job_terminal: false,
+      // 排队原因也带一个 —— 那是这一版新加的那句话（「在等空闲资源」），
+      // 不带的话开发模式里永远看不到它。
+      job_reason: 'Resources',
+      job_exit_code: null,
+      job_restarts: null,
       time_limit: '12:00:00',
       expires_at: now + DEFAULT_TIME_SECONDS,
     };
@@ -791,6 +801,10 @@ class FakeBackend extends Backend {
         sess.auth_password = DEMO_PASSWORD;
       }
       sess.job_state = 'RUNNING';
+      // ★ 排队原因**必须跟着清掉**。真集群上跑起来的作业报的是 `Reason=None`
+      //   （守护进程把它滤掉），不清的话开发模式里会显示
+      //   「运行中 · 在等空闲资源」—— 一句自相矛盾的话，而它在真集群上不出现。
+      sess.job_reason = null;
       this._emitState(true, '会话已登记');
     }, this.enrollDelayMs).unref?.();
 
@@ -896,6 +910,12 @@ class FakeBackend extends Backend {
       d.job_state = s.job_state;
       d.time_limit = s.time_limit;
       d.expires_at = s.expires_at;
+      // 与守护进程一致：**判定**与状态一起来，客户端不做判定（见 jobstate.js）。
+      d.job_terminal = Boolean(s.job_terminal);
+      // `Reason=None` 在守护进程那边被过滤掉；这里同样只在有值时出现。
+      if (s.job_reason) d.job_reason = s.job_reason;
+      if (s.job_exit_code) d.job_exit_code = s.job_exit_code;
+      if (s.job_restarts) d.job_restarts = s.job_restarts;
     }
     // 口令只在 ACL_STATES 才返回（真实行为）—— 假站点也照做，
     // 这样界面不会养成「任何时候都能读到口令」的错误假设。

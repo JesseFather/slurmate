@@ -653,6 +653,48 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 反推出来的（见第六节），它**永不参与自动 `scancel`** ——
 对「用户是否还连着」没有可靠信息时，误杀在跑的作业比多留一会儿更糟。
 
+### 3.1 ★★ 两条轴：会话状态是**我们的**，作业状态是**集群**的
+
+上面那张图是**我们自己的**状态机。它回答"这个会话我们管到哪一步了"。而集群那边
+另有一条轴：Slurm 的作业状态（`JobState=`），它回答"那个作业现在怎么样"。
+两者只在一处相交 —— `phase_running()`，每个 tick 一次。
+
+相交处的规则只有一条：
+
+> **只有真终态才释放，其余一律保留。**
+
+`begin_release()` 只改状态（两行），真正的拆除在**下一个 tick** 的 `phase_release()`
+里（删 nft 规则 + 删用户家目录里的会话文件），而**没有任何路径能改回去**。
+所以判错一次就没了：作业还在跑，防护已经拆掉。反方向的判错（该释放的没释放）
+有 `JOB_MISSING` 那条路在 `job_missing_confirm_ticks` 个 tick 之后兜住 ——
+**两个方向的代价不对称，所以判据的缺省落在"保留"这一侧**
+（`TERMINAL_JOB_STATES` 的注里写着这一段）。
+
+真终态**只有**这些（与 Slurm 自己的 `is_job_terminal_state()` 逐条对应，
+**不是**与 manpage 对应 —— manpage 只列状态码）：
+
+| 类别 | 状态 | 处理 |
+|---|---|---|
+| 真终态 | `COMPLETED` `CANCELLED` `FAILED` `NODE_FAIL` `BOOT_FAIL` `DEADLINE` `OUT_OF_MEMORY` `LAUNCH_FAILED` `REVOKED` | 释放 |
+| **有条件**的终态 | `PREEMPTED` `TIMEOUT` —— 只有 `Requeue=0` 时才释放 | 见下 |
+| 排队 | `PENDING` `CONFIGURING` `REQUEUE_HOLD` `REQUEUE_FED` `RESV_DEL_HOLD` | 保留 |
+| 在跑 | `RUNNING`（走登记/续期）`RESIZING` `SIGNALING` `STAGE_OUT` `COMPLETING` | 保留 |
+| 暂停 | `SUSPENDED` `STOPPED` | 保留 |
+| 会回来 | `REQUEUED` `SPECIAL_EXIT` | 保留 |
+| **不认识的** | 任何 Slurm 将来新增的状态 | **保留** |
+
+两处要点：
+
+- **`Requeue` 那一格不能省。** 被重新排队的作业会自己回来，而"回来的那一个"
+  面对的是一套已经被拆掉的防护 —— 用户连不上，也没有人再去 `scancel` 它。
+  判据是 `scontrol show job` 的 `Requeue=`（0 = 不重排），拿不到时按**不重排**处理。
+- **不认识的状态必须落在"保留"侧。** Slurm 加一个新状态时，判成释放等于
+  "集群升级一次，所有人的防护被拆一遍"。
+
+保留不等于不管：非终态连着停留超过 `stuck_job_seconds` 会写一条 `job_stuck`
+审计（`note_nonterminal()`）。**它不释放任何东西** —— 作业是集群的，
+而我们拆掉的防护是不可逆的。
+
 ## 四、nft 规则为什么写成单条 `meta skuid != UID drop`
 
 规则形态（`cluster/slurmate-sessiond`）：

@@ -312,6 +312,7 @@ src/main/
   backend-fake.js  假后端（开发者模式用的那个本地模拟站点）
   demo-server.js   它那个假 web 服务（**通用**：契约来自当前插件的清单；纯 Node，可脱离 Electron 测）
   session.js       会话状态机 + 心跳
+  jobstate.js      作业状态 → 给人看的一句话（纯函数；**不做判定**，判定由守护进程给）
   tunnel.js        槽位中继 + 直连通道
   shortcuts.js     最小菜单 + 按键黑名单
   windows.js       BrowserWindow + WebContentsView
@@ -320,7 +321,9 @@ src/renderer/      面板、状态条、遮罩
 src/demo/          假后端那个服务的两个页面
 test/              classify / config / keys / shortcuts / renderer / backend-ssh /
                    plugin-package / site-plugins / contract（契约）/ integration /
-                   boot（端到端，含假后端）/ devmode（**不起集群也不起假后端**那一半）
+                   boot（端到端，含假后端）/ devmode（**不起集群也不起假后端**那一半）/
+                   jobstate（作业状态那句话 + 与守护进程状态表的跨文件不变量）/
+                   backend-fake（假后端不许比真守护进程多知道任何东西）
 ```
 
 ### 四条不要改坏的约束

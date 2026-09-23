@@ -37,7 +37,8 @@ tail -100 ~/.slurmate/logs/job-<job_id>.log
 审计日志里的事件名是最快的线索（`audit()`，`cluster/slurmate-sessiond`）：
 `submitted` / `enrolled` / `suspect` / `suspect_recovered` / `orphaned` / `releasing` /
 `released` / `rejected` / `expired` / `renewed` / `renew_failed` / `renew_exhausted` /
-`job_query_failed` / `acl_orphan_removed` / `acl_reinstalled` / `throttled` / `recovered`。
+`job_query_failed` / `job_stuck` / `acl_orphan_removed` / `acl_reinstalled` /
+`throttled` / `recovered`。
 
 ---
 
@@ -69,12 +70,36 @@ for s in json.load(sys.stdin)["sessions"]: print(s["sid"], s.get("job_id"), s.ge
 `slurmate`，等于什么都没说），就装不下会话的可辨认性。要同时看名字和作业 ID 用
 `squeue -o "%.10i %.16j %.8T"`。
 
-`PENDING` / `CONFIGURING` 时守护进程**刻意什么都不做** —— 重排队不释放
-（`cluster/slurmate-sessiond`）。若 `squeue` 已经查不到，那是在走
-「作业查不到要连续确认」的路径（见第六节）。分区满、`QOSMaxJobsPerUserLimit`、
-资源不足都会让作业长时间挂在 `PD`，这属于 Slurm 侧的问题，不是 Slurmate 的问题。
+**★ 凡是"作业还没结束"的状态，守护进程都刻意什么都不做** —— 保留会话与 ACL，
+不释放。判据是"是不是真终态"，不是"是不是 `RUNNING`"，所以 `PENDING`、
+`SUSPENDED`、`REQUEUED`、`COMPLETING` 这些都落在保留那一侧
+（`job_is_terminal()`，`cluster/slurmate-sessiond`；逐状态的表见
+[ARCHITECTURE.md](./ARCHITECTURE.md) 的 §3.1）。
+
+若 `squeue` 已经查不到，那是在走「作业查不到要连续确认」的路径：
+`scontrol` 报"没有这个作业"要连续 `job_missing_confirm_ticks` 次（缺省 3）才认定结束。
+分区满、资源不足都会让作业长时间挂在 `PD`，这属于 Slurm 侧的问题。
+
+### 1a.1 ★ 排队原因：有四类"等下去没有用"
+
+界面在「作业状态」那一行会带上 Slurm 给的排队原因（`Reason=`）。**要分清哪一类**：
+
+| 原因 | 意思 | 该做什么 |
+|---|---|---|
+| `Resources` / `Priority` | 在等空闲资源 / 优先级不够 | 等，或者要更少资源 |
+| `Dependency` / `Reservation` / `Licenses` | 在等前置作业 / 预约时段 / 许可证 | 等 |
+| `ReqNodeNotAvail` / `NodeDown` / `PartitionDown` | 节点或分区不可用 | 等，或换分区 |
+| **`JobHeldUser`** | **被（你自己）挂起了** | ★ **等没有用**。`scontrol release <job_id>` 放它走，或者取消 |
+| **`JobHeldAdmin`** | **被管理员挂起了** | ★ **等没有用**。找管理员 |
+| **`AssocGrp*Limit` / `QOS*Limit` / `AssocMax*Limit`** | **账户或你本人到了额度上限** | ★ **等没有用**。要等下一个计费周期，或者找管理员调额度 |
+
+判定权在守护进程（它读 `Requeue=` 之类的字段），**客户端不做任何状态判定** ——
+界面只把 `job_terminal` 与 `job_reason` 译成中文（`client/src/main/jobstate.js`）。
+原因名认不出来时界面会**原样印出来**：Slurm 的原因有几十种、各站点版本不同，
+给原文也比什么都不说强。
 
 ### 1b. 会话文件还没被守护进程看见（NFS 属性缓存，最长 60 秒）
+
 
 这是**最常见也最容易被误判**的一类。作业在计算节点上写好了文件，守护进程在登录
 节点上通过 NFS 读，而目录属性的缓存默认是 `acdirmax=60s` —— **会话登记最多延迟
@@ -477,6 +502,47 @@ sudo journalctl -u slurmate-sessiond | grep -i '心跳中断\|orphaned'
 - 客户端还在，但心跳送不出去 → 多半是登录节点不可达或守护进程在重启窗口里。
   200 秒到 1800 秒之间有整整 25 分钟的「`suspect` 但不动作」的窗口，
   就是给这种情况留的。
+
+### ★ 作业被重新排队了（状态 `REQUEUED` / `PREEMPTED` / `SPECIAL_EXIT`）
+
+**症状**：界面上的「作业状态」先是变成「被抢占，正在重新排队」，过一会儿又变回
+「运行中」，而后面的「已重启 N 次」多了一次。
+
+**这是正常的，会话不会断。** 被重新排队的作业**还会回来**，所以守护进程
+**保留**这个会话与它的 ACL —— 不删规则、不删会话文件（判据是 `Requeue=`，
+见 [ARCHITECTURE.md](./ARCHITECTURE.md) 的 §3.1）。作业重新跑起来之后会写一份
+**新的**会话文件（可能换了节点或端口），`refresh_enrollment()` 跟着把 ACL 挪过去。
+
+**★ 但有一件事用户必须知道**：重新跑起来的是**新的进程**，原来那个已经没了 ——
+在 code-server 里没保存的东西不会回来。界面上那句「已重启 N 次」就是为这件事说的。
+
+**要注意的边界**：作业模板里写着 `--no-requeue`（`cluster/run.sbatch`），
+所以**正常路径下不会有重排队**。真的出现 `REQUEUED` 说明作业是被别的东西重新
+提交的（管理员 `scontrol requeue`、或者站点改了 `PreemptMode=REQUEUE`）——
+那时上面这套保留逻辑就是唯一让会话活下来的东西。
+
+### ★ 「作业状态」一直不动
+
+**症状**：界面上的作业状态长时间停在同一个值（尤其是「排队中」或「正在收尾」）。
+
+先按 §1a.1 看**排队原因** —— 里面有三类是"等下去没用"的，那才是最可能的情况。
+
+真正的"卡住"只有一种：作业停在一个只该持续几秒的状态上（`COMPLETING` /
+`STAGE_OUT` / `SIGNALING` / `RESIZING`），那说明 epilog 挂住了。守护进程会在
+`stuck_job_seconds`（缺省 1800 秒）之后写一条 `job_stuck` 审计并打一行 warning：
+
+```bash
+sudo tail -50 /var/log/slurmate/audit.log | grep job_stuck
+sudo journalctl -u slurmate-sessiond | grep '停留'
+```
+
+**★ 守护进程不会因此释放会话**，这是刻意的：作业是集群的，而拆掉的防护是不可逆的。
+要收尾得由人来点：
+
+```bash
+slurmate list                      # 找到会话
+scancel <job_id>                   # 或者让作业真的结束
+```
 
 ### 续期一直失败，作业在到期时静默消失
 
