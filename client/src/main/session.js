@@ -79,28 +79,32 @@ const SERVER_FINISHED_STATES = ['released', 'rejected', 'expired'];
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
-   *   backend, layoutId, onTunnelPort, onRelayPort
+   *   backend, layoutId, onRelayPort
    *   getExcludedPorts {() => Set<number>}  「别的布局组占着的端口」，由 index.js
    *                                        提供 —— 控制器不认识 config，所以注入。
    *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
    *
    * layoutId 是**布局组**的 id（见 config.js）：它决定本地监听端口、从而决定
-   * 浏览器 origin 与存储分区。控制器自己不解释它，只原样带给 onTunnelPort。
+   * 浏览器 origin 与存储分区。
+   *
+   * ★ 但控制器**不解释它，也不把端口回报给谁**。那个数在布局组创建时就定下来了，
+   *   此后**只读**（`config.js` 的 `nextLayoutPort`）。顺移只影响**这一次**会话：
+   *   把顺移后的值写回配置，等于把一次**暂时**的冲突变成永久的 origin 变更 ——
+   *   冲突消失之后 origin 也回不去了，而那份布局本来是可以回来的。
    *
    * ★ 中转站会话的 layoutId 是 **null**。布局组存在的全部理由是「浏览器按 origin
    *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 ——
    *   给它分配一个布局组，等于凭空造出一个永远不会被创建的存储分区，还会让
-   *   「运行中切布局」那条路去挪一个 ssh 隧道在用的端口。所以中转站的端口不走
-   *   onTunnelPort，走 onRelayPort（见 _announcePort）。
+   *   「运行中切布局」那条路去挪一个 ssh 隧道在用的端口。所以它的端口要**报出去**
+   *   （写进用户那份 ssh 配置的 `Port` 行 —— 那边必须反映当前真值），走 onRelayPort。
    */
-  constructor({ backend, layoutId, onTunnelPort, onRelayPort, getExcludedPorts,
+  constructor({ backend, layoutId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs,
                 requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
     this.layoutId = layoutId;
-    this.onTunnelPort = onTunnelPort || (() => {});
     this.onRelayPort = onRelayPort || (() => {});
     this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
@@ -398,28 +402,33 @@ class SessionController extends EventEmitter {
   }
 
   /**
-   * 本地端口变了，通知外面去把它记下来。**两条路，语义完全不同**：
+   * 隧道起来了（或被顺移了），把**实际**端口告诉外面。
    *
-   *   有布局组 → 端口就是 origin，必须写回布局组（config.json），否则下次启动
-   *              会绑回旧端口、浏览器布局跟着重置一次。
-   *   没有布局组 → 端口要写进**用户那份 ssh 配置**的 Port 那一行。它不进
-   *              config.json（那个插件没有布局组，见构造函数）。
+   * ★ **只有没有布局组的会话要报。** 它的端口要写进**用户那份 ssh 配置**的
+   *   `Port` 那一行 —— 那份配置必须在会话活着的每一刻都指向真值，而用户手上
+   *   认的那个名字（别名）恒定，端口漂移对他无害。
+   *
+   * ★ **有布局组的会话什么都不做。** 那个数在布局组创建时就定下来了、此后只读；
+   *   它的**实际**值在快照里（`snapshot().localPort` 与 `origin`），谁要用谁去读。
+   *   ★ 从前这里会把顺移后的端口**写回 config.json**。那对这一次会话没有任何好处
+   *   （端口一变 origin 就变、编辑器布局已经重置过了），却把一次**暂时**的冲突
+   *   **永久化**：冲突消失之后 origin 也回不到最初那个，原来那份布局再也看不到了。
    *
    * ★ 判据是 `this.layoutId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
    *   等价（跑在浏览器里的插件才需要布局组），但前者是框架的事实，后者是一个
    *   插件名 —— 用名字判，加第三个插件时这里就得改。
    */
   _announcePort(port) {
-    if (this.layoutId) this.onTunnelPort(this.layoutId, port);
-    else this.onRelayPort(port);
+    if (!this.layoutId) this.onRelayPort(port);
   }
 
   /** 建立隧道并开始心跳。 */
   async _bringUpTunnel(preferredPort) {
     const target = this.session.tunnel_target;
+    const want = preferredPort || 18080;
     try {
       const { port, shifted } = await this.tunnel.start({
-        preferredPort: preferredPort || 18080,
+        preferredPort: want,
         target,
         excludePorts: this.getExcludedPorts(),
       });
@@ -431,8 +440,14 @@ class SessionController extends EventEmitter {
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
         // ★ 没有布局组的插件不适用：那边没有浏览器，名字恒定，端口在底下漂移
         //   是无害的 —— 对它报"布局会重置"是一句纯粹的错误信息。
-        this.warning = `首选端口被占用，已改用 ${port}。`
-                     + `由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。`;
+        //
+        // ★ 末句是承重的：顺移**不写回**配置，所以首选端口没被改掉。占用它的是
+        //   **这一次**的冲突，冲突一消失，下次启动就绑回原处、原来那份布局也跟着
+        //   回来。不说这一句，用户会以为自己被永久搬走了。
+        this.warning = `首选端口 ${want} 被占用，已改用 ${port}。`
+                     + '由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。'
+                     + `首选端口没有被改掉：占用它的进程退出之后，下次启动会回到 ${want}，`
+                     + '那份布局也还在。';
       }
     } catch (e) {
       this._setState(State.ERROR, { error: '建立隧道失败：' + e.message });
@@ -467,21 +482,20 @@ class SessionController extends EventEmitter {
     try {
       const { port, shifted } = await this.tunnel.start({
         preferredPort, target, excludePorts });
-      // ★ 先把 layoutId 换成新的，再写回端口 —— onTunnelPort 是拿 layoutId 当键的，
-      //   顺序反了会把新端口记到**旧**组名下，于是两个组的端口互相错位，
-      //   下次启动各自绑到对方的 origin 上。
+      // ★ 换的是**这一次会话的** origin：`layoutId` 与 `_tunnelPort` 一起改，然后
+      //   `_emit()` 把新的 origin 带出去。
+      //   **不写回配置** —— 新组的端口是它**被创建时**定下来的那个
+      //   （`config.js` 的 `nextLayoutPort`），顺移只是这一次的事。
       this.layoutId = newLayoutId;
       this._tunnelPort = port;
-      this.onTunnelPort(newLayoutId, port);
       this._emit();
       return { ok: true, port, shifted };
     } catch (e) {
       try {
-        // 回滚：原来的端口和原来的组都放回去（同理，先还原 layoutId 再写回）
+        // 回滚：原来的端口和原来的组都放回去（同理，两样一起还原再 _emit）
         const back = await this.tunnel.start({ preferredPort: prevPort, target });
         this.layoutId = prevLayout;
         this._tunnelPort = back.port;
-        this.onTunnelPort(prevLayout, back.port);
         this._emit();
       } catch (e2) {
         this._setState(State.ERROR, {
@@ -494,7 +508,7 @@ class SessionController extends EventEmitter {
     }
   }
 
-  /** 换一个布局组 id。**只改标记与快照**，端口由 relisten 负责。 */
+  /** 换一个布局组 id。**只改标记与快照**，端口的挪动由 relisten 负责。 */
   setLayout(layoutId) {
     this.layoutId = layoutId;
     this._emit();
@@ -563,13 +577,14 @@ class SessionController extends EventEmitter {
                 preferredPort: prevPort, target: s.tunnel_target,
                 excludePorts: this.getExcludedPorts() });
               this._tunnelPort = port;
-              // 端口顺移必须**写回去**：code-server 那边 origin 就是端口，配置里
-              // 那份一旦与实际分叉，下次启动会绑回配置的端口、布局跟着重置一次，
-              // 而用户不知道为什么；中转站那边则是 ssh 配置里的 Port 行。
+              // 端口顺移**不写回配置**（理由见 `_announcePort`）。这里只把**实际**
+              // 端口告诉需要它的那一位 —— 没有布局组的会话（它的 ssh 配置里那行
+              // `Port` 必须反映当前真值）；有布局组的会话什么都不用做，实际值在快照里。
               this._announcePort(port);
               if (shifted && this.layoutId) {
                 this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
-                             + `浏览器按端口隔离本地存储，编辑器布局会重置一次。`;
+                             + '浏览器按端口隔离本地存储，编辑器布局会重置一次。'
+                             + `首选端口没有被改掉：冲突消失之后，下次启动会回到 ${prevPort}。`;
               }
             } catch (e) {
               this.warning = '隧道重建失败：' + e.message;

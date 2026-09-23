@@ -194,7 +194,7 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 具体网页服务的名字。所以下面这些路径是真的在跑：
 
 - 会话状态机（提交 → 排队 → 登记 → 运行 → 释放）
-- 本地端口槽位绑定与占用回退
+- 本地端口绑定与占用顺移（顺移**只影响这一次**会话，不写回配置）
 - 隧道中继（真的 TCP 转发，真的只监听 127.0.0.1）
 - 登录契约（`POST <清单里的路径>` + cookie jar 判定）
 - 快捷键接管与诊断
@@ -298,7 +298,7 @@ draft Release 上。
 ```
 src/main/
   index.js         入口：单实例锁、生命周期、IPC、登录编排
-  config.js        配置 + safeStorage 口令 + 槽位端口持久化
+  config.js        配置 + safeStorage 口令 + 布局组的端口（**创建时定一次、此后只读**）
   hosts.js         登录节点地址表 + 并发探测（读 SSH banner 校验）
   classify.js      RPC 结果 → 客户端可行动作（纯函数，最容易写错的地方）
   weblogin.js      「POST 表单 + 查 cookie」这个**通用**登录机制（纯函数）

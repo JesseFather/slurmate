@@ -16,11 +16,10 @@
 const sshconfig = require('./sshconfig.js');
 
 module.exports = {
-  // 隧道端口：一个固定的基准端口，与布局组无关。别名恒定、端口漂移无害 ——
-  // 中转站没有 origin 语义（与 code-server 恰好相反）。
-  preferredPort(ctx) {
-    return ctx.config.RELAY_PORT_BASE;
-  },
+  // ★ 这里**没有** preferredPort。本地端口不是插件的事：这个插件没声明
+  //   `contributes.layout`，于是会话用中转基准端口（基座的常量）。真被占了隧道
+  //   会顺移，而**实际**端口由 `attach()` 写进用户那份 ssh 配置的 `Port` 行 ——
+  //   那边必须反映当前真值，而用户认的那个名字（别名）恒定，端口漂移对他无害。
 
   closeWarning: {
     message: '关闭窗口会结束这个 SSH 中转会话。',
@@ -71,12 +70,18 @@ async function attach(ctx, snap) {
   const port = snap.localPort;
   if (!port) return;                       // 还没监听，还轮不到写配置
 
-  // 登录节点上的用户名。用连接里那个 —— 它是用户亲手填的，而 whoami 要等一次
-  // RPC 回来才有（重连上来时可能还没有）。
-  const conn = ctx.config.activeConnection(ctx.cfg);
-  const user = (conn && conn.user) || (ctx.whoami() && ctx.whoami().user);
+  // 登录节点上的用户名 —— 取**这一条会话所属那条连接**里那个（用户亲手填的）。
+  //
+  // ★ **不回落 `ctx.whoami()`。** 它是一个模块级单值（"最近一次连上的是谁"），
+  //   而切换活跃连接**不会**停掉已经在跑的会话 —— 于是它可能给出**另一个站点**的
+  //   用户名。写错这个字段的症状是"ssh 连上了，但不是你要的那台机器"，而用户
+  //   完全看不出为什么。拿不到就不写，说清原因。
+  const conn = ctx.connection();
+  const user = conn && conn.user;
   if (!user) {
-    ctx.notice('error', '中转站已就绪，但不知道要用哪个用户名写 ssh 配置。');
+    ctx.notice('error',
+      '中转站已就绪，但这条会话所属的连接已经不在了，所以不知道要用哪个用户名'
+      + `写 ssh 配置。配置没有写 —— 你仍然可以直接连 127.0.0.1:${port} 使用它。`);
     return;
   }
 

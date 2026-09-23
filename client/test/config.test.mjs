@@ -355,15 +355,23 @@ test('忘记主机密钥后回到 new', () => {
 //
 // 一个组 = 一个本地端口 = 一个 origin = 一份 code-server 的编辑器布局。
 
-test('布局组：端口持久化，换过之后必须记住', () => {
+test('★★ 布局组的端口**创建时定一次、此后只读**（顺移不写回）', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   assert.deepEqual(cfg.layouts, [], '一条连接都没有时不该有布局组');
 
-  // 端口变了 origin 就变，编辑器布局会全部重置 —— 所以必须记住，不是每次重算。
+  // 一个组 = 一个本地端口 = 一个 origin = 一份编辑器布局。端口只在这个组**被创建
+  // 时**定一次（`nextLayoutPort`），此后再没有任何东西改它。
   cfg.layouts = [{ id: gid(1), name: '布局 1', port: 18080 }];
-  config.setLayoutPort(dir, cfg, gid(1), 18093);
-  assert.equal(config.layoutPort(config.loadConfig(dir), gid(1)), 18093);
+  assert.equal(config.layoutPort(config.loadConfig(dir), gid(1)), 18080,
+    '存下来的端口读得回来');
+
+  // ★ 顺移**不**写回。把顺移后的值记下来，等于把一次**暂时**的冲突变成永久的
+  //   origin 变更 —— 冲突消失之后 origin 也回不去，而那份布局本来是可以回来的
+  //   （用户下一会话回到原端口，那份布局也跟着回来）。
+  //   所以模块里**根本没有**改端口的函数 —— 这条断言就是那道闸。
+  assert.equal(typeof config.setLayoutPort, 'undefined',
+    '★ 没有任何函数改得动一个已存在布局组的端口 —— 它是只读属性');
 });
 
 test('布局组：端口越界就整条不合法，不补默认值', () => {

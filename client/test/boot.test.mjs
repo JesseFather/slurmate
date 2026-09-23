@@ -443,6 +443,30 @@ const frontSlotOf = async () => {
   const r = await invoke('app:states');
   return r.front;
 };
+/** 界面收到的通知（主进程 `win.pushNotice` 推的那一路，形如 `{kind, text}`）。 */
+const noticesOf = () =>
+  (calls.windows[0] && calls.windows[0].webContents.handlers['send:ui:notice']) || [];
+
+/**
+ * 把连接表收成**只剩 demo 那一条**（并把它设为活跃）。
+ *
+ * ★ 阶段 5 那几条用例的前提是「**最后一条**用某个布局组的连接」—— 而连接表是
+ *   **跨用例共享**的（同一个进程、同一份开发者模式配置）。少了这一步，上一条用例
+ *   留下的连接会让"最后一条"这个前提不成立，而失败信息看着像清理逻辑坏了。
+ */
+async function onlyDemoConnection(idx) {
+  const cfg = idx._test.getCfg();
+  const demo = (cfg.connections || []).find((c) => c.user === 'demo' && c.host === '127.0.0.1');
+  assert.ok(demo, '夹具前提：先跑 connectDemo');
+  for (const c of [...cfg.connections]) {
+    if (c.id !== demo.id) {
+      const r = await invoke('app:deleteConnection', c.id);
+      assert.equal(r.ok, true, `收尾没删掉 ${c.id}：${JSON.stringify(r)}`);
+    }
+  }
+  await invoke('app:setActiveConnection', demo.id);
+  return demo;
+}
 
 test('index.js 能加载并完成整个启动流程', async (t) => {
   t.after(() => { Module._load = origLoad; });
@@ -2504,9 +2528,9 @@ test('★★ 时序：新位置**写成功**才清旧的；写失败时旧的**�
   // ★ 本仓库的第一个假 ctx。它存在的理由只有一个：这条**时序**只能从 `attach`
   //   那一层测（写盘的成功与失败各跑一遍），而 `attach` 的入口就是一个 ctx。
   const ctx = {
-    config: { activeConnection: () => ({ user: 'alice' }) },
-    whoami: () => ({ user: 'alice' }),
-    cfg: {},
+    // ★ 是 `connection()` 而不是 `config` / `cfg` —— 那个能力已经收掉了（插件不该
+    //   拿到整个 config.json 的写权，也不该拿"当前活跃连接"当"我这条会话的连接"）。
+    connection: () => ({ id: 'c1', label: '', user: 'alice', host: 'h', port: 22 }),
     dataDir: () => dataDir,
     home: () => home,
     once: () => true,               // "第一次"（那道闸的语义见 pluginContext 的 once）
@@ -3125,6 +3149,427 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
   const left = bs._sessions.filter((s) => !['releasing', 'released'].includes(s.state));
   assert.deepEqual(left.map((s) => s.session_id), [],
     '★ 每一条都要发 goodbye —— 少发一条，那个作业就在集群上继续烧到 TimeLimit');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  阶段 5：端口只读 / ctx.connection() / 删连接删数据
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★★ 端口顺移**不写回**：localPort 与 origin 跟着实际端口走，而配置里那个字不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const config = require('../src/main/config.js');
+  const net = require('net');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const conn = await onlyDemoConnection(idx);
+
+  // 这条连接的布局组端口 = 这次会话的**首选**端口。
+  const want = config.loadConfig(DEV_CFG).layouts.find((l) => l.id === conn.layoutId).port;
+  assert.ok(want > 0, '夹具应当已经建出一个布局组');
+
+  // ★ 由**测试**把首选端口占住。不这么做的话，"顺移了"可能是这台机器上恰好有
+  //   别的东西在用那个端口 —— 而那时这条用例验的是运气，不是代码。
+  const squatter = net.createServer();
+  await new Promise((r, j) => {
+    squatter.once('error', j);
+    squatter.listen(want, '127.0.0.1', r);
+  });
+  t.after(() => new Promise((r) => squatter.close(r)));
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '进入 running', 20000);
+
+  const snap = ctl.snapshot();
+  assert.notEqual(snap.localPort, want, '★ 首选端口被占，必须顺移');
+  assert.ok(snap.localPort > want && snap.localPort <= want + 20,
+    `顺移要落在扫描区间 ${want + 1}–${want + 20}，实际 ${snap.localPort}`);
+  // ★ 实际端口必须走到快照里 —— 界面和插件都靠它（`origin` 是给浏览器的那一个）。
+  assert.equal(snap.origin, `http://127.0.0.1:${snap.localPort}`,
+    'origin 必须跟着**实际**端口走');
+
+  // ★★ 本阶段的重点：**配置里那个端口一个字都不动。**
+  //    写回会把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin
+  //    也回不去，而原来那份编辑器布局本来是可以回来的。
+  const onDisk = config.loadConfig(DEV_CFG).layouts.find((l) => l.id === snap.layoutId);
+  assert.ok(onDisk, '那个布局组不该被顺手回收');
+  assert.equal(onDisk.port, want,
+    `★★ 顺移绝不能写回配置（配置里应当还是 ${want}，实际 ${onDisk.port}）——`
+    + '写回等于把一次暂时的冲突永久化');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 中转站的端口绝不能落进任何布局组', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const config = require('../src/main/config.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const RELAY = config.RELAY_PORT_BASE;
+  const layoutPorts = config.loadConfig(DEV_CFG).layouts.map((l) => l.port);
+  assert.ok(layoutPorts.length, '夹具应当已经建出一个布局组');
+  const b = await invoke('app:start', null, 'sshd');
+  assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
+  const ctl = idx._test.sessionAt(b.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '中转站进入 running', 20000);
+
+  const snap = ctl.snapshot();
+  assert.equal(snap.layoutId, null, '中转站没有布局组');
+  // ★ 端口的**键**归基座之后，这里最容易踩的是"忘了判 layoutId 是不是 null"：
+  //   `layoutPort(cfg, null)` 会回落到 LAYOUT_PORT_BASE(18080)，于是中转站会话去抢
+  //   某个布局组的 origin。那条路**不报错**，症状是"浏览器那一块打到 ssh 端口上，
+  //   页面打不开"，而日志里一个字都不提端口。
+  assert.ok(snap.localPort >= RELAY,
+    `★ 中转站必须从中转基准端口（${RELAY}）起，实际 ${snap.localPort} —— `
+    + '落到布局组那一段就等于抢了某个组的 origin');
+  assert.equal(layoutPorts.includes(snap.localPort), false,
+    '更不能正好压在某个布局组占着的端口上');
+
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ ctx.connection() 只回这一条会话所属的那条连接 —— 切活跃连接不影响它', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
+  const P = require('../src/main/plugin-data.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);                       // C1：user=demo
+  await onlyDemoConnection(idx);
+
+  const b = await invoke('app:start', null, 'sshd');
+  assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
+  const ctl = idx._test.sessionAt(b.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '中转站进入 running', 20000);
+
+  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
+  const dataDir = path.join(idx._test.getPluginDataRoot(),
+    P.dataDirNameOf(P.identityOf(sshdPlugin)));
+  const conf = sshc.pathsFor(dataDir).config;
+  assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m, '前提：先写的是 C1 的用户');
+
+  // 再配一条**另一个用户**的连接，并把它设为活跃。这一步**不停任何会话** ——
+  // 那正是"按当前活跃连接去取"会出错的地方。
+  const c2 = await invoke('app:saveConnection',
+    { user: 'other', host: '127.0.0.2', port: 1 });
+  assert.equal(c2.ok, true, JSON.stringify(c2));
+  await invoke('app:setActiveConnection', c2.connection.id);
+  assert.equal(idx._test.getCfg().activeConnectionId, c2.connection.id);
+
+  // 逼一次重新渲染。真实的那条路是心跳（45 秒）或状态轮询（60 秒）——
+  // 用例等不了那么久，而 `emit('change')` 触发的正是同一个回调
+  // （`session.js` 的 `_emit()` 就是这个形状）。
+  ctl.emit('change', ctl.snapshot());
+  // ★ `attach` 是异步的，而 `emit` 不等它 —— 必须给它一点时间落地（写的是本地
+  //   文件，没有网络）。**不等的后果是这条用例形同虚设**：文件还没被改写就去读，
+  //   于是"没变"这个答案永远拿到，而它证明不了任何事。
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(idx._test.getCfg().activeConnectionId, c2.connection.id,
+    '前提：活跃连接真的切过去了');
+
+  // ★★ 这份 ssh 配置属于**这条会话**，而这条会话属于 C1。按"当前活跃"去取会把
+  //    C2 的用户名写进去 —— 而症状是"ssh 连上了，但不是你要的那台机器"，
+  //    用户完全看不出为什么。
+  assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m,
+    '★★ 切活跃连接不该改到这条会话的 ssh 配置 —— 它属于 C1，不属于"当前活跃的那条"');
+
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 拿不到连接就不写 ssh 配置 —— 绝不回落到 whoami（它可能属于另一个站点）', async (t) => {
+  const relay = require('../../plugins/sshd/client/index.js');
+  const sshc = require('../../plugins/sshd/client/sshconfig.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-noconn-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-noconn-data-'));
+  const notices = [];
+  const ctx = {
+    // ★ 拿不到 —— 这条会话所属的连接已经不在了（被删掉，或者它是重连接回来的、
+    //   而客户端根本不知道它属于谁）。
+    connection: () => null,
+    // ★★ `whoami` **故意给一个别的用户**：它答的是"最近一次连上的是谁"，
+    //    是一个模块级单值，而切换活跃连接**不会**停掉已经在跑的会话 ——
+    //    按它回落就会把另一个站点的用户名写进这一条会话的 ssh 配置。
+    whoami: () => ({ user: 'alice' }),
+    dataDir: () => dataDir,
+    home: () => home,
+    once: () => true,
+    notice: (kind, text) => notices.push({ kind, text }),
+  };
+  const snap = { localPort: 18090, sshHostKey: 'ssh-ed25519 ' + 'A'.repeat(68) };
+
+  await relay.attach(ctx, snap);
+
+  assert.equal(fs.existsSync(sshc.pathsFor(dataDir).config), false,
+    '★★ 拿不到连接就**不写** —— 回落 whoami 会把 alice 写进去，而这条会话不是 alice 的');
+  assert.ok(notices.some((n) => n.kind === 'error'),
+    '而且必须如实说出来（用户仍然可以直连那个端口）');
+});
+
+test('★ 导出 preferredPort 的插件会被**拒绝** —— 那个钩子已经收掉了', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const reg = idx._test.getRegistry();
+
+  // ★ 为什么是"拒绝"而不是"忽略"：静默忽略会让一个旧插件看起来装上了，而它的
+  //   选择从头到尾没生效 —— 症状是"我明明写了 18099，它却听在 18080"。
+  //   一个导出了不再存在的钩子的插件，就是**需要作者改一版**的插件。
+  putSitePlugin({
+    id: mintId(), name: 'stale', version: '1.0.0',
+    over: { contributes: { layout: false } },
+    clientSrc: 'module.exports = { preferredPort() { return 18099; } };\n',
+  });
+  reg.reload();
+
+  const hit = reg.errors.find((e) => /preferredPort/.test(e));
+  assert.ok(hit, `应当有一条指名 preferredPort 的报错：${JSON.stringify(reg.errors)}`);
+  assert.match(hit, /认不得的键/, '而且要说清是"这个键不认识了"');
+  assert.equal(reg.list().some((p) => p.name === 'stale'), false,
+    '★ 它不该被当成一个可用的插件加载进来');
+
+  resetFixture();
+  reg.reload();
+});
+
+// ── 丙组：一个布局组被回收时，它名下的数据一起删 ─────────────────────────────
+
+/**
+ * 造一份"插件写在磁盘上的数据"，并返回它在沙盒里那个目录。
+ *
+ * ★ 路径**现算**（`getPluginDataRoot` + 身份），与 `ctx.dataDir()` 同源 ——
+ *   另拼一遍的话，用例守着的会是用户永远拿不到的一个路径。
+ */
+function makePluginDataDir(idx, pluginName) {
+  const P = require('../src/main/plugin-data.js');
+  const layoutId = (idx._test.getCfg().connections[0] || {}).layoutId;
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
+  assert.ok(plugin && layoutId, `夹具前提：应当有一个 ${pluginName} 与一个布局组`);
+  const dir = path.join(idx._test.getPluginDataRoot(),
+    P.dataDirNameOf(P.identityOf(plugin, layoutId)));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'marker'), 'x');
+  return { dir, layoutId, plugin };
+}
+
+test('★★ 删掉最后一条用某个布局组的连接 ⇒ 那个组的两份数据一起清掉', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const P = require('../src/main/plugin-data.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const { dir, layoutId, plugin } = makePluginDataDir(idx, 'code-server');
+  const partition = P.partitionOf(P.identityOf(plugin, layoutId));
+
+  // ★ 在**真根**下放一份**同名**的目录：开发者模式绝不能删到真实那一份。
+  //   （两个根只差一级：`<userData>/dev-sandbox/plugin-data` 与 `<userData>/plugin-data`。）
+  const realRoot = path.join(userData, 'plugin-data');
+  const realDir = path.join(realRoot, path.basename(dir));
+  fs.mkdirSync(realDir, { recursive: true });
+  fs.writeFileSync(path.join(realDir, 'marker'), 'x');
+  t.after(() => { fs.rmSync(realRoot, { recursive: true, force: true }); });
+
+  const connId = idx._test.getCfg().connections[0].id;
+  const r = await invoke('app:deleteConnection', connId);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  await waitUntil(() => !fs.existsSync(dir), '插件数据目录被清掉', 5000);
+
+  assert.equal(fs.existsSync(dir), false, '★ 沙盒里那份数据目录要跟着组一起走');
+  assert.equal(fs.existsSync(path.join(realDir, 'marker')), true,
+    '★★ 真实的那一份一个字节都不能动 —— 两个根绝不能混');
+  // 分区那一半是异步清的（`clearPartitionStorage` 走 Electron 的 clearStorageData），
+  // 所以这里要等一等，不能当场断言。
+  await waitUntil(() => calls.cleared.includes(partition),
+    `★ 浏览器存储那一半也要清（清过的：${JSON.stringify(calls.cleared)}）`, 5000);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收清掉', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const { dir, layoutId } = makePluginDataDir(idx, 'code-server');
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
+
+  // ★ 这条路径**今天够得着**，而且每一步都是用户做得到的：
+  //   ① 会话跑在 C1 的组上 → ② 把活跃连接切成 C2（**不动引用计数、不停会话**）
+  //   → ③ 给 C1 换一个布局组：`isActive` 是假，于是不走 relisten，而 C1 原来那个
+  //   组引用计数归零、被回收。
+  //
+  //   ★ C2 必须落在**另一个**组上，否则它替 C1 撑着引用计数、那个组根本不会被
+  //     回收 —— 而"回收"正是这条用例要造出来的东西（新连接默认落进活跃连接的组，
+  //     所以这里要显式给它一个）。
+  const c2 = await invoke('app:saveConnection',
+    { user: 'demo', host: '127.0.0.3', port: 1 });
+  await invoke('app:setConnectionLayout',
+    { connectionId: c2.connection.id, layoutId: null, confirmDiscard: true });
+  await invoke('app:setActiveConnection', c2.connection.id);
+
+  const c1Id = idx._test.getCfg().connections.find((c) => c.id !== c2.connection.id).id;
+  const sw = await invoke('app:setConnectionLayout',
+    { connectionId: c1Id, layoutId: null, confirmDiscard: true });
+  assert.equal(sw.ok, true, JSON.stringify(sw));
+  assert.equal(idx._test.getCfg().layouts.some((l) => l.id === layoutId), false,
+    '前提：那个组真的被回收了');
+  assert.equal(ctl.state, 'running', '前提：那条会话还跑着');
+
+  // ★★ 少了守卫的后果是**静默**的：一条正在跑的会话脚下的数据被删掉
+  //    （`ssh slurmate` 忽然认证失败、编辑器状态没了），而用户只点过"换布局组"。
+  assert.equal(fs.existsSync(path.join(dir, 'marker')), true,
+    '★★ 会话还跑着，它脚下那份数据一个字节都不能动');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 而会话结束之后，同一份必须清得掉（反向的那一半）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const { dir, layoutId } = makePluginDataDir(idx, 'code-server');
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(() => !occupiedOf(idx, a.slot), '会话结束', 20000);
+
+  // C2 要落在**另一个**组上（新连接默认落进活跃连接的组），否则它替 C1 撑着
+  // 引用计数、那个组根本不会被回收。
+  const c2 = await invoke('app:saveConnection',
+    { user: 'demo', host: '127.0.0.3', port: 1 });
+  await invoke('app:setConnectionLayout',
+    { connectionId: c2.connection.id, layoutId: null, confirmDiscard: true });
+  await invoke('app:setActiveConnection', c2.connection.id);
+
+  const c1Id = idx._test.getCfg().connections.find((c) => c.id !== c2.connection.id).id;
+  const sw = await invoke('app:setConnectionLayout',
+    { connectionId: c1Id, layoutId: null, confirmDiscard: true });
+  assert.equal(sw.ok, true, JSON.stringify(sw));
+  assert.equal(idx._test.getCfg().layouts.some((l) => l.id === layoutId), false,
+    '前提：那个组真的被回收了');
+  await waitUntil(() => !fs.existsSync(path.join(dir, 'marker')), '数据被清掉', 5000);
+
+  // ★ 与上一条**必须成对**：只钉"跑着的时候留着"，一个"什么都不清"的实现照样绿。
+  assert.equal(fs.existsSync(path.join(dir, 'marker')), false,
+    '★ 会话结束了，那份数据就该跟着组一起走');
+
+  await invoke('app:deleteConnection', c2.connection.id);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★ 没声明分实例的那一份不跟着任何布局组走', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const P = require('../src/main/plugin-data.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const layoutId = idx._test.getCfg().connections[0].layoutId;
+
+  // ★ 第三种：**声明了 perInstance、却没有界面**的插件。它照样在磁盘上留一份，
+  //   而"属于这个组"的判据是 `hasInstance`，**不是** `hasLayoutStorage`
+  //   （后者多一条"有界面"）。抄错那个判据的后果是这一份**永远不被回收** ——
+  //   而它不会在审计里露头（那张"该有的"表用的正是 `hasInstance`）。
+  const headless = putSitePlugin({
+    id: mintId(), name: 'headless', version: '1.0.0',
+    over: { contributes: { layout: true, data: { perInstance: true } } },
+  });
+  t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
+  const headlessPlugin = idx._test.getRegistry().list().find((p) => p.name === 'headless');
+  assert.ok(headlessPlugin, `夹具没装进去：${JSON.stringify(idx._test.getRegistry().errors)}`);
+  assert.equal(fs.existsSync(headless), true, '前提：它真的装上了');
+  const headlessDir = path.join(idx._test.getPluginDataRoot(),
+    P.dataDirNameOf(P.identityOf(headlessPlugin, layoutId)));
+  fs.mkdirSync(headlessDir, { recursive: true });
+  fs.writeFileSync(path.join(headlessDir, 'marker'), 'x');
+
+  // code-server 那一份：**属于**这个组，会被清。
+  const cs = makePluginDataDir(idx, 'code-server');
+
+  // sshd 那一份：身份里**没有实例段**，它不属于任何一个组。
+  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
+  const relayDir = path.join(idx._test.getPluginDataRoot(),
+    P.dataDirNameOf(P.identityOf(sshdPlugin)));
+  fs.mkdirSync(relayDir, { recursive: true });
+  fs.writeFileSync(path.join(relayDir, 'marker'), 'x');
+
+  const connId = idx._test.getCfg().connections[0].id;
+  assert.equal((await invoke('app:deleteConnection', connId)).ok, true);
+
+  // ★ 三个方向一起断言 —— 只钉一边的话，"什么都不清"与"什么都清"各能骗过一条。
+  assert.equal(fs.existsSync(path.join(cs.dir, 'marker')), false,
+    '属于那个组的、有界面的那一份要跟着走');
+  assert.equal(fs.existsSync(path.join(headlessDir, 'marker')), false,
+    '★ 属于那个组、但**没有界面**的那一份也要跟着走 —— 判据是 hasInstance，'
+    + '抄成 hasLayoutStorage 会让它永远留着，而且审计里看不出来');
+  assert.equal(fs.existsSync(path.join(relayDir, 'marker')), true,
+    '★ 而**不属于任何组**的那一份绝不能跟着走 —— 它只有一份（sshd 的钥匙与 '
+    + 'ssh 配置就在里面），删掉它等于把 `ssh slurmate` 弄坏');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"失败"）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const { dir } = makePluginDataDir(idx, 'code-server');
+  const dataRoot = idx._test.getPluginDataRoot();
+  // 让那个目录**删不动**：把它的父层设成不可写。
+  fs.chmodSync(dataRoot, 0o500);
+  t.after(() => { try { fs.chmodSync(dataRoot, 0o700); } catch { /* 尽力而为 */ } });
+
+  const connId = idx._test.getCfg().connections[0].id;
+  const r = await invoke('app:deleteConnection', connId);
+  // ★ 抛出去的后果：`commitConfig` 抛穿 IPC ⇒ 用户看到"删除失败"，而配置其实
+  //   已经删了、也存了 —— 一句指不回根因的话，而界面上那一条已经不见了。
+  assert.equal(r.ok, true, `清理失败不该把删除本身变成失败：${JSON.stringify(r)}`);
+  assert.equal(idx._test.getCfg().connections.some((c) => c.id === connId), false,
+    '配置那一侧必须真的删掉了');
+  await waitUntil(() => noticesOf().some((n) => /没能清干净/.test(n.text || '')),
+    '要有一条说清磁盘没清干净的提示', 5000);
+  assert.equal(fs.existsSync(dir), true, '前提：它真的没被删掉（父层不可写）');
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);

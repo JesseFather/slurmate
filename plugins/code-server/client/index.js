@@ -12,10 +12,11 @@
  */
 
 module.exports = {
-  // 隧道端口：用布局组自己的端口，于是同一个布局组的若干条连接共用一个监听端口。
-  preferredPort(ctx, layoutId) {
-    return ctx.config.layoutPort(ctx.cfg, layoutId);
-  },
+  // ★ 这里**没有** preferredPort。本地端口不是插件的事：这个插件声明了
+  //   `contributes.layout`，于是会话用它那个布局组的端口 —— 而那个端口是布局组
+  //   被创建时定下来的、此后只读（一个组 = 一个本地端口 = 一份浏览器存储）。
+  //   顺移（端口被别的进程占了）只影响这一次会话，不写回配置。
+  //   需要知道实际端口时读 `snap.origin` / `snap.localPort`。
 
   // 关窗会杀掉什么。见 windows.js 的确认对话框。
   closeWarning: {

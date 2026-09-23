@@ -1090,22 +1090,19 @@ function siteVersions() {
 // 模型与纯函数在 config.js 的「布局组」一节；这里只做编排：
 // 谁指向谁、什么时候回收、回收时清理什么。
 
-/** 当前活跃连接所属的布局组 id。没有连接时为 null。 */
-function activeLayoutId() {
-  const conn = config.activeConnection(cfg);
-  return conn ? conn.layoutId : null;
-}
-
 /**
  * 这次会话该用哪个布局组。
  *
- * 有活跃连接就用它的组（正常路径）。但**开发者模式里一个连接都没有**，那里也必须能
+ * 有连接就用**它**的组（正常路径）。但**开发者模式里一个连接都没有**，那里也必须能
  * 开会话 —— 所以退回到「已有的第一个组，没有就建一个」。
  * （pruneLayouts 对「一条连接都没有」的情形不回收，正是为了让这一步造出来的组
  *   能活过下一次 commitConfig，否则每次开会话都会换一个 partition。）
+ *
+ * ★ 收的是**那条连接**，不是"当前活跃的那条" —— 多开之后两者会分家。调用方读一次、
+ *   让布局组与 `ctx.connection()` 共用**同一个**对象，它们就不会指向两条连接。
  */
-function layoutForSession() {
-  const id = activeLayoutId();
+function layoutForSession(conn) {
+  const id = conn ? conn.layoutId : null;
   if (id) return id;
   if (cfg.layouts[0]) return cfg.layouts[0].id;
   const layout = {
@@ -1146,8 +1143,12 @@ function ensureConnectionLayout(conn) {
  * **所有会改变引用计数的改动都必须走这里**，而不是直接 config.saveConfig。
  * 漏掉一处的后果是某个组永远不被回收 —— 它占着一个端口和一份浏览器存储。
  *
- * 反过来，setLayoutPort / rememberHostKey / forgetHostKey 内部自己 saveConfig 是安全的：
- * 端口写回只可能发生在引用计数 ≥ 1 的组上，改主机密钥更与计数无关。**那不是漏改。**
+ * 反过来，rememberHostKey / forgetHostKey 内部自己 saveConfig 是安全的：
+ * 改主机密钥与引用计数无关。**那不是漏改。**
+ *
+ * ★ 而 `layouts[].port` 已经**没有**写盘点 —— 它在布局组创建时定下来、此后只读
+ *   （见 config.js 的 `nextLayoutPort`），所以 `pruneLayouts` 之外没有任何东西
+ *   需要为它操心。
  */
 function commitConfig() {
   // ★ 组的**名字**要在 pruneLayouts 之前记下来：它一删，`cfg` 里就没有这个名字了，
@@ -1166,14 +1167,50 @@ function commitConfig() {
 }
 
 /**
- * 回收一个布局组之后的卫生清理。
+ * 显式回收**一个指定的**布局组（连同它名下的数据）。
  *
- * **不是正确性必需** —— partition 名永不复用，残留数据永远不会被新的组读到。
- * 是隐私：那个目录里躺着 code-server 的登录 cookie。
+ * ★ 它与 `commitConfig` 里那条**引用计数**回收不是同一件事，所以是两个入口：
+ *   那一条数的是"还有几条连接指着它"，而这一条用在**数不出来**的场合 ——
+ *   今天只有一个：`app:deleteConnection` 删掉了**最后一条**连接，于是
+ *   `pruneLayouts` 那条「一条连接都没有时**不**回收」的守卫会把它拦下。
  *
- * ★ 有且只有一条致命前提：**绝不能对正被那块界面用着的那个 partition 做**。
- *   那会把用户当前的会话连 cookie 带 localStorage 一起抽掉，而症状只是
- *   「页面莫名其妙坏了」。所以先跟窗口对一下现在用的是哪个。
+ *   ★ 那条守卫守的是**从来没被任何连接指过**的兜底组（开发者模式、全新安装：
+ *     回收掉它，下次开会话会造一个新的，id 一变 partition 就变，布局白重置一次）。
+ *     而"用户亲手删掉了最后一条连接"是另一回事 —— 那个组已经没用了，而且那条
+ *     连接**再建回来也是另一个组、另一份分区**，旧数据反正读不到。
+ *     ★ 少了这一步，「删条目就删数据」在**只有一条连接**这个最常见的场合根本
+ *     不发生 —— 而那正是用户提这件事的场景。
+ */
+function reclaimLayoutGroup(layoutId, layoutName) {
+  if (!layoutId || !config.findLayout(cfg, layoutId)) return false;
+  cfg.layouts = (cfg.layouts || []).filter((l) => l.id !== layoutId);
+  try {
+    config.saveConfig(cfgDir, cfg);
+  } catch (e) {
+    win.pushNotice('error',
+      '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
+  }
+  clearLayoutStorage(layoutId, layoutName);
+  return true;
+}
+
+/**
+ * 回收一个布局组之后的卫生清理 —— **两个根一起清**：浏览器存储分区，以及各插件
+ * 写在这个组名下那份数据目录（`ctx.dataDir()` 给的那个）。
+ *
+ * **不是正确性必需** —— 名字永不复用（布局组 id 与 partition 都是），残留数据永远
+ * 不会被新的组读到。是隐私：那个分区里躺着 code-server 的登录 cookie，那个目录里
+ * 躺着插件自己的东西（sshd 的钥匙、别的插件的缓存）。
+ *
+ * ★ 有且只有一条致命前提：**绝不能对正被用着的那一份做**。那会把一条**正在跑**的
+ *   会话脚下的数据抽掉，而症状只是「页面莫名其妙坏了」或「ssh 忽然认证失败」。
+ *   所以两半各有各的守卫：分区看 `livePartitions()`（窗口持有），数据目录看
+ *   `liveDataDirs()`（会话持有）—— 两者的判据不同，理由见各自那一段。
+ *
+ * ★ **什么时候会发生**：只有 `commitConfig` 里 `pruneLayouts` 真的回收了组的时候
+ *   （最后一条指着它的连接被删掉、或被切到别的组）。所以"删一条 ssh 条目就删掉它的
+ *   用户数据"这件事**只在那是最后一个用某个组的连接时**成立 —— 还有别的连接指着
+ *   那个组时，数据留着，因为下一会话还要用它。
  *
  * 不 await：删一个组不该因为磁盘慢而卡住界面。
  *
@@ -1229,6 +1266,46 @@ function clearLayoutStorage(layoutId, layoutName) {
           `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
       }
     });
+  }
+
+  // ── 插件写在磁盘上的那一份（`plugin-data/`）────────────────────────────────
+  //
+  // ★ 判据是 `hasInstance`，**不是** `hasLayoutStorage` —— 后者多一条"有界面"。
+  //   没有界面的插件照样可能在磁盘上留一份：它没有分区，但有数据目录。
+  // ★ 反过来：没声明分实例的插件**绝不能**跟着一个组被清 —— 它只有一份，不属于
+  //   任何一个组（sshd 的 `<ULID>@relay` 就是）。下面那行 filter 就是那道闸；
+  //   少了它，删一条连接会把 `~/.ssh/config` 那行 Include 指空。
+  // ★ 路径**现算**（与 `ctx.dataDir()` 同一个表达式），绝不从分区名拼 —— 分区名里
+  //   插件 id 那一段是**大写**的，拼出来会静默落空，而 `force` 把 ENOENT 吞掉，
+  //   于是"删成功"而目录还在。
+  // ★ 整段**只报不抛**：`commitConfig` 的调用点在 IPC 的**成功路径**上，这里抛出去
+  //   会把「删除连接」变成一句失败，而配置其实已经删了、也存了。
+  //
+  //   ★ 而**失败的那条路走的是 `removeDirChecked` 的返回值，不是异常**（它自己
+  //     把 `rmSync` 包住了）—— 所以 `catch` 这一段是**够不着的**：今天块里没有
+  //     任何一个调用会抛。留着它是因为这里是一条**破坏性**路径上的**成功路径**，
+  //     而"抛出去"在这里的代价是一句**说谎的**错误信息（删成功了却说失败）。
+  //   ⇒ **别为这个 catch 写用例**：没有任何变异打得红它，写出来的只会是一条
+  //     看起来在守什么、其实什么也没守的用例。"删不动"那一条真实的路由
+  //     `boot.test.mjs` 的〈磁盘删不动时只报、不抛〉守着（它断言的是**提示**与
+  //     IPC 仍然成功）。
+  try {
+    const root = pluginDataRoot();
+    if (root) {
+      const live = liveDataDirs();
+      for (const p of registry.list().filter(pluginData.hasInstance)) {
+        const name = pluginData.dataDirNameOf(pluginData.identityOf(p, layoutId));
+        if (live.has(name)) continue;
+        const r = removeDirChecked(path.join(root, name));
+        if (!r.ok) {
+          win.pushNotice('error', `${label}已经回收，但`
+            + `「${p.displayName || p.name}」那份磁盘数据没能清干净：${r.error}`);
+        }
+      }
+    }
+  } catch (e) {
+    win.pushNotice('error',
+      `${label}已经回收，但磁盘上那份数据没能清干净：${e.message}`);
   }
 }
 
@@ -1349,8 +1426,9 @@ function removeDirChecked(dir) {
  *   永远留在对账的清单里，而用户会以为自己点了没反应。
  *
  * ★ 两条路都调它：对账里用户主动删那一行（`clearOneRow`），以及一个布局组被回收
- *   （`clearLayoutStorage`）。后者**只**清分区那一侧 —— 插件写在磁盘上的文件不跟着
- *   一个布局组走（那可能是它攒了很久、重建不出来的东西），它留给对账去列、由用户决定。
+ *   （`clearLayoutStorage`）。★ 但它**只管分区这一侧** —— 插件写在磁盘上的那份
+ *   （`plugin-data/` 下）是**另一个根**，由 `clearLayoutStorage` 并列处理的另一段
+ *   负责。两半的判据也不同：分区要 `hasLayoutStorage`，数据目录只要 `hasInstance`。
  *
  * @param {string} partition 完整的 `persist:…`（给 Electron 的那个名字）
  * @param {string|null} diskName 磁盘上的目录名（**折叠过**的那一份）。给不出来就只清存储、不删目录。
@@ -1444,15 +1522,6 @@ function reapSessions() {
 }
 
 /**
- * 这一次会话的端口排除集：**别人已经拿走的**都不许碰。
- *
- * ★ 「别人」不止别的布局组。这里从前只排别的组端口（`usedLayoutPorts`），单会话时
- *   那是完备的；多开之后不是了 —— 中转站从中转基准端口起，而**没有任何东西**把它
- *   从布局隧道的候选里排除掉。布局隧道从组端口一路 +1 往上探（`tunnel.js` 的
- *   `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
- *   两边的日志里一个字都不提端口冲突。
- */
-/**
  * 现在**真的被某一块界面用着**的那些分区（一组折叠过的名字）。
  *
  * ★ 为什么是"一组"而不是"那一个"：窗口里那一块从前只有一个，而多开之后前台只是
@@ -1470,6 +1539,45 @@ function livePartitions() {
   return out;
 }
 
+/**
+ * 现在**真的有一条活会话落在上面**的那些插件数据目录（折叠过的目录名）。
+ *
+ * ★ 它是 `livePartitions()` 的**姊妹，不是它的副本** —— 判据不同：
+ *   · 分区是**窗口**持有的（构造 WebContentsView 时定下来），所以那里问的是
+ *     "哪块视图显示着哪个分区"；
+ *   · 插件数据目录**不由窗口持有** —— 它由 `ctx.dataDir()` 现算，唯一的主人是
+ *     那条会话。所以这里必须问"哪条**活会话**落在哪个布局组上"。
+ *   拿前者当后者用会**静默失效**：一个没有界面的插件（`hasInstance` 却没有
+ *   `surface`）在窗口里没有位置，于是它正在用的那份目录会被当成没人用的。
+ *
+ * ★ 少了它的症状也是**静默**的：回收一个组时把一条正在跑的会话脚下那份数据删掉
+ *   （`ssh slurmate` 忽然认证失败、编辑器状态没了），而用户只点过"换布局组"或
+ *   "删连接"。这条路径**今天够得着**：
+ *     ① 会话跑在 C1 的组上 → ② 把活跃连接切成 C2（**不动引用计数、不停会话**）
+ *     → ③ 从 C1 改布局组：`isActive` 是假、不走 relisten，而 C1 原来那个组
+ *     引用计数归零、被回收。
+ */
+function liveDataDirs() {
+  const out = new Set();
+  for (const rec of sessions.values()) {
+    if (!occupied(rec.slot) || !rec.controller) continue;
+    const p = rec.plugin;
+    if (!p || !pluginData.hasInstance(p) || !rec.controller.layoutId) continue;
+    out.add(pluginData.dataDirNameOf(
+      pluginData.identityOf(p, rec.controller.layoutId)));
+  }
+  return out;
+}
+
+/**
+ * 这一次会话的端口排除集：**别人已经拿走的**都不许碰。
+ *
+ * ★ 「别人」不止别的布局组。这里从前只排别的组端口（`usedLayoutPorts`），单会话时
+ *   那是完备的；多开之后不是了 —— 中转站从中转基准端口起，而**没有任何东西**把它
+ *   从布局隧道的候选里排除掉。布局隧道从组端口一路 +1 往上探（`tunnel.js` 的
+ *   `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
+ *   两边的日志里一个字都不提端口冲突。
+ */
 function excludedPortsFor(rec) {
   const s = config.usedLayoutPorts(cfg, rec.controller && rec.controller.layoutId);
   for (const other of sessions.values()) {
@@ -1543,10 +1651,18 @@ async function startSession(resources, serviceKind) {
   }
   warnVersionDrift(plugin);
 
+  // ★ 这一次会话是**哪条连接**的 —— 读一次，两处共用：布局组从它算，
+  //   `ctx.connection()` 也从它来。分两处读会让它们指向两条不同的连接。
+  //
+  //   ★ 读的是**当前活跃连接**：会话就是从界面上那个连接起的。这个读法有代价 ——
+  //     切活跃连接不影响已经在跑的会话，所以重连接回来的会话可能拿到"不是它自己的"
+  //     那条（见 pluginContext 的 `connection()`）。
+  const conn = config.activeConnection(cfg);
+
   // ★ 布局组是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
   //   编辑器布局），不跑浏览器的不给 —— 给它一个组只会凭空造出一个永远不会被
   //   创建的存储分区，并让「运行中切布局」去挪一个正在用的隧道端口。
-  const layoutId = plugin.contributes.layout ? layoutForSession() : null;
+  const layoutId = plugin.contributes.layout ? layoutForSession(conn) : null;
 
   // ── ★ 槽：一个活跃会话占一份「一个就够」的资源，同一个槽只能有一个 ──────────
   //
@@ -1576,7 +1692,8 @@ async function startSession(resources, serviceKind) {
   //
   // ★ 排在槽那道闸之后：为一个马上会被拒的会话去生成一把钥匙，是在磁盘上留一个
   //   用户没要求过的副作用。
-  const rec = { slot, plugin, pluginWhy: null, controller: null };
+  const rec = { slot, plugin, pluginWhy: null, controller: null,
+                connectionId: conn ? conn.id : null };
   let sshPubkey = null;
   if (plugin.prepare) {
     const pre = plugin.prepare(pluginContext(rec));
@@ -1604,17 +1721,13 @@ async function startSession(resources, serviceKind) {
   rec.controller = new SessionController({
       backend,
       layoutId,
-      onTunnelPort: (id, port) => {
-        // 端口要**持久化** —— 变了 origin 就变，浏览器存在 localStorage 里的
-        // 编辑器布局会重置。记住它，下次还用同一个。
-        // （没有布局组的插件走下面那条 onRelayPort，它的端口属于别的地方。）
-        if (!id) return;
-        config.setLayoutPort(cfgDir, cfg, id, port);
-      },
-      // 没有布局组的插件：端口不由我们记，交给插件自己的 attach() 去处理
-      // （sshd 把它写进用户那份 ssh 配置，见 sshconfig.js）。
-      // 这里只需要「重新渲染一次」，插件按当前端口重写它那份配置；
-      // 端口和主机公钥都没变时它会自己跳过（那正是 ctx.once() 的用处）。
+      // 没有布局组的插件：**实际**端口要交给插件自己去写进用户那份 ssh 配置
+      // （见 plugins/sshd/client/sshconfig.js）。这里只需要「重新渲染一次」，插件
+      // 按当前端口重写它那份配置；端口和主机公钥都没变时它会自己跳过
+      // （那正是 ctx.once() 的用处）。
+      //
+      // ★ 有布局组的会话**没有**对应的回调 —— 端口是布局组的只读属性，顺移只影响
+      //   这一次会话，实际值在快照里。见 session.js 的 `_announcePort`。
       onRelayPort: () => onSessionChange(slot),
       // 端口顺移时必须跳过别的布局组占着的端口，否则两个组会声称同一个端口，
       // 每次启动谁先绑谁赢，布局在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
@@ -1629,11 +1742,15 @@ async function startSession(resources, serviceKind) {
   rec.controller.on('retarget', () => onSessionChange(slot));
   sessions.set(slot, rec);
 
-  // 首选端口也是**按插件**的：跑浏览器的用工位组的端口，其余用它自己声明的那个。
-  // 插件没声明时给 0，交给隧道模块自己顺移。
-  const preferredPort = plugin.preferredPort
-    ? plugin.preferredPort(pluginContext(rec), layoutId)
-    : 0;
+  // 本地端口**不是插件的事**（插件的 `preferredPort` 钩子已经收掉了）：有布局组的
+  // 会话用布局组自己那个端口（它就是 origin），没有布局组的用中转基准端口。
+  //
+  // ★ **必须判 null**：`layoutPort(cfg, null)` 会回落到 `LAYOUT_PORT_BASE`（18080），
+  //   于是中转站会话去抢某个布局组的 origin —— 那条路径**不报错**，症状是
+  //   "浏览器那一块打到 ssh 端口上，页面打不开"。
+  const preferredPort = layoutId
+    ? config.layoutPort(cfg, layoutId)
+    : config.RELAY_PORT_BASE;
   const snap = await rec.controller.start(resources, {
     preferredPort,
     serviceKind: plugin.name,
@@ -1649,8 +1766,8 @@ async function startSession(resources, serviceKind) {
  * 提交时该用本机的哪一个插件。
  *
  * ★ **优先按站点报的 `(id, 版本)` 挑**，而不是"同名里版本最高的那个"：那个才是
- *   这个会话真会跑的那一版，而客户端的 `prepare()`、`preferredPort()` 必须与服务端
- *   即将起的那份**配套**。同名多 id 只可能出现在"站点分发的插件覆盖了内建同名插件"
+ *   这个会话真会跑的那一版，而客户端的 `prepare()` 必须与服务端即将起的那份
+ *   **配套**。同名多 id 只可能出现在"站点分发的插件覆盖了内建同名插件"
  *   这种情形上，那时按名字挑纯属碰运气。
  *
  * 站点没报（老守护进程、或还没连上）时才退回按短名取版本最高的那个。
@@ -2117,12 +2234,33 @@ function pluginContext(rec) {
       get surfaceSession() { return win.surfaceSession(rec.slot); },
       reloadSurface: () => win.reloadSurface(rec.slot),
     },
-    config,
+    /**
+     * **这一条会话属于哪条连接**（只读，拿不到就是 `null`）。
+     *
+     * ★ 从前插件拿的是**整个 `config` 模块**加 `ctx.cfg` —— 那既是"当前活跃连接"，
+     *   又是整个 `config.json` 的**写**权（`setLayoutPort` 就是这么用的）。现在只给
+     *   这一条会话**自己**那点事实，而且是**副本**：插件改一个字段不该在下一次
+     *   `saveConfig` 时被原样写回磁盘 —— 那是把配置文件的写权限交给插件走一条看不见
+     *   的路。
+     *
+     * ★ 「属于**哪条**连接」而不是"当前活跃的那条"：多开之后两者会分家 —— 会话跑在
+     *   C1 上，用户把活跃连接切成 C2，按"当前"去拿会把 C2 的用户名写进 C1 那份
+     *   ssh 配置。唯一的例外是**重连接回来的**会话（它不知道自己属于谁，只能取活跃
+     *   连接那个），见 `reattachOne` 与账本 S26。
+     *
+     * ★ 只给"一条连接是什么"那几个字段。**布局组的事实不在这里** —— 那是另一条轴，
+     *   而快照里已经有了（`snap.layoutId`）。在这里再放一份等于把两条轴又焊回一个
+     *   对象上。
+     */
+    connection: () => {
+      const c = (cfg.connections || []).find((x) => x.id === rec.connectionId);
+      return c ? Object.freeze({
+        id: c.id, label: c.label, user: c.user, host: c.host, port: c.port,
+      }) : null;
+    },
     /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
      *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。 */
     keys,
-    get cfg() { return cfg; },
-    get cfgDir() { return cfgDir; },
     dev: dev.developerMode,
     // **这一条会话的**视图。不是"当前那一个" —— 那个概念被这次改动删掉了。
     session: () => (rec.controller && rec.controller.session) || null,
@@ -2399,7 +2537,16 @@ async function reattachOne(s) {
   //
   // 不跑浏览器的插件不走布局组（见 startSession）。这里**不需要**有连接也能接上，
   // 因为它的端口不是布局端口，没有「该用哪个组」这个问题。
-  const layoutId = (plugin && plugin.contributes.layout) ? activeLayoutId() : null;
+  // ★ **重启之后，"这条会话是哪条连接的"已经不知道了** —— 守护进程的会话视图里
+  //   没有这个字段（它只知道是谁提交的、用的哪个插件版本）。唯一能用的是**当前
+  //   活跃连接**，于是接回来的会话拿到的可能就是"不是它自己的"那条。
+  //   这是已知的、说得出原因的一格，记在账本 S26；**新开的**会话没有这个问题。
+  //
+  //   ★ 走的是 `conn.layoutId` 而不是 `layoutForSession(conn)`：接回一条会话是
+  //     **只读**的一步，不该顺手造出一个布局组来（那条路只在开会话时走）。
+  const conn = config.activeConnection(cfg);
+  const layoutId = (plugin && plugin.contributes.layout && conn)
+    ? conn.layoutId : null;
   if (plugin && plugin.contributes.layout && !layoutId) return;   // 没配置连接，接不上
 
   // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
@@ -2426,13 +2573,11 @@ async function reattachOne(s) {
     return;
   }
 
-  const rec = { slot, plugin, pluginWhy: why, controller: null };
+  const rec = { slot, plugin, pluginWhy: why, controller: null,
+                connectionId: conn ? conn.id : null };
   rec.controller = new SessionController({
     backend, layoutId,
-    onTunnelPort: (id, port) => {
-      if (!id) return;                 // 没有布局组的插件，没有东西可记
-      config.setLayoutPort(cfgDir, cfg, id, port);
-    },
+    // 同上（startSession 那处）：只有**没有布局组**的会话要报实际端口。
     onRelayPort: () => onSessionChange(slot),
     getExcludedPorts: () => excludedPortsFor(rec),
     // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
@@ -2446,9 +2591,10 @@ async function reattachOne(s) {
   sessions.set(slot, rec);
 
   // 认不出的插件用**非布局组**的基准端口：它的端口绝不能落进任何布局组（否则会与
-  // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。
-  const preferredPort = (plugin && plugin.preferredPort)
-    ? plugin.preferredPort(pluginContext(rec), layoutId)
+  // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。有布局组的会话用组
+  // 自己那个端口 —— 判据是 layoutId 有没有（框架的事实），不是"是哪个插件"。
+  const preferredPort = layoutId
+    ? config.layoutPort(cfg, layoutId)
     : config.RELAY_PORT_BASE;
   if (queued) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
@@ -2564,6 +2710,10 @@ function registerIpc() {
     //    唯一挡着它的是 `clearLayoutStorage` 里"正被那块界面用着就不清"，而多开
     //    之后那一句只能看到**前台**那一块 —— 前台不是它的时候形同虚设。
     const conn = (cfg.connections || []).find((c) => c.id === id);
+    // 组的**名字**要在 commitConfig 之前记下来 —— 一回收，`cfg` 里就没有这个名字了，
+    // 而清理失败时那句话要说清是**哪一个**组（"某个布局组"对用户没有用）。
+    const goneLayout = conn && conn.layoutId
+      ? config.findLayout(cfg, conn.layoutId) : null;
     const held = conn && conn.layoutId
       && [...sessions.values()].find((r) => occupied(r.slot)
         && r.controller && r.controller.layoutId === conn.layoutId);
@@ -2581,6 +2731,13 @@ function registerIpc() {
     // commitConfig 而不是 saveConfig：删掉最后一条指向它的连接之后，
     // 它的布局组引用计数归零，必须被回收（并清掉它的浏览器存储）。
     commitConfig();
+    // ★ 而**删掉的可能是最后一条连接**：那一步 `pruneLayouts` 会跳过（它的守卫是给
+    //   "从来没被任何连接指过的兜底组"用的，见 `reclaimLayoutGroup` 的注释），
+    //   所以这里要显式回收 —— 否则"删条目就删数据"在最常见的场合（只配了一条连接）
+    //   根本不发生。
+    if (!cfg.connections.length && conn && conn.layoutId) {
+      reclaimLayoutGroup(conn.layoutId, (goneLayout || {}).name);
+    }
     // 这条连接的密钥跟着走 —— 留着它既无用，又会在界面上留下一条看不见的凭据。
     // 两处都要清：落盘的那份，以及「这台机器没有凭据库」时留在内存里的那份。
     const gone = config.deleteKey(cfgDir, id).removed;
@@ -2676,7 +2833,10 @@ function registerIpc() {
           error: '换端口失败，布局组没有改动：' + r.error,
         };
       }
-      target.port = r.port;                 // 可能顺移过
+      // ★ **不把 r.port 写回 target** —— 新组的端口是它**被创建时**定下来的那个
+      //   （`nextLayoutPort`），顺移只是这一次会话的事。写回会把一次暂时的冲突
+      //   变成永久的 origin 变更，而冲突消失之后 origin 回不去、那份布局也跟着
+      //   白丢。（`relisten` 的 warning 已经把这个取舍告诉用户了。）
     } else if (isActive && !sessionLive) {
       // 没有会话在跑：只改标记，下次开会话就用它。
       // ★ 这里从前还有一个 `controller.setLayout(...)` —— 它改的是那个会话的

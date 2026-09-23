@@ -284,7 +284,7 @@ function portState(port) {
   });
 }
 
-test('★ 隧道重建时端口顺移必须写回，localPort 不能失真', async (t) => {
+test('★★ 顺移只影响这一次会话：控制器里没有任何「把端口报告给配置」的回调', async (t) => {
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 100 });
 
@@ -304,15 +304,19 @@ test('★ 隧道重建时端口顺移必须写回，localPort 不能失真', asy
   let layoutPort = await freePort();
   while (layoutPort > 65500) layoutPort = await freePort();
 
-  const ports = [];
   const ctl = new SessionController({
     backend, layoutId: 'l1', statusMs: 80,
-    onTunnelPort: (id, port) => ports.push(port),
   });
   t.after(() => ctl.stop());      // 见下方「服务端替用户做的决定」那条的说明
   const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
   assert.equal(snap.localPort, layoutPort);
-  assert.deepEqual(ports, [layoutPort], '首次监听也应当写回配置');
+
+  // ★ 这个控制器**没有** onTunnelPort —— 顺移后的端口不回报给任何人。写回配置会把
+  //   一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也回不去，而
+  //   原来那份布局本来是可以回来的（下一会话绑回原端口，那份布局也跟着回来）。
+  //   ★ 这一条断言就是那道闸：那个钩子**在控制器上根本不存在**。
+  assert.equal(typeof ctl.onTunnelPort, 'undefined',
+    '★ 布局组的端口是只读属性，控制器里不该有把它报告出去的钩子');
 
   // 制造确定性的 EADDRINUSE：先停掉隧道（它自己正占着这个端口），
   // 再由**测试**把端口占住。不这么做的话，重建时端口是空的，永远不会顺移。
@@ -335,11 +339,38 @@ test('★ 隧道重建时端口顺移必须写回，localPort 不能失真', asy
     `顺移应当落在扫描区间内，实际 ${moved}`);
   assert.equal(ctl.snapshot().origin, `http://127.0.0.1:${moved}`,
     'origin 必须跟着新端口走');
-  // ★ 顺移必须写回配置。不写回的话，配置记的端口与实际 origin 分叉，
-  //   下次启动会绑回配置的端口、布局跟着重置一次，而用户不知道为什么。
-  assert.equal(ports[ports.length - 1], moved, '顺移必须通过 onTunnelPort 写回');
   assert.match(ctl.snapshot().warning || '', /被占用|已改用/,
     '顺移是丢布局的原因，必须说出来');
+  // ★ 还要说清它是**暂时**的：首选端口没被改掉，冲突消失之后下一会话会绑回原处、
+  //   原来那份布局也跟着回来。不说这一句，用户会以为自己被永久搬走了。
+  assert.match(ctl.snapshot().warning || '', /回到/,
+    '★ 顺移不改写首选端口 —— 要告诉用户下一会话会回到原来的端口');
+});
+
+test('★ 端口报给谁：有布局组的会话一声不吭，没有布局组的必须报实际端口', () => {
+  // ★ 这一条守的是 `_announcePort` 里那个**取反的判据**。写反的后果不是"报错"：
+  //   一个中转站会话永远不报端口 ⇒ 用户那份 ssh 配置停在基准端口（或者根本没写），
+  //   而面板上会话是绿的、「本地地址」那一栏也对（隧道真的在监听）——
+  //   两边的日志里一个字都不提这个回调。
+  //
+  //   另一头同样要钉住：**有布局组的会话什么都不做**。端口是布局组的只读属性，
+  //   实际值就在快照里（`localPort` / `origin`），不需要再回报给谁。
+  const seen = [];
+  const be = { async rpc() { return { ok: true, code: 0, data: {} }; } };
+
+  const inLayout = new SessionController({
+    backend: be, layoutId: 'l1', onRelayPort: (p) => seen.push(['layout', p]),
+  });
+  const relay = new SessionController({
+    backend: be, layoutId: null, onRelayPort: (p) => seen.push(['relay', p]),
+  });
+
+  inLayout._announcePort(18080);
+  relay._announcePort(18090);
+
+  assert.deepEqual(seen, [['relay', 18090]],
+    '★ 有布局组的会话不该把端口报给任何人；没有布局组的必须报 —— 那一份 ssh 配置'
+    + '要反映当前真值，而用户认的别名恒定');
 });
 
 test('★ 会话被守护进程回收后，本地监听必须一起收掉', async (t) => {

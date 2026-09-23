@@ -498,7 +498,13 @@ function usedLayoutPorts(cfg, exceptId) {
  * 下一个可用端口：从 18080 起，跳过已被占用的。**确定性**，不探测 OS。
  *
  * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
- * 那就等于每次启动都可能换 origin。EADDRINUSE 交给隧道顺移 + 写回来处理。
+ * 那就等于每次启动都可能换 origin。
+ *
+ * ★ **调用它的地方只有一个时机：一个布局组被创建的时候。** 此后再没有任何东西改
+ *   这个值 —— 端口是布局组的**只读属性**。（从前隧道顺移之后会把它写回来，
+ *   那等于把一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也
+ *   回不去，而原来那份布局本来是可以回来的。）
+ *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  */
 function nextLayoutPort(cfg) {
   const used = usedLayoutPorts(cfg, null);
@@ -524,19 +530,8 @@ function layoutPort(cfg, id) {
 }
 
 /**
- * 端口变了 origin 就变，code-server 的编辑器布局会全部重置 —— 所以必须持久化。
- * 与旧的 setSlotPort 理由完全相同（那个函数就是为这件事存在的）。
- *
- * 注意：这里自己 saveConfig 是**安全**的。端口写回只可能发生在「正在被某个连接指着的组」
- * 上（引用计数 ≥ 1），所以它不会与 pruneLayouts 冲突。改 hostKeys 的两个函数同理。
- * 会改变**引用计数**的改动才必须走 index.js 的 commitConfig()。
+ * 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。
  */
-function setLayoutPort(dir, cfg, id, port) {
-  cfg.layouts = (cfg.layouts || []).map((l) => (l.id === id ? { ...l, port } : l));
-  saveConfig(dir, cfg);
-}
-
-/** 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。 */
 function setConnectionLayout(cfg, connId, layoutId) {
   if (!(cfg.connections || []).some((c) => c.id === connId)) {
     return { ok: false, error: '这条连接不存在。' };
@@ -966,7 +961,7 @@ module.exports = {
   // 布局组
   RELAY_PORT_BASE,
   newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
-  nextLayoutName, layoutPort, setLayoutPort, setConnectionLayout,
+  nextLayoutName, layoutPort, setConnectionLayout,
   pruneLayouts, layoutPlan,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账

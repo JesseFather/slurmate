@@ -114,7 +114,19 @@ const DATA_KEYS = ['inherit', 'perInstance'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
 const LOGIN_KEYS = ['path', 'field', 'cookie'];
-const CLIENT_HOOKS = ['prepare', 'attach', 'preferredPort', 'closeWarning'];
+/**
+ * 客户端代码允许导出的钩子。
+ *
+ * ★ 没有 `preferredPort` 了 —— 本地端口**不是插件的事**：有布局组的会话用布局组
+ *   那个端口（`config.js` 的 `layoutPort`），没有的用中转基准端口。这两个值基座
+ *   自己就能算，而从前那个钩子只是让插件把基座的值原样报回来。
+ *   ★ 从一个客户端代码导出它现在是**错误**（`keysProblem` 会拒），不是"被忽略" ——
+ *   静默忽略会让一个旧插件看起来装上了、而它的选择从头到尾没生效。
+ *
+ * 插件要的"这条会话属于哪条连接"由 `ctx.connection()` 给（见 index.js 的
+ * pluginContext），那是一个**读**的能力，不是一个让插件回报偏好的口子。
+ */
+const CLIENT_HOOKS = ['prepare', 'attach', 'closeWarning'];
 
 /**
  * 站点短名的字符集。它进配置块名、进会话文件、进日志与报错文案 —— 宽松的字符集
@@ -794,7 +806,7 @@ function inspectDir(dir) {
      */
     active: true,
     // ── 客户端代码的钩子（全都可以没有）──
-    prepare: null, attach: null, preferredPort: null, closeWarning: null,
+    prepare: null, attach: null, closeWarning: null,
   };
   return { entry: { plugin, dir, files, digest,
                     clientPath: hasClientCode ? clientPath : null } };
@@ -830,7 +842,7 @@ function activatePlugin(entry) {
   }
   const why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
   if (why) return { error: `${entry.clientPath}：${why}` };
-  for (const k of ['prepare', 'attach', 'preferredPort']) {
+  for (const k of ['prepare', 'attach']) {
     if (mod[k] !== undefined && typeof mod[k] !== 'function') {
       return { error: `${entry.clientPath}：${k} 必须是一个函数` };
     }
@@ -846,7 +858,6 @@ function activatePlugin(entry) {
       ...entry.plugin,
       prepare: mod.prepare || null,
       attach: mod.attach || null,
-      preferredPort: mod.preferredPort || null,
       closeWarning: mod.closeWarning || null,
     },
   };

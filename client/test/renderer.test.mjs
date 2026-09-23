@@ -356,6 +356,29 @@ test('★ 删插件数据的确认框要说清**删的是哪几样**（磁盘上
   assert.match(js, /function placesText/, '清单里的每一行都要说清它在哪几个落点');
 });
 
+test('★ 删连接与切走布局的确认框都要说清「连带删掉那个布局组的数据」', () => {
+  // ★ 这一条与 boot.test.mjs 那条**行为**断言是成对的（「删掉最后一条用某个布局组的
+  //   连接 ⇒ 那个组的两份数据一起清掉」）。只留一边都不成立：
+  //   · 只有行为断言 ⇒ 真删了而文案没提 = 没有知情同意；
+  //   · 只有文本断言 ⇒ 文案说了而实现没做 = 一句不成立的承诺。
+  //
+  // ★ 判据必须是"**最后一条**"而不是"删一条就删数据"：还有别的连接指着那个组时，
+  //   数据留着（下一会话还要用它）。文案说错这一点的后果与"没说"一样严重 ——
+  //   它把一件**没有发生**的事告诉了用户。
+  const delAt = js.indexOf('del.onclick = async () => {');
+  assert.notEqual(delAt, -1, 'panel.js 里找不到「删除连接」那一段了');
+  const del = js.slice(delAt, delAt + 1800);
+  assert.match(del, /soleOwnerId/,
+    '判据要用 layoutPlan 的 soleOwnerId —— 它与主进程数的是同一件事');
+  assert.match(del, /写在磁盘上的那些文件/, '要说到插件写在磁盘上的那一份');
+
+  const cdAt = js.indexOf('function confirmDiscard');
+  assert.notEqual(cdAt, -1, 'panel.js 里找不到 confirmDiscard 了');
+  const cd = js.slice(cdAt, cdAt + 900);
+  assert.match(cd, /插件写在磁盘上的那些文件/,
+    '切走一个组也是回收它 —— 磁盘那一份同样会跟着走');
+});
+
 test('★ 主进程发来的 warn 不许被折成 info（显示成信息的失败 = 被吞掉的失败）', () => {
   // 这一条钉的是一处**真的发生过**的错：`onNotice` 从前把除 ok/error 之外的一切都画成
   // 「信息」，于是"布局组已删除，但它的浏览器存储没能清干净"这条**警告**在日志里长成了

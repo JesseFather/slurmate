@@ -504,10 +504,22 @@ function renderConnections(list) {
     del.onclick = async () => {
       // 删除现在连带销毁这条连接的私钥，所以要先问一句 —— 它是一条不可逆的操作，
       // 而且用户已经拿去 IDM 注册过的公钥会就此作废（重新建一条要重新注册）。
+      //
+      // ★ 还有一样会被删掉：**最后一个用某个布局组的连接被删掉时，那个布局组的
+      //   数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）—— 主进程那边是
+      //   `commitConfig` → `pruneLayouts` → `clearLayoutStorage`。
+      //   判据与主进程**同源**：`layoutPlan` 的 `soleOwnerId` 就是从"只有这一条
+      //   连接在用它"推出来的，与 `pruneLayouts` 数的是同一件事。
+      const sole = (boot.layouts || []).find((l) => l.soleOwnerId === c.id);
       const sure = window.confirm(
         `删除「${c.user}@${c.host}:${c.port}」？\n\n`
         + '这条连接的私钥会一起删掉。你注册到 IDM 的那把公钥随之作废，'
-        + '重建一条需要重新注册。');
+        + '重建一条需要重新注册。\n'
+        + (sole
+          ? `\n★ 「${sole.name}」只有这一条连接在用，所以它也会被删掉 —— 里面的`
+            + '编辑器布局、登录状态，以及插件写在磁盘上的那些文件都会一起没掉，'
+            + '而且找不回来。\n'
+          : ''));
       if (!sure) return;
       const r = await window.slurmate.deleteConnection(c.id);
       if (!r.ok) return notice('error', r.error);
@@ -516,9 +528,9 @@ function renderConnections(list) {
       // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
       if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
       renderConnections(boot.connections);
-      notice('info', r.keyDeleted
-        ? '已删除该连接，它的私钥也一并删掉了。'
-        : '已删除该连接。');
+      notice('info', '已删除该连接。'
+        + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
+        + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
     };
 
     li.append(t, m, lay, main, edit, del);
@@ -620,7 +632,8 @@ function confirmDiscard(name) {
     && lastSnap.state !== 'idle' && lastSnap.state !== 'ended';
   return window.confirm(
     `「${name}」现在只有这一条连接在用，切走之后它会被删除。\n\n`
-    + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，而且找不回来。\n'
+    + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，'
+    + '插件写在磁盘上的那些文件也一样 —— 而且找不回来。\n'
     + (live ? '\n★ 当前页面会重新加载到新布局，未保存的编辑内容会丢失。\n' : '')
     + '\n确定要切换吗？');
 }
