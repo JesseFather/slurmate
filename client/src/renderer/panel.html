@@ -20,6 +20,12 @@
 <div id="statusbar" class="s-idle">
   <span class="dot"></span>
   <span class="st" id="sb-state">未开始</span>
+  <!-- 会话标签：**两条以上**才出现（一条时它不提供任何选择，只占地方）。
+       ★ 它必须待在这 30px 里：窗口主体会被原生视图整块盖住，把标签放在下面
+         等于它们永远点不到。见 windows.js 的 setFront。
+       ★ 名字是**服务名**：同一个槽只能有一条会话，所以两条会话的插件必然不同，
+         服务名在这里天然唯一，不需要再造一个编号。 -->
+  <span id="session-tabs" class="hidden"></span>
   <span class="sep" id="sb-sep1">|</span>
   <span id="sb-detail"></span>
   <span class="spacer"></span>

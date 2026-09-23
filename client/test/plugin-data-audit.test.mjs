@@ -331,7 +331,7 @@ test('★ 删这一份行不行：三个下场各自说得出原因（判定权�
   ];
   // 不在清单里（界面那份已经陈旧），或者那一行本来就不给删。
   for (const p of ['never-seen', '认不出的东西']) {
-    const v = audit.deletionVerdict({ rows, name: p, surfacePartition: null });
+    const v = audit.deletionVerdict({ rows, name: p, surfacePartitions: [] });
     assert.equal(v.ok, false, `${p} 不该删得掉`);
     assert.equal(v.code, 'stale');
     assert.match(v.error, /重新看一下/, '拒绝也要说清下一步');
@@ -340,17 +340,24 @@ test('★ 删这一份行不行：三个下场各自说得出原因（判定权�
   //   被从本机拿掉了（站点回收，或者用户在本机删掉了那一版）—— 那一刻它既"在用"、
   //   又"不在该有的清单里"，于是一眼看过去就是一份没人要的孤儿。
   const live = audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartition: 'persist:AA@bb@cc',
+    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:AA@bb@cc'],
   });
   assert.equal(live.ok, false);
   assert.equal(live.code, 'in_use');
   assert.match(live.error, /新建空白布局/, '要给出路 —— 换一个布局组就是"重置"');
   // 折叠后才比得上：分区名里 id 那一段是大写的，磁盘上那一份是小写的。
   assert.equal(audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartition: 'persist:aa@bb@cc' }).code, 'in_use');
+    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'] }).code, 'in_use');
+  // ★★ **多开之后才成立的那一条**：窗口里有几块视图，判据就必须看**每一块**。
+  //    命中项排在第二个 —— 只看第一个的实现会放行，而放行的后果是"把后台那块
+  //    正在跑的页面脚下的存储抽掉"，症状只是「页面莫名其妙坏了」。
+  assert.equal(audit.deletionVerdict({
+    rows, name: 'aa@bb@cc',
+    surfacePartitions: ['persist:别的一条', 'persist:aa@bb@cc'],
+  }).code, 'in_use', '★ 命中的那一块不在第一个也照样算"在用"');
   // 没在用的放行，而且回的是**这次算出来的那一行**（拼路径要用它）。
   const ok = audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartition: 'persist:别的',
+    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:别的'],
   });
   assert.equal(ok.ok, true);
   assert.equal(ok.row, rows[0]);

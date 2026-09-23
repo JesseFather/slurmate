@@ -63,7 +63,7 @@ const hosts = require('./hosts.js');
 // ★ `KIND` 也引进来：主进程里有好几处要问"这是不是那个假后端"。写字面量
 //   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
 const { createBackend, KIND } = require('./backend.js');
-const { SessionController, State } = require('./session.js');
+const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
@@ -94,7 +94,21 @@ let devSaved = { developerMode: false, pluginDir: null };
 
 let win = null;
 let backend = null;
-let controller = null;
+/**
+ * 活着的会话：**槽 → 记录**（槽见 `plugin-data.js` 的 `slotOf`）。
+ *
+ * ★ 这里从前是 `let controller = null`。单值能成立，靠的是"同一时刻只有一个会话"
+ *   这条**假设**，而假设不是判据 —— 它的失败形态是：起中转站时把 code-server 那块
+ *   界面收掉、关窗只掐断两条会话里的一条、插件拿错**别人的**会话口令。
+ *
+ * ★ 键是**槽**而不是 sessionId：会话在提交回来之前还没有 id，而"这个槽被占了"
+ *   从用户按下「开始」那一刻起就必须成立。
+ *
+ * ★ 记录里留着 `plugin`，与从前 `controller.plugin` 是同一条纪律：**起它那一刻
+ *   捕获**，之后所有状态变化都用它、不再查注册表（站点会升级，而一个跑着的会话
+ *   用的是它提交时那一份代码）。
+ */
+let sessions = new Map();
 let cfgDir = null;
 let cfg = null;
 /**
@@ -254,7 +268,13 @@ function bootstrap() {
     //   被我们**吞掉**的键（F12 之类）仍然照报：那是在解释「为什么按了没反应」，
     //   是用户自己触发的、想问的问题。
     attachKeyGuard(win.win.webContents, {
-      onOwned: (action) => { if (action === 'reload') win.reloadSurface(); },
+      // 「重新加载页面」这个键打的是**前台**那一块 —— 屏幕只有一块，而用户按
+      // 快捷键时看的正是它。
+      onOwned: (action) => {
+        if (action !== 'reload') return;
+        const slot = frontSlot();
+        if (slot) win.reloadSurface(slot);
+      },
       onBlocked: (desc) => {
         win.pushNotice('key-blocked', desc);
         if (backend.kind === KIND.FAKE) win.pushSwallowed(desc);
@@ -266,7 +286,9 @@ function bootstrap() {
 
     registerIpc();
 
-    win.pushState(null);
+    // 开局那一屏：**零条会话**（`_sessions` 空 ⇒ 关窗不会问，正是要的）。
+    win.setSessions([]);
+    win.pushSessions([], null);
     await announceBackend();
 
     // 启动时看看有没有「上次没关干净的会话」—— 自动接上，而不是让用户重新提交
@@ -274,20 +296,24 @@ function bootstrap() {
   });
 
   app.on('before-quit', async (e) => {
-    if (quitting || !controller) return;
+    if (quitting || !sessions.size) return;
     quitting = true;
     e.preventDefault();
     win.setBusy(false);
-    let res = { ok: true };
+    // ★★ 走**唯一那份**实现（见 `stopAllSessions`）。从前这里只看那唯一的
+    //   `controller`，多开之后只补一个，剩下的会话在控制节点上停在一个"客户端已经
+    //   退出、而它还以为有人连着"的状态，要等 1800 秒的孤儿判定才被 scancel。
     try {
-      res = await controller.stop();
+      for (const { sessionId, res } of await stopAllSessions()) {
+        if (!res.ok && sessionId) {
+          // 落盘待补发。**下次启动时补发** —— 这就是「跨崩溃的可靠投递」。
+          // 注意：绝不用 process.on('exit') 做这件事，那里只能跑同步代码，发不出网络请求。
+          config.addPendingGoodbye(cfgDir, sessionId);
+        }
+      }
     } catch (err) {
-      res = { ok: false, detail: err.message };
-    }
-    if (!res.ok && controller.sessionId) {
-      // 落盘待补发。**下次启动时补发** —— 这就是「跨崩溃的可靠投递」。
-      // 注意：绝不用 process.on('exit') 做这件事，那里只能跑同步代码，发不出网络请求。
-      config.addPendingGoodbye(cfgDir, controller.sessionId);
+      // 退出这条路**绝不能因为收尾失败就走不掉**：用户按的是关闭，不是"重试释放"。
+      win.pushNotice('error', '结束会话时出错：' + err.message);
     }
     app.exit(0);
   });
@@ -1183,19 +1209,20 @@ function clearLayoutStorage(layoutId, layoutName) {
     //   只有一个分区，跳过它就等于跳过整件事；多份之后跳过**这一个**才是它本来的
     //   意思。
     //
-    //   ★ 这一条今天**够不着**，写在这里免得下一个人把它当成一道正在生效的防线：
-    //     界面还在的时候，它那个分区必定属于一个引用计数 ≥ 1 的组（跑着的会话就是
-    //     那条连接），而回收只删引用计数为 0 的；界面不在的时候 `_destroySurface()`
-    //     已经把 `surfacePartition` 清成 null 了。它留着是因为它守的那条不变量是
-    //     **约定**而不是类型 —— `setConnectionLayout` 那条"先 relisten、成功了才动
-    //     配置"的次序一旦被改坏，这里就是最后一道。（与 plugins/index.js 的
-    //     `parseVer` 同一类：留着一个不可观测的守卫，并且**明说**它不可观测。）
+    //   ★★ 判据从"**那一块**界面"改成"**任何一块**界面"（`livePartitions()`）。
+    //     从前 `win.surfacePartition` 只能返回一块，而那块是**前台**；多开之后
+    //     前台不是它的时候，这一道就形同虚设 —— 而那正是"回收一个组，抽掉另一块
+    //     正在跑的视图脚下的 localStorage"这条路径。
+    //
+    //   ★ 关于它够不够得着：从前这里写着"今天够不着"，而**多开让它够得着了**。
+    //     完整的路径在 `app:deleteConnection` 那段注释里（切换活跃连接 → 删旧连接
+    //     → 组被回收）。所以它现在是一道**正在生效**的防线，不再是一个约定。
     //
     //   ★ 跳过仍然是**静默**的，但那不等于"清理在瞒着用户"：这条路是"开关布局组 /
     //     删连接"带出来的，而那两步在动手之前都已经问过用户了（`would_discard`
     //     那个确认框）。**用户主动发起**的删除是另一条路（`app:deletePluginData`），
     //     那一条碰到同样的情形会**明确拒绝**并说清原因 —— 静默只在这一条路上关掉。
-    if (win && win.surfacePartition === partition) continue;
+    if (livePartitions().has(pluginData.foldAscii(partition))) continue;
     clearPartitionStorage(partition, disk, root).then((r) => {
       if (!r.ok) {
         win.pushNotice('error',
@@ -1372,6 +1399,87 @@ async function clearOneRow(row, roots) {
   return { ok: true, error: null };
 }
 
+// ── 会话表 ──────────────────────────────────────────────────────────────────
+/**
+ * 这个槽**还占着**吗。
+ *
+ * 判据与从前 `startSession` 里"能不能复用那个 controller"**逐字相同**（只是取了
+ * 反）：ENDED / ERROR / IDLE / RELEASING 都算"上一个会话已经完了"。
+ *
+ * ★ `RELEASING` 那一档尤其要紧 —— `stop()` 之后它就再也走不出去了（状态轮询已经
+ *   停了），把它当成"还占着"会让「结束会话」变成一道单向门：用户结束掉一个，
+ *   那个槽就永远开不了新的。
+ */
+function occupied(slot) {
+  const rec = sessions.get(slot);
+  const c = rec && rec.controller;
+  return Boolean(c)
+    && ![State.ENDED, State.ERROR, State.IDLE, State.RELEASING].includes(c.state);
+}
+
+/**
+ * 界面的那一份视图。**一次给全**。
+ *
+ * ★ `live` 与"有没有记录"是两件事：已经结束的记录**还要显示**（用户要看"已结束"，
+ *   也要在那里点「重新开始」），而它不占着槽。
+ */
+function sessionViews() {
+  return [...sessions.values()].map((rec) => ({
+    slot: rec.slot,
+    service: rec.plugin ? (rec.plugin.displayName || rec.plugin.name) : null,
+    live: occupied(rec.slot),
+    snap: rec.controller ? rec.controller.snapshot() : null,
+  }));
+}
+
+/**
+ * 把已经结束的记录收掉。
+ *
+ * 槽是**淘汰制**的：一个槽的上一轮记录留着，是为了让界面能显示"已结束 + 重新开始"；
+ * 而只要用户开始了**新的一轮**，那一屏就没有意义了。
+ * （只有一个会话时这是自动的 —— 新 controller 直接顶掉旧的。多开之后要有人做。）
+ */
+function reapSessions() {
+  for (const [slot] of sessions) if (!occupied(slot)) sessions.delete(slot);
+}
+
+/**
+ * 这一次会话的端口排除集：**别人已经拿走的**都不许碰。
+ *
+ * ★ 「别人」不止别的布局组。这里从前只排别的组端口（`usedLayoutPorts`），单会话时
+ *   那是完备的；多开之后不是了 —— 中转站从中转基准端口起，而**没有任何东西**把它
+ *   从布局隧道的候选里排除掉。布局隧道从组端口一路 +1 往上探（`tunnel.js` 的
+ *   `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
+ *   两边的日志里一个字都不提端口冲突。
+ */
+/**
+ * 现在**真的被某一块界面用着**的那些分区（一组折叠过的名字）。
+ *
+ * ★ 为什么是"一组"而不是"那一个"：窗口里那一块从前只有一个，而多开之后前台只是
+ *   "哪一块盖在上面"。**判据不能跟着前台走** —— 回收一个布局组时，被抽掉的是
+ *   "正在跑的那块页面"脚下的 localStorage，而它完全可能就是后台那一个。
+ *   （`plugin-data.js` 的 `samePartition` 两边都折叠，这里跟着它。）
+ */
+function livePartitions() {
+  const out = new Set();
+  if (!win) return out;
+  for (const rec of sessions.values()) {
+    const p = win.surfacePartition(rec.slot);
+    if (p) out.add(pluginData.foldAscii(p));
+  }
+  return out;
+}
+
+function excludedPortsFor(rec) {
+  const s = config.usedLayoutPorts(cfg, rec.controller && rec.controller.layoutId);
+  for (const other of sessions.values()) {
+    if (other === rec) continue;
+    const p = other.controller && other.controller.snapshot().localPort;
+    if (p) s.add(p);
+  }
+  return s;
+}
+
 // ── 会话编排 ────────────────────────────────────────────────────────────────
 /**
  * 起一个会话。
@@ -1440,11 +1548,38 @@ async function startSession(resources, serviceKind) {
   //   创建的存储分区，并让「运行中切布局」去挪一个正在用的隧道端口。
   const layoutId = plugin.contributes.layout ? layoutForSession() : null;
 
+  // ── ★ 槽：一个活跃会话占一份「一个就够」的资源，同一个槽只能有一个 ──────────
+  //
+  // 判据与逐条理由见 `plugin-data.js` 的 `slotOf`。这里只做一件事：**拒绝，并说出
+  // 是哪一个挡住了**。从前这一段没有 else 分支（走到 else 的唯一可能是"已经有一个
+  // 会话在跑"，而那时 `controller.start()` 会抛一句「会话已在进行中」）—— 那句话
+  // 对用户毫无用处：它不说**是哪个**会话挡着，也不说该怎么办。而多开的代价更大：
+  // 被拒绝的那条会静默地顶掉一条正在跑的。
+  const slot = pluginData.slotOf(layoutId);
+  if (occupied(slot)) {
+    const other = sessions.get(slot);
+    const who = other.plugin ? `「${other.plugin.displayName || other.plugin.name}」` : '另一个会话';
+    win.pushNotice('error', layoutId
+      ? `${who}正占着「${(config.findLayout(cfg, layoutId) || {}).name || layoutId}」`
+        + '这个布局组。一个布局组就是一个本地端口、一份浏览器存储，所以同一时刻'
+        + '只能有一个会话用它 —— 先结束那一个，或者到「布局」那一栏换一个组。'
+      : `${who}正占着中转站的位置。不要布局组的会话共用同一份对外身份`
+        + '（同一个 ssh 别名、同一个基准端口），所以同一时刻只能有一个 —— '
+        + '先结束那一个。');
+    return null;
+  }
+  // 上一个已经结束的那个记录该走了（它是给界面看"已结束"用的，新的一轮开始了）。
+  reapSessions();
+
   // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
   // 这次提交，而那要花掉一整趟往返）。**先备好再提交**是硬要求。
+  //
+  // ★ 排在槽那道闸之后：为一个马上会被拒的会话去生成一把钥匙，是在磁盘上留一个
+  //   用户没要求过的副作用。
+  const rec = { slot, plugin, pluginWhy: null, controller: null };
   let sshPubkey = null;
   if (plugin.prepare) {
-    const pre = plugin.prepare(pluginContext(plugin));
+    const pre = plugin.prepare(pluginContext(rec));
     if (!pre || !pre.ok) {
       win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
       return null;
@@ -1458,9 +1593,15 @@ async function startSession(resources, serviceKind) {
   //   一道单向门，用户必须重启客户端才能再开会话。
   //   让新会话拿一个新 controller 之后，若旧作业还没被守护进程收掉，用户会拿到
   //   服务端那句准确的「已有 1 个活跃会话（上限 1）」，而不是一句指不回根因的话。
-  if (!controller
-      || [State.ENDED, State.ERROR, State.IDLE, State.RELEASING].includes(controller.state)) {
-    controller = new SessionController({
+  // ★ **在这里捕获插件对象**（塞进 `rec`），之后所有状态变化都用它，不再查注册表。
+  //
+  //   站点升级插件之后池里会有同一个 id 的新版本，而一个**已经跑着**的会话用的是
+  //   它起时那一版 —— 作业侧与客户端侧是配套的两半，中途换掉这一半，轻则行为诡异、
+  //   重则对接不上。捕获之后，**升级插件对正在跑的会话完全没有影响**。
+  //
+  //   顺带得到一个好性质：把一个插件从池里卸掉，正在跑的会话也完全不受影响 ——
+  //   它手里已经攥着那个对象了。
+  rec.controller = new SessionController({
       backend,
       layoutId,
       onTunnelPort: (id, port) => {
@@ -1474,45 +1615,34 @@ async function startSession(resources, serviceKind) {
       // （sshd 把它写进用户那份 ssh 配置，见 sshconfig.js）。
       // 这里只需要「重新渲染一次」，插件按当前端口重写它那份配置；
       // 端口和主机公钥都没变时它会自己跳过（那正是 ctx.once() 的用处）。
-      onRelayPort: () => onSessionChange(controller.snapshot()),
+      onRelayPort: () => onSessionChange(slot),
       // 端口顺移时必须跳过别的布局组占着的端口，否则两个组会声称同一个端口，
       // 每次启动谁先绑谁赢，布局在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
       // 不然自己那个端口会被当成「别人的」而永远绑不上。
       //
       // 没有布局组的插件 layoutId 是 null，于是这里排除掉**全部**布局端口 ——
       // 正是要的：它绝不能落到某个布局组的端口上。
-      getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
-    });
-    controller.on('change', onSessionChange);
-    controller.on('retarget', () => onSessionChange(controller.snapshot()));
-  }
-  // ★ **在这里捕获插件对象**，之后所有状态变化都用它，不再查注册表。
-  //
-  //   站点升级插件之后池里会有同一个 id 的新版本，而一个**已经跑着**的会话用的是
-  //   它起时那一版 —— 作业侧与客户端侧是配套的两半，中途换掉这一半，轻则行为诡异、
-  //   重则对接不上。捕获之后，**升级插件对正在跑的会话完全没有影响**。
-  //
-  //   顺带得到一个好性质：把一个插件从池里卸掉，正在跑的会话也完全不受影响 ——
-  //   它手里已经攥着那个对象了。
-  controller.plugin = plugin;
-  // ★ 这里**没有** else 分支。走到 else 的唯一可能是「已经有一个会话在跑」，
-  //   而那种情况下 controller.start() 会抛「会话已在进行中」—— 这正是双击
-  //   「开始」时该有的表现。在 else 里顺手改一下运行中会话的 layoutId 是纯副作用：
-  //   它会把这个正在跑的会话挪到另一个布局组上，而用户什么都没要求。
+      // ★ 多开之后「别人」不止别的布局组，见 `excludedPortsFor`。
+      getExcludedPorts: () => excludedPortsFor(rec),
+  });
+  rec.controller.on('change', () => onSessionChange(slot));
+  rec.controller.on('retarget', () => onSessionChange(slot));
+  sessions.set(slot, rec);
 
   // 首选端口也是**按插件**的：跑浏览器的用工位组的端口，其余用它自己声明的那个。
   // 插件没声明时给 0，交给隧道模块自己顺移。
   const preferredPort = plugin.preferredPort
-    ? plugin.preferredPort(pluginContext(plugin), layoutId)
+    ? plugin.preferredPort(pluginContext(rec), layoutId)
     : 0;
-  const snap = await controller.start(resources, {
+  const snap = await rec.controller.start(resources, {
     preferredPort,
     serviceKind: plugin.name,
     needsPubkey: plugin.contributes.submitPubkey,
     sshPubkey,
   });
-  if (!snap) onSessionChange(controller.snapshot());
-  return snap;
+  if (!snap) onSessionChange(slot);
+  // ★ 回**槽**：界面拿它指着说"我起的是这一个"（`app:start` 的回包）。
+  return { slot, snap };
 }
 
 /**
@@ -1579,27 +1709,68 @@ function warnVersionDrift(plugin) {
  *   unhandledRejection —— 在 Electron 里表现为「界面某处悄悄不更新了」，
  *   而控制台里只有一条谁也不看的警告。宁可把它变成面板上看得见的一条错误。
  */
-async function onSessionChange(snap) {
+async function onSessionChange(slot) {
   try {
-    await _renderSession(snap);
+    await _renderSession(slot);
+    // 一次推**全部** —— 面板那一屏要显示的是"这个窗口里有几个会话、各自什么样"，
+    // 而不是"最后动过的那一个"。
+    const views = sessionViews();
+    // 窗口那一层要的两件事（几条活着、各自的 closeWarning）走这一份；界面要的
+    // 那一份走 pushSessions。**分开**：前者是"关窗会掐断什么"，后者是"画什么"。
+    win.setSessions(views.map((v) => ({
+      live: v.live,
+      service: v.service,
+      plugin: (sessions.get(v.slot) || {}).plugin || null,
+    })));
+    win.pushSessions(views, frontSlot());
   } catch (e) {
     win.pushNotice('error', '更新界面时出错：' + e.message);
   }
 }
 
-async function _renderSession(snap) {
-  win.pushState(snap);
+/**
+ * 正盖在面板上的那一个槽。
+ *
+ * ★ 它是**界面的事实**，不是框架的事实 —— 别拿它决定行为（停哪个作业、用哪份
+ *   cookie、清哪个分区都不许看它）。它是"哪一块视图可见"这个问题的答案，
+ *   而且是窗口那一层唯一的答案：原生视图同一时刻只装得下一块。
+ */
+function frontSlot() {
+  if (win && win.front && sessions.has(win.front)) return win.front;
+  // 没有前台、或者前台那个已经被收掉了：挑第一个活着的。
+  for (const [slot] of sessions) if (occupied(slot)) return slot;
+  const first = sessions.keys().next();
+  return first.done ? null : first.value;
+}
 
-  // 会话没有了（结束/出错/正在释放），或者压根还没起来：窗口里那个 code-server
-  // 页面背后的服务器已经不存在了 —— 隧道在 stop() 的最开头就停了 —— 收起它，
+/**
+ * 画这一条会话。
+ *
+ * ★ 参数是**槽**，不是快照 —— 这一点是故意的。从前它收一个裸 `snap`，而那个签名
+ *   把"这是哪一条会话的"变成一个**无从回答**的问题：里面每一句 `win.hideSurface()`、
+ *   `win.setSessionService(plugin)`、`controller.plugin` 都在暗中假设"只有一个会话"。
+ *   收槽之后，这些句子必须先答出那个问题才写得出来。
+ */
+async function _renderSession(slot) {
+  const rec = sessions.get(slot);
+  if (!rec || !rec.controller) return;          // 记录已经收了：什么都不画
+  const snap = rec.controller.snapshot();
+
+  // 会话没有了（结束/出错/正在释放），或者压根还没起来：**这一条**会话的页面背后的
+  // 服务器已经不存在了 —— 隧道在 stop() 的最开头就停了 —— 收起**它那一块**，
   // 把窗口主体还给面板，而面板上正是「重新开始」那几个按钮。
   //
   // ★ RELEASING 也要算在内，而且它才是在真机上**最先到达**的那一个：stop() 发出
   //   goodbye 之后状态就是 releasing，而它要等下一次 status 轮询（60 秒）才可能
   //   变成 ended。只收 ENDED 的话，用户点了「结束会话」之后还要盯着一块打不开的
   //   页面最多一分钟。
+  //
+  // ★★ **收的是这一个槽，不是"窗口里那一块"。** 从前这里是 `win.hideSurface()`，
+  //   而多开之后那是**静默的越权**：甲会话结束，把乙会话那块正跑着的页面一起
+  //   销毁掉 —— 通知、状态条全都正常，只有用户的编辑器没了，而出路（重新加载）
+  //   正压在那块页面底下。
   if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
-    win.hideSurface();
+    win.destroySurface(slot);
   }
 
   // ── 唯一的服务分派点 ──
@@ -1616,41 +1787,38 @@ async function _renderSession(snap) {
   //
   // ★ 这里**没有**任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
   //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个目录。
-  const plugin = (controller && controller.plugin) || null;
-  win.setSessionService(plugin);        // 关窗文案要用（见 windows.js）
+  const plugin = rec.plugin;
   if (snap.state === State.RUNNING && snap.origin) {
     if (!plugin) {
       // 未知服务：**绝不建界面**（那个端口上跑的可能是任何东西），也绝不 POST 口令。
-      // 但上一个会话留下的那块界面必须收掉 —— 它盖在面板上，用户会以为那还是
-      // 自己的会话。
-      win.hideSurface();
-      await warnUnknownService(snap);
+      // 但它自己那一块必须收掉（上面那道状态闸已经收过了）。
+      win.destroySurface(slot);
+      await warnUnknownService(slot, snap);
     } else if (plugin.contributes.surface) {
-      await ensureSurface(plugin, snap);
-      if (plugin.attach) await plugin.attach(pluginContext(plugin), snap);
+      await ensureSurface(rec, snap);
+      if (plugin.attach) await plugin.attach(pluginContext(rec), snap);
     } else {
-      // 这个插件不要界面（比如中转站）：把上一个会话留下的那块收掉，否则它盖在
-      // 面板上，而用户在这个会话里根本不需要它。
-      win.hideSurface();
-      if (plugin.attach) await plugin.attach(pluginContext(plugin), snap);
+      // 这个插件不要界面（比如中转站）：**它自己**那一块收掉。
+      //
+      // ★★ 这里从前是 `win.hideSurface()` —— "把窗口里那一块收掉"。多开之后那是
+      //    一次**越权**：起 sshd 时（以及它每次心跳、每次隧道重建时）会把
+      //    code-server 那块正跑着的页面一起销毁，而用户看到的是"我的编辑器忽然
+      //    没了"，日志里一个字都没有。
+      win.destroySurface(slot);
+      if (plugin.attach) await plugin.attach(pluginContext(rec), snap);
     }
   }
-  if (snap.state === State.RUNNING && snap.warning) {
-    await win.showOverlay(snap.warning);
-    win.setBusy(true);
-  } else if (snap.state === State.RUNNING) {
-    win.hideOverlay();
-    win.setBusy(false);
-  }
 
-  const titles = {
-    [State.SUBMITTING]: '正在提交…',
-    [State.QUEUED]: `排队中 — 作业 ${snap.jobId || ''}`,
-    [State.RELEASING]: '正在释放…',
-    [State.ENDED]: '已结束',
-  };
-  const devPrefix = snap.dev ? '[开发] ' : '';
-  win.setTitle(devPrefix + 'Slurmate — ' + (titles[snap.state] || snap.node || '就绪'));
+  // 遮罩与忙碌位跟着**前台**那一条走：它们是"占满整块界面"的东西，而屏幕只有一块。
+  if (slot === frontSlot()) {
+    if (snap.state === State.RUNNING && snap.warning) {
+      await win.showOverlay(snap.warning);
+      win.setBusy(true);
+    } else if (snap.state === State.RUNNING) {
+      win.hideOverlay();
+      win.setBusy(false);
+    }
+  }
 }
 
 /**
@@ -1870,7 +2038,8 @@ function ensureSitePoolDir() {
  * ★ 这也是唯一的入口。windows.js 的 pushState 里那条「origin 变了就 loadURL」的
  *   自动 retarget 已经删掉了：它不换 partition、也不重跑登录，两条路并存必然分叉。
  */
-async function ensureSurface(plugin, snap) {
+async function ensureSurface(rec, snap) {
+  const plugin = rec.plugin;
   const surface = plugin.contributes.surface;
   if (!surface) return;
 
@@ -1888,11 +2057,18 @@ async function ensureSurface(plugin, snap) {
 
   // 换布局组 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局重置了）必须
   // 说出来，否则他只会觉得"我的设置莫名其妙没了"。
-  const rebuilt = win.hasSurface() && win.surfacePartition !== partition;
+  //
+  // ★ 判据是**这一个槽**自己的分区，不是"窗口里那一块"的分区 —— 后者在多开下
+  //   会拿到**别人的**分区：该重建的判定成"没变"（页面继续跑在旧分区里，而界面上
+  //   完全看不出区别，正是上面那句注释说的那件事），不该重建的被判成"变了"。
+  const has = win.hasSurface(rec.slot);
+  const rebuilt = has && win.surfacePartition(rec.slot) !== partition;
   // `demo` 这个参数是 windows.js 的：true 时给那块视图注入 `preload/demo.js`，
   // 好把「被外壳吞掉的按键」推回面板（对照用）。只有假后端才要这份诊断 ——
   // 判据跟着**这次会话的后端**走（`snap.dev`），不是跟着那个开关走。
-  await win.showSurface({ url: snap.origin + surface.path, partition, demo: snap.dev });
+  await win.showSurface({
+    slot: rec.slot, url: snap.origin + surface.path, partition, demo: snap.dev,
+  });
   if (rebuilt) {
     win.pushNotice('info', '已切换到新的布局组，页面已重新加载。');
   }
@@ -1910,13 +2086,37 @@ async function ensureSurface(plugin, snap) {
  *
  * ★ `once()` 按插件名分桶：两个插件各记各的"上次值"，共用一个槽会互相冲掉。
  *
+ * ★ **参数是那一条会话的记录**，不是插件对象 —— 因为这里每一个"我"都必须是**这一条
+ *   会话的**：`session()` 是它的会话视图，`win` 是它那块界面。从前这里收 `plugin`
+ *   并去读模块级的"当前会话"，多开之后那句"当前"没有定义了，而失败形态不是崩溃：
+ *   是 code-server 拿着**另一条会话的**口令去 POST，然后弹一句"控制节点还没返回
+ *   会话口令"。
+ *
  * ★ **插件能用的一切都在这里。** 它不能 `require` 客户端的源码 —— 插件装在池里
  *   （`~/.slurmate/site-plugins/<id>/<版本>/`），相对路径指不到客户端；就算指得到，
  *   那种依赖也是无法检查的。所以缺什么就在这里加什么，而不是让插件绕过这份清单。
  */
-function pluginContext(plugin) {
+function pluginContext(rec) {
+  const plugin = rec.plugin;
   return {
-    win,
+    /**
+     * 这块界面自己的那两件事，**绑在这一条会话上**。
+     *
+     * ★ 从前递的是整个 `ShellWindow`。多开之后那是**张冠李戴**：`surfaceSession`
+     *   会拿到"窗口里那一块"的 session，而 code-server 拿它去查 cookie jar ——
+     *   查错一个分区，症状是"自动登录失败（HTTP 200，未拿到会话 cookie）"，而
+     *   口令本身是对的。
+     *
+     * ★ 顺带收窄了：插件本来就不该碰 forceClose / pushSessions / pushNotice 那些，
+     *   "能碰什么"这份清单撑大没有任何好处。
+     */
+    win: {
+      // ★ 是**取值器**，不是方法 —— 插件那边写的是 `const ses = ctx.win.surfaceSession`。
+      //   把它改成方法不会报错，只会让 `ses` 变成一个函数而一路传下去（`ctx.login`
+      //   拿它当 Electron session 用），失败形态是"自动登录莫名其妙不工作"。
+      get surfaceSession() { return win.surfaceSession(rec.slot); },
+      reloadSurface: () => win.reloadSurface(rec.slot),
+    },
     config,
     /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
      *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。 */
@@ -1924,7 +2124,8 @@ function pluginContext(plugin) {
     get cfg() { return cfg; },
     get cfgDir() { return cfgDir; },
     dev: dev.developerMode,
-    session: () => (controller && controller.session) || null,
+    // **这一条会话的**视图。不是"当前那一个" —— 那个概念被这次改动删掉了。
+    session: () => (rec.controller && rec.controller.session) || null,
     whoami: () => whoami,
     /**
      * **用户自己的**家目录。开发者模式必须落在沙盒里 —— 见 sshd 插件。
@@ -1948,20 +2149,25 @@ function pluginContext(plugin) {
      * ★ 路径由**身份**算出来（`plugin-data.js` 的第三个落点），所以它和对账看到的是
      *   同一个目录 —— 那是"用户看得见、删得掉"的前提。
      *
-     * ★ `instanceId` 与 `identityOf` 同签名：声明了 `contributes.data.perInstance`
-     *   的插件**必须**给（不给会抛 —— 两个实例共用一份数据是"两边都以为自己写进去了"
-     *   的那种静默损坏）。今天唯一的消费者 sshd 没声明分实例，所以它不传。
+     * ★ **没有实例参数了** —— 实例由框架从**这一条会话**填（今天就是它那个布局组）。
+     *   与 `login()` 同一条理由：插件没法把一个它不传的参数传错。
+     *
+     *   从前那个"声明了 `perInstance` 却不传就抛"的设计是在守一条真实的不变量，
+     *   而它**够不着**：插件要拿实例只能从 `snap.layoutId` 里拿，而 `prepare()`
+     *   根本没有 `snap` —— 一个声明了分实例、又要在提交前写数据的插件，除了猜
+     *   没有别的办法。改成框架填之后，那个抛只剩最后一道（`identityOf` 自己那道，
+     *   给 `ensureSurface` / 对账那些走参数化的调用点用）。
      *
      * ★ 算不出根来的时候**抛**，不返回 null：一个 null 会让插件拼出一个**相对路径**
      *   （落进进程的 cwd 里），那比抛严重得多。
      */
-    dataDir: (instanceId) => {
+    dataDir: () => {
       const root = pluginDataRoot();
       if (!root) {
         throw new Error('还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。');
       }
-      return path.join(root,
-        pluginData.dataDirNameOf(pluginData.identityOf(plugin, instanceId)));
+      return path.join(root, pluginData.dataDirNameOf(
+        pluginData.identityOf(plugin, rec.controller && rec.controller.layoutId)));
     },
     /**
      * 自动登录。契约由**框架**从当前插件自己的清单里取，不由插件传进来 ——
@@ -1988,12 +2194,12 @@ function pluginContext(plugin) {
  *   哪种情况，用户才知道该升级客户端还是该找管理员。所以它会把站点那边认得的
  *   名字列出来。
  */
-async function warnUnknownService(snap) {
+async function warnUnknownService(slot, snap) {
   const key = `unknown|${snap.sessionId}`;
   if (!registry.once('__unknown__', key)) return;
 
   win.pushNotice('warn',
-    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${unknownWhy(snap)}\n`
+    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${unknownWhy(slot, snap)}\n`
     + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。'
     + '（能结束、能看，是因为状态、心跳和结束这三件事**从不查插件** —— 只认会话号。）');
 }
@@ -2010,7 +2216,7 @@ async function warnUnknownService(snap) {
  *   可能已经和这个会话提交时不是一回事了。所以站点清单只用来把 id 翻成人看的标题，
  *   判定始终以会话自带的 `(id, 版本)` 为准。
  */
-function unknownWhy(snap) {
+function unknownWhy(slot, snap) {
   const missing = pluginsView().missing;
   const ref = typeof snap.servicePlugin === 'string' ? snap.servicePlugin : null;
   const at = ref ? ref.lastIndexOf('@') : -1;
@@ -2036,12 +2242,37 @@ function unknownWhy(snap) {
     return `本站开了这个客户端没有的插件：${names.join('、')}。升级客户端之后就能用它。`;
   }
   // 最后才用解析那一刻留下的说法（它只有 id，没有标题）。
-  if (controller && controller.pluginWhy) return `${controller.pluginWhy}。`;
+  // ★ 取的是**这一条会话的**说法：多开时读那个全局的会把根因说成别人的。
+  const rec = sessions.get(slot);
+  if (rec && rec.pluginWhy) return `${rec.pluginWhy}。`;
   return '它多半是别的进程提交的，控制节点没有关于它的记录。';
 }
 
 
 // ── 关闭 ────────────────────────────────────────────────────────────────────
+/**
+ * 把**所有**会话停掉。返回 `[{slot, sessionId, res}]`，顺序与表里一致。
+ *
+ * ★★ **只此一份实现，三条路都走它**：关窗收尾、退出前、主动断开。它们要做的是
+ *    同一件事 —— **每一条会话都发 goodbye**。各写一遍的代价已经在变异验证里
+ *    现过一次形：同一个循环出现在两个地方时，改一处、另一处静默地少停一条，而
+ *    用户看到的是"关掉窗口会结束会话"，集群上却还烧着一个作业（那是账本 F13
+ *    的同一类：说了一句话，而它不成立）。
+ *
+ * ★ **不跳过没有 sessionId 的那些**：正在提交（还没有会话号）的那一条也要停 ——
+ *   `SessionController.stop()` 自己分得清该发什么。跳过它的话，一次"提交中就关窗"
+ *   会留下一个客户端已经不管、而控制节点上正在长大的会话。
+ */
+async function stopAllSessions() {
+  const out = [];
+  for (const rec of [...sessions.values()]) {
+    const c = rec.controller;
+    if (!c) continue;
+    out.push({ slot: rec.slot, sessionId: c.sessionId, res: await c.stop() });
+  }
+  return out;
+}
+
 /**
  * 关窗 = 结束会话并释放资源。
  *
@@ -2059,11 +2290,11 @@ function unknownWhy(snap) {
 async function shutdown() {
   win.setBusy(false);
   try {
-    if (controller) {
-      const res = await controller.stop();
+    // ★★ 走**唯一那份**实现（见 `stopAllSessions`）。
+    for (const { sessionId, res } of await stopAllSessions()) {
       if (!res.ok) {
         win.pushNotice('error', res.detail);
-        if (controller.sessionId) config.addPendingGoodbye(cfgDir, controller.sessionId);
+        if (sessionId) config.addPendingGoodbye(cfgDir, sessionId);
       }
     }
   } finally {
@@ -2111,11 +2342,42 @@ async function tryReattach() {
     }
   }
 
-  const resp = await backend.rpc({ op: 'status' });
-  if (!resp || !resp.ok) return;
-  const s = resp.data && resp.data.session;
-  if (!s) return;                      // 没有活跃会话，正常路径
+  // ★★ **用 `list`，不是不带 session_id 的 `status`。**
+  //
+  //   那一版 `status` 只返回**最新**那一条占着位置的会话。多开之后那意味着：
+  //   重连只接得回一个，**其余的在控制节点上继续跑而客户端不知道** —— 没有心跳
+  //   ⇒ 300 秒 `suspect`、1800 秒 `orphaned` + `scancel`。**那是用户的作业被悄悄
+  //   杀掉**，而界面上一个字都不会有。这一条路径是"多开"这个改动**自己**让它变成
+  //   可达的（从前服务端最多只允许一个会话）。
+  //
+  //   `list` 返回该 uid 最近 50 条会话，**`with_secret=False`** —— 所以它只够筛出
+  //   "还占着位置"的那几条；它们的完整视图（含自动登录要的口令）再逐个用带
+  //   `session_id` 的 `status` 取，而那一个默认 `with_secret=True`。
+  //   用现成的两条路，不为了这件事去改协议。
+  const listed = await backend.rpc({ op: 'list' });
+  if (!listed || !listed.ok) return;
+  const live = ((listed.data && listed.data.sessions) || [])
+    .filter((r) => r && SERVER_LIVE_STATES.includes(r.state));
+  if (!live.length) return;            // 没有活跃会话，正常路径
 
+  win.pushNotice('info', live.length > 1
+    ? `发现 ${live.length} 个还没结束的会话，正在逐个接上。`
+    : '发现一个还没结束的会话，正在重新接上。');
+
+  for (const row of live) {
+    const one = await backend.rpc({ op: 'status', session_id: row.session_id });
+    if (!one || !one.ok) continue;
+    const view = one.data && one.data.session;
+    if (view) await reattachOne(view);
+  }
+}
+
+/**
+ * 接上**一条**会话。
+ *
+ * @param {object} s 带 `session_id` 的完整会话视图（含口令，见 `tryReattach`）
+ */
+async function reattachOne(s) {
   // ★ 用**注册表**归一，而不是在会话对象上直接判。三种输入三种答案，理由见
   //   plugins/index.js 的 resolve()：`<id>@<版本>` 查池；服务端**没说**是哪一种
   //   服务（`null`，或这个键根本不存在）时**绝不猜**。
@@ -2146,54 +2408,62 @@ async function tryReattach() {
   //   用户一点就提交了**第二个**作业，而第一个还在排队。这既正是「单一启动」要防的
   //   资源占用，又恰好是「换了电脑 / 上次没关干净」最常见的形态 —— 重启客户端时
   //   作业往往还没跑起来。
-  //   （不带 session_id 的 status 返回的是 (reserved, submitted, enrolled, suspect,
-  //     orphaned, releasing) 里最新的那条，所以走到这里的一定是「占着名额」的会话。）
+  //   （`tryReattach` 筛的就是守护进程的 `OCCUPYING_STATES`，所以走到这里的一定是
+  //     「还占着位置」的会话。）
   const queued = !s.tunnel_target;
-  win.pushNotice('info', queued
-    ? `发现一个还在排队的会话（作业 ${s.job_id}），正在重新接上。`
-    : `发现仍在运行的会话（作业 ${s.job_id}），正在重新接上。`);
 
-  controller = new SessionController({
+  // 槽已经在表里 ⇒ 这一条与已经接上的某一条抢同一份资源。**不覆盖**：覆盖会把先接上
+  // 的那条记录连同它的心跳一起丢掉（心跳一停，那个作业 1800 秒后被 scancel），
+  // 而用户看到的只是"少了一个标签"。
+  const slot = pluginData.slotOf(layoutId);
+  if (sessions.has(slot)) {
+    const held = sessions.get(slot);
+    win.pushNotice('warn',
+      `控制节点上还有一个会话（作业 ${s.job_id}）与已经接上的`
+      + `「${(held.plugin && (held.plugin.displayName || held.plugin.name)) || '某一条'}」`
+      + '占着同一个位置，没法同时接上。它仍然在跑，会在超时后被控制节点回收 —— '
+      + '想留住它就先用 `slurm` 把它的作业停掉。');
+    return;
+  }
+
+  const rec = { slot, plugin, pluginWhy: why, controller: null };
+  rec.controller = new SessionController({
     backend, layoutId,
     onTunnelPort: (id, port) => {
       if (!id) return;                 // 没有布局组的插件，没有东西可记
       config.setLayoutPort(cfgDir, cfg, id, port);
     },
-    onRelayPort: () => onSessionChange(controller.snapshot()),
-    getExcludedPorts: () => config.usedLayoutPorts(cfg, controller && controller.layoutId),
+    onRelayPort: () => onSessionChange(slot),
+    getExcludedPorts: () => excludedPortsFor(rec),
     // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
     // 认不出时**原样**记下，于是界面仍然得出「未知」。
     requestedKind: plugin ? plugin.name : s.service_kind,
     needsPubkey: Boolean(plugin && plugin.contributes.submitPubkey),
   });
-  controller.on('change', onSessionChange);
-  controller.sessionId = s.session_id;
-  controller.session = s;
-  // ★ 与 startSession 同一件事：**在这里捕获**，之后状态变化都用它，不再查注册表。
-  //   对"接上一个上次没关干净的会话"这条路径尤其要紧 —— 站点可能就在这中间升级了
-  //   插件，而那个作业跑的还是旧版。
-  controller.plugin = plugin;
-  controller.pluginWhy = why;
+  rec.controller.on('change', () => onSessionChange(slot));
+  rec.controller.sessionId = s.session_id;
+  rec.controller.session = s;
+  sessions.set(slot, rec);
 
   // 认不出的插件用**非布局组**的基准端口：它的端口绝不能落进任何布局组（否则会与
   // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。
   const preferredPort = (plugin && plugin.preferredPort)
-    ? plugin.preferredPort(pluginContext(plugin), layoutId)
+    ? plugin.preferredPort(pluginContext(rec), layoutId)
     : config.RELAY_PORT_BASE;
   if (queued) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
     // 会自己把视图/ssh 配置建起来，界面标题也已经有「排队中 — 作业 N」那一档）。
-    controller.state = State.QUEUED;
-    await controller._afterSubmit({ preferredPort });
+    rec.controller.state = State.QUEUED;
+    await rec.controller._afterSubmit({ preferredPort });
     return;
   }
 
-  controller.state = State.RUNNING;
-  await controller._bringUpTunnel(preferredPort);
+  rec.controller.state = State.RUNNING;
+  await rec.controller._bringUpTunnel(preferredPort);
   // ★ 走**同一个**渲染入口，而不是像以前那样直接调 openCodeServer。
   //   以前那条直路只服务 code-server 一种会话，而接上一个中转站会话时它会把
   //   隧道指向的 SSH 端口当成一个网页去加载。分派只有一个地方，就是 _renderSession。
-  await onSessionChange(controller.snapshot());
+  await onSessionChange(slot);
 }
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
@@ -2282,12 +2552,26 @@ function registerIpc() {
   });
 
   send('app:deleteConnection', async (id) => {
-    // ★ 正在跑的那条不许删。删掉它的后果不是「少一条配置」：它所属的布局组会
-    //   引用计数归零 → 被回收 → 浏览器存储被清 —— 而用户当前的页面正在用那份存储。
+    // ★ 它的布局组上有会话在跑，就不许删。删掉的后果不是「少一条配置」：那个组会
+    //   引用计数归零 → 被回收 → 浏览器存储被清 —— 而那块页面正在用那份存储。
     //   界面已经禁用了按钮，这里只是把它变成**权威**。
-    if (controller && cfg.activeConnectionId === id
-        && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state)) {
-      return { ok: false, code: 'in_use', error: '这条连接正在使用中，请先断开再删除。' };
+    //
+    // ★★ 判据是「**那个布局组**上有没有会话」，不是「要删的是不是活跃连接」。
+    //    后者是一个**已经错了**的判据，而多开把它变成一个**可达的删活数据**路径：
+    //     ① 连接 C1（组 l1）活跃，起一条会话落在 l1；
+    //     ② 把活跃连接切成 C2（组 l2）—— 这一步**不动引用计数**，C1 仍指着 l1；
+    //     ③ 删 C1 ⇒ l1 计数归零 ⇒ 回收 ⇒ 抽掉会话脚下那个分区。
+    //    唯一挡着它的是 `clearLayoutStorage` 里"正被那块界面用着就不清"，而多开
+    //    之后那一句只能看到**前台**那一块 —— 前台不是它的时候形同虚设。
+    const conn = (cfg.connections || []).find((c) => c.id === id);
+    const held = conn && conn.layoutId
+      && [...sessions.values()].find((r) => occupied(r.slot)
+        && r.controller && r.controller.layoutId === conn.layoutId);
+    if (held) {
+      return {
+        ok: false, code: 'in_use',
+        error: '这条连接的布局组上还有会话在跑，请先结束它再删除这条连接。',
+      };
     }
 
     cfg.connections = cfg.connections.filter((c) => c.id !== id);
@@ -2366,20 +2650,25 @@ function registerIpc() {
     if (!existed) cfg.layouts = [...cfg.layouts, target];   // 只为算排除集，还没落盘
 
     const isActive = cfg.activeConnectionId === connectionId;
-    const sessionLive = controller
-      && ![State.ENDED, State.ERROR, State.IDLE].includes(controller.state);
+    // ★★ 「有没有会话在跑」这个问题的**对象变了**：从前是"窗口里那一个"（最多只有
+    //    一个），现在是「**这条连接的布局组上**有没有会话」。判据必须跟着问题一起
+    //    改 —— 前者在多开下会把另一条连接那个组上的会话当成"这个组的"，于是挪一个
+    //    与这条连接无关的隧道端口。
+    const live = [...sessions.values()].find((r) => occupied(r.slot)
+      && r.controller && r.controller.layoutId === conn.layoutId);
+    const sessionLive = Boolean(live);
     // ★ 不参与布局的插件（没有布局组的那些）**不能走 relisten**：它的端口不在任何
     //   布局组里，relisten 会去挪一个正在被使用的隧道端口 —— 而它对外的那份配置是
     //   隧道起来时才写的，挪完那一瞬间用户手上的连接指向一个没人监听的端口。
     //   所以那种会话只改配置、不动会话本身。
     //
     //   判据是 layoutId 有没有（框架的事实），不是"是哪个插件"（那是插件名）。
-    const sessionInLayout = sessionLive && controller.layoutId !== null;
+    const sessionInLayout = sessionLive && live.controller.layoutId !== null;
     const outsideLayout = sessionLive && !sessionInLayout;
 
-    if (isActive && controller && sessionLive && !outsideLayout) {
+    if (isActive && live && !outsideLayout) {
       const excluded = config.usedLayoutPorts(cfg, target.id);
-      const r = await controller.relisten(target.id, target.port, excluded);
+      const r = await live.controller.relisten(target.id, target.port, excluded);
       if (!r.ok) {
         if (!existed) cfg.layouts = cfg.layouts.filter((l) => l.id !== target.id);
         return {
@@ -2388,8 +2677,11 @@ function registerIpc() {
         };
       }
       target.port = r.port;                 // 可能顺移过
-    } else if (isActive && controller && !outsideLayout) {
-      controller.setLayout(target.id);      // 没有会话在跑：只改标记，下次开会话就用它
+    } else if (isActive && !sessionLive) {
+      // 没有会话在跑：只改标记，下次开会话就用它。
+      // ★ 这里从前还有一个 `controller.setLayout(...)` —— 它改的是那个会话的
+      //   `layoutId`。多开之后"那个会话"没有定义了，而**恰当地**：没有会话时
+      //   本来就没什么可改的，标记落在 `cfg` 里（下面那句 setConnectionLayout）。
     }
     // outsideLayout 时两条都不走：配置照改（下次起 code-server 就用新组了），
     // 但这个正在跑的中转站会话不受任何影响 —— 它的 layoutId 保持 null。
@@ -2435,7 +2727,10 @@ function registerIpc() {
     //   **匹配**某一行 —— `{name: '../../..'}` 匹配不上任何一行。
     const fresh = auditPluginData();
     const verdict = dataAudit.deletionVerdict({
-      rows: fresh.rows, name, surfacePartition: win && win.surfacePartition,
+      // ★ 是**一组**，不是"那一个" —— 见 `livePartitions`。多开之后拿单个前台分区
+      //   去判，会把"另一块正在跑着的界面脚下的那份数据"判成可以删。
+      rows: fresh.rows, name,
+      surfacePartitions: [...livePartitions()],
     });
     if (!verdict.ok) return verdict;
     // 删哪几个落点由**这一行**说了算（`places`）—— 一份数据的浏览器那一半与磁盘
@@ -2583,11 +2878,17 @@ function registerIpc() {
    */
   send('app:disconnect', async () => {
     let released = { ok: true, detail: '' };
-    if (controller && controller.sessionId) {
-      released = await controller.stop();
+    // ★ **每一条都要停** —— 与 `shutdown()` 同一条理由：断开等于"我不要了"，
+    //   不等于"我先走开，你继续烧着"。只停一个的话，剩下的那条在拆掉连接之后
+    //   连心跳都没有了，只能等守护进程 1800 秒后的孤儿判定。
+    for (const { res } of await stopAllSessions()) {
+      // ★ **每一条的结果都要回填**，不是只在失败时 —— 只在失败时赋值的话，
+      //   全都成功时 `released` 还是那个初值，于是调用方拿不到 `state`
+      //   （界面靠它区分"已经释放了"与"只是请求发出去了"）。
+      released = res;
       // 释放失败要说出来。守护进程的 released 并不保证作业真的停了
-      // （见 memory cluster-side-defects），所以不能在这里宣布成功。
-      if (!released.ok) win.pushNotice('error', released.detail);
+      // （见 docs/KNOWN-ISSUES.md 的 F12/F13），所以不能在这里宣布成功。
+      if (!res.ok) win.pushNotice('error', res.detail);
     }
     await backend.close();
     whoami = null;
@@ -2625,8 +2926,13 @@ function registerIpc() {
    *        `defaultService` 的那一个），与这个参数存在之前的行为一致。
    */
   send('app:start', async (resources, serviceKind) => {
-    const snap = await startSession(resources, serviceKind);
-    return { ok: Boolean(snap), snapshot: controller && controller.snapshot() };
+    const r = await startSession(resources, serviceKind);
+    return {
+      ok: Boolean(r),
+      slot: r ? r.slot : null,
+      sessions: sessionViews(),
+      front: frontSlot(),
+    };
   });
 
   /**
@@ -2801,20 +3107,54 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
-  send('app:state', async () => (controller ? controller.snapshot() : null));
+  /**
+   * 面板启动时拉一次全量。
+   *
+   * ★ 回的是**列表 + 哪一个是前台**，不再是"那一个快照"。从前那个形状在多开下
+   *   的失败形态不是崩溃，而是**看不见**：启动时自动接上来的会话里，只有最后一条
+   *   会被画出来，其余的既没有标签也没有「结束会话」的入口。
+   */
+  send('app:states', async () => ({
+    sessions: sessionViews(),
+    front: frontSlot(),
+    layouts: config.layoutPlan(cfg),
+  }));
 
   send('app:doctor', async () => {
     const resp = await backend.rpc({ op: 'doctor' });
     return resp;
   });
 
-  // 只有一个语义：结束会话并释放资源。没有「保持作业运行」的开关。
-  send('app:stop', async () => {
-    if (!controller) return { ok: true };
-    return controller.stop();
+  /** 把某一条会话抬到面板上面。**纯界面动作** —— 它不改任何框架状态。 */
+  send('app:setFront', async (payload = {}) => {
+    const slot = payload && payload.slot;
+    if (!sessions.has(slot)) return { ok: false, error: '没有这一条会话。' };
+    win.setFront(slot);
+    await _renderSession(slot);
+    win.pushSessions(sessionViews(), frontSlot());
+    return { ok: true, front: slot };
   });
 
-  send('app:reload', async () => { await win.reloadSurface(); return { ok: true }; });
+  // 只有一个语义：结束会话并释放资源。没有「保持作业运行」的开关。
+  //
+  // ★ 必须**指名**停哪一个。省略 slot 一律拒绝，而不是"停那唯一的一个" ——
+  //   那个隐式缺省在多开下会变成"停错了另一条"，而调用方（界面）永远拿不准
+  //   自己手里那个 slot 是不是还新鲜。
+  send('app:stop', async (payload = {}) => {
+    const slot = payload && payload.slot;
+    if (!slot) return { ok: false, error: '没有说清要结束哪一条会话。' };
+    const rec = sessions.get(slot);
+    if (!rec || !rec.controller) return { ok: true };
+    const r = await rec.controller.stop();
+    win.pushSessions(sessionViews(), frontSlot());
+    return r;
+  });
+
+  send('app:reload', async (payload = {}) => {
+    const slot = (payload && payload.slot) || frontSlot();
+    if (slot) await win.reloadSurface(slot);
+    return { ok: true };
+  });
 
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
 
@@ -2996,7 +3336,15 @@ module.exports = {
    */
   _test: {
     getBackend: () => backend,
-    getController: () => controller,
+    /**
+     * 活着的会话：**槽 → 记录**。
+     *
+     * ★ 从前这里叫 `getController`，回那唯一一个。多开之后"那一个"没有定义了 ——
+     *   而用例需要的是"现在有哪几条、各自什么状态"，那正是这一份。
+     */
+    getSessions: () => sessions,
+    /** 某一槽的记录（`getSessions().get(slot)` 的糖，用例里读起来短一点）。 */
+    sessionAt: (slot) => sessions.get(slot),
     getWindow: () => win,
     /** 一条连接的密钥（读不到就返回错误对象）。测试用它核对「按连接隔离」。 */
     getKey: (id) => resolveKey(id || config.PENDING_ID),
@@ -3012,8 +3360,8 @@ module.exports = {
     /**
      * 重跑「启动时接上已有会话」那条路（`tryReattach`）。
      *
-     * 它只在启动时被调用一次，所以不重新触发就没法验证。先把 controller 清掉是
-     * **还原现场**而不是绕过什么 —— 启动那一刻它本来就是 null。
+     * 它只在启动时被调用一次，所以不重新触发就没法验证。先把表清掉是
+     * **还原现场**而不是绕过什么 —— 启动那一刻它本来就是空的。
      *
      * ★ 但光把引用清掉还不够：真机上重启时**这个进程整个没了**，它的监听套接字、
      *   轮询、心跳跟着一起消失；只在同一个进程里换个引用的话，模拟出来的现场是
@@ -3022,9 +3370,9 @@ module.exports = {
      *   所以旧的先 `abandon()` —— 只释放本地资源，一个字都不发给服务端。
      */
     reattach: async () => {
-      const old = controller;
-      controller = null;
-      if (old) await old.abandon();
+      const old = [...sessions.values()];
+      sessions = new Map();
+      for (const rec of old) if (rec.controller) await rec.controller.abandon();
       return tryReattach();
     },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */

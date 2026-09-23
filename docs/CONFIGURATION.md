@@ -39,7 +39,7 @@ default_mem  = 8G
 
 ---
 
-## 一、站点通用键。一共 12 个。
+## 一、站点通用键。一共 13 个。
 
 这是 v0.2 的收缩，v0.3 又把它推进了一步：**能从 Slurm 查到的，一律不再写一份；
 只属于某个插件的，搬进那个插件的块。**
@@ -66,6 +66,7 @@ default_mem  = 8G
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
 | `sbatch` / `scancel` / `squeue` / `scontrol` / `sacctmgr` | 路径 | 空 = 自动查找 | 见下方专节 |
 | `default_plugin` | 短名 | **空**（无默认值） | 提交时不带 `service_kind` 用哪个插件。**留空 = 必填**，见〈一之二〉 |
+| `max_sessions_per_user` | 正整数 | `1` | 每人最多几个会话。**排队中的也算占着位置**。见下方专节 |
 
 ### 为什么 `auth_mode` 和 `code_server_bin` 不在这里了
 
@@ -448,7 +449,7 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `default_time` / `max_time` / `suspect_after_seconds` / `orphan_after_seconds` / `reserved_ttl_seconds` / `submitted_ttl_seconds` / `released_keep_seconds` / `job_missing_confirm_ticks` | 各自的常量 | 同上。`max_time` 尤其：它现在由**分区的 `MaxTime`** 动态决定（见下） |
 | `[renew] enabled` / `threshold_seconds` / `max_total_seconds` | 常量 | 同上 |
 | `security.password_bytes` | `PASSWORD_BYTES` | 同上 |
-| `[quota]` 全部 | 各自的常量 | 同上 |
+| `[quota]` 里的 `max_pending_per_user` | **已删除** | ★ 见下方〈`max_sessions_per_user` 为什么回来了〉—— 它那一格**确实**只有一种正确取值，所以它没了 |
 | `service_kinds` | **已删除** | v0.3 起「站点开了哪些插件」由**有没有那个 `[plugin:*]` 块**表达，见上 |
 | `code_server_bin` / `sshd_bin` | 各自的插件块里的 `bin` | 它们是**插件的**路径，不是站点事实 |
 | `auth_mode` | `[plugin:code-server]` 块的 `auth_mode` | 同上：它是 code-server 的认证方式 |
@@ -456,6 +457,38 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `job_script` / `jobs_dir` | `default_jobs_dir()` | 从守护进程**自身的安装位置**推导（`<prefix>/share/slurmate/jobs`）。里面是**每个插件一份** `<ULID>.sbatch` |
 | `job_log_subdir` | `JOB_LOG_SUBDIR` | 与 `run.sbatch` 的约定，不是站点参数 |
 | `[purpose:*]` 整节 | 已删除 | 见下 |
+
+★ **这张表里有一格回来了，而那不是反复** —— 见下。
+
+### `max_sessions_per_user` 为什么回来了
+
+上面那张表的共同理由是「**只有一种正确取值**，而配置项的存在本身就制造了取错的可能」。
+v0.2 把整个 `[quota]` 节按那条理由收了起来，其中包含 `max_active_per_user`。
+
+**那一格被这一版证伪了。** 客户端现在能同时挂**两个**会话（一个要布局组的、一个不要的
+—— 一个 IDE 加一个终端中转），于是"一个人最多几个会话"重新变成一个**站点的决定**：
+计算节点是管理员的，不是我们的。**同一节里的另一半**（`max_pending_per_user`）则相反 ——
+它挡的是"提交非幂等"那件事的后果，而正确的取值只有一种（**没有它**），所以它彻底删掉了。
+
+判据不是"哪个键曾经被删过"，是**那一格的取值到底有没有分歧**。逐条症状：
+
+| | 说明 |
+|---|---|
+| 类型 | 正整数。**0 会被自检拒绝** —— 它的表现是"所有人都开不了会话"，而报错里看不出根因在配置里 |
+| 缺省 | `1`。**缺省落在安全侧**：站点不显式放开就还是一个会话 |
+| 说明 | 「占着位置」**包括排队中的**（`reserved` / `submitted`）。见下 |
+
+**为什么排队中的也算。** 一个会话占着的是一位端口、一行记录和一个名额 —— 而这三件事
+从**提交那一刻**就成立，不等作业跑起来。从前配额只数 `enrolled/suspect/orphaned/releasing`
+（要装 nft 规则的那些），于是「已提交、尚未登记」那个窗口里它**恒为 0**，并发的第二次
+提交一路穿过（`docs/KNOWN-ISSUES.md` 的 F14，v0.7 修掉）。守护进程是**单线程串行**的，
+所以只要那个集合含 `submitted`，这个窗口就不存在了。
+
+★ 而 `op_doctor` 的 `active_sessions` **仍然只数有 ACL 规则的那些** —— 它要和 nft 规则数
+比对，把排队中的并进去会让"排着一个队"报成"规则数与会话数不一致"。
+
+★ 客户端一侧还有一道**独立的**限制：同一个布局组同时只能有一个会话（一个组 = 一个本地
+端口 = 一份浏览器存储，同组的第二条会把第一条的端口与存储当场抢掉）。两道**取严**。
 
 ### `max_time` 为什么必须变成「按分区算」
 

@@ -347,3 +347,26 @@ test('contributes.data：一个声明都不写的插件是**正常**的（缺省
   assert.ok(!r.error, `不声明 data 必须合法：${r.error}`);
   assert.equal(r.entry.plugin.contributes.data, null);
 });
+
+test('★★ slotOf：一个活跃会话占的那个槽（多开的判据就是它）', () => {
+  // ★ 这一条是**整个并发层存在与否**的判据：改回"每次都不同"或者"两个无组插件
+  //   各一个槽"都会让它红，而红的方式正是它要防的那件事。
+  assert.equal(pluginData.slotOf('l0a1b2c3d4e5'), 'layout:l0a1b2c3d4e5');
+
+  // ★★ **不要布局组的那一整类共用一个槽** —— 这一档是**故意**粗的。
+  //    端口由插件的 `preferredPort` 自己挑、写进用户 ssh 配置的别名也是插件自己的
+  //    常量，基座**无从核对**它们会不会撞。核对不了的事只能整类互斥。
+  //    细一档（按插件 id 分槽）会让两个互不认识的无组插件并存着去抢同一个别名，
+  //    而症状是"`ssh slurmate` 连到哪一个是不确定的"，两边都报"已就绪"。
+  assert.equal(pluginData.slotOf(null), 'relay');
+  assert.equal(pluginData.slotOf(undefined), pluginData.slotOf(null),
+    '两个不同的"不要布局组"的插件必须落进同一个槽');
+
+  // 要布局组的：**同组 ⇒ 同槽**（无论是不是同一个插件）；不同组 ⇒ 不同槽。
+  assert.equal(pluginData.slotOf('l1'), pluginData.slotOf('l1'));
+  assert.notEqual(pluginData.slotOf('l1'), pluginData.slotOf('l2'));
+  // 要组的与不要组的，永远是两个槽 —— 那条能力（一个 IDE + 一个终端中转）靠它。
+  assert.notEqual(pluginData.slotOf('l1'), pluginData.slotOf(null));
+  // 两个槽名不会互撞（前缀把它们挡开了，而组 id 是 `l<hex>`，撞不上 `relay`）。
+  assert.notEqual(pluginData.slotOf(null), pluginData.slotOf('relay'));
+});

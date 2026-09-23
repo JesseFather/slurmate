@@ -223,7 +223,8 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 {"ok": true,  "code": 0, "data": { ... }, "error": null}
 
 {"ok": false, "code": 4, "data": null,
- "error": {"kind": "quota_active", "detail": "已有 1 个活跃会话（上限 1）"}}
+ "error": {"kind": "quota_active",
+ "detail": "已经有 1 个会话占着位置（本站上限 1）—— 排队中的也算。结束一个再开下一个。"}}
 ```
 
 构造点：`_ok()` 与 `_err()`（`cluster/slurmate-sessiond`）。
@@ -240,7 +241,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 | `0` | 成功 | — | `0` |
 | `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
 | `3` | 未找到（会话不存在，uid 查不到，或本站没有这个东西） | `not_found`、`unknown_uid`、`plugin_unknown` | `3` |
-| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`quota_pending`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_package_too_large` | `4` |
+| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_package_too_large` | `4` |
 | `5` | **守护进程不可达**（`daemon_unreachable`）**或**端口池空（`no_port`） | `daemon_unreachable`、`no_port` | `5` |
 | `6` | Slurm 侧失败 | `partitions_unknown`、`submit_failed` | `6` |
 | `7` | 触发限流 | `rate_limited` | `7` |
@@ -344,8 +345,15 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 `idempotent` 为假时直接返回 `false`，**无论动作是什么**。
 
 `submit` 必须这样处理的具体理由：`op_submit` 每次调用都生成新 `sid`、插新行、
-提交新作业（`cluster/slurmate-sessiond`），而 `count_active()` 只数
-`ACL_STATES`，`submitted` 不在内 —— `max_active_per_user` **拦不住并发的第二个提交**。
+提交新作业（`cluster/slurmate-sessiond`）—— 它是**非幂等**的。
+
+★ **F14 已经在 v0.7 修掉**：配额数的那个集合（`OCCUPYING_STATES`）含
+`reserved` / `submitted`，所以「已提交、尚未登记」那个窗口里它不再是 0，
+并发的第二个提交当场被拒。修法是**完备**的，唯一的依据是守护进程**单线程串行**
+（`run()` → `select` → `accept_one` → `handle_client` 同步跑到底），所以两次
+`submit` 不可能交错；而那道检查在 `store.insert` **之前**。
+★ 客户端这套处理**照旧不变** —— 服务端那一侧修好了，不等于客户端可以开始重试：
+超时仍然可能是"响应丢了而会话建好了"，认领仍然是唯一正确的下一步。
 
 所以客户端的做法是（`client/src/main/session.js`）：
 
@@ -674,8 +682,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
 | `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**（部署不完整，`plugins/` 里有而 `jobs/` 里没有对应那一份） |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
-| `4` | `quota_active` | 活跃会话数已达 `max_active_per_user` |
-| `4` | `quota_pending` | 未决提交数已达 `max_pending_per_user` |
+| `4` | `quota_active` | **占着位置**的会话数已达 `max_sessions_per_user`（站点可配，见 [CONFIGURATION.md](CONFIGURATION.md)）。**排队中的也算** |
 | `4` | `no_account` | 该用户没有 Slurm association |
 | `4` | `no_partition` | association 不允许这个分区 |
 | `5` | `no_port` | 端口池暂时没有可用端口 |

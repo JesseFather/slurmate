@@ -107,12 +107,17 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 叫 jupyter 的插件而它们是两个不同的东西。不影响服务端。
   setPluginEnabled: (id, enabled) =>
     ipcRenderer.invoke('app:setPluginEnabled', id, enabled),
-  state: () => ipcRenderer.invoke('app:state'),
+  // **全部**会话 + 哪一个是前台。`app:state`（单数）已经删掉了 —— 它只会回
+  // 最后动过的那一个，而在多开下"某条会话在界面上根本不存在"是一种静默的丢失。
+  states: () => ipcRenderer.invoke('app:states'),
+  // 把某一条抬到面板上面。**纯界面动作**，不改任何框架状态。
+  setFront: (slot) => ipcRenderer.invoke('app:setFront', { slot }),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
   // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。
-  stop: () => ipcRenderer.invoke('app:stop'),
+  // ★ **必须指名 slot**：省略会被主进程拒绝，而不是"停那唯一的一个"。
+  stop: (slot) => ipcRenderer.invoke('app:stop', { slot }),
   doctor: () => ipcRenderer.invoke('app:doctor'),
-  reload: () => ipcRenderer.invoke('app:reload'),
+  reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
   // ── 开发者模式 ──
@@ -134,10 +139,10 @@ contextBridge.exposeInMainWorld('slurmate', {
   debug: (what, arg) => ipcRenderer.invoke('app:debug', what, arg),
 
   // 主进程 → 渲染进程
-  onState: (fn) => {
-    const h = (_e, snap) => fn(snap);
-    ipcRenderer.on('session:state', h);
-    return () => ipcRenderer.removeListener('session:state', h);
+  onStates: (fn) => {
+    const h = (_e, payload) => fn(payload);
+    ipcRenderer.on('session:states', h);
+    return () => ipcRenderer.removeListener('session:states', h);
   },
   onNotice: (fn) => {
     const h = (_e, notice) => fn(notice);

@@ -109,17 +109,32 @@ class ShellWindow {
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'panel.html'));
     this.win.once('ready-to-show', () => this.win.show());
 
-    this.surfaceView = null;
+    /**
+     * 窗口里现在有几块界面：**槽 → { view, origin, partition }**。
+     *
+     * ★ 这里从前是**一个** `surfaceView`。单值能成立，靠的是"同一时刻只有一个会话"
+     *   这条假设，而它的失败形态很具体：起中转站时那条「这个插件不要界面」的分支
+     *   会把 code-server 那块正跑着的页面一起销毁，用户看到的是"我的编辑器忽然
+     *   没了"，日志里一个字都没有。
+     */
+    this.surfaces = new Map();
+    /**
+     * 哪一块**盖在面板上面**。
+     *
+     * ★ 原生视图只有一块地方，所以窗口这一层**必须**有这个"前台"的概念。它**不是**
+     *   "当前会话"（那个概念被这次改动删掉了）—— 它只回答"屏幕上看得见哪一块"。
+     *   由 `pushSessions` 从 `index.js` 的 `frontSlot()` 带过来：**决定权只有一处**。
+     */
+    this._front = null;
     this.overlayView = null;
-    this._origin = null;
-    this._partition = null;        // 见 surfacePartition getter
-    this._destroyingSurface = false;   // 见 _destroySurface / render-process-gone
+    // 正被我们自己拆掉的那些视图（见 _destroySurface / render-process-gone）。
+    // 用 Set 而不是一个布尔：多块视图时，甲块在被拆不该让乙块的崩溃报告被吞掉。
+    this._destroying = new Set();
     this._closing = false;
     this._closeConfirmed = false;
-    this._sessionLive = false;     // 由 pushState 更新
-    // 当前会话由哪个插件在接 —— 由 setSessionService 设。**窗口不认识任何插件**，
-    // 它只要一份「关窗会掐断什么」的说法（见 _confirmClose）。
-    this._sessionPlugin = null;
+    // 窗口这一层只需要两件事：活着的会话**有几个**、各自的 `closeWarning`。
+    // 由 setSessions 设。**窗口不认识任何插件**（见 _confirmClose）。
+    this._sessions = [];
     this._overlayText = null;
 
     this.win.on('resize', () => this._layout());
@@ -139,6 +154,7 @@ class ShellWindow {
   /**
    * 把插件声明的那块界面显示出来。
    *
+   * @param {string} slot      这是**哪一条会话**的界面（见 plugin-data.js 的 slotOf）
    * @param {string} url       完整 URL，形如 http://127.0.0.1:18080/lab
    *                           （主机部分**字面 127.0.0.1**，隧道在这一头）
    * @param {string} partition 形如 'persist:<插件 id>@<共享组>[@<实例>]'
@@ -146,21 +162,22 @@ class ShellWindow {
    * @param {boolean} demo     true 时注入 demo.js preload 用于快捷键对照。
    *                           **真实模式绝不注入任何 preload** —— 那会污染那款软件。
    *
-   * ★ 这里**只看 url 和 partition**，不看是谁。`origin` 这个字眼在本文件里已经
-   *   没有意义：URL 的路径部分由插件声明（`contributes.surface.path`），所以
+   * ★ 这里**只看 slot、url 和 partition**，不看是谁。`origin` 这个字眼在本文件里
+   *   已经没有意义：URL 的路径部分由插件声明（`contributes.surface.path`），所以
    *   "同一个隧道端口、不同路径"也是合法的。
    */
-  async showSurface({ url, partition, demo = false }) {
+  async showSurface({ slot, url, partition, demo = false }) {
     // ★ WebContentsView 的 partition **只在构造时读一次**（就是下面那个 new）。
     //   所以「换布局组」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
     //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
     //   而界面上完全看不出区别。
-    if (this.surfaceView && this._partition !== partition) this._destroySurface();
+    //   ★ 判据是**这一个槽**自己的分区，不是"窗口里那块"的 —— 见 index.js 的
+    //     `ensureSurface`。
+    let s = this.surfaces.get(slot);
+    if (s && s.partition !== partition) { this._destroySurface(slot); s = null; }
 
-    this._origin = originOf(url);
-    this._partition = partition;
-    if (!this.surfaceView) {
-      this.surfaceView = new WebContentsView({
+    if (!s) {
+      const view = new WebContentsView({
         webPreferences: {
           partition,
           contextIsolation: true,
@@ -168,31 +185,42 @@ class ShellWindow {
           sandbox: true,
           // 这类页面是最不该被 Chromium 节流的：后台标签页限速会让终端和
           // 语言服务器看起来「卡住」，而且没有任何报错。
+          // ★ 多开之后它更要紧：**后台那个标签页里的终端还在跑**，限速它等于
+          //   让用户切回去时发现命令停了半天。
           backgroundThrottling: false,
           ...(demo ? { preload: path.join(__dirname, '..', 'preload', 'demo.js') } : {}),
         },
       });
-      this.win.contentView.addChildView(this.surfaceView);
-      // 「只装一次」是针对**同一个 webContents 对象**说的：origin 由 this._origin
+      s = { view, origin: originOf(url), partition };
+      this.surfaces.set(slot, s);
+      this.win.contentView.addChildView(view);
+      // 「只装一次」是针对**同一个 webContents 对象**说的：origin 由 `s.origin`
       // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是**新对象**，
       // 必须重新装一遍 —— 否则新视图的 will-navigate 不设防、崩溃也不报错。
-      this._wireSurface(this.surfaceView.webContents);
-      await this.surfaceView.webContents.loadURL(url);
-    } else if (this.surfaceView.webContents.getURL() !== url) {
-      await this.surfaceView.webContents.loadURL(url);
+      this._wireSurface(view.webContents, slot);
+      await view.webContents.loadURL(url);
+    } else {
+      // 隧道换端口：origin 变了，但**不重装监听器**（它们读的是 s.origin）。
+      s.origin = originOf(url);
+      if (s.view.webContents.getURL() !== url) await s.view.webContents.loadURL(url);
     }
     this._layout();
   }
 
-  _wireSurface(wc) {
+  _wireSurface(wc, slot) {
     // 锁死导航：点外链不能把整个界面顶掉（而窗口里没有后退按钮）。
-    // 用 this._origin 而不是捕获参数 —— 隧道换端口后 origin 会变。
+    // 用 `s.origin` 现取而不是捕获参数 —— 隧道换端口后 origin 会变。
+    const originOfSlot = () => {
+      const s = this.surfaces.get(slot);
+      return s ? s.origin : null;
+    };
     wc.setWindowOpenHandler(({ url }) => {
       if (/^https?:/.test(url)) shell.openExternal(url);
       return { action: 'deny' };
     });
     wc.on('will-navigate', (e, url) => {
-      if (this._origin && !url.startsWith(this._origin)) {
+      const o = originOfSlot();
+      if (o && !url.startsWith(o)) {
         e.preventDefault();
         if (/^https?:/.test(url)) shell.openExternal(url);
       }
@@ -202,54 +230,85 @@ class ShellWindow {
       // ★ 我们自己拆视图（换布局组）也会走到这里。不区分的话，用户每切一次布局
       //   就会看到一条「页面崩溃了」的**假警报** —— 系统报告了一件没发生的事，
       //   正是这个项目一路在清的那类。
-      if (this._destroyingSurface) return;
-      this.onAction('renderer-gone', { reason: details && details.reason });
+      if (this._destroying.has(slot)) return;
+      this.onAction('renderer-gone', { slot, reason: details && details.reason });
     });
   }
 
   /**
-   * 销毁视图。**换布局组时必须走这条** —— partition 是构造期属性，不重建就换不了
-   * 存储分区。
+   * 销毁**某一个槽**的视图。**换布局组时必须走这条** —— partition 是构造期属性，
+   * 不重建就换不了存储分区。
    *
    * 顺序照文件头那条写死：removeChildView → webContents.close() → 引用置 null，
    * 每一步 isDestroyed() 兜底。`removeChildView()` 自己不销毁 webContents。
+   *
+   * ★★ **名字里必须带"销毁"两个字。** 从前它叫 `hideSurface()`，而多开之后那个
+   *    名字会同时表示两件事（"这个会话结束了，拆掉"与"用户切了标签，藏起来"），
+   *    而这两件事的差别是**页面会不会被重置**：藏起来的那一块必须原样留着，
+   *    否则用户切一次标签，另一个会话的编辑器就重新加载一次、自动登录再跑一遍。
+   *    隐藏是 `setFront` + `_layout` 的事，**不在这条路上**。
    */
-  _destroySurface() {
-    const v = this.surfaceView;
-    if (!v) return;
+  _destroySurface(slot) {
+    const s = this.surfaces.get(slot);
+    if (!s) return;
+    const v = s.view;
     // 立旗子：这是我们自己要拆的，不是页面崩了（见 _wireSurface）
-    this._destroyingSurface = true;
+    this._destroying.add(slot);
     try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
     try {
       if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
     } catch { /* 同上 */ }
-    this.surfaceView = null;
-    this._partition = null;
-    this._destroyingSurface = false;
+    this.surfaces.delete(slot);
+    this._destroying.delete(slot);
+    if (this._front === slot) this._front = null;
   }
 
-  /** 取当前界面用的 session（要在同一个分区里发请求才能带上它的 cookie）。 */
-  get surfaceSession() {
-    return this.surfaceView ? this.surfaceView.webContents.session : null;
+  /** 收起**某一个槽**的界面（销毁那一块）。会话结束时走这条。 */
+  destroySurface(slot) {
+    if (!this.surfaces.has(slot)) return;
+    this._destroySurface(slot);
+    this.hideOverlay();
+    this._layout();
   }
 
   /**
-   * 当前界面跑在哪个存储分区里。
+   * 把**某一个槽**那块抬到面板上面。其余各块 `setVisible(false)` —— **不销毁**：
+   * 它们背后是还活着的服务器，藏起来只是不占屏幕。
    *
-   * 回收一个布局组时要清它的浏览器存储 —— 而那**绝不能**发生在正被这个视图用着的
-   * 那个分区上，否则用户当前的界面会连 cookie 带 localStorage 一起被抽掉，
+   * ★ 这是切标签走的那条路，与 `destroySurface` **不是一回事**（见那里的注释）。
+   */
+  setFront(slot) {
+    this._front = slot || null;
+    this._layout();
+  }
+
+  get front() { return this._front; }
+
+  /** 取**某一个槽**那块界面用的 session（要在同一个分区里发请求才带得上它的 cookie）。 */
+  surfaceSession(slot) {
+    const s = this.surfaces.get(slot);
+    return s ? s.view.webContents.session : null;
+  }
+
+  /**
+   * **某一个槽**那块界面跑在哪个存储分区里。没有那一块时返回 null。
+   *
+   * 回收一个布局组时要清它的浏览器存储 —— 而那**绝不能**发生在正被**任何一块**
+   * 视图用着的那个分区上，否则那块界面会连 cookie 带 localStorage 一起被抽掉，
    * 症状只是「页面莫名其妙坏了」。
    */
-  get surfacePartition() {
-    return this._partition;
+  surfacePartition(slot) {
+    const s = this.surfaces.get(slot);
+    return s ? s.partition : null;
   }
 
-  /** 当前界面加载的 origin（隧道换端口后它会变）。 */
-  get surfaceOrigin() {
-    return this._origin;
+  /** **某一个槽**那块界面加载的 origin（隧道换端口后它会变）。 */
+  surfaceOrigin(slot) {
+    const s = this.surfaces.get(slot);
+    return s ? s.origin : null;
   }
 
-  hasSurface() { return Boolean(this.surfaceView); }
+  hasSurface(slot) { return this.surfaces.has(slot); }
 
   /**
    * 收起界面，把窗口主体还给面板。
@@ -261,34 +320,30 @@ class ShellWindow {
    *   1. 会话结束时（ended / error）。那个页面背后的服务器已经没了 —— 隧道停了、
    *      作业也快没了 —— 留着它只有坏处。此前**没有任何地方**调用这个收尾，
    *      于是「结束会话」之后用户看到的是一张加载不出来的网页，出路只剩重启客户端。
-   *   2. 起一个**不声明 surface** 的会话时（比如中转站）。上一个会话留下的视图
-   *      必须让开，否则它盖在面板上，而新会话根本不需要它。
+   *   2. 起一个**不声明 surface** 的会话时（比如中转站）。**它自己那一块**（本来
+   *      就没有）让开即可 —— ★ 而从前这里是"把窗口里那一块收掉"，多开之后那是
+   *      一次**越权**：它会把 code-server 那块正跑着的页面一起销毁。
    *
    * 是**销毁**而不是 setVisible(false)：唤醒一个已经死掉的页面没有意义，而且
    * ensureSurface 是按 (url, partition) 判定要不要重建的，一个被藏起来的
    * 旧页面会正好命中「没变」而永远不再加载。销毁之后下次一定是干净的新页面。
+   *
+   * ★ **切标签不走这条**，走 `setFront` —— 那里藏起来的那一块背后还活着。
    */
-  hideSurface() {
-    if (!this.surfaceView) return;
-    this._destroySurface();
-    this.hideOverlay();
-    this._layout();
-  }
-
-  async reloadSurface() {
-    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
-      this.surfaceView.webContents.reload();
-    }
+  async reloadSurface(slot) {
+    const s = this.surfaces.get(slot);
+    if (s && !s.view.webContents.isDestroyed()) s.view.webContents.reload();
   }
 
   /**
    * 重新加载到新的 URL（隧道换了端口时用）。
    */
-  async retarget(url) {
-    if (!this.surfaceView || this.surfaceView.webContents.isDestroyed()) return;
-    // 只更新 this._origin —— 监听器已经装过了，不重复装（见 _wireSurface 的注释）
-    this._origin = originOf(url);
-    await this.surfaceView.webContents.loadURL(url);
+  async retarget(slot, url) {
+    const s = this.surfaces.get(slot);
+    if (!s || s.view.webContents.isDestroyed()) return;
+    // 只更新 s.origin —— 监听器已经装过了，不重复装（见 _wireSurface 的注释）
+    s.origin = originOf(url);
+    await s.view.webContents.loadURL(url);
   }
 
   // ── 遮罩（断线提示）────────────────────────────────────────────────────
@@ -321,9 +376,9 @@ class ShellWindow {
     if (this.overlayView) this.overlayView.setVisible(false);
     // ★ 移除遮罩后必须把焦点还给界面那块视图，否则用户打字没反应 ——
     //   又一个「看起来正常但就是不工作」的静默失败。
-    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
-      this.surfaceView.webContents.focus();
-    }
+    //   还给的必须是**前台**那一块：遮罩底下看得见的就是它。
+    const s = this._front ? this.surfaces.get(this._front) : null;
+    if (s && !s.view.webContents.isDestroyed()) s.view.webContents.focus();
     this._layout();
   }
 
@@ -342,8 +397,15 @@ class ShellWindow {
     const top = STATUS_BAR_HEIGHT;
     const body = Math.max(0, h - top);
     // 用 setBounds 而不是靠 CSS —— WebContentsView 是原生层，不参与页面布局
-    if (this.surfaceView && !this.surfaceView.webContents.isDestroyed()) {
-      this.surfaceView.setBounds({ x: 0, y: top, width: w, height: body });
+    //
+    // ★ 可见性：**只有前台那一块**。其余各块 setVisible(false) 但**留着** ——
+    //   它们背后是还活着的服务器，切回去时必须是同一个页面（`setBounds(0,0,0,0)`
+    //   那种"藏法"会把页面尺寸打乱，切回来要重排）。
+    for (const [slot, s] of this.surfaces) {
+      if (!s.view.webContents || s.view.webContents.isDestroyed()) continue;
+      const on = slot === this._front;
+      s.view.setVisible(on);
+      if (on) s.view.setBounds({ x: 0, y: top, width: w, height: body });
     }
     if (this.overlayView && !this.overlayView.webContents.isDestroyed()) {
       this.overlayView.setBounds({ x: 0, y: top, width: w, height: body });
@@ -351,36 +413,43 @@ class ShellWindow {
   }
 
   // ── 面板通信 ────────────────────────────────────────────────────────────
-  /** 把会话快照推给面板。快照是界面唯一的数据来源。 */
   /**
-   * 告诉窗口「这个会话由哪个插件在接」。传 null = 不知道（未知服务，或没有会话）。
+   * 告诉窗口「现在有几条会话、各自由哪个插件在接」。
    *
-   * 窗口只用到其中的 `closeWarning`（关窗确认要说清楚会掐断什么）。传整个插件
-   * 对象而不是一句文案，是为了让窗口在将来需要别的插件信息时不必再开一个方法 ——
-   * 但它**不**应该去读 `attach` 之类的东西：那是框架与插件之间的事。
+   * 窗口只用它两件事：**有几条活着**（关窗确认要数）、以及各自的 `closeWarning`
+   * （要掐断的东西不一样，话也得不一样）。传整个插件对象而不是一句文案，是为了
+   * 让窗口在将来需要别的插件信息时不必再开一个方法 —— 但它**不**应该去读
+   * `attach` 之类的东西：那是框架与插件之间的事。
+   *
+   * ★ 从前这里收的是**一个** plugin（`setSessionService`），失败形态不是崩溃而是
+   *   **说一句假话**：两条会话（开发环境 + 中转站）时，窗口会把"关闭会结束这个
+   *   开发会话，编辑器里**没有保存的改动会丢失**"念给一个只用着终端的人听。
    */
-  setSessionService(plugin) {
-    this._sessionPlugin = plugin || null;
-  }
+  setSessions(list) { this._sessions = Array.isArray(list) ? list : []; }
 
-  pushState(snap) {
-    // 关窗确认要用：有会话在跑才值得拦一下误点。快照本来就每次状态变化都推过来，
-    // 顺手记下即可，不必再开一条查询通道。
-    const st = snap && snap.state;
-    this._sessionLive = Boolean(st) && st !== 'idle' && st !== 'ended';
+  /**
+   * 把**全部**会话推给面板，并顺手把前台记下来。
+   *
+   * ★ 界面唯一的数据来源是这一份**列表**，不是"最后动过的那一个快照"。从前那个
+   *   形状在多开下的失败形态是"某一条会话在界面上根本不存在" —— 既没有标签、
+   *   也没有「结束会话」的入口，而它在集群上占着资源。
+   */
+  pushSessions(list, front) {
+    this._front = front || null;
     const wc = this.win.webContents;
-    if (wc.isDestroyed()) return;
-    wc.send('session:state', snap);
+    if (!wc.isDestroyed()) wc.send('session:states', { sessions: list, front: this._front });
+    this._layout();
     // ★ 这里曾经有一条「origin 变了就 loadURL」的自动 retarget。删掉了：
     //   它是第二条改 URL 的通路，而且只会 loadURL —— **不换 partition、
     //   也不重跑登录**。换布局组要的恰恰是前者，于是两条路必然分叉。
     //   现在统一由 index.js 的 ensureSurface 判定（它同时看 url 和 partition）。
   }
 
-  /** 把被外壳吞掉的按键推给那个假页面（仅开发者模式用，用于对照）。 */
+  /** 把被外壳吞掉的按键推给**前台**那个假页面（仅开发者模式用，用于对照）。 */
   pushSwallowed(desc) {
-    if (!this.surfaceView || this.surfaceView.webContents.isDestroyed()) return;
-    this.surfaceView.webContents.send('demo:swallowed', desc);
+    const s = this._front ? this.surfaces.get(this._front) : null;
+    if (!s || s.view.webContents.isDestroyed()) return;
+    s.view.webContents.send('demo:swallowed', desc);
   }
 
   pushNotice(kind, text) {
@@ -426,7 +495,11 @@ class ShellWindow {
     if (this._closing) return;
     this._closing = true;
     try {
-      if (!this._sessionLive) {           // 没有会话语义上的损失，不必打扰
+      // ★ **数活着的条数**，不是"有没有会话"。从前这一个布尔在多开下的失败形态
+      //   是一句**不成立的话**：关窗只说了"会结束这个会话"，而实际掐断两条 ——
+      //   用户以为自己只损失一个。（与账本 F13 同一类：说了一句话，而它不成立。）
+      const live = this._sessions.filter((s) => s && s.live);
+      if (!live.length) {                 // 没有会话语义上的损失，不必打扰
         this._closeConfirmed = true;
         this.onClose();
         return;
@@ -438,18 +511,28 @@ class ShellWindow {
       //
       // ★ 文案由**插件**提供（见 plugins/*.js 的 closeWarning），窗口不认识任何
       //   插件名。没有插件信息时用中性的那句 —— 见 NEUTRAL_CLOSE_WARNING。
-      const cw = (this._sessionPlugin && this._sessionPlugin.closeWarning)
-        || NEUTRAL_CLOSE_WARNING;
+      //
+      // ★ 一条一条**各念各的**：两条会话各掐断什么，只有各自的插件说得清。合成
+      //   一句"会结束 2 个会话"等于把"你的编辑器里有没保存的改动"这件**只对其中
+      //   一条成立**的事说成对两条都成立。
+      const warn = (s) => (s.plugin && s.plugin.closeWarning) || NEUTRAL_CLOSE_WARNING;
+      const message = live.length === 1
+        ? warn(live[0]).message
+        : `关闭窗口会结束这 ${live.length} 个会话。`;
+      const detail = (live.length === 1
+        ? warn(live[0]).detail
+        : live.map((s) => `· ${s.service || '（未知服务）'}：${warn(s).detail}`).join('\n'))
+        + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
+        + '下次打开会自动接上。）';
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',
-        buttons: ['结束会话并退出', '取消'],
+        buttons: [live.length === 1 ? '结束会话并退出' : `结束这 ${live.length} 个会话并退出`,
+          '取消'],
         defaultId: 1,                     // 默认停在「取消」：回车不该毁掉作业
         cancelId: 1,
         title: '关闭 Slurmate',
-        message: cw.message,
-        detail: cw.detail
-        + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
-        + '下次打开会自动接上。）',
+        message,
+        detail,
         noLink: true,
       });
       if (response === 1) return;                       // 取消
@@ -471,8 +554,10 @@ class ShellWindow {
   }
 
   _destroyViews() {
-    // surfaceView 走它自己那条（还要清 _partition、立 _destroyingSurface 旗子）
-    this._destroySurface();
+    // 每一块界面走它自己那条（还要清 partition、立 _destroying 旗子）。
+    // ★ 遍历的是**一份拷贝**：`_destroySurface` 会改 `this.surfaces`。
+    for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
+    this._front = null;
     // overlayView 与 partition 无关，照旧走通用清理
     const v = this.overlayView;
     if (!v) return;

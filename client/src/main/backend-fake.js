@@ -135,10 +135,25 @@ class FakeBackend extends Backend {
     this._pickPartition = typeof opts.pickPartition === 'function' ? opts.pickPartition : null;
 
     this._server = null;
-    this._session = null;        // 当前的会话对象
+    /**
+     * 假站点上的全部会话。
+     *
+     * ★ 这里从前是**一个** `_session`。多开之后那不是"少几个字段"：客户端那一半
+     *   能不能同时挂两条会话，**只有在假后端上才验得了**（真集群上要造出"两个
+     *   会话同时活着"极难）。留一个单值的话，本阶段最要紧的那几条用例
+     *   **根本没有办法跑起来** —— 而"用例跑不起来"与"功能是对的"在输出上长得一样。
+     *
+     * ★ 每条会话自己带定时器（`_enrollTimer` / `_releaseTimer`）：从前那两个字段
+     *   挂在后端上，一个会话结束时 `_clearTimers()` 会把**另一条**会话的登记定时器
+     *   一起清掉 —— 那条会话就永远停在 `submitted`，而界面上一切正常。
+     */
+    this._sessions = [];
+    /**
+     * 每人最多几条会话。与守护进程的 `max_sessions_per_user` 同一条规则，
+     * 缺省也同值（1，安全侧）。用例直接把 `getBackend().maxActive = 2` 就能验多开。
+     */
+    this.maxActive = 1;
     this._seq = 0;
-    this._enrollTimer = null;
-    this._releaseTimer = null;
 
     // 调试开关 —— 由调试面板驱动，用来复现真机上极难复现的状态
     this._daemonDownUntil = 0;
@@ -488,12 +503,27 @@ class FakeBackend extends Backend {
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
   /** 模拟作业被回收（比如心跳断了 30 分钟后被 scancel）。 */
   debugReap() {
-    if (!this._session) return false;
-    this._clearTimers();
-    this._session.state = 'released';
-    this._session.tunnel_target = null;
+    const live = this._occupying();
+    if (!live.length) return false;
+    // ★ **全部**收掉（从前只有一个，所以"全部"与"那一个"是同一件事）。用例拿它
+    //   制造"上一个会话已经走完了"的现场。
+    for (const s of live) {
+      this._clearTimers(s);
+      s.state = 'released';
+      s.tunnel_target = null;
+    }
     this._emitState(false, '会话已被回收');
     return true;
+  }
+
+  /** 还占着位置的会话（与守护进程的 `OCCUPYING_STATES` 同一个集合）。 */
+  _occupying() {
+    return this._sessions.filter((s) => !['released', 'rejected', 'expired'].includes(s.state));
+  }
+
+  /** 按 session_id 找。找不到返回 null（调用方一律回 `not_found`）。 */
+  _find(sid) {
+    return this._sessions.find((s) => s.session_id === sid) || null;
   }
   /**
    * 让假站点"开了某个插件但本客户端不认识它"。
@@ -675,9 +705,13 @@ class FakeBackend extends Backend {
     if (!this._server && sitePlugin.surface) {
       return err(9, 'internal', '假后端尚未 connect()，本地服务未启动');
     }
-    if (this._session && !['released', 'rejected', 'expired'].includes(this._session.state)) {
-      // 与真实守护进程一致：max_active_per_user = 1
-      return err(4, 'quota_active', '已有 1 个活跃会话（上限 1）');
+    // 与真实守护进程一致：**占着位置的**（含排队中的）都算一个名额，
+    // 上限来自配置键 `max_sessions_per_user`（`this.maxActive`）。
+    const occ = this._occupying();
+    if (occ.length >= this.maxActive) {
+      return err(4, 'quota_active',
+        `已经有 ${occ.length} 个会话占着位置（本站上限 ${this.maxActive}）—— `
+        + '排队中的也算。结束一个再开下一个。');
     }
 
     // 显式指定了分区 → 必须校验权限（fail-closed）；
@@ -701,7 +735,7 @@ class FakeBackend extends Backend {
               + Math.random().toString(16).slice(2, 10);
     const now = nowSec();
 
-    this._session = {
+    const sess = {
       session_id: sid,
       job_id: 5700 + this._seq,
       state: 'submitted',
@@ -737,30 +771,31 @@ class FakeBackend extends Backend {
       expires_at: now + DEFAULT_TIME_SECONDS,
     };
 
-    this._enrollTimer = setTimeout(() => {
-      if (!this._session || this._session.session_id !== sid) return;
-      this._session.state = 'enrolled';
-      this._session.enrolled_at = nowSec();
-      this._session.node = part.name === '2080TI' ? 'node04' : 'node01';
+    this._sessions.push(sess);
+    sess._enrollTimer = setTimeout(() => {
+      if (!this._find(sid)) return;
+      sess.state = 'enrolled';
+      sess.enrolled_at = nowSec();
+      sess.node = part.name === '2080TI' ? 'node04' : 'node01';
       // 假站点里 tunnel_target 指向本地的假 code-server（中转站则指向一个**没有
       // 东西在监听**的端口 —— 那边真正的 sshd 假不出来，见 DEMO_HOST_KEY）。
       // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
-      this._session.node_ip = '127.0.0.1';
-      const relay = this._session.site_pubkey;
-      this._session.service_port = relay
+      sess.node_ip = '127.0.0.1';
+      const relay = sess.site_pubkey;
+      sess.service_port = relay
         ? DEMO_SSHD_PORT : (this._server ? this._server.port : 0);
-      this._session.tunnel_target = `127.0.0.1:${this._session.service_port}`;
+      sess.tunnel_target = `127.0.0.1:${sess.service_port}`;
       if (relay) {
-        this._session.ssh_host_key = DEMO_HOST_KEY;
+        sess.ssh_host_key = DEMO_HOST_KEY;
       } else {
-        this._session.auth_password = DEMO_PASSWORD;
+        sess.auth_password = DEMO_PASSWORD;
       }
-      this._session.job_state = 'RUNNING';
+      sess.job_state = 'RUNNING';
       this._emitState(true, '会话已登记');
     }, this.enrollDelayMs).unref?.();
 
     return ok({
-      session_id: sid, job_id: this._session.job_id, state: 'submitted',
+      session_id: sid, job_id: sess.job_id, state: 'submitted',
       partition: part.name,
       resources: { cpus, mem, gpus },
       candidates: [55101, 55102, 55103, 55104, 55105, 55106],
@@ -770,49 +805,57 @@ class FakeBackend extends Backend {
 
   _status(req) {
     const sid = req && req.session_id;
-    if (!this._session) return ok({ session: null });
-    if (sid && this._session.session_id !== sid) return err(3, 'not_found');
-    return ok({ session: this._view(this._session) });
+    // ★ 不带 session_id 时回**最新**那条占着位置的 —— 与守护进程逐字一致。
+    //   客户端要多会话走 `_list`（`tryReattach` 就是那样接回全部会话的）。
+    const s = sid ? this._find(sid) : (this._occupying().slice(-1)[0] || null);
+    if (sid && !s) return err(3, 'not_found');
+    return ok({ session: s ? this._view(s) : null });
   }
 
   _list() {
-    return ok({ sessions: this._session ? [this._view(this._session)] : [] });
+    return ok({ sessions: this._sessions.map((s) => this._view(s)) });
   }
 
   _heartbeat(req) {
     const sid = req && req.session_id;
-    if (!this._session || this._session.session_id !== sid) return err(3, 'not_found');
-    this._session.last_hb_at = nowSec();
-    if (this._session.state === 'suspect') this._session.state = 'enrolled';
-    return ok({ state: this._session.state, at: nowSec() });
+    const s = this._find(sid);
+    if (!s) return err(3, 'not_found');
+    s.last_hb_at = nowSec();
+    if (s.state === 'suspect') s.state = 'enrolled';
+    return ok({ state: s.state, at: nowSec() });
   }
 
   _goodbye(req) {
     const sid = req && req.session_id;
-    if (!this._session || this._session.session_id !== sid) return err(3, 'not_found');
-    if (['released', 'rejected', 'expired'].includes(this._session.state)) {
-      return ok({ state: this._session.state });
+    const s = this._find(sid);
+    if (!s) return err(3, 'not_found');
+    if (['released', 'rejected', 'expired'].includes(s.state)) {
+      return ok({ state: s.state });
     }
-    this._clearTimers();
-    this._session.state = 'releasing';
-    this._session.note = 'goodbye';
+    // ★ 只清**这一条**的定时器。清全部的话，另一条会话的登记定时器被清掉，
+    //   它就永远停在 submitted —— 而界面上一切正常。
+    this._clearTimers(s);
+    s.state = 'releasing';
+    s.note = 'goodbye';
     // 真实守护进程会回 releasing，然后下一个 tick（最多 2 秒）才置 released。
     // 假后端照做 —— 界面必须把「正在释放」和「已结束」当成两个状态，
     // 因为 scancel 有可能静默失败（见 docs/KNOWN-ISSUES.md 的 F12 / F13）。
-    this._releaseTimer = setTimeout(() => {
-      if (!this._session) return;
-      this._session.state = 'released';
-      this._session.tunnel_target = null;
+    s._releaseTimer = setTimeout(() => {
+      s.state = 'released';
+      s.tunnel_target = null;
       this._emitState(false, '会话已释放');
     }, 1600).unref?.();
     return ok({ state: 'releasing' });
   }
 
   _doctor() {
+    // ★ `active_sessions` 只数 `enrolled`（有 nft 规则的那些）—— 与守护进程一致，
+    //   排队中的**不算**，否则体检会报"规则数与会话数不一致"。
+    const enrolled = this._sessions.filter((s) => s.state === 'enrolled').length;
     return ok({
       socket: true, table: true, rules_readable: true,
-      rules_count: this._session && this._session.state === 'enrolled' ? 1 : 0,
-      active_sessions: this._session && this._session.state === 'enrolled' ? 1 : 0,
+      rules_count: enrolled,
+      active_sessions: enrolled,
       consistent: true,
       port_range: [55001, 55999],
       existing: { codeserver_table: true, portdaemon_table: true },
@@ -862,9 +905,12 @@ class FakeBackend extends Backend {
     return d;
   }
 
-  _clearTimers() {
-    if (this._enrollTimer) { clearTimeout(this._enrollTimer); this._enrollTimer = null; }
-    if (this._releaseTimer) { clearTimeout(this._releaseTimer); this._releaseTimer = null; }
+  /** 清定时器。给 `s` = 只清那一条；省略 = 全部（关后端时用）。 */
+  _clearTimers(s) {
+    for (const one of (s ? [s] : this._sessions)) {
+      if (one._enrollTimer) { clearTimeout(one._enrollTimer); one._enrollTimer = null; }
+      if (one._releaseTimer) { clearTimeout(one._releaseTimer); one._releaseTimer = null; }
+    }
   }
 }
 

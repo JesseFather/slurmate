@@ -87,6 +87,19 @@ TERMINAL_STATES = (ST_RELEASED, ST_REJECTED, ST_EXPIRED)
 # ACL 存在的状态集合 —— 与 nft 规则必须严格一一对应
 ACL_STATES = (ST_ENROLLED, ST_SUSPECT, ST_ORPHANED, ST_RELEASING)
 
+# ── 「占着位置」的会话 ──────────────────────────────────────────────────────
+#
+# 一个会话占着一份**位置**：一行数据库记录、一位候选端口、用户的一个名额。
+# 而「占着位置」与「被放行」**不是同一件事**，所以这里有两个集合而不是一个：
+#
+#     被放行（nft 规则该不该在）  ← 只有 ACL_STATES，与规则严格一一对应
+#     占着位置（端口避让、名额）  ← 上面那个 ∪ {reserved, submitted}
+#
+# ★ 一个还在排队的会话**没有** ACL 规则（规则在登记时才装），但它已经占着一个候选
+#   端口、也占着用户的一个名额。把两者并成一个，症状是 `op_doctor` 拿它去和规则数
+#   比，于是"排着一个队"就报"规则数与会话数不一致"，指向一个不存在的问题。
+OCCUPYING_STATES = (ST_RESERVED, ST_SUBMITTED) + ACL_STATES
+
 
 def log_setup(level=logging.INFO):
     h = logging.StreamHandler(sys.stderr)
@@ -305,8 +318,15 @@ RENEW_MAX_TOTAL = 604800
 
 PASSWORD_BYTES = 12
 
-MAX_ACTIVE_PER_USER = 1
-MAX_PENDING_PER_USER = 4
+# 每人最多几个会话。**站点可配**（`max_sessions_per_user`），这是它的缺省值。
+#
+# ★ 缺省是 1 —— 落在安全侧：集群是共享设施，"一个人同时占几个作业"该由站点的
+#   管理员说了算，不由我们替他放开。想要多开（一个 IDE + 一个终端中转同时活）
+#   就在配置里写 2 或更大。
+#
+# ★ v0.2 曾把配额整节从配置里收回去，理由是「只有一种正确取值」。这一格**被
+#   这一版证伪了** —— 理由与逐条症状见 docs/CONFIGURATION.md 的那一节。
+DEFAULT_MAX_SESSIONS_PER_USER = 1
 
 # ── 插件 ────────────────────────────────────────────────────────────────────
 # 一个「服务种类」就是一个**插件**，而站点上的一个插件是**一个包文件**：
@@ -1075,6 +1095,11 @@ SLURM_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/slurm/bin", "/usr/sbin",
 GLOBAL_KEYS = frozenset([
     "cluster_cidr", "readonly_paths",
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
+    # 每人最多几个会话。★ 名字**不是** v0.2 那个 `max_active_per_user` ——
+    # 合并之后它数的是「占着位置的」（排队中的也算），沿用旧名字会让这个名字说谎；
+    # 而旧名字留在白名单外，正好让那条「老配置里的键会被明确拒绝」的用例
+    # 一个字都不用改地继续守着。
+    "max_sessions_per_user",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
     # 提交时不带 service_kind 时用哪个插件。**没有内建缺省值** —— 见 Config 里
     # 那段说明：隐式缺省会让"装/卸一个插件"这种配置之外的动作悄悄改变行为。
@@ -2222,8 +2247,13 @@ class Config(object):
         self.renew_increment = RENEW_INCREMENT
         self.renew_max_total = RENEW_MAX_TOTAL
         self.password_bytes = PASSWORD_BYTES
-        self.max_active_per_user = MAX_ACTIVE_PER_USER
-        self.max_pending_per_user = MAX_PENDING_PER_USER
+        # ── 配额 ──
+        # ★ 这一格是**变回**配置键的，理由与逐条症状见 docs/CONFIGURATION.md
+        #   的〈max_sessions_per_user〉那一节：v0.2 收它的理由是「只有一种正确取值」，
+        #   而这一版把那条理由证伪了 —— 客户端现在能同时挂两个会话（一个要布局组的、
+        #   一个不要的），"一个人最多几个会话"于是重新变成一个**站点决定**。
+        self.max_sessions_per_user = getint("max_sessions_per_user",
+                                            DEFAULT_MAX_SESSIONS_PER_USER)
         self.max_rpc_per_second = MAX_RPC_PER_SECOND
         self.reject_threshold = REJECT_THRESHOLD
         self.reject_window = REJECT_WINDOW
@@ -2384,6 +2414,14 @@ class Config(object):
                 % (self.default_plugin,
                    "、".join(sorted(self.plugin_by_name)) or "（一个都没有）",
                    self.plugins_dir))
+        # 配额。0 的后果是**所有人都开不了会话**，而报错会是一句
+        # "已经有 0 个会话占着位置（本站上限 0）" —— 没人能从那句话里看出
+        # 根因在配置里。所以宁可起不来。
+        if self.max_sessions_per_user < 1:
+            errors.append(
+                "max_sessions_per_user = %d 不成立：0 会让任何人都开不了会话。"
+                "想要「一个人只能有一个会话」就写 1。"
+                % self.max_sessions_per_user)
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -2567,9 +2605,9 @@ class Store(object):
         return [dict(r) for r in cur.fetchall()]
 
     def active_ports(self):
-        """所有活跃会话占用的端口（候选集 ∪ 已选定），用于分配时避让。"""
+        """所有占着位置的会话占用的端口（候选集 ∪ 已选定），用于分配时避让。"""
         used = set()
-        for s in self.by_state((ST_RESERVED, ST_SUBMITTED) + ACL_STATES):
+        for s in self.by_state(OCCUPYING_STATES):
             for tok in (s.get("candidates") or "").split(","):
                 if tok.strip().isdigit():
                     used.add(int(tok))
@@ -2577,17 +2615,17 @@ class Store(object):
                 used.add(int(s["service_port"]))
         return used
 
-    def count_active(self, uid):
-        q = ",".join("?" * len(ACL_STATES))
+    def count_occupying(self, uid):
+        """这个用户占着几个位置。
+
+        ★ 从前这里叫 `count_active`、只数 `ACL_STATES`，于是「已提交、尚未登记」
+          那个窗口里它**恒为 0** —— 配额拦不住并发的第二个提交（账本 F14）。
+          名字跟着含义一起改：它数的是"没走完的"，不只是"活跃的"。
+        """
+        q = ",".join("?" * len(OCCUPYING_STATES))
         cur = self.conn.execute(
             "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (%s)" % q,
-            (uid,) + ACL_STATES)
-        return cur.fetchone()[0]
-
-    def count_pending(self, uid):
-        cur = self.conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (?,?)",
-            (uid, ST_RESERVED, ST_SUBMITTED))
+            (uid,) + OCCUPYING_STATES)
         return cur.fetchone()[0]
 
     # ── 写入 ────────────────────────────────────────────────────────────────
@@ -4276,7 +4314,10 @@ class Sessiond(object):
             if not s or s["uid"] != uid:
                 return self._err(3, "not_found")
             return self._ok({"session": self.session_view(s)})
-        act = self.store.by_uid(uid, (ST_RESERVED, ST_SUBMITTED) + ACL_STATES)
+        # 不带 session_id：返回**最新**那条占着位置的会话。
+        # ★ 客户端要多会话请走 `list`（它一次给全，而这一条只给一条）——
+        #   这是两种不同的需要，所以没有把 status 改成返回列表。
+        act = self.store.by_uid(uid, OCCUPYING_STATES)
         if not act:
             return self._ok({"session": None})
         return self._ok({"session": self.session_view(act[-1])})
@@ -4349,13 +4390,21 @@ class Sessiond(object):
         if self.is_throttled(uid):
             return self._err(4, "throttled", "请求被拒绝次数过多，请稍后再试")
 
-        if self.store.count_active(uid) >= cfg.max_active_per_user:
+        # ★ **一次调用，一个判据。** 从前这里是两道检查、两个集合，而它们数的
+        #   东西差一个「已提交、尚未登记」的窗口 —— 那个窗口里 count_active 恒为 0，
+        #   于是并发第二次提交一路穿过（账本 F14）。现在只有一个集合，而它含
+        #   reserved/submitted。
+        #
+        # ★ 这里**不需要锁**，唯一的依据是：本守护进程单线程串行（run() →
+        #   selector.select → accept_one → handle_client 同步跑到底），所以两次
+        #   submit 不可能交错；而这道检查在 store.insert **之前**，于是第二个提交
+        #   到达时第一个一定已经是 submitted 或更后面。改并发模型就得重新想这一条。
+        n = self.store.count_occupying(uid)
+        if n >= cfg.max_sessions_per_user:
             return self._err(4, "quota_active",
-                             "已有 %d 个活跃会话（上限 %d）"
-                             % (self.store.count_active(uid),
-                                cfg.max_active_per_user))
-        if self.store.count_pending(uid) >= cfg.max_pending_per_user:
-            return self._err(4, "quota_pending", "未完成的提交过多，请稍后再试")
+                             "已经有 %d 个会话占着位置（本站上限 %d）—— "
+                             "排队中的也算。结束一个再开下一个。"
+                             % (n, cfg.max_sessions_per_user))
 
         # 账户：AccountingStorageEnforce 含 associations 时【必须】带 -A
         acct, why = self.slurm.account_for(user)

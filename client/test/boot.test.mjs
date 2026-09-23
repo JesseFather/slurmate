@@ -383,7 +383,7 @@ after(async () => {
   Module._load = origLoad;
   try {
     const idx = require('../src/main/index.js');
-    const ctl = idx._test.getController();
+    const ctl = onlyCtl(idx);
     if (ctl) await ctl.stop();
     const b = idx._test.getBackend();
     if (b) await b.close();
@@ -399,6 +399,49 @@ const invoke = (ch, ...args) => {
   const h = calls.ipc.get(ch);
   assert.ok(h, `IPC 通道 ${ch} 未注册`);
   return h(null, ...args);
+};
+
+/**
+ * ── 多开之后用例要用的三个小工具 ───────────────────────────────────────────
+ *
+ * ★ 会话不再是"那一个"，而是**一张表**。这些用例绝大多数时候只有一条会话，
+ *   所以这里把"唯一那一条"的取法收成三个函数 —— 而不是让每条断言各写一遍
+ *   `[...map.values()][0]`（写错了不会报错，只会取到 undefined 然后断言以错误的
+ *   理由变绿）。
+ */
+const onlyRec = (idx) => {
+  const m = idx._test.getSessions();
+  return m.get([...m.keys()][0]) || null;
+};
+const onlyCtl = (idx) => { const r = onlyRec(idx); return r && r.controller; };
+/** 某一个槽还占着吗（与 index.js 的 `occupied` 同一条判据，经 `live` 暴露）。 */
+const occupiedOf = (idx, slot) => {
+  const r = idx._test.getSessions().get(slot);
+  return Boolean(r) && r.controller
+    && !['ended', 'error', 'idle', 'releasing'].includes(r.controller.state);
+};
+/** **某一个槽**那块视图（多开用例要按槽取，不能拿"唯一那一块"）。 */
+const viewFor = (w, slot) => {
+  const it = w.surfaces.get(slot);
+  return it ? it.view : null;
+};
+/** 假站点上唯一那条会话（用例拿它直接改服务端状态，模拟各种现场）。 */
+const onlyFake = (b) => b._occupying()[0] || null;
+/** 界面上那一块视图（没有时 null）。 */
+const theView = (w) => {
+  const it = [...w.surfaces.values()][0];
+  return it ? it.view : null;
+};
+/** 前台的快照（`app:states` 的糖）。 */
+const frontSnap = async () => {
+  const r = await invoke('app:states');
+  const hit = (r.sessions || []).find((x) => x.slot === r.front);
+  return (hit && hit.snap) || null;
+};
+/** 前台那一条的槽 —— **停会话必须指名**，不收名字的 stop 会被拒绝。 */
+const frontSlotOf = async () => {
+  const r = await invoke('app:states');
+  return r.front;
 };
 
 test('index.js 能加载并完成整个启动流程', async (t) => {
@@ -417,12 +460,12 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
 
   // 假后端启动时会推一条 dev 通知，面板据此显示横幅
   const win = calls.windows[0];
-  assert.ok((win.webContents.handlers['send:session:state'] || []).length >= 1,
+  assert.ok((win.webContents.handlers['send:session:states'] || []).length >= 1,
     '应当向面板推过状态');
 
   // IPC 通道注册齐全
   for (const ch of ['app:bootstrap', 'app:probeHosts', 'app:connect', 'app:partitions',
-                    'app:start', 'app:state', 'app:doctor', 'app:stop', 'app:reload',
+                    'app:start', 'app:states', 'app:doctor', 'app:stop', 'app:reload',
                     'app:debug',
                     // 连接管理：地址必须在界面上可填可删 —— 这条曾经是个硬缺口，
                     // 那时地址只能手改 config.json，面板上根本没有入口。
@@ -641,7 +684,8 @@ test('app:debug 在开发者模式下可用（真机上造不出来的状态）'
 
 test('app:state 在没开会话时返回 null，而不是崩', async (t) => {
   t.after(() => { Module._load = origLoad; });
-  assert.equal(await invoke('app:state'), null);
+  assert.deepEqual((await invoke('app:states')).sessions, [],
+    '没有会话时应当是**空表**，而不是崩或回 null');
 });
 
 test('★ 分区来自 Slurm（不是配置里的「用途」），且没权限的要标出来', async (t) => {
@@ -672,7 +716,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
       const v = calls.views[before];
       if (v && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(v.webContents._url)) return v;
       if (Date.now() > deadline) {
-        const snap = await invoke('app:state');
+        const snap = await frontSnap();
         assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(snap)}`);
       }
       await new Promise((r) => setTimeout(r, 100));
@@ -743,7 +787,7 @@ async function waitForView(fromIndex, timeoutMs = 15000) {
     const v = calls.views[fromIndex];
     if (v && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(v.webContents._url)) return v;
     if (Date.now() > deadline) {
-      assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(await invoke('app:state'))}`);
+      assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(await invoke('app:states'))}`);
     }
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -776,7 +820,7 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   assert.equal(started.ok, true, `开会话应当成功：${JSON.stringify(started)}`);
   const view1 = await waitForView(before);
 
-  const ctl = idx._test.getController();
+  const ctl = onlyCtl(idx);
   const sessionId = ctl.sessionId;
   const jobId = ctl.snapshot().jobId;
   const oldGroupId = ctl.snapshot().layoutId;
@@ -949,19 +993,19 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
     '前置条件：要先连上 —— 没连上时 tryReattach 会（正确地）直接返回');
   await b.rpc({ op: 'submit', cpus: 2, mem: '8G' });
   await new Promise((r) => setTimeout(r, 400));      // 假后端 200ms 登记
-  const sid = b._session && b._session.session_id;
+  const sid = onlyFake(b) && onlyFake(b).session_id;
   assert.ok(sid, '前置条件：要有一个会话');
 
   // 把它改回「作业还在队列里」的样子：没有 tunnel_target。
   // 这正是「换了电脑、或客户端重启时作业还没跑起来」的形态。
-  b._session.tunnel_target = null;
-  b._session.state = 'submitted';
+  onlyFake(b).tunnel_target = null;
+  onlyFake(b).state = 'submitted';
 
   // 重跑启动时那条路。注意不能 await —— 它会一直等登记，而这里永远不会登记。
   const p = idx._test.reattach().catch(() => {});
   await new Promise((r) => setTimeout(r, 600));
 
-  const ctl = idx._test.getController();
+  const ctl = onlyCtl(idx);
   assert.ok(ctl,
     '排队中的会话也必须被接管 —— 否则界面照常显示「启动」，用户一点就提交了'
     + '第二个作业，而第一个还在队列里');
@@ -970,7 +1014,7 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
     '还没有 tunnel_target，不能假装已经跑起来了');
 
   // 收尾：结束这个会话，让 _waitForEnroll 的轮询自己走到终态停下
-  await invoke('app:stop');
+  await invoke('app:stop', { slot: await frontSlotOf() });
   await Promise.race([p, new Promise((r) => setTimeout(r, 5000))]);
   await invoke('app:deleteConnection', conn.connection.id);
   await invoke('app:debug', 'reset');
@@ -1487,7 +1531,7 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   // ★ 这个文件里的用例共用一个 Electron 实例，所以"一次会话都不许建"要拿
   //   **前后对比**来说：直接断言 `app:state` 是 null 会被上一个用例留下的那个
   //   `releasing` 会话判红 —— 而那与这道闸无关。
-  const sidBefore = (await invoke('app:state'))?.sessionId ?? null;
+  const sidBefore = (await frontSnap())?.sessionId ?? null;
 
   // ① 服务端更新、**同一个大版本** —— 那条要求咬人的那一格。
   await invoke('app:debug', 'daemon-version', '2.5');
@@ -1499,7 +1543,7 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   assert.match(r.error, /2\.4/, r.error);
   assert.equal(idx._test.getBackend().connected, false,
     '★ 拦住时连接必须已经关掉 —— 不许留一条"连上了、但不许用"的连接占着守护进程');
-  assert.equal((await invoke('app:state'))?.sessionId ?? null, sidBefore,
+  assert.equal((await frontSnap())?.sessionId ?? null, sidBefore,
     '★ 一次会话都不许建 —— 判定只在连接期做，会话一个字都不该被动到');
   // 注：`whoami` 不能用来说这件事 —— 它是模块级的，上一个用例早就把它填上了。
   // "这道闸真的跑过"由上面的 `code === 'client_behind'` 保证：那个 code 只有
@@ -2491,8 +2535,8 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   const b = idx._test.getBackend();
 
   // 等上一个用例的会话真的被释放（假后端要 1.6 秒，而配额是 1）
-  await waitUntil(async () => !b._session
-    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+  await waitUntil(async () => !onlyFake(b)
+    || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
   // ★ 盯**窗口当前那一个视图**，不去数 calls.views 的下标。
   //   数下标的话，如果中途有一次「视图被复用了、没有新建」，这个用例会以
@@ -2500,16 +2544,16 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
   const w = idx._test.getWindow();
   await invoke('app:start', null, 'code-server');
-  await waitUntil(() => (w.surfaceView && !w.surfaceView.webContents.isDestroyed()
-    && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(w.surfaceView.webContents._url)
-    ? w.surfaceView : null), '插件声明的那块界面');
+  await waitUntil(() => (theView(w) && !theView(w).webContents.isDestroyed()
+    && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(theView(w).webContents._url)
+    ? theView(w) : null), '插件声明的那块界面');
 
   // 结束会话。★ 用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
   //   就是死的 —— 而状态要等下一次 status 轮询（60 秒）才可能从 releasing 变成
   //   ended。所以收起视图必须发生在 releasing，不能等 ended：否则用户还要盯着
   //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
-  await invoke('app:stop');
-  assert.equal(w.hasSurface(), false,
+  await invoke('app:stop', { slot: await frontSlotOf() });
+  assert.equal(Boolean(theView(w)), false,
     '★ 会话结束后必须销毁 code-server 视图 —— 它是原生层、覆在面板上方，'
     + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
 });
@@ -2529,8 +2573,8 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = idx._test.getBackend();
-  await waitUntil(async () => !b._session
-    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+  await waitUntil(async () => !onlyFake(b)
+    || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
   // ★ 这一条测的是**框架与插件的分工**，也是下一阶段（站点分发声明式插件）的形状：
   //   界面由**框架**按 `contributes.surface` 打开，不由插件代码打开。所以一个
@@ -2573,32 +2617,32 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   const w = idx._test.getWindow();
   const started = await invoke('app:start', null, 'jupyter');
   assert.equal(started.ok, true, `提交失败：${JSON.stringify(started.snapshot || started)}`);
-  const ctl = idx._test.getController();
+  const ctl = onlyCtl(idx);
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin, '会话进入 running', 20000);
 
   // ★ 界面开了，而且开的是**声明里那个路径** —— 框架读的是 contributes，不是插件名。
-  await waitUntil(() => (w.surfaceView && !w.surfaceView.webContents.isDestroyed()
-    && /\/lab$/.test(w.surfaceView.webContents._url) ? w.surfaceView : null),
+  await waitUntil(() => (theView(w) && !theView(w).webContents.isDestroyed()
+    && /\/lab$/.test(theView(w).webContents._url) ? theView(w) : null),
   '声明式插件的界面');
-  assert.match(w.surfaceView.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
+  assert.match(theView(w).webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
     'URL = 隧道 origin + 声明里的 path');
   // ★ 分区按**插件**走 —— 一个网页应用自己的状态该跟它自己走。它没声明分实例，
   //   所以身份是两段：插件 id @ 版本。★ 那一段**是版本号**而不是常量，也就是
   //   "这个插件没声明跨版本共享 ⇒ 升一次版本换一份干净存储"这条缺省在这里的样子。
-  assert.match(w.surfacePartition || '',
+  assert.match(w.surfacePartition(w.front) || '',
     /^persist:01M2JKM1M1M1M1M1M1M1M1M1M1@1\.0\.0$/,
-    `没声明分实例的插件要用按插件的分区，实际是 ${w.surfacePartition}`);
+    `没声明分实例的插件要用按插件的分区，实际是 ${w.surfacePartition(w.front)}`);
 
   // ★ 而没有客户端代码就**没有登录那一步**。证据看它那个存储分区里的 cookie jar：
   //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架**不会去猜**一个
   //   口令该怎么用 —— 它手里根本没有"这个插件要 POST 什么"的知识。
-  const jar = partitionJars[w.surfacePartition];
+  const jar = partitionJars[w.surfacePartition(w.front)];
   assert.equal(jar ? jar.size : 0, 0,
     '没有客户端代码的插件不该有任何登录 —— 没人告诉过框架该拿什么去登录');
 
-  await invoke('app:stop');
-  await waitUntil(async () => !b._session
-    || ['released', 'rejected', 'expired'].includes(b._session.state), '会话释放', 20000);
+  await invoke('app:stop', { slot: await frontSlotOf() });
+  await waitUntil(async () => !onlyFake(b)
+    || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '会话释放', 20000);
   cleanupSiteState(idx);
 });
 
@@ -2611,8 +2655,8 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是**上一个用例**的会话，
   // 排查起来会以为是中转站本身的问题。
   const b = idx._test.getBackend();
-  await waitUntil(async () => !b._session
-    || ['released', 'rejected', 'expired'].includes(b._session.state), '上一个会话释放');
+  await waitUntil(async () => !onlyFake(b)
+    || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
   const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
   assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
@@ -2625,7 +2669,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   let snap = null;
   const deadline = Date.now() + 15000;
   for (;;) {
-    snap = await invoke('app:state');
+    snap = await frontSnap();
     if (snap && snap.state === 'running') break;
     if (Date.now() > deadline) break;
     await new Promise((r) => setTimeout(r, 100));
@@ -2685,7 +2729,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
     '作业带回来的主机公钥要被钉进 known_hosts');
 
   // 收尾
-  await invoke('app:stop');
+  await invoke('app:stop', { slot: await frontSlotOf() });
 });
 
 
@@ -2724,7 +2768,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
     // ★ 这一条不只是打扫卫生：如果 tryReattach 提前返回（正是 C10 那个变异），
     //   controller 会是 null 而隧道还活着 —— 事件循环被它撑住，
     //   整轮 `node --test` 不会结束。收尾要能覆盖"没有 controller"那种情况。
-    const c = idx._test.getController();
+    const c = onlyCtl(idx);
     if (c) { try { await c.stop(); } catch (e) { /* 收尾失败不该改变结论 */ } }
     await invoke('app:debug', 'reset');   // 它会把假站点那两个插件恢复成开着的
   });
@@ -2736,10 +2780,10 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // 带着一个在跑的会话去开新的只会拿到「已有 1 个活跃会话」。
   // 假后端的 _goodbye 只把 state 置成 released、不把对象清掉（真守护进程也是
   // 这样：终态记录会留着），所以判据是**状态**而不是对象在不在。
-  const dead = () => !b._session
-    || ['released', 'rejected', 'expired'].includes(b._session.state);
+  const dead = () => !onlyFake(b)
+    || ['released', 'rejected', 'expired'].includes(onlyFake(b).state);
   if (!dead()) {
-    await invoke('app:stop');
+    await invoke('app:stop', { slot: await frontSlotOf() });
     await waitUntil(dead, '上一个会话释放', 20000);
   }
 
@@ -2748,9 +2792,10 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
   const started = await invoke('app:start', { cpus: 2 });
   assert.equal(started.ok, true,
-    `开会话失败：${JSON.stringify(started.snapshot || started)}`);
-  // ★ controller 要在 start 之后取：上面那个会话若停在终态，start 会换一个新的。
-  const ctl = idx._test.getController();
+    `开会话失败：${JSON.stringify(started.sessions || started)}`);
+  // ★ 取**刚起的这一条**的 controller（`onlyCtl` 取的是表里第一个，而多开之后
+  //   表里可能还留着别的槽的记录 —— 拿错了不会报错，只会以错误的理由变绿）。
+  const ctl = idx._test.sessionAt(started.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin,
     '会话进入 running', 20000);
 
@@ -2766,10 +2811,10 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // 插件对象是在**会话创建时捕获**的，之后所有状态变化都用它、不再查注册表。
   // 所以就算这个会话的 service_kind 凭空变成别的，客户端也照旧按它起时那个插件
   // 渲染 —— 这正是"站点升级插件不该弄坏正在跑的会话"的落点。
-  w.hideSurface();
+  w.destroySurface(w.front);
   const viewsBefore = calls.views.length;
-  b._session.service_kind = 'jupyter';
-  b._session.service_plugin = ref;
+  onlyFake(b).service_kind = 'jupyter';
+  onlyFake(b).service_plugin = ref;
   ctl.session.service_kind = 'jupyter';
   ctl.session.service_plugin = ref;
   ctl.emit('change', ctl.snapshot());
@@ -2780,8 +2825,11 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   assert.equal(calls.views.length, viewsBefore + 1,
     '★ 会话跑起来之后改这些字段不该换掉它的插件 —— 框架用的仍是它起时捕获的那一个'
     + '（那个插件声明了 surface，所以界面会被重新建起来）');
-  assert.equal(ctl.plugin && ctl.plugin.name, 'code-server', '而且攥着的确实还是它');
-  w.hideSurface();
+  // ★ 插件对象住在**记录**上（`rec.plugin`），不在 controller 上 —— 多开之后
+  //   "这个 controller 属于谁"必须由表来回答，controller 自己不该认识插件。
+  const recNow = idx._test.sessionAt(started.slot);
+  assert.equal(recNow.plugin && recNow.plugin.name, 'code-server', '而且攥着的确实还是它');
+  w.destroySurface(w.front);
 
   // ── ★ 不变量二：走**客户端重启**那条路时，认不出的插件要接隧道、不建视图 ──
   //
@@ -2796,13 +2844,14 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   const before = notices.length;
 
   await idx._test.reattach();
-  const ctl2 = idx._test.getController();
+  const ctl2 = onlyCtl(idx);
   assert.notEqual(ctl2, null, '接上已有会话这条路不能因为插件认不出就放弃');
-  assert.equal(ctl2.plugin, null, '认不出的插件应当**明说**认不出（null），不是硬塞一个');
+  assert.equal(idx._test.sessionAt(idx._test.getSessions().keys().next().value).plugin, null,
+    '认不出的插件应当**明说**认不出（null），不是硬塞一个');
   await waitUntil(() => ctl2.snapshot().origin, '认不出的会话也把隧道接起来', 20000);
   assert.equal(calls.views.length, viewsNow,
     '认不出的插件绝不能**新建**一个 WebView 去加载它 —— 那个端口上可能是任何东西');
-  assert.equal(w.hasSurface(), false, '窗口里不该留下任何视图');
+  assert.equal(Boolean(theView(w)), false, '窗口里不该留下任何视图');
 
   const said = notices.slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
   // ★ 要害二：**点名**是哪个插件、并说清该怎么办。用户该升级客户端，不是找管理员 ——
@@ -2812,7 +2861,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // ★ 要害三：隧道**在**（用户有出路）。
   assert.ok(ctl2.snapshot().origin, '隧道要接起来，否则用户连那个端口都够不着');
 
-  await invoke('app:stop');
+  await invoke('app:stop', { slot: await frontSlotOf() });
   await waitUntil(dead, '会话释放', 20000);
 });
 
@@ -2842,4 +2891,241 @@ test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说
   assert.equal(r.ok, false);
   assert.equal(r.code, 'stale');
   assert.equal(fs.existsSync(path.join(parts, 'slot-1')), true, '一个字都不许动');
+});
+
+// ── 多开（并发层）───────────────────────────────────────────────────────────
+//
+// ★ 这一组用例是**唯一**能验多开的地方：真集群上要造出"两个会话同时活着"极难，
+//   而假后端本来就是为这种现场存在的（见 `tryReattach` 那段注释里的教训 ——
+//   一条路在"唯一能测它的地方"不可达，等于没有验过）。
+//   `maxActive` 就是真集群上的 `max_sessions_per_user`（站点可配，缺省 1）。
+
+/**
+ * 把假站点的上限放开到 n（真集群上等价于配置里写 `max_sessions_per_user = n`），
+ * 并把上一个用例可能留下的会话**收干净**。
+ *
+ * ★ 配额是**跨用例**累积的（同一个进程、同一个假站点），所以少了这一步的后果不是
+ *   "这条用例红"，而是**下一条**红 —— 而那时排查的人看的是另一条用例。
+ */
+async function openUpTo(idx, n) {
+  const b = idx._test.getBackend();
+  b.maxActive = n;
+  b.debugReap();
+  // ★ **客户端那一侧也要清**：假站点把它的会话标成 released 了，而客户端手里的
+  //   controller 还停在 running，而"这个槽被占了"是**客户端**的判据
+  //   （`occupied`）。只清服务端的话，下一个用例会拿到一句"布局组被占着"，
+  //   而它排查的是自己。
+  for (const rec of [...idx._test.getSessions().values()]) {
+    if (rec.controller) await rec.controller.abandon();
+  }
+  idx._test.getSessions().clear();
+  await new Promise((r) => setTimeout(r, 150));
+  return b;
+}
+
+async function connectDemo(idx) {
+  await invoke('app:debug', 'reset');
+  const conn = await invoke('app:saveConnection',
+    { user: 'demo', host: '127.0.0.1', port: 1 });
+  const r = await invoke('app:connect', { connectionId: conn.connection.id });
+  assert.equal(r.ok, true, `连接失败：${JSON.stringify(r)}`);
+}
+
+test('★★ 多开：一个开发会话与一个中转站会话同时活着，互不打扰', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // ── 起甲：code-server（有界面）──
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `甲提交失败：${JSON.stringify(a)}`);
+  const ctlA = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctlA.state === 'running' && ctlA.snapshot().origin,
+    '甲进入 running', 20000);
+  await waitUntil(() => (viewFor(w, a.slot) && !viewFor(w, a.slot).webContents.isDestroyed()
+    ? viewFor(w, a.slot) : null), '甲那块界面');
+  const viewA = viewFor(w, a.slot);
+
+  // ── 起乙：中转站（**不要界面**）──
+  const bs = await invoke('app:start', null, 'sshd');
+  assert.equal(bs.ok, true, `乙提交失败：${JSON.stringify(bs)}`);
+  assert.notEqual(bs.slot, a.slot,
+    '★ 要布局组与不要布局组的是**两个槽** —— 那条能力（IDE + 终端中转）靠它');
+  const ctlB = idx._test.sessionAt(bs.slot).controller;
+  await waitUntil(() => ctlB.state === 'running', '乙进入 running', 20000);
+
+  // ★ 判据一：两条都在跑，本地端口**不同**（同一个端口的两条隧道会互相抢）。
+  const pA = ctlA.snapshot().localPort;
+  const pB = ctlB.snapshot().localPort;
+  assert.ok(pA && pB, `两条都该有本地端口：${pA} / ${pB}`);
+  assert.notEqual(pA, pB, '★ 两个隧道的本地端口必须不同');
+
+  // ★★ 判据二（本阶段最贵的一处）：**甲那块页面没有被乙收掉**。
+  //    从前 `_renderSession` 里那句 `win.hideSurface()` 收的是"窗口里那唯一一块"，
+  //    起中转站（以及它每次心跳）都会把用户的编辑器页面销毁掉，而日志里一个字都没有。
+  assert.equal(w.hasSurface(a.slot), true, '★ 甲那块界面必须还在');
+  assert.equal(viewFor(w, a.slot), viewA, '★ 而且是**同一块**视图对象，不是重建出来的');
+  assert.equal(w.hasSurface(bs.slot), false, '中转站不该有界面');
+
+  // ★ 判据三：两条都在 `app:states` 里（不是"最后动过的那一条"）。
+  const st = await invoke('app:states');
+  assert.equal(st.sessions.length, 2, `界面上应当看得见两条：${JSON.stringify(st.sessions)}`);
+  assert.ok(st.sessions.every((x) => x.live), '两条都该是"活着"的');
+  assert.ok(st.sessions.every((x) => x.service), '每条都要报得出是哪个插件');
+
+  // ★★ 判据四：结束甲，**乙完全不受影响**。
+  await invoke('app:stop', { slot: a.slot });
+  assert.equal(ctlB.state, 'running', '★ 结束甲不该动到乙');
+  assert.equal(idx._test.getSessions().has(bs.slot), true);
+  // ★ 记录**留着**（界面要显示"已结束"那一屏），只是它不再占着那个槽 ——
+  //   判据是 `occupied`（与 index.js 同一个口径），不是"记录还在不在"。
+  assert.ok(idx._test.getSessions().get(a.slot), '甲那条记录该留着（界面要显示"已结束"）');
+  assert.equal(occupiedOf(idx, a.slot), false, '★ 甲那个槽要能被下一轮用起来');
+  assert.equal(w.hasSurface(a.slot), false, '甲那块界面该收掉');
+
+  await invoke('app:stop', { slot: bs.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '两条都释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡住了', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
+  const ctlA = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctlA.state === 'running', '甲进入 running', 30000);
+  const sidA = ctlA.sessionId;
+  const viewA = viewFor(w, a.slot);
+
+  // 再起一条**同一个槽**的（同一个布局组）—— 必须被**客户端**拦住，
+  // 而不是提交到服务端之后才拿到一句 quota_active。理由：一个布局组 = 一个本地
+  // 端口 = 一份浏览器存储，同组的第二条会把第一条的端口与存储**当场抢掉**。
+  const b2 = await invoke('app:start', null, 'code-server');
+  assert.equal(b2.ok, false, '★ 同一个槽的第二个会话必须在提交**之前**就被拒');
+  assert.equal(ctlA.state, 'running', '★ 甲必须一动不动');
+  assert.equal(ctlA.sessionId, sidA, '★ 甲连会话号都不该变');
+  assert.equal(viewFor(w, a.slot), viewA, '★ 甲那块视图一个字都不该动');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 崩溃重连要接回**全部**会话，而不是最新那一条', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
+  const b2 = await invoke('app:start', null, 'sshd');
+  assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
+  await waitUntil(() => idx._test.sessionAt(b2.slot)
+    && idx._test.sessionAt(b2.slot).controller.state === 'running',
+  '两条都跑起来', 20000);
+
+  // 模拟"客户端整个进程没了再起来"：清表 + abandon，然后走启动那条路。
+  await idx._test.reattach();
+
+  const after = await invoke('app:states');
+  assert.equal(after.sessions.length, 2,
+    '★★ 两条都要接回来 —— 只接回一条的话，另一条在控制节点上继续跑而客户端不知道，'
+    + '没有心跳 ⇒ 1800 秒后被 scancel。**那是用户的作业被悄悄杀掉。**');
+
+  // 清理：两条都停掉
+  for (const s of after.sessions) await invoke('app:stop', { slot: s.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★ 关窗确认要数**全部**活着的会话（说一句不成立的话 = F13 同一类）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
+  const b2 = await invoke('app:start', null, 'sshd');
+  assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
+  await waitUntil(() => idx._test.sessionAt(b2.slot)
+    && idx._test.sessionAt(b2.slot).controller.state === 'running',
+  '两条都跑起来', 20000);
+
+  // 打桩那个确认框：把弹出来的话记下来，并回"取消"（不真的关窗）。
+  //
+  // ★ 用**模块作用域里那个桩对象**，不要 `require('electron')` —— 每个用例结束时
+  //   `Module._load` 都被还原了，而 `require` 的缓存里只有**本仓源码**那几个模块；
+  //   在用例体里现 require 一次会真的去解析 `node_modules/electron`，而这个仓库
+  //   里没有 Electron 二进制（症状是一句 "failed to install correctly"，
+  //   指向一个跟本用例毫无关系的东西）。
+  const dialogs = [];
+  const origDialog = electronStub.dialog.showMessageBox;
+  electronStub.dialog.showMessageBox = async (_win, opts) => {
+    dialogs.push(opts);
+    return { response: 1 };                 // 1 = 取消
+  };
+  try {
+    await w._confirmClose();
+  } finally {
+    electronStub.dialog.showMessageBox = origDialog;
+  }
+
+  assert.equal(dialogs.length, 1, '有会话在跑就一定要问一句');
+  const d = dialogs[0];
+  assert.match(d.message, /2|两个/, `★ 要说出**几条**：${d.message}`);
+  // ★ 不能只念一条插件的话 —— 那等于把"你的编辑器里有没保存的改动"这件
+  //   **只对其中一条成立**的事说成对两条都成立。
+  assert.match(d.detail, /开发环境|code-server/, `要念到第一条：${d.detail}`);
+  assert.match(d.detail, /中转站|sshd/, `也要念到第二条：${d.detail}`);
+
+  for (const s of (await invoke('app:states')).sessions) {
+    await invoke('app:stop', { slot: s.slot });
+  }
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一份实现）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
+  const b2 = await invoke('app:start', null, 'sshd');
+  assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
+  await waitUntil(() => idx._test.sessionAt(b2.slot)
+    && idx._test.sessionAt(b2.slot).controller.state === 'running',
+  '两条都跑起来', 20000);
+
+  // ★ 主动断开 = 彻底终止，而它与关窗、退出收尾**共用同一个 `stopAllSessions`**。
+  //   在这里钉住它，等于同时钉住那三条路 —— 而"只在其中一条里少停一个"正是
+  //   「关掉窗口会结束会话」这句话**不成立**的形状（账本 F13 的同一类）。
+  const dis = await invoke('app:disconnect');
+  assert.equal(dis.ok, true, JSON.stringify(dis));
+  assert.equal(dis.released.state, 'releasing', '要有释放的结果回给界面');
+
+  // ★ 判据放在**服务端**那一侧：每条会话都必须收到过一句 goodbye。
+  const bs = idx._test.getBackend();
+  const left = bs._sessions.filter((s) => !['releasing', 'released'].includes(s.state));
+  assert.deepEqual(left.map((s) => s.session_id), [],
+    '★ 每一条都要发 goodbye —— 少发一条，那个作业就在集群上继续烧到 TimeLimit');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
 });

@@ -58,6 +58,24 @@ const SUBMIT_TIMEOUT_MS = 45000;
 /** status.last_hb_at 落后我们最近一次成功心跳超过这个值，说明心跳没落地。 */
 const HB_STALE_SLACK_MS = 90000;
 
+/**
+ * 守护进程那边**还算数**的全部状态，以及**完事了的**全部状态。
+ *
+ * ★ 这两个集合是 `cluster/slurmate-sessiond` 那个状态机的**镜像**，而它们是**第二份
+ *   实现** —— 这一点没法避免：客户端与服务端是两个进程，"这个会话还算不算数"
+ *   必须两边各自能判。能做的只有**收成一处**并写明它的来源：从前这条判断散在
+ *   这个文件的三处地方，写法还各不相同（一处四个、两处三个），于是"某个状态算
+ *   哪一边"每次都要现推一遍。
+ *
+ * ★ 对应关系：
+ *   LIVE     = 守护进程的 `OCCUPYING_STATES`（reserved + submitted + ACL_STATES）
+ *   FINISHED = 守护进程的 `TERMINAL_STATES`
+ *   改任何一边都要同时改另一边 —— 不一致的表现是"某个会话卡在界面上不动"。
+ */
+const SERVER_LIVE_STATES = ['reserved', 'submitted', 'enrolled',
+  'suspect', 'orphaned', 'releasing'];
+const SERVER_FINISHED_STATES = ['released', 'rejected', 'expired'];
+
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
@@ -354,7 +372,7 @@ class SessionController extends EventEmitter {
             this._setState(State.RUNNING);
             return resolve(true);
           }
-          if (['released', 'rejected', 'expired', 'orphaned'].includes(s.state)) {
+          if (!SERVER_LIVE_STATES.includes(s.state)) {
             this._setState(State.ERROR, {
               error: `会话已结束（${s.state}）` + (s.note ? `：${s.note}` : ''),
             });
@@ -559,7 +577,7 @@ class SessionController extends EventEmitter {
             this.emit('retarget', this.snapshot());
           }
 
-          if (['released', 'rejected', 'expired'].includes(s.state)) {
+          if (SERVER_FINISHED_STATES.includes(s.state)) {
             this._stopHeartbeat();
             this._stopStatusPoll();
             // ★ 会话结束了，本地监听必须一起收掉。留着它的后果不是「多占一个端口」：
@@ -700,4 +718,5 @@ function withTimeout(promise, ms) {
 
 // ★ `HEARTBEAT_MS` 删了：它只是构造函数的**缺省值**（`heartbeatMs || HEARTBEAT_MS`），
 //   而用例要调心跳节奏时走的是构造参数，不是这个常量。
-module.exports = { SessionController, State, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS };
+module.exports = { SessionController, State, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS,
+  SERVER_LIVE_STATES, SERVER_FINISHED_STATES };

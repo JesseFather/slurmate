@@ -383,10 +383,13 @@ function declaredGroupOf(plugin) {
  * @param {object} o
  * @param {Array} o.rows              这次对账算出来的行
  * @param {string} o.name             界面点的那一行的 `name`
- * @param {string} [o.surfacePartition] 窗口此刻显示的那个分区（`persist:…`）
+ * @param {string[]} [o.surfacePartitions] 此刻**每一块**界面的分区（`persist:…`）。
+ *        ★ 是**一组**，不是"窗口里那一个"：多开之后窗口里有几块视图，而"正被用着"
+ *        这件事对**每一块**都成立。拿单个前台分区去判，会把后台那块正在跑的页面
+ *        脚下的数据判成可以删。
  * @returns {{ok: true, row: object}|{ok: false, code: string, error: string}}
  */
-function deletionVerdict({ rows, name, surfacePartition }) {
+function deletionVerdict({ rows, name, surfacePartitions }) {
   const row = (rows || []).find((r) => r.name === name && r.deletable);
   if (!row) {
     return {
@@ -399,7 +402,8 @@ function deletionVerdict({ rows, name, surfacePartition }) {
   //   拿掉了**（站点回收、或者用户在本机删掉了那一版）—— 那一刻它既"在用"、
   //   又"不在该有的清单里"，于是一眼看过去就是一份没人要的孤儿。少了这一格，
   //   用户会把眼前那个页面脚下的存储抽掉，而症状只是「页面莫名其妙坏了」。
-  if (surfacePartition && pluginData.samePartition(surfacePartition, row.name)) {
+  const live = Array.isArray(surfacePartitions) ? surfacePartitions : [];
+  if (live.some((p) => p && pluginData.samePartition(p, row.name))) {
     return {
       ok: false, code: 'in_use',
       error: '这一份数据正被当前页面用着，删掉它会让那个页面在下次刷新时报错。'

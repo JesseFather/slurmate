@@ -544,7 +544,7 @@ def main():
               node_ip="192.0.2.11")
     check("插入后可读回", st.get("s1")["state"] == mod.ST_ENROLLED)
     check("按 uid 查询", len(st.by_uid(UID)) == 1)
-    check("活跃计数", st.count_active(UID) == 1)
+    check("占位计数", st.count_occupying(UID) == 1)
     check("活跃端口包含候选集",
           st.active_ports() == {55001, 55002}, str(st.active_ports()))
 
@@ -3760,6 +3760,123 @@ exit 0
           " —— 拆成一份一份的全部理由就在这里",
           not os.path.exists(os.path.join(_tl_home["quiet"], "toplevel-ran")),
           os.listdir(_tl_home["quiet"]))
+
+    # ── 23. 配额：一个会话占着一个位置 ─────────────────────────────────────
+    print("\n── 23. 配额（每人最多几个会话）──")
+
+    # ★ 这一节与第 18 节的唯一区别，正是它存在的理由：**store 不重建**。
+    #   配额是跨请求累积的，而第 18 节的 `run_submit` 每次都新建一个 Store ——
+    #   那会让计数永远从 0 开始，于是"配额"这件事在那里**根本测不出来**。
+    #   （这正是它此前一条用例都没有的原因。）
+    _q_home = os.path.join(tmpdir, "home-quota")
+    os.makedirs(_q_home, exist_ok=True)
+    d.user_home = lambda uid: _q_home
+    d.store.close()
+    d.store = mod.Store(os.path.join(tmpdir, "quota.db"))
+    _q_seq = [0]
+    _q_limit0 = cfg.max_sessions_per_user
+
+    def _q_run(argv, timeout=10, check=False):
+        """账户与分区都查得到 —— 这一节要的是**走到配额那一步之后**的行为，
+        所以前面那几道（账户、分区权限）必须让路。"""
+        a = [str(x) for x in argv]
+        if "show" in a and "assoc" in a:
+            if any("Partition" in x for x in a):
+                return 0, "myaccount|\n", ""      # Partition 列为空 = 不限制
+            return 0, "myaccount\n", ""
+        return slurm_stub(argv, timeout, check)
+
+    def quota_submit(limit):
+        """把配额设成 `limit`，提交一次。store **跨调用保留**。"""
+        cfg.max_sessions_per_user = limit
+        _q_seq[0] += 1
+        d.slurm = mod.Slurm(cfg)
+        d.slurm.submit = lambda *a, **k: (7000 + _q_seq[0], None)
+        real = mod.run_cmd
+        mod.run_cmd = _q_run
+        try:
+            return d.op_submit(UID, {"op": "submit"})
+        finally:
+            mod.run_cmd = real
+
+    check("★ 「占着位置」的两个集合不是一回事（一个是另一个的真超集）",
+          mod.OCCUPYING_STATES == (mod.ST_RESERVED, mod.ST_SUBMITTED) + mod.ACL_STATES
+          and set(mod.ACL_STATES) < set(mod.OCCUPYING_STATES),
+          "%r / %r" % (mod.OCCUPYING_STATES, mod.ACL_STATES))
+
+    r1 = quota_submit(1)
+    check("上限 1 时第一个提交成功", r1.get("ok"), str(r1))
+    check("★ 它此刻处在 submitted —— 这就是 F14 那个窗口",
+          any(s["state"] == mod.ST_SUBMITTED for s in d.store.by_state((mod.ST_SUBMITTED,))),
+          str([s["state"] for s in d.store.by_uid(UID)]))
+
+    # ★★ **F14 的回归断言。** 改回「只数 ACL_STATES」的话，此刻计数是 **0**，
+    #    第二个提交会长驱直入 —— 这一条立刻红，而红的原因正是账本里那句话。
+    r2 = quota_submit(1)
+    check("★ F14：上限 1 时第二个提交被拒（排队中的也算占着位置）",
+          (not r2.get("ok")) and (r2.get("error") or {}).get("kind") == "quota_active",
+          str(r2))
+    check("★ 而它报的不是 quota_pending —— 那个 kind 已经不存在了",
+          (r2.get("error") or {}).get("kind") != "quota_pending", str(r2))
+    check("★ 拒绝的话里说得出「几个」与「上限几」",
+          "1" in ((r2.get("error") or {}).get("detail") or "")
+          and "占着位置" in ((r2.get("error") or {}).get("detail") or ""),
+          str((r2.get("error") or {}).get("detail")))
+
+    r3 = quota_submit(2)
+    check("上限 2 时第二个提交放行（这一条挡住「合并 = 恒等于 1」那种实现）",
+          r3.get("ok"), str(r3))
+    r4 = quota_submit(2)
+    # ★ 判据必须是**那个 kind**，不能只判 `not ok` —— 上面那些提交里任何一条
+    #   因为别的原因失败（账户、分区）都会让"不 ok"成立，于是一条假绿。
+    check("上限 2 时第三个提交被拒（且拒绝的原因是配额）",
+          (r4.get("error") or {}).get("kind") == "quota_active", str(r4))
+
+    # ★ `op_doctor` **不许**跟着合并：它拿 active_sessions 去和 nft 规则数比，
+    #   而规则只属于 ACL_STATES 那些会话。并进去的话，只要有人排着队，
+    #   体检就会报「规则数与会话数不一致」—— 指向一个不存在的问题。
+    # ★ 取字段**全走 `.get`**。这一节每一条断言的前提都是"上面某一条成立"，而变异
+    #   验证时那个前提**就是不成立的** —— 缺键时抛 `KeyError` 会让脚本**崩掉**，
+    #   于是它后面一条都不跑，而"崩掉"与"一条都不红"在输出上长得一模一样（这个
+    #   仓库在这上面栽过三次，见第 18 节 `_Captured` 的那段说明）。给 None 则让
+    #   断言**红掉**，那才是它们该做的事。
+    try:
+        _q_doc = (d.op_doctor(UID) or {}).get("data") or {}
+    except Exception as _qe:                                 # noqa: BLE001
+        _q_doc = {"_error": repr(_qe)}
+    _q_acl = len(d.store.by_state(mod.ACL_STATES))
+    _q_occ = d.store.count_occupying(UID)
+    check("★ op_doctor 的 active_sessions 不把排队中的算进去（否则体检会假报警）",
+          _q_doc.get("active_sessions") == _q_acl and _q_acl < _q_occ,
+          "doctor=%r acl=%d occupying=%d" % (_q_doc.get("active_sessions"),
+                                             _q_acl, _q_occ))
+
+    cfg.max_sessions_per_user = _q_limit0
+    check("配置里不写这个键时用缺省值 1（缺省在安全侧）",
+          _q_limit0 == mod.DEFAULT_MAX_SESSIONS_PER_USER == 1,
+          str(_q_limit0))
+    check("写 3 是合法的（自检无错误）",
+          mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                "max_sessions_per_user = 3\n",
+                                "quota-ok.conf")).validate() == [])
+    check("而旧名字不在白名单里 —— 那条「老配置被拒」的用例仍然守着",
+          "max_active_per_user" not in mod.GLOBAL_KEYS
+          and "max_sessions_per_user" in mod.GLOBAL_KEYS,
+          str(sorted(mod.GLOBAL_KEYS)))
+    _q_bad = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                   "max_sessions_per_user = 0\n",
+                                   "quota-zero.conf")).validate()
+    check("★ 写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
+          any("max_sessions_per_user" in e for e in _q_bad), str(_q_bad))
+
+    # ★ 「整个删掉」的可执行形式：那三个名字在守护进程源码里必须零命中。
+    #   留着任何一处，下一个人就会以为那条路还在。
+    with open(mod.__file__, encoding="utf-8") as _f:
+        _q_src = _f.read()
+    for _dead in ("count_pending", "MAX_PENDING_PER_USER", "quota_pending",
+                  "max_pending_per_user"):
+        check("★ 守护进程里不再有 %s" % _dead,
+              _q_src.count(_dead) == 0, "出现 %d 次" % _q_src.count(_dead))
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

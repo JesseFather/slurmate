@@ -366,3 +366,49 @@ test('★ 主进程发来的 warn 不许被折成 info（显示成信息的失�
   assert.equal(/n\.kind === 'ok' \? 'ok' : n\.kind === 'error' \? 'error' : 'info'/.test(js),
     false, '又回到那个三元表达式了');
 });
+
+test('★★ 多开这一份载荷：通道名与字段名，四处必须逐字一致', () => {
+  // 这个文件是**唯一**的防线 —— 本机起不了 Electron，panel.js 跑不起来。
+  // ★ 而它此前**查不出载荷字段改名**：文本比对里 `.snap` 与 `snap:` 都长得对。
+  //   多开这一版新加的载荷正好是"改错了不报错、只是某一格永远显示 undefined"
+  //   那一类，所以这一条要真的去比**生产端造出来的键**与**消费端读的键**。
+  const main = fs.readFileSync(path.join(here, '..', 'src', 'main', 'index.js'), 'utf8');
+  // ★ 发这条通道的是 **windows.js**（`pushSessions`），不是 index.js —— 写错文件的话
+  //   这一条会永远红，而红的原因是"测试找错了地方"，不是代码错了。
+  const winSrc = fs.readFileSync(path.join(here, '..', 'src', 'main', 'windows.js'), 'utf8');
+
+  // 通道名：主进程发 → preload 订阅 → panel.js 用。
+  assert.match(winSrc, /send\('session:states'/, 'windows.js 要发 session:states');
+  assert.match(api, /'session:states'/, 'preload 要订阅 session:states');
+  assert.ok(bridgeCalls().has('onStates'), 'panel.js 要用 onStates 订阅');
+  // ★ 旧的单值那条路必须**删干净** —— 留着它就是留第二条路，而两条路会分叉。
+  assert.equal(/'session:state'/.test(api), false, 'session:state（单数）必须删掉');
+  assert.equal(/\bonState\b/.test(api), false, 'onState（单数）必须删掉');
+  assert.equal(/\bstate:\s*\(\)/.test(api), false, 'state()（单数）必须删掉');
+
+  // 字段名：panel.js 读的每一个，都必须在 index.js 的 sessionViews() 里被写出来。
+  const built = /function sessionViews\(\)[\s\S]*?\n\}/.exec(main);
+  assert.ok(built, 'index.js 里应当有 sessionViews()');
+  for (const f of ['slot', 'service', 'live', 'snap']) {
+    assert.match(built[0], new RegExp(`\\b${f}\\b`), `sessionViews 没给出 ${f}`);
+    assert.match(js, new RegExp(`\\.${f}\\b`), `panel.js 没读 ${f}`);
+  }
+  // 切前台与停会话都要**指名 slot** —— 不收名字的 stop 在多开下会停错另一条。
+  assert.ok(bridgeCalls().has('setFront'), 'panel.js 没有调用 setFront');
+  assert.match(js, /slurmate\.stop\(slot\)/, '停会话必须把 slot 传下去');
+});
+
+test('★ 标签栏在这 30px 里 —— 它下面是原生视图，放外面等于永远点不到', () => {
+  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
+  assert.ok(bar, '找不到状态条');
+  assert.match(bar[0], /id="session-tabs"/,
+    '会话标签必须在状态条**里面**：窗口主体被原生视图整块盖住');
+  assert.match(css, /--bar-h:\s*30px/, '状态条高度还是那个常量');
+});
+
+test('★ 布局选择器只在**前台那条会话真的有布局组**时露出来', () => {
+  // 前台是中转站时（layoutId 为 null）选择器还露着的话，用户改了**没反应** ——
+  // 那条路径（outsideLayout）两条分支都不走，而界面上一切正常。
+  assert.match(js, /sb-layout-wrap[\s\S]{0,240}?layoutId/,
+    'sb-layout-wrap 的露出条件里必须有 layoutId');
+});

@@ -44,7 +44,8 @@ let boot = null;
 let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
-let lastSnap = null;         // 最近一次会话快照，供状态条里的布局选择器读当前布局
+let lastSnap = null;         // **前台**那一条的快照，供状态条与布局选择器读它
+let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
 /**
  * 最近一次的插件清单。界面里有**两处**需要知道"这个会话的插件声明了界面没有"，
  * 而快照本身是插件无关的（session.js 不认识任何插件）—— 所以在这里留一份，
@@ -120,6 +121,59 @@ function syncPurposeVisibility() {
   $('sec-purpose').classList.toggle('hidden', !(noPlugins || (idle && connected)));
 }
 
+/**
+ * 主进程推来的**全部**会话 + 哪一个是前台。
+ *
+ * ★ 面板这一层只需要"画哪一条"（`renderSnapshot` 照旧只画前台那一条），而
+ *   **决定权在主进程**（`index.js` 的 `frontSlot()`）—— 界面这里一个字都不推。
+ *   推的话就多了一个会漂的"当前会话"，而它的失败形态是"点结束会话，停掉的是另一条"。
+ */
+function renderSessions(payload) {
+  const p = payload || {};
+  SESS = {
+    sessions: Array.isArray(p.sessions) ? p.sessions : [],
+    front: p.front || null,
+  };
+  renderTabs();
+  renderSnapshot(frontSnap());
+}
+
+/** 前台那一条的快照（没有会话时 null）。 */
+function frontSnap() {
+  const hit = SESS.sessions.find((x) => x.slot === SESS.front);
+  return (hit && hit.snap) || null;
+}
+
+/**
+ * 状态条底下那一排标签。**一条会话一个**。
+ *
+ * ★ 只在**两条以上**时露出来：一条的时候它不提供任何选择，只占掉一行地方。
+ * ★ 每一条都要能点 —— 那是"我还能切回去"的唯一入口。前端那条加一个 class，
+ *   而**标签上写的是服务名**：两条会话的插件必然不同（同一个槽只能有一条），
+ *   所以服务名在这里天然是唯一的，不需要再造一个编号。
+ */
+function renderTabs() {
+  const box = $('session-tabs');
+  const list = SESS.sessions;
+  box.classList.toggle('hidden', list.length < 2);
+  box.textContent = '';
+  for (const s of list) {
+    const b = document.createElement('button');
+    b.className = 'tab' + (s.slot === SESS.front ? ' on' : '')
+      + (s.live ? '' : ' dead');
+    b.textContent = s.service || '（未知服务）';
+    const st = s.snap && s.snap.state;
+    b.title = STATE_TEXT[st] || st || '';
+    b.onclick = () => window.slurmate.setFront(s.slot);
+    box.appendChild(b);
+  }
+}
+
+/** 前台那一条的槽（按钮要指名停哪一个）。没有会话时 null。 */
+function frontSlot() {
+  return (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot || null;
+}
+
 function renderSnapshot(s) {
   lastSnap = s || null;
   const bar = $('statusbar');
@@ -154,8 +208,11 @@ function renderSnapshot(s) {
   $('sb-dev').classList.toggle('hidden', !(s && s.dev));
   // 布局选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
   // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」布局，没有连接就没有对象。
+  // ★ 多一个条件：**前台那条会话真的有布局组**（`s.layoutId`）。
+  //   漏了它的症状是：前台是个中转站会话时选择器还露着，用户改了**没反应** ——
+  //   那条路（`outsideLayout`）两条分支都不走，而界面上一切正常。
   $('sb-layout-wrap').classList.toggle(
-    'hidden', !(running && boot && boot.activeConnectionId));
+    'hidden', !(running && boot && boot.activeConnectionId && s && s.layoutId));
 
   // 形态切换
   const idle = !s || st === 'idle';
@@ -602,10 +659,9 @@ async function applyLayout(connectionId, layoutId) {
   notice('info', wasRunning
     ? '已切换布局。页面会重新加载一次；计算节点上的作业没有受影响，仍然在跑。'
     : '已切换布局。');
-  // 拉一次权威快照：controller 的 layoutId 刚变，界面手里那份还是旧的，
-  // 而状态条正是拿它显示当前布局的 —— 不拉就会继续显示上一个。
-  const s = await window.slurmate.state();
-  if (s && s.state) renderSnapshot(s);
+  // 拉一次权威状态：会话的 layoutId 刚变，界面手里那份还是旧的，而状态条正是
+  // 拿它显示当前布局的 —— 不拉就会继续显示上一个。
+  renderSessions(await window.slurmate.states());
   return { ok: true };
 }
 
@@ -1466,7 +1522,7 @@ async function startWith(serviceKind, btn) {
     if (part) res.partition = part;
 
     const r = await window.slurmate.start(res, serviceKind);
-    if (r && r.snapshot) renderSnapshot(r.snapshot);
+    if (r && r.sessions) renderSessions({ sessions: r.sessions, front: r.front });
     // 提交失败（比如版本对不上被服务端拒了）时把清单刷新一遍 —— 那句话要落到
     // 界面上，不能只在日志里。
     if (r && !r.ok) {
@@ -1542,7 +1598,7 @@ async function handleConnectResult(res) {
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
     if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
-    renderSnapshot({ state: 'idle', dev: boot.dev });
+    renderSessions({ sessions: [], front: null });
     return true;
   }
 
@@ -1563,10 +1619,15 @@ async function handleConnectResult(res) {
 
 // ── 开发者模式 ──────────────────────────────────────────────────────────────
 
-/** 现在有会话在跑吗（提交中/排队/运行/释放中都算）。 */
-function sessionBusy() {
-  const st = lastSnap && lastSnap.state;
-  return Boolean(st) && st !== 'idle' && st !== 'ended';
+/**
+ * 现在有几条会话在跑（提交中/排队/运行/释放中都算）。
+ *
+ * ★ 回**条数**，不是布尔 —— 弹确认框的那两处都要把数字说给用户听：
+ *   "重启会先结束当前会话"在两条的时候是一句**不准确**的话，而用户是按那句话
+ *   决定要不要点下去的。
+ */
+function liveCount() {
+  return SESS.sessions.filter((s) => s.live).length;
 }
 
 /** 上一次从主进程拿到的开发者模式设置。**只由 renderDevMode 更新**。 */
@@ -1771,8 +1832,9 @@ async function init() {
     else notice('ok', `体检通过：${d.rules_count} 条 ACL 规则，${d.active_sessions} 个活跃会话。`);
   };
 
-  $('btn-reload').onclick = () => window.slurmate.reload();
-  $('sb-reload').onclick = () => window.slurmate.reload();
+  // 重新加载打的是**前台**那一条 —— 屏幕只有一块，用户看的正是它。
+  $('btn-reload').onclick = () => window.slurmate.reload(frontSlot());
+  $('sb-reload').onclick = () => window.slurmate.reload(frontSlot());
   $('btn-end').onclick = () => endSession();
   $('sb-end').onclick = () => endSession();
 
@@ -1822,13 +1884,16 @@ async function init() {
   $('dev-restart').onclick = async () => {
     // ★ 重启会先结束会话 —— 与关窗口同一套收尾。那是一次**明确的终止**（集群上的
     //   作业会被取消），所以必须先问一句：用户点的是"让设置生效"，不是"取消作业"。
-    if (sessionBusy() && !window.confirm(
-      '重启会先结束当前会话，集群上的作业会被取消。确定吗？')) return;
+    const n = liveCount();
+    if (n && !window.confirm(
+      n === 1
+        ? '重启会先结束当前会话，集群上的作业会被取消。确定吗？'
+        : `重启会先结束这 ${n} 个会话，集群上的作业会被取消。确定吗？`)) return;
     const r = await window.slurmate.restart();
     if (r && !r.ok) notice('error', r.error || '重启失败。');
   };
 
-  window.slurmate.onState(renderSnapshot);
+  window.slurmate.onStates(renderSessions);
   window.slurmate.onNotice((n) => {
     if (n.kind === 'dev') { $('dev-banner').classList.remove('hidden'); return; }
     if (n.kind === 'key-seen' || n.kind === 'key-blocked') {
@@ -1843,13 +1908,13 @@ async function init() {
     notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);
   });
 
-  // 拉一次当前状态（可能是启动时自动接上的会话）
-  const s = await window.slurmate.state();
-  if (s && s.state && s.state !== 'idle' && s.state !== 'ended') connected = true;
+  // 拉一次全部会话（启动时可能自动接上了**几条**）
+  const st = await window.slurmate.states();
+  if (st && st.sessions && st.sessions.some((x) => x.live)) connected = true;
   // connected 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
   // 补一次，否则自动接上会话时那一条不会显示「已连接」
   renderConnections(boot.connections);
-  renderSnapshot(s || { state: 'idle', dev: boot.dev });
+  renderSessions(st || { sessions: [], front: null });
 }
 
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
@@ -1886,11 +1951,15 @@ async function doDisconnect() {
     notice('info', '已断开与登录节点的连接。');
   }
   renderConnections(boot.connections);
-  renderSnapshot({ state: 'idle', dev: boot.dev });
+  renderSessions({ sessions: [], front: null });
 }
 
 async function endSession() {
-  const res = await window.slurmate.stop();
+  // ★ **指名**结束哪一条（前台那一条）—— 主进程不收没名字的 stop，
+  //   那个隐式缺省在多开下会变成"停错了另一条"。
+  const slot = frontSlot();
+  if (!slot) return;
+  const res = await window.slurmate.stop(slot);
   if (res && res.ok) {
     notice('info', res.detail || '已请求释放。');
     if (res.state === 'releasing') {

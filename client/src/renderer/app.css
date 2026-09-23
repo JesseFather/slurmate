@@ -55,6 +55,25 @@ html, body {
 #statusbar .st { font-weight: 600; }
 #statusbar .sep { color: var(--border); }
 #statusbar .spacer { flex: 1; }
+
+/* ── 会话标签（多开）────────────────────────────────────────────────────── */
+/* 它就在状态条这一行里 —— 窗口主体被原生视图整块盖住，放在下面等于点不到。 */
+#session-tabs { display: flex; gap: 6px; flex: none; }
+#session-tabs.hidden { display: none; }
+#session-tabs .tab {
+  font: inherit; font-size: 11px; line-height: 1;
+  padding: 4px 8px; border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent; color: var(--fg-dim);
+  cursor: pointer; max-width: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#session-tabs .tab:hover { color: var(--fg); }
+#session-tabs .tab.on {
+  color: var(--fg); border-color: var(--fg-dim); background: var(--bg);
+}
+/* 已经结束的那一条：留着（用户要能看见「它结束了」），但明显淡下去。 */
+#session-tabs .tab.dead { opacity: .45; }
 #statusbar .dev-tag {
   color: var(--dev); font-weight: 700; letter-spacing: .3px;
 }
