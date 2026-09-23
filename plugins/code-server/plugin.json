@@ -16,9 +16,9 @@
     "layout": true,
     "submitPubkey": false,
     "defaultService": true,
+    "concurrent": true,
     "data": {
-      "inherit": "editor",
-      "perInstance": true
+      "inherit": "editor"
     }
   },
   "site": {

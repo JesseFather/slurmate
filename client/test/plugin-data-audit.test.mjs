@@ -27,20 +27,21 @@ const SSHD = '01M2JKHTZGF12N0T9CB3XVK36H';
 const LAYOUT = 'l0123456789ab';
 const OTHER_LAYOUT = 'lffffffffffff';
 
-/** 有界面、声明了分实例、跨版本共享的那种插件 —— code-server 真实的样子。 */
+/** 有界面、能同时开两份、跨版本共享的那种插件 —— code-server 真实的样子。 */
 const cs = (over = {}) => ({
   id: CS, name: 'code-server', displayName: '开发环境', version: '1.0.0',
   contributes: {
-    surface: { kind: 'web', path: '/' }, layout: true,
-    data: { inherit: 'editor', perInstance: true },
+    surface: { kind: 'web', path: '/' }, layout: true, concurrent: true,
+    data: { inherit: 'editor' },
   },
   ...over,
 });
 
-/** 有界面、但**没**声明分实例：只有一份存储，不属于任何布局组。 */
+/** 有界面、但**不能多开**：只有一份存储，不属于任何布局组。 */
 const oneStore = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
-  contributes: { surface: { kind: 'web', path: '/' }, layout: false, data: null },
+  contributes: { surface: { kind: 'web', path: '/' }, layout: false, concurrent: false,
+    data: null },
 });
 
 const layouts = (...ids) => ids.map((id, i) => ({ id, name: `组${i + 1}`, port: 51000 + i }));
@@ -48,10 +49,11 @@ const conn = (layoutId, id = 'c1') => ({ id, layoutId });
 const disk = (identity) => pluginData.diskNameOf(identity);
 
 /** sshd **实际的样子**：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
- *  框架连一块界面都不建），但声明了数据、且**不**按实例分。 */
+ *  框架连一块界面都不建），但声明了数据、而且**不能多开**。 */
 const relay = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
-  contributes: { layout: false, submitPubkey: true, data: { inherit: 'relay' } },
+  contributes: { layout: false, submitPubkey: true, concurrent: false,
+    data: { inherit: 'relay' } },
 });
 
 /**
@@ -234,8 +236,8 @@ test('★ 没人用的组：数据在、而没有任何连接指着它 ⇒ 一�
 
 test('★ 一个布局组 = 每个有分区的插件各一行（一份数据 = 一个分区）', () => {
   const two = [cs(), { ...oneStore(), id: '01M2JKHTZGKJBFQQTWYXMQMF2W',
-    contributes: { ...oneStore().contributes, layout: true,
-      data: { inherit: 'ssh', perInstance: true } } }];
+    contributes: { ...oneStore().contributes, layout: true, concurrent: true,
+      data: { inherit: 'ssh' } } }];
   const names = two.map((p) => disk(pluginData.identityOf(p, LAYOUT)));
   const r = run({ plugins: two, names, connections: [] });
   assert.equal(r.rows.length, 2, '两个插件各有一份，就是两行（可删除的单位就是这一份）');

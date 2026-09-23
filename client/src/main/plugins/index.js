@@ -108,9 +108,10 @@ const UNKNOWN = 'unknown';
 
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
   'author', 'engines', 'contributes', 'site'];
-const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService', 'data'];
-/** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头（两条轴、两个缺省）。 */
-const DATA_KEYS = ['inherit', 'perInstance'];
+const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService',
+  'concurrent', 'data'];
+/** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头。 */
+const DATA_KEYS = ['inherit'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
 const LOGIN_KEYS = ['path', 'field', 'cookie'];
@@ -701,6 +702,34 @@ function inspectDir(dir) {
     }
   }
 
+  // ── concurrent：这一节里**唯一必填**的一格 ──────────────────────────────
+  //
+  // ★ 它答的是"**这个插件的代码**能不能同时开两份" —— 一个只有作者知道的事实。
+  //   基座推不出来：「不要布局组」（`layout: false`）与「不能同时开两份」是两件事，
+  //   而从前它们被焊成一件（`slotOf` 只收一个 layoutId，**看不见插件**）。
+  //
+  // ★ **没有缺省**，与这个清单里**别的每一格**刻意相反：它们（`layout` / `submitPubkey`
+  //   / `defaultService` / `data.inherit`）的缺省都落在安全侧、基座自己就答得了；
+  //   而这一格无论缺省取哪一边，都是基座替作者表态 —— 取"不能"，一个真能多开的
+  //   作者永远不知道为什么只能开一份；取"能"，一个没想过的作者会得到一个静默的
+  //   第二份。**只有他能答，所以必须他答。**
+  //
+  // ★ 值是**能/不能**，不是数量：能的话开多少份都是同一个逻辑，总数由站点那一侧管
+  //   （`max_sessions_per_user`）。类型检查在上面那条循环里（它是布尔键）。
+  if (mfc.concurrent === undefined) {
+    return { error: `${mfPath}：contributes.concurrent 是**必填**的`
+      + '（true = 这个插件可以同时开两份，false = 只能开一份）—— 它答的是"你的代码'
+      + '能不能同时处理两份"，只有你知道，基座替你答不了' };
+  }
+  // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：实例键今天只有一个来源
+  //   —— 布局组（一条连接挂在一个组上）。没有布局组就没有"第二份实例"可指。
+  //   判在**装之前**，与 `engines` 同一条纪律。
+  if (mfc.concurrent === true && mfc.layout !== true) {
+    return { error: `${mfPath}：contributes.concurrent: true 要求同时有 `
+      + 'contributes.layout: true —— 实例键就是布局组，没有布局组就没有第二份实例可指'
+      + '（不要布局组的插件一律只能开一份）' };
+  }
+
   // data —— **给客户端自己读的那一段**：这个插件的运行时数据存在哪儿、和谁共用。
   //
   // ★ 它与 `site` 那一段正好相对，而**判据是同一条**：每一侧只校验自己真正会读的
@@ -708,13 +737,23 @@ function inspectDir(dir) {
   //   进程在扫描时报错）；`data` 是客户端自己读的，所以客户端要**深究到底**。谁读
   //   决定了谁深究，而不是"哪一段更重要"。
   //
-  // ★ 深究到什么程度：组的字符集（它进分区名 = 磁盘目录名）、两个值各自的类型、
-  //   以及**一个组合** —— 见下面 perInstance 那一条。
+  // ★ 深究到什么程度：组的字符集（它进分区名 = 磁盘目录名），以及那个键的类型。
+  //   ★ 从前这里还有**一个组合**判定（`perInstance` 要求 `layout`）—— 它现在跟着
+  //     那一格一起搬到了 `concurrent` 上（见上面）。两段声明之间的关系由**一格**
+  //     回答，而不是两处各说一半。
   let data = null;
   if (mfc.data !== undefined && mfc.data !== null) {
     const d = mfc.data;
     if (!d || typeof d !== 'object' || Array.isArray(d)) {
       return { error: `${mfPath}：contributes.data 必须是一个对象` };
+    }
+    // ★ 改名提示要排在 `keysProblem` **之前**：否则老写法只会得到一句"认不得的键：
+    //   perInstance"，而那句话**指不到新名字**（它只说"这个键我不认识"）。这一格
+    //   还同时搬了家（`data` → `contributes` 底下），所以更要说出来。
+    if (d.perInstance !== undefined) {
+      return { error: `${mfPath}：contributes.data.perInstance 已经改名成 `
+        + 'contributes.concurrent，而且从 data 里搬到了 contributes 底下 —— '
+        + '值不变、意思不变：能同时开两份写 true，只能开一份写 false' };
     }
     why = keysProblem(d, DATA_KEYS, 'contributes.data');
     if (why) return { error: `${mfPath}：${why}` };
@@ -724,19 +763,7 @@ function inspectDir(dir) {
         + `${pluginData.GROUP_RE}（小写字母开头，只含小写字母/数字/连字符），`
         + `现在是 ${JSON.stringify(d.inherit)}` };
     }
-    if (d.perInstance !== undefined && typeof d.perInstance !== 'boolean') {
-      return { error: `${mfPath}：contributes.data.perInstance 必须是 true 或 false` };
-    }
-    // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：实例键今天只有一个来源
-    //   —— 布局组（一条连接挂在一个组上）。没有布局组就没有"每个实例一份"可指，
-    //   而"声明了却指不出来"只会在开会话时变成一个说不清的下场。
-    //   判在**装之前**，与 `engines` 同一条纪律。
-    if (d.perInstance === true && mfc.layout !== true) {
-      return { error: `${mfPath}：contributes.data.perInstance 要求同时有 `
-        + 'contributes.layout: true —— 实例键就是布局组，没有布局组就没有"每个实例"'
-        + '（这只是各自一份，而它已经是缺省了）' };
-    }
-    data = { inherit: d.inherit || null, perInstance: d.perInstance === true };
+    data = { inherit: d.inherit || null };
   }
 
   // 客户端代码 —— 可有可无。没有它就是**纯声明式插件**：框架按 contributes
@@ -787,9 +814,12 @@ function inspectDir(dir) {
       layout: mfc.layout === true,
       submitPubkey: mfc.submitPubkey === true,
       defaultService: mfc.defaultService === true,
-      // ★ 那两条缺省在这里**不落成具体的值**：`null` 表示"这个插件没声明"，
-      //   而"回落成版本号 / 不分成实例"是 plugin-data.js 的 identityOf 干的事。
-      //   在这一层就把缺省填实，等于把那条规则抄成第二份。
+      // ★ 这一格是**必填**的，所以它在这里**总是**一个实打实的布尔 —— 上面查过
+      //   "缺席"与"类型不对"两种。与它相邻的那几个（上面三行）都有安全缺省。
+      concurrent: mfc.concurrent === true,
+      // ★ `data` 的缺省在这里**不落成具体的值**：`null` 表示"这个插件没声明"，
+      //   而"回落成版本号"是 plugin-data.js 的 identityOf 干的事。在这一层就把
+      //   缺省填实，等于把那条规则抄成第二份。
       data,
     },
     // ── 加载记录 ──

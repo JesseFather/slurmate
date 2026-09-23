@@ -1,19 +1,20 @@
 /**
  * plugin-data.test.mjs —— 插件**运行时数据**的身份（`plugin-data.js`）。
  *
- * 这一份要钉住的东西只有两样，而它们都是**缺省值**：
+ * 这一份要钉住的东西只有两样，而它们分属**两种不同的形状**：
  *
- *   · 不声明 `inherit` ⇒ 身份里带**版本号**（每个版本各一份，新版本读不到旧数据）；
- *   · 不声明 `perInstance` ⇒ 身份里**没有实例段**（所有实例一份，于是天然不许
- *     同时开两份 —— 同一个目录两份写是静默损坏，而两边都以为自己成功了）。
+ *   · `inherit` 有**缺省**（不写 ⇒ 身份里带**版本号**，每个版本各一份，新版本读不到
+ *     旧数据）—— 基座答得了"共享安不安全"，所以缺省落在安全侧。
+ *   · `concurrent` **没有缺省**（作者必须写：能同时开两份，还是只能开一份）——
+ *     "你的代码能不能同时处理两份"只有作者知道。`false` ⇒ 身份里**没有实例段**
+ *     （同一个目录两份写是静默损坏，而两边都以为自己成功了）。
  *
- * ★ 两个缺省都在安全侧，而安全侧的东西**特别容易被改坏却全绿**：一个"永远共享"
- *   的实现能让所有"共享"的用例照常通过，只有这两条会红。所以它们是这一份的主体，
- *   不是补充。
+ * ★ 有缺省的那一格**特别容易被改坏却全绿**：一个"永远共享"的实现能让所有"共享"的
+ *   用例照常通过，只有那一条会红。所以它是这一份的主体，不是补充。
  *
- * 后半段是**清单校验**（`contributes.data` 那一段）。它测的是"作者写错了会怎样"：
- * 这一段的每一条都要求**报错里说出真正的原因** —— 那是"插件装上了却不生效"这个
- * 症状唯一的线索来源。
+ * 后半段是**清单校验**（`contributes.data` 与 `contributes.concurrent`）。它测的是
+ * "作者写错了会怎样"：这一段的每一条都要求**报错里说出真正的原因** —— 那是
+ * "插件装上了却不生效"这个症状唯一的线索来源。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,22 +33,22 @@ const ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
 /** 一个注册表里的插件对象该有的样子（只列身份要用的那几项）。 */
 const plugin = (over = {}) => ({
   id: ID, name: 'code-server', version: '1.0.0',
-  contributes: { layout: true, data: null },
+  contributes: { layout: true, concurrent: false, data: null },
   ...over,
 });
 
-/** 声明了分实例的那一个 —— code-server 真实的样子。 */
-const perInstance = (over = {}) => plugin({
-  contributes: { layout: true, data: { inherit: 'editor', perInstance: true } },
+/** 声明了能同时开两份的那一个 —— code-server 真实的样子。 */
+const concurrent = (over = {}) => plugin({
+  contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } },
   ...over,
 });
 
 const partitionOf = (p, instance) =>
   pluginData.partitionOf(pluginData.identityOf(p, instance));
 
-// ── 缺省：两个都在安全侧 ────────────────────────────────────────────────────
+// ── 有缺省的那一格：inherit ─────────────────────────────────────────────────
 
-test('★ 缺省之一：不声明 inherit ⇒ 身份里带版本号（每个版本各一份）', () => {
+test('★ 缺省：不声明 inherit ⇒ 身份里带版本号（每个版本各一份）', () => {
   const a = plugin({ version: '1.0.0' });
   const b = plugin({ version: '1.0.1' });
 
@@ -60,23 +61,23 @@ test('★ 缺省之一：不声明 inherit ⇒ 身份里带版本号（每个版
     '没声明共享的两个版本必须是两份存储 —— 默认继承是一个**静默**读错数据的实现');
 
   // data 写了、但里面没有 inherit，与完全没写是同一件事（缺省就是缺省）。
-  const empty = plugin({ contributes: { layout: true, data: {} } });
+  const empty = plugin({ contributes: { layout: true, concurrent: false, data: {} } });
   assert.deepEqual(pluginData.identityOf(empty), [ID, '1.0.0']);
 });
 
-test('★ 缺省之二：不声明 perInstance ⇒ 身份里没有实例段（所有实例一份）', () => {
+test('★ concurrent: false ⇒ 身份里没有实例段（那个插件同时只有一份）', () => {
   const p = plugin();
   assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'), [ID, '1.0.0'],
     '★ 实例段**整段不存在** —— 不是"用一个常量占位"');
-  // ★ 这一格就是「同一个插件不许同时开两份」那条规则的来源：实例不同而身份相同
-  //   ⇒ 两份会话写的是同一个目录。它是缺省的**推论**，不是另焊上去的一条限制。
+  // ★ 这一格就是「不能多开的插件不许同时开两份」那条规则的来源：实例不同而身份相同
+  //   ⇒ 两份会话写的是同一个目录。它是声明 `false` 的**推论**，不是另焊上去的限制。
   assert.equal(partitionOf(p, 'l0123456789ab'), partitionOf(p, 'lffffffffffff'),
-    '没声明分实例的插件，哪个实例来都是同一份存储');
+    '不能多开的插件，哪个实例来都是同一份存储');
   assert.equal(pluginData.hasInstance(p), false);
 });
 
-test('声明了 perInstance ⇒ 每个实例一份，且插件的完整身份进分区名', () => {
-  const p = perInstance();
+test('声明了 concurrent: true ⇒ 每个实例一份，且插件的完整身份进分区名', () => {
+  const p = concurrent();
   assert.equal(pluginData.hasInstance(p), true);
   assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'),
     [ID, 'editor', 'l0123456789ab']);
@@ -87,8 +88,8 @@ test('声明了 perInstance ⇒ 每个实例一份，且插件的完整身份进
 });
 
 test('声明了 inherit ⇒ 同一组的几个版本共用一份（这正是 code-server 保行为的那一条）', () => {
-  const a = perInstance({ version: '1.0.0' });
-  const b = perInstance({ version: '1.0.1' });
+  const a = concurrent({ version: '1.0.0' });
+  const b = concurrent({ version: '1.0.1' });
   assert.equal(partitionOf(a, 'l0123456789ab'), partitionOf(b, 'l0123456789ab'),
     '★ 升级不丢布局，靠的就是这一条 —— 而它今天是从清单里读出来的，'
     + '从前是硬编码在 ensureSurface 的三元表达式里的');
@@ -100,15 +101,15 @@ test('★ 别的插件共用同一个组名，也不会共用同一份存储', (
   // 组名是**作者自己起的**，两个插件正好都叫 editor 是完全正常的。分区名的头一段
   // 是插件 id，所以它们不会撞 —— 少了这一段（从前 `persist:layout-<组 id>` 就只有
   // 末段），两个声明了 layout 的插件共用一个组时会读写同一份存储。
-  const other = perInstance({ id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd' });
-  assert.notEqual(partitionOf(perInstance(), 'l0123456789ab'),
+  const other = concurrent({ id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd' });
+  assert.notEqual(partitionOf(concurrent(), 'l0123456789ab'),
     partitionOf(other, 'l0123456789ab'));
 });
 
-test('★ 声明了 perInstance 却拿不到实例 ⇒ 抛，不回落成两段', () => {
-  const p = perInstance();
+test('★ 声明了 concurrent: true 却拿不到实例 ⇒ 抛，不回落成两段', () => {
+  const p = concurrent();
   for (const bad of [undefined, null, '']) {
-    assert.throws(() => pluginData.identityOf(p, bad), /perInstance/,
+    assert.throws(() => pluginData.identityOf(p, bad), /concurrent/,
       `实例是 ${JSON.stringify(bad)} 时必须停下来 —— 回落成两段会让所有实例`
       + '静默地共用一份数据，而两边都以为自己写进去了');
   }
@@ -141,7 +142,7 @@ test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份�
   // ★ 这条断言就是全部。名字里没有分隔符 ⇒ `path.join(根, 名字)` 得到的两个目录
   //   落在**同一个父目录**下。而如果改成三层目录（`<id>/<组>/<实例>`），`three`
   //   就会落在 `two` **里面** —— 而这两份身份**真的会同时存在**：同一个插件 1.0.0
-  //   声明 `{inherit:'editor'}`（两段）、2.0.0 声明 `{inherit:'editor',perInstance}`
+  //   声明 `{inherit:'editor'}`（两段）、2.0.0 声明 `{inherit:'editor',concurrent}`
   //   （三段），`inherit` 的语义正是"这几个版本共享一份"。那时"删掉没人用的
   //   editor 那一份"会把 2.0.0 那份**正在用的**连根删掉，而两边都不报错。
   assert.ok(!two.includes('/') && !two.includes('\\'), '名字里不能有路径分隔符');
@@ -202,7 +203,7 @@ test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段�
 });
 
 test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', () => {
-  const a = pluginData.identityOf(perInstance(), 'l0123456789ab');
+  const a = pluginData.identityOf(concurrent(), 'l0123456789ab');
   const back = pluginData.identityOfDiskName(pluginData.diskNameOf(a));
   assert.deepEqual([back.id, back.group, back.instance],
     [DISK_ID, 'editor', 'l0123456789ab']);
@@ -214,7 +215,7 @@ test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', 
 });
 
 test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会**恒为假**', () => {
-  const id = pluginData.identityOf(perInstance(), 'l0123456789ab');
+  const id = pluginData.identityOf(concurrent(), 'l0123456789ab');
   const partition = pluginData.partitionOf(id);
   assert.equal(pluginData.samePartition(partition, pluginData.diskNameOf(id)), true);
   // 没折叠的那一份也认（磁盘上不会出现，但判据不该因此漏掉一整格）。
@@ -228,19 +229,19 @@ test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会*
 });
 
 test('★ 两条判据不是一回事：hasSurface（有没有界面）与 hasLayoutStorage（按不按组）', () => {
-  const data = { inherit: 'editor', perInstance: true };
+  const many = { inherit: 'editor' };
   const surface = { kind: 'web', path: '/' };
   const cases = [
     // [contributes, hasSurface, hasLayoutStorage]
-    [{ surface, layout: true, data }, true, true],
+    [{ surface, layout: true, concurrent: true, data: many }, true, true],
     // 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）
-    [{ layout: true, data }, false, false],
-    // ★ 有界面、但**没**声明分实例：它**照样有一份分区**，只是不按布局组分。
+    [{ layout: true, concurrent: true, data: many }, false, false],
+    // ★ 有界面、但**不能多开**：它**照样有一份分区**，只是不按布局组分。
     //   回收一个组时不该清它（那是它唯一的一份），而对账必须把它算进"该有的"
     //   —— 用 hasLayoutStorage 当对账的入口，会让**它活着的那一份**看起来像孤儿，
     //   而界面上会给它一个删除按钮。
-    [{ surface, layout: true, data: { inherit: 'editor' } }, true, false],
-    [{ surface, layout: true, data: null }, true, false],
+    [{ surface, layout: true, concurrent: false, data: many }, true, false],
+    [{ surface, layout: true, concurrent: false, data: null }, true, false],
   ];
   for (const [contributes, wantSurface, wantLayout] of cases) {
     const p = { id: ID, version: '1.0.0', contributes };
@@ -251,13 +252,13 @@ test('★ 两条判据不是一回事：hasSurface（有没有界面）与 hasLa
   assert.equal(pluginData.hasLayoutStorage(null), false);
 });
 
-// ── 清单校验：contributes.data ──────────────────────────────────────────────
+// ── 清单校验：contributes.concurrent 与 contributes.data ────────────────────
 
 /** 一份最小合法清单，`over` 里的东西直接盖上去。 */
 function manifest(over = {}) {
   return {
     id: ID, name: 'code-server', displayName: '开发环境', version: '1.0.0',
-    contributes: { layout: true },
+    contributes: { layout: true, concurrent: false },
     ...over,
   };
 }
@@ -269,29 +270,69 @@ function inspect(mf) {
   return P.inspectDir(dir);
 }
 
-/** 一份**有界面、要布局**的清单，只换 `data` 那一段。 */
-const accept = (data) => inspect(manifest({ contributes: { layout: true, data } }));
+/** 一份**有界面、要布局、不能多开**的清单，只换 `data` 那一段。 */
+const accept = (data) => inspect(manifest({
+  contributes: { layout: true, concurrent: false, data } }));
 const reject = (data) => {
   const r = accept(data);
   assert.ok(r.error, `这份声明必须被拒：${JSON.stringify(data)}`);
   return r.error;
 };
 
+test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不上（不是"当成不能"）', () => {
+  // ★ 这一条钉的是"**没有缺省**"，而它与同一个清单里另外三格（layout / submitPubkey /
+  //   defaultService）刻意相反：那三个缺省都在安全侧，基座答得了。
+  //   而"你的代码能不能同时处理两份"基座答不了 —— 缺省无论取哪边都是替作者表态。
+  const 没写 = inspect(manifest({ contributes: { layout: true } }));
+  assert.match(没写.error || '', /contributes\.concurrent 是\*\*必填\*\*/,
+    '缺了这一格必须**拒绝安装**，而不是静默当成 false');
+  assert.equal(没写.entry, undefined);
+
+  // ★ 反例：写了的照常收下，而且两种取值都收 —— 否则上面那一条会因为"什么都拒"而全绿。
+  for (const v of [true, false]) {
+    const r = inspect(manifest({ contributes: { layout: true, concurrent: v } }));
+    assert.ok(!r.error, `concurrent: ${v} 是合法的：${r.error}`);
+    assert.equal(r.entry.plugin.contributes.concurrent, v);
+  }
+
+  // 类型不对由那条布尔循环管（与 layout / submitPubkey 同一句措辞）。
+  const bad = inspect(manifest({ contributes: { layout: true, concurrent: 'yes' } }));
+  assert.match(bad.error, /contributes\.concurrent 必须是 true 或 false/);
+});
+
+test('contributes.concurrent：★ 能多开要求 layout —— 没有组就没有第二份实例可指', () => {
+  // ★ 这一条是**组合**判定：两半各自都没错，错在放一起。实例键今天只有一个来源
+  //   ——布局组。没有布局组就没有"第二份实例"可指，所以它判在**装之前**
+  //   （与 engines 同一条纪律）。
+  const noLayout = inspect(manifest({
+    contributes: { layout: false, concurrent: true },
+  }));
+  assert.match(noLayout.error || '', /concurrent: true 要求同时有 contributes\.layout/);
+
+  // 而 layout: true 的那一份照常收下 —— 否则上面那一条会因为"什么都拒"而全绿。
+  const ok = inspect(manifest({ contributes: { layout: true, concurrent: true } }));
+  assert.ok(!ok.error, `这一份是合法的：${ok.error}`);
+
+  // ★ 反例也要钉：layout 那一段自己写错了（这里是字符串）时，报的必须是
+  //   "layout 必须是 true 或 false"，而不是被这一条抢先说成"concurrent 缺 layout"
+  //   —— 后者会把用户指去改一个本来没错的地方。
+  const badLayout = inspect(manifest({
+    contributes: { layout: 'true', concurrent: true },
+  }));
+  assert.match(badLayout.error, /contributes\.layout 必须是 true 或 false/);
+});
+
 test('contributes.data：合法的收下，并且**规整成固定形状**', () => {
-  const r = accept({ inherit: 'editor', perInstance: true });
+  const r = accept({ inherit: 'editor' });
   assert.ok(!r.error, `这份是合法的：${r.error}`);
-  assert.deepEqual(r.entry.plugin.contributes.data,
-    { inherit: 'editor', perInstance: true });
+  assert.deepEqual(r.entry.plugin.contributes.data, { inherit: 'editor' });
+  // data 只有这一个键了 —— 实例那一轴搬到了 `contributes.concurrent`。
+  assert.deepEqual(Object.keys(r.entry.plugin.contributes.data), ['inherit']);
 
   // data 缺席 ⇒ null。"这个插件没声明"与"声明了一个空的"在这一层**不合并** ——
   // 缺省怎么回落是 plugin-data.js 的事，在这里填实等于把那条规则抄成第二份。
-  const none = inspect(manifest({ contributes: { layout: true } }));
+  const none = inspect(manifest());
   assert.equal(none.entry.plugin.contributes.data, null);
-
-  // 只写一半也要规整成两段都在，少一段的读者会拿到 undefined。
-  const half = accept({ inherit: 'editor' });
-  assert.deepEqual(half.entry.plugin.contributes.data,
-    { inherit: 'editor', perInstance: false });
 });
 
 test('contributes.data：形状不对的一份都收不下，且报错说得清是哪一条', () => {
@@ -300,49 +341,32 @@ test('contributes.data：形状不对的一份都收不下，且报错说得清�
   assert.match(reject(['editor']), /必须是一个对象/);
   // 认不得的键 —— 打错一个键名不该静默变成一个"配了但不生效"的插件
   assert.match(reject({ inheritTo: 'editor' }), /认不得的键：inheritTo/);
-  assert.match(reject({ inherit: 'editor', perInstance: true, copy: 'x' }),
-    /认不得的键：copy/);
+  assert.match(reject({ inherit: 'editor', copy: 'x' }), /认不得的键：copy/);
   // 组名的字符集（它进分区名 = 磁盘目录名）
   for (const bad of ['..', 'a/b', 'Editor', '有中文', '-lead', '', 'a'.repeat(33)]) {
     assert.match(reject({ inherit: bad }), /inherit 必须匹配/,
       `${JSON.stringify(bad)} 不是一个能进路径的组名`);
   }
-  // perInstance 的类型
-  assert.match(reject({ perInstance: 'true' }), /perInstance 必须是 true 或 false/);
-  assert.match(reject({ perInstance: 1 }), /perInstance 必须是 true 或 false/);
 });
 
-test('contributes.data：★ perInstance 要求同时有 layout —— 没有组就没有实例可指', () => {
-  // ★ 这一条是**组合**判定：两半各自都没错，错在放一起。实例键今天只有一个来源
-  //   ——布局组。没有布局组就没有"每个实例一份"可指，而"声明了却指不出来"只会在
-  //   开会话时变成一个说不清的下场，所以它判在**装之前**（与 engines 同一条纪律）。
-  const noLayout = inspect(manifest({
-    contributes: { layout: false, data: { perInstance: true } },
-  }));
-  assert.match(noLayout.error || '', /perInstance 要求同时有 contributes\.layout/);
+test('contributes.data：★ 老的 perInstance 得到一句**指路**的报错，不是"认不得的键"', () => {
+  // ★ 加一个键名、把另一个键改名，最容易留下的症状是"照着报错改，改完还是错"：
+  //   `认不得的键：perInstance` 只说"我不认识它"，不说它现在叫什么、搬到哪儿了。
+  const old = reject({ inherit: 'editor', perInstance: true });
+  assert.match(old, /perInstance 已经改名成[\s\S]*contributes\.concurrent/);
 
-  // 而 layout: true 的那一份照常收下 —— 否则上面那一条会因为"什么都拒"而全绿。
-  const ok = inspect(manifest({
-    contributes: { layout: true, data: { perInstance: true } },
-  }));
-  assert.ok(!ok.error, `这一份是合法的：${ok.error}`);
-
-  // ★ 反例也要钉：layout 那一段自己写错了（这里是字符串）时，报的必须是
-  //   "layout 必须是 true 或 false"，而不是被这一条抢先说成"perInstance 缺 layout"
-  //   —— 后者会把用户指去改一个本来没错的地方。
-  const badLayout = inspect(manifest({
-    contributes: { layout: 'true', data: { perInstance: true } },
-  }));
-  assert.match(badLayout.error, /contributes\.layout 必须是 true 或 false/);
+  // 光有它、别的都没有时也照样指路（这条提示排在 keysProblem **之前**）。
+  const only = reject({ perInstance: false });
+  assert.match(only, /已经改名成[\s\S]*contributes\.concurrent/);
 });
 
-test('contributes.data：一个声明都不写的插件是**正常**的（缺省就在安全侧）', () => {
-  // sshd 就是这样：它没有界面、落盘那几个文件是可丢弃的缓存，所以它一个字都不用
-  // 声明。这一条钉的是"不声明必须合法" —— 若哪一天 data 变成必填，插件作者会收到
-  // 一条他无从回答的要求。
+test('contributes.data：一个声明都不写的插件是**正常**的（那一格有缺省）', () => {
+  // sshd 就是这样：它落盘那几个文件是可丢弃的缓存，共享组那一格它不用表态。
+  // ★ 注意它与 `concurrent` 的差别：那一格**没有**缺省、必须写（见上面第一条），
+  //   而这一格不写只是一个保守的选择。
   const r = inspect({
     id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd', displayName: 'SSH 中转站',
-    version: '1.0.0', contributes: { layout: false },
+    version: '1.0.0', contributes: { layout: false, concurrent: false },
   });
   assert.ok(!r.error, `不声明 data 必须合法：${r.error}`);
   assert.equal(r.entry.plugin.contributes.data, null);
@@ -353,9 +377,13 @@ test('★★ slotOf：一个活跃会话占的那个槽（多开的判据就是�
   //   各一个槽"都会让它红，而红的方式正是它要防的那件事。
   assert.equal(pluginData.slotOf('l0a1b2c3d4e5'), 'layout:l0a1b2c3d4e5');
 
-  // ★★ **不要布局组的那一整类共用一个槽** —— 这一档是**故意**粗的。
-  //    端口由插件的 `preferredPort` 自己挑、写进用户 ssh 配置的别名也是插件自己的
-  //    常量，基座**无从核对**它们会不会撞。核对不了的事只能整类互斥。
+  // ★★ **不要布局组的那一整类共用一个槽** —— 这一档是**故意**粗的，而它现在有
+  //    **两层**理由（见 plugin-data.js 的 slotOf 与账本〈保留⑥〉）：
+  //    · 架构层：**没有第二份实例键的来源** —— 实例键就是布局组，而这一类不要组；
+  //    · 作者层：写进用户 ssh 配置的那个别名是插件自己的常量，基座**无从核对**
+  //      两个无组插件的别名会不会撞。
+  //    （从前这里还有"端口由插件的 `preferredPort` 自己挑"这半条 —— 那个钩子在
+  //      阶段 5 收掉了，无组会话的端口现在是基座的常量，所以那半条已经作废。）
   //    细一档（按插件 id 分槽）会让两个互不认识的无组插件并存着去抢同一个别名，
   //    而症状是"`ssh slurmate` 连到哪一个是不确定的"，两边都报"已就绪"。
   assert.equal(pluginData.slotOf(null), 'relay');

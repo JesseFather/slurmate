@@ -179,7 +179,8 @@ function putSitePlugin({ id, name, version = '1.0.0', over = {}, clientSrc, trus
   const dir = path.join(SITE_POOL, id, version);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'plugin.json'),
-    JSON.stringify({ id, name, displayName: name, version, ...over }, null, 2));
+    JSON.stringify({ id, name, displayName: name, version,
+      contributes: { concurrent: false }, ...over }, null, 2));
   if (clientSrc !== undefined) {
     fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'client', 'index.js'), clientSrc);
@@ -1141,7 +1142,7 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   writePlugin(tmp, 'aaa', { name: 'aaa', displayName: '排在前面的' },
     'module.exports = {};\n');
   writePlugin(tmp, 'zzz', { name: 'zzz', displayName: '真正的缺省',
-    contributes: { defaultService: true } }, 'module.exports = {};\n');
+    contributes: { concurrent: false, defaultService: true } }, 'module.exports = {};\n');
   const reg2 = new Registry([{ dir: tmp, source: 'pool' }]);
   assert.deepEqual(reg2.list().map((p) => p.name), ['aaa', 'zzz'], '前置条件：顺序');
   assert.equal(reg2.defaultPlugin().name, 'zzz',
@@ -1204,7 +1205,11 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
  */
 function writePlugin(root, dirName, over = {}, clientSrc = undefined) {
   const mf = {
-    id: mintId(), name: 'temp', displayName: '临时', version: '1.0.0', ...over,
+    id: mintId(), name: 'temp', displayName: '临时', version: '1.0.0',
+    // `concurrent` 是**必填**的（见 plugins/index.js）—— 夹具不写它，每一条用例都会
+    // 红在"清单不合法"上，而那个红离它们各自要测的东西十万八千里。
+    contributes: { concurrent: false },
+    ...over,
   };
   const vdir = /^\d+\.\d+\.\d+$/.test(String(mf.version)) ? String(mf.version) : '1.0.0';
   const dir = path.join(root, dirName, vdir);
@@ -2025,7 +2030,8 @@ test('★ §5.1③：往站点池里手放一份合法的树 ⇒ 不出现、也
     const dir = path.join(idx._test.getSitePoolDir(), id, '1.0.0');
     fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(
-      { id, name: 'handmade', displayName: '手放的', version: '1.0.0' }, null, 2));
+      { id, name: 'handmade', displayName: '手放的', version: '1.0.0',
+        contributes: { concurrent: false } }, null, 2));
     fs.writeFileSync(path.join(dir, 'client', 'index.js'), 'module.exports = {};\n');
     idx._test.getRegistry().reload();
 
@@ -2619,10 +2625,11 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     over: {
       displayName: 'Jupyter',
       description: '没有客户端代码的声明式插件。',
-      // 没声明 contributes.data.perInstance → 身份里**没有实例段**，于是它只有一份
-      // 存储，与布局组无关。那一条分支在内建的两个插件上走不到（一个声明了要按实例
-      // 分，另一个根本不要界面）。
-      contributes: { surface: { kind: 'web', path: '/lab' }, layout: false },
+      // 不能多开 → 身份里**没有实例段**，于是它只有一份
+      // 存储，与布局组无关。那一条分支在内建的两个插件上走不到（一个能多开，
+      // 另一个根本不要界面）。
+      contributes: { surface: { kind: 'web', path: '/lab' }, layout: false,
+        concurrent: false },
     },
   });
 
@@ -3335,7 +3342,7 @@ test('★ 导出 preferredPort 的插件会被**拒绝** —— 那个钩子已�
   //   一个导出了不再存在的钩子的插件，就是**需要作者改一版**的插件。
   putSitePlugin({
     id: mintId(), name: 'stale', version: '1.0.0',
-    over: { contributes: { layout: false } },
+    over: { contributes: { layout: false, concurrent: false } },
     clientSrc: 'module.exports = { preferredPort() { return 18099; } };\n',
   });
   reg.reload();
@@ -3503,13 +3510,13 @@ test('★ 没声明分实例的那一份不跟着任何布局组走', async (t) 
 
   const layoutId = idx._test.getCfg().connections[0].layoutId;
 
-  // ★ 第三种：**声明了 perInstance、却没有界面**的插件。它照样在磁盘上留一份，
+  // ★ 第三种：**能多开、却没有界面**的插件。它照样在磁盘上留一份，
   //   而"属于这个组"的判据是 `hasInstance`，**不是** `hasLayoutStorage`
   //   （后者多一条"有界面"）。抄错那个判据的后果是这一份**永远不被回收** ——
   //   而它不会在审计里露头（那张"该有的"表用的正是 `hasInstance`）。
   const headless = putSitePlugin({
     id: mintId(), name: 'headless', version: '1.0.0',
-    over: { contributes: { layout: true, data: { perInstance: true } } },
+    over: { contributes: { layout: true, concurrent: true } },
   });
   t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
   const headlessPlugin = idx._test.getRegistry().list().find((p) => p.name === 'headless');

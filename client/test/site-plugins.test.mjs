@@ -70,7 +70,10 @@ function makeSite() {
   function add(dirName, over = {}, files = {}) {
     const dir = path.join(src, dirName);
     fs.mkdirSync(dir, { recursive: true });
-    const mf = { id: ulid.mint(), name: 'plug', displayName: '插件', version: '1.0.0', ...over };
+    const mf = { id: ulid.mint(), name: 'plug', displayName: '插件', version: '1.0.0',
+      // `concurrent` 是**必填**的（见 plugins/index.js），所以夹具要给它一格 ——
+      // 不然每一条端到端用例都会红在"清单不合法"上。
+      contributes: { concurrent: false }, ...over };
     fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify(mf, null, 2));
     for (const [rel, body] of Object.entries(files)) {
       const full = path.join(dir, rel);

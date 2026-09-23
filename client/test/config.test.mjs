@@ -442,7 +442,7 @@ test('★ 每个组一个独立的存储目录，且 id 不复用', () => {
   // 「新建空白布局真的空白」靠的是 id **永不复用**：若按端口命名，A 组被回收后端口
   // 被新组 B 复用，B 就会继承 A 的 localStorage 和登录 cookie。
   const cs = { id: '01M2JKHTZGKJBFQQTWYXMQMF2V', name: 'code-server', version: '1.0.0',
-    contributes: { layout: true, data: { inherit: 'editor', perInstance: true } } };
+    contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } } };
   const of = (layoutId) => pluginData.partitionOf(pluginData.identityOf(cs, layoutId));
 
   const a = config.newLayoutId();
