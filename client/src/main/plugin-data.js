@@ -117,10 +117,12 @@
  * ── 今天谁在用 ──────────────────────────────────────────────────────────────
  *
  * `partitionOf`：`index.js` 的 `ensureSurface`（建分区）与 `clearLayoutStorage`（回收）。
- * `diskNameOf` / `identityOfDiskName` / `samePartition` / `hasSurface` / `hasLayoutStorage`：
- * `plugin-data-audit.js` 的对账（本机还剩几份、哪一份没人用）。
- * `dataDirNameOf`：`index.js` 的 `ctx.dataDir()`（给插件一个落点）与
- * `plugin-data-audit.js` 的对账（第二个根）。
+ * `diskNameOf` / `identityOfDiskName` / `hasSurface` / `hasLayoutStorage`：
+ * `plugin-data-audit.js` 的对账（本机还剩几份、哪一份没人用）；`samePartition`：
+ * 同一处的 `held`（"分区名与目录名是不是同一份"）。
+ * `dataDirNameOf`：`index.js` 的 `ctx.dataDir()`（给插件一个落点）、
+ * `snapshotTempData`（**临时实例的起点快照** —— 它要从"持有者那一份"的目录名算出
+ * 源路径），以及 `plugin-data-audit.js` 的对账（第二个根）。
  *
  * ★ **这一段从前写的是「`ctx.dataDir()` 今天一个真消费者都没有，所以它不在这里」**，
  *   而那条判据是对的、结论不是 —— 一个没有读者的接口与"意图写了、没人用"确实是同一
@@ -138,11 +140,16 @@
  *
  * ── 词要钉住 ────────────────────────────────────────────────────────────────
  *
- * 这里一律写"**实例**"。今天一个实例就是**一条连接**（挂在一个布局组上）—— 说得更
- * 准：实例键是**布局组**，因为"一个布局组若干条连接"正是用户自己选的"这几条连接
- * 共用一份"。★ **不要写"会话"**：那个词在代码里已经有主儿 = Slurm 作业
- * （`session_id`、`SessionController`、「开始会话」），写它会读岔 —— 而"每个会话
- * 有自己的配置"这句话按两种读法一对一错。
+ * 这里一律写"**实例**"，而**实例键就是布局组 id** —— 因为"一个布局组若干条连接"
+ * 正是用户自己选的"这几条连接共用一份"。
+ *
+ * ★★ **一个实例不一定是某条连接的组**（0.7 的临时实例就是这样的：它不属于任何连接，
+ * 见 `index.js` 的 `claimInstance`）。所以准确的说法是"**一个布局组**"，而不是
+ * "一条连接" —— 后者在多开之后会把"第二份"读成"另一条连接的"，而那一份根本没有连接。
+ *
+ * ★ **不要写"会话"**：那个词在代码里已经有主儿 = Slurm 作业（`session_id`、
+ * `SessionController`、「开始会话」），写它会读岔 —— 而"每个会话有自己的配置"
+ * 这句话按两种读法一对一错。
  */
 
 const ulid = require('./plugins/ulid.js');
@@ -289,9 +296,15 @@ function identityOf(plugin, instanceId) {
  *     （让基座能核对并拒绝两个撞名的无组插件），而那件事还没做。见账本。
  *
  * ★ **不要**在这里再补一条"数据身份"判据。它今天是上面两条的推论：要组的会话必然
- *   同槽（组只有一个来源），不要组的会话只有 `relay` 一个槽。多一条判据就是多一个
- *   会漂的第二定义 —— 而**将来**给布局组开出第二个来源（比如允许用户显式建组）
- *   时，这两条都要重新算一遍，不能只改一条。
+ *   同槽（**槽名带组 id**），不要组的会话只有 `relay` 一个槽。多一条判据就是多一个
+ *   会漂的第二定义。
+ *
+ * ★★ **"将来给布局组开出第二个来源"那件事已经发生了**（0.7 的**临时实例**：一个
+ *   只在内存里的组，见 `index.js` 的 `claimInstance` 与 `tempLayouts`）—— 而这一条
+ *   **一个字都不用改**，因为临时组就是**另一个组 id**：两个实例的槽因此天然是两个
+ *   （`layout:lAA…` 与 `layout:lBB…`）。这正是当初把槽名写成"带上那个 id"而不是
+ *   "该不该有组"换来的。⇒ 下次再给组开一个新来源时，**先问这一条还成不成立**，
+ *   别默认它自动跟着变。
  *
  * @param {string|null} layoutId 这次会话的布局组；不参与布局的插件是 null
  * @returns {string} 槽的名字
@@ -405,6 +418,11 @@ function hasLayoutStorage(plugin) {
  * ★ 必须折叠后比：分区名里插件 id 那一段是大写的，而磁盘上那一段是小写的。拿两者
  *   直接 `===` 会**恒为假**，症状是"正被界面用着的那一份也被当成没人用" —— 而那正是
  *   最不能误判的一格（抽掉它的后果见 `index.js` 的 `clearLayoutStorage`）。
+ *
+ * ★ **唯一的调用者是 `plugin-data-audit.js` 的 `held`** —— 而它的用途正是"别把两个
+ *   根各自的写法（分区名 vs 目录名）搞混"。★ 任何要判"这两串是不是同一份"的地方都
+ *   应当调它，**不要**在别处再拼一遍 `persist:` 前缀：两条规矩会漂开，而漂开的症状是
+ *   "护住活数据"在一半上静默失效。
  */
 function samePartition(partition, diskName) {
   if (typeof partition !== 'string' || !partition.startsWith('persist:')) return false;

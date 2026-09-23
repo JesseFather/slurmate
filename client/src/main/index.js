@@ -109,6 +109,25 @@ let backend = null;
  *   用的是它提交时那一份代码）。
  */
 let sessions = new Map();
+/**
+ * **临时布局组**：`id → {id, name, port}`，形状与 `config.normalizeLayout` 的产物
+ * **逐字同形**（于是凡是拿一个组去用的地方，拿到临时组也不需要分支）。
+ *
+ * ★ **只在内存里，一个字都不落盘。** 它不是"一个还没保存的组"，而是**故意不存在于
+ *   配置里**的一种组：配置里的组有引用计数、会被 `pruneLayouts` 回收、会被对账
+ *   当成"该有的" —— 而临时组的全部意义就是"它属于**这一次会话**，会话结束就没了"。
+ *   落盘会让它在下次启动时变成一个真的组（引用计数 0 ⇒ 当场被回收 ⇒ 但那之前
+ *   `layoutPlan` 会把它报给界面，用户看到一堆自己没建过的组）。
+ *
+ * ★ **谁能进来只有一个来源**：`claimInstance` 造它。它今天只服务一件事 ——
+ *   一个声明了 `concurrent: true` 的插件要开第二份时，给第二份一个**自己的**
+ *   实例键（= 一个自己的端口 = 一个自己的 origin = 一份空的浏览器存储）。
+ *
+ * ★ **"这条会话是不是临时的"这个问题只问这一个 Map**（见 `sessionViews`）——
+ *   绝不在会话记录上再存一个布尔：两份状态会漂，而漂的后果是**漏回收**（留一份
+ *   永远没人清的目录）或者**误回收**（把持久那份的数据删掉）。
+ */
+let tempLayouts = new Map();
 let cfgDir = null;
 let cfg = null;
 /**
@@ -1108,7 +1127,10 @@ function layoutForSession(conn) {
   const layout = {
     id: config.newLayoutId(),
     name: config.nextLayoutName(cfg),
-    port: config.nextLayoutPort(cfg),
+    // ★ 端口要跳过**所有**还占着的（配置里的 ∪ 临时实例那些）—— 见
+    //   `usedLayoutPortsAll`。只数配置里的，就会把一个活的临时实例脚下那个端口
+    //   分给一个新组，而症状是两条隧道抢一个端口、谁先绑谁赢。
+    port: config.nextLayoutPort(cfg, usedLayoutPortsAll(null)),
   };
   cfg.layouts = [...cfg.layouts, layout];
   config.saveConfig(cfgDir, cfg);
@@ -1132,11 +1154,155 @@ function ensureConnectionLayout(conn) {
   const layout = {
     id: config.newLayoutId(),
     name: config.nextLayoutName(cfg),   // 必须在入列之前算，否则会把自己算进去
-    port: config.nextLayoutPort(cfg),
+    port: config.nextLayoutPort(cfg, usedLayoutPortsAll(null)),   // 同上（含临时实例）
   };
   cfg.layouts = [...cfg.layouts, layout];
   config.setConnectionLayout(cfg, conn.id, layout.id);
   return layout.id;
+}
+
+/**
+ * 一个布局组（**持久的或临时的**）听在哪个端口。
+ *
+ * ★ **没有回落分支，找不到就抛。** 这与 `config.layoutPort` 刻意相反，而理由不是
+ *   洁癖：那个函数的回落值是 `LAYOUT_PORT_BASE`（18080），而它在临时组这条路上
+ *   **够得着** —— 临时组不在 `cfg.layouts` 里，于是每一个临时实例都会"回落到"
+ *   18080，也就是**持有者那个组自己的端口**。症状有两条，都很难查：终端上推一条
+ *   "端口被占、布局会重置"的**假警报**（而那个端口根本没有被抢），以及同一份配置
+ *   在不同启动顺序下得到**不同的 origin**（localStorage 于是时有时无）。
+ *   宁可停下来，也不要一个看起来像端口冲突的错。
+ *
+ * ★ 它是**唯一**的取端口入口。从前还有一条 `config.layoutPort`（只认配置、组不在
+ *   就回落到基址）—— 它已经**整个删掉**了，因为那条回落够得着**临时组**这条新路，
+ *   而它给出的答案是持有者那个端口（见上）。⇒ 别再长出第二条取端口的函数。
+ */
+function layoutPortOf(layoutId) {
+  const l = config.findLayout(cfg, layoutId);
+  if (l) return l.port;
+  const t = tempLayouts.get(layoutId);
+  if (t) return t.port;
+  throw new Error(`取不到布局组 ${layoutId} 的端口：它既不在配置里，也不是一个`
+    + '本进程还在用的临时实例。（临时实例只活在内存里，进程一重启它就不存在了'
+    + '—— 那时应当重新认领，而不是去问一个已经没有的组。）');
+}
+
+/**
+ * 现在**所有还占着端口**的布局组：配置里的 ∪ 临时实例那些。
+ *
+ * ★ 三个读者**全都走这一个入口**（`excludedPortsFor`、`app:setConnectionLayout`、
+ *   新建临时组时挑端口）。少一个的后果都是**静默**的：
+ *   · 隧道顺移时会挑走一个临时实例的端口 —— 而那条监听是活的，于是顺移**绑不上**，
+ *     用户看到"页面忽然打不开"，两边的日志里一个字都不提端口冲突；
+ *   · 两条临时实例拿到同一个首选端口 —— 第二条起来时第一条的 origin 被顶掉。
+ *
+ * ★ 它**不是** `config.usedLayoutPorts` 的替代品：那一个的语义是"配置里的"，要
+ *   保持干净（它还有别的读者）。这一层负责把第二个来源并进来。
+ *
+ * @param {string|null} [exceptId] 摘掉自己那一个（顺移时自己那个端口不能被当成
+ *        "别人的"，否则永远绑不上）。
+ */
+function usedLayoutPortsAll(exceptId) {
+  const s = config.usedLayoutPorts(cfg, exceptId);
+  for (const [id, t] of tempLayouts) if (id !== exceptId) s.add(t.port);
+  return s;
+}
+
+/**
+ * 给这一次会话认领一个**实例键**（今天就是布局组 id）。
+ *
+ * ── 认领规则（**唯一**的实现，`startSession` 与 `reattachOne` 都走它）────────
+ *
+ * **持有者身份只在开局那一刻确定**：开局时那个组上**没有活会话** ⇒ 它就是持有者，
+ * 用连接那个组（与这个机制存在之前**逐字相同**）；已经有 ⇒ 这是一份**临时实例**，
+ * 给它一个新造的、只在内存里的临时组。
+ *
+ * ★ **已经开着的实例永不接任**。一个正在跑的会话手里攥着它那个组 id（分区、数据
+ *   目录、外面那个 origin 都从它算），把"持有者"这个身份挪到它头上等于在运行时
+ *   迁移一份被活进程持有的存储 —— 做不到，而硬做的症状是页面忽然空掉。所以持有者
+ *   结束之后，还开着的那一份**接着当临时实例**，下一个**新开**的会话才认领持有者。
+ *
+ * ★ 分两处写必然漂：一处判 `occupied`、一处判 `sessions.has`；一处拷数据、一处不拷。
+ *   而漂的后果是**静默的** —— `reattachOne` 那一侧漂了，重启之后 N 条会话全部落进
+ *   同一个槽，只接回第一条，其余的在集群上继续跑而心跳没了（1800 秒后 scancel）。
+ *
+ * ★ `concurrent !== true` 的插件**恒返回 base**：它没有实例段（`identityOf` 不给
+ *   第三段），所以"第二份"对它是**同一个身份**的两条会话 —— 那正是槽闸要拒的，
+ *   交给槽闸拒（它的文案说得出是哪一个挡住了），而不是在这里悄悄给它一份假实例。
+ *
+ * ★ 它**会造一个临时组**，所以只在"这次会话确实要起"的路径上调（槽闸之前那一步），
+ *   不要拿它去问"会是什么" —— 那样每问一次就漏一个临时组。
+ *
+ * @param {string} baseLayoutId 连接那个组（调用方已经保证这个插件要布局组）
+ * @param {object} plugin
+ * @returns {string} 这次会话的实例键
+ */
+function claimInstance(baseLayoutId, plugin) {
+  if (!pluginData.hasInstance(plugin)) return baseLayoutId;
+  if (!occupied(pluginData.slotOf(baseLayoutId))) return baseLayoutId;
+  const t = {
+    id: config.newLayoutId(),
+    name: '临时实例',
+    // ★ 端口要跳过**两个来源**：配置里那些组，以及本进程里已经活着的临时实例。
+    //   少了后者，两条临时实例会拿到同一个首选端口（见 `usedLayoutPortsAll`）。
+    port: config.nextLayoutPort(cfg, usedLayoutPortsAll(null)),
+  };
+  tempLayouts.set(t.id, t);
+  return t.id;
+}
+
+/**
+ * 把这一份**临时实例**的全部痕迹收掉：注册表里那一格，以及它名下的两个落点
+ * （浏览器存储分区 + 各插件的插件数据目录）。
+ *
+ * ★ **用 `Map.delete` 的返回值当"只回收一次"的旗子**，不在会话记录上再存一个
+ *   `rec.reclaimed`：两份状态会漂，而漂的后果正是这个函数要防的那件事 ——
+ *   多回收一次会把**另一个**已经复用了这个 id 的实例的数据删掉，少回收一次
+ *   会漏一份永远没人清的目录。旗子和事实是同一个东西时，它不会漂。
+ *
+ * ★ 调用点的**次序是承重的**：必须排在 `win.destroySurface(slot)` **之后**。
+ *   排在前面的话，`livePartitions()` 还看得见那块视图 ⇒ 分区那一半被静默跳过 ⇒
+ *   **每一次回收都在盘上留一份垃圾**（而它看起来像"没清干净"，不像"顺序错了"）。
+ *
+ * ★ 不是临时实例时**什么都不做**（持久的组有它自己的回收路径：引用计数、或者
+ *   用户删掉最后一条连接）。
+ */
+function releaseEphemeral(layoutId) {
+  const t = tempLayouts.get(layoutId);
+  if (!t || !tempLayouts.delete(layoutId)) return;
+  clearLayoutStorage(layoutId, t.name);
+}
+
+/**
+ * 把持有者那份插件数据**拷一份**当临时实例的起点。
+ *
+ * ★ 拷的是**那个组上这个插件那一份**（`identityOf(plugin, baseLayoutId)`），不是
+ *   "持有者那条会话的" —— 持有者可能是**另一个**插件（同一个组上，code-server 与
+ *   别人可以各有一份身份）。按会话去拷会拷到别人的数据。
+ *
+ * ★ **同步**（`fs.cpSync`），而且**调用点与认领之间不许有 `await`**：两条
+ *   `app:start` 同时在飞时，若在"看那个组上有没有活会话"与 `sessions.set` 之间
+ *   让出控制权，两条都会看到"没有持有者" ⇒ 都用连接那个组 ⇒ 后一条把前一条的
+ *   记录**顶掉**，前一条的作业从此没有心跳、1800 秒后被 `scancel`，而界面上只有
+ *   一条会话。异步拷贝会把那个窗口打开。
+ *
+ * ★ 源目录不存在（`ENOENT`）= **没有起点，不是错误** —— 持有者可能还什么都没写过。
+ *   空目录对插件是一个**有定义**的状态：它本来就是自己按需建的。
+ *   真拷不出来（权限、空间）时**照起会话** + 一条 warn：这一份本来就是临时的，
+ *   因为读不到起点而拒绝开局，代价比"起点是空的"大得多。
+ */
+function snapshotTempData(plugin, baseLayoutId, tempLayoutId) {
+  const root = pluginDataRoot();
+  if (!root) return;
+  const nameOf = (id) => pluginData.dataDirNameOf(pluginData.identityOf(plugin, id));
+  try {
+    fs.cpSync(path.join(root, nameOf(baseLayoutId)), path.join(root, nameOf(tempLayoutId)),
+      { recursive: true });
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return;      // 没有起点：这一份本来就是空的
+    win.pushNotice('warn',
+      `「${plugin.displayName || plugin.name}」这份临时副本没能拿到起点数据`
+      + `（${e.message}），它会从空白开始。`);
+  }
 }
 
 /**
@@ -1392,6 +1558,15 @@ function auditPluginData() {
     ...dataAudit.audit({
       plugins: registry.list(), layouts, connections: cfg.connections,
       names, why, dataNames, dataWhy,
+      // ★★ **现在正被活会话拿着的**（两个根都要）—— 少了它，一份正在被写的
+      //    数据会被摆上一个删除按钮。★ 两个根各有各的持有者，所以**两句都要**：
+      //    · `livePartitions()`：浏览器存储分区（**窗口**持有，见它那段注释）；
+      //    · `liveDataDirs()`：插件数据目录（**会话**持有 —— 没有界面的插件、
+      //      以及临时实例，在窗口里都没有位置）。
+      //    只给前者的后果**够得着**：`boot.test.mjs` 里那个没有界面的 `headless`
+      //    夹具活着的时候就能被删掉。
+      // ★ 顺序无关（`audit` 内部收成一个集合），折过没折过也无关（它自己再折一遍）。
+      held: [...livePartitions(), ...liveDataDirs()],
     }),
     // ★ 两根都给出去：删除要按行的 `places` 分派，而它需要知道每一根在哪。
     roots: { partition: pr.root, data: dataRoot },
@@ -1506,6 +1681,11 @@ function sessionViews() {
     slot: rec.slot,
     service: rec.plugin ? (rec.plugin.displayName || rec.plugin.name) : null,
     live: occupied(rec.slot),
+    // ★ 这一份是不是**临时实例**（第二份、数据是一份副本、会话结束就没了）。
+    //   判据只有**一个来源**：那张临时组注册表。**不要在会话记录上另存一个布尔**
+    //   —— 两份状态会漂，而漂的后果是"界面说它是临时的，而它其实已经变成持久的"
+    //   或者反过来（用户据此以为自己的改动会留下，或者以为不会）。
+    temporary: Boolean(rec.controller && tempLayouts.has(rec.controller.layoutId)),
     snap: rec.controller ? rec.controller.snapshot() : null,
   }));
 }
@@ -1527,7 +1707,7 @@ function reapSessions() {
  * ★ 为什么是"一组"而不是"那一个"：窗口里那一块从前只有一个，而多开之后前台只是
  *   "哪一块盖在上面"。**判据不能跟着前台走** —— 回收一个布局组时，被抽掉的是
  *   "正在跑的那块页面"脚下的 localStorage，而它完全可能就是后台那一个。
- *   （`plugin-data.js` 的 `samePartition` 两边都折叠，这里跟着它。）
+ *   （名字两边都折叠，`plugin-data.js` 的 `foldAscii` 那一套。）
  */
 function livePartitions() {
   const out = new Set();
@@ -1577,9 +1757,12 @@ function liveDataDirs() {
  *   从布局隧道的候选里排除掉。布局隧道从组端口一路 +1 往上探（`tunnel.js` 的
  *   `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
  *   两边的日志里一个字都不提端口冲突。
+ *
+ * ★ 而"别的布局组"现在有**两个来源**（配置里的 + 临时实例那些），所以这里走
+ *   `usedLayoutPortsAll` 而不是 `config.usedLayoutPorts` —— 见那个函数的注释。
  */
 function excludedPortsFor(rec) {
-  const s = config.usedLayoutPorts(cfg, rec.controller && rec.controller.layoutId);
+  const s = usedLayoutPortsAll(rec.controller && rec.controller.layoutId);
   for (const other of sessions.values()) {
     if (other === rec) continue;
     const p = other.controller && other.controller.snapshot().localPort;
@@ -1662,7 +1845,15 @@ async function startSession(resources, serviceKind) {
   // ★ 布局组是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
   //   编辑器布局），不跑浏览器的不给 —— 给它一个组只会凭空造出一个永远不会被
   //   创建的存储分区，并让「运行中切布局」去挪一个正在用的隧道端口。
-  const layoutId = plugin.contributes.layout ? layoutForSession(conn) : null;
+  const baseLayoutId = plugin.contributes.layout ? layoutForSession(conn) : null;
+
+  // ★★ **认领**（见 `claimInstance`）：持有者身份只在这一刻确定。上面那一个是
+  //    "连接那个组"，而这一行回答的是"**这一次会话**用哪一个实例键" —— 那个组上
+  //    已经有活会话时，这一份是**临时实例**（一个只在内存里的新组、新端口、
+  //    空的浏览器存储、持有者那份数据的快照）。
+  //    ★ 它与下面那道槽闸的**次序是承重的**：认领先发生，于是"能多开"的插件拿到
+  //    一个新组、槽闸放行；"不能多开"的插件拿到原组，槽闸照旧拒它并说出原因。
+  const layoutId = baseLayoutId === null ? null : claimInstance(baseLayoutId, plugin);
 
   // ── ★ 槽：一个活跃会话占一份「一个就够」的资源，同一个槽只能有一个 ──────────
   //
@@ -1687,22 +1878,8 @@ async function startSession(resources, serviceKind) {
   // 上一个已经结束的那个记录该走了（它是给界面看"已结束"用的，新的一轮开始了）。
   reapSessions();
 
-  // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
-  // 这次提交，而那要花掉一整趟往返）。**先备好再提交**是硬要求。
-  //
-  // ★ 排在槽那道闸之后：为一个马上会被拒的会话去生成一把钥匙，是在磁盘上留一个
-  //   用户没要求过的副作用。
   const rec = { slot, plugin, pluginWhy: null, controller: null,
                 connectionId: conn ? conn.id : null };
-  let sshPubkey = null;
-  if (plugin.prepare) {
-    const pre = plugin.prepare(pluginContext(rec));
-    if (!pre || !pre.ok) {
-      win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
-      return null;
-    }
-    sshPubkey = pre.sshPubkey || null;
-  }
 
   // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
   //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会**复用**那个
@@ -1718,6 +1895,18 @@ async function startSession(resources, serviceKind) {
   //
   //   顺带得到一个好性质：把一个插件从池里卸掉，正在跑的会话也完全不受影响 ——
   //   它手里已经攥着那个对象了。
+  // ★★ **这一段（controller 的构造与 `sessions.set`）排在 `prepare()` **之前**，
+  //    是为了 `ctx.dataDir()`。** 那个能力从 `rec.controller.layoutId` 现算实例段，
+  //    而 `prepare()` 从前跑在 controller **构造之前** ⇒ 一个「能多开
+  //    （`concurrent: true`）**又**带 `prepare()`」的插件，一提交就撞上 `identityOf`
+  //    那个"没有给出实例"的抛 —— 也就是说**这种插件今天根本提交不出去**。
+  //    （sshd 把那个抛 catch 住了，而它是 `false`，所以这条路上从来没有人踩到过。）
+  //
+  //    ★ `rec.controller.layoutId` 是**唯一**的实例键来源，**不要在 `rec` 上另存
+  //      一个 `layoutId`**：两份会在 `relisten` 改了 controller 那一份之后分家，
+  //      而 `liveDataDirs()` 走的是 controller 那个 —— 于是它看不见这条会话正用着
+  //      的目录，回收一个组时**把正在跑的数据删掉**。
+
   rec.controller = new SessionController({
       backend,
       layoutId,
@@ -1742,14 +1931,50 @@ async function startSession(resources, serviceKind) {
   rec.controller.on('retarget', () => onSessionChange(slot));
   sessions.set(slot, rec);
 
+  // ★★ **临时实例：开局把持有者那份插件数据拷一份当起点。**
+  //    同步（见 `snapshotTempData`），而且**必须在 `sessions.set` 与 `prepare`
+  //    之间不留 `await`** —— 这一段就是那条"两条 `app:start` 同时在飞"的竞态窗口，
+  //    让出控制权会让后一条顶掉前一条的记录（前一条的作业从此没有心跳）。
+  //
+  //    判据是"认领给的组与连接那个组不是同一个"，而**不是**问 `tempLayouts`：
+  //    两者今天等价，但将来多一个临时组的来源时，这一行仍然说得对。
+  if (baseLayoutId && layoutId !== baseLayoutId) {
+    snapshotTempData(plugin, baseLayoutId, layoutId);
+  }
+
+  // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
+  // 这次提交，而那要花掉一整趟往返）。**先备好再提交**是硬要求。
+  //
+  // ★ 排在槽那道闸之后：为一个马上会被拒的会话去生成一把钥匙，是在磁盘上留一个
+  //   用户没要求过的副作用。
+  //
+  // ★ 失败时**要把刚才那两条记录撤掉**：槽里留着一条假记录 ⇒ 那个槽再也开不了
+  //   新的（用户看到的是"某某正占着这个布局组"，而那个会话根本不存在）；临时实例
+  //   留着 ⇒ 注册表里多一格、数据目录永远没人回收（面板上那一行还删不掉 ——
+  //   `held` 会护着它）。
+  let sshPubkey = null;
+  if (plugin.prepare) {
+    const pre = plugin.prepare(pluginContext(rec));
+    if (!pre || !pre.ok) {
+      sessions.delete(slot);
+      releaseEphemeral(layoutId);
+      win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
+      return null;
+    }
+    sshPubkey = pre.sshPubkey || null;
+  }
+
   // 本地端口**不是插件的事**（插件的 `preferredPort` 钩子已经收掉了）：有布局组的
   // 会话用布局组自己那个端口（它就是 origin），没有布局组的用中转基准端口。
   //
-  // ★ **必须判 null**：`layoutPort(cfg, null)` 会回落到 `LAYOUT_PORT_BASE`（18080），
-  //   于是中转站会话去抢某个布局组的 origin —— 那条路径**不报错**，症状是
-  //   "浏览器那一块打到 ssh 端口上，页面打不开"。
+  // ★ **必须判 null**：没有布局组的会话拿的是 `RELAY_PORT_BASE`，而它绝不能落到
+  //   某个布局组的端口上 —— 那条路径**不报错**，症状是"浏览器那一块打到 ssh 端口
+  //   上，页面打不开"。
+  //   ★ 而 `layoutPortOf` 那条路**连回落都没有**（找不到就抛）：临时实例不在配置里。
+  //     从前那条会回落到基址（18080）的取端口函数已经**整个删掉**了 —— 它会让每一个
+  //     临时实例都从 18080 起扫，也就是**持有者自己那个端口**。
   const preferredPort = layoutId
-    ? config.layoutPort(cfg, layoutId)
+    ? layoutPortOf(layoutId)
     : config.RELAY_PORT_BASE;
   const snap = await rec.controller.start(resources, {
     preferredPort,
@@ -1888,6 +2113,16 @@ async function _renderSession(slot) {
   //   正压在那块页面底下。
   if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
     win.destroySurface(slot);
+    // ★★ **临时实例到这里就没了**（这一条会话结束了，那份副本的使命也就完了）。
+    //
+    //    ★ **必须排在 `destroySurface` 之后**，次序是承重的：那个调用会销毁这一块
+    //      视图，而 `releaseEphemeral` 里 `clearLayoutStorage` 拿 `livePartitions()`
+    //      当"正被用着"的守卫。排在前面的话那块视图还在 ⇒ **分区那一半被静默跳过**
+    //      ⇒ 每一次回收都在盘上留一份垃圾，而它看起来像"没清干净"，不像"顺序错了"。
+    //
+    //    ★ 传的是 `rec.controller.layoutId`（**这一次会话的**实例键），不是"当前
+    //      活跃连接"那个组 —— 多开时后者是别人的，传错会把别人那份正在跑的数据清掉。
+    releaseEphemeral(rec.controller.layoutId);
   }
 
   // ── 唯一的服务分派点 ──
@@ -2410,6 +2645,15 @@ async function stopAllSessions() {
     if (!c) continue;
     out.push({ slot: rec.slot, sessionId: c.sessionId, res: await c.stop() });
   }
+  // ★★ 临时实例的**后备回收**。正常路径是 `_renderSession` 里那一处（会话走到终态
+  //    时回收），但那一条依赖事件循环继续跑 —— 而 `before-quit` 那条路紧接着就是
+  //    `app.exit(0)`，等不到。
+  //
+  //    ★ 与 `_renderSession` 那一处**不是重复**：`releaseEphemeral` 用 `Map.delete`
+  //      当旗子，第二次调用是 no-op（见它的注释）。这里多一次调用换的是"进程退出
+  //      这条路上也一定收干净"，而代价是零。
+  //    ★ 遍历一份**拷贝**：`releaseEphemeral` 会改 `tempLayouts`。
+  for (const id of [...tempLayouts.keys()]) releaseEphemeral(id);
   return out;
 }
 
@@ -2546,10 +2790,33 @@ async function reattachOne(s) {
   //
   //   ★ 走的是 `conn.layoutId` 而不是 `layoutForSession(conn)`：接回一条会话是
   //     **只读**的一步，不该顺手造出一个布局组来（那条路只在开会话时走）。
+  //     ★ 而**认领**（下面那一行）会造一个**临时**组 —— 那不是"顺手造一个持久的组"，
+  //       它是这一次接管**必须要有的**实例键，见那段说明。
   const conn = config.activeConnection(cfg);
-  const layoutId = (plugin && plugin.contributes.layout && conn)
+  const baseLayoutId = (plugin && plugin.contributes.layout && conn)
     ? conn.layoutId : null;
-  if (plugin && plugin.contributes.layout && !layoutId) return;   // 没配置连接，接不上
+  if (plugin && plugin.contributes.layout && !baseLayoutId) return;   // 没配置连接，接不上
+
+  // ★★ **重连必须走同一个 `claimInstance`**（不是"照抄 startSession 那两行"）。
+  //
+  //    临时组只存在于**上一个进程的内存**里 —— 配置里没有它。所以重启之后 N 条
+  //    code-server 会话全都算成"连接那个组" ⇒ 全部落进同一个槽 ⇒ **只接回第一条**，
+  //    其余的在控制节点上继续跑、心跳没了 ⇒ 300 秒 `suspect`、1800 秒 **`scancel`**。
+  //    而那条提示语还是错的（"想留住它就先用 `slurm` 把它的作业停掉" —— 那是
+  //    **我们自己的**会话）。走到认领之后：第一条认领连接那个组，其余各拿一个临时实例。
+  //
+  //    ★ 代价（账本 S26）：接回来的临时实例拿到的是**新**的临时 id ⇒ 新的分区，
+  //      重启前那一份 localStorage 变成孤儿（面板上看得见、删得掉）。这是"临时"的
+  //      应有之义 —— 但界面上要说得出来（`temporary` 那一格就是为它留的）。
+  const layoutId = baseLayoutId ? claimInstance(baseLayoutId, plugin) : null;
+
+  // ★ 临时实例的起点数据：与 `startSession` **同一个函数、同一句判据**（"认领给的组
+  //   不是连接那个组"）。★ 重连接回来的临时实例也必须是"持有者那份的快照" ——
+  //   少了这一句，同一个插件在"开局"与"重启接回"两条路上会得到两种第二份
+  //   （一种有起点、一种空着），而用户看不出为什么。
+  if (baseLayoutId && layoutId !== baseLayoutId) {
+    snapshotTempData(plugin, baseLayoutId, layoutId);
+  }
 
   // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
   //   此前这里写的是 `if (!s || !s.tunnel_target) return;` —— 于是「作业还在队列里」
@@ -2564,8 +2831,15 @@ async function reattachOne(s) {
   // 槽已经在表里 ⇒ 这一条与已经接上的某一条抢同一份资源。**不覆盖**：覆盖会把先接上
   // 的那条记录连同它的心跳一起丢掉（心跳一停，那个作业 1800 秒后被 scancel），
   // 而用户看到的只是"少了一个标签"。
+  //
+  // ★ 判据是 `occupied(slot)`，与 `startSession` **同一口径**（从前这里是
+  //   `sessions.has(slot)`，两个函数两个口径）。差别在**已经结束的那些记录**：
+  //   它们还留在表里（界面要显示"已结束"），而它们**不占着槽** ——
+  //   按 `sessions.has` 去判，一条已经死掉的记录会挡住一条真会话的重连。
+  //   ★ 走到这里还没被拒的，只有"`concurrent: false` 的插件、而那个槽上真的
+  //     有一条活会话"（能多开的那些已经在上面的认领里各拿了一个新组）。
   const slot = pluginData.slotOf(layoutId);
-  if (sessions.has(slot)) {
+  if (occupied(slot)) {
     const held = sessions.get(slot);
     win.pushNotice('warn',
       `控制节点上还有一个会话（作业 ${s.job_id}）与已经接上的`
@@ -2595,8 +2869,10 @@ async function reattachOne(s) {
   // 认不出的插件用**非布局组**的基准端口：它的端口绝不能落进任何布局组（否则会与
   // 那个组的 origin 撞上），而它自己听在哪个端口我们并不知道。有布局组的会话用组
   // 自己那个端口 —— 判据是 layoutId 有没有（框架的事实），不是"是哪个插件"。
+  // ★ 与 `startSession` 同一条：走 `layoutPortOf`（**没有回落**），临时实例不在
+  //   配置里，那条带回落的取端口函数（已删）会让它从 18080 起扫、撞上持有者那个端口。
   const preferredPort = layoutId
-    ? config.layoutPort(cfg, layoutId)
+    ? layoutPortOf(layoutId)
     : config.RELAY_PORT_BASE;
   if (queued) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
@@ -2786,7 +3062,7 @@ function registerIpc() {
       target = {
         id: config.newLayoutId(),
         name: config.nextLayoutName(cfg),
-        port: config.nextLayoutPort(cfg),
+        port: config.nextLayoutPort(cfg, usedLayoutPortsAll(null)),
       };
     }
     if (target.id === conn.layoutId) {
@@ -2826,7 +3102,7 @@ function registerIpc() {
     const outsideLayout = sessionLive && !sessionInLayout;
 
     if (isActive && live && !outsideLayout) {
-      const excluded = config.usedLayoutPorts(cfg, target.id);
+      const excluded = usedLayoutPortsAll(target.id);
       const r = await live.controller.relisten(target.id, target.port, excluded);
       if (!r.ok) {
         if (!existed) cfg.layouts = cfg.layouts.filter((l) => l.id !== target.id);
@@ -2883,17 +3159,13 @@ function registerIpc() {
     const { name } = payload;
     // ★ **判定权在这里**（照 `app:setConnectionLayout` 那条形状）：界面手里那份清单
     //   随时可能已经陈旧（刚连上、刚改过配置、刚装了插件），所以**重新对一遍账**，
-    //   只认这一次算出来的那一条。判据本身在 plugin-data-audit.js 的 deletionVerdict
-    //   （两句话都说得出原因的那两格：`stale` 与 `in_use`）。
+    //   只认这一次算出来的那一条。判据本身在 plugin-data-audit.js 的 deletionVerdict。
     //   ★ 于是路径**只由 根 + 磁盘上的目录名 拼**，而 `name` 这个字符串只用来
     //   **匹配**某一行 —— `{name: '../../..'}` 匹配不上任何一行。
+    //   ★ 「正被用着」那一格**不在这里判**：`auditPluginData()` 已经把活会话拿着的
+    //   名字挡在 `rows` 之外了（两个根都挡）。在这里再判一次等于留一条够不着的分支。
     const fresh = auditPluginData();
-    const verdict = dataAudit.deletionVerdict({
-      // ★ 是**一组**，不是"那一个" —— 见 `livePartitions`。多开之后拿单个前台分区
-      //   去判，会把"另一块正在跑着的界面脚下的那份数据"判成可以删。
-      rows: fresh.rows, name,
-      surfacePartitions: [...livePartitions()],
-    });
+    const verdict = dataAudit.deletionVerdict({ rows: fresh.rows, name });
     if (!verdict.ok) return verdict;
     // 删哪几个落点由**这一行**说了算（`places`）—— 一份数据的浏览器那一半与磁盘
     // 那一半是一起删的，只删一半的话下一次对账会把同一行再带回来。
@@ -3530,10 +3802,19 @@ module.exports = {
      *   **两个客户端同时在跑** —— 旧的那个还占着端口在监听、还在轮询状态，收尾时
      *   进程退不掉（症状是整个测试文件凭空多花几十秒，而每条用例自己都是绿的）。
      *   所以旧的先 `abandon()` —— 只释放本地资源，一个字都不发给服务端。
+     *
+     * ★ **临时实例那张表也要清**，理由与 `sessions` 逐字相同：真机上重启之后
+     *   它一定是空的（它只活在内存里）。不清的后果不是"用例红"那么轻 ——
+     *   一个**上一个进程的**临时实例会跟着新认领的那些一起数，于是"重启后各拿一个
+     *   实例"这条用例会以为认领多造了一个，而真实的路径上根本没有这一格。
+     *   ★ 清的时候**不回收**（不调 `releaseEphemeral`）：真机上进程没了，那两份
+     *   数据就留在盘上等着对账去认 —— 那正是"崩溃残留"该有的样子，别在夹具里
+     *   把它抹平。
      */
     reattach: async () => {
       const old = [...sessions.values()];
       sessions = new Map();
+      tempLayouts = new Map();
       for (const rec of old) if (rec.controller) await rec.controller.abandon();
       return tryReattach();
     },
@@ -3547,5 +3828,14 @@ module.exports = {
     getPendingConsent: () => pendingConsent,
     /** 站点池在哪（测试要直接看盘上的东西）。 */
     getSitePoolDir: () => sitePoolDir(),
+    /**
+     * **临时实例**那张注册表（`id → {id, name, port}`，只活在内存里）。
+     *
+     * ★ 用例要断言的是"它**没了**"（会话结束之后回收干净），而那件事没有别的
+     *   观测面：那个组不在配置里（所以 `getCfg()` 看不见），它那条会话的记录也已经
+     *   被收掉了。盘上那两半各有一条用例（目录在不在），但"注册表里那一格清了"
+     *   是第三件事 —— 少了它，一条"回收时只删了磁盘、没删注册表"的实现会全绿。
+     */
+    getTempLayouts: () => tempLayouts,
   },
 };

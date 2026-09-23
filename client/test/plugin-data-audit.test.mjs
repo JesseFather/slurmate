@@ -70,6 +70,9 @@ const run = (o) => audit.audit({
   why: o.why,
   dataNames: o.dataNames === undefined ? [] : o.dataNames,
   dataWhy: o.dataWhy,
+  // ★ `held` 的缺省是**空的一列**（= "此刻没有任何活会话"）。它不是"没查"——
+  //   "谁活着"这件事在调用方那里永远是知道的（进程就是它自己），所以没有三态。
+  held: o.held === undefined ? [] : o.held,
 });
 
 // ── ★ 活着的分区绝不能被报出来 ──────────────────────────────────────────────
@@ -326,41 +329,61 @@ test('listDirs：目录不存在 = 一份都没有（肯定的答案）；读不
   assert.equal(audit.listDirs(null).names, null);
 });
 
-test('★ 删这一份行不行：三个下场各自说得出原因（判定权在主进程）', () => {
+test('★★ 正被活会话拿着的那一份**不进名单**（`held`）—— 而没拿着的照旧进', () => {
+  // 一份**临时实例**的身份：它的实例键（布局组 id）只在内存里，配置里根本没有
+  // 那个组 ⇒ 它**永远**不在"该有的"里。没有 `held` 的话，它在名单上就是一个
+  // 可删的孤儿 —— 而那个删除按钮就落在用户正写着的那份数据上。
+  const temp = disk(pluginData.identityOf(cs(), 'l0123456789cd'));
+  const noHold = run({ names: [temp], dataNames: [temp] });
+  assert.equal(noHold.rows.length, 1, '先说清前提：没有 held 时它确实像孤儿');
+  assert.equal(noHold.rows[0].kind, 'orphan');
+  assert.equal(noHold.rows[0].deletable, true, '而且给得出删除按钮 —— 这正是要挡的那件事');
+
+  const withHold = run({ names: [temp], dataNames: [temp], held: [temp] });
+  assert.deepEqual(withHold.rows, [], '★ 拿着它的人说它活着 ⇒ 不许出现在名单里');
+
+  // ★ 折叠是**幂等**的：调用方折过没折过都对。写大写的那一份照样护得住 ——
+  //   两个根的名字在折叠这件事上本来就不同源（分区名里 id 段是大写的）。
+  assert.deepEqual(run({ names: [temp], held: [temp.toUpperCase()] }).rows, [],
+    '★ held 里的名字大写也认（折叠在这里再做一遍）');
+
+  // ★★ **两个根报上来的写法不一样，而这一条是承重的**：窗口那一半
+  //    （`livePartitions()`）报的是**分区名**（`persist:…`），会话那一半
+  //    （`liveDataDirs()`）报的是**目录名**。少了前缀那一步归一，分区那一半
+  //    **永远匹配不上** —— 而症状是"护了个寂寞"：一份活着的临时实例照样在名单里。
+  assert.deepEqual(run({ names: [temp], held: [`persist:${temp}`] }).rows, [],
+    '★ 带 persist: 前缀的那种写法也要认（窗口那一半报的就是它）');
+
+  // ★ **反例**：没人拿着的同类名字照样是孤儿。少了这一条，一个"`held` 恒为真"
+  //   的实现也能让上面那两条通过 —— 而那会让**所有**垃圾都删不掉。
+  const other = disk(pluginData.identityOf(cs(), 'l0123456789ef'));
+  const stray = run({ names: [other], held: [temp] });
+  assert.equal(stray.rows.length, 1, '★ 护的是**拿着的那一份**，不是"所有临时样子的"');
+  assert.equal(stray.rows[0].deletable, true);
+});
+
+test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）', () => {
   const rows = [
     { name: 'aa@bb@cc', deletable: true, label: 'x' },
     { name: '认不出的东西', deletable: false, label: 'y' },
   ];
   // 不在清单里（界面那份已经陈旧），或者那一行本来就不给删。
   for (const p of ['never-seen', '认不出的东西']) {
-    const v = audit.deletionVerdict({ rows, name: p, surfacePartitions: [] });
+    const v = audit.deletionVerdict({ rows, name: p });
     assert.equal(v.ok, false, `${p} 不该删得掉`);
     assert.equal(v.code, 'stale');
     assert.match(v.error, /重新看一下/, '拒绝也要说清下一步');
   }
-  // ★ 正被当前页面用着的那一份。这一格**够得着**：正在显示的那份数据，它所属的插件
-  //   被从本机拿掉了（站点回收，或者用户在本机删掉了那一版）—— 那一刻它既"在用"、
-  //   又"不在该有的清单里"，于是一眼看过去就是一份没人要的孤儿。
-  const live = audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:AA@bb@cc'],
-  });
-  assert.equal(live.ok, false);
-  assert.equal(live.code, 'in_use');
-  assert.match(live.error, /新建空白布局/, '要给出路 —— 换一个布局组就是"重置"');
-  // 折叠后才比得上：分区名里 id 那一段是大写的，磁盘上那一份是小写的。
-  assert.equal(audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'] }).code, 'in_use');
-  // ★★ **多开之后才成立的那一条**：窗口里有几块视图，判据就必须看**每一块**。
-  //    命中项排在第二个 —— 只看第一个的实现会放行，而放行的后果是"把后台那块
-  //    正在跑的页面脚下的存储抽掉"，症状只是「页面莫名其妙坏了」。
-  assert.equal(audit.deletionVerdict({
-    rows, name: 'aa@bb@cc',
-    surfacePartitions: ['persist:别的一条', 'persist:aa@bb@cc'],
-  }).code, 'in_use', '★ 命中的那一块不在第一个也照样算"在用"');
   // 没在用的放行，而且回的是**这次算出来的那一行**（拼路径要用它）。
-  const ok = audit.deletionVerdict({
-    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:别的'],
-  });
+  const ok = audit.deletionVerdict({ rows, name: 'aa@bb@cc' });
   assert.equal(ok.ok, true);
   assert.equal(ok.row, rows[0]);
+  // ★★ **"正被用着"那一格已经搬走了**：它从前是这里的一个 `in_use` 分支，收一个
+  //    `surfacePartitions`。现在由 `audit` 的 `held` 在算行的时候就挡掉（见上一条）——
+  //    所以这里**只剩两个下场**。留一个第三态的话，它是一条恒不可达的分支：
+  //    它比的是**分区**，而"有一条活会话"不止体现在分区上（没有界面的插件、
+  //    临时实例都没有分区）。这一条钉的就是"它没有回来"。
+  assert.equal(audit.deletionVerdict({
+    rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'],
+  }).ok, true, '★ 传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');
 });

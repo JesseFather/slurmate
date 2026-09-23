@@ -11,7 +11,9 @@
  *
  *     该有的 = { 折叠(身份) : 有分区的插件 × 配置里的布局组 }
  *              ∪ { 折叠(身份) : 有分区的插件、没声明分实例 }
- *     孤儿   = 磁盘上的目录名 − 该有的
+ *     孤儿   = 磁盘上的目录名 − 该有的 − **活着的**
+ *
+ * ★ **"活着的"那一项必须减掉**（`held`），而它**必须来自两个根** —— 见下面那段。
  *
  * ★ **反过来做会删掉活数据**，两个坑各自都够：
  *
@@ -183,15 +185,38 @@ function recognized(place, name) {
  * @param {string} [o.why]            没查分区那一根的原因（原样带给界面）
  * @param {string[]|null} [o.dataNames] 插件数据目录那一根下的目录名；`null`/省略 = 没查
  * @param {string} [o.dataWhy]        没查数据那一根的原因
+ * @param {string[]} [o.held]         **此刻正被活会话拿着的**名字。★ **两个根都要收进来**：
+ *        浏览器存储分区由窗口持有（`livePartitions()`），插件数据目录由会话持有
+ *        （`liveDataDirs()`）—— 只收一半的话，另一半里"活着却不在该有的清单里"的
+ *        那些会被当成孤儿。
+ *        ★ 那件事**够得着**，而且不止一种走法：一个声明了 `hasInstance` 却**没有界面**
+ *        的插件（数据目录有、分区没有）活着的时候就是这样；**临时实例**更是天生如此
+ *        （它的实例键只在内存里，配置里根本没有那个布局组 ⇒ 它永远不在"该有的"里）。
+ *        ⇒ 少了这个参数，界面上会给一份**正在被写**的数据一个删除按钮。
+ *        ★ **两种写法都收**：分区名（`persist:…`，窗口那一半报上来的就是它）与
+ *        目录名（磁盘上的样子）。判据是 `pluginData.samePartition` —— 少了这一步，
+ *        分区那一半**永远匹配不上**（而症状是"护了个寂寞"：一份活着的临时实例
+ *        照样在名单里、照样可删）。
  * @returns {{rows: Array, diskChecked: boolean, why: string|null}}
  *          `diskChecked` = **两根都查成了**。只要有一根没查，`why` 里会**点名是哪一根**
  *          —— "查不了"与"没有"是两件事，这个界面里最忌讳的就是把它俩说成一件。
  */
-function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy }) {
+function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, held }) {
   const diskChecked = Array.isArray(names) && Array.isArray(dataNames);
   const list = Array.isArray(names) ? names : [];
   const dataList = Array.isArray(dataNames) ? dataNames : [];
   const layoutsArr = Array.isArray(layouts) ? layouts : [];
+  // ★ 归一：`held` 里**两种写法都收** —— 分区名（`persist:…`，窗口那一半
+  //   `livePartitions()` 报的就是它）与目录名（磁盘上的样子，会话那一半
+  //   `liveDataDirs()` 报的是它）。★ 少这一步的后果是**静默**的：分区那一半永远
+  //   匹配不上，于是"护住活数据"在那一半等于没做（一份活着的临时实例照样在名单里）。
+  //   ★ 判据走 `pluginData.samePartition` —— **只有那一处**知道分区名与目录名差在哪
+  //   （前缀 + 折叠），不在这里再拼一遍：同一条规矩两份实现会漂开。
+  const heldList = (Array.isArray(held) ? held : []).map((n) => pluginData.foldAscii(n));
+  const isHeld = (name) => {
+    const f = pluginData.foldAscii(name);
+    return heldList.some((h) => h === f || pluginData.samePartition(h, name));
+  };
 
   // ── 该有的：正向算出来，折叠 ──
   //
@@ -290,6 +315,20 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy }
       continue;
     }
 
+    // ── ★ 正被活会话拿着的，**不问是不是孤儿** ──
+    //
+    // 它排在这里（"该有的"那支之后、孤儿那支之前），因为能走到这两行之间的名字
+    // 必然是"不在该有的清单里"的那些 —— 而那些里面混着两类完全不同的东西：
+    // 真垃圾，以及**活得好好但算不出来**的。后者有两条来路，都不是假想：
+    //   · 一个 `hasInstance` 却**没有界面**的插件（数据目录有、分区没有）；
+    //   · **临时实例** —— 它的实例键只在内存里，配置里没有那个布局组，
+    //     于是它**永远**不在"该有的"里。
+    // ⇒ 少了这一行，用户在会话跑着的时候点一下删除，就抽掉了它脚下的那份数据，
+    //   而症状只是「那个页面/那条命令忽然坏了」。
+    //
+    // ★ 方向与"该有的变大 ⇒ 孤儿变少 ⇒ 删除按钮变少"那条口径一致：护着，不删。
+    if (isHeld(name)) continue;
+
     // ── 不在"该有的"里 ⇒ 孤儿 ──
     const parts = pluginData.identityOfDiskName(name);
     if (parts) {
@@ -380,34 +419,26 @@ function declaredGroupOf(plugin) {
  *   接下来拼路径用的是它里面的 `name` —— 也就是 `readdir` 读到的那个目录名。
  *   `places` 决定要删哪几个根下的那一份。
  *
+ * ★ **"正被用着"那一格已经不在这个函数里了**（它从前是 `in_use` 那一支，收一个
+ *   `surfacePartitions`）：那件事现在由 `audit` 的 `held` 在**算行的时候**就挡掉 ——
+ *   被活会话护着的名字根本不会出现在 `rows` 里，于是这里够不着它，只剩 `stale`
+ *   一条路。★ 留着旧那一支就是留一条**恒不可达**的分支加几条假断言：它比的是
+ *   分区，而"有一条活会话"这件事**不止**体现在分区上（没有界面的插件、临时实例
+ *   都没有分区）—— 一份看起来有人守着、其实什么也守不住的代码，下一个人会以为
+ *   它守着那一格。（判定权仍在主进程，这一点没变。）
+ *
  * @param {object} o
- * @param {Array} o.rows              这次对账算出来的行
- * @param {string} o.name             界面点的那一行的 `name`
- * @param {string[]} [o.surfacePartitions] 此刻**每一块**界面的分区（`persist:…`）。
- *        ★ 是**一组**，不是"窗口里那一个"：多开之后窗口里有几块视图，而"正被用着"
- *        这件事对**每一块**都成立。拿单个前台分区去判，会把后台那块正在跑的页面
- *        脚下的数据判成可以删。
+ * @param {Array} o.rows  这次对账算出来的行
+ * @param {string} o.name 界面点的那一行的 `name`
  * @returns {{ok: true, row: object}|{ok: false, code: string, error: string}}
  */
-function deletionVerdict({ rows, name, surfacePartitions }) {
+function deletionVerdict({ rows, name }) {
   const row = (rows || []).find((r) => r.name === name && r.deletable);
   if (!row) {
     return {
       ok: false, code: 'stale',
-      error: '这一份数据现在不在「没人用」的清单里了 —— 多半是配置或插件刚变过。'
-        + '重新看一下再决定。',
-    };
-  }
-  // ★ 这一格**够得着**，不是"理论上"：正在显示的那份数据，它所属的插件**被从本机
-  //   拿掉了**（站点回收、或者用户在本机删掉了那一版）—— 那一刻它既"在用"、
-  //   又"不在该有的清单里"，于是一眼看过去就是一份没人要的孤儿。少了这一格，
-  //   用户会把眼前那个页面脚下的存储抽掉，而症状只是「页面莫名其妙坏了」。
-  const live = Array.isArray(surfacePartitions) ? surfacePartitions : [];
-  if (live.some((p) => p && pluginData.samePartition(p, row.name))) {
-    return {
-      ok: false, code: 'in_use',
-      error: '这一份数据正被当前页面用着，删掉它会让那个页面在下次刷新时报错。'
-        + '想重置它，用「＋ 新建空白布局…」换一个布局组（页面会重新加载）。',
+      error: '这一份数据现在不在「没人用」的清单里了 —— 多半是配置或插件刚变过，'
+        + '或者它正被一条活着的会话用着。重新看一下再决定。',
     };
   }
   return { ok: true, row };

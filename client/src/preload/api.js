@@ -69,8 +69,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 没人用"，以及**删掉其中一份**。
   //
   // ★ 删除**不可逆**（那个插件下次打开会是一份全新的空白存储），所以界面必须先问过
-  //   用户。被拒绝时 code 是 `in_use`（正被当前页面用着）或 `stale`（配置或插件刚
-  //   变过，界面手里那份清单已经不作数）；删除成功时把重算过的清单一起回来。
+  //   用户。被拒绝时只有一个 code：`stale` —— 那**一份已经不在"没人用"的清单里了**
+  //   （多半是配置或插件刚变过，或者它正被一条活着的会话用着：那种情况下对账根本
+  //   不会把它列出来）。删除成功时把重算过的清单一起回来。
   pluginData: () => ipcRenderer.invoke('app:pluginData'),
   deletePluginData: (payload) => ipcRenderer.invoke('app:deletePluginData', payload),
 

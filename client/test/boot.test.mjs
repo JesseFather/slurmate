@@ -3029,6 +3029,26 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
+  // ★★ 这条用例的第二个插件是**合成**的，理由必须写下来：它要的是
+  //    「**要布局组、但不能多开**」这一格 —— 而那正是"认领"与"槽闸"唯一分得开
+  //    的地方。
+  //    · 拿 **code-server** 来测会**测到一句不再成立的话**：它今天是
+  //      `concurrent: true`，于是第二个会话会正常起来（见下一条用例），
+  //      而这条用例断言的是"必须在提交之前被拒"。
+  //    · 拿 **sshd** 来测则相反 —— 它不要布局组，`layoutId` 在 `claimInstance`
+  //      之前就已经是 null，于是**认领那一步根本走不到**：去掉认领这条用例照样
+  //      绿，那半边就是装饰。
+  //    ★ 它**不需要假站点认识它**：被拒发生在提交**之前**，这个插件到不了后端。
+  const id = mintId();
+  putSitePlugin({
+    id, name: 'single-slot',
+    over: {
+      contributes: {
+        layout: true, concurrent: false, surface: { kind: 'web', path: '/' },
+      },
+    },
+  });
+
   const a = await invoke('app:start', null, 'code-server');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
   const ctlA = idx._test.sessionAt(a.slot).controller;
@@ -3039,11 +3059,433 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   // 再起一条**同一个槽**的（同一个布局组）—— 必须被**客户端**拦住，
   // 而不是提交到服务端之后才拿到一句 quota_active。理由：一个布局组 = 一个本地
   // 端口 = 一份浏览器存储，同组的第二条会把第一条的端口与存储**当场抢掉**。
-  const b2 = await invoke('app:start', null, 'code-server');
+  const b2 = await invoke('app:start', null, 'single-slot');
   assert.equal(b2.ok, false, '★ 同一个槽的第二个会话必须在提交**之前**就被拒');
   assert.equal(ctlA.state, 'running', '★ 甲必须一动不动');
   assert.equal(ctlA.sessionId, sidA, '★ 甲连会话号都不该变');
   assert.equal(viewFor(w, a.slot), viewA, '★ 甲那块视图一个字都不该动');
+  // ★ 说得出**是哪一个**挡住了（这才是这条提示存在的理由）—— 而不是一句
+  //   「会话已在进行中」。名字取的是**挡着的那一条**的插件。
+  const said = noticesOf().filter((n) => n.kind === 'error').map((n) => n.text);
+  const last = said[said.length - 1] || '';
+  assert.match(last, /开发环境/, `★ 提示里要点名是哪一个挡着：${last}`);
+  assert.match(last, /布局组/, `★ 而且要说清占的是布局组：${last}`);
+  // ★ 而**不能**走到提交：那说明被拒的时机错了（服务端只会回一句 quota_active，
+  //   而那时第二条已经占住了那个布局组的端口与存储）。
+  assert.equal(idx._test.getBackend()._occupying().length, 1,
+    '★ 必须在提交**之前**就拒掉 —— 后端不该多出一条会话');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+// ── 阶段 7：第二份从哪来（认领 + 临时实例）──────────────────────────────────
+//
+// 这一组用例的共同前提：**同一个插件（code-server）要能同时开两份**，所以
+// `openUpTo(idx, 2)` 是配额，`connectDemo` 给出那条连接 —— 而**第一份认领它**。
+
+/** 起一条会话并等它真的跑起来。返回 `{slot, ctl}`。 */
+async function startRunning(idx, name, ms = 30000) {
+  const r = await invoke('app:start', null, name);
+  assert.equal(r.ok, true, `${name} 没起来：${JSON.stringify(r.sessions)}`);
+  const ctl = idx._test.sessionAt(r.slot).controller;
+  await waitUntil(() => ctl.state === 'running', `${name} 进入 running`, ms);
+  return { slot: r.slot, ctl };
+}
+
+/** 某一槽那个身份在**磁盘上**的目录名（两个根同名，见 plugin-data.js）。 */
+function diskNameOf(idx, pluginName, instanceId) {
+  const P = require('../src/main/plugin-data.js');
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
+  assert.ok(plugin, `夹具前提：注册表里应当有 ${pluginName}`);
+  return P.dataDirNameOf(P.identityOf(plugin, instanceId));
+}
+
+test('★★ 同一个插件开两份：第二份是**临时实例**（另一个端口、另一份分区）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const config = require('../src/main/config.js');
+  const P = require('../src/main/plugin-data.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 3);
+  await connectDemo(idx);
+
+  const a = await startRunning(idx, 'code-server');
+  const idA = a.ctl.layoutId;
+  const partA = w.surfacePartition(a.slot);
+  const cfg = idx._test.getCfg();
+  const connLayout = (cfg.connections[0] || {}).layoutId;
+
+  // ★ 判据一：**第一份仍然是持久的，一个字都没变**。它认领的就是连接那个组
+  //   （与这个机制存在之前**逐字相同**），分区名也就是那个组算出来的那一个。
+  assert.equal(idA, connLayout, '★ 第一份认领的是连接那个组');
+  assert.equal(partA, P.partitionOf(P.identityOf(
+    idx._test.getRegistry().list().find((p) => p.name === 'code-server'), idA)),
+  '★ 第一份的分区名与从前逐字相同');
+
+  const b = await startRunning(idx, 'code-server');
+  const idB = b.ctl.layoutId;
+
+  // ★ 判据二：两份落在**两个槽**、两个**实例键**上 —— 而第二份那个键
+  //   **不在配置里**（它只活在内存里，这就是"临时"的全部含义）。
+  assert.notEqual(b.slot, a.slot, '★ 两份必须是两个槽（同一个槽就是同一个端口）');
+  assert.notEqual(idB, idA, '★ 两份的实例键必须不同');
+  assert.equal(config.findLayout(cfg, idB), null, '★ 第二份那个组不在配置里');
+  assert.equal(idx._test.getTempLayouts().has(idB), true, '★ 它在内存那张表里');
+  assert.equal(idx._test.getTempLayouts().size, 1, '而只有它一个是临时的');
+
+  // ★ 判据三：**另一个端口**、**另一份浏览器存储**（新 origin ⇒ localStorage 天然
+  //   是空的，这正是"临时副本"在浏览器那一侧的样子）。
+  const temp = idx._test.getTempLayouts().get(idB);
+  assert.notEqual(temp.port, config.findLayout(cfg, idA).port, '★ 端口不能是持有者那个');
+  for (const l of cfg.layouts) {
+    assert.notEqual(temp.port, l.port, `★ 也不能撞上配置里任何一个组的端口（${l.id}）`);
+  }
+  const partB = w.surfacePartition(b.slot);
+  assert.notEqual(partB, partA, '★ 两份必须是两个存储分区');
+  assert.equal(partB, P.partitionOf(P.identityOf(
+    idx._test.getRegistry().list().find((p) => p.name === 'code-server'), idB)));
+  assert.equal(connLayout === idB, false, '★ 而第二份**不属于任何连接**');
+
+  // ★ 判据四：界面上两条都看得见，而**只有第二份**带 `temporary`（那个标记是
+  //   常驻提示唯一的数据来源，见 sessionViews）。
+  const st = await invoke('app:states');
+  const vA = st.sessions.find((x) => x.slot === a.slot);
+  const vB = st.sessions.find((x) => x.slot === b.slot);
+  assert.equal(vA.temporary, false, '★ 持有者不是临时的');
+  assert.equal(vB.temporary, true, '★ 第二份是');
+
+  // ★ 判据五：**实际监听端口**必须分开，而**首选端口必须来自它自己那个组**。
+  //
+  //   ★ 为什么不是简单的一句"不许有顺移警报"：`nextLayoutPort` 是**确定性**的、
+  //     **不探测 OS** —— 所以一台机器上只要有个无关进程占着 18080，会话就会顺移，
+  //     而那是**设计好的行为**（顺移只影响这一次会话），不是故障。在那种机器上
+  //     "不许有警报"会假红（本机就是这种情况）。真正要钉的是**首选端口从哪来**：
+  //     临时实例必须用**它自己那个组**的端口，而**不是**回落到 `LAYOUT_PORT_BASE`
+  //     （18080 = 持有者那个端口）—— 那正是"每一次开局都推一条假警报 + 同一份配置
+  //     在不同启动顺序下得到不同 origin"那条路。
+  const wantOf = (ctl) => {
+    const m = /首选端口 (\d+)/.exec(ctl.snapshot().warning || '');
+    return m ? Number(m[1]) : null;
+  };
+  const groupPortOf = (id) => {
+    const t = idx._test.getTempLayouts().get(id);
+    return t ? t.port : (config.findLayout(cfg, id) || {}).port;
+  };
+  // ★★ **必须到三条会话才守得住上面那条"没有回落"。** 回落值是
+  //    `LAYOUT_PORT_BASE`（18080），而**至多一条**会话能真的绑上 18080 ——
+  //    两条临时实例里有回落时，**必然有一条要顺移**（或者被排除集跳过），而那一步的
+  //    警报里报的会是 18080，与它自己那个组的端口对不上，于是这条断言当场红。
+  //    只查两条的话，回落值恰好等于某个临时组自己的端口时**什么都看不出来**——
+  //    而那不是假想：夹具里配置的布局端口是**跨用例累积**的，新算出来的临时组端口
+  //    真的会回到 18080（变异验证抓到过这一格）。
+  //
+  //    顺带把"两条临时实例绝不能拿到同一个首选端口"也钉住（`usedLayoutPortsAll`
+  //    漏掉一个来源时唯一的可观测后果：前两条恰好一个 18080 一个 18081，看不出来；
+  //    第三条才会与第二条撞上）。
+  const c3 = await startRunning(idx, 'code-server');
+  const xs = [[a.ctl, idA], [b.ctl, idB], [c3.ctl, c3.ctl.layoutId]];
+  assert.equal(new Set(xs.map(([, id]) => id)).size, 3,
+    `★ 三条三个实例键：${JSON.stringify(xs.map(([, id]) => id))}`);
+  const ports3 = xs.map(([c]) => c.snapshot().localPort);
+  assert.equal(new Set(ports3).size, 3, `★ 三条三个本地端口：${JSON.stringify(ports3)}`);
+  for (const [ctl, id] of xs) {
+    const want = wantOf(ctl);
+    // 没顺移就是最干净的形态；顺移了的话，报出来的"首选端口"必须是它**自己那个组**
+    // 的端口（回落的话这里会是 18080）。
+    if (want !== null) {
+      assert.equal(want, groupPortOf(id),
+        `★ 顺移警报里的首选端口必须是这个组自己的（${id}）。警报：${ctl.snapshot().warning}`);
+    }
+  }
+  const tempPorts = [...idx._test.getTempLayouts().values()].map((t) => t.port);
+  assert.equal(new Set(tempPorts).size, 2, `★ 两个临时组两个首选端口：${JSON.stringify(tempPorts)}`);
+
+  await invoke('app:stop', { slot: a.slot });
+  await invoke('app:stop', { slot: b.slot });
+  await invoke('app:stop', { slot: c3.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 临时实例的插件数据目录是持有者那一份的**快照**', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // 先在持有者那个身份下放一份"用户攒出来的数据"。
+  const { dir: baseDir, layoutId } = makePluginDataDir(idx, 'code-server');
+  fs.writeFileSync(path.join(baseDir, 'settings.json'), '{"theme":"dark"}');
+  fs.mkdirSync(path.join(baseDir, 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(baseDir, 'nested', 'deep.txt'), 'deep');
+
+  const a = await startRunning(idx, 'code-server');
+  assert.equal(a.ctl.layoutId, layoutId, '夹具前提：第一份认领的就是这个组');
+  const b = await startRunning(idx, 'code-server');
+
+  // ★ 起点是**持有者那一份**（整个目录，含嵌套），而且是**开局就有**的 ——
+  //   不是"插件第一次写的时候才去拿"。少了这一步，第二份看到的是一间空屋子，
+  //   而用户会以为自己的设置丢了。
+  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', b.ctl.layoutId));
+  assert.equal(fs.readFileSync(path.join(tempDir, 'settings.json'), 'utf8'),
+    '{"theme":"dark"}', '★ 临时实例开局就该看见持有者那份的内容');
+  assert.equal(fs.readFileSync(path.join(tempDir, 'nested', 'deep.txt'), 'utf8'), 'deep',
+    '★ 嵌套目录也要跟着走（`recursive`）');
+
+  // ★ **两份是两份**：在临时那一份里改一个字节，持有者那一份一个字都不能动。
+  //   （拷贝而不是共享 —— 共享的话两边会互相踩，而症状是"我改了它，它自己变回去了"。）
+  fs.writeFileSync(path.join(tempDir, 'settings.json'), '{"theme":"light"}');
+  assert.equal(fs.readFileSync(path.join(baseDir, 'settings.json'), 'utf8'),
+    '{"theme":"dark"}', '★ 临时那一份是副本，不是同一个目录');
+
+  await invoke('app:stop', { slot: a.slot });
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 持有者结束之后，还开着的那一份**不接任**；下一个新开的才认领', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const cfg = () => idx._test.getCfg();
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // ★ 持有者名下有"用户攒出来的数据"——它**必须活过这一次会话**（那个组是持久的，
+  //   下一次开会话还要用它）。这条断言同时守着 `releaseEphemeral` 那两个前提里的
+  //   后一个：**只回收临时实例**（把 `Map.delete` 那道守卫去掉，它就会连持久的
+  //   那份一起清掉 —— 而症状是"关掉一个会话，另一个的编辑器设置没了"）。
+  const { dir: baseDir } = makePluginDataDir(idx, 'code-server');
+
+  const a = await startRunning(idx, 'code-server');
+  const connLayout = (cfg().connections[0] || {}).layoutId;
+  assert.equal(a.ctl.layoutId, connLayout, '夹具前提：甲是持有者');
+  assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true, '夹具前提：那份数据在');
+
+  const b = await startRunning(idx, 'code-server');
+  const idB = b.ctl.layoutId;
+  assert.equal(idx._test.getTempLayouts().has(idB), true, '夹具前提：乙是临时实例');
+
+  // ★ 持有者结束。**乙一个字都不许变**：它手里攥着的那个组 id 就是它的分区、它的
+  //   数据目录、外面那个 origin —— 把"持有者"这个身份挪到一个正在跑的实例头上，
+  //   等于在运行时迁移一份被活进程持有的存储（做不到；硬做的症状是页面忽然空掉）。
+  const sidA = a.ctl.sessionId;
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(() => occupiedOf(idx, a.slot) === false, '甲真的结束', 20000);
+  // ★ **还要等服务端也真的释放它**：客户端那一侧进入终态是**立刻**的，而假后端
+  //   照真实守护进程的样子**延迟**才把它移出「占着位置」那一档（`_goodbye` 里那个
+  //   定时器，最多 2 秒）。不等的话，下面那条**新开的**会话会撞上配额，拿回一句
+  //   "已经有 N 个会话占着位置"，而失败信息看着像"多开坏了"。
+  await waitUntil(() => !idx._test.getBackend()._occupying()
+    .some((x) => x.session_id === sidA), '甲在服务端也真的释放了', 20000);
+  assert.equal(b.ctl.layoutId, idB, '★★ 乙**没有**接任 —— 它的实例键一个字都不该变');
+  assert.equal(idx._test.getTempLayouts().has(idB), true, '★ 乙仍然是临时的');
+  assert.equal(b.ctl.state, 'running', '★ 而且它还在跑');
+  assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true,
+    '★★ 持有者那份数据必须原样在 —— 回收只该回收**临时**那一份');
+
+  // ★ 而**下一个新开的**会话认领持有者那个组 —— 认领只在开局那一刻发生。
+  const c = await startRunning(idx, 'code-server');
+  assert.equal(c.ctl.layoutId, connLayout,
+    '★★ 新开的那一条才认领持有者（那个槽已经空了）');
+
+  await invoke('app:stop', { slot: b.slot });
+  await invoke('app:stop', { slot: c.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 临时实例结束 ⇒ 它的两份数据一起没，而持久那一份一个字节都不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const P = require('../src/main/plugin-data.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const { dir: baseDir } = makePluginDataDir(idx, 'code-server');
+  const a = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'code-server');
+  const idB = b.ctl.layoutId;
+  const partB = w.surfacePartition(b.slot);
+  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', idB));
+  assert.equal(fs.existsSync(tempDir), true, '夹具前提：临时那一份真的建出来了');
+
+  // ★ 结束**临时那一份**（持有者继续跑）。
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(() => !idx._test.getTempLayouts().has(idB), '临时实例被回收', 20000);
+
+  // ★★ 三样一起没：注册表那一格、磁盘上那份目录、浏览器存储那个分区。
+  //    次序是承重的（回收必须排在 `destroySurface` **之后**）—— 排在前面的话
+  //    `livePartitions()` 还看得见那块视图，分区那一半被静默跳过，而症状是
+  //    "每次回收都在盘上留一份垃圾"。
+  assert.equal(fs.existsSync(tempDir), false, '★ 临时那份数据目录要跟着会话一起走');
+  await waitUntil(() => calls.cleared.includes(partB),
+    `★ 临时那份浏览器存储也要清（清过的：${JSON.stringify(calls.cleared)}）`, 5000);
+
+  // ★ 反过来：**持久那一份一个字节都不许动**（这是这条用例的另一半，不是顺带）。
+  assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true,
+    '★★ 持有者那份数据必须原样在');
+  assert.equal(w.surfacePartition(a.slot) !== null, true, '★ 持有者那块视图也还在');
+  assert.equal(a.ctl.state, 'running', '★ 而且持有者还在跑');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 断开（= 客户端退出前走的那条路）也要把临时实例收干净', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'code-server');
+  const idB = b.ctl.layoutId;
+  const tempDir = path.join(idx._test.getPluginDataRoot(),
+    diskNameOf(idx, 'code-server', idB));
+  assert.equal(idx._test.getTempLayouts().has(idB), true, '夹具前提：乙是临时实例');
+
+  // ★★ 走的是 `stopAllSessions` —— `before-quit` 与关窗收尾的**同一条**路。
+  //    那条路紧接着就是 `app.exit(0)`：等不到事件循环再去跑 `_renderSession`，
+  //    所以回收在 `stopAllSessions` 里还有一次后备（同一个函数，第二次是 no-op）。
+  await invoke('app:disconnect');
+  await waitUntil(() => !idx._test.getTempLayouts().has(idB), '临时实例被清空', 20000);
+
+  assert.equal(idx._test.getTempLayouts().has(idB), false, '★ 退出前必须一条都不剩');
+  await waitUntil(() => !fs.existsSync(tempDir), '临时那份数据目录也没了', 5000);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 对账的 `held` 必须**两个根都收**（只收分区那一半是一个删活数据的口子）', () => {
+  // ★ 为什么这一条是**读源码**而不是跑一遍：对账在**开发者模式下一律不查磁盘**
+  //   （`auditPluginData()` 自己那段：沙箱那份配置里的布局组 id 与真实那一份对不上，
+  //   照它去认会把真实的数据整片看成孤儿）。而这些用例全都跑在假后端上 ——
+  //   所以 `app:pluginData` 在这里**永远是空名单**，拿它测不出任何东西。
+  //   行为那一半在 `plugin-data-audit.test.mjs`（`held` 护住整行、而没拿着照旧进），
+  //   这里守的是**接线**：两个根都要有人报，否则那一半的行为永远收不到名字。
+  //   ★ 变异「去掉 liveDataDirs」打红的就是这一条。
+  const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+  const m = /held:\s*\[([^\]]*)\]/.exec(src);
+  assert.ok(m, 'index.js 应当把 held 交给 auditPluginData');
+  assert.match(m[1], /livePartitions\(\)/,
+    '★ 浏览器存储分区由**窗口**持有 —— 不收它，前台那块页面脚下的存储就没人护');
+  assert.match(m[1], /liveDataDirs\(\)/,
+    '★★ 插件数据目录由**会话**持有 —— 不收它，一个没有界面的插件（以及**临时实例**）'
+    + '活着的时候那份数据就能被面板删掉');
+});
+
+test('★★ 重连：N 条会话各拿一个实例，不会只剩第一条', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'code-server');
+  const idB = b.ctl.layoutId;
+  assert.notEqual(a.ctl.layoutId, idB, '夹具前提：两条各有各的实例');
+
+  // 模拟"客户端整个进程没了再起来"。
+  await idx._test.reattach();
+
+  // ★★ 判据是**两条都在**，而不是"接回了一条"。
+  //    临时组只活在**上一个进程的内存**里 —— 不重新认领的话，两条都会算成
+  //    "连接那个组" ⇒ 落进同一个槽 ⇒ 只接回第一条，另一条在控制节点上继续跑、
+  //    心跳没了 ⇒ 300 秒 suspect、1800 秒 **scancel**（用户的作业被悄悄杀掉）。
+  await waitUntil(() => idx._test.getSessions().size === 2, '两条都接回来', 30000);
+  const ids = [...idx._test.getSessions().values()].map((r) => r.controller.layoutId);
+  assert.equal(new Set(ids).size, 2, `★ 两条必须落在两个实例键上：${JSON.stringify(ids)}`);
+  // ★ 而**接回来的**临时实例拿到的是**新**的 id（旧那个只活在死掉那个进程里）——
+  //   于是旧的 localStorage 变成孤儿。这是"临时"的应有之义，账本 S26 记着。
+  //   ★ 判据是"**新的那个**在表里、旧的**不在**"，而不是"表里恰好一条"：
+  //     `reattach()` 会**清空**那张表（真机上重启就是这个效果），所以这条用例
+  //     守的是"重新认领了"，不是某个绝对数字。
+  assert.equal(ids.includes(idB), false, '★ 旧的临时 id 已经不存在了');
+  assert.equal(idx._test.getTempLayouts().has(ids.find((x) => x !== a.ctl.layoutId)), true,
+    '接回来的那一条又重新认领了一个临时实例');
+
+  // ★ 收尾走**逐条 stop**，不走 `app:disconnect`：后者会 `backend.close()`，而假后端
+  //   的 `close()` 会 `_clearTimers()` —— 那些"已发 goodbye、还在释放中"的会话于是
+  //   永远停在 releasing，`_occupying()` 再也不会空。那是**夹具的**性质（真机上客户端
+  //   退出之后不需要服务端把状态走完），不是被测行为。★ "断开那条路也要收干净"由
+  //   另一条用例守着（那里等的是临时实例那张表，不是服务端的会话状态）。
+  const after = await invoke('app:states');
+  for (const x of after.sessions) await invoke('app:stop', { slot: x.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ prepare 失败的会话：不留记录，也不留临时实例', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const config = require('../src/main/config.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // 一个「能多开 + 带 prepare」的插件，而它的 prepare 永远失败。★ 它**不需要**
+  // 假站点认识它：prepare 跑在提交**之前**，这个插件到不了后端。
+  //
+  // ★★ 而它失败的理由**故意是 `ctx.dataDir()` 的结果**（把那个路径原样当 message）——
+  //    这一句话同时钉住两件事：
+  //      · 失败信息原样传给用户（下面断言它出现了）；
+  //      · **`prepare()` 看得到实例段**。`ctx.dataDir()` 从 `rec.controller.layoutId`
+  //        现算那一格，而 `prepare()` 从前跑在 controller **构造之前** ⇒ 这条会变成
+  //        `identityOf` 那个"没有给出实例"的抛（`app:start` 把它变成一句 error），
+  //        于是下面那条"路径的第三段是一个临时实例键"当场变红。
+  //        少了这句 `ctx.dataDir()`，把 controller 挪回去这个变异**打不红任何东西**
+  //        —— 那正是"一条看起来在守什么、其实什么也没守的用例"。
+  putSitePlugin({
+    id: mintId(), name: 'prep-fail',
+    over: {
+      contributes: {
+        layout: true, concurrent: true, surface: { kind: 'web', path: '/' },
+      },
+    },
+    clientSrc: 'module.exports = { prepare: (ctx) => ({ ok: false, message: ctx.dataDir() }) };',
+  });
+
+  // 先让持有者占住那个组 —— 于是 prep-fail 会拿到一个**临时**实例。
+  const a = await startRunning(idx, 'code-server');
+  const before = idx._test.getSessions().size;
+  // ★ 用**差集**而不是"表是空的"：这条用例要说的是"**这一次**什么都没留下"，
+  //   而"表里一条都没有"多断言了别人的家务事（上一条用例万一留下过什么，
+  //   这一条会红在一个与它无关的地方）。
+  const tempsBefore = new Set(idx._test.getTempLayouts().keys());
+
+  const r = await invoke('app:start', null, 'prep-fail');
+  assert.equal(r.ok, false, '★ prepare 失败必须拦住这次提交');
+
+  // ★★ 三样都不许留下：会话表里那一格（留着的话那个槽再也开不了新的，而提示会说
+  //    "某某正占着这个布局组" —— 而那个会话根本不存在）、临时组注册表那一格、
+  //    以及它在磁盘上那份起点目录（永远没人回收）。
+  assert.equal(idx._test.getSessions().size, before, '★ 不许留下一条假记录');
+  assert.deepEqual([...idx._test.getTempLayouts().keys()].filter((k) => !tempsBefore.has(k)),
+    [], '★ 这一次认领的临时实例要一起撤掉');
+  assert.equal(a.ctl.state, 'running', '★ 持有者一动不动');
+
+  // ★ 失败原因（= 那个数据目录的路径）原样说出来，而且它的**第三段就是这次的
+  //   实例键** —— 一个临时组（不在配置里、与持有者那个组不同）。这一条就是
+  //   "prepare 看得到实例"的可自动化证明。
+  const said = noticesOf().filter((n) => n.text.startsWith(idx._test.getPluginDataRoot()));
+  assert.equal(said.length, 1, `★ prepare 失败的原因要原样说出来：${JSON.stringify(noticesOf())}`);
+  const seg = said[0].text.split('@');
+  assert.equal(seg.length, 3, `★ dataDir 的目录名是三段身份：${said[0].text}`);
+  assert.match(seg[2], /^l[0-9a-f]{12}$/, '★ 第三段是一个布局组 id');
+  assert.notEqual(seg[2], a.ctl.layoutId, '★★ 而且是**临时**那个（不是持有者那个）');
+  assert.equal(config.findLayout(idx._test.getCfg(), seg[2]), null,
+    '★ 那个组不在配置里 —— 它只活在内存里');
 
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);

@@ -17,6 +17,10 @@
   --warn: #dcdcaa;
   --err: #f48771;
   --dev: #ff5cf4;
+  /* 「临时副本」的记号。★ **不是洋红** —— 那个颜色在这个仓库里等于「假后端」
+     （见文件头那条三重互锁），复用会把两件毫不相干的事说成一件：临时副本是
+     真实的会话、真实的作业，只是它那份数据不会被记录。 */
+  --temp: #e0a458;
   --bar-h: 30px;
 }
 
@@ -76,6 +80,11 @@ html, body {
 #session-tabs .tab.dead { opacity: .45; }
 #statusbar .dev-tag {
   color: var(--dev); font-weight: 700; letter-spacing: .3px;
+}
+/* 「临时副本」那条常驻提示。它**必须**在状态条里 —— 会话一跑起来，面板那一块
+   就被原生视图整块盖住，而那正是最需要看见这句话的时候（见 panel.html）。 */
+#statusbar .temp-tag {
+  color: var(--temp); font-weight: 700; letter-spacing: .3px;
 }
 
 /* ── 面板主体 ── */
@@ -344,5 +353,11 @@ dialog .row { justify-content: flex-end; }
   margin: 0 0 16px; padding: 10px 14px; border-radius: 4px;
   background: #3a0f36; border: 1px solid var(--dev); color: var(--dev);
   font-weight: 600;
+}
+/* 「临时副本」那条横幅。与 `.banner-dev` 同一个形状、**另一个颜色**（见 --temp
+   那条注释：洋红留给假后端）。 */
+.banner-temp {
+  margin: 0 0 16px; padding: 10px 14px; border-radius: 4px;
+  background: #3a2a10; border: 1px solid var(--temp); color: var(--temp);
 }
 .hidden { display: none !important; }

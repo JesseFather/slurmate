@@ -42,6 +42,12 @@
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
   <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
   <button id="sb-end" class="danger tiny hidden">结束会话</button>
+  <!-- ★ 「这一份是临时副本」。它**必须**待在状态条里 —— 与上面那两个按钮、
+       以及 #sb-dev 同一条理由：会话一跑起来，面板那一块就被原生视图整块盖住，
+       而那正是用户最需要看见这句话的时候（见 panel.js 的 renderSnapshot）。
+       ★ 颜色**另起一个**（--temp）：洋红在这个仓库里等于「假后端」，复用会把
+         两件毫不相干的事说成一件。 -->
+  <span id="sb-temp" class="temp-tag hidden">临时副本 · 改动不会被记录</span>
   <span id="sb-dev" class="dev-tag hidden">开发者模式 · 未连接集群</span>
 </div>
 
@@ -52,6 +58,14 @@
          不标注，正是这个项目一路在清的那类问题 —— 系统声称了不成立的事。 -->
     <div id="dev-banner" class="banner-dev hidden">
       开发者模式 · 未连接集群 —— 下面的会话是一个本地的模拟服务，不是真实的计算节点。
+    </div>
+
+    <!-- 「这一份是临时副本」。与状态条里那一条是**同一句话的两个位置**：
+         状态条那一份在会话跑起来之后仍然看得见，这一份在面板还露着的时候看得见。
+         两处都要，缺一个就会有一段时间里用户看不到它。 -->
+    <div id="temp-banner" class="banner-temp hidden">
+      这一份是临时副本 —— 同一个插件已经有一份在跑了，这一份是从它那儿拷来的起点。
+      这里改的东西不会被记录，关掉它就没了。
     </div>
 
     <h1>Slurmate</h1>

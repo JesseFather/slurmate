@@ -145,6 +145,21 @@ function frontSnap() {
 }
 
 /**
+ * 前台那一条**是不是临时实例**（第二份、数据是一份副本、会话结束就没了）。
+ *
+ * ★ 判据由主进程给（`index.js` 的 `sessionViews` 里的 `temporary`），界面这一层
+ *   **一个字都不推** —— 它不掌握"哪一份是持有者"这件事，猜的话就会在回收之后
+ *   还告诉用户"这里不会记录你的改动"（或者反过来，让用户以为改动留下了）。
+ *
+ * ★ 它不是一个瞬时通知，而是一条**常驻**状态：只要那一份还开着，这句话就成立。
+ *   所以问的是"前台那一条现在是什么"，而不是"刚才发生过什么"。
+ */
+function frontTemporary() {
+  const hit = SESS.sessions.find((x) => x.slot === SESS.front);
+  return Boolean(hit && hit.temporary);
+}
+
+/**
  * 状态条底下那一排标签。**一条会话一个**。
  *
  * ★ 只在**两条以上**时露出来：一条的时候它不提供任何选择，只占掉一行地方。
@@ -206,6 +221,16 @@ function renderSnapshot(s) {
   $('sb-reload').classList.toggle('hidden', !running);
   $('sb-end').classList.toggle('hidden', !running);
   $('sb-dev').classList.toggle('hidden', !(s && s.dev));
+  // ★★ 「这一份是临时副本」—— **两个地方都要露**，而状态条那一份是**必须的**，
+  //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
+  //    `setVisible(true)`，从状态条下沿铺到底），面板里那一条也跟着被盖住 ——
+  //    而那正是**最需要看见这句话的时候**（用户正要在里面干活）。`#sb-dev` 就是
+  //    为同一件事待在那 30px 里的先例（见 panel.html 的注释）。
+  //   ★ 诚实：这句话说的是"不会被记录"，而它只在**前台**那一条上成立 ——
+  //     切到持久那一条时它会跟着消失（这正是要的：两份的差别就在这一点上）。
+  const temp = frontTemporary();
+  $('sb-temp').classList.toggle('hidden', !temp);
+  $('temp-banner').classList.toggle('hidden', !temp);
   // 布局选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
   // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」布局，没有连接就没有对象。
   // ★ 多一个条件：**前台那条会话真的有布局组**（`s.layoutId`）。
@@ -1326,7 +1351,7 @@ async function dropPluginData(r) {
   if (!sure) return;
   const res = await window.slurmate.deletePluginData({ name: r.name });
   if (!res || !res.ok) {
-    // `in_use` / `stale` 都由主进程给一句能直接读的话（判定权在它那儿）。
+    // `stale` 由主进程给一句能直接读的话（判定权在它那儿）。
     return notice('error', (res && res.error) || '没能删掉。');
   }
   notice('info', `已删掉「${res.label || r.label}」。`);

@@ -363,8 +363,19 @@ test('★★ 布局组的端口**创建时定一次、此后只读**（顺移不
   // 一个组 = 一个本地端口 = 一个 origin = 一份编辑器布局。端口只在这个组**被创建
   // 时**定一次（`nextLayoutPort`），此后再没有任何东西改它。
   cfg.layouts = [{ id: gid(1), name: '布局 1', port: 18080 }];
-  assert.equal(config.layoutPort(config.loadConfig(dir), gid(1)), 18080,
+  assert.equal(config.findLayout(cfg, gid(1)).port, 18080, '端口是这个组的一个属性');
+  config.saveConfig(dir, cfg);
+  assert.equal(config.findLayout(config.loadConfig(dir), gid(1)).port, 18080,
     '存下来的端口读得回来');
+
+  // ★★ 这一条从前断言的是 `config.layoutPort(...)`，而那个函数**整个删掉了** ——
+  //    它整个就是一条回落（"组不存在 ⇒ 回落到基址"），而那条回落会给**临时实例**
+  //    算出持有者那个端口（见 `index.js` 的 `layoutPortOf`）。取端口现在只有那一条
+  //    路，而且它**没有回落**。
+  //    ★ 顺带记下：那条断言从前之所以能过，靠的**正是**那条回落 —— 它拿一个**刚
+  //    从磁盘读回来**的配置去问，而那一刻 `layouts` 还没落盘、里面是空的，于是
+  //    拿到的是回落值 18080，与它上面刚设的那个数字**恰好相同**。换句话说，
+  //    「存下来的端口读得回来」这句话当时**一个字都没有被验过**。
 
   // ★ 顺移**不**写回。把顺移后的值记下来，等于把一次**暂时**的冲突变成永久的
   //   origin 变更 —— 冲突消失之后 origin 也回不去，而那份布局本来是可以回来的

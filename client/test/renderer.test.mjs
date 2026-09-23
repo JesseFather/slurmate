@@ -412,7 +412,7 @@ test('★★ 多开这一份载荷：通道名与字段名，四处必须逐字�
   // 字段名：panel.js 读的每一个，都必须在 index.js 的 sessionViews() 里被写出来。
   const built = /function sessionViews\(\)[\s\S]*?\n\}/.exec(main);
   assert.ok(built, 'index.js 里应当有 sessionViews()');
-  for (const f of ['slot', 'service', 'live', 'snap']) {
+  for (const f of ['slot', 'service', 'live', 'temporary', 'snap']) {
     assert.match(built[0], new RegExp(`\\b${f}\\b`), `sessionViews 没给出 ${f}`);
     assert.match(js, new RegExp(`\\.${f}\\b`), `panel.js 没读 ${f}`);
   }
@@ -434,4 +434,39 @@ test('★ 布局选择器只在**前台那条会话真的有布局组**时露出
   // 那条路径（outsideLayout）两条分支都不走，而界面上一切正常。
   assert.match(js, /sb-layout-wrap[\s\S]{0,240}?layoutId/,
     'sb-layout-wrap 的露出条件里必须有 layoutId');
+});
+
+test('★★ 「临时副本」那条提示**两处都有**，而状态条那一份是必须的', () => {
+  // ★ 为什么状态条那一份不是锦上添花：会话一跑起来，窗口主体就被原生视图整块
+  //   盖住（只有前台那块 setVisible(true)，从状态条下沿铺到底），面板里那一份
+  //   跟着被盖住 —— 而那正是**最需要看见这句话的时候**（用户正要在里面干活）。
+  //   `#sb-dev` 就是为同一件事待在那 30px 里的先例。
+  //   这里测不了"看得见"（本机无图形环境），测的是**它在不在那个盒子里** ——
+  //   那正是当年 `#dev-banner` 交过学费的那一格。
+  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
+  assert.ok(bar, '找不到状态条');
+  assert.match(bar[0], /id="sb-temp"/,
+    '★ 状态条里必须有一条「临时副本」，否则会话跑起来之后它就被盖住了');
+  assert.match(html, /id="temp-banner"/, '面板里那一份也要在（面板还露着的时候靠它）');
+
+  // ★ 而两条都由**前台那一条的 `temporary`** 驱动 —— 不是"发生过什么"。
+  //   它是一条**常驻**状态：只要那一份还开着，这句话就成立。
+  assert.match(js, /function frontTemporary\(\)[\s\S]{0,700}?temporary/,
+    'frontTemporary 读的是主进程给的那一格');
+  assert.match(js, /const temp = frontTemporary\(\)/,
+    '前台那一条的 temporary 要先取出来（两处共用同一个值）');
+  for (const id of ['sb-temp', 'temp-banner']) {
+    const line = new RegExp(`\\$\\('${id}'\\)\\.classList\\.toggle\\([^)]*\\)`).exec(js);
+    assert.ok(line, `${id} 要有一个 classList.toggle`);
+    assert.match(line[0], /\btemp\b/,
+      `${id} 的露出条件必须来自 frontTemporary()：${line[0]}`);
+  }
+
+  // ★ **颜色另起一个**：洋红在这个仓库里等于「假后端」（三重互锁的第二重），
+  //   复用会把两件毫不相干的事说成一件 —— 临时副本是真实的会话、真实的作业。
+  assert.match(css, /--temp:\s*#/, '要有一个自己的颜色变量');
+  const tempTag = /\.temp-tag\s*\{[^}]*\}/.exec(css);
+  assert.ok(tempTag, '找不到 .temp-tag 那条样式');
+  assert.match(tempTag[0], /var\(--temp\)/, '它用的是自己那个颜色');
+  assert.equal(/--dev/.test(tempTag[0]), false, '★ 不许复用洋红（那是假后端的记号）');
 });

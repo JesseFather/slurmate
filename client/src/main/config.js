@@ -505,9 +505,18 @@ function usedLayoutPorts(cfg, exceptId) {
  *   那等于把一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也
  *   回不去，而原来那份布局本来是可以回来的。）
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
+ *
+ * @param {Set<number>} [extraPorts] **配置之外**还占着的端口。今天唯一的来源是
+ *   临时实例那些组（它们**不在** `cfg.layouts` 里，见 index.js 的 `tempLayouts`）。
+ *   ★ 不让这个函数自己去问临时组，是因为这一层**只认配置**（`usedLayoutPorts`
+ *   的语义就是"配置里的"）—— 把第二个来源焊进来，这一层就再也说不清它数的是
+ *   什么了。调用方把两半并好再传进来。
+ *   ★ 不传 = 只有配置说了算，那是这个函数从前的语义（`app:setConnectionLayout`
+ *   那条路就是）。
  */
-function nextLayoutPort(cfg) {
+function nextLayoutPort(cfg, extraPorts) {
   const used = usedLayoutPorts(cfg, null);
+  if (extraPorts) for (const p of extraPorts) used.add(p);
   let p = LAYOUT_PORT_BASE;
   while (p <= 65535 && used.has(p)) p += 1;
   return p;
@@ -523,11 +532,13 @@ function nextLayoutName(cfg) {
   return `布局 ${n}`;
 }
 
-/** 取一个组配置的端口。组不存在时回落基址 —— 调用方应先确认组存在。 */
-function layoutPort(cfg, id) {
-  const l = findLayout(cfg, id);
-  return l ? l.port : LAYOUT_PORT_BASE;
-}
+// ★ 这里从前有一个 `layoutPort(cfg, id)`：取一个组的端口，**组不存在时回落到
+//   `LAYOUT_PORT_BASE`**。它整个删掉了 —— 而理由不是"没人用"（那只是结果）：
+//   那条回落**正是**临时实例这条路上最危险的一格。临时组不在配置里，于是每一个
+//   临时实例都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局都推一条
+//   "端口被占、布局会重置"的**假警报**，而且同一份配置在不同启动顺序下会得到
+//   不同的 origin。取端口现在只有一条路：`index.js` 的 `layoutPortOf`（先查配置、
+//   再查临时组，都没有就抛）。**别在这里再长出一条带回落的取端口函数。**
 
 /**
  * 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。
@@ -961,7 +972,7 @@ module.exports = {
   // 布局组
   RELAY_PORT_BASE,
   newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
-  nextLayoutName, layoutPort, setConnectionLayout,
+  nextLayoutName, setConnectionLayout,
   pruneLayouts, layoutPlan,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
