@@ -189,6 +189,14 @@ class FakeBackend extends Backend {
      */
     this.maxActive = 1;
     this._seq = 0;
+    /**
+     * 这台电脑的客户端身份（见 backend.js 的接口注释）。假后端**不用它排席位**
+     * ——它没有第二个客户端——但它必须**收下**：一个不看这个字段的假后端，
+     * 会让"客户端身份根本没送到后端"这件事在开发者模式里完全看不出来。
+     */
+    this._client = (opts && opts.client) || null;
+    /** 被另一个客户端顶掉了没有。见 debugDisplace。 */
+    this._displaced = null;
 
     /**
      * 推送那一半的账。
@@ -386,6 +394,9 @@ class FakeBackend extends Backend {
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
   get connected() { return this._connected; }
 
+  /** 见 backend.js 的接口注释：被另一个客户端顶掉了没有。 */
+  get displaced() { return this._displaced; }
+
   // ── 生命周期 ────────────────────────────────────────────────────────────
   async connect(profile) {
     if (!this._server) {
@@ -393,6 +404,8 @@ class FakeBackend extends Backend {
       await this._server.listen();
     }
     this._connected = true;
+    // ★ 与 SshBackend.connect 同一条：「重新连接」是"被顶掉"唯一的出口。
+    this._displaced = null;
     this._startPushSweep();
     this._emitState(true, '假后端已就绪');
     return {
@@ -425,6 +438,15 @@ class FakeBackend extends Backend {
   // ── RPC ─────────────────────────────────────────────────────────────────
   async rpc(req) {
     const op = String((req && req.op) || '');
+    // ★★ 与真后端**逐字同一条规矩**：被顶掉之后一律拒绝，绝不"照常干活"。
+    //    少了它，开发者模式里"被顶掉"这条路会一路跑通、界面完全正常，
+    //    而那条路恰恰是这个功能唯一要传达的东西。
+    if (this._displaced) {
+      return { ok: false, code: null, data: null,
+               error: { kind: 'displaced',
+                        detail: `本机已被另一个客户端顶掉（${this._displaced.reason}），`
+                              + '这个动作没有发出去。点「连接」取回之后再做一次。' } };
+    }
     if (this.rpcLatencyMs > 0) await sleep(this.rpcLatencyMs);
 
     // 调试：模拟守护进程不可达。**注意这返回的是 ok:false 的 JSON**，
@@ -443,7 +465,16 @@ class FakeBackend extends Backend {
       case 'ping':
         return ok({
           pong: true,
-          version: this._daemonVersion === null ? hostVersion() : this._daemonVersion,
+          // ★★ 这里是 `pluginFiles.hostVersion()`，**不是裸的 `hostVersion()`**。
+          //    裸的那个名字在本文件里根本不存在 —— 于是这一支一被调用就抛
+          //    `ReferenceError`。它此前是**睡着的**：生产代码里唯一发 `ping` 的
+          //    是 SSH 后端（探针与握手），而假后端没有常驻通道，所以谁都没走到
+          //    这一行。v0.8 阶段 4 的用例第一次给它发了 `ping`，当场就炸。
+          //    ★ 而这个假后端**全部的价值**就是"它演的是同一件事" ——
+          //      一句只在它身上不成立的协议，比没有它更坏。
+          //    （同文件 423 行那份一直是对的，两处一对照就知道是笔误。）
+          version: this._daemonVersion === null
+            ? pluginFiles.hostVersion() : this._daemonVersion,
           time: nowSec(),
         });
       case 'whoami':     return this._whoami();
@@ -550,6 +581,30 @@ class FakeBackend extends Backend {
 
   // ── 调试面板用的控制 ────────────────────────────────────────────────────
   debugDaemonDown(ms = 20000) { this._daemonDownUntil = Date.now() + ms; }
+
+  /**
+   * 调试：模拟「另一台电脑上的客户端把你顶掉了」。
+   *
+   * ★ 这一条**在假站点上没有对等的真事件** —— 真守护进程只在真的发生顶替时发它
+   *   （见 slurmate-sessiond 的 `displace`）。它造的是**客户端收到它之后的样子**，
+   *   而那正是开发者模式存在的理由：真机上要看到这一幕得有两台电脑。
+   *
+   * ★★ 它**不是「断开连接」**：`_connected` 保持为真（SSH 那条链路好好的），
+   *   变的只有"本机还能不能干活"。把两者混起来的话，界面会走上
+   *   「正在重连……」那条路 —— 而这条路**永远不会重连**，那是设计。
+   */
+  debugDisplace(name = '另一台电脑') {
+    if (this._displaced) return this._displaced;
+    this._displaced = {
+      reason: '另一个客户端接管了',
+      by: { id: 'demo-other-machine', name },
+      at: nowSec(),
+    };
+    // 推送那一半立刻停：真守护进程在顶替的同时就把订阅摘了。
+    this._stopPushSweep();
+    this.emit('displaced', this._displaced);
+    return this._displaced;
+  }
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
   /** 模拟作业被回收（比如心跳断了 30 分钟后被 scancel）。 */
   debugReap() {
@@ -666,6 +721,9 @@ class FakeBackend extends Backend {
   debugReset() {
     this._daemonDownUntil = 0;
     this._tunnelDownUntil = 0;
+    // ★ 顶替也一起复位 —— 否则「复位」之后这个假站点仍然是不干活的，
+    //   而界面上没有任何东西说明为什么（`_displaced` 不显示在任何地方）。
+    this._displaced = null;
     this._extraSitePlugins.length = 0;
     this._siteDisabled.clear();
     this._siteNoJob.clear();

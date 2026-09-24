@@ -33,6 +33,21 @@
  *   on('state', fn)        → 连接状态变化 { connected, detail }
  *   on('notify', fn)       → 服务端**主动推**来的一份全量会话快照
  *                            `{ push:'sessions', seq:<单调>, at, sessions:[视图], stale? }`
+ *   displaced              `{reason, by, at} | null` —— 本机被**另一个客户端**顶掉了
+ *   on('displaced', fn)    → 刚刚被顶掉（只会响一次）。见下方那一段
+ *
+ * ★★ **`displaced` 与 `connected` 是两根轴，别合并。**
+ *    `connected === false` 是"连不上，等一会儿会重连"；`displaced` 是"另一个客户端
+ *    接管了，**在你手动点「连接」之前不会回来**"。两个后端都必须报它。
+ *
+ * ★★ **被顶掉之后 `rpc()` 必须拒绝，绝不退回 exec。** 退回去的后果是具体的：
+ *    这个客户端安静地继续干活、界面完全正常，而"你已经被另一台电脑接管了"
+ *    **一个字都不会出现** —— 一个只在协议层成立、在界面上看不见的状态。
+ *
+ * ★ **被顶掉 ≠ 会话被停。** 服务端只断开那条常驻连接，不碰任何会话；而客户端
+ *   这一侧必须同时保证**不给这些会话发 `goodbye`**（`goodbye` 会让 `phase_release`
+ *   删掉 ACL 并 scancel 作业，而用户以为自己只是换了个地方看）。见 session.js 的
+ *   `suspend`。这一半只能在客户端堵 —— 守护进程分辨不了那个 `goodbye` 是谁发的。
  *
  * ★★ **`notify` 的契约是"可以不发"，不是"必须发"。** 这不是容错，是这一版能成立
  *    的前提：SSH 后端的常驻通道会因为"登录节点上的 CLI 还是旧的"而起不来，
@@ -68,6 +83,12 @@ class Backend extends EventEmitter {
    */
   get connected() { throw new Error('未实现 connected'); }
 
+  /**
+   * 被另一个客户端顶掉了没有。同样**抛异常而不是返回 false**：少实现会静默变成
+   * "永远没被顶掉"，而那条路的表现正是"界面一切正常"。
+   */
+  get displaced() { throw new Error('未实现 displaced'); }
+
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }
   // eslint-disable-next-line no-unused-vars
@@ -88,8 +109,13 @@ class Backend extends EventEmitter {
  * @param {object} opts
  *   dev     {boolean}  **开发者模式**（用户在界面上打开的那个开关，见 index.js）。
  *                      它是进假后端的**唯一**一条路。
- *   ssh     {object}   SSH 后端的参数（私钥、主机密钥裁决）
+ *   ssh     {object}   SSH 后端的参数（私钥、主机密钥裁决、**客户端身份**）
  *   fake    {object}   假后端的可调参数
+ *
+ * ★ `ssh.client` / `fake.client` 是**这台电脑的客户端身份** `{id, name}`，
+ *   由 index.js 从数据目录里读出来（见 config.js 的 `loadClientId`）。
+ *   后端自己**不生成**它 —— 身份是"这台电脑"的属性，不是"这次连接"的属性，
+ *   而一个后端会被重连很多次。
  *
  * ★ **这个选择没有第三条路。** 从前它是「`--demo`，否则只要 SSH 后端没实现就
  *   落到假后端」—— 而那句兜底与它旁边那句注释（"绝不会在真实后端不可用时静默

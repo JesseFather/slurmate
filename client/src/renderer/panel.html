@@ -342,6 +342,9 @@
           <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
           <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
           <button class="ghost" data-debug="reap">模拟会话被回收</button>
+          <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
+               要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
+          <button class="ghost" data-debug="displaced">模拟被另一台电脑顶掉</button>
           <button class="ghost" data-debug="reset">复位</button>
         </div>
         <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、

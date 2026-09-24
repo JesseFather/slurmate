@@ -340,6 +340,44 @@ function saveDevSettings(dir, s) {
   return next;
 }
 
+// ── 这台电脑的客户端身份 ────────────────────────────────────────────────────
+//
+// ★ 与 `pinned-keys.json`、`dev-mode.json` 同一类：一个独立的小状态文件。
+//   它**必须**是独立的一份，理由和钉子那次一模一样 —— 旧版本读一遍 `config.json`
+//   再存一遍就会把不认识的东西抹掉，而"客户端身份没了"的后果是：这台电脑下次连
+//   上来算**新人**，于是把**另一台**正在用的电脑顶掉。用户什么都没做。
+//
+// ★ 它**不是**密钥、也不是凭据：它只是一个名字，用来回答"这两个连接是不是同一台
+//   电脑"。服务端拿它排席位（见 slurmate-sessiond 的 enforce_client_cap）。
+//   说出去也无所谓，但它是**稳定的**，所以不能每次启动重新生成。
+const CLIENT_ID_FILE = 'client-id.json';
+const CLIENT_ID_SCHEMA = 1;
+
+function clientIdPath(dir) { return path.join(dir, CLIENT_ID_FILE); }
+
+/**
+ * 取这台电脑的客户端 id。**没有就生成一个并落盘。**
+ *
+ * @returns {string} 形如 `m1a2b3c4d5e6`（`m` = machine）
+ *
+ * ★ 落盘失败也**照常返回**刚生成的那个：这一次连接是好的（席位排得对），
+ *   代价只是下次启动会变成"另一台电脑"。为一件"身份没记住"把整个连接拒掉，
+ *   是把一个小问题换成一个大问题 —— 而它正是那种用户完全无从理解的失败。
+ */
+function loadClientId(dir) {
+  const raw = readJson(clientIdPath(dir));
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)
+      && typeof raw.id === 'string' && raw.id) {
+    return raw.id;
+  }
+  const id = 'm' + crypto.randomBytes(8).toString('hex');
+  try {
+    writeAtomic(clientIdPath(dir),
+      JSON.stringify({ schema: CLIENT_ID_SCHEMA, id }, null, 2), 0o600);
+  } catch { /* 见上：留不住身份不等于连不上 */ }
+  return id;
+}
+
 // ── 底层：原子写 ────────────────────────────────────────────────────────────
 //
 // ★ 实现搬去了 `atomic-write.js`（框架里唯一的那一份 —— 这个文件与
@@ -982,6 +1020,8 @@ module.exports = {
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
   // 开发者模式的两个设置 —— 也单独一个文件，理由见那一段（**次序**）
   loadDevSettings, saveDevSettings,
+  // 这台电脑的客户端身份 —— 同样单独一个文件，理由见那一段
+  loadClientId,
   checkHostKey, rememberHostKey, forgetHostKey,
   setKey, getKey, deleteKey, hasKey,
   addPendingGoodbye, listPendingGoodbye, removePendingGoodbye,

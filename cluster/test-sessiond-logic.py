@@ -5426,6 +5426,8 @@ exit 0
     _cli_src = io.open(os.path.join(HERE, "slurmate"), encoding="utf-8").read()
     _be_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
                                    "backend-ssh.js"), encoding="utf-8").read()
+    _idx_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                    "index.js"), encoding="utf-8").read()
     _m_cli = re.search(r"(?m)^RPC_MAX_RESPONSE_BYTES\s*=\s*(.+)$", _cli_src)
     _m_be = re.search(r"const MAX_RESPONSE_BYTES\s*=\s*(.+?);", _be_src)
     check("★★★ 守护进程的 CONN_OUT_HARD 与 CLI 的 RPC_MAX_RESPONSE_BYTES"
@@ -5485,6 +5487,40 @@ exit 0
           and bool(re.search(r"typeof obj\.push === 'string'", _be_src))
           and bool(re.search(r"typeof obj\.seq === 'number'", _be_src)),
           "守护进程那份是 %s" % (_m_msg_key.group(1) if _m_msg_key else "没找到"))
+
+    # ★★★ 顶替通知：同一个字面量、同一个字段名，两边各写了一遍。
+    #
+    #   漂了的后果与上一条**不一样、而且更坏**：推快照漂了只是「退回轮询」
+    #   （一切照常，只是慢一点）；而顶替通知漂了是 —— 客户端认不出它 ⇒ 把这次
+    #   关闭读成**一次普通断线** ⇒ 自动重连 ⇒ 两台电脑互相顶，**没有终点**。
+    #   那正是这一版花力气修的那个失败形态，所以它值得一条跨文件用例。
+    _m_dis = re.search(r'"push":\s*"([a-z_]+)",\s*"seq":\s*conn\.seq', _msg_src)
+    _m_dis_cli = re.search(r"msg\.push === '([a-z_]+)'", _be_src)
+    _m_by = re.search(r'"by":\s*\{"id":\s*by\.client_id,\s*"name":\s*by\.client_name\}',
+                      _msg_src)
+    # ★★ 「同一个名字写在两个文件里」这一类，而且这一条**真的漏过一次**：
+    #    `index.js` 有两处读 `c.suspended`（收尾时跳过它、接手前 abandon 它），
+    #    而 `SessionController` 当时只有 `_suspended` 与快照里的 `suspended` ——
+    #    那两处读到的都是 `undefined` ⇒ **恒为假**，而没有一个字会报错。
+    #    症状是"用户点了「连接」，会话一条都接不回来"。
+    check("★★ index.js 读的 `c.suspended` 真的是 SessionController 的属性"
+          "（不是那个私有的 `_suspended`、也不是快照里那一个）",
+          bool(re.search(r"(?m)^\s*get suspended\(\)", _ses_src))
+          and bool(re.search(r"\bc\.suspended\b", _idx_src)),
+          "session.js 有 getter=%s / index.js 读了=%s"
+          % (bool(re.search(r"(?m)^\s*get suspended\(\)", _ses_src)),
+             bool(re.search(r"\bc\.suspended\b", _idx_src))))
+
+    check("★★★ 顶替通知的键名两边逐字相同，且客户端读的 `by.name` 就是守护进程"
+          "发的那个字段 —— 漂了不是「退回轮询」，是**两台电脑互相顶、没有终点**",
+          bool(_m_dis) and bool(_m_dis_cli) and bool(_m_by)
+          and _m_dis.group(1) == _m_dis_cli.group(1) == "displaced"
+          and bool(re.search(r"info\.by\s*&&\s*info\.by\.name", _idx_src)),
+          "守护进程=%s 客户端=%s by=%s index.js 读 by.name=%s"
+          % (_m_dis.group(1) if _m_dis else "?",
+             _m_dis_cli.group(1) if _m_dis_cli else "?",
+             bool(_m_by),
+             bool(re.search(r"info\.by\s*&&\s*info\.by\.name", _idx_src))))
 
     # ── 26.19b 推送里不含任何口令（靠一条**真会话文件**才验得出来）──────
     #
@@ -5613,6 +5649,84 @@ exit 0
             check("★★★ 端到端：而它在好几个 tick 里**一条推送都没收到** —— "
                   "老客户端不受常驻通道影响的保证是结构性的",
                   _extra == [], "它收到了 %d 条推送" % len(_extra))
+            # ── 27.8 ★★★ 端到端：真循环里的顶替 ─────────────────────────
+            #
+            # 前面 27.x 都是拿 Conn 手工驱动的。这一条走真 listener、真 accept、
+            # 真事件循环 —— 顶替要在这条路上也成立，才算数。
+            _s3 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _s3.settimeout(10.0)
+            _s3.connect(_e2e_path)
+            _x = _Client(_s3)
+            _x.send({"op": "ping", "rid": "e2e-A",
+                     "client": {"id": "e2e-A", "name": "甲机"}})
+            _t0 = time.time()
+            _xa = []
+            while not _xa and time.time() - _t0 < 8.0:
+                _xa = [m for m in _x.lines(0.3) if m.get("rid") == "e2e-A"]
+            check("★ 前提：甲机在真循环里认下了身份并拿到应答",
+                  len(_xa) == 1 and _xa[0].get("ok") is True, str(_xa)[:200])
+
+            def _ask_state(what):
+                _sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                _sk.settimeout(10.0)
+                _sk.connect(_e2e_path)
+                _cl = _Client(_sk)
+                _cl.send(what)
+                _t = time.time()
+                _got = []
+                while not _got and time.time() - _t < 8.0:
+                    _got = [m for m in _cl.lines(0.3) if "ok" in m]
+                _cl.close()
+                _rows = ((_got[0].get("data") or {}).get("sessions") or []) if _got else []
+                _row = next((r for r in _rows
+                             if r.get("session_id") == "s-e2e"), None)
+                return (_row or {}).get("state")
+
+            _before_state = _ask_state({"op": "list"})
+            check("★ 前提：顶替前那条会话问得到、而且是活的",
+                  _before_state in ("reserved", "submitted", "enrolled",
+                                    "suspect", "orphaned"),
+                  str(_before_state))
+
+            _s4 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _s4.settimeout(10.0)
+            _s4.connect(_e2e_path)
+            _y = _Client(_s4)
+            _y.send({"op": "ping", "rid": "e2e-B",
+                     "client": {"id": "e2e-B", "name": "乙机"}})
+            _t0 = time.time()
+            _ya = []
+            while not _ya and time.time() - _t0 < 8.0:
+                _ya = [m for m in _y.lines(0.3) if m.get("rid") == "e2e-B"]
+            check("★ 前提：乙机也拿到应答（后到的那个本身要能干活）",
+                  len(_ya) == 1 and _ya[0].get("ok") is True, str(_ya)[:200])
+
+            _t0 = time.time()
+            _xdis = []
+            while not _xdis and time.time() - _t0 < 8.0:
+                _xdis = [m for m in _x.lines(0.3) if m.get("push") == "displaced"]
+            check("★★★ 端到端（真循环 + 真 listener）：后到的把先到的顶掉，"
+                  "而先到的**读到了为什么、以及是谁**",
+                  len(_xdis) == 1
+                  and (_xdis[0].get("by") or {}).get("name") == "乙机"
+                  and _xdis[0].get("rid") is None,
+                  str(_xdis)[:250])
+            _t0 = time.time()
+            while not _x.eof and time.time() - _t0 < 5.0:
+                _x.lines(0.2)
+            check("★★ 而它随后**读到 EOF**（那条连接是真的被收掉了）",
+                  _x.eof, "eof=%s" % _x.eof)
+            _after_state = _ask_state({"op": "list"})
+            # ★★ 会话还在不在，要**从外面问** —— 那个 store 是在守护进程线程里
+            #    建的，跨线程摸它会抛（`check_same_thread`）。那条限制本身是对的，
+            #    不该为了测试拆掉它。于是：顶替**前后各问一次**，比对。
+            #    这比读库更硬 —— 它问的就是用户能问的那条路。
+            check("★★★ 端到端：顶替**一个字都没动那条会话** —— 顶替之后从**另一条"
+                  "连接**问，它还在、状态一模一样（顶掉断的是连接，不是会话）",
+                  _before_state is not None and _after_state == _before_state,
+                  "顶替前=%s 顶替后=%s" % (_before_state, _after_state))
+            _x.close(); _y.close()
+
             # ── 26.21 ★★★ 通过**真正的 `slurmate stream` 进程**走一遍 ──────
             #
             # 前面那些都是拿 Conn 直接驱动的。这一条把 CLI 当成用户会用的那个
@@ -5689,6 +5803,298 @@ exit 0
               not _th.is_alive(), "线程还活着")
     _fh.cancel_dump_traceback_later()
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  27. 多客户端：席位与顶替（v0.8 阶段 4）
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # ★★ 这一节守的是一句产品话：「同一时刻只让一台电脑管这些会话」。
+    #    而它**最要紧的一条不是"谁赢"**，是"顶掉**一个字都不动会话**" ——
+    #    用户以为自己只是换了个地方看，而作业还在集群上跑着。
+
+    # ── 27.0 认领的收敛（纯函数）───────────────────────────────────────
+    check("★ client 认领：非 dict / 没有 id / 空的 id ⇒ 认不出来"
+          "（而**不是**拒绝这条请求 —— 报不好身份不该让人连不上集群）",
+          mod.parse_client_claim(None) == (None, None)
+          and mod.parse_client_claim({}) == (None, None)
+          and mod.parse_client_claim({"id": ""}) == (None, None)
+          and mod.parse_client_claim("m1") == (None, None)
+          and mod.parse_client_claim({"id": 42}) == (None, None),
+          str(mod.parse_client_claim(None)))
+    _dirty = mod.parse_client_claim({"id": "a\x1bb\nc&d"})[0]
+    check("★ client 认领：不可打印的字符被抹掉"
+          "（它要落进一行审计日志 —— 一个 \\n 会把那行劈成两半）",
+          _dirty == "abc&d", repr(_dirty))
+    check("★ client 认领：id 截到 %d 位 —— 否则一个 10 MB 的 id 就是一次内存放大"
+          % mod.CLIENT_ID_MAX,
+          len(mod.parse_client_claim({"id": "x" * 9000})[0]) == mod.CLIENT_ID_MAX,
+          str(len(mod.parse_client_claim({"id": "x" * 9000})[0])))
+    check("★ client 认领：name 不填就回落成 id（判等**从不看 name** ——"
+          "一台机器改个名不该被当成换了一台电脑）",
+          mod.parse_client_claim({"id": "m1"}) == ("m1", "m1"),
+          str(mod.parse_client_claim({"id": "m1"})))
+    _cleanname = mod.parse_client_claim({"id": "m1", "name": "\x07" * 400 + "箱"})[1]
+    check("★ client 认领：name 同样被收敛（不可打印的抹掉），并有它自己的上限",
+          _cleanname == "箱"
+          and len(mod.parse_client_claim({"id": "m1", "name": "名" * 999})[1])
+          == mod.CLIENT_NAME_MAX,
+          repr(_cleanname))
+    check("★ 缺省配额是 1：站点不显式放开，就还是「一台电脑」",
+          mod.DEFAULT_MAX_CLIENTS_PER_USER == 1,
+          str(mod.DEFAULT_MAX_CLIENTS_PER_USER))
+    check("★★ 这一格**在配置白名单里**（不在的话，写进 conf 会让守护进程拒绝启动）",
+          "max_clients_per_user" in mod.GLOBAL_KEYS,
+          str(sorted(mod.GLOBAL_KEYS)))
+    check("★★ 而它与 max_sessions_per_user 是**两个旋钮**"
+          "（一个管「几个客户端在看」，一个管「几个作业」）",
+          "max_sessions_per_user" in mod.GLOBAL_KEYS
+          and mod.DEFAULT_MAX_CLIENTS_PER_USER == mod.DEFAULT_MAX_SESSIONS_PER_USER,
+          "")
+    # ★★ 0 必须被自检拦下，而理由与 max_sessions_per_user 那条**不一样**：
+    #    0 个会话是"谁都开不了会话"（够响亮），而 0 个客户端**不拦住任何人** ——
+    #    `enforce_client_cap` 的循环里"只剩它自己却仍然超编"那一支会 break，
+    #    于是配额 0 实际退化成配额 1，而配置里那个 0 从头到尾没有生效。
+    #    **一个不生效的配置值比一个错的值更坏。**
+    _c_ok = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                  "max_clients_per_user = 2\n",
+                                  "clients-ok.conf")).validate()
+    check("★ 写 2 是合法的（自检无错误）", _c_ok == [], str(_c_ok))
+    _c_zero = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                    "max_clients_per_user = 0\n",
+                                    "clients-zero.conf")).validate()
+    check("★★ 写 0 会被自检拦下（它会安静地退化成 1，而配置里那个 0 从未生效）",
+          any("max_clients_per_user" in e for e in _c_zero), str(_c_zero))
+
+    # ── 27.1 身份只在常驻通道上认（rid 那道门槛）────────────────────────
+    _d17 = _mkd()
+    _cR, _kR = _pair(_d17)
+    _cR.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d17)
+    check("★ 前提：常驻通道（带 rid）认下了身份",
+          _kR.client_id == "mA" and _kR.client_name == "甲机",
+          "%s/%s" % (_kR.client_id, _kR.client_name))
+    check("★ 而认身份不影响这条请求本身：它照样拿到应答",
+          len(_cR.lines()) == 1, "")
+    # ★★★ 这一条是本节最要紧的**结构性质**：exec 退路带的 client 必须被无视。
+    _cE, _kE = _pair(_d17)
+    _cE.send({"op": "ping", "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d17)
+    check("★★★ exec 退路（**不带 rid**）即使带着同一个 client，也**不认领、不顶人**"
+          " —— 少了这道门槛，客户端每降级一次 exec 就把自己那条常驻通道打掉一次，"
+          "而症状是「通道时好时坏」（两边各自的日志都自洽）",
+          _kE.client_id is None and not _kR.displaced and not _kR.closing,
+          "kE.client_id=%s kR.displaced=%s kR.closing=%s"
+          % (_kE.client_id, _kR.displaced, _kR.closing))
+    check("★ 一条连接只认一次身份（连接的身份是连接的属性，不许中途改）",
+          (_d17.handle_line(_kR, json.dumps(
+              {"op": "ping", "rid": 2, "client": {"id": "mZ"}}).encode()),
+           _kR.client_id)[1] == "mA",
+          _kR.client_id)
+    _cE.close(); _cR.close()
+
+    # ── 27.2 ★★★ 顶掉**一个字都不动会话**（本节最要紧的安全断言）────────
+    class _NftRec(object):
+        """记账用的 nft：规则真的存下来、删掉真的记下来。
+
+        ★ 用例要断言的是"**没有**发生释放" —— 而"没发生"是看不见的。
+          所以把删除动作记下来，让"没有发生"变成一条可断言的**空列表**。"""
+
+        def __init__(self):
+            self.rules = {}
+            self.deleted = []
+
+        def ensure(self):
+            return True
+
+        def session_rules(self):
+            return dict(self.rules)
+
+        def table_exists(self):
+            return True
+
+        def del_by_comment(self, c):
+            self.deleted.append(c)
+            self.rules.pop(c, None)
+
+        def comment_for(self, uid, job_id, port):
+            return "slurmate-sess-%d-%s-%s" % (uid, job_id, port)
+
+        def add_session_rule(self, node_ip, port, uid, job_id):
+            self.rules[self.comment_for(uid, job_id, port)] = (node_ip, port)
+            return True, ""
+
+    _d24 = _mkd()
+    _d24.nft = _NftRec()
+    _d24.store.insert(session_id="s-keep", uid=UID, user="alice",
+                      partition="A6000", account="acct", cpus=2, mem="8G",
+                      requested_time="1:00:00", state=mod.ST_ENROLLED,
+                      job_id="901", candidates="55001", created_at=mod.now_ts(),
+                      node_ip="192.0.2.11", service_port=55001)
+    _d24.tick()                       # 对账把 ACL 规则建起来
+    _rules0 = dict(_d24.nft.rules)
+    _state0 = _d24.store.get("s-keep")["state"]
+    check("★ 前提：这条会话确实占着一条 ACL 规则（否则下面那条是空断言）",
+          len(_rules0) == 1 and _state0 == mod.ST_ENROLLED,
+          "%s / %s" % (sorted(_rules0), _state0))
+
+    _cA, _kA = _pair(_d24)
+    _cA.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d24)
+    _cB, _kB = _pair(_d24)
+    _cB.send({"op": "ping", "rid": 1, "client": {"id": "mB", "name": "乙机"}})
+    _drive(_d24)
+
+    # ★ 按**类型**挑，不按条数：甲机这条流上先有它自己那条 ping 的应答、后有顶替
+    #   通知 —— 而"响应与通知在同一条流上不会混"正是 rid 那条规矩要保证的事。
+    _ra = [m for m in _cA.lines() if m.get("push")]
+    _rb = [m for m in _cB.lines() if m.get("rid") == 1]
+    check("★★ 后到者赢：先到的那条**收到一条 displaced 通知**，而不是被静默断开",
+          len(_ra) == 1 and _ra[0].get("push") == "displaced"
+          and _ra[0].get("rid") is None,
+          str(_ra)[:300])
+    check("★★ 而通知里**说得出是谁顶的**、以及为什么 —— "
+          "没有它，用户只能看到一次没有原因的断线，然后去重启客户端",
+          bool(_ra) and (_ra[0].get("by") or {}).get("name") == "乙机"
+          and bool(_ra[0].get("reason")),
+          str(_ra[:1])[:300])
+    check("★★ 后到的那条照常工作（应答带它自己的 rid）",
+          len(_rb) == 1 and _rb[0].get("ok") is True and _rb[0].get("rid") == 1,
+          str(_rb)[:200])
+    check("★★ 顶掉之后**不再给被顶的那条推快照**（订阅是摘掉的）",
+          _kA.subscribed is False and _kB.subscribed is True,
+          "A=%s B=%s" % (_kA.subscribed, _kB.subscribed))
+    check("★ 被顶掉的那条随后**被关掉**（席位是真的收回去了，不是挂着）",
+          _kA.closing and _kA not in _d24.conns(),
+          "closing=%s 还在花名册里=%s" % (_kA.closing, _kA in _d24.conns()))
+
+    _d24.tick()
+    _state1 = _d24.store.get("s-keep")["state"]
+    check("★★★ 顶掉之后那条会话**还在原来的状态**（不是 releasing / released）——"
+          "「下线」断的是那条常驻连接，不是会话",
+          _state1 == mod.ST_ENROLLED, _state1)
+    check("★★★ 而它的 ACL 规则**一条都没被删**（顶掉不是释放）",
+          dict(_d24.nft.rules) == _rules0 and _d24.nft.deleted == [],
+          "规则=%s 删过=%s" % (sorted(_d24.nft.rules), _d24.nft.deleted))
+
+    # ── 27.3 被顶掉的连接，inbuf 里那些行不再受理 ───────────────────────
+    _d19 = _mkd()
+    _cA2, _kA2 = _pair(_d19)
+    _cB2, _kB2 = _pair(_d19)
+    _d19.handle_line(_kA2, json.dumps(
+        {"op": "ping", "rid": 1, "client": {"id": "mA"}}).encode())
+    _d19.handle_line(_kB2, json.dumps(
+        {"op": "ping", "rid": 1, "client": {"id": "mB"}}).encode())
+    check("★ 前提：甲机确实被顶掉了", _kA2.displaced is True,
+          str(_kA2.displaced))
+    _kA2.inbuf = b'{"op": "ping", "rid": 77}\n'
+    _out0 = len(_kA2.out)
+    _d19.drain_pending()
+    check("★★ 被顶掉的连接，它 inbuf 里那些行**不再受理** —— "
+          "否则它在临死前还能提交一个作业，而那条连接已经不属于它了",
+          len(_kA2.out) == _out0, "%d → %d" % (_out0, len(_kA2.out)))
+    # ★★ 同一条规矩的**另一半**，而且它才是真正会发生的那一半：
+    #    事件循环在这一轮唤醒里取到的掩码是**顶替之前**的，所以被顶掉的那条连接
+    #    仍然可能带着 EVENT_READ 被 dispatch 一次。少了 read_ready 那个判断，
+    #    它就在临死前把请求真的处理掉、还回一条响应。
+    _cA2.send({"op": "ping", "rid": 88})
+    _d19.read_ready(_kA2)
+    check("★★★ read_ready 也不受理被顶掉的连接 —— 这一轮唤醒的掩码是顶替"
+          "**之前**取的，所以这条路上真的会走到一次",
+          len(_kA2.out) == _out0, "%d → %d" % (_out0, len(_kA2.out)))
+    _cA2.close(); _cB2.close()
+
+    # ── 27.4 「两条 SSH 连接」≠「两个客户端」───────────────────────────
+    _d20 = _mkd()
+    _c0, _k0 = _pair(_d20)
+    _c0.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d20)
+    _by_others = []
+    for _i in range(3):
+        _oc, _ok = _pair(_d20)
+        _oc.send({"op": "ping", "rid": 1})      # 不带 client：终端 / rpc / wait
+        _drive(_d20)
+        _by_others.append((_oc, _ok))
+    check("★★★ 认不出身份的连接**既不占席位、也永远不会被顶掉** —— "
+          "同一个用户在同一个站点上本来就会有很多条 SSH 连接",
+          all(not _k.displaced and not _k.closing for _, _k in _by_others)
+          and not _k0.displaced and not _k0.closing,
+          "被顶的=%d" % sum(1 for _, _k in _by_others if _k.displaced))
+    check("★ 而席位表里只有认了身份的那一个",
+          list(_d20.clients.get(UID, {})) == ["mA"], str(_d20.clients))
+    for _oc, _ok in _by_others:
+        _oc.close()
+    _c0.close()
+
+    # ── 27.5 席位按**客户端首次出现**排，不按连接先后 ────────────────────
+    #
+    # ★★ 差别在**重连**上，而重连是真会发生的（笔记本休眠、网络闪断）。
+    #    按连接先后排的话，一次重连会把**没出任何问题的那台**顶掉，
+    #    而对方连自己为什么掉了都不知道。
+    _d21 = _mkd(max_clients_per_user=2)
+
+    def _join(dd, cid, name="某机"):
+        c, k = _pair(dd)
+        c.send({"op": "ping", "rid": 1, "client": {"id": cid, "name": name}})
+        _drive(dd)
+        return c, k
+
+    _jA, _jKA = _join(_d21, "mA", "甲机")
+    _seat_a = _d21.clients[UID]["mA"]
+    _jB, _jKB = _join(_d21, "mB", "乙机")
+    check("★ 配额 2：两条**都活着**（不是配额 1 的那种行为）",
+          not _jKA.displaced and not _jKB.displaced,
+          "%s / %s" % (_jKA.displaced, _jKB.displaced))
+    # 甲机的连接闪断了一下，它重连回来（`_join` 返回 `(客户端, Conn)`）
+    _jA.close()
+    _d21.drop_conn(_jKA, "模拟闪断")
+    _jA2, _jKA2 = _join(_d21, "mA", "甲机")
+    check("★★ 重连**既不吃亏也不占便宜**：甲的席位时刻没被刷新",
+          _d21.clients[UID].get("mA") == _seat_a,
+          "%s vs %s" % (_d21.clients[UID].get("mA"), _seat_a))
+    # 第三台电脑来了 ⇒ 该顶掉**最早来的那一个**
+    _jC, _jKC = _join(_d21, "mC", "丙机")
+    check("★★★ 席位按**客户端首次出现**排：被顶掉的是最早来的甲机，"
+          "而不是一直好好连着的乙机（按连接先后排的话就会是乙机）",
+          bool(_jKA2.displaced) and not _jKB.displaced and not _jKC.displaced,
+          "甲=%s 乙=%s 丙=%s" % (_jKA2.displaced, _jKB.displaced, _jKC.displaced))
+    check("★★ 被顶掉的 client_id **同时从席位表里删掉**"
+          "（它下次连进来算新人 —— 这正是「被顶掉的禁止自动重连」必须成立的理由）",
+          "mA" not in _d21.clients[UID],
+          str(sorted(_d21.clients[UID])))
+    _jA3, _jKA3 = _join(_d21, "mA", "甲机")
+    check("★★ 于是甲机再连进来**会反过来顶掉现在这个** —— "
+          "少了客户端那条「不自动重连」，两台电脑就会互相顶、**没有终点**；"
+          "而这条用例把那个终点为什么需要，钉在协议这一侧",
+          not _jKA3.displaced and _jKB.displaced and not _jKC.displaced,
+          "甲=%s 乙=%s 丙=%s" % (_jKA3.displaced, _jKB.displaced, _jKC.displaced))
+    _jA3.close(); _jB.close(); _jC.close()
+
+    # ── 27.6 顶替**只在同一个 uid 之内**（安全）─────────────────────────
+    _d22 = _mkd()
+    _u1c, _u1k = _pair(_d22, uid=UID)
+    _u1c.send({"op": "ping", "rid": 1, "client": {"id": "mX", "name": "甲的机"}})
+    _drive(_d22)
+    _u2c, _u2k = _pair(_d22, uid=UID + 1)
+    _u2c.send({"op": "ping", "rid": 1, "client": {"id": "mX", "name": "乙的机"}})
+    _drive(_d22)
+    check("★★ 另一个 uid 用**同一个 client_id** 也顶不掉我（席位是按 uid 分的）",
+          not _u1k.displaced and not _u1k.closing and not _u2k.displaced,
+          "u1=%s u2=%s" % (_u1k.displaced, _u2k.displaced))
+    check("★ 两个 uid 各自的席位里各有一条",
+          list(_d22.clients.get(UID, {})) == ["mX"]
+          and list(_d22.clients.get(UID + 1, {})) == ["mX"],
+          str(_d22.clients))
+    _u1c.close(); _u2c.close()
+
+    # ── 27.7 席位表**有上界**（不会随连接数无界增长）────────────────────
+    _d23 = _mkd(max_clients_per_user=2)
+    for _i in range(12):
+        _sc, _sk = _join(_d23, "m%d" % _i, "第%d台" % _i)
+        _sc.close()
+    check("★★ 换过 12 台电脑之后，席位表里**最多只有配额那么多个**"
+          "（它是内存里的，没有回收就是一条只涨不落的曲线）",
+          len(_d23.clients.get(UID, {})) <= 2,
+          str(sorted(_d23.clients.get(UID, {}))))
+
     # ── 26.19 资源回收：连接与观察表都不许无界增长 ──────────────────────
     _d16 = _mkd()
     for _i in range(30):
@@ -5701,7 +6107,9 @@ exit 0
           "%d 条" % len(_d16.conns()))
 
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
-                _d13, _d14, _d15, _d16):
+                _d13, _d14, _d15, _d16,
+                # 第 27 节（多客户端）自己那一批
+                _d17, _d19, _d20, _d21, _d22, _d23, _d24):
         try:
             _dd.store.close()
         except Exception:                                    # noqa: BLE001

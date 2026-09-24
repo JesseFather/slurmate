@@ -199,7 +199,13 @@ function renderSnapshot(s) {
 
   let detail = '';
   if (s) {
-    if (st === 'running' || st === 'releasing') {
+    if (s.suspended) {
+      // ★ 这一支**排在所有分支之前**。被顶掉的时候这些会话仍然停在 `running`，
+      //   下面那一支会说「分区 · 节点 · 剩余时间」—— 那些话全是真的，但用户此刻
+      //   最需要知道的是**本机已经不管它了**，以及**作业还在跑**。
+      //   不这么排的话，界面看起来和一个正常运行的会话**一模一样**。
+      detail = '已被另一台电脑顶掉，本机不再管理这条会话（作业仍在运行）';
+    } else if (st === 'running' || st === 'releasing') {
       const bits = [];
       if (s.partition) bits.push(s.partition);
       if (s.node) bits.push(s.node);
@@ -380,6 +386,10 @@ function renderKv(s) {
     // 这一句由主进程译好（`jobstate.js`）—— 界面只印。从前印的是 Slurm 的原文
     // 大写枚举（`OUT_OF_MEMORY`），那是说给管理员听的话。
     ['作业状态', s.jobText || '—'],
+    // ★ 「被顶掉」是**这台电脑**的状态，不是这条会话的状态 —— 所以它自己一行，
+    //   而不是改「作业状态」那一行：作业**真的还在跑**，把它写进那一行就是
+    //   一句不成立的话，而用户会照着它去把作业停掉。
+    ...(s.suspended ? [['本机', '已下线 —— 另一台电脑接手了这条会话']] : []),
     ['上次心跳', fmtAge(s.hbAgeMs)],
     ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState] || s.tunnelState],
   ];

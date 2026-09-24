@@ -53,6 +53,7 @@
 const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard,
         dialog } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const config = require('./config.js');
@@ -95,6 +96,18 @@ let devSaved = { developerMode: false, pluginDir: null };
 
 let win = null;
 let backend = null;
+/**
+ * **这台电脑**的客户端身份 `{id, name}`。
+ *
+ * ★ `id` 是稳定的（落在数据目录的 `client-id.json` 里），`name` 只用于显示
+ *   （主机名）。服务端拿 `id` 排席位 —— 所以它**不能每次启动重新生成**：
+ *   那会让这台电脑每次都算"一台新电脑"，把另一台正在用的顶掉，而用户什么都没做。
+ *
+ * ★ `cfgDir` 一拿到就赋值（见 bootstrap）。开发者模式用的是沙盒目录，于是沙盒里
+ *   的身份**与真身不同** —— 这一条是有意的：开着开发者模式调试不该把你正在用的
+ *   那个客户端顶掉。
+ */
+let clientIdentity = null;
 /**
  * 活着的会话：**槽 → 记录**（槽见 `plugin-data.js` 的 `slotOf`）。
  *
@@ -243,9 +256,21 @@ function bootstrap() {
     ensureSitePoolDir();
     registry.reload();
 
+    // ★ 身份在**建后端之前**取好：它要作为构造参数交给后端（见 backend.js 的
+    //   接口注释 —— 身份是"这台电脑"的属性，不是"这次连接"的，而一个后端会被
+    //   重连很多次）。
+    clientIdentity = {
+      id: config.loadClientId(cfgDir),
+      // 主机名是给人看的：被顶掉的那台电脑要靠它说出"是谁顶了我"。
+      // 取不到不是错误 —— 那么多半是容器/异常环境，回一句"另一台电脑"仍然说得清。
+      name: os.hostname() || '另一台电脑',
+    };
+
     backend = createBackend({
       dev: dev.developerMode,
+      ssh: { client: clientIdentity },
       fake: {
+        client: clientIdentity,
         // 只影响假站点「登记」要等多久，好让你（和测试）能看到排队态，
         // 或者反过来跳过它。真实后端完全不读这个。
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEV_ENROLL_MS))
@@ -260,6 +285,11 @@ function bootstrap() {
         sitePluginDir: devPluginSourceDir,
       },
     });
+
+    // ★ **只订阅一次，订阅在进程这一层。** 被顶掉是**这台客户端**的状态（服务端
+    //   只保留一个席位），不是某一条会话的 —— 挂到 SessionController 上的话，
+    //   每个控制器都会各自处理一遍"我被顶掉了"，而它们谁也停不掉别人。
+    backend.on('displaced', handleDisplaced);
 
     win = new ShellWindow({
       onClose: handleWindowClose,
@@ -461,6 +491,37 @@ function regenerateKey(id) {
     fingerprint: info.fingerprint,
     persisted: info.persisted,
   };
+}
+
+/**
+ * 本机被**另一个客户端**顶掉了。
+ *
+ * ★★ 三件事，次序也是承重的：
+ *
+ *   ① **先停**：所有会话立刻停下心跳与对账。晚一步的话，那些定时器会继续对着
+ *      一个已经拒绝一切的后端发请求（`rpc()` 会拒），把界面刷成一片"重试中" ——
+ *      而那是**一个永远不会成功的重试**。
+ *   ② **再告诉用户为什么**。不说的话，用户看到的是"客户端莫名其妙不动了"，
+ *      下一步是重启、重连、或者以为集群挂了；而真相是"另一台电脑已经接管了"。
+ *      更要紧的是**要说清会话还在跑** —— 否则用户的下一个动作是去把作业停掉。
+ *   ③ **一个字都不发给服务端**（见 session.js 的 `suspend`）。这条不是次序问题，
+ *      是"绝对不能做"：那个 `goodbye` 会把用户的作业 scancel 掉。
+ *
+ * ★ 怎么回去：那条连接上的「连接」按钮（它本来就在，断开时显示的就是「连接」）。
+ *   重新连上之后 `tryReattach()` 会把会话一条条接回来并**接手心跳** ——
+ *   不需要为这件事新写一条路。
+ */
+function handleDisplaced(info) {
+  const by = (info && info.by && info.by.name) || '另一台电脑';
+  const reason = (info && info.reason) || '另一个客户端接管了';
+  const line = `本机已被「${by}」上的客户端顶掉（${reason}）。`
+             + '你的会话**仍然在集群上运行**，那边已经接手了它们 —— '
+             + '不要为了保证作业而去停它。想在这台电脑上接着管，'
+             + '就点那条连接上的「连接」。';
+  for (const rec of sessions.values()) {
+    if (rec.controller) rec.controller.suspend(line);
+  }
+  if (win) win.pushNotice('warn', line);
 }
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
@@ -2660,6 +2721,13 @@ async function stopAllSessions() {
   for (const rec of [...sessions.values()]) {
     const c = rec.controller;
     if (!c) continue;
+    // ★★ **被顶掉的会话一条都不停。** 它们不归这台电脑管了，而这里的每一次
+    //    `stop()` 都会给守护进程发 `goodbye` —— 那会把用户的作业 scancel 掉，
+    //    而用户以为自己只是「换个地方看」。
+    //    （`SessionController.stop()` 顶上还有同一道闸，这里再判一次是为了
+    //     **不产生一条误导的报错**：它现在回的是 `ok:false`，而 `shutdown()`
+    //     会把它当成失败推到界面上。）
+    if (c.suspended) continue;
     out.push({ slot: rec.slot, sessionId: c.sessionId, res: await c.stop() });
   }
   // ★★ 临时实例的**后备回收**。正常路径是 `_renderSession` 里那一处（会话走到终态
@@ -2734,6 +2802,27 @@ async function tryReattach() {
   // 在**唯一能测它的地方**完全不可达 —— 而「上次没关干净的会话」恰恰是假后端
   // 存在的理由（真机上要造出这个状态极难）。
   if (!backend.connected) return;
+
+  // ★★ **先摘掉被顶掉的那些记录，再接手。**
+  //
+  //   不摘的话接手会**直接失败**：那些记录仍然占着槽（`occupied()` 看的是
+  //   controller 的 state，而它们停在 RUNNING），于是 `reattachOne` 会报
+  //   「控制节点上还有一个会话与已经接上的占着同一个位置，没法同时接上」——
+  //   用户点了「连接」、看着它连上了，却一条会话都接不回来。
+  //
+  //   ★ 摘的动作是 `abandon()`（**一个字都不发给服务端**），而不是 `stop()`：
+  //     这些会话在服务端还活着，只是不归这台电脑管了。发 `goodbye` 就是 scancel。
+  //     `abandon` 与 `stop` 的差别在这里是**承重的**，不是风格问题。
+  //
+  //   ★ 修隧道也在这一步（`abandon` 拆隧道）。所以它必须在**确认连上了之后**做：
+  //     用户从被顶掉到点「连接」之间，可能一直开着那个页面在用 —— 提前拆掉等于
+  //     把"换个地方看"变成"这边的东西全没了"。
+  for (const [slot, rec] of [...sessions.entries()]) {
+    const c = rec.controller;
+    if (!c || !c.suspended) continue;
+    await c.abandon();
+    sessions.delete(slot);
+  }
 
   // 先把上次没发出去的 goodbye 补上
   for (const item of config.listPendingGoodbye(cfgDir)) {
@@ -3705,6 +3794,9 @@ function registerIpc() {
     if (backend.kind !== KIND.FAKE) return { ok: false, error: '仅开发者模式可用' };
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
+    // ★ 「被另一台电脑顶掉」在真集群上要两台电脑才看得到，而它的**界面表现**
+    //   恰恰是这个功能唯一要传达的东西。所以它必须能在开发者模式里立刻造出来。
+    else if (what === 'displaced') backend.debugDisplace(arg || '另一台电脑');
     else if (what === 'reap') backend.debugReap();
     else if (what === 'reset') backend.debugReset();
     // 让假站点"装了本客户端不认识的插件" / "把某个插件关掉" ——

@@ -192,6 +192,13 @@ class SessionController extends EventEmitter {
     this._statusTimer = null;
     this._lastTarget = null;
     this._stopped = false;
+    /**
+     * 被另一个客户端顶掉了（那时这里是原因那句话），没被顶就是 `null`。
+     *
+     * ★ 它是一个**终态**：置上之后本机不再心跳、不再对账、不再订阅推送，
+     *   而在用户手动点「连接」之前不会清掉。见 `suspend()`。
+     */
+    this._suspended = null;
 
     /**
      * 推送那一路的水位。
@@ -222,6 +229,22 @@ class SessionController extends EventEmitter {
       this._emit();
     });
   }
+
+  /**
+   * 被另一个客户端顶掉了没有（原因那句话），没被顶就是 `null`。
+   *
+   * ★★ 这个 getter **必须有**，而且它单独存在是有理由的：
+   *    `index.js` 有**两处**按它做判断 —— `stopAllSessions()` 里跳过它
+   *    （否则关一次窗就是一次 scancel）、`tryReattach()` 里先把它 `abandon()` 掉
+   *    （否则它仍然占着本机的槽，用户点了「连接」却**一条会话都接不回来**）。
+   *    少了这个 getter，那两处读到的都是 `undefined` ⇒ **恒为假**，
+   *    而**没有一个字会报错**。
+   *
+   * ★ 它是真的发生过一次的那种漏法：名字在两个文件里各写了一半
+   *   （`_suspended` 在这里、`.suspended` 在那里），中间没有任何东西保证它们一致。
+   *   所以 `cluster/test-sessiond-logic.py` 里有一条**跨文件校验**盯着这一对名字。
+   */
+  get suspended() { return this._suspended; }
 
   // ── 服务种类 ────────────────────────────────────────────────────────────
   /**
@@ -310,6 +333,11 @@ class SessionController extends EventEmitter {
       backendKind: this.backend.kind,
       error: this.error,
       warning: this.warning,
+      // ★ 「本机被另一个客户端顶掉了」。它是**这台客户端**的状态，不是这条会话的
+      //   —— 界面要说的话完全不同：session 的 `state` 仍然是 running（作业真的
+      //   还在跑），变的只是"本机不再管它了"。把它并进 `state` 的话，界面会
+      //   显示「已结束」，而那是**一句不成立的话**。
+      suspended: this._suspended,
       // ★ 「这一次会话不是在真集群上跑的」。界面据此挂那条横幅与状态条标记。
       //
       //   判据是**后端身份**，不是"用户开着那个开关"—— `fake` 只可能由开发者模式
@@ -880,6 +908,34 @@ class SessionController extends EventEmitter {
   }
 
   /**
+   * 被另一个客户端顶掉：**停下本机的一切，一个字都不发给服务端。**
+   *
+   * ★★ 这个方法存在的全部理由是**那一条不能发出去的 `goodbye`**。
+   *
+   *    收尾流程（`stop()`）会给守护进程发 `goodbye`，而 `goodbye` 会让
+   *    `phase_release` 删掉 ACL **并 scancel 作业**。被顶掉的客户端如果照常
+   *    收尾 —— 关窗、点断开、或者只是退出 —— 用户的作业就没了，而用户以为
+   *    自己只是**换了个地方看**。
+   *
+   *    守护进程那一侧堵不住：它按 `session_id` 记账，**分辨不了那个 `goodbye`
+   *    是顶替者发的还是被顶掉的那个发的**。所以只能在客户端这一半堵，
+   *    而堵法就是"根本不进收尾流程"（另见 `stop()` 顶部的那道闸）。
+   *
+   * ★ 与 `abandon()` 只差一处，而那一处是承重的：`abandon` 拆隧道，这里
+   *   **不拆**。用户此刻可能正开着那个页面看着东西 —— 拆掉隧道等于把"换个地方
+   *   看"变成"这边的东西全没了"，而作业还在集群上跑着。
+   */
+  suspend(reason) {
+    if (this._suspended) return;                 // 幂等：只记第一条原因
+    this._suspended = reason || '本机已被另一个客户端顶掉。';
+    this._stopHeartbeat();
+    this._stopStatusPoll();
+    this._watchBackend(false);
+    this.warning = this._suspended;
+    this._emit();
+  }
+
+  /**
    * 结束会话并释放资源。**只有一个语义：彻底终止。**
    *
    * ★ 这里曾经有一条 `farewell=false` 的分支（「只关窗口，作业继续跑」）。它被删掉了。
@@ -895,6 +951,15 @@ class SessionController extends EventEmitter {
    *   （见文件头第 1 条），客户端再提供一个「主动保活」的开关是多余且有害的。
    */
   async stop() {
+    // ★★ 被顶掉的会话**绝不进收尾流程** —— 这道闸放在这里（而不是只放在调用方
+    //    `stopAllSessions` 里），是为了让保证跟着**数据**走而不是跟着**调用点**走：
+    //   下一个"顺手加"的收尾入口不该有机会绕过它。
+    //   为什么不发：见 `suspend()` —— 那个 `goodbye` 会把用户的作业 scancel 掉，
+    //   而用户以为自己只是换了个地方看。
+    if (this._suspended) {
+      return { ok: false, state: 'suspended',
+               detail: this._suspended + '本机没有发送释放请求，作业仍在运行。' };
+    }
     this._stopped = true;
     this._stopHeartbeat();          // ★ 必须在 goodbye 之前停。
     this._stopStatusPoll();         //    否则残留心跳收到 code:3 会被误判成出错。

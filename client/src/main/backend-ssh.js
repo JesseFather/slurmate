@@ -232,6 +232,19 @@ function transportError(detail) {
   return { ok: false, code: null, data: null, error: { kind: 'transport', detail } };
 }
 
+/**
+ * 「本机已被另一个客户端顶掉」的信封。
+ *
+ * ★★ 它**必须与 `transportError` 分开**。两者都会让调用方停下来，但含义差得很远：
+ *   传输失败是**暂时**的（该重试，而且我们确实在重连），被顶掉是**终局**的
+ *   —— 在用户手动点「连接」之前，重试一万次也都是同一个结果。
+ *   合成一个的话，`classify` 会把"你被顶掉了"当成网络抖动，于是界面显示
+ *   「重试中……」，而它永远不会成功，也永远不会说清为什么。
+ */
+function displacedError(detail) {
+  return { ok: false, code: null, data: null, error: { kind: 'displaced', detail } };
+}
+
 /** ssh2 在「服务器拒绝了所有认证方式」时抛的原话。 */
 const AUTH_FAILED_RE = /all configured authentication methods failed/i;
 
@@ -287,11 +300,14 @@ class ResidentChannel {
    *   onNotify {function}  收到一条通知时调用（`{push, seq, at, sessions, stale?}`）
    *   onClose  {function}  这条通道死了（参数是原因字符串）。**无论是谁先动的手**
    *                        ——对端关了、写失败了、超长了，都走这一个出口。
+   *   client   {object}     这台电脑的客户端身份 `{id, name}`。**每一条请求都带上它**
+   *                         （见 request()）。
    */
   constructor(stream, opts = {}) {
     this._stream = stream;
     this._onNotify = opts.onNotify || (() => {});
     this._onClose = opts.onClose || (() => {});
+    this._client = opts.client || null;
     /** rid → {resolve, timer}。**只有**在途的请求在里面。 */
     this._pending = new Map();
     this._nextRid = 1;
@@ -382,7 +398,14 @@ class ResidentChannel {
       //   的判据，而 exec 那条路是**一次性的**：带上它，守护进程会把推送写进一条
       //   已经没人读的连接。见 rpc() 里那一句。
       try {
-        this._stream.write(JSON.stringify({ ...req, rid }) + '\n');
+        // ★★ `client` 与 `rid` **只在同一条路径上、同一个理由上发出去**：
+        //   守护进程认身份的判据就是"这条连接发过带 rid 的请求"（见
+        //   register_client）。exec 那条路上一个都不带 —— 带上 `rid` 会让守护
+        //   进程把推送写进一条已经没人读的连接；带上 `client` 会让**每一次 exec
+        //   退路都顶掉自己那条常驻通道**（同一个 client_id 又"连上来了"）。
+        this._stream.write(JSON.stringify(
+          this._client ? { ...req, rid, client: this._client } : { ...req, rid }
+        ) + '\n');
       } catch (e) {
         clearTimeout(timer);
         this._pending.delete(rid);
@@ -465,6 +488,18 @@ class SshBackend extends Backend {
     this.residentError = null;
     this._streamTimer = null;
     this._streamAttempt = 0;
+    /**
+     * 被另一个客户端顶掉了（`{reason, by, at}`），没被顶就是 `null`。
+     *
+     * ★★ 这是一个**终态**，不是一个降级：进入之后 `rpc()` 一律拒绝、常驻通道
+     *    也不再重开。**关键在于它不能让调用方悄悄退回 exec。**
+     *
+     *    少了这条，被顶掉的客户端会安静地走 exec 继续干活 —— 界面完全正常、
+     *    心跳照发、状态照查，而"你已经被另一台电脑接管了"这件事**一个字都不
+     *    会出现**。那正是这一版最该避免的失败形态：一个只在协议层成立、
+     *    在界面上看不见的状态。
+     */
+    this._displaced = null;
   }
 
   /**
@@ -475,6 +510,9 @@ class SshBackend extends Backend {
    *   的日志说出一句当时并不成立的话。
    */
   get resident() { return this._resident ? true : (this._conn ? false : null); }
+
+  /** 被另一个客户端顶掉了没有。`{reason, by, at}`，没被顶就是 `null`。 */
+  get displaced() { return this._displaced; }
 
   /**
    * 调用方（index.js 的启动接续）问的是「有没有连上」，不是「你的私有字段叫什么」。
@@ -494,6 +532,10 @@ class SshBackend extends Backend {
     if (!profile || !profile.user || !profile.host || !Number.isInteger(profile.port)) {
       return { ok: false, error: '连接信息不完整（需要用户名、主机、端口）' };
     }
+    // ★★ **这里是"被顶掉"唯一的出口，而它必须是显式的用户动作。**
+    //   自动重连（`_openOnce` 那条路）走不到这里 —— 这正是要的：被顶掉的客户端
+    //   不自动回来。用户点「连接」才会走到这一行。
+    this._displaced = null;
     // 每次连接都接受一次选项覆盖 —— 私钥可能刚被用户重新生成，
     // 主机密钥裁决依赖最新配置。构造时给的只是默认值。
     this._opts = { ...this._opts, ...opts };
@@ -762,7 +804,13 @@ class SshBackend extends Backend {
    * @returns {Promise<boolean>} 这条通道现在可用吗
    */
   _openStream() {
-    if (this._resident || !this._conn || this._closed) return Promise.resolve(false);
+    // ★ `_displaced` 与 `_closed` 同一档：被顶掉之后**再也不开**这条通道。
+    //   少这一句的话，顶替事件之后那次正常的"通道断了 ⇒ 重开"会立刻把连接
+    //   建回来，而守护进程那边会把它当成**同一个客户端又连上来了**，
+    //   于是让当前那个客户端让位 —— 两边互相顶，**没有终点**。
+    if (this._resident || !this._conn || this._closed || this._displaced) {
+      return Promise.resolve(false);
+    }
     const conn = this._conn;
     return new Promise((resolve) => {
       let settled = false;
@@ -795,9 +843,11 @@ class SshBackend extends Backend {
             return done(false);
           }
           const ch = new ResidentChannel(stream, {
-            // 通知原样往上抛 —— 这一层不认识"会话"，那是 session.js 的事。
-            onNotify: (msg) => this.emit('notify', msg),
+            // ★ 两种通知在这里分道，见 `_onResidentNotify`。
+            onNotify: (msg) => this._onResidentNotify(msg),
             onClose: (why, deliberate) => this._onResidentClose(ch, why, deliberate),
+            // 这台电脑是谁。**每一条请求都带上**（见 ResidentChannel.request）。
+            client: this._opts.client || null,
           });
           ch.request({ op: 'ping' }, STREAM_PROBE_MS).then((resp) => {
             // ★ 判据是"**对面**答了一个信封"，**不是** `ok:true`：限流
@@ -855,8 +905,47 @@ class SshBackend extends Backend {
     this._scheduleStreamReopen();
   }
 
+  /**
+   * 常驻通道上来了一个通知。**两种通知在这里分道。**
+   *
+   * ★ `sessions` 往上抛（那是 session.js 的事）；`displaced` 留在这里 ——
+   *   它是**这台客户端**的状态，不是某一条会话的状态。抛给 session.js 的话，
+   *   每个控制器都会各自处理一遍"我被顶掉了"，而它们谁也停不掉别人。
+   */
+  _onResidentNotify(msg) {
+    if (msg && msg.push === 'displaced') return this._onDisplaced(msg);
+    this.emit('notify', msg);
+  }
+
+  _onDisplaced(msg) {
+    if (this._displaced) return;                     // 只认第一条
+    const by = (msg && msg.by) || null;
+    const reason = (msg && msg.reason) || '另一个客户端接管了';
+    const who = (by && by.name) || '另一台电脑';
+    this._displaced = {
+      reason,
+      by,
+      at: (msg && typeof msg.at === 'number')
+        ? msg.at : Math.floor(Date.now() / 1000),
+      /**
+       * ★★ 那句人话**在这里只写一遍**。它有两个去处（拒绝 `rpc()` 时的原因、
+       *    诊断），而"被谁顶的"这个信息只在通知里 —— 少了它，用户看到的是
+       *    「被顶掉了」却不知道被谁顶的，下一步就是重启客户端，然后再被顶一次。
+       *    写两遍就会漂，漂的方向永远是其中一处少了 `who`。
+       */
+      detail: `本机已被「${who}」上的客户端顶掉（${reason}）。`
+            + '这个动作没有发出去 —— 点「连接」取回之后再做一次。',
+    };
+    // ★ 先拆通道、再抛事件：订阅方（index.js）收到事件会立刻停掉所有会话的
+    //   定时器，而那条通道对谁都没用了。让它活着的话，它会在关闭之前再送一条
+    //   推送进来 —— 而那时订阅方已经不在听了（那条推送就此消失，没有任何痕迹）。
+    this.residentError = '已被另一个客户端顶掉';
+    this._teardownStream();
+    this.emit('displaced', this._displaced);
+  }
+
   _scheduleStreamReopen() {
-    if (this._closed || !this._conn || this._streamTimer) return;
+    if (this._closed || !this._conn || this._streamTimer || this._displaced) return;
     // 连着失败够多次就不再试 —— 见 STREAM_ATTEMPT_MAX。此后这一条 SSH 连接上
     // 一直走 exec，而这正是"从前的行为"，不是坏掉的状态。
     if (this._streamAttempt >= STREAM_ATTEMPT_MAX) return;
@@ -887,6 +976,17 @@ class SshBackend extends Backend {
    * classify.js 统一分类 —— 调用方（session.js）从不 try/catch rpc 的返回值。
    */
   async rpc(req) {
+    // ★★ 被顶掉之后**一律拒绝，绝不退回 exec**。
+    //
+    //   退回去的后果是具体的：这个客户端会安静地继续干活（心跳照发、状态照查、
+    //   界面完全正常），而"你已经被另一台电脑接管了"**一个字都不会出现**。
+    //   那正是这一版最该避免的形态 —— 一个只在协议层成立、在界面上看不见的状态。
+    //
+    //   ★ 拒绝也是**对的语义**：手动点「停止会话」这类动作会让守护进程 scancel
+    //     用户的作业，而用户此刻以为自己在另一台电脑上操作。
+    if (this._displaced) {
+      return displacedError(this._displaced.detail);
+    }
     // ★★ 常驻通道在，就走它。**这是这一版唯一改变行为的一行。**
     //
     //   判据是"现在有没有一条活的常驻通道"，而它是一条**每时每刻都在变**的事实：
@@ -912,8 +1012,15 @@ class SshBackend extends Backend {
     //
     //   写成"复制一份再删掉"而不是"要求调用方别传"：调用方（session.js）
     //   只发业务字段，但**不变量不能住在调用方的自觉里**。
+    //
+    // ★★ `client` 与 `rid` 在这里是**同一条规矩**：它也一样只在常驻通道上发。
+    //    守护进程那边的门槛是 `conn.subscribed`（"这条连接发过带 rid 的请求"），
+    //    所以今天即使漏了这一行也不会出事 —— 但那正是"两层各守一半"，
+    //    而两层里任何一层被下一个人改掉，症状都是「客户端每降级一次 exec，
+    //    就把自己那条常驻通道顶掉一次」。
     const body = { ...req };
     delete body.rid;
+    delete body.client;
 
     return new Promise((resolve) => {
       conn.exec(RPC_CMD, (err, stream) => {
@@ -1008,6 +1115,7 @@ function isImplemented() {
 module.exports = {
   isImplemented, SshBackend, RPC_CMD, STREAM_CMD,
   hostKeyFingerprint, hostKeyAlgorithm,
+  displacedError,     // 同上：「被顶掉」与「传输失败」必须分得开
   pickEnvelope,       // 导出给测试：它是纯函数，规则又值得钉住
   parseEnvelopeLine,  // 同上：exec 与常驻通道共用同一条「什么算一条消息」的判据
   ResidentChannel,    // 同上：它只认字节与行，所以不连 SSH 也验得了

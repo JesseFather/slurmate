@@ -66,6 +66,20 @@ function classify(resp, ctx) {
     return mk(Action.TRANSPORT, null, 'transport',
       resp.error.detail || '与登录节点通信失败', ctx);
   }
+  // ★★ 「本机已被另一个客户端顶掉」**和传输失败不是一回事**，所以走不到上面那
+  //    一条，也绝不能落到下面那些会重试的分支里去。
+  //
+  //    传输失败是**暂时**的：我们在重连，下一轮可能就好了。
+  //    被顶掉是**终局**的：在用户手动点「连接」之前，重试一万次都是同一个结果。
+  //    把它当成网络抖动的话，界面会一直显示「重试中……」，而它永远不成功、
+  //    也永远不说清为什么。
+  //
+  //    `FATAL` 在这里取的是它名字里的第二层意思：**不可重试的失败**
+  //    （`shouldRetry` 对它恒为假），而消息原样用后端写好的那一句。
+  if (resp.ok === false && resp.error && resp.error.kind === 'displaced') {
+    return mk(Action.FATAL, null, 'displaced',
+      resp.error.detail || '本机已被另一个客户端顶掉', ctx);
+  }
 
   // ── 2. 成功 ──────────────────────────────────────────────────────────────
   if (resp.ok === true) {
