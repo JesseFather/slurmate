@@ -54,6 +54,31 @@ const HEARTBEAT_MS = 45000;
 const STATUS_MS = 60000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
+/**
+ * 推送看门狗：这么久没收到推送，就当那条路不通，退回按 `STATUS_MS` 轮询。
+ *
+ * ★★ 必须**严格大于**守护进程的 `SNAPSHOT_INTERVAL`（30 秒）—— 那一条保证
+ *    "哪怕什么都没变也每 30 秒推一条"。取小了会把**正常的空闲**读成"通道坏了"，
+ *    于是每一轮都去问一次，把常驻通道省下来的东西原样还回去。
+ *    反过来的方向也不致命，只是坏得久一点才发现。跨文件用例钉着这个大小关系。
+ *
+ * ★ 而"一条推送都没收到"（旧 CLI 上没有 `stream` 子命令、老守护进程、
+ *   ForceCommand 拦了）落到这里就是 `_lastPushAt` 恒为 0 ⇒ 永远不健康 ⇒
+ *   **对账逐字回到这一版之前**。这是这一版最重要的一条性质。
+ */
+const PUSH_STALE_MS = 75000;
+
+/**
+ * 推送那份视图**结构上**不会带的键。
+ *
+ * ★ 守护进程渲染推送用的是 `session_view(s, with_secret=False)` —— 与 `op_list`
+ *   逐字同构，而 list 从来不返回口令。所以这不是"服务端这一次没给"，是**它不会给**。
+ *   合并时缺哪个就保留旧值，是那条结构性事实的另一半。
+ *
+ * ★ 反过来的方向（用 undefined 覆盖）后果不是少显示一格：`auth_password` 没了
+ *   ⇒ 自动重登失败 ⇒ **页面打不开**，而界面上一切正常。
+ */
+const PUSH_ABSENT_KEYS = ['auth_password', 'ssh_host_key'];
 /** submit 超时。**必须比 `slurmate` 内部的 40s socket 超时长**，否则会在守护进程
  *  还在跑 sbatch 的时候放弃，然后——按大多数重试逻辑——重试，于是两个作业。 */
 const SUBMIT_TIMEOUT_MS = 45000;
@@ -77,6 +102,32 @@ const HB_STALE_SLACK_MS = 90000;
 const SERVER_LIVE_STATES = ['reserved', 'submitted', 'enrolled',
   'suspect', 'orphaned', 'releasing'];
 const SERVER_FINISHED_STATES = ['released', 'rejected', 'expired'];
+
+/**
+ * 把一份会话视图合进当前那一份。
+ *
+ * @param {object|null} prev 当前视图（可能还没有）
+ * @param {object}      next 新到的那一份
+ * @param {object}      opts `fromPush {boolean}` 这一份是不是**推送**来的
+ *
+ * ★ 两种来源各有一条**不同**的保留规则，而它们不是同一条规矩的两份实现：
+ *   - **推送**：缺 `auth_password` / `ssh_host_key` 是结构性的（见 `PUSH_ABSENT_KEYS`）。
+ *   - **status**：口令可能因为一次 `load_session_file` 失败而**暂时**读不出来
+ *     （NFS 抖动），那不能当成"口令没了"。这一条从前就在这里，一个字没改。
+ *
+ * ★ 而**换了会话就一律不保留**：拿上一个作业的口令去打一个新作业是另一回事，
+ *   而它的症状（认证失败）会指向错误的地方。
+ */
+function mergeView(prev, next, { fromPush }) {
+  const same = Boolean(prev && next && prev.session_id === next.session_id);
+  const merged = { ...next };
+  if (same) {
+    for (const k of (fromPush ? PUSH_ABSENT_KEYS : ['auth_password'])) {
+      if (merged[k] === undefined && prev[k] !== undefined) merged[k] = prev[k];
+    }
+  }
+  return merged;
+}
 
 class SessionController extends EventEmitter {
   /**
@@ -102,7 +153,7 @@ class SessionController extends EventEmitter {
    *   （写进用户那份 ssh 配置的 `Port` 行 —— 那边必须反映当前真值），走 onRelayPort。
    */
   constructor({ backend, layoutId, onRelayPort, getExcludedPorts,
-                heartbeatMs, statusMs, queuedPollMs,
+                heartbeatMs, statusMs, queuedPollMs, pushStaleMs,
                 requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
@@ -112,6 +163,11 @@ class SessionController extends EventEmitter {
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
     this.statusMs = statusMs || STATUS_MS;
     this.queuedPollMs = queuedPollMs || QUEUED_POLL_MS;
+    /**
+     * 推送看门狗的长度。**可注入**，与上面三个节奏同一个理由：用例要把它压到
+     * 几百毫秒才验得了"通道坏了会退回轮询"——而真值见 `PUSH_STALE_MS`。
+     */
+    this.pushStaleMs = pushStaleMs || PUSH_STALE_MS;
 
     this.state = State.IDLE;
     this.sessionId = null;
@@ -136,6 +192,20 @@ class SessionController extends EventEmitter {
     this._statusTimer = null;
     this._lastTarget = null;
     this._stopped = false;
+
+    /**
+     * 推送那一路的水位。
+     *
+     * ★ `_lastPushAt` 恒为 0 就是"这个后端从不推送"——而那不是异常状态，
+     *   是**这一版必须支持的常态**（旧 CLI、老守护进程、通道断了）。
+     *   见 `_pushHealthy()`。
+     */
+    this._lastPushAt = 0;
+    this._pushSeq = 0;
+    this._statusBusy = false;
+    this._watching = false;
+    /** 后端推来的会话快照。绑定一次，订阅/退订用它 —— 每次现 bind 会让退订漏掉。 */
+    this._onNotify = (msg) => this._handlePush(msg);
 
     this.tunnel.on('state', (s) => {
       this._emit();
@@ -259,6 +329,105 @@ class SessionController extends EventEmitter {
 
   _emit() { this.emit('change', this.snapshot()); }
 
+  // ── 推送 ────────────────────────────────────────────────────────────────
+  /**
+   * 订阅/退订后端的推送。
+   *
+   * ★★ **必须在拆的时候退订。** 一个后端服务着**所有**会话（见 index.js：整个
+   *    进程一个 `backend`），而控制器是**会被换掉的**（`rec.controller = new ...`）。
+   *    不退订的话，每换一次就多一个监听器，而它们全都还在写一个已经没人看的
+   *    `this.session` —— 症状是内存慢慢涨，指不回任何一行。
+   *
+   * ★ 幂等：`start()` 之后可能再走一次 `_bringUpTunnel()`，重复订阅会让同一条
+   *   推送被处理两次（于是 `_emit()` 也两次）。
+   */
+  _watchBackend(on) {
+    if (typeof this.backend.on !== 'function') return;
+    if (on && !this._watching) {
+      this.backend.on('notify', this._onNotify);
+      this._watching = true;
+    } else if (!on && this._watching) {
+      // `removeListener` 而不是 `off`：`off` 是 Node 10 才有的别名，
+      // 而这里不该赌运行时的版本。
+      this.backend.removeListener('notify', this._onNotify);
+      this._watching = false;
+    }
+  }
+
+  /**
+   * 收到一条推送。
+   *
+   * ★★ 它只做两件事：**刷新视图**，以及**在实质变化时去要一份权威视图**。
+   *    别的判定（终态、releasing、隧道重建、心跳交叉校验）一律留在
+   *    `_statusOnce()` 里 —— 在这里重写一遍就是同一个状态机的第二份实现，
+   *    而两份会漂，漂的方向是"某一条路忘了收隧道"这种静默的活锁。
+   */
+  _handlePush(msg) {
+    if (this._stopped || !this.sessionId) return;
+    // 排队那一段由 `_waitForEnroll()` 的轮询负责 —— 它自己有一组很细的错误分支
+    // （会话不存在 / 已结束 / 配额 / 传输失败各有各的下场）。这里插一脚，两条路
+    // 会同时改同一个状态。
+    if (this.state !== State.RUNNING) return;
+
+    this._lastPushAt = Date.now();
+    if (typeof msg.seq === 'number') this._pushSeq = msg.seq;
+
+    // ★ "我落后了几帧"由**守护进程**报（`stale`），不在这里按 seq 缺口自己推。
+    //   那是同一个判据的第二份实现，而它的权威位置在 `enqueue_push`。
+    if (msg.stale && msg.stale.dropped) {
+      this.warning = `错过了 ${msg.stale.dropped} 条状态更新（控制节点侧发得太快），`
+                   + '已直接采用最新的一份。';
+    }
+
+    const s = (msg.sessions || []).find((x) => x && x.session_id === this.sessionId);
+    // ★★ **找不到不等于会话没了。**
+    //   快照和 `list` 一样**截断到最近 50 条**，而那是**同一个 uid** 的全部会话 ——
+    //   一个多开的用户完全可能排到 50 名之外。把它读成"会话没了"的后果是客户端
+    //   自己拆掉隧道、界面上写"会话已不存在"，**而作业还在跑**。
+    //   真没了的话 `_statusOnce()` 会给权威答案（它走 `status`，那一条不截断）。
+    if (!s) return;
+
+    const prev = this.session || {};
+    // 这两个字段变了就必须去要一份**权威**视图：
+    //   `state` —— 越过 ACL 边界意味着口令可能刚出现（排队 → 已登记）；
+    //   `tunnel_target` —— 作业换了节点/端口，隧道要重建，而重建要用带口令的那一份。
+    const escalate = s.state !== prev.state || s.tunnel_target !== prev.tunnel_target;
+    this.session = mergeView(prev, s, { fromPush: true });
+    this._checkHeartbeatLanded();
+    if (escalate) { this._statusOnce(); return; }
+    this._emit();
+  }
+
+  /**
+   * 推送还在喂吗。
+   *
+   * ★ 反面就是"退回这一版之前的行为"，而那是**设计的一部分**，不是容错：
+   *   一条推送都不来 ⇒ `_lastPushAt` 恒为 0 ⇒ 这里永远为假 ⇒ `STATUS_MS` 轮询
+   *   照常跑。旧 CLI、老守护进程、SSH 常驻通道起不来，走的都是这一条。
+   */
+  _pushHealthy() {
+    return this._lastPushAt > 0 && (Date.now() - this._lastPushAt) < this.pushStaleMs;
+  }
+
+  /**
+   * 交叉校验：守护进程记的 `last_hb_at` 应该跟得上我们自己的心跳。
+   * 落后太多说明心跳根本没落地（比如守护进程在写 DB 前崩了）——
+   * 这条把一个纯静默的失败变成可见的告警。
+   *
+   * ★ 从 `_statusOnce()` 里抽出来，是因为**推送那份视图也带这个字段** ——
+   *   把它留在一个只有轮询才走得到的地方，等于"推送健康时这条校验静默失效"，
+   *   而它守的恰恰是最危险的那件事（作业会因为心跳不落地被自动 scancel）。
+   */
+  _checkHeartbeatLanded() {
+    const s = this.session || {};
+    if (!this._heartbeatAt || typeof s.last_hb_at !== 'number') return;
+    const daemonAge = Date.now() - s.last_hb_at * 1000;
+    if (daemonAge > HB_STALE_SLACK_MS) {
+      this.warning = `控制节点记录的心跳已过期 ${Math.round(daemonAge / 1000)} 秒 —— `
+                   + '心跳可能没有真正送达，会话可能被判定为断开。';
+    }
+  }
+
   _setState(st, extra = {}) {
     this.state = st;
     Object.assign(this, extra);
@@ -285,6 +454,10 @@ class SessionController extends EventEmitter {
     this._stopped = false;
     this.error = null;
     this.warning = null;
+    // 上一个会话的推送水位不能带进这一个：留着的话，一条新会话可能在**还没有
+    // 收到过任何推送**的时候就被判成"推送健康"，于是它的第一次对账要等满 60 秒。
+    this._lastPushAt = 0;
+    this._pushSeq = 0;
     this._requestedKind = opts.serviceKind || null;
     this._needsPubkey = Boolean(opts.needsPubkey);
     this._setState(State.SUBMITTING);
@@ -390,7 +563,12 @@ class SessionController extends EventEmitter {
             this._setState(State.ERROR, { error: '会话在控制节点上已不存在。' });
             return resolve(false);
           }
-          this.session = s;
+          // ★ 走**同一个**合并入口，不直接赋值 —— 理由与下面那条注释同源：
+          //   "一份会话视图怎么合进 `this.session`"这条规矩只该有一处实现。
+          //   这一条轮询每 3 秒一次，而口令要等状态越过 ACL 边界才出现；
+          //   直接赋值的话，一次读文件失败（NFS 抖动）就会把它抹掉，
+          //   此后没有任何一条路会把它拿回来（登记完成之后轮询就停了）。
+          this.session = mergeView(this.session, s, { fromPush: false });
           if (s.tunnel_target) {
             this._setState(State.RUNNING);
             return resolve(true);
@@ -475,6 +653,10 @@ class SessionController extends EventEmitter {
     this._setState(State.RUNNING);
     this._startHeartbeat();
     this._startStatusPoll();
+    // ★ 订阅排在最后：`_handlePush` 只在 RUNNING 态做事，而上面那一行才把状态
+    //   置成 RUNNING。反过来（先订阅后置态）会让排队期到达的推送白白丢掉一条，
+    //   虽然无害，但"什么时候开始收推送"就成了一个要靠时序去推的问题。
+    this._watchBackend(true);
     return this.snapshot();
   }
 
@@ -563,23 +745,49 @@ class SessionController extends EventEmitter {
     if (this._hbTimer) { clearInterval(this._hbTimer); this._hbTimer = null; }
   }
 
-  // ── 状态轮询 ────────────────────────────────────────────────────────────
+  // ── 状态对账 ────────────────────────────────────────────────────────────
+  /**
+   * 那个定时器。
+   *
+   * ★★ 它是**对账的钟**，不是对账本身 —— 推送健康的时候它什么都不做，
+   *    而在推送不来的时候（旧 CLI / 老守护进程 / 通道断了）它每一轮都照问不误，
+   *    与这一版之前逐字相同。
+   */
   _startStatusPoll() {
     if (this._statusTimer) return;
-    const tick = async () => {
+    const tick = () => {
       if (this._stopped || !this.sessionId) return;
+      if (this._pushHealthy()) return;
+      this._statusOnce();
+    };
+    this._statusTimer = setInterval(tick, this.statusMs);
+    this._statusTimer.unref?.();
+  }
+
+  /**
+   * 问一次 `status` 并把结果落到状态机上。
+   *
+   * ★ 由**两处**触发：那个定时器（推送不来时），以及一条**实质变化**的推送
+   *   （见 `_handlePush`）。两条路进的是同一个函数，判定只有这一份。
+   */
+  async _statusOnce() {
+    if (this._stopped || !this.sessionId) return;
+    // ★ 同一时刻只许有一次。两条同时在飞的 status 各写一遍 `this.session`，
+    //   而它们回来的**顺序没有保证** —— 后回来的那条可能是更旧的一份。
+    //   （定时器那条本来就串行；这一条是为推送触发的那条加的。）
+    if (this._statusBusy) return;
+    this._statusBusy = true;
+    try {
       const resp = await this.backend.rpc({ op: 'status', session_id: this.sessionId });
       const c = classify(resp, { op: 'status' });
 
       if (c.action === Action.OK) {
         const s = resp.data.session;
         if (s) {
-          // 口令只在 ACL_STATES 才返回。**不能**用新响应里的 undefined 覆盖已有值 ——
-          // 否则一次 NFS 抖动之后，自动重登就会因为没口令而失败。
-          if (typeof s.auth_password !== 'string' && this.session && this.session.auth_password) {
-            s.auth_password = this.session.auth_password;
-          }
-          this.session = s;
+          // ★ 合并的方向：**新的一份说了算，除了它没说的那些键**。
+          //   口令只在 ACL_STATES 才返回，而一次 `load_session_file` 失败（NFS 抖动）
+          //   也会让它缺席 —— 那不能当成"口令没了"。规则只有一份，见 mergeView()。
+          this.session = mergeView(this.session, s, { fromPush: false });
 
           // tunnel_target 变了（作业重启换了节点/端口）→ 重建隧道。
           // 不做这件事的表现是**页面卡住、没有任何报错**。
@@ -628,16 +836,7 @@ class SessionController extends EventEmitter {
             return;
           }
 
-          // 交叉校验：守护进程记的 last_hb_at 应该跟得上我们自己的心跳。
-          // 落后太多说明心跳根本没落地（比如守护进程在写 DB 前崩了）——
-          // 这条断言把一个纯静默的失败变成可见的告警。
-          if (this._heartbeatAt && typeof s.last_hb_at === 'number') {
-            const daemonAge = Date.now() - s.last_hb_at * 1000;
-            if (daemonAge > HB_STALE_SLACK_MS) {
-              this.warning = `控制节点记录的心跳已过期 ${Math.round(daemonAge / 1000)} 秒 —— `
-                           + `心跳可能没有真正送达，会话可能被判定为断开。`;
-            }
-          }
+          this._checkHeartbeatLanded();
         }
       } else if (c.action === Action.SESSION_GONE) {
         this._stopHeartbeat();
@@ -649,9 +848,11 @@ class SessionController extends EventEmitter {
         this.warning = c.message;
       }
       this._emit();
-    };
-    this._statusTimer = setInterval(tick, this.statusMs);
-    this._statusTimer.unref?.();
+    } finally {
+      // ★ 放在 `finally` 里：上面有好几条 `return`（终态、releasing、会话没了），
+      //   漏掉任何一条的后果都是**对账从此彻底停摆** —— 而界面上一切正常。
+      this._statusBusy = false;
+    }
   }
 
   _stopStatusPoll() {
@@ -674,6 +875,7 @@ class SessionController extends EventEmitter {
     this._stopped = true;
     this._stopHeartbeat();
     this._stopStatusPoll();
+    this._watchBackend(false);
     await this.tunnel.stop();
   }
 
@@ -696,6 +898,7 @@ class SessionController extends EventEmitter {
     this._stopped = true;
     this._stopHeartbeat();          // ★ 必须在 goodbye 之前停。
     this._stopStatusPoll();         //    否则残留心跳收到 code:3 会被误判成出错。
+    this._watchBackend(false);      // ★ 同上：释放期的推送会写一个没人再看的状态。
 
     await this.tunnel.stop();
 
@@ -753,4 +956,4 @@ function withTimeout(promise, ms) {
 // ★ `HEARTBEAT_MS` 删了：它只是构造函数的**缺省值**（`heartbeatMs || HEARTBEAT_MS`），
 //   而用例要调心跳节奏时走的是构造参数，不是这个常量。
 module.exports = { SessionController, State, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS,
-  SERVER_LIVE_STATES, SERVER_FINISHED_STATES };
+  SERVER_LIVE_STATES, SERVER_FINISHED_STATES, PUSH_STALE_MS, PUSH_ABSENT_KEYS };

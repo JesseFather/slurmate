@@ -42,6 +42,26 @@ const pluginFiles = require('./plugins/index.js');
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 
 /**
+ * 假站点里那次"变化的判据"，多久扫一遍。
+ *
+ * ★ 取守护进程那个 tick 的周期（2 秒），**不是**因为性能，是因为要**照着它演**：
+ *   真守护进程的推送挂在 tick 上，所以"2 秒内的多次变化只会推出一条"是它的一条
+ *   真实性质（用例 26.4 钉着"每个 tick 每条连接至多一条消息"）。假站点扫得快，
+ *   这条性质就演不出来，而客户端对着它调的东西（合并、升级判定）会显得比真集群
+ *   更容易通过。
+ */
+const PUSH_SWEEP_MS = 2000;
+
+/**
+ * 与守护进程的 `SNAPSHOT_INTERVAL` **同值**：哪怕什么都没变，也这么久推一条。
+ *
+ * ★ 它不是"心跳"。它是让客户端那条看门狗（session.js 的 `PUSH_STALE_MS`）能
+ *   把**安静**与**通道坏了**分开的那条保证 —— 少了它，一个空闲的会话会被判成
+ *   "通道不通"从而退回轮询，功能不受影响，但开发者模式里那条路就再也走不到了。
+ */
+const PUSH_INTERVAL_MS = 30000;
+
+/**
  * ── 假站点的**整包**投递 ──────────────────────────────────────────────────
  *
  * 真实的守护进程发的是**一个包**（`package` + `plugin_package`），假站点照着
@@ -169,6 +189,19 @@ class FakeBackend extends Backend {
      */
     this.maxActive = 1;
     this._seq = 0;
+
+    /**
+     * 推送那一半的账。
+     *
+     * ★ 机制与守护进程的 `phase_push` **一样**：变化的判据是**渲染结果本身**
+     *   （一份指纹），不是"谁改过状态"。差别只有载体（那边是 tick()，这里是
+     *   一个定时器）。这样写不只是省事 —— 它让"忘了在某个改动点标脏"这件事
+     *   从构造上不存在，而那个漏法的症状是**某个状态在界面上永远不更新**。
+     */
+    this._pushSeq = 0;
+    this._pushDigest = null;
+    this._pushAt = 0;
+    this._pushTimer = null;
 
     // 调试开关 —— 由调试面板驱动，用来复现真机上极难复现的状态
     this._daemonDownUntil = 0;
@@ -360,6 +393,7 @@ class FakeBackend extends Backend {
       await this._server.listen();
     }
     this._connected = true;
+    this._startPushSweep();
     this._emitState(true, '假后端已就绪');
     return {
       ok: true,
@@ -379,6 +413,7 @@ class FakeBackend extends Backend {
 
   async close() {
     this._clearTimers();
+    this._stopPushSweep();
     this._connected = false;
     if (this._server) {
       await this._server.close();
@@ -947,6 +982,58 @@ class FakeBackend extends Backend {
     return d;
   }
 
+  // ── 推送（常驻通道的服务端那一半）─────────────────────────────────────────
+  /**
+   * 推送那份视图：**逐字等于 `_list` 给出的那一种**。
+   *
+   * ★ 守护进程的 `snapshot_for` 用的是 `session_view(s, with_secret=False)`，
+   *   与 `op_list` 同构 —— 所以这里就是"先按 list 渲染，再把秘密摘掉"，
+   *   而不是另写一份。另写一份的那天，推送的字段集与 list 的字段集就会分家，
+   *   而症状是**界面上某一格在有推送时是空的、没有推送时是满的**。
+   */
+  _pushView(s) {
+    const d = this._view(s);
+    delete d.auth_password;
+    delete d.ssh_host_key;
+    return d;
+  }
+
+  _startPushSweep() {
+    if (this._pushTimer) return;
+    this._pushTimer = setInterval(() => this._sweepPush(), PUSH_SWEEP_MS);
+    this._pushTimer.unref?.();
+  }
+
+  _stopPushSweep() {
+    if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
+  }
+
+  /**
+   * 扫一遍：变了就推，没变也每 `PUSH_INTERVAL_MS` 推一条。
+   *
+   * ★ 调试开关"守护进程不可达"期间**一条都不推** —— 否则那个开关只挡得住
+   *   一问一答，挡不住推送，而开发者模式里就会出现"守护进程挂了、界面却还在
+   *   自己更新"这种真集群上不存在的景象。
+   */
+  _sweepPush() {
+    if (!this._connected) return;
+    if (Date.now() < this._daemonDownUntil) return;
+    const sessions = this._sessions.map((s) => this._pushView(s));
+    const digest = crypto.createHash('sha256')
+      .update(JSON.stringify(sessions)).digest('hex');
+    const now = Date.now();
+    const due = (now - this._pushAt) >= PUSH_INTERVAL_MS;
+    if (digest === this._pushDigest && !due) return;
+    this._pushDigest = digest;
+    this._pushAt = now;
+    this._pushSeq += 1;
+    // 形状逐字照守护进程的 enqueue_push。`stale` 在这里永远不会出现：
+    // 假站点没有出站队列，也就没有"水位太高丢了一条"这回事。
+    this.emit('notify', {
+      push: 'sessions', seq: this._pushSeq, at: nowSec(), sessions,
+    });
+  }
+
   /** 清定时器。给 `s` = 只清那一条；省略 = 全部（关后端时用）。 */
   _clearTimers(s) {
     for (const one of (s ? [s] : this._sessions)) {
@@ -1032,4 +1119,5 @@ function gresFor(raw, part) {
 
 // ★ 只导出真有人读的：`PARTITIONS` 从前也在这里，而它只在**本文件内**被用
 //   （测试要看分区表时走的是 `app:partitions` 那条真路，不是这个常量）。
-module.exports = { FakeBackend, DEFAULTS, DEMO_PASSWORD };
+module.exports = { FakeBackend, DEFAULTS, DEMO_PASSWORD,
+  PUSH_INTERVAL_MS, PUSH_SWEEP_MS };

@@ -5444,6 +5444,48 @@ exit 0
           mod.SNAPSHOT_INTERVAL * 1000 < 60000,
           "快照 %s 秒 vs STATUS_MS 60 秒" % mod.SNAPSHOT_INTERVAL)
 
+    # ── 26.18b 跨文件：客户端那条看门狗与推送的命令行 ────────────────────
+    #
+    # ★★ 这一组挡的是**两条都会静默降级**的漂法。它们的共同点是：坏了之后
+    #    客户端**照常能用**（走 exec），所以没有任何东西会红 ——
+    #    只有这几条把两侧的字面量摆在一起才有可能发现。
+    _ses_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                    "session.js"), encoding="utf-8").read()
+    _m_wd = re.search(r"(?m)^const PUSH_STALE_MS\s*=\s*(\d+)", _ses_src)
+    check("★★★ 客户端的推送看门狗**严格大于**守护进程的快照周期"
+          "（取小了会把**正常的空闲**读成通道坏了，于是每一轮都去问一次 —— "
+          "把常驻通道省下来的东西原样还回去）",
+          bool(_m_wd) and int(_m_wd.group(1)) > mod.SNAPSHOT_INTERVAL * 1000,
+          "看门狗 %s ms vs 快照 %s 秒"
+          % ((_m_wd.group(1) if _m_wd else "没找到"), mod.SNAPSHOT_INTERVAL))
+
+    # ★★ 客户端要的那条 `slurmate <子命令>` 必须是 CLI **真的有的**。
+    #    打错一个词的话，那条命令会以 argparse 的退出码 2 结束，而客户端会
+    #    **安静地退回 exec** —— 一切照常，只是常驻通道永远没起来。
+    _m_stream_cmd = re.search(r'const STREAM_CMD = "/bin/bash -c \'[^\']*slurmate (\w+)\'"',
+                              _be_src)
+    _m_rpc_cmd = re.search(r'const RPC_CMD = "/bin/bash -c \'[^\']*slurmate (\w+)\'"',
+                           _be_src)
+    for _label, _m in (("STREAM_CMD", _m_stream_cmd), ("RPC_CMD", _m_rpc_cmd)):
+        _sub = _m.group(1) if _m else None
+        check("★★ 客户端 %s 要的子命令 `%s` 是 CLI 真的有的"
+              "（打错一个词 = 安静地退回 exec，谁都看不出来）"
+              % (_label, _sub or "?"),
+              bool(_sub) and bool(re.search(r'add\("%s"' % re.escape(_sub), _cli_src)),
+              "在 cluster/slurmate 的子命令表里找不到 `%s`" % (_sub or "?"))
+
+    # ★★ 通知的键名：客户端认的那两个，必须与守护进程发的**逐字相同**。
+    #    改一处漏另一处 = 通知永远认不出来 —— 而它同样只是"退回轮询"，不报错。
+    _msg_src = io.open(DAEMON, encoding="utf-8").read()
+    _m_msg_key = re.search(r'msg = \{"push": "([a-z_]+)", "seq": seq', _msg_src)
+    #    那两条判据在客户端的 `parseEnvelopeLine` 里（`obj.push` / `obj.seq`）。
+    check("★★ 客户端认的通知键（`obj.push` / `obj.seq`）与守护进程发的"
+          "（`\"push\": \"sessions\"` + `\"seq\"`）逐字相同",
+          bool(_m_msg_key) and _m_msg_key.group(1) == "sessions"
+          and bool(re.search(r"typeof obj\.push === 'string'", _be_src))
+          and bool(re.search(r"typeof obj\.seq === 'number'", _be_src)),
+          "守护进程那份是 %s" % (_m_msg_key.group(1) if _m_msg_key else "没找到"))
+
     # ── 26.19b 推送里不含任何口令（靠一条**真会话文件**才验得出来）──────
     #
     # ★ 没有这一条的话，"推送走的是 list 的 with_secret=False"只是一句注释：

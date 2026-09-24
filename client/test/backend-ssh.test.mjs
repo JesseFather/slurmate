@@ -305,3 +305,226 @@ test('★ 断开之后 daemonVersion 跟着清掉（下一条连接不许报上�
   assert.equal(b._daemonVersion, null, '断开之后它必须回到"不知道"');
   assert.equal(b.connected, false);
 });
+
+// ── 两条链路：什么时候走常驻通道，什么时候退回 exec ────────────────────────
+//
+// ★ 这一层验的是**选择**，不是字节层 —— 字节层在 resident-channel.test.mjs 里
+//   （那边不需要 SSH）。真握手仍然只能在真集群上验，这里不假装测过。
+
+const { EventEmitter } = require('node:events');
+
+/** 测试进程要自己撑住事件循环 —— 这里的定时器都 unref 了（理由见 session.js）。 */
+function keepLoop(t) {
+  const h = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(h));
+}
+
+/** exec 那条路的假 channel：`end(body)` 之后回一条应答并关闭。 */
+class FakeExecStream extends EventEmitter {
+  constructor(reply) {
+    super();
+    this.stderr = new EventEmitter();
+    this.sentBody = null;
+    this._reply = reply;
+  }
+
+  end(body) {
+    this.sentBody = body;
+    setImmediate(() => {
+      if (this._reply !== null) this.emit('data', Buffer.from(this._reply + '\n', 'utf8'));
+      this.emit('exit');
+      this.emit('close');
+    });
+  }
+
+  close() { /* 用例不关心 */ }
+}
+
+/** 常驻通道那条路的假 duplex。 */
+class FakeDuplex extends EventEmitter {
+  constructor() {
+    super();
+    this.written = '';
+    this.closed = false;
+  }
+
+  write(s) { this.written += s; return true; }
+  close() { this.closed = true; this.emit('close'); }
+  feed(s) { this.emit('data', Buffer.from(s, 'utf8')); }
+
+  /**
+   * 回一条应答，**rid 回填成最后那条请求的** —— 守护进程就是这么做的
+   * （`handle_line` 里 `resp["rid"] = rid`）。
+   * ★ 夹具这里省掉 rid 的话，应答会被当成噪声丢掉，而症状是"探针超时"——
+   *   一句指向通道的话，而问题在夹具。
+   */
+  answer(payload) {
+    const last = this.written.split('\n').filter(Boolean).pop();
+    const rid = last ? JSON.parse(last).rid : null;
+    this.feed(JSON.stringify({ ...payload, rid }) + '\n');
+  }
+}
+
+/** 探针与 whoami 都会用的一个正常应答。 */
+const PONG = { ok: true, code: 0, data: { pong: true, version: '0.8' }, error: null };
+
+function fakeConn() {
+  const c = {
+    execs: [],
+    streamChannel: null,
+    execStream: null,
+    // 常驻通道那条 exec 给一个 duplex；其余给一条一次性的假 channel。
+    exec(cmd, cb) {
+      c.execs.push(cmd);
+      if (cmd === sshBackend.STREAM_CMD) {
+        c.streamChannel = c.streamChannel || new FakeDuplex();
+        cb(null, c.streamChannel);
+      } else {
+        c.execStream = new FakeExecStream(JSON.stringify(PONG));
+        cb(null, c.execStream);
+      }
+    },
+  };
+  return c;
+}
+
+/** 造一个"已经连着 SSH"的后端（这一层不碰网络）。 */
+function connectedBackend() {
+  const b = new sshBackend.SshBackend({});
+  b._conn = fakeConn();
+  b._profile = { user: 'u', host: 'h', port: 1 };
+  b._closed = false;
+  return b;
+}
+
+test('★ 两条命令只差最后一个词：同一个解释器、同一个二进制路径', () => {
+  // 分头写死是有意的（上面那条用例要求它是常量），代价就是路径写了两遍 ——
+  // 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程的问题。
+  const rpc = sshBackend.RPC_CMD;
+  const stream = sshBackend.STREAM_CMD;
+  assert.equal(sshBackend.STREAM_CMD, "/bin/bash -c '/usr/local/bin/slurmate stream'");
+  assert.ok(!/[$`{}]/.test(stream), '不得含任何模板/变量语法');
+  assert.ok(!/code-server/.test(stream), '不得含 code-server 字面量');
+  assert.equal(rpc.replace(/ rpc'$/, ''), stream.replace(/ stream'$/, ''),
+    '两条命令除了最后那个子命令名之外必须逐字相同');
+});
+
+test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）', async (t) => {
+  keepLoop(t);
+  // rid 在守护进程那边是"这条连接从此收推送"的判据，而这条连接是一次性的：
+  // 发了它，守护进程会把推送写进一条马上要被关掉的连接，而推送与响应
+  // **共用同一个输出队列** —— 一次恰好落在 tick 上的推送会被读成这条请求的应答。
+  const b = connectedBackend();
+  // ★ 先 await 再看：`rpc()` 的第一个 `await`（`_ensure()`）之前什么都没发生，
+  //   同步读 `sentBody` 读到的是 null。
+  const r = await b.rpc({ op: 'ping', rid: 99 });
+  const sent = JSON.parse(b._conn.execStream.sentBody);
+  assert.equal(sent.op, 'ping');
+  assert.equal('rid' in sent, false, 'exec 那条路不许带 rid');
+  assert.equal(r.ok, true);
+});
+
+test('★ 调用方传的 req 对象本身不被改写（删的是副本）', async (t) => {
+  keepLoop(t);
+  const b = connectedBackend();
+  const req = { op: 'ping', rid: 7 };
+  await b.rpc(req);
+  assert.equal(req.rid, 7, '不许为了发出去而改调用方的对象');
+});
+
+test('★ 常驻通道在的时候，rpc 一次 exec 都不发', async (t) => {
+  keepLoop(t);
+  const b = connectedBackend();
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);                 // 探针的应答
+  assert.equal(await opened, true);
+  assert.equal(b.resident, true);
+  const before = b._conn.execs.length;
+
+  const p = b.rpc({ op: 'whoami' });
+  b._conn.streamChannel.answer({ ok: true, code: 0, data: { user: 'u' }, error: null });
+  assert.equal((await p).data.user, 'u');
+  assert.equal(b._conn.execs.length, before, '走通道就不该再 exec');
+});
+
+test('★★ 探针失败 ⇒ 不建通道、记下原因、并排一次重开', async (t) => {
+  keepLoop(t);
+  // ★ "通道起来了"与"通道能用"是两件事：旧 CLI 上 `slurmate stream` 会立刻以
+  //   argparse 的退出码 2 结束，而那条通道在客户端看来与正常的别无二致。
+  const b = connectedBackend();
+  const opened = b._openStream();
+  b._conn.streamChannel.emit('close');                // 立刻死了，没有应答
+  assert.equal(await opened, false);
+  assert.equal(b.resident, false);
+  assert.match(b.residentError, /关闭/);
+  assert.ok(b._streamTimer, '失败之后要排一次重开（覆盖"守护进程正在重启"）');
+  b._teardownStream();
+});
+
+test('★ 重开是有上限的：连着失败够多次就不再试', async (t) => {
+  keepLoop(t);
+  // 上限挡的是"登录节点上的 CLI 是旧的"那种**永久**失败 —— 它和暂时的失败
+  // 现场一模一样（一行 usage + 退出码 2），区分不了，只能靠次数。
+  // 每一次失败的重开都是一次注定失败的 exec，也就是每分钟白 fork 一个 python。
+  const b = connectedBackend();
+  b._streamAttempt = 3;
+  b._scheduleStreamReopen();
+  assert.equal(b._streamTimer, null, '到了上限就不该再排');
+});
+
+test('★ 一次成功会把重开计数清零（曾经好用的通道永远有配额）', async (t) => {
+  keepLoop(t);
+  const b = connectedBackend();
+  b._streamAttempt = 2;
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  assert.equal(await opened, true);
+  assert.equal(b._streamAttempt, 0);
+  assert.equal(b.residentError, null, '建起来了就把上一条失败的原因清掉');
+});
+
+test('★ 通道断了会排重开；拆掉之后不再排', async (t) => {
+  keepLoop(t);
+  const b = connectedBackend();
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  await opened;
+
+  b._conn.streamChannel.emit('close');                // 对端关了（不是我们关的）
+  assert.equal(b.resident, false);
+  assert.ok(b._streamTimer, '对端关的必须要重开');
+
+  b._teardownStream();
+  assert.equal(b._streamTimer, null);
+  // ★ 拆掉通道之后 `resident` 是 **false** 而不是 null：SSH 还连着，
+  //   "连上了、但没有通道"与"还没连上"是两件事（见 resident 的三态）。
+  assert.equal(b.resident, false);
+  assert.equal(b._resident, null);
+});
+
+test('★ 后端自己 close() 之后不重开（也不许报"还连着"）', async (t) => {
+  keepLoop(t);
+  const b = connectedBackend();
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  await opened;
+  await b.close();
+  assert.equal(b._resident, null);
+  assert.equal(b._streamTimer, null, '拆了就不该再排重开');
+  // resident 的三态：连接没了 ⇒ null（"还没试过/没有连接"），不是 false。
+  assert.equal(b.resident, null);
+});
+
+test('★ resident 的三态分得开：还没连 / 连了但没有通道 / 通道在', async (t) => {
+  keepLoop(t);
+  // ★ 合成两态的话，启动阶段的日志会说出一句当时并不成立的话
+  //   （"常驻通道不可用" vs "还没试过"）。
+  const fresh = new sshBackend.SshBackend({});
+  assert.equal(fresh.resident, null, '还没连上登录节点');
+  const b = connectedBackend();
+  assert.equal(b.resident, false, '连上了、但还没有通道');
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  await opened;
+  assert.equal(b.resident, true);
+});

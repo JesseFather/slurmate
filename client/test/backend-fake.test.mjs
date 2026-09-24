@@ -22,8 +22,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// ★ 这个文件一直是**纯文本比对**（本机起不了 Electron），所以从前不需要 require。
+//   推送那一组要真的造一个假后端来验它的行为，于是需要它。
+const require = createRequire(import.meta.url);
 const ROOT = path.join(here, '..', '..');
 const FAKE = fs.readFileSync(
   path.join(ROOT, 'client', 'src', 'main', 'backend-fake.js'), 'utf8');
@@ -111,4 +115,136 @@ test('★ 假站点里的作业也带判定与原因（不然那条路一次都�
   //   「运行中 · 在等空闲资源」—— 一句自相矛盾、且在真集群上不出现的话。
   assert.match(FAKE, /sess\.job_state = 'RUNNING';[\s\S]{0,400}?sess\.job_reason = null;/,
     '作业转成 RUNNING 时要把排队原因一起清掉');
+});
+
+// ── 推送：假站点必须**照守护进程的规则**推，不然那条路在开发者模式里走不到 ──
+//
+// ★★ 这一组的理由不是"多测几个函数"：常驻通道在真集群上**可能起不来**
+//    （旧 CLI / 老守护进程），那时客户端整条推送路径都不执行。开发者模式是
+//    唯一能反复走那条路的地方 —— 假站点不推的话，"推送那条路"就只有在真集群上
+//    才跑过，而那正是这个接缝最怕的一类（开发模式能跑、真集群跑不了，反过来也一样）。
+
+const { FakeBackend, PUSH_INTERVAL_MS, PUSH_SWEEP_MS } =
+  require('../src/main/backend-fake.js');
+
+/** 一条会话，字段取到 `_view()` 会用到的全部。 */
+function aSession(extra = {}) {
+  return {
+    session_id: 's-demo', job_id: '7', state: 'enrolled',
+    partition: 'A6000', resources: { cpus: 2, mem: '8G', gres: null },
+    node: 'node01', node_ip: '192.0.2.11', service_port: 55001,
+    created_at: 1, enrolled_at: 2, last_hb_at: 3, renew_count: 0,
+    requested_time: 3600, note: null, auth_mode: 'password', account: 'acct',
+    tunnel_target: '192.0.2.11:55001', service_kind: null, service_plugin: null,
+    ssh_host_key: 'ssh-ed25519 AAAA', auth_password: 'pw',
+    job_state: 'RUNNING', job_terminal: false,
+    ...extra,
+  };
+}
+
+function fakeWith(sessions) {
+  const b = new FakeBackend({ rpcLatencyMs: 0 });
+  b._connected = true;
+  b._sessions = sessions;
+  return b;
+}
+
+test('★★ 推送那份视图 = list 那份**摘掉秘密**（不是另写一份）', () => {
+  // 另写一份的那天，推送的字段集与 list 的字段集就会分家，而症状是
+  // **界面上某一格在有推送时是空的、没有推送时是满的**。
+  const b = fakeWith([aSession()]);
+  const listView = b._view(b._sessions[0]);
+  const pushView = b._pushView(b._sessions[0]);
+
+  assert.equal(listView.auth_password, 'pw', '前提：list 那份是带口令的');
+  assert.equal(listView.ssh_host_key, 'ssh-ed25519 AAAA');
+  assert.equal('auth_password' in pushView, false, '推送**结构上**不带口令');
+  assert.equal('ssh_host_key' in pushView, false, '作业内主机公钥同理');
+
+  // 除了那两个键，逐字相同 —— 多一个少一个都要红。
+  assert.deepEqual(Object.keys(pushView).sort(),
+    Object.keys(listView).filter((k) => k !== 'auth_password' && k !== 'ssh_host_key').sort());
+});
+
+test('★ 推送的形状逐字照守护进程的 enqueue_push', () => {
+  const b = fakeWith([aSession()]);
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  b._sweepPush();
+  assert.equal(got.length, 1);
+  assert.equal(got[0].push, 'sessions');
+  assert.equal(got[0].seq, 1);
+  assert.equal(typeof got[0].at, 'number');
+  assert.equal(Array.isArray(got[0].sessions), true);
+  assert.equal('stale' in got[0], false, '假站点没有出站队列，也就不会有缺口');
+});
+
+test('★ 没有变化就不推；但过了快照周期**必须**推一条', () => {
+  // ★ 那一条"没变也推"是**承重的**：客户端那条看门狗（session.js 的
+  //   PUSH_STALE_MS）靠它把"安静"与"通道坏了"分开。少了它，一个空闲的会话会被
+  //   判成通道不通而退回轮询 —— 功能不受影响，但开发者模式里那条路就演不出来了。
+  const b = fakeWith([aSession()]);
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  b._sweepPush();
+  b._sweepPush();
+  assert.equal(got.length, 1, '没变化、也没到点，就不该再推');
+
+  b._pushAt = Date.now() - PUSH_INTERVAL_MS;      // 假装一个周期过去了
+  b._sweepPush();
+  assert.equal(got.length, 2, '到点了就算没变化也要推');
+  assert.equal(got[1].seq, 2, 'seq 单调递增');
+});
+
+test('★ 会话变了就推（判据是渲染结果本身，不是谁记得标脏）', () => {
+  const b = fakeWith([aSession()]);
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  b._sweepPush();
+  b._sessions[0].job_state = 'COMPLETED';
+  b._sessions[0].job_terminal = true;
+  b._sweepPush();
+  assert.equal(got.length, 2);
+  assert.equal(got[1].sessions[0].job_state, 'COMPLETED');
+});
+
+test('★★ 调试开关"守护进程不可达"期间**一条都不推**', () => {
+  // 不挡的话，开发者模式里会出现"守护进程挂了、界面却还在自己更新"这种
+  // 真集群上不存在的景象 —— 而那正是模拟"通道断了 ⇒ 退回轮询"要造的状态。
+  const b = fakeWith([aSession()]);
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  b.debugDaemonDown(5000);
+  b._pushAt = Date.now() - PUSH_INTERVAL_MS;
+  b._sweepPush();
+  assert.equal(got.length, 0);
+});
+
+test('★ 关掉之后不再推（定时器要收干净）', async () => {
+  const b = fakeWith([aSession()]);
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  b._startPushSweep();
+  await b.close();
+  assert.equal(b._pushTimer, null, '关后端必须把扫描停掉');
+  b._pushAt = Date.now() - PUSH_INTERVAL_MS;
+  b._sweepPush();
+  assert.equal(got.length, 0, '已经关了就不该再推');
+});
+
+test('★★ 扫描**真的**在跑（不是"实现了一个只有手动调才走的方法"）', async () => {
+  // ★ 这一条挡的是最容易骗过自己的那种：`_sweepPush()` 每条用例都手调，
+  //   全绿 —— 而 `connect()` 里那一行忘了挂定时器的话，开发者模式里
+  //   一条推送都不会来，客户端永远退回轮询，界面上看不出来。
+  const b = new FakeBackend({ rpcLatencyMs: 0 });
+  const got = [];
+  b.on('notify', (m) => got.push(m));
+  await b.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
+  try {
+    b._sessions.push(aSession());
+    await new Promise((r) => setTimeout(r, PUSH_SWEEP_MS + 400));
+    assert.ok(got.length >= 1, `扫描没跑起来（等了 ${PUSH_SWEEP_MS + 400}ms 一条都没有）`);
+  } finally {
+    await b.close();
+  }
 });
