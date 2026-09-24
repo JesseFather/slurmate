@@ -259,6 +259,135 @@ def job_is_terminal(info):
     return False
 
 
+# ── GRES：一个结构化描述符，和一个拼法 ──────────────────────────────────────
+#
+# ★ 这一层为什么存在：GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`，
+#   名字与类型随集群而定），而从前这里只认 `gpu:N` 一种形状 —— 写只写
+#   `"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`。于是异构集群上的表现是
+#   **界面上显示"没有 GPU"，而作业正占着两张 A100**，且没有任何地方会报错。
+#
+# ★ `{name, type, count}` 是**唯一**的内部表示：线上（请求与响应）是它，
+#   数据库里存它的 JSON，交给 Slurm 的那个串由 gres_spec() **当场拼**。
+#   ⇒ "自己写进去的值自己读不回来"（今天那条正则就是）在结构上不可能发生：
+#   没有第二份表示，也就没有两者对不上的余地。
+#
+# ★ name / type 的字符集是**窄**的，因为它们要原样进 `--gres=` 的那一格，
+#   而 `:` 与 `,` 是 Slurm 自己的分隔符。
+#
+# ★★ 用 `fullmatch`，**不要**写成 `re.match(r"^…$")`：Python 的 `$` 还匹配
+#   **结尾换行之前**那个位置，于是 `"gpu\n"` 会溜过去 —— 而它拼出来的
+#   `"gpu\n:2"` 是一个谁也认不出的 GRES 串。这不是理论问题：这条正则的第一版
+#   就是 `^…$` + `.match()`，用例立刻抓到了（第 25 节）。
+GRES_FIELD_RE = re.compile(r"[A-Za-z0-9_]{1,32}")
+
+# 量级护栏，**不是站点策略**。真实上限来自集群自己配了什么、每个节点配了几个
+# （见 Slurm.gres_catalog() 与 Sessiond.fit_gres()）。这一条挡的只是"一个改过的
+# 客户端往数据库和日志里灌一个天文数字"，所以它必须宽到不误伤任何真实配置
+# （`mps:100` 这种按核数计的 GRES 是正常的）。
+MAX_GRES_COUNT = 4096
+
+
+def gres_spec(g):
+    """描述符 → 交给 Slurm 的那个串（`name[:type]:count`）。**全仓唯一一处拼法。**
+
+    sbatch 的语法是 `--gres=name[[:type]:count]`：配了型号的是三段，没配的是两段。
+    """
+    if not g:
+        return None
+    if g.get("type"):
+        return "%s:%s:%d" % (g["name"], g["type"], g["count"])
+    return "%s:%d" % (g["name"], g["count"])
+
+
+def gres_label(g):
+    """给人看的名字（不含数量）：`gpu` 或 `gpu:a100`。只用在报错与日志里。"""
+    if not g:
+        return "—"
+    return ("%s:%s" % (g["name"], g["type"])) if g.get("type") else g["name"]
+
+
+def parse_gres_field(s):
+    """`scontrol show node -o` 那一格 `Gres=` → [描述符]。认不出的项**跳过**。
+
+    形式：`gpu:4`（没配型号）或 `gpu:a100:2`（配了）；多个之间用逗号隔开。
+    ★ 末尾的 `(S:0-1)` 这类索引说明是 Slurm 在某些输出形态里缀上的，先剥掉 ——
+      本机 `-o` 的 `Gres=` 实测是干净的，但那是个**字段格式**，剥一次很便宜。
+    """
+    out = []
+    for item in str(s or "").split(","):
+        item = re.sub(r"\(.*\)$", "", item.strip()).strip()
+        if not item or item in ("(null)", "N/A"):
+            continue
+        parts = item.split(":")
+        try:
+            if len(parts) == 2:
+                name, typ, cnt = parts[0], None, int(parts[1])
+            elif len(parts) == 3:
+                name, typ, cnt = parts[0], parts[1], int(parts[2])
+            else:
+                raise ValueError("段数不是 2 或 3")
+        except ValueError:
+            log.warning("看不懂的 Gres 项，已跳过: %r", item)
+            continue
+        if not GRES_FIELD_RE.fullmatch(name) or (typ and not GRES_FIELD_RE.fullmatch(typ)):
+            log.warning("Gres 项里的名字不合法，已跳过: %r", item)
+            continue
+        out.append({"name": name, "type": typ, "count": cnt})
+    return out
+
+
+def clean_gres(v):
+    """把客户端送来的任意形状收成描述符。返回 `(描述符或 None, 错误说明或 None)`。
+
+    **只查形状，不查上限** —— 上限是集群自己的事（某个分区上有没有这个名字、
+    每节点配了几个），那一步在分区定下来之后做（Sessiond.fit_gres()）。
+    """
+    if v is None or v == "":
+        return None, None
+    if not isinstance(v, dict):
+        return None, "gres 必须是一个对象：{\"name\": …, \"type\": …, \"count\": …}"
+    name = v.get("name")
+    if not isinstance(name, str) or not GRES_FIELD_RE.fullmatch(name):
+        return None, ("gres 的 name 不合法：%r（只允许字母、数字、下划线，"
+                      "最长 32 —— `:` 与 `,` 是 Slurm 自己的分隔符）" % (name,))
+    typ = v.get("type")
+    if typ == "":
+        typ = None
+    if typ is not None and (not isinstance(typ, str) or not GRES_FIELD_RE.fullmatch(typ)):
+        return None, "gres 的 type 不合法：%r（规则同 name）" % (typ,)
+    cnt = v.get("count")
+    if isinstance(cnt, bool) or not isinstance(cnt, int):
+        return None, "gres 的 count 必须是整数，得到 %r" % (cnt,)
+    if cnt < 1:
+        return None, ("gres 的 count 必须 >= 1，得到 %d"
+                      "（不占 GRES 就整个别写这一格）" % cnt)
+    if cnt > MAX_GRES_COUNT:
+        return None, ("gres 的 count 上限是 %d，得到 %d —— 一个作业能要多少由集群"
+                      "自己配了几个决定（管理员跑 `slurmate-sessiond --check` 能看到"
+                      "每个分区的 GRES 清单）" % (MAX_GRES_COUNT, cnt))
+    return {"name": name, "type": typ, "count": cnt}, None
+
+
+def load_gres(raw):
+    """数据库那一格（JSON 文本）→ 描述符或 None。**认不出来当没要**，并记一条 error。
+
+    为什么宽容：`session_view()` 也走这里。一行坏数据不该让整个 `list` 变成一个
+    错误 —— 那会把"某个会话的 gres 坏了"变成"所有会话都列不出来"。
+    """
+    if not raw:
+        return None
+    try:
+        g = json.loads(raw)
+    except (TypeError, ValueError):
+        log.error("会话的 gres 那一格读不动（%r）—— 当作没要 GRES", raw)
+        return None
+    ok, err = clean_gres(g)
+    if err:
+        log.error("会话的 gres 那一格不合法（%r）：%s", raw, err)
+        return None
+    return ok
+
+
 def run_cmd(argv, timeout=10, check=False):
     """执行命令，返回 (rc, stdout, stderr)。永不抛异常。"""
     try:
@@ -482,7 +611,12 @@ THROTTLE_SECONDS = 1800
 #   `site.defaultMem` 里，站点可以在 `[plugin:<名字>]` 块里覆盖它。
 #   这里只有"绝不能超过多少"这一条 —— 那是**框架**的策略，不是插件能自选的。
 MAX_CPUS_REQUEST = 64
-MAX_GPUS_REQUEST = 8
+# ★ 这里此前有一个 `MAX_GPUS_REQUEST = 8`。它删掉了，因为**GRES 的上限不是框架的
+#   策略，而是集群的事实** —— 每节点配了几张卡由管理员在 `gres.conf` 里定，写死在
+#   代码里等于替所有站点做了同一个决定（每节点 16 张卡的站点也只能要 8 张）。
+#   今天那个数来自 `Slurm.gres_catalog()`（`scontrol show node -o` 的 `Gres=`），
+#   在 `Sessiond.fit_gres()` 里与请求对账。框架只剩一条量级护栏
+#   （`MAX_GRES_COUNT`），它挡的是"改过的客户端灌一个天文数字"，不是策略。
 
 
 # ── 版本号：两套方案，一条比较规则 ─────────────────────────────────────────
@@ -2923,8 +3057,14 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
         argv.extend(["-p", sess["partition"]])
     # gres 为空 → 【完全省略】--gres，而不是写 gpu:0。默认不占 GPU，
     # 而在不带 GRES 的分区上写 --gres=gpu:0 会直接被 Slurm 拒绝。
-    if sess.get("gres"):
-        argv.append("--gres=%s" % sess["gres"])
+    #
+    # ★ 库里那一格存的是**描述符的 JSON**，交给 Slurm 的那个串在这里当场拼。
+    #   全仓只有这一处把 GRES 变成 Slurm 的语法（gres_spec），所以"自己写进去的
+    #   值自己读不回来"这一类不会发生 —— 从前这里存的是 `"gpu:2"`，而读回时那句
+    #   `re.fullmatch(r"gpu:(\d+)")` 一遇到 `gpu:a100:2` 就静默地报"没有 GPU"。
+    gres = load_gres(sess.get("gres"))
+    if gres:
+        argv.append("--gres=%s" % gres_spec(gres))
     # 注意：不写 -w。节点由 Slurm 在分区内自动选择 —— 这既是需求
     # （自动分配、天然负载均衡），也避免所有用户都写死同一个节点名、
     # 造成"一台排队到天荒地老、同分区另一台空着"的经典局面。
@@ -2942,6 +3082,7 @@ class Slurm(object):
         self.cfg = cfg
         self._acct_cache = {}      # uid -> (ts, account)
         self._part_cache = {}      # uid -> (ts, set(partitions) or None)
+        self._gres_cache = None    # (ts, {分区: [描述项]})；值为 None 表示查不到
 
     def show_job(self, job_id):
         """返回 dict 或 None。**仅用于展示**，不要用它做生命周期判定。
@@ -3068,6 +3209,66 @@ class Slurm(object):
                 "is_default": bool(d and d.group(1).upper() in ("YES", "TRUE", "1")),
             }
         return table
+
+    def gres_catalog(self, ttl=300):
+        """`{分区名: [{"name","type","per_node_max","total"}]}`；**None = 查不到**。
+
+        来源是 `scontrol show node -o` 的两格：`Gres=`（这台节点配了什么）与
+        `Partitions=`（它在哪些分区里），两个都是 Slurm 已经知道的事实。
+
+        ★ 本机实测（slurm-wlm 23.11.4，本集群 `GresTypes = gpu`）：
+          · `Gres=gpu:4` —— 节点的**配置**。没有 GRES 的节点上这个键**整个不
+            出现**（不是 `Gres=(null)`），所以"没这个键"就是"没配"，别去猜。
+          · 节点的 `CfgTRES` / `AllocTRES` 里**没有** gres：那要求
+            `AccountingStorageTRES` 里列了 `gres/gpu`，本集群没列。
+          · `GresUsed=` 这个字段在本版本上**不存在**（别的版本/别的配置里才有）。
+            ⇒ **"已用"这一格报不出来，就不报**。拿 `squeue` 的作业去减是另一件
+            事，而且那个数刚算完就过期了 —— 报一个错的数量比不报更糟。
+            这一条记在 `docs/KNOWN-ISSUES.md` 的〈未实测/取不到〉里。
+
+        ★ 缓存 ttl 秒：节点配置几乎不变，而每个 `partitions` 请求都去 fork 一次
+          `scontrol show node`（大集群上输出很大）是白花的。这与阶段 5 的
+          「三层钟」是同一个判断，只是这里先用一个简单的 TTL 顶上。
+        """
+        hit = self._gres_cache
+        if hit and now_ts() - hit[0] < ttl:
+            return hit[1]
+        rc, out, err = run_cmd([self.cfg.scontrol, "show", "node", "-o"], timeout=10)
+        if rc != 0:
+            log.warning("查节点 GRES 失败: %s", (err or "").strip()[:200])
+            self._gres_cache = (now_ts(), None)
+            return None
+        table = {}
+        for line in out.splitlines():
+            pm = re.search(r"\bPartitions=(\S+)", line)
+            gm = re.search(r"\bGres=(\S+)", line)
+            if not pm or not gm:
+                continue                      # 没配 GRES 的节点，跳过
+            entries = parse_gres_field(gm.group(1))
+            if not entries:
+                continue
+            for pname in pm.group(1).split(","):
+                # 分区名后面的 `*`（默认分区）是别的输出形态里的记号，这里剥掉。
+                pname = pname.strip().rstrip("*")
+                if not pname:
+                    continue
+                acc = table.setdefault(pname, {})
+                for e in entries:
+                    key = (e["name"], e["type"])
+                    cur = acc.get(key)
+                    if cur is None:
+                        acc[key] = {"name": e["name"], "type": e["type"],
+                                    "per_node_max": e["count"], "total": e["count"]}
+                    else:
+                        # `total` 是"这个分区一共几张"，`per_node_max` 才是**一个
+                        # 作业能要到的上限**（`--gres=gpu:N` 是每节点 N 个）。
+                        # 两个都给，但界面上要问的是后者。
+                        cur["total"] += e["count"]
+                        cur["per_node_max"] = max(cur["per_node_max"], e["count"])
+        result = {p: sorted(v.values(), key=lambda e: (e["name"], e["type"] or ""))
+                  for p, v in table.items()}
+        self._gres_cache = (now_ts(), result)
+        return result
 
     def is_accounting_enforced(self):
         """AccountingStorageEnforce 里是否含 associations —— 决定 sbatch 必须带 -A。"""
@@ -4375,6 +4576,7 @@ class Sessiond(object):
                              "暂时无法从 Slurm 取到分区列表，请稍后重试")
         allowed = self.slurm.allowed_partitions(user)
         unknown = (allowed is PARTITIONS_UNKNOWN)
+        catalog = self.slurm.gres_catalog()
         out = []
         # 默认分区排在最前（界面按顺序渲染），其余按名字排 —— 顺序稳定，
         # 用户才不会觉得"上次那个分区这次找不到了"。
@@ -4389,6 +4591,15 @@ class Sessiond(object):
                 d["is_default"] = True
             if info["max_time"] is not None:
                 d["max_time"] = fmt_slurm_time(info["max_time"])
+            # 这个分区上能申请的 GRES。**三态，与协议里其它地方同一条规矩**：
+            #   · 键不存在 = 查不到（`scontrol` 失败）—— 界面据此**不要**说
+            #     "这个分区没有卡"，那是它在替集群说话；
+            #   · `[]` = 查到了，这个分区确实一个 GRES 都没配；
+            #   · 非空 = 每一项 `{name, type, per_node_max, total}`。
+            # 一个作业能要到的上限是 `per_node_max`（`--gres=gpu:N` 是**每节点**
+            # N 个），不是 `total` —— 界面上要问的是前者。
+            if catalog is not None:
+                d["gres"] = catalog.get(name, [])
             if not ok:
                 d["reason"] = "你的账号没有 %s 分区的权限" % name
             if unknown:
@@ -4402,10 +4613,6 @@ class Sessiond(object):
         return self._ok({"partitions": out})
 
     def session_view(self, s, with_secret=True):
-        gpus = None
-        m = re.fullmatch(r"gpu:(\d+)", str(s["gres"] or ""))
-        if m:
-            gpus = int(m.group(1))
         d = {
             "session_id": s["session_id"], "job_id": s["job_id"],
             "state": s["state"],
@@ -4417,8 +4624,16 @@ class Sessiond(object):
             # 恢复出来的会话（别的进程提交的作业）我们没写过它的命令行，
             # 它当时要了多少资源无从得知。报 null 而不是 0 ——
             # 0 会被读成"它只要了 0 核"。
+            #
+            # ★ gres 是**描述符**（`{name, type, count}`）或 null，**不是数字**。
+            #   它就是库里那一格解出来的，中间没有第二次解析 —— 界面上"有没有
+            #   卡、什么型号、几张"全部由它回答。
+            #   null 有两条来路（没要 / 从 nft 规则恢复出来的会话无从得知），
+            #   与 cpus、mem 一样**合并成同一个答案**：这一行不说 GRES。
+            #   不把两者分开是**有意的** —— 分开等于多一个状态，而界面在任何
+            #   一种情况下要做的事都一样（照实不说）。
             "resources": {"cpus": s["cpus"] or None, "mem": s["mem"] or None,
-                          "gpus": gpus},
+                          "gres": load_gres(s["gres"])},
             # 这个会话提供的是哪种服务。界面据此决定「连接」该做什么 ——
             # code-server 要建视图并自动登录，sshd 只是把隧道指向它、让用户拿
             # 原生 VS Code / codex 去连，客户端不做任何 HTTP 的事。
@@ -4564,6 +4779,49 @@ class Sessiond(object):
         self.begin_release(s, "goodbye")
         return self._ok({"state": ST_RELEASING})
 
+    def fit_gres(self, g, partition):
+        """把请求的 GRES 与这个分区**实际有的**对一对。返回 `(描述符, 错误说明)`。
+
+        ★ **"上限由站点的实际配置定"就落在这一句上。** 从前是一个写死的
+          `MAX_GPUS_REQUEST = 8`，于是每节点 16 张卡的站点也只能要 8 张 —— 那是
+          替所有站点做了同一个决定。
+
+        ★ 查不到目录（`scontrol` 失败/超时）时**放行**：报错就等于一次控制器抖动
+          让所有要 GRES 的人都提交不了，而**权威本来就在 Slurm 那一侧** —— 它会
+          在 sbatch 那一刻用同一份配置拒绝，用户看到一条 sbatch 错误。
+          这与端口区间、CIDR 那几处的 fail-closed 不同：那几处判错会留下安全
+          缺口，这一处不会（多要几张卡由 Slurm 拦，不是我们能"给出去"的东西）。
+
+        ★ 超上限时**拒绝而不是截断**：把 16 悄悄改成 4，用户拿到的是一个"跑得
+          起来但不是他要的"作业，而他要的多半正是那 16 张。分区选错了是可改的，
+          资源悄悄变少不是。
+        """
+        if not g:
+            return None, None
+        catalog = self.slurm.gres_catalog()
+        if catalog is None:
+            return g, None
+        if partition:
+            entries = catalog.get(partition, [])
+            where = "分区 %s" % partition
+        else:
+            # 没点名分区（权限查不到时退化成不带 -p）⇒ 在所有分区里找。
+            entries = [e for p in sorted(catalog) for e in catalog[p]]
+            where = "有权限的那些分区"
+        match = [e for e in entries
+                 if e["name"] == g["name"]
+                 and (not g["type"] or e["type"] == g["type"])]
+        if not match:
+            have = sorted({gres_label(e) for e in entries})
+            return None, ("%s 上没有 %s（它有：%s）"
+                          % (where, gres_label(g),
+                             "、".join(have) or "什么 GRES 都没配"))
+        cap = max(e["per_node_max"] for e in match)
+        if g["count"] > cap:
+            return None, ("%s 上 %s 每个节点最多 %d 个，你要了 %d 个"
+                          % (where, gres_label(g), cap, g["count"]))
+        return g, None
+
     def op_submit(self, uid, req):
         cfg = self.cfg
         try:
@@ -4683,8 +4941,11 @@ class Sessiond(object):
         # 配不同的默认资源，而客户端省略字段永远是在说"用你的默认"。
         cpus = clamp_int(req.get("cpus"), pcfg.default_cpus, 1, MAX_CPUS_REQUEST)
         mem, mem_rejected = sanitize_mem(req.get("mem"), pcfg.default_mem)
-        gpus = clamp_int(req.get("gpus"), 0, 0, MAX_GPUS_REQUEST)
-        gres = ("gpu:%d" % gpus) if gpus > 0 else None
+        # GRES 这一步**只查形状** —— 与这个分区对不对得上要等分区定下来
+        # （上限是分区自己的：同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
+        gres, gres_err = clean_gres(req.get("gres"))
+        if gres_err:
+            return self._err(2, "bad_gres", gres_err)
         warning = []
         if mem_rejected:
             # 此前这条只进日志。用户填了 `--mem 0`（在 Slurm 里是"整机内存"）
@@ -4725,11 +4986,29 @@ class Sessiond(object):
                 return self._err(4, "no_partition",
                                  "你的账号在 %s 这些分区上都没有权限"
                                  % "、".join(sorted(table)))
+            # ★ 要了 GRES 的时候，只从**装得下它**的分区里挑。
+            #   不这么做的话，"要 2 张卡、分区随便"会随机落到一个没有那种卡的
+            #   分区上被拒 —— 而用户明明没有指定分区，他没有任何办法绕开。
+            #   界面上给的选项也是这么算的（所有有权限分区的并集），两边是同一句话。
+            if gres:
+                fit = [n for n in usable if self.fit_gres(gres, n)[1] is None]
+                if not fit:
+                    why = self.fit_gres(gres, sorted(usable)[0])[1] or ""
+                    return self._err(2, "bad_gres",
+                                     "有权限的分区里没有一个能给你 %s（%s）"
+                                     % (gres_label(gres), why))
+                usable = fit
             # 随机挑，不按顺序挑第一个 —— 顺序挑会让所有默认会话落到同一个分区，
             # 而用户明确要的是分散。代价是他事先不知道会落到哪种卡上，所以
             # session_view 必须把【实际落到的】分区返回给界面显示。
             partition = random.choice(sorted(usable))
         max_time_secs = table[partition]["max_time"] if partition else None
+
+        # ── GRES 与这个分区对不对得上 ──────────────────────────────────────
+        # ★ 必须在分区定下来之后 —— 见 fit_gres() 的 docstring：上限是分区自己的。
+        gres, gres_err = self.fit_gres(gres, partition)
+        if gres_err:
+            return self._err(2, "bad_gres", gres_err)
 
         # ── 时间 ────────────────────────────────────────────────────────────
         t = str(req.get("time") or cfg.default_time)
@@ -4767,7 +5046,11 @@ class Sessiond(object):
         now = now_ts()
         self.store.insert(
             session_id=sid, uid=uid, user=user,
-            partition=partition, account=acct, cpus=cpus, mem=mem, gres=gres,
+            partition=partition, account=acct, cpus=cpus, mem=mem,
+            # ★ 存**描述符的 JSON**，不存 `"gpu:2"` 那个串 —— 那个串是**给 Slurm
+            #   的**，在这里存一份就等于同一件事有两个表示（写的时候一个、读回来
+            #   要靠正则再解析一个）。见文件上方 GRES 那一段。
+            gres=(json.dumps(gres, ensure_ascii=False) if gres else None),
             requested_time=time_str, job_id=None, state=ST_RESERVED,
             candidates=",".join(str(c) for c in cands),
             # 这里只是登记那一刻的初值，作业跑起来后会用它自己写进会话文件的那份
@@ -4795,7 +5078,11 @@ class Sessiond(object):
             "SLURMATE_PARTITION": partition,
             "SLURMATE_CPUS": str(cpus),
             "SLURMATE_MEM": mem,
-            "SLURMATE_GPUS": str(gpus),
+            # ★ 跨语言契约：作业侧（`cluster/run.sbatch`）读的是这个名字，值就是
+            #   交给 Slurm 的那个串（`gpu:a100:2` / `mps:100`），空串 = 没要。
+            #   作业侧**只把它记进日志与会话文件**，不做任何判断 —— 请求与分配
+            #   是两件事，而 Slurm 才是分配的那一方。改这一行就要改 run.sbatch。
+            "SLURMATE_GRES": gres_spec(gres) or "",
             "SLURMATE_AUTH_MODE": pcfg.session_auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
             "SLURMATE_CLUSTER_CIDR": cfg.cluster_cidr,
@@ -4833,15 +5120,15 @@ class Sessiond(object):
         self.store.update(sid, job_id=job_id, state=ST_SUBMITTED, submitted_at=now_ts())
         self.audit("submitted", session=sid, uid=uid, job=job_id,
                    partition=partition or None, account=acct,
-                   cpus=cpus, mem=mem, gpus=gpus,
+                   cpus=cpus, mem=mem, gres=gres,
                    candidates=cands, time=time_str, service_kind=kind)
-        log.info("已提交: uid=%d job=%s partition=%s cpus=%d mem=%s gpus=%d "
+        log.info("已提交: uid=%d job=%s partition=%s cpus=%d mem=%s gres=%s "
                  "candidates=%s time=%s",
-                 uid, job_id, partition or "(Slurm 默认)", cpus, mem, gpus,
-                 cands, time_str)
+                 uid, job_id, partition or "(Slurm 默认)", cpus, mem,
+                 gres_spec(gres) or "(不占)", cands, time_str)
         out = {"session_id": sid, "job_id": job_id, "state": ST_SUBMITTED,
                "partition": partition or None,
-               "resources": {"cpus": cpus, "mem": mem, "gpus": gpus or None},
+               "resources": {"cpus": cpus, "mem": mem, "gres": gres},
                "candidates": cands, "requested_time": time_str}
         if warning:
             # 服务端替用户做了决定（改了内存、截断了时间、或没按他以为的方式挑
@@ -5157,6 +5444,22 @@ def main():
                     _n, "默认  " if _i["is_default"] else "      ",
                     "无时间上限" if _i["max_time"] is None
                     else fmt_slurm_time(_i["max_time"])))
+        # 每个分区上能申请的 GRES。★ 这是"界面上为什么没有我要的那种卡"唯一
+        # 能回答的地方 —— 名字与型号都是管理员在 gres.conf 里定的，代码里
+        # 没有任何一份副本可以拿来对照。
+        _cat = slurm.gres_catalog()
+        if _cat is None:
+            print("  GRES          : 【读不到】scontrol show node 失败"
+                  "（这不影响提交，但界面上不会有可选项，服务端也不校验上限）")
+        else:
+            print("  GRES          :")
+            for _n in sorted(_cat):
+                _g = _cat[_n]
+                print("    %-12s %s" % (
+                    _n,
+                    "、".join("%s × %d/节点（本分区共 %d）"
+                              % (gres_label(e), e["per_node_max"], e["total"])
+                              for e in _g) or "（没有配任何 GRES）"))
         # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对 —— 这是唯一能发现
         # 「网段漏掉了某个节点」的地方，而漏掉的后果是静默失效。
         cidr_errors = crosscheck_cidr(cfg)

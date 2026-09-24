@@ -77,7 +77,11 @@ umask 077
 SLURMATE_PARTITION="${SLURMATE_PARTITION:-}"
 SLURMATE_CPUS="${SLURMATE_CPUS:-0}"
 SLURMATE_MEM="${SLURMATE_MEM:-}"
-SLURMATE_GPUS="${SLURMATE_GPUS:-0}"
+# 请求的 GRES，写法就是交给 sbatch 的那个串（`gpu:a100:2` / `mps:100`），
+# 空串 = 没要。★ **只是记进日志与会话文件，不做任何判断** —— 请求与分配是
+# 两件事，而分配是 Slurm 的事（每个节点实际给了几张，看 `squeue -o "%b"`）。
+# 变量名与守护进程 `op_submit` 里那一行是一份契约，改一处就要改两处。
+SLURMATE_GRES="${SLURMATE_GRES:-}"
 SLURMATE_PASSWORD_BYTES="${SLURMATE_PASSWORD_BYTES:-12}"
 # 兜底值只是"这个变量不该为空"的防御，不是默认网段 —— 真正的值由守护进程
 # 从配置里传下来，而配置里留空时守护进程根本不会启动。
@@ -405,7 +409,7 @@ trap 'log "收到 SIGUSR1：作业即将到期"; [[ -n "$SVC_PORT" ]] && write_s
 
 # ─── 6. 主流程 ──────────────────────────────────────────────────────────────
 log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
-    "partition=${SLURMATE_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gpus=$SLURMATE_GPUS" \
+    "partition=${SLURMATE_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gres=${SLURMATE_GRES:-（不占）}" \
     "service=$SLURMATE_SERVICE_KIND"
 log "候选端口: $SLURMATE_CANDIDATES"
 

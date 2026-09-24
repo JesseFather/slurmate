@@ -16,6 +16,7 @@ test-sessiond-logic.py — slurmate-sessiond 的单元/集成测试
   现在所有会碰宿主机的输入（状态目录、作业脚本、Slurm 命令）都在
   make_config() 里被摘掉，见那里的说明。
 """
+import ast
 import base64
 import hashlib
 import importlib.machinery
@@ -352,6 +353,28 @@ def make_config(mod, tmpdir):
 def slurm_stub(argv, timeout=10, check=False):
     cmd = " ".join(str(a) for a in argv)
     args = [str(a) for a in argv]
+
+    # ★ `scontrol show node -o`（**不带节点名**，列全部）—— GRES 的唯一来源。
+    #   形状照抄真机（本机实测 slurm-wlm 23.11.4）：
+    #     · `Gres=gpu:4` 是"名字:数量"；配了型号时是"名字:型号:数量"；
+    #     · **没配 GRES 的节点上这个键整个不出现**（不是 `Gres=(null)`）；
+    #     · `CfgTRES` / `AllocTRES` 里**没有** gres —— 那要
+    #       `AccountingStorageTRES` 里列了 `gres/gpu`，本集群没列。
+    #       所以夹具里也不许出现它们，否则用例守的是一个真机上不存在的形状。
+    #   ★ `gpu:a100:2` 那一台是**故意的**：本集群只有不带型号的 `gpu`，
+    #     带型号这条路在真集群上走不到，夹具不造它就等于没有覆盖（账本 F26）。
+    if "show node" in cmd and args[-1] == "-o":
+        return 0, (
+            "NodeName=nodea1 Arch=x86_64 NodeAddr=192.0.2.11 State=MIXED "
+            "Gres=gpu:a100:2 Partitions=A6000\n"
+            "NodeName=nodea2 Arch=x86_64 NodeAddr=192.0.2.12 State=IDLE "
+            "Gres=gpu:a100:2 Partitions=A6000\n"
+            "NodeName=nodeb1 Arch=x86_64 NodeAddr=192.0.2.20 State=IDLE "
+            "Gres=gpu:4,mps:100 Partitions=RTX8000\n"
+            "NodeName=nodec1 Arch=x86_64 NodeAddr=192.0.2.30 State=IDLE "
+            "Gres=gpu:8 Partitions=2080TI\n"
+            "NodeName=noded1 Arch=x86_64 NodeAddr=192.0.2.40 State=IDLE "
+            "Partitions=2080TI\n"), ""
 
     if "show node" in cmd:
         return {
@@ -944,7 +967,6 @@ exit 0
     check("cpus 超上限被钳制", mod.clamp_int(999, 2, 1, 64) == 64)
     check("cpus 负值被钳到下限", mod.clamp_int(-5, 2, 1, 64) == 1)
     check("cpus 非数字 → 默认值", mod.clamp_int("abc", 2, 1, 64) == 2)
-    check("gpus 缺失 → 0（不占卡）", mod.clamp_int(None, 0, 0, 8) == 0)
 
     # ── 14. cluster_cidr：三种写错的方式都必须被拦 ─────────────────────────
     # 这一项的失效方向全是 fail-open：不报错，只是 ACL 不再生效。
@@ -1072,8 +1094,30 @@ exit 0
     a = argv_of(partition="")
     check("分区为空串 → 不带 -p（交给 Slurm 的默认分区）",
           "-p" not in a, str(a))
+    # ★ 库里那一格存的是**描述符的 JSON**（见 op_submit 里那段），所以这里喂的
+    #   也是它。喂一个现拼的 `"gpu:2"` 就绕开了 load_gres() —— 而
+    #   "自己写进去的值自己读不回来"恰恰是要守的那一件事。
+    a = argv_of(gres=json.dumps({"name": "gpu", "count": 2}))
+    check("没型号的 GRES → --gres=gpu:2", "--gres=gpu:2" in a, str(a))
+    a = argv_of(gres=json.dumps({"name": "gpu", "type": "a100", "count": 2}))
+    check("★ 带型号 → --gres=gpu:a100:2（拼的时候丢掉 type 就是今天那条缺陷）",
+          "--gres=gpu:a100:2" in a, str(a))
+    a = argv_of(gres=json.dumps({"name": "mps", "count": 100}))
+    check("★ 名字不是 gpu 也表达得出来（GRES 是管理员自定义的，代码里没有白名单）",
+          "--gres=mps:100" in a, str(a))
+    a = argv_of(gres=json.dumps({"name": "shard", "type": "fast", "count": 1}))
+    check("★ 认不出来的名字/型号照样提交（上限由集群判，不由这张白名单判）",
+          "--gres=shard:fast:1" in a, str(a))
+    # 坏掉的那一格：**宽容**（当没要 + 记一条 error），不是让整次提交炸掉 ——
+    # 与 recover_from_rules() 对读不动的行是同一个取舍。代价如实说：这一次提交
+    # 会**不带 GRES 跑起来**，而日志里有一条 error、会话视图里 gres 是 null。
     a = argv_of(gres="gpu:2")
-    check("指定了 GPU → 带 --gres=gpu:2", "--gres=gpu:2" in a, str(a))
+    check("★ 库里那一格读不动时当没要（不让整次提交炸掉，但记 error）",
+          not any(x.startswith("--gres") for x in a), str(a))
+    check("★ 而 `load_gres` 认得的是 JSON 描述符，不是 `gpu:2` 那个串",
+          mod.load_gres(json.dumps({"name": "gpu", "count": 2}))
+          == {"name": "gpu", "type": None, "count": 2}
+          and mod.load_gres("gpu:2") is None, "load_gres 的两种输入")
     a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, tmpdir,
                               "/tmp/j.sbatch", "code-server")
     check("家目录下没有日志子目录时回退到家目录根",
@@ -1178,10 +1222,152 @@ exit 0
           not r.get("ok") and r["code"] == 2 and r["error"]["kind"] == "bad_partition",
           str(r))
 
-    r, sess, _ = run_submit({"op": "submit", "gpus": 2})
-    check("指定 GPU → gres=gpu:2", sess["gres"] == "gpu:2", str(sess["gres"]))
-    r, sess, _ = run_submit({"op": "submit", "gpus": 0})
-    check("gpus=0 → 不带 gres", sess["gres"] is None, str(sess["gres"]))
+    # ★ 存进库里的是**描述符的 JSON**，不是 `"gpu:2"` 那个串 —— 那个串是给 Slurm
+    #   的，存一份就等于同一件事有两个表示（写的时候一个、读回来再解析一个），
+    #   而今天那条缺陷正是两者对不上。所以这里的判据是**存进去的东西本身**。
+    def _stored_json(v):
+        """把库里那一格解成对象；解不开就原样返回（**不抛**）。"""
+        try:
+            return json.loads(v)
+        except (TypeError, ValueError):
+            return v
+
+    r, sess, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
+    check("提交带 GRES → 库里存的是描述符的 JSON",
+          _stored_json(sess["gres"]) == {"name": "gpu", "type": None, "count": 2},
+          repr(sess["gres"]))
+    check("★ 而它不是那个交给 Slurm 的串（两件事不许混成一个）",
+          sess["gres"] != "gpu:2", repr(sess["gres"]))
+    check("响应的 resources 里是同一个描述符",
+          (r.get("data") or {}).get("resources", {}).get("gres")
+          == {"name": "gpu", "type": None, "count": 2},
+          str((r.get("data") or {}).get("resources")))
+    r, sess, env = run_submit({"op": "submit", "partition": "RTX8000",
+                               "gres": {"name": "mps", "count": 100}})
+    check("★ 跨语言契约：环境变量是 SLURMATE_GRES（已无 SLURMATE_GPUS）",
+          env.get("SLURMATE_GRES") == "mps:100" and "SLURMATE_GPUS" not in env,
+          "GRES=%r / 有没有 GPUS=%s" % (env.get("SLURMATE_GRES"),
+                                       "SLURMATE_GPUS" in env))
+    r, sess, _ = run_submit({"op": "submit"})
+    check("不提交 GRES → 库里那一格是空的（不是 'null' 那个字符串）",
+          sess["gres"] is None and (r.get("data") or {}).get("resources", {}).get("gres") is None,
+          repr(sess["gres"]))
+
+    # ★★ 上限来自**集群的实际配置**，不是代码里那个写死的 8。
+    #   夹具的 2080TI 每节点 8 张（真集群上就是 8）—— 从前 `MAX_GPUS_REQUEST = 8`
+    #   在这里恰好也过得去，所以换一个**比 8 大**的分区来钉：RTX8000 那一台
+    #   每节点 4 张 + mps:100。看 mps 那一条。
+    r, _s, _e = run_submit({"op": "submit", "partition": "RTX8000",
+                            "gres": {"name": "mps", "count": 100}})
+    check("★ 每节点 100 个的那种 GRES 也能要到 100（硬编码 8 会在这里红）",
+          r.get("ok"), str(r))
+    r, _s, _e = run_submit({"op": "submit", "partition": "RTX8000",
+                            "gres": {"name": "mps", "count": 101}})
+    check("★ 超过**这个分区**的上限 → bad_gres，且那句话里有数",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres"
+          and "100" in r["error"]["detail"] and "101" in r["error"]["detail"],
+          str(r))
+    r, _s, _e = run_submit({"op": "submit", "partition": "A6000",
+                            "gres": {"name": "gpu", "type": "a100", "count": 8}})
+    check("★ 分区自己的上限：A6000 每节点 2 张 → 要 8 张被拒",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres"
+          and "2" in r["error"]["detail"], str(r))
+    r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
+                            "gres": {"name": "gpu", "type": "a100", "count": 1}})
+    check("★ 型号对不上 → 拒绝（这个分区没有 a100）",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres"
+          and "a100" in r["error"]["detail"], str(r))
+    r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
+                            "gres": {"name": "nvidia", "count": 1}})
+    check("★ 名字对不上 → 拒绝，且把**这个分区有什么**说出来",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres"
+          and "gpu" in r["error"]["detail"], str(r))
+    r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
+                            "gres": {"name": "gpu", "count": 16}})
+    check("★ 2080TI 每节点 8 张、要 16 张 → 拒绝（不是悄悄截成 8）",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
+    # 没点名分区（会随机挑一个）→ 必须**从装得下它的分区里**挑。mps 只有
+    # RTX8000 有 —— 从前那句 `random.choice(usable)` 会随机落到 2080TI 上被拒，
+    # 而用户没有任何办法绕开（他本来就没指定分区）。界面上给的选项也是并集，
+    # 两边必须是同一句话。
+    _picked = set()
+    for _ in range(12):
+        r, sess, _ = run_submit({"op": "submit", "gres": {"name": "mps", "count": 100}})
+        if not r.get("ok"):
+            check("★ 没点名分区时只从装得下它的分区里挑",
+                  False, "%s / %s" % (r.get("error"), sess["partition"]))
+            break
+        _picked.add(sess["partition"])
+    else:
+        check("★ 没点名分区时只从装得下它的分区里挑（mps 只有 RTX8000 有）",
+              _picked == {"RTX8000"}, str(sorted(_picked)))
+    # ★ 而过滤**不能**把"随机挑"变成"永远挑同一个"：不带型号的 gpu 要 2 个，
+    #   三个分区都装得下 ⇒ 落点必须分散（12 次全落同一个的概率约 3^-11）。
+    _picked2 = set()
+    for _ in range(12):
+        _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
+        if _r2.get("ok"):
+            _picked2.add(_s2["partition"])
+    check("★ 过滤之后**仍然是随机挑**（不是永远挑第一个装得下的）",
+          len(_picked2) >= 2, str(sorted(_picked2)))
+    r, _s, _e = run_submit({"op": "submit",
+                            "gres": {"name": "gpu", "type": "nosuch", "count": 1}})
+    check("★ 有权限的分区一个都装不下 → bad_gres，且那句话里有原因",
+          not r.get("ok") and r["error"]["kind"] == "bad_gres"
+          and "nosuch" in r["error"]["detail"], str(r))
+
+    # 后面几条要临时让"目录查不到"，这里先留一份真身。
+    _real_cat = mod.Slurm.gres_catalog
+
+    # ★★ 形状判据**自己**要能挡住 —— 不能靠下游"目录里没有这个名字"顺手挡住。
+    #   两件事是两码事：**目录查不到时下游是放行的**（权威在 Slurm），那时一个带
+    #   `:` 的名字会**原样拼进 `--gres`** —— `a:b:2` 在 Slurm 眼里是"名字 a、型号 b"，
+    #   与用户写下来的东西根本不是一回事，而且没有任何地方会报错。
+    #   （变异验证里"名字里放行 `:` 与 `,`"一开始**没红**，红的原因就是这层缺了。）
+    for _bad in ("a:b", "a,b", "gp u", "gpu;rm", "gpu\n"):
+        check("★★ clean_gres 自己挡住名字里的 %r（不靠目录）" % _bad,
+              mod.clean_gres({"name": _bad, "count": 2})[1] is not None,
+              str(mod.clean_gres({"name": _bad, "count": 2})))
+    check("★ type 那一格同理",
+          mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})[1] is not None
+          and mod.clean_gres({"name": "gpu", "type": "a,b", "count": 2})[1] is not None,
+          str(mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})))
+    # 而**目录查不到**时它照样挡：那正是上面那条的理由。
+    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    try:
+        r, _s, _e = run_submit({"op": "submit", "gres": {"name": "a:b", "count": 1}})
+        check("★★ 目录查不到时，带 `:` 的名字仍然被拒（下游这时是放行的）",
+              not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
+    finally:
+        mod.Slurm.gres_catalog = _real_cat
+
+    # 形状不合法的几种：都必须在**提交之前**被拒（不能靠 sbatch 报错）。
+    for _bad, _why in (
+        ("gpu:2", "不是一个对象"),
+        ({"name": "gpu", "count": 2, "type": "a:100"}, "type 里有分隔符"),
+        ({"name": "gp u", "count": 2}, "name 里有空格"),
+        ({"name": "gpu", "count": 0}, "count 是 0"),
+        ({"name": "gpu", "count": -1}, "count 是负数"),
+        ({"name": "gpu", "count": "2"}, "count 是字符串"),
+        ({"name": "gpu", "count": 2.5}, "count 不是整数"),
+        ({"name": "gpu", "count": mod.MAX_GRES_COUNT + 1}, "count 超量级护栏"),
+        ({"count": 2}, "没有 name"),
+        ({"name": "", "count": 2}, "name 是空串"),
+    ):
+        r, _s, _e = run_submit({"op": "submit", "gres": _bad})
+        check("形状不合法被拒（%s）→ bad_gres" % _why,
+              not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
+
+    # ★ 目录查不到时**放行**（由 Slurm 判），而不是拒绝所有带 GRES 的提交 ——
+    #   一次控制器抖动不该让所有人提交不了。
+    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    try:
+        r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
+                                "gres": {"name": "gpu", "count": 8}})
+        check("★ 查不到集群的 GRES 时放行（权威在 Slurm，不在我们）",
+              r.get("ok"), str(r))
+    finally:
+        mod.Slurm.gres_catalog = _real_cat
 
     r, sess, _ = run_submit({"op": "submit", "time": "183-00:00:00"})
     check("超过分区 MaxTime 与硬上限的时间被截断",
@@ -4426,6 +4612,215 @@ exit 0
           % (_v_run.get("job_terminal"), sorted(_v_run)))
     check("★ 排队中那一行同样带判定（false = 还没结束）",
           _v_pend.get("job_terminal") is False, repr(_v_pend.get("job_terminal")))
+
+    # ── 25. GRES：一个结构化描述符，和一个拼法 ───────────────────────────────
+    #
+    # 这一节守的是**一整类**缺陷，不是一条：GRES 是**管理员自定义的**
+    # （`GresTypes` + `gres.conf`），名字与型号随集群而定。从前代码里假定它只有
+    # `gpu:N` 一种形状 —— 写只写 `"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`。
+    # 于是带型号的集群上界面显示"没有 GPU"而作业正占着两张 A100，**没有任何地方
+    # 会报错**（那条正则不匹配就是"没有"，与"没要"长得一模一样）。
+    #
+    # 修法不是把正则写宽一点，而是**取消第二份表示**：描述符 `{name,type,count}`
+    # 是唯一的内部表示，交给 Slurm 的那个串由 `gres_spec()` 当场拼。
+    print("\n── 25. GRES（结构化描述符 + 唯一的拼法）──")
+
+    # ── 25.1 一个拼法 ───────────────────────────────────────────────────────
+    check("没型号 → 两段（`gpu:2`）",
+          mod.gres_spec({"name": "gpu", "type": None, "count": 2}) == "gpu:2",
+          mod.gres_spec({"name": "gpu", "type": None, "count": 2}))
+    check("★ 带型号 → 三段（`gpu:a100:2`）",
+          mod.gres_spec({"name": "gpu", "type": "a100", "count": 2}) == "gpu:a100:2",
+          mod.gres_spec({"name": "gpu", "type": "a100", "count": 2}))
+    check("★ 名字不是 gpu 照样拼得出来（GRES 是管理员自定义的）",
+          mod.gres_spec({"name": "mps", "type": None, "count": 100}) == "mps:100",
+          mod.gres_spec({"name": "mps", "type": None, "count": 100}))
+    check("没要 GRES → None（既不是空串，也不是 gpu:0）",
+          mod.gres_spec(None) is None, repr(mod.gres_spec(None)))
+
+    # ── 25.2 拆 `Gres=` 那一格（形状照抄真机）───────────────────────────────
+    check("`gpu:4` → 没型号",
+          mod.parse_gres_field("gpu:4") == [{"name": "gpu", "type": None, "count": 4}],
+          str(mod.parse_gres_field("gpu:4")))
+    check("★ `gpu:a100:2` → 带型号",
+          mod.parse_gres_field("gpu:a100:2")
+          == [{"name": "gpu", "type": "a100", "count": 2}],
+          str(mod.parse_gres_field("gpu:a100:2")))
+    check("多个之间用逗号（一台节点上两种 GRES）",
+          mod.parse_gres_field("gpu:4,mps:100")
+          == [{"name": "gpu", "type": None, "count": 4},
+              {"name": "mps", "type": None, "count": 100}],
+          str(mod.parse_gres_field("gpu:4,mps:100")))
+    check("★ 空 / `(null)` → 空列表（**不是**猜成 1 个）",
+          mod.parse_gres_field("") == [] and mod.parse_gres_field("(null)") == []
+          and mod.parse_gres_field("N/A") == [],
+          "%r / %r" % (mod.parse_gres_field(""), mod.parse_gres_field("(null)")))
+    check("★ 认不出的**那一项**跳过，不让整条作废（同一行里别的还认得）",
+          mod.parse_gres_field("gpu:4,x:") == [{"name": "gpu", "type": None, "count": 4}],
+          str(mod.parse_gres_field("gpu:4,x:")))
+    check("★ 段数不对的也跳过（`gpu` 这种没数量的）",
+          mod.parse_gres_field("gpu") == [], str(mod.parse_gres_field("gpu")))
+    check("末尾那种 `(S:0-1)` 索引说明被剥掉",
+          mod.parse_gres_field("gpu:2(S:0-1)")
+          == [{"name": "gpu", "type": None, "count": 2}],
+          str(mod.parse_gres_field("gpu:2(S:0-1)")))
+
+    # ── 25.3 目录：从**照抄真机**的夹具算出来 ───────────────────────────────
+    _real_run = mod.run_cmd
+    mod.run_cmd = slurm_stub
+    try:
+        _cat = mod.Slurm(cfg).gres_catalog()
+    finally:
+        mod.run_cmd = _real_run
+    check("★ 目录按分区聚合（A6000 两台各 2 张 → per_node_max 2、总 4）",
+          _cat and _cat.get("A6000") == [{"name": "gpu", "type": "a100",
+                                          "per_node_max": 2, "total": 4}],
+          str(_cat and _cat.get("A6000")))
+    check("★ 同一台节点上两种 GRES 都进目录",
+          _cat and [e["name"] for e in _cat.get("RTX8000", [])] == ["gpu", "mps"],
+          str(_cat and _cat.get("RTX8000")))
+    check("★ 没配 GRES 的节点**不产生条目**（那一格在真机上整个不出现）",
+          _cat and _cat.get("2080TI") == [{"name": "gpu", "type": None,
+                                           "per_node_max": 8, "total": 8}],
+          str(_cat and _cat.get("2080TI")))
+    check("★ 目录里**没有**『已用』这一格（本版本的 Slurm 给不出来，就不编）",
+          _cat and all("used" not in k for e in _cat.values() for k in e),
+          str(_cat))
+    # 缓存：ttl 之内不重复 fork（这是每个 partitions 请求都要走的路）。
+    _calls = [0]
+
+    def _counting_run(argv, timeout=10, check=False):
+        _calls[0] += 1
+        return slurm_stub(argv, timeout, check)
+
+    mod.run_cmd = _counting_run
+    try:
+        _s = mod.Slurm(cfg)
+        _s.gres_catalog()
+        _s.gres_catalog()
+        _s.gres_catalog()
+    finally:
+        mod.run_cmd = _real_run
+    check("★ 目录有缓存（三次调用只 fork 一次）", _calls[0] == 1, "fork 了 %d 次" % _calls[0])
+
+    # ── 25.4 op_partitions：每分区一份清单，而且**三态** ─────────────────────
+    _part_ran = [0]
+
+    def _part_run(argv, timeout=10, check=False):
+        a = [str(x) for x in argv]
+        if "show" in a and "assoc" in a:
+            return 0, ("myaccount|\n" if any("Partition" in x for x in a)
+                       else "myaccount\n"), ""
+        _part_ran[0] += 1
+        return slurm_stub(argv, timeout, check)
+
+    _pv = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
+    _by_name = {p["name"]: p for p in (_pv.get("data") or {}).get("partitions", [])}
+    check("分区列表仍然照常返回", _pv.get("ok") and len(_by_name) == 3, str(_pv))
+    check("★ 每个分区带上它自己的 GRES 清单",
+          _by_name["A6000"].get("gres")
+          == [{"name": "gpu", "type": "a100", "per_node_max": 2, "total": 4}],
+          str(_by_name["A6000"].get("gres")))
+    check("★ 清单里带型号（`gpu:a100`）—— 不是只有一个数字",
+          _by_name["A6000"]["gres"][0]["type"] == "a100",
+          str(_by_name["A6000"]["gres"]))
+    # ★★ 三态：查不到时那个键**整个不存在**（不是 `[]`）。
+    #   `[]` 的意思是"这个分区确实没配"，而"没问到"是另一句话 ——
+    #   把两者合并，界面就会替集群说一句它不知道的话。
+    _real_cat2 = mod.Slurm.gres_catalog
+    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    try:
+        _pv2 = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
+    finally:
+        mod.Slurm.gres_catalog = _real_cat2
+    _p0 = ((_pv2.get("data") or {}).get("partitions") or [{}])[0]
+    check("★★ 目录查不到 ⇒ `gres` 这个键**不存在**（不是空列表）",
+          _pv2.get("ok") and "gres" not in _p0, str(sorted(_p0)))
+
+    # ── 25.5 ★★ 读回：带型号的会话在视图里是带型号的（今天红的那一条）──────
+    #
+    # 从前那一句是 `re.fullmatch(r"gpu:(\d+)", s["gres"])` —— 一个自己写进去的
+    # `gpu:a100:2` 在这里**匹配不上**，于是 `gpus` 是 None，界面显示"没有 GPU"。
+    # 缺陷的形状是"写进去的读不回来"，所以用例必须**先经过 list 那一侧**看回来。
+    _v_sess = {"session_id": "s1", "job_id": None, "state": mod.ST_RESERVED,
+               "partition": "A6000", "cpus": 4, "mem": "16G",
+               "gres": json.dumps({"name": "gpu", "type": "a100", "count": 2}),
+               "service_kind": "code-server", "service_plugin": "x@1.0.0",
+               "node": None, "node_ip": None, "service_port": None,
+               "created_at": 0, "enrolled_at": None, "last_hb_socket": None,
+               "renew_count": 0, "requested_time": "12:00:00", "note": None,
+               "auth_mode": "password", "account": "myaccount", "uid": UID}
+    # ★ 一律用 `.get()` 取那一格：**别让"字段被改名"变成一次 KeyError**。
+    #   变异验证时那正是被测的东西（把 `gres` 改回 `gpus`），而抛出去的异常会把
+    #   整个脚本带崩 —— 崩了与"一条都不红"在输出上长得一模一样。
+    _vv = d.session_view(dict(_v_sess))
+    check("★★ 读回带型号的 GRES：视图里是描述符，不是 None",
+          _vv.get("resources", {}).get("gres")
+          == {"name": "gpu", "type": "a100", "count": 2},
+          str(_vv.get("resources")))
+    check("★★ 而它**不再是** `resources.gpus` 那个数字（那个字段没有了）",
+          "gpus" not in (_vv.get("resources") or {}),
+          str(sorted(_vv.get("resources") or {})))
+    _vv2 = d.session_view(dict(_v_sess, gres=json.dumps({"name": "mps", "count": 64})))
+    check("★ 名字不是 gpu 的会话照样读得回来",
+          _vv2.get("resources", {}).get("gres")
+          == {"name": "mps", "type": None, "count": 64},
+          str(_vv2.get("resources")))
+    _vv3 = d.session_view(dict(_v_sess, gres=None))
+    check("没要 GRES → null（界面那一行就不说 GRES）",
+          _vv3.get("resources", {}).get("gres") is None, str(_vv3.get("resources")))
+    _vv4 = d.session_view(dict(_v_sess, gres="gpu:2"))
+    check("库里那一格读不动 → null，**不让整个 list 变成错误**",
+          _vv4.get("resources", {}).get("gres") is None
+          and _vv4.get("session_id") == "s1",
+          str(_vv4.get("resources")))
+
+    # ── 25.6 ★★ 跨文件往返：CLI 拆词与守护进程拼词必须互相认得 ──────────────
+    #
+    # 拆词在 `cluster/slurmate`（用户敲的 `--gres gpu:a100:2`），拼词在守护进程
+    # （交给 sbatch 的那个串）。两个文件不共享模块（CLI 在 <prefix>/bin、守护进程
+    # 在 <prefix>/sbin），所以这一对**会漂**，而漂的表现是"CLI 收下了、服务端
+    # 说不认识"或反过来。这条往返用例就是那道闸。
+    _cli = load_cli()
+    for _spec in ("gpu:2", "gpu:a100:2", "mps:100", "shard:fast:1"):
+        _g, _e = _cli.parse_gres_spec(_spec)
+        check("★ 往返：CLI 拆 %r 再拼回去还是它" % _spec,
+              _e is None and mod.gres_spec(_g) == _spec,
+              "%r / %s" % (_g, _e))
+    check("★ CLI 拆出来的东西守护进程认（形状一致，不是各写一套）",
+          all(mod.clean_gres(_cli.parse_gres_spec(s)[0])[1] is None
+              for s in ("gpu:2", "gpu:a100:2", "mps:100")),
+          "三种写法")
+    for _bad in ("gpu", "a:b:c:d", "gpu:x"):
+        _g, _e = _cli.parse_gres_spec(_bad)
+        check("★ CLI 对 %r 说得出它不对（不是静默当成没要）" % _bad,
+              _g is None and bool(_e), "%r / %s" % (_g, _e))
+    _g, _e = _cli.parse_gres_spec("")
+    check("★ 空串 = 没要（与「写错了」是两回事）",
+          _g is None and _e is None, "%r / %s" % (_g, _e))
+
+    # ── 25.7 ★ 跨语言契约：run.sbatch 读的那个变量名 ────────────────────────
+    # ★ 那个写死的 GPU 上限**不许回来**。用 `ast` 查而不是 grep：这段代码里
+    #   **必须**提到 `MAX_GPUS_REQUEST`（上面那段注释在解释它为什么被删掉），
+    #   而 grep 分不清"提到"与"用着"—— 那正是这个仓库栽过的那种假红/假绿。
+    _tree = ast.parse(io.open(DAEMON, encoding="utf-8").read())
+    _refs = [n.id for n in ast.walk(_tree) if isinstance(n, ast.Name)]
+    _assigned = [t.id for n in ast.walk(_tree) if isinstance(n, ast.Assign)
+                 for t in n.targets if isinstance(t, ast.Name)]
+    check("★★ MAX_GPUS_REQUEST 既没被赋值、也没被引用（写死的上限不许回来）",
+          "MAX_GPUS_REQUEST" not in _refs and "MAX_GPUS_REQUEST" not in _assigned,
+          "引用 %d 次 / 赋值 %d 次" % (_refs.count("MAX_GPUS_REQUEST"),
+                                    _assigned.count("MAX_GPUS_REQUEST")))
+    _sb = io.open(os.path.join(HERE, "run.sbatch"), encoding="utf-8").read()
+    _daemon_src = io.open(DAEMON, encoding="utf-8").read()
+    check("★ run.sbatch 读的是 SLURMATE_GRES（作业侧那一半）",
+          "SLURMATE_GRES" in _sb, "run.sbatch 里没有这个名字")
+    check("★★ 而旧名字 SLURMATE_GPUS 两边都不剩（改名改一半是最坏的一种）",
+          "SLURMATE_GPUS" not in _sb and "SLURMATE_GPUS" not in _daemon_src,
+          "run.sbatch=%s / 守护进程=%s"
+          % ("SLURMATE_GPUS" in _sb, "SLURMATE_GPUS" in _daemon_src))
+    check("★ 守护进程往环境里放的就是那个名字",
+          '"SLURMATE_GRES"' in _daemon_src, "op_submit 的 env 里没有它")
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

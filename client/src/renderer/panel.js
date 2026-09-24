@@ -362,7 +362,9 @@ function renderKv(s) {
   const resText = [
     r.cpus ? `${r.cpus} 核` : null,
     r.mem || null,
-    (typeof r.gpus === 'number' && r.gpus > 0) ? `${r.gpus} GPU` : null,
+    // GRES 那一段**已经在主进程译好**（`gres.js`）—— 名字与型号是集群定的，
+    // 这里一个假设都不做。`s.gresText` 为 null = 这一行不说 GRES。
+    s.gresText || null,
   ].filter(Boolean).join(' / ') || '—';
 
   const rows = [
@@ -1554,12 +1556,28 @@ async function startWith(serviceKind, btn) {
     const res = {};
     const cpus = $('f-cpus').value.trim();
     const mem = $('f-mem').value.trim();
-    const gpus = $('f-gpus').value.trim();
     const part = $('f-part').value;
     if (cpus) res.cpus = Number(cpus);
     if (mem) res.mem = mem;
-    if (gpus !== '') res.gpus = Number(gpus);
     if (part) res.partition = part;
+    // GRES：选了名字才发。**数量是必填的** —— 发一个没有数量的 GRES 等于让服务端
+    // 去猜要几个，而服务端不猜（它只校验与钳制），回一句"不合法"才是对的。
+    // ★ 描述符按**序号**取回（选项的 value 就是 curGres 的下标）：不从 option 的
+    //   文字里再拆一遍 `gpu:a100` —— 那等于在客户端再造一个语法解析器。
+    const gi = $('f-gres').value;
+    if (gi !== '') {
+      const e = curGres[Number(gi)];
+      const n = Number($('f-gres-n').value);
+      if (!e) {
+        notice('error', 'GRES 那一项已经失效了（分区是不是换过？），请重新选一次。');
+        return;
+      }
+      if (!Number.isInteger(n) || n < 1) {
+        notice('error', '选了 GRES 就要填数量，至少 1。');
+        return;
+      }
+      res.gres = { name: e.name, type: e.type || null, count: n };
+    }
 
     const r = await window.slurmate.start(res, serviceKind);
     if (r && r.sessions) renderSessions({ sessions: r.sessions, front: r.front });
@@ -1575,9 +1593,18 @@ async function startWith(serviceKind, btn) {
 }
 
 // ── 分区 ────────────────────────────────────────────────────────────────────
+/** 最近一次拿到的分区表（含每个分区的 GRES 清单）。换分区时要拿它重画 GRES。 */
+let partList = [];
+/**
+ * 当前 GRES 下拉里每一项对应的描述符。
+ * ★ 选项的 `value` 是它的**下标**，不是拼出来的字符串 —— 见 startWith 里那段。
+ */
+let curGres = [];
+
 function renderPartitions(list) {
   const sel = $('f-part');
   const keep = sel.value;
+  partList = list || [];
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
@@ -1594,6 +1621,89 @@ function renderPartitions(list) {
     sel.append(o);
   }
   sel.value = keep;
+  // 换分区 ⇒ 可选的 GRES 跟着换（上限是**分区自己**的：同一个集群上
+  // 一种卡每节点 8 张、另一种 4 张）。这里画一次，之后由 onchange 接着画。
+  sel.onchange = renderGresOptions;
+  renderGresOptions();
+}
+
+/**
+ * 某个分区（或"还没挑分区"）能用哪些 GRES。
+ *
+ * ★ 服务端查不到集群的 GRES 时，分区对象上**根本没有 `gres` 这个键** —— 那时
+ *   返回 `absent: true`，界面要把这件事说出来。否则用户读成"这台集群没有卡"，
+ *   而真相是"我们没问到"。`[]` 才是"确实没有卡"。
+ *
+ * ★ 没挑分区时给的是**所有有权限分区的并集**：不这么做，"要 2 张卡、分区随便"
+ *   这句话在界面上就表达不出来 —— 而服务端是支持的（`fit_gres` 在没点名分区时
+ *   在所有分区里找）。并集里同一个名字取各分区里**最大的** `per_node_max`，
+ *   因为最终落到哪个分区由服务端随机挑。
+ */
+function gresChoicesFor(partName) {
+  if (partName) {
+    const p = partList.find((x) => x.name === partName);
+    if (!p) return { list: [], absent: false };
+    if (!Array.isArray(p.gres)) return { list: [], absent: true };
+    return { list: p.gres, absent: false };
+  }
+  let absent = false;
+  const byKey = new Map();
+  for (const p of partList) {
+    if (!p.allowed) continue;
+    if (!Array.isArray(p.gres)) { absent = true; continue; }
+    for (const e of p.gres) {
+      const k = `${e.name}:${e.type || ''}`;
+      const cur = byKey.get(k);
+      if (!cur) {
+        byKey.set(k, { ...e });
+      } else {
+        cur.per_node_max = Math.max(cur.per_node_max, e.per_node_max);
+        cur.total += e.total;
+      }
+    }
+  }
+  return { list: [...byKey.values()], absent };
+}
+
+function renderGresOptions() {
+  const sel = $('f-gres');
+  const { list, absent } = gresChoicesFor($('f-part').value);
+  curGres = list;
+  sel.textContent = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '（不占）';
+  sel.append(none);
+  for (let i = 0; i < curGres.length; i++) {
+    const e = curGres[i];
+    const o = document.createElement('option');
+    o.value = String(i);
+    // ★ 问的是 `per_node_max`（`--gres=gpu:N` 是**每节点** N 个），不是 total：
+    //   "本分区一共 8 张"与"一个作业最多能要 4 张"是两个不同的问题。
+    o.textContent = `${e.label || e.name}（每节点最多 ${e.per_node_max}）`;
+    sel.append(o);
+  }
+  sel.title = absent
+    ? '服务端暂时查不到这台集群的 GRES 清单（scontrol 没答上来）' : '';
+  sel.value = '';
+  sel.onchange = applyGresMax;
+  applyGresMax();
+}
+
+/** GRES 的数量上限跟着选中的那一项走。**客户端不写死任何数字。** */
+function applyGresMax() {
+  const cnt = $('f-gres-n');
+  const e = curGres[Number($('f-gres').value)];
+  if (!e) {
+    cnt.value = '';
+    cnt.disabled = true;
+    cnt.placeholder = '—';
+    cnt.removeAttribute('max');
+    return;
+  }
+  cnt.disabled = false;
+  cnt.placeholder = '必填';
+  cnt.max = String(e.per_node_max);
 }
 
 // ── 主机密钥确认 ────────────────────────────────────────────────────────────

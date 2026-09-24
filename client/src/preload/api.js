@@ -95,7 +95,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   newKey: () => ipcRenderer.invoke('app:newKey'),
 
   // ── 会话 ──
-  // resources 是高级选项里的**临时**覆盖：{cpus, mem, gpus, partition}。
+  // resources 是高级选项里的**临时**覆盖：{cpus, mem, gres, partition}。
+  // `gres` 是结构化描述符 `{name, type, count}`，**不是**一个数字 —— 名字与
+  // 型号是管理员在集群上定的（见 main/gres.js）。
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
   // serviceKind 是**本站的短名**（配置块名、块标题旁边那个 code）。省略 = 缺省

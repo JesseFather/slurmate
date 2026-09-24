@@ -695,6 +695,38 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 审计（`note_nonterminal()`）。**它不释放任何东西** —— 作业是集群的，
 而我们拆掉的防护是不可逆的。
 
+### 3.2 ★★ 资源：GRES 是「名字 + 型号 + 数量」三件事
+
+CPU 与内存是**数字**，GRES 不是。它是**管理员自定义的**：`GresTypes` 里列名字，
+`gres.conf` 里给每台机器配型号与数量。名字可以是 `gpu`，也可以是 `mps`、`shard`；
+同一个名字还可以带型号（`gpu:a100`）。
+
+**内部的唯一表示**是描述符 `{name, type, count}`：线路上是它，数据库里存它的
+JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` **当场拼** ——
+全仓只有那一处拼法。
+
+> ★ 这一条不是风格，是一个**缺陷的形状**。从前存的是 `"gpu:2"` 那个串，读回来
+> 用 `re.fullmatch(r"gpu:(\d+)")`：一台配了型号的集群上，服务端**自己写进去的
+> `gpu:a100:2` 自己读不回来** ⇒ 当成"没有 GPU" ⇒ 界面上那一段整个不出现。
+> 作业占着两张 A100，而用户以为自己没要卡，**没有任何地方会报错**。
+> 把正则写宽一点治不了这个病 —— 病是"同一件事有两个表示"。
+
+**上限来自集群，不来自代码**：`Slurm.gres_catalog()` 从 `scontrol show node -o`
+的 `Gres=` 与 `Partitions=` 算出每个分区上有什么、每节点几个；
+`Sessiond.fit_gres()` 拿它对账。查不到目录时**放行**（权威在 Slurm 那一侧）。
+从前是一个写死的 `MAX_GPUS_REQUEST = 8` —— 那是替所有站点做同一个决定。
+
+两处**不许混**的东西：
+
+- `per_node_max`（一个作业能要几个）与 `total`（这个分区一共几张）是两个问题，
+  `--gres=gpu:N` 是**每节点** N 个，所以界面与判据都用前者；
+- **没有"已用"这一格。** 本机实测（slurm-wlm 23.11.4）：节点的 `CfgTRES` /
+  `AllocTRES` 不含 gres，`GresUsed=` 也不存在。拿 `squeue` 去减是另一件事，
+  而且那个数刚算完就过期 —— 报一个错的数量比不报更糟。
+
+★ **这一版不做 `site.defaultGpus`（插件声明默认卡数）。** 那是稀缺算力的**政策**，
+是一个悬而未决的产品决定，不是疏漏 —— 见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 F15。
+
 ## 四、nft 规则为什么写成单条 `meta skuid != UID drop`
 
 规则形态（`cluster/slurmate-sessiond`）：
@@ -912,15 +944,18 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 3. **计算节点上没有 per-user 网络隔离时，ACL 覆盖不到同节点内的横向访问。**
    这是 code-server 插件的 `auth_mode` 默认取 `password` 的原因
    （`plugins/code-server/README.md`）。
-4. **`op_submit` 非幂等，而配额检查漏掉了 `submitted` 那一档** —— 并发的第二个
-   提交因此拦不住。客户端的应对是 `submit` 超时时**绝不重试**，改用不带
-   `session_id` 的 `status` 去认领（`client/src/main/session.js`）。
-   **未修，编号 F14** —— 机理与两条修法在账本里。
+4. **`op_submit` 非幂等** —— 它背后是 `sbatch`，而 `sbatch` 本来就非幂等：一次超时
+   之后重试会造出**第二个作业**。客户端的应对是 `submit` 超时时**绝不重试**，改用
+   不带 `session_id` 的 `status` 去认领（`client/src/main/session.js`）。
+   ★ 这一条曾经是"缺陷"，因为配额检查漏掉了 `submitted` 那一档，并发的第二个提交
+   因此真的拦不住 —— **v0.7 修掉了（F14）**。今天剩下的只是上面那句边界：
+   **别重试**。
 5. **`goodbye` 返回 `ok:true` 不代表作业被取消了** —— 所以客户端把「正在释放」和
    「已结束」当成两个状态（`client/src/main/session.js`）。**未修，编号 F12 / F13。**
 
-★ 第 4、5 两条是**当前代码里的缺陷**，不是设计上的取舍 —— 连同其余未修项、
-未实测项与结构性欠账，全部记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。
+★ 第 5 条是**当前代码里的缺陷**，不是设计上的取舍；第 4 条是**契约上的边界**
+（该做的事在客户端那一侧）。连同其余未修项、未实测项与结构性欠账，
+全部记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。
 
 ## 延伸阅读
 

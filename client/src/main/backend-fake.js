@@ -88,11 +88,26 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 // 模拟用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
 // 在开发者模式下也走得到。
+//
+// ★ GRES 那一格是**故意的假**，而且比真集群"脏"：本机那台真集群只有不带型号的
+//   `gpu`，所以"带型号"（`gpu:a6000`）与"名字不是 gpu"（`mps`）这两条路**只在
+//   这里走得到**。夹具比现实干净，缺陷就会在用例里隐形 —— 见账本 F26。
+//   形状与字段名照抄 `scontrol show node -o` 的 `Gres=` 与守护进程的
+//   `gres_catalog()`（`scontrol show config` 的 GresTypes 只列名字，不带数量）。
+const GRES = {
+  '2080TI': [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }],
+  'A6000': [{ name: 'gpu', type: 'a6000', per_node_max: 4, total: 8 }],
+  // ★ 同一台集群上两种 GRES 并存，其中一种的数量是**按份额**算的（100 个）——
+  //   一个写死的上限 8 会在这里立刻露馅。
+  'RTX8000': [{ name: 'gpu', type: 'rtx8000', per_node_max: 4, total: 4 },
+              { name: 'mps', type: null, per_node_max: 100, total: 100 }],
+  'DEBUG': [],
+};
 const PARTITIONS = [
-  { name: '2080TI',  allowed: true,  is_default: true, max_time: '183-00:00:00' },
-  { name: 'A6000',   allowed: true,  max_time: '183-00:00:00' },
-  { name: 'RTX8000', allowed: true,  max_time: '183-00:00:00' },
-  { name: 'DEBUG',   allowed: false, reason: '你的账户没有该分区的权限', max_time: '1:00:00' },
+  { name: '2080TI',  allowed: true,  is_default: true, max_time: '183-00:00:00', gres: GRES['2080TI'] },
+  { name: 'A6000',   allowed: true,  max_time: '183-00:00:00', gres: GRES['A6000'] },
+  { name: 'RTX8000', allowed: true,  max_time: '183-00:00:00', gres: GRES['RTX8000'] },
+  { name: 'DEBUG',   allowed: false, reason: '你的账户没有该分区的权限', max_time: '1:00:00', gres: GRES['DEBUG'] },
 ];
 
 /** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。 */
@@ -637,7 +652,10 @@ class FakeBackend extends Backend {
   }
 
   _partitions() {
-    return PARTITIONS.map((p) => ({ ...p }));
+    // 每一项都**真的拷一份**（含 GRES 那一格）：真实后端回的是刚解析出来的 JSON，
+    // 谁都不与别人共享一个对象。这里共享的话，界面上一处手误的原地修改会**同时
+    // 改掉所有会话看到的那一份** —— 而那种 bug 在真集群上不会出现。
+    return PARTITIONS.map((p) => ({ ...p, gres: p.gres.map((e) => ({ ...e })) }));
   }
 
   /**
@@ -729,7 +747,11 @@ class FakeBackend extends Backend {
     // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
     const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 64);
     const mem = typeof (req && req.mem) === 'string' && req.mem ? req.mem : DEFAULTS.mem;
-    const gpus = req && req.gpus !== undefined && req.gpus !== null ? clampInt(req.gpus, 0, 0, 8) : null;
+    // GRES：与守护进程同一条规矩 —— **分区定下来之后**再对账，因为上限是分区
+    // 自己的（同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
+    const gresp = gresFor(req && req.gres, part);
+    if (gresp.err) return err(2, 'bad_gres', gresp.err);
+    const gres = gresp.gres;
 
     const sid = 'demo-' + String(++this._seq).padStart(4, '0')
               + Math.random().toString(16).slice(2, 10);
@@ -741,7 +763,7 @@ class FakeBackend extends Backend {
       state: 'submitted',
       partition: part.name,
       account: 'myaccount',
-      resources: { cpus, mem, gpus },
+      resources: { cpus, mem, gres },
       node: null,
       node_ip: null,
       service_port: 0,
@@ -811,7 +833,7 @@ class FakeBackend extends Backend {
     return ok({
       session_id: sid, job_id: sess.job_id, state: 'submitted',
       partition: part.name,
-      resources: { cpus, mem, gpus },
+      resources: { cpus, mem, gres },
       candidates: [55101, 55102, 55103, 55104, 55105, 55106],
       requested_time: '12:00:00',
     });
@@ -947,6 +969,65 @@ function clampInt(v, fallback, lo, hi) {
   if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) v = Number(v);
   if (!Number.isInteger(v)) return fallback;
   return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * 框架对 GRES 数量的量级护栏。★ **必须与守护进程的 `MAX_GRES_COUNT` 相等**
+ * （用例 `client/test/limits.test.mjs` 逐字比对两个文件里的这个数）——
+ * 它**不是**站点策略：真实上限来自集群自己配了几个，由分区的 `per_node_max`
+ * 给出。这一条只挡"一个天文数字"。
+ */
+const MAX_GRES_COUNT = 4096;
+
+/**
+ * `--gres` 的名字里允许出现的字符。与守护进程的 `GRES_FIELD_RE` 同一条规矩
+ * （`:` 与 `,` 是 Slurm 自己的分隔符，不能出现在名字里）。
+ */
+const GRES_FIELD_RE = /^[A-Za-z0-9_]{1,32}$/;
+
+/**
+ * 把请求里的 GRES 与**这个分区实际有的**对一对。返回 `{gres}` 或 `{err}`。
+ *
+ * ★ 逐条照着守护进程的 `clean_gres()` + `fit_gres()` 来。这个假后端的全部价值
+ *   就是**它演的是生产那条路**：两处规则漂开的话，开发者模式里说得通的事在真机上
+ *   会被拒（或反过来），而 `backend-fake.test.mjs` 只守得住字段名，守不住规则。
+ * ★ 上限**从分区的清单来**（`per_node_max`），不是写死一个 8 —— 与守护进程一样。
+ */
+function gresFor(raw, part) {
+  if (raw === undefined || raw === null || raw === '') return { gres: null };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { err: 'gres 必须是一个对象：{"name": …, "type": …, "count": …}' };
+  }
+  const name = raw.name;
+  if (typeof name !== 'string' || !GRES_FIELD_RE.test(name)) {
+    return { err: `gres 的 name 不合法：${JSON.stringify(name)}` };
+  }
+  let type = raw.type;
+  if (type === '' || type === undefined) type = null;
+  if (type !== null && (typeof type !== 'string' || !GRES_FIELD_RE.test(type))) {
+    return { err: `gres 的 type 不合法：${JSON.stringify(type)}` };
+  }
+  const count = raw.count;
+  if (!Number.isInteger(count) || count < 1) {
+    return { err: `gres 的 count 必须是 >= 1 的整数，得到 ${JSON.stringify(count)}` };
+  }
+  if (count > MAX_GRES_COUNT) {
+    return { err: `gres 的 count 上限是 ${MAX_GRES_COUNT}，得到 ${count}` };
+  }
+  const list = Array.isArray(part.gres) ? part.gres : [];
+  const match = list.filter((e) => e.name === name && (!type || e.type === type));
+  if (match.length === 0) {
+    const have = list.map((e) => (e.type ? `${e.name}:${e.type}` : e.name));
+    return { err: `分区 ${part.name} 上没有 ${type ? `${name}:${type}` : name}`
+      + `（它有：${have.join('、') || '什么 GRES 都没配'}）` };
+  }
+  const label = type ? `${name}:${type}` : name;
+  const cap = Math.max(...match.map((e) => e.per_node_max));
+  if (count > cap) {
+    return { err: `分区 ${part.name} 上 ${label} 每个节点最多 ${cap} 个，`
+      + `你要了 ${count} 个` };
+  }
+  return { gres: { name, type, count } };
 }
 
 // ★ 只导出真有人读的：`PARTITIONS` 从前也在这里，而它只在**本文件内**被用

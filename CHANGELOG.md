@@ -90,6 +90,49 @@
   老守护进程不发 `job_terminal` 时它**印状态原文**，不猜。
 - 界面不再印 Slurm 的原文大写枚举（`OUT_OF_MEMORY` / `REQUEUE_HOLD`）。
 
+### Fixed — ★★ GRES 是管理员自定义的，不是只有 `gpu:N` 一种形状
+
+GRES 由 `GresTypes` + `gres.conf` 定，名字随集群而定（`gpu` / `mps` / `shard`…），
+同一个名字还可以带型号（`gpu:a100`）。而代码从前假定它只有一种形状：写只写
+`"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`。**缺陷的形状**是：一台配了型号的
+集群上，服务端**自己写进去的 `gpu:a100:2` 自己读不回来** ⇒ 正则不匹配 ⇒ 当成
+"没有 GPU" ⇒ 界面上那一段整个不出现 —— **作业占着两张 A100，而用户以为自己没要卡，
+没有任何地方会报错**。
+
+- 修法不是把正则写宽一点，是**取消第二份表示**：描述符 `{name, type, count}` 是
+  **唯一**的内部表示 —— 线上是它、数据库里存它的 JSON、审计里也是它；交给 Slurm 的
+  那个串（`name[:type]:count`）由 `gres_spec()` **当场拼**，全仓只有那一处。
+- `sessions.gres` 那一列**类型不变**（还是 `TEXT`），内容从 `"gpu:2"` 变成
+  描述符的 JSON ⇒ **不需要删库**（见账本 S15 那条代价）。
+- 请求那一格从 `"gpus": 2` 变成 `"gres": {"name":…,"type":…,"count":…}`；
+  响应与 `resources` 里是同一个描述符。**0.y 不考虑兼容性**，所以旧形状直接删掉。
+- **上限由集群自己配了几个决定**：新增 `Slurm.gres_catalog()`（从
+  `scontrol show node -o` 的 `Gres=` 与 `Partitions=` 聚合出"每个分区有什么、
+  每节点几个"）与 `Sessiond.fit_gres()`（对账：这个分区上没有那种 GRES ⇒
+  `bad_gres`；超过 `per_node_max` ⇒ `bad_gres`，**拒绝而不是悄悄截断**）。
+  `MAX_GPUS_REQUEST = 8` **删掉**。
+- ★ 用户**没点名分区**时，只从"装得下它"的分区里随机挑 —— 否则"要 2 张卡、
+  分区随便"会随机落到一个没有那种卡的分区上被拒，而用户没有任何办法绕开。
+- `partitions` op 的每一项多一格 `gres`（三态：键不存在 = 查不到 / `[]` = 确实没有 /
+  非空 = 清单）。**没有"已用"这一格** —— 本机实测那台版本的 Slurm 给不出来，
+  而拿 `squeue` 去减出来的数刚算完就过期（见账本 U8）。
+- 跨语言契约改名：`SLURMATE_GPUS` → `SLURMATE_GRES`（值就是交给 Slurm 的那个串），
+  `cluster/run.sbatch` 同一次改完 —— 作业侧只把它记进日志，不做任何判断。
+- 客户端：`client/src/main/gres.js`（`gresLabel` / `gresText`，纯函数），
+  高级选项里那一格从"GPU 数"换成 **GRES 选择器**（名字 + 型号 + 数量，选项与服务端
+  给的 `per_node_max` 都**由服务端来**，界面里不再有写死的 `max="8"`）。
+- CLI：`--gpus N` → **`--gres 名字[:型号]:数量`**（写法同 `sbatch`），
+  `slurmate partitions` 多一列 GRES，`slurmate-sessiond --check` 多一段每个分区的清单。
+- ★ **这一版仍然不做 `site.defaultGpus`**（插件声明默认卡数）—— 那是稀缺算力的
+  **政策**，是一个悬而未决的产品决定（账本 F15，"不要顺手修"）。但 F15 的处境变好了：
+  "没法表达"那一半被这一版修掉了，剩下的只有"刻意不声明"。
+
+### Added — 结构性：几个"同一个数写了两遍"的地方加上了交叉校验
+
+`MAX_CPUS_REQUEST` 此前在守护进程、`panel.html` 的 `max="64"`、假后端的 `clampInt`
+里各写一遍，而 `tools/checks.yml` 只比对版本号 —— 漂了不会红任何东西。
+`client/test/limits.test.mjs` 把这三处抠出来逐字比对（`MAX_GRES_COUNT` 同理）。
+
 ## [0.7] — 未发布
 
 > 四处版本号（`client/package.json`、`client/package-lock.json`、

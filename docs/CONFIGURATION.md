@@ -519,9 +519,17 @@ Slurm 拒绝」的错误，与真正的原因（配置里的副本过期了）�
 
 ### `gres` 从死配置变成真传递
 
-`[purpose:*] gres` 此前**只用于展示、从不参与提交**（`op_submit` 完全从请求里的 `gpus`
-推导）。现在 `gpus` 没给 → **完全省略** `--gres`（默认不占 GPU，而在不带 GRES 的分区上
-写 `--gres=gpu:0` 会被 Slurm 拒绝）；给了 `N > 0` → `--gres=gpu:N`。
+`[purpose:*] gres` 此前**只用于展示、从不参与提交**（`op_submit` 从请求里推导）。
+现在 `gres` 没给 → **完全省略** `--gres`（默认不占 GRES，而在不带 GRES 的分区上
+写 `--gres=gpu:0` 会被 Slurm 拒绝）；给了 → 拼成 `name[:type]:count`。
+
+> ★ **v0.8 阶段 2 改了这里的形状**：请求里那一格从 `"gpus": 2`（一个数字）变成
+> `"gres": {"name": "gpu", "type": "a100", "count": 2}`（一个描述符）。理由是
+> GRES 是**管理员自定义的**，不是一个数字 —— 名字与型号随集群而定，而"上限是几"
+> 由集群自己配了几个决定（不再有 `MAX_GPUS_REQUEST`）。
+> 完整规则见 [PROTOCOL.md](PROTOCOL.md) 的〈`gres`：一个结构化描述符〉，
+> 与 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 F15（**没有** `defaultGpus`，
+> 那是刻意的）。
 
 ### 分区名大小写仍然无关地比较
 

@@ -211,7 +211,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 ### 请求
 
 ```json
-{"op": "submit", "cpus": 2, "mem": "8G", "gpus": 0, "time": "12:00:00"}
+{"op": "submit", "cpus": 2, "mem": "8G", "gres": {"name": "gpu", "type": "a100", "count": 2}, "time": "12:00:00"}
 ```
 
 > **v0.2 变更**：`submit` 不再接受 `purpose`，「用途 → 分区」那一层配置被整个删掉了。
@@ -411,7 +411,9 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 
 ```json
 {"partitions": [{"name": "2080TI", "allowed": true, "is_default": true,
-                 "max_time": "183-00:00:00"}]}
+                 "max_time": "183-00:00:00",
+                 "gres": [{"name": "gpu", "type": null,
+                           "per_node_max": 8, "total": 8}]}]}
 ```
 
 分区列表**从 Slurm 现查**（`scontrol show partition -o`），并与该用户的
@@ -419,6 +421,24 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 那是策略，而策略不该同时存在于两个地方。
 
 `allowed` 为假时附 `reason`（界面据此禁用并说明原因，而不是让用户猜）。
+
+`gres` 是这个分区上**能申请的 GRES**，来源是 `scontrol show node -o` 的 `Gres=`
+与 `Partitions=`（`Slurm.gres_catalog()`）。它是**三态**，与协议里其它地方同一条规矩：
+
+| 取值 | 意思 |
+|---|---|
+| 键**不存在** | **查不到**（`scontrol` 失败）。界面**不许**据此说"这个分区没有卡" |
+| `[]` | 查到了，这个分区确实一个 GRES 都没配 |
+| 非空 | 每一项 `{name, type, per_node_max, total}`；`type` 为 `null` = 这个 GRES 没配型号 |
+
+> ★ **一个作业能要到的上限是 `per_node_max`，不是 `total`。** `--gres=gpu:N` 是
+> **每节点** N 个：8 张卡分在 4 台机器上（`total: 8`、`per_node_max: 2`）时，
+> 一个作业最多只能要 2 张。界面拿它当数量那一格的 `max`，服务端拿它当判据。
+>
+> ★ **没有"已用"这一格，也不会有。** 本机实测（slurm-wlm 23.11.4）：节点的
+> `CfgTRES` / `AllocTRES` 里不含 gres（那要求 `AccountingStorageTRES` 里列了
+> `gres/gpu`），`GresUsed=` 这个字段也不存在。拿 `squeue` 的作业去减是另一件事，
+> 而且那个数刚算完就过期 —— 报一个错的数量比不报更糟。
 
 > ★ **v0.3 删掉了这里的 `defaults`。** 默认资源现在是**按插件**的（在一个 shell
 > 里跑 codex 和在 IDE 里跑语言服务器不是一回事），所以它跟 `plugins` op 走。
@@ -628,7 +648,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `ssh_pubkey` | 一行公钥 | 清单里 `contributes.submitPubkey` 为真的插件**必填**，否则 `2 bad_ssh_pubkey` |
 | `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在 `[plugin:<名字>]` 块里覆盖；服务端钳制到 1–上限） |
 | `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
-| `gpus` | 整数 | 未给 = **完全省略** `--gres`（默认不占 GPU）。给了 `0` 也一样省略 |
+| `gres` | **对象** `{name, type, count}` | 未给 = **完全省略** `--gres`（默认不占 GRES）。见下面的〈`gres`：一个结构化描述符〉 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
 | `time` | Slurm 时间 | `12:00:00`（超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断） |
 
@@ -647,7 +667,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 ```json
 {"session_id": "9f2c…", "job_id": 12345, "state": "submitted",
- "partition": "2080TI", "resources": {"cpus": 2, "mem": "8G", "gpus": null},
+ "partition": "2080TI", "resources": {"cpus": 2, "mem": "8G", "gres": null},
  "candidates": [55001, 55002, ...], "requested_time": "12:00:00"}
 ```
 
@@ -655,6 +675,51 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 不知道会落到哪种卡上，界面要显示出来。它也可能为 `null`：分区权限查不到时缺省提交会
 退化为不带 `-p`（见上面的随机挑分区边界），那时「落在哪个分区」在提交那一刻确实无人
 知晓，报 `null` 比编一个出来诚实。作业跑起来之后 `status` 会用 Slurm 的答案补上。
+
+### `gres`：一个结构化描述符
+
+```json
+{"name": "gpu", "type": "a100", "count": 2}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | 字符串（必填） | GRES 的名字，如 `gpu` / `mps` / `shard` |
+| `type` | 字符串或 `null` | 型号，如 `a100`。没配型号的 GRES 就是 `null`（**不是空串**，服务端会把空串收成 `null`） |
+| `count` | 整数 ≥ 1 | 要几个。**不占 GRES 就整个别写这一格**，不要写 `count: 0` |
+
+`name` 与 `type` 只允许 `[A-Za-z0-9_]`、最长 32 —— 它们要原样进 `--gres=` 的
+那一格，而 `:` 与 `,` 是 Slurm 自己的分隔符。其余的**一律不校验**：
+GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型号随集群而定，
+代码里没有白名单。
+
+> ★★ **GRES 是"名字 + 型号 + 数量"三件事，不是一个数字。**
+>
+> 这是一个**缺陷的形状**，不是风格：从前协议里是 `"gpus": 2`，守护进程写
+> `"gpu:%d"`、读回来用 `re.fullmatch(r"gpu:(\d+)")`。于是在一台配了型号的集群上，
+> 服务端自己写进去的 `gpu:a100:2` **自己读不回来** —— 正则不匹配 ⇒ 当成"没有 GPU"
+> ⇒ 界面上那一段整个不出现。作业占着两张 A100，而用户以为自己没要卡，
+> **没有任何地方会报错**。
+>
+> 所以修法不是把正则写宽一点，而是**取消第二份表示**：`{name, type, count}` 是
+> 唯一的表示（线上、数据库、审计里都是它），交给 Slurm 的那个串（`name[:type]:count`）
+> 由 `gres_spec()` **当场拼**，全仓只有那一处。
+
+> ★ **上限由集群自己配了几个决定，不由代码决定。** 服务端拿 `partitions` 里那份
+> 清单对账：这个分区上没有那种 GRES ⇒ `2 bad_gres`；数量超过 `per_node_max` ⇒
+> `2 bad_gres`（**拒绝，而不是悄悄截断** —— 截断之后用户拿到的是"跑得起来但不是他
+> 要的"作业）。查不到清单时**放行**：权威本来就在 Slurm 那一侧，它会用同一份配置在
+> `sbatch` 那一刻拒绝。从前是一个写死的 `MAX_GPUS_REQUEST = 8`，
+> 每节点 16 张卡的站点也只能要 8 张。
+
+> ★ **不要点名分区时会从"装得下它"的分区里挑。** 用户没指定分区、只要 `mps`，
+> 而只有 RTX8000 有 mps —— 那么随机挑选的范围就是 RTX8000。否则用户被拒在一件
+> 他没有表达过的事情上（他本来就没选分区），而界面上给的选项是所有有权限分区的并集，
+> 两边必须是同一句话。
+
+> ★ **`resources` 里的 `gres` 是同一个描述符或 `null`。** `null` 有两条来路：
+> 没要，以及从 nft 规则恢复出来的会话（我们没写过它的命令行）—— 与 `cpus`/`mem`
+> 一样合并成同一个答案：这一行不说 GRES。
 
 ### `warning`（可选字段）
 
@@ -674,6 +739,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | code | kind | 触发 |
 |---|---|---|
 | `2` | `bad_partition` | 指定的分区名不存在 |
+| `2` | `bad_gres` | `gres` 的形状不合法 / 这个分区没有那种 GRES / 数量超过 `per_node_max` |
 | `2` | `bad_time` | 时间格式无法解析或 ≤ 0 |
 | `3` | `unknown_uid` | `getpwuid` 失败 |
 | `4` | `throttled` | 该 uid 在熔断静默期内 |
@@ -725,7 +791,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 | 字段 | 说明 |
 |---|---|
-| `session_id`、`job_id`、`state`、`partition`、`resources` | 基本身份 |
+| `session_id`、`job_id`、`state`、`partition`、`resources` | 基本身份。`resources` 是 `{cpus, mem, gres}` —— 见〈`gres`：一个结构化描述符〉 |
 | `node`、`node_ip`、`service_port` | 作业落点 |
 | `tunnel_target` | **`"<字面 IPv4>:<端口>"`**，或 `null`（还没登记） |
 | `created_at`、`enrolled_at`、`last_hb_at`、`renew_count` | 时间线 |

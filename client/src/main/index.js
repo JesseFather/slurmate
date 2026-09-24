@@ -64,6 +64,7 @@ const hosts = require('./hosts.js');
 //   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
 const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
+const { gresLabel } = require('./gres.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
@@ -650,7 +651,23 @@ async function loadPartitions() {
     const detail = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
     return { ok: false, partitions: [], error: `取分区列表失败：${detail}` };
   }
-  return { ok: true, partitions: (resp.data && resp.data.partitions) || [], error: null };
+  return { ok: true, partitions: withGresLabels((resp.data && resp.data.partitions) || []), error: null };
+}
+
+/**
+ * 给每个分区的 GRES 清单补一个 `label`（`gpu` / `gpu:a100`）。
+ *
+ * ★ 补在这里而不是面板里：面板是普通 `<script>`，用不了模块；而"名字怎么拼"
+ *   在客户端只该有一处（`gres.js`）。
+ * ★ `gres` 这个键**可能整个不存在** —— 服务端查不到集群的 GRES 时它是缺席的
+ *   （协议的三态：缺席 ≠ 空数组）。那就**原样留着缺席**：`[]` 的意思是"这个
+ *   分区确实一张卡都没有"，界面要说的话完全不同，不能在这里把它抹平。
+ */
+function withGresLabels(list) {
+  return list.map((p) => {
+    if (!Array.isArray(p.gres)) return p;
+    return { ...p, gres: p.gres.map((e) => ({ ...e, label: gresLabel(e) })) };
+  });
 }
 
 /**

@@ -246,8 +246,16 @@
                <input type="number" id="f-cpus" min="1" max="64" placeholder="留空 = 默认"></div>
           <div><label for="f-mem">内存</label>
                <input type="text" id="f-mem" class="narrow" placeholder="留空 = 默认" spellcheck="false"></div>
-          <div><label for="f-gpus">GPU 数</label>
-               <input type="number" id="f-gpus" min="0" max="8" placeholder="默认 0"></div>
+          <!--
+            GRES 是**两个格子**：要哪一种（选项由服务端给，因为名字与型号是
+            管理员在集群上定的）+ 要几个。★ 这里**没有** `<option>` 是写死的，
+            也**没有** `max="8"` 这种数字 —— 上限来自服务端那份清单里每个节点的
+            实际配置，"每个站点都最多 8 张卡"是一个我们无权做的假设。
+          -->
+          <div><label for="f-gres">GRES</label>
+               <select id="f-gres"><option value="">（不占）</option></select></div>
+          <div><label for="f-gres-n">数量</label>
+               <input type="number" id="f-gres-n" min="1" placeholder="—" disabled></div>
           <div class="grow"><label for="f-part">分区</label>
                <select id="f-part" class="full"><option value="">（随机挑一个有权限的）</option></select></div>
         </div>

@@ -273,6 +273,55 @@ def human_state(state):
     }.get(state, state)
 
 
+def parse_gres_spec(s):
+    """`--gres` 的取值 → 描述符。**写法就是 sbatch 那个**：`名字[:型号]:数量`。
+
+    空串 = 没要（返回 `(None, None)`）。这里只做**拆词**，不判名字合不合法 ——
+    那是服务端的事（它不认识的一切都会拒），而且拒的那句话由服务端说，
+    两边各写一套判断就会漂成"这里放过去了、那边说不认识"。
+
+    ★ 这个函数与守护进程的 `gres_spec()` 是一对（一个拆、一个拼）。它们住在两个
+      文件里，因为 CLI 与守护进程是**两个独立安装的程序**（见 _human_bytes 那段
+      说明）。一对拆/拼会漂开，所以 `cluster/test-sessiond-logic.py` 里有一条
+      往返用例把两个文件都抠出来真跑。
+    """
+    s = (s or "").strip()
+    if not s:
+        return None, None
+    parts = s.split(":")
+    if len(parts) == 2:
+        name, typ, cnt = parts[0], None, parts[1]
+    elif len(parts) == 3:
+        name, typ, cnt = parts[0], parts[1], parts[2]
+    else:
+        return None, ("写不对：要「名字:数量」或「名字:型号:数量」，"
+                      "例如 gpu:2 / gpu:a100:2")
+    if not cnt.isdigit():
+        return None, "数量必须是整数，得到 %r" % cnt
+    return {"name": name, "type": typ or None, "count": int(cnt)}, None
+
+
+def gres_label(g):
+    """描述符 → 名字（不含数量）：`gpu` 或 `gpu:a100`。
+
+    ★ 守护进程里有一份同名的。两边是**两个独立安装的程序**（CLI 在 <prefix>/bin、
+      守护进程在 <prefix>/sbin），不共享模块 —— 与 `_human_bytes` 同一情形。
+      要盯的不是这两份（它们只是给人看的字），而是**拆词与拼词那一对**：
+      `parse_gres_spec()` 与守护进程的 `gres_spec()` 必须互相认得，
+      `cluster/test-sessiond-logic.py` 里有一条往返用例把两个文件都抠出来真跑。
+    """
+    if not isinstance(g, dict) or not g.get("name"):
+        return "?"
+    return "%s:%s" % (g["name"], g["type"]) if g.get("type") else g["name"]
+
+
+def gres_text(g):
+    """描述符 → 人话（`gpu:a100 × 2`）。给人看的输出用；`--json` 出的是原样结构。"""
+    if not isinstance(g, dict) or not g.get("name"):
+        return None
+    return "%s × %s" % (gres_label(g), g.get("count"))
+
+
 def fmt_left(expires_at):
     if not expires_at:
         return "-"
@@ -295,10 +344,11 @@ def print_session(s, verbose=True):
     if s.get("job_id"):
         print("作业 ID   : %s" % s.get("job_id"))
     res = s.get("resources") or {}
+    gt = gres_text(res.get("gres"))
     print("分区      : %s" % (s.get("partition") or "（Slurm 默认）"))
     print("资源      : %s 核 / %s%s"
           % (res.get("cpus") or "?", res.get("mem") or "?",
-             "，GPU %s" % res.get("gpus") if res.get("gpus") else ""))
+             "，%s" % gt if gt else ""))
     if s.get("tunnel_target"):
         print("隧道目标  : %s" % s.get("tunnel_target"))
         print("连          : ssh -N -L <本地端口>:%s ..." % s.get("tunnel_target"))
@@ -371,14 +421,22 @@ def cmd_partitions(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    print("%-12s %-8s %-14s %s" % ("分区", "默认", "时间上限", "说明"))
-    print("-" * 62)
+    print("%-12s %-8s %-14s %-24s %s" % ("分区", "默认", "时间上限", "GRES", "说明"))
+    print("-" * 86)
     for p in d["partitions"]:
         mark = "" if p.get("allowed") else "  [无权限]"
-        print("%-12s %-8s %-14s %s%s"
+        # GRES 那一列**三态**，与协议同一条规矩：`gres` 这个键不存在 = 服务端
+        # 查不到（它没有说"这个分区没有卡"的资格），`[]` = 确实一个都没配。
+        if "gres" not in p:
+            gres = "（查不到）"
+        else:
+            gres = "、".join("%s×%d" % (gres_label(e), e.get("per_node_max") or 0)
+                             for e in p["gres"]) or "无"
+        print("%-12s %-8s %-14s %-24s %s%s"
               % (p["name"], "是" if p.get("is_default") else "",
-                 p.get("max_time") or "无上限", p.get("reason", ""), mark))
+                 p.get("max_time") or "无上限", gres, p.get("reason", ""), mark))
     print()
+    print("GRES 那一列是**每个节点**最多几个（`--gres` 就是按节点算的）。")
     print("不指定 --partition 时，会从有权限的分区里随机挑一个。")
     print("缺省资源是**按插件**的，见 `slurmate plugins`。")
     return 0
@@ -456,8 +514,12 @@ def cmd_submit(args):
         req["cpus"] = args.cpus
     if args.mem:
         req["mem"] = args.mem
-    if args.gpus is not None:
-        req["gpus"] = args.gpus
+    if args.gres:
+        g, gerr = parse_gres_spec(args.gres)
+        if gerr:
+            print("--gres %s：%s" % (args.gres, gerr), file=sys.stderr)
+            return 2
+        req["gres"] = g
     if args.time:
         req["time"] = args.time
     if args.service_kind:
@@ -471,12 +533,13 @@ def cmd_submit(args):
         return 1
     d = r["data"]
     res = d.get("resources") or {}
+    gt = gres_text(res.get("gres"))
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
     print("插件 %s" % (req.get("service_kind") or "（本站的 default_plugin）"))
     print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
                                    d.get("requested_time")))
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
-                                "，GPU %s" % res.get("gpus") if res.get("gpus") else ""))
+                                "，%s" % gt if gt else ""))
     if d.get("warning"):
         # 服务端替用户做了决定（截断时间、回退内存、没按他以为的方式挑分区）
         # 时必须说出来 —— 静默地替他决定，他会以为自己要到了。
@@ -697,7 +760,10 @@ def build_parser():
     p.add_argument("--cpus", type=int,
                    help="CPU 核心数（省略 = 该插件的服务端默认）")
     p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")
-    p.add_argument("--gpus", type=int, help="GPU 数量（省略 = 不占卡）")
+    p.add_argument("--gres",
+                   help="要哪种 GRES、几个，写法同 sbatch：名字[:型号]:数量，"
+                        "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 不占。"
+                        "本站有哪些、每个节点最多几个，看 `slurmate partitions`")
     p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
     p.add_argument("--service-kind",
                    help="插件名。见 `slurmate plugins`。省略时用配置里的 "

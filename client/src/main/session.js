@@ -29,6 +29,7 @@ const { EventEmitter } = require('events');
 const { Action, classify, shouldRetry } = require('./classify.js');
 const { Tunnel } = require('./tunnel.js');
 const { jobText } = require('./jobstate.js');
+const { gresText } = require('./gres.js');
 
 const State = {
   IDLE: 'idle',
@@ -251,6 +252,8 @@ class SessionController extends EventEmitter {
     // 放在主进程是因为界面那一侧没有测试（panel.js 在本机跑不起来），
     // 而这一句里有两处会静默说错话的地方（终态判定、Reason 的措辞）。
     snap.jobText = jobText(snap);
+    // 资源那一行里的 GRES 部分同理：`gpu:a100 × 2` 这种写法在客户端只该有一处。
+    snap.gresText = gresText(snap.resources && snap.resources.gres);
     return snap;
   }
 
@@ -266,7 +269,10 @@ class SessionController extends EventEmitter {
   /**
    * 提交并一路推到 running。
    *
-   * @param {object} resources 高级选项里的**临时**覆盖：{cpus, mem, gpus, partition, time}
+   * @param {object} resources 高级选项里的**临时**覆盖：
+   *   {cpus, mem, gres, partition, time}。`gres` 是结构化的描述符
+   *   `{name, type, count}`（`type` 可空）—— **不是**一个数字：GRES 的名字
+   *   与型号是管理员在集群上定的，可能是 `gpu:a100`，也可能是 `mps`。
    *   全部可选。**缺省由服务端填**（2 CPU / 8G / 从有权限的分区里随机挑一个）——
    *   默认值不由客户端填，否则一个改过的客户端省略字段就能要到整机。
    *   只传用户**真的填了**的键，不要用 undefined 覆盖服务端的默认值。
@@ -286,7 +292,7 @@ class SessionController extends EventEmitter {
     // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
     // 但带 `cpus: null` 不会 —— 而服务端会把 null 当成「用户要了 0 核」。
     const req = { op: 'submit' };
-    for (const k of ['cpus', 'mem', 'gpus', 'partition', 'time']) {
+    for (const k of ['cpus', 'mem', 'gres', 'partition', 'time']) {
       const v = resources && resources[k];
       if (v !== undefined && v !== null && v !== '') req[k] = v;
     }
