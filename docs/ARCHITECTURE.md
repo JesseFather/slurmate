@@ -668,7 +668,7 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 所以判错一次就没了：作业还在跑，防护已经拆掉。反方向的判错（该释放的没释放）
 有 `JOB_MISSING` 那条路在 `job_missing_confirm_ticks` 个 tick 之后兜住 ——
 **两个方向的代价不对称，所以判据的缺省落在"保留"这一侧**
-（`TERMINAL_JOB_STATES` 的注里写着这一段）。
+（判据本身是 `job_is_terminal()`，`TERMINAL_JOB_STATES` 的注里写着这一段）。
 
 真终态**只有**这些（与 Slurm 自己的 `is_job_terminal_state()` 逐条对应，
 **不是**与 manpage 对应 —— manpage 只列状态码）：
