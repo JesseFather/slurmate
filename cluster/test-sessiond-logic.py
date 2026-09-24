@@ -25,11 +25,15 @@ import importlib.util
 import json
 import os
 import re
+import select
+import selectors
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -4821,6 +4825,850 @@ exit 0
           % ("SLURMATE_GPUS" in _sb, "SLURMATE_GPUS" in _daemon_src))
     check("★ 守护进程往环境里放的就是那个名字",
           '"SLURMATE_GRES"' in _daemon_src, "op_submit 的 env 里没有它")
+
+    # ══ 26. 常驻通道 ═══════════════════════════════════════════════════════
+    #
+    # 这一节之前，连接那条路是**零覆盖**的：`tick()` 一次都没被调用过，
+    # `handle_client` 也没有。而这一版把它从「一问一答」改成了一条状态机，
+    # 于是"没测到"的东西从"一个函数"变成"整个事件循环"。
+    #
+    # ★ 这一节里几乎每一条都在守一个**静默**的失败：卡死、丢响应、跨用户泄漏、
+    #   心跳被挤出桶导致批量 scancel。它们的共同点是**不会红任何东西** ——
+    #   所以每条断言都要指出"改坏了会看到什么"。
+    print("\n── 26. 常驻通道 ──")
+
+    class _Nft(object):
+        def ensure(self):
+            return True
+
+        def session_rules(self):
+            return []
+
+        def table_exists(self):
+            return True
+
+        def del_by_comment(self, _c):
+            pass
+
+        def add_session_rule(self, *_a, **_k):
+            return True, ""
+
+    class _Slurm(object):
+        """最小接口：`job_state` / `show_job`，外加一个调用计数器。
+
+        ★ 计数器是这一节的承重件：用例⑫（渲染不许放大 fork）靠它。"""
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def __init__(self):
+            self.calls = 0
+            self.jobs = {}
+
+        def job_state(self, jid):
+            self.calls += 1
+            j = self.jobs.get(str(jid))
+            return (self.JOB_OK, j) if j is not None else (self.JOB_MISSING, None)
+
+        def show_job(self, jid):
+            self.calls += 1
+            return self.jobs.get(str(jid))
+
+        def expand_node(self, _n):
+            return "node01"
+
+        def node_ip(self, _n):
+            return "192.0.2.11"
+
+        def cancel(self, *_a, **_k):
+            return True
+
+    class _CfgClone(object):
+        """配置的一份浅副本 —— 这一节的几个数要能调小才测得到，
+        而共享的 cfg 上有别的节在用。"""
+        def __init__(self, base, **kw):
+            self.__dict__.update(base.__dict__)
+            self.__dict__.update(kw)
+
+    _seq = [0]
+
+    def _mkd(**kw):
+        _seq[0] += 1
+        c = _CfgClone(cfg, **kw)
+        c.state_dir = os.path.join(tmpdir, "stream-state")
+        c.log_dir = os.path.join(tmpdir, "stream-log")
+        c.audit_log = os.path.join(c.log_dir, "audit.log")
+        c.db_path = os.path.join(tmpdir, "stream-%d.db" % _seq[0])
+        os.makedirs(c.state_dir, exist_ok=True)
+        os.makedirs(c.log_dir, exist_ok=True)
+        dd = mod.Sessiond(c)
+        dd.nft, dd.slurm, dd.audit_fp = _Nft(), _Slurm(), None
+        # ★ 第 7 节把主 d 的 user_home 指到临时家目录；这一节的守护进程各自
+        #   新建，必须也指过去 —— 否则"会话文件"那条路会去摸真实家目录。
+        dd.user_home = lambda uid: home
+        return dd
+
+    class _Client(object):
+        """测试端的客户端：一个 socket + 一个行缓冲。"""
+
+        def __init__(self, sock):
+            self.sock = sock
+            self.buf = b""
+            self.eof = False
+
+        def send(self, obj):
+            self.sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+
+        def raw(self, data):
+            self.sock.sendall(data)
+
+        def lines(self, timeout=0.25, max_chunks=64):
+            """取走已经到达的**整行**；半行留在缓冲里。
+
+            ★ 半行必须留下：客户端读到一半的流是这一节要测的东西之一
+              （用例⑥ 逐字节读），把它当成整行会让那条用例变成假的。
+
+            ★★ 循环**必须有上界**：订阅连接每 tick 都收到推送，每隔几十毫秒就
+              来一条 —— "一直读到出现一次超时"这个终止条件**永远不会成立**，
+              于是这个助手会永远转下去（实测：主线程卡在 recv 上，整个用例
+              看上去像死了）。每次唤醒读多少是有限的，这个助手也一样。"""
+            self.sock.settimeout(timeout)
+            chunks = 0
+            while chunks < max_chunks:
+                try:
+                    chunk = self.sock.recv(65536)
+                except (socket.timeout, BlockingIOError):
+                    break
+                except OSError:
+                    self.eof = True
+                    break
+                if not chunk:
+                    self.eof = True
+                    break
+                self.buf += chunk
+                chunks += 1
+            parts = self.buf.split(b"\n")
+            self.buf = parts.pop()
+            out = []
+            for p in parts:
+                if p.strip():
+                    out.append(json.loads(p))
+            return out
+
+        def close(self):
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+    def _pair(dd, uid=None, sock=None):
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        if sock is not None:                      # 用例② 要先把 SO_SNDBUF 调小
+            b.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sock)
+        b.setblocking(False)
+        conn = mod.Conn(dd.cfg, b, UID if uid is None else uid, os.getgid())
+        dd.selector.register(b, conn.want_events(), conn)
+        return _Client(a), conn
+
+    def _drive(dd, rounds=4, timeout=0.0):
+        """把事件循环推几轮（**不跑 run()** —— 那是个 while True）。"""
+        for _ in range(rounds):
+            try:
+                ev = dd.selector.select(timeout)
+            except InterruptedError:
+                continue
+            dd.handle_events(ev)
+            dd.drain_pending()
+
+    def _add(dd, sid, job_id=None, state=None, uid=None):
+        dd.store.insert(session_id=sid, uid=UID if uid is None else uid,
+                        user="alice", partition="A6000", account="acct",
+                        cpus=2, mem="8G", requested_time="1:00:00",
+                        state=state or mod.ST_ENROLLED, job_id=job_id,
+                        candidates="55001", created_at=mod.now_ts())
+
+    # ── 26.1 老客户端一字不改地继续工作（§八 第 2 步的判据）──────────────
+    #
+    # ★★ 这是整节的**分水岭**：它过了，`slurmate rpc` 那条路上的字节流就
+    #    与从前逐字相同，而"常驻通道"是叠加在它上面的，不是替换它。
+    _d = _mkd()
+    _c1, _k1 = _pair(_d)
+    _c1.send({"op": "ping"})
+    _drive(_d)
+    _r1 = _c1.lines()
+    check("★★ 老客户端（不带 rid）仍然一问一答",
+          len(_r1) == 1 and _r1[0].get("ok") is True
+          and (_r1[0].get("data") or {}).get("pong") is True, str(_r1)[:200])
+    check("★★ 而它的应答里**没有 rid** —— 线上的字节与从前逐字相同",
+          bool(_r1) and "rid" not in _r1[0], str(sorted((_r1 or [{}])[0].keys())))
+    check("★ 不带 rid 的请求**不会**让它变成订阅者（推送会打乱一问一答）",
+          _k1.subscribed is False, "subscribed=%s" % _k1.subscribed)
+
+    # ── 26.2 一条连接上多请求 + rid 回填（§八 第 3 步）───────────────────
+    _c2, _k2 = _pair(_d)
+    for i in (1, 2, 3):
+        _c2.send({"op": "ping", "rid": i})
+    _drive(_d)
+    _r2 = _c2.lines()
+    check("★ 一条连接上 3 条 ping 得到 3 条响应",
+          len(_r2) == 3, "收到 %d 条：%s" % (len(_r2), str(_r2)[:200]))
+    check("★★ 每一条都回填了**同一个** rid，而且按顺序",
+          [r.get("rid") for r in _r2] == [1, 2, 3],
+          str([r.get("rid") for r in _r2]))
+    check("★ 带了 rid 的请求让这条连接成为订阅者",
+          _k2.subscribed is True, "subscribed=%s" % _k2.subscribed)
+
+    # ── 26.3 推送：只推全量、带 seq（§八 第 5 步）───────────────────────
+    _d.slurm.jobs["501"] = {"JobState": "RUNNING", "UserId": UID,
+                            "NodeList": "node01", "Partition": "A6000",
+                            "TimeLimit": "1:00:00"}
+    _add(_d, "s-a", job_id="501")
+    _d.tick()
+    _drive(_d)
+    _p1 = _c2.lines()
+    check("★ 会话变了 ⇒ 那条订阅连接收到一条推送",
+          len(_p1) == 1 and _p1[0].get("push") == "sessions",
+          str(_p1)[:250])
+    check("★★ 推送带单调 seq，且**没有** rid（rid 是响应的判据）",
+          bool(_p1) and isinstance(_p1[0].get("seq"), int)
+          and "rid" not in _p1[0], str(sorted((_p1 or [{}])[0].keys())))
+    check("★ 推送里的会话列表与 op_list **逐字同构**（推送就是自动化的 list）",
+          bool(_p1) and _p1[0].get("sessions")
+          == _d.dispatch(UID, os.getgid(), {"op": "list"})["data"]["sessions"],
+          "推送里 %d 条" % len((_p1 or [{}])[0].get("sessions") or []))
+    check("★★ 推送里**不含任何口令**（它走的是 list 的 with_secret=False）",
+          all("auth_password" not in s
+              for s in ((_p1 or [{}])[0].get("sessions") or [])),
+          str((_p1 or [{}])[0].get("sessions"))[:200])
+    check("★★ 没订阅的那条连接**一个字节都没多**（老客户端不受影响）",
+          _c1.lines() == [], "它收到了推送")
+
+    # ── 26.4 全量：一个 tick 里多个会话变了 ⇒ 每个连接至多一条（用例⑪）──
+    _add(_d, "s-b", job_id="502")
+    _add(_d, "s-c", job_id="503")
+    _d.slurm.jobs["502"] = {"JobState": "PENDING", "UserId": UID}
+    _d.slurm.jobs["503"] = {"JobState": "PENDING", "UserId": UID}
+    _d.tick()
+    _drive(_d)
+    _p2 = _c2.lines()
+    check("★★ 一个 tick 里三个会话变了 ⇒ 每个连接仍然**至多一条**"
+          "（钉住「只推全量、不推增量」）",
+          len(_p2) == 1, "收到 %d 条" % len(_p2))
+    check("★ 而这一条里三个会话都在（全量自足，丢掉上一条无害）",
+          bool(_p2) and len(_p2[0].get("sessions") or []) == 3,
+          str([len(x.get("sessions") or []) for x in _p2]))
+
+    # ── 26.4b 终态但还在库里的会话，推送里也要报得出作业状态 ─────────────
+    #
+    # ★ `phase_running` 只为**活跃**那几档查作业（`submitted` / `enrolled` /
+    #   `suspect` / `orphaned`），而快照要渲染的**包括终态但还在库里的那些**
+    #   （它们要留到 `released_keep`）。快照不自己补那一次查询的话，那些行在推送
+    #   里**没有 job_state**，而同一行在 `list` 里有 —— 于是界面上一行会话的作业
+    #   状态会忽有忽无（刷新一下有、下一帧又没了），而没有任何地方报错。
+    _d.slurm.jobs["504"] = {"JobState": "COMPLETED", "UserId": UID,
+                            "TimeLimit": "1:00:00"}
+    _add(_d, "s-done", job_id="504", state=mod.ST_RELEASED)
+    _d.tick()
+    _drive(_d)
+    _p3 = [m for m in _c2.lines() if m.get("push")]
+    _done = None
+    for _m in _p3:
+        for _s in (_m.get("sessions") or []):
+            if _s.get("session_id") == "s-done":
+                _done = _s
+    check("★★ 终态会话在推送里也报得出 job_state"
+          "（phase_running 不为它查询 ⇒ 快照必须自己补一次，否则它时有时无）",
+          _done is not None and _done.get("job_state") == "COMPLETED",
+          str(_done)[:220])
+    check("★ 而与 list 仍然逐字同构（两边说的必须是同一件事）",
+          bool(_p3) and _p3[-1].get("sessions")
+          == _d.dispatch(UID, os.getgid(), {"op": "list"})["data"]["sessions"],
+          str(_p3)[-1:][:200])
+
+    # ── 26.5 没有变化也按期推（用例④：把兜底实现成"有变化才发"）─────────
+    _d2 = _mkd(snapshot_interval=0.0)
+    _c3, _k3 = _pair(_d2)
+    _c3.send({"op": "ping", "rid": 1})
+    _drive(_d2)
+    _c3.lines()
+    for _ in range(3):
+        _d2.tick()
+        _drive(_d2)
+    _r3 = [x for x in _c3.lines() if x.get("push")]
+    check("★★ 全程**无变化**的连接也按期收到快照（三条 tick ≥ 2 条）",
+          len(_r3) >= 2, "只收到 %d 条" % len(_r3))
+    check("★ 而无变化时推的还是全量（不是空消息）",
+          all("sessions" in x for x in _r3), str(_r3)[:200])
+
+    # ── 26.6 seq 的缺口与 stale 对得上（用例③）─────────────────────────
+    #
+    # ★ 直接驱动 enqueue_push 而不是靠真实水位：要验的是**代数**，
+    #   而"水位挡下第几条"由内核缓冲决定，那个数在别的机器上会变。
+    _d3 = _mkd(conn_out_hard=200)
+    _c4, _k4 = _pair(_d3)
+    _k4.subscribed = True
+    _sess = [{"session_id": "s-x"}]
+    for _ in range(6):
+        _d3.enqueue_push(_k4, _sess)
+    check("★ 水位之上的那几条被丢掉了（stale 记着）",
+          _k4.stale > 0 and _k4.seq == 6,
+          "stale=%s seq=%s" % (_k4.stale, _k4.seq))
+    _k4.pump()                      # 排空，让后面那条发得出去
+    _d3.enqueue_push(_k4, _sess)
+    _k4.pump()
+    _got = _c4.lines()
+    _seqs = [m.get("seq") for m in _got]
+    _drop = sum((m.get("stale") or {}).get("dropped", 0) for m in _got)
+    check("★★ seq 的缺口代数对得上：(末−首+1) == 条数 + Σ stale.dropped",
+          bool(_seqs) and (_seqs[-1] - _seqs[0] + 1) == len(_got) + _drop,
+          "seqs=%s 条数=%d dropped=%d" % (_seqs, len(_got), _drop))
+    check("★★ 每个缺口都**紧邻**一条带 stale 的消息（不然客户端不知道丢过）",
+          _drop == 0 or any("stale" in m for m in _got), str(_got)[:250])
+    check("★ stale 里说得清缺口从哪开始",
+          all(m["stale"]["from"] == m["seq"] - m["stale"]["dropped"]
+              for m in _got if "stale" in m), str(_got)[:250])
+
+    # ── 26.7 ★★★ 推送把心跳挤出桶 ⇒ 静默批量 scancel（用例①）──────────
+    #
+    # 这是整节最要紧的一条。桶在 dispatch 里，而 heartbeat 也在 dispatch 里；
+    # 推送一旦计进桶，症状是：心跳被回 rate_limited → last_hb_socket 不更新 →
+    # 300 s suspect → 1800 s **自动 scancel** —— 用户正在跑的作业被杀掉，
+    # 而界面只显示"心跳发送失败，仍在重试"。
+    _d4 = _mkd()
+    _c5, _k5 = _pair(_d4)
+    _k5.subscribed = True
+    _cap = _d4.cfg.max_rpc_per_second
+    for _ in range(2 * _cap):
+        _d4.enqueue_push(_k5, _sess)
+    _k5.pump()
+    _hb = _d4.dispatch(UID, os.getgid(), {"op": "heartbeat",
+                                          "session_id": "s-nope"})
+    check("★★★ 推送连发 2×桶上限之后，同一 uid 的 heartbeat **仍然进得去**",
+          _hb.get("error") is None or _hb["error"].get("kind") != "rate_limited",
+          str(_hb.get("error"))[:160])
+    # 对照组：走 dispatch 的那条路**确实**会被限流 —— 否则上一条是空断言
+    _d5 = _mkd()
+    _c6, _k6 = _pair(_d5)
+    _limited = False
+    for _ in range(2 * _cap):
+        _r = _d5.dispatch(UID, os.getgid(), {"op": "ping"})
+        if (_r.get("error") or {}).get("kind") == "rate_limited":
+            _limited = True
+    check("★★ 对照组：走 dispatch 连发同样次数**确实**回 rate_limited"
+          "（证明上一条不是空断言）", _limited, "一次都没限流")
+
+    # ── 26.8 一个不读的客户端不卡 tick（用例②）─────────────────────────
+    #
+    # ★ 计划里写的是"断言 tick 次数逐次相等"。那是个**依赖墙钟**的判据，
+    #   在负载不同的机器上会自己红。这里换成三条更硬、且都是确定性的：
+    #   ① tick() 结构上**一次 send 都不发**；② 队列**有上界**且超出即丢推送；
+    #   ③ 整个循环跑得完（阻塞写会让它永远不返回）。
+    # ★ 硬线也调小：默认 4 MiB 是照"一条合法响应装得下"定的，60 轮小推送根本
+    #   到不了那个量 —— 不调小的话"超出即丢推送"那条是**空断言**。
+    _d6 = _mkd(snapshot_interval=0.0, conn_out_hard=2048, conn_out_soft=512)
+    # SO_SNDBUF=4096 ⇒ 内核只吸收约 8 KiB（本机实测：写满 8064 字节即 EAGAIN）。
+    # 不调小的话 send 永远成功，这一条就**永远是绿的假用例**。
+    _c7, _k7 = _pair(_d6, sock=4096)
+    _k7.subscribed = True
+    check("★★ 出站队列空的时候**不挂 EVENT_WRITE**"
+          "（挂着而队列空 ⇒ 水平触发 ⇒ 100% CPU 空转，实测 300 ms 内 214167 次）",
+          not (_k7.want_events() & selectors.EVENT_WRITE)
+          and bool(_k7.want_events() & selectors.EVENT_READ),
+          "want=%s" % _k7.want_events())
+    _add(_d6, "s-peek", job_id="601")
+    _d6.tick()
+    # ★ 判据是"字节**在队列里**、而对端**一个字节都没收到**" —— 等价于
+    #   "tick 里一次 send 都没有"，而且不需要给 socket 挂代理。
+    check("★★ tick() 只把推送**入队**，绝不在这里写（写会阻塞整个事件循环）",
+          _k7.pending() > 0 and _c7.lines(0.0) == [],
+          "待发 %d 字节" % _k7.pending())
+    _t0 = time.time()
+    for _i in range(60):
+        _d6.slurm.jobs["601"] = {"JobState": "RUNNING", "UserId": UID,
+                                 "NodeIndex": str(_i)}
+        _d6.tick()
+        _k7.pump()
+    _elapsed = time.time() - _t0
+    check("★★ 对端一个字都不读时，60 轮 tick 跑得完（阻塞写会让它永远不返回）",
+          _elapsed < 20.0, "耗时 %.1f 秒" % _elapsed)
+    check("★★ 出站队列**有上界**（超出即丢推送，绝不无界增长）",
+          _k7.pending() < 2 * _d6.cfg.conn_out_hard,
+          "pending=%d 硬线=%d" % (_k7.pending(), _d6.cfg.conn_out_hard))
+    check("★ 而丢的是**推送**（stale 有计数），不是响应",
+          _k7.stale > 0, "stale=%s" % _k7.stale)
+
+    # ── 26.9 半关 ≠ 断线：响应不能丢（用例⑦）───────────────────────────
+    # ★ 这条连接**带了 rid**（是订阅者），所以它半关之后**不会**立刻被关 ——
+    #   它要留到 EOF_LINGER。这里把那个窗口调成 0，好在用例里看得见"最终会关"。
+    _d7 = _mkd(eof_linger=0.0)
+    _c8, _k8 = _pair(_d7)
+    _c8.send({"op": "ping", "rid": 7})
+    _c8.sock.shutdown(socket.SHUT_WR)      # 老客户端每次发完就半关
+    _drive(_d7, rounds=6)
+    _r8 = _c8.lines()
+    check("★★ 发完立刻半关，**仍然读得到完整响应**"
+          "（丢了它 ⇒ 提交拿不到 job_id ⇒ 重试 ⇒ 被配额拒 ⇒"
+          "用户看到「提交失败」而作业在跑）",
+          len(_r8) == 1 and _r8[0].get("rid") == 7, str(_r8)[:200])
+    _d7.tick()                             # sweep_conns() 在这里收
+    _c8.lines(0.2)
+    check("★ 排空之后连接**最终**被关掉（不会永远留着，"
+          "否则 64 个名额会被走掉的客户端占满）", _c8.eof, "还没关")
+
+    # ── 26.10 半关之后推送还在（用例⑨）─────────────────────────────────
+    _d8 = _mkd()
+    _c9, _k9 = _pair(_d8)
+    _c9.send({"op": "ping", "rid": 1})
+    _drive(_d8)
+    _c9.lines()
+    _c9.sock.shutdown(socket.SHUT_WR)
+    _drive(_d8, rounds=2)
+    _add(_d8, "s-eof", job_id="701")
+    _d8.tick()
+    _drive(_d8, rounds=2)
+    _r9 = [x for x in _c9.lines() if x.get("push")]
+    check("★ 半关之后**仍然收到推送**（EOF 只停读，不取消订阅）",
+          len(_r9) >= 1, "收到 %d 条推送" % len(_r9))
+
+    # ── 26.11 连接数上限：accept-then-reject（用例⑩）───────────────────
+    _d9 = _mkd(conn_max=2)
+    _ca, _ka = _pair(_d9)
+    _cb, _kb = _pair(_d9)
+    # 真去 accept 一条，好让守护进程走它自己那条超限分支。
+    # （`_mkd` 不调 setup_socket，所以 `_d9.listener` 本来就是 None，这里现造一个。）
+    _lsn_path = os.path.join(tmpdir, "max.sock")
+    if os.path.exists(_lsn_path):
+        os.unlink(_lsn_path)
+    _lsn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    _lsn.bind(_lsn_path)
+    _lsn.listen(8)
+    _lsn.setblocking(False)
+    _d9.selector.register(_lsn, selectors.EVENT_READ)
+    _d9.listener = _lsn
+    _extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    _extra.connect(_lsn_path)
+    _d9.accept_ready()
+    _extra.settimeout(1.0)
+    _buf = b""
+    try:
+        while b"\n" not in _buf:
+            _chunk = _extra.recv(65536)
+            if not _chunk:
+                break
+            _buf += _chunk
+    except (socket.timeout, OSError):
+        pass
+    _rej = json.loads(_buf.split(b"\n")[0]) if b"\n" in _buf else {}
+    check("★★ 超限的那条**读到** too_many_connections（不是静默等待后报"
+          "一个方向反了的 daemon_unreachable）",
+          (_rej.get("error") or {}).get("kind") == "too_many_connections",
+          str(_rej)[:200])
+    check("★★ 而它**不在**事件循环里（否则它会占着一个名额、还得有人记得管它）",
+          len(_d9.conns()) == 2, "循环里有 %d 条" % len(_d9.conns()))
+    _d9.selector.unregister(_lsn)
+    _lsn.close()
+    _extra.close()
+    _ka.sock.close()
+    _kb.sock.close()
+    _ca.close()
+    _cb.close()
+
+    # ── 26.12 跨用户泄漏（用例⑧，安全用例）─────────────────────────────
+    _d10 = _mkd()
+    _cA, _kA = _pair(_d10, uid=UID)
+    _cB, _kB = _pair(_d10, uid=UID + 1)
+    _kA.subscribed = True
+    _kB.subscribed = True
+    _add(_d10, "s-A", job_id="801", uid=UID)
+    _add(_d10, "s-B", job_id="802", uid=UID + 1)
+    _d10.tick()
+    _drive(_d10)
+    _ra, _rb = _cA.lines(), _cB.lines()
+    _aid = {s["session_id"] for m in _ra for s in (m.get("sessions") or [])}
+    _bid = {s["session_id"] for m in _rb for s in (m.get("sessions") or [])}
+    check("★★ A 收到的推送里**一个 B 的会话都没有**",
+          _aid and not (_aid & _bid) and "s-B" not in _aid and "s-A" not in _bid,
+          "A=%s B=%s" % (sorted(_aid), sorted(_bid)))
+    check("★ 两边各自都收到了自己那一条（否则上一条是空断言）",
+          _aid == {"s-A"} and _bid == {"s-B"},
+          "A=%s B=%s" % (sorted(_aid), sorted(_bid)))
+
+    # ── 26.13 fd 复用不会把推送写错人（用例⑤）──────────────────────────
+    _d11 = _mkd()
+    _cX, _kX = _pair(_d11, uid=UID)
+    _cY, _kY = _pair(_d11, uid=UID + 1)
+    _kX.subscribed = _kY.subscribed = True
+    _fd_x = _kX.sock.fileno()
+    _d11.drop_conn(_kX, "测试")
+    _cX.close()
+    _cZ, _kZ = _pair(_d11, uid=UID)
+    _kZ.subscribed = True
+    _fd_z = _kZ.sock.fileno()
+    _add(_d11, "s-Y", job_id="901", uid=UID + 1)
+    _add(_d11, "s-Z", job_id="902", uid=UID)
+    _d11.tick()
+    _drive(_d11)
+    _rz = _cZ.lines()
+    _zid = {s["session_id"] for m in _rz for s in (m.get("sessions") or [])}
+    check("★ 关掉一条再开一条之后，fd 号确实被复用了（否则这条用例是空的）",
+          _fd_z == _fd_x, "关的是 fd=%s，新开的是 fd=%s" % (_fd_x, _fd_z))
+    check("★★★ fd 复用之后，Y 的推送**不会**跑到 Z 的连接上（跨用户泄漏）",
+          _zid == {"s-Z"}, "Z 收到了 %s" % sorted(_zid))
+
+    # ── 26.14 推送渲染不放大 fork（用例⑫）──────────────────────────────
+    #
+    # ★ 判据用的是"与连接数**无关**"，而不是计划里那个"≤ 20 × (N + C)"的
+    #   魔数：前者是性质，后者是一条会随实现细节漂的线。
+    def _calls_per_tick(nconn):
+        dd = _mkd()
+        for i in range(3):
+            _add(dd, "s-f%d" % i, job_id=str(1000 + i))
+            dd.slurm.jobs[str(1000 + i)] = {"JobState": "RUNNING", "UserId": UID}
+        for _i in range(nconn):
+            _c, _k = _pair(dd)
+            _k.subscribed = True
+        dd.slurm.calls = 0
+        dd.tick()
+        return dd.slurm.calls
+
+    _one = _calls_per_tick(1)
+    _four = _calls_per_tick(4)
+    check("★★★ 推送渲染的 fork 次数**与连接数无关**（这才是「不放大」）",
+          _one == _four and _one > 0,
+          "1 条连接 %d 次 / 4 条连接 %d 次" % (_one, _four))
+    # ★★ 上界是 **N 本身**，不是 2N。这两件事是分开的、各有各的守卫：
+    #   · 上面那条钉的是"**按 uid** 渲染一次"（`_tick_snap`）—— 连接之间不放大；
+    #   · 这一条钉的是"**按 tick** 复用"（`job_live=False` + `tick_job()` 记忆化）
+    #     —— 快照复用 `phase_running` 本 tick 已经取过的那一份，**不再查第二遍**。
+    #   只钉前者的话，把 `job_live=False` 去掉会让每个作业每 tick 查两次，
+    #   而"与连接数无关"照样成立 —— 那是一个**不红任何东西**的浪费。
+    check("★★ 而且每个作业每 tick **至多一次** Slurm 查询"
+          "（3 个会话 ⇒ 至多 3 次；快照复用它，不查第二遍）",
+          _one <= 3, "%d 次（3 个会话）" % _one)
+
+    # ── 26.15 逐字节读也不丢帧（用例⑥）─────────────────────────────────
+    _d12 = _mkd(snapshot_interval=0.0)
+    _cE, _kE = _pair(_d12)
+    _kE.subscribed = True
+    for _ in range(4):
+        _d12.enqueue_push(_kE, [{"session_id": "s-byte"}])
+        _kE.pump()
+    _cE.sock.settimeout(1.0)
+    _all = b""
+    try:
+        while _all.count(b"\n") < 4:
+            _ch = _cE.sock.recv(1)          # ★ 每次只读 1 个字节
+            if not _ch:
+                break
+            _all += _ch
+    except (socket.timeout, OSError):
+        pass
+    _msgs = [json.loads(x) for x in _all.split(b"\n") if x.strip()]
+    check("★★ 客户端**每次只读 1 个字节**也解出恰好 4 条（半写断点不错位）",
+          len(_msgs) == 4, "解出 %d 条" % len(_msgs))
+    check("★ 而 seq 严格递增且连续",
+          [m.get("seq") for m in _msgs] == [1, 2, 3, 4],
+          str([m.get("seq") for m in _msgs]))
+
+    # ── 26.16 超长请求行与批次上限（都不会静默吞掉请求）─────────────────
+    _d13 = _mkd()
+    _cF, _kF = _pair(_d13)
+    _cF.raw(b"x" * (mod.CONN_IN_MAX + 100))
+    _drive(_d13)
+    _rF = _cF.lines()
+    check("★ 超长请求行回一句 bad_request（不是静默丢弃）",
+          len(_rF) == 1 and (_rF[0].get("error") or {}).get("kind") == "bad_request",
+          str(_rF)[:200])
+
+    _d14 = _mkd()
+    _cG, _kG = _pair(_d14)
+    for _i in range(mod.MAX_DISPATCH_PER_WAKEUP * 3):
+        _cG.send({"op": "ping", "rid": _i})
+    _drive(_d14, rounds=12)
+    _rG = [x.get("rid") for x in _cG.lines() if "rid" in x]
+    check("★★ 一次发 %d 条请求，**一条都不丢**（批次上限只限速不限量）"
+          % (mod.MAX_DISPATCH_PER_WAKEUP * 3),
+          _rG == list(range(mod.MAX_DISPATCH_PER_WAKEUP * 3)),
+          "收到 %d 条" % len(_rG))
+
+    # ── 26.17 tick 的节拍：话多的客户端不能加速它（§八 第 1 步）─────────
+    _d15 = _mkd()
+    _ticks = [0]
+    _real_tick = _d15.tick
+
+    def _counted_tick():
+        _ticks[0] += 1
+        return _real_tick()
+    _d15.tick = _counted_tick
+    _t0 = time.time()
+    _d15.next_tick_at = _t0 + 5.0
+    _cH, _kH = _pair(_d15)
+    for _i in range(200):                  # 200 次客户端唤醒
+        _cH.send({"op": "ping", "rid": _i})
+    _drive(_d15, rounds=200)
+    check("★★ 200 次客户端唤醒**一次 tick 都没触发**"
+          "（tick 的钟是截止时刻，不是「有人说话就转一圈」）",
+          _ticks[0] == 0, "触发了 %d 次" % _ticks[0])
+    check("★ 还没到点 ⇒ 不 tick", _d15.tick_due(_t0) is False)
+    check("★ 到点了才 tick", _d15.tick_due(_t0 + 5.0) is True)
+    check("★ 而推进是「此刻 + 周期」，**落在未来**"
+          "（写成 `+=` 会在慢 tick 上自持死循环）",
+          _d15.next_tick_at == _t0 + 5.0 + _d15.cfg.tick_seconds,
+          "next=%.2f 期望 %.2f" % (_d15.next_tick_at,
+                                   _t0 + 5.0 + _d15.cfg.tick_seconds))
+    _d15.tick_done(_t0 + 8.2)              # 假装这个 tick 跑了 3.2 秒
+    check("★★ 一个超时的 tick **不触发补跑**（补跑是往慢集群上雪上加霜）",
+          _d15.tick_due(_t0 + 8.3) is False
+          and _d15.next_tick_at > _t0 + 8.2,
+          "next=%.2f" % _d15.next_tick_at)
+
+    # ── 26.18 跨文件的那一个数：出站硬线（§3.3）────────────────────────
+    _cli_src = io.open(os.path.join(HERE, "slurmate"), encoding="utf-8").read()
+    _be_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                   "backend-ssh.js"), encoding="utf-8").read()
+    _m_cli = re.search(r"(?m)^RPC_MAX_RESPONSE_BYTES\s*=\s*(.+)$", _cli_src)
+    _m_be = re.search(r"const MAX_RESPONSE_BYTES\s*=\s*(.+?);", _be_src)
+    check("★★★ 守护进程的 CONN_OUT_HARD 与 CLI 的 RPC_MAX_RESPONSE_BYTES"
+          "**逐字相等**（比它小的话，一条合法的 plugin_package 响应会进不去）",
+          bool(_m_cli) and eval(_m_cli.group(1)) == mod.CONN_OUT_HARD,
+          "CLI 那份是 %s，守护进程是 %d"
+          % ((_m_cli.group(1).strip() if _m_cli else "没找到"), mod.CONN_OUT_HARD))
+    check("★★ 客户端的 MAX_RESPONSE_BYTES 也是同一个数（三处一致）",
+          bool(_m_be) and eval(_m_be.group(1)) == mod.CONN_OUT_HARD,
+          "客户端那份是 %s" % (_m_be.group(1).strip() if _m_be else "没找到"))
+    check("★ 软水位小于硬线（反过来的话读侧的门永远关着）",
+          0 < mod.CONN_OUT_SOFT < mod.CONN_OUT_HARD,
+          "%d / %d" % (mod.CONN_OUT_SOFT, mod.CONN_OUT_HARD))
+    check("★★ 快照周期**严格小于**客户端的 STATUS_MS（否则这一版在数据新鲜度上"
+          "是净退化）",
+          mod.SNAPSHOT_INTERVAL * 1000 < 60000,
+          "快照 %s 秒 vs STATUS_MS 60 秒" % mod.SNAPSHOT_INTERVAL)
+
+    # ── 26.19b 推送里不含任何口令（靠一条**真会话文件**才验得出来）──────
+    #
+    # ★ 没有这一条的话，"推送走的是 list 的 with_secret=False"只是一句注释：
+    #   夹具里那条会话根本没有口令可发，两个方向都会绿。
+    _d18 = _mkd()
+    _cI, _kI = _pair(_d18)
+    _kI.subscribed = True
+    _pwjid = 4242
+    write_session("job-%d.json" % _pwjid, {
+        "schema": 1, "session_id": "s-pw", "job_id": _pwjid, "uid": UID,
+        "user": "alice", "partition": "A6000", "node": "node01",
+        "node_ip": "192.0.2.11", "service_port": 55019,
+        "tunnel_target": "192.0.2.11:55019", "state": "running",
+        "job_started_at": 1, "written_at": 2, "job_hb_at": 3,
+        "code_server_pid": 4, "auth_mode": "password",
+        "auth_password": "pw-push-secret",
+        "slurm_restart_number": 0, "exit_code": None,
+    })
+    _add(_d18, "s-pw", job_id=str(_pwjid))
+    _pw_view = _d18.session_view(_d18.store.get("s-pw"))     # with_secret=True
+    check("★ 前提：这条会话**确实**有口令可发（否则下面那条是空断言）",
+          _pw_view.get("auth_password") == "pw-push-secret",
+          "status 那条路拿到的口令是 %r" % _pw_view.get("auth_password"))
+    _d18.tick()
+    _drive(_d18)
+    _rpw = [m for m in _cI.lines() if m.get("push")]
+    check("★★ 推送里**一个 auth_password 都没有**（它走的是 list 的 "
+          "with_secret=False —— 于是「推送不含秘密」是结构性质，不靠任何判断）",
+          bool(_rpw) and all("auth_password" not in s
+                             for m in _rpw for s in (m.get("sessions") or [])),
+          str(_rpw)[:250])
+
+    # ── 26.20 ★★★ 端到端：真循环 + 真 listener + 真客户端 ──────────────
+    #
+    # 前面那些用例都是拿着 Conn 手工驱动事件循环的。这一条把 `run()` 真的跑
+    # 起来 —— 它才会走到 select、走到 tick 的截止时刻、走到 accept 那条路。
+    # 手工驱动测不到的东西（比如"accept 返回阻塞 fd"）只会在真循环里现形。
+    #
+    # ★ 守护进程跑在**它自己的线程**里，所有 store 访问都在那个线程内完成：
+    #   sqlite3 连接默认 check_same_thread=True，跨线程用会抛。为了测试把它
+    #   关掉等于把一条真实的防线拆了 —— 所以改成"由守护进程线程自己建行"。
+    _e2e_path = os.path.join(tmpdir, "e2e.sock")
+    _box = {}
+    _ready = threading.Event()
+    # ★ 兜底：这一段涉及真线程 + 真 socket，卡住的话默认症状是"测试永远不返回"，
+    #   而那种现场什么都查不出来（本项目已经在别处吃过一次这个亏）。让它在 60 秒
+    #   之后**自己把每个线程的栈打出来**并退出 —— 卡住变成一份可读的证据。
+    import faulthandler as _fh
+    _fh.dump_traceback_later(90, exit=True)
+
+    def _boot():
+        _dd = _mkd(tick_seconds=0.05, snapshot_interval=0.05, eof_linger=0.2)
+        _dd.cfg.socket_path = _e2e_path
+        _dd.setup_socket()
+        _add(_dd, "s-e2e", job_id="950")
+        # ★ 刻意用 PENDING 而不是 RUNNING：RUNNING 会让每个 tick 都去读一次
+        #   **不存在**的会话文件（夹具里没有那份文件），并各写一行 warning ——
+        #   0.05 秒一个 tick 就是每秒二十几行，日志会被淹掉，而那不是被测的东西。
+        _dd.slurm.jobs["950"] = {"JobState": "PENDING", "UserId": UID,
+                                 "Partition": "A6000", "Reason": "Resources"}
+        _box["d"] = _dd
+        _ready.set()
+        _dd.run()
+        _dd.store.close()
+
+    _th = threading.Thread(target=_boot, daemon=True)
+    _th.start()
+    check("★ 守护进程线程起来了", _ready.wait(10.0), "5 秒内没起来")
+    _dd = _box.get("d")
+    if _dd is None:
+        check("★★★ 端到端（守护进程没起来，其余免谈）", False, "见上")
+    else:
+        _s1 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        _s1.settimeout(10.0)
+        try:
+            _s1.connect(_e2e_path)
+            _w = _Client(_s1)
+            _w.send({"op": "ping", "rid": "e2e-1"})
+            _t0 = time.time()
+            _wresp = []
+            # ★ 按 rid 挑，而不是"读到的那一条"：同一次 recv 里很可能**既有响应
+            #   也有推送**（守护进程推得很勤）。用 rid 挑正好把判据本身验了 ——
+            #   响应带 rid、通知不带，两者在同一条流上不会混。
+            while not _wresp and time.time() - _t0 < 8.0:
+                _wresp = [m for m in _w.lines(0.3) if m.get("rid") == "e2e-1"]
+            check("★★★ 端到端：真循环 + 真 listener，带 rid 的请求拿到带 rid 的响应",
+                  len(_wresp) == 1 and _wresp[0].get("ok") is True,
+                  str(_wresp)[:200])
+            # ★ 放在拿到响应**之后**：accept 是守护进程线程做的，刚 connect
+            #   完就去问 conns() 会问到一个空列表（那是竞态，不是缺陷）。
+            _accepted = _dd.conns()
+            check("★★ 被接受的连接是**非阻塞**的"
+                  "（实测 accept() 在非阻塞 listener 上返回的是阻塞 socket ——"
+                  "不显式关掉，第一次 send 就会卡死整个事件循环）",
+                  bool(_accepted)
+                  and all(not c.sock.getblocking() for c in _accepted),
+                  "getblocking=%s" % [c.sock.getblocking() for c in _accepted])
+            # 订阅之后第一个 tick 必定推一条（sent_digest 还是 None）
+            _t0 = time.time()
+            _wpush = []
+            while not _wpush and time.time() - _t0 < 8.0:
+                _wpush = [m for m in _w.lines(0.3) if m.get("push")]
+            check("★★★ 端到端：订阅连接收到了推送，而且推的是那条会话",
+                  len(_wpush) >= 1 and any(
+                      s.get("session_id") == "s-e2e"
+                      for s in (_wpush[-1].get("sessions") or [])),
+                  str(_wpush)[:250])
+
+            # 同一时刻一条**不带 rid** 的连接：它一个字节的推送都不该收到
+            _s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _s2.settimeout(10.0)
+            _s2.connect(_e2e_path)
+            _v = _Client(_s2)
+            _v.send({"op": "ping"})
+            _t0 = time.time()
+            _vresp = []
+            while not _vresp and time.time() - _t0 < 8.0:
+                _vresp = _v.lines(0.3)
+            check("★★ 端到端：老客户端（不带 rid）一问一答，且**没有 rid**",
+                  len(_vresp) == 1 and "rid" not in _vresp[0], str(_vresp)[:200])
+            _extra = []
+            _t0 = time.time()
+            while time.time() - _t0 < 0.6:          # 跨过好几个 tick
+                _extra += [m for m in _v.lines(0.1) if m.get("push")]
+            check("★★★ 端到端：而它在好几个 tick 里**一条推送都没收到** —— "
+                  "老客户端不受常驻通道影响的保证是结构性的",
+                  _extra == [], "它收到了 %d 条推送" % len(_extra))
+            # ── 26.21 ★★★ 通过**真正的 `slurmate stream` 进程**走一遍 ──────
+            #
+            # 前面那些都是拿 Conn 直接驱动的。这一条把 CLI 当成用户会用的那个
+            # 东西跑起来：它经 stdin/stdout 说话，内部自己维持那条常驻连接。
+            _bootsrc = (
+                "import importlib.machinery, importlib.util, sys\n"
+                "L = importlib.machinery.SourceFileLoader('slurmate_cli', %r)\n"
+                "S = importlib.util.spec_from_loader('slurmate_cli', L)\n"
+                "M = importlib.util.module_from_spec(S)\n"
+                "L.exec_module(M)\n"
+                "M.DEFAULT_SOCKET = %r\n"
+                "sys.exit(M.cmd_stream(None))\n"
+                % (os.path.join(HERE, "slurmate"), _e2e_path))
+            _proc = subprocess.Popen([sys.executable, "-c", _bootsrc],
+                                     stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+            try:
+                for _i in range(3):
+                    _proc.stdin.write(
+                        (json.dumps({"op": "ping", "rid": "st-%d" % _i}) + "\n")
+                        .encode("utf-8"))
+                _proc.stdin.flush()
+                # ★ 用 os.read 而不是 stdout.readline()：后者是**带缓冲**的，
+                #   而 select 只看内核缓冲 —— 缓冲区里已经有整行时 select 不报，
+                #   于是 readline 会永远等下去。这是同一类坑的第二次出现。
+                _buf, _msgs = b"", []
+                _t0 = time.time()
+                while time.time() - _t0 < 12.0:
+                    _r, _, _ = select.select([_proc.stdout], [], [], 0.3)
+                    if _r:
+                        _chunk = os.read(_proc.stdout.fileno(), 65536)
+                        if not _chunk:
+                            break
+                        _buf += _chunk
+                    _parts = _buf.split(b"\n")
+                    _buf = _parts.pop()
+                    _msgs += [json.loads(x) for x in _parts if x.strip()]
+                    if (len([m for m in _msgs if "rid" in m]) >= 3
+                            and len([m for m in _msgs if m.get("push")]) >= 2):
+                        break
+                _strids = [m.get("rid") for m in _msgs if "rid" in m]
+                check("★★★ 一条 `slurmate stream` 进程承载 3 条 RPC，各回各的 rid",
+                      _strids == ["st-0", "st-1", "st-2"], str(_strids))
+                _stpush = [m for m in _msgs if m.get("push")]
+                check("★★★ 而同一条 stream 上还收到 ≥ 2 条推送（服务端主动说的）",
+                      len(_stpush) >= 2, "收到 %d 条" % len(_stpush))
+                _stseq = [m.get("seq") for m in _stpush]
+                check("★ 推送的 seq 严格递增（缺口由 stale 报，不靠猜）",
+                      _stseq == sorted(set(_stseq)) and len(_stseq) >= 2,
+                      str(_stseq))
+                # 半关 ⇒ 守护进程把出站排空后关掉它 ⇒ 那是**正常终点**，退出码 0
+                _proc.stdin.close()
+                _rc = _proc.wait(timeout=20)
+                check("★★ stdin 半关之后 `stream` 以 0 退出"
+                      "（半关 ≠ 断线，是正常收摊；报 5 会让客户端白白重连）",
+                      _rc == 0,
+                      "退出码 %s，stderr=%s"
+                      % (_rc, _proc.stderr.read()[:200]))
+            finally:
+                try:
+                    _proc.kill()
+                except Exception:                            # noqa: BLE001
+                    pass
+
+            _v.close()
+            _w.close()
+        except OSError as _e:
+            check("★★★ 端到端：连得上守护进程", False, str(_e))
+        finally:
+            _dd.running = False
+            _th.join(timeout=8.0)
+        check("★ 收到停止信号之后循环退出来了（不是卡在 select 里）",
+              not _th.is_alive(), "线程还活着")
+    _fh.cancel_dump_traceback_later()
+
+    # ── 26.19 资源回收：连接与观察表都不许无界增长 ──────────────────────
+    _d16 = _mkd()
+    for _i in range(30):
+        _c, _k = _pair(_d16)
+        _d16.drop_conn(_k, "测试")
+        _c.close()
+    check("★★ 开关 30 条之后 selector 里仍然只有那一份（没有 fd 泄漏）",
+          len(_d16.selector.get_map()) == 0, str(len(_d16.selector.get_map())))
+    check("★ 关闭的连接不再出现在花名册里", _d16.conns() == [],
+          "%d 条" % len(_d16.conns()))
+
+    for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
+                _d13, _d14, _d15, _d16):
+        try:
+            _dd.store.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+    for _dd in (_d9,):
+        try:
+            _dd.store.close()
+        except Exception:                                    # noqa: BLE001
+            pass
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

@@ -24,6 +24,7 @@ slurmate — Slurmate 用户态 CLI
 import argparse
 import json
 import os
+import selectors
 import socket
 import subprocess
 import sys
@@ -58,6 +59,10 @@ EXIT_RATELIMIT = 7
 #   "响应太大"，而客户端把它归成 `daemon_unreachable`（code 5）并**退避重试** ——
 #   一次"文件太大"会被报成"控制节点上的守护进程没有响应"。
 RPC_MAX_RESPONSE_BYTES = 4 << 20
+
+# `slurmate stream` 连上守护进程要等多久。连上之后**不再有任何超时** ——
+# 它是常驻通道，空闲是正常的。
+STREAM_CONNECT_TIMEOUT = 40.0
 
 
 def socket_path():
@@ -396,6 +401,131 @@ def cmd_rpc(args):
     return 0 if resp.get("ok") else _code_to_exit(resp)
 
 
+def cmd_stream(args):                                          # noqa: ARG001
+    """常驻通道：把 stdin 的一行行请求转给守护进程，把它吐的每一行写回 stdout。
+
+        stdin   一行一条请求（**可以带 `rid`**，带了的才会收到推送）
+        stdout  一行一条：响应带 `rid`，通知带 `seq`
+
+    ★★ 它是一个**字节泵**，不是第二套协议实现：不解析、不校验、不重排、
+      **不做任何用户态缓冲**（读多少写多少）。
+
+      "不做用户态缓冲"是整条背压链上唯一可能引入无界缓冲的地方，所以它必须
+      没有。链条这样闭合：
+
+          客户端不读 stdout
+            ⇒ 本进程阻塞在 write(1)            （内核管道缓冲满）
+            ⇒ 它不再 read(socket)              （单线程，顺序执行）
+            ⇒ 守护进程的 send 拿到 EAGAIN
+            ⇒ 它按水位丢**推送**（响应绝不丢）
+
+      中间任何一级加了队列，这条链就断了，而断掉的症状是"内存慢慢涨" ——
+      指不回任何一行。
+
+    ★ 它**不加限速**：它以用户自己的身份跑，限自己防不了任何东西；而"一个判据
+      两处实现会漂"，漂的方向是心跳发不出去 ⇒ 被判定孤儿 ⇒ scancel。
+      限流的权威位置只有守护进程那一处。
+
+    ★ 它**不加空闲超时**：它不理解心跳的语义（谁在心跳、多久算超时，是
+      session.js 的事）。按"多久没说话"在这里关连接，会在用户只是停下来看
+      界面的时候把通道掐掉。
+
+    ★ 两个方向的限长**不一样**（请求 64 KiB / 响应 4 MiB），但这里一条都不实现
+      —— 请求那一侧由守护进程的 `CONN_IN_MAX` 管，响应那一侧由
+      `RPC_MAX_RESPONSE_BYTES` 管。此处再加一遍就是第三份真相。
+    """
+    path = socket_path()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(STREAM_CONNECT_TIMEOUT)
+    try:
+        s.connect(path)
+    except (FileNotFoundError, ConnectionRefusedError, socket.timeout) as e:
+        sys.stderr.write(
+            "无法连接 Slurmate 守护进程（%s）：%s\n"
+            "请确认控制节点上 slurmate-sessiond 正在运行：\n"
+            "  systemctl status slurmate-sessiond\n" % (path, e))
+        return EXIT_NODAEMON
+    except OSError as e:
+        sys.stderr.write("连接守护进程失败（%s）：%s\n" % (path, e))
+        return EXIT_NODAEMON
+    # 连上之后**不再有超时**：这是一条常驻通道，空闲是正常的。
+    s.settimeout(None)
+
+    sel = selectors.DefaultSelector()
+    sel.register(0, selectors.EVENT_READ, "in")
+    sel.register(s, selectors.EVENT_READ, "sock")
+    in_closed = False
+    try:
+        while True:
+            for key, _mask in sel.select():
+                if key.data == "in":
+                    try:
+                        data = os.read(0, 65536)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        # stdin 关了（客户端退出）。**半关，不是断开** ——
+                        # 已经发出去的请求还要把响应收回来，而守护进程那边
+                        # 正是靠"半关 ≠ 断线"把响应写完的。
+                        try:
+                            sel.unregister(0)
+                        except (KeyError, ValueError):
+                            pass
+                        try:
+                            s.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                        in_closed = True
+                        continue
+                    s.sendall(data)          # 阻塞写：背压靠它往上游传
+                else:
+                    try:
+                        data = s.recv(65536)
+                    except OSError as e:
+                        sys.stderr.write("与守护进程的通道断了：%s\n" % e)
+                        return EXIT_NODAEMON
+                    if not data:
+                        # ★ 两种"对面关了"要分开：
+                        #   · 我们自己先半关过（客户端收摊了）⇒ 这是**正常的终点**，
+                        #     退出码 0。守护进程会在 EOF_LINGER 之后把这半条关掉，
+                        #     所以走到这里就是"该发的都发完了"。
+                        #   · 没半关过 ⇒ 守护进程不在了，报 5 让客户端去重连。
+                        if not in_closed:
+                            sys.stderr.write("守护进程关闭了通道\n")
+                            return EXIT_NODAEMON
+                        return EXIT_OK
+                    _write_all(1, data)      # 阻塞写：背压靠它往上游传
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except BrokenPipeError:
+        # stdout 没了（客户端进程退出了）。**不是错误** —— 走的人不需要解释。
+        return EXIT_OK
+    finally:
+        try:
+            sel.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _write_all(fd, data):
+    """往一个**阻塞** fd 写完。写不完就一直写 —— 这就是背压本身。
+
+    ★ 不用 `print` / `sys.stdout`：那是带缓冲的文本层，而这条通道上跑的是
+      **字节**（一行 JSON，可能很长）。文本层会引入一层用户态缓冲，
+      正是上面那条链要避免的东西。
+    """
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if n <= 0:
+            raise OSError("写标准输出失败")
+        view = view[n:]
+
+
 def cmd_whoami(args):
     r = call({"op": "whoami"}, args.json)
     if isinstance(r, int):
@@ -731,6 +861,11 @@ def build_parser():
         return p
 
     p = add("rpc", cmd_rpc, "从 stdin 读 JSON 请求、向 stdout 写 JSON 响应（客户端入口）")
+
+    # 常驻版：一条连接上可以问很多次，服务端还会主动说。老客户端继续用 rpc，
+    # 两者是**同一个状态机**，差别只在客户端什么时候关（见守护进程的 Conn）。
+    p = add("stream", cmd_stream,
+            "常驻通道：stdin 一行一条请求、stdout 一行一条（响应带 rid，通知带 seq）")
 
     # `plugin` 是一个**管理**动词（要 root），与其余那些用户动词不是一类 ——
     # 所以它有自己的一层子命令，而不是 `slurmate install-plugin` 这样一个动词名。

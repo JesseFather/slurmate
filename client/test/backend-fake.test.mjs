@@ -32,7 +32,13 @@ const DAEMON = fs.readFileSync(
 
 /** 守护进程 `session_view()` 的**函数体**。判据只在那个函数里，别处不算。 */
 function daemonViewBody() {
-  const at = DAEMON.indexOf('    def session_view(self, s, with_secret=True):');
+  // ★ 锚点是**完整签名**，这是有意的：签名变了就说明"这一份视图由谁渲染、
+  //   渲染时要不要现查 Slurm"变了，而假后端演的是同一件事 —— 那正是这一条要
+  //   盯住的东西。v0.8 阶段 3 加了 `job_live`（推送那条路只读本 tick 已经取过的
+  //   作业信息，绝不在这里 fork），锚点跟着改；**默认值不变**，所以假后端
+  //   （它演的是 `list` / `status` 那一侧）一个字都不用动。
+  const at = DAEMON.indexOf(
+    '    def session_view(self, s, with_secret=True, job_live=True):');
   assert.notEqual(at, -1, '守护进程里找不到 session_view() —— 改名了就更新这条检查');
   const end = DAEMON.indexOf('\n    def op_status', at);
   assert.notEqual(end, -1, '找不到 session_view() 的结尾');

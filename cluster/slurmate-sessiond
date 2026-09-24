@@ -603,6 +603,54 @@ REJECT_THRESHOLD = 20
 REJECT_WINDOW = 600
 THROTTLE_SECONDS = 1800
 
+# ── 常驻通道 ────────────────────────────────────────────────────────────────
+#
+# 一条连接从「一问一答」变成「可以问很多次、服务端还会主动说」。下面这几个数
+# 全部是**实测**定的（本机 Python 3.13.11 / Linux，AF_UNIX + epoll），
+# 每一条都把实测现象写在旁边 —— 它们不是调优参数，是几处承重结构的支点。
+#
+# ★ 两个水位（CONN_OUT_SOFT / CONN_OUT_HARD）撑起的是同一件事的两端：
+#   软水位**摘掉 EVENT_READ**（不再收新请求），硬水位**丢推送**（但绝不丢响应）。
+#   它们各自的理由见 Conn.want_events() 与 Sessiond.enqueue_push()。
+
+# 出站待发到这个量，就停止读这条连接。
+# 64 KiB 是照 op_list 定的：它硬性截到 50 行，50 × ~900 B ≈ 45 KiB，所以一份
+# **完整的合法响应**装得下 —— 摘掉读侧不会把一个正常客户端卡在半路上。
+CONN_OUT_SOFT = 64 << 10
+
+# 出站待发的硬上限。★★ **必须逐字等于 `cluster/slurmate` 的
+# RPC_MAX_RESPONSE_BYTES**（4 MiB）。合法响应最大的是 plugin_package
+# （base64 之后约 2.7 MiB），硬线比它小的话，一条**合法响应**会因为"队列里
+# 还压着一条快照"而进不去 —— 症状是插件装不上，而报错会指向守护进程没响应。
+# 这个等式由 cluster/test-sessiond-logic.py 里一条用例逐字比对。
+CONN_OUT_HARD = 4 << 20
+
+# 同时活着的连接数上限，与 listener.listen(64) 一致。
+# ★ 两者不一致时，多出来的那条会在**内核的 backlog 里**静默等待：客户端
+#   connect() 成功、然后一直读不到东西，40 秒后报 daemon_unreachable ——
+#   一个方向完全反了的结论。所以超限时必须 **accept-then-reject**。
+CONN_MAX = 64
+
+# 一条请求行的长度上限（与从前的 handle_client 一致：读满这么多还没见到换行
+# 就放弃）。超了回一句 bad_request 再关，**不是静默丢弃**。
+CONN_IN_MAX = 65536
+
+# 读到 EOF（半关）之后，还允许留着把出站排空多久。
+# ★★ 这个窗口是必须的：老客户端（`slurmate rpc`）**每次发完就半关**，
+#   立刻关连接会把 submit 的响应一起带走 ⇒ 客户端拿不到 job_id ⇒ 重试 ⇒
+#   被 quota_active 拒 ⇒ 用户看到「提交失败了」**而作业在跑**。
+# 有上界是因为 EOF 之后不会再有新请求，所以待发的字节数只减不增。
+EOF_LINGER = 10.0
+
+# 没有变化时，也至少每这么久推一条全量快照。
+# ★★ 必须**严格小于**客户端的 STATUS_MS（60 秒）：客户端本来每 60 秒主动问
+#   一次，改成靠推送之后，快照比 60 秒还稀疏的话，它在"数据新鲜度"上是**净退化**。
+SNAPSHOT_INTERVAL = 30.0
+
+# 一次唤醒最多处理几条请求。一个 64 KiB 的读缓冲装得下几千条小请求，
+# 一次跑完的话期间 tick 与**所有别的连接**都停摆。
+MAX_DISPATCH_PER_WAKEUP = 8
+
 # 服务端默认资源的上限。客户端【不填】cpus/mem —— 缺省一律由服务端决定，
 # 否则一个改过的客户端省略字段就能要到整机。
 #
@@ -2475,6 +2523,13 @@ class Config(object):
         self.reject_threshold = REJECT_THRESHOLD
         self.reject_window = REJECT_WINDOW
         self.throttle_seconds = THROTTLE_SECONDS
+        # ── 常驻通道（见文件上方那一节；全部是实测定的数）──
+        self.conn_out_soft = CONN_OUT_SOFT
+        self.conn_out_hard = CONN_OUT_HARD
+        self.conn_max = CONN_MAX
+        self.conn_in_max = CONN_IN_MAX
+        self.eof_linger = EOF_LINGER
+        self.snapshot_interval = SNAPSHOT_INTERVAL
         self.jobs_dir = default_jobs_dir()
         self.job_log_subdir = JOB_LOG_SUBDIR
 
@@ -3417,8 +3472,109 @@ def parse_iso_ts(s):
 
 
 # ==============================================================================
-#  会话守护进程
+#  常驻通道：一条连接的状态
 # ==============================================================================
+
+class Conn(object):
+    """一条连接的全部状态。它**就是** selector 的 `key.data`，没有第二本花名册。
+
+    ★★ 为什么不另设 `self.conns = {fd: Conn}`：两处记账会漂，而漂的形态是
+      fd 被复用之后**把 B 的推送写进 C 的连接** —— 跨用户的数据泄漏，而且
+      不会红任何东西（两边各自都自洽）。放进 `key.data` 之后，"这条 fd 属于
+      谁"只有一个答案，因为 fd 号的复用手册就在内核手里、selector 跟着它走。
+
+    ★★ 队列里**只有 bytes**，而且是**在入队那一刻序列化好的**。这一条是
+      「不需要锁」的论证能覆盖到这个队列的唯一方式：今天的「读→算→写」是一条
+      直线，常驻通道把它劈成两半、中间隔着一个**跨 tick 的队列** —— 而"单线程
+      所以不需要锁"这句话对队列里的东西并不自动成立。让队列只装不可变的
+      bytes，等于让那个论证重新闭合：没有任何会变的东西被跨 tick 持有。
+      把 cursor、惰性视图、数据库行放进队列，就是另一类 bug（读到一半的行）。
+
+    `seq` / `stale` 是推送的序号与缺口：见 Sessiond.enqueue_push()。
+    """
+
+    __slots__ = ("cfg", "sock", "uid", "gid", "inbuf", "out", "out_off",
+                 "rx_eof", "eof_at", "subscribed", "seq", "stale",
+                 "pushed_at", "sent_digest", "want", "closing")
+
+    def __init__(self, cfg, sock, uid, gid):
+        # ★ 拿 cfg 而不是直接读模块常量：两个水位是**实测调出来的**，而用例要
+        #   能把它们调小才测得到（conn_out_soft = 0 就立刻门住读侧）。
+        #   留一份常量副本在这里等于第二个真相。
+        self.cfg = cfg
+        self.sock = sock
+        self.uid = uid
+        self.gid = gid
+        self.inbuf = b""
+        self.out = b""              # 待发字节（只增不减，排空时整体丢弃）
+        self.out_off = 0            # 已经写出去的偏移；out_off == len(out) 即排空
+        self.rx_eof = False         # 对端半关了（**不是断线**，见 read_ready）
+        self.eof_at = 0.0
+        self.subscribed = False     # 收到过带 rid 的请求 → 从此收推送
+        self.seq = 0                # 已"发出"（含被丢弃的）的推送条数
+        self.stale = 0              # 因为水位被丢掉的推送条数（缺口挂在 seq 上）
+        self.pushed_at = 0.0
+        self.sent_digest = None     # 最近一次真正推出去的视图的指纹
+        self.want = 0               # 当前挂在 selector 上的事件掩码
+        self.closing = False
+
+    # ── 出站 ────────────────────────────────────────────────────────────────
+    def pending(self):
+        return len(self.out) - self.out_off
+
+    def queue_msg(self, msg):
+        """序列化**当场**做完，入队的是 bytes。理由是类 docstring 里那一条。"""
+        self.out += (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def pump(self):
+        """尽量把出站队列写出去。返回 False 表示这条连接该关了。
+
+        ★ 只用 `sock.send()` + 偏移，**禁止 `sendall`**：
+          · 阻塞 fd 上 `sendall` 会卡死整个事件循环（而 accept 返回的正是阻塞 fd）；
+          · 非阻塞 fd 上它丢掉"已经写了多少" —— 重试时会把同一条消息的头再发一遍。
+        """
+        while self.out_off < len(self.out):
+            try:
+                n = self.sock.send(memoryview(self.out)[self.out_off:])
+            except BlockingIOError:
+                return True                      # 对端不读 —— 留着下次再写
+            except OSError:
+                return False
+            if n == 0:
+                # 写不进去又没报错。对着它循环是空转。
+                return False
+            self.out_off += n
+        self.out = b""
+        self.out_off = 0
+        return True
+
+    def compact(self):
+        """把已经写出去的那一段丢掉。只在偏移够大时做，否则每次唤醒都拷一遍
+        剩下的尾巴 —— 那在"对端一直不读"时是 O(n²)。"""
+        if self.out_off >= len(self.out):
+            self.out = b""
+            self.out_off = 0
+        elif self.out_off >= (1 << 16) and self.out_off * 2 >= len(self.out):
+            self.out = self.out[self.out_off:]
+            self.out_off = 0
+
+    # ── 事件掩码 ────────────────────────────────────────────────────────────
+    def want_events(self):
+        """这条连接此刻想让 selector 关心什么。
+
+        ★★ `EVENT_WRITE` **只在真有残留字节时才挂**。挂着而队列是空的，
+          epoll 是**水平触发**的 ⇒ `select` 立即返回 ⇒ **100% CPU 空转**，
+          而日志里什么都没有。本机实测：300 ms 内 `select` 返回了 214167 次。
+
+        ★ 软水位之上摘掉 `EVENT_READ` —— 这是背压的读侧门（见 enqueue_push）。
+        """
+        ev = 0
+        if not self.rx_eof and self.pending() < self.cfg.conn_out_soft:
+            ev |= selectors.EVENT_READ
+        if self.pending():
+            ev |= selectors.EVENT_WRITE
+        return ev
+
 
 class Sessiond(object):
 
@@ -3450,6 +3606,14 @@ class Sessiond(object):
         self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
         self.running = True
         self._reconcile_warned = False
+        # ── 常驻通道 ──
+        # ★ 下一次 tick 的截止**时刻**（不是"还剩几秒"）。理由见 run()。
+        self.next_tick_at = time.time()
+        # 本 tick 的作业信息缓存：job_id -> dict|None。**每个作业每 tick 至多查
+        # 一次** —— 它是"推送不放大 fork"的全部依据，见 tick_job()。
+        self._tick_job = {}
+        # 本 tick 每个 uid 渲染一次的快照：uid -> (digest, [会话视图])。
+        self._tick_snap = {}
 
     # ── 审计 ────────────────────────────────────────────────────────────────
     def audit(self, event, **kw):
@@ -3539,26 +3703,95 @@ class Sessiond(object):
         os.chmod(path, 0o666)
         self.listener.listen(64)
         self.listener.setblocking(False)
-        self.selector.register(self.listener, selectors.EVENT_READ)
+        # `data=None` 是**约定**，写出来而不是靠缺省值：`handle_events()` 靠它区分
+        # "监听 socket"与"一条连接"（后者的 `key.data` 是一个 `Conn`）。
+        self.selector.register(self.listener, selectors.EVENT_READ, None)
 
-    # ── 主循环 ──────────────────────────────────────────────────────────────
-    def run(self):
+    def install_signal_handlers(self):
+        """装信号处理。**由 main() 调，不放在 run() 里** —— `signal.signal()`
+        只能从主线程调，放在 run() 里就等于"这个循环没法从工作线程跑"，
+        而那正是端到端用例需要的（用例要一边跑循环一边发请求）。"""
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGHUP, self._on_signal)
+
+    # ── 主循环 ──────────────────────────────────────────────────────────────
+    def run(self):
+        self.next_tick_at = time.time()
         while self.running:
+            now = time.time()
+            if self.tick_due(now):
+                self._run_tick()
+                self.tick_done(time.time())
+                continue                  # 回到顶部重算截止时刻，不 select
+            timeout = max(0.0, self.next_tick_at - time.time())
+            # ★ 上一轮被 MAX_DISPATCH_PER_WAKEUP 截断的行还在**我们自己的
+            #   inbuf 里**，内核不知道，所以不会再有事件。这里把超时压成 0，
+            #   让外层循环立刻转一圈把它们接着处理掉。
+            if self.pending_input():
+                timeout = 0.0
             try:
-                self.tick()
-            except Exception:                                # noqa: BLE001
-                log.exception("tick 异常（已捕获，守护进程继续）")
-            # 用 select 等待，既能及时响应 socket，又保持 tick 周期
-            try:
-                events = self.selector.select(timeout=self.cfg.tick_seconds)
+                events = self.selector.select(timeout)
             except InterruptedError:
                 continue
-            for key, _ in events:
-                if key.fileobj is self.listener:
-                    self.accept_one()
+            self.handle_events(events)
+            self.drain_pending()
+
+    def tick_due(self, now):
+        """该不该跑 tick；该的话**顺手把截止时刻推到未来**。
+
+        ★★ 推进必须在 tick **之前**，而且必须写成"此刻 + 周期"。
+
+          写成 `self.next_tick_at += 周期` 是错的：一个跑了 3.2 秒的 tick 会让
+          新的截止时刻仍然落在**过去**，于是下一轮 `timeout=0`、立刻再 tick、
+          又加一个周期、仍然在过去 —— **自持死循环**，而每一轮都要 fork 一遍
+          所有会话。那是"一个慢查询把守护进程变成 fork 炸弹"。
+
+          "此刻 + 周期"则最多落后一个周期，而 tick_done() 再把那一点也抹平。
+        """
+        if now < self.next_tick_at:
+            return False
+        self.next_tick_at = now + self.cfg.tick_seconds
+        return True
+
+    def tick_done(self, now):
+        """tick 跑完之后收尾：**一个超时的 tick 不触发补跑。**
+
+        ★ 超时说明集群本来就慢，补跑是往慢集群上雪上加霜。代价是节拍整体后移
+          （而不是丢一次对账）—— 对账是幂等的，晚一轮没有后果。
+        """
+        if self.next_tick_at <= now:
+            self.next_tick_at = now + self.cfg.tick_seconds
+
+    def _run_tick(self):
+        try:
+            self.tick()
+        except Exception:                                    # noqa: BLE001
+            log.exception("tick 异常（已捕获，守护进程继续）")
+
+    def handle_events(self, events):
+        for key, mask in events:
+            conn = key.data
+            if conn is None:                # 监听 socket 的 data 是 None
+                self.accept_ready()
+                continue
+            self.service_conn(conn, mask)
+
+    def pending_input(self):
+        """还有没有"读到一半、剩下整行"的连接。理由见 run() 里那一段。"""
+        for conn in self.conns():
+            if not conn.closing and b"\n" in conn.inbuf:
+                return True
+        return False
+
+    def conns(self):
+        """当前所有连接。
+
+        ★ 这是**唯一**的花名册 —— 它就是从 selector 里现读出来的。
+          没有第二本的理由见 Conn 的 docstring（fd 复用 ⇒ 跨用户泄漏）。
+        """
+        return [k.data for k in self.selector.get_map().values()
+                if isinstance(k.data, Conn)]
 
     def _on_signal(self, signum, _frame):
         log.info("收到信号 %d，准备退出", signum)
@@ -3585,13 +3818,24 @@ class Sessiond(object):
 
     # ── tick 各阶段 ─────────────────────────────────────────────────────────
     def tick(self):
-        if not self.reconcile():
-            return                       # 表都拿不到，后面的都不必做
-        self.phase_pending()
-        self.phase_running()
-        self.phase_heartbeat()
-        self.phase_release()
-        self.phase_gc()
+        # ★ 缓存的生命周期**恰好是一个 tick**：在这里清，而不是在 phase_push 里清。
+        #   在 phase_push 里清的话，phase_running 刚填好的那一份会被自己清掉，
+        #   于是每个会话每个 tick 查两次 Slurm（实测约 8 ms 一次）。
+        self._tick_job = {}
+        self._tick_snap = {}
+        ok = self.reconcile()
+        if ok:                           # 表都拿不到，后面那些都不必做
+            self.phase_pending()
+            self.phase_running()
+            self.phase_heartbeat()
+            self.phase_release()
+            self.phase_gc()
+        # ★ 推送**在对账失败时也照做**，这是有意的：快照渲染的是数据库与 Slurm
+        #   的现状，不是 nft 的现状 —— 读不到规则不代表会话列表是错的。
+        #   而"停推"会让界面变成一张**看起来正常、其实静止**的画（没有任何地方
+        #   会报错）。每一条推送里都带 `at`，客户端据此看得出画面有多旧。
+        self.phase_push()
+        self.sweep_conns()
 
     def reconcile(self):
         """自愈 + 对账：nft 规则集合 与 DB 中应有的 ACL 集合必须一致。
@@ -3727,6 +3971,10 @@ class Sessiond(object):
             if not s.get("job_id"):
                 continue
             status, job = self.slurm.job_state(s["job_id"])
+            # ★ 顺手把这一次的结果喂给本 tick 的缓存：快照要渲染同一个会话的
+            #   作业状态，没有它就要再 fork 一次（见 tick_job）。
+            self._tick_job[s["job_id"]] = (job if status == self.slurm.JOB_OK
+                                           else None)
 
             # 查不了 → 什么都不做。绝不能因为一次命令失败就拆掉在跑的会话。
             if status == self.slurm.JOB_UNKNOWN:
@@ -4006,6 +4254,107 @@ class Sessiond(object):
             if now - ref > self.cfg.released_keep:
                 self.store.delete(s["session_id"])
 
+    # ── 推送 ────────────────────────────────────────────────────────────────
+    def phase_push(self):
+        """把每个 uid 的当前视图推给它那些订过的连接。
+
+        ★★★ **只推全量，绝不推增量。** 每条消息都是一份自足、完整的会话列表，
+          所以**丢掉任何一条都无害**（下一条会纠正它）。这一条是整套背压能这么
+          简单的原因：丢弃不需要分级、客户端不需要重放，
+          而"重连恢复"与"落后恢复"是**同一条代码路径**。
+          改成增量的话，"丢弃"会从无害变成有害，而症状是**界面上静默地少一个
+          会话** —— 不报错、不重连，只是少一行。
+
+        ★ 一个 uid 每 tick 只渲染一次，所有连接共用（见 snapshot_for）。
+
+        ★ 变化的判据是**渲染结果本身**（指纹不同），不是"谁改过状态"。
+          任何一处状态变化都会推出去，也就不存在"忘了标记脏"这个地方。
+        """
+        conns = [c for c in self.conns() if c.subscribed and not c.closing]
+        if not conns:
+            return
+        now = time.time()
+        for conn in conns:
+            digest, sessions = self.snapshot_for(conn.uid)
+            due = (now - conn.pushed_at) >= self.cfg.snapshot_interval
+            if digest == conn.sent_digest and not due:
+                continue
+            # 被水位挡下时**什么都不动**：sent_digest 没更新 ⇒ 下一个 tick 的
+            # 指纹仍然对不上 ⇒ 还会再试。客户端一旦开始读，它立刻拿到最新的一份，
+            # 而不是再等一个 SNAPSHOT_INTERVAL。
+            if self.enqueue_push(conn, sessions):
+                conn.sent_digest = digest
+                conn.pushed_at = now
+            self.sync_events(conn)
+
+    def snapshot_for(self, uid):
+        """本 tick 里这个 uid 的会话视图：`(digest, [视图])`。每个 uid 每 tick 至多算一次。
+
+        ★ 与 `op_list` **逐字同构**：同一条 50 行截断、同一个 `with_secret=False`。
+          用 `with_secret=False` 是**故意的** —— 推送就是一条自动化的 `list`，
+          而 list 从来不带口令。于是"推送里不含任何秘密"是一条**结构性质**，
+          不依赖任何一处判断。真正要连的那一个会话走 `status`（它带口令）。
+        """
+        got = self._tick_snap.get(uid)
+        if got is not None:
+            return got
+        rows = self.store.by_uid(uid)
+        # ★★ 先把这一批会话的作业信息补齐。`phase_running` 只为**活跃**的那几档
+        #   查过（`submitted`/`enrolled`/`suspect`/`orphaned`），而快照要渲染的
+        #   **包括终态但还在库里的那些**（`released` / `rejected` / `expired`，
+        #   它们要留到 `released_keep`）。不补这一步的话，那些行在推送里**没有
+        #   `job_state`**，而同一行在 `list` 里有 —— 于是"推送与 list 逐字同构"
+        #   只在活跃会话上成立，而界面上会看到一条会话的作业状态**忽有忽无**。
+        #   `tick_job()` 是**记忆化**的，所以补这一遍仍然保证"每个作业每 tick
+        #   至多一次 `scontrol`"，不会把 fork 放大。
+        for s in rows[-50:]:
+            if s["job_id"]:
+                self.tick_job(s["job_id"])
+        sessions = [self.session_view(s, with_secret=False, job_live=False)
+                    for s in rows[-50:]]
+        # ★ 指纹算在**会话列表**上，不是算在"谁改过"上。任何一个字段变了，
+        #   指纹就变，于是"该不该推"这件事不需要任何人记得去标记。
+        digest = hashlib.sha256(
+            json.dumps(sessions, ensure_ascii=False, sort_keys=True)
+            .encode("utf-8")).hexdigest()
+        self._tick_snap[uid] = (digest, sessions)
+        return digest, sessions
+
+    def enqueue_push(self, conn, sessions):
+        """推一条全量快照。返回 False 表示它被水位挡下、没有入队。
+
+        ★★ **这条路径不经过 `dispatch`，这是"推送不进限流桶"的实现方式。**
+
+          桶在 `dispatch` 里（按 uid、1 秒滑窗、上限 `max_rpc_per_second`），
+          对**所有 op 一视同仁** —— 而 `heartbeat` 就在里面。推送一旦计进桶：
+
+              推送占满桶 → 心跳被回 rate_limited → last_hb_socket 不更新
+                        → 300 s suspect → 1800 s 自动 scancel
+                        → 用户正在跑的作业被杀掉，而界面只显示"心跳发送失败"
+
+          所以不写成 `if op != "push"`：那是在**调用点做例外**，下一个人会加
+          第二个。让推送根本不从 dispatch 走，例外就变成一个结构事实 ——
+          **不经过 dispatch 的东西不可能被 dispatch 的桶计量**。
+
+        ★ 硬水位之上**丢这一条推送**（绝不丢响应）：seq 照常前进，于是缺口本身
+          就是"这里丢过"的凭据，客户端据此知道自己的画面落后了几帧。
+        """
+        seq = conn.seq + 1
+        conn.seq = seq
+        dropped = conn.stale
+        if conn.pending() >= self.cfg.conn_out_hard:
+            conn.stale = dropped + 1
+            return False
+        msg = {"push": "sessions", "seq": seq, "at": now_ts(),
+               "sessions": sessions}
+        if dropped:
+            # ★ "你落后了"**搭在下一条能发得出去的消息上**，不自己成为一条消息
+            #   —— 水位高的时候它同样发不出去，那是个悖论。
+            msg["stale"] = {"dropped": dropped, "from": seq - dropped}
+            conn.stale = 0
+        conn.queue_msg(msg)
+        return True
+
     # ── 会话文件读取（安全关键）─────────────────────────────────────────────
     def user_home(self, uid):
         """家目录必须从 getpwnam 取，【绝不能】拼 家目录前缀 + 用户名。
@@ -4201,59 +4550,226 @@ class Sessiond(object):
                 self.port_cursor = self.cfg.port_start
         return out
 
-    # ── RPC：接受连接 ───────────────────────────────────────────────────────
-    def accept_one(self):
-        try:
-            conn, _ = self.listener.accept()
-        except OSError:
-            return
-        try:
-            self.handle_client(conn)
-        except Exception:                                    # noqa: BLE001
-            log.exception("处理 RPC 连接时异常")
-        finally:
+    # ── RPC：接受连接与一条连接的读写 ───────────────────────────────────────
+    def accept_ready(self):
+        """接受**所有**排队的连接。"""
+        while True:
             try:
-                conn.close()
+                sock, _ = self.listener.accept()
+            except (BlockingIOError, InterruptedError):
+                return
             except OSError:
-                pass
+                return
+            # ★★ 身份必须在【注册进事件循环之前】取到，取不到就当场关掉。
+            #   一条 `uid=None` 的连接进循环不是"少了一个字段"：所有人会共用
+            #   同一个限流桶，而 `op_list(None)` 是一个跨用户数据的入口。
+            #   也不信任 pid —— PID 会复用。
+            try:
+                raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                      struct.calcsize("3i"))
+                _pid, uid, gid = struct.unpack("3i", raw)
+            except OSError:
+                self.close_sock(sock)
+                continue
+            # ★★ accept() 在**非阻塞 listener** 上返回的是**阻塞** socket
+            #   （本机实测：listener.getblocking() 是 False 而 conn.getblocking()
+            #   是 True）。不显式设成非阻塞，第一次 send 就会卡死整个事件循环 ——
+            #   而那个循环里装着所有人的 tick 与心跳超时判定。
+            try:
+                sock.setblocking(False)
+            except OSError:
+                self.close_sock(sock)
+                continue
+            if len(self.conns()) >= self.cfg.conn_max:
+                # ★ **accept-then-reject**，不是"不 accept"：后者之下客户端的
+                #   connect() 仍然成功，然后静默等到 40 秒超时，报一个方向完全
+                #   反了的 daemon_unreachable。这一条要让它**读到**为什么。
+                self.reject_conn(sock)
+                continue
+            conn = Conn(self.cfg, sock, uid, gid)
+            try:
+                self.selector.register(sock, conn.want_events(), conn)
+            except (OSError, ValueError):
+                self.close_sock(sock)
+                continue
+            log.info("常驻通道：接受连接（uid=%d，当前 %d 条）",
+                     uid, len(self.conns()))
 
-    def handle_client(self, conn):
-        # 【必须在读任何数据之前】取 SO_PEERCRED —— 这是身份的唯一可信来源，
-        # 由内核在 connect() 时填充，用户态不可伪造。不信任 pid（PID 会复用）。
+    def reject_conn(self, sock):
+        msg = self._err(5, "too_many_connections",
+                        "本站的守护进程同时只服务 %d 条连接，现在满了。"
+                        "稍后重试；已经连上的不受影响。" % self.cfg.conn_max)
         try:
-            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                  struct.calcsize("3i"))
-            _pid, uid, gid = struct.unpack("3i", raw)
+            sock.send((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
         except OSError:
-            return
-
-        conn.settimeout(5.0)
-        buf = b""
-        try:
-            while len(buf) < 65536:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                if b"\n" in chunk:
-                    break
-        except (socket.timeout, OSError):
             pass
-        line = buf.split(b"\n", 1)[0].strip()
-        if not line:
+        self.close_sock(sock)
+
+    def close_sock(self, sock):
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def drop_conn(self, conn, why):
+        """摘掉一条连接。**必须先 unregister 再 close** —— 反过来的话
+        unregister 会拿一个已经关掉的 fd 去查表（而那个 fd 号可能已经被别人用了）。"""
+        try:
+            self.selector.unregister(conn.sock)
+        except (KeyError, OSError, ValueError):
+            pass
+        self.close_sock(conn.sock)
+        conn.closing = True
+        log.debug("常驻通道：关闭连接（uid=%s，%s）", conn.uid, why)
+
+    def sync_events(self, conn):
+        """把 `want_events()` 的结果挂到 selector 上。**没有变化就不动** ——
+        modify 是一次系统调用，而 tick 结束时会无条件扫一遍所有连接。"""
+        want = conn.want_events()
+        if want == conn.want:
             return
+        conn.want = want
+        try:
+            self.selector.modify(conn.sock, want, conn)
+        except (KeyError, OSError, ValueError):
+            self.drop_conn(conn, "改事件掩码失败")
+
+    def service_conn(self, conn, mask):
+        """一条连接在这一轮唤醒里该做的事。
+
+        顺序是**先写后读**：先把欠它的字节尽量排出去（它可能正等着），再收新请求。
+        反过来会让一个正在被推快照的客户端先被塞进更多请求。
+        """
+        if conn.closing:
+            return
+        if mask & selectors.EVENT_WRITE and not conn.pump():
+            return self.drop_conn(conn, "写失败")
+        conn.compact()
+        if mask & selectors.EVENT_READ:
+            self.read_ready(conn)
+            if conn.closing:
+                return self.drop_conn(conn, "读失败")
+        # 半关之后的收尾。**两种客户端在这里分道**：
+        #
+        #   · 没订阅过的 = 一次一请求的老客户端。它的契约就是"一问一答然后走"，
+        #     排空即是终点。不关的话每一条 `slurmate rpc` 都会占住一个 fd 直到
+        #     EOF_LINGER —— 而 `slurmate wait` 这类调用是**每 2 秒一条新连接**，
+        #     64 个名额几秒钟就不够了。
+        #   · 订阅过的 = 常驻通道。它半关的意思是"我不再发请求了"，**不是要走**
+        #     —— 推送还得接着来（用例⑨）。它交给 tick 里的 sweep_conns()
+        #     按 EOF_LINGER 收。
+        if conn.rx_eof and not conn.pending() and not conn.subscribed:
+            return self.drop_conn(conn, "半关后排空")
+        self.sync_events(conn)
+
+    def read_ready(self, conn):
+        """**读一次**，不是读到 EAGAIN 为止。
+
+        ★ 每次唤醒最多读一次、最多 dispatch MAX_DISPATCH_PER_WAKEUP 条：读循环
+          会把别人的 tick 饿死。而 epoll 是**水平触发**的 —— 还有数据的话下一轮
+          立刻还会进来，所以"少读一点"不会漏，只是多转几圈。
+          真正会漏的是"内核缓冲读空了、剩下的行在我们自己的 inbuf 里"，那由
+          run() 里的 pending_input() 与 drain_pending() 兜住。
+        """
+        try:
+            data = conn.sock.recv(65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            conn.closing = True
+            return
+        if not data:
+            # ★★ **半关 ≠ 断线。** 老客户端（`slurmate rpc`）每次发完就关写方，
+            #   而它的响应可能还没写出去 —— 在这里关连接会把 submit 的 job_id
+            #   一起带走，于是客户端拿不到会话、重试、被 quota_active 拒，
+            #   用户看到「提交失败」而作业在跑。
+            #   所以：只停读，连接留着，等出站排空（或 EOF_LINGER 到期）。
+            conn.rx_eof = True
+            conn.eof_at = time.time()
+            if not conn.inbuf.strip():
+                return
+        else:
+            conn.inbuf += data
+            if len(conn.inbuf) > self.cfg.conn_in_max and b"\n" not in conn.inbuf:
+                # ★ 入队之后**停读**，不是当场关。当场关会把刚入队的那句话
+                #   一起丢掉，客户端看到的是一次没有原因的断线 —— 与 submit
+                #   半关那条路是同一个坑。
+                conn.queue_msg(self._err(
+                    2, "bad_request",
+                    "请求行超过 %d 字节还没有换行" % self.cfg.conn_in_max))
+                conn.rx_eof = True
+                conn.eof_at = time.time()
+                return
+        self.dispatch_lines(conn)
+
+    def dispatch_lines(self, conn):
+        """把 inbuf 里**完整的**那些行处理掉，最多 MAX_DISPATCH_PER_WAKEUP 条。"""
+        n = 0
+        while b"\n" in conn.inbuf and n < MAX_DISPATCH_PER_WAKEUP:
+            line, conn.inbuf = conn.inbuf.split(b"\n", 1)
+            n += 1
+            line = line.strip()
+            if line:
+                self.handle_line(conn, line)
+            if conn.closing:
+                return
+        # 剩下的是半行（等下一条数据的）—— 不丢，留在 inbuf 里。
+
+    def drain_pending(self):
+        """接着处理上一轮被 MAX_DISPATCH_PER_WAKEUP 截断的那些整行。
+
+        ★ 为什么不能只靠事件：epoll 只在**内核缓冲里有数据**时再报一次
+          EVENT_READ，而我们已经把内核缓冲读空了 —— 剩下的行在我们自己的
+          inbuf 里。没有这一步的话，第 9 条之后的请求会一直卡到下一次 tick，
+          而且只在"客户端一次发很多条"时才出现（最难复现的那一类）。
+        """
+        for conn in self.conns():
+            if conn.closing or b"\n" not in conn.inbuf:
+                continue
+            self.dispatch_lines(conn)
+            if not conn.closing and not conn.pump():
+                self.drop_conn(conn, "写失败")
+            elif not conn.closing:
+                self.sync_events(conn)
+
+    def sweep_conns(self):
+        """tick 里的连接卫生。
+
+        ★ 只有一件事：半关之后**对端也永远不再读**的连接不会再有任何事件
+          （EVENT_WRITE 挂着但永远不触发），所以"超时该关了"只能由 tick 这个钟
+          来推动。放进事件回调里的话，那种连接会一直留着。
+        """
+        now = time.time()
+        for conn in self.conns():
+            if conn.rx_eof and now - conn.eof_at > self.cfg.eof_linger:
+                self.drop_conn(conn, "半关后超时")
+
+    def handle_line(self, conn, line):
+        rid = None
         try:
             req = json.loads(line.decode("utf-8"))
             if not isinstance(req, dict):
                 raise ValueError("not an object")
         except Exception:                                    # noqa: BLE001
-            resp = self._err(2, "bad_request", "请求不是合法的 JSON 对象")
-        else:
-            resp = self.dispatch(uid, gid, req)
-        try:
-            conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
-        except OSError:
-            pass
+            conn.queue_msg(self._err(2, "bad_request", "请求不是合法的 JSON 对象"))
+            return
+        got = req.get("rid")
+        if isinstance(got, (str, int)) and not isinstance(got, bool):
+            # ★★ 带 `rid` 的请求 = 这条连接是常驻通道的客户端 ⇒ 从此收推送。
+            #
+            #   为什么判据是 rid 而不是"连接活了多久"或一个 subscribe op：
+            #   老客户端（`slurmate rpc`）每次都是**新连接、只发一条、永远不带
+            #   rid**。把订阅挂在 rid 上，"老客户端收不到推送"就成为一个
+            #   **结构事实**，而不是一句承诺 —— 否则一次恰好落在 tick 上的
+            #   推送会被它当成响应读走，症状是随机的、说不清的失败。
+            #   （那条路径上"线上的字节与从前逐字相同"也由它保证。）
+            conn.subscribed = True
+            rid = got
+        resp = self.dispatch(conn.uid, conn.gid, req)
+        if rid is not None:
+            # ★ rid 是**加法**：不带就不回填，线路上与从前逐字相同。
+            resp["rid"] = rid
+        conn.queue_msg(resp)
 
     # ── RPC：限流与分发 ─────────────────────────────────────────────────────
     @staticmethod
@@ -4612,7 +5128,27 @@ class Sessiond(object):
         #   中转站会话拿到的是 1 核/2G，且没有任何地方会为此报错。
         return self._ok({"partitions": out})
 
-    def session_view(self, s, with_secret=True):
+    def tick_job(self, job_id):
+        """本 tick 的作业信息：**每个 job_id 每 tick 至多一次** `scontrol`。
+
+        ★ 它存在的理由只有一个：快照渲染会话时要读作业状态，而那是**一次
+          fork**（实测约 8 ms）。按连接渲染的代价是 O(会话 × 连接) ——
+          64 条连接 × 几个会话就足以把一个 tick 拖到几十秒，
+          于是"常驻通道"变成"常驻风暴"。查过的结果留在这里，同一个 tick 里
+          谁来读都是它。
+        """
+        if job_id not in self._tick_job:
+            self._tick_job[job_id] = self.slurm.show_job(job_id)
+        return self._tick_job[job_id]
+
+    def session_view(self, s, with_secret=True, job_live=True):
+        """`job_live=False` ⇒ 只读**本 tick 已经取过**的作业信息，绝不在这里 fork。
+
+        ★ 这是推送专用的模式。渲染快照的那条路上一次 `scontrol` 都不许发，
+          否则"一个 tick 一次查询"会被连接数放大（见 tick_job）。
+          代价是快照里那几格最多旧一个 tick（2 秒）—— 而推送的语义本来就说死了
+          是"**上一次对账时的视图**"，不是实时查询。
+        """
         d = {
             "session_id": s["session_id"], "job_id": s["job_id"],
             "state": s["state"],
@@ -4659,7 +5195,8 @@ class Sessiond(object):
         else:
             d["tunnel_target"] = None
         if s["job_id"]:
-            job = self.slurm.show_job(s["job_id"])
+            job = (self.slurm.show_job(s["job_id"]) if job_live
+                   else self._tick_job.get(s["job_id"]))
             if job:
                 d["job_state"] = job.get("JobState")
                 d["time_limit"] = job.get("TimeLimit")
@@ -4839,10 +5376,14 @@ class Sessiond(object):
         #   于是并发第二次提交一路穿过（账本 F14）。现在只有一个集合，而它含
         #   reserved/submitted。
         #
-        # ★ 这里**不需要锁**，唯一的依据是：本守护进程单线程串行（run() →
-        #   selector.select → accept_one → handle_client 同步跑到底），所以两次
-        #   submit 不可能交错；而这道检查在 store.insert **之前**，于是第二个提交
-        #   到达时第一个一定已经是 submitted 或更后面。改并发模型就得重新想这一条。
+        # ★ 这里**不需要锁**，唯一的依据是：dispatch() 在事件循环线程里
+        #   **同步跑到底**，内部没有任何让出点 —— 也就是**不可重入**。
+        #   （常驻通道之后不再写"单线程串行"：那个词会让人以为它指的是"没有
+        #   并发"，而要传出去的其实是"从检查到写入之间没有让出点"。见
+        #   docs/ARCHITECTURE.md〈六之二〉最后那一节。）
+        #   所以两次 submit 不可能交错；而这道检查在 store.insert **之前**，
+        #   于是第二个提交到达时第一个一定已经是 submitted 或更后面。
+        #   改并发模型就得重新想这一条。
         n = self.store.count_occupying(uid)
         if n >= cfg.max_sessions_per_user:
             return self._err(4, "quota_active",
@@ -5492,6 +6033,7 @@ def main():
         if not d.start():
             rc = 1
         else:
+            d.install_signal_handlers()
             d.run()
     except KeyboardInterrupt:
         pass
