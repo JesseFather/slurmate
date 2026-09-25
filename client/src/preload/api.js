@@ -120,6 +120,14 @@ contextBridge.exposeInMainWorld('slurmate', {
   // ★ **必须指名 slot**：省略会被主进程拒绝，而不是"停那唯一的一个"。
   stop: (slot) => ipcRenderer.invoke('app:stop', { slot }),
   doctor: () => ipcRenderer.invoke('app:doctor'),
+  // 集群这一侧的现状：控制器、分区、节点忙闲、队列、GRES，加自己那一份
+  // （账户、公平份额、排队名次）。**只读**，不改任何状态。
+  // ★ 每一格都是三态的：键不存在 = 【取不到】，`null`/`[]`/`{}` = 【确实没有】。
+  //   界面必须把"取不到"画成"取不到" —— 画成"没有"就是在替集群说话。
+  cluster: () => ipcRenderer.invoke('app:cluster'),
+  // 最近几天的作业（`sacct`）。**按需拉**：它是最贵的一条查询，而它回答的
+  // "过去发生了什么"不会自己变新，所以不进任何一层缓存。
+  history: () => ipcRenderer.invoke('app:history'),
   reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 

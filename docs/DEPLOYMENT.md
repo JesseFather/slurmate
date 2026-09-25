@@ -117,7 +117,13 @@ nft list chain inet slurmate output
 
 守护进程还必须能以 root 身份执行 `sbatch`（它用 `user=`/`group=`/`extra_groups=`
 切到目标用户，`cluster/slurmate-sessiond`）、`scancel`、`scontrol`、
-`sacctmgr`。
+`sacctmgr`，以及**只读的** `squeue` / `sinfo` / `sshare` / `sacct`。
+
+★ 后四个是 v0.8 阶段 5 加的（「集群状态」那一屏）。它们**都要能读** ——
+守护进程在启动时会逐个校验它们的路径（`Config.validate()`），缺一个就拒绝启动。
+理由与另外几个逐字相同：错路径的失败形态在界面上长得像「这个集群没有节点 /
+没有公平份额 / 没有历史」，与真正的原因隔了好几层。
+★ 它们全都**只读**，一个写操作都没有：这一屏不改集群上的任何东西。
 
 **怎么确认**：`slurmate doctor` 之外，直接看一眼续期是否真的在发生：
 

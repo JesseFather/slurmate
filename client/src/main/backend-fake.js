@@ -130,6 +130,52 @@ const PARTITIONS = [
   { name: 'DEBUG',   allowed: false, reason: '你的账户没有该分区的权限', max_time: '1:00:00', gres: GRES['DEBUG'] },
 ];
 
+/**
+ * 假站点的节点忙闲。★ **故意比真集群脏。**
+ *
+ * 本机那台真集群此刻四个节点全是 `idle`/`mix`，**一个带后缀的都没有** —— 于是
+ * "剥掉后缀、只按 base state 计数，后缀原样留着只做展示"这条路径在真机上根本
+ * 走不到，而它正是这一格唯一要验的那件事。夹具比现实干净，缺陷就会在用例里
+ * 隐形（见账本 F26）。所以这里给两个带后缀的：
+ *
+ *   `drain*` —— 不响应（`*`）；`down~` —— 已关电（`~`）。
+ *
+ * ★ 形状与守护进程 `Slurm.node_table()` 的返回**逐字一致**：counts 只装 base
+ *   state，flags 单独一列。两者的键**不相交**，那是"从右往左剥"能成立的前提。
+ */
+const NODES = {
+  '2080TI': { counts: { idle: 1, drain: 1 }, flags: { '*': 1 } },
+  'A6000': { counts: { mix: 2 }, flags: {} },
+  'RTX8000': { counts: { idle: 1 }, flags: {} },
+  'DEBUG': { counts: { down: 1 }, flags: { '~': 1 } },
+};
+
+/**
+ * 假站点的队列。★ 同样故意脏：真集群此刻**全是 `PD`**，`R` 与"其余那一档"
+ * （`CG` 收尾中）都走不到，而"其余那一档不并进 running"是这里唯一的判断。
+ */
+const QUEUE = {
+  '2080TI': { pending: 4, running: 0, other: 0 },
+  'A6000': { pending: 5, running: 2, other: 0 },
+  'RTX8000': { pending: 0, running: 1, other: 1 },
+  'DEBUG': { pending: 0, running: 0, other: 0 },
+};
+
+/** 假的 `sacct` 输出。★ 混进两条**作业步**（`.0` / `.extern`）不可能 —— 那个
+ *  过滤发生在守护进程里，这里已经是过滤后的形状。 */
+const HISTORY = [
+  { job_id: '901002', name: 'code-server', state: 'COMPLETED', exit_code: '0:0',
+    elapsed: '06:38:58', end: '2026-09-22T17:17:13', partition: 'A6000' },
+  { job_id: '901001', name: 'code-server', state: 'TIMEOUT', exit_code: '0:0',
+    elapsed: '5-01:01:38', end: '2026-09-22T10:36:34', partition: 'A6000' },
+  { job_id: '901000', name: 'code-server', state: 'FAILED', exit_code: '0:9',
+    elapsed: '00:03:11', end: '2026-09-21T09:02:00', partition: '2080TI' },
+];
+
+function sumCounts(counts) {
+  return Object.values(counts).reduce((a, b) => a + b, 0);
+}
+
 /** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。 */
 const DEFAULTS = { cpus: 2, mem: '8G' };
 
@@ -197,6 +243,16 @@ class FakeBackend extends Backend {
     this._client = (opts && opts.client) || null;
     /** 被另一个客户端顶掉了没有。见 debugDisplace。 */
     this._displaced = null;
+    /**
+     * 集群信息里**哪些格缺席**（`{health:true, nodes:true, …}`）。
+     *
+     * ★ 存在的理由是那一条三态规矩：「取不到」与「确实没有」在界面上是两句
+     *   不同的话。真集群上"取不到"要么要等一次故障、要么要把 sinfo 改名 ——
+     *   而它恰恰是这一整块最容易画错的那一格。见 _cluster()。
+     */
+    this._clusterMissing = {};
+    /** `sacct` 取不到。同上 —— 它回的是**错误**不是空列表，两者不能混。 */
+    this._historyDown = false;
 
     /**
      * 推送那一半的账。
@@ -562,6 +618,8 @@ class FakeBackend extends Backend {
       case 'heartbeat':  return this._heartbeat(req);
       case 'goodbye':    return this._goodbye(req);
       case 'doctor':     return this._doctor();
+      case 'cluster':    return this._cluster();
+      case 'history':    return this._history();
       default:           return err(2, 'unknown_op', op);
     }
   }
@@ -605,6 +663,24 @@ class FakeBackend extends Backend {
     this.emit('displaced', this._displaced);
     return this._displaced;
   }
+  /**
+   * 让集群信息的某一格**取不到**（`kind` 省略 = 全部）。
+   *
+   * ★ 这一态必须能造出来：真集群上"取不到"要么要等一次故障、要么要把 sinfo
+   *   改名，而"把取不到画成没有"正是这一整块最容易犯的错 —— 用户会去查一个
+   *   不存在的问题（"为什么这台集群没有分区"）。
+   */
+  debugClusterMissing(kind) {
+    this._clusterMissing = kind ? { [kind]: true } : {
+      health: true, version: true, partitions: true, gres: true,
+      nodes: true, queue: true, fairshare: true,
+    };
+    return Object.keys(this._clusterMissing);
+  }
+
+  /** 让 `sacct` 取不到。它回的是**错误**，不是空列表 —— 两者不能混。 */
+  debugHistoryDown(on = true) { this._historyDown = Boolean(on); }
+
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
   /** 模拟作业被回收（比如心跳断了 30 分钟后被 scancel）。 */
   debugReap() {
@@ -724,6 +800,8 @@ class FakeBackend extends Backend {
     // ★ 顶替也一起复位 —— 否则「复位」之后这个假站点仍然是不干活的，
     //   而界面上没有任何东西说明为什么（`_displaced` 不显示在任何地方）。
     this._displaced = null;
+    this._clusterMissing = {};
+    this._historyDown = false;
     this._extraSitePlugins.length = 0;
     this._siteDisabled.clear();
     this._siteNoJob.clear();
@@ -742,6 +820,95 @@ class FakeBackend extends Backend {
       account: 'myaccount', account_error: null,
       allowed_partitions: null,
     });
+  }
+
+  /**
+   * 假站点的集群现状（`op_cluster`）。
+   *
+   * ★★ **形状与守护进程逐字一致，包括"哪一格缺席"。** 这个假后端全部的价值就是
+   *   它演的是同一件事 —— 一份只在它身上成立的协议比没有它更坏。
+   *
+   * ★★ 这里**故意比真集群脏**（同 GRES 那条注释的道理）：
+   *   · 真集群上四个节点全是 `idle`/`mix`，**没有一个带后缀** —— 于是
+   *     "剥后缀、只按 base state 计数"这条路径在真机上根本走不到。
+   *     这里给一个 `drain*`（不响应）、一个 `down~`（已关电）。
+   *   · 队列里既有排队也有在跑，还有一个**不是这两个**的（`CG` 收尾中）——
+   *     真集群上此刻全是 `PD`，那一支也走不到。
+   *   · `me` 里有排队作业，于是"我排第几"算得出来。
+   *
+   * ★ `debugClusterMissing` 能让**任意一格缺席**，因为"取不到"与"确实没有"
+   *   必须分得开，而这两种状态在界面上是两句不同的话。
+   */
+  _cluster() {
+    const miss = this._clusterMissing || {};
+    const data = { at: nowSec(), taken: {} };
+    if (!miss.health) {
+      data.health = { up: true, at: nowSec() };
+      data.taken.health = nowSec();
+    }
+    if (!miss.version) {
+      data.version = 'slurm-wlm 23.11.4（假站点）';
+      data.taken.version = nowSec() - 42;
+    }
+    if (!miss.partitions) {
+      data.partitions = {};
+      for (const p of PARTITIONS) {
+        data.partitions[p.name] = {
+          max_time: p.max_time, is_default: Boolean(p.is_default),
+          state: 'UP', nodes: NODES[p.name].counts ? sumCounts(NODES[p.name].counts) : 1,
+          cpus: 40,
+        };
+      }
+      data.taken.partitions = nowSec() - 42;
+    }
+    if (!miss.gres) {
+      data.gres = JSON.parse(JSON.stringify(GRES));
+      data.taken.gres = nowSec() - 42;
+    }
+    if (!miss.nodes) {
+      data.nodes = JSON.parse(JSON.stringify(NODES));
+      data.taken.nodes = nowSec() - 12;
+    }
+    if (!miss.queue) {
+      data.queue = { depth: {}, pending: {}, by_user: {}, at: nowSec() };
+      for (const p of PARTITIONS) {
+        const d = QUEUE[p.name] || { pending: 0, running: 0, other: 0 };
+        data.queue.depth[p.name] = { pending: d.pending, running: d.running, other: d.other };
+        if (d.pending) {
+          data.queue.pending[p.name] = Array.from(
+            { length: d.pending },
+            (_, i) => `${900000 + i}-${p.name}`,
+          );
+        }
+      }
+      // 我自己：排在最前面那个分区里的第 3 位，另有一个在跑。
+      data.queue.by_user[this.user] = [
+        data.queue.pending.A6000 ? data.queue.pending.A6000[2] : null,
+        '900999',
+      ].filter(Boolean);
+      data.taken.queue = nowSec() - 12;
+    }
+    data.me = {
+      account: 'myaccount', account_error: null, allowed_partitions: null,
+      fairshare: miss.fairshare ? null : {
+        account: 'myaccount', fair_share: '0.125000',
+        raw_usage: '3072302', effectv_usage: '0.108641',
+      },
+    };
+    if (!miss.queue) {
+      const first = {};
+      const q = QUEUE.A6000;
+      if (q && q.pending >= 3) first.A6000 = 3;
+      data.me.pending_count = q ? q.pending : 0;
+      data.me.first_in = first;
+    }
+    return ok(data);
+  }
+
+  /** 最近几天的作业（`sacct`）。★ 按需拉，不进任何缓存。 */
+  _history() {
+    if (this._historyDown) return err(6, 'history_unknown', '开发者模式：模拟取不到历史');
+    return ok({ history: HISTORY.map((h) => ({ ...h })), days: 7, limit: 30 });
   }
 
   _partitions() {

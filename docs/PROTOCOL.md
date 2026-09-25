@@ -1162,6 +1162,87 @@ GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型�
 `consistent` = 规则数 == 活跃会话数。它不等就说明对账在报错
 （`cluster/slurmate-sessiond`）。`existing` 是**非侵入式体检**：
 只读地看一眼既有系统还在不在，本系统绝不碰它们。
+### `cluster`
+
+请求：`{"op":"cluster"}`
+
+返回集群这一侧的现状，分两块：**共享的那几格**（对所有 uid 逐字相同）与
+**`me`**（按 uid 的那一份）。
+
+```json
+{"at": 1790301794,
+ "health": {"up": true, "at": 1790301794},
+ "version": "slurm-wlm 23.11.4",
+ "partitions": {"A6000": {"max_time": 15811200, "is_default": false,
+                          "state": "UP", "nodes": 2, "cpus": 160}},
+ "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {}}},
+ "queue":    {"depth": {"A6000": {"pending": 48, "running": 4}},
+              "pending": {"A6000": ["7001", "…"]},
+              "by_user": {"alice": ["7001", "…"]}, "at": 1790301780},
+ "gres":     {"A6000": [{"name": "gpu", "type": "a100",
+                         "per_node_max": 2, "total": 4}]},
+ "taken":    {"health": 1790301794, "partitions": 1790301500},
+ "me": {"account": "chbstudents", "account_error": null,
+        "allowed_partitions": null,
+        "fairshare": {"account": "chbstudents", "fair_share": "0.125000",
+                      "raw_usage": "3072302", "effectv_usage": "0.108641"},
+        "pending_count": 3, "first_in": {"A6000": 1}}}
+```
+
+★★★ **三态是这一节的规矩，逐格适用**（与 §四 同源）：
+
+| 形态 | 意思 |
+|---|---|
+| **键不存在** | **取不到** —— 我们没问到，或者这一层还没刷出来 |
+| `null` / `[]` / `{}` | **确实没有** |
+
+⇒ **客户端必须把"取不到"显示成"取不到"**。把一个缺席画成"这台集群没有分区"，
+用户会去查一个不存在的问题，而真正的原因在守护进程那一侧。
+
+★ **`partitions` / `gres` / `nodes` / `queue` 取不到时本 op 不报错**（对比
+`partitions` 那个 op —— 它的失败要挡住整张表单）。这一屏是只读的现状展示，
+一格取不到不该让另外五格也看不见。
+
+★ **`taken`** 是每一格"取到它的时刻"（Unix 秒）。慢钟上的一格可以是 5 分钟前的，
+而"这份有多旧"是用户要看的 —— 所以它必须送出去，不能由客户端拿**收到**的时刻顶替。
+
+★ `me.allowed_partitions` 的三态与 `whoami` 一致：`null` = 不限制（这是**答案**），
+列表 = 允许的那些。
+
+★ `me.first_in` 是"我最靠前的那条排队作业，在它那个分区里排第几"（从 1 数起）。
+**它不是"还要等多久"** —— 前面多少作业会同时开跑取决于分区此刻有多少空闲节点。
+★ 它由共享的 `queue.pending` 与 `queue.by_user` **现推**，不额外查询。
+
+★ **一次请求一次 fork 都不发**（除了进程第一次问、或某一层刚到期）：所有东西都来自
+tick 刷新的那份缓存。`users` 是"现在连着的用户"，tick 替他们预热自己那一份。
+判据见 `docs/ARCHITECTURE.md`〈三层钟〉。
+
+### `history`
+
+请求：`{"op":"history"}`
+
+成功 data：
+
+```json
+{"history": [{"job_id": "5854", "name": "code-server", "state": "RUNNING",
+              "exit_code": "0:0", "elapsed": "10:13:12",
+              "end": "Unknown", "partition": "A6000"}],
+ "days": 7, "limit": 30}
+```
+
+★ **按需拉**：它不进任何一层钟。`sacct` 是这一组里最贵的一条查询（账本库要按时间窗
+扫描），而它回答的"过去发生了什么"**不会自己变新** —— 没有调用者就没有这个 fork。
+
+★ 只要**作业级**记录：`.extern` / `.0` / `.batch` 那些是**作业步**，混进来会让
+"最近 30 条"变成"最近 10 个作业的每一步"。判据是 JobID 里没有 `.`。
+
+★ 倒序：最新的在最前。`sacct` 默认按作业号升序，而人要看的是最后发生的那件事。
+
+★ 用户**从 uid 推出来**，绝不接受请求里给的用户名 —— 否则这个 op 就是读别人账本的
+入口（与 `list` 同源）。
+
+★ **取不到时是 `code 6` / `history_unknown`，不是空列表。** 空列表的意思是
+"你这几天没有作业"，一句我们并不知道的话。
 
 ---
 

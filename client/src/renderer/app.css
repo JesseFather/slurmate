@@ -361,3 +361,17 @@ dialog .row { justify-content: flex-end; }
   background: #3a2a10; border: 1px solid var(--temp); color: var(--temp);
 }
 .hidden { display: none !important; }
+
+/* ── 集群状态（只读的那一节）─────────────────────────────────────────────
+   分区 / 队列两张紧凑表。用 grid 而不是 <table>：行数由数据定，而这里既没有
+   表头排序也没有跨列，<table> 那套语义（thead/tbody/scope）在这里只是噪音。 */
+.ctable { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px;
+  font-size: 12px; font-family: ui-monospace, Consolas, monospace; margin: 0 0 6px; }
+.ctable .k { color: var(--fg-dim); }
+/* 一个分区一条：左边名字加默认标记，右边一行忙闲。 */
+.crow { margin: 0 0 6px; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+.crow .nm { color: #9cdcfe; }
+.crow .dim { color: var(--fg-dim); }
+/* 「取不到」那一句。**它是默认就有的**，不是错误态才插进去的 —— 见 panel.html
+   里那一段注释：忘了写数据的那条路要让它露出来，而不是让空的看起来像"没有"。 */
+.na { color: var(--warn); font-size: 12px; margin: 0 0 6px; }

@@ -81,6 +81,9 @@
         <h2>登录节点</h2>
         <button id="btn-new">新建连接…</button>
         <button id="btn-probe" class="ghost">探测全部</button>
+        <!-- 集群现状是**只读**的，而且与"有没有会话"无关 —— 所以入口在这一屏，
+             不在"开始会话"那一屏里（那一屏连不上集群时是藏着的）。 -->
+        <button id="btn-cluster" class="ghost">集群状态</button>
       </div>
       <ul id="conn-list" class="conns"></ul>
       <!-- 文案由 renderConnEmpty 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
@@ -286,6 +289,32 @@
       </p>
     </section>
 
+    <!-- ── 集群状态（只读）──
+         ★★ 这一节里每一格都是**三态**的：数据不在 = 【取不到】，界面要照实说
+            "取不到"，**不能**画成"没有"。一个把"问不到"画成"这台集群没有分区"
+            的界面，会把用户送去查一个不存在的问题。所以下面每一块都有一个
+            `<p class="na">`（`panel.js` 的 `na()`）专门说那句话，而它是**默认**
+            可见的 —— 忘了写数据的那条路会让它露出来，而不是让空的看起来像"没有"。 -->
+    <section id="sec-cluster" class="hidden">
+      <div class="sec-head">
+        <h2>集群状态</h2>
+        <button id="btn-cluster-reload" class="ghost">刷新</button>
+        <button id="btn-cluster-back" class="ghost">返回</button>
+      </div>
+      <p class="sub" id="cluster-when">正在取…</p>
+      <div id="cluster-body"></div>
+
+      <h2>最近作业</h2>
+      <p class="sub">
+        最近 7 天，最多 30 条。<strong>按需拉</strong> —— 它是最贵的一条查询，
+        所以不跟着上面那张表一起刷。
+      </p>
+      <div class="row">
+        <button id="btn-history" class="ghost">取最近作业</button>
+      </div>
+      <div id="history-body"></div>
+    </section>
+
     <!-- ── 开发者模式 ──
          这一节**永远露出来**（不像从前那样只在演示模式下露）：开关必须够得着，
          否则打开了就再也关不掉。打开之后它里面那两块配置才出现。 -->
@@ -345,6 +374,9 @@
           <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
                要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
           <button class="ghost" data-debug="displaced">模拟被另一台电脑顶掉</button>
+          <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
+               而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
+          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
           <button class="ghost" data-debug="reset">复位</button>
         </div>
         <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、

@@ -37,8 +37,12 @@ const BACKOFF_MS = {
 
 /**
  * @param {object|null} resp   守护进程返回的 JSON（{ok,code,data,error}）；传输失败时传 null
- * @param {object}      ctx    { op: 'submit'|'status'|'heartbeat'|'goodbye'|'purposes'|'whoami'|'doctor',
+ * @param {object}      ctx    { op: 'submit'|'status'|'heartbeat'|'goodbye',
  *                               transportError: Error|null }
+ * ★ 就这四个 —— 它们都是 `session.js` 里那条**会话生命周期**的路径。
+ *   从前这里还列着 `purposes`（那个 op 早没了）、`whoami` 与 `doctor`（它们
+ *   直接看 `ok`，从不经过这里）。一张走了样的清单比没有清单更坏：下一个人会
+ *   照着它去 `classify` 一个不该进来的 op，然后以为某条分支被覆盖过了。
  * @returns {{action:string, code:number|null, kind:string|null, message:string,
  *            retryAfterMs:number|null, idempotent:boolean}}
  */

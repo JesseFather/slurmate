@@ -246,8 +246,12 @@ function renderSnapshot(s) {
     'hidden', !(running && boot && boot.activeConnectionId && s && s.layoutId));
 
   // 形态切换
+  //
+  // ★ 「集群状态」那一节开着的时候，这一屏与「开始会话」那一屏都要让位。
+  //   让位写在这里而不是写在 showCluster 里：显示/隐藏只有一处判据，
+  //   两处判据会漂，而漂的形态是"某一边把它又显示回来了"。
   const idle = !s || st === 'idle';
-  $('sec-connect').classList.toggle('hidden', !idle);
+  $('sec-connect').classList.toggle('hidden', !idle || CLUSTER.open);
   // 会话一起来就把表单收掉 —— 它只在「还没连上」这一屏里说得通
   if (!idle) closeForm();
   // 「开始会话」只在真的连上之后才出现 —— 连不上就没有分区可挑，
@@ -257,6 +261,11 @@ function renderSnapshot(s) {
   //   集群毫无关系（插件是本机的东西），而把安装入口藏在一块要连上才看得见的
   //   区域里，等于用户第一次打开客户端时**无路可走**。见 renderPlugins 的空态。
   syncPurposeVisibility();
+  // 「开始会话」那一屏的判据在 syncPurposeVisibility 里（idle / 本机没插件），
+  // 它不知道集群这一节有没有开着 —— 所以让位在这里补一刀，而不是往那个函数里
+  // 再塞一个与它无关的条件。
+  if (CLUSTER.open) $('sec-purpose').classList.add('hidden');
+  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
   $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
 
   if (s && st !== 'idle' && st !== 'ended') renderKv(s);
@@ -1602,6 +1611,231 @@ async function startWith(serviceKind, btn) {
   }
 }
 
+// ── 集群状态（只读）────────────────────────────────────────────────────────
+//
+// ★★ 这一节里每一格都是**三态**的，与服务端逐字同一条规矩：
+//
+//      键不存在 / 值为 null 且带原因  = 【取不到】（我们没问到）
+//      `null` / `[]` / `{}`           = 【确实没有】
+//
+//   而这两句在界面上必须长得不一样。把"取不到"画成"没有"，用户会去查一个
+//   不存在的问题（"为什么这台集群没有分区"），而真正的原因在守护进程那一侧。
+//   所以下面每一块都有 `na(...)` 那一行，**它是数据缺席时才出现的**，
+//   而不是包在一个 try 里等出错。
+let CLUSTER = { open: false, data: null, error: null, history: null, historyError: null };
+
+/** 造一个元素。职责很小，但这一节里要造几十个 —— 手写三行的地方容易漏掉
+ *  `textContent` 而改用 `innerHTML`，那正是这里唯一不能出的事。 */
+function cel(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
+}
+
+/** 「取不到」那一行。**每一次缺席都要说清是哪一格**，否则用户只知道"少了点东西"。 */
+function na(what) {
+  return cel('p', 'na', `取不到：${what}。这一格是「没问到」，不是「没有」。`);
+}
+
+/** 一个时间戳有多旧。服务端的慢钟是 5 分钟，所以"这一份有多旧"是用户要看的。 */
+function agoText(ts) {
+  if (typeof ts !== 'number') return null;
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (s < 90) return `${s} 秒前`;
+  const m = Math.floor(s / 60);
+  return m < 90 ? `${m} 分钟前` : `${Math.floor(m / 60)} 小时前`;
+}
+
+/**
+ * 节点忙闲：`{counts: {base_state: n}, flags: {后缀: n}}` 画成一行。
+ *
+ * ★ 后缀**只做展示**，而且与计数分开画（`idle 1  drain 1  （后缀 *×1）`）——
+ *   把它并进状态名里等于对它做了一次判定，而它跨 Slurm 版本含义不一致
+ *   （见 `Slurm.node_table()`）。这里一个字都不解释它是什么意思。
+ */
+function nodeCountsText(n) {
+  const c = Object.entries((n && n.counts) || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v}`);
+  const f = Object.entries((n && n.flags) || {})
+    .sort()
+    .map(([k, v]) => `${k}×${v}`);
+  if (!c.length) return null;
+  return c.join('  ') + (f.length ? `  （后缀 ${f.join(' ')}）` : '');
+}
+
+/** 分区一行：`A6000  UP  默认  183-00:00:00  mix 2  gpu:a6000 ×4/节点` */
+function partitionRow(name, info, nodes, queue, gres) {
+  const row = cel('div', 'crow');
+  row.append(cel('span', 'nm', name));
+
+  const bits = [];
+  if (info.state) bits.push(info.state);
+  if (info.is_default) bits.push('默认');
+  bits.push(info.max_time ? `时限 ${info.max_time}` : '无时限');
+  if (typeof info.nodes === 'number') bits.push(`${info.nodes} 节点`);
+  if (typeof info.cpus === 'number') bits.push(`${info.cpus} 核`);
+  row.append(cel('span', 'dim', '  ' + bits.join('  ·  ')));
+
+  const nc = nodeCountsText(nodes && nodes[name]);
+  row.append(cel('div', 'dim', `　　节点　${nc || '（这一格没有数据）'}`));
+
+  const q = queue && queue.depth && queue.depth[name];
+  const qs = q ? `排队 ${q.pending}　在跑 ${q.running}`
+    + (q.other ? `　其它 ${q.other}` : '') : '（这一格没有数据）';
+  row.append(cel('div', 'dim', `　　队列　${qs}`));
+
+  const g = gres && gres[name];
+  // ★ 三态：`gres` 整个键缺席 = 取不到；`[]` = 这个分区确实一张卡都没有。
+  const gs = !gres ? '取不到'
+    : (g === undefined ? '（这个分区不在 GRES 清单里）'
+      : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`).join('，')
+        : '确实一张都没有'));
+  row.append(cel('div', 'dim', `　　GRES　${gs}`));
+  return row;
+}
+
+/** 把整份 `op_cluster` 的答案画出来。**纯函数式地照着数据画，不做任何判定。** */
+function renderCluster() {
+  const box = $('cluster-body');
+  box.textContent = '';
+
+  if (CLUSTER.error) {
+    $('cluster-when').textContent = '';
+    box.append(cel('p', 'bad', `取不到集群信息：${CLUSTER.error}`));
+    return;
+  }
+  const d = CLUSTER.data;
+  if (!d) { $('cluster-when').textContent = '正在取…'; return; }
+
+  const h = d.health;
+  $('cluster-when').textContent = h
+    ? `控制器${h.up ? '在线' : '连不上'}　·　取数于 ${agoText(h.at) || '刚刚'}`
+    : '控制器状态取不到';
+
+  // 控制器与版本：两个**互相独立**的格子，所以各说各的。
+  if (!h) box.append(na('控制器状态（scontrol ping）'));
+  else if (!h.up) box.append(cel('p', 'bad', '控制器连不上 —— 提交、心跳、查询都会失败。'));
+
+  const ver = cel('div', 'ctable');
+  ver.append(cel('div', 'k', 'Slurm'));
+  ver.append(cel('div', null, d.version || '取不到'));
+  ver.append(cel('div', 'k', '分区表'), cel('div', null,
+    d.partitions ? `${Object.keys(d.partitions).length} 个` +
+      (agoText(d.taken && d.taken.partitions) ? `（${agoText(d.taken.partitions)}）` : '')
+      : '取不到'));
+  ver.append(cel('div', 'k', '节点忙闲'), cel('div', null,
+    d.nodes ? '见下' : '取不到'));
+  box.append(ver);
+
+  // ── 分区 ──
+  box.append(cel('h3', null, '分区'));
+  if (!d.partitions) {
+    box.append(na('分区列表（scontrol show partition）'));
+  } else if (!Object.keys(d.partitions).length) {
+    box.append(cel('p', 'sub', '这台集群确实一个分区都没有。'));
+  } else {
+    const names = Object.keys(d.partitions).sort(
+      (a, b) => (Number(Boolean(d.partitions[b].is_default))
+        - Number(Boolean(d.partitions[a].is_default))) || a.localeCompare(b));
+    for (const n of names) {
+      box.append(partitionRow(n, d.partitions[n], d.nodes, d.queue, d.gres));
+    }
+    if (!d.nodes) box.append(na('节点忙闲（sinfo -N）'));
+    if (!d.queue) box.append(na('队列（squeue）'));
+    if (!d.gres) box.append(na('GRES 清单（scontrol show node）'));
+  }
+
+  // ── 我自己 ──
+  box.append(cel('h3', null, '我的'));
+  const me = d.me || {};
+  const mine = cel('div', 'ctable');
+  mine.append(cel('div', 'k', '账户'), cel('div', null,
+    me.account || (me.account_error ? '无' : '取不到')));
+  if (me.account_error) mine.append(cel('div', 'k', ''), cel('div', 'bad', me.account_error));
+  // ★ 三态：`null` = 不限（这是**答案**，不是没问到）。
+  mine.append(cel('div', 'k', '可提交分区'), cel('div', null,
+    me.allowed_partitions === undefined ? '取不到'
+      : (me.allowed_partitions === null ? '不限制'
+        : me.allowed_partitions.join('，') || '一个都没有')));
+  mine.append(cel('div', 'k', '公平份额'), cel('div', null,
+    me.fairshare ? `${me.fairshare.fair_share || '—'}`
+      + `（账户 ${me.fairshare.account || '—'}，`
+      + `已用 ${me.fairshare.effectv_usage || '—'}）` : '取不到'));
+  if (typeof me.pending_count === 'number') {
+    const fi = Object.entries(me.first_in || {})
+      .map(([p, i]) => `${p} 第 ${i} 位`).join('，');
+    mine.append(cel('div', 'k', '排队中'), cel('div', null,
+      `${me.pending_count} 条` + (fi ? `（${fi}）` : '')));
+  }
+  box.append(mine);
+  if (me.pending_count === undefined) box.append(na('排队名次（squeue）'));
+  box.append(cel('p', 'sub',
+    '「第几位」是在那个分区的排队队伍里排第几，**不是**还要等多久 ——'
+    + '前面那些作业有多少会同时开跑，取决于分区此刻有多少空闲节点。'));
+}
+
+/** 开/关这一节。 */
+function showCluster(on) {
+  CLUSTER.open = Boolean(on);
+  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
+  if (CLUSTER.open) {
+    $('sec-connect').classList.add('hidden');
+    $('sec-purpose').classList.add('hidden');
+    return;
+  }
+  // ★ 关的时候**交回给 renderSnapshot 原来那套判定**，而不是自己把 sec-connect
+  //   显示出来 —— 那两处的判据（idle / 有没有插件 / 会话状态）会漂，而漂的形态
+  //   是"从集群页退回去之后回到了错误的一屏"。
+  // ★ **不加 `if (lastSnap)`**：`renderSnapshot(null)` 是合法的（它按「空闲」
+  //   处理），而加了那个判断之后，还没收到任何快照就打开又关掉集群页时，
+  //   那一屏会永远停在"什么都不显示"—— 而这是一个真实可达的顺序（启动瞬间
+  //   连上、点开集群状态、再返回）。
+  renderSnapshot(lastSnap);
+}
+
+async function loadCluster() {
+  CLUSTER.data = null;
+  CLUSTER.error = null;
+  renderCluster();
+  const r = await window.slurmate.cluster();
+  if (!r || !r.ok) {
+    CLUSTER.error = (r && r.error && r.error.detail) || '控制节点没有说明原因';
+  } else {
+    CLUSTER.data = r.data || {};
+  }
+  renderCluster();
+}
+
+async function loadHistory() {
+  const box = $('history-body');
+  box.textContent = '';
+  box.append(cel('p', 'sub', '正在取…'));
+  const r = await window.slurmate.history();
+  box.textContent = '';
+  if (!r || !r.ok) {
+    const detail = (r && r.error && r.error.detail) || '控制节点没有说明原因';
+    // ★ 这里是**错误**，不是空列表 —— 空列表的意思是"你这几天没有作业"，
+    //   而那是完全不同的两句话。
+    box.append(cel('p', 'bad', `取不到作业历史：${detail}`));
+    return;
+  }
+  const rows = (r.data && r.data.history) || [];
+  if (!rows.length) {
+    box.append(cel('p', 'sub', `最近 ${(r.data && r.data.days) || 7} 天没有作业。`));
+    return;
+  }
+  for (const j of rows) {
+    const row = cel('div', 'crow');
+    row.append(cel('span', 'nm', j.job_id));
+    row.append(cel('span', 'dim',
+      `  ${j.state}　退出码 ${j.exit_code}　跑了 ${j.elapsed}`
+      + `　${j.partition || '?'}　${j.end}`));
+    box.append(row);
+  }
+}
+
 // ── 分区 ────────────────────────────────────────────────────────────────────
 /** 最近一次拿到的分区表（含每个分区的 GRES 清单）。换分区时要拿它重画 GRES。 */
 let partList = [];
@@ -1991,6 +2225,14 @@ async function init() {
     if (bad.length) notice('error', '体检发现问题：' + bad.join('；'));
     else notice('ok', `体检通过：${d.rules_count} 条 ACL 规则，${d.active_sessions} 个活跃会话。`);
   };
+
+  // ── 集群状态（只读的那一节）──
+  $('btn-cluster').onclick = () => { showCluster(true); loadCluster(); };
+  $('btn-cluster-back').onclick = () => showCluster(false);
+  $('btn-cluster-reload').onclick = () => loadCluster();
+  // ★ 「最近作业」是一个**按需拉**的动作，不跟着上面那张表一起刷：它是最贵的
+  //   一条查询（账本库要按时间窗扫描），而它回答的"过去发生了什么"不会自己变新。
+  $('btn-history').onclick = () => loadHistory();
 
   // 重新加载打的是**前台**那一条 —— 屏幕只有一块，用户看的正是它。
   $('btn-reload').onclick = () => window.slurmate.reload(frontSlot());

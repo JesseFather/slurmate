@@ -39,7 +39,7 @@ default_mem  = 8G
 
 ---
 
-## 一、站点通用键。一共 13 个。
+## 一、站点通用键。一共 17 个。
 
 这是 v0.2 的收缩，v0.3 又把它推进了一步：**能从 Slurm 查到的，一律不再写一份；
 只属于某个插件的，搬进那个插件的块。**
@@ -56,6 +56,10 @@ default_mem  = 8G
 | 该用户能用哪些分区 | `sacctmgr show assoc user=<u> format=Account,Partition` |
 | 该用户的账户 | 同上，`format=Account` |
 | 是否强制 association | `scontrol show config` 的 `AccountingStorageEnforce` |
+| 每分区节点忙闲 | `sinfo -N -h -o "%P|%N|%t"` |
+| 队列深度与排队顺序 | `squeue -h -o "%i|%P|%t|%u"` |
+| 该用户的公平份额 | `sshare -u <u> -P -o Account,User,FairShare,RawUsage,EffectvUsage` |
+| 最近几天的作业 | `sacct -u <u> -S now-7days` |
 
 | 键 | 类型 | 默认值 | 说明与后果 |
 |---|---|---|---|
@@ -65,6 +69,7 @@ default_mem  = 8G
 | `reserved_ranges` | `起-止,起-止` | 空（无） | 要避让的其他区间。见下方专节 |
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
 | `sbatch` / `scancel` / `squeue` / `scontrol` / `sacctmgr` | 路径 | 空 = 自动查找 | 见下方专节 |
+| `sinfo` / `sshare` / `sacct` | 路径 | 空 = 自动查找 | 只被「集群状态」那一屏用（v0.8）。见下方专节 |
 | `default_plugin` | 短名 | **空**（无默认值） | 提交时不带 `service_kind` 用哪个插件。**留空 = 必填**，见〈一之二〉 |
 | `max_sessions_per_user` | 正整数 | `1` | 每人最多几个会话。**排队中的也算占着位置**。见下方专节 |
 | `max_clients_per_user` | 正整数 | `1` | 每人同时几个**客户端在看**。★ 与上一格是**两个旋钮**，见下方专节 |
@@ -389,7 +394,7 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 
 ## Slurm 命令、以及插件各自的 `bin`
 
-### 五个 Slurm 命令：留空是推荐值
+### 八个 Slurm 命令：留空是推荐值
 
 留空 = 运行时自动查找：**先查 `PATH`，再依次查**
 `/usr/bin`、`/usr/local/bin`、`/opt/slurm/bin`、`/usr/sbin`、`/bin`、`/sbin`。
@@ -406,12 +411,16 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 > 顺带一提，守护进程在 systemd 下运行，而 systemd 的 `PATH` 是固定的，与登录 shell
 > 的 `PATH` 无关 —— 所以只靠 `which` 也不够，候选目录表是必需的。
 
-### 五个命令的**存在性都要检查**
+### 八个命令的**存在性都要检查**
 
 此前只查 `sbatch` / `scancel` / `scontrol`，而 `squeue`（`job_state` 的兜底查询）与
 `sacctmgr`（账户与分区权限）可以是错路径而**启动通过**，运行时才失败 —— 那时报出来的
-是「查不到作业」或「没有账户」，与真正的原因（路径写错）隔了好几层。现在五个全查，
+是「查不到作业」或「没有账户」，与真正的原因（路径写错）隔了好几层。现在八个全查，
 且区分配置留空自动查找失败与显式指定的路径不存在两种情况。
+
+★ v0.8 加进来的 `sinfo` / `sshare` / `sacct` 是**同一个理由的第三次**：它们失败时在
+界面上长得像「这个集群没有节点 / 没有公平份额 / 没有历史」—— 而根因在配置里。
+**错路径必须在启动时报，不能以「集群就是这样」的形状出现。**
 
 ### 插件块里的 `bin`
 

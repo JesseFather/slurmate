@@ -732,6 +732,21 @@ function withGresLabels(list) {
 }
 
 /**
+ * 同上，但用在 `op_cluster` 那一份上（它是 `{分区: [描述项]}`，不是一张分区表）。
+ *
+ * ★ **原地改，而且缺席就什么都不做**：`gres` 这个键不存在 = 取不到，而我们的
+ *   判据是 `undefined` / `null` —— 补一个 `{}` 进去会把它变成"确实一个都没有"，
+ *   那正是三态里最不该犯的那一次混淆。
+ */
+function withGresCatalogLabels(cat) {
+  if (!cat || typeof cat !== 'object') return;
+  for (const [name, entries] of Object.entries(cat)) {
+    if (!Array.isArray(entries)) continue;
+    cat[name] = entries.map((e) => ({ ...e, label: gresLabel(e) }));
+  }
+}
+
+/**
  * 取本站点的插件清单（`op_plugins`）。
  *
  * ★ **它失败不是错误**，所以这里不推通知：守护进程比客户端旧时（v0.2 及以前）
@@ -3665,6 +3680,32 @@ function registerIpc() {
     return resp;
   });
 
+  /**
+   * 集群这一侧的现状（`op_cluster`）。
+   *
+   * ★ **这里没有任何加工。** 协议里每一格都是三态的（键不存在 = 取不到；
+   *   `null`/`[]`/`{}` = 确实没有），而把"取不到"在客户端抹平成"没有"，就是在
+   *   替集群说一句我们并不知道的话 —— 用户会去查一个不存在的问题（"为什么这台
+   *   集群没有分区"），而真正的原因是守护进程没问到。原样递给界面。
+   *
+   * ★ 反过来，**这里也不缓存**。服务端那一侧已经有三层钟了（见 `Cluster`），
+   *   客户端再存一份就是第三个"这份数据有多旧"的判据，而它会漂。
+   */
+  send('app:cluster', async () => {
+    const resp = await backend.rpc({ op: 'cluster' });
+    if (resp && resp.ok && resp.data) {
+      // ★★ GRES 那一格要经过**客户端唯一的那处拼法**（`gres.js` 的 `gresLabel`）——
+      //    与 `loadPartitions()` 走同一条路。少了这一步，同一个分区在表单里显示
+      //    `gpu:a6000 ×4`、在集群状态里显示 `gpu ×4`，而两边都没错、只是**两个
+      //    拼法**。★ 缺席仍然是缺席（不因为"顺手补一个空对象"变成"确实没有"）。
+      withGresCatalogLabels(resp.data.gres);
+    }
+    return resp;
+  });
+
+  /** 最近几天的作业（`sacct`）。**按需拉** —— 不进任何一层缓存，见 op_history。 */
+  send('app:history', async () => backend.rpc({ op: 'history' }));
+
   /** 把某一条会话抬到面板上面。**纯界面动作** —— 它不改任何框架状态。 */
   send('app:setFront', async (payload = {}) => {
     const slot = payload && payload.slot;
@@ -3798,6 +3839,13 @@ function registerIpc() {
     //   恰恰是这个功能唯一要传达的东西。所以它必须能在开发者模式里立刻造出来。
     else if (what === 'displaced') backend.debugDisplace(arg || '另一台电脑');
     else if (what === 'reap') backend.debugReap();
+    // ★★ 「集群信息取不到」——真集群上要么得等一次故障、要么得把 sinfo 改名，
+    //   而"把取不到画成没有"正是这一整块最容易犯的错。它必须能立刻造出来。
+    //   `arg` 指名哪一格（省略 = 全部）；`history` 那一格走的是**错误**不是缺席。
+    else if (what === 'cluster-missing') {
+      if (arg === 'history') backend.debugHistoryDown(true);
+      else backend.debugClusterMissing(arg || null);
+    }
     else if (what === 'reset') backend.debugReset();
     // 让假站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
     // 这两条路是"插件增减不许崩"的验收路径，必须能在开发者模式里走到。

@@ -411,7 +411,76 @@ def slurm_stub(argv, timeout=10, check=False):
         return 1, "", "Invalid job id specified"
 
     if "squeue" in cmd:
-        return 0, "", ""
+        # `-j <作业号>` 是 job_state 的兜底查询：空输出 = "不在队列里"。
+        if "-j" in args:
+            return 0, "", ""
+        # ★★ `-h -o "%i|%P|%t|%u"` 是集群队列快照（v0.8 阶段 5）。这一份夹具
+        #    照着真机的形状给，并且**故意比真集群脏**：本机那台此刻全是 `PD`，
+        #    `R` 与"其余那一档"（`CG` 收尾中）都走不到，而"其余那一档**不并进**
+        #    running"正是这里唯一的那条判断（见 Slurm.queue_table）。
+        return 0, (
+            "7001|A6000|PD|alice\n"
+            "7002|A6000|PD|bob\n"
+            "7003|A6000|PD|alice\n"
+            "7004|RTX8000|R|alice\n"
+            "7005|RTX8000|CG|bob\n"
+            # ★ 作业数组：`%i` 给的是这个写法，而 Slurm 把它当**一条**排。
+            #   数成 9 条会让"队列深度"在用了数组的集群上直接虚高一个量级。
+            "7006_[3-9,13-19%2]|2080TI|PD|alice\n"), ""
+
+    # ★★ v0.8 阶段 5 的四条新查询。形状照抄真机（本机实测 slurm-wlm 23.11.4）。
+    if "sinfo" in cmd and "-V" in args:
+        return 0, "slurm-wlm 23.11.4\n", ""
+    if "sinfo" in cmd:
+        # `%t` 给的是**紧凑**形式（真机实测：`%t`=mix、`%T`=mixed）。
+        # ★ 带后缀的那两个是**故意的**：真集群四个节点全是 idle/mix，一个带
+        #   后缀的都没有 —— 于是"剥后缀、只按 base state 计数"在真机上走不到。
+        #   夹具比现实干净，缺陷就会在用例里隐形（账本 F26）。
+        # ★ `2080TI*` 是**默认分区**的记号，`%P` 会给出来，要剥掉。
+        # ★★ **表头照真机给。** `sinfo` 与 `scontrol show … -o` 不一样，它会打
+        #    一行 `PARTITION|NODELIST|STATE`；少了 `-h` 的话那一行会被当成一个
+        #    名叫 `PARTITION`、状态叫 `STATE` 的分区，然后原样画进界面。
+        #    这一行是**真集群实测抓到那个缺陷之后补上的** —— 手写一个不带表头的
+        #    输出，等于把那条路径从用例里抹掉。
+        _body = (
+            "A6000|nodea1|mix\n"
+            "A6000|nodea2|idle\n"
+            "RTX8000|nodeb1|alloc\n"
+            "2080TI*|nodec1|idle*\n"
+            "2080TI*|nodec2|down~\n")
+        # `-h` 在 ⇒ 没有表头；不在 ⇒ 有（与真机逐字一致）。
+        return 0, ("" if "-h" in args else "PARTITION|NODELIST|STATE\n") + _body, ""
+
+    if "sshare" in cmd:
+        # User 那一列**逐字**是判据：非 root 调用时 sshare 只给账户级的汇总行
+        #（User 列为空），而那几行**不是**用户的公平份额。这条夹具照那个形状给：
+        # 只有认得的用户名才有一行。
+        who = args[args.index("-u") + 1] if "-u" in args else ""
+        rows = ["root|||28284168|0.000000",
+                " chbstudents|||28279528|0.999836"]
+        if who in ("alice", "bob"):
+            rows.append("  chbstudents|%s|0.125000|3072302|0.108641" % who)
+        return 0, "\n".join(rows) + "\n", ""
+
+    # ★★ 判据要带 `sacctmgr not in` —— 这个桩全篇按**子串**认命令，而
+    #    "sacctmgr" 里就含 "sacct"。少了它，所有 sacctmgr 调用都会被这一支接住
+    #    （实测：五条既有的账户/分区权限用例一起变红，而报出来的是"alice 的账户
+    #    是 8101|code-server|COMPLETED…"）。
+    if "sacct" in cmd and "sacctmgr" not in cmd:
+        # ★★ **时间写法照真机校验。** `sacct` 只认 `now-7days` / `now-7day`，
+        #    写 `now-7d` 会回 `Invalid time specification`（真集群实测）。
+        #    桩不校验的话，那一格写错的形态是"历史**永远**取不到" —— 而它长得
+        #    像集群没有账本，与真正的原因隔了好几层。这一条是补的。
+        _since = args[args.index("-S") + 1] if "-S" in args else ""
+        if _since and not _since.endswith(("day", "days")):
+            return 1, "", "Invalid time specification (pos=4): %s" % _since
+        # ★ 混进两个**作业步**（`.extern` / `.0`）：它们与作业同时出现，
+        #   混进来会让"最近 30 条"变成"最近 10 个作业的每一步"。
+        return 0, (
+            "8100|code-server|FAILED|0:9|00:03:11|2026-09-21T09:02:00|2080TI\n"
+            "8100.extern|extern|COMPLETED|0:0|00:03:11|2026-09-21T09:02:00|\n"
+            "8101|code-server|COMPLETED|0:0|06:38:58|2026-09-22T17:17:13|A6000\n"
+            "8101.0|code-server|COMPLETED|0:0|06:39:01|2026-09-22T17:17:16|\n"), ""
 
     if "sacctmgr" in cmd:
         user = next((a[5:] for a in args if a.startswith("user=")), "")
@@ -436,6 +505,21 @@ def with_stub(mod, fake, fn):
         return fn()
     finally:
         mod.run_cmd = real
+
+
+def fresh_cluster(mod, d, cfg):
+    """给 d 换一个**空的**集群信息缓存，返回它。
+
+    ★★ 阶段 5 之后守护进程**不再每个请求现查**集群信息 —— 那是那一版的全部
+      目的（一次查询服务所有连接）。代价是："把底下的 Slurm 答案换掉、再看
+      界面"这类用例必须先让缓存作废，否则它断言的是上一段缓存里的那个答案，
+      而它会**绿**。
+
+      生产代码里不存在这个问题：缓存的寿命就是守护进程的寿命，而它读的那些
+      数据（分区表、节点配置、association）本来就几分钟才变一次。
+    """
+    d.cluster = mod.Cluster(cfg, d.slurm)
+    return d.cluster
 
 
 def _read_logs(home):
@@ -1151,6 +1235,10 @@ exit 0
         seq[0] += 1
         d.store = mod.Store(os.path.join(tmpdir, "submit-%d.db" % seq[0]))
         d.slurm = mod.Slurm(cfg)
+        # ★ 缓存跟着一起换新。阶段 5 之后集群信息**不再每个请求现查**（那是
+        #   那一版的全部目的），所以一个"把底下的 Slurm 答案换掉、再看结果"的
+        #   用例必须先让缓存作废 —— 否则它断言的是上一轮缓存里的那个答案。
+        d.cluster = mod.Cluster(cfg, d.slurm)
         captured.clear()
 
         def _sub(sess, env, h, u, usr, job_script, service_kind):
@@ -1337,7 +1425,7 @@ exit 0
           and mod.clean_gres({"name": "gpu", "type": "a,b", "count": 2})[1] is not None,
           str(mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})))
     # 而**目录查不到**时它照样挡：那正是上面那条的理由。
-    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    mod.Slurm.gres_catalog = lambda self: None
     try:
         r, _s, _e = run_submit({"op": "submit", "gres": {"name": "a:b", "count": 1}})
         check("★★ 目录查不到时，带 `:` 的名字仍然被拒（下游这时是放行的）",
@@ -1364,7 +1452,7 @@ exit 0
 
     # ★ 目录查不到时**放行**（由 Slurm 判），而不是拒绝所有带 GRES 的提交 ——
     #   一次控制器抖动不该让所有人提交不了。
-    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    mod.Slurm.gres_catalog = lambda self: None
     try:
         r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                                 "gres": {"name": "gpu", "count": 8}})
@@ -4690,7 +4778,12 @@ exit 0
     check("★ 目录里**没有**『已用』这一格（本版本的 Slurm 给不出来，就不编）",
           _cat and all("used" not in k for e in _cat.values() for k in e),
           str(_cat))
-    # 缓存：ttl 之内不重复 fork（这是每个 partitions 请求都要走的路）。
+    # 缓存：**一个钟周期之内不重复 fork**（这是每个 partitions / cluster 请求
+    # 都要走的那条路）。
+    #
+    # ★ 阶段 5 之后缓存住在 `Cluster` 里，不在 `Slurm` 上 —— 那是"钟只能有一处"
+    #   的直接后果，`Slurm` 变成纯粹无状态的查询层。所以这条断言也搬了家：
+    #   直接量 `Slurm.gres_catalog()` 会 fork 三次，而那是**对的**。
     _calls = [0]
 
     def _counting_run(argv, timeout=10, check=False):
@@ -4699,10 +4792,9 @@ exit 0
 
     mod.run_cmd = _counting_run
     try:
-        _s = mod.Slurm(cfg)
-        _s.gres_catalog()
-        _s.gres_catalog()
-        _s.gres_catalog()
+        _cl = mod.Cluster(cfg, mod.Slurm(cfg))
+        for _ in range(3):
+            _cl.gres()
     finally:
         mod.run_cmd = _real_run
     check("★ 目录有缓存（三次调用只 fork 一次）", _calls[0] == 1, "fork 了 %d 次" % _calls[0])
@@ -4718,6 +4810,7 @@ exit 0
         _part_ran[0] += 1
         return slurm_stub(argv, timeout, check)
 
+    fresh_cluster(mod, d, cfg)
     _pv = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
     _by_name = {p["name"]: p for p in (_pv.get("data") or {}).get("partitions", [])}
     check("分区列表仍然照常返回", _pv.get("ok") and len(_by_name) == 3, str(_pv))
@@ -4732,7 +4825,8 @@ exit 0
     #   `[]` 的意思是"这个分区确实没配"，而"没问到"是另一句话 ——
     #   把两者合并，界面就会替集群说一句它不知道的话。
     _real_cat2 = mod.Slurm.gres_catalog
-    mod.Slurm.gres_catalog = lambda self, ttl=300: None
+    mod.Slurm.gres_catalog = lambda self: None
+    fresh_cluster(mod, d, cfg)                 # 让上一段缓存的那一份作废
     try:
         _pv2 = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
     finally:
@@ -6106,10 +6200,494 @@ exit 0
     check("★ 关闭的连接不再出现在花名册里", _d16.conns() == [],
           "%d 条" % len(_d16.conns()))
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  28. 集群信息：一次查询服务所有连接（v0.8 阶段 5）
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # ★★ 这一节守的是一句**结构性质**，不是"某条命令发了没有"：
+    #
+    #       刷新的代价与**连接数、用户数无关** —— 每层每周期一次。
+    #
+    #    从前的形状是每个 `partitions` / `submit` / `whoami` 请求各自 fork 一次
+    #    `scontrol`（分区表那条连缓存都没有）。所以这里的判据一律是**计数**：
+    #    "20 组读，零 fork"是一条可以逐次数出来的事实，而不是一句设计意图。
+
+    class _CountSlurm(object):
+        """只数 fork 的假 Slurm：每个查询记一笔，返回一个可辨认的答案。
+
+        ★ 用它而不是量 `run_cmd`：要钉的是"`Cluster` 不重复问"，而那与查询
+          具体怎么实现无关。
+        ★ `__getattr__` **只认 `Cluster` 点过名的那些方法**，别的一律
+          `AttributeError` —— 一个万能的 catch-all 会把"名字写错了"也一起吞掉，
+          而名字写错的形态正是"那一格永远取不到"（见 28.0 那条）。
+        """
+
+        NAMES = (tuple(m for _k, _p, m in mod.Cluster.SHARED)
+                 + tuple(m for _k, m in mod.Cluster.PER_USER))
+
+        def __init__(self):
+            self.n = {}
+            self.answer = {
+                "controller_health": {"up": True, "at": 0},
+                "slurm_version": "slurm-wlm 9.9.9",
+                "partition_table": {"P1": {"max_time": 3600, "is_default": True,
+                                           "state": "UP", "nodes": 1, "cpus": 4}},
+                "gres_catalog": {"P1": [{"name": "gpu", "type": None,
+                                         "per_node_max": 1, "total": 1}]},
+                "node_table": {"P1": {"counts": {"idle": 1}, "flags": {}}},
+                "queue_table": {"depth": {"P1": {"pending": 0, "running": 0}},
+                                "pending": {}, "by_user": {}, "at": 0},
+                "account_for": ("acct", None),
+                "allowed_partitions": None,
+                "fairshare": {"account": "acct", "fair_share": "1.0",
+                              "raw_usage": "0", "effectv_usage": "0"},
+            }
+
+        def __getattr__(self, name):
+            if name not in _CountSlurm.NAMES:
+                raise AttributeError(name)
+
+            def _q(*_a, **_k):
+                self.n[name] = self.n.get(name, 0) + 1
+                return self.answer.get(name)
+            return _q
+
+    # ── 28.0 名字与常量 ─────────────────────────────────────────────────
+    _cs_names = [m for _k, _p, m in mod.Cluster.SHARED]
+    _cu_names = [m for _k, m in mod.Cluster.PER_USER]
+    check("★★ `Cluster` 里点名的每一个查询都**真的在 `Slurm` 上**"
+          "（名字写错的形态是那一格**永远取不到** —— 一个字都不报）",
+          all(hasattr(mod.Slurm, m) for m in _cs_names + _cu_names),
+          str([m for m in _cs_names + _cu_names if not hasattr(mod.Slurm, m)]))
+    check("★ 共享的那几类与「按用户」的那几类没有重名"
+          "（重了的话 tick 的预热会覆盖掉请求侧读的那一格）",
+          not (set(_cs_names) & set(_cu_names)), str(sorted(set(_cs_names) & set(_cu_names))))
+    check("★ 三层钟的顺序：快 < 中 < 慢（反过来的话，最贵的那些会被最急的拖着跑）",
+          mod.INFO_FAST_SECONDS < mod.INFO_MEDIUM_SECONDS < mod.INFO_SLOW_SECONDS,
+          "%s / %s / %s" % (mod.INFO_FAST_SECONDS, mod.INFO_MEDIUM_SECONDS,
+                            mod.INFO_SLOW_SECONDS))
+    check("★ 最快的那一层就是 tick 的周期（控制器健康跟着每一轮对账走，不额外加钟）",
+          mod.INFO_FAST_SECONDS == mod.TICK_SECONDS,
+          "%s vs %s" % (mod.INFO_FAST_SECONDS, mod.TICK_SECONDS))
+    check("★★ 失败之后按 INFO_RETRY_SECONDS 重试，**不是**等满自己那一层"
+          "（慢钟上的东西失败一次就 5 分钟不再看，而「分区表读不到」是要立刻"
+          "自愈的瞬时故障：slurmctld 重启、munge 抖动）",
+          mod.INFO_RETRY_SECONDS < mod.INFO_MEDIUM_SECONDS,
+          "%s vs %s" % (mod.INFO_RETRY_SECONDS, mod.INFO_MEDIUM_SECONDS))
+    # ★★ 「从右往左剥后缀」能成立的前提：后缀字符集与紧凑状态名**不相交**。
+    #    相交的话 `idle` 会被剥成 `idl`，而没有任何地方会报错。
+    _COMPACT_STATES = ("alloc", "comp", "completing", "down", "drain", "drng",
+                       "fail", "future", "idle", "inval", "maint", "mix",
+                       "perfctrs", "plnd", "pow_dn", "pow_up", "reboot_issued",
+                       "reboot_req", "resv", "unk")
+    check("★★ 节点后缀字符集与紧凑状态名**不相交**（剥法成立的前提）",
+          not any(st[-1] in mod.NODE_FLAG_CHARS for st in _COMPACT_STATES),
+          str([st for st in _COMPACT_STATES if st[-1] in mod.NODE_FLAG_CHARS]))
+
+    # ── 28.1 ★★★ 零 fork：刷新之后，读不再问 ──────────────────────────
+    _cs = _CountSlurm()
+    _cl = mod.Cluster(cfg, _cs)
+    # ★★ `_T0` 必须是**真实时钟**：`refresh()` 收得下任意 `now`（用例要能快进），
+    #    但请求侧那几条读走的是 `time.time()` —— 两者对不上时"零 fork"那条会红，
+    #    而红的原因与缓存毫无关系（读认为已经过期了）。生产里两边是同一个钟。
+    _T0 = time.time()
+    _cl.refresh(_T0, users=())
+    _after = dict(_cs.n)
+    check("★ 前提：刷新本身确实查了（否则下面那条是空断言）",
+          set(_after) == set(_cs_names), str(sorted(_after)))
+    for _ in range(20):
+        _cl.health(); _cl.slurm_version(); _cl.partitions()
+        _cl.gres(); _cl.nodes(); _cl.queue()
+    check("★★★ 刷新之后，**20 组读一次 fork 都不发**"
+          "（这就是「一次查询服务所有连接」）",
+          _cs.n == _after, "多出来的：%s" % {k: v - _after.get(k, 0)
+                                            for k, v in _cs.n.items()
+                                            if v != _after.get(k, 0)})
+
+    _cl.refresh(_T0, users=["alice"])
+    _n_user = {k: v for k, v in _cs.n.items() if k in _cu_names}
+    for _ in range(20):
+        _cl.account_for("alice"); _cl.allowed_partitions("alice")
+        _cl.fairshare("alice")
+    check("★★ 同一个用户的 20 组读同样零 fork（M 条连接读的是同一份）",
+          {k: v for k, v in _cs.n.items() if k in _cu_names} == _n_user,
+          str({k: v for k, v in _cs.n.items() if k in _cu_names}))
+
+    # ── 28.2 分开的钟 ───────────────────────────────────────────────────
+    _cs2 = _CountSlurm()
+    _cl2 = mod.Cluster(cfg, _cs2)
+    _cl2.refresh(_T0, users=())
+    check("★ 前提：health 与分区表各刷了一次",
+          _cs2.n.get("controller_health") == 1
+          and _cs2.n.get("partition_table") == 1, str(_cs2.n))
+    _cl2.refresh(_T0 + mod.INFO_FAST_SECONDS - 0.1, users=())
+    check("★ 不到一个快钟周期，health **不重查**",
+          _cs2.n.get("controller_health") == 1, str(_cs2.n))
+    _cl2.refresh(_T0 + mod.INFO_FAST_SECONDS, users=())
+    check("★ 到了一个快钟周期，health 重查一次",
+          _cs2.n.get("controller_health") == 2, str(_cs2.n))
+    check("★★ 而分区表**一次都没跟着重查** —— 分开的钟，不是一个 tick 干所有事"
+          "（一个 tick 干所有事等于每种数据都被最急的那种拖着跑）",
+          _cs2.n.get("partition_table") == 1, str(_cs2.n))
+    _cl2.refresh(_T0 + mod.INFO_MEDIUM_SECONDS, users=())
+    check("★ 到了中钟，节点忙闲与队列刷第二次，而分区表仍然只刷过一次",
+          _cs2.n.get("node_table") == 2 and _cs2.n.get("queue_table") == 2
+          and _cs2.n.get("partition_table") == 1, str(_cs2.n))
+
+    # ★★ 钟的推进必须写在查询**之前**，而且写成"此刻 + 周期"。
+    #    写成 `self._due[k] += 周期` 的话，一次"跑得比周期还久"的查询会让新的
+    #    截止时刻仍然落在**过去** ⇒ 每一轮都重跑 ⇒ 一个慢集群把守护进程变成
+    #    不停 fork 的循环。这一条把那个写法钉死。
+    _cs3 = _CountSlurm()
+    _cl3 = mod.Cluster(cfg, _cs3)
+    _cl3.refresh(_T0, users=())
+    _cl3.refresh(_T0 + mod.INFO_FAST_SECONDS, users=())          # 到期
+    _n_at = _cs3.n.get("controller_health")
+    _cl3.refresh(_T0 + mod.INFO_FAST_SECONDS + 0.5, users=())    # 刚查完
+    check("★★ 钟的推进写在查询**之前**：刚查完的那 0.5 秒内不会又查一次"
+          "（写成 `+=` 的话截止时刻会落在过去，于是每一轮都重跑）",
+          _cs3.n.get("controller_health") == _n_at,
+          "%s → %s" % (_n_at, _cs3.n.get("controller_health")))
+
+    # ── 28.3 失败：按最急的那层重试，而且那几秒里仍然读得到"取不到" ────
+    _cs4 = _CountSlurm()
+    _cs4.answer["partition_table"] = None
+    _cl4 = mod.Cluster(cfg, _cs4)
+    _cl4.refresh(_T0, users=())
+    _cl4.refresh(_T0 + mod.INFO_RETRY_SECONDS, users=())
+    check("★★ 失败之后按 INFO_RETRY_SECONDS 重试（不是等满慢钟的 5 分钟）",
+          _cs4.n.get("partition_table") == 2, str(_cs4.n))
+    check("★ 而这两次之间读到的仍然是 None ——「取不到」是一个**答案**，"
+          "它必须留在缓存里让调用方看得见（`{}` 才是「确实没有」）",
+          _cl4.partitions() is None, str(_cl4.partitions()))
+    check("★ 失败只影响它自己那一类，别的不受影响",
+          _cs4.n.get("node_table") == 1, str(_cs4.n))
+
+    # ── 28.4 节点忙闲：只按 base state 计数，后缀只做展示 ──────────────
+    _nt = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).node_table())
+    check("★★ `-h` 不能省：`sinfo` 与 `scontrol show … -o` 不一样，它会打一行表头"
+          "（`PARTITION|NODELIST|STATE`），而少了 `-h` 的话那一行会变成一个名叫 "
+          "`PARTITION`、状态叫 `STATE` 的**假分区**，原样画进界面。"
+          "★ 真集群实测抓到的 —— 手写的桩本来没有表头，所以它一直是绿的",
+          _nt is not None and set(_nt) == {"A6000", "RTX8000", "2080TI"},
+          str(sorted(_nt or ())))
+    check("★ 带后缀的状态被剥成 base state（`idle*` → `idle`，`down~` → `down`）",
+          _nt and _nt["2080TI"]["counts"] == {"idle": 1, "down": 1},
+          str(_nt and _nt.get("2080TI")))
+    check("★★ 而后缀**原样留着**、单独一列（只做展示，一个都不参与判定 ——"
+          "它们跨 Slurm 版本含义不一致，拿它们判定等于把「我记得的那个版本」当协议）",
+          _nt and _nt["2080TI"]["flags"] == {"*": 1, "~": 1},
+          str(_nt and _nt.get("2080TI")))
+    check("★ 默认分区的记号（`2080TI*`）被剥掉",
+          _nt and "2080TI*" not in _nt and "2080TI" in _nt,
+          str(sorted(_nt or ())))
+    check("★ 没有后缀的分区，flags 是空的（不是缺失）",
+          _nt and _nt["A6000"]["flags"] == {} and _nt["A6000"]["counts"] == {"mix": 1, "idle": 1},
+          str(_nt and _nt.get("A6000")))
+
+    # ── 28.5 队列：深度、顺序、以及"我在第几位" ────────────────────────
+    _q = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).queue_table())
+    check("★ 数组作业算**一条**（`7006_[3-9,13-19%2]` 是 1，不是 9）——"
+          "数成 9 会让「队列深度」在用了数组的集群上直接虚高一个量级",
+          _q and _q["depth"]["2080TI"]["pending"] == 1,
+          str(_q and _q["depth"].get("2080TI")))
+    check("★★★ 「其余那一档」（`CG` 收尾中）**不并进 running** ——"
+          "并了之后「这个分区忙不忙」就开始说谎，而那是这一格唯一的用途",
+          _q and _q["depth"]["RTX8000"] == {"pending": 0, "running": 1, "other": 1},
+          str(_q and _q["depth"].get("RTX8000")))
+    check("★ 排队顺序留着（`pending` 就是 squeue 给的顺序）",
+          _q and _q["pending"]["A6000"] == ["7001", "7002", "7003"],
+          str(_q and _q["pending"].get("A6000")))
+    check("★ 按用户也分了一份（「我排第几」靠它算，**不额外 fork**）",
+          _q and _q["by_user"]["alice"] == ["7001", "7003", "7004",
+                                            "7006_[3-9,13-19%2]"],
+          str(_q and _q["by_user"].get("alice")))
+
+    _cs5 = _CountSlurm()
+    _cs5.answer["queue_table"] = with_stub(
+        mod, slurm_stub, lambda: mod.Slurm(cfg).queue_table())
+    _cl5 = mod.Cluster(cfg, _cs5)
+    _cl5.refresh(_T0, users=["alice"])
+    _n_q = _cs5.n.get("queue_table")
+    _pos = _cl5.for_user("alice")
+    check("★★ 「我排第几位」是从**共享的队列快照现推**的，不额外 fork",
+          _cs5.n.get("queue_table") == _n_q, str(_cs5.n))
+    check("★ alice 在自己排队的**每个分区**里都是第 1 位"
+          "（A6000 里最靠前的是 7001；2080TI 里只有那条数组作业）",
+          _pos.get("first_in") == {"A6000": 1, "2080TI": 1}
+          and _pos.get("pending_count") == 3,
+          str({k: _pos.get(k) for k in ("first_in", "pending_count")}))
+    _pos2 = _cl5.for_user("carol")
+    check("★ 没有排队作业的人**不报**排队名次（而不是报 0）",
+          "first_in" not in _pos2 and "pending_count" not in _pos2, str(_pos2))
+
+    # ── 28.6 fairshare：`-u` 而不是 `-U`（一个看起来正常的错答案）──────
+    _seen = []
+
+    def _cap(argv, timeout=10, check=False):
+        _seen.append([str(a) for a in argv])
+        return slurm_stub(argv, timeout, check)
+
+    _fs = with_stub(mod, _cap, lambda: mod.Slurm(cfg).fairshare("alice"))
+    _fsa = _seen[-1] if _seen else []
+    check("★★★ fairshare 必须传 `-u <用户>`，**绝不能**是 `-U`"
+          "（守护进程以 root 跑，而 `-U` 是「当前用户」= root —— 那会把 **root 自己的**"
+          "公平份额显示成用户的，一个看起来完全正常的错误答案）",
+          "-u" in _fsa and "alice" in _fsa and "-U" not in _fsa, str(_fsa))
+    check("★ 认得出用户那一行（账户行是**缩进**的，而 User 列必须逐字等于目标用户）",
+          _fs == {"account": "chbstudents", "fair_share": "0.125000",
+                  "raw_usage": "3072302", "effectv_usage": "0.108641"},
+          str(_fs))
+    _fs2 = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).fairshare("carol"))
+    check("★★ 看不到用户那一行时返回 **None**，而不是拿账户级的汇总行当「你的份额」"
+          "（那正是上面那个错的另一个形状）",
+          _fs2 is None, str(_fs2))
+    _fs3 = with_stub(mod, lambda *a, **k: (1, "", "slurmdbd is down"),
+                     lambda: mod.Slurm(cfg).fairshare("alice"))
+    check("★ 查询失败也是 None（「取不到」与「没有」在这一格上是两件事，"
+          "但都不是一个数字）", _fs3 is None, str(_fs3))
+
+    # ── 28.7 history：按需拉、只要作业级、倒序 ─────────────────────────
+    _seen2 = []
+
+    def _cap2(argv, timeout=10, check=False):
+        _seen2.append([str(a) for a in argv])
+        return slurm_stub(argv, timeout, check)
+
+    _hist = with_stub(mod, _cap2, lambda: mod.Slurm(cfg).history("alice"))
+    _ha = _seen2[-1] if _seen2 else []
+    check("★★ 作业步（`8101.extern` / `8101.0`）被滤掉 —— 混进来会让"
+          "「最近 30 条」变成「最近 10 个作业的每一步」",
+          [r["job_id"] for r in (_hist or [])] == ["8101", "8100"],
+          str([r["job_id"] for r in (_hist or [])]))
+    check("★ 倒序：最新的在最前（sacct 默认按作业号升序，而人要看的是最后那件事）",
+          _hist and _hist[0]["job_id"] == "8101", str(_hist and _hist[0]))
+    check("★★ 时间窗**下推给 Slurm**（`-S now-Ndays`），不是把全部拉回来自己截。"
+          "★ 而且写法必须是 `days` —— `now-7d` 是非法的，`sacct` 直接回"
+          "「Invalid time specification」（真集群实测）。"
+          "写错的形态是「历史**永远**取不到」，而它长得像集群没有账本",
+          any(str(a).startswith("now-") and str(a).endswith(("day", "days"))
+              for a in _ha), str(_ha))
+    check("★ 条数上限在代码里，且有上界（它是这一组里最贵的一条查询）",
+          0 < mod.HISTORY_MAX_ROWS <= 100 and mod.HISTORY_DAYS >= 1,
+          "%s / %s" % (mod.HISTORY_DAYS, mod.HISTORY_MAX_ROWS))
+
+    # ── 28.8 三态：取不到 vs 确实没有 ──────────────────────────────────
+    def _dead(argv, timeout=10, check=False):
+        return 1, "", "slurmdbd is down"
+
+    check("★★ 「取不到」是 None，而「确实没有」是 `{}` / `[]` —— 两者不能混"
+          "（把问不到画成「没有」，用户会去查一个不存在的问题）",
+          with_stub(mod, _dead, lambda: mod.Slurm(cfg).node_table()) is None
+          and with_stub(mod, _dead, lambda: mod.Slurm(cfg).queue_table()) is None
+          and with_stub(mod, _dead, lambda: mod.Slurm(cfg).slurm_version()) is None
+          and with_stub(mod, _dead, lambda: mod.Slurm(cfg).history("alice")) is None
+          and with_stub(mod, lambda *a, **k: (0, "", ""),
+                        lambda: mod.Slurm(cfg).partition_table()) == {},
+          "控制器可达但一个分区都没有 ⇒ `{}`，不是 None")
+    check("★ 输出超过上限 ⇒ 按**取不到**处理（不是解析半个，也不是抛）",
+          with_stub(mod, lambda *a, **k: (0, "x" * (mod.CLUSTER_QUERY_MAX_BYTES + 1),
+                                          ""),
+                    lambda: mod.Slurm(cfg).queue_table()) is None
+          and with_stub(mod, lambda *a, **k: (0, "x" * (mod.CLUSTER_QUERY_MAX_BYTES + 1),
+                                              ""),
+                        lambda: mod.Slurm(cfg).node_table()) is None,
+          "上限 %d" % mod.CLUSTER_QUERY_MAX_BYTES)
+    check("★ 而这个上限**管的是解析与保留**，不是读取 —— 注释里说清楚了"
+          "（写成「上限」而不说清管哪一段，下一个人会以为读也被截住了）",
+          "解析与保留" in io.open(
+              os.path.join(HERE, "slurmate-sessiond"), encoding="utf-8").read(),
+          "")
+
+    # ── 28.9 op_cluster / op_history 的接线 ────────────────────────────
+    _d28 = _mkd()
+    _d28.slurm = mod.Slurm(cfg)
+    _calls28 = [0]
+
+    def _run28(argv, timeout=10, check=False):
+        _calls28[0] += 1
+        return slurm_stub(argv, timeout, check)
+
+    _cv1 = with_stub(mod, _run28, lambda: _d28.op_cluster(UID))
+    _first28 = _calls28[0]
+    _cv2 = with_stub(mod, _run28, lambda: _d28.op_cluster(UID))
+    check("★★★ 第二次 op_cluster **零 fork** —— 这就是「一次查询服务所有连接」"
+          "（第一次是冷启动，每个 uid 每个慢钟周期至多一次）",
+          _cv1.get("ok") and _cv2.get("ok") and _calls28[0] == _first28,
+          "第一次 %d 次，第二次又 %d 次" % (_first28, _calls28[0] - _first28))
+    _cd = _cv1.get("data") or {}
+    check("★ 共享的那几格都在（缺哪个都是客户端画不出来的一格）",
+          set(_cd) >= {"at", "health", "version", "partitions", "gres",
+                       "nodes", "queue", "taken", "me"},
+          str(sorted(_cd)))
+    check("★ 而「自己那一份」在 `me` 里 —— 共享的与按 uid 的**分开**"
+          "（分开的不只是缓存：客户端据此知道「这一格变了不是我的事」）",
+          set(_cd.get("me") or {}) >= {"account", "allowed_partitions",
+                                       "fairshare"},
+          str(sorted(_cd.get("me") or {})))
+    check("★ `partitions` 取不到时 op_cluster **不报错**（对比 op_partitions）——"
+          "只看现状的那一屏不该因为一格取不到而整屏打不开",
+          with_stub(mod, lambda *a, **k: (1, "", "down"),
+                    lambda: mod.Cluster(cfg, mod.Slurm(cfg)).shared())
+          .get("partitions") is None,
+          "")
+
+    _seen3 = []
+
+    def _cap3(argv, timeout=10, check=False):
+        _seen3.append([str(a) for a in argv])
+        return slurm_stub(argv, timeout, check)
+
+    _hv = with_stub(mod, _cap3, lambda: _d28.op_history(UID))
+    _me_name = mod.pwd.getpwuid(UID).pw_name
+    _hargv = _seen3[-1] if _seen3 else []
+    check("★★ 历史的用户**从 uid 推出来**，不接受请求里给的用户名"
+          "（否则这个 op 就是读别人账本的入口）",
+          _me_name in _hargv and "bob" not in _hargv, str(_hargv))
+    check("★ 它**不进任何一层钟**：两次调用就是两次查询（按需拉）",
+          (lambda: (_seen3.clear(),
+                    with_stub(mod, _cap3, lambda: _d28.op_history(UID)),
+                    with_stub(mod, _cap3, lambda: _d28.op_history(UID)),
+                    len(_seen3))[-1])() == 2,
+          "查了 %d 次" % len(_seen3))
+    check("★ 取不到时报**错误**而不是空列表（空列表的意思是「你这几天没有作业」）",
+          not with_stub(mod, _dead, lambda: _d28.op_history(UID)).get("ok"),
+          str(with_stub(mod, _dead, lambda: _d28.op_history(UID))))
+
+    # ── 28.10 tick 里刷，而且只给**连着**的用户预热 ────────────────────
+    _d29 = _mkd()
+    _d29.slurm = _CountSlurm()
+    _d29.tick()
+    check("★★ tick 里会把集群信息刷一遍（刷新跑在 tick 里，请求才可能零 fork）",
+          _d29.slurm.n.get("partition_table") == 1
+          and _d29.slurm.n.get("controller_health") == 1,
+          str(_d29.slurm.n))
+    check("★ 没有连接时，**没有**任何按用户的查询被发出去"
+          "（tick 不该替不在场的人问东西）",
+          not any(k in _d29.slurm.n for k in _cu_names), str(_d29.slurm.n))
+    _d29.slurm.n.clear()
+    _c29, _k29 = _pair(_d29)
+    _d29.tick()
+    check("★★ tick 只给**连着**的用户预热自己那一份（判据是连着，不是有会话 ——"
+          "一个刚连上、还没提交任何东西的用户打开集群面板时也要立刻有东西看）",
+          all(_d29.slurm.n.get(k) == 1 for k in _cu_names), str(_d29.slurm.n))
+    check("★ 前提：那条连接认得出来是谁（否则上面那条是空断言）",
+          _d29.user_name(_k29.uid) == mod.pwd.getpwuid(UID).pw_name,
+          str(_d29.user_name(_k29.uid)))
+    _c29.close()
+    _d29.slurm.n.clear()
+    _d29.tick()
+    check("★★ 断开之后**不再替它问** —— 而这正是 prune() 存在的理由："
+          "一个只增的字典与一个泄漏的字典，从「会不会撑爆」的角度看没有区别",
+          not any(k in _d29.slurm.n for k in _cu_names), str(_d29.slurm.n))
+    check("★★ 而**刚被 tick 预热过**的条目不会被 prune 掉 —— `_seen` 记的是"
+          "「最后一次有人碰过」，包括 tick 那一次。只在请求侧记的话，一个连着"
+          "但没发过请求的用户会被每个快钟周期 prune 掉、再重查一遍",
+          (lambda: (_d29.slurm.n.clear(), _d29.tick(),
+                    _d29.cluster.prune(time.time()),
+                    not [k for k in _d29.cluster._v if ":" in k]
+                    and not [k for k in _d29.cluster._due if ":" in k]))(),
+          str(sorted(_d29.cluster._v)))
+    _c29b, _k29b = _pair(_d29)
+    _d29.tick()
+    _d29.cluster.prune(time.time() + 3 * mod.INFO_SLOW_SECONDS)
+    check("★ 而真的很久没人问过之后，prune 把按用户的那几项丢掉"
+          "（_v / _due / _taken 一起 —— 一个只增的字典与一个泄漏的字典，"
+          "从「会不会撑爆」的角度看没有区别）",
+          not [k for k in _d29.cluster._v if ":" in k]
+          and not [k for k in _d29.cluster._due if ":" in k]
+          and not [k for k in _d29.cluster._taken if ":" in k],
+          str(sorted(_d29.cluster._v)))
+    check("★ 而**共享**的那几类不受影响（它们与用户无关）",
+          "partitions" in _d29.cluster._v, str(sorted(_d29.cluster._v)))
+    _c29b.close()
+
+    _cfgdoc_src = io.open(os.path.join(HERE, os.pardir, "docs",
+                                       "CONFIGURATION.md"), encoding="utf-8").read()
+    # ── 28.11 启动自检：八个命令 ────────────────────────────────────────
+    # ★★ 文档里那个数必须与 `GLOBAL_KEYS` 一致。它**本来就漂过一次**：写着
+    #    「一共 13 个」而实际是 14 —— 一个没人验的数，迟早会变成一句错话，
+    #    而"写进 conf 会被拒绝启动"的那些键正是靠这一节才找得到的。
+    _cn_at = _cfgdoc_src.find("站点通用键。一共 ")
+    _cn_num = int(_cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0]) \
+        if _cn_at >= 0 and _cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0].isdigit() \
+        else -1
+    check("★★ docs/CONFIGURATION.md 说「一共 N 个」的 N **等于** GLOBAL_KEYS 的个数",
+          _cn_num == len(mod.GLOBAL_KEYS),
+          "文档说 %s 个，实际 %d 个" % (_cn_num, len(mod.GLOBAL_KEYS)))
+    check("★★ 三个新命令在配置白名单里（不在的话，写进 conf 会让守护进程拒绝启动）",
+          all(k in mod.GLOBAL_KEYS for k in ("sinfo", "sshare", "sacct")),
+          str(sorted(mod.GLOBAL_KEYS)))
+    _bin_bad = []
+    for _nm in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
+                "sinfo", "sshare", "sacct"):
+        _errs = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n%s = /nonexistent/%s\n"
+                                      % (_nm, _nm), "bin-%s.conf" % _nm)).validate()
+        if not any(_nm in e for e in _errs):
+            _bin_bad.append(_nm)
+    check("★★ 八个 Slurm 命令**逐个**都在启动自检里（少一个 ⇒ 那一格的失败形态是"
+          "「这个集群就是这样」，而根因在配置里）",
+          _bin_bad == [], "没被检查的：%s" % _bin_bad)
+
+    # ── 28.12 跨文件：协议的两半要逐字对上 ──────────────────────────────
+    _sess_src = io.open(os.path.join(HERE, "slurmate-sessiond"),
+                        encoding="utf-8").read()
+    _be_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                   "backend-fake.js"), encoding="utf-8").read()
+    _pn_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
+                                   "panel.js"), encoding="utf-8").read()
+    _ph_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
+                                   "panel.html"), encoding="utf-8").read()
+    check("★★ 两个新 op 的名字两边逐字相同（漂了不是「少一格」，是"
+          "**unknown_op** —— 而界面会把它画成一次失败）",
+          'op == "cluster"' in _sess_src and "'app:cluster'" in io.open(
+              os.path.join(HERE, os.pardir, "client", "src", "main", "index.js"),
+              encoding="utf-8").read()
+          and "case 'cluster':" in _be_src and "case 'history':" in _be_src,
+          "")
+    check("★★ 假后端也认这两个 op —— 它的全部价值就是「演的是同一件事」"
+          "（一份只在它身上成立的协议比没有它更坏）",
+          "case 'cluster':" in _be_src and "case 'history':" in _be_src,
+          "")
+    check("★★ 面板上那四个 id 与 panel.js 读的逐字相同"
+          "（漂了的形态是按钮点了没反应，而控制台里什么都不说）",
+          all(k in _ph_src for k in ('id="btn-cluster"', 'id="sec-cluster"',
+                                     'id="cluster-body"', 'id="btn-history"'))
+          and all(("$('%s')" % k) in _pn_src for k in
+                  ("btn-cluster", "sec-cluster", "cluster-body", "btn-history")),
+          "")
+    # ★★ 判据要落在 `na()` 的**函数体**上，不是只数调用点：调用点还在、
+    #    而函数体被改成返回一个空元素的话，界面上"取不到"就是一格**空白** ——
+    #    而那正是这一条要防的那件事（"忘了写数据"与"确实没有"长得一样）。
+    #    实测：只数调用点的版本，对上面那种改动**一条都不红**。
+    _na_at = _pn_src.find("function na(")
+    _na_body = _pn_src[_na_at:_pn_src.find("\n}", _na_at)] if _na_at >= 0 else ""
+    # ★★ 同一个分区的 GRES 有两个显示出口（表单里那一行、集群状态那一格），
+    #    而"名字怎么拼"在客户端只该有一处（`gres.js` 的 `gresLabel`）。
+    #    过了拼法与没过拼法，两边**都没错**，只是会显示成 `gpu:a6000` 与 `gpu` ——
+    #    一句谁也说不清哪个对的话。
+    _idx_src28 = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                      "index.js"), encoding="utf-8").read()
+    check("★★ 集群状态里的 GRES 也过客户端那处**唯一的拼法**"
+          "（不过的话，同一个分区在表单里是 `gpu:a6000`、在这一屏是 `gpu`）",
+          "withGresCatalogLabels(resp.data.gres)" in _idx_src28
+          and "withGresLabels((resp.data && resp.data.partitions)" in io.open(
+              os.path.join(HERE, os.pardir, "client", "src", "main", "index.js"),
+              encoding="utf-8").read(),
+          "")
+    check("★★★ 「取不到」那一行必须**画得出那句人话**：`na()` 的函数体里要有"
+          "「取不到」这三个字，而且它要落在**看得见的**元素上（返回一个空元素"
+          "等于把「取不到」画成一片空白，而那与「确实没有」长得一样）",
+          _na_at >= 0 and "取不到" in _na_body and "'na'" in _na_body
+          and _pn_src.count("na('") >= 4,
+          "na() 函数体：%r" % _na_body[:90])
+
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
                 _d13, _d14, _d15, _d16,
                 # 第 27 节（多客户端）自己那一批
-                _d17, _d19, _d20, _d21, _d22, _d23, _d24):
+                _d17, _d19, _d20, _d21, _d22, _d23, _d24,
+                # 第 28 节（集群信息）自己那一批
+                _d28, _d29):
         try:
             _dd.store.close()
         except Exception:                                    # noqa: BLE001
