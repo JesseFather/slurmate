@@ -6682,6 +6682,41 @@ exit 0
           and _pn_src.count("na('") >= 4,
           "na() 函数体：%r" % _na_body[:90])
 
+    # ── 28.13 ★★ 两道闸：能力（本机）与配额（全局）───────────────────────
+    # ★★ 这一段钉的是 docs/CONFIGURATION.md 里〈这一格与插件声明的 `concurrent`
+    #    是两道闸〉那一节的两个**具体事实**。那一节的结论（"缺省 1 会让能多开的
+    #    插件开不出第二份"）全部压在它们身上，而两者都会随着**别处**的改动悄悄
+    #    变成假话 —— 而一句假话不会红任何东西。
+    #
+    # ★ 判据取**表里那一格**（结构），不取正文里那句话（措辞）：措辞会改，
+    #   而"缺省是几"不该跟着措辞一起漂。同 28.11 里那个「一共 N 个」。
+    #
+    # ★★ 选择器要能**唯一**命中键表那一行：同一格里我新写的那张两列表也以同样的
+    #    三个字开头 —— 第一版就是被它顶成两个候选、报了 None，而那是一个
+    #    "守着自己写错"的红，与"文档漂了"长得一样。键表那一行有**四个单元格**。
+    _cap_rows = [ln for ln in _cfgdoc_src.splitlines()
+                 if ln.startswith("| `max_sessions_per_user` |")
+                 and len(ln.split("|")) == 6]
+    _cap_doc = (_cap_rows[0].split("|")[3].strip().strip("`")
+                if len(_cap_rows) == 1 else None)
+    check("★★ docs/CONFIGURATION.md 里 `max_sessions_per_user` 的缺省值"
+          "**等于**守护进程的常量（不等的话，这一节「缺省 1 压住了能力」"
+          "整段就是一句错话）",
+          _cap_doc is not None
+          and _cap_doc == str(mod.DEFAULT_MAX_SESSIONS_PER_USER),
+          "命中 %d 行；文档说 %r，代码是 %r"
+          % (len(_cap_rows), _cap_doc, mod.DEFAULT_MAX_SESSIONS_PER_USER))
+
+    # ★ 那一节举的例子是 code-server。举错例子的症状是"文档里的反例在真站点上
+    #   并不成立"，而它读起来一点问题都没有 —— 所以例子本身也要有人守。
+    _cs_manifest = json.load(io.open(
+        os.path.join(HERE, os.pardir, "plugins", "code-server", "plugin.json"),
+        encoding="utf-8"))
+    _cs_conc = (_cs_manifest.get("contributes") or {}).get("concurrent")
+    check("★ docs/CONFIGURATION.md 举的那个例子（code-server）真的声明了 "
+          "`concurrent: true`",
+          _cs_conc is True, str(_cs_conc))
+
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
                 _d13, _d14, _d15, _d16,
                 # 第 27 节（多客户端）自己那一批
