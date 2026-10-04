@@ -655,6 +655,12 @@ CONN_MAX = 64
 # 就放弃）。超了回一句 bad_request 再关，**不是静默丢弃**。
 CONN_IN_MAX = 65536
 
+# `leave` 一次最多放开几条会话。★ 它防的是**放大**：64 KiB 的请求行能装下几千个
+# session_id，而每一个都要一次点查 + 一次写。`op_list` 只给最近 50 条，所以正常
+# 的客户端**不可能**超过这个数 —— 超了就是有人手写的，拒绝比截断诚实
+# （截断会让客户端以为"都放开了"）。
+LEAVE_MAX_SESSIONS = 64
+
 # 读到 EOF（半关）之后，还允许留着把出站排空多久。
 # ★★ 这个窗口是必须的：老客户端（`slurmate rpc`）**每次发完就半关**，
 #   立刻关连接会把 submit 的响应一起带走 ⇒ 客户端拿不到 job_id ⇒ 重试 ⇒
@@ -5652,6 +5658,10 @@ class Sessiond(object):
                 return self.op_list(uid)
             if op == "heartbeat":
                 return self.op_heartbeat(uid, req, client_id)
+            if op == "takeover":
+                return self.op_takeover(uid, req, client_id)
+            if op == "leave":
+                return self.op_leave(uid, req)
             if op == "goodbye":
                 return self.op_goodbye(uid, req)
             if op == "doctor":
@@ -6017,6 +6027,16 @@ class Sessiond(object):
             "node_ip": s["node_ip"], "service_port": s["service_port"],
             "created_at": s["created_at"], "enrolled_at": s["enrolled_at"],
             "last_hb_at": s["last_hb_socket"], "renew_count": s["renew_count"],
+            # ★ v0.9：**谁在看** —— 一个 `client_id`，或者 `null`。取值只有这两种
+            #   （不是空串、不是 "unknown"）：见 SCHEMA_SQL 里 keeper 那一段。
+            #
+            #   ★★ `null` 与 `last_hb_at` 合起来才说得清状况：「谁都没有，30 分钟
+            #      前有过心跳」与「甲机在看，但它 25 分钟没说话了」是两句不同的话，
+            #      而界面要能分别说出来（一个该说"你已经离开"，另一个该说
+            #      "甲机可能只是断了网，要不要接管"）。
+            #   ★ 它同时是「接管」这个按钮的**唯一判据** —— 没有这一格，界面
+            #      不知道该不该画那个按钮，也不知道该踢谁。
+            "keeper": s["keeper"],
             "requested_time": s["requested_time"], "note": s["note"],
             "auth_mode": s["auth_mode"], "account": s["account"],
         }
@@ -6231,6 +6251,111 @@ class Sessiond(object):
             self.audit("suspect_recovered", session=sid, uid=uid)
         self.store.update(sid, **kw)
         return self._ok({"state": kw.get("state", s["state"]), "at": now})
+
+    def op_takeover(self, uid, req, client_id=None):
+        """把这条会话的看护者换成我。★★ **一个字都不动会话。**
+
+        ★★ 这条 op 的全部内容就是改**一格**：`keeper`。作业、ACL、nft 规则、会话
+          文件、端口、`last_hb_socket`、`state` —— 一个都不许动。理由是这条功能
+          存在的意义：用户只是**换了一台电脑看同一个作业**（「布局之类的不同无所谓，
+          但后台作业是同一个是根本原则」）。动了别的任何一个字，接管的语义就变成
+          "结束并重开"，而那是**另一个按钮**。
+
+        ★ 也**不**顺手刷新 `last_hb_socket`：它不是心跳，是"换人"。★ 代价要说清：
+          新看护者要等它自己的下一次心跳（客户端 `HEARTBEAT_MS` 45 秒）才生效，
+          所以「在 1800 秒大限前 40 秒才点接管」有一个窄窗口。
+          那一半在客户端上补（接管成功之后**立刻**打一次心跳，不等定时器），
+          而不是在这里偷偷多写一列 —— 多写一列会让"接管只动一格"这条不变量
+          变成一句需要解释的话。
+
+        ★ 没有身份的连接**不能**接管：要把看护者写成谁？没有名字就没人可写。
+          这一条与心跳那条**正好相反**，而且不是矛盾：心跳是"我在续命"（缺少身份
+          时宽进，因为排除错了会杀作业），接管是"我来当家"（缺少身份时严出，
+          因为它要往那一格里写一个名字）。
+
+        ★ 已经有看护者、而它不是我的时候，**不通知、也不拒绝**别的看护者 ——
+          旧看护者下一次心跳会被回 `ignored`，而那正是它认出「这条作业被另一台
+          电脑接管了」的信号。★ 另一条路是那一份**全量快照**：`keeper` 变了 ⇒
+          指纹变了 ⇒ 下一个 tick 就有一条推送（见 snapshot_for）。
+          **刻意不加一条专门的推送**：全量推送的可丢弃性是这一版的承重性质，
+          而"谁在看"这件事本来就是快照里的一格。
+        """
+        if not client_id:
+            return self._err(2, "no_client_id",
+                             "这条连接没有自报身份（`client`），而「接管」必须知道"
+                             "看护者该写成谁。客户端走常驻通道时会带上它。")
+        sid = str(req.get("session_id") or "")
+        s = self.store.get(sid)
+        if not s or s["uid"] != uid:
+            return self._err(3, "not_found")
+        if s["state"] in TERMINAL_STATES:
+            # 幂等地"成功"会说什么都没发生，而用户以为接管了 —— 那条作业已经
+            # 结束了，他该看到的是这个事实。
+            return self._err(4, "session_gone",
+                             "这条会话已经结束（%s），没有还能做主的作业了。"
+                             % s["state"])
+        was = s["keeper"]
+        if was != client_id:
+            self.store.update(sid, keeper=client_id)
+            self.audit("taken_over", session=sid, uid=uid, was=was, keeper=client_id)
+            log.info("会话 %s 的看护者从「%s」换成「%s」（作业一个字都没动）",
+                     sid, was or "（无）", client_id)
+        return self._ok({"session_id": sid, "keeper": client_id, "was": was})
+
+    def op_leave(self, uid, req):
+        """「这些会话我不看了」⇒ 把它们的看护者置空。**倒计时从这一刻起算。**
+
+        ★★ 与**闪断**的分工是这一条的全部意义：
+
+        | | 服务端收到什么 | 看护者 | 谁能让它停下来 |
+        |---|---|---|---|
+        | 闪断 | 什么都没收到（连接断了） | **保留** | 只有原来的看护者（或接管） |
+        | 离开 | 这条 op | 清空 | **任何**开始看它的客户端（会认领） |
+
+        ★ 「留一个已经走了的人当看护者」不是小事：界面会照实说"甲机在看"，
+          而那是**一句假话**，要 30 分钟之后才被超时纠正 —— 用户等不到那一刻，
+          他只会看到"我的作业怎么还在"。清空之后那句话当场就变成"没人在看"。
+
+        ★ **倒计时不加第二个窗口**：这里只是把看护者清空，之后仍然走
+          `suspect_after`(300 秒) → `orphan_after`(1800 秒) → `scancel`。
+          一条窗口两个入口 —— 加第二个窗口会让"多久算消失"有两个说法，而它们会漂。
+
+        ★ 这条 op **不校验身份**，与 `goodbye` 同一条理由：它是一次**放手**，
+          不是一次**取得**。要防的是"谁的作业被别人的心跳续了命"（那由心跳的判据
+          管），而"我以为我不看了"这句话没有假冒的价值 —— 它只能让作业**更早**
+          被回收，且随时可以被下一个开始看它的客户端认领回去（认领那一支见
+          op_heartbeat）。★ 反过来，校验身份会有一个具体得多的坏处：客户端在
+          常驻通道断掉之后走的是 exec 退路，那条路上身份是**被删掉的**，
+          于是「临时离开」会**静默地不生效**，而用户以为自己已经离开了。
+
+        ★ 清单是**显式**的，不是"我名下的全部"：只有调用方知道它刚才在看哪几条。
+          不完整的清单不会造成错误（漏掉的那些没人刷心跳，照样会超时），
+          它只影响"那句话什么时候变成真的"。
+        """
+        got = req.get("session_ids")
+        if not isinstance(got, list) or not got:
+            return self._err(2, "bad_request",
+                             "leave 要带一张非空的 session_ids 清单。")
+        if len(got) > LEAVE_MAX_SESSIONS:
+            # ★ 拒绝而不是悄悄截断：截断会让客户端以为"都放开了"，而它列在后面
+            #   的那些会话仍然挂着一个看护者。上限本身是**防放大**用的 ——
+            #   一次请求最多值这么多次点查，而 op_list 只给 50 条，
+            #   正常的客户端不可能超过它。
+            return self._err(2, "bad_request",
+                             "一次最多放开 %d 条会话（清单里有 %d 条）。"
+                             % (LEAVE_MAX_SESSIONS, len(got)))
+        cleared = []
+        for raw in got:
+            sid = str(raw or "")
+            s = self.store.get(sid)
+            # 不是我的、不存在的、以及**看护者本来就是空的**都安静跳过：
+            # 后者尤其要跳过 —— 它会被记成一次"放手"，而实际上什么都没发生。
+            if not s or s["uid"] != uid or s["keeper"] is None:
+                continue
+            self.store.update(sid, keeper=None)
+            self.audit("left", session=sid, uid=uid, was=s["keeper"])
+            cleared.append(sid)
+        return self._ok({"cleared": cleared})
 
     def op_goodbye(self, uid, req):
         sid = str(req.get("session_id") or "")

@@ -4849,6 +4849,10 @@ exit 0
                "service_kind": "code-server", "service_plugin": "x@1.0.0",
                "node": None, "node_ip": None, "service_port": None,
                "created_at": 0, "enrolled_at": None, "last_hb_socket": None,
+               # ★ 手搓的会话行必须把 session_view 读的**每一列**都写出来：
+               #   少一列就是一次 KeyError（这一节第一次加 keeper 时正是这样
+               #   被拦住的）。它在这里是 None = 确实没人在看。
+               "keeper": None,
                "renew_count": 0, "requested_time": "12:00:00", "note": None,
                "auth_mode": "password", "account": "myaccount", "uid": UID}
     # ★ 一律用 `.get()` 取那一格：**别让"字段被改名"变成一次 KeyError**。
@@ -6861,6 +6865,197 @@ exit 0
     _w1c.close()
     _w2c.close()
 
+    # ── 29.7 ★★★ 接管：**只有一格会变** ─────────────────────────────────
+    #
+    # ★ 这条用例的全部意义是那个**差集**。接管存在的理由是「用户只是换了一台
+    #   电脑看同一个作业」，所以除了 `keeper`，会话行、nft 规则都不许动一个字 ——
+    #   动了任何一个，接管的语义就变成"结束并重开"，而那是另一个按钮。
+    _d34 = _mkd()
+    _d34.nft = _NftRec()
+    _add(_d34, "s-tk", job_id="606", keeper="mA", hb=mod.now_ts() - 5)
+    _d34.store.update("s-tk", node_ip="192.0.2.11", service_port=55001)
+    _d34.tick()                        # 对账把 ACL 规则建起来
+    _row0 = dict(_d34.store.get("s-tk"))
+    _rules0 = dict(_d34.nft.rules)
+    check("★ 前提：这条会话确实占着一条 ACL 规则且作业在跑（否则下面全是空断言）",
+          len(_rules0) == 1 and _row0["state"] == mod.ST_ENROLLED,
+          "%s / %s" % (sorted(_rules0), _row0["state"]))
+    _rtk = _d34.dispatch(UID, os.getgid(),
+                         {"op": "takeover", "session_id": "s-tk"}, "mB")
+    _row1 = dict(_d34.store.get("s-tk"))
+    _diff = sorted(k for k in set(_row0) | set(_row1)
+                   if _row0.get(k) != _row1.get(k))
+    check("★★★ 接管 ⇒ 会话行逐字段比对，**差集恰好是 {keeper}**",
+          _rtk.get("ok") and _diff == ["keeper"], str(_diff))
+    check("★★ 而 nft 规则**一条都没动**（既没删也没加）",
+          dict(_d34.nft.rules) == _rules0 and _d34.nft.deleted == [],
+          "%s / 删过 %s" % (sorted(_d34.nft.rules), _d34.nft.deleted))
+    check("★ 响应里说得清是从谁手里接过来的（界面要能写「已从甲机接管」）",
+          (_rtk.get("data") or {}).get("was") == "mA"
+          and (_rtk.get("data") or {}).get("keeper") == "mB",
+          str(_rtk.get("data")))
+    _rtk2 = _d34.dispatch(UID, os.getgid(),
+                          {"op": "takeover", "session_id": "s-tk"}, "mB")
+    check("★ 自己接管自己的（界面点两下）不是错，也不改任何东西",
+          _rtk2.get("ok") and (_rtk2.get("data") or {}).get("was") == "mB"
+          and dict(_d34.store.get("s-tk")) == _row1,
+          str(_rtk2.get("data")))
+
+    # ── 29.8 接管的两条边界 ──────────────────────────────────────────────
+    _rtk3 = _d34.dispatch(UID, os.getgid(), {"op": "takeover",
+                                             "session_id": "s-tk"})
+    check("★★ 没报身份的连接**不能**接管 —— 要把看护者写成谁？"
+          "（与心跳那条正好相反，而这不是矛盾：心跳是「我在续命」，少一个身份"
+          "仍然该宽进；接管是「我来当家」，它要往那一格里写一个名字）",
+          (_rtk3.get("error") or {}).get("kind") == "no_client_id",
+          str(_rtk3.get("error")))
+    _add(_d34, "s-over", job_id="607", keeper="mA", state=mod.ST_RELEASED)
+    _rtk4 = _d34.dispatch(UID, os.getgid(),
+                          {"op": "takeover", "session_id": "s-over"}, "mB")
+    check("★★ 已经结束的会话**接管不了** —— 幂等地「成功」会让用户以为接管了，"
+          "而他该看到的是「这条作业已经结束」",
+          (_rtk4.get("error") or {}).get("kind") == "session_gone",
+          str(_rtk4.get("error")))
+
+    # ── 29.9 离开：清空，而**只报真的清掉的那几条** ─────────────────────
+    _d35 = _mkd()
+    _add(_d35, "s-l1", job_id="608", keeper="mA", hb=mod.now_ts() - 5)
+    _add(_d35, "s-l2", job_id="609", keeper="mB", hb=mod.now_ts() - 5)
+    _add(_d35, "s-l3", job_id="610", hb=mod.now_ts() - 5)      # 本来就没人在看
+    _rlv = _d35.dispatch(UID, os.getgid(),
+                         {"op": "leave",
+                          "session_ids": ["s-l1", "s-l2", "s-l3", "s-nope"]})
+    check("★★ leave 把清单里那些会话的看护者清空 —— **包括是别人的**："
+          "它是一次「放手」，与 goodbye 同族，不是一次「取得」",
+          _d35.store.get("s-l1")["keeper"] is None
+          and _d35.store.get("s-l2")["keeper"] is None,
+          "%r / %r" % (_d35.store.get("s-l1")["keeper"],
+                       _d35.store.get("s-l2")["keeper"]))
+    check("★★ 而响应里只报**真的清掉了**的那几条：本来就没人在看的（s-l3）与"
+          "不存在的（s-nope）都不算 —— 报进去就是一句假话（那几条什么都没发生）",
+          (_rlv.get("data") or {}).get("cleared") == ["s-l1", "s-l2"],
+          str(_rlv.get("data")))
+    check("★★ 清空之后库里是 **NULL**，不是空串"
+          "（空串会让「确实没人在看」与「有人在看、只是名字是空的」分不开）",
+          _d35.store.get("s-l1")["keeper"] is None,
+          repr(_d35.store.get("s-l1")["keeper"]))
+    _rlv2 = _d35.dispatch(UID, os.getgid(), {"op": "leave"})
+    check("★ 不带清单 / 空清单被明确拒绝（不是「沉默地什么都不做」）",
+          (_rlv2.get("error") or {}).get("kind") == "bad_request",
+          str(_rlv2.get("error")))
+    _rlv3 = _d35.dispatch(UID, os.getgid(),
+                          {"op": "leave",
+                           "session_ids": ["x%d" % i
+                                           for i in range(mod.LEAVE_MAX_SESSIONS + 1)]})
+    check("★★ 超过 %d 条被**拒绝**而不是悄悄截断"
+          "（截断会让客户端以为「都放开了」，而后面那几条还挂着看护者）"
+          % mod.LEAVE_MAX_SESSIONS,
+          (_rlv3.get("error") or {}).get("kind") == "bad_request",
+          str(_rlv3.get("error")))
+
+    # ── 29.10 离开之后走的是**同一条**窗口（不新开第二个）────────────────
+    _d36 = _mkd(suspect_after=10, orphan_after=20, startup_grace_seconds=0)
+    _cancels = []
+    _d36.slurm.cancel = lambda *a, **k: _cancels.append(a) or True
+    _add(_d36, "s-win", job_id="611", keeper="mA", hb=mod.now_ts() - 30)
+    _d36.dispatch(UID, os.getgid(),
+                  {"op": "leave", "session_ids": ["s-win"]})
+    _d36.tick()
+    check("★★ 离开之后走的是**同一条**窗口：心跳断了 30 秒 ⇒ suspect"
+          "（既不「立刻结束」，也不「什么都不做」—— 一条窗口两个入口）",
+          _d36.store.get("s-win")["state"] == mod.ST_SUSPECT,
+          _d36.store.get("s-win")["state"])
+    _d36.tick()
+    _sw = _d36.store.get("s-win")
+    check("★★ 再一轮 ⇒ orphaned，而且**真的发了 scancel**"
+          "（「临时离开由超时来控制」这句话落在这里）",
+          _sw["note"] == "orphaned" and len(_cancels) == 1,
+          "%s / scancel %d 次" % (_sw["note"], len(_cancels)))
+
+    # ── 29.11 ★★ 闪断 ≠ 离开 ───────────────────────────────────────────
+    #
+    # ★★★ 这是"离开"这条 op 存在的全部理由的反面：一次网络抖动**不是**一次
+    #    离开。把两者混起来，用户回来时作业已经在回收路上了。
+    _d37 = _mkd()
+    _f1c, _f1k = _pair(_d37)
+    _f1c.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d37)
+    _add(_d37, "s-flash", job_id="612", keeper="mA", hb=mod.now_ts() - 5)
+    _f1c.send({"op": "heartbeat", "session_id": "s-flash", "rid": 2})
+    _drive(_d37)
+    _f1c.lines()
+    # 闪断：**只**是连接断了，没有任何显式事件发生
+    _f1c.close()
+    _d37.drop_conn(_f1k, "模拟闪断")
+    check("★★★ 闪断（连接断了、没有任何显式事件）⇒ 看护者**保留** —— "
+          "它是「这台电脑还在看，只是一时联系不上」",
+          _d37.store.get("s-flash")["keeper"] == "mA"
+          and _d37.store.get("s-flash")["state"] == mod.ST_ENROLLED,
+          "%r / %s" % (_d37.store.get("s-flash")["keeper"],
+                       _d37.store.get("s-flash")["state"]))
+    _f2c, _f2k = _pair(_d37)                    # 同一台电脑重连（同一个 client_id）
+    _f2c.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d37)
+    _f2c.send({"op": "heartbeat", "session_id": "s-flash", "rid": 2})
+    _drive(_d37)
+    _f2r = [m for m in _f2c.lines() if m.get("rid") == 2]
+    check("★★ 重连之后心跳**继续算**（自动恢复）—— 这正是「闪断必须能自动恢复」"
+          "那条根本要求的落点",
+          bool(_f2r) and "ignored" not in (_f2r[0].get("data") or {})
+          # ★ 判据是"这一次心跳**落地了**"（库里那一格 == 应答里的那个时刻），
+          #   而不是"它比上一次大" —— `now_ts()` 是**秒级**的，同一个用例里连着
+          #   两次心跳会落在同一秒上，`>` 会假红（第一版正是这么红的）。
+          and _d37.store.get("s-flash")["last_hb_socket"]
+          == (_f2r[0].get("data") or {}).get("at"),
+          str(_f2r)[:150])
+    _f2c.close()
+
+    # ── 29.12 ★★★ 接管要在旧看护者那边**看得见** ────────────────────────
+    #
+    # ★ 旧看护者怎么知道？两条路：它的下一次心跳会被回 `ignored`，以及
+    #   **全量快照里 `keeper` 变了**（指纹变了 ⇒ 下一个 tick 就有一条推送）。
+    #   刻意**没有**一条专门的 `taken_over` 推送 —— 全量推送的可丢弃性是这一版
+    #   的承重性质，而"谁在看"本来就是快照里的一格。
+    _d38 = _mkd(snapshot_interval=30.0)
+    _k1c, _k1k = _pair(_d38)
+    _k1c.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d38)
+    _add(_d38, "s-alert", job_id="613", keeper="mA", hb=mod.now_ts() - 5)
+    _d38.tick()
+    _drive(_d38)
+    _k1c.lines()                   # 丢掉第一帧（那是「从无到有」，不是「变了」）
+    _d38.dispatch(UID, os.getgid(),
+                  {"op": "takeover", "session_id": "s-alert"}, "mB")
+    _d38.tick()
+    _drive(_d38)
+    _keeper_seen = None
+    for _m in [x for x in _k1c.lines() if x.get("push") == "sessions"]:
+        for _s in (_m.get("sessions") or []):
+            if _s.get("session_id") == "s-alert":
+                _keeper_seen = _s.get("keeper")
+    check("★★★ 看护者变了 ⇒ 旧看护者在下一条**全量**推送里就看得见"
+          "「现在不是我」—— 这就是「上一个电脑的界面要被踢掉」的那条通路"
+          "（周期是 30 秒，所以这一条**只**可能是「变了才推」）",
+          _keeper_seen == "mB", repr(_keeper_seen))
+    _k1c.close()
+
+    # ── 29.13 契约：`session_view` 的那一格与文档 ─────────────────────────
+    _proto = io.open(os.path.join(HERE, os.pardir, "docs", "PROTOCOL.md"),
+                     encoding="utf-8").read()
+    _add(_d35, "s-view", job_id="614", keeper="mZ")
+    _vw = _d35.session_view(_d35.store.get("s-view"), with_secret=False)
+    check("★★ 跨文件：`session_view` 真的吐 `keeper` 那一格，而 docs/PROTOCOL.md "
+          "的字段表里也写着它（两半缺一，界面那一侧就没有可读的东西）",
+          _vw.get("keeper") == "mZ" and "`keeper`" in _proto,
+          "%r / 文档里%s" % (_vw.get("keeper"),
+                             "有" if "`keeper`" in _proto else "★ 没有"))
+    check("★★ 而取值**只有两种**：一个 client_id 或者 `null`"
+          "（不是空串、不是 \"unknown\" —— 界面据此知道该不该画「接管」）",
+          isinstance(_vw.get("keeper"), str)
+          and _d35.session_view(_d35.store.get("s-l1"),
+                                with_secret=False).get("keeper") is None,
+          repr(_vw.get("keeper")))
+
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
                 _d13, _d14, _d15, _d16,
                 # 第 27 节（多客户端）自己那一批
@@ -6868,7 +7063,7 @@ exit 0
                 # 第 28 节（集群信息）自己那一批
                 _d28, _d29,
                 # 第 29 节（看护者）自己那一批
-                _d30, _d31, _d32, _d33):
+                _d30, _d31, _d32, _d33, _d34, _d35, _d36, _d37, _d38):
         try:
             _dd.store.close()
         except Exception:                                    # noqa: BLE001
