@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.8"
+VERSION = "0.9"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -2885,6 +2885,23 @@ CREATE TABLE IF NOT EXISTS sessions (
     enrolled_at     INTEGER,
     ended_at        INTEGER,
     last_hb_socket  INTEGER,
+    -- ★ v0.9：这条会话此刻**谁在看** —— 一个 `client_id`（见 parse_client_claim），
+    --   或者 NULL。
+    --
+    --   ★★ **NULL 是合法状态，不是缺失值。** 它指的是「确实没人在看」：submit 由
+    --      CLI 发起、用户点了「临时离开」、或者从来没有人连上过。与三态那条纪律
+    --      同源（空 = 确实没有，而不是不知道）。别把它读成 "unknown" 或空串 ——
+    --      取值只有两种：一个 client_id，或者 NULL。
+    --
+    --   ★ 它管的**只有一件事**：上一格 `last_hb_socket` 谁刷得动。而"谁刷得动
+    --     心跳"就是"谁的作业不会被 300/1800 秒那条超时干掉" —— 所以这一列的
+    --     判据写错，后果是**批量 scancel**。判据本身只有一份，在 op_heartbeat()
+    --     里，那是唯一该改它的地方。
+    --
+    --   ★ 它是**本机**的身份（一台电脑一个），不是"哪条 SSH 连接"：同一个用户在
+    --     一个站点上本来就会有很多条 SSH 连接（终端、rpc、VS Code…），那些都不是
+    --     "在看"。这一条与阶段 4 的席位同源。
+    keeper          TEXT,
     file_inode      INTEGER,
     file_ctime      INTEGER,
     job_started_at  INTEGER,
@@ -5451,7 +5468,11 @@ class Sessiond(object):
         # ★ `client` 与 `rid` 在**同一个位置**、同一条理由上被认领：只有常驻通道
         #   发得出它们。见 register_client() 里的门槛。
         self.register_client(conn, req.get("client"))
-        resp = self.dispatch(conn.uid, conn.gid, req)
+        # ★ 身份随请求一起交给 op —— **它是这条连接的属性**（`register_client`
+        #   刚在上面把它认下来），而两个用到它的 op（submit / heartbeat）都只
+        #   读不写。没报身份的连接传进去的是 None，那是一个有意义的输入：
+        #   见 op_heartbeat() 的 docstring（「没有身份 = 不被排除」）。
+        resp = self.dispatch(conn.uid, conn.gid, req, conn.client_id)
         if rid is not None:
             # ★ rid 是**加法**：不带就不回填，线路上与从前逐字相同。
             resp["rid"] = rid
@@ -5599,7 +5620,15 @@ class Sessiond(object):
         self.throttled.pop(uid, None)
         return False
 
-    def dispatch(self, uid, gid, req):
+    def dispatch(self, uid, gid, req, client_id=None):
+        """`client_id` = 这条连接自报的客户端身份（没报就是 None）。
+
+        ★ 它是**连接的属性**，由 handle_line 从 `conn.client_id` 传进来 —— 刻意
+          不做成"每个 op 自己去 req 里读 `client.id`"：那会让身份有第二个来源，
+          而第二个来源与 `register_client` 那道门槛（只在常驻通道上认）会漂开。
+          exec 那条路上 `client` 是被**删掉**的（见 backend-ssh.js 的 rpc()），
+          所以那条路的 `client_id` 必然是 None —— 这不是缺陷，是判据的一部分。
+        """
         op = str(req.get("op") or "")
         if not self.rpc_allowed(uid):
             return self._err(7, "rate_limited")
@@ -5616,13 +5645,13 @@ class Sessiond(object):
             if op == "plugin_package":
                 return self.op_plugin_package(uid, req)
             if op == "submit":
-                return self.op_submit(uid, req)
+                return self.op_submit(uid, req, client_id)
             if op == "status":
                 return self.op_status(uid, req)
             if op == "list":
                 return self.op_list(uid)
             if op == "heartbeat":
-                return self.op_heartbeat(uid, req)
+                return self.op_heartbeat(uid, req, client_id)
             if op == "goodbye":
                 return self.op_goodbye(uid, req)
             if op == "doctor":
@@ -6143,13 +6172,59 @@ class Sessiond(object):
                          "limit": HISTORY_MAX_ROWS})
 
     # ── RPC：写操作 ─────────────────────────────────────────────────────────
-    def op_heartbeat(self, uid, req):
+    def op_heartbeat(self, uid, req, client_id=None):
+        """心跳 —— 而「谁的心跳算数」由 `keeper` 那一列定。**判据只有这一份。**
+
+        ★★ 判据是**四档**，一档都不能少：
+
+        | 发心跳的连接 | `keeper` | 结果 |
+        |---|---|---|
+        | 报了身份 | 空 | 接受，**并认领**（keeper = 我） |
+        | 报了身份 | 是我 | 接受 |
+        | 报了身份 | 是别人 | 回 `ok` + `ignored`，**什么都不动** |
+        | **没报身份** | 任意 | **一律接受**，keeper 不动 |
+
+        ★★★ 最后一行是**承重的，别把它「收严」成"keeper 不是我就不算"**。
+          没报身份的连接有两类，而两类都必须能续命：
+            · CLI（`slurmate heartbeat` / `wait`）与更老的客户端；
+            · ★ **我们自己的客户端在常驻通道断掉之后的 exec 退路**。那条路上
+              `client` 是**被删掉的**（见 backend-ssh.js 的 `rpc()`：exec 那条路
+              一个身份字段都不带），因为带上它会让每一次退路都把自己那条常驻
+              通道顶掉。
+          收严的后果是具体的一条：用户正开着客户端看着作业，登录节点上一次通道
+          抖动让它退化成 exec ⇒ 心跳**全部**被回 `ignored` ⇒ 300 秒 `suspect`、
+          1800 秒 **`scancel`** —— 而界面上一切正常（心跳确实"发出去了"，客户端
+          只看到 `ok`）。这与阶段 4 那条失败形态（推送把心跳挤出桶）是同一类，
+          而且更隐蔽。
+
+        ★ 所以判据与阶段 4 的席位**是同一条**：**身份是"被排除"的必要条件，
+          不是"被接受"的必要条件。** 不报身份的连接既不占席位、也永远不会被
+          顶掉；同理，它也永远不会被别人挡在心跳之外。**没有身份 = 不被排除。**
+
+        ★ 「认出我是看护者之后要**认领**」不是顺手加的：CLI 提交的会话
+          （keeper 为空）在客户端上打开时，界面要画得出"这台电脑在看它"，
+          而"接管"这个按钮也要有东西可接管 —— 没有认领，那条会话永远无主，
+          用户换一台电脑之后两台都以为自己在看，谁也踢不掉谁。
+
+        ★ 不是看护者时回 `ok` + `ignored` 而**不回错**：心跳不是一条会让客户端
+          重试的请求，回错会让它退避、进而把「不是看护者」演成「网络不好」。
+          而 `ignored` 那一格是客户端认出「我被接管了」的**唯一**信号。
+        """
         sid = str(req.get("session_id") or "")
         s = self.store.get(sid)
         if not s or s["uid"] != uid:
             return self._err(3, "not_found")
         now = now_ts()
+        keeper = s["keeper"]
+        if client_id and keeper is not None and keeper != client_id:
+            # `state` 原样返回、一个字段都不动 —— 别人的心跳既不能续命，
+            # 也不能把一个 `suspect` 的会话"救"回来（那台电脑并没有在看它）。
+            return self._ok({"state": s["state"], "at": now,
+                             "ignored": "not_keeper"})
         kw = {"last_hb_socket": now}
+        if client_id and keeper is None:
+            kw["keeper"] = client_id
+            self.audit("keeper_claimed", session=sid, uid=uid, client=client_id)
         if s["state"] == ST_SUSPECT:
             # 心跳恢复 —— 从"网络闪断"回到正常态。作业和 ACL 全程都没动过。
             kw["state"] = ST_ENROLLED
@@ -6213,7 +6288,8 @@ class Sessiond(object):
                           % (where, gres_label(g), cap, g["count"]))
         return g, None
 
-    def op_submit(self, uid, req):
+    def op_submit(self, uid, req, client_id=None):
+        """`client_id` = 提交这条连接的身份（没报就是 None，见 dispatch）。"""
         cfg = self.cfg
         try:
             user = pwd.getpwuid(uid).pw_name
@@ -6446,6 +6522,12 @@ class Sessiond(object):
             #   的**，在这里存一份就等于同一件事有两个表示（写的时候一个、读回来
             #   要靠正则再解析一个）。见文件上方 GRES 那一段。
             gres=(json.dumps(gres, ensure_ascii=False) if gres else None),
+            # ★ 提交的这一方就是**第一任看护者**（谁提交谁在看）。没报身份
+            #   （CLI、exec 退路）⇒ NULL = "确实没人在看" —— 那是诚实的一格，
+            #   不是缺失值。它随后会被第一个报了身份的心跳**认领**走
+            #   （见 op_heartbeat），所以这一格早写晚写都不影响正确性；
+            #   写在这里只是让"提交之后、第一次心跳之前"那个窗口也说真话。
+            keeper=client_id,
             requested_time=time_str, job_id=None, state=ST_RESERVED,
             candidates=",".join(str(c) for c in cands),
             # 这里只是登记那一刻的初值，作业跑起来后会用它自己写进会话文件的那份

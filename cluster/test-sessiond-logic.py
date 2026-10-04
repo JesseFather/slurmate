@@ -1230,8 +1230,11 @@ exit 0
         def __missing__(self, key):
             return None
 
-    def run_submit(req, allowed="normal"):
-        """跑一次 op_submit。返回 (响应, 记下来的 sess/env)。"""
+    def run_submit(req, allowed="normal", client_id=None):
+        """跑一次 op_submit。返回 (响应, 记下来的 sess/env)。
+
+        `client_id` 走的是 `dispatch` 那条路给的那个参数（连接自报的身份）。
+        """
         seq[0] += 1
         d.store = mod.Store(os.path.join(tmpdir, "submit-%d.db" % seq[0]))
         d.slurm = mod.Slurm(cfg)
@@ -1272,7 +1275,7 @@ exit 0
         real = mod.run_cmd
         mod.run_cmd = _run
         try:
-            resp = d.op_submit(UID, req)
+            resp = d.op_submit(UID, req, client_id)
         finally:
             mod.run_cmd = real
         d.store.close()
@@ -5074,11 +5077,18 @@ exit 0
             dd.handle_events(ev)
             dd.drain_pending()
 
-    def _add(dd, sid, job_id=None, state=None, uid=None):
+    def _add(dd, sid, job_id=None, state=None, uid=None, keeper=None, hb=None):
         dd.store.insert(session_id=sid, uid=UID if uid is None else uid,
                         user="alice", partition="A6000", account="acct",
                         cpus=2, mem="8G", requested_time="1:00:00",
                         state=state or mod.ST_ENROLLED, job_id=job_id,
+                        # ★ v0.9：缺省的 NULL 是有含义的一格（确实没人在看），
+                        #   所以这里显式写出来 —— 见 SCHEMA_SQL 里 keeper 那一段。
+                        keeper=keeper,
+                        # ★ 一个 `enrolled` 的会话**至少心跳过一次** —— 所以第 29
+                        #   节那几条"推进了没有"的断言要有一个真实的起点，而不是
+                        #   NULL（从 None 上说"推进"是没法定判据的）。
+                        last_hb_socket=hb,
                         candidates="55001", created_at=mod.now_ts())
 
     # ── 26.1 老客户端一字不改地继续工作（§八 第 2 步的判据）──────────────
@@ -6717,12 +6727,148 @@ exit 0
           "`concurrent: true`",
           _cs_conc is True, str(_cs_conc))
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  29. 看护者：谁在看这条会话（v0.9 阶段 1）
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # ★★ 这一节守的是一句话：**一条会话同一时刻只有一个看护者**，而"看护者"
+    #    决定了谁刷得动 `last_hb_socket` —— 也就是**谁的作业不会被 300/1800 秒
+    #    那条超时干掉**。判据写错的后果是整批 scancel，所以这里每一条都是
+    #    "哪一类连接刷得动"的直接断言，而不是"这一列写着什么"。
+    #
+    # ★ 最要紧的一条在 29.5：**没报身份的连接一律刷得动**（哪怕看护者是别人）。
+    #   收严它 = 客户端在常驻通道抖动、退化成 exec 之后心跳全被忽略 ⇒ 用户看着
+    #   的作业在 1800 秒后被杀，而界面上一切正常（心跳"发出去了"，回的是 ok）。
+
+    # ── 29.1 提交那一刻的第一任看护者 ────────────────────────────────────
+    _r29a, _s29a, _ = run_submit({"op": "submit"}, client_id="mX")
+    check("★★ 报了身份的提交 ⇒ keeper 就是那个 client_id（谁提交谁在看）",
+          _r29a.get("ok") and _s29a["keeper"] == "mX", repr(_s29a.get("keeper")))
+    _r29b, _s29b, _ = run_submit({"op": "submit"})
+    check("★★ 不报身份的提交（CLI / exec 退路）⇒ keeper 是 **NULL** —— 而 NULL 是"
+          "「确实没人在看」（合法的空），不是「不知道」",
+          _r29b.get("ok") and _s29b["keeper"] is None, repr(_s29b.get("keeper")))
+
+    # ── 29.2 看护者非空 ⇒ 只有它刷得动 ───────────────────────────────────
+    _d30 = _mkd()
+    _add(_d30, "s-own", job_id="601", keeper="mA", hb=mod.now_ts() - 10)
+    _t30 = _d30.store.get("s-own")["last_hb_socket"]
+    _rb30 = _d30.dispatch(UID, os.getgid(),
+                          {"op": "heartbeat", "session_id": "s-own"}, "mB")
+    check("★★★ 不是看护者的心跳：回 **ok**（不是错）+ `ignored`，"
+          "而 `last_hb_socket` 一个字都没动",
+          _rb30.get("ok")
+          and (_rb30.get("data") or {}).get("ignored") == "not_keeper"
+          and _d30.store.get("s-own")["last_hb_socket"] == _t30,
+          "%s / %s" % (str(_rb30)[:120],
+                       _d30.store.get("s-own")["last_hb_socket"]))
+    _add(_d30, "s-susp", job_id="602", keeper="mA", state=mod.ST_SUSPECT,
+         hb=mod.now_ts() - 10)
+    _d30.dispatch(UID, os.getgid(),
+                  {"op": "heartbeat", "session_id": "s-susp"}, "mB")
+    check("★★ 而别人的心跳也**救不回**一个 suspect 的会话"
+          "（那台电脑并没有在看它；能救回它的是「另一个人的心跳」）",
+          _d30.store.get("s-susp")["state"] == mod.ST_SUSPECT,
+          _d30.store.get("s-susp")["state"])
+    _ra30 = _d30.dispatch(UID, os.getgid(),
+                          {"op": "heartbeat", "session_id": "s-own"}, "mA")
+    check("★ 看护者自己的心跳照常推进，而且**不认领**（keeper 本来就是它）",
+          _ra30.get("ok") and "ignored" not in (_ra30.get("data") or {})
+          and _d30.store.get("s-own")["last_hb_socket"] > _t30
+          and _d30.store.get("s-own")["keeper"] == "mA",
+          str(_ra30.get("data")))
+
+    # ── 29.3 看护者为空 ⇒ 谁都刷得动（老客户端那条路逐字不变）────────────
+    _d31 = _mkd()
+    _add(_d31, "s-free", job_id="603", hb=mod.now_ts() - 10)
+    _t31 = _d31.store.get("s-free")["last_hb_socket"]
+    _ra31 = _d31.dispatch(UID, os.getgid(), {"op": "heartbeat",
+                                             "session_id": "s-free"})
+    check("★★★ keeper 为空 ⇒ **不带身份**的心跳照常推进 —— 这正是 `slurmate rpc` /"
+          " `slurmate wait` / 更老的客户端走的那条路",
+          _ra31.get("ok") and "ignored" not in (_ra31.get("data") or {})
+          and _d31.store.get("s-free")["last_hb_socket"] > _t31,
+          str(_ra31.get("data")))
+    check("★★ 而它**不认领**：匿名没有名字可写，keeper 仍然是 NULL"
+          "（「有个人在刷」与「这台电脑在看」是两件事）",
+          _d31.store.get("s-free")["keeper"] is None,
+          repr(_d31.store.get("s-free")["keeper"]))
+
+    # ── 29.4 报了身份的空 keeper ⇒ 认领，而认领之后别人就进不来了 ─────────
+    _rc31 = _d31.dispatch(UID, os.getgid(),
+                          {"op": "heartbeat", "session_id": "s-free"}, "mC")
+    check("★★ 报了身份、而 keeper 为空 ⇒ **认领**（keeper 变成它）—— "
+          "没有这一条，CLI 提交的会话永远无主：界面画不出「这台电脑在看它」，"
+          "换一台电脑之后两台都以为自己在看、谁也踢不掉谁",
+          _d31.store.get("s-free")["keeper"] == "mC",
+          repr(_d31.store.get("s-free")["keeper"]))
+    _rd31 = _d31.dispatch(UID, os.getgid(),
+                          {"op": "heartbeat", "session_id": "s-free"}, "mD")
+    check("★ 认领之后，第三台电脑的心跳就被挡在外面了（回 ignored）",
+          (_rd31.get("data") or {}).get("ignored") == "not_keeper",
+          str(_rd31.get("data")))
+
+    # ── 29.5 ★★★ 没报身份 ⇒ 一律刷得动，哪怕看护者是别人 ─────────────────
+    #
+    # ★ 这一条看着"宽"，而它是这一版最重的一条：客户端在常驻通道断掉之后会
+    #   退化成一次性的 exec，而那条路上 `client` 是**被删掉**的
+    #   （见 backend-ssh.js 的 rpc()）。收严这一条的后果不是"少一次心跳"，
+    #   是**用户正看着的作业在 1800 秒后被 scancel**。
+    _d32 = _mkd()
+    _add(_d32, "s-anon", job_id="604", keeper="mA", hb=mod.now_ts() - 10)
+    _t32 = _d32.store.get("s-anon")["last_hb_socket"]
+    _re32 = _d32.dispatch(UID, os.getgid(), {"op": "heartbeat",
+                                             "session_id": "s-anon"})
+    check("★★★ 看护者是别人、而这条连接**没报身份** ⇒ 心跳照常推进"
+          "（exec 退路与 CLI 走的正是这条路）",
+          _re32.get("ok") and "ignored" not in (_re32.get("data") or {})
+          and _d32.store.get("s-anon")["last_hb_socket"] > _t32,
+          str(_re32.get("data")))
+    check("★★ 但它**抢不走** keeper —— 没有身份就没有名字可写"
+          "（「没被排除」与「能当看护者」是两件事）",
+          _d32.store.get("s-anon")["keeper"] == "mA",
+          repr(_d32.store.get("s-anon")["keeper"]))
+
+    # ── 29.6 端到端：身份取自**连接**（handle_line 那一行）────────────────
+    # ★ 上面几条都是直接调 dispatch 喂 client_id，验的是**规则**；这一条验的是
+    #   那口"井"接对了没有 —— 规则对而接线错，表现与规则错一模一样。
+    _d33 = _mkd(max_clients_per_user=2)
+    _w1c, _w1k = _pair(_d33)
+    _w1c.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
+    _drive(_d33)
+    _add(_d33, "s-e2e", job_id="605", keeper="mA")
+    _w1c.send({"op": "heartbeat", "session_id": "s-e2e", "rid": 2})
+    _drive(_d33)
+    _w1r = [m for m in _w1c.lines() if m.get("rid") == 2]
+    check("★★ 心跳的身份取自**连接**（`conn.client_id`），不是请求体 ——"
+          "守护进程这一侧没有第二个身份来源",
+          bool(_w1r) and "ignored" not in (_w1r[0].get("data") or {}),
+          str(_w1r)[:160])
+    _w2c, _w2k = _pair(_d33)
+    _w2c.send({"op": "ping", "rid": 1, "client": {"id": "mB", "name": "乙机"}})
+    _drive(_d33)
+    _w2c.send({"op": "heartbeat", "session_id": "s-e2e", "rid": 2})
+    _drive(_d33)
+    _w2r = [m for m in _w2c.lines() if m.get("rid") == 2]
+    check("★★ 而另一条连接带着**自己的**身份发同一个心跳 ⇒ 被挡在外面"
+          "（这一条与上一条合起来才是「身份取自连接」）",
+          bool(_w2r)
+          and (_w2r[0].get("data") or {}).get("ignored") == "not_keeper",
+          str(_w2r)[:160])
+    check("★ 前提：两条连接各自都认了身份（否则上一条是空断言）",
+          _w1k.client_id == "mA" and _w2k.client_id == "mB",
+          "%s / %s" % (_w1k.client_id, _w2k.client_id))
+    _w1c.close()
+    _w2c.close()
+
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
                 _d13, _d14, _d15, _d16,
                 # 第 27 节（多客户端）自己那一批
                 _d17, _d19, _d20, _d21, _d22, _d23, _d24,
                 # 第 28 节（集群信息）自己那一批
-                _d28, _d29):
+                _d28, _d29,
+                # 第 29 节（看护者）自己那一批
+                _d30, _d31, _d32, _d33):
         try:
             _dd.store.close()
         except Exception:                                    # noqa: BLE001
