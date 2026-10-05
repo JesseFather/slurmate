@@ -424,6 +424,48 @@ test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）
   assert.equal(r.ok, true);
 });
 
+test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async (t) => {
+  keepLoop(t);
+  // ★★ 两件事同一个理由：守护进程认身份（register_client）与订阅推送（handle_line）
+  //    的判据都是"这条连接发过带 rid 的请求"。
+  //
+  //    带上 `client` 的后果是具体的：看护者那一格会跟着一条**一次性的**连接走 ——
+  //    它刚认领的会话下一秒就变成"没人看"，倒计时开始跑。而症状是
+  //    「作业莫名其妙开始倒计时」，两边各自都自洽。
+  const CLIENT = { id: 'm-aaaa', name: '甲机' };
+  const b = new sshBackend.SshBackend({ client: CLIENT });
+  b._conn = fakeConn();
+  b._profile = { user: 'u', host: 'h', port: 1 };
+  b._closed = false;
+
+  // ① 常驻通道：每一条请求都带着身份
+  //    ★ 必须**回一条应答**：常驻通道上的请求会一直等（默认 180 秒），
+  //      不回的话这条用例挂在那里，而症状是"整个文件跑了三分钟"。
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  assert.equal(await opened, true, '前提：常驻通道建起来了');
+  const pending = b.rpc({ op: 'ping' });
+  b._conn.streamChannel.answer(PONG);
+  await pending;
+  const asked = JSON.parse(
+    b._conn.streamChannel.written.split('\n').filter(Boolean).pop());
+  assert.deepEqual(asked.client, CLIENT);
+  assert.equal(typeof asked.rid, 'number');
+
+  // ② exec 退路：一个都不带
+  //
+  //    ★★ **调用方必须显式把这两个都传进去。** 写成 `{op:'ping'}` 的话，
+  //       `rpc()` 里那两行 `delete` 删的是**本来就不存在的东西** —— 于是删掉它们
+  //       不会有任何断言变红（一条**等价变异**，也就是没人守着的代码）。
+  b._resident = null;
+  b._teardownStream();
+  b._conn.execStream = null;
+  await b.rpc({ op: 'ping', rid: 999, client: CLIENT });
+  const body = JSON.parse(b._conn.execStream.sentBody);
+  assert.equal(body.rid, undefined, 'rid 是订阅的判据，一次性连接上带了它就会收到推送');
+  assert.equal(body.client, undefined, 'exec 退路上带身份 = 看护者跟着一次性的连接走');
+});
+
 test('★ 调用方传的 req 对象本身不被改写（删的是副本）', async (t) => {
   keepLoop(t);
   const b = connectedBackend();

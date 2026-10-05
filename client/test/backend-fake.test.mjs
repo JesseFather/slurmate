@@ -248,3 +248,33 @@ test('★★ 扫描**真的**在跑（不是"实现了一个只有手动调才�
     await b.close();
   }
 });
+
+test('★ 假后端收下了身份 —— 不收的话「身份根本没送到后端」在开发者模式里看不出来', () => {
+  // ★ 假站点上没有第二个客户端，所以它**永远用不到**这个字段；但它必须**收下**。
+  //   一个不看这个字段的假后端，会让"客户端身份根本没送到后端"这件事在开发者
+  //   模式里完全看不出来 —— 而那条路的真机症状是看护者认不出来是谁。
+  const CLIENT = { id: 'm-aaaa', name: '甲机' };
+  assert.deepEqual(new FakeBackend({ client: CLIENT })._client, CLIENT);
+});
+
+test('★★ 假后端的 `ping` 真的答得出来（那一行曾经是睡着的笔误）', async () => {
+  // ★★ 这一条守的是一个**已经发生过一次**的缺陷：`case 'ping'` 里写的是**裸的**
+  //    `hostVersion()`，而本文件里根本没有这个名字 —— 那一支一被调用就抛
+  //    `ReferenceError`。它此前是睡着的：生产代码里唯一发 `ping` 的是 SSH 后端，
+  //    而假后端没有常驻通道，所以谁都没走到那一行。
+  //
+  //    ★ 它值得有一条**自己的**用例，是因为守护它的那条用例（v0.8 阶段 4 的
+  //      "假后端也实现 displaced"）在 v0.9 阶段 3 连同被顶替那个形状一起删掉了 ——
+  //      "缺陷修好了、而守它的用例随别的功能一起消失"正是它会**第二次睡着**的方式。
+  const b = new FakeBackend({ rpcLatencyMs: 0 });
+  await b.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
+  try {
+    const r = await b.rpc({ op: 'ping' });
+    assert.equal(r.ok, true);
+    assert.equal(r.data.pong, true);
+    assert.equal(typeof r.data.version, 'string', '版本号要给得出来（版本闸看的就是它）');
+    assert.ok(r.data.version.length > 0);
+  } finally {
+    await b.close();
+  }
+});

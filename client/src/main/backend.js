@@ -33,21 +33,18 @@
  *   on('state', fn)        → 连接状态变化 { connected, detail }
  *   on('notify', fn)       → 服务端**主动推**来的一份全量会话快照
  *                            `{ push:'sessions', seq:<单调>, at, sessions:[视图], stale? }`
- *   displaced              `{reason, by, at} | null` —— 本机被**另一个客户端**顶掉了
- *   on('displaced', fn)    → 刚刚被顶掉（只会响一次）。见下方那一段
+ * ★ **"这条会话被另一台电脑接管了"不是一个后端事件。** v0.9 之前这里有一条
+ *    `displaced`（推送 + 事件 + 一根独立的状态轴），服务端**顶掉整个客户端**；
+ *    那个形状连同它的实现一起删掉了（见 docs/CONFIGURATION.md 的
+ *    `max_connections_per_user` 那一节）。现在"谁在看一条会话"是**会话行上的
+ *    一格**，而"我不再是看护者"由**心跳的应答**告诉客户端（`ignored`），
+ *    于是它是**逐会话**的、也是**这条连接自己问出来的** —— 不需要一条推送，
+ *    也不需要后端替会话记一个状态。
  *
- * ★★ **`displaced` 与 `connected` 是两根轴，别合并。**
- *    `connected === false` 是"连不上，等一会儿会重连"；`displaced` 是"另一个客户端
- *    接管了，**在你手动点「连接」之前不会回来**"。两个后端都必须报它。
- *
- * ★★ **被顶掉之后 `rpc()` 必须拒绝，绝不退回 exec。** 退回去的后果是具体的：
- *    这个客户端安静地继续干活、界面完全正常，而"你已经被另一台电脑接管了"
- *    **一个字都不会出现** —— 一个只在协议层成立、在界面上看不见的状态。
- *
- * ★ **被顶掉 ≠ 会话被停。** 服务端只断开那条常驻连接，不碰任何会话；而客户端
- *   这一侧必须同时保证**不给这些会话发 `goodbye`**（`goodbye` 会让 `phase_release`
- *   删掉 ACL 并 scancel 作业，而用户以为自己只是换了个地方看）。见 session.js 的
- *   `suspend`。这一半只能在客户端堵 —— 守护进程分辨不了那个 `goodbye` 是谁发的。
+ * ★ 它带来的那条保证仍然在，而它现在住在 `session.js`：**被接管的会话不许发
+ *   `goodbye`**（`goodbye` 会让 `phase_release` 删掉 ACL 并 scancel 作业，
+ *   而用户以为自己只是换了个地方看）。守护进程分辨不了那个 `goodbye` 是谁发的，
+ *   所以这一半只能在客户端堵。
  *
  * ★★ **`notify` 的契约是"可以不发"，不是"必须发"。** 这不是容错，是这一版能成立
  *    的前提：SSH 后端的常驻通道会因为"登录节点上的 CLI 还是旧的"而起不来，
@@ -82,12 +79,6 @@ class Backend extends EventEmitter {
    * （启动接续）什么都不做，而没有任何地方报错 —— 那正是这个接缝此前的老毛病。
    */
   get connected() { throw new Error('未实现 connected'); }
-
-  /**
-   * 被另一个客户端顶掉了没有。同样**抛异常而不是返回 false**：少实现会静默变成
-   * "永远没被顶掉"，而那条路的表现正是"界面一切正常"。
-   */
-  get displaced() { throw new Error('未实现 displaced'); }
 
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }

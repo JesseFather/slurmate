@@ -539,19 +539,24 @@ PASSWORD_BYTES = 12
 #   这一版证伪了** —— 理由与逐条症状见 docs/CONFIGURATION.md 的那一节。
 DEFAULT_MAX_SESSIONS_PER_USER = 1
 
-# 每人同时有几个**客户端**在看。**站点可配**（`max_clients_per_user`），这是它的
+# 每人同时能有几条**连接**。**站点可配**（`max_connections_per_user`），这是它的
 # 缺省值。
 #
-# ★★ 它与 `max_sessions_per_user` 是**两个不同的旋钮**，别合并成一个：
-#    一个管「几个客户端在看」（连接），一个管「几个作业」（资源）。
-#    把它们并成一个的话，"我在两台电脑上都想看一眼"会立刻变成"我要占两个作业"。
+# ★★ 它数的是**连接**（一条常驻通道、一次 `slurmate rpc`、一次 `slurmate wait`
+#    各算一条），**不是"几台电脑"**。它与 `max_sessions_per_user` 仍然是两个旋钮
+#    （一个管连接，一个管作业）—— 但别把这一格读回成"客户端配额"：那个东西叫
+#    `max_clients_per_user`，它按 uid **顶掉整个客户端**，而那个形状在 v0.9 整条
+#    删掉了（理由与逐条症状见 docs/CONFIGURATION.md 的那一节）。
 #
-# ★ 缺省是 1：同一个站点上，同一时刻只让**一台电脑**管这些会话。超出的按
-#   **后到者赢**顶掉（见 Sessiond.enforce_client_cap）。想要两台同时看着就写 2。
+# ★ 超限时**拒绝新来的那一条**（`5 too_many_connections`），**不顶掉旧的**。
+#   "顶掉"那条路上没有终点：两台电脑互相顶下去，而这一次连"被顶掉的禁止自动重连"
+#   那道闸都没有了（账本 S28）。
 #
-# ★ 被顶掉的那个客户端**不自动重连**（那是客户端的事，见 session.js 的 suspend），
-#   否则两个客户端会互相顶、无限拉锯 —— 那个失败形态是**没有终点**的。
-DEFAULT_MAX_CLIENTS_PER_USER = 1
+# ★ 缺省 8 是照**实际用量**定的：一个客户端在一个站点上只开**一条**常驻通道，
+#   再算上 `wait` 这类一次一请求的短连接，正常用量是个位数 —— 8 远在它之上。
+#   它的作用不是"管住正常的客户端"，而是**一个人占不满全部连接名额**
+#   （全局上限见 CONN_MAX）。
+DEFAULT_MAX_CONNECTIONS_PER_USER = 8
 
 # `client` 认领里的两个字段各自的上限。**必须是有限的**：那句话会被原样写进
 # 发给**另一个客户端**的通知里，而一个 10 MB 的 name 就是一次内存放大。
@@ -1436,9 +1441,10 @@ GLOBAL_KEYS = frozenset([
     # 而旧名字留在白名单外，正好让那条「老配置里的键会被明确拒绝」的用例
     # 一个字都不用改地继续守着。
     "max_sessions_per_user",
-    # 每人同时几个**客户端**在看。★ 与上面那一格是两个旋钮，别合并：
-    # 一个管"几个客户端在看"（连接），一个管"几个作业"（资源）。
-    "max_clients_per_user",
+    # 每人同时几条**连接**。★ 名字是 v0.9 换的：从前叫 `max_clients_per_user`，
+    # 而那个名字说的是**顶掉整个客户端**那种语义 —— 它连同 enforce_client_cap /
+    # displace 一起删掉了。这一格现在是"超限就拒绝新来的那一条"。
+    "max_connections_per_user",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
     # ★ 这三个是 v0.8 阶段 5 加的（集群信息）。**不能省** —— 它们是集群信息
     #   那三格的唯一来源，而 `resolve_bin` 找不到就返回 None，于是
@@ -2598,9 +2604,10 @@ class Config(object):
         #   一个不要的），"一个人最多几个会话"于是重新变成一个**站点决定**。
         self.max_sessions_per_user = getint("max_sessions_per_user",
                                             DEFAULT_MAX_SESSIONS_PER_USER)
-        # ★ 与上一格**是两个旋钮**（几个客户端在看 / 几个作业），见常量的说明。
-        self.max_clients_per_user = getint("max_clients_per_user",
-                                           DEFAULT_MAX_CLIENTS_PER_USER)
+        # ★ 与上一格**是两个旋钮**（几条连接 / 几个作业），见常量的说明。
+        #   它**不顶掉任何人**：超限时被拒的是那条新连接。
+        self.max_connections_per_user = getint("max_connections_per_user",
+                                               DEFAULT_MAX_CONNECTIONS_PER_USER)
         self.max_rpc_per_second = MAX_RPC_PER_SECOND
         self.reject_threshold = REJECT_THRESHOLD
         self.reject_window = REJECT_WINDOW
@@ -2782,17 +2789,16 @@ class Config(object):
                 "max_sessions_per_user = %d 不成立：0 会让任何人都开不了会话。"
                 "想要「一个人只能有一个会话」就写 1。"
                 % self.max_sessions_per_user)
-        # 客户端配额。0 的后果不是"谁都连不上"（那还算响亮），而是**每一个客户端
-        # 一连上就被自己顶掉** —— 因为 `enforce_client_cap` 的循环里，
-        # "席位表里只剩它自己却仍然超编"那一支会 break，于是配额 0 实际退化成
-        # 配额 1，而配置里写着的那个 0 从头到尾没有生效。**一个不生效的配置值
-        # 比一个错的值更坏**，所以宁可起不来。
-        if self.max_clients_per_user < 1:
+        # 每用户连接配额。0 的后果是**谁都连不上** —— 每一条连上来的都被拒，
+        # 而报错会是一句"本站的守护进程同时只服务 0 条连接"，那句话把根因指向
+        # "人太多"，而不是"配置里写了个 0"。所以宁可起不来。
+        if self.max_connections_per_user < 1:
             errors.append(
-                "max_clients_per_user = %d 不成立：0 不是一个有意义的配额"
-                "（客户端会互相顶到只剩一个，而配置里那个 0 从未生效）。"
-                "想要「一人一台电脑」就写 1。"
-                % self.max_clients_per_user)
+                "max_connections_per_user = %d 不成立：0 会让任何人都连不上"
+                "（每一条连接都会被拒绝）。它数的是**连接**，而一个客户端就会"
+                "开一条常驻通道、`slurmate wait` 之类还会各占一条 —— 正常用量"
+                "是个位数，别把它写成 1。"
+                % self.max_connections_per_user)
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -2906,7 +2912,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     --
     --   ★ 它是**本机**的身份（一台电脑一个），不是"哪条 SSH 连接"：同一个用户在
     --     一个站点上本来就会有很多条 SSH 连接（终端、rpc、VS Code…），那些都不是
-    --     "在看"。这一条与阶段 4 的席位同源。
+    --     "在看"。所以这一格只认**常驻通道**报上来的身份，见 register_client()。
     keeper          TEXT,
     file_inode      INTEGER,
     file_ctime      INTEGER,
@@ -4108,7 +4114,8 @@ def parse_client_claim(claim):
 
     ★★ **`id` 是身份，`name` 只是显示。** 判等只用 `id`：`name` 是客户端自己
       报的（今天取主机名），一台机器改个名不该被当成换了一台电脑 —— 那会让它
-      既有的一份"席位"失效，而症状是**它自己**被自己顶掉。
+      认不出自己看过的那些会话（`keeper` 那一格存的是 `id`），而症状是
+      **它自己**的作业开始倒计时。
       反过来，`name` 不可信也无所谓：它只出现在发给**同一个 uid** 的通知里。
 
     ★ 认不出来一律返回 `(None, None)`，而**不是抛异常、也不是拒绝这条请求** ——
@@ -4147,7 +4154,7 @@ class Conn(object):
     __slots__ = ("cfg", "sock", "uid", "gid", "inbuf", "out", "out_off",
                  "rx_eof", "eof_at", "subscribed", "seq", "stale",
                  "pushed_at", "sent_digest", "want", "closing",
-                 "client_id", "client_name", "displaced")
+                 "client_id", "client_name")
 
     def __init__(self, cfg, sock, uid, gid):
         # ★ 拿 cfg 而不是直接读模块常量：两个水位是**实测调出来的**，而用例要
@@ -4169,10 +4176,12 @@ class Conn(object):
         self.sent_digest = None     # 最近一次真正推出去的视图的指纹
         self.want = 0               # 当前挂在 selector 上的事件掩码
         self.closing = False
-        # ── 身份（见本文件上方〈多客户端〉那一节）──
+        # ── 身份 ──
+        # ★ 它**不是**"席位"的一部分（席位那一套已经删掉了）：这条连接的 client_id
+        #   只有一个用途 —— 交给 op_submit / op_heartbeat / op_takeover，决定
+        #   **它能不能写会话行上那一格 `keeper`**。见 op_heartbeat 的 docstring。
         self.client_id = None       # 自报的客户端 id；None = 没报名（老客户端）
         self.client_name = None     # 只用于显示，判等从不看它
-        self.displaced = False      # 已被顶掉：出站排空之后就关（见 displace）
 
     # ── 出站 ────────────────────────────────────────────────────────────────
     def pending(self):
@@ -4276,12 +4285,12 @@ class Sessiond(object):
         self._tick_job = {}
         # 本 tick 每个 uid 渲染一次的快照：uid -> (digest, [会话视图])。
         self._tick_snap = {}
-        # ── 多客户端 ──
-        # uid -> {client_id: 首次出现的时刻}。「席位」是按**首次出现**排的，不是按
-        # 连接先后（见 enforce_client_cap）。**只在内存里**，不落盘：守护进程重启
-        # 之后所有人的席位重排，而重排的规则就是"谁先连回来谁在前" —— 那是一个
-        # 说得清、也不需要额外的持久化状态。大小**有上界**：每次认领都会收到 ≤ 配额。
-        self.clients = {}
+        # ★ **这里从前有一张「席位表」**（`self.clients`，uid -> client_id -> 首次
+        #   出现的时刻），它服务的是"同一个 uid 只让一台电脑管"。v0.9 把它整条删了：
+        #   那个形状按 uid **顶掉整个客户端**，于是"接管作业 1"会连坐"作业 2"
+        #   （那台电脑上另一条会话被一起踢掉），而它的替代品是**会话行上那一格
+        #   `keeper`** —— 席位一开始就该按会话排（见 op_takeover / op_leave）。
+        #   连接数不再需要一张表：`uid_conn_count()` 从 selector 现读。
 
     # ── 审计 ────────────────────────────────────────────────────────────────
     def audit(self, event, **kw):
@@ -5280,7 +5289,26 @@ class Sessiond(object):
                 # ★ **accept-then-reject**，不是"不 accept"：后者之下客户端的
                 #   connect() 仍然成功，然后静默等到 40 秒超时，报一个方向完全
                 #   反了的 daemon_unreachable。这一条要让它**读到**为什么。
-                self.reject_conn(sock)
+                self.reject_conn(sock,
+                                 "本站的守护进程同时只服务 %d 条连接，现在满了。"
+                                 "稍后重试；**已经连上的不受影响**。"
+                                 % self.cfg.conn_max)
+                continue
+            # ★★ 每用户连接上限：**拒绝新来的那一条**，绝不动已经在的那些。
+            #
+            #   这一格取代了 v0.8 那套"按 uid 顶掉整个客户端"的席位（见常量的
+            #   说明）。判据落在**连接数**上，而它在 accept 这一刻就是已知的
+            #   （uid 来自 SO_PEERCRED）—— 不需要等到某条请求自报身份。
+            #
+            #   ★ 不这么做的话，一个把连接开爆的用户会把 64 个名额全占了，
+            #     别人的 `slurmate rpc` 只能读到一句"本站满了"，而根因在另一个
+            #     用户身上、从那条报错里看不出来。
+            if self.uid_conn_count(uid) >= self.cfg.max_connections_per_user:
+                self.reject_conn(sock,
+                                 "你这个账号同时已经有 %d 条连接了（本站每人的"
+                                 "上限）。**已经连上的不受影响** —— 被拒绝的只有"
+                                 "这一条新连接；关掉几个不用的再试。"
+                                 % self.cfg.max_connections_per_user)
                 continue
             conn = Conn(self.cfg, sock, uid, gid)
             try:
@@ -5291,10 +5319,22 @@ class Sessiond(object):
             log.info("常驻通道：接受连接（uid=%d，当前 %d 条）",
                      uid, len(self.conns()))
 
-    def reject_conn(self, sock):
-        msg = self._err(5, "too_many_connections",
-                        "本站的守护进程同时只服务 %d 条连接，现在满了。"
-                        "稍后重试；已经连上的不受影响。" % self.cfg.conn_max)
+    def uid_conn_count(self, uid):
+        """这个 uid 此刻在事件循环里有几条连接。
+
+        ★ 与 `conns()` 一样**从 selector 现读**，没有第二本账：两处记账会漂，
+          而漂的形态是"配额算错了"—— 一个不报错的错误。
+        """
+        return sum(1 for c in self.conns() if c.uid == uid)
+
+    def reject_conn(self, sock, detail):
+        """把一条刚 accept 上来的连接**告诉它为什么**再关掉。
+
+        ★ 两处上限（全局的 conn_max 与每用户的 max_connections_per_user）共用
+          这一个出口，而 `detail` 由调用点给：那句话要说清**是谁满了**，否则
+          用户唯一的线索就是一句"本站满了"，而根因可能在别人身上。
+        """
+        msg = self._err(5, "too_many_connections", detail)
         try:
             sock.send((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
         except OSError:
@@ -5367,12 +5407,7 @@ class Sessiond(object):
           真正会漏的是"内核缓冲读空了、剩下的行在我们自己的 inbuf 里"，那由
           run() 里的 pending_input() 与 drain_pending() 兜住。
         """
-        # ★ 已被顶掉的连接不再受理请求。**这一句是必需的，而不是防御性的**：
-        #   顶替发生在一轮唤醒的中途（service_conn(A) → 它的请求注册了客户端 →
-        #   顶掉 B），而 B 可能**也**在这一轮的 `events` 列表里 —— 那个掩码是
-        #   顶替**之前**取到的，所以它仍然带着 EVENT_READ。
-        #   少了这一句，B 在临死前还能提交一个作业，而它已经被顶掉了。
-        if conn.displaced:
+        if conn.closing:
             return
         try:
             data = conn.sock.recv(65536)
@@ -5427,10 +5462,7 @@ class Sessiond(object):
           而且只在"客户端一次发很多条"时才出现（最难复现的那一类）。
         """
         for conn in self.conns():
-            # ★ `displaced` 与 `closing` 同一条：被顶掉的连接，它 inbuf 里那些
-            #   还没处理的行**不再受理**。受理了就要回一条响应，而这条连接已经
-            #   在不认识它的那个客户端手里了。
-            if conn.closing or conn.displaced or b"\n" not in conn.inbuf:
+            if conn.closing or b"\n" not in conn.inbuf:
                 continue
             self.dispatch_lines(conn)
             if not conn.closing and not conn.pump():
@@ -5484,25 +5516,27 @@ class Sessiond(object):
             resp["rid"] = rid
         conn.queue_msg(resp)
 
-    # ── 多客户端：席位与顶替 ────────────────────────────────────────────────
+    # ── 客户端身份 ──────────────────────────────────────────────────────────
     def register_client(self, conn, claim):
         """一条连接自报身份。**只在常驻通道上认，而且一条连接只认一次。**
+
+        ★ 身份唯一的用途是 `keeper` 那一格（见 op_heartbeat / op_takeover）：
+          它决定这条连接**能不能代表某个客户端**去认领或接管一条会话。
 
         ★★ 门槛 `conn.subscribed`（"这条连接发过带 rid 的请求"）不是装饰：
 
           一次一请求的连接（`slurmate rpc` —— 那是客户端在常驻通道起不来时的
           **退路**）**永远不带 rid**。它若也能认领身份，那么客户端每退路一次就
-          以同一个 client_id 报名一次，而 `enforce_client_cap` 会把**正在用的
-          那条常驻通道**当成"同一个客户端又连上来了"顶掉 —— 于是每降级一次
-          exec，就把自己那条常驻通道打掉一次。症状是"通道时好时坏"，
-          而两边各自的日志都自洽。
+          以一个 client_id 报名一次，而**看护者那一格会跟着这条一次性的连接走**
+          —— 那条连接下一秒就没了，于是它刚认领的会话立刻变成"没人看"，
+          倒计时开始跑。症状是"作业莫名其妙开始倒计时"，而两边各自都自洽。
 
           钉在 rid 上之后，"exec 那条路上的字节与从前逐字相同"仍然是一条
-          **结构事实** —— 与阶段 3 保证"老客户端收不到推送"用的是同一条理由。
+          **结构事实** —— 与"老客户端收不到推送"用的是同一条理由。
 
         ★ 一条连接只认一次（`conn.client_id` 已设就返回）：连接的身份是**连接
           的属性**，允许改的话，一条连接可以先顶着 A 报名、再顶着 B 报名，
-          而"谁顶掉了谁"就成了一个追不回来的问题。
+          而"这条会话的看护者到底是谁"就成了一个追不回来的问题。
         """
         if conn.client_id or not conn.subscribed:
             return
@@ -5511,92 +5545,7 @@ class Sessiond(object):
             return
         conn.client_id = cid
         conn.client_name = cname
-        reg = self.clients.setdefault(conn.uid, {})
-        first_seen = reg.setdefault(cid, time.time())
-        self.audit("client_joined", uid=conn.uid, client=cid, name=cname,
-                   known_since=first_seen)
-        self.enforce_client_cap(conn)
-
-    def enforce_client_cap(self, conn):
-        """让「这个 uid 此刻有几个客户端」落回配额之内。
-
-        ★★ **判据是"后到者赢"，不是"按活动度"。** 按活动度（谁最近说过话就留谁）
-          在两台电脑都在用的时候会**互相顶**：你在这台上动一下鼠标、那台就断。
-          那不是一条能用的规则。后到者赢是确定的，而且用户能预期。
-
-        ★ 席位按 **client_id 首次出现**的时刻排，不按"这条连接什么时候来的"。
-          差别在**重连**上，而它是真会发生的：一台笔记本休眠醒来、网络闪断一下，
-          它的连接重开了 —— 按连接排的话，这次重连会把**没出任何问题的那台**
-          顶掉，而对方连自己为什么掉了都不知道。按 client_id 排之后，重连只是
-          回到自己原来那个席位。
-
-        ★ 被顶掉的 client_id **同时从席位表里删掉**。于是它下次连进来算**新人**，
-          会反过来顶掉现在这个 —— 这正是"被顶掉的那个禁止自动重连"必须成立的
-          理由（见 session.js 的 `suspend`）。少了那一条，两个客户端会互相顶、
-          **没有终点**。
-
-        ★ 不认识身份的连接（`client_id` 为空，也就是 `slurmate rpc`、`slurmate
-          wait`、VS Code 的 Remote-SSH……）**既不占席位、也永远不会被顶掉**。
-          "两条 SSH 连接 ≠ 两个客户端"这句话在这里是落地成代码的。
-        """
-        reg = self.clients.get(conn.uid) or {}
-        cap = self.cfg.max_clients_per_user
-        # ① 同一个 client_id 的旧连接让位。这是**异常兜底**，不是冲突：
-        #    上一轮的连接还挂在守护进程这边（进程重启、或者上一次的断线还没被
-        #    发现），而它服务的是同一个客户端。
-        for other in self.conns():
-            if (other is conn or other.closing or other.uid != conn.uid
-                    or not other.client_id):
-                continue
-            if other.client_id == conn.client_id:
-                self.displace(other, "同一个客户端又连上来了", conn)
-        # ② 超编：按首次出现**从旧到新**顶掉。
-        while len(reg) > cap:
-            others = [c for c in reg if c != conn.client_id]
-            if not others:
-                # 席位表里只剩它自己却仍然超编 —— 只可能发生在配额被调到 0 之后。
-                # 不 break 的话这是一个死循环，而循环体里会一遍遍顶掉同一个连接。
-                break
-            oldest = min(others, key=lambda c: reg[c])
-            reg.pop(oldest, None)
-            for other in self.conns():
-                if (not other.closing and other.uid == conn.uid
-                        and other.client_id == oldest):
-                    self.displace(other, "另一个客户端接管了", conn)
-
-    def displace(self, conn, why, by):
-        """顶掉一条连接：**告诉它为什么**，然后排空、关掉。
-
-        ★★ "下线"只做这一件事 —— 断开那条常驻连接。**绝不动它的会话**：会话是
-          服务端的、独立的，用户只是想换个地方看。★ 这一条有另一半在客户端：
-          被顶掉的那个客户端若照常走收尾流程，会给守护进程发 `goodbye`，
-          而 `goodbye` 会让 `phase_release` 删掉 ACL **并 scancel 作业** ——
-          用户以为自己只是换了个地方看，作业却没了。守护进程这一侧**分辨不了**
-          "这个 goodbye 是谁发的"（它按 session_id 记账，不按连接），
-          所以那一半只能在客户端堵（见 session.js 的 `suspend`）。
-
-        ★ 这条通知**不看水位、也不走 `enqueue_push`**：它是一次性的、不可重放的。
-          被丢掉之后客户端只会看到一次**没有原因的断线** —— 然后自动重连，
-          而那正是拉锯的燃料。它很小，而队列里压着的是**可以被丢掉**的全量快照。
-        """
-        if conn.closing or conn.displaced:
-            return
-        conn.displaced = True
-        conn.subscribed = False      # 不再给它推快照
-        conn.rx_eof = True           # 不再收它的请求（在途的那些也不再受理）
-        conn.eof_at = time.time()    # 排空不了就由 sweep_conns 兜底关掉
-        conn.seq += 1
-        conn.queue_msg({
-            "push": "displaced", "seq": conn.seq, "at": now_ts(),
-            "reason": why,
-            "by": {"id": by.client_id, "name": by.client_name},
-        })
-        self.audit("client_displaced", uid=conn.uid, client=conn.client_id,
-                   by=by.client_id, reason=why)
-        log.info("客户端「%s」（uid=%d）被顶掉：%s（顶替者「%s」）",
-                 conn.client_name or "未报名", conn.uid, why,
-                 by.client_name or "未报名")
-        self.sync_events(conn)
+        self.audit("client_joined", uid=conn.uid, client=cid, name=cname)
 
     # ── RPC：限流与分发 ─────────────────────────────────────────────────────
     @staticmethod
@@ -6209,17 +6158,21 @@ class Sessiond(object):
             · CLI（`slurmate heartbeat` / `wait`）与更老的客户端；
             · ★ **我们自己的客户端在常驻通道断掉之后的 exec 退路**。那条路上
               `client` 是**被删掉的**（见 backend-ssh.js 的 `rpc()`：exec 那条路
-              一个身份字段都不带），因为带上它会让每一次退路都把自己那条常驻
-              通道顶掉。
+              一个身份字段都不带）；★ 而**这一条不能拿来当挡箭牌** —— 判据必须在
+              守护进程这一侧自己成立（见 handle_line 与 register_client 里那道
+              `subscribed` 门槛），因为"身份有第二个来源"这件事的后果正好落在这里：
+              一条没有身份的连接要是被收严规则挡在心跳之外，它的作业就会
+              在 1800 秒后被 scancel。
           收严的后果是具体的一条：用户正开着客户端看着作业，登录节点上一次通道
           抖动让它退化成 exec ⇒ 心跳**全部**被回 `ignored` ⇒ 300 秒 `suspect`、
           1800 秒 **`scancel`** —— 而界面上一切正常（心跳确实"发出去了"，客户端
           只看到 `ok`）。这与阶段 4 那条失败形态（推送把心跳挤出桶）是同一类，
           而且更隐蔽。
 
-        ★ 所以判据与阶段 4 的席位**是同一条**：**身份是"被排除"的必要条件，
-          不是"被接受"的必要条件。** 不报身份的连接既不占席位、也永远不会被
-          顶掉；同理，它也永远不会被别人挡在心跳之外。**没有身份 = 不被排除。**
+        ★ 所以判据是一条**不对称**的规矩：**身份是"被排除"的必要条件，不是
+          "被接受"的必要条件。** 不报身份的连接永远不会被别人挡在心跳之外 ——
+          **没有身份 = 不被排除。**
+          （而只有认了身份的连接才写得进 `keeper`：没有名字就没人可写。）
 
         ★ 「认出我是看护者之后要**认领**」不是顺手加的：CLI 提交的会话
           （keeper 为空）在客户端上打开时，界面要画得出"这台电脑在看它"，

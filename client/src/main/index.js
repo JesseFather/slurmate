@@ -261,8 +261,8 @@ function bootstrap() {
     //   重连很多次）。
     clientIdentity = {
       id: config.loadClientId(cfgDir),
-      // 主机名是给人看的：被顶掉的那台电脑要靠它说出"是谁顶了我"。
-      // 取不到不是错误 —— 那么多半是容器/异常环境，回一句"另一台电脑"仍然说得清。
+      // 主机名是给人看的（界面上"正在被 X 看"那一句）。取不到不是错误 ——
+      // 那么多半是容器/异常环境，回一句"另一台电脑"仍然说得清。
       name: os.hostname() || '另一台电脑',
     };
 
@@ -285,11 +285,6 @@ function bootstrap() {
         sitePluginDir: devPluginSourceDir,
       },
     });
-
-    // ★ **只订阅一次，订阅在进程这一层。** 被顶掉是**这台客户端**的状态（服务端
-    //   只保留一个席位），不是某一条会话的 —— 挂到 SessionController 上的话，
-    //   每个控制器都会各自处理一遍"我被顶掉了"，而它们谁也停不掉别人。
-    backend.on('displaced', handleDisplaced);
 
     win = new ShellWindow({
       onClose: handleWindowClose,
@@ -491,37 +486,6 @@ function regenerateKey(id) {
     fingerprint: info.fingerprint,
     persisted: info.persisted,
   };
-}
-
-/**
- * 本机被**另一个客户端**顶掉了。
- *
- * ★★ 三件事，次序也是承重的：
- *
- *   ① **先停**：所有会话立刻停下心跳与对账。晚一步的话，那些定时器会继续对着
- *      一个已经拒绝一切的后端发请求（`rpc()` 会拒），把界面刷成一片"重试中" ——
- *      而那是**一个永远不会成功的重试**。
- *   ② **再告诉用户为什么**。不说的话，用户看到的是"客户端莫名其妙不动了"，
- *      下一步是重启、重连、或者以为集群挂了；而真相是"另一台电脑已经接管了"。
- *      更要紧的是**要说清会话还在跑** —— 否则用户的下一个动作是去把作业停掉。
- *   ③ **一个字都不发给服务端**（见 session.js 的 `suspend`）。这条不是次序问题，
- *      是"绝对不能做"：那个 `goodbye` 会把用户的作业 scancel 掉。
- *
- * ★ 怎么回去：那条连接上的「连接」按钮（它本来就在，断开时显示的就是「连接」）。
- *   重新连上之后 `tryReattach()` 会把会话一条条接回来并**接手心跳** ——
- *   不需要为这件事新写一条路。
- */
-function handleDisplaced(info) {
-  const by = (info && info.by && info.by.name) || '另一台电脑';
-  const reason = (info && info.reason) || '另一个客户端接管了';
-  const line = `本机已被「${by}」上的客户端顶掉（${reason}）。`
-             + '你的会话**仍然在集群上运行**，那边已经接手了它们 —— '
-             + '不要为了保证作业而去停它。想在这台电脑上接着管，'
-             + '就点那条连接上的「连接」。';
-  for (const rec of sessions.values()) {
-    if (rec.controller) rec.controller.suspend(line);
-  }
-  if (win) win.pushNotice('warn', line);
 }
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
@@ -3835,9 +3799,6 @@ function registerIpc() {
     if (backend.kind !== KIND.FAKE) return { ok: false, error: '仅开发者模式可用' };
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
-    // ★ 「被另一台电脑顶掉」在真集群上要两台电脑才看得到，而它的**界面表现**
-    //   恰恰是这个功能唯一要传达的东西。所以它必须能在开发者模式里立刻造出来。
-    else if (what === 'displaced') backend.debugDisplace(arg || '另一台电脑');
     else if (what === 'reap') backend.debugReap();
     // ★★ 「集群信息取不到」——真集群上要么得等一次故障、要么得把 sinfo 改名，
     //   而"把取不到画成没有"正是这一整块最容易犯的错。它必须能立刻造出来。
