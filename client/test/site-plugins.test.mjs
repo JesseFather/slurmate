@@ -728,9 +728,17 @@ test('★★ 站点**关掉**或**不再报**一个插件 ⇒ 留着不删（决
     '`distributes` 只增不减：它要把"你以前从 X 站装过它"这件事说出来');
 });
 
-test('★ 活会话引用着它 ⇒ 不回收', async () => {
-  // 客户端重启之后会 tryReattach 接回旧会话，而那些会话的 service_plugin
-  // **只有守护进程知道** —— 所以这一步必须去问 `op:list`，不能只看本地那一条。
+/**
+ * 造一个**真的会回收**的现场：站点升到 1.1.0 ⇒ 1.0.0 的引用归零。
+ *
+ * ★★ 从前这两条用的是"站点不再报它"（`disabled`）—— 而那条路走的是
+ *    「**决定 3：不再报 ⇒ 留着不删**」：`wants` 根本没变，所以**什么都不保护
+ *    也会绿**。一条永远绿的用例比没有更糟，它会让下一个人以为这一格被守住了。
+ *    所以要造的是"引用真的归零"那一种，判据才有承重。
+ *
+ * @param {string} sessionState 那一条会话的 `state`（`undefined` = 老守护进程没报这一格）
+ */
+async function upgradeWithSessions(sessionState) {
   const site = makeSite();
   const env = makeEnv();
   const v1 = site.add('v1', { name: 'x', version: '1.0.0' },
@@ -738,12 +746,57 @@ test('★ 活会话引用着它 ⇒ 不回收', async () => {
   let r = await callSync(site, env);
   consentAll(env, r);
 
-  site.state.sessions = [{ session_id: 's1', service_plugin: `${v1.id}@1.0.0` }];
+  // ★ `service_plugin` 要用**这个 fake 自己铸的那个 id**（`v1.id`），
+  //   不是 code-server 那一个 —— 写死的话这一条测的就成了别的插件。
+  const row = { session_id: 's1', service_plugin: `${v1.id}@1.0.0` };
+  if (sessionState !== undefined) row.state = sessionState;
+  site.state.sessions = [row];
   site.state.disabled.add(`${v1.id}@1.0.0`);
+  site.add('v2', { id: v1.id, name: 'x', version: '1.1.0' },
+    { 'client/index.js': 'module.exports = {};\n' });
   r = await callSync(site, env);
+  consentAll(env, r);
+  r = await callSync(site, env);
+
+  // ★ 前提要**真的成立**才轮到那条判据：新版装上了 ⇒ 这一轮确实走到了回收那一步。
+  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.1.0')), true,
+    `前提：新版真的装上了（否则这一条可能只是"没走到回收"）：${JSON.stringify(r)}`);
+  return { site, env, v1, r };
+}
+
+test('★ 活会话引用着它 ⇒ 不回收', async () => {
+  // 客户端重启之后会 tryReattach 接回旧会话，而那些会话的 service_plugin
+  // **只有守护进程知道** —— 所以这一步必须去问 `op:list`，不能只看本地那一条。
+  const { env, v1, r } = await upgradeWithSessions('enrolled');
   assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
     '会话还在用它 ⇒ 不能删');
   assert.deepEqual(r.reclaimed, [], '而且要真的没删');
+});
+
+test('★★ **已经结束**的会话不该把那一个版本钉住', async () => {
+  // `op:'list'` 回的是**最近 50 行、不分状态**（守护进程那边就是 `rows[-50:]`），
+  // 所以一个早就 `released` 的会话，它那一行里的 `service_plugin` 从前照样被当成
+  // "还有人要它" ⇒ 回收那一档**永远跳过那一版**。池里于是慢慢攒下"没有任何站点要、
+  // 也没有任何会话在跑"的版本 —— 而界面上那句「没有任何站点要它（下次同步时会被
+  // 回收）」对它们**是假的**。（账本 S21。）
+  //
+  // ★ 这一条与上一条**成对**才承重：上一条钉"活的要护住"，这一条钉"死的不要护"。
+  //   少任何一条，另一条都能被一个走极端的实现骗过去。
+  const { env, v1, r } = await upgradeWithSessions('released');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), false,
+    '★★ 结束了的会话不算"还在用" ⇒ 该回收的那一版要真的回收');
+  assert.equal(r.reclaimed.length, 1, `要真的回收了一个：${JSON.stringify(r.reclaimed)}`);
+});
+
+test('★★ **不认识**的会话状态要护着（判错的方向是回收掉用户在用的东西）', async () => {
+  // ★ 判据用"排除已知终态"而不是"只收活状态"，差别就在这一条：守护进程哪天多出
+  //   一个客户端还不认识的 `state`，排除法把它**护住**，白名单法把它当成"不算数"。
+  //   而后者错的方向是**回收掉用户正在用的那一版** —— 与 F23 那条纪律（不知道谁在
+  //   引用的时候，唯一安全的动作是不删）反着来。
+  const { env, v1, r } = await upgradeWithSessions('some_future_state');
+  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
+    '★ 不认识的状态 ⇒ 护着，不回收');
+  assert.deepEqual(r.reclaimed, []);
 });
 
 // ── 记录与回收的次序 ────────────────────────────────────────────────────────

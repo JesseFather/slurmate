@@ -448,6 +448,46 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有布局"，
   }
 });
 
+test('★★ 兜底那个组的 id 是**确定的** —— 不然读一次配置就丢掉一份布局', () => {
+  // 场景就是用户真的会走的那条：手改过配置（或者第一次配连接就写下了连接），
+  // `layouts[]` 是空的 ⇒ `loadLayouts` 就地补一个「默认布局」。
+  //
+  // ★★ 而 `loadConfig` **自己不写盘**（见 config.js 文件头那三条原则），所以
+  //    这条兜底从前用 `newLayoutId()`（随机）的后果是**静默丢数据**：
+  //
+  //        读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
+  //        ⇒ 上一轮刚攒的编辑器布局凭空消失（分区名就是磁盘上的目录名）。
+  //
+  //    ★ 它当年是被防过一次的 —— 迁移那条路用**字面量 id** 挡的正是这件事；
+  //      迁移删了，这条兜底却漏了。所以这里钉的是**确定性**这个性质。
+  const dir = tmpdir();
+  const write = () => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 6,
+    connections: [{ id: 'c1', label: '内网', user: 'alice',
+      host: '198.51.100.10', port: 10100 }],
+    activeConnectionId: 'c1',
+    layouts: [],
+  }));
+
+  write();
+  const a = config.loadConfig(dir);
+  assert.equal(a.layouts.length, 1, '有连接、一个组都没有 ⇒ 就地补一个');
+  const id = a.layouts[0].id;
+
+  // ★ 判据一（承重的那条）：再读一次必须还是同一个 id。随机 id 在这里必然红。
+  write();
+  const b = config.loadConfig(dir);
+  assert.equal(b.layouts[0].id, id,
+    '★★ 同一份配置读两次必须得到同一个组 id —— 换一个 id 就是换一个分区，'
+    + '而用户刚攒下的那份布局正在那个分区里');
+
+  // ★ 判据二：它的形状必须过 `LAYOUT_ID_RE`。兜底那一支是**直接 push** 的，
+  //   不走 `normalizeLayout` —— 所以一个形状不对的常量能活过一次读、却会在
+  //   **下一次读**时被丢掉（那正是上一条要防的病的另一种发作方式）。
+  assert.match(id, /^l[0-9a-f]{12}$/,
+    '兜底 id 的形状必须与 LAYOUT_ID_RE 是同一条规则');
+});
+
 test('★ 每个组一个独立的存储目录，且 id 不复用', () => {
   // 组 id 是 partition 的**末段**，而整个 partition 名就是 Electron 的存储目录名 ——
   // 「新建空白布局真的空白」靠的是 id **永不复用**：若按端口命名，A 组被回收后端口

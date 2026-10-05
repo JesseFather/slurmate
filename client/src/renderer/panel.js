@@ -1352,17 +1352,33 @@ function renderPluginData(d) {
 
   const wrap = document.createElement('div');
   wrap.className = 'plug plug-off';
+  // ★★ 整屏认不出时**标题也要跟着改**：下面那些行不是"没人用的插件数据"，
+  //   而是"我一个都不认识的目录" —— 标题说成前者就是在替它们编一个身份。
+  const allUnknown = Boolean(d && d.allUnknown);
   const head = document.createElement('div');
   head.className = 'plug-head';
-  head.append(el('h3', null, rows.length
-    ? `本机有 ${rows.length} 份插件数据没人在用`
-    : '本机的插件数据'));
+  head.append(el('h3', null, allUnknown
+    ? `插件数据目录里有 ${rows.length} 个目录，一个都认不出`
+    : (rows.length
+      ? `本机有 ${rows.length} 份插件数据没人在用`
+      : '本机的插件数据')));
   wrap.append(head);
 
   if (!d || !d.diskChecked) {
     wrap.append(el('p', 'plug-desc', (d && d.why)
       || '这一次没能去看磁盘上还剩哪些，所以这里没有东西可列。'));
   } else {
+    if (allUnknown) {
+      // ★ 这一句是**插件数据目录那一根唯一的防线**（它是我们自己拼出来的，
+      //   没有任何探针能当场核对它 —— 见 plugin-data-audit.js 里 `allUnknown`）。
+      //   所以话要说满：说出"多半是根取错了"，也说出"下面为什么一个按钮都没有"。
+      wrap.append(issueBox('warn', '这一屏的目录一个都认不出',
+        '本机有两处放插件数据：Electron 那棵**存储分区目录**（那一根是问 Electron'
+        + '要来的，还当场核对过名字），以及**本程序自己拼出来**的插件数据目录。'
+        + '一整屏都认不出，更像"其中某一根指到了别的地方"，而不是"你攒了一堆垃圾"。'
+        + '⇒ 下面一个删除按钮都没有，这是故意的：一份我不认识的东西，'
+        + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在；还在的话值得报出来。'));
+    }
     wrap.append(el('p', 'plug-desc',
       '插件在运行中攒下的东西按**份**存在本机，一份 = 一个插件 + 共享组 + 布局组。'
       + '一份数据有两个落点：**浏览器里的存储**（编辑器布局、打开的标签页、登录状态），'

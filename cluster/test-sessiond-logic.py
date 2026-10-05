@@ -2087,6 +2087,27 @@ exit 0
           any("nosuchplugin" in e for e in _c.validate()),
           str(_c.validate())[:160])
 
+    # ★★ 装了、但**关着** —— 与上面那条同一类，都是硬错误（账本 F17）。
+    #    少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
+    #    **每一次省略 service_kind 的提交**都拿到 `4 service_kind_disabled`，
+    #    错误消息说的是「本站没开「SSH 中转站」」—— 它**不会提**这是配置里
+    #    default_plugin 配错了。用户看到的是"站点好像不支持 sshd"，而管理员
+    #    接下来的排查方向从第一步就是错的。
+    _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = no\n")
+    _errs = " ".join(_c.validate())
+    check("★★ default_plugin 指向**装了、但关着**的插件 → 启动就拒绝",
+          _errs != "", str(_c.validate())[:160])
+    # ★ "被拒了"不够：那句话必须**点名 default_plugin**。不点名的话，管理员唯一
+    #   能想到的方向是"查这个插件"，而根因在配置的另一处。
+    check("★ 而且要点名 default_plugin（排查方向不能被指到插件本身上）",
+          "default_plugin" in _errs and "enabled = no" in _errs, _errs[:220])
+    # ★★ 对照组：同一个 default_plugin，把它打开就一切正常。少了这一条，一个
+    #    "default_plugin 非空就报错"的实现也能让上面两条绿 —— 而它会拒绝一份
+    #    完全合法的配置。
+    _ok = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
+    check("★ 对照：同一个 default_plugin，插件开着 ⇒ 一个错误都没有",
+          _ok.validate() == [], str(_ok.validate())[:160])
+
     # 各种错法：一律**报错**，不能静默忽略 —— 静默忽略的后果是
     # 「文件里写着，而实际什么也没发生」，正是本项目一路在清的那类问题。
     for _txt, _why, _kw in (

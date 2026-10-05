@@ -223,6 +223,44 @@ test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
   assert.match(r.rows.find((x) => x.name === 'secrets.json').label, /认不出/);
 });
 
+test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', () => {
+  // 上面那一条说的是"认不出就不给删除按钮"（逐行的防线）。这一条说的是**全局**：
+  // 一整屏都认不出时，读的人会以为"我攒了一堆垃圾"，而真相多半是**这一根指到了
+  // 别的地方** —— 插件数据目录那一根是本程序自己拼的，没有任何探针能当场核对它。
+  // ⇒ 它是那一根**唯一**的防线，所以得有话可说。
+  const r = run({ names: ['secrets.json', 'dev-sandbox', 'Partitions'] });
+  assert.equal(r.allUnknown, true, '一个都认不出来 ⇒ 这一根多半取错了');
+
+  // ★ 反例一：**有一行认得出**就不成立 —— 那时屏幕上是"我认识的东西 + 不认识的
+  //   东西"，而那正是"用户自己往那个目录里放了点别的"，不是根取错了。
+  //
+  //   ★ 这里要造一个**真的会产生行**的认得出的名字：**在用的那一份一行都不产生**
+  //     （它不是"问题"，见 `audit` 里那条 `continue`）—— 用一个"没人用的组"来造，
+  //     否则这一条会因为"行里只剩认不出的那条"而假绿。
+  const mixed = run({
+    names: ['secrets.json'],
+    dataNames: [disk(pluginData.identityOf(cs(), LAYOUT))],
+    layouts: layouts(LAYOUT, OTHER_LAYOUT),
+    connections: [conn(OTHER_LAYOUT)],
+  });
+  assert.ok(mixed.rows.some((x) => x.kind === 'unused'),
+    '前提：那一行真的产生了（否则这一条测的是别的东西）');
+  assert.equal(mixed.allUnknown, false,
+    '有一行认得出 ⇒ 不是"整屏认不出"，不能报"根取错了"');
+
+  // ★ 反例二：**一根没查成**就不成立。那是"查不了"，`why` 已经如实说了，
+  //   不该被这一句盖过去（"问不到"与"认不出"是两件事）。
+  assert.equal(run({ names: null, dataNames: ['secrets.json'] }).allUnknown, false,
+    '分区那一根没查成 ⇒ 这是"查不了"，不是"认不出"');
+  assert.equal(run({ names: ['secrets.json'], dataNames: null }).allUnknown, false,
+    '数据那一根没查成 ⇒ 同上');
+
+  // ★ 反例三：**空清单**不成立。那是"本机一份插件数据都没有"—— 一个**肯定**的
+  //   答案。（`every` 对空数组恒真，所以少了 `rows.length > 0` 这一条，
+  //   一个全新安装会被告知"你的数据目录取错了"。）
+  assert.equal(run({}).allUnknown, false, '一份都没有 ⇒ 不能报"根取错了"');
+});
+
 // ── 没人用的组（内存侧那一类）──────────────────────────────────────────────
 
 test('★ 没人用的组：数据在、而没有任何连接指着它 ⇒ 一行，标签里带**组的名字**', () => {

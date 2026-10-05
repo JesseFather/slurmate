@@ -759,8 +759,8 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 | 控制器 | `scontrol ping` 在登录节点上能不能跑；跑不动就是 Slurm 客户端或 munge 的问题 |
 | Slurm 版本 | `sinfo -V` |
 | 分区表 / GRES | `scontrol show partition -o` / `scontrol show node -o` |
-| 节点忙闲 | **`sinfo -N -h -o "%P|%N|%t"`** —— ★ 命令路径写错的话，它在界面上长得就像"这个集群没有节点" |
-| 队列 | `squeue -h -o "%i|%P|%t|%u"` |
+| 节点忙闲 | **`sinfo -N -h -o "%P\|%N\|%t"`** —— ★ 命令路径写错的话，它在界面上长得就像"这个集群没有节点" |
+| 队列 | `squeue -h -o "%i\|%P\|%t\|%u"` |
 | 公平份额 | `sshare -u <你> -P -o Account,User,FairShare,RawUsage,EffectvUsage` |
 | 最近作业 | `sacct -u <你> -S now-7days -o JobID,JobName,State,ExitCode,Elapsed,End,Partition` |
 

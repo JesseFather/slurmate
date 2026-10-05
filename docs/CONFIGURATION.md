@@ -56,8 +56,8 @@ default_mem  = 8G
 | 该用户能用哪些分区 | `sacctmgr show assoc user=<u> format=Account,Partition` |
 | 该用户的账户 | 同上，`format=Account` |
 | 是否强制 association | `scontrol show config` 的 `AccountingStorageEnforce` |
-| 每分区节点忙闲 | `sinfo -N -h -o "%P|%N|%t"` |
-| 队列深度与排队顺序 | `squeue -h -o "%i|%P|%t|%u"` |
+| 每分区节点忙闲 | `sinfo -N -h -o "%P\|%N\|%t"` |
+| 队列深度与排队顺序 | `squeue -h -o "%i\|%P\|%t\|%u"` |
 | 该用户的公平份额 | `sshare -u <u> -P -o Account,User,FairShare,RawUsage,EffectvUsage` |
 | 最近几天的作业 | `sacct -u <u> -S now-7days` |
 

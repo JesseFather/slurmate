@@ -197,9 +197,12 @@ function recognized(place, name) {
  *        目录名（磁盘上的样子）。判据是 `pluginData.samePartition` —— 少了这一步，
  *        分区那一半**永远匹配不上**（而症状是"护了个寂寞"：一份活着的临时实例
  *        照样在名单里、照样可删）。
- * @returns {{rows: Array, diskChecked: boolean, why: string|null}}
+ * @returns {{rows: Array, diskChecked: boolean, allUnknown: boolean, why: string|null}}
  *          `diskChecked` = **两根都查成了**。只要有一根没查，`why` 里会**点名是哪一根**
  *          —— "查不了"与"没有"是两件事，这个界面里最忌讳的就是把它俩说成一件。
+ *          `allUnknown` = **这一屏整屏都认不出**（见下面那段）。它是一条**全局判据**，
+ *          与逐行的 `kind: 'unknown'` 不是一回事：那一档说的是"这一行我不认识"，
+ *          这一条说的是"**没有一个是我认识的** —— 那多半是某一根取错了"。
  */
 function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, held }) {
   const diskChecked = Array.isArray(names) && Array.isArray(dataNames);
@@ -383,7 +386,33 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
   const order = { unused: 0, orphan: 1, legacy: 2, unknown: 3 };
   rows.sort((a, b) => (order[a.kind] - order[b.kind]) || a.label.localeCompare(b.label));
 
-  return { rows, diskChecked, why: mergeWhy({ names, why, dataNames, dataWhy }) };
+  // ── ★★ 全局判据：这一屏**整屏都认不出** ⇒ 多半是某一根取错了 ──
+  //
+  // 「认不出的目录」那一档**不给删除按钮**，所以它本身是安全的；但它一次出现一整屏
+  // 时，读的人会以为"我攒了一堆垃圾"，而真相多半是**这一根指向了别的地方**。
+  //
+  // ★ 而"这一根取错了"在这个函数里**没有别的表达方式**：
+  //   · 分区那一根有 `partitionRoot()` 的命名核对（拿一个**该有的**分区名去问
+  //     Electron，对不上就 `root: null` 并如实说"查不了"）；
+  //   · **插件数据目录那一根是我们自己拼的**（`cfgDir` + `plugin-data`），
+  //     没有任何探针能当场核对它 —— 自己核自己那个字符串是同义反复。
+  //   所以这条全局判据就是那一根**唯一**有的防线。
+  //
+  // ★ 判据要**两根都查成了**才成立：一根没查成时 `why` 已经如实说了"查不了"，
+  //   那是另一句话，不该被这一句盖过去（"问不到"不等于"认不出"）。
+  // ★ 而 `rows` 为空时**不成立** —— 空清单是"本机一份插件数据都没有"，
+  //   那是一个**肯定**的答案，不是"认不出"。
+  //
+  // ★ 它**够不到的**那一格要说清：一根取错了、而错的那个目录里恰好装着**合法形状**
+  //   的名字（例如另一个 profile 的 `plugin-data/`），那些行会被判成孤儿而不是
+  //   "认不出"，这条判据一个字都不会说。压住那一格的是**别的**性质（回收只在
+  //   `pruneLayouts` 真的回收了组时发生、而它在"一条连接都没有"时不回收），
+  //   不是这一条 —— 账本 S23 里写着。别把这条读成"取错根这件事被根治了"。
+  const allUnknown = diskChecked && rows.length > 0
+    && rows.every((r) => r.kind === 'unknown');
+
+  return { rows, diskChecked, allUnknown,
+    why: mergeWhy({ names, why, dataNames, dataWhy }) };
 }
 
 /**

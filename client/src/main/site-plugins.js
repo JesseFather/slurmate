@@ -87,6 +87,9 @@ const path = require('path');
 const crypto = require('crypto');
 const plugins = require('./plugins/index.js');
 const atomicWrite = require('./atomic-write.js');
+// ★ "哪个会话还算数"只有**一处定义**（那份镜像注释里写着它的来源与对应关系）。
+//   在这里另写一个状态数组就是第二份实现 —— 而它漂开的方向是**把在跑的版本回收掉**。
+const { SERVER_FINISHED_STATES } = require('./session.js');
 
 /**
  * 延迟取读包那一半。
@@ -764,15 +767,27 @@ async function sync(o) {
   // ★ 这一步是**必须**的：只靠本地 `controller.session` 只能看到当前那一条，而
   //   客户端重启之后会 `tryReattach()` 接回旧会话 —— 那些会话的 `service_plugin`
   //   只有守护进程知道。
+  //
+  // ★★ 但**只保护还算数的那些会话**，而这是修掉一个真账（账本 S21）：`op:'list'`
+  //    回的是**最近 50 行、不分状态**（守护进程那边就是 `rows[-50:]`），所以一个
+  //    早就 `released` 的会话，它那一行里的 `id@版本` 从前照样进这个集合 ⇒
+  //    回收那一档**永远跳过那一版** ⇒ 池里慢慢攒下"没有任何站点要、也没有任何会话
+  //    在跑"的版本，而界面上那句"没有任何站点要它（下次同步时会被回收）"对它们
+  //    **是假的**。
+  //
+  //    ★ 判据用 `SERVER_FINISHED_STATES`（**排除已知终态**），不是"只收活状态"：
+  //      守护进程哪天多出一个**客户端还不认识**的状态时，排除法会把它**护住**，
+  //      而收白名单法会把它当成"不算数"—— **那一边是要回收用户正在用的东西**。
+  //      与 F23 那条纪律同向：不知道谁在引用的时候，唯一安全的动作是**不删**。
   const protectedVersions = new Set(o.protectedVersions || []);
   let protectedKnown = true;
   try {
     const lr = await o.rpc({ op: 'list' });
     if (lr && lr.ok) {
       for (const s of ((lr.data && lr.data.sessions) || [])) {
-        if (s && typeof s.service_plugin === 'string' && s.service_plugin) {
-          protectedVersions.add(s.service_plugin);
-        }
+        if (!s || typeof s.service_plugin !== 'string' || !s.service_plugin) continue;
+        if (SERVER_FINISHED_STATES.includes(s.state)) continue;
+        protectedVersions.add(s.service_plugin);
       }
     } else {
       protectedKnown = false;

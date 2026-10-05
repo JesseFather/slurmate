@@ -2794,6 +2794,27 @@ class Config(object):
                 % (self.default_plugin,
                    "、".join(sorted(self.plugin_by_name)) or "（一个都没有）",
                    self.plugins_dir))
+        elif self.default_plugin and not self.plugins[self.default_plugin].enabled:
+            # ★★ **装了、但关着** —— 这是配置里两处互相打架，不是合法状态。
+            #
+            #   少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
+            #   **每一次省略 service_kind 的提交**都拿到 `4 service_kind_disabled`，
+            #   错误消息说的是「本站没开「SSH 中转站」」—— 它**不会提**这是
+            #   default_plugin 配错了。用户看到的是"站点好像不支持 sshd"，而真相是
+            #   "站点把缺省指到了一个关着的插件上"，管理员的排查方向从第一步就是错的。
+            #
+            #   ★ 它进 `validate()` 是对的，与"插件坏了不是启动错误"不冲突：
+            #     插件坏了是**插件形态**的问题（不该带走整个站点），而这一条是
+            #     **配置里两处指向相反** —— 与上面那条 `max_sessions_per_user < 1`
+            #     同一类：能起，但每一条走这条路的请求都注定失败。
+            errors.append(
+                "配置里的 default_plugin = %r 指向本站**装了、但关着**的插件"
+                "（[plugin:%s] 的 enabled = no）。这两处互相打架：省略 service_kind "
+                "的提交会全部失败，而报错说的是「本站没开这个插件」—— 从那一句里"
+                "看不出根因在配置里。要么把它打开（enabled = yes），要么把 "
+                "default_plugin 指到一个开着的插件上（本站开着的是：%s）。"
+                % (self.default_plugin, self.default_plugin,
+                   "、".join(self.enabled_kinds) or "（一个都没有）"))
         # 配额。0 的后果是**所有人都开不了会话**，而报错会是一句
         # "已经有 0 个会话占着位置（本站上限 0）" —— 没人能从那句话里看出
         # 根因在配置里。所以宁可起不来。
