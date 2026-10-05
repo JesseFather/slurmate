@@ -419,6 +419,94 @@ section('4. 跨文件的常量');
     !!client && !!daemon && packerSet.length > 0);
 }
 
+{
+  // ★★ 负载的大小上限（§3.7）：三侧各持一份常量，**书面判据**在
+  //    `tools/plugin-limits.json`。打包器这一份是没办法的 —— 它要"下载这个
+  //    文件夹就能用"，所以它读不到 tools/ 里那份（与 COPY_SKIP 同一个处境）。
+  //
+  //    漂开的样子：打包器放行一个**任何站点都拒收**的包，或者反过来拦下一个
+  //    合规的。两种都是静默的，直到有人真的把插件发布出去。
+  const rules = readJsonOrNull(path.join(ROOT, 'tools', 'plugin-limits.json'));
+  check('★ tools/plugin-limits.json 读得动（读不动的话下面几条都是假通过）',
+    rules !== null && typeof rules === 'object', String(rules));
+
+  if (rules) {
+    // 抠的是打包器**源码里的那几行**，而不是"某个导出" —— 导出可以有人改，
+    // 而这几行是打包器真正用的那几行。表达式按声明次序求值（`MAX_TOTAL_BYTES`
+    // 引用了前两个），所以这里也按次序拼起来。
+    const src = fs.readFileSync(PACKER, 'utf8');
+    const names = ['MAX_DEPTH', 'MAX_SEGMENT_BYTES', 'MAX_FILES', 'MAX_FILE_BYTES',
+      'MAX_PACKAGE_BYTES', 'MAX_PATH_BYTES', 'MAX_ENVELOPE_BYTES', 'MAX_TOTAL_BYTES'];
+    const decls = [];
+    const missing = [];
+    for (const n of names) {
+      const m = new RegExp(`^const ${n} = (.+);$`, 'm').exec(src);
+      if (!m) missing.push(n); else decls.push(`const ${n} = ${m[1]};`);
+    }
+    check('★ 打包器源码里那 8 行常量都抠到了（抠不到说明改了形状，不是它对了）',
+      !missing.length, `缺 ${JSON.stringify(missing)}`);
+
+    if (!missing.length) {
+      // eslint-disable-next-line no-new-func
+      const V = new Function(`${decls.join('\n')}\nreturn {${names.join(',')}};`)();
+      check('★★ 打包器那几个数与书面判据逐字一致',
+        V.MAX_DEPTH === rules.load.max_depth
+        && V.MAX_SEGMENT_BYTES === rules.format.max_segment_bytes
+        && V.MAX_FILES === rules.load.max_files
+        && V.MAX_FILE_BYTES === rules.load.file_bytes
+        && V.MAX_PACKAGE_BYTES === rules.package.max_bytes
+        && V.MAX_ENVELOPE_BYTES === rules.package.envelope_max_bytes
+        && V.MAX_TOTAL_BYTES === rules.load.total_bytes,
+        `打包器 ${JSON.stringify(V)} / 判据 ${JSON.stringify(rules)}`);
+      check('★★ 负载上限 + 信封最坏情况 ≤ 包上限（打包器自己那三个数之间也得成立）',
+        V.MAX_TOTAL_BYTES + V.MAX_ENVELOPE_BYTES <= V.MAX_PACKAGE_BYTES,
+        `${V.MAX_TOTAL_BYTES} + ${V.MAX_ENVELOPE_BYTES} > ${V.MAX_PACKAGE_BYTES}`);
+    }
+  }
+}
+
+{
+  // ★★ 上面那几条钉的是常量。这三条是**验收**：真正的 `packer build`。
+  //    删掉 build 里那道检查 ⇒ 前两条会**成功产包** ⇒ 它们红。
+  const big = 'x'.repeat(200 * 1024);
+  const many = {};
+  for (let i = 0; i < 8; i++) many[`data/part${i}.bin`] = big;   // 8 × 200 KiB ≈ 1.6 MiB
+
+  const a = mkRepo({ ...baseFiles(), ...many });
+  const ra = packer('build', a.plug, '--out', path.join(a.base, 'a.splug'));
+  check('★★ 负载超过整体上限 ⇒ build **拒绝**，且报错里给得出数字',
+    ra.code !== 0 && /1562251/.test(ra.err) && /1\.5 MiB/.test(ra.err),
+    ra.err.slice(0, 400));
+  check('★ 而且它把"站点那道闸是 2 MiB"说出来（作者要知道该往哪儿改）',
+    /2\.0 MiB/.test(ra.err), ra.err.slice(0, 400));
+  check('★ 拒绝时**不产出**包（先判后写）',
+    !fs.existsSync(path.join(a.base, 'a.splug')));
+
+  // ★ 反侧必须**放行**：上限之下的树照常打得出来。少了这一条，把上限写成 0
+  //   也能让上面那一条绿。
+  const few = {};
+  for (let i = 0; i < 7; i++) few[`data/part${i}.bin`] = big;    // 7 × 200 KiB ≈ 1.37 MiB
+  const b = mkRepo({ ...baseFiles(), ...few });
+  const rb = packer('build', b.plug, '--out', path.join(b.base, 'b.splug'));
+  check('★ 上限之下的树照常打得出来（不然"拒绝"那条拦的是"什么都拒"）',
+    rb.code === 0, rb.err.slice(0, 400));
+
+  // ★ 单份那一关单独验：一个 300 KiB 的文件本身就该拦，报的是**它**。
+  const c = mkRepo({ ...baseFiles(), 'data/one.bin': 'y'.repeat(300 * 1024) });
+  const rc = packer('build', c.plug, '--out', path.join(c.base, 'c.splug'));
+  check('★★ 单份超过 file_bytes ⇒ build 拒绝，并**点名那一份**',
+    rc.code !== 0 && /data\/one\.bin/.test(rc.err) && /262144/.test(rc.err),
+    rc.err.slice(0, 400));
+
+  // ★ 份数那一关。257 个 1 字节的文件（加上清单那几份）⇒ 超过 256。
+  const tiny = {};
+  for (let i = 0; i < 260; i++) tiny[`many/f${String(i).padStart(3, '0')}.txt`] = 'z';
+  const d = mkRepo({ ...baseFiles(), ...tiny });
+  const rd = packer('build', d.plug, '--out', path.join(d.base, 'd.splug'));
+  check('★★ 份数超过 max_files ⇒ build 拒绝',
+    rd.code !== 0 && /256/.test(rd.err) && /份/.test(rd.err), rd.err.slice(0, 400));
+}
+
 // ==============================================================================
 //  5. 坏包：两份 JS 实现必须给出**同一个**理由词
 // ==============================================================================

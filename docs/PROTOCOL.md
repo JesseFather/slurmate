@@ -741,7 +741,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
               "defaults": {"cpus": 1, "mem": "2G"},
               "package": {"format": 1, "bytes": 40000, "digest": "…"}}],
  "enabled": ["code-server"],
- "limits": {"file_bytes": 262144, "total_bytes": 1048576, "max_files": 256,
+ "limits": {"file_bytes": 262144, "total_bytes": 1562251, "max_files": 256,
             "package_bytes": 2097152}}
 ```
 

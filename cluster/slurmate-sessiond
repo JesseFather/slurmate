@@ -1048,15 +1048,16 @@ PLUGIN_PACKAGE_MAX_BYTES = 2 << 20
 # 今天最大的一份是 sshd 的 client/sshconfig.js（17.5 KB），余量 15 倍。
 PLUGIN_FILE_MAX_BYTES = 256 * 1024
 
-# 一份插件**整体**的上限（负载内规则）与份数上限。与上面同类：守护进程**只通报、
-# 不拦截** —— 客户端自己有一份硬上限，取两者中更严的那个。理由：这几个数字是
-# **本站自述**的，用它去放宽客户端的限制等于让被告自己定刑期。它们在这里的用处是
-# 让运维在部署时看得见自己装了个多大的东西（`--check-plugins` 会对超过的打 ⚠）。
+# 一份插件的**份数上限**（负载内规则）。与上面同类：守护进程**只通报、不拦截** ——
+# 客户端自己有一份硬上限，取两者中更严的那个。理由：这几个数字是**本站自述**的，
+# 用它去放宽客户端的限制等于让被告自己定刑期。它们在这里的用处是让运维在部署时
+# 看得见自己装了个多大的东西（`--check-plugins` 会对超过的打 ⚠）。
 #
-# ★ 这个 1 MiB 说的是**负载**（解出来的那些文件的字节和），不是应答有多大 ——
-#   应答那笔账归 `PLUGIN_PACKAGE_MAX_BYTES`，两者别混。包里还有记录表与签名块
-#   （每个路径 2 + 路径长 + 8 + 32 字节），所以"负载 1 MiB"的包比 1 MiB 略大。
-PLUGIN_TOTAL_MAX_BYTES = 1 << 20
+# ★ **负载的"整体字节上限"（`PLUGIN_TOTAL_MAX_BYTES`）不在这几行里。** 它是
+#   **推出来的**（包上限 − 信封的最坏情况），所以要用的那几个数（头的长度、
+#   签名的长度、路径深度上限）在哪儿它就在哪儿 —— 见下面容器格式常量那一段紧
+#   后面的〈负载的整体上限〉。从前它在这里，是个拍出来的 1 MiB：它和那个 2 MiB
+#   的包上限之间没有任何东西钉住，而"负载 1 MiB"这句话因此什么也没说明。
 PLUGIN_MAX_FILES = 256
 
 # 安装器写在 plugins_dir 里的两个东西（都以 `.` 开头，所以 scan_plugins 扫不到）：
@@ -1704,6 +1705,38 @@ PACKAGE_HEADER_BYTES = 20
 PACKAGE_SIG_BYTES = 97               # alg(u8) | 公钥(32) | 签名(64)
 PACKAGE_SIG_ALG_ED25519 = 1
 PACKAGE_MAX_DEPTH = 8
+PACKAGE_MAX_SEGMENT_BYTES = 255      # §3.3。与客户端 MAX_SEGMENT_BYTES 逐字相同
+
+# ── 负载的整体上限：由上面这几个格式常量**推出来** ──────────────────────────
+#
+# 书面判据在 `tools/plugin-limits.json`（守护进程、客户端、打包器三侧各持一份
+# 常量，那个文件是它们共同指向的那句话）。**推导摆在这里**，因为它要用的几个数
+# 就住在上面。
+#
+# 附录 A.1 里信封的长度是**精确**的：
+#
+#     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 97) ‖ 负载 Σsize
+#
+# ⇒ 一个"负载刚好顶到上限"的包，其字节数是 `上限 + 信封`。要让它**永远**装得进
+#   `PLUGIN_PACKAGE_MAX_BYTES`，就得按信封的**最坏情况**留余量。最坏情况由 §3.3
+#   决定：路径最多 `PACKAGE_MAX_DEPTH` 段、每段最多 `PACKAGE_MAX_SEGMENT_BYTES`
+#   字节（★ 三份实现都只限**逐段**、不限整条路径的长），于是最长的一条路径是
+#   8 × 255 + 7 = 2047 字节，256 份文件的记录表就是 256 × (42 + 2047) 字节。
+#
+# ★ 这**不是**一个保守到没用的估计：实测一棵 256 份、路径都顶到 2047 字节的树，
+#   负载只有 512 字节时包本身就有 532,515 字节。凭直觉写下的 64 KiB 余量小了约
+#   8 倍 —— 照它把上限提到 `2 MiB − 64 KiB`，最坏路径下会打出约 2.44 MiB 的包，
+#   而**安装器会拒**：一句话说不清的"明明合规却装不上"。
+PACKAGE_MAX_PATH_BYTES = (PACKAGE_MAX_DEPTH * PACKAGE_MAX_SEGMENT_BYTES
+                          + (PACKAGE_MAX_DEPTH - 1))
+PACKAGE_ENVELOPE_MAX_BYTES = (PACKAGE_HEADER_BYTES + PACKAGE_SIG_BYTES
+                              + PLUGIN_MAX_FILES
+                              * (2 + PACKAGE_MAX_PATH_BYTES + 8 + 32))
+
+# 负载的整体上限 = 包上限 − 信封的最坏情况。★ 今天这条关系**刚好顶满**
+# （1562251 + 534901 == 2 MiB），一个字节都不浪费 —— 它要保证的那件事正是
+# "按协议上限做出来的包，一定送得出去"。
+PLUGIN_TOTAL_MAX_BYTES = PLUGIN_PACKAGE_MAX_BYTES - PACKAGE_ENVELOPE_MAX_BYTES
 
 # 拒绝的理由词表。与另外两份实现**字面相同**。
 PACKAGE_LENGTH = "length"            # 长度对不上：尾随字节、截断、Σsize 与负载不符
@@ -1760,8 +1793,8 @@ def package_path_problem(rel, max_depth):
     for s in segs:
         if not s or s == "." or s == "..":
             return '路径里有空的、"." 或 ".." 这一段'
-        if len(s.encode("utf-8")) > 255:
-            return "路径里有一段超过 255 字节"
+        if len(s.encode("utf-8")) > PACKAGE_MAX_SEGMENT_BYTES:
+            return ("路径里有一段超过 %d 字节" % PACKAGE_MAX_SEGMENT_BYTES)
         if _PKG_WIN_BAD_CHARS.search(s):
             return "路径里有 Windows 上不合法的字符（: * ? \" < > |）"
         if _PKG_WIN_RESERVED.match(s):

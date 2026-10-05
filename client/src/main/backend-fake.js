@@ -197,6 +197,30 @@ const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
  *  "服务端只能收紧、客户端取更严的那个"这条在假站点里也走得到。 */
 const DEMO_FILE_BYTES = 512 * 1024;
 
+/**
+ * 假站点自称的另外三个上限。★ **它们要与守护进程真正报的那几个数逐字相同** ——
+ * 假站点的全部价值就是它演的是**同一件事**，而偏差是两个方向的坏事：
+ *
+ *   · 报得**更松** ⇒ 开发时通过、真机上被拒；
+ *   · 报得**更严** ⇒ 开发时被拒、真机上反而能过（作者会去改一个没问题的插件）。
+ *
+ * ★ `file_bytes` **不在此列**（它是上面那个数）：那是**刻意**报得更松的，好让
+ *   "服务端只能收紧、客户端取更严的那个"这条在假站点里也走得到。
+ * ★ 这几个数由 `client/test/limits.test.mjs` 与守护进程那几份**跨文件**钉着。
+ */
+const DEMO_TOTAL_BYTES = 1562251;    // = PLUGIN_TOTAL_MAX_BYTES（包上限 − 信封最坏情况）
+const DEMO_MAX_FILES = 256;
+const DEMO_PACKAGE_BYTES = 2 << 20;  // = PLUGIN_PACKAGE_MAX_BYTES
+
+/** 假站点在 `plugins` 那一条里自报的那一组。**导出去只给用例**（limits.test.mjs
+ *  拿它与 tools/plugin-limits.json 比对 —— 它是"假站点演得像不像"的唯一判据）。 */
+const DEMO_SITE_LIMITS = {
+  file_bytes: DEMO_FILE_BYTES,
+  total_bytes: DEMO_TOTAL_BYTES,
+  max_files: DEMO_MAX_FILES,
+  package_bytes: DEMO_PACKAGE_BYTES,
+};
+
 class FakeBackend extends Backend {
   /**
    * @param {object} opts
@@ -590,11 +614,9 @@ class FakeBackend extends Backend {
             })()),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
-          limits: {
-            file_bytes: DEMO_FILE_BYTES, total_bytes: 1 << 20, max_files: 256,
-            // 链路那一笔账（base64 之后要装得进一条应答）。
-            package_bytes: 4 << 20,
-          },
+          // 假站点自报的那一组。★ 用展开而不是逐字段写：这个对象与 DEMO_SITE_LIMITS
+          //   必须是**同一组数**，写两遍就是两个会漂的东西。
+          limits: { ...DEMO_SITE_LIMITS },
         });
       }
       /**
@@ -1476,4 +1498,4 @@ function gresFor(raw, part) {
 // ★ 只导出真有人读的：`PARTITIONS` 从前也在这里，而它只在**本文件内**被用
 //   （测试要看分区表时走的是 `app:partitions` 那条真路，不是这个常量）。
 module.exports = { FakeBackend, DEFAULTS, DEMO_PASSWORD,
-  PUSH_INTERVAL_MS, PUSH_SWEEP_MS };
+  PUSH_INTERVAL_MS, PUSH_SWEEP_MS, DEMO_SITE_LIMITS };

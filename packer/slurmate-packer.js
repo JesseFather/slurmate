@@ -119,10 +119,81 @@ const LINEAGE_SCHEMA = 1;
 // ==============================================================================
 
 /**
- * 深度上限（§3.3）。与客户端 `site-plugins.js` 的 `max_depth` 是同一个数。
+ * 深度上限（§3.3）。与客户端 `site-plugins.js` 的 `max_depth`、守护进程的
+ * `PACKAGE_MAX_DEPTH` 是同一个数。
  */
 const MAX_DEPTH = 8;
 const MAX_SEGMENT_BYTES = 255;
+
+// ── 负载的大小上限（§3.7） ──────────────────────────────────────────────────
+//
+// 书面判据在 `tools/plugin-limits.json` —— 打包器、客户端、守护进程三侧各持一份
+// 常量，那个文件是它们共同指向的那句话。★ 这个文件夹**要能单独下载来用**，所以
+// 这里 import 不到仓库里的任何东西（与 COPY_SKIP 同一个处境）；那份代价由 CI 的
+// lint 与 `packer/test-packer.mjs` 一起付。
+//
+// ★ **为什么闸要装在这里**（§3.7 的由来）：上限从前只有**站点**知道 ——
+//   作者要等包发出去、装不上、再回头问，才知道自己超了。而打包器是他手上唯一的
+//   工具，所以这里是唯一能"在他发布之前就说话"的地方。
+const MAX_FILES = 256;
+const MAX_FILE_BYTES = 256 * 1024;
+
+/** 站点愿意收的**整包**上限（§3.7 那条链路账）。与守护进程的
+ *  `PLUGIN_PACKAGE_MAX_BYTES` 是同一个数。 */
+const MAX_PACKAGE_BYTES = 2 << 20;
+
+/** 最长的一条路径有多少字节：`MAX_DEPTH` 段 × 每段上限 + 中间那几个 `/`。 */
+const MAX_PATH_BYTES = MAX_DEPTH * MAX_SEGMENT_BYTES + (MAX_DEPTH - 1);
+
+/**
+ * 信封在**最坏情况**下占多少字节（附录 A.1）。
+ *
+ *     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 97) ‖ 负载 Σsize
+ *
+ * ★ 路径那一项按**最长的一条**算（2047 字节），不按常见的十几字节算 —— 见
+ *   MAX_TOTAL_BYTES 的注释。
+ */
+const MAX_ENVELOPE_BYTES = 20 + 97 + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
+
+/**
+ * 负载的**整体**上限。★ **它是推出来的，不是挑出来的**：包上限减掉信封的最坏
+ * 情况，于是"按上限做出来的包一定装得进 `MAX_PACKAGE_BYTES`"是**算出来的**，
+ * 不是碰巧成立的。
+ *
+ * ★ 从前这里没有这个数，客户端与守护进程那份是拍出来的 1 MiB；而"负载 1 MiB"
+ *   与"包 2 MiB"之间没有任何东西钉住。若照直觉把它提到 `2 MiB − 64 KiB`，一棵
+ *   256 份、路径都顶到 2047 字节的树会打出约 **2.44 MiB** 的包（实测：负载只有
+ *   512 字节时包本身就有 532,515 字节），而**安装器会拒** —— 一句话说不清的
+ *   "明明合规却装不上"。
+ */
+const MAX_TOTAL_BYTES = MAX_PACKAGE_BYTES - MAX_ENVELOPE_BYTES;
+
+/**
+ * 这一棵树的负载合不合 §3.7。返回 `null`（可以）或一句为什么不行。
+ *
+ * ★ 报错里要**给数字**：作者拿着"太大了"三个字没有任何下一步。
+ */
+function payloadSizeProblem(files) {
+  if (files.length > MAX_FILES) {
+    return `这一棵树有 ${files.length} 份文件，超过上限 ${MAX_FILES} 份（§3.7）`;
+  }
+  // 单份那一关先判：一棵树同时犯两条时，"这一份太大了"比"加起来太大了"更可操作。
+  let big = files[0];
+  for (const f of files) if (f.data.length > big.data.length) big = f;
+  if (big.data.length > MAX_FILE_BYTES) {
+    return `${big.path} 有 ${big.data.length} 字节（${humanBytes(big.data.length)}），`
+      + `超过单份上限 ${MAX_FILE_BYTES} 字节（${humanBytes(MAX_FILE_BYTES)}）（§3.7）`;
+  }
+  const total = files.reduce((a, f) => a + f.data.length, 0);
+  if (total > MAX_TOTAL_BYTES) {
+    return `这些文件加起来 ${total} 字节（${humanBytes(total)}），`
+      + `超过负载上限 ${MAX_TOTAL_BYTES} 字节（${humanBytes(MAX_TOTAL_BYTES)}）（§3.7）。\n`
+      + `  站点愿意收的**包**最大是 ${humanBytes(MAX_PACKAGE_BYTES)}，减去最坏情况下的`
+      + `信封（记录表与签名块，${humanBytes(MAX_ENVELOPE_BYTES)}）就只剩这么多。\n`
+      + '  ★ 这不是本站的偏好：**任何**站点都收不下比这更大的负载。';
+  }
+  return null;
+}
 
 /**
  * 跳过集合：**不进负载**的那几个名字。与客户端 `plugins/index.js` 的 `COPY_SKIP`
@@ -1156,6 +1227,12 @@ function cmdBuild(dir, opts) {
   }
   const engWhy = enginesShapeProblem(manifest);
   if (engWhy) throw new Error(`${MANIFEST} 里的 ${engWhy}（§2.3.1）`);
+
+  // §3.7：负载的大小上限。★ 判在**这里**、而且是**发布之前**，正是 §3.7 存在的
+  //   理由：站点那边只有 `--check-plugins` 对管理员打 ⚠，客户端那边要等包发出去、
+  //   收下来才拒 —— 作者拿到的都是"装不上"，而那时他已经发布出去了。
+  const sizeWhy = payloadSizeProblem(files);
+  if (sizeWhy) throw new Error(sizeWhy);
 
   // §2.5：这个 id 得在这棵树**这个提交**的血统表里。表从提交里读（不是从盘上）——
   // 于是"我们判的那张表"与"进负载的那张表"是同一次读出来的同一份字节。

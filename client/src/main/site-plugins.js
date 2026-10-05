@@ -108,6 +108,38 @@ const RECORD_NAME = '.sites.json';
 const LOCK_NAME = 'lock';
 const RECORD_VERSION = 1;
 
+// ── 下面那张表里，`total_bytes` 是从哪里来的 ────────────────────────────────
+//
+// 书面判据在 `tools/plugin-limits.json`（本文件、守护进程、打包器三侧各持一份
+// 常量，那个文件是它们共同指向的那句话）。这里把**推导**摆出来，因为它决定了
+// 那个数为什么长这样、以及改 `max_files` / `max_depth` 时谁会跟着动。
+//
+// 附录 A.1 里信封的长度是**精确**的：
+//
+//     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 97) ‖ 负载 Σsize
+//
+// ⇒ 一个"负载刚好顶到 `total_bytes`"的包，其字节数是 `total_bytes + 信封`。
+//   要让它**永远**装得进那个 2 MiB 的包上限，就得按信封的**最坏情况**留余量 ——
+//   而最坏情况由 §3.3 决定：路径最多 8 段、每段最多 255 字节（★ 三份实现都只限
+//   **逐段**、不限整条路径的长），于是最长的一条路径是 `8 × 255 + 7` = 2047 字节，
+//   256 份文件的记录表就是 256 × (42 + 2047) 字节。
+//
+// ★ 这**不是**一个保守到没用的估计：实测一棵 256 份、路径都顶到 2047 字节的树，
+//   负载只有 512 字节时包本身就有 532,515 字节。凭直觉写下的 64 KiB 余量小了约
+//   8 倍 —— 照它把上限提到 `2 MiB − 64 KiB`，最坏路径下会打出约 2.44 MiB 的包，
+//   而安装器**会拒**（"明明合规却装不上"）。
+
+/** §3.3 的每段字节上限。与打包器、守护进程那两份逐字相同。 */
+const MAX_SEGMENT_BYTES = 255;
+/** §3.3 的深度上限。 */
+const MAX_DEPTH = 8;
+/** 份数上限。它既是**负载内**规则，也是信封最长时的那一项系数。 */
+const MAX_FILES = 256;
+/** 最长的一条路径有多少字节：`MAX_DEPTH` 段 × 每段上限 + 中间那几个 `/`。 */
+const MAX_PATH_BYTES = MAX_DEPTH * MAX_SEGMENT_BYTES + (MAX_DEPTH - 1);
+/** 信封在**最坏情况**下占多少字节：头 + 签名 + 每份的记录（2 + 路径 + 8 + 32）。 */
+const ENVELOPE_MAX_BYTES = 20 + 97 + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
+
 /**
  * 客户端**自己**那份硬上限。
  *
@@ -132,16 +164,19 @@ const RECORD_VERSION = 1;
  *
  *   三处分别在 JS / Python 里，没有共享机制 —— 所以上面这两条是**要人看图**
  *   的关系，不是抄写。
+ *
+ * ★ `total_bytes`（v0.10 起）**是推出来的，不是挑出来的** —— 它与
+ *   `package_bytes`、与信封的长度三者构成一条真的关系，见下面 ENVELOPE_MAX_BYTES。
+ *   从前它是 1 MiB，一个拍出来的数：`total_bytes` 与那个 2 MiB 的包上限之间没有任何
+ *   东西钉住，而"负载 1 MiB"这句话因此什么也没说明。
  */
 const HARD_LIMITS = {
   file_bytes: 256 * 1024,
-  total_bytes: 1 << 20,
-  max_files: 256,
-  max_depth: 8,
+  total_bytes: (2 << 20) - ENVELOPE_MAX_BYTES,
+  max_files: MAX_FILES,
+  max_depth: MAX_DEPTH,
   package_bytes: 4 << 20,
 };
-
-const MAX_SEGMENT_BYTES = 255;
 
 /** Windows 上不合法或会被静默改名的东西。Linux 上永远测不出来，而客户端发三平台。 */
 const WIN_BAD_CHARS = /[\\:*?"<>|]/;

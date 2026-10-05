@@ -292,3 +292,136 @@ jobs:
               sys.exit(1)
           print("✓ 书面判据 = 客户端 = 守护进程（五张表，十五处都真的抠到了）")
           PY
+
+      - name: 插件负载上限：书面判据与三侧逐字一致
+        # ★ 与上面两条（版本号、跳过表、清单键）同一个形状。这一组数比它们更宽的
+        #   地方是**三份**实现各写一遍：客户端（site-plugins.js 的 HARD_LIMITS）、
+        #   守护进程（PLUGIN_*）、打包器（MAX_*）。三份都是分发单元，谁也读不到
+        #   tools/plugin-limits.json（守护进程是一个文件装到 /usr/local/sbin/，
+        #   客户端是一个分发单元，打包器要"下载这个文件夹就能用"）—— 所以那份
+        #   JSON 是**书面判据**，不是运行期依赖。理由与代价写在它的 `_` 段里。
+        #
+        #   漂开的样子：客户端收下一个站点根本发不出来的负载；或者打包器放出一个
+        #   **任何站点都拒收**的包。两种都不红任何东西，直到有人真的发布一个插件。
+        #
+        #   ★ `total_bytes` 是**推出来的**（包上限 − 信封最坏情况），所以这里除了
+        #   三处逐字相同，还要验那条推导本身 —— 否则一份自己就不自洽的书面判据会
+        #   让三条比对一起绿。
+        #
+        #   抠的是**字面量**，不是"跑一遍 JS"（本机不一定有 node）；这几个表达式
+        #   在 Python 与 JS 里逐字同解（`1 << 20`、`256 * 1024`、加减乘与括号）。
+        #
+        #   同一条意思在 client/test/limits.test.mjs、packer/test-packer.mjs 与
+        #   cluster/test-sessiond-logic.py 的 19.17 里各有一条（本地跑得到）；
+        #   这里再来一条是因为 CI 上的 lint 是**最外层**的那道网，它不依赖测试
+        #   脚本被正确地调用。
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util, json, re, sys
+
+          def lits(src, names):
+              """把一串 `const NAME = <纯算术>;` 求值出来（声明次序即依赖次序）。
+                 抠不到或算不动就返回 None —— 这一层不许把异常当成通过。"""
+              env = {}
+              for n in names:
+                  m = re.search(r"^const %s = (.+);$" % n, src, re.M)
+                  if not m:
+                      return None
+                  try:
+                      env[n] = eval(m.group(1), {"__builtins__": {}}, env)
+                  except Exception:
+                      return None
+              return env
+
+          written = json.load(open("tools/plugin-limits.json", encoding="utf-8"))
+          load, pkg, fmt = written["load"], written["package"], written["format"]
+          csrc = open("client/src/main/site-plugins.js", encoding="utf-8").read()
+          psrc = open("packer/slurmate-packer.js", encoding="utf-8").read()
+
+          ldr = importlib.machinery.SourceFileLoader("d", "cluster/slurmate-sessiond")
+          mod = importlib.util.module_from_spec(
+              importlib.util.spec_from_loader("d", ldr))
+          ldr.exec_module(mod)
+
+          cv = lits(csrc, ("MAX_SEGMENT_BYTES", "MAX_DEPTH", "MAX_FILES",
+                           "MAX_PATH_BYTES", "ENVELOPE_MAX_BYTES"))
+          pv = lits(psrc, ("MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
+                           "MAX_FILE_BYTES", "MAX_PACKAGE_BYTES",
+                           "MAX_PATH_BYTES", "MAX_ENVELOPE_BYTES", "MAX_TOTAL_BYTES"))
+          hv = None
+          hm = re.search(r"const HARD_LIMITS = \{(.*?)\n\};", csrc, re.S)
+          if hm is not None and cv is not None:
+              hv = {}
+              for line in hm.group(1).split("\n"):
+                  kv = re.match(r"\s*(\w+): (.+?),?\s*$", line)
+                  if not kv:
+                      continue
+                  try:
+                      hv[kv.group(1)] = eval(kv.group(2), {"__builtins__": {}}, cv)
+                  except Exception:
+                      hv = None
+                      break
+
+          bad = 0
+          def say(name, ok, detail=""):
+              global bad
+              print("  %-34s %s%s" % (name, "ok" if ok else "FAIL",
+                                      "" if ok else "  " + detail))
+              if not ok:
+                  bad = 1
+
+          # ★ 先证明"抠到了"：`None == None` 那种假通过正是这一条要防的。
+          say("三侧字面量都抠到了",
+              cv is not None and pv is not None and hv is not None
+              and set(hv) == {"file_bytes", "total_bytes", "max_files", "max_depth",
+                              "package_bytes"},
+              "客户端 %r / 打包器 %r / HARD_LIMITS %r" % (cv, pv, hv))
+          say("客户端 = 书面判据",
+              hv is not None and all(hv[k] == load[k] for k in
+                                     ("file_bytes", "total_bytes", "max_files", "max_depth")),
+              "%r vs %r" % (hv, load))
+          # ★ 深度上限在客户端里有两份：site-plugins.js 的（上面那条钉了）与
+          #   plugin-package.js 的 —— 后者传给共享的 checkRelPath，也就是"读一个包
+          #   时允许多深"的那个数，而坏包向量里没有"路径超过深度"的用例。
+          pksrc = open("client/src/main/plugin-package.js", encoding="utf-8").read()
+          pkm = re.search(r"^const MAX_DEPTH = (\d+);$", pksrc, re.M)
+          say("客户端第二份深度上限（plugin-package.js）",
+              pkm is not None and int(pkm.group(1)) == load["max_depth"],
+              "抠到 %r" % (pkm and pkm.group(1),))
+
+          say("守护进程 = 书面判据",
+              mod.PLUGIN_FILE_MAX_BYTES == load["file_bytes"]
+              and mod.PLUGIN_TOTAL_MAX_BYTES == load["total_bytes"]
+              and mod.PLUGIN_MAX_FILES == load["max_files"],
+              "%s / %s / %s" % (mod.PLUGIN_FILE_MAX_BYTES, mod.PLUGIN_TOTAL_MAX_BYTES,
+                                mod.PLUGIN_MAX_FILES))
+          say("打包器 = 书面判据",
+              pv is not None and pv["MAX_FILE_BYTES"] == load["file_bytes"]
+              and pv["MAX_TOTAL_BYTES"] == load["total_bytes"]
+              and pv["MAX_FILES"] == load["max_files"]
+              and pv["MAX_DEPTH"] == load["max_depth"],
+              "%r" % (pv,))
+
+          # 推导：信封最坏情况（附录 A.1 + §3.3），以及 total = 包上限 − 它。
+          path_bytes = load["max_depth"] * fmt["max_segment_bytes"] + (load["max_depth"] - 1)
+          env = (fmt["header_bytes"] + fmt["signature_bytes"]
+                 + load["max_files"] * (fmt["record_overhead_bytes"] + path_bytes))
+          say("信封最坏情况算得出来（%d 字节）" % env,
+              env == pkg["envelope_max_bytes"],
+              "现算 %d vs 判据 %d" % (env, pkg["envelope_max_bytes"]))
+          say("负载上限 = 包上限 − 信封最坏情况",
+              load["total_bytes"] == pkg["max_bytes"] - pkg["envelope_max_bytes"],
+              "%d vs %d" % (load["total_bytes"], pkg["max_bytes"] - pkg["envelope_max_bytes"]))
+          say("按上限做的包装得进包上限（算出来的）",
+              load["total_bytes"] + env <= pkg["max_bytes"],
+              "%d + %d > %d" % (load["total_bytes"], env, pkg["max_bytes"]))
+
+          if bad:
+              print("✗ 插件负载上限三处不一致（或有一处没抠出来）。")
+              print("  改规则要同时改 tools/plugin-limits.json 与三侧的实现：")
+              print("  client/src/main/site-plugins.js（深度那一项还有")
+              print("  client/src/main/plugin-package.js）/ cluster/slurmate-sessiond /")
+              print("  packer/slurmate-packer.js。")
+              sys.exit(1)
+          print("✓ 书面判据 = 客户端 = 守护进程 = 打包器")
+          PY

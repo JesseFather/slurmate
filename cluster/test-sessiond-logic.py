@@ -3714,6 +3714,152 @@ exit 0
               _s2 is None and any("认不得的键" in x and _key in x for x in _p2),
               "%s / %s" % (_s2, _p2))
 
+    # ── 19.17 ★★ 负载的大小上限：书面判据 ↔ 三侧常量（v0.10 阶段 5，S10）──────
+    #
+    # 与 19.16（认得的键）同一个形状，但比它多**两个**读者：这一组数不只在守护
+    # 进程与客户端里各写一遍，打包器（`packer/slurmate-packer.js`）里还有第三份。
+    #
+    # ★ 三份都是**分发单元**，谁也读不到 `tools/plugin-limits.json`：守护进程是
+    #   一个文件装到 /usr/local/sbin/slurmate-sessiond（集群上没有 tools/）；客户端
+    #   是一个分发单元；打包器要"下载这个文件夹就能用"。各写一条相对路径的话，
+    #   **从源码跑得通、装出去就断** —— 上限全变成 0，也就是"什么都不拦"，而那只
+    #   在装出去的机器上出现。
+    #
+    # ★ 漂开的样子很具体：客户端收下一个站点根本发不出来的负载；或者打包器放出
+    #   一个**任何站点都拒收**的包。两种都不红任何东西，直到有人真的发布一个插件。
+    #
+    # ★ 这一组数里只有 `total_bytes` 是**推出来的**（包上限 − 信封最坏情况），
+    #   所以下面除了"三处逐字相同"，还要验那条**推导**本身 —— 否则一份自己就不
+    #   自洽的书面判据会让三条比对一起绿。
+    print("\n── 19.17. 负载的大小上限（三侧逐字一致）──")
+
+    def _pl_lit(src, names):
+        """把一串 `const NAME = <纯算术>;` 求值出来（按声明次序，后面的可引用前面的）。
+
+        ★ 求的是**源码文本**，不是"跑一遍 JS" —— 与 19.12 / 19.16 同一个理由：
+          本机不一定有 node。而这几个表达式在 Python 与 JS 里**逐字同解**
+          （`1 << 20`、`256 * 1024`、加减乘与括号都在两边同一个意思），所以
+          这一步是等价的。
+        ★ 抠不到就返回 `None`，**不抛**：抛出去会把后面每一条用例都带走，而
+          "脚本崩了"与"这条防线不存在"在报告里长得一模一样。
+        """
+        env = {}
+        for n in names:
+            m = re.search(r"^const %s = (.+);$" % n, src, re.M)
+            if not m:
+                return None
+            try:
+                env[n] = eval(m.group(1), {"__builtins__": {}}, env)
+            except Exception:
+                return None
+        return env
+
+    _pl_json_path = os.path.join(HERE, os.pardir, "tools", "plugin-limits.json")
+    with io.open(_pl_json_path, encoding="utf-8") as _f:
+        _pl = json.load(_f)
+    with io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                              "site-plugins.js"), encoding="utf-8") as _f:
+        _pl_csrc = _f.read()
+    with io.open(os.path.join(HERE, os.pardir, "packer", "slurmate-packer.js"),
+                 encoding="utf-8") as _f:
+        _pl_psrc = _f.read()
+    with io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                              "plugin-package.js"), encoding="utf-8") as _f:
+        _pl_pksrc = _f.read()
+
+    _pl_cv = _pl_lit(_pl_csrc, ("MAX_SEGMENT_BYTES", "MAX_DEPTH", "MAX_FILES",
+                                "MAX_PATH_BYTES", "ENVELOPE_MAX_BYTES"))
+    _pl_pv = _pl_lit(_pl_psrc, ("MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
+                                "MAX_FILE_BYTES", "MAX_PACKAGE_BYTES",
+                                "MAX_PATH_BYTES", "MAX_ENVELOPE_BYTES",
+                                "MAX_TOTAL_BYTES"))
+    # 客户端那张表是一个对象字面量（值里还引用了上面那几个常量），单独抠。
+    _pl_hv = None
+    _pl_hm = re.search(r"const HARD_LIMITS = \{(.*?)\n\};", _pl_csrc, re.S)
+    if _pl_hm is not None and _pl_cv is not None:
+        _pl_hv = {}
+        for _line in _pl_hm.group(1).split("\n"):
+            _kv = re.match(r"\s*(\w+): (.+?),?\s*$", _line)
+            if not _kv:
+                continue
+            try:
+                _pl_hv[_kv.group(1)] = eval(_kv.group(2), {"__builtins__": {}}, _pl_cv)
+            except Exception:
+                _pl_hv = None
+                break
+
+    check("★ 三侧的字面量都真的抠出来了（抠出 None 的话，下面几条是**假通过**）",
+          _pl_cv is not None and _pl_pv is not None and _pl_hv is not None
+          and set(_pl_hv) == {"file_bytes", "total_bytes", "max_files", "max_depth",
+                              "package_bytes"},
+          "客户端 %r / 打包器 %r / HARD_LIMITS %r" % (_pl_cv, _pl_pv, _pl_hv))
+
+    _pl_written = _pl["load"]
+    check("★★ 客户端 HARD_LIMITS 的四个负载上限 = 书面判据（逐字）",
+          _pl_hv is not None and all(
+              _pl_hv[k] == _pl_written[k]
+              for k in ("file_bytes", "total_bytes", "max_files", "max_depth")),
+          "客户端 %r / 书面 %r" % (_pl_hv, _pl_written))
+    # ★ 深度上限在**客户端里有两份**：`site-plugins.js` 的（上面那一条已经钉了）与
+    #   `plugin-package.js` 的。后者传给**共享的** `sitePlugins.checkRelPath`，也就是
+    #   "读一个包时允许多深"的那个数；而 tools/conformance/ 的坏包向量里**没有**
+    #   一条"路径超过深度"的用例，所以它此前漂开不会红任何东西。
+    _pl_pk = re.search(r"^const MAX_DEPTH = (\d+);$", _pl_pksrc, re.M)
+    check("★★ 客户端第二份深度上限（plugin-package.js）也对得上书面判据",
+          _pl_pk is not None and int(_pl_pk.group(1)) == _pl_written["max_depth"],
+          "抠到 %r / 判据 %s" % (_pl_pk and _pl_pk.group(1), _pl_written["max_depth"]))
+
+    check("★★ 守护进程那三个 = 书面判据（逐字）",
+          mod.PLUGIN_FILE_MAX_BYTES == _pl_written["file_bytes"]
+          and mod.PLUGIN_TOTAL_MAX_BYTES == _pl_written["total_bytes"]
+          and mod.PLUGIN_MAX_FILES == _pl_written["max_files"],
+          "%s / %s / %s vs %r"
+          % (mod.PLUGIN_FILE_MAX_BYTES, mod.PLUGIN_TOTAL_MAX_BYTES,
+             mod.PLUGIN_MAX_FILES, _pl_written))
+    check("★★ 打包器那四个 = 书面判据（逐字）",
+          _pl_pv is not None
+          and _pl_pv["MAX_FILE_BYTES"] == _pl_written["file_bytes"]
+          and _pl_pv["MAX_TOTAL_BYTES"] == _pl_written["total_bytes"]
+          and _pl_pv["MAX_FILES"] == _pl_written["max_files"]
+          and _pl_pv["MAX_DEPTH"] == _pl_written["max_depth"],
+          "%r vs %r" % (_pl_pv, _pl_written))
+
+    # ── 推导那一半：`total_bytes` 是算出来的，不是挑出来的 ────────────────────
+    #
+    # 附录 A.1：包 = 头 ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名 ‖ 负载。
+    # §3.3：路径最长 max_depth 段、每段 max_segment_bytes 字节。
+    _pl_fmt = _pl["format"]
+    _pl_path = (_pl_written["max_depth"] * _pl_fmt["max_segment_bytes"]
+                + (_pl_written["max_depth"] - 1))
+    _pl_env = (_pl_fmt["header_bytes"] + _pl_fmt["signature_bytes"]
+               + _pl_written["max_files"] * (_pl_fmt["record_overhead_bytes"] + _pl_path))
+    check("★★ 书面判据里的信封最坏情况 = 按附录 A.1 与 §3.3 现算一遍（%d 字节）"
+          % _pl_env,
+          _pl_env == _pl["package"]["envelope_max_bytes"],
+          "现算 %d / 判据 %d（改 §3.3 的深度、段长，或改份数上限，这个数会跟着动）"
+          % (_pl_env, _pl["package"]["envelope_max_bytes"]))
+    check("★★ 负载上限 = 包上限 − 信封最坏情况（这条关系**刚好顶满**）",
+          _pl_written["total_bytes"]
+          == _pl["package"]["max_bytes"] - _pl["package"]["envelope_max_bytes"],
+          "%d vs %d − %d" % (_pl_written["total_bytes"], _pl["package"]["max_bytes"],
+                             _pl["package"]["envelope_max_bytes"]))
+    check("★★ 于是「按上限做出来的包一定装得进包上限」是一条**算出来的**结论"
+          "（从前那个 1 MiB 与 2 MiB 之间没有任何东西钉住）",
+          _pl_written["total_bytes"] + _pl_env <= _pl["package"]["max_bytes"],
+          "%d + %d > %d" % (_pl_written["total_bytes"], _pl_env,
+                            _pl["package"]["max_bytes"]))
+    check("★ 守护进程那份兜底也得装得下站点报得出来的最大负载",
+          _pl_hv is not None
+          and _pl_hv["package_bytes"] >= _pl["package"]["max_bytes"],
+          "客户端 package_bytes %r / 站点最大 %d"
+          % (_pl_hv and _pl_hv["package_bytes"], _pl["package"]["max_bytes"]))
+    check("★ 守护进程自己那三个数之间的关系也算得出来（不是各写各的）",
+          mod.PACKAGE_ENVELOPE_MAX_BYTES == _pl_env
+          and mod.PLUGIN_TOTAL_MAX_BYTES + mod.PACKAGE_ENVELOPE_MAX_BYTES
+          <= mod.PLUGIN_PACKAGE_MAX_BYTES,
+          "%d / %d / %d" % (mod.PACKAGE_ENVELOPE_MAX_BYTES,
+                            mod.PLUGIN_TOTAL_MAX_BYTES, mod.PLUGIN_PACKAGE_MAX_BYTES))
+
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #
     # 这两个文件之间有一条**跨语言的契约**：作业用 printf 拼一段 JSON 出来，守护
