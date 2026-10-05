@@ -375,3 +375,40 @@ dialog .row { justify-content: flex-end; }
 /* 「取不到」那一句。**它是默认就有的**，不是错误态才插进去的 —— 见 panel.html
    里那一段注释：忘了写数据的那条路要让它露出来，而不是让空的看起来像"没有"。 */
 .na { color: var(--warn); font-size: 12px; margin: 0 0 6px; }
+
+/* ── 三屏的路由 ──────────────────────────────────────────────────────────────
+   ▶ 一个站点的三个层次（连接 → 插件 → 作业），同时只露一个。**"露哪一个"由
+     panel.js 的 `showScreen()` 决定**，这里一个字都不参与 —— 样式只管长相。
+
+   ▶ 三屏里没有任何一屏自带 margin-top：它们的标题行是 `.sec-head`（那个 26px
+     的上边距是给"区块"用的），而一屏是**页面**，上面还有横幅与那行副标题。 */
+.screen > .sec-head:first-child { margin-top: 0; }
+
+/* ── 作业列表 ──────────────────────────────────────────────────────────────
+   一行 = 一条会话。它与上面的连接列表同形（.conn），但不是同一个东西：
+   `·` 分隔的那些是**这条作业的事实**（作业号/分区/节点/剩余），
+   最后那一格是**谁在看** —— 而"谁在看"是三件事，不是两件（见 index.js 的 jobsView）。 */
+.jobs {
+  list-style: none; margin: 0 0 10px; padding: 0;
+  max-height: 340px; overflow-y: auto; overscroll-behavior: contain;
+}
+.job {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 6px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt);
+  font-size: 12px;
+}
+/* 选中的那一行。★ 它与 `.conn.active` 用的是同一个颜色 —— 两处都是"当前这一条"，
+   而"当前"在这个界面里只能有一个颜色。 */
+.job.on { border-color: var(--accent); background: #0e3a5c; }
+/* 已经结束的那些**照旧列出来**（服务端要留到 `released_keep`），但画得轻一点：
+   它们还是"我的作业"，只是不再占着任何东西。 */
+.job.dead { opacity: .55; }
+.job .t { flex: none; min-width: 9em; color: #9cdcfe; }
+.job .st { flex: none; color: var(--fg-dim); }
+.job .m { flex: 1; color: var(--fg-dim); font-family: ui-monospace, Consolas, monospace; }
+.job .kp { flex: none; color: var(--fg-dim); }
+.job .kp.good { color: var(--ok); font-weight: 600; }
+/* 「本机没接着它」。★ 它说的是**这一行的按钮为什么是灰的** —— 不写出来的话，
+   用户点不动"结束"只会以为界面坏了，而真正要做的事（重连一次这个站点）没人告诉他。 */
+.job .warn { flex: none; color: var(--warn); }

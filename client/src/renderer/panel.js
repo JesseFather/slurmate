@@ -65,6 +65,25 @@ const NEW_LAYOUT = '__new__';
  */
 let form = { open: false, mode: 'new', id: null };
 
+/**
+ * 现在在哪一屏：`'conns'` | `'plugins'` | `'jobs'`。
+ *
+ * ★★ 它是一个**用户的选择**，不是从会话状态推出来的。从前三块的显隐是
+ *   `renderSnapshot()` 按会话状态算的（空闲就露连接列表、跑起来就露当前会话），
+ *   于是"用户在哪儿"没有地方记着 —— 他去作业列表看一眼，下一次快照回来就被
+ *   弹回另一屏。这一格就是为此存在的。
+ */
+let SCREEN = 'conns';
+
+/**
+ * 第三屏（作业列表）的那一份数据。
+ *
+ * ★ `forConn` 是**这份数据属于哪条连接** —— 切连接之后它立刻作废。少了这一格，
+ *   用户切到另一个站点、还没刷新时会看到**上一个站点**的作业列表，而每一行
+ *   看起来都像真的。这是这一屏唯一会静默说谎的地方。
+ */
+let JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
+
 // ── 工具 ────────────────────────────────────────────────────────────────────
 function fmtLeft(expiresAt) {
   // expires_at 在 show_job 失败时**整个字段不存在**（守护进程的行为）。
@@ -100,25 +119,44 @@ function notice(kind, text) {
   while (box.children.length > 80) box.lastChild.remove();
 }
 
-// ── 状态渲染 ────────────────────────────────────────────────────────────────
+// ── 三屏的路由 ──────────────────────────────────────────────────────────────
 /**
- * 「开始会话」那一屏露不露出来。
+ * 把三屏之一露出来。**同时只露一个。**
  *
- * ★ 两个条件都可能让它出现，而且它们是**独立的**：
- *   · idle && connected —— 老规矩：连不上就没有分区可挑，摆一堆按不动的按钮
- *     只会让人以为客户端坏了；
- *   · **本机一个插件都没装** —— 装插件与连不连得上集群毫无关系（插件是本机的
- *     东西），而把安装入口藏在一块"要连上才看得见"的区域里，等于用户第一次
- *     打开客户端时无路可走。
+ * ★★ 为什么"我在哪一屏"必须是一个显式的状态：这三屏是**一个站点的三个层次**
+ *   （连接 → 插件 → 作业），而"在哪一层"取决于用户刚才点了什么，不取决于
+ *   会话此刻是什么状态。从前的判据是后者（`idle` 露连接列表、跑起来露当前会话），
+ *   于是用户点进作业列表看一眼，下一次快照回来就被弹回另一屏——而他什么都没做。
  *
- * 两处都会改变这个判定（会话状态变化、插件列表被重扫），所以它单独成函数 ——
- * 复制一份判断在两个地方，迟早会分叉。
+ * ★「集群状态」那一节是**盖在三屏上面**的，不是第四屏：它是只读的现状，
+ *   从哪儿打开的就该回到哪儿去。所以它开着的时候三屏一起让位，关掉时按
+ *   `SCREEN` 原样恢复。
  */
-function syncPurposeVisibility() {
-  const st = lastSnap ? lastSnap.state : 'idle';
-  const idle = !lastSnap || st === 'idle';
-  const noPlugins = Boolean(lastPlugins && lastPlugins.installedCount === 0);
-  $('sec-purpose').classList.toggle('hidden', !(noPlugins || (idle && connected)));
+function showScreen(name) {
+  SCREEN = name;
+  for (const [key, id] of [['conns', 'screen-conns'],
+                           ['plugins', 'screen-plugins'],
+                           ['jobs', 'screen-jobs']]) {
+    $(id).classList.toggle('hidden', CLUSTER.open || key !== name);
+  }
+  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
+  // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（与从前
+  // `renderSnapshot` 里那一句同一个意思，只是判据从"会话跑起来了"换成了
+  // "用户走开了"）。不收的话，用户从第二屏退回来会看见一个半填的表单，
+  // 而它上面那个地址可能已经连过了。
+  if (name !== 'conns') closeForm();
+  // 第二屏的标题带上**是哪一个站点** —— 用户在几台机器之间来回时，最要紧的
+  // 一件事就是"我现在看的是哪一台"。
+  // ★ 判据是**活跃连接**（主进程那一格），不是"上次点了哪一行"：删掉一条连接、
+  //   或者从别处改了活跃连接之后，界面手上那份"我刚才点的是谁"就已经过期了。
+  const conn = ((boot && boot.connections) || [])
+    .find((c) => c.id === (boot && boot.activeConnectionId));
+  $('plugins-title').textContent = conn ? `插件 · ${conn.user}@${conn.host}` : '插件';
+  // 屏一换，那些**跟着当前这一屏走**的小块都要重算一次：作业详情（只在这一屏里
+  // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
+  // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
+  renderSnapshot(lastSnap);
+  if (name === 'jobs' && !CLUSTER.open) refreshJobs();
 }
 
 /**
@@ -245,34 +283,18 @@ function renderSnapshot(s) {
   $('sb-layout-wrap').classList.toggle(
     'hidden', !(running && boot && boot.activeConnectionId && s && s.layoutId));
 
-  // 形态切换
+  // ★★ 这一屏**不再参与"露哪一屏"的判定** —— 那是路由的事（见 showScreen）。
+  //   从前这三句话按会话状态切换 `sec-connect` / `sec-purpose` / `sec-session`，
+  //   而"用户在哪儿"和"会话跑没跑起来"是两件事：会话一起来就把人弹回当前会话那
+  //   一屏，他刚才点开的作业列表就没了。
   //
-  // ★ 「集群状态」那一节开着的时候，这一屏与「开始会话」那一屏都要让位。
-  //   让位写在这里而不是写在 showCluster 里：显示/隐藏只有一处判据，
-  //   两处判据会漂，而漂的形态是"某一边把它又显示回来了"。
-  const idle = !s || st === 'idle';
-  $('sec-connect').classList.toggle('hidden', !idle || CLUSTER.open);
-  // 会话一起来就把表单收掉 —— 它只在「还没连上」这一屏里说得通
-  if (!idle) closeForm();
-  // 「开始会话」只在真的连上之后才出现 —— 连不上就没有分区可挑，
-  // 摆一堆按不动的按钮只会让人以为客户端坏了。
-  //
-  // ★ 一个例外：**本机一个插件都没装**时，这一屏必须露出来。装插件与连不连得上
-  //   集群毫无关系（插件是本机的东西），而把安装入口藏在一块要连上才看得见的
-  //   区域里，等于用户第一次打开客户端时**无路可走**。见 renderPlugins 的空态。
-  syncPurposeVisibility();
-  // 「开始会话」那一屏的判据在 syncPurposeVisibility 里（idle / 本机没插件），
-  // 它不知道集群这一节有没有开着 —— 所以让位在这里补一刀，而不是往那个函数里
-  // 再塞一个与它无关的条件。
-  if (CLUSTER.open) $('sec-purpose').classList.add('hidden');
-  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
-  $('sec-session').classList.toggle('hidden', !(s && st !== 'idle' && st !== 'ended'));
-
-  if (s && st !== 'idle' && st !== 'ended') renderKv(s);
+  //   这里只留**它确实该管的那两格**：状态条上的按钮、以及前台那一条的详情。
+  const live = Boolean(s) && st !== 'idle' && st !== 'ended';
+  $('job-detail').classList.toggle('hidden', !(live && SCREEN === 'jobs'));
+  if (live) renderKv(s);
 
   renderLayoutSelectors();
-  // 上面刚把 sec-connect 显示/隐藏过，映射图的几何位置到这一帧结束后才是最终的。
-  // rAF 里重画一次，比在这里硬算可靠（字体、滚动条、换行都还没定下来）。
+  // 布局下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
   requestAnimationFrame(drawLayoutLines);
 }
 
@@ -484,8 +506,12 @@ function renderConnections(list) {
   const box = $('conn-list');
   box.textContent = '';
   $('conn-empty').classList.toggle('hidden', list.length > 0);
+  $('conn-notes').classList.toggle('hidden', list.length === 0);
   // 映射图与列表同生共死：没有连接就没有可映射的东西
   $('sec-layouts').classList.toggle('hidden', list.length === 0);
+  // 「断开」只在连着的时候存在 —— 它是**站点级**的动作（见 renderConnections
+  // 里那个「连接/进入」按钮的注释）。
+  $('btn-disconnect').classList.toggle('hidden', !connected);
 
   for (const c of list) {
     const li = document.createElement('li');
@@ -506,7 +532,16 @@ function renderConnections(list) {
     const m = document.createElement('span');
     m.className = 'm';
     if (live) {
-      m.textContent = '已连接';
+      // ★ 「这个站点上我还有几个作业」——**只有在它身上取过作业列表时才说得出来**。
+      //   没取过就只说"已连接"，绝不补一个 0：`0` 会被读成"一个作业都没有"，
+      //   而那是我们并不知道的一件事（同一条三态纪律）。
+      //
+      //   ★ 而**别的站点上的作业数，这一屏本来就答不了** —— 要答就得连上去，
+      //     而"打开客户端连着几个站点挨个查一遍"正是这一版删掉的那个形状。
+      //     所以列表下面那一句（`#conn-notes`）把这条边界明说出来。
+      const known = JOBS.list && JOBS.forConn === c.id;
+      const n = known ? JOBS.list.filter((j) => j.live).length : null;
+      m.textContent = known ? `已连接 · ${n} 个作业在跑` : '已连接';
       m.classList.add('good');
     } else if (!probe) {
       m.textContent = '未探测';
@@ -532,12 +567,18 @@ function renderConnections(list) {
       if (!r.ok) lay.value = c.layoutId;
     };
 
-    // 主动断开。断的只是客户端这一跳 —— 作业还在集群上跑着，
-    // 再点「连接」会重新接上它。会话进行中不给断（主进程也会拒）。
+    // ★★ 这一格是**三屏的入口**，而不是"连接/断开"那个开关。
+    //
+    //   连着的时候点它 = **进去看这个站点的插件与作业**（第二屏）；没连的时候
+    //   点它 = 连上它（连上之后自动进第二屏，见 handleConnectResult）。
+    //
+    //   ★ 「断开」因此挪到了这一屏的标题栏上（`#btn-disconnect`）：它是一个
+    //     **站点级**的动作（同时最多连着一个站点），而不是某一条连接自己的属性 ——
+    //     挂在每一条行上，等于在说"你可以同时断开好几条"。
     const main = document.createElement('button');
-    main.className = 'tiny' + (live ? ' ghost danger-ghost' : '');
-    main.textContent = live ? '断开' : '连接';
-    main.onclick = () => (live ? doDisconnect() : doConnectTo(c));
+    main.className = 'tiny';
+    main.textContent = live ? '进入' : '连接';
+    main.onclick = () => (live ? showScreen('plugins') : doConnectTo(c));
 
     // 编辑：地址 / 这条连接自己的密钥。
     const edit = document.createElement('button');
@@ -1395,14 +1436,12 @@ async function syncPlugins() {
   const r = await window.slurmate.syncPlugins();
   if (r && r.plugins) renderPlugins(r.plugins);
   else notice('error', (r && r.error) || '重新同步失败');
-  syncPurposeVisibility();
 }
 
 async function consentPlugin(id, version) {
   const r = await window.slurmate.consentPlugin(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
   if (!r || !r.ok) notice('error', (r && r.error) || '没能同意这个插件');
-  syncPurposeVisibility();
 }
 
 async function rejectPlugin(id, version) {
@@ -1416,7 +1455,6 @@ async function dropPluginVersion(id, version) {
   const r = await window.slurmate.dropPluginVersion(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
   if (!r || !r.ok) notice('error', (r && r.error) || '没能删掉本机那一份');
-  syncPurposeVisibility();
 }
 
 /** 建一个按钮。CSP 里没有 unsafe-inline，所以一律走 class，一个 style 都不能有。 */
@@ -1776,23 +1814,18 @@ function renderCluster() {
     + '前面那些作业有多少会同时开跑，取决于分区此刻有多少空闲节点。'));
 }
 
-/** 开/关这一节。 */
+/**
+ * 开/关「集群状态」。
+ *
+ * ★ 它是**盖在三屏上面**的一层，不是第四屏：只读的现状，从哪儿打开的就该回到
+ *   哪儿去。所以关的时候**交回给路由**（`showScreen(SCREEN)`），而不是自己把
+ *   某一屏显示出来 —— 那两处的判据会漂，而漂的形态是"从集群页退回去之后回到了
+ *   错误的一屏"。
+ * ★ **不重建 `SCREEN`**：它记的正是"打开集群页之前我在哪"，所以这里一个字都不用改。
+ */
 function showCluster(on) {
   CLUSTER.open = Boolean(on);
-  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
-  if (CLUSTER.open) {
-    $('sec-connect').classList.add('hidden');
-    $('sec-purpose').classList.add('hidden');
-    return;
-  }
-  // ★ 关的时候**交回给 renderSnapshot 原来那套判定**，而不是自己把 sec-connect
-  //   显示出来 —— 那两处的判据（idle / 有没有插件 / 会话状态）会漂，而漂的形态
-  //   是"从集群页退回去之后回到了错误的一屏"。
-  // ★ **不加 `if (lastSnap)`**：`renderSnapshot(null)` 是合法的（它按「空闲」
-  //   处理），而加了那个判断之后，还没收到任何快照就打开又关掉集群页时，
-  //   那一屏会永远停在"什么都不显示"—— 而这是一个真实可达的顺序（启动瞬间
-  //   连上、点开集群状态、再返回）。
-  renderSnapshot(lastSnap);
+  showScreen(SCREEN);
 }
 
 async function loadCluster() {
@@ -1834,6 +1867,203 @@ async function loadHistory() {
       + `　${j.partition || '?'}　${j.end}`));
     box.append(row);
   }
+}
+
+// ── 第三屏：作业列表 ────────────────────────────────────────────────────────
+//
+// ★★ 这一屏的数据来自**服务端**（`op:list`，经 index.js 的 `jobsView()`），
+//   不是本机那张会话表。两者在正常情况下一样，差在三种**真的会发生**的场合：
+//   上一台电脑提交的、本机认不出插件因而没接上的、刚结束而服务端还留着那一行的。
+//   只画本机那一份，这三种里用户看到的都是"我没有作业了" —— 而作业还在。
+//
+// ★ 而**动作只给本机接着的那些**（`attached`）：结束走的是 `SessionController.stop()`，
+//   它要心跳、要隧道、要那条会话的完整视图。给没接着的另写一条短路，就是同一条
+//   规矩的第二份实现。没接着的那些照实说出来，出路是重连一次。
+
+/**
+ * 重新问一次服务端（`op:list`）。
+ *
+ * ★ 它**不是缓存刷新**，是一次真查询。作业列表的变化有一大半发生在本进程之外
+ *   （另一台电脑提交的、CLI 提交的、排队中的作业被调度器跑起来），所以它必须
+ *   能随时重问 —— 「刷新」那个按钮存在的理由就是这个，而不是装饰。
+ */
+async function refreshJobs() {
+  const connId = boot ? boot.activeConnectionId : null;
+  $('jobs-when').textContent = '正在取…';
+  const r = await window.slurmate.jobs();
+  if (!r || !r.ok) {
+    const detail = (r && r.error && r.error.detail) || '控制节点没有说明原因';
+    JOBS = { forConn: connId, list: null, at: 0, error: detail, selected: null };
+    renderJobs();
+    return;
+  }
+  JOBS = {
+    forConn: connId, list: r.jobs || [], at: r.at || Date.now(),
+    error: null, selected: JOBS.selected,
+  };
+  renderJobs();
+}
+
+/** 选中的那一行（没有就是 null）。 */
+function selectedJob() {
+  return (JOBS.list || []).find((j) => j.session_id === JOBS.selected) || null;
+}
+
+/**
+ * 点某一行。
+ *
+ * ★ 本机接着的那些顺手 `setFront` —— "点一条作业"与"我要看这一条"是同一件事，
+ *   而前台的详情（`#kv`）跟的就是它。分成两个动作的话，用户点了 A 却在详情里
+ *   看到 B，而两边看起来都对。
+ */
+async function selectJob(j) {
+  JOBS.selected = j.session_id;
+  if (j.attached && j.slot) {
+    await window.slurmate.setFront(j.slot);
+  }
+  renderJobs();
+}
+
+function jobRow(j) {
+  const li = document.createElement('li');
+  li.className = 'job'
+    + (j.live ? '' : ' dead')
+    + (j.attached ? '' : ' detached')
+    + (j.session_id === JOBS.selected ? ' on' : '');
+
+  // 服务名 —— 本机认不出这个插件时**照实说**，不编一个名字。
+  // （认得出才有名字：判据在主进程的 `registry.resolve`，不在这一层。）
+  li.append(cel('span', 't', j.service || '（本机没有这个插件）'));
+  li.append(cel('span', 'st', j.state_text || j.state || '—'));
+
+  const bits = [];
+  if (j.job_id) bits.push(`作业 ${j.job_id}`);
+  if (j.partition) bits.push(j.partition);
+  if (j.node) bits.push(j.node);
+  if (j.live && j.expires_at) bits.push('剩余 ' + fmtLeft(j.expires_at));
+  li.append(cel('span', 'm', bits.join(' · ') || '—'));
+
+  // 「谁在看」——**三句话三件事**（见 index.js 的 jobsView），不是"是不是本机"。
+  // ★ 而它只在**还活着**的会话上说得通：一条已经结束的会话没有"谁在看"。
+  if (j.keeper_text) {
+    li.append(cel('span', 'kp' + (j.keeper_is_me ? ' good' : ''), j.keeper_text));
+  }
+  // ★ 没接着的**必须说出来**：这一行的动作按钮是灰的，而"为什么点不动"不能靠猜。
+  //   出路是重连一次（`doConnect` 会跑 `tryReattach`），不是在这里再造一个入口。
+  if (j.live && !j.attached) {
+    li.append(cel('span', 'warn', '本机没接着它 —— 重连一次这个站点就会接上'));
+  }
+
+  li.onclick = () => selectJob(j);
+  return li;
+}
+
+function renderJobs() {
+  const rows = JOBS.list || [];
+  const err = $('jobs-error');
+
+  // ★ 三态：**取不到**（`list === null`）与**确实没有**（`list === []`）必须
+  //   长得不一样。把"问不到"画成"没有作业"，用户会以为自己的作业丢了 ——
+  //   而真正的原因在连接那一侧。
+  err.classList.toggle('hidden', !JOBS.error);
+  if (JOBS.error) err.textContent = `取不到作业列表：${JOBS.error}`;
+  $('jobs-when').textContent = JOBS.at
+    ? `这个站点上的作业（${fmtAge(Date.now() - JOBS.at)}前取的）。`
+    : '';
+
+  // ★ **先定选中的是谁，再画** —— 反过来的话，这一轮刚选中的那一行不带 `.on`，
+  //   而用户看到的是"点了没反应"。
+  //
+  //   默认顺序：用户刚点的那条还在就留着 → 前台那一条 → 第一条活着且本机接着的
+  //   → 第一行。★ 第一个条件不能省：省了的话每刷一次列表就把用户的选择冲掉。
+  const ids = new Set(rows.map((j) => j.session_id));
+  if (!(JOBS.selected && ids.has(JOBS.selected))) {
+    const front = (SESS.sessions.find((x) => x.slot === SESS.front) || {}).snap;
+    const hit = (front && rows.find((j) => j.session_id === front.sessionId))
+      || rows.find((j) => j.live && j.attached)
+      || rows[0];
+    JOBS.selected = hit ? hit.session_id : null;
+  }
+
+  const box = $('job-list');
+  box.textContent = '';
+  for (const j of rows) box.append(jobRow(j));
+  $('jobs-empty').classList.toggle('hidden', Boolean(JOBS.error) || rows.length > 0);
+
+  renderJobsSelection();
+}
+
+/**
+ * 三个动作按钮的可用性与提示。
+ *
+ * ★ 「接管」在**本机已经是看护者**时禁用：那是一次空动作，而它成功之后会回一句
+ *   "已接管" —— 用户会以为刚才发生了什么。按钮该说的是"这台电脑已经在看它了"。
+ */
+function renderJobsSelection() {
+  const j = selectedJob();
+  const canAct = Boolean(j && j.live && j.attached);
+  $('btn-jobs-end').disabled = !canAct;
+  $('btn-jobs-takeover').disabled = !canAct || j.keeper_is_me;
+  $('btn-jobs-reload').disabled = !canAct;
+  $('btn-jobs-takeover').title = !j ? '先在上面点一条作业'
+    : (j.keeper_is_me ? '这台电脑已经在看它了' : '把这条会话的看护者换成这台电脑（作业一个字都不动）');
+}
+
+/**
+ * 结束**某一个槽**上的会话。界面里三个地方都走它（作业列表、状态条、断开）。
+ *
+ * ★ 收成一份而不是各写一遍：那三处要说的话**逐字相同**，而其中最要紧的一句
+ *   （"`releasing` 不等于作业已经停了"）漏掉任何一处，用户就会以为作业结束了
+ *   而它还在烧 GPU。见 docs/ARCHITECTURE.md 的 §3.0。
+ */
+async function stopSlot(slot) {
+  if (!slot) return null;
+  const res = await window.slurmate.stop(slot);
+  if (res && res.ok) {
+    notice('info', res.detail || '已请求释放。');
+    if (res.state === 'releasing') {
+      notice('warn', '已请求释放。这表示控制节点开始处理了 —— '
+        + '请以状态变成「已结束」为准。');
+    }
+  } else if (res) {
+    notice('error', res.detail || '释放失败。');
+  }
+  return res;
+}
+
+/** 【结束】：结束**选中的**那一条。 */
+async function endSelectedJob() {
+  const j = selectedJob();
+  if (!j || !j.attached || !j.slot) {
+    return notice('error', '先在列表里点一条本机接着的作业。');
+  }
+  await stopSlot(j.slot);
+  refreshJobs();
+}
+
+/** 状态条上那个「结束会话」—— 结束**前台**那一条（跑起来之后那 30px 是唯一够得着的）。 */
+async function endFrontSession() {
+  await stopSlot(frontSlot());
+}
+
+/** 【接管】：把选中那条会话的看护者换成这台电脑。 */
+async function takeoverSelectedJob() {
+  const j = selectedJob();
+  if (!j) return notice('error', '先在列表里点一条作业。');
+  const r = await window.slurmate.takeover(j.session_id);
+  if (!r || !r.ok) {
+    const k = (r && r.error && r.error.kind) || '';
+    const detail = (r && r.error && r.error.detail) || '控制节点没有说明原因';
+    // ★ `no_client_id` 这一条**必须单独说**：它指的是"这次连接没有自报身份"，
+    //   而身份只在常驻通道上报（走 exec 退路时会被删掉）。那不是"控制节点坏了"，
+    //   是"这条路走不了" —— 用户能做的事完全不同（等通道恢复 / 重连）。
+    notice('error', k === 'no_client_id'
+      ? `这一次连接没有自报身份，接管做不了：${detail}`
+      : `接管失败：${detail}`);
+    return;
+  }
+  notice('info', '已接管。从现在起由这台电脑看护这条会话（作业一个字都没动）。');
+  refreshJobs();
 }
 
 // ── 分区 ────────────────────────────────────────────────────────────────────
@@ -1993,6 +2223,13 @@ async function handleConnectResult(res) {
     if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
     renderSessions({ sessions: [], front: null });
+    // ★★ 连上之后**进第二屏**。这一屏之所以能进，正是"连上"这件事本身：
+    //   插件是站点分发的，没有连接就不知道有哪些插件。
+    //   ★ 而"接回上次那些会话"是主进程在 connect 里**做完才返回**的（`doConnect`
+    //     的最后一步）—— 所以走到这一行时，本机手上已经有那几条会话了，
+    //     第三屏进去就看得见它们。
+    JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
+    showScreen('plugins');
     return true;
   }
 
@@ -2196,7 +2433,27 @@ async function init() {
   };
 
   $('btn-probe').onclick = doProbe;
+  $('btn-disconnect').onclick = doDisconnect;
 
+  // ── 三屏之间的前后关系 ──
+  // ★ 它们是**一个站点的三个层次**，所以靠前后关系走，不是一排平级标签：
+  //   进去要连着，退回不用。
+  $('btn-plugins-back').onclick = () => showScreen('conns');
+  $('btn-to-jobs').onclick = () => showScreen('jobs');
+  $('btn-to-plugins').onclick = () => showScreen('plugins');
+
+  // ── 作业列表那一屏 ──
+  // ★ 这三个 id（`btn-jobs-new` / `btn-jobs-takeover` / `btn-jobs-end`）与
+  //   panel.html 里那三个按钮由 test/renderer.test.mjs **逐字对着**：改了一边
+  //   而没改另一边，当场变红。它们指的是哪三个动作，见 panel.html 那一段注释。
+  $('btn-jobs-new').onclick = () => showScreen('plugins');
+  $('btn-jobs-takeover').onclick = takeoverSelectedJob;
+  $('btn-jobs-end').onclick = endSelectedJob;
+  $('btn-jobs-reload').onclick = () => {
+    const j = selectedJob();
+    return window.slurmate.reload(j ? j.slot : null);
+  };
+  $('btn-jobs-refresh').onclick = refreshJobs;
 
   // ★ 这里从前有一句：「『从一个包安装…』『打开插件目录』『重新扫描』**不在这里
   //   绑** —— 它们只在开发者模式那一节里出现，默认路径上"禁止自装"因此是真的」。
@@ -2208,7 +2465,6 @@ async function init() {
   window.slurmate.onPlugins((pv) => {
     if (!pv) return;
     renderPlugins(pv);
-    syncPurposeVisibility();
   });
 
   $('btn-doctor').onclick = async () => {
@@ -2235,10 +2491,15 @@ async function init() {
   $('btn-history').onclick = () => loadHistory();
 
   // 重新加载打的是**前台**那一条 —— 屏幕只有一块，用户看的正是它。
-  $('btn-reload').onclick = () => window.slurmate.reload(frontSlot());
+  // ★ 面板里那一份挪到作业列表那一屏了（`#btn-jobs-reload`，打的是**选中**的
+  //   那一条）；状态条这一份留着，理由与 `sb-end` 同：会话一跑起来，窗口主体
+  //   就被原生视图整块盖住，那 30px 是唯一够得着的像素。
   $('sb-reload').onclick = () => window.slurmate.reload(frontSlot());
-  $('btn-end').onclick = () => endSession();
-  $('sb-end').onclick = () => endSession();
+  // ★ `#btn-end` 那个按钮**没有了** —— 它的位置由作业列表那一屏上的
+  //   【结束】（`#btn-jobs-end`，结束选中的那一条）接过。状态条上这一个留着，
+  //   而且必须留着：会话跑起来之后窗口主体被原生视图整块盖住，那 30px 是唯一
+  //   够得着的像素（与 `sb-reload` / `sb-temp` 同一条理由）。
+  $('sb-end').onclick = () => endFrontSession();
 
   // 状态条里的布局选择器 —— 会话跑起来之后唯一够得着的入口。
   // 它改的是当前活跃连接的布局组（会话正跑在它上面，所以会立刻换端口重连隧道，
@@ -2310,13 +2571,24 @@ async function init() {
     notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);
   });
 
-  // 拉一次全部会话（启动时可能自动接上了**几条**）
+  // 拉一次全部会话。
+  //
+  // ★ v0.9 起启动**不会**接回任何会话（`index.js` 不再自动连），所以这里通常是
+  //   一份空表。留着这一问是因为它同时回答了"这个客户端手上还有没有会话记录"
+  //   —— 那与"连没连上"是两件事（比如上个进程留下的已经结束的记录）。
   const st = await window.slurmate.states();
   if (st && st.sessions && st.sessions.some((x) => x.live)) connected = true;
   // connected 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
-  // 补一次，否则自动接上会话时那一条不会显示「已连接」
+  // 补一次，否则那一条不会显示「已连接」
   renderConnections(boot.connections);
   renderSessions(st || { sessions: [], front: null });
+
+  // ★★ **开局落在第一屏**（连接列表），而且没有任何自动连接。
+  //   这一句是「不自动连」在界面这一侧的落点：`index.js` 那边不连，
+  //   这里不跳。没有它的话，`screen-conns` 那份 HTML 是露着的（它是唯一没有
+  //   `hidden` 的一屏），但路由的 `SCREEN` 还是上一次的值 —— 两份"我在哪一屏"
+  //   会漂，而漂的形态是"点了返回，页面没动"。
+  showScreen('conns');
 }
 
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
@@ -2352,26 +2624,12 @@ async function doDisconnect() {
   } else {
     notice('info', '已断开与登录节点的连接。');
   }
+  // ★ 断开之后**回第一屏**，并把作业列表作废：那份数据属于刚才那个站点，
+  //   留着它会让下一次进作业列表时先闪一下**上一个站点**的作业（见 JOBS.forConn）。
+  JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
   renderConnections(boot.connections);
   renderSessions({ sessions: [], front: null });
-}
-
-async function endSession() {
-  // ★ **指名**结束哪一条（前台那一条）—— 主进程不收没名字的 stop，
-  //   那个隐式缺省在多开下会变成"停错了另一条"。
-  const slot = frontSlot();
-  if (!slot) return;
-  const res = await window.slurmate.stop(slot);
-  if (res && res.ok) {
-    notice('info', res.detail || '已请求释放。');
-    if (res.state === 'releasing') {
-      notice('warn',
-        '已请求释放，但这只表示控制节点开始处理 —— 它并不保证作业真的被取消了。'
-        + '请以状态条变为「已结束」为准。');
-    }
-  } else if (res) {
-    notice('error', res.detail || '释放失败。');
-  }
+  showScreen('conns');
 }
 
 async function doProbe() {

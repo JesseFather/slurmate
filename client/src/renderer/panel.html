@@ -71,16 +71,33 @@
     <h1>Slurmate</h1>
     <p class="sub" id="app-sub">远程开发会话</p>
 
-    <!-- ── 登录节点：表面只放已保存的连接 ──
-         公钥和地址表单都折进「新建连接」里 —— 它们是**一次性**的活，
-         而用户每次打开客户端真正要做的事是「连上上次那台」。 -->
+    <!-- ══ 三屏 ══════════════════════════════════════════════════════════════
+         连接列表 → 插件列表 → 作业列表。**同时只露一个**（见 panel.js 的
+         showScreen）。
+
+         ★★ v0.9 换掉的是**打开客户端时落在哪里**：从前启动就自动连上"上次那条"、
+         直接落在「开始会话」上 —— 于是下面这两屏（我配了哪几个站点、这个站点上
+         我还有哪些作业）在启动序列里根本没有位置，用户也没有一个可以退回来的地方。
+         现在打开停在连接列表，连哪一台由用户点。
+
+         ★ 这三屏是**一个站点的三个层次**，不是三个并列的功能页：进去了才有第二屏，
+         连上了才有第三屏。所以它们靠**前后关系**走（连接行上的按钮、每屏左上角的
+         「←」），而不是一排平级的标签。
+         ══════════════════════════════════════════════════════════════════ -->
+
+    <!-- ── 第一屏：连接列表 ──
+         公钥和地址表单都折进「新建连接」里 —— 它们是**一次性**的活。 -->
+    <section id="screen-conns" class="screen">
     <section id="sec-connect">
-      <!-- 两个操作放右上角：它们是这一屏的「入口」，而列表本身是内容。
-           摆在列表下面时，列表一长就得先滚过全部条目才够得着。 -->
+      <!-- 操作放右上角：它们是这一屏的「入口」，而列表本身是内容。
+           摆在列表下面时，列表一长就得先滚过全部条目才够得着。
+           ★ 「断开」只在**连着**的时候出现 —— 它是一个站点级的动作
+             （同时最多连着一个站点），不是某一条连接自己的属性。 -->
       <div class="sec-head">
         <h2>登录节点</h2>
         <button id="btn-new">新建连接…</button>
         <button id="btn-probe" class="ghost">探测全部</button>
+        <button id="btn-disconnect" class="ghost danger-ghost hidden">断开</button>
         <!-- 集群现状是**只读**的，而且与"有没有会话"无关 —— 所以入口在这一屏，
              不在"开始会话"那一屏里（那一屏连不上集群时是藏着的）。 -->
         <button id="btn-cluster" class="ghost">集群状态</button>
@@ -91,6 +108,15 @@
       <p class="sub" id="conn-empty">
         还没有保存任何登录节点。点右上角的「新建连接」填一个 ——
         只需要用户名、主机和端口。
+      </p>
+      <!-- ★ 这一句是**边界**，不是客套话：打开客户端确实不会连上任何一台，
+           而"某个站点上还有没有作业在跑"这件事，不连上去就无从知道（作业在
+           服务端，客户端手上没有它的影子）。★ 所以第二句同样要紧 ——
+           连上去**不会动任何作业**，于是"点一下看看"是一个没有代价的动作。 -->
+      <p class="sub" id="conn-notes">
+        打开客户端<strong>不会自动连上任何一台</strong>。
+        想知道某个站点上还有没有作业在跑，点它那一行的「连接」——
+        连上去<strong>不会动任何作业</strong>，只是把还在跑的那些接回来看着。
       </p>
 
       <!-- ── 连接 ↔ 布局 的映射图 ──
@@ -180,10 +206,21 @@
         <button id="btn-cancel-form" class="ghost">取消</button>
       </div>
     </section>
+    </section><!-- /screen-conns -->
 
-    <!-- ── 开始会话（每个插件一块，高级选项折叠在下面）── -->
-    <section id="sec-purpose" class="hidden">
-      <h2>开始会话</h2>
+    <!-- ── 第二屏：插件列表（每个插件一块，高级选项折叠在下面）──
+         ★ 这一屏的入口只有一个：连接列表上那条**已经连上**的连接（行上的「进入」）。
+           所以它不需要自己的"还没连上"空态 —— 走不到那儿。 -->
+    <section id="screen-plugins" class="screen hidden">
+      <div class="sec-head">
+        <h2 id="plugins-title">插件</h2>
+        <button id="btn-plugins-back" class="ghost">← 登录节点</button>
+        <button id="btn-to-jobs" class="ghost">作业</button>
+      </div>
+    <section id="sec-purpose">
+      <!-- ★ 这一屏的标题在上面那个 `.sec-head` 里（`#plugins-title`，由 panel.js
+           写成「插件 · user@host」—— 用户在几个站点之间来回时，最要紧的一件事
+           就是"我现在看的是哪一台"）。所以这里不再另起一个 h2。 -->
       <p class="sub" id="purpose-hint">
         分区由集群从你有权限的分区里随机挑一个，节点和端口都自动分配。
         会话到期前会自动续期。<strong>默认资源按插件不同</strong>，见每一块里那行。
@@ -273,19 +310,45 @@
         <button id="btn-doctor" class="ghost">体检集群</button>
       </div>
     </section>
+    </section><!-- /screen-plugins -->
 
-    <!-- ── 会话进行中 ── -->
-    <section id="sec-session" class="hidden">
-      <h2>当前会话</h2>
-      <dl class="kv" id="kv"></dl>
-      <div class="row row-spaced">
-        <button id="btn-reload" class="ghost">重新加载页面</button>
-        <button id="btn-end" class="danger">结束会话</button>
+    <!-- ── 第三屏：作业列表 ──
+         ★★ 数据的来源是**服务端**（`op:list`，见 index.js 的 jobsView），不是本机
+           那张会话表。两者在正常情况下一样，差在三种**真的会发生**的场合：上一台
+           电脑提交的、本机认不出插件因而没接上的、刚结束而服务端还留着那一行的。
+           只画本机那一份的话，这三种里用户看到的都是"我没有作业了" —— 而作业还在。
+
+         ★ 而**动作只给本机接着的那些**（`attached`）：结束一条会话走的是
+           `SessionController.stop()`，它要心跳、要隧道、要那条会话的完整视图。
+           给一条没接着的会话另写一条"直接发 goodbye"的短路，就是同一条规矩的第二份
+           实现 —— 而它漂开的方向是"界面说结束了、作业还在烧"。
+           没接着的那些照实说出来，出路是重连一次（`doConnect` 会跑 `tryReattach`）。
+
+         ★ 三个动作按钮的 id 与 panel.js 读的**逐字相同**，由 renderer 那一份
+           跨文件用例钉着（`btn-jobs-new` / `btn-jobs-takeover` / `btn-jobs-end`）。 -->
+    <section id="screen-jobs" class="screen hidden">
+      <div class="sec-head">
+        <h2>作业</h2>
+        <button id="btn-to-plugins" class="ghost">← 插件</button>
+        <button id="btn-jobs-new">新建…</button>
+        <button id="btn-jobs-takeover" class="ghost">接管</button>
+        <button id="btn-jobs-end" class="danger">结束</button>
+        <button id="btn-jobs-reload" class="ghost">重新加载页面</button>
+        <button id="btn-jobs-refresh" class="ghost">刷新</button>
+      </div>
+      <p class="sub" id="jobs-when"></p>
+      <!-- 三态：这一格是**取不到**时的话。它必须画得跟"确实没有作业"不一样 ——
+           把"问不到"画成"没有"，用户会以为自己的作业丢了。 -->
+      <p class="sub bad hidden" id="jobs-error"></p>
+      <ul id="job-list" class="jobs"></ul>
+      <p class="sub" id="jobs-empty">这个站点上还没有你的作业。点「新建…」挑一个插件起一条。</p>
+      <div id="job-detail" class="hidden">
+        <h3>选中的那一条</h3>
+        <dl class="kv" id="kv"></dl>
       </div>
       <p class="sub row-spaced">
-        会话运行期间，这两个按钮也可以从左上的状态条直接点到。
         <strong>关掉窗口同样会结束会话</strong>；但合盖、断网、断电不会 ——
-        那些情况客户端说不上话，作业会被保留，下次打开自动接上。
+        那些情况客户端说不上话，作业会被保留，下次连上时自动接回。
       </p>
     </section>
 
@@ -376,6 +439,9 @@
           <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
                而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
           <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
+          <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
+               而【接管】这个按钮的全部意义就是那一刻。 -->
+          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
           <button class="ghost" data-debug="reset">复位</button>
         </div>
         <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、

@@ -245,11 +245,26 @@ class FakeBackend extends Backend {
     this.cancelFails = false;
     this._seq = 0;
     /**
-     * 这台电脑的客户端身份（见 backend.js 的接口注释）。假后端**不用它排席位**
-     * ——它没有第二个客户端——但它必须**收下**：一个不看这个字段的假后端，
-     * 会让"客户端身份根本没送到后端"这件事在开发者模式里完全看不出来。
+     * 这台电脑的客户端身份（见 backend.js 的接口注释）。
+     *
+     * ★★ v0.9：假站点**真的用它**了 —— 提交时写进会话行的 `keeper`（与真守护
+     *   进程的 `op_submit(client_id)` 同一个位置），心跳按它判"这是不是看护者"，
+     *   接管按它换人。从前这里写着"假后端不用它排席位"，那句话随着自动顶替
+     *   一起过期了：今天的身份不用来排席位，用来**认看护者**。
+     *
+     * ★ 一个不看这个字段的假后端，会让"客户端身份根本没送到后端"这件事在
+     *   开发者模式里完全看不出来 —— 而那正是这一版最重的一条失败形态
+     *   （身份没到 ⇒ 看护者永远为空 ⇒ 谁也不认得自己的会话）。
      */
     this._client = (opts && opts.client) || null;
+    /**
+     * 假站点上**别人**的看护者（模拟另一台电脑）。`null` = 没有别人。
+     *
+     * ★ 存在的理由与 `cancelFails` 一样：真集群上"这条作业被另一台电脑看着"
+     *   要两台机器才造得出来，而**接管**这个按钮的全部意义就是那一刻。
+     *   `_sessions` 里那些会话的 keeper 会被它覆盖（见 `_effKeeper`）。
+     */
+    this._foreignKeeper = null;
     /**
      * 集群信息里**哪些格缺席**（`{health:true, nodes:true, …}`）。
      *
@@ -609,6 +624,7 @@ class FakeBackend extends Backend {
       case 'status':     return this._status(req);
       case 'list':       return this._list();
       case 'heartbeat':  return this._heartbeat(req);
+      case 'takeover':   return this._takeover(req);
       case 'goodbye':    return this._goodbye(req);
       case 'doctor':     return this._doctor();
       case 'cluster':    return this._cluster();
@@ -716,6 +732,31 @@ class FakeBackend extends Backend {
   debugOldDaemon(on = true) { this._noPluginsOp = on; }
 
   /**
+   * 让假站点上每一条会话都显示成**另一台电脑在看**。
+   *
+   * ★ 真集群上这一幕要两台机器才造得出来（在一台上开着，去另一台上打开），
+   *   而「接管」这个按钮的全部意义就是那一刻 —— 它的**判据**（`keeper` 不是本机）
+   *   与它成功之后那句「已接管」在开发者模式里必须能先看一遍。
+   *
+   * ★ 关掉（`false`）时把会话行上那一格**还原成它自己的值**，而不是留一个刚造的
+   *   假值 —— 否则"撤销"只是把别人的名字换成另一个别人的名字，而界面上看不出来。
+   *
+   * ★ 传**空串**造的是第三种现场：**没人在看**（`keeper` 为空）。真集群上那一格
+   *   出现在"会话是 CLI 提交的"（提交那条连接没有身份）—— 而它也是界面上
+   *   「本机在看 / 另一台电脑在看 / 没人在看」三句话里最后一句的唯一来源。
+   *   少了它，那一句在开发者模式里永远看不到（这正是"夹具要比真集群脏"那条）。
+   */
+  debugForeignKeeper(who) {
+    if (who === undefined || who === true) {
+      this._foreignKeeper = this._foreignKeeper || 'demo-other-machine-0001';
+    } else if (who === false || who === null) {
+      this._foreignKeeper = null;
+    } else {
+      this._foreignKeeper = String(who);          // '' = 没人在看
+    }
+  }
+
+  /**
    * 让假站点报一个**指定的基座版本**（`ping` 的 `version`）。传 `null` 恢复成
    * "跟着本客户端走"。
    *
@@ -777,6 +818,11 @@ class FakeBackend extends Backend {
     this._bloatPlugin = null;
     this._pkgCache.clear();
     this._rateLimitBurst = 0;
+    // ★ 「另一台电脑在看」那几个单向开关里唯一需要显式撤掉的一个：
+    //   它改的是**已有会话行**上那一格（不是"以后新建的"），所以不撤掉的话
+    //   下一条用例会看见上一个用例留下的"别人"。
+    this._foreignKeeper = null;
+    this.cancelFails = false;
   }
 
   // ── op 实现 ─────────────────────────────────────────────────────────────
@@ -1001,6 +1047,11 @@ class FakeBackend extends Backend {
       renew_count: 0,
       requested_time: '12:00:00',
       note: null,
+      // ★★ v0.9：**谁在看这条会话** —— 与真守护进程的 `op_submit(client_id)`
+      //   同一个位置、同一个含义。提交这条连接的客户端就是它的第一个看护者；
+      //   没有身份（CLI、老客户端）⇒ `null`，而 `null` 是**合法状态**：
+      //   指的是"确实没人在看"，不是"不知道"。
+      keeper: this._client ? this._client.id : null,
       service_kind: kind,
       // ★ 会话的**解析键**：`<id>@<版本>`。守护进程在提交时从它自己那份插件
       //   清单里抄下来 —— 而"抄下来"是关键：站点之后升级了插件，这个字段
@@ -1079,13 +1130,77 @@ class FakeBackend extends Backend {
     return ok({ sessions: this._sessions.map((s) => this._view(s)) });
   }
 
+  /**
+   * 心跳。**判据与真守护进程的 `op_heartbeat` 逐档同构**（见那一段的四档表）：
+   *
+   *   | 发心跳的连接 | keeper | 结果 |
+   *   | 报了身份 | 空 | 接受，**并认领** |
+   *   | 报了身份 | 是我 | 接受 |
+   *   | 报了身份 | 是别人 | 回 `ok` + `ignored`，**什么都不动** |
+   *   | **没报身份** | 任意 | 一律接受，keeper 不动 |
+   *
+   * ★★ 最后一行是承重的，别"收严"：没报身份的是 CLI 与更老的客户端，以及
+   *   **我们自己在常驻通道断掉之后的 exec 退路**。假站点要是把它也挡掉，
+   *   开发者模式里就会演出一件真集群上不会发生的事 —— 而假站点全部的价值
+   *   就是它演的是同一件事。
+   *
+   * ★ 也**不认领**没报身份的连接：`keeper` 写谁？没有名字就没人可写。
+   */
   _heartbeat(req) {
     const sid = req && req.session_id;
     const s = this._find(sid);
     if (!s) return err(3, 'not_found');
+    const me = this._client && this._client.id;
+    const keeper = this._effKeeper(s);
+    if (me && keeper !== null && keeper !== me) {
+      // `state` 原样返回、一个字段都不动 —— 别人的心跳既不能续命，也不能把
+      // 一条 `suspect` 的会话"救"回来（那台电脑并没有在看它）。
+      return ok({ state: s.state, at: nowSec(), ignored: 'not_keeper' });
+    }
     s.last_hb_at = nowSec();
+    if (me && keeper === null) s.keeper = me;
     if (s.state === 'suspect') s.state = 'enrolled';
     return ok({ state: s.state, at: nowSec() });
+  }
+
+  /**
+   * 【接管】：把这条会话的看护者换成我。★★ **一个字都不动会话。**
+   *
+   * 与真守护进程的 `op_takeover` 同一条纪律（见那一段 docstring）：作业、ACL、
+   * 端口、`last_hb_at`、`state` 一个都不动 —— 用户只是**换了一台电脑看同一个
+   * 作业**。动了别的任何一个字，接管的语义就变成"结束并重开"。
+   *
+   * ★ 没有身份**不能**接管（要把看护者写成谁？）—— 与心跳那条**正好相反**，
+   *   而且不是矛盾：心跳是"我在续命"（缺身份时宽进，排除错了会杀作业），
+   * 接管是"我来当家"（缺身份时严出，它要往那一格里写一个名字）。
+   */
+  _takeover(req) {
+    const me = this._client && this._client.id;
+    if (!me) {
+      return err(2, 'no_client_id',
+        '这条连接没有自报身份（`client`），而「接管」必须知道看护者该写成谁。');
+    }
+    const s = this._find(req && req.session_id);
+    if (!s) return err(3, 'not_found');
+    if (['released', 'rejected', 'expired'].includes(s.state)) {
+      return err(4, 'session_gone', `这条会话已经结束（${s.state}）。`);
+    }
+    const was = this._effKeeper(s);
+    // 别人那个"在看"要**真的撤掉**，否则下一次心跳还会被回 `ignored`。
+    this._foreignKeeper = null;
+    s.keeper = me;
+    return ok({ session_id: s.session_id, keeper: me, was });
+  }
+
+  /**
+   * 这条会话**现在**的看护者：那一层覆盖（如果开着）优先，其次才是它自己那一格。
+   *
+   * ★ 判空用的是 `!== null` 而不是真值 —— 覆盖值**可以是空串**，而那是一个
+   *   有意义的取值（"没人在看"），不是"没有覆盖"。
+   */
+  _effKeeper(s) {
+    if (this._foreignKeeper !== null) return this._foreignKeeper || null;
+    return s.keeper === undefined ? null : s.keeper;
   }
 
   _goodbye(req) {
@@ -1149,6 +1264,11 @@ class FakeBackend extends Backend {
       last_hb_at: s.last_hb_at, renew_count: s.renew_count,
       requested_time: s.requested_time, note: s.note,
       auth_mode: s.auth_mode, account: s.account,
+      // ★ v0.9：**谁在看** —— 一个 client_id，或者 null。取值只有这两种
+      // （不是空串、不是 "unknown"），与守护进程那一格逐字同形。
+      // ★ 它是「接管」这个按钮的**唯一判据**，也是界面上「本机在看 / 另一台电脑
+      //   在看 / 没人在看」那三句话的来源。
+      keeper: this._effKeeper(s),
       tunnel_target: s.tunnel_target,
       // 与守护进程逐字一致：这个字段**总是**存在（可能是 null）。
       // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——

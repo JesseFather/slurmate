@@ -444,6 +444,16 @@ const frontSlotOf = async () => {
   const r = await invoke('app:states');
   return r.front;
 };
+/**
+ * 作业列表里**还活着**的那些。
+ *
+ * ★ 为什么要有这一条糖：`op:list` 返回的是**服务端记着的每一行**，包括已经结束、
+ *   还没被 `released_keep` 回收的那些（照实说：真守护进程也是这样，那一行要留
+ *   一阵子）。所以 `jobs[0]` 完全可能是上一次用例留下的**已结束**那一条 ——
+ *   直接取下标，红的理由会和想验的事情毫无关系。
+ */
+const liveJobs = (r) => ((r && r.jobs) || []).filter((j) => j.live);
+
 /** 界面收到的通知（主进程 `win.pushNotice` 推的那一路，形如 `{kind, text}`）。 */
 const noticesOf = () =>
   (calls.windows[0] && calls.windows[0].webContents.handlers['send:ui:notice']) || [];
@@ -488,6 +498,23 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
   assert.ok((win.webContents.handlers['send:session:states'] || []).length >= 1,
     '应当向面板推过状态');
 
+  // ★★ v0.9：**启动不自动连。**
+  //
+  //   这一条必须查在**这里** —— 这个文件里所有用例共用同一个进程，后面的用例
+  //   都会自己连上，那时再查就查不出"启动那一刻连没连"了。而它是这一整版最
+  //   要紧的一条行为：接管必须是**用户的一个动作**，不能是打开客户端的副作用。
+  const idx = require('../src/main/index.js');
+  assert.equal(idx._test.getBackend().connected, false,
+    '★ 启动之后后端必须**没有**被连上（从前 announceBackend 的最后一句就是 doConnect）');
+  assert.equal((await invoke('app:states')).sessions.length, 0,
+    '启动时不该有任何会话被接回来');
+  assert.equal((await invoke('app:bootstrap')).connections.length, 0,
+    '前置：这个沙盒里一条连接都还没配（下面各条用例自己建）');
+  // ★ 旁证：整条启动路径上一次 `connect` 都没发生 —— 界面收到的通知里
+  //   不该有那一句（它只在 handleConnectResult 里推）。
+  assert.equal(noticesOf().some((n) => /已连接：/.test(n.text || '')), false,
+    '★ 启动这一路上不许有过一次成功的连接');
+
   // IPC 通道注册齐全
   for (const ch of ['app:bootstrap', 'app:probeHosts', 'app:connect', 'app:partitions',
                     'app:start', 'app:states', 'app:doctor', 'app:stop', 'app:reload',
@@ -519,6 +546,29 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
   // 开发者模式必须用独立的配置命名空间 —— 否则沙盒里配的用户名/端口会污染真连接
   assert.equal(fs.existsSync(path.join(userData, 'config.json')), false,
     '开发者模式绝不能往真配置目录里写东西');
+});
+
+test('★★ 启动那一路上一次 `doConnect` / `backend.connect` 都不许有', () => {
+  // ★★ 为什么这条只能查源码：**真后端那一支在开发者模式里够不着。**
+  //   `announceBackend()` 第一句就是"假后端 → 只推通知、直接返回"，所以开发者
+  //   模式永远走不到下面那一段（`const conn = config.activeConnection(cfg)`）。
+  //   上面那条用例能验的是"假后端启动时没被 connect"，而"真后端启动时不会连上
+  //   上次那条"是**行为上验不了**的一格。
+  //
+  //   这确实是弱判据（"源码里有没有这个词"），所以把范围收窄到**这个函数体**、
+  //   把两个词都列上：`doConnect(` 在别的函数里到处都是（`app:connect`、
+  //   `app:trustHostKey`），不收紧的话它是一条永远绿的空断言。
+  //
+  //   ★ 这一格的诚实说法是：**它是"不许再写回去"的封印，不是"它确实不连"的证明。**
+  //     要真的验它，得有一台真集群（或一个能演真后端的桩）——那属于账本里
+  //     「从未实测过」那一类。
+  const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+  const fn = /async function announceBackend\(\)[\s\S]*?\n\}/.exec(src);
+  assert.ok(fn, 'index.js 里应当有 announceBackend() —— 结构变了就更新这条检查');
+  assert.equal(/\bdoConnect\s*\(/.test(fn[0]), false,
+    '★ announceBackend 里又出现了 doConnect —— 那正是"打开客户端就自动连上"');
+  assert.equal(/backend\.connect\s*\(/.test(fn[0]), false,
+    '★ announceBackend 里又出现了 backend.connect —— 同上');
 });
 
 test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', async (t) => {
@@ -831,14 +881,22 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
   }
   const conn = boot.connections.find((c) => c.id === boot.activeConnectionId)
             || boot.connections[0];
-  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
-    '假后端应当连得上');
 
   const idx = require('../src/main/index.js');
   // 上一个用例「断开」时假后端被 close()，而它那个 1.6 秒的释放定时器在 close() 里
   // 被清掉了 —— 于是那个会话卡在 releasing，_submit 会以 quota_active 拒绝。
   // 真集群上守护进程的 phase_release 会自己收掉它（最多一个 tick），这里手动收。
+  //
+  // ★★ 这一步必须排在 `app:connect` **前面**（v0.9 起）。连接现在会跑
+  //   `tryReattach()`（`doConnect` 的最后一步），而它会把**还占着位置**的会话
+  //   接回来 —— `releasing` 就在那个集合里。接回来之后：那个槽被它占着，于是
+  //   下面这一条新会话拿的是一个**临时实例**（另一个组、另一个端口），而这条
+  //   用例要验的"换组会重建视图"就永远走不到（判据是 `layoutId` 与连接那个组
+  //   相等）。症状是"换 partition 必须重建视图"这一条红，而原因完全不在这里。
   idx._test.getBackend().debugReap();
+
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
+    '假后端应当连得上');
 
   const before = calls.views.length;
   const started = await invoke('app:start', {});
@@ -2563,6 +2621,7 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = idx._test.getBackend();
+  await ensureConnected(idx);
 
   // 等上一个用例的会话真的被释放（假后端要 1.6 秒，而配额是 1）
   await waitUntil(async () => !onlyFake(b)
@@ -2603,6 +2662,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = idx._test.getBackend();
+  await ensureConnected(idx);
   await waitUntil(async () => !onlyFake(b)
     || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
@@ -2680,6 +2740,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
 test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
+  await ensureConnected(idx);
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // 等上一个用例的会话真的被释放。假后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
@@ -2795,6 +2856,7 @@ test('配置里认不出的 enabled 值按「跟着站点走」处理，不读�
 
 test('★ 未知服务的会话：接上隧道、不建视图，并说清该升级客户端', async (t) => {
   t.after(async () => {
+  await ensureConnected(idx);
     Module._load = origLoad;
     // ★ 这一条不只是打扫卫生：如果 tryReattach 提前返回（正是 C10 那个变异），
     //   controller 会是 null 而隧道还活着 —— 事件循环被它撑住，
@@ -2960,6 +3022,33 @@ async function connectDemo(idx) {
     { user: 'demo', host: '127.0.0.1', port: 1 });
   const r = await invoke('app:connect', { connectionId: conn.connection.id });
   assert.equal(r.ok, true, `连接失败：${JSON.stringify(r)}`);
+}
+
+/**
+ * 保证「连着」这件事成立 —— **不清假站点的状态**。
+ *
+ * ★★ 为什么这一条从 v0.9 起需要每个用例自己说：**启动不再自动连**。从前这些
+ *   用例靠的是"bootstrap 已经替它连上了"，而那正是这一版删掉的行为。留着那种
+ *   隐含前提，症状是"改了启动序列 ⇒ 一堆用例以 `app:start` 失败收场，而报出来的
+ *   原因指不回启动序列"。
+ *
+ * ★ 它与 `connectDemo` 的差别只有一处：**不 reset**。`connectDemo` 用来开一个
+ *   干净的现场（服务端状态 + 客户端记录一起清），而这一条只补上"连上"那一步 ——
+ *   对着一个已经摆好现场的用例调用它，reset 会把现场一起抹掉。
+ */
+async function ensureConnected(idx) {
+  const b = idx._test.getBackend();
+  if (b.connected) return b;
+  let boot = await invoke('app:bootstrap');
+  if (!boot.connections.length) {
+    await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+    boot = await invoke('app:bootstrap');
+  }
+  const conn = boot.connections.find((c) => c.id === boot.activeConnectionId)
+            || boot.connections[0];
+  const r = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(r.ok, true, `补一次连接失败：${JSON.stringify(r)}`);
+  return b;
 }
 
 test('★★ 多开：一个开发会话与一个中转站会话同时活着，互不打扰', async (t) => {
@@ -4020,6 +4109,293 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
     '要有一条说清磁盘没清干净的提示', 5000);
   assert.equal(fs.existsSync(dir), true, '前提：它真的没被删掉（父层不可写）');
 
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  v0.9 阶段 5：三屏（连接 → 插件 → 作业）
+//
+//  ★ "不自动连"那一条查在**第一个用例**里（必须在那儿 —— 启动那一刻只发生一次）。
+//    这里查的是第三屏的数据与那三个动作。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★★ 作业列表来自服务端（`op:list`），不是本机那张会话表', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  // ── 一条活着的都没有时：**确实没有**（空的），不是"取不到"（那要报错） ──
+  let r = await invoke('app:jobs');
+  assert.equal(r.ok, true, `这份查询本身应当成功：${JSON.stringify(r)}`);
+  assert.ok(Array.isArray(r.jobs), 'jobs 必须是一个数组（不是 null）');
+  assert.deepEqual(liveJobs(r), [],
+    '还没有活着的作业时，活的那一批是空的（已经结束的那些会照旧留着 —— 服务端也是这样）');
+
+  // ── 起一条，再看 ──
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  r = await invoke('app:jobs');
+  assert.equal(r.ok, true);
+  assert.equal(liveJobs(r).length, 1, `应当刚好一条活着的：${JSON.stringify(r.jobs)}`);
+  const j = liveJobs(r)[0];
+
+  // ★ 每一格都是界面要用的那一格，而且名字与 panel.js 读的**逐字相同**。
+  for (const k of ['session_id', 'state', 'state_text', 'live', 'job_id', 'partition',
+                   'node', 'expires_at', 'job_state', 'service', 'service_kind',
+                   'attached', 'slot', 'keeper', 'keeper_text', 'keeper_is_me']) {
+    assert.ok(k in j, `作业那一行缺了 ${k}`);
+  }
+  assert.equal(j.live, true);
+  assert.equal(j.attached, true, '刚提交的这一条本机接着它');
+  assert.ok(j.slot, '接着的必须给出 slot —— 结束那条路要指名停哪一个');
+  // ★ 会话状态译成人话（与**作业状态**是两张表，见 src/main/sessionstate.js）
+  assert.match(j.state_text, /[一-鿿]/, `state_text 要是人话：${j.state_text}`);
+  assert.notEqual(j.state_text, j.state, '不该把状态原文当译文发出去');
+  // ★ 「谁在看」：提交这条连接就是它的第一个看护者（与守护进程的
+  //   `op_submit(client_id)` 同一个位置）。
+  assert.equal(j.keeper_is_me, true, `提交者应当是看护者：${JSON.stringify(j)}`);
+  assert.equal(j.keeper_text, '本机在看');
+
+  // ★★ **决定性的一格：这一屏问的是服务端，不是本机手上那张表。**
+  //
+  //   只把**客户端这一侧**清掉（模拟"这条作业是在别处提交的、本机还没接上它"），
+  //   服务端那条作业一个字不动。作业列表必须照样看得见它 —— 拿本机那张表当答案
+  //   的话，用户在这里看到的是"我没有作业了"，而作业正在集群上烧着 GPU。
+  for (const rec of [...idx._test.getSessions().values()]) {
+    if (rec.controller) await rec.controller.abandon();   // 一个字都不发给服务端
+  }
+  idx._test.getSessions().clear();
+  assert.equal((await invoke('app:states')).sessions.length, 0, '前置：本机手上已经没有它了');
+
+  r = await invoke('app:jobs');
+  assert.equal(liveJobs(r).length, 1,
+    `★★ 作业列表问的是服务端 —— 本机没接着它也必须在：${JSON.stringify(r.jobs)}`);
+  assert.equal(liveJobs(r)[0].attached, false, '★ 而 attached 要如实说"本机没接着它"');
+  assert.equal(liveJobs(r)[0].slot, null, '没接着就没有槽 —— 动作按钮靠这一格灰掉');
+
+  // 收尾：把它接回来再停掉，免得留给下一条用例。
+  await invoke('app:connect', {});
+  for (const s of (await invoke('app:states')).sessions) {
+    if (s.live) await invoke('app:stop', { slot: s.slot });
+  }
+  await openUpTo(idx, 1);
+});
+
+test('★★ 【接管】只换看护者那一格，会话其余部分一动都不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true);
+  const before = await invoke('app:jobs');
+  const row = liveJobs(before)[0];
+  assert.equal(row.keeper_is_me, true, '前置：先得是自己在看');
+
+  // ★★ 服务端那一行**逐字段**记下来 —— 接管之后要比对的是它，不是作业列表
+  //   加工过的那一份。作业列表只带客户端要用的那几格，而"接管一个字都不动会话"
+  //   这条不变量说的是**服务端那一行**：`last_hb_at`、`job_id`、`node`、
+  //   `service_port`、`tunnel_target`、`state`、`partition` 一个都不许动。
+  const srvBefore = { ...onlyFake(b) };
+
+  // ── 造出「另一台电脑在看」（真集群上要两台电脑才看得到这一幕）──
+  await invoke('app:debug', 'foreign-keeper');
+  let r = await invoke('app:jobs');
+  assert.equal(liveJobs(r)[0].keeper_is_me, false);
+  assert.equal(liveJobs(r)[0].keeper_text, '另一台电脑在看',
+    `★ 三句话里的第二句：${JSON.stringify(liveJobs(r)[0])}`);
+
+  // ★ 第三句：**没人在看** —— `keeper` 为空是**合法状态**（会话是 CLI 提交的
+  //   那种），不是"不知道"。它与第二句必须画得不一样：一件是"那台电脑在看着"，
+  //   一件是"**倒计时已经在跑**，谁先认领就是谁的"。
+  await invoke('app:debug', 'foreign-keeper', '');
+  r = await invoke('app:jobs');
+  assert.equal(liveJobs(r)[0].keeper, null, 'keeper 为空就是**为空**（不是空串、不是 unknown）');
+  assert.equal(liveJobs(r)[0].keeper_text, '没人在看',
+    `★ 三句话里的第三句：${JSON.stringify(liveJobs(r)[0])}`);
+  assert.equal(liveJobs(r)[0].keeper_is_me, false);
+  await invoke('app:debug', 'foreign-keeper');            // 换回"另一台电脑在看"
+
+  // ── 接管 ──
+  const tk = await invoke('app:takeover', { sessionId: row.session_id });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+  assert.equal(tk.data.keeper, b._client.id);
+  assert.equal(tk.data.was, 'demo-other-machine-0001');
+
+  r = await invoke('app:jobs');
+  const after = liveJobs(r)[0];
+  assert.equal(after.keeper_is_me, true, '接管之后看护者是本机');
+  assert.equal(after.keeper_text, '本机在看');
+
+  // ★★ **接管只动一格。** 逐字段比对会话行 —— 动了别的任何一个字，这条功能的
+  //   语义就从"换一台电脑看同一个作业"变成"结束并重开"，而那是另一个按钮
+  //   （用户已明确："布局之类的不同无所谓，但后台作业是同一个是根本原则"）。
+  for (const k of ['session_id', 'state', 'state_text', 'live', 'job_id', 'partition',
+                   'node', 'expires_at', 'job_state', 'service', 'service_kind',
+                   'attached', 'slot']) {
+    assert.deepEqual(after[k], row[k], `接管动了 ${k} —— 它只该动 keeper`);
+  }
+
+  // ★★ 而**服务端那一行**是更严的那一半：作业列表里根本没有 `last_hb_at`、
+  //   `service_port`、`tunnel_target` 这几格，所以"接管顺手把别的东西也改了"
+  //   在上面那一轮比对里**看不出来**。
+  //
+  //   ★ 这里允许两个字段变，而且只有这两个：`keeper`（接管的内容本身）与
+  //     `last_hb_at`（**客户端**在接管成功之后补的那一次心跳 —— 守护进程刻意
+  //     没有在 op 里顺手刷新它，代价是"在 1800 秒大限前 40 秒才点接管"有一个窄
+  //     窗口，那一半补在客户端，见 index.js 的 app:takeover）。
+  const srvAfter = onlyFake(b);
+  const changed = Object.keys(srvBefore).filter(
+    (k) => k !== 'last_hb_at' && !k.startsWith('_')
+      && JSON.stringify(srvBefore[k]) !== JSON.stringify(srvAfter[k]));
+  assert.deepEqual(changed, [],
+    `接管动了服务端那一行的这几个字段：${changed.join('、')} —— 它只该动 keeper 与那一次心跳`);
+  // ★ `keeper` **不在上面那个清单里**，因为「另一台电脑在看」是**覆盖层**
+  //   （`debugForeignKeeper`），它不写进会话行 —— 所以行上那一格从头到尾都是本机。
+  //   "它真的换人了"这件事由下一段（走 op 本身、行上那一格真的是别人）来证。
+  assert.equal(onlyFake(b).keeper, b._client.id, '这一层的覆盖撤掉之后，行上是本机');
+  assert.ok(srvAfter.last_hb_at >= srvBefore.last_hb_at,
+    '★ 客户端补的那一次心跳只能让时刻往前走，不能往回拨');
+
+  // ★★ 而"接管**本身**只动一格"要单独验一次 —— 走**服务端那条 op**，
+  //   不经过客户端那层包装。这两件事必须分得开：
+  //     · op 只改 keeper（**连 `last_hb_socket` 都不碰**）—— 守护进程那一侧的
+  //       不变量。碰了的话，"新看护者要等它自己下一次心跳才真的接手"这件事
+  //       就被掩盖了，而那条窄窗口正是客户端要补的那一格。
+  //     · 客户端补心跳是**另一条请求**，不是接管的一部分。
+  //   ★ 这一段的看护者是**真的写在会话行上**（不是那一层覆盖）：直接改掉它，
+  //     于是"这一格换人了没有"在行本身上看得出来。
+  onlyFake(b).keeper = 'demo-other-machine-0001';
+  //   ★★ 心跳时刻也要**先按到一个一眼看得出是旧的值**上。不这么做的话，
+  //     "接管顺手把 `last_hb_socket` 刷成现在"这个改动**在这一秒里看不出来**
+  //     （`nowSec()` 是一秒的分辨率，而这一整段跑在同一秒内）—— 变异验证实测：
+  //     用当前时刻当基准时，那条变异一次都不红。按到一小时前之后，任何"顺手刷新"
+  //     都会留下一个差一小时的痕迹。
+  onlyFake(b).last_hb_at = Math.floor(Date.now() / 1000) - 3600;
+  const srv2Before = { ...onlyFake(b) };
+  const raw = await b.rpc({ op: 'takeover', session_id: row.session_id });
+  assert.equal(raw.ok, true, `直接调 op 失败：${JSON.stringify(raw)}`);
+  assert.equal(raw.data.was, 'demo-other-machine-0001');
+  const srv2After = onlyFake(b);
+  const changed2 = Object.keys(srv2Before).filter(
+    (k) => k !== 'keeper' && !k.startsWith('_')
+      && JSON.stringify(srv2Before[k]) !== JSON.stringify(srv2After[k]));
+  assert.deepEqual(changed2, [],
+    `★★ \`takeover\` 这条 op 动了这几个字段：${changed2.join('、')} —— `
+    + '它**只**该动 keeper（连 last_hb_socket 都不许碰）');
+  assert.equal(srv2After.keeper, b._client.id, '而那一格必须真的换了人');
+
+  await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+});
+
+test('★★ 端到端：点「连接」之后，作业列表里就看得见那些还在跑的作业', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  // ── 模拟"客户端进程没了再起来"：**只清客户端这一侧**，服务端那条作业还在跑 ──
+  //   （这与「崩溃重连」那条用例的前半段是同一件事，只是这里不走 reattach()，
+  //    走的是**用户点「连接」**那条路。）
+  for (const rec of [...idx._test.getSessions().values()]) {
+    if (rec.controller) await rec.controller.abandon();   // 一个字都不发给服务端
+  }
+  idx._test.getSessions().clear();
+  assert.equal((await invoke('app:states')).sessions.length, 0, '前置：本机手上已经没有它了');
+
+  // ★★ 给假后端的每一次 RPC 加一点延迟。**这一格是这条用例的全部要害**：
+  //   没有它，"接回做完才返回"与"发出去就返回"在几十微秒里分不出来，
+  //   而那条差别正是用户看到的"点了连接，进去却是空的、要等一会儿才有"。
+  const latency0 = b.rpcLatencyMs;
+  b.rpcLatencyMs = 40;
+  let res;
+  try {
+    res = await invoke('app:connect', {});
+  } finally {
+    // 还原成**它原来的值**，不是写死一个 0 —— 假后端的缺省就是 40ms（贴近真实的
+    // exec channel 开销），写死 0 会把后面那些用例一起加速，而它们的时间假设
+    // 是照着 40ms 定的。
+    b.rpcLatencyMs = latency0;
+  }
+  assert.equal(res.ok, true, `连接失败：${JSON.stringify(res)}`);
+
+  // ★ **紧接着**查，中间不等任何东西 —— 连接返回时接回就该已经做完了。
+  const st = await invoke('app:states');
+  assert.equal(st.sessions.filter((x) => x.live).length, 1,
+    '★★ 点完「连接」之后，接回必须**已经做完**（`doConnect` 的最后一步 await 了 '
+    + 'tryReattach）—— 发出去就返回的话，用户进作业列表看到的是一张空表，'
+    + '而那几条作业正在集群上跑着、没有心跳');
+
+  // 而作业列表那一屏（第三屏的数据）也应当看得见它，且是本机接着的。
+  const j = await invoke('app:jobs');
+  assert.equal(j.ok, true);
+  assert.equal(j.jobs.filter((x) => x.live && x.attached).length, 1,
+    `作业列表里也应当看得见、并且是本机接着的：${JSON.stringify(j.jobs)}`);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 连着的时候再点一次「连接」：已经在手上的那几条**不会再接一遍**', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  const map = idx._test.getSessions();
+  const slotsBefore = [...map.keys()].sort();
+  const sidsBefore = [...map.values()]
+    .map((r) => r.controller && r.controller.sessionId).sort();
+
+  // ★★ 再连一次 —— 用户在连接列表上又点了一下「连接」，或者换了一条连接又换回来。
+  //   服务端那条会话从头到尾都在跑，所以 `op:list` 一定会列出它；而**本机已经在
+  //   管它了**。这正是 v0.9 新加的那道守卫要拦的现场。
+  const r = await invoke('app:connect', {});
+  assert.equal(r.ok, true, `再连一次失败：${JSON.stringify(r)}`);
+
+  assert.deepEqual([...map.keys()].sort(), slotsBefore,
+    '★★ 本机已经在管的那几条**不许再接一遍**：接第二遍时 `reattachOne` 会看到基础槽'
+    + '已被占，于是给它发一个**临时实例**（另一个组、另一个端口、另一份存储）——'
+    + '同一个 session_id 上从此挂着两个 controller、两条心跳，标签栏多一条，'
+    + '而两边看起来都对');
+  assert.deepEqual([...map.values()].map((x) => x.controller && x.controller.sessionId).sort(),
+    sidsBefore, 'session_id 也不许多出一个');
+  assert.equal(idx._test.sessionAt(a.slot).controller, ctl,
+    '原来那条 controller 必须原样留着 —— 换掉它等于把它那条心跳丢了');
+
+  await openUpTo(idx, 1);
+});
+
+test('★ 没连上的时候问作业列表 ⇒ 说"取不到"，不是"你没有作业"', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  // 守护进程不可达 —— 真集群上这一幕是登录节点抽风，而它最容易犯的错就是
+  // 把失败吞成一个空数组（于是界面说"你没有作业"，而作业还在跑）。
+  await invoke('app:debug', 'daemon-down');
+  try {
+    const r = await invoke('app:jobs');
+    assert.equal(r.ok, false, `取不到就不能报 ok：${JSON.stringify(r)}`);
+    assert.ok(r.error, '必须带上原因 —— 否则界面只能显示一个空列表');
+  } finally {
+    await invoke('app:debug', 'reset');
+  }
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });

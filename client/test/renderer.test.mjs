@@ -139,6 +139,111 @@ test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
   assert.match(css, /\.lmap-lines\s*\{[^}]*position:\s*absolute/, '.lmap-lines 必须绝对定位');
 });
 
+// ── ★★ 三屏（v0.9 阶段 5）────────────────────────────────────────────────────
+
+/** 抠出某一屏那一整段（`#screen-jobs` 这类容器里没有嵌套的 `<section>`）。 */
+function screenBlock(id) {
+  const m = new RegExp(`<section id="${id}"[\\s\\S]*?</section>`).exec(html);
+  assert.ok(m, `panel.html 里找不到 #${id} 那一屏 —— 三屏的容器改名了？`);
+  return m[0];
+}
+
+test('★★ 三屏都在，而且路由只认这三个 id', () => {
+  // ★★ 这一条守的是「打开客户端落在哪一屏」这件事**有唯一一处判据**。
+  //   从前"露哪一屏"是 renderSnapshot() 按**会话状态**算出来的（空闲露连接列表、
+  //   跑起来露当前会话），于是"用户在哪儿"没有地方记着 —— 他去作业列表看一眼，
+  //   下一次快照回来就被弹回另一屏，而他什么都没做。
+  const ids = ['screen-conns', 'screen-plugins', 'screen-jobs'];
+  for (const id of ids) screenBlock(id);
+
+  // 路由里**恰好**列着这三个 —— 少一个 = 那一屏永远藏不起来（叠在别的屏上面）；
+  // 多一个（比如某个屏被拆成两半）= 露一个的时候另一个还开着。
+  const fn = /function showScreen\(name\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(fn, 'panel.js 里应当有 showScreen()');
+  const listed = [...fn[0].matchAll(/'screen-[a-z]+'/g)].map((m) => m[0]);
+  assert.deepEqual(listed.sort(), ids.map((i) => `'${i}'`).sort(),
+    `showScreen 里列的屏与 panel.html 里那三屏对不上：${listed.join('、')}`);
+
+  // ★ 「集群状态」是**盖在三屏上面**的一层，不是第四屏 —— 它开着的时候三屏一起
+  //   让位。少了这一格，集群页会和三屏里当前那一屏同时露着。
+  //
+  //   ★★ 这里必须查**那一句表达式本身**，不能只查"函数体里出现过 CLUSTER.open"：
+  //     `showScreen` 里另有两处提到它（切集群那一节的显隐、进作业列表时的判据），
+  //     所以"出现过"是一条**永远绿的空断言** —— 变异验证实测：把这一句里的
+  //     `CLUSTER.open ||` 删掉，那条查"出现过"的判据一个字都不会说。
+  assert.match(fn[0],
+    /classList\.toggle\('hidden',\s*CLUSTER\.open \|\| key !== name\)/,
+    '三屏的显隐必须把「集群那一层开着」算进去（这一句里，不是别处）');
+
+  // 路由由 init() 起手 —— 少了这一句，`SCREEN` 是上次的值而 page 上是第一屏，
+  // 两份"我在哪一屏"会漂，漂的形态是"点了返回，页面没动"。
+  assert.match(js, /showScreen\('conns'\)/, '开局必须显式落在第一屏');
+
+  // ★ 第二屏的标题要**带上是哪一个站点**（"我现在看的是哪一台"），而判据是
+  //   **主进程给的活跃连接**，不是"我刚才点了哪一行" —— 后者在删掉一条连接、
+  //   或从别处改了活跃连接之后就已经过期，而它指着的那条连接可能已经不存在了。
+  assert.match(fn[0], /plugins-title/, '第二屏的标题要在路由里按当前站点写一次');
+  assert.match(fn[0], /activeConnectionId/,
+    '★ 而它的判据必须是**主进程给的活跃连接**，不是界面自己记的"刚才点了谁"');
+});
+
+test('★★ 用例 12：作业列表那一屏的三个动作按钮，两侧逐字相同', () => {
+  // ★ 这三个按钮就是计划里那个「三个动作」：【新建】= `op_submit`、
+  //   【接管】= `takeover`、【结束】= `goodbye`。
+  //
+  //   ★ 它比上面那条通用的 id 检查强在哪：那一条只查「panel.js 用到的 id 在
+  //     panel.html 里都有」，所以**把按钮整个删掉**它一个字都不会说
+  //     （用的人也一起没了）。这一条钉的是"这三个按钮必须存在、必须绑了动作、
+  //     必须待在作业列表那一屏里"。
+  const jobs = screenBlock('screen-jobs');
+  const trio = [
+    ['btn-jobs-new', '新建'],
+    ['btn-jobs-takeover', '接管'],
+    ['btn-jobs-end', '结束'],
+  ];
+  for (const [id, what] of trio) {
+    assert.match(jobs, new RegExp(`id="${id}"`),
+      `${what}按钮（#${id}）必须在作业列表那一屏里`);
+    assert.match(js, new RegExp(`\\$\\('${id}'\\)\\.onclick\\s*=`),
+      `panel.js 没有给 ${what}按钮（#${id}）绑动作 —— 点了没反应`);
+  }
+  // 而它们**只在这一屏里**：同一个 id 出现两次的话，`getElementById` 取到的是
+  // 第一个，第二个那颗按钮永远点不动（而它看起来完全正常）。
+  for (const [id] of trio) {
+    const n = [...html.matchAll(new RegExp(`id="${id}"`, 'g'))].length;
+    assert.equal(n, 1, `#${id} 在 panel.html 里出现了 ${n} 次`);
+  }
+});
+
+test('★ 作业列表那一屏只说服务端给的事实，不自己编', () => {
+  // ★ 「会话状态」与「作业状态」是**两张表**：会话 `suspect` 的时候作业可能
+  //   好好地跑着（见 src/main/sessionstate.js）。作业那一行**不做任何状态判定**，
+  //   它印的是主进程译好的那一格（`state_text`）。
+  //
+  //   查的是 `jobRow` 这个函数体，不是整个文件 —— `STATE_TEXT`（**客户端**会话
+  //   状态那张表）在状态条与标签栏里是正当用途，全局查会把那些一起误伤。
+  const rowFn = /function jobRow\(j\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(rowFn, 'panel.js 里应当有 jobRow()');
+  assert.match(rowFn[0], /j\.state_text/, '作业那一行要印主进程译好的 state_text');
+  assert.equal(/STATE_TEXT/.test(rowFn[0]), false,
+    '★ 作业那一行不许拿**客户端会话状态**那张表去译服务端的状态（两张表别混：'
+    + '会话 suspect 的时候作业可能好好地跑着）');
+
+  // ★ 三态：**取不到**与**确实没有**必须长得不一样。把"问不到"画成"没有作业"，
+  //   用户会以为自己的作业丢了 —— 而真正的原因在连接那一侧。
+  assert.match(js, /function renderJobs\(\)[\s\S]*?\$\('jobs-error'\)/,
+    'renderJobs 必须把"取不到"单独画出来');
+
+  // ★ 没接着的那些**照实说**，而且说清出路 —— 那一行的按钮是灰的，
+  //   而"为什么点不动"不能靠猜（出路是重连一次，`doConnect` 会跑 tryReattach）。
+  assert.match(js, /j\.attached/, 'renderJobs 必须读 attached（动作只给本机接着的那些）');
+  //   ★★ 查的是**那一格元素**，不是"文件里出现过「没接着」"：`jobRow` 上面那段
+  //     注释里就有这三个字，所以那种查法是一条**永远绿的空断言** —— 变异验证
+  //     实测：把这一句整个删掉，查"出现过"的判据一个字都不说。
+  assert.match(rowFn[0], /cel\('span',\s*'warn',/,
+    '没接着的那些要真的画出一格话（`cel(\'span\', \'warn\', …)`），而不是留一个灰按钮');
+});
+
 test('panel.js 不用 window.prompt —— 它在 Electron 里直接抛异常', () => {
   // 不是返回 null，是抛 "prompt() is and will not be supported"。
   // 改名走的是页面内的 <input>（见 startRename）。

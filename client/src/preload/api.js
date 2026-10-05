@@ -113,6 +113,18 @@ contextBridge.exposeInMainWorld('slurmate', {
   // **全部**会话 + 哪一个是前台。`app:state`（单数）已经删掉了 —— 它只会回
   // 最后动过的那一个，而在多开下"某条会话在界面上根本不存在"是一种静默的丢失。
   states: () => ipcRenderer.invoke('app:states'),
+  // ★★ 「作业列表」那一屏：**这个站点上我还有哪些作业**（服务端的 `op:list`）。
+  //
+  //   它与 `states()` 是**两个不同的问题**，别合并：`states()` 回答"这个客户端
+  //   在管哪几条会话"，而这一条回答"站点上还有哪些作业" —— 上一台电脑提交的、
+  //   本机还没接上的、刚结束还没被回收的那些，只在后者里。
+  //   每一行带 `attached`：动作（结束/接管）只给本机接着的那些，理由见 index.js
+  //   的 `jobsView()`。
+  jobs: () => ipcRenderer.invoke('app:jobs'),
+  // 【接管】：把这条会话的看护者换成**这台电脑**。**一个字都不动会话**。
+  // ★ 只能走常驻通道（身份在 exec 退路上是被删掉的），失败时守护进程回
+  //   `no_client_id`，界面要如实说 —— 不能悄悄降级成"什么都没发生"。
+  takeover: (sessionId) => ipcRenderer.invoke('app:takeover', { sessionId }),
   // 把某一条抬到面板上面。**纯界面动作**，不改任何框架状态。
   setFront: (slot) => ipcRenderer.invoke('app:setFront', { slot }),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——

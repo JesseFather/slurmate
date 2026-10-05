@@ -66,6 +66,7 @@ const hosts = require('./hosts.js');
 const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
 const { gresLabel } = require('./gres.js');
+const { sessionStateText } = require('./sessionstate.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
@@ -336,8 +337,9 @@ function bootstrap() {
     win.pushSessions([], null);
     await announceBackend();
 
-    // 启动时看看有没有「上次没关干净的会话」—— 自动接上，而不是让用户重新提交
-    await tryReattach();
+    // ★★ v0.9：这里从前是 `await tryReattach()` —— 启动就自动接回上次的会话。
+    //   它现在跟着**用户点的那一次连接**走（见 doConnect）。启动这一路上一步
+    //   网络动作都没有，这是「不自动连」的全部内容。
   });
 
   app.on('before-quit', async (e) => {
@@ -489,28 +491,28 @@ function regenerateKey(id) {
 }
 
 // ── 后端选择与告知 ──────────────────────────────────────────────────────────
+/**
+ * 启动时**只告知，不连接**。
+ *
+ * ★★ v0.9：**打开客户端不再自动连上任何东西。** 从前这里是
+ *   `const conn = config.activeConnection(cfg); await doConnect(conn)` ——
+ *   于是"打开客户端"与"连上某个站点"是同一个动作：用户没有机会先看一眼自己配了
+ *   哪几个站点、哪一台是上次用的，也没法在连错的那一台上一键退回来。
+ *
+ * ★ 而这一版把「这台电脑在看哪个作业」变成了**服务端记得住、用户点得动**的一格
+ *   （看护者）。接管必须是**用户的一个动作** —— 打开客户端就自动连上、自动接管
+ *   一次，正是这一版要拆掉的那个形状。
+ *
+ * ★ 开发者模式那一路**也一起停了**。假站点在连接列表里就是一条普通的连接
+ *   （`demo@127.0.0.1:1`），由用户点。`backend.connect()` 仍然要有人调（它在那一步
+ *   启动本地 HTTP 服务并分配端口），但那一步现在发生在 `doConnect()` 里，与真站点
+ *   走**同一条路** —— 两半各自连一次的那种写法（假分支在这里直接 connect、真分支
+ *   走 doConnect）正是"同一条规矩两份实现"的老形态。
+ *   ★ 代价要说清：沙盒第一次打开时连接列表是空的，要手填一次 `demo` / `127.0.0.1` / `1`
+ *     （见 client/README.md 的「开发者模式」那一节）。
+ */
 async function announceBackend() {
   if (backend.kind === KIND.FAKE) {
-    // ★ 假后端**也要** connect —— 它在那一步启动本地 HTTP 服务并分配端口。
-    //   曾经这里提前 return，结果是 service_port 恒为 0，
-    //   隧道目标变成 "127.0.0.1:0"，会话在「运行中」之后立刻报端口不合法。
-    //   开发者模式不等于「不需要初始化」。
-    const res = await backend.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
-    if (res.ok) {
-      // ★ 假后端也要过这道闸 —— 否则"版本不符会怎样"在界面上的样子没有地方能
-      //   先看一遍，而它恰恰是用户会遇到、开发者却很难复现的状态。
-      //   用 `app:debug daemon-version` 造。
-      const gated = await applyVersionGate(res);
-      if (!gated.ok) {
-        win.pushNotice('error', gated.error);
-        win.setTitle('Slurmate — 开发者模式 · 未连接集群');
-        return;
-      }
-      whoami = res.whoami;
-      await refreshPartitions();
-      // 假站点也真的走一遍分发（分发源见 devPluginSourceDir）。
-      reconcileSitePlugins();
-    }
     // ★ 通知 kind `'dev'`：界面据它挂那条洋红横幅（三重互锁的第二重）。
     win.pushNotice('dev', '开发者模式 · 未连接集群');
     win.setTitle('Slurmate — 开发者模式 · 未连接集群');
@@ -521,11 +523,12 @@ async function announceBackend() {
   if (!conn) {
     // 一条连接都没配 —— 这是**真实状态**，不是错误。如实说出来，
     // 而不是显示一句笼统的「连接失败」让用户去猜。
-    win.pushNotice('info', '还没有配置登录节点。请在下方填写用户名、主机与端口。');
+    win.pushNotice('info', '还没有配置登录节点。点「新建连接」填一个 —— '
+      + '只需要用户名、主机和端口。');
     win.setTitle('Slurmate — 未配置连接');
     return;
   }
-  await doConnect(conn);
+  win.setTitle('Slurmate — 未连接');
 }
 
 /**
@@ -642,6 +645,26 @@ async function doConnect(conn, extra = {}) {
     // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
     reconcileSitePlugins();
     win.setTitle(`Slurmate — ${conn.user}@${conn.host}`);
+    // ★★ v0.9：**「接上上次的会话」这一步的触发点是"用户显式点了这条连接"。**
+    //
+    //   从前它在 `bootstrap()` 的最后一行 —— 而那时启动本身就自动连了一条，
+    //   于是"接回"也是自动的。现在启动不连了，接回就必须挂在**这一次连接**上：
+    //   用户点「连接」＝"我要用这个站点"，而"这个站点上还有我的作业在跑"是
+    //   紧接着必须发生的事（不接回 = 没有心跳 = 1800 秒后作业被 scancel）。
+    //
+    //   ★★ 它**必须 await**。不 await 的话，"连上了"与"接回来了"之间就有一个
+    //     窗口，而这个窗口里的每一次按键（提交、切布局组、结束）都在跟一个**还在
+    //     跑**的接回抢同一个槽 —— 症状是随机的（多一个视图、少一次重建），
+    //     而且都指不回这里。接回一条会话要建隧道、登录取 cookie，是秒级的事；
+    //     那点等待换来的是"连上之后现场已经安定"这一条可依赖的事实。
+    //     `tryReattach` 自己会推通知说"正在逐个接上"。
+    try {
+      await tryReattach();
+    } catch (e) {
+      // 接回失败**不能**把这次连接说成失败：连接本身是好的，只是上次那几条
+      // 会话没接回来（它们仍然在集群上跑，下一次连接会再试一遍）。
+      win.pushNotice('error', '接上已有的会话时出错：' + ((e && e.message) || e));
+    }
   } else if (res.code === 'host_key_unknown' || res.code === 'host_key_changed') {
     // 主机密钥要用户拍板 —— 这不是「连接失败」，是一个待确认的安全决定。
     // 所以不设成 error 标题，界面会弹一个专门的确认框。
@@ -1748,6 +1771,73 @@ function sessionViews() {
 }
 
 /**
+ * 「作业列表」那一屏的数据：**把服务端的 `op:list` 与本机的会话表合起来**。
+ *
+ * ★★ 为什么以**服务端那一份**为准，而不是直接画本机的会话表：
+ *
+ *   本机那张表（`sessionViews`）回答的是"**这个客户端**在管哪几条会话"，而作业列表
+ *   要回答的是"**这个站点上我还有哪些作业**"。两者在正常情况下一样，差在三种场合，
+ *   而三种都真的会发生：
+ *     · 上一台电脑提交的、本机刚连上还没来得及接的；
+ *     · 本机认不出插件（`registry.resolve` 给了 `why`）因而 `reattachOne` 早退的；
+ *     · 刚刚结束、本机记录已经收掉、而服务端还留着那一行（`released_keep`）的。
+ *   只画本机那一份的话，这三种里用户看到的都是"我没有作业了" —— 而作业还在。
+ *
+ * ★ 而**动作仍然只给本机接着的那些**（`attached`）。理由不是省事：结束一条会话
+ *   走的是 `SessionController.stop()`，而它要心跳、要隧道、要那条会话的完整视图；
+ *   给一条没接着的会话再写一条"直接发 goodbye"的短路，就是**同一条规矩的第二份
+ *   实现** —— 而它漂开的方向是"界面说结束了、作业还在烧"。
+ *   没接着的那些**照实说出来**（`attached:false`），出路是重连一次（`doConnect`
+ *   会跑 `tryReattach`），而不是在这里再造一个入口。
+ *
+ * ★ `keeper` 原样带出去（一个 `client_id` 或 `null`），判等只在这里做一次 ——
+ *   界面不认识别人的 `client_id`，它能说的只有"一台不是本机的电脑"。
+ */
+function jobsView(rows) {
+  const me = clientIdentity && clientIdentity.id;
+  const bySession = new Map();
+  for (const rec of sessions.values()) {
+    if (rec.controller && rec.controller.sessionId) {
+      bySession.set(rec.controller.sessionId, rec);
+    }
+  }
+  return (rows || []).map((r) => {
+    const sid = r && r.session_id;
+    const rec = bySession.get(sid) || null;
+    // ★ 认插件走**注册表那一份实现**（`resolve`），不在会话列表里另写一套按
+    //   `service_kind` 抄名字的逻辑 —— 认不出时它给的 `why` 是给人看的那句话。
+    const { plugin } = registry.resolve(r.service_kind, r.service_plugin);
+    const live = SERVER_LIVE_STATES.includes(r.state);
+    return {
+      session_id: sid,
+      state: r.state,
+      // ★ **会话状态**译成人话 —— 与作业状态（`job_state`）是两张表，别混：
+      //   会话 `suspect` 的时候作业可能好好地跑着（见 sessionstate.js）。
+      state_text: sessionStateText(r.state),
+      live,
+      job_id: r.job_id || null,
+      partition: r.partition || null,
+      node: r.node || null,
+      expires_at: typeof r.expires_at === 'number' ? r.expires_at : null,
+      job_state: r.job_state || null,
+      // 认得出插件就给名字，认不出给 null —— 界面据此说「本机没有这个插件」，
+      // 而不是编一个名字出来。
+      service: plugin ? (plugin.displayName || plugin.name) : null,
+      service_kind: r.service_kind || null,
+      attached: Boolean(rec),
+      slot: rec ? rec.slot : null,
+      keeper: r.keeper || null,
+      // ★ 「谁在看」只有三句话，而它们是**三件不同的事**：本机在看 / 另一台电脑
+      //   在看（那台也许多半已经断了网）/ 没人在看（倒计时正在跑）。
+      //   压成一个布尔会让后两种糊成"不是本机"，而用户要做的事完全不同。
+      keeper_text: !live ? null
+        : (r.keeper ? (r.keeper === me ? '本机在看' : '另一台电脑在看') : '没人在看'),
+      keeper_is_me: Boolean(me) && r.keeper === me,
+    };
+  });
+}
+
+/**
  * 把已经结束的记录收掉。
  *
  * 槽是**淘汰制**的：一个槽的上一轮记录留着，是为了让界面能显示"已结束 + 重新开始"；
@@ -2829,11 +2919,30 @@ async function tryReattach() {
     .filter((r) => r && SERVER_LIVE_STATES.includes(r.state));
   if (!live.length) return;            // 没有活跃会话，正常路径
 
-  win.pushNotice('info', live.length > 1
-    ? `发现 ${live.length} 个还没结束的会话，正在逐个接上。`
+  // ★★ **本机已经接着的那些，一条都不再接。**
+  //
+  //   这一条是 v0.9 新增的，而它必须在这儿：`tryReattach()` 现在的触发点是
+  //   **用户点的那一次连接**（见 doConnect），而"点连接"完全可能发生在**本机
+  //   手上已经有会话**的时候（换一条连接再换回来、连着的时候又点了一次）。
+  //   少了这一句，那些会话会被**再接一遍**，而接第二遍的后果不是"重复显示"——
+  //   `reattachOne` 里认领实例那一步看到基础槽已被占，会给它发一个**临时实例**
+  //   （另一个组、另一个端口、另一份存储），于是同一个 `session_id` 上挂着**两个
+  //   controller、两条心跳**，界面上的标签多出来一条，而两边看起来都对。
+  //
+  //   判据用 `sessionId`（服务端的身份），不用槽：槽是**本机**的事实，而"这一条
+  //   我已经在管了"问的正是服务端那一条的身份。
+  const have = new Set();
+  for (const rec of sessions.values()) {
+    if (rec.controller && rec.controller.sessionId) have.add(rec.controller.sessionId);
+  }
+  const fresh = live.filter((r) => !have.has(r.session_id));
+  if (!fresh.length) return;           // 全都已经在手上了，正常路径
+
+  win.pushNotice('info', fresh.length > 1
+    ? `发现 ${fresh.length} 个还没结束的会话，正在逐个接上。`
     : '发现一个还没结束的会话，正在重新接上。');
 
-  for (const row of live) {
+  for (const row of fresh) {
     const one = await backend.rpc({ op: 'status', session_id: row.session_id });
     if (!one || !one.ok) continue;
     const view = one.data && one.data.session;
@@ -3640,6 +3749,60 @@ function registerIpc() {
     layouts: config.layoutPlan(cfg),
   }));
 
+  /**
+   * 「作业列表」那一屏：**这个站点上我还有哪些作业**（`op:list`）。
+   *
+   * ★ 它是一次真查询，不是缓存 —— 而且**必须是这样**。作业列表回答的是"现在有什么"，
+   *   而它的变化来源有一大半在**本进程之外**（另一台电脑提交的、CLI 提交的、
+   *   调度器把排队中的作业跑起来的）。拿本机那张会话表当答案，用户就会在
+   *   "作业明明在跑"的时候看见一个空列表。
+   *
+   * ★ 失败**原样带回去**（连 `error.kind` 一起）：界面要分得开"没连上"、"守护进程
+   *   不可达"与"确实一条都没有" —— 把后者当前两者画，用户会以为作业丢了。
+   */
+  send('app:jobs', async () => {
+    const resp = await backend.rpc({ op: 'list' });
+    if (!resp || !resp.ok) return resp || { ok: false, error: { detail: '无响应' } };
+    return {
+      ok: true,
+      jobs: jobsView((resp.data && resp.data.sessions) || []),
+      at: Date.now(),
+    };
+  });
+
+  /**
+   * 【接管】—— 把这条会话的看护者换成**这台电脑**。
+   *
+   * ★★ 它**一个字都不动会话**（作业、ACL、端口、心跳时刻全都不动），这一点由守护
+   *   进程那一侧保证（`op_takeover` 的 docstring）。界面要说的话也只有一句：
+   *   "从现在起这台电脑在看它"。
+   *
+   * ★ 而它**只能走常驻通道**：身份（`client`）只在常驻通道上报，走 exec 退路时
+   *   会被删掉（见 backend-ssh.js 的 `rpc()`）。那时守护进程回 `no_client_id`，
+   *   界面要如实说出来 —— 这条路**不能**悄悄降级成"什么都没发生"：用户点的是
+   *   "这台电脑现在做主"，而作业那边一个字节都没变。
+   *
+   * ★ 成功之后**立刻打一次心跳**，不等 45 秒的定时器。守护进程那边刻意没有在
+   *   接管里顺手刷新 `last_hb_socket`（"接管只动一格"是一条不变量），代价是
+   *   "在 1800 秒大限前 40 秒才点接管"有一个窄窗口 —— 那一半在客户端补。
+   */
+  send('app:takeover', async (payload = {}) => {
+    const sid = String((payload && payload.sessionId) || '');
+    if (!sid) return { ok: false, error: { detail: '没有说清要接管哪一条会话。' } };
+    const resp = await backend.rpc({ op: 'takeover', session_id: sid });
+    if (resp && resp.ok) {
+      const rec = [...sessions.values()].find(
+        (x) => x.controller && x.controller.sessionId === sid);
+      // 立刻续一次命：那一条是本机接着的才打得了心跳（别的连心跳都没有）。
+      if (rec && rec.controller) {
+        try { await rec.controller.heartbeatNow(); } catch { /* 接管已经成功了 */ }
+      }
+      win.pushNotice('info', `已接管这条会话：从现在起由这台电脑看护它（作业一个字都没动）。`);
+    }
+    win.pushSessions(sessionViews(), frontSlot());
+    return resp;
+  });
+
   send('app:doctor', async () => {
     const resp = await backend.rpc({ op: 'doctor' });
     return resp;
@@ -3830,6 +3993,19 @@ function registerIpc() {
     // 造出「守护进程太旧，连 plugins 这个 op 都没有」—— 那条路上**每一个**字段
     // 都是缺的，而客户端的纪律是"缺席 ≠ 否"。
     else if (what === 'old-daemon') backend.debugOldDaemon(true);
+    // ★★ v0.9：把每一条会话显示成「另一台电脑在看」。真集群上这一幕要两台机器
+    //   才造得出来（在一台上开着、去另一台上打开），而【接管】这个按钮的全部
+    //   意义就是那一刻 —— 它的判据（keeper 不是本机）在开发者模式里必须能先看
+    //   一遍。★ 也顺便造出「本机在看 / 另一台电脑在看 / 没人在看」三句话里的
+    //   第二句，否则那一句在开发者模式里永远看不到。
+    //   不带参数 = **打开**（与 `extra-plugin` / `old-daemon` 那几个单向开关同一
+    //   形状）：撤销它走「复位」，而不是让同一个按钮在两种意思之间来回翻 ——
+    //   一个不知道自己现在是开还是关的按钮，就是一颗会骗人的按钮。
+    //   ★ 传**空串**是第三种现场：`keeper` 为空 = **没人在看**（会话是 CLI 提交
+    //     的那种）。它没有按钮，在 DevTools 里 `window.slurmate.debug('foreign-keeper', '')`。
+    else if (what === 'foreign-keeper') {
+      backend.debugForeignKeeper(arg === undefined ? true : arg);
+    }
     // ★ 与上一条是**两件事**：这一档有 `plugins`、但没有 `limits`（v0.5 的守护
     //   进程）。客户端的处理必须一样（回退），但代码路径不同（一个是 unknown_op，
     //   一个是字段缺席）—— 只造其中一条的话，另一条上的退化没人看得见。

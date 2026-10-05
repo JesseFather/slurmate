@@ -747,29 +747,51 @@ class SessionController extends EventEmitter {
   }
 
   // ── 心跳 ────────────────────────────────────────────────────────────────
+  /**
+   * 打一次心跳。**定时器与显式调用走的是同一份实现**（见 `heartbeatNow`）。
+   *
+   * ★ 抽出来而不是让 `heartbeatNow` 自己再发一次请求：那会是"心跳"这条规矩的
+   *   第二份实现，而它漂开的方向很具体 —— 显式那一次不更新 `_heartbeatAt`、
+   *   不认 `SESSION_GONE`、也不写 warning，于是界面在接管之后显示的是
+   *   一句和真实情况不符的话（"心跳正常"或"心跳一直失败"）。
+   */
+  async _beat() {
+    if (this._stopped || !this.sessionId) return;
+    const resp = await this.backend.rpc({ op: 'heartbeat', session_id: this.sessionId });
+    const c = classify(resp, { op: 'heartbeat' });
+    if (c.action === Action.OK) {
+      this._heartbeatAt = Date.now();
+      if (this.warning && /心跳/.test(this.warning)) this.warning = null;
+    } else if (c.action === Action.SESSION_GONE) {
+      // 会话没了，心跳没有意义了。**但不能因此判定作业已停** —— 只报告事实。
+      this._stopHeartbeat();
+      this.warning = '控制节点上已找不到该会话，心跳停止。';
+    } else {
+      // 传输层失败 / 守护进程不可达：**继续重试，绝不放弃**。
+      // 这一段正是 300 秒闪断窗口要覆盖的情况。
+      this.warning = '心跳发送失败（' + c.message + '），仍在重试。';
+    }
+    this._emit();
+  }
+
+  /**
+   * **立刻**打一次心跳，不等下一个 45 秒。
+   *
+   * ★ 它存在的理由只有一个：**接管**。守护进程那边刻意没有在 `op_takeover` 里
+   *   顺手刷新 `last_hb_socket` —— "接管只动一格"是一条不变量（见那个 op 的
+   *   docstring）。代价是"在 1800 秒大限前 40 秒才点接管"有一个窄窗口，而那一半
+   *   补在**这里**：接管成功之后立刻表态一次。
+   *
+   * ★ 定时器没起来时也照打。这一条不是"续期"，是"这台电脑现在做主"的第一次表态；
+   *   而"没起来"的场合恰好就是最需要它的那一种（刚从别的电脑手里接管过来）。
+   */
+  heartbeatNow() { return this._beat(); }
+
   _startHeartbeat() {
     if (this._hbTimer) return;                    // 幂等：绝不允许同一个会话有两个心跳
-    const beat = async () => {
-      if (this._stopped || !this.sessionId) return;
-      const resp = await this.backend.rpc({ op: 'heartbeat', session_id: this.sessionId });
-      const c = classify(resp, { op: 'heartbeat' });
-      if (c.action === Action.OK) {
-        this._heartbeatAt = Date.now();
-        if (this.warning && /心跳/.test(this.warning)) this.warning = null;
-      } else if (c.action === Action.SESSION_GONE) {
-        // 会话没了，心跳没有意义了。**但不能因此判定作业已停** —— 只报告事实。
-        this._stopHeartbeat();
-        this.warning = '控制节点上已找不到该会话，心跳停止。';
-      } else {
-        // 传输层失败 / 守护进程不可达：**继续重试，绝不放弃**。
-        // 这一段正是 300 秒闪断窗口要覆盖的情况。
-        this.warning = '心跳发送失败（' + c.message + '），仍在重试。';
-      }
-      this._emit();
-    };
-    this._hbTimer = setInterval(beat, this.heartbeatMs);
+    this._hbTimer = setInterval(() => { this._beat(); }, this.heartbeatMs);
     this._hbTimer.unref?.();
-    beat();                        // 立刻打一次，别等 45 秒
+    this._beat();                  // 立刻打一次，别等 45 秒
   }
 
   _stopHeartbeat() {
