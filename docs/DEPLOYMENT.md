@@ -304,9 +304,12 @@ node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 �
 sudo bash cluster/deploy.sh --plugins-src ~/下载的插件
 ```
 
-★ **`deploy.sh` 永不打包**（`cluster/deploy.sh`）：它只收成品。所以对本仓库
-自带的 `plugins/` 直接部署会在预检那一步**停下来**并告诉你要先 `packer build`
-—— 那个失败是刻意的：包是**构建产物**，不进 git（二进制进 git 等于代码评审死掉）。
+★ **`deploy.sh` 永不打包**（`cluster/deploy.sh`）：它只收成品。所以对仓库里那两棵
+插件**源码树**（`plugins/code-server`、`plugins/sshd`）直接部署会在预检那一步
+**停下来**并告诉你要先 `packer build` —— 那个失败是刻意的：包是**构建产物**，
+不进 git（二进制进 git 等于代码评审死掉）。
+★ 那两棵树是**开发样例**，**基座不带任何插件** —— 它们不是"仓库自带的插件"，
+所以这里没有一份欠着的成品要补。
 
 ★ 装插件也可以不在部署里做，用一个动词：
 
