@@ -242,6 +242,79 @@ test('★ 作业列表那一屏只说服务端给的事实，不自己编', () =
   //     实测：把这一句整个删掉，查"出现过"的判据一个字都不说。
   assert.match(rowFn[0], /cel\('span',\s*'warn',/,
     '没接着的那些要真的画出一格话（`cel(\'span\', \'warn\', …)`），而不是留一个灰按钮');
+  // ★ 「谁在看这条会话」也是**服务端给的事实**（`keeper_text`，由 index.js 的
+  //   `jobsView` 译好）—— 界面印它，不自己按 `keeper` 编一句话。
+  //   ★★ 它同时是失败形态 ③ 的另一半（"看护者清空之后界面上要画得出那句话"）：
+  //      这一查落在 **`jobRow` 的函数体**里，不落在"整个文件里出现过「没人在看」"上
+  //      —— 后者是一条永远绿的断言（旁边那段注释里就有那几个字）。
+  assert.match(rowFn[0], /j\.keeper_text/,
+    '作业那一行要印主进程译好的 keeper_text（本机在看 / 另一台电脑在看 / 没人在看）');
+});
+
+test('★★【临时离开】与【断开】：两个方向相反的动作，各自只有一个入口', () => {
+  // ★★ 这两个按钮对作业做的事**正好相反** —— 一个发 `leave`（看护者置空、作业继续
+  //    跑），一个发 `goodbye`（作业被 `scancel`）—— 而它们在界面上挨着。
+  //    ⇒ 判据只能是"它们绑到两个不同的函数上，而且各自**只**调用自己那一个通道"。
+  //      共用一个实现、或者互相调对方的通道，症状都是**"点了临时离开，作业被停了"**：
+  //      一句与提示相反的、不可撤销的事实。
+  const conns = screenBlock('screen-conns');
+  for (const [id, what] of [['btn-leave', '临时离开'], ['btn-disconnect', '断开']]) {
+    assert.match(conns, new RegExp(`id="${id}"`),
+      `${what}按钮（#${id}）必须在连接列表那一屏里`);
+    assert.match(js, new RegExp(`\\$\\('${id}'\\)\\.onclick\\s*=`),
+      `panel.js 没给 ${what}绑动作 —— 点了没反应`);
+  }
+
+  const leaveFn = /async function doLeave\(\)[\s\S]*?\n\}/.exec(js);
+  const discFn = /async function doDisconnect\(\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(leaveFn && discFn, 'panel.js 里应当有 doLeave() 与 doDisconnect()');
+  assert.match(leaveFn[0], /slurmate\.leave\(/, '【临时离开】要发 `leave`');
+  assert.equal(/slurmate\.disconnect\(/.test(leaveFn[0]), false,
+    '★★ 【临时离开】**绝不许**顺手断开 —— 那会把作业 scancel 掉，而提示说它还在跑');
+  assert.match(discFn[0], /slurmate\.disconnect\(/, '【断开】要发 `goodbye`');
+  assert.equal(/slurmate\.leave\(/.test(discFn[0]), false,
+    '★★ 【断开】**绝不许**走 `leave` 那条路 —— 那会让它和【临时离开】长得一模一样');
+  // 全程只有一处调 `leave`：多一处就是"同一条规矩的第二份实现"，而它会漂。
+  assert.equal([...js.matchAll(/slurmate\.leave\(/g)].length, 1,
+    '`leave` 只该在 doLeave 里被调用一次');
+
+  // ★★ 两个按钮的显隐**必须一起**跟着 `connected` 走。少了「临时离开」那一句，
+  //    它会永远停在初始的 `hidden` 上 —— 一个**存在、绑了动作、但永远不出现**的
+  //    按钮，比没有它更坏：读代码的人会以为这条路走得通。
+  //    ★ 查的是**那一句表达式本身**，不是"函数体里出现过 `btn-leave`"（后者在
+  //      下面 `renderConnections` 那一大段里到处都是，是一条永远绿的断言）。
+  const rcFn = /function renderConnections\(list\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(rcFn, 'panel.js 里应当有 renderConnections()');
+  for (const id of ['btn-leave', 'btn-disconnect']) {
+    assert.match(rcFn[0],
+      new RegExp(`\\$\\('${id}'\\)\\.classList\\.toggle\\('hidden',\\s*!connected\\)`),
+      `#${id} 要跟着 connected 一起显隐（这一句里，不是别处）`);
+  }
+
+  // ★★ 那句最要紧的话必须**画在函数体里**（失败形态 ③ 的判据落在函数体上，
+  //    不落在调用点上）：离开**不是暂停**，倒计时从这一刻起算。
+  //    ★ 不说的话，用户以为离开是免费的：合上电脑出差，回来时作业已经没了，
+  //      而界面上从来没有任何一句话预告过。
+  //
+  //    ★★ 查的是**成功那一路的那整句话**，不是"函数体里出现过「35 分钟」"：
+  //      `doLeave` 里"35 分钟"出现**两次**（另一处在"没能告诉控制节点"那一路），
+  //      所以查"出现过"是一条**能被等价变异蒙过去的**判据 —— 变异验证实测：
+  //      把这一句整个删掉，那条查"出现过"的断言一个字都不说。
+  assert.match(leaveFn[0], /35 分钟内没有人回来接着看/,
+    '★★ doLeave 必须把"没人看着它 35 分钟就会被回收"说出来');
+  // ★ 而按钮自己的 title 也要写出后果 —— 不点下去也看得见。
+  assert.match(conns, /id="btn-leave"[\s\S]{0,240}?35 分钟/,
+    '#btn-leave 的 title 里要写明后果（临时离开不是免费的）');
+
+  // ★★ 「被接管」那句话由**主进程**给（`suspend()` 的那句原因），界面只印。
+  //    两处各写一句的漂法是"主进程说被接管了、界面说被顶掉了"—— 而用户会去查
+  //    一个并不存在的区别。（这一版把触发方式从"服务端顶掉整个客户端"收窄成
+  //    "另一台电脑接管了这条作业"，旧措辞在界面上不该留下一处。）
+  const codeOnly = stripJsComments(js);
+  assert.equal(/顶掉/.test(codeOnly), false,
+    '★ 界面上不该再出现"顶掉"这个说法 —— 现在发生的是**逐会话**的接管');
+  assert.match(codeOnly, /s\.suspended/,
+    '状态条与明细要印主进程给的那句原因，而不是自己编一句');
 });
 
 test('panel.js 不用 window.prompt —— 它在 Electron 里直接抛异常', () => {

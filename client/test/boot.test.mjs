@@ -525,6 +525,9 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
                     // 一律彻底终止（取消作业 + 释放资源），不留下还在烧的作业
                     'app:disconnect',
+                    // ★ 与断开**方向相反**的那一个（v0.9 阶段 6）：它只放开看护者，
+                    // 作业继续在集群上跑。少了这个通道，界面上那颗按钮点了没反应。
+                    'app:leave',
                     // 密钥与主机密钥。生成只有两个入口：「新建」时的 app:newKey，
                     // 以及用户显式发起的 app:regenerateKey —— 「保存方式」那个
                     // 下拉框已经删掉，私钥永远加密保存。
@@ -4396,6 +4399,181 @@ test('★ 没连上的时候问作业列表 ⇒ 说"取不到"，不是"你没�
   } finally {
     await invoke('app:debug', 'reset');
   }
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  v0.9 阶段 6：四个动作里剩下的那两个（【临时离开】/【断开】）
+//
+//  【结束】与【接管】在阶段 5 就接上了（它们住在作业列表那一屏上）。这里查的是
+//  **连接级**那一对，加上"闪断不算离开"那条分工。
+//
+//  ★★ 这三条用例守的是**同一件事的三种问法**：一条作业在服务端归谁看着，以及
+//     "本机不再看着它"之后它会不会被误杀。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★★【临时离开】：看护者交回去，作业一个字都没动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  // ★★ **先显式打一拍，而且等它落地，再记基准。**
+  //    入会时那一次心跳是**异步**的（`_startHeartbeat()` 里那次 `_beat()` 没人
+  //    await），所以"state 变成 running"并不等于"心跳已经落过地"。不等它，
+  //    下面那次逐字段比对会把**那一次心跳**算成"临时离开干的事"—— 症状是本条
+  //    用例红在 `last_hb_at` 上，而它指的方向完全是错的。
+  await ctl.heartbeatNow();
+  const before = { ...onlyFake(b) };
+  assert.equal(before.keeper, b._client.id,
+    '前置：提交这条连接的就是它第一个看护者（守护进程 `op_submit(client_id)` 那一格）');
+
+  const r = await invoke('app:leave');
+  assert.equal(r.ok, true, `临时离开失败：${JSON.stringify(r)}`);
+  assert.equal(r.left.ok, true, `应当把那条会话交回去了：${JSON.stringify(r.left)}`);
+  assert.deepEqual(r.left.cleared, [before.session_id], '要如实说出交回去了哪几条');
+
+  // ── 服务端那一行：**只有 keeper 变了** ──
+  const after = onlyFake(b);
+  assert.ok(after, '作业必须还在 —— 临时离开不是结束');
+  assert.equal(after.keeper, null,
+    '看护者交回去了（从此"没人在看"是一句真话，而不是一句要等 30 分钟才被纠正的假话）');
+  assert.equal(after.state, 'enrolled',
+    '★★ 会话还在跑 —— 这就是它与【断开】的全部差别');
+  const changed = Object.keys(before).filter((k) => !k.startsWith('_')
+    && JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  assert.deepEqual(changed, ['keeper'],
+    `临时离开动了这几格：${changed.join('、')} —— 它只该动 keeper`
+    + '（`leave` 是一次放手，不是一次结束）');
+
+  // ── 本机这一侧：记录一条都不留，连接也拆了 ──
+  assert.equal((await invoke('app:states')).sessions.length, 0,
+    '用户已经回到列表了，本机不该还留着一个没有心跳在跑的记录');
+  assert.equal(b.connected, false, '离开＝回列表，连接不该还挂着');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 闪断（连接掉了，没点任何按钮）⇒ 看护者保留，重连之后接着续命', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  const sid = onlyFake(b).session_id;
+  assert.equal(onlyFake(b).keeper, b._client.id, '前置：提交者就是看护者');
+
+  // ── 闪断：连接**直接掉了**，客户端一个字都没发出去 ──
+  //   ★ 这是断电 / 合盖 / 网线被拔 / sshd 抖一下在客户端这一侧的形状，也是它与
+  //     【临时离开】的**全部分工**：那边有一条显式的 `leave`，这边什么都没有。
+  //
+  //   ★ 说清这条用例**证得了什么、证不了什么**：它证的是"连接掉了一次之后，
+  //     服务端那一格**没有被本机动过**"（本机没有可以清空它的代码路径 —— 唯一
+  //     会发 `leave` 的地方是 `app:leave`）。★ 它**证不了**"闪断期间心跳发不出去"：
+  //     假后端的 `rpc()` 不看 `_connected`，所以那条路上的心跳照旧成功。那一半
+  //     在 `suspended.test.mjs` 里单独验（传输失败 ⇒ 不接管、继续重试）。
+  await b.close();
+
+  assert.equal(b.connected, false, '前提：连接真的断了');
+  assert.equal(onlyFake(b).keeper, b._client.id,
+    '★★ 闪断**不清空看护者** —— 清了的话，一次网络抖动就等于一次"我不看了"，'
+    + '而用户回来时作业已经在回收路上了');
+  assert.equal(onlyFake(b).state, 'enrolled', '会话本身也一个字都不动');
+
+  // ── 重连：心跳必须**接着**续，而不是从此没有人在看这条作业 ──
+  await ensureConnected(idx);
+  const ctl2 = idx._test.sessionAt(a.slot).controller;
+  assert.ok(ctl2, '重连之后那条 controller 应当还在本机手上（闪断不动本机的记录）');
+  onlyFake(b).last_hb_at = Math.floor(Date.now() / 1000) - 3600;
+  await ctl2.heartbeatNow();
+
+  assert.ok(onlyFake(b).last_hb_at > Math.floor(Date.now() / 1000) - 60,
+    '★★ 重连之后心跳必须继续推进 —— 停在这里的后果是 1800 秒之后作业被 scancel，'
+    + '而界面上一切正常（"上次心跳"会越走越远，而那是唯一看得见的痕迹）');
+  assert.equal(onlyFake(b).keeper, b._client.id, '看护者从头到尾都是本机');
+  assert.equal(onlyFake(b).session_id, sid, '还是同一条会话，不是新提交的');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 被接管之后又点【接管】：本机是**真的**把它拿回来了', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  const sid = onlyFake(b).session_id;
+
+  // ── 造出「另一台电脑把它拿走了」，而且走**心跳**那条真路 ──
+  //   `foreign-keeper` 只改服务端那一格，本机还照常心跳 ⇒ 它会收到 `ignored:
+  //   not_keeper` —— 这正是真集群上发生的那件事（也是客户端认出"我被接管了"的
+  //   唯一信号）。
+  await invoke('app:debug', 'foreign-keeper');
+  await ctl.heartbeatNow();
+  assert.match(ctl.suspended || '', /接管/, '前置：本机先认出被接管');
+
+  // ── 点【接管】把它拿回来 ──
+  onlyFake(b).last_hb_at = Math.floor(Date.now() / 1000) - 3600;
+  const tk = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+
+  assert.equal(ctl.suspended, null,
+    '★★ 接管成功之后本机必须**真的**把它拿回来 —— `suspend()` 是一个终态，'
+    + '不撤销它的话，界面会一直说"已被另一台电脑接管"，而心跳一直不发');
+  assert.notEqual(ctl._hbTimer, null, '★ 心跳必须回来');
+  assert.ok(onlyFake(b).last_hb_at > Math.floor(Date.now() / 1000) - 60,
+    '★★ 而且接管成功之后**立刻**补的那一拍要真的落地 —— 它被 `_beat()` 顶上那道'
+    + '闸挡掉的话，"在 1800 秒大限前 40 秒才点接管"那个窄窗口就原样留着');
+  assert.equal(onlyFake(b).keeper, b._client.id, '服务端那一格也换回来了');
+
+  await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★【断开】是【临时离开】的反面：它真的把作业停掉', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  const r = await invoke('app:disconnect');
+  assert.equal(r.ok, true, `断开失败：${JSON.stringify(r)}`);
+
+  // ★ 紧接着查，不等任何东西：假站点把 `releasing` 置成 `released` 是 1.6 秒之后
+  //   的事，而这里要的是**那一刻**的行（`_occupying()` 会把已结束的滤掉）。
+  const row = onlyFake(b);
+  assert.ok(row, '断开之后那条会话应当还在释放流程里 —— 马上查，别等那个 1.6 秒的定时器');
+  assert.ok(['releasing', 'released'].includes(row.state),
+    `★★ 断开必须把作业停掉（它发的是 goodbye）：${row.state}`);
+  // ★★ 而看护者**还在本机名下** —— 这一格是"断开**没有**顺手走 leave 那条路"的
+  //    证据，也是这两个按钮唯一一个能把它们分开、又不依赖"数一数发了几条请求"
+  //    的判据（数请求在任何一次重试或改道之后都会失效）。
+  assert.equal(row.keeper, b._client.id,
+    '★★ 断开**不许**顺手发一条 leave —— 发了它，断开就和【临时离开】长得一模一样了');
+  assert.equal(b.connected, false);
+
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });

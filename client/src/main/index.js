@@ -2790,7 +2790,7 @@ async function stopAllSessions() {
   for (const rec of [...sessions.values()]) {
     const c = rec.controller;
     if (!c) continue;
-    // ★★ **被顶掉的会话一条都不停。** 它们不归这台电脑管了，而这里的每一次
+    // ★★ **被接管的会话一条都不停。** 它们不归这台电脑管了，而这里的每一次
     //    `stop()` 都会给守护进程发 `goodbye` —— 那会把用户的作业 scancel 掉，
     //    而用户以为自己只是「换个地方看」。
     //    （`SessionController.stop()` 顶上还有同一道闸，这里再判一次是为了
@@ -2809,6 +2809,39 @@ async function stopAllSessions() {
   //    ★ 遍历一份**拷贝**：`releaseEphemeral` 会改 `tempLayouts`。
   for (const id of [...tempLayouts.keys()]) releaseEphemeral(id);
   return out;
+}
+
+/**
+ * 拆掉与这个站点的连接 —— **【断开】与【临时离开】共用的那一半**。
+ *
+ * ★ 它只做**连接级**的收尾：关后端、清掉"这一次连接"的现场。**一条会话都不碰** ——
+ *   会话怎么收（每条一条 `goodbye`，还是一条 `leave`）由调用方在进来之前定，
+ *   而那两件事的差别是这一版最重的一条（见 `app:leave`）。
+ *
+ * ★ 收成一份的理由与 `stopAllSessions` 逐字相同：两处各写一遍的话，下一次加了
+ *   一样"连接级"的东西（比如再来一份暂存树），改了一处、另一处静默地少做一步，
+ *   而症状是"临时离开之后再连回来，界面上还挂着上一个站点的东西"—— 一句指不回
+ *   根因的话，因为两边都"看起来对"。
+ */
+async function teardownConnection() {
+  await backend.close();
+  whoami = null;
+  partitions = [];
+  // 断开之后就没有「站点开了哪些插件」可谈了
+  sitePlugins = null;
+  // 待同意的那些是**这一次连接**的现场：换代 + 丢掉它们的暂存树（那是**我们
+  // 自己的**草稿纸，删它不算"删站点的东西"）。不清的话，用户会看到一个来自
+  // 已经断掉的站点的"同意"按钮。
+  //
+  // ★ `existing` 的那些**一个字节都不许动**：它们指向的是**池里那一份**，
+  //   不是草稿。断开一次就把它删掉，等于"断个网就丢了用户已经同意的插件"。
+  connectGeneration += 1;
+  for (const p of pendingConsent) {
+    if (!p.existing) sitePluginSync.discardStaged(p.stagedDir, p.stagedPkg);
+  }
+  pendingConsent = [];
+  siteSync = null;
+  versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
 }
 
 /**
@@ -2872,7 +2905,8 @@ async function tryReattach() {
   // 存在的理由（真机上要造出这个状态极难）。
   if (!backend.connected) return;
 
-  // ★★ **先摘掉被顶掉的那些记录，再接手。**
+  // ★★ **先摘掉被接管的那些记录，再接手**（临时离开的那些在 `app:leave` 里
+  //   就已经摘掉了，走不到这里）。
   //
   //   不摘的话接手会**直接失败**：那些记录仍然占着槽（`occupied()` 看的是
   //   controller 的 state，而它们停在 RUNNING），于是 `reattachOne` 会报
@@ -2884,7 +2918,7 @@ async function tryReattach() {
   //     `abandon` 与 `stop` 的差别在这里是**承重的**，不是风格问题。
   //
   //   ★ 修隧道也在这一步（`abandon` 拆隧道）。所以它必须在**确认连上了之后**做：
-  //     用户从被顶掉到点「连接」之间，可能一直开着那个页面在用 —— 提前拆掉等于
+  //     用户从被接管到点「连接」之间，可能一直开着那个页面在用 —— 提前拆掉等于
   //     把"换个地方看"变成"这边的东西全没了"。
   for (const [slot, rec] of [...sessions.entries()]) {
     const c = rec.controller;
@@ -3495,11 +3529,17 @@ function registerIpc() {
   });
 
   /**
-   * 主动断开与登录节点的连接。
+   * 【断开】—— 主动断开与登录节点的连接。
    *
-   * ★ 这也是**一次彻底的终止**：只要还有会话（哪怕它已经出错，作业却可能还在
+   * ★ 这是**一次彻底的终止**：只要还有会话（哪怕它已经出错，作业却可能还在
    *   集群上跑着），就先把作业取消、资源释放掉，再拆连接。
    *   断开等于「我不要了」，不等于「我先走开，你继续烧着」。
+   *
+   * ★★ 而「我先走开，你继续跑」这条**确实存在** —— 它是旁边那个按钮
+   *   （`app:leave`）。两个按钮挨在一起，而它们对作业做的事**正好相反**：
+   *   这里每一条都发 `goodbye`（`scancel`），那里只发一条 `leave`（置空看护者）。
+   *   ⇒ 所以这一条**一个字都不许**长成 `leave` 的形状，反之亦然：它们是同一件事
+   *   的两个方向，任何"统一一下"的念头都会把其中一个的语义抹掉。
    *
    *   注意它与「意外消失」的分工：断电、睡眠、网线被拔时这个方法根本不会被调用，
    *   那种情况靠守护进程的 suspect/orphaned 容错窗口兜底，客户端下次启动自动接回。
@@ -3519,24 +3559,74 @@ function registerIpc() {
       // （`docs/ARCHITECTURE.md` 的 §3.0），所以不能在这里宣布成功。
       if (!res.ok) win.pushNotice('error', res.detail);
     }
-    await backend.close();
-    whoami = null;
-    partitions = [];
-    sitePlugins = null;           // 断开之后就没有「站点开了哪些插件」可谈了
-    // 待同意的那些是**这一次连接**的现场：换代 + 丢掉它们的暂存树（那是**我们
-    // 自己的**草稿纸，删它不算"删站点的东西"）。不清的话，用户会看到一个来自
-    // 已经断掉的站点的"同意"按钮。
-    //
-    // ★ `existing` 的那些**一个字节都不许动**：它们指向的是**池里那一份**，
-    //   不是草稿。断开一次就把它删掉，等于"断个网就丢了用户已经同意的插件"。
-    connectGeneration += 1;
-    for (const p of pendingConsent) {
-      if (!p.existing) sitePluginSync.discardStaged(p.stagedDir, p.stagedPkg);
-    }
-    pendingConsent = [];
-    siteSync = null;
-    versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
+    await teardownConnection();
     return { ok: true, released };
+  });
+
+  /**
+   * 【临时离开】—— 回登录节点列表，**作业继续在集群上跑**。
+   *
+   * ★★ 它与【断开】的差别就是这一条的承重点：这里发的是 `leave`（把看护者置空），
+   *   **不是** `goodbye`（那会 `scancel` 掉作业）。断开发的是 `goodbye`。
+   *   两个按钮在界面上挨着，而走错一个的代价是一个正在跑的作业 —— 所以它们
+   *   **各自只有一条实现**，谁都不许顺手写第二条（与 `stopAllSessions` 同一条纪律）。
+   *
+   * ★★ 而「置空看护者」**不是"暂停"**：倒计时从这一刻起算，走的还是那一条窗口
+   *   （300 秒 `suspect` → 1800 秒 `orphaned` → `scancel`）。所以界面**必须**把这句
+   *   话说出来（见 panel.js 的 doLeave）—— 不说的后果很具体：用户以为离开是免费的，
+   *   合上电脑出差，回来时作业已经没了，而界面上从来没有任何一句话预告过。
+   *
+   * ★ 清单是**本机接着的那些**，一条都不多。★ 而少几条不是错误：漏掉的那些没人
+   *   刷心跳，照样会超时 —— 清单只决定"没人在看"这句话**什么时候**变成真的，
+   *   所以这里不需要为了凑齐去问服务端（那会引入一次额外的 `list`，而它答的是
+   *   另一个问题："我名下有哪些"，不是"我此刻接着哪些"）。
+   *
+   * ★ 一条会话都没有时**不发作**：守护进程的 `leave` 要一张非空清单（空清单是
+   *   `bad_request`）。这里如实回一句"没有要放开的"，而不是发一条注定被拒的请求。
+   *
+   * ★ **正在提交（还没有会话号）的那一条只有名字进不了清单** —— 它在服务端还
+   *   没有行，`leave` 无从下手。它照样被 `abandon()` 掉（本机不再管它），于是它
+   *   的结局是"在服务端长出来、然后按 300 秒 / 1800 秒那条窗口被回收"——
+   *   与"提交到一半合上电脑"逐字相同，而那不是这一条 op 能改变的事。
+   *   ★ 反过来说：**不能**为了这一条去发 `goodbye` —— 一次"提交中"的 `goodbye`
+   *     会把用户刚刚要的东西取消掉，而提示说它还在跑。
+   */
+  send('app:leave', async () => {
+    const ids = [];
+    for (const rec of sessions.values()) {
+      const c = rec.controller;
+      if (c && c.sessionId) ids.push(c.sessionId);
+    }
+
+    let left = { ok: true, cleared: [] };
+    if (ids.length) {
+      const resp = await backend.rpc({ op: 'leave', session_ids: ids });
+      left = (resp && resp.ok)
+        ? { ok: true, cleared: (resp.data && resp.data.cleared) || [] }
+        // ★ 失败**照实带出去**，但**不因此留下**：用户要的是回到列表，而留在
+        //   这个站点上会让他卡在一个他没打算待的地方。看护者没被清空的后果是
+        //   "倒计时要等 300 秒才起算"（与一次闪断逐字相同），不是"作业被误杀"——
+        //   两个方向的代价不对称，所以这里选择离开，并把那句话说出来。
+        : { ok: false, error: (resp && resp.error && resp.error.detail)
+              || '控制节点没有回应这次离开请求。' };
+    }
+
+    // ★ 本机这一侧的记录**一条都不留**：用户已经离开这个站点了，页面也拆了。
+    //   走 `abandon()` 而不是 `stop()` —— 后者会发 `goodbye`，那正是这一步**全部
+    //   要避免的**那一件事（发了它，用户的作业就没了，而他以为自己只是走开一会）。
+    for (const [slot, rec] of [...sessions.entries()]) {
+      if (rec.controller) await rec.controller.abandon();
+      sessions.delete(slot);
+    }
+    // ★★ 而**临时实例**（多开时那条第二份）**不回收** —— 这里与 `stopAllSessions`
+    //   的最后那一步**故意不一样**。那边收尾时那些会话真的结束了，所以那份副本的
+    //   使命也完了；这边作业还在集群上跑，用户随时可能连回来接着看，
+    //   而那份副本里装着他的编辑器布局、打开的标签页、登录状态。
+    //   ★ "离开"这个动作的全部意思就是**什么都别动** —— 顺手删掉一份数据，
+    //     正是它要避免的那件事：用户回来时东西没了，而他以为自己只是走开一会。
+    //     与 `abandon()` 的另外两处调用（`tryReattach`、模拟重启）同一条取舍。
+    await teardownConnection();
+    return { ok: true, left };
   });
 
   // ── 会话 ──
@@ -3785,6 +3875,11 @@ function registerIpc() {
    * ★ 成功之后**立刻打一次心跳**，不等 45 秒的定时器。守护进程那边刻意没有在
    *   接管里顺手刷新 `last_hb_socket`（"接管只动一格"是一条不变量），代价是
    *   "在 1800 秒大限前 40 秒才点接管"有一个窄窗口 —— 那一半在客户端补。
+   *
+   * ★★ 而它**必须先 `resume()`**：这条会话可能正停在"被接管"那个终态上
+   *   （上一台电脑把它拿走了，本机的心跳被回 `ignored`）—— 那正是用户会来点这个
+   *   按钮的**主要场合**。不撤销那个终态的话，接管在服务端生效了、在客户端却
+   *   一句都没变：心跳那道闸把它自己挡掉，界面继续写"已被另一台电脑接管"。
    */
   send('app:takeover', async (payload = {}) => {
     const sid = String((payload && payload.sessionId) || '');
@@ -3795,6 +3890,13 @@ function registerIpc() {
         (x) => x.controller && x.controller.sessionId === sid);
       // 立刻续一次命：那一条是本机接着的才打得了心跳（别的连心跳都没有）。
       if (rec && rec.controller) {
+        // ★★ **先撤销「被接管」这个终态，再补那一拍** —— 顺序不能反。
+        //    `_beat()` 顶上有一道闸（被接管的会话一拍都不发），反过来的话这一拍
+        //    会被自己的闸挡掉，而"在 1800 秒大限前 40 秒才点接管"那个窄窗口就
+        //    原样留着 —— 症状是接管成功、界面说"已接管"，而作业到点被 scancel。
+        //   ★ 而它也正是"上一台电脑又要把这条会话拿回去"这条路的落点：那台机器
+        //     此刻正停在 `suspend()` 的终态上，不让它出来，【接管】就对它无效。
+        rec.controller.resume();
         try { await rec.controller.heartbeatNow(); } catch { /* 接管已经成功了 */ }
       }
       win.pushNotice('info', `已接管这条会话：从现在起由这台电脑看护它（作业一个字都没动）。`);

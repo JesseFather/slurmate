@@ -625,6 +625,7 @@ class FakeBackend extends Backend {
       case 'list':       return this._list();
       case 'heartbeat':  return this._heartbeat(req);
       case 'takeover':   return this._takeover(req);
+      case 'leave':      return this._leave(req);
       case 'goodbye':    return this._goodbye(req);
       case 'doctor':     return this._doctor();
       case 'cluster':    return this._cluster();
@@ -1190,6 +1191,41 @@ class FakeBackend extends Backend {
     this._foreignKeeper = null;
     s.keeper = me;
     return ok({ session_id: s.session_id, keeper: me, was });
+  }
+
+  /**
+   * 【临时离开】：把这几条会话的看护者置空。**倒计时从这一刻起算。**
+   *
+   * 与真守护进程的 `op_leave` 同一条纪律（见那一段 docstring）：
+   *
+   *   · **不校验身份** —— 它是一次放手，不是一次取得。要防的是"谁的作业被别人的
+   *     心跳续了命"（那由 `_heartbeat` 管），而"我以为我不看了"这句话没有假冒的
+   *     价值：它只能让作业**更早**被回收，且随时可以被下一个开始看它的客户端
+   *     认领回去（认领那一支在 `_heartbeat` 里）。
+   *   · **看护者本来就是空的，安静跳过** —— 那会被记成一次"放手"，而实际上
+   *     什么都没发生。
+   *   · **不加第二个超时窗口**：这里只是置空，之后仍然走 suspect → orphaned →
+   *     scancel 那一条（假站点里由 `debugReap` 演）。
+   *
+   * ★ 覆盖层（`debugForeignKeeper`）**跟着一起撤掉**：它模拟的就是"服务端此刻
+   *   认为谁在看"这一格，而这一格刚刚被清空了。不清的话，界面上会停在
+   *   「另一台电脑在看」，而那条会话已经没人在看了 —— 假的比真的还假。
+   */
+  _leave(req) {
+    const got = req && req.session_ids;
+    if (!Array.isArray(got) || !got.length) {
+      return err(2, 'bad_request', 'leave 要带一张非空的 session_ids 清单。');
+    }
+    const cleared = [];
+    for (const raw of got) {
+      const s = this._find(String(raw || ''));
+      if (!s) continue;
+      if (this._effKeeper(s) === null) continue;
+      this._foreignKeeper = null;
+      s.keeper = null;
+      cleared.push(s.session_id);
+    }
+    return ok({ cleared });
   }
 
   /**

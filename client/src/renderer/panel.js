@@ -238,11 +238,15 @@ function renderSnapshot(s) {
   let detail = '';
   if (s) {
     if (s.suspended) {
-      // ★ 这一支**排在所有分支之前**。被顶掉的时候这些会话仍然停在 `running`，
+      // ★ 这一支**排在所有分支之前**。被接管的时候这些会话仍然停在 `running`，
       //   下面那一支会说「分区 · 节点 · 剩余时间」—— 那些话全是真的，但用户此刻
       //   最需要知道的是**本机已经不管它了**，以及**作业还在跑**。
       //   不这么排的话，界面看起来和一个正常运行的会话**一模一样**。
-      detail = '已被另一台电脑顶掉，本机不再管理这条会话（作业仍在运行）';
+      //
+      //   ★ 说的这句话由**主进程**给（`s.suspended` 本身就是那句原因）—— 界面
+      //     不再自己编一句。两处各写一句的漂法是"主进程说被接管了、界面说被顶掉了"，
+      //     而用户会去查一个不存在的区别。
+      detail = s.suspended;
     } else if (st === 'running' || st === 'releasing') {
       const bits = [];
       if (s.partition) bits.push(s.partition);
@@ -417,10 +421,10 @@ function renderKv(s) {
     // 这一句由主进程译好（`jobstate.js`）—— 界面只印。从前印的是 Slurm 的原文
     // 大写枚举（`OUT_OF_MEMORY`），那是说给管理员听的话。
     ['作业状态', s.jobText || '—'],
-    // ★ 「被顶掉」是**这台电脑**的状态，不是这条会话的状态 —— 所以它自己一行，
+    // ★ 「被接管」是**这台电脑**的状态，不是这条会话的状态 —— 所以它自己一行，
     //   而不是改「作业状态」那一行：作业**真的还在跑**，把它写进那一行就是
     //   一句不成立的话，而用户会照着它去把作业停掉。
-    ...(s.suspended ? [['本机', '已下线 —— 另一台电脑接手了这条会话']] : []),
+    ...(s.suspended ? [['本机', s.suspended]] : []),
     ['上次心跳', fmtAge(s.hbAgeMs)],
     ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState] || s.tunnelState],
   ];
@@ -509,8 +513,10 @@ function renderConnections(list) {
   $('conn-notes').classList.toggle('hidden', list.length === 0);
   // 映射图与列表同生共死：没有连接就没有可映射的东西
   $('sec-layouts').classList.toggle('hidden', list.length === 0);
-  // 「断开」只在连着的时候存在 —— 它是**站点级**的动作（见 renderConnections
-  // 里那个「连接/进入」按钮的注释）。
+  // 「临时离开」与「断开」只在连着的时候存在 —— 它们是**站点级**的动作（见
+  // renderConnections 里那个「连接/进入」按钮的注释）。★ 两个一起切：只切一个的话，
+  // 另一个会在没连上的时候露着，而它按下去只能得到一句"控制节点没有回应"。
+  $('btn-leave').classList.toggle('hidden', !connected);
   $('btn-disconnect').classList.toggle('hidden', !connected);
 
   for (const c of list) {
@@ -2433,6 +2439,10 @@ async function init() {
   };
 
   $('btn-probe').onclick = doProbe;
+  // ★★ 这两个按钮**必须绑两个不同的函数**（见 doLeave / doDisconnect）：它们对作业
+  //   做的事正好相反，而共用一个实现的话，其中一个的语义迟早会被"顺手统一"掉 ——
+  //   漂的方向是"点了临时离开，作业被停了"。
+  $('btn-leave').onclick = doLeave;
   $('btn-disconnect').onclick = doDisconnect;
 
   // ── 三屏之间的前后关系 ──
@@ -2601,17 +2611,68 @@ async function doConnectTo(c) {
 }
 
 /**
- * 主动断开。
+ * 【临时离开】—— 回这个列表，**作业继续在集群上跑**。
  *
- * ★ 断开 = **彻底终止**。还有会话的话先取消作业、释放资源，再拆连接。
+ * ★★ 它与【断开】是**两个方向相反**的动作，而它们的区别**只在一条请求上**：
+ *   这里发的是 `leave`（看护者置空），断开发的是 `goodbye`（`scancel` 作业）。
+ *   写反了的后果是**用户的作业被删掉**，而界面上那句提示会告诉他"作业还在跑"——
+ *   一句话和它描述的事实正好相反，且不可撤销。
+ *
+ * ★★ 「离开」**不是暂停**：倒计时从这一刻起算，走的还是那一条窗口
+ *   （300 秒 suspect → 1800 秒 orphaned → `scancel`）。所以这里必须把那句话
+ *   **说出来**，而不是等用户自己发现 —— 见 panel.html 里这个按钮的 title。
+ *   ★ 三态纪律照旧：`left.ok === false`（这一条没送出去）与 `cleared` 是空
+ *     是两件事，前者说"那句话没能告诉控制节点"，后者说"本来就没人在看"。
+ */
+async function doLeave() {
+  const r = await window.slurmate.leave();
+  if (!r || !r.ok) return notice('error', (r && r.error) || '临时离开失败。');
+  connected = false;
+  whoami = null;
+  const left = r.left;
+  if (left && !left.ok) {
+    // ★ 没能告诉控制节点，而用户**确实已经离开了** —— 两句都要说。
+    //   只报错的话，用户会以为"离开没成功、还连着呢"，而去重按一次。
+    notice('warn', '已经回到列表，但没能告诉控制节点你离开了：' + left.error
+      + '　作业仍在运行 —— 只是那 35 分钟要从「没人看着它」被判定出来才开始算。'
+      + '想立刻确认它没事，重新连上这个站点即可。');
+  } else {
+    notice('info', '已临时离开。作业仍在集群上运行 —— '
+      + '但本机不再看着它：35 分钟内没有人回来接着看，它会被自动回收。');
+  }
+  // ★ 回到第一屏，并把作业列表作废 —— 与断开逐字同一个理由：那份数据属于刚才
+  //   那个站点，留着它会让下一次进作业列表时先闪一下**上一个站点**的作业
+  //   （见 JOBS.forConn）。
+  JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
+  renderConnections(boot.connections);
+  renderSessions({ sessions: [], front: null });
+  showScreen('conns');
+}
+
+/**
+ * 【断开】—— **彻底终止**。还有会话的话先取消作业、释放资源，再拆连接。
  *   「断开」和「结束会话」在这里是同一件事的两种说法，因为对用户来说
  *   它们的意思本来就一样：我不要了。凡是用户主动表达的终止，都不该留下
  *   一个还在集群上占着资源的作业。
  *
  *   反过来，合盖/断网/断电时这个函数不会被调用 —— 那条路走守护进程的
  *   suspect/orphaned 容错窗口，客户端下次启动自动接回。
+ *
+ * ★★ 所以它**先问一句**，而旁边的「临时离开」不问。这不是双重标准：断开是这一屏
+ *   上唯一一个会**销毁正在跑的计算**的按钮，它和"回列表"那颗按钮紧挨着，而误点的
+ *   代价是一个可能已经跑了几小时的作业加一份 12 小时的机时 —— 不可逆，也不会有
+ *   第二次机会。★ 这句话里要带上**有几个作业会没**：只说"确定断开吗"，用户答不了。
  */
 async function doDisconnect() {
+  const n = (SESS.sessions || []).filter((s) => s.live).length;
+  const sure = window.confirm(
+    (n
+      ? `断开连接会结束 ${n} 个会话 —— 集群上的作业会被取消，`
+        + '已经跑掉的时间不会回来。\n\n'
+      : '断开与登录节点的连接。\n\n')
+    + '如果你只是想回到这个列表、让作业继续跑，点「临时离开」。');
+  if (!sure) return;
+
   const r = await window.slurmate.disconnect();
   if (!r || !r.ok) return notice('error', (r && r.error) || '断开失败。');
   connected = false;
@@ -2624,8 +2685,7 @@ async function doDisconnect() {
   } else {
     notice('info', '已断开与登录节点的连接。');
   }
-  // ★ 断开之后**回第一屏**，并把作业列表作废：那份数据属于刚才那个站点，
-  //   留着它会让下一次进作业列表时先闪一下**上一个站点**的作业（见 JOBS.forConn）。
+  // ★ 断开之后**回第一屏**，并把作业列表作废（理由见 doLeave）。
   JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
   renderConnections(boot.connections);
   renderSessions({ sessions: [], front: null });

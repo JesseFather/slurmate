@@ -91,13 +91,20 @@
     <section id="sec-connect">
       <!-- 操作放右上角：它们是这一屏的「入口」，而列表本身是内容。
            摆在列表下面时，列表一长就得先滚过全部条目才够得着。
-           ★ 「断开」只在**连着**的时候出现 —— 它是一个站点级的动作
-             （同时最多连着一个站点），不是某一条连接自己的属性。 -->
+           ★★ 「临时离开」与「断开」只在**连着**的时候出现 —— 它们是**站点级**的
+             动作（同时最多连着一个站点），不是某一条连接自己的属性。
+           ★★ 而这两个按钮对作业做的事**正好相反**，所以文案必须把后果写出来，
+             不能只靠名字：断开 = 作业停掉（`goodbye`），临时离开 = 作业继续跑
+             （`leave`，但没人看着它 35 分钟就会被回收）。名字挨着、后果相反，
+             正是最容易点错的一格。 -->
       <div class="sec-head">
         <h2>登录节点</h2>
         <button id="btn-new">新建连接…</button>
         <button id="btn-probe" class="ghost">探测全部</button>
-        <button id="btn-disconnect" class="ghost danger-ghost hidden">断开</button>
+        <button id="btn-leave" class="ghost hidden"
+                title="回到这个列表，作业继续在集群上跑。★ 但没人看着它 35 分钟之后，它会被自动回收。">临时离开</button>
+        <button id="btn-disconnect" class="ghost danger-ghost hidden"
+                title="停掉这些作业并断开连接。">断开</button>
         <!-- 集群现状是**只读**的，而且与"有没有会话"无关 —— 所以入口在这一屏，
              不在"开始会话"那一屏里（那一屏连不上集群时是藏着的）。 -->
         <button id="btn-cluster" class="ghost">集群状态</button>
@@ -117,6 +124,10 @@
         打开客户端<strong>不会自动连上任何一台</strong>。
         想知道某个站点上还有没有作业在跑，点它那一行的「连接」——
         连上去<strong>不会动任何作业</strong>，只是把还在跑的那些接回来看着。
+        <br>
+        连着的时候有两个出口，它们对作业做的事<strong>正好相反</strong>：
+        「临时离开」让作业<strong>继续跑</strong>（但没人看着它 35 分钟就会被回收），
+        「断开」则<strong>把作业停掉</strong>。
       </p>
 
       <!-- ── 连接 ↔ 布局 的映射图 ──

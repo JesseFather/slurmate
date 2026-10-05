@@ -46,6 +46,17 @@ const State = {
 
 /** 心跳间隔。suspect_after=300s，留 6 倍余量。 */
 const HEARTBEAT_MS = 45000;
+
+/**
+ * 「这条作业被另一台电脑接管了」—— 交给 `suspend()` 的那句话。
+ *
+ * ★ 它是一条**常量**而不是散在 `_beat()` 与界面里的两句文案：界面那一边（状态条、
+ *   明细里那一行）要印的是**同一件事**，而两处各写一句的漂法是"主进程说被接管了、
+ *   界面说被顶掉了"—— 用户会去查一个不存在的区别。
+ */
+const SUSPENDED_TAKEN_OVER =
+  '这条作业已被另一台电脑接管，本机不再看护它（作业仍在运行）。';
+
 /**
  * 稳定态刷新间隔（剩余时间、续期次数、tunnel_target 变化、被回收检测）。
  *
@@ -196,7 +207,7 @@ class SessionController extends EventEmitter {
     this._lastTarget = null;
     this._stopped = false;
     /**
-     * 被另一个客户端顶掉了（那时这里是原因那句话），没被顶就是 `null`。
+     * 这条作业被另一台电脑接管了（那时这里是原因那句话），没有被接管就是 `null`。
      *
      * ★ 它是一个**终态**：置上之后本机不再心跳、不再对账、不再订阅推送，
      *   而在用户手动点「连接」之前不会清掉。见 `suspend()`。
@@ -234,7 +245,7 @@ class SessionController extends EventEmitter {
   }
 
   /**
-   * 被另一个客户端顶掉了没有（原因那句话），没被顶就是 `null`。
+   * 这条作业被另一台电脑接管了没有（原因那句话），没有被接管就是 `null`。
    *
    * ★★ 这个 getter **必须有**，而且它单独存在是有理由的：
    *    `index.js` 有**两处**按它做判断 —— `stopAllSessions()` 里跳过它
@@ -336,10 +347,12 @@ class SessionController extends EventEmitter {
       backendKind: this.backend.kind,
       error: this.error,
       warning: this.warning,
-      // ★ 「本机被另一个客户端顶掉了」。它是**这台客户端**的状态，不是这条会话的
+      // ★ 「这条作业被另一台电脑接管了」。它是**这台客户端**的状态，不是这条会话的
       //   —— 界面要说的话完全不同：session 的 `state` 仍然是 running（作业真的
       //   还在跑），变的只是"本机不再管它了"。把它并进 `state` 的话，界面会
       //   显示「已结束」，而那是**一句不成立的话**。
+      // ★★ 而它本身就是**给界面看的那句话**（`suspend()` 记下的原因）—— 界面
+      //   直接印，不再自己编一句（见 panel.js 的 renderSnapshot）。
       suspended: this._suspended,
       // ★ 「这一次会话不是在真集群上跑的」。界面据此挂那条横幅与状态条标记。
       //
@@ -756,10 +769,47 @@ class SessionController extends EventEmitter {
    *   一句和真实情况不符的话（"心跳正常"或"心跳一直失败"）。
    */
   async _beat() {
-    if (this._stopped || !this.sessionId) return;
+    // ★★ 被接管的会话**一拍都不发**，这道闸与 `_stopped` 并列。
+    //
+    //   它守的是"接管"这件事的**收尾**：`suspend()` 会把定时器停掉，但
+    //   `heartbeatNow()` 是一条**显式**的路（`app:takeover` 会调它），而显式的路
+    //   绕过定时器。少了这道闸，一个已经放手的会话会拿着**本机的身份**去问一次
+    //   "我还在看吗"—— 服务端只能回 `ignored`，于是那句话在接管成功的同一条路径上
+    //   又变回"被接管"，而界面上刚刚才说过"已接管"。
+    //
+    //   ★ 回来那条路是 `resume()`（`app:takeover` 成功之后调它），**不是**在这里
+    //     悄悄放行 —— "我不再是看护者"与"我又成了看护者"是两件事，各有各的入口。
+    if (this._stopped || this._suspended || !this.sessionId) return;
     const resp = await this.backend.rpc({ op: 'heartbeat', session_id: this.sessionId });
     const c = classify(resp, { op: 'heartbeat' });
     if (c.action === Action.OK) {
+      // ★★ 服务端说「这一拍没有算数」。那是**另一件事**，不是成功 —— 而它挂在
+      //    `ok:true` 上（见 `op_heartbeat` 的 docstring：心跳不是一条会让客户端
+      //    重试的请求，所以拒绝时回 `ok` 带一个 `ignored`，而不是回错）。
+      //
+      //    ★ 判据是 `ignored` 那一格**在不在**，不是它等于什么：它在，就说明
+      //      这一次心跳**没有续上命**，于是 `_heartbeatAt` 一个字节都不能推进。
+      //      推进它等于本机自己宣称"我在看着"，而服务端刚刚说了不是 —— 那句假话
+      //      会一路传到界面上（"上次心跳 3 秒前"），而真相是这条会话已经不归
+      //      本机管了。
+      //
+      //    ★ `not_keeper` 是唯一有确定含义的取值：**另一台电脑接管了它**。这是
+      //      客户端认出「我被接管了」的**唯一**信号 —— 守护进程刻意没有为此发明
+      //      一条推送，因为"谁在看"是会话行上的一格，而这一格变了只有正在心跳的
+      //      那个人问得出来。
+      //
+      //    ★ 认不出来的取值**原样印出来**，不猜（与 sessionstate.js 同一条纪律）。
+      //      猜成"接管了"会让本机白白放弃一条其实还归自己的会话；猜成"没事"则会
+      //      把一句服务端明说了的话咽掉。
+      const ign = resp.data && resp.data.ignored;
+      if (ign) {
+        if (ign === 'not_keeper') this.suspend(SUSPENDED_TAKEN_OVER);
+        else {
+          this.warning = `心跳被服务端忽略了（${ign}），本机可能不再看护这条会话。`;
+          this._emit();
+        }
+        return;
+      }
       this._heartbeatAt = Date.now();
       if (this.warning && /心跳/.test(this.warning)) this.warning = null;
     } else if (c.action === Action.SESSION_GONE) {
@@ -933,30 +983,70 @@ class SessionController extends EventEmitter {
   }
 
   /**
-   * 被另一个客户端顶掉：**停下本机的一切，一个字都不发给服务端。**
+   * 这条作业**被另一台电脑接管了**：停下本机的一切，一个字都不发给服务端。
    *
    * ★★ 这个方法存在的全部理由是**那一条不能发出去的 `goodbye`**。
    *
    *    收尾流程（`stop()`）会给守护进程发 `goodbye`，而 `goodbye` 会让
-   *    `phase_release` 删掉 ACL **并 scancel 作业**。被顶掉的客户端如果照常
+   *    `phase_release` 删掉 ACL **并 scancel 作业**。被接管的那台如果照常
    *    收尾 —— 关窗、点断开、或者只是退出 —— 用户的作业就没了，而用户以为
    *    自己只是**换了个地方看**。
    *
    *    守护进程那一侧堵不住：它按 `session_id` 记账，**分辨不了那个 `goodbye`
-   *    是顶替者发的还是被顶掉的那个发的**。所以只能在客户端这一半堵，
+   *    是接管者发的还是被接管的那台发的**。所以只能在客户端这一半堵，
    *    而堵法就是"根本不进收尾流程"（另见 `stop()` 顶部的那道闸）。
    *
    * ★ 与 `abandon()` 只差一处，而那一处是承重的：`abandon` 拆隧道，这里
    *   **不拆**。用户此刻可能正开着那个页面看着东西 —— 拆掉隧道等于把"换个地方
    *   看"变成"这边的东西全没了"，而作业还在集群上跑着。
+   *
+   * ★★ 触发它的是**心跳的应答**（`ignored: not_keeper`，见 `_beat()`），不是一条
+   *    推送。v0.9 之前这里是"被服务端按 uid 顶掉整个客户端"（一条 `displaced`
+   *    通知）；那个形状连同它的实现一起删掉了（见 `backend.js` 的接口注释）。
+   *    ★ 收窄之后它是**逐会话**的：同一台电脑上另一条作业被别人接管了，不影响
+   *      这一条 —— 而"整台电脑被顶掉"那个形状做不到这件事，那正是它被删掉的理由。
+   *
+   * ★ **「临时离开」不走这里。** 两者的效果看着像（都停下心跳、都不发 goodbye），
+   *   但离开之后本机**连记录都不留**（用户已经回列表了、页面也拆了），而这里
+   *   留着记录、留着隧道 —— 因为用户可能还开着那个页面在看。见 index.js 的
+   *   `app:leave`。
    */
   suspend(reason) {
     if (this._suspended) return;                 // 幂等：只记第一条原因
-    this._suspended = reason || '本机已被另一个客户端顶掉。';
+    this._suspended = reason || SUSPENDED_TAKEN_OVER;
     this._stopHeartbeat();
     this._stopStatusPoll();
     this._watchBackend(false);
     this.warning = this._suspended;
+    this._emit();
+  }
+
+  /**
+   * 把这条会话**重新拿到手上** —— 【接管】成功之后走的那一步。
+   *
+   * ★★ 少了它，「接管」会变成一句假话：`suspend()` 是一个**终态**（`_beat()` 顶上
+   *    有一道闸），而接管成功意味着服务端那一格**已经换成本机**了。不撤销它的话，
+   *    界面会一直说"已被另一台电脑接管"、心跳一直不发 —— 而用户刚刚看到一句
+   *    「已接管」。★ 而心跳不发这件事的代价不是"少几个字"：1800 秒之后，那条
+   *    作业会被当作没人看护而 `scancel` 掉，界面上仍然写着"已接管"。
+   *
+   * ★ 四样一起开回来，与 `suspend()` 停掉的四样**一一对应**：心跳、对账、订阅，
+   *   以及那句原因。少开任何一样的症状都是静默的（少了对账 ⇒ 剩余时间永远停在
+   *   接管那一刻，而那个数看起来完全正常）。
+   *
+   * ★ 这里**不拆也不建隧道**：`suspend()` 特意没拆（用户可能还开着那个页面在看），
+   *   于是接管回来时它还在。这与"接管一个字都不动会话"是同一条纪律的延伸。
+   */
+  resume() {
+    if (!this._suspended) return;
+    const why = this._suspended;
+    this._suspended = null;
+    // 只清**这一句**：别的原因（隧道断了、心跳失败）还站着，一并清掉就是替用户
+    // 把一句仍然成立的话咽下去。
+    if (this.warning === why) this.warning = null;
+    this._watchBackend(true);
+    this._startStatusPoll();
+    this._startHeartbeat();
     this._emit();
   }
 
@@ -976,7 +1066,7 @@ class SessionController extends EventEmitter {
    *   （见文件头第 1 条），客户端再提供一个「主动保活」的开关是多余且有害的。
    */
   async stop() {
-    // ★★ 被顶掉的会话**绝不进收尾流程** —— 这道闸放在这里（而不是只放在调用方
+    // ★★ 被接管的会话**绝不进收尾流程** —— 这道闸放在这里（而不是只放在调用方
     //    `stopAllSessions` 里），是为了让保证跟着**数据**走而不是跟着**调用点**走：
     //   下一个"顺手加"的收尾入口不该有机会绕过它。
     //   为什么不发：见 `suspend()` —— 那个 `goodbye` 会把用户的作业 scancel 掉，
