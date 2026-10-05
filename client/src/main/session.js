@@ -20,9 +20,12 @@
  *    而 `count_active` 只数 ACL_STATES，`submitted` 不在内，所以配额拦不住第二个。
  *    → 超时 45s（比 CLI 内部的 40s 长）、**超时绝不重试**、用 status 认领。
  *
- * 3. **`released` 不代表作业已停**。守护进程的 `phase_release` 只删规则、删文件、
- *    置 released，从不确认 `scancel` 真的成功（`docs/KNOWN-ISSUES.md` 的 F12 / F13）。
+ * 3. **`ok:true` 不代表作业已停**。`goodbye` 的 `ok:true` 说的是「这条请求被受理
+ *    了、会话进了 `releasing`」；`released` 说的才是「作业确认消失了」—— 守护进程
+ *    在两者之间有一道闸（`docs/ARCHITECTURE.md` 的 §3.0），而它会一直重试。
  *    所以「正在释放」和「已结束」必须是两个状态，且不能自己宣布成功。
+ *    ★ 这一次 `scancel` 没成功时，响应里带 `data.warning`（v0.9 起，账本 F12）
+ *    —— 那句必须显示：用户会以为作业停了，而它可能还在烧 GPU。
  */
 
 const { EventEmitter } = require('events');
@@ -987,11 +990,16 @@ class SessionController extends EventEmitter {
 
     const c = classify(resp, { op: 'goodbye' });
     if (c.action === Action.OK) {
-      // ★ 注意：ok:true **不等于作业真的被取消了**。
-      //   守护进程的 op_goodbye 丢弃 scancel 的返回值（docs/KNOWN-ISSUES.md 的 F12），
-      //   而 phase_release 从不确认作业是否真的没了（F13）。所以这里只能说「已请求释放」。
+      // ★ `ok:true` 仍然**不等于**作业真的被取消了 —— 它等于"这一次 scancel
+      //   发出去了、会话进了 releasing"。守护进程现在会一直重试到确认作业消失
+      //   为止（`phase_release` 的闸），所以这里能说的是"已请求释放"。
+      // ★ 而服务端**说得出**"这一次没成功"（v0.9 起协议里的 `warning`，账本 F12）
+      //   —— 它必须被显示：用户会以为作业停了，而它可能还在烧 GPU。
+      const w = resp.data && resp.data.warning;
+      if (w) this.warning = w;
       this._setState(State.RELEASING);
-      return { ok: true, state: 'releasing', detail: '已请求释放，等待控制节点确认。' };
+      return { ok: true, state: 'releasing',
+               detail: w ? ('已请求释放。' + w) : '已请求释放，等待控制节点确认。' };
     }
     if (c.action === Action.SESSION_GONE) {
       this._setState(State.ENDED);

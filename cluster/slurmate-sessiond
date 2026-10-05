@@ -489,6 +489,18 @@ RELEASED_KEEP = 600
 # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
 JOB_MISSING_CONFIRM_TICKS = 3
 
+# 释放流程里"作业还没确认停掉"时，隔多久**再 scancel 一次**。
+#
+# ★★ 它只节流**重试**与**说话**，**不节流"看一眼作业还在不在"**。看一眼是每个
+#    tick 都要做的事（与 phase_running 对在跑的会话做的事是同一笔账），而"作业
+#    一真的停了就立刻放行"全靠它 —— 节流它等于让用户在点完【结束】之后多等一个
+#    间隔才看见"已结束"。
+#
+# ★ 为什么需要它：一个**杀不掉**的作业（epilog 挂住、控制器拒收）会让 releasing
+#    停留几小时，而每个 tick 一次 `scancel` 加一行日志、一条审计是一条**没有上限**
+#    的账单。而重复的 scancel 对"作业还活着"这个事实一个字都改变不了。
+RELEASE_RETRY_SECONDS = 60
+
 # ── Slurm 作业状态：两条轴，别混 ────────────────────────────────────────────
 #
 # 会话状态（ST_*）是**我们**的状态机，作业状态是**集群**的。两者只在一处相交
@@ -2592,6 +2604,7 @@ class Config(object):
         self.released_keep = RELEASED_KEEP
         self.job_missing_confirm_ticks = JOB_MISSING_CONFIRM_TICKS
         self.stuck_job_seconds = STUCK_JOB_SECONDS
+        self.release_retry_seconds = RELEASE_RETRY_SECONDS
         self.renew_enabled = True
         self.renew_threshold = RENEW_THRESHOLD
         self.renew_increment = RENEW_INCREMENT
@@ -3772,9 +3785,17 @@ class Slurm(object):
         return int(m.group(1)), None
 
     def cancel(self, job_id, reason=""):
+        """取消作业。**返回值必须被调用方看** —— 失败只记一行日志然后当没发生，
+        正是账本 F12 那条缺陷（`op_goodbye` 从前就是这么做的）。
+
+        `reason` 只进日志：它回答"这一次是谁要取消的"（goodbye / orphaned /
+        release_waiting / enroll_timeout），而一条失败的 `scancel` 行里没有它
+        就只能靠上下文猜。
+        """
         rc, _, err = run_cmd([self.cfg.scancel, str(job_id)], timeout=15)
         if rc != 0:
-            log.warning("scancel %s 失败: %s", job_id, err.strip()[:200])
+            log.warning("scancel %s 失败（%s）: %s", job_id, reason or "未注明",
+                        err.strip()[:200])
             return False
         return True
 
@@ -4267,6 +4288,9 @@ class Sessiond(object):
         # 存**时刻**而不是计数：tick 之间有别的活（查询、fork），按 tick 数算会把
         # 一个跑了 8 秒的 tick 当成 2 秒。
         self.job_stuck = {}
+        # session_id -> 下一次"再 scancel 一次"的**时刻**（见 phase_release 的闸）。
+        # 它只管重试与说话，不管"看一眼作业还在不在"。
+        self.release_retry = {}
         # 插件包的快照缓存：包路径 -> {files: {包内路径: (字节数, sha256)},
         #                                package: {format, bytes, digest} | None}。
         # **刻意不失效** —— 守护进程对插件的认知本来就是启动那一刻的快照，
@@ -4786,6 +4810,42 @@ class Sessiond(object):
         self.audit("job_stuck", session=sid, job=s["job_id"], job_state=jstate,
                    seconds=now - t0)
 
+    def note_release_waiting(self, s, why, jstate):
+        """作业还没确认停掉 ⇒ **什么都不拆**，必要时再 scancel 一次。
+
+        `why`：`"alive"`（作业还在，`jstate` 是它的状态）或 `"unknown"`
+        （联系不上控制器，`jstate` 必然是 None）。
+
+        ★★ **这里没有任何拆除动作，是刻意的** —— 见 `phase_release` 的 docstring。
+        这个函数只做两件事：再试一次取消，以及**把"还没停"说出来**。
+
+        ★ `"unknown"` 时**不重试 scancel**：控制器都联系不上，scancel 只会以同样
+        的方式失败，而那条日志会把真正的原因（联系不上）埋在一句"取消失败"下面。
+
+        ★ 重试与说话都**带节流**（`release_retry_seconds`）：一个杀不掉的作业会让
+        `releasing` 停留几小时，而每个 tick 一次 fork 加一行日志、一条审计是一条
+        没有上限的账单，且它对"作业还活着"这个事实一个字都改变不了。
+        ★ 而**第一个 tick 不节流** —— 刚 `begin_release` 的那一次必须真的试一下，
+        否则每一条正常的释放都要白等一个间隔。
+        """
+        sid = s["session_id"]
+        now = now_ts()
+        if now < self.release_retry.get(sid, 0):
+            return
+        self.release_retry[sid] = now + self.cfg.release_retry_seconds
+        again = None
+        if why != "unknown":
+            again = self.slurm.cancel(s["job_id"], "release_waiting")
+        if why == "unknown":
+            how = "联系不上控制节点，问不到它还在不在"
+        else:
+            how = "作业还在（%s）" % (jstate or "拿不到状态")
+        log.warning("会话 %s（job=%s）释放不了：%s。防护与 ACL 一律保留，"
+                    "在作业被确认消失之前不会标成已释放",
+                    sid, s["job_id"], how)
+        self.audit("release_waiting", session=sid, job=s["job_id"], why=why,
+                   job_state=jstate, cancel_ok=again)
+
     def try_enroll(self, s, job):
         now = now_ts()
         info, why = self.load_session_file(s["uid"], s["job_id"])
@@ -4917,6 +4977,10 @@ class Sessiond(object):
                             s["session_id"], miss)
                 self.audit("orphaned", session=s["session_id"], uid=s["uid"],
                            job=s["job_id"], miss_seconds=miss)
+                # ★ 这里的返回值同样不看 —— 而它今天**不要紧**：下面
+                #   begin_release 之后，phase_release 的闸会自己查一遍并重试
+                #   （见那一道闸的 docstring）。上一句的 scancel 只是让作业
+                #   早一两个 tick 开始死。
                 self.slurm.cancel(s["job_id"], "orphaned")
                 self.store.update(s["session_id"], state=ST_ORPHANED)
                 self.begin_release(s, "orphaned")
@@ -4926,12 +4990,48 @@ class Sessiond(object):
         self.audit("releasing", session=s["session_id"], job=s["job_id"], reason=reason)
 
     def phase_release(self):
-        """拆除：删 ACL → 删口令文件 → 尽力删会话文件 → 置 released。
+        """拆除：**先确认作业真的停了**，再删 ACL → 删口令文件 → 尽力删会话文件 → 置 released。
 
         released 之前规则一定在，之后规则一定不在。
+
+        ★★ v0.9 多了一道闸，而它是账本 F13 的落点。从前这里**从不确认作业是否
+        还在** —— 于是「已释放」这句话可以是假的：作业占着节点跑到 `TimeLimit`
+        （GPU 分区上那是 12 小时实打实的算力），而会话文件已经删了、`released`
+        又不在 `phase_running` 的扫描集合里 ⇒ **再也找不回来**。
+
+        ★★ **闸只放行两种答案**：`JOB_MISSING`（确认不存在），以及 `JOB_OK` 且
+        `job_is_terminal()`（真终态）。`JOB_UNKNOWN`（联系不上控制器）与一切非
+        终态（`PENDING` / `RUNNING` / `CANCELLING` / 拿不到详情…）都**不放行**，
+        会话停在 `releasing`，下一个 tick 再看。
+        ★ **绝不能把「问不到」当成「不存在」** —— 那正是 `Slurm.job_state()`
+        三态存在的原因，它的 docstring 里写着合并两者的后果：一次控制器抖动
+        = 所有活跃会话在同一个 tick 内被判成"作业已结束"。
+
+        ★ **拆的三件事一起推迟，不是只推迟状态那一格**：ACL、口令文件、会话
+        文件一件都不动，直到确认作业停了。好处有两个：① 上面那条不变量一个字
+        都不用改；② 一个还在跑（或还杀不掉）的作业上，用户**仍然连得进去**，
+        看得见它还在烧 —— 那正是要让人看见的事。
+
+        ★ 而 `note` 是**为什么走到这里**，不是**为什么可以拆**：不论原因是
+        `goodbye` / `orphaned` / `job_gone` / `job_<状态>`，这一节都要自己查
+        （`job_gone` 那条会多花一次查询，而"释放的判据只有一处"值这个价）。
         """
         now = now_ts()
         for s in self.store.by_state((ST_RELEASING,)):
+            # ── 闸：作业真的停了吗 ──────────────────────────────────────────
+            if s["job_id"]:
+                jid = s["job_id"]
+                status, job = self.slurm.job_state(jid)
+                # ★ 与 phase_running 同一条：把这次的结果留给本 tick 的快照，
+                #   免得它为同一个作业再 fork 一次（tick_job 是记忆化的）。
+                self._tick_job[jid] = job if status == self.slurm.JOB_OK else None
+                if status == self.slurm.JOB_UNKNOWN:
+                    self.note_release_waiting(s, "unknown", None)
+                    continue
+                if status == self.slurm.JOB_OK and not job_is_terminal(job):
+                    self.note_release_waiting(s, "alive",
+                                              (job or {}).get("JobState"))
+                    continue
             # 1) 删掉该会话可能存在的【所有】规则（端口可能变过，按前缀删更稳妥）
             prefix = "slurmate-sess-%d-%s-" % (s["uid"], s["job_id"])
             rules = self.nft.session_rules() or {}
@@ -4942,11 +5042,14 @@ class Sessiond(object):
             # 2) 口令文件
             # 3) 会话文件（只在能被安全确认属于该用户时才删）
             self.remove_session_file(s)
-            # 4) 三个按 session_id 记账的观察表一起清掉。
+            # 4) 几个按 session_id 记账的观察表一起清掉。
             #    不清的话它们会随**每一个曾经存在过的会话**一直长下去 —— 这是
             #    守护进程里唯一没有上限的容器，而它的症状是"跑几个月之后内存
             #    慢慢涨"，指不回任何一行。
-            for _t in (self.job_missing, self.job_unknown, self.job_stuck):
+            #    ★ 这张名册是**唯一**一处：往上面加一个表却忘了加进这里，症状
+            #      与上面那句一模一样，而它指不回任何一行 —— 所以这几行挨着放。
+            for _t in (self.job_missing, self.job_unknown, self.job_stuck,
+                       self.release_retry):
                 _t.pop(s["session_id"], None)
             self.store.update(s["session_id"], state=ST_RELEASED, ended_at=now)
             self.audit("released", session=s["session_id"], job=s["job_id"],
@@ -5215,6 +5318,15 @@ class Sessiond(object):
 
     # ── 文件清理（安全关键）─────────────────────────────────────────────────
     def remove_session_file(self, s):
+        # ★ `job_id` 可能是 NULL，而这一条**不是**防御性编程：`op_goodbye` 只挡
+        #   终态，不挡 `job_id` 为空，所以一条 `reserved`（提交中途被打断留下来的）
+        #   会话被 goodbye 之后会走到这里 —— 而 `"job-%d.json" % None` 是
+        #   TypeError，它从 phase_release 里抛出去会**中止整个 tick**：
+        #   同一个 tick 的 phase_gc 与 phase_push 全部不跑，每 2 秒一次，
+        #   直到那条会话消失为止（用户看到的是"所有推送停了"，指不回这一行）。
+        #   没有 job_id 就没有会话文件，直接返回。
+        if not s.get("job_id"):
+            return
         home = self.user_home(s["uid"])
         if not home:
             return
@@ -6311,17 +6423,42 @@ class Sessiond(object):
         return self._ok({"cleared": cleared})
 
     def op_goodbye(self, uid, req):
+        """显式结束一条会话：发 `scancel`，然后交给 phase_release 去**确认**。
+
+        ★★ v0.9（账本 F12）：`cancel()` 的返回值从前在这里被**丢掉**，于是
+        `scancel` 失败时照样回一个干净的 `ok:true` —— 而用户与客户端都会把它读成
+        "作业停了"。现在它看得见那个结果，并且**说得出来**：失败时带 `warning`。
+
+        ★ 为什么是 `ok:true` + `warning`，不是 `ok:false`：这条请求**被受理了**
+        —— 会话已经进了 `releasing`，而守护进程会一直重试到确认作业消失为止
+        （见 `phase_release`）。回 `ok:false` 等于告诉客户端"你的动作没生效"，
+        而那与事实相反：它生效了，只是还没做完；客户端还会因此把这条会话当成
+        仍然活着，去劝用户重试一次已经在了的事。
+
+        ★ 而那句 `warning` **不诊断原因**。"作业可能还在跑"是一个**没有核对过**
+        的结论 —— 作业也可能刚刚正常结束，`scancel` 报的只是"没有这个作业"。
+        它说的是守护进程**接下来会怎么做**，那一句两条路上都是真的。
+        """
         sid = str(req.get("session_id") or "")
         s = self.store.get(sid)
         if not s or s["uid"] != uid:
             return self._err(3, "not_found")
         if s["state"] in TERMINAL_STATES:
             return self._ok({"state": s["state"]})
+        data = {"state": ST_RELEASING}
         if s["job_id"]:
-            self.slurm.cancel(s["job_id"], "goodbye")
+            if not self.slurm.cancel(s["job_id"], "goodbye"):
+                # ★ 单独一条审计：`goodbye` 那条只说明"用户要结束"，
+                #   而这一条说明"这一次没做成" —— 两件事，分开记。
+                self.audit("cancel_failed", session=sid, uid=uid,
+                           job=s["job_id"], reason="goodbye")
+                data["warning"] = (
+                    "scancel 这一次没有成功（控制节点拒绝了它，或者暂时联系不上）。"
+                    "会话已经进入释放流程，守护进程会继续重试；在作业被确认消失"
+                    "之前，它不会被标成已释放。")
         self.audit("goodbye", session=sid, uid=uid, job=s["job_id"])
         self.begin_release(s, "goodbye")
-        return self._ok({"state": ST_RELEASING})
+        return self._ok(data)
 
     def fit_gres(self, g, partition):
         """把请求的 GRES 与这个分区**实际有的**对一对。返回 `(描述符, 错误说明)`。

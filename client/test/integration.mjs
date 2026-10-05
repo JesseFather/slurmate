@@ -186,8 +186,9 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   // ── 释放 ──
   const res = await ctl.stop();
   assert.equal(res.ok, true);
-  // ★ 返回 releasing 而不是「已结束」—— 因为 op_goodbye 的 ok:true 并不保证
-  //   scancel 真的成功了（记忆 cluster-side-defects 的 F12/F13）。
+  // ★ 返回 releasing 而不是「已结束」—— `ok:true` 的含义是"这一次 scancel 发出去了、
+  //   会话进了 releasing"，而不是"作业已经停了"。真守护进程会一直重试到确认作业
+  //   消失（`phase_release` 的闸），客户端等不了那么久，所以只能说「已请求释放」。
   assert.equal(res.state, 'releasing');
 
   // 隧道必须已经关掉：再连应当失败，而不是挂住
@@ -221,6 +222,41 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
   const st = await backend.rpc({ op: 'status', session_id: ctl.sessionId });
   assert.equal(st.ok, true);
   assert.notEqual(st.data.session.state, 'enrolled', '作业不应当还在跑');
+});
+
+test('★★ 取消失败时，那句「这一次没成功」必须一路走到用户眼前', async (t) => {
+  t.after(keepAlive());
+  const backend = await makeBackend(t, { enrollDelayMs: 200 });
+  // ★ 先跑一遍**成功**的那条：一个永远失败的夹具，会让下面那条断言
+  //   在"warning 是写死的"这种情况下也照样绿。
+  const ctlOk = new SessionController({ backend, layoutId: 'l1' });
+  await ctlOk.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
+  const rOk = await ctlOk.stop();
+  assert.equal(rOk.ok, true);
+  assert.equal(rOk.state, 'releasing');
+  assert.ok(!/没有成功/.test(rOk.detail), '取消失败那句话不该在成功时出现：' + rOk.detail);
+  assert.ok(!/没有成功/.test(ctlOk.snapshot().warning || ''),
+            '成功时不该留下那句警告：' + ctlOk.snapshot().warning);
+
+  // ── 失败那一条 ──
+  const backend2 = await makeBackend(t, { enrollDelayMs: 200 });
+  backend2.cancelFails = true;
+  const ctl = new SessionController({ backend: backend2, layoutId: 'l1' });
+  await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
+  const res = await ctl.stop();
+
+  // ★★ 形状是**承重的**：仍然 `ok:true`、仍然是 `releasing`。
+  //    这条请求**被受理了** —— 会话已经进了释放流程，守护进程会一直重试到确认
+  //    作业消失。回 `ok:false` 等于说"你的动作没生效"，而它生效了、只是没做完；
+  //    客户端还会因此劝用户去重试一件已经在做的事。
+  assert.equal(res.ok, true, '取消失败不等于请求被拒绝');
+  assert.equal(res.state, 'releasing');
+  // ★ 而那句话必须在这儿 —— 协议里 `warning` 这个字段存在的唯一理由就是被显示。
+  assert.ok(/没有成功/.test(res.detail), '那句话必须回到调用方：' + res.detail);
+  assert.ok(/重试/.test(res.detail), '而且要说清接下来会怎样：' + res.detail);
+  // ★ 两条路都要到：`stop()` 的返回值给的是调用点，`snapshot()` 给的是界面。
+  assert.ok(/没有成功/.test(ctl.snapshot().warning || ''),
+            '还必须进 snapshot().warning —— 界面读的是它：' + ctl.snapshot().warning);
 });
 
 test('★ 意外消失（没来得及发 goodbye）时作业必须还在 —— 这才是「保活」唯一该生效的场景', async (t) => {

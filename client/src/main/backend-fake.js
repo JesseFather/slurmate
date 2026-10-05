@@ -234,6 +234,15 @@ class FakeBackend extends Backend {
      * 缺省也同值（1，安全侧）。用例直接把 `getBackend().maxActive = 2` 就能验多开。
      */
     this.maxActive = 1;
+    /**
+     * `scancel` 这一次会不会失败。**默认不失败**（正常的站点上它多半成功）。
+     *
+     * ★ 这个开关存在的理由与 `maxActive` 一样：真守护进程**会**在取消失败时
+     *   回一个 `warning`（协议里那个字段，见 `op_goodbye`），而一个永远不会失败
+     *   的假后端让客户端那一半**根本没有办法验**。假后端演的是同一件事 ——
+     *   包括它失败的那一面。
+     */
+    this.cancelFails = false;
     this._seq = 0;
     /**
      * 这台电脑的客户端身份（见 backend.js 的接口注释）。假后端**不用它排席位**
@@ -1092,13 +1101,21 @@ class FakeBackend extends Backend {
     s.state = 'releasing';
     s.note = 'goodbye';
     // 真实守护进程会回 releasing，然后下一个 tick（最多 2 秒）才置 released。
-    // 假后端照做 —— 界面必须把「正在释放」和「已结束」当成两个状态，
-    // 因为 scancel 有可能静默失败（见 docs/KNOWN-ISSUES.md 的 F12 / F13）。
+    // 假后端照做 —— 界面必须把「正在释放」和「已结束」当成两个状态。
     s._releaseTimer = setTimeout(() => {
       s.state = 'released';
       s.tunnel_target = null;
       this._emitState(false, '会话已释放');
     }, 1600).unref?.();
+    if (this.cancelFails) {
+      // ★ 真守护进程在这里说两件事，而且**故意不说**"作业还在跑"（它没有核对过
+      //   那一点：作业可能刚刚正常结束，scancel 报的只是"没有这个作业"）。
+      //   它说的是"这一次没成功 + 我接下来会怎么做"。假后端照这个形状演。
+      return ok({ state: 'releasing',
+                  warning: 'scancel 这一次没有成功（模拟）。会话已经进入释放流程，'
+                         + '守护进程会继续重试；在作业被确认消失之前，'
+                         + '它不会被标成已释放。' });
+    }
     return ok({ state: 'releasing' });
   }
 

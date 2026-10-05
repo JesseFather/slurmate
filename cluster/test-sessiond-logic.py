@@ -95,8 +95,12 @@ def load_cli():
     """加载 `cluster/slurmate` 那个 CLI（它没有 .py 后缀，所以只能这样加载）。
 
     ★ 加载它是安全的：那个文件的顶层只有 import 与常量定义，`main()` 在
-      `if __name__ == "__main__"` 里。这里要的只是它那几个常量 —— 19.11d 那条
-      跨文件不变量读的是它与守护进程各写一遍的那两个数。
+      `if __name__ == "__main__"` 里。调用方要的是它那几个常量（19.11d 那条
+      跨文件不变量读的是它与守护进程各写一遍的那两个数），以及第 30.9 节那处
+      ——把 `call` 换掉、真跑一遍 `_simple`，验"服务端发的那句话命令行看得见"。
+
+    ★ 每次调用都是一个**新的模块对象**，所以调用方在它上面做的任何替换都不会
+      漏给下一个调用方。
     """
     path = os.path.join(HERE, "slurmate")
     loader = importlib.machinery.SourceFileLoader("slurmate_cli", path)
@@ -7014,6 +7018,377 @@ exit 0
           and _d35.session_view(_d35.store.get("s-l1"),
                                 with_secret=False).get("keeper") is None,
           repr(_vw.get("keeper")))
+
+    # ══ 30. 释放那条路要能说实话（v0.9 阶段 4：账本 F12 / F13）══════════════
+    #
+    # ★★ 从前 `phase_release` **从不确认作业是否还在**：它删 ACL、删口令文件、
+    #    删会话文件，然后置 `released`。于是"已释放"这句话可以是假的 —— 作业占着
+    #    节点跑到 TimeLimit（GPU 分区上那是 12 小时实打实的算力），而会话文件已经
+    #    删了、`released` 又不在 `phase_running` 的扫描集合里 ⇒ **再也找不回来**。
+    #    而 `op_goodbye` 丢掉 `cancel()` 的返回值，所以连"这一次没成功"都不说。
+    #
+    # ★ 这一节有**两半**，第二半是承重的：**闸**（只有确认作业停了才拆）与
+    #   **那句话**（没成功要说出来、必须走到用户眼前）。只判"状态没变"的话，
+    #   把拆除提到闸前面的写法照样绿 —— 所以每条判据里都带着"规则一条都没少、
+    #   会话文件还在"，那才是"什么都没拆"。
+    print("\n── 30. 释放的闸：确认作业真的停了才拆（F12 / F13）──")
+
+    check("★ 重试间隔是一个**常量**而不是配置键（与 job_missing_confirm_ticks "
+          "同族：这些时间刻度从来没有站点改过）",
+          mod.RELEASE_RETRY_SECONDS >= 1
+          and "release_retry_seconds" not in mod.GLOBAL_KEYS
+          and cfg.release_retry_seconds == mod.RELEASE_RETRY_SECONDS,
+          "%s / 在 GLOBAL_KEYS 里：%s"
+          % (getattr(mod, "RELEASE_RETRY_SECONDS", "★ 没有这个常量"),
+             "release_retry_seconds" in mod.GLOBAL_KEYS))
+
+    class _RelSlurm(object):
+        """能喂三态的 Slurm：`jobs[jid]` 是 dict（JOB_OK）/ `None`（**UNKNOWN**）
+        / 缺席（MISSING）。外加一个 cancel 计数器与一个可设的成功/失败。
+
+        ★ 三态必须都能喂到：这一节要验的第一件事就是"问不到"**不许**被当成
+          "不存在" —— 而一个只会吐 MISSING 的夹具让那条判断无从验起。
+        """
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def __init__(self):
+            self.jobs = {}
+            self.cancels = []
+            self.cancel_ok = True
+
+        def job_state(self, jid):
+            j = self.jobs.get(str(jid), "absent")
+            if j == "absent":
+                return self.JOB_MISSING, None
+            if j is None:
+                return self.JOB_UNKNOWN, None
+            return self.JOB_OK, dict(j)
+
+        def show_job(self, jid):
+            j = self.jobs.get(str(jid))
+            return dict(j) if isinstance(j, dict) else None
+
+        def expand_node(self, _n):
+            return "node01"
+
+        def node_ip(self, _n):
+            return "192.0.2.11"
+
+        def renew(self, *_a, **_k):
+            return True, ""
+
+        def cancel(self, jid, reason=""):
+            self.cancels.append((str(jid), reason))
+            return self.cancel_ok
+
+    _rel_real_now = mod.now_ts
+    _rel_clock = [1700500000]
+    mod.now_ts = lambda: _rel_clock[0]
+    _rel_daemons = []
+    # 这一节会故意造出十几个"释放不了"的会话，每一个都写一行 warning。
+    # 要断言的事情全走 `dd.audit` 的记录器与数据库，一行日志都不靠 ——
+    # 关掉它们只是为了让输出里剩下的全是断言（照第 24 节的做法）。
+    _rel_real_level = mod.log.level
+    mod.log.setLevel(50)                       # CRITICAL
+
+    def _rel_case(job, *, job_id="7001", cancel_ok=True, note="goodbye"):
+        """造一个 `releasing` 的会话 + 一条 ACL 规则 + 一个会话文件，跑**一个** tick。
+
+        `job`：`"missing"` / `"unknown"` / 一个 `JobState` 名字 / `"{}"`（在队列里
+        但拿不到详情 —— 真 `job_state()` 会这么回）。
+
+        返回 `(daemon, 事件表, 会话文件路径)`。
+        """
+        dd = _mkd(startup_grace_seconds=0)
+        dd.nft = _NftRec()
+        dd.slurm = _RelSlurm()
+        dd.slurm.cancel_ok = cancel_ok
+        if job == "missing":
+            pass
+        elif job == "unknown":
+            dd.slurm.jobs[job_id] = None
+        elif job == "{}":
+            dd.slurm.jobs[job_id] = {}
+        else:
+            dd.slurm.jobs[job_id] = {"JobState": job, "Requeue": "0"}
+        ev = []
+        dd.audit = lambda e, **kw: ev.append(dict(kw, event=e))
+        _add(dd, "s-rel", job_id=job_id, state=mod.ST_RELEASING)
+        if note:
+            dd.store.update("s-rel", note=note)
+        if job_id is not None:
+            # ★ 必须把 node_ip / service_port 也写上：`reconcile()` 的期望集合是
+            #   "ACL_STATES 里、且这两个字段都在的那些会话"，少了它们，下面那条
+            #   规则在同一个 tick 里会被当成**孤儿规则删掉** —— 于是"规则一条都
+            #   没少"那条断言测的是一条根本不存在的规则。
+            dd.store.update("s-rel", node_ip="192.0.2.11", service_port=55001)
+            dd.nft.add_session_rule("192.0.2.11", 55001, UID, job_id)
+            sf = os.path.join(sess_dir, "job-%s.json" % job_id)
+            with io.open(sf, "w", encoding="utf-8") as f:
+                f.write("{}")
+            os.chmod(sf, 0o600)
+        else:
+            sf = None
+        dd.tick()
+        _rel_daemons.append(dd)
+        return dd, ev, sf
+
+    def _rel_state(dd):
+        return dd.store.get("s-rel")["state"]
+
+    # ── 30.1 ★★★ 问不到 ≠ 不存在 ────────────────────────────────────────────
+    #
+    # ★★★ 这是整道闸上最重的一条。把 JOB_UNKNOWN 归进"可以拆"，形态是
+    #     **一次控制器抖动 = 所有正在释放的会话在同一 tick 内被拆干净**，
+    #     而它们对应的作业可能一个都没停。`Slurm.job_state()` 的三态就是为这个
+    #     存在的，它自己的 docstring 写着合并两者的后果。
+    _dd, _ev, _sf = _rel_case("unknown")
+    check("★★★ 问不到控制器 ⇒ **不拆**（问不到 ≠ 不存在）",
+          _rel_state(_dd) == mod.ST_RELEASING and os.path.exists(_sf),
+          "state=%r 会话文件在=%s" % (_rel_state(_dd), os.path.exists(_sf)))
+    check("★★ 而 ACL 规则也一条都没少 —— 「没拆」的第二半是承重的那个",
+          len(_dd.nft.rules) == 1, str(_dd.nft.rules))
+    _rw = [e for e in _ev if e["event"] == "release_waiting"]
+    check("★★ 它**说得出来**（否则用户看见的就是一条永远停着的会话）",
+          len(_rw) == 1 and _rw[0].get("why") == "unknown"
+          and _rw[0].get("job_state") is None, str(_rw))
+    check("★ 而联系不上控制器时**不重试 scancel** —— scancel 会以同样的方式失败，"
+          "而那条日志会把真正的原因（联系不上）埋在一句「取消失败」下面",
+          _dd.slurm.cancels == [], str(_dd.slurm.cancels))
+
+    # ── 30.2 ★★★ 作业还在 ⇒ 不拆，而且再 scancel 一次 ──────────────────────
+    #
+    # `CANCELLING` 是**最常撞上的那一个**：scancel 之后作业不会立刻消失，它会先
+    # 经过 CANCELLING（Slurm 23.02 起的一个非终态）再到 CANCELLED。把它当成"停了"，
+    # 就等于**每一次正常的取消都在作业还活着的时候宣布"已释放"**。
+    for _st in ("RUNNING", "PENDING", "CANCELLING", "COMPLETING", "SUSPENDED",
+                "REQUEUED", "STAGE_OUT"):
+        _dd, _ev, _sf = _rel_case(_st)
+        check("★★★ 作业是 %s ⇒ 不拆、不置 released、规则与会话文件都在" % _st,
+              _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1
+              and os.path.exists(_sf)
+              and not [e for e in _ev if e["event"] == "released"],
+              "state=%r 规则=%d 文件在=%s"
+              % (_rel_state(_dd), len(_dd.nft.rules), os.path.exists(_sf)))
+        check("   ★ 而它**再试了一次** scancel（第一次不节流）",
+              _dd.slurm.cancels == [("7001", "release_waiting")],
+              str(_dd.slurm.cancels))
+
+    # ── 30.3 ★★ `JOB_OK` 但拿不到详情 ⇒ 也不拆 ─────────────────────────────
+    #
+    # 真 `job_state()` 有这么一条路：`scontrol` 查不到详情、而 `squeue` 说它还在
+    # 队列里 ⇒ 回 `(JOB_OK, {})`。**它是"还在"，不是"没了"** —— 把空 dict 当成
+    # "没有作业状态 ⇒ 结束了"，形态与"非终态被当成终态"一模一样。
+    _dd, _ev, _sf = _rel_case("{}")
+    check("★★ `JOB_OK` 但拿不到详情（在队列里）⇒ 不拆",
+          _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1,
+          "state=%r" % _rel_state(_dd))
+
+    # ── 30.4 ★★★ 真停了才拆 ────────────────────────────────────────────────
+    _dd, _ev, _sf = _rel_case("missing")
+    check("★★★ `JOB_MISSING`（确认不存在）⇒ 才拆",
+          _rel_state(_dd) == mod.ST_RELEASED and not os.path.exists(_sf)
+          and len(_dd.nft.rules) == 0,
+          "state=%r 规则=%d 文件在=%s"
+          % (_rel_state(_dd), len(_dd.nft.rules), os.path.exists(_sf)))
+    check("   ★ 而确认不存在时**不必**再 scancel（省掉一次无意义的 fork）",
+          _dd.slurm.cancels == [], str(_dd.slurm.cancels))
+    check("   拆完仍然记 `released` 与那条规则被删的审计",
+          [e["event"] for e in _ev].count("released") == 1
+          and any(e["event"] == "acl_removed" for e in _ev),
+          str([e["event"] for e in _ev]))
+
+    for _st in ("COMPLETED", "CANCELLED", "FAILED", "OUT_OF_MEMORY"):
+        _dd, _ev, _sf = _rel_case(_st)
+        check("★★ 真终态 %s ⇒ 拆" % _st,
+              _rel_state(_dd) == mod.ST_RELEASED and not os.path.exists(_sf),
+              "state=%r" % _rel_state(_dd))
+
+    # ── 30.5 ★★ 重试与说话都节流，而**看一眼不节流** ────────────────────────
+    #
+    # ★ 两边都不能少：
+    #   · 不节流 ⇒ 一个杀不掉的作业让每个 tick 都 fork 一次 scancel + 写四行日志，
+    #     而 releases 会停留几小时 ⇒ 一条**没有上限**的账单；
+    #   · 把"看一眼"也节流 ⇒ 作业真的停了也要多等一个间隔才放行，于是**每一次
+    #     正常的释放**都慢一拍。
+    _dd, _ev, _sf = _rel_case("RUNNING")
+    check("★★ 第一个 tick 就试过了一次（这一条钉住「第一次不节流」）",
+          len(_dd.slurm.cancels) == 1, str(_dd.slurm.cancels))
+    for _i in range(3):
+        _rel_clock[0] += 1                      # 还没到 RELEASE_RETRY_SECONDS
+        _dd.tick()
+    check("★★ 间隔之内：**不再** scancel，也不再重复说话",
+          len(_dd.slurm.cancels) == 1
+          and len([e for e in _ev if e["event"] == "release_waiting"]) == 1,
+          "scancel %d 次 / release_waiting %d 条"
+          % (len(_dd.slurm.cancels),
+             len([e for e in _ev if e["event"] == "release_waiting"])))
+    _rel_clock[0] += mod.RELEASE_RETRY_SECONDS
+    _dd.tick()
+    check("★ 过了间隔 ⇒ 再试一次、再说一次",
+          len(_dd.slurm.cancels) == 2
+          and len([e for e in _ev if e["event"] == "release_waiting"]) == 2,
+          "scancel %d 次" % len(_dd.slurm.cancels))
+    # ★★ 而"看一眼"从来不被节流：上面那几个 tick 里，作业从 RUNNING 变成真终态
+    #    的那一刻**同一 tick 就放行**，不许多等。
+    _rel_clock[0] += 1
+    _dd.slurm.jobs["7001"] = {"JobState": "CANCELLED", "Requeue": "0"}
+    _dd.tick()
+    check("★★★ 作业一真的停了就**立刻**放行 —— 「看一眼」不在节流窗口里"
+          "（节流它等于让每一次正常释放都慢一个间隔）",
+          _rel_state(_dd) == mod.ST_RELEASED, _rel_state(_dd))
+
+    # ── 30.6 ★★ 没有 job_id 的 releasing 会话不能被闸卡住 ──────────────────
+    #
+    # ★★ 这一条顺带守着一条**崩溃路径**（写这一节时抓出来的）：`job_id` 为 NULL 的
+    #    会话能走到 `releasing`（`op_goodbye` 只挡终态、不挡它），而
+    #    `remove_session_file()` 从前无条件拼 `"job-%d.json" % None` ⇒ `TypeError`
+    #    从 `phase_release()` 里抛出去。`_run_tick()` 会捕获（守护进程不死），但同一个
+    #    tick 里排在后面的 `phase_gc()` 与 `phase_push()` 全部不跑 ⇒ **所有用户的
+    #    推送都停摆**，每 2 秒一次，而症状指不回那一行。
+    # ★ 所以这里**显式接住异常并断言它没发生**：不接的话，那条变异让用例抛
+    #   traceback 而不是报一条 `[FAIL]`，而"用例被打崩了"与"用例守住了"在输出上
+    #   长得不一样（变异验证里最容易被读错的一种）。
+    _dd = _mkd(startup_grace_seconds=0)
+    _dd.nft, _dd.slurm = _NftRec(), _RelSlurm()
+    _dd.audit = lambda *_a, **_k: None
+    _add(_dd, "s-nojob", job_id=None, state=mod.ST_RELEASING)
+    _boom = None
+    try:
+        _dd.tick()
+    except Exception as _e:                                  # noqa: BLE001
+        _boom = _e
+    _rel_daemons.append(_dd)
+    check("★★ 没有作业可查的 releasing 会话 ⇒ 直接拆（闸判的是作业，不是状态）",
+          _boom is None and _dd.store.get("s-nojob")["state"] == mod.ST_RELEASED,
+          "异常=%r state=%s" % (_boom, _dd.store.get("s-nojob")["state"]))
+    check("★★ 而且这个 tick **没有抛异常** —— 它一抛，同一个 tick 里排在"
+          " `phase_release` 后面的 gc 与推送就全都不跑了（所有用户的推送停摆）",
+          _boom is None, repr(_boom))
+
+    # ── 30.7 ★★ `note` 是**为什么走到这里**，不是**为什么可以拆** ──────────
+    #
+    # `begin_release` 的 reason 有四个（goodbye / orphaned / job_gone /
+    # job_<状态>）。如果闸信了那个 reason（"job_gone ⇒ 作业已经没了，不必查"），
+    # 那么 `phase_running` 判错一次 —— 或者作业在那一瞬间又被重新排队 ——
+    # 就会拆掉一个**还在跑**的作业，而这一版新加的那道闸形同虚设。
+    _dd, _ev, _sf = _rel_case("RUNNING", note="job_gone")
+    check("★★ 就算 `note` 写着 `job_gone`，也要**自己查一遍**才能拆",
+          _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1,
+          "state=%r" % _rel_state(_dd))
+
+    # ── 30.8 ★★★ `goodbye`：取消失败时那句话必须说出来（F12）──────────────
+    #
+    # ★ 形状是**承重的**：仍然 `ok:true`、仍然是 `releasing` —— 这条请求**被受理
+    #   了**（会话进了释放流程，守护进程会一直重试）。回 `ok:false` 会说成"你的
+    #   动作没生效"，而它生效了、只是没做完。所以这一节同时钉两件事：
+    #   ① 失败**不许静默**；② 失败**不许被说成失败**。
+    _dd = _mkd(startup_grace_seconds=0)
+    _dd.nft, _dd.slurm = _NftRec(), _RelSlurm()
+    _ev8 = []
+    _dd.audit = lambda e, **kw: _ev8.append(dict(kw, event=e))
+    _add(_dd, "s-gb", job_id="7002")
+    _dd.slurm.cancel_ok = False
+    _r8 = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb"})
+    _rel_daemons.append(_dd)
+    _w8 = (_r8.get("data") or {}).get("warning")
+    check("★★★ scancel 失败 ⇒ `ok:true` **且**带一句 `warning`"
+          "（从前它照样回一个干净的 ok —— 用户与客户端都会把它读成"
+          "「作业停了」）",
+          _r8.get("ok") is True and isinstance(_w8, str) and _w8,
+          "ok=%r warning=%r" % (_r8.get("ok"), _w8))
+    check("★★ 形状是「已受理」：状态仍然是 releasing，不是错误、也不是终态",
+          (_r8.get("data") or {}).get("state") == mod.ST_RELEASING
+          and _dd.store.get("s-gb")["state"] == mod.ST_RELEASING,
+          str(_r8.get("data")))
+    check("★★ 那句话说的是**接下来会怎样**，而不是一个没核对过的诊断 —— "
+          "「作业可能还在跑」是**猜**的（作业也可能刚刚正常结束，scancel 报的"
+          "只是「没有这个作业」）",
+          "重试" in _w8 and "还在跑" not in _w8 and "仍在运行" not in _w8,
+          _w8)
+    check("★ 失败单独记一条审计（`goodbye` 那条只说明「用户要结束」，"
+          "这一条说明「这一次没做成」—— 两件事）",
+          [e["event"] for e in _ev8].count("cancel_failed") == 1
+          and [e["event"] for e in _ev8].count("goodbye") == 1,
+          str([e["event"] for e in _ev8]))
+
+    # 成功那一条：**不许**出现 warning（一个永远带着警告的字段等于没有字段）。
+    _dd = _mkd(startup_grace_seconds=0)
+    _dd.nft, _dd.slurm = _NftRec(), _RelSlurm()
+    _dd.audit = lambda *_a, **_k: None
+    _add(_dd, "s-gb2", job_id="7003")
+    _r8b = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb2"})
+    _rel_daemons.append(_dd)
+    check("★ scancel 成功 ⇒ 响应里**没有** `warning` 那一格",
+          _r8b.get("ok") is True
+          and "warning" not in (_r8b.get("data") or {})
+          and _dd.slurm.cancels == [("7003", "goodbye")],
+          "%r / %s" % (_r8b.get("data"), _dd.slurm.cancels))
+    # 幂等：已经是终态的会话照原样回，不碰作业。
+    _dd.store.update("s-gb2", state=mod.ST_RELEASED)
+    _dd.slurm.cancels = []
+    _r8c = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb2"})
+    check("★ 已经是终态 ⇒ 原样返回那个终态，**不碰作业**（幂等）",
+          (_r8c.get("data") or {}).get("state") == mod.ST_RELEASED
+          and _dd.slurm.cancels == [] and "warning" not in (_r8c.get("data") or {}),
+          str(_r8c.get("data")))
+
+    # ── 30.9 ★★ 跨文件：那句话**四端**都要在 ─────────────────────────────
+    #
+    # `warning` 这个字段**存在的唯一理由就是被显示出来**（PROTOCOL.md 自己写的）。
+    # 服务端发了而某一端不读，它就只有读代码的人知道。四端都判 ——
+    # 只判一边的话，另一边删掉不会有任何东西变红（而这一格**已经有三个**消费者：
+    # 图形界面、命令行、以及"换一门语言重写客户端"的那个人读的文档）。
+    _sess_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                     "session.js"), encoding="utf-8").read()
+    _proto_src = io.open(os.path.join(HERE, os.pardir, "docs", "PROTOCOL.md"),
+                         encoding="utf-8").read()
+    _daemon_src = io.open(os.path.join(HERE, "slurmate-sessiond"),
+                          encoding="utf-8").read()
+    _ends = [("守护进程发", 'data["warning"]' in _daemon_src),
+             # ★★ 判据必须是**这一条路**读它的那个写法，不能只查 "resp.data.warning"
+             #    —— 那个字符串在 `session.js` 里**本来就出现过**（`submit` 那条路
+             #    早就在读同一个字段），所以查它是一条永远绿的空断言。
+             #    （实测：把 `stop()` 里那一行改成 `const w = null;`，那种判据不红。）
+             ("客户端读", "resp.data && resp.data.warning" in _sess_src),
+             ("文档写明", "`data.warning`" in _proto_src)]
+    check("★★ 三端都在：守护进程发 `warning`、客户端读 `data.warning`、"
+          "文档列了它",
+          all(_ok for _n, _ok in _ends),
+          "、".join("%s=%s" % (_n, _ok) for _n, _ok in _ends))
+
+    # ★★ 命令行那一端**真跑一遍**，不查源码 —— 第四端是"用户真的看得见"，
+    #    而"源码里出现过 `warning` 这个词"在 `slurmate` 里**本来就成立**
+    #    （`cmd_doctor` 早就在打另一个 warning），所以那种判据是一条永远绿的空断言。
+    _cli30 = load_cli()
+
+    class _Args(object):
+        json = False
+
+    _cli30.call = lambda req, asjson, timeout=20.0: {
+        "ok": True, "code": 0,
+        "data": {"state": "releasing", "warning": "这一句必须被显示出来"}}
+    _so, _se = io.StringIO(), io.StringIO()
+    _old_std = (sys.stdout, sys.stderr)
+    try:
+        sys.stdout, sys.stderr = _so, _se
+        _rc30 = _cli30._simple({"op": "goodbye"}, _Args(), "已请求释放会话")
+    finally:
+        sys.stdout, sys.stderr = _old_std
+    check("★★ `slurmate`（命令行也是客户端）真的把那句话打出来了 —— "
+          "协议里这个字段存在的唯一理由就是被显示出来",
+          _rc30 == 0 and "这一句必须被显示出来" in _se.getvalue(),
+          "退出码=%r stderr=%r" % (_rc30, _se.getvalue()))
+
+    mod.now_ts = _rel_real_now
+    mod.log.setLevel(_rel_real_level)
+    for _dd in _rel_daemons:
+        try:
+            _dd.store.close()
+        except Exception:                                    # noqa: BLE001
+            pass
 
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
                 _d13, _d14, _d15, _d16,

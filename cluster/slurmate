@@ -780,6 +780,12 @@ def _simple(req, args, okmsg):
     if not isinstance(r, dict):
         return 1
     print("%s（状态: %s）" % (okmsg, human_state(r["data"].get("state"))))
+    # ★ 协议里 `warning` 这个字段存在的**唯一**理由就是被显示出来 —— 命令行也是
+    #   客户端。`goodbye` 用它说"这一次 scancel 没成功，我在继续重试"，
+    #   而那句话没人看见的话，用户就会以为作业已经停了。
+    _w = r["data"].get("warning")
+    if _w:
+        print("[注意] %s" % _w, file=sys.stderr)
     return 0
 
 

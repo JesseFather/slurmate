@@ -19,39 +19,6 @@
 
 代码就在那儿，读一遍就能确认。
 
-### F12 — `goodbye` 返回 `ok:true` 不代表作业被取消了
-
-**位置**：`cluster/slurmate-sessiond` 的 `op_goodbye` —— 那一行是
-`self.slurm.cancel(s["job_id"], "goodbye")`。
-
-`Slurm.cancel()` 在 `scancel` 失败时**返回 `False` 并只记一条 warning**，
-而 `op_goodbye` **不看这个返回值**，照样 `begin_release()` 然后回 `ok:true`。
-
-**后果**：客户端和用户都以为会话结束了，而作业可能还在跑。
-
-**修法**：`cancel()` 失败时不要静默 —— 要么回 `ok:false`，要么在响应里带一个
-`warning` 字段（协议里已经有 `warning` 的先例，见 `op_submit` 对内存参数的处置）。
-
-### F13 — `phase_release` 从不确认作业真的停了
-
-**位置**：`cluster/slurmate-sessiond` 的 `phase_release`。
-
-顺序是：删 ACL → 删口令文件 → 删会话文件 → 置 `released`。**全程没有一次
-`scancel`，也没有任何一步确认作业是否还在。**
-
-**后果**（叠加 F12 之后才完整）：
-
-1. 守护进程报告「已释放」，而作业占着节点跑到 `TimeLimit` —— GPU 分区上这是
-   **12 小时的实打实算力**；
-2. 会话文件被删了，所以**再也没有东西能从作业侧把它找回来**；
-3. `released` 不在 `phase_running` 的扫描集合里，**永远不会被回收**。
-
-这条比 F12 严重：F12 是"说了句不准的话"，F13 是"把它从账上划掉"。
-
-**修法**：`releasing` 的会话要重新 `scancel` 并**确认作业真的消失**（`scontrol`
-查不到，且不是 `JOB_UNKNOWN`），再置 `released`。注意别把「问不到」当成「不存在」
-—— 那正是 `Slurm.job_state()` 三态存在的原因。
-
 ### F15 — 插件清单里没有 `defaultGpus`
 
 `site` 段有 `defaultCpus` / `defaultMem`，**没有 `defaultGpus`**。也就是说
@@ -392,6 +359,38 @@ $ squeue -h -j 5709,5746 -o "%i"   -> 2 个作业   ✓（文本形式正确）
 **教训**（写在这里给下一个人）：把一条外部命令的**输出形状**当成契约之前，
 先量一次**它在参数边界上的行为**。「文档说 `-j` 接受逗号分隔的列表」与
 「这个版本在这个子命令上真的这么做了」是两件事。
+
+### F32 — `expired` / `rejected` 两条路绕过了释放的闸：自己 `scancel`，而结果被丢掉
+
+**位置**：`cluster/slurmate-sessiond` 的 `try_enroll()`（登记超时那一条）与
+`reject()`（会话文件校验失败）。
+
+v0.9 阶段 4 给 `phase_release()` 加了一道闸（**作业确认消失才置 `released`**，
+见 [ARCHITECTURE.md](ARCHITECTURE.md) 的 §3.0），但那道闸**只服务 `releasing`**。
+而这两条路**直接跳到终态**，各自 `scancel` 一次就再也不过问：
+
+```python
+self.slurm.cancel(s["job_id"], "enroll_timeout")   # 返回值丢掉
+self.store.update(..., state=ST_EXPIRED, ...)
+```
+
+**后果**：与 F12 / F13 **完全同形**。`scancel` 失败时作业继续占着节点跑到
+`TimeLimit`（GPU 分区上那是 12 小时实打实的算力），而这两条会话：
+
+1. 不在 `phase_running()` 的扫描集合里（它只扫 `submitted` / `enrolled` /
+   `suspect` / `orphaned`）—— 永远不会被回收；
+2. 不在 `ACL_STATES` 里 ⇒ `reconcile()` 会把它们的 nft 规则当**孤儿规则删掉**，
+   于是用户连"它还在烧"都看不见；
+3. 行本身在 `released_keep` 之后被 `phase_gc()` 删掉 —— 没有任何人再想起那个作业。
+
+**为什么没有和 F13 一起修**：修法要先回答一个**产品问题**。把 `expired` 的语义
+（"从来没提交成功"）与"提交过、现在收尾了"分开，是一个独立的、要拍板的改动 ——
+不该顺手做（与 F15 那条"不要顺手修"同一条纪律）。
+
+**修法**：这两条路改走 `begin_release(s, "<原因>")`，让作业的确认与拆除都发生在
+`phase_release()` 那一处（**一个判据一处实现**）；`expired` 于是只剩
+`phase_pending()` 的 `reserved` 超期一条来路，而 `note` 记原因。
+**要先拍板**：收尾之后落 `released`，还是给这两条各自保留一个终态名字。
 
 ---
 
@@ -1120,6 +1119,9 @@ A 被 B 顶 → A 重连（顶掉 B）→ B 被顶 → B 重连（顶掉 A）→
 
 | 曾经的问题 | 现状 |
 |---|---|
+| **F13 — `phase_release` 从不确认作业真的停了** | **v0.9 修掉（阶段 4）。** `phase_release()` 里加了一道**闸**：`released` 的含义从"我们不管了"变成**"作业确认消失了"**。只有两种答案能通过 —— ①`scontrol` 查不到（且控制器可达 = `JOB_MISSING`）；②查到了且 `job_is_terminal()` 为真。`JOB_UNKNOWN`（联系不上控制器）与一切非终态（含 `CANCELLING` —— scancel 之后**每次**都会经过它）都**不通过**，会话留在 `releasing`，下一个 tick 再看。★★ **"问不到"绝不许当成"不存在"**：把它归进"可以拆"，形态是**一次控制器抖动 = 所有正在释放的会话在同一个 tick 内被拆干净**。★ **拆的三件事一起推迟**（ACL / 口令文件 / 会话文件），不是只推迟状态那一格 —— 于是「`released` 之前规则一定在，之后一定不在」那条不变量一个字都没改，而一个还在跑的作业上用户**仍然连得进去**，看得见它还在烧。★ `note` 记的是"为什么走到这里"，不是"为什么可以拆"：不论 `goodbye` / `orphaned` / `job_gone` / `job_<状态>`，这一节都自己查一遍（少了这条，`phase_running()` 判错一次就会拆掉一个在跑的作业，而闸形同虚设）。★ 重发 `scancel` 与那行日志按 `release_retry_seconds`（60 秒）节流，而**"看一眼作业还在不在"不节流** —— 作业一真的停了，同一个 tick 就放行。用例：`cluster/test-sessiond-logic.py` 第 30 节（8 个非终态 + `JOB_OK` 但拿不到详情 + `JOB_UNKNOWN` 逐个喂进去；判据带"规则一条都没少、会话文件还在"这承重的第二半；把闸去掉或把 `JOB_UNKNOWN` 归进可拆 ⇒ 立刻红） |
+| **F12 — `goodbye` 返回 `ok:true` 不代表作业被取消了** | **v0.9 修掉（阶段 4）。** `op_goodbye` 现在**看得见** `cancel()` 的返回值，失败时在响应里带一句 `data.warning`（协议里那个字段的先例在 `op_submit`）。★ **形状是承重的**：仍然是 `ok:true` + `state:releasing` —— 这条请求**被受理了**（会话进了释放流程，守护进程会一直重试到确认作业消失）。回 `ok:false` 等于说"你的动作没生效"，而它生效了、只是没做完，客户端还会因此劝用户去重试一件已经在做的事。★ 而那句话**故意不诊断原因**（"作业可能还在跑"是一个**没核对过**的结论 —— 作业也可能刚刚正常结束，`scancel` 报的只是「没有这个作业」）：它说的是守护进程**接下来会怎么做**。★ 失败另记一条 `cancel_failed` 审计：`goodbye` 那条只说明"用户要结束"，这一条说明"这一次没做成"。★ 那句话必须**走到用户眼前**：`client/src/main/session.js` 接进 `snapshot().warning` 与 `stop()` 的返回值，`cluster/slurmate` 打到 stderr（协议里这个字段存在的唯一理由就是被显示出来）。用例：同第 30 节（失败 ⇒ 有 `warning` 且 `ok` 仍为真；成功 ⇒ **没有** `warning` 那一格）；客户端那一半在 `client/test/integration.mjs`（先用成功那条作对照，免得"warning 是写死的"也绿） |
+| **`goodbye` 到一条 `job_id` 为空的会话上 ⇒ 每个 tick 一次 `TypeError`，所有推送跟着停摆** | **v0.9 修掉（阶段 4）—— 它是写第 30 节时被用例抓出来的。** `remove_session_file()` 无条件拼 `"job-%d.json" % s["job_id"]`，而 `op_goodbye` 只挡终态、不挡 `job_id` 为空，所以一条 `reserved` 会话（插入之后、`sbatch` 返回之前那一段被守护进程崩溃/重启截断，留下来的）能被 goodbye 推进 `releasing` ⇒ `%d` 收到 `None` ⇒ `TypeError` 从 `phase_release()` 里抛出去。★ **后果比那一行看起来大得多**：`_run_tick()` 会捕获它（守护进程不死），但同一个 tick 里排在 `phase_release()` **之后**的 `phase_gc()` 与 `phase_push()` 全部不跑 —— 于是**所有用户的推送都停了**，每 2 秒一次，而日志里只有一行 tick 异常。症状指不回这一行。★ 修法是那句 `if not s.get("job_id"): return`（没有 job_id 就没有会话文件）。★ **它值得记的原因**：那是一个「不可能发生」的假设（"走到 `releasing` 的会话一定有 `job_id`"）写成了一句没有守卫的格式化 —— 而这类假设的可达路径通常不在它身边，在**状态机的那一头**。用例：第 30.6 节 |
 | **S24 — 同一个插件不能同时开两份** | **v0.7 修掉。** 分两步：**声明**（`contributes.concurrent`，必填，见 PLUGIN-SPEC §2.8）与**机制**（**认领** + **临时实例**）。开局那一刻那个组上没有活会话 ⇒ 它是**持有者**（用连接那个组，与从前逐字相同）；已经有 ⇒ 它拿一个**只在内存里**的临时组 + 持有者那份数据的**快照** + 一个新的本地端口（⇒ 一份空的浏览器存储）。已经开着的那几份**永不晋升**，下一个**新开**的会话才认领持有者。临时实例的一切在会话结束时回收。★ 代价如实记着：**多开时只有一份能攒数据**，而「哪一份」是「开局那一刻谁先来」决定的；接回来的临时实例拿到的是**新** id（见 S26 那一格）。★ 它顺带解掉了 `slotOf` 注释里那条「今天够不到」的推论。 |
 | **F25 — 非终态的 Slurm 作业状态被当成"作业结束了"** | **v0.8 修掉（阶段 1）。** 判据从 `if jstate not in ("PENDING","CONFIGURING","RUNNING")` 换成 **`job_is_terminal(job)`** —— 只认**真终态**（与 Slurm 自己的 `is_job_terminal_state()` 逐条对应），其余一律保留，**不认识的状态也保留**。★★ 两个方向的代价不对称：`begin_release()` 只是两行，真正的拆除在下一个 tick 的 `phase_release()` 里，而**没有任何路径能改回去** ⇒ 判错一次就没了（作业还在跑，防护已经拆掉）；反向判错有 `JOB_MISSING` 在 3 个 tick 后兜住。★ 顺带补上 Slurm 那条**附加条件**：`PREEMPTED` / `TIMEOUT` 只有 `Requeue=0` 才算终态 —— 会把作业重新排队的抢占，从前被当成"结束"，而"回来的那一个"面对的是一套已经拆掉的防护。★ 非终态停留超过 `stuck_job_seconds` 写一条 `job_stuck` 审计（**不释放**）。用例：`cluster/test-sessiond-logic.py` 第 24 节（26 个状态一次 tick 全喂进去；把判据改回当年那句 ⇒ 31 条红） |
 | **F26 — `UserId=hfu(2002)` 让 `recover_from_rules()` 一条都恢复不出来** | **v0.8 修掉（阶段 1）。** 真集群 `scontrol show job <id> -o` 给的是 **`name(uid)`** 形式，而那一行是 `int(job.get("UserId", -1))` ⇒ `ValueError` ⇒ 被 `except` 静默跳过 ⇒ **DB 一丢，`reconcile()` 把所有在跑的作业的规则当成孤儿删掉**（那个函数自己的 docstring 写着这个后果）。修法是 `parse_slurm_uid()`：两种形态都认，**认不出来返回 `None` 而不是 `-1`**（`-1` 是合法整数，会一路走进 `!= uid` 的比较里，看上去像"确认过不是这个人"），并且认不出来时**说话**（从前是静默 `continue`）。★★ **它藏了这么久的原因值得记**：测试桩喂的是**纯数字** `UserId` —— 假桩比真集群"干净"，于是真缺陷在用例里完全隐形。夹具已改成真形状。用例：同第 24.6 节（改回 `int()` ⇒ 立刻红） |

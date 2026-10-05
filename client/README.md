@@ -344,10 +344,12 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
    见 `weblogin.js`。
 
 3. **`goodbye` 返回 `ok:true` 不代表作业被取消了。**
-   集群侧的 `op_goodbye` 丢弃了 `scancel` 的返回值，`phase_release` 也不确认作业是否
-   真的没了（编号 F12 / F13，见 [`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md)）。
+   `ok:true` 说的是「这条请求被受理了、会话进了 `releasing`」；`released` 说的才是
+   「作业确认消失了」—— 守护进程在两者之间有一道闸，而它会一直重试到确认作业消失
+   （见 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) 的 §3.0）。
    所以界面把「正在释放」和「已结束」当成两个状态。见 `session.js` 的 `stop()`。
-   **这一条对应的缺陷还没修** —— 客户端这边的两个状态是它的应对，不是它的修复。
+   ★ v0.9 起，这一次 `scancel` 没成功时守护进程会带一句 `data.warning`，
+   `stop()` 必须把它显示出来 —— 用户会以为作业停了，而它可能还在烧 GPU。
 
 4. **激活就是 `require()`，所以它必须是两趟。**
    `plugins/index.js` 的 `activatePlugin()` 在读到 `client/index.js` 时会**当场**
