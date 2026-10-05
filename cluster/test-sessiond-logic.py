@@ -3620,6 +3620,100 @@ exit 0
     finally:
         shutil.rmtree(_ins_home, ignore_errors=True)
 
+    # ── 19.16 ★★ 清单里认得的键：判据只有一份书面形式，两侧逐字相同 ──────────
+    #
+    # 这一条与 19.12（跳过表）是**同一个形状**，差别在于这里多了一份**书面的**
+    # 判据：`tools/manifest-keys.json`。那份 JSON 的 `_` 段写清了为什么生产代码
+    # **不**在运行期读它 —— 守护进程是一个文件装到 /usr/local/sbin/slurmate-sessiond，
+    # 集群上没有 `tools/`；客户端是一个分发单元，运行期只读 `client/` 里的东西。
+    # 两侧各写一条相对路径的话，**从源码跑得通、装出去就断**：键表成了空集，
+    # 于是"什么都不拒" —— 而那条路只在装出去的机器上露出来。
+    #
+    # 所以是三处，且必须逐字相同（**有序**：报错里"认识的只有 …"那一串用的就是
+    # 它）：书面判据 / 客户端那五张字面量 / 守护进程那五张元组。
+    #
+    # 抠的是**字面量本身**，不是"跑一遍 JS" —— 与 19.12 同一个理由：本机不一定有
+    # node，而这条契约要的是"两份声明写的是同一组名字"。
+    #
+    # ★ 从前只有客户端那一侧有这几张表：守护进程逐键取值、多出来的键一律不管。
+    #   于是「一份把 `contributes` 拼错的清单：客户端拒、守护进程收」，站点能把
+    #   一个任何客户端都装不上的插件正常分发出去，而**没有任何东西会红**（S12）。
+    print("\n── 19.16. 清单里认得的键（两侧逐字一致）──")
+
+    _mk_tables = (("manifest", "MANIFEST_KEYS"),
+                  ("contributes", "CONTRIBUTES_KEYS"),
+                  ("surface", "SURFACE_KEYS"),
+                  ("login", "LOGIN_KEYS"),
+                  ("data", "DATA_KEYS"))
+    with io.open(os.path.join(HERE, os.pardir, "tools", "manifest-keys.json"),
+                 encoding="utf-8") as _f:
+        _mk_written = json.load(_f)
+    with io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                              "plugins", "index.js"), encoding="utf-8") as _f:
+        _mk_js = _f.read()
+
+    _mk_client, _mk_daemon = {}, {}
+    for _name, _const in _mk_tables:
+        _m = re.search(r"const %s = \[([^\]]*)\]" % _const, _mk_js, re.S)
+        _mk_client[_name] = re.findall(r"'([^']*)'", _m.group(1)) if _m else None
+        _mk_daemon[_name] = list(getattr(mod, _const, ()))
+    check("★ 十处都真的抠到了键（抠出 None 或空表的话，下面五条是**假通过**）",
+          all(_mk_client[n] for n, _ in _mk_tables)
+          and all(_mk_daemon[n] for n, _ in _mk_tables),
+          "客户端 %r / 守护进程 %r" % (_mk_client, _mk_daemon))
+    for _name, _const in _mk_tables:
+        check("★★ %s：书面判据 = 客户端字面量 = 守护进程元组（逐字、有序）"
+              % _name,
+              _mk_written.get(_name) == _mk_client[_name] == _mk_daemon[_name],
+              "书面 %r / 客户端 %r / 守护进程 %r"
+              % (_mk_written.get(_name), _mk_client[_name], _mk_daemon[_name]))
+
+    # ── 判定那一半：拼错了**真的**会被拒（"两侧都拒"的另一半在这里）────────
+    #
+    # ★ 上面那几条比的是常量。这一条把常量接回**清单那条路**上 —— 一张写对了
+    #   却没人调的键表，与没有它是一样的（这个仓库里"一行包装 + 一份没人验的
+    #   注释"出现过不止一次）。
+    _mk_valid = {
+        "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "cs", "version": "1.0.0",
+        "displayName": "开发环境", "engines": {"slurmate": ">=0.5"},
+        "contributes": {
+            "surface": {"kind": "web", "path": "/"},
+            "login": {"path": "/login", "field": "password", "cookie": "cs"},
+            "layout": True, "submitPubkey": False, "concurrent": True,
+            "data": {"inherit": "editor"},
+        },
+        "site": {"defaultCpus": 2, "defaultMem": "8G"},
+    }
+
+    def _mk_parse(mf):
+        return mod.parse_plugin_manifest(
+            "探针.splug:plugin.json", json.loads(json.dumps(mf)))
+
+    _mk_spec, _mk_probs = _mk_parse(_mk_valid)
+    check("正对照：一份完整合法的清单被收下"
+          "（否则下面五条会被「什么都拒」一并满足）",
+          _mk_spec is not None and not _mk_probs,
+          "%s / %s" % (_mk_spec, _mk_probs))
+
+    for _where, _edit, _key in (
+            ("顶层", lambda m: m.update({"contribution": {}}), "contribution"),
+            ("contributes 子键",
+             lambda m: m["contributes"].update({"contrib": 1}), "contrib"),
+            ("contributes.surface 子键",
+             lambda m: m["contributes"]["surface"].update({"knd": "web"}), "knd"),
+            ("contributes.login 子键",
+             lambda m: m["contributes"]["login"].update({"pathh": "/"}), "pathh"),
+            ("contributes.data 子键",
+             lambda m: m["contributes"]["data"].update({"inheritt": "x"}),
+             "inheritt")):
+        _mf = json.loads(json.dumps(_mk_valid))
+        _edit(_mf)
+        _s2, _p2 = _mk_parse(_mf)
+        check("★★ %s 里拼错成 %s ⇒ **拒**，且报错点名那个键"
+              % (_where, _key),
+              _s2 is None and any("认不得的键" in x and _key in x for x in _p2),
+              "%s / %s" % (_s2, _p2))
+
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #
     # 这两个文件之间有一条**跨语言的契约**：作业用 printf 拼一段 JSON 出来，守护

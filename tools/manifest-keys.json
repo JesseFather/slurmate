@@ -1,0 +1,72 @@
+{
+  "_": [
+    "插件清单里**认得的键** —— 规则在这里只有这一份书面形式。",
+    "",
+    "「认得的键」是一个**封闭集合**：多一个键不是被忽略，是**被拒绝**。两侧都拒 ——",
+    "客户端在装之前拒（`plugins/index.js` 的 `keysProblem`），守护进程在扫描与安装时拒",
+    "（`slurmate-sessiond` 的 `parse_plugin_manifest`）。从前只有客户端那一侧有这个",
+    "白名单，于是「一份把 contributes 拼错的清单：客户端拒、守护进程收」，而站点能把",
+    "一个任何客户端都装不上的插件正常分发出去 —— 没有任何东西会红（账本 S12）。",
+    "",
+    "谁读它：**两侧的用例**与 **CI 的 lint**。",
+    "  · client/test/manifest-keys.test.mjs   —— 客户端那五张表与这里逐字相同（真跑 JS）",
+    "  · cluster/test-sessiond-logic.py 的 19.14 —— 守护进程那五张表与这里逐字相同",
+    "  · .github/workflows/checks.yml 的 lint —— 最外层那道网：把两侧的**字面量**抠出来",
+    "    互相比、再与这里比（抠字面量而不是跑 JS：本机不一定有 node，而这条契约要的",
+    "    是「两份声明写的是同一组名字」）",
+    "",
+    "★ **两侧的生产代码为什么不直接在运行期读这个文件**（那本来是最结实的形状）：",
+    "  · 守护进程是**一个文件**装到 /usr/local/sbin/slurmate-sessiond（见 cluster/deploy.sh",
+    "    的 DAEMON），集群上没有 tools/；",
+    "  · 客户端是一个分发单元，运行期只读 client/ 里的东西 —— 唯一一处往外走的是开发者",
+    "    模式的 defaultDevPluginSourceDir()，而它**显式处理「安装包里没有它」**。",
+    "  各写一条 path.join(__dirname, '..', '..', 'tools', ...) 的话，**从源码跑通、装出去",
+    "  就断**：两侧的键表都成了空集，于是「什么都不拒」—— 那是这条规则最坏的失败方式，",
+    "  而且它只在装出去的机器上出现。所以是「一份书面判据 + 两份实现 + 能红的守门」，",
+    "  与 tools/version-fixtures.json 同一个先例（两份实现、一份夹具）。",
+    "",
+    "★ **为什么不像 COPY_SKIP 那样只靠一条 lint**：那两个集合是生产代码里的常量，且",
+    "  必须住在各自的文件里；这里多一份 JSON 的理由是「改规则」应当有一个**可读的、",
+    "  独立的**落点 —— 读的人不必同时读 JS 与 Python 才能知道认得的键有哪些。",
+    "  代价是三处要一起改，而漏掉任何一处都会红（两侧的用例 + lint 都对着它）。",
+    "",
+    "改这个文件就是改规则：跑两侧的用例，哪一侧跟不上会立刻红。",
+    "措辞不在这个文件里 —— 报错文案两边各写各的（它们本来就可以各说各话），判定不行。"
+  ],
+
+  "manifest": [
+    "id",
+    "name",
+    "displayName",
+    "version",
+    "description",
+    "author",
+    "engines",
+    "contributes",
+    "site"
+  ],
+
+  "contributes": [
+    "surface",
+    "login",
+    "layout",
+    "submitPubkey",
+    "concurrent",
+    "data"
+  ],
+
+  "surface": [
+    "kind",
+    "path"
+  ],
+
+  "login": [
+    "path",
+    "field",
+    "cookie"
+  ],
+
+  "data": [
+    "inherit"
+  ]
+}

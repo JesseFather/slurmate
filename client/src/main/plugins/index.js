@@ -105,7 +105,22 @@ const UNKNOWN = 'unknown';
 //
 // **未知键报错而不是忽略**，沿用 v0.2 定下的规矩：打错一个键名（比如
 // `contribution`）不该静默变成一个"配了但不生效"的插件。
+//
+// ★★ 下面这五张表**不是**这条规则唯一的落点：判据的书面形式在
+//    `tools/manifest-keys.json`，守护进程那一侧也持有一份同样的，而
+//    `client/test/manifest-keys.test.mjs` 与 CI 的 lint 逐字比对这三处。
+//    从前只有客户端这一侧有白名单 —— 于是"一份把 contributes 拼错的清单：
+//    客户端拒、守护进程收"，而站点能把一个任何客户端都装不上的插件正常分发
+//    出去，**没有任何东西会红**（账本 S12）。
+//
+//    ★ 为什么不直接在运行期读那份 JSON（那本来是最结实的形状）：客户端是一个
+//      **分发单元**，运行期只读 `client/` 里的东西 —— 唯一一处往外走的是开发者
+//      模式的 `defaultDevPluginSourceDir()`，而它**显式处理"安装包里没有它"**。
+//      这里写一条 `path.join(__dirname, '..', '..', 'tools', ...)` 的话，**从源码
+//      跑通、装出去就断**：这份表成了空集，于是"什么都不拒"。那条路只有装出去的
+//      机器上才会露出来 —— 所以不选它。理由与代价都写在那个 JSON 的 `_` 段里。
 
+// 顺序与那份 JSON 逐字相同（比对是**有序**的，不只是集合相等）。
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
   'author', 'engines', 'contributes', 'site'];
 // ★ 没有 `defaultService` 了（v0.10 删掉）。它答的是"**本站**的缺省服务是哪一个"
@@ -1288,6 +1303,10 @@ module.exports = {
   VERSION_RE, FRAMEWORK_VERSION_RE, parseVer, cmpVer, cmpPluginVer, cmpFramework,
   // 两侧必须逐条一致的两条规则（判据在夹具里，措辞各写各的）
   enginesProblem,      // engines 的字段级判定（守护进程侧是 engines_problem）
+  // ★ 「认得的清单键」那五张表也导出去 —— **只给用例**：判据的书面形式在
+  //   tools/manifest-keys.json，而这三处必须逐字相同（见上面那一段）。生产代码里
+  //   没有别的读者：`inspectDir` 就在本文件里，直接用那几个常量。
+  MANIFEST_KEYS, CONTRIBUTES_KEYS, SURFACE_KEYS, LOGIN_KEYS, DATA_KEYS,
   versionCheck,        // 握手：客户端版本 × 服务端版本 → 一个态
   // ── 站点分发那条路要用的（见 site-plugins.js）──
   COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,

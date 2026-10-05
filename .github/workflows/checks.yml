@@ -231,3 +231,64 @@ jobs:
             echo "  而打包器排除的那些必须正好是读方拒绝的那些。"
             exit 1
           fi
+
+      - name: 清单里认得的键：书面判据与两侧逐字一致
+        # ★ 与上面那条"跳过表三端必须一致"同一个形状，差别是这里多了一份**书面的**
+        #   判据（tools/manifest-keys.json）—— 它是这几张表唯一可读的落点，而生产
+        #   代码**不能**在运行期读它：守护进程是一个文件装到 /usr/local/sbin/（集群
+        #   上没有 tools/），客户端是一个分发单元（运行期只读 client/ 里的东西）。
+        #   两侧各写一条相对路径的话，从源码跑得通、装出去就断 —— 键表成了空集，
+        #   于是"什么都不拒"，而那只在装出去的机器上露出来。理由与代价都写在
+        #   那份 JSON 的 `_` 段里。
+        #
+        #   三处必须逐字相同（**有序**：报错里"认识的只有 …"那一串用的就是它）：
+        #   书面判据 / 客户端那五张字面量 / 守护进程那五张元组。漂开的后果是
+        #   "客户端拒、守护进程收"—— 站点能把一个任何客户端都装不上的插件正常
+        #   分发出去，而报错里一个字都不会提到是这两组键分了家（账本 S12）。
+        #
+        #   抠的是**字面量**，不是"跑一遍 JS" —— 与上面那条同一个理由（本机不一定
+        #   有 node），而这条契约要的正是"两份声明写的是同一组名字"。
+        #
+        #   同一条意思在 client/test/manifest-keys.test.mjs 与
+        #   cluster/test-sessiond-logic.py 的 19.16 里各有一条（本地跑得到）；
+        #   这里再来一条是因为 CI 上的 lint 是**最外层**的那道网，它不依赖测试
+        #   脚本被正确地调用。
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util, json, re, sys
+
+          TABLES = [("manifest", "MANIFEST_KEYS"),
+                    ("contributes", "CONTRIBUTES_KEYS"),
+                    ("surface", "SURFACE_KEYS"),
+                    ("login", "LOGIN_KEYS"),
+                    ("data", "DATA_KEYS")]
+
+          written = json.load(open("tools/manifest-keys.json", encoding="utf-8"))
+          js = open("client/src/main/plugins/index.js", encoding="utf-8").read()
+
+          ldr = importlib.machinery.SourceFileLoader("d", "cluster/slurmate-sessiond")
+          mod = importlib.util.module_from_spec(
+              importlib.util.spec_from_loader("d", ldr))
+          ldr.exec_module(mod)
+
+          bad = 0
+          for name, const in TABLES:
+              m = re.search(r"const %s = \[([^\]]*)\]" % const, js, re.S)
+              client = re.findall(r"'([^']*)'", m.group(1)) if m else None
+              daemon = list(getattr(mod, const, ()))
+              w = written.get(name)
+              # ★ 三个都非空才算数：`[] == [] == None` 那种假通过正是这一条要防的。
+              ok = bool(client) and bool(daemon) and w == client == daemon
+              print("  %-12s %s" % (name, "ok" if ok else "FAIL"))
+              if not ok:
+                  bad = 1
+                  print("      书面 %r" % (w,))
+                  print("      客户端 %r / 守护进程 %r" % (client, daemon))
+          if bad:
+              print("✗ 清单键三处不一致（或有一处没抠出来）。")
+              print("  它们必须逐字相同：改规则要同时改 tools/manifest-keys.json")
+              print("  与两侧的实现（client/src/main/plugins/index.js /")
+              print("  cluster/slurmate-sessiond）。")
+              sys.exit(1)
+          print("✓ 书面判据 = 客户端 = 守护进程（五张表，十五处都真的抠到了）")
+          PY

@@ -800,6 +800,30 @@ PLUGIN_ID_RE = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
 # 站点短名进配置块名（`[plugin:<名字>]`）、进会话文件、进日志与报错文案。
 PLUGIN_NAME_RE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
 
+# ── 清单里认得的键 ──────────────────────────────────────────────────────────
+#
+# **未知键拒绝，不是忽略。** 用户从前只有客户端那一侧有这个白名单，而这边逐键
+# 取值、多出来的键一律不管 —— 于是「一份把 contributes 拼错的清单：客户端拒、
+# 守护进程收」，站点能把一个任何客户端都装不上的插件正常分发出去，而**没有任何
+# 东西会红**（账本 S12）。判定与客户端**逐条一致**，判据的书面形式是
+# `tools/manifest-keys.json`（两侧的用例与 CI 的 lint 对着它比）。
+#
+# ★ 这几份为什么是**字面量**，不在运行期读那个 JSON：本文件是**一个文件**装到
+#   /usr/local/sbin/slurmate-sessiond（见 cluster/deploy.sh 的 DAEMON），集群上
+#   没有 tools/。写一条相对路径的话，**从源码跑得通、装出去就断**：这几张表成了
+#   空集，于是"什么都不拒"。那条路只在装在集群上的那一份上露出来 —— 所以不选它。
+#   完整理由与代价写在那份 JSON 的 `_` 段里。
+#
+# ★ 顺序与那份 JSON 逐字相同（比对是有序的，不只是集合相等）。它同时也是报错
+#   文案里"认识的只有 …"那一串的顺序。
+MANIFEST_KEYS = ("id", "name", "displayName", "version", "description",
+                 "author", "engines", "contributes", "site")
+CONTRIBUTES_KEYS = ("surface", "login", "layout", "submitPubkey",
+                    "concurrent", "data")
+SURFACE_KEYS = ("kind", "path")
+LOGIN_KEYS = ("path", "field", "cookie")
+DATA_KEYS = ("inherit",)
+
 
 def _ver_segments(s, pattern):
     """版本号 → **十进制字符串**的段数组；不合形状返回 None。
@@ -1190,6 +1214,26 @@ def parse_plugin_manifest(where, raw, source_package=None, needs_job=False):
         problems.append("%s：%s" % (where, msg))
         return None
 
+    def unknown_keys(obj, allowed, what):
+        """认不得的键 ⇒ 报一条。措辞与客户端 `keysProblem` 同形（各写各的，
+        但**都要点名那个键** —— 只说"清单有问题"等于没说）。"""
+        extra = sorted(k for k in obj if k not in allowed)
+        if extra:
+            bad("%s里有认不得的键：%s（认识的只有 %s）"
+                % (what, "、".join(repr(k) for k in extra), "、".join(allowed)))
+
+    # ── 认不得的键：**报错，不是忽略**（v0.10 起，与客户端逐条一致）────────────
+    #
+    # ★ 从前这一层只有客户端有，于是"站点分发出去了、而任何客户端都装不上"
+    #   从来不报错。**逐层判**（顶层 / contributes / 它的三个子对象），不是只判
+    #   顶层：停在顶层的话，`contributes.login.pathh` 这种拼错仍然是一侧拒、
+    #   一侧收 —— 同一个缺陷往下挪一层而已。
+    #
+    # ★ 判的**只是键名**。值那一层这边仍然只管自己真读的那几个（`submitPubkey`
+    #   查类型、`engines` 走 engines_problem），其余的值形状由客户端判 ——
+    #   所以"两侧一样严"这句话今天在**键名**上成立，值形状上不成立。
+    unknown_keys(raw, MANIFEST_KEYS, "清单")
+
     def need_str(key, pattern=None, what=""):
         v = raw.get(key)
         if not isinstance(v, str) or not v.strip():
@@ -1282,6 +1326,16 @@ def parse_plugin_manifest(where, raw, source_package=None, needs_job=False):
         needs_pubkey = contrib.get("submitPubkey", False)
         if not isinstance(needs_pubkey, bool):
             bad("`contributes.submitPubkey` 必须是 true / false")
+        unknown_keys(contrib, CONTRIBUTES_KEYS, "`contributes`")
+        # 三个子对象各自的键（`contributes.surface` / `.login` / `.data`）。
+        # ★ 只在它**是对象**时判 —— 值不是对象时这边不表态（形状由客户端判，见
+        #   上面那段 ★），但绝不能拿一个字符串去迭代：那会把它的**每个字符**
+        #   当成一个键名，报出一串谁也看不懂的东西。
+        for _sub, _allowed in (("surface", SURFACE_KEYS), ("login", LOGIN_KEYS),
+                               ("data", DATA_KEYS)):
+            _v = contrib.get(_sub)
+            if isinstance(_v, dict):
+                unknown_keys(_v, _allowed, "`contributes.%s`" % _sub)
 
     # ── 可执行文件 ──────────────────────────────────────────────────────────
     bin_env = bin_name = bin_fallback = None
