@@ -280,8 +280,8 @@ const reject = (data) => {
 };
 
 test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不上（不是"当成不能"）', () => {
-  // ★ 这一条钉的是"**没有缺省**"，而它与同一个清单里另外三格（layout / submitPubkey /
-  //   defaultService）刻意相反：那三个缺省都在安全侧，基座答得了。
+  // ★ 这一条钉的是"**没有缺省**"，而它与同一个清单里另外两格（layout / submitPubkey）
+  //   刻意相反：那两个缺省都在安全侧，基座答得了。
   //   而"你的代码能不能同时处理两份"基座答不了 —— 缺省无论取哪边都是替作者表态。
   const 没写 = inspect(manifest({ contributes: { layout: true } }));
   assert.match(没写.error || '', /contributes\.concurrent 是\*\*必填\*\*/,

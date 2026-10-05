@@ -1923,25 +1923,34 @@ function excludedPortsFor(rec) {
  * 起一个会话。
  *
  * @param {object} resources 高级选项里的临时覆盖（见 session.js 的 start）
- * @param {string} serviceKind 这一次要哪个**插件**（注册表里的名字）。
- *        省略 = 缺省插件 —— 与这个参数存在之前的行为一致。
+ * @param {string} serviceKind 这一次要哪个**插件**（注册表里的名字）。**必填。**
  */
 async function startSession(resources, serviceKind) {
+  // ★ **必须写明要哪一个插件**（v0.10 起）。
+  //
+  //   从前这里有一条兜底：省略服务种类 = 用清单里标了 `contributes.defaultService`
+  //   的那一个。那一格**已经删了**：它答的是"**本站**的缺省服务是哪一个"，而那是
+  //   **站点**的事（配置里的 `default_plugin`，见 cluster/slurmate），不是某个
+  //   客户端本地的约定。两边各存一份的代价是漂开时静默 —— 客户端的缺省与站点的
+  //   缺省可以指向两个不同的插件，而没有东西会红（账本 S19）。
+  //
+  //   ★ 界面上走不到这里：每个启动按钮绑的都是 `startWith(p.name, btn)`，服务名
+  //     永远显式传。所以走到这里的是**调用方漏传了参数**，而那件事必须当场说清 ——
+  //     让它落到下面那条"不认识这种服务"上，报出来的是一句关于"服务种类"的话，
+  //     而根因是少了一个实参。
+  if (typeof serviceKind !== 'string' || !serviceKind) {
+    win.pushNotice('error', '开会话必须写明用哪一个插件（服务种类）—— '
+      + '这一条请求没有写。这是调用方漏传了参数，与站点无关。');
+    return null;
+  }
   // ★ 认不出的服务种类**在提交之前**就拦住。走到提交再让服务端回一句
   //   `bad_service_kind` 也行，但那要花掉一整趟往返，而且用户看到的是一个
   //   关于"服务种类"的错误、而他刚才点的可能是一个界面上的按钮。
   //
-  // ★ 省略 serviceKind = **缺省插件**，不是"未知"。这与这个参数存在之前的行为
-  //   完全一致（那时的界面只能起一个插件），所以老界面、老测试、以及任何还在用
-  //   单参数调用的地方都不会因此坏掉。而传一个**认不出的名字**是另一回事 ——
-  //   那是明确的错误，必须拦住。
-  const wanted = serviceKind === undefined
-    ? (registry.defaultPlugin() || {}).name
-    : serviceKind;
   // ★ 提交时只知道**短名**（配置块名、界面按钮上那个）。短名是站点内唯一的，
   //   而本机可能并存同一个插件的多个版本 —— 取版本最高的那一个：站点那边跑的
   //   通常就是它。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
-  const plugin = pickForSubmit(wanted);
+  const plugin = pickForSubmit(serviceKind);
   if (!plugin) {
     // ★ 「一个插件都没装」与「不认识这个名字」是**两件事**，行动也不同（去装一个
     //   vs 换个按钮点）。以前这里只印一句「本版支持：（一个都没有）」—— 那既是
@@ -1949,7 +1958,7 @@ async function startSession(resources, serviceKind) {
     // ★ 第三种情况：**它就在本机，只是还没同意**。与"没有这个插件"必须分得开 ——
     //   一个是去点同意，一个是去同步/去装。含糊的一句"不认识这种服务"会让用户
     //   跑去重新同步，而同步本来就已经成功了。
-    const held = registry.list().find((p) => p.name === wanted && p.active === false);
+    const held = registry.list().find((p) => p.name === serviceKind && p.active === false);
     if (held) {
       win.pushNotice('error',
         `「${held.displayName}」${held.version} 已经取回本机了，但它的客户端代码`
@@ -1974,7 +1983,7 @@ async function startSession(resources, serviceKind) {
             + '没有别的办法。请联系这个站点的管理员。'));
     } else {
       win.pushNotice('error',
-        `这个客户端不认识「${wanted || '（未指定）'}」这种服务，已阻止提交。`
+        `这个客户端不认识「${serviceKind}」这种服务，已阻止提交。`
         + `本机装的是：${registry.list().map((p) => p.displayName).join('、')}。`);
     }
     return null;
@@ -3641,8 +3650,9 @@ function registerIpc() {
    * 起一个会话。
    *
    * @param {object} resources 高级选项里的临时覆盖（省略字段 = 用服务端默认）
-   * @param {string} [serviceKind] 插件名。**省略 = 缺省插件**（清单里标了
-   *        `defaultService` 的那一个），与这个参数存在之前的行为一致。
+   * @param {string} serviceKind 插件名（站点内的**短名**）。**必填** —— 客户端
+   *        这一侧没有"缺省插件"，缺省是**站点**的事（配置里的 `default_plugin`，
+   *        它只作用于不带 `service_kind` 的 `slurmate submit`）。
    */
   send('app:start', async (resources, serviceKind) => {
     const r = await startSession(resources, serviceKind);

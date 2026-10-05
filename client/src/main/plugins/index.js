@@ -108,7 +108,12 @@ const UNKNOWN = 'unknown';
 
 const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
   'author', 'engines', 'contributes', 'site'];
-const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey', 'defaultService',
+// ★ 没有 `defaultService` 了（v0.10 删掉）。它答的是"**本站**的缺省服务是哪一个"
+//   —— 那是**站点**的事（配置里的 `default_plugin`，见 `cluster/slurmate`），不是
+//   某个客户端本地的约定。两边各存一份只会漂开，而漂开时没有任何东西会红：客户端
+//   的界面**从不省略**服务名（每个启动按钮绑的都是 `startWith(p.name, btn)`），
+//   所以客户端这一份从来没被走到过，删掉它不改变任何可达行为。
+const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey',
   'concurrent', 'data'];
 /** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头。 */
 const DATA_KEYS = ['inherit'];
@@ -710,7 +715,7 @@ function inspectDir(dir) {
   //   而从前它们被焊成一件（`slotOf` 只收一个 layoutId，**看不见插件**）。
   //
   // ★ **没有缺省**，与这个清单里**别的每一格**刻意相反：它们（`layout` / `submitPubkey`
-  //   / `defaultService` / `data.inherit`）的缺省都落在安全侧、基座自己就答得了；
+  //   / `data.inherit`）的缺省都落在安全侧、基座自己就答得了；
   //   而这一格无论缺省取哪一边，都是基座替作者表态 —— 取"不能"，一个真能多开的
   //   作者永远不知道为什么只能开一份；取"能"，一个没想过的作者会得到一个静默的
   //   第二份。**只有他能答，所以必须他答。**
@@ -814,9 +819,8 @@ function inspectDir(dir) {
       login,
       layout: mfc.layout === true,
       submitPubkey: mfc.submitPubkey === true,
-      defaultService: mfc.defaultService === true,
       // ★ 这一格是**必填**的，所以它在这里**总是**一个实打实的布尔 —— 上面查过
-      //   "缺席"与"类型不对"两种。与它相邻的那几个（上面三行）都有安全缺省。
+      //   "缺席"与"类型不对"两种。与它相邻的那两个（上面两行）都有安全缺省。
       concurrent: mfc.concurrent === true,
       // ★ `data` 的缺省在这里**不落成具体的值**：`null` 表示"这个插件没声明"，
       //   而"回落成版本号"是 plugin-data.js 的 identityOf 干的事。在这一层就把
@@ -1178,21 +1182,6 @@ class Registry {
   latestByName(name) {
     const hit = this.list().filter((p) => p.name === name);
     return hit.length ? hit[hit.length - 1] : null;
-  }
-
-  /**
-   * **不指定服务种类时**用哪一个 —— 清单里标了 `defaultService` 的那一个。
-   *
-   * ★ 这是**缺省**，不是**猜测**，两者别混：它只用在**提交**那条路上
-   *   （`startSession` 省略 serviceKind 时），而"用哪一个"是本站自己的约定，写在
-   *   清单里。**接手一个已经存在的会话**是另一回事 —— 那时服务端说了才算，绝不
-   *   兜底，见 resolve()。
-   *
-   * 没人标、或有两个以上都标了，返回 null。多个都标是清单写错了，这里不替它挑。
-   */
-  defaultPlugin() {
-    const all = this.list().filter((p) => p.contributes.defaultService);
-    return all.length === 1 ? all[0] : null;
   }
 
   /**

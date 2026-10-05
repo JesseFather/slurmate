@@ -785,7 +785,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   const before = calls.views.length;
   // 高级选项的临时覆盖：只传真实填了的键。这里模拟用户填了 4 核，
   // 内存不填 → 由服务端用自己的默认值（而不是客户端编一个）。
-  await invoke('app:start', { cpus: 4 });
+  await invoke('app:start', { cpus: 4 }, 'code-server');
 
   // 等登记完成（假后端 200ms）+ 建隧道 + 登录
   const view = await (async () => {
@@ -902,7 +902,7 @@ test('★ 运行中切换布局组：只换本地端口与存储分区，作业�
     '假后端应当连得上');
 
   const before = calls.views.length;
-  const started = await invoke('app:start', {});
+  const started = await invoke('app:start', {}, 'code-server');
   assert.equal(started.ok, true, `开会话应当成功：${JSON.stringify(started)}`);
   const view1 = await waitForView(before);
 
@@ -1195,21 +1195,53 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   assert.match(reg.resolve(u.mint(), `${u.mint()}@1.0.0`).why || '', /没有/,
     '本机根本没有这个 id 时，要说"没有这个插件"，而不是"版本不对"');
 
-  // ★ 缺省插件靠的是清单里那个 defaultService 标记，**不是"列表里第一个"**。
-  //   内建这两个恰好同名序与标记重合（code-server 字母序在前、也正是它标了
-  //   defaultService），所以只测内建的注册表分辨不出这两种实现。加一个名字排序
-  //   在前的插件，答案就会分叉。
+});
+
+test('★★ contributes.defaultService 已经删掉 —— 写了它的清单**装不上**，且点名那个键', (t) => {
+  // ★ 删它的理由：那一格答的是"**本站**的缺省服务是哪一个"，而那是**站点**的事
+  //   （配置里的 `default_plugin`，见 cluster/slurmate）。客户端从前也存了一份，
+  //   两份可以指向两个不同的插件，而**没有任何东西会红**（账本 S19）—— 就是本文件
+  //   一路在记的那个形状：同一条规矩两份实现，漂开时静默。
+  //
+  // ★ 这一条钉的是**键真的没了**，不是"键被忽略了"。静默忽略会让一份写着它的清单
+  //   看起来好好的、被收下、被分发出去，而作者以为自己在配置本站的缺省服务 ——
+  //   正是这个仓库把"未知键"判成错误而不是忽略的那条理由。
+  const { Registry } = require('../src/main/plugins/index.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-def-'));
-  writePlugin(tmp, 'aaa', { name: 'aaa', displayName: '排在前面的' },
-    'module.exports = {};\n');
-  writePlugin(tmp, 'zzz', { name: 'zzz', displayName: '真正的缺省',
-    contributes: { concurrent: false, defaultService: true } }, 'module.exports = {};\n');
-  const reg2 = new Registry([{ dir: tmp, source: 'pool' }]);
-  assert.deepEqual(reg2.list().map((p) => p.name), ['aaa', 'zzz'], '前置条件：顺序');
-  assert.equal(reg2.defaultPlugin().name, 'zzz',
-    '★ 缺省插件是**标了 defaultService 的那一个**，不是列表里第一个 —— '
-    + '按"第一个"取的话，加一个名字排序在前的插件就会把真正的缺省顶掉');
-  fs.rmSync(tmp, { recursive: true, force: true });
+  try {
+    writePlugin(tmp, 'stale', { name: 'stale', displayName: '还写着旧键的',
+      contributes: { concurrent: false, defaultService: true } },
+      'module.exports = {};\n');
+    const reg = new Registry([{ dir: tmp, source: 'pool' }]);
+    assert.equal(reg.list().length, 0,
+      '★★ 写了 contributes.defaultService ⇒ 装不上（不是"忽略这一格"）');
+    const why = reg.errors.join('\n');
+    assert.match(why, /defaultService/, `报错要点名那个键：${why}`);
+    assert.match(why, /认不得的键/, `而且要说清"这个键我不认识"：${why}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('★★ 漏传服务名**当场拒绝** —— 客户端这一侧没有"缺省插件"', async () => {
+  // ★ 从前省略 serviceKind = 用清单里标了 `contributes.defaultService` 的那一个。
+  //   那一格已删（见上一条），所以"省略"不再是"用缺省的那个"，而是**调用方漏了
+  //   一个实参**。
+  //
+  // ★ 它要挡住的失败方式很具体：兜底那一支删掉之后，什么都不做也能让这段请求
+  //   **失败**（`pickForSubmit(undefined)` 查不到东西）—— 于是这道闸的全部内容
+  //   就是**那句报错**。没有它，用户拿到的是一句关于"服务种类"的"不认识"，
+  //   把根因指向站点；而根因在调用方少传了一个实参。所以这一条钉的正是那句话。
+  //
+  // ★ 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, btn)`，
+  //   服务名永远显式传），所以这一条是这段逻辑**唯一**的守门人。
+  const before = noticesOf().length;
+  const r = await invoke('app:start', { cpus: 1 });
+  assert.equal(r.ok, false, '漏传服务名必须被拦住，而不是起一个会话');
+  assert.equal(r.slot, null, '而且不许留下一个槽');
+  const said = noticesOf().slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
+  assert.match(said, /error: .*服务种类/, `要说清缺的是"服务种类"这个参数：${said}`);
+  assert.match(said, /没有写|漏传/, `而且要指明是这一条请求没写：${said}`);
 });
 
 test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t) => {
@@ -2886,7 +2918,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个**真的在监听**
   // 的端口。起完再把这个会话的 service_kind 换成客户端不认识的名字，正是
   // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
-  const started = await invoke('app:start', { cpus: 2 });
+  const started = await invoke('app:start', { cpus: 2 }, 'code-server');
   assert.equal(started.ok, true,
     `开会话失败：${JSON.stringify(started.sessions || started)}`);
   // ★ 取**刚起的这一条**的 controller（`onlyCtl` 取的是表里第一个，而多开之后

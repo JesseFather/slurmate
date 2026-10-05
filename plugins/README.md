@@ -181,7 +181,6 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
     "login": { "path": "/login", "field": "password", "cookie": "code-server-session" },
     "layout": true,
     "submitPubkey": false,
-    "defaultService": true,
     "concurrent": true,
     "data": { "inherit": "editor" }
   },
@@ -227,7 +226,6 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | `login` | `{ path, field, cookie }`。**这是数据，不是代码** —— 基座实现的是「POST 一个表单、然后查 cookie」这个通用机制，端点/字段名/cookie 名三条具体值由插件自述。有了它，基座一个字都不知道 code-server 是什么，而任何 web 插件都能自动登录。 |
 | `layout` | 这个插件的会话能不能共用布局。★ 它同时决定**本地端口从哪儿来**：声明了的会话用**布局组自己的端口**（一个组 = 一个端口 = 一个 `origin` = 一份浏览器存储），没声明的用**中转基准端口**。端口由基座算，**插件不自报** —— 从前那个 `preferredPort` 钩子已经收掉了。 |
 | `submitPubkey` | 提交时客户端要随请求带一行 ssh 公钥。**这一条两侧都读**：客户端据此取公钥，守护进程据此校验并下发 `SLURMATE_SSH_PUBKEY`。 |
-| `defaultService` | **不指定服务种类时用哪一个**。只有本站人人都要用的那个服务该标 —— 今天只有 code-server。标了它的插件在界面上就是"不挑就用它"的那一个。没人标、或两个以上都标，就没有缺省（提交时必须写明要哪个）。 |
 | `concurrent` | **必填**：`true` = 你的代码能同时处理两份（客户端允许同一时刻有两个这个插件的会话），`false` = 只能一个。★ **没有缺省** —— 只有你知道自己的代码能不能同时处理两份。见下一节。 |
 | `data` | 你的**运行时数据**（界面布局、cookie 这类用户攒下来的东西）存在哪儿、和谁共用。见下一节。**不写是正常的**，缺省在安全侧。 |
 

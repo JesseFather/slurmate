@@ -9,7 +9,6 @@
   "contributes": {
     "layout": false,
     "submitPubkey": true,
-    "defaultService": false,
     "concurrent": false,
     "data": { "inherit": "relay" }
   },

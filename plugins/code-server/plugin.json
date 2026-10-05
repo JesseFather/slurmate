@@ -15,7 +15,6 @@
     },
     "layout": true,
     "submitPubkey": false,
-    "defaultService": true,
     "concurrent": true,
     "data": {
       "inherit": "editor"
