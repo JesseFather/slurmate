@@ -2483,9 +2483,18 @@ exit 0
     _IDS = [s.id for s in mod.scan_plugins(_nupdir)[0]]
 
     _c = pcfg_namedup("[plugin:jup]\nenabled = yes\n", "namedup1.conf")
-    _errs = " ".join(_c.validate())
-    check("★★ 短名有歧义、而块名写的是短名 ⇒ **硬错误**（不许悄悄挑一个）",
-          _errs != "", str(_c.validate())[:200])
+    _errs = " ".join(_c.stale_conf_problems)
+    check("★★ 短名有歧义、而文件名写的是短名 ⇒ **一条 ⚠**，而且**一个都不挑**"
+          "（挑一个的后果取决于遍历次序）",
+          _errs != "" and not any(q.enabled for q in _c.plugins.values()),
+          "%s / %s" % (_errs[:200],
+                       sorted((q.name, q.enabled) for q in _c.plugins.values())))
+    # ★ v0.12 阶段 2：它从**硬错误**降成了 ⚠ —— 与"指向没装的插件"同一档，理由也
+    #   是同一句：后果只是**这一份不生效**（那两个插件按清单缺省跑），而一个站点
+    #   不该因此拒绝为所有人服务（那样连"停掉正在跑的会话"都做不到）。
+    #   ★ 这两条**合起来**才是那条例律：说了、且不拦启动、且没挑一个。
+    check("★★ 而它**不拦启动**（降成 ⚠ 是 v0.12 阶段 2 做的）",
+          _c.validate() == [], str(_c.validate())[:200])
     check("★★ 而且报错**列出那几个 id** —— 那是唯一指得清的写法",
           _IDS[0] in _errs and _IDS[1] in _errs, _errs[:260])
     check("★ 那句话要说清「改用插件的 id」，不是一句泛泛的「认不出」",
@@ -2525,36 +2534,51 @@ exit 0
         mod.default_plugins_dir = _saved_dir_for_kind
         d.cfg = _saved_cfg_for_kind
 
-    # 各种错法：一律**报错**，不能静默忽略 —— 静默忽略的后果是
+    # 各种错法：一律**报出来**，不能静默忽略 —— 静默忽略的后果是
     # 「文件里写着，而实际什么也没发生」，正是本项目一路在清的那类问题。
-    for _txt, _why, _kw in (
-            ("[plugin:ssh]\nenabled = yes\n", "未知的插件名", "ssh"),
-            ("[plugin:sshd]\ndefualt_cpus = 1\n", "块内拼错的键", "defualt_cpus"),
+    #
+    # ★★ 第四列是**档位**（v0.12 阶段 2 加的），而它必须逐条写出来：
+    #    · `"err"`  —— 硬错误，进 `validate()` ⇒ 守护进程拒绝启动；
+    #    · `"warn"` —— ⚠，进 `stale_conf_problems` ⇒ `--check` 打一条、日志记一条，
+    #      站点照常服务。
+    #    ★ 分档的判据是"这件事的后果有多远"：`warn` 那一条的后果只是**它自己不
+    #      生效**（那个插件按清单里声明的缺省跑，其余一切照常），而 `err` 那些
+    #      要么是**配置自己跟自己矛盾**（同一件事说了两遍而说法不同），要么是
+    #      **每一次走这条路的请求都注定失败**。把档位写进表里，是为了让"降错档"
+    #      这件事**当场红**，而不是靠读代码的人记得。
+    for _txt, _why, _kw, _where in (
+            ("[plugin:ssh]\nenabled = yes\n", "未知的插件名", "ssh", "warn"),
+            ("[plugin:sshd]\ndefualt_cpus = 1\n", "插件配置里拼错的键",
+             "defualt_cpus", "err"),
             ("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n",
-             "通用键写到了块之后", "cluster_cidr"),
+             "通用键写进了插件那一份里（它住在主配置）", "cluster_cidr", "err"),
             ("[plugin:code-server]\nauth_mode = passwd\n", "auth_mode 取值非法",
-             "auth_mode"),
+             "auth_mode", "err"),
             ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
-             "default_mem"),
+             "default_mem", "err"),
             ("[plugin:sshd]\ndefault_time = 0:30\n", "default_time 比 1 分钟还短",
-             "default_time"),
+             "default_time", "err"),
             ("[plugin:sshd]\ndefault_time = unlimited\n", "default_time 写成「无限」",
-             "default_time"),
+             "default_time", "err"),
             ("[plugin:sshd]\ndefault_time = 两小时\n", "default_time 认不出",
-             "default_time"),
+             "default_time", "err"),
             ("[plugin:sshd]\ndefault_gpus = gpu:a100\n",
-             "default_gpus 缺数量（写成了名字:型号）", "数量必须是整数"),
+             "default_gpus 缺数量（写成了名字:型号）", "数量必须是整数", "err"),
             ("[plugin:sshd]\ndefault_gpus = gpu:1,mps:2\n",
-             "default_gpus 写了两项", "只能写一项"),
+             "default_gpus 写了两项", "只能写一项", "err"),
             ("[plugin:sshd]\ndefault_gpus = gpu:0\n",
-             "default_gpus 的数量是 0", "count"),
+             "default_gpus 的数量是 0", "count", "err"),
             ("[plugin:sshd]\ndefault_gpus = gpu:1:2:3\n",
-             "default_gpus 段数不对", "无法识别")):
+             "default_gpus 段数不对", "无法识别", "err")):
         try:
-            _errs = " ".join(pcfg(_txt).validate())
+            _c = pcfg(_txt)
+            _in_err = bool(_c.validate())
+            _errs = " ".join(_c.validate() + _c.stale_conf_problems)
         except ValueError as _ex:
-            _errs = str(_ex)
-        check("%s → 被拦下" % _why, _kw in _errs, _errs[:110])
+            _errs, _in_err = str(_ex), True
+        check("%s → 被说出来（%s）" % (_why, "硬错误" if _where == "err" else "⚠"),
+              _kw in _errs and _in_err == (_where == "err"),
+              "%s / 在 validate() 里=%s" % (_errs[:110], _in_err))
 
     # ★★ 上面三条都会被"提到了 default_time"满足 —— 而把**粒度那条校验整个删掉**，
     #   它们照样绿（另外两条还在以同一个键名报错）。所以粒度这一条必须**自己**
@@ -2588,9 +2612,11 @@ exit 0
 
     # ★★ 同一个形状再来一条：**未知文件名**那句话必须说清"装插件"是**放一个包**，
     #   而不是"放一个目录"。这一句是管理员唯一会照着做的那句话，说错了对象就
-    #   等于把他指到一个不存在的动作上（见 `section_names_problem` 的 docstring：
-    #   零插件与"名字写错了"是两种行动，而它们在配置里长得一模一样）。
-    _um = " ".join(pcfg("[plugin:ssh]\nenabled = yes\n").validate())
+    #   等于把他指到一个不存在的动作上（见 `stale_plugin_conf_problems` 的
+    #   docstring：零插件与"名字写错了"是两种行动，而它们在配置里长得一模一样）。
+    #   ★ v0.12 阶段 2：这句话住在 **⚠ 那一档**里（悬空不再拦启动），所以要从
+    #     `stale_conf_problems` 取，不是 `validate()`。
+    _um = " ".join(pcfg("[plugin:ssh]\nenabled = yes\n").stale_conf_problems)
     check("★★ 未知文件名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
           ".splug" in _um and "目录放" not in _um and "放一个目录" not in _um,
           _um[:220])
@@ -2884,6 +2910,54 @@ exit 0
           "（一个插件的这一行不该让整个站点起不来）",
           _er.returncode == 0,
           "rc=%s\n%s" % (_er.returncode, _er.stderr[-400:]))
+
+    # ── 19.5i ★★ 悬空的 drop-in 文件：一条 ⚠，且**真的打得出来** ──────────────
+    #
+    # ★ 与 19.5h 逐字同一个理由（F35：算出来了、没送出去）。上面那条钉的是 gres
+    #   那个 ⚠ 有没有接到 `--check` 上；这一条钉的是 v0.12 阶段 2 新降下来的这一
+    #   档 —— 它有两个出口（`--check` 打一条、`start()` 记一条日志），而只有
+    #   `--check` 这一边**端到端跑得起来**（`start()` 要建 socket、连数据库、装
+    #   nft 规则）。两个出口共用同一份数据，钉住一个、另一个靠评审 —— 与 gres
+    #   那条的现状逐字同形。
+    #
+    # ★★ 这一条同时钉住"降档"**真的发生了**：`validate()` 里不再有它，所以
+    #    `--check` 才走得下去 —— 反过来（留在 validate 里）的话，这条命令在打印
+    #    任何东西之前就以 1 退出了，两三行断言一起红。
+    #
+    # ★ 复用上面那一节的假安装前缀与桩：`_eplug` 里只有 MF2V（sshd）。
+    _stale_conf = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                             "range_start = 55001\nrange_end = 55099\n",
+                             "check-stale.conf")
+    _ghost = "01M2JKHTZGKJBFQQTWYXMQMF63"    # 本站**没装**它
+    _p_ghost = write_plugin_conf(_stale_conf, _ghost, "enabled = yes\n")
+    _p_hand = write_plugin_conf(_stale_conf, "typo", "enabled = yes\n")
+    _sr = subprocess.run(
+        [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
+         "--check", "--config", _stale_conf],
+        capture_output=True, text=True,
+        env=dict(os.environ,
+                 PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
+    check("★★ 悬空的 drop-in（安装器起的那份）⇒ `--check` 把它打出来，点名**文件路径**",
+          _p_ghost in _sr.stdout and (_ghost + ".conf") in _sr.stdout,
+          "rc=%s\n%s\n--- stderr ---\n%s"
+          % (_sr.returncode, _sr.stdout[-700:], _sr.stderr[-300:]))
+    check("★★ 而且指出「跑一次 plugin sync」—— 那是唯一修得了它的动作",
+          "plugin sync" in _sr.stdout, _sr.stdout[-700:])
+    _sln = [ln for ln in _sr.stdout.splitlines() if _p_hand in ln]
+    # ★ 判"它这一段不说那句话"的取法：它按**文件名**排在最后（`typo.conf` 排在
+    #   那个 ULID 后面），所以从它那一行到输出末尾就是它这一段。
+    #   ★★ 不能用"含路径的那**一行**" —— 指路那句在**下一行**（hint 是多行的）。
+    #   变异验证查出来的：把 hint 改成无条件加，只判一行的写法照样绿。而这条
+    #   用例的全部价值就在"两种成因的报法不同"上。
+    _idx = _sr.stdout.find(_p_hand)
+    check("★★ 手写的（短名）那份也在，但**不说**那句话"
+          "（sync 不会替他删手写的文件，说了就是骗人）",
+          len(_sln) == 1 and _idx >= 0 and "plugin sync" not in _sr.stdout[_idx:],
+          ("（那一份一个字都没出现）" if _idx < 0 else _sr.stdout[_idx:][:300]))
+    check("★★ 而 `--check` **照常以 0 退出**：悬空是 ⚠，不是启动错误"
+          "（一个指不到人的文件不该让整个站点起不来）",
+          _sr.returncode == 0,
+          "rc=%s\n%s" % (_sr.returncode, _sr.stderr[-400:]))
 
     # 19.5d ★★ 插件目录的形状（跨语言契约，重定义为"两边读的是同一份东西"）
     #
@@ -4723,20 +4797,30 @@ exit 0
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _rc, _out = _sy_sync(_SY3, _CONF_D)            # ⇒ 多出 <id>.conf 那一份
         os.unlink(os.path.join(_SY3, _U3 + ".splug"))  # 再把包拿走
-        _errs = " ".join(_sy_cfg_now(_SY3, _CONF_D).validate())
-        check("★★ 指向没装插件的**安装器那份** ⇒ 报错要指出「跑一次 plugin sync」"
+        _c_d = _sy_cfg_now(_SY3, _CONF_D)
+        _errs = " ".join(_c_d.stale_conf_problems)
+        check("★★ 指向没装插件的**安装器那份** ⇒ 报 ⚠ 并指出「跑一次 plugin sync」"
               "（那正是能修它的那个动作）",
               "plugin sync" in _errs and (_U3 + ".conf") in _errs, _errs[:300])
-        # ★ 先让 sync 把安装器那份收掉，再放一份手写的进去 —— 否则两条错误同时在，
+        # ★★ v0.12 阶段 2：悬空**不拦启动**。这两条合起来才是新的形状 —— 只断言
+        #    "报了 ⚠"的话，一个把悬空**同时**塞进 `validate()` 的实现照样绿，而
+        #    那样守护进程会拒绝起来，症状与"插件坏了"毫无关系（改了配置之后连
+        #    "停掉正在跑的会话"都做不到）。
+        check("★★ 而它**不拦启动** —— `validate()` 里一条都没有（悬空是 ⚠，不是错误）",
+              _c_d.validate() == [], str(_c_d.validate())[:300])
+        # ★ 先让 sync 把安装器那份收掉，再放一份手写的进去 —— 否则两条同时在，
         #   `_errs2` 里那句指路（来自安装器那份）会把"手写那种不说这句话"测成假的。
         _rc, _out = _sy_sync(_SY3, _CONF_D)
         _p_hand = write_plugin_conf(_CONF_D, "typo2", "enabled = yes\n")
-        _errs2 = " ".join(_sy_cfg_now(_SY3, _CONF_D).validate())
+        _c_d2 = _sy_cfg_now(_SY3, _CONF_D)
+        _errs2 = " ".join(_c_d2.stale_conf_problems)
         check("★ 对照：**手写的**那种不说这句话（sync 不会替他删，说了就是骗人）",
               _errs2 != "" and "plugin sync" not in _errs2, _errs2[:300])
         check("★ 而报错里带**文件路径** —— 插件配置不在主文件里了，只说名字等于"
               "让管理员去翻一个他找不到的地方",
               _p_hand in _errs2, _errs2[:300])
+        check("★ 手写的悬空同样**不拦启动**（两种成因的后果逐字相同，档位就该相同）",
+              _c_d2.validate() == [], str(_c_d2.validate())[:300])
 
         # ── ④e ★★ 有人**手写**了它的配置 ⇒ 安装器不另写一份 ─────────────────
         #

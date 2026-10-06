@@ -2818,25 +2818,28 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
     做两件事（都只碰**按 id 命名**的那一份，见 `plugin_conf_path`）：
 
       · 目录里**没有**的插件，却有 `<ULID>.conf` ⇒ **删掉那个文件**
-        （含管理员在里面改过的行）。★ 这**不是可选的**：那一份留着就指向一个不
-        存在的插件，而那是**启动错误** —— 守护进程会拒绝起来，连"停掉正在跑的
-        会话"都做不到。
+        （含管理员在里面改过的行）。★ 它**不再是**"不删就起不来"了 —— 悬空的
+        那一份现在是一条 ⚠（见 `stale_plugin_conf_problems`），守护进程照常服务。
+        留着删它的理由变成了**别攒垃圾**：`rm` 一个 `.splug` 是最自然的卸载动作
+        （见文件头），而残留的那一份会在同 id 的插件下次装上时**悄悄复活**成一个
+        没人记得的配置。判据是**文件名**（ULID 命名的才是安装器那份），所以手写
+        的一个字都不动。
       · 目录里**有**的插件，而**没有任何**配置指向它 ⇒ 写一份 `<ULID>.conf`
         （`render_plugin_file`）。★ 判据是"有没有指向它"，不是"它叫什么名字"：
         管理员手写了 `<短名>.conf`，安装器就**不再**另写一份 —— 两份指向同一个
-        插件是 `--check` 的硬错误（见 `duplicate_block_problem`）。
+        插件是 `--check` 的硬错误（见 `duplicate_plugin_conf_problem`）。
 
     **幂等**：第二次跑什么都不做（"已经一致"）。
 
     ★ 它不做的事，同样重要 —— 每一条都**说一句**，因为"没做"与"没什么可做"在
       输出上长得一样：
         · 手写的（不是 ULID 命名的）配置指向一个没装的插件 ⇒ **不删**，报 ⚠
-          （`--check` 会当硬错误拦下）；
+          （`--check` 与启动日志里也各有一条，同一个判据）；
         · 已有的配置（手写的，或者上一次生成的）⇒ **一个字都不动**
           —— 「升级不能乱变」：管理员调过的 `enabled` / `bin` / 默认资源必须原样
           留着，而生成器没有任何依据知道哪些行是他改的；
         · 两个文件指着同一个插件 ⇒ 报 ⚠（这是 `--check` 的硬错误，见
-          `duplicate_block_problem`），不去猜他想留哪一个。
+          `duplicate_plugin_conf_problem`），不去猜他想留哪一个。
     """
     specs, dir_problems = scan_plugins(plugins_dir)
     by_id, by_name = plugin_indexes(specs)
@@ -3169,7 +3172,7 @@ def _conf_file_of(meta, name):
     return (meta.get(name) or {}).get("file") or name
 
 
-def duplicate_block_problem(sections, meta, resolve):
+def duplicate_plugin_conf_problem(sections, meta, resolve):
     """**两个文件指向同一个插件** ⇒ 错误串。空 = 没问题。
 
     ★★ 短名与 id 都能当文件名（`jup.conf` 与 `<那个 jup 的 id>.conf`），所以
@@ -3192,7 +3195,8 @@ def duplicate_block_problem(sections, meta, resolve):
     for name in sorted(sections):
         spec, _why = resolve(name)
         if spec is None:
-            continue                    # 文件名本身就不对，那条错误已经报过了
+            continue            # 这个名字指不到人 —— 那条由 stale_plugin_conf_problems
+                                # 报成 ⚠（**不是**错误），这里没什么可比的
         if spec.id in seen:
             first = seen[spec.id]
             errors.append(
@@ -3255,30 +3259,41 @@ def _looks_installer_named(name):
     return bool(PLUGIN_ID_RE.match(name))
 
 
-def section_names_problem(sections, meta, resolve):
-    """文件名有没有认不出的、或者**有歧义**的。返回错误串列表（空 = 没问题）。
+def stale_plugin_conf_problems(sections, meta, resolve):
+    """**指不到本站任何插件**的 drop-in 文件。返回 ⚠ 文案列表（空 = 没问题）。
 
-    ★ 报错而不是忽略：把文件命名成 `ssh.conf`（少个 d，而本站只有 `sshd`）
-      被静默忽略，症状是「配了但它就是不生效」—— 与未知键那条要防的是同一类
-      问题。
+    ★★ 这是一条 ⚠，**不是启动错误** —— 与 `plugin_gres_problems()` 同一条路：
+      `--check` 打一条、`start()` 记一条日志，其余一切照常。理由是同一句话：
+      一个站点不该因为某一个文件就拒绝为所有人服务（那样连"停掉正在跑的会话"
+      都做不到）。而这一份配置的后果只是**它自己不生效**（那个插件按清单里声明
+      的缺省跑，其余一切照常）—— 让它带走整个站点是**过量**的。
 
-    ★ 歧义（本站有两个插件共用同一个短名）**也是错**：那时只有**插件的 id**
-      指得清是哪一个，所以那句话由 `resolve_plugin()` 说 —— 它把是哪几个 id
-      列出来。**判据只有那一处**，这里不自己再判一遍。
+    ★★ 这个降级是 v0.12 阶段 2 做的，而它是阶段 1 那个格式换来的：判据从
+      **内容**（`# slurmate:auto` 那行标记）换到了**位置**（文件在不在 `.d/` 里、
+      名字是不是 ULID）之后，"这个文件指不到人"才成了**单看这一个文件就能判**的
+      事。在那之前它是一个块的残缺，而这种残缺说不清是"删到一半"还是"手写错了"
+      —— 于是只能当硬错误。
 
-    ★★ `meta` 用来把**成因**说清。指向没装插件的配置有两种成因，而它们的
-      **修法不同**：
+    ★ 必须**说出来**，不能静默忽略：把文件命名成 `ssh.conf`（少个 d，而本站只有
+      `sshd`）被吞掉的症状是「配了但它就是不生效」—— 与未知键那条要防的是同一类
+      问题，只是后果轻得多。
+
+    ★★ `meta` 用来把**成因**说清。指不到人有三种成因，而它们的**修法不同**：
         · **安装器起的名字**（`<ULID>.conf`）⇒ 那个插件被拿走了，而这一份没跟上。
           修它的动作是**跑一次 `slurmate plugin sync`** —— 它会删掉这个文件。
           不说这句的话，管理员唯一想得到的动作是"去改这个文件"，而那正好是
           sync 会替他做的事（改完下次部署又生成回来）。
-        · **手写的** ⇒ 是笔误或者过时的配置，得他自己看着办。**这一种不说**那句
-          话 —— sync **不会**替他删手写的文件，说了就是骗人。
+        · **手写的**（`<短名>.conf`）⇒ 是笔误或者过时的配置，得他自己看着办。
+          **这一种不说**那句话 —— sync **不会**替他删手写的文件，说了就是骗人。
+        · 短名**有歧义**（本站两个插件共用它）⇒ 也是"指不到具体哪一个"，而后果
+          与上面两种**逐字相同**（这一份不生效）。那时只有**插件的 id** 指得清，
+          所以那句话由 `resolve_plugin()` 说 —— 它把是哪几个 id 列出来。**判据
+          只有那一处**，这里不自己再判一遍。
 
-    ★ 报错带上**文件路径**：插件配置不再住在主文件里，只说名字等于让管理员去翻
+    ★ 文案带上**文件路径**：插件配置不再住在主文件里，只说名字等于让管理员去翻
       一个他找不到的地方。
     """
-    errors = []
+    out = []
     for name in sorted(sections):
         _spec, why = resolve(name)
         if why is None:
@@ -3288,8 +3303,8 @@ def section_names_problem(sections, meta, resolve):
             hint = ("\n        ★ 这个文件名是**安装器起的**（一个 ULID）——它指向的"
                     "插件已经不在本站了。\n"
                     "        跑一次 `slurmate plugin sync` 会自动把这个文件删掉。")
-        errors.append("%s：%s%s" % (_conf_file_of(meta, name), why, hint))
-    return errors
+        out.append("%s：%s%s" % (_conf_file_of(meta, name), why, hint))
+    return out
 
 
 def plugin_gres_problems(plugins, catalog):
@@ -3350,7 +3365,8 @@ def plugin_keys_problem(sections, meta, resolve):
     for name in sorted(sections):
         spec, _why = resolve(name)
         if spec is None:
-            continue                    # 文件名本身就不对，那条错误已经报过了
+            continue            # 这个名字指不到人 ⇒ 它里面的键无从谈起（那条 ⚠
+                                # 已经说了这一份不生效，再报一串键是噪音）
         allowed = spec.conf_keys()
         where = _conf_file_of(meta, name)
         for key in sorted(sections[name]):
@@ -3411,17 +3427,23 @@ class Config(object):
         #   有任何东西变红。
         self.plugins_by_id, self.plugins_by_name = plugin_indexes(self.plugin_specs)
 
-        # 认不出来的键/文件/文件内键不在构造时报错，攒着交给 validate() —— --check
+        # 认不出来的键/文件内键不在构造时报错，攒着交给 validate() —— --check
         # 要能一次把问题列全，而不是让人改一个跑一次。
         self.unknown_keys = sorted(set(raw) - GLOBAL_KEYS)
-        # ★ **两条**配置文件名的问题，都得报：认不出/有歧义的（第一条），以及
-        #   **两个文件指着同一个插件**的（第二条）。少了第二条，两份里后一份会
-        #   静默盖掉前一份（见 duplicate_block_problem 的说明）。
-        self.bad_sections = (section_names_problem(sections, self.plugin_conf_files,
-                                                   self.resolve_plugin)
-                             + duplicate_block_problem(sections,
-                                                       self.plugin_conf_files,
-                                                       self.resolve_plugin))
+        # ★★ 配置文件名的问题**分两档**，别把它们混起来：
+        #   · `bad_sections`   —— **硬错误**（进 validate()，拒绝启动）：
+        #     **两个文件指着同一个插件**。少了它，两份里后一份会**静默盖掉**前一份
+        #     （见 duplicate_plugin_conf_problem 的说明）。这一档留住，是因为它是
+        #     **配置自己跟自己矛盾** —— 同一件事说了两遍而说法不同，谁也不知道
+        #     哪一份算数。
+        #   · `stale_conf_problems` —— **⚠**（--check 打一条、start() 记一条日志）：
+        #     **指不到人的那些文件**。它是"配了但没生效"，不是"两处打架" ——
+        #     站点照常工作，那个插件按清单缺省跑。一个站点不该因为它起不来。
+        self.bad_sections = duplicate_plugin_conf_problem(sections,
+                                                          self.plugin_conf_files,
+                                                          self.resolve_plugin)
+        self.stale_conf_problems = stale_plugin_conf_problems(
+            sections, self.plugin_conf_files, self.resolve_plugin)
         self.bad_plugin_keys = plugin_keys_problem(sections, self.plugin_conf_files,
                                                   self.resolve_plugin)
 
@@ -5336,6 +5358,13 @@ class Sessiond(object):
         for s in self.cfg.plugin_job_missing:
             log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
                       "不了。重跑一次 deploy.sh 会生成它。", s.name, self.cfg.jobs_dir)
+        # 「有一份配置指不到本站任何插件」—— 同上，**不是启动错误**。
+        # ★ 后果只是那一份**不生效**（那个插件按清单缺省跑），但它**必须说出来**：
+        #   不说的话，管理员的症状是"我明明配了啊"，而日志里一个字都没有。
+        #   与上面两条要防的是同一件事，只是后果轻得多 —— 而轻，正是不该让它
+        #   拦住启动的理由（那样连"停掉正在跑的会话"都做不到）。
+        for w in self.cfg.stale_conf_problems:
+            log.error("%s", w)
         # 插件那份配置里配的 GRES 与本站实际有的对不上 —— 同上，**不是启动错误**。
         # ★ 判据与 `--check` **共用一处**（`plugin_gres_problems`），只有出口不同：
         #   这里进日志，那里打 ⚠。少了这一边，症状是"文件里配着，而日志里一个字
@@ -8264,6 +8293,14 @@ def main():
         for _s in cfg.plugin_job_missing:
             print("  ⚠ 插件「%s」的作业脚本不在：%s（重跑一次 deploy.sh 会生成它）"
                   % (_s.name, os.path.join(cfg.jobs_dir, _s.id + ".sbatch")))
+        # 「有一份配置指不到本站任何插件」—— 同上，**报告但不算错误**。
+        # ★ 这一档是 v0.12 阶段 2 从"硬错误"降下来的（见
+        #   stale_plugin_conf_problems 的说明）：判据从内容换到位置之后，"这个文件
+        #   指不到人"才成了单看一个文件就能判的事。
+        # ★ 它必须**真的打出来** —— 算出来了不送出去就是又一个 F35，而这一条的
+        #   读者正是"改完配置想确认一下"的管理员。
+        for _w in cfg.stale_conf_problems:
+            print("  ⚠ %s" % _w)
 
         print("  插件          :")
         if not cfg.plugins:
