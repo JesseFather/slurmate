@@ -1035,13 +1035,41 @@ test('★ 服务端通报的默认资源要真的送到界面上，不能又在�
   // ★ 时限在**同一格**里（v0.11 起）—— 它是"这个插件缺省给多少"的第三个答案，
   //   而不是另一件事。少了它界面就说不出"这个会话能跑多久"，用户只能在作业被
   //   `TimeLimit` 砍掉的那一刻第一次知道。
-  assert.deepEqual(codeServer.defaults, { cpus: 2, mem: '8G', time: '12:00:00' },
-    '服务端通报的默认资源必须原样带回来（含时限）');
+  assert.deepEqual(codeServer.defaults,
+    { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
+    '服务端通报的默认资源必须原样带回来（含时限与卡）');
+  // ★ 卡那一格是**描述符或 null**，而 `null` 是"本站确实没给这个插件配默认卡"
+  //   ——一个**确定的事实**，与"这一格整个不在"（老守护进程）不是一回事。
+  assert.equal(codeServer.defaultsGresText, null,
+    '没配默认卡 ⇒ 那句话里不说 GRES（不编一个，也不显示一个裸对象）');
 
   const boot = await invoke('app:bootstrap');
   const cs2 = boot.plugins.plugins.find((p) => p.name === 'code-server');
-  assert.deepEqual(cs2.defaults, { cpus: 2, mem: '8G', time: '12:00:00' },
+  assert.deepEqual(cs2.defaults,
+    { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     'bootstrap 也要带 —— 界面首次渲染时还没有别的机会拿到它');
+});
+
+test('★★ 站点配了默认卡 ⇒ 那句「默认 …」里出现它，且走唯一那处拼法', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // ★ 卡那一格的文本由**主进程**译好（`gres.js` 的 `gresText`）再递给界面 ——
+  //   与 `session.js` 给会话快照加 `gresText` 是同一条路。渲染层自己拼
+  //   `name:type × n` 的话，同一个插件在选择器里与在插件卡片上会有**两个拼法**，
+  //   而两边都没错、只是不一样。所以这里断言的是**译好的那一串**。
+  await invoke('app:debug', 'default-gpus',
+    { name: 'gpu', type: 'a6000', count: 1 });
+  try {
+    const r = await invoke('app:partitions');
+    assert.equal(r.ok, true);
+    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    assert.deepEqual(cs.defaults.gpus, { name: 'gpu', type: 'a6000', count: 1 },
+      '站点报的那个描述符要原样带回来 —— 界面不重排它的形状');
+    assert.equal(cs.defaultsGresText, 'gpu:a6000 × 1',
+      '译法只能有一处（`client/src/main/gres.js` 的 `gresText`）');
+  } finally {
+    await invoke('app:debug', 'reset');
+  }
 });
 
 test('★ 老守护进程的 `defaults` 里没有 time：缺了就是缺了，不许编一个', async (t) => {
@@ -1061,9 +1089,12 @@ test('★ 老守护进程的 `defaults` 里没有 time：缺了就是缺了，�
     assert.equal(r.ok, true);
     const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
     assert.deepEqual(cs.defaults, { cpus: 2, mem: '8G' },
-      'v0.5 的守护进程只报这两格 —— 客户端照原样带回来，不补 time');
+      'v0.5 的守护进程只报这两格 —— 客户端照原样带回来，不补 time / gpus');
     assert.equal(cs.defaults.time, undefined,
       '不许给缺席的那一格编一个值');
+    assert.equal(cs.defaultsGresText, null,
+      '同上：`gpus` 那一格整个不在是不说话，而不是"不占"' +
+      ' —— 两者在界面上碰巧长得一样，但来源不同，不该被合并成一件事');
   } finally {
     await invoke('app:debug', 'reset');
   }

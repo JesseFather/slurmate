@@ -792,8 +792,13 @@ JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` **当
   `AllocTRES` 不含 gres，`GresUsed=` 也不存在。拿 `squeue` 去减是另一件事，
   而且那个数刚算完就过期 —— 报一个错的数量比不报更糟。
 
-★ **这一版不做 `site.defaultGpus`（插件声明默认卡数）。** 那是稀缺算力的**政策**，
-是一个悬而未决的产品决定，不是疏漏 —— 见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 F15。
+★ **`site.defaultGpus`（插件**声明**默认卡数）永远不会有**，而"默认卡数"这一层
+在 v0.11 有了 —— 它在**配置块**里（`[plugin:<名字>]` 的 `default_gpus`）。
+差别是**谁知道本站管那张卡叫什么**：作者写不出来（`gpu` 还是 `mps`、型号叫 `a100`
+还是 `A100-PCIE-40GB`），那是管理员在 `gres.conf` 里定的事实。所以那是**站点**的
+政策，由站点写；而 `--check` 拿实际目录替他对一遍账（打 ⚠，不拦启动）。
+见 [CONFIGURATION.md](CONFIGURATION.md) 的块键表与 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)
+§四的 F15。
 
 ## 四、nft 规则为什么写成单条 `meta skuid != UID drop`
 

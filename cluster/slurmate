@@ -643,12 +643,12 @@ def cmd_plugins(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    # ★ 缺省资源那一列比别的宽：它现在装三样（核 / 内存 / 时限），因为它们回答
-    #   的是**同一个问题**（"这个插件缺省给多少"）。分成两列的话，管理员问
-    #   "这个插件缺省配的什么"就要横着读两个地方。
-    print("%-14s %-8s %-9s %-24s %-10s %s"
+    # ★ 缺省资源那一列比别的宽：它现在装四样（核 / 内存 / 时限 / 卡），因为它们
+    #   回答的是**同一个问题**（"这个插件缺省给多少"）。分成几列的话，管理员问
+    #   "这个插件缺省配的什么"就要横着读几个地方。
+    print("%-14s %-8s %-9s %-30s %-10s %s"
           % ("插件", "状态", "版本", "缺省资源", "分发", "说明"))
-    print("-" * 98)
+    print("-" * 104)
     # 「本站支不支持分发」的判据是**顶层有没有 `limits`**（见守护进程 `op_plugins`
     # 的注释：v0.6 那个判据是"这一项里有没有 files"，而 v0.7 把 files 删掉了）。
     _has_delivery = isinstance(d.get("limits"), dict)
@@ -669,11 +669,15 @@ def cmd_plugins(args):
             _deliv = "1 个包"
         # ★ 时限那一格在**老守护进程**上是缺席的（v0.11 才加进 `defaults`）——
         #   与这一屏其它地方同一个惯例：缺席显示 `?`，不替它编一个值。
-        print("%-14s %-8s %-9s %-24s %-10s %s"
+        # ★ 卡那一格相反：**没配就不说**。`null`（本站确实没给这个插件配默认卡）
+        #   与"这一格不在"（老守护进程）在这一屏上是同一句话，而两者都**不是**
+        #   "有卡但数量不明" —— 写一个 `—` 会让人那样读。
+        print("%-14s %-8s %-9s %-30s %-10s %s"
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
                  p.get("version") or "?",
-                 "%s 核 / %s / %s" % (df.get("cpus"), df.get("mem"),
-                                      df.get("time") or "?"),
+                 "%s 核 / %s / %s%s" % (
+                     df.get("cpus"), df.get("mem"), df.get("time") or "?",
+                     (" / " + gres_text(df["gpus"])) if df.get("gpus") else ""),
                  _deliv, p.get("title") or ""))
 
     # ★★ 那些**没能加载**的包（账本 **F22**）必须出现在这一屏上 —— 否则这一屏
@@ -737,7 +741,12 @@ def cmd_submit(args):
         req["cpus"] = args.cpus
     if args.mem:
         req["mem"] = args.mem
-    if args.gres:
+    # ★ `--no-gres` 发的是**显式 `null`**，与"没写 `--gres`"是两件事：
+    #   不写 = 用**这个插件的** `default_gpus`；写了 `--no-gres` = 不占，盖过它。
+    #   （两者互斥由 argparse 的 add_mutually_exclusive_group 保证。）
+    if args.no_gres:
+        req["gres"] = None
+    elif args.gres:
         g, gerr = parse_gres_spec(args.gres)
         if gerr:
             print("--gres %s：%s" % (args.gres, gerr), file=sys.stderr)
@@ -1005,10 +1014,15 @@ def build_parser():
     p.add_argument("--cpus", type=int,
                    help="CPU 核心数（省略 = 该插件的服务端默认）")
     p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")
-    p.add_argument("--gres",
-                   help="要哪种 GRES、几个，写法同 sbatch：名字[:型号]:数量，"
-                        "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 不占。"
-                        "本站有哪些、每个节点最多几个，看 `slurmate partitions`")
+    _gres = p.add_mutually_exclusive_group()
+    _gres.add_argument("--gres",
+                       help="要哪种 GRES、几个，写法同 sbatch：名字[:型号]:数量，"
+                            "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 用**该插件**"
+                            "的默认（`slurmate plugins` 那一列）。"
+                            "本站有哪些、每个节点最多几个，看 `slurmate partitions`")
+    _gres.add_argument("--no-gres", action="store_true",
+                       help="明确**不占** GRES，盖过该插件的默认 —— 与"
+                            "「没写 --gres」是两件事")
     p.add_argument("--time",
                    help="时间上限，如 12:00:00（省略 = 该插件的缺省时限；"
                         "到期会自动续期）")

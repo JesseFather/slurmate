@@ -1599,9 +1599,12 @@ function pluginBlock(p) {
   // ★ `def.time` **缺席不算否**（老守护进程的 `defaults` 里没有这一格，见
   //   backend-fake 的 `_noDistribute` 那一档）：缺了就不说，而不是显示
   //   "undefined" 或"0"。这与本页其它每一处三态是同一条纪律。
+  // ★ 卡那一格由**主进程**译好（`defaultsGresText`，走 `gres.js`）—— 与下面
+  //   `renderKv` 里那一行同一条路子。渲染层不拼 `name:type × n`：那是第二个拼法。
   const def = p.defaults;
   meta.append(el('span', null, def
     ? `默认 ${def.cpus} 核 / ${def.mem}${def.time ? ` / ${def.time}` : ''}`
+      + (p.defaultsGresText ? ` / ${p.defaultsGresText}` : '')
     : '默认资源由服务端定'));
 
   // 本机开关。它能点，是因为"本机要不要"是用户自己的决定，与站点无关。
@@ -1689,7 +1692,11 @@ async function startWith(serviceKind, btn) {
     // ★ 描述符按**序号**取回（选项的 value 就是 curGres 的下标）：不从 option 的
     //   文字里再拆一遍 `gpu:a100` —— 那等于在客户端再造一个语法解析器。
     const gi = $('f-gres').value;
-    if (gi !== '') {
+    if (gi === 'none') {
+      // ★ 显式「不占」发的是 `null`，与"没碰这一项"（不发这个键）**不是**同一件事：
+      //   后者让服务端用那个插件的默认卡，前者盖过它。见 renderGresOptions 那段。
+      res.gres = null;
+    } else if (gi !== '') {
       const e = curGres[Number(gi)];
       const n = Number($('f-gres-n').value);
       if (!e) {
@@ -2211,9 +2218,20 @@ function renderGresOptions() {
   const { list, absent } = gresChoicesFor($('f-part').value);
   curGres = list;
   sel.textContent = '';
+  // ★★ 这里的两项**不是**同一件事，而它们以前是同一项：
+  //   · `''`  = **不碰**（省略这个字段）⇒ 用**这个插件的** `default_gpus`。
+  //     站点可以在块里给插件配默认卡（那是稀缺算力政策），而"不碰"就该拿到它。
+  //   · `none` = **显式不占** ⇒ 发 `gres: null`，盖过插件的默认。
+  //   少了第二项，站点的默认卡就是一道用户**无法拒绝**的命令 —— 而管理员拍的是
+  //   "默认"，不是"任何人都不许说不"。（协议侧同一条：见 op_submit 里
+  //   `"gres" in req` 那一段。）
+  const deflt = document.createElement('option');
+  deflt.value = '';
+  deflt.textContent = '（用插件的默认）';
+  sel.append(deflt);
   const none = document.createElement('option');
-  none.value = '';
-  none.textContent = '（不占）';
+  none.value = 'none';
+  none.textContent = '（不占 GRES）';
   sel.append(none);
   for (let i = 0; i < curGres.length; i++) {
     const e = curGres[i];

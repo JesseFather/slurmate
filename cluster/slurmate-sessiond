@@ -399,6 +399,48 @@ def clean_gres(v):
     return {"name": name, "type": typ, "count": cnt}, None
 
 
+def parse_config_gres(raw, where):
+    """**配置里**的 GRES（块 `default_gpus`）→ 描述符或 None。不合法就抛 ValueError。
+
+    ★ 写的是 `--gres=` 后面那一段，也就是 `gres_spec()` 的**输出**形状：
+      `gpu:2` 或 `gpu:a100:2`。于是"怎么写"与"怎么发给 Slurm"是同一个东西 ——
+      中间不存在一份需要跟着改的配置文件语法。
+
+    ★ 与 `parse_gres_field()`（读 `scontrol` 的 `Gres=` 那一格）**同一套语法**，
+      差别只有一处，而它是那条纪律的推论：那一处**跳过**看不懂的项、只记一条
+      warning（它读的是 Slurm 的输出，不能因为一棵树上有个怪项就把整份丢掉），
+      而配置里写错**必须当场拒绝** —— 否则症状是"文件里写着，而实际什么也没发生"。
+
+    ★ 校验（名字合法、数量 1..MAX_GRES_COUNT）**复用 `clean_gres()`**，不在这里
+      再写一遍：那是同一套规则的第二个副本，而两份规则迟早会分叉。
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    t = str(raw).strip()
+    if "," in t:
+        raise ValueError(
+            "%s 只能写一项（一个插件一份默认 GRES），得到 %r。"
+            "要多种卡就整个不写 —— 让用户在高级选项里自己挑"
+            % (where, t))
+    parts = t.split(":")
+    if len(parts) == 2:
+        name, typ, cnt = parts[0], None, parts[1]
+    elif len(parts) == 3:
+        name, typ, cnt = parts
+    else:
+        raise ValueError(
+            "%s 无法识别: %r（形如 gpu:2 或 gpu:a100:2 —— 就是 `--gres=` 后面"
+            "那一段）" % (where, t))
+    try:
+        cnt = int(cnt)
+    except ValueError:
+        raise ValueError("%s 的数量必须是整数，得到 %r" % (where, t))
+    g, err = clean_gres({"name": name, "type": typ or None, "count": cnt})
+    if err:
+        raise ValueError("%s：%s" % (where, err))
+    return g
+
+
 def load_gres(raw):
     """数据库那一格（JSON 文本）→ 描述符或 None。**认不出来当没要**，并记一条 error。
 
@@ -1024,7 +1066,8 @@ def engines_problem(manifest, host_version):
     return ("unsatisfied", "%s（engines.slurmate 是插件自己声明的）" % why)
 
 
-PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem", "default_time")
+PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem", "default_time",
+                      "default_gpus")
 
 MANIFEST_NAME = "plugin.json"
 # 作业侧入口在**包里的**那个名字。★ 用正斜杠写死，不走 `os.path.join`：它是一个
@@ -2905,6 +2948,19 @@ class PluginConfig(object):
         else:
             self.default_time = spec.default_time
 
+        # 这个插件的会话**缺省占哪种卡、几张**。不写 = 不占（与 v0.11 之前一致）。
+        #
+        # ★★ 这一格**只在块里**，清单里**没有对应的键** —— 与上面三项**不同**，
+        #    而差别是刻意的：作者写不出本站管那张卡叫什么（`gpu` 还是 `mps`，
+        #    型号叫 `a100` 还是 `A100-PCIE-40GB`），那是**本站的事实** ——
+        #    名字由管理员在 `gres.conf` 里定，代码里没有任何一份副本可以拿来对照。
+        #    所以清单里那一格不是"还没做"，是**不该有**（见账本 F15 的去向）。
+        #
+        # ★ 缺省是 `None`（不占），不是一个"安全的数量"：**开发会话默认占住稀缺
+        #    算力**是站点政策，不能让框架替所有站点挑一个数。
+        self.default_gpus = parse_config_gres(
+            raw.get("default_gpus"), "[plugin:%s] 的 default_gpus" % spec.name)
+
         # ── 可执行文件 ──
         explicit = (raw.get("bin") or "").strip()
         if explicit:
@@ -3141,6 +3197,53 @@ def section_names_problem(sections, meta, resolve):
                     "会自动把它**整块**删掉。" % AUTO_BLOCK_MARK)
         errors.append("[plugin:%s]：%s%s" % (name, why, hint))
     return errors
+
+
+def plugin_gres_problems(plugins, catalog):
+    """把每个插件块声明的 `default_gpus` 与**本站实际有的**对一对。返回 ⚠ 文案列表。
+
+    ★ 判据是「**配置块里**声明的资源」vs「本站的实际目录」—— 不是"插件清单里
+      声明的"：作者写不出本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100`
+      还是 `A100-PCIE-40GB`），那是本站在 `gres.conf` 里定的事实，所以那一格
+      **只在块里**（见 `PluginConfig.default_gpus`）。
+
+    ★ **不是启动错误**，调用方打一条 ⚠（`--check`）或记一条 `log.error`
+      （`start()`），其余一切照常 —— 与 `plugin_problems` / `plugin_job_missing`
+      同一条路。一个站点不该因为某一块的某一行就拒绝为所有人服务：那连"停掉正在
+      跑的会话"都做不到。
+
+    ★ `catalog is None`（`scontrol` 挂了）⇒ 返回**空**：与 `fit_gres()` 同一条
+      fail-open。一次控制器抖动不该让自检说一句它并不确定的话，而"报了但其实
+      没事"正是这个项目一路在清的那种噪音。
+
+    ★ 判据是「**至少有一个分区**放得下」，不是"每个分区都放得下"：分区是**随机
+      挑**的（见 `op_submit`），而提交期用的正是同一句话（"在可用分区里找至少
+      一个能放下的"）。自检比提交期**更宽**（它不知道这个用户有哪些分区），这是
+      对的 —— 自检不该报一个只有某几个用户才会撞上的问题。
+    """
+    if catalog is None:
+        return []
+    entries = [e for ps in catalog.values() for e in ps]
+    names = sorted({gres_label(e) for e in entries})
+    out = []
+    for p in sorted(plugins, key=lambda c: (c.name, c.spec.id)):
+        g = p.default_gpus
+        if not g:
+            continue                      # 没配 = 不占，没什么可对
+        match = [e for e in entries
+                 if e["name"] == g["name"]
+                 and (not g["type"] or e["type"] == g["type"])]
+        if not match:
+            out.append("[plugin:%s] 的 default_gpus 写的是 %s，而**本站没有这种"
+                       "资源**（本站有的是：%s）"
+                       % (p.name, gres_spec(g),
+                          "、".join(names) or "什么 GRES 都没配"))
+        elif g["count"] > max(e["per_node_max"] for e in match):
+            out.append("[plugin:%s] 的 default_gpus 要 %s 每节点 %d 个，而本站最多 "
+                       "%d 个/节点 —— 这个插件的会话会以 bad_gres 被拒"
+                       % (p.name, gres_label(g), g["count"],
+                          max(e["per_node_max"] for e in match)))
+    return out
 
 
 def block_keys_problem(sections, resolve):
@@ -5110,6 +5213,13 @@ class Sessiond(object):
         for s in self.cfg.plugin_job_missing:
             log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
                       "不了。重跑一次 deploy.sh 会生成它。", s.name, self.cfg.jobs_dir)
+        # 插件块里配的 GRES 与本站实际有的对不上 —— 同上，**不是启动错误**。
+        # ★ 判据与 `--check` **共用一处**（`plugin_gres_problems`），只有出口不同：
+        #   这里进日志，那里打 ⚠。少了这一边，症状是"文件里配着，而日志里一个字
+        #   都没有"—— 正是上面那两段要防的同一件事。
+        #   查询失败时它返回空（fail-open，与 `fit_gres()` 同一条）。
+        for w in plugin_gres_problems(self.cfg.plugins.values(), self.cluster.gres()):
+            log.error("%s", w)
         if not self.cfg.plugins:
             log.warning("本站没有安装任何插件（%s）—— 会话能查、能停，"
                         "但没有可提交的服务。这是合法状态。", self.cfg.plugins_dir)
@@ -6545,8 +6655,11 @@ class Sessiond(object):
                 # ★ `time` 与 cpus / mem **同一格**，因为它要回答的是同一个问题
                 #   （"这个插件缺省给多少"），而客户端显示它的地方也只有那一处。
                 #   单开一格的话，"默认资源"这一句话在界面上就有了两个来源。
+                # ★ `gpus` 是**描述符或 null**，不是数字（与 `submit` 里的 `gres`
+                #   同一形状）：`null` = 本站没给这个插件配默认卡（**确定的事实**），
+                #   而"这个键整个不在"= 老守护进程（三态，与 `can_submit` 同一条）。
                 "defaults": {"cpus": p.default_cpus, "mem": p.default_mem,
-                             "time": p.default_time},
+                             "time": p.default_time, "gpus": p.default_gpus},
                 # ── 站点分发：这个插件作为**一个包** ──
                 #
                 # ★ **只有这一条投递方式了。** v0.6 曾经同时报 `files`（逐份取，
@@ -7398,7 +7511,19 @@ class Sessiond(object):
         mem, mem_rejected = sanitize_mem(req.get("mem"), pcfg.default_mem)
         # GRES 这一步**只查形状** —— 与这个分区对不对得上要等分区定下来
         # （上限是分区自己的：同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
-        gres, gres_err = clean_gres(req.get("gres"))
+        #
+        # ★★ 「这个键**在不在**」与「这个键是 `null`」是**两件事**，而这一格是
+        #    唯一一处必须把它们分开的地方：
+        #      · **缺席** ⇒ 用**这个插件的** `default_gpus`（与 cpus / mem / time
+        #        同一条：省略字段永远是在说"用你的默认"）；
+        #      · **显式 `null`** ⇒ 不占，**盖过**插件的默认。
+        #    少了第二条，站点的 `default_gpus` 就成了一道用户无法拒绝的命令 ——
+        #    而"开发会话默认占住 A6000 的卡"是**稀缺算力政策**，管理员拍的是
+        #    **默认**，不是"任何人都不许说不"。
+        if "gres" in req:
+            gres, gres_err = clean_gres(req.get("gres"))
+        else:
+            gres, gres_err = pcfg.default_gpus, None
         if gres_err:
             return self._err(2, "bad_gres", gres_err)
         warning = []
@@ -7970,6 +8095,11 @@ def main():
                     "、".join("%s × %d/节点（本分区共 %d）"
                               % (gres_label(e), e["per_node_max"], e["total"])
                               for e in _g) or "（没有配任何 GRES）"))
+        # ★★ 每个插件块声明的 `default_gpus` 与**本站实际有的**对账（账本 F15 的去向）。
+        #   判据、fail-open 与"哪些分区算数"都写在 `plugin_gres_problems()` 里 ——
+        #   这里只负责**把它打出来**，而它返回空列表时这一行什么都不说。
+        for _w in plugin_gres_problems(cfg.plugins.values(), _cat):
+            print("  ⚠ %s" % _w)
         if _node_counts is None:
             print("  节点忙闲      : 【读不到】sinfo -N 失败（界面上会显示为"
                   "「取不到」，不是「没有节点」）")

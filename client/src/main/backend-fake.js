@@ -176,8 +176,15 @@ function sumCounts(counts) {
   return Object.values(counts).reduce((a, b) => a + b, 0);
 }
 
-/** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。 */
-const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00' };
+/** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。
+ *
+ *  ★ `gpus: null` = **本站没给这个插件配默认卡**（`null` 是"确定的事实"，
+ *    与那一格整个不在是两回事 —— 后者是老守护进程）。不给它一个具体的卡是
+ *    有意的：假站点里分区是**随机挑**的，而三个分区的 GRES 型号互不相同 ——
+ *    挑任何一个都会让另外两个分区在提交时以 `bad_gres` 被拒，于是"提交成功"
+ *    这条主路会在开发者模式下时灵时不灵。要验"配了默认卡"那条路，
+ *    用 `debugDefaultGpus()`。 */
+const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00', gpus: null };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
 const DEMO_PASSWORD = 'demo-1a2b3c4d5e6f7081';  // 固定值，方便你手动 curl 验证
@@ -367,6 +374,17 @@ class FakeBackend extends Backend {
      *   见 `debugPluginProblems` 与 `_dispatch` 的 `case 'plugins'`。
      */
     this._pluginProblems = [];
+    /**
+     * 站点给插件配的**默认 GRES**（`defaults.gpus`）。`null` = 没配（见 DEFAULTS）。
+     *
+     * ★ 真站点是**每个插件一份**，而假站点只有一份全局的 —— 与它给 cpus / mem /
+     *   time 的待遇一样（DEFAULTS 那一份）。要验界面在"配了默认卡"时那句话怎么写，
+     *   用 `debugDefaultGpus()`。
+     *
+     * ★ 它**不进 `_noDistribute` 那一档**：`defaults.gpus` 是 v0.11 才有的格，
+     *   与 `time` / `problems` 同一条 —— 那一档照发就等于演了一个不存在的版本。
+     */
+    this._defaultGpus = null;
     /** 打好的包，按 `(id@版本)` 缓存 —— 见 _pkgOf。 */
     this._pkgCache = new Map();
   }
@@ -618,7 +636,11 @@ class FakeBackend extends Backend {
         return ok({
           plugins: this._sitePlugins().map((p) => ({
             id: p.id, name: p.name, version: p.version, title: p.title,
-            enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
+            enabled: p.enabled, can_submit: p.can_submit,
+            // ★ `gpus` 盖成**这一站当下那一份**（`debugDefaultGpus` 改的就是它）：
+            //   直接 `...DEFAULTS` 的话，那个开关改了也传不下去，于是"配了默认卡"
+            //   这条路上一个用例都走不到。
+            defaults: { ...DEFAULTS, gpus: this._defaultGpus },
             // ★ `noPackage` 的那几条**不带 `package` 这个键**（见 _sitePlugins）。
             //   用 `delete` 之外的办法（展开）是因为这里在造一个**新对象**：
             //   挑字段而不是 `...p` 是有意的，见上面那段"逐字段挑"。
@@ -852,6 +874,22 @@ class FakeBackend extends Backend {
   }
 
   /**
+   * 让假站点报出**这一站的默认 GRES**（`op_plugins` 每项的 `defaults.gpus`）。
+   *
+   * ★ 与 `debugPluginProblems` 同一条纪律：**必须传参**（`null` / 不传 = 清掉，
+   *   也就是"本站没配"）。假站点**没有**"某个插件默认占几张卡"这个事实 ——
+   *   真站点上它是**每个插件一份**的管理员声明，而这里只有一份全局的（见 DEFAULTS）。
+   *   编一个默认值就等于演一个不存在的站点，而这一格的价值恰恰是让界面那句
+   *   "默认 … / gpu:a6000 × 1"真的被画出来一次。
+   *
+   * ★ 传进来的形状与协议一致：`{name, type, count}` 或 `null`。
+   *   从 DevTools 里 `window.slurmate.debug('default-gpus', {name:'gpu', type:'a6000', count:1})`。
+   */
+  debugDefaultGpus(g) {
+    this._defaultGpus = g && typeof g === 'object' ? { ...g } : null;
+  }
+
+  /**
    * 让某一份的**包里**多一个**超过单文件上限**的文件（造"这一份装不上"）。
    *
    * ★ v0.6 时它是往 `files` 那份清单里加一条假的（清单里报一个装不下的文件）；
@@ -886,6 +924,7 @@ class FakeBackend extends Backend {
     this._noPluginsOp = false;
     this._noDistribute = false;
     this._pluginProblems.length = 0;
+    this._defaultGpus = null;
     this._bloatPlugin = null;
     this._pkgCache.clear();
     this._rateLimitBurst = 0;

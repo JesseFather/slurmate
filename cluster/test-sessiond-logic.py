@@ -1480,6 +1480,53 @@ exit 0
     check("无法解析的时间 → bad_time(code 2)",
           not r.get("ok") and r["error"]["kind"] == "bad_time", str(r))
 
+    # ── 缺省 GRES：省略 = 用**这个插件的**默认；显式 `null` = 不占 ─────────────
+    #
+    # ★★ 这一格与 cpus / mem / time 同一条纪律（"省略字段永远是在说『用你的
+    #    默认』"），但它多一层，而那一层不是可选的：站点的默认卡**必须能被拒绝**。
+    #    少了它，`default_gpus` 就是一道用户无法拒绝的命令 —— 而"开发会话默认占住
+    #    A6000 的卡"是**稀缺算力政策**，管理员拍的是"默认"，不是"任何人都不许说不"。
+    #
+    #    ★ 判据是「这个键**在不在**」，不是「这个键是不是空的」：`clean_gres(None)`
+    #      返回 `(None, None)`，所以"没发"与"显式 null"在**下游**长得一模一样 ——
+    #      分得开它们的只有 `"gres" in req` 这一句。这也是为什么三条都要走
+    #      **提交那条线**（只判 `PluginConfig` 的字段，这一句一个字都测不到）。
+    #
+    #    ★ 用的是**不带型号**的 `gpu:1`：桩里的三个分区都有 `gpu`，而带型号的
+    #      （`gpu:a100`）只在 A6000 上有 —— 而分区是随机挑的，用它这条用例会时灵
+    #      时不灵。夹具要能**稳定地**回答它要问的那个问题。
+    def _gres_of(resp):
+        """响应里**实际生效**的那个 GRES（`data.resources.gres`）。
+
+        ★ 键与值分开返回：`"gres" in …` 是"服务端说了这件事"，`…["gres"] is None`
+          是"它说不占"。两者都取不到时（响应整个失败）返回 `("缺", None)`，让上面
+          那条断言红掉，而不是在 `check(...)` 的参数里抛 KeyError 把脚本带崩。
+        """
+        res = ((resp.get("data") or {}).get("resources") or {})
+        return ("gres" in res), res.get("gres")
+
+    _cs_id = cfg.resolve_plugin(CS)[0].id
+    _saved_dg = cfg.plugins[_cs_id].default_gpus
+    cfg.plugins[_cs_id].default_gpus = {"name": "gpu", "type": None, "count": 1}
+    try:
+        r, _sess, _env = run_submit({"op": "submit"})
+        _has, _g = _gres_of(r)
+        check("★★ 提交时省略 gres ⇒ 用**这个插件块里**的 default_gpus",
+              _has and _g == {"name": "gpu", "type": None, "count": 1},
+              str(r)[:200])
+        r, _sess, _env = run_submit({"op": "submit", "gres": None})
+        _has, _g = _gres_of(r)
+        check("★★ 但**显式 `null` ⇒ 不占**，盖过插件的默认 —— 用户拒绝得了它",
+              _has and _g is None, str(r)[:200])
+        r, _sess, _env = run_submit({"op": "submit",
+                                     "gres": {"name": "gpu", "count": 2}})
+        _has, _g = _gres_of(r)
+        check("★ 显式给了 ⇒ 就用它（默认只在**省略**时生效）",
+              _has and _g == {"name": "gpu", "type": None, "count": 2},
+              str(r)[:200])
+    finally:
+        cfg.plugins[_cs_id].default_gpus = _saved_dg
+
     # ★ 权限查不到时的两条路径必须【不同】：
     #   显式点名了分区 → fail-closed（用户表达了意图，沉默地落到别处更糟）；
     #   没点名 → 退化为不带 -p，交给 Slurm 的 association 兜住。
@@ -2041,7 +2088,8 @@ exit 0
     check("★ 它的配置块允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
           _jup.block_keys() == ("enabled", "default_cpus", "default_mem",
-                                "default_time", "bin", "token_mode"),
+                                "default_time", "default_gpus",
+                                "bin", "token_mode"),
           str(_jup.block_keys()))
     # ★★ 清单声明的时限是**规范化之后**存下来的（`3:30:00` → `03:30:00`）。
     #   规范化只在解析这一处做，下游（协议、界面、自检）就不必各自处理"同一段
@@ -2245,6 +2293,26 @@ exit 0
           _c.plugin_config(SSHD).default_time == "02:00:00",
           str(_c.plugin_config(SSHD).default_time))
 
+    # ── `default_gpus`：**只在块里** ────────────────────────────────────────
+    #
+    # ★ 它与上面几格**不同**：清单里**没有**对应的键，而那是刻意的 —— 作者写不出
+    #   本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100` 还是 `A100-PCIE-40GB`），
+    #   那是本站在 `gres.conf` 里定的事实。所以"作者声明缺省卡数"这一格**不该有**，
+    #   不是"还没做"（见账本 F15 的去向）。
+    _c = pcfg("[plugin:sshd]\ndefault_gpus = gpu:a100:2\n")
+    check("★ 块里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
+          _c.plugin_config(SSHD).default_gpus == {"name": "gpu", "type": "a100",
+                                                  "count": 2},
+          repr(_c.plugin_config(SSHD).default_gpus))
+    check("★ 不带型号的那一段形状也认（与 sbatch 同一条语法）",
+          pcfg("[plugin:sshd]\ndefault_gpus = gpu:4\n")
+          .plugin_config(SSHD).default_gpus == {"name": "gpu", "type": None,
+                                                "count": 4})
+    check("★★ 没写 ⇒ **不占**（None，而不是一个「安全的数量」）—— 默认占住稀缺"
+          "算力是**站点政策**，框架不替所有站点挑一个数",
+          _c.plugin_config(CS).default_gpus is None,
+          repr(_c.plugin_config(CS).default_gpus))
+
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
     check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
           _c.enabled_kinds == (CS, SSHD),
@@ -2362,7 +2430,15 @@ exit 0
             ("[plugin:sshd]\ndefault_time = unlimited\n", "default_time 写成「无限」",
              "default_time"),
             ("[plugin:sshd]\ndefault_time = 两小时\n", "default_time 认不出",
-             "default_time")):
+             "default_time"),
+            ("[plugin:sshd]\ndefault_gpus = gpu:a100\n",
+             "default_gpus 缺数量（写成了名字:型号）", "数量必须是整数"),
+            ("[plugin:sshd]\ndefault_gpus = gpu:1,mps:2\n",
+             "default_gpus 写了两项", "只能写一项"),
+            ("[plugin:sshd]\ndefault_gpus = gpu:0\n",
+             "default_gpus 的数量是 0", "count"),
+            ("[plugin:sshd]\ndefault_gpus = gpu:1:2:3\n",
+             "default_gpus 段数不对", "无法识别")):
         try:
             _errs = " ".join(pcfg(_txt).validate())
         except ValueError as _ex:
@@ -2570,6 +2646,16 @@ exit 0
           _by[CS]["defaults"].get("time") == mod.DEFAULT_TIME
           and _by[SSHD]["defaults"].get("time") == mod.DEFAULT_TIME,
           str({k: v.get("defaults") for k, v in _by.items()}))
+    # ★ GRES 那一格是**描述符或 null**（与 `submit` 的 `gres` 同一形状），不是数字：
+    #   `null` = 本站没给这个插件配默认卡，那是**确定的事实**，而"这个键整个不在"
+    #   = 老守护进程。三态，与 `can_submit` / `problems` 同一条。
+    #   ★ 用 `.get` 取值：把这一格拿掉时，直接下标会让 `check(...)` 的**参数**先抛
+    #     KeyError，整份脚本崩在那一行 —— 那时"变异被发现了"与"用例自己坏了"
+    #     在输出上分不开。
+    check("★ defaults 里也有 gpus，且没配时是 `null`（不是缺键、不是 0）",
+          _by[CS]["defaults"].get("gpus", "缺") is None
+          and _by[SSHD]["defaults"].get("gpus", "缺") is None,
+          str({k: v.get("defaults") for k, v in _by.items()}))
     check("enabled 如实反映站点决定（sshd 默认关着）",
           _by[CS]["enabled"] is True
           and _by[SSHD]["enabled"] is False,
@@ -2578,6 +2664,112 @@ exit 0
           SSHD in _by)
     check("★ 不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
           all("name" in p and "title" in p for p in _by.values()))
+
+    # ── 19.5g ★★ `default_gpus` 与「本站实际有的」对账（账本 F15 的去向）──────
+    #
+    # 判据是「**配置块里**声明的资源」vs「本站的实际目录」，不是"插件清单里声明的"：
+    # 作者写不出本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100` 还是
+    # `A100-PCIE-40GB`），那是本站在 `gres.conf` 里定的事实 —— 所以那一格**只在
+    # 块里**，而它必须有人对账：一个本站没有的卡名，症状是"这个插件的会话永远
+    # 提交不了"，而提交期那句话（`bad_gres`）要等用户点下去才说。
+    #
+    # ★ 四态都在这里（对得上 / 对不上 / 没配 / 目录查不到），而**"它接没接到
+    #   `--check` 上"由下一节那条端到端钉住** —— 只判这个函数的话，把 --check 里
+    #   那一行删掉，全绿（F35 的形状：算出来了没送出去）。
+    class _P(object):
+        def __init__(self, name, g):
+            self.name = name
+            self.default_gpus = g
+            self.spec = type("_S", (), {"id": "01M2JKHTZGKJBFQQTWYXMQMF2V"})()
+
+    _cat = {"A6000": [{"name": "gpu", "type": "a100",
+                       "per_node_max": 2, "total": 4}],
+            "RTX8000": [{"name": "gpu", "type": None,
+                         "per_node_max": 4, "total": 4},
+                        {"name": "mps", "type": None,
+                         "per_node_max": 100, "total": 100}]}
+
+    _bad = mod.plugin_gres_problems(
+        [_P("ide", {"name": "gpu", "type": "h100", "count": 1})], _cat)
+    check("★ 本站没有这种资源 ⇒ 一条 ⚠，而且**点名本站有什么**"
+          "（管理员据此改那一行，而不是去猜）",
+          len(_bad) == 1 and "gpu:h100" in _bad[0]
+          and "gpu:a100" in _bad[0] and "mps" in _bad[0], str(_bad))
+    _big = mod.plugin_gres_problems(
+        [_P("ide", {"name": "gpu", "type": "a100", "count": 3})], _cat)
+    check("★ 名字对得上、数量超过每节点上限 ⇒ 也是一条（现在就说，不等提交时）",
+          len(_big) == 1 and "3" in _big[0] and "2" in _big[0], str(_big))
+    check("★ 对得上 ⇒ **一条都没有**（这一格不该有噪音）",
+          mod.plugin_gres_problems(
+              [_P("ide", {"name": "gpu", "type": "a100", "count": 2})], _cat) == [])
+    check("★ 没配 ⇒ 一条都没有（不写 = 不占，没什么可对）",
+          mod.plugin_gres_problems([_P("ide", None)], _cat) == [])
+    # ★★ 目录查不到（`scontrol` 挂了）⇒ **一个字都不说**：与 `fit_gres()` 同一条
+    #    fail-open。一次控制器抖动不该让自检说一句它并不确定的话 —— 而"报了但其实
+    #    没事"正是这个项目一路在清的那种噪音。
+    check("★★ 目录查不到 ⇒ 不报（fail-open，与 fit_gres 同一条；"
+          "反过来的话一次控制器抖动会让自检满屏假警报）",
+          mod.plugin_gres_problems(
+              [_P("ide", {"name": "gpu", "type": "h100", "count": 1})], None) == [])
+
+    # ── 19.5h ★★ 那条 ⚠ **真的接到了 `--check` 上**（不是只算出来）──────────
+    #
+    # ★★ F35 的教训：算出来了、没送出去，**任何变异都打不红**。上面一节判的是
+    #    `plugin_gres_problems()` 的**返回值**；这一条判的是"它有没有被打印出来"。
+    #    少了这一条，把 `--check` 里那一行删掉，全绿。
+    #
+    # ★ 这里**真的起一个子进程**跑 `--check`（不是调函数）：这条路的全部价值就在
+    #   "管理员敲那条命令时看得见"，而中间隔着 Config、validate、几处 slurm 查询
+    #   与一堆 print —— 只判函数的话，那一段一个字都没被执行到。
+    #
+    # ★ 假安装前缀：`default_plugins_dir()` 是从**守护进程自身的路径**推出来的
+    #   （`<prefix>/sbin/…` → `<prefix>/share/slurmate/plugins`），而它**不是**
+    #   配置项 —— 所以造一个假 prefix 是唯一能在用例里喂它一份插件表的办法。
+    #   命令桩放在**另一个**目录，只进 PATH：`sbin/` 里多一个文件不会影响推导
+    #   （它只看 `__file__`），但那两件事不该混在一个目录里，读的人会以为有关。
+    _eprefix = os.path.join(tmpdir, "check-prefix")
+    _ebin = os.path.join(_eprefix, "sbin")
+    _eplug = os.path.join(_eprefix, "share", "slurmate", "plugins")
+    _epath = os.path.join(_eprefix, "bin")
+    for _d in (_ebin, _eplug, _epath):
+        os.makedirs(_d, exist_ok=True)
+    shutil.copyfile(DAEMON, os.path.join(_ebin, "slurmate-sessiond"))
+    for _cmd in ("sbatch", "scancel", "squeue", "sacctmgr",
+                 "sinfo", "sshare", "sacct"):
+        write_stub(os.path.join(_epath, _cmd), "exit 0\n")
+    # `show node -o` 是 GRES 的**唯一**来源；`show config` 那条决定 sbatch 要不要 -A。
+    write_stub(os.path.join(_epath, "scontrol"),
+               'case "$*" in\n'
+               '  *"show node"*)\n'
+               '    echo "NodeName=n1 NodeAddr=192.0.2.11 State=IDLE'
+               ' Gres=gpu:a100:2 Partitions=A6000" ;;\n'
+               'esac\n')
+    put_package(_eplug, [("plugin.json", json.dumps({
+        "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "sshd",
+        "version": "1.0.0",
+        "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
+    _econf = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                        "range_start = 55001\nrange_end = 55099\n"
+                        "[plugin:sshd]\nenabled = yes\n"
+                        # ★ 本站只有 `gpu:a100`，这里故意写一个没有的型号。
+                        "default_gpus = gpu:h100:1\n", "check-gres.conf")
+    _er = subprocess.run(
+        [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
+         "--check", "--config", _econf],
+        capture_output=True, text=True,
+        env=dict(os.environ,
+                 PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
+    check("★★ `--check` 真的把那条 ⚠ 打出来了（算出来了**也**送出去了）",
+          "gpu:h100" in _er.stdout and "[plugin:sshd]" in _er.stdout,
+          "rc=%s\n%s\n--- stderr ---\n%s"
+          % (_er.returncode, _er.stdout[-700:], _er.stderr[-300:]))
+    check("★★ 而且**点名本站有什么** —— 管理员照这一行改，不用去猜",
+          "gpu:a100" in _er.stdout,
+          _er.stdout[-700:])
+    check("★ 它是 ⚠ 而**不是**启动错误：`--check` 照常以 0 退出"
+          "（一个插件的这一行不该让整个站点起不来）",
+          _er.returncode == 0,
+          "rc=%s\n%s" % (_er.returncode, _er.stderr[-400:]))
 
     # 19.5d ★★ 插件目录的形状（跨语言契约，重定义为"两边读的是同一份东西"）
     #

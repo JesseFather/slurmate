@@ -65,7 +65,7 @@ const hosts = require('./hosts.js');
 //   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
 const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
-const { gresLabel } = require('./gres.js');
+const { gresLabel, gresText } = require('./gres.js');
 const { sessionStateText } = require('./sessionstate.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
@@ -1045,6 +1045,13 @@ function pluginsView() {
       // 【省略】cpus/mem 让服务端填当下那份默认值 —— 不是把这两个数字发回去。
       // 回发旧值的客户端会把管理员的改动**永远钉死**。拿不到就是 null，不编一个。
       defaults: (s && s.defaults) || null,
+      // ★ GRES 那一格要过**客户端唯一的那处拼法**（`gres.js` 的 `gresText`）——
+      //   与 `session.js` 给会话快照加 `gresText` 走同一条路（见 `renderKv` 那句
+      //   注释）。少了这一步，界面要么自己拼一个 `name:type × n`（那是第二个拼法），
+      //   要么显示一个裸对象。
+      //   ★ `null` = 没配 / 没要（**确定的事实**），`undefined` 那一格不来 = 老守护
+      //     进程（它没有 `defaults.gpus`）—— 两种都不说 GRES，理由与 cpus/mem 同。
+      defaultsGresText: gresText(s && s.defaults && s.defaults.gpus),
       // 能不能真的起一个会话 —— 三个条件都成立。界面画"启动"按钮时看这个。
       // 三个条件各有各的主语（站点 / 用户 / 站点的部署状态），所以界面上那三句
       // 解释也必须是三句不同的话。
@@ -4288,6 +4295,12 @@ function registerIpc() {
     //     window.slurmate.debug('plugin-problems', '…：这是一个目录，不是一个插件包…')
     //   传空数组清掉。给一个按钮就得有默认文案，而默认文案只能是编的。
     else if (what === 'plugin-problems') backend.debugPluginProblems(arg === undefined ? [] : [arg]);
+    // ★★ 站点给插件配的**默认 GRES**（`defaults.gpus`）。与上面那条同一个理由
+    //   没有按钮：真站点上它是**每个插件一份**的管理员声明，而假站点只有一份
+    //   全局的，编一个默认值就是演一个不存在的站点。
+    //     window.slurmate.debug('default-gpus', {name:'gpu', type:'a6000', count:1})
+    //   不传参数 = 清掉（"本站没配"）。
+    else if (what === 'default-gpus') backend.debugDefaultGpus(arg === undefined ? null : arg);
     // 站点报了一个超过单文件上限的文件 ⇒ 「站点支持分发，但这一份装不上」。
     else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。

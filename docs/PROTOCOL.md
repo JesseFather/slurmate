@@ -746,12 +746,14 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 {"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
               "name": "code-server", "title": "开发环境", "enabled": true,
               "can_submit": true,
-              "defaults": {"cpus": 2, "mem": "8G", "time": "12:00:00"},
+              "defaults": {"cpus": 2, "mem": "8G", "time": "12:00:00",
+                           "gpus": null},
               "package": {"format": 1, "bytes": 19416, "digest": "…"}},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
               "can_submit": false,
-              "defaults": {"cpus": 1, "mem": "2G", "time": "12:00:00"},
+              "defaults": {"cpus": 1, "mem": "2G", "time": "12:00:00",
+                           "gpus": {"name": "gpu", "type": null, "count": 1}},
               "package": {"format": 1, "bytes": 40000, "digest": "…"}}],
  "enabled": ["code-server"],
  "limits": {"file_bytes": 262144, "total_bytes": 1562251, "max_files": 256,
@@ -764,6 +766,13 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 >
 > ★ 注意 **`plugin.json` 自己也在包里** —— 站点分发发的是**整个包**，不是只挑
 > 客户端会执行的那一份。README 也一样会被发下去。
+>
+> ★★ **`defaults` 是「这个插件缺省给多少」的四个答案**，而它们是**同一件事的四个
+> 面**（客户端显示它们的地方也只有一个），所以不会各自漂：`cpus` / `mem` / `time`
+> 是标量，`gpus` 是**描述符或 `null`**（与 `submit` 的 `gres` 同一形状）。
+> `gpus: null` = 本站**确实没给**这个插件配默认卡（一个确定的事实），而"这一格
+> 整个不在" = 老守护进程（v0.11 之前没有 `time` / `gpus`）—— **三态，缺席 ≠ 否**，
+> 与 `can_submit` 同一条规矩。客户端不许给缺席的那一格补一个值。
 >
 > ★ `package` 里那三个数是**示意值**：本仓库那两个插件还没有包（要作者先
 > `packer init` / `keygen` / `build`，见 [plugins/README.md](../plugins/README.md)）。
@@ -933,7 +942,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `ssh_pubkey` | 一行公钥 | 清单里 `contributes.submitPubkey` 为真的插件**必填**，否则 `2 bad_ssh_pubkey` |
 | `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在 `[plugin:<名字>]` 块里覆盖；服务端钳制到 1–上限） |
 | `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
-| `gres` | **对象** `{name, type, count}` | 未给 = **完全省略** `--gres`（默认不占 GRES）。见下面的〈`gres`：一个结构化描述符〉 |
+| `gres` | **对象** `{name, type, count}`，或 **`null`** | **省略** = 用**该插件**的 `default_gpus`（站点在 `[plugin:<名字>]` 块里配的策略；它没配就是不占）。**显式 `null`** = 不占，**盖过**插件的默认。见下面的〈`gres`：一个结构化描述符〉 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
 | `time` | Slurm 时间 | **该插件**的 `site.defaultTime`（站点可在 `[plugin:<名字>]` 块里覆盖；三处都不写才是内建的 `12:00:00`）。超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断 |
 
@@ -1009,6 +1018,13 @@ GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型�
 > ★ **`resources` 里的 `gres` 是同一个描述符或 `null`。** `null` 有两条来路：
 > 没要，以及从 nft 规则恢复出来的会话（我们没写过它的命令行）—— 与 `cpus`/`mem`
 > 一样合并成同一个答案：这一行不说 GRES。
+
+> ★★ **「省略」与「`null`」在**请求**里是两件事，而在这个响应里合成了同一个答案。**
+> 省略 = 用该插件的 `default_gpus`（站点配的策略），`null` = 用户明确不要卡 ——
+> 分得开它们的只有 `"gres" in req` 那一句（`clean_gres(None)` 两条路都返回 `None`）。
+> 少了 `null` 这条出路，站点的默认卡就是一道用户**无法拒绝**的命令，而"开发会话
+> 默认占住 A6000 的卡"是**稀缺算力政策**：管理员拍的是"默认"，不是"谁都不许说不"。
+> （界面上的两项 ——「用插件的默认」与「不占 GRES」—— 就是这件事的两个落点。）
 
 ### `submit` 的错误
 
