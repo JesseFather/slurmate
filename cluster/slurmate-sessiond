@@ -1552,9 +1552,36 @@ GLOBAL_KEYS = frozenset([
 
 SECTION_PREFIX = "plugin:"
 
+# 安装器**自动生成**的配置块，块头**上一行**是这一行。它同时是两件事：
+#
+#   ① 给管理员看的一眼区分 ——「这一块是生成物」。他自己写的那一块不会有它；
+#   ② 给工具认边界 —— 只有带着它的块，`sync_plugin_config()` 才会去加/删。
+#      没有它的块是**管理员写的**，那个工具一个字节都不动（它凭什么删人家手写
+#      的东西？）。
+#
+# ★ 它必须与块头**紧挨着**（中间不能有空行）：判据是"上一行"，不是"附近有没有"。
+AUTO_BLOCK_MARK = "# slurmate:auto"
+
+
+def is_auto_block_mark(raw_line):
+    """这一行是不是那个边界标记。判据只有这一处。"""
+    s = raw_line.strip()
+    return s == AUTO_BLOCK_MARK or s.startswith(AUTO_BLOCK_MARK + " ")
+
 
 def parse_config(path):
-    """读配置，返回 `({站点通用键: 值}, {插件名: {块内键: 值}})`。
+    """读文件 → `parse_config_text()`。
+
+    ★ 分成两个函数是为了让 `sync_plugin_config()` 能**只读一遍**：它要拿同一段
+      文本既解析又重写。读两遍的话，两次之间的任何改动都会被"用旧内容覆盖新内容"
+      抹掉，而那是静默的。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        return parse_config_text(f.read())
+
+
+def parse_config_text(text):
+    """一段配置文本 → `({站点通用键: 值}, {插件名: {块内键: 值}}, {插件名: 块的元信息})`。
 
     两种行形态：
 
@@ -1568,47 +1595,80 @@ def parse_config(path):
     ★ 块一旦开始就没有回头路：块之后写的通用键会落进那个块，然后在块内键白名单
       那一步被拒。那一步的错误消息会点明「这是站点通用键，要写在块之前」——
       因为「把 cluster_cidr 追加到文件末尾」是个很容易犯、而症状完全指错方向的错。
+
+    ── 第三个返回值（元信息）────────────────────────────────────────────────
+    每块一条 `{"auto": 是不是安装器生成的, "start": 起行号, "end": 止行号}`
+    （1 起、闭区间）。给 `sync_plugin_config()` 用 —— 它要按行**整块**加/删。
+
+    ★ `end` 取的是**这个块最后一行 `键 = 值`**，不是"下一个块头之前的那一行"。
+      差别在一处，而它是"静默删掉管理员写的东西"：文件**末尾**那个块后面若跟着
+      一段注释（他写的笔记），按后者算就会把那段笔记连同块一起删掉。按前者算，
+      最后一行键之后的注释**不在块的范围内**，于是最坏也只是留下一段注释。
+      ★ 代价是：安装器生成的块里，**我们自己那些说明注释必须写在最后一行键的
+        上面**（见 `render_auto_block`）—— 这条约束在那一处写着。
     """
     global_out = {}
     sections = {}
     section_line = {}
+    section_auto = {}
+    section_end = {}                    # 块内**最后一行 `键 = 值`**
     cur = None                          # None = 全局段，否则是插件名
-    with open(path, "r", encoding="utf-8") as f:
-        for lineno, raw in enumerate(f, 1):
-            line = raw.split("#", 1)[0].strip()
-            if not line:
-                continue
-            if line.startswith("["):
-                if not line.endswith("]"):
-                    raise ValueError("第 %d 行：块头缺少闭合的 `]`: %r"
-                                     % (lineno, raw.strip()))
-                head = line[1:-1].strip()
-                if not head.startswith(SECTION_PREFIX):
-                    raise ValueError(
-                        "第 %d 行：认不出的块头 %r。本版只有 [plugin:名字] 一种块。"
-                        % (lineno, line))
-                name = head[len(SECTION_PREFIX):].strip()
-                if not name:
-                    raise ValueError("第 %d 行：块头里没有插件名: %r" % (lineno, line))
-                if name in sections:
-                    raise ValueError("第 %d 行：[plugin:%s] 出现了两次（第 %d 行"
-                                     "已经出现过）" % (lineno, name, section_line[name]))
-                sections[name] = {}
-                section_line[name] = lineno
-                cur = name
-                continue
-            if "=" not in line:
-                raise ValueError("第 %d 行不是 `键 = 值` 形式: %r" % (lineno, raw.strip()))
-            key, _, val = line.partition("=")
-            key = key.strip()
-            if not key:
-                raise ValueError("第 %d 行缺少键名: %r" % (lineno, raw.strip()))
-            target = global_out if cur is None else sections[cur]
-            where = "全局段" if cur is None else "[plugin:%s] 块" % cur
-            if key in target:
-                raise ValueError("第 %d 行：%s 里键 %r 重复出现" % (lineno, where, key))
-            target[key] = val.strip()
-    return global_out, sections
+    prev_raw = ""
+    # ★ `splitlines(keepends=True)`（不是直接迭代文件对象）是为了让"第 N 行"这个
+    #   编号对**改写它的人**也成立 —— `sync_plugin_config()` 要按同样的编号删行。
+    for lineno, raw in enumerate(text.splitlines(keepends=True), 1):
+        # ★ `prev_raw` 在**每一个**分支里都更新（空行、注释、块头、键行）。
+        #   判据是"块头的**上一行**"，不是"上面某处有没有那个标记"。
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            prev_raw = raw
+            continue
+        if line.startswith("["):
+            if not line.endswith("]"):
+                raise ValueError("第 %d 行：块头缺少闭合的 `]`: %r"
+                                 % (lineno, raw.strip()))
+            head = line[1:-1].strip()
+            if not head.startswith(SECTION_PREFIX):
+                raise ValueError(
+                    "第 %d 行：认不出的块头 %r。本版只有 [plugin:名字] 一种块。"
+                    % (lineno, line))
+            name = head[len(SECTION_PREFIX):].strip()
+            if not name:
+                raise ValueError("第 %d 行：块头里没有插件名: %r" % (lineno, line))
+            if name in sections:
+                raise ValueError("第 %d 行：[plugin:%s] 出现了两次（第 %d 行"
+                                 "已经出现过）" % (lineno, name, section_line[name]))
+            sections[name] = {}
+            section_line[name] = lineno
+            # 紧挨着的上一行（空行、注释行都算"隔开了"）。
+            section_auto[name] = is_auto_block_mark(prev_raw)
+            cur = name
+            prev_raw = raw
+            continue
+        if "=" not in line:
+            raise ValueError("第 %d 行不是 `键 = 值` 形式: %r" % (lineno, raw.strip()))
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key:
+            raise ValueError("第 %d 行缺少键名: %r" % (lineno, raw.strip()))
+        target = global_out if cur is None else sections[cur]
+        where = "全局段" if cur is None else "[plugin:%s] 块" % cur
+        if key in target:
+            raise ValueError("第 %d 行：%s 里键 %r 重复出现" % (lineno, where, key))
+        target[key] = val.strip()
+        if cur is not None:
+            section_end[cur] = lineno
+        prev_raw = raw
+    meta = {}
+    for name in sections:
+        hdr = section_line[name]
+        auto = section_auto[name]
+        meta[name] = {
+            "auto": auto,
+            "start": (hdr - 1) if auto else hdr,
+            "end": section_end.get(name, hdr),
+        }
+    return global_out, sections, meta
 
 
 def parse_yes_no(raw, default, what):
@@ -2225,8 +2285,17 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
     ③ **两个包不许同一个 id**（§6.4）。按 id 命名之后，两个同 id 的包**文件名
        本身就是 id** ⇒ 后装的那个**静默覆盖**前一个。它是这一次调用的内部检查
        （同一个包传两遍也算），因为跨次调用时后一次本来就是"替换"。
-    ④ **签名的验证与"谁签的"**（§4.1/§2.5）。见下面那两段。
-    ⑤ **整包大小**：装了也发不出去的包不装（`PLUGIN_PACKAGE_MAX_BYTES`）。
+       ★ **短名不在这一条里**（v0.11 阶段 2+3）：两个 id 不同、短名一样的包是
+       **允许并存**的 —— 短名只是本站给人看的名字，不是身份。从前这里把短名也
+       一起拒了，理由是"它同时是配置块名与作业侧函数名的后缀"，而那个理由**已经
+       不成立**：作业脚本是**一个插件一份**（`jobs/<id>.sbatch`），两份
+       `start_<短名>` 各在自己那一份里，谁也盖不着谁。配置那一侧的歧义改由
+       `resolve_plugin_spec()` 管（短名撞了就必须写 id）。
+       ★ 这里因此**只**判 id。跨次调用判不了短名撞 —— 那要知道**整个站点**装了
+       什么，而安装器手上只有这一次调用这一批。
+    ④ **同一个 id、同一个版本，内容不一样** ⇒ 拒绝（账本 **F36**）。见下面那段。
+    ⑤ **签名的验证与"谁签的"**（§4.1/§2.5）。见下面那两段。
+    ⑥ **整包大小**：装了也发不出去的包不装（`PLUGIN_PACKAGE_MAX_BYTES`）。
 
     ★ 第二遍里**钥匙记录先写、包后写**，那个次序是刻意的 —— 理由写在那一段。
     """
@@ -2248,7 +2317,6 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         return 1
     problems = []
     seen_id = {}
-    seen_name = {}
 
     for path in packages:
         bad = package_input_problem(path)
@@ -2278,8 +2346,11 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         if spec is None:
             problems.extend(probs)
             continue
-        # ③ §6.4：同 id（以及同短名）。两个都拒 —— 挑一个的后果是"哪个生效"
-        #    取决于命令行参数的先后，而那是没人会想到去查的地方。
+        # ③ §6.4：**同 id**。两个都拒 —— 挑一个的后果是"哪个生效"取决于命令行
+        #    参数的先后，而那是没人会想到去查的地方。
+        #
+        # ★ **短名撞不在这里**（v0.11 阶段 2+3）：那是允许并存的，理由见 docstring
+        #   的 ③。这一条因此只剩 id 一个判据 —— 而 id 就是身份。
         if spec.id in seen_id:
             problems.append(
                 "%s：id %s 与 %s 是同一个插件（§6.4 不许两个插件同 id）。\n"
@@ -2287,16 +2358,62 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
                 "而覆盖是静默的。"
                 % (path, spec.id, seen_id[spec.id]))
             continue
-        if spec.name in seen_name:
-            problems.append("%s：短名 %r 与 %s 里的那个重复了（短名要站点内唯一 ——"
-                            "它是配置块名，也是作业侧函数名的后缀）。两个都不装。"
-                            % (path, spec.name, seen_name[spec.name]))
-            continue
+        # ③b ★★ **同一个 id、同一个版本，内容不一样** ⇒ 拒绝（账本 F36）。
+        #
+        #   这是"替换"这条路上唯一还开着的一个静默口子。同 id 不同版本是**升级**
+        #   （上面那一屏会说"升级"还是"降级"），同 id 同版本同内容是无害的重装
+        #   —— 唯独**同版本不同内容**这一格：本站那一份被换掉了，而**已经取过旧
+        #   内容的客户端永远不会发现**。它们重新对账时核的是**本机那一份**
+        #   （`verifyStaged(dest, …)` + `o.trusted(...)` 用的都是本机算出来的
+        #   摘要），站点这次新报的摘要根本不参与那次比较 ⇒ 同一个版本号在两个
+        #   用户那里是两个不同的东西，而两边都叫 1.0.0。
+        #
+        #   ★ 判据是**内容摘要**（§3.4 那个，签名盖的就是它），不是容器字节的
+        #     sha256 —— 补一个签名块会让容器字节变而摘要不变，那是**同一个构件**。
+        dst = os.path.join(plugins_dir, spec.id + PLUGIN_PACKAGE_SUFFIX)
+        if os.path.isfile(dst):
+            old = package_read_file(dst)
+            # ★ 包解析成功时 `manifest` 已经是解好的对象（`package_parse` 就把它
+            #   解了 —— 解不动的话 `ok` 已经是 False）。所以这里**不再** json.loads
+            #   一次：多解一遍就多一处会抛的地方，而它抛出来的异常会变成一句
+            #   与"装不装"无关的 traceback。
+            _oldver = (old["manifest"].get("version")
+                       if old["ok"] and isinstance(old.get("manifest"), dict)
+                       else None)
+            if not old["ok"] or not isinstance(_oldver, str):
+                # 比不了。此时**放行**并说一句：盘上那一份读不动只可能是一份坏掉
+                # 的安装，而"重装一遍"正是修它的动作 —— 在这里拦住会把唯一的出路
+                # 也堵上。★ 说一句是必须的：不说的话，"比不了"与"比过了、一样"
+                # 在输出上长得一样，而那正是这一节要防的形状。
+                say("  ⚠ %s：盘上已经有一个 %s，但它读不出来（%s）—— 没法比内容，"
+                    "这一份会**覆盖**它。"
+                    % (os.path.basename(path), os.path.basename(dst),
+                       old["code"] if not old["ok"] else "清单里没有 version"))
+            elif _oldver == spec.version and old["digest"] != r["digest"]:
+                problems.append(
+                    "%s：本站已经有 **%s 这个版本**的另一份内容。\n"
+                    "        id        %s\n"
+                    "        版本      %s\n"
+                    "        盘上那份  内容摘要 %s\n"
+                    "        这一份    内容摘要 %s\n"
+                    "        （盘上那份在 %s）\n"
+                    "        不装：客户端按 **(id, 版本)** 记住自己取过哪个包 —— "
+                    "已经取过旧内容的用户\n"
+                    "        **永远不会发现换过**（它们重新对账时核的是**本机**那一份，"
+                    "本站新报的摘要\n"
+                    "        不参与那次比较），于是同一个版本号在两个人那里是两个"
+                    "不同的东西。\n"
+                    "        两条路，看你确认了哪一条：\n"
+                    "          · 让作者**升版本号**再发 —— 内容变了，版本就该变，这是对的；\n"
+                    "          · 你确认就是要**就地换掉**它 ⇒ 先把 %s 删掉，再装这一份。\n"
+                    "            ★ 那条路只修得了本站：已经取过旧内容的客户端仍然是旧的。"
+                    % (path, spec.version, spec.id, spec.version,
+                       old["digest"], r["digest"], dst, dst))
+                continue
         seen_id[spec.id] = path
-        seen_name[spec.name] = path
         plan.append((path, r, spec))
 
-    # ④ 签名：验，以及"与上一次是同一把吗"。
+    # ⑤ 签名：验，以及"与上一次是同一把吗"。
     #
     #    ★ 两件事**分开**，别把它们并成一条：
     #      · 验签回答"这个包与那把钥匙自洽吗" —— 它挡的是**传输损坏**与**就地
@@ -2457,6 +2574,209 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
     return 0
 
 
+# ==============================================================================
+#  让配置里的插件块与插件目录对齐（`slurmate plugin sync` / deploy.sh）
+# ==============================================================================
+#
+#   ★★ 为什么是**一次对账**，而不是"装的时候插一块、卸的时候删一块"：
+#
+#     · 卸载**根本不经过安装器**。deploy.sh 的卸载是"源目录里没有了 ⇒ 按上一次
+#       的标记把包删掉"（`.installed` 那个文件），而"源目录空到没有 .splug"时
+#       它**连 `--install-plugins` 都不调**（那样连一个包都传不进来）。所以在
+#       安装器里挂钩子，**结构上**就盖不住"全卸光"这一格。
+#     · 管理员也可以直接 `rm` 一个 `.splug`。那是最自然的卸载动作。
+#
+#     于是"谁被卸载了"这个知识**不是一个事件**，而是一个**状态**：目录里现在
+#     有什么，配置里就该有什么。对账拿状态判，一次覆盖全部路径，而且**幂等**
+#     —— 跑两遍与跑一遍的结果逐字节相同。
+#
+#   ★ 判据只有一条：**配置里的插件块集合要等于插件目录里的插件集合**。
+#     但"删"只对**安装器自己生成的**那些块做（认边界标记，见 AUTO_BLOCK_MARK）：
+#     管理员手写的块不是我们的东西，凭什么替他删？（他写错的那一条，`--check`
+#     会照常当硬错误报出来。）
+#
+#   ★★ 生成物**不改变任何行为**：块里 `enabled` 写的是插件清单声明的缺省
+#     （见 render_auto_block），别的项全是注释。所以"给一个零配置的站点补上索引"
+#     这件事，装前装后 `--check` 报的生效值一模一样。
+#
+#   ★ 写的是**同一个文本**：读一遍 → 拿它解析 → 拿它重写。读两遍的话，
+#     两次之间的任何改动都会被"用旧内容覆盖新内容"抹掉，而那是静默的。
+
+
+def spec_block_defaults(spec):
+    """这个插件块里**除 `enabled` 外**的各项缺省值，渲染成注释用：`[(键, 值文本)]`。
+
+    ★ `bin` **不在**里面，理由不是省事：它的缺省取决于**计算节点**上有没有那个
+      文件，而这里只能问**登录节点**（`shutil.which`）。把登录节点上查到的路径
+      写进配置，正好是 `PluginConfig` 里那段说明要防的事。
+    """
+    out = [("default_cpus", str(spec.default_cpus)),
+           ("default_mem", str(spec.default_mem))]
+    for key, _choices, default in spec.enum_keys:
+        out.append((key, str(default)))
+    return out
+
+
+def _write_text_atomic(path, text, mode=None, uid_gid=None):
+    """原子地把文本写回 `path`（同目录临时文件 + rename）。失败抛 OSError。
+
+    ★ 模式与属主**照原样留着**：站点配置是 root 拥有的 0644，而 `os.replace`
+      换的是一个新 inode —— 不显式带过去的话，一次"同步插件块"会把配置文件变成
+      跑它的那个进程的默认模式。**没有比这更好的例子**说明"顺手写一个文件"能
+      捅多大的篓子：改了权限的配置，守护进程下次读它可能就直接失败了。
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".slurmate-conf-", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        if uid_gid is not None:
+            try:
+                os.chown(tmp, uid_gid[0], uid_gid[1])
+            except OSError:
+                pass                    # 非 root 跑不动 chown；模式那一条已经保住
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
+    """把配置里**安装器生成的**那些块，与插件目录里实际装着的插件对齐。返回退出码。
+
+    做两件事（都只碰带边界标记的块）：
+
+      · 目录里**没有**的插件，却有一块**安装器生成的**块 ⇒ **整块删掉**
+        （含管理员在块里改过的行）。★ 这**不是可选的**：块留着就指向一个不存在
+        的插件，而那是**启动错误** —— 守护进程会拒绝起来，连"停掉正在跑的会话"
+        都做不到。
+      · 目录里**有**的插件，而配置里**没有任何**指向它的块 ⇒ 在**文件末尾**
+        追加一块（`render_auto_block`）。★ 只能落在末尾：`parse_config` 要求
+        站点通用键写在所有块之前，块一旦开始就没有回头路。
+
+    **幂等**：第二次跑什么都不做（"已经一致"）。
+
+    ★ 它不做的事，同样重要 —— 每一条都**说一句**，因为"没做"与"没什么可做"在
+      输出上长得一样：
+        · 手写的块指向一个没装的插件 ⇒ **不删**，报 ⚠（`--check` 会当硬错误拦下）；
+        · 已有的块（手写的，或者上一次生成的）⇒ **一个字都不动**
+          —— 「升级不能乱变」：管理员调过的 `enabled` / `bin` / 默认资源必须原样
+          留着，而生成器没有任何依据知道哪些行是他改的；
+        · 两个块指着同一个插件 ⇒ 报 ⚠（这是 `--check` 的硬错误，见
+          `duplicate_block_problem`），不去猜他想留哪一块。
+    """
+    specs, dir_problems = scan_plugins(plugins_dir)
+    by_id, by_name = plugin_indexes(specs)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        say("✗ 配置文件 %s 不存在 —— 没有它就没有索引块可言。" % path)
+        say("  先跑一次 cluster/deploy.sh（它会从 slurmate.conf.example 装一份）。")
+        return 1
+    except OSError as e:
+        say("✗ 配置文件 %s 读不出来：%s（要以 root 跑吗？）" % (path, e))
+        return 1
+
+    try:
+        _global, sections, meta = parse_config_text(text)
+    except ValueError as e:
+        say("✗ 配置文件里有一处读不动，所以没法对齐：%s" % e)
+        say("  **一个字节都没有写。** 先把它修好（`slurmate-sessiond --check` 会列全）。")
+        return 1
+
+    for p in dir_problems:
+        say("  ⚠ 插件目录里有一条读不动的：%s" % str(p).split("\n")[0])
+
+    # ── 现在是什么状态 ──────────────────────────────────────────────────────
+    blocks_of = {}                      # id → [块名, …]
+    stray_manual = []                   # 手写的、指向没装插件的块
+    for name in sorted(sections):
+        spec, why = resolve_plugin_spec(by_id, by_name, name, plugins_dir)
+        if spec is None:
+            if meta[name]["auto"]:
+                continue                # 下面按 to_delete 处理
+            stray_manual.append((name, why))
+            continue
+        blocks_of.setdefault(spec.id, []).append(name)
+
+    to_delete = [n for n in sorted(sections)
+                 if meta[n]["auto"]
+                 and resolve_plugin_spec(by_id, by_name, n, plugins_dir)[0] is None]
+    to_add = [s for s in sorted(specs, key=lambda s: (s.name, s.id))
+              if s.id not in blocks_of]
+
+    for name, why in stray_manual:
+        say("  ⚠ [plugin:%s] 指的是一个本站没有装的插件，而它**不是安装器生成的**"
+            "（上面没有 `%s` 那行标记）——" % (name, AUTO_BLOCK_MARK))
+        say("    这个工具不替你删手写的块。%s" % why)
+    for _id, names in sorted(blocks_of.items()):
+        if len(names) > 1:
+            say("  ⚠ [plugin:%s] 与 [plugin:%s] 指的是**同一个插件**（id %s）——"
+                % (names[0], names[1], _id))
+            say("    守护进程会因此**拒绝启动**（配置自相矛盾）。删掉其中一块，"
+                "这个工具不去猜你想留哪一块。")
+
+    if not to_delete and not to_add:
+        say("配置 %s 里的插件块与插件目录 %s 已经一致。" % (path, plugins_dir))
+        say("  装着的插件：%s" % ("、".join("%s（id %s）" % (s.name, s.id)
+                                            for s in sorted(
+                                                specs, key=lambda s: (s.name, s.id)))
+                                   or "（一个都没有 —— 合法状态）"))
+        return 0
+
+    if dry_run:
+        for n in to_delete:
+            say("  [演练] 会删掉 [plugin:%s]（第 %d-%d 行，安装器生成的）"
+                % (n, meta[n]["start"], meta[n]["end"]))
+        for s in to_add:
+            say("  [演练] 会在文件末尾加一块 [plugin:%s]" % s.name)
+        return 0
+
+    lines = text.splitlines(keepends=True)
+    drop = set()
+    for n in to_delete:
+        drop.update(range(meta[n]["start"], meta[n]["end"] + 1))
+    out = [ln for i, ln in enumerate(lines, 1) if i not in drop]
+
+    if to_add:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        for s in to_add:
+            out.append("\n")
+            out.append(render_auto_block(s, s.default_enabled,
+                                         spec_block_defaults(s)))
+
+    try:
+        st = os.stat(path)
+    except OSError:
+        st = None
+    try:
+        _write_text_atomic(
+            path, "".join(out),
+            mode=(st.st_mode & 0o7777) if st else None,
+            uid_gid=(st.st_uid, st.st_gid) if st else None)
+    except OSError as e:
+        say("✗ 写 %s 失败：%s（要以 root 跑吗？）" % (path, e))
+        say("  **它没有被改动**（写的是同目录的临时文件，没换成）。")
+        return 1
+
+    for n in to_delete:
+        say("  删掉了 [plugin:%s]（那个插件已经不在插件目录里了）" % n)
+    for s in to_add:
+        say("  加了一块 [plugin:%s]（enabled = %s —— 这个插件自己声明的缺省）"
+            % (s.name, "yes" if s.default_enabled else "no"))
+    say("配置 %s 已与插件目录对齐。改完记得 systemctl restart slurmate-sessiond。"
+        % path)
+    return 0
+
+
 class PluginConfig(object):
     """一个插件的**生效配置**：元数据（PluginSpec）+ 站点在它的块里写的东西。
 
@@ -2579,7 +2899,143 @@ def build_plugin_configs(specs, blocks):
     return out
 
 
-def section_names_problem(sections, resolve):
+def plugin_indexes(specs):
+    """`[PluginSpec]` → `(id → spec, 短名 → [spec, …])`。**两张表，别合并**。
+
+    ★★ 名字那一侧必须是**一对多**：v0.11 起不同 id 同名的插件允许并存（短名只是
+      本站给人看的名字，id 才是身份）。用 `{s.name: s}` 收的话，后一个会**静默
+      盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
+
+    ★ 两个调用方（`Config` 与 `sync_plugin_config`）都用它，所以表的形状只有一份
+      定义。`resolve_plugin_spec()` 是"名字 → 具体哪一个"的唯一判据，别处不要再
+      写一遍：同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
+    """
+    by_id = {s.id: s for s in specs}
+    by_name = {}
+    for s in specs:
+        by_name.setdefault(s.name, []).append(s)
+    return by_id, by_name
+
+
+def resolve_plugin_spec(by_id, by_name, key, plugins_dir):
+    """把一个**用户写得出来的名字**解析成一个 `PluginSpec`。
+
+    `key` 是 `[plugin:<key>]` 里的那个 key，或者提交时的 `service_kind`。
+    返回 `(spec, why)`：认得出时 `why` 是 `None`；否则 `spec` 是 `None`，
+    而 `why` 是一句**能直接念给用户听**的话。
+
+    ★ 两种写法都收：
+      · **短名** —— 本站内给人看的名字（配置块名与 `service_kind` 都是它）；
+      · **id** —— 那个铸造出来、永不变的标识符。
+
+    ★★ 短名**不再是唯一的**（不同 id 同名允许并存），所以短名只在**本站只有
+      一个**插件用它时才算数；有歧义时**要求写 id**，并把是哪几个列出来 ——
+      挑一个的后果是"哪个生效"取决于遍历次序，而那是没人会想到去查的地方。
+
+    ★ 一个插件都没装时那句话要说**安装**，不是"名字写错了"：那是两种完全不同
+      的行动（去装一个 vs 去改一个字），而它们在配置里长得一模一样。
+
+    ★★ **这是"名字 → 具体哪一个"的唯一判据。** 别处不要再写一遍。
+    """
+    if not key:
+        return None, "名字是空的。"
+    spec = by_id.get(key)
+    if spec is not None:
+        return spec, None
+    same = by_name.get(key) or []
+    if len(same) == 1:
+        return same[0], None
+    if len(same) > 1:
+        return None, (
+            "%r 是本站**几个**插件共用的短名，所以它认不出你指的是哪一个 —— "
+            "请改用**插件的 id**（那一个永远是唯一的）：%s"
+            % (key, "、".join("%s（id %s）" % (s.title or s.name, s.id)
+                              for s in sorted(same, key=lambda s: s.id))))
+    if not by_id:
+        return None, (
+            "本站**一个插件都没装**，所以任何名字都配不上。插件安装目录 %s "
+            "是空的。（装插件是把一个 .splug 包放进去、再跑一次 deploy.sh，"
+            "见 plugins/README.md。）" % plugins_dir)
+    # ★ 那句话必须说清"装插件"是**放一个包**，不是"放一个目录" —— 它是管理员
+    #   唯一会照着做的那句，说错对象等于把他指到一个不存在的动作上。
+    return None, ("本站没有装叫 %r 的插件。装了的是：%s。"
+                  "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录 "
+                  "%s、再跑一次 deploy.sh，见 plugins/README.md。）"
+                  % (key, "、".join(sorted(by_name)) or "（一个都没有）",
+                     plugins_dir))
+
+
+def duplicate_block_problem(sections, resolve):
+    """**两个块指向同一个插件** ⇒ 错误串。空 = 没问题。
+
+    ★★ 短名与 id 都能当地址（`[plugin:jup]` 与 `[plugin:<那个 jup 的 id>]`），
+      所以"同一个插件被配了两遍"这件事**今天到得了**：两个块名各自都解析得通，
+      而它们是同一个东西。合并时**后一个静默盖掉前一个** —— 管理员改的那一块
+      可能一个字都没生效，而配置里没有任何迹象。
+
+    ★ 用户 2026-10-06 对"配置自相矛盾"的拍板：**像别的软件那样拒绝启动并给出
+      原因**，不许擅自挑一个、更不许擅自改内容。所以它进 `validate()`。
+
+    ★ 报错要**同时点名那两个块头**（`[plugin:jup]` 与 `[plugin:01M2…]`）——
+      只说"重复了"的话，用 id 写的那个根本认不出自己是哪一个。
+    """
+    seen = {}                           # id → 第一个块名
+    errors = []
+    for name in sorted(sections):
+        spec, _why = resolve(name)
+        if spec is None:
+            continue                    # 块名本身就不对，那条错误已经报过了
+        if spec.id in seen:
+            first = seen[spec.id]
+            errors.append(
+                "[plugin:%s] 与 [plugin:%s] 指的是**同一个插件**（id %s）——"
+                "同一份配置里配了两遍。删掉其中一块。\n"
+                "        ★ 不许挑一个用：两块里可能有一块是管理员改过的，"
+                "挑错哪一块都是静默的（改的东西一个字都没生效，而配置里看不出"
+                "任何迹象）。"
+                % (first, name, spec.id))
+            continue
+        seen[spec.id] = name
+    return errors
+
+
+def render_auto_block(spec, enabled, commented):
+    """安装器为**没有块**的插件生成的配置块（一整段文本，末尾带换行）。
+
+    ★★ 块里第一行是**边界标记**（`AUTO_BLOCK_MARK`），它紧挨着块头上面 ——
+      只有带它的块，`sync_plugin_config()` 才会去删。判据只有这一处（见
+      `is_auto_block_mark`）。
+
+    ★★ 说明注释**必须写在最后一行键的上面**：`parse_config` 给的块范围止于
+      "最后一行 `键 = 值`"（那样才不会连带删掉管理员写在块后面的注释），
+      所以键之后的注释会**留在原地**成为一个孤儿。这条约束是硬的。
+
+    ★★ `enabled` 写的是**插件自己声明的缺省**（`site.defaultEnabled`），不是
+      写死的 `no`。写死 `no` 是一处**静默的行为改变**：一个"一个块都没写"的
+      站点本来靠清单缺省开着的插件（code-server 就是），会在装完第一次
+      deploy.sh 之后**悄悄关掉** —— 那正是 CONFIGURATION.md 点名的最危险的
+      那类改变。生成物只该**照实**说出生效值，不该改变它。
+    """
+    lines = [
+        "%s ← 边界标记，别动这一行（这整块由安装器生成，装卸插件时整块加/删）"
+        % AUTO_BLOCK_MARK,
+        "[plugin:%s]" % spec.name,
+        "# 本站装着这个插件。**没有 `#` 的行是现在生效的值**；带 `#` 的那几行是",
+        "# 它的缺省 —— 想钉住哪一项就把那一行开头的 `# ` 去掉。",
+        "# ★ 这一块从生成那一刻起就是**你的**：安装器此后不再改里面的任何一行",
+        "#   （升级、重装都不动）。它只按上面那行标记认边界、整块加或整块删。",
+        "# ★ 把整块删掉**不会**卸载插件（插件还在本站）；下次 deploy.sh 会重新",
+        "#   生成一个。要卸载就把那个 .splug 从插件目录/源目录里拿走。",
+        "# （bin 不列在这里：它的缺省按**计算节点**算，写死一个登录节点上查到的",
+        "#   路径会指错 —— 见 docs/CONFIGURATION.md 的 bin 那一节。）",
+    ]
+    for key, val in commented:
+        lines.append("# %s = %s" % (key, val))
+    lines.append("enabled = %s" % ("yes" if enabled else "no"))
+    return "\n".join(lines) + "\n"
+
+
+def section_names_problem(sections, meta, resolve):
     """块名有没有认不出的、或者**有歧义**的。返回错误串列表（空 = 没问题）。
 
     ★ 报错而不是忽略：写成 `[plugin:ssh]`（少个 d）被静默忽略，症状是
@@ -2588,13 +3044,28 @@ def section_names_problem(sections, resolve):
     ★ 歧义（本站有两个插件共用同一个短名）**也是错**：那时只有**插件的 id**
       指得清是哪一个，所以那句话由 `resolve_plugin()` 说 —— 它把是哪几个 id
       列出来。**判据只有那一处**，这里不自己再判一遍。
+
+    ★★ `meta` 用来把**成因**说清。一个指向没装插件的块有两种成因，而它们的
+      **修法完全不同**：
+        · **安装器生成的**（上一行是边界标记）⇒ 那个插件被拿走了，而配置没跟上。
+          修它的动作是**跑一次 `slurmate plugin sync`**（或者 deploy.sh）——
+          它会整块删掉。不说这句的话，管理员唯一想得到的动作是"去改那个块"，
+          而那正好是 sync 会替他做的事（改完下次部署又生成回来）。
+        · **手写的** ⇒ 是笔误或者过时的配置，得他自己看着办。**这一种不说**那句
+          话 —— sync **不会**替他删手写的块，说了就是骗人。
     """
     errors = []
     for name in sorted(sections):
         _spec, why = resolve(name)
         if why is None:
             continue
-        errors.append("[plugin:%s]：%s" % (name, why))
+        hint = ""
+        if (meta.get(name) or {}).get("auto"):
+            hint = ("\n        ★ 这一块是**安装器生成的**（上一行是 %s 那个边界标记）"
+                    "——它指向的插件已经不在本站了。\n"
+                    "        跑一次 `slurmate plugin sync`（或者 cluster/deploy.sh）"
+                    "会自动把它**整块**删掉。" % AUTO_BLOCK_MARK)
+        errors.append("[plugin:%s]：%s%s" % (name, why, hint))
     return errors
 
 
@@ -2641,7 +3112,7 @@ def parse_reserved_ranges(spec):
 class Config(object):
     def __init__(self, path):
         self.path = path
-        raw, sections = parse_config(path)
+        raw, sections, self.block_meta = parse_config(path)
 
         # ── 插件：表是**扫出来的**，不是代码里写死的 ────────────────────────
         # 先扫盘 —— 配置里的 [plugin:*] 块要对照它才知道认不认识。顺序不能反。
@@ -2658,17 +3129,21 @@ class Config(object):
         #   （短名只是本站给人看的名字）。用 `{s.name: s}` 收的话，后一个会
         #   **静默盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
         #
-        # ★ 唯一那个"名字 → 具体哪一个"的判据在 `resolve_plugin()` 里，别处
-        #   不要再写一遍：同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
-        self.plugins_by_id = {s.id: s for s in self.plugin_specs}
-        self.plugins_by_name = {}
-        for _s in self.plugin_specs:
-            self.plugins_by_name.setdefault(_s.name, []).append(_s)
+        # ★ 表的形状只有 `plugin_indexes()` 一处定义、"名字 → 具体哪一个"的判据
+        #   只有 `resolve_plugin_spec()` 一处 —— `sync_plugin_config()` 用的是
+        #   同两份（它手上没有 Config）。同一条规矩两份实现会漂开，而漂开时不会
+        #   有任何东西变红。
+        self.plugins_by_id, self.plugins_by_name = plugin_indexes(self.plugin_specs)
 
         # 认不出来的键/块/块内键不在构造时报错，攒着交给 validate() —— --check
         # 要能一次把问题列全，而不是让人改一个跑一次。
         self.unknown_keys = sorted(set(raw) - GLOBAL_KEYS)
-        self.bad_sections = section_names_problem(sections, self.resolve_plugin)
+        # ★ **两条**块名的问题，都得报：认不出/有歧义的（第一条），以及
+        #   **两个块指着同一个插件**的（第二条）。少了第二条，两块里后一块会
+        #   静默盖掉前一块（见 duplicate_block_problem 的说明）。
+        self.bad_sections = (section_names_problem(sections, self.block_meta,
+                                                   self.resolve_plugin)
+                             + duplicate_block_problem(sections, self.resolve_plugin))
         self.bad_block_keys = block_keys_problem(sections, self.resolve_plugin)
 
         def get(key, default=""):
@@ -2811,52 +3286,18 @@ class Config(object):
         self.sshare = resolve_bin("sshare", get("sshare"))
         self.sacct = resolve_bin("sacct", get("sacct"))
     def resolve_plugin(self, key):
-        """把一个**用户写得出来的名字**解析成一个 `PluginSpec`。
+        """把一个**用户写得出来的名字**解析成一个 `PluginSpec`。返回 `(spec, why)`。
 
-        `key` 是 `[plugin:<key>]` 里的那个 key，或者提交时的 `service_kind`。
-        返回 `(spec, why)`：认得出时 `why` 是 `None`；否则 `spec` 是 `None`，
-        而 `why` 是一句**能直接念给用户听**的话。
+        ★★ 计算在 `resolve_plugin_spec()` 里 —— **"名字 → 具体哪一个"的判据只有
+          那一处**，别处不要再写一遍（同一条规矩两份实现会漂开，而漂开时不会有
+          任何东西变红）。这里只是把本站那两张表递过去。
 
-        ★ 两种写法都收：
-          · **短名** —— 本站内给人看的名字（配置块名与 `service_kind` 都是它）；
-          · **id** —— 那个铸造出来、永不变的标识符。
-
-        ★★ 短名**不再是唯一的**（不同 id 同名允许并存），所以短名只在**本站只有
-          一个**插件用它时才算数；有歧义时**要求写 id**，并把是哪几个列出来 ——
-          挑一个的后果是"哪个生效"取决于遍历次序，而那是没人会想到去查的地方。
-
-        ★ 一个插件都没装时那句话要说**安装**，不是"名字写错了"：那是两种完全不同
-          的行动（去装一个 vs 去改一个字），而它们在配置里长得一模一样。
-
-        ★★ **这是"名字 → 具体哪一个"的唯一判据。** 别处不要再写一遍 ——
-          同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
+        ★ `sync_plugin_config()` 用的是同一个函数（它手上没有 Config，自己
+          `plugin_indexes()` 建表）。这两个调用方是这一版新长出来的第二条路 ——
+          判据分家的话，"安装器认得出、守护进程认不出"就会变成一个新的静默失效。
         """
-        if not key:
-            return None, "名字是空的。"
-        spec = self.plugins_by_id.get(key)
-        if spec is not None:
-            return spec, None
-        same = self.plugins_by_name.get(key) or []
-        if len(same) == 1:
-            return same[0], None
-        if len(same) > 1:
-            return None, (
-                "%r 是本站**几个**插件共用的短名，所以它认不出你指的是哪一个 —— "
-                "请改用**插件的 id**（那一个永远是唯一的）：%s"
-                % (key, "、".join("%s（id %s）" % (s.title or s.name, s.id)
-                                  for s in sorted(same, key=lambda s: s.id))))
-        if not self.plugin_specs:
-            return None, (
-                "本站**一个插件都没装**，所以任何名字都配不上。插件安装目录 %s "
-                "是空的。（装插件是把一个 .splug 包放进去、再跑一次 deploy.sh，"
-                "见 plugins/README.md。）" % self.plugins_dir)
-        # ★ 那句话必须说清"装插件"是**放一个包**，不是"放一个目录" —— 它是管理员
-        #   唯一会照着做的那句，说错对象等于把他指到一个不存在的动作上。
-        return None, ("本站没有装叫 %r 的插件。装了的是：%s。"
-                      "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录 "
-                      "%s、再跑一次 deploy.sh，见 plugins/README.md。）"
-                      % (key, "、".join(sorted(self.plugins_by_name)) or "（一个都没有）",
-                         self.plugins_dir))
+        return resolve_plugin_spec(self.plugins_by_id, self.plugins_by_name,
+                                   key, self.plugins_dir)
 
     def plugin_config(self, key):
         """取一个插件的**生效配置**（`PluginConfig`）—— 按短名或 id。
@@ -7103,6 +7544,11 @@ def main():
                     help="配合 --install-plugins：确认「这个 id 换了签名者」（§2.5）。"
                          "取值必须是**记录里那把旧指纹** —— 确认是一次有依据的动作，"
                          "不是随手加一个开关")
+    ap.add_argument("--sync-plugin-config", action="store_true",
+                    help="把配置里**安装器生成的**插件块与插件目录对齐：目录里没有"
+                         "的插件⇒整块删掉；目录里有、而配置里没有块的⇒在文件末尾"
+                         "追加一块。已有的块一个字都不动。`slurmate plugin sync` "
+                         "与 deploy.sh 走这条路（见 sync_plugin_config）")
     ap.add_argument("--extract-package", nargs=2, metavar=("包", "包内路径"),
                     help="从 .splug 里取出**一份**文件写到标准输出，然后退出。"
                          "集群侧读包只有这一个入口 —— 部署脚本用它取插件里的 "
@@ -7142,6 +7588,20 @@ def main():
             sys.stderr.write("错误: %s\n" % e)
             return 1
 
+    # ── 对齐配置里的插件块（`slurmate plugin sync` 与 deploy.sh 用）──────────
+    # ★ 与 --install-plugins 排在同一个位置（log_setup() 之前）：它**要读配置**，
+    #   但**不要**守护进程配好、Slurm 装好。而且它的输出是给管理员看的一屏。
+    #
+    # ★ 它**排在装完之后**：这一步的前提是"插件目录已经是最终状态"。反过来
+    #   （先对齐再装）会给刚删掉的插件重新生成块，然后再也删不掉它。
+    if args.sync_plugin_config:
+        where = args.plugins_dir or default_plugins_dir()
+        try:
+            return sync_plugin_config(args.config, where)
+        except ValueError as e:
+            sys.stderr.write("错误: %s\n" % e)
+            return 1
+
     log_setup()
 
     # ── 只扫插件（deploy.sh 用）────────────────────────────────────────────
@@ -7169,6 +7629,18 @@ def main():
             print("  ⚠ 站点侧的钥匙记录读不出来 —— 「换了签名者」这件事现在判不了：")
             print("    %s" % str(e).split("\n")[0])
         print("插件目录 %s 里有 %d 个插件：" % (where, len(specs)))
+        # ★★ 这一屏**不读站点配置**（它要能在一台配置读不出来的机器上跑，
+        #   deploy.sh 也拿它预检**还没装进去**的源目录）⇒ 它**不知道**本站把那
+        #   几个插件开成什么样。所以那一列说的是**插件清单里声明的缺省**，
+        #   措辞必须与 `--check` 的「已启用/已停用」（那才是本站状态）分得开。
+        #
+        #   ★ 从前两屏都写「启用/停用」—— 同一个词、两件事，而 deploy.sh 里它们
+        #     前后紧挨着打印。站点写了 `[plugin:sshd] enabled = yes` 而这一屏说
+        #     「停用」时，"我明明开了"与"它说停用"之间的那一步排查，方向从第一
+        #     步就是错的。（见 KNOWN-ISSUES 的 F39。）
+        print("  ★ 这一屏**不读站点配置**，所以下面那一列是**插件清单里声明的缺省**，")
+        print("    不是本站的开关状态 —— 开关看 `slurmate-sessiond --check`"
+              "（或 `slurmate plugins`）。")
         for s in specs:
             if s.needs_job:
                 note = "  作业侧入口 %s" % s.job_entry
@@ -7181,7 +7653,7 @@ def main():
                        % PLUGIN_JOB_ENTRY
             print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
-                     "启用" if s.default_enabled else "停用", note))
+                     "缺省开" if s.default_enabled else "缺省关", note))
             # 分发是**另一个读者**：客户端连上之后**整包一次取走**（一次 RPC）。
             # ★ 这里从前还写着"或者按这份清单逐份取走（N 次 RPC）"—— **那条路在
             #   v0.7 删掉了**（`op_plugin_file`，见上面"站点分发"那一段）。所以

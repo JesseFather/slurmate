@@ -133,9 +133,73 @@ def cmd_plugin_install(args):
     # ★ 不用 os.execv：留一层能让退出码原样传上去，也让这条路在用例里跑得动
     #   （execv 会把跑用例的那个进程换掉）。
     try:
-        return subprocess.run(argv).returncode
+        rc = subprocess.run(argv).returncode
     except OSError as e:
         print("启动安装器失败（%s）：%s" % (exe, e), file=sys.stderr)
+        return EXIT_NODAEMON
+    if rc != 0:
+        return rc
+
+    # ★★ 装完立刻把配置对齐（见守护进程的 `sync_plugin_config`）：装了插件而配置
+    #   里看不见它，管理员就少了一处能改开关的地方 —— 而"装了什么"与"配置里写了
+    #   什么"不一致正是这一版要消灭的形状。
+    #
+    # ★ 但 `--plugins-dir` 指到别处时**不动配置**：那是一条排查路径（把包装到
+    #   一个临时目录里看看），拿它去对齐站点配置会把**真正的**插件块全删掉
+    #   （目录里当然没有它们）。这个口子必须在这里堵住，因为在那边堵不住 ——
+    #   守护进程只知道"你给了我一个目录"，不知道那是本站还是别处。
+    if args.plugins_dir:
+        print("★ 装到了 %s 而不是本站的插件目录 ⇒ **没有**动站点配置。"
+              % args.plugins_dir, file=sys.stderr)
+        return 0
+    sync = [sys.executable, exe, "--sync-plugin-config"]
+    if args.config:
+        sync += ["--config", args.config]
+    try:
+        src = subprocess.run(sync).returncode
+    except OSError as e:
+        print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
+        return EXIT_NODAEMON
+    if src != 0:
+        # ★ 包装好了，而站点配置没对上。**分开说**：把这两件事混成一句"装插件
+        #   失败"，管理员会去重装那个已经装好了的包。
+        print("★ 插件包**已经装好**了，但站点配置没能对齐（原因见上）——"
+              "在配置对好之前，守护进程可能起不来。", file=sys.stderr)
+    return src
+
+
+def cmd_plugin_sync(args):
+    """`slurmate plugin sync` —— 把配置里的插件块与插件目录对齐。
+
+    ★ 它**不装也不卸任何包**，只对账：目录里没有的插件 ⇒ 删掉它那一块（仅限
+      安装器生成的块）；目录里有而配置里没块的 ⇒ 在文件末尾追加一块。见守护进程
+      的 `sync_plugin_config()`。管理员直接 `rm` 掉一个 `.splug` 之后，就是跑
+      这一条（或者跑一次 deploy.sh，它也会跑）。
+    """
+    if os.geteuid() != 0:
+        print("对齐插件块要改站点配置 %s，所以要 root：\n"
+              "  sudo slurmate plugin sync" % (args.config
+                                               or "/etc/slurmate/slurmate.conf"),
+              file=sys.stderr)
+        return EXIT_REJECTED
+
+    exe = sessiond_path()
+    if not os.path.isfile(exe):
+        print("找不到守护进程脚本 %s —— 对账的判据在它里面。\n"
+              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+              "指过去；\n"
+              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+        return EXIT_NOTFOUND
+
+    argv = [sys.executable, exe, "--sync-plugin-config"]
+    if args.plugins_dir:
+        argv += ["--plugins-dir", args.plugins_dir]
+    if args.config:
+        argv += ["--config", args.config]
+    try:
+        return subprocess.run(argv).returncode
+    except OSError as e:
+        print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
 
 
@@ -908,7 +972,18 @@ def build_parser():
     pi.add_argument("--replace-key", default=None, metavar="旧指纹",
                     help="确认「这个 id 换了签名者」（§2.5）。取值必须是记录里"
                          "那把旧指纹 —— 确认要有依据，不是随手加一个开关")
+    pi.add_argument("--config", default="",
+                    help="站点配置文件。省略 = 用守护进程的缺省路径"
+                         "（/etc/slurmate/slurmate.conf）")
     pi.set_defaults(func=cmd_plugin_install)
+
+    ps = psub.add_parser("sync", help="把配置里的插件块与插件目录对齐（不装不卸）")
+    ps.add_argument("--plugins-dir", default="",
+                    help="用这个插件目录对账而不是安装目录（排查用）")
+    ps.add_argument("--config", default="",
+                    help="站点配置文件。省略 = 用守护进程的缺省路径"
+                         "（/etc/slurmate/slurmate.conf）")
+    ps.set_defaults(func=cmd_plugin_sync)
 
     p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
     p.add_argument("--json", action="store_true")
