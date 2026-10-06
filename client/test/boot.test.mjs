@@ -3044,6 +3044,86 @@ test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说
   assert.equal(fs.existsSync(path.join(parts, 'slot-1')), true, '一个字都不许动');
 });
 
+/**
+ * `panel.js` 的 `renderPluginData(d)` 里读到的那些 `d.xxx`。
+ *
+ * ★ 这份清单是**现读出来的**，不是在这里手抄一份 —— 手抄的那份会在 panel.js 新增一个
+ *   `d.xxx` 时**照样绿**，而那正是下面那条用例要拦的形状。
+ */
+function fieldsReadFromPluginData() {
+  const src = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'renderer', 'panel.js'),
+    'utf8');
+  const start = src.indexOf('function renderPluginData(d) {');
+  assert.ok(start >= 0, '前提：panel.js 里还有 renderPluginData');
+  // 那个函数的结尾是**第 0 列**的 `}`（里面每一层都缩进着）。
+  const end = src.indexOf('\n}', start);
+  assert.ok(end > start, '前提：找得到那个函数的结尾');
+  const out = new Set();
+  for (const m of src.slice(start, end).matchAll(/\bd\.([A-Za-z_$][\w$]*)/g)) out.add(m[1]);
+  return out;
+}
+
+test('★★ `app:pluginData` 的回包里带着界面要读的那几个字段', async (t) => {
+  // 这一条判的是**线**，不是函数 —— 与 `plugin-data-audit.test.mjs` 那条并存：
+  // 那条判 `audit()` 算出来的值对不对，这一条判那个值**到不到得了界面**。
+  //
+  // ★ 为什么必须有这一条：`allUnknown` 曾经算出来了、却**没进回包**，而界面读的是一个
+  //   永远不存在的字段 —— `Boolean(undefined)` 是 `false`，于是那句提示永远不出现。
+  //   全程**没有任何东西会红**：算的那一半有用例（绿），丢的那一半没有。
+  //   见 KNOWN-ISSUES 的 F35。
+  t.after(() => { Module._load = origLoad; });
+  require('../src/main/index.js');
+  await new Promise((r) => setTimeout(r, 400));
+
+  const d = await invoke('app:pluginData');
+  assert.equal(d.ok, true, JSON.stringify(d));
+
+  // `error` 只在**失败**回包那一支里（`d.ok === false`），成功回包不欠它。
+  const onFailureOnly = new Set(['error']);
+  const want = [...fieldsReadFromPluginData()].filter((f) => !onFailureOnly.has(f));
+  assert.ok(want.includes('allUnknown'), '前提：界面确实在读它（否则这一条测的是别的东西）');
+  for (const f of want) {
+    assert.ok(f in d, `界面读 \`d.${f}\`，而回包里没有这个键 —— `
+      + `界面会读到 undefined，然后安静地走另一条分支。回包的键：${Object.keys(d).join('、')}`);
+  }
+  // 类型也要对：`Boolean(undefined)` 与 `false` 在 `if` 里是同一件事，但在
+  // 「查不了」与「没有」之间不是 —— 这一格必须是**算出来的**真布尔。
+  assert.equal(typeof d.allUnknown, 'boolean',
+    '`allUnknown` 必须是一个算出来的布尔，不是"缺了这个键"');
+
+  // ★ 另一半（**值**对不对）在 `plugin-data-audit.test.mjs` 里；这里够不到它：
+  //   开发者模式下**不查磁盘** ⇒ `diskChecked:false`、`rows:[]`、`allUnknown` 恒 `false`。
+  //   所以这一条只保证"送到"，不保证"送对了"。
+  assert.equal(d.diskChecked, false, '前提：开发者模式不查磁盘（值那一半因此测不到）');
+});
+
+test('★ 删除之后的回包与 `app:pluginData` **同一个形状**', async () => {
+  // 界面拿这份回包**重画同一块**（`panel.js` 的 `dropPluginData` 最后一句就是
+  // `renderPluginData(res)`）⇒ 少一个字段，症状与上面那一条逐字相同。
+  // ★ 这一条是**读源码**（开发者模式下删不掉任何东西 ⇒ 走不到成功那条回包）。
+  const src = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main', 'index.js'),
+    'utf8');
+  for (const ch of ['app:pluginData', 'app:deletePluginData']) {
+    const start = src.indexOf(`send('${ch}'`);
+    assert.ok(start >= 0, `前提：index.js 里还有 ${ch}`);
+    const end = src.indexOf('\n  });', start);
+    assert.ok(end > start, `前提：找得到 ${ch} 那个处理器的结尾`);
+    // 只看**最后那个** `return {`（回包本身）—— 处理器中间还有别的 return
+    // （`stale` 那一条），拿整个函数体去搜会让"写在别处、没进回包"也绿。
+    const whole = src.slice(start, end);
+    const body = whole.slice(whole.lastIndexOf('return {'));
+    assert.ok(body.startsWith('return {'), `前提：${ch} 的最后一句是回包`);
+    const want = [...fieldsReadFromPluginData()].filter((f) => f !== 'error');
+    for (const f of want) {
+      // `f:`/`f` 两种写法都认（`{ rows: a.rows }` 与 `{ rows }`）。
+      assert.match(body, new RegExp(`\\b${f}\\b`),
+        `${ch} 的回包里没有 \`${f}\` —— 界面读它，见上面那条用例`);
+    }
+  }
+});
+
 // ── 多开（并发层）───────────────────────────────────────────────────────────
 //
 // ★ 这一组用例是**唯一**能验多开的地方：真集群上要造出"两个会话同时活着"极难，

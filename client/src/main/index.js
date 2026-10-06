@@ -3433,7 +3433,16 @@ function registerIpc() {
   // 只读：它不清理、不回收，只回答"本机还剩几份、哪一份没人用"。
   send('app:pluginData', async () => {
     const a = auditPluginData();
-    return { ok: true, rows: a.rows, diskChecked: a.diskChecked, why: a.why };
+    // ★★ 回包的形状**照界面读的那几个字段逐字给**（`panel.js` 的 `renderPluginData`）
+    //   —— 少给一个不会红任何东西：界面读到 `undefined`，而 `Boolean(undefined)` 是
+    //   `false`，于是那条提示**永远不出现**、也没有任何地方报错。
+    //   ★ `allUnknown` 正是这样漏过一次（见 KNOWN-ISSUES 的 F35）：判据在 `audit()` 里
+    //   算得好好的，只是没送到这里。改动这几个字段时，`client/test/boot.test.mjs` 的
+    //   「回包里带着界面要读的那几个字段」那条用例会红。
+    return {
+      ok: true, rows: a.rows, diskChecked: a.diskChecked,
+      allUnknown: a.allUnknown, why: a.why,
+    };
   });
 
   /**
@@ -3460,8 +3469,11 @@ function registerIpc() {
     }
     const row = verdict.row;
     const after = auditPluginData();
+    // ★ 与 `app:pluginData` **同一个形状**（界面拿这份回包重画同一块，见上面的注释
+    //   与 KNOWN-ISSUES 的 F35）—— 这里少一个字段，症状与那边逐字相同。
     return {
-      ok: true, rows: after.rows, diskChecked: after.diskChecked, why: after.why,
+      ok: true, rows: after.rows, diskChecked: after.diskChecked,
+      allUnknown: after.allUnknown, why: after.why,
       label: row.label,
     };
   });
