@@ -145,7 +145,7 @@ def cmd_plugin_install(args):
     #   什么"不一致正是这一版要消灭的形状。
     #
     # ★ 但 `--plugins-dir` 指到别处时**不动配置**：那是一条排查路径（把包装到
-    #   一个临时目录里看看），拿它去对齐站点配置会把**真正的**插件块全删掉
+    #   一个临时目录里看看），拿它去对齐站点配置会把**真正的**插件配置全删掉
     #   （目录里当然没有它们）。这个口子必须在这里堵住，因为在那边堵不住 ——
     #   守护进程只知道"你给了我一个目录"，不知道那是本站还是别处。
     if args.plugins_dir:
@@ -169,15 +169,15 @@ def cmd_plugin_install(args):
 
 
 def cmd_plugin_sync(args):
-    """`slurmate plugin sync` —— 把配置里的插件块与插件目录对齐。
+    """`slurmate plugin sync` —— 把插件配置与插件目录对齐。
 
-    ★ 它**不装也不卸任何包**，只对账：目录里没有的插件 ⇒ 删掉它那一块（仅限
-      安装器生成的块）；目录里有而配置里没块的 ⇒ 在文件末尾追加一块。见守护进程
-      的 `sync_plugin_config()`。管理员直接 `rm` 掉一个 `.splug` 之后，就是跑
-      这一条（或者跑一次 deploy.sh，它也会跑）。
+    ★ 它**不装也不卸任何包**，只对账：某个插件的配置在而包没了 ⇒ 删掉它那一份
+      （**只删安装器起的名字**，即 `<ULID>.conf`）；装了而没有配置的 ⇒ 写一份
+      `<ULID>.conf`。见守护进程的 `sync_plugin_config()`。管理员直接 `rm` 掉一个
+      `.splug` 之后，就是跑这一条（或者跑一次 deploy.sh，它也会跑）。
     """
     if os.geteuid() != 0:
-        print("对齐插件块要改站点配置 %s，所以要 root：\n"
+        print("对齐插件配置要写 %s.d/，所以要 root：\n"
               "  sudo slurmate plugin sync" % (args.config
                                                or "/etc/slurmate/slurmate.conf"),
               file=sys.stderr)
@@ -726,7 +726,7 @@ def cmd_plugins(args):
               "（它的响应里没有 `limits`，客户端不会来取）。")
     print()
     print("id 是这个插件的全球唯一标识（铸造出来、永不改变），客户端靠它 + 版本")
-    print("在自己的插件池里找配套的那一半。名字只是本站的短名，日志和配置块用它。")
+    print("在自己的插件池里找配套的那一半。名字只是本站的短名，日志和配置文件名用它。")
     return 0
 
 
@@ -992,7 +992,7 @@ def build_parser():
                          "（/etc/slurmate/slurmate.conf）")
     pi.set_defaults(func=cmd_plugin_install)
 
-    ps = psub.add_parser("sync", help="把配置里的插件块与插件目录对齐（不装不卸）")
+    ps = psub.add_parser("sync", help="把插件配置与插件目录对齐（不装不卸）")
     ps.add_argument("--plugins-dir", default="",
                     help="用这个插件目录对账而不是安装目录（排查用）")
     ps.add_argument("--config", default="",

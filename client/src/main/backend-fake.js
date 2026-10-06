@@ -596,7 +596,7 @@ class FakeBackend extends Backend {
       // 默认资源是**按插件**的，所以它跟 `plugins` 走，不再挂在 `partitions` 上
       //（与守护进程逐字一致 —— 那个字段已经删掉了，见 op_partitions）。
       // 默认资源是**站点设定的策略**，客户端不推导 —— 假站点一律报 DEFAULTS，
-      // 真实站点报它自己那份（每个插件可以不同，见 slurmate.conf 的插件块）。
+      // 真实站点报它自己那份（每个插件可以不同，见 slurmate.conf.d/ 里它那一份）。
       //
       // ★ 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
       //   清单里自己读**的东西，服务端多报一份就是两份真相，而两份迟早会分叉。

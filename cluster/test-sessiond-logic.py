@@ -564,8 +564,17 @@ def main():
             f.write(text)
         return p
 
+    def write_plugin_conf(conf_path, name, text):
+        """在 `<conf_path>.d/` 下写一份插件配置（文件名就是身份，里面没有块头）。"""
+        d = mod.plugin_conf_dir(conf_path)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name + ".conf")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return p
+
     def parse(text, name="parse.conf"):
-        """只要前两个返回值（键表）。第三个是块的元信息，见 19.16 那一节。"""
+        """只要前两个返回值（键表）。第三个是"这一份住在哪个文件里"，见 19.18。"""
         g, s, _m = mod.parse_config(write_conf(text, name))
         return g, s
 
@@ -576,20 +585,55 @@ def main():
     check("值两端空白被去掉",
           parse("readonly_paths =   /shared/home  \n")[0]
           == {"readonly_paths": "/shared/home"})
-    check("块被分出来，通用键留在全局段",
-          parse("range_end = 5\n[plugin:sshd]\nenabled = yes\ndefault_cpus = 3\n")
-          == ({"range_end": "5"}, {"sshd": {"enabled": "yes", "default_cpus": "3"}}))
+
+    # ★★ v0.12 起插件配置**不住在主文件里**：一个插件一个文件。所以主文件里
+    #   `[plugin:...]` 这件事**不存在**了，写了就是错误。
     for i, (bad, why) in enumerate((("range_start = 1\nrange_start = 2\n", "重复键"),
                                     ("这不是赋值\n", "缺等号"),
                                     ("= 5\n", "缺键名"),
-                                    ("[plugin:sshd]\n[plugin:sshd]\n", "重复块"),
-                                    ("[plugin:sshd\n", "块头没闭合"),
-                                    ("[cluster]\nx = 1\n", "不是 plugin 的块头"))):
+                                    ("[plugin:sshd]\nenabled = yes\n", "主文件里写块头"),
+                                    ("[plugin:sshd\n", "没闭合的块头"),
+                                    ("[cluster]\nx = 1\n", "别的块头也一样"))):
         try:
             parse(bad, "bad-%d.conf" % i)
             check("%s → 报错" % why, False, "竟然通过了")
         except ValueError:
             check("%s → 报错" % why, True)
+
+    # 而插件配置住在 drop-in 文件里：文件名就是身份，文件里只有 `键 = 值`。
+    _pc = os.path.join(tmpdir, "treeparse.conf")
+    with open(_pc, "w", encoding="utf-8") as f:
+        f.write("range_end = 5\n")
+    write_plugin_conf(_pc, "sshd", "# 说明\nenabled = yes\ndefault_cpus = 3\n")
+    _g, _s, _m = mod.parse_config(_pc)
+    check("★★ 插件配置住在 `<配置路径>.d/<名字>.conf`，主文件只有通用键",
+          _g == {"range_end": "5"}
+          and _s == {"sshd": {"enabled": "yes", "default_cpus": "3"}},
+          "%s / %s" % (_g, _s))
+    check("★ 第三个返回值给出**是哪一个文件**（报错要说得出这句，不然管理员"
+          "得去猜）",
+          _m["sshd"]["file"].endswith(
+              os.path.join("treeparse.conf.d", "sshd.conf")), str(_m))
+
+    # ★ 主文件里写块头那条报错要说清**该写到哪儿去** —— 只说"不合法"的话，
+    #   管理员唯一想得到的动作是把那几行删掉，而那是把他的配置丢掉。
+    try:
+        parse("[plugin:sshd]\nenabled = yes\n", "hint.conf")
+        _hint = ""
+    except ValueError as e:
+        _hint = str(e)
+    check("★★ 主文件里写块头的报错要**指路**（`.d/` 目录 + 一个插件一个文件）",
+          ".d/" in _hint and "一个插件一个文件" in _hint, _hint)
+
+    # ★ drop-in 文件里同样不写块头 —— 文件名已经说了这一份是谁的。
+    _weird = write_plugin_conf(_pc, "weird", "[plugin:sshd]\nenabled = yes\n")
+    try:
+        mod.parse_config(_pc)
+        _hint2 = ""
+    except ValueError as e:
+        _hint2 = str(e)
+    os.unlink(_weird)
+    check("★ drop-in 文件里也不写块头（文件名就是身份）", "文件名" in _hint2, _hint2)
 
     # ★ 认不出的键必须是【错误】而不是被忽略：拼错的键被静默忽略，后果是
     #   "文件里写着，而实际什么也没发生" —— 这正是本项目一路在清的那类问题。
@@ -2114,10 +2158,10 @@ exit 0
           "%s/%s/%s" % (_jup.default_cpus, _jup.default_mem, _jup.bin_env))
     check("★ 它的配置块允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
-          _jup.block_keys() == ("enabled", "default_cpus", "default_mem",
+          _jup.conf_keys() == ("enabled", "default_cpus", "default_mem",
                                 "default_time", "default_gpus",
                                 "bin", "token_mode"),
-          str(_jup.block_keys()))
+          str(_jup.conf_keys()))
     # ★★ 清单声明的时限是**规范化之后**存下来的（`3:30:00` → `03:30:00`）。
     #   规范化只在解析这一处做，下游（协议、界面、自检）就不必各自处理"同一段
     #   时间的两种写法" —— 而那种"两处各写各的"正是这个项目一路在清的东西。
@@ -2294,8 +2338,48 @@ exit 0
     #   （它标了 site.defaultEnabled）。少了这条，所有现有站点升级后会一个服务都
     #   开不出来，而配置里一个字都不像有问题。
 
+    def write_conf_tree(text, name):
+        """把"通用键 + `[plugin:X]` 段"的**老形状**写成 v0.12 的**两半**，返回主文件路径。
+
+        ★ 通用键 → 主文件；每个插件的段 → 一份 `<主文件>.d/<名字>.conf`。抽成
+          一个函数是因为 `pcfg` 与 `pcfg_namedup` 都要这份翻译 —— 各写一遍的话，
+          "格式变了"会有两个地方要改，而漏掉一处是静默的。
+
+        ★ 所以这一节里的用例**仍然按"给 X 配这几项"说话**，它们测的是语义
+          （开关、默认资源、歧义判据），不是"配置住在哪个文件里"。
+          "住在哪儿、谁起的名字"由 19.18 的专门用例钉着。
+
+        ★★ 每次调用先**清空** drop-in 目录：真实的对账只删"它自己那一份"，而
+          夹具要的是"这一次写的就是全部"。不清的话，上一次留下的 `sshd.conf`
+          会继续生效 —— 症状是"一个插件都不开"那条用例拿到一个开着的 sshd
+          （这个夹具第一版就是这么写的，当场被那条用例逮到）。
+        """
+        p = os.path.join(tmpdir, name)
+        shutil.rmtree(mod.plugin_conf_dir(p), ignore_errors=True)
+        main, cur, buf = [], None, []
+
+        def _flush(cur, buf):
+            if cur is not None:
+                write_plugin_conf(p, cur, "".join(buf))
+
+        for line in text.splitlines(True):
+            s = line.strip()
+            if s.startswith("[plugin:") and s.endswith("]"):
+                _flush(cur, buf)
+                cur, buf = s[len("[plugin:"):-1], []
+            elif cur is None:
+                main.append(line)
+            else:
+                buf.append(line)
+        _flush(cur, buf)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("".join(main))
+        return p
+
     def pcfg(text, name="plug.conf"):
-        return mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n" + text, name))
+        """一份站点配置。见 `write_conf_tree` —— 它把老形状拆成 v0.12 的两半。"""
+        return mod.Config(write_conf_tree("cluster_cidr = 192.0.2.0/24\n" + text,
+                                          name))
 
     _c = pcfg("")
     check("★ 一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
@@ -2392,7 +2476,7 @@ exit 0
         _saved = mod.default_plugins_dir
         try:
             mod.default_plugins_dir = lambda: _nupdir
-            return mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n" + text, name))
+            return pcfg(text, name)
         finally:
             mod.default_plugins_dir = _saved
 
@@ -2490,22 +2574,24 @@ exit 0
           len({_dt_msgs[_v] for _v in _dt_msgs}) == 3,
           str(_dt_msgs)[:260])
 
-    # ★ 顺序陷阱的报错必须**指得回根因**。只断言"被拒了"是不够的：通用键落进块里
-    #   时，块内键白名单那条**也会**拒绝它（它本来就不在允许列表里），于是"拒绝了"
-    #   这件事两种实现都满足 —— 而这个分支存在的全部理由是那句话。
+    # ★ 「通用键写进插件那一份」的报错必须**指得回根因**。只断言"被拒了"是不够
+    #   的：那份配置的键白名单**也会**拒绝它（它本来就不在允许列表里），于是
+    #   "拒绝了"这件事两种实现都满足 —— 而这个分支存在的全部理由是那句话。
     #   变异验证发现：把 `if key in GLOBAL_KEYS` 改成 `if False`，上面那条断言照样
     #   绿。这一条就是补那个洞的。
+    #   ★ v0.12：根因从"顺序"变成了"它住在**另一份文件**里"—— 通用键在主配置
+    #     （`slurmate.conf`），插件那一份里写不下它。
     _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n")
                     .validate())
-    check("★ 而且要说清是「通用键写到了块之后」，不是一句泛泛的「认不出这个键」",
-          "通用键" in _msg and "块之前" in _msg, _msg[:140])
+    check("★ 而且要说清是「它住在主配置里」，不是一句泛泛的「认不出这个键」",
+          "通用键" in _msg and "主配置" in _msg, _msg[:160])
 
-    # ★★ 同一个形状再来一条：**未知块名**那句话必须说清"装插件"是**放一个包**，
+    # ★★ 同一个形状再来一条：**未知文件名**那句话必须说清"装插件"是**放一个包**，
     #   而不是"放一个目录"。这一句是管理员唯一会照着做的那句话，说错了对象就
     #   等于把他指到一个不存在的动作上（见 `section_names_problem` 的 docstring：
     #   零插件与"名字写错了"是两种行动，而它们在配置里长得一模一样）。
     _um = " ".join(pcfg("[plugin:ssh]\nenabled = yes\n").validate())
-    check("★★ 未知块名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
+    check("★★ 未知文件名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
           ".splug" in _um and "目录放" not in _um and "放一个目录" not in _um,
           _um[:220])
 
@@ -2776,10 +2862,11 @@ exit 0
         "version": "1.0.0",
         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
     _econf = write_conf("cluster_cidr = 192.0.2.0/24\n"
-                        "range_start = 55001\nrange_end = 55099\n"
-                        "[plugin:sshd]\nenabled = yes\n"
-                        # ★ 本站只有 `gpu:a100`，这里故意写一个没有的型号。
-                        "default_gpus = gpu:h100:1\n", "check-gres.conf")
+                        "range_start = 55001\nrange_end = 55099\n",
+                        "check-gres.conf")
+    # ★ v0.12 起插件配置是**它自己的一份文件**（`<主配置>.d/<名字>.conf`）。
+    #   本站只有 `gpu:a100`，所以这里故意写一个没有的型号。
+    write_plugin_conf(_econf, "sshd", "enabled = yes\ndefault_gpus = gpu:h100:1\n")
     _er = subprocess.run(
         [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
          "--check", "--config", _econf],
@@ -2787,7 +2874,7 @@ exit 0
         env=dict(os.environ,
                  PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
     check("★★ `--check` 真的把那条 ⚠ 打出来了（算出来了**也**送出去了）",
-          "gpu:h100" in _er.stdout and "[plugin:sshd]" in _er.stdout,
+          "gpu:h100" in _er.stdout and "sshd" in _er.stdout,
           "rc=%s\n%s\n--- stderr ---\n%s"
           % (_er.returncode, _er.stdout[-700:], _er.stderr[-300:]))
     check("★★ 而且**点名本站有什么** —— 管理员照这一行改，不用去猜",
@@ -4404,11 +4491,15 @@ exit 0
             return sorted(x for x in os.listdir(pdir) if x.endswith(".splug"))
 
         def _sy_cfg(pdir, text, name):
-            """一份指向 `pdir` 的 Config（插件目录是代码常量，只能在模块上盖）。"""
+            """一份指向 `pdir` 的 Config（插件目录是代码常量，只能在模块上盖）。
+
+            ★ 走 `write_conf_tree`：传进来的老形状（通用键 + `[plugin:X]` 段）
+              被拆成主文件与 `slurmate.conf.d/<名字>.conf` 两半。
+            """
             _saved = mod.default_plugins_dir
             try:
                 mod.default_plugins_dir = lambda: pdir
-                return mod.Config(write_conf(text, name))
+                return mod.Config(write_conf_tree(text, name))
             finally:
                 mod.default_plugins_dir = _saved
 
@@ -4468,12 +4559,15 @@ exit 0
         check("★ 同一个版本、升级之后又换内容 ⇒ 照样拒（判据是内容，不是文件时间）",
               _rc == 1 and "同一个版本" in _out, "rc=%d %r" % (_rc, _out[:240]))
 
-        # ── ③ 两个块指着同一个插件 ⇒ 硬错误（账本 F38）────────────────────
+        # ── ③ 两个文件指着同一个插件 ⇒ 硬错误（账本 F38）────────────────────
         #
-        # ★★ 短名与 id 都能当地址（`[plugin:jup]` 与 `[plugin:<那个 id>]`），所以
-        #    "同一个插件配了两遍"这件事**到得了**：两个块名各自都解析得通，而它们
-        #    是同一个东西 —— 合并时后一个**静默盖掉**前一个，管理员改的那一块可能
-        #    一个字都没生效，而配置里没有任何迹象。
+        # ★★ 短名与 id 都能当**文件名**（`solo.conf` 与 `<那个 id>.conf`），所以
+        #    "同一个插件配了两遍"这件事**到得了**：两个文件名各自都解析得通，而它们
+        #    是同一个东西 —— 真合并起来后一份**静默盖掉**前一份，管理员改的那一份
+        #    可能一个字都没生效，而配置里没有任何迹象。
+        #
+        # ★ 报错点的是**两个文件路径**（能直接 `rm`），不再是两个块头 —— 插件配置
+        #   不在主文件里了，只说个名字等于让他去翻一个找不到的地方。
         _SY3 = os.path.join(_sy_home, "plugins3")
         os.makedirs(_SY3, exist_ok=True)
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
@@ -4483,14 +4577,26 @@ exit 0
                            "[plugin:solo]\nenabled = yes\n"
                            "[plugin:%s]\nenabled = no\n" % _U3, "dupblock.conf")
         _errs = " ".join(_c.validate())
-        check("★★ 两个块指的是**同一个插件**（一个写短名、一个写 id）⇒ 硬错误",
+        check("★★ 两个文件指的是**同一个插件**（一个用短名命名、一个用 id）⇒ 硬错误",
               _errs != "", str(_c.validate())[:200])
-        check("★ 而且**两个块头都点出来** —— 只说「重复了」的话，用 id 写的那个"
-              "认不出自己是哪一个",
-              "[plugin:solo]" in _errs and "[plugin:%s]" % _U3 in _errs,
-              _errs[:300])
+        check("★ 而且**两个文件路径都点出来** —— 只说「重复了」的话，用 id 命名的"
+              "那个认不出自己是哪一个",
+              "solo.conf" in _errs and (_U3 + ".conf") in _errs, _errs[:300])
 
-        # ── ④ 对账：补块 / 幂等 / 删块 / 手写的块不动 ────────────────────
+        def _sy_cfg_now(pdir, conf_path):
+            """直接读**盘上那一份**配置（不重新造）—— 对账改了盘，要按改动后的看。"""
+            _saved = mod.default_plugins_dir
+            try:
+                mod.default_plugins_dir = lambda: pdir
+                return mod.Config(conf_path)
+            finally:
+                mod.default_plugins_dir = _saved
+
+        # ── ④ 对账：写一份 / 幂等 / 删自己那份 / 手写的不动 ──────────────────
+        #
+        # ★★ v0.12 起它动的是**文件**：装了而没有配置的插件 ⇒ 写 `<ULID>.conf`；
+        #    那一份在而插件没了 ⇒ 删那个文件；其余的一个字节不动。**主文件全程
+        #    不参与** —— 这是"一个插件一份配置、一个来源"的直接推论。
         _CONF_S = os.path.join(_sy_home, "site.conf")
         with open(_CONF_S, "w", encoding="utf-8") as _f:
             _f.write("# 站点配置\ncluster_cidr = 192.0.2.0/24\n"
@@ -4501,145 +4607,161 @@ exit 0
         _eff_before = _sy_effective(_sy_cfg(_SY3, _orig_conf, "eff-before.conf"))
 
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        _after = _sy_read(_CONF_S)
-        check("★★ 目录里有、配置里没块的插件 ⇒ 文件末尾多出一块",
-              _rc == 0 and "[plugin:solo]" in _after, "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而且带**边界标记**（只有带它的块，对账才敢删）",
-              mod.AUTO_BLOCK_MARK in _after, _after[-500:])
-        check("★ 标记**紧挨着**块头上面（判据是「上一行」，不是「附近有没有」）",
-              "[plugin:solo]" in _sy_read(_CONF_S).split(
-                  mod.AUTO_BLOCK_MARK)[1].split("\n")[1],
-              repr(_after[-360:]))
+        _p_solo = mod.plugin_conf_path(_CONF_S, _U3)
+        check("★★ 装了而没有配置的插件 ⇒ 写一份 `<id>.conf`",
+              _rc == 0 and os.path.isfile(_p_solo), "rc=%d %r" % (_rc, _out[:300]))
+        check("★★ 而**主文件一个字节都没变**（插件配置不住在那儿了）",
+              _sy_read(_CONF_S) == _orig_conf, repr(_sy_read(_CONF_S)[-300:]))
+        check("★ 文件名用**插件的 id**，不是短名 —— 这样「该删哪一个」是算得出来的",
+              os.path.basename(_p_solo) == _U3 + ".conf", _p_solo)
+        check("★ 那一份里第一行写上**短名**（文件名是 ULID，人不认识）",
+              "solo" in _sy_read(_p_solo), _sy_read(_p_solo)[:200])
+        _solo1 = _sy_read(_p_solo)
         _g, _s, _m = mod.parse_config(_CONF_S)
-        check("★★ 追加的块**落在通用键之后**（块一旦开始就没有回头路）",
+        # ★ 名字是 **id**（安装器按 id 命名），不是短名 —— 这一格正是"该删哪一个
+        #   是算得出来的"那句话的另一面。
+        check("★★ 解析回来：通用键来自主文件、插件配置来自 `.d/`，来源记在 meta 里",
               _g == {"cluster_cidr": "192.0.2.0/24",
                      "readonly_paths": "/shared/home"}
-              and set(_s) == {"solo"} and _m["solo"]["auto"] is True,
+              and set(_s) == {_U3} and _m[_U3]["file"] == _p_solo,
               "%s / %s / %s" % (_g, _s, _m))
-        check("★★ 生成的那一块让配置**自洽**了（`--check` 不再报错）",
-              _sy_cfg(_SY3, _after, "after-sync.conf").validate() == [],
-              str(_sy_cfg(_SY3, _after, "after-sync2.conf").validate())[:240])
+        check("★★ 生成的那一份让配置**自洽**了（`--check` 不再报错）",
+              _sy_cfg_now(_SY3, _CONF_S).validate() == [],
+              str(_sy_cfg_now(_SY3, _CONF_S).validate())[:240])
         check("★★★ 而且**没有改动任何行为** —— 每个插件的 (开关, cpus, mem) 逐项相同",
-              _sy_effective(_sy_cfg(_SY3, _after, "eff-after.conf")) == _eff_before,
+              _sy_effective(_sy_cfg_now(_SY3, _CONF_S)) == _eff_before,
               "%s → %s" % (_eff_before,
-                           _sy_effective(_sy_cfg(_SY3, _after, "eff-after3.conf"))))
+                           _sy_effective(_sy_cfg_now(_SY3, _CONF_S))))
 
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 幂等：再跑一遍，文件**逐字节相同**（不是「又加了一块」）",
-              _rc == 0 and _sy_read(_CONF_S) == _after, "rc=%d %r" % (_rc, _out[:300]))
+        check("★★ 幂等：再跑一遍，那一份**逐字节相同**（不是「又写了一份」）",
+              _rc == 0 and _sy_read(_p_solo) == _solo1, "rc=%d %r" % (_rc, _out[:300]))
         check("★ 而且它说的是「已经一致」，不是一句含糊的「没做什么」",
               "已经一致" in _out, _out[:200])
 
-        # 管理员改过那一块 ⇒ 安装器此后**一个字都不动**（「升级不能乱变」）
-        _edited = _after.replace("enabled = no", "enabled = yes\ndefault_cpus = 4")
-        with open(_CONF_S, "w", encoding="utf-8") as _f:
+        # 管理员改过那一份 ⇒ 安装器此后**一个字都不动**（「升级不能乱变」）
+        _edited = _solo1.replace("enabled = no", "enabled = yes\ndefault_cpus = 4")
+        with open(_p_solo, "w", encoding="utf-8") as _f:
             _f.write(_edited)
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 已有的块**逐字节不动**（管理员调过的开关与默认资源必须原样留着）",
-              _rc == 0 and _sy_read(_CONF_S) == _edited, "rc=%d %r" % (_rc, _out[:300]))
-        check("★ 而且改过的那块**真的生效**了（不是被静默忽略）",
-              _sy_cfg(_SY3, _edited, "edited.conf").plugin_config("solo").enabled is True,
+        check("★★ 已有的那一份**逐字节不动**（管理员调过的开关与默认资源必须原样留着）",
+              _rc == 0 and _sy_read(_p_solo) == _edited, "rc=%d %r" % (_rc, _out[:300]))
+        check("★ 而且改过的那一份**真的生效**了（不是被静默忽略）",
+              _sy_cfg_now(_SY3, _CONF_S).plugin_config("solo").enabled is True,
               "还关着")
 
-        # 手写的块指向一个没装的插件 ⇒ **不删**，只报
-        #   ★ 手写的那一块**加在生成的那一块后面**：这样才测得出"只删该删的"，
-        #     而不是"整个文件重写了一遍"。
-        with open(_CONF_S, "w", encoding="utf-8") as _f:
-            _f.write(_edited + "\n# 我自己写的\n[plugin:typo]\nenabled = yes\n")
-        _hand = _sy_read(_CONF_S)
+        # 手写的（**不是 ULID 命名**的）那份指向一个没装的插件 ⇒ **不删**，只报
+        #   ★ 它摆在**安装器那一份旁边**：这样才测得出"只删该删的那一个"，
+        #     而不是"整个目录重写了一遍"。
+        _p_typo = write_plugin_conf(_CONF_S, "typo", "enabled = yes\n")
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 手写的（没有标记的）块指向一个没装的插件 ⇒ **不删**，只报",
-              _rc == 0 and _sy_read(_CONF_S) == _hand and "[plugin:typo]" in _out,
+        check("★★ 手写的（不是 ULID 命名）那份指向一个没装的插件 ⇒ **不删**，只报",
+              _rc == 0 and os.path.isfile(_p_typo) and _p_typo in _out,
               "rc=%d %r" % (_rc, _out[:400]))
-        check("★ 而且那句话说出**凭什么不删**（那是他写的，不是生成物）",
+        check("★ 而且那句话说出**凭什么不删**（那是他写的，不是安装器那份）",
               "手写" in _out, _out[:400])
 
-        # 拿走包（最自然的卸载动作）⇒ 生成的那一块**整块删掉**
+        # 拿走包（最自然的卸载动作）⇒ **它那一份**被删掉，手写那份留着
         os.unlink(os.path.join(_SY3, _U3 + ".splug"))
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        _final = _sy_read(_CONF_S)
-        check("★★ 包从目录里拿走了 ⇒ **整块消失**（留着它守护进程会拒绝启动）",
-              _rc == 0 and "[plugin:solo]" not in _final, "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而且**手写的那一块还在**（不是「整块文件重写一遍」）",
-              "[plugin:typo]" in _final, _final[-400:])
-        check("★★ 通用键一个字没动、生成物那一段一行不剩",
+        check("★★ 包从目录里拿走了 ⇒ **它那一份消失**（留着它守护进程会拒绝启动）",
+              _rc == 0 and not os.path.exists(_p_solo), "rc=%d %r" % (_rc, _out[:300]))
+        check("★★ 而**手写的那一份还在**（判据是位置与名字，不是「整个目录重写一遍」）",
+              _rc == 0 and os.path.isfile(_p_typo), repr(_out[:300]))
+        check("★★ 主文件的通用键一个字没动",
               mod.parse_config(_CONF_S)[0] == {"cluster_cidr": "192.0.2.0/24",
-                                               "readonly_paths": "/shared/home"}
-              and _final.count("[plugin:solo]") == 0
-              and mod.AUTO_BLOCK_MARK not in _final,
-              repr(_final[-400:]))
+                                               "readonly_paths": "/shared/home"},
+              repr(_sy_read(_CONF_S)[-300:]))
+        os.unlink(_p_typo)
 
-        # ── ④b ★★ 生成块**后面**跟着管理员写的注释 ⇒ 删块时不许连它一起删 ──
+        # ── ④b ★★ 那条「删块不许吃到 EOF」的用例**退休了** ─────────────────
         #
-        # ★ 这一条钉的是"块的 end 取到哪一行"。取成"下一个块头之前的那一行"的话，
-        #   文件**末尾**那一块的范围会一直吃到 EOF —— 于是删块会**静默吃掉**管理员
-        #   写在后面的一段笔记。判据因此是"块内最后一行 `键 = 值`"，代价是生成器
-        #   自己的说明注释必须写在最后一行键的**上面**（见 `render_auto_block`）。
-        _CONF_B = os.path.join(_sy_home, "site3.conf")
-        _B_BASE = "cluster_cidr = 192.0.2.0/24\n"
-        with open(_CONF_B, "w", encoding="utf-8") as _f:
-            _f.write(_B_BASE)
-        _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
-        _rc, _out = _sy_sync(_SY3, _CONF_B)
-        _NOTE = "\n# 我自己的笔记：改完 cluster_cidr 记得重启守护进程\n"
-        with open(_CONF_B, "a", encoding="utf-8") as _f:
-            _f.write(_NOTE)
-        os.unlink(os.path.join(_SY3, _U3 + ".splug"))
-        _rc, _out = _sy_sync(_SY3, _CONF_B)
-        _b_final = _sy_read(_CONF_B)
-        check("★★★ 生成块后面那段管理员写的注释**活着**（删块不许吃到 EOF）",
-              _rc == 0 and _b_final.rstrip("\n").endswith(
-                  "改完 cluster_cidr 记得重启守护进程")
-              and "[plugin:solo]" not in _b_final, repr(_b_final))
-        check("★ 而生成物那一段一行不剩（删的正好是它自己）",
-              mod.AUTO_BLOCK_MARK not in _b_final
-              and mod.parse_config(_CONF_B)[0] == {"cluster_cidr": "192.0.2.0/24"},
-              repr(_b_final))
+        # ★ 它从前钉的是"块的 end 取到哪一行"：取坏了的话，文件末尾那一块的
+        #   范围会一直吃到 EOF，于是删块会**静默吃掉**管理员写在后头的一段笔记。
+        #   换成"一个插件一个文件"之后**这件事不存在了** —— 删的是整个文件，
+        #   没有任何行的范围要算，也就没有算错的可能。
+        # ★ 那条例律本身还在（**别的**东西不许被顺手删掉），而它现在由上面那条
+        #   「手写的那一份还在」承担 —— 判据从"行号算对了没"变成"动的是不是只有
+        #   它自己那一个文件"。
 
-        # ── ④c ★ 写回时**模式与属主照原样留着** ─────────────────────────────
+        # ── ④c ★ 新写的那一份照**主文件**的模式与属主 ───────────────────────
         #
-        # ★ 站点配置是 root 拥有的 0644，而写回走的是"同目录临时文件 + rename"
-        #   —— 换的是一个**新 inode**。不显式带过去的话，一次"同步插件块"会把
-        #   配置文件改成跑它的那个进程的默认模式。改了权限的配置，守护进程下次
-        #   读它可能就直接失败了，而症状与"插件块"毫无关系。
+        # ★ 站点配置是 root 拥有的 0644，而"写一份新的"走的是"同目录临时文件 +
+        #   rename" —— `tempfile.mkstemp` 建出来是 0600。不显式 chmod 的话，插件
+        #   配置会比主配置**更严**（root 读得到、别人读不到），而症状与插件毫无
+        #   关系，排查时指错方向。
         #
-        # ★★ 取 0640 当夹具是**刻意的**：`tempfile.mkstemp` 建出来是 0600，
-        #    而 umask 通常让普通新建文件是 0644 —— 拿这两个当夹具的话，
-        #    "把 chmod 那一行删掉"这个变异**一个用例都打不红**（结果碰巧相同，
-        #    那是等价变异）。0640 与两者都不同，删掉 chmod 当场露馅。
+        # ★★ 取 0640 当夹具是**刻意的**：0600 与 0644 都可能碰巧相同（那会让
+        #    "把 chmod 那一步删掉"变成等价变异，一个用例都打不红）。0640 与两者
+        #    都不同，删掉那一步当场露馅。
+        _CONF_M = os.path.join(_sy_home, "site5.conf")
+        with open(_CONF_M, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n")
+        os.chmod(_CONF_M, 0o640)
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
-        os.chmod(_CONF_B, 0o640)
-        _rc, _out = _sy_sync(_SY3, _CONF_B)
-        check("★★ 同步之后文件模式**没变**（写回是换了 inode 的）",
-              _rc == 0 and (os.stat(_CONF_B).st_mode & 0o777) == 0o640,
-              "%o" % (os.stat(_CONF_B).st_mode & 0o777))
+        _rc, _out = _sy_sync(_SY3, _CONF_M)
+        _p_m = mod.plugin_conf_path(_CONF_M, _U3)
+        check("★★ 新写的那一份模式照**主文件**（0640，不是 mkstemp 的 0600）",
+              _rc == 0 and (os.stat(_p_m).st_mode & 0o777) == 0o640,
+              "%o" % (os.stat(_p_m).st_mode & 0o777))
         check("★ 而且它**真的写了**（不是因为什么都没做才「没变」）",
-              "[plugin:solo]" in _sy_read(_CONF_B), _sy_read(_CONF_B)[-200:])
+              os.path.isfile(_p_m) and "enabled =" in _sy_read(_p_m),
+              _sy_read(_p_m)[-200:] if os.path.isfile(_p_m) else "（没有那个文件）")
 
         # ── ④d ★★ 报错要说清**成因**（两种成因的修法完全不同）────────────
         #
-        # 一个指向没装插件的块有两种：**安装器生成的**（插件被拿走了，配置没跟上）
-        # 与**手写的**（笔误/过时）。前者的修法是跑一次 `plugin sync`，后者不是。
+        # 一个指向没装插件的配置有两种：**安装器起的名字**（插件被拿走了，配置没
+        # 跟上）与**手写的**（笔误/过时）。前者的修法是跑一次 `plugin sync`，
+        # 后者不是。
+        # ★ 判据是**文件名**（是不是 ULID），不再是块头上面那行注释 —— 注释是
+        #   内容判据，改一个字、挪走一个空行就失效；名字是结构。
         # ★ 这一条同时钉住 `parse_config` 的第三个返回值**真的被用上了** ——
         #   只算出来不送出去，就是又一个 F35。
         _CONF_D = os.path.join(_sy_home, "site4.conf")
         with open(_CONF_D, "w", encoding="utf-8") as _f:
             _f.write("cluster_cidr = 192.0.2.0/24\n")
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
-        _rc, _out = _sy_sync(_SY3, _CONF_D)          # ⇒ 多出一个生成块
+        _rc, _out = _sy_sync(_SY3, _CONF_D)            # ⇒ 多出 <id>.conf 那一份
         os.unlink(os.path.join(_SY3, _U3 + ".splug"))  # 再把包拿走
-        _errs = " ".join(_sy_cfg(_SY3, _sy_read(_CONF_D),
-                                 "auto-hint.conf").validate())
-        check("★★ 指向没装插件的**生成块** ⇒ 报错要指出「跑一次 plugin sync」"
+        _errs = " ".join(_sy_cfg_now(_SY3, _CONF_D).validate())
+        check("★★ 指向没装插件的**安装器那份** ⇒ 报错要指出「跑一次 plugin sync」"
               "（那正是能修它的那个动作）",
-              "plugin sync" in _errs and "[plugin:solo]" in _errs, _errs[:300])
-        _errs2 = " ".join(_sy_cfg(
-            _SY3, "cluster_cidr = 192.0.2.0/24\n[plugin:typo2]\nenabled = yes\n",
-            "hand-hint.conf").validate())
-        check("★ 对照：**手写的**那种块不说这句话（sync 不会替他删，说了就是骗人）",
+              "plugin sync" in _errs and (_U3 + ".conf") in _errs, _errs[:300])
+        # ★ 先让 sync 把安装器那份收掉，再放一份手写的进去 —— 否则两条错误同时在，
+        #   `_errs2` 里那句指路（来自安装器那份）会把"手写那种不说这句话"测成假的。
+        _rc, _out = _sy_sync(_SY3, _CONF_D)
+        _p_hand = write_plugin_conf(_CONF_D, "typo2", "enabled = yes\n")
+        _errs2 = " ".join(_sy_cfg_now(_SY3, _CONF_D).validate())
+        check("★ 对照：**手写的**那种不说这句话（sync 不会替他删，说了就是骗人）",
               _errs2 != "" and "plugin sync" not in _errs2, _errs2[:300])
+        check("★ 而报错里带**文件路径** —— 插件配置不在主文件里了，只说名字等于"
+              "让管理员去翻一个他找不到的地方",
+              _p_hand in _errs2, _errs2[:300])
 
-        # ── ⑤ 清单声明 defaultEnabled=true 的插件 ⇒ 生成的块照实写 yes ────
+        # ── ④e ★★ 有人**手写**了它的配置 ⇒ 安装器不另写一份 ─────────────────
+        #
+        # ★★ 判据是「**有没有**配置指向这个插件」，不是"它叫什么名字"。少了这一条，
+        #    一个已经手写 `solo.conf` 的站点会在下一次 sync 之后**多出**一份
+        #    `<ULID>.conf` —— 两份指同一个插件，而那是 `--check` 的硬错误：
+        #    守护进程当场拒绝启动，症状与"插件坏了"毫无关系。
+        _CONF_H = os.path.join(_sy_home, "site6.conf")
+        with open(_CONF_H, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n")
+        _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
+        _p_by_hand = write_plugin_conf(_CONF_H, "solo", "enabled = yes\n")
+        _rc, _out = _sy_sync(_SY3, _CONF_H)
+        check("★★ 已经有手写的一份 ⇒ 安装器**不另写** `<id>.conf`"
+              "（两份指同一个插件是硬错误）",
+              _rc == 0 and not os.path.exists(mod.plugin_conf_path(_CONF_H, _U3)),
+              "rc=%d %r" % (_rc, _out[:300]))
+        check("★★ 而且配置照旧**自洽**：那份手写的按短名解析得到，开关也真的生效",
+              _sy_cfg_now(_SY3, _CONF_H).validate() == []
+              and _sy_cfg_now(_SY3, _CONF_H).plugin_config("solo").enabled is True,
+              str(_sy_cfg_now(_SY3, _CONF_H).validate())[:200])
+        check("★ 手写的那一份**逐字节没被动**",
+              _sy_read(_p_by_hand) == "enabled = yes\n", repr(_sy_read(_p_by_hand)))
+
+        # ── ⑤ 清单声明 defaultEnabled=true 的插件 ⇒ 生成的那一份照实写 yes ────
         #
         # ★★ 这一条防的是一处**静默的行为改变**：写死 `enabled = no` 的话，
         #    一个"一个块都没写"的站点（code-server 就靠清单缺省开着）会在装完
@@ -4654,20 +4776,22 @@ exit 0
             _f.write(_T_BASE)
         _eff_b = _sy_effective(_sy_cfg(_SY4, _T_BASE, "eff-t-before.conf"))
 
+        _t_p = mod.plugin_conf_path(_CONF_T, _U3)
         _rc, _out = _sy_sync(_SY4, _CONF_T, dry_run=True)
         check("★ 演练模式：报出**要做什么**（还没做），而且**一个字节都不写**",
               _rc == 0 and _sy_read(_CONF_T) == _T_BASE and "演练" in _out
-              and "[plugin:solo]" in _out, "rc=%d %r" % (_rc, _out[:300]))
+              and _t_p in _out and not os.path.exists(_t_p),
+              "rc=%d %r" % (_rc, _out[:300]))
 
         _rc, _out = _sy_sync(_SY4, _CONF_T)
-        _t_after = _sy_read(_CONF_T)
-        check("★★ 清单标了 defaultEnabled=true ⇒ 生成的块写 **enabled = yes**"
+        check("★★ 清单标了 defaultEnabled=true ⇒ 生成的那一份写 **enabled = yes**"
               "（照实说出生效值，不许把它关掉）",
-              _rc == 0 and "\nenabled = yes" in _t_after, _t_after[-320:])
+              _rc == 0 and os.path.isfile(_t_p)
+              and "\nenabled = yes" in _sy_read(_t_p),
+              _sy_read(_t_p)[-320:] if os.path.isfile(_t_p) else "（没有那个文件）")
         check("★★★ 而且生效值装前装后**逐项相同** —— 生成物不改行为",
-              _sy_effective(_sy_cfg(_SY4, _t_after, "eff-t-after.conf")) == _eff_b,
-              "%s → %s" % (_eff_b, _sy_effective(_sy_cfg(
-                  _SY4, _t_after, "eff-t-after2.conf"))))
+              _sy_effective(_sy_cfg_now(_SY4, _CONF_T)) == _eff_b,
+              "%s → %s" % (_eff_b, _sy_effective(_sy_cfg_now(_SY4, _CONF_T))))
 
         # ── ⑥ CLI 接线：`slurmate plugin sync` 真的转发到那个入口 ──────────
         _cli = load_cli()

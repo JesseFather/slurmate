@@ -139,6 +139,9 @@ PLUGINS_MARKER="${PLUGINS_DIR}/.installed"
 JOBS_MARKER="${JOBS_DIR}/.installed"
 CONF_DIR="/etc/slurmate"
 CONF="${CONF_DIR}/slurmate.conf"
+# 插件配置住在这里：**一个插件一个文件**（照 systemd 的 drop-in）。
+# 主文件只有站点通用键；插件那一份由安装器写、由它删。
+CONF_D="${CONF}.d"
 UNIT="/etc/systemd/system/slurmate-sessiond.service"
 SERVICE="slurmate-sessiond.service"
 
@@ -375,6 +378,28 @@ if [[ "$MODE" == "uninstall" ]]; then
         fi
         rm -f "$f" && ok "已删除 $f"
     done
+
+    # ── 插件配置（`${CONF}.d/`）────────────────────────────────────────────
+    # ★ 只删**安装器起的名字**那些（`<ULID>.conf`）。管理员手写的那几份
+    #   （`<短名>.conf`）留着 —— 与守护进程那一侧 `sync_plugin_config()` 一字
+    #   不差的同一条纪律：**判据是文件名，不是内容**。
+    #   上面那个循环的守卫是"内容里要有 slurmate"，对插件配置不成立（一份
+    #   `enabled = yes` 里当然没有这个词），所以它不能并进那个循环。
+    # ★ 目录非空时下面的 rmdir 静默失败 —— 那正是我们要的：里面还有别人的东西，
+    #   就留着。
+    if [[ -d "$CONF_D" ]]; then
+        for f in "$CONF_D"/*.conf; do
+            [[ -f "$f" && ! -L "$f" ]] || continue
+            if [[ "$(basename "$f" .conf)" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+                rm -f "$f" && ok "已删除插件配置 $f"
+            else
+                warn "保留 $f —— 它的名字不是安装器起的（不是 ULID），不敢删"
+                warn "      如确认要删请人工执行：rm -f '$f'"
+            fi
+        done
+        rmdir "$CONF_D" 2>/dev/null || true
+    fi
+
     # 只在目录为空时才删 —— 里面若有别人放的东西就留着
     rmdir "$SHARE_DIR" "$CONF_DIR" 2>/dev/null || true
     rm -f "$SOCKET" 2>/dev/null || true
@@ -926,7 +951,7 @@ install_one() {
 
 # 确保所有目标文件的父目录存在（真实系统上这些目录本来就在，但不能依赖这个前提）
 for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
-         "$(dirname "$UNIT")" "$STATE_DIR" "$PLUGINS_DIR" "$JOBS_DIR"; do
+         "$CONF_D" "$(dirname "$UNIT")" "$STATE_DIR" "$PLUGINS_DIR" "$JOBS_DIR"; do
     if [[ ! -d "$d" ]]; then
         run mkdir -p "$d"
         if [[ "$DRYRUN" -eq 1 ]]; then
@@ -940,7 +965,7 @@ done
 #   **提交作业的用户**身份的 sbatch 读取（守护进程 fork + setuid 之后 exec 它）。
 #   0770 或 0700 的表现是 sbatch 报「读不到文件」—— 而那句话指不回权限，
 #   会让人去查脚本是不是生成失败了。
-[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR" "$PLUGINS_DIR" "$JOBS_DIR"
+[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR" "$CONF_D" "$PLUGINS_DIR" "$JOBS_DIR"
 [[ "$DRYRUN" -eq 1 ]] || chmod 700 "$STATE_DIR"
 
 install_one "${SRC_DIR}/slurmate-sessiond"  "$DAEMON"  755
@@ -1305,21 +1330,51 @@ else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
 fi
 
-# ── 2c. 插件块与插件目录对齐 ───────────────────────────────────────────────
+# ── 主文件里还有老形态的 `[plugin:...]` 块 ⇒ 停下来指路 ─────────────────────
+#
+# ★ v0.12 起插件配置住在 `${CONF}.d/`（一个插件一个文件），主文件里那种块是
+#   **解析错误** —— 守护进程会拒绝起来，而症状是"整个站点起不来"。
+#
+# ★★ 本脚本**不替他搬**：那几行里可能有管理员调过的默认资源，自动搬一趟等于
+#    替他改他写的东西，而搬错了是**静默的**（值被合进哪一份、谁盖了谁，配置里
+#    看不出来）。所以停下来，把该做的动作说清楚。
+if grep -qE '^[[:space:]]*\[[[:space:]]*plugin:' "$CONF" 2>/dev/null; then
+    die "站点配置 ${CONF} 里还有老形态的 \`[plugin:...]\` 块，而本版起插件配置
+    住在 ${CONF_D}/ 里 —— 一个插件一个文件，文件名就是那个插件的短名或 id。
+
+    ★ 搬法：把块头那一行丢掉，剩下的键值写成 ${CONF_D}/<名字>.conf。例如
+
+          [plugin:sshd]
+          enabled = yes
+          default_cpus = 1
+
+      变成 ${CONF_D}/sshd.conf，内容只有
+
+          enabled = yes
+          default_cpus = 1
+
+    ★ 也可以一块都不搬：那些插件就是「装在本站、但没开」。跑一次
+      \`slurmate plugin sync\` 会把缺的那几份补上（用的是插件自己声明的缺省），
+      再按需要在补出来的那一份里改。
+    ★ 这个脚本不替你搬 —— 那几行里可能有你调过的默认资源。"
+fi
+
+# ── 2c. 插件配置与插件目录对齐 ─────────────────────────────────────────────
 #
 # ★ 装完/卸完之后、`--check` 之前，**必须**跑这一步。
 #
-#   一条插件块指向一个不在本站的插件是**启动错误**（守护进程会拒绝起来，连
+#   一份插件配置指向一个不在本站的插件是**启动错误**（守护进程会拒绝起来，连
 #   "停掉正在跑的会话"都做不到），而"从源目录里拿走一个包"正是最自然的卸载动作
-#   —— 上面 2b.1b 删掉的那些包，它们留下的块必须跟着走。
+#   —— 上面 2b.1b 删掉的那些包，它们留下的那一份必须跟着走。
 #
-# ★ 为什么是**一次对账**而不是在这里按"这次删了哪几个"逐个删块：
-#   判据是"目录里现在有什么"，所以它一次覆盖全部路径（deploy.sh 删的、管理员
-#   自己 `rm` 的、手动 `slurmate plugin install` 装的），而且幂等。
+# ★ 为什么是**一次对账**而不是在这里按"这次删了哪几个"逐个删：判据是"目录里
+#   现在有什么"，所以它一次覆盖全部路径（deploy.sh 删的、管理员自己 `rm` 的、
+#   手动 `slurmate plugin install` 装的），而且幂等。
 #   理由与取舍写在守护进程的 `sync_plugin_config()` 那一节。
 #
-# ★ 它只碰**安装器生成的**块（带边界标记的那些）。管理员手写的块一个字节都不动
-#   —— 手写的块指向一个没装的插件仍然是硬错误，那是他的东西，由 `--check` 报。
+# ★ 它写 `${CONF_D}/<ULID>.conf`、也只删那一个名字上的文件；管理员手写的
+#   `${CONF_D}/<短名>.conf` 一个字节都不动 —— 手写的那份指向一个没装的插件仍然
+#   是硬错误，那是他的东西，由 `--check` 报。
 #
 # ★ 它排在**这里**（conf 装完之后）而不是插件那一段：首次部署时 conf 还不存在，
 #   那时对账没东西可对（`CONF` 在上一个 if 里才落到盘上）。
