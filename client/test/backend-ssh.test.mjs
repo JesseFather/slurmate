@@ -295,6 +295,55 @@ test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVe
     '短路那一支漏了 daemonVersion ⇒ 每次重连都误报"对面不是我们的守护进程"');
 });
 
+test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上一台的身份冒充', async () => {
+  // ★★ 这一格是「系统报告成功，而事情没成」里最坏的一种，因为连"没成"都看不出来：
+  //    `_open()` 在"已经连着"时是**短路返回**上一条连接的 whoami / daemonVersion 的
+  //    （那是给同一台的第二次 connect 准备的），可它**不看要连的是哪一台**。
+  //    于是"换一条连接"的真实后果是：拨号 0 次、`_conn` 还是旧的那条、`_profile`
+  //    已经写成新的 —— 三种事实互相矛盾，而返回的是**上一台**的身份。
+  //    调用方（index.js 的 doConnect）据此认定"连上了新站点"：窗口标题写新站点、
+  //    界面上新站点显示「已连接」，而**每一次 RPC 都发给旧站点**。
+  const b = connectedBackend();               // _conn 在，_profile = u@h:1
+  b._whoami = { user: 'u' };
+  b._daemonVersion = '0.8';
+  const oldConn = b._conn;
+  let dialed = 0;
+  b._openOnce = () => {
+    dialed += 1;
+    b._conn = fakeConn();                     // 真拨号会把 _conn 换成新的那条
+    return Promise.resolve({ ok: true, whoami: { user: 'bob' }, daemonVersion: '0.9' });
+  };
+  const r = await b.connect({ user: 'bob', host: '192.0.2.9', port: 22 },
+    { privateKey: keys.generate().privateKeyPem });
+
+  assert.equal(dialed, 1, '换一台必须真的去拨号 —— 短路返回上一条就是"报告成功而事情没成"');
+  assert.equal(r.whoami.user, 'bob', '回来的必须是**新那一台**的身份');
+  assert.equal(r.daemonVersion, '0.9', '版本号也必须是新那一台的 —— 拿它去过版本闸');
+  assert.notEqual(b._conn, oldConn, '`_conn` 要换成新那条，旧的必须已经拆掉');
+  assert.deepEqual(b._profile, { user: 'bob', host: '192.0.2.9', port: 22 });
+
+  // ★ 判据是**三元组**，不是"主机名变了没有"：同一个登录节点上的**另一个端口**
+  //   是另一台守护进程（端口是配置里那条连接的一部分），它同样必须真拨号。
+  let dialed2 = 0;
+  b._openOnce = () => {
+    dialed2 += 1;
+    b._conn = fakeConn();
+    return Promise.resolve({ ok: true, whoami: { user: 'bob' }, daemonVersion: '0.9' });
+  };
+  const r2 = await b.connect({ user: 'bob', host: '192.0.2.9', port: 2222 },
+    { privateKey: keys.generate().privateKeyPem });
+  assert.equal(dialed2, 1, '★ 只有端口不同也是**另一台** —— 一样要真拨号');
+  assert.deepEqual(b._profile, { user: 'bob', host: '192.0.2.9', port: 2222 });
+
+  // ★ 反侧：**同一台**再 connect 一次仍然短路（不重复拨号）—— 这条语义不能被上面
+  //   那一改顺手去掉，每一次重连都真拨一次号是白花的。
+  let again = 0;
+  b._openOnce = () => { again += 1; return Promise.resolve({ ok: true }); };
+  const r3 = await b._open();
+  assert.equal(again, 0, '同一台的重连照旧走短路那一支');
+  assert.equal(r3.ok, true);
+});
+
 test('★ 断开之后 daemonVersion 跟着清掉（下一条连接不许报上一条的号）', async () => {
   // 它是**这一条连接**的事实，所以要与 `_conn` 同生共死：留着的话，下一条连接
   // 会拿着上一条的版本号去做判定 —— 而"上一条是哪一台"在两条连接之间没有任何保证。

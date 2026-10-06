@@ -156,6 +156,19 @@ let cfg = null;
  */
 let pins = {};
 let whoami = null;
+/**
+ * **后端正连着的那条连接**的 id（没连着时 `null`）。
+ *
+ * ★ 它与 `cfg.activeConnectionId` 是两个问题，别合并：那个字段答的是"**下一次**
+ *   要用哪一条"（界面在连之前就把它改掉了 —— `doConnectTo` 正是先
+ *   `setActiveConnection` 再 `connect`），而这个答的是"**现在**在哪一条上"。
+ *   换站点时要收的是后者的尾巴：上一个站点那些会话记录带着它的 `session_id`。
+ *   ⇒ 拿 `cfg.activeConnectionId` 去判"换没换"会在界面那条路上**永远判不出来**
+ *     （那一刻它已经等于目标了）。
+ *
+ * ★ 与 `whoami` 同生共死：`doConnect` 成功那一刻写，`teardownConnection` 清。
+ */
+let connectedConnId = null;
 let partitions = [];
 /**
  * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
@@ -641,6 +654,7 @@ async function doConnect(conn, extra = {}) {
       return gated;
     }
     whoami = res.whoami;
+    connectedConnId = conn.id;      // 见它的声明处：换站点时要收的就是这一条的尾巴
     await refreshPartitions();
     // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
     reconcileSitePlugins();
@@ -2835,6 +2849,7 @@ async function stopAllSessions() {
 async function teardownConnection() {
   await backend.close();
   whoami = null;
+  connectedConnId = null;   // 与 whoami 同生共死，理由见它的声明处
   partitions = [];
   // 断开之后就没有「站点开了哪些插件」可谈了
   sitePlugins = null;
@@ -2851,6 +2866,39 @@ async function teardownConnection() {
   pendingConsent = [];
   siteSync = null;
   versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
+}
+
+/**
+ * **离开这个站点**：本机手上那些记录一条都不留，然后拆掉连接。
+ *
+ * ★ 走 `abandon()` 而不是 `stop()` —— 后者会发 `goodbye`，而 `goodbye` 会让守护
+ *   进程 `scancel` 作业。这一步要的恰恰相反：用户只是**从这个站点走开**
+ *   （回列表，或者换一个站点），不是要取消那些作业。
+ *
+ * ★★ 两个调用点共用这一份：`app:leave`（【临时离开】，它前面还多一步 `leave`
+ *   请求，把看护者置空）与 `app:connect` 的「换一条连接」。各写一遍的话，下一次
+ *   加一样"本机这一侧"的东西（比如再来一份暂存树）就会漏掉一处，而症状是
+ *   "换到另一个站点之后，界面上还挂着上一个站点的东西"。
+ *
+ * ★★ 判据是**记录**（`sessions` 那张表），不是"有没有活着的会话"：已经结束的
+ *   那些记录**也带着上一个站点的 `session_id`**，留着它们，下一次心跳或 `goodbye`
+ *   就会拿旧站点的号去打新站点的守护进程 —— 而那是各自编的号，撞上了就是一次
+ *   打在别人作业上的 `scancel`。
+ *
+ * ★★ 而**临时实例**（多开时那条第二份）**不回收** —— 这里与 `stopAllSessions`
+ *   的最后那一步**故意不一样**。那边收尾时那些会话真的结束了，所以那份副本的
+ *   使命也完了；这边作业还在集群上跑，用户随时可能连回来接着看，
+ *   而那份副本里装着他的编辑器布局、打开的标签页、登录状态。
+ *   ★ "走开"这个动作的全部意思就是**什么都别动** —— 顺手删掉一份数据，
+ *     正是它要避免的那件事：用户回来时东西没了，而他以为自己只是走开一会。
+ *     与 `abandon()` 的另外两处调用（`tryReattach`、模拟重启）同一条取舍。
+ */
+async function leaveSite() {
+  for (const [slot, rec] of [...sessions.entries()]) {
+    if (rec.controller) await rec.controller.abandon();
+    sessions.delete(slot);
+  }
+  await teardownConnection();
 }
 
 /**
@@ -3426,6 +3474,29 @@ function registerIpc() {
     }
     if (!conn) return { ok: false, error: '还没有配置登录节点。', code: 'no_connection' };
 
+    // ★★ 要连的是**另一条**连接，而本机正连着一条 ⇒ 这是一次**换站点**，
+    //    而换站点的意思就是**离开上一个站点**。
+    //
+    //    ★ 它**必须先于 `doConnect`**，而且必须在**拨号之前**：本机手上那些记录
+    //      还带着上一个站点的 `session_id`（各站点的守护进程各自编号），留着它们，
+    //      接下来的心跳与 `goodbye` 就会拿旧站点的号去打新站点的守护进程 ——
+    //      撞上了就是一次打在**别的作业**上的 `scancel`。`abandon()` 一个字都不发。
+    //    ★ 顺带把连接现场也收掉（`whoami` / 分区 / 站点插件 / 待同意），否则
+    //      它们会以"上一个站点的事实"出现在新站点这一侧。
+    //    ★★ 判据是 `connectedConnId`（**正连着**的那条），**不是**
+    //      `cfg.activeConnectionId`（下一次要用哪一条）。界面那条路是**先**
+    //      `setActiveConnection` **再** `connect` 的 —— 那一刻配置里已经写成目标
+    //      那条了，拿它去判"换没换"会**永远判不出来**，于是这条收尾在界面上
+    //      一次都不会发生（而在其它入口上照常发生：同一个缺陷的形态是"两条入口
+    //      行为不一样"，最难查）。
+    //    ★ 保守的方向是"多收一次"：`connectedConnId` 是 null 而后端说连着（比如
+    //      "删掉正连着的那条连接"那条边），这里也会先收尾再连 —— 代价是一次多余的
+    //      收尾，而不是把旧站点的记录带过去。
+    //    ★ 界面那一道闸（renderer 的 `allowSwitchTo`）拦的是"还有会话在跑时不切"，
+    //      与这一条**不是同一条规矩**：那一条是产品约定（一个客户端只连一个站点），
+    //      这一条是"既然走了，就把本机这一侧收干净"。
+    if (backend.connected && connectedConnId !== conn.id) await leaveSite();
+
     // 显式点名要连哪一条，就是「这条是我要用的」。不跟着改的话，
     // 下次启动自动重连会连到另一台上去 —— 而用户完全看不出为什么。
     if (cfg.activeConnectionId !== conn.id) {
@@ -3620,21 +3691,7 @@ function registerIpc() {
               || '控制节点没有回应这次离开请求。' };
     }
 
-    // ★ 本机这一侧的记录**一条都不留**：用户已经离开这个站点了，页面也拆了。
-    //   走 `abandon()` 而不是 `stop()` —— 后者会发 `goodbye`，那正是这一步**全部
-    //   要避免的**那一件事（发了它，用户的作业就没了，而他以为自己只是走开一会）。
-    for (const [slot, rec] of [...sessions.entries()]) {
-      if (rec.controller) await rec.controller.abandon();
-      sessions.delete(slot);
-    }
-    // ★★ 而**临时实例**（多开时那条第二份）**不回收** —— 这里与 `stopAllSessions`
-    //   的最后那一步**故意不一样**。那边收尾时那些会话真的结束了，所以那份副本的
-    //   使命也完了；这边作业还在集群上跑，用户随时可能连回来接着看，
-    //   而那份副本里装着他的编辑器布局、打开的标签页、登录状态。
-    //   ★ "离开"这个动作的全部意思就是**什么都别动** —— 顺手删掉一份数据，
-    //     正是它要避免的那件事：用户回来时东西没了，而他以为自己只是走开一会。
-    //     与 `abandon()` 的另外两处调用（`tryReattach`、模拟重启）同一条取舍。
-    await teardownConnection();
+    await leaveSite();
     return { ok: true, left };
   });
 
@@ -4177,6 +4234,16 @@ module.exports = {
    */
   _test: {
     getBackend: () => backend,
+    /**
+     * **后端正连着的那条连接**的 id（没连着时 null）。
+     *
+     * ★ 用例要问"我们现在在哪一条上"时用它，**不要**用 `getCfg().activeConnectionId`
+     *   —— 那个答的是"下一次要用哪一条"，而这两件事**可以不一样**：界面是**先**
+     *   `setActiveConnection` **再** `connect`（见 `doConnectTo`），而只设活跃不连接
+     *   的入口也不止一处。拿它当"我在哪"会让用例在那些前提下问错问题
+     *   （把一次重连当成换站点，或者反过来）。
+     */
+    getConnectedConnId: () => connectedConnId,
     /**
      * 活着的会话：**槽 → 记录**。
      *

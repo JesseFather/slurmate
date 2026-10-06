@@ -1647,17 +1647,34 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   t.after(() => { Module._load = realLoad; });
 
   const idx = require('../src/main/index.js');
-  const conn = await invoke('app:saveConnection',
-    { user: 'demo', host: '203.0.113.9', port: 10100, label: '版本闸' });
 
-  // ★ 这个文件里的用例共用一个 Electron 实例，所以"一次会话都不许建"要拿
-  //   **前后对比**来说：直接断言 `app:state` 是 null 会被上一个用例留下的那个
-  //   `releasing` 会话判红 —— 而那与这道闸无关。
+  // ★★ 前提由这一条用例**自己建**：手上那张表清空、连在 demo 那条上，然后
+  //    **连的就是它**（一次"重连"，不是换站点）。两件事都得自己说，否则会红在一个
+  //    与这道闸无关的地方：
+  //    · 这个文件里的用例共用一个 Electron 实例，上一个用例留下的记录会出现在
+  //      下面那个"前后对比"里；
+  //    · "正连着的那条"可能是**已经被删掉**的那一条（别的用例会删连接），那时连
+  //      任何一条都是换站点 ⇒ `app:connect` 会先 `leaveSite()` 把记录收掉
+  //      （见 index.js 那一段的注释）。
+  //    ★ 目标也不能随手写 `getCfg().activeConnectionId`：那答的是"下一次要用哪一条"，
+  //      而界面是**先** `setActiveConnection` **再** `connect` —— 两块事实不一样时，
+  //      拿它当目标同样会让这一步变成一次换站点。
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const demo = await onlyDemoConnection(idx);
+  const here = idx._test.getConnectedConnId();
+  assert.equal(here, demo.id, '前提：现在连的是 demo 那条');
+  const target = idx._test.getCfg().connections.find((c) => c.id === here);
+  assert.ok(target, '前提：正连着的那条还在配置里');
+
+  // ★ "一次会话都不许建"拿**前后对比**来说：这样它证的是"这一步没让表长出东西来"，
+  //   而不是"表恰好是空的"。★ 这道闸的牙齿其实是上面那两条（`code === 'client_behind'`
+  //   与"连接已经关掉"）—— 那个 code 只有 `applyVersionGate` 产得出来。
   const sidBefore = (await frontSnap())?.sessionId ?? null;
 
   // ① 服务端更新、**同一个大版本** —— 那条要求咬人的那一格。
   await invoke('app:debug', 'daemon-version', '2.5');
-  const r = await invoke('app:connect', { connectionId: conn.connection.id });
+  const r = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r.ok, false, `客户端落后必须被拦住：${JSON.stringify(r)}`);
   assert.equal(r.code, 'client_behind', JSON.stringify(r));
   // ★ 两个版本号都要在：用户唯一能做的动作是升级客户端，他得知道升到哪一版。
@@ -1673,28 +1690,34 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
 
   // ② 反方向：同 x 而客户端**更新** —— 这是被承诺过的那一格，必须放行。
   await invoke('app:debug', 'daemon-version', '2.3');
-  const r2 = await invoke('app:connect', { connectionId: conn.connection.id });
+  const r2 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r2.ok, true,
     `同 x 且客户端更新 ⇒ 必须放行（"同 x 保证兼容"承诺的就是这一格）：${JSON.stringify(r2)}`);
 
   // ③ 跨大版本：**不拦**，但要说出来。
   await invoke('app:debug', 'daemon-version', '1.28');
-  const r3 = await invoke('app:connect', { connectionId: conn.connection.id });
+  const r3 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r3.ok, true,
     '跨大版本**不判为不兼容**（"不一定，不是绝对不"）—— 拦住它等于把"我们不知道"说成"不行"');
 
   // ④ 而"答了却没有能用的版本号"是另一件事：不拦，但绝不许被当成"旧"。
   await invoke('app:debug', 'daemon-version', '');
-  const r4 = await invoke('app:connect', { connectionId: conn.connection.id });
+  const r4 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r4.ok, true, JSON.stringify(r4));
 
   // 还原现场：这个文件里所有用例共用同一个 Electron 实例。
   await invoke('app:debug', 'daemon-version', null);
-  const back = await invoke('app:connect', { connectionId: conn.connection.id });
+  const back = await invoke('app:connect', { connectionId: target.id });
   assert.equal(back.ok, true, `还原现场失败（后面的用例都假定连着）：${JSON.stringify(back)}`);
-  await invoke('app:deleteConnection', conn.connection.id);
   assert.equal(idx._test.getBackend().connected, true,
     '收尾之后假后端必须还是连着的 —— 这个文件里后面的用例没做重连');
+  // ★ 而"连着"还不够：连接之后那一次**站点对账**是后台跑的（`reconcileSitePlugins`
+  //   故意不 await，理由见它自己的注释）。不等它落地，下一条用例的夹具（`setSitePlugins`
+  //   会**清空站点池那一棵树**）就会和它抢同一个目录 —— 症状是后面那条用例红在
+  //   "这个站点不分发插件"上，而它排查的是它自己。
+  //   ★ 走**产品里那个动词**（`app:syncPlugins` 自己 await 到对账跑完才返回），
+  //     不在这里 sleep 一段猜出来的时间。
+  await invoke('app:syncPlugins');
 });
 
 test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被管', async (t) => {
@@ -3864,6 +3887,62 @@ test('★★ ctx.connection() 只回这一条会话所属的那条连接 —— 
 
   await invoke('app:stop', { slot: b.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 换一条连接 = 离开上一个站点：本机那些记录一条都不留，而作业一个字不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);                        // C1
+  await onlyDemoConnection(idx);
+
+  const b = await invoke('app:start', null, 'sshd');
+  assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
+  const ctl = idx._test.sessionAt(b.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '中转站进入 running', 20000);
+  const sid = ctl.sessionId;
+  assert.ok(sid, '前提：这条会话在服务端有号了');
+
+  // 换一条连接（C2）。**这一步不停作业** —— 它只是让本机不再看着上一个站点那些
+  // 会话。而正是"不停"决定了本机手上那份记录必须**当场丢掉**：
+  const c2 = await invoke('app:saveConnection', { user: 'other', host: '127.0.0.2', port: 1 });
+  assert.equal(c2.ok, true, JSON.stringify(c2));
+  // ★★ 两步都要走，而且**次序照界面上那条路**（`doConnectTo`：先设活跃、再连）。
+  //    只走第二步的话，这条用例就漏掉了判据最容易写错的那一格 —— 那一刻
+  //    `cfg.activeConnectionId` **已经等于目标**了，拿它去判"换没换"永远判不出来，
+  //    于是这条收尾在界面上一次都不会发生（而别的入口照常发生）。
+  await invoke('app:setActiveConnection', c2.connection.id);
+  const r = await invoke('app:connect', { connectionId: c2.connection.id });
+  assert.equal(r.ok, true, JSON.stringify(r));
+
+  // ★★ 那一条记录不许还留在表里。它带着**上一个站点**的 session_id，而
+  //    session_id 是各个守护进程**各自编**的 —— 留着它，接下来的心跳、以及用户
+  //    点【结束】时那条 `goodbye`，就会拿旧站点的号去打**新站点**的守护进程；
+  //    两个站点上同一个 uid 是常事，撞上了就是一次打在**别人作业**上的 scancel。
+  for (const rec of idx._test.getSessions().values()) {
+    assert.notEqual(rec.controller, ctl,
+      '★★ 旧站点那条会话的 controller 不许还留在表里 —— 它带着旧站点的 session_id');
+  }
+  // ★ 而它是被 `abandon()` 收掉的（隧道拆了、心跳停了、**一个字都没发给服务端**），
+  //   不是被 `stop()` —— 那会发 `goodbye`，而 `goodbye` 会让守护进程 scancel 作业。
+  assert.equal(ctl.snapshot().tunnelState, 'stopped',
+    '★ 走的是 abandon 那条路（隧道拆掉），不是 stop');
+
+  // ★★ 服务端那一条**一个字都没动**：这是"离开"（回列表 / 换站点）与"断开"的分界。
+  //    ★ 判据是 `state === 'enrolled'`（还在跑）而**不是**"没有 released" ——
+  //    走错成 `stop()` 时守护进程收到的是 `goodbye`，它先把会话推进 `releasing`
+  //    （`phase_release` 里 scancel 作业），而 'releasing' 并不在
+  //    `['released','rejected','expired']` 里，那种写法会放它过去。
+  const onSite = onlyFake(idx._test.getBackend());
+  assert.ok(onSite, '作业在服务端还在 —— 换个站点不等于把作业停掉');
+  assert.equal(onSite.session_id, sid, '前提：还是刚才那一条');
+  assert.equal(onSite.state, 'enrolled',
+    `★★ 会话还在跑（当时的 state=${onSite.state}）—— 用户只是换了个站点看，`
+    + '这一步绝不能发 goodbye（`abandon()` 一个字都不发给服务端）');
+
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });

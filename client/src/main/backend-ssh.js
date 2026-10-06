@@ -539,6 +539,26 @@ class SshBackend extends Backend {
         return Buffer.isBuffer(blob) ? `${key.type} ${blob.toString('base64')} slurmate` : null;
       })(),
     };
+    // ★★ **换一台**：先把上一条连接拆掉，再拨号。
+    //
+    //    `_open()` 在 `this._conn` 还在的时候是**短路返回**上一条连接的
+    //    `whoami` / `daemonVersion` 的 —— 那是给"同一台机器的第二次 `connect`"
+    //    准备的（每一次重连都真拨一次号没有意义）。可它**不看要连的是哪一台**：
+    //    少了下面这一段，"换一条连接"会拿**上一台**的身份回来 —— 拨号次数 0、
+    //    `_conn` 还是旧的那条、`_profile` 却已经写成了新的（三种事实互相矛盾），
+    //    而调用方（`index.js` 的 `doConnect`）会把它当成"连上了新站点"：
+    //    **窗口标题写新站点、界面上新站点显示「已连接」，而每一次 RPC 都发给旧站点**。
+    //    这是"系统报告成功，而事情没成"里最坏的一种 —— 它连"没成"都看不出来。
+    //
+    //    ★ 判据是**三元组**而不是连接的 id：这一层不认识 id（id 是配置那一侧的事，
+    //      见 backend.js 的接口注释）。同一台机器的重复 `connect` 照旧短路。
+    //    ★ 位置在**私钥解析之后**：新那条的私钥要是不合法，本不该把旧连接拆掉。
+    const sameTarget = this._profile
+      && this._profile.user === profile.user
+      && this._profile.host === profile.host
+      && this._profile.port === profile.port;
+    if (this._conn && !sameTarget) await this.close();
+
     this._profile = { user: profile.user, host: profile.host, port: profile.port };
     this._closed = false;
     this._attempt = 0;

@@ -317,6 +317,66 @@ test('★★【临时离开】与【断开】：两个方向相反的动作，�
     '状态条与明细要印主进程给的那句原因，而不是自己编一句');
 });
 
+test('★★ 换站点那道闸：连着一条、而它上面还有会话在跑时，不切', () => {
+  // ★★ 客户端只保持**一条活跃连接**（产品约定，见 KNOWN-ISSUES 的 S26(a)）。
+  //    连着 A 的时候点 B，A 上那些正在跑的会话从此**不再被这台电脑看护**
+  //    （心跳没了 ⇒ 300 秒 `suspect`、1800 秒 `orphaned`、然后 `scancel`），
+  //    而用户点那个按钮的时候未必是这么想的。
+  //    ⇒ 有会话在跑时**不切**，并且**把话说清楚**：几条、当前是哪一条、
+  //      该去按哪两个按钮。只说"确定吗"，用户答不了 —— 他不知道代价是什么。
+  const gate = /function allowSwitchTo\(connId\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(gate, 'panel.js 里应当有 allowSwitchTo()');
+  assert.match(gate[0], /liveCount\(\)/,
+    '条数要问 `liveCount()` —— 与【断开】、【重启】**同一份定义**，各写一遍就会漂');
+  assert.match(gate[0], /window\.alert\(/,
+    '★ 用 alert 而不是 confirm：这里**没有第二个选项**可给（那句话不是"确定吗"）');
+  assert.match(gate[0], /\$\{n\} 条会话/,
+    '要点名**几条** —— 只说"确定吗"，用户答不了');
+  assert.match(gate[0], /【临时离开】/, '要说出去哪两个按钮');
+  assert.match(gate[0], /【断开】/, '★ 两个都要说 —— 一个作业继续跑，一个把作业停掉');
+  assert.match(gate[0], /connLabel\(cur\)/,
+    '要点名**当前连着的是哪一条** —— 这一屏上可能有好几条，说"当前这条"指不出来');
+
+  // ★★ 判据落在**动词的次序**上：拦下时 `setActiveConnection` 一次都不许被调到 ——
+  //    它一调，配置里"活跃连接"就已经是新那条了，而实际连着的是旧那条，
+  //    两份事实从此对不上（下一次启动会重连到用户没打算去的那台）。
+  const fn = /async function doConnectTo\(c\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(fn, 'panel.js 里应当有 doConnectTo()');
+  const gi = fn[0].indexOf('allowSwitchTo(');
+  const si = fn[0].indexOf('setActiveConnection(');
+  assert.notEqual(gi, -1, 'doConnectTo 必须先过那道闸');
+  assert.ok(gi < si,
+    '★★ 闸要在 `setActiveConnection` **之前** —— 反过来的话，"拦下"这件事发生时'
+    + '活跃连接已经被改掉了');
+
+  // ★ 「保存并连接」是**第二个**能换站点的入口：少了这道闸，用户从「新建连接」
+  //   那条路照样绕得过去，而"不许换"就成了摆设。
+  const save = /\$\('btn-save'\)\.onclick = async \(\) => \{[\s\S]*?\n  \};/.exec(js);
+  assert.ok(save, "panel.js 里应当有 btn-save 的处理函数");
+  const bi = save[0].indexOf('allowSwitchTo(');
+  assert.notEqual(bi, -1, '「保存并连接」那条路也要过同一道闸');
+  const bj = save[0].indexOf('boot.activeConnectionId = saved.connection.id');
+  assert.notEqual(bj, -1, '这条路上还是要把它设成活跃的（连的就是它）');
+  assert.ok(bi < bj,
+    '★ 闸要在**改 `boot.activeConnectionId` 之前**问 —— 改完之后"这次要连的是不是'
+    + '另一条"就永远问不出真话了（那一刻它已经等于目标）');
+
+  // ★★ 而**编辑**一条连接那条路一个字都不许碰它：那个按钮这时写的是「保存」
+  //    （不是「保存并连接」），主进程那边活跃连接也一个字都没动
+  //    （`app:saveConnection` 只在从来没有活跃连接时才设它）。把它指过去的话，
+  //    界面会当场把一条**没连着**的连接画成「已连接」—— 而"哪一条连着"是这一屏
+  //    上最要紧的一格。同一个赋值**从前就在** `if (editing)` 之前，于是
+  //    `wasLive` 那个比较恒为真：「这条连接正连着」这句会被念给一条没连着的连接。
+  const ei = save[0].indexOf('if (editing)');
+  assert.notEqual(ei, -1, '编辑那条路还在这个函数里');
+  assert.ok(bj > ei,
+    '★★ `boot.activeConnectionId = …` 必须排在 `if (editing)` **之后**（只有真的'
+    + '去连它时才设），否则编辑一条没连着的连接会把它画成「已连接」');
+  const wi = save[0].indexOf('const wasLive =');
+  assert.ok(wi !== -1 && wi < bj,
+    '★ `wasLive` 要在**改它之前**算 —— 之后算的话那个比较恒为真');
+});
+
 test('panel.js 不用 window.prompt —— 它在 Electron 里直接抛异常', () => {
   // 不是返回 null，是抛 "prompt() is and will not be supported"。
   // 改名走的是页面内的 <input>（见 startRename）。

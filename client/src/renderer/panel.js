@@ -506,6 +506,17 @@ function renderKey(k) {
 }
 
 // ── 连接列表 ────────────────────────────────────────────────────────────────
+
+/**
+ * 一条连接在界面上叫什么：**有备注就用备注，没有才回落成地址**。
+ *
+ * ★ 一处定义、别处指路。列表那一行用的是它，"换站点"那道闸说的话里也要点名
+ *   当前这条 —— 各写一遍的话，漂开的方向是"框里说的那条，用户在这一屏上找不到"。
+ */
+function connLabel(c) {
+  return (c && c.label) || `${c.user}@${c.host}:${c.port}`;
+}
+
 function renderConnections(list) {
   const box = $('conn-list');
   box.textContent = '';
@@ -530,7 +541,7 @@ function renderConnections(list) {
     // 有备注就显示备注 —— 用户给它起了名，就是为了不必再读地址。
     // 没起名才回落成地址。**两者取其一，不并排显示**：并排等于把备注降级成一个
     // 前缀，那这个名字就白起了，用户还是得去读那串地址。
-    t.textContent = c.label || `${c.user}@${c.host}:${c.port}`;
+    t.textContent = connLabel(c);
     // 地址仍然在，只是不占地方 —— 鼠标停一下就能看到。
     t.title = `${c.user}@${c.host}:${c.port}`;
 
@@ -2430,11 +2441,24 @@ async function init() {
     const saved = await window.slurmate.saveConnection(input);
     if (!saved.ok) return notice('error', saved.error);
     boot.connections = saved.connections;
-    boot.activeConnectionId = saved.connection.id;
-    renderConnections(boot.connections);
+
+    // ★★ 两道判据都必须在**动 `boot.activeConnectionId` 之前**问，而且它们问的
+    //    都是同一件事："这一刻哪一条才是活着的"。它一旦被改掉，两句话就都算错了。
+    //
+    //    · `wasLive` —— 编辑**这一条**时它正连着吗？从前它是在赋值**之后**算的，
+    //      于是那个比较恒为真：编辑任何一条连接都会得到「这条连接正连着 ——
+    //      新地址要重新点一次连接才会生效」，而用户可能压根没连着它。
+    //    · `allowSwitchTo` —— 这一步要不要**换站点**（见它的注释）。
+    //
+    //    ★ 还有一层：编辑这条路上**根本不该**碰 `boot.activeConnectionId`。
+    //      这个按钮这时写的是「保存」（不是「保存并连接」，见 openEditForm），
+    //      而主进程那边活跃连接一个字都没动（`app:saveConnection` 只在从来没有
+    //      活跃连接时才设它）。把它指过去的话，界面会当场把一条**没连着**的连接
+    //      画成「已连接」—— 而"哪一条连着"是这一屏上最要紧的一格。
+    const wasLive = connected && saved.connection.id === boot.activeConnectionId;
 
     if (editing) {
-      const wasLive = connected && saved.connection.id === boot.activeConnectionId;
+      renderConnections(boot.connections);
       closeForm();
       notice('ok', '已保存这条连接。');
       if (wasLive) {
@@ -2444,6 +2468,19 @@ async function init() {
       return;
     }
 
+    // ★ 换站点那道闸（见 `allowSwitchTo`）问在**改 `boot` 之前**：这一刻
+    //   `boot.activeConnectionId` 还是"正连着的那条"，所以"这次要连的是不是
+    //   另一条"问得准。
+    // ★ 被拦下时这条连接**留着**（已经存进去了、也在列表里），只是这一次不连它 ——
+    //   那句话由 `allowSwitchTo` 说。
+    if (!allowSwitchTo(saved.connection.id)) {
+      renderConnections(boot.connections);
+      notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
+      return closeForm();
+    }
+
+    boot.activeConnectionId = saved.connection.id;
+    renderConnections(boot.connections);
     notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
     await handleConnectResult(
       await window.slurmate.connect({ connectionId: saved.connection.id }));
@@ -2617,8 +2654,45 @@ async function init() {
   showScreen('conns');
 }
 
+/**
+ * 换站点之前的那道闸：**连着一条、而它上面还有会话在跑时，不切。**
+ *
+ * ★★ 这不是一句"确定吗"。客户端只保持**一条活跃连接**（见 KNOWN-ISSUES 的
+ *   S26(a)）—— 连着 A 的时候点 B，A 上那些正在跑的会话从此**不再被这台电脑
+ *   看护**（心跳没了 ⇒ 300 秒 `suspect`、1800 秒 `orphaned`、然后 `scancel`），
+ *   而用户点那个按钮时未必是这么想的。⇒ 有会话在跑时**不切**，把话说清楚，
+ *   让他自己去按那一个**说得出后果**的按钮 —— 两个就在这一屏的标题栏上：
+ *   【临时离开】（作业继续跑）与【断开】（作业停掉）。
+ *   ★ 所以这里**没有第二个选项**可给，用的是 alert 而不是 confirm：confirm 的
+ *     "确定"会把上面那句后果变成一个用户随手按掉的开关。
+ *
+ * ★ 拦的是"换到**别的**连接"，不是"重连当前这一条"：目标是当前活跃连接时直接
+ *   放行（否则地址没变的重连会被自己挡住）。
+ * ★ 判据用 `liveCount()`，与【断开】、【重启】那两处**同一份定义** —— 各写一遍的话，
+ *   漂开的方向是"这个框说 2 条、那个框说 1 条"，而用户会以为自己看错了。
+ *
+ * @returns {boolean} true = 可以继续；false = 已经拦下、并且把话说完了
+ */
+function allowSwitchTo(connId) {
+  const n = liveCount();
+  if (!connected || !n) return true;
+  if (connId && connId === boot.activeConnectionId) return true;   // 重连当前这条
+  const cur = (boot.connections || []).find((x) => x.id === boot.activeConnectionId);
+  window.alert(
+    `当前还连着「${cur ? connLabel(cur) : '这一条'}」，它上面有 ${n} 条会话在跑。\n\n`
+    + '一个客户端同时只连一个站点。要换过去，请先在这一屏把当前这条收掉：\n'
+    + '· 【临时离开】—— 作业继续在集群上跑（但没人看着它 35 分钟就会被回收）\n'
+    + '· 【断开】—— 把作业停掉\n\n'
+    + '这两个按钮就在这一屏的标题栏上。');
+  return false;
+}
+
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
 async function doConnectTo(c) {
+  // ★★ 闸在**改任何状态之前**：拦下时 `setActiveConnection` 一次都不许被调到 ——
+  //   它一调，配置里"活跃连接"就已经是新那条了，而实际连着的是旧那条，
+  //   两份事实从此对不上（下一次启动重连会连到用户没打算去的那台）。
+  if (!allowSwitchTo(c.id)) return;
   const r = await window.slurmate.setActiveConnection(c.id);
   if (!r.ok) return notice('error', r.error);
   boot.activeConnectionId = c.id;
