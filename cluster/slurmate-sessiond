@@ -1436,6 +1436,11 @@ def scan_plugins(plugins_dir):
       所以留在那儿就等于一份**看不见的副本**（含客户端代码的那种最要紧）。
       报出来是它唯一的出口 —— 见到一个就报一条。
 
+    ★★ **两条去重规则，只有一条还在**（v0.11 阶段 2+3）：
+      · **id 撞** ⇒ 两个都不收（同一个身份两份作业侧代码）；见下面那一段。
+      · **短名撞** ⇒ **不去重**，两个都收。短名只是本站给人看的名字，不同 id
+        同名是允许并存的 —— 配置里用 `[plugin:<id>]` 区分即可。
+
     目录不存在时返回**空的**、且**不是错误** —— 一个插件都没装是合法状态。
     """
     specs, problems = [], []
@@ -1471,17 +1476,40 @@ def scan_plugins(plugins_dir):
         if spec is None:
             problems.extend(probs)
             continue
-        dup = next((s for s in specs if s.name == spec.name), None)
+        dup = next((s for s in specs if s.id == spec.id), None)
         if dup is not None:
-            # 短名必须站点内唯一：它是配置块名，也是作业侧函数名的后缀。
-            # 两个包抢一个短名时**两个都不收** —— 挑一个的后果是"哪个生效"取决于
-            # 文件名的字典序，而那是没人会想到去查的地方。
-            problems.append("%s：短名 %r 与 %s 里的那个重复了，两个都不加载"
-                            % (full, spec.name, dup.source_package))
-            specs = [s for s in specs if s.name != spec.name]
+            # ★★ 判据是 **id**，不是短名 —— 这两个的严重程度差着一层：
+            #
+            #   · **短名撞**（不同 id、同名）：**允许**。短名只是本站给人看的名
+            #     字，配置块改写成 `[plugin:<id>]` 就能各配各的（见
+            #     `Config.resolve_plugin`）。所以这里**不去重**。
+            #   · **id 撞**（同一个身份两份包）：**两个都不收**。真身份重了 ——
+            #     deploy.sh 织出来的作业脚本按 **id** 命名（`jobs/<id>.sbatch`），
+            #     后织的会**静默覆盖**先织的那一份，于是其中一个插件的作业侧代码
+            #     整个丢掉。挑一个的后果还取决于目录名的字典序，而那是没人会想到
+            #     去查的地方。
+            #
+            # ★ 正常路径装不出这个形状：安装器按 id 给文件命名、装的时候就拒同 id
+            #   （`install_plugins` 的 `seen_id`）。所以见到它基本只有一种解释 ——
+            #   有人绕过安装器往这个目录里放了东西。报错要把那条出路指出来。
+            #
+            # ★ **不拿文件名当判据**：作者发布的包名是 `<目录名>-<版本>.splug`
+            #   （packer 的产物），"文件名就是 id"只是**安装器**的纪律，
+            #   而这里刻意不依赖任何一方的纪律 —— 对不上就当场说。
+            problems.append(
+                "%s：id %s 与 %s 是**同一个插件**（同一个 id 的两个包）。\n"
+                "        两个都不加载：作业脚本按 id 命名，后一份会**静默覆盖**"
+                "前一份，其中一个插件的作业侧代码会整个丢掉。\n"
+                "        正常装不出这个形状（安装器按 id 命名文件、装的时候就拒"
+                "同 id）⇒ 有人绕过了安装器。删掉其中一个，或者用 "
+                "`slurmate plugin install` 重装一遍。"
+                % (full, spec.id, dup.source_package))
+            specs = [s for s in specs if s.id != spec.id]
             continue
         specs.append(spec)
-    return tuple(sorted(specs, key=lambda s: s.name)), tuple(problems)
+    # ★ 排序键带上 id：短名**不再是唯一的**，只按短名排的话两条同名插件的先后
+    #   会跟着目录遍历的次序变 —— 而"每次启动顺序都不一样"是最难查的那类。
+    return tuple(sorted(specs, key=lambda s: (s.name, s.id))), tuple(problems)
 
 JOB_LOG_SUBDIR = ".slurmate/logs"
 
@@ -2532,54 +2560,51 @@ class PluginConfig(object):
         return self.enum.get("auth_mode") or "none"
 
 
-def build_plugin_configs(specs, sections):
-    """把配置里的块摊成 {插件名: PluginConfig}。**每个装了的插件都有一项**，
+def build_plugin_configs(specs, blocks):
+    """把配置里的块摊成 **{插件 id: PluginConfig}**。**每个装了的插件都有一项**，
     哪怕站点没写它的块 —— 因为「没写」和「写着但关掉了」在行为上等价，
     但在自检输出里必须分得开。
+
+    ★ 键是 **id**，不是短名：短名可以重复（不同 id 同名的插件允许并存），
+      拿它当键的话后一个会静默盖掉前一个。
+
+    `blocks` 是 `{id: (块内容, 块的名字)}` —— 由 `Config.__init__` 解析好。
+    **"哪个块属于谁"的判据只有 `Config.resolve_plugin()` 一处**，
+    这里不自己按名字去 `sections` 里找一遍（两份实现会漂开）。
     """
     out = {}
     for spec in specs:
-        raw = sections.get(spec.name)
-        out[spec.name] = PluginConfig(spec, raw or {}, raw is not None)
+        raw, key = blocks.get(spec.id, ({}, None))
+        out[spec.id] = PluginConfig(spec, raw, key is not None)
     return out
 
 
-def section_names_problem(sections, by_name):
-    """块名有没有认不出的。返回错误串列表（空 = 没问题）。
+def section_names_problem(sections, resolve):
+    """块名有没有认不出的、或者**有歧义**的。返回错误串列表（空 = 没问题）。
 
     ★ 报错而不是忽略：写成 `[plugin:ssh]`（少个 d）被静默忽略，症状是
       「配了但它就是不生效」—— 与未知键那条要防的是同一类问题。
 
-    ★ 一个插件都没装时这句话要说**安装**，不是"名字写错了"：那是两种完全不同的
-      行动（去装一个 vs 去改一个字），而它们在配置里长得一模一样。
+    ★ 歧义（本站有两个插件共用同一个短名）**也是错**：那时只有**插件的 id**
+      指得清是哪一个，所以那句话由 `resolve_plugin()` 说 —— 它把是哪几个 id
+      列出来。**判据只有那一处**，这里不自己再判一遍。
     """
     errors = []
     for name in sorted(sections):
-        if name in by_name:
+        _spec, why = resolve(name)
+        if why is None:
             continue
-        if by_name:
-            errors.append(
-                "[plugin:%s] 是个未知的插件。本站**装了**的是：%s。"
-                "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录、"
-                "再跑一次 deploy.sh，见 plugins/README.md。）"
-                % (name, "、".join(sorted(by_name))))
-        else:
-            errors.append(
-                "[plugin:%s] 指向一个插件，而本站**一个插件都没装**。"
-                "插件安装目录是空的，所以任何 [plugin:*] 块都不可能生效。"
-                "把一个 .splug 包放进去再跑一次 deploy.sh 即可"
-                "（见 plugins/README.md）。"
-                % name)
+        errors.append("[plugin:%s]：%s" % (name, why))
     return errors
 
 
-def block_keys_problem(sections, by_name):
+def block_keys_problem(sections, resolve):
     """块内的键有没有认不出的。返回错误串列表（空 = 没问题）。"""
     errors = []
     for name in sorted(sections):
-        spec = by_name.get(name)
+        spec, _why = resolve(name)
         if spec is None:
-            continue                    # 块名本身就不认识，那条错误已经报过了
+            continue                    # 块名本身就不对，那条错误已经报过了
         allowed = spec.block_keys()
         for key in sorted(sections[name]):
             if key in allowed:
@@ -2622,13 +2647,29 @@ class Config(object):
         # 先扫盘 —— 配置里的 [plugin:*] 块要对照它才知道认不认识。顺序不能反。
         self.plugins_dir = default_plugins_dir()
         self.plugin_specs, self.plugin_problems = scan_plugins(self.plugins_dir)
-        self.plugin_by_name = {s.name: s for s in self.plugin_specs}
+
+        # ── 插件怎么被**找到**：两张表，别把它们合并 ────────────────────────
+        #
+        #   · `plugins_by_id`   —— **id → spec**，永远一对一。id 是铸造出来的
+        #     身份，一个插件一份包，`scan_plugins` 已经保证它不重复。
+        #   · `plugins_by_name` —— **短名 → [spec, …]**，**一对多**。
+        #
+        # ★★ 名字那一侧必须是一对多：v0.11 起**不同 id 同名的插件允许并存**
+        #   （短名只是本站给人看的名字）。用 `{s.name: s}` 收的话，后一个会
+        #   **静默盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
+        #
+        # ★ 唯一那个"名字 → 具体哪一个"的判据在 `resolve_plugin()` 里，别处
+        #   不要再写一遍：同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
+        self.plugins_by_id = {s.id: s for s in self.plugin_specs}
+        self.plugins_by_name = {}
+        for _s in self.plugin_specs:
+            self.plugins_by_name.setdefault(_s.name, []).append(_s)
 
         # 认不出来的键/块/块内键不在构造时报错，攒着交给 validate() —— --check
         # 要能一次把问题列全，而不是让人改一个跑一次。
         self.unknown_keys = sorted(set(raw) - GLOBAL_KEYS)
-        self.bad_sections = section_names_problem(sections, self.plugin_by_name)
-        self.bad_block_keys = block_keys_problem(sections, self.plugin_by_name)
+        self.bad_sections = section_names_problem(sections, self.resolve_plugin)
+        self.bad_block_keys = block_keys_problem(sections, self.resolve_plugin)
 
         def get(key, default=""):
             return raw.get(key, default)
@@ -2661,11 +2702,22 @@ class Config(object):
         # 每个【装了的】插件都有一项，哪怕站点没写它的块（见 build_plugin_configs）。
         # 默认资源、可执行文件路径、auth_mode 这些**插件的策略**住在这里的块里，
         # 而它们的缺省值来自插件自己的清单（plugin.json 的 site 段）。
-        self.plugins = build_plugin_configs(self.plugin_specs, sections)
-        # 已启用的插件名，按名字排序 —— 稳定顺序，界面与日志才不会每次都不一样。
+        # ★ 键是 **id**（与 `plugins_by_id` 同一个理由：短名可以重复）。块的归属
+        #   先在这里解析好 —— "哪个块属于谁"的判据只有 `resolve_plugin()` 一处，
+        #   不让 `build_plugin_configs` 自己再拼一遍。
+        blocks = {}
+        for _key in sorted(sections):
+            _spec, _why = self.resolve_plugin(_key)
+            if _spec is not None:
+                blocks[_spec.id] = (sections[_key], _key)
+        self.plugins = build_plugin_configs(self.plugin_specs, blocks)
+        # 「本站开了哪些」—— 一份**短名**清单，给日志与 --check 看。
+        # ★ 它是**去重**的：两个不同 id 的插件可以共用一个短名，而"开了 jup、jup"
+        #   不是一句读得通的话。协议那一侧不受影响 —— 客户端看的是每个插件自己
+        #   的 `enabled` 字段（`op_plugins`）。
         # ★ enabled_kinds 才是"本站开了哪些"，**不是**"配置里有哪些块"。
         self.enabled_kinds = tuple(sorted(
-            n for n, p in self.plugins.items() if p.enabled))
+            {p.name for p in self.plugins.values() if p.enabled}))
 
         # ── 提交时的缺省服务种类 ────────────────────────────────────────────
         # ★ 刻意**没有**硬编码的缺省，也刻意**不**用"表里唯一的那个"当缺省：
@@ -2758,9 +2810,66 @@ class Config(object):
         self.sinfo = resolve_bin("sinfo", get("sinfo"))
         self.sshare = resolve_bin("sshare", get("sshare"))
         self.sacct = resolve_bin("sacct", get("sacct"))
-    def plugin(self, name):
-        """取一个插件的生效配置。名字不认识返回 None（调用方负责报错）。"""
-        return self.plugins.get(name)
+    def resolve_plugin(self, key):
+        """把一个**用户写得出来的名字**解析成一个 `PluginSpec`。
+
+        `key` 是 `[plugin:<key>]` 里的那个 key，或者提交时的 `service_kind`。
+        返回 `(spec, why)`：认得出时 `why` 是 `None`；否则 `spec` 是 `None`，
+        而 `why` 是一句**能直接念给用户听**的话。
+
+        ★ 两种写法都收：
+          · **短名** —— 本站内给人看的名字（配置块名与 `service_kind` 都是它）；
+          · **id** —— 那个铸造出来、永不变的标识符。
+
+        ★★ 短名**不再是唯一的**（不同 id 同名允许并存），所以短名只在**本站只有
+          一个**插件用它时才算数；有歧义时**要求写 id**，并把是哪几个列出来 ——
+          挑一个的后果是"哪个生效"取决于遍历次序，而那是没人会想到去查的地方。
+
+        ★ 一个插件都没装时那句话要说**安装**，不是"名字写错了"：那是两种完全不同
+          的行动（去装一个 vs 去改一个字），而它们在配置里长得一模一样。
+
+        ★★ **这是"名字 → 具体哪一个"的唯一判据。** 别处不要再写一遍 ——
+          同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
+        """
+        if not key:
+            return None, "名字是空的。"
+        spec = self.plugins_by_id.get(key)
+        if spec is not None:
+            return spec, None
+        same = self.plugins_by_name.get(key) or []
+        if len(same) == 1:
+            return same[0], None
+        if len(same) > 1:
+            return None, (
+                "%r 是本站**几个**插件共用的短名，所以它认不出你指的是哪一个 —— "
+                "请改用**插件的 id**（那一个永远是唯一的）：%s"
+                % (key, "、".join("%s（id %s）" % (s.title or s.name, s.id)
+                                  for s in sorted(same, key=lambda s: s.id))))
+        if not self.plugin_specs:
+            return None, (
+                "本站**一个插件都没装**，所以任何名字都配不上。插件安装目录 %s "
+                "是空的。（装插件是把一个 .splug 包放进去、再跑一次 deploy.sh，"
+                "见 plugins/README.md。）" % self.plugins_dir)
+        # ★ 那句话必须说清"装插件"是**放一个包**，不是"放一个目录" —— 它是管理员
+        #   唯一会照着做的那句，说错对象等于把他指到一个不存在的动作上。
+        return None, ("本站没有装叫 %r 的插件。装了的是：%s。"
+                      "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录 "
+                      "%s、再跑一次 deploy.sh，见 plugins/README.md。）"
+                      % (key, "、".join(sorted(self.plugins_by_name)) or "（一个都没有）",
+                         self.plugins_dir))
+
+    def plugin_config(self, key):
+        """取一个插件的**生效配置**（`PluginConfig`）—— 按短名或 id。
+
+        ★ 给**内部调用方与用例**用：认不出或有歧义时它**抛**，不返回 None。
+          调用方在这一刻都自以为知道指的是哪一个，悄悄给一个 None 会把一处笔误
+          变成一个看起来像"这个插件没配置"的现象。**要一句给用户看的话，
+          用 `resolve_plugin()`。**
+        """
+        spec, why = self.resolve_plugin(key)
+        if spec is None:
+            raise KeyError("[plugin:%s]：%s" % (key, why))
+        return self.plugins[spec.id]
 
     def cluster_cidr_problem(self):
         """cluster_cidr 的**形式**问题描述；没问题返回 None。
@@ -2873,15 +2982,14 @@ class Config(object):
         #
         # 插件坏了**同样不是**启动错误：一个插件坏了不该带走整个站点。它由
         # --check 逐条打印，也在 start() 里进日志。
-        if self.default_plugin and self.default_plugin not in self.plugin_by_name:
-            errors.append(
-                "配置里的 default_plugin = %r 在本站**没有装**。装了的插件是：%s。"
-                "（装插件是把一个 .splug 包放进插件安装目录 %s 再跑一次 "
-                "deploy.sh。）"
-                % (self.default_plugin,
-                   "、".join(sorted(self.plugin_by_name)) or "（一个都没有）",
-                   self.plugins_dir))
-        elif self.default_plugin and not self.plugins[self.default_plugin].enabled:
+        # ★ 解析走 `resolve_plugin()` —— 于是 default_plugin 也能写 **id**
+        #   （短名有歧义时那是唯一的写法），而且"配不上"那句话由那一处说。
+        _dft_spec, _dft_why = (self.resolve_plugin(self.default_plugin)
+                               if self.default_plugin else (None, None))
+        if self.default_plugin and _dft_spec is None:
+            errors.append("配置里的 default_plugin = %r 配不上：%s"
+                          % (self.default_plugin, _dft_why))
+        elif self.default_plugin and not self.plugins[_dft_spec.id].enabled:
             # ★★ **装了、但关着** —— 这是配置里两处互相打架，不是合法状态。
             #
             #   少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
@@ -5883,10 +5991,17 @@ class Sessiond(object):
 
         `title` 的用途是**兜底标签**：客户端认得这个插件时用它自己的名字（那才
         对应它实际会做的事）；不认得时至少能显示"站点提供了一个叫 X 的东西"。
+
+        ★★ **顶层还有一个 `problems`**（账本 F22）：那些**没能加载**的包与为什么。
+          它与 `plugins` 是两件事 —— 这里列的是**能用的**，那里说的是"另外还有些
+          用不了的"。少了它，客户端看到的就是「本站没有这个插件」，而真相可能是
+          「本站有两个、因为撞名/撞 id 没被加载」，运维的排查方向从第一步就是错的。
         """
         out = []
-        for name in sorted(self.cfg.plugins):
-            p = self.cfg.plugins[name]
+        # ★ 排序键是 **(短名, id)**，不是短名一个：短名不再唯一，只按它排的话
+        #   两条同名插件的先后会跟着 dict 的插入次序变 —— 而"两次启动顺序不一样"
+        #   是最难查的那类。
+        for p in sorted(self.cfg.plugins.values(), key=lambda c: (c.name, c.spec.id)):
             out.append({
                 # `id` + `version` 是**解析键**：客户端拿它去自己的插件池里找
                 # 配套的那一半。`name` 只是**站点内**的短名，用于配置块与日志 ——
@@ -5934,6 +6049,26 @@ class Sessiond(object):
         return self._ok({
             "plugins": out,
             "enabled": list(self.cfg.enabled_kinds),
+            # ── ★★ 站点级的插件问题（账本 **F22**）─────────────────────────
+            #
+            # 那些**没能加载**的包（同 id 两个包、不是一个包、清单读不出来……）
+            # 从前只有登录节点上的人看得见：`--check-plugins` 打一行、`--check`
+            # 打一条 ⚠、`start()` 记一条日志 —— 而**协议里一个字都没有**。
+            # 于是客户端看到的是「本站没有这个插件」，真相却是「本站有两个、
+            # 因为撞了没被加载」：**运维在客户端上排查，方向从第一步就是错的。**
+            #
+            # ★ 形状与 `limits` 同一档：**顶层、站点级、有就有没有就没有**。
+            #   它与「这个插件怎么样」不是一回事 —— `plugins[]` 里每一条都是
+            #   **能用的**插件，这里说的是"另外还有些用不了的，以及为什么"。
+            #
+            # ★ 它**不阻塞任何东西**：一个插件坏了不该让整个站点起不来（起不来
+            #   连"停掉正在跑的会话"都做不到）。所以它是**通报**，不是错误码 ——
+            #   与 `plugin_problems` 在 --check / 日志里那条路逐字同源。
+            #
+            # ★★ **加了这个字段就必须有人读它。** 只加协议不接界面，等于又造一个
+            #   F35（算出来了、没送出去）：客户端那一侧要在插件那一栏把这几条
+            #   画出来，否则运维看到的仍然只是"本站没有这个插件"。
+            "problems": list(self.cfg.plugin_problems),
             # 上限也是**自述**：客户端取"它自己的硬上限"与"这里报的"中更严的那个。
             # 名字叫 limits 而不是 policy，是因为它不是本站定的策略，是本站的能力。
             #
@@ -6013,8 +6148,7 @@ class Sessiond(object):
           从 `op_plugins` 拿到的 `(id, 版本)`。按短名找会让"改了个名字"变成
           "客户端突然取不到文件"。
         """
-        for name in sorted(self.cfg.plugins):
-            c = self.cfg.plugins[name]
+        for c in self.cfg.plugins.values():
             if c.spec.id == plugin_id and c.spec.version == version:
                 return c
         return None
@@ -6667,22 +6801,25 @@ class Sessiond(object):
                 return self._err(2, "missing_service_kind",
                                  "本站没有设置 default_plugin，提交时必须显式指定"
                                  " service_kind。本站装了：%s。"
-                                 % ("、".join(sorted(cfg.plugins))
+                                 % ("、".join(sorted(cfg.plugins_by_name))
                                     or "（一个插件都没有）"))
             kind = cfg.default_plugin
-        spec = cfg.plugin_by_name.get(kind)
+        # ★ 解析走**同一处**（`resolve_plugin`）：短名有歧义时它会说清"是哪几个
+        #   id"并让人改用 id —— 从前这里只认短名，"两个插件同名"在这一格上
+        #   是没有出路的（`plugin_by_name` 那张 dict 静默只留了一个）。
+        spec, why = cfg.resolve_plugin(kind)
         if spec is None:
             return self._err(2, "bad_service_kind",
-                             "本站没有装名为 %r 的插件（装了的是：%s）"
-                             % (kind, "、".join(sorted(cfg.plugin_by_name))
-                                or "（一个都没有）"))
-        pcfg = cfg.plugins[kind]
+                             "service_kind %r 用不了 —— %s" % (kind, why))
+        pcfg = cfg.plugins[spec.id]
         if not pcfg.enabled:
             return self._err(4, "service_kind_disabled",
                              "本站点没有开启「%s」服务（已开启的是：%s）"
                              % (pcfg.title,
-                                "、".join(cfg.plugins[n].title
-                                          for n in cfg.enabled_kinds) or "（无）"))
+                                "、".join(sorted(
+                                    {cfg.plugins[s.id].title
+                                     for s in cfg.plugin_specs
+                                     if cfg.plugins[s.id].enabled})) or "（无）"))
 
         # 「装了、也开着，但没有作业侧实现」—— 这个插件**合法**（一个只有客户端
         # 那一半的插件是允许存在的），但它提交不出去：作业脚本里没有 start_<短名>，
@@ -7189,8 +7326,7 @@ def main():
             print("      `packer build`）然后 `slurmate plugin install <包>`，或者")
             print("      把包放进 deploy.sh 的 --plugins-src 目录再跑一次部署。")
             print("      见 plugins/README.md；插件落地在 %s。" % cfg.plugins_dir)
-        for _n in sorted(cfg.plugins):
-            _p = cfg.plugins[_n]
+        for _p in sorted(cfg.plugins.values(), key=lambda c: (c.name, c.spec.id)):
             print("    %-12s %s  默认 %s 核 / %s%s"
                   % (_p.name, "已启用" if _p.enabled else "已停用",
                      _p.default_cpus, _p.default_mem,

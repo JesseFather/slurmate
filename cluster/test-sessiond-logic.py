@@ -1520,20 +1520,45 @@ exit 0
     # <prefix>/share/slurmate/plugins/<ULID>.splug，由安装器装进去（deploy.sh
     # 只是把包交给它）。加一个插件因此是「放一个包 + 跑一次 deploy.sh」，
     # 不是「改守护进程的源码」。
+    def add_plugin_to_cfg(_cfg, _spec, _raw=None):
+        """给 `_cfg` **就地**加一个插件（spec + 生效配置），返回一个还原函数。
+
+        ★ 这几处从前各写各的四行（`plugin_by_name = dict(...)` 加一条、
+          `plugins["jup"] = PluginConfig(...)` 加一条、再重算 enabled_kinds）。
+          v0.11 起那几张表按 **id** 收、"名字 → 哪一个"的判据收在
+          `resolve_plugin()` 里，于是"该动哪几张表"值得只有一处 ——
+          漏一张的症状是这条用例因为**别的原因**红或绿。
+        """
+        _saved = (_cfg.plugin_specs, _cfg.plugins, _cfg.plugins_by_name,
+                  _cfg.plugins_by_id, _cfg.enabled_kinds)
+        _cfg.plugin_specs = tuple(_saved[0]) + (_spec,)
+        _cfg.plugins = dict(_saved[1])
+        _cfg.plugins[_spec.id] = mod.PluginConfig(_spec, _raw or {}, _raw is not None)
+        _cfg.plugins_by_id = dict(_saved[3], **{_spec.id: _spec})
+        _cfg.plugins_by_name = {k: list(v) for k, v in _saved[2].items()}
+        _cfg.plugins_by_name.setdefault(_spec.name, []).append(_spec)
+        _cfg.enabled_kinds = tuple(sorted(
+            {p.name for p in _cfg.plugins.values() if p.enabled}))
+
+        def _restore():
+            (_cfg.plugin_specs, _cfg.plugins, _cfg.plugins_by_name,
+             _cfg.plugins_by_id, _cfg.enabled_kinds) = _saved
+        return _restore
+
     # ★ 这里从前写的是 `*/plugin.json` + "放一个目录" —— 那是 v0.6 的布局。
     print("\n  -- 19.0 扫出来的插件表 --")
     check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
-          sorted(cfg.plugin_by_name) == [CS, SSHD], str(sorted(cfg.plugin_by_name)))
+          sorted(cfg.plugins_by_name) == [CS, SSHD], str(sorted(cfg.plugins_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
     check("每个 spec 都记得自己的**包**在哪（分发与报错都用它）",
           all(s.source_package and s.source_package.endswith(mod.PLUGIN_PACKAGE_SUFFIX)
               for s in cfg.plugin_specs),
           str([s.source_package for s in cfg.plugin_specs]))
     check("★ job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
-          cfg.plugin_by_name[CS].job_entry == "start_code_server"
-          and cfg.plugin_by_name[SSHD].job_entry == "start_sshd",
-          "%s / %s" % (cfg.plugin_by_name[CS].job_entry,
-                       cfg.plugin_by_name[SSHD].job_entry))
+          cfg.resolve_plugin(CS)[0].job_entry == "start_code_server"
+          and cfg.resolve_plugin(SSHD)[0].job_entry == "start_sshd",
+          "%s / %s" % (cfg.resolve_plugin(CS)[0].job_entry,
+                       cfg.resolve_plugin(SSHD)[0].job_entry))
     # ★ 「有没有作业侧」现在是**一个事实**，不是一条合法性判据：两个真插件都有，
     #   而没有的那种是**合法**的（见 19.0e）。所以这里断言的是"这两个有"，
     #   不是"所有插件都必须有"。
@@ -1677,23 +1702,138 @@ exit 0
         check("清单：%s → 被拦下" % _why, _s2 == () and _kw in _msg2,
               (_msg2[:130] or str(_s2)))
 
-    # 短名撞车：两个包抢一个短名 —— **两个都不收**。挑一个的后果是"哪个生效"
-    # 取决于文件名的字典序，而那是没人会想到去查的地方。
+    # ── 短名撞车：**允许**（v0.11 阶段 2+3 把这条判据整个换掉了）──────────
     #
-    # ★ 它们的 **id 不同**（真实世界里同 id 的两个包会落到同一个文件名上、由
-    #   安装器在装的那一刻拦掉，见 19.15）。这里要测的是短名这一条判据本身：
-    #   `scan_plugins` 是守护进程**启动时**的最后一道，它必须在包已经在盘上之后
-    #   仍然拦得住。
-    _dupdir = os.path.join(tmpdir, "plugins-dup")
-    os.makedirs(_dupdir, exist_ok=True)
-    for _sub, _ver, _uid in (("a", "1.0.0", "01M2JKHTZGKJBFQQTWYXMQMF2V"),
-                             ("b", "2.0.0", "01M2JKHTZGKJBFQQTWYXMQMF3A")):
-        put_package(_dupdir, [("plugin.json", json.dumps(
+    # 短名只是**本站给人看**的名字，不是身份 —— 两个 id 不同、短名一样的插件
+    # 允许并存：配置里用 `[plugin:<id>]` 各配各的就能分开（见 resolve_plugin）。
+    # ★ 从前这条判据是反的（两个都不收）。改掉的理由不是"宽松一点"，是**短名
+    #   本来就不该承重**：拿它当身份的地方撞一次就丢两个插件，而客户端一个字都
+    #   看不到（F22）—— 于是"本站有两个 jup"在界面上长成"本站没有 jup"。
+    _nupdir = os.path.join(tmpdir, "plugins-namedup")
+    os.makedirs(_nupdir, exist_ok=True)
+    for _ver, _uid in (("1.0.0", "01M2JKHTZGKJBFQQTWYXMQMF2V"),
+                       ("2.0.0", "01M2JKHTZGKJBFQQTWYXMQMF3A")):
+        put_package(_nupdir, [("plugin.json", json.dumps(
             {"id": _uid, "name": "jup", "version": _ver,
              "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
-    _s3, _p3 = mod.scan_plugins(_dupdir)
-    check("★ 两个包抢一个短名 → 两个都不加载（挑一个等于让文件名决定行为）",
-          _s3 == () and any("重复" in p for p in _p3), "%s / %s" % (_s3, _p3))
+    _s3, _p3 = mod.scan_plugins(_nupdir)
+    check("★★ 两个包共用同一个**短名** → 两个都加载（短名不是身份，id 才是）",
+          len(_s3) == 2 and _p3 == () and [s.name for s in _s3] == ["jup", "jup"],
+          "%s / %s" % ([(s.name, s.id) for s in _s3], _p3))
+    check("★ 而且次序是确定的（按 (短名, id) 排）—— 两次扫出来必须一模一样",
+          [s.id for s in _s3] == sorted(s.id for s in _s3),
+          str([s.id for s in _s3]))
+
+    # ── id 撞车：**两个都不收**（F21）────────────────────────────────────
+    #
+    # 同一个 **id** 的两个包 = 同一个插件的两份作业侧代码。deploy.sh 织出来的
+    # 作业脚本按 **id** 命名（`jobs/<id>.sbatch`），后织的会**静默覆盖**先织的。
+    #
+    # ★ 这个形状**正常装不出来**：安装器按 id 给文件命名（两个同 id 的包会落在
+    #   同一个文件名上），而它在装的那一刻就拒（见 19.15）。所以这条测的是
+    #   **绕过安装器**那条路 —— 那正是 `scan_plugins` 作为"启动时最后一道"
+    #   存在的理由。
+    # ★★ 也正因为如此，这里必须**显式给两个不同的文件名**：`put_package` 的
+    #   缺省文件名取自包里的 id，那样第二个会把第一个覆盖掉，这条用例连两行
+    #   都走不到（而它会以"绿"收场）。
+    _iddir = os.path.join(tmpdir, "plugins-iddup")
+    os.makedirs(_iddir, exist_ok=True)
+    for _fname, _nm in (("one.splug", "jup"), ("two.splug", "jupyter")):
+        put_package(_iddir, [("plugin.json", json.dumps(
+            {"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": _nm, "version": "1.0.0",
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))],
+            filename=_fname)
+    _s4, _p4 = mod.scan_plugins(_iddir)
+    check("★★ 两个包共用同一个 **id** → 两个都不加载（同一个身份两份作业侧代码）",
+          _s4 == () and any("同一个插件" in p for p in _p4), "%s / %s" % (_s4, _p4))
+    check("★ 而且点名是哪两个包、并指出正常路径装不出这个形状",
+          "one.splug" in " ".join(_p4) and "two.splug" in " ".join(_p4)
+          and "安装器" in " ".join(_p4), " ".join(_p4)[:240])
+
+    # ── ★★ 那些**没能加载**的包必须到得了客户端（F22）────────────────────
+    #
+    # 这一条判的是**线**，不是函数。`plugin_problems` 从前只走
+    # `--check-plugins` / `--check` / 启动日志 —— 而**协议里一个字都没有**，
+    # 于是客户端看到的是「本站没有这个插件」，真相却是「本站有两个、因为撞了
+    # 没被加载」：**运维在客户端上排查，方向从第一步就是错的**。
+    #
+    # ★ 走真的一条路：真 `Config`（插件目录指向那两个同 id 的包）→ 真的
+    #   `op_plugins` 派发。断言 `plugins` 是**空的**、而 `problems` 点名了它们 ——
+    #   这正是 FE 里"插件消失"那个症状的解药。
+    _saved_dir_fn = mod.default_plugins_dir
+    _saved_cfg_for_problems = d.cfg
+    try:
+        mod.default_plugins_dir = lambda: _iddir
+        d.cfg = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n",
+                                      "iddup.conf"))
+        _pm = d.dispatch(UID, os.getgid(), {"op": "plugins"})
+        _pmd = _pm.get("data") or {}
+        check("★★ 站点级的问题**进了 op_plugins 的回包**（顶层 problems，F22）",
+              isinstance(_pmd.get("problems"), list) and len(_pmd["problems"]) == 1,
+              str(_pmd.get("problems"))[:240])
+        check("★ 而且客户端看得到是哪两个包 —— 不再是「本站没有这个插件」",
+              "one.splug" in " ".join(_pmd.get("problems") or [])
+              and "two.splug" in " ".join(_pmd.get("problems") or []),
+              str(_pmd.get("problems"))[:240])
+        check("★ 它**不影响能用的那些**：这个目录里一个能用的都没有，所以是空表",
+              _pmd.get("plugins") == [], str(_pmd.get("plugins"))[:160])
+    finally:
+        mod.default_plugins_dir = _saved_dir_fn
+        d.cfg = _saved_cfg_for_problems
+
+    # ── ★★ 命令行那一屏（`slurmate plugins`）：F22 的另一半 + 账本 **F37** ──
+    #
+    # ★★ 这一屏从前**一条用例都没有**，而它身上有一个与 F35 逐字同形的缺陷：
+    #    「分发」那一列读的是 `p.get("files")` —— 那个字段**在 v0.7 就删掉了**
+    #    （两条投递方式并成一条整包），于是这一列**永远**显示 `—`，而下面那句
+    #    解释说的是"这一版守护进程不支持分发"。⇒ CLI 会对**每一个**站点说这句话，
+    #    **包括最新那一个**：一句系统并不知道的话。
+    #
+    # ★ 判据落在**用户真看得见的那一屏**上（把 `call` 换成一份给定的响应、真跑
+    #   `cmd_plugins`），不是"源码里出现过某个词"—— 后者在这个函数里本来就成立。
+    class _Args19(object):
+        json = False
+        files = []
+
+    def _cli_plugins_screen(data):
+        _c = load_cli()
+        _c.call = lambda req, asjson, timeout=20.0: {"ok": True, "code": 0, "data": data}
+        _so, _se = io.StringIO(), io.StringIO()
+        _old = (sys.stdout, sys.stderr)
+        try:
+            sys.stdout, sys.stderr = _so, _se
+            _rc = _c.cmd_plugins(_Args19())
+        finally:
+            sys.stdout, sys.stderr = _old
+        return _rc, _so.getvalue() + _se.getvalue()
+
+    _one_pkg = {"format": "splug1", "bytes": 1234, "digest": "ab"}
+    _good_data = {
+        "plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
+                     "name": "jup", "title": "Jupyter", "enabled": True,
+                     "can_submit": True, "defaults": {"cpus": 2, "mem": "8G"},
+                     "package": _one_pkg}],
+        "enabled": ["jup"],
+        "limits": {"file_bytes": 1000, "total_bytes": 2000, "max_files": 3,
+                   "package_bytes": 4000},
+    }
+    _rc19, _out19 = _cli_plugins_screen(_good_data)
+    check("★★ 一个支持分发的站点 ⇒ 「分发」那一列**说得出话**（不是永远 `—`）",
+          _rc19 == 0 and "1 个包" in _out19, _out19[:260])
+    check("★ 而且印的是**今天**那条路（整包一次取走），不是 v0.6 那两条",
+          "整包上限" in _out19 and "份数" in _out19, _out19[:260])
+
+    _old_daemon_data = {"plugins": _good_data["plugins"], "enabled": ["jup"]}
+    _rc19, _out19 = _cli_plugins_screen(_old_daemon_data)
+    check("★ 老守护进程（响应里**没有 `limits`**）⇒ `—`，并说清是它不支持分发",
+          _rc19 == 0 and "—" in _out19 and "不支持插件分发" in _out19, _out19[:260])
+
+    _prob_data = dict(_good_data)
+    _prob_data["problems"] = ["/x/one.splug：id 01M2… 与 /x/two.splug 是同一个插件"]
+    _rc19, _out19 = _cli_plugins_screen(_prob_data)
+    check("★★ 站点报的那些问题**出现在这一屏上**（F22 的另一半：到得了用户眼前）",
+          _rc19 == 0 and "one.splug" in _out19 and "没能加载" in _out19,
+          _out19[:260])
 
     # 19.0b2 ★★ 版本号：两套方案，一条比较规则 —— 夹具与**客户端读的是同一份**
     #
@@ -1882,17 +2022,8 @@ exit 0
     check("它的作业侧入口是按短名推出来的（与 run.sbatch 的 plugin_call 同一条规则）",
           _jup.job_entry == "start_jup", _jup.job_entry)
 
-    _saved_plugins = cfg.plugins
-    _saved_by = cfg.plugin_by_name
-    _saved_specs = cfg.plugin_specs
-    _saved_kinds = cfg.enabled_kinds
+    _restore_jup = add_plugin_to_cfg(cfg, _jup, {"enabled": "yes"})
     try:
-        cfg.plugin_specs = tuple(list(_saved_specs) + [_jup])
-        cfg.plugin_by_name = dict(_saved_by, jup=_jup)
-        cfg.plugins = dict(_saved_plugins)
-        cfg.plugins["jup"] = mod.PluginConfig(_jup, {"enabled": "yes"}, True)
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
-
         _r5, _sess5, _env5 = run_submit({"op": "submit", "service_kind": "jup"})
         check("★ 新插件能被提交，资源缺省来自**它自己的清单**（不是全局常量）",
               _r5.get("ok") and _sess5["cpus"] == 3 and _sess5["mem"] == "6G",
@@ -1904,8 +2035,8 @@ exit 0
               _sess5.get("service_plugin") == "%s@%s" % (_jup.id, _jup.version),
               repr(_sess5.get("service_plugin")))
         check("站点没在块里写的那几个枚举键，取清单声明的缺省",
-              cfg.plugins["jup"].enum.get("token_mode") == "auto",
-              repr(cfg.plugins["jup"].enum))
+              cfg.plugin_config("jup").enum.get("token_mode") == "auto",
+              repr(cfg.plugin_config("jup").enum))
 
         _pj = d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
         _pnames = {x["name"] for x in (_pj.get("data") or {}).get("plugins", [])}
@@ -1918,10 +2049,7 @@ exit 0
         check("★ op_plugins 报出 can_submit=true（开了 + 有作业侧）",
               _jup_row.get("can_submit") is True, str(_jup_row))
     finally:
-        cfg.plugins = _saved_plugins
-        cfg.plugin_by_name = _saved_by
-        cfg.plugin_specs = _saved_specs
-        cfg.enabled_kinds = _saved_kinds
+        _restore_jup()
 
     # 19.0e ★★ 没有作业侧：**合法状态**，但它提交不了，而且必须说得出来
     #
@@ -1948,15 +2076,10 @@ exit 0
                                  mod.package_read_file(_decl.source_package)["files"]],
           _decl.source_package)
 
-    _sj, _bj, _pj2, _kj, _dj = (cfg.plugin_specs, cfg.plugin_by_name,
-                                cfg.plugins, cfg.enabled_kinds, cfg.default_plugin)
     _saved_missing = cfg.plugin_job_missing
+    _saved_default = cfg.default_plugin
+    _restore_decl = add_plugin_to_cfg(cfg, _decl, {"enabled": "yes"})
     try:
-        cfg.plugin_specs = tuple(list(_sj) + [_decl])
-        cfg.plugin_by_name = dict(_bj, decl=_decl)
-        cfg.plugins = dict(_pj2)
-        cfg.plugins["decl"] = mod.PluginConfig(_decl, {"enabled": "yes"}, True)
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
         # 它没有作业脚本，所以**不该**出现在 plugin_job_missing 里 —— 那个列表
         # 说的是"有作业侧却找不到脚本"（部署不完整），与"本来就没有作业侧"是
         # 两件完全不同的事。合并它们会让这条合法的状态被报成故障。
@@ -2004,8 +2127,8 @@ exit 0
               "是两句话，客户端要能分辨）",
               _decl_row.get("enabled") is True, str(_decl_row))
     finally:
-        (cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins,
-         cfg.enabled_kinds, cfg.default_plugin) = _sj, _bj, _pj2, _kj, _dj
+        _restore_decl()
+        cfg.default_plugin = _saved_default
         cfg.plugin_job_missing = _saved_missing
 
     # 19.0d ★ 零插件：不是"坏掉的安装包"，而是"外壳"本身
@@ -2014,10 +2137,12 @@ exit 0
     #   客户端那半已经在 boot.test.mjs 里验过"卸掉插件不影响跑着的会话"，这里验
     #   的是**服务端**在零插件时的行为：能启动、能说清、明确拒绝 —— 而不是崩溃、
     #   不是静默。
-    _sz, _bz, _pz, _kz, _dz = (cfg.plugin_specs, cfg.plugin_by_name,
-                               cfg.plugins, cfg.enabled_kinds, cfg.default_plugin)
+    _sz, _pz, _bz, _iz, _kz, _dz = (cfg.plugin_specs, cfg.plugins,
+                                    cfg.plugins_by_name, cfg.plugins_by_id,
+                                    cfg.enabled_kinds, cfg.default_plugin)
     try:
-        cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins = (), {}, {}
+        cfg.plugin_specs = ()
+        cfg.plugins, cfg.plugins_by_name, cfg.plugins_by_id = {}, {}, {}
         cfg.enabled_kinds, cfg.default_plugin = (), ""
         # 上面的 run_submit 用完就把库关掉了（每个用例一个临时库），重开一个。
         d.store = mod.Store(os.path.join(tmpdir, "zero-plugin.db"))
@@ -2040,8 +2165,8 @@ exit 0
               and (_pz2.get("data") or {}).get("enabled") == [],
               str(_pz2.get("data")))
     finally:
-        (cfg.plugin_specs, cfg.plugin_by_name, cfg.plugins,
-         cfg.enabled_kinds, cfg.default_plugin) = _sz, _bz, _pz, _kz, _dz
+        (cfg.plugin_specs, cfg.plugins, cfg.plugins_by_name, cfg.plugins_by_id,
+         cfg.enabled_kinds, cfg.default_plugin) = _sz, _pz, _bz, _iz, _kz, _dz
 
     # 19.1 配置块
     #
@@ -2056,17 +2181,17 @@ exit 0
     check("★ 一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
-          _c.plugins[SSHD].present is False
-          and _c.plugins[SSHD].enabled is False)
+          _c.plugin_config(SSHD).present is False
+          and _c.plugin_config(SSHD).enabled is False)
 
     _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
     check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("块里写的默认资源生效；没写的用插件自己的内建值",
-          _c.plugins[SSHD].default_cpus == 4
-          and _c.plugins[SSHD].default_mem == "2G",
-          "%s / %s" % (_c.plugins[SSHD].default_cpus,
-                       _c.plugins[SSHD].default_mem))
+          _c.plugin_config(SSHD).default_cpus == 4
+          and _c.plugin_config(SSHD).default_mem == "2G",
+          "%s / %s" % (_c.plugin_config(SSHD).default_cpus,
+                       _c.plugin_config(SSHD).default_mem))
 
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
     check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
@@ -2107,6 +2232,67 @@ exit 0
     _ok = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
     check("★ 对照：同一个 default_plugin，插件开着 ⇒ 一个错误都没有",
           _ok.validate() == [], str(_ok.validate())[:160])
+
+    # ── 19.1b ★★ 短名**不再唯一**：块按 **id** 寻址（v0.11 阶段 2+3）─────
+    #
+    # 两个 id 不同、短名都叫 `jup` 的插件是**允许并存**的：它们不是同一个东西，
+    # 只是本站给人看的名字撞了。于是配置块必须能指清是哪一个 —— 这时短名不够
+    # 用，**id 才是身份**。
+    #
+    # ★ 判据是**用户 2026-10-06 拍的那条**：短名为主，**撞名时必须带 id**。
+    #   它不是建议，是校验 —— 歧义时"挑一个"的后果取决于遍历次序。
+    def pcfg_namedup(text, name):
+        _saved = mod.default_plugins_dir
+        try:
+            mod.default_plugins_dir = lambda: _nupdir
+            return mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n" + text, name))
+        finally:
+            mod.default_plugins_dir = _saved
+
+    _IDS = [s.id for s in mod.scan_plugins(_nupdir)[0]]
+
+    _c = pcfg_namedup("[plugin:jup]\nenabled = yes\n", "namedup1.conf")
+    _errs = " ".join(_c.validate())
+    check("★★ 短名有歧义、而块名写的是短名 ⇒ **硬错误**（不许悄悄挑一个）",
+          _errs != "", str(_c.validate())[:200])
+    check("★★ 而且报错**列出那几个 id** —— 那是唯一指得清的写法",
+          _IDS[0] in _errs and _IDS[1] in _errs, _errs[:260])
+    check("★ 那句话要说清「改用插件的 id」，不是一句泛泛的「认不出」",
+          "id" in _errs and "短名" in _errs, _errs[:260])
+
+    _c = pcfg_namedup("[plugin:%s]\nenabled = yes\n[plugin:%s]\nenabled = yes\n"
+                      % (_IDS[0], _IDS[1]), "namedup2.conf")
+    check("★★ 两个块都用 **id** 写 ⇒ 两个都配上了（同名不构成障碍）",
+          _c.validate() == [] and len(_c.plugins) == 2
+          and all(q.enabled for q in _c.plugins.values()),
+          "%s / %s" % (str(_c.validate())[:160], sorted(_c.plugins)))
+    check("★ 而且是**各自那一份**（不是同一份配置被读了两遍）",
+          {q.spec.id for q in _c.plugins.values()} == set(_IDS),
+          str(sorted(_c.plugins)))
+
+    _c = pcfg_namedup("default_plugin = %s\n[plugin:%s]\nenabled = yes\n"
+                      % (_IDS[0], _IDS[0]), "namedup3.conf")
+    check("★ default_plugin 也能写 id（短名有歧义时那是唯一的写法）",
+          _c.validate() == [], str(_c.validate())[:200])
+
+    # ★ 提交那一侧同一条规则：`service_kind` 也是短名，所以歧义在那里也一样
+    #   要**当场拒绝并给出 id** —— 否则用户只会拿到一句"本站没有这个插件"。
+    _saved_dir_for_kind = mod.default_plugins_dir
+    _saved_cfg_for_kind = d.cfg
+    try:
+        mod.default_plugins_dir = lambda: _nupdir
+        d.cfg = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n",
+                                      "namedup-kind.conf"))
+        _r9 = d.dispatch(UID, os.getgid(), {"op": "submit", "service_kind": "jup"})
+        _d9 = (_r9.get("error") or {}).get("detail") or ""
+        check("★★ 提交时短名有歧义 ⇒ 明确拒绝（不是静默失败，也不是挑一个）",
+              not _r9.get("ok") and _r9["error"]["kind"] == "bad_service_kind",
+              str(_r9.get("error"))[:200])
+        check("★★ 而且把那几个 id 给出来 —— 用户照它改就能提交",
+              _IDS[0] in _d9 and _IDS[1] in _d9, _d9[:260])
+    finally:
+        mod.default_plugins_dir = _saved_dir_for_kind
+        d.cfg = _saved_cfg_for_kind
 
     # 各种错法：一律**报错**，不能静默忽略 —— 静默忽略的后果是
     # 「文件里写着，而实际什么也没发生」，正是本项目一路在清的那类问题。
@@ -2159,18 +2345,18 @@ exit 0
     _pub8 = ("ssh-ed25519 "
              "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
     _sd, _sk = cfg.default_plugin, cfg.enabled_kinds
-    _se = cfg.plugins[SSHD].enabled
+    _se = cfg.plugin_config(SSHD).enabled
     try:
         cfg.default_plugin = SSHD
-        cfg.plugins[SSHD].enabled = True
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        cfg.plugin_config(SSHD).enabled = True
+        cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
         _r8, _s8, _ = run_submit({"op": "submit", "ssh_pubkey": _pub8})
         check("★ 不带 service_kind 时**真的**落到配置里那个插件上（不是写死的名字）",
               _r8.get("ok") and _s8.get("service_kind") == SSHD,
               "%s / %s" % (str(_r8.get("error"))[:90], _s8.get("service_kind")))
     finally:
         cfg.default_plugin, cfg.enabled_kinds = _sd, _sk
-        cfg.plugins[SSHD].enabled = _se
+        cfg.plugin_config(SSHD).enabled = _se
 
     # 19.2 公钥的解析（纯函数）。ed25519 的 blob 恒为 51 字节，形状可以卡死。
     _pub = ("ssh-ed25519 "
@@ -2213,9 +2399,9 @@ exit 0
           and r["error"]["kind"] == "bad_service_kind", str(r.get("error")))
 
     # 19.5 站点开启之后
-    _saved = cfg.plugins[SSHD].enabled
-    cfg.plugins[SSHD].enabled = True
-    cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+    _saved = cfg.plugin_config(SSHD).enabled
+    cfg.plugin_config(SSHD).enabled = True
+    cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
     try:
         r, sess, env = run_submit({"op": "submit", "service_kind": "sshd",
                                    "ssh_pubkey": _pub})
@@ -2236,7 +2422,7 @@ exit 0
         #   的事（sshd 插件的 job/start.sh 里写着 $HOME/.slurmate/ssh）。守护进程
         #   只下发插件的**清单**里声明过的那个 bin_env。
         check("守护进程按插件清单声明的变量名下发可执行文件路径",
-              env.get("SLURMATE_SSHD_BIN") == cfg.plugins[SSHD].bin
+              env.get("SLURMATE_SSHD_BIN") == cfg.plugin_config(SSHD).bin
               and "SLURMATE_SSH_DIR" not in env,
               "%s / %s" % (env.get("SLURMATE_SSHD_BIN"),
                            env.get("SLURMATE_SSH_DIR")))
@@ -2251,20 +2437,22 @@ exit 0
                    ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
                     "SLURMATE_SSHD_BIN")}))
     finally:
-        cfg.plugins[SSHD].enabled = _saved
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        cfg.plugin_config(SSHD).enabled = _saved
+        cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
     # 19.5b ★ 默认资源是**按插件**的 —— 这是"插件块里放插件的策略"最直接的体现
     #
     # 从前它是两个代码常量（DEFAULT_CPUS / DEFAULT_MEM），所有服务共用一个值；
     # 而在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。现在它是块里
     # 的一项，缺失时才回落到插件自己的内建值。
-    _saved_cfg = cfg.plugins[SSHD]
+    _sshd_id = cfg.resolve_plugin(SSHD)[0].id
+    _saved_cfg = cfg.plugins[_sshd_id]
     try:
-        cfg.plugins[SSHD] = mod.PluginConfig(
-            cfg.plugin_by_name[SSHD],
+        # ★ 表按 **id** 收（短名可以重复），所以这里写回去也要按 id。
+        cfg.plugins[_sshd_id] = mod.PluginConfig(
+            cfg.resolve_plugin(SSHD)[0],
             {"enabled": "yes", "default_cpus": "7", "default_mem": "5G"}, True)
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
         _r, _sess, _env = run_submit({"op": "submit", "service_kind": "sshd",
                                       "ssh_pubkey": _pub})
@@ -2280,8 +2468,8 @@ exit 0
         check("显式给的资源仍然覆盖块里的默认值",
               _sess2["cpus"] == 3, str(_sess2.get("cpus")))
     finally:
-        cfg.plugins[SSHD] = _saved_cfg
-        cfg.enabled_kinds = tuple(sorted(n for n, q in cfg.plugins.items() if q.enabled))
+        cfg.plugins[_sshd_id] = _saved_cfg
+        cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
     # 19.5c op_plugins：客户端据此决定画哪些按钮、每个按钮写多少资源
     _resp = d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
@@ -2371,7 +2559,7 @@ exit 0
     # 旧的那一版代码（作业侧与客户端侧是配套的两半）。如果服务端在读取会话时按
     # "站点当前清单"现算，客户端就会把**新版本**的客户端代码接到**旧版本**的作业
     # 实现上 —— 而站点更新频繁正是这个项目要支持的现实。
-    _cs_spec = cfg.plugin_by_name[CS]
+    _cs_spec = cfg.resolve_plugin(CS)[0]
     _old_ver = _cs_spec.version
     _before = None
     try:
@@ -2601,7 +2789,7 @@ exit 0
     #   （`checkDeclared` 的 `file_bytes`，见 client/test/site-plugins.test.mjs），
     #   第三条由 `plugin_package_changed` 在 19.11c 里原样守着。
     _d2 = mod.Sessiond(cfg)
-    _cs_spec = cfg.plugin_by_name[CS]
+    _cs_spec = cfg.resolve_plugin(CS)[0]
 
     def _pf(req):
         """发一条 RPC。
@@ -2738,7 +2926,7 @@ exit 0
                      ((_pp({"op": "plugins"}).get("data") or {}).get("plugins") or [])
                      if x.get("name") == name), None)
 
-    _cs4 = cfg.plugin_by_name[CS]
+    _cs4 = cfg.resolve_plugin(CS)[0]
     _pk4 = {n: _plug_of(n) for n in (CS, SSHD)}
     check("★★ 加法过渡**结束了**：每条只剩 package，`files` 那个键不在 "
           "（v0.6 两条同时在，v0.7 只留这一条）",
@@ -2748,7 +2936,7 @@ exit 0
           str({k: sorted((v or {}).keys()) for k, v in _pk4.items()})[:200])
 
     for _n in (CS, SSHD):
-        _spec = cfg.plugin_by_name[_n]
+        _spec = cfg.resolve_plugin(_n)[0]
         _info = (_pk4.get(_n) or {}).get("package") or {}
         _disk = mod.package_read_file(_spec.source_package)
         check("★★ op_plugins 报的 package 三样事实与**盘上那一份包**相符（「%s」）" % _n,
