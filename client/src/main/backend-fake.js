@@ -1067,8 +1067,12 @@ class FakeBackend extends Backend {
       return err(2, 'bad_service_kind',
         '这个站点没有设缺省插件，提交时必须显式指定 service_kind');
     }
-    // ★ 按**短名**在假站点自己的清单里查 —— 短名只在站点内唯一，而假后端
-    //   扮演的正是"一个站点"。查不到就拒绝。
+    // ★ 按**短名**在假站点自己的清单里查 —— 假后端扮演的正是"一个站点"，而
+    //   它演的那些插件都是它自己装的，短名不会撞（真站点**允许**撞，短名不再
+    //   唯一了；见 `docs/PLUGIN-SPEC.md` §2.2）。查不到就拒绝。
+    //   ★ 这里刻意**不**实现真站点那套歧义规则：假后端的目的不是把站点的每一条
+    //     纪律演一遍，而是让"没有集群时界面还能走通"。哪天它要演两个同名插件，
+    //     那就在这里照 `resolve_plugin()` 补一次 —— 而不是现在给一个用不上的分支。
     const sitePlugin = this._sitePlugins().find((p) => p.name === kind);
     if (!sitePlugin) {
       return err(2, 'bad_service_kind', `未知的服务类型：${kind}`);

@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.10"
+VERSION = "0.11"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -1228,8 +1228,14 @@ class PluginSpec(object):
         self.id = plugin_id
         self.version = version
         # `name` 是**站点内**用的短名：配置块名（`[plugin:<name>]`）、提交时的
-        # `service_kind`、日志与报错文案里出现的都是它。它只需要站点内唯一（由
-        # 配置校验保证），不需要全球唯一 —— 全球唯一是上面那个 id 的事。
+        # `service_kind`、日志与报错文案里出现的都是它。它不需要全球唯一 ——
+        # 全球唯一是上面那个 id 的事。
+        #
+        # ★★ **它也不再需要站点内唯一**（v0.11 放开）。两个 id 不同、短名一样的
+        #    插件允许并存，它们**不是**同一个东西。于是"名字 → 哪一个"的判据只剩
+        #    一处（`Config.resolve_plugin()`）：短名唯一时能写短名，**有歧义时
+        #    要求写 id**，并把是哪几个列出来。★ 别在这里补一句"所以它是唯一的"：
+        #    从前那句"由配置校验保证"正是这么来的，而校验不再保证它了。
         self.name = name
         self.title = title
         # 这个插件的**包文件**在哪（`<plugins_dir>/<ULID>.splug`）。
