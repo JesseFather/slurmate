@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.9"
+VERSION = "0.10"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。

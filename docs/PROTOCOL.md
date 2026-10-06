@@ -12,14 +12,17 @@
 
 ## 〇、协议版本与变更
 
-**当前版本：v0.7。** 协议版本、客户端版本、服务端版本是**同一个号** —— 它们不是
+**当前版本：v0.10。** 协议版本、客户端版本、服务端版本是**同一个号** —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言必须
 逐字相同：`client/package.json`、`client/package-lock.json`、`cluster/slurmate`、
 `cluster/slurmate-sessiond`。
 
 ★ **这个号是 `major.minor`：两段。** `major` 无上限，`minor` ∈ `0..255`，
 **禁止前导零**（写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串）。
-超上界时**必须进位**（`0.255` 之后是 `1.0`）。所以它是 `v0.7`，不是 `v0.7.0`。
+超上界时**必须进位**（`0.255` 之后是 `1.0`）。所以它是 `v0.10`，不是 `v0.10.0`。
+★ 顺带一句：`v0.10` **不是** `v0.1` —— `minor` 是**十进制字符串**，`10` 比 `1` 大。
+把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是
+**版本闸把更新的那一端判成更旧的**。
 
 > ★ **两段是有意的，而且这两段各有分工。**
 >
@@ -81,7 +84,7 @@
 **自初始提交起就在** —— 于是这条规则对**每一个曾经部署过的守护进程**立刻有效，
 正好对上"客户端要能兼容老版本服务端"那条要求。
 
-> ✅ **两端都已按 v0.7 实现**，四处版本号都是 0.7。此前这里挂着一条警告说集群侧
+> ✅ **两端都已按 v0.10 实现**，四处版本号都是 0.10。此前这里挂着一条警告说集群侧
 > 还停在 v0.1、两端连不上 —— 那条后来不成立了，所以删掉：留着一条已经不成立的警告，
 > 与留一条已经失效的注释是同一类问题。
 >
@@ -116,6 +119,13 @@
 > ⚠️ **更早的一档仍然要分得开**：v0.6 的客户端拿不到站点分发的插件
 > （v0.5 的客户端连那个池都不认识，只扫自己的 `~/.slurmate/plugins/`）。
 > 所以"能连上"从来不等于"行为一样"。
+>
+> ★ **上面这几段 ⚠️ 是记录，不是承诺 —— 而这条区分是上面〈`x == 0` 是内测期〉
+> 那一段的直接后果。** 它们记的是**当时那几次升级真的断在哪、朝哪个方向断**（那个
+> 信息本身有用：它告诉你要不要两边一起升）。而 `x == 0` 期间〈三方：谁不低于谁〉
+> 那整张表**不受约束**，所以这里**只记到 v0.7** —— v0.8 之后不再逐版补，是因为
+> 那一档**没有承诺可给**，**不是**因为"后面都兼容"。
+> ★ 实践上因此只有一条，而且它对每一版都成立：**跨版本升级，两端一起升。**
 
 | 版本 | 变更 |
 |---|---|
@@ -126,6 +136,9 @@
 | **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
 | **v0.6** | **插件文件可以从站点取回来**，而且同一份内容有**两条投递方式**。`plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）与 `package`（`{format, bytes, digest}`）、顶层多了 `limits`（本站的上限，**自述**，含 `package_bytes`）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）与 `plugin_package`（`id` / `version` → **整个包**，base64）；四个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`、`4 plugin_package_too_large`（外加 `9 plugin_file_changed` 与 `9 plugin_package_changed`）。**全部是加法**。 |
 | **v0.7** | **只剩一条投递方式**：**删掉** `plugins[].files` 与 op `plugin_file`，连同三个只属于那条路的 kind（`3 plugin_file_unknown`、`4 plugin_file_too_large`、`9 plugin_file_changed`）。`plugins[].package`、`op_plugin_package`、顶层 `limits`（含 `package_bytes`）**一个字都没动**。★ 「本站支不支持分发」的判据因此**换了**：从"这一项里有没有 `files`"改成顶层**有没有 `limits`**。**不兼容**，见上面那段。<br>★ 同时落下**版本握手**（客户端连上后读 `ping` 的 `version`，按〈三方：谁不低于谁〉判）。**协议线上一个字都没动** —— `ping` 与它的 `version` 自 v0.1 起就在，只是此前没有读者；`engines.slurmate` 的**字段级**规则也统一了（两侧从前一侧静默跳过、一侧拒绝）。 |
+| **v0.8** | **常驻通道 + 多客户端 + 集群信息。** 新 op：`stream`（一条连接可以问**很多次**，服务端还会**主动推送**）、`cluster`（一次查询服务所有连接）、`history`（按需拉历史，不进任何一层钟）；`session_view` 多四个字段（`job_terminal` / `job_reason` / `job_exit_code` / `job_restarts`）；GRES 通用化（不再只有 `gpu:N` 一种形状）。★ 同时加了一层**席位**：连接自报 `client` 身份、按 uid **顶掉**先到者、推送 `{"push":"displaced"}`。 |
+| **v0.9** | **看护者。** `session_view` 多一格 `keeper`（这条会话此刻**谁在看**；`null` = 确实没人在看，**不是**"不知道"）；新 op `takeover`（**只改 `keeper` 一格** —— 作业、ACL、规则、会话文件一个都不动）与 `leave`（放开看护者，作业继续在集群上跑）；心跳的应答多一格 `ignored`（**一条 `ok:true` 的响应，而它是一句状态**）；`goodbye` 的响应沿用 `data.warning` 那一格。**删掉**：v0.8 那层席位整套（推送 `displaced`、错误种类里那一档、`max_clients_per_user`）—— 换成 `max_connections_per_user`，**超限拒绝**而不是顶掉，新增错误 `5 too_many_connections`。 |
+| **v0.10** | **协议线上没有新的 op、也没有新的字段。** 变的是两条**判据**与一组**数值**：① 站点侧开始**拒**认不得的清单键（顶层 / `contributes` / `contributes.surface` / `.login` / `.data`）—— 客户端本来就在拒，这一版把守护进程那一侧补上，判据只有一份**书面**形式（`tools/manifest-keys.json`）；② 客户端**不再认** `contributes.defaultService`（写了它的清单**装不上**）；③ 站点报的 `limits.total_bytes` 从 1 MiB 抬到 **1,562,251 字节**（客户端执行的那四条上限没变，变的是站点**通报**的那个数）。 |
 
 ★ **`files` 这份清单的来源换过一次，而那一次不是协议变更。** 站点上的插件从
 "一棵目录树"变成了"一个包文件"（`<prefix>/share/slurmate/plugins/<ULID>.splug`），
