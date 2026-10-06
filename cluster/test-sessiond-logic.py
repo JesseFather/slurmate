@@ -359,6 +359,33 @@ def make_config(mod, tmpdir):
 #
 # 那种红的**原因与被测逻辑毫无关系**，排查它纯属浪费。桩替换的是 run_cmd ——
 # 模块级函数，所有 Slurm 调用的唯一出口。
+def _read_installed(directory):
+    """读一个目录里的部署标记（`.installed`）。文件不在 = 空表（v0.12 阶段 4 起
+    "空集"就是"没有记录"，见守护进程里的 `_write_installed_marker`）。"""
+    try:
+        with open(os.path.join(directory, ".installed"), encoding="utf-8") as f:
+            return [l.strip() for l in f if l.strip()]
+    except OSError:
+        return []
+
+
+def _write_manual_conf(conf_path, name):
+    """管理员**手写**的那一份插件配置（短名命名，不是 ULID 命名）。"""
+    d = conf_path + ".d"
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, name + ".conf"), "w", encoding="utf-8") as f:
+        f.write("enabled = yes\n")
+    return True
+
+
+def _raises(fn):
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+
 def slurm_stub(argv, timeout=10, check=False):
     cmd = " ".join(str(a) for a in argv)
     args = [str(a) for a in argv]
@@ -3502,8 +3529,10 @@ exit 0
         check("★★ 包在本次启动之后被换过 ⇒ 9 plugin_package_changed",
               _cc4 == 9 and _ck4 == "plugin_package_changed",
               "code=%s kind=%s detail=%s" % (_cc4, _ck4, _cd4[:80]))
-        check("★ 而且那句话指向「重跑一次 deploy.sh」，不是指回客户端",
-              "deploy.sh" in _cd4, repr(_cd4[:140]))
+        check("★★ 而且那句话指向**重装一次那个插件**（v0.12 阶段 4 起插件不再经过"
+              "部署脚本），不是指回客户端",
+              "重装" in _cd4 and "插件" in _cd4 and "客户端" not in _cd4,
+              repr(_cd4[:200]))
         _after = (_plug_of(CS) or {}).get("package") or {}
         check("★★ 快照是**启动那一刻**：换完之后 op_plugins 报的还是当初那一个"
               "（快照与这一条回答的是同一份包）",
@@ -3631,167 +3660,140 @@ exit 0
               _js_set == sorted(mod.PLUGIN_COPY_SKIP),
               "客户端 %s vs 守护进程 %s" % (_js_set, sorted(mod.PLUGIN_COPY_SKIP)))
 
-    # ── 19.13 ★ 部署的信任门 ⊇ 站点会分发的文件 ─────────────────────────────
+    # ── 19.13 ★ 包来源目录：哪些文件算"要装的包" ─────────────────────────────
     #
-    # `deploy.sh` 的 `source_is_trusted()` 会拒绝安装"源里有人能改写"的文件。
-    # 那一圈名单（`plugin_src_files()`）**以前只列 plugin.json 与 job/start.sh**，
-    # 理由是"插件目录里其余的都不装、也不读"。站点分发接上之后那句话不成立了：
-    # `client/` 整棵子树会被 `plugins` / `plugin_package` 发到**每一台客户端**上，
-    # 并在用户的 Electron 主进程里 `require()`。于是"某个普通用户能改写它"的后果
-    # 从"没什么后果"变成了"他的代码在每个用户的工作站上跑"。
+    # ★★ v0.12 阶段 4：这条判据**从 deploy.sh 搬进了安装器**
+    #    （`plugin_src_files()` / `plugin_src_problems()`）。从前这一节是把
+    #    deploy.sh 里那段 bash **抠出来真跑**（因为 deploy.sh 本机跑不了整套：
+    #    要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）；搬进 Python 之后可以
+    #    **直接调**，于是"用例验的是不是那一份实现"这个隐患没有了。
     #
-    # 这一节钉的就是这条包含关系：**守护进程会分发的每一份文件，都必须在部署的
-    # 信任门里**。它此前是红的（client/index.js、client/sshconfig.js、README.md
-    # 三份都不在名单里）。
+    # ★ 它挡的是一件很具体的事：管理员把插件的**源码树**复制进了包目录，以为
+    #   装上了 —— 而安装器只列 `*.splug`，那几棵树会被**静默忽略**。所以
+    #   "哪些算包"与"别的东西在这儿"是**两条**判据，都要有。
     #
-    # ★ 为什么是把 `plugin_src_files()` **抠出来真跑**，而不是在用例里照抄一遍：
-    #   照抄的那一份永远不会跟着 deploy.sh 改，于是"用例绿了、真机上炸了" ——
-    #   而 deploy.sh 本机跑不了（要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）。
-    #   抠出来跑是这里唯一能真的验到那个函数的地方。
-    print("\n── 19.13. 部署的信任门 ⊇ 会被安装的那一批包 ──")
-    _dep = os.path.join(HERE, "deploy.sh")
-    with open(_dep, encoding="utf-8") as _f:
-        _dep_src = _f.read()
-    _m = re.search(r"^plugin_src_files\(\) \{\n.*?^\}$", _dep_src, re.M | re.S)
-    check("★ deploy.sh 里那个 plugin_src_files() 找得到（找不到说明它改了形状）",
-          _m is not None)
-    if _m:
+    # ★ 符号链接那一条是承重的：一个叫 `x.splug` 的链接能指向任何地方、还能随时
+    #   换目标，于是"我读到的那一份"与"校验过的那一份"不是同一份 —— 那正是整节
+    #   要防的事。
+    print("\n── 19.13. 包来源目录：哪些文件算包（判据只有一份）──")
+    _gate = tempfile.mkdtemp(prefix="slurmate-gate-")
+    try:
+        def _touch(rel, blob=b"x\n"):
+            p = os.path.join(_gate, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as _f:
+                _f.write(blob)
+            return p
 
-        def _gated(plugins_src):
-            """在真 bash 里跑一遍那个函数，返回它列出来的路径集合。"""
-            r = subprocess.run(
-                ["bash", "-c",
-                 'PLUGINS_SRC="$1"\n%s\nplugin_src_files\n' % _m.group(0),
-                 "bash", plugins_src],
-                capture_output=True, text=True)
-            return {l for l in r.stdout.split("\n") if l}
+        _real_pkg = _touch("vendor-1.0.0.splug", b"splug\x1a\r\n" + b"\0" * 12)
+        _touch("notes.txt")                    # 随手放的文件
+        _touch("README")                       # 说明文件
+        _touch("old/plugin.json", b"{}")       # 一个目录（站点只认包）
+        _touch("nested/deep.splug")            # 子目录里的包（不扫第二层）
+        os.symlink(_real_pkg, os.path.join(_gate, "linked.splug"))
+        os.symlink("/etc/passwd", os.path.join(_gate, "passwd.splug"))
+        _got = set(mod.plugin_src_files(_gate))
+        check("★★ 恰好列出那一个真正的包文件",
+              _got == {_real_pkg}, repr(sorted(_got))[:200])
+        check("★★ 符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
+              not any("linked.splug" in p or "passwd.splug" in p for p in _got),
+              repr(sorted(_got))[:200])
+        check("★ 目录、散落的文件、子目录里的包都不进名单"
+              "（它们**不该在这儿**，由下面那条逐条点名）",
+              not any("old/" in p or "notes.txt" in p or "README" in p
+                      or "nested" in p for p in _got),
+              repr(sorted(_got))[:200])
 
-        # ── ① 合成目录：**只有 `.splug` 进名单，而且是普通文件的那种** ──
-        #
-        # ★ 这里比从前**更容易写错**，所以要逐种排除：「一个包」现在是一个文件，
-        #   而文件名可以随便起 —— 包括起成 `x.splug` 却是一个**符号链接**。
-        #   链接能指向任何地方、还能随时换目标，所以它必须像别的东西一样被挡在
-        #   门外。`-f` 会跟随链接，所以判据里那一句 `! -L` 是承重的。
-        _tmp = tempfile.mkdtemp(prefix="slurmate-gate-")
+        # ★★ 而"它们在这儿"必须**说出来** —— 不说就是静默忽略：管理员以为装上了。
+        #    四种成因各点名一条（三种"看着像包但不是"、一种"根本不是包"）。
+        _probs = mod.plugin_src_problems(_gate)
+        _ptxt = "\n".join(_probs)
+        check("★★ 目录里除 .splug 之外的东西**逐条点名**（不说就是静默忽略）",
+              len(_probs) == 6, "\n".join(x.split("\n")[0] for x in _probs))
+        check("★★ 源码树那一种要说清成因（最常见的那个）",
+              "README" in _ptxt and "源码树" in _ptxt, _ptxt[:300])
+        # ★ 两种成因的**修法完全不同**（"把链接换成一个真的包" vs "把文件搬走"），
+        #   所以措辞必须分得开 —— 一句"这里有不合法的东西"两种都盖不住。
+        check("★ 名字像包、却是符号链接的 ⇒ 说「符号链接」",
+              "linked.splug" in _ptxt and "符号链接" in _ptxt, _ptxt[:400])
+        check("★ 压根不是包的（目录、散落的文件）⇒ 说「不是一个插件包」",
+              "notes.txt" in _ptxt and "不是一个插件包" in _ptxt
+              and "符号链接" not in _ptxt.split("notes.txt")[1].split("\n")[0],
+              _ptxt[:400])
+        # ★★ 上一条的**正对照**：一个只有包的目录必须一条问题都不报 —— 少了它，
+        #    "什么都报"也能让上一条通过。
+        _clean = tempfile.mkdtemp(prefix="slurmate-gate-clean-")
         try:
-            def _touch(rel, blob=b"x\n"):
-                p = os.path.join(_tmp, rel)
-                os.makedirs(os.path.dirname(p), exist_ok=True)
-                with open(p, "wb") as _f:
-                    _f.write(blob)
-                return p
-
-            _real_pkg = _touch("vendor-1.0.0.splug", b"splug\x1a\r\n" + b"\0" * 12)
-            _touch("notes.txt")                    # 随手放的文件
-            _touch("README")                       # 说明文件
-            _touch("old/plugin.json", b"{}")       # 一个目录（站点只认包）
-            _touch("nested/deep.splug")            # 子目录里的包（不扫第二层）
-            os.symlink(_real_pkg, os.path.join(_tmp, "linked.splug"))
-            os.symlink("/etc/passwd", os.path.join(_tmp, "passwd.splug"))
-            _got = _gated(_tmp)
-            check("★★ 信任门**恰好**列出那一个真正的包文件",
-                  _got == {_real_pkg}, repr(sorted(_got))[:200])
-            check("★★ 符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
-                  not any("linked.splug" in p or "passwd.splug" in p for p in _got),
-                  repr(sorted(_got))[:200])
-            check("★ 目录、散落的文件、子目录里的包都不进名单"
-                  "（它们**不该在这儿**，由 --check-plugins 逐条点名）",
-                  not any("old/" in p or "notes.txt" in p or "README" in p
-                          or "nested" in p for p in _got),
-                  repr(sorted(_got))[:200])
-
-            # ── ② ⊇：安装器拿到的就是信任门过的那一批 ──
-            #
-            # ★ 这条是**接线检查**（两个列表分家才会长出"装了但没验"的缺口），
-            #   所以它抠的是 deploy.sh 的源码：安装器的参数必须来自
-            #   `${PLUGIN_PKGS[@]}`，而那个数组必须由 `plugin_src_files()` 填。
-            #   ★ 不强求它是别的形状：这段代码只有 root 能跑（见 KNOWN-ISSUES 的
-            #     U2），在用例里没有第二种验法。
-            check("★★ 安装器的参数取自 ${PLUGIN_PKGS[@]}（不是另列一份）",
-                  re.search(r'--install-plugins"?\s*"?\$\{PLUGIN_PKGS\[@\]\}',
-                            _dep_src) is not None,
-                  "没找到 `--install-plugins \"${PLUGIN_PKGS[@]}\"`")
-            #    ★ 两处各有一份（本脚本开头、以及自拷贝之后重建路径那一处）——
-            #      少一处就会出现"从非 root 目录部署时信任门是空的"这种只在
-            #      一种部署方式下成立的假绿，所以数它个个数。
-            check("★★ PLUGIN_PKGS 的两处填充都来自 plugin_src_files()（同一个来源）",
-                  len(re.findall(r'PLUGIN_PKGS\+=\("\$f"\)', _dep_src)) == 2
-                  and len(re.findall(r"done < <\(plugin_src_files\)", _dep_src)) == 2,
-                  "填充点 %d 个 / 来源 %d 个"
-                  % (len(re.findall(r'PLUGIN_PKGS\+=\("\$f"\)', _dep_src)),
-                     len(re.findall(r"done < <\(plugin_src_files\)", _dep_src))))
-            check("★ 而它们都进 ALL_SRC_FILES（信任门与哈希基线看的是那一份）",
-                  len(re.findall(r'ALL_SRC_FILES\+=\("\$f"\)', _dep_src)) == 4,
-                  "ALL_SRC_FILES 的填充点 %d 个（4 = PLUGIN_PKGS 的两处 + "
-                  "SRC_FILES 的两处，少一处就有一批文件没进信任门）"
-                  % len(re.findall(r'ALL_SRC_FILES\+=\("\$f"\)', _dep_src)))
+            _touch2 = os.path.join(_clean, "a.splug")
+            with open(_touch2, "wb") as _f:
+                _f.write(b"splug\x1a\r\n" + b"\0" * 12)
+            check("★★ 对照：一个只有包的目录 ⇒ 一条问题都没有"
+                  "（否则上一条会被「什么都报」一并满足）",
+                  mod.plugin_src_problems(_clean) == [],
+                  repr(mod.plugin_src_problems(_clean)))
         finally:
-            shutil.rmtree(_tmp, ignore_errors=True)
+            shutil.rmtree(_clean, ignore_errors=True)
+    finally:
+        shutil.rmtree(_gate, ignore_errors=True)
 
-    # ── 19.13b ★ 完成摘要那张插件表：四列，第四列说话 ────────────────────────
+    # ── 19.13b ★★ deploy.sh 剩下的那一半**不认识插件** ──────────────────────
     #
-    # 这一段是**抠出来真跑**的（与 19.13 同一个理由：deploy.sh 本机跑不了全套，
-    # 只有那段命令替换是自足的）。
+    # ★ 这一条是 v0.12 阶段 4 拆分的**验收判据**（计划里的判据②）：插件那一半
+    #   搬走之后，基座安装脚本里不该再出现"插件目录""作业脚本目录""drop-in 目录"
+    #   这些概念 —— 一个路径一旦有两个写方，就多一次"脚本以为装到了 A、守护进程
+    #   扫的是 B"的机会。
     #
-    # ★ 它钉的是一个**已经发生过**的错误：那一行从前写的是
-    #   `if [[ -f "${_d}/job/start.sh" ]]`，而 `_d` 早就是**包的路径**（一个
-    #   `.splug` 文件）—— 于是这个判断**永远为假**，完成摘要把**每一个**插件都
-    #   说成"没有作业侧"，包括明明有 job/start.sh 的那些。它不报错、不改行为，
-    #   只是每次部署都对管理员说一句假话。
-    #   修法是去读 `--check-plugins` 的**第 4 列**（`has_job` / `no_job`）——
-    #   那一列是守护进程给的、明确的一位，不是靠"取一次试试"推出来的。
-    #
-    # ★ 为什么不是一条 `grep` 源码的形状检查：那样只能钉住"没写回 `-f`"，
-    #   钉不住"四列读对没有"。下面这几条是真的把那段 bash 跑一遍看输出。
-    _m = re.search(r'\$\(if \[\[ "\$DRYRUN" -eq 1 \]\]; then echo .*?\n.*?fi\)',
-                   _dep_src, re.S)
-    check("★ deploy.sh 的完成摘要那段命令替换找得到（找不到说明它改了形状）",
-          _m is not None)
-    if _m:
-        _inner = _m.group(0)[2:-1]          # 剥掉最外那对 $( )
-        # ★ 前提取自 `--check-plugins` 的真实格式：`<短名>\t<包路径>\t<ULID>\t<job>`。
-        _plist = ("jupyter\t/opt/slurmate/share/slurmate/plugins/01ABC.splug"
-                  "\t01ABC\tno_job\n"
-                  "sshd\t/opt/slurmate/share/slurmate/plugins/01DEF.splug"
-                  "\t01DEF\thas_job")
-        _r = subprocess.run(
-            ["bash", "-c",
-             'PLUGIN_LIST="$1"\nDRYRUN=0\nPLUGINS_SRC=/tmp/src\n'
-             'PLUGINS_DIR=/tmp/pd\nJOBS_DIR=/tmp/jd\n'
-             'printf "%s\\n" "$(' + _inner + ')"',
-             "bash", _plist],
-            capture_output=True, text=True)
-        _lines = [l for l in _r.stdout.split("\n") if l.strip()]
-        # 每个插件两行（一行"短名 → 包"，一行"作业脚本"或者"没有"）。
-        _by_name = {}
-        _cur = None
-        for _l in _lines:
-            _t = _l.strip()
-            if _t.startswith("jupyter") or _t.startswith("sshd"):
-                _cur = _t.split()[0]
-                _by_name[_cur] = [_t]
-            elif _cur:
-                _by_name[_cur].append(_t)
+    # ★ 判据是**标识符**而不是"提没提 plugin 这个词"：文件头里必须**说清楚**
+    #   插件搬到哪儿去了（那是给管理员看的），那是文字；而变量名与路径是判据。
+    print("\n── 19.13b. 拆开之后：基座安装脚本不认识插件 ──")
+    _ib = os.path.join(HERE, "deploy.sh")
+    with open(_ib, encoding="utf-8") as _f:
+        _ib_src = _f.read()
 
-        check("★★ 那段摘要跑得起来（rc=0）", _r.returncode == 0,
-              "rc=%d stderr=%r" % (_r.returncode, _r.stderr[:300]))
-        check("★★ 两个插件都被列出来了（第 4 列不认识时不能静默少一行）",
-              set(_by_name) == {"jupyter", "sshd"}, repr(_by_name))
-        _jup = "\n".join(_by_name.get("jupyter", []))
-        _ssh = "\n".join(_by_name.get("sshd", []))
-        check("★★ 有作业侧的那个**没有**被说成「包里没有 job/start.sh」"
-              "（从前那个 `-f ${包路径}/job/start.sh` 恒为假，于是每个插件都被"
-              "这么说一遍）",
-              "【包里没有 job/start.sh" not in _ssh, repr(_ssh))
-        check("★ 而没有作业侧的那个**仍然**被如实点名"
-              "（改判断不能把这一句一起改没）",
-              "【包里没有 job/start.sh" in _jup, repr(_jup))
-        check("★★ 有作业侧的报出它那份作业脚本，没有作业侧的不报",
-              "/tmp/jd/01DEF.sbatch" in _ssh and "/tmp/jd/01ABC.sbatch" not in _jup,
-              repr(_by_name))
-        check("★ 印出来的是**第 2 列那个包的路径**（不是一个目录）",
-              "plugins/01DEF.splug" in _ssh and "plugins/01ABC.splug" in _jup,
-              repr(_by_name))
+    def _code_only(src):
+        """**只留代码行**：注释里必须说清"插件搬到哪儿去了"（那是给管理员看的），
+        所以判据是代码，不是文件里提没提那个词。"""
+        return "\n".join(ln for ln in src.split("\n")
+                         if not ln.lstrip().startswith("#"))
+
+    _ib_code = _code_only(_ib_src)
+    for _bad in ("PLUGINS_DIR", "JOBS_DIR", "PLUGINS_MARKER", "JOBS_MARKER",
+                 "CONF_D", "PLUGINS_SRC", "plugin_src_files", "PLUGIN_PKGS",
+                 "--install-plugins", "--sync-plugins", "--check-plugins"):
+        # ★ 判据要**认出标识符**，不能是子串：`CONF_D` 是 `CONF_DIR` 的前缀，
+        #   子串匹配会让"drop-in 目录还在脚本里"这条**永远红**（假红）。
+        _pat = r"(?<![\w-])%s(?![\w-])" % re.escape(_bad)
+        check("★★ 基座安装脚本的**代码**里没有 %s（插件那一半真的搬走了）" % _bad,
+              re.search(_pat, _ib_code) is None,
+              repr([l.strip() for l in _ib_code.split("\n")
+                    if re.search(_pat, l)][:2]))
+    check("★ 而它**调用**卸载器来收掉插件（判据仍然只有一份，不在脚本里抄一遍）",
+          "--uninstall-plugins" in _ib_src and "--all-plugins" in _ib_src)
+    check("★ 作业模板装到了 <SHARE_DIR>/run.sbatch.template"
+          "（装完基座之后集群上可能根本没有仓库）",
+          "run.sbatch.template" in _ib_src)
+    # ★★ 而"插件搬到哪儿去了"必须**读得到**：`--help` 从前的范围表达式
+    #    （`sed -n '2,/^# =====/p'`）在**第 2 行自己**就闭合了 —— 于是它只印横幅
+    #    那一行，整个用法块一次都没打出来过。那不是"一个没人用的开关"：管理员找
+    #    不到插件入口时，第一件事就是跑 `--help`。
+    #    ★ 它不需要 root（`-h` 在参数解析那一轮就 `exit 0` 了），所以这条能真跑。
+    _h = subprocess.run(["bash", _ib, "--help"], capture_output=True, text=True)
+    check("★★ `--help` 真的把用法印出来（不是只印标题那一行）",
+          _h.returncode == 0 and "--uninstall" in _h.stdout
+          and "slurmate plugin install" in _h.stdout
+          and len(_h.stdout.splitlines()) > 20,
+          "rc=%d %d 行 %r" % (_h.returncode, len(_h.stdout.splitlines()),
+                              _h.stdout[:120]))
+    check("★ 基座安装脚本**调用**守护进程的 --check，而不是自己再判一遍"
+          "（端口区间 / Slurm 命令那些判据从前在这里各有一份孪生实现）",
+          '"$DAEMON_SRC" --check --config=' in _ib_src)
+    # ★★ 而"不再自己判一遍"这句话要**真的红得起来**：那几条孪生实现各自有一
+    #    个特征串（端口区间重叠的判定、Slurm 命令清单、cidr 交叉核对）。它们
+    #    一个都不该留在基座脚本里 —— 留在那里就是"同一件事两份判据"。
+    for _dup in ("ip_local_reserved_ports", "reserved_ranges", "scontrol"):
+        check("★★ 基座安装脚本里不再有 %r 那份孪生判据" % _dup,
+              _dup not in _ib_code,
+              repr([l.strip() for l in _ib_code.split("\n") if _dup in l][:2]))
 
     # ── 19.14 ★★ 读一个 .splug：三端共用同一份符合性向量 ────────────────────
     #
@@ -4535,19 +4537,25 @@ exit 0
     try:
         def _sy_mk(uid, name, ver="1.0.0", body=b"a", default_enabled=None,
                    out=None):
-            """造一个包（job/start.sh 用来区分内容；`body` 不同 ⇒ 摘要不同）。
+            """造一个包（`body` 是作业侧正文里的一行注释，不同 ⇒ 摘要不同）。
 
             ★ 文件名带上 id 的后三位：安装器**不看文件名**（落地名由包里的 id
               决定），而夹具里若两个包同名就会**互相覆盖**，于是"装的是哪一份"
               变成一件取决于调用次序的事 —— 那是这个仓库吃过亏的形状。
+
+            ★★ 作业侧那一份**必须是合法的**（定义 `start_<短名>`）：v0.12 阶段 4
+              起对账会**顺手织作业脚本**，而织不过去会让整段对账返回 1 —— 夹具
+              里塞一句 `a` 的话，下面每一条断言都会因为一个与它无关的原因变红。
             """
             site = {"defaultCpus": 1, "defaultMem": "1G"}
             if default_enabled is not None:
                 site["defaultEnabled"] = default_enabled
+            jobsh = ("start_%s() { :; }\n# %s\n"
+                     % (name.replace("-", "_"), body.decode("utf-8", "replace")))
             files = [("plugin.json", json.dumps(
                 {"id": uid, "name": name, "version": ver, "site": site}
             ).encode("utf-8")),
-                ("job/start.sh", body)]
+                ("job/start.sh", jobsh.encode("utf-8"))]
             p = os.path.join(out or _sy_home,
                              "%s-%s-%s.splug" % (name, ver, uid[-3:]))
             with open(p, "wb") as f:
@@ -4582,12 +4590,20 @@ exit 0
             return {i: (q.enabled, q.default_cpus, q.default_mem)
                     for i, q in c.plugins.items()}
 
+        # ★ `jobs_dir` / `template_path` 指到一个临时目录与仓库里那份模板上：
+        #   对账现在**也织作业脚本**（v0.12 阶段 4 从 deploy.sh 并进来），而
+        #   生产路径上这两个是从守护进程自身的安装位置推导的。用例里不能走那条
+        #   —— 它会往真的 `<prefix>/share/slurmate/jobs` 里写。
+        _SY_JOBS = os.path.join(_sy_home, "jobs")
+
         def _sy_sync(pdir, conf, **kw):
             buf = io.StringIO()
-            rc = mod.sync_plugin_config(conf, pdir,
-                                        say=lambda *a: buf.write(
-                                            " ".join(str(x) for x in a) + "\n"),
-                                        **kw)
+            kw.setdefault("jobs_dir", _SY_JOBS)
+            kw.setdefault("template_path", os.path.join(HERE, "run.sbatch"))
+            rc = mod.sync_plugins(conf, pdir,
+                                  say=lambda *a: buf.write(
+                                      " ".join(str(x) for x in a) + "\n"),
+                                  **kw)
             return rc, buf.getvalue()
 
         def _sy_read(p):
@@ -4925,9 +4941,9 @@ exit 0
             _cli.sessiond_path = _saved_exe
             _cli.os.geteuid = _saved_euid
             sys.stdout = _saved_stdout
-        check("★ `slurmate plugin sync` 转发到 `--sync-plugin-config`（判据只有一处）",
+        check("★ `slurmate plugin sync` 转发到 `--sync-plugins`（判据只有一处）",
               _rc == 0 and _seen and _seen[0][1].endswith("slurmate-sessiond")
-              and "--sync-plugin-config" in _seen[0],
+              and "--sync-plugins" in _seen[0],
               repr(_seen))
         # ★★ 而对齐成功之后**真的**去让守护进程重读了配置。
         #   从前这一步不存在：配置改完要管理员自己记得再跑一次 deploy.sh，而它是
@@ -5002,6 +5018,353 @@ exit 0
               str(_c_off.validate())[:200])
     finally:
         shutil.rmtree(_sy_home, ignore_errors=True)
+
+    # ── 19.19 ★★ 拆开 deploy.sh 之后的四件事（v0.12 阶段 4）─────────────────
+    #
+    # 这四件事从前都在 `deploy.sh` 里，靠**抠它那段 bash 出来真跑**才能验到一点
+    # （它本机跑不了整套：要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）。
+    # 搬进守护进程之后可以直接调，于是这一节是**真跑**。
+    #
+    #   ① 目录模式：`--from DIR` 装整批，并把上一次由本模式装过、这次没有的卸掉
+    #   ② 卸插件：一个插件在站点上留下**恰好四处**痕迹，全删，不多删
+    #   ③ 对账顺手织作业脚本，并清掉不再属于任何插件的那几份
+    #   ④ `--check` 的两个退出码：机器级(2) vs 配置级(1)
+    print("\n── 19.19. 拆开 deploy.sh 之后的四件事 ──")
+    _d4 = tempfile.mkdtemp(prefix="slurmate-split-")
+    _ck = tempfile.mkdtemp(prefix="slurmate-ck-")
+    try:
+        def _mk4(uid, name, ver="1.0.0", out=None):
+            """一个合法的包：清单 + 一份**过得了三道断言**的作业侧。"""
+            return put_package(out or _d4, [
+                ("plugin.json", json.dumps(
+                    {"id": uid, "name": name, "version": ver,
+                     "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+                ("job/start.sh",
+                 ("start_%s() { :; }\n" % name.replace("-", "_")).encode("utf-8")),
+            ])
+
+        def _quiet(fn, *a, **kw):
+            buf = io.StringIO()
+            rc = fn(*a, say=lambda *x: buf.write(
+                " ".join(str(y) for y in x) + "\n"), **kw)
+            return rc, buf.getvalue()
+
+        def _ls(d, suffix):
+            """目录里那几种文件。★ 目录**被收掉了**就是空 —— 那正是 `--all`
+            之后该有的样子，不是错误。"""
+            try:
+                return sorted(x for x in os.listdir(d) if x.endswith(suffix))
+            except OSError:
+                return []
+
+        def _pkgs(pd):
+            return _ls(pd, ".splug")
+
+        def _jobs_of(jd):
+            return _ls(jd, ".sbatch")
+
+        def _read_of(path):
+            """读一份文件；不在就是空串。
+            ★ 少了它，一条"本该红"的断言会先抛 FileNotFoundError —— 于是用例是
+              **被打崩**的，而不是干净地红。这两种读法在报告里必须分得开。"""
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return f.read()
+            except OSError:
+                return ""
+
+        _U1 = "01M2JKHTZGKJBFQQTWYXMQMF70"      # alpha
+        _U2 = "01M2JKHTZGKJBFQQTWYXMQMF71"      # beta
+        _U3 = "01M2JKHTZGKJBFQQTWYXMQMF72"      # gamma（只手动装）
+        _SRC = os.path.join(_d4, "src")
+        _PD = os.path.join(_d4, "plugins")
+        _JD = os.path.join(_d4, "jobs")
+        _SITE = os.path.join(_d4, "site.conf")
+        os.makedirs(_SRC, exist_ok=True)
+        with open(_SITE, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n")
+
+        def _sync():
+            return _quiet(mod.sync_plugins, _SITE, _PD, jobs_dir=_JD,
+                          template_path=os.path.join(HERE, "run.sbatch"))
+
+        def _from_src():
+            return _quiet(mod.install_plugins, [], _PD, src_dir=_SRC)
+
+        # ── ① 目录模式：整批装上 ──────────────────────────────────────────
+        _mk4(_U1, "alpha", out=_SRC)
+        _mk4(_U2, "beta", out=_SRC)
+        _rc, _out = _from_src()
+        check("★★ --from DIR：目录里的包全装上，并按 id 命名",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug", _U2 + ".splug"],
+              "%d %r %r" % (_rc, sorted(os.listdir(_PD)), _out[:200]))
+        check("★ 而它记下了「这一次是目录模式装的哪几个」（下一轮对账要靠它）",
+              _read_installed(_PD) == [_U1 + ".splug", _U2 + ".splug"],
+              repr(_read_installed(_PD)))
+
+        # ── ①a 从源目录拿走一个 ⇒ 站点上那个也真的没了 ────────────────────
+        #    ★ 这是"把一个包从源里移走再同步"——最自然的卸载动作。判据是**记录**，
+        #      不是"目录里现在有什么"。
+        os.unlink(os.path.join(_SRC, _U2 + ".splug"))
+        _rc, _out = _from_src()
+        check("★★ 源里拿走一个包再同步 ⇒ 站点上那个包也没了",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug"],
+              "%d %r" % (_rc, _pkgs(_PD)))
+
+        # ── ①b ★★ 而**手动装的**那个不受目录模式管 ────────────────────────
+        #    这正是"记录"与"目录里现在有什么"的分野：手动装是**显式动作**，
+        #    一次集合同步不该把它悄悄撤销。
+        _mk4(_U3, "gamma", out=_d4)
+        _quiet(mod.install_plugins, [os.path.join(_d4, _U3 + ".splug")], _PD)
+        _rc, _out = _from_src()
+        check("★★ 手动装的包不会被一次目录同步撤销（它不在记录里）",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug", _U3 + ".splug"],
+              "%d %r" % (_rc, _pkgs(_PD)))
+
+        # ── ①c 空目录是合法的：它表示「这次要装的是空集」──────────────────
+        _empty = os.path.join(_d4, "empty")
+        os.makedirs(_empty, exist_ok=True)
+        _rc, _out = _quiet(mod.install_plugins, [], _PD, src_dir=_empty)
+        check("★ 空目录合法，且它表示「这一次要装的是空集」",
+              _rc == 0 and "空集" in _out, "%d %r" % (_rc, _out[:300]))
+        check("★★ 于是上次由目录模式装的那个没了，**手动装的那个还在**",
+              _pkgs(_PD) == [_U3 + ".splug"], repr(_pkgs(_PD)))
+
+        # ── ①d 源目录里混进一棵源码树 ⇒ **一个字节都不写** ────────────────
+        _bad_src = os.path.join(_d4, "badsrc")
+        os.makedirs(os.path.join(_bad_src, "sometree"), exist_ok=True)
+        with open(os.path.join(_bad_src, "sometree", "plugin.json"), "w",
+                  encoding="utf-8") as _f:
+            _f.write("{}\n")
+        _mk4(_U1, "alpha", out=_bad_src)
+        _before = _pkgs(_PD)
+        _rc, _out = _quiet(mod.install_plugins, [], _PD, src_dir=_bad_src)
+        check("★★ 源目录里混着源码树 ⇒ 拒绝，且**一个字节都没写**",
+              _rc == 1 and "源码树" in _out and _pkgs(_PD) == _before,
+              "%d %r" % (_rc, _out[:300]))
+
+        # ── ③ 对账顺手织作业脚本 ──────────────────────────────────────────
+        _rc, _out = _from_src()
+        check("（夹具）现在站点上装着 alpha 与 gamma",
+              _pkgs(_PD) == sorted([_U1 + ".splug", _U3 + ".splug"]), repr(_pkgs(_PD)))
+        _rc, _out = _sync()
+        check("★★ 对账顺手织出了作业脚本（一个插件一份，按 id 命名）",
+              _rc == 0 and _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U3 + ".sbatch"]),
+              "%d %r %r" % (_rc, _jobs_of(_JD), _out[-300:]))
+        _woven = _read_of(os.path.join(_JD, _U1 + ".sbatch"))
+        check("★ 织出来的那一份真的含这个插件的作业侧（拼接标记一处不剩）",
+              "start_alpha()" in _woven
+              and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _woven))
+        check("★ 而它**语法上**是合法 shell（两遍式的第一遍就是 bash -n）",
+              subprocess.run(["bash", "-n", os.path.join(_JD, _U1 + ".sbatch")],
+                             capture_output=True).returncode == 0)
+        check("★★ 幂等：再对账一次，一份都不多、一份都不少",
+              _sync()[0] == 0 and _jobs_of(_JD) == sorted(
+                  [_U1 + ".sbatch", _U3 + ".sbatch"]), repr(_jobs_of(_JD)))
+
+        # ── ③c ★★ 插件脚本**语法错** ⇒ 对账拒绝，且一份都不装 ────────────────
+        #
+        # 两遍式的全部意义在这一条上：先把 N 份全部生成并逐份 `bash -n`，
+        # **全过了才开始装**。少了那道语法闸，一份语法错的插件脚本会被装进
+        # jobs/ —— 而它的失败要到**用户的作业在计算节点上跑起来**时才出现，
+        # 那时报的是"作业脚本第 N 行错了"，指不回是哪个插件的哪一次对账。
+        _U4 = "01M2JKHTZGKJBFQQTWYXMQMF73"
+        _broken = put_package(_d4, [
+            ("plugin.json", json.dumps(
+                {"id": _U4, "name": "broken", "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+            # ★ 函数名**对**（三道断言那一关要能过），错的是 shell 语法本身
+            #   —— 这样这一条红的成因才唯一。
+            ("job/start.sh", b"start_broken() {\n"),
+        ])
+        check("（夹具）那份插件包装得上（语法错不归安装器管）",
+              _quiet(mod.install_plugins, [_broken], _PD)[0] == 0, repr(_pkgs(_PD)))
+        _jobs_before = _jobs_of(_JD)
+        _rc, _out = _sync()
+        check("★★ 插件脚本语法错 ⇒ 对账返回 1（不是静默装下去）",
+              _rc == 1 and "语法检查失败" in _out, "%d %r" % (_rc, _out[-300:]))
+        check("★★ 而且作业脚本目录**一份都没动**（两遍式：全过了才开始装）",
+              _jobs_of(_JD) == _jobs_before,
+              "%r → %r" % (_jobs_before, _jobs_of(_JD)))
+        check("★ 而它说清了「配置那一半已经对齐、只有作业脚本没织成」"
+              "（两件事分开说，免得让人去重装那个已经装好的包）",
+              "作业脚本没织成" in _out, repr(_out[-200:]))
+        _quiet(mod.uninstall_plugins, [_U4], _PD, _SITE, _JD)
+        _sync()
+        check("★ （收拾干净）语法错的那个卸掉之后，对账又回到 0",
+              _jobs_of(_JD) == _jobs_before, repr(_jobs_of(_JD)))
+
+        # ── ③b 包没了 ⇒ 它那份作业脚本也跟着走 ───────────────────────────
+        _mk4(_U2, "beta", out=_SRC)
+        _from_src()
+        _sync()
+        check("（夹具）三个插件的作业脚本都在",
+              _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U2 + ".sbatch",
+                                       _U3 + ".sbatch"]), repr(_jobs_of(_JD)))
+        os.unlink(os.path.join(_SRC, _U2 + ".splug"))
+        _from_src()
+        _sync()
+        check("★★ 包被拿走后，它那份作业脚本也清了（不留无主的、仍可提交的脚本）",
+              _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U3 + ".sbatch"]),
+              repr(_jobs_of(_JD)))
+        check("★★ 而它那份配置也清了（两份派生物同一个判据）",
+              not os.path.isfile(mod.plugin_conf_path(_SITE, _U2))
+              and os.path.isfile(mod.plugin_conf_path(_SITE, _U1)),
+              repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
+
+        # ── ② 卸插件：恰好四处，一处不多 ──────────────────────────────────
+        _conf_of = mod.plugin_conf_path(_SITE, _U1)
+        check("（夹具）那四处都在：包 / 它那份配置 / 作业脚本 / 钥匙记录",
+              os.path.isfile(os.path.join(_PD, _U1 + ".splug"))
+              and os.path.isfile(_conf_of)
+              and os.path.isfile(os.path.join(_JD, _U1 + ".sbatch"))
+              and _U1 in mod.read_plugin_keys(_PD),
+              "%r %r %r" % (os.path.isfile(_conf_of), _jobs_of(_JD),
+                            sorted(mod.read_plugin_keys(_PD))))
+        _rc, _out = _quiet(mod.uninstall_plugins, [_U1], _PD, _SITE, _JD)
+        check("★★ 卸掉之后那四处**一处都不剩**",
+              _rc == 0
+              and not os.path.isfile(os.path.join(_PD, _U1 + ".splug"))
+              and not os.path.isfile(_conf_of)
+              and not os.path.isfile(os.path.join(_JD, _U1 + ".sbatch"))
+              and _U1 not in mod.read_plugin_keys(_PD),
+              "%d %r" % (_rc, _out[:300]))
+        check("★★ 而**别的插件**一处都没被碰（gamma 还在，记录里也还有它）",
+              _pkgs(_PD) == [_U3 + ".splug"]
+              and _U3 in mod.read_plugin_keys(_PD),
+              "%r %r" % (_pkgs(_PD), sorted(mod.read_plugin_keys(_PD))))
+        check("★★ 手写的那一份配置一个字不动（判据是文件名，不是内容）",
+              _write_manual_conf(_SITE, "handwritten"),
+              repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
+
+        # ── ②b --all：三处痕迹取并集；手写的不在并集里 ────────────────────
+        _rc, _out = _quiet(mod.uninstall_plugins, [], _PD, _SITE, _JD,
+                           uninstall_all=True)
+        check("★★ --all 把本站的包都卸了",
+              _rc == 0 and _pkgs(_PD) == [], "%d %r" % (_rc, _pkgs(_PD)))
+        check("★★ 手写的那一份**不在并集里**（它不是 ULID 命名的）⇒ 一个字没动",
+              os.path.isfile(os.path.join(mod.plugin_conf_dir(_SITE),
+                                          "handwritten.conf")),
+              repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
+        check("★ 而空掉的那几个目录被收掉了（`rmdir` 只在**空掉**时成功）",
+              not os.path.isdir(_JD) and not os.path.isdir(_PD),
+              "jd=%r pd=%r 里面还有 %r" % (
+                  os.path.isdir(_JD), os.path.isdir(_PD),
+                  sorted(os.listdir(_PD)) if os.path.isdir(_PD) else None))
+        check("★ 而它**没有**伸手去删上一层（那是基座的地方）",
+              os.path.isdir(_d4), repr(os.path.isdir(_d4)))
+
+        # ── ②c 认不出的 id ⇒ 用法错误，不是静默什么都不做 ─────────────────
+        _rc, _out = _quiet(mod.uninstall_plugins, ["not-a-ulid"], _PD, _SITE, _JD)
+        check("★★ 给一个不是 ULID 的 id ⇒ 用法错误（2），并说清 id 与短名的区别",
+              _rc == 2 and "ULID" in _out and "短名" in _out,
+              "%d %r" % (_rc, _out[:300]))
+
+        # ── ④ `--check` 的两个退出码 ──────────────────────────────────────
+        #
+        # ★★ 这是"部署脚本要能把「这台机器缺东西」与「这份配置写错了」分开"
+        #    那条约定的落点（见 machine_selfcheck 的说明）。判据是**真的跑**，
+        #    不是读源码里有没有那个数 —— 一个没人读的退出码与没有它是一样的。
+        #
+        # ★ 这一节**不能靠改 PATH 来造"机器缺 Slurm"**：本机（一台计算节点）
+        #   的 /usr/bin 下真的装着那些命令，而 `resolve_bin` 除了 PATH 还会查
+        #   `SLURM_BIN_DIRS`。所以"机器级"那一半用**单元级**（直接调
+        #   machine_selfcheck）+ **接线级**（替换掉它，看 main 返回几）。
+        _ckconf = os.path.join(_ck, "c.conf")
+        with open(_ckconf, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55999\n"
+                     "readonly_paths = /shared/home\n")
+
+        class _FakeCfg(object):
+            def __init__(self, missing=(), nft_ok=True):
+                for _n in mod.SLURM_COMMANDS:
+                    setattr(self, _n, None if _n in missing else "/bin/true")
+                self._nft_ok = nft_ok
+
+        _m_none = mod.machine_selfcheck(_FakeCfg())
+        check("（夹具）八个命令都解析得到、nft 也在 ⇒ 机器级一条问题都没有",
+              _m_none == [], repr(_m_none))
+        _m_one = mod.machine_selfcheck(_FakeCfg(missing=("squeue",)))
+        check("★★ 少一个 Slurm 命令 ⇒ 机器级一条问题，并**点名**是哪一个、"
+              "以及「这台机器不像是登录节点」",
+              len(_m_one) == 1 and "squeue" in _m_one[0]
+              and "登录节点" in _m_one[0], repr(_m_one))
+        _m_nft = mod.machine_selfcheck(_FakeCfg(), nft="/nonexistent/nft")
+        check("★ 找不到 nft ⇒ 也是机器级（它同样与配置好坏无关）",
+              len(_m_nft) == 1 and "nft" in _m_nft[0], repr(_m_nft))
+
+        # 接线：main() 把三档翻成三个退出码。
+        # ★★ 这一段**必须把两个会去问真集群的东西替换掉**（`machine_selfcheck`
+        #    与 `crosscheck_cidr`）—— 否则这条用例的结论取决于"跑它的那台机器
+        #    长什么样"，而它要考的恰恰是**判据本身**。
+        #    ★ 真进程那一半（配置级 ⇒ 1）不用替换：`validate()` 在碰任何集群事实
+        #      之前就返回了，所以它在哪台机器上都是同一个答案。
+        def _run_check(machine, cidr_errors=()):
+            _s_msc, _s_cc = mod.machine_selfcheck, mod.crosscheck_cidr
+            _s_argv, _s_out = sys.argv, sys.stdout
+            try:
+                mod.machine_selfcheck = lambda cfg, nft=None: list(machine)
+                mod.crosscheck_cidr = lambda cfg: list(cidr_errors)
+                sys.argv = ["slurmate-sessiond", "--check", "--config", _ckconf]
+                sys.stdout = io.StringIO()
+                rc = mod.main()
+                return rc, sys.stdout.getvalue()
+            finally:
+                mod.machine_selfcheck, mod.crosscheck_cidr = _s_msc, _s_cc
+                sys.argv, sys.stdout = _s_argv, _s_out
+
+        _rc2, _out2 = _run_check(["假的：这台机器缺 sbatch"])
+        check("★★ 机器级有问题 ⇒ main() 返回 **2**（部署脚本据此在装任何文件之前"
+              "停下），而且**整屏照样打完**",
+              _rc2 == 2 and "假的：这台机器缺 sbatch" in _out2
+              and "端口池" in _out2 and "作业脚本目录" in _out2,
+              "%d %r" % (_rc2, _out2[:300]))
+        _rc1, _out1 = _run_check([], ["假的：网段对不上"])
+        check("★★ 只有配置级的问题 ⇒ **1**（不是 2）—— 部署脚本据此决定"
+              "「继续装、装完再判」",
+              _rc1 == 1 and "对不上" in _out1, "%d %r" % (_rc1, _out1[-300:]))
+        _rc0, _out0 = _run_check([])
+        check("★★ 两样都没问题 ⇒ **0**（少了这一条，上面两条会被「永远非零」"
+              "一并满足）", _rc0 == 0, "%d %r" % (_rc0, _out0[:200]))
+        _rcm, _outm = _run_check(["机器缺东西"], ["网段也对不上"])
+        check("★★ 两样都有 ⇒ **2 优先**（一台不是登录节点的机器上，"
+              "「配置写错了」这句话没什么用）",
+              _rcm == 2, "%d %r" % (_rcm, _outm[:200]))
+
+        # 配置级那一条跑**真进程**：cluster_cidr 空着 ⇒ 1。
+        _badconf = os.path.join(_ck, "bad.conf")
+        with open(_badconf, "w", encoding="utf-8") as _f:
+            _f.write("range_start = 55001\nrange_end = 55999\n")
+        _r_c = subprocess.run([sys.executable, DAEMON, "--check", "--config", _badconf],
+                              capture_output=True, text=True)
+        check("★★ 真进程也一样：配置级失败（cluster_cidr 空着）⇒ **1**，"
+              "而不是 2",
+              _r_c.returncode == 1 and "配置错误" in _r_c.stdout
+              and "集群网段" in _r_c.stdout,
+              "%d %r" % (_r_c.returncode, _r_c.stdout[-300:]))
+
+        # ── ④b 端口池与本机保留端口的重叠：一条 ⚠，动不了退出码 ────────────
+        _cfg4 = make_config(mod, _ck)
+        _w = mod.reserved_ports_warning(
+            _cfg4, "%d-%d" % (_cfg4.port_start + 1, _cfg4.port_start + 2))
+        check("★★ 重叠 ⇒ 说一条 ⚠，点名那两个区间与那个文件",
+              _w is not None and str(_cfg4.port_start) in _w
+              and "ip_local_reserved_ports" in _w, repr(_w))
+        check("★ 不重叠 ⇒ 一个字都不说（「没报」与「没事」必须分得开）",
+              mod.reserved_ports_warning(_cfg4, "1-100") is None)
+        check("★★ 内核那个格式**单项与区间都收**（与 reserved_ranges 的解析器"
+              "刻意是两份：两份输入的语法本来就不同）",
+              mod.parse_port_set("5000,6000-7000") == [(5000, 5000), (6000, 7000)],
+              repr(mod.parse_port_set("5000,6000-7000")))
+        check("★ 而 reserved_ranges 那边**只收区间**（一个裸数字多半是写错了，"
+              "拒掉比猜好）—— 两份解析器刻意不合并",
+              _raises(lambda: mod.parse_reserved_ranges("5000")),
+              "parse_reserved_ranges('5000') 应当抛 ValueError")
+    finally:
+        shutil.rmtree(_d4, ignore_errors=True)
+        shutil.rmtree(_ck, ignore_errors=True)
+
 
     # ── 20. run.sbatch 写的会话文件 ↔ 守护进程的白名单 ──────────────────────
     #

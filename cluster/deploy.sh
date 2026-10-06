@@ -1,9 +1,31 @@
 #!/bin/bash
 # ==============================================================================
-#  deploy.sh — Slurmate 集群侧一键部署
+#  deploy.sh — Slurmate 集群侧**基座**安装 / 卸载
 # ==============================================================================
 #
 #  在【控制节点（登录节点）】上以 root 运行。
+#
+#  ★★ v0.12 阶段 4 起本脚本**只管基座**：守护进程、CLI、作业模板、systemd 单元、
+#     站点配置主文件、目录骨架。它**不再碰插件** —— 插件那四件事（装包 / 编织
+#     作业脚本 / 对齐配置 / 卸包）有一个**唯一入口**：
+#
+#         sudo slurmate plugin install [--from DIR]   装（可从一个目录整批对齐）
+#         sudo slurmate plugin uninstall <id>…        卸
+#         sudo slurmate plugin sync                   对齐配置与作业脚本
+#
+#     它们走守护进程里的**安装器 / 卸载器**（`--install-plugins` /
+#     `--uninstall-plugins` / `--sync-plugins`）—— 读包、验签、同 id 检查、
+#     三道作业侧断言，各只有那一份实现。
+#
+#     ★ 为什么搬走：本脚本从前压着三件不同的事（插件、部署预检、基座安装），
+#       而"插件是独立项目，装它却要重跑一次整个部署"正是压在一起的结果。
+#     ★ 为什么**不整个删掉**：基座这一半还没有软件包接手（deb/rpm 是另一条
+#       决定，见 KNOWN-ISSUES）。它整个消失的那一天 = 基座软件包做出来的那一天。
+#
+#  ★ **部署预检**那一半也拆了：凡守护进程自己判得了的（端口区间自洽、与
+#    reserved_ranges 相交、Slurm 命令齐备、cluster_cidr 与节点对账…）都进
+#    `slurmate-sessiond --check` —— **同一件事只允许有一个判据**。本脚本现在
+#    只是**调用**它，并把它的两个退出码分开对待（见〈阶段 0〉那一段）。
 #
 #  设计原则：只增不改，绝不影响集群上已有的任何功能
 #  ──────────────────────────────────────────────
@@ -19,64 +41,24 @@
 #  5. 幂等：可反复运行。卸载只删自己的东西。
 #
 #  用法：
-#    sudo bash deploy.sh                     # 部署
+#    sudo bash deploy.sh                     # 装基座
 #    sudo bash deploy.sh --check             # 只体检，不做任何改动
 #    sudo bash deploy.sh --dry-run           # 演练，不做任何改动
 #    sudo bash deploy.sh --uninstall         # 卸载（保留状态数据）
 #    sudo bash deploy.sh --uninstall --purge-state
 #    sudo bash deploy.sh --require-baseline  # 前置基线缺失即中止（见下）
-#    sudo bash deploy.sh --plugins-src DIR   # 从 DIR 装插件（缺省 <repo>/plugins）
-#                                            # 指向空目录 = 本站不装任何插件
+#
+#  装完基座之后装插件（那是**唯一**的插件入口，本脚本不认识插件）：
+#    sudo slurmate plugin install --from /srv/slurmate-pkgs
+#    ★ 包是**构建产物**（作者在他机器上 `packer build` 出来的 `<id>.splug`），
+#      不进 git；本脚本与安装器**永不打包**，服务器上从头到尾没有源码树。
+#    ★ 一个插件都没有是**合法状态**：基座照常起，会话照常能查能停。
 #
 #  关于 --require-baseline
 #  ─────────────────────
 #  本脚本最初是为「一台已经跑着别的端口管理方案的登录节点」写的，因此会检查
 #  若干前置设施是否存在。**在别人的集群上这些设施通常不存在**，所以默认只
 #  警告、继续部署。若你需要"前置条件不满足就绝不继续"的严格语义，加这个开关。
-#
-#  关于插件
-#  ───────
-#  作业里能跑什么由**插件**决定。★ 而插件是一个**成品包**，不是一棵源码树：
-#
-#      --plugins-src DIR/              ← 放下载来的 .splug 的地方
-#        01M2JKHTZGKJBFQQTWYXMQMF2V.splug   作者用 packer/ 打出来的
-#
-#  ★ **本脚本永不打包**（仓库里没有 Node 的依赖，也不该有）。作者在他的机器上
-#    `packer build`，把 `.splug` 发布到网站 / GitHub；管理员下载下来，放进
-#    `--plugins-src` 指的目录，然后跑本脚本。**服务器上从头到尾没有源码树。**
-#
-#  本脚本这一步只做三件事，每件都有它自己的负责人：
-#      · **信任门**：这些包在"root 下载完到安装器读"之间不能被普通用户换掉；
-#      · **交给安装器**（`slurmate-sessiond --install-plugins`）：解析、验签、
-#        同 id 检查 —— 规则只有那一份实现；
-#      · **逐插件编织**作业脚本：把包里的 `job/start.sh` 织进作业模板。
-#
-#  ★ 缺省 `--plugins-src` 是仓库顶层的 `plugins/`。而那里放的是**源码树**
-#    （它们是仓库的一部分，要能逐行评审），所以直接跑本脚本会在信任门那一步
-#    停下来，并告诉你先 `packer build`。那个失败是刻意的：**包是构建产物，
-#    不进 git**（二进制进 git 等于代码评审死掉），所以"装这个仓库自己的插件"
-#    也要先打一次包。
-#
-#  一个包都没有是**合法状态**：传一个空目录给 --plugins-src 即可。
-#  一个插件**包里的负载没有 job/start.sh** 也是合法的：它装得上、看得见，
-#  但提交不了（守护进程在提交时报 service_kind_no_job），本脚本跳过它、
-#  不给它生成作业脚本。
-#
-#  ★ **一个插件一份作业脚本**，装到：
-#
-#      <prefix>/share/slurmate/jobs/<ULID>.sbatch
-#
-#    文件名是插件清单里的 `id`（ULID）—— 它是插件的**身份**，全球唯一、铸造
-#    出来就不变；短名只是本站的标签，可以改。目录列表里那一串 ULID 各自对应哪个
-#    插件，看完成摘要那张表，或让 `slurmate-sessiond --check` 再打印一遍。
-#
-#    为什么一插件一份、不是所有插件织进同一份：同处一个文件时，插件里任何一行
-#    **不在函数里**的代码都会待在主流程中间，在**每一个**作业里执行，不管用的是
-#    哪个插件。拆开之后，一个插件的代码连"被另一个插件的作业解析到"的机会都没有。
-#
-#  ★ 编织（而不是运行时 source）是刻意的：装出来的每一份都是**单文件、零运行时
-#    依赖**，计算节点不需要能看见那个目录。理由与失败形态见 cluster/run.sbatch 的
-#    文件头。**拆成 N 份没有改变这一点** —— 仍然是部署期把内容写进文件。
 #
 # ==============================================================================
 
@@ -86,16 +68,6 @@ set -uo pipefail
 # deploy.sh 与它要安装的源文件同在 cluster/ 下。
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SELF_DIR}"
-
-# 插件**包**的来源目录：里面放的是一个或多个 `<ULID>.splug`（作者发布、
-# 管理员下载）。**可参数化**：缺省是仓库顶层的 plugins/，而"从网站下载来的一批
-# 包"可以用 --plugins-src 指过去。指向一个空目录 = 本站不装任何插件（合法状态）。
-#
-# ★ 语义变过一次：从前它是"插件的**源码**目录"。现在目录里只该有 `.splug`
-#   —— 别的东西（子目录、随手放的文件）会在预检那一步被点名，见 scan_plugins()
-#   与下面 plugin_src_files() 的说明。
-PLUGINS_SRC=""
-PLUGINS_SRC_GIVEN=0
 
 # 面向用户的"脚本路径"。源码不可信时本脚本会自拷贝到 /root 下再重执行，那时
 # $0 指向 /root/slurmate-src.XXXXXX/…—— 一个随机的临时目录。若把卸载指令写成
@@ -107,41 +79,12 @@ SCRIPT_PATH="${SLURMATE_ORIG_SCRIPT:-$SELF_SCRIPT}"
 DAEMON="/usr/local/sbin/slurmate-sessiond"
 CLI="/usr/local/bin/slurmate"
 SHARE_DIR="/usr/local/share/slurmate"
-# 作业脚本目录。守护进程按**自己的安装位置**推导出同一个路径
-# （slurmate-sessiond 的 default_jobs_dir），两边由同一个前缀推导。
-#
-# ★ 里面是**一插件一份**的编织成品，文件名是插件的 ULID：`<ULID>.sbatch`。
-#   本目录 100% 由本脚本生成，没有任何人写的东西 —— 所以陈旧文件的清理可以
-#   直接按"不在这次的集合里"删掉，与 PLUGINS_DIR 不同（那里要更小心，因为
-#   插件包是别人下载来的构件）。
-#
-# ★ 权限必须是 0755（见下面 chmod 那一处）：里面的脚本由**提交作业的用户**
-#   身份的 sbatch 读取。0700 的表现是 sbatch 报"读不到文件"，指不回权限。
-JOBS_DIR="${SHARE_DIR}/jobs"
-# 插件安装目录。守护进程按**自己的安装位置**推导出同一个路径
-# （slurmate-sessiond 的 default_plugins_dir），两边由同一个前缀推导，
-# 就不存在「守护进程扫 A、作业脚本编织的是 B」这种只在提交时才炸的不一致。
-#
-# ★ 里面是**一插件一个包**：`<ULID>.splug`。文件名就是包的 `id` —— 所以两个
-#   同 id 的包会落在同一个文件名上，而**互相覆盖是静默的**。§6.4 的那条检查因此
-#   落在安装器里（它手里同时拿着这一次要装的全部包），不在本脚本里另写一份。
-PLUGINS_DIR="${SHARE_DIR}/plugins"
-# deploy.sh 记下自己装过哪几个包（每行一个 `<ULID>.splug`）。重复部署时，源里已经
-# 拿走的插件要跟着删掉 —— 否则「把包移走再部署」这个最自然的卸载动作会**静默
-# 无效**，而用户看到的是"它还在"。
-#
-# ★ 作业脚本目录里也有一份**同名**的 `.installed`：两个标记记的是同一件事 ——
-#   本脚本往这个目录里放过哪些文件。同一件事不要有两个名字。
-PLUGINS_MARKER="${PLUGINS_DIR}/.installed"
-# 同上，但记的是本脚本生成过哪几份作业脚本（每行一个 ULID）。插件的源目录没了、
-# 插件被拿走了，对应那份 <ULID>.sbatch 要跟着删掉 —— 否则它会留下一份**无主的、
-# 仍然可以被提交的**脚本，而没有任何东西能把它们对上号。
-JOBS_MARKER="${JOBS_DIR}/.installed"
+# ★ `<SHARE_DIR>/jobs` 与 `<SHARE_DIR>/plugins` **不归本脚本管** —— 那两条路径
+#   由安装器按同一个前缀算出来（`slurmate-sessiond` 的 default_jobs_dir /
+#   default_plugins_dir），本脚本**不认识它们**。这是刻意的：一个路径一旦有两个
+#   写方，就多一次"脚本以为装到了 A、守护进程扫的是 B"的机会。
 CONF_DIR="/etc/slurmate"
 CONF="${CONF_DIR}/slurmate.conf"
-# 插件配置住在这里：**一个插件一个文件**（照 systemd 的 drop-in）。
-# 主文件只有站点通用键；插件那一份由安装器写、由它删。
-CONF_D="${CONF}.d"
 UNIT="/etc/systemd/system/slurmate-sessiond.service"
 SERVICE="slurmate-sessiond.service"
 
@@ -153,32 +96,11 @@ SOCKET="${RUN_DIR}/ctl.sock"
 PY="/usr/bin/python3"
 NFT="$(command -v nft || echo /sbin/nft)"
 
-# 端口区间与「要避让的其他区间」都从配置里读，不在这里另写一份 ——
-# 否则管理员改了 slurmate.conf，部署脚本的预检与完成报告仍是旧值，两者互相矛盾。
-#
-# 读哪一份：已经装过就优先读【已安装】的那份（管理员可能按站点改过），
-# 否则读随仓库分发的示例。这样重复部署时，预检用的值和守护进程实际
-# 读到的值是同一份。
-SRC_CONF="${SRC_DIR}/slurmate.conf.example"
-if [[ -r "$CONF" ]]; then
-    SRC_CONF="$CONF"
-fi
-PORT_MIN="$(sed -nE 's/^[[:space:]]*range_start[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$SRC_CONF" 2>/dev/null | head -1)"
-PORT_MAX="$(sed -nE 's/^[[:space:]]*range_end[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$SRC_CONF" 2>/dev/null | head -1)"
-RESERVED_RANGES="$(sed -nE 's/^[[:space:]]*reserved_ranges[[:space:]]*=[[:space:]]*(.*)/\1/p' "$SRC_CONF" 2>/dev/null | head -1)"
-PORT_MIN="${PORT_MIN:-55001}"
-PORT_MAX="${PORT_MAX:-55999}"
-
 # ─── 参数 ────────────────────────────────────────────────────────────────────
 MODE="install"
 REQUIRE_BASELINE=0
 DRYRUN=0
 PURGE=0
-
-want_plugins_src() {
-    PLUGINS_SRC="$1"
-    PLUGINS_SRC_GIVEN=1
-}
 
 while [[ $# -gt 0 ]]; do
     arg="$1"; shift
@@ -191,29 +113,26 @@ while [[ $# -gt 0 ]]; do
         # 所以它已成空操作，但保留接受，免得旧脚本/旧笔记里的命令直接报错。
         --force)             : ;;
         --purge-state)       PURGE=1 ;;
-        --plugins-src)
-            [[ $# -gt 0 ]] || { echo "--plugins-src 后面要跟一个目录" >&2; exit 2; }
-            want_plugins_src "$1"; shift ;;
-        --plugins-src=*)     want_plugins_src "${arg#--plugins-src=}" ;;
+        # ★ v0.12 阶段 4：插件不再经过本脚本。**说清楚它搬去哪儿**，而不是
+        #   只说一句"未知参数" —— 那会让人以为是自己打错了。
+        --plugins-src|--plugins-src=*)
+            echo "★ 插件不再经过本脚本（v0.12 起）：本脚本只装基座。" >&2
+            echo "  装插件（那是唯一的入口）：" >&2
+            echo "      sudo slurmate plugin install --from ${arg#--plugins-src=}" >&2
+            exit 2 ;;
         -h|--help)
-            sed -n '2,/^# =====/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            # ★★ 印的是**文件头那一段**（标题那两行之间的东西），不是整个文件头。
+            #
+            #   从前这里是 `sed -n '2,/^# =====/p'` —— 而第 2 行**自己**就是一条
+            #   `# =====`，于是它只印出横幅那三行，下面整段「用法」一次都没打出来
+            #   过（`--help` 看起来"能用"，只是短得没人怀疑）。v0.12 阶段 4 顺手
+            #   修掉：这一版往用法里加了"插件搬到哪儿去了"，而它必须**读得到**。
+            awk '/^# =====/ { n++; next }
+                 n == 2 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
             exit 0 ;;
         *) echo "未知参数: $arg（用 --help 查看用法）" >&2; exit 2 ;;
     esac
 done
-
-# 缺省是仓库顶层的 plugins/（与 cluster/ 并列）。它**不是** cluster/ 的子目录 ——
-# 那正是"插件是独立项目"的形状。
-if [[ "$PLUGINS_SRC_GIVEN" -eq 0 ]]; then
-    PLUGINS_SRC="$(cd "${SRC_DIR}/.." 2>/dev/null && pwd || echo "${SRC_DIR}/..")/plugins"
-fi
-# 去掉结尾的斜杠，否则后面拼路径会出 //，而它进哈希基线之后两份对不上。
-PLUGINS_SRC="${PLUGINS_SRC%/}"
-if [[ -n "$PLUGINS_SRC" && ! -d "$PLUGINS_SRC" ]]; then
-    echo "插件源目录不存在：${PLUGINS_SRC}" >&2
-    echo "  用 --plugins-src DIR 指定（指向一个空目录 = 本站不装任何插件，合法）。" >&2
-    exit 2
-fi
 
 # ─── 输出 ────────────────────────────────────────────────────────────────────
 PASS_N=0; FAIL_N=0; WARN_N=0
@@ -301,73 +220,39 @@ if [[ "$MODE" == "uninstall" ]]; then
         info "nft 表 inet slurmate 不存在，跳过"
     fi
 
-    # 插件目录：**只删部署标记里记着的那几个包**，每个删之前先确认它确实是一个
-    # 插件包（开头那 8 个字节是魔数）。按名字拼出来的路径，删之前先读一遍 ——
-    # 这条规矩从前在客户端有个孪生兄弟（`plugins/install.js` 的 `uninstall`），
-    # 那个文件随本机安装那条路在 v0.7 删掉了；规矩留下。
-    if [[ -d "$PLUGINS_DIR" ]]; then
-        if [[ -f "$PLUGINS_MARKER" ]]; then
-            while IFS= read -r p; do
-                [[ -n "$p" ]] || continue
-                case "$p" in
-                    */*|.|..) warn "跳过标记里那条形状不对的记录：${p}"; continue ;;
-                esac
-                if [[ -f "${PLUGINS_DIR}/${p}" ]] \
-                   && head -c 8 "${PLUGINS_DIR}/${p}" 2>/dev/null | grep -q '^splug'; then
-                    rm -f "${PLUGINS_DIR:?}/${p}" && ok "已删除插件包 ${p}"
-                else
-                    warn "跳过 ${PLUGINS_DIR}/${p} —— 它不像一个插件包，不敢删"
-                fi
-            done < "$PLUGINS_MARKER"
-            rm -f "$PLUGINS_MARKER" && ok "已删除插件部署标记"
-        fi
-        # 钥匙记录：它是**站点侧的记忆**（"这个 id 上一次是哪把钥匙签的"）。
-        # 卸载 = 这个站点不再有插件，记忆跟着走；留下它反而会让下次装同一个包时
-        # 撞上一句"签名者变了"——而那时没有任何东西能告诉管理员上一次是谁签的。
-        rm -f "${PLUGINS_DIR}/.keys.json" && ok "已删除站点侧的钥匙记录"
-        if [[ ! -f "$PLUGINS_MARKER" ]] \
-           && [[ -n "$(ls -A "$PLUGINS_DIR" 2>/dev/null)" ]]; then
-            warn "${PLUGINS_DIR} 里还有东西，但它们不在本脚本的部署标记里 —— 不是我们装的，一律不删"
-            warn "      如确认要删请人工执行：rm -rf '${PLUGINS_DIR}'"
-        fi
-        rmdir "$PLUGINS_DIR" 2>/dev/null || true
-    fi
-
-    # 作业脚本目录：里面的每一份都是本脚本生成的，删除的判据因此比插件目录**更强**
-    # —— 不再需要逐份读内容确认，只要它带着本脚本的部署标记，整个目录都是我们的。
+    # ── 插件：交给**卸载器**，本脚本不认识那几处痕迹 ────────────────────────
     #
-    # ★ 沿用 `grep -qi slurmate` 那道内容闸门作为**第二道**：ULID 文件名里没有
-    #   "slurmate" 这个词，所以文件名本身提供不了任何归属证据；内容里有
-    #   （模板头就是）。两道都过才删。
-    if [[ -d "$JOBS_DIR" ]]; then
-        if [[ -f "$JOBS_MARKER" ]]; then
-            while IFS= read -r j; do
-                [[ -n "$j" ]] || continue
-                jf="${JOBS_DIR}/${j}"
-                [[ -f "$jf" ]] || continue
-                if grep -qi "slurmate" "$jf" 2>/dev/null; then
-                    rm -f "$jf" && ok "已删除作业脚本 ${j}"
-                else
-                    warn "跳过 $jf —— 内容不含 \"slurmate\"，不像本系统装的，不敢删"
-                fi
-            done < "$JOBS_MARKER"
-            rm -f "$JOBS_MARKER" && ok "已删除作业脚本部署标记"
-        elif [[ -n "$(ls -A "$JOBS_DIR" 2>/dev/null)" ]]; then
-            warn "${JOBS_DIR} 里有东西，但没有本脚本的部署标记 —— 不是我们装的，一律不删"
-            warn "      如确认要删请人工执行：rm -rf '${JOBS_DIR}'"
+    # ★★ v0.12 阶段 4 起，一个插件在站点上留下哪几处痕迹（包 / 它那份配置 /
+    #    它那份作业脚本 / 站点侧那条签名者记录）**只有卸载器知道**（守护进程的
+    #    `uninstall_plugins()`）。这里从前有一份孪生实现（按 `.installed` 标记删
+    #    包、按 ULID 删配置、按标记删作业脚本），两份判据迟早会漂开 —— 而漂开的
+    #    症状是"卸载之后站点上还剩一点什么"，没有任何地方会报错。
+    #
+    # ★ 用**已装的**那份守护进程（`$DAEMON`），不是源码里那份：卸载要在**任何**
+    #   状态下都做得到（源码目录可能已经没了、配置可能坏了），而装在盘上的那一份
+    #   正是这个站点上"插件是什么"的判据来源。它必须在下面删二进制**之前**跑。
+    #
+    # ★ 它失败**不中止卸载**：卸载的第一属性是**永远可用**（出故障时管理员最需要
+    #   的就是能干净地把它拿掉）。失败时说清"哪几处还在、怎么人工收尾"。
+    if [[ -x "$DAEMON" ]]; then
+        if "$PY" "$DAEMON" --uninstall-plugins --all-plugins --config="$CONF" >/dev/null 2>&1; then
+            ok "已卸掉本站的全部插件（包 / 它们的配置 / 它们的作业脚本 / 钥匙记录）"
+        else
+            warn "插件卸载器没能跑完 —— 站点上可能还剩着插件包或它们的配置。"
+            warn "  人工看一眼（这一步在做任何删除之前，所以安全）："
+            warn "      ${DAEMON} --uninstall-plugins --all-plugins --config=${CONF}"
+            warn "  看完再重跑本脚本；直接继续也行，那几份会留在盘上。"
         fi
-        rmdir "$JOBS_DIR" 2>/dev/null || true
+    else
+        info "没找到已装的守护进程 —— 跳过插件卸载（本机可能只装了一半）"
     fi
 
     # 删文件前逐项确认"这确实是本系统装的文件"。
     # 早期版本在这里无条件 rm -f，而脚本又反复提示用 --uninstall 做回滚 ——
     # 于是在一台从未部署过 Slurmate 的机器上执行它，会删掉同名的他人文件。
     # 注意：这是 root 的 rm，不设防的代价是别人的东西。
-    # ★ 这里此前有一项 "$JOBSH"（那份单文件成品）。现在一个插件一份、按 ULID
-    #   命名，名字在部署时才知道，所以它不在这张"写死的文件"清单里 ——
-    #   上面的 JOBS_DIR 那一段负责它。**顺序也重要**：先清空 JOBS_DIR，
-    #   下面这句 rmdir "$SHARE_DIR" 才可能真的成功（目录非空时它是静默失败的）。
-    for f in "$DAEMON" "$CLI" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py"; do
+    for f in "$DAEMON" "$CLI" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py" \
+             "${SHARE_DIR}/run.sbatch.template"; do
         if [[ ! -e "$f" ]]; then
             continue
         fi
@@ -379,28 +264,9 @@ if [[ "$MODE" == "uninstall" ]]; then
         rm -f "$f" && ok "已删除 $f"
     done
 
-    # ── 插件配置（`${CONF}.d/`）────────────────────────────────────────────
-    # ★ 只删**安装器起的名字**那些（`<ULID>.conf`）。管理员手写的那几份
-    #   （`<短名>.conf`）留着 —— 与守护进程那一侧 `sync_plugin_config()` 一字
-    #   不差的同一条纪律：**判据是文件名，不是内容**。
-    #   上面那个循环的守卫是"内容里要有 slurmate"，对插件配置不成立（一份
-    #   `enabled = yes` 里当然没有这个词），所以它不能并进那个循环。
-    # ★ 目录非空时下面的 rmdir 静默失败 —— 那正是我们要的：里面还有别人的东西，
-    #   就留着。
-    if [[ -d "$CONF_D" ]]; then
-        for f in "$CONF_D"/*.conf; do
-            [[ -f "$f" && ! -L "$f" ]] || continue
-            if [[ "$(basename "$f" .conf)" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
-                rm -f "$f" && ok "已删除插件配置 $f"
-            else
-                warn "保留 $f —— 它的名字不是安装器起的（不是 ULID），不敢删"
-                warn "      如确认要删请人工执行：rm -f '$f'"
-            fi
-        done
-        rmdir "$CONF_D" 2>/dev/null || true
-    fi
-
-    # 只在目录为空时才删 —— 里面若有别人放的东西就留着
+    # 只在目录为空时才删 —— 里面若有别人放的东西就留着。
+    # ★ `<SHARE_DIR>` 下面那两个子目录（plugins/ 与 jobs/）由卸载器收掉；
+    #   它只在**空掉**时才 rmdir，所以"里面还有别人的东西"这一格是安全的。
     rmdir "$SHARE_DIR" "$CONF_DIR" 2>/dev/null || true
     rm -f "$SOCKET" 2>/dev/null || true
 
@@ -426,52 +292,23 @@ done
 ok "源文件齐备（${SRC_DIR}）"
 
 # ── 插件包 ──
-# ★ **每一个会被装进去的 `.splug`** 都进信任检查与哈希基线。
-#
-# ★ 判据换了形，而**理由也换了**，这一点必须写清楚（免得下一个人以为它还是
-#   原来那条）：
-#
-#     从前  源目录里任何一个文件都能被普通用户改写 ⇒ 他改一行 `client/**.js`，
-#           那行代码就在**每个用户的工作站上**以用户身份跑。
-#     现在  包是一个**成品**：管理员下载下来、root 放好，安装器才去读它。
-#           所以防的是**下载完到安装器读之间**那个窗口 —— 别人（或别的进程）
-#           在那一段里把文件换掉，而 root 会照着换过的那一份去解析、验签、装。
-#
-#   两个形状挡的是**同一类事**：以 root 的身份安装一个别人能改的字节串。
-#   判据（root 拥有 + 组/其他不可写）一个字没变。
-#
-# ★ 为什么这里只列 `*.splug`、不列目录里别的东西：**别的东西不该在这儿**，
-#   而"报出来"这件事已经有一条实现（`scan_plugins` 会把目录与散落的文件逐条
-#   点名），预检那一步跑的就是它。这里是**信任门**，不是清单校验器 —— 两件事
-#   分开，才不会出现"两套解释器说不同的话"。
-plugin_src_files() {
-    local f
-    [[ -n "$PLUGINS_SRC" && -d "$PLUGINS_SRC" ]] || return 0
-    for f in "$PLUGINS_SRC"/*.splug; do
-        # 通配符没匹配上时它原样留着，所以这一行不能省。
-        # `-f` 而不是 `-e`：**符号链接不算**（`-f` 会跟随链接，所以还要显式排掉
-        # 链接本身）—— 一个叫 `x.splug` 的链接能指向任何地方，而它随时可以换目标。
-        [[ -f "$f" && ! -L "$f" ]] || continue
-        printf '%s\n' "$f"
-    done | LC_ALL=C sort
-}
-
 # 所有源文件的【绝对路径】。两处用它：信任检查、以及"拷贝前后哈希一致"。
+#
+# ★★ **插件包不在名单里了**（v0.12 阶段 4）：本脚本不装插件，它也无从知道
+#    "哪个目录里放着包"（那由 `slurmate plugin install --from DIR` 说）。
+#    信任门在**安装器**那一侧仍然逐包判，而且是同一个判据的不变部分
+#    —— "root 拥有 + 组/其他不可写"（`package_input_problem`）。
+#    ★ 从前那条"源目录里任何一个文件都能被普通用户改写 ⇒ 他改一行 client/**.js，
+#      那行代码就在每个用户的工作站上跑"讲的正是**包**，所以它跟着判据一起搬到
+#      安装器那里去了 —— 不是被丢掉了。
 ALL_SRC_FILES=()
-# 插件包单独留一份：安装器要的正是这一批，见下面 2b.1。
-PLUGIN_PKGS=()
-while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    PLUGIN_PKGS+=("$f")
-    ALL_SRC_FILES+=("$f")
-done < <(plugin_src_files)
 while IFS= read -r f; do
     [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
 done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
 
 # ── 源文件可信性 ──
 # 本脚本会以 root 身份【安装并执行】这些文件。若它们能被普通用户改写，
-# 等于把 root 权限交出去 —— 那三套正在服务真实用户的生产系统也会一并失守。
+# 等于把 root 权限交出去 —— 那几套正在服务真实用户的生产系统也会一并失守。
 # 判据：每个源文件必须是 root 拥有，且组/其他不可写；目录同理。
 source_is_trusted() {
     local f st owner mode
@@ -553,26 +390,13 @@ else
 
     # 先记录源文件哈希，拷贝后比对，缩窄"检查与使用之间被掉包"的窗口
     BEFORE_HASH="$(src_hash_all)"
-    # 布局照搬一遍：cluster/ 与 plugins/ 各占一层，于是**缺省推导出来的插件源
-    # 路径在拷贝里同样成立**（${SRC_DIR}/../plugins），不需要额外传参数。
-    # ★ 插件源在 SELF_DIR 之内时不重复拷（那是同一次拷贝已经带上的东西）。
+    # 布局照搬一层（cluster/）。★ 从前这里还要把**插件源目录**也拷一份（那时本
+    # 脚本要读包）；插件搬走之后没有第二个目录要拷了。
     mkdir -p "${SECURE_DIR}/cluster"
     cp -a "${SELF_DIR}/." "${SECURE_DIR}/cluster/" || die "拷贝源码失败"
-    case "${PLUGINS_SRC}/" in
-        "${SELF_DIR}/"*) : ;;
-        *) cp -a "${PLUGINS_SRC}/." "${SECURE_DIR}/plugins/" 2>/dev/null \
-               || mkdir -p "${SECURE_DIR}/plugins" ;;
-    esac
     # 拷贝后重建路径列表（路径变了，而要比的是内容）
     SRC_DIR="${SECURE_DIR}/cluster"
-    PLUGINS_SRC="${SECURE_DIR}/plugins"
     ALL_SRC_FILES=()
-    PLUGIN_PKGS=()
-    while IFS= read -r f; do
-        [[ -n "$f" ]] || continue
-        PLUGIN_PKGS+=("$f")
-        ALL_SRC_FILES+=("$f")
-    done < <(plugin_src_files)
     while IFS= read -r f; do
         [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
     done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
@@ -600,23 +424,31 @@ else
     fi
 
     # 用 basename 而不是写死文件名 —— 将来再改脚本名时这里不会成为暗礁。
-    # ★ `--plugins-src` 放在 `$@` **之后**：同名参数取最后一个，所以拷贝里的那一份
-    #   一定赢。调用方原本可能用 --plugins-src 指到别处，而那个位置未必可信 ——
-    #   自拷贝的全部意义就是"执行的文件已经固定下来了"，参数不能把这一点推翻。
     SLURMATE_SRC_REEXEC=1 SLURMATE_ORIG_SCRIPT="${SELF_SCRIPT}" \
-        exec bash "${SECURE_DIR}/cluster/$(basename "${BASH_SOURCE[0]}")" \
-             "$@" --plugins-src "${SECURE_DIR}/plugins"
+        exec bash "${SECURE_DIR}/cluster/$(basename "${BASH_SOURCE[0]}")" "$@"
 fi
 info "源文件哈希（可记录备查）：$(for f in "${ALL_SRC_FILES[@]}"; do sha256sum "$f" 2>/dev/null | awk '{printf "%s ", substr($1,1,12)}'; done)"
 
-# 源码里的那一份守护进程。**装插件、校验插件、从包里取文件走的都是它** ——
+# 源码里的那一份守护进程。下面**每一次自检、每一次插件操作走的都是它**——
 # 不是刚装到 ${DAEMON} 的那一份。
 #
 # ★ 为什么用源码里这一份：`${DAEMON}` 在"第一次部署"时还不存在，而在"升级部署"
-#   时它是**上一个版本**。用旧版本去校验新格式的插件包，失败方式会是一句看不懂
+#   时它是**上一个版本**。用旧版本去校验新版本的配置/模板，失败方式会是一句看不懂
 #   的报错（或者更糟：它恰好收下了）。源码这一份永远与本次部署的规则同源。
 #   放在这里而不是文件开头：上面那条自拷贝分支会把 SRC_DIR 改掉。
 DAEMON_SRC="${SRC_DIR}/slurmate-sessiond"
+
+# 这一次要拿给守护进程自检的那份配置：**已经装过就读已装的那份**（管理员可能
+# 按站点改过），否则读随仓库分发的示例。
+#
+# ★★ 它在**自拷贝之后**才算，这一点是承重的：从前这一行在文件开头，于是从
+#   非 root 目录部署、走进自拷贝分支时，它仍然指着**原来那个（别人能改写的）**
+#   示例文件 —— 而那个文件后面会被读出来渲染 systemd 单元（readonly_paths）。
+#   判据是"我读的这一份必须来自我已经固定下来的目录"。
+SRC_CONF="${SRC_DIR}/slurmate.conf.example"
+if [[ -r "$CONF" ]]; then
+    SRC_CONF="$CONF"
+fi
 
 # 非干扰比对器自身先自测 —— 依赖一个判定器之前，先证明它是对的
 if comparator_selftest "${SRC_DIR}/nft-compare.py"; then
@@ -657,90 +489,11 @@ ok "nft -j 可用且输出结构正常（非干扰比对有效）"
 command -v sha256sum >/dev/null 2>&1 || die "找不到 sha256sum，无法校验现有文件是否被改动"
 ok "sha256sum 可用"
 
-# ── 端口区间自检：必须与配置里声明的「其他端口管理区间」完全不交 ──
-# nftables 对【同 hook 同 priority 的跨表求值顺序没有保证】，所以只有"集合不交"
-# 才能保证两个表的行为互不影响。要与哪些区间避让由 slurmate.conf 的
-# reserved_ranges 决定 —— 早期实现把本集群的约定（"必须 > 55000"）写死在代码里，
-# 结果任何没有那两套系统的集群用 55000 以下端口都装不上。
-if (( PORT_MIN > PORT_MAX )); then
-    die "端口区间起止颠倒：${PORT_MIN}-${PORT_MAX}"
-fi
-if (( PORT_MAX > 65535 )); then
-    die "端口区间上界 ${PORT_MAX} 越界"
-fi
-if [[ -n "${RESERVED_RANGES// /}" ]]; then
-    "$PY" - "$RESERVED_RANGES" "$PORT_MIN" "$PORT_MAX" <<'PYEOF' || \
-        die "端口池与 reserved_ranges 重叠（见下）。跨表顺序在 nftables 里没有保证，
-     重叠会导致行为不可预测。请调整 slurmate.conf 的 range_start/range_end
-     或 reserved_ranges。"
-import sys
-def parse(spec):
-    # ⚠️ 这里【只接受 start-end】，不接受裸数字 —— 必须与守护进程
-    # Config 里那份解析器完全一致。两处规则不一致的后果是：
-    # 部署预检放行了一份配置，守护进程启动时却抛 ValueError 起不来；
-    # 或者反过来，配置在部署阶段就被拒，而它其实能跑。
-    # 一个配置项有两套解释，是最难排查的一类问题。
-    out = []
-    for part in spec.replace(" ", "").split(","):
-        if not part:
-            continue
-        if "-" not in part:
-            print("        reserved_ranges 的每一项应为 start-end 形式，得到: %r" % part)
-            sys.exit(2)
-        a, b = part.split("-", 1)
-        if not (a.isdigit() and b.isdigit()):
-            print("        reserved_ranges 的起止必须是数字，得到: %r" % part)
-            sys.exit(2)
-        out.append((int(a), int(b)))
-    return out
-spec, lo, hi = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-for a, b in parse(spec):
-    if a <= hi and lo <= b:
-        print("        保留区间 %d-%d 与端口池 %d-%d 重叠" % (a, b, lo, hi))
-        sys.exit(1)
-sys.exit(0)
-PYEOF
-    ok "端口区间 ${PORT_MIN}-${PORT_MAX} 与 reserved_ranges 不交"
-else
-    ok "端口区间 ${PORT_MIN}-${PORT_MAX}（配置未声明需避让的区间）"
-fi
-
-RESERVED="$(sysctl -n net.ipv4.ip_local_reserved_ports 2>/dev/null || echo '')"
-info "ip_local_reserved_ports = ${RESERVED:-（未设置）}"
-# 真正判断区间是否重叠 —— 早期版本写成子串匹配（找 "55001" 这个字符串），
-# 那只能抓到"恰好逐字写了边界值"的情况，等于永远不报警。
-if [[ -n "$RESERVED" ]]; then
-    "$PY" - "$RESERVED" "$PORT_MIN" "$PORT_MAX" <<'PYEOF' || \
-        warn "端口池与 ip_local_reserved_ports 存在重叠（见上），可能出现偶发端口冲突"
-import sys
-def parse(spec):
-    out = []
-    for part in spec.replace(" ", "").split(","):
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            if a.isdigit() and b.isdigit():
-                out.append((int(a), int(b)))
-        elif part.isdigit():
-            out.append((int(part), int(part)))
-    return out
-spec, lo, hi = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-for a, b in parse(spec):
-    if a <= hi and lo <= b:
-        print("        保留区间 %d-%d 与端口池 %d-%d 重叠" % (a, b, lo, hi))
-        sys.exit(1)
-sys.exit(0)
-PYEOF
-fi
-# 说明：计算节点的临时端口范围（默认 32768-60999）包含本端口池，
-# 作业脚本的端口自检会跳过真正被占的端口并试下一个候选，属于预期行为。
-info "提示：端口池 ${PORT_MIN}-${PORT_MAX} 未加入 ip_local_reserved_ports。"
-info "      这只会让作业偶尔多试几个候选端口；nft 规则匹配 dport，不受影响。"
-
 # ── 目标位置是否已被非本系统的文件占用 ──
-# 作业脚本不在这张表里：它按 ULID 命名，名字要到扫完插件才知道；而 JOBS_DIR
-# 那一层有自己的守卫（有东西、却没有 .installed 标记 → 中止），见下面安装那一段。
+#
+# ★ 这一条**留在本脚本里**，它没有第二份实现也不该有：它问的是"我要写的那几个
+#   位置现在是谁的"，只有**要写它们的人**知道这件事。`--check` 判不了它
+#   （守护进程不知道自己是不是被覆盖着装上的，也不该知道）。
 for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
     if [[ -e "$dst" ]]; then
         if ! grep -qi "slurmate" "$dst" 2>/dev/null; then
@@ -750,33 +503,73 @@ for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
         fi
     fi
 done
-# 插件目录：里面**有东西**、却没有我们的部署标记，说明那不是我们建的。
-# 后面的安装会往这个目录里写、也会删掉标记里记着的子目录，所以在动手之前拦住。
-# （目录不存在、或存在但空着，都算正常 —— 首次部署就是那样。）
-if [[ -d "$PLUGINS_DIR" && ! -f "$PLUGINS_MARKER" ]] \
-   && [[ -n "$(ls -A "$PLUGINS_DIR" 2>/dev/null)" ]]; then
-    die "插件目录 ${PLUGINS_DIR} 里已经有东西，但它不是本脚本装的
-     （没有 ${PLUGINS_MARKER} 这个部署标记）。
-     为避免删掉别人的文件，部署中止。请人工确认后自行清理再重试。"
-fi
+# 作业脚本目录与插件目录**不在这张表里**：它们不归本脚本管（见文件头），
+# 而各自的守卫长在**安装器**那一侧（它才是往里面写的人）。
 ok "目标路径未被他人文件占用"
 
-# ── 通用预检：这台机器看起来是不是一个 Slurm 登录节点 ──
-# 这几项对任何集群都成立，缺了就不该继续 —— 这是"别在错误的机器上部署"
-# 这条诉求的通用形式。
-for c in sbatch scancel squeue scontrol; do
-    command -v "$c" >/dev/null 2>&1 || die "找不到 ${c} —— 这台机器不像是 Slurm 登录节点。"
-done
-ok "Slurm 命令齐备（sbatch / scancel / squeue / scontrol）"
-if command -v scontrol >/dev/null 2>&1; then
-    if scontrol ping >/dev/null 2>&1; then
-        ok "Slurm 控制器可达（scontrol ping 成功）"
-    else
-        warn "scontrol ping 失败 —— 控制器不可达。部署能完成，但作业提交与回收都会失败。"
-        warn "  守护进程的 job_state() 会把这种情况判为 JOB_UNKNOWN 并保持现状，"
-        warn "  也就是不会误释放会话 —— 但仍建议先修好 Slurm 再部署。"
-    fi
-fi
+# ==============================================================================
+#  ★★ 「这台机器对不对、这份配置对不对」—— 一律问守护进程自己
+# ==============================================================================
+#
+#   这一段从前是本脚本里的一大块**孪生实现**：端口区间自洽、与 reserved_ranges
+#   相交、Slurm 命令齐备、控制器可达 —— 每一条守护进程都判过一遍（`validate()`
+#   与 `--check`），而两处判据的失效方式是**"预检放行了、守护进程起不来"**
+#   （或者反过来），这个仓库已经因为同一类分叉吃过一次亏（reserved_ranges 的
+#   解析器）。⇒ v0.12 阶段 4 起这里只剩**一次调用**。
+#
+#   ★★ 而它的两个退出码要**分开对待**，这正是"部署脚本也要能读它"的原因：
+#
+#        2 = **这台机器**缺东西（缺 Slurm 命令、缺 nft）
+#            ⇒ 现在就停。装文件之前就停 —— 那正是本脚本开头那句
+#              「任何一项不满足即中止，不做任何改动」。
+#        1 = **这份配置**写错了
+#            ⇒ 第一次部署时 `cluster_cidr` 还空着，**那本来就是预期状态**，
+#              继续装；装完、配置落盘之后〈阶段 3〉还会再跑一次，那一次才是门。
+#              而若读的是**已装的**那份配置（重复部署），它就必须是对的 ⇒ 停。
+#
+#   ★ 退出码 2 这个约定写在守护进程那一侧（见 `machine_selfcheck()`），
+#     这里是唯一的读者。
+#   ★ `--dry-run` 下**照跑**：它是只读的，而"演练"要回答的正是"真跑起来会怎样"
+#     —— 演练时把最该发现的那件事藏起来，那个演练就没有意义。
+#
+#   ★ 过了就**只打一行**：完整那一屏〈阶段 3〉还会再打一次（那一次读的是刚落盘的
+#     站点配置），在这里重复一遍只会把别的信息淹掉。没过才把输出打出来。
+_check_out="$("$PY" "$DAEMON_SRC" --check --config="$SRC_CONF" 2>&1)"
+_check_rc=$?
+_check_dump() { printf '%s\n' "$_check_out" | sed 's/^/        /' >&2; }
+case "$_check_rc" in
+    0)
+        ok "自检通过（用的是 ${SRC_CONF}）" ;;
+    2)
+        _check_dump
+        die "这一台**机器**缺东西（见上，标着 ✗ 的那几条）。
+     装文件之前必须先解决它 —— 本脚本的承诺是「不满足即中止，不做任何改动」。
+     它问的是「这台机器上有没有 nft、有没有那八个 Slurm 命令」，
+     与你要装什么版本的 Slurmate 无关。" ;;
+    1)
+        if [[ "$SRC_CONF" == "$CONF" ]]; then
+            _check_dump
+            die "已装的站点配置 ${CONF} 自检没通过（见上）。重复部署时它必须是
+     对的 —— 部署中止，一个字节都没有改。改完重跑本脚本。"
+        fi
+        warn "示例配置 ${SRC_CONF} 的自检没通过 —— **第一次部署时这是正常的**："
+        warn "  它里面的 cluster_cidr 还是空的，而没有安全的默认值。（详细那一屏在"
+        warn "  〈阶段 3〉：那一次读的是刚落盘的站点配置，它才是门。）" ;;
+    *)
+        _check_dump
+        die "自检没跑起来（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
+     本身有问题 —— 而此时正是最该停下来的时候。" ;;
+esac
+
+# ── 「控制器可达吗」也**不在这里** ──
+# ★★ 它上面那次 `--check` 已经问过、也打印了结论（`控制器 : 在线 / 【连不上】…`），
+#    连同"提交与回收会失败"这句后果。本脚本再 `scontrol ping` 一次就是**同一件
+#    事的第二份实现** —— 而两份探测之间可以变，于是它们还能给出互相矛盾的答案
+#    （"上面说连不上、下面说可达"），那正是让人不再相信报告的开始。
+#
+#    ★ 这一条刻意**不是** `validate()` 的硬错误：控制器抖一下不该让整个站点起
+#      不来（那连"停掉正在跑的会话"都做不到）。所以 `--check` 只是打印它，
+#      退出码不受影响 —— 部署照常继续。
 
 # ── 可选基线检查：本系统最初部署环境的其余端口管理设施 ──
 # **Slurmate 不依赖它们**（独立的 nft 表、独立的端口区间、独立的服务），
@@ -894,28 +687,15 @@ if [[ "$MODE" == "check" ]]; then
     step "只体检模式（--check）：不安装任何东西"
     info "源文件与目标位置检查通过。"
 
-    # 插件：校验的是**还没装进去的包目录**（--check 不安装任何东西，
-    # 所以不能去看安装目录 —— 那里面是上一次部署留下的东西）。
-    # ★ 跑的还是守护进程自己的扫描器，只是在源目录上跑。它同时管两件事：每个包
-    #   能不能解析，以及**目录里除 .splug 之外有没有别的东西**（那些东西不会被
-    #   安装，所以不在这里说的话就是静默忽略）。
+    # ★ **插件不在这里体检**（v0.12 阶段 4）：本脚本不装插件，也就无从知道
+    #   "哪一批包要装"（那是 `slurmate plugin install --from DIR` 说的）。
+    #   要体检一个包目录：`slurmate-sessiond --check-plugins --plugins-dir DIR`
+    #   —— 判据与安装器**逐字相同**（同一个 `scan_plugins`），所以这里不再抄一遍。
     if [[ "$DRYRUN" -eq 1 ]]; then
-        info "[演练] 跳过插件体检"
-    elif ! "$PY" "$DAEMON_SRC" --check-plugins \
-             --plugins-dir "$PLUGINS_SRC" > "${BACKUP_DIR}/plugins-check.txt" 2>&1; then
-        bad "插件包目录 ${PLUGINS_SRC} 里有不合法的东西："
-        sed 's/^/        /' "${BACKUP_DIR}/plugins-check.txt" >&2
-        bad "  真正部署会被中止。修好再跑。"
+        info "[演练] 跳过"
     else
-        n_pl="$(sed -n '/^plugin-packages:$/,$p' "${BACKUP_DIR}/plugins-check.txt" \
-                | tail -n +2 | grep -c . || true)"
-        if (( n_pl == 0 )); then
-            info "插件包目录 ${PLUGINS_SRC} 里没有 .splug —— 部署后会是一个"
-            info "  **零插件**的基座（合法状态：会话能查、能停，只是没有可提交的服务）"
-        else
-            ok "插件包目录 ${PLUGINS_SRC} 里有 ${n_pl} 个合法的包"
-            sed -n '/^插件目录 /,$p' "${BACKUP_DIR}/plugins-check.txt" | sed 's/^/        /'
-        fi
+        info "插件不在本脚本的范围内 —— 装/卸/对齐走："
+        info "    slurmate plugin install --from DIR | uninstall <id> | sync"
     fi
 
     info "已保存快照到 ${BACKUP_DIR}"
@@ -951,7 +731,7 @@ install_one() {
 
 # 确保所有目标文件的父目录存在（真实系统上这些目录本来就在，但不能依赖这个前提）
 for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
-         "$CONF_D" "$(dirname "$UNIT")" "$STATE_DIR" "$PLUGINS_DIR" "$JOBS_DIR"; do
+         "$(dirname "$UNIT")" "$STATE_DIR"; do
     if [[ ! -d "$d" ]]; then
         run mkdir -p "$d"
         if [[ "$DRYRUN" -eq 1 ]]; then
@@ -961,363 +741,23 @@ for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
         fi
     fi
 done
-# ★ JOBS_DIR 必须 0755，与 SHARE_DIR / PLUGINS_DIR 同一个理由：里面的脚本由
-#   **提交作业的用户**身份的 sbatch 读取（守护进程 fork + setuid 之后 exec 它）。
-#   0770 或 0700 的表现是 sbatch 报「读不到文件」—— 而那句话指不回权限，
-#   会让人去查脚本是不是生成失败了。
-[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR" "$CONF_D" "$PLUGINS_DIR" "$JOBS_DIR"
+# ★ 0755 而不是 0700：`<SHARE_DIR>` 下面有两样东西要被**用户身份**的进程读 ——
+#   编织好的作业脚本（`jobs/<ULID>.sbatch`，由提交作业的用户身份的 sbatch 读）
+#   与作业模板（安装器用它织）。0700 的表现是 sbatch 报「读不到文件」，而那句
+#   话指不回权限，会让人去查脚本是不是生成失败了。
+[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR"
 [[ "$DRYRUN" -eq 1 ]] || chmod 700 "$STATE_DIR"
 
 install_one "${SRC_DIR}/slurmate-sessiond"  "$DAEMON"  755
 install_one "${SRC_DIR}/slurmate"           "$CLI"     755
 install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
-# ★ run.sbatch **不在这里装** —— 它是编织出来的成品（见下面那一段），
-#   装的是「模板 + 各插件的 job/start.sh」拼起来的东西。
-
-# ==============================================================================
-step "阶段 2b／6  安装插件并编织作业脚本"
-# ==============================================================================
-
-# ── 2b.1 把插件包装进 <prefix>/share/slurmate/plugins/ ─────────────────────
+# ★★ **作业模板**装到 `<SHARE_DIR>/run.sbatch.template`（v0.12 阶段 4）。
 #
-# ★ 装的动作**全部交给安装器**（`slurmate-sessiond --install-plugins`）：解析包、
-#   验签、§6.4 的同 id 检查、写站点侧的钥匙记录 —— 都在它里面，而
-#   那些判据在守护进程那一侧本来就要有（它要读同一批包）。本脚本再抄一遍的失效
-#   方式是"部署放行了、守护进程不认"，而症状要到用户点提交时才出现。
-#
-# ★ 本脚本自己只做**集合**这一件事：源里已经拿走的插件要真的从站点上删掉。
-#   那是"这次部署想装哪几个"的知识，只有部署脚本有。
-plugin_pkgs_now() {
-    local f
-    for f in "$PLUGINS_SRC"/*.splug; do
-        [[ -f "$f" && ! -L "$f" ]] || continue
-        printf '%s\n' "$(basename "$f")"
-    done | sort
-}
-
-if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 将安装插件包：$(plugin_pkgs_now | tr '\n' ' ')"
-else
-    # ── 2b.1a 预检**源目录** ──
-    # ★ 它管两件事，都不是"装完之后"能补上的：
-    #     ① 每个包都能解析（下载坏了、传丢了、放错文件）；
-    #     ② **目录里除 `.splug` 之外没有别的东西** —— 那些东西不会被安装
-    #        （`plugin_src_files()` 只列包），所以不在这里说的话，它们会被
-    #        **静默忽略**。源码树放错地方就是这一种：管理员以为装上去了。
-    SRC_PLUGIN_LIST=""
-    if [[ -n "$PLUGINS_SRC" && -d "$PLUGINS_SRC" ]]; then
-        if ! "$PY" "$DAEMON_SRC" --check-plugins \
-                 --plugins-dir "$PLUGINS_SRC" > "${BACKUP_DIR}/plugins-src.txt" 2>&1; then
-            sed 's/^/        /' "${BACKUP_DIR}/plugins-src.txt" >&2
-            die "插件包目录 ${PLUGINS_SRC} 里有不合法的东西（原因见上）。一个字节都没装。
-     ★ 「源码树」放错地方是最常见的一种：站点只收 .splug，包要先在**作者机器上**
-       用 packer/ 打出来（本脚本永不打包，见文件头）。"
-        fi
-        sed 's/^/        /' "${BACKUP_DIR}/plugins-src.txt"
-        # 机器可读的那一段后面还要用（标记文件按它写：装进去的文件名就是 ULID）。
-        SRC_PLUGIN_LIST="$(sed -n '/^plugin-packages:$/,$p' \
-                           "${BACKUP_DIR}/plugins-src.txt" | tail -n +2)"
-    fi
-
-    # ── 2b.1b 先删掉**上次部署装过、这次源里没有了**的包 ──
-    # 「把一个包从源里移走再部署」是最自然的卸载动作，它必须真的生效。
-    # 只删标记文件里记着的文件名，且**删之前先确认它确实是一个插件包** —— 与
-    # 客户端的 uninstall 同一条规矩：按名字拼出来的路径，删之前先读一遍，对不上
-    # 就不动它。
-    if [[ -f "$PLUGINS_MARKER" ]]; then
-        while IFS= read -r old; do
-            [[ -n "$old" ]] || continue
-            # `-F`：标记里的那一行是一个**字面量**，不是模式 —— 少了它会拿
-            # `01M2….splug` 里的那个 `.` 当通配符，于是一条"碰巧对得上"的记录
-            # 会让这个包**不被删掉**（而那是静默的）。
-            plugin_pkgs_now | grep -qxF "$old" && continue
-            # 标记里的每一行都是我们自己写进去的 `<ULID>.splug`，但删之前仍然
-            # 断言一次形状 —— 这个文件在两次部署之间躺在一个人人可读的目录里，
-            # 而"按名字拼出来的路径删东西"是这个脚本里唯一一处 rm -f。
-            case "$old" in
-                */*|.|..|"") warn "跳过标记里那条形状不对的记录：${old}"; continue ;;
-            esac
-            if [[ -f "${PLUGINS_DIR}/${old}" ]] && \
-               head -c 8 "${PLUGINS_DIR}/${old}" 2>/dev/null | grep -q '^splug'; then
-                rm -f "${PLUGINS_DIR:?}/${old}" && info "已移除不再装着的插件包：${old}"
-            else
-                warn "跳过 ${PLUGINS_DIR}/${old} —— 它不像一个插件包，不敢删"
-            fi
-        done < "$PLUGINS_MARKER"
-    fi
-
-    mkdir -p "$PLUGINS_DIR"
-    if (( ${#PLUGIN_PKGS[@]} > 0 )); then
-        # ★ 参数取自 `PLUGIN_PKGS` —— 而它**就是**信任门过的那一批
-        #   （`plugin_src_files()` 的输出，见上面）。两处用同一个来源，是因为
-        #   "装了但没验"这种缺口只会从两个列表分家那里长出来。
-        "$PY" "$DAEMON_SRC" --install-plugins "${PLUGIN_PKGS[@]}" \
-            --plugins-dir "$PLUGINS_DIR" \
-            || die "安装插件包失败（原因见上）。已有的包没有被改动。
-     修好之后重跑本脚本即可。"
-    else
-        info "本次没有要装的插件包（${PLUGINS_SRC} 下没有 .splug）"
-    fi
-
-    # ★ 标记记的是**本脚本这一次装了什么**：每个源包的 ULID（第 3 列）+ 后缀。
-    #   装进去的文件名就是它（安装器按 id 命名，§6.4 保证不会有两个包抢一个名字）。
-    #
-    #   ★ 为什么**不**记"插件目录里现在有哪些包"：那样一来，管理员用
-    #     `slurmate plugin install` 单独装的那个包会出现在标记里，而下一次部署
-    #     会把它当成"源里已经拿走的"**删掉**。手动装是显式动作，不该被一次
-    #     集合同步悄悄撤销。
-    #
-    # ★ 标记文件只在这次真的写成了才覆盖。写失败时**保留旧的那一份** ——
-    #   清空它等于"忘了自己装过什么"，那下一次部署就不会移除已经从源里拿走的
-    #   插件，而这个失败是静默的（用户看到的是"它还在"）。
-    : > "${PLUGINS_DIR}/.tmp-marker.$$"
-    while IFS=$'\t' read -r _pn _pp _pid _pj; do
-        [[ -n "${_pid:-}" ]] || continue
-        # 与编织那一段同一条断言：ULID 是**路径分量**，形状不对就不往下拼。
-        if [[ ! "$_pid" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
-            die "插件 ${_pn} 的 id 不是合法的 ULID：${_pid}
-     标记文件按 <ULID>.splug 记，一个形状不对的 id 会拼出一个失控的路径。
-     这多半意味着 --check-plugins 的输出被改过 —— 那里的格式是跨脚本契约。"
-        fi
-        printf '%s\n' "${_pid}.splug" >> "${PLUGINS_DIR}/.tmp-marker.$$"
-    done <<< "$SRC_PLUGIN_LIST"
-    if sort -u -o "${PLUGINS_DIR}/.tmp-marker.$$" "${PLUGINS_DIR}/.tmp-marker.$$" 2>/dev/null; then
-        chmod 644 "${PLUGINS_DIR}/.tmp-marker.$$" 2>/dev/null || true
-        if ! mv -f "${PLUGINS_DIR}/.tmp-marker.$$" "$PLUGINS_MARKER" 2>/dev/null; then
-            warn "无法更新插件部署标记 ${PLUGINS_MARKER} —— 下次部署不会移除已拿走的插件"
-            rm -f "${PLUGINS_DIR}/.tmp-marker.$$"
-        fi
-    else
-        warn "无法整理插件部署标记 —— 保留上一次的那一份"
-        rm -f "${PLUGINS_DIR}/.tmp-marker.$$"
-    fi
-    if [[ ! -s "$PLUGINS_MARKER" ]]; then
-        # ★ 说的是**本脚本这次装了什么**，不是"站点上一个插件都没有" ——
-        #   后者可能不成立（管理员可以用 `slurmate plugin install` 单独装过）。
-        #   一句话把两件事混起来，排查的人会去查一个根本不存在的"没装"。
-        info "本次部署没有装任何插件包（${PLUGINS_SRC} 下没有 .splug）—— 这是合法状态"
-    fi
-fi
-
-# ── 2b.2 校验：跑守护进程**自己的**扫描器 ───────────────────────────────────
-#
-# ★ 不在部署脚本里另写一份清单规则。两套解释器的后果是"预检放行了、守护进程起不
-#   来"（或者反过来），而这个仓库已经因为同一类分叉吃过一次亏（reserved_ranges）。
-# ★ 它必须在**装完之后**跑：`--check-plugins` 按守护进程自己的安装位置推导插件
-#   目录，所以它读的正是刚才装进去的那份。
-PLUGIN_LIST=""
-if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 跳过插件校验与编织（作业脚本不会被写出）"
-else
-    if ! "$DAEMON" --check-plugins > "${BACKUP_DIR}/plugins.txt" 2>&1; then
-        sed 's/^/        /' "${BACKUP_DIR}/plugins.txt" >&2
-        die "插件校验未通过（原因见上）。未安装作业脚本、未启动服务。
-     修好再重跑本脚本即可。"
-    fi
-    sed 's/^/        /' "${BACKUP_DIR}/plugins.txt"
-    ok "插件校验通过（用守护进程自己的扫描器，规则只有一份）"
-    # 后面要逐个断言作业侧，所以留下 `<短名>\t<包路径>\t<ULID>\t<has_job|no_job>`。
-    # ★ 四列各管一件事，混用就会得到一个假错误：短名算函数名、包路径取文件、
-    #   ULID 命名作业脚本、第 4 列回答"要不要取作业侧那一份"。
-    PLUGIN_LIST="$(sed -n '/^plugin-packages:$/,$p' "${BACKUP_DIR}/plugins.txt" \
-                   | tail -n +2)"
-fi
-
-# 一条插件 job 脚本要过的三道断言。它们不是"防御性编程" —— 每一条对应的都是一个
-# **静默**失效，而静默正是这个项目一路在清的那类东西。
-check_plugin_jobsh() {
-    local pname="$1" pf="$2" suffix fn offenders=""
-
-    # ① 不许有 shebang、不许有 #SBATCH。
-    #    它们在拼接点**之后**，而 Slurm 只扫脚本开头那一段连续的注释（模板里的
-    #    `set -uo pipefail` 就终止了扫描）—— 带了不是报错，是"写了但静默不生效"。
-    #    资源需求全部由守护进程在提交时经 sbatch 的 argv 定下（见 op_submit），
-    #    插件从来不参与，所以这条不需要任何新机制。
-    if grep -nE '^#!|^[[:space:]]*#SBATCH' "$pf" >/dev/null 2>&1; then
-        grep -nE '^#!|^[[:space:]]*#SBATCH' "$pf" | sed 's/^/        /' >&2
-        die "${pf} 里有 shebang 或 #SBATCH。
-     它们会被拼在作业脚本的**中间**，而 Slurm 只解析脚本开头的注释块 ——
-     所以带了不是报错，是「写了但静默不生效」。删掉它们。"
-    fi
-
-    suffix="${pname//-/_}"
-
-    # ② 有作业侧就必须定义 start_<短名>。没有它，作业会在用户**排完队之后**才以 24
-    #    失败，而那时他看到的是"这份作业脚本提供的是 Y，而请求的是 X"——一句话指不回
-    #    这个文件。（**没有 job/start.sh 本身不在这里中止** —— 那是合法状态。）
-    if ! grep -qE "^[[:space:]]*start_${suffix}[[:space:]]*\(\)" "$pf"; then
-        die "${pf} 里没有定义 start_${suffix}（插件 ${pname} 的作业侧入口）。
-      宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字对不上等于没有实现。"
-    fi
-
-    # ③ 其余函数必须带 _<短名>_ 前缀。
-    #
-    #  ★ 这条断言的**理由**在"一个插件一份脚本"之后变了，规则本身留着 ——
-    #    下文同步重写过，别把它当成旧理由的残留。
-    #    旧理由：「编织后所有插件共处一个文件，固定名会互相覆盖」—— 那是真的，
-    #    但那个形状已经不在了。
-    #    新理由：**不许遮蔽宿主自己的函数**（log / cleanup / write_session /
-    #    pick_port_and_start …）。一份脚本里只有一个插件，所以插件**之间**不会
-    #    再撞；但插件盖掉宿主的函数仍然是**静默**的 —— 症状是"清理没跑"
-    #    「日志少了几行」这类指不回任何一个文件的现象。
-    while IFS= read -r fn; do
-        [[ -n "$fn" ]] || continue
-        case "$fn" in
-            start_${suffix}|precheck_${suffix}|cleanup_${suffix}) continue ;;
-            _${suffix}_*) continue ;;
-        esac
-        offenders="${offenders} ${fn}"
-    done < <(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)' "$pf" \
-             | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*).*/\1/')
-    if [[ -n "$offenders" ]]; then
-        die "${pf} 里定义了没有命名空间的函数：${offenders}
-     它会被拼进作业脚本，而宿主自己的函数（log / cleanup / write_session /
-     pick_port_and_start …）都是**没有后缀**的动词 —— 一个同名的插件函数会
-     把它们**静默**盖掉，症状是"清理没跑""日志少了几行"，指不回这个文件。
-     规则：契约钩子用 <动词>_${suffix}，其余一律用 _${suffix}_ 前缀。"
-    fi
-    return 0
-}
-
-# ── 2b.3 编织：模板 + **一个**插件的 job/start.sh → 那个插件的一份成品 ──────
-#
-# ★ 一插件一份，文件名是插件的 ULID。两份收益，都不在"好看"这一层：
-#     ① 插件里任何一行**不在函数里**的代码都只会出现在它自己那份脚本里 ——
-#        不可能被另一个插件的作业解析到（同处一份文件时，那种行会在**每一个**
-#        作业里执行，不管用的是哪个插件）；
-#     ② 一个插件的语法错只影响它自己那一份的 bash -n，报错直接指向一份文件。
-#
-# ★ **两遍式**：先把 N 份全部生成并逐份验语法，**全过了才开始装**。
-#   这保住了原来那句承诺「要么换成新的、要么一份都不动」。要诚实说明的是：
-#   N 次 install 之间不是原子的（窗口是毫秒级，且每份各自完整）—— 而它换来的是
-#   "半新半旧的那一批"里不会出现**语法错的**脚本，因为语法检查在安装之前。
-if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 跳过编织（${JOBS_DIR} 下不会写出任何作业脚本）"
-else
-    # ★ 数的是**整行**的标记，不是子串：模板的文件头注释里也提到了这个标记（读
-    #   代码的人需要知道它叫什么），而子串匹配会把那句注释也算成一处。
-    N_MARK="$(grep -c '^# @@SLURMATE_PLUGIN_BLOCKS@@$' "${SRC_DIR}/run.sbatch" || true)"
-    if [[ "$N_MARK" != "1" ]]; then
-        die "作业模板 ${SRC_DIR}/run.sbatch 里的拼接标记有 ${N_MARK} 处，应当**恰好一处**。
-     零处 = 插件无处分派；多于一处 = 只有第一处会被替换，其余静默留在文件里。
-     标记是整行： # @@SLURMATE_PLUGIN_BLOCKS@@"
-    fi
-
-    mkdir -p "$JOBS_DIR"
-    # JOBS_DIR 里全是本脚本生成的东西，但仍要走一遍与 PLUGINS_DIR 同样的守卫：
-    # 目录里有东西、却没有本脚本的标记 → 那不可能是我们装的，中止而不是删。
-    if [[ -z "$(ls -A "$JOBS_DIR" 2>/dev/null)" || -f "$JOBS_MARKER" ]]; then
-        :
-    else
-        die "作业脚本目录 ${JOBS_DIR} 里已经有东西，但它不是本脚本装的
-     （没有 ${JOBS_MARKER} 这个部署标记）。为避免删掉别人的文件，部署中止。
-     确认里面确实没有你要保留的东西之后，人工执行：
-       rm -rf '${JOBS_DIR}'"
-    fi
-
-    WEAVE_DIR="${BACKUP_DIR}/jobs"
-    mkdir -p "$WEAVE_DIR"
-    : > "${JOBS_DIR}/.tmp-marker.$$"
-    JOBS_DONE=""
-
-    # ── 第一遍：全部生成 + 逐份验语法，一份都不装 ──
-    while IFS=$'\t' read -r pname pkg pid hasjob; do
-        [[ -n "${pname:-}" && -n "${pkg:-}" && -n "${pid:-}" ]] || continue
-        # ★ ULID 是**路径分量**，所以要先断言它的形状。PLUGIN_ID_RE 已经保证了
-        #   （`^[0-9A-HJKMNP-TV-Z]{26}$`，没有点、没有斜杠），这里是第二道：
-        #   deploy.sh 拿它拼 `<JOBS_DIR>/<ULID>.sbatch`，一个形状不对的值意味着
-        #   上游出了别的问题，宁可不部署。
-        if [[ ! "$pid" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
-            die "插件 ${pname} 的 id 不是合法的 ULID：${pid}
-     作业脚本按 <ULID>.sbatch 命名，一个形状不对的 id 会拼出一个失控的路径。
-     这多半意味着 --check-plugins 的输出被改过 —— 那里的格式是跨脚本契约。"
-        fi
-        # ★ 「有没有作业侧」现在是**明确的一列**，不是靠"取一次试试"推出来的：
-        #   没有作业侧是**合法状态**（只有客户端那一半的插件允许存在），而
-        #   "取不出来"还可能是包坏了 —— 用一个退出码同时表达这两件事，就会把
-        #   后果不同的两种情况并成一条路。见守护进程里 TSV 那一段的说明。
-        if [[ "${hasjob:-}" != "has_job" ]]; then
-            warn "插件 ${pname} 的包里没有 job/start.sh —— 跳过，不生成作业脚本。
-          这个插件装得上、看得见，但提交不了（合法状态）。要让它能提交：
-          在**源码树**里补一份 job/start.sh、升版本号，重新 packer build 再装一次。"
-            continue
-        fi
-        # 作业侧那一份从**包里**取出来（服务器上没有源码树可以读），取到一个临时
-        # 文件里再走下面同样那三道断言。★ `--extract-package` 是集群侧读包的
-        # 唯一入口，所以"包怎么读"仍然只有 Python 那一份实现。
-        pf="${WEAVE_DIR}/${pid}.jobstart.sh"
-        if ! "$PY" "$DAEMON_SRC" --extract-package "$pkg" job/start.sh \
-                 > "$pf" 2>"${pf}.err"; then
-            sed 's/^/        /' "${pf}.err" >&2
-            die "从 ${pkg} 里取 job/start.sh 失败（原因见上）。
-     该包的记录表里**有**这一份（--check-plugins 是这么报的），所以这多半意味着
-     包在安装之后被换过 —— 重跑一次本脚本。"
-        fi
-        check_plugin_jobsh "$pname" "$pf"
-        BLOCKS="${WEAVE_DIR}/${pid}.blocks.sh"
-        {
-            echo
-            echo "# ─── 插件 ${pname}（id ${pid}）──────────────────────────────"
-            cat "$pf"
-            echo
-        } > "$BLOCKS"
-        WEAVE="${WEAVE_DIR}/${pid}.sbatch"
-        awk -v blocks="$BLOCKS" '
-            /^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {
-                while ((getline line < blocks) > 0) print line
-                close(blocks); found = 1; next
-            }
-            { print }
-            END { if (!found) exit 9 }
-        ' "${SRC_DIR}/run.sbatch" > "$WEAVE" || die "编织失败（拼接标记没有被替换？）"
-        if grep -q '^# @@SLURMATE_PLUGIN_BLOCKS@@$' "$WEAVE"; then
-            die "编织 ${pname} 的作业脚本后仍有拼接标记行 —— 说明模板里有不止一处。"
-        fi
-        bash -n "$WEAVE" || die "插件 ${pname} 的作业脚本语法检查失败（多半是
-     ${pf} 里有语法错误，见上面的行号）。已中止，${JOBS_DIR} 一份都没有改动。"
-        JOBS_DONE="${JOBS_DONE} ${pid}"
-        ok "插件 ${pname}：三道断言通过（无 shebang/#SBATCH、定义了 start_${pname//-/_}、函数名都有命名空间），编织成 $(wc -l < "$WEAVE") 行的作业脚本"
-    done <<< "$PLUGIN_LIST"
-
-    # ── 第二遍：全部验过了，才开始装 ──
-    for pid in $JOBS_DONE; do
-        install_one "${WEAVE_DIR}/${pid}.sbatch" "${JOBS_DIR}/${pid}.sbatch" 644
-        printf '%s\n' "${pid}.sbatch" >> "${JOBS_DIR}/.tmp-marker.$$"
-    done
-
-    # ── 清掉不再属于任何插件的那些 ──
-    # 「把一个插件包从源里拿走再部署」必须真的生效，否则会留下一份**无主的、
-    # 仍然可以被提交的**脚本。判据是文件在不在这次的集合里，不是内容 ——
-    # 这个目录 100% 是本脚本生成的。
-    if [[ -f "$JOBS_MARKER" ]]; then
-        while IFS= read -r old; do
-            [[ -n "$old" ]] || continue
-            # 这次生成了的 ULID 集合是空格分隔的（两头的空格让整词匹配成立）。
-            case " ${JOBS_DONE} " in
-                *" ${old%.sbatch} "*) continue ;;
-            esac
-            rm -f "${JOBS_DIR:?}/${old}" && info "已移除不再需要的作业脚本：${old}"
-        done < "$JOBS_MARKER"
-    fi
-
-    # ★ 标记只在这次真的写成了才覆盖（与 PLUGINS_DIR 那一段同一条规矩）：
-    #   写失败时保留旧的那一份，否则下次部署就不会移除已经拿走的插件脚本。
-    if sort -o "${JOBS_DIR}/.tmp-marker.$$" "${JOBS_DIR}/.tmp-marker.$$" 2>/dev/null; then
-        chmod 644 "${JOBS_DIR}/.tmp-marker.$$" 2>/dev/null || true
-        if ! mv -f "${JOBS_DIR}/.tmp-marker.$$" "$JOBS_MARKER" 2>/dev/null; then
-            warn "无法更新作业脚本部署标记 ${JOBS_MARKER} —— 下次部署不会移除已拿走的插件脚本"
-            rm -f "${JOBS_DIR}/.tmp-marker.$$"
-        fi
-    else
-        warn "无法整理作业脚本部署标记 —— 保留上一次的那一份"
-        rm -f "${JOBS_DIR}/.tmp-marker.$$"
-    fi
-
-    if [[ -z "$JOBS_DONE" ]]; then
-        info "本站没有任何插件的作业脚本 —— 合法状态：守护进程照常启动、会话照常能停，"
-        info "  只是没有可提交的服务。装插件：见 plugins/README.md。"
-    fi
-fi
+#   它是**安装器织作业脚本时要读的那一份** —— 装它是因为装完基座之后集群上
+#   可能根本没有仓库（`cluster/` 只在部署机上），而从那一刻起"装一个插件"必须
+#   能独立完成。名字里带 `template` 是刻意的：`jobs/` 下那一串才是作业脚本，
+#   这一份不是作业、也不会被提交。
+install_one "${SRC_DIR}/run.sbatch" "${SHARE_DIR}/run.sbatch.template" 644
 
 # ── slurmate.conf：只在【不存在】时安装 ──
 # 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、集群网段。
@@ -1328,67 +768,6 @@ if [[ -e "$CONF" ]]; then
     info "  随仓库分发的版本在 ${SRC_DIR}/slurmate.conf.example，可对比新增了哪些项"
 else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
-fi
-
-# ── 主文件里还有老形态的 `[plugin:...]` 块 ⇒ 停下来指路 ─────────────────────
-#
-# ★ v0.12 起插件配置住在 `${CONF}.d/`（一个插件一个文件），主文件里那种块是
-#   **解析错误** —— 守护进程会拒绝起来，而症状是"整个站点起不来"。
-#
-# ★★ 本脚本**不替他搬**：那几行里可能有管理员调过的默认资源，自动搬一趟等于
-#    替他改他写的东西，而搬错了是**静默的**（值被合进哪一份、谁盖了谁，配置里
-#    看不出来）。所以停下来，把该做的动作说清楚。
-if grep -qE '^[[:space:]]*\[[[:space:]]*plugin:' "$CONF" 2>/dev/null; then
-    die "站点配置 ${CONF} 里还有老形态的 \`[plugin:...]\` 块，而本版起插件配置
-    住在 ${CONF_D}/ 里 —— 一个插件一个文件，文件名就是那个插件的短名或 id。
-
-    ★ 搬法：把块头那一行丢掉，剩下的键值写成 ${CONF_D}/<名字>.conf。例如
-
-          [plugin:sshd]
-          enabled = yes
-          default_cpus = 1
-
-      变成 ${CONF_D}/sshd.conf，内容只有
-
-          enabled = yes
-          default_cpus = 1
-
-    ★ 也可以一块都不搬：那些插件就是「装在本站、但没开」。跑一次
-      \`slurmate plugin sync\` 会把缺的那几份补上（用的是插件自己声明的缺省），
-      再按需要在补出来的那一份里改。
-    ★ 这个脚本不替你搬 —— 那几行里可能有你调过的默认资源。"
-fi
-
-# ── 2c. 插件配置与插件目录对齐 ─────────────────────────────────────────────
-#
-# ★ 装完/卸完之后、`--check` 之前，**必须**跑这一步。
-#
-#   一份插件配置指向一个不在本站的插件是**启动错误**（守护进程会拒绝起来，连
-#   "停掉正在跑的会话"都做不到），而"从源目录里拿走一个包"正是最自然的卸载动作
-#   —— 上面 2b.1b 删掉的那些包，它们留下的那一份必须跟着走。
-#
-# ★ 为什么是**一次对账**而不是在这里按"这次删了哪几个"逐个删：判据是"目录里
-#   现在有什么"，所以它一次覆盖全部路径（deploy.sh 删的、管理员自己 `rm` 的、
-#   手动 `slurmate plugin install` 装的），而且幂等。
-#   理由与取舍写在守护进程的 `sync_plugin_config()` 那一节。
-#
-# ★ 它写 `${CONF_D}/<ULID>.conf`、也只删那一个名字上的文件；管理员手写的
-#   `${CONF_D}/<短名>.conf` 一个字节都不动 —— 手写的那份指向一个没装的插件仍然
-#   是硬错误，那是他的东西，由 `--check` 报。
-#
-# ★ 它排在**这里**（conf 装完之后）而不是插件那一段：首次部署时 conf 还不存在，
-#   那时对账没东西可对（`CONF` 在上一个 if 里才落到盘上）。
-#
-# ★ 演练模式下**不跑它**：那会写配置文件，而 `--dry-run` 的承诺是一个字节都不
-#   落盘。而且这一步用的是**装好的**守护进程（`$DAEMON`），首次部署演练时它
-#   还不存在 —— 与上面那两处跳过自检的理由相同。
-if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 跳过插件配置对齐（它会写配置文件）"
-else
-    if ! "$DAEMON" --sync-plugin-config --config="$CONF" --plugins-dir "$PLUGINS_DIR"; then
-        die "插件配置对齐失败（原因见上）。配置与插件目录现在不一致 ——
-     修好再重跑本脚本。"
-    fi
 fi
 
 # ── systemd 单元：从模板渲染 ──
@@ -1426,17 +805,12 @@ compile(src, sys.argv[1], "exec")' "$1" 2>&1
     }
     syntax_check "$DAEMON" || die "守护进程语法检查失败，已中止（未启动服务）"
     syntax_check "$CLI"    || die "CLI 语法检查失败，已中止"
-    # 对**已经装好的**每一份作业脚本再验一次语法（编织那一段验的是临时副本）。
-    # 一个都没装时不循环 —— 零插件是合法状态，不是"少了点什么"。
-    for _jf in "$JOBS_DIR"/*.sbatch; do
-        [[ -f "$_jf" ]] || continue
-        bash -n "$_jf" || die "已安装的作业脚本语法检查失败：${_jf}，已中止"
-    done
+    # ★ **作业脚本不在这一轮里**（v0.12 阶段 4）：装好的每一份都在
+    #   `<SHARE_DIR>/jobs/` 下，由**安装器**织、也由它在织的时候逐份 `bash -n`
+    #   （两遍式的第一遍）。本脚本不认识那个目录，也就不该在这里再验一遍。
     comparator_selftest "${SHARE_DIR}/nft-compare.py" \
         || die "已安装的比对器自测未通过（项数下限 ${COMPARATOR_MIN_TESTS}），已中止"
-    ok "语法自检通过（守护进程 / CLI / 作业脚本 / 比对器）"
-    _jf_n="$(ls -1 "$JOBS_DIR"/*.sbatch 2>/dev/null | grep -c . || true)"
-    info "作业脚本文法自检覆盖 ${_jf_n} 份（${JOBS_DIR}）"
+    ok "语法自检通过（守护进程 / CLI / 比对器）"
 fi
 
 # ==============================================================================
@@ -1446,14 +820,17 @@ step "阶段 3／6  配置自检（不启动服务）"
 if [[ "$DRYRUN" -eq 1 ]]; then
     info "[演练] 跳过"
 else
-    # 这一条跑的是守护进程【自己的】自检，不是在脚本里另写一份规则 ——
-    # 两套解释器的后果是"预检放行了一份配置，守护进程却起不来"（或者反过来），
-    # 而这个仓库已经因为同一类分叉吃过一次亏（reserved_ranges 的解析）。
-    # 上面那条 log.error 会逐条列出原因，最常见的是 cluster_cidr 还没填。
+    # 这一条跑的是守护进程【自己的】自检 —— **这是第二次**：〈阶段 0〉那一次
+    # 用的是**还没装上/还没配好**的那份配置（首次部署时它是随仓库分发的示例，
+    # cluster_cidr 还空着，所以那一次允许它不通过）。这一次读的是**刚落盘的那份
+    # 站点配置**，它必须是对的。
+    #
+    # ★ 退出码 2（机器缺东西）在〈阶段 0〉已经拦过了；走到这里还拿到 2 只可能
+    #   是这两步之间机器被改过 —— 那时也该停。
     if "$DAEMON" --check --config="$CONF"; then
         ok "配置自检通过"
     else
-        die "配置自检失败（原因见上面的『配置错误: …』）。未启动服务，未创建任何 nft 规则。
+        die "配置自检失败（原因见上）。未启动服务，未创建任何 nft 规则。
      多半是 ${CONF} 里的 cluster_cidr 还没改成本集群的网段 —— 它没有安全的默认值，
      留空或仍是文档占位网段都会被拒绝。改完重跑本脚本。"
     fi
@@ -1689,28 +1066,21 @@ ${DONE_TITLE}
     ${CONF}
     ${UNIT}
     ${SHARE_DIR}/nft-compare.py
-    ${JOBS_DIR}/    ← **有作业侧**的插件每份一个作业脚本，文件名是它的 ULID（见下表）
+    ${SHARE_DIR}/run.sbatch.template   ← 作业模板（安装器织作业脚本时读它）
 
-  插件（源 ${PLUGINS_SRC}）：
-$(if [[ "$DRYRUN" -eq 1 ]]; then echo "    （演练：上面那个源目录里的插件将被装到 ${PLUGINS_DIR}）"; \
-  elif [[ -n "$PLUGIN_LIST" ]]; then \
-      while IFS=$'\t' read -r _n _p _i _j; do \
-          [[ -n "$_n" ]] || continue; \
-          if [[ "${_j}" == "has_job" ]]; then echo "    ${_n}  → ${_p}"; \
-          else echo "    ${_n}  → ${_p}   【包里没有 job/start.sh：装得上、看得见，但提交不了】"; fi; \
-          if [[ "${_j}" == "has_job" ]]; then echo "        ${JOBS_DIR}/${_i}.sbatch"; \
-          else echo "        （没有作业脚本 —— 就是上面说的那个「提交不了」）"; fi; \
-      done <<< "$PLUGIN_LIST"; \
-  else echo "    （本站没有安装任何插件 —— 合法状态。装：把 .splug 包放进插件源目录再跑一次本脚本）"; fi)
+  ★ **插件不在这张表里，也不归本脚本管**（v0.12 起）。装完基座之后装插件：
 
-  ★ 上面每一行「短名 → 包 → <ULID>.sbatch」就是 jobs/ 那一串 ULID 的**对照表**。
-    没有作业侧的插件**没有**那第三段 —— 它的包里没有 job/start.sh，所以本脚本
-    不给它生成作业脚本（那一行于是只说它"提交不了"，不说它有一份脚本）。
-    它是**算出来的**、不是另存一份账 —— 任何时候要再打印一遍：
-      ${DAEMON} --check | grep -A2 作业脚本
+      sudo slurmate plugin install <包.splug>…       # 装一个或多个
+      sudo slurmate plugin install --from <目录>     # 与那个目录整批对齐
+      sudo slurmate plugin uninstall <id>…           # 卸（--all 卸全部）
+      sudo slurmate plugin sync                      # 对齐配置与作业脚本
 
-  端口池：${PORT_MIN}-${PORT_MAX}${RESERVED_RANGES:+（与 reserved_ranges
-          ${RESERVED_RANGES} 严格不交，跨表行为因此与顺序无关）}
+    一个插件都没有是**合法状态**：守护进程照常启动，已有会话照常能查、能停，
+    只是没有可提交的服务。要看清本站现在有什么：
+      ${DAEMON} --check | grep -A3 插件
+
+  端口池与集群网段：跑一次 `${DAEMON} --check` 看（那是它自己的配置，
+  本脚本不再抄一份 —— 抄一份就会漂开）。
 
   常用操作：
     systemctl status slurmate-sessiond
@@ -1721,6 +1091,8 @@ $(if [[ "$DRYRUN" -eq 1 ]]; then echo "    （演练：上面那个源目录里�
   卸载：
     sudo bash ${SCRIPT_PATH} --uninstall              # 保留状态与日志
     sudo bash ${SCRIPT_PATH} --uninstall --purge-state
+    ★ 它会把插件一起卸掉（在删守护进程之前调卸载器）—— 一个插件在站点上留下
+      哪几处痕迹，那条判据只有一份实现。
 
 EOF
 

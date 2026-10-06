@@ -695,14 +695,15 @@ CLIENT_NAME_MAX = 64
 #
 # ★ **守护进程里没有任何一个插件的名字。** 表是**扫出来的**：安装器把作者打好的
 #   包放进 `<prefix>/share/slurmate/plugins/`，守护进程启动时扫那一个目录。
-#   加一个插件因此是「放一个包 + 跑一次 deploy.sh」，不是「改守护进程的源码」——
-#   这是「插件是独立项目」这句话在集群侧的落点。
+#   加一个插件因此是「放一个包 + 跑一次 `slurmate plugin install`」，不是
+#   「改守护进程的源码」—— 这是「插件是独立项目」在集群侧的落点。
 #
 # ★ **这一段从前写的是「一个插件是一个目录、三半」**（`plugin.json` /
 #   `client/index.js` / `job/start.sh` 三个文件）。它说的四件事今天全不对：形状
 #   是包不是目录、落点由安装器改名成 `<ULID>.splug`、扫法是**读包**不是列目录、
-#   而"放一个目录"那个动作也不再存在（作者 `packer build` 出包，deploy.sh 永不
-#   打包）。**那三样东西仍然是插件的三半**，只是它们在一个包的负载里 —— 见下面
+#   而"放一个目录"那个动作也不再存在（作者 `packer build` 出包；**安装器与部署
+#   脚本都永不打包**）。**那三样东西仍然是插件的三半**，只是它们在一个包的负载里
+#   —— 见下面
 #   「站点侧的一个插件是【一个包文件】」那一段与 docs/PLUGIN-SPEC.md 附录 A。
 #
 # ★ 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的分派结构性
@@ -1119,6 +1120,11 @@ MANIFEST_NAME = "plugin.json"
 # 反斜杠在负载路径里是**被拒绝**的字符（§3.3）。
 PLUGIN_JOB_ENTRY = "job/start.sh"
 
+# 作业模板里的**拼接标记**：模板在那一行处被换成某个插件的 job/start.sh。
+# ★ 它是**跨文件契约** —— `cluster/run.sbatch` 的文件头写着它，测试里也钉着
+#   "整行、恰好一处"。改它要同时改模板、这里的正则与那份模板里的一段说明。
+JOB_TEMPLATE_MARKER = "# @@SLURMATE_PLUGIN_BLOCKS@@"
+
 # ★ 站点短名 / 版本号 / id 那三条正则现在住在上面「版本号：两套方案」那一段里 ——
 #   它们和 `version_satisfies` 是同一份约定（`\A…\Z`、禁止前导零、`0..255`），
 #   分开放就会有人只改一处。改它们之前先看那一段的说明。
@@ -1186,9 +1192,10 @@ PLUGIN_MAX_FILES = 256
 
 # 安装器写在 plugins_dir 里的两个东西（都以 `.` 开头，所以 scan_plugins 扫不到）：
 #
-#   .installed   上一批装了哪几个包（每行一个 `<ULID>.splug`）。deploy.sh 用它把
-#                "源里已经拿走的插件"真的从站点上删掉 —— 少了它，「把包移走再
-#                部署」这个最自然的卸载动作会**静默无效**。
+#   .installed   **目录模式**（`--from DIR`）上一次装了哪几个包（每行一个
+#                `<ULID>.splug`）。安装器用它把"源里已经拿走的插件"真的从站点上
+#                删掉 —— 少了它，「把包从源目录移走再同步」这个最自然的卸载动作
+#                会**静默无效**。
 #   .keys.json   站点侧记住的「这个 id 上一次是哪把钥匙签的」。见 install_plugins()
 #                里 §2.5 那一段：同一个 id 换了签名者 ⇒ 停下来问。
 PLUGIN_INSTALLED_MARKER = ".installed"
@@ -1262,8 +1269,8 @@ class PluginSpec(object):
         # 它有没有作业侧实现。**判据是包里的负载有没有 `job/start.sh` 那一份** ——
         # 从前是"目录里有没有那个文件"，两者说的是同一件事，只是问的对象变了。
         #
-        # 没有的话作业会在 run.sbatch 里以 24 明确失败 —— 但**部署时** deploy.sh
-        # 就会跳过它、不给它织作业脚本，所以正常路径下"装上了却提交不了"是可查的
+        # 没有的话作业会在 run.sbatch 里以 24 明确失败 —— 但**织作业脚本时**就会
+        # 跳过它、不给它织，所以正常路径下"装上了却提交不了"是可查的
         # （`--check-plugins` 会单独说出来）。
         self.needs_job = needs_job
         self.default_cpus = default_cpus
@@ -1306,7 +1313,7 @@ class PluginSpec(object):
         """作业侧的处理函数名。
 
         ★ 这是个**真契约**，不是文档：`run.sbatch` 的 `plugin_call` 就是这个拼法
-          （短名里的 `-` 写成 `_`），deploy.sh 在编织时会断言每个插件的
+          （短名里的 `-` 写成 `_`），安装器在编织时会断言每个插件的
           `job/start.sh` 里确实定义了这个函数。名字对不上时作业会在运行时才报
           "本站没有作业侧实现了 X 的插件"，而那是一个用户排完队之后才看到的错误。
         """
@@ -1613,7 +1620,7 @@ def scan_plugins(plugins_dir):
                 "%s：这是一个%s，不是一个插件包。站点上的插件只能是 %s 文件"
                 "（docs/PLUGIN-SPEC.md 附录 A）—— 它们既不会被分发、也不会被读到。\n"
                 "        两种情况：① 它是某个插件的**源码树** ⇒ 在作者机器上 "
-                "`packer build` 打成包（deploy.sh 永不打包，见它的文件头）；\n"
+                "`packer build` 打成包（安装器与部署脚本都永不打包）；\n"
                 "        ② 别的什么 ⇒ 人工确认后删掉。"
                 % (full, what, "*" + PLUGIN_PACKAGE_SUFFIX))
             continue
@@ -1639,7 +1646,7 @@ def scan_plugins(plugins_dir):
             #     字，配置文件改用 `<id>.conf` 命名就能各配各的（见
             #     `Config.resolve_plugin`）。所以这里**不去重**。
             #   · **id 撞**（同一个身份两份包）：**两个都不收**。真身份重了 ——
-            #     deploy.sh 织出来的作业脚本按 **id** 命名（`jobs/<id>.sbatch`），
+            #     织出来的作业脚本按 **id** 命名（`jobs/<id>.sbatch`），
             #     后织的会**静默覆盖**先织的那一份，于是其中一个插件的作业侧代码
             #     整个丢掉。挑一个的后果还取决于目录名的字典序，而那是没人会想到
             #     去查的地方。
@@ -1676,6 +1683,14 @@ JOB_LOG_SUBDIR = ".slurmate/logs"
 # 于是"留空则自动查找"会失败，而失败信息看起来像"Slurm 没装"。
 SLURM_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/slurm/bin", "/usr/sbin",
                   "/bin", "/sbin")
+
+# 守护进程要用的 Slurm 命令，**一张名单**。两个读者：
+#   · `Config.validate()` —— 少一个就拒绝启动；
+#   · `machine_selfcheck()` —— 把"这台机器缺东西"与"这份配置写错了"分开。
+# ★★ 两个读者用**同一个**常量是刻意的：分家的话，"少一个命令"会在两个地方
+#    得到两种答案，而调用方（部署脚本）正是按那个答案决定要不要继续。
+SLURM_COMMANDS = ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
+                  "sinfo", "sshare", "sacct")
 
 # 配置里允许出现的**站点通用**键。表外的键一律报错 —— 拼错的键被静默忽略，
 # 正是这个项目一路在清的那类问题：文件里写着，而实际什么也没发生。
@@ -1884,11 +1899,31 @@ def parse_config(path):
 
 # 主文件里出现块头时那句话（`parse_main_text` 用）。写得长一点，因为
 # 「把插件的东西写回主文件」是一个**有理由**的直觉 —— 得说清格式为什么换了。
+# ★★ 这条报错要**说清该写到哪儿去**，并给出可照做的搬法 —— 只说"不合法"的话，
+#    管理员唯一想得到的动作是把那几行**删掉**，而那是把他的配置丢掉。
+#    ★ 这段话此前在 `deploy.sh` 里有一份**孪生兄弟**（它在装完 conf 之后自己
+#      扫一遍块头再 die）。v0.12 阶段 4 把那一份删了：判据只能有一处，而这里
+#      是唯一知道"主文件里为什么不能有块头"的地方。
 _MAIN_NO_SECTION = (
-    "本版起插件配置不写在这里：一个插件一个文件，住在\n"
-    "        `<本文件>.d/<名字>.conf`。这么改是因为"
-    "「这一份是谁写的」必须由**位置**说了算，\n"
-    "        而不是由文件里某一行注释说了算 —— 判据得是结构，不能是内容。")
+    "本版起插件配置**不写在这里**：一个插件一个文件，住在\n"
+    "        `<本文件>.d/<名字>.conf`。这么改是因为「这一份是谁写的」必须由"
+    "**位置**说了算，\n"
+    "        而不是由文件里某一行注释说了算 —— 判据得是结构，不能是内容。\n"
+    "        ★ 搬法：把块头那一行丢掉，剩下的键值写成 `<本文件>.d/<名字>.conf`。"
+    "例如\n"
+    "              [plugin:sshd]\n"
+    "              enabled = yes\n"
+    "              default_cpus = 1\n"
+    "          变成 `<本文件>.d/sshd.conf`，内容只有\n"
+    "              enabled = yes\n"
+    "              default_cpus = 1\n"
+    "        ★ 也可以一块都不搬 —— 那些插件就是「装在本站、但没开」。跑一次\n"
+    "          `slurmate plugin sync` 会把缺的那几份补上（用的是插件自己声明的"
+    "缺省），\n"
+    "          再按需要在补出来的那一份里改。\n"
+    "        ★ 这个工具**不替你搬**：那几行里可能有你调过的默认资源，自动搬一趟"
+    "而搬错了\n"
+    "          是静默的（值被合进哪一份、谁盖了谁，配置里看不出来）。")
 
 
 def parse_main_text(text, path):
@@ -1983,7 +2018,8 @@ def resolve_bin(name, explicit):
 def default_jobs_dir():
     """作业脚本目录，从【守护进程自身的安装位置】推导。
 
-    安装布局由 deploy.sh 定下：守护进程在 <prefix>/sbin，作业脚本在
+    安装布局由基座安装脚本（cluster/deploy.sh）定下：守护进程在 <prefix>/sbin，
+    作业脚本在
     <prefix>/share/slurmate/jobs。两边由同一个前缀推导，就不存在
     「配置指向 A、实际装在 B」这种只在提交时才炸的不一致。
 
@@ -2006,12 +2042,12 @@ def default_plugins_dir():
 
     ★ **它是唯一的真相来源** —— 三个读者：
         安装器（`--install-plugins`）  把包按 `<ULID>.splug` 的名字放进来
-        deploy.sh                     读它 + 包里那一份 job/start.sh，编织 run.sbatch
+        作业脚本编织（`--sync-plugins`）  读它 + 包里那一份 job/start.sh，织出作业脚本
         本守护进程                     启动时扫它，建出 PluginSpec 表
 
-      加一个插件于是是「放一个包 + 跑一次 deploy.sh」，不是「改守护进程的源码」。
-      这正是「插件是独立项目」在集群侧的落点：守护进程仍然要 root 重部署一次，
-      但那是**安装动作**，不是**改代码**。
+      加一个插件于是是「放一个包 + 跑一次 `slurmate plugin install`」，不是
+      「改守护进程的源码」。这正是「插件是独立项目」在集群侧的落点：装插件是
+      **安装动作**，不是**改代码**，也不需要为此重跑一次部署。
 
     ★ 它**不是**配置项：一个能配的路径与"实际装在哪"可以不一致，而症状是守护进程
       报的插件表与作业模板里编织的插件是两套 —— 用户看得见按钮、点了却起不来。
@@ -2043,7 +2079,7 @@ def human_bytes(n):
 # ★ **集群侧读包只有这一份实现**，三个调用方共用它：
 #     安装器（`--install-plugins`）  解析 + 验签 + 同 id 检查
 #     `scan_plugins()`               从包里读插件表（守护进程与 --check-plugins）
-#     `--extract-package`            deploy.sh 取包里的 job/start.sh 去织作业脚本
+#     `--extract-package`            取包里的 job/start.sh 去织作业脚本（编织那一节）
 #   ★ 从前这里还列着 `plugin_payload_index()`（一个只读记录表的一行包装，给
 #     `--check` 报"分发出去多大"用）。**它删了** —— 详见 `main()` 里那一段。
 #
@@ -2352,9 +2388,9 @@ def package_read_file(path):
 def package_extract(path, inner):
     """取出包里的**一份**文件，返回字节；没有那一份返回 `None`。
 
-    ★ 这是集群侧读包的**唯一**入口。部署脚本要插件里的 `job/start.sh` 去织作业
-      脚本时走它，于是"包怎么读"只有 Python 这一份实现，两遍编织的结构一个字都
-      不用改。见 deploy.sh 的插件那一节。
+    ★ 这是集群侧读包的**唯一**入口。**编织那一节**要插件里的 `job/start.sh` 去
+      织作业脚本时走它，于是"包怎么读"只有 Python 这一份实现，两遍编织的结构一个
+      字都不用改。
     """
     r = package_read_file(path)
     if not r["ok"]:
@@ -2373,7 +2409,8 @@ def package_extract(path, inner):
 #
 #       sudo slurmate plugin install ~/下载/foo-1.2.0.splug
 #
-#   deploy.sh 走同一个入口（它把 PLUGINS_SRC 下的每一个 `.splug` 一起传进来）。
+#   ★ v0.12 阶段 4 起**集群侧只有这一个入口**：`deploy.sh` 不再碰插件，而
+#     `--plugins-src DIR`（目录模式：枚举 + 信任检查 + 集合对账）也走它。
 #   ★ **服务器上从头到尾没有源码树** —— 打包是作者的事（`packer/`），这里只收包。
 #
 # ★ 为什么安装器要长在守护进程这个文件里，而不是 CLI 里或 deploy.sh 里：
@@ -2507,7 +2544,7 @@ def package_input_problem(path, want_uid=None, st=None):
     ★ 判据是「**root 下载完到安装器读之间**，这个字节串有没有可能被别人换掉」：
 
         普通文件      不是符号链接、不是目录、不是 FIFO —— 后三者都能让"我读到的
-                      那份"与"deploy.sh 校验哈希的那份"不是同一份；
+                      那份"与"安装器读进来的那份"不是同一份；
         属主 = 调用者  root 跑就是"root 拥有"。**属主之外的人能改写自己拥有的
                       文件**，所以"组/其他人不可写"这一条挡不住属主本身；
         组/他人不可写  022 位为空。
@@ -2542,10 +2579,195 @@ def package_input_problem(path, want_uid=None, st=None):
     return None
 
 
-def install_plugins(packages, plugins_dir, replace_key=None, say=print):
+# ── 「一个包来源目录里，哪些文件是包」 ────────────────────────────────────────
+#
+# ★ 这一条此前长在 `deploy.sh` 里（`plugin_src_files()`）。v0.12 阶段 4 把"插件
+#   那一半"从部署脚本搬进安装器，它跟着搬过来 —— **判据只能有一份**，而分家的
+#   失效方式是"部署放行了、安装器不认"（或者反过来）。
+#
+# ★ 它只回答**一个**问题：目录里哪几个文件是"要装的包"。别的东西（源码树、
+#   README、子目录、随手放的文件）**不在**答案里 —— 而"它们在这儿"这件事由
+#   `plugin_src_problems()` 单独说，因为**不说就是静默忽略**：管理员会以为
+#   他已经把它装了上去。
+
+def plugin_src_files(src_dir):
+    """一个**包来源目录**里，哪些文件算"要装的包"。返回排序后的路径列表。
+
+    ★ **符号链接不算**。`-f` 会跟随链接，所以这里显式排掉链接本身 —— 一个叫
+      `x.splug` 的链接能指向任何地方、还能随时换目标，而"我读到的那一份"与
+      "校验过的那一份"不是同一份正是这一整节要防的事。
+    """
+    try:
+        names = os.listdir(src_dir)
+    except OSError:
+        return []
+    out = []
+    for name in sorted(names):
+        if not name.endswith(PLUGIN_PACKAGE_SUFFIX):
+            continue
+        path = os.path.join(src_dir, name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        out.append(path)
+    return out
+
+
+def plugin_src_problems(src_dir):
+    """一个**包来源目录**里，除 `.splug` 之外还有别的东西吗。返回问题列表。
+
+    ★ 它们**不会被安装**（`plugin_src_files()` 只列包）⇒ 不在这里说出来的话，
+      它们会被**静默忽略**，而最常见的成因正是"把插件的**源码树**复制到了这里"
+      —— 那个人以为装上去了。
+
+    ★ 名字带 `.splug` 后缀却进不了名单的（符号链接、目录、FIFO）**也要说**：
+      它们看起来像包，而"看起来像"正是让人不再往下查的那种状态。
+    """
+    try:
+        names = sorted(os.listdir(src_dir))
+    except OSError as e:
+        return ["读不了这个目录：%s" % e]
+    accepted = set(plugin_src_files(src_dir))
+    out = []
+    for name in names:
+        path = os.path.join(src_dir, name)
+        if path in accepted:
+            continue
+        if name.endswith(PLUGIN_PACKAGE_SUFFIX):
+            why = ("它是一个**符号链接**（链接指向的东西可以换，于是校验过的"
+                   "与读到的不一定是同一份）" if os.path.islink(path)
+                   else "它不是一个普通文件")
+            out.append("%s：名字看着像一个包，但%s —— **不会被安装**。" % (path, why))
+        else:
+            out.append(
+                "%s：它不是一个插件包（站点只收 `*%s`）—— **不会被安装**。\n"
+                "        最常见的成因是把插件的**源码树**放到了这里；打包是作者"
+                "机器上的事（`packer build`），服务器上从头到尾没有源码树。"
+                % (path, PLUGIN_PACKAGE_SUFFIX))
+    return out
+
+
+# 部署标记：安装器记着"有哪几个包是**目录模式**这一次装进去的"。
+# 它服务的只有一件事 —— 目录模式的对账（见 `_remove_stale_packages`）。
+# ★ 用同一个文件名住在两个目录里（这里与 jobs 目录），因为它是**同一件事**：
+#    "这个目录里哪几个文件是安装器写的"。两个名字会让它们看起来是两件事。
+INSTALLED_MARKER = ".installed"
+
+
+def _write_plugin_keys_or_remove(plugins_dir, keys, say=print):
+    """写回站点侧的钥匙记录；**空了就把文件删掉**。
+
+    ★★ 这条不变量与部署标记那一条逐字同形（见 `_write_installed_marker`）：
+      **空集就是"没有记录"**，不是"一个空文件"。后果很具体 —— 留一个
+      `{"keys": {}}` 会让插件目录**永远不为空**，于是"空掉的目录要收掉"这件事
+      再也做不到（`rmdir` 对非空目录静默失败）。而两个形状在读者那里是同一个
+      意思（`read_plugin_keys` 两种都返回空表）。
+    """
+    try:
+        if keys:
+            write_plugin_keys(plugins_dir, keys)
+        else:
+            os.unlink(plugin_keys_path(plugins_dir))
+    except OSError as e:
+        say("  ⚠ 写回钥匙记录失败：%s" % e)
+
+
+def _stale_package_names(plugins_dir, keep):
+    """目录模式里**这一次要卸掉**的那几个包名（`keep` 是要装的 `<id>.splug` 集合）。
+
+    ★ 判据是**记录文件**，不是"目录里现在有什么"：管理员单独 `slurmate plugin
+      install` 装的包不在记录里，所以一次目录同步**不会**把它悄悄撤销 —— 手动装
+      是显式动作（这是 v0.11 阶段 4 定下的）。
+
+    ★ 它**先算、后用**，因为算出来的那批 id 还要去抹掉**站点侧的钥匙记录**
+      （见下面那条不变量），而钥匙记录是在**写包之前**写的。
+    """
+    try:
+        with open(os.path.join(plugins_dir, INSTALLED_MARKER),
+                  encoding="utf-8") as f:
+            old = [ln.strip() for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        # ★ 读不出来时**什么都不删**（而不是当成空集 —— 那等于放行一次全清）。
+        #   与"没有记录"是两回事，所以这里要**说一句**。
+        raise OSError("读不了部署标记 %s（%s）" % (
+            os.path.join(plugins_dir, INSTALLED_MARKER), e))
+    return [n for n in old if n not in keep]
+
+
+def _remove_stale_packages(plugins_dir, names, say=print):
+    """目录模式的对账：把**这一次不再要**的那几个包真的从盘上删掉。
+
+    ★ 删之前**再读一遍魔数**：这里的路径是按名字拼出来的，而"按名字拼出来的路径
+      删东西"是这个文件里唯一一处 rm。对不上就不删，并说一句 —— 静默跳过与
+      "本来就没有"在输出上长得一样。
+    """
+    for name in names:
+        # 标记里每一行都是安装器自己写的 `<ULID>.splug`，但删之前仍然断言一次
+        # 形状：这个文件在两次安装之间躺在一个人人可读的目录里。
+        if os.sep in name or name in (".", ".."):
+            say("  ⚠ 跳过标记里那条形状不对的记录：%s" % name)
+            continue
+        path = os.path.join(plugins_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                magic = f.read(len(PACKAGE_MAGIC))
+        except OSError as e:
+            say("  ⚠ 跳过 %s —— 读不动（%s），不敢删" % (path, e))
+            continue
+        if magic != PACKAGE_MAGIC:
+            say("  ⚠ 跳过 %s —— 它不是一个插件包，不敢删" % path)
+            continue
+        try:
+            os.unlink(path)
+        except OSError as e:
+            say("  ⚠ 删不掉 %s：%s" % (path, e))
+            continue
+        say("  已移除不再装着的插件包：%s" % name)
+
+
+def _write_installed_marker(directory, names, say=print):
+    """把"这个目录里哪几个文件是安装器写的"原子地写回。失败**不致命**。
+
+    ★ 失败时**保留旧的那一份**（写的是同目录的临时文件，rename 才落地）——
+      清空它等于"忘了自己装过什么"，下一次对账就不会移除已经拿走的那些，而这个
+      失败是**静默**的（用户看到的是"它还在"）。
+
+    ★★ **空集就是"没有记录"**：`names` 为空时把标记文件**删掉**，而不是留一个
+      空文件。理由是后果很具体 —— 留一个空的 `.installed` 会让那个目录**永远
+      不为空**，于是"空掉的目录要收掉"这件事再也做不到（`rmdir` 对非空目录静默
+      失败）。而"文件不在"与"文件是空的"在每一个读者那里都是同一个意思。
+    """
+    marker = os.path.join(directory, INSTALLED_MARKER)
+    if not names:
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+        return
+    tmp = "%s.tmp.%d" % (marker, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for n in sorted(set(names)):
+                f.write(n + "\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, marker)
+    except OSError as e:
+        say("  ⚠ 更新不了部署标记 %s（%s）—— 下一次对账不会移除已经拿走的那些"
+            % (marker, e))
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def install_plugins(packages, plugins_dir, replace_key=None, say=print,
+                    src_dir=None):
     """把一批 `.splug` 装进 `plugins_dir`。返回退出码。
 
-    ── 两遍式（与 deploy.sh 编织作业脚本同一个形状）──────────────────────────
+    ── 两遍式（与编织作业脚本、与对账同一个形状）────────────────────────────
     **第一遍只读**：每个包都解析、验签、查记录，一条不过就一条也不装。第二遍才
     写。于是"装了一半"这件事不会发生在一个可以被读到的中间态上。
 
@@ -2571,9 +2793,36 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
     ⑥ **整包大小**：装了也发不出去的包不装（`PLUGIN_PACKAGE_MAX_BYTES`）。
 
     ★ 第二遍里**钥匙记录先写、包后写**，那个次序是刻意的 —— 理由写在那一段。
+
+    ── `src_dir`：**目录模式**（`slurmate plugin install --from DIR`）──────────
+    给了它就把 `packages` 放一边，改从那个目录取整批包。而"整批"多一层含义：
+    上一次**由目录模式装进去**、这一次 DIR 里没有了的包会被**卸掉**（判据是
+    `<plugins_dir>/.installed`，见 `_remove_stale_packages`）。
+
+    ★ 它**只删自己装过的那一批**：管理员单独 `slurmate plugin install` 装的包
+      不在记录里，于是不会被一次目录同步悄悄撤销。
+
+    ★ 目录模式下**空目录是合法的**（本站一个插件都没有），它表示"这次要装的是
+      空集" —— 于是那一条会走完整段流程，把上一次装的全卸掉。
     """
-    if not packages:
+    if src_dir is not None:
+        problems = plugin_src_problems(src_dir)
+        if problems:
+            say("✗ 包来源目录 %s 里有东西不是一个插件包，**一个字节都没有写**："
+                % src_dir)
+            for p in problems:
+                say("  · %s" % p)
+            return 1
+        packages = plugin_src_files(src_dir)
+        if not packages:
+            say("包来源目录 %s 里没有 `*%s` —— 这一次要装的是一个**空集**。"
+                % (src_dir, PLUGIN_PACKAGE_SUFFIX))
+            say("  空集是合法的（本站可以一个插件都没有）。下面会把上一次由目录"
+                "模式装进去的那些卸掉。")
+
+    if not packages and src_dir is None:
         say("用法：slurmate plugin install <文件.splug> [更多包…]")
+        say("  或：slurmate plugin install --from <目录>   # 与那个目录对齐")
         return 2
 
     # ── 第一遍：全部检查，一个字节都不写 ────────────────────────────────────
@@ -2797,7 +3046,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         say("    摘要      %s" % r["digest"])
         say("    签名者    %s" % (now if now else "（未签名）"))
         if spec.needs_job:
-            say("    作业侧    %s（deploy.sh 会把它织进作业脚本）" % PLUGIN_JOB_ENTRY)
+            say("    作业侧    %s（对账时会把它织进作业脚本）" % PLUGIN_JOB_ENTRY)
         else:
             say("    作业侧    ⚠ 包里的负载没有 %s —— 装得上、看得见，但提交不了"
                 % PLUGIN_JOB_ENTRY)
@@ -2811,6 +3060,26 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         say("✗ 建不了插件目录 %s：%s（要以 root 跑吗？）" % (plugins_dir, e))
         return 1
 
+    # ── 目录模式：这一次要卸掉哪几个（先算，因为钥匙记录要在写包**之前**抹）──
+    #
+    # ★★ 不变量：**站点侧的钥匙记录里只该有本站装着的插件**。少了这一条，一个
+    #    被拿走的插件会在记录里留一条 —— 而它的后果不是"多占几行"，是**下一次
+    #    装同一个 id 时撞上一句「签名者变了」**（记录里那条属于一个早已不在本站的
+    #    插件），以及卸载之后 `.keys.json` 留着，插件目录永远收不掉。
+    stale_names = []
+    if src_dir is not None:
+        try:
+            stale_names = _stale_package_names(
+                plugins_dir,
+                set(spec.id + PLUGIN_PACKAGE_SUFFIX for _p, _r, spec, _n in verified))
+        except OSError as e:
+            say("✗ %s" % e)
+            say("  **一个字节都没有写** —— 读不出记录就不知道哪些该卸，"
+                "而当成空集等于放行一次全清。")
+            return 1
+        for _n in stale_names:
+            keys.pop(_n[:-len(PLUGIN_PACKAGE_SUFFIX)], None)
+
     try:
         # ★ **记录先写、包后写。** 两个都可能失败，但失败之后留下的状态不一样：
         #   记录在前 ⇒ 最坏是"记录说这个 id 是谁签的，而包还没落地"，而那个方向的
@@ -2819,7 +3088,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         for _p, _r, _sp, _n in verified:
             keys[_sp.id] = {"fingerprint": _n, "name": _sp.name,
                             "version": _sp.version}
-        write_plugin_keys(plugins_dir, keys)
+        _write_plugin_keys_or_remove(plugins_dir, keys, say=say)
         for path, r, spec, now in verified:
             dst = os.path.join(plugins_dir, spec.id + PLUGIN_PACKAGE_SUFFIX)
             tmp = dst + ".tmp.%d" % os.getpid()
@@ -2839,31 +3108,476 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print):
         return 1
 
     say("")
-    say("装好了 %d 个插件包 → %s" % (len(verified), plugins_dir))
-    if any(r.get("sig") is None for _p, r, _s, _n in verified):
-        say("★ 其中**有没签名的包**。站点这一侧只能照着上面那一屏 trust 它们 ——")
-        say("  服务器上没有源码可对照，这是这一版的已知代价（见 README）。")
-    say("下一步：跑一次 deploy.sh（它会校验并**逐插件编织**作业脚本）。")
+    if verified:
+        say("装好了 %d 个插件包 → %s" % (len(verified), plugins_dir))
+        if any(r.get("sig") is None for _p, r, _s, _n in verified):
+            say("★ 其中**有没签名的包**。站点这一侧只能照着上面那一屏 trust 它们 ——")
+            say("  服务器上没有源码可对照，这是这一版的已知代价（见 README）。")
+    else:
+        say("本次没有包要装 → %s" % plugins_dir)
+
+    # ── 目录模式：把上一次装过、这一次不再要的卸掉 ──────────────────────────
+    #
+    # ★ 排在**装完之后**：写失败了就停在上一步（`return 1`），一个包都不会被删
+    #   —— 反过来（先删后装）会把"装失败"放大成"旧的也走了"。
+    if src_dir is not None:
+        _remove_stale_packages(plugins_dir, stale_names, say=say)
+        # ★ 标记只在**这一次真的写成了**才覆盖 —— 它是下一次对账的唯一依据，
+        #   而写失败时保留旧的等于"忘了自己装过什么"：下一次就不会移除已经拿走的
+        #   那些，而这个失败是**静默**的（人看到的是"它还在"）。
+        # ★ 空集也是一次**真实的**声明（"本站由目录模式管的插件一个都没有"），
+        #   所以它要把标记写成"没有记录"，而不是留着上一次那一份。
+        _write_installed_marker(
+            plugins_dir,
+            set(spec.id + PLUGIN_PACKAGE_SUFFIX for _p, _r, spec, _n in verified),
+            say=say)
+
+    # ★ 这句从前是"下一步：跑一次 deploy.sh" —— v0.12 阶段 4 起**编织与配置
+    #   对齐都在安装器这一侧**（`--sync-plugins`），`slurmate plugin install`
+    #   自己会把它们跑完。所以这里说的是**调用方**该做的下一件事。
+    if src_dir is None:
+        say("下一步：让守护进程重读配置（`systemctl reload slurmate-sessiond`，"
+            "热重载，不会断会话）。\n"
+            "  ★ 若你是直接跑这个安装器（而不是 `slurmate plugin install`），"
+            "作业脚本与配置还没对齐 —— 再跑一次 `--sync-plugins`。")
     return 0
 
 
 # ==============================================================================
-#  让插件配置与插件目录对齐（`slurmate plugin sync` / deploy.sh）
+#  从站点上卸掉插件（`slurmate plugin uninstall` / `--uninstall-plugins`）
+# ==============================================================================
+#
+#   ★★ 它是安装器的**对偶**，而且与安装器一样是**唯一入口**：一个插件在站点上
+#     留下四处痕迹，只有这一个地方知道它们各叫什么、删之前该确认什么。
+#
+#         <plugins_dir>/<id>.splug    包本身
+#         <conf>.d/<id>.conf          安装器为它生成的那一份配置
+#         <jobs_dir>/<id>.sbatch      编织出来的那一份作业脚本
+#         <plugins_dir>/.keys.json    里属于这个 id 的那条签名者记录
+#
+#   ★ 为什么"删"要集中在一处：那四处里，**包/配置/作业脚本**三种命名判据（都按
+#     id）分别长在三个模块里，而每一个写方都是一次"只删掉了其中三处"的机会 ——
+#     症状是配置指不到人（一条 ⚠），或者留下一份**仍然能被提交的无主作业脚本**。
+#
+#   ★ 它与 `deploy.sh --uninstall` 的分工：那一条卸载的是**基座**，它在删掉守护
+#     进程之前调用本函数（`--uninstall-plugins --all`）—— 判据因此仍然只有一份。
+#
+#   ★ **卸载不删数据**：站点侧没有插件的运行时数据（那是客户端的事），所以这里
+#     删掉的四处都是"本站对那个插件说过的话"。
+
+def _plugin_ids_on_site(plugins_dir, conf_path, jobs_dir):
+    """本站上"看起来装着"的插件 id 的并集 —— 从三处痕迹里取。
+
+    ★ 只认 **ULID 命名**的那些（`PLUGIN_ID_RE`）。管理员手写的
+      `<短名>.conf` 因此**自动落选** —— 那不是"额外加的一道判断"，而是"安装器
+      起的名字"这个判据的直接结果（见 `_looks_installer_named`）。
+    """
+    out = set()
+    for d, suffix in ((plugins_dir, PLUGIN_PACKAGE_SUFFIX),
+                      (plugin_conf_dir(conf_path), ".conf"),
+                      (jobs_dir, ".sbatch")):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith(suffix) and PLUGIN_ID_RE.match(n[:-len(suffix)]):
+                out.add(n[:-len(suffix)])
+    return out
+
+
+def _read_installed_marker(directory):
+    """读一个目录里的部署标记（`INSTALLED_MARKER`）。读不到就是空集。"""
+    try:
+        with open(os.path.join(directory, INSTALLED_MARKER), encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def uninstall_plugins(ids, plugins_dir, conf_path, jobs_dir, say=print,
+                      uninstall_all=False):
+    """把若干插件从本站卸掉。返回退出码。
+
+    `ids` 是插件的 **ULID**（身份，不是短名：短名只是本站的标签，会改、也会撞）。
+    `uninstall_all=True` 时忽略 `ids`，改从三处痕迹里取并集 —— 那是"把这个站点上
+    的插件全卸掉"，**基座卸载**走的就是它。
+    """
+    if uninstall_all:
+        # ★ id 只从**三处痕迹**取 —— 钥匙记录不算一处：它是**记忆**，不是痕迹。
+        #   而 `--all` 说的是"本站不再有插件" ⇒ 记忆整个丢掉（见下面那一段）。
+        ids = sorted(_plugin_ids_on_site(plugins_dir, conf_path, jobs_dir))
+    if not ids and not uninstall_all:
+        say("本站没有装着任何插件 —— 没有可卸的。")
+        return 0
+
+    bad = [i for i in ids if not PLUGIN_ID_RE.match(i)]
+    if bad:
+        say("✗ 这不是插件的 id：%s" % "、".join(bad))
+        say("  id 是一个 26 位的 ULID（插件的**身份**，不是短名 —— 短名是本站的"
+            "标签，会改也会撞）。")
+        say("  看本站装了哪些：`slurmate plugins` 或 "
+            "`slurmate-sessiond --check`（那里逐条印着 id@版本）。")
+        say("  要一次卸掉全部：`slurmate plugin uninstall --all`。")
+        return 2
+
+    # ★ 钥匙记录：读不出来时**一个字节都不动它**。这里用 strict 不是为了拦住
+    #   卸载（卸载必须永远可用），而是为了不把一份读不动的记录**覆盖成空的** ——
+    #   那会把站点的钥匙记忆一次抹掉，而症状要到下一次装插件时才出现。
+    try:
+        keys = read_plugin_keys(plugins_dir, strict=True)
+    except ValueError as e:
+        keys = None
+        say("  ⚠ 站点的钥匙记录读不出来（%s）—— 本次**不动**它："
+            % str(e).split("\n")[0])
+        say("    卸掉的插件会在记录里留一条，下次装同一个 id 可能撞上"
+            "「签名者变了」。")
+
+    pkg_marker = _read_installed_marker(plugins_dir)
+    job_marker = _read_installed_marker(jobs_dir)
+    gone = []
+    for pid in ids:
+        hit = []
+
+        pkg = os.path.join(plugins_dir, pid + PLUGIN_PACKAGE_SUFFIX)
+        if os.path.isfile(pkg):
+            # ★ 按名字拼出来的路径，删之前**再读一遍魔数** —— 与安装器同一条规矩。
+            try:
+                with open(pkg, "rb") as f:
+                    magic = f.read(len(PACKAGE_MAGIC))
+            except OSError as e:
+                say("  ⚠ 跳过 %s —— 读不动（%s），不敢删" % (pkg, e))
+                magic = None
+            if magic is None:
+                pass
+            elif magic != PACKAGE_MAGIC:
+                say("  ⚠ 跳过 %s —— 它不是一个插件包，不敢删" % pkg)
+            else:
+                os.unlink(pkg)
+                hit.append(pkg)
+                if pid + PLUGIN_PACKAGE_SUFFIX in pkg_marker:
+                    pkg_marker.remove(pid + PLUGIN_PACKAGE_SUFFIX)
+
+        job = os.path.join(jobs_dir, pid + ".sbatch")
+        if os.path.isfile(job):
+            os.unlink(job)
+            hit.append(job)
+            if pid + ".sbatch" in job_marker:
+                job_marker.remove(pid + ".sbatch")
+
+        conf = plugin_conf_path(conf_path, pid)
+        if os.path.isfile(conf):
+            os.unlink(conf)
+            hit.append(conf)
+
+        if keys is not None:
+            keys.pop(pid, None)
+
+        if hit:
+            gone.append(pid)
+            say("  已卸掉 %s：" % pid)
+            for p in hit:
+                say("      %s" % p)
+
+    # ── 把改动落回盘上，并把空掉的那几个目录收掉 ────────────────────────────
+    if keys is not None:
+        if uninstall_all:
+            # ★★ "本站的插件全卸掉" ⇒ **记忆跟着走**。理由不是整洁，是后果：
+            #    一份指向早已不在本站的 id 的签名者记录，会在下次装同一个 id 时
+            #    报一句"这个 id 上一次不是这么签的" —— 而那时没有任何东西能告诉
+            #    管理员上一次是谁签的（那个包早就不在了）。
+            keys = {}
+        _write_plugin_keys_or_remove(plugins_dir, keys, say=say)
+    if os.path.isdir(plugins_dir):
+        _write_installed_marker(plugins_dir, pkg_marker, say=say)
+    if os.path.isdir(jobs_dir):
+        _write_installed_marker(jobs_dir, job_marker, say=say)
+    # ★ 只在**空掉**时才删目录：里面还有别人的东西就留着（`rmdir` 对非空目录
+    #   静默失败，那正是这里要的）。
+    # ★ 范围**到 plugins/ 为止**，不含它的上一层（`<SHARE_DIR>`）—— 那是**基座**
+    #   的地方，由基座安装脚本自己收（它才认识自己往那儿装了什么）。
+    for d in (jobs_dir, plugin_conf_dir(conf_path), plugins_dir):
+        try:
+            os.rmdir(d)
+        except OSError:
+            pass
+
+    if not gone:
+        say("本站没有装着任何插件 —— 没有可卸的（记忆里那些也已经清掉了）。"
+            if uninstall_all else
+            "要卸的那几个在盘上什么都没留下（可能已经卸过了）。")
+    else:
+        say("")
+        say("卸掉 %d 个插件。★ 已经取过它们的客户端不受影响 —— 客户端上那一份是"
+            "用户自己的，" % len(gone))
+        say("  本站只是不再分发它（下次对账时客户端会发现它没了）。")
+    return 0
+
+
+# ==============================================================================
+#  编织作业脚本（模板 + 每个插件的 job/start.sh → <jobs_dir>/<id>.sbatch）
+# ==============================================================================
+#
+#   ★★ 这一节同样是 v0.12 阶段 4 从 `deploy.sh` 搬进来的：插件是"安装器/卸载器
+#     是唯一入口"的，而"装一个插件要再跑一次部署脚本"正是那句话没成立的证据。
+#     搬过来之后，装、卸、配置、作业脚本四件事都在这一侧说完。
+#
+#   ★ 判据一条没改，只是换了语言：三道断言、两遍式、只删自己装过的那些。
+#     模板与拼接标记也逐字没变 —— 作业脚本里那一行的形状是**跨文件契约**
+#     （`cluster/run.sbatch` 的文件头写着它）。
+
+def default_job_template():
+    """作业模板在哪 —— 从**守护进程自身的安装位置**推导，与 `default_jobs_dir()`
+    同一个前缀。
+
+    ★ 它是部署时装下的（`<prefix>/share/slurmate/run.sbatch.template`），**不是**
+      仓库里 `cluster/run.sbatch` 那一份：集群上可能根本没有仓库。
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.normpath(
+        os.path.join(here, os.pardir, "share", "slurmate",
+                     "run.sbatch.template"))
+
+
+def plugin_jobsh_problems(pname, text):
+    """插件那一份 `job/start.sh` 要过的**三道断言**。返回问题列表（空 = 能织）。
+
+    ★ 它们不是"防御性编程" —— 每一条对应的都是一个**静默**失效：
+
+      ① **不许有 shebang、不许有 `#SBATCH`。** 它们在拼接点**之后**，而 Slurm
+         只扫脚本开头那一段连续的注释（模板里的 `set -uo pipefail` 就终止了那次
+         扫描）—— 带了不是报错，是「写了但静默不生效」。
+      ② **有作业侧就必须定义 `start_<短名>`。** 没有它，作业会在用户**排完队
+         之后**才以 24 失败，而他看到的是"这份作业脚本提供的是 Y、请求的是 X"
+         —— 一句话指不回这个文件。
+      ③ **其余函数必须带 `_<短名>_` 前缀。** 一份脚本里只有一个插件，所以插件
+         **之间**不会再撞；但插件盖掉**宿主**的函数（log / cleanup /
+         write_session / pick_port_and_start …）仍然是**静默**的 —— 症状是
+         "清理没跑""日志少了几行"这类指不回任何一个文件的现象。
+    """
+    suffix = pname.replace("-", "_")
+    out = []
+
+    offenders = [ln for ln in text.splitlines()
+                 if ln.startswith("#!") or re.match(r"^[ \t]*#SBATCH", ln)]
+    if offenders:
+        out.append(
+            "文件里有 shebang 或 #SBATCH（第 %s 行）。\n"
+            "        它们会被拼在作业脚本的**中间**，而 Slurm 只解析脚本开头的"
+            "注释块 ——\n"
+            "        所以带了不是报错，是「写了但静默不生效」。删掉它们。"
+            % "、".join(str(i + 1) for i, ln in enumerate(text.splitlines())
+                        if ln in offenders))
+
+    if not re.search(r"(?m)^[ \t]*start_%s[ \t]*\(\)" % re.escape(suffix), text):
+        out.append(
+            "文件里没有定义 start_%s（插件 %s 的作业侧入口）。\n"
+            "        宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字对不上"
+            "等于没有实现。\n"
+            "        ★ 短名里的 `-` 在这一侧写成 `_`。" % (suffix, pname))
+
+    bad_fns = []
+    for m in re.finditer(r"(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)", text):
+        fn = m.group(1)
+        if fn in ("start_" + suffix, "precheck_" + suffix, "cleanup_" + suffix):
+            continue
+        if fn.startswith("_" + suffix + "_"):
+            continue
+        bad_fns.append(fn)
+    if bad_fns:
+        out.append(
+            "文件里定义了没有命名空间的函数：%s\n"
+            "        它会被拼进作业脚本，而宿主自己的函数（log / cleanup / "
+            "write_session /\n"
+            "        pick_port_and_start …）都是**没有后缀**的动词 —— 一个同名的"
+            "插件函数会\n"
+            "        把它们**静默**盖掉，症状是「清理没跑」「日志少了几行」，"
+            "指不回这个文件。\n"
+            "        规则：契约钩子用 <动词>_%s，其余一律用 _%s_ 前缀。"
+            % ("、".join(bad_fns), suffix, suffix))
+    return out
+
+
+def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
+    """把每个插件的 `job/start.sh` 织进作业模板，**一个插件一份**。返回退出码。
+
+    ★ **两遍式**：先把 N 份全部生成并逐份验语法，**全过了才开始装**。这保住了
+      「要么换成新的、要么一份都不动」。要诚实说明的是：N 次 install 之间不是
+      原子的（窗口是毫秒级，且每份各自完整）—— 换来的是"半新半旧的那一批"里
+      **不会出现语法错的**脚本，因为语法检查在安装之前。
+    """
+    try:
+        with open(template_path, encoding="utf-8") as f:
+            template = f.read()
+    except OSError as e:
+        say("✗ 读不了作业模板 %s：%s" % (template_path, e))
+        say("  它由部署装下（<prefix>/share/slurmate/run.sbatch.template）。"
+            "重跑一次 cluster/deploy.sh 会把它装上。")
+        return 1
+
+    n_mark = sum(1 for ln in template.splitlines() if ln == JOB_TEMPLATE_MARKER)
+    if n_mark != 1:
+        say("✗ 作业模板 %s 里的拼接标记有 %d 处，应当**恰好一处**。" % (template_path, n_mark))
+        say("  零处 = 插件无处分派；多于一处 = 只有第一处会被替换，其余静默留在"
+            "文件里。")
+        say("  标记是整行： %s" % JOB_TEMPLATE_MARKER)
+        return 1
+
+    specs, problems = scan_plugins(plugins_dir)
+    if problems:
+        say("✗ 插件目录里有读不动的东西，先用 `--check-plugins` 看一遍再织：")
+        for p in problems:
+            say("  · %s" % str(p).split("\n")[0])
+        return 1
+
+    # ★ 作业脚本目录 100% 由本工具生成，但仍然走一遍与插件目录同样的守卫：
+    #   里面有东西、却没有本工具的部署标记 ⇒ 那不可能是我们装的，**中止而不是删**。
+    try:
+        existing = os.listdir(jobs_dir)
+    except OSError:
+        existing = []
+    if existing and INSTALLED_MARKER not in existing:
+        say("✗ 作业脚本目录 %s 里已经有东西，但它不是本工具装的（没有 %s）。"
+            % (jobs_dir, INSTALLED_MARKER))
+        say("  为避免删掉别人的文件，中止。确认里面没有你要保留的东西之后，"
+            "人工执行：")
+        say("      rm -rf '%s'" % jobs_dir)
+        return 1
+
+    try:
+        os.makedirs(jobs_dir, mode=0o755, exist_ok=True)
+    except OSError as e:
+        say("✗ 建不了作业脚本目录 %s：%s" % (jobs_dir, e))
+        return 1
+
+    stage = tempfile.mkdtemp(prefix="slurmate-weave-")
+    try:
+        # ── 第一遍：全部生成 + 逐份验语法，一份都不装 ──────────────────────
+        wanted = []                 # [(id, 暂存文件)]
+        skipped = []
+        for spec in sorted(specs, key=lambda s: (s.name, s.id)):
+            if not spec.needs_job:
+                # ★ 包里的负载没有 job/start.sh 是**合法状态**（只有客户端那一半
+                #   的插件允许存在）。它装得上、看得见，但提交不了。
+                skipped.append(spec)
+                continue
+            try:
+                raw = package_extract(spec.source_package, PLUGIN_JOB_ENTRY)
+            except ValueError as e:
+                say("✗ 从 %s 里取 %s 失败：%s" % (spec.source_package,
+                                                  PLUGIN_JOB_ENTRY, e))
+                say("  扫描器说这个包**有**那一份（它是这么报的），所以这多半意味着"
+                    "包在装进来之后被换过 —— 重装一次那个包。")
+                return 1
+            text = raw.decode("utf-8", "replace")
+            probs = plugin_jobsh_problems(spec.name, text)
+            if probs:
+                say("✗ 插件 %s 的 %s 过不了作业侧的三道断言："
+                    % (spec.name, PLUGIN_JOB_ENTRY))
+                for p in probs:
+                    say("      %s" % p)
+                say("  已中止 —— 作业脚本目录一份都没有改动。")
+                return 1
+            header = ("# ─── 插件 %s（id %s）──────────────────────────────"
+                      % (spec.name, spec.id))
+            woven = re.sub(r"(?m)^%s$" % re.escape(JOB_TEMPLATE_MARKER),
+                           lambda _m: header + "\n" + text.rstrip("\n"),
+                           template, count=1)
+            # ★ 判据必须是**整行**，不是子串：模板的文件头注释里也提到了这个
+            #   标记（读模板的人需要知道它叫什么），子串匹配会把那句注释也算成
+            #   一处，于是"替换成功"这件事看起来永远不成立。
+            if any(ln == JOB_TEMPLATE_MARKER for ln in woven.splitlines()):
+                say("✗ 织完 %s 之后模板里仍有拼接标记 —— 模板里有不止一处。"
+                    % spec.name)
+                return 1
+            path = os.path.join(stage, spec.id + ".sbatch")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(woven)
+            try:
+                chk = subprocess.run(["bash", "-n", path],
+                                     capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError) as e:
+                say("✗ 跑不了 bash -n（%s）—— 没法证明织出来的脚本是合法 shell。"
+                    % e)
+                return 1
+            if chk.returncode != 0:
+                say("✗ 插件 %s 的作业脚本语法检查失败：" % spec.name)
+                say("      %s" % chk.stderr.strip().split("\n")[0])
+                say("  多半是 %s 里有语法错误（行号见上）。已中止，作业脚本目录"
+                    "一份都没有改动。" % PLUGIN_JOB_ENTRY)
+                return 1
+            wanted.append((spec.id, path))
+            say("  · %s：三道断言通过，织成 %d 行的作业脚本"
+                % (spec.name, woven.count("\n")))
+
+        # ── 第二遍：全部验过了，才开始装 ────────────────────────────────────
+        for pid, path in wanted:
+            dst = os.path.join(jobs_dir, pid + ".sbatch")
+            tmp = dst + ".tmp.%d" % os.getpid()
+            try:
+                shutil.copyfile(path, tmp)
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, dst)
+            except OSError as e:
+                say("✗ 装 %s 失败：%s" % (dst, e))
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return 1
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    # ── 清掉不再属于任何插件的那些 ──────────────────────────────────────────
+    # 「把一个包拿走」必须真的生效，否则会留下一份**无主的、仍然可以被提交的**
+    # 脚本。判据是"在不在这一次的集合里"，而**只有标记里记着的**才删 ——
+    # 我们只删自己写过的东西。
+    keep = set(pid + ".sbatch" for pid, _p in wanted)
+    old = _read_installed_marker(jobs_dir)
+    for name in old:
+        if name in keep:
+            continue
+        if os.sep in name or name in (".", ".."):
+            say("  ⚠ 跳过标记里那条形状不对的记录：%s" % name)
+            continue
+        path = os.path.join(jobs_dir, name)
+        if os.path.isfile(path):
+            try:
+                os.unlink(path)
+                say("  已移除不再需要的作业脚本：%s" % name)
+            except OSError as e:
+                say("  ⚠ 删不掉 %s：%s" % (path, e))
+    _write_installed_marker(jobs_dir, keep, say=say)
+
+    if skipped:
+        say("  ★ 这几个插件**没有**作业脚本（包里没有 %s —— 合法状态，它们提交"
+            "不了）：" % PLUGIN_JOB_ENTRY)
+        say("      %s" % "、".join(s.name for s in skipped))
+    return 0
+
+
+# ==============================================================================
+#  让站点的两份派生物与插件目录对齐（`slurmate plugin sync` / `--sync-plugins`）
 # ==============================================================================
 #
 #   ★★ 为什么是**一次对账**，而不是"装的时候插一份、卸的时候删一份"：
 #
-#     · 卸载**根本不经过安装器**。deploy.sh 的卸载是"源目录里没有了 ⇒ 按上一次
-#       的标记把包删掉"（`.installed` 那个文件），而"源目录空到没有 .splug"时
-#       它**连 `--install-plugins` 都不调**（那样连一个包都传不进来）。所以在
-#       安装器里挂钩子，**结构上**就盖不住"全卸光"这一格。
-#     · 管理员也可以直接 `rm` 一个 `.splug`。那是最自然的卸载动作。
+#     · 管理员可以直接 `rm` 一个 `.splug`。那是最自然的卸载动作，而且**不经过
+#       任何工具** —— 挂钩子的做法**结构上**就盖不住它。
+#     · 从源目录里拿走一个包再同步（`--from` 那一侧的对账）也不是"一次事件"。
 #
-#     于是"谁被卸载了"这个知识**不是一个事件**，而是一个**状态**：目录里现在
-#     有什么，配置里就该有什么。对账拿状态判，一次覆盖全部路径，而且**幂等**
-#     —— 跑两遍与跑一遍的结果逐字节相同。
+#     于是"谁被卸载了"这个知识**不是一个事件**，而是一个**状态**：插件目录里
+#     现在有什么，站点的**两份派生物**里就该有什么。对账拿状态判，一次覆盖全部
+#     路径，而且**幂等** —— 跑两遍与跑一遍的结果逐字节相同。
 #
-#   ★ 判据只有一条：**装着的插件，每一个都有一份配置**。做三件事：
+#   ★★ **两份派生物，一个判据**（v0.12 阶段 4 起）：
+#       · `<conf>.d/<ULID>.conf`   插件**生效配置**的那一份（见 render_plugin_file）
+#       · `<jobs_dir>/<ULID>.sbatch`  织好的**作业脚本**（见 weave_plugin_jobs）
+#     它们都是"由插件目录**算得出来**的东西"，所以它们与插件目录对齐这件事是
+#     **同一条判据** —— 分开放就会有人只对齐一半，而症状是"配置改了、作业脚本
+#     还是旧的"，两边看起来都正常。
+#
+#   ★ 配置那一半做的三件事：
 #       · 装了而**没有任何**配置指向它 ⇒ 写一份 `<ULID>.conf`（`plugin_conf_path`）；
 #       · `<ULID>.conf` 在，而那个 id **没装** ⇒ 删掉那个文件；
 #       · 其余文件（管理员手写的 `<短名>.conf`，以及任何不是它那份的）⇒ **一个字
@@ -2922,9 +3636,11 @@ def _write_text_atomic(path, text, mode=None, uid_gid=None):
         raise
 
 
-def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
-    """把**安装器那一份**插件配置，与插件目录里实际装着的插件对齐。返回退出码。
+def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
+                 say=print, dry_run=False):
+    """把站点的**两份派生物**（插件配置、作业脚本）与插件目录对齐。返回退出码。
 
+    ── 配置那一半 ──────────────────────────────────────────────────────────────
     做两件事（都只碰**按 id 命名**的那一份，见 `plugin_conf_path`）：
 
       · 目录里**没有**的插件，却有 `<ULID>.conf` ⇒ **删掉那个文件**
@@ -2950,6 +3666,20 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
           留着，而生成器没有任何依据知道哪些行是他改的；
         · 两个文件指着同一个插件 ⇒ 报 ⚠（这是 `--check` 的硬错误，见
           `duplicate_plugin_conf_problem`），不去猜他想留哪一个。
+
+    ── 作业脚本那一半（v0.12 阶段 4 并进来）──────────────────────────────────
+    `weave_plugin_jobs()`：一个插件一份 `<jobs_dir>/<id>.sbatch`，由模板 + 包里
+    的 `job/start.sh` 织成。判据与配置那一半**逐字同形** —— 由插件目录算得出来
+    的东西，就该与插件目录一致。★ 它排在配置那一半**之后**：配置对不上是硬错误
+    （两个文件指同一个插件），那时作业脚本也不该动。
+
+    ★★ `jobs_dir` / `template_path` **都是给用例用的注入口**：生产路径上两个都
+      不传，从守护进程自身的安装位置推导。用例如要在一个临时目录里验编织，就
+      把它们指过去 —— 而不是在用例里另写一份编织（那样验的是那份抄件）。
+    ★★ 调用方把 `--plugins-dir` 指到**别处**时（一条排查路径：把包装到一个临时
+      目录里看看），调用方**不该**调到这里来 —— 那会把真正的站点派生物全删掉。
+      判据在调用方（`slurmate` CLI 与 main() 各有一处），因为"你给我的这个目录
+      是不是本站"只有调用方知道。
     """
     specs, dir_problems = scan_plugins(plugins_dir)
     by_id, by_name = plugin_indexes(specs)
@@ -3003,14 +3733,6 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
             say("    守护进程会因此**拒绝启动**（配置自相矛盾）。删掉其中一个文件，"
                 "这个工具不去猜你想留哪一个。")
 
-    if not to_delete and not to_add:
-        say("配置 %s 与插件目录 %s 已经一致。" % (path, plugins_dir))
-        say("  装着的插件：%s" % ("、".join("%s（id %s）" % (s.name, s.id)
-                                            for s in sorted(
-                                                specs, key=lambda s: (s.name, s.id)))
-                                   or "（一个都没有 —— 合法状态）"))
-        return 0
-
     if dry_run:
         for n in to_delete:
             say("  [演练] 会删掉 %s（那个插件已经不在插件目录里了）"
@@ -3018,6 +3740,13 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
         for s in to_add:
             say("  [演练] 会写一份 %s" % plugin_conf_path(path, s.id))
         return 0
+
+    if not to_delete and not to_add:
+        say("配置 %s 与插件目录 %s 已经一致。" % (path, plugins_dir))
+        say("  装着的插件：%s" % ("、".join("%s（id %s）" % (s.name, s.id)
+                                            for s in sorted(
+                                                specs, key=lambda s: (s.name, s.id)))
+                                   or "（一个都没有 —— 合法状态）"))
 
     # ── 删：按 id 命名的那一份，而它指向的插件没装 ──────────────────────────
     for n in to_delete:
@@ -3060,11 +3789,28 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
                 % (p, "yes" if s.default_enabled else "no"))
 
     say("配置 %s 已与插件目录对齐。" % path)
+
+    # ── 作业脚本那一半：同一个判据，另一份派生物 ────────────────────────────
+    #
+    # ★ 排在最后：上面任何一步返回 1 都意味着**配置那一半**没对齐，那时作业脚本
+    #   也不该动（否则会留下"脚本是新的、配置是旧的"这种两头都不像的状态）。
+    if jobs_dir is None:
+        jobs_dir = default_jobs_dir()
+    if template_path is None:
+        template_path = default_job_template()
+    say("")
+    say("作业脚本（模板 %s）：" % template_path)
+    rc = weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=say)
+    if rc != 0:
+        say("  ★ 配置那一半**已经对齐了**，只有作业脚本没织成 —— 修好上面那条"
+            "再跑一次 `slurmate plugin sync`。")
+        return rc
+
     # ★ v0.12 阶段 3：这句话从前是"改完记得 systemctl restart slurmate-sessiond"
     #   —— 而配置改动现在是**热得起来**的，那句话会让管理员去断掉所有人的会话。
-    #   ★ 这里只能**指路**、不能自己动手：这个函数跑在 `--sync-plugin-config`
-    #   那个一次性进程里，而"要不要让正在跑的那个重读"是**调用方**的事
-    #   （`slurmate` CLI 与 deploy.sh 各自在合适的时机调 `systemctl reload`）。
+    #   ★ 这里只能**指路**、不能自己动手：这个函数跑在 `--sync-plugins` 那个
+    #   一次性进程里，而"要不要让正在跑的那个重读"是**调用方**的事
+    #   （`slurmate` CLI 与 main() 各自在合适的时机调 `systemctl reload`）。
     say("  正在跑的守护进程要重读一遍才用得上："
         "systemctl reload slurmate-sessiond（热重载，不会断会话）。")
     return 0
@@ -3224,7 +3970,7 @@ def plugin_indexes(specs):
       本站给人看的名字，id 才是身份）。用 `{s.name: s}` 收的话，后一个会**静默
       盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
 
-    ★ 两个调用方（`Config` 与 `sync_plugin_config`）都用它，所以表的形状只有一份
+    ★ 两个调用方（`Config` 与 `sync_plugins`）都用它，所以表的形状只有一份
       定义。`resolve_plugin_spec()` 是"名字 → 具体哪一个"的唯一判据，别处不要再
       写一遍：同一条规矩两份实现会漂开，而漂开时不会有任何东西变红。
     """
@@ -3272,13 +4018,15 @@ def resolve_plugin_spec(by_id, by_name, key, plugins_dir):
     if not by_id:
         return None, (
             "本站**一个插件都没装**，所以任何名字都配不上。插件安装目录 %s "
-            "是空的。（装插件是把一个 .splug 包放进去、再跑一次 deploy.sh，"
+            "是空的。（装插件是放一个 .splug **包**进去："
+            "`sudo slurmate plugin install --from <那个目录>`，"
             "见 plugins/README.md。）" % plugins_dir)
     # ★ 那句话必须说清"装插件"是**放一个包**，不是"放一个目录" —— 它是管理员
     #   唯一会照着做的那句，说错对象等于把他指到一个不存在的动作上。
     return None, ("本站没有装叫 %r 的插件。装了的是：%s。"
-                  "（装了的才认得 —— 装插件是把一个 .splug 包放进插件安装目录 "
-                  "%s、再跑一次 deploy.sh，见 plugins/README.md。）"
+                  "（装了的才认得 —— 装插件是放一个 .splug **包**进去："
+                  "`sudo slurmate plugin install --from <那个目录>`，"
+                  "落到 %s，见 plugins/README.md。）"
                   % (key, "、".join(sorted(by_name)) or "（一个都没有）",
                      plugins_dir))
 
@@ -3303,7 +4051,7 @@ def duplicate_plugin_conf_problem(sections, meta, resolve):
       根本认不出自己是哪一个。
 
     ★ 安装器**不会**造出这一格：它写之前先看"这个插件是不是已经有配置了"
-      （无论哪个文件名的），有就不写（见 `sync_plugin_config`）。所以这一条
+      （无论哪个文件名的），有就不写（见 `sync_plugins`）。所以这一条
       只会由**手写**触发。
     """
     seen = {}                           # id → 第一个配置名
@@ -3338,8 +4086,8 @@ def render_plugin_file(spec, enabled, commented):
 
     ★★ `enabled` 写的是**插件自己声明的缺省**（`site.defaultEnabled`），不是
       写死的 `no`。写死 `no` 是一处**静默的行为改变**：一个"一份配置都没写"的
-      站点本来靠清单缺省开着的插件（code-server 就是），会在装完第一次
-      deploy.sh 之后**悄悄关掉** —— 那正是 CONFIGURATION.md 点名的最危险的
+      站点本来靠清单缺省开着的插件（code-server 就是），会在第一次对账生成它
+      那一份之后**悄悄关掉** —— 那正是 CONFIGURATION.md 点名的最危险的
       那类改变。生成物只该**照实**说出生效值，不该改变它。
 
     ★ 第一行写上**短名**：文件名是 ULID，人不认识，而这一份是给人看的。
@@ -3470,6 +4218,82 @@ def plugin_gres_problems(plugins, catalog):
     return out
 
 
+# ==============================================================================
+#  「这台机器缺什么」—— `--check` 的机器级自检（v0.12 阶段 4）
+# ==============================================================================
+#
+#   ★★ 为什么它与配置错误**必须分开报**：`--check` 的退出码有两个读者，而它们
+#     想要的答案不一样。
+#
+#        · systemd 的 `ExecStartPre`（单元文件里那一条）：只要非零就拦住启动，
+#          不必分清。
+#        · **部署脚本**（`cluster/deploy.sh`）：它在装文件**之前**跑一次 `--check`
+#          —— 那正是"任何一项不满足即中止，不做任何改动"这条承诺的落点。而它
+#          必须分得清两件事：
+#            这台机器缺东西（缺 sbatch、缺 nft）⇒ **现在就停**，一个字节都别装；
+#            这份配置写错了（第一次部署时 `cluster_cidr` 还空着，**那本来就是
+#            预期状态**）⇒ 继续装，装完在配置落盘之后再判它。
+#          混成一个退出码的话，部署脚本只有两条路：要么在第一次部署时必然中止，
+#          要么把"装到了一台根本不是登录节点的机器上"也放过去。
+#
+#   ★ 它**不是**一份新的判据：名单取自 `SLURM_COMMANDS`（与 `validate()` 同一份），
+#     而"留空则自动查找"的语义就是 `Config` 解析出来的结果。这里只回答"有没有
+#     解析到"，不重问一遍"该去哪儿找"。
+
+def machine_selfcheck(cfg, nft=None):
+    """这台机器缺什么。返回问题列表（空 = 机器本身没问题）。"""
+    out = []
+    missing = [n for n in SLURM_COMMANDS if not getattr(cfg, n)]
+    if missing:
+        out.append("这台机器上找不到这些 Slurm 命令：%s。\n"
+                   "        （配置里留空表示自动查找，已在 PATH 与 %s 里找过。）\n"
+                   "        这通常意味着**这一台不是 Slurm 登录节点** —— 守护进程"
+                   "在它上面提交不了任何作业。"
+                   % ("、".join(missing), "、".join(SLURM_BIN_DIRS)))
+    if nft is None:
+        nft = shutil.which("nft") or "/sbin/nft"
+    if not (os.path.exists(nft) and os.access(nft, os.X_OK)):
+        out.append("这台机器上找不到 nft（%s）—— 守护进程没法维护 ACL，"
+                   "会话的隧道端口谁也拦不住。" % nft)
+    return out
+
+
+def reserved_ports_warning(cfg, raw=None):
+    """端口池与本机 `ip_local_reserved_ports` 重叠吗。重叠返回一句 ⚠，否则 None。
+
+    ★ 这是**运行环境**的事实，不是配置 —— 所以它进不了 `validate()`（那里每一条
+      都让守护进程拒绝启动，而这一条只意味着"偶尔要多试几个候选端口"）。
+      调用方打一条 ⚠，退出码不动。
+
+    ★ 它此前长在 `deploy.sh` 的预检里（v0.12 阶段 4 搬进来）。搬的理由是那条
+      判据只能有一份，而且搬过来之后它跟着 `--check` 进了 `ExecStartPre`
+      —— **每次启动前都跑**，比"只在部署时跑一次"见得多。
+
+    ★ `raw` 是给用例用的注入口（本机改不了那个 sysctl）。
+      ★ 没有那个文件时返回 None：不是所有内核都编了它，而"读不到"与"没重叠"
+        在这里是同一件事该做什么（什么都不做），但**不能**把读不到写成"没有重叠"
+        的报告 —— 所以这里只说 None，一个字都不说。
+    """
+    if raw is None:
+        try:
+            with open(IP_LOCAL_RESERVED_PORTS, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            return None
+    ranges = parse_port_set(raw)
+    for a, b in ranges:
+        if cfg.port_start <= b and a <= cfg.port_end:
+            return ("端口池 %d-%d 与内核的 ip_local_reserved_ports 里的 %d-%d "
+                    "重叠（%s = %s）。\n"
+                    "        这不会让 nft 规则失效（它匹配 dport），只会让作业"
+                    "偶尔多试几个候选端口。\n"
+                    "        要消掉它：把本区间从 %s 里去掉，或者把端口池挪走。"
+                    % (cfg.port_start, cfg.port_end, a, b,
+                       IP_LOCAL_RESERVED_PORTS, raw.strip(),
+                       IP_LOCAL_RESERVED_PORTS))
+    return None
+
+
 def plugin_keys_problem(sections, meta, resolve):
     """这一份插件配置里的键有没有认不出的。返回错误串列表（空 = 没问题）。
 
@@ -3498,6 +4322,35 @@ def plugin_keys_problem(sections, meta, resolve):
                     "%s 里有无法识别的键 %r（本版插件配置只认：%s）"
                     % (where, key, ", ".join(allowed)))
     return errors
+
+
+# 内核那一侧的临时端口保留清单。★ 它住在 /proc 下而不是 `sysctl` 的输出里：
+# 读一个文件不需要起一个进程，而 `--check` 跑在 `ExecStartPre` 里，每次启动都要跑。
+IP_LOCAL_RESERVED_PORTS = "/proc/sys/net/ipv4/ip_local_reserved_ports"
+
+
+def parse_port_set(spec):
+    """内核那种端口清单 → [(起, 止), …]。**单项也收**（`5000,6000-7000`）。
+
+    ★ 它与 `parse_reserved_ranges()` **是两个解析器**，因为两份输入的语法本来就
+      不同：`reserved_ranges` 是**本站配置**，只接受 `起-止`（一个裸数字多半是
+      写错了，拒掉比猜好）；`ip_local_reserved_ports` 是**内核**的格式，单项与
+      区间**都合法**。合成一个函数的后果是其中一侧必然被放宽或者被误拒。
+      两项在这里各自只有一个读者，所以不构成"同一条规矩两份实现"。
+    """
+    out = []
+    for item in (spec or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        a, _, b = item.partition("-")
+        try:
+            lo = int(a)
+            hi = int(b) if b else lo
+        except ValueError:
+            continue                # 内核写的东西读不懂 ⇒ 跳过这一项，不猜
+        out.append((lo, hi))
+    return out
 
 
 def parse_reserved_ranges(spec):
@@ -3547,7 +4400,7 @@ class Config(object):
         #   **静默盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
         #
         # ★ 表的形状只有 `plugin_indexes()` 一处定义、"名字 → 具体哪一个"的判据
-        #   只有 `resolve_plugin_spec()` 一处 —— `sync_plugin_config()` 用的是
+        #   只有 `resolve_plugin_spec()` 一处 —— `sync_plugins()` 用的是
         #   同两份（它手上没有 Config）。同一条规矩两份实现会漂开，而漂开时不会
         #   有任何东西变红。
         self.plugins_by_id, self.plugins_by_name = plugin_indexes(self.plugin_specs)
@@ -3725,7 +4578,7 @@ class Config(object):
           那一处**，别处不要再写一遍（同一条规矩两份实现会漂开，而漂开时不会有
           任何东西变红）。这里只是把本站那两张表递过去。
 
-        ★ `sync_plugin_config()` 用的是同一个函数（它手上没有 Config，自己
+        ★ `sync_plugins()` 用的是同一个函数（它手上没有 Config，自己
           `plugin_indexes()` 建表）。这两个调用方是这一版新长出来的第二条路 ——
           判据分家的话，"安装器认得出、守护进程认不出"就会变成一个新的静默失效。
         """
@@ -3937,8 +4790,7 @@ class Config(object):
         # ★ 阶段 5 加进来的 sinfo / sshare / sacct 是**同一个理由的第三次**：
         #   它们的失败形态在界面上长得像"这个集群没有节点/没有公平份额/没有历史"，
         #   而根因在配置里。错路径必须在启动时报，不能以"集群就是这样"的形状出现。
-        for name in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
-                     "sinfo", "sshare", "sacct"):
+        for name in SLURM_COMMANDS:
             path = getattr(self, name)
             if not path:
                 errors.append("找不到 %s：配置里留空表示自动查找，已在 PATH 与 %s "
@@ -5519,10 +6371,11 @@ class Sessiond(object):
         for p in self.cfg.plugin_problems:
             log.error("插件有问题（已跳过，其余插件照常工作）：%s", p)
         # 「有作业侧、却找不到那份作业脚本」—— 同上，**不是启动错误**。
-        # 会走到的情形：deploy.sh 在插件装上之前跑过，或者拷贝/安装失败。
+        # 会走到的情形：装了包却没有跑过对账，或者上一次编织失败了。
         for s in self.cfg.plugin_job_missing:
             log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
-                      "不了。重跑一次 deploy.sh 会生成它。", s.name, self.cfg.jobs_dir)
+                      "不了。跑一次 `slurmate plugin sync` 会织出它。", s.name,
+                      self.cfg.jobs_dir)
         # 「有一份配置指不到本站任何插件」—— 同上，**不是启动错误**。
         # ★ 后果只是那一份**不生效**（那个插件按清单缺省跑），但它**必须说出来**：
         #   不说的话，管理员的症状是"我明明配了啊"，而日志里一个字都没有。
@@ -7316,7 +8169,8 @@ class Sessiond(object):
           包"）报成"校验不过"。
 
           缓存之后，这个场景在这里就有了名字：`plugin_package_changed`，附带一句
-          "重跑一次 deploy.sh"。要换插件内容，本来就该升版本号 + 重跑部署 ——
+          "重装一次那个插件"。要换插件内容，本来就该升版本号 + 重新 `packer
+          build` 再装 ——
           就地改文件从来不是一条被支持的路径。
 
         ★ **三样事实装在一个缓存里**（而不是"字节数一个、摘要一个"）：它们必须出自
@@ -7401,7 +8255,7 @@ class Sessiond(object):
         if info is None:
             return self._err(9, "plugin_package_changed",
                              "%s@%s 的包在扫描之后不见了 —— 本站的插件包与启动时"
-                             "扫到的那一份对不上，重跑一次 deploy.sh 再试"
+                             "扫到的那一份对不上，重装一次那个插件再试"
                              % (plugin_id, version))
 
         # ★ 上限**先判**：超限的包连读都不读（读它只是白花内存再原样丢掉）。
@@ -7419,7 +8273,7 @@ class Sessiond(object):
         if not r["ok"]:
             return self._err(9, "plugin_package_changed",
                              "%s@%s 的包读不动了（%s）—— 本站的插件包与启动时扫到的"
-                             "那一份对不上，重跑一次 deploy.sh 再试"
+                             "那一份对不上，重装一次那个插件再试"
                              % (plugin_id, version, r["code"]))
         data = r["data"]
         # 与**启动那一刻**的快照逐项比。三样都比：字节数、内容摘要、容器格式。
@@ -7430,7 +8284,7 @@ class Sessiond(object):
                 or r["format"] != info["format"]):
             return self._err(9, "plugin_package_changed",
                              "%s@%s 的包在扫描之后被换过（启动时 %d 字节 / %s，"
-                             "现在是 %d 字节 / %s）—— 重跑一次 deploy.sh 再试"
+                             "现在是 %d 字节 / %s）—— 重装一次那个插件再试"
                              % (plugin_id, version, info["bytes"],
                                 info["digest"][:16], len(data), r["digest"][:16]))
         return self._ok({"id": plugin_id, "version": version,
@@ -8012,7 +8866,7 @@ class Sessiond(object):
         #     给了个本站没有的名字    → 名字打错 / 客户端太新
         #     认得但本站没开          → 站点的一个决定，去找管理员
         #     开着但没有作业侧实现    → 这个插件的部署还不完整（补 job/start.sh
-        #                              再跑一次 deploy.sh），同样是找管理员
+        #                              也就是补上那个包），同样是找管理员
         kind = str(req.get("service_kind") or "").strip()
         if not kind:
             if not cfg.default_plugin:
@@ -8321,36 +9175,53 @@ def main():
                     help="只做配置校验与连通性自检，不启动")
     ap.add_argument("--check-plugins", action="store_true",
                     help="只扫插件目录并校验每个插件包，不读配置、不启动。"
-                         "deploy.sh 在编织作业脚本之前用它 —— 校验规则只有这"
-                         "一份，不在部署脚本里另写一套")
+                         "带 --plugins-dir 时可以体检**还没装进去**的一批包 —— "
+                         "判据与安装器逐字相同（同一个 scan_plugins），不在别处"
+                         "另写一套")
     ap.add_argument("--plugins-dir", default="",
-                    help="配合 --check-plugins / --install-plugins：用这个目录"
-                         "而不是安装目录。部署前的体检用它校验**还没装进去**的"
-                         "那一批包")
-    ap.add_argument("--install-plugins", nargs="+", metavar="包",
+                    help="配合 --check-plugins / --install-plugins / "
+                         "--uninstall-plugins / --sync-plugins：用这个目录而不是"
+                         "安装目录。体检**还没装进去**的那一批包用它")
+    ap.add_argument("--install-plugins", nargs="*", metavar="包",
                     default=None,
                     help="把一个或多个 .splug 装进插件目录，然后退出。"
-                         "`slurmate plugin install` 就是它；deploy.sh 也走这条路。"
+                         "`slurmate plugin install` 就是它。"
                          "验签、同 id 检查都在这里（见 install_plugins）")
+    ap.add_argument("--plugins-src", default=None, metavar="目录",
+                    help="配合 --install-plugins：**目录模式** —— 这次要装的整批包"
+                         "取自这个目录，而站点的插件集合随之对齐（上一次由本模式"
+                         "装过、这次目录里没有了的包会被卸掉）。空目录是合法的，"
+                         "它表示「本站由目录模式管的插件一个都没有」")
     ap.add_argument("--replace-key", default=None, metavar="旧指纹",
                     help="配合 --install-plugins：确认「这个 id 换了签名者」（§2.5）。"
                          "取值必须是**记录里那把旧指纹** —— 确认是一次有依据的动作，"
                          "不是随手加一个开关")
-    ap.add_argument("--sync-plugin-config", action="store_true",
-                    help="把**安装器那份**插件配置与插件目录对齐：目录里没有的插件"
-                         "⇒删掉它的 `<ULID>.conf`；装了而没有配置的⇒写一份"
-                         " `<ULID>.conf`。已有的一个字都不动，手写的（用短名命名的）"
-                         "一概不碰。`slurmate plugin sync` 与 deploy.sh 走这条路"
-                         "（见 sync_plugin_config）")
+    ap.add_argument("--uninstall-plugins", nargs="*", metavar="id",
+                    default=None,
+                    help="把若干插件从本站卸掉（包 + 它那份 `<ULID>.conf` + 它那份"
+                         "作业脚本 + 站点侧那条签名者记录），然后退出。"
+                         "`slurmate plugin uninstall` 就是它。见 uninstall_plugins")
+    ap.add_argument("--all-plugins", action="store_true",
+                    help="配合 --uninstall-plugins（不给 id）：把本站的插件**全部**"
+                         "卸掉。基座卸载走的就是这一条 —— 它在删掉守护进程之前"
+                         "先调这里，于是「一个插件在站点上留下哪几处痕迹」这条"
+                         "判据仍然只有一份实现")
+    ap.add_argument("--sync-plugins", action="store_true",
+                    help="把站点的**两份派生物**（插件配置、作业脚本）与插件目录"
+                         "对齐：目录里没有的插件 ⇒ 删掉它的 `<ULID>.conf` 与"
+                         " `<ULID>.sbatch`；装了而没有配置的 ⇒ 写一份；有作业侧的"
+                         "⇒ 织一份作业脚本。已有的配置一个字都不动，手写的（用短名"
+                         "命名的）一概不碰。`slurmate plugin sync` 走这条路"
+                         "（见 sync_plugins）")
     ap.add_argument("--extract-package", nargs=2, metavar=("包", "包内路径"),
                     help="从 .splug 里取出**一份**文件写到标准输出，然后退出。"
-                         "集群侧读包只有这一个入口 —— 部署脚本用它取插件里的 "
+                         "集群侧读包只有这一个入口 —— 编织那一节用它取插件里的 "
                          "job/start.sh 去织作业脚本，于是'包怎么读'只有 Python "
-                         "这一份实现（见 deploy.sh 的插件那一节）")
+                         "这一份实现")
     ap.add_argument("--version", action="version", version=VERSION)
     args = ap.parse_args()
 
-    # ── 从包里取一份文件（deploy.sh 用）────────────────────────────────────
+    # ── 从包里取一份文件（编织那一节用）────────────────────────────────────
     # ★ 它**不读配置、不连 Slurm、不写日志到标准输出** —— 它的输出是一段二进制，
     #   任何一行多余的打印都会变成"取回来的 job/start.sh 里混进了日志"。
     #   所以它排在 `log_setup()` 与 `Config()` 之前。
@@ -8368,36 +9239,70 @@ def main():
         sys.stdout.buffer.flush()
         return 0
 
-    # ── 装插件（`slurmate plugin install` 与 deploy.sh 用）──────────────────
+    # ── 装插件（`slurmate plugin install` 用）────────────────────────────────
     # ★ 与 --extract-package 一样排在 log_setup() 之前，但理由不同：它的输出是
     #   **给管理员看的一屏**，不是日志。而且它要能在守护进程没配好、Slurm 没装、
     #   甚至配置读不出来的机器上跑 —— 装插件与"这台机器能不能跑作业"无关。
-    if args.install_plugins:
+    if args.install_plugins is not None or args.plugins_src is not None:
+        if args.install_plugins is None:
+            sys.stderr.write("错误: --plugins-src 要配合 --install-plugins 用\n")
+            return 2
         where = args.plugins_dir or default_plugins_dir()
         try:
             return install_plugins(args.install_plugins, where,
-                                   replace_key=args.replace_key)
+                                   replace_key=args.replace_key,
+                                   src_dir=args.plugins_src)
         except ValueError as e:
             sys.stderr.write("错误: %s\n" % e)
             return 1
 
-    # ── 对齐插件配置（`slurmate plugin sync` 与 deploy.sh 用）────────────────
+    # ── 卸插件（`slurmate plugin uninstall` 与基座卸载用）────────────────────
+    # ★ 排在 log_setup() 之前，理由与 --install-plugins 逐字相同：它的输出是
+    #   给管理员看的一屏，而且它要能在一台守护进程没配好、Slurm 没装的机器上跑。
+    # ★ 基座卸载（`deploy.sh --uninstall`）在删掉守护进程**之前**调它，于是
+    #   "一个插件在站点上留下哪几处痕迹"这条判据仍然只有一份实现。
+    if args.uninstall_plugins is not None or args.all_plugins:
+        if args.all_plugins and args.uninstall_plugins:
+            sys.stderr.write("错误: --all-plugins 与 id 只能给一个\n")
+            return 2
+        where = args.plugins_dir or default_plugins_dir()
+        jobs = default_jobs_dir()
+        try:
+            return uninstall_plugins(args.uninstall_plugins or [],
+                                     where, args.config, jobs,
+                                     uninstall_all=args.all_plugins)
+        except ValueError as e:
+            sys.stderr.write("错误: %s\n" % e)
+            return 1
+
+    # ── 对齐站点的两份派生物（`slurmate plugin sync` 用）────────────────────
     # ★ 与 --install-plugins 排在同一个位置（log_setup() 之前）：它**要读配置**，
     #   但**不要**守护进程配好、Slurm 装好。而且它的输出是给管理员看的一屏。
     #
     # ★ 它**排在装完之后**：这一步的前提是"插件目录已经是最终状态"。反过来
     #   （先对齐再装）会给刚删掉的插件重新生成那一份，然后再也删不掉它。
-    if args.sync_plugin_config:
-        where = args.plugins_dir or default_plugins_dir()
+    #
+    # ★★ `--plugins-dir` 指到别处时**不织也不对齐**：那是一条排查路径（把包装到
+    #   一个临时目录里看看），拿它去对齐会把**真正的**站点派生物全删掉 ——
+    #   目录里当然没有本站的那些插件。这个口子在 CLI 那一侧也堵了一次，两处都要
+    #   有：CLI 拦住的是 `slurmate plugin install --plugins-dir`，这里拦住的是
+    #   直接跑守护进程的人。
+    if args.sync_plugins:
+        if args.plugins_dir:
+            sys.stderr.write(
+                "★ --plugins-dir 指向 %s 而不是本站的插件目录 ⇒ **没有**对齐任何"
+                "东西。\n  那是一条排查路径，拿它去对齐会把本站的插件配置与作业"
+                "脚本全删掉。\n" % args.plugins_dir)
+            return 0
         try:
-            return sync_plugin_config(args.config, where)
+            return sync_plugins(args.config, default_plugins_dir())
         except ValueError as e:
             sys.stderr.write("错误: %s\n" % e)
             return 1
 
     log_setup()
 
-    # ── 只扫插件（deploy.sh 用）────────────────────────────────────────────
+    # ── 只扫插件（体检一个目录 / 看本站装了什么）────────────────────────────
     # ★ 它跑的是**守护进程自己的**扫描器，不是在部署脚本里另写一份规则。
     #   两套解释器的后果是"预检放行了、守护进程起不来"（或者反过来），而这个
     #   仓库已经因为同一类分叉吃过一次亏（reserved_ranges 的解析）。
@@ -8422,12 +9327,12 @@ def main():
             print("  ⚠ 站点侧的钥匙记录读不出来 —— 「换了签名者」这件事现在判不了：")
             print("    %s" % str(e).split("\n")[0])
         print("插件目录 %s 里有 %d 个插件：" % (where, len(specs)))
-        # ★★ 这一屏**不读站点配置**（它要能在一台配置读不出来的机器上跑，
-        #   deploy.sh 也拿它预检**还没装进去**的源目录）⇒ 它**不知道**本站把那
-        #   几个插件开成什么样。所以那一列说的是**插件清单里声明的缺省**，
+        # ★★ 这一屏**不读站点配置**（它要能在一台配置读不出来的机器上跑，也
+        #   要能拿它体检**还没装进去**的一批包）⇒ 它**不知道**本站把那几个插件
+        #   开成什么样。所以那一列说的是**插件清单里声明的缺省**，
         #   措辞必须与 `--check` 的「已启用/已停用」（那才是本站状态）分得开。
         #
-        #   ★ 从前两屏都写「启用/停用」—— 同一个词、两件事，而 deploy.sh 里它们
+        #   ★ 从前两屏都写「启用/停用」—— 同一个词、两件事，而部署脚本里它们
         #     前后紧挨着打印。站点写了 `[plugin:sshd] enabled = yes` 而这一屏说
         #     「停用」时，"我明明开了"与"它说停用"之间的那一步排查，方向从第一
         #     步就是错的。（见 KNOWN-ISSUES 的 F39。）
@@ -8441,7 +9346,7 @@ def main():
                 # ★ 这**不是**故障，是一种合法状态：插件可以只有客户端那一半。
                 #   所以措辞是"不能提交"，不是"会失败" —— 它连提交都到不了。
                 #   要给它加作业侧：在**源码树里**补一份 job/start.sh、升版本号、
-                #   重新 `packer build`，再装一次（deploy.sh 永不打包）。
+                #   重新 `packer build`，再装一次（安装器与部署脚本都永不打包）。
                 note = "  ⚠ 包里的负载没有 %s —— 本插件不能提交（合法状态）" \
                        % PLUGIN_JOB_ENTRY
             print("  %-16s %s@%s  %s%s"
@@ -8509,19 +9414,23 @@ def main():
                       "                    包上是  %s\n"
                       "                    这个包**不是安装器装进来的**（有人直接"
                       "把它放进了插件目录）。\n"
-                      "                    重跑一次 deploy.sh 走安装器，或核对这把"
+                      "                    重装一次那个包（走安装器），或核对这把"
                       "新钥匙的来历。"
                       % (_rec.get("fingerprint") or "（无签名）",
                          _signer or "（无签名）"))
-        # deploy.sh 要逐个处理这些包，所以最后给一行**机器可读**的。
-        # 用制表符而不是空格：短名与这三列都不允许出现制表符。
+        # 最后一屏给一行**机器可读**的（人看上面那一屏）。用制表符而不是空格：
+        # 短名与这三列都不允许出现制表符。
         #
-        # ★ 四列。第 2、3 列是**跨脚本契约**（deploy.sh 按它们找包、给作业脚本
-        #   命名），第 4 列回答"要不要取作业侧那一份"：
+        # ★ 四列：
         #
         #     <短名>\t<包路径>\t<ULID>\t<has_job|no_job>
         #
-        #   ★ 第 4 列为什么是**显式的一列**、而不是让 deploy.sh 去试着取一次
+        #   ★★ **它现在没有仓内的读者了**（v0.12 阶段 4）：从前 `deploy.sh` 靠这
+        #     一行找包、给作业脚本命名，而插件那一半已经搬进安装器 —— 安装器是
+        #     Python，直接调 `scan_plugins()`，不经过这一屏。留着它的理由是"从
+        #     shell 里枚举本站的插件"这件事仍然要有个出口。★ 要删就删。
+        #
+        #   ★ 第 4 列为什么是**显式的一列**、而不是让读者去试着取一次
         #     `job/start.sh` 看退出码：「没有作业侧」是**合法状态**，而"取不出来"
         #     还可能是包坏了。用一个退出码同时表达这两件事，就是把两种后果不同
         #     的情况并成一条路 —— 而正确的那一侧（"跳过、不织"）恰好是**静默**的。
@@ -8540,15 +9449,40 @@ def main():
         return 1
 
     errors = cfg.validate()
-    if errors:
+
+    # ★★ `--check` 的退出码分两档（v0.12 阶段 4）：**2 = 这台机器缺东西**，
+    #   1 = 这份配置写错了。判据与整段理由写在 `machine_selfcheck()` 上面 ——
+    #   一句话：部署脚本要在**装任何文件之前**就知道该不该停，而它分得清这两档
+    #   才做得到那件事。
+    machine = machine_selfcheck(cfg) if args.check else []
+
+    if errors and not args.check:
         for e in errors:
             log.error("配置错误: %s", e)
         return 1
 
     if args.check:
         is_root = os.geteuid() == 0
-        print("配置 OK: %s" % args.config)
+        # ★ 机器级与配置级**都打出来**，而不是碰到第一条就退出：它们是**独立的**
+        #   两组事实（"这台机器缺 sbatch" 与 "cluster_cidr 是空的" 可以同时成立），
+        #   而分两次跑才能看全，正是自检最不该有的体验。
+        for _m in machine:
+            print("  ✗ %s" % _m)
+        for _e in errors:
+            print("  配置错误: %s" % _e)
+        if machine or errors:
+            # ★ 有错也把这一屏打完，而不是碰到第一条就退出：机器级与配置级是
+            #   **互相独立**的两组事实（"这台机器缺 sbatch" 与 "cluster_cidr 还
+            #   空着" 可以同时成立），分两次跑才能看全正是自检最不该有的体验。
+            print("配置 %s（上面那两条互相独立，一起修更快）：" % args.config)
+        else:
+            print("配置 OK: %s" % args.config)
         print("  端口池        : %d-%d" % (cfg.port_start, cfg.port_end))
+        # ★ 端口池与本机保留端口的重叠（v0.12 阶段 4 从 deploy.sh 搬进来）。
+        #   一条 ⚠，**不动退出码** —— 它只意味着作业偶尔要多试几个候选端口。
+        _rp = reserved_ports_warning(cfg)
+        if _rp:
+            print("  ⚠ %s" % _rp)
         print("  socket        : %s" % cfg.socket_path)
         print("  数据库        : %s" % cfg.db_path)
         print("  作业脚本目录  : %s" % cfg.jobs_dir)
@@ -8574,11 +9508,12 @@ def main():
         for _p in cfg.plugin_problems:
             print("  ⚠ 插件有问题（已跳过，其余插件照常工作）：%s" % _p)
         # 「有作业侧、却找不到那份作业脚本」—— 同样是**报告但不算错误**。
-        # 它说明这个插件的部署不完整（deploy.sh 跑在插件装上之前？拷贝失败了？），
-        # 而症状是提交时被拒。不说出来的话，运维只会看到"本站没有开启"之类
-        # 与真正原因隔了一层的话。修法是重跑一次 deploy.sh。
+        # 它说明这个插件的部署不完整（装了包却没跑过对账？编织失败了？），而症状是
+        # 提交时被拒。不说出来的话，运维只会看到"本站没有开启"之类与真正原因隔了
+        # 一层的话。修法是跑一次 `slurmate plugin sync`。
         for _s in cfg.plugin_job_missing:
-            print("  ⚠ 插件「%s」的作业脚本不在：%s（重跑一次 deploy.sh 会生成它）"
+            print("  ⚠ 插件「%s」的作业脚本不在：%s（跑一次 `slurmate plugin "
+                  "sync` 会织出它）"
                   % (_s.name, os.path.join(cfg.jobs_dir, _s.id + ".sbatch")))
         # 「有一份配置指不到本站任何插件」—— 同上，**报告但不算错误**。
         # ★ 这一档是 v0.12 阶段 2 从"硬错误"降下来的（见
@@ -8597,7 +9532,8 @@ def main():
             print("      这是合法状态：守护进程照常启动，已有会话照常能查、能停，")
             print("      只是没有可提交的服务。装插件是把它**打包**（作者机器上，")
             print("      `packer build`）然后 `slurmate plugin install <包>`，或者")
-            print("      把包放进 deploy.sh 的 --plugins-src 目录再跑一次部署。")
+            print("      把 .splug 包放进一个目录，然后："
+                  " sudo slurmate plugin install --from <那个目录>")
             print("      见 plugins/README.md；插件落地在 %s。" % cfg.plugins_dir)
         for _p in sorted(cfg.plugins.values(), key=lambda c: (c.name, c.spec.id)):
             print("    %-12s %s  默认 %s 核 / %s / %s%s"
@@ -8643,8 +9579,16 @@ def main():
         # 控制器与版本：集群那一屏最上面两格，而"连不上控制器"是所有故障里
         # 最该先排除的那一个 —— 放在 --check 的第一段里，而不是让人去开客户端。
         _h = slurm.controller_health()
+        # ★ 这一行是**唯一**说"控制器此刻可不可达"的地方（部署脚本从前自己
+        #   `scontrol ping` 一次 —— 那是同一件事的第二份实现，v0.12 阶段 4 删了）。
+        #   所以后果也要在这里说完：它不是启动错误（起得来），但每一件要让
+        #   Slurm 动起来的事都会失败。
         print("  控制器        : %s" % ("在线" if _h["up"] else
-              "【连不上】scontrol ping 没回 UP —— 提交、心跳、查询都会失败"))
+              "【连不上】scontrol ping 没回 UP —— 提交、心跳、查询都会失败。\n"
+              "                  部署能完成；守护进程的 job_state() 会把这种情况"
+              "判为 JOB_UNKNOWN\n"
+              "                  并保持现状，也就是**不会误释放会话**，"
+              "但仍建议先修好 Slurm。"))
         _v = slurm.slurm_version()
         print("  Slurm 版本    : %s" % (_v if _v else "【读不到】sinfo -V 失败"))
         table = slurm.partition_table()
@@ -8715,6 +9659,15 @@ def main():
         # 退出码非零才会真的拦住服务。交叉核对失败时拒绝启动，与
         # Sessiond.start() 里的判断是同一条 —— 两处都要有，因为 --check
         # 才是 systemd 看到的那一道。
+        # ★★ 次序是**承重的**，别把它当成随手排的：**机器级在最前**（2 比 1
+        #   更根本 —— 一台不是登录节点的机器上，"配置写错了"这句话没什么用，
+        #   而部署脚本要靠这个数决定"现在就停"还是"装完再判"）。
+        #   然后才是配置级（`validate()` 那一串），最后才是 cidr 交叉核对
+        #   —— 它其实也是配置级，只是判它要问 Slurm，所以排在后面。
+        if machine:
+            return 2
+        if errors:
+            return 1
         if cidr_errors:
             print("配置检查未通过：cluster_cidr 与 Slurm 的节点地址对不上（见上）")
             return 1

@@ -96,7 +96,7 @@ def sessiond_path():
       不认**，症状要到用户点提交时才出现。
 
     所以 `plugin install` 只是一层壳：找到那份脚本、把参数原样转发过去。
-    与 deploy.sh 调 `--check-plugins` 是同一个路子（它也是直接跑那份脚本）。
+    与部署脚本调 `--check` 是同一个路子（它也是直接跑那份脚本）。
 
     ★ 覆盖用的环境变量叫 `SLURMATE_SESSIOND`：部署脚本把守护进程装在
       `<prefix>/sbin/slurmate-sessiond`，而前缀可以改，所以留一个出口。
@@ -171,7 +171,15 @@ def cmd_plugin_install(args):
               "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
+    if not args.files and not args.from_dir:
+        print("要给一个或多个包，或者用 --from <目录>。\n"
+              "  sudo slurmate plugin install foo-1.2.0.splug\n"
+              "  sudo slurmate plugin install --from /srv/slurmate-pkgs", file=sys.stderr)
+        return EXIT_USAGE
+
     argv = [sys.executable, exe, "--install-plugins"] + list(args.files)
+    if args.from_dir:
+        argv += ["--plugins-src", args.from_dir]
     if args.plugins_dir:
         argv += ["--plugins-dir", args.plugins_dir]
     if args.replace_key:
@@ -195,10 +203,10 @@ def cmd_plugin_install(args):
     #   （目录里当然没有它们）。这个口子必须在这里堵住，因为在那边堵不住 ——
     #   守护进程只知道"你给了我一个目录"，不知道那是本站还是别处。
     if args.plugins_dir:
-        print("★ 装到了 %s 而不是本站的插件目录 ⇒ **没有**动站点配置。"
+        print("★ 装到了 %s 而不是本站的插件目录 ⇒ **没有**动站点的那两份派生物。"
               % args.plugins_dir, file=sys.stderr)
         return 0
-    sync = [sys.executable, exe, "--sync-plugin-config"]
+    sync = [sys.executable, exe, "--sync-plugins"]
     if args.config:
         sync += ["--config", args.config]
     try:
@@ -207,10 +215,10 @@ def cmd_plugin_install(args):
         print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if src != 0:
-        # ★ 包装好了，而站点配置没对上。**分开说**：把这两件事混成一句"装插件
-        #   失败"，管理员会去重装那个已经装好了的包。
-        print("★ 插件包**已经装好**了，但站点配置没能对齐（原因见上）——"
-              "在配置对好之前，守护进程可能起不来。", file=sys.stderr)
+        # ★ 包装好了，而站点那两份派生物没对上。**分开说**：把这两件事混成一句
+        #   "装插件失败"，管理员会去重装那个已经装好了的包。
+        print("★ 插件包**已经装好**了，但站点的配置/作业脚本没能对齐（原因见上）"
+              "—— 在它们对上之前，这个插件可能起不来或提交不了。", file=sys.stderr)
         return src
     # ★ 装好了、配置也对齐了 ⇒ 让守护进程**重读一遍**（热重载）。
     #   这一步从前不存在：那时候装完插件要**再跑一次 deploy.sh**，而它是
@@ -219,16 +227,61 @@ def cmd_plugin_install(args):
     return 0
 
 
-def cmd_plugin_sync(args):
-    """`slurmate plugin sync` —— 把插件配置与插件目录对齐。
+def cmd_plugin_uninstall(args):
+    """`slurmate plugin uninstall <id>…` —— 把插件从本站卸掉。
 
-    ★ 它**不装也不卸任何包**，只对账：某个插件的配置在而包没了 ⇒ 删掉它那一份
-      （**只删安装器起的名字**，即 `<ULID>.conf`）；装了而没有配置的 ⇒ 写一份
-      `<ULID>.conf`。见守护进程的 `sync_plugin_config()`。管理员直接 `rm` 掉一个
-      `.splug` 之后，就是跑这一条（或者跑一次 deploy.sh，它也会跑）。
+    ★ 卸掉的四处痕迹（包 / 它那份配置 / 它那份作业脚本 / 站点侧那条签名者记录）
+      由守护进程的 `uninstall_plugins()` 一处说了算 —— 与安装对称，都是"唯一
+      入口"。CLI 这一层只负责找到那份脚本、把参数转过去。
     """
     if os.geteuid() != 0:
-        print("对齐插件配置要写 %s.d/，所以要 root：\n"
+        print("卸插件要动 <prefix>/share/slurmate/ 与 %s.d/，所以要 root：\n"
+              "  sudo slurmate plugin uninstall %s"
+              % (args.config or "/etc/slurmate/slurmate.conf",
+                 " ".join(args.ids) or "--all"), file=sys.stderr)
+        return EXIT_REJECTED
+    if not args.ids and not args.all:
+        print("要给一个或多个插件的 id，或者用 --all 卸掉全部。\n"
+              "  看本站装了哪些：slurmate plugins", file=sys.stderr)
+        return EXIT_USAGE
+
+    exe = sessiond_path()
+    if not os.path.isfile(exe):
+        print("找不到守护进程脚本 %s —— 卸载的判据在它里面。\n"
+              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+              "指过去；\n"
+              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+        return EXIT_NOTFOUND
+
+    argv = [sys.executable, exe, "--uninstall-plugins"] + list(args.ids)
+    if args.all:
+        argv += ["--all-plugins"]
+    if args.plugins_dir:
+        argv += ["--plugins-dir", args.plugins_dir]
+    if args.config:
+        argv += ["--config", args.config]
+    try:
+        rc = subprocess.run(argv).returncode
+    except OSError as e:
+        print("启动卸载器失败（%s）：%s" % (exe, e), file=sys.stderr)
+        return EXIT_NODAEMON
+    if rc == 0:
+        # ★ 卸掉一个插件会删掉它那一份配置 ⇒ 让守护进程重读一遍（见 reload_daemon）。
+        #   不说这一句的话，表现是"卸了但它好像还在" —— 直到下次重启才消失。
+        reload_daemon()
+    return rc
+
+
+def cmd_plugin_sync(args):
+    """`slurmate plugin sync` —— 把站点的两份派生物与插件目录对齐。
+
+    ★ 它**不装也不卸任何包**，只对账：某个插件的那份配置（`<ULID>.conf`）或作业
+      脚本（`<ULID>.sbatch`）在而包没了 ⇒ 删掉；装了而没有配置的 ⇒ 写一份；有
+      作业侧的 ⇒ 织一份作业脚本。见守护进程的 `sync_plugins()`。管理员直接
+      `rm` 掉一个 `.splug` 之后，就是跑这一条。
+    """
+    if os.geteuid() != 0:
+        print("对齐要写 %s.d/ 与作业脚本目录，所以要 root：\n"
               "  sudo slurmate plugin sync" % (args.config
                                                or "/etc/slurmate/slurmate.conf"),
               file=sys.stderr)
@@ -242,7 +295,7 @@ def cmd_plugin_sync(args):
               "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
-    argv = [sys.executable, exe, "--sync-plugin-config"]
+    argv = [sys.executable, exe, "--sync-plugins"]
     if args.plugins_dir:
         argv += ["--plugins-dir", args.plugins_dir]
     if args.config:
@@ -755,11 +808,11 @@ def cmd_plugins(args):
         print("这是合法状态：守护进程照常运行，已有会话照常能查、能停，")
         print("只是没有可提交的服务。装插件：")
         print("  sudo slurmate plugin install <作者发布的 .splug>")
-        print("或者把包放进 deploy.sh 的 --plugins-src 目录，再跑一次 deploy.sh。")
+        print("  或者从一个目录整批对齐：sudo slurmate plugin install --from <目录>")
         # ★ 这里从前写的是"把插件目录放进 plugins/" —— 那是**源码树布局**时代的
         #   说法，现在放进去的东西会（正确地）被拒绝：站点上的插件只能是一个包。
         print("站点上的插件只能是**一个包文件**（.splug）：源码树放上去会被拒绝，")
-        print("包要在作者那边用 packer build 打出来（deploy.sh 永不打包）。")
+        print("包要在作者那边用 packer build 打出来（安装器与部署脚本都永不打包）。")
         return 0
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
@@ -1037,10 +1090,14 @@ def build_parser():
     p = add("plugin", None, "管理本站的插件（装包；要 root）")
     psub = p.add_subparsers(dest="plugin_cmd")
     pi = psub.add_parser("install", help="把作者发布的 .splug 装到本站")
-    pi.add_argument("files", nargs="+", metavar="包",
+    pi.add_argument("files", nargs="*", metavar="包",
                     help="一个或多个 .splug 文件（作者 `packer build` 的产物）")
+    pi.add_argument("--from", dest="from_dir", default=None, metavar="目录",
+                    help="**目录模式**：这次要装的整批包取自这个目录，而站点的"
+                         "插件集合随之对齐 —— 上一次由本模式装过、这次目录里没有"
+                         "了的包会被卸掉。空目录合法（= 本站一个插件都没有）")
     pi.add_argument("--plugins-dir", default="",
-                    help="装到这个目录而不是安装目录（排查用）")
+                    help="装到这个目录而不是安装目录（排查用；此时不动站点配置）")
     pi.add_argument("--replace-key", default=None, metavar="旧指纹",
                     help="确认「这个 id 换了签名者」（§2.5）。取值必须是记录里"
                          "那把旧指纹 —— 确认要有依据，不是随手加一个开关")
@@ -1049,9 +1106,24 @@ def build_parser():
                          "（/etc/slurmate/slurmate.conf）")
     pi.set_defaults(func=cmd_plugin_install)
 
-    ps = psub.add_parser("sync", help="把插件配置与插件目录对齐（不装不卸）")
+    pu = psub.add_parser("uninstall", help="把插件从本站卸掉")
+    pu.add_argument("ids", nargs="*", metavar="id",
+                    help="插件的 id（26 位 ULID —— 是**身份**，不是短名）。"
+                         "看本站装了哪些：`slurmate plugins`")
+    pu.add_argument("--all", action="store_true",
+                    help="卸掉本站的**全部**插件（不给 id）")
+    pu.add_argument("--plugins-dir", default="",
+                    help="用这个插件目录而不是安装目录（排查用）")
+    pu.add_argument("--config", default="",
+                    help="站点配置文件。省略 = 用守护进程的缺省路径"
+                         "（/etc/slurmate/slurmate.conf）")
+    pu.set_defaults(func=cmd_plugin_uninstall)
+
+    ps = psub.add_parser(
+        "sync", help="把站点的两份派生物（插件配置、作业脚本）与插件目录对齐")
     ps.add_argument("--plugins-dir", default="",
-                    help="用这个插件目录对账而不是安装目录（排查用）")
+                    help="用这个插件目录对账而不是安装目录（排查用；此时什么都"
+                         "不对齐）")
     ps.add_argument("--config", default="",
                     help="站点配置文件。省略 = 用守护进程的缺省路径"
                          "（/etc/slurmate/slurmate.conf）")
