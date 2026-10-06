@@ -359,6 +359,14 @@ class FakeBackend extends Backend {
     this._noPluginsOp = false;
     /** 造出「有 plugins 这个 op，但不会分发」（v0.5 的守护进程）。 */
     this._noDistribute = false;
+    /**
+     * 假站点报出来的**站点级插件问题**（`op_plugins` 顶层那个 `problems`）。
+     *
+     * ★ 默认空的，而且**在 `_noDistribute` 那一档里一律不发**：那个字段是 v0.11
+     *   才有的，v0.5 的守护进程报不出来 —— 让它照发就等于演了一个不存在的版本。
+     *   见 `debugPluginProblems` 与 `_dispatch` 的 `case 'plugins'`。
+     */
+    this._pluginProblems = [];
     /** 打好的包，按 `(id@版本)` 缓存 —— 见 _pkgOf。 */
     this._pkgCache = new Map();
   }
@@ -590,6 +598,9 @@ class FakeBackend extends Backend {
         //   `debugOldDaemon` 走的是上面那条 `unknown_op`，而这一条是更细的一档：
         //   有 `plugins` 却没有 `limits`（v0.5 的守护进程）。
         if (this._noDistribute) {
+          // ★ 这一档**连 `problems` 也不发** —— 它是 v0.11 才有的字段，v0.5 的
+          //   守护进程报不出来。少发它是这一档的全部意义（"字段缺席"这条路
+          //   必须有人走），照发就等于演了一个不存在的版本。
           return ok({
             plugins: this._sitePlugins().map((p) => ({
               id: p.id, name: p.name, version: p.version, title: p.title,
@@ -614,6 +625,17 @@ class FakeBackend extends Backend {
             })()),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
+          // ── ★★ 站点级的插件问题（账本 **F22**）───────────────────────────
+          //
+          // 那些**没能加载**的站点侧包与原因。真守护进程那边它是
+          // `cfg.plugin_problems` 原样倒出来的一组字符串（`scan_plugins` 造），
+          // 而它的形状是给**终端**的：多行、带站点上的路径。
+          //
+          // ★ 假站点默认一个都报不出来 —— 它的分发源是仓库里那两个真插件，
+          //   都装得好好的。要演这一格只能由用例**造**（`debugPluginProblems`），
+          //   而造出来的字符串必须与真守护进程那几个分支的措辞同形，否则界面
+          //   那一格被演的就不是真会发生的样子（〈夹具要比真集群脏〉）。
+          problems: [...this._pluginProblems],
           // 假站点自报的那一组。★ 用展开而不是逐字段写：这个对象与 DEMO_SITE_LIMITS
           //   必须是**同一组数**，写两遍就是两个会漂的东西。
           limits: { ...DEMO_SITE_LIMITS },
@@ -805,6 +827,25 @@ class FakeBackend extends Backend {
   debugOldDistribute(on = true) { this._noDistribute = on; }
 
   /**
+   * 让假站点报出**站点级的插件问题**（`op_plugins` 顶层的 `problems`，账本 F22）。
+   *
+   * ★★ **必须传参**，这里没有默认值 —— 与 `debugForeignKeeper` 那种"不传就造一个
+   *   演示值"的开关**故意不同**。理由是这一格说的是**站点上的一个事实**
+   *   （"本站有个包坏了、坏在哪"），而假站点**没有**这个事实：它的分发源是仓库里
+   *   那两个真插件，都装得好好的。给它编一条默认值，就是在界面上说一句关于一个
+   *   不存在的站点的假话 —— 而这一格的全部价值恰恰是"让运维看到**真的**诊断"。
+   *
+   *   要演它，就从 DevTools 里 `window.slurmate.debug('plugin-problems', '…')`，
+   *   串照 `cluster/slurmate-sessiond` 的 `scan_plugins()` 那几条分支的措辞写
+   *   （多行、带站点上的路径 —— 界面那边是 `white-space: pre-wrap`，原样显示）。
+   *
+   * ★ 传空数组 = 清掉。
+   */
+  debugPluginProblems(list) {
+    this._pluginProblems = (list || []).map((s) => String(s));
+  }
+
+  /**
    * 让某一份的**包里**多一个**超过单文件上限**的文件（造"这一份装不上"）。
    *
    * ★ v0.6 时它是往 `files` 那份清单里加一条假的（清单里报一个装不下的文件）；
@@ -838,6 +879,7 @@ class FakeBackend extends Backend {
     this._siteNoJob.clear();
     this._noPluginsOp = false;
     this._noDistribute = false;
+    this._pluginProblems.length = 0;
     this._bloatPlugin = null;
     this._pkgCache.clear();
     this._rateLimitBurst = 0;

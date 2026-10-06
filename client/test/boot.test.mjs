@@ -4768,3 +4768,112 @@ test('★★【断开】是【临时离开】的反面：它真的把作业停�
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });
+
+// ── v0.11 阶段 2+3 · 第三层：站点侧的插件问题与同名 ─────────────────────────
+//
+// ★ 这四条的判据都是**那条线通没通**，不是某个函数的返回值。账本 F35 的教训：
+//   `audit()` 算出 `allUnknown`、用例绿着，而那一句提示**永远到不了界面** ——
+//   因为 `app:pluginData` 的回包里根本没有那个字段。**变异打红的是函数，不是线。**
+
+test('★★ F22：站点报的 `problems` 必须一路到界面（算出来了没送出去 = 又一个 F35）', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+
+  // 站点上有一条**没能加载**的包。文案照守护进程 `scan_plugins()` 那一条的形状写
+  // （多行、带**站点上的**路径）—— 界面原样显示它，一个字都不改写。
+  const line = '/opt/slurmate/plugins/old：这是一个目录，不是一个插件包。'
+    + '站点上的插件只能是 *.splug 文件 —— 它既不会被分发、也不会被读到。';
+  idx._test.getBackend().debugPluginProblems([line]);
+
+  // ★ 走**真的那条线**：`op_plugins` → `loadPlugins()` → `sitePlugins` →
+  //   `pluginsView()` → 回包。分段断言（比如直接读 `getPluginsView()`）会漏掉
+  //   "中间某一节把它丢了" —— 而那正是 F35 的形状。
+  const r = await invoke('app:partitions');
+  assert.deepEqual(r.plugins.problems, [line],
+    '★★ 站点报的 problems 必须出现在递到界面的那份视图里。'
+    + `实际拿到 ${JSON.stringify(r.plugins.problems)}。少了它，运维在客户端上看到的`
+    + '仍然只是「本站没有这个插件」，而真相是「本站有个包装坏了」——'
+    + '**排查方向从第一步就是错的**。');
+});
+
+test('★★ 同名不同 id 的两条站点插件都进视图 —— 按短名收表会静默丢一条', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+
+  // ★ 造"**同名、不同 id**"的现场：短名撞上仓库里真的 code-server，id 是假站点
+  //   自己那一个（`DEMO_EXTRA_ID`）。v0.11 起这是**合法**的一种站点 ——
+  //   两个不同的插件可以同名，配置里用 `[plugin:<id>]` 各配一块。
+  idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
+
+  await withSitePlugins([], async () => {
+    const r = await invoke('app:partitions');
+    const cs = (r.plugins.missing || []).filter((m) => m.name === 'code-server');
+    assert.equal(cs.length, 2,
+      `★★ 站点报了两条 code-server（两个 id），本机一条都没有 ⇒ 两条都该在 missing 里。`
+      + `实际 ${cs.length} 条：${JSON.stringify(cs)}。`
+      + '按**短名**收表的话，后一条会盖掉前一条 —— 界面上凭空少一个插件，'
+      + '而没有任何一句话解释它去哪了（`missing` 也用的是同一张表，所以它同样少报）。');
+    assert.equal(new Set(cs.map((x) => x.id)).size, 2,
+      '前置：这两条的 id 必须真的不同（同 id 是另一件事，见 scan_plugins）');
+  });
+});
+
+test('★★ 短名有歧义时**不替用户挑一个**，而是把那几个 id 摆出来', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+  idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
+
+  // ★ 先让 `sitePlugins` 带上那两条（它来自**连接时**的 `op:plugins`，不是现算的）。
+  await invoke('app:partitions');
+
+  const before = noticesOf().length;
+  const r = await invoke('app:start', {}, 'code-server');
+  assert.equal(r.ok, false, '★★ 短名指不出是哪一个 ⇒ 必须在**提交之前**拦下，不许挑一个');
+  const said = noticesOf().slice(before).map((n) => n.text).join('\n');
+  assert.match(said, /都叫/, `要说清是**短名撞了**（不是"不认识这个插件"）：${said}`);
+  assert.match(said, /01M2/,
+    `★★ 而且要把**那几个 id** 摆出来 —— 用户/管理员只有靠它才分得清是哪两个：${said}`);
+});
+
+test('★★ 站点版本漂移那句话按 **id** 认亲 —— 短名撞了的话它会指错对象', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+
+  // ★ 池里装着**另一个**插件：短名也叫 code-server，但 id 与站点报的那个不是一回事
+  //   —— v0.11 起这是合法的（两个不同的插件可以同名，配置里用 id 各配一块）。
+  const mine = '01M2JKM1M1M1M1M1M1M1M1M1M9';
+  setSitePlugins([]);                       // 先清干净：池里只留下面这一个
+  putSitePlugin({ id: mine, name: 'code-server', version: '2.0.0' });
+
+  // 站点报的是**它那个** code-server（仓库里的真插件，1.0.0）。
+  await invoke('app:partitions');
+
+  const before = noticesOf().length;
+  await invoke('app:start', {}, 'code-server');
+  const said = noticesOf().slice(before).map((n) => n.text).join('\n');
+
+  assert.doesNotMatch(said, /站点那边/,
+    '★★ 本机这一份与站点报的那个 code-server 是**两个不同的插件**（id 不同），'
+    + '只是短名撞了。按**短名**认亲的话，这里会拿站点那条的版本号说出'
+    + '「站点那边是 1.0.0 版，本机这一份是 2.0.0 版」—— 那是一句**指错对象**的话，'
+    + '它把用户指去升级一个本来没问题的插件。'
+    + `实际说了：${said}`);
+  // ★ 这条判据**不是**在说"没跑到也对"：它要真的走到 `warnVersionDrift` 那一格，
+  //   而"走到了"由变异验证回答 —— 把那一处改回按短名找，这条当场红。
+});

@@ -755,20 +755,36 @@ function withGresCatalogLabels(cat) {
  *   "只画客户端自己认识、且用户没关掉的那些"，也就是这次升级之前的行为。
  *   为一件"你的服务端版本旧"弹一条 error，是把升级的节奏问题说成故障。
  *
- * @returns {Promise<{ok:boolean, plugins:Array|null, error:string|null}>}
+ * ★★ **`problems` 必须一路带出去**（账本 F22）：它是"本站还有几个包没能加载、
+ *   为什么"，与 `plugins`（**能用的**那些）是两件事。守护进程那一侧加了它、
+ *   也写清了"加了这个字段就必须有人读它"—— 在**这里**丢掉的话，界面看到的仍然
+ *   只是「本站没有这个插件」，而真相是「本站有两个、因为撞名/撞 id 没被加载」，
+ *   运维的排查方向从第一步就是错的。**算出来了没送出去 = F35 那个形状。**
+ *
+ *   缺失（老守护进程不报这个键）按**空**处理，不按"未知"：客户端对"本站的包
+ *   有没有装坏"这件事**没有别的来源**，画一句"本站可能有插件没加载"是凭空
+ *   造一个怀疑；而真有问题时新守护进程会报出来。
+ *
+ * @returns {Promise<{ok:boolean, plugins:Array|null, problems:Array|null, error:string|null}>}
  */
 async function loadPlugins() {
   let resp;
   try {
     resp = await backend.rpc({ op: 'plugins' });
   } catch (e) {
-    return { ok: false, plugins: null, error: e.message };
+    return { ok: false, plugins: null, problems: null, error: e.message };
   }
   if (!resp || !resp.ok) {
     const detail = (resp && resp.error && resp.error.detail) || '控制节点没有说明原因';
-    return { ok: false, plugins: null, error: detail };
+    return { ok: false, plugins: null, problems: null, error: detail };
   }
-  return { ok: true, plugins: (resp.data && resp.data.plugins) || [], error: null };
+  const d = resp.data || {};
+  return {
+    ok: true,
+    plugins: d.plugins || [],
+    problems: Array.isArray(d.problems) ? d.problems : [],
+    error: null,
+  };
 }
 
 /**
@@ -786,7 +802,11 @@ async function refreshPartitions() {
   const p = await loadPlugins();
   // null（问到但站点没返回清单 / 问不到）与 []（站点真的一个插件都没有）不同，
   // 但对界面是同一件事：没有站点信息可用。留 null 让调用方能分辨。
-  sitePlugins = p.ok ? { plugins: p.plugins || [] } : null;
+  //
+  // ★ `problems` 与 `plugins` 一起收着走：它是**同一个应答**里的两半（能用的
+  //   与没能加载的），分两处存会让它们来自两个时刻 —— 而 `pluginsView()` 一次
+  //   要把两半都画出来。
+  sitePlugins = p.ok ? { plugins: p.plugins || [], problems: p.problems || [] } : null;
   return r;
 }
 
@@ -951,9 +971,17 @@ function pickPlugin(name) {
  *   才发明确值。
  */
 function pluginsView() {
+  // ★★ 收表的键是 **`id`，不是短名**。短名**不再是唯一的**（v0.11 放开：两个
+  //   不同的插件可以同名，站点里用 id 各配一块），按短名收会让后一条**静默盖掉**
+  //   前一条 —— 于是界面上少一个插件、而少掉的那个恰好是"站点开着、本机也装着"
+  //   的那一个时，用户面对的是"按钮凭空没了一个"，没有任何一句话解释它去哪了。
+  //   `missing` 那一列也从这张表来，所以它同样会**少报一个**。
+  //
+  //   按 id 收之后，池里同一个 id 的**多个版本**仍然都拿到同一个站点条目 ——
+  //   这正是 `siteVersion` 那一格要的（站点报的是那个 id 的版本）。
   const site = new Map(((sitePlugins && sitePlugins.plugins) || [])
-    .filter((x) => x && typeof x.name === 'string')
-    .map((x) => [x.name, x]));
+    .filter((x) => x && typeof x.id === 'string')
+    .map((x) => [x.id, x]));
   const siteKnown = Boolean(sitePlugins && Array.isArray(sitePlugins.plugins));
 
   // ★ 一张表，每条带**两个**开关，界面自己决定怎么画。
@@ -968,7 +996,9 @@ function pluginsView() {
   //   硬塞进去就把两件事糊在一起了（`test/renderer.test.mjs` 正钉着那四句话）。
   const records = registry.list();
   const plugins = records.filter((p) => p.active !== false).map((plugin) => {
-    const s = site.get(plugin.name) || null;
+    // 按 **id** 取站点那一份 —— 短名会撞（见上面收表那段），而"站点报的这条
+    // 说的是池里哪一个"只能由身份回答。
+    const s = site.get(plugin.id) || null;
     // 本机开关按 **id** 记 —— 理由见 app:setPluginEnabled。
     const locallyEnabled = config.pluginEnabledLocally(cfg, plugin.id);
     // 站点清单**拿不到**时（守护进程太旧，没有这个 op）按"站点没说"算 true。
@@ -1078,7 +1108,26 @@ function pluginsView() {
     // 池里同 `(id, 版本)` 撞了（两个不同的东西在抢同一个身份）而被全部跳过的，
     // 以及插件目录里扫到的坏文件。它们被跳过了，客户端照常工作 —— 但必须说出来，
     // 否则用户面对的症状只是"加了插件它就是不生效"。
+    //
+    // ★ 与下面那个 `problems` **必须分开**，它们是**两侧**的同一类事：
+    //   这一列是**本机池**里的（客户端自己扫出来的），`problems` 是**站点**报的
+    //   （守护进程加载不了的包）。合成一列的话，"是本站装坏了还是我这儿坏了"
+    //   就没有答案 —— 而两者的出路完全不同（找管理员 vs 重新同步）。
     errors: registry.errors,
+    // ── ★★ 站点级的插件问题（账本 **F22**）────────────────────────────────
+    //
+    // 那些**没能加载**的站点侧包（同 id 两个包、不是一个包、清单读不出来……）
+    // 与原因。`plugins` 那一列里每一条都是**能用的**，这里说的是"另外还有些
+    // 用不了的、以及为什么"。
+    //
+    // ★ 守护进程早就把它算出来并放进应答了（v0.11 第一层），而**这条路从前是
+    //   断的**：`loadPlugins()` 只取 `d.plugins`，于是运维在客户端上看到的仍然
+    //   只是「本站没有这个插件」—— 排查方向从第一步就是错的。
+    //
+    // ★ 界面**必须画它**（见 panel.js 的 renderPlugins）：加了这个字段而没有人
+    //   读，就是又一个 F35（算出来了、没送出去）。所以这条链的每一节都有一条
+    //   打在**线上**的用例，而不只是打在函数返回值上。
+    problems: (sitePlugins && sitePlugins.problems) || [],
     // 池**在哪** —— 站点分发那一栏用它判断"要不要画那一块"（见 panel.js 的
     // renderSitePlugins）。它在这里而不是在 `site` 里面：**站点连不上时那一栏
     // 照样得画**，因为池里可能已经有东西了。
@@ -1961,11 +2010,31 @@ async function startSession(resources, serviceKind) {
   //   `bad_service_kind` 也行，但那要花掉一整趟往返，而且用户看到的是一个
   //   关于"服务种类"的错误、而他刚才点的可能是一个界面上的按钮。
   //
-  // ★ 提交时只知道**短名**（配置块名、界面按钮上那个）。短名是站点内唯一的，
-  //   而本机可能并存同一个插件的多个版本 —— 取版本最高的那一个：站点那边跑的
-  //   通常就是它。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
-  const plugin = pickForSubmit(serviceKind);
+  // ★ 提交时只知道**短名**（配置块名、界面按钮上那个），而本机可能并存同一个
+  //   插件的多个版本 —— 站点报了的话就按它报的那个 `(id, 版本)` 取，否则取版本
+  //   最高的那一个。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
+  //
+  //   ★ 「短名是站点内唯一的」那句**已经不成立**（v0.11 放开），所以 `pickForSubmit`
+  //     在同名多条时**不猜**，把 id 列出来交给下面那一支说清楚。
+  const pick = pickForSubmit(serviceKind);
+  const plugin = pick.plugin;
   if (!plugin) {
+    // ── 站点的短名有歧义（v0.11 起合法的一种站点）──────────────────────────
+    //
+    // ★ 这一支必须**排在最前**，而且必须**自己有一句话**：落到下面任何一支都是
+    //   指错方向 —— "不认识这种服务"会让用户以为客户端太旧，"一个都没装"会让
+    //   他去重新同步，而两件事都不是。真相是**这个短名在站点里指两个东西**，
+    //   要做的事是让管理员在站点配置里改用 id（或者把其中一个改个短名）。
+    //
+    // ★ 也**不替用户挑一个**：站点那一侧同样会拒（`resolve_plugin_spec`），
+    //   挑了只是把一次必然的失败提前到本地、还顺手掩盖了原因。
+    if (pick.ambiguous.length) {
+      win.pushNotice('error',
+        `本站有 ${pick.ambiguous.length} 个插件都叫「${serviceKind}」，所以这个名字`
+        + '指不出是哪一个，提交已经拦下。要请管理员在站点配置里改用插件的 id：'
+        + `${pick.ambiguous.join('、')}。`);
+      return null;
+    }
     // ★ 「一个插件都没装」与「不认识这个名字」是**两件事**，行动也不同（去装一个
     //   vs 换个按钮点）。以前这里只印一句「本版支持：（一个都没有）」—— 那既是
     //   一句错话（本版没有"支持"任何东西，是**你还没装**），也没给出路。
@@ -2162,18 +2231,35 @@ async function startSession(resources, serviceKind) {
  *
  * ★ **优先按站点报的 `(id, 版本)` 挑**，而不是"同名里版本最高的那个"：那个才是
  *   这个会话真会跑的那一版，而客户端的 `prepare()` 必须与服务端即将起的那份
- *   **配套**。同名多 id 只可能出现在"站点分发的插件覆盖了内建同名插件"
- *   这种情形上，那时按名字挑纯属碰运气。
+ *   **配套**。
  *
- * 站点没报（老守护进程、或还没连上）时才退回按短名取版本最高的那个。
+ *   （这一段从前写的是"同名多 id 只可能出现在『站点分发的插件覆盖了内建同名
+ *   插件』这种情形上"。★ **那句话已经不成立了**：v0.11 起两个不同的插件可以
+ *   合法地同名并存，所以"短名对上多份"是一条**正常**的路，不是边角情形。）
+ *
+ * ★★ **同名多条时不许猜。** 站点报了两条同名而 id 不同的插件时，短名传上去
+ *   **站点自己也会拒**（`resolve_plugin_spec` 那条歧义规则，把几个 id 一起列
+ *   出来）。而客户端在这里 `find` 一个的后果比"提交失败"重得多：本机拿 **A**
+ *   的客户端代码去对接站点起的 **B** 的作业 —— **两半本该配套**，而错配是静默的。
+ *
+ *   ⇒ 歧义时返回 `{plugin: null, ambiguous: [...]}`，让调用方把那几个 id 说出来。
+ *
+ * 站点没报（老守护进程、或还没连上）时才退回按短名取版本最高的那个 —— 那一格
+ * **没有歧义可言**：老守护进程按短名去重，同一短名它只可能起一个。
+ *
+ * @returns {{plugin: object|null, ambiguous: string[]}}
  */
 function pickForSubmit(name) {
-  const s = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.name === name);
+  const named = ((sitePlugins && sitePlugins.plugins) || []).filter((p) => p.name === name);
+  if (named.length > 1) {
+    return { plugin: null, ambiguous: named.map((p) => p.id).filter(Boolean) };
+  }
+  const s = named[0];
   if (s && s.id && s.version) {
     const hit = usable(registry.get(s.id, s.version));
-    if (hit) return hit;
+    if (hit) return { plugin: hit, ambiguous: [] };
   }
-  return usable(registry.latestByName(name));
+  return { plugin: usable(registry.latestByName(name)), ambiguous: [] };
 }
 
 /**
@@ -2202,9 +2288,14 @@ function usable(p) {
  *   而根因一个字都不在里面。这正是这个项目一路在清的那类症状。
  *
  * 老守护进程不报版本（`siteVersion` 为 null）时不说话 —— 那不是漂移，是信息缺失。
+ *
+ * ★ 找站点那一条按 **`id`**，不按短名：短名会撞（v0.11 起合法），按名字找会拿到
+ *   **另一个插件**的那一条，于是这句话会说"站点那边是 X 版"——而 X 版是隔壁那个
+ *   插件的版本号。**一句说错对象的警告比不说更坏**：它把用户指去升级一个本来就
+ *   没问题的插件。按 id 找之后，"找不到"就如实变成不说话（`siteVersion` 为 null）。
  */
 function warnVersionDrift(plugin) {
-  const site = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.name === plugin.name);
+  const site = ((sitePlugins && sitePlugins.plugins) || []).find((p) => p.id === plugin.id);
   const siteVersion = site && site.version;
   if (!siteVersion || siteVersion === plugin.version) return;
   if (!registry.once(`${plugin.id}@${siteVersion}`, 'version-drift')) return;
@@ -4191,6 +4282,12 @@ function registerIpc() {
     //   进程）。客户端的处理必须一样（回退），但代码路径不同（一个是 unknown_op，
     //   一个是字段缺席）—— 只造其中一条的话，另一条上的退化没人看得见。
     else if (what === 'old-distribute') backend.debugOldDistribute(true);
+    // ★★ 站点级的插件问题（账本 F22）—— 但**没有按钮**：这一格说的是"本站有个
+    //   包坏了、坏在哪"，而假站点编不出这个事实（它的分发源是真插件，都装得好
+    //   好的）。所以它只能从 DevTools 里带上一条**照真守护进程措辞写的**串：
+    //     window.slurmate.debug('plugin-problems', '…：这是一个目录，不是一个插件包…')
+    //   传空数组清掉。给一个按钮就得有默认文案，而默认文案只能是编的。
+    else if (what === 'plugin-problems') backend.debugPluginProblems(arg === undefined ? [] : [arg]);
     // 站点报了一个超过单文件上限的文件 ⇒ 「站点支持分发，但这一份装不上」。
     else if (what === 'plugin-too-big') backend.debugBloatPlugin(arg || null);
     // 限流不是失败：假后端先回几次 rate_limited，对账必须**退避之后照样成功**。
