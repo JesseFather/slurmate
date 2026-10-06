@@ -8673,6 +8673,259 @@ exit 0
           _rc30 == 0 and "这一句必须被显示出来" in _se.getvalue(),
           "退出码=%r stderr=%r" % (_rc30, _se.getvalue()))
 
+    # ══ 31. 所有的终态都过同一道闸（v0.11 阶段 7：账本 F32），以及
+    #         「排队」那一档要的是一个**不同的** TTL（F27）══════════════════
+    #
+    # ★★ F32 与 F12/F13 **完全同形**，只是绕开闸的姿势不同：`reject()` 与
+    #    `try_enroll()` 的超时那一条**自己跳到终态**，各自 `scancel` 一次而
+    #    **返回值丢掉** ⇒ `scancel` 失败时作业继续占着节点跑到 `TimeLimit`
+    #    （GPU 分区上那是 12 小时实打实的算力），而那条会话不在
+    #    `phase_running()` 的扫描集合里、也不在 `ACL_STATES` 里
+    #    ⇒ **再也没有任何人回收它**。
+    #
+    # ★ 这一节钉**两半**，两半都承重：
+    #   ① **过闸**：作业还在 ⇒ 会话停在 `releasing`、什么都不拆、一直重试；
+    #   ② **落回各自的终态**：确认停了之后，`rejected` 与 `expired` **不许**被压成
+    #      `released`（"校验没过" / "提交超时" / "正常结束"是三件不同的事）。
+    #   只判①的话，"自己跳终态 + 顺手 scancel"也能写出①看起来通过的样子；
+    #   只判②的话，一条把拆除提到闸前面的实现照样绿。
+    #
+    # ★★ F27 的形状是**一个矩阵**，不是一条：两条 TTL 的判据是
+    #    「会话还在 `submitted`」**并且**「作业在做什么」，四个格子缺一不可 ——
+    #    尤其 **`submitted` + 排队 + 等了 2400 秒 ⇒ 一个字都不许动** 那一格：
+    #    少了它，"拿 1800 秒一刀切"那个**错的**修法会全绿。
+    print("\n── 31. 终态都过同一道闸（F32）/ 排队那一档的 TTL（F27）──")
+
+    check("★ 两个 TTL 都是**常量**而不是配置键（与 RELEASE_RETRY_SECONDS 同族），"
+          "而且排队那个**明显更长** —— 这一条挡的是「合成一个数」那种修法",
+          mod.ENROLL_TTL == 1800 and mod.QUEUED_TTL > mod.ENROLL_TTL * 10
+          and "enroll_ttl_seconds" not in mod.GLOBAL_KEYS
+          and "queued_ttl_seconds" not in mod.GLOBAL_KEYS
+          and cfg.enroll_ttl == mod.ENROLL_TTL
+          and cfg.queued_ttl == mod.QUEUED_TTL,
+          "enroll=%s queued=%s" % (getattr(mod, "ENROLL_TTL", "★没有"),
+                                   getattr(mod, "QUEUED_TTL", "★没有")))
+
+    def _final_case(sid, job_id, *, state=None, waited=0, job_state="PENDING",
+                    cancel_ok=True, with_file=False, with_rule=False):
+        """造一条会话，时钟拨到 `waited` 秒之前提交。返回 `(daemon, 事件表)`。
+
+        `with_file`：写一份**真的**会话文件（`job_id` 故意对不上 ⇒ 校验会拒）。
+        `with_rule`：装一条 nft 规则并写上 node_ip / service_port。
+
+        ★ 这两个开关**分开**：`reject` 那条路要的是文件（它就是写了文件才被拒的），
+          而"规则"那一格对应的是**进程在装完规则、写状态之间死过**那个窗口 ——
+          而它正是 F32 记的第二条后果（`reconcile()` 把那条规则当孤儿删掉，
+          于是用户连"它还在烧"都看不见）。
+        ★ `last_hb_socket` 必须写：`phase_heartbeat()` 扫 ENROLLED 的会话，
+          不写的话一条"很久以前登记、作业在排队"的会话会先因为心跳超时被判成
+          孤儿 —— 那是**另一条**路（300/1800 秒），会把这条用例要测的东西盖掉。
+        """
+        dd = _mkd(startup_grace_seconds=0)
+        dd.nft, dd.slurm = _NftRec(), _RelSlurm()
+        dd.slurm.cancel_ok = cancel_ok
+        dd.slurm.jobs[str(job_id)] = {"JobState": job_state, "Requeue": "0"}
+        ev = []
+        dd.audit = lambda e, **kw: ev.append(dict(kw, event=e))
+        dd.store.insert(
+            session_id=sid, uid=UID, user="alice", partition="A6000",
+            account="acct", cpus=2, mem="8G", requested_time="1:00:00",
+            state=state or mod.ST_SUBMITTED, job_id=job_id, candidates="55001",
+            created_at=_rel_clock[0] - waited,
+            submitted_at=_rel_clock[0] - waited,
+            last_hb_socket=_rel_clock[0])
+        if with_rule:
+            dd.store.update(sid, node_ip="192.0.2.11", service_port=55001)
+            dd.nft.add_session_rule("192.0.2.11", 55001, UID, job_id)
+        if with_file:
+            # ★ 用**真的**文件，不打桩 `validate_session`：这条路的重点之一是
+            #   "拒绝之后会对那份文件做什么"（今天它**永远**留在用户家目录里 ——
+            #   没有任何人删它），打桩会把要验的东西一起打掉。
+            _p = os.path.join(sess_dir, "job-%s.json" % job_id)
+            with io.open(_p, "w", encoding="utf-8") as _f:
+                _f.write(json.dumps({"schema": mod.SCHEMA_VERSION,
+                                     "job_id": int(job_id) + 1}))
+            os.chmod(_p, 0o600)
+        _rel_daemons.append(dd)
+        return dd, ev
+
+    def _st_of(dd, sid):
+        return dd.store.get(sid)["state"]
+
+    # ── 31.1 ★★★ F32 · reject：作业还在 ⇒ 过不了闸，什么都不拆 ────────────
+    #
+    # 这里刻意**直接调 `phase_running()`**，不走 `tick()`：那个窗口（装完规则、
+    # 写状态之前进程死掉）留下的就是"一条 `submitted` 的会话 + 一条真的规则"，
+    # 而 `reconcile()` 在同一个 tick 里跑在 `phase_running()` **前面** —— 那时
+    # 会话还是 `submitted`，规则会被当孤儿删掉，于是"规则一条都没少"这条断言
+    # 测的是一条**本来就不存在**的规则。先让它进 `releasing`，再看下一个完整
+    # tick 里 `reconcile()` 认不认它。
+    _rj, _rev = _final_case("s-rj", 8101, job_state="RUNNING",
+                            cancel_ok=False, with_file=True, with_rule=True)
+    _rj.phase_running()
+    check("★★★ 校验失败 ⇒ 会话进 `releasing`，**不是**直接跳 `rejected`"
+          "（跳过去就再也没人回收它 —— 那正是 F32）",
+          _st_of(_rj, "s-rj") == mod.ST_RELEASING,
+          "state=%r" % _st_of(_rj, "s-rj"))
+    check("★★ 而这一刻**一个字都还没拆**：规则在、会话文件在",
+          len(_rj.nft.rules) == 1
+          and os.path.exists(os.path.join(sess_dir, "job-8101.json")),
+          "规则=%s 文件在=%s" % (sorted(_rj.nft.rules),
+                                os.path.exists(os.path.join(sess_dir, "job-8101.json"))))
+    check("★ 拒绝那一刻的两条审计分开记：「判定拒绝了」与「交给释放流程了」"
+          "是两件事",
+          [e["event"] for e in _rev].count("rejected") == 1
+          and [e["event"] for e in _rev].count("releasing") == 1,
+          str([e["event"] for e in _rev]))
+
+    # 完整 tick：reconcile + phase_release 都跑。作业**还在跑**、`scancel` 又失败
+    # ⇒ 闸不许放行。
+    _rj.slurm.cancel_ok = False
+    _rj.tick()
+    check("★★★ `scancel` 失败 + 作业仍在跑 ⇒ **留在 `releasing`**，"
+          "不许进终态（从前这里已经是 `rejected` 了，而作业还在烧）",
+          _st_of(_rj, "s-rj") == mod.ST_RELEASING, _st_of(_rj, "s-rj"))
+    check("★★ 而规则一条都没少 —— 会话现在是 `releasing`（在 `ACL_STATES` 里），"
+          "`reconcile()` **不再**把它当孤儿（从前 `rejected` 不在那一族里，"
+          "于是用户连「它还在烧」都看不见）",
+          len(_rj.nft.rules) == 1, str(sorted(_rj.nft.rules)))
+    check("★★ 会话文件也还在（作业还活着，用户仍然连得进去、看得见它）",
+          os.path.exists(os.path.join(sess_dir, "job-8101.json")),
+          str(sorted(os.listdir(sess_dir))[:6]))
+    check("★★ 而它**说得出来**：这条释放卡在「作业还在」上",
+          any(e["event"] == "release_waiting" and e.get("why") == "alive"
+              for e in _rev),
+          str([e["event"] for e in _rev]))
+    check("★ `scancel` 是**那道闸**发的（reason=`release_waiting`），"
+          "不再是 `reject()` 自己顺手发一次 —— 一个判据一处实现",
+          _rj.slurm.cancels and all(r == "release_waiting"
+                                    for _j, r in _rj.slurm.cancels),
+          str(_rj.slurm.cancels))
+
+    # 作业确认没了 ⇒ 才拆，而且**落回 `rejected`**
+    _rj.slurm.jobs.pop("8101")
+    _rj.tick()
+    check("★★★ 作业确认消失 ⇒ 拆完**落回 `rejected`**，不是 `released`"
+          "（「校验没过」与「正常结束」是两件不同的事）",
+          _st_of(_rj, "s-rj") == mod.ST_REJECTED, _st_of(_rj, "s-rj"))
+    check("★★ 而拆是真拆：规则没了、会话文件也没了"
+          "（从前那份文件**永远**留在用户家目录里 —— 没有任何人删它）",
+          len(_rj.nft.rules) == 0
+          and not os.path.exists(os.path.join(sess_dir, "job-8101.json")),
+          "规则=%s 文件在=%s" % (sorted(_rj.nft.rules),
+                                os.path.exists(os.path.join(sess_dir, "job-8101.json"))))
+    _rel_ev = [e for e in _rev if e["event"] == "released"]
+    check("★★ 审计那条 `released` 带着 `state`：事件名说的是「拆除做完了」，"
+          "而它落进哪一个终态要看得见（否则 `rejected` 与 `released` 在审计里"
+          "分不开）",
+          len(_rel_ev) == 1 and _rel_ev[0].get("state") == mod.ST_REJECTED
+          and _rel_ev[0].get("reason") == "job_id_mismatch",
+          str(_rel_ev))
+
+    # ── 31.2 ★★ F32 · 登记超时：同一条路、同一个闸，落回 `expired` ────────
+    #
+    # ★ 判据里带着"等待时间只有 1801 秒"：它逼着这条走 `ENROLL_TTL` 而不是
+    #   `QUEUED_TTL`（后者是 86400）。两个数合成一个的话这一条仍然会过，而
+    #   下面 31.3 的第一格会红 —— 两格一起才钉得住"分两档"。
+    # ★ 与 31.1 逐条对称，包括"先直接调 `phase_running()`"那一步 —— 两条路都要
+    #   各自证一遍**过闸**与**落回自己的名字**这两半，缺一条就有半边没人看。
+    _en, _eev = _final_case("s-en", 8201, waited=mod.ENROLL_TTL + 1,
+                            job_state="RUNNING", cancel_ok=False, with_rule=True)
+    _en.phase_running()
+    check("★★★ 作业**在跑**、而会话文件迟迟不来、已等 %d 秒 ⇒ 进 `releasing`"
+          "（用的是 `enroll_ttl`，不是排队那个）" % (mod.ENROLL_TTL + 1),
+          _st_of(_en, "s-en") == mod.ST_RELEASING, _st_of(_en, "s-en"))
+    check("   而它的理由说的是**登记超时**，不是排队超时",
+          any(e["event"] == "expired" and e.get("reason") == "enroll_timeout"
+              for e in _eev)
+          and not any(e.get("reason") == "queued_timeout" for e in _eev),
+          str([(e["event"], e.get("reason")) for e in _eev]))
+    check("★★ 而这一刻**一个字都还没拆**：规则还在",
+          len(_en.nft.rules) == 1, str(sorted(_en.nft.rules)))
+    _en.tick()
+    check("★★★ `scancel` 失败 + 作业仍在跑 ⇒ 留在 `releasing`、规则一条都没少"
+          "（与 31.1 那一条对称 —— 两条路各证一遍）",
+          _st_of(_en, "s-en") == mod.ST_RELEASING and len(_en.nft.rules) == 1,
+          "state=%r 规则=%s" % (_st_of(_en, "s-en"), sorted(_en.nft.rules)))
+    _en.slurm.jobs.pop("8201")
+    _en.tick()
+    check("★★ 作业确认消失 ⇒ 落回 `expired`（与 `rejected` 一样过闸，"
+          "但**名字各留各的**）",
+          _st_of(_en, "s-en") == mod.ST_EXPIRED, _st_of(_en, "s-en"))
+
+    # ── 31.3 ★★★ F27 · 两个 TTL 的矩阵 ──────────────────────────────────
+    #
+    # ★★ 第一格是**这一整节里最重要的那一条**：会话停在 `submitted`、作业在排队、
+    #    已经等了 2400 秒（**超过 `enroll_ttl` 的 1800，远不到 `queued_ttl`**）
+    #    ⇒ **一个字都不许动**。少了它，"拿 1800 秒一刀切"那个修法全绿 ——
+    #    而那个修法在繁忙集群上的形态是"守护进程自动取消用户正在排队的作业"。
+    _q1, _q1ev = _final_case("s-q1", 8301, waited=mod.ENROLL_TTL + 600,
+                             job_state="PENDING")
+    _q1.tick()
+    check("★★★ 排队中、等了 %d 秒（超过 `enroll_ttl`、远不到 `queued_ttl`）"
+          "⇒ **一个字都不许动** —— 排队是集群的正常状态，拿 1800 秒去收它"
+          "等于自动取消用户在排队的作业"
+          % (mod.ENROLL_TTL + 600),
+          _st_of(_q1, "s-q1") == mod.ST_SUBMITTED
+          and not [e for e in _q1ev
+                   if e["event"] in ("expired", "releasing", "released")],
+          "state=%r 事件=%s" % (_st_of(_q1, "s-q1"),
+                               str([e["event"] for e in _q1ev])))
+    check("   而它**确实占着**一个名额 —— 这正是它必须有 TTL 的理由"
+          "（`OCCUPYING_STATES` 含 `submitted`）",
+          _q1.store.count_occupying(UID) == 1,
+          str(_q1.store.count_occupying(UID)))
+
+    _q2, _q2ev = _final_case("s-q2", 8302, waited=mod.QUEUED_TTL + 1,
+                             job_state="PENDING")
+    _q2.tick()
+    check("★★★ 排队中、等了 %d 秒（超过 `queued_ttl`）⇒ 才回收"
+          % (mod.QUEUED_TTL + 1),
+          _st_of(_q2, "s-q2") == mod.ST_RELEASING, _st_of(_q2, "s-q2"))
+    check("   理由说的是**排队超时**，而且带着等了多久与作业当时的状态"
+          "（否则运维只知道它没了，不知道为什么）",
+          any(e["event"] == "expired" and e.get("reason") == "queued_timeout"
+              and e.get("job_state") == "PENDING"
+              and e.get("seconds") == mod.QUEUED_TTL + 1 for e in _q2ev),
+          str([(e["event"], e.get("reason"), e.get("seconds")) for e in _q2ev]))
+    check("   而 `scancel` 走的是**那道闸**（这条会话的作业还在排队，"
+          "闸不许放行 ⇒ 先取消再等它真的消失）",
+          _q2.slurm.cancels == [("8302", "release_waiting")]
+          and _st_of(_q2, "s-q2") == mod.ST_RELEASING,
+          "%s / %s" % (_q2.slurm.cancels, _st_of(_q2, "s-q2")))
+    _q2.slurm.jobs.pop("8302")
+    _q2.tick()
+    check("   作业确认消失 ⇒ 落回 `expired`",
+          _st_of(_q2, "s-q2") == mod.ST_EXPIRED, _st_of(_q2, "s-q2"))
+
+    # ★ 矩阵的第四格：**已经登记过**的会话，作业被挂起/重排 ⇒ 永远不回收。
+    #   它是"判据必须两件事一起"里少了 `submitted` 那一半的对照 ——
+    #   那半条丢了的话，一条**用户正在用**、只是作业被挂起的会话会被收掉。
+    _q3, _q3ev = _final_case("s-q3", 8303, state=mod.ST_ENROLLED,
+                             waited=mod.QUEUED_TTL * 3, job_state="SUSPENDED")
+    _q3.tick()
+    check("★★★ 已登记的会话、作业被挂起、等了三天 ⇒ **不回收**"
+          "（它登记过 —— 用户在用它，只是作业被挂起了）",
+          _st_of(_q3, "s-q3") == mod.ST_ENROLLED
+          and not [e for e in _q3ev
+                   if e["event"] in ("expired", "releasing", "released")],
+          "state=%r 事件=%s" % (_st_of(_q3, "s-q3"),
+                               str([e["event"] for e in _q3ev])))
+
+    # ── 31.4 ★★ 没有 `final_state` 的行仍然是 `released`（回落那一格）──────
+    #
+    # 第 30 节那十几条 `releasing` 的用例**都是**这种行（它们直接插成
+    # `releasing`、没有走过 `begin_release`），所以"回落"其实已经被 30.4 钉住了。
+    # 这一条只说清**为什么**它可以回落：`final_state` 只在 `releasing` 期间被读，
+    # 而三选一里 `released` 是唯一一个**不含判断**的答案。
+    _fb, _fbev = _final_case("s-fb", 8401, job_state="RUNNING")
+    _fb.begin_release(_fb.store.get("s-fb"), "goodbye")      # 缺省 final_state
+    _fb.slurm.jobs.pop("8401")
+    _fb.tick()
+    check("★ `begin_release` 的缺省仍然是 `released`（goodbye / orphaned / "
+          "job_gone / job_<状态> 四条路一个字都不用改）",
+          _st_of(_fb, "s-fb") == mod.ST_RELEASED, _st_of(_fb, "s-fb"))
+
     mod.now_ts = _rel_real_now
     mod.log.setLevel(_rel_real_level)
     for _dd in _rel_daemons:

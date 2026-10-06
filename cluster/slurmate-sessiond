@@ -563,7 +563,29 @@ MAX_TIME = "7-00:00:00"
 SUSPECT_AFTER = 300
 ORPHAN_AFTER = 1800
 RESERVED_TTL = 600
-SUBMITTED_TTL = 1800
+# ── 会话停在 `submitted` 的两个超时：**两个数，不是一个**（账本 F27）──────────
+#
+# 两条都只对 `submitted` 的会话成立（作业已提交、还没登记上），而它们的判据是
+# **作业在做什么**，不是会话停在哪个状态 —— 所以名字按作业那一侧取：
+#
+#   · ENROLL_TTL —— 作业**已经在跑**（RUNNING），而它的会话文件迟迟不出现。
+#     1800 秒是个很宽的窗口：作业起来之后写那份文件是**几秒**的事（run.sbatch
+#     一挑到端口就写），半小时还没写出来说明它卡住了。
+#   · QUEUED_TTL —— 作业**一直没跑起来**（排队 / 被 hold / 暂停 / 在重排）。
+#
+# ★★ 这两个数**必须分开**，理由是**代价不对称**：
+#   排队是集群的正常状态，一个繁忙集群上排几个小时是家常便饭。拿 ENROLL_TTL
+#   去收它，形态是"守护进程**自动取消**用户特意提交、正在排队的作业"。
+#   反过来，一个永远排不上的作业会让这条会话**永远**占着一个配额位
+#   （`OCCUPYING_STATES` 含 `submitted`），缺省 `max_sessions_per_user=1`
+#   ⇒ 那个用户**再也开不了新会话**，而界面上只有一条"排队中"的会话。
+#   两侧都是真的，所以不做"一刀切"，而是**按作业在做什么**分两档。
+#
+# ★ QUEUED_TTL 取 24 小时的理由：它必须**明显长于**任何"人还在等"的排队时间
+#   （否则就是上面那条自动取消），又要短到能兜住"提交完就忘了"。
+#   ★ 它不是算出来的：这是产品判断，取错了改**这一行**即可。
+ENROLL_TTL = 1800
+QUEUED_TTL = 86400
 RELEASED_KEEP = 600
 # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
 JOB_MISSING_CONFIRM_TICKS = 3
@@ -3406,7 +3428,8 @@ class Config(object):
         self.suspect_after = SUSPECT_AFTER
         self.orphan_after = ORPHAN_AFTER
         self.reserved_ttl = RESERVED_TTL
-        self.submitted_ttl = SUBMITTED_TTL
+        self.enroll_ttl = ENROLL_TTL
+        self.queued_ttl = QUEUED_TTL
         self.released_keep = RELEASED_KEEP
         self.job_missing_confirm_ticks = JOB_MISSING_CONFIRM_TICKS
         self.stuck_job_seconds = STUCK_JOB_SECONDS
@@ -3783,7 +3806,21 @@ CREATE TABLE IF NOT EXISTS sessions (
     renew_count     INTEGER NOT NULL DEFAULT 0,
     renew_last_at   INTEGER,
     trust           TEXT NOT NULL DEFAULT 'owned',
-    note            TEXT
+    note            TEXT,
+    -- ★ v0.11（账本 F32）：释放走完之后这条会话**落在哪个终态** ——
+    --   `released` / `rejected` / `expired` 三者之一，NULL 读作 `released`。
+    --
+    --   要存它的理由：`rejected` 与 `expired` 从前**自己跳到终态**，绕过了
+    --   `phase_release()` 那道闸（作业确认消失才拆）—— 于是 `scancel` 失败时
+    --   作业继续占着节点跑到 `TimeLimit`，而那条会话再也没有人回收。
+    --   现在三条路都先进 `releasing`、过同一道闸，而"走完之后叫什么"必须
+    --   **跨 tick 记得住**（闸可能等几个小时，作业一直杀不掉就一直等）——
+    --   所以它是一列，不是一个只在内存里的表：守护进程重启之后那条会话还在
+    --   `releasing`，而它该落哪个终态不能因为重启就丢掉。
+    --
+    --   ★ 取值只在 `releasing` 期间有意义。`recover_from_rules()` 造出来的行、
+    --     以及一切没走过释放流程的行，这一格都是 NULL —— 而它们不会被读。
+    final_state     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 CREATE INDEX IF NOT EXISTS idx_sessions_job   ON sessions(job_id);
@@ -5620,6 +5657,39 @@ class Sessiond(object):
                     self.maybe_renew(s, job)
                 continue
 
+            # ★★ 非终态、而这条会话**从提交起就没跑起来过** —— 这里问一句
+            #    「它是不是已经等太久了」（账本 F27）。
+            #
+            #    判据是**两件事一起**：会话还在 `submitted`（一次都没登记上），
+            #    **并且**作业不是 RUNNING（否则上面那条 if 已经接走了）。
+            #    两个都要：
+            #      · 少了 `submitted` 那一半 ⇒ 一条**已经登记、正在用**的会话
+            #        在作业被挂起时会被回收，而那是用户在跑的东西；
+            #      · 少了这一句 ⇒ 一条永远排不上队的会话**永远**停在 `submitted`，
+            #        而 `OCCUPYING_STATES` 含它 ⇒ 它占着一个候选端口 + 用户的一个
+            #        配额位，缺省 `max_sessions_per_user=1` 下那个用户**再也开不了
+            #        新会话**（`phase_pending` 只收 reserved，`phase_gc` 只收终态，
+            #        没有任何阶段看它）。
+            #
+            #    ★ 用的是 `queued_ttl`（24 小时），**不是** `enroll_ttl`：排队是
+            #      集群的正常状态，拿 1800 秒去收它等于"自动取消用户在排队的作业"。
+            #      两个常量的注解写着这两侧为什么不能合成一个数。
+            if s["state"] == ST_SUBMITTED:
+                waited = now - (s["submitted_at"] or s["created_at"])
+                if waited > self.cfg.queued_ttl:
+                    log.warning("会话 %s（job=%s）从提交起一直停在 %s，已等 %d 秒"
+                                "（上限 %d 秒）—— 回收这条会话并取消作业。"
+                                "在那之前它一直占着这个用户的一个会话名额。",
+                                s["session_id"], s["job_id"], jstate, waited,
+                                self.cfg.queued_ttl)
+                    self.audit("expired", session=s["session_id"], reason="queued_timeout",
+                               job=s["job_id"], job_state=jstate, seconds=waited)
+                    # ★ 与 enroll_timeout 同一条路：先进 `releasing`、过同一道闸，
+                    #   确认作业真的停了才拆（账本 F32）。
+                    self.begin_release(s, "queued_timeout:%s" % jstate,
+                                       final_state=ST_EXPIRED)
+                    continue
+
             self.note_nonterminal(s, jstate, now)
 
     def note_nonterminal(self, s, jstate, now):
@@ -5708,19 +5778,29 @@ class Sessiond(object):
                    job_state=jstate, cancel_ok=again)
 
     def try_enroll(self, s, job):
+        """作业已经在跑、却还没登记上的会话：**只有这一条路**。
+
+        ★ 走到这里的会话，它的作业**是 RUNNING 的**（`phase_running` 那条分派），
+          所以这里用的是 `enroll_ttl`，**不是** `queued_ttl` —— 后者管的是
+          "作业从提交起就没跑起来"，判在 `phase_running` 的非 RUNNING 分支里
+          （见那两个常量的注解，以及账本 F27）。
+        """
         now = now_ts()
         info, why = self.load_session_file(s["uid"], s["job_id"])
         if info is None:
-            if now - (s["submitted_at"] or s["created_at"]) > self.cfg.submitted_ttl:
-                log.warning("会话 %s 迟迟未登记（%s），回收并取消作业", s["session_id"], why)
-                # 必须 scancel：否则作业会白占节点直到 TimeLimit，而且 EXPIRED
-                # 不在 phase_running 的扫描集合里，再也没人回收它。
-                if s.get("job_id"):
-                    self.slurm.cancel(s["job_id"], "enroll_timeout")
-                self.store.update(s["session_id"], state=ST_EXPIRED, ended_at=now,
-                                  note="enroll_timeout:%s" % why)
+            if now - (s["submitted_at"] or s["created_at"]) > self.cfg.enroll_ttl:
+                log.warning("会话 %s（job=%s）迟迟未登记（%s），回收并取消作业",
+                            s["session_id"], s["job_id"], why)
+                # ★★ **不在这里 scancel，也不在这里写终态**（账本 F32）。
+                #   交给 begin_release → phase_release 那道闸：它**先确认作业真的
+                #   停了**，然后才拆 ACL / 会话文件。从前这两句是 `self.slurm.cancel(...)`
+                #   加一句 `state=ST_EXPIRED`，而**返回值丢掉** —— scancel 失败时作业
+                #   继续占着节点跑到 TimeLimit，而这条会话不在 phase_running 的扫描
+                #   集合里、也不在 ACL_STATES 里，再也没人回收它（与 F12/F13 同形）。
                 self.audit("expired", session=s["session_id"], reason="enroll_timeout",
                            job=s.get("job_id"), detail=why)
+                self.begin_release(s, "enroll_timeout:%s" % why,
+                                   final_state=ST_EXPIRED)
             return
 
         ok, why = self.validate_session(s, info, job)
@@ -5903,14 +5983,39 @@ class Sessiond(object):
                 self.store.update(s["session_id"], state=ST_ORPHANED)
                 self.begin_release(s, "orphaned")
 
-    def begin_release(self, s, reason):
-        self.store.update(s["session_id"], state=ST_RELEASING, note=reason)
+    def begin_release(self, s, reason, final_state=ST_RELEASED):
+        """把一条会话交给 `phase_release()`：**这是唯一的释放入口**。
+
+        `reason` 是**为什么走到这里**（进 `note` 列，也进审计）；
+        `final_state` 是**走完之后叫什么**（进 `final_state` 列）。
+
+        ★★ 两者分开是账本 F32 的落点。在那之前，`reject()` 与
+        `try_enroll()` 的超时那一条**自己跳到终态**：各自 `scancel` 一次、**返回值
+        丢掉**，然后直接写 `rejected` / `expired`。形态与 F12/F13 一模一样 ——
+        `scancel` 失败时作业继续占着节点跑到 `TimeLimit`（GPU 分区上那是 12 小时
+        实打实的算力），而那两条会话不在 `phase_running()` 的扫描集合里、也不在
+        `ACL_STATES` 里 ⇒ **再也没有任何人回收它**。
+
+        ★ 于是那两条改成走这里：作业的确认与拆除都发生在 `phase_release()`
+        **那一处**（一个判据一处实现），过闸之后**各自落回原来的终态名字**
+        （`expired` / `rejected`）—— 名字是给人和界面看的，"提交超时"与
+        "校验没过"是两件不同的事，不该都变成 `released`。
+
+        ★ 缺省是 `ST_RELEASED`，所以 `goodbye` / `orphaned` / `job_gone` /
+        `job_<状态>` 四条路一个字都不用改。
+        """
+        self.store.update(s["session_id"], state=ST_RELEASING, note=reason,
+                          final_state=final_state)
         self.audit("releasing", session=s["session_id"], job=s["job_id"], reason=reason)
 
     def phase_release(self):
-        """拆除：**先确认作业真的停了**，再删 ACL → 删口令文件 → 尽力删会话文件 → 置 released。
+        """拆除：**先确认作业真的停了**，再删 ACL → 删口令文件 → 尽力删会话文件 → 置终态。
 
-        released 之前规则一定在，之后规则一定不在。
+        终态之前规则一定在，之后规则一定不在。
+
+        ★ 落哪个终态由 `begin_release()` 的 `final_state` 决定（缺省 `released`，
+        见那一处）；**所有**终态都从这里出 —— `rejected` 与 `expired` 从前是例外，
+        而那两个例外正是账本 F32。
 
         ★★ v0.9 多了一道闸，而它是账本 F13 的落点。从前这里**从不确认作业是否
         还在** —— 于是「已释放」这句话可以是假的：作业占着节点跑到 `TimeLimit`
@@ -5969,9 +6074,16 @@ class Sessiond(object):
             for _t in (self.job_missing, self.job_unknown, self.job_stuck,
                        self.enroll_file_missing, self.release_retry):
                 _t.pop(s["session_id"], None)
-            self.store.update(s["session_id"], state=ST_RELEASED, ended_at=now)
+            # ★ 落哪个终态是 `begin_release()` 当时定下的（缺省 `released`）。
+            #   缺一格时**回落到 `released`**：这是三选一里唯一一个不含判断的
+            #   答案，而这条路上不可能停在这里等人来修。
+            final = s.get("final_state") or ST_RELEASED
+            self.store.update(s["session_id"], state=final, ended_at=now)
+            # ★ 审计多带一格 `state`：事件名 `released` 说的是"拆除做完了"，
+            #   而它落进 `rejected` / `expired` 时，光看事件名是分不出来的 ——
+            #   而这两件事在排查时问的是不同的问题。
             self.audit("released", session=s["session_id"], job=s["job_id"],
-                       reason=s.get("note"))
+                       reason=s.get("note"), state=final)
 
     def phase_gc(self):
         now = now_ts()
@@ -6230,9 +6342,19 @@ class Sessiond(object):
         if cur >= self.cfg.reject_threshold:
             self.throttled[s["uid"]] = now + self.cfg.throttle_seconds
             self.audit("throttled", uid=s["uid"], until=self.throttled[s["uid"]])
-        self.store.update(s["session_id"], state=ST_REJECTED, ended_at=now, note=why)
-        if s.get("job_id"):
-            self.slurm.cancel(s["job_id"], "rejected")
+        # ★★ **不在这里 scancel，也不在这里写终态**（账本 F32）。
+        #    从前这两句是 `state=ST_REJECTED` 加一次 `self.slurm.cancel(...)`，而
+        #    **返回值丢掉** —— 一条校验没过、但作业**确实在跑**的会话（它就是写了
+        #    会话文件才被拒的）会因为一次失败的 scancel 继续占着节点跑到 TimeLimit，
+        #    而这条会话不在 phase_running 的扫描集合里、也不在 ACL_STATES 里
+        #    ⇒ 再也没人回收它。
+        #    现在交给 begin_release → phase_release 那道闸：**先确认作业真的停了**
+        #    （杀不掉就一直等、一直重试），再拆 ACL 与会话文件。
+        #    ★ 落回 `rejected` 而不是 `released` —— "校验没过"与"正常结束"是两件
+        #      不同的事，界面上与审计里都该分得开。
+        #    ★ 上面那条 `audit("rejected", ...)` 留在**这里**：它说的是"这一刻判定
+        #      拒绝了"，而 `releasing` 那条说的是"交给释放流程了"。两件事。
+        self.begin_release(s, why, final_state=ST_REJECTED)
 
     # ── 文件清理（安全关键）─────────────────────────────────────────────────
     def remove_session_file(self, s):

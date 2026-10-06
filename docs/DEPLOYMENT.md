@@ -61,10 +61,12 @@ nft list chain inet slurmate output
 **3a. 家目录必须在登录节点与计算节点上都能看到**
 
 - 不满足：守护进程读不到会话文件 → 会话停在 `submitted` → 到
-  `submitted_ttl_seconds`（默认 1800 秒）超时 → 记 `expired`，并且**作业被
-  `scancel`**（`cluster/slurmate-sessiond`，注释解释了为什么必须
-  `scancel`：否则作业会白占节点到 `TimeLimit`，而 `expired` 不在
+  `ENROLL_TTL`（默认 1800 秒；作业一直在排队时是 `QUEUED_TTL`，24 小时）超时 →
+  进 `releasing`、记 `expired`，并且**作业会被取消**（`cluster/slurmate-sessiond`，
+  注释解释了为什么必须取消：否则作业会白占节点到 `TimeLimit`，而 `expired` 不在
   `phase_running` 的扫描集合里，再没人回收它）。
+  ★ 取消与拆除都发生在**释放流程那一处**：它先确认作业真的停了，杀不掉就一直
+  重试 —— 所以「超时了但作业还在烧」的形态是会话停在 `releasing`，不是静默消失。
 - 用户看到的现象：界面一直停在「排队中 · 等待调度与登记」。
 
 **3b. rename 必须是原子的（NFSv4 的 RENAME 是服务端原子的）**

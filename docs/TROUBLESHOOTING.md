@@ -126,6 +126,12 @@ ls -l /shared/home/alice/.slurmate/sessions/
 **留一份取证副本**在 `rejected_dir`（默认 `/var/lib/slurmate-session/rejected/<uid>/`），
 权限 `0600`、root 只读。
 
+★ **会话随后进 `releasing`，终态名字仍然是 `rejected`** —— 但它要等作业
+**确认停掉**之后才落到那里（见 [ARCHITECTURE.md](ARCHITECTURE.md) §3.0）。
+所以「作业杀不掉」的形态是这条会话**停在 `releasing`**、审计里反复出现
+`release_waiting`，而**不是**它已经变成 `rejected` 了 —— 从前正是后者，
+于是那个作业再也没人回收（账本 F32）。原始会话文件也在那时候才删。
+
 常见原因与含义：
 
 | 原因 | 含义 |
@@ -140,15 +146,23 @@ ls -l /shared/home/alice/.slurmate/sessions/
 | `schema_mismatch` | 客户端/作业脚本版本与守护进程不匹配 |
 
 **注意一个诊断上的空档**：在等待期间（`submitted`，还没超时）守护进程**不打日志**，
-只在超过 `submitted_ttl_seconds`（默认 1800 秒）之后才把原因写进 `note`：
+只在超时之后才把原因写进 `note`：
 
 ```bash
 slurmate status --json      # 看 note 字段，形如 enroll_timeout:not_yet
 ```
 
-超时的处置是记 `expired` **并 `scancel` 掉作业** —— 因为 `expired` 不在
-`phase_running` 的扫描集合里，不取消的话没人会再回收它
-（`cluster/slurmate-sessiond`）。
+**超时是哪一个**取决于作业当时在做什么（`cluster/slurmate-sessiond` 的两个常量）：
+
+| 作业在做的事 | 超时 | 落进 `note` 的 |
+|---|---|---|
+| 已经在跑（`RUNNING`），只是会话文件没来 | `ENROLL_TTL` = 1800 秒 | `enroll_timeout:<为什么读不到>` |
+| 一直没跑起来（排队 / 被 hold / 暂停 / 在重排） | `QUEUED_TTL` = 86400 秒 | `queued_timeout:<作业状态>` |
+
+超时的处置是记 `expired` **并取消作业**。★ 取消**不在这两条路里直接做**：会话先进
+`releasing`，由释放流程**确认作业真的停了**（`scancel` 失败就一直重试）之后才拆
+ACL 与会话文件。所以「超时了但作业还在烧」会表现为会话**停在 `releasing`**，
+日志与会话的 `note` 里都说得出原因 —— 那是**对的**，不是卡住了。
 
 **若这就是你要的**（比如只想看看到底为什么），可以盯审计日志与守护进程的
 warning 行，它们在 `rejected` 与 `expired` 时都会说话。

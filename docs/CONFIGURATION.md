@@ -479,7 +479,8 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `state_dir` / `db_path` / `rejected_dir` | `STATE_DIR` | 与 `StateDirectory=` 对应。在配置里改掉它，单元不会跟着改 —— 症状是状态目录凭空换了个地方、旧数据不见了，报错里没有一个字提到配置 |
 | `log_dir` / `audit_log` | `LOG_DIR` | 与 `LogsDirectory=` 对应，同上 |
 | `tick_seconds` / `startup_grace_seconds` | `TICK_SECONDS` / `STARTUP_GRACE_SECONDS` | 从没有人改过 |
-| `max_time` / `suspect_after_seconds` / `orphan_after_seconds` / `reserved_ttl_seconds` / `submitted_ttl_seconds` / `released_keep_seconds` / `job_missing_confirm_ticks` | 各自的常量 | 同上。`max_time` 尤其：它现在由**分区的 `MaxTime`** 动态决定（见下） |
+| `max_time` / `suspect_after_seconds` / `orphan_after_seconds` / `reserved_ttl_seconds` / `released_keep_seconds` / `job_missing_confirm_ticks` | 各自的常量 | 同上。`max_time` 尤其：它现在由**分区的 `MaxTime`** 动态决定（见下） |
+| 会话停在 `submitted` 的超时（曾经是 `submitted_ttl_seconds` 一个键） | **两个**常量：`ENROLL_TTL`（1800 秒）与 `QUEUED_TTL`（86400 秒） | ★ 一个数盖不住两种处境，而**代价不对称**：作业已经在跑、只是会话文件没来 ⇒ 半小时足够；作业**一直在排队** ⇒ 排队是集群的正常状态，拿半小时去收它等于自动取消用户特意提交、正在排队的作业。见下方〈会话停在 `submitted` 的两个超时〉 |
 | `[renew] enabled` / `threshold_seconds` / `max_total_seconds` | 常量 | 同上 |
 | `security.password_bytes` | `PASSWORD_BYTES` | 同上 |
 | `[quota]` 里的 `max_pending_per_user` | **已删除** | ★ 见下方〈`max_sessions_per_user` 为什么回来了〉—— 它那一格**确实**只有一种正确取值，所以它没了 |
@@ -631,6 +632,34 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 「所有分区都不可用」，而守护进程侧不会报任何错（只会拒绝提交），极难排查。
 `tools/check-cluster.sh` 会把 association 里写了、但实际不存在的分区逐个标成
 `[MISMATCH]`。
+
+### 会话停在 `submitted` 的两个超时
+
+一条会话从 `sbatch` 返回 job_id 起，到作业写出会话文件、被守护进程登记为止，
+一直停在 `submitted`。这个状态会**占着一个候选端口和用户的一个会话名额**
+（`OCCUPYING_STATES` 含它），所以它必须有上限 —— 否则 `max_sessions_per_user`
+缺省为 1 的站点上，那个用户**再也开不了新会话**，而界面上只有一条「排队中」。
+
+上限是**两个**，判据是作业在做什么：
+
+| 常量 | 取值 | 何时适用 |
+|---|---|---|
+| `ENROLL_TTL` | 1800 秒 | 作业**已经在跑**（`RUNNING`），而它的会话文件迟迟不出现 |
+| `QUEUED_TTL` | 86400 秒（24 小时） | 作业**一直没跑起来**（`PENDING` / 被 hold / 暂停 / 在重排） |
+
+两个都必须同时满足**会话还在 `submitted`**：一条已经登记过、用户正在用的会话，
+哪怕它的作业被挂起三天，也不会被回收。
+
+**为什么不是一个数**：两侧的代价不对称。排队是集群的正常状态，一个繁忙集群上排
+几个小时是家常便饭 —— 拿半小时去收它，形态是「守护进程**自动取消**用户特意提交、
+正在排队的作业」。反过来，一个永远排不上的作业会让那条会话永远占着名额。
+`QUEUED_TTL` 取 24 小时是为了**明显长于**任何「人还在等」的排队时间，又要短到能
+兜住「提交完就忘了」。
+
+两者到期的处置是同一条路：先进 `releasing`，由释放流程**确认作业真的停了**
+（杀掉为止，杀不掉就一直重试）之后才拆，最后分别落回 `expired`，审计里的
+`reason` 分别是 `enroll_timeout` 与 `queued_timeout`。
+（`rejected` 那条路也走同一个闸，落回 `rejected`。）
 
 ---
 

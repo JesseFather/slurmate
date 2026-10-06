@@ -618,23 +618,30 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 定义在 `cluster/slurmate-sessiond`：
 
 ```
-                        ┌──────────── reserved_ttl 到期 ──────────► expired
-                        │
+                        ┌─────────── reserved_ttl 到期 ──────────► expired
+                        │                                          （无作业可确认，
+                        │                                            直接落终态）
   reserved ──sbatch 返回 job_id──► submitted ──会话文件校验通过──► enrolled
-       │                              │                              │
-       │                    enroll_timeout                 心跳中断 ≥ suspect_after
-       ▼                              ▼                              ▼
-   expired                       expired                        suspect
-                                                                   │
-                                                        心跳中断 ≥ orphan_after
-                                                                   ▼
-                                                               orphaned
-                                                                   │
-                                        （任何一条拆除路径）           ▼
-   released ◄──────────── releasing ◄──────────────────────────────┘
-                    ▲
-       goodbye / job_gone / rejected 也走这里
+                                       │                             │
+                                       │                   心跳中断 ≥ suspect_after
+                                       │                             ▼
+                                       │                          suspect
+                                       │                             │
+                                       │                  心跳中断 ≥ orphan_after
+                                       │                             ▼
+                                       │                         orphaned
+                                       │                             │
+                                       └──────────────┬──────────────┘
+                                                      ▼
+                                                  releasing
+                                                      │
+                                            作业确认消失 ▼
+                                       released / rejected / expired
 ```
+
+**进 `releasing` 的来路**：`goodbye`、作业消失或真终态、会话文件校验失败（落
+`rejected`）、登记超时与排队超时（落 `expired`）。★ 前四条从前就在这里，后两条
+**从前不走这里** —— 它们自己 `scancel` 一次、直接跳终态，见 §3.0 与账本 F32。
 
 | 状态 | 含义 | 谁把它推进来 |
 |---|---|---|
@@ -645,18 +652,32 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 | `orphaned` | 心跳丢失 > `orphan_after`：判定异常退出，已发 `scancel` | `phase_heartbeat()` |
 | `releasing` | 正在拆除 | `begin_release()` |
 | `released` | 终态 | `phase_release()` |
-| `rejected` | 终态（校验失败） | `reject()` |
-| `expired` | 终态（TTL 到期仍未登记） | `phase_pending()` / `try_enroll()` |
+| `rejected` | 终态（会话文件校验失败） | `phase_release()`（由 `reject()` 交给它） |
+| `expired` | 终态（超时仍未登记） | `phase_pending()`（`reserved` 超期，没有作业）／`phase_release()`（登记超时、排队超时） |
+
+★ `begin_release(s, reason, final_state)` 把**为什么走到这里**（`reason` → `note` 列）
+与**走完之后叫什么**（`final_state` → `final_state` 列）分开存：闸可能等几个小时
+（作业杀不掉就一直等），而"该落哪个终态"不能因为跨 tick、跨重启就丢掉。
 
 两条不变量：
 
 - `TERMINAL_STATES = (released, rejected, expired)`；
 - `ACL_STATES = (enrolled, suspect, orphaned, releasing)` ——
   **这个集合与「nft 里应该存在哪些规则」严格一一对应**。`reconcile()` 用它算期望集合，
-  `phase_release()` 保证「`released` 之前规则一定在，之后规则一定不在」
+  `phase_release()` 保证「终态之前规则一定在，之后规则一定不在」
   （`cluster/slurmate-sessiond`）。
+  ★ 这也是那两条超时必须先进 `releasing` 的原因之一：直接跳到 `rejected` / `expired`
+  的会话**不在这个集合里**，于是 `reconcile()` 把它的规则当孤儿删掉 ——
+  用户连"它还在烧"都看不见。
 
-### 3.0 ★★ `releasing` 上有一道闸：`released` 的意思是**作业确认消失了**
+### 3.0 ★★ `releasing` 上有一道闸：终态的意思是**作业确认消失了**
+
+★★ **所有终态都从这里出**（`released` / `rejected` / `expired`），差别只在
+`begin_release()` 当时定下的 `final_state`。从前有两个例外 —— `reject()` 与
+`try_enroll()` 的登记超时**自己跳到终态**，各自 `scancel` 一次而**返回值丢掉**
+（账本 F32）。形态与 F12/F13 一模一样：`scancel` 失败时作业继续占着节点跑到
+`TimeLimit`（GPU 分区上那是 12 小时实打实的算力），而那条会话不在
+`phase_running()` 的扫描集合里、也不在 `ACL_STATES` 里 ⇒ **再也没有任何人回收它**。
 
 `phase_release()` 不是"进去就拆"。它先问一次 `job_state()`，**只有两种答案能通过**：
 
@@ -682,8 +703,13 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 对"作业还活着"这个事实一个字都改变不了。
 
 ★ **`note` 记的是"为什么走到这里"，不是"为什么可以拆"**：不论原因是
-`goodbye` / `orphaned` / `job_gone` / `job_<状态>`，这一节都要自己查一遍。
+`goodbye` / `orphaned` / `job_gone` / `job_<状态>` / `job_id_mismatch` /
+`enroll_timeout:…` / `queued_timeout:…`，这一节都要自己查一遍。
 少了这条，`phase_running()` 判错一次就会拆掉一个还在跑的作业，而这道闸形同虚设。
+
+★ 拆除做完时记的审计事件名是 `released`（"拆除做完了"），**另带一格 `state`**
+说它落进了哪个终态 —— 光看事件名分不出 `rejected` / `expired` / `released`，
+而这三件事在排查时问的是不同的问题。
 
 另有三个记录在数据库 `trust` 字段上的特殊值。`recovered` 表示这条记录是从 nft 规则
 反推出来的（见第六节），它**永不参与自动 `scancel`** ——
@@ -730,6 +756,16 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 保留不等于不管：非终态连着停留超过 `stuck_job_seconds` 会写一条 `job_stuck`
 审计（`note_nonterminal()`）。**它不释放任何东西** —— 作业是集群的，
 而我们拆掉的防护是不可逆的。
+
+★★ **唯一的例外，而它窄到只有一格**：会话还停在 `submitted`（一次都没登记上）
+**并且**作业不是 `RUNNING`，等过 `queued_ttl`（24 小时）之后会被回收。
+两半判据缺一不可 —— 少了"还在 `submitted`"，一条已经登记、用户正在用、只是作业被
+挂起的会话会被收掉；少了这一格，一条永远排不上队的会话会**永远**占着一个候选端口
+和用户的一个会话名额（`OCCUPYING_STATES` 含 `submitted`），缺省
+`max_sessions_per_user=1` 下那个用户**再也开不了新会话**。
+★ 24 小时这个数**不是** `enroll_ttl`（1800 秒）能替代的：排队是集群的正常状态，
+拿半小时去收它等于自动取消用户特意提交、正在排队的作业。见账本 F27 与
+`docs/CONFIGURATION.md` 的〈会话停在 `submitted` 的两个超时〉。
 
 ### 3.1.1 ★★ 还有第三条轴：**谁在看**这条会话
 
