@@ -36,6 +36,10 @@ import time
 VERSION = "0.11"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
+# systemd 单元的名字。★ 与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
+# 部署脚本里那个变量是同一个事实，三处各写一遍（有 lint 的机会再说 —— 目前单元
+# 名字只在部署期用一次，改错的话 `systemctl` 会当场说"没有这个单元"）。
+SERVICE = "slurmate-sessiond"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -98,6 +102,48 @@ def sessiond_path():
       `<prefix>/sbin/slurmate-sessiond`，而前缀可以改，所以留一个出口。
     """
     return os.environ.get("SLURMATE_SESSIOND") or DEFAULT_SESSIOND
+
+
+def reload_daemon():
+    """配置改完之后，让**正在跑的**守护进程重新读一遍（v0.12 阶段 3）。
+
+    ★★ 这是热重载在**运维动线**上的落点：装插件、对齐配置都会改配置文件，而从
+      前的下线是"再跑一次 deploy.sh"（它 stop + start，所以**所有会话都断一次**）。
+      现在这两条动线自己把话说完了。
+
+    ★ 用 `systemctl reload`（单元的 `ExecReload` 是 `kill -HUP`），**不是 restart**
+      —— 这正是这一版要的东西：正在跑的会话一条都不该断。
+
+    ★ 失败**只报一句、绝不致命**：配置已经写好了，而"服务没在跑"是最常见的情形
+      （首次部署、或者管理员刚把它停掉），那不是错误。
+    ★★ 但**不许说谎**：三条路各说各的话 —— "重载过了" / "服务没在跑，下次启动
+      用上" / "重载没成功，得重启"。把这三件事混成一句"配置已生效"，就是这一版
+      一路在清的那种静默。
+    """
+    try:
+        act = subprocess.run(["systemctl", "is-active", SERVICE],
+                             capture_output=True, text=True)
+    except OSError:
+        return          # 这台机器上没有 systemctl（开发机 / 容器）—— 什么都不说
+    if act.stdout.strip() != "active":
+        print("（守护进程没在跑，配置已经写好 —— 下次启动就会用上。）")
+        return
+    try:
+        rc = subprocess.run(["systemctl", "reload", SERVICE]).returncode
+    except OSError as e:
+        print("★ 配置写好了，但没能让守护进程重读（%s）。" % e, file=sys.stderr)
+        return
+    if rc == 0:
+        # ★★ 说准：`systemctl reload` 回 0 只表示**信号送到了** —— systemd 不知道
+        #   服务内部接不接受这次改动（守护进程可能**整个拒绝**，见它的
+        #   `reload_config()`）。所以这句话**不能**是"配置已生效"。
+        print("已让守护进程重读配置（`systemctl reload`）——"
+              "正在跑的会话一条都没断。")
+        print("  它有没有接受这次改动，看它自己的日志："
+              "journalctl -u %s -n 20" % SERVICE)
+    else:
+        print("★ 配置写好了，但 `systemctl reload` 没成功。它会在下次重启时生效；"
+              "想立刻生效：sudo systemctl restart %s" % SERVICE, file=sys.stderr)
 
 
 def cmd_plugin_install(args):
@@ -165,7 +211,12 @@ def cmd_plugin_install(args):
         #   失败"，管理员会去重装那个已经装好了的包。
         print("★ 插件包**已经装好**了，但站点配置没能对齐（原因见上）——"
               "在配置对好之前，守护进程可能起不来。", file=sys.stderr)
-    return src
+        return src
+    # ★ 装好了、配置也对齐了 ⇒ 让守护进程**重读一遍**（热重载）。
+    #   这一步从前不存在：那时候装完插件要**再跑一次 deploy.sh**，而它是
+    #   stop + start —— 所有人的会话断一次，就为了加一个插件。
+    reload_daemon()
+    return 0
 
 
 def cmd_plugin_sync(args):
@@ -197,10 +248,16 @@ def cmd_plugin_sync(args):
     if args.config:
         argv += ["--config", args.config]
     try:
-        return subprocess.run(argv).returncode
+        rc = subprocess.run(argv).returncode
     except OSError as e:
         print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
+    if rc == 0:
+        # ★ 对齐动了配置文件 ⇒ 让守护进程重读一遍（见 reload_daemon）。
+        #   从前这一条之后管理员还得记得"改完要重启"，而忘了的后果是
+        #   "配了但它就是不生效" —— 正是这一版要消灭的那类症状。
+        reload_daemon()
+    return rc
 
 
 def rpc(req, timeout=40.0):

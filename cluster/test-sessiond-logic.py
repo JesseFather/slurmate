@@ -4882,12 +4882,23 @@ exit 0
         _seen = []
 
         class _FakeRun(object):
+
             def __call__(self, argv, *a, **kw):
                 _seen.append(list(argv))
 
                 class _R(object):
                     returncode = 0
-                return _R()
+
+                r = _R()
+                # ★★ `stdout` / `stderr` **必须有**：真的 `subprocess.run` 一定带
+                #   这两个属性，而这个桩从前只有 `returncode` —— 被调方一读就是
+                #   AttributeError（v0.12 阶段 3 新加的 `reload_daemon()` 是第一个
+                #   读者）。桩比真的瘦，与"桩比真的干净"是同一类毛病。
+                # ★ 而 `is-active` 要回**真的 systemd 会回的东西**：回空串会让它
+                #   走"服务没在跑"那条路，于是下面那条判据永远测不到。
+                r.stdout = "active\n" if "is-active" in argv else ""
+                r.stderr = ""
+                return r
 
         class _SyncArgs(object):
             plugins_dir = ""
@@ -4901,19 +4912,62 @@ exit 0
         _saved_run = _cli.subprocess.run
         _saved_exe = _cli.sessiond_path
         _saved_euid = _cli.os.geteuid
+        _saved_stdout = sys.stdout
         try:
             _cli.subprocess.run = _FakeRun()
             _cli.sessiond_path = lambda: _fake_exe
             _cli.os.geteuid = lambda: 0
+            sys.stdout = io.StringIO()
             _rc = _cli.cmd_plugin_sync(_SyncArgs())
+            _sync_out = sys.stdout.getvalue()
         finally:
             _cli.subprocess.run = _saved_run
             _cli.sessiond_path = _saved_exe
             _cli.os.geteuid = _saved_euid
+            sys.stdout = _saved_stdout
         check("★ `slurmate plugin sync` 转发到 `--sync-plugin-config`（判据只有一处）",
               _rc == 0 and _seen and _seen[0][1].endswith("slurmate-sessiond")
               and "--sync-plugin-config" in _seen[0],
               repr(_seen))
+        # ★★ 而对齐成功之后**真的**去让守护进程重读了配置。
+        #   从前这一步不存在：配置改完要管理员自己记得再跑一次 deploy.sh，而它是
+        #   stop + start —— 所有人的会话断一次，就为了改一行插件配置。
+        check("★★ 对齐成功 ⇒ 真的调了 `systemctl reload`（配置改动不再需要重启）",
+              any(a[:2] == ["systemctl", "reload"] for a in _seen), repr(_seen))
+        check("★★ 而它**说准了**这一步做成了什么：只是「发了重载信号」，"
+              "**不是**「配置已生效」—— `systemctl reload` 回 0 只表示信号送到了，"
+              "守护进程可能整个拒绝 —— 并指路去看日志",
+              "reload" in _sync_out and "没断" in _sync_out
+              and "journalctl" in _sync_out, repr(_sync_out[:400]))
+
+        # ★★ 对照组：**服务没在跑**时不许说"已生效" —— 那是两件不同的事，混成
+        #    一句就是这一版一路在清的那种静默。
+        class _FakeRunDown(_FakeRun):
+
+            def __call__(self, argv, *a, **kw):
+                r = _FakeRun.__call__(self, argv, *a, **kw)
+                if "is-active" in argv:
+                    r.stdout = ""            # 服务没在跑
+                return r
+
+        try:
+            _n0 = len(_seen)                 # ★ 只判这一轮新加的（`_seen` 是共用的）
+            _cli.subprocess.run = _FakeRunDown()
+            _cli.sessiond_path = lambda: _fake_exe
+            _cli.os.geteuid = lambda: 0
+            sys.stdout = io.StringIO()
+            _rc = _cli.cmd_plugin_sync(_SyncArgs())
+            _down_out = sys.stdout.getvalue()
+        finally:
+            _cli.subprocess.run = _saved_run
+            _cli.sessiond_path = _saved_exe
+            _cli.os.geteuid = _saved_euid
+            sys.stdout = _saved_stdout
+        check("★★ 服务没在跑 ⇒ 说的是「下次启动就会用上」，**不是**「已生效」"
+              "（也不去调 reload）",
+              _rc == 0 and "下次启动" in _down_out and "没断" not in _down_out
+              and not any(a[:2] == ["systemctl", "reload"] for a in _seen[_n0:]),
+              "rc=%s / %r / %s" % (_rc, _down_out[:200], _seen[_n0:]))
 
         # ── ⑦ ★★ `--check-plugins` 那一屏说的是**清单缺省**，不是本站开关（F39）──
         #
@@ -9135,6 +9189,444 @@ exit 0
           _st_of(_fb, "s-fb") == mod.ST_RELEASED, _st_of(_fb, "s-fb"))
 
     mod.now_ts = _rel_real_now
+    # ── 32. 热重载（v0.12 阶段 3）────────────────────────────────────────────
+    #
+    # ★★ 这一节的判据**不是**「新值读进来了」—— 那个太弱：一个「重读 + 重启」的
+    #   实现照样满足它，而它把所有人的会话断一次。真正要钉的是三件事：
+    #     · 新值生效了，而**进程还是同一个**（同一个 store 句柄、同一条连接 ——
+    #       重启的话这些全都会换掉）；
+    #     · 校验或可热性不过 ⇒ **一个字都不改**（旧值仍是旧值）；
+    #     · 插件目录变了 ⇒ 重载之后**不用重启就能用**。
+    print("\n── 32. 热重载（v0.12 阶段 3）──")
+
+    # 32.1 ★★ 那张表必须**覆盖每一个配置键**
+    #
+    # ★ 它是这一版的承重件：漏登记一个键，那个键就落进 `_changed_keys_by_class`
+    #   的缺省档（COLD，见那里的说明）—— 行为是保守的，但「哪一个键属于哪一档」
+    #   不该由「有没有人记得」决定。多一个不存在的键同样是错：那说明表在描述一个
+    #   已经删掉的键，而读表的人会以为它还在。
+    check("★★ 可热重载表覆盖**每一个**配置键（多一个、少一个都红）",
+          set(mod.RELOAD_CLASS) == set(mod.GLOBAL_KEYS),
+          "表里多了 %s / 少了 %s"
+          % (sorted(set(mod.RELOAD_CLASS) - set(mod.GLOBAL_KEYS)),
+             sorted(set(mod.GLOBAL_KEYS) - set(mod.RELOAD_CLASS))))
+    check("★ 而三档**都真的用到了**（空着一档说明分档没做）",
+          set(mod.RELOAD_CLASS.values()) == {mod.RELOAD_HOT, mod.RELOAD_NOTICE,
+                                             mod.RELOAD_COLD},
+          str(sorted(set(mod.RELOAD_CLASS.values()))))
+
+    # ── 这一节的两件基础设施 ────────────────────────────────────────────────
+    #
+    # ① 一个**真的记得规则集**的 nft 替身。它只接管「命令执行」，不接管 `Nft`
+    #    对象本身 —— 因为 32.8 要验的正是 `ensure()` **按值比对**那一段：先读出
+    #    那条基础规则的**网段**，与配置比，不同才删旧插新。只记「删了哪些
+    #    comment」的替身会把「读出来的是什么」抹掉，而那一步恰是被测的东西。
+    class _NftSim(object):
+
+        def __init__(self):
+            self.rules = []            # [{"h": 句柄, "text": 规则原文}]
+            self._h = 0
+
+        def _render(self, with_handle):
+            out = []
+            for r in self.rules:
+                ln = "        " + r["text"]
+                if with_handle:
+                    ln += " # handle %d" % r["h"]
+                out.append(ln)
+            return ("\n".join(out) + "\n") if out else ""
+
+        def _nft(self, args, check=False, timeout=10):
+            a = list(args)
+            with_h = a[:1] == ["-a"]
+            if with_h:
+                a = a[1:]
+            if a[:2] == ["list", "table"]:
+                return 0, "", ""
+            if a[:2] in (["add", "table"], ["add", "chain"]):
+                return 0, "", ""
+            if a[:2] == ["list", "chain"]:
+                return 0, self._render(with_h), ""
+            if a[:2] == ["insert", "rule"]:
+                self._h += 1
+                self.rules.insert(0, {
+                    "h": self._h,
+                    "text": " ".join(a[4:-2]) + ' comment "%s"' % a[-1]})
+                return 0, "", ""
+            if a[:2] == ["delete", "rule"]:
+                h = int(a[-1])
+                self.rules = [r for r in self.rules if r["h"] != h]
+                return 0, "", ""
+            return 0, "", ""
+
+        def cidr(self):
+            """现在那条基础规则里的网段（没有那条规则 ⇒ None）。"""
+            return mod.Nft.base_offcluster_cidr(self._render(True))
+
+    _nftsim = _NftSim()
+
+    # ② 这一节自己的**插件目录**：`default_plugins_dir()` 是模块级的，而
+    #    `reload_config()` 内部会重新 `Config(path)` ⇒ 它必须在**整个 reload
+    #    期间**都指向这里，否则重扫的是真插件目录而不是本节的。整节包在
+    #    try/finally 里，就是为了这个。
+    _RL = os.path.join(tmpdir, "reload-plugins")
+    os.makedirs(_RL, exist_ok=True)
+    _RU1 = "01M2JKHTZGKJBFQQTWYXMQMF70"
+    _RU2 = "01M2JKHTZGKJBFQQTWYXMQMF71"
+
+    def _rl_pkg(uid, name):
+        put_package(_RL, [("plugin.json", json.dumps(
+            {"id": uid, "name": name, "version": "1.0.0",
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
+
+    _rl_pkg(_RU1, "alpha")
+    _seq_rl = [0]
+    _rl_ds = []
+
+    def _mk_reload_d(cpath):
+        """一个**能从盘上那份配置重读**的守护进程（这一节专用）。
+
+        ★ 与 `_mkd`（26 节）的差别在**配置的来源**：那个克隆的是内存里那个对象
+          （没有 `path` / `raw`），而热重载的全部工作就是「从 `path` 再读一遍」。
+        ★ 部件用**真的**（Nft / Slurm / Cluster）：32.3 有一条判据是「每一个按
+          引用拿着配置的部件都换成了同一份新的」，而它靠的正是它们**真的有
+          `cfg` 属性**。只有 nft 的**命令执行**被换掉。
+        """
+        _seq_rl[0] += 1
+        c = mod.Config(cpath)
+        c.state_dir = os.path.join(tmpdir, "rl-state")
+        c.log_dir = os.path.join(tmpdir, "rl-log")
+        c.audit_log = os.path.join(c.log_dir, "audit.log")
+        c.db_path = os.path.join(tmpdir, "rl-%d.db" % _seq_rl[0])
+        os.makedirs(c.state_dir, exist_ok=True)
+        os.makedirs(c.log_dir, exist_ok=True)
+        dd = mod.Sessiond(c)
+        dd.nft._nft = _nftsim._nft
+        dd.audit_fp = None
+        dd.user_home = lambda uid: home
+        _rl_ds.append(dd)
+        return dd
+
+    _saved_rl_dir = mod.default_plugins_dir
+    mod.default_plugins_dir = lambda: _RL
+    try:
+        # 32.2 ★ `changed_*_keys`：判据是**配置里写了什么**
+        #
+        # ★ 比的是 `Config.raw`，不是解析出来的属性 —— 留空表示「去 PATH 上找」
+        #   的那几格命令路径，属性值可能一模一样而配置**真的变了**。
+        _cf_a = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "max_sessions_per_user = 2\n", "rl-a.conf")
+        _cf_b = write_conf("cluster_cidr = 198.51.100.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "max_sessions_per_user = 2\n", "rl-b.conf")
+        _cfg_a, _cfg_b = mod.Config(_cf_a), mod.Config(_cf_b)
+        check("★★ 只改了 cluster_cidr ⇒ 它落在 NOTICE 档，而 COLD 档是空的",
+              mod.changed_notice_keys(_cfg_a, _cfg_b) == ["cluster_cidr"]
+              and mod.changed_cold_keys(_cfg_a, _cfg_b) == [],
+              "%s / %s" % (mod.changed_notice_keys(_cfg_a, _cfg_b),
+                           mod.changed_cold_keys(_cfg_a, _cfg_b)))
+        check("★ 而「随时可热」那一档不报它（它确实会动到已经建立的东西）",
+              "cluster_cidr" not in mod._changed_keys_by_class(
+                  _cfg_a, _cfg_b, mod.RELOAD_HOT))
+        check("★ 什么都没改 ⇒ 两档都是空的（不然每次 reload 都要说一堆废话）",
+              mod.changed_notice_keys(_cfg_a, mod.Config(_cf_a)) == []
+              and mod.changed_cold_keys(_cfg_a, mod.Config(_cf_a)) == [])
+        _cf_c = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "max_sessions_per_user = 5\n", "rl-c.conf")
+        check("★ 改了 max_sessions_per_user ⇒ **一个字都不说**（HOT 档只影响新发生的事）",
+              mod.changed_notice_keys(_cfg_a, mod.Config(_cf_c)) == [])
+        _cf_d = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/home\n"
+                           "range_start = 55001\nrange_end = 55099\n", "rl-d.conf")
+        _cf_e = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/other\n"
+                           "range_start = 55001\nrange_end = 55099\n", "rl-e.conf")
+        check("★★ 改了 readonly_paths ⇒ 落进 **COLD** 档（它只有重启才生效）",
+              mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))
+              == ["readonly_paths"],
+              str(mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))))
+
+        # 32.3 ★★ 改一个「随时可热」的键 ⇒ 生效，而**进程还是同一个**
+        #
+        # ★ 三条一起才是「没有重启」的证明：同一个 `Sessiond`、同一个 store 句柄、
+        #   同一条连接 —— 而那条连接拿到的**也是新配置**（见下面那一条）。
+        _LIVE = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "max_sessions_per_user = 2\n", "rl-live.conf")
+        _d_hot = _mk_reload_d(_LIVE)
+        _store0 = _d_hot.store
+        _cli_live, _conn_live = _pair(_d_hot)
+        check("（夹具）热重载用的守护进程起来了，并且连着一条连接",
+              _d_hot.cfg.max_sessions_per_user == 2
+              and _conn_live in _d_hot.conns(),
+              str(_d_hot.conns()))
+
+        with open(_LIVE, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 5\n")
+        _rl_ok, _rl_notes = _d_hot.reload_config()
+        check("★★ 改一个 HOT 键 + 热重载 ⇒ 新值生效了",
+              _rl_ok is True and _d_hot.cfg.max_sessions_per_user == 5,
+              "ok=%s / 现值=%s" % (_rl_ok, _d_hot.cfg.max_sessions_per_user))
+        check("★★ 而**进程还是同一个** —— 同一个 store 句柄、同一条连接还在",
+              _d_hot.store is _store0 and _conn_live in _d_hot.conns(),
+              "store 换了" if _d_hot.store is not _store0 else "连接没了")
+        check("★ HOT 档**什么都不说**（notes 是空的）", _rl_notes == [], str(_rl_notes))
+        check("★★ 而那条连接拿到的**也是新配置**（它按引用存着 cfg —— 只换"
+              "`Sessiond` 自己那一份的话，症状是一半新一半旧，且没有东西会报错）",
+              _conn_live.cfg is _d_hot.cfg,
+              "%s / %s" % (id(_conn_live.cfg), id(_d_hot.cfg)))
+        check("★★ 而且**每一个**按引用拿着配置的部件都换成了同一份"
+              "（判据是「有没有 cfg 属性」，不是一张手抄的类名清单）",
+              all(o.cfg is _d_hot.cfg for o in _d_hot._config_holders()),
+              str([(type(o).__name__, o.cfg is _d_hot.cfg)
+                   for o in _d_hot._config_holders()]))
+
+        # 32.4 ★★ 改一个**必须重启**的键 ⇒ 整个 reload 拒绝，一个字都不改
+        _COLD = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "readonly_paths = /shared/home\n"
+                           "max_sessions_per_user = 2\n", "rl-cold.conf")
+        _dc = _mk_reload_d(_COLD)
+        with open(_COLD, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "readonly_paths = /shared/other\n"
+                     "max_sessions_per_user = 7\n")
+        _rl_ok, _rl_notes = _dc.reload_config()
+        check("★★ 改了 readonly_paths ⇒ 热重载**整个拒绝**"
+              "（用户拍的那条：校验不全过就一个字都不改）",
+              _rl_ok is False and _rl_notes == [],
+              "ok=%s notes=%s" % (_rl_ok, _rl_notes))
+        check("★★ 而**连那个本来可以热的键也没被改** —— 这就是「整个拒绝」的意思"
+              "（只拒绝那一个键的话，max_sessions_per_user 会悄悄变成 7）",
+              _dc.cfg.max_sessions_per_user == 2
+              and _dc.cfg.raw.get("readonly_paths") == "/shared/home",
+              "%s / %s" % (_dc.cfg.max_sessions_per_user,
+                           _dc.cfg.raw.get("readonly_paths")))
+
+        # 32.5 ★★ 新配置**读不动** ⇒ 旧配置继续服务
+        #
+        # ★ 坏配置里那个配额特意写成 **4**（旧值是 3）：两个数**不同**，这条断言
+        #   才真的在判"有没有被换掉"。写成同一个数的话，一个"部分采用"的实现
+        #   照样绿，而这条用例会以"守住了"收场。
+        _BAD = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                          "range_start = 55001\nrange_end = 55099\n"
+                          "max_sessions_per_user = 3\n", "rl-bad.conf")
+        _dbad = _mk_reload_d(_BAD)
+        with open(_BAD, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 4\n"
+                     "[plugin:alpha]\nenabled = yes\n")     # 主文件里不许有块头
+        _rl_ok, _rl_notes = _dbad.reload_config()
+        check("★★ 新配置**语法就不对** ⇒ 拒绝，旧配置继续服务",
+              _rl_ok is False and _dbad.cfg.max_sessions_per_user == 3,
+              "ok=%s / %s" % (_rl_ok, _dbad.cfg.max_sessions_per_user))
+
+        # 32.6 ★★ 新配置**过不了自检** ⇒ 同样拒绝（走的是**另一条**路：解析成功、
+        #   而 validate() 有话说）
+        _INV = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                          "range_start = 55001\nrange_end = 55099\n"
+                          "max_sessions_per_user = 3\n", "rl-inv.conf")
+        _di = _mk_reload_d(_INV)
+        with open(_INV, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 0\n")
+        _rl_ok, _rl_notes = _di.reload_config()
+        check("★★ 新配置过不了自检（max_sessions_per_user = 0）⇒ 拒绝，旧值仍是旧值",
+              _rl_ok is False and _di.cfg.max_sessions_per_user == 3,
+              "ok=%s / %s" % (_rl_ok, _di.cfg.max_sessions_per_user))
+
+        # 32.7 ★★ 插件目录变了 ⇒ **不用重启**就能用
+        #
+        # ★ 这是用户那条诉求的正面：装一个插件之后不该断任何人的会话。
+        _PLUG = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n", "rl-plug.conf")
+        _dp = _mk_reload_d(_PLUG)
+        check("（夹具）重载之前本站只有 alpha 一个插件",
+              sorted(s.name for s in _dp.cfg.plugin_specs) == ["alpha"],
+              str(sorted(s.name for s in _dp.cfg.plugin_specs)))
+        _rl_pkg(_RU2, "beta")                       # 往目录里丢一个新包
+        _rl_ok, _rl_notes = _dp.reload_config()
+        check("★★ 往插件目录里丢一个包 + 热重载 ⇒ **不用重启**新插件就可用了",
+              _rl_ok is True
+              and sorted(s.name for s in _dp.cfg.plugin_specs) == ["alpha", "beta"],
+              "ok=%s / %s" % (_rl_ok, sorted(s.name for s in _dp.cfg.plugin_specs)))
+        check("★ 而 `plugins_by_id` / `plugins_by_name` 两张表也跟着重建了"
+              "（只换 Config 而漏掉它们，症状是「装上了但认不出」）",
+              _RU2 in _dp.cfg.plugins_by_id
+              and [s.id for s in _dp.cfg.plugins_by_name.get("beta", [])] == [_RU2],
+              "%s / %s" % (sorted(_dp.cfg.plugins_by_id), _dp.cfg.plugins_by_name))
+        check("★ 而插件包的**快照缓存**被清空了（它本来标注的是「刻意不失效」——"
+              "那说的是从前那个进程一辈子只有启动那一刻的认知）",
+              _dp._plugin_cache == {}, str(_dp._plugin_cache))
+
+        # 32.8 ★★ `cluster_cidr` 改了 ⇒ **内核里那条基础规则的网段真的变了**
+        #
+        # ★★ 这一条修的是一个**真缺陷**（v0.12 之前只判"comment 在不在"）：改了
+        #    cluster_cidr 之后**连 restart 都不生效** —— comment 还在那儿，于是
+        #    永远走"已存在"那条路，而内核里那条基础规则一直指着旧网段。而文档说
+        #    它是"即使前面所有校验都被绕过"的**最后一道几何约束**。
+        _CIDR = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n", "rl-cidr.conf")
+        _d_cidr = _mk_reload_d(_CIDR)
+        _nftsim.rules = []                    # 从干净的规则集开始
+        _d_cidr.nft.ensure()
+        check("（夹具）基础规则建好了，网段是配置里那个",
+              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
+        with open(_CIDR, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 198.51.100.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n")
+        _rl_ok, _rl_notes = _d_cidr.reload_config()
+        check("★★ 改了 cluster_cidr + 热重载 ⇒ **内核里那条基础规则的网段真的变了**"
+              "（今天连 restart 都不变：实现只看 comment 在不在）",
+              _rl_ok is True and _nftsim.cidr() == "198.51.100.0/24",
+              "ok=%s / nft 里现在是 %s" % (_rl_ok, _nftsim.cidr()))
+        check("★★ 而那条规则**只剩一条**（是删旧插新，不是两条并存）",
+              sum(1 for r in _nftsim.rules
+                  if mod.Nft.BASE_OFFCLUSTER in r["text"]) == 1,
+              str([r["text"] for r in _nftsim.rules]))
+        check("★ 而且它说了 NOTICE 那一档的那句话（「哪些流量被放行」这一刻真的变了）",
+              _rl_notes == ["cluster_cidr"], str(_rl_notes))
+
+        # 32.9 ★ `base_offcluster_cidr` 的三态，以及**删基础规则真的删得掉**
+        #
+        # ★★ 后面那一条承重：`del_by_comment()` 从前用 `RE_SESS`（只认
+        #    `slurmate-sess-…`）去找句柄 —— 拿它去删基础规则会**一条都匹配不到**，
+        #    而函数照样返回 True（它报的是"规则集读得到"）。症状是"删过了，但规则
+        #    还在"，而没有任何地方会报错 —— 那正是 32.8 那条修复的另一半。
+        check("★ 那条规则在 ⇒ 读出它的网段",
+              mod.Nft.base_offcluster_cidr(
+                  '        ip daddr != 203.0.113.0/24 accept'
+                  ' comment "slurmate-base-offcluster" # handle 7')
+              == "203.0.113.0/24")
+        check("★★ 那条规则**不在** ⇒ None（与「在、但读不出网段」必须分得开）",
+              mod.Nft.base_offcluster_cidr("") is None
+              and mod.Nft.base_offcluster_cidr(
+                  '        oif "lo" accept comment "slurmate-base-lo" # handle 1')
+              is None)
+        _sim2 = _NftSim()
+        _sim2._nft(["insert", "rule", "inet", "slurmate", "output",
+                    "ip", "daddr", "!=", "192.0.2.0/24", "accept",
+                    "comment", mod.Nft.BASE_OFFCLUSTER])
+        _sim2._nft(["insert", "rule", "inet", "slurmate", "output",
+                    "oif", "lo", "accept", "comment", mod.Nft.BASE_LO])
+        _d_del = _mk_reload_d(_PLUG)
+        _d_del.nft._nft = _sim2._nft
+        _ok_del = _d_del.nft.del_by_comment(mod.Nft.BASE_OFFCLUSTER)
+        check("★★ `del_by_comment` 删得掉**基础规则**（它从前用的正则只认会话规则 "
+              "⇒ 一条都匹配不到，而函数照样返回 True）",
+              _ok_del is True and len(_sim2.rules) == 1
+              and mod.Nft.BASE_LO in _sim2.rules[0]["text"],
+              str([r["text"] for r in _sim2.rules]))
+
+        # 32.10 ★ 端口区间换了 ⇒ 游标重置（不重置的话它会落在新区间**之外**）
+        _RANGE = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                            "range_start = 55001\nrange_end = 55099\n", "rl-range.conf")
+        _d_rg = _mk_reload_d(_RANGE)
+        _d_rg.port_cursor = 55090                   # 已经跑到区间尾部
+        with open(_RANGE, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 56001\nrange_end = 56099\n")
+        _rl_ok, _rl_notes = _d_rg.reload_config()
+        check("★★ 端口区间换了 ⇒ 游标回到**新的**起点（不重置的话它会落在 "
+              "56001–56099 之外，而按游标算出来的端口会跟着跑出去）",
+              _rl_ok is True and _d_rg.port_cursor == 56001,
+              "游标=%s" % _d_rg.port_cursor)
+        check("★ 而区间变了要说一句（已经在跑的会话，端口可能落在新区间外）",
+              _rl_notes == sorted(["range_start", "range_end"]), str(_rl_notes))
+
+        # 32.11 ★★ SIGHUP **不是退出**，而是"置一个待重载标志"
+        #
+        # ★ 从前三个信号走同一条路（都退出），而单元的 `ExecReload` 写的正是
+        #   `kill -HUP` ⇒ `systemctl reload` 的实际语义与它声明的**相反**。
+        _SIGD = _mk_reload_d(_PLUG)
+        _SIGD._on_signal(mod.signal.SIGHUP, None)
+        check("★★ SIGHUP ⇒ 只**置标志**，进程不退出",
+              _SIGD._reload_pending is True and _SIGD.running is True,
+              "pending=%s running=%s" % (_SIGD._reload_pending, _SIGD.running))
+        _SIGD._on_signal(mod.signal.SIGTERM, None)
+        check("★ SIGTERM 仍然是退出（而且**不**触发重载）",
+              _SIGD.running is False and _SIGD._reload_pending is True,
+              "pending=%s running=%s" % (_SIGD._reload_pending, _SIGD.running))
+
+        # 32.12 ★★ 主循环**真的消费**那个标志
+        #
+        # ★ 少了这一条，`_on_signal` 置的那个标志就是一个**永远不发生的重载** ——
+        #   而 32.11 那两条照样绿（它们只判标志被置上了）。
+        _LOOP = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                           "range_start = 55001\nrange_end = 55099\n"
+                           "max_sessions_per_user = 4\n", "rl-loop.conf")
+        _dloop = _mk_reload_d(_LOOP)
+        _dloop._on_signal(mod.signal.SIGHUP, None)
+        with open(_LOOP, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.0/24\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 9\n")
+        _loop_seen = {"ticked": 0}
+
+        def _fake_tick():
+            _loop_seen["ticked"] += 1
+            _dloop.running = False          # 跑一轮就让它退出来
+
+        _dloop._run_tick = _fake_tick
+        _dloop.run()
+        check("★★ 主循环**真的消费**了那个标志：进去之后新配置已经生效"
+              "（信号只置标志、重活在循环顶部做）",
+              _dloop.cfg.max_sessions_per_user == 9 and _loop_seen["ticked"] == 1,
+              "值=%s tick=%s" % (_dloop.cfg.max_sessions_per_user,
+                                 _loop_seen["ticked"]))
+
+        # 32.13 ★★ 成功与失败**各留一条审计**
+        #
+        # ★ 「改过配置」这件事要能事后查，而只看日志等级分不出这两件事（两条都
+        #   是 error / 都是 info 的一部分）。判据落在**事件名**上。
+        class _AuditCap(logging.Handler):
+
+            def __init__(self):
+                logging.Handler.__init__(self)
+                self.lines = []
+
+            def emit(self, rec):
+                self.lines.append(rec.getMessage())
+
+        _acap = _AuditCap()
+        # ★ 等级要**显式调低**：`audit()` 走的是 `log.info`，而上面几节动过这个
+        #   logger 的等级。不调的话 record 根本不会被创建，handler 一个字都收不到
+        #   —— 那样这条用例会以"审计没记"收场，而真相是"这条用例没在读"。
+        _saved_lvl = mod.log.level
+        mod.log.addHandler(_acap)
+        mod.log.setLevel(logging.DEBUG)
+        try:
+            _d_aud = _mk_reload_d(_PLUG)
+            _d_aud._do_reload()
+            with open(_PLUG, "w", encoding="utf-8") as _f:
+                _f.write("cluster_cidr = 192.0.2.0/24\nrange_start = 55001\n"
+                         "range_end = 55099\nmax_sessions_per_user = 0\n")
+            _d_aud._do_reload()
+        finally:
+            mod.log.removeHandler(_acap)
+            mod.log.setLevel(_saved_lvl)
+        _ja = [m for m in _acap.lines if "AUDIT" in m]
+        check("★★ 成功的重载留 `config_reload`、被拒的留 `config_reload_rejected`"
+              "（不是一个笼统的「配置变了」）",
+              any("config_reload" in m and "config_reload_rejected" not in m
+                  for m in _ja)
+              and any("config_reload_rejected" in m for m in _ja),
+              str(_ja)[:400])
+
+    finally:
+        mod.default_plugins_dir = _saved_rl_dir
+
+    for _dd in _rl_ds:
+        try:
+            _dd.store.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+
     mod.log.setLevel(_rel_real_level)
     for _dd in _rel_daemons:
         try:

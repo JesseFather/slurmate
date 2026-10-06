@@ -806,6 +806,17 @@ SNAPSHOT_INTERVAL = 30.0
 # 一次跑完的话期间 tick 与**所有别的连接**都停摆。
 MAX_DISPATCH_PER_WAKEUP = 8
 
+# `select` 一次最多阻塞这么久（v0.12 阶段 3）。
+#
+# ★★ 它是"信号要等一个 tick 才被看见"的解药，而那个现象的来源是 PEP 475：
+#   被信号打断的系统调用会**自动重试**（超时按原起点重算），所以 `select` 不会
+#   因为一个 SIGHUP 提前返回。没有这个上限：
+#     · `systemctl reload` 要等最多一个 tick 才真正重载；
+#     · `systemctl stop` 今天也要等最多一个 tick 才退出（同一个成因，同一个解药）。
+# ★ 取 1 秒：对人的操作来说与"立刻"无差别，而空转的代价只是一次 `select` 返回
+#   空列表（后面那两行什么都不做）。
+SIGNAL_POLL_SECONDS = 1.0
+
 # ── 集群信息：三层钟 ────────────────────────────────────────────────────────
 #
 # ★★ 这一节要的是**一次查询服务所有连接**。
@@ -1693,6 +1704,105 @@ GLOBAL_KEYS = frozenset([
     # 那段说明：隐式缺省会让"装/卸一个插件"这种配置之外的动作悄悄改变行为。
     "default_plugin",
 ])
+
+# ── 每个配置键的**可热重载性**（v0.12 阶段 3）────────────────────────────────
+#
+# ★★ 三档，而**每一个键都要在这里有归属** —— `GLOBAL_KEYS` 里漏一个、或者这里
+#   多一个不存在的键，用例当场红（`set(RELOAD_CLASS) == set(GLOBAL_KEYS)`）。
+#   理由与"清单里认得的键"那条 lint 逐字相同：靠人记得去更新的表，漏掉的那一格
+#   不会报错，只会让那个键**悄悄地**落进某一档。
+#
+# ★ 分档的判据是「**它影响的是哪一段时间**」，不是"改起来麻不麻烦"：
+#
+#   HOT —— 只影响"从这一刻之后**新发生的事**"。已经建立的会话一个字都不动，
+#          所以换上去立刻生效，没有副作用，也不必说什么。
+#
+#   NOTICE —— 会**动到已经建立的东西**。换上去仍然是对的，但要说一句话：不说
+#          的话，"改完之后某个已经在跑的会话出了怪事"与这次改动之间的关系，
+#          没有任何地方连得上。
+#
+#   COLD —— **不是"运行期的事实"**。它只在部署那一刻有意义，或者根本不是配置键
+#          （`socket_path` / `db_path` / `tick_seconds` 这些来自常量，热重载管不
+#          着、也不该管 —— 它们不在 `GLOBAL_KEYS` 里，所以这里也没有它们的格）。
+#          ★ 碰到它 ⇒ **整个 reload 拒绝**（用户 2026-10-07 拍板：校验不全过就
+#          一个字都不改），报错点名是哪个键。
+#
+# ★ **插件配置里那些键**（`enabled` / `default_*` / `bin` / `auth_mode`）全在 HOT
+#   那一档，所以它们不在这张表里 —— 这张表管的是**主文件**里的站点通用键。它们的
+#   "只影响新发生的事"由 `PluginConfig` 的读者保证：会话一旦提交，它的资源与端口
+#   就落在会话记录里了，之后改配置不动它（见 `PluginConfig` 的 docstring）。
+RELOAD_HOT = "hot"
+RELOAD_NOTICE = "notice"
+RELOAD_COLD = "cold"
+
+RELOAD_CLASS = {
+    # ── 随时可热 ──────────────────────────────────────────────────────────
+    # 缺省插件：只决定"以后不带 service_kind 的提交落到哪个插件上"。
+    "default_plugin": RELOAD_HOT,
+    # 端口候选数：只影响**下一次**分配时给出去的那个候选列表。
+    "candidates_per_session": RELOAD_HOT,
+    # 两个配额：只判**新**会话与新连接（见 validate() 里那两段）。已经开着的
+    # 一个都不动 —— 这正是"只影响从这一刻之后新发生的事"。
+    "max_sessions_per_user": RELOAD_HOT,
+    "max_connections_per_user": RELOAD_HOT,
+
+    # ── 可热，但要说一句 ──────────────────────────────────────────────────
+    # 集群网段：换了之后**内核里那一条基础规则要跟着换**（`Nft.ensure()` 按值
+    # 比对，见那一节）。说一句是因为"哪些流量被放行"在这一刻真的变了。
+    "cluster_cidr": RELOAD_NOTICE,
+    # 端口区间与避让区间：已经在跑的会话，它的端口可能落在**新区间之外**。
+    # ★ 不拦：那些会话该跑完就跑完（拆的时候按会话记录里的端口拆，与区间无关），
+    #   而拦下来会让"改一个数"变成"必须重启、断掉所有人的会话"。
+    "range_start": RELOAD_NOTICE,
+    "range_end": RELOAD_NOTICE,
+    "reserved_ranges": RELOAD_NOTICE,
+    # 8 个 Slurm 命令路径：换了之后**下一次 fork** 用的就是新的那一个。说一句是
+    # 因为"正在跑的会话突然开始失败"与这次改动之间的关系，只有这句话连得上。
+    "sbatch": RELOAD_NOTICE,
+    "scancel": RELOAD_NOTICE,
+    "squeue": RELOAD_NOTICE,
+    "scontrol": RELOAD_NOTICE,
+    "sacctmgr": RELOAD_NOTICE,
+    "sinfo": RELOAD_NOTICE,
+    "sshare": RELOAD_NOTICE,
+    "sacct": RELOAD_NOTICE,
+
+    # ── 必须重启 ──────────────────────────────────────────────────────────
+    # 部署期配置：`deploy.sh` 读它（只读挂载的路径），守护进程里**零读者**
+    #   ⇒ 它在运行期改了本来就没有意义，而"改了就热重载"会让管理员以为生效了。
+    "readonly_paths": RELOAD_COLD,
+}
+
+
+def _changed_keys_by_class(old, new, cls):
+    """`old` → `new` 之间，落在 `cls` 这一档、而且**配置里写的值真的变了**的键。
+
+    ★ 比的是 `Config.raw`（配置里写了什么），不是解析出来的属性 —— 理由见
+      `Config.__init__` 里那一段：留空表示"去 PATH 上找"的那几格，属性值可能
+      一模一样而配置真的变了。
+    """
+    out = []
+    for key in sorted(GLOBAL_KEYS):
+        # ★★ 表里没有的键按 **COLD** 处理（`.get` 的第二个参数是缺省值）——
+        #   这是 fail-safe：哪天有人往 GLOBAL_KEYS 里加了一个键而忘了登记，
+        #   行为是"必须重启"，而不是"悄悄地可以热重载"。用例会因为表对不上
+        #   而红（`set(RELOAD_CLASS) == set(GLOBAL_KEYS)`），但在那之前它
+        #   也不会造成任何伤害。
+        if RELOAD_CLASS.get(key, RELOAD_COLD) != cls:
+            continue
+        if old.raw.get(key, "") != new.raw.get(key, ""):
+            out.append(key)
+    return out
+
+
+def changed_cold_keys(old, new):
+    """变了、而且**必须重启才生效**的键。空 = 这次可以热重载。"""
+    return _changed_keys_by_class(old, new, RELOAD_COLD)
+
+
+def changed_notice_keys(old, new):
+    """变了、**可以热**但要说一句的键。"""
+    return _changed_keys_by_class(old, new, RELOAD_NOTICE)
 
 # ── 插件配置住在哪儿：一个插件一个文件（照 systemd 的 drop-in）───────────────
 #
@@ -2949,8 +3059,14 @@ def sync_plugin_config(path, plugins_dir, say=print, dry_run=False):
             say("  写了 %s（enabled = %s —— 这个插件自己声明的缺省）"
                 % (p, "yes" if s.default_enabled else "no"))
 
-    say("配置 %s 已与插件目录对齐。改完记得 systemctl restart slurmate-sessiond。"
-        % path)
+    say("配置 %s 已与插件目录对齐。" % path)
+    # ★ v0.12 阶段 3：这句话从前是"改完记得 systemctl restart slurmate-sessiond"
+    #   —— 而配置改动现在是**热得起来**的，那句话会让管理员去断掉所有人的会话。
+    #   ★ 这里只能**指路**、不能自己动手：这个函数跑在 `--sync-plugin-config`
+    #   那个一次性进程里，而"要不要让正在跑的那个重读"是**调用方**的事
+    #   （`slurmate` CLI 与 deploy.sh 各自在合适的时机调 `systemctl reload`）。
+    say("  正在跑的守护进程要重读一遍才用得上："
+        "systemctl reload slurmate-sessiond（热重载，不会断会话）。")
     return 0
 
 
@@ -3405,6 +3521,15 @@ class Config(object):
     def __init__(self, path):
         self.path = path
         raw, sections, self.plugin_conf_files = parse_config(path)
+        # ★ 原始键值**原样留着**（v0.12 阶段 3）：热重载要判"哪些键变了"，而判据
+        #   必须是**配置里写了什么**，不是"解析出来的属性等不等"。后者会漏掉：
+        #     · 两个写法不同而解析结果相同的值；
+        #     · 以及**解析出来没进属性的键** —— 比如留空表示"去 PATH 上找"的那
+        #       几格命令路径：`sbatch = /usr/bin/sbatch` 与留空，属性值是同一个，
+        #       而配置**真的变了**。
+        #   ★ 判别"变了"时**宁可多报**：多报的代价是一句话，漏报的代价是 reload
+        #     悄悄把某个键换掉而没人知道（`readonly_paths` 那一档尤其如此）。
+        self.raw = dict(raw)
 
         # ── 插件：表是**扫出来的**，不是代码里写死的 ────────────────────────
         # 先扫盘 —— 配置里那些插件配置**要对照它才知道认不认识**。顺序不能反。
@@ -4068,6 +4193,14 @@ class Nft(object):
     TABLE = "inet slurmate"
     CHAIN = "output"
     RE_SESS = re.compile(r'comment "(slurmate-sess-\d+-\d+-\d+)"\s*#\s*handle (\d+)')
+    # 任意一条规则的 (comment, handle)。
+    # ★★ `del_by_comment()` 用**这个**，不能用 `RE_SESS` —— 那个只认会话规则
+    #   （`slurmate-sess-…`），拿它去找基础规则会**一条都匹配不到**，而
+    #   `del_by_comment()` 照样返回 True（它报的是"规则集读得到"）。症状是
+    #   "删过了，但规则还在"，且没有任何地方会报错。
+    RE_ANY_RULE = re.compile(r'comment "([^"]+)"\s*#\s*handle (\d+)')
+    BASE_OFFCLUSTER = "slurmate-base-offcluster"
+    BASE_LO = "slurmate-base-lo"
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -4105,26 +4238,56 @@ class Nft(object):
                       check=True)
             log.warning("nft 链 inet slurmate output 缺失，已重建")
 
-        # 基础规则：只在缺失时补（按 comment 判断），避免每次 tick 重复添加。
+        # 基础规则：按 **comment + 值** 对齐（幂等）。
         # 用 insert 而不是 add —— add 会追加到链尾，也就是跑到已有会话规则【后面】。
         # 虽然两者的匹配集基本不相交（会话规则只匹配集群网段内的具体 IP:端口），
         # 但 `oif "lo" accept` 与"目标是本机 IP"的会话规则理论上会重叠，
         # 保持"基础规则在前"能让语义始终确定。
         rc, out, _ = self._nft(["list", "chain", "inet", "slurmate", "output"])
         if rc == 0:
-            if "slurmate-base-lo" not in out:
+            if self.BASE_LO not in out:
                 self._nft(["insert", "rule", "inet", "slurmate", "output",
-                           "oif", "lo", "accept", "comment", "slurmate-base-lo"],
+                           "oif", "lo", "accept", "comment", self.BASE_LO],
                           check=True)
-                log.warning("补齐基础规则 slurmate-base-lo")
-            if "slurmate-base-offcluster" not in out:
-                # 最后一道几何约束：本网段之外的流量一律放行，
-                # 即使前面所有校验都被绕过，也影响不到集群之外
-                self._nft(["insert", "rule", "inet", "slurmate", "output",
-                           "ip", "daddr", "!=", self.cfg.cluster_cidr, "accept",
-                           "comment", "slurmate-base-offcluster"], check=True)
-                log.warning("补齐基础规则 slurmate-base-offcluster")
+                log.warning("补齐基础规则 %s", self.BASE_LO)
+            # ★★ 判据是**值**，不是"comment 在不在"。v0.12 之前那个实现只看
+            #   comment：改掉 `cluster_cidr` 之后，那条规则**永远**走"已存在"
+            #   这条路 —— 于是**连 restart 都不生效**，内核里那条旧网段的基础规则
+            #   一直在。而文档说它是"即使前面所有校验都被绕过"的**最后一道几何
+            #   约束**：它悄悄指着一个旧网段，是这条线上最不该有的一种失效。
+            cur = self.base_offcluster_cidr(out)
+            if cur is None:
+                self._insert_base_offcluster()
+                log.warning("补齐基础规则 %s", self.BASE_OFFCLUSTER)
+            elif cur != self.cfg.cluster_cidr:
+                self.del_by_comment(self.BASE_OFFCLUSTER)
+                self._insert_base_offcluster()
+                log.warning("基础规则 %s 的网段从 %s 换成 %s（cluster_cidr 改了）",
+                            self.BASE_OFFCLUSTER, cur, self.cfg.cluster_cidr)
         return True
+
+    def _insert_base_offcluster(self):
+        """插那条"本网段之外一律放行"的基础规则。
+
+        最后一道几何约束：即使前面所有校验都被绕过，也影响不到集群之外。
+        """
+        self._nft(["insert", "rule", "inet", "slurmate", "output",
+                   "ip", "daddr", "!=", self.cfg.cluster_cidr, "accept",
+                   "comment", self.BASE_OFFCLUSTER], check=True)
+
+    @staticmethod
+    def base_offcluster_cidr(out):
+        """从 `list chain` 的输出里读出基础规则里那个**网段**。
+
+        没有那条规则 ⇒ `None`（与"有，但网段是空串"必须分得开 —— 三态纪律）。
+        """
+        for line in out.splitlines():
+            if Nft.BASE_OFFCLUSTER not in line:
+                continue
+            m = re.search(r"ip\s+daddr\s+!=\s+(\S+)\s+accept", line)
+            if m:
+                return m.group(1)
+        return None
 
     def session_rules(self):
         """返回 {comment: handle}"""
@@ -4165,7 +4328,7 @@ class Nft(object):
             return False
         handles = []
         for line in out.splitlines():
-            m = self.RE_SESS.search(line)
+            m = self.RE_ANY_RULE.search(line)
             if m and m.group(1) == comment:
                 handles.append(int(m.group(2)))
         for h in sorted(handles, reverse=True):
@@ -5283,6 +5446,8 @@ class Sessiond(object):
         # 启动静默期：这段时间内不做任何超时判定，避免重启窗口把在跑的会话误判成孤儿
         self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
         self.running = True
+        # SIGHUP 置它、主循环顶部消费（见 `_on_signal` 的说明）。
+        self._reload_pending = False
         self._reconcile_warned = False
         # ── 常驻通道 ──
         # ★ 下一次 tick 的截止**时刻**（不是"还剩几秒"）。理由见 run()。
@@ -5417,12 +5582,20 @@ class Sessiond(object):
     def run(self):
         self.next_tick_at = time.time()
         while self.running:
+            # ★ 热重载在这里做，**不在信号处理函数里**（见 `_on_signal` 的说明）。
+            if self._reload_pending:
+                self._reload_pending = False
+                self._do_reload()
             now = time.time()
             if self.tick_due(now):
                 self._run_tick()
                 self.tick_done(time.time())
                 continue                  # 回到顶部重算截止时刻，不 select
             timeout = max(0.0, self.next_tick_at - time.time())
+            # ★★ 上限：理由见 SIGNAL_POLL_SECONDS 那一段 —— 没有它，SIGHUP 与
+            #   SIGTERM 都要等最多一个 tick 才被看见（PEP 475 会让 select 自动
+            #   重试，而超时是按原起点重算的）。
+            timeout = min(timeout, SIGNAL_POLL_SECONDS)
             # ★ 上一轮被 MAX_DISPATCH_PER_WAKEUP 截断的行还在**我们自己的
             #   inbuf 里**，内核不知道，所以不会再有事件。这里把超时压成 0，
             #   让外层循环立刻转一圈把它们接着处理掉。
@@ -5515,7 +5688,121 @@ class Sessiond(object):
                 names.add(n)
         return names
 
+    # ── 热重载（v0.12 阶段 3）────────────────────────────────────────────────
+
+    def reload_config(self):
+        """重新读一遍配置，**全过才原子替换**。返回 `(ok, notes)`。
+
+        ★★ 纪律（用户 2026-10-07 拍板）：**校验不全过就一个字都不改** —— 旧配置
+          继续服务，报错点名是哪一处。宁可"这次没换成"，也不要"换了一半"。
+
+        四步，任何一步不过就停在那里：
+          1. 重新解析（主文件 + `drop-in` 目录）**并重扫插件目录** —— 两件事都在
+             `Config()` 里，所以新装的插件在这一步就进来了；
+          2. `validate()` 为空（自相矛盾的配置、区间、cidr 与节点的交叉核对……）；
+          3. **可热重载性**：变了的键里只要有一个在 COLD 档 ⇒ 拒绝（见 RELOAD_CLASS）；
+          4. 全过 ⇒ `_adopt_config()`。
+
+        `notes` 是"可以换、但**要说一句**"的那些键（NOTICE 档）。
+        ★ 它是**返回值**而不是日志：调用方要能把它记进审计，用例也要能直接断言
+          它 —— 只写日志的话，这件事在任何地方都验不了。
+        """
+        try:
+            new = Config(self.cfg.path)
+        except Exception as e:                               # noqa: BLE001
+            # ★ 解析不动就**什么都不改**。注意这里连 `self.cfg` 都不碰 ——
+            #   旧配置继续服务，正在跑的会话一条都不会断。
+            log.error("热重载失败：新配置读不动（**旧配置继续服务**）：%s", e)
+            return False, []
+        errs = new.validate()
+        if errs:
+            log.error("热重载失败：新配置有 %d 处过不了自检（**旧配置继续服务**）："
+                      "%s", len(errs), errs[0])
+            for e in errs[1:]:
+                log.error("  %s", e)
+            return False, []
+
+        cold = changed_cold_keys(self.cfg, new)
+        if cold:
+            log.error("热重载**拒绝**：这几个键改了之后必须重启才生效：%s。"
+                      "新配置一个字都没被采用 —— 跑 "
+                      "`systemctl restart slurmate-sessiond`。",
+                      "、".join(cold))
+            return False, []
+
+        notes = changed_notice_keys(self.cfg, new)
+        self._adopt_config(new)
+        return True, notes
+
+    def _config_holders(self):
+        """所有**按引用**拿着配置的部件（`Sessiond` 自己除外 —— 它就是持有者）。
+
+        ★★ 判据是"**有没有一个 `cfg` 属性**"，不是一张手抄的类名清单：漏掉一个
+          的后果是那个部件继续用旧配置，而那是**静默**的（一半新一半旧，没有任何
+          东西会报错）。用例里那条"每个持有者的 cfg 都是同一个对象"用的也是这个
+          判据 —— 于是以后新加一个持有者，它自动被管住。
+        """
+        return ([v for v in vars(self).values() if hasattr(v, "cfg")]
+                + list(self.conns()))
+
+    def _adopt_config(self, new):
+        """把新配置装上去。**只在全过之后调**（见 `reload_config`）。
+
+        ★★ 配置对象是**按引用**传给各个部件的（构造时 `self.cfg = cfg`），所以
+          只换 `Sessiond.cfg` 的话，别处会继续拿着旧的那一份。
+        """
+        old = self.cfg
+        self.cfg = new
+        for obj in self._config_holders():
+            obj.cfg = new
+
+        # 端口游标：区间变了就回到新的起点。★ 不重置的话它可能落在**新区间
+        # 之外**，而按游标算出来的端口会跟着跑出去（见 alloc_ports 那圈算术）。
+        if (old.port_start, old.port_end) != (new.port_start, new.port_end):
+            self.port_cursor = new.port_start
+
+        # 插件包的快照缓存：**必须失效**。插件目录在这期间可能变了（装上、
+        # 卸掉、升级），而它本来标注的是"刻意不失效"—— 那说的是从前那个进程对
+        # 插件的认知一辈子只有启动那一刻，热重载之后那句话不再成立。
+        self._plugin_cache = {}
+
+        # ★ 启动宽限（`hb_grace_until`）**不动**：它是"这个进程刚起来，先别急着
+        #   判超时"，与配置无关 —— 上一次启动是什么时候，不会因为改一行配置而改变。
+        #   （改掉它会让重启窗口里的会话被误判成孤儿，而那正是它存在的理由。）
+
+        # 基础规则立刻对齐一次（`Nft.ensure()` 里按值比对那一段）。
+        # ★ 不等下一个 tick：用户敲完 reload 马上 `nft list` 就该看到新的网段，
+        #   而"要等最多一个 tick"是一个没人预期得到的延迟。
+        # ★ 失败只是记一句（下一个 tick 的 reconcile 会再试）—— 它不是配置错误，
+        #   而配置在这一刻**已经**全过校验并生效了。
+        if not self.nft.ensure():
+            log.warning("热重载之后 nft 基础规则没对齐（下一个 tick 会再试）")
+
+    def _do_reload(self):
+        """主循环顶部真正做一次重载：跑 `reload_config()`，结果进日志与审计。"""
+        ok, notes = self.reload_config()
+        for n in notes:
+            # NOTICE 档：**说一句**。不说的话，"改完之后某个已经在跑的会话出了
+            # 怪事"与这次改动之间的关系，没有任何地方连得上。
+            log.warning("热重载：%s", n)
+        self.audit("config_reload" if ok else "config_reload_rejected",
+                   notes=list(notes))
+        return ok
+
     def _on_signal(self, signum, _frame):
+        """SIGHUP = **重载**；SIGTERM / SIGINT = 退出。
+
+        ★★ 从前三个信号走的是同一条路（都退出），而 systemd 单元的 `ExecReload`
+          写的正是 `kill -HUP` —— 于是 `systemctl reload` 的实际语义与它声明的
+          **相反**：它是"杀进程 + 5 秒后被 `Restart=always` 拉起来"，所有会话在
+          那 5 秒里断一次。v0.12 阶段 3 把这头修好，两者才一致。
+
+        ★ SIGHUP **只置一个标志**，重活在主循环顶部做（见 `run()`）：信号会打断
+          循环里任意一行，而"读到一半的配置"不该被另一次读配置打断。
+        """
+        if signum == signal.SIGHUP:
+            self._reload_pending = True
+            return
         log.info("收到信号 %d，准备退出", signum)
         self.running = False
 

@@ -1383,11 +1383,11 @@ fi
 #   落盘。而且这一步用的是**装好的**守护进程（`$DAEMON`），首次部署演练时它
 #   还不存在 —— 与上面那两处跳过自检的理由相同。
 if [[ "$DRYRUN" -eq 1 ]]; then
-    info "[演练] 跳过插件块对齐（它会写配置文件）"
+    info "[演练] 跳过插件配置对齐（它会写配置文件）"
 else
     if ! "$DAEMON" --sync-plugin-config --config="$CONF" --plugins-dir "$PLUGINS_DIR"; then
-        die "插件块对齐失败（原因见上）。配置与插件目录现在不一致，
-     而其中一种形状会让守护进程**起不来** —— 修好再重跑本脚本。"
+        die "插件配置对齐失败（原因见上）。配置与插件目录现在不一致 ——
+     修好再重跑本脚本。"
     fi
 fi
 
@@ -1482,9 +1482,29 @@ else
 fi
 
 if [[ "$DRYRUN" -eq 0 ]]; then
-    # 先 stop 再 start（而不是 restart），确保配置改动完全生效
-    systemctl stop "$SERVICE" 2>/dev/null || true
-    if systemctl start "$SERVICE"; then
+    # ★★ v0.12 阶段 3：服务**在跑**时走 `reload`，不再 stop + start。
+    #
+    #   从前的下线是"先 stop 再 start（而不是 restart），确保配置改动完全生效"
+    #   —— 它的代价是**所有人的会话断一次**，就为了改一行配置或装一个插件。
+    #   而现在改配置本身热得起来（守护进程的 `reload_config()`）。
+    #
+    #   ★ 热不起来的那些键（`readonly_paths`）由守护进程**自己拒绝整个 reload**
+    #     并说清是哪一个键 —— 那时它仍然用**旧配置**照常服务，所以这里不能报
+    #     "已生效"。这一条分支说的是实话：改了没生效，要重启。
+    if systemctl is-active --quiet "$SERVICE"; then
+        # ★★ 说准：`systemctl reload` 回 0 只表示**信号送到了** —— systemd 不知道
+        #   服务内部接不接受这次改动（守护进程可能**整个拒绝**并说清是哪个键）。
+        #   所以这里不能说"配置已生效"。
+        if systemctl reload "$SERVICE"; then
+            ok "服务已在运行 → 已给它发了重载信号（正在跑的会话一条都没断）"
+            info "  它有没有接受这次改动，看它自己的日志：journalctl -u ${SERVICE} -n 20"
+        else
+            warn "systemctl reload 没成功 —— 守护进程很可能**拒绝了这次改动**"
+            warn "  （比如改了必须重启才生效的键，它自己的日志里点了名）。"
+            warn "  它仍然在用**旧配置**照常服务。想让改动生效："
+            warn "      systemctl restart $SERVICE"
+        fi
+    elif systemctl start "$SERVICE"; then
         ok "服务已启动"
     else
         bad "服务启动失败 —— 打印最近日志："

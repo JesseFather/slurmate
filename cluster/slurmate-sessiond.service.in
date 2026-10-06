@@ -28,6 +28,15 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStartPre=/usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.conf
 ExecStart=/usr/local/sbin/slurmate-sessiond --foreground --config=/etc/slurmate/slurmate.conf
+# 热重载（v0.12 阶段 3）：SIGHUP 让守护进程**重新读一遍配置**，正在跑的会话
+# 一条都不该断 —— 装/卸插件、改站点配置都走这条路（`slurmate plugin install`
+# 与 `slurmate plugin sync` 自己会调 `systemctl reload`）。
+#
+# ★★ 而 `systemctl reload` 的退出码**不表达"配置生效了没有"** —— 它只说信号送到
+#   了。守护进程在碰到"必须重启才生效的键"时会**整个拒绝**这次重载（用户拍板的
+#   那条：校验不全过就一个字都不改），那时它仍然用旧配置照常服务。所以：
+#       journalctl -u slurmate-sessiond -n 20        # 看它接受了没有、拒绝了哪个键
+#       slurmate-sessiond --check --config=...       # 看现在**生效**的是什么
 ExecReload=/bin/kill -HUP $MAINPID
 
 Restart=always
