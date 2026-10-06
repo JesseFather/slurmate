@@ -643,9 +643,12 @@ def cmd_plugins(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    print("%-14s %-8s %-9s %-14s %-10s %s"
+    # ★ 缺省资源那一列比别的宽：它现在装三样（核 / 内存 / 时限），因为它们回答
+    #   的是**同一个问题**（"这个插件缺省给多少"）。分成两列的话，管理员问
+    #   "这个插件缺省配的什么"就要横着读两个地方。
+    print("%-14s %-8s %-9s %-24s %-10s %s"
           % ("插件", "状态", "版本", "缺省资源", "分发", "说明"))
-    print("-" * 88)
+    print("-" * 98)
     # 「本站支不支持分发」的判据是**顶层有没有 `limits`**（见守护进程 `op_plugins`
     # 的注释：v0.6 那个判据是"这一项里有没有 files"，而 v0.7 把 files 删掉了）。
     _has_delivery = isinstance(d.get("limits"), dict)
@@ -664,10 +667,13 @@ def cmd_plugins(args):
             _deliv = "缺"
         else:
             _deliv = "1 个包"
-        print("%-14s %-8s %-9s %-14s %-10s %s"
+        # ★ 时限那一格在**老守护进程**上是缺席的（v0.11 才加进 `defaults`）——
+        #   与这一屏其它地方同一个惯例：缺席显示 `?`，不替它编一个值。
+        print("%-14s %-8s %-9s %-24s %-10s %s"
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
                  p.get("version") or "?",
-                 "%s 核 / %s" % (df.get("cpus"), df.get("mem")),
+                 "%s 核 / %s / %s" % (df.get("cpus"), df.get("mem"),
+                                      df.get("time") or "?"),
                  _deliv, p.get("title") or ""))
 
     # ★★ 那些**没能加载**的包（账本 **F22**）必须出现在这一屏上 —— 否则这一屏
@@ -1003,7 +1009,9 @@ def build_parser():
                    help="要哪种 GRES、几个，写法同 sbatch：名字[:型号]:数量，"
                         "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 不占。"
                         "本站有哪些、每个节点最多几个，看 `slurmate partitions`")
-    p.add_argument("--time", help="时间上限，如 12:00:00（到期会自动续期）")
+    p.add_argument("--time",
+                   help="时间上限，如 12:00:00（省略 = 该插件的缺省时限；"
+                        "到期会自动续期）")
     p.add_argument("--service-kind",
                    help="插件名。见 `slurmate plugins`。省略时用配置里的 "
                         "default_plugin；没配就是必填（没有内建缺省 —— 隐式缺省"

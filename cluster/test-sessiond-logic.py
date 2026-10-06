@@ -1656,6 +1656,12 @@ exit 0
                                          "site": {"defaultCpus": 1,
                                                   "defaultMem": "1G"}})[0].title
               == "jup")
+        # ★ `site.defaultTime` 与上面两格**不同：它是可选的**。资源那两格缺了
+        #   有一个说不通的后果（"这个插件用几个核"没有安全的猜测），而时限缺了
+        #   有一个明确的、今天就在用的答案。为一个"已经有答案"的键要求所有清单
+        #   作者补一行，只会让新键变成一个升级障碍。
+        check("★ 清单没写 `site.defaultTime` ⇒ 取内建缺省（这一个键是可选的）",
+              _s[0].default_time == mod.DEFAULT_TIME, str(_s[0].default_time))
 
     for _txt, _why, _kw in (
             (json.dumps({"id": "short", "name": "jup", "version": "1.0.0",
@@ -1696,7 +1702,22 @@ exit 0
                          "site": {"defaultCpus": 1, "defaultMem": "1G",
                                   "enumKeys": {"mode": {"choices": ["a", "b"],
                                                         "default": "c"}}}}),
-             "enumKeys 的 default 不在 choices 里", "default")):
+             "enumKeys 的 default 不在 choices 里", "default"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "defaultTime": "0:30"}}),
+             "defaultTime 比 1 分钟还短", "1 分钟"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "defaultTime": "unlimited"}}),
+             "defaultTime 写成「无限」", "无限"),
+            (json.dumps({"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "jup",
+                         "version": "1.0.0",
+                         "site": {"defaultCpus": 1, "defaultMem": "1G",
+                                  "defaultTime": "半天"}}),
+             "defaultTime 认不出", "defaultTime")):
         _s2, _p2 = _manifest(_txt)
         _msg2 = " ".join(_p2)
         # 断言的是"**一个都没收下** + 报错里点到了那一项"，不是"函数返回了 None" ——
@@ -2001,6 +2022,7 @@ exit 0
             "engines": {"slurmate": ">=0.5"},
             "contributes": {"submitPubkey": False},
             "site": {"defaultCpus": 3, "defaultMem": "6G", "defaultEnabled": False,
+                     "defaultTime": "3:30:00",
                      "bin": {"env": "SLURMATE_JUP_BIN", "discovery": "convention",
                              "fallback": "/usr/local/bin/jupyter"},
                      "enumKeys": {"token_mode": {"choices": ["auto", "none"],
@@ -2019,8 +2041,13 @@ exit 0
     check("★ 它的配置块允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
           _jup.block_keys() == ("enabled", "default_cpus", "default_mem",
-                                "bin", "token_mode"),
+                                "default_time", "bin", "token_mode"),
           str(_jup.block_keys()))
+    # ★★ 清单声明的时限是**规范化之后**存下来的（`3:30:00` → `03:30:00`）。
+    #   规范化只在解析这一处做，下游（协议、界面、自检）就不必各自处理"同一段
+    #   时间的两种写法" —— 而那种"两处各写各的"正是这个项目一路在清的东西。
+    check("★ 清单声明 `site.defaultTime` ⇒ 规范化后存下来（3:30:00 → 03:30:00）",
+          _jup.default_time == "03:30:00", str(_jup.default_time))
     check("它的作业侧入口是按短名推出来的（与 run.sbatch 的 plugin_call 同一条规则）",
           _jup.job_entry == "start_jup", _jup.job_entry)
 
@@ -2030,6 +2057,22 @@ exit 0
         check("★ 新插件能被提交，资源缺省来自**它自己的清单**（不是全局常量）",
               _r5.get("ok") and _sess5["cpus"] == 3 and _sess5["mem"] == "6G",
               str(_r5)[:160])
+        # ★★ 时限那一格走的是**同一条**：清单 → spec → 提交。这一句不是在重复
+        #   上面那句 —— cpus/mem 从 v0.5 起就这么做，而时限在 v0.11 之前**一直**
+        #   是一个全局常量（`Config.default_time`），提交期读的是它。改完之后
+        #   "算出来了"与"送出去了"是两件事，所以这一句要打在**提交那一步**上
+        #   （F35 的教训：算出来了没送出去，任何变异都打不红）。
+        check("★★ 提交时省略 time ⇒ 用**这个插件声明的**时限（清单 → spec → 提交）",
+              _sess5["requested_time"] == "03:30:00",
+              repr(_sess5.get("requested_time")))
+        # ★ 三层里的**首**层（块 ＞ 清单）：纯解析那条路各占一条，与上面那条
+        #   "清单走到了提交"合起来才是完整的三层。少了它，把 `PluginConfig` 里
+        #   "块没写才回落到 spec" 写成"永远用 spec"不会被任何一条打红 ——
+        #   而症状是**管理员在块里改时限完全不生效**，配置里却看不出问题。
+        check("★ 块里写了 default_time ⇒ **盖过**清单声明的那个（块 ＞ 清单）",
+              mod.PluginConfig(_jup, {"enabled": "yes",
+                                      "default_time": "1:00:00"}, True)
+              .default_time == "01:00:00")
         check("它声明的那个变量名与解析出来的路径传给了作业",
               _env5.get("SLURMATE_JUP_BIN") == "/usr/local/bin/jupyter",
               repr(_env5.get("SLURMATE_JUP_BIN")))
@@ -2194,6 +2237,13 @@ exit 0
           and _c.plugin_config(SSHD).default_mem == "2G",
           "%s / %s" % (_c.plugin_config(SSHD).default_cpus,
                        _c.plugin_config(SSHD).default_mem))
+    # ★ 时限是"块 ＞ 清单 ＞ 内建"三层。这里验"块里写的生效 + 规范化"，另外两层
+    #   各自有它自己的那一条（`_jup` 那一节：清单声明的 3:30:00 **走到了提交**，
+    #   并有一条纯解析的断言验它**盖过**清单）。
+    _c = pcfg("[plugin:sshd]\ndefault_time = 2:00:00\n")
+    check("★ 块里写的 default_time 生效，且与清单那条一样规范化",
+          _c.plugin_config(SSHD).default_time == "02:00:00",
+          str(_c.plugin_config(SSHD).default_time))
 
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
     check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
@@ -2306,12 +2356,36 @@ exit 0
             ("[plugin:code-server]\nauth_mode = passwd\n", "auth_mode 取值非法",
              "auth_mode"),
             ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
-             "default_mem")):
+             "default_mem"),
+            ("[plugin:sshd]\ndefault_time = 0:30\n", "default_time 比 1 分钟还短",
+             "default_time"),
+            ("[plugin:sshd]\ndefault_time = unlimited\n", "default_time 写成「无限」",
+             "default_time"),
+            ("[plugin:sshd]\ndefault_time = 两小时\n", "default_time 认不出",
+             "default_time")):
         try:
             _errs = " ".join(pcfg(_txt).validate())
         except ValueError as _ex:
             _errs = str(_ex)
         check("%s → 被拦下" % _why, _kw in _errs, _errs[:110])
+
+    # ★★ 上面三条都会被"提到了 default_time"满足 —— 而把**粒度那条校验整个删掉**，
+    #   它们照样绿（另外两条还在以同一个键名报错）。所以粒度这一条必须**自己**
+    #   红一次：报错里要有「1 分钟」，而且那三个不同的错法要说三句不同的话。
+    #   这是"三条反例共用一个关键词"时唯一能分清"守住了"与"没生效"的办法。
+    _dt_msgs = {}
+    for _v in ("0:30", "unlimited", "两小时"):
+        try:
+            _dt_msgs[_v] = " ".join(pcfg("[plugin:sshd]\ndefault_time = %s\n" % _v)
+                                    .validate())
+        except ValueError as _ex:
+            _dt_msgs[_v] = str(_ex)
+    check("★★ 「比 1 分钟还短」与「认不出」是**两句不同的话**（删掉粒度校验，这一条会红）",
+          "1 分钟" in _dt_msgs["0:30"] and "无法识别" in _dt_msgs["两小时"],
+          str(_dt_msgs)[:220])
+    check("★ 三种错法各有各的说法（同一个键名不是同一个理由）",
+          len({_dt_msgs[_v] for _v in _dt_msgs}) == 3,
+          str(_dt_msgs)[:260])
 
     # ★ 顺序陷阱的报错必须**指得回根因**。只断言"被拒了"是不够的：通用键落进块里
     #   时，块内键白名单那条**也会**拒绝它（它本来就不在允许列表里），于是"拒绝了"
@@ -2482,6 +2556,19 @@ exit 0
     check("每个插件带自己的默认资源",
           _by[CS]["defaults"]["cpus"] == 2
           and _by[SSHD]["defaults"]["cpus"] == 1,
+          str({k: v.get("defaults") for k, v in _by.items()}))
+    # ★★ 时限在**同一格** `defaults` 里，因为它要回答的是同一个问题（"这个插件
+    #   缺省给多少"），而客户端显示它的地方也只有那一处。★ 这一格不进协议的话，
+    #   界面就永远说不出"这个会话能跑多久" —— 用户只能在作业被 `TimeLimit` 砍掉
+    #   的那一刻第一次知道（F35 的形状：值算出来了、没送到能看见它的地方）。
+    #
+    # ★ 取值一律走 `.get`：直接下标的话，把这一格拿掉会让 `check(...)` 的**参数**
+    #   先抛 KeyError，整份脚本崩在那一行 —— 那时"变异被发现了"与"用例自己坏了"
+    #   在输出上分不开（崩了没有统计行、也没有那一条 FAIL）。`.get` 让它变成
+    #   一条清清楚楚的红。
+    check("★ defaults 里也有 time（少了它，界面说不出「能跑多久」）",
+          _by[CS]["defaults"].get("time") == mod.DEFAULT_TIME
+          and _by[SSHD]["defaults"].get("time") == mod.DEFAULT_TIME,
           str({k: v.get("defaults") for k, v in _by.items()}))
     check("enabled 如实反映站点决定（sshd 默认关着）",
           _by[CS]["enabled"] is True

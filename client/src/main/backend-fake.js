@@ -177,7 +177,7 @@ function sumCounts(counts) {
 }
 
 /** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。 */
-const DEFAULTS = { cpus: 2, mem: '8G' };
+const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00' };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
 const DEMO_PASSWORD = 'demo-1a2b3c4d5e6f7081';  // 固定值，方便你手动 curl 验证
@@ -601,10 +601,16 @@ class FakeBackend extends Backend {
           // ★ 这一档**连 `problems` 也不发** —— 它是 v0.11 才有的字段，v0.5 的
           //   守护进程报不出来。少发它是这一档的全部意义（"字段缺席"这条路
           //   必须有人走），照发就等于演了一个不存在的版本。
+          //
+          // ★ `defaults.time` 同理，而且这里**逐字段挑**（不用 `...DEFAULTS`）：
+          //   那一格是 v0.11 才加进 `defaults` 的，v0.5 只报 cpus / mem。展开
+          //   会把新字段顺手带上，于是"这一格缺席"这条路上一个用例都走不到 ——
+          //   而界面恰恰必须能在它缺席时照常画出那句话。
           return ok({
             plugins: this._sitePlugins().map((p) => ({
               id: p.id, name: p.name, version: p.version, title: p.title,
-              enabled: p.enabled, can_submit: p.can_submit, defaults: { ...DEFAULTS },
+              enabled: p.enabled, can_submit: p.can_submit,
+              defaults: { cpus: DEFAULTS.cpus, mem: DEFAULTS.mem },
             })),
             enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
           });

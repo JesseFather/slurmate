@@ -157,6 +157,37 @@ def fmt_slurm_time(secs):
     return "%02d:%02d:%02d" % (hh, mm, ss)
 
 
+def parse_config_time(raw, where):
+    """**配置里**的时限（清单 `site.defaultTime` / 块 `default_time`）→ 规范化串。
+
+    走的是与请求里那个 `time` **同一条**解析（`parse_slurm_time`），只有两处不同，
+    而两处都是「写在文件里的东西必须当场发现」那条纪律的推论：
+
+    · **「无限」在这里被拒**。请求里的无限会被 `bad_time` 拒掉，所以一个"无限"的
+      缺省注定在提交期炸 —— 而那时报错指向的是**用户的请求**，不是写错了的配置。
+    · **最小 1 分钟**。作业运行时间的粒度是分钟，比它短的值只可能来自笔误
+      （`0:30` 想写的多半是 30 分钟）。
+
+    返回 `fmt_slurm_time` **规范化之后**的串（`2:00:00` → `02:00:00`）。规范化只
+    在这一处做：下游（协议、界面、自检输出）就不必各自处理"同一段时间的两种写法"。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("%s 必须是一个时间串（形如 12:00:00 / 2-00:00:00 / 90）"
+                         % where)
+    t = raw.strip()
+    try:
+        secs = parse_slurm_time(t)
+    except ValueError:
+        raise ValueError("%s 无法识别: %r（形如 12:00:00 / 2-00:00:00；"
+                         "**纯数字是分钟** —— 90 是 90 分钟，不是 90 秒）"
+                         % (where, t))
+    if secs is None:
+        raise ValueError("%s 不能是「无限」" % where)
+    if secs < MIN_CONFIG_TIME:
+        raise ValueError("%s 不能短于 1 分钟（当前为 %r）" % (where, t))
+    return fmt_slurm_time(secs)
+
+
 def clamp_int(v, default, lo, hi):
     """请求里的整数 → 钳制到 [lo, hi]。缺失/非数字用 default。
 
@@ -478,7 +509,13 @@ LOG_DIR = "/var/log/slurmate"
 TICK_SECONDS = 2
 
 STARTUP_GRACE_SECONDS = 120
+# 插件清单**没声明** `site.defaultTime` 时用的缺省时限。作者可以在清单里给自己的
+# 插件定一个，站点可以在 `[plugin:<名字>]` 块里再覆盖 —— 理由是默认资源那条的
+# 同一条：在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事，那是**插件的策略**。
 DEFAULT_TIME = "12:00:00"
+# 配置里能写的时限的下限（秒）。作业运行时间的粒度是分钟，比它短的值只可能来自
+# 笔误（`0:30` 想写的多半是 30 分钟）—— 见 parse_config_time()。
+MIN_CONFIG_TIME = 60
 # 用户可请求的时间硬上限。分区自己的 MaxTime 比它小时按分区截断。
 MAX_TIME = "7-00:00:00"
 SUSPECT_AFTER = 300
@@ -987,7 +1024,7 @@ def engines_problem(manifest, host_version):
     return ("unsatisfied", "%s（engines.slurmate 是插件自己声明的）" % why)
 
 
-PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem")
+PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem", "default_time")
 
 MANIFEST_NAME = "plugin.json"
 # 作业侧入口在**包里的**那个名字。★ 用正斜杠写死，不走 `os.path.join`：它是一个
@@ -1092,7 +1129,7 @@ class PluginSpec(object):
     """
 
     def __init__(self, plugin_id, name, version, title,
-                 default_cpus, default_mem,
+                 default_cpus, default_mem, default_time,
                  default_enabled=False, needs_pubkey=False,
                  bin_env=None, bin_discovery="convention",
                  bin_name=None, bin_fallback=None, enum_keys=(),
@@ -1138,6 +1175,16 @@ class PluginSpec(object):
         self.needs_job = needs_job
         self.default_cpus = default_cpus
         self.default_mem = default_mem
+        # 这个插件**天生要跑多久**（清单 `site.defaultTime`，站点在块里可覆盖）。
+        #
+        # ★ 它是 `default_cpus` / `default_mem` 的同一条理由，也是这条线上**最后
+        #   一个**跟上来的：资源是按插件的策略，而"跑多久"同样是 —— 一个跑语言
+        #   服务器的 IDE 与一个在 shell 里跑 codex 的中转站，合理的时限差一个量级。
+        #
+        # ★ 存的是 `fmt_slurm_time` 规范化之后的串（`parse_config_time` 的返回值），
+        #   不是秒数：它会原样进协议、进界面、进自检输出，而这三处要的都是 Slurm
+        #   那个形状。存秒数的话每一处出口都要各自格式化一遍。
+        self.default_time = default_time
         # ★ 装上了是不是就等于开着。绝大多数插件是 False：装一个插件是一次**显式
         #   的决定**，但升级是另一回事 —— 站点从旧版本升上来时，新装进来的插件
         #   不该在没有任何人同意的情况下多出一个能力。
@@ -1313,6 +1360,19 @@ def parse_plugin_manifest(where, raw, source_package=None, needs_job=False):
         else:
             default_mem = mem
 
+    # ★ 这一个**可选**（`defaultCpus` / `defaultMem` 是必填）—— 不写就是
+    #   `DEFAULT_TIME`。差别不是随手定的：资源那两格缺了会有一个**说不通**的
+    #   后果（"这个插件用几个核"没有安全的猜测），而时限缺了有一个明确的、今天
+    #   就在用的答案。为一个"已经有答案"的键要求所有清单作者补一行，只会让新键
+    #   变成一个升级障碍。
+    default_time = DEFAULT_TIME
+    v = site.get("defaultTime")
+    if v is not None:
+        try:
+            default_time = parse_config_time(v, "`site.defaultTime`")
+        except ValueError as e:
+            bad(str(e))
+
     default_enabled = site.get("defaultEnabled", False)
     if not isinstance(default_enabled, bool):
         bad("`site.defaultEnabled` 必须是 true / false")
@@ -1411,6 +1471,7 @@ def parse_plugin_manifest(where, raw, source_package=None, needs_job=False):
     spec = PluginSpec(
         plugin_id=pid, name=name, version=version, title=title,
         default_cpus=default_cpus, default_mem=default_mem,
+        default_time=default_time,
         default_enabled=default_enabled, needs_pubkey=needs_pubkey,
         bin_env=bin_env, bin_discovery=bin_discovery, bin_name=bin_name,
         bin_fallback=bin_fallback, enum_keys=tuple(enum_keys),
@@ -2611,7 +2672,8 @@ def spec_block_defaults(spec):
       写进配置，正好是 `PluginConfig` 里那段说明要防的事。
     """
     out = [("default_cpus", str(spec.default_cpus)),
-           ("default_mem", str(spec.default_mem))]
+           ("default_mem", str(spec.default_mem)),
+           ("default_time", str(spec.default_time))]
     for key, _choices, default in spec.enum_keys:
         out.append((key, str(default)))
     return out
@@ -2830,6 +2892,18 @@ class PluginConfig(object):
                     % (spec.name, v))
         else:
             self.default_mem = spec.default_mem
+
+        v = (raw.get("default_time") or "").strip()
+        if v:
+            # ★ 同 default_mem：**配置里写错必须当场拒绝**，不回退。存下来的是
+            #   `parse_config_time` 规范化之后的串（`2:00:00` → `02:00:00`），
+            #   于是"块里写的"与"清单里写的"两处形状一致，下游只看一种。
+            try:
+                self.default_time = parse_config_time(v, "default_time")
+            except ValueError as e:
+                raise ValueError("[plugin:%s] 的 %s" % (spec.name, e))
+        else:
+            self.default_time = spec.default_time
 
         # ── 可执行文件 ──
         explicit = (raw.get("bin") or "").strip()
@@ -3209,7 +3283,11 @@ class Config(object):
         self.audit_log = os.path.join(LOG_DIR, "audit.log")
         self.tick_seconds = TICK_SECONDS
         self.startup_grace_seconds = STARTUP_GRACE_SECONDS
-        self.default_time = DEFAULT_TIME
+        # ★ 这里从前有 `self.default_time = DEFAULT_TIME`。缺省时限**按插件**之后
+        #   它就没有读者了（提交期那一处改读 `pcfg.default_time`），而一个没人读的
+        #   字段只会让下一个读到这里的人以为"站点有一份全局时限" —— 那件事已经
+        #   不是真的了。常量 `DEFAULT_TIME` 仍在，它现在的身份是"清单没声明时用
+        #   什么"，见 PluginSpec.default_time。
         self.max_time = MAX_TIME
         self.suspect_after = SUSPECT_AFTER
         self.orphan_after = ORPHAN_AFTER
@@ -6463,7 +6541,12 @@ class Sessiond(object):
                 # 它，但它没有作业侧实现」—— **两句话、两个该做的事**。
                 "can_submit": bool(p.enabled and p.spec.needs_job),
                 # 默认资源是**按插件**的，客户端不自己定一份（两份真相的老问题）。
-                "defaults": {"cpus": p.default_cpus, "mem": p.default_mem},
+                #
+                # ★ `time` 与 cpus / mem **同一格**，因为它要回答的是同一个问题
+                #   （"这个插件缺省给多少"），而客户端显示它的地方也只有那一处。
+                #   单开一格的话，"默认资源"这一句话在界面上就有了两个来源。
+                "defaults": {"cpus": p.default_cpus, "mem": p.default_mem,
+                             "time": p.default_time},
                 # ── 站点分发：这个插件作为**一个包** ──
                 #
                 # ★ **只有这一条投递方式了。** v0.6 曾经同时报 `files`（逐份取，
@@ -7383,7 +7466,10 @@ class Sessiond(object):
             return self._err(2, "bad_gres", gres_err)
 
         # ── 时间 ────────────────────────────────────────────────────────────
-        t = str(req.get("time") or cfg.default_time)
+        # 缺省来自**这个插件**的配置（块 `default_time` ＞ 清单 `site.defaultTime`
+        # ＞ 内建的 `DEFAULT_TIME`），不是全局常量 —— 与上面 cpus / mem 是同一条：
+        # "跑多久"是插件的策略，客户端省略 time 永远是在说"用你的默认"。
+        t = str(req.get("time") or pcfg.default_time)
         try:
             secs = parse_slurm_time(t)
         except ValueError:
@@ -7799,9 +7885,9 @@ def main():
             print("      把包放进 deploy.sh 的 --plugins-src 目录再跑一次部署。")
             print("      见 plugins/README.md；插件落地在 %s。" % cfg.plugins_dir)
         for _p in sorted(cfg.plugins.values(), key=lambda c: (c.name, c.spec.id)):
-            print("    %-12s %s  默认 %s 核 / %s%s"
+            print("    %-12s %s  默认 %s 核 / %s / %s%s"
                   % (_p.name, "已启用" if _p.enabled else "已停用",
-                     _p.default_cpus, _p.default_mem,
+                     _p.default_cpus, _p.default_mem, _p.default_time,
                      "" if _p.present else "（配置里没有这个块，这里是插件清单里的缺省值）"))
             print("      %-11s %s@%s" % ("id@版本", _p.spec.id, _p.spec.version))
             if not _p.spec.needs_job:

@@ -1592,9 +1592,16 @@ function pluginBlock(p) {
   }
   meta.append(site);
 
+  // ★ 时限与资源**同一句话**：它们回答的是同一个问题（"这个插件缺省给多少"），
+  //   而站点也是在同一格 `defaults` 里报的。单开一句的话，"默认"这件事在界面上
+  //   就有了两个出处，而它们迟早会说不一样的话。
+  //
+  // ★ `def.time` **缺席不算否**（老守护进程的 `defaults` 里没有这一格，见
+  //   backend-fake 的 `_noDistribute` 那一档）：缺了就不说，而不是显示
+  //   "undefined" 或"0"。这与本页其它每一处三态是同一条纪律。
   const def = p.defaults;
   meta.append(el('span', null, def
-    ? `默认 ${def.cpus} 核 / ${def.mem}`
+    ? `默认 ${def.cpus} 核 / ${def.mem}${def.time ? ` / ${def.time}` : ''}`
     : '默认资源由服务端定'));
 
   // 本机开关。它能点，是因为"本机要不要"是用户自己的决定，与站点无关。

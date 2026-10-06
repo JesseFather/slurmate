@@ -746,12 +746,12 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 {"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
               "name": "code-server", "title": "开发环境", "enabled": true,
               "can_submit": true,
-              "defaults": {"cpus": 2, "mem": "8G"},
+              "defaults": {"cpus": 2, "mem": "8G", "time": "12:00:00"},
               "package": {"format": 1, "bytes": 19416, "digest": "…"}},
              {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
               "name": "sshd", "title": "SSH 中转站", "enabled": false,
               "can_submit": false,
-              "defaults": {"cpus": 1, "mem": "2G"},
+              "defaults": {"cpus": 1, "mem": "2G", "time": "12:00:00"},
               "package": {"format": 1, "bytes": 40000, "digest": "…"}}],
  "enabled": ["code-server"],
  "limits": {"file_bytes": 262144, "total_bytes": 1562251, "max_files": 256,
@@ -935,7 +935,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 | `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
 | `gres` | **对象** `{name, type, count}` | 未给 = **完全省略** `--gres`（默认不占 GRES）。见下面的〈`gres`：一个结构化描述符〉 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
-| `time` | Slurm 时间 | `12:00:00`（超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断） |
+| `time` | Slurm 时间 | **该插件**的 `site.defaultTime`（站点可在 `[plugin:<名字>]` 块里覆盖；三处都不写才是内建的 `12:00:00`）。超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断 |
 
 > ★ **默认值一律由服务端填，不由客户端填。** 客户端省略字段是在说「用你的默认」，
 > 不是「我要 0 核」。服务端必须自己填默认值并做上限钳制 ——

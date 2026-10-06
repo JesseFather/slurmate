@@ -1032,13 +1032,41 @@ test('★ 服务端通报的默认资源要真的送到界面上，不能又在�
   assert.equal(r.ok, true);
   const codeServer = r.plugins.plugins.find((p) => p.name === 'code-server');
   assert.ok(codeServer, '代码宿主插件必须出现在可用的插件里');
-  assert.deepEqual(codeServer.defaults, { cpus: 2, mem: '8G' },
-    '服务端通报的默认资源必须原样带回来');
+  // ★ 时限在**同一格**里（v0.11 起）—— 它是"这个插件缺省给多少"的第三个答案，
+  //   而不是另一件事。少了它界面就说不出"这个会话能跑多久"，用户只能在作业被
+  //   `TimeLimit` 砍掉的那一刻第一次知道。
+  assert.deepEqual(codeServer.defaults, { cpus: 2, mem: '8G', time: '12:00:00' },
+    '服务端通报的默认资源必须原样带回来（含时限）');
 
   const boot = await invoke('app:bootstrap');
   const cs2 = boot.plugins.plugins.find((p) => p.name === 'code-server');
-  assert.deepEqual(cs2.defaults, { cpus: 2, mem: '8G' },
+  assert.deepEqual(cs2.defaults, { cpus: 2, mem: '8G', time: '12:00:00' },
     'bootstrap 也要带 —— 界面首次渲染时还没有别的机会拿到它');
+});
+
+test('★ 老守护进程的 `defaults` 里没有 time：缺了就是缺了，不许编一个', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // ★ 这一条钉的是**三态**，不是"老版本兼容"：`defaults.time` 是 v0.11 才加进
+  //   那一格的，v0.5 的守护进程只报 cpus / mem。界面必须能在那条路上照常画出
+  //   那句话 —— 而"照常"的唯一判据是**它不凭空多出一个时限**。
+  //   写成 `def.time || '12:00:00'` 之类的兜底，用户看到一个他从没被承诺过的
+  //   数字，而站点那一侧的真相在别处。
+  //
+  //   `old-distribute`（有 `plugins`、没有 `limits`）是**更细的那一档** ——
+  //   `old-daemon` 是整个 op 都没有，那时 `defaults` 根本没有出处，验不到这一格。
+  await invoke('app:debug', 'old-distribute');
+  try {
+    const r = await invoke('app:partitions');
+    assert.equal(r.ok, true);
+    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    assert.deepEqual(cs.defaults, { cpus: 2, mem: '8G' },
+      'v0.5 的守护进程只报这两格 —— 客户端照原样带回来，不补 time');
+    assert.equal(cs.defaults.time, undefined,
+      '不许给缺席的那一格编一个值');
+  } finally {
+    await invoke('app:debug', 'reset');
+  }
 });
 
 test('★ 取不到分区时必须说出来，不能谎报「这台集群没有分区」', async (t) => {

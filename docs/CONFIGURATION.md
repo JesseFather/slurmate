@@ -28,6 +28,7 @@ default_plugin = code-server    # 提交时不带 service_kind 用哪个（可�
 enabled      = yes              #            enabled = yes 才是真的开着
 default_cpus = 2
 default_mem  = 8G
+default_time = 12:00:00         # 这个插件的会话缺省能跑多久（最小 1 分钟）
 ```
 
 **块一旦开始就没有回头路**：块之后写的通用键会落进那个块，然后被拒。报错会点明
@@ -82,7 +83,8 @@ default_mem  = 8G
 是 **code-server 的**路径。中转站用的是公钥，那两个键对它一个字都不适用 ——
 从前它们摆在顶层，是因为那时只有一个插件。
 
-现在每个插件块里有同样的四项：`enabled` / `default_cpus` / `default_mem` / `bin`，
+现在每个插件块里有同样的五项：`enabled` / `default_cpus` / `default_mem` /
+`default_time` / `bin`，
 外加它**自己在清单里声明的**那几个取值受限的键（code-server 是 `auth_mode`；
 清单里没声明就一个都没有）。
 
@@ -104,12 +106,13 @@ default_mem  = 8G
 本配置文件都不需要动 —— 下面那些块全是**可选的**，不写就用插件清单里的缺省。
 契约见 [plugins/README.md](../plugins/README.md)。
 
-块内的键（每个插件都认这四个）：
+块内的键（每个插件都认这五个）：
 
 | 键 | 含义 |
 |---|---|
 | `enabled` | 开不开。**不写就用插件自己声明的缺省** —— 见下 |
 | `default_cpus` / `default_mem` | **这个插件**的默认资源。客户端省略 cpus/mem 时用这一组 |
+| `default_time` | **这个插件**的会话缺省能跑多久。客户端省略 time 时用它。写法同 Slurm（`12:00:00` / `2-00:00:00`；纯数字是**分钟**），**最小 1 分钟**；不写就用插件清单里的 `site.defaultTime` |
 | `bin` | 作业在**计算节点**上执行的那个可执行文件。留空 = 按插件清单里声明的 `discovery` 找 |
 
 外加**该插件自己在清单里声明的**那几个取值受限的键（清单里的 `site.enumKeys`）。
@@ -460,7 +463,7 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `state_dir` / `db_path` / `rejected_dir` | `STATE_DIR` | 与 `StateDirectory=` 对应。在配置里改掉它，单元不会跟着改 —— 症状是状态目录凭空换了个地方、旧数据不见了，报错里没有一个字提到配置 |
 | `log_dir` / `audit_log` | `LOG_DIR` | 与 `LogsDirectory=` 对应，同上 |
 | `tick_seconds` / `startup_grace_seconds` | `TICK_SECONDS` / `STARTUP_GRACE_SECONDS` | 从没有人改过 |
-| `default_time` / `max_time` / `suspect_after_seconds` / `orphan_after_seconds` / `reserved_ttl_seconds` / `submitted_ttl_seconds` / `released_keep_seconds` / `job_missing_confirm_ticks` | 各自的常量 | 同上。`max_time` 尤其：它现在由**分区的 `MaxTime`** 动态决定（见下） |
+| `max_time` / `suspect_after_seconds` / `orphan_after_seconds` / `reserved_ttl_seconds` / `submitted_ttl_seconds` / `released_keep_seconds` / `job_missing_confirm_ticks` | 各自的常量 | 同上。`max_time` 尤其：它现在由**分区的 `MaxTime`** 动态决定（见下） |
 | `[renew] enabled` / `threshold_seconds` / `max_total_seconds` | 常量 | 同上 |
 | `security.password_bytes` | `PASSWORD_BYTES` | 同上 |
 | `[quota]` 里的 `max_pending_per_user` | **已删除** | ★ 见下方〈`max_sessions_per_user` 为什么回来了〉—— 它那一格**确实**只有一种正确取值，所以它没了 |
@@ -468,6 +471,7 @@ v0.2 把下面这些从配置里收了回去，改成代码常量。它们的共
 | `code_server_bin` / `sshd_bin` | 各自的插件块里的 `bin` | 它们是**插件的**路径，不是站点事实 |
 | `auth_mode` | `[plugin:code-server]` 块的 `auth_mode` | 同上：它是 code-server 的认证方式 |
 | 默认资源（曾经是 `DEFAULT_CPUS`/`DEFAULT_MEM` 两个常量） | 每个插件块的 `default_cpus`/`default_mem` | 在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事 —— 它是**插件的策略** |
+| 默认时限（曾经是 `DEFAULT_TIME` 那个全局常量） | 每个插件块的 `default_time`（不写则取插件清单的 `site.defaultTime`，再不写才用内建的 `12:00:00`） | 与上一条**逐字同理** —— 一个 IDE 与一个在 shell 里跑 codex 的中转站，合理的时限差一个量级 |
 | `job_script` / `jobs_dir` | `default_jobs_dir()` | 从守护进程**自身的安装位置**推导（`<prefix>/share/slurmate/jobs`）。里面是**每个插件一份** `<ULID>.sbatch` |
 | `job_log_subdir` | `JOB_LOG_SUBDIR` | 与 `run.sbatch` 的约定，不是站点参数 |
 | `[purpose:*]` 整节 | 已删除 | 见下 |
@@ -627,7 +631,7 @@ Slurm 分区名**大小写敏感**，而 association 里的 `Partition` 字段�
 | `cluster_cidr` 四项校验全过 | 见上，全部 fail-open |
 | **五个** Slurm 命令都能解析到 | 无法提交、查状态或查权限 |
 | 每个插件块里的键都认得（块名、块内键） | 拼错的键/块名会被静默忽略 |
-| 块里的 `enabled` 是 yes/no、`default_cpus` 在 1-64、`default_mem` 可解析 | 认不出时拒绝启动，**不回退默认值** |
+| 块里的 `enabled` 是 yes/no、`default_cpus` 在 1-64、`default_mem` 可解析、`default_time` 可解析且不短于 1 分钟 | 认不出时拒绝启动，**不回退默认值** |
 | 至少有一个插件是开着的 | 客户端上一个按钮都不会有 |
 | `[plugin:code-server] auth_mode ∈ {password, none}` | 无法决定 code-server 启动参数 |
 | 数据库表结构是本版的 | 少一列或多一列都只会在第一次用到时炸成「内部错误」 |

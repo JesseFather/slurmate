@@ -188,6 +188,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
   "site": {
     "defaultCpus": 2,
     "defaultMem": "8G",
+    "defaultTime": "12:00:00",
     "defaultEnabled": true,
     "bin": {
       "env": "SLURMATE_CS_BIN",
@@ -327,6 +328,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | 键 | 必有 | 说明 |
 |---|---|---|
 | `defaultCpus` / `defaultMem` | ✔ | 缺省资源。客户端**不填**这两个值，缺省一律由服务端定（否则一个改过的客户端省略字段就能要到整机）。站点可以在 `[plugin:<名字>]` 块里覆盖。 |
+| `defaultTime` | | 缺省时限 —— **你这个插件天生要跑多久**。写法同 Slurm（`12:00:00` / `2-00:00:00`；纯数字是**分钟**），**最小 1 分钟**。不写就是框架的 `12:00:00`。站点可以在 `[plugin:<名字>]` 块里覆盖。★ 与上面那两格同一句话：一个跑语言服务器的 IDE 与一个在 shell 里跑 codex 的中转站，合理的时限差一个量级 —— 那是**你的策略**，不是站点该替你猜的。 |
 | `defaultEnabled` | | 装上了是不是就等于开着。**缺省 `false`。** |
 | `bin` | | 作业里那个可执行文件在哪。`env` 是传给作业的环境变量名（**必须以 `SLURMATE_` 开头** —— 那个名字会被塞进作业的环境变量表，前缀是本系统的领地）；`discovery` 是 `which`（先查 PATH）或 `convention`（只用惯例路径）；`name` 是 `which` 时要找的文件名；`fallback` 是找不到时的路径。 |
 | `enumKeys` | | 取值只能固定的配置键：`{ 键名: { choices: [...], default: "..." } }`。它们同时**就是**这个插件块里允许出现的额外键。 |
