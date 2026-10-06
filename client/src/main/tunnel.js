@@ -100,6 +100,24 @@ class Tunnel extends EventEmitter {
   }
 
   async _listen(preferredPort, excludePorts) {
+    // ★★ **先校验，再动手。** `preferredPort + i` 对 `null` / `undefined` 是**合法的
+    //    JS**：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是**随便挑一个**
+    //    —— 于是它会**成功地**绑到一个临时端口，`start()` 返回 `{port: 0}`，
+    //    `snapshot().localPort` 从此指向一个并不存在的端口、`origin` 是 null。
+    //    全程没有一处报错：这是"安静地做错事"，而不是"响亮地坏"。
+    //
+    //    它今天够不到（两个调用点分别写的是 `preferredPort || 18080` 和"上一次的
+    //    实际端口"，后者必然是真的端口号），所以这是一条**潜伏**的路 —— 而它是
+    //    被一条用例撞见的：那条用例把控制器推到 RUNNING 却没给它端口，现象是
+    //    "隧道重建成功了，而 `_tunnelPort` 是 0"。
+    //
+    //    ★ 判据是 1–65535 的**整数**：`'18080'`（字符串）与 `18080.5` 也拒绝 ——
+    //      `'18080' + 0 === '180800'`，那是另一个安静的错。
+    if (!Number.isInteger(preferredPort)
+        || preferredPort < 1 || preferredPort > 65535) {
+      throw new Error(`首选端口不合法：${JSON.stringify(preferredPort)}`
+        + '（要求 1–65535 的整数）');
+    }
     const reserved = excludePorts instanceof Set
       ? excludePorts : new Set(excludePorts || []);
     let lastErr = null;

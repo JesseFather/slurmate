@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import logging
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DAEMON = os.path.join(HERE, "slurmate-sessiond")
@@ -1216,6 +1217,32 @@ exit 0
                               "/tmp/j.sbatch", "code-server")
     check("家目录下没有日志子目录时回退到家目录根",
           any(x.endswith("slurm-%j.out") and tmpdir in x for x in a), str(a))
+
+    # ── 17b. ★ 环境变量**只**靠命令行传（F19）────────────────────────────────
+    #
+    # 模板里从前写着 `#SBATCH --export=ALL`，而 sbatch 的**命令行选项覆盖脚本里的
+    # `#SBATCH`** ⇒ 那一行从头到尾没被读过。两条值恰好都是 `ALL`，所以行为上分毫
+    # 不差 —— 它不是缺陷，是一句**假信号**：下一个读那份模板的人会以为"环境变量是
+    # 靠这一行传进去的"，于是调 build_sbatch_argv 时**漏掉那些 SLURMATE_\***。
+    #
+    # ★ 判据是**两条一起**：命令行上真的有它（且 SLURMATE_* 一个都不许漏），
+    #   而模板里**没有**任何一条 `#SBATCH` 指令提到 export。只判一头的话，
+    #   "两边都删掉"会全绿 —— 而那是把环境变量整个弄丢。
+    _sub_env = {"SLURMATE_SESSION_ID": "s-1", "SLURMATE_CANDIDATES": "55001;55002",
+                "SLURMATE_AUTH_MODE": "password", "SLURMATE_SERVICE_KIND": "code-server"}
+    _aexp = mod.build_sbatch_argv(cfg, dict(base_sess, partition="2080TI"), _sub_env,
+                                  home, "/tmp/j.sbatch", "code-server")
+    _exp = [x for x in _aexp if x.startswith("--export=")]
+    check("★ 命令行上恰好一个 --export=ALL,…（环境变量唯一的来路）",
+          len(_exp) == 1, str(_aexp))
+    check("★ 而它带着**每一个** SLURMATE_* 变量（漏一个 = 作业里当场退出）",
+          bool(_exp) and all("%s=%s" % (k, v) in _exp[0] for k, v in _sub_env.items())
+          and _exp[0].startswith("--export=ALL,"), str(_exp))
+    _tpl_txt = io.open(os.path.join(HERE, "run.sbatch"), encoding="utf-8").read()
+    _tpl_exp = [ln.strip() for ln in _tpl_txt.splitlines()
+                if re.match(r"^\s*#SBATCH\b", ln) and "export" in ln]
+    check("★ 模板里没有任何一条 #SBATCH 指令提到 export（那一行从来没生效过）",
+          _tpl_exp == [], "模板里还有：%s" % _tpl_exp)
 
     # ── 18. op_submit：缺省值由服务端填，权限查不到时退化而不是拒绝 ─────────
     print("\n── 18. op_submit（服务端填默认值）──")
@@ -5116,6 +5143,48 @@ exit 0
           "（这正是契约要禁止那种写法的原因 —— 它是静默丢失）",
           not any("水位之前偷偷写的一行" in x for x in _rlines), _rlog[-500:])
 
+    # ── 22d-2 ★ 「每一个候选端口都失败」这条路（F16）────────────────────────
+    #
+    # **账本上这条不是缺陷，是防线上一个洞。** 它是"计算节点上没装那个服务"的表现：
+    # deploy.sh 解析 `bin` 是在**登录节点**上做的，猜不到计算节点上有没有。这条路
+    # 走到最后要做两件事 —— 写一个 `failed` 墓碑（让守护进程立刻知道，而不是等
+    # orphan 周期）+ 以 22 结束 —— 而在此之前，仓库里**没有任何一条用例**看过它们。
+    #
+    # ★ 观测手段是"每个候选端口都返回失败"的假插件：`pick_port_and_start` 会逐个
+    #   试完 `SLURMATE_CANDIDATES` 里的两个端口，然后落进那一格。
+    _woven_fail = os.path.join(tmpdir, "woven-allfail.sbatch")
+    with open(os.path.join(tmpdir, "blocks_f.sh"), "w", encoding="utf-8") as _f:
+        _f.write("start_thing() { log '端口 $1 起不来'; return 1; }\n")
+    _awkf = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_f.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven_fail, "w", encoding="utf-8") as _f:
+        _f.write(_awkf.stdout)
+    _hf = os.path.join(tmpdir, "jobsh-allfail")
+    os.makedirs(_hf, exist_ok=True)
+    _rcf, _logf = run_jobsh(_woven_fail, "thing", _hf)
+    check("★ 每一个候选端口都失败 ⇒ 以 22 结束（不是 0、不是 24）",
+          _rcf == 22, "rc=%s 日志=%s" % (_rcf, _logf[-400:]))
+    check("★ 而且两个候选端口**都真的试过**（一个都不许跳过）",
+          _logf.count("端口") >= 2 and "55001" in _logf and "55002" in _logf,
+          _logf[-400:])
+    check("★ 失败原因分类要说出来（「全部失败」一句话指不回根因）",
+          "候选端口全部失败" in _logf and "启动失败 2" in _logf, _logf[-400:])
+    # ★ 墓碑：守护进程据此**立刻**释放，而不是等一个 orphan 周期。它必须存在的
+    #   理由与"这条路有没有人测"是同一件事 —— 没写墓碑时没有人会看见任何异常。
+    _sessf = os.path.join(_hf, ".slurmate", "sessions", "job-424242.json")
+    _okf, _bodyf = False, "（没有会话文件）"
+    if os.path.exists(_sessf):
+        with open(_sessf, encoding="utf-8") as _f:
+            _bodyf = json.load(_f)
+        _okf = (_bodyf.get("state") == "failed" and _bodyf.get("exit_code") == 22)
+    check("★ 而且写下了 failed 墓碑、退出码 22（守护进程据此立刻释放）",
+          _okf, repr(_bodyf))
+
     # ── 22e ★★ 一个插件的顶层语句**不会**在别的插件的作业里执行 ──────────────
     #
     # **这条是这次拆文件的全部理由。** 同处一份文件时，插件里任何一行不在函数
@@ -5826,6 +5895,94 @@ exit 0
           % (_v_run.get("job_terminal"), sorted(_v_run)))
     check("★ 排队中那一行同样带判定（false = 还没结束）",
           _v_pend.get("job_terminal") is False, repr(_v_pend.get("job_terminal")))
+
+    # ── 24b. 会话文件读不到：那句话有节流，而且恢复时说一句（F28）─────────────
+    #
+    # 这一条从前**零覆盖**，而它是在别处的端到端用例里被发现的：那条用例用 0.05 秒
+    # 的 tick 跑守护进程，几十秒里刷出两千多行 —— 因为 `refresh_enrollment()` 对
+    # **每一个** RUNNING 会话、**每一个** tick 无条件写一行 warning。
+    #
+    # ★ 判据是"**一个会话在 N 秒里最多几行**"，不是"有没有这一行"。后者判不出
+    #   节流：把节流整个删掉，它照样绿。所以下面**两条一起**：
+    #   ① 首报必须立刻有（晚 30 分钟才说第一句等于没说）；
+    #   ② 在 `ENROLL_FILE_WARN_SECONDS * 3` 秒的窗口里行数**恰好 3**
+    #      （t=0 首报、t=T、t=2T），而不是几万行。
+    #
+    # ★ 时间靠**喂进去**（`now=`），不靠真等：真跑半小时的 tick 是不现实的，
+    #   而"测不出来"正是这一条此前没有用例的原因之一。
+    print("\n── 24b. 会话文件读不到的说话频率（F28）──")
+
+    class _LogCatcher(logging.Handler):
+        """把守护进程那一个 logger 的记录收下来 —— 判"行数"要看的是**真的发了什么**。"""
+
+        def __init__(self):
+            logging.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, rec):
+            self.lines.append((rec.levelname, rec.getMessage()))
+
+    _logcat = _LogCatcher()
+    _lg = logging.getLogger("slurmate")
+    _lg.addHandler(_logcat)
+    _lg.setLevel(logging.DEBUG)
+    try:
+        d.store.close()
+        d.store = mod.Store(os.path.join(tmpdir, "f28.db"))
+        d.store.insert(session_id="sess-f28", uid=UID, user="alice",
+                       partition="A6000", account="acct", cpus=2, mem="8G",
+                       requested_time="12:00:00", state=mod.ST_ENROLLED,
+                       candidates="55001", created_at=mod.now_ts(), job_id=88001)
+        _s = d.store.get("sess-f28")
+
+        # `load_session_file` 报"读不到"，别的一概不动 —— 这一条只问"说了几句"。
+        # ★ 钟要**拨**：5400 个 tick 在真实时间里只过去几十毫秒，而这一条的判据
+        #   正是"过了多久才再说一次"。不拨钟的话它只会有一行，而那一行**看起来
+        #   就像节流生效了** —— 一条判不出节流的用例。
+        _real_load = d.load_session_file
+        _real_now = mod.now_ts
+        _f28_clock = [1_700_000_000.0]
+        d.load_session_file = lambda uid, job: (None, "文件不见了")
+        mod.now_ts = lambda: _f28_clock[0]
+        try:
+            _warn_secs = mod.ENROLL_FILE_WARN_SECONDS
+            _ticks = _warn_secs * 3
+            for _i in range(_ticks):
+                _f28_clock[0] += 1.0          # 一个 tick = 一秒
+                d.refresh_enrollment(_s, {})
+        finally:
+            d.load_session_file = _real_load
+            mod.now_ts = _real_now
+        _miss = [m for lv, m in _logcat.lines if "读不到" in m]
+        check("★ 首报**不节流**：一件事第一次发生必须立刻说出来",
+              len(_miss) >= 1 and _miss[0].startswith("会话 sess-f28 的会话文件暂时读不到"),
+              "报了 %d 行：%s" % (len(_miss), _miss[:3]))
+        check("★★ %d 秒里**恰好 %d 行**（首报 + 每 %d 秒一次），而不是 %d 行"
+              % (_ticks, _ticks // _warn_secs, _warn_secs, _ticks),
+              len(_miss) == _ticks // _warn_secs,
+              "报了 %d 行（%d 个 tick）：%s" % (len(_miss), _ticks, _miss[:5]))
+        check("★ 而且后续那几行说得清**已经持续多久**（不是把第一句重复一遍）",
+              any("已持续" in m for m in _miss[1:]), str(_miss[:3]))
+
+        # 恢复：文件又读得到了 ⇒ **报一次**，而且只说一次（下一次不再说）。
+        # `validate_session` 换成一个不干活的桩 —— 这一条只问"恢复那句话说了几次"，
+        # 后面的刷新校验是别处的账。
+        _real_validate = d.validate_session
+        d.load_session_file = lambda uid, job: ({"node_ip": "192.0.2.20",
+                                                 "service_port": 55001}, "ok")
+        d.validate_session = lambda *a, **k: (False, "这一条不验别的")
+        try:
+            _before = len(_logcat.lines)
+            d.refresh_enrollment(_s, {})
+            d.refresh_enrollment(_s, {})
+        finally:
+            d.load_session_file = _real_load
+            d.validate_session = _real_validate
+        _back = [m for lv, m in _logcat.lines[_before:] if "又能读到" in m]
+        check("★ 文件恢复可读时**报一次恢复**（「没有新行」在日志里长得像「一切正常」）",
+              len(_back) == 1, "报了 %d 行：%s" % (len(_back), _back))
+    finally:
+        _lg.removeHandler(_logcat)
 
     # ── 25. GRES：一个结构化描述符，和一个拼法 ───────────────────────────────
     #
@@ -8320,6 +8477,25 @@ exit 0
         check("★★ 真终态 %s ⇒ 拆" % _st,
               _rel_state(_dd) == mod.ST_RELEASED and not os.path.exists(_sf),
               "state=%r" % _rel_state(_dd))
+
+    # ── 30.4b 拆完之后，每一个**按 session_id 记账的表**都要清干净 ────────────
+    #
+    # ★ 为什么这一条值得单独钉：那张名册是**唯一**一处（见 phase_release 里那段
+    #   注释），而漏加一个表的症状是"跑几个月之后内存慢慢涨"—— 它指不回任何一行，
+    #   也没有别的东西会因此变红。F28 往里加了第五个表，所以这里钉一次。
+    _dd, _ev, _sf = _rel_case("RUNNING")
+    _FIVE = ("job_missing", "job_unknown", "job_stuck",
+             "enroll_file_missing", "release_retry")
+    for _n in _FIVE:
+        getattr(_dd, _n)["s-rel"] = 1
+    del _dd.slurm.jobs["7001"]              # 作业现在真的没了
+    _dd.tick()
+    check("★★ 拆完之后 %d 个按 session_id 记账的表**全都**清空了"
+          "（漏一个 = 内存无上限地涨，而它指不回任何一行）" % len(_FIVE),
+          _rel_state(_dd) == mod.ST_RELEASED
+          and not [n for n in _FIVE if "s-rel" in getattr(_dd, n)],
+          "state=%r / 还留着的：%s"
+          % (_rel_state(_dd), [n for n in _FIVE if "s-rel" in getattr(_dd, n)]))
 
     # ── 30.5 ★★ 重试与说话都节流，而**看一眼不节流** ────────────────────────
     #

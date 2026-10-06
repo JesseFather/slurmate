@@ -97,6 +97,37 @@ test('隧道：目标解析必须是字面 IPv4，否则拒绝', () => {
   assert.throws(() => Tunnel.parseTarget('203.0.113.5:99999'), /端口/);
 });
 
+test('★★ 首选端口必须是 1–65535 的整数：null 会**安静地**绑到一个随机端口', async () => {
+  // `preferredPort + i` 对 null 是合法的 JS（`null + 0 === 0`），而 `listen(0)`
+  // 在操作系统那边的意思是"随便挑一个" —— 于是它会**成功地**绑到一个临时端口、
+  // `start()` 返回 `{port: 0}`，`snapshot().localPort` 从此指向一个并不存在的端口、
+  // `origin` 是 null。全程没有一处报错。
+  //
+  // ★ 这一条是**潜伏**的（三个调用点今天都挡住了），所以它唯一的证据就是这条用例：
+  //   把校验拿掉，这里会绿着返回 `{port: 0}` —— 而不是红。
+  //
+  // ★★ **每个候选值一个全新的 Tunnel，而且 `stop()` 放在 `finally` 里。**
+  //    这不是洁癖 —— 变异验证抓到过：把校验拿掉之后，`start()` 会**成功**绑到一个
+  //    临时端口，于是 `assert.rejects` 变红**之前**，那个监听器已经起来了，而一条
+  //    没人关的监听器会让 node 的事件循环永远不空 ⇒ **整轮用例挂死**（TAP 停在
+  //    那里不动，0% CPU）。"红"必须是一句判词，不能是一次挂起 —— 在 CI 上它就是
+  //    一次超时，而超时指向的从来不是真正的那一行。
+  const backend = new FakeBackend();
+  for (const bad of [null, undefined, 0, -1, 65536, '18080', 18080.5, NaN]) {
+    const t = new Tunnel({ backend });
+    try {
+      await assert.rejects(
+        () => t.start({ preferredPort: bad, target: '203.0.113.9:9999' }),
+        /端口/, `应拒绝 ${JSON.stringify(bad)}`);
+      // ★ 一次都不许真的绑上去：判"抛了"还不够，还要判**没有副作用**。
+      assert.equal(t.port, null, `失败之后不许留下一个端口号（${JSON.stringify(bad)}）`);
+      assert.equal(t.state, 'stopped', '状态也不许变成 listening');
+    } finally {
+      if (t.server) await t.stop();
+    }
+  }
+});
+
 test('隧道：只听 127.0.0.1，不绑所有网卡', async () => {
   const backend = new FakeBackend();
   const t = new Tunnel({ backend });

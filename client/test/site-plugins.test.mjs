@@ -381,9 +381,10 @@ test('★ 本机那一份多出文件来 ⇒ 也失败（双向比对）', async
   assert.match(r.failed[0].why, /extra\.js/, `要点名多出来的是哪一份：${r.failed[0].why}`);
 });
 
-test('★ 同一个版本号下内容变了 ⇒ 明确失败，**绝不静默覆盖**', async () => {
-  // 站点改了内容却没升版本号是**站点的错**。覆盖的后果是一条正在跑的旧会话配上
-  // 新的客户端那一半 —— 正是 PROTOCOL.md 里"两半是配套的"那条注释在防的事。
+test('★ 本机那一份被改过 ⇒ 明确失败，**绝不静默覆盖**', async () => {
+  // ★ 这一条判的是**本机**：树与它自己的来路凭证（旁边那个 `.splug`）对不上。
+  //   而"站点报的是另一份内容"是**另一件事**，见下面那一条 —— 两句话从前长成
+  //   一句，而它们的处置完全不同（一个在本机重同步，一个去找管理员）。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
@@ -393,9 +394,49 @@ test('★ 同一个版本号下内容变了 ⇒ 明确失败，**绝不静默覆
 
   const r = await callSync(site, env);
   assert.equal(r.failed.length, 1, `要报失败：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /升版本号|版本号/, `要说清该怎么办：${r.failed[0].why}`);
+  assert.match(r.failed[0].why, /来路凭证/, `要指向本机这一份：${r.failed[0].why}`);
+  assert.ok(!/站点现在报的不一样/.test(r.failed[0].why),
+    `★ 不是"站点报了别的" —— 那件事走另一条判据：${r.failed[0].why}`);
   assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')), before,
     '★ 失败时池里原来那份**每个字节都不能变**');
+});
+
+test('★★ 两个站点报同一个 (id, 版本) 而内容不同 ⇒ 明确失败，且点名这个槽位是**谁**放进来的', async () => {
+  // ★★ 这一格从 v0.7 起就**空着**：v0.6 的判据是"站点这一轮报的清单"（`p.files`），
+  //    那条路删掉之后它换成了**本机那个包**，于是"对面这次说的是不是另一份内容"
+  //    再没有任何东西在看 —— 两个站点报同一个 `(id, 版本)` 而内容不同时，后一个会被
+  //    **静默收下**（它的 `wants` 还照样记在那个槽位上），一个字节都不报。
+  //
+  //    判据回到"对面这一轮说的"：`package.digest` 与池里那个 `.splug` 解析出来的
+  //    是**同一个函数**算的（§3.4 的内容摘要），可以直接比。
+  const A = makeSite();
+  const B = makeSite();
+  const v1 = A.add('a1', { name: 'x', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = { who: "A" };\n' });
+  B.add('b1', { id: v1.id, name: 'x', version: '1.0.0' },
+    { 'client/index.js': 'module.exports = { who: "B" };\n' });
+  const env = makeEnv();
+
+  // A 先把它装进来，并让记录里留下"是 A 要的"（`wants` 在**下一次**对账里写）
+  let r = await callSync(A, env, { siteKey: 'aaaa', siteLabel: 'A 站' });
+  consentAll(env, r);
+  r = await callSync(A, env, { siteKey: 'aaaa', siteLabel: 'A 站' });
+  assert.equal(r.kept.length, 1, `A 那一份应当已在池里：${JSON.stringify(r.failed)}`);
+  assert.equal(readRecordOf(env.siteRoot).sites.aaaa.wants[v1.id], '1.0.0',
+    '（前提）记录里说 A 要这一版 —— 下面那句点名靠的就是它');
+
+  const dest = path.join(env.siteRoot, v1.id, '1.0.0', 'client', 'index.js');
+  const before = fs.readFileSync(dest);
+  r = await callSync(B, env, { siteKey: 'bbbb', siteLabel: 'B 站' });
+  assert.deepEqual(r.kept, [], '★ 绝不能当成"已经在池里、跳过"收下');
+  assert.equal(r.failed.length, 1, `B 这一份必须失败：${JSON.stringify(r)}`);
+  assert.match(r.failed[0].why, /站点现在报的不一样/, r.failed[0].why);
+  assert.match(r.failed[0].why, /A 站/,
+    `★★ 要点名**先来的那个站点** —— 那是管理员接着要问的第一个问题：${r.failed[0].why}`);
+  assert.deepEqual(fs.readFileSync(dest), before, '池里那一份**一个字节都不能变**');
+  // 而 B 的 `wants` **不许**记上这一版：它没拿到任何东西。
+  assert.notEqual(((readRecordOf(env.siteRoot).sites.bbbb || {}).wants || {})[v1.id], '1.0.0',
+    '★ B 没拿到这一份 ⇒ 引用表里也不该有它（否则回收会以为有人在要）');
 });
 
 test('★ 写下去之后再从磁盘读回来验 —— 不能拿手里的 Buffer 当证据', async () => {

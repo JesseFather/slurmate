@@ -52,10 +52,18 @@
 #   （`--job-name=sj-<插件短名>`，见 build_sbatch_argv）—— 而 sbatch 的命令行
 #   选项**覆盖**脚本里的 `#SBATCH`，所以这里写一个固定值就是一句永远不生效的
 #   假话：读代码的人会以为作业叫那个名字，而 squeue 里显示的是另一个。
+# ★ 这里**也没有** `--export` 那一行，理由与上面 `--job-name` 逐字相同：环境变量
+#   是由 `build_sbatch_argv` **在命令行上**传的（`--export=ALL,SLURMATE_SESSION_ID=…`），
+#   而命令行的选项**覆盖**脚本里的 `#SBATCH` —— 写在这里就是一句永远不生效的假话。
+#   ★ 而这一句假话比上面那一句更贵：下一个读这份模板的人会以为"环境变量是靠这一行
+#     传进去的"，于是**调 `build_sbatch_argv` 时漏掉那些 `SLURMATE_*`**，而症状是
+#     作业里 `: "${SLURMATE_SESSION_ID:?…}"` 当场退出、隔着一层作业日志。
+#   ★ 反过来删命令行那一个**不行**：`SLURMATE_AUTH_MODE` / `SLURMATE_SSH_PUBKEY`
+#     之类会一起丢，而它们不是"能从环境里继承到"的东西（sbatch 默认只导 `ALL`，
+#     这些变量在**提交方**的环境里根本不存在）。
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --no-requeue
-#SBATCH --export=ALL
 
 set -uo pipefail
 umask 077

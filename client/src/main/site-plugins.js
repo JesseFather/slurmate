@@ -485,6 +485,33 @@ function siteEntry(record, key, label) {
 }
 
 /**
+ * 池里那个 `<id>/<版本>` 槽位，是**哪些站点**要来的（给人看的标签列表）。
+ *
+ * ★ 为什么值得单独一个函数：对账第 4 步撞上"本机这一份与站点现在报的不是同一份
+ *   东西"时，用户（和运维）接下来要问的第一个问题就是"**这一份是谁先放进去的**"。
+ *   答案一直躺在记录文件里（`sites[<站点键>].wants`），只是此前没人读它。
+ *
+ * ★ 判据是 `wants` 而**不是**"这一轮报了它的站点"：`wants` 只在**真的把那一版拿
+ *   下来**时才写（第 5 步），所以它记的正是"谁把它放进了池子"。这一轮才报它、而
+ *   摘要对不上的那个站点**不在**里面 —— 那正是我们要的（它不是放进去的那个）。
+ *
+ * ★ 记录读不动时（`record` 是 `null`）返回空列表：那是**"不知道"**，调用方据此
+ *   少说一句，而不是编一个来源出来。
+ */
+function sitesWanting(record, id, version) {
+  if (!record || !record.sites || typeof record.sites !== 'object') return [];
+  const out = [];
+  for (const [key, s] of Object.entries(record.sites)) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
+    const w = s.wants;
+    if (!w || typeof w !== 'object' || Array.isArray(w)) continue;
+    if (w[id] !== version) continue;
+    out.push(typeof s.label === 'string' && s.label ? s.label : key);
+  }
+  return out;
+}
+
+/**
  * 池里每一个 `<id>/<版本>`，以及谁在要它。
  *
  * ★ `hasPackage` = 旁边那个 `<版本>.splug` 在不在。它只用于**如实报告**（见文件头
@@ -956,15 +983,51 @@ async function sync(o) {
 
         const r = verifyStaged(dest, decl, { id: p.id, version: p.version });
         if (r.ok && o.trusted(p.id, p.version, r.entry.digest)) {
+          // ★★ **站点这一轮报的，与本机躺着的是不是同一份东西** —— 这一格从 v0.7
+          //    起就空着，而它是这里唯一无法从本机自证的一条。
+          //
+          //    v0.6 的判据是**站点这一轮报的清单**（`p.files`）：`verifyStaged(dest,
+          //    declared, …)` 里的 `declared` 那时来自对面。v0.7 把 `files` 删掉之后
+          //    它换成了**本机那个包**（`pkgOnDisk`），于是这一格退化成"本机的树 vs
+          //    本机的包" —— 而"站点这次说的是不是另一份内容"**再没有任何东西在看**：
+          //    两个站点报同一个 `(id, 版本)` 而内容不同时，后一个会被**静默收下**
+          //    （它的 `wants` 还照样记在那个槽位上），一个字节都不报。
+          //
+          //    判据回到"对面这一轮说的"：`package.digest` 是 §3.4 的内容摘要，与池里
+          //    那个 `.splug` 解析出来的**是同一个函数算的**（`contentDigest`），所以
+          //    两者可以直接比。摘要盖的是内容，补一个签名块不会让它变 —— 这正是
+          //    "摘要相同 ⇒ 还是同一份构件"那条规则。
+          //
+          //    ★ 包不在了（剩下的只有树）就**比不了**：那时两边都没有一个"对面说的
+          //      摘要"的对应物，只能按上面那条通知如实说"少做了一半"。不猜。
+          if (pkgOnDisk && p.package.digest !== pkgOnDisk.digest) {
+            const owners = sitesWanting(record, p.id, p.version);
+            fail(`本机已有 ${label}，但它的内容与站点现在报的不一样`
+              + `（站点报 ${plugins.shortDigest(p.package.digest)}，本机这一份是 `
+              + `${plugins.shortDigest(pkgOnDisk.digest)}）。`
+              // ★ F20：那个槽位是**谁**先放进来的 —— 记录文件里一直有这份信息
+              //   （`sites[<站点键>].wants`），此前没用上，而它是管理员接着要问的
+              //   第一个问题。`wants` 只在"真的把那一版拿下来了"时才写，所以它记的
+              //   正是"谁把它放进了池子"，而不是"这一轮有谁报了它"。
+              + (owners.length
+                ? `这个槽位是 ${owners.join('、')} 要来的 —— ` : '')
+              + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。');
+            continue;
+          }
           out.kept.push({ id: p.id, version: p.version, name: p.name, title: p.title, dir: dest });
           continue;
         }
         if (!r.ok) {
-          // ★ **绝不静默覆盖。** 站点改了内容却没升版本号是**站点的错**，而覆盖的
-          //   后果是一条正在跑的旧会话配上新的客户端那一半 —— 正是 PROTOCOL.md 里
-          //   "两半是配套的"那条注释在防的事。
-          fail(`本机已有 ${label}，但它的内容与站点现在报的不一样（${r.why}）。`
-            + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。');
+          // ★ **绝不静默覆盖。** 覆盖的后果是一条正在跑的旧会话配上新的客户端那一半
+          //   —— 正是 PROTOCOL.md 里"两半是配套的"那条注释在防的事。
+          //
+          // ★ 而这**不是**"站点报了另一份内容"：上一条判据已经把那件事分走了，走到
+          //   这里的是**本机那一份与它自己的来路凭证对不上**（树被动过、或者上一次
+          //   落盘就是坏的）。两者要做的事完全不同 —— 一个去找管理员，一个在本机，
+          //   所以两句话不能长成一句。
+          fail(`本机已有 ${label}，但它与自己的来路凭证（${p.version}.splug）对不上`
+            + `（${r.why}）。这一份在本机被改过 —— 请重新同步一次；`
+            + '如果它会自己恢复成原来的样子，说明有别的东西在改它。');
           continue;
         }
 

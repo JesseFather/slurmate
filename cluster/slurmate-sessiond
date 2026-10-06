@@ -614,6 +614,17 @@ CONDITIONAL_TERMINAL_JOB_STATES = frozenset(("PREEMPTED", "TIMEOUT"))
 # 不会触发它；会触发的是 epilog 挂住、或者作业被 held 住永远排不上。
 STUCK_JOB_SECONDS = 1800
 
+# "会话文件读不到"这件事多久**再说一次** —— 见 note_enrollment_file_missing()。
+#
+# ★★ 取这个数的理由不是"多久合适"，而是**不节流时它是多少**：那件事发生在
+#    **每一个** RUNNING 会话的**每一个** tick（缺省 2 秒），也就是一个会话
+#    **每分钟 30 行**，一直写到作业结束或者有人来管。静默的反面不是"话多"，
+#    是**把同一个日志里有用的话埋掉** —— 而日志正是排查时唯一能看的东西。
+#
+# ★ 与 STUCK_JOB_SECONDS 同为 1800 是**巧合**，不是同一件事：那一个是"停多久算
+#   异常"，这一个是"同一句话多久重复一次"。两条都可以各自改。
+ENROLL_FILE_WARN_SECONDS = 1800
+
 RENEW_INCREMENT = "12:00:00"
 RENEW_THRESHOLD = 7200
 RENEW_MAX_TOTAL = 604800
@@ -3399,6 +3410,7 @@ class Config(object):
         self.released_keep = RELEASED_KEEP
         self.job_missing_confirm_ticks = JOB_MISSING_CONFIRM_TICKS
         self.stuck_job_seconds = STUCK_JOB_SECONDS
+        self.enroll_file_warn_seconds = ENROLL_FILE_WARN_SECONDS
         self.release_retry_seconds = RELEASE_RETRY_SECONDS
         self.renew_enabled = True
         self.renew_threshold = RENEW_THRESHOLD
@@ -5126,6 +5138,10 @@ class Sessiond(object):
         # 存**时刻**而不是计数：tick 之间有别的活（查询、fork），按 tick 数算会把
         # 一个跑了 8 秒的 tick 当成 2 秒。
         self.job_stuck = {}
+        # session_id -> (第一次读到"会话文件不见了"的时刻, 上一次说这句话的时刻)。
+        # 两个都要：一个用来算"已经持续多久"，一个用来算"该不该再说一次"。
+        # 见 note_enrollment_file_missing()。
+        self.enroll_file_missing = {}
         # session_id -> 下一次"再 scancel 一次"的**时刻**（见 phase_release 的闸）。
         # 它只管重试与说话，不管"看一眼作业还在不在"。
         self.release_retry = {}
@@ -5737,9 +5753,10 @@ class Sessiond(object):
         info, why = self.load_session_file(s["uid"], s["job_id"])
         if info is None:
             # 文件不见了但作业还在 —— 可能是 NFS 抖动或作业正在重启。
-            # 绝不因此拆规则（那样会打断正在用的隧道）。
-            log.warning("会话 %s 的会话文件暂时读不到（%s），保留 ACL", s["session_id"], why)
+            # 绝不因此拆规则（那样会打断正在用的隧道）。说话带节流，见下面那个函数。
+            self.note_enrollment_file_missing(s, why)
             return
+        self.note_enrollment_file_back(s)
         ok, why = self.validate_session(s, info, job, for_refresh=True)
         if not ok:
             log.warning("会话 %s 刷新校验失败: %s", s["session_id"], why)
@@ -5759,6 +5776,62 @@ class Sessiond(object):
                               file_ctime=info.get("_ctime"), note=None)
             self.audit("reenrolled", session=s["session_id"], node_ip=node_ip,
                        port=port, rule=detail)
+
+    def note_enrollment_file_missing(self, s, why):
+        """一个已在跑的会话，它的会话文件读不到 —— **保留 ACL，但把这句话限流**。
+
+        ★★ 为什么要节流：这件事对**每一个** RUNNING 会话、**每一个** tick 都成立，
+        而 tick 缺省 2 秒 ⇒ 一个会话**每分钟 30 行**。那条 warning 本身是**有意的**
+        （文件不见了而作业还在 ⇒ 绝不因此拆规则），错的只是**频率**：真的丢了文件的
+        会话会一直写到作业结束，而它把同一个日志里别的东西全淹掉 —— 日志正是排查时
+        唯一能看的东西。
+
+        形状照同文件里两个现成的先例：`note_nonterminal()`（按 `session_id` 记时刻、
+        到点说一次再拨钟）与 `phase_running()` 里 `job_unknown` 那一段（首报即报）。
+        这里两者各取一半 —— **首报不节流**（一件事第一次发生必须说出来），之后每
+        `enroll_file_warn_seconds` 说一次。
+
+        ★ 判据是"**一个会话在 N 秒里最多几行**"，而它只有在能拨钟的时候才测得出来
+          （真跑 1800 秒的 tick 是不现实的）⇒ 用例按同文件里别的用例的样子打桩
+          `now_ts`，**不给这个方法开一个只在测试里用得上的参数**。
+
+        ★ 不写进数据库的 `note` 列：那一列已经有主人（释放原因 / renew_exhausted /
+          recovered_from_rule）。与 `note_nonterminal()` 同一条理由。
+        """
+        sid = s["session_id"]
+        now = now_ts()
+        seen = self.enroll_file_missing.get(sid)
+        if seen is None:
+            # 首报**不节流**：这条 warning 是"文件不见了而作业还在"，它是运维唯一
+            # 会看见的信号。晚 30 分钟才说第一句等于没说。
+            self.enroll_file_missing[sid] = (now, now)
+            log.warning("会话 %s 的会话文件暂时读不到（%s），保留 ACL", sid, why)
+            self.audit("enroll_file_unreadable", session=sid, job=s["job_id"],
+                       why=why, seconds=0)
+            return
+        first_seen, last_said = seen
+        if now - last_said < self.cfg.enroll_file_warn_seconds:
+            return
+        # 到点说一次，并把"上一次说"拨到此刻 —— 频率因此是"每
+        # enroll_file_warn_seconds 一次"，而不是每个 tick 一次。
+        self.enroll_file_missing[sid] = (first_seen, now)
+        log.warning("会话 %s 的会话文件仍然读不到（%s），已持续 %d 秒，保留 ACL",
+                    sid, why, now - first_seen)
+        self.audit("enroll_file_unreadable", session=sid, job=s["job_id"],
+                   why=why, seconds=now - first_seen)
+
+    def note_enrollment_file_back(self, s):
+        """会话文件又读得到了 —— **报一次恢复**，然后忘掉节流状态。
+
+        ★ 没有这一句的话，"读不到"与"恢复"在日志里长得一样（都是"没有新行"），
+          而那两件事对运维的意义完全相反：一个是 NFS 在抖、一个是一切正常。
+        ★ 只在**确实报过**的时候说：没报过就说明这一次读得到是常态，不必说话。
+        """
+        seen = self.enroll_file_missing.pop(s["session_id"], None)
+        if seen is None:
+            return
+        log.info("会话 %s 的会话文件又能读到了（读不到持续了 %d 秒），刷新恢复正常",
+                 s["session_id"], max(0, now_ts() - seen[0]))
 
     def maybe_renew(self, s, job):
         cfg = self.cfg
@@ -5894,7 +5967,7 @@ class Sessiond(object):
             #    ★ 这张名册是**唯一**一处：往上面加一个表却忘了加进这里，症状
             #      与上面那句一模一样，而它指不回任何一行 —— 所以这几行挨着放。
             for _t in (self.job_missing, self.job_unknown, self.job_stuck,
-                       self.release_retry):
+                       self.enroll_file_missing, self.release_retry):
                 _t.pop(s["session_id"], None)
             self.store.update(s["session_id"], state=ST_RELEASED, ended_at=now)
             self.audit("released", session=s["session_id"], job=s["job_id"],

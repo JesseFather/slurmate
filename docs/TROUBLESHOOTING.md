@@ -37,8 +37,8 @@ tail -100 ~/.slurmate/logs/job-<job_id>.log
 审计日志里的事件名是最快的线索（`audit()`，`cluster/slurmate-sessiond`）：
 `submitted` / `enrolled` / `suspect` / `suspect_recovered` / `orphaned` / `releasing` /
 `released` / `rejected` / `expired` / `renewed` / `renew_failed` / `renew_exhausted` /
-`job_query_failed` / `job_stuck` / `acl_orphan_removed` / `acl_reinstalled` /
-`throttled` / `recovered`。
+`job_query_failed` / `job_stuck` / `enroll_file_unreadable` / `acl_orphan_removed` /
+`acl_reinstalled` / `throttled` / `recovered`。
 
 ---
 
@@ -728,6 +728,13 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 编辑器布局会重置一次，客户端会明确告诉你原因。
 在 Windows 上 `EACCES` 很常见（Hyper-V/WSL 会保留大段端口），
 所以它对 `EADDRINUSE` 和 `EACCES` 一视同仁地继续试。
+
+**首选端口必须是 1–65535 的整数，否则当场失败。** 这条校验在 `_listen` 的**开头**
+（`client/src/main/tunnel.js`），而它防的是一个**安静**的错：`preferredPort` 传
+`null` 时 `null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是**随便挑一个** ——
+它会成功地绑到一个临时端口、`start()` 返回 `{port: 0}`，界面上的「本地地址」那一栏
+从此指向一个并不存在的端口。判据是 1–65535 的**整数**：字符串 `'18080'` 与
+`18080.5` 也拒绝（前者会变成 `'180800'`，是另一个安静的错）。
 
 **顺移会跳过其他布局组占着的端口。** 每个布局组在配置里绑一个本地端口；两个组
 声称同一个端口的话，每次启动谁先绑上谁赢、另一个再顺移，布局就会在两个 `origin`
