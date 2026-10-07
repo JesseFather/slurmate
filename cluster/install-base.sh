@@ -115,10 +115,18 @@ while [[ $# -gt 0 ]]; do
         --purge-state)       PURGE=1 ;;
         # ★ v0.12 阶段 4：插件不再经过本脚本。**说清楚它搬去哪儿**，而不是
         #   只说一句"未知参数" —— 那会让人以为是自己打错了。
+        #
+        #   ★★ 两种写法都要取到那个目录：`--plugins-src=X` 的 X 在同一个参数里，
+        #     而 `--plugins-src X` 的在**下一个**（上面 `arg="$1"; shift` 已经
+        #     shift 过了，所以下一条就是现在的 `$1`）。只认等号那一种的话，
+        #     管理员照最顺手的写法敲，得到的指路里那一条命令**自己跑不通**
+        #     （印出来是 `--from --plugins-src`）。
         --plugins-src|--plugins-src=*)
+            _src="${arg#--plugins-src=}"
+            [[ "$_src" == "$arg" ]] && _src="${1:-DIR}"
             echo "★ 插件不再经过本脚本（v0.12 起）：本脚本只装基座。" >&2
             echo "  装插件（那是唯一的入口）：" >&2
-            echo "      sudo slurmate plugin install --from ${arg#--plugins-src=}" >&2
+            echo "      sudo slurmate plugin install --from ${_src}" >&2
             exit 2 ;;
         -h|--help)
             # ★★ 印的是**文件头那一段**（标题那两行之间的东西），不是整个文件头。

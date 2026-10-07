@@ -31,7 +31,7 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 ```
 
 ★ **分发与安装在服务器上的那一个是 `.splug`（一个文件），不是这棵树。**
-`install-base.sh` 永不打包 —— 打包是**作者**的事。服务器上从头到尾没有源码树。
+**站点侧永不打包** —— 打包是**作者**的事。服务器上从头到尾没有源码树。
 
 **目录名不参与任何判定。** 身份来自清单里的 `id`，版本来自 `version`，站点内的短名
 来自 `name`。目录名纯粹是给人看的（包的文件名也不参与判定 —— 安装器按 `id` 给它
@@ -39,9 +39,9 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 
 | 半边 | 谁读它 | 什么时候读 |
 |---|---|---|
-| `plugin.json` | 客户端注册表 + 守护进程扫描器 | 客户端启动 / 守护进程启动 / install-base.sh 部署 |
+| `plugin.json` | 客户端注册表 + 守护进程扫描器 | 客户端启动 / 守护进程启动 / **装插件时** |
 | `client/index.js` | 客户端注册表 | 客户端启动时扫池（**站点分发的那一份由对账取回来**，过了同意闸才加载） |
-| `job/start.sh` | **没有任何运行时读者** | install-base.sh 部署时**编织**成一份作业脚本 |
+| `job/start.sh` | **没有任何运行时读者** | **装插件时**编织成一份作业脚本 |
 
 ★ **三半都会被分发到客户端**（站点分发发的是整个包，不是只挑 `client/`）——
 所以"哪个文件会被执行"与"哪个文件会被传输"是两件事。后者由**包里的记录表**定
@@ -72,17 +72,15 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 `<prefix>` 通常是 `/usr/local`。**这是唯一需要放东西的地方**，而放进去的是**包**：
 
 ```bash
-# ① 把下载来的 .splug 收在一个目录里，然后部署
-sudo bash cluster/install-base.sh --plugins-src DIR
-# ② 或者一个动词装一个包（它做的是同一件事）
-sudo slurmate plugin install DIR/your-plugin-1.0.0.splug
+# ① 一个动词装一个包
+sudo slurmate plugin install ~/下载/your-plugin-1.0.0.splug
+# ② 或者把一批 .splug 收在一个目录里，一次对齐
+sudo slurmate plugin install --from DIR
 # ③ 一个都不装（合法状态）
-sudo bash cluster/install-base.sh --plugins-src EMPTY
 ```
 
-★ **缺省 `--plugins-src` 是仓库顶层的 `plugins/`**，而那里放的是**源码树** ——
-所以直接 `sudo bash cluster/install-base.sh` 会在预检那一步停下来，告诉你先
-`packer build`。那个失败是刻意的（包是构建产物，不进 git）。
+★ **`--from DIR` 只认 `.splug`。** 仓库顶层的 `plugins/` 放的是**源码树**，拿它
+当那个目录用不会装上任何东西 —— 包是构建产物，不进 git，要先 `packer build`。
 
 安装器做这些事（`slurmate plugin install` 会一件件说给人听）：
 
@@ -96,16 +94,18 @@ sudo bash cluster/install-base.sh --plugins-src EMPTY
 5. **两个包同一个 id ⇒ 两个都不装**（§6.4：按 id 命名会互相覆盖，而覆盖是静默的）；
 6. 装进 `<ULID>.splug`（root 所有、0644），并清掉更早那版布局留下的插件目录。
 
-然后是 `install-base.sh` 的活：
+然后是**对账**（`slurmate plugin sync`）的活 —— `slurmate plugin install` 装完会
+自己跑一次，所以上面那一步做完的同一个动作里，下面这些也已经做完了：
 
 7. 用守护进程自己的扫描器校验装完之后那一份；
 8. 对每个**包里有 `job/start.sh` 的**插件**单独织一份**作业脚本，装到
    `<prefix>/share/slurmate/jobs/<ULID>.sbatch`；没有的跳过（合法）；
-9. 对每份脚本做三条硬断言（见〈作业侧契约〉）。任何一条不过，部署当场中止。
-   缺 `job/start.sh` **不在**中止之列 —— 那是合法状态。
+9. 对每份脚本做三条硬断言（见〈作业侧契约〉）。任何一条不过就**当场中止**，
+   而那一批**一份都不装**。缺 `job/start.sh` **不在**中止之列 —— 那是合法状态。
 
-★ **加一个插件 = 放一个 `.splug` + 跑一次 install-base.sh。** 不需要改守护进程的源码，也
-不需要改配置文件。守护进程仍然要 root 重部署一次，但那是**安装动作**，不是改代码。
+★ **加一个插件 = 跑一次 `slurmate plugin install`。** 不需要改守护进程的源码，也不
+需要改配置文件（它自己那份由安装器写出来）。★ **而整个过程不重启守护进程** ——
+装完它自己发一次重载信号，正在跑的会话一条都不受影响。
 
 ★ **`plugins/code-server` 与 `plugins/sshd` 是两棵插件源码树，不是"基座自带的插件"
 —— 基座两端都不带任何插件。** 它们是**开发样例**（最早做"基座与插件对齐"时用的），
@@ -144,7 +144,7 @@ sudo bash cluster/install-base.sh --plugins-src EMPTY
 原因。★ 来源与真的守护进程一样是**启动时的快照**，所以换了目录要重启。
 
 ★ **打包器那一步在这一侧用不上。** `packer init` / `packer build` 产出的是
-`.splug`，那是**发给站点**、由管理员 `install-base.sh --plugins-src` 装上去的东西；
+`.splug`，那是**发给站点**、由管理员用安装器装上去的东西；
 假站点读的是你的**源码树**。所以本机循环里不需要每改一次就打一次包：
 
 ```
@@ -453,7 +453,7 @@ JSON —— 让每个插件自己拼 JSON 片段等于把转义责任推给每�
 - 宿主的函数都是没有后缀的动词（`log` / `cleanup` / `write_session` /
   `pick_port_and_start` …），与插件那套后缀命名不会撞。
 
-install-base.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一条不过就**当场中止部署**：
+对账在编织前对每个 `job/start.sh` 断言三件事，任何一条不过就**当场中止**：
 
 1. **没有 shebang、没有 `#SBATCH`。** 它们会被拼在作业脚本的中间，而 Slurm 只解析
    脚本**开头**那一段连续的注释 —— 带了不是报错，是"写了但静默不生效"。资源需求
@@ -470,19 +470,19 @@ install-base.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一
 ```
 作者机器上那棵树里的 job/start.sh
         └─ packer build ─→ <你的插件>.splug ─→ 安装器 ─→ <prefix>/share/slurmate/plugins/<ULID>.splug
-                                                              └─ install-base.sh 逐插件织一次
+                                                              └─ 对账逐插件织一次
                                                                  ─→ <prefix>/share/slurmate/jobs/<ULID>.sbatch
 ```
 
 ★ **站点上从头到尾没有源码树**（从前这一段写的是 `<prefix>/share/slurmate/plugins/
 <目录名>/job/start.sh  ← 源`，那是"插件是一棵目录树"那个形状，v0.7 起不存在了）。
-作业侧的源是**你仓库里那份** `job/start.sh`，它先被打进包，再由 `install-base.sh` 从
+作业侧的源是**你仓库里那份** `job/start.sh`，它先被打进包，再由**对账**从
 **包里的记录表**读出来、织成一份作业脚本。
 
 **文件名是这个插件清单里的 `id`（ULID）**，不是短名 —— ULID 是插件的**身份**
 （全球唯一、铸造出来就不变），短名只是本站的标签、可以改。目录列表里那一串 ULID
-各自对应哪个插件：`install-base.sh` 的完成摘要里有一张对照表，
-`slurmate-sessiond --check` 也会逐个打印。
+各自对应哪个插件：`slurmate plugin sync` 会说它装/移除了哪几份作业脚本，
+`slurmate-sessiond --check` 会逐个打印（那一屏带 `id@版本`）。
 
 ★ **为什么一插件一份，不是所有插件织进一份。** 同处一份文件时，插件里任何一行
 **不在函数里**的代码（一个多余的 `set -e`、一个变量赋值）都待在主流程中间 ——
@@ -518,8 +518,10 @@ bash 自上而下解析整个文件，那一行于是在**每一个**作业里�
 4. 需要客户端行为就写 `client/index.js`；
 5. 需要作业里跑东西就写 `job/start.sh`，定义 `start_<短名>`。
    **不写也行** —— 但它就提交不了（装得上、看得见，按钮是灰的，并说明原因）；
-6. 集群侧：`sudo bash cluster/install-base.sh --plugins-src <你的目录的父目录>`，
-   再写一份 `/etc/slurmate/slurmate.conf.d/<短名>.conf`，里面写 `enabled = yes`；
+6. 集群侧：`sudo slurmate plugin install <你的包>` —— 装完它会自己写一份
+   `/etc/slurmate/slurmate.conf.d/<id>.conf`（`enabled` 取清单里的
+   `defaultEnabled`）。要**手写**就用短名那份：
+   `/etc/slurmate/slurmate.conf.d/<短名>.conf`，里面写 `enabled = yes`；
 7. **客户端侧不用做任何事** —— 用户连上站点之后会自己取回来（开发时想在本机试，
    见〈客户端侧（开发用）〉）。
 
@@ -548,8 +550,9 @@ node packer/slurmate-packer.js inspect <那个 .splug>
 
 > ★ **这一段从前跟着一句已经不成立的话**：「这个仓库里的安装路径现在仍然收目录，
 > 『一个插件是一个包』那一步还没切过来」。**那一步已经切过来了** ——
-> `--plugins-src` 指的是**放 `.splug` 的目录**，缺省那个 `plugins/` 是源码树，
-> 所以直接部署会在预检那一步停下来告诉你要先 `packer build`。
+> 安装器收的是**放 `.splug` 的目录**（`slurmate plugin install --from DIR`），而仓库
+> 顶层那个 `plugins/` 是源码树 —— 拿它当那个目录用，安装器会把里面每一份文件逐个
+> 点名说"它不是一个插件包、不会被安装"，并指路 `packer build`。
 > 留着这次更正，是因为那句话当时读起来像一条"已知限制"，而它其实已经过期了 ——
 > 过期的话比没有话更坏：它会让人以为包那条路还没通。
 

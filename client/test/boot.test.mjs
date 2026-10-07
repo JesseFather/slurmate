@@ -4986,7 +4986,7 @@ test('★★ 同名不同 id 的两条站点插件都进视图 —— 按短名�
 
   // ★ 造"**同名、不同 id**"的现场：短名撞上仓库里真的 code-server，id 是假站点
   //   自己那一个（`DEMO_EXTRA_ID`）。v0.11 起这是**合法**的一种站点 ——
-  //   两个不同的插件可以同名，配置里用 `[plugin:<id>]` 各配一块。
+  //   两个不同的插件可以同名，配置文件名写 `<id>.conf` 就分得开。
   idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
 
   await withSitePlugins([], async () => {

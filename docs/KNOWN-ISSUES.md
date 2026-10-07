@@ -160,6 +160,57 @@ self.store.update(sid, job_id=job_id, state=ST_SUBMITTED, submitted_at=now_ts())
 
 ---
 
+### F45 — 热重载的拒绝判据比启动的**少一半**：`cluster_cidr` 的交叉核对不在里面
+
+**位置**：`Sessiond.reload_config()`（`cluster/slurmate-sessiond`）只跑
+`new.validate()` + `changed_cold_keys()`；而 `start()` 在 `validate()` **之外**还跑
+`crosscheck_cidr(self.cfg)`（它是 `start()` 的第一件事，`--check` 里同样有）。
+
+**机理**：管理员把 `cluster_cidr` 改错一个数字（`192.0.2.0/24` → `192.0.2.128/25`，
+漏掉半个集群）之后 `systemctl reload` —— `validate()` 过（语法对、非空），
+`cluster_cidr` 在 `RELOAD_CLASS` 里是 **NOTICE 档**（可热）⇒ 不拒绝，
+而 `_adopt_config()` 里 `nft.ensure()` **按值比对**，把内核里那条基础规则换成**错的
+网段**。
+
+**后果**：被漏掉的那些节点，流量走到链尾那条 `policy accept` —— **没有报错、没有
+日志、没有任何迹象**。`start()` 里那句注释写的正是这件事：「这是唯一能在装上规则
+**之前**发现它的地方」。★ 从前改 `cluster_cidr` 只能重启 ⇒ 必然撞上那道核对；
+**v0.12 阶段 3 新开的 reload 这条路绕过了它**。
+
+**修法**（方向明确，**待用户拍板**）：`reload_config()` 的校验并上
+`crosscheck_cidr(new)` —— 或者更根本地，把"这个配置不能上线"的全部判据抽成**一处**，
+让 `start()` / `--check` / reload 三条路共用，而不是各抄一份子集。
+
+**用例**：**无** —— 这正是它没被发现的原因。★★ 修的时候要**两半都写**：既要有
+"cidr 对不上 ⇒ 这次 reload 被拒、旧配置继续服务"，也要有"cidr 对得上 ⇒ reload
+照常生效"（只写前者的话，把 reload 整个禁掉也能绿）。
+
+### F46 — 热重载之后，站点级那几条 ⚠ **一次都不打**：每次 reload 把上一轮的结论擦掉
+
+**位置**：`start()` 里那一段"插件状态播报"（`cluster/slurmate-sessiond`）——
+`plugin_problems` / `plugin_job_missing` / `stale_conf_problems` /
+`plugin_gres_problems` 四条 ⚠，加上「本站没有安装任何插件」与「装了但一个都没启用」
+两句 —— 出口只有 `start()` 与 `--check` 两个。`reload_config()` 换掉 `Config` 对象
+之后，那些字段是**新的一组值**，却没有任何地方把它打出来。
+
+**机理**：卸一个插件（或者有人 `rm` 一个 `.splug` 而没跑对账）之后
+`slurmate plugin sync` 会自己 reload ⇒ 新扫出来的插件表与旧的那份不同 ⇒
+"有一份配置指不到任何插件"这件事**只在下次重启守护进程时才说**。
+
+**后果**：`stale_plugin_conf_problems` 自己的注释写着它要防的正是——"不说的话，
+管理员的症状是『我明明配了啊』，而日志里一个字都没有"。★ 与 **F45** 同源：
+**reload 抄了启动判据的一个子集**，而 v0.12 之前根本没有 reload 这条路（那时的
+"reload" 是 restart，必然经过 `start()`）。
+
+**修法**（方向明确，**待用户拍板**）：把那一整段抽成一个方法，`start()` 与
+`_do_reload()` 各调一次。★ 要定的是**重打全部**（读日志的人拿到的是"现在的结论"）
+还是**只报新增的**（与上一轮的集合求差）—— 前者简单且不会漏，后者安静，但要多存
+一份上一轮的快照。
+
+**用例**：**无**。★ 它测得动：`_do_reload()` 可以直接调（不需要 socket 与 nft），
+日志用 handler 抓即可 —— 与那四条 ⚠ 在 `start()` 里"跑不了"（要建 socket、连库）
+形成对照。
+
 ## 二、从未实测过的
 
 这些不是"代码有问题"，是**这些事实至今只有推断，没有一次真实输出**。
@@ -616,7 +667,7 @@ Slurm（`scontrol`）、要读节点地址去核 `cluster_cidr` —— 所以给
 
 ### S29 — 有几处「算出来的值」到用户眼前那一段，用例只打到**前一半**
 
-**这一条是 2026-10-06 复核 F35 时顺带核出来的**（见 §一 的 F35）。它记的是
+**这一条是 2026-10-06 复核 F35 时顺带核出来的**（见 §四 的 F35）。它记的是
 **用例的触达深度**，**不是代码里的缺陷** —— 下面点名的每一环今天都带着正确的值。
 
 **形状**：`A 算出 X → B 把 X 装进回包 → C 读出来显示`，而用例只到 `A`。
@@ -634,7 +685,7 @@ Slurm（`scontrol`）、要读节点地址去核 `cluster_cidr` —— 所以给
 | **F17** | 函数（`Config.validate()` 的返回值，`cluster/test-sessiond-logic.py` 第 19 节） | `cluster/slurmate-sessiond` 的 `main()`：`errors = cfg.validate()` → 逐条 `log.error` + `return 1` | 带，**但没有用例** |
 | **S12**（客户端那一侧） | 函数（键表与 `inspectDir`，`client/test/manifest-keys.test.mjs`） | `pluginsView().errors`（`client/src/main/index.js`）→ `panel.js` 画「插件没有加载」那一块 | 带，**但没有用例** —— `boot.test.mjs` 只断言过"池空不是错误"那一面 |
 | **S19**（第一条） | 函数（`new Registry(...)` 的 `errors`） | 同上（同一个 `registry.errors` → 视图 → 界面） | 带，**但没有用例** |
-| **S12**（服务端那一侧） | 函数（`parse_plugin_manifest` / `scan_plugins`） | 「**为什么**被拒」到不了客户端 | **不带** —— 而那是 §一 的 **F22**，本版阶段 2 修。**所以这一格不需要新账** |
+| **S12**（服务端那一侧） | 函数（`parse_plugin_manifest` / `scan_plugins`） | 「**为什么**被拒」到不了客户端 | **不带** —— 而那是 §四 的 **F22**，本版阶段 2 修。**所以这一格不需要新账** |
 | **S10** | **线**：`packer/test-packer.mjs` 真 `execFileSync` 跑 CLI，断言退出码与 stderr | —— | 无缺口 |
 | **S17** | 函数（`loadConfig` 两次、比兜底组的 id） | 没有中间那一环可丢：值由 `config.js` 产出、`index.js` / `plugin-data.js` 直接消费 | 无缺口 |
 | **S21** | **线**：断言真实副作用（`fs.existsSync(...) === false`、`reclaimed.length`） | 下游只剩界面上一句提示 | 无缺口 |
@@ -775,7 +826,7 @@ S12 客户端那一侧是同一类余量。）
 | 盘上有**两个**同名的 `.deployed`（插件侧的旧布局标记、作业脚本标记各一个） | v0.7 把作业侧那个改名成 `.installed` —— 与它的兄弟标记同名（两个标记记的本来就是同一件事）。`grep .deployed` 于是只剩本文件里那几条记录，不再与一个活着的文件同名 |
 | 客户端读旧版 `secrets.json` 的**明文私钥**，并把旧版**一份全局密钥**搬给每条连接 | v0.7 删掉（连同 `migrateLegacySecret`）。★ 明文私钥**不再被读出来** —— 一份能被继续沿用的明文密钥，最该做的事是**被发现**。两种旧形态的**实际结局**都钉进了用例 |
 | 客户端读旧配置的 `slots`（布局）与 `profile` + `extraHosts`（连接）两条路 | v0.7 删掉。实际结局钉进用例：旧连接读作空列表、旧 `slots` 读作"没有布局"（补一个端口 18080 的空白组）。连带 `LEGACY_LAYOUT_ID` / `legacySlotPort` / `LEGACY_PARTITION`，以及 `partitionForLayout` 那条**唯一的例外** |
-| 守护进程**自动给旧库补列**（`Store._migrate`） | v0.7 删掉，换成启动时拒绝 —— **代价见 S15**（加列从此要删库） |
+| 守护进程**自动给旧库补列**（`Store._migrate`） | v0.7 删掉，换成启动时拒绝 —— **代价见 §五 保留 ⑧**（加列从此要删库） |
 | 客户端 `resolve()` 里两条只对**更旧的守护进程**有意义的解析路 | v0.7 删掉。它们本身就违反协议的三态纪律（**缺席不等于可以猜**），而它们服务的那个守护进程组合（插件这一层做出来之前的）今天不存在。今天 `null` 与"键不存在"是同一件事：不猜 |
 | 方法早就叫 `resolve()`，而两处注释里写着 `route()` | v0.7 改过来了（`client/src/main/session.js`、`client/src/main/plugins/index.js`）。一个不存在的名字会让人去找一个不存在的方法 |
 | **GRES 只有 `gpu:N` 一种形状**（写只写 `"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`） | **v0.8 修掉（阶段 2）。** 而 GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`）：名字可以是 `gpu` / `mps` / `shard`，同一个名字还可以带型号（`gpu:a100`）。★★ 这条缺陷的形状值得记：一台配了型号的集群上，服务端**自己写进去的 `gpu:a100:2` 自己读不回来** ⇒ 正则不匹配 ⇒ 当成"没有 GPU" ⇒ 界面那一段整个不出现 —— **作业占着两张 A100，而用户以为自己没要卡，没有任何地方会报错**。★ 修法不是把正则写宽一点，是**取消第二份表示**：`{name, type, count}` 是唯一的内部表示（线上 / 数据库 / 审计都是它），交给 Slurm 的那个串由 `gres_spec()` 当场拼（全仓唯一一处）。用例：`cluster/test-sessiond-logic.py` 第 25 节（★ 把读回改回那条正则 ⇒ 立刻红） |

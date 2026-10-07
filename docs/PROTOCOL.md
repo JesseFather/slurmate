@@ -133,7 +133,7 @@
 | **v0.2** | **删掉「用途」这一层**。配置里不再有 `[purpose:*]`；`purposes` op 改成 `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，**全部可选，缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。 |
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
-| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 install-base.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
+| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
 | **v0.6** | **插件文件可以从站点取回来**，而且同一份内容有**两条投递方式**。`plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）与 `package`（`{format, bytes, digest}`）、顶层多了 `limits`（本站的上限，**自述**，含 `package_bytes`）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）与 `plugin_package`（`id` / `version` → **整个包**，base64）；四个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`、`4 plugin_package_too_large`（外加 `9 plugin_file_changed` 与 `9 plugin_package_changed`）。**全部是加法**。 |
 | **v0.7** | **只剩一条投递方式**：**删掉** `plugins[].files` 与 op `plugin_file`，连同三个只属于那条路的 kind（`3 plugin_file_unknown`、`4 plugin_file_too_large`、`9 plugin_file_changed`）。`plugins[].package`、`op_plugin_package`、顶层 `limits`（含 `package_bytes`）**一个字都没动**。★ 「本站支不支持分发」的判据因此**换了**：从"这一项里有没有 `files`"改成顶层**有没有 `limits`**。**不兼容**，见上面那段。<br>★ 同时落下**版本握手**（客户端连上后读 `ping` 的 `version`，按〈三方：谁不低于谁〉判）。**协议线上一个字都没动** —— `ping` 与它的 `version` 自 v0.1 起就在，只是此前没有读者；`engines.slurmate` 的**字段级**规则也统一了（两侧从前一侧静默跳过、一侧拒绝）。 |
 | **v0.8** | **常驻通道 + 多客户端 + 集群信息。** 新 op：`stream`（一条连接可以问**很多次**，服务端还会**主动推送**）、`cluster`（一次查询服务所有连接）、`history`（按需拉历史，不进任何一层钟）；`session_view` 多四个字段（`job_terminal` / `job_reason` / `job_exit_code` / `job_restarts`）；GRES 通用化（不再只有 `gpu:N` 一种形状）。★ 同时加了一层**席位**：连接自报 `client` 身份、按 uid **顶掉**先到者、推送 `{"push":"displaced"}`。 |
@@ -184,7 +184,7 @@ v0.5。所以协议表的读法是「v0.2 → v0.5 之间隔了三个不兼容�
 
 两种方式在守护进程侧是**同一个状态机**，差别只在客户端什么时候关连接 ——
 `rpc` 发一条、读一条、就走；`stream` 留着，可以接着问，也会收到服务端主动说的
-（见〈二·五 常驻通道〉）。所以老客户端**一个字节都不用改**，而它收到的字节流
+（见〈二·五、常驻通道〉）。所以老客户端**一个字节都不用改**，而它收到的字节流
 与从前**逐字相同**（推送的订阅判据见那一节）。
 
 ### `slurmate stream`
@@ -362,7 +362,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 
 #### ★★★ `client` 只决定一件事：这条连接能不能写 `keeper`
 
-`keeper` 是**会话行上的一格**（见〈`session_view`〉），不是连接的属性、也不是
+`keeper` 是**会话行上的一格**（见〈`status`〉那一节的会话视图字段表），不是连接的属性、也不是
 「席位」。它管的是「谁刷得动 `last_hb_socket`」—— 而那就是「谁的作业不会被
 `suspect_after` / `orphan_after` 那条超时干掉」。
 
@@ -816,8 +816,8 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > ★ **v0.5 删掉了每一项里的 `builtin`。** 它从前恒为 `true`（插件的代码随本项目一起
 > 发布），而没有任何客户端代码读它 —— 一个永远为真、谁也不看的字段，只会让下一个
 > 读的人问"什么时候是 false"。现在**没有内建这回事**：两端都只认"装了的插件"，
-> 而"装"是站点的一个动作（集群侧 `install-base.sh --plugins-src` 或
-> `slurmate plugin install`，客户端是经站点分发取回来）。
+> 而"装"是站点的一个动作（集群侧 `slurmate plugin install`，客户端是经站点分发
+> 取回来）。
 
 客户端据此决定画哪些按钮、以及每个按钮上"默认 2 核 / 8G"该写多少。
 

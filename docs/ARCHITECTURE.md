@@ -102,8 +102,9 @@ exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shel
 由守护进程以目标用户身份提交，**文件本身 root 拥有、0644、用户不可写**：执行的是
 这个固定文件，用户可控的只有 `sbatch` 的命令行 flag（`cluster/run.sbatch`）。
 
-★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：`install-base.sh` 对每个插件
-把它的 `job/start.sh` 拼在模板里那个 `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
+★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：**对账**（`slurmate plugin
+sync`，装/卸插件时会自动跑一次）对每个插件把它的 `job/start.sh` 拼在模板里那个
+`# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` 的是一份**编织后的成品** ——
 **一个插件一份**，文件名是这个插件清单里的 `id`（ULID）。见
 [plugins/README.md](../plugins/README.md)〈作业侧契约〉。
@@ -139,7 +140,7 @@ slurmd 从**自己的 spool** 取脚本执行 —— 本系统从来没有让计
 `<prefix>/share/slurmate/` 里任何一个文件。改成运行时 `source` 会引入本项目
 **有史以来第一个**「共享目录对计算节点可见」的前置条件，而那个事实**在登录节点上
 永远验证不出来**（文件在那儿必然存在）。编织让不确定性归零：一个语法错的插件脚本
-让 `install-base.sh` 当场中止，而不是变成用户的一次失败会话。
+让**对账**当场中止，而不是变成用户的一次失败会话。
 
 ★ **从一份拆成 N 份没有改变上面这条论证。** 仍然是部署期把内容写进文件、
 `sbatch` 仍然只拿到一个路径、计算节点仍然不需要看见 `<prefix>/share/slurmate/`。
@@ -211,7 +212,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 会话都做不到。它照 `plugin_problems` 的现成先例处理：`--check` 打印 `⚠`、
 `start()` 记一条 `log.error`，但**不拦启动**。
 
-★ 于是「加一个插件」只是**放一个 `.splug` + 跑一次 `install-base.sh --plugins-src`**。
+★ 于是「加一个插件」只是**跑一次 `slurmate plugin install`**。
 **客户端那一侧一步人工动作都不需要**（v0.6 起它自己取回来），
 **也不用改基座的任何一行源码。**
 
@@ -462,7 +463,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 | # | 在哪 | 加什么 |
 |---|---|---|
 | 1 | 你的插件**源码树**（**可以在另一个仓库**） | `plugin.json`（**铸一个新的 ULID** 当 id）+ `client/index.js`（可无）+ `job/start.sh`（可无），然后 `packer build` 出一个 `.splug` |
-| 2 | `sudo bash cluster/install-base.sh --plugins-src <放 .splug 的那个目录>` | 装进站点 + 为它织一份 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` |
+| 2 | `sudo slurmate plugin install --from <放 .splug 的那个目录>` | 装进站点 + 写它那份 `slurmate.conf.d/<id>.conf` + 为它织一份 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` |
 | 3 | `/etc/slurmate/slurmate.conf.d/<名字>.conf`（可选） | 一个插件一份。**这是站点的决定**，不进仓库；不写就用清单里的缺省 |
 
 ★ #1 到 #3 就是全部。**客户端那一步没有了** —— v0.6 起，站点 `enabled = yes` 的
@@ -507,8 +508,8 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 | **三份实现在同一批字节上的对账** | `tools/conformance/`（输入树 + 期望的包字节 + 23 条坏包 + 签名夹具） |
 
 ★ **"读包"最初落的是能力，不是路径**（那时不动线、不动布局）。现在**布局与投递
-都已经切过来了**：站点上的插件就是一个 `<ULID>.splug`（由安装器装，`install-base.sh`
-只是"把一批包一起装"），守护进程把它**整个**发给客户端（`package` + `plugin_package`）。
+都已经切过来了**：站点上的插件就是一个 `<ULID>.splug`（由**安装器**装 —— 一个一个装，
+或者用 `--from` 把一批一起装），守护进程把它**整个**发给客户端（`package` + `plugin_package`）。
 顺序是刻意的 —— **读包的能力先于任何一条线落地**，否则中间会开一个窗口，那个窗口里
 客户端拿到的是它读不懂的字节，而它唯一能说的话是"校验不过"。
 
@@ -906,8 +907,9 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 
 - 配置自检：`Config.validate()` 断言端口池与 `reserved_ranges` 不重叠，不满足则
   **拒绝启动**（`cluster/slurmate-sessiond`）；
-- 部署预检：`install-base.sh` 读同一份配置做同样的区间比对，重叠即中止部署
-  （`cluster/install-base.sh`）。
+- 部署预检：`install-base.sh` **调用**守护进程自己的 `--check`（v0.12 阶段 4 起），
+  重叠即中止部署。★ 此前脚本里另有一份孪生实现 —— 同一件事有两个判据，而它们
+  会漂开，所以那一条已经删掉了（`cluster/install-base.sh`）。
 
 要注意的是这里**没有**用「端口必须 > 55000」之类的硬编码约定。那是某个具体站点的
 习惯，写死在代码里会让用低位端口的集群直接装不上（`cluster/slurmate-sessiond`）。

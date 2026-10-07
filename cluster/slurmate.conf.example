@@ -16,13 +16,14 @@
 #
 #  读者：
 #    slurmate-sessiond   全部键
-#    cluster/install-base.sh   range_start / range_end / reserved_ranges / readonly_paths
+#    cluster/install-base.sh   readonly_paths（只这一个 —— 拿去渲染 systemd 单元）
 #    slurmate（用户 CLI）【不读本文件】—— socket 路径是编译期常量，见下。
 #
 #  本文件由 root 拥有（0644）。守护进程把它读到的**所有**值当作可信输入，
 #  但绝不允许用户进程修改它 —— 部署脚本会断言属主与权限。
 #
-#  修改后：systemctl restart slurmate-sessiond
+#  修改后：systemctl reload slurmate-sessiond（v0.12 起 SIGHUP 是重载，不是退出。
+#  正在跑的会话一条都不断；只有 readonly_paths 改了才需要重跑 install-base.sh）
 #
 # ── 通用段里只有「无法从系统推导」的值 ──────────────────────────────────────
 #  分区名、分区的时间上限、GRES 的名字与型号 —— 这些 Slurm 自己知道，写在这里就是
@@ -192,8 +193,9 @@ max_connections_per_user = 8
 #    启动，已有会话照常能查、能停，只是没有可提交的服务。`slurmate plugins`
 #    与 `slurmate-sessiond --check` 都会照实说出来。
 #
-#    配置里认不出的键、指向没装的插件的那一份，都会报错 —— 写成 defualt_cpus
-#    不能被静默忽略。
+#    配置里**认不出的键**是**硬错误**（写成 defualt_cpus 不能被静默忽略）；而
+#    **指向没装的插件的那一份**只是一条 ⚠ —— 它不生效，但**不拦启动**，因为
+#    "整个站点起不来"并不会让那份配置变对，只会让别的东西也一起停。
 #
 #  ★ 下面两段**都是注释**：它们是"如果要改，该怎么改"的示范，不是必须。
 #    一个字都不写时，每个插件的取值为**插件清单自己声明**的那一份（清单打在
@@ -276,7 +278,7 @@ max_connections_per_user = 8
 #   **看得见的决定**，而不是升级时悄悄多出来的能力。
 #
 #   要开就在 /etc/slurmate/slurmate.conf.d/sshd.conf 里写下面那两行
-#   （**不带块头**），然后重启守护进程。
+#   （**不带块头** —— 文件名就是身份），然后 `systemctl reload slurmate-sessiond`。
 #
 # enabled = yes
 #

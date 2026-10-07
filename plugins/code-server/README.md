@@ -21,14 +21,20 @@ code-server/
 
 ## 站点侧
 
+它那一份配置住在 `/etc/slurmate/slurmate.conf.d/` 里，**一个插件一个文件、文件名
+就是身份**（这份是 `code-server.conf`）。安装器装插件时会替你写一份（用它的 `id`
+当文件名），下面是它长什么样 —— **文件里只有 `键 = 值`，没有段头**：
+
 ```ini
-[plugin:code-server]
-enabled      = yes          # 一个块都不写时，缺省取清单里的 defaultEnabled = true
+enabled      = yes          # 不写那一份时，缺省取清单里的 defaultEnabled = true
 default_cpus = 2            # 不写则取清单里的 2
 default_mem  = 8G           # 不写则取清单里的 8G
 bin          =              # 留空 = 按清单里的 bin 解析
 auth_mode    = password     # 清单里声明的取值受限键
 ```
+
+★ 改完 `systemctl reload slurmate-sessiond` 就够了 —— **不用重启**，正在跑的会话
+一条都不受影响。
 
 ### ★ `auth_mode` 为什么缺省是 `password`
 

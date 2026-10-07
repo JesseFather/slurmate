@@ -180,7 +180,7 @@ start_sshd() {
     local p="$1" cfg authkeys i banner=""
 
     # 兜底值只是"这个变量不该为空"的防御；真正的值由守护进程按站点的
-    # [plugin:sshd] bin 解析后传下来。
+    # 那份配置（slurmate.conf.d/sshd.conf）里的 bin 解析后传下来。
     local bin="${SLURMATE_SSHD_BIN:-/usr/sbin/sshd}"
 
     [[ -x "$bin" ]] || {

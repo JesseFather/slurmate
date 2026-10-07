@@ -178,7 +178,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 校验，不是起不来。这是刻意的：把一个"更好的校验"变成硬依赖，会让一个本来能跑的
 集群装不上。
 
-**6b. 插件的依赖 —— 由 `install-base.sh` 装的那些插件决定**
+**6b. 插件的依赖 —— 由你装的那些插件决定**
 
 ★ **这一段没有固定清单**，因为计算节点上需要什么完全取决于你装了哪些插件。
 每个插件在自己的 README 里写清楚，两份现成的：
@@ -223,17 +223,29 @@ code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文
 部署脚本还会断言 `socket.SO_PEERCRED` 与 `sqlite3` 可用，缺一即中止
 （`cluster/install-base.sh`）。
 
-### 9. 其他部署脚本会检查的项
+### 9. 其余预检项
+
+★ **「位置」那一列只有两个值**，因为 v0.12 起**同一件事只允许有一个判据**：凡是
+守护进程自己判得了的（Slurm 命令齐备、`nft`、端口区间、`cluster_cidr` 与节点地址
+对账、`scontrol ping`、`ip_local_reserved_ports`），都由 `install-base.sh`
+**调用** `slurmate-sessiond --check` 来判 —— 脚本里从前那份孪生实现已经删了。
+只有**基座安装自己**的事（部署锁、哈希工具、目标路径占用）留在脚本里。
 
 | 检查 | 位置 | 不满足的后果 |
 |---|---|---|
-| `sbatch` / `scancel` / `squeue` / `scontrol` 存在 | `cluster/install-base.sh` | 直接中止：「这台机器不像是 Slurm 登录节点」 |
-| `scontrol ping` 成功 | `cluster/install-base.sh` | 只警告。部署能完成，但提交与回收都会失败；守护进程的 `job_state()` 会把这种情况判为 `JOB_UNKNOWN` 并保持现状，**不会误释放会话** |
+| `sbatch` / `scancel` / `squeue` / `scontrol` 存在 | `slurmate-sessiond --check`（退出码 **2**） | 直接中止：「这台机器不像是 Slurm 登录节点」 |
+| `scontrol ping` 成功 | `slurmate-sessiond --check`（只报，不打码） | 只警告。部署能完成，但提交与回收都会失败；守护进程的 `job_state()` 会把这种情况判为 `JOB_UNKNOWN` 并保持现状，**不会误释放会话** |
 | `sha256sum` 存在 | `cluster/install-base.sh` | 直接中止（无法校验现有文件是否被改动） |
 | `flock` 存在 | `cluster/install-base.sh` | 只警告，失去并发部署保护 |
 | 目标路径未被他人文件占用 | `cluster/install-base.sh` | 直接中止，绝不覆盖别人的文件 |
-| 端口池与 `reserved_ranges` 不交 | `cluster/install-base.sh` | 直接中止。跨表顺序在 nftables 里没有保证，重叠会让行为不可预测 |
-| 端口池与 `ip_local_reserved_ports` 不交 | `cluster/install-base.sh` | 只警告。作业脚本会跳过真被占的端口试下一个（`cluster/run.sbatch`），nft 规则匹配 `dport` 不受影响 |
+| 端口池与 `reserved_ranges` 不交 | `slurmate-sessiond --check`（退出码 **1**） | 直接中止。跨表顺序在 nftables 里没有保证，重叠会让行为不可预测 |
+| 端口池与 `ip_local_reserved_ports` 不交 | `slurmate-sessiond --check`（只报，不打码） | 只警告。作业脚本会跳过真被占的端口试下一个（`cluster/run.sbatch`），nft 规则匹配 `dport` 不受影响 |
+
+★ 退出码那两档是有分工的，而部署脚本正要靠它决定"现在就停"还是"装完再判"：
+**2 = 这台机器缺东西**（一个字节都不装）、**1 = 这份配置写错了**（读的是**已装的**
+那份 ⇒ 停；读的是**示例**、第一次部署 ⇒ 继续装，装完再判）。
+★ 而 `cluster_cidr` 与节点地址那份交叉核对排在**最后**（也是 1），前面两档先判 ——
+一台"机器缺东西"的机器上，一句"网段对不上"不该把它盖成别的意思。
 
 ### 10. `KillWait` 要够写墓碑
 
@@ -296,32 +308,34 @@ node packer/slurmate-packer.js init  path/to/your-plugin     # 铸一个 id（�
 node packer/slurmate-packer.js keygen path/to/your-plugin    # 想签名才需要（只做一次）
 git commit -am "铸一个 id"
 node packer/slurmate-packer.js build path/to/your-plugin     # → your-plugin-1.0.0.splug
-node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 §6.4
+node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 PLUGIN-SPEC.md §6.4
 ```
 
-把那几个 `.splug` 收集到一个目录（就是下面 `--plugins-src` 要指的目录），
-拷到登录节点上，然后部署：
+把那几个 `.splug` 收集到一个目录，拷到登录节点上，然后装：
 
 ```bash
-sudo bash cluster/install-base.sh --plugins-src ~/下载的插件
+sudo slurmate plugin install --from ~/下载的插件
 ```
 
-★ **`install-base.sh` 永不打包**（`cluster/install-base.sh`）：它只收成品。所以对仓库里那两棵
-插件**源码树**（`plugins/code-server`、`plugins/sshd`）直接部署会在预检那一步
-**停下来**并告诉你要先 `packer build` —— 那个失败是刻意的：包是**构建产物**，
-不进 git（二进制进 git 等于代码评审死掉）。
+★ **安装器永不打包**：它只收成品。所以拿仓库里那两棵插件**源码树**
+（`plugins/code-server`、`plugins/sshd`）当那个目录用是**不行**的 —— 那里没有
+`.splug`，而它会**逐条点名**说"它不是一个插件包、不会被安装"并指路 `packer build`。
+那个失败是刻意的：包是**构建产物**，不进 git（二进制进 git 等于代码评审死掉）。
 ★ 那两棵树是**开发样例**，**基座不带任何插件** —— 它们不是"仓库自带的插件"，
 所以这里没有一份欠着的成品要补。
 
-★ 装插件也可以不在部署里做，用一个动词：
+★★ **装插件不是部署的一部分** —— 基座装完之后随时可以装，装一个也不用重跑部署：
 
 ```bash
 sudo slurmate plugin install ~/下载的插件/foo-1.0.0.splug
 ```
 
-它做四件事，每一件都会**说给人听**：验签（§6.4）、把包里有什么打一屏出来、
+它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）、
+把包里有什么打一屏出来、
 按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装进
-`<prefix>/share/slurmate/plugins/<ULID>.splug`。
+`<prefix>/share/slurmate/plugins/<ULID>.splug`。★ 装完它还会顺手做三件：写它那份
+`slurmate.conf.d/<id>.conf`、织好作业脚本、让守护进程**重读一遍配置** ——
+全程不重启，正在跑的会话一条都不受影响。
 
 **服务器上没有源码可以对照**，所以那一屏是管理员手上唯一的依据 —— 它也是这条
 路上已知的取舍之一，见 `README.md` 的〈已知限制〉。
@@ -329,16 +343,24 @@ sudo slurmate plugin install ~/下载的插件/foo-1.0.0.splug
 ### 步骤 1：先 `--check`
 
 ```bash
-sudo bash cluster/install-base.sh --check --plugins-src ~/下载的插件
+sudo bash cluster/install-base.sh --check
 ```
 
 `--check` 承诺零改动：不安装文件、不启动服务、不改动 nftables，快照也只写到
 `/tmp`（`cluster/install-base.sh`）。它把所有预检跑一遍并打印一份可存档的
 报告 —— 警告与失败都走 stdout，就是为了让报告能整份重定向保存
-（`cluster/install-base.sh`）。
+（`cluster/install-base.sh`）。★ 它跑的就是守护进程**自己的** `--check`
+（同一份判据），所以"预检放行、守护进程起不来"那种两套解释器的错配不会发生。
 
-它同时会校验 `--plugins-src` 下的每一个包，并且**指出那里除 `.splug` 之外的
-任何东西** —— 那些东西不会被安装，所以不在这里说的话就是静默忽略。
+★ **要体检一批包**，用守护进程自己的 `--check-plugins`（还没装基座时，仓库里
+那份也能跑）：
+
+```bash
+python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插件
+```
+
+它会逐条点名目录里**除 `.splug` 之外的任何东西** —— 那些东西不会被安装，
+所以不在这里说的话就是静默忽略。
 
 ### 步骤 2：准备站点配置
 

@@ -27,8 +27,9 @@
 #    $NODE_IP           本节点的**字面 IPv4**（ACL 的 ip daddr 依赖它；别自己解析
 #                       节点名 —— 解析结果与集群侧写进 nft 的不一致时 ACL 会静默失效）
 #    $LOCAL_LOG         节点本地日志文件，必定可写
-#    $SLURMATE_CS_BIN   本插件的可执行文件路径，由守护进程按站点 [plugin:code-server]
-#                       的 bin 解析后传下来（这个变量名由 plugin.json 的 site.bin.env
+#    $SLURMATE_CS_BIN   本插件的可执行文件路径，由守护进程按站点那份插件配置
+#                       （slurmate.conf.d/code-server.conf）里的 bin 解析后传下来
+#                       （这个变量名由 plugin.json 的 site.bin.env
 #                       声明，宿主不认识它）
 #    函数 log / json_escape / write_atomic / write_session 直接可用
 #
@@ -60,7 +61,7 @@ _code_server_scrub_env() {
 start_code_server() {
     local p="$1"
     # 兜底值只是"这个变量不该为空"的防御。真正的值由守护进程按站点的
-    # [plugin:code-server] bin 解析后传下来，那份解析在 --check 里逐条打印。
+    # 那份配置里的 bin 解析后传下来，那份解析在 --check 里逐条打印。
     local bin="${SLURMATE_CS_BIN:-/usr/local/bin/code-server}"
 
     _code_server_scrub_env

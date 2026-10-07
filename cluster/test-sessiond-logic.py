@@ -2416,6 +2416,24 @@ exit 0
           _c.plugin_config(SSHD).present is False
           and _c.plugin_config(SSHD).enabled is False)
 
+    # ── ★★ 取值写错时，报错要点名**那一份配置在哪个文件** ────────────────────
+    #
+    # ★ 从前报的是 `[plugin:sshd] 的 default_cpus` —— 那是**主文件里还有
+    #   `[plugin:…]` 段**的年代留下的写法。今天照它去改，**写进主文件本身就是一条
+    #   硬错误**（守护进程拒绝启动），所以那句报错指的是一个"照做就报错"的位置，
+    #   比不指还坏。现在报的是那一份 drop-in 的路径。
+    # ★ 判据是"那条报错里出现了那一份配置的**文件名**"，而且**没有** `[plugin:` ——
+    #   只判前者的话，写成 `[plugin:sshd]（sshd.conf）` 这种既旧又新的混搭也会绿。
+    _bad_where = None
+    try:
+        pcfg("[plugin:sshd]\ndefault_cpus = 很多\n")
+    except ValueError as _e:
+        _bad_where = str(_e)
+    check("★★ 配置项写错时的报错点名那一份配置的**文件**，不再写 `[plugin:…]`",
+          _bad_where is not None and "sshd.conf" in _bad_where
+          and "[plugin:" not in _bad_where,
+          repr(_bad_where))
+
     _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
     check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
@@ -3785,6 +3803,20 @@ exit 0
           and len(_h.stdout.splitlines()) > 20,
           "rc=%d %d 行 %r" % (_h.returncode, len(_h.stdout.splitlines()),
                               _h.stdout[:120]))
+    # ★★ 而"插件搬到哪儿去了"这条指路，**两种写法都要给出能跑的命令**：
+    #    `--plugins-src=X` 的 X 在同一个参数里，`--plugins-src X` 的在**下一个**。
+    #    只认等号那一种的话，管理员照最顺手的写法敲，拿到的指路里那一条命令
+    #    **自己是跑不通的**（印出来是 `--from --plugins-src`）—— 而"照它做"正是
+    #    读到这句话的人唯一会做的事。★ 判据是"`--from` 后面跟着那个目录"，
+    #    不是"提没提插件"（那样两种写法都会绿）。
+    for _argv, _want in ((["--plugins-src", "/tmp/pkgs"], "/tmp/pkgs"),
+                         (["--plugins-src=/tmp/pkgs"], "/tmp/pkgs")):
+        _p = subprocess.run(["bash", _ib] + _argv, capture_output=True, text=True)
+        check("★★ `%s` 的指路给出的是**能跑的命令**（`--from` 后面跟着那个目录）"
+              % " ".join(_argv),
+              _p.returncode == 2
+              and ("slurmate plugin install --from %s" % _want) in _p.stderr,
+              "rc=%d %r" % (_p.returncode, _p.stderr[-160:]))
     check("★ 基座安装脚本**调用**守护进程的 --check，而不是自己再判一遍"
           "（端口区间 / Slurm 命令那些判据从前在这里各有一份孪生实现）",
           '"$DAEMON_SRC" --check --config=' in _ib_src)

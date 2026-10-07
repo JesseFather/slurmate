@@ -1601,7 +1601,7 @@ def scan_plugins(plugins_dir):
     ★★ **两条去重规则，只有一条还在**（v0.11 阶段 2+3）：
       · **id 撞** ⇒ 两个都不收（同一个身份两份作业侧代码）；见下面那一段。
       · **短名撞** ⇒ **不去重**，两个都收。短名只是本站给人看的名字，不同 id
-        同名是允许并存的 —— 配置里用 `[plugin:<id>]` 区分即可。
+        同名是允许并存的 —— 配置文件名写 `<id>.conf` 就分得开。
 
     目录不存在时返回**空的**、且**不是错误** —— 一个插件都没装是合法状态。
     """
@@ -3828,11 +3828,17 @@ class PluginConfig(object):
       这两种状态的**行为**可能相同，但**该做什么**完全不同。
     """
 
-    def __init__(self, spec, raw, present):
+    def __init__(self, spec, raw, present, where=None):
         self.spec = spec
         self.name = spec.name
         self.title = spec.title
         self.present = present
+        # ★★ 取值校验的报错**点名这一份配置在哪个文件**，不再写 `[plugin:sshd] 的 …`。
+        #   那个写法是主文件里还有 `[plugin:…]` 段的年代留下的：今天照它去改，
+        #   写进主文件**本身就是一条硬错误**（守护进程拒绝启动）。指一个"照做就
+        #   报错"的位置，比不指还坏。`where` 由 `build_plugin_configs` 传进来
+        #   （它手上那个 `key` 就是 `_conf_file_of()` 的结果）。
+        self.where = where or spec.name
         self.raw = dict(raw)
 
         # 缺省开关状态由**插件自己**声明（`site.defaultEnabled`）。为 true 的只有
@@ -3840,7 +3846,7 @@ class PluginConfig(object):
         # 现有站点的行为」，不是「这个插件比较重要」。见 PluginSpec.default_enabled。
         self.enabled = parse_yes_no(
             raw.get("enabled"), spec.default_enabled,
-            "[plugin:%s] 的 enabled" % spec.name)
+            "%s 的 enabled" % self.where)
 
         # ── 默认资源（缺省 = 该插件代码里的内建值）──
         v = (raw.get("default_cpus") or "").strip()
@@ -3848,13 +3854,13 @@ class PluginConfig(object):
             try:
                 self.default_cpus = int(v)
             except ValueError:
-                raise ValueError("[plugin:%s] 的 default_cpus 必须是整数，得到: %r"
-                                 % (spec.name, v))
+                raise ValueError("%s 的 default_cpus 必须是整数，得到: %r"
+                                 % (self.where, v))
         else:
             self.default_cpus = spec.default_cpus
         if not (1 <= self.default_cpus <= MAX_CPUS_REQUEST):
-            raise ValueError("[plugin:%s] 的 default_cpus 应在 1-%d 之间，当前为 %d"
-                             % (spec.name, MAX_CPUS_REQUEST, self.default_cpus))
+            raise ValueError("%s 的 default_cpus 应在 1-%d 之间，当前为 %d"
+                             % (self.where, MAX_CPUS_REQUEST, self.default_cpus))
 
         v = (raw.get("default_mem") or "").strip()
         if v:
@@ -3864,9 +3870,9 @@ class PluginConfig(object):
                 #   （用户会拿到 warning），而配置里写错必须当场拒绝 —— 否则
                 #   「文件里写着 0，而所有人实际拿到 8G」会一直没人发现。
                 raise ValueError(
-                    "[plugin:%s] 的 default_mem 无法识别: %r（形如 8G / 512M。"
+                    "%s 的 default_mem 无法识别: %r（形如 8G / 512M。"
                     "注意 0 在 Slurm 里表示整台节点的内存，不是「零内存」）"
-                    % (spec.name, v))
+                    % (self.where, v))
         else:
             self.default_mem = spec.default_mem
 
@@ -3878,7 +3884,7 @@ class PluginConfig(object):
             try:
                 self.default_time = parse_config_time(v, "default_time")
             except ValueError as e:
-                raise ValueError("[plugin:%s] 的 %s" % (spec.name, e))
+                raise ValueError("%s 的 %s" % (self.where, e))
         else:
             self.default_time = spec.default_time
 
@@ -3893,7 +3899,7 @@ class PluginConfig(object):
         # ★ 缺省是 `None`（不占），不是一个"安全的数量"：**开发会话默认占住稀缺
         #    算力**是站点政策，不能让框架替所有站点挑一个数。
         self.default_gpus = parse_config_gres(
-            raw.get("default_gpus"), "[plugin:%s] 的 default_gpus" % spec.name)
+            raw.get("default_gpus"), "%s 的 default_gpus" % self.where)
 
         # ── 可执行文件 ──
         explicit = (raw.get("bin") or "").strip()
@@ -3920,8 +3926,8 @@ class PluginConfig(object):
         for key, choices, default in spec.enum_keys:
             val = (raw.get(key) or "").strip().lower() or default
             if val not in choices:
-                raise ValueError("[plugin:%s] 的 %s 只能是 %s 之一，当前为 %r"
-                                 % (spec.name, key, " 或 ".join(choices), val))
+                raise ValueError("%s 的 %s 只能是 %s 之一，当前为 %r"
+                                 % (self.where, key, " 或 ".join(choices), val))
             self.enum[key] = val
 
     def get(self, key):
@@ -3952,14 +3958,14 @@ def build_plugin_configs(specs, plugin_raw):
     ★ 键是 **id**，不是短名：短名可以重复（不同 id 同名的插件允许并存），
       拿它当键的话后一个会静默盖掉前一个。
 
-    `plugin_raw` 是 `{id: (配置内容, 那一份叫什么名字)}` —— 由 `Config.__init__`
+    `plugin_raw` 是 `{id: (配置内容, 那一份在哪个文件)}` —— 由 `Config.__init__`
     解析好。**"这一份属于谁"的判据只有 `Config.resolve_plugin()` 一处**，
     这里不自己按名字去 `sections` 里找一遍（两份实现会漂开）。
     """
     out = {}
     for spec in specs:
         raw, key = plugin_raw.get(spec.id, ({}, None))
-        out[spec.id] = PluginConfig(spec, raw, key is not None)
+        out[spec.id] = PluginConfig(spec, raw, key is not None, key)
     return out
 
 
@@ -3984,7 +3990,7 @@ def plugin_indexes(specs):
 def resolve_plugin_spec(by_id, by_name, key, plugins_dir):
     """把一个**用户写得出来的名字**解析成一个 `PluginSpec`。
 
-    `key` 是 `[plugin:<key>]` 里的那个 key，或者提交时的 `service_kind`。
+    `key` 是那个**配置文件名**（去掉 `.conf`），或者提交时的 `service_kind`。
     返回 `(spec, why)`：认得出时 `why` 是 `None`；否则 `spec` 是 `None`，
     而 `why` 是一句**能直接念给用户听**的话。
 
@@ -4464,7 +4470,8 @@ class Config(object):
         for _key in sorted(sections):
             _spec, _why = self.resolve_plugin(_key)
             if _spec is not None:
-                plugin_raw[_spec.id] = (sections[_key], _key)
+                plugin_raw[_spec.id] = (sections[_key],
+                                        _conf_file_of(self.plugin_conf_files, _key))
         self.plugins = build_plugin_configs(self.plugin_specs, plugin_raw)
         # 「本站开了哪些」—— 一份**短名**清单，给日志与 --check 看。
         # ★ 它是**去重**的：两个不同 id 的插件可以共用一个短名，而"开了 jup、jup"
@@ -4595,7 +4602,7 @@ class Config(object):
         """
         spec, why = self.resolve_plugin(key)
         if spec is None:
-            raise KeyError("[plugin:%s]：%s" % (key, why))
+            raise KeyError("配置 %s：%s" % (key, why))
         return self.plugins[spec.id]
 
     def cluster_cidr_problem(self):
@@ -4731,11 +4738,12 @@ class Config(object):
             #     同一类：能起，但每一条走这条路的请求都注定失败。
             errors.append(
                 "配置里的 default_plugin = %r 指向本站**装了、但关着**的插件"
-                "（[plugin:%s] 的 enabled = no）。这两处互相打架：省略 service_kind "
+                "（它那份配置里写着 `enabled = no`，或者根本没写那一份、而清单"
+                "声明的缺省就是关着）。这两处互相打架：省略 service_kind "
                 "的提交会全部失败，而报错说的是「本站没开这个插件」—— 从那一句里"
                 "看不出根因在配置里。要么把它打开（enabled = yes），要么把 "
                 "default_plugin 指到一个开着的插件上（本站开着的是：%s）。"
-                % (self.default_plugin, self.default_plugin,
+                % (self.default_plugin,
                    "、".join(self.enabled_kinds) or "（一个都没有）"))
         # 配额。0 的后果是**所有人都开不了会话**，而报错会是一句
         # "已经有 0 个会话占着位置（本站上限 0）" —— 没人能从那句话里看出

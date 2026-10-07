@@ -51,13 +51,18 @@ sshd/
 
 ## 站点侧
 
+它那一份配置住在 `/etc/slurmate/slurmate.conf.d/` 里，**一个插件一个文件、文件名
+就是身份**（这份是 `sshd.conf`）。**文件里只有 `键 = 值`，没有段头**：
+
 ```ini
-[plugin:sshd]
 enabled      = yes          # ★ 缺省是 no（清单里 defaultEnabled = false）
 default_cpus = 1
 default_mem  = 2G
 bin          =              # 留空 = /usr/sbin/sshd（清单里的 convention）
 ```
+
+★ 改完 `systemctl reload slurmate-sessiond` 就够了 —— **不用重启**，正在跑的会话
+一条都不受影响。
 
 ★ **`defaultEnabled` 是 `false`，这是刻意的。** 那个标记为 `true` 的只有一种插件：
 「升级前那个唯一可用的服务」。新插件标 `true` 等于给所有站点在升级时**静默多开
