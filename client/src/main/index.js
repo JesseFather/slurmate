@@ -925,8 +925,12 @@ function reconcileSitePlugins() {
       limits: r.limits,
       added: r.added, kept: r.kept, reclaimed: r.reclaimed, failed: r.failed,
       withdrawn: r.withdrawn || [],
-      recordOk: Boolean(r.record && r.record.ok),
-      recordWhy: (r.record && r.record.why) || null,
+      snapshotOk: Boolean(r.snapshot && r.snapshot.ok),
+      snapshotWhy: (r.snapshot && r.snapshot.why) || null,
+      // ★ 池里"不是槽位"的那几项的名字。**只报不删**（§5.1：手工放置必须不产生
+      //   任何效果，而删掉它是一种效果）—— 报出来只是为了让"池里到底有什么"这个
+      //   问题有一个诚实的答案，不然它们会静静地躺在那儿、谁也不知道。
+      poolStrays: r.poolStrays || [],
       notices: r.notices || [],
     };
 
@@ -1204,10 +1208,12 @@ function pluginsView() {
       // §5.3：本机那一份不在了 ⇒ 同意作废。**只报数**，文案在界面里 ——
       // 而那条文案绝不断言是谁删的（客户端不知道原因）。
       withdrawn: (siteSync.withdrawn || []).length,
-      recordOk: siteSync.recordOk !== false,
+      snapshotOk: siteSync.snapshotOk !== false,
       // 池里每个版本**被哪些站点要** —— 这是那一栏唯一值得显示的东西，它解释了
       // "为什么这台机器上有两个版本"。读自快照表（`.sites.json`）。
       versions: siteVersions(),
+      // 池里不是槽位的那几项 —— 只报不删，见 site-plugins.js 的 sweepPool。
+      strays: siteSync.poolStrays || [],
     } : null,
     // 待同意的：**不下发暂存路径** —— 那是主进程的现场，界面不需要知道它在哪。
     consent: pendingConsent.map((p) => ({
@@ -1227,10 +1233,6 @@ function pluginsView() {
       // 而不是留白（留白会被读成"还没显示出来"）。
       fingerprint: p.fingerprint || null,
       siteLabel: p.siteLabel, fileCount: (p.files || []).length,
-      // ★ 这一份**核到什么程度**。本机只有树、包不在了时是 `false` —— 那一次
-      //   只核了内容摘要，没法逐份比对。少做的那一半要在用户点同意的那一屏说
-      //   出来：一次"只核了一半"的核对，不许看起来与做全了的那次一样。
-      compared: p.compared !== false,
       // 同 (id, 版本) 以前同意过吗？—— 有的话这一次**内容变了**，界面上要说出来。
       previous: (() => {
         const e = cfg && cfg.trustedPlugins && cfg.trustedPlugins[config.trustKey(p.id, p.version)];
@@ -1241,18 +1243,23 @@ function pluginsView() {
 }
 
 /**
- * 池里每个 `<id>/<版本>` 被**哪些站点**要 —— 读自快照表。
+ * 池里每个**已提交的槽位**（`<id>_<版本>`）被**哪些站点**要 —— 读自快照表。
  *
- * ★ 读不出来就返回空数组，并且**不编**。它只有显示用途（"为什么这台机器上有两个
- *   版本"），而回收那条路自己会去判"记录读不出来就不回收"。
+ * ★ 从前这里还多一列 `hasPackage`（"旁边那个 `.splug` 在不在"）。它整条**删掉**了：
+ *   容器不落盘之后没有那个文件，而"有树没有记录表"也不是一个状态（见
+ *   site-plugins.js 的文件头）。那一列在界面上那句话（"只有解出来的树，没有包"）
+ *   跟着一起消失 —— 一个不再存在的状态不该在界面上留一句解释。
+ *
+ * ★ 快照表读不出来就返回空数组，并且**不编**。它只有显示用途（"为什么这台机器上
+ *   有两个版本"），而回收那条路自己会去判"读不出来就不回收"。
  */
 function siteVersions() {
   const root = sitePoolDir();
   if (!root) return [];
-  const rr = sitePluginSync.readRecord(sitePluginSync.recordPathOf(root));
+  const rr = sitePluginSync.readSnapshot(sitePluginSync.snapshotPathOf(root));
   if (!rr.ok) return [];
   const wanters = new Map();
-  for (const [key, s] of Object.entries(rr.record.sites || {})) {
+  for (const [key, s] of Object.entries(rr.snapshot.sites || {})) {
     for (const [id, v] of Object.entries((s && s.wants) || {})) {
       const k = `${id}@${v}`;
       if (!wanters.has(k)) wanters.set(k, []);
@@ -1261,10 +1268,6 @@ function siteVersions() {
   }
   return sitePluginSync.listPooled(root).map((it) => ({
     id: it.id, version: it.version,
-    // 旁边那个 `<版本>.splug` 在不在。**如实报**（见 site-plugins.js 的文件头）：
-    // 包单独不在了不构成撤回，也不会被静默取回来 —— 但用户打开那个目录就会发现
-    // 少了一个文件，所以不能瞒着不说。
-    hasPackage: Boolean(it.hasPackage),
     wantedBy: wanters.get(`${it.id}@${it.version}`) || [],
   }));
 }
@@ -2842,7 +2845,7 @@ async function ensureSurface(rec, snap) {
  *   会话口令"。
  *
  * ★ **插件能用的一切都在这里。** 它不能 `require` 客户端的源码 —— 插件装在池里
- *   （`~/.slurmate/site-plugins/<id>/<版本>/`），相对路径指不到客户端；就算指得到，
+ *   （`~/.slurmate/site-plugins/<id>_<版本>/`），相对路径指不到客户端；就算指得到，
  *   那种依赖也是无法检查的。所以缺什么就在这里加什么，而不是让插件绕过这份清单。
  */
 function pluginContext(rec) {
@@ -3095,7 +3098,7 @@ async function teardownConnection() {
   //   不是草稿。断开一次就把它删掉，等于"断个网就丢了用户已经同意的插件"。
   connectGeneration += 1;
   for (const p of pendingConsent) {
-    if (!p.existing) sitePluginSync.discardStaged(p.stagedDir, p.stagedPkg);
+    if (!p.existing) sitePluginSync.discardStaged(p.stagedDir);
   }
   pendingConsent = [];
   siteSync = null;
@@ -4067,7 +4070,11 @@ function registerIpc() {
 
     // ── ② 收下这一份（换入，或者对已在池里的那一份"原地认领"）──
     const mv = sitePluginSync.acceptStaged({
-      stagedDir: hit.stagedDir, stagedPkg: hit.stagedPkg || null, siteRoot: sitePoolDir(),
+      stagedDir: hit.stagedDir, siteRoot: sitePoolDir(),
+      // ★ 记录表草稿**只在内存里**活到这一刻，而下面那一次写就是**提交**
+      //   （见 site-plugins.js 的 acceptStaged）。`existing` 那一份本来就已经提交过
+      //   了，所以它没有草稿 —— 那条路只是"原地认领"。
+      record: hit.record || null,
       id, version, digest: hit.digest, existing: Boolean(hit.existing),
     });
     if (!mv.ok) {
@@ -4129,7 +4136,7 @@ function registerIpc() {
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，本机这一份已经删掉了。`
         + '站点上那份不受影响 —— 它还在的话，下次同步会再问你一次。');
     } else {
-      sitePluginSync.discardStaged(hit.stagedDir, hit.stagedPkg);
+      sitePluginSync.discardStaged(hit.stagedDir);
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
     }
     pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));

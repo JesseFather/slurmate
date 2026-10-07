@@ -1142,9 +1142,9 @@ function renderSitePlugins(pv) {
     }
     // 记录读不出来 ⇒ **一个版本都不会被回收**。这是用户该知道的一件事：
     // 他可能发现池子越来越大，而原因在这里。
-    if (site.recordOk === false) {
+    if (site.snapshotOk === false) {
       d.append(el('p', 'why',
-        '站点的插件记录读不出来（或者写不下去），所以这一轮**没有回收任何旧版本** —— '
+        '站点的插件快照表读不出来（或者写不下去），所以这一轮**没有回收任何旧版本** —— '
         + '不知道谁在引用的时候，唯一安全的动作是什么都不删。'));
     }
 
@@ -1167,16 +1167,21 @@ function renderSitePlugins(pv) {
         li.append(document.createTextNode(v.wantedBy.length
           ? `被 ${v.wantedBy.join('、')} 要`
           : '没有任何站点要它（下次同步时会被回收）'));
-        // ★ 包单独不在了要**如实说**：它是这一份的来路凭证，而用户打开那个目录
-        //   就会发现少了一个文件。它**不构成撤回**（能加载的是树），也不会被
-        //   静默取回来 —— 所以这里只说事实，不给一个"修一下"的按钮。
-        if (!v.hasPackage) {
-          li.append(document.createTextNode('（只有解出来的树，没有包）'));
-        }
         ul.append(li);
       }
       d.append(el('p', 'plug-desc', '本机站点池里的版本：'));
       d.append(ul);
+    }
+
+    // ★ 池里"不是槽位"的那几项 —— **只报不删**（§5.1：手工放置必须不产生任何
+    //   效果，而删掉它是一种效果）。报出来只是为了让"池里到底有什么"有一个诚实的
+    //   答案：旧版本留下的目录会静静地躺在那儿，而它们不生效这件事本身没有任何
+    //   地方会说出来。措辞只说事实，不说"可以删掉"——那是用户自己的目录。
+    const strays = site.strays || [];
+    if (strays.length) {
+      d.append(el('p', 'plug-desc',
+        `池里还有 ${strays.length} 项不是插件（${strays.slice(0, 5).join('、')}`
+        + `${strays.length > 5 ? ' 等' : ''}）—— 它们不生效、也没有被动过。`));
     }
   }
 
@@ -1236,12 +1241,7 @@ function renderConsent(pv) {
     const who = document.createElement('p');
     who.className = 'why';
     who.textContent = `来自 ${c.siteLabel || '本站'}，共 ${c.fileCount} 份文件。`
-      + (c.existing ? '这一份已经在你的本机上了。' : '')
-      // ★ 少核了一半要说出来。本机只有解出来的树、那个包不在了的时候，这一次
-      //   只核了内容摘要，没法逐份比对 —— 而用户正在为"这一份"点同意，他有权
-      //   知道我们核到了什么程度。不说的话，两种核对看起来一模一样。
-      + (c.compared === false
-        ? '（本机只剩解出来的树、没有它的包 —— 这一次只核了内容摘要。）' : '');
+      + (c.existing ? '这一份已经在你的本机上了。' : '');
     one.append(who);
 
     // ★ 第二次之后的同意要显示**变了什么**。只显示一个摘要等于什么也没说。

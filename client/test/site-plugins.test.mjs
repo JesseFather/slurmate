@@ -27,6 +27,7 @@ const require = createRequire(import.meta.url);
 const S = require('../src/main/site-plugins.js');
 const P = require('../src/main/plugins/index.js');
 const PP = require('../src/main/plugin-package.js');
+const SLOT = require('../src/main/plugin-slot.js');
 const ulid = require('../src/main/plugins/ulid.js');
 // 测试用的包**由仓库里那个打包器现打**，不手搓字节：手搓一份就是在这里又
 // 实现了一遍容器格式，而它与真格式分家的那天，测试反而会说"一切正常"。
@@ -143,14 +144,19 @@ function makeSite() {
     return state.pkgTruncate ? p.buf.subarray(0, p.buf.length - state.pkgTruncate) : p.buf;
   }
 
-  /** 把这一份的包**直接摆进池子**（连同树）—— 造"上次已经装过"用。 */
+  /**
+   * 把这一份**摆进池子** —— 造"上次已经装过"用。
+   *
+   * ★ 摆的是**已提交的槽位**：一棵树 + 一张记录表（v0.13 的形状）。记录表由
+   *   **生产代码**从那个包算出来（`SLOT.recordFromPackage`），不在这里另写一份 ——
+   *   手写一张就是在这里又实现了一遍记录表格式，而它与真格式分家的那天，用例反而
+   *   会说"一切正常"。
+   */
   function poolPut(env, p) {
-    const dest = path.join(env.siteRoot, p.id, p.version);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.cpSync(p.dir, dest, { recursive: true });
-    fs.writeFileSync(path.join(env.siteRoot, p.id, `${p.version}.splug`),
-      pkgOf(`${p.id}@${p.version}`).buf);
-    return dest;
+    const buf = pkgOf(`${p.id}@${p.version}`).buf;
+    const parsed = PP.parsePackage(buf);
+    assert.equal(parsed.ok, true, `夹具自己打的包要能解析：${parsed.why}`);
+    return putSlot(env, p.id, p.version, p.dir, parsed, buf);
   }
 
   async function rpc(req) {
@@ -257,7 +263,10 @@ function callSync(site, env, over = {}) {
 function consentAll(env, r, over = {}) {
   for (const p of r.pendingConsent) {
     const mv = S.acceptStaged({
-      stagedDir: p.stagedDir, stagedPkg: p.stagedPkg || null, siteRoot: env.siteRoot,
+      stagedDir: p.stagedDir, siteRoot: env.siteRoot,
+      // ★ 记录表草稿：只在内存里活到这一刻，而 acceptStaged 里那一次写就是**提交**。
+      //   `existing` 那一份本来就已经提交过了，所以它没有草稿。
+      record: p.record || null,
       id: p.id, version: p.version, digest: p.digest,
       // ★ 「已经在池里」那一份是**原地认领**，不是换入 —— 见 acceptStaged。
       existing: Boolean(p.existing),
@@ -277,8 +286,60 @@ function consentAll(env, r, over = {}) {
   return r.pendingConsent.length;
 }
 
-const readRecordOf = (siteRoot) => JSON.parse(
-  fs.readFileSync(path.join(siteRoot, S.RECORD_NAME), 'utf8'));
+const readSnapshotOf = (siteRoot) => JSON.parse(
+  fs.readFileSync(path.join(siteRoot, S.SNAPSHOT_NAME), 'utf8'));
+
+// ── 池里一个槽位的三个地址，以及"把一份摆进去" ───────────────────────────────
+//
+// ★ 全部走**生产代码**（`plugin-slot.js`）算路径：用例自己拼一遍的话，它们会在
+//   命名规则变的那天继续绿着，而绿的是另一个形状。
+const poolTree = (env, p, version) => SLOT.treeDirOf(env.siteRoot, p.id, version || p.version);
+const poolRecord = (env, p, version) => SLOT.recordPathOf(env.siteRoot, p.id, version || p.version);
+const stagedTree = (env, s, p, version) => path.join(s.stagingDir, `${p.id}_${version || p.version}`);
+const slotOf = (env, p, version) => S.readSlot(env.siteRoot, p.id, version || p.version);
+const recOf = (env, p, version) => slotOf(env, p, version).record;
+
+/**
+ * 把一棵树 + 一张记录表摆成**一个已提交的槽位**。
+ *
+ * `parsed`/`buf` 给的是"记录表从哪个包算出来"；`srcDir` 是树的内容从哪拷。
+ * ★ 记录表是**先于树**写的吗？不是 —— 提交点是"最后写记录表"，而这里两步都成功，
+ *   所以顺序无关紧要。要造"没提交"的状态，用 `putTreeOnly`。
+ */
+function putSlot(env, id, version, srcDir, parsed, buf) {
+  const dest = SLOT.treeDirOf(env.siteRoot, id, version);
+  assert.ok(dest, `夹具的 id 必须是 ULID：${id}`);
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.rmSync(SLOT.recordPathOf(env.siteRoot, id, version), { force: true });
+  fs.cpSync(srcDir, dest, { recursive: true });
+  const rec = parsed ? SLOT.recordFromPackage(parsed)
+    : SLOT.recordFromPackage(PP.parsePackage(buf));
+  const w = SLOT.writeRecordFile(SLOT.recordPathOf(env.siteRoot, id, version), rec);
+  assert.equal(w.ok, true, `记录表要写得下去：${w.error}`);
+  return dest;
+}
+
+/** 只摆一棵树、**不写记录表** —— 造"没提交的安装"（v0.13 才有的那个状态）。 */
+function putTreeOnly(env, id, version, srcDir) {
+  const dest = SLOT.treeDirOf(env.siteRoot, id, version);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.cpSync(srcDir, dest, { recursive: true });
+  return dest;
+}
+
+/** 递归列出目录下所有条目名（判"暂存里有没有容器文件"用）。 */
+function allNames(dir) {
+  const out = [];
+  for (const n of fs.readdirSync(dir)) {
+    out.push(n);
+    const full = path.join(dir, n);
+    if (fs.statSync(full).isDirectory()) out.push(...allNames(full));
+  }
+  return out;
+}
+
+/** 一个已提交槽位的记录表在不在（判断"提交/没提交"用）。 */
+const committed = (env, p, version) => fs.existsSync(poolRecord(env, p, version));
 
 // ── 同意闸 ──────────────────────────────────────────────────────────────────
 
@@ -301,13 +362,14 @@ test('★★ 同意闸真的拦住了代码执行 —— 这是它的全部意�
       + 'module.exports = { attach() {} };\n',
   });
 
-  // 手工把一棵树放进站点池（"对账 + 下载"那两步在别的用例里单独测）——
+  // 手工摆一个**已提交的槽位**进站点池（"对账 + 下载"那两步在别的用例里单独测）——
   // 这里要问的只有一件事：**注册表会不会去执行它**。
-  const root = tmp('slurmate-sitepool2-');
-  fs.mkdirSync(path.join(root, p.id), { recursive: true });
-  fs.cpSync(p.dir, path.join(root, p.id, '1.0.0'), { recursive: true });
+  //
+  // ★ 摆的是 v0.13 的形状（树 + 记录表）：注册表现在要求**两样都在**才认一个槽位
+  //   （提交点语义），所以只摆一棵树的话这条用例会红在一个与同意闸无关的地方。
+  site.poolPut(env, p);
 
-  const reg = new P.Registry([{ dir: root, source: 'site' }], { allows: () => false });
+  const reg = new P.Registry([{ dir: env.siteRoot, source: 'site' }], { allows: () => false });
   reg.reload();
   assert.equal(fs.existsSync(marker), false,
     '★ 没同意的插件，它的代码绝不能在主进程里跑过 —— 跑了就是同意闸不存在');
@@ -357,48 +419,142 @@ test('★★ 包声明了而负载里没有 ⇒ 根本编不出来（结构性�
   assert.equal(r.pendingConsent.length, 0, '读不动的包不许走进同意闸');
   assert.equal(r.failed.length, 1, `要报失败：${JSON.stringify(r)}`);
   assert.match(r.failed[0].why, /读不了|长度|length/, `要说清是包读不了：${r.failed[0].why}`);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 失败之后站点池里**根本不能有**那个目录 —— 半份比没有更坏');
-  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), false,
     '★ 连那个包也不许留下 —— 它是半个容器，解不开');
 });
 
-test('★ 本机那一份多出文件来 ⇒ 也失败（双向比对）', async () => {
+test('★ 本机那一份多出文件来 ⇒ 检出、点名、**重取**（双向比对）', async () => {
   // ★ 只比一个总摘要抓不到"多出来一个文件" —— 这正是 F18 的形态。
-  //   而只比"声明了的都在"抓不到"磁盘上多出来的那些"。两个方向都要判。
+  //   而只比"记录表里那几份都在"抓不到"磁盘上多出来的那些"。两个方向都要判。
   //
-  // ★ v0.7 之后被比的另一方是**本机那个包**（上一次下来、逐字节校过的那一份），
+  // ★ 被比的另一方是**这一份自己的记录表**（它随这一份一起下来、逐字节校过），
   //   不是站点这一轮的自述 —— 拿对面说的去核本机有的，那是让被告当法官。
+  //
+  // ★★ 检出之后做的是**重取**（拍板 8），不是"报个错就完"：池里那一份已知不可用，
+  //    留着它只会让每一次对账都红一遍。清掉、重新取一份核过的 —— 修好了就不报失败。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
-  const dest = site.poolPut(env, p);
-  fs.writeFileSync(path.join(dest, 'extra.js'), '// 包里的记录表没有这一份\n');
+  // ★ 先走一遍正常的路并同意 —— 于是台账里有这一份，而重取回来的内容与它相符 ⇒
+  //   **不会重新问一遍**（用户同意的是内容，不是"盘上那个目录"）。
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  const dest = poolTree(env, p, '1.0.0');
+  fs.writeFileSync(path.join(dest, 'extra.js'), '// 记录表里没有这一份\n');
 
   const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0, '★ 内容没变 ⇒ 不重新问（同意的是内容）');
   assert.equal(r.kept.length, 0, '磁盘上多出来一份就不算"已经有一份"');
-  assert.equal(r.failed.length, 1, `要报失败：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /extra\.js/, `要点名多出来的是哪一份：${r.failed[0].why}`);
+  assert.equal(r.failed.length, 0, `自愈成功就不该报失败：${JSON.stringify(r.failed)}`);
+  assert.equal(r.added.length, 1, '★ 它要**重新取一份**回来');
+  assert.ok(r.notices.some((n) => /extra\.js/.test(n)),
+    `要点名多出来的是哪一份、并说清做了什么事：${JSON.stringify(r.notices)}`);
+  assert.equal(fs.existsSync(path.join(dest, 'extra.js')), false,
+    '★ 取回来的那一份是核过的 —— 多出来的那个文件不许还在');
 });
 
-test('★ 本机那一份被改过 ⇒ 明确失败，**绝不静默覆盖**', async () => {
-  // ★ 这一条判的是**本机**：树与它自己的来路凭证（旁边那个 `.splug`）对不上。
+test('★ 本机那一份被改过一个字节 ⇒ 检出、点名，并且**重取一份干净的**', async () => {
+  // ★ 这一条判的是**本机**：树与它自己的记录表对不上。
   //   而"站点报的是另一份内容"是**另一件事**，见下面那一条 —— 两句话从前长成
-  //   一句，而它们的处置完全不同（一个在本机重同步，一个去找管理员）。
+  //   一句，而它们的处置完全不同（一个在本机重取，一个去找管理员）。
+  //
+  // ★★ 而"检出"这一步之后**不是覆盖**：先把它清掉（撤回提交、再删内容），**再**
+  //    走一遍正常的取件那条路。所以池里不会出现"旧树被新树盖住"这种半路状态，
+  //    而取不回来的话也不会退回那份动过的树（见下一条用例）。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r0 = await callSync(site, env);
+  consentAll(env, r0);
+  const dest = poolTree(env, p, '1.0.0');
+  const good = fs.readFileSync(path.join(dest, 'client', 'index.js'));
+  fs.writeFileSync(path.join(dest, 'client', 'index.js'), 'module.exports = { attach() {} };\n');
+
+  const r = await callSync(site, env);
+  assert.equal(r.failed.length, 0, `站点还在发这一份 ⇒ 重取应当成功：${JSON.stringify(r.failed)}`);
+  assert.equal(r.added.length, 1, '★ 重取回来的是一个新提交的槽位');
+  assert.ok(r.notices.some((n) => /client\/index\.js/.test(n)),
+    `要点名是哪一份文件对不上：${JSON.stringify(r.notices)}`);
+  assert.ok(!r.notices.some((n) => /站点现在报的不一样/.test(n)),
+    `★ 不是"站点报了别的" —— 那件事走另一条判据：${JSON.stringify(r.notices)}`);
+  assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')), good,
+    '★ 池里那一份必须回到**站点上的那一份**，而不是留着改过的那一份');
+});
+
+test('★★ 重取**失败**时绝不退回本机那份动过的树 —— 终点是"报不可用"', async () => {
+  // ★ 与文件头第三个"不"（下载失败绝不退回到本机池）同源：能改池子的人若能靠
+  //   "让重取失败"把客户端留在**他改过的那一份**上，攻击成本就从"改内容"降到
+  //   "让下载失败"。
+  //
+  // ★ 造的是"站点还在发它、而那串字节取回来是坏的"（`pkgCorrupt`）—— 真机上对应
+  //   "站点那份被改过"或"链路上有人动过"。★ 而**站点不分发它**是另一回事：那种
+  //   情况下我们连池子都不看（见下面那条"只增不减"的用例），树会原样留着。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r0 = await callSync(site, env);
+  consentAll(env, r0);
+  const dest = poolTree(env, p, '1.0.0');
+  fs.writeFileSync(path.join(dest, 'client', 'index.js'), 'module.exports = { attach() {} };\n');
+  site.state.pkgCorrupt = true;                        // 站点发的字节取回来是坏的
+
+  const r = await callSync(site, env);
+  assert.equal(r.added.length, 0);
+  assert.equal(r.kept.length, 0, '★ 一份动过的树绝不许被当成"已经有一份"');
+  assert.equal(fs.existsSync(dest), false, '★ 那份动过的树必须不在了');
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), false, '记录表一起走');
+  assert.equal(r.failed.length, 1, JSON.stringify(r));
+  assert.ok(r.notices.some((n) => /不可用/.test(n)),
+    `要说清它是先被判成不可用、才去重取的：${JSON.stringify(r.notices)}`);
+});
+
+test('★★ 站点**不分发**一个它还在报的插件 ⇒ 本机那一份原样留着（"只增不减"）', async () => {
+  // ★ 这一格是"一个 id 只增不减"那条规则在**新引入的路径**上的落点：站点因为自己
+  //   那边对不过账而不分发它（v0.13 阶段 1 新有的状态）时，客户端**什么都不做** ——
+  //   不删、也不去猜"是不是该清掉本机那一份"。
+  //   ★ 理由是流量：重新分发比在盘上多留一份贵，而站点随时可能恢复。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r0 = await callSync(site, env);
+  consentAll(env, r0);
+  const before = fs.readFileSync(path.join(poolTree(env, p, '1.0.0'), 'client', 'index.js'));
+
+  site.state.noPackage.add(`${p.id}@1.0.0`);           // 站点这一轮不分发它了
+  const r = await callSync(site, env);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), true, '★ 树一个字节都不动');
+  assert.deepEqual(fs.readFileSync(path.join(poolTree(env, p, '1.0.0'), 'client', 'index.js')),
+    before);
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), true, '记录表也留着');
+  assert.equal(r.reclaimed.length, 0, '★ 更没有被"回收" —— 它还在快照表的 wants 里');
+  assert.equal(r.failed.length, 0, '站点没说要发它 ⇒ 不是失败');
+  assert.deepEqual(r.withdrawn, [], '★ 也不是"本机那一份不在了 ⇒ 同意作废"');
+
+  // ── 而站点**恢复**分发同一个版本 ⇒ 一个字节都不用重新下载 ──
+  site.state.noPackage.delete(`${p.id}@1.0.0`);
+  const r2 = await callSync(site, env);
+  assert.equal(site.state.pkgCalls, 1, '★ 从头到尾只取过一次包 —— 恢复分发是零流量');
+  assert.equal(r2.kept.length, 1, '本机那一份直接复用');
+  assert.equal(r2.pendingConsent.length, 0, '也没重新问一遍');
+});
+
+test('★★ 有**活会话**正用着那一份时，一个字节都不动它', async () => {
+  // ★ 与 v0.12 阶段 6 那条「活会话用过的落点一个不碰」同源：换了会把正在跑的
+  //   会话脚下的代码换掉 —— 那是"修好了一个坏东西、顺手弄坏了另一个"。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const dest = site.poolPut(env, p);
   fs.writeFileSync(path.join(dest, 'client', 'index.js'), 'module.exports = { attach() {} };\n');
-  const before = fs.readFileSync(path.join(dest, 'client', 'index.js'));
+  const tampered = fs.readFileSync(path.join(dest, 'client', 'index.js'));
 
-  const r = await callSync(site, env);
-  assert.equal(r.failed.length, 1, `要报失败：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /来路凭证/, `要指向本机这一份：${r.failed[0].why}`);
-  assert.ok(!/站点现在报的不一样/.test(r.failed[0].why),
-    `★ 不是"站点报了别的" —— 那件事走另一条判据：${r.failed[0].why}`);
-  assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')), before,
-    '★ 失败时池里原来那份**每个字节都不能变**');
+  const r = await callSync(site, env, { protectedVersions: [`${p.id}@1.0.0`] });
+  assert.equal(fs.existsSync(dest), true, '★ 树一个字都不动');
+  assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')), tampered);
+  assert.equal(r.failed.length, 1, JSON.stringify(r));
+  assert.match(r.failed[0].why, /活着的会话/, r.failed[0].why);
 });
 
 test('★★ 两个站点报同一个 (id, 版本) 而内容不同 ⇒ 明确失败，且点名这个槽位是**谁**放进来的', async () => {
@@ -422,10 +578,10 @@ test('★★ 两个站点报同一个 (id, 版本) 而内容不同 ⇒ 明确失
   consentAll(env, r);
   r = await callSync(A, env, { siteKey: 'aaaa', siteLabel: 'A 站' });
   assert.equal(r.kept.length, 1, `A 那一份应当已在池里：${JSON.stringify(r.failed)}`);
-  assert.equal(readRecordOf(env.siteRoot).sites.aaaa.wants[v1.id], '1.0.0',
+  assert.equal(readSnapshotOf(env.siteRoot).sites.aaaa.wants[v1.id], '1.0.0',
     '（前提）记录里说 A 要这一版 —— 下面那句点名靠的就是它');
 
-  const dest = path.join(env.siteRoot, v1.id, '1.0.0', 'client', 'index.js');
+  const dest = path.join(poolTree(env, v1, '1.0.0'), 'client', 'index.js');
   const before = fs.readFileSync(dest);
   r = await callSync(B, env, { siteKey: 'bbbb', siteLabel: 'B 站' });
   assert.deepEqual(r.kept, [], '★ 绝不能当成"已经在池里、跳过"收下');
@@ -435,7 +591,7 @@ test('★★ 两个站点报同一个 (id, 版本) 而内容不同 ⇒ 明确失
     `★★ 要点名**先来的那个站点** —— 那是管理员接着要问的第一个问题：${r.failed[0].why}`);
   assert.deepEqual(fs.readFileSync(dest), before, '池里那一份**一个字节都不能变**');
   // 而 B 的 `wants` **不许**记上这一版：它没拿到任何东西。
-  assert.notEqual(((readRecordOf(env.siteRoot).sites.bbbb || {}).wants || {})[v1.id], '1.0.0',
+  assert.notEqual(((readSnapshotOf(env.siteRoot).sites.bbbb || {}).wants || {})[v1.id], '1.0.0',
     '★ B 没拿到这一份 ⇒ 引用表里也不该有它（否则回收会以为有人在要）');
 });
 
@@ -467,7 +623,7 @@ test('★ 写下去之后再从磁盘读回来验 —— 不能拿手里的 Buff
   }
   assert.equal(r.failed.length, 1, `只写了一半也要被发现：${JSON.stringify(r)}`);
   assert.match(r.failed[0].why, /start\.sh/, `要点名是哪一份：${r.failed[0].why}`);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 站点池里不能留下半份');
 });
 
@@ -480,7 +636,7 @@ test('★ 清单合法但 client/index.js 有语法错 ⇒ 在暂存里就被抓
   const r = await callSync(site, env);
   assert.equal(r.failed.length, 1, `语法错要在换入之前就被抓住：${JSON.stringify(r)}`);
   assert.match(r.failed[0].why, /语法|用不了/, `要说清坏在哪：${r.failed[0].why}`);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 语法错的树一个字节都不该进站点池 —— 进去之后按"站点不主动删"就只能让它躺着');
 });
 
@@ -560,7 +716,7 @@ test('★★ 路径穿越：六种坏 path 全部**整份拒绝**', async () => 
   assert.equal(r.pendingConsent.length, 0, '说不清的包不许走进同意闸');
   assert.equal(r.failed.length, 1);
   assert.match(r.failed[0].why, /\.\./, `要说清哪一条不对：${r.failed[0].why}`);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, pl.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, pl, '1.0.0')), false,
     '★ 一个说不清的包本身就是"这份东西不能信"');
   assert.equal(fs.existsSync(path.join(env.siteRoot, 'escape.js')), false, '更不能写到池外面去');
   assert.equal(fs.existsSync(path.join(env.stagingRoot, '..', 'escape.js')), false);
@@ -581,7 +737,7 @@ test('★ 两份只差大小写的声明 ⇒ 拒绝整个插件', async () => {
   const r = await callSync(site, env);
   assert.equal(r.failed.length, 1, `要拒：${JSON.stringify(r)}`);
   assert.match(r.failed[0].why, /大小写/, `要说清原因：${r.failed[0].why}`);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, pl.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, pl, '1.0.0')), false);
 });
 
 // ── 限流 ────────────────────────────────────────────────────────────────────
@@ -641,7 +797,7 @@ test('★ 引用计数：只有 A 要它，A 升级 ⇒ 装新删旧', async () 
     { 'client/index.js': 'module.exports = {};\n' });
   let r = await callSync(site, env);
   consentAll(env, r);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true, '前置：1.0.0 在');
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true, '前置：1.0.0 在');
 
   // 站点升到 1.1.0（同一个 id，新版本目录）
   site.state.disabled.add(`${v1.id}@1.0.0`);
@@ -650,13 +806,13 @@ test('★ 引用计数：只有 A 要它，A 升级 ⇒ 装新删旧', async () 
   r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 1, '新版本是**另一份构件** ⇒ 要重新同意一次');
   consentAll(env, r);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.1.0')), true, '新版要装上');
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.1.0')), true, '新版要装上');
 
   // ★ 回收发生在**下一次对账**：指针是在对账第 5 步移的，而同意在它之后。
   //   这一点要如实写在测试里 —— 它不是bug，是"同意"与"对账"本来就是两个动作，
   //   而用户随时可以点「重新同步」把收尾那一步提前。
   r = await callSync(site, env);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), false,
     '★ 引用归零就回收 —— 这就是"装新删旧"，它不是一个单独的规则');
 });
 
@@ -678,8 +834,8 @@ test('★ 引用计数：A 要 1.0.0、B 要 1.1.0 ⇒ 两份并存，各升各�
   r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B' });
   consentAll(env, r);
 
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true, '两份并存');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.1.0')), true);
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true, '两份并存');
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.1.0')), true);
 
   // A 再升到 1.2.0：1.0.0 归零 ⇒ 回收；1.1.0 因 B 仍在而留着
   const v3 = site.add('v3', { id: v1.id, name: 'x', version: '1.2.0' },
@@ -692,13 +848,13 @@ test('★ 引用计数：A 要 1.0.0、B 要 1.1.0 ⇒ 两份并存，各升各�
   r = await callSync(site, env, { siteKey: 'aaaa', siteLabel: 'A' });
   consentAll(env, r);
   r = await callSync(site, env, { siteKey: 'aaaa', siteLabel: 'A' });
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.2.0')), true, 'A 的新版在');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.2.0')), true, 'A 的新版在');
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), false,
     'A 换走了那一版 ⇒ 归零 ⇒ 回收');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.1.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.1.0')), true,
     '★ B 还要 1.1.0 ⇒ 留着。A 的升级不该影响 B');
 
-  const rec = readRecordOf(env.siteRoot);
+  const rec = readSnapshotOf(env.siteRoot);
   assert.equal(rec.sites.aaaa.wants[v1.id], '1.2.0');
   assert.equal(rec.sites.bbbb.wants[v1.id], '1.1.0');
   assert.ok(v2 && v3, '（占位：上面两个目录确实造出来了）');
@@ -723,23 +879,23 @@ test('★★ 连接没了的站点条目要跟着删 —— 否则它的 `wants`
   site.state.disabled.add(`${a.id}@1.0.0`);
   r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B' });
   consentAll(env, r);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, a.id, '1.0.0')), true);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, b.id, '1.0.0')), true);
-  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
+  assert.equal(fs.existsSync(poolTree(env, a, '1.0.0')), true);
+  assert.equal(fs.existsSync(poolTree(env, b, '1.0.0')), true);
+  assert.deepEqual(Object.keys(readSnapshotOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
 
   // ★ 省略 `keepSites` = **不知道** ⇒ 一条都不删（与"读不到记录就不回收"同一条纪律）。
   r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B' });
   assert.deepEqual(r.forgotSites, [], '不知道就不删');
-  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
+  assert.deepEqual(Object.keys(readSnapshotOf(env.siteRoot).sites).sort(), ['aaaa', 'bbbb']);
 
   // A 那条连接被删掉（或者主机名改了）⇒ 现在只有 bbbb。
   //   `aaaa` 那一份 `wants` 一没，a 就只有"没有任何站点要它"了 ⇒ 同一个对账里回收。
   r = await callSync(site, env, { siteKey: 'bbbb', siteLabel: 'B', keepSites: ['bbbb'] });
   assert.deepEqual(r.forgotSites, ['aaaa']);
-  assert.deepEqual(Object.keys(readRecordOf(env.siteRoot).sites), ['bbbb']);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, a.id, '1.0.0')), false,
+  assert.deepEqual(Object.keys(readSnapshotOf(env.siteRoot).sites), ['bbbb']);
+  assert.equal(fs.existsSync(poolTree(env, a, '1.0.0')), false,
     '★ 回收发生在**同一次**对账里 —— 站点表在第 5 步删、回收在第 6 步');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, b.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, b, '1.0.0')), true,
     'B 还活着，它要的那一份一个字都不该动');
 });
 
@@ -750,21 +906,21 @@ test('★★ 站点**关掉**或**不再报**一个插件 ⇒ 留着不删（决
     { 'client/index.js': 'module.exports = {};\n' });
   let r = await callSync(site, env);
   consentAll(env, r);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true);
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true);
 
   // 管理员把它关掉
   site.state.disabled.add(`${v1.id}@1.0.0`);
   r = await callSync(site, env);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true,
     '★ "站点不报它"不构成删除理由 —— 它随时可能再打开');
 
   // 管理员把它从 plugins/ 里整个移除
   site.state.disabled.clear();
   site.byKey.delete(`${v1.id}@1.0.0`);
   r = await callSync(site, env);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true,
     '★ 整个移除也一样 —— 删除的唯一理由是"没有任何站点要它、也没有活会话用它"');
-  const rec = readRecordOf(env.siteRoot);
+  const rec = readSnapshotOf(env.siteRoot);
   assert.ok(rec.sites.aaaaaaaaaaaaaaaa.distributes.includes(v1.id),
     '`distributes` 只增不减：它要把"你以前从 X 站装过它"这件事说出来');
 });
@@ -800,7 +956,7 @@ async function upgradeWithSessions(sessionState) {
   r = await callSync(site, env);
 
   // ★ 前提要**真的成立**才轮到那条判据：新版装上了 ⇒ 这一轮确实走到了回收那一步。
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.1.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.1.0')), true,
     `前提：新版真的装上了（否则这一条可能只是"没走到回收"）：${JSON.stringify(r)}`);
   return { site, env, v1, r };
 }
@@ -809,7 +965,7 @@ test('★ 活会话引用着它 ⇒ 不回收', async () => {
   // 客户端重启之后会 tryReattach 接回旧会话，而那些会话的 service_plugin
   // **只有守护进程知道** —— 所以这一步必须去问 `op:list`，不能只看本地那一条。
   const { env, v1, r } = await upgradeWithSessions('enrolled');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true,
     '会话还在用它 ⇒ 不能删');
   assert.deepEqual(r.reclaimed, [], '而且要真的没删');
 });
@@ -824,7 +980,7 @@ test('★★ **已经结束**的会话不该把那一个版本钉住', async () 
   // ★ 这一条与上一条**成对**才承重：上一条钉"活的要护住"，这一条钉"死的不要护"。
   //   少任何一条，另一条都能被一个走极端的实现骗过去。
   const { env, v1, r } = await upgradeWithSessions('released');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), false,
     '★★ 结束了的会话不算"还在用" ⇒ 该回收的那一版要真的回收');
   assert.equal(r.reclaimed.length, 1, `要真的回收了一个：${JSON.stringify(r.reclaimed)}`);
 });
@@ -835,7 +991,7 @@ test('★★ **不认识**的会话状态要护着（判错的方向是回收掉
   //   而后者错的方向是**回收掉用户正在用的那一版** —— 与 F23 那条纪律（不知道谁在
   //   引用的时候，唯一安全的动作是不删）反着来。
   const { env, v1, r } = await upgradeWithSessions('some_future_state');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, v1.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true,
     '★ 不认识的状态 ⇒ 护着，不回收');
   assert.deepEqual(r.reclaimed, []);
 });
@@ -852,19 +1008,19 @@ test('★★ 记录丢了或坏了 ⇒ 一个字节都不删，只报一条', as
     { 'client/index.js': 'module.exports = {};\n' });
   let r = await callSync(site, env);
   consentAll(env, r);
-  const dest = path.join(env.siteRoot, v1.id, '1.0.0');
+  const dest = poolTree(env, v1, '1.0.0');
   assert.equal(fs.existsSync(dest), true);
 
   // 站点不再报它 + 记录被写坏 —— 两个条件同时成立才有可能误删
   site.byKey.delete(`${v1.id}@1.0.0`);
-  fs.writeFileSync(path.join(env.siteRoot, S.RECORD_NAME), '{ 这不是 JSON');
+  fs.writeFileSync(path.join(env.siteRoot, S.SNAPSHOT_NAME), '{ 这不是 JSON');
   r = await callSync(site, env);
   assert.equal(fs.existsSync(dest), true, '★ 读不到引用表时，唯一安全的动作是什么都不删');
   assert.ok(r.notices.some((n) => /不会回收/.test(n)),
     `而且要**说出来**（否则用户只会发现池子越来越大）：${JSON.stringify(r.notices)}`);
 
   // 记录**不存在**而池子不空 —— 同样是最危险的那一刻，同样不删
-  fs.unlinkSync(path.join(env.siteRoot, S.RECORD_NAME));
+  fs.unlinkSync(path.join(env.siteRoot, S.SNAPSHOT_NAME));
   r = await callSync(site, env);
   assert.equal(fs.existsSync(dest), true, '★ 记录不见了而池里有东西时更不能删');
 });
@@ -878,7 +1034,7 @@ test('★★ 写记录失败 ⇒ 什么都不回收（顺序反了会真丢数�
     { 'client/index.js': 'module.exports = {};\n' });
   let r = await callSync(site, env);
   consentAll(env, r);
-  const old = path.join(env.siteRoot, v1.id, '1.0.0');
+  const old = poolTree(env, v1, '1.0.0');
   assert.equal(fs.existsSync(old), true);
 
   // 站点升到 1.1.0（正常会回收 1.0.0），但这一次记录写不下去
@@ -887,7 +1043,7 @@ test('★★ 写记录失败 ⇒ 什么都不回收（顺序反了会真丢数�
     { 'client/index.js': 'module.exports = {};\n' });
   const realRename = fs.renameSync;
   fs.renameSync = function patched(a, b) {
-    if (String(b).endsWith(S.RECORD_NAME)) throw new Error('磁盘满了');
+    if (String(b).endsWith(S.SNAPSHOT_NAME)) throw new Error('磁盘满了');
     return realRename.call(fs, a, b);
   };
   try {
@@ -921,7 +1077,7 @@ test('★★ 写记录**真的**发生在回收之前（记下副作用的先后
   const realRename = fs.renameSync;
   const realRm = fs.rmSync;
   fs.renameSync = function (a, b) {
-    if (String(b).endsWith(S.RECORD_NAME)) order.push('写记录');
+    if (String(b).endsWith(S.SNAPSHOT_NAME)) order.push('写记录');
     return realRename.call(fs, a, b);
   };
   fs.rmSync = function (p, o) {
@@ -979,14 +1135,40 @@ test('★ 站点键是哈希，不是那个地址串本身', () => {
   assert.equal(/[^0-9a-f]/.test(S.siteKeyOf({ user: '../..', host: '../..', port: 22 })), false);
 });
 
-test('★ 站点池的列举只看目录，跳过记录文件与暂存目录', () => {
+test('★ 列举的判据是"已提交的槽位"：跳过快照表、记录表、没提交的树、以及不是槽位的东西', () => {
+  // ★ 池里只该有**一种**形状（`<id>_<版本>/` + `<id>_<版本>.json`），而列举是它的
+  //   读者。三种东西各自要被跳过，理由不同：
+  //     · `.sites.json` 是**快照表**（整个池的账），点开头 ⇒ 进不来；
+  //     · 记录表是一个**文件**，不是槽位；
+  //     · 一棵**没有记录表**的树是"没提交的安装"，它**不存在**（提交点语义）。
   const root = tmp('slurmate-list-');
-  fs.mkdirSync(path.join(root, 'ID1', '1.0.0'), { recursive: true });
-  fs.writeFileSync(path.join(root, S.RECORD_NAME), '{}');
-  fs.mkdirSync(path.join(root, '.site-staging'), { recursive: true });
-  const out = S.listPooled(root);
-  assert.deepEqual(out.map((x) => `${x.id}@${x.version}`), ['ID1@1.0.0'],
-    '记录文件（一个 .json）与暂存目录都不算插件');
+  const id = ulid.mint();
+  const other = ulid.mint();
+  const rec = { schema: SLOT.RECORD_SCHEMA, format: 1, envelope: null,
+                files: [{ path: 'plugin.json', size: 2, sha256: 'a'.repeat(64) }] };
+  fs.mkdirSync(path.join(root, `${id}_1.0.0`), { recursive: true });     // 没提交
+  fs.mkdirSync(path.join(root, `${other}_1.0.0`), { recursive: true });   // 已提交
+  fs.mkdirSync(path.join(root, 'ID1'), { recursive: true });              // 不是槽位
+  fs.writeFileSync(path.join(root, S.SNAPSHOT_NAME), '{}');
+  SLOT.writeRecordFile(path.join(root, `${other}_1.0.0.json`), rec);
+  assert.deepEqual(S.listPooled(root).map((x) => `${x.id}@${x.version}`), [`${other}@1.0.0`],
+    '只有"树 + 记录表读得动"的才算一个槽位');
+
+  // ★ 而"记录表在、读不动"是**第三**种东西：它也是"没提交"（写坏了 / 被人改过），
+  //   所以列举看不见它、清扫要收掉它。★ 判据**必须是同一个**（`readRecordFile`）——
+  //   两处分家的那天会出现一个"注册表加载得了、而列举与回收都看不见"的槽位。
+  SLOT.writeRecordFile(path.join(root, `${id}_1.0.0.json`), rec);
+  fs.writeFileSync(path.join(root, `${id}_1.0.0.json`), '{ 这不是 JSON');
+  assert.deepEqual(S.listPooled(root).map((x) => `${x.id}@${x.version}`), [`${other}@1.0.0`],
+    '读不动的记录表 ⇒ 不算一个槽位');
+
+  // ★ 而"不是槽位"与"没提交"要分开：前者**不报也不删**，后两者**要收掉**。
+  const swept = S.sweepPool(root);
+  assert.deepEqual(swept.removed.sort(), [`${id}_1.0.0`, `${id}_1.0.0.json`].sort(),
+    '没提交的树、以及读不动的记录表，都要收掉');
+  assert.deepEqual(swept.strays, ['ID1'], '不是槽位的东西一个字节都不动');
+  assert.equal(fs.existsSync(path.join(root, `${other}_1.0.0`)), true, '已提交的照旧');
+  assert.equal(fs.existsSync(path.join(root, `${other}_1.0.0.json`)), true);
 });
 
 // ── 上限 ────────────────────────────────────────────────────────────────────
@@ -1013,7 +1195,7 @@ test('★ 包里的某一份超过单文件上限 ⇒ 明确拒绝，不是截�
   assert.match(r.failed[0].why, /超过/, `要说清是超限，而不是一句"失败了"：${r.failed[0].why}`);
   assert.match(r.failed[0].why, new RegExp(String(S.HARD_LIMITS.file_bytes)),
     '★ 运维要照着这句话调，所以要说清上限是多少');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 绝不截断 —— 截断与明确失败的差别就是"谎报成功"与"说得出来"的差别');
 });
 
@@ -1030,7 +1212,7 @@ test('★ 连接换了一条 ⇒ 这一次对账整个作废，一个字节都�
     trusted: () => true,
     stale: () => true,                  // 一开始就已经换代了
   });
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '作废的对账不许往站点池里写东西');
   assert.deepEqual(r.pendingConsent, [], '也不许留下待同意的树');
   assert.deepEqual(r.failed, [], '★ 作废不是失败 —— 报成失败会让用户看到一条假故障');
@@ -1045,9 +1227,9 @@ test('★ 连接换了一条 ⇒ 这一次对账整个作废，一个字节都�
   let calls = 0;
   // 每轮：循环开头问一次、取包之前再问一次。第 4 次是第二个插件取包之前。
   const r2 = await callSync(site2, env, { trusted: () => true, stale: () => (calls += 1) > 3 });
-  assert.equal(fs.existsSync(path.join(env.siteRoot, pa.id, '1.0.0')), true,
+  assert.equal(fs.existsSync(poolTree(env, pa, '1.0.0')), true,
     '互换代之前那一份是拿到了的 —— 不然下面那条"第二个没下来"什么都没证明');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, pb.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, pb, '1.0.0')), false,
     '★ 取到一半换代 ⇒ 第二个绝不能进站点池');
   assert.ok(r2.failed.some((f) => /作废/.test(f.why)),
     `中途换代要说得出这一份为什么没下来：${JSON.stringify(r2.failed)}`);
@@ -1076,21 +1258,40 @@ test('★★ 一条 RPC 把整个包取回来 —— 而且一次都不许再走
     '★ `plugin_file` 这个 op 已经删了 —— 它只可能是 0，而这条断言钉的就是'
     + '"客户端没有偷偷退回逐份取"');
 
-  consentAll(env, r);
-  // 池里**两样挨着**：解出来的树 + 那个包。
-  const tree = path.join(env.siteRoot, p.id, '1.0.0');
-  const pkgFile = S.pkgPathOf(env.siteRoot, p.id, '1.0.0');
-  assert.equal(fs.existsSync(tree), true, '树要进池（require 用的是它）');
-  assert.equal(fs.existsSync(pkgFile), true, '★ 包也要进池 —— 它是这一份的来路凭证');
-  assert.equal(S.listPooled(env.siteRoot)[0].hasPackage, true);
+  // ── ★ 判据⑤：容器**自始至终**没有落过盘 —— 连暂存里也没有 ──
+  //
+  //   它在 `unpackTo` 铺完树之后就退休了。★ 这一条要在**提交之前**查：提交换入
+  //   之后暂存就空了，那时"没有 .splug"是一句空话（空目录里当然没有）。
+  const stagedNow = r.pendingConsent[0].stagedDir;
+  assert.deepEqual(allNames(stagedNow).filter((n) => n.endsWith('.splug')), [],
+    '★ 暂存里只有解出来的树，没有容器');
+  assert.deepEqual(allNames(env.stagingRoot).filter((n) => n.endsWith('.splug')), [],
+    '★ 整个暂存根也一样');
 
-  // 池里那个包与站点发出来的**逐字节相同**，而且它的签名者就是站点那把钥匙。
-  const onDisk = fs.readFileSync(pkgFile);
-  const parsed = PP.parsePackage(onDisk);
-  assert.equal(parsed.ok, true, parsed.why);
-  assert.equal(parsed.digest, site.pkgOf(`${p.id}@1.0.0`).digest);
-  assert.equal(parsed.sig.fingerprint, site.state.pkgKey.fingerprint,
-    '池里那个包自带的签名者就是站点那把钥匙');
+  consentAll(env, r);
+  // 池里**两样**：解出来的树 + 它的记录表。★ **没有容器**。
+  const tree = poolTree(env, p, '1.0.0');
+  const recFile = poolRecord(env, p, '1.0.0');
+  assert.equal(fs.existsSync(tree), true, '树要进池（require 用的是它）');
+  assert.equal(fs.existsSync(recFile), true, '★ 记录表也要进池 —— 它是这一份的提交点');
+  assert.deepEqual(fs.readdirSync(env.siteRoot).filter((n) => n.endsWith('.splug')), [],
+    '★★ 池里**一个 `.splug` 都不该有** —— 容器只在链路与内存里活');
+  assert.deepEqual(fs.readdirSync(env.stagingRoot).flatMap(
+    (n) => (fs.statSync(path.join(env.stagingRoot, n)).isDirectory()
+      ? fs.readdirSync(path.join(env.stagingRoot, n)) : [n])).filter((n) => n.endsWith('.splug')), [],
+  '★★ 暂存里也一样 —— 只有解出来的树');
+
+  // 记录表里的两样：那个签名块**逐字**保留，以及逐份真相（带容器里的次序）。
+  const rec = recOf(env, p, '1.0.0');
+  const pkg = PP.parsePackage(site.pkgOf(`${p.id}@1.0.0`).buf);
+  assert.equal(rec.envelope.pubkey, pkg.sig.pubkey.toString('base64'));
+  assert.equal(rec.envelope.signature, pkg.sig.signature.toString('base64'),
+    '★ 签名块要逐字保留 —— 少一位就是"签名对不上"，而那时报的是"有人改了包"');
+  assert.deepEqual(rec.files.map((f) => f.path), pkg.files.map((f) => f.path),
+    '★ `files` 保留**容器里的次序**（照它重打包 = 逐字节重现原件）');
+  assert.equal(PP.contentDigest(rec.files), pkg.digest, '照记录表重算的摘要与原件相同');
+  // ★ 记录表里**不存**摘要：它是派生值，存下来就会与 `files` 里的 sha256 各说各话。
+  assert.equal(rec.digest, undefined);
 });
 
 test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒绝，绝不换入', async () => {
@@ -1102,7 +1303,7 @@ test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒�
   assert.equal(r.pendingConsent.length, 0, '对不上的东西不许走进同意闸');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /说的不是同一份东西/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 一个字节都不许进池');
 });
 
@@ -1120,7 +1321,7 @@ test('★ 包里的字节被改过 ⇒ 拒绝，而且**绝不退回逐份那条
     '★ 包读不了的时候**一次 `plugin_file` 都不许发** —— 那就是回退');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /读不了|不符/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 });
 
 test('★★ 包格式比客户端认得的新 ⇒ 明确失败，**而且没有退路可退**', async () => {
@@ -1143,7 +1344,7 @@ test('★★ 包格式比客户端认得的新 ⇒ 明确失败，**而且没有
   assert.equal(r.reason, 'site_too_new', '要有一态说明"站点比客户端新"');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /只认识 1|格式/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
   // ★ 而它说的是"升级**这个客户端**"——方向对了用户才知道该做什么。
   assert.match(r.failed[0].why, /守护进程比这个客户端新|客户端/, r.failed[0].why);
 });
@@ -1169,8 +1370,8 @@ test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async ()
   assert.equal(site.state.pkgCalls, 1, '取一次才知道对不对');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /字节/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
-  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), false,
     '★ 对不上就不许进池 —— 连那个包也不许');
 });
 
@@ -1198,7 +1399,7 @@ test('★ 包里的内容超过**站点自报**的上限 ⇒ 拒绝（自述只�
   });
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /1024/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 });
 
 test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', async () => {
@@ -1221,7 +1422,7 @@ test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', a
   assert.equal(site.state.pkgCalls, 0, '★ 自述就说不成立，白跑一次传输没意义');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
   assert.match(r.failed[0].why, /100/, r.failed[0].why);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 });
 
 test('★ 「站点愿不愿意发这一份」的判据，与"这一份此刻生产不生产得出来"是两件事', () => {
@@ -1339,7 +1540,7 @@ test('★★ 池里有一份、台账对不上 ⇒ 进待同意（**不能消失
   // 第一次：正常下来、正常同意。
   const r1 = await callSync(site, env);
   consentAll(env, r1);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), true);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), true);
 
   // ★ 台账那一条不见了（用户换过机器 / 删过配置 / 换过摘要公式）。
   env.trusted.clear();
@@ -1349,7 +1550,7 @@ test('★★ 池里有一份、台账对不上 ⇒ 进待同意（**不能消失
     `★★ 它必须走进待同意 —— 这就是那个洞：${JSON.stringify(r2)}`);
   const item = r2.pendingConsent[0];
   assert.equal(item.existing, true, '★ 要标明"本机已经有一份"（出路与草稿不同）');
-  assert.equal(item.stagedDir, path.join(env.siteRoot, p.id, '1.0.0'),
+  assert.equal(item.stagedDir, poolTree(env, p, '1.0.0'),
     '指向的是**池里那一份**，不是暂存里的草稿');
 
   // ── 点同意 ⇒ 原地认领：不 rename、不重下、直接记台账 ──
@@ -1379,7 +1580,7 @@ test('★★ 对"已在池里"的那一份点不同意 ⇒ **删掉池里那一�
 
   const d = S.dropPooledVersion(env.siteRoot, p.id, '1.0.0');
   assert.equal(d.ok, true, d.error);
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 
   // 再对一次账：**重新问**（不是静默装回来，也不是"什么都没有"）。
   const r3 = await callSync(site, env);
@@ -1403,7 +1604,7 @@ test('★★ 删掉本机那一份 ⇒ 台账那条一并消失 ⇒ 下一次**�
   assert.equal(env.trusted.size, 1, '前置：同意过一份');
 
   // 用户把它删了（在文件管理器里、或者点了界面上那个按钮）。
-  fs.rmSync(path.join(env.siteRoot, p.id, '1.0.0'), { recursive: true, force: true });
+  fs.rmSync(poolTree(env, p, '1.0.0'), { recursive: true, force: true });
 
   const r2 = await callSync(site, env);
   assert.equal(env.trusted.size, 0, '★ 同意必须作废 —— 只删内容、留着台账就等于静默装回来');
@@ -1438,7 +1639,7 @@ test('★ 只对**本站这一轮报出来的**那些判撤回（别的站点的
 
   // b 被站点关掉了，同时 a 的本机那一份被删了。
   site.state.disabled.add(`${b.id}@1.0.0`);
-  fs.rmSync(path.join(env.siteRoot, a.id, '1.0.0'), { recursive: true, force: true });
+  fs.rmSync(poolTree(env, a, '1.0.0'), { recursive: true, force: true });
   const r2 = await callSync(site, env);
   assert.deepEqual(r2.withdrawn.map((x) => x.id), [a.id], '只有 a 是"这一轮报出来的"');
   assert.equal(env.trusted.has(`${b.id}@1.0.0`), true,
@@ -1455,7 +1656,7 @@ test('★ 回收一个版本时，包跟着一起走（不留没树的 .splug）
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
   consentAll(env, r1);
-  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), true, '前置');
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), true, '前置');
 
   site.state.disabled.add(`${p.id}@1.0.0`);
   site.add('b', { id: p.id, name: 'a', version: '1.1.0' },
@@ -1464,54 +1665,270 @@ test('★ 回收一个版本时，包跟着一起走（不留没树的 .splug）
   consentAll(env, r2);
   const r3 = await callSync(site, env);
   assert.deepEqual(r3.reclaimed.map((x) => x.version), ['1.0.0'], JSON.stringify(r3.reclaimed));
-  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0')), false,
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.0.0')), false,
     '★ 包要一起回收 —— 留下一个没有树的 .splug 就是池里一份谁也看不见的残留');
-  assert.equal(fs.existsSync(S.pkgPathOf(env.siteRoot, p.id, '1.1.0')), true);
+  assert.equal(fs.existsSync(poolRecord(env, p, '1.1.0')), true);
 });
 
-test('★ 列举只认目录：旁边的 <版本>.splug 不是另一份插件', async () => {
+test('★★ 记录表被删掉 ⇒ 这一份**不存在**了（提交点语义），而不是"少了一样本事"', async () => {
+  // ★ 从前池里是**两样挨着**的（树 + 那个 `.splug`），而删掉包**不算撤回** ——
+  //   于是有一整类状态要伺候："有树没有包"，比对只能做一半（`compared: false`），
+  //   界面上还得留一句话解释它。
+  //
+  // ★★ v0.13 把那一类状态**删掉了**：记录表是**提交点**，树与它同生共死。
+  //    "记录表没了"于是有一个明确的意思 —— **这一份不在了**，与"树没了"同义。
+  //    这条用例钉的就是这个等号，而它是"容器不落盘"换来的一处**简化**：
+  //    两样都对得上才叫装上了，否则重取。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
   consentAll(env, r1);
-  const out = S.listPooled(env.siteRoot);
-  assert.deepEqual(out.map((x) => `${x.id}@${x.version}`), [`${p.id}@1.0.0`]);
-  assert.equal(out[0].hasPackage, true);
+  assert.deepEqual(S.listPooled(env.siteRoot).map((x) => `${x.id}@${x.version}`),
+    [`${p.id}@1.0.0`]);
 
-  // 把包删掉：**不算撤回**（能加载的是树），但必须如实报出来。
-  fs.rmSync(S.pkgPathOf(env.siteRoot, p.id, '1.0.0'));
-  const out2 = S.listPooled(env.siteRoot);
-  assert.equal(out2.length, 1, '树还在 ⇒ 这一份还在');
-  assert.equal(out2[0].hasPackage, false, '★ 包不在了要如实说，不能瞒着');
+  // ── 手删记录表 ⇒ 清扫器把它当成"没写完的安装"，树也一起收掉 ──
+  //
+  // ★ 于是走到插件那一格时，**树也不在了** —— 这正好落进 §5.3 那条既有的路：
+  //   "本机这一份不在了 ⇒ 同意作废 ⇒ 重新问一次"。
+  //   ★ 这是刻意的**安全一侧**：池里那一份（用户同意过的那一份）确实没有了，
+  //     而"自己再装回来、一个字都不问"正是 §5.3 要防的那件事。
+  //   ★ 与"树在对不上"那一格的差别也正在这里：那一格重取的是**同一份内容**
+  //     （台账里那个摘要相符 ⇒ 不必再问），而这一格是本机这一份**没了**。
+  fs.rmSync(poolRecord(env, p, '1.0.0'));
+  assert.deepEqual(S.listPooled(env.siteRoot), [],
+    '★ 没提交的槽位列举看不见 —— 它不存在');
+
   const r2 = await callSync(site, env);
-  assert.equal(r2.kept.length, 1, '★ 包单独不在了**不构成撤回**');
-  assert.deepEqual(r2.withdrawn, []);
-  // ★ 但它**要说出来**：从"两向比对"退化成"只核摘要"是**少做了一半校验**，
-  //   而一次少做了的核对绝不许看起来与做全了的那次一样。
-  assert.ok(r2.notices.some((n) => /没有它的包/.test(n)),
-    `包不在了要如实说：${JSON.stringify(r2.notices)}`);
+  assert.equal(r2.kept.length, 0, '★ 它不算"已经有一份"');
+  assert.equal(r2.withdrawn.length, 1, '★ 本机那一份不在了 ⇒ 同意作废（§5.3）');
+  assert.ok(r2.notices.some((n) => /没写完的安装/.test(n)),
+    `清扫要说清它收掉了什么：${JSON.stringify(r2.notices)}`);
+  assert.equal(r2.pendingConsent.length, 1, '★ 重新取回来之后要**重新问一次**');
 
-  // ★ 再换一格：树在、包不在、而**台账也对不上** ⇒ 它要重新问一次。而这时
-  //   **钉子还在**（上一次同意时钉的），于是 §5.4 判出一条很具体的话：
-  //   这一份证不了签名者。★ 这条是删掉包**之后**才可能出现的一态，值得钉住 ——
-  //   它说的是"你把来路凭证删了，于是我们没法再确认这一份是谁做的"。
-  env.trusted.clear();
-  const r3 = await callSync(site, env);
-  assert.equal(r3.pendingConsent.length, 0, '钉过之后，一份证不了签名者的构件不能进同意闸');
-  assert.equal(r3.failed.length, 1, JSON.stringify(r3.failed));
-  assert.match(r3.failed[0].why, /没有签名/, r3.failed[0].why);
+  // ── 记录表在、而**树**被删掉：同一条路（提交点是两样一起）──
+  const env2 = makeEnv();
+  const r3 = await callSync(site, env2);
+  consentAll(env2, r3);
+  fs.rmSync(poolTree(env2, p, '1.0.0'), { recursive: true, force: true });
+  const r4 = await callSync(site, env2);
+  assert.equal(r4.kept.length, 0);
+  assert.equal(r4.withdrawn.length, 1, '★ 同上：本机那一份不在了');
+  assert.deepEqual(S.listPooled(env2.siteRoot), [], '孤儿记录表也被清扫收掉了');
+  assert.equal(r4.pendingConsent.length, 1, '重新取 + 重新问');
 
-  // ★ 而没有钉过（或者钉子被清掉）时，它走**待同意**，并且带上 `compared: false`
-  //   —— 用户正在为"这一份"点同意，他有权知道我们核到了什么程度。
+  // ── 而"已在本机、台账对不上"那一格还在（原地认领），见下面那条用例 ──
+  const env3 = makeEnv();
+  const r5 = await callSync(site, env3);
+  consentAll(env3, r5);
+  env3.trusted.clear();
+  env3.pinned.clear();
+  const r6 = await callSync(site, env3);
+  assert.equal(r6.pendingConsent.length, 1, JSON.stringify(r6.failed));
+  assert.equal(r6.pendingConsent[0].existing, true, '这一份已经在池里 ⇒ 原地认领');
+  assert.deepEqual(r6.pendingConsent[0].files, ['client/index.js', 'plugin.json'],
+    '★ "你要同意的是哪几份文件"从**记录表**里来（次序也是容器里的次序）');
+});
+
+test('★★★ 树与记录表**一起**被改 ⇒ 逐份比对过得去，而**签名**挡住（这是这一步的全部意义）', async () => {
+  // ★★★ 这一条是"容器只在内存里活"之后**必须显式补上**的那一步（见 site-plugins.js
+  //     的 `treeSignature`）。
+  //
+  //   从前签名盖的是**容器里那张记录表**，而容器在盘上 ⇒ 每次对账都顺手重验一次。
+  //   改成"树 + 记录表"之后，改池子的人可以把**两边一起**改成自洽的：
+  //   改 `client/index.js`，再把记录表里那一份的 sha256/size 一起改掉。
+  //   于是「树 vs 记录表」逐份比对**全过** —— 那一关问的是"这两个东西一致吗"，
+  //   而它们确实一致，只是两个都是假的。
+  //
+  //   拦住它的是**第三个数**：从树重算的内容摘要，与记录表里那个签名块。
+  //   签名是**作者**盖的，改池子的人改不动 ⇒ 摘要对不上，签名不成立。
+  //
+  //   ★ 少了这一步会怎样：§5.4 那条"签名者不变"就只剩**指纹字符串的比较**，
+  //     而指纹就写在记录表里 —— 一个能改池的人可以把它一并改掉。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' },
+    { 'client/index.js': 'module.exports = { evil: false };\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+
+  const dest = poolTree(env, p, '1.0.0');
+  const evil = Buffer.from('module.exports = { evil: true };\n');
+  fs.writeFileSync(path.join(dest, 'client', 'index.js'), evil);
+  // 记录表也一起改 —— 改到"两边一致"为止：逐份比对再也说不出话来。
+  const rec = recOf(env, p, '1.0.0');
+  const row = rec.files.find((f) => f.path === 'client/index.js');
+  row.size = evil.length;
+  row.sha256 = sha256hex(evil);
+  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
+
+  // 前置：**逐份比对确实过得去**（不然这条用例测的是另一件事）。
+  assert.equal(S.treeFault(dest, rec.files), null, '前置：树与记录表两边自洽');
+
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 0, '★★ 自洽的伪造**绝不许**被当成"已经有一份"');
+  assert.equal(r2.added.length, 1, '★ 检出之后重取一份真的');
+  assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')),
+    Buffer.from('module.exports = { evil: false };\n'), '★ 池里那一份回到站点的内容');
+});
+
+test('★★ 改记录表里那个签名一个字节 ⇒ 拒（而不是"这一份没签名"）', async () => {
+  // ★★ "有一块、但读不动"与"没有签名"**必须分开**。折成同一件事的后果是
+  //    **下转型攻击**：把签名块改坏 ⇒ 变成"没签名" ⇒ 对**钉过的** id 是拒绝
+  //    （那一档还算对），而对**没钉过的** id 会被静默收下，此后这一份的来源
+  //    没有任何东西能证明。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  const rec = recOf(env, p, '1.0.0');
+  assert.ok(rec.envelope, '前置：假站点发的包是签过名的');
+  const sig = Buffer.from(rec.envelope.signature, 'base64');
+  sig[0] ^= 0xff;
+  rec.envelope.signature = sig.toString('base64');
+  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
+  env.pinned.clear();                    // ★ 连钉子都不留：判据不能靠钉子兜底
+
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 0, '★ 签名对不上的那一份不算"已经有一份"');
+  assert.equal(r2.added.length, 1, '重取一份真的');
+  assert.equal(r2.pendingConsent.length, 0, '★ 更不是"没签名所以重新问一次"');
+});
+
+test('★ 记录表里那个信封**读不动**（长度不对）也拒 —— 同上，那是"被改过"不是"没签名"', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  const rec = recOf(env, p, '1.0.0');
+  rec.envelope.pubkey = Buffer.alloc(31, 7).toString('base64');   // 少一个字节
+  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
   env.pinned.clear();
-  const r4 = await callSync(site, env);
-  assert.equal(r4.pendingConsent.length, 1, JSON.stringify(r4.failed));
-  assert.equal(r4.pendingConsent[0].existing, true, '这一份已经在池里 ⇒ 原地认领');
-  assert.equal(r4.pendingConsent[0].compared, false,
-    '★ 少做的那一半必须一路传到界面上（没有包 ⇒ 只核了摘要，没法逐份比对）');
-  assert.ok(r4.pendingConsent[0].files.length > 0,
-    '★ 而"你要同意的是哪几份文件"仍然要给出来（那是**显示**，不是判据）');
+
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 0);
+  assert.ok(r2.notices.some((n) => /信封|签名/.test(n)) || r2.added.length === 1,
+    `要说清是那个信封读不动：${JSON.stringify(r2.notices.concat(r2.failed))}`);
+  assert.ok(r2.notices.some((n) => /不可用/.test(n)), JSON.stringify(r2.notices));
+});
+
+test('★★ 站点报一个带 `../` 的 id ⇒ 一个字节都不写，池外绝不出东西', async () => {
+  // ★★ 这一条是**防御**：`p.id` 是站点报来的字符串，从前它被直接拼进
+  //    `path.join(siteRoot, p.id, p.version)`，而铺树那一步的 `mkdirSync(recursive)`
+  //    会把中间目录**建出来** ⇒ 一个冒充站点的人可以往池外写文件。
+  //    ★ 判据是 **id 的形状**（ULID 的 26 个字符里既没有 `/` 也没有 `.`），
+  //      不是一份"挡掉想得到的写法"的黑名单。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  site.state.disabled.add(`${p.id}@1.0.0`);            // 真的那一份这一轮不报
+  // 站点多报一条：id 是穿越路径，而 `package` 那一格**形状说得通**（免得先被
+  // `deliveryOf` 拦住 —— 那样测的就是另一条判据了）。
+  site.state.extra.push({ id: '../../escape', version: '1.0.0', name: 'x', title: 'x',
+    enabled: true, package: { format: 1, bytes: 100, digest: 'a'.repeat(64) } });
+
+  const r = await callSync(site, env);
+  assert.equal(site.state.pkgCalls, 0, '★ 连一次取件的 RPC 都不发');
+  for (const outside of [path.join(env.siteRoot, '..', 'escape'),
+    path.join(path.dirname(env.siteRoot), 'escape'), path.join(os.homedir(), 'escape')]) {
+    assert.equal(fs.existsSync(outside), false, `★ 池外不许出现东西：${outside}`);
+  }
+  assert.deepEqual(fs.readdirSync(env.siteRoot).filter((n) => n !== S.SNAPSHOT_NAME), [],
+    '★ 池子里也不许因为它多出任何东西');
+  assert.equal(r.pendingConsent.length, 0);
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /ULID/, r.failed[0].why);
+});
+
+test('★★ 提交点是"最后那一写"：换入之后 `listPooled` 才看得见它', async () => {
+  // ★ 树 `rename` 进池子与写记录表之间有一个窗口，而窗口里那一份是**不可见**的
+  //   （列举看不见、注册表也不加载）。它是"没提交"，不是"装了一半"。
+  //   ★ 这里直接对着两步之间的状态断言：把记录表拿掉 = 那个窗口。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  assert.equal(r1.pendingConsent.length, 1);
+  const staged = r1.pendingConsent[0].stagedDir;
+  const rec = r1.pendingConsent[0].record;
+  assert.ok(rec, '★ 记录表草稿要在待同意那一份上 —— 它只在内存里活到提交那一刻');
+
+  // 只 `rename` 树、**不写记录表**（模拟崩在中间）
+  const dest = SLOT.treeDirOf(env.siteRoot, p.id, '1.0.0');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(staged, dest);
+  assert.deepEqual(S.listPooled(env.siteRoot), [], '★ 没提交 ⇒ 列举看不见');
+  assert.deepEqual(new P.Registry([{ dir: env.siteRoot, source: 'site' }],
+    { allows: () => true }).list(), [], '★ 注册表也不加载它（提交点不成立）');
+
+  // 提交：写记录表
+  assert.equal(SLOT.writeRecordFile(SLOT.recordPathOf(env.siteRoot, p.id, '1.0.0'), rec).ok, true);
+  assert.deepEqual(S.listPooled(env.siteRoot).map((x) => `${x.id}@${x.version}`),
+    [`${p.id}@1.0.0`], '★ 提交之后才看得见');
+});
+
+test('★★ 同意那一刻的次序是"先树后表"：记录表写不下去 ⇒ 不许留一个半成品', async () => {
+  // ★ 反过来（先写记录表、后 rename）崩在中间会留下一张指向**不存在的树**的记录表，
+  //   而按"记录表 = 已提交"那条判据，池里会有一份**声称装好了、而内容是空的**东西。
+  //
+  // ★ 这一条钉两件事：①记录表写不下去时**当场**把树撤掉（用户看到的是一句准确的
+  //   失败，而不是"上一次没写完的安装"）；②**万一撤不掉**，那一份也不可见、而且
+  //   下一轮清扫会收掉它 —— 半成品不许冒充成品，也不许永远赖着。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  const item = r1.pendingConsent[0];
+  const tree = SLOT.treeDirOf(env.siteRoot, p.id, '1.0.0');
+
+  // 让记录表那一步写不下去：给它一份**序列化不了**的记录表（自己指自己）。
+  // ★ 为什么造在这里而不是"把路径占成一个目录"：那样会**同时**让"撤掉"这一步
+  //   也失败（删目录用 `unlink` 不成立），于是测不到第①条。撤不掉那一格见下面。
+  const bad = { ...item.record };
+  bad.self = bad;
+  const mv = S.acceptStaged({
+    stagedDir: item.stagedDir, record: bad, siteRoot: env.siteRoot,
+    id: p.id, version: p.version, digest: item.digest,
+  });
+  assert.equal(mv.ok, false, '写不下去就是失败');
+  assert.match(mv.error, /记录表写不下去/, mv.error);
+  assert.match(mv.error, /已经把它撤掉了/, mv.error);
+  assert.equal(fs.existsSync(tree), false, '★ 那棵树要被当场撤掉，不留一个半成品');
+
+  // ── 万一**连撤都撤不掉**（记录表的路径被占成一个目录）：它仍然不可见，
+  //    而且下一轮清扫收得掉。★ "半成品不冒充成品"这一条不许有例外 ──
+  const r2 = await callSync(site, env);
+  const item2 = r2.pendingConsent[0];
+  const recPath = SLOT.recordPathOf(env.siteRoot, p.id, '1.0.0');
+  fs.mkdirSync(recPath, { recursive: true });
+  const mv2 = S.acceptStaged({
+    stagedDir: item2.stagedDir, record: item2.record, siteRoot: env.siteRoot,
+    id: p.id, version: p.version, digest: item2.digest,
+  });
+  assert.equal(mv2.ok, false);
+  assert.match(mv2.error, /没能撤掉/, mv2.error);
+  assert.deepEqual(S.listPooled(env.siteRoot), [], '★ 撤不掉也不可见');
+  assert.deepEqual(new P.Registry([{ dir: env.siteRoot, source: 'site' }],
+    { allows: () => true }).list(), [], '★ 注册表也不加载它');
+  fs.rmSync(recPath, { recursive: true, force: true });
+  assert.deepEqual(S.sweepPool(env.siteRoot).removed, [`${p.id}_1.0.0`],
+    '★ 下一轮清扫把它收掉');
+});
+
+test('★ 没有记录表草稿的调用 ⇒ 失败，而不是留一棵谁也看不见的树', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  const item = r1.pendingConsent[0];
+  const mv = S.acceptStaged({
+    stagedDir: item.stagedDir, siteRoot: env.siteRoot,
+    id: p.id, version: p.version, digest: item.digest,
+  });
+  assert.equal(mv.ok, false, '没有记录表 = 没提交 ⇒ 不算装上');
+  assert.equal(fs.existsSync(SLOT.treeDirOf(env.siteRoot, p.id, '1.0.0')), false);
 });
 
 test('★ 站点**不报** `package` 的那一条 ⇒ 不分发，不是失败', async () => {
@@ -1527,5 +1944,5 @@ test('★ 站点**不报** `package` 的那一条 ⇒ 不分发，不是失败',
   assert.deepEqual(r.pendingConsent, [], '也不该有东西等着同意');
   assert.equal(site.state.pkgCalls, 0, '★ 自述就说没有，白跑一次传输没意义');
   assert.equal(r.supported, true, '★ 而**能力**还在（顶层有 limits）—— 两件事必须分得开');
-  assert.equal(fs.existsSync(path.join(env.siteRoot, p.id, '1.0.0')), false);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 });

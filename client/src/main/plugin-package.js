@@ -33,6 +33,8 @@
  *   `site-plugins.js`  —— **唯一**的读者。站点分发那条路上 `plugin_package` 取回来
  *                      的字节在这里解析、验签、重算摘要，再 `unpackTo` 铺成树
  *                      （见那边的 fetchPackage）。
+ *                       ★ 而**解析完就丢**：容器不落盘（v0.13），留在盘上的是树加
+ *                       一张记录表（`plugin-slot.js`）。
  *
  * ★ 这里从前还列着第二个读者：`plugins/install.js`（开发者模式的「从一个包安装」，
  *   用户自己挑一个 `.splug`）。那个文件连同那条路一起删掉了。
@@ -370,6 +372,9 @@ function parsePackage(buf) {
     sig = {
       alg: parsed.alg,
       pubkey: Buffer.from(parsed.pubkey),
+      // ★ 那 64 个字节本身也要带出来：调用方要把它**逐字**存进记录表
+      //   （`envelope.signature`），而"重新验一次"要的正是原件。
+      signature: Buffer.from(parsed.sig),
       fingerprint: fingerprint(parsed.pubkey),
     };
   }
@@ -402,9 +407,14 @@ function dataOf(buf, f) {
  * ★ **不跟随、不链接、不建空目录**：格式里就没有这些东西（附录 A），所以这里
  *   只有普通文件与 `mkdir -p`。
  *
- * ★ 调用方**必须**在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` +
- *   `digestOf`，或重新 `parsePackage` 那个包文件）—— "校验我收到的"不等于
+ * ★ 调用方**必须**在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` 与
+ *   记录表逐份比，见 `site-plugins.js` 的 `treeFault`）—— "校验我收到的"不等于
  *   "校验我写下的"，磁盘满的时候 `writeFileSync` 会留下半份文件然后抛错。
+ *
+ *   ★ 从前这里还写着第二种做法："或者重新 `parsePackage` 那个包文件"。**那一条
+ *     不存在了**：v0.13 起容器不落盘（池里只有树 + 记录表），所以"读回来再核"
+ *     现在只有一种做法，而且是**更强**的那一种 —— 它比的是"我写下的那棵树是不是
+ *     这一份构件"。
  */
 function unpackTo(parsed, buf, dir) {
   try {

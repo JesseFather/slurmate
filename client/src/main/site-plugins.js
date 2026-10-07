@@ -43,10 +43,13 @@
  *
  *   `package` + `plugin_package`   一次 RPC 拿到整个 `.splug`（容器的字节）
  *
- * ★ **拿的是包，不是"照着清单拼出来的字节"，这不是"快"的问题。** 包才是作者发布
- *   的那个构件：它是签名的载体（§4.2），它的内容摘要（§3.4）是"是不是同一份东西"
+ * ★ **拿的是包，不是"照着清单拼出来的字节"，这不是"快"的问题。** 包才是作者发布的
+ *   那个构件：它是签名的载体（§4.2），它的内容摘要（§3.4）是"是不是同一份东西"
  *   的判据。客户端要能**自己**解析、自己重算摘要、自己验签，手里就必须有容器本身
  *   —— 一堆散装字节谁也证明不了什么。
+ *
+ * ★ 而**收下来之后容器就退休了**：树 + 记录表取代它（见上面那一节）。"手里有
+ *   容器"说的是**这一刻**，不是盘上留一份。
  *
  * ★ v0.6 曾经有**第二条**路（`files` 清单 + `plugin_file` 一份一次，N 次 RPC），
  *   那是加法过渡的形状：老客户端只看 `files`，新客户端看 `package`。**它在 v0.7
@@ -56,15 +59,37 @@
  *   v0.6 是"退回逐份取"，今天只能明确地拒绝并让用户升级客户端。这是删掉第二条
  *   路的**代价**，写在这里而不是含糊过去。
  *
- * ★ 池里一个版本是**两样挨着**：
+ * ── ★ 池里一个版本是一个**槽位**：一棵树 + 一张记录表 ────────────────────────
  *
- *   <站点池>/<id>/<版本>/        解出来的树 —— `require()` 用的是它
- *   <站点池>/<id>/<版本>.splug   包本身 —— 它与树一起换入，也一起被回收
+ *   <站点池>/<id>_<版本>/        解出来的树 —— `require()` 用的是它
+ *   <站点池>/<id>_<版本>.json    记录表 —— 这一份的**提交点**
  *
- *   "删掉本机那一份"（§5.3）= **树**不在了 ⇒ 同意作废（见下一节）。包文件单独
- *   不在了**不算**撤回：能加载的是树，包是它的来路凭证；那件事会被如实报出来
- *   （`listPooled` 的 `hasPackage`），但既不会让用户重新同意一遍，也不会被
- *   **静默取回来**。
+ * ★ **容器是运输形状，不是存储形状。** `.splug` 只在「站点 → 这里」这一段路上
+ *   活着：取回来在**内存里**解析、逐份校 sha256、重算摘要、验签，铺成树，然后
+ *   就扔了 —— 盘上不再有它的位置。从前它是两样挨着存的（树 + 那个包），而"包"
+ *   那一半从来没有读者：能 `require()` 的是树，验签要的是**它盖的那几份字节**，
+ *   不是容器本身。
+ *
+ * ★ 记录表回答"这一份该是什么"（逐份 path/size/sha256 加签名块），于是"本机这一份
+ *   有没有被动过"从一个**推断**变成一次**对账**。它同时是提交点（见 plugin-slot.js）。
+ *
+ * ★ **一棵没有记录表的树怎么处理，两端方向相反**：这里是**我们自己的池**（唯一的
+ *   写方是安装器）⇒ 清掉重取；站点那一边同样一棵没记录的树，却可能是管理员手放的
+ *   东西 ⇒ 只报不删。刻意如此，理由写在 plugin-slot.js 的文件头。
+ *
+ * ★★ **两张表不是一回事，名字必须分开**（本文件里也是）：
+ *
+ *   记录表（`<id>_<版本>.json`）   **一份构件**的提交点。随那一份一起换入、一起删。
+ *   快照表（`.sites.json`）        **整个池**的引用计数：哪个站点要哪一版。回收的
+ *                                  唯一判据，与任何一份构件的完好与否无关。
+ *
+ *   ★ 合并叫"记录"的那天，症状是"删一个坏掉的插件"与"改一次回收判据"会被当成
+ *     同一件事来做。
+ *
+ *   "删掉本机那一份"（§5.3）= **树**不在了 ⇒ 同意作废（见下一节）。记录表与树
+ *   同生共死，所以**没有"有树没有记录表"这个状态** —— 记录表没了与树没了是同一
+ *   件事（这一份不在了）：注册表不加载它（`findPluginDirs` 要求两样都在），回收
+ *   看不见它，下一轮对账按"本机没有这一份"重新取。
  *
  * ── 删除 = 撤回同意（§5.3）──────────────────────────────────────────────────
  *
@@ -87,6 +112,10 @@ const path = require('path');
 const crypto = require('crypto');
 const plugins = require('./plugins/index.js');
 const atomicWrite = require('./atomic-write.js');
+// ★ 池的**形状**（槽位名、记录表读写）住在 `plugin-slot.js` 里，那是一个**叶子**
+//   模块 —— 注册表也要用它（`findPluginDirs` 靠"旁边有没有记录表"判提交），而
+//   让注册表 require 本文件会构成一个环。见那个文件的文件头。
+const SLOT = require('./plugin-slot.js');
 // ★ "哪个会话还算数"只有**一处定义**（那份镜像注释里写着它的来源与对应关系）。
 //   在这里另写一个状态数组就是第二份实现 —— 而它漂开的方向是**把在跑的版本回收掉**。
 const { SERVER_FINISHED_STATES } = require('./session.js');
@@ -102,11 +131,17 @@ const { SERVER_FINISHED_STATES } = require('./session.js');
  */
 function PP() { return require('./plugin-package.js'); }
 
-/** 快照表。放在站点池**里面**：清掉那个目录 = 记录与内容一起没，两者不可能各漂各的。 */
-const RECORD_NAME = '.sites.json';
+/**
+ * 快照表。放在站点池**里面**：清掉那个目录 = 引用计数与内容一起没，两者不可能
+ * 各漂各的。
+ *
+ * ★ 它是**整个池**的账（哪个站点要哪一版），与每一份构件旁边那张**记录表**
+ *   （`<id>_<版本>.json`，那一份的提交点）是两件事 —— 名字必须分开，见文件头。
+ */
+const SNAPSHOT_NAME = '.sites.json';
 /** 对账锁。同一时刻只允许一次对账 —— 见 acquireLock。 */
 const LOCK_NAME = 'lock';
-const RECORD_VERSION = 1;
+const SNAPSHOT_VERSION = 1;
 
 // ── 下面那张表里，`total_bytes` 是从哪里来的 ────────────────────────────────
 //
@@ -420,7 +455,7 @@ function fileListOf(pkg) {
 
 // ── 快照表 ──────────────────────────────────────────────────────────────────
 
-function recordPathOf(siteRoot) { return path.join(siteRoot, RECORD_NAME); }
+function snapshotPathOf(siteRoot) { return path.join(siteRoot, SNAPSHOT_NAME); }
 
 /**
  * 原子写快照表。**不用 `writeFileSync` 直接覆盖** —— 半份记录会让池子的引用表凭空变少。
@@ -438,7 +473,7 @@ const writeJsonAtomic = (file, obj) => atomicWrite.writeAtomicOrThrow(
  *
  * @returns {{ok:true, record:object} | {ok:false, why:string}}
  */
-function readRecord(file) {
+function readSnapshot(file) {
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
@@ -456,23 +491,23 @@ function readRecord(file) {
   try {
     rec = JSON.parse(raw);
   } catch (e) {
-    return { ok: false, missing: false, why: `记录不是合法的 JSON（${e.message}）` };
+    return { ok: false, missing: false, why: `快照表不是合法的 JSON（${e.message}）` };
   }
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)
       || !rec.sites || typeof rec.sites !== 'object' || Array.isArray(rec.sites)) {
-    return { ok: false, missing: false, why: '记录的顶层形状不对（要 {version, sites}）' };
+    return { ok: false, missing: false, why: '快照表的顶层形状不对（要 {version, sites}）' };
   }
-  return { ok: true, record: rec };
+  return { ok: true, snapshot: rec };
 }
 
-function emptyRecord() { return { version: RECORD_VERSION, sites: {} }; }
+function emptySnapshot() { return { version: SNAPSHOT_VERSION, sites: {} }; }
 
 /**
  * 归一化一个站点条目。**只收认得出的形状** —— 这个文件是磁盘上的，可以被手改坏，
  * 而 `wants` 是回收唯一的判据。认不出的直接丢掉 = 回到"不回收"，那是安全的那一侧。
  */
-function siteEntry(record, key, label) {
-  const cur = record.sites[key];
+function siteEntry(snapshot, key, label) {
+  const cur = snapshot.sites[key];
   if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
     if (!cur.wants || typeof cur.wants !== 'object' || Array.isArray(cur.wants)) cur.wants = {};
     if (!Array.isArray(cur.distributes)) cur.distributes = [];
@@ -480,28 +515,28 @@ function siteEntry(record, key, label) {
     return cur;
   }
   const fresh = { label: label || key, syncedAt: 0, wants: {}, distributes: [] };
-  record.sites[key] = fresh;
+  snapshot.sites[key] = fresh;
   return fresh;
 }
 
 /**
- * 池里那个 `<id>/<版本>` 槽位，是**哪些站点**要来的（给人看的标签列表）。
+ * 池里那个 `<id>_<版本>` 槽位，是**哪些站点**要来的（给人看的标签列表）。
  *
- * ★ 为什么值得单独一个函数：对账第 4 步撞上"本机这一份与站点现在报的不是同一份
- *   东西"时，用户（和运维）接下来要问的第一个问题就是"**这一份是谁先放进去的**"。
- *   答案一直躺在记录文件里（`sites[<站点键>].wants`），只是此前没人读它。
+ * ★ 为什么值得单独一个函数：对账撞上"本机这一份与站点现在报的不是同一份东西"时，
+ *   用户（和运维）接下来要问的第一个问题就是"**这一份是谁先放进去的**"。答案一直
+ *   躺在快照表里（`sites[<站点键>].wants`），只是此前没人读它。
  *
  * ★ 判据是 `wants` 而**不是**"这一轮报了它的站点"：`wants` 只在**真的把那一版拿
- *   下来**时才写（第 5 步），所以它记的正是"谁把它放进了池子"。这一轮才报它、而
+ *   下来**时才写（第 6 步），所以它记的正是"谁把它放进了池子"。这一轮才报它、而
  *   摘要对不上的那个站点**不在**里面 —— 那正是我们要的（它不是放进去的那个）。
  *
- * ★ 记录读不动时（`record` 是 `null`）返回空列表：那是**"不知道"**，调用方据此
- *   少说一句，而不是编一个来源出来。
+ * ★ 快照表读不动时（`snapshot` 是 `null`）返回空列表：那是**"不知道"**，调用方
+ *   据此少说一句，而不是编一个来源出来。
  */
-function sitesWanting(record, id, version) {
-  if (!record || !record.sites || typeof record.sites !== 'object') return [];
+function sitesWanting(snapshot, id, version) {
+  if (!snapshot || !snapshot.sites || typeof snapshot.sites !== 'object') return [];
   const out = [];
-  for (const [key, s] of Object.entries(record.sites)) {
+  for (const [key, s] of Object.entries(snapshot.sites)) {
     if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
     const w = s.wants;
     if (!w || typeof w !== 'object' || Array.isArray(w)) continue;
@@ -512,39 +547,209 @@ function sitesWanting(record, id, version) {
 }
 
 /**
- * 池里每一个 `<id>/<版本>`，以及谁在要它。
+ * 池里每一个**已提交的槽位**（`<id>_<版本>/` + 旁边那张记录表）。
  *
- * ★ `hasPackage` = 旁边那个 `<版本>.splug` 在不在。它只用于**如实报告**（见文件头
- *   那一段）：包单独不在了不构成撤回，也不会被静默取回来 —— 但它是一件用户看得见
- *   的事实（他打开那个目录就会发现少了一个文件），所以不能瞒着。
+ * ★ 判据是**两样都在**，而这不是"更严格一点"，是提交点语义本身：树在、记录表不在
+ *   ⇒ 那一次安装没提交 ⇒ 这一份**不存在**（见 plugin-slot.js）。少了这一格，
+ *   回收会对着一个半成品动手，而"半成品"与"成品"在列表里长得一模一样。
+ *
+ * ★ **不是槽位的东西一个都不报，也不删**（旧版本的残留、用户随手放的目录）。
+ *   §5.1 的措辞是「往池目录里手工放置内容**必须不产生任何效果**」—— 看不见就是
+ *   不产生效果。`sweepPool` 会把它们的**名字**数出来交给界面，只是为了让"池里到底
+ *   有什么"这个问题有一个诚实的答案，不是为了让它们生效。
  */
 function listPooled(siteRoot) {
   const out = [];
-  let level1;
-  try {
-    level1 = fs.readdirSync(siteRoot).sort();
-  } catch {
-    return out;
-  }
-  for (const id of level1) {
-    if (id.startsWith('.')) continue;                 // .sites.json、暂存目录
-    const idDir = path.join(siteRoot, id);
-    let st;
-    try { st = fs.statSync(idDir); } catch { continue; }
-    if (!st.isDirectory()) continue;
-    for (const version of fs.readdirSync(idDir).sort()) {
-      const dir = path.join(idDir, version);
-      // ★ 只认**目录**：旁边的 `<版本>.splug` 是这一份的包，不是另一份插件。
-      try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
-      out.push({ id, version, dir, hasPackage: fs.existsSync(pkgPathOf(siteRoot, id, version)) });
-    }
+  for (const [name, dir] of poolEntries(siteRoot)) {
+    const slot = SLOT.parseSlotName(name);
+    if (!slot) continue;
+    if (!SLOT.readRecordFile(SLOT.recordPathOf(siteRoot, slot.id, slot.version)).ok) continue;
+    out.push({ id: slot.id, version: slot.version, dir });
   }
   return out;
 }
 
-/** 池里那一份包的位置 —— **一个函数**，写与读、换入与回收都走它。 */
-function pkgPathOf(siteRoot, id, version) {
-  return path.join(siteRoot, id, `${version}.splug`);
+/**
+ * 池的顶层逐项过一遍 → `[[名字, 全路径], …]`，**只看一层、不跟随链接**。
+ *
+ * ★ 单独抽出来是因为"池里有什么"这件事有两个读者（列举、清扫），而两处各写一遍
+ *   `readdirSync` + `statSync` 的那天，它们的**过滤条件**就会漂开 —— 漂开的症状是
+ *   一个"列举看不见、清扫却删得掉"的东西。
+ */
+function poolEntries(siteRoot) {
+  const out = [];
+  let names;
+  try {
+    names = fs.readdirSync(siteRoot).sort();
+  } catch {
+    return out;
+  }
+  for (const n of names) {
+    // ★ 点开头的**进不来**：`.sites.json` 是快照表，`.tmp.*` 是原子写的半成品 ——
+    //   两者都不是槽位，而它们又是我们自己写的，所以不该被"来历不明"那一档收走。
+    if (n.startsWith('.')) continue;
+    out.push([n, path.join(siteRoot, n)]);
+  }
+  return out;
+}
+
+/**
+ * **清扫**：把"没提交的安装"收掉，并数出"不是我们写的东西"。
+ *
+ * 三种东西，三种处置 —— 分开的理由是它们的**来历**不同，而"来历不明"与
+ * "我们自己留下的"要用不同的动作：
+ *
+ *   · **槽位名 + 没有记录表** ⇒ 是我们自己崩在中间留下的（池里唯一的写方是安装器）
+ *     ⇒ **删掉**。下一轮对账会把它重新取回来，而"重取"本来就会发生（它没有引用
+ *     计数，快照表里也从来没有过它）。
+ *   · **记录表在、树不在** ⇒ 同一个半成品的另一半（先删表再删树崩在中间）⇒
+ *     把那张孤儿记录表删掉。★ 留着它的后果很具体：`listPooled` 看不见它（要求两样
+ *     都在），于是它永远不会被回收 —— 池里一个谁也看不见的文件。
+ *   · **名字不是槽位** ⇒ **一个字节都不动**，只把名字数出来。§5.1：手工放置必须
+ *     不产生任何效果；而"删掉它"是一种效果。★ 也不报错 —— 报错等于在界面上承认
+ *     这个形状有意义。
+ *
+ * ★ 清扫只在**持锁的对账里**跑：那是唯一一个"池里不可能有别人正在写"的时刻。
+ *
+ * ★ **代价写在明处**：判据是"记录表**读得动**"，所以一次**读**失败（坏道、权限、
+ *   文件被别的东西占着）也会让那一份被收掉。权衡的两头是：
+ *
+ *   · 收掉一个其实完好的一份 ⇒ 下一轮**重新取回来**（流量，而且它本来就在站点上）；
+ *   · 留着它 ⇒ 池里一个**谁也看不见、谁也收不掉**的目录（列举要求记录表读得动，
+ *     回收只遍历列举得到的）—— 而且它每一轮都在那儿。
+ *
+ *   两害相权取前者。★ 与 `findPluginDirs` 用**同一个**判据，所以"收掉"与"加载不了"
+ *   永远说的是同一件事。
+ *
+ * @returns {{removed:string[], strays:string[]}}
+ */
+function sweepPool(siteRoot) {
+  const removed = [];
+  const strays = [];
+  for (const [name, full] of poolEntries(siteRoot)) {
+    const slot = SLOT.parseSlotName(name);
+    const rec = SLOT.parseRecordName(name);
+    if (slot) {
+      // ★ 记录表在不在**用路径问**，不用"这次 readdir 里有没有"—— 后者要求两个
+      //   名字在同一批里恰好相邻地对上，而那是 readdir 的排序给不了的保证。
+      let st;
+      try { st = fs.statSync(full); } catch { continue; }
+      if (!st.isDirectory()) { strays.push(name); continue; }
+      if (SLOT.readRecordFile(SLOT.recordPathOf(siteRoot, slot.id, slot.version)).ok) continue;
+      try {
+        fs.rmSync(full, { recursive: true, force: true });
+        removed.push(name);
+      } catch { strays.push(name); }
+      continue;
+    }
+    if (rec) {
+      const tree = SLOT.treeDirOf(siteRoot, rec.id, rec.version);
+      let isTree = false;
+      try { isTree = fs.statSync(tree).isDirectory(); } catch { /* 树不在 */ }
+      if (isTree) continue;
+      if (SLOT.removeRecordFile(full).ok) removed.push(name);
+      else strays.push(name);
+      continue;
+    }
+    strays.push(name);
+  }
+  return { removed, strays };
+}
+
+// ── 槽位：读一张记录表、验一次签 ────────────────────────────────────────────
+
+/**
+ * 池里那一份**已提交**的记录表。返回 `{ok:true, record}` 或 `{ok:false, why}`。
+ *
+ * ★ 它**不建路径**（交给 `plugin-slot.js`）：`p.id` 是站点报来的字符串，直接
+ *   `path.join` 的话一个 `../..` 就能让写入落到池子外面。那里要求 id 是 ULID，
+ *   于是"名字安全"是结构性的，不是一份挡住想得到的写法的黑名单。
+ */
+function readSlot(siteRoot, id, version) {
+  const p = SLOT.recordPathOf(siteRoot, id, version);
+  if (!p) return { ok: false, why: `${JSON.stringify(id)}@${JSON.stringify(version)} 拼不出一个池里的路径` };
+  return SLOT.readRecordFile(p);
+}
+
+/**
+ * 记录表里那个 `envelope` → 与 `parsePackage()` 同形的一个签名块。
+ *
+ * 返回 `{ok:true, sig}`（`sig` 是 `null` = **这一份没有签名**）或
+ * `{ok:false, why}`（**有一块，但读不动**）。
+ *
+ * ★★ 这两态**必须分开**，不能把"读不动"折成"没签名"：一个读不动的签名块只可能
+ *   是**有人改过它**（我们自己写下去的那一份是解析器给的字节），而"没签名"是作者
+ *   的选择。折成同一件事的后果是**下转型攻击**：把签名块删掉一位 ⇒ 变成"没签名"
+ *   ⇒ 钉过的 id 会被 `keyVerdict` 拒（那一档还算对），而**没钉过的 id 会被静默
+ *   收下**，此后这份构件的来源没有任何东西能证明。
+ *
+ * ★ 形状判据用的是**容器那一份实现**（`parseSigBlock`），不在这里另写一遍长度与
+ *   alg —— 那正是"同一条规矩两份实现会漂开"的现场。
+ */
+function recordSig(record) {
+  if (!record.envelope) return { ok: true, sig: null };
+  const e = record.envelope;
+  if (!Number.isInteger(e.alg) || e.alg < 0 || e.alg > 255) {
+    return { ok: false, why: `记录表里那个信封的 alg 是 ${JSON.stringify(e.alg)}，不是一个字节` };
+  }
+  // ★ `Buffer.from(…, 'base64')` **不抛** —— 它对不合法的输入是宽容的（丢掉认不得的
+  //   字符）。所以"这一段能不能用"的判据只有一个：下面那次 `parseSigBlock`（它看
+  //   长度与 alg）。在这里另写一遍"base64 合不合法"就是同一条规矩的第二份实现，
+  //   而两份漂开的方向是"一边收、一边拒"。
+  const blk = Buffer.concat([
+    Buffer.from([e.alg]), Buffer.from(e.pubkey, 'base64'), Buffer.from(e.signature, 'base64')]);
+  const parsed = PP().parseSigBlock(blk);
+  if (!parsed) {
+    return { ok: false,
+      why: '记录表里那个信封不是一个合法的 Ed25519 签名块'
+        + `（本格式是 ${PP().SIG_BYTES} 字节、alg=1）—— 它被改过` };
+  }
+  return { ok: true,
+           // ★ 形状对齐 `parsePackage()` 交出来的那个签名对象（`pubkey` /
+           //   `signature` / `fingerprint`），而不是 `parseSigBlock()` 那三个短名字
+           //   —— 下游（`keyVerdict`）读的字段名只有一份定义，别在这里换个叫法。
+           sig: { alg: parsed.alg,
+                  pubkey: Buffer.from(parsed.pubkey),
+                  signature: Buffer.from(parsed.sig),
+                  fingerprint: PP().fingerprint(parsed.pubkey) } };
+}
+
+/**
+ * 一棵树**自己**的签名对不对。
+ *
+ * ★★ 这一步是这一版全部意义所在，而它今天**不存在**（新增的）：签名从前是盖在
+ *   **容器里的记录表**上的，而容器在盘上，所以每次对账都顺手重验一次。改成"容器
+ *   只在内存里活"之后，盘上只剩一棵树 —— 于是要**显式地**从树重算内容摘要，
+ *   再拿记录表里的那个签名块去验它。**签名于是直接盖在树上。**
+ *
+ * ★ 少了这一步会怎样：§5.4 那条"签名者不变"就只剩**指纹字符串的比较**，而指纹
+ *   就写在记录表里 —— 一个能改池的人可以把它一并改掉。那不是"弱一点"，那是
+ *   **没有验证**：字符串比较证明不了任何关于内容的事。
+ *
+ * ★ 为什么必须从**树**重算，而不是照 `record.files` 里那几个 sha256 拼一遍：
+ *   后者与记录表是同一份数据，改树的人顺手改表就自洽了。从树重算之后，改动必须
+ *   **同时**骗过"逐份比对"与"重算的摘要"两道，而摘要那一头连着**作者的签名**。
+ */
+function treeSignature(treeDir, record) {
+  const got = recordSig(record);
+  if (!got.ok) return got;
+  if (!got.sig) return { ok: true, signed: false, sig: null };
+  let files;
+  try {
+    files = plugins.readPluginFiles(treeDir);
+  } catch (e) {
+    return { ok: false, why: `读不到 ${treeDir} 里的文件：${e.message}` };
+  }
+  // ★ 非普通文件在**逐份比对**那一关就该被拒了（`verifyStaged` 的 `odd`），所以
+  //   走到这里的一定只有普通文件与目录。只喂普通文件 —— 内容摘要的定义在负载上，
+  //   负载里没有目录。
+  const digest = PP().contentDigest(files.filter((f) => f.kind === 'f'));
+  if (!PP().verifyEd25519(got.sig.pubkey, Buffer.from(digest, 'hex'), got.sig.signature)) {
+    return { ok: false, signed: true,
+      why: `从树重算的内容摘要是 ${digest}，而记录表里那个签名盖的不是它 ——`
+        + ` 这一份构件在本机被改过（签的人是 ${got.sig.fingerprint}）` };
+  }
+  return { ok: true, signed: true, sig: got.sig, fingerprint: got.sig.fingerprint };
 }
 
 // ── 对账 ────────────────────────────────────────────────────────────────────
@@ -587,46 +792,65 @@ function clearStaging(stagingRoot, lock) {
 }
 
 /**
+ * 一棵树与一张记录表**逐份**对一遍。返回 `null`（对得上）或一句为什么。
+ *
+ * ★ **双向**。只比一个总摘要抓不到"多出来一个文件"，而只比"记录里那几份都在"
+ *   抓不到"磁盘上多出来的那些"。
+ *
+ * ★ **非普通文件也算不一致**：容器格式里只有普通文件与它隐含建出来的目录
+ *   （附录 A），所以一棵树上出现符号链接、空目录、管道，都是**这棵树不是那一份**
+ *   的证据。★ 这一条同时是内容摘要能成立的前提 —— 摘要只吃 `kind === 'f'`，
+ *   于是"树里多了个链接而摘要没变"必须在这里被拒，否则摘要那一层看不见它。
+ *
+ * ★ 单独抽出来是因为它有两个调用点，而它们问的是**同一句话**："磁盘上这棵树是不是
+ *   记录表说的那一棵"。一处是暂存里的核对（`verifyStaged`），一处是**提交那一刻**
+ *   的复核（`acceptStaged`）—— 各写一遍的那天，"提交时少核了一条"不会有任何东西红。
+ */
+function compareTree(treeFiles, want) {
+  const have = new Map(treeFiles.filter((f) => f.kind === 'f').map((f) => [f.path, f]));
+  const wantMap = new Map(want.map((f) => [f.path, f]));
+  const missing = [...wantMap.keys()].filter((p) => !have.has(p));
+  const extra = [...have.keys()].filter((p) => !wantMap.has(p));
+  const differs = [...wantMap.keys()].filter((p) => have.has(p)
+    && (have.get(p).sha256 !== wantMap.get(p).sha256 || have.get(p).size !== wantMap.get(p).size));
+  const odd = treeFiles.filter((f) => f.kind !== 'f').map((f) => f.path);
+  if (!missing.length && !extra.length && !differs.length && !odd.length) return null;
+  const bits = [];
+  if (missing.length) bits.push(`少 ${missing.join('、')}`);
+  if (extra.length) bits.push(`多 ${extra.join('、')}`);
+  if (differs.length) bits.push(`对不上 ${differs.join('、')}`);
+  if (odd.length) bits.push(`非普通文件 ${odd.join('、')}`);
+  return bits.join('；');
+}
+
+/** 读一棵树并把它与那份记录逐份对一遍。返回 `null`（对得上）或一句为什么。 */
+function treeFault(treeDir, want) {
+  let files;
+  try {
+    // ★ **从磁盘重新读回来**算，不是核对手里那些 Buffer —— 那是"校验我收到的"当成
+    //   "校验我写下的"，而 `writeFileSync` 在磁盘满时会留下部分文件然后抛错。
+    files = plugins.readPluginFiles(treeDir);
+  } catch (e) {
+    return `写下去的东西读不回来：${e.message}`;
+  }
+  return compareTree(files, want);
+}
+
+/**
  * 暂存里的四道校验。**通过了才换入。**
  *
- * ★ 顺序错了就没救：先 `rename` 再校验的话，一棵已经进了站点目录的坏树按"站点
- *   不会主动删东西"那条规则就只能让它躺着。
+ * ★ 顺序错了就没救：先 `rename` 再校验的话，一棵已经进了站点池的坏树按"池里的东西
+ *   不主动删"那条规则就只能让它躺着（今天它会走进"重取"那一格，但那是**收尾**，
+ *   不是校验）。
  *
- * ★ `declared` 可以是 `null` —— 那是"**没有另一份可比的清单**"，只发生在一种
- *   情况下：本机那一份**只有解出来的树、包不在了**（见 sync 第 3 步）。那时
- *   ①② 跳过，只剩 ③④，而"内容有没有被动过"由**台账里那个摘要**回答（摘要是
- *   从磁盘上算的）。返回值里带 `compared:false`，让调用方能如实说出来 ——
- *   一次"少做了一半校验"的核对，不许看起来与做全了的那次一样。
+ * ★ `declared` 从前可以是 `null`（"本机那一份只有解出来的树、包不在了"）——
+ *   **那个状态没有了**：记录表与树同生共死，所以"有一棵树可比"与"有一张表可比"
+ *   是同一件事。整条"只核了一半"的分支（`compared`）跟着一起删掉：一次核对要么
+ *   做全，要么这一份不成立。
  */
 function verifyStaged(destDir, declared, expect) {
-  const want = Array.isArray(declared) ? declared : null;
-  if (want) {
-    // ① **从磁盘重新读回来**算，不是核对手里那些 Buffer —— 那是"校验我收到的"当成
-    //    "校验我写下的"，而 `writeFileSync` 在磁盘满时会留下部分文件然后抛错。
-    let files;
-    try {
-      files = plugins.readPluginFiles(destDir);
-    } catch (e) {
-      return { ok: false, why: `写下去的东西读不回来：${e.message}` };
-    }
-    // ② **双向**比对。只比一个总摘要抓不到"多出来一个文件"，而只比"声明了的都在"
-    //    抓不到"磁盘上多出来的那些"。
-    const have = new Map(files.filter((f) => f.kind === 'f').map((f) => [f.path, f]));
-    const wantMap = new Map(want.map((f) => [f.path, f]));
-    const missing = [...wantMap.keys()].filter((p) => !have.has(p));
-    const extra = [...have.keys()].filter((p) => !wantMap.has(p));
-    const differs = [...wantMap.keys()].filter((p) => have.has(p)
-      && (have.get(p).sha256 !== wantMap.get(p).sha256 || have.get(p).size !== wantMap.get(p).size));
-    const odd = files.filter((f) => f.kind !== 'f').map((f) => f.path);
-    if (missing.length || extra.length || differs.length || odd.length) {
-      const bits = [];
-      if (missing.length) bits.push(`少 ${missing.join('、')}`);
-      if (extra.length) bits.push(`多 ${extra.join('、')}`);
-      if (differs.length) bits.push(`对不上 ${differs.join('、')}`);
-      if (odd.length) bits.push(`非普通文件 ${odd.join('、')}`);
-      return { ok: false, why: `写下去之后与声明的不一致：${bits.join('；')}` };
-    }
-  }
+  const fault = treeFault(destDir, declared);
+  if (fault) return { ok: false, why: `写下去之后与记录表不符：${fault}` };
   // ③ 清单级校验 —— **但不执行代码**（`inspectDir` 只编译）。
   //    于是"清单合法而 client/index.js 有语法错"会在这里就被抓到。
   const r = plugins.inspectDir(destDir);
@@ -637,7 +861,7 @@ function verifyStaged(destDir, declared, expect) {
     return { ok: false, why: `这份自报的是 ${r.entry.plugin.id}@${r.entry.plugin.version}，`
       + `而站点说的是 ${expect.id}@${expect.version}` };
   }
-  return { ok: true, entry: r.entry, compared: Boolean(want) };
+  return { ok: true, entry: r.entry };
 }
 
 /**
@@ -648,9 +872,16 @@ function verifyStaged(destDir, declared, expect) {
  *   它们只用来**比对**：对不上就说明"站点说它发的是什么"与"它实际发的是什么"
  *   不是一回事，那种时候唯一正确的动作是拒绝。
  *
- * ★ 解出来的树与包**都落到暂存**，一起等着过闸或换入（见 acceptStaged）。
+ * ★★ **容器到这一层为止。** 它在这里解析、验签、铺成树，然后**丢掉** ——
+ *   `unpackTo` 是唯一的落盘动作，而它写的是负载，不是容器。留下来的是一棵树加
+ *   一张**记录表草稿**（`recordFromPackage`），后者要等过了同意闸才落盘
+ *   （见 acceptStaged）—— 在那之前它只在内存里，与容器一样。
+ *
+ *   ★ 这一条删掉的是**一整类状态**：从前"树下来了、包没下来"是一格真实存在的
+ *     半成品（`hasPackage`、`compared`、`pkgOnDisk` 那几条分支都在伺候它）。
+ *     容器不落盘之后，那格状态**表达不出来**，于是它连同它的分支一起消失。
  */
-async function fetchPackage(rpc, p, meta, dir, pkgFile, limits, ctx) {
+async function fetchPackage(rpc, p, meta, dir, limits, ctx) {
   if (ctx.stale()) return { ok: false, why: '连接已经换了一条，这次对账作废' };
   const resp = await rpcWithBackoff(rpc, { op: 'plugin_package', id: p.id, version: p.version });
   if (!resp || !resp.ok) {
@@ -696,45 +927,54 @@ async function fetchPackage(rpc, p, meta, dir, pkgFile, limits, ctx) {
   const chk = checkDeclared(fileListOf(parsed), limits);
   if (!chk.ok) return { ok: false, why: `这一份包里的内容不合规：${chk.why}` };
 
+  // ★ 记录表**在落盘之前**就建好：它要带着**容器里的次序**（`parsed.files`），
+  //   而不是上面那个 `chk.files`（按路径排过序的，那是校验的产物）。两者是同一批
+  //   文件，但"记录表里那一份"必须是**作者发的顺序** —— 见 plugin-slot.js。
+  const record = SLOT.recordFromPackage(parsed);
+
   try {
     // ★ 铺树用 `unpackTo` —— **只有那一份实现**（权限位 `0644` 在这里定死，
     //   而权限位进摘要：两份实现漂开的那天，同一份内容会算出两个摘要）。
+    //   ★ 而**容器不落盘**：这一份字节到这里就退休了，留在树上的只有负载。
     const u = PP().unpackTo(parsed, buf, dir);
     if (!u.ok) return { ok: false, why: u.why };
-    fs.writeFileSync(pkgFile, buf, { mode: 0o644 });
   } catch (e) {
     return { ok: false, why: `写到暂存失败：${e.message}` };
   }
 
-  // ★ **校验我写下的，不是校验我收到的。** 与 verifyStaged 同一个理由：磁盘满的
-  //   时候 `writeFileSync` 会留下半份文件然后抛错，而不抛的那种更坏。
-  const again = PP().readPackageFile(pkgFile);
-  if (!again.ok) return { ok: false, why: `写下去的包读不回来：${again.why}` };
-  if (again.digest !== parsed.digest) {
-    return { ok: false,
-      why: `写下去的包与收到的那一份不是同一份（${again.digest} ≠ ${parsed.digest}）` };
-  }
-  return { ok: true, files: chk.files, pkg: parsed };
+  // ★ **校验我写下的，不是校验我收到的。** 与别处同一个理由：磁盘满的时候
+  //   `writeFileSync` 会留下半份文件然后抛错，而不抛的那种更坏。
+  //
+  //   ★ 从前这一步是"把包文件读回来重新解析一遍"；容器不落盘之后，它变成**从树上
+  //     读回来与记录表逐份对** —— 而后者是**更强**的一条：它比的是"我写下的那棵树
+  //     是不是这一份构件"，不再依赖"那个包文件还在不在、还读不读得动"。
+  const fault = treeFault(dir, record.files);
+  if (fault) return { ok: false, why: `写下去的树与这一份对不上：${fault}` };
+  return { ok: true, record };
 }
-
-/** 某一份包记录的字节由 `plugin-package.js` 的 `dataOf` 取（**只有那一份实现**）。 */
 
 /**
  * §5.4：这一份的签名者，与本机钉住的那把是同一把吗。
  *
- * ★ `pkg` 为 `null` 表示"这一份**不是以一个包的形式来的**"。今天调用的两处都
- *   一定拿得到包（唯一那条路就是取整包），所以 `null` 只在**调用方手里那个包读不动**
- *   时出现；而 `keyVerdict` 那时对钉过的 id 给出 `unsigned`，也就是**拒绝** ——
- *   这是对的。
+ * ★ 第三个参数是**一个信封**（`{alg, pubkey, signature}` 解出来的那个形状），或者
+ *   `null`。今天它有两个来源，而两者说的是同一件事：
+ *   · 刚取回来的那一份 —— 内存里那个容器解析出来的签名块；
+ *   · 本机已有的那一份 —— **记录表里的 `envelope`**（见 `recordSig`）。
  *
- *   ★ v0.6 时这个 `null` 有第二个来源：逐份取那条路**根本没有包**。那条路同时是
- *     §5.4 的一个**绕过口**（拿散装字节冒充一个"没签名"的构件），所以当时它在
- *     这里被判拒 —— 而 v0.7 把那条路整个删掉了，这个缺口因此**关在结构里**，
- *     不再靠这一句判断挡着。
+ *   ★ 从前这个参数是"整个解析出来的包"，而"本机那一份"那一路要先从盘上重新解析
+ *     一遍容器才拿得到它 —— 容器不落盘之后那一步没有了，而**判据一个字没变**：
+ *     `keyVerdict` 读的只有 `pkg.sig.fingerprint`。
+ *
+ * ★ `sig` 为 `null` 表示"这一份**没有签名**" —— 对钉过的 id，`keyVerdict` 给的是
+ *   `unsigned`，也就是**拒绝**，这是对的。
+ *   ★ v0.6 时 `null` 有第二个来源：逐份取那条路**根本没有包**（拿散装字节冒充一个
+ *     "没签名"的构件，是 §5.4 的一个绕过口）。那条路在 v0.7 删掉了，这个缺口因此
+ *     **关在结构里**。★ 而今天"信封读不动"那一格**不算**没签名（见 `recordSig`）——
+ *     把"读不动"折成"没签名"就是把那个绕过口重新打开一次。
  */
-function pinVerdict(o, p, pkg) {
+function pinVerdict(o, p, sig) {
   const pinned = (typeof o.pinnedKey === 'function') ? o.pinnedKey(p.id) : undefined;
-  return PP().keyVerdict(pinned, pkg);
+  return PP().keyVerdict(pinned, sig ? { sig } : null);
 }
 
 /**
@@ -791,7 +1031,7 @@ async function sync(o) {
   const out = {
     supported: false, reason: null, error: null,
     added: [], kept: [], pendingConsent: [], reclaimed: [], failed: [], withdrawn: [],
-    forgotSites: [], notices: [], record: null, limits: { ...HARD_LIMITS },
+    forgotSites: [], notices: [], snapshot: null, poolStrays: [], limits: { ...HARD_LIMITS },
   };
 
   // ── 1. 站点清单 ──
@@ -869,13 +1109,15 @@ async function sync(o) {
   }
   const stagingDir = path.join(stagingRoot,
     `${o.siteKey}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  let recordOk = true;
-  let record = null;
+  // ★ 这个局部变量装的是**快照表**（整个池的引用计数），不是某一份构件的记录表 ——
+  //   名字必须分开，见文件头。（`draft` 那个名字留给下面那些记录表草稿。）
+  let snapshotOk = true;
+  let snapshot = null;
   try {
     clearStaging(stagingRoot, lock);
-    const rr = readRecord(recordPathOf(siteRoot));
+    const rr = readSnapshot(snapshotPathOf(siteRoot));
     if (rr.ok) {
-      record = rr.record;
+      snapshot = rr.snapshot;
     } else if (rr.missing && listPooled(siteRoot).length === 0) {
       // ★ "还不存在"**在池子空的时候**与"没有站点要它们"是同一件事 —— 那是第一次
       //   对账的正常状态，不是问题。这里给它一份空记录，顺便把那条"不会回收"的
@@ -883,12 +1125,12 @@ async function sync(o) {
       //
       //   ★ 池子**不空**时绝不能这么算 —— 那时"记录不见了"恰恰是最危险的那一刻
       //     （引用表凭空少了一份），只能什么都不删（见文件头第一个"不"）。
-      record = emptyRecord();
+      snapshot = emptySnapshot();
     } else {
-      recordOk = false;
-      out.notices.push(`读不到站点的插件记录（${rr.why}）—— 这一次**不会回收**任何版本。`);
+      snapshotOk = false;
+      out.notices.push(`读不到站点的插件快照表（${rr.why}）—— 这一次**不会回收**任何版本。`);
     }
-    out.record = { ok: recordOk, why: rr.ok ? null : rr.why };
+    out.snapshot = { ok: snapshotOk, why: rr.ok ? null : rr.why };
     return await run();
   } finally {
     releaseLock(lock);
@@ -901,7 +1143,24 @@ async function sync(o) {
   }
 
   async function run() {
-    // ── 4. 逐个插件 ──
+    // ── 4. 池子先清扫一次（持锁 —— 所以池里不可能有别人正在写）──
+    //
+    // ★ 位置是承重的：**在列举之前**。清扫收掉的是"上一次崩在中间的安装"，而那些
+    //   半成品如果留着，下面每一个"本机有没有这一份"的判断都要多写一条"……而且它
+    //   是完整的"。扫掉之后判据只剩一条：**旁边那张记录表在不在**。
+    //
+    // ★ 它删的是**我们自己的半成品**（槽位名 + 没有记录表；记录表在而树不在），
+    //   不是槽位的东西一个字节都不动（`sweepPool` 会把它们的名字交出来）。删了什么
+    //   要说出来 —— 一次"我替你删了东西"的静默是不可接受的，哪怕那些东西确实是
+    //   半成品。
+    const swept = sweepPool(siteRoot);
+    if (swept.removed.length) {
+      out.notices.push(`池里有 ${swept.removed.length} 项是上一次没写完的安装`
+        + `（${swept.removed.join('、')}）—— 已经清掉了，这一轮会重新取。`);
+    }
+    out.poolStrays = swept.strays;
+
+    // ── 5. 逐个插件 ──
     const enabled = reported.filter((p) => p && p.enabled === true
       && typeof p.id === 'string' && typeof p.version === 'string');
     const seenIds = reported.filter((p) => p && typeof p.id === 'string').map((p) => p.id);
@@ -909,11 +1168,28 @@ async function sync(o) {
     for (const p of enabled) {
       if (stale()) break;
       const label = `${p.title || p.name || p.id} ${p.version}`;
-      const dest = path.join(siteRoot, p.id, p.version);
-      const pkgDest = pkgPathOf(siteRoot, p.id, p.version);
       const fail = (why) => out.failed.push({
         id: p.id, version: p.version, name: p.name, title: p.title, why,
       });
+
+      // ── 0. 这个标识能不能拿去拼路径 ──
+      //
+      // ★★ 这一格是**防御**，而且是这一版新加的。`p.id` 是**站点报来的字符串**，
+      //    从前它被直接拼进 `path.join(siteRoot, p.id, p.version)` —— 一个 `../..`
+      //    就能让写入落到池子外面，而铺树那一步的 `mkdirSync(recursive)` 会把中间
+      //    目录**建出来**。合法的守护进程报的永远是 ULID（`PLUGIN_ID_RE` 卡着），
+      //    所以这一条只可能挡住**冒充站点的人**。
+      //    ★ 判据是 id 的**形状**（26 个 ULID 字符里既没有 `/` 也没有 `.`），不是
+      //      一份"挡掉想得到的写法"的黑名单 —— 后者只挡得住写它的人想得到的那些。
+      //    ★ 而版本那一段的**语法**（`x.y.z`）不由这里判：那是协议边界的事
+      //      （清单校验那边另有一道），两条各管一件事，合并会造出一句谁也读不懂的
+      //      拒绝。这里只问"这个名字能不能当文件名"。
+      const tree = SLOT.treeDirOf(siteRoot, p.id, p.version);
+      if (!tree) {
+        fail(`站点报的这一份的标识 ${JSON.stringify(p.id)}@${JSON.stringify(p.version)}`
+          + ' 不能用作插件标识（id 必须是 ULID）—— 这一份不取。');
+        continue;
+      }
 
       // ── 1. 这一份分发得出来吗 ──
       const del = deliveryOf(p, out.limits);
@@ -936,9 +1212,14 @@ async function sync(o) {
         continue;
       }
 
-      // ── 2. 本机那一份不在了 ⇒ 同意作废（§5.3，见文件头那一节）──
-      const exists = fs.existsSync(dest);
-      if (!exists) {
+      // ── 2. 本机那一份**不在了** ⇒ 同意作废（§5.3，见文件头那一节）──
+      //
+      // ★ 判据是"**树**在不在"，而不是"记录表在不在"：两样同生共死（见文件头），
+      //   而"树在、记录表不在"不是"这一份还在"，是"这一份**没提交**"—— 那种状态
+      //   由下面第 3 步按不可用收掉，走的不是这条路。
+      const slot = readSlot(siteRoot, p.id, p.version);
+      const treeThere = fs.existsSync(tree);
+      if (!treeThere) {
         const w = forgetTrust(p.id, p.version);
         if (w && w.had) {
           out.withdrawn.push({ id: p.id, version: p.version, name: p.name, title: p.title });
@@ -947,65 +1228,54 @@ async function sync(o) {
         }
       }
 
-      // ── 3. **已经有一份** —— 增量。逐文件比，对得上就不重下 ──
-      if (exists) {
-        // ★ 核对的判据是**本机那个包** —— 它是上一次下来、逐份校过的那一份。
+      // ── 3. 本机有一份 ⇒ **对账**，对得上就不重下 ──
+      if (treeThere) {
+        // ★★ 对账判**两件事**，而且它们是**两道不同的关**：
         //
-        //   v0.6 这里先看站点这一轮报的逐份清单（`p.files`），本机没有包时才退到
-        //   磁盘上那个。**今天只剩后一半**：`files` 那个字段没有了，而这里本来
-        //   也不该信它 —— 拿站点这一轮的自述去核**磁盘上**那一份，是让"对面说的"
-        //   当"本机有的"的判据。本机那个包是**上一次真下载到、逐字节校过**的东西，
-        //   它才是这里的正确答案。
-        const rd = fs.existsSync(pkgDest) ? PP().readPackageFile(pkgDest) : null;
-        const pkgOnDisk = (rd && rd.ok) ? rd : null;
-        if (rd && !rd.ok) {
-          out.notices.push(`本机那一份 ${label} 旁边的 ${p.version}.splug 读不出来`
-            + `（${rd.why}）—— 树本身照样核，但那个包已经不能当来路凭证了。`);
-        }
-        // ★ 包不在了**不算撤回**（见文件头）：能加载的是树，包是它的来路凭证。
-        //   那时没有"另一份清单"可比（`decl = null`），于是"内容有没有被动过"
-        //   只剩**台账里那个摘要**回答 —— 摘要是从**磁盘上**算的，动过就变，
-        //   对不上就会走进下面的待同意（原地认领）。**少做的那一半要说得出来**。
-        if (!pkgOnDisk) {
-          out.notices.push(`本机那一份 ${label} 旁边没有它的包（只剩解出来的树）——`
-            + '这一次只能核内容摘要，没法逐份比对。');
-        }
-        const decl = pkgOnDisk ? fileListOf(pkgOnDisk) : null;
-        // 给**界面**看的那份清单。没有包时从树上现读一份出来 —— 它只用来画那个
-        // "你要同意的是这几份文件"，**不参与任何判定**（所以它是另一个变量）。
-        // 读不出来就是空列表：那是显示上的缺省，不是一条校验结论。
-        const display = decl || (() => {
-          try {
-            return plugins.readPluginFiles(dest).filter((f) => f.kind === 'f')
-              .map((f) => ({ path: f.path }));
-          } catch { return []; }
-        })();
+        //   ① **树 vs 记录表**（`verifyStaged` 里那条逐份双向比对 + 清单 + 身份）：
+        //      抓"树被动过"与"记录表被动过"—— 但**抓不到**"两边一起被改"。
+        //   ② **树 vs 签名**（`treeSignature`：从树重算内容摘要，再验记录表里那个
+        //      签名块）：抓的正是"两边一起被改"。签名是**作者**盖的，改池子的人改不动。
+        //
+        //   ★ 少了②会怎样：①的两边都在本机、都被同一个人可写 ⇒ 一份**自洽的伪造**
+        //     会一路通过，而 §5.4 那条"签名者不变"只剩指纹字符串比较 —— 那等于没有
+        //     验证。这一条是"容器只在内存里活"之后**必须显式补上**的那一步。
+        //
+        //   ★ 顺序：①不过就不必问②了。①不过时摘要必然也对不上，而那时**更有用的
+        //     那句话**是"哪一份文件对不上"（①会说），不是"签名盖的不是它"。
+        const rec = slot.ok ? fileListOf(slot.record) : null;
+        const vr = slot.ok
+          ? verifyStaged(tree, rec, { id: p.id, version: p.version })
+          : { ok: false, why: `${tree} 没有一张读得动的记录表（${slot.why}）` };
+        const sv = vr.ok ? treeSignature(tree, slot.record) : { ok: false, why: vr.why };
+        const healthy = vr.ok && sv.ok;
 
-        const r = verifyStaged(dest, decl, { id: p.id, version: p.version });
-        if (r.ok && o.trusted(p.id, p.version, r.entry.digest)) {
+        if (healthy && o.trusted(p.id, p.version, vr.entry.digest)) {
           // ★★ **站点这一轮报的，与本机躺着的是不是同一份东西** —— 这一格从 v0.7
           //    起就空着，而它是这里唯一无法从本机自证的一条。
           //
           //    v0.6 的判据是**站点这一轮报的清单**（`p.files`）：`verifyStaged(dest,
           //    declared, …)` 里的 `declared` 那时来自对面。v0.7 把 `files` 删掉之后
-          //    它换成了**本机那个包**（`pkgOnDisk`），于是这一格退化成"本机的树 vs
-          //    本机的包" —— 而"站点这次说的是不是另一份内容"**再没有任何东西在看**：
-          //    两个站点报同一个 `(id, 版本)` 而内容不同时，后一个会被**静默收下**
-          //    （它的 `wants` 还照样记在那个槽位上），一个字节都不报。
+          //    它换成了**本机那个包**，于是这一格退化成"本机的树 vs 本机的包" ——
+          //    而"站点这次说的是不是另一份内容"**再没有任何东西在看**：两个站点报
+          //    同一个 `(id, 版本)` 而内容不同时，后一个会被**静默收下**（它的 `wants`
+          //    还照样记在那个槽位上），一个字节都不报。
           //
-          //    判据回到"对面这一轮说的"：`package.digest` 是 §3.4 的内容摘要，与池里
-          //    那个 `.splug` 解析出来的**是同一个函数算的**（`contentDigest`），所以
+          //    判据回到"对面这一轮说的"：`package.digest` 是 §3.4 的内容摘要，与
+          //    **从记录表重算**出来的那个是同一个函数算的（`contentDigest`），所以
           //    两者可以直接比。摘要盖的是内容，补一个签名块不会让它变 —— 这正是
           //    "摘要相同 ⇒ 还是同一份构件"那条规则。
           //
-          //    ★ 包不在了（剩下的只有树）就**比不了**：那时两边都没有一个"对面说的
-          //      摘要"的对应物，只能按上面那条通知如实说"少做了一半"。不猜。
-          if (pkgOnDisk && p.package.digest !== pkgOnDisk.digest) {
-            const owners = sitesWanting(record, p.id, p.version);
+          //    ★ 从前这里算的是"盘上那个容器解析出来的摘要"。容器不落盘之后，同一个
+          //      数从**记录表**重算 —— 而 `verified` 那一关刚刚才逐份核过"记录表就是
+          //      这棵树"，所以两者说的是同一件事。
+          const localDigest = PP().contentDigest(rec);
+          if (p.package.digest !== localDigest) {
+            const owners = sitesWanting(snapshot, p.id, p.version);
             fail(`本机已有 ${label}，但它的内容与站点现在报的不一样`
               + `（站点报 ${plugins.shortDigest(p.package.digest)}，本机这一份是 `
-              + `${plugins.shortDigest(pkgOnDisk.digest)}）。`
-              // ★ F20：那个槽位是**谁**先放进来的 —— 记录文件里一直有这份信息
+              + `${plugins.shortDigest(localDigest)}）。`
+              // ★ F20：那个槽位是**谁**先放进来的 —— 快照表里一直有这份信息
               //   （`sites[<站点键>].wants`），此前没用上，而它是管理员接着要问的
               //   第一个问题。`wants` 只在"真的把那一版拿下来了"时才写，所以它记的
               //   正是"谁把它放进了池子"，而不是"这一轮有谁报了它"。
@@ -1014,53 +1284,75 @@ async function sync(o) {
               + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。');
             continue;
           }
-          out.kept.push({ id: p.id, version: p.version, name: p.name, title: p.title, dir: dest });
-          continue;
-        }
-        if (!r.ok) {
-          // ★ **绝不静默覆盖。** 覆盖的后果是一条正在跑的旧会话配上新的客户端那一半
-          //   —— 正是 PROTOCOL.md 里"两半是配套的"那条注释在防的事。
-          //
-          // ★ 而这**不是**"站点报了另一份内容"：上一条判据已经把那件事分走了，走到
-          //   这里的是**本机那一份与它自己的来路凭证对不上**（树被动过、或者上一次
-          //   落盘就是坏的）。两者要做的事完全不同 —— 一个去找管理员，一个在本机，
-          //   所以两句话不能长成一句。
-          fail(`本机已有 ${label}，但它与自己的来路凭证（${p.version}.splug）对不上`
-            + `（${r.why}）。这一份在本机被改过 —— 请重新同步一次；`
-            + '如果它会自己恢复成原来的样子，说明有别的东西在改它。');
+          out.kept.push({ id: p.id, version: p.version, name: p.name, title: p.title, dir: tree });
           continue;
         }
 
-        // ★ **同意闸的第二个落点：本机已经有一份、而台账对不上。**
+        if (healthy) {
+          // ★ **同意闸的第二个落点：本机已经有一份、而台账对不上。**
+          //
+          //   这一段以前不存在，而它不在的后果是**这个插件在界面上彻底看不见**：
+          //   它进了池子（`active:false`），于是 `missing` 不认领它（那边要求
+          //   `registry.get` 取不到）；它又在 `plugins` 那一列之外。两条路都不在，
+          //   用户连"点同意"的入口都没有，重新同步也救不回来。
+          //
+          //   摘要换一次公式、或者用户删过 `config.json` 里那一条，这条路就会对
+          //   **每一个**站点的**每一个**插件成立 —— 集体消失、无从恢复。
+          // ★ 签名块从 `treeSignature` 手里拿 —— 它刚验过的那一个，而不是另取一遍。
+          //   一个 `undefined` 传进来会静默变成"这一份没有签名"，而那条路对**钉过的**
+          //   id 是拒绝、对没钉过的是**收下** —— 一次手滑就能把 §5.4 关掉一半。
+          const pv = pinVerdict(o, p, sv.sig);
+          if (!pv.ok) { fail(pv.why); continue; }
+          out.pendingConsent.push({
+            id: p.id, version: p.version, name: p.name, title: p.title,
+            digest: vr.entry.digest,
+            // ★ `existing`：这一份**已经在池里**，点同意时是"原地认领"而不是换入
+            //   （见 acceptStaged），点不同意时删的也是池里那一份（见 index.js）。
+            existing: true,
+            stagedDir: tree,
+            fingerprint: pv.fingerprint,
+            siteKey: o.siteKey, siteLabel: o.siteLabel,
+            files: rec.map((f) => f.path),
+          });
+          continue;
+        }
+
+        // ── 本机那一份**不可用**（树被动过、记录表读不动、或者两者一起被改）──
         //
-        //   这一段以前不存在，而它不在的后果是**这个插件在界面上彻底看不见**：
-        //   它进了池子（`active:false`），于是 `missing` 不认领它（那边要求
-        //   `registry.get` 取不到）；它又在 `plugins` 那一列之外。两条路都不在，
-        //   用户连"点同意"的入口都没有，重新同步也救不回来。
+        // ★ 两件硬约束，都从既有纪律推出来，见文件头那三个"不"：
         //
-        //   摘要换一次公式、或者用户删过 `config.json` 里那一条，这条路就会对
-        //   **每一个**站点的**每一个**插件成立 —— 集体消失、无从恢复。
-        const pv = pinVerdict(o, p, pkgOnDisk);
-        if (!pv.ok) { fail(pv.why); continue; }
-        out.pendingConsent.push({
-          id: p.id, version: p.version, name: p.name, title: p.title,
-          digest: r.entry.digest,
-          // ★ `existing`：这一份**已经在池里**，点同意时是"原地认领"而不是换入
-          //   （见 acceptStaged），点不同意时删的也是池里那一份（见 index.js）。
-          existing: true,
-          stagedDir: dest, stagedPkg: null,
-          fingerprint: pv.fingerprint,
-          siteKey: o.siteKey, siteLabel: o.siteLabel,
-          files: display.map((f) => f.path),
-          // ★ 让界面能说出"这一份我们只核了摘要"—— 少做的那一半不能瞒着。
-          compared: r.compared,
-        });
-        continue;
+        //   ① **有活会话认领它时不动它。** 与 v0.12 阶段 6 那条「活会话用过的落点
+        //      一个不碰」同源：换了会把正在跑的会话脚下的代码换掉。那时只能报。
+        //   ② **重取失败绝不退回本机那一份动过的树。** 与"下载失败绝不退回到本机池"
+        //      同源。⇒ 终点是"报不可用，等用户处理"。
+        //
+        // ★ 还有一条要如实说的：**重取的唯一来源是站点分发**。站点此刻若正因为
+        //   自己那边对不过账而不分发这一份，重取**必然失败** ⇒ 终点仍是"不可用"。
+        //   所以"重取"不是一个总能成功的修复，它是**先清掉已知不可用的那一份**，
+        //   再走一遍正常的路。
+        if (protectedVersions.has(`${p.id}@${p.version}`)) {
+          // ★ 那句话里的原因**总是** `sv.why`：①不过时 `sv` 就是 ① 那一句
+          //   （上面那行三元），②不过时它是签名那一句。写成 `sv.ok ? … : …` 会
+          //   在"两道都不过"时选到同一个值，看着像在挑，其实没有第二个可能。
+          fail(`本机已有的 ${label} 不可用（${sv.why}），但它正被一个`
+            + '**活着的会话**用着 —— 所以没有动它（换了会把它脚下的代码换掉）。'
+            + '结束那个会话之后再同步一次。');
+          continue;
+        }
+        const gone = removeSlot(siteRoot, p.id, p.version);
+        if (!gone.ok) { fail(gone.error); continue; }
+        out.notices.push(`本机那一份 ${label} 不可用（${sv.why}）——`
+          + '已经清掉，正在重新取一份。');
+        // ★ 从这里**往下走**（不是 continue）：下面那条路要么取回来一份核过的，
+        //   要么明确失败。这样"不可用"这个状态不会在池里多留一瞬。
       }
 
-      // ── 4. **没有** —— 把整个包取到暂存 ──
-      const staged = path.join(stagingDir, p.id, p.version);
-      const stagedPkg = path.join(stagingDir, p.id, `${p.version}.splug`);
+      // ── 4. **没有**（或者刚被判定不可用而收掉）—— 把整个包取到暂存 ──
+      //
+      // ★ 暂存里那棵树的名字**必须也是槽位名**：`acceptStaged` 拿它 `rename` 进池子，
+      //   而池里的名字就是这一份的地址。暂存那一层目录带随机后缀（同一次对账里不会
+      //   撞），所以两次暂存同一份不会互相覆盖。
+      const staged = path.join(stagingDir, `${p.id}${SLOT.SLOT_SEP}${p.version}`);
       try {
         fs.mkdirSync(staged, { recursive: true, mode: 0o700 });
       } catch (e) {
@@ -1074,16 +1366,20 @@ async function sync(o) {
       //   `fetchPackage` 自己数字节、自己解析、自己逐份校 sha256、自己重算摘要。
       //   丢掉的那条交叉判据**不是损失**：它防的是"两份自述互相矛盾"，而矛盾需要
       //   两个来源；今天本站的每一个说法都拿去与**我们算出来的那个**比了。
-      const got = await fetchPackage(o.rpc, p, p.package, staged, stagedPkg, out.limits, ctx);
+      const got = await fetchPackage(o.rpc, p, p.package, staged, out.limits, ctx);
       if (!got.ok) { fail(got.why); continue; }
-      const pkg = got.pkg;
-      const decl = got.files;
+      const draft = got.record;
 
-      const vr = verifyStaged(staged, decl, { id: p.id, version: p.version });
+      const vr = verifyStaged(staged, draft.files, { id: p.id, version: p.version });
       if (!vr.ok) { fail(vr.why); continue; }
       const digest = vr.entry.digest;
 
-      const pv = pinVerdict(o, p, pkg);
+      // ★ 签名在这一层已经**验过**（`parsePackage` 第 10 步，签的是这个包的内容
+      //   摘要）—— 这里只是把那个签名块取出来，供 §5.4 判"签名者是不是同一把"。
+      //   再验一遍是多余的：它是**同一个函数**刚算过的结果。
+      const sg = recordSig(draft);
+      if (!sg.ok) { fail(sg.why); continue; }
+      const pv = pinVerdict(o, p, sg.sig);
       if (!pv.ok) { fail(pv.why); continue; }
 
       if (!o.trusted(p.id, p.version, digest)) {
@@ -1098,17 +1394,19 @@ async function sync(o) {
         out.pendingConsent.push({
           id: p.id, version: p.version, name: p.name, title: p.title,
           digest, stagedDir: staged,
-          stagedPkg,
           existing: false,
           fingerprint: pv.fingerprint,
           siteKey: o.siteKey, siteLabel: o.siteLabel,
-          files: decl.map((f) => f.path),
+          files: draft.files.map((f) => f.path),
+          // ★ 记录表草稿**只在内存里**，与容器一样：它要等过了同意闸才落盘
+          //   （那一次写就是提交）。见 acceptStaged。
+          record: draft,
         });
         continue;
       }
 
       const mv = acceptStaged({
-        stagedDir: staged, stagedPkg, siteRoot,
+        stagedDir: staged, record: draft, siteRoot,
         id: p.id, version: p.version, digest,
       });
       if (!mv.ok) { fail(mv.error); continue; }
@@ -1117,8 +1415,8 @@ async function sync(o) {
     }
 
     // ── 5. 更新记录（**必须在回收之前**）──
-    if (recordOk) {
-      const cur = siteEntry(record, o.siteKey, o.siteLabel);
+    if (snapshotOk) {
+      const cur = siteEntry(snapshot, o.siteKey, o.siteLabel);
       cur.label = o.siteLabel;
       cur.syncedAt = now();
       // ── `wants`：这个站点**当前拿着哪些版本**（回收只认它）──
@@ -1158,33 +1456,33 @@ async function sync(o) {
       //   一定在 `keepSites` 里；不成立的话这一行会把刚写好的那一条当场删掉。
       if (Array.isArray(o.keepSites)) {
         const keep = new Set(o.keepSites);
-        for (const k of Object.keys(record.sites)) {
+        for (const k of Object.keys(snapshot.sites)) {
           if (keep.has(k)) continue;
           out.forgotSites.push(k);
-          delete record.sites[k];
+          delete snapshot.sites[k];
         }
       }
 
-      record.version = RECORD_VERSION;
+      snapshot.version = SNAPSHOT_VERSION;
       try {
-        writeJsonAtomic(recordPathOf(siteRoot), record);
+        writeJsonAtomic(snapshotPathOf(siteRoot), snapshot);
       } catch (e) {
         // ★ 写不下去就**不回收**。顺序反了（先回收后写）会按一份旧引用表动手，
         //   把另一个站点还要的版本删掉 —— 这是本设计里唯一会真丢数据的地方。
-        recordOk = false;
-        out.record = { ok: false, why: `写记录失败：${e.message}` };
+        snapshotOk = false;
+        out.snapshot = { ok: false, why: `写快照表失败：${e.message}` };
         out.notices.push(`记录写不下去（${e.message}）—— 这一次**不会回收**任何版本。`);
       }
     }
 
     // ── 6. 回收（引用计数归零才删）──
-    if (!recordOk) {
+    if (!snapshotOk) {
       // 见文件头：不知道谁在引用的时候，唯一安全的动作是什么都不删。
     } else if (!protectedKnown) {
       // 活会话那张表没拿到，同样是不"不知道"。
     } else {
       const wanted = new Set();
-      for (const s of Object.values(record.sites)) {
+      for (const s of Object.values(snapshot.sites)) {
         for (const [id, v] of Object.entries(s.wants || {})) wanted.add(`${id}@${v}`);
       }
       for (const it of listPooled(siteRoot)) {
@@ -1194,12 +1492,12 @@ async function sync(o) {
         if (out.added.some((x) => x.id === it.id && x.version === it.version)) continue;
         if (out.pendingConsent.some((x) => x.id === it.id && x.version === it.version)) continue;
         try {
-          fs.rmSync(it.dir, { recursive: true, force: true });
-          // ★ 包是与树**一起**换入的，所以回收时也一起走。留下一个没有树的
-          //   `<版本>.splug` 就是池里一份**谁也看不见**的残留（`listPooled` 只认
-          //   目录）—— 用户打开那个目录会看到一个说不清是什么的文件。
-          fs.rmSync(pkgPathOf(siteRoot, it.id, it.version), { force: true });
-          try { fs.rmdirSync(path.dirname(it.dir)); } catch { /* 还有别的版本 */ }
+          // ★ 记录表与树**一起走**（`removeSlot`，先撤提交再删内容）。从前这里是
+          //   两句 `rmSync`（树 + 那个 `.splug`），而"删了一个、另一个没删掉"是一种
+          //   真实的状态 —— 它留下的残留谁也看不见（列举要求两样都在），于是它会
+          //   永远躺在那儿。今天失败会说出来，下一次同步还会再试。
+          const g = removeSlot(siteRoot, it.id, it.version);
+          if (!g.ok) throw new Error(g.error);
           out.reclaimed.push({ id: it.id, version: it.version });
         } catch (e) {
           out.notices.push(`回收 ${key} 失败：${e.message}`);
@@ -1221,22 +1519,64 @@ async function sync(o) {
 }
 
 /**
+ * 池里一个槽位**从池子里消失** —— 先撤记录表，再删树。
+ *
+ * ★ 次序是承重的，与站点侧那条**逐字对称**（那边是 `remove_plugin_tree`）：
+ *
+ *   · 先删树的话，崩在中间会留下一张指向**一棵不存在的树**的记录表；
+ *   · 这个次序崩在中间，留下的是一棵**没有记录表**的树。
+ *
+ *   两者都正确收敛（前者被 `sweepPool` 收掉，后者按"没提交"收掉），所以**真正的
+ *   理由不是崩溃收敛**，而是这一条：**记录表是提交点，撤回一个提交要发生在动它的
+ *   内容之前**。先动内容再撤提交，中间那一瞬的状态是"已提交、而内容是半个"——
+ *   那正是提交点这个概念存在的意义所要消灭的东西。
+ *
+ * ★ 返回值带**哪一步失败**：调用方要把这句话原样交给用户，而"删不掉"有两种，一种
+ *   是权限、一种是文件正被占着，用户要做的事不一样。
+ */
+function removeSlot(siteRoot, id, version) {
+  const rec = SLOT.recordPathOf(siteRoot, id, version);
+  const tree = SLOT.treeDirOf(siteRoot, id, version);
+  if (!rec || !tree) return { ok: false, error: '这个 (id, 版本) 拼不出池里的路径。' };
+  const r = SLOT.removeRecordFile(rec);
+  if (!r.ok) return { ok: false, error: `删不掉记录表 ${rec}：${r.error}` };
+  try {
+    fs.rmSync(tree, { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, error: `删不掉 ${tree}：${e.message}` };
+  }
+  return { ok: true };
+}
+
+/**
  * 把一份**验过的**构件收下。**同意动作走的就是这里。**
  *
  * 两种情形，写法不同而判据相同：
  *
- *   ① **换入**（`existing` 假）：暂存里那一棵树 `rename` 进池子，包跟着一起。
- *      目标是**一个全新的键**（版本不可变 ⇒ 同名版本已经存在是"拒绝"，
- *      不是"覆盖"），所以 `rename` 覆盖的是一个不存在的目标 —— POSIX 与
- *      Windows 都成立。需要"旧的先 rename 走、新的再 rename 进来"那种两步的
- *      只有删旧，而删旧是独立的收尾步骤。
+ *   ① **换入**（`existing` 假）：暂存里那一棵树 `rename` 进池子，**然后原子地写
+ *      记录表** —— 那一写就是**提交**（见 plugin-slot.js）。
+ *      目标是**一个全新的键**（版本不可变 ⇒ 同名版本已经存在是"拒绝"，不是
+ *      "覆盖"），所以 `rename` 覆盖的是一个不存在的目标 —— POSIX 与 Windows 都
+ *      成立。需要"旧的先 rename 走、新的再 rename 进来"那种两步的只有删旧，而删旧
+ *      是独立的收尾步骤（`removeSlot`）。
  *
  *   ② **原地认领**（`existing` 真）：树**已经在池里**（它上一次下来过、只是台账
- *      对不上，见 sync 的第 4 步）。这时源与目标是同一个路径，没有 `rename` 可做
- *      ——要做的只有一件事：**再核一遍摘要**。
+ *      对不上，见 sync 第 3 步）。这时源与目标是同一个路径，没有 `rename` 可做，
+ *      记录表也已经在了 —— 要做的只有一件事：**再核一遍摘要**。
  *
  * ★ 两种情形都**必须**在收下之前再核一遍摘要与对话框里那个值相同。用户同意的是
  *   他看到的那个摘要，不是"这个 (id, 版本) 上碰巧躺着的东西"。
+ *
+ * ── ★ 换入之后崩在中间会怎样 ────────────────────────────────────────────────
+ *
+ * `rename` 与"写记录表"之间有一个窗口。崩在那里 ⇒ 池里多一棵**没有记录表**的树
+ * ⇒ 它**不可见**（`findPluginDirs` 要求两样都在、`listPooled` 也一样），下一轮对账
+ * 的 `sweepPool` 把它收掉、重新取一份。★ 这就是"提交点"要的形状：**半成品不会冒充
+ * 成品**，而它自己会收敛。
+ *
+ * ★ 反过来（先写记录表、后 rename）**不行**：崩在中间会留下一张指向不存在的树的
+ *   记录表，而按"记录表 = 已提交"那条判据，池子里会有一份**声称装好了、而内容是
+ *   空的**东西。
  */
 function acceptStaged(o) {
   if (o.existing) {
@@ -1261,7 +1601,7 @@ function acceptStaged(o) {
   try { st = fs.statSync(o.stagedDir); } catch { return { ok: false, error: '暂存的那一份已经不在了 —— 请重新同步一次。' }; }
   if (!st.isDirectory()) return { ok: false, error: '暂存的那一份不是一个目录。' };
 
-  const r = plugins.inspectDir(o.stagedDir, 'site');
+  const r = plugins.inspectDir(o.stagedDir);
   if (r.error) return { ok: false, error: `暂存的那一份用不了：${r.error}` };
   if (r.entry.plugin.id !== o.id || r.entry.plugin.version !== o.version) {
     return { ok: false, error: `暂存的那一份自报的是 ${r.entry.plugin.id}@${r.entry.plugin.version}，`
@@ -1270,26 +1610,56 @@ function acceptStaged(o) {
   if (o.digest && r.entry.digest !== o.digest) {
     return { ok: false, error: '暂存的那一份在你点同意之后变过了 —— 请重新同步一次再决定。' };
   }
-
-  const dest = path.join(o.siteRoot, o.id, o.version);
+  // ★ 提交之前**最后一次**逐份核对：记录表草稿说的那几份，与**此刻磁盘上**这棵树
+  //   是不是同一批。它不是多余的 —— 上面的 `inspectDir` 只算了一个总摘要，而一个
+  //   总摘要相等**不等于**逐份相等这件事只有在它不等的时候才成立。这一次用的是
+  //   与对账**同一个函数**（`compareTree`），所以"提交时核的"与"对账时核的"是同一
+  //   句话，不可能漂开。
+  if (o.record) {
+    const fault = treeFault(o.stagedDir, o.record.files);
+    if (fault) return { ok: false, error: `暂存的那一份与它的记录表对不上：${fault}` };
+  }
+  const dest = SLOT.treeDirOf(o.siteRoot, o.id, o.version);
+  if (!dest) return { ok: false, error: '这个 (id, 版本) 拼不出池里的路径 —— 不装。' };
   if (fs.existsSync(dest)) {
-    return { ok: false, error: `${dest} 已经存在 —— 同一个版本只装一份，` + '要么它已经装好了，要么站点该升版本号。' };
+    return { ok: false, error: `${dest} 已经存在 —— 同一个版本只装一份，`
+      + '要么它已经装好了，要么站点该升版本号。' };
   }
   try {
-    // ★ **包先落，树后落。** 反过来（先树后包）在包那一步失败时，池里会留下一棵
-    //   **没有来路凭证**的树，而收尾只剩两条路：删掉刚下来的东西，或者留着一个
-    //   半份。这个顺序下最坏的结果是池里多一个孤儿 `.splug` —— 它谁也看不见
-    //   （`listPooled` 只认目录），而下一次同步会把包 `rename` 覆盖过去。
-    if (o.stagedPkg) {
-      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
-      fs.renameSync(o.stagedPkg, pkgPathOf(o.siteRoot, o.id, o.version));
-    }
-    fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
     fs.renameSync(o.stagedDir, dest);
   } catch (e) {
     // 半份树比没有更坏：它会被扫到一个残破的目录。尽力清掉，清不掉也要说出来。
     try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* 下面会说 */ }
     return { ok: false, error: `换入 ${dest} 失败：${e.message}` };
+  }
+  // ★★ **这一写就是提交。** 上面那一次 `rename` 是非原子的（它会崩在中间），而这一
+  //     次不是 —— 于是"装好了"有一个明确的时刻，而那个时刻之前的状态有一个名字：
+  //     **没提交**。
+  if (o.record) {
+    const w = SLOT.writeRecordFile(SLOT.recordPathOf(o.siteRoot, o.id, o.version), o.record);
+    if (!w.ok) {
+      // ★ 写不下去就**把树收掉**，不留一棵没有记录表的树：它的命运本来也是被
+      //   `sweepPool` 收掉，而那里会把它报成"上一次没写完的安装"——一句不准确的
+      //   话。这里当场收掉，用户看到的是一句准确的失败。
+      const g = removeSlot(o.siteRoot, o.id, o.version);
+      return { ok: false,
+        error: `装到一半停下了：树已经放好，但记录表写不下去（${w.error}${w.detail ? `：${w.detail}` : ''}）。`
+          + (g.ok
+            ? '已经把它撤掉了 —— 请重新同步一次。'
+            // ★ 撤不掉也要说清**它会怎样**：那一份是"没提交"，所以不可见、也不会
+            //   被加载，而下一次同步的清扫会把它收掉。留一句含糊的"失败了"，用户
+            //   会去那个目录里找一个已经不生效的东西。
+            : `而且没能撤掉（${g.error}）—— 那棵树是"没提交"的，所以不会被加载；`
+              + '下一次同步会把它清掉。') };
+    }
+  } else {
+    // ★ 没有记录表草稿 = **不可能来自同意那条路**（`sync` 一定会带上它）。走到这里
+    //   说明有调用方绕过了它，而"没有记录表"恰好等于"没提交" —— 所以回报一个明确的
+    //   失败，而不是留一棵谁也看不见的树。
+    const g = removeSlot(o.siteRoot, o.id, o.version);
+    return { ok: false,
+      error: '收下一份构件时没有带记录表 —— 那一份不算装上'
+        + `${g.ok ? '（已经撤掉了）' : `（而且撤不掉：${g.error}）`}。` };
   }
   return { ok: true, dir: dest, digest: r.entry.digest };
 }
@@ -1297,25 +1667,28 @@ function acceptStaged(o) {
 /**
  * 记下"这个站点拿了这一版" —— **同意那一步也要记**。
  *
- * ★ 不加这一步的话有一个真的洞：`wants` 是在对账的第 5 步写的，而同意发生在
- *   **对账返回之后**。于是"用户刚同意、还没重新对账"这段窗口里，那个版本在引用表
- *   上**不存在** —— 下一条连接（另一个站点）对账时就会按"没人要它"把它回收掉。
- *   用户看到的是"我刚同意的插件，换了个站点就没了"。
+ * ★ 它写的是**快照表**（回收的判据），不是那一份构件的记录表 —— 后者在
+ *   `acceptStaged` 里已经随树一起提交了。两张表，两个不同的时刻，见文件头。
  *
- * ★ 记录读不出来时**什么都不写**，返回失败。这不是保守：读不出来意味着引用表的
+ * ★ 不加这一步的话有一个真的洞：`wants` 是在对账里写的，而同意发生在**对账返回
+ *   之后**。于是"用户刚同意、还没重新对账"这段窗口里，那个版本在引用表上**不存在**
+ *   —— 下一条连接（另一个站点）对账时就会按"没人要它"把它回收掉。用户看到的是
+ *   "我刚同意的插件，换了个站点就没了"。
+ *
+ * ★ 快照表读不出来时**什么都不写**，返回失败。这不是保守：读不出来意味着引用表的
  *   其余部分也在，而我们看不到 —— 拿一份只有自己那条的空记录覆盖上去，等于把别的
  *   站点的引用全抹掉，那正是 F23 记的那个场景。留给下一次对账（它在这种状态下
  *   本来就不回收）。
  */
 function noteConsent(o) {
-  const file = recordPathOf(o.siteRoot);
-  const rr = readRecord(file);
+  const file = snapshotPathOf(o.siteRoot);
+  const rr = readSnapshot(file);
   if (!rr.ok) {
     // "还不存在"是第一次对账的正常状态（池子此时要么空、要么即将被建起来），
     // 那时没有别人的引用可丢。其余情况一律不动。
     if (!rr.missing) return { ok: false, why: rr.why };
   }
-  const rec = rr.ok ? rr.record : emptyRecord();
+  const rec = rr.ok ? rr.snapshot : emptySnapshot();
   const cur = siteEntry(rec, o.siteKey, o.siteLabel);
   cur.label = o.siteLabel || cur.label;
   cur.syncedAt = cur.syncedAt || Date.now();
@@ -1325,19 +1698,22 @@ function noteConsent(o) {
   try {
     writeJsonAtomic(file, rec);
   } catch (e) {
-    return { ok: false, why: `写记录失败：${e.message}` };
+    return { ok: false, why: `写快照表失败：${e.message}` };
   }
   return { ok: true };
 }
 
-/** 不要一份待同意的草稿了（用户点了"不同意"，或者它已经作废）。 */
-function discardStaged(stagedDir, stagedPkg) {
+/**
+ * 不要一份待同意的**草稿**了（用户点了"不同意"，或者它已经作废）。
+ *
+ * ★ 它删的是**暂存里那棵树**。从前的第二个参数是"那个 `.splug` 草稿"，容器不落盘
+ *   之后它不存在了 —— 而这一整条路径也简单了一半：那份草稿从前是**另一个文件**，
+ *   与树分开删，于是"删了一半"是一种可能的状态。
+ */
+function discardStaged(stagedDir) {
   if (typeof stagedDir !== 'string' || !stagedDir) return { ok: false, error: '没有指定要丢掉哪一份。' };
   try {
     fs.rmSync(stagedDir, { recursive: true, force: true });
-    // 整包下来的那一份草稿也一起走 —— 留着它就是暂存里一份没人认领的字节，
-    // 而暂存目录每次对账开头都会整个清掉（clearStaging），所以它本来也活不过一轮。
-    if (typeof stagedPkg === 'string' && stagedPkg) fs.rmSync(stagedPkg, { force: true });
   } catch (e) {
     return { ok: false, error: `删不掉 ${stagedDir}：${e.message}` };
   }
@@ -1352,28 +1728,29 @@ function discardStaged(stagedDir, stagedPkg) {
  *   一份留着就是"一个用户在界面上拒绝了、却仍然躺在磁盘上的插件"，而且它下次还会
  *   以同一个形状回来（台账里没有它，树还在）⇒ 用户点一百次不同意也去不掉。
  *
- * ★ 删**树与包两样**。站点那一份一个字节没动 —— 下一次对账还会把它取回来、
- *   再问一次。这正是 §5.3 要的：删除是一个没说出口的决定，而对账不认识它。
+ * ★ 删的是**记录表与树两样**（`removeSlot`，先表后树）。站点那一份一个字节没动 ——
+ *   下一次对账还会把它取回来、再问一次。这正是 §5.3 要的：删除是一个没说出口的
+ *   决定，而对账不认识它。
  */
 function dropPooledVersion(siteRoot, id, version) {
   if (typeof id !== 'string' || typeof version !== 'string' || !id || !version) {
     return { ok: false, error: 'id 与版本都必须是字符串。' };
   }
-  try {
-    fs.rmSync(path.join(siteRoot, id, version), { recursive: true, force: true });
-    fs.rmSync(pkgPathOf(siteRoot, id, version), { force: true });
-    try { fs.rmdirSync(path.join(siteRoot, id)); } catch { /* 还有别的版本 */ }
-  } catch (e) {
-    return { ok: false, error: `删不掉 ${path.join(siteRoot, id, version)}：${e.message}` };
-  }
-  return { ok: true };
+  return removeSlot(siteRoot, id, version);
 }
 
+
 module.exports = {
+  // ── 对账与三个动作（同意 / 不同意 / 删掉本机那一份）──
   sync, acceptStaged, discardStaged, dropPooledVersion, noteConsent,
   siteKeyOf, siteLabelOf,
-  readRecord, writeJsonAtomic, recordPathOf, listPooled, pkgPathOf,
+  // ── 池的形状（槽位、记录表、清扫）──
+  listPooled, sweepPool, readSlot, removeSlot,
+  // ── 快照表（`.sites.json`）：整个池的引用计数，与上面那些记录表**不是一回事** ──
+  readSnapshot, writeJsonAtomic, snapshotPathOf,
+  // ── 给用例与目录模式用的纯函数 ──
   checkRelPath, checkDeclared, caseCollisions, effectiveLimits,
   deliveryOf, packageMetaProblem, fileListOf, pinVerdict, verifyStaged,
-  HARD_LIMITS, RECORD_NAME, LOCK_NAME,
+  compareTree, treeFault, recordSig, treeSignature,
+  HARD_LIMITS, SNAPSHOT_NAME, LOCK_NAME,
 };
