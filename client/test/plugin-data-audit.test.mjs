@@ -107,7 +107,8 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
   const r = run({ plugins: [oneStore()], names: [store], connections: [] });
   assert.deepEqual(r.rows, [], '它不属于任何组 ⇒ 引用计数这件事对它没有意义');
 
-  // 而它若换了版本（一个没声明 inherit 的插件升了版），旧的那一份就真的是孤儿了。
+  // 而一份**算不出来**的旧目录照样是孤儿 —— 那些名字有两条来路：v0.12 之前
+  // "缺省 = 版本号"那个缺省留下的，以及今天 `perVersion: true` 的插件升版留下的。
   const old = '01m2jkhtzgf12n0t9cb3xvk36h@0.9.0';
   const r2 = run({ plugins: [oneStore()], names: [old, store] });
   assert.deepEqual(r2.rows.map((x) => x.name), [old]);
@@ -135,7 +136,7 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
 
   // ★ **反向**：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
   //   一个"什么都报不出来"的实现也能让上面那条绿。
-  const old = disk([SSHD, '0.9.0']);           // 没声明 inherit 时第二段就是版本号
+  const old = disk([SSHD, '0.9.0']);           // 算不出来的第二段：版本形状的那一种
   const r2 = run({ plugins: [relay()], names: [], dataNames: [old], connections: [] });
   assert.deepEqual(r2.rows.map((x) => `${x.kind}:${x.name}`), [`orphan:${old}`]);
   assert.equal(r2.rows[0].deletable, true);

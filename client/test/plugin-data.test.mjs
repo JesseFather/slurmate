@@ -3,14 +3,16 @@
  *
  * 这一份要钉住的东西只有两样，而它们分属**两种不同的形状**：
  *
- *   · `inherit` 有**缺省**（不写 ⇒ 身份里带**版本号**，每个版本各一份，新版本读不到
- *     旧数据）—— 基座答得了"共享安不安全"，所以缺省落在安全侧。
+ *   · **共享组**那一格有**缺省**（两个键都不写 ⇒ 一个常量组名，所有版本共用一份）
+ *     —— 两个方向基座都填得出来，所以缺省可以填，取哪一边是一个**产品判断**。
  *   · `concurrent` **没有缺省**（作者必须写：能同时开两份，还是只能开一份）——
  *     "你的代码能不能同时处理两份"只有作者知道。`false` ⇒ 身份里**没有实例段**
  *     （同一个目录两份写是静默损坏，而两边都以为自己成功了）。
  *
- * ★ 有缺省的那一格**特别容易被改坏却全绿**：一个"永远共享"的实现能让所有"共享"的
- *   用例照常通过，只有那一条会红。所以它是这一份的主体，不是补充。
+ * ★★ 共享组那一格**翻过一次边**（v0.12：每个版本一份 → 继承），所以这一份里钉得最
+ *   死的是**三态各自算出来的第二段**：两个都不写、写 `inherit`、写 `perVersion`。
+ *   少钉任何一边，"缺省"都会悄悄退回到另一个值上，而"声明了 inherit"的那些用例
+ *   照样全绿 —— 这正是这条轴最容易出的错。
  *
  * 后半段是**清单校验**（`contributes.data` 与 `contributes.concurrent`）。它测的是
  * "作者写错了会怎样"：这一段的每一条都要求**报错里说出真正的原因** —— 那是
@@ -46,28 +48,62 @@ const concurrent = (over = {}) => plugin({
 const partitionOf = (p, instance) =>
   pluginData.partitionOf(pluginData.identityOf(p, instance));
 
-// ── 有缺省的那一格：inherit ─────────────────────────────────────────────────
+// ── 共享组那一格（有缺省）：两个键都不写 / inherit / perVersion ──────────────
 
-test('★ 缺省：不声明 inherit ⇒ 身份里带版本号（每个版本各一份）', () => {
+test('★★ 缺省：两个键都不写 ⇒ 共用一份，第二段是一个**常量**（不是版本号）', () => {
   const a = plugin({ version: '1.0.0' });
   const b = plugin({ version: '1.0.1' });
 
-  assert.deepEqual(pluginData.identityOf(a), [ID, '1.0.0']);
-  // ★ 这一条是**安全侧**：新版本拿不到旧版本的数据。反过来（默认继承）会让一个
-  //   改过数据格式的新版本读到自己读不懂的东西，而用户看到的是一片错乱的界面，
-  //   不是一句"升级之后要重配"。
-  assert.deepEqual(pluginData.identityOf(b), [ID, '1.0.1']);
-  assert.notEqual(partitionOf(a), partitionOf(b),
-    '没声明共享的两个版本必须是两份存储 —— 默认继承是一个**静默**读错数据的实现');
+  // ★ 第一句钉**取值**：第二段是那个常量。一个"缺省仍然是版本号"的实现到这里就红。
+  assert.deepEqual(pluginData.identityOf(a), [ID, pluginData.DEFAULT_GROUP]);
+  assert.deepEqual(pluginData.identityOf(b), [ID, pluginData.DEFAULT_GROUP]);
+  // ★ 第二句钉**后果**：升级不换存储 —— 这正是翻缺省要买的东西。★ 而它的代价
+  //   （一个改过数据格式的新版本会读到旧格式的东西）写在 plugin-data.js 的文件头，
+  //   出口是 `perVersion: true`（见下一条）。
+  assert.equal(partitionOf(a), partitionOf(b),
+    '缺省是**继承**：同一个插件的两个版本必须落在同一份存储上');
 
-  // data 写了、但里面没有 inherit，与完全没写是同一件事（缺省就是缺省）。
-  const empty = plugin({ contributes: { layout: true, concurrent: false, data: {} } });
-  assert.deepEqual(pluginData.identityOf(empty), [ID, '1.0.0']);
+  // `data` 写了、但两个键都不写，与完全没写、与写成 null 都是同一件事 ——
+  // ★ "缺省"不是**第三档**，它就是这个取值（所以没有"半个声明"这种状态）。
+  for (const data of [{}, null, undefined]) {
+    const p = plugin({ contributes: { layout: true, concurrent: false, data } });
+    assert.deepEqual(pluginData.identityOf(p), [ID, pluginData.DEFAULT_GROUP],
+      `data = ${JSON.stringify(data)} 必须落在缺省上`);
+  }
+});
+
+test('★ 缺省那个常量本身必须是个**合法的组名**（它进磁盘目录名）', () => {
+  assert.match(pluginData.DEFAULT_GROUP, pluginData.GROUP_RE,
+    '改名改出格 ⇒ 磁盘上会出现一个 identityOfDiskName 认不出的段');
+  // ★ 它与"作者显式写了这个名字"**同义** —— 缺省不是一种特殊状态，只是这个取值。
+  const explicit = plugin({ contributes: { layout: true, concurrent: false,
+    data: { inherit: pluginData.DEFAULT_GROUP } } });
+  assert.deepEqual(pluginData.identityOf(explicit), pluginData.identityOf(plugin()));
+});
+
+test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺省**，现在要明写）', () => {
+  const decl = (v) => plugin({ version: v,
+    contributes: { layout: true, concurrent: false, data: { perVersion: true } } });
+
+  assert.deepEqual(pluginData.identityOf(decl('1.0.0')), [ID, '1.0.0'],
+    '★ 第二段是**版本号** —— 所以它未必匹配 GROUP_RE，这正是 identityOfDiskName 不猜的原因');
+  assert.notEqual(partitionOf(decl('1.0.0')), partitionOf(decl('1.0.1')),
+    '声明的就是"升级换一份"：新版本读不到旧数据');
+  // ★ 与缺省**必须**不同 —— 否则这个键是个摆设，而上面那两句照样绿。
+  assert.notEqual(pluginData.identityOf(decl('1.0.0'))[1],
+    pluginData.identityOf(plugin())[1],
+    'perVersion 与缺省必须落在两份不同的存储上');
+
+  // 显式写 false 与不写它同义（那一格不是三态，是"要/不要"）。
+  const off = plugin({ contributes: { layout: true, concurrent: false,
+    data: { perVersion: false } } });
+  assert.deepEqual(pluginData.identityOf(off), [ID, pluginData.DEFAULT_GROUP]);
 });
 
 test('★ concurrent: false ⇒ 身份里没有实例段（那个插件同时只有一份）', () => {
   const p = plugin();
-  assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'), [ID, '1.0.0'],
+  assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'),
+    [ID, pluginData.DEFAULT_GROUP],
     '★ 实例段**整段不存在** —— 不是"用一个常量占位"');
   // ★ 这一格就是「不能多开的插件不许同时开两份」那条规则的来源：实例不同而身份相同
   //   ⇒ 两份会话写的是同一个目录。它是声明 `false` 的**推论**，不是另焊上去的限制。
@@ -183,9 +219,9 @@ const DISK_ID = '01m2jkhtzgkjbfqqtwyxmqmf2v';
 test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段，认不出残缺的', () => {
   assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@editor@l0123456789ab`),
     { id: DISK_ID, group: 'editor', instance: 'l0123456789ab' });
-  // ★ 第二段**可以是版本号**（`inherit` 缺席时它就是版本号），而 `1.0.0` 不匹配
-  //   `GROUP_RE` —— 这正是"拿逆向解析当判据"会删掉活数据的那条路：一个没声明
-  //   `inherit` 的插件，它**当前**那一份存储会被判成"认不出来"。
+  // ★ 第二段**可以是版本号**（声明了 `data.perVersion: true` 的插件就是），而
+  //   `1.0.0` 不匹配 `GROUP_RE` —— 这正是"拿逆向解析当判据"会删掉活数据的那条路：
+  //   一个 `perVersion` 的插件，它**当前**那一份存储会被判成"认不出来"。
   assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@1.0.0`),
     { id: DISK_ID, group: '1.0.0', instance: null });
 
@@ -208,10 +244,19 @@ test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', 
   assert.deepEqual([back.id, back.group, back.instance],
     [DISK_ID, 'editor', 'l0123456789ab']);
 
-  // 两段的那一种（没声明分实例、也没声明 inherit ⇒ 第二段是版本号）
-  const b = pluginData.identityOf({ id: ID, version: '2.3.4', contributes: {} });
-  const back2 = pluginData.identityOfDiskName(pluginData.diskNameOf(b));
-  assert.deepEqual([back2.id, back2.group, back2.instance], [DISK_ID, '2.3.4', null]);
+  // 两段的那一种，而第二段**两种取值都要走一遍**：
+  //   · 缺省 ⇒ 常量组名；
+  //   · `perVersion` ⇒ 版本号，★ 它不匹配 `GROUP_RE`，所以往返里它是承重的那一份
+  //     （"认得出"与"长得像组名"是两件事，`identityOfDiskName` 只要求前者）。
+  const def = pluginData.identityOf({ id: ID, version: '2.3.4', contributes: {} });
+  const back2 = pluginData.identityOfDiskName(pluginData.diskNameOf(def));
+  assert.deepEqual([back2.id, back2.group, back2.instance],
+    [DISK_ID, pluginData.DEFAULT_GROUP, null]);
+
+  const pv = pluginData.identityOf({ id: ID, version: '2.3.4',
+    contributes: { data: { perVersion: true } } });
+  const back3 = pluginData.identityOfDiskName(pluginData.diskNameOf(pv));
+  assert.deepEqual([back3.id, back3.group, back3.instance], [DISK_ID, '2.3.4', null]);
 });
 
 test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会**恒为假**', () => {
@@ -325,9 +370,12 @@ test('contributes.concurrent：★ 能多开要求 layout —— 没有组就没
 test('contributes.data：合法的收下，并且**规整成固定形状**', () => {
   const r = accept({ inherit: 'editor' });
   assert.ok(!r.error, `这份是合法的：${r.error}`);
-  assert.deepEqual(r.entry.plugin.contributes.data, { inherit: 'editor' });
-  // data 只有这一个键了 —— 实例那一轴搬到了 `contributes.concurrent`。
-  assert.deepEqual(Object.keys(r.entry.plugin.contributes.data), ['inherit']);
+  assert.deepEqual(r.entry.plugin.contributes.data,
+    { inherit: 'editor', perVersion: false });
+  // 两个键、顺序固定 —— 实例那一轴搬到了 `contributes.concurrent`，而这两个键
+  // 答的是共享组那一格（`plugin-data.js` 的 `groupOf` 读的就是它们）。
+  assert.deepEqual(Object.keys(r.entry.plugin.contributes.data),
+    ['inherit', 'perVersion']);
 
   // data 缺席 ⇒ null。"这个插件没声明"与"声明了一个空的"在这一层**不合并** ——
   // 缺省怎么回落是 plugin-data.js 的事，在这里填实等于把那条规则抄成第二份。
@@ -346,6 +394,30 @@ test('contributes.data：形状不对的一份都收不下，且报错说得清�
   for (const bad of ['..', 'a/b', 'Editor', '有中文', '-lead', '', 'a'.repeat(33)]) {
     assert.match(reject({ inherit: bad }), /inherit 必须匹配/,
       `${JSON.stringify(bad)} 不是一个能进路径的组名`);
+  }
+});
+
+test('★★ contributes.data：perVersion 与 inherit 同时写 ⇒ 拒，且点名两个键', () => {
+  // ★ 这是"两半各自都没错、错在放一起"的那一类（与 concurrent 要求 layout 同形）。
+  //   不判的话症状是**两个都"成功"**：清单里明明写着共用一份，实际落在哪一份却
+  //   取决于 `groupOf` 里两行的先后次序 —— 一个改代码顺序就会变的结论，而没有任何
+  //   东西会红。
+  const both = reject({ inherit: 'editor', perVersion: true });
+  assert.match(both, /perVersion/);
+  assert.match(both, /inherit/);
+  assert.match(both, /矛盾/);
+  assert.match(both, /editor/, '报错要把它读到的那两个值说出来');
+
+  // ★ 反例：只写一个的照常收下 —— 否则上面那一条会因为"什么都拒"而全绿。
+  assert.ok(!accept({ perVersion: true }).error, '只写 perVersion 必须合法');
+  assert.ok(!accept({ inherit: 'editor', perVersion: false }).error,
+    'perVersion: false 与 inherit 不冲突 —— 它说的正是"不要每个版本一份"');
+});
+
+test('contributes.data：perVersion 的类型不对 ⇒ 拒，且报错说得出该写什么', () => {
+  for (const bad of ['true', 1, null, {}]) {
+    assert.match(reject({ perVersion: bad }), /perVersion 必须是 true \/ false/,
+      `${JSON.stringify(bad)} 不是一个布尔值`);
   }
 });
 

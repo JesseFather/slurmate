@@ -4339,7 +4339,11 @@ exit 0
             "surface": {"kind": "web", "path": "/"},
             "login": {"path": "/login", "field": "password", "cookie": "cs"},
             "layout": True, "submitPubkey": False, "concurrent": True,
-            "data": {"inherit": "editor"},
+            # ★ 两个键都列上（值不冲突）—— 站点这一侧要**收得下** `perVersion`。
+            #   少了它，"守护进程拒了一个任何客户端都认的键"这件事只有 19.14 那条
+            #   常量比对守着；这一条把**清单那条路**也接上（19.14 证明表是对应的，
+            #   这一条证明表真的用在路上）。
+            "data": {"inherit": "editor", "perVersion": False},
         },
         "site": {"defaultCpus": 2, "defaultMem": "8G"},
     }

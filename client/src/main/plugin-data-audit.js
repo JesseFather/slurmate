@@ -17,8 +17,8 @@
  *
  * ★ **反过来做会删掉活数据**，两个坑各自都够：
  *
- *   · `identityOf` 的第二段**可以是版本号**（`inherit` 缺席时它就是版本号），
- *     所以"第二段不匹配 `GROUP_RE`"根本不意味着"这不是我们的东西"；
+ *   · `identityOf` 的第二段**可以是版本号**（声明了 `data.perVersion: true` 的
+ *     插件就是），所以"第二段不匹配 `GROUP_RE`"根本不意味着"这不是我们的东西"；
  *   · 磁盘上的名字是**折叠过**的（`MakePartitionName` = `EscapePath(ToLowerASCII(…))`，
  *     ULID 段落盘是小写）。
  *
@@ -347,8 +347,8 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
           : {
             name, places, kind: 'orphan',
             label: `${known.displayName} 的一份旧数据`,
-            why: `它记的是「${parts.group}」，而这个插件现在的版本号是 `
-              + `${known.version}${declaredGroupOf(known)}。`,
+            why: `它记的是「${parts.group}」，而这个插件现在算出来是 `
+              + `「${pluginData.groupOf(known)}」。`,
             deletable: true,
           });
         continue;
@@ -428,13 +428,6 @@ function mergeWhy(o) {
     parts.push(`插件数据目录那一根：${o.dataWhy}`);
   }
   return parts.length ? parts.join('\n') : null;
-}
-
-/** 那个插件自己声明的共享组（没声明就返回空串）—— 只用来把话说完整。 */
-function declaredGroupOf(plugin) {
-  const d = plugin && plugin.contributes && plugin.contributes.data;
-  const g = d && typeof d.inherit === 'string' ? d.inherit : '';
-  return g ? `、声明的共享组是「${g}」` : '';
 }
 
 /**

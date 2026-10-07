@@ -946,7 +946,7 @@ CONTRIBUTES_KEYS = ("surface", "login", "layout", "submitPubkey",
                     "concurrent", "data")
 SURFACE_KEYS = ("kind", "path")
 LOGIN_KEYS = ("path", "field", "cookie")
-DATA_KEYS = ("inherit",)
+DATA_KEYS = ("inherit", "perVersion")
 
 
 def _ver_segments(s, pattern):

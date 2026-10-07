@@ -514,8 +514,8 @@ const RELAY_PORT_BASE = 18090;
  *
  * ★ 这是**补上从前的洞**，不是新规矩：它钉的就是 `newLayoutId` 铸出来的那个形状。
  *
- * ★ 新模型还要往同一个字符串里再塞一个作者写的组名（清单里的
- *   `contributes.data.inherit`），所以这一格必须先关上。
+ * ★ 新模型还要往同一个字符串里再塞一个组名（清单里的 `contributes.data.inherit`，
+ *   或者两个键都不写时那个缺省常量），所以这一格必须先关上。
  */
 const LAYOUT_ID_RE = /^l[0-9a-f]{12}$/;
 

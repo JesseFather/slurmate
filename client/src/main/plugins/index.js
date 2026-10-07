@@ -130,8 +130,9 @@ const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
 //   所以客户端这一份从来没被走到过，删掉它不改变任何可达行为。
 const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey',
   'concurrent', 'data'];
-/** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头。 */
-const DATA_KEYS = ['inherit'];
+/** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头。
+ *  ★ 这两个键答的是**同一格**（身份的第二段），所以同时写是矛盾（判定在下面）。 */
+const DATA_KEYS = ['inherit', 'perVersion'];
 const SURFACE_KEYS = ['kind', 'path'];
 const SURFACE_KINDS = ['web'];
 const LOGIN_KEYS = ['path', 'field', 'cookie'];
@@ -735,7 +736,8 @@ function inspectDir(dir) {
   //   而从前它们被焊成一件（`slotOf` 只收一个 layoutId，**看不见插件**）。
   //
   // ★ **没有缺省**，与这个清单里**别的每一格**刻意相反：它们（`layout` / `submitPubkey`
-  //   / `data.inherit`）的缺省都落在安全侧、基座自己就答得了；
+  //   / `data` 底下那两个键）缺省取哪边都是基座**算得出来**的，所以它可以填
+  //   （取哪边是产品判断，见 `data` 那一段）；
   //   而这一格无论缺省取哪一边，都是基座替作者表态 —— 取"不能"，一个真能多开的
   //   作者永远不知道为什么只能开一份；取"能"，一个没想过的作者会得到一个静默的
   //   第二份。**只有他能答，所以必须他答。**
@@ -763,10 +765,18 @@ function inspectDir(dir) {
   //   进程在扫描时报错）；`data` 是客户端自己读的，所以客户端要**深究到底**。谁读
   //   决定了谁深究，而不是"哪一段更重要"。
   //
-  // ★ 深究到什么程度：组的字符集（它进分区名 = 磁盘目录名），以及那个键的类型。
+  // ★ 深究到什么程度：组的字符集（它进分区名 = 磁盘目录名），两个键的类型，以及
+  //   **两个键之间的关系**。
   //   ★ 从前这里还有**一个组合**判定（`perInstance` 要求 `layout`）—— 它现在跟着
-  //     那一格一起搬到了 `concurrent` 上（见上面）。两段声明之间的关系由**一格**
-  //     回答，而不是两处各说一半。
+  //     那一格一起搬到了 `concurrent` 上（见上面）。
+  //
+  // ★★ `inherit` 与 `perVersion` **答的是同一格**（身份的第二段：`plugin-data.js`
+  //   的 `groupOf`），所以两个同时写是**矛盾**而不是"后者覆盖前者"。这类"两半各自
+  //   都没错、错在放一起"的判定在这个函数里已经有一条先例（`concurrent` 要求
+  //   `layout`），纪律也一样：判在**装之前**，报错**点名两个键**。
+  //   ★ 不判的话症状是两个都"成功"：清单里明明写着要共用一份，而实际落在哪一份
+  //     取决于 `groupOf` 里两行的**先后次序** —— 一个改代码顺序就会变的结论，而
+  //     没有任何东西会红。
   let data = null;
   if (mfc.data !== undefined && mfc.data !== null) {
     const d = mfc.data;
@@ -789,7 +799,20 @@ function inspectDir(dir) {
         + `${pluginData.GROUP_RE}（小写字母开头，只含小写字母/数字/连字符），`
         + `现在是 ${JSON.stringify(d.inherit)}` };
     }
-    data = { inherit: d.inherit || null };
+    if (d.perVersion !== undefined && typeof d.perVersion !== 'boolean') {
+      return { error: `${mfPath}：contributes.data.perVersion 必须是 true / false `
+        + `（true = 每个版本各一份，false = 与不写它一样），`
+        + `现在是 ${JSON.stringify(d.perVersion)}` };
+    }
+    // ★ 两个键都写 ⇒ 拒。见上面那段：它们答的是同一格，谁赢不该由代码次序决定。
+    if (d.perVersion === true && d.inherit) {
+      return { error: `${mfPath}：contributes.data.perVersion: true 与 `
+        + `contributes.data.inherit: ${JSON.stringify(d.inherit)} 互相矛盾 —— `
+        + `前一个说「每个版本各一份」，后一个说「这几个版本共用`
+        + `「${d.inherit}」这一份」—— 而两者问的是同一件事（身份的第二段写什么）。`
+        + `只能留一个：要每个版本各一份就写 perVersion，要共用一份就写 inherit` };
+    }
+    data = { inherit: d.inherit || null, perVersion: d.perVersion === true };
   }
 
   // 客户端代码 —— 可有可无。没有它就是**纯声明式插件**：框架按 contributes
