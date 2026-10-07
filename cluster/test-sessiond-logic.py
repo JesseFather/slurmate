@@ -169,7 +169,11 @@ def plugin_files_of(dirpath, skip=()):
 
 
 def put_package(out_dir, files, sig_block=b"", filename=None):
-    """把一份包写进 out_dir，文件名默认是 `<包里的 id>.splug`。返回那个路径。"""
+    """把一份包写进 out_dir，文件名默认是 `<包里的 id>.splug`。返回那个路径。
+
+    ★ 这是**包来源目录**那一侧的写方（`slurmate plugin install <文件>` 的输入）。
+      站点盘上的形状是另一回事 —— 见 `install_package`。
+    """
     blob = build_package(files, sig_block)
     if filename is None:
         mf = next((b for p, b in files if p == "plugin.json"), b"{}")
@@ -178,6 +182,76 @@ def put_package(out_dir, files, sig_block=b"", filename=None):
     with open(path, "wb") as f:
         f.write(blob)
     return path
+
+
+def install_package(plugins_dir, files, sig_block=b"", plugin_id=None):
+    """把一份包**照安装器的形状**装进一个站点插件目录（一棵树 + 一份记录表）。
+
+    `files` 是 `[(路径, 字节), …]`，与 `put_package` 同一形状。返回那份**包**的字节。
+
+    ★ 为什么这一步不能省成"往目录里摆一棵树"：被测的东西**正是那个形状**
+      （记录表是提交点、扫描器逐份对账）—— 夹具绕过它就等于没测。
+    ★ 记录表走的是**实现自己的写方**（`plugin_record_of` / `write_plugin_record`）
+      —— 夹具在这里再抄一遍摘要与字段名，就会跟着实现一起漂而没人发现。
+    ★ 刻意**不经安装器**：安装器还要验签、查钥匙记录、判同 id，而那些各有各的
+      用例。这一层只负责"造出一个**已经装好**的目录"。
+    ★ `plugin_id` 覆盖**目录名**（缺省 = 清单里的 id）。造"目录名与清单里的 id
+      不一致"那种坏形状时用它 —— 那是 F21 在新形状下的落点。
+    """
+    blob = build_package(files, sig_block)
+    r = MOD.package_parse(blob)
+    if not r["ok"]:
+        raise AssertionError("夹具自己造的包不成立：%s —— %s" % (r["code"], r["why"]))
+    pid = plugin_id or json.loads(dict(files)["plugin.json"].decode("utf-8"))["id"]
+    tree = MOD.plugin_tree_dir(plugins_dir, pid)
+    os.makedirs(plugins_dir, exist_ok=True)
+    # ★ 先清掉同一个 id 上一次那一份 —— 安装器换树是**整棵换掉**（见
+    #   `_install_plugin_tree`），而"往里加几份文件"会在树上留下上一版的残骸，
+    #   于是对账报"盘上有、记录表里没有" —— 那是一条**假**的篡改指控。
+    shutil.rmtree(tree, ignore_errors=True)
+    try:
+        os.unlink(MOD.plugin_record_path(plugins_dir, pid))
+    except OSError:
+        pass
+    for f in r["files"]:
+        full = os.path.join(tree, f["path"].replace("/", os.sep))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as fh:
+            fh.write(r["data"][f["offset"]:f["offset"] + f["size"]])
+    MOD.write_plugin_record(plugins_dir, pid, MOD.plugin_record_of(r))
+    return blob
+
+
+def tree_digest(root):
+    """一棵目录树的确定性摘要：逐份「相对路径 ‖ 0x00 ‖ sha256(内容) ‖ 0x0A」再 sha256。
+
+    ★ 用例用它断言"盘上那一份一个字节都没被动"。**按路径排序**，与 §3.4 同一条
+      排序规则 —— 一个只看文件名的断言会被"内容换了而文件名没换"骗过去。
+    """
+    h = hashlib.sha256()
+    out = []
+    for dirpath, dirnames, names in os.walk(root):
+        dirnames.sort()
+        for n in sorted(names):
+            full = os.path.join(dirpath, n)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            with open(full, "rb") as f:
+                out.append((rel, hashlib.sha256(f.read()).hexdigest()))
+    for rel, d in sorted(out):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(d.encode("ascii"))
+        h.update(b"\x0a")
+    return h.hexdigest()
+
+
+def file_digest(path):
+    """一个文件的 sha256；不在就是空串（对"一个字节都没动"那类断言友好）。"""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
 
 
 def openssl_bin():
@@ -243,7 +317,7 @@ def sign_files(files, pem, pubkey):
     return build_package(files, bytes([1]) + pubkey + sig)
 
 
-def weave_one(tpl_path, plugin_pkg, name, ulid, out_path):
+def weave_one(tpl_path, install_dir, name, ulid, out_path):
     """照安装器的做法，把**一个**插件的 job/start.sh 织进模板。
 
     ★ 一个插件一份：这里与安装器是同一段 awk、同一个标记、同样只放一个块。
@@ -251,11 +325,12 @@ def weave_one(tpl_path, plugin_pkg, name, ulid, out_path):
       而实现的织法自己有用例钉着（19.19 ③）。
       返回 awk 的 CompletedProcess（调用方要断言 returncode）。
 
-    ★ 作业侧那一份现在是从**包里**取的（`--extract-package`），与安装器走
-      同一条路 —— 服务器上没有源码树可以读。
+    ★ 作业侧那一份从**那棵树**里取（`<install_dir>/job/start.sh`），与安装器走
+      同一条路 —— v0.13 起站点上就是一棵树（从前是 `--extract-package` 从包里取）。
     """
     blocks = out_path + ".blocks"
-    body = MOD.package_extract(plugin_pkg, "job/start.sh").decode("utf-8")
+    with open(os.path.join(install_dir, "job", "start.sh"), "rb") as _f:
+        body = _f.read().decode("utf-8")
     with open(blocks, "w", encoding="utf-8") as f:
         f.write("\n# ─── 插件 %s（id %s）──────────────────────────────\n%s\n"
                 % (name, ulid, body))
@@ -324,8 +399,9 @@ def make_config(mod, tmpdir):
     #
     #    ★ 刻意用**真的那两个**而不是合成替身：插件与基座的接口正是这一版反复在
     #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
-    #    ★ 也是**真的打包**（走 build_package 那个容器），不是绕过包直接摆一棵树：
-    #      "插件是一个包"正是这一版要测的东西，夹具绕过它就等于没测。
+    #    ★ 也是**真的打包**（走 build_package 那个容器）、再**照安装器的形状解开**
+    #      （`install_package` → 一棵树 + 一份记录表），不是绕过这两步直接摆一棵树：
+    #      "装出来是一棵能对账的树"正是这一版要测的东西，夹具绕过它就等于没测。
     plugins_src = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
     plugins_dir = os.path.join(tmpdir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)
@@ -333,8 +409,8 @@ def make_config(mod, tmpdir):
         _d = os.path.join(plugins_src, _name)
         if not os.path.isfile(os.path.join(_d, "plugin.json")):
             continue
-        put_package(plugins_dir,
-                    plugin_files_of(_d, skip=mod.PLUGIN_COPY_SKIP))
+        install_package(plugins_dir,
+                        plugin_files_of(_d, skip=mod.PLUGIN_COPY_SKIP))
     mod.default_plugins_dir = lambda: plugins_dir
 
     # 5. **作业脚本目录** —— 按各插件的 ULID 真织一遍（见上面第 2 条的说明）。
@@ -346,7 +422,7 @@ def make_config(mod, tmpdir):
     for _s in _specs:
         if not _s.needs_job:
             continue
-        weave_one(os.path.join(HERE, "run.sbatch"), _s.source_package, _s.name,
+        weave_one(os.path.join(HERE, "run.sbatch"), _s.install_dir, _s.name,
                   _s.id, os.path.join(jobs_dir, _s.id + ".sbatch"))
     mod.default_jobs_dir = lambda: jobs_dir
     return mod.Config(p)
@@ -1692,15 +1768,22 @@ exit 0
              _cfg.plugins_by_id, _cfg.enabled_kinds) = _saved
         return _restore
 
-    # ★ 这里从前写的是 `*/plugin.json` + "放一个目录" —— 那是 v0.6 的布局。
     print("\n  -- 19.0 扫出来的插件表 --")
     check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
           sorted(cfg.plugins_by_name) == [CS, SSHD], str(sorted(cfg.plugins_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
-    check("每个 spec 都记得自己的**包**在哪（分发与报错都用它）",
-          all(s.source_package and s.source_package.endswith(mod.PLUGIN_PACKAGE_SUFFIX)
+    # ★ v0.13 起一个插件在站点上是**一棵树 + 一份记录表**：树按 id 命名，记录表
+    #   就在它旁边。两条都要在 —— 只有树没有记录表 = 那次安装没提交。
+    check("每个 spec 都记得自己的**树**在哪，而它旁边有记录表（分发与报错都用它）",
+          all(s.install_dir
+              and os.path.isdir(s.install_dir)
+              and os.path.basename(s.install_dir) == s.id
+              and os.path.isfile(mod.plugin_record_path(cfg.plugins_dir, s.id))
               for s in cfg.plugin_specs),
-          str([s.source_package for s in cfg.plugin_specs]))
+          str([s.install_dir for s in cfg.plugin_specs]))
+    check("★ 而站点盘上**没有** `.splug`（容器只是运输形状，不是存储形状）",
+          not [n for n in os.listdir(cfg.plugins_dir) if n.endswith(".splug")],
+          str(sorted(os.listdir(cfg.plugins_dir))))
     check("★ job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
           cfg.resolve_plugin(CS)[0].job_entry == "start_code_server"
           and cfg.resolve_plugin(SSHD)[0].job_entry == "start_sshd",
@@ -1721,39 +1804,99 @@ exit 0
               os.path.isfile(os.path.join(cfg.jobs_dir, _s.id + ".sbatch")),
               os.path.join(cfg.jobs_dir, _s.id + ".sbatch"))
 
-    # 坏掉的包：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
+    # 坏掉的东西：**跳过并报出来，但绝不让守护进程起不来**。一个插件坏了不该
     # 带走整个站点 —— 而静默跳过同样不行（"我明明装了啊"会变成一句谁也答不上来的话）。
+    #
+    # ★★ v0.13 起"坏掉"有**五种形状**，而且它们的处置**不完全一样**：
+    #      · 树与记录表对不上（有人在装完之后动了它）  ⇒ 报**点名哪一份**，不删
+    #      · 一棵树**没有记录表**（那次安装没提交）     ⇒ 报，**不删**
+    #      · 目录名不是一个 id                         ⇒ 报，不删
+    #      · 一个 `.splug` 文件（旧形状 / 手放的包）    ⇒ 报，不删
+    #      · 别的一个普通文件                          ⇒ 报，不删
+    #   ★ **一条都不删**，而且这是**故意的**：那一格可能有管理员手放的东西，而
+    #     "少收一个插件"与"删掉别人的东西"不是同一个量级。客户端池那一侧正好相反
+    #     （那里只有对账在写）—— 两处的方向**刻意不同**。
     _baddir = os.path.join(tmpdir, "plugins-broken")
     os.makedirs(_baddir, exist_ok=True)
     with open(os.path.join(HERE, os.pardir, "plugins", CS, "plugin.json"),
               "rb") as _f:
         _cs_manifest = _f.read()
-    put_package(_baddir, [("plugin.json", _cs_manifest)])          # 好的那一份
-    # 坏①：根本不是包（下载了一半的字节）
-    with open(os.path.join(_baddir, "half-download.splug"), "wb") as _f:
-        _f.write(b"splug\x1a\r\n\x00\x00")
-    # 坏②：是一个能解析的包，但负载里没有 plugin.json
-    put_package(_baddir, [("README.md", b"x\n")],
+    install_package(_baddir, [("plugin.json", _cs_manifest)])      # 好的那一份
+    # 坏①：一棵树被改过一个字节（记录表还在，而里面的 sha256 对不上了）
+    _BAD1 = "01M2JKHTZGKJBFQQTWYXMQMF70"
+    install_package(_baddir, [
+        ("plugin.json", json.dumps(
+            {"id": _BAD1, "name": "tampered", "version": "1.0.0",
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+        ("job/start.sh", b"start_tampered() { :; }\n")])
+    # ★ **原地改一个字节、长度不动**：这样拦住它的是"sha256 不符"那一支，
+    #   而不是"字节数不符"那一支。两句话都在，但只有前者说得清"内容变了" ——
+    #   而后者的存在会让一个把内容比对照抄错的实现照样绿（这正是 M2 变异
+    #   第一次没红的原因）。
+    _tp1 = os.path.join(mod.plugin_tree_dir(_baddir, _BAD1), "job", "start.sh")
+    with open(_tp1, "r+b") as _f:
+        _one = _f.read(1)
+        _f.seek(0)
+        _f.write(bytes([_one[0] ^ 0x01]))
+    # 坏②：一棵树**没有记录表**（安装被打断，或者有人手放了一棵源码树）
+    _BAD2 = "01M2JKHTZGKJBFQQTWYXMQMF71"
+    _t2 = mod.plugin_tree_dir(_baddir, _BAD2)
+    os.makedirs(_t2, exist_ok=True)
+    with open(os.path.join(_t2, "plugin.json"), "wb") as _f:
+        _f.write(_cs_manifest)
+    # 坏③：一个 `.splug`（旧形状：容器是运输形状，站点盘上不该有它）
+    put_package(_baddir, [("plugin.json", _cs_manifest)],
                 filename="01M2JKHTZGQ7X8V4T5R6N7B8C9.splug")
-    # 坏③：**一个目录**（不是包）。它不是"跳过"，是一条明确的错误 ——
-    #       因为目录既不会被分发、也不会被读到，留着就是一份看不见的副本。
+    # 坏④：**一个目录**，名字不是一个 id
     os.makedirs(os.path.join(_baddir, "old-layout"), exist_ok=True)
     with open(os.path.join(_baddir, "old-layout", "plugin.json"), "wb") as _f:
         _f.write(_cs_manifest)
+    # 坏⑤：**有记录表、没有那棵树** —— 与"没有记录表"正好相反（那一个是"没提交"，
+    #      这一个是"已提交而内容不见了"）。★ 孤儿记录表若不报出来，就等于
+    #      **静默忽略**一份写着全部真相（逐份 sha256 + 签名）的文件。
+    _BAD3 = "01M2JKHTZGKJBFQQTWYXMQMF73"
+    mod.write_plugin_record(_baddir, _BAD3, mod.plugin_record_of(
+        mod.package_parse(build_package([("plugin.json", _cs_manifest)]))))
     _specs2, _probs2 = mod.scan_plugins(_baddir)
-    check("★ 一个坏包不会让守护进程起不来（跳过它，其余照常）",
+    check("★ 坏掉的东西不会让守护进程起不来（跳过它们，其余照常）",
           [s.name for s in _specs2] == [CS], str([s.name for s in _specs2]))
-    check("★ 但它必须被**报出来**，而且点名是哪一个",
-          len(_probs2) == 3 and any("half-download" in p for p in _probs2)
+    check("★ 但它们必须被**逐条报出来**，而且点名是哪一个",
+          len(_probs2) == 5 and any("job/start.sh" in p for p in _probs2)
+          and any(_BAD2 in p for p in _probs2)
           and any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p for p in _probs2)
-          and any("old-layout" in p for p in _probs2),
-          str(_probs2))
+          and any("old-layout" in p for p in _probs2)
+          and any(_BAD3 in p for p in _probs2),
+          str(_probs2)[:900])
+    check("★★ 孤儿记录表那条说的是「有记录表、没有那棵树」（不是一句笼统的「坏了」）",
+          any(_BAD3 in p and "记录表" in p and "提交点" in p for p in _probs2),
+          str([p for p in _probs2 if _BAD3 in p])[:400])
+    # ★★ 这一条是本版的主题：**逐份比对**，不是"整棵树一个摘要"。只有前者说得
+    #    出"是哪一份被动过"，而那一句话决定了运维是去查一个文件还是去查一整棵树。
+    check("★★ 被改过的那一棵树：报出来的话**点名是哪一份文件**",
+          any(_BAD1 in p and "job/start.sh" in p for p in _probs2),
+          str([p for p in _probs2 if _BAD1 in p])[:400])
+    check("★★ 而那句话说的是「与记录表不符」，不是一句含糊的「坏了」",
+          any(_BAD1 in p and "记录表" in p and "sa256" not in p for p in _probs2),
+          str([p for p in _probs2 if _BAD1 in p])[:400])
     # ★ 报出来必须**给出下一步** —— 只诊断不指出路，等于把"这怎么办"留给运维猜。
-    #   现在没有任何东西会去清它（自动迁移在 v0.7 删掉了），所以这两条是全部的出口。
     check("★★ 目录那条错误给出下一步（打包或删掉），不是只诊断",
           any("old-layout" in p and "packer build" in p and "删掉" in p
               for p in _probs2),
           str([p[:80] for p in _probs2]))
+    check("★ 旧形状的 `.splug` 那条也给出下一步（用安装器装一次就变成新形状）",
+          any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p and "plugin install" in p
+              for p in _probs2),
+          str([p[:120] for p in _probs2 if "01M2JKHTZGQ7X8V4T5R6N7B8C9" in p]))
+    # ★★ **一条都没被删**。这是本文件里最要紧的一条纪律的两个方向之一（另一个
+    #    在客户端池：那边"没记录表的目录"是要清掉的）。
+    check("★★ 那些坏东西**一个都没被删**（那一格可能有管理员手放的东西）",
+          os.path.isdir(mod.plugin_tree_dir(_baddir, _BAD1))
+          and os.path.isdir(_t2)
+          and os.path.isfile(os.path.join(
+              _baddir, "01M2JKHTZGQ7X8V4T5R6N7B8C9.splug"))
+          and os.path.isdir(os.path.join(_baddir, "old-layout"))
+          and os.path.isfile(mod.plugin_record_path(_baddir, _BAD3)),
+          str(sorted(os.listdir(_baddir))))
     # ★ 而**非包非目录**的普通文件同样报出来：`PLUGINS_SRC` 里放错东西时，
     #   预检就该红，而不是等到守护进程扫完一圈什么都不说。
     _stray = os.path.join(tmpdir, "plugins-stray")
@@ -1782,7 +1925,16 @@ exit 0
         # 一个与短名无关的名字。
         d = os.path.join(tmpdir, "mf-%d" % time.time_ns())
         os.makedirs(d, exist_ok=True)
-        put_package(d, [("plugin.json", text.encode("utf-8"))], filename=name)
+        try:
+            install_package(d, [("plugin.json", text.encode("utf-8"))])
+        except (AssertionError, KeyError, ValueError):
+            # 清单本身就不合法的那些（连 id 都没有）—— 装不进一棵树，但
+            # `scan_plugins` 要能把它们报出来。这里照"一棵树 + 一份记录表"的
+            # 形状摆一份**不带记录表**的：判据落在清单那一关上。
+            _t = os.path.join(d, name[:-len(".splug")])
+            os.makedirs(_t, exist_ok=True)
+            with open(os.path.join(_t, "plugin.json"), "wb") as _f:
+                _f.write(text.encode("utf-8"))
         return mod.scan_plugins(d)
 
     _okmf = json.dumps({
@@ -1881,7 +2033,7 @@ exit 0
     os.makedirs(_nupdir, exist_ok=True)
     for _ver, _uid in (("1.0.0", "01M2JKHTZGKJBFQQTWYXMQMF2V"),
                        ("2.0.0", "01M2JKHTZGKJBFQQTWYXMQMF3A")):
-        put_package(_nupdir, [("plugin.json", json.dumps(
+        install_package(_nupdir, [("plugin.json", json.dumps(
             {"id": _uid, "name": "jup", "version": _ver,
              "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
     _s3, _p3 = mod.scan_plugins(_nupdir)
@@ -1892,31 +2044,40 @@ exit 0
           [s.id for s in _s3] == sorted(s.id for s in _s3),
           str([s.id for s in _s3]))
 
-    # ── id 撞车：**两个都不收**（F21）────────────────────────────────────
+    # ── 同一个 id 的两份内容：**两个都不收**（F21）────────────────────────
     #
-    # 同一个 **id** 的两个包 = 同一个插件的两份作业侧代码。安装器织出来的
-    # 作业脚本按 **id** 命名（`jobs/<id>.sbatch`），后织的会**静默覆盖**先织的。
+    # 同一个 **id** 的两份内容 = 同一个插件的两份作业侧代码。织出来的作业脚本按
+    # **id** 命名（`jobs/<id>.sbatch`），后织的会**静默覆盖**先织的，其中一个
+    # 插件的作业侧代码**整个丢掉** —— 而"哪一个赢了"取决于目录的字典序。
     #
-    # ★ 这个形状**正常装不出来**：安装器按 id 给文件命名（两个同 id 的包会落在
-    #   同一个文件名上），而它在装的那一刻就拒（见 19.15）。所以这条测的是
-    #   **绕过安装器**那条路 —— 那正是 `scan_plugins` 作为"启动时最后一道"
-    #   存在的理由。
-    # ★★ 也正因为如此，这里必须**显式给两个不同的文件名**：`put_package` 的
-    #   缺省文件名取自包里的 id，那样第二个会把第一个覆盖掉，这条用例连两行
-    #   都走不到（而它会以"绿"收场）。
+    # ★★ v0.13 起这条判据换了形式，但**没有消失**：一个插件的存储键**就是它的
+    #    id**（`<plugins_dir>/<id>/`），所以"两棵树各自声称同一个 id"这件事被
+    #    落成了"**目录名必须等于清单里的 id**"（`plugin_reconcile` 里那条）。
+    #    少了它，两棵名字不同的树可以都声称同一个 id，而扫描器会照样把两条都收下 ——
+    #    于是 F21 原样回来。
+    #
+    # ★ 这个形状**正常装不出来**：安装器按 id 命名目录、装的时候就拒同 id。所以
+    #   这条测的是**绕过安装器**那条路 —— 那正是 `scan_plugins` 作为"启动时最后
+    #   一道"存在的理由。
     _iddir = os.path.join(tmpdir, "plugins-iddup")
     os.makedirs(_iddir, exist_ok=True)
-    for _fname, _nm in (("one.splug", "jup"), ("two.splug", "jupyter")):
-        put_package(_iddir, [("plugin.json", json.dumps(
-            {"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": _nm, "version": "1.0.0",
-             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))],
-            filename=_fname)
+    _ID_C = "01M2JKHTZGKJBFQQTWYXMQMF2V"
+    install_package(_iddir, [("plugin.json", json.dumps(
+        {"id": _ID_C, "name": "jup", "version": "1.0.0",
+         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
+    # 第二棵：**目录名是另一个合法 id**，而清单里写的是上面那个 id。
+    _ID_D = "01M2JKHTZGKJBFQQTWYXMQMF72"
+    install_package(_iddir, [("plugin.json", json.dumps(
+        {"id": _ID_C, "name": "jupyter", "version": "1.0.0",
+         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))],
+        plugin_id=_ID_D)
     _s4, _p4 = mod.scan_plugins(_iddir)
-    check("★★ 两个包共用同一个 **id** → 两个都不加载（同一个身份两份作业侧代码）",
-          _s4 == () and any("同一个插件" in p for p in _p4), "%s / %s" % (_s4, _p4))
-    check("★ 而且点名是哪两个包、并指出正常路径装不出这个形状",
-          "one.splug" in " ".join(_p4) and "two.splug" in " ".join(_p4)
-          and "安装器" in " ".join(_p4), " ".join(_p4)[:240])
+    check("★★ 一棵树顶着**别人的 id** → 它不加载（否则同一个 id 会有两份作业侧代码）",
+          [x.id for x in _s4] == [_ID_C] and len(_p4) == 1,
+          "%s / %s" % ([(x.name, x.id) for x in _s4], _p4))
+    check("★ 而且点名是哪个目录、清单里写的是哪个 id、以及为什么这会是问题",
+          _ID_D in " ".join(_p4) and _ID_C in " ".join(_p4)
+          and "id" in " ".join(_p4), " ".join(_p4)[:300])
 
     # ── ★★ 那些**没能加载**的包必须到得了客户端（F22）────────────────────
     #
@@ -1939,12 +2100,12 @@ exit 0
         check("★★ 站点级的问题**进了 op_plugins 的回包**（顶层 problems，F22）",
               isinstance(_pmd.get("problems"), list) and len(_pmd["problems"]) == 1,
               str(_pmd.get("problems"))[:240])
-        check("★ 而且客户端看得到是哪两个包 —— 不再是「本站没有这个插件」",
-              "one.splug" in " ".join(_pmd.get("problems") or [])
-              and "two.splug" in " ".join(_pmd.get("problems") or []),
+        check("★ 而且客户端看得到是哪个目录 —— 不再是「本站没有这个插件」",
+              _ID_D in " ".join(_pmd.get("problems") or []),
               str(_pmd.get("problems"))[:240])
-        check("★ 它**不影响能用的那些**：这个目录里一个能用的都没有，所以是空表",
-              _pmd.get("plugins") == [], str(_pmd.get("plugins"))[:160])
+        check("★ 它**不影响能用的那些**：能用的那一个照样报出来（一个坏的不带走另一个）",
+              [x["id"] for x in _pmd.get("plugins") or []] == [_ID_C],
+              str(_pmd.get("plugins"))[:200])
     finally:
         mod.default_plugins_dir = _saved_dir_fn
         d.cfg = _saved_cfg_for_problems
@@ -2107,22 +2268,22 @@ exit 0
     # 分两处（装：拒绝写入；扫：跳过并报一条 problem），两处都要验。
     _engdir = os.path.join(tmpdir, "plugins-engines")
     os.makedirs(_engdir, exist_ok=True)
-    _engpkg = put_package(
-        tmpdir, [("job/start.sh", b"start_e() { :; }\n"),
-                 ("plugin.json", json.dumps({
-                     "id": "01M2JKHTZGKJBFQQTWYXMQMF2W", "name": "eng",
-                     "displayName": "要新基座", "version": "1.0.0",
-                     "engines": {"slurmate": ">=99.0"},
-                     "site": {"defaultCpus": 1, "defaultMem": "1G",
-                              "bin": {"env": "SLURMATE_E_BIN", "discovery": "which",
-                                      "name": "e", "fallback": "/usr/bin/e"}}})
-                    .encode("utf-8"))],
-        filename="engines-too-new.splug")
+    _eng_files = [("job/start.sh", b"start_e() { :; }\n"),
+                  ("plugin.json", json.dumps({
+                      "id": "01M2JKHTZGKJBFQQTWYXMQMF2W", "name": "eng",
+                      "displayName": "要新基座", "version": "1.0.0",
+                      "engines": {"slurmate": ">=99.0"},
+                      "site": {"defaultCpus": 1, "defaultMem": "1G",
+                               "bin": {"env": "SLURMATE_E_BIN", "discovery": "which",
+                                       "name": "e", "fallback": "/usr/bin/e"}}})
+                     .encode("utf-8"))]
+    _engpkg = put_package(tmpdir, _eng_files, filename="engines-too-new.splug")
     _say = []
     _rc = mod.install_plugins([_engpkg], _engdir,
                               say=lambda *a: _say.append(" ".join(str(x) for x in a)))
     _out = "\n".join(_say)
-    _dest = os.path.join(_engdir, "01M2JKHTZGKJBFQQTWYXMQMF2W.splug")
+    _dest_id = "01M2JKHTZGKJBFQQTWYXMQMF2W"
+    _dest = os.path.join(_engdir, _dest_id + ".json")
     # ★ 两条断言合成一条，是**故意的**：`rc != 0` 单独看会被"输入那一关"假绿
     #   （不是 root、组可写……任何一条都会让它非零），而"理由里有 >=99.0"只有在
     #   **真的走到 engines 那条判据**时才成立。分开写，前一条就是一句空话。
@@ -2134,7 +2295,10 @@ exit 0
 
     # 手放进目录（绕过安装器）的那一份：`scan_plugins` **跳过并报一条**，
     # 而不是让守护进程起不来 —— 一个插件坏了不该带走整个站点。
-    shutil.copyfile(_engpkg, _dest)
+    # ★ v0.13 起"手放"= 自己把那棵树与记录表摆进去（`install_package`），而
+    #   `scan_plugins` 的对账**不看 engines** —— 那一关在 `parse_plugin_manifest`，
+    #   正是这里要验的那一步。
+    install_package(_engdir, _eng_files, plugin_id=_dest_id)
     _specs6, _probs6 = mod.scan_plugins(_engdir)
     check("★ 手放进目录的同一个包：扫的时候**跳过并报一条 problem**（不带走整个站点）",
           _specs6 == () and any(">=99.0" in p for p in _probs6), str(_probs6)[:300])
@@ -2157,7 +2321,7 @@ exit 0
     # 然后走一遍：扫描 → 插件配置 → 提交 → 环境变量 → op_plugins。
     _thirddir = os.path.join(tmpdir, "plugins-third")
     os.makedirs(_thirddir, exist_ok=True)
-    put_package(_thirddir, [
+    install_package(_thirddir, [
         # 作业侧那一半。**必须真的放一份**：没有它这个插件就是"合法但提交不了"，
         # 而这一节要验的恰恰是"能提交"。没有作业侧那一态由 19.0e 专门覆盖。
         ("job/start.sh", b"start_jup() { :; }\n"),
@@ -2251,7 +2415,7 @@ exit 0
     #   · `op_plugins` 的 can_submit=false —— 界面据此画灰按钮，用户不必点了才知道。
     _nojdir = os.path.join(tmpdir, "plugins-nojob")
     os.makedirs(_nojdir, exist_ok=True)
-    put_package(_nojdir, [("plugin.json", json.dumps({
+    install_package(_nojdir, [("plugin.json", json.dumps({
         "id": "01M2JKHTZGKJBFQQTWYXMQMF30", "name": "decl",
         "version": "1.0.0", "displayName": "声明式",
         "engines": {"slurmate": ">=0.5"},
@@ -2262,10 +2426,10 @@ exit 0
     _decl = _specs5[0]
     check("★ 它被记为「没有作业侧」，而不是「坏掉的插件」",
           _decl.needs_job is False, str(_decl.needs_job))
-    check("★ 判据来自**包里的记录表**（服务器上没有磁盘上的 job/start.sh 可查）",
+    check("★ 判据来自**记录表**（服务器上没有源码树可以查，树就是真相）",
           "job/start.sh" not in [f["path"] for f in
-                                 mod.package_read_file(_decl.source_package)["files"]],
-          _decl.source_package)
+                                 mod.read_plugin_record(_nojdir, _decl.id)["record"]["files"]],
+          _decl.install_dir)
 
     _saved_missing = cfg.plugin_job_missing
     _saved_default = cfg.default_plugin
@@ -2929,7 +3093,7 @@ exit 0
                '    echo "NodeName=n1 NodeAddr=192.0.2.11 State=IDLE'
                ' Gres=gpu:a100:2 Partitions=A6000" ;;\n'
                'esac\n')
-    put_package(_eplug, [("plugin.json", json.dumps({
+    install_package(_eplug, [("plugin.json", json.dumps({
         "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "sshd",
         "version": "1.0.0",
         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
@@ -3453,14 +3617,17 @@ exit 0
     for _n in (CS, SSHD):
         _spec = cfg.resolve_plugin(_n)[0]
         _info = (_pk4.get(_n) or {}).get("package") or {}
-        _disk = mod.package_read_file(_spec.source_package)
-        check("★★ op_plugins 报的 package 三样事实与**盘上那一份包**相符（「%s」）" % _n,
-              _info.get("format") == mod.PACKAGE_FORMAT
-              and _info.get("bytes") == len(_disk.get("data") or b"")
+        # ★ v0.13 起"盘上那一份"是**一棵树 + 一份记录表**：把这两样现对一遍账，
+        #   再照记录表重打一个包 —— 报出去的三样事实必须与它相符。
+        _blob, _disk = mod.plugin_rebuild(cfg.plugins_dir, _spec.id)
+        check("★★ op_plugins 报的 package 三样事实与**现打出来的那一份**相符（「%s」）" % _n,
+              _disk["ok"] and _blob is not None
+              and _info.get("format") == mod.PACKAGE_FORMAT
+              and _info.get("bytes") == len(_blob)
               and _info.get("digest") == _disk.get("digest")
               and _info.get("digest"),
-              "%s vs format=%s bytes=%s digest=%s"
-              % (_info, _disk.get("format"), len(_disk.get("data") or b""),
+              "%s vs ok=%s bytes=%s digest=%s"
+              % (_info, _disk.get("ok"), _blob and len(_blob),
                  _disk.get("digest")))
 
     _lim4 = ((_pp({"op": "plugins"}).get("data") or {}).get("limits") or {})
@@ -3478,9 +3645,23 @@ exit 0
     _dg_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
                                  b'"version":"1.0.0"}' % _cs4.id.encode()),
                  ("client/index.js", b"module.exports = {};\n")]
-    _sigblock = b"\x01" + b"\x11" * 32 + b"\x22" * 64
+    # ★★ 那一个"补了签名块"的包**必须用真签名**：v0.13 起站点在**每次对账时**
+    #   验签（记录表里的 sha256 列本身没有认证，签名是它的解药），所以一个随手编
+    #   的签名块根本装不进去、也扫不出来。用假签名测，测到的是"验签把这一份拒了"，
+    #   与这一节要验的"摘要不看信封"是两回事。
+    if not openssl_bin():
+        check("★★ 本机没有 openssl —— 这一节要的「补一个真签名块」测不了"
+              "（不是「跳过」，是这条判据的核心没被验到）", False, "装一个 openssl 再跑")
+    _k4 = openssl_make_key(tmpdir, "k4")
+    _sigblock = None
+    if _k4:
+        _dg_digest = mod.package_parse(build_package(_dg_files))["digest"]
+        _dg_sig = openssl_sign(_k4[0], bytes.fromhex(_dg_digest))
+        if _dg_sig:
+            _sigblock = bytes([1]) + _k4[1] + _dg_sig
+    check("测试用的那把 Ed25519 钥匙造出来了，而且签得动", _sigblock is not None)
     _plain_bytes = build_package(_dg_files)
-    _signed_bytes = build_package(_dg_files, _sigblock)
+    _signed_bytes = build_package(_dg_files, _sigblock or b"")
     _plain = mod.package_parse(_plain_bytes)
     _signed = mod.package_parse(_signed_bytes)
     check("这条用例自己的前提：两份都能解析，而**容器字节**确实不同",
@@ -3496,16 +3677,18 @@ exit 0
 
     _fx4 = os.path.join(tmpdir, "siteplug-pkgpath")
     os.makedirs(_fx4, exist_ok=True)
-    _dg_name = "01M2JKHTZGKJBFQQTWYXMQMFDG.splug"
-    _saved_src4 = _cs4.source_package
+    _saved_src4 = _cs4.install_dir
     try:
-        _dg_a = put_package(_fx4, _dg_files, filename=_dg_name)
-        _cs4.source_package = _dg_a
+        # ★ v0.13 起"盘上那一份"是**一棵树 + 一份记录表**，所以换内容 = 换那棵树
+        #   （`install_package` 照安装器的形状摆一份）。`spec.install_dir` 是这里
+        #   唯一的指针 —— 记录表就住在它旁边，见 `plugin_record_path()`。
+        install_package(_fx4, _dg_files)
+        _cs4.install_dir = mod.plugin_tree_dir(_fx4, _cs4.id)
         _d4._plugin_cache.clear()          # 清缓存 = 模拟"守护进程重启一次"
         _a_pkg = (_plug_of(CS) or {}).get("package") or {}
 
         # 同一个负载、换成一个**带签名块**的包（容器字节变长 97 字节）
-        put_package(_fx4, _dg_files, sig_block=_sigblock, filename=_dg_name)
+        install_package(_fx4, _dg_files, sig_block=_sigblock)
         _d4._plugin_cache.clear()
         _b_plug = _plug_of(CS) or {}
         _b_pkg = _b_plug.get("package") or {}
@@ -3515,14 +3698,14 @@ exit 0
               and _a_pkg.get("digest") == _b_pkg.get("digest") and _a_pkg.get("digest"),
               "%s vs %s" % (_a_pkg, _b_pkg))
 
-        # ── 整包取：字节逐字节等于盘上那一份 ──
+        # ── 整包取：字节逐字节等于**现打出来的那一份** ──
         _pr = _pp({"op": "plugin_package", "id": _cs4.id, "version": _cs4.version})
         _pd = _pr.get("data") or {}
         _got = base64.b64decode(_pd.get("data") or "")
-        _cur = mod.package_read_file(_cs4.source_package)
-        check("★★ op_plugin_package 发回来的字节与盘上那份包**逐字节全等**",
-              _got == (_cur.get("data") or b"") and len(_got) > 0,
-              "%d vs %d 字节" % (len(_got), len(_cur.get("data") or b"")))
+        _want4, _wr = mod.plugin_rebuild(_fx4, _cs4.id)
+        check("★★ op_plugin_package 发回来的字节与你照记录表现打的那一份**逐字节全等**",
+              _wr["ok"] and _got == _want4 and len(_got) > 0,
+              "%d vs %d 字节" % (len(_got), len(_want4 or b"")))
         check("★ 报回的 format/bytes/digest 与 op_plugins 那一轮报的**同一个值**",
               (_pd.get("format"), _pd.get("bytes"), _pd.get("digest"))
               == (_b_pkg.get("format"), _b_pkg.get("bytes"), _b_pkg.get("digest")),
@@ -3540,21 +3723,28 @@ exit 0
               _uc4 == 3 and _uk4 == "plugin_unknown",
               "code=%s kind=%s detail=%s" % (_uc4, _uk4, _ud4[:60]))
 
-        # ★ 启动之后包被换过：**要说出来**，而不是把对不上的字节发出去
+        # ★ 启动之后**那棵树被换过**：**要说出来**，而不是把对不上的字节发出去
         #   让客户端去报"校验不过"（那是同一个事实，但会让运维去查错的地方）。
-        put_package(_fx4, _dg_files, filename=_dg_name)     # 换回不带签名的那一份
+        #
+        # ★ v0.13 起这件事**自己就会被发现**：出口每次都重新对账（读记录表 + 逐份
+        #   比 + 验签），所以"就地改一个字节"在下一次取的时候就对不上账了 ——
+        #   而**只是把记录表换掉**（树不动）也会，因为摘要从记录表重算、签名盖的是它。
+        _tree4 = mod.plugin_tree_dir(_fx4, _cs4.id)
+        with open(os.path.join(_tree4, "client", "index.js"), "wb") as _f:
+            _f.write(b"module.exports = { tampered: true };\n")
         _cc4, _ck4, _cd4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★★ 包在本次启动之后被换过 ⇒ 9 plugin_package_changed",
+        check("★★ 那一棵树在本次启动之后被改过一个字节 ⇒ 9 plugin_package_changed",
               _cc4 == 9 and _ck4 == "plugin_package_changed",
-              "code=%s kind=%s detail=%s" % (_cc4, _ck4, _cd4[:80]))
-        check("★★ 而且那句话指向**重装一次那个插件**（v0.12 阶段 4 起插件不再经过"
-              "部署脚本），不是指回客户端",
-              "重装" in _cd4 and "插件" in _cd4 and "客户端" not in _cd4,
-              repr(_cd4[:200]))
+              "code=%s kind=%s detail=%s" % (_cc4, _ck4, _cd4[:120]))
+        check("★★ 而且那句话**点名是哪一份文件**（只说「对不上」等于让运维去猜）",
+              "client/index.js" in _cd4, repr(_cd4[:200]))
+        check("★★ 而不是把这一份发出去让客户端报「校验不过」—— 那句话里指向"
+              "**重装一次那个插件**",
+              "重装" in _cd4 and "客户端" not in _cd4, repr(_cd4[:200]))
         _after = (_plug_of(CS) or {}).get("package") or {}
         check("★★ 快照是**启动那一刻**：换完之后 op_plugins 报的还是当初那一个"
-              "（快照与这一条回答的是同一份包）",
+              "（快照与这一条回答的是同一份内容）",
               _after.get("digest") == _b_pkg.get("digest")
               and _after.get("bytes") == _b_pkg.get("bytes"),
               "%s vs %s" % (_after, _b_pkg))
@@ -3564,7 +3754,7 @@ exit 0
         _big_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
                                       b'"version":"1.0.0"}' % _cs4.id.encode()),
                       ("big.bin", b"x" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 1))]
-        put_package(_fx4, _big_files, filename=_dg_name)
+        install_package(_fx4, _big_files)
         _d4._plugin_cache.clear()
         _lc4, _lk4, _ld4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
@@ -3578,15 +3768,18 @@ exit 0
         check("★ 上限那个数在错误信息里（运维要照着调）",
               str(mod.PLUGIN_PACKAGE_MAX_BYTES) in _ld4, repr(_ld4[:140]))
 
-        # ── 包**不见了**：`package` 是 null，而**能力仍然在** ──
+        # ── 那一份**不见了**：`package` 是 null，而**能力仍然在** ──
         #
         # ★ 这两件事必须分得开：「这一份现在给不出来」是瞬时的、是这一份的事；
         #   「本站没有这个能力」是协议事实（顶层没有 limits）。合成一个信号的话，
         #   一次误删文件会让客户端把整站降级。
-        _cs4.source_package = os.path.join(_fx4, "被删掉了.splug")
+        # ★ "不见了"= **树与记录表都没了**（不是把 install_dir 指到别处 —— 记录表
+        #   就住在树旁边，指错地方仍然找得到同一个 id 那一份）。
+        shutil.rmtree(mod.plugin_tree_dir(_fx4, _cs4.id), ignore_errors=True)
+        os.unlink(mod.plugin_record_path(_fx4, _cs4.id))
         _d4._plugin_cache.clear()
         _gone = _plug_of(CS) or {}
-        check("★★ 包不见了 ⇒ package 是 **null**（不是把这个键省掉）",
+        check("★★ 那一份不见了 ⇒ package 是 **null**（不是把这个键省掉）",
               "package" in _gone and _gone.get("package") is None,
               "键在=%s 值=%r" % ("package" in _gone, _gone.get("package")))
         check("对照：顶层 limits 照旧报（缺席的不是**能力**，是这一份的内容）",
@@ -3597,35 +3790,36 @@ exit 0
         check("★ 整包取那条路回 9 plugin_package_changed（不是 3/4 —— 它刚才还在，"
               "而「刚才还在」正是这句话要说的事）",
               _gc4 == 9 and _gk4 == "plugin_package_changed",
-              "code=%s kind=%s detail=%s" % (_gc4, _gk4, _gd4[:80]))
+              "code=%s kind=%s detail=%s" % (_gc4, _gk4, _gd4[:120]))
 
-        # ── ★ 包在**两次读之间**消失（快照说在、现读说读不动）──
+        # ── ★ 那一份在**两次读之间**消失（快照说在、现读说读不动）──
         #
         # `op_plugin_package` 读两次：第一次经**启动快照**（`plugin_package()`，
-        # 那是缓存的），第二次**现读**（`package_read_file()`）。上一条走的是
-        # "快照里就没有"那个出口；这一条走的是**另一个**出口 —— 快照里还在，
-        # 而现读时它没了。两句都是 `9 plugin_package_changed`，但说的是两件事，
-        # 而**第二句从前一条用例都没有**（这一条是补的，见 CHANGELOG 的〈三处〉）。
+        # 那是缓存的），第二次**现对账 + 现打**。上一条走的是"快照里就没有"那个
+        # 出口；这一条走的是**另一个**出口 —— 快照里还在，而现读时它没了。
+        # 两句都是 `9 plugin_package_changed`，但说的是两件事。
         #
-        # ★ 顺序是承重的：**先问一次 `op_plugins`**（那一步会把快照填上），再删文件。
+        # ★ 顺序是承重的：**先问一次 `op_plugins`**（那一步会把快照填上），再删。
         #   反过来的话快照本身就是"不在"，于是走到的是上面那个出口 —— 那这一条
         #   看起来绿了，而其实什么都没测到。
-        put_package(_fx4, _dg_files, filename=_dg_name)
-        _cs4.source_package = os.path.join(_fx4, _dg_name)
+        install_package(_fx4, _dg_files)
+        _cs4.install_dir = mod.plugin_tree_dir(_fx4, _cs4.id)
         _d4._plugin_cache.clear()
         _live = _plug_of(CS) or {}
-        check("这条用例自己的前提：快照里那个包**是在的**",
+        check("这条用例自己的前提：快照里那一份**是在的**",
               isinstance(_live.get("package"), dict), repr(_live.get("package")))
-        os.remove(os.path.join(_fx4, _dg_name))
+        # ★ 删的是**记录表**：树还在，而没有记录表 = 这次安装没提交。
+        os.remove(mod.plugin_record_path(_fx4, _cs4.id))
         _rc4, _rk4, _rd4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★★ 包在两次读之间消失 ⇒ 9 plugin_package_changed（说的是「读不动」）",
-              _rc4 == 9 and _rk4 == "plugin_package_changed" and "读不动" in _rd4,
-              "code=%s kind=%s detail=%s" % (_rc4, _rk4, _rd4[:100]))
-        check("★ 而它没有被兜成 9 internal（那句话指不回包，运维会去查别的地方）",
+        check("★★ 记录表在两次读之间消失 ⇒ 9 plugin_package_changed（说的是「没提交」）",
+              _rc4 == 9 and _rk4 == "plugin_package_changed"
+              and "没有记录表" in _rd4,
+              "code=%s kind=%s detail=%s" % (_rc4, _rk4, _rd4[:120]))
+        check("★ 而它没有被兜成 9 internal（那句话指不回插件，运维会去查别的地方）",
               _rk4 != "internal", repr(_rk4))
     finally:
-        _cs4.source_package = _saved_src4
+        _cs4.install_dir = _saved_src4
         _d4._plugin_cache.clear()
     _d4.store.close()
 
@@ -3885,23 +4079,27 @@ exit 0
         check("★ 公钥字节就是夹具里那 32 个字节",
               _s["sig"]["pubkey"].hex() == _exp["signed"]["publicKeyHex"])
 
-    # ★★ 站点**不验签**，这是一条**有断言的**事实，不是一件被忘掉的事。
+    # ★★ **包解析器不验签**，这是一条**有断言的**事实，不是一件被忘掉的事。
     #
-    #    §6 没有给站点任何一条验签义务 —— 验签是客户端的事（§5.4「客户端会钉住
-    #    你的公钥」）。这一节解析签名块、把签名者报出来给管理员看，但不判它成不
-    #    成立。所以夹具里那两条"只有会验签的一端才拒得了"的坏包，在这里**预期会
-    #    被收下** —— 下面这一条把它断言成事实。
+    #    它只判"这个包自己跟自己一致吗"（记录表、逐份 sha256、长度方程）；签名块
+    #    只解析、并把签名者报出来给管理员看，不判它成不成立。所以夹具里那两条
+    #    "只有会验签的一端才拒得了"的坏包，在这里**预期会被收下**。
     #
-    #    ★ 换成在 Python 里手写一个 Ed25519 验签器的代价是：给一个以 root 跑在
-    #      集群上的进程加一份自己实现的密码学，而它挡的那件事本来就发生在客户端
-    #      那一侧。（安装器那一侧要不要验、以及"没验就别说验过了"的措辞，是切包
-    #      那一段的事 —— 见 KNOWN-ISSUES。）
+    #    ★★ v0.13 起**站点也验签了，只是在另一个地方**（`plugin_reconcile`：每次
+    #      启动对账、以及每次分发前现算），那里问的是另一个问题 —— "盘上这一份
+    #      是不是当初装进来的那一份"。上面那条断言说的**只是解析器**，别读成
+    #      "站点从不验签"；两者的分工写在 `package_parse` 的注记里。
+    #
+    #    ★ 这一节仍然不验签的理由没变：给一个以 root 跑在集群上的进程加一份自己
+    #      实现的密码学，是这条路上最不该省的那一步的**反面** —— 要验就调系统
+    #      openssl（见 `openssl_verify_ed25519`）。
     _needs_verify = [c for c in _bad["cases"] if c.get("needs") == "verify"]
     check("★ 夹具里至少有两条是「只有会验签的一端才拒得了」的",
           len(_needs_verify) >= 2, repr([c["name"] for c in _needs_verify]))
     for _c in _needs_verify:
         _g = mod.package_parse(_unhex(_c["hex"]))
-        check("★★ 守护进程**收下**它（%s）—— 站点不验签，这是设计不是漏洞" % _c["name"],
+        check("★★ 包解析器**收下**它（%s）—— 解析器不验签，这是分工不是漏洞"
+              % _c["name"],
               _g["ok"], "却被拒了：%s %s" % (_g.get("code"), _g.get("why")))
 
     _wrong = []
@@ -3915,6 +4113,48 @@ exit 0
     check("★★ %d 条坏包逐条对上夹具里的理由词（词表与判的次序是三端共用的契约）"
           % (len(_bad["cases"]) - len(_needs_verify)), not _wrong,
           "；".join(_wrong))
+
+    # ★★ **第四份实现**：`package_build()`（Python）与 `packer/slurmate-packer.js`
+    #    的 `buildPackage`、客户端的 `buildPackage` 必须**逐字节相同**（§3.5）。
+    #
+    #    这是本版**最值钱的新检查**：站点侧从 v0.13 起要**从一棵树现打一个包**
+    #    发给客户端（容器在盘上不存在了），于是"同一个内容打出来的字节"第一次
+    #    有了两个来源。它们漂开的症状是"站点发出去的包客户端解析得了、而摘要对不
+    #    上" —— 排查方向会先落到钥匙上。
+    #
+    #    ★ 判据是**逐字节全等**，不是"摘要一样"：摘要不吃信封（§3.4），所以记录表
+    #      次序变了、长度字段写错了，摘要都会照样相同，而客户端会解析出一个与你
+    #      报的不一样的东西。
+    _again = mod.package_build(
+        [{"path": f["path"], "sha256": f["sha256"],
+          "data": _good[f["offset"]:f["offset"] + f["size"]]}
+         for f in _r["files"]], b"")
+    check("★★ 第四份实现：照着记录表重打一个包 ⇒ 与打包器产出的字节**逐字节全等**",
+          _again == _good,
+          "%d vs %d 字节；首个不同在 %s"
+          % (len(_again), len(_good),
+             next((i for i in range(min(len(_again), len(_good)))
+                   if _again[i] != _good[i]), "（长度不同）")))
+    if _s["ok"] and _s.get("sig"):
+        _sigblk = mod._envelope_bytes(mod._record_envelope(_s["sig"]))
+        _again_s = mod.package_build(
+            [{"path": f["path"], "sha256": f["sha256"],
+              "data": _signed[f["offset"]:f["offset"] + f["size"]]}
+             for f in _s["files"]], _sigblk)
+        check("★★ 带签名的那一份同样逐字节全等（签名块也被原样重建）",
+              _again_s == _signed,
+              "%d vs %d 字节" % (len(_again_s), len(_signed)))
+    # ★ 而"记录表次序"确实是这个等式的一部分：把次序倒过来重打，内容摘要不变、
+    #   字节却不同 —— 所以上面那两条不是"两边都算了个常量"。
+    _revb = mod.package_build(
+        [{"path": f["path"], "sha256": f["sha256"],
+          "data": _good[f["offset"]:f["offset"] + f["size"]]}
+         for f in reversed(_r["files"])], b"")
+    check("★ 对照：倒着打出来的字节**不一样**，而摘要一样"
+          "（次序是字节等式的一部分，不是摘要的一部分）",
+          _revb != _good
+          and mod.package_parse(_revb)["digest"] == _exp["digest"],
+          "%r" % (_revb == _good))
 
     _covered = {c["code"] for c in _bad["cases"]}
     _vocab = [mod.PACKAGE_LENGTH, mod.PACKAGE_MAGIC_BAD, mod.PACKAGE_FORMAT_BAD,
@@ -4085,11 +4325,146 @@ exit 0
             _rc, _out = _install([_signed], _INSDIR)
             check("★★ 签名验过了 ⇒ 装上，而且**说出来了**",
                   _rc == 0 and "签名验过了" in _out
-                  and os.path.isfile(os.path.join(_INSDIR, _UID_A + ".splug")),
+                  and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A)),
                   "rc=%d %r" % (_rc, _out[:300]))
-            check("★ 落地文件名是**包里的 id**（不是下载时那个文件名）",
-                  [x for x in os.listdir(_INSDIR) if x.endswith(".splug")]
-                  == [_UID_A + ".splug"], str(os.listdir(_INSDIR)))
+            check("★ 落地用的名字是**包里的 id**（不是下载时那个文件名）",
+                  os.path.isdir(mod.plugin_tree_dir(_INSDIR, _UID_A))
+                  and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A))
+                  and not [x for x in os.listdir(_INSDIR) if x.endswith(".splug")],
+                  str(sorted(os.listdir(_INSDIR))))
+            check("★★ 而盘上**没有**那个容器 —— 装完之后它就不再存在了"
+                  "（容器是运输形状，不是存储形状）",
+                  not [x for x in os.listdir(_INSDIR) if x.endswith(".splug")]
+                  and os.path.isdir(mod.plugin_tree_dir(_INSDIR, _UID_A)),
+                  str(sorted(os.listdir(_INSDIR))))
+            check("★★ 装出来的那棵树过得了启动时的对账（装得上就得认得出）",
+                  mod.plugin_reconcile(_INSDIR, _UID_A)["ok"] is True,
+                  str(mod.plugin_reconcile(_INSDIR, _UID_A))[:200])
+            # ★★ **装完之后现打出来的包与作者发的原件逐字节相同。**
+            #    这一条是"拆成树"这件事**不丢东西**的判据：少一份、多一份、次序
+            #    变了、权限位被写进负载 —— 任何一种都会让下面这个等式不成立。
+            with open(_signed, "rb") as _sf:
+                _orig_bytes = _sf.read()
+            _back, _br = mod.plugin_rebuild(_INSDIR, _UID_A)
+            check("★★ 从盘上那棵树现打一个包 ⇒ 与作者发的原件**逐字节全等**",
+                  _br["ok"] and _back == _orig_bytes,
+                  "%d vs %d 字节（%s）"
+                  % (len(_back or b""), len(_orig_bytes),
+                     next((i for i in range(min(len(_back or b""),
+                                                len(_orig_bytes)))
+                           if _back[i] != _orig_bytes[i]), "（长度不同）")))
+
+            # ★★★ 本版**最要紧的那条判据**：有人改了树、**又同步改了记录表**。
+            #
+            #   逐份 sha256 是记录表里写着的一列，所以它**自己证明不了自己** ——
+            #   改树的人把表里那一行一起改掉，逐份对账会**通过**。抓住它的是
+            #   签名：内容摘要从表重算 ⇒ 与签名里那 32 个字节对不上。
+            #
+            #   ★ 这一条必须**分成两步**验，否则分不清是哪一道闸拦住的：
+            #     ① `verify=False` ⇒ **通过**（说明表与树确实自洽、确实只有签名能拦）；
+            #     ② 默认（验签）  ⇒ 拒，而且理由是 `signature`。
+            _tamdir = os.path.join(_ins_home, "tamper-both")
+            _tfiles = [("plugin.json", json.dumps(
+                {"id": _UID_B, "name": "tam", "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+                ("job/start.sh", b"start_tam() { :; }\n")]
+            _tsig = None
+            _tbare = mod.package_parse(build_package(_tfiles))
+            _ts = openssl_sign(_k1[0], bytes.fromhex(_tbare["digest"]))
+            if _ts:
+                _tsig = bytes([1]) + _k1[1] + _ts
+            install_package(_tamdir, _tfiles, sig_block=_tsig or b"")
+            check("（夹具）被改的那一份是**签过名**的（否则这条测的是别的闸）",
+                  _tsig is not None and mod.plugin_reconcile(
+                      _tamdir, _UID_B)["ok"] is True,
+                  str(mod.plugin_reconcile(_tamdir, _UID_B))[:200])
+            # 改树：多写一个字节
+            _tp = os.path.join(mod.plugin_tree_dir(_tamdir, _UID_B),
+                               "job", "start.sh")
+            with open(_tp, "ab") as _f:
+                _f.write(b"# someone added a line\n")
+            with open(_tp, "rb") as _f:
+                _tblob = _f.read()
+            # 同步改表：把那一行的 size 与 sha256 改成**与树一致**
+            _trec = mod.read_plugin_record(_tamdir, _UID_B)["record"]
+            for _e in _trec["files"]:
+                if _e["path"] == "job/start.sh":
+                    _e["size"] = len(_tblob)
+                    _e["sha256"] = hashlib.sha256(_tblob).hexdigest()
+            mod.write_plugin_record(_tamdir, _UID_B, _trec)
+            check("★★★ 改树 + 同步改表 ⇒ **逐份对账会通过**（只有签名拦得住它）",
+                  mod.plugin_reconcile(_tamdir, _UID_B, verify=False)["ok"] is True,
+                  str(mod.plugin_reconcile(_tamdir, _UID_B, verify=False))[:200])
+            _tr = mod.plugin_reconcile(_tamdir, _UID_B)
+            check("★★★ 而它**真的被拒了**，理由是 signature（重建的摘要与签名对不上）",
+                  _tr["ok"] is False and _tr["code"] == mod.PACKAGE_SIGNATURE,
+                  "ok=%s code=%s why=%s" % (_tr["ok"], _tr.get("code"),
+                                            str(_tr.get("why"))[:160]))
+            # ★ 反方向：树一个字没动，只把**记录表里那个签名块**改一位。
+            #   （改 pubkey 而不是 sig：sig 那一串会被 openssl 判成"验不过"，而
+            #   这里要验的是"信封被改过"这件事本身也走同一条判据。）
+            _trec2 = mod.read_plugin_record(_tamdir, _UID_B)["record"]
+            _pk = bytearray(base64.b64decode(_trec2["envelope"]["pubkey"]))
+            _pk[0] ^= 0x01
+            _trec2["envelope"]["pubkey"] = base64.b64encode(bytes(_pk)).decode()
+            mod.write_plugin_record(_tamdir, _UID_B, _trec2)
+            _tr2 = mod.plugin_reconcile(_tamdir, _UID_B)
+            # ★ 改了 pubkey 也可能**恰好**解不出曲线点 ⇒ 仍然必须是 signature
+            #   （`_envelope_sig` 返回 None 时走的是同一条理由词）。
+            check("★★★ 只改记录表里那个公钥一位 ⇒ 同样拒，理由仍是 signature",
+                  _tr2["ok"] is False and _tr2["code"] == mod.PACKAGE_SIGNATURE,
+                  "ok=%s code=%s" % (_tr2["ok"], _tr2.get("code")))
+            # ★★ 而站点的**自检**也报它（不是只有函数级那一层看得见）
+            _tcrun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
+                                     "--plugins-dir", _tamdir],
+                                    capture_output=True, text=True)
+            check("★★ 自检那一屏也报出来，而且**不退 0 成功**",
+                  _tcrun.returncode == 1 and "不可用" in _tcrun.stdout,
+                  "rc=%d %r" % (_tcrun.returncode, _tcrun.stdout[-300:]))
+
+            # ── 判据②的后半：**它没被织进任何作业脚本** ────────────────────
+            #
+            # ★ 这是"拆包**不降**安全"最要紧的一格：作业脚本的内容**来自那棵树**，
+            #   所以"织不织"决定了被改过的字节能不能以 root 身份进到集群上。
+            #   扫描器把对不过账的那一份从 `specs` 里丢了 ⇒ 它到不了织那一步。
+            _twjobs = os.path.join(_ins_home, "jobs-tamper")
+
+            def _jobs_diag(rc, d, out):
+                """一条**不会把用例打崩**的诊断：目录不在时说"不在"，不去 listdir。
+
+                ★★ 这一条是补的：变异 M6（把"跳过不可用的"改回"整体中止"）第一次
+                  跑出来的是**用例被打崩**（FileNotFoundError），而不是干净地红 ——
+                  两者在报告里必须分得开，而分不开的代价是"这条判据到底有没有在守
+                  东西"变成一个查不出来的问题。
+                """
+                return "rc=%s out=%r jobs=%r" % (
+                    rc, out[:200],
+                    sorted(os.listdir(d)) if os.path.isdir(d) else "（目录不在）")
+
+            _twbuf = io.StringIO()
+            _twrc = mod.weave_plugin_jobs(
+                _tamdir, _twjobs, os.path.join(HERE, "run.sbatch"),
+                say=lambda *x: _twbuf.write(" ".join(str(y) for y in x) + "\n"))
+            check("★★ 对不过账的那个插件 ⇒ 织那一步**不会把它织进去**",
+                  not os.path.isfile(os.path.join(_twjobs, _UID_B + ".sbatch")),
+                  _jobs_diag(_twrc, _twjobs, _twbuf.getvalue()))
+            check("★ 而它说了**为什么没织**（不织与织不了在输出上要分得开）",
+                  "不织它们" in _twbuf.getvalue(), repr(_twbuf.getvalue()[:300]))
+            # ★ 对照：同一批里**能用**的那些照常织得出来（一个坏了不带走一整批）
+            install_package(_tamdir, [
+                ("plugin.json", json.dumps(
+                    {"id": _UID_A, "name": "ok", "version": "1.0.0",
+                     "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode()),
+                ("job/start.sh", b"start_ok() { :; }\n")])
+            _twbuf2 = io.StringIO()
+            _twrc2 = mod.weave_plugin_jobs(
+                _tamdir, _twjobs, os.path.join(HERE, "run.sbatch"),
+                say=lambda *x: _twbuf2.write(" ".join(str(y) for y in x) + "\n"))
+            check("★★ 对照：同一批里能用的那个**照常织出来**（一个坏了不带走一整批）",
+                  _twrc2 == 0
+                  and os.path.isfile(os.path.join(_twjobs, _UID_A + ".sbatch"))
+                  and not os.path.isfile(os.path.join(_twjobs, _UID_B + ".sbatch")),
+                  _jobs_diag(_twrc2, _twjobs, _twbuf2.getvalue()))
             check("★ 站点侧记下了「这个 id 是哪把钥匙签的」",
                   mod.read_plugin_keys(_INSDIR, strict=True).get(
                       _UID_A, {}).get("fingerprint")
@@ -4236,10 +4611,11 @@ exit 0
         mod.write_plugin_keys(_bypass, {_UID_A: {"fingerprint": "a" * 64,
                                                  "name": "alpha",
                                                  "version": "1.0.0"}})
-        with open(os.path.join(_bypass, _UID_A + ".splug"), "wb") as _f:
-            _f.write(build_package([("plugin.json", json.dumps(
-                {"id": _UID_A, "name": "alpha", "version": "1.0.0",
-                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]))
+        # ★ "绕过安装器"在新形状下的样子：自己把那一棵树与记录表摆进去（没有签名，
+        #   而记录里写着一把钥匙的指纹）—— 这正是"安装器是唯一写方"那句话要抓的。
+        install_package(_bypass, [("plugin.json", json.dumps(
+            {"id": _UID_A, "name": "alpha", "version": "1.0.0",
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
         _crun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _bypass],
                                capture_output=True, text=True)
@@ -4256,10 +4632,9 @@ exit 0
         # 而且必须是**内容摘要**（§3.4）—— 报成容器字节的 sha256 的话，"补了个签名块"
         # 会被读成"换了一份包"，而按 §4.2 那还是同一份构件：管理员会得出**相反**的
         # 结论。
-        _pk_path = os.path.join(_bypass, _UID_A + ".splug")
-        _want_digest = mod.package_read_file(_pk_path)["digest"]
-        with open(_pk_path, "rb") as _pf2:
-            _container_sha = hashlib.sha256(_pf2.read()).hexdigest()
+        _want_digest = mod.plugin_reconcile(_bypass, _UID_A)["digest"]
+        _blob_b, _rb_b = mod.plugin_rebuild(_bypass, _UID_A)
+        _container_sha = hashlib.sha256(_blob_b or b"").hexdigest()
         check("★★ 自检报出**完整的内容摘要**（拿它去与作者报的那个逐个字符比）",
               ("内容摘要 %s" % _want_digest) in _crun.stdout,
               repr(_crun.stdout[-400:]))
@@ -4276,14 +4651,16 @@ exit 0
         #   已经把同一件事说得更全。）
         _tsvdir = os.path.join(_ins_home, "tsv")
         os.makedirs(_tsvdir, exist_ok=True)
-        _tsv_a = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF60", "withjob",
-                         extra=[("job/start.sh", b"start_withjob() { :; }\n")],
-                         out=_tsvdir)
-        os.rename(_tsv_a, os.path.join(_tsvdir,
-                                       "01M2JKHTZGKJBFQQTWYXMQMF60.splug"))
-        _tsv_b = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF61", "nojob", out=_tsvdir)
-        os.rename(_tsv_b, os.path.join(_tsvdir,
-                                       "01M2JKHTZGKJBFQQTWYXMQMF61.splug"))
+        install_package(_tsvdir, [
+            ("plugin.json", json.dumps(
+                {"id": "01M2JKHTZGKJBFQQTWYXMQMF60", "name": "withjob",
+                 "version": "1.0.0", "site": {"defaultCpus": 1,
+                                              "defaultMem": "1G"}}).encode()),
+            ("job/start.sh", b"start_withjob() { :; }\n")])
+        install_package(_tsvdir, [("plugin.json", json.dumps(
+            {"id": "01M2JKHTZGKJBFQQTWYXMQMF61", "name": "nojob",
+             "version": "1.0.0",
+             "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode())])
         _trun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _tsvdir],
                                capture_output=True, text=True)
@@ -4595,7 +4972,10 @@ exit 0
             return rc, buf.getvalue()
 
         def _sy_pkgs(pdir):
-            return sorted(x for x in os.listdir(pdir) if x.endswith(".splug"))
+            """目录里"装着哪几个插件" —— v0.13 起判据是**记录表**（一棵树 + 一份
+            记录表，而记录表是那次安装的提交点）。"""
+            return sorted(x for x in os.listdir(pdir)
+                          if x.endswith(".json") and not x.startswith("."))
 
         def _sy_cfg(pdir, text, name):
             """一份指向 `pdir` 的 Config（插件目录是代码常量，只能在模块上盖）。
@@ -4645,13 +5025,13 @@ exit 0
         _rc, _out = _sy_install([_sy_mk(_U1, "jup"), _sy_mk(_U2, "jup")], _SY)
         check("★★ 一批里两个包共用同一个**短名** ⇒ **两个都装**"
               "（短名不是身份，id 才是；作业脚本一插件一份，函数名不会撞）",
-              _rc == 0 and _sy_pkgs(_SY) == [_U1 + ".splug", _U2 + ".splug"],
+              _rc == 0 and _sy_pkgs(_SY) == [_U1 + ".json", _U2 + ".json"],
               "rc=%d %r" % (_rc, _out[:300]))
 
         # ── ② 同 id@版本、内容不同 ⇒ 拒（F36）───────────────────────────
         #   盘上现在是 U1@1.0.0（内容 `a`），下面四条按这个基准走。
-        _p1 = os.path.join(_SY, _U1 + ".splug")
-        _before = hashlib.sha256(open(_p1, "rb").read()).hexdigest()
+        _p1 = mod.plugin_record_path(_SY, _U1)
+        _before = tree_digest(mod.plugin_tree_dir(_SY, _U1)) + file_digest(_p1)
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup", body=b"DIFFERENT")], _SY)
         check("★★ 同一个 id、**同一个版本**、内容不同 ⇒ 拒绝（F36）",
@@ -4659,8 +5039,9 @@ exit 0
               "rc=%d %r" % (_rc, _out[:300]))
         check("★★ 而且报错说清**为什么**（已经取过旧内容的客户端永远发现不了）",
               "永远不会发现" in _out and "升版本号" in _out, _out[:400])
-        check("★ 盘上那一份**一个字节都没被动**",
-              hashlib.sha256(open(_p1, "rb").read()).hexdigest() == _before)
+        check("★ 盘上那一份**一个字节都没被动**（树与记录表都算）",
+              tree_digest(mod.plugin_tree_dir(_SY, _U1)) + file_digest(_p1)
+              == _before)
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup")], _SY)
         check("★ 对照：同一个 id@版本、内容**逐字节相同** ⇒ 放行（重装是幂等的）",
@@ -4776,10 +5157,12 @@ exit 0
         check("★ 而且那句话说出**凭什么不删**（那是他写的，不是安装器那份）",
               "手写" in _out, _out[:400])
 
-        # 拿走包（最自然的卸载动作）⇒ **它那一份**被删掉，手写那份留着
-        os.unlink(os.path.join(_SY3, _U3 + ".splug"))
+        # 把插件从目录里拿走（最自然的卸载动作）⇒ **它那一份**被删掉，手写那份留着
+        # ★ v0.13 起"拿走一个插件"= 树与记录表**一起**删（删一半会留下一棵
+        #   没有记录表的树，而那是一条**明确的错误**，不是"没装"）。
+        mod.remove_plugin_tree(_SY3, _U3)
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 包从目录里拿走了 ⇒ **它那一份消失**（留着它守护进程会拒绝启动）",
+        check("★★ 插件从目录里拿走了 ⇒ **它那一份配置消失**（留着它守护进程会拒绝启动）",
               _rc == 0 and not os.path.exists(_p_solo), "rc=%d %r" % (_rc, _out[:300]))
         check("★★ 而**手写的那一份还在**（判据是位置与名字，不是「整个目录重写一遍」）",
               _rc == 0 and os.path.isfile(_p_typo), repr(_out[:300]))
@@ -4837,7 +5220,7 @@ exit 0
             _f.write("cluster_cidr = 192.0.2.0/24\n")
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _rc, _out = _sy_sync(_SY3, _CONF_D)            # ⇒ 多出 <id>.conf 那一份
-        os.unlink(os.path.join(_SY3, _U3 + ".splug"))  # 再把包拿走
+        mod.remove_plugin_tree(_SY3, _U3)              # 再把这个插件拿走
         _c_d = _sy_cfg_now(_SY3, _CONF_D)
         _errs = " ".join(_c_d.stale_conf_problems)
         check("★★ 指向没装插件的**安装器那份** ⇒ 报 ⚠ 并指出「跑一次 plugin sync」"
@@ -5083,7 +5466,9 @@ exit 0
                 return []
 
         def _pkgs(pd):
-            return _ls(pd, ".splug")
+            """站点上装着哪几个插件 —— v0.13 起判据是**记录表**（一个插件在这
+            个目录里占**两个**条目：一棵树 + 一份记录表，而记录表是提交点）。"""
+            return sorted(x for x in _ls(pd, ".json") if not x.startswith("."))
 
         def _jobs_of(jd):
             return _ls(jd, ".sbatch")
@@ -5120,11 +5505,14 @@ exit 0
         _mk4(_U1, "alpha", out=_SRC)
         _mk4(_U2, "beta", out=_SRC)
         _rc, _out = _from_src()
-        check("★★ --from DIR：目录里的包全装上，并按 id 命名",
-              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug", _U2 + ".splug"],
+        check("★★ --from DIR：目录里的包全装上，并按 id 落地成一棵树 + 一份记录表",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".json", _U2 + ".json"]
+              and all(os.path.isdir(mod.plugin_tree_dir(_PD, u))
+                      for u in (_U1, _U2)),
               "%d %r %r" % (_rc, sorted(os.listdir(_PD)), _out[:200]))
-        check("★ 而它记下了「这一次是目录模式装的哪几个」（下一轮对账要靠它）",
-              _read_installed(_PD) == [_U1 + ".splug", _U2 + ".splug"],
+        check("★ 而它记下了「这一次是目录模式装的哪几个」（下一轮对账要靠它）"
+              "—— 每行是**裸 id**（一个插件两个条目，共同的名字就是 id）",
+              _read_installed(_PD) == [_U1, _U2],
               repr(_read_installed(_PD)))
 
         # ── ①a 从源目录拿走一个 ⇒ 站点上那个也真的没了 ────────────────────
@@ -5132,8 +5520,10 @@ exit 0
         #      不是"目录里现在有什么"。
         os.unlink(os.path.join(_SRC, _U2 + ".splug"))
         _rc, _out = _from_src()
-        check("★★ 源里拿走一个包再同步 ⇒ 站点上那个包也没了",
-              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug"],
+        check("★★ 源里拿走一个包再同步 ⇒ 站点上那个插件也没了"
+              "（树与记录表一起走）",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".json"]
+              and not os.path.isdir(mod.plugin_tree_dir(_PD, _U2)),
               "%d %r" % (_rc, _pkgs(_PD)))
 
         # ── ①b ★★ 而**手动装的**那个不受目录模式管 ────────────────────────
@@ -5142,8 +5532,8 @@ exit 0
         _mk4(_U3, "gamma", out=_d4)
         _quiet(mod.install_plugins, [os.path.join(_d4, _U3 + ".splug")], _PD)
         _rc, _out = _from_src()
-        check("★★ 手动装的包不会被一次目录同步撤销（它不在记录里）",
-              _rc == 0 and _pkgs(_PD) == [_U1 + ".splug", _U3 + ".splug"],
+        check("★★ 手动装的插件不会被一次目录同步撤销（它不在记录里）",
+              _rc == 0 and _pkgs(_PD) == [_U1 + ".json", _U3 + ".json"],
               "%d %r" % (_rc, _pkgs(_PD)))
 
         # ── ①c 空目录是合法的：它表示「这次要装的是空集」──────────────────
@@ -5153,7 +5543,7 @@ exit 0
         check("★ 空目录合法，且它表示「这一次要装的是空集」",
               _rc == 0 and "空集" in _out, "%d %r" % (_rc, _out[:300]))
         check("★★ 于是上次由目录模式装的那个没了，**手动装的那个还在**",
-              _pkgs(_PD) == [_U3 + ".splug"], repr(_pkgs(_PD)))
+              _pkgs(_PD) == [_U3 + ".json"], repr(_pkgs(_PD)))
 
         # ── ①d 源目录里混进一棵源码树 ⇒ **一个字节都不写** ────────────────
         _bad_src = os.path.join(_d4, "badsrc")
@@ -5171,7 +5561,7 @@ exit 0
         # ── ③ 对账顺手织作业脚本 ──────────────────────────────────────────
         _rc, _out = _from_src()
         check("（夹具）现在站点上装着 alpha 与 gamma",
-              _pkgs(_PD) == sorted([_U1 + ".splug", _U3 + ".splug"]), repr(_pkgs(_PD)))
+              _pkgs(_PD) == sorted([_U1 + ".json", _U3 + ".json"]), repr(_pkgs(_PD)))
         _rc, _out = _sync()
         check("★★ 对账顺手织出了作业脚本（一个插件一份，按 id 命名）",
               _rc == 0 and _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U3 + ".sbatch"]),
@@ -5219,6 +5609,50 @@ exit 0
         check("★ （收拾干净）语法错的那个卸掉之后，对账又回到 0",
               _jobs_of(_JD) == _jobs_before, repr(_jobs_of(_JD)))
 
+        # ── ③d ★★ 「不可用」不等于「替你把它删了」─────────────────────────
+        #
+        # ★★ 一个人改了树里一个字节 ⇒ 那个插件**不可用**（不分发、不织、报出来）。
+        #    但它**还是装着的** —— 于是它那份配置与作业脚本**必须原地不动**。
+        #
+        #    判据要是写错成"不在 `specs` 里就删"，一次篡改就会**静默删掉**管理员
+        #    改过的 `enabled` / 默认资源，而症状要到他修好篡改、重跑一次 sync 之后
+        #    才出现（配置回到了安装缺省值，看起来像"我明明改过啊"）。
+        #    ⇒ 判据是**"盘上还有没有那棵树"**（`plugin_ids_present`），不是"能不能用"。
+        _rc, _out = _from_src()                # alpha 与 gamma 都在
+        _sync()
+        _conf_u1 = mod.plugin_conf_path(_SITE, _U1)
+        _job_u1 = os.path.join(_JD, _U1 + ".sbatch")
+        check("（夹具）那两份派生物都在",
+              os.path.isfile(_conf_u1) and os.path.isfile(_job_u1),
+              "%r %r" % (os.path.isfile(_conf_u1), _jobs_of(_JD)))
+        _j_one = _read_of(_job_u1)
+        _tp_u1 = os.path.join(mod.plugin_tree_dir(_PD, _U1), "job", "start.sh")
+        with open(_tp_u1, "r+b") as _f:
+            _b0 = _f.read(1)
+            _f.seek(0)
+            _f.write(bytes([_b0[0] ^ 0x01]))       # 原地改一个字节，长度不动
+        _rc, _out = _sync()
+        check("★★ 对不过账的那个插件：对账**照常返回 0**，其余照常工作"
+              "（一个插件坏了不带走整个站点）",
+              _rc == 0 and "不织它们" in _out, "%d %r" % (_rc, _out[-400:]))
+        check("★★ 而它那份**配置**原地不动（不是「不在 specs 里就删」）",
+              os.path.isfile(_conf_u1), repr(sorted(os.listdir(
+                  mod.plugin_conf_dir(_SITE)))))
+        check("★★ 它那份**作业脚本**也原地不动，而且**一个字节都没重织**"
+              "（被改过的字节进不了作业脚本）",
+              os.path.isfile(_job_u1) and _read_of(_job_u1) == _j_one,
+              "%r" % (_jobs_of(_JD),))
+        check("★ 而它**真的不可用**了：扫描器不再收它（提交不到它）",
+              _U1 not in [s.id for s in mod.scan_plugins(_PD)[0]],
+              str([s.id for s in mod.scan_plugins(_PD)[0]]))
+        # ★ 修好（卸掉再装一次）⇒ 一切照旧，而且配置**没有**被中途删过
+        _quiet(mod.uninstall_plugins, [_U1], _PD, _SITE, _JD)
+        _from_src()
+        _sync()
+        check("★ 修好之后那两份派生物又回来了（上面那次没有把谁删掉）",
+              os.path.isfile(_conf_u1) and os.path.isfile(_job_u1)
+              and _read_of(_job_u1) == _j_one, repr(_jobs_of(_JD)))
+
         # ── ③b 包没了 ⇒ 它那份作业脚本也跟着走 ───────────────────────────
         _mk4(_U2, "beta", out=_SRC)
         _from_src()
@@ -5239,34 +5673,54 @@ exit 0
 
         # ── ② 卸插件：恰好四处，一处不多 ──────────────────────────────────
         _conf_of = mod.plugin_conf_path(_SITE, _U1)
-        check("（夹具）那四处都在：包 / 它那份配置 / 作业脚本 / 钥匙记录",
-              os.path.isfile(os.path.join(_PD, _U1 + ".splug"))
+        check("（夹具）那五处都在：树 / 记录表 / 它那份配置 / 作业脚本 / 钥匙记录",
+              os.path.isdir(mod.plugin_tree_dir(_PD, _U1))
+              and os.path.isfile(mod.plugin_record_path(_PD, _U1))
               and os.path.isfile(_conf_of)
               and os.path.isfile(os.path.join(_JD, _U1 + ".sbatch"))
               and _U1 in mod.read_plugin_keys(_PD),
               "%r %r %r" % (os.path.isfile(_conf_of), _jobs_of(_JD),
                             sorted(mod.read_plugin_keys(_PD))))
         _rc, _out = _quiet(mod.uninstall_plugins, [_U1], _PD, _SITE, _JD)
-        check("★★ 卸掉之后那四处**一处都不剩**",
+        check("★★ 卸掉之后那五处**一处都不剩**",
               _rc == 0
-              and not os.path.isfile(os.path.join(_PD, _U1 + ".splug"))
+              and not os.path.isdir(mod.plugin_tree_dir(_PD, _U1))
+              and not os.path.isfile(mod.plugin_record_path(_PD, _U1))
               and not os.path.isfile(_conf_of)
               and not os.path.isfile(os.path.join(_JD, _U1 + ".sbatch"))
               and _U1 not in mod.read_plugin_keys(_PD),
               "%d %r" % (_rc, _out[:300]))
         check("★★ 而**别的插件**一处都没被碰（gamma 还在，记录里也还有它）",
-              _pkgs(_PD) == [_U3 + ".splug"]
+              _pkgs(_PD) == [_U3 + ".json"]
+              and os.path.isdir(mod.plugin_tree_dir(_PD, _U3))
               and _U3 in mod.read_plugin_keys(_PD),
               "%r %r" % (_pkgs(_PD), sorted(mod.read_plugin_keys(_PD))))
         check("★★ 手写的那一份配置一个字不动（判据是文件名，不是内容）",
               _write_manual_conf(_SITE, "handwritten"),
               repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
+        # ★★ 插件目录里**旁人手写的东西**：卸载一个插件时一个字节都不许动它。
+        #    它是 `_remove_stale_plugins` 那条「没有记录表就不删」的另一半 ——
+        #    那一半管"自动对账别删别人的东西"，这一半管"显式卸载也只删自己那五处"。
+        _bystander = os.path.join(_PD, "管理员自己的笔记.txt")
+        with open(_bystander, "w", encoding="utf-8") as _f:
+            _f.write("这是我自己放在这儿的\n")
+        _quiet(mod.uninstall_plugins, [_U3], _PD, _SITE, _JD)
+        check("★★ 卸载只删自己那五处 —— 旁人放在插件目录里的文件一个字不动",
+              os.path.isfile(_bystander)
+              and not os.path.isdir(mod.plugin_tree_dir(_PD, _U3)),
+              repr(sorted(os.listdir(_PD)) if os.path.isdir(_PD) else None))
+        os.unlink(_bystander)
+        _quiet(mod.install_plugins, [_mk4(_U3, "gamma", out=_d4)], _PD)
 
         # ── ②b --all：三处痕迹取并集；手写的不在并集里 ────────────────────
         _rc, _out = _quiet(mod.uninstall_plugins, [], _PD, _SITE, _JD,
                            uninstall_all=True)
-        check("★★ --all 把本站的包都卸了",
-              _rc == 0 and _pkgs(_PD) == [], "%d %r" % (_rc, _pkgs(_PD)))
+        check("★★ --all 把本站的插件都卸了（一棵树都不剩）",
+              _rc == 0 and _pkgs(_PD) == []
+              and not os.path.isdir(mod.plugin_tree_dir(_PD, _U3)),
+              "%d %r %r" % (_rc, _pkgs(_PD),
+                            sorted(os.listdir(_PD))
+                            if os.path.isdir(_PD) else None))
         check("★★ 手写的那一份**不在并集里**（它不是 ULID 命名的）⇒ 一个字没动",
               os.path.isfile(os.path.join(mod.plugin_conf_dir(_SITE),
                                           "handwritten.conf")),
@@ -5514,7 +5968,7 @@ exit 0
     _awk = None
     for _sp in cfg.plugin_specs:
         _out = os.path.join(tmpdir, "woven-%s.sbatch" % _sp.name)
-        _awk = weave_one(_rb, _sp.source_package, _sp.name, _sp.id, _out)
+        _awk = weave_one(_rb, _sp.install_dir, _sp.name, _sp.id, _out)
         _woven_of[_sp.name] = _out
     _woven = _woven_of[CS]        # 22a 用它，见下
     # ★ 数的是**整行**的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
@@ -5535,10 +5989,11 @@ exit 0
         check("★ 插件 %s 的 job/start.sh 里定义了 %s（宿主就是按这个分派）"
               % (_sp.name, _sp.job_entry),
               re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _wtxt) is not None)
+        with open(os.path.join(_sp.install_dir, "job", "start.sh"),
+                  encoding="utf-8") as _jf:
+            _jsrc = _jf.read()
         check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）",
-              re.search(r"(?m)^#!|^[ \t]*#SBATCH",
-                        mod.package_extract(_sp.source_package,
-                                            "job/start.sh").decode("utf-8")) is None)
+              re.search(r"(?m)^#!|^[ \t]*#SBATCH", _jsrc) is None)
         # ★★ 这一节的核心：**那份脚本里只有它自己**。
         #
         # 同处一份文件时，插件里任何一行不在函数里的代码都待在主流程中间，会在
@@ -5852,7 +6307,7 @@ exit 0
                 'start_quiet() { return 1; }\n'))
     os.makedirs(_tld, exist_ok=True)
     for _n, _i, _body in _tl_def:
-        put_package(_tld, [
+        install_package(_tld, [
             ("job/start.sh", _body.encode("utf-8")),
             ("plugin.json", json.dumps(
                 {"id": _i, "name": _n, "version": "1.0.0",
@@ -5867,7 +6322,7 @@ exit 0
     _tl_home = {}
     for _n in ("loud", "quiet"):
         _o = os.path.join(tmpdir, "tl-%s.sbatch" % _n)
-        weave_one(_rb, _tl_by[_n].source_package, _n, _tl_by[_n].id, _o)
+        weave_one(_rb, _tl_by[_n].install_dir, _n, _tl_by[_n].id, _o)
         _tl_home[_n] = os.path.join(tmpdir, "jobsh-tl-%s" % _n)
         os.makedirs(_tl_home[_n], exist_ok=True)
         run_jobsh(_o, _n, _tl_home[_n])
@@ -9663,7 +10118,7 @@ exit 0
     _RU2 = "01M2JKHTZGKJBFQQTWYXMQMF71"
 
     def _rl_pkg(uid, name):
-        put_package(_RL, [("plugin.json", json.dumps(
+        install_package(_RL, [("plugin.json", json.dumps(
             {"id": uid, "name": name, "version": "1.0.0",
              "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
 

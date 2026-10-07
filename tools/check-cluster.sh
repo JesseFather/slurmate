@@ -554,17 +554,19 @@ sec "插件"
 # 它去计算节点核对。
 _plugdir="/usr/local/share/slurmate/plugins"
 _daemon="/usr/local/sbin/slurmate-sessiond"
-# ★ 站点上的插件是一个**包文件**（`<ULID>.splug`），不是一个目录 —— 所以这里
-#   列的是包，而"包里有什么"要靠守护进程那份读包实现来取（`--extract-package`）。
-#   本脚本**不自己解析那个格式**：三份实现共用一份符合性向量，第四份抄本只会漂。
+# ★★ 站点上的一个插件是**一棵树 + 一份记录表**（v0.13 起）：
+#       <plugins_dir>/<ULID>/        负载原样铺开
+#       <plugins_dir>/<ULID>.json    记录表（这次安装的「提交点」）
+#   容器（`.splug`）**装完就不在盘上了** —— 它只在「作者→站点」与「站点→客户端」
+#   这两段路上活着。所以这里不再找 `*.splug`，也不再自己解析那个格式：
+#   "这一份对不对"要由守护进程那份实现来答（`--check-plugins`），本脚本只列事实。
 if [[ -d "$_plugdir" ]]; then
-    n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -name '*.splug' -type f 2>/dev/null | wc -l)"
+    n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l)"
     if (( n_pl == 0 )); then
-        r INFO "${_plugdir} 里没有 .splug —— 本站没有安装任何插件"
+        r INFO "${_plugdir} 里没有插件目录 —— 本站没有安装任何插件"
         r INFO "  这是合法状态（会话能查、能停，只是没有可提交的服务）"
     else
-        r PASS "${_plugdir} 里有 ${n_pl} 个插件包"
-        run bash -c "ls -1 '$_plugdir'/*.splug 2>/dev/null | sed 's/^/    /'"
+        r PASS "${_plugdir} 里有 ${n_pl} 个插件"
         # ★ 这里同时打 **id（ULID）** 和它在 jobs/ 里那一份作业脚本**在不在**。
         #
         #   为什么非要打 id：作业脚本一个插件一份，文件名就是 ULID —— 而 ULID 是
@@ -573,50 +575,64 @@ if [[ -d "$_plugdir" ]]; then
         #
         #   「作业侧 （无）」**不是**故障：那种插件装得上、看得见，但提交不了
         #   （守护进程报 service_kind_no_job）。它对应的状态是合法的。
+        #
+        #   ★ 短名与版本从**那棵树里的 plugin.json** 读（它就是安装时解出来的
+        #     那一份），不经过任何解析器 —— `sed` 抠两个字段不需要懂容器格式。
         _jobsdir="/usr/local/share/slurmate/jobs"
-        echo "  --- 各插件的身份 / 作业侧 / 对应的作业脚本 ---"
-        if [[ ! -x "$_daemon" ]]; then
-            r INFO "读不出包里的清单：${_daemon} 不在（还没部署？）"
-            r INFO "  文件名就是 id，可以拿它对着 ${_jobsdir}/<ULID>.sbatch 看"
-        fi
-        run bash -c "for f in '$_plugdir'/*.splug; do
-            [ -f \"\$f\" ] || continue
-            i=\$(basename \"\$f\" .splug)
-            if [ -x '$_daemon' ]; then
-                mf=\$(mktemp); '$_daemon' --extract-package \"\$f\" plugin.json > \"\$mf\" 2>/dev/null || true
-                n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
-                v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
-                ii=\$(sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" | head -1)
-                rm -f \"\$mf\"
-                [ -n \"\$ii\" ] && i=\"\$ii\"
-                if '$_daemon' --extract-package \"\$f\" job/start.sh >/dev/null 2>&1; then j='有'; else j='（无）'; fi
-            else
-                n='（读不出）'; v='（读不出）'; j='（读不出）'
-            fi
+        echo "  --- 各插件的身份 / 记录表 / 作业侧 / 对应的作业脚本 ---"
+        run bash -c "for d in '$_plugdir'/*/; do
+            [ -d \"\$d\" ] || continue
+            i=\$(basename \"\$d\")
+            mf=\"\$d/plugin.json\"
+            n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" 2>/dev/null | head -1)
+            v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" 2>/dev/null | head -1)
+            [ -n \"\$n\" ] || n='（读不出）'
+            [ -n \"\$v\" ] || v='（读不出）'
+            if [ -f '$_plugdir/'\$i'.json' ]; then rec='在'; else rec='⚠ 没有'; fi
+            if [ -f \"\$d/job/start.sh\" ]; then j='有'; else j='（无）'; fi
             s='（没有那份脚本）'
             [ -f '$_jobsdir/'\$i'.sbatch' ] && s='在'
-            printf '    %-16s %-9s %-24s 作业侧 %-8s 作业脚本 %s\\n' \"\$n\" \"\$v\" \"\$i\" \"\$j\" \"\$s\"
+            printf '    %-16s %-9s %-24s 记录表 %-8s 作业侧 %-8s 作业脚本 %s\n' \"\$n\" \"\$v\" \"\$i\" \"\$rec\" \"\$j\" \"\$s\"
         done"
-        _nj="\$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
+        # ★★ **记录表不在 = 那次安装没提交**（或者有人手放了一棵树）。这一条
+        #    与守护进程对账时的处置**逐字同源**，所以这里只报、不删。
+        _no_rec="\$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -exec sh -c 'test -f "$1.json" || echo "$1"' _ {} \; 2>/dev/null)"
+        if [[ -n "$_no_rec" ]]; then
+            r FAIL "下面这几个插件目录**没有记录表**（那一次安装没提交完，或者它是人手放进去的）："
+            printf '%s\n' "$_no_rec" | sed 's/^/      /'
+            r INFO "  它们**不会被分发、也不会被读到**。重装一次那个插件即可；"
+            r INFO "  若那是你手放的源码树 ⇒ 在作者机器上 packer build 打成包再装。"
+            r INFO "  ★ 本脚本**不删**它们 —— 那一格可能有你自己放的东西。"
+        fi
+        _nj="$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
         r INFO "${_jobsdir} 里有 ${_nj} 份作业脚本（应当等于上面「作业侧 有」的个数）"
         # 无主脚本：jobs/ 里有、但没有任何插件的 id 对得上。它仍然是可以被提交的 ——
         # 所以必须被看见，而不是留在那儿等某天有人问"这份是哪个插件的"。
         run bash -c "for jf in '$_jobsdir'/*.sbatch; do
             [ -f \"\$jf\" ] || continue
             b=\$(basename \"\$jf\" .sbatch)
-            [ -f '$_plugdir/'\$b'.splug' ] \\
-              || printf '    ⚠ 无主的作业脚本（没有插件认领）：%s\\n' \"\$jf\"
+            [ -d '$_plugdir/'\$b ] \
+              || printf '    ⚠ 无主的作业脚本（没有插件认领）：%s\n' \"\$jf\"
         done"
+        # ★ 这一屏**只是事实**。判"这一份对不对"（逐份 sha256 + 摘要 + 验签）是
+        #   守护进程那份实现的事 —— 判据只能有一份，这里不抄第二遍。
+        if [[ -x "$_daemon" ]]; then
+            echo "  --- 对账（由守护进程自己的实现判）---"
+            run "$_daemon" --check-plugins --plugins-dir "$_plugdir"
+        else
+            r INFO "判不了「这一份对不对」：${_daemon} 不在（还没部署？）"
+        fi
     fi
-    # ★ **不该在这儿的东西**：一个目录（更早那版布局留下的，或放错地方的源码树）、
-    #   或者一个散落的文件。守护进程只读 `.splug`，所以那些东西既不会被分发、
-    #   也不会被扫到 —— 留着它们的后果是"一份 root 拥有的、含客户端代码的副本
-    #   永久残留而界面上看不见"。`install-base.sh` 会因此拒绝部署，这里先把它们点出来。
-    _stray="$(find "$_plugdir" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name '*.splug' 2>/dev/null)"
+    # ★ **不该在这儿的东西**：一个散落的 `.splug`（旧形状，或放错的成品包）、
+    #   一个普通文件。守护进程只认 `<ULID>/` 与 `<ULID>.json`，所以那些东西既不会
+    #   被分发、也不会被扫到 —— 留着它们的后果是"一份 root 拥有的、含客户端代码的
+    #   副本永久残留而界面上看不见"。
+    _stray="$(find "$_plugdir" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name '*.json' -not -type d 2>/dev/null)"
     if [[ -n "$_stray" ]]; then
-        r FAIL "${_plugdir} 里有不是插件包的东西（站点只认 .splug）："
+        r FAIL "${_plugdir} 里有不是插件的东西（站点只认 `<ULID>/` 目录与 `<ULID>.json`）："
         printf '%s\n' "$_stray" | sed 's/^/      /'
-        r INFO "  如果是插件的**源码树**，那要先在作者机器上 packer build 打成包；"
+        r INFO "  如果是 `.splug` ⇒ 用 slurmate plugin install 装一次就变成新形状；"
+        r INFO "  如果是插件的**源码树**里的一份 ⇒ 在作者机器上 packer build 打成包；"
         r INFO "  别的什么都要人工确认后删掉 —— 没有任何东西会自动清它们。"
     fi
 else

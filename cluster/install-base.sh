@@ -697,8 +697,10 @@ if [[ "$MODE" == "check" ]]; then
 
     # ★ **插件不在这里体检**（v0.12 阶段 4）：本脚本不装插件，也就无从知道
     #   "哪一批包要装"（那是 `slurmate plugin install --from DIR` 说的）。
-    #   要体检一个包目录：`slurmate-sessiond --check-plugins --plugins-dir DIR`
-    #   —— 判据与安装器**逐字相同**（同一个 `scan_plugins`），所以这里不再抄一遍。
+    #   要体检本站装着的插件：`slurmate-sessiond --check-plugins`
+    #   —— 判据与守护进程启动时**逐字相同**（同一个 `scan_plugins`），不抄第二遍。
+    #   ★ 要体检**还没装进去**的一批包：`--install-plugins --plugins-dir <临时目录>`
+    #     —— 跑的是同一个安装器的第一遍，任何一条不过就**一个字节都不写**。
     if [[ "$DRYRUN" -eq 1 ]]; then
         info "[演练] 跳过"
     else

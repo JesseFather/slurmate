@@ -173,7 +173,7 @@ def cmd_plugin_install(args):
 
     if not args.files and not args.from_dir:
         print("要给一个或多个包，或者用 --from <目录>。\n"
-              "  sudo slurmate plugin install foo-1.2.0.splug\n"
+              "  sudo slurmate plugin install foo.splug\n"
               "  sudo slurmate plugin install --from /srv/slurmate-pkgs", file=sys.stderr)
         return EXIT_USAGE
 
@@ -275,10 +275,11 @@ def cmd_plugin_uninstall(args):
 def cmd_plugin_sync(args):
     """`slurmate plugin sync` —— 把站点的两份派生物与插件目录对齐。
 
-    ★ 它**不装也不卸任何包**，只对账：某个插件的那份配置（`<ULID>.conf`）或作业
-      脚本（`<ULID>.sbatch`）在而包没了 ⇒ 删掉；装了而没有配置的 ⇒ 写一份；有
-      作业侧的 ⇒ 织一份作业脚本。见守护进程的 `sync_plugins()`。管理员直接
-      `rm` 掉一个 `.splug` 之后，就是跑这一条。
+    ★ 它**不装也不卸任何插件**，只对账：某个插件的那份配置（`<ULID>.conf`）或
+      作业脚本（`<ULID>.sbatch`）在而插件没了 ⇒ 删掉；装了而没有配置的 ⇒ 写一份；
+      有作业侧的 ⇒ 织一份作业脚本。见守护进程的 `sync_plugins()`。
+      ★ v0.13 起"插件没了"的判据是 `<ULID>/` 那一棵树 —— 管理员直接
+      `rm -r` 掉它（或者用 `slurmate plugin uninstall`）之后，就是跑这一条。
     """
     if os.geteuid() != 0:
         print("对齐要写 %s.d/ 与作业脚本目录，所以要 root：\n"
@@ -811,8 +812,12 @@ def cmd_plugins(args):
         print("  或者从一个目录整批对齐：sudo slurmate plugin install --from <目录>")
         # ★ 这里从前写的是"把插件目录放进 plugins/" —— 那是**源码树布局**时代的
         #   说法，现在放进去的东西会（正确地）被拒绝：站点上的插件只能是一个包。
-        print("站点上的插件只能是**一个包文件**（.splug）：源码树放上去会被拒绝，")
-        print("包要在作者那边用 packer build 打出来（安装器与部署脚本都永不打包）。")
+        # ★ v0.13 起站点上装出来的是**一棵树 + 一份记录表**（`<ULID>/` 与
+        #   `<ULID>.json`）—— 容器只在两段运输里活着，站点盘上不留它。
+        print("站点上的插件是**一棵树 + 一份记录表**（`<ULID>/` 与 `<ULID>.json`）：")
+        print("  · 源码树直接放上去会被拒绝（它没有记录表，也不该有）；")
+        print("  · 包（.splug）要在作者那边用 packer build 打出来，再 plugin install；")
+        print("  · 装完之后那个包**不在盘上**了 —— 容器只是运输形状。")
         return 0
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
@@ -823,7 +828,8 @@ def cmd_plugins(args):
         # ★ v0.7 起**只有一条投递方式**：整包一次取走。这里从前印的是"两条投递
         #   方式"那一套（逐份 N 次 RPC / 整包 1 次）—— 与上面那一列同一个毛病：
         #   描述的是一个已经不在的世界。
-        print("「分发」= 客户端连上之后要把**整个包**取走一次（只取已启用的）。")
+        print("「分发」= 客户端连上之后要把**整个包**取走一次（只取已启用的；")
+        print("  而这个包是站点从盘上那棵树**现打**的 —— 盘上没有现成的容器）。")
         print("  单份上限 %s，另有份数与总量上限；客户端取两边的更严者。"
               % _human_bytes(d["limits"].get("file_bytes")))
         _pb = d["limits"].get("package_bytes")
