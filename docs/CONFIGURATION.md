@@ -830,8 +830,9 @@ sudo systemctl reload slurmate-sessiond
 ★ 装插件、`slurmate plugin sync` 这两条动线做完会**自己**发一次重载信号 —— 所以
 "装一个插件"今天不需要任何人记得去重启。
 
-★ 若改的是 `readonly_paths` 或端口区间，**重载不够**：它们要重新渲染 systemd 单元，
-所以还要跑一次 `sudo bash cluster/install-base.sh`。
+★ 若改的是 `readonly_paths`，**重载不够**：它是唯一一个要**重新渲染 systemd 单元**的
+键（单元里的 `ReadOnlyPaths=` 由 `install-base.sh` 按它生成）—— 重载会直接拒绝这个
+改动并让你去重启，而真正的做法是跑一次 `sudo bash cluster/install-base.sh`。
 
 `install-base.sh` **不会覆盖已存在的 `/etc/slurmate/slurmate.conf`** —— 重复部署时覆盖等于把
 站点的调优悄悄抹掉，而且故障要等下次重启守护进程才出现。要重置就手动删掉它再跑。

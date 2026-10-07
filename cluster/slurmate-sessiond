@@ -9418,27 +9418,6 @@ def main():
                       "新钥匙的来历。"
                       % (_rec.get("fingerprint") or "（无签名）",
                          _signer or "（无签名）"))
-        # 最后一屏给一行**机器可读**的（人看上面那一屏）。用制表符而不是空格：
-        # 短名与这三列都不允许出现制表符。
-        #
-        # ★ 四列：
-        #
-        #     <短名>\t<包路径>\t<ULID>\t<has_job|no_job>
-        #
-        #   ★★ **它现在没有仓内的读者了**（v0.12 阶段 4）：从前 `install-base.sh` 靠这
-        #     一行找包、给作业脚本命名，而插件那一半已经搬进安装器 —— 安装器是
-        #     Python，直接调 `scan_plugins()`，不经过这一屏。留着它的理由是"从
-        #     shell 里枚举本站的插件"这件事仍然要有个出口。★ 要删就删。
-        #
-        #   ★ 第 4 列为什么是**显式的一列**、而不是让读者去试着取一次
-        #     `job/start.sh` 看退出码：「没有作业侧」是**合法状态**，而"取不出来"
-        #     还可能是包坏了。用一个退出码同时表达这两件事，就是把两种后果不同
-        #     的情况并成一条路 —— 而正确的那一侧（"跳过、不织"）恰好是**静默**的。
-        print("plugin-packages:")
-        for s in specs:
-            print("%s\t%s\t%s\t%s"
-                  % (s.name, s.source_package, s.id,
-                     "has_job" if s.needs_job else "no_job"))
         return 0
 
     # 先把配置与 --check 走完，这样非 root 也能拿它做诊断（nft 相关项会诚实报 false）

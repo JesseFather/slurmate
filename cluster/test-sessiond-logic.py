@@ -4236,12 +4236,12 @@ exit 0
               and ("内容摘要 %s" % _container_sha) not in _crun.stdout,
               "%s vs %s" % (_want_digest[:16], _container_sha[:16]))
 
-        # ── ⑨b `--check-plugins` 的机器可读那一段（**跨脚本契约**）──
+        # ── ⑨b `--check-plugins` 报的分发量 ──
         #
-        # ★ 这一段从前是 `install-base.sh` 拿来找包、给作业脚本命名的唯一依据；v0.12
-        #   阶段 4 起它**没有仓内的读者了**（安装器是 Python，直接调 `scan_plugins()`）。
-        #   而"从 shell 里枚举本站的插件"这个出口仍要有个形状，改坏了没有别处会红 ——
-        #   所以形状本身留着用例。
+        # ★ 两个包，一个带 `job/start.sh`、一个不带 —— 分发出去的份数因此是 2 与 1。
+        #   （那一段**机器可读的** `plugin-packages:` 在本版删掉了：它唯一的读者是
+        #   安装器，而安装器 v0.12 阶段 4 起直接调 `scan_plugins()`。人读的那一屏
+        #   已经把同一件事说得更全。）
         _tsvdir = os.path.join(_ins_home, "tsv")
         os.makedirs(_tsvdir, exist_ok=True)
         _tsv_a = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF60", "withjob",
@@ -4255,21 +4255,8 @@ exit 0
         _trun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _tsvdir],
                                capture_output=True, text=True)
-        _tlines = _trun.stdout.split("plugin-packages:")[-1].strip().split("\n")
-        _trows = [l.split("\t") for l in _tlines if l.strip()]
-        check("★★ 机器可读那一段是**四列**（那一屏留给 shell 的契约）",
-              len(_trows) == 2 and all(len(r) == 4 for r in _trows), repr(_trows))
-        check("★★ 第 4 列如实回答包里有没有 `job/start.sh`（判据是记录表，不是磁盘）",
-              sorted(r[3] for r in _trows) == ["has_job", "no_job"]
-              and {r[0]: r[3] for r in _trows} == {"withjob": "has_job",
-                                                   "nojob": "no_job"},
-              repr(_trows))
-        check("★ 第 2 列是**包在哪**、第 3 列是 id（作业脚本按它命名）",
-              all(r[1].endswith(r[2] + ".splug") and len(r[2]) == 26
-                  for r in _trows), repr(_trows))
-        # ★ 那一行「分发 N 字节 / M 份文件」读的是 `plugin_payload_index()` ——
-        #   而它**只剩这一个调用方**（v0.7 删掉逐份取之后它不再走线）。它必须与
-        #   **包里的记录表**一致：报少了运维以为这个插件很小，报多了是在吓人。
+        # ★ 那一行「分发 N 字节 / M 份文件」**必须来自包里那张记录表**（而不是磁盘上
+        #   现数一遍）：报少了运维以为这个插件很小，报多了是在吓人。
         check("★★ 自检报出的份数就是**包里那张记录表**的份数（2 份 / 1 份）",
               "2 份文件" in _trun.stdout and "1 份文件" in _trun.stdout,
               repr(_trun.stdout[-300:]))
