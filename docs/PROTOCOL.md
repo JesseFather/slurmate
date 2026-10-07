@@ -12,15 +12,15 @@
 
 ## 〇、协议版本与变更
 
-**当前版本：v0.10。** 协议版本、客户端版本、服务端版本是**同一个号** —— 它们不是
+**当前版本：v0.12。** 协议版本、客户端版本、服务端版本是**同一个号** —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言必须
 逐字相同：`client/package.json`、`client/package-lock.json`、`cluster/slurmate`、
 `cluster/slurmate-sessiond`。
 
 ★ **这个号是 `major.minor`：两段。** `major` 无上限，`minor` ∈ `0..255`，
 **禁止前导零**（写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串）。
-超上界时**必须进位**（`0.255` 之后是 `1.0`）。所以它是 `v0.10`，不是 `v0.10.0`。
-★ 顺带一句：`v0.10` **不是** `v0.1` —— `minor` 是**十进制字符串**，`10` 比 `1` 大。
+超上界时**必须进位**（`0.255` 之后是 `1.0`）。所以它是 `v0.12`，不是 `v0.12.0`。
+★ 顺带一句：`v0.12` **不是** `v0.1` —— `minor` 是**十进制字符串**，`12` 比 `1` 大。
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是
 **版本闸把更新的那一端判成更旧的**。
 
@@ -50,7 +50,7 @@
 这件事：
 
 - **客户端由用户自己更新**（他装上什么版本就是什么版本）；
-- **服务端由管理员手动更新**（`deploy.sh`）。★ 服务端版本低**不是故障**，它的后果
+- **服务端由管理员手动更新**（`install-base.sh`）。★ 服务端版本低**不是故障**，它的后果
   只有一条：**不认识某些新插件** —— 那是插件自己的 `engines.slurmate` 说了算的，
   见下。
 
@@ -84,7 +84,7 @@
 **自初始提交起就在** —— 于是这条规则对**每一个曾经部署过的守护进程**立刻有效，
 正好对上"客户端要能兼容老版本服务端"那条要求。
 
-> ✅ **两端都已按 v0.10 实现**，四处版本号都是 0.10。此前这里挂着一条警告说集群侧
+> ✅ **两端都已按 v0.12 实现**，四处版本号都是 0.12。此前这里挂着一条警告说集群侧
 > 还停在 v0.1、两端连不上 —— 那条后来不成立了，所以删掉：留着一条已经不成立的警告，
 > 与留一条已经失效的注释是同一类问题。
 >
@@ -133,7 +133,7 @@
 | **v0.2** | **删掉「用途」这一层**。配置里不再有 `[purpose:*]`；`purposes` op 改成 `partitions`；`submit` 直接收 `cpus`/`mem`/`gpus`/`partition`/`time`，**全部可选，缺省由服务端填**（2 核 / 8G / 从有权限的分区里随机挑一个）。 |
 | **v0.3** | **「服务种类」变成「插件」**。配置里每个插件一个 `[plugin:名字]` 块；新增 `plugins` op（客户端据此决定画哪些按钮、各自默认多少资源）；`partitions` 的响应**删掉了 `defaults`**（默认资源改成**按插件**的，只能有一个来源）；`submit` 收 `service_kind` 与 `ssh_pubkey`。 |
 | **v0.4** | **插件的身份变成铸造出来的 `id` + 版本。** `plugins` 的每一项多了 `id`（ULID，全球唯一，永不改变）与 `version`；会话视图多了 `service_plugin`（`"<id>@<版本>"`，提交那一刻的值）。`service_kind` 不变 —— 它仍然是**站点内的短名**（配置块名、日志用它）。 |
-| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 deploy.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
+| **v0.5** | **基座里再没有任何一个插件的名字。** 集群侧的插件表改成**扫** `<prefix>/share/slurmate/plugins/`（不再有 `BUILTIN_PLUGINS`），作业侧改成 install-base.sh **逐插件织一份**作业脚本（`jobs/<ULID>.sbatch`，不再有内建的 `start_*` 分支）；`submit` 的 `service_kind` **不再有内建缺省**（改由配置里的 `default_plugin`，没配就是必填 → `2 missing_service_kind`）；`plugins` 的每一项**删掉了 `builtin`**、**多了 `can_submit`**；`submit` 新增错误种类 `4 service_kind_no_job`（装了但没作业侧实现）。 |
 | **v0.6** | **插件文件可以从站点取回来**，而且同一份内容有**两条投递方式**。`plugins` 的每一项多了 `files`（`[{path, size, sha256}]`）与 `package`（`{format, bytes, digest}`）、顶层多了 `limits`（本站的上限，**自述**，含 `package_bytes`）；新 op `plugin_file`（`id` / `version` / `path` → 一份文件，base64）与 `plugin_package`（`id` / `version` → **整个包**，base64）；四个新 kind：`3 plugin_unknown`、`3 plugin_file_unknown`、`4 plugin_file_too_large`、`4 plugin_package_too_large`（外加 `9 plugin_file_changed` 与 `9 plugin_package_changed`）。**全部是加法**。 |
 | **v0.7** | **只剩一条投递方式**：**删掉** `plugins[].files` 与 op `plugin_file`，连同三个只属于那条路的 kind（`3 plugin_file_unknown`、`4 plugin_file_too_large`、`9 plugin_file_changed`）。`plugins[].package`、`op_plugin_package`、顶层 `limits`（含 `package_bytes`）**一个字都没动**。★ 「本站支不支持分发」的判据因此**换了**：从"这一项里有没有 `files`"改成顶层**有没有 `limits`**。**不兼容**，见上面那段。<br>★ 同时落下**版本握手**（客户端连上后读 `ping` 的 `version`，按〈三方：谁不低于谁〉判）。**协议线上一个字都没动** —— `ping` 与它的 `version` 自 v0.1 起就在，只是此前没有读者；`engines.slurmate` 的**字段级**规则也统一了（两侧从前一侧静默跳过、一侧拒绝）。 |
 | **v0.8** | **常驻通道 + 多客户端 + 集群信息。** 新 op：`stream`（一条连接可以问**很多次**，服务端还会**主动推送**）、`cluster`（一次查询服务所有连接）、`history`（按需拉历史，不进任何一层钟）；`session_view` 多四个字段（`job_terminal` / `job_reason` / `job_exit_code` / `job_restarts`）；GRES 通用化（不再只有 `gpu:N` 一种形状）。★ 同时加了一层**席位**：连接自报 `client` 身份、按 uid **顶掉**先到者、推送 `{"push":"displaced"}`。 |
@@ -141,6 +141,7 @@
 | **v0.10** | **协议线上没有新的 op、也没有新的字段。** 变的是两条**判据**与一组**数值**：① 站点侧开始**拒**认不得的清单键（顶层 / `contributes` / `contributes.surface` / `.login` / `.data`）—— 客户端本来就在拒，这一版把守护进程那一侧补上，判据只有一份**书面**形式（`tools/manifest-keys.json`）；② 客户端**不再认** `contributes.defaultService`（写了它的清单**装不上**）；③ 站点报的 `limits.total_bytes` 从 1 MiB 抬到 **1,562,251 字节**（客户端执行的那四条上限没变，变的是站点**通报**的那个数）。 |
 
 | **v0.11** | **插件可以有同名，配置块按 `id` 寻址。** `plugins` 的**顶层多了 `problems`**（没能加载的插件 —— 从前只有登录节点上的人看得见）；`plugins[].defaults` 多了 **`time`** 与 **`gpus`**（与 v0.10 那次一样，每一项的字段是**加法**，缺席的老守护进程那一格客户端不许补值）。★ **离线的行为变化两处，都不在协议上**：① 站点把**同一个 `id@版本`** 的内容换掉，安装器从"静默替换"改成**拒绝**；② 客户端对"两个站点报同一个 `(id, 版本)` 而内容不同"从**静默收下**改成**明确失败**。两条都是**收紧**，见 [CHANGELOG](../CHANGELOG.md)。 |
+| **v0.12** | **协议线上没有新的 op、也没有新的字段。** 变的是**配置的承载**与**离线那两件事的后果**：① 插件配置从主文件里的块搬进 `slurmate.conf.d/`（一个插件一个文件，**破坏性** —— 但配置不在协议上）；② 孤儿插件数据**自己**会被收掉；③ 清单多了 `contributes.data.perVersion`（三份键表同步，见 `tools/manifest-keys.json`）。★ **两端的关系没变** —— 这一版没有动任何 `op_*` 的形状，所以 v0.11 与 v0.12 的两端仍然通得了。 |
 
 ★ **`files` 这份清单的来源换过一次，而那一次不是协议变更。** 站点上的插件从
 "一棵目录树"变成了"一个包文件"（`<prefix>/share/slurmate/plugins/<ULID>.splug`），
@@ -815,7 +816,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > ★ **v0.5 删掉了每一项里的 `builtin`。** 它从前恒为 `true`（插件的代码随本项目一起
 > 发布），而没有任何客户端代码读它 —— 一个永远为真、谁也不看的字段，只会让下一个
 > 读的人问"什么时候是 false"。现在**没有内建这回事**：两端都只认"装了的插件"，
-> 而"装"是站点的一个动作（集群侧 `deploy.sh --plugins-src` 或
+> 而"装"是站点的一个动作（集群侧 `install-base.sh --plugins-src` 或
 > `slurmate plugin install`，客户端是经站点分发取回来）。
 
 客户端据此决定画哪些按钮、以及每个按钮上"默认 2 核 / 8G"该写多少。
@@ -826,11 +827,11 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > 反过来同一个插件被两个站点分发又该被认出来。名字答不了这两个问题，铸造出来的
 > `id` 才答得了。
 >
-> `name` 出现在配置块名、日志与 `service_kind` 里。★ 它**既不**需要全球唯一，
+> `name` 出现在它那份配置的**文件名**、日志与 `service_kind` 里。★ 它**既不**需要全球唯一，
 > **也不**需要站点内唯一（v0.11 放开）—— 两个 `id` 不同、短名一样的插件允许在
 > 同一个站点上并存。所以**不要拿 `name` 当键**：`op_plugins` 的响应里认亲用的是
 > `id`，客户端的表也按 `id` 收。短名撞了的时候，只有站点自己的配置校验要求
-> **写 id** 来消歧（`[plugin:<id>]`），协议这一层不替任何人挑一个。
+> **写 id** 来消歧（文件名用 `<id>.conf`），协议这一层不替任何人挑一个。
 
 三条契约，每条都对应一种"用户看不见"的失败：
 
@@ -953,13 +954,13 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 
 | 字段 | 类型 | 缺省 |
 |---|---|---|
-| `service_kind` | **本站的短名**（配置块名） | 配置里的 `default_plugin`；**没配就是必填**，否则 `2 missing_service_kind` |
+| `service_kind` | **本站的短名**（插件配置的文件名） | 配置里的 `default_plugin`；**没配就是必填**，否则 `2 missing_service_kind` |
 | `ssh_pubkey` | 一行公钥 | 清单里 `contributes.submitPubkey` 为真的插件**必填**，否则 `2 bad_ssh_pubkey` |
-| `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在 `[plugin:<名字>]` 块里覆盖；服务端钳制到 1–上限） |
+| `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在它那份配置里覆盖；服务端钳制到 1–上限） |
 | `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
-| `gres` | **对象** `{name, type, count}`，或 **`null`** | **省略** = 用**该插件**的 `default_gpus`（站点在 `[plugin:<名字>]` 块里配的策略；它没配就是不占）。**显式 `null`** = 不占，**盖过**插件的默认。见下面的〈`gres`：一个结构化描述符〉 |
+| `gres` | **对象** `{name, type, count}`，或 **`null`** | **省略** = 用**该插件**的 `default_gpus`（站点在它那份配置里配的策略；它没配就是不占）。**显式 `null`** = 不占，**盖过**插件的默认。见下面的〈`gres`：一个结构化描述符〉 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
-| `time` | Slurm 时间 | **该插件**的 `site.defaultTime`（站点可在 `[plugin:<名字>]` 块里覆盖；三处都不写才是内建的 `12:00:00`）。超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断 |
+| `time` | Slurm 时间 | **该插件**的 `site.defaultTime`（站点可在它那份配置里覆盖；三处都不写才是内建的 `12:00:00`）。超过**分区自己的 `MaxTime`** 与硬上限 7 天中的较小者时截断 |
 
 > ★ **默认值一律由服务端填，不由客户端填。** 客户端省略字段是在说「用你的默认」，
 > 不是「我要 0 核」。服务端必须自己填默认值并做上限钳制 ——
@@ -1069,7 +1070,7 @@ GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型�
 > |---|---|---|
 > | `missing_service_kind` | 调用方 | 补上 `service_kind` |
 > | `bad_service_kind` | 客户端版本 / 参数 | 升级客户端，或改掉打错的名字 |
-> | `service_kind_disabled` | **站点**（管理员的开关） | 找管理员打开那个配置块 |
+> | `service_kind_disabled` | **站点**（管理员的开关） | 找管理员打开那个插件的配置 |
 > | `service_kind_no_job` | **站点**（部署不完整） | 找管理员**重新部署** |
 >
 > 后两条**都是"找管理员"，但管理员要做的事完全不同** —— 后者去翻配置开关是白费
@@ -1104,7 +1105,7 @@ GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型�
 | `created_at`、`enrolled_at`、`last_hb_at`、`renew_count` | 时间线 |
 | `keeper` | **谁在看这条会话**：一个 `client_id`，或者 `null`。★ 取值**只有这两种** —— `null` 是「确实没人在看」（不是「不知道」，也不是空串），它与 `last_hb_at` 合起来才说得清状况。它同时是「接管」那个按钮的判据。见〈`heartbeat`〉与〈`takeover` / `leave`〉 |
 | `requested_time`、`account`、`auth_mode`、`note` | 状态 |
-| `service_kind` | 这个会话提供哪种服务 —— **本站的短名**（配置块名）。三态：字符串 / `null`（服务端**明说**不知道，会话是从 nft 规则恢复出来的）/ 键不存在（更旧的守护进程）。**后两种客户端按同一件事处理：不猜**（见下）。 |
+| `service_kind` | 这个会话提供哪种服务 —— **本站的短名**（插件配置的文件名）。三态：字符串 / `null`（服务端**明说**不知道，会话是从 nft 规则恢复出来的）/ 键不存在（更旧的守护进程）。**后两种客户端按同一件事处理：不猜**（见下）。 |
 | `service_plugin` | **解析键**：`"<id>@<版本>"`。同样是三态，两个 NULL 含义不同（见下）。 |
 | `job_state`、`time_limit`、`expires_at` | **可能整个键不存在**（`show_job` 失败时），调用方必须容忍 `undefined` |
 | `job_terminal` | **布尔**：这个作业算不算**真终态**。见下 |

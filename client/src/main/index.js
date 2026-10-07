@@ -1038,7 +1038,7 @@ function pluginsView() {
       // 自己看到的是哪一版。
       id: plugin.id,
       version: plugin.version,
-      // 站点内用的短名。配置块名、提交时的 service_kind 都是它。
+      // 站点内用的短名。那份插件配置的文件名、提交时的 service_kind 都是它。
       name: plugin.name,
       // 客户端认得的插件用**它自己的**标题：那个才对应它实际会做的事。
       title: plugin.displayName,
@@ -2142,7 +2142,7 @@ async function startSession(resources, serviceKind) {
   //   `bad_service_kind` 也行，但那要花掉一整趟往返，而且用户看到的是一个
   //   关于"服务种类"的错误、而他刚才点的可能是一个界面上的按钮。
   //
-  // ★ 提交时只知道**短名**（配置块名、界面按钮上那个），而本机可能并存同一个
+  // ★ 提交时只知道**短名**（那份配置的文件名、界面按钮上那个），而本机可能并存同一个
   //   插件的多个版本 —— 站点报了的话就按它报的那个 `(id, 版本)` 取，否则取版本
   //   最高的那一个。版本对不上时下面会明确说出来（但**不拦**，见 warnVersionDrift）。
   //

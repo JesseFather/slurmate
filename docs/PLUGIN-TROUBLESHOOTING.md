@@ -95,7 +95,7 @@
 |---|---|---|
 | 「守护进程太旧，不支持插件分发」 | 那个站点的响应**顶层没有 `limits`** | 让管理员重新部署。**这一条不是客户端的问题** |
 | 「取 xx 失败：…」 | 那份字节没下来（断流、超时、守护进程限流重试到头） | 点「重新同步」。**它不会退回池里已经有的那一份** —— 见下 |
-| 「内容与声明的 sha256 不符」 | 传输被改，或者站点在服务期间换了包 | 点「重新同步」；反复出现就让管理员重跑 deploy.sh |
+| 「内容与声明的 sha256 不符」 | 传输被改，或者站点在服务期间换了包 | 点「重新同步」；反复出现就让管理员重跑 install-base.sh |
 | 「本机已有 X，但它的内容与站点现在报的不一样（站点报 …，本机这一份是 …）」 | **站点改了内容却没升版本号**（这句话后面会点名这个槽位是**哪个站点**放进来的） | 让管理员升版本号。**客户端拒绝覆盖是对的** |
 | 「本机已有 X，但它与自己的来路凭证（X.splug）对不上」 | **本机那一份被改过**（不是站点的问题） | 点「重新同步」。如果它自己会恢复成原样，说明有别的东西在改那个目录 |
 | 「已经有一次对账在跑」 | 上一次还没收尾 | 等一会儿再点 |
@@ -119,16 +119,21 @@
 的纪律**一个字都没删** —— v0.6 时逐份取是 `1 + 1 + 每个文件一个`（十来个，正好压在
 桶边上），谁要是引回一条按份数伸缩的路，那条退避就是唯一还站着的东西。
 
-## 守护进程起不来，报「[plugin:xxx] 是个未知的插件」
+## 启动时报「插件配置指不到任何已装的插件」（⚠，**不拦启动**）
 
-两种原因，报错里会**分开说**，因为它们对应两种完全不同的行动：
+**v0.12 起这不是启动错误，是一条 ⚠。** 两种原因，报错里会**分开说**，因为它们对应
+两种完全不同的行动：
 
 | 报错里说 | 原因 | 该做什么 |
 |---|---|---|
-| 「本站**装了**的是：…」 | 块名打错了（`[plugin:ssh]` 少一个 d 也算），或那个插件**没装** | 改块名 / 把插件装上去 |
-| 「本站**一个插件都没装**」 | 插件目录是空的 | 把 `.splug` 放进 `--plugins-src` 指的目录，再跑一次 `deploy.sh`（包要在作者机器上用 `packer build` 打出来，见 `packer/README.md`） |
+| 「本站**装了**的是：…」 | 文件名打错了（`ssh.conf` 少一个 d 也算），或那个插件**没装** | 改文件名 / 把插件装上去 |
+| 「本站**一个插件都没装**」 | 插件目录是空的 | 装一个插件：`sudo slurmate plugin install <包>`（包要在作者机器上用 `packer build` 打出来，见 `packer/README.md`） |
 
-守护进程**故意**不静默忽略 —— 静默忽略的后果是「配置里写着，而实际什么也没开」。
+**为什么降成 ⚠**：这一份配置不生效，那个插件按清单缺省跑 —— 而"整个站点起不来"
+并不会让那份配置变对，只会让**别的东西也一起停**。★ 但「**不许悄悄挑一个**」一个字
+没松：短名撞名（两个已装插件同名、你却写了短名）仍然是**硬错误**。
+
+守护进程**故意**不静默忽略 —— 静默忽略的后果是「文件里写着，而实际什么也没开」。
 
 ```bash
 # 看装了什么（守护进程自己扫出来的那一份）
@@ -162,22 +167,22 @@ default_plugin = code-server
 装上了、看得见、就是提交不了。
 
 成因是**部署不完整** —— 它的包里没有 `job/start.sh`（所以在 `plugins/` 里有这个包、
-在 `jobs/` 里没有对应那一份），或者有而 deploy.sh 那次没跑到它。
+在 `jobs/` 里没有对应那一份），或者有而 install-base.sh 那次没跑到它。
 
 ```bash
 # 1. 看它到底有没有作业侧（判据是**包里的记录表**，不是磁盘上的一个文件）
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins      # 看那一行的「作业侧」
-# 2. 有就重新部署一次，让 deploy.sh 为它织一份 <ULID>.sbatch
-sudo bash cluster/deploy.sh
+# 2. 有就重新部署一次，让 install-base.sh 为它织一份 <ULID>.sbatch
+sudo bash cluster/install-base.sh
 ```
 
 ★ **这与"站点没开这个插件"是两件事，两句话也不同。** 那种情况报的是
-`service_kind_disabled`，解除办法是管理员把配置块里的 `enabled` 打开；而这一条
+`service_kind_disabled`，解除办法是管理员把那个插件的配置里 `enabled` 打开；而这一条
 **打开 `enabled` 没有用**，缺的是作业脚本。
 
 ## 作业起来了，日志里说「这份作业脚本提供的是 Y，而请求的是 X」
 
-拿到**别的插件**的作业脚本了。这是 `deploy.sh` 部署出了问题（`jobs/` 与 `plugins/`
+拿到**别的插件**的作业脚本了。这是 `install-base.sh` 部署出了问题（`jobs/` 与 `plugins/`
 对不上），**不是插件本身的问题** —— 作业会以 **24** 退出而不是跑错服务。
 
 ```bash
@@ -185,26 +190,35 @@ sudo bash cluster/deploy.sh
 python3 /usr/local/sbin/slurmate-sessiond --check-plugins \
   --plugins-dir /usr/local/share/slurmate/plugins
 ls /usr/local/share/slurmate/jobs/
-sudo bash cluster/deploy.sh          # 重跑一次会清掉陈旧的、补上缺的
+sudo bash cluster/install-base.sh          # 重跑一次会清掉陈旧的、补上缺的
 ```
 
-正常情况下这件事**在部署期就会被拦住**：deploy.sh 对每个 `job/start.sh` 断言三条
+正常情况下这件事**在部署期就会被拦住**：install-base.sh 对每个 `job/start.sh` 断言三条
 （无 shebang/`#SBATCH`、定义了 `start_<短名>`、函数名都带命名空间），任何一条不过
 当场中止部署。所以看到这条通常意味着：**手工提交了作业**，或者 `jobs/` 是别人装剩
-下的。注意 deploy.sh **不会**因为插件没有 `job/start.sh` 而中止 —— 那是合法的
+下的。注意 install-base.sh **不会**因为插件没有 `job/start.sh` 而中止 —— 那是合法的
 （见上一条）。
 
-## 守护进程起不来，报「块里有 'cluster_cidr'，它是站点通用键」
+## 守护进程起不来，报「主文件里有 `[plugin:xxx]`」
 
-**块一旦开始就没有回头路。** 通用键必须写在所有 `[plugin:*]` 块**之前**；
-写在后面会落进那个块，然后被拒。把那一行挪到文件顶部即可。
+**v0.12 起插件配置住进 `slurmate.conf.d/`，一个插件一个文件**，主文件里只有
+`键 = 值`。看到这条说明有一份**老形态**的配置还留在主文件里。
 
-（`deploy.sh` 用 `sed` 抓的 `range_start` / `range_end` / `reserved_ranges` /
-`readonly_paths` 也是按行首匹配的，所以它们同样必须待在文件上半部分。）
+把那一整段挪到 `slurmate.conf.d/<名字>.conf`（去掉 `[plugin:…]` 那一行 —— **文件名
+就是身份**），主文件里那几行删掉。
+
+★ **`install-base.sh` 不会替你搬**：那几行里可能有你调过的默认资源，自动搬会把它
+搬丢或搬错。
+
+★ 顺带：从前那条「通用键必须写在所有块之前，块一旦开始就没有回头路」的规则**随之
+消失** —— 主文件里没有块了，也就没有"落进块里"这回事。
+
+（`install-base.sh` 用 `sed` 抓的 `range_start` / `range_end` / `reserved_ranges` /
+`readonly_paths` 仍然按行首匹配，所以它们待在**主文件**里就行。）
 
 ## 安装器拒绝了我下载的包
 
-`slurmate plugin install`（`deploy.sh` 走同一条路）**一条都不装**时会说清是哪一条。
+`slurmate plugin install`（`install-base.sh` 走同一条路）**一条都不装**时会说清是哪一条。
 按报错里的字样对：
 
 | 报错里出现 | 是什么 | 该做什么 |
@@ -230,7 +244,7 @@ sudo slurmate plugin install --replace-key <报出来的旧指纹> <包>
 
 ★ **包被换过之后没重新部署**：守护进程在**启动那一刻**记下每一份的内容与摘要，
 对不上时回 `9 plugin_package_changed`（v0.6 时逐份取另有一句 `9 plugin_file_changed`，
-那条 op 已经删了）—— 这句话指回 `deploy.sh`，不是指回客户端。
+那条 op 已经删了）—— 这句话指回 `install-base.sh`，不是指回客户端。
 
 ## 升级之后一个插件都不见了
 
@@ -246,7 +260,7 @@ ls -l /usr/local/share/slurmate/plugins/          # 应该是一串 <ULID>.splug
 **id**。要装新的：把包放进一个目录，然后
 
 ```bash
-sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>
+sudo bash cluster/install-base.sh --plugins-src <放 .splug 的那个目录>
 ```
 
 ★ **这里应该只有 `.splug`。** 出现目录或别的文件时，`--check-plugins` 会逐条点名
@@ -254,10 +268,10 @@ sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>
 那种最要紧）。**没有任何东西会自动清它们**：是某个插件的源码树就先在作者机器上
 `packer build` 打成包，别的什么确认无用之后人工删掉。
 
-**再确认配置里没有把它关掉。** 一个 `[plugin:*]` 块都没有时，缺省取插件清单里的
+**再确认配置里没有把它关掉。** 一份插件配置都没有时，缺省取插件清单里的
 `site.defaultEnabled`（code-server 是 true）；但只要你写了
-`[plugin:code-server] enabled = no`（或者只写了 `[plugin:sshd] enabled = yes`
-并**同时**关了 code-server），那就只剩中转站。
+`slurmate.conf.d/code-server.conf` 而里面是 `enabled = no`（或者只写了
+`sshd.conf` 的 `enabled = yes` 并**同时**关了 code-server），那就只剩中转站。
 
 ★ **装了但一个都没开**、以及**一个都没装**，两种都是**合法状态**（守护进程照常
 启动，已有会话照常能查能停），但 `--check` 会把它们明确说出来：

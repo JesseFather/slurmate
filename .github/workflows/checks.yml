@@ -115,8 +115,8 @@ jobs:
           #   都是 .sbatch，没有 .sh 后缀 —— 而它们恰恰是**用户真的会执行**的
           #   那两份 shell。此前 run.sbatch 就是从这个清单里漏掉的。
           #   仓库里只有模板（成品在 <prefix>/share/slurmate/jobs/，不进仓库），
-          #   所以这条扫的是模板；成品那一份的语法由 deploy.sh 的 bash -n 挡。
-          for f in $(git ls-files '*.sh' '*.sbatch' cluster/deploy.sh tools/*.sh); do
+          #   所以这条扫的是模板；成品那一份的语法由 install-base.sh 的 bash -n 挡。
+          for f in $(git ls-files '*.sh' '*.sbatch' cluster/install-base.sh tools/*.sh); do
             [ -f "$f" ] || continue
             if bash -n "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
           done

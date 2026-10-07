@@ -16,7 +16,7 @@
 #
 #  读者：
 #    slurmate-sessiond   全部键
-#    cluster/deploy.sh   range_start / range_end / reserved_ranges / readonly_paths
+#    cluster/install-base.sh   range_start / range_end / reserved_ranges / readonly_paths
 #    slurmate（用户 CLI）【不读本文件】—— socket 路径是编译期常量，见下。
 #
 #  本文件由 root 拥有（0644）。守护进程把它读到的**所有**值当作可信输入，
@@ -56,12 +56,12 @@
 #      但启动时会与 Slurm 的 NodeAddr 交叉核对，对不上就拒绝启动并点名。）
 cluster_cidr =
 
-# 共享家目录的挂载点，多个用空格分隔。deploy.sh 用它渲染 systemd 单元的
+# 共享家目录的挂载点，多个用空格分隔。install-base.sh 用它渲染 systemd 单元的
 # ReadOnlyPaths。
 #
 # 为什么可以只读：守护进程【从不写】用户家目录 —— 口令由作业自己生成并写进
 # 0600 的会话文件，会话文件也由作业自己创建。root 身上没有"写用户文件"这条
-# 攻击面。留空则生成的单元不含该行，这层保护随之消失（deploy.sh 会警告）。
+# 攻击面。留空则生成的单元不含该行，这层保护随之消失（install-base.sh 会警告）。
 readonly_paths = /shared/home
 
 
@@ -168,9 +168,9 @@ max_connections_per_user = 8
 #    ★ 这里从前写的是 `<任意目录名>/plugin.json` —— 那是 v0.7 之前的形态。
 #      今天守护进程只认 `.splug`，「装没装」由**目录里有哪些包**说了算。
 #
-#    加一个插件 = 放一个 `.splug` + 跑一次 deploy.sh。**不需要改守护进程的源码**；
+#    加一个插件 = 放一个 `.splug` + 跑一次 install-base.sh。**不需要改守护进程的源码**；
 #    那份配置由安装器自己写（`slurmate plugin sync` 也能随时对账），所以通常连
-#    上面那个目录你都不用碰。仓库顶层的 plugins/ 下有两个现成的，deploy.sh 默认
+#    上面那个目录你都不用碰。仓库顶层的 plugins/ 下有两个现成的，install-base.sh 默认
 #    就从那里装。
 #
 #  ★ 「装了」和「开着」是两件事，别混：

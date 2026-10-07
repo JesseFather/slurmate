@@ -252,7 +252,7 @@ sudo systemctl restart slurmate-sessiond            # 自愈：先反推恢复�
   `trust='recovered'`，**永不参与自动 `scancel`**。
 
 **预防**：部署脚本**绝不**执行 `nft flush ruleset`，也绝不 reload/restart
-`nftables.service`（`cluster/deploy.sh`）。`tools/check-cluster.sh`
+`nftables.service`（`cluster/install-base.sh`）。`tools/check-cluster.sh`
 会检查 `/etc/nftables.conf`（RHEL 9 上是 `/etc/sysconfig/nftables.conf`）里有没有
 `flush ruleset`，有就给出 WARN。
 
@@ -303,7 +303,7 @@ curl -i -X POST -d 'password=<口令>' http://127.0.0.1:<本地端口>/login
 **还有一个容易搞混的情况**：`auth_mode = none` 时客户端**不发** `POST /login`
 （`plugins/code-server/client/index.js` 的 `attach`）。若服务端实际是 `password`
 而客户端以为是 `none`，用户就会看到一个没人替他登录的登录页。核对两边的
-`[plugin:<短名>]` 块里的 `auth_mode` 与 `status` 返回里的 `auth_mode` 字段。
+那份插件配置里的 `auth_mode` 与 `status` 返回里的 `auth_mode` 字段。
 
 ---
 
@@ -435,7 +435,7 @@ nft list chain inet slurmate output
 ```
 
 处置：调大 `[ports] range_start/range_end`，或调小 `candidates_per_session`，
-或先收掉一些陈旧会话。注意**改了端口区间必须重新跑 `deploy.sh`**（预检与单元渲染都
+或先收掉一些陈旧会话。注意**改了端口区间必须重新跑 `install-base.sh`**（预检与单元渲染都
 读配置）。
 
 ### 作业起来了但立刻失败，会话变 `expired` / `rejected`
@@ -452,7 +452,7 @@ nft list chain inet slurmate output
   全部被占说明候选太少或池太小。
 - **启动失败** 占多数 → 看上面的行里那个服务自己的报错。**这一段是插件的**，
   宿主只负责把端口逐个试过去，所以具体报错格式取决于哪个插件：
-  - 可执行文件路径不对（站点的 `[plugin:<短名>] bin` 要写**计算节点上**的路径）；
+  - 可执行文件路径不对（那份插件配置里的 `bin` 要写**计算节点上**的路径）；
   - 日志里只有一句语焉不详的 IPC 报错 —— 那是 code-server 的环境变量让它去附着到
     已有实例而不是启动新进程（`plugins/code-server/job/start.sh` 会清掉那些变量，
     正常路径下不该出现）。

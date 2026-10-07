@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#  deploy.sh — Slurmate 集群侧**基座**安装 / 卸载
+#  install-base.sh — Slurmate 集群侧**基座**安装 / 卸载
 # ==============================================================================
 #
 #  在【控制节点（登录节点）】上以 root 运行。
@@ -41,12 +41,12 @@
 #  5. 幂等：可反复运行。卸载只删自己的东西。
 #
 #  用法：
-#    sudo bash deploy.sh                     # 装基座
-#    sudo bash deploy.sh --check             # 只体检，不做任何改动
-#    sudo bash deploy.sh --dry-run           # 演练，不做任何改动
-#    sudo bash deploy.sh --uninstall         # 卸载（保留状态数据）
-#    sudo bash deploy.sh --uninstall --purge-state
-#    sudo bash deploy.sh --require-baseline  # 前置基线缺失即中止（见下）
+#    sudo bash install-base.sh                     # 装基座
+#    sudo bash install-base.sh --check             # 只体检，不做任何改动
+#    sudo bash install-base.sh --dry-run           # 演练，不做任何改动
+#    sudo bash install-base.sh --uninstall         # 卸载（保留状态数据）
+#    sudo bash install-base.sh --uninstall --purge-state
+#    sudo bash install-base.sh --require-baseline  # 前置基线缺失即中止（见下）
 #
 #  装完基座之后装插件（那是**唯一**的插件入口，本脚本不认识插件）：
 #    sudo slurmate plugin install --from /srv/slurmate-pkgs
@@ -65,7 +65,7 @@
 set -uo pipefail
 
 # ─── 路径 ────────────────────────────────────────────────────────────────────
-# deploy.sh 与它要安装的源文件同在 cluster/ 下。
+# install-base.sh 与它要安装的源文件同在 cluster/ 下。
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SELF_DIR}"
 
@@ -403,7 +403,7 @@ else
 
     chown -R root:root "$SECURE_DIR" || die "无法把拷贝的源码改为 root 所有，拒绝继续"
     chmod -R go-w "$SECURE_DIR" || die "无法收紧拷贝源码的权限，拒绝继续"
-    # 注意：源文件与 deploy.sh 同在 cluster/ 下（历史上 deploy.sh 曾在 sh/ 下，
+    # 注意：源文件与 install-base.sh 同在 cluster/ 下（历史上 install-base.sh 曾在 sh/ 下，
     # 那时这里是 ${SECURE_DIR}/cluster）。目录结构变了但这里没跟着改的话，
     # 从非 root 目录部署会走进这条自拷贝分支、然后在这里静默拿到空哈希。
     AFTER_HASH="$(src_hash_all)"

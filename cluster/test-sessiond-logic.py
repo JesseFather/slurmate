@@ -244,13 +244,14 @@ def sign_files(files, pem, pubkey):
 
 
 def weave_one(tpl_path, plugin_pkg, name, ulid, out_path):
-    """照 deploy.sh 的做法，把**一个**插件的 job/start.sh 织进模板。
+    """照安装器的做法，把**一个**插件的 job/start.sh 织进模板。
 
-    ★ 一个插件一份：这里与 deploy.sh 是同一段 awk、同一个标记、同样只放一个块。
-      这里分叉的后果是"用例全绿、部署到真机上炸" —— 而部署脚本没法在本机跑。
+    ★ 一个插件一份：这里与安装器是同一段 awk、同一个标记、同样只放一个块。
+      这里分叉的后果是"用例全绿、真机上炸" —— 所以织法必须与实现同形，
+      而实现的织法自己有用例钉着（19.19 ③）。
       返回 awk 的 CompletedProcess（调用方要断言 returncode）。
 
-    ★ 作业侧那一份现在是从**包里**取的（`--extract-package`），与 deploy.sh 走
+    ★ 作业侧那一份现在是从**包里**取的（`--extract-package`），与安装器走
       同一条路 —— 服务器上没有源码树可以读。
     """
     blocks = out_path + ".blocks"
@@ -281,7 +282,7 @@ def make_config(mod, tmpdir):
       2. **作业脚本目录** —— 由守护进程自身的安装位置推导（`<prefix>/share/
          slurmate/jobs/`），而开发机上还没部署。这里**真织一遍**：把仓库顶层
          那两个真插件的 job/start.sh 各织一份进临时目录，文件名用它们的 ULID ——
-         与 deploy.sh 做的是同一件事。指向一个空目录或手写的替身都不行：
+         与安装器做的是同一件事。指向一个空目录或手写的替身都不行：
          那样 `build_sbatch_argv` 的末项、`plugin_job_missing` 全是空的，
          而这两样正是这次要测的东西。
       3. **Slurm 命令** —— `validate()` 会检查它们【在宿主机上】存在，而 CI
@@ -302,9 +303,9 @@ def make_config(mod, tmpdir):
     # 顺便补上 default_plugin：示例配置里它是**注释掉的**（推荐值），而这一份测试
     # 配置要的是「一个升级前的老站点」的样子 —— 那时不带 service_kind 的提交落到
     # code-server。第 19 节用**不带这一项**的另一份配置测"没配就该被明确拒绝"。
-    # 写在 cluster_cidr 那一行后面而不是文件末尾：通用键落在 [plugin:*] 块之后
-    # 是硬错误（见 parse_config 的说明），而"块一旦开始就没有回头路"这条对测试
-    # 夹具同样成立。
+    # 就插在 cluster_cidr 那一行后面 —— v0.12 起主文件里只有 `键 = 值`（插件配置
+    # 住进 slurmate.conf.d/ 了），所以原先那条"通用键不许落在块之后"的约束**已经
+    # 不存在**，插在哪儿都行。
     text = re.sub(r"(?m)^cluster_cidr\s*=.*$",
                   "cluster_cidr = 192.0.2.0/24\ndefault_plugin = code-server", text)
     for name in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
@@ -319,7 +320,7 @@ def make_config(mod, tmpdir):
     mod.SOCKET_PATH = os.path.join(tmpdir, "ctl.sock")
     # 4. **插件目录** —— 与作业脚本同理，由守护进程自身的安装位置推导，开发机上
     #    还没部署。这里**现场把仓库顶层 plugins/ 下那两个真插件打成包**，装进一个
-    #    临时目录 —— 正是 deploy.sh 会做的事（它也只是把 `.splug` 交给安装器）。
+    #    临时目录 —— 正是安装器会做的事（集群侧装包只有那一处实现）。
     #
     #    ★ 刻意用**真的那两个**而不是合成替身：插件与基座的接口正是这一版反复在
     #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
@@ -1609,7 +1610,7 @@ exit 0
     try:
         r, _sess, _env = run_submit({"op": "submit"})
         _has, _g = _gres_of(r)
-        check("★★ 提交时省略 gres ⇒ 用**这个插件块里**的 default_gpus",
+        check("★★ 提交时省略 gres ⇒ 用**这个插件那份配置里**的 default_gpus",
               _has and _g == {"name": "gpu", "type": None, "count": 1},
               str(r)[:200])
         r, _sess, _env = run_submit({"op": "submit", "gres": None})
@@ -1664,9 +1665,8 @@ exit 0
     # 19.0 ★★ 插件表是**扫出来的**，不是代码里写死的
     #
     # 这一节是全节的支点。守护进程里**没有任何一个插件的名字** —— 表来自
-    # <prefix>/share/slurmate/plugins/<ULID>.splug，由安装器装进去（deploy.sh
-    # 只是把包交给它）。加一个插件因此是「放一个包 + 跑一次 deploy.sh」，
-    # 不是「改守护进程的源码」。
+    # <prefix>/share/slurmate/plugins/<ULID>.splug，由安装器装进去。加一个插件因此
+    # 是「放一个包 + 跑一次 `slurmate plugin install`」，不是「改守护进程的源码」。
     def add_plugin_to_cfg(_cfg, _spec, _raw=None):
         """给 `_cfg` **就地**加一个插件（spec + 生效配置），返回一个还原函数。
 
@@ -1894,7 +1894,7 @@ exit 0
 
     # ── id 撞车：**两个都不收**（F21）────────────────────────────────────
     #
-    # 同一个 **id** 的两个包 = 同一个插件的两份作业侧代码。deploy.sh 织出来的
+    # 同一个 **id** 的两个包 = 同一个插件的两份作业侧代码。安装器织出来的
     # 作业脚本按 **id** 命名（`jobs/<id>.sbatch`），后织的会**静默覆盖**先织的。
     #
     # ★ 这个形状**正常装不出来**：安装器按 id 给文件命名（两个同 id 的包会落在
@@ -2154,7 +2154,7 @@ exit 0
     #
     # 这是「插件是独立项目」在集群侧的落点，所以它必须有一条**跑的**用例，而不是
     # 一句注释。这里合成一个全新的插件（仓库里没有它、守护进程更没听说过它），
-    # 然后走一遍：扫描 → 配置块 → 提交 → 环境变量 → op_plugins。
+    # 然后走一遍：扫描 → 插件配置 → 提交 → 环境变量 → op_plugins。
     _thirddir = os.path.join(tmpdir, "plugins-third")
     os.makedirs(_thirddir, exist_ok=True)
     put_package(_thirddir, [
@@ -2183,7 +2183,7 @@ exit 0
           and _jup.bin_env == "SLURMATE_JUP_BIN"
           and _jup.enum_default("token_mode") == "auto",
           "%s/%s/%s" % (_jup.default_cpus, _jup.default_mem, _jup.bin_env))
-    check("★ 它的配置块允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
+    check("★ 它那份配置允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
           _jup.conf_keys() == ("enabled", "default_cpus", "default_mem",
                                 "default_time", "default_gpus",
@@ -2211,11 +2211,11 @@ exit 0
         check("★★ 提交时省略 time ⇒ 用**这个插件声明的**时限（清单 → spec → 提交）",
               _sess5["requested_time"] == "03:30:00",
               repr(_sess5.get("requested_time")))
-        # ★ 三层里的**首**层（块 ＞ 清单）：纯解析那条路各占一条，与上面那条
+        # ★ 三层里的**首**层（那份配置 ＞ 清单）：纯解析那条路各占一条，与上面那条
         #   "清单走到了提交"合起来才是完整的三层。少了它，把 `PluginConfig` 里
-        #   "块没写才回落到 spec" 写成"永远用 spec"不会被任何一条打红 ——
-        #   而症状是**管理员在块里改时限完全不生效**，配置里却看不出问题。
-        check("★ 块里写了 default_time ⇒ **盖过**清单声明的那个（块 ＞ 清单）",
+        #   "那份配置没写才回落到 spec" 写成"永远用 spec"不会被任何一条打红 ——
+        #   而症状是**管理员在那份配置里改时限完全不生效**，配置文件里却看不出问题。
+        check("★ 那份配置里写了 default_time ⇒ **盖过**清单声明的那个（配置 ＞ 清单）",
               mod.PluginConfig(_jup, {"enabled": "yes",
                                       "default_time": "1:00:00"}, True)
               .default_time == "01:00:00")
@@ -2225,7 +2225,7 @@ exit 0
         check("会话记住的解析键是 <id>@<版本>",
               _sess5.get("service_plugin") == "%s@%s" % (_jup.id, _jup.version),
               repr(_sess5.get("service_plugin")))
-        check("站点没在块里写的那几个枚举键，取清单声明的缺省",
+        check("站点没在那份配置里写的那几个枚举键，取清单声明的缺省",
               cfg.plugin_config("jup").enum.get("token_mode") == "auto",
               repr(cfg.plugin_config("jup").enum))
 
@@ -2359,9 +2359,10 @@ exit 0
         (cfg.plugin_specs, cfg.plugins, cfg.plugins_by_name, cfg.plugins_by_id,
          cfg.enabled_kinds, cfg.default_plugin) = _sz, _pz, _bz, _iz, _kz, _dz
 
-    # 19.1 配置块
+    # 19.1 插件配置（slurmate.conf.d/）
     #
-    # ★ 这一节的核心是**向后兼容**：一个块都没有的老配置必须仍然只开 code-server
+    # ★ 这一节的核心是**向后兼容**：一份插件配置都没有的老站点必须仍然只开
+    #   code-server
     #   （它标了 site.defaultEnabled）。少了这条，所有现有站点升级后会一个服务都
     #   开不出来，而配置里一个字都不像有问题。
 
@@ -2418,27 +2419,27 @@ exit 0
     _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
     check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
-    check("块里写的默认资源生效；没写的用插件自己的内建值",
+    check("那份配置里写的默认资源生效；没写的用插件自己的内建值",
           _c.plugin_config(SSHD).default_cpus == 4
           and _c.plugin_config(SSHD).default_mem == "2G",
           "%s / %s" % (_c.plugin_config(SSHD).default_cpus,
                        _c.plugin_config(SSHD).default_mem))
-    # ★ 时限是"块 ＞ 清单 ＞ 内建"三层。这里验"块里写的生效 + 规范化"，另外两层
+    # ★ 时限是"那份配置 ＞ 清单 ＞ 内建"三层。这里验"配置里写的生效 + 规范化"，另外两层
     #   各自有它自己的那一条（`_jup` 那一节：清单声明的 3:30:00 **走到了提交**，
     #   并有一条纯解析的断言验它**盖过**清单）。
     _c = pcfg("[plugin:sshd]\ndefault_time = 2:00:00\n")
-    check("★ 块里写的 default_time 生效，且与清单那条一样规范化",
+    check("★ 那份配置里写的 default_time 生效，且与清单那条一样规范化",
           _c.plugin_config(SSHD).default_time == "02:00:00",
           str(_c.plugin_config(SSHD).default_time))
 
-    # ── `default_gpus`：**只在块里** ────────────────────────────────────────
+    # ── `default_gpus`：**只在那儿** ────────────────────────────────────────
     #
     # ★ 它与上面几格**不同**：清单里**没有**对应的键，而那是刻意的 —— 作者写不出
     #   本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100` 还是 `A100-PCIE-40GB`），
     #   那是本站在 `gres.conf` 里定的事实。所以"作者声明缺省卡数"这一格**不该有**，
     #   不是"还没做"（见账本 F15 的去向）。
     _c = pcfg("[plugin:sshd]\ndefault_gpus = gpu:a100:2\n")
-    check("★ 块里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
+    check("★ 那份配置里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
           _c.plugin_config(SSHD).default_gpus == {"name": "gpu", "type": "a100",
                                                   "count": 2},
           repr(_c.plugin_config(SSHD).default_gpus))
@@ -2494,7 +2495,7 @@ exit 0
     # ── 19.1b ★★ 短名**不再唯一**：块按 **id** 寻址（v0.11 阶段 2+3）─────
     #
     # 两个 id 不同、短名都叫 `jup` 的插件是**允许并存**的：它们不是同一个东西，
-    # 只是本站给人看的名字撞了。于是配置块必须能指清是哪一个 —— 这时短名不够
+    # 只是本站给人看的名字撞了。于是那份配置的**文件名**必须能指清是哪一个 —— 这时短名不够
     # 用，**id 才是身份**。
     #
     # ★ 判据是**用户 2026-10-06 拍的那条**：短名为主，**撞名时必须带 id**。
@@ -2758,10 +2759,10 @@ exit 0
         cfg.plugin_config(SSHD).enabled = _saved
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
-    # 19.5b ★ 默认资源是**按插件**的 —— 这是"插件块里放插件的策略"最直接的体现
+    # 19.5b ★ 默认资源是**按插件**的 —— 这是"插件的策略放在它自己那份配置里"最直接的体现
     #
     # 从前它是两个代码常量（DEFAULT_CPUS / DEFAULT_MEM），所有服务共用一个值；
-    # 而在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。现在它是块里
+    # 而在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。现在它是那一份配置里
     # 的一项，缺失时才回落到插件自己的内建值。
     _sshd_id = cfg.resolve_plugin(SSHD)[0].id
     _saved_cfg = cfg.plugins[_sshd_id]
@@ -2774,7 +2775,7 @@ exit 0
 
         _r, _sess, _env = run_submit({"op": "submit", "service_kind": "sshd",
                                       "ssh_pubkey": _pub})
-        check("★ 省略 cpus/mem 时用【这个插件块里】的默认值，不是全局那两个常量",
+        check("★ 省略 cpus/mem 时用【这个插件那份配置里】的默认值，不是全局那两个常量",
               _sess["cpus"] == 7 and _sess["mem"] == "5G",
               "%s / %s" % (_sess.get("cpus"), _sess.get("mem")))
         check("同一组默认值也传给了作业",
@@ -2783,7 +2784,7 @@ exit 0
 
         _r, _sess2, _ = run_submit({"op": "submit", "service_kind": "sshd",
                                     "ssh_pubkey": _pub, "cpus": 3})
-        check("显式给的资源仍然覆盖块里的默认值",
+        check("显式给的资源仍然覆盖那份配置里的默认值",
               _sess2["cpus"] == 3, str(_sess2.get("cpus")))
     finally:
         cfg.plugins[_sshd_id] = _saved_cfg
@@ -2833,10 +2834,10 @@ exit 0
 
     # ── 19.5g ★★ `default_gpus` 与「本站实际有的」对账（账本 F15 的去向）──────
     #
-    # 判据是「**配置块里**声明的资源」vs「本站的实际目录」，不是"插件清单里声明的"：
+    # 判据是「**那份插件配置里**声明的资源」vs「本站的实际目录」，不是"插件清单里声明的"：
     # 作者写不出本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100` 还是
     # `A100-PCIE-40GB`），那是本站在 `gres.conf` 里定的事实 —— 所以那一格**只在
-    # 块里**，而它必须有人对账：一个本站没有的卡名，症状是"这个插件的会话永远
+    # 那儿**，而它必须有人对账：一个本站没有的卡名，症状是"这个插件的会话永远
     # 提交不了"，而提交期那句话（`bad_gres`）要等用户点下去才说。
     #
     # ★ 四态都在这里（对得上 / 对不上 / 没配 / 目录查不到），而**"它接没接到
@@ -3662,9 +3663,9 @@ exit 0
 
     # ── 19.13 ★ 包来源目录：哪些文件算"要装的包" ─────────────────────────────
     #
-    # ★★ v0.12 阶段 4：这条判据**从 deploy.sh 搬进了安装器**
+    # ★★ v0.12 阶段 4：这条判据**从 install-base.sh 搬进了安装器**
     #    （`plugin_src_files()` / `plugin_src_problems()`）。从前这一节是把
-    #    deploy.sh 里那段 bash **抠出来真跑**（因为 deploy.sh 本机跑不了整套：
+    #    install-base.sh 里那段 bash **抠出来真跑**（因为 install-base.sh 本机跑不了整套：
     #    要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）；搬进 Python 之后可以
     #    **直接调**，于是"用例验的是不是那一份实现"这个隐患没有了。
     #
@@ -3736,7 +3737,7 @@ exit 0
     finally:
         shutil.rmtree(_gate, ignore_errors=True)
 
-    # ── 19.13b ★★ deploy.sh 剩下的那一半**不认识插件** ──────────────────────
+    # ── 19.13b ★★ install-base.sh 剩下的那一半**不认识插件** ──────────────────────
     #
     # ★ 这一条是 v0.12 阶段 4 拆分的**验收判据**（计划里的判据②）：插件那一半
     #   搬走之后，基座安装脚本里不该再出现"插件目录""作业脚本目录""drop-in 目录"
@@ -3746,7 +3747,7 @@ exit 0
     # ★ 判据是**标识符**而不是"提没提 plugin 这个词"：文件头里必须**说清楚**
     #   插件搬到哪儿去了（那是给管理员看的），那是文字；而变量名与路径是判据。
     print("\n── 19.13b. 拆开之后：基座安装脚本不认识插件 ──")
-    _ib = os.path.join(HERE, "deploy.sh")
+    _ib = os.path.join(HERE, "install-base.sh")
     with open(_ib, encoding="utf-8") as _f:
         _ib_src = _f.read()
 
@@ -3960,7 +3961,7 @@ exit 0
 
     # ── 19.15 ★★ 安装器：装一个包进站点（`slurmate plugin install`）──────────
     #
-    # 这一节是"服务器开始收外面的包"这件事**唯一**的自动化防线（deploy.sh 本机
+    # 这一节是"服务器开始收外面的包"这件事**唯一**的自动化防线（install-base.sh 本机
     # 跑不了：要 root 加一台控制节点，见 KNOWN-ISSUES 的 U2）。它钉三组判据：
     #
     #   ① **输入**：只收 root 控制得住、别人换不掉的普通文件；
@@ -4237,9 +4238,10 @@ exit 0
 
         # ── ⑨b `--check-plugins` 的机器可读那一段（**跨脚本契约**）──
         #
-        # ★ 这一段是 `deploy.sh` 拿来找包、给作业脚本命名的唯一依据。它的形状变了，
-        #   编织那一段会立刻跟着坏 —— 而坏法是"找不到文件"或"函数名对不上"，
-        #   指不回这里。所以形状本身要有用例。
+        # ★ 这一段从前是 `install-base.sh` 拿来找包、给作业脚本命名的唯一依据；v0.12
+        #   阶段 4 起它**没有仓内的读者了**（安装器是 Python，直接调 `scan_plugins()`）。
+        #   而"从 shell 里枚举本站的插件"这个出口仍要有个形状，改坏了没有别处会红 ——
+        #   所以形状本身留着用例。
         _tsvdir = os.path.join(_ins_home, "tsv")
         os.makedirs(_tsvdir, exist_ok=True)
         _tsv_a = _pkg_of("01M2JKHTZGKJBFQQTWYXMQMF60", "withjob",
@@ -4255,7 +4257,7 @@ exit 0
                                capture_output=True, text=True)
         _tlines = _trun.stdout.split("plugin-packages:")[-1].strip().split("\n")
         _trows = [l.split("\t") for l in _tlines if l.strip()]
-        check("★★ 机器可读那一段是**四列**（deploy.sh 的跨脚本契约）",
+        check("★★ 机器可读那一段是**四列**（那一屏留给 shell 的契约）",
               len(_trows) == 2 and all(len(r) == 4 for r in _trows), repr(_trows))
         check("★★ 第 4 列如实回答包里有没有 `job/start.sh`（判据是记录表，不是磁盘）",
               sorted(r[3] for r in _trows) == ["has_job", "no_job"]
@@ -4523,7 +4525,7 @@ exit 0
           "%d / %d / %d" % (mod.PACKAGE_ENVELOPE_MAX_BYTES,
                             mod.PLUGIN_TOTAL_MAX_BYTES, mod.PLUGIN_PACKAGE_MAX_BYTES))
 
-    # ── 19.18 ★★ 安装器 / 配置块 / 对账（v0.11 阶段 2+3 的**第二层**）─────────
+    # ── 19.18 ★★ 安装器 / 插件配置 / 对账（v0.11 阶段 2+3 的**第二层**）─────────
     #
     # 这一节钉三件在这一版之前**没有**的事：
     #   ① 安装器不再因**短名撞**拒装（短名不是身份）；同 **id** 仍然拒。
@@ -4532,10 +4534,10 @@ exit 0
     #   ③ `sync_plugin_config()`：配置里**安装器生成的**块与插件目录对账 ——
     #      少的补、多的删、别人的一个字节不动，而且**幂等**。
     #
-    # ★ 这一节是第二次那句「装得上、守护进程不认」的落点：`deploy.sh` 在本机跑
+    # ★ 这一节是第二次那句「装得上、守护进程不认」的落点：`install-base.sh` 在本机跑
     #   不了（要 root 加一台控制节点，见 KNOWN-ISSUES 的 U2），所以"装完之后配置
     #   里该多出一块、拿走包之后该少一块"这件事**只有这里**看得见。
-    print("\n── 19.18. 安装器、配置块与对账（插件身份那一层）──")
+    print("\n── 19.18. 安装器、插件配置与对账（插件身份那一层）──")
 
     _sy_home = tempfile.mkdtemp(prefix="slurmate-sync-")
     try:
@@ -4595,7 +4597,7 @@ exit 0
                     for i, q in c.plugins.items()}
 
         # ★ `jobs_dir` / `template_path` 指到一个临时目录与仓库里那份模板上：
-        #   对账现在**也织作业脚本**（v0.12 阶段 4 从 deploy.sh 并进来），而
+        #   对账现在**也织作业脚本**（v0.12 阶段 4 从 install-base.sh 并进来），而
         #   生产路径上这两个是从守护进程自身的安装位置推导的。用例里不能走那条
         #   —— 它会往真的 `<prefix>/share/slurmate/jobs` 里写。
         _SY_JOBS = os.path.join(_sy_home, "jobs")
@@ -4868,8 +4870,8 @@ exit 0
         # ── ⑤ 清单声明 defaultEnabled=true 的插件 ⇒ 生成的那一份照实写 yes ────
         #
         # ★★ 这一条防的是一处**静默的行为改变**：写死 `enabled = no` 的话，
-        #    一个"一个块都没写"的站点（code-server 就靠清单缺省开着）会在装完
-        #    第一次 deploy.sh 之后**悄悄关掉** —— 而配置文件里多了一行，看起来
+        #    一个"一份插件配置都没写"的站点（code-server 就靠清单缺省开着）会在装完
+        #    第一次装插件之后**悄悄关掉** —— 而配置文件里多了一行，看起来
         #    像是"一直就这样"。
         _SY4 = os.path.join(_sy_home, "plugins4")
         os.makedirs(_SY4, exist_ok=True)
@@ -4926,7 +4928,7 @@ exit 0
 
         # ★ `cmd_plugin_sync` 会先 `os.path.isfile(exe)` —— 那是**真的**去问盘上
         #   有没有这个文件，所以夹具得造一个出来（`subprocess.run` 那一层才是
-        #   被替掉的）。用一个真的空脚本当替身，与 deploy.sh 那条路同形。
+        #   被替掉的）。用一个真的空脚本当替身，与基座安装脚本那条路同形。
         _fake_exe = write_stub(os.path.join(_sy_home, "slurmate-sessiond"),
                                "exit 0\n")
         _saved_run = _cli.subprocess.run
@@ -4950,8 +4952,8 @@ exit 0
               and "--sync-plugins" in _seen[0],
               repr(_seen))
         # ★★ 而对齐成功之后**真的**去让守护进程重读了配置。
-        #   从前这一步不存在：配置改完要管理员自己记得再跑一次 deploy.sh，而它是
-        #   stop + start —— 所有人的会话断一次，就为了改一行插件配置。
+        #   从前这一步不存在：配置改完要管理员自己记得重跑一次基座安装脚本，而那时
+        #   它是 stop + start —— 所有人的会话断一次，就为了改一行插件配置。
         check("★★ 对齐成功 ⇒ 真的调了 `systemctl reload`（配置改动不再需要重启）",
               any(a[:2] == ["systemctl", "reload"] for a in _seen), repr(_seen))
         check("★★ 而它**说准了**这一步做成了什么：只是「发了重载信号」，"
@@ -4993,10 +4995,10 @@ exit 0
         #
         # ★ 与 F37 同一族：**这一屏没有用例**。而这一条比 F37 更隐蔽 —— 它读的
         #   字段**存在**，只是**回答的不是那个问题**。它**不读站点配置**（要能在
-        #   配置读不出来的机器上跑，deploy.sh 也拿它预检还没装进去的源目录），
+        #   配置读不出来的机器上跑），
         #   所以它**不知道**本站开了哪些；而从前它写的是「启用/停用」，与
         #   `--check`（读配置、说「已启用/已停用」）**同一个词、两件事** ——
-        #   而 deploy.sh 里两屏前后紧挨着打印。
+        #   而从前的基座安装脚本里两屏前后紧挨着打印。
         _SY5 = os.path.join(_sy_home, "plugins5")
         os.makedirs(_SY5, exist_ok=True)
         _rc, _out = _sy_install([_sy_mk(_U1, "onplug", default_enabled=True),
@@ -5023,9 +5025,9 @@ exit 0
     finally:
         shutil.rmtree(_sy_home, ignore_errors=True)
 
-    # ── 19.19 ★★ 拆开 deploy.sh 之后的四件事（v0.12 阶段 4）─────────────────
+    # ── 19.19 ★★ 拆开 install-base.sh 之后的四件事（v0.12 阶段 4）─────────────────
     #
-    # 这四件事从前都在 `deploy.sh` 里，靠**抠它那段 bash 出来真跑**才能验到一点
+    # 这四件事从前都在 `install-base.sh` 里，靠**抠它那段 bash 出来真跑**才能验到一点
     # （它本机跑不了整套：要 root + 一台控制节点，见 KNOWN-ISSUES 的 U2）。
     # 搬进守护进程之后可以直接调，于是这一节是**真跑**。
     #
@@ -5033,7 +5035,7 @@ exit 0
     #   ② 卸插件：一个插件在站点上留下**恰好四处**痕迹，全删，不多删
     #   ③ 对账顺手织作业脚本，并清掉不再属于任何插件的那几份
     #   ④ `--check` 的两个退出码：机器级(2) vs 配置级(1)
-    print("\n── 19.19. 拆开 deploy.sh 之后的四件事 ──")
+    print("\n── 19.19. 拆开 install-base.sh 之后的四件事 ──")
     _d4 = tempfile.mkdtemp(prefix="slurmate-split-")
     _ck = tempfile.mkdtemp(prefix="slurmate-ck-")
     try:
@@ -5483,12 +5485,12 @@ exit 0
     # 这条契约漂了的症状是：用户排完队、作业跑起来，然后在日志里读到"候选端口
     # 全部失败" —— 一句话指不回根因，而根因是一个函数名拼错了。
     #
-    # 所以这里**真的编织一遍**（照 deploy.sh 的做法，同一个标记、同一段 awk），
+    # 所以这里**真的编织一遍**（照安装器的做法，同一个标记、同一段 awk），
     # 再真的调一次分派。
     print("\n── 21. 作业侧契约（宿主 ↔ 插件的唯一接口：函数名）──")
     _tpl = open(_rb, encoding="utf-8").read()
-    # ★ **一个插件一份**：照 deploy.sh 逐插件织，而不是把所有插件织进一份。
-    #   这一节的分叉后果是"用例绿了、部署到真机上炸" —— 而 deploy.sh 本机跑不了。
+    # ★ **一个插件一份**：逐插件织，而不是把所有插件织进一份。
+    #   这一节的分叉后果是"用例绿了、真机上炸" —— 所以织法必须与实现同形。
     _woven_of = {}
     _awk = None
     for _sp in cfg.plugin_specs:
@@ -5497,8 +5499,8 @@ exit 0
         _woven_of[_sp.name] = _out
     _woven = _woven_of[CS]        # 22a 用它，见下
     # ★ 数的是**整行**的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
-    #   于是"替换成功"这件事看起来永远不成立 —— deploy.sh 里那条同理。
-    check("★ 模板里的拼接标记恰好一处，编织后一处不剩（照 deploy.sh 的做法）",
+    #   于是"替换成功"这件事看起来永远不成立 —— install-base.sh 里那条同理。
+    check("★ 模板里的拼接标记恰好一处，编织后一处不剩（照安装器的做法）",
           _awk is not None and _awk.returncode == 0
           and len(re.findall(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _tpl)) == 1
           and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _awk.stdout),
@@ -5775,7 +5777,7 @@ exit 0
     # ── 22d-2 ★ 「每一个候选端口都失败」这条路（F16）────────────────────────
     #
     # **账本上这条不是缺陷，是防线上一个洞。** 它是"计算节点上没装那个服务"的表现：
-    # deploy.sh 解析 `bin` 是在**登录节点**上做的，猜不到计算节点上有没有。这条路
+    # 守护进程解析 `bin` 是在**登录节点**上做的，猜不到计算节点上有没有。这条路
     # 走到最后要做两件事 —— 写一个 `failed` 墓碑（让守护进程立刻知道，而不是等
     # orphan 周期）+ 以 22 结束 —— 而在此之前，仓库里**没有任何一条用例**看过它们。
     #
@@ -5841,7 +5843,7 @@ exit 0
     check("顶层语句的假插件被扫进来（这条用例自己的前提）",
           sorted(s.name for s in _tl_specs) == ["loud", "quiet"], str(_tl_probs))
     _tl_by = {s.name: s for s in _tl_specs}
-    # ★ 这里逐插件织 —— **与 deploy.sh 同一个形状**。如果哪天退回"共处一份"，
+    # ★ 这里逐插件织 —— **与安装器同一个形状**。如果哪天退回"共处一份"，
     #   下面第二条会立刻红，而红的方式正是它要防的那件事。
     _tl_home = {}
     for _n in ("loud", "quiet"):

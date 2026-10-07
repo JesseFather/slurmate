@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.11"
+VERSION = "0.12"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -933,7 +933,7 @@ PLUGIN_NAME_RE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
 # `tools/manifest-keys.json`（两侧的用例与 CI 的 lint 对着它比）。
 #
 # ★ 这几份为什么是**字面量**，不在运行期读那个 JSON：本文件是**一个文件**装到
-#   /usr/local/sbin/slurmate-sessiond（见 cluster/deploy.sh 的 DAEMON），集群上
+#   /usr/local/sbin/slurmate-sessiond（见 cluster/install-base.sh 的 DAEMON），集群上
 #   没有 tools/。写一条相对路径的话，**从源码跑得通、装出去就断**：这几张表成了
 #   空集，于是"什么都不拒"。那条路只在装在集群上的那一份上露出来 —— 所以不选它。
 #   完整理由与代价写在那份 JSON 的 `_` 段里。
@@ -1783,7 +1783,7 @@ RELOAD_CLASS = {
     "sacct": RELOAD_NOTICE,
 
     # ── 必须重启 ──────────────────────────────────────────────────────────
-    # 部署期配置：`deploy.sh` 读它（只读挂载的路径），守护进程里**零读者**
+    # 部署期配置：`install-base.sh` 读它（只读挂载的路径），守护进程里**零读者**
     #   ⇒ 它在运行期改了本来就没有意义，而"改了就热重载"会让管理员以为生效了。
     "readonly_paths": RELOAD_COLD,
 }
@@ -1901,7 +1901,7 @@ def parse_config(path):
 # 「把插件的东西写回主文件」是一个**有理由**的直觉 —— 得说清格式为什么换了。
 # ★★ 这条报错要**说清该写到哪儿去**，并给出可照做的搬法 —— 只说"不合法"的话，
 #    管理员唯一想得到的动作是把那几行**删掉**，而那是把他的配置丢掉。
-#    ★ 这段话此前在 `deploy.sh` 里有一份**孪生兄弟**（它在装完 conf 之后自己
+#    ★ 这段话此前在 `install-base.sh` 里有一份**孪生兄弟**（它在装完 conf 之后自己
 #      扫一遍块头再 die）。v0.12 阶段 4 把那一份删了：判据只能有一处，而这里
 #      是唯一知道"主文件里为什么不能有块头"的地方。
 _MAIN_NO_SECTION = (
@@ -2018,7 +2018,7 @@ def resolve_bin(name, explicit):
 def default_jobs_dir():
     """作业脚本目录，从【守护进程自身的安装位置】推导。
 
-    安装布局由基座安装脚本（cluster/deploy.sh）定下：守护进程在 <prefix>/sbin，
+    安装布局由基座安装脚本（cluster/install-base.sh）定下：守护进程在 <prefix>/sbin，
     作业脚本在
     <prefix>/share/slurmate/jobs。两边由同一个前缀推导，就不存在
     「配置指向 A、实际装在 B」这种只在提交时才炸的不一致。
@@ -2409,11 +2409,11 @@ def package_extract(path, inner):
 #
 #       sudo slurmate plugin install ~/下载/foo-1.2.0.splug
 #
-#   ★ v0.12 阶段 4 起**集群侧只有这一个入口**：`deploy.sh` 不再碰插件，而
+#   ★ v0.12 阶段 4 起**集群侧只有这一个入口**：`install-base.sh` 不再碰插件，而
 #     `--plugins-src DIR`（目录模式：枚举 + 信任检查 + 集合对账）也走它。
 #   ★ **服务器上从头到尾没有源码树** —— 打包是作者的事（`packer/`），这里只收包。
 #
-# ★ 为什么安装器要长在守护进程这个文件里，而不是 CLI 里或 deploy.sh 里：
+# ★ 为什么安装器要长在守护进程这个文件里，而不是 CLI 里或 install-base.sh 里：
 #   读包、验签、"包里有没有 job/start.sh"、扫描器认不认这份清单 —— 这几件事全
 #   都在本文件里，各自只有一份实现。安装器再抄一遍就是第四份，而它的失效方式是
 #   最坏的那种：**装得上、守护进程不认**，症状要到用户点提交时才出现。
@@ -2581,7 +2581,7 @@ def package_input_problem(path, want_uid=None, st=None):
 
 # ── 「一个包来源目录里，哪些文件是包」 ────────────────────────────────────────
 #
-# ★ 这一条此前长在 `deploy.sh` 里（`plugin_src_files()`）。v0.12 阶段 4 把"插件
+# ★ 这一条此前长在 `install-base.sh` 里（`plugin_src_files()`）。v0.12 阶段 4 把"插件
 #   那一半"从部署脚本搬进安装器，它跟着搬过来 —— **判据只能有一份**，而分家的
 #   失效方式是"部署放行了、安装器不认"（或者反过来）。
 #
@@ -3132,7 +3132,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
             set(spec.id + PLUGIN_PACKAGE_SUFFIX for _p, _r, spec, _n in verified),
             say=say)
 
-    # ★ 这句从前是"下一步：跑一次 deploy.sh" —— v0.12 阶段 4 起**编织与配置
+    # ★ 这句从前是"下一步：跑一次 install-base.sh" —— v0.12 阶段 4 起**编织与配置
     #   对齐都在安装器这一侧**（`--sync-plugins`），`slurmate plugin install`
     #   自己会把它们跑完。所以这里说的是**调用方**该做的下一件事。
     if src_dir is None:
@@ -3159,7 +3159,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
 #     id）分别长在三个模块里，而每一个写方都是一次"只删掉了其中三处"的机会 ——
 #     症状是配置指不到人（一条 ⚠），或者留下一份**仍然能被提交的无主作业脚本**。
 #
-#   ★ 它与 `deploy.sh --uninstall` 的分工：那一条卸载的是**基座**，它在删掉守护
+#   ★ 它与 `install-base.sh --uninstall` 的分工：那一条卸载的是**基座**，它在删掉守护
 #     进程之前调用本函数（`--uninstall-plugins --all`）—— 判据因此仍然只有一份。
 #
 #   ★ **卸载不删数据**：站点侧没有插件的运行时数据（那是客户端的事），所以这里
@@ -3318,7 +3318,7 @@ def uninstall_plugins(ids, plugins_dir, conf_path, jobs_dir, say=print,
 #  编织作业脚本（模板 + 每个插件的 job/start.sh → <jobs_dir>/<id>.sbatch）
 # ==============================================================================
 #
-#   ★★ 这一节同样是 v0.12 阶段 4 从 `deploy.sh` 搬进来的：插件是"安装器/卸载器
+#   ★★ 这一节同样是 v0.12 阶段 4 从 `install-base.sh` 搬进来的：插件是"安装器/卸载器
 #     是唯一入口"的，而"装一个插件要再跑一次部署脚本"正是那句话没成立的证据。
 #     搬过来之后，装、卸、配置、作业脚本四件事都在这一侧说完。
 #
@@ -3412,7 +3412,7 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
     except OSError as e:
         say("✗ 读不了作业模板 %s：%s" % (template_path, e))
         say("  它由部署装下（<prefix>/share/slurmate/run.sbatch.template）。"
-            "重跑一次 cluster/deploy.sh 会把它装上。")
+            "重跑一次 cluster/install-base.sh 会把它装上。")
         return 1
 
     n_mark = sum(1 for ln in template.splitlines() if ln == JOB_TEMPLATE_MARKER)
@@ -3688,7 +3688,7 @@ def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
         _global, sections, meta = parse_config(path)
     except FileNotFoundError:
         say("✗ 配置文件 %s 不存在 —— 没有它就没有插件配置可言。" % path)
-        say("  先跑一次 cluster/deploy.sh（它会从 slurmate.conf.example 装一份）。")
+        say("  先跑一次 cluster/install-base.sh（它会从 slurmate.conf.example 装一份）。")
         return 1
     except ValueError as e:
         # ★ 主文件读不动与某个 drop-in 文件读不动都走这里，而消息里带着**是哪
@@ -4227,7 +4227,7 @@ def plugin_gres_problems(plugins, catalog):
 #
 #        · systemd 的 `ExecStartPre`（单元文件里那一条）：只要非零就拦住启动，
 #          不必分清。
-#        · **部署脚本**（`cluster/deploy.sh`）：它在装文件**之前**跑一次 `--check`
+#        · **部署脚本**（`cluster/install-base.sh`）：它在装文件**之前**跑一次 `--check`
 #          —— 那正是"任何一项不满足即中止，不做任何改动"这条承诺的落点。而它
 #          必须分得清两件事：
 #            这台机器缺东西（缺 sbatch、缺 nft）⇒ **现在就停**，一个字节都别装；
@@ -4265,7 +4265,7 @@ def reserved_ports_warning(cfg, raw=None):
       都让守护进程拒绝启动，而这一条只意味着"偶尔要多试几个候选端口"）。
       调用方打一条 ⚠，退出码不动。
 
-    ★ 它此前长在 `deploy.sh` 的预检里（v0.12 阶段 4 搬进来）。搬的理由是那条
+    ★ 它此前长在 `install-base.sh` 的预检里（v0.12 阶段 4 搬进来）。搬的理由是那条
       判据只能有一份，而且搬过来之后它跟着 `--check` 进了 `ExecStartPre`
       —— **每次启动前都跑**，比"只在部署时跑一次"见得多。
 
@@ -5189,7 +5189,7 @@ class Nft(object):
 
     def delete_table(self):
         """整表删除。仅用于人工排障，正常运行路径【绝不】调用 ——
-        卸载由 deploy-slurmate-session.sh --uninstall 负责，
+        卸载由 cluster/install-base.sh --uninstall 负责，
         且卸载前会先确认服务已停止（否则本进程下一个 tick 就把表重建回来）。"""
         self._nft(["delete", "table", "inet", "slurmate"])
 
@@ -9259,7 +9259,7 @@ def main():
     # ── 卸插件（`slurmate plugin uninstall` 与基座卸载用）────────────────────
     # ★ 排在 log_setup() 之前，理由与 --install-plugins 逐字相同：它的输出是
     #   给管理员看的一屏，而且它要能在一台守护进程没配好、Slurm 没装的机器上跑。
-    # ★ 基座卸载（`deploy.sh --uninstall`）在删掉守护进程**之前**调它，于是
+    # ★ 基座卸载（`install-base.sh --uninstall`）在删掉守护进程**之前**调它，于是
     #   "一个插件在站点上留下哪几处痕迹"这条判据仍然只有一份实现。
     if args.uninstall_plugins is not None or args.all_plugins:
         if args.all_plugins and args.uninstall_plugins:
@@ -9425,7 +9425,7 @@ def main():
         #
         #     <短名>\t<包路径>\t<ULID>\t<has_job|no_job>
         #
-        #   ★★ **它现在没有仓内的读者了**（v0.12 阶段 4）：从前 `deploy.sh` 靠这
+        #   ★★ **它现在没有仓内的读者了**（v0.12 阶段 4）：从前 `install-base.sh` 靠这
         #     一行找包、给作业脚本命名，而插件那一半已经搬进安装器 —— 安装器是
         #     Python，直接调 `scan_plugins()`，不经过这一屏。留着它的理由是"从
         #     shell 里枚举本站的插件"这件事仍然要有个出口。★ 要删就删。
@@ -9478,7 +9478,7 @@ def main():
         else:
             print("配置 OK: %s" % args.config)
         print("  端口池        : %d-%d" % (cfg.port_start, cfg.port_end))
-        # ★ 端口池与本机保留端口的重叠（v0.12 阶段 4 从 deploy.sh 搬进来）。
+        # ★ 端口池与本机保留端口的重叠（v0.12 阶段 4 从 install-base.sh 搬进来）。
         #   一条 ⚠，**不动退出码** —— 它只意味着作业偶尔要多试几个候选端口。
         _rp = reserved_ports_warning(cfg)
         if _rp:

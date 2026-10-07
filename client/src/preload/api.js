@@ -106,7 +106,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 型号是管理员在集群上定的（见 main/gres.js）。
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
-  // serviceKind 是**本站的短名**（配置块名、块标题旁边那个 code），**必填** ——
+  // serviceKind 是**本站的短名**（那份配置的文件名、界面上那个 code），**必填** ——
   // 客户端这一侧没有缺省插件（"缺省"是**站点**配置里 `default_plugin` 的事，
   // 只作用于不带 service_kind 的 `slurmate submit`）。漏传会当场拿到一句说明。
   // 客户端再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。

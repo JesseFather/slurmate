@@ -89,11 +89,11 @@ Slurm 说作业没了，就拆规则；nft 规则被人删了（例如 `systemct
 cluster/          集群侧（部署到登录节点）
   slurmate-sessiond        root 守护进程
   slurmate                 用户 CLI（也是客户端调用的 RPC 入口）
-  run.sbatch               作业**模板**（仓库里的这一份不提交；deploy.sh 对每个
+  run.sbatch               作业**模板**（仓库里的这一份不提交；**安装器**对每个
                            插件用它织一次，装到 <prefix>/share/slurmate/jobs/
                            <ULID>.sbatch —— 一个插件一份）
   slurmate.conf.example    配置示例 —— 复制到 /etc/slurmate/slurmate.conf 再改
-  deploy.sh                一键部署 / 卸载
+  install-base.sh                一键部署 / 卸载
   nft-compare.py           非干扰比对器（带自测）
   test-sessiond-logic.py   守护进程自测
 client/           Electron 桌面客户端
@@ -102,7 +102,7 @@ plugins/          ★ 两个插件的**独立项目** —— 基座不依赖它�
                     sshd/         作业内的用户态 ssh
                   一个都没有是**合法状态**，见 plugins/README.md
 packer/           ★ 插件**作者**的打包器（单文件、零依赖）—— 它跑在你的机器上，
-                   产出 .splug；服务器上从头到尾没有源码树，deploy.sh 永不打包
+                   产出 .splug；服务器上从头到尾没有源码树，install-base.sh 永不打包
 docs/             README.md 是**索引**（按读者分三组）；其余：架构、部署、配置、
                    协议、插件规范与容器格式、排障、**已知问题**
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
@@ -156,8 +156,8 @@ Slurmate 对集群形态有几个硬性要求（单一登录节点、登录与�
 共享家目录、root 有 Slurm operator 权限等），不满足时的失败方式往往很隐蔽。
 
 ```bash
-sudo bash cluster/deploy.sh --check      # 只体检，不做任何改动
-sudo bash cluster/deploy.sh              # 部署
+sudo bash cluster/install-base.sh --check      # 只体检，不做任何改动
+sudo bash cluster/install-base.sh              # 部署
 ```
 
 ---
@@ -206,7 +206,8 @@ sudo bash cluster/deploy.sh              # 部署
   项目**（[`plugins/`](plugins/)），基座里没有任何一个插件的名字。
   ★ **插件以一个包文件（`.splug`）分发**：作者在自己的机器上用
   [`packer/`](packer/) 打包（**服务器上从头到尾没有源码树**），管理员把包装上去
-  （`sudo slurmate plugin install <包>`，或 `deploy.sh --plugins-src <放包的目录>`）。
+  （`sudo slurmate plugin install <包>`，或 `sudo slurmate plugin install --from
+  <放包的目录>` 整批对齐）。
   装的时候会**验签**，并按 `id` 记住签名者（§6.4）。代价写在明处：服务器上没有
   源码可对照，管理员对"包里是什么"的信任来自 `packer inspect` 的输出 ——
   所以安装器会把包里有什么逐项打出来。
@@ -224,7 +225,7 @@ sudo bash cluster/deploy.sh              # 部署
   一个插件都不装是**正常状态**：基座照常启动、已有会话照常能查能停，只是没有可
   提交的服务。**一个插件的包里没有 `job/start.sh` 也是合法状态**：它装得上、
   看得见，但提交不了（守护进程报 `service_kind_no_job`，界面上那个按钮是灰的）。
-  加一个插件 = 打一个包 + 放进去 + 跑一次 deploy.sh，**不用改基座的源码**，
+  加一个插件 = 打一个包 + 放进去 + 跑一次 `slurmate plugin install`，**不用改基座的源码**，
   客户端那一侧一步人工动作都不需要。契约见 [plugins/README.md](plugins/README.md)。
 - **站点分发的插件要你点一次同意**。每个 `(id + 版本 + 整目录摘要)` 第一次都要在
   界面上同意一次，不同意就不激活。四条护栏（**签名、钉公钥、逐插件同意、进程隔离**）

@@ -485,7 +485,7 @@ test('★ 清单合法但 client/index.js 有语法错 ⇒ 在暂存里就被抓
 });
 
 test('★ 一条"永远通过"的对账比没有对账更糟：坏的必须真的红', async () => {
-  // 反向自测（这个项目里 `check-sanitized.sh --selftest` 与 `deploy.sh` 的
+  // 反向自测（这个项目里 `check-sanitized.sh --selftest` 与 `install-base.sh` 的
   // `comparator_selftest()` 立过的规矩）：对账本身也要有一条"种进一个应当被抓住的
   // 东西、断言它会红"的用例。
   const site = makeSite();
@@ -844,8 +844,8 @@ test('★★ **不认识**的会话状态要护着（判错的方向是回收掉
 
 test('★★ 记录丢了或坏了 ⇒ 一个字节都不删，只报一条', async () => {
   // 记录丢了 ⇒ 池里每个版本的引用数都算 0 ⇒ 按规则会把整个池清空。那是"因为读不到
-  // 一张表而删掉用户的文件"。与 deploy.sh 的「JOBS_DIR 有东西但没有标记 ⇒ die，
-  // 不删」是同一个先例。
+  // 一张表而删掉用户的文件"。与安装器织作业脚本时那条「目录里有东西、却没有部署
+  // 标记 ⇒ 中止，不是删」是同一个先例。
   const site = makeSite();
   const env = makeEnv();
   const v1 = site.add('v1', { name: 'x', version: '1.0.0' },

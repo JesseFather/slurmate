@@ -33,7 +33,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate-sessiond、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。
-VERSION = "0.11"
+VERSION = "0.12"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。★ 与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
@@ -108,8 +108,8 @@ def reload_daemon():
     """配置改完之后，让**正在跑的**守护进程重新读一遍（v0.12 阶段 3）。
 
     ★★ 这是热重载在**运维动线**上的落点：装插件、对齐配置都会改配置文件，而从
-      前的下线是"再跑一次 deploy.sh"（它 stop + start，所以**所有会话都断一次**）。
-      现在这两条动线自己把话说完了。
+      前的下线是"重跑一次基座安装脚本"（那时它是 stop + start，所以**所有会话都断
+      一次**）。现在这两条动线自己把话说完了。
 
     ★ 用 `systemctl reload`（单元的 `ExecReload` 是 `kill -HUP`），**不是 restart**
       —— 这正是这一版要的东西：正在跑的会话一条都不该断。
@@ -168,7 +168,7 @@ def cmd_plugin_install(args):
         print("找不到守护进程脚本 %s —— 安装器在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     if not args.files and not args.from_dir:
@@ -221,7 +221,7 @@ def cmd_plugin_install(args):
               "—— 在它们对上之前，这个插件可能起不来或提交不了。", file=sys.stderr)
         return src
     # ★ 装好了、配置也对齐了 ⇒ 让守护进程**重读一遍**（热重载）。
-    #   这一步从前不存在：那时候装完插件要**再跑一次 deploy.sh**，而它是
+    #   这一步从前不存在：那时候装完插件要**重跑一次基座安装脚本**，而那时它是
     #   stop + start —— 所有人的会话断一次，就为了加一个插件。
     reload_daemon()
     return 0
@@ -250,7 +250,7 @@ def cmd_plugin_uninstall(args):
         print("找不到守护进程脚本 %s —— 卸载的判据在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     argv = [sys.executable, exe, "--uninstall-plugins"] + list(args.ids)
@@ -292,7 +292,7 @@ def cmd_plugin_sync(args):
         print("找不到守护进程脚本 %s —— 对账的判据在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/deploy.sh。" % exe, file=sys.stderr)
+              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     argv = [sys.executable, exe, "--sync-plugins"]

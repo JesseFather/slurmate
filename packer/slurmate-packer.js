@@ -7,7 +7,7 @@
  *
  * ★ **这是作者的工具，不是部署工具。** 它跑在**你**的机器上（写插件的那台），
  *   产出 `.splug` 之后发布到网站 / GitHub；管理员下载下来交给安装器。
- *   **服务器上从头到尾没有源码树** —— 所以 `cluster/deploy.sh` 永不打包。
+ *   **服务器上从头到尾没有源码树** —— 所以 `cluster/install-base.sh` 永不打包。
  *
  * ★ **单文件、零依赖**：只用 `crypto` / `fs` / `os` / `path` / `child_process`。
  *   下载这个文件夹就能用（`node slurmate-packer.js …`）。所以它**不**从

@@ -70,7 +70,7 @@ Slurmate 让用户在 Slurm 集群上用远程开发环境。它的核心动作�
 `/usr/local/bin/codeserver-*`、sshd 配置、sudoers、`user@.service`。
 独立表、独立端口区间、独立状态目录、独立 systemd 单元。部署脚本把这条原则
 升级成可验证的判据：部署前后各取一次 nft 规则集快照，剥掉 `inet slurmate`
-之后必须逐条一致，否则判失败并提示回滚（`cluster/deploy.sh`）。
+之后必须逐条一致，否则判失败并提示回滚（`cluster/install-base.sh`）。
 
 为什么是 Python：bash 拿不到 `getsockopt(SO_PEERCRED)`（身份认证的唯一可信来源），
 而用 `sed` 解析文本正是最脆弱的地方。
@@ -102,7 +102,7 @@ exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shel
 由守护进程以目标用户身份提交，**文件本身 root 拥有、0644、用户不可写**：执行的是
 这个固定文件，用户可控的只有 `sbatch` 的命令行 flag（`cluster/run.sbatch`）。
 
-★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：`deploy.sh` 对每个插件
+★ **这个文件里没有任何一个插件的名字。** 它是一份**模板**：`install-base.sh` 对每个插件
 把它的 `job/start.sh` 拼在模板里那个 `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` 的是一份**编织后的成品** ——
 **一个插件一份**，文件名是这个插件清单里的 `id`（ULID）。见
@@ -139,7 +139,7 @@ slurmd 从**自己的 spool** 取脚本执行 —— 本系统从来没有让计
 `<prefix>/share/slurmate/` 里任何一个文件。改成运行时 `source` 会引入本项目
 **有史以来第一个**「共享目录对计算节点可见」的前置条件，而那个事实**在登录节点上
 永远验证不出来**（文件在那儿必然存在）。编织让不确定性归零：一个语法错的插件脚本
-让 `deploy.sh` 当场中止，而不是变成用户的一次失败会话。
+让 `install-base.sh` 当场中止，而不是变成用户的一次失败会话。
 
 ★ **从一份拆成 N 份没有改变上面这条论证。** 仍然是部署期把内容写进文件、
 `sbatch` 仍然只拿到一个路径、计算节点仍然不需要看见 `<prefix>/share/slurmate/`。
@@ -183,8 +183,14 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 |---|---|---|---|
 | 身份与声明 | `plugin.json` | 两侧（**一份清单，一个 schema**） | 客户端启动 / 守护进程启动 / 安装器 |
 | 客户端 | `client/index.js` | 客户端的注册表 —— **可以没有**（那就是声明式插件） | 客户端启动时扫池；站点分发的那一份由对账取回来，**过了同意闸才加载** |
-| 作业侧 | `job/start.sh` | **没有任何运行时读者** —— **可以没有**（那这个插件就提交不了） | deploy.sh 部署时**逐插件织一份**作业脚本 |
-| 站点策略 | `slurmate.conf` 里的 `[plugin:<短名>]` 块（开不开、默认资源、可执行文件） | 守护进程 | 守护进程启动 |
+| 作业侧 | `job/start.sh` | **没有任何运行时读者** —— **可以没有**（那这个插件就提交不了） | 安装器**逐插件织一份**作业脚本 |
+| 站点策略 | `slurmate.conf.d/<名字>.conf`（开不开、默认资源、可执行文件） | 守护进程 | 启动时读一次；**`SIGHUP` 时整个重读**（v0.12 热重载） |
+
+★★ **"站点策略"这一行是活的（v0.12）**：装插件（`slurmate plugin install`）与对齐
+（`slurmate plugin sync`）都会改 `slurmate.conf.d/`，而改完**自己**给守护进程发一次
+重载信号 —— **正在跑的会话一条都不**断。重载是**全有或全无**的（解析 → 重扫插件
+目录 → 校验，全过才原子替换）；碰到必须重启的键就**整个拒绝**，旧配置继续服务，
+日志点名是哪个键。见 [CONFIGURATION.md](./CONFIGURATION.md)〈配置改了之后〉。
 
 站点上它是 `<prefix>/share/slurmate/plugins/<ULID>.splug`（**一插件一个文件**，
 文件名就是它的 id）—— **服务器上从头到尾没有源码树**，包是作者在自己的机器上
@@ -205,7 +211,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 会话都做不到。它照 `plugin_problems` 的现成先例处理：`--check` 打印 `⚠`、
 `start()` 记一条 `log.error`，但**不拦启动**。
 
-★ 于是「加一个插件」只是**放一个 `.splug` + 跑一次 `deploy.sh --plugins-src`**。
+★ 于是「加一个插件」只是**放一个 `.splug` + 跑一次 `install-base.sh --plugins-src`**。
 **客户端那一侧一步人工动作都不需要**（v0.6 起它自己取回来），
 **也不用改基座的任何一行源码。**
 
@@ -220,7 +226,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 |---|---|---|---|
 | `id` | ULID，诞生时铸一次，**全球唯一** | **永不可变** | 会话的解析键 |
 | `version` | `x.y.z` | 每次改动都变 | 会话的解析键 |
-| `name` | **站点内**的短名 | 可以改 | 配置块名、日志、`service_kind` |
+| `name` | **站点内**的短名 | 可以改 | 插件配置的文件名、日志、`service_kind` |
 
 ★ 表里那个 `version` 是**插件版本**（三段）。**框架自己要另一个号** —— 客户端 /
 守护进程 / 协议三合一的那个，是**两段**（`major.minor`）。两者形状不同是有意的：
@@ -238,7 +244,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 ★ **一个站点里，一个 `id` 只可能有一个版本 —— 这是结构性的，不是约定。** 站点侧
 一个插件就是**一个包文件**（`<plugins_dir>/<ULID>.splug`），**文件名就是 id**，所以
 两个同 id 的包在同一格里互相覆盖；安装器按 `seen_id` 拒绝整批、`scan_plugins` 再按
-短名去重；配置块名、`cfg.plugins`、作业脚本名（`<ULID>.sbatch`）也全都按 id 单值。
+短名去重；插件配置的文件名、`cfg.plugins`、作业脚本名（`<ULID>.sbatch`）也全都按 id 单值。
 ⇒ **服务端没有表达"同一个 id 两个版本"的能力。**
 
 于是"池里同一个 id 有两个版本"只可能来自**别**的事，而它们都是真实的：**池是所有
@@ -456,8 +462,8 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 | # | 在哪 | 加什么 |
 |---|---|---|
 | 1 | 你的插件**源码树**（**可以在另一个仓库**） | `plugin.json`（**铸一个新的 ULID** 当 id）+ `client/index.js`（可无）+ `job/start.sh`（可无），然后 `packer build` 出一个 `.splug` |
-| 2 | `sudo bash cluster/deploy.sh --plugins-src <放 .splug 的那个目录>` | 装进站点 + 为它织一份 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` |
-| 3 | `/etc/slurmate/slurmate.conf`（可选） | 一个 `[plugin:<短名>]` 块。**这是站点的决定**，不进仓库；不写就用清单里的缺省 |
+| 2 | `sudo bash cluster/install-base.sh --plugins-src <放 .splug 的那个目录>` | 装进站点 + 为它织一份 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` |
+| 3 | `/etc/slurmate/slurmate.conf.d/<名字>.conf`（可选） | 一个插件一份。**这是站点的决定**，不进仓库；不写就用清单里的缺省 |
 
 ★ #1 到 #3 就是全部。**客户端那一步没有了** —— v0.6 起，站点 `enabled = yes` 的
 插件由客户端自己取回来（见〈插件从哪来〉）。"加一个插件不用改基座"这句话是
@@ -501,7 +507,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 | **三份实现在同一批字节上的对账** | `tools/conformance/`（输入树 + 期望的包字节 + 23 条坏包 + 签名夹具） |
 
 ★ **"读包"最初落的是能力，不是路径**（那时不动线、不动布局）。现在**布局与投递
-都已经切过来了**：站点上的插件就是一个 `<ULID>.splug`（由安装器装，`deploy.sh`
+都已经切过来了**：站点上的插件就是一个 `<ULID>.splug`（由安装器装，`install-base.sh`
 只是"把一批包一起装"），守护进程把它**整个**发给客户端（`package` + `plugin_package`）。
 顺序是刻意的 —— **读包的能力先于任何一条线落地**，否则中间会开一个窗口，那个窗口里
 客户端拿到的是它读不懂的字节，而它唯一能说的话是"校验不过"。
@@ -840,7 +846,7 @@ JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` **当
   而且那个数刚算完就过期 —— 报一个错的数量比不报更糟。
 
 ★ **`site.defaultGpus`（插件**声明**默认卡数）永远不会有**，而"默认卡数"这一层
-在 v0.11 有了 —— 它在**配置块**里（`[plugin:<名字>]` 的 `default_gpus`）。
+在 v0.11 有了 —— 它在**那个插件的配置**里（`default_gpus`）。
 差别是**谁知道本站管那张卡叫什么**：作者写不出来（`gpu` 还是 `mps`、型号叫 `a100`
 还是 `A100-PCIE-40GB`），那是管理员在 `gres.conf` 里定的事实。所以那是**站点**的
 政策，由站点写；而 `--check` 拿实际目录替他对一遍账（打 ⚠，不拦启动）。
@@ -900,8 +906,8 @@ nftables 对**同 hook、同 priority 的跨表求值顺序没有保证**。两�
 
 - 配置自检：`Config.validate()` 断言端口池与 `reserved_ranges` 不重叠，不满足则
   **拒绝启动**（`cluster/slurmate-sessiond`）；
-- 部署预检：`deploy.sh` 读同一份配置做同样的区间比对，重叠即中止部署
-  （`cluster/deploy.sh`）。
+- 部署预检：`install-base.sh` 读同一份配置做同样的区间比对，重叠即中止部署
+  （`cluster/install-base.sh`）。
 
 要注意的是这里**没有**用「端口必须 > 55000」之类的硬编码约定。那是某个具体站点的
 习惯，写死在代码里会让用低位端口的集群直接装不上（`cluster/slurmate-sessiond`）。
@@ -951,7 +957,7 @@ socket 权限是 `0666`，但**安全性不建立在这个权限位上**
 ### root 不写用户家目录
 
 口令由**作业自己生成**并写进 `0600` 的会话文件；守护进程全程只读用户家目录，
-并且 systemd 单元把共享存储挂成只读（`ReadOnlyPaths=`，由 `deploy.sh` 按
+并且 systemd 单元把共享存储挂成只读（`ReadOnlyPaths=`，由 `install-base.sh` 按
 `readonly_paths` 渲染，`cluster/slurmate-sessiond.service.in`）。
 
 这样 root 身上没有「写用户文件」这条攻击面，也避免了 root 被符号链接诱骗
@@ -1445,9 +1451,9 @@ off"，别的文档把它说成省电模式，还有版本把它关联到 `COMPL
 | `CapabilityBoundingSet` | `CAP_NET_ADMIN`（nft）、`CAP_SETUID/SETGID`（setuid 提交）、`CAP_DAC_READ_SEARCH`/`CAP_DAC_OVERRIDE`（读 0600 会话文件）、`CAP_KILL`（回收子进程） |
 | `StartLimitIntervalSec=0` + `Restart=always` | 永不放弃重启 |
 
-单元是**模板**（`.service.in`），`deploy.sh` 安装时把 `@READONLY_PATHS@` 替换成站点
+单元是**模板**（`.service.in`），`install-base.sh` 安装时把 `@READONLY_PATHS@` 替换成站点
 的真实挂载点；`readonly_paths` 为空时整行被删除，同时打印警告
-（`cluster/deploy.sh`）。
+（`cluster/install-base.sh`）。
 
 ## 九、已知边界
 

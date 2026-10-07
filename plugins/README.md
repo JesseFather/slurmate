@@ -31,7 +31,7 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 ```
 
 ★ **分发与安装在服务器上的那一个是 `.splug`（一个文件），不是这棵树。**
-`deploy.sh` 永不打包 —— 打包是**作者**的事。服务器上从头到尾没有源码树。
+`install-base.sh` 永不打包 —— 打包是**作者**的事。服务器上从头到尾没有源码树。
 
 **目录名不参与任何判定。** 身份来自清单里的 `id`，版本来自 `version`，站点内的短名
 来自 `name`。目录名纯粹是给人看的（包的文件名也不参与判定 —— 安装器按 `id` 给它
@@ -39,9 +39,9 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 
 | 半边 | 谁读它 | 什么时候读 |
 |---|---|---|
-| `plugin.json` | 客户端注册表 + 守护进程扫描器 | 客户端启动 / 守护进程启动 / deploy.sh 部署 |
+| `plugin.json` | 客户端注册表 + 守护进程扫描器 | 客户端启动 / 守护进程启动 / install-base.sh 部署 |
 | `client/index.js` | 客户端注册表 | 客户端启动时扫池（**站点分发的那一份由对账取回来**，过了同意闸才加载） |
-| `job/start.sh` | **没有任何运行时读者** | deploy.sh 部署时**编织**成一份作业脚本 |
+| `job/start.sh` | **没有任何运行时读者** | install-base.sh 部署时**编织**成一份作业脚本 |
 
 ★ **三半都会被分发到客户端**（站点分发发的是整个包，不是只挑 `client/`）——
 所以"哪个文件会被执行"与"哪个文件会被传输"是两件事。后者由**包里的记录表**定
@@ -73,15 +73,15 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 
 ```bash
 # ① 把下载来的 .splug 收在一个目录里，然后部署
-sudo bash cluster/deploy.sh --plugins-src DIR
+sudo bash cluster/install-base.sh --plugins-src DIR
 # ② 或者一个动词装一个包（它做的是同一件事）
 sudo slurmate plugin install DIR/your-plugin-1.0.0.splug
 # ③ 一个都不装（合法状态）
-sudo bash cluster/deploy.sh --plugins-src EMPTY
+sudo bash cluster/install-base.sh --plugins-src EMPTY
 ```
 
 ★ **缺省 `--plugins-src` 是仓库顶层的 `plugins/`**，而那里放的是**源码树** ——
-所以直接 `sudo bash cluster/deploy.sh` 会在预检那一步停下来，告诉你先
+所以直接 `sudo bash cluster/install-base.sh` 会在预检那一步停下来，告诉你先
 `packer build`。那个失败是刻意的（包是构建产物，不进 git）。
 
 安装器做这些事（`slurmate plugin install` 会一件件说给人听）：
@@ -96,7 +96,7 @@ sudo bash cluster/deploy.sh --plugins-src EMPTY
 5. **两个包同一个 id ⇒ 两个都不装**（§6.4：按 id 命名会互相覆盖，而覆盖是静默的）；
 6. 装进 `<ULID>.splug`（root 所有、0644），并清掉更早那版布局留下的插件目录。
 
-然后是 `deploy.sh` 的活：
+然后是 `install-base.sh` 的活：
 
 7. 用守护进程自己的扫描器校验装完之后那一份；
 8. 对每个**包里有 `job/start.sh` 的**插件**单独织一份**作业脚本，装到
@@ -104,7 +104,7 @@ sudo bash cluster/deploy.sh --plugins-src EMPTY
 9. 对每份脚本做三条硬断言（见〈作业侧契约〉）。任何一条不过，部署当场中止。
    缺 `job/start.sh` **不在**中止之列 —— 那是合法状态。
 
-★ **加一个插件 = 放一个 `.splug` + 跑一次 deploy.sh。** 不需要改守护进程的源码，也
+★ **加一个插件 = 放一个 `.splug` + 跑一次 install-base.sh。** 不需要改守护进程的源码，也
 不需要改配置文件。守护进程仍然要 root 重部署一次，但那是**安装动作**，不是改代码。
 
 ★ **`plugins/code-server` 与 `plugins/sshd` 是两棵插件源码树，不是"基座自带的插件"
@@ -144,7 +144,7 @@ sudo bash cluster/deploy.sh --plugins-src EMPTY
 原因。★ 来源与真的守护进程一样是**启动时的快照**，所以换了目录要重启。
 
 ★ **打包器那一步在这一侧用不上。** `packer init` / `packer build` 产出的是
-`.splug`，那是**发给站点**、由管理员 `deploy.sh --plugins-src` 装上去的东西；
+`.splug`，那是**发给站点**、由管理员 `install-base.sh --plugins-src` 装上去的东西；
 假站点读的是你的**源码树**。所以本机循环里不需要每改一次就打一次包：
 
 ```
@@ -213,7 +213,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | 键 | 必有 | 说明 |
 |---|---|---|
 | `id` | ✔ | 26 字符的 ULID（Crockford base32）。**诞生时铸一次，此后永不改变。** |
-| `name` | ✔ | 站点内的**短名**：`^[a-z][a-z0-9-]{0,31}$`。进配置块名、进会话文件，也是作业侧函数名的后缀。**不需要唯一**（全球不必、站点内也不必）—— 两个 `id` 不同、短名一样的插件允许并存。站点管理员撞名时用 `id` 配块，见 `docs/CONFIGURATION.md`。 |
+| `name` | ✔ | 站点内的**短名**：`^[a-z][a-z0-9-]{0,31}$`。进它那份配置的**文件名**、进会话文件，也是作业侧函数名的后缀。**不需要唯一**（全球不必、站点内也不必）—— 两个 `id` 不同、短名一样的插件允许并存。站点管理员撞名时用 `id` 给那份配置命名，见 `docs/CONFIGURATION.md`。 |
 | `version` | ✔ | `x.y.z`。**升级插件必须改它** —— 这是唯一的更新路径。 |
 | `displayName` | | 界面与报错文案里的名字。缺了就退回短名（它不影响任何判定）。 |
 | `engines.slurmate` | | 要求的框架版本，如 `">=0.5"`、`">=0.5 <0.7"`。★ 框架版本是 **x.y（两段）**，与 `version` 那个三段号**不是一回事**；写三段（`">=0.5.0"`）是一个**看不懂的片段**，插件会因此**不被加载**。`^` / `~` / `\|\|` / 逗号也都不支持。两侧都会查。 |
@@ -341,14 +341,14 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 
 | 键 | 必有 | 说明 |
 |---|---|---|
-| `defaultCpus` / `defaultMem` | ✔ | 缺省资源。客户端**不填**这两个值，缺省一律由服务端定（否则一个改过的客户端省略字段就能要到整机）。站点可以在 `[plugin:<名字>]` 块里覆盖。 |
-| `defaultTime` | | 缺省时限 —— **你这个插件天生要跑多久**。写法同 Slurm（`12:00:00` / `2-00:00:00`；纯数字是**分钟**），**最小 1 分钟**。不写就是框架的 `12:00:00`。站点可以在 `[plugin:<名字>]` 块里覆盖。★ 与上面那两格同一句话：一个跑语言服务器的 IDE 与一个在 shell 里跑 codex 的中转站，合理的时限差一个量级 —— 那是**你的策略**，不是站点该替你猜的。 |
+| `defaultCpus` / `defaultMem` | ✔ | 缺省资源。客户端**不填**这两个值，缺省一律由服务端定（否则一个改过的客户端省略字段就能要到整机）。站点可以在它那份配置里覆盖。 |
+| `defaultTime` | | 缺省时限 —— **你这个插件天生要跑多久**。写法同 Slurm（`12:00:00` / `2-00:00:00`；纯数字是**分钟**），**最小 1 分钟**。不写就是框架的 `12:00:00`。站点可以在它那份配置里覆盖。★ 与上面那两格同一句话：一个跑语言服务器的 IDE 与一个在 shell 里跑 codex 的中转站，合理的时限差一个量级 —— 那是**你的策略**，不是站点该替你猜的。 |
 | `defaultEnabled` | | 装上了是不是就等于开着。**缺省 `false`。** |
 | `bin` | | 作业里那个可执行文件在哪。`env` 是传给作业的环境变量名（**必须以 `SLURMATE_` 开头** —— 那个名字会被塞进作业的环境变量表，前缀是本系统的领地）；`discovery` 是 `which`（先查 PATH）或 `convention`（只用惯例路径）；`name` 是 `which` 时要找的文件名；`fallback` 是找不到时的路径。 |
-| `enumKeys` | | 取值只能固定的配置键：`{ 键名: { choices: [...], default: "..." } }`。它们同时**就是**这个插件块里允许出现的额外键。 |
+| `enumKeys` | | 取值只能固定的配置键：`{ 键名: { choices: [...], default: "..." } }`。它们同时**就是**这个插件那份配置里允许出现的额外键。 |
 
 ★ **`defaultEnabled` 只有一种插件该标 `true`**：**本站人人都要用的那个服务**（今天
-只有 code-server）。它的用处是让「一个 `[plugin:*]` 块都没写的站点」装完就能用上它 ——
+只有 code-server）。它的用处是让「**一份插件配置都没写的站点**」装完就能用上它 ——
 而不是"这个插件比较重要"。新插件标了它，等于给所有站点静默多开一个能力。
 
 ★ `bin.discovery` 的差别是真实的：守护进程在**登录节点**上跑，而作业跑在**计算
@@ -357,15 +357,15 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 解析到了哪里如实打印出来。
 
 ★★ **这里没有 `defaultGpus`，而那不是疏忽 —— 它永远不会存在。**
-「选了某个插件就默认占几张卡」那一格在**站点的配置块**里
-（`[plugin:<名字>]` 的 `default_gpus`），不在你的清单里。理由很简单：**你写不出
+「选了某个插件就默认占几张卡」那一格在**站点那份插件配置**里
+（`default_gpus`），不在你的清单里。理由很简单：**你写不出
 本站管那张卡叫什么** —— 是 `gpu` 还是 `mps`、型号叫 `a100` 还是
 `A100-PCIE-40GB`，那是管理员在 `gres.conf` 里定的事实，你的机器上那份清单对它
 一无所知。写一个猜的名字，坏结果是**管理员那边**的会话全部提交不了。
 
 > ★ **所以你要做的事只有一件：在你写给管理员的使用说明（你的 README）里讲清
 > 「我这个插件要什么」。** 需要 GPU 就写"建议至少一张 A 系列卡，本站叫什么名字
-> 请按 `slurmate partitions` 的 GRES 那一列填"。管理员照着在块里写一行
+> 请按 `slurmate partitions` 的 GRES 那一列填"。管理员照着在那份配置里写一行
 > `default_gpus = <本站的名字>:1` —— 写错了 `--check` 会告诉他本站实际有什么。
 >
 > ★ 这一格**不是强制的**：站点不配就是不占卡，而用户随时能在高级选项里
@@ -453,7 +453,7 @@ JSON —— 让每个插件自己拼 JSON 片段等于把转义责任推给每�
 - 宿主的函数都是没有后缀的动词（`log` / `cleanup` / `write_session` /
   `pick_port_and_start` …），与插件那套后缀命名不会撞。
 
-deploy.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一条不过就**当场中止部署**：
+install-base.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一条不过就**当场中止部署**：
 
 1. **没有 shebang、没有 `#SBATCH`。** 它们会被拼在作业脚本的中间，而 Slurm 只解析
    脚本**开头**那一段连续的注释 —— 带了不是报错，是"写了但静默不生效"。资源需求
@@ -470,18 +470,18 @@ deploy.sh 在编织前对每个 `job/start.sh` 断言三件事，任何一条不
 ```
 作者机器上那棵树里的 job/start.sh
         └─ packer build ─→ <你的插件>.splug ─→ 安装器 ─→ <prefix>/share/slurmate/plugins/<ULID>.splug
-                                                              └─ deploy.sh 逐插件织一次
+                                                              └─ install-base.sh 逐插件织一次
                                                                  ─→ <prefix>/share/slurmate/jobs/<ULID>.sbatch
 ```
 
 ★ **站点上从头到尾没有源码树**（从前这一段写的是 `<prefix>/share/slurmate/plugins/
 <目录名>/job/start.sh  ← 源`，那是"插件是一棵目录树"那个形状，v0.7 起不存在了）。
-作业侧的源是**你仓库里那份** `job/start.sh`，它先被打进包，再由 `deploy.sh` 从
+作业侧的源是**你仓库里那份** `job/start.sh`，它先被打进包，再由 `install-base.sh` 从
 **包里的记录表**读出来、织成一份作业脚本。
 
 **文件名是这个插件清单里的 `id`（ULID）**，不是短名 —— ULID 是插件的**身份**
 （全球唯一、铸造出来就不变），短名只是本站的标签、可以改。目录列表里那一串 ULID
-各自对应哪个插件：`deploy.sh` 的完成摘要里有一张对照表，
+各自对应哪个插件：`install-base.sh` 的完成摘要里有一张对照表，
 `slurmate-sessiond --check` 也会逐个打印。
 
 ★ **为什么一插件一份，不是所有插件织进一份。** 同处一份文件时，插件里任何一行
@@ -518,8 +518,8 @@ bash 自上而下解析整个文件，那一行于是在**每一个**作业里�
 4. 需要客户端行为就写 `client/index.js`；
 5. 需要作业里跑东西就写 `job/start.sh`，定义 `start_<短名>`。
    **不写也行** —— 但它就提交不了（装得上、看得见，按钮是灰的，并说明原因）；
-6. 集群侧：`sudo bash cluster/deploy.sh --plugins-src <你的目录的父目录>`，
-   再到 `/etc/slurmate/slurmate.conf` 里写 `[plugin:<短名>] enabled = yes`；
+6. 集群侧：`sudo bash cluster/install-base.sh --plugins-src <你的目录的父目录>`，
+   再写一份 `/etc/slurmate/slurmate.conf.d/<短名>.conf`，里面写 `enabled = yes`；
 7. **客户端侧不用做任何事** —— 用户连上站点之后会自己取回来（开发时想在本机试，
    见〈客户端侧（开发用）〉）。
 

@@ -16,7 +16,7 @@
     "    是「两份声明写的是同一组名字」）",
     "",
     "★ **两侧的生产代码为什么不直接在运行期读这个文件**（那本来是最结实的形状）：",
-    "  · 守护进程是**一个文件**装到 /usr/local/sbin/slurmate-sessiond（见 cluster/deploy.sh",
+    "  · 守护进程是**一个文件**装到 /usr/local/sbin/slurmate-sessiond（见 cluster/install-base.sh",
     "    的 DAEMON），集群上没有 tools/；",
     "  · 客户端是一个分发单元，运行期只读 client/ 里的东西 —— 唯一一处往外走的是开发者",
     "    模式的 defaultDevPluginSourceDir()，而它**显式处理「安装包里没有它」**。",

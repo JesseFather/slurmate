@@ -152,7 +152,7 @@ const LOGIN_KEYS = ['path', 'field', 'cookie'];
 const CLIENT_HOOKS = ['prepare', 'attach', 'closeWarning'];
 
 /**
- * 站点短名的字符集。它进配置块名、进会话文件、进日志与报错文案 —— 宽松的字符集
+ * 站点短名的字符集。它进那份插件配置的**文件名**、进会话文件、进日志与报错文案 ——
  * 会在这些地方变成一个说不清的问题（空格、斜杠、大小写）。
  *
  * ★ 短名**不需要全球唯一** —— 全球唯一是 `id` 的事。两个站点各有一个 `jupyter`
@@ -616,7 +616,7 @@ function inspectDir(dir) {
       + `现在是 ${JSON.stringify(mf.id)}` };
   }
 
-  // name —— 站点内用的短名。配置块名、会话里的 service_kind 都是它。
+  // name —— 站点内用的短名。那份插件配置的文件名、会话里的 service_kind 都是它。
   if (typeof mf.name !== 'string' || !NAME_RE.test(mf.name)) {
     return { error: `${mfPath}：name 必须匹配 ${NAME_RE}（小写字母开头，`
       + `只含小写字母/数字/连字符），现在是 ${JSON.stringify(mf.name)}` };
@@ -651,7 +651,7 @@ function inspectDir(dir) {
   const engProblem = enginesProblem(mf, hostVersion());
   if (engProblem) return { error: `${mfPath}：${engProblem.why}` };
 
-  // site —— **给集群侧读的那一段**：默认资源、可执行文件怎么找、配置块里允许
+  // site —— **给集群侧读的那一段**：默认资源、可执行文件怎么找、那份插件配置里允许
   // 哪些键。客户端一个字都不用，但必须**接受**它（否则一份合法清单会被客户端
   // 判成"认不得的键"）。
   //

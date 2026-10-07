@@ -6,7 +6,7 @@ ACL 的登记簿从「SSH 会话」改挂到「Slurm 作业」上** —— 于�
 仓库分成三部分：
 
 - **集群侧（`cluster/`）** —— root 守护进程 `slurmate-sessiond`、用户 CLI `slurmate`、
-  作业模板 `run.sbatch`、部署脚本 `deploy.sh`、配置示例 `slurmate.conf.example`
+  作业模板 `run.sbatch`、部署脚本 `install-base.sh`、配置示例 `slurmate.conf.example`
 - **客户端（`client/`）** —— Electron 桌面应用
 - **插件（`plugins/`）** —— **独立项目**，基座两端都不依赖它们。契约见
   [plugins/README.md](plugins/README.md)。**一个插件都不装是合法状态**，所以基座里
@@ -46,7 +46,7 @@ npm config set ELECTRON_MIRROR https://npmmirror.com/mirrors/electron/
 
 - `cluster/slurmate-sessiond`、`cluster/slurmate`、`cluster/nft-compare.py` 是 Python 3，
   只用标准库
-- `cluster/deploy.sh` 是 bash；`cluster/run.sbatch` 是一份**模板**，`deploy.sh`
+- `cluster/install-base.sh` 是 bash；`cluster/run.sbatch` 是一份**模板**，**安装器**
   把插件的作业侧**编织**进去之后才成品
 
 注意前两个**没有 `.py` 后缀** —— 它们最终要安装成 `/usr/local/sbin/slurmate-sessiond`
@@ -88,11 +88,11 @@ python3 cluster/test-sessiond-logic.py
 
 ### 部署脚本的体检模式
 
-`deploy.sh` 可以只体检、不做任何改动，改脚本后值得先跑一遍：
+`install-base.sh` 可以只体检、不做任何改动，改脚本后值得先跑一遍：
 
 ```bash
-sudo bash cluster/deploy.sh --check      # 体检
-sudo bash cluster/deploy.sh --dry-run    # 演练：打印将要执行的命令，不执行
+sudo bash cluster/install-base.sh --check      # 体检
+sudo bash cluster/install-base.sh --dry-run    # 演练：打印将要执行的命令，不执行
 ```
 
 ---
@@ -135,7 +135,7 @@ sudo bash cluster/deploy.sh --dry-run    # 演练：打印将要执行的命令�
 
 写新检查之前，先看一眼这三个 —— 它们各自踩过一种不同的坑。
 
-**1. `cluster/deploy.sh` 5.2 —— 外部文件哈希比对。**
+**1. `cluster/install-base.sh` 5.2 —— 外部文件哈希比对。**
 
 它比的是部署前后一组**不属于本系统**的文件（`/etc/port-daemon.conf` 之类）的
 sha256。这里连着踩过两个坑：
@@ -173,7 +173,7 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
 校验没跑成、或者没有可比对象时，**必须显式说出来**：既不能静默跳过，也不能算作通过。
 
 「通过」和「未参与校验」是两种不同的结论 —— 前者可以据以决策，后者不能。
-上面 `deploy.sh` 那句 `[INFO] ... 未参与校验` 就是照这个写的。
+上面 `install-base.sh` 那句 `[INFO] ... 未参与校验` 就是照这个写的。
 
 ---
 

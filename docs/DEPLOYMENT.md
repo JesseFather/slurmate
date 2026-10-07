@@ -3,7 +3,7 @@
 本文分两部分：**前置条件**（每一条都注明「不满足会怎样失败」）和**部署流程**。
 前置条件全部从代码核实，不是经验之谈。
 
-部署脚本是 `cluster/deploy.sh`，在**登录节点（控制节点）**上以 root 运行。
+部署脚本是 `cluster/install-base.sh`，在**登录节点（控制节点）**上以 root 运行。
 源码树里还有一份只读的自检脚本 `tools/check-cluster.sh`，建议在部署前先跑它。
 
 ---
@@ -101,9 +101,9 @@ nft list chain inet slurmate output
 
 **3e. 家目录在 systemd 下被挂成只读**
 
-`deploy.sh` 按 `readonly_paths` 渲染 `ReadOnlyPaths=`（`cluster/deploy.sh`）。
+`install-base.sh` 按 `readonly_paths` 渲染 `ReadOnlyPaths=`（`cluster/install-base.sh`）。
 填错的后果是守护进程在一个不存在的路径上做只读挂载，**systemd 直接拒绝启动**
-（`cluster/deploy.sh`）。留空则整行被删除，保护随之消失（会打印警告）。
+（`cluster/install-base.sh`）。留空则整行被删除，保护随之消失（会打印警告）。
 
 ### 4. root 需要 Slurm operator 权限
 
@@ -178,7 +178,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 校验，不是起不来。这是刻意的：把一个"更好的校验"变成硬依赖，会让一个本来能跑的
 集群装不上。
 
-**6b. 插件的依赖 —— 由 `deploy.sh` 装的那些插件决定**
+**6b. 插件的依赖 —— 由 `install-base.sh` 装的那些插件决定**
 
 ★ **这一段没有固定清单**，因为计算节点上需要什么完全取决于你装了哪些插件。
 每个插件在自己的 README 里写清楚，两份现成的：
@@ -201,9 +201,9 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 
 - **systemd**：服务单元与 `StateDirectory` / `LogsDirectory` / `RuntimeDirectory`
   都依赖它。
-- **nftables**：`deploy.sh` 要求 `nft list tables` 成功（`cluster/deploy.sh`）。
+- **nftables**：`install-base.sh` 要求 `nft list tables` 成功（`cluster/install-base.sh`）。
 - **`nft -j list ruleset` 必须可用**：这是硬性要求，取不到就**拒绝部署**
-  （`cluster/deploy.sh`）。理由是没有这道校验就无法证明部署没有破坏现有
+  （`cluster/install-base.sh`）。理由是没有这道校验就无法证明部署没有破坏现有
   规则集 —— 宁可现在拒绝，也不要事后给一个证明不了任何东西的绿灯。
 
 **注意 firewalld 与 nftables 并存的情况**：`tools/check-cluster.sh` 会打印
@@ -221,19 +221,19 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文的提交失败提示。
 
 部署脚本还会断言 `socket.SO_PEERCRED` 与 `sqlite3` 可用，缺一即中止
-（`cluster/deploy.sh`）。
+（`cluster/install-base.sh`）。
 
 ### 9. 其他部署脚本会检查的项
 
 | 检查 | 位置 | 不满足的后果 |
 |---|---|---|
-| `sbatch` / `scancel` / `squeue` / `scontrol` 存在 | `cluster/deploy.sh` | 直接中止：「这台机器不像是 Slurm 登录节点」 |
-| `scontrol ping` 成功 | `cluster/deploy.sh` | 只警告。部署能完成，但提交与回收都会失败；守护进程的 `job_state()` 会把这种情况判为 `JOB_UNKNOWN` 并保持现状，**不会误释放会话** |
-| `sha256sum` 存在 | `cluster/deploy.sh` | 直接中止（无法校验现有文件是否被改动） |
-| `flock` 存在 | `cluster/deploy.sh` | 只警告，失去并发部署保护 |
-| 目标路径未被他人文件占用 | `cluster/deploy.sh` | 直接中止，绝不覆盖别人的文件 |
-| 端口池与 `reserved_ranges` 不交 | `cluster/deploy.sh` | 直接中止。跨表顺序在 nftables 里没有保证，重叠会让行为不可预测 |
-| 端口池与 `ip_local_reserved_ports` 不交 | `cluster/deploy.sh` | 只警告。作业脚本会跳过真被占的端口试下一个（`cluster/run.sbatch`），nft 规则匹配 `dport` 不受影响 |
+| `sbatch` / `scancel` / `squeue` / `scontrol` 存在 | `cluster/install-base.sh` | 直接中止：「这台机器不像是 Slurm 登录节点」 |
+| `scontrol ping` 成功 | `cluster/install-base.sh` | 只警告。部署能完成，但提交与回收都会失败；守护进程的 `job_state()` 会把这种情况判为 `JOB_UNKNOWN` 并保持现状，**不会误释放会话** |
+| `sha256sum` 存在 | `cluster/install-base.sh` | 直接中止（无法校验现有文件是否被改动） |
+| `flock` 存在 | `cluster/install-base.sh` | 只警告，失去并发部署保护 |
+| 目标路径未被他人文件占用 | `cluster/install-base.sh` | 直接中止，绝不覆盖别人的文件 |
+| 端口池与 `reserved_ranges` 不交 | `cluster/install-base.sh` | 直接中止。跨表顺序在 nftables 里没有保证，重叠会让行为不可预测 |
+| 端口池与 `ip_local_reserved_ports` 不交 | `cluster/install-base.sh` | 只警告。作业脚本会跳过真被占的端口试下一个（`cluster/run.sbatch`），nft 规则匹配 `dport` 不受影响 |
 
 ### 10. `KillWait` 要够写墓碑
 
@@ -270,12 +270,12 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 ### 步骤 0：把源码放到 root 拥有的目录
 
 部署脚本会以 root 身份**安装并执行** `cluster/` 下的文件。若它们能被普通用户改写，
-等于把 root 权限交出去（`cluster/deploy.sh`）。判据是：每个源文件必须 root
+等于把 root 权限交出去（`cluster/install-base.sh`）。判据是：每个源文件必须 root
 拥有，且组/其他不可写；目录同理。
 
 源码不可信时脚本会自拷贝到 `/root/slurmate-src.XXXXXX`（源码位于 `/` 或 `/root`
 时改用 `/var/tmp`，避免把目录拷进自己里面）再重新执行
-（`cluster/deploy.sh`）。
+（`cluster/install-base.sh`）。
 
 这条路是通的，但**部署完记得清理 `/root/slurmate-src.*`** —— 每次从非 root
 拥有的目录部署都会留下一份拷贝。
@@ -303,10 +303,10 @@ node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 �
 拷到登录节点上，然后部署：
 
 ```bash
-sudo bash cluster/deploy.sh --plugins-src ~/下载的插件
+sudo bash cluster/install-base.sh --plugins-src ~/下载的插件
 ```
 
-★ **`deploy.sh` 永不打包**（`cluster/deploy.sh`）：它只收成品。所以对仓库里那两棵
+★ **`install-base.sh` 永不打包**（`cluster/install-base.sh`）：它只收成品。所以对仓库里那两棵
 插件**源码树**（`plugins/code-server`、`plugins/sshd`）直接部署会在预检那一步
 **停下来**并告诉你要先 `packer build` —— 那个失败是刻意的：包是**构建产物**，
 不进 git（二进制进 git 等于代码评审死掉）。
@@ -329,27 +329,27 @@ sudo slurmate plugin install ~/下载的插件/foo-1.0.0.splug
 ### 步骤 1：先 `--check`
 
 ```bash
-sudo bash cluster/deploy.sh --check --plugins-src ~/下载的插件
+sudo bash cluster/install-base.sh --check --plugins-src ~/下载的插件
 ```
 
 `--check` 承诺零改动：不安装文件、不启动服务、不改动 nftables，快照也只写到
-`/tmp`（`cluster/deploy.sh`）。它把所有预检跑一遍并打印一份可存档的
+`/tmp`（`cluster/install-base.sh`）。它把所有预检跑一遍并打印一份可存档的
 报告 —— 警告与失败都走 stdout，就是为了让报告能整份重定向保存
-（`cluster/deploy.sh`）。
+（`cluster/install-base.sh`）。
 
 它同时会校验 `--plugins-src` 下的每一个包，并且**指出那里除 `.splug` 之外的
 任何东西** —— 那些东西不会被安装，所以不在这里说的话就是静默忽略。
 
 ### 步骤 2：准备站点配置
 
-`deploy.sh` **只在配置不存在时安装** `slurmate.conf.example`
-（`cluster/deploy.sh`）—— 重复部署时覆盖等于把站点的调优悄悄抹掉，
+`install-base.sh` **只在配置不存在时安装** `slurmate.conf.example`
+（`cluster/install-base.sh`）—— 重复部署时覆盖等于把站点的调优悄悄抹掉，
 而且故障要等下次重启守护进程才出现。
 
 所以推荐两种顺序之一：
 
 - 先部署，再编辑 `/etc/slurmate/slurmate.conf`，最后
-  `systemctl restart slurmate-sessiond`；
+  `systemctl reload slurmate-sessiond`（v0.12 起改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
 至少要把这两项改成你站点的真实值：
@@ -357,40 +357,40 @@ sudo bash cluster/deploy.sh --check --plugins-src ~/下载的插件
 - `cluster_cidr` —— 见前置条件 2。**它没有默认值，不填服务起不来**；
 - `readonly_paths` —— 见前置条件 3e。
 
-配置一共只有 12 个键，全部见 [CONFIGURATION.md](./CONFIGURATION.md)。
+站点通用键一共 17 个，全部见 [CONFIGURATION.md](./CONFIGURATION.md)。
 
 ★ **插件要不要开、开哪几个，也在这一步决定。** `enabled = yes` 的插件会被
 **分发到每一台连上来的客户端**（v0.6）—— 不只是"用户可以提交它"。所以
-`[plugin:*]` 块现在是一个**对外的**动作：
+写一份插件配置现在是一个**对外的**动作：
 
 ```ini
-[plugin:code-server]
+# /etc/slurmate/slurmate.conf.d/code-server.conf
 enabled = yes          # ← 这一行同时也意味着"把它发到用户的工作站上"
 ```
 
-不写任何 `[plugin:*]` 块时行为与以前完全一样（缺省取插件清单里的
-`site.defaultEnabled`），所以**升级本身不会静默多发一个插件出去**。
-逐条见 [CONFIGURATION.md](./CONFIGURATION.md) 的〈一之二、插件块〉。
+一份插件配置都不写时行为与以前完全一样（缺省取插件清单里的 `site.defaultEnabled`），
+所以**升级本身不会静默多发一个插件出去**。
+逐条见 [CONFIGURATION.md](./CONFIGURATION.md) 的〈一之二、插件配置〉。
 
 ### 步骤 3：演练（可选但推荐）
 
 ```bash
-sudo bash cluster/deploy.sh --dry-run
+sudo bash cluster/install-base.sh --dry-run
 ```
 
 演练模式不会写任何文件、不会启动服务、不会改动 nftables，报告里会明确标注
-「将要安装」而不是「已安装」（`cluster/deploy.sh`）。
+「将要安装」而不是「已安装」（`cluster/install-base.sh`）。
 
 ### 步骤 4：部署
 
 ```bash
-sudo bash cluster/deploy.sh
+sudo bash cluster/install-base.sh
 ```
 
 六个阶段：预检 → 快照 → 安装文件 → 配置自检 → 启用并启动 → 非干扰验证
-（`cluster/deploy.sh`）。
+（`cluster/install-base.sh`）。
 
-看起来最啰嗦的第五阶段其实是最重要的一步（`cluster/deploy.sh`）：
+看起来最啰嗦的第五阶段其实是最重要的一步（`cluster/install-base.sh`）：
 部署前后各取一次 `nft -j list ruleset` 结构化快照，剥掉本系统新增的
 `inet slurmate` 表之后必须逐条一致。判据有五个档位：
 
@@ -404,9 +404,9 @@ sudo bash cluster/deploy.sh
 
 比对器 `cluster/nft-compare.py` 自带自测，部署脚本会在用它之前先跑一遍自测，
 并要求项数不低于一个下限（`COMPARATOR_MIN_TESTS = 23`）—— 少了就拒绝部署，
-防的是「测试被删减但报告更绿」（`cluster/deploy.sh`）。
+防的是「测试被删减但报告更绿」（`cluster/install-base.sh`）。
 
-任何一项 FAIL 都会让脚本以非零码退出，并提示回滚命令（`cluster/deploy.sh`）。
+任何一项 FAIL 都会让脚本以非零码退出，并提示回滚命令（`cluster/install-base.sh`）。
 
 ### 步骤 5：验证
 
@@ -449,7 +449,7 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 第 2 步的输出里 `data` 是**整个 `.splug`** 的 base64，`digest` 要与作者那边
 `packer inspect` 报的**内容摘要**一致（第 1 步打印的那一行就是它）。若它回
 `9 plugin_package_changed`，说明守护进程**起来之后**有人动过那个包（就地换了包而
-没重新部署）—— 那要重跑一次 deploy.sh，而不是重试这个请求。
+没重新部署）—— 那要重跑一次 install-base.sh，而不是重试这个请求。
 
 ★ **v0.6 时这里还有第 3 步**（`plugin_file` 一份文件一次，用来验"逐份取"那条路）。
 那条 op 在 v0.7 删掉了，所以今天手工调它会回 `2 unknown_op` —— **那是预期的**，
@@ -457,7 +457,7 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 
 ★ 第 1 步的输出里还有一行「包 N 字节 / M 份文件」、一行**完整的内容摘要**，和一个
 **机器可读的** `plugin-packages:` 段（`<短名>\t<包路径>\t<ULID>\t<has_job|no_job>`）。
-最后那个是 `deploy.sh` 拿来编织作业脚本的**跨脚本契约** —— 它的形状变了，
+最后那个是 `install-base.sh` 拿来编织作业脚本的**跨脚本契约** —— 它的形状变了，
 编织那一段会立刻跟着坏。内容摘要那一行是这个站点上**唯一**能回答"我装上去的
 是不是作者发布的那一份"的东西（服务器上没有源码树可对照）。
 
@@ -479,21 +479,21 @@ ls -l ~/.slurmate/site-plugins/<ULID>/     # 一个 <版本>/ 目录 + 一个 <�
 ### 步骤 6：卸载
 
 ```bash
-sudo bash cluster/deploy.sh --uninstall              # 保留状态与日志
-sudo bash cluster/deploy.sh --uninstall --purge-state
+sudo bash cluster/install-base.sh --uninstall              # 保留状态与日志
+sudo bash cluster/install-base.sh --uninstall --purge-state
 ```
 
 卸载路径**永远可用** —— 它不做任何多余的预检，出故障时管理员最需要的就是能干净地
-把它拿掉（`cluster/deploy.sh`）。
+把它拿掉（`cluster/install-base.sh`）。
 
 两处刻意的保守行为：
 
 - **必须确认服务真的停了再删表和文件**，否则删表后守护进程下一个 tick 就把表重建
   回来（会打印「已删除」但实际还在），而 `Restart=always` 还会再起
-  （`cluster/deploy.sh`）。
+  （`cluster/install-base.sh`）。
 - **删文件前逐项确认「这确实是本系统装的文件」**（内容里必须含 `slurmate`）。
   早期版本在这里无条件 `rm -f`，在一台从未部署过 Slurmate 的机器上执行会删掉同名
-  的他人文件（`cluster/deploy.sh`）。
+  的他人文件（`cluster/install-base.sh`）。
 
   ★ `<prefix>/share/slurmate/jobs/` 里那些文件**文件名里没有 `slurmate`**（是插件的
   ULID），所以那道闸门对它们看的是**脚本内容** —— 里面必然有 `SLURMATE_*`。
@@ -515,13 +515,13 @@ sudo bash cluster/deploy.sh --uninstall --purge-state
 
 ## 部署完仍然要注意的
 
-`deploy.sh` 跑通 **不等于**系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
+`install-base.sh` 跑通 **不等于**系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
 **已核实的缺陷、从未在真机上跑过的路径、以及结构性欠账**都在
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)，每条写了位置、后果与修法。
 
 与部署直接相关的两条按**编号**引用（编号是稳定的，复述会漂）：
 
-- **U2** —— `deploy.sh` 整条从来没在真机上跑过。那一条里列着"第一次真机部署要
+- **U2** —— `install-base.sh` 整条从来没在真机上跑过。那一条里列着"第一次真机部署要
   重点看的几件事"（`plugins/` 与 `jobs/` 里那几个 ULID 对不对得上、属主与权限、
   卸载清干净没有）。
 - **U6** —— **线上那份守护进程比仓库旧**，带着一个让 `submit` 必然失败的缺陷。
