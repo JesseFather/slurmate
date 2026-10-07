@@ -156,13 +156,24 @@ function recordFromPackage(parsed) {
   };
 }
 
-/** 容器里那个签名块 → 记录表里那个 `envelope`（没有签名时是 `null`）。**逐字保留**。 */
+/**
+ * 容器里那个签名块 → 记录表里那个 `envelope`（没有签名时是 `null`）。**逐字保留**。
+ *
+ * ★ v0.13 起这块盖的是**四元组**（`{id, 版本, digestSite, digestClient}`），所以
+ *   记录表里也就多出那四个字段。★ 它们**逐字保留**，不是"重算一遍存下来"——
+ *   验签要的正是作者签的那几个字节，重算出来的只是"我以为它该是什么"。
+ *   两者的差别就是这一版全部意义所在（见 site-plugins.js 的 `treeSignature`）。
+ */
 function envelopeOfPackage(sig) {
   if (!sig) return null;
   return {
     alg: sig.alg,
     pubkey: Buffer.from(sig.pubkey).toString('base64'),
     signature: Buffer.from(sig.signature).toString('base64'),
+    id: sig.id,
+    version: sig.version,
+    digestSite: sig.digestSite,
+    digestClient: sig.digestClient,
   };
 }
 
@@ -170,7 +181,7 @@ function envelopeOfPackage(sig) {
  * 一张记录表**形状**对不对。返回 `null`（可以）或一句为什么。
  *
  * ★ 只判**结构**：`alg` 是不是 1、那两段 base64 解出来是不是 32/64 字节、签名
- *   验不验得过 —— 那些要认识**容器**（`SIG_BYTES` / `SIG_ALG_ED25519`），而认识
+ *   验不验得过 —— 那些要认识**容器**（`SIG_MIN_BYTES` / `SIG_ALG_ED25519`），而认识
  *   容器的那个模块在依赖图**上面**（见文件头）。所以这个模块回答"这是不是一张
  *   记录表"，`site-plugins.js` 的 `recordSig` 回答"这张表里的签名我认不认得"。
  *   两句不同的话，两个不同的地方 —— 合并只能靠把这个常量抄一份到这里。
@@ -187,11 +198,19 @@ function recordProblem(rec) {
     const e = rec.envelope;
     if (!e || typeof e !== 'object' || Array.isArray(e)) return 'envelope 既不是 null 也不是一个对象';
     if (!Number.isInteger(e.alg)) return 'envelope.alg 不是整数';
-    for (const k of ['pubkey', 'signature']) {
+    for (const k of ['pubkey', 'signature', 'id', 'version']) {
       if (typeof e[k] !== 'string' || !e[k]) return `envelope.${k} 不是一个非空字符串`;
     }
+    for (const k of ['digestSite', 'digestClient']) {
+      if (typeof e[k] !== 'string' || !/^[0-9a-f]{64}$/.test(e[k])) {
+        return `envelope.${k} 不是 64 位小写十六进制`;
+      }
+    }
     for (const k of Object.keys(e)) {
-      if (!['alg', 'pubkey', 'signature'].includes(k)) return `envelope 里有认不得的键：${k}`;
+      if (!['alg', 'pubkey', 'signature', 'id', 'version',
+        'digestSite', 'digestClient'].includes(k)) {
+        return `envelope 里有认不得的键：${k}`;
+      }
     }
   }
   if (!Array.isArray(rec.files) || !rec.files.length) return 'files 必须是一个非空数组';

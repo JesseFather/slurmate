@@ -30,9 +30,26 @@ const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 /** 一张形状说得通的记录表。 */
 const okRecord = (over = {}) => ({
   schema: SLOT.RECORD_SCHEMA,
-  format: 1,
+  format: 2,
   envelope: null,
   files: [{ path: 'plugin.json', size: 2, sha256: sha('{}') }],
+  ...over,
+});
+
+/**
+ * 一份形状说得通的 `envelope`（A.3 那七个字段）。
+ *
+ * ★ v0.13 起信封里有**四个**新字段，而它们不是装饰：`id`/`version` 是被签消息的
+ *   前两段，两个摘要是后两段。少了它们，记录表与签名块之间那份"逐字保留"就断了。
+ */
+const okEnvelope = (over = {}) => ({
+  alg: 1,
+  pubkey: Buffer.alloc(32, 3).toString('base64'),
+  signature: Buffer.alloc(64, 4).toString('base64'),
+  id: '01M2JKHTZGQ7X8V4T5R6N7B8C9',
+  version: '1.0.0',
+  digestSite: 'a'.repeat(64),
+  digestClient: 'b'.repeat(64),
   ...over,
 });
 
@@ -108,6 +125,21 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
   assert.match(SLOT.readRecordFile(p).why, /pubkey/,
     '★ 信封少一半也算读不动 —— 它只可能是被改过');
 
+  // ★ v0.13 那四个新字段，少一个、或者两个摘要不是一个摘要，都算读不动。
+  for (const k of ['id', 'version', 'digestSite', 'digestClient']) {
+    const e = okEnvelope();
+    delete e[k];
+    fs.writeFileSync(p, JSON.stringify(okRecord({ envelope: e })));
+    assert.match(SLOT.readRecordFile(p).why, new RegExp(k), `少了 envelope.${k} 要是读不动`);
+  }
+  fs.writeFileSync(p, JSON.stringify(okRecord({
+    envelope: okEnvelope({ digestClient: 'XYZ' }) })));
+  assert.match(SLOT.readRecordFile(p).why, /digestClient/);
+  fs.writeFileSync(p, JSON.stringify(okRecord({
+    envelope: okEnvelope({ 多出来的键: 1 }) })));
+  assert.match(SLOT.readRecordFile(p).why, /认不得的键/,
+    '★ 认不得的键也要拒 —— 多一个键就是"写它的东西不是这一个"');
+
   assert.equal(SLOT.readRecordFile(path.join(root, '不存在.json')).ok, false);
 
   fs.writeFileSync(p, JSON.stringify(okRecord()));
@@ -118,10 +150,7 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
 test('★ 一张读得动的记录表：写下去、读回来、逐字节相同（它是提交点）', () => {
   const root = tmp('slurmate-slot-');
   const p = path.join(root, 'r.json');
-  const rec = okRecord({
-    envelope: { alg: 1, pubkey: Buffer.alloc(32, 3).toString('base64'),
-                signature: Buffer.alloc(64, 4).toString('base64') },
-  });
+  const rec = okRecord({ envelope: okEnvelope() });
   assert.equal(SLOT.writeRecordFile(p, rec).ok, true);
   const back = SLOT.readRecordFile(p);
   assert.equal(back.ok, true, back.why);
@@ -151,18 +180,25 @@ test('★ 从解析出来的包建记录表：`files` 保序、`envelope` 逐字
     { path: 'z.txt', size: 3, sha256: sha('zzz') },
     { path: 'a.txt', size: 1, sha256: sha('a') },
   ];
-  const parsed = { format: 1, files,
-    sig: { alg: 1, pubkey: Buffer.alloc(32, 5), signature: Buffer.alloc(64, 6) } };
+  const parsed = { format: 2, files,
+    sig: { alg: 1, pubkey: Buffer.alloc(32, 5), signature: Buffer.alloc(64, 6),
+           id: '01M2JKHTZGQ7X8V4T5R6N7B8C9', version: '1.0.0',
+           digestSite: 'c'.repeat(64), digestClient: 'd'.repeat(64) } };
   const rec = SLOT.recordFromPackage(parsed);
   assert.deepEqual(rec.files.map((f) => f.path), ['z.txt', 'a.txt'],
     '★ **保留容器里的次序**，不重排 —— 照它重打包才是逐字节重现原件');
   assert.equal(rec.envelope.pubkey, Buffer.alloc(32, 5).toString('base64'));
   assert.equal(rec.envelope.signature, Buffer.alloc(64, 6).toString('base64'));
+  // ★ v0.13：四元组那四个字段也逐字保留（它们是**被签的内容**，不能重算着存）。
+  assert.equal(rec.envelope.id, parsed.sig.id);
+  assert.equal(rec.envelope.version, parsed.sig.version);
+  assert.equal(rec.envelope.digestSite, parsed.sig.digestSite);
+  assert.equal(rec.envelope.digestClient, parsed.sig.digestClient);
   assert.deepEqual(Object.keys(rec).sort(), ['envelope', 'files', 'format', 'schema']);
   assert.equal(rec.digest, undefined, '★ 摘要是派生值，**不存** —— 存了就会各说各话');
 
   // ★ 没有签名 ⇒ `envelope` 是 `null`（不是 `{}`、也不是少一个键）。
-  assert.equal(SLOT.recordFromPackage({ format: 1, files, sig: null }).envelope, null);
+  assert.equal(SLOT.recordFromPackage({ format: 2, files, sig: null }).envelope, null);
 });
 
 test('★ 一个记录表最多多少字节：**推出来的**，不是挑出来的', () => {

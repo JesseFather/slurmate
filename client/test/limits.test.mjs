@@ -148,7 +148,9 @@ test('★★ 负载上限 + 信封最坏情况 ≤ 包上限 —— 这三者是
   // 附录 A.1：包 = 头 ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名 ‖ 负载。
   // §3.3：路径最长 max_depth 段、每段 max_segment_bytes 字节 ⇒ 最长路径。
   const pathBytes = load.max_depth * f.max_segment_bytes + (load.max_depth - 1);
-  const env = f.header_bytes + f.signature_bytes
+  // ★ v0.13：签名那一项按**最长**的一块算（`188 + 255`），因为签名块的长度现在随
+  //   版本号变（A.3）。书面判据那一格因此叫 `signature_max_bytes`。
+  const env = f.header_bytes + f.signature_max_bytes
     + load.max_files * (f.record_overhead_bytes + pathBytes);
   assert.equal(env, pkg.envelope_max_bytes,
     `按附录 A.1 与 §3.3 算出来的信封最坏情况是 ${env}，而书面判据写的是 `
@@ -160,6 +162,12 @@ test('★★ 负载上限 + 信封最坏情况 ≤ 包上限 —— 这三者是
 
   // ★ 而且客户端**自己算出来的**那个数也得落在这条关系上 —— 不是抄来的。
   const H = require('../src/main/site-plugins.js').HARD_LIMITS;
+  // ★ 客户端的 HARD_LIMITS 是从 site-plugins.js 自己那两个常量推出来的（那里刻意
+  //   又写了一遍 —— `PP()` 惰性 require 不能用来求模块级常量，见那边的注记），
+  //   所以这里钉住"那两遍写的是同一对数"。
+  assert.equal(pkg.max_bytes - H.total_bytes, env,
+    `site-plugins.js 自己算出来的信封最坏情况（${pkg.max_bytes - H.total_bytes}）`
+    + `与书面判据（${env}）对不上 —— 那两处是同一个推导的两份写法`);
   assert.ok(H.total_bytes + env <= pkg.max_bytes,
     `客户端的 total_bytes ${H.total_bytes} 加上信封最坏情况 ${env} 已经超过包上限 `
     + `${pkg.max_bytes} —— 按协议上限做出来的包会**送不出去**，而症状是作者那边一句话`

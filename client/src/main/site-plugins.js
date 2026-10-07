@@ -151,7 +151,7 @@ const SNAPSHOT_VERSION = 1;
 //
 // 附录 A.1 里信封的长度是**精确**的：
 //
-//     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 97) ‖ 负载 Σsize
+//     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 188+verlen) ‖ 负载 Σsize
 //
 // ⇒ 一个"负载刚好顶到 `total_bytes`"的包，其字节数是 `total_bytes + 信封`。
 //   要让它**永远**装得进那个 2 MiB 的包上限，就得按信封的**最坏情况**留余量 ——
@@ -172,8 +172,21 @@ const MAX_DEPTH = 8;
 const MAX_FILES = 256;
 /** 最长的一条路径有多少字节：`MAX_DEPTH` 段 × 每段上限 + 中间那几个 `/`。 */
 const MAX_PATH_BYTES = MAX_DEPTH * MAX_SEGMENT_BYTES + (MAX_DEPTH - 1);
-/** 信封在**最坏情况**下占多少字节：头 + 签名 + 每份的记录（2 + 路径 + 8 + 32）。 */
-const ENVELOPE_MAX_BYTES = 20 + 97 + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
+/**
+ * 信封在**最坏情况**下占多少字节：头 + 签名 + 每份的记录（2 + 路径 + 8 + 32）。
+ *
+ * ★ 签名那一项 v0.13 起是 **443**（`SIG_MAX_BYTES`），不是 97：签名块盖的是四元组
+ *   `{id, 版本, 站点侧摘要, 客户端侧摘要}`，长度 = `188 + 版本号的字节数`，而版本号
+ *   那一段的长度是一个 u8。★ 推导见上面的注释块与 `tools/plugin-limits.json`。
+ *
+ * ★ 那两个数**在这里又写了一遍**（而不是问 `PP().SIG_MIN_BYTES`）：`PP()` 是惰性
+ *   `require`，为的是断开 `plugin-package.js ↔ site-plugins.js` 那个环，而在模块
+ *   初始化的时候调它正好把这个环**跑一遍** —— 那正是它要躲的东西。`limits.test.mjs`
+ *   有一条钉住"这里那两个数与容器那一份逐字相同"。
+ */
+const ENVELOPE_SIG_MIN = 188;
+const ENVELOPE_SIG_MAX = ENVELOPE_SIG_MIN + 255;
+const ENVELOPE_MAX_BYTES = 20 + ENVELOPE_SIG_MAX + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
 
 /**
  * 客户端**自己**那份硬上限。
@@ -694,23 +707,42 @@ function recordSig(record) {
   }
   // ★ `Buffer.from(…, 'base64')` **不抛** —— 它对不合法的输入是宽容的（丢掉认不得的
   //   字符）。所以"这一段能不能用"的判据只有一个：下面那次 `parseSigBlock`（它看
-  //   长度与 alg）。在这里另写一遍"base64 合不合法"就是同一条规矩的第二份实现，
-  //   而两份漂开的方向是"一边收、一边拒"。
-  const blk = Buffer.concat([
-    Buffer.from([e.alg]), Buffer.from(e.pubkey, 'base64'), Buffer.from(e.signature, 'base64')]);
+  //   长度、alg、以及那两段的编码）。在这里另写一遍"base64 合不合法"就是同一条规矩
+  //   的第二份实现，而两份漂开的方向是"一边收、一边拒"。
+  //
+  // ★ 记录表里存的是**拆开的七个字段**，而形状判据吃的是**字节**，所以这里要把它们
+  //   拼回去。★ 拼不回来（id 不是 26 字节、版本超过 255 字节）与拼回来解析不了
+  //   （长度对不上、alg 认不得）是**同一件事**的两个入口：这张记录表里的信封被改过。
+  let blk;
+  try {
+    blk = PP().buildSigBlock({
+      alg: e.alg,
+      pubkey: Buffer.from(e.pubkey, 'base64'),
+      sig: Buffer.from(e.signature, 'base64'),
+      id: e.id, version: e.version,
+      digestSite: e.digestSite, digestClient: e.digestClient,
+    });
+  } catch (err) {
+    return { ok: false, why: `记录表里那个信封拼不回一个签名块（${err.message}）—— 它被改过` };
+  }
   const parsed = PP().parseSigBlock(blk);
   if (!parsed) {
     return { ok: false,
       why: '记录表里那个信封不是一个合法的 Ed25519 签名块'
-        + `（本格式是 ${PP().SIG_BYTES} 字节、alg=1）—— 它被改过` };
+        + `（本格式是 ${ENVELOPE_SIG_MIN} + 版本号 字节、alg=1）—— 它被改过` };
   }
   return { ok: true,
            // ★ 形状对齐 `parsePackage()` 交出来的那个签名对象（`pubkey` /
-           //   `signature` / `fingerprint`），而不是 `parseSigBlock()` 那三个短名字
-           //   —— 下游（`keyVerdict`）读的字段名只有一份定义，别在这里换个叫法。
+           //   `signature` / `id` / `version` / 两个摘要 / `fingerprint`），而不是
+           //   `parseSigBlock()` 自己那几个字段名 —— 下游（`keyVerdict` 与
+           //   `treeSignature`）读的字段名只有一份定义，别在这里换个叫法。
            sig: { alg: parsed.alg,
                   pubkey: Buffer.from(parsed.pubkey),
                   signature: Buffer.from(parsed.sig),
+                  id: parsed.id,
+                  version: parsed.version,
+                  digestSite: parsed.digestSite,
+                  digestClient: parsed.digestClient,
                   fingerprint: PP().fingerprint(parsed.pubkey) } };
 }
 
@@ -729,6 +761,15 @@ function recordSig(record) {
  * ★ 为什么必须从**树**重算，而不是照 `record.files` 里那几个 sha256 拼一遍：
  *   后者与记录表是同一份数据，改树的人顺手改表就自洽了。从树重算之后，改动必须
  *   **同时**骗过"逐份比对"与"重算的摘要"两道，而摘要那一头连着**作者的签名**。
+ *
+ * ★★ v0.13：那块签名盖的是**四元组** `{id, 版本, digestSite, digestClient}`（A.3），
+ *   不再是"整棵树一个摘要"。于是这里分成**两步**，次序是承重的：
+ *
+ *     ① 用**信封里那四个东西**拼出被签消息，验签 ⇒ "这个信封是不是作者发的"；
+ *     ② 从**树**重算两侧的 §3.4 摘要，与信封里那两个比 ⇒ "树配不配得上这个信封"。
+ *
+ *   ①不过 ⇒ 改的是**信封**；①过而②不过 ⇒ 改的是**树**。两句话指向两个完全不同的
+ *   动作（查谁动了记录表 / 重装一份），对调次序就会把它们说反。
  */
 function treeSignature(treeDir, record) {
   const got = recordSig(record);
@@ -743,13 +784,39 @@ function treeSignature(treeDir, record) {
   // ★ 非普通文件在**逐份比对**那一关就该被拒了（`verifyStaged` 的 `odd`），所以
   //   走到这里的一定只有普通文件与目录。只喂普通文件 —— 内容摘要的定义在负载上，
   //   负载里没有目录。
-  const digest = PP().contentDigest(files.filter((f) => f.kind === 'f'));
-  if (!PP().verifyEd25519(got.sig.pubkey, Buffer.from(digest, 'hex'), got.sig.signature)) {
+  const sd = PP().sideDigests(files.filter((f) => f.kind === 'f'));
+
+  // ① **信封本身是不是作者发的。** 盖的是四元组那串字节，而那四个东西全都来自
+  //    信封（`signedMessage` 只看 `id`/`version`/两个摘要）⇒ 这一步**不需要树**，
+  //    也**不依赖树对不对**。①不过 ⇒ 这张记录表里的信封被改过。
+  if (!PP().verifyEd25519(got.sig.pubkey, PP().signedMessage(got.sig), got.sig.signature)) {
     return { ok: false, signed: true,
-      why: `从树重算的内容摘要是 ${digest}，而记录表里那个签名盖的不是它 ——`
-        + ` 这一份构件在本机被改过（签的人是 ${got.sig.fingerprint}）` };
+      why: `记录表里那个签名块验不过 —— 它盖的必须是 `
+        + `${JSON.stringify(got.sig.id)}@${JSON.stringify(got.sig.version)} 这四个东西（A.3），`
+        + `而这一块盖的不是它（签的人是 ${got.sig.fingerprint}）` };
   }
-  return { ok: true, signed: true, sig: got.sig, fingerprint: got.sig.fingerprint };
+
+  // ② **树配不配得上这个信封。** 从树重算两侧的 §3.4 摘要，与信封里那两个比。
+  //    ★ 顺序是承重的：①先判，②后判。②不过而①过 ⇒ 改的是**树**；①不过 ⇒ 改的是
+  //      **信封**。两句话指向两个不同的动作（重装 / 查谁动了记录表）。
+  //    ★ **哪一侧在手里就核哪一侧**：客户端侧永远在（`plugin.json` 是它的一员）；
+  //      站点侧在不在，由"记录表里有没有一条**只属于站点侧**的路径"决定。阶段 4
+  //      之后池子里只剩客户端侧，那一条自然为假 —— 而那时站点侧的字节也不在这里，
+  //      核不了，也不必核。
+  if (sd.client !== got.sig.digestClient) {
+    return { ok: false, signed: true,
+      why: `从树重算的**客户端侧**摘要是 ${sd.client}，而记录表里那个签名块写的是 `
+        + `${got.sig.digestClient} —— 这一份构件在本机被改过`
+        + `（签的人是 ${got.sig.fingerprint}）` };
+  }
+  const sitePresent = (record.files || []).some((f) => !PP().isClientSidePath(f.path));
+  if (sitePresent && sd.site !== got.sig.digestSite) {
+    return { ok: false, signed: true,
+      why: `从树重算的**站点侧**摘要是 ${sd.site}，而记录表里那个签名块写的是 `
+        + `${got.sig.digestSite} —— 这一份构件在本机被改过`
+        + `（签的人是 ${got.sig.fingerprint}）` };
+  }
+  return { ok: true, signed: true, sig: got.sig, fingerprint: got.sig.fingerprint, digests: sd };
 }
 
 // ── 对账 ────────────────────────────────────────────────────────────────────

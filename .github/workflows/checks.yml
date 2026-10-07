@@ -343,9 +343,15 @@ jobs:
               importlib.util.spec_from_loader("d", ldr))
           ldr.exec_module(mod)
 
+          # 次序 = 源码里的声明次序（有几行引用了前面那几行）。v0.13 起信封那一项
+          # 是 `…SIG_MAX` 推出来的，所以签名块那几个常量也得一起抠。
           cv = lits(csrc, ("MAX_SEGMENT_BYTES", "MAX_DEPTH", "MAX_FILES",
-                           "MAX_PATH_BYTES", "ENVELOPE_MAX_BYTES"))
-          pv = lits(psrc, ("MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
+                           "MAX_PATH_BYTES",
+                           "ENVELOPE_SIG_MIN", "ENVELOPE_SIG_MAX", "ENVELOPE_MAX_BYTES"))
+          pv = lits(psrc, ("HEADER_BYTES", "DIGEST_BYTES",
+                           "SIG_PREFIX_BYTES", "SIG_ID_BYTES", "SIG_TAIL_BYTES",
+                           "SIG_MIN_BYTES", "MAX_VERSION_BYTES", "SIG_MAX_BYTES",
+                           "MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
                            "MAX_FILE_BYTES", "MAX_PACKAGE_BYTES",
                            "MAX_PATH_BYTES", "MAX_ENVELOPE_BYTES", "MAX_TOTAL_BYTES"))
           hv = None
@@ -404,8 +410,26 @@ jobs:
 
           # 推导：信封最坏情况（附录 A.1 + §3.3），以及 total = 包上限 − 它。
           path_bytes = load["max_depth"] * fmt["max_segment_bytes"] + (load["max_depth"] - 1)
-          env = (fmt["header_bytes"] + fmt["signature_bytes"]
+          # ★ v0.13：签名那一项按**最长**的一块算（`188 + 255`）—— 签名块的长度现在
+          #   随版本号变（A.3），所以那一格叫 signature_max_bytes。
+          env = (fmt["header_bytes"] + fmt["signature_max_bytes"]
                  + load["max_files"] * (fmt["record_overhead_bytes"] + path_bytes))
+          say("三侧各自算出来的签名块最长 = 书面判据",
+              pv is not None and cv is not None
+              and pv["SIG_MAX_BYTES"] == fmt["signature_max_bytes"]
+              and cv["ENVELOPE_SIG_MAX"] == fmt["signature_max_bytes"]
+              and mod.PACKAGE_SIG_MAX_BYTES == fmt["signature_max_bytes"],
+              "打包器 %r / 客户端 %r / 守护进程 %r / 判据 %r"
+              % (pv and pv["SIG_MAX_BYTES"], cv and cv["ENVELOPE_SIG_MAX"],
+                 mod.PACKAGE_SIG_MAX_BYTES, fmt["signature_max_bytes"]))
+          say("签名块最短 188（alg+公钥+签名+id+verlen+两摘要）",
+              pv is not None and pv["SIG_MIN_BYTES"] == 188
+              and cv["ENVELOPE_SIG_MIN"] == 188
+              and mod.PACKAGE_SIG_MIN_BYTES == 188
+              and pv["SIG_MAX_BYTES"] == pv["SIG_MIN_BYTES"] + pv["MAX_VERSION_BYTES"],
+              "%r / %r / %d" % (pv and pv["SIG_MIN_BYTES"],
+                                cv and cv["ENVELOPE_SIG_MIN"],
+                                mod.PACKAGE_SIG_MIN_BYTES))
           say("信封最坏情况算得出来（%d 字节）" % env,
               env == pkg["envelope_max_bytes"],
               "现算 %d vs 判据 %d" % (env, pkg["envelope_max_bytes"]))

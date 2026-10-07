@@ -116,6 +116,8 @@ function packer(...args) {
 }
 
 const MF_ID = '01M2JKHTZGQ7X8V4T5R6N7B8C9';
+/** 夹具里那个版本号。★ 它要**放得进签名块**（A.3 的 `verlen` 是一个 u8）。 */
+const MF_VER = '1.0.0';
 
 /** 一个最小的、合法的清单。 */
 const mf = (over = {}) => `${JSON.stringify({
@@ -435,7 +437,14 @@ section('4. 跨文件的常量');
     // 而这几行是打包器真正用的那几行。表达式按声明次序求值（`MAX_TOTAL_BYTES`
     // 引用了前两个），所以这里也按次序拼起来。
     const src = fs.readFileSync(PACKER, 'utf8');
-    const names = ['MAX_DEPTH', 'MAX_SEGMENT_BYTES', 'MAX_FILES', 'MAX_FILE_BYTES',
+    // ★ 次序 = 源码里的**声明次序**（有几行引用了前面那几行）。v0.13 起信封那一项
+    //   是 `SIG_MAX_BYTES` 推出来的，所以签名块那几个常量也得一起抠出来 ——
+    //   抠漏了的话 `new Function` 会当场 `ReferenceError`（这条就变成一次崩溃，
+    //   而不是一条"红了"的用例）。
+    const names = ['HEADER_BYTES', 'DIGEST_BYTES',
+      'SIG_PREFIX_BYTES', 'SIG_ID_BYTES', 'SIG_TAIL_BYTES', 'SIG_MIN_BYTES',
+      'MAX_VERSION_BYTES', 'SIG_MAX_BYTES',
+      'MAX_DEPTH', 'MAX_SEGMENT_BYTES', 'MAX_FILES', 'MAX_FILE_BYTES',
       'MAX_PACKAGE_BYTES', 'MAX_PATH_BYTES', 'MAX_ENVELOPE_BYTES', 'MAX_TOTAL_BYTES'];
     const decls = [];
     const missing = [];
@@ -443,7 +452,7 @@ section('4. 跨文件的常量');
       const m = new RegExp(`^const ${n} = (.+);$`, 'm').exec(src);
       if (!m) missing.push(n); else decls.push(`const ${n} = ${m[1]};`);
     }
-    check('★ 打包器源码里那 8 行常量都抠到了（抠不到说明改了形状，不是它对了）',
+    check('★ 打包器源码里那 16 行常量都抠到了（抠不到说明改了形状，不是它对了）',
       !missing.length, `缺 ${JSON.stringify(missing)}`);
 
     if (!missing.length) {
@@ -458,6 +467,17 @@ section('4. 跨文件的常量');
         && V.MAX_ENVELOPE_BYTES === rules.package.envelope_max_bytes
         && V.MAX_TOTAL_BYTES === rules.load.total_bytes,
         `打包器 ${JSON.stringify(V)} / 判据 ${JSON.stringify(rules)}`);
+      check('★ 信封最坏情况那个数确实是"头 + **最长**的签名块 + 记录表"推出来的',
+        V.MAX_ENVELOPE_BYTES === V.HEADER_BYTES + V.SIG_MAX_BYTES
+          + V.MAX_FILES * (2 + V.MAX_PATH_BYTES + 8 + 32),
+        `${V.MAX_ENVELOPE_BYTES} vs ${V.HEADER_BYTES + V.SIG_MAX_BYTES
+          + V.MAX_FILES * (2 + V.MAX_PATH_BYTES + 8 + 32)}`);
+      check('★ 签名块最长 = 最短 + 255（版本号那一段的长度是一个 u8）',
+        V.SIG_MIN_BYTES === 188 && V.SIG_MAX_BYTES === V.SIG_MIN_BYTES + V.MAX_VERSION_BYTES,
+        `${V.SIG_MIN_BYTES} / ${V.SIG_MAX_BYTES} / ${V.MAX_VERSION_BYTES}`);
+      check('★ 书面判据里那个 signature_max_bytes 就是打包器算出来的那个',
+        rules.format.signature_max_bytes === V.SIG_MAX_BYTES,
+        `${rules.format.signature_max_bytes} vs ${V.SIG_MAX_BYTES}`);
       check('★★ 负载上限 + 信封最坏情况 ≤ 包上限（打包器自己那三个数之间也得成立）',
         V.MAX_TOTAL_BYTES + V.MAX_ENVELOPE_BYTES <= V.MAX_PACKAGE_BYTES,
         `${V.MAX_TOTAL_BYTES} + ${V.MAX_ENVELOPE_BYTES} > ${V.MAX_PACKAGE_BYTES}`);
@@ -475,7 +495,7 @@ section('4. 跨文件的常量');
   const a = mkRepo({ ...baseFiles(), ...many });
   const ra = packer('build', a.plug, '--out', path.join(a.base, 'a.splug'));
   check('★★ 负载超过整体上限 ⇒ build **拒绝**，且报错里给得出数字',
-    ra.code !== 0 && /1562251/.test(ra.err) && /1\.5 MiB/.test(ra.err),
+    ra.code !== 0 && /1561905/.test(ra.err) && /1\.5 MiB/.test(ra.err),
     ra.err.slice(0, 400));
   check('★ 而且它把"站点那道闸是 2 MiB"说出来（作者要知道该往哪儿改）',
     /2\.0 MiB/.test(ra.err), ra.err.slice(0, 400));
@@ -735,8 +755,17 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const r = P.parsePackage(signed);
   check('★★ 签名**不改内容摘要**（§4.2：签名盖的是摘要，不覆盖信封）',
     r.ok && r.digest === digestBefore, r.ok ? `${r.digest} vs ${digestBefore}` : r.why);
-  check('★ 信封只长了 97 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
-    signed.length === sizeBefore + 97, `${signed.length} vs ${sizeBefore}`);
+  // ★ v0.13：签名块的长度是 **188 + 版本号的字节数**（A.3），不再是定长 97。
+  const verlen = Buffer.byteLength(MF_VER, 'utf8');
+  check('★ 信封只长了 188+版本号 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
+    signed.length === sizeBefore + 188 + verlen,
+    `${signed.length} vs ${sizeBefore + 188 + verlen}`);
+  check('★ 签名块里那两段摘要是**从这一棵树算的**（站点侧 + 客户端侧，A.3）',
+    r.ok && r.sig.digestSite === P.sideDigests(r.files).site
+      && r.sig.digestClient === P.sideDigests(r.files).client
+      && r.sig.id === MF_ID && r.sig.version === MF_VER,
+    r.ok ? JSON.stringify({ ds: r.sig.digestSite, dc: r.sig.digestClient,
+      id: r.sig.id, v: r.sig.version }) : r.why);
   check('★ 说清了"原地"这件事（未签名的那份被换掉了）', /原地/.test(s.out), s.out);
   check('★ 也说了它为什么合法：摘要没变 ⇒ 还是同一份构件（§2.4）', /§2\.4/.test(s.out), s.out);
 
@@ -801,8 +830,13 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const sorted = P.sortByPathBytes(swapped);
   const mine = crypto.generateKeyPairSync('ed25519').privateKey;
   const myRaw = P.rawPubOf(mine);
-  const sig = crypto.sign(null, Buffer.from(P.contentDigest(sorted), 'hex'), mine);
-  const pkg = P.buildPackage(sorted, Buffer.concat([Buffer.from([1]), myRaw, sig]));
+  // ★ v0.13：签的是四元组（A.3），所以这里得先把 `id`/版本与两个侧摘要拿出来。
+  const sd = P.sideDigests(sorted);
+  const quad = { id: MF_ID, version: MF_VER,
+                 digestSite: sd.site, digestClient: sd.client };
+  const sig = crypto.sign(null, P.signedMessage(quad), mine);
+  const pkg = P.buildPackage(sorted, P.buildSigBlock(
+    Object.assign({ alg: 1, pubkey: myRaw, sig }, quad)));
 
   const { base } = mkRepo(baseFiles());     // 只是要一个临时目录放这个包
   const f = path.join(base, 'lie.splug');

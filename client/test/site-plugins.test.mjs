@@ -54,7 +54,7 @@ function makeSite() {
     extra: [],                 // 站点多报的（客户端不认识的）
     sessions: [],
     // ── 唯一那条投递方式 ──
-    pkgFormat: 1,              // `op_plugins` 里报出去的格式
+    pkgFormat: 2,              // `op_plugins` 里报出去的格式
     pkgByteDelta: 0,           // 报出去的字节数偏离真实值多少
     pkgDigestLie: false,       // 报出去的内容摘要是假的
     pkgCorrupt: false,         // `plugin_package` 发出来的字节被改了一位
@@ -120,10 +120,17 @@ function makeSite() {
     })).concat(state.pkgExtra || []);
     const digest = PACKER.contentDigest(files);
     const k = key();
+    // ★★ v0.13：签的是**四元组**（A.3）—— `{id, 版本, 站点侧摘要, 客户端侧摘要}`，
+    //    两个摘要由**打包器那份实现**现算（与真守护进程走的是同一个函数）。
+    const sd = PACKER.sideDigests(files);
+    const quad = { id: e.mf.id, version: e.mf.version,
+                   digestSite: sd.site, digestClient: sd.client };
     // ★ 不签名的那一档：§5.4 要判"钉过之后收到一份没有签名的构件"。
     const sigBlock = state.pkgSign
-      ? Buffer.concat([Buffer.from([1]), k.pub,
-                       crypto.sign(null, Buffer.from(digest, 'hex'), k.priv)])
+      ? PACKER.buildSigBlock(Object.assign({
+        alg: 1, pubkey: k.pub,
+        sig: crypto.sign(null, PACKER.signedMessage(quad), k.priv),
+      }, quad))
       : Buffer.alloc(0);
     const buf = PACKER.buildPackage(files, sigBlock);
     const out = { buf, digest, fingerprint: state.pkgSign ? k.fingerprint : null };
@@ -205,7 +212,7 @@ function makeSite() {
         buf[buf.length - 1] ^= 0xff;
       }
       return { ok: true,
-               data: { format: 1, bytes: buf.length, digest: p.digest,
+               data: { format: 2, bytes: buf.length, digest: p.digest,
                        data: buf.toString('base64') } };
     }
     // ★ `plugin_file` **不在这里** —— v0.7 把它从协议里删掉了，真守护进程回的是
@@ -1144,7 +1151,7 @@ test('★ 列举的判据是"已提交的槽位"：跳过快照表、记录表�
   const root = tmp('slurmate-list-');
   const id = ulid.mint();
   const other = ulid.mint();
-  const rec = { schema: SLOT.RECORD_SCHEMA, format: 1, envelope: null,
+  const rec = { schema: SLOT.RECORD_SCHEMA, format: 2, envelope: null,
                 files: [{ path: 'plugin.json', size: 2, sha256: 'a'.repeat(64) }] };
   fs.mkdirSync(path.join(root, `${id}_1.0.0`), { recursive: true });     // 没提交
   fs.mkdirSync(path.join(root, `${other}_1.0.0`), { recursive: true });   // 已提交
@@ -1287,6 +1294,13 @@ test('★★ 一条 RPC 把整个包取回来 —— 而且一次都不许再走
   assert.equal(rec.envelope.pubkey, pkg.sig.pubkey.toString('base64'));
   assert.equal(rec.envelope.signature, pkg.sig.signature.toString('base64'),
     '★ 签名块要逐字保留 —— 少一位就是"签名对不上"，而那时报的是"有人改了包"');
+  // ★ v0.13：那块签的是**四元组**（A.3），所以后四个字段也要逐字留下来。
+  //   少了它们，`treeSignature` 拼不回那块字节，而"签名者不变"就只剩指纹比较。
+  for (const k of ['id', 'version', 'digestSite', 'digestClient']) {
+    assert.equal(rec.envelope[k], pkg.sig[k], `envelope.${k} 要逐字保留`);
+  }
+  assert.equal(rec.envelope.digestClient, PACKER.sideDigests(pkg.files).client,
+    '★ 那个摘要就是**客户端侧那一半**的 §3.4 摘要（阶段 4 之后客户端只有它）');
   assert.deepEqual(rec.files.map((f) => f.path), pkg.files.map((f) => f.path),
     '★ `files` 保留**容器里的次序**（照它重打包 = 逐字节重现原件）');
   assert.equal(PP.contentDigest(rec.files), pkg.digest, '照记录表重算的摘要与原件相同');
@@ -1335,7 +1349,7 @@ test('★★ 包格式比客户端认得的新 ⇒ 明确失败，**而且没有
   //       而该做的事是**升级客户端**，不是去找管理员。
   const site = makeSite();
   const env = makeEnv();
-  site.state.pkgFormat = 2;
+  site.state.pkgFormat = 3;
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 0, '读不懂的包不许走进同意闸');
@@ -1432,7 +1446,7 @@ test('★ 「站点愿不愿意发这一份」的判据，与"这一份此刻生
   //   "这次下没下下来"。最早是`Array.isArray(p.files)`；v0.6 两条路并存时是
   //   "有没有一条能走"；v0.7 只剩一条，于是就是"`package` 在不在"。
   const fp = 'a'.repeat(64);
-  const meta = { format: 1, bytes: 100, digest: fp };
+  const meta = { format: 2, bytes: 100, digest: fp };
   assert.equal(S.deliveryOf({ package: meta }, S.HARD_LIMITS).mode, 'package', '有包 = 愿意发');
   assert.equal(S.deliveryOf({ package: null }, S.HARD_LIMITS).mode, null,
     '★ `package: null` 是"此刻生产不出来"（包在守护进程启动之后不见了）——'
@@ -1772,6 +1786,99 @@ test('★★★ 树与记录表**一起**被改 ⇒ 逐份比对过得去，而*
     Buffer.from('module.exports = { evil: false };\n'), '★ 池里那一份回到站点的内容');
 });
 
+test('★ 没有签名的那一份照常装得上 —— 而"两侧的配套关系"就**没有任何东西保证**', async () => {
+  // ★ §4.1 允许作者不签名，所以"没签名"是一条**正常**的路，不是错误。这条用例把
+  //   它的**代价**写在明处（那句话要进 SECURITY.md，见计划阶段 6）：
+  //
+  //     四元组里那两半的**配套关系**（"客户端这一半与站点那一半出自同一次构建"）
+  //     靠签名回答。没有签名 ⇒ 没有 `digestSite`、没有 `digestClient` ⇒ 这个保证
+  //     **不存在**。★ 这不是新增的洞，是"不签名"本来就有的代价。
+  //
+  //   ★ 而"树被动过"仍然检得出来 —— 逐份比对与签名无关，它用的是记录表里那一列。
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.pkgSign = false;
+  const p = site.add('a', { name: 'a' }, {
+    'client/index.js': 'module.exports = {};\n',
+    'job/start.sh': 'start_a() { :; }\n',
+  });
+  const r1 = await callSync(site, env);
+  assert.equal(r1.pendingConsent.length, 1, '没签名的照样走到同意闸（§4.1 允许不签）');
+  assert.equal(r1.failed.length, 0, JSON.stringify(r1.failed));
+  consentAll(env, r1);
+
+  const rec = recOf(env, p, '1.0.0');
+  assert.equal(rec.envelope, null, '★ 没有签名 ⇒ 信封是 `null`（不是 `{}`、也不是少一个键）');
+  assert.equal(S.treeSignature(poolTree(env, p, '1.0.0'), rec).signed, false,
+    '★ `signed: false` —— 调用方要能把它与"验过了"分开');
+
+  const dest = poolTree(env, p, '1.0.0');
+  fs.appendFileSync(path.join(dest, 'job', 'start.sh'), '# 谁加的一行\n');
+  assert.notEqual(S.treeFault(dest, rec.files), null, '★ 逐份比对仍然守着（它与签名无关）');
+  const r2 = await callSync(site, env);
+  assert.equal(r2.added.length, 1, '★ 检出之后重取一份干净的');
+});
+
+test('★★ 被改的是**站点侧**那一半（表也一起改）⇒ 一样挡住 —— 这一版签名盖的是两个摘要', async () => {
+  // ★★ v0.13 新增的这一格：签名不再盖"整棵树一个摘要"，而是盖
+  //    `{id, 版本, digestSite, digestClient}` 四元组（A.3）。于是"改了树又改了表"
+  //    这件事要在**每一侧**分别被挡住：
+  //
+  //      · 改 `client/**` ⇒ `digestClient` 对不上；
+  //      · 改 `job/**` 或别的不属于客户端侧的路径 ⇒ `digestSite` 对不上。
+  //
+  //    ★ 第二条**只在池子里还留着站点侧那一半时才有意义**（阶段 3 就是这样；
+  //      阶段 4 之后客户端池里只剩 `client/**`，那一半自然不在手里，见
+  //      `treeSignature` 里 `sitePresent` 那一段）。
+  //    ★ 少了它，池里那一半站点侧字节就成了**改了没人管**的东西。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, {
+    'client/index.js': 'module.exports = { evil: false };\n',
+    'job/start.sh': 'start_a() { :; }\n',
+  });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+
+  const dest = poolTree(env, p, '1.0.0');
+  const evil = Buffer.from('start_a() { rm -rf /; }\n');
+  fs.writeFileSync(path.join(dest, 'job', 'start.sh'), evil);
+  const rec = recOf(env, p, '1.0.0');
+  assert.ok(rec.files.some((f) => f.path === 'job/start.sh'),
+    '★ 这一份的记录表里要有站点侧那一半 —— 不然这一条测的是另一件事');
+  const row = rec.files.find((f) => f.path === 'job/start.sh');
+  row.size = evil.length;
+  row.sha256 = sha256hex(evil);
+  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
+
+  assert.equal(S.treeFault(dest, rec.files), null, '前置：树与记录表两边自洽');
+
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 0, '★★ 自洽的伪造**绝不许**被当成"已经有一份"');
+  assert.equal(r2.added.length, 1, '★ 检出之后重取一份真的');
+  assert.deepEqual(fs.readFileSync(path.join(dest, 'job', 'start.sh')),
+    Buffer.from('start_a() { :; }\n'), '★ 池里那一份回到站点的内容');
+});
+
+test('★ 记录表里那个信封的 id 被改 ⇒ 拒（签名盖的是四元组，改了它就验不过）', async () => {
+  // ★ 这一条与上一条**不同源**：上一条改的是树，这一条改的是**信封本身**。
+  //   四元组那四个字段全都进了被签消息，所以改任何一个都让签名不成立。
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r1 = await callSync(site, env);
+  consentAll(env, r1);
+  const rec = recOf(env, p, '1.0.0');
+  rec.envelope.id = '01M2JKHTZGQ7X8V4T5R6N7B8CA';
+  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
+  env.pinned.clear();
+
+  const r2 = await callSync(site, env);
+  assert.equal(r2.kept.length, 0);
+  assert.equal(r2.added.length, 1, '重取一份真的');
+  assert.equal(r2.pendingConsent.length, 0, '★ 不是"没签名所以重新问一次"');
+});
+
 test('★★ 改记录表里那个签名一个字节 ⇒ 拒（而不是"这一份没签名"）', async () => {
   // ★★ "有一块、但读不动"与"没有签名"**必须分开**。折成同一件事的后果是
   //    **下转型攻击**：把签名块改坏 ⇒ 变成"没签名" ⇒ 对**钉过的** id 是拒绝
@@ -1827,7 +1934,7 @@ test('★★ 站点报一个带 `../` 的 id ⇒ 一个字节都不写，池外�
   // 站点多报一条：id 是穿越路径，而 `package` 那一格**形状说得通**（免得先被
   // `deliveryOf` 拦住 —— 那样测的就是另一条判据了）。
   site.state.extra.push({ id: '../../escape', version: '1.0.0', name: 'x', title: 'x',
-    enabled: true, package: { format: 1, bytes: 100, digest: 'a'.repeat(64) } });
+    enabled: true, package: { format: 2, bytes: 100, digest: 'a'.repeat(64) } });
 
   const r = await callSync(site, env);
   assert.equal(site.state.pkgCalls, 0, '★ 连一次取件的 RPC 都不发');

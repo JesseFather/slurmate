@@ -1115,6 +1115,8 @@ PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem", "default_time",
                       "default_gpus")
 
 MANIFEST_NAME = "plugin.json"
+# 血统表。与 MANIFEST_NAME 一样**两侧都在**（见 package_is_client_side）。
+PLUGIN_LINEAGE_NAME = "lineage.json"
 # 作业侧入口在**包里的**那个名字。★ 用正斜杠写死，不走 `os.path.join`：它是一个
 # 负载路径（附录 A.3），不是本机的文件路径 —— Windows 上 `join` 会给反斜杠，而
 # 反斜杠在负载路径里是**被拒绝**的字符（§3.3）。
@@ -2178,10 +2180,19 @@ def human_bytes(n):
 #     那一步的**反面**。
 
 PACKAGE_MAGIC = b"splug\x1a\r\n"
-PACKAGE_FORMAT = 1
+PACKAGE_FORMAT = 2                   # ★ v0.13：1 一律拒
 PACKAGE_HEADER_BYTES = 20
-PACKAGE_SIG_BYTES = 97               # alg(u8) | 公钥(32) | 签名(64)
 PACKAGE_SIG_ALG_ED25519 = 1
+PACKAGE_SIG_PREFIX_BYTES = 1 + 32 + 64    # alg(u8) | 公钥(32) | 签名(64)
+PACKAGE_SIG_ID_BYTES = 26                 # id：26 个 ASCII 字节（一个 ULID 的写法）
+PACKAGE_SIG_TAIL_BYTES = 1 + 32 + 32      # verlen(u8) | digestSite(32) | digestClient(32)
+# 签名块的长度 = PACKAGE_SIG_MIN_BYTES + verlen，而 verlen 是一个 u8 ⇒ 最长 443。
+# ★ 于是"版本号超过 255 字节的插件签不了名"是同一个 u8 的另一面：它能打成一个不
+#   带签名的包（`package_build` 不拦），而打包器的 `sign` 会明确拒绝。
+PACKAGE_SIG_MIN_BYTES = (PACKAGE_SIG_PREFIX_BYTES + PACKAGE_SIG_ID_BYTES
+                         + PACKAGE_SIG_TAIL_BYTES)        # 188
+PACKAGE_MAX_VERSION_BYTES = 255
+PACKAGE_SIG_MAX_BYTES = PACKAGE_SIG_MIN_BYTES + PACKAGE_MAX_VERSION_BYTES   # 443
 PACKAGE_MAX_DEPTH = 8
 PACKAGE_MAX_SEGMENT_BYTES = 255      # §3.3。与客户端 MAX_SEGMENT_BYTES 逐字相同
 
@@ -2193,7 +2204,7 @@ PACKAGE_MAX_SEGMENT_BYTES = 255      # §3.3。与客户端 MAX_SEGMENT_BYTES �
 #
 # 附录 A.1 里信封的长度是**精确**的：
 #
-#     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 97) ‖ 负载 Σsize
+#     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 188+verlen) ‖ 负载 Σsize
 #
 # ⇒ 一个"负载刚好顶到上限"的包，其字节数是 `上限 + 信封`。要让它**永远**装得进
 #   `PLUGIN_PACKAGE_MAX_BYTES`，就得按信封的**最坏情况**留余量。最坏情况由 §3.3
@@ -2207,12 +2218,14 @@ PACKAGE_MAX_SEGMENT_BYTES = 255      # §3.3。与客户端 MAX_SEGMENT_BYTES �
 #   而**安装器会拒**：一句话说不清的"明明合规却装不上"。
 PACKAGE_MAX_PATH_BYTES = (PACKAGE_MAX_DEPTH * PACKAGE_MAX_SEGMENT_BYTES
                           + (PACKAGE_MAX_DEPTH - 1))
-PACKAGE_ENVELOPE_MAX_BYTES = (PACKAGE_HEADER_BYTES + PACKAGE_SIG_BYTES
+# ★ 签名那一项 v0.13 起是 PACKAGE_SIG_MAX_BYTES（443），不是 97：签名块盖的是四元组
+#   {id, 版本, 站点侧摘要, 客户端侧摘要}，长度随版本号变（见 A.3）。
+PACKAGE_ENVELOPE_MAX_BYTES = (PACKAGE_HEADER_BYTES + PACKAGE_SIG_MAX_BYTES
                               + PLUGIN_MAX_FILES
                               * (2 + PACKAGE_MAX_PATH_BYTES + 8 + 32))
 
 # 负载的整体上限 = 包上限 − 信封的最坏情况。★ 今天这条关系**刚好顶满**
-# （1562251 + 534901 == 2 MiB），一个字节都不浪费 —— 它要保证的那件事正是
+# （1561905 + 535247 == 2 MiB），一个字节都不浪费 —— 它要保证的那件事正是
 # "按协议上限做出来的包，一定送得出去"。
 PLUGIN_TOTAL_MAX_BYTES = PLUGIN_PACKAGE_MAX_BYTES - PACKAGE_ENVELOPE_MAX_BYTES
 
@@ -2306,6 +2319,84 @@ def package_content_digest(files):
 def package_signature_fingerprint(pubkey):
     """公钥指纹 = sha256(32 字节裸公钥) 的小写十六进制（§4.1 给人核对的那一串）。"""
     return hashlib.sha256(pubkey).hexdigest()
+
+
+# ── 把一个负载**按侧**分成两半（§3.1 / §4.2）────────────────────────────────
+#
+#     客户端侧 = `client/**` + `plugin.json` + `lineage.json`
+#     站点侧   = 其余全部（也就是"原树 − `client/**`"，两个顶层元数据文件同时在两侧）
+#
+# ★ 与 `packer/slurmate-packer.js` 的 `isClientSidePath` / 客户端
+#   `plugin-package.js` 那一份是**同一条规则的三份实现**，判据都是**顶层前缀**，
+#   不是"名字里有没有 client"：`clientfoo/x` 与 `a/client/x` 都不算客户端侧。
+# ★ 两侧**会重叠**（两个顶层元数据文件各进两次摘要），这是定义的一部分。
+
+CLIENT_SIDE_DIR = "client/"
+
+
+def package_is_client_side(path):
+    """这一条路径属不属于**客户端侧**。"""
+    return (path.startswith(CLIENT_SIDE_DIR) or path == MANIFEST_NAME
+            or path == PLUGIN_LINEAGE_NAME)
+
+
+def package_sides(files):
+    """分成两半，各自**保留原来的次序**。"""
+    return {"site": [f for f in files if not f["path"].startswith(CLIENT_SIDE_DIR)],
+            "client": [f for f in files if package_is_client_side(f["path"])]}
+
+
+def package_side_digests(files):
+    """两侧的内容摘要。空的那一侧 = sha256("")，**有定义**（§3.1 允许某一侧为空）。"""
+    sp = package_sides(files)
+    return {"site": package_content_digest(sp["site"]),
+            "client": package_content_digest(sp["client"])}
+
+
+def package_signed_message(q):
+    """被签的那串字节（附录 A.3）：
+
+        id(26) ‖ 0x00 ‖ version(verlen) ‖ 0x00 ‖ digestSite(32 原值) ‖ digestClient(32 原值)
+
+    ★ 两个摘要是**原值**，不是它们的十六进制写法。★ 两个 `0x00` 是**分隔符**：少了
+      它们，`id` 与 `version` 的边界就成了"前 26 个字节"，而一个改包的人可以把 id
+      末尾几个字节挪进 version 里，换出另一对 `(id, 版本)`。
+    """
+    return (q["id"].encode("ascii") + b"\x00" + q["version"].encode("utf-8") + b"\x00"
+            + bytes.fromhex(q["digestSite"]) + bytes.fromhex(q["digestClient"]))
+
+
+def package_parse_sig_block(block):
+    """签名块字节 → 那七个字段（附录 A.3）；不合形状返回 `None`。
+
+    ★ 长度 = `PACKAGE_SIG_MIN_BYTES + verlen`，而 verlen 是块里第 123 个字节。
+    ★ `id` / `version` 那两段用**逐字节回比**判合法编码 —— 与路径那一条同源：
+      `decode(errors="replace")` 会把坏字节悄悄换成 U+FFFD，于是两端算的不是同一份东西。
+    """
+    if len(block) < PACKAGE_SIG_MIN_BYTES or block[0] != PACKAGE_SIG_ALG_ED25519:
+        return None
+    verlen = block[97 + PACKAGE_SIG_ID_BYTES]
+    if len(block) != PACKAGE_SIG_MIN_BYTES + verlen:
+        return None
+    id_raw = block[97:97 + PACKAGE_SIG_ID_BYTES]
+    try:
+        pid = id_raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if pid.encode("ascii") != id_raw:
+        return None
+    ver_raw = block[124:124 + verlen]
+    try:
+        version = ver_raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if version.encode("utf-8") != ver_raw:
+        return None
+    at = 124 + verlen
+    return {"alg": block[0], "pubkey": block[1:33], "signature": block[33:97],
+            "id": pid, "version": version,
+            "digestSite": block[at:at + 32].hex(),
+            "digestClient": block[at + 32:at + 64].hex()}
 
 
 # ★ 与客户端那一份一样，这个读方**不**执行"单文件多少字节 / 一共几份／整包多大"
@@ -2429,19 +2520,58 @@ def package_parse(data):
     if not isinstance(manifest, dict):
         return bad(PACKAGE_MANIFEST, "%s 的最外层不是一个 JSON 对象" % MANIFEST_NAME)
 
-    # 10 签名块：**只解析、不验签**（见本节开头那段）
+    # 10 有签名块。**四小步，次序是规范的一部分**（附录 A.4）：
+    #    ① 形状 ② 身份（块里的 id/版本 vs 清单）③ 内容（重算的侧摘要 vs 块里那两个）
+    #    ④ 密码学（验签）。①③④ 报 `signature`，②报 `manifest`。
+    #
+    #    ★ ② 在 ③ 前面：`id`/`version` 是"这个包**是**什么"，摘要是"它**装着**什么"。
+    #    ★★ **①③ 这一份实现做得了，④ 它不做**（见本节开头那段：本读方不验签）。
+    #      ③ 不是密码学 —— 它是 §3.4 加一次字节比较，而"这个包自己跟自己一致吗"
+    #      正是本函数的职责范围。少了 ③，"签名块里那两个摘要"就没有任何人看。
     sig = None
     if sig_len != 0:
-        block = data[off:off + sig_len]
-        if len(block) != PACKAGE_SIG_BYTES or block[0] != PACKAGE_SIG_ALG_ED25519:
+        parsed = package_parse_sig_block(data[off:off + sig_len])
+        # ① 形状
+        if parsed is None:
             return bad(PACKAGE_SIGNATURE,
                        "签名块 %d 字节，不是一个合法的 Ed25519 签名块"
-                       "（本格式是 %d 字节、alg=1）" % (sig_len, PACKAGE_SIG_BYTES))
+                       "（本格式是 %d + 版本号 字节、alg=1）"
+                       % (sig_len, PACKAGE_SIG_MIN_BYTES))
+        # ② 身份：块里的 id/版本必须与清单**逐字**相同。逐**字节**比，不比字符串。
+        if (not isinstance(manifest.get("id"), str)
+                or not isinstance(manifest.get("version"), str)
+                or manifest["id"].encode("utf-8") != parsed["id"].encode("ascii")
+                or manifest["version"].encode("utf-8") != parsed["version"].encode("utf-8")):
+            return bad(PACKAGE_MANIFEST,
+                       "签名块说这一份是 %r@%r，而负载里那份 %s 说是 %r@%r"
+                       " —— 同一个包里两处说了两个身份"
+                       % (parsed["id"], parsed["version"], MANIFEST_NAME,
+                          manifest.get("id"), manifest.get("version")))
+        # ③ 内容：**这个包里在的那几侧**，从它们的字节重算 §3.4 摘要，与块里那两个比。
+        #    ★ 客户端侧**永远在**（`plugin.json` 是它的一员，第 9 步保证它在）⇒ 那一边
+        #      永远核。站点侧在不在，由"包里有没有一条**只属于站点侧**的路径"决定 ——
+        #      这正是"同一个内容、两个包"（§4.2）那一格。
+        sd = package_side_digests(files)
+        site_present = any(not package_is_client_side(f["path"]) for f in files)
+        if sd["client"] != parsed["digestClient"]:
+            return bad(PACKAGE_SIGNATURE,
+                       "这一份的客户端侧算出来的内容摘要是 %s，而签名块里写的是 %s"
+                       " —— 签名盖的不是这些字节"
+                       % (sd["client"], parsed["digestClient"]))
+        if site_present and sd["site"] != parsed["digestSite"]:
+            return bad(PACKAGE_SIGNATURE,
+                       "这一份的站点侧算出来的内容摘要是 %s，而签名块里写的是 %s"
+                       " —— 签名盖的不是这些字节"
+                       % (sd["site"], parsed["digestSite"]))
         sig = {
-            "alg": block[0],
-            "pubkey": block[1:33],
-            "signature": block[33:97],
-            "fingerprint": package_signature_fingerprint(block[1:33]),
+            "alg": parsed["alg"],
+            "pubkey": parsed["pubkey"],
+            "signature": parsed["signature"],
+            "id": parsed["id"],
+            "version": parsed["version"],
+            "digestSite": parsed["digestSite"],
+            "digestClient": parsed["digestClient"],
+            "fingerprint": package_signature_fingerprint(parsed["pubkey"]),
         }
 
     return {
@@ -2683,14 +2813,20 @@ def _atomic_write_bytes(path, blob, mode=0o644):
 def _record_envelope(sig):
     """容器里那个签名块 → 记录表里那个 `envelope`（没有签名时是 `None`）。
 
-    ★ **逐字保留**：`alg` / `pubkey` / `signature` 三个字段就是块里那三段字节。
+    ★ **逐字保留**：那七个字段就是块里那七段字节（其中两段 base64 了一下）。
       验签要它一字不改 —— 少一位就是"签名对不上"，而那时报出来的是"有人改了包"。
+    ★ 后四个字段（`id`/`version`/两个摘要）是 v0.13 加的：它们**是**被签的那份
+      内容（A.3 的四元组），所以它们也必须逐字留着，不能"重算一遍存下来"。
     """
     if not sig:
         return None
     return {"alg": sig["alg"],
             "pubkey": base64.b64encode(sig["pubkey"]).decode("ascii"),
-            "signature": base64.b64encode(sig["signature"]).decode("ascii")}
+            "signature": base64.b64encode(sig["signature"]).decode("ascii"),
+            "id": sig["id"],
+            "version": sig["version"],
+            "digestSite": sig["digestSite"],
+            "digestClient": sig["digestClient"]}
 
 
 def _envelope_sig(envelope):
@@ -2698,6 +2834,11 @@ def _envelope_sig(envelope):
 
     形状不对时返回 `None`。★ 它是**唯一**一处把 base64 解回字节的地方 —— 别处再
     解一遍就会多出一处会抛的地方。
+
+    ★★ 它是记录表那一侧的**形状判据**：读一张**手工改过的**记录表时，这里必须判得
+      比"三个字段在不在"多。`id` 要 26 字节的 ASCII、版本要放得进一个 u8、两个摘要
+      要 64 位小写十六进制 —— 少判一条，`_envelope_bytes()` 就会拼出一块长度不对的
+      签名块，而那块东西会以"包读不了"的形式响在一个离这里很远的地方。
     """
     if not isinstance(envelope, dict):
         return None
@@ -2705,20 +2846,45 @@ def _envelope_sig(envelope):
         alg = envelope["alg"]
         pubkey = base64.b64decode(envelope["pubkey"], validate=True)
         signature = base64.b64decode(envelope["signature"], validate=True)
+        pid = envelope["id"]
+        version = envelope["version"]
+        digest_site = envelope["digestSite"]
+        digest_client = envelope["digestClient"]
     except (KeyError, TypeError, ValueError):
         return None
     if alg != PACKAGE_SIG_ALG_ED25519 or len(pubkey) != 32 or len(signature) != 64:
         return None
+    if not isinstance(pid, str) or not isinstance(version, str):
+        return None
+    try:
+        idb = pid.encode("ascii")
+        verb = version.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(idb) != PACKAGE_SIG_ID_BYTES or not 0 < len(verb) <= PACKAGE_MAX_VERSION_BYTES:
+        return None
+    for d in (digest_site, digest_client):
+        if not isinstance(d, str) or not re.fullmatch(r"[0-9a-f]{64}", d):
+            return None
     return {"alg": alg, "pubkey": pubkey, "signature": signature,
+            "id": pid, "version": version,
+            "digestSite": digest_site, "digestClient": digest_client,
             "fingerprint": package_signature_fingerprint(pubkey)}
 
 
 def _envelope_bytes(envelope):
-    """`envelope` → 签名块的字节（没有签名时是空字节）。重打包时用。"""
+    """`envelope` → 签名块的字节（没有签名时是空字节）。重打包时用。
+
+    ★ 长度 = `188 + 版本号的字节数`（A.3），而 `_envelope_sig()` 已经保证版本号放得进
+      一个 u8 —— 两处是同一条约束，所以这里不必再判一次长度。
+    """
     sig = _envelope_sig(envelope)
     if sig is None:
         return b""
-    return bytes([sig["alg"]]) + sig["pubkey"] + sig["signature"]
+    verb = sig["version"].encode("utf-8")
+    return (bytes([sig["alg"]]) + sig["pubkey"] + sig["signature"]
+            + sig["id"].encode("ascii") + bytes([len(verb)]) + verb
+            + bytes.fromhex(sig["digestSite"]) + bytes.fromhex(sig["digestClient"]))
 
 
 def _record_files(parsed):
@@ -2930,16 +3096,18 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
     ③ 树上没有多出来的东西：一个不在表里的文件、目录、链接、空目录都不行；
     ④ 表里没有缺的东西；
     ⑤ 逐份 `size` / `sha256` 与表相符（**点名是哪一份**）；
-    ⑥ 从表重算的内容摘要 + 信封里的签名**验得过**。
+    ⑥ 信封的形状、信封说的身份与清单**对得上**（v0.13：签的是四元组，见附录 A.3）；
+    ⑦ 从表重算**两侧**的内容摘要 + 信封里的签名**验得过**。
 
-    ★★ **⑥ 是这个形状的全部意义。** 从前的 `.splug` 是自校验的（记录表 + 逐份
+    ★★ **⑦ 是这个形状的全部意义。** 从前的 `.splug` 是自校验的（记录表 + 逐份
       sha256 + 签名都在同一个文件里，改一个字节当场自相矛盾）。拆成树之后树自己
       什么校验信息都不带 —— 记录表是它的解药，而**签名是解药的解药**：有人改了
       `job/start.sh` 又同步改了表里那一行的 sha256，逐份对账会通过，而重算出来的
-      摘要与签名对不上。少了 ⑥，改树与改表是配套的两步，而两步都做得到。
+      摘要与签名对不上。少了 ⑦，改树与改表是配套的两步，而两步都做得到。
 
-    ★ **⑥ 走的是"从表重算"**，不是"读一个存下来的摘要"：摘要不落盘（见上面那段），
+    ★ **⑦ 走的是"从表重算"**，不是"读一个存下来的摘要"：摘要不落盘（见上面那段），
       所以它只可能是当下的真相。
+    ★ **⑦ 内部那两步的次序也是承重的**（先验签、后比摘要）—— 理由写在它那一段。
 
     ★ `verify=False` 只给用例用（在没装 openssl 的机器上测前五步）。
     """
@@ -3023,25 +3191,16 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
                        "%s 的字节与记录表里的 sha256 不符（记录 %s，实际 %s）"
                        % (f["path"], f["sha256"], got))
 
-    # ⑥ 重算摘要 + 验签
+    # ⑥ **信封的形状** + **清单** + **身份**（信封说的 (id, 版本) vs 清单说的）
+    #
+    # ★★ 次序照抄 A.4 那条原则：**形状 → 身份 → 内容 → 密码学**。
+    #   身份排在密码学前面，因为"这个包**是**什么"比"它的签名对不对"更靠前 ——
+    #   一个自己都没说清是什么的安装，先说"签名验不过"是把人往错的地方带。
     digest = package_content_digest(files)
+    sd = package_side_digests(files)
     sig = _envelope_sig(record.get("envelope"))
     if record.get("envelope") is not None and sig is None:
         return bad(PACKAGE_SIGNATURE, "记录表里的签名块不合形状")
-    if sig is not None and verify:
-        verdict, why = openssl_verify_ed25519(
-            sig["pubkey"], bytes.fromhex(digest), sig["signature"])
-        if verdict == "unavailable":
-            return bad(RECORD_VERIFIER,
-                       "这一份有签名，而**本站验不了**（%s）："
-                       "这不是「被改过」的证据，装上 %s 就能判"
-                       % (why, PLUGIN_OPENSSL))
-        if verdict == "bad":
-            return bad(PACKAGE_SIGNATURE,
-                       "**签名验不过**（%s）。记录表里那几份的 sha256 自洽，"
-                       "但从它们重算出来的内容摘要（%s）与签名对不上 ——\n"
-                       "        有人**同时**改了树与记录表。"
-                       % (why, digest))
 
     # 清单：从树上那一份读（记录表不重复它 —— 同一件事存两遍就会漂）
     mpath = os.path.join(root, MANIFEST_NAME.replace("/", os.sep))
@@ -3064,6 +3223,66 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
         return bad(PACKAGE_MANIFEST,
                    "%s 里的 id 是 %r，而它装在 %r 这个目录下 —— 目录名必须是 id"
                    % (mpath, manifest.get("id"), plugin_id))
+    # ★ v0.13：信封说的 `(id, 版本)` 必须与清单**逐字**相同。判它的理由很直接：
+    #   重打包时签名块是从信封**原样搬过去**的（`_envelope_bytes`），而清单是从树上
+    #   现读的 —— 两者不一致时打出来的那个包**自己就不自洽**，而客户端会在 A.4 第 10
+    #   步②把它拒掉（`manifest`）。与其让这句毛病跑到用户机器上才响，不如在这里说清。
+    #
+    #   ★ 位置是承重的：它必须**在 ⑦ 之前**。放到验签之后的话，一个被改了版本号的
+    #     信封会先以"签名验不过"响，而那句指向**钥匙**；这里那句话指向**两处不一致
+    #     的那两处**，那才是能照着修的东西。
+    if sig is not None and (manifest.get("id") != sig["id"]
+                            or manifest.get("version") != sig["version"]):
+        return bad(PACKAGE_MANIFEST,
+                   "记录表里的签名块说这一份是 %r@%r，而 %s 说是 %r@%r"
+                   " —— 同一份安装里两处说了两个身份"
+                   % (sig["id"], sig["version"], mpath,
+                      manifest.get("id"), manifest.get("version")))
+
+    # ⑦ 验签 + 从树重算两侧摘要
+    #
+    # ★★ **里面那两步的次序也是承重的，别对调。**
+    #
+    #     ② 信封本身是不是作者发的（验签盖的是四元组那串字节，而它**全部**来自信封）
+    #     ① 树配不配得上这个信封（从树重算的两侧摘要 vs 信封里那两个）
+    #
+    #   ②过而①不过 ⇒ 被改的是**树**；①不过而②也过不了 ⇒ 被改的是**信封**。
+    #   对调的话，一个**只**被改了信封的安装会报成"有人同时改了树与记录表" ——
+    #   那句话把排查的人直接指向错的地方。
+    #
+    # ★ 而①的结论**只在②成立的前提下**才指向"树被改"，所以 `verify=False`（用例在
+    #   没有 openssl 的机器上跑前五步）时①**一并不判**，而不是单独判出个半截结论。
+    if sig is not None and verify:
+        verdict, why = openssl_verify_ed25519(
+            sig["pubkey"], package_signed_message(sig), sig["signature"])
+        if verdict == "unavailable":
+            return bad(RECORD_VERIFIER,
+                       "这一份有签名，而**本站验不了**（%s）："
+                       "这不是「被改过」的证据，装上 %s 就能判"
+                       % (why, PLUGIN_OPENSSL))
+        if verdict == "bad":
+            return bad(PACKAGE_SIGNATURE,
+                       "**签名验不过**（%s）。它盖的必须是 %r@%r 这四个东西（A.3），"
+                       "而这一块盖的不是它 ——\n"
+                       "        有人改了**记录表里的那个信封**。"
+                       % (why, sig["id"], sig["version"]))
+        # ① 树配不配得上这个信封。★ 站点这一侧**两侧都核**：本站的树是**整棵树**
+        #    （负载原样铺开，`client/**` 也在），所以没有"某一侧不在手里"那一格
+        #    （客户端有，见 site-plugins.js 的 treeSignature）。
+        if sd["client"] != sig["digestClient"]:
+            return bad(PACKAGE_SIGNATURE,
+                       "**从树重算的客户端侧摘要与签名对不上**：树是 %s，"
+                       "签名块里写的是 %s。\n"
+                       "        记录表里那几份的 sha256 自洽，所以有人**同时**改了树"
+                       "与记录表里那一行 —— 而签名是作者盖的，改不动。"
+                       % (sd["client"], sig["digestClient"]))
+        if sd["site"] != sig["digestSite"]:
+            return bad(PACKAGE_SIGNATURE,
+                       "**从树重算的站点侧摘要与签名对不上**：树是 %s，"
+                       "签名块里写的是 %s。\n"
+                       "        这与上一条同源：改树的人顺手把记录表里那一行的 "
+                       "sha256 也改了。签名盖的是作者发的那一份。"
+                       % (sd["site"], sig["digestSite"]))
 
     return {"ok": True, "record": record, "manifest": manifest,
             "digest": digest, "sig": sig, "files": files}
@@ -3678,7 +3897,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
                 % os.path.basename(path))
         else:
             verdict, why = openssl_verify_ed25519(
-                sig["pubkey"], bytes.fromhex(r["digest"]), sig["signature"])
+                sig["pubkey"], package_signed_message(sig), sig["signature"])
             if verdict == "unavailable":
                 problems.append(
                     "%s：这个包**有签名**，而本站验不了（%s）。\n"
@@ -3690,10 +3909,10 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
             if verdict == "bad":
                 problems.append(
                     "%s：**签名验不过**（%s）。\n"
-                    "        签名盖的是内容摘要 %s，而包里算出来的就是它。\n"
+                    "        签名盖的是 %r@%r 这四个东西（A.3），而这一块盖的不是它。\n"
                     "        包在下载或存放的过程中被改过（或作者发出来的就是坏的）"
                     "—— 重新下载一次；还是这样就让作者查。"
-                    % (path, why, r["digest"]))
+                    % (path, why, sig["id"], sig["version"]))
                 continue
             say("  ✓ %s 的签名验过了：%s"
                 % (os.path.basename(path), now))

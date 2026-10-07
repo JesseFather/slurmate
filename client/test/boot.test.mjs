@@ -209,9 +209,10 @@ function putSitePlugin({ id, name, version = '1.0.0', over = {}, clientSrc, trus
 function writeFixtureRecord(root, dir, id, version) {
   const P = require('../src/main/plugins/index.js');
   const SLOT = require('../src/main/plugin-slot.js');
+  const PPACK = require('../src/main/plugin-package.js');
   const files = P.readPluginFiles(dir).filter((f) => f.kind === 'f')
     .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
-  const rec = { schema: SLOT.RECORD_SCHEMA, format: 1, envelope: null, files };
+  const rec = { schema: SLOT.RECORD_SCHEMA, format: PPACK.FORMAT, envelope: null, files };
   const w = SLOT.writeRecordFile(SLOT.recordPathOf(root, id, version), rec);
   assert.ok(w.ok, `夹具的记录表要写得下去：${w.error}`);
   return dir;

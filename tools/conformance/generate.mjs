@@ -76,6 +76,76 @@ function buildPackageBytes() {
 // ==============================================================================
 
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
+const FORMAT = 2;
+const SIG_ALG = 1;
+/** 签名块的定长部分（A.3）：`alg|pubkey|sig|id|verlen|…|digestSite|digestClient`。 */
+const SIG_MIN = 1 + 32 + 64 + 26 + 1 + 32 + 32;
+
+// ── §3.1 / §4.2：把负载按侧分成两半 ────────────────────────────────────────
+//
+// ★ **这一份是独立实现**（不 import 打包器），与三份读方各写各的 —— 夹具的价值
+//    正在于"三份实现各自算，答案必须相同"。判据是**顶层前缀**，按字节比。
+const CLIENT_PREFIX = Buffer.from('client/', 'utf8');
+const MANIFEST_B = Buffer.from('plugin.json', 'utf8');
+const LINEAGE_B = Buffer.from('lineage.json', 'utf8');
+
+function digestOfEntries(pairs) {
+  const sorted = pairs.slice().sort((a, b) => Buffer.compare(a.p, b.p));
+  const h = crypto.createHash('sha256');
+  for (const x of sorted) {
+    h.update(x.p);
+    h.update(Buffer.from([0]));
+    h.update(Buffer.from(x.sha, 'ascii'));
+    h.update(Buffer.from([0x0a]));
+  }
+  return h.digest('hex');
+}
+
+/** 这一条路径在不在**客户端侧**。 */
+function isClientSideBytes(pb) {
+  return (pb.length >= CLIENT_PREFIX.length
+          && pb.subarray(0, CLIENT_PREFIX.length).equals(CLIENT_PREFIX))
+    || pb.equals(MANIFEST_B) || pb.equals(LINEAGE_B);
+}
+
+/**
+ * 一个已解析的容器 → 两半的路径/摘要对。`which` ∈ 'site' | 'client'。
+ *
+ * ★★ **两侧不是互补的**：`plugin.json` 与 `lineage.json` **两侧都在**，所以
+ *    站点侧不是"客户端侧的补集"，而是"**不以 `client/` 开头的那些**"。
+ *    ★ 这一条自己就错过一次（写成 `!isClientSideBytes()`，于是两个元数据文件从
+ *      站点侧掉了出去），而抓住它的是下面那次 `packer verify` 自检 —— 三份读方
+ *      各自算出来的 `digestSite` 只有一个，抄错一处当场就响。
+ */
+function sidePairs(parts, which) {
+  const pairs = parts.recs.map((r) => ({ p: r.pathBytes, sha: r.sha256.toString('hex') }));
+  if (which === 'client') return pairs.filter((x) => isClientSideBytes(x.p));
+  return pairs.filter((x) => !(x.p.length >= CLIENT_PREFIX.length
+    && x.p.subarray(0, CLIENT_PREFIX.length).equals(CLIENT_PREFIX)));
+}
+
+/** A.3 的被签消息。 */
+function sigMessage(id, version, ds, dc) {
+  return Buffer.concat([Buffer.from(id, 'ascii'), Buffer.from([0]),
+    Buffer.from(version, 'utf8'), Buffer.from([0]),
+    Buffer.from(ds, 'hex'), Buffer.from(dc, 'hex')]);
+}
+
+/** A.3 的签名块。 */
+function sigBlockBytes(id, version, pub, sig, ds, dc) {
+  const ib = Buffer.from(id, 'ascii');
+  const vb = Buffer.from(version, 'utf8');
+  const out = Buffer.alloc(SIG_MIN + vb.length);
+  out[0] = SIG_ALG;
+  pub.copy(out, 1);
+  sig.copy(out, 33);
+  ib.copy(out, 97);
+  out[123] = vb.length;
+  vb.copy(out, 124);
+  Buffer.from(ds, 'hex').copy(out, 124 + vb.length);
+  Buffer.from(dc, 'hex').copy(out, 156 + vb.length);
+  return out;
+}
 
 function split(buf) {
   const fileCount = buf.readUInt32BE(12);
@@ -102,7 +172,7 @@ function split(buf) {
 }
 
 function join(parts) {
-  const { format = 1, recs, sig, payload } = parts;
+  const { format = FORMAT, recs, sig, payload } = parts;
   const head = Buffer.alloc(20);
   MAGIC.copy(head, 0);
   head.writeUInt32BE(format, 8);
@@ -140,12 +210,21 @@ const CASES = [
     apply: (b) => { const o = Buffer.from(b); o.fill(0, 0, 8); return o; },
   },
   {
-    name: 'format 是 2',
+    name: 'format 是 3（比本实现新）',
     code: 'format',
-    change: '头里偏移 8 的 format 从 00000001 改成 00000002',
+    change: '头里偏移 8 的 format 从 00000002 改成 00000003',
     why: '★ 这一条就是客户端「站点太新」那一态的来源：认不得的 format 要**拒绝**，'
-      + '不是"按 1 理解"。按 1 理解的后果是拿一个未知布局的字节当已知布局读。',
-    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(2, 8); return o; },
+      + '不是"按 2 理解"。按 2 理解的后果是拿一个未知布局的字节当已知布局读。',
+    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(3, 8); return o; },
+  },
+  {
+    name: 'format 是 1（v0.13 之前的容器）',
+    code: 'format',
+    change: '头里偏移 8 的 format 从 00000002 改成 00000001',
+    why: '★ **一条实打实的兼容性判据**：v1 的签名块是定长 97 字节、只盖一个整树摘要，'
+      + '而 v2 的盖的是四元组、长度还随版本号变。把 v1 的字节按 v2 读，签名块那一段'
+      + '会整体错位 —— 所以零容忍，一个字节都不试着往下读（`0.y` 不考虑兼容性）。',
+    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(1, 8); return o; },
   },
   {
     name: '尾随一个字节',
@@ -163,12 +242,12 @@ const CASES = [
     apply: (b) => b.subarray(0, b.length - 1),
   },
   {
-    name: 'sig_len 说 97 但签名块不在',
+    name: 'sig_len 说 188 但签名块不在',
     code: 'length',
-    change: '头里偏移 16 的 sig_len 从 0 改成 00000061（97，一个合法签名块的长度）',
+    change: '头里偏移 16 的 sig_len 从 0 改成 000000bc（188，签名块**最短**的长度）',
     why: '★ 长度等式在**签名块之前**判 —— 所以这一条拿到的是 `length` 而不是 `signature`。'
       + '次序是规范的一部分（附录 A.4）：一个包同时犯两条时，先判哪条决定了理由词。',
-    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(97, 16); return o; },
+    apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(188, 16); return o; },
   },
   {
     name: '记录说的字节数比负载多一个',
@@ -363,6 +442,97 @@ const CASES = [
       return o;
     },
   },
+  // ── v0.13 新加的四条：钉住四元组（A.3）的**每一个成员都在起作用** ──────────
+  {
+    name: '签名块里的 digestSite 被改了一位',
+    base: 'signed',
+    code: 'signature',
+    change: '签名块里 digestSite 那 32 字节的第一个字节取反',
+    why: '★ 站点侧摘要进了**被签消息**，所以它改一位就验不过；而且这一份实现与'
+      + '守护进程读方**都在签名之前**先比一次"重算的摘要 vs 块里写的"（A.4 第 10 步③）'
+      + '—— 所以它连密码学都不必等到。这一条钉住"站点侧那 32 字节真的被绑住了"。',
+    apply: (b, ctx) => {
+      const o = Buffer.from(b);
+      o[ctx.sigAt + 188 + Buffer.byteLength(ctx.sigVer, 'utf8') - 64] ^= 0xff;
+      return o;
+    },
+  },
+  {
+    name: '签名块里的 digestClient 被改了一位',
+    base: 'signed',
+    code: 'signature',
+    change: '签名块里 digestClient 那 32 字节的第一个字节取反',
+    why: '★ 与上一条同源，只是换到客户端侧 —— 而客户端侧那半**只有客户端手里有**，'
+      + '所以它是"站点单独发一半"那条路上唯一的判据（§4.2）。',
+    apply: (b, ctx) => {
+      const o = Buffer.from(b);
+      o[ctx.sigAt + 188 + Buffer.byteLength(ctx.sigVer, 'utf8') - 32] ^= 0xff;
+      return o;
+    },
+  },
+  {
+    name: '签名块里的 id 换成另一个合法 ULID（清单没跟着改）',
+    base: 'signed',
+    code: 'manifest',
+    change: '签名块里那 26 个 ASCII 字节的 id 换成另一个合法 ULID',
+    why: '★ 只改一处时它连**密码学都不必等到**：A.4 第 10 步② 要求块里的 '
+      + '`id`/`version` 与清单**逐字**相同 —— 同一个包里两处说了两个身份。'
+      + '报 `manifest` 而不是 `signature`，因为"这个包是什么"比"签名对不对"更靠前。',
+    apply: (b, ctx) => {
+      const o = Buffer.from(b);
+      Buffer.from('01M2JKHTZGQ7X8V4T5R6N7B8CA', 'ascii').copy(o, ctx.sigAt + 97);
+      return o;
+    },
+  },
+  {
+    name: 'verlen 与实际版本号长度不符',
+    base: 'signed',
+    code: 'signature',
+    change: '签名块里那个 verlen 字节从 5（`1.0.0`）改成 4',
+    why: '★ 签名块的长度**必须**等于 `188 + verlen`。改这一个字节会让长度等式对不上，'
+      + '而那时**不许**"按最长的读"或者"截掉多余的那一段" —— 长度是这一块的形状。',
+    apply: (b, ctx) => {
+      const o = Buffer.from(b);
+      o[ctx.sigAt + 123] = 4;
+      return o;
+    },
+  },
+  {
+    name: 'id 在信封与清单里一起换掉（记录表那一行也补上）',
+    base: 'signed',
+    code: 'signature',
+    needs: 'verify',
+    change: '把 id 换成另一个合法 ULID —— **三处一起改**：签名块里那 26 字节、'
+      + '负载里 `plugin.json` 那一条、以及记录表里 `plugin.json` 那一行的 sha256；'
+      + '再把两个侧摘要重算后写回签名块',
+    why: '★★ **这一条钉的是 A.3 里"被签消息含 id"。** 少了那一项，一份构件可以被'
+      + '**改名**成另一个插件而签名照样成立 —— 两个包配错对，而客户端钉住的公钥'
+      + '还是同一把，于是 §5.4 一个字都不会响。'
+      + '★ 它被造得**尽量像自洽**：长度、逐份 sha256、清单、两侧摘要（③）全都过得去，'
+      + '只有验签（④）拦得住 —— 这正是"只有会验签的那一端才拒得了它"的意思。',
+    apply: (b, ctx) => {
+      const NEWID = '01M2JKHTZGQ7X8V4T5R6N7B8CA';
+      const s = split(b);
+      // ① 负载里 plugin.json 那一份里的 id（**等长**替换，所以 size 不变）
+      const i = s.recs.findIndex((r) => r.pathBytes.equals(MANIFEST_B));
+      if (i < 0) throw new Error('夹具树里没有 plugin.json —— 这一条造不出来');
+      const mf = Buffer.from(s.recs[i].data);
+      const at = mf.indexOf(Buffer.from(ctx.sigId, 'ascii'));
+      if (at < 0) throw new Error('plugin.json 里找不到那个 id —— 这一条造不出来');
+      Buffer.from(NEWID, 'ascii').copy(mf, at);
+      s.recs[i].data = mf;
+      // ② 摘要跟着走：`join()` 会把 `recs[i].sha256` 原样写进记录表那一行
+      s.recs[i].sha256 = crypto.createHash('sha256').update(mf).digest();
+      s.payload = Buffer.concat(s.recs.map((r) => r.data));
+      // ③ 两个侧摘要重算，**写回签名块**（而不是重签 —— 那正是这一条要测的）
+      const verlen = Buffer.byteLength(ctx.sigVer, 'utf8');
+      s.sig = Buffer.from(s.sig);
+      Buffer.from(NEWID, 'ascii').copy(s.sig, 97);
+      Buffer.from(digestOfEntries(sidePairs(s, 'site')), 'hex').copy(s.sig, 124 + verlen);
+      Buffer.from(digestOfEntries(sidePairs(s, 'client')), 'hex').copy(s.sig, 156 + verlen);
+      return join(s);
+    },
+  },
 ];
 
 function patchPath(b, i, bytes) {
@@ -438,8 +608,17 @@ function main() {
 
   const { priv, raw: rawPub } = ed25519FromSeed(FIXTURE_SEED);
   const digest = digestOf(buf);
-  const signature = crypto.sign(null, Buffer.from(digest, 'hex'), priv);
-  const sigBlock = Buffer.concat([Buffer.from([1]), rawPub, signature]);
+  // ★★ v0.13：签的是**四元组**（A.3）—— `{id, 版本, 站点侧摘要, 客户端侧摘要}`。
+  //    这里两个侧摘要由**本文件自己**那份实现算（`sidePairs`/`digestOfEntries`），
+  //    与三份读方各写各的 —— 夹具的价值正在于"各自算、答案必须相同"。
+  const parts = split(buf);
+  const MF = JSON.parse(parts.recs.find((r) => r.pathBytes.equals(MANIFEST_B)).data.toString('utf8'));
+  const SIG_ID = MF.id;
+  const SIG_VER = MF.version;
+  const dsSite = digestOfEntries(sidePairs(parts, 'site'));
+  const dsClient = digestOfEntries(sidePairs(parts, 'client'));
+  const signature = crypto.sign(null, sigMessage(SIG_ID, SIG_VER, dsSite, dsClient), priv);
+  const sigBlock = sigBlockBytes(SIG_ID, SIG_VER, rawPub, signature, dsSite, dsClient);
   // ★ 签名块在**记录表之后、负载之前**（附录 A.2）—— 不是追加到文件末尾。
   //   追加到末尾会让负载整体错位，而那会以 `content` 的形式响，不是 `signature`。
   const tableEnd = split(buf).tableEnd;
@@ -457,7 +636,35 @@ function main() {
 
   const other = ed25519FromSeed(OTHER_SEED).raw;
 
-  const ctx = { sigAt: tableEnd, otherPub: other };
+  const ctx = { sigAt: tableEnd, otherPub: other, sigId: SIG_ID, sigVer: SIG_VER,
+                dsSite, dsClient, priv, rawPub };
+
+  // ★★ **自检：让真的那个读方读一遍。** 上面那块签名块是**本文件手拼的**
+  //    （`sigBlockBytes` —— 与三份读方各写各的，夹具的价值正在于此），所以
+  //    "拼出来的偏移对不对"必须有一处**不依赖本文件**的东西来判。
+  //    打包器的 `verify` 就是那一处：它解析、验签、还要核对血统表与签名者对得上。
+  //    ★ 少了这一步，`sigBlockBytes` 里写错一个偏移会让**整批坏包**的期望理由词
+  //      一起漂 —— 而那时红的是三端的用例，看起来像"三份实现同时坏了"。
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-confsig-'));
+    const sf = path.join(tmp, 'signed.splug');
+    fs.writeFileSync(sf, signed);
+    const fp = crypto.createHash('sha256').update(rawPub).digest('hex');
+    let ok = true;
+    let out = '';
+    try {
+      out = sh(process.execPath, [path.join(ROOT, 'packer', 'slurmate-packer.js'),
+        'verify', sf, '--expect-signer', fp], { encoding: 'utf8' });
+    } catch (e) {
+      ok = false;
+      out = String((e.stdout || '') + (e.stderr || '') + (e.message || ''));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+    if (!ok) {
+      throw new Error('夹具里那份带签名的包，打包器自己读不过 —— 手拼的签名块与实现'
+        + `对不上（见 generate.mjs 的 sigBlockBytes）：\n${out}`);
+    }
+  }
 
   const expected = {
     _: '由 tools/conformance/generate.mjs 生成，**不要手改**。'
@@ -470,11 +677,30 @@ function main() {
       size: Number(r.size),
       sha256: r.sha256.toString('hex'),
     })),
+    // ★ v0.13：**按侧**分两半（A.3 的四元组要这两个数）。两侧**会重叠** ——
+    //   `plugin.json` 与 `lineage.json` 逐字节相同地进两次摘要。
+    sides: {
+      _: '客户端侧 = `client/**` + `plugin.json` + `lineage.json`；站点侧 = 其余全部。',
+      site: {
+        digest: dsSite,
+        files: sidePairs(parts, 'site').map((x) => x.p.toString('utf8')),
+      },
+      client: {
+        digest: dsClient,
+        files: sidePairs(parts, 'client').map((x) => x.p.toString('utf8')),
+      },
+    },
     package: serializableBytes(buf),
     signed: {
-      _: '同一棵树、同一个内容摘要，只是多了一块签名（§4.2：签名盖的是内容摘要，不是信封）。'
+      _: '同一棵树、同一个内容摘要，只是多了一块签名。★ v1 盖的是"整棵树一个摘要"，'
+        + 'v2 盖的是 {id, 版本, 站点侧摘要, 客户端侧摘要} 四元组（A.3）—— '
+        + '下面那四个字段**就是**被签的那串字节里的东西。'
         + '★ 被签的那把**私钥当场丢掉了** —— 夹具只需要公钥与签名，而验签不需要私钥。',
       alg: 'Ed25519',
+      id: SIG_ID,
+      version: SIG_VER,
+      digestSite: dsSite,
+      digestClient: dsClient,
       publicKeyHex: rawPub.toString('hex'),
       fingerprint: crypto.createHash('sha256').update(rawPub).digest('hex'),
       signatureHex: signature.toString('hex'),
@@ -490,10 +716,11 @@ function main() {
     _order: '期望的理由词次序见 docs/PLUGIN-SPEC.md 附录 A.4：一个包同时犯两条时，'
       + '先判哪条决定了理由词。',
     _needs: '`needs: "verify"` 的意思是：**只有会验签的那一端才拒得了它**。'
-      + '站点（守护进程那一份实现）不验签 —— §6 没有给站点任何一条验签义务，'
-      + '验签是客户端的事（§5.4）。所以那两条在守护进程那端**预期会被收下**，'
-      + '而守护进程的用例据此断言"它确实没拒" —— 把一条被省掉的检查写成一个'
-      + '有断言的事实，而不是让它悄悄躺在那里。',
+      + '守护进程那个**包解析器**不验签（A.4 第 10 步④它不做，①②③ 它都做），'
+      + '所以这几条在那一端**预期会被收下**，而守护进程的用例据此断言"它确实没拒"'
+      + '—— 把一条被省掉的检查写成一个有断言的事实，而不是让它悄悄躺在那里。'
+      + '★ 站点**真的**验签是在另一个地方（`plugin_reconcile`：启动对账与每次分发前），'
+      + '那里问的是另一个问题，别把这两句话读成同一句。',
     cases: CASES.map((c) => {
       const base = c.base === 'signed' ? signed : buf;
       const bytes = c.apply(Buffer.from(base), ctx);
@@ -526,16 +753,7 @@ function main() {
 
 function digestOf(buf) {
   const s = split(buf);
-  const h = crypto.createHash('sha256');
-  const paths = s.recs.map((r) => ({ p: r.pathBytes, sha: r.sha256.toString('hex') }))
-    .sort((a, b) => Buffer.compare(a.p, b.p));
-  for (const x of paths) {
-    h.update(x.p);
-    h.update(Buffer.from([0]));
-    h.update(Buffer.from(x.sha, 'ascii'));
-    h.update(Buffer.from([0x0a]));
-  }
-  return h.digest('hex');
+  return digestOfEntries(s.recs.map((r) => ({ p: r.pathBytes, sha: r.sha256.toString('hex') })));
 }
 
 main();

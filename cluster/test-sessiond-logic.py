@@ -126,8 +126,6 @@ def write_stub(path, body):
 #   解析器收得下的包，而"包该长什么样"由 19.14 说了算：那一节拿打包器**真的产出**
 #   的那份字节去验解析器。于是这里的正确性不靠自己证明，靠那条链子。
 PKG_MAGIC = b"splug\x1a\r\n"
-PKG_HEADER_BYTES = 20
-PKG_SIG_BYTES = 97
 
 
 def build_package(files, sig_block=b""):
@@ -143,8 +141,31 @@ def build_package(files, sig_block=b""):
         pb = p.encode("utf-8")
         recs += (struct.pack(">H", len(pb)) + pb
                  + struct.pack(">Q", len(blob)) + hashlib.sha256(blob).digest())
-    return (PKG_MAGIC + struct.pack(">III", 1, len(files), len(sig_block))
+    return (PKG_MAGIC + struct.pack(">III", MOD.PACKAGE_FORMAT, len(files), len(sig_block))
             + recs + sig_block + b"".join(b for _p, b in files))
+
+
+def quadruple_of(files):
+    """`[(路径, 字节), …]` → A.3 的四元组（`id` / 版本 / 两个侧摘要）。
+
+    ★ 两个摘要走的是**实现自己的** `package_side_digests`（与守护进程读包时同一个
+      函数）—— 夹具在这里再抄一遍分侧规则，就会跟着实现一起漂而没人发现。
+      `id`/版本取自负载里那份 `plugin.json`，与打包器 `sign` 取的是同一处。
+    """
+    by = dict(files)
+    mf = json.loads(by["plugin.json"].decode("utf-8"))
+    pairs = [{"path": p, "sha256": hashlib.sha256(b).hexdigest()} for p, b in files]
+    sd = MOD.package_side_digests(pairs)
+    return {"id": mf["id"], "version": mf["version"],
+            "digestSite": sd["site"], "digestClient": sd["client"]}
+
+
+def sig_block_of(quad, pubkey, sig64):
+    """四元组 + 公钥 + 64 字节签名 → 一块 v0.13 的签名块（A.3）。"""
+    verb = quad["version"].encode("utf-8")
+    return (bytes([1]) + pubkey + sig64 + quad["id"].encode("ascii")
+            + bytes([len(verb)]) + verb
+            + bytes.fromhex(quad["digestSite"]) + bytes.fromhex(quad["digestClient"]))
 
 
 def plugin_files_of(dirpath, skip=()):
@@ -303,18 +324,15 @@ def openssl_sign(pem, message):
 def sign_files(files, pem, pubkey):
     """给一份 `[(路径, 字节)]` 签上名，返回**带签名块的那个包**的字节。
 
-    ★ 两步：先编一个不带签名的包（签名盖的是**内容摘要**，与信封无关），拿它的
-      摘要去签，然后把签名块插进信封重编一次 —— 摘要不变，所以签名仍然成立。
+    ★ v0.13：签的是**四元组**（A.3）—— `{id, 版本, 站点侧摘要, 客户端侧摘要}`。
+      两个摘要从 `files` 现算，与读方走的是同一个函数（`package_side_digests`）。
       与打包器 `sign` 的做法完全一样（§4.2：签名不改内容摘要）。
     """
-    bare = build_package(files)
-    r = MOD.package_parse(bare)
-    if not r["ok"]:
-        return None
-    sig = openssl_sign(pem, bytes.fromhex(r["digest"]))
+    quad = quadruple_of(files)
+    sig = openssl_sign(pem, MOD.package_signed_message(quad))
     if sig is None:
         return None
-    return build_package(files, bytes([1]) + pubkey + sig)
+    return build_package(files, sig_block_of(quad, pubkey, sig))
 
 
 def weave_one(tpl_path, install_dir, name, ulid, out_path):
@@ -3655,10 +3673,10 @@ exit 0
     _k4 = openssl_make_key(tmpdir, "k4")
     _sigblock = None
     if _k4:
-        _dg_digest = mod.package_parse(build_package(_dg_files))["digest"]
-        _dg_sig = openssl_sign(_k4[0], bytes.fromhex(_dg_digest))
+        _dg_quad = quadruple_of(_dg_files)
+        _dg_sig = openssl_sign(_k4[0], mod.package_signed_message(_dg_quad))
         if _dg_sig:
-            _sigblock = bytes([1]) + _k4[1] + _dg_sig
+            _sigblock = sig_block_of(_dg_quad, _k4[1], _dg_sig)
     check("测试用的那把 Ed25519 钥匙造出来了，而且签得动", _sigblock is not None)
     _plain_bytes = build_package(_dg_files)
     _signed_bytes = build_package(_dg_files, _sigblock or b"")
@@ -3687,7 +3705,7 @@ exit 0
         _d4._plugin_cache.clear()          # 清缓存 = 模拟"守护进程重启一次"
         _a_pkg = (_plug_of(CS) or {}).get("package") or {}
 
-        # 同一个负载、换成一个**带签名块**的包（容器字节变长 97 字节）
+        # 同一个负载、换成一个**带签名块**的包（容器字节变长 188+版本号 字节）
         install_package(_fx4, _dg_files, sig_block=_sigblock)
         _d4._plugin_cache.clear()
         _b_plug = _plug_of(CS) or {}
@@ -4068,6 +4086,28 @@ exit 0
         check("★ 倒着喂进去算出同一个摘要（排序按路径字节，不是按进去的先后）",
               _rev == _exp["digest"], _rev)
 
+        # ★★ v0.13：**两侧**的摘要（A.3 的四元组要这两个数）。这一条同时是
+        #    "打包器与守护进程对同一棵树算出的两个摘要逐字相同"那个判据 ——
+        #    夹具里那两个数是**打包器那一侧**算的（`generate.mjs` 自己那份实现），
+        #    而这里用守护进程的实现重算一遍。
+        _sd = mod.package_side_digests(_r["files"])
+        check("★★ 两侧的内容摘要与夹具逐字相同（打包器 / 守护进程两份实现）",
+              _sd["site"] == _exp["sides"]["site"]["digest"]
+              and _sd["client"] == _exp["sides"]["client"]["digest"],
+              "%r vs %r" % (_sd, _exp["sides"]))
+        # ★ 两侧**不是互补的**：两个顶层元数据文件两侧都在。写错成"客户端侧的补集"
+        #   的话，站点侧的摘要会少算两份文件，而那个数**只**在签名里出现一次 ——
+        #   症状是"签名验不过"，排查的人会去查钥匙。（`generate.mjs` 自己就错过一次。）
+        _site_paths = [f["path"] for f in mod.package_sides(_r["files"])["site"]]
+        check("★ 两个顶层元数据文件在**站点侧**里（站点侧不是客户端侧的补集）",
+              "plugin.json" in _site_paths and "lineage.json" in _site_paths
+              and "client/index.js" not in _site_paths,
+              repr(_site_paths))
+        check("★ 而两侧的那份 `client/**` 与 `job/**` 各自归位",
+              "client/extra.js" in _exp["sides"]["client"]["files"]
+              and "job/start.sh" in _exp["sides"]["site"]["files"],
+              repr(_exp["sides"]))
+
     _s = mod.package_parse(_signed)
     check("★ 带签名的包也解析得动，而且**摘要与不带签名的那份逐字相同**", _s["ok"] and
           _s["digest"] == _exp["digest"],
@@ -4369,10 +4409,10 @@ exit 0
                  "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
                 ("job/start.sh", b"start_tam() { :; }\n")]
             _tsig = None
-            _tbare = mod.package_parse(build_package(_tfiles))
-            _ts = openssl_sign(_k1[0], bytes.fromhex(_tbare["digest"]))
+            _tquad = quadruple_of(_tfiles)
+            _ts = openssl_sign(_k1[0], mod.package_signed_message(_tquad))
             if _ts:
-                _tsig = bytes([1]) + _k1[1] + _ts
+                _tsig = sig_block_of(_tquad, _k1[1], _ts)
             install_package(_tamdir, _tfiles, sig_block=_tsig or b"")
             check("（夹具）被改的那一份是**签过名**的（否则这条测的是别的闸）",
                   _tsig is not None and mod.plugin_reconcile(
@@ -4485,20 +4525,46 @@ exit 0
             _bare_files = [("plugin.json", json.dumps(
                 {"id": _UID_A, "name": "alpha", "version": "1.0.0",
                  "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]
-            _bare_blob = build_package(_bare_files)
-            _sig64 = openssl_sign(_k1[0], bytes.fromhex(
-                mod.package_parse(_bare_blob)["digest"]))
+            _bare_quad = quadruple_of(_bare_files)
+            _sig64 = openssl_sign(_k1[0], mod.package_signed_message(_bare_quad))
             _flipped = bytes([_sig64[0] ^ 0x01]) + _sig64[1:]
             _tp = os.path.join(_ins_home, "tampered.splug")
             with open(_tp, "wb") as _f:
                 _f.write(build_package(_bare_files,
-                                       bytes([1]) + _k1[1] + _flipped))
+                                       sig_block_of(_bare_quad, _k1[1], _flipped)))
             _before = sorted(os.listdir(_INSDIR))
             _rc, _out = _install([_tp], _INSDIR)
             check("★★ 签名对不上（内容被改过）⇒ 拒绝，且一个字节都不写",
                   _rc == 1 and "签名验不过" in _out
                   and sorted(os.listdir(_INSDIR)) == _before,
                   "rc=%d %r" % (_rc, _out[:200]))
+
+            # ★★ v0.13：**信封说的 (id, 版本) 必须与清单对得上**。它排在验签
+            #    **之前**（与 A.4 第 10 步②同一个原则：形状 → 身份 → 内容 → 密码学）。
+            #    ★ 位置错了会怎样：一个被改了版本号的信封若先以"签名验不过"响，
+            #      那句话指向**钥匙**；而这里这句话指向**两处不一致的那两处** ——
+            #      那才是能照着修的东西。
+            _iddir = os.path.join(_ins_home, "id-mismatch")
+            _idfiles = [("plugin.json", json.dumps(
+                {"id": _UID_B, "name": "idm", "version": "1.0.0",
+                 "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
+                ("client/index.js", b"module.exports = {};\n")]
+            _idquad = quadruple_of(_idfiles)
+            _idsig = openssl_sign(_k1[0], mod.package_signed_message(_idquad))
+            install_package(_iddir, _idfiles,
+                            sig_block=sig_block_of(_idquad, _k1[1], _idsig)
+                            if _idsig else b"")
+            check("（夹具）这一份装得上、也对得过账（下面那条才有意义）",
+                  mod.plugin_reconcile(_iddir, _UID_B)["ok"] is True,
+                  str(mod.plugin_reconcile(_iddir, _UID_B))[:200])
+            _irec = mod.read_plugin_record(_iddir, _UID_B)["record"]
+            _irec["envelope"]["version"] = "1.0.1"     # 与清单不符（等长，所以形状仍合法）
+            mod.write_plugin_record(_iddir, _UID_B, _irec)
+            _ir = mod.plugin_reconcile(_iddir, _UID_B)
+            check("★★ 信封说的版本与清单不符 ⇒ 拒，理由是 manifest（身份先于密码学）",
+                  _ir["ok"] is False and _ir["code"] == mod.PACKAGE_MANIFEST
+                  and "1.0.1" in _ir["why"] and "1.0.0" in _ir["why"],
+                  "%s %s" % (_ir.get("code"), _ir.get("why")))
 
             # ★ 验不了 ≠ 验过了。把 openssl 从 PATH 上拿掉（这里靠改常量模拟），
             #   有签名的包必须**拒绝** —— 而报出来的话要说清是"验不了"。
@@ -4828,9 +4894,17 @@ exit 0
                               "plugin-package.js"), encoding="utf-8") as _f:
         _pl_pksrc = _f.read()
 
+    # ★ 次序 = 源码里的**声明次序**（有几行引用了前面那几行）。v0.13 起信封那一项
+    #   是 `…SIG_MAX` 推出来的，所以签名块那几个常量也得一起抠出来 —— 抠漏了的话
+    #   `eval` 会当场炸，而"脚本崩了"与"这条防线不存在"在报告里长得一模一样。
     _pl_cv = _pl_lit(_pl_csrc, ("MAX_SEGMENT_BYTES", "MAX_DEPTH", "MAX_FILES",
-                                "MAX_PATH_BYTES", "ENVELOPE_MAX_BYTES"))
-    _pl_pv = _pl_lit(_pl_psrc, ("MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
+                                "MAX_PATH_BYTES",
+                                "ENVELOPE_SIG_MIN", "ENVELOPE_SIG_MAX",
+                                "ENVELOPE_MAX_BYTES"))
+    _pl_pv = _pl_lit(_pl_psrc, ("HEADER_BYTES", "DIGEST_BYTES",
+                                "SIG_PREFIX_BYTES", "SIG_ID_BYTES", "SIG_TAIL_BYTES",
+                                "SIG_MIN_BYTES", "MAX_VERSION_BYTES", "SIG_MAX_BYTES",
+                                "MAX_DEPTH", "MAX_SEGMENT_BYTES", "MAX_FILES",
                                 "MAX_FILE_BYTES", "MAX_PACKAGE_BYTES",
                                 "MAX_PATH_BYTES", "MAX_ENVELOPE_BYTES",
                                 "MAX_TOTAL_BYTES"))
@@ -4892,7 +4966,9 @@ exit 0
     _pl_fmt = _pl["format"]
     _pl_path = (_pl_written["max_depth"] * _pl_fmt["max_segment_bytes"]
                 + (_pl_written["max_depth"] - 1))
-    _pl_env = (_pl_fmt["header_bytes"] + _pl_fmt["signature_bytes"]
+    # ★ v0.13：签名那一项按**最长**的一块算（`188 + 255`），因为签名块的长度现在
+    #   随版本号变（A.3）。书面判据那一格因此叫 `signature_max_bytes`。
+    _pl_env = (_pl_fmt["header_bytes"] + _pl_fmt["signature_max_bytes"]
                + _pl_written["max_files"] * (_pl_fmt["record_overhead_bytes"] + _pl_path))
     check("★★ 书面判据里的信封最坏情况 = 按附录 A.1 与 §3.3 现算一遍（%d 字节）"
           % _pl_env,
@@ -4909,6 +4985,26 @@ exit 0
           _pl_written["total_bytes"] + _pl_env <= _pl["package"]["max_bytes"],
           "%d + %d > %d" % (_pl_written["total_bytes"], _pl_env,
                             _pl["package"]["max_bytes"]))
+    # ★ 三侧**各自**算出来的"签名块最长"必须与书面判据那一格逐字相同。
+    #   少这一条的话，某一侧把 443 写成别的数时，"信封最坏情况"那条对它就成了
+    #   一次**自洽的错算** —— 自己跟自己永远对得上。
+    check("★★ 客户端与打包器各自算出来的签名块最长 = 书面判据那一格（443）",
+          _pl_cv is not None and _pl_pv is not None
+          and _pl_cv["ENVELOPE_SIG_MAX"] == _pl_fmt["signature_max_bytes"]
+          and _pl_pv["SIG_MAX_BYTES"] == _pl_fmt["signature_max_bytes"]
+          and mod.PACKAGE_SIG_MAX_BYTES == _pl_fmt["signature_max_bytes"],
+          "客户端 %r / 打包器 %r / 守护进程 %r / 判据 %r"
+          % (_pl_cv and _pl_cv["ENVELOPE_SIG_MAX"], _pl_pv and _pl_pv["SIG_MAX_BYTES"],
+             mod.PACKAGE_SIG_MAX_BYTES, _pl_fmt["signature_max_bytes"]))
+    check("★★ 而签名块最短 = 最短那一块的长度（188 = alg+公钥+签名+id+verlen+两摘要）",
+          _pl_pv is not None and mod.PACKAGE_SIG_MIN_BYTES == 188
+          and _pl_pv["SIG_MIN_BYTES"] == 188
+          and _pl_pv["SIG_MAX_BYTES"] == _pl_pv["SIG_MIN_BYTES"] + _pl_pv["MAX_VERSION_BYTES"]
+          and _pl_cv["ENVELOPE_SIG_MIN"] == _pl_pv["SIG_MIN_BYTES"],
+          "%r / %r / %d" % (_pl_pv and _pl_pv["SIG_MIN_BYTES"],
+                            _pl_cv and _pl_cv["ENVELOPE_SIG_MIN"],
+                            mod.PACKAGE_SIG_MIN_BYTES))
+
     check("★ 守护进程那份兜底也得装得下站点报得出来的最大负载",
           _pl_hv is not None
           and _pl_hv["package_bytes"] >= _pl["package"]["max_bytes"],

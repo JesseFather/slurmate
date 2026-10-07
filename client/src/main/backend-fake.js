@@ -215,7 +215,7 @@ const DEMO_FILE_BYTES = 512 * 1024;
  *   "服务端只能收紧、客户端取更严的那个"这条在假站点里也走得到。
  * ★ 这几个数由 `client/test/limits.test.mjs` 与守护进程那几份**跨文件**钉着。
  */
-const DEMO_TOTAL_BYTES = 1562251;    // = PLUGIN_TOTAL_MAX_BYTES（包上限 − 信封最坏情况）
+const DEMO_TOTAL_BYTES = 1561905;    // = PLUGIN_TOTAL_MAX_BYTES（包上限 − 信封最坏情况）
 const DEMO_MAX_FILES = 256;
 const DEMO_PACKAGE_BYTES = 2 << 20;  // = PLUGIN_PACKAGE_MAX_BYTES
 
@@ -423,12 +423,19 @@ class FakeBackend extends Backend {
       });
       const pub = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' })
         .subarray(-32);
-      const sig = crypto.sign(null, Buffer.from(digest, 'hex'), priv);
+      // ★★ v0.13：签的是**四元组**（A.3）—— 与真守护进程、与打包器走的是同一个
+      //    实现（`sideDigests` / `signedMessage` / `buildSigBlock` 都从打包器来）。
+      //    假站点在这里**再手搓一遍**就等于又实现了一次容器格式，而它与真格式分家
+      //    的那天，假站点反而会说"一切正常"。
+      const sd = packer.sideDigests(files);
+      const quad = { id: entry.id, version: entry.version,
+                     digestSite: sd.site, digestClient: sd.client };
+      const sig = crypto.sign(null, packer.signedMessage(quad), priv);
       const buf = packer.buildPackage(files,
-        Buffer.concat([Buffer.from([1]), pub, sig]));
+        packer.buildSigBlock(Object.assign({ alg: 1, pubkey: pub, sig }, quad)));
       out = {
         buf,
-        meta: { format: 1, bytes: buf.length, digest },
+        meta: { format: 2, bytes: buf.length, digest },
         fingerprint: crypto.createHash('sha256').update(pub).digest('hex'),
       };
     } catch {
@@ -474,6 +481,10 @@ class FakeBackend extends Backend {
         const c = (mf.contributes && typeof mf.contributes === 'object') ? mf.contributes : {};
         cache.set(`${mf.id}@${mf.version}`, {
           dir, files, name: mf.name, title: mf.displayName || mf.name,
+          // ★ 内部用（不在 `plugins` 响应里）：**现打一个包要签四元组**（A.3），
+          //   而四元组的头两段就是这两个。从 `key` 那个串里切是不行的 —— 版本号
+          //   里可能出现 `@`，而身份不该由一个给人看的字符串反推出来。
+          id: mf.id, version: mf.version,
           // 内部用，**不进 `plugins` 响应**（见下面 case 'plugins' 的逐字段挑）。
           surface: c.surface || null,
           submitPubkey: c.submitPubkey === true,

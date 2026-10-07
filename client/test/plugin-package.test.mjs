@@ -28,6 +28,9 @@ const require = createRequire(import.meta.url);
 const PP = require('../src/main/plugin-package.js');
 const P = require('../src/main/plugins/index.js');
 
+const crypto = require('crypto');
+const sha256hex = (b) => crypto.createHash('sha256').update(b).digest('hex');
+
 const CONF = fileURLToPath(new URL('../../tools/conformance/', import.meta.url));
 const EXPECTED = JSON.parse(fs.readFileSync(`${CONF}expected.json`, 'utf8'));
 const BAD = JSON.parse(fs.readFileSync(`${CONF}bad.json`, 'utf8'));
@@ -35,6 +38,84 @@ const BAD = JSON.parse(fs.readFileSync(`${CONF}bad.json`, 'utf8'));
 const unhex = (lines) => Buffer.from(lines.join(''), 'hex');
 const GOOD = unhex(EXPECTED.package.hex);
 const SIGNED = unhex(EXPECTED.signed.hex);
+
+/**
+ * 从**夹具里那份带签名的包**切出 `{recs, sig, sigAt}`。
+ *
+ * ★ 不调 `PP.parsePackage()`：那些字段在 `parsePackage` 的返回值里已经被规范化
+ *   过了，拿它回编等于"用被测的那份实现造被测的输入"。这里只按附录 A.2 的字节
+ *   布局切，与 `packagesOf` 无关。
+ */
+function splitSignedFixture() {
+  const buf = SIGNED;
+  const sigLen = buf.readUInt32BE(16);
+  let off = 20;
+  const recs = [];
+  for (let i = 0; i < buf.readUInt32BE(12); i++) {
+    const pathlen = buf.readUInt16BE(off);
+    const pathBytes = buf.subarray(off + 2, off + 2 + pathlen);
+    const size = buf.readBigUInt64BE(off + 2 + pathlen);
+    const sha256 = buf.subarray(off + 2 + pathlen + 8, off + 2 + pathlen + 40);
+    const data = buf.subarray(buf.readUInt32BE(16) + off, 0);   // 占位，下面重算
+    recs.push({ pathlen, path: pathBytes.toString('utf8'), pathBytes, size, sha256, data });
+    off += 2 + pathlen + 40;
+  }
+  const payload = buf.subarray(off + sigLen);
+  let p = 0;
+  for (const r of recs) {
+    const n = Number(r.size);
+    r.data = payload.subarray(p, p + n);
+    p += n;
+  }
+  return { recs, sig: buf.subarray(off, off + sigLen), sigAt: off };
+}
+
+/**
+ * 这几条记录编出来的容器，记录表在第几字节结束（= 签名块从这里开始）。
+ *
+ * ★ 必须**现算**：`splitSignedFixture()` 给的 `sigAt` 是它在**整包**里的位置，
+ *   而只取一半时记录表短了 —— 拿旧偏移去改新容器，改到的是**负载**里的一个字节
+ *   （这一条自己就踩过一次，报出来的是 `content` 而不是 `signature`）。
+ */
+function tableEndOf(recs) {
+  return 20 + recs.reduce((a, r) => a + 2 + r.pathBytes.length + 40, 0);
+}
+
+/**
+ * 签名块里 `digestSite` / `digestClient` 那 32 字节在**整个容器**里的起点。
+ *
+ * ★ 算式直接用 A.3 的布局：块长 `188 + verlen`，`digestSite` 在块末 −64、
+ *   `digestClient` 在块末 −32。★ **绝对**偏移（含记录表），别拿一个"相对块首"
+ *   的数再减一次 —— 那会改到公钥或签名上，而报出来的理由词**仍然是**
+ *   `signature`，看着像"这一条验过了"。
+ */
+function digestSiteAt(recs, version) {
+  return tableEndOf(recs) + 188 + Buffer.byteLength(String(version), 'utf8') - 64;
+}
+
+function digestClientAt(recs, version) {
+  return tableEndOf(recs) + 188 + Buffer.byteLength(String(version), 'utf8') - 32;
+}
+
+/** 按 A.2 的布局把 `recs` + 一块签名块编成容器（`format` 用本实现认识的那个）。 */
+function buildContainer(recs, sig) {
+  const fileCount = Buffer.alloc(4);
+  fileCount.writeUInt32BE(recs.length, 0);
+  const head = Buffer.alloc(20);
+  PP.MAGIC.copy(head, 0);
+  head.writeUInt32BE(PP.FORMAT, 8);
+  fileCount.copy(head, 12);
+  head.writeUInt32BE(sig.length, 16);
+  const table = [];
+  for (const r of recs) {
+    const h = Buffer.alloc(2);
+    h.writeUInt16BE(r.pathBytes.length, 0);
+    const sz = Buffer.alloc(8);
+    sz.writeBigUInt64BE(r.size, 0);
+    table.push(h, r.pathBytes, sz, r.sha256);
+  }
+  return Buffer.concat([head, ...table, sig, ...recs.map((r) => r.data)]);
+}
 
 // ── 好包 ────────────────────────────────────────────────────────────────────
 
@@ -86,20 +167,126 @@ test('★ 签名：验得过、指纹对得上，而且**摘要与没签名的�
 test('★ 签名验的是"这一段内容"，不是"格式对了就行"', () => {
   const pub = Buffer.from(EXPECTED.signed.publicKeyHex, 'hex');
   const sig = Buffer.from(EXPECTED.signed.signatureHex, 'hex');
-  const msg = Buffer.from(EXPECTED.digest, 'hex');
+  // ★★ v0.13：被签的是**四元组**那串字节（A.3），不是某一个摘要。
+  const quad = { id: EXPECTED.signed.id, version: EXPECTED.signed.version,
+                 digestSite: EXPECTED.signed.digestSite,
+                 digestClient: EXPECTED.signed.digestClient };
+  const msg = PP.signedMessage(quad);
   assert.equal(PP.verifyEd25519(pub, msg, sig), true);
   // 换一位消息 ⇒ 验不过
   const other = Buffer.from(msg);
   other[0] ^= 0xff;
   assert.equal(PP.verifyEd25519(pub, other, sig), false);
-  // 签名是**摘要的原值**那 32 字节，不是它的十六进制写法
-  assert.equal(PP.verifyEd25519(pub, Buffer.from(EXPECTED.digest, 'ascii'), sig), false,
-    '拿十六进制字符串当被签内容也验得过 ⇒ 被签的是哪一个没有写死');
+  // ★ **四元组的每一个成员都真的进了被签消息**：改哪一段都验不过。
+  //   少了这一段断言，"id 与版本在不在被签内容里"就没人守 —— 而它们不在的话，
+  //   一份构件可以被改个名字挂到另一个插件上，签名照样成立。
+  for (const k of ['id', 'version', 'digestSite', 'digestClient']) {
+    const tampered = Object.assign({}, quad);
+    tampered[k] = k === 'version' ? '1.0.1' : (k === 'id' ? '01M2JKHTZGQ7X8V4T5R6N7B8CA'
+      : 'f'.repeat(64));
+    assert.equal(PP.verifyEd25519(pub, PP.signedMessage(tampered), sig), false,
+      `改掉被签消息里的 ${k} 之后签名仍然成立 ⇒ 它没有真的进那条消息`);
+  }
   // 形状不对的公钥不抛，只返回 false
+  assert.equal(PP.verifyEd25519(pub, msg, sig) && false, false);
   assert.equal(PP.verifyEd25519(Buffer.alloc(32), msg, sig), false);
 });
 
+test('★★ 两侧的摘要：与夹具里那两个逐字相同，而且**两侧会重叠**', () => {
+  const r = PP.parsePackage(GOOD);
+  assert.equal(r.ok, true, r.ok ? '' : r.why);
+  const sd = PP.sideDigests(r.files);
+  assert.equal(sd.site, EXPECTED.sides.site.digest,
+    '站点侧的 §3.4 摘要与夹具对不上 —— 分侧的规则或摘要公式漂了');
+  assert.equal(sd.client, EXPECTED.sides.client.digest);
+  // ★ 两侧**不是互补的**：`plugin.json` 与 `lineage.json` 两侧都在。
+  const parts = PP.sidesOf(r.files).site.map((f) => f.path);
+  assert.ok(parts.includes('plugin.json') && parts.includes('lineage.json'),
+    '两个顶层元数据文件要在**站点侧**里 —— 站点侧不是"客户端侧的补集"');
+  assert.ok(!parts.includes('client/index.js'), '而 client/** 不在站点侧');
+  // ★ 空的那一侧**有定义**（§3.1 允许某一侧为空）：它是 sha256("")，不是 null ——
+  //   给它一个 null 的话，"这一侧是空的"与"这一侧不知道"就分不开了。
+  assert.equal(PP.contentDigest([]),
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    '空列表的内容摘要不是 sha256("")');
+});
+
 // ── 坏包 ────────────────────────────────────────────────────────────────────
+
+test('★★ 「同一个内容、两个包」：只发客户端侧那一半，**作者的签名照样成立**', () => {
+  // ★★ 这是 v0.13 走到今天这一步的**全部理由**（§3.1 第 4 条 + §4.2）。
+  //
+  //   站点要给客户端发一个只含 `client/**` 的包（阶段 4），而它**没有私钥** ——
+  //   它能做的只有把作者那块签名块**原样搬过去**。这件事成立的依据是 §4.2 那条
+  //   「**禁止**签名覆盖信封字节」：摘要从解析出来的 `(path, sha256)` 重算，不看
+  //   容器怎么编那张表 —— 于是子集的 §3.4 摘要逐字等于作者原件里那一半。
+  //
+  //   ★ 这一条现在就钉住，因为它是阶段 4 的地基；等到那一步才发现不成立，
+  //     要改的就是**签名格式**。
+  const parts = splitSignedFixture();
+  const clientOnly = parts.recs.filter((r) => PP.isClientSidePath(r.path));
+  assert.ok(clientOnly.length && clientOnly.length < parts.recs.length,
+    '前置：夹具里两侧都有，子集才是真子集');
+  const buf = buildContainer(clientOnly, parts.sig);
+  const r = PP.parsePackage(buf);
+  assert.equal(r.ok, true, r.ok ? '' : `${r.code} ${r.why}`);
+  assert.equal(r.sig.digestClient, EXPECTED.sides.client.digest,
+    '★ 客户端侧那一半的摘要与作者原件里那一半**逐字相同**（作者签名认它）');
+  assert.equal(r.sig.digestSite, EXPECTED.sides.site.digest,
+    '★ 而 `digestSite` 只是**跟着走**，客户端手里没有那一半的字节、核不了它');
+  assert.ok(buf.length < SIGNED.length, '★ 真的更小（这一半确实没发出去）');
+
+  // ★★ 判据②的后一半：把 `digestSite` 改一位，**这一个包**（只含客户端侧）也必须拒。
+  //    它靠的不是"重算站点侧摘要"（手里没有那半字节），而是**验签** ——
+  //    `digestSite` 是四元组的一员，改它就让签名不成立。
+  const tampered = Buffer.from(buf);
+  tampered[digestSiteAt(clientOnly, EXPECTED.signed.version)] ^= 0xff;
+  const bad = PP.parsePackage(tampered);
+  assert.equal(bad.ok, false, '★ 改 digestSite 而只发客户端侧 —— 也必须拒得了');
+  assert.equal(bad.code, 'signature', bad.why);
+});
+
+test('★★ 改只含客户端侧那个包的 `digestClient` ⇒ 也拒（③ 先响：重算的摘要对不上）', () => {
+  const parts = splitSignedFixture();
+  const clientOnly = parts.recs.filter((r) => PP.isClientSidePath(r.path));
+  const buf = Buffer.from(buildContainer(clientOnly, parts.sig));
+  buf[digestClientAt(clientOnly, EXPECTED.signed.version)] ^= 0xff;
+  const bad = PP.parsePackage(buf);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'signature', bad.why);
+  assert.match(bad.why, /客户端侧/, '★ 要说出**是哪一侧**对不上');
+});
+
+test('★ 只有站点侧的包也合法（§3.1：某一侧为空是允许的）', () => {
+  // ★ 一条插件可以只有 `job/**`、一个字节的客户端代码都没有 —— 那样的包**必须**
+  //   读得动，而且它客户端侧那份摘要不是 null、也不是空：`plugin.json` 是客户端侧的
+  //   一员，它永远在。★ 三个阶段之后（分发只发客户端侧）这一格会变成"某一侧**真的**
+  //   空"，那时这条判据仍然成立。
+  const PACKER = require('../../packer/slurmate-packer.js');
+  const mf = JSON.stringify({ id: '01M2JKHTZGQ7X8V4T5R6N7B8C9', name: 's', version: '1.0.0' });
+  const files = [
+    { path: 'plugin.json', data: Buffer.from(mf), sha256: sha256hex(Buffer.from(mf)) },
+    { path: 'job/start.sh', data: Buffer.from('start_s() { :; }\n'),
+      sha256: sha256hex(Buffer.from('start_s() { :; }\n')) },
+  ];
+  const sd = PACKER.sideDigests(files);
+  const quad = { id: '01M2JKHTZGQ7X8V4T5R6N7B8C9', version: '1.0.0',
+                 digestSite: sd.site, digestClient: sd.client };
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' })
+    .subarray(-32);
+  const buf = PACKER.buildPackage(files, PACKER.buildSigBlock(Object.assign({
+    alg: 1, pubkey: pub, sig: crypto.sign(null, PACKER.signedMessage(quad), privateKey),
+  }, quad)));
+  const r = PP.parsePackage(buf);
+  assert.equal(r.ok, true, r.ok ? '' : `${r.code} ${r.why}`);
+  // ★ 两侧都**保留容器里的次序**（与记录表那条同源：照它重打包要逐字节重现原件）。
+  assert.deepEqual(PP.sidesOf(r.files).site.map((f) => f.path),
+    ['plugin.json', 'job/start.sh'], '站点侧 = 不以 client/ 开头的那些');
+  assert.deepEqual(PP.sidesOf(r.files).client.map((f) => f.path), ['plugin.json'],
+    '★ 客户端侧**不是空的** —— `plugin.json` 永远在（三端的分侧规则都靠这一条）');
+  assert.equal(PP.sideDigests(r.files).site, sd.site);
+});
 
 test('★ 符合性向量：每一份坏包都必须被拒，且理由是**夹具里那个词**', () => {
   const wrong = [];

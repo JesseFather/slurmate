@@ -57,15 +57,32 @@ const sitePlugins = require('./site-plugins.js');
 /** 8 字节。末三字节是 `\x1a\r\n` —— 让文本工具一眼看出"这是二进制"。 */
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
 /** 本实现认识的容器格式版本。别的值 ⇒ **拒绝**（客户端那一态叫"站点太新"）。 */
-const FORMAT = 1;
+const FORMAT = 2;
 const HEADER_BYTES = 20;
-/** 签名块：alg(u8) | 公钥(32) | 签名(64)。 */
-const SIG_BYTES = 97;
 const SIG_ALG_ED25519 = 1;
+/** 签名块的**定长头**：`alg u8 | 公钥 32 | 签名 64`。 */
+const SIG_PREFIX_BYTES = 1 + 32 + 64;
+/** 块里的 `id`：**26 个 ASCII 字节**（一个 ULID 的写法）。 */
+const SIG_ID_BYTES = 26;
+/** `id` 之后那一段的**定长部分**：`verlen u8 | digestSite 32 | digestClient 32`。 */
+const SIG_TAIL_BYTES = 1 + 32 + 32;
+/**
+ * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 **u8**：
+ * 最短 **188** 字节，最长 **443**（`188 + 255`）。
+ *
+ * ★ 那两端的数由 `tools/plugin-limits.json` 的 `signature_max_bytes` 与 CI 的 lint
+ *   在**三侧之间**钉着；这个模块自己只用到 `SIG_MIN_BYTES`（判长度）与
+ *   `MAX_VERSION_BYTES`（判版本号放不放得下），所以只导出这两个 ——
+ *   "一个没人读的导出就是一句没人守的承诺"。
+ */
+const SIG_MIN_BYTES = SIG_PREFIX_BYTES + SIG_ID_BYTES + SIG_TAIL_BYTES;
+const MAX_VERSION_BYTES = 255;
 /** Ed25519 裸公钥的 SPKI 前缀 —— Node 只认 DER。12 字节，与打包器那一份逐字相同。 */
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 const MANIFEST = 'plugin.json';
+/** 血统表。与 `plugin.json` 一样**两侧都在**（见 site-plugins.js 的 `isClientSidePath`）。 */
+const LINEAGE_FILE = 'lineage.json';
 
 /** §3.3 的深度上限。与 site-plugins.js 的 `HARD_LIMITS.max_depth` 是同一个数。 */
 const MAX_DEPTH = 8;
@@ -229,11 +246,112 @@ function keyVerdict(pinned, pkg) {
   };
 }
 
-/** 从一块签名块里取出 `{alg, pubkey, sig}`；不合形状返回 `null`。 */
+/**
+ * 那七个字段 → 一块签名块的字节（附录 A.3）。**`sign` 不用它**（客户端不签名），
+ * 它服务的是**记录表那一条回路**：记录表里存的是拆开的字段，而形状判据必须与容器
+ * 那一份**同一处实现**（`parseSigBlock`）—— 否则"什么算一块合法的签名块"就有了
+ * 第二份说法，而两份漂开的方向是"一边收、一边拒"。
+ *
+ * ★ 拼不出来时**抛**（id 不是 26 字节、版本超过 255 字节）。调用方 `recordSig`
+ *   把它折成 `{ok:false}` —— 那正是"这张记录表里的信封**被改过**"。
+ */
+function buildSigBlock(o) {
+  const idb = Buffer.from(o.id, 'ascii');
+  const ver = Buffer.from(o.version, 'utf8');
+  if (idb.length !== SIG_ID_BYTES) throw new Error(`id 不是 ${SIG_ID_BYTES} 个 ASCII 字节`);
+  if (ver.length > MAX_VERSION_BYTES) {
+    throw new Error(`版本号超过 ${MAX_VERSION_BYTES} 字节，放不进签名块`);
+  }
+  const out = Buffer.alloc(SIG_MIN_BYTES + ver.length);
+  out[0] = o.alg;
+  Buffer.from(o.pubkey).copy(out, 1);
+  Buffer.from(o.sig).copy(out, 33);
+  idb.copy(out, 97);
+  out[97 + SIG_ID_BYTES] = ver.length;
+  ver.copy(out, 124);
+  Buffer.from(o.digestSite, 'hex').copy(out, 124 + ver.length);
+  Buffer.from(o.digestClient, 'hex').copy(out, 156 + ver.length);
+  return out;
+}
+
+/**
+ * 从一块签名块里取出那七个字段（附录 A.3）；不合形状返回 `null`。
+ *
+ * ```
+ * alg u8(=1) ｜ pubkey 32 ｜ sig 64 ｜ id 26(ASCII) ｜ verlen u8 ｜ version ｜
+ * digestSite 32 ｜ digestClient 32          长度 = 188 + verlen
+ * ```
+ *
+ * ★ "不合形状"三种：长度不等于 `188 + verlen`、`alg` 认不得、`id`/`version` 那两段
+ *   不是合法的 ASCII / UTF-8。★ 后两条靠**逐字节回比**判 —— 与路径那一条同源：
+ *   `toString` 会把坏字节悄悄换成 U+FFFD，于是两端算的不是同一份东西。
+ */
 function parseSigBlock(buf) {
-  if (buf.length !== SIG_BYTES) return null;
+  if (!Buffer.isBuffer(buf) || buf.length < SIG_MIN_BYTES) return null;
   if (buf[0] !== SIG_ALG_ED25519) return null;   // 认不得的算法**拒绝**，不忽略
-  return { alg: buf[0], pubkey: buf.subarray(1, 33), sig: buf.subarray(33, 97) };
+  const verlen = buf[97 + SIG_ID_BYTES];
+  if (buf.length !== SIG_MIN_BYTES + verlen) return null;
+  const idRaw = buf.subarray(97, 97 + SIG_ID_BYTES);
+  const id = idRaw.toString('ascii');
+  if (!Buffer.from(id, 'ascii').equals(idRaw)) return null;
+  const verRaw = buf.subarray(124, 124 + verlen);
+  const version = verRaw.toString('utf8');
+  if (!Buffer.from(version, 'utf8').equals(verRaw)) return null;
+  const at = 124 + verlen;
+  return {
+    alg: buf[0],
+    pubkey: buf.subarray(1, 33),
+    sig: buf.subarray(33, 97),
+    id,
+    version,
+    digestSite: buf.subarray(at, at + 32).toString('hex'),
+    digestClient: buf.subarray(at + 32, at + 64).toString('hex'),
+  };
+}
+
+/**
+ * 被签的那串字节（附录 A.3）：
+ *
+ *     id(26) ‖ 0x00 ‖ version(verlen) ‖ 0x00 ‖ digestSite(32 原值) ‖ digestClient(32 原值)
+ *
+ * ★ 两个摘要是**原值**，不是十六进制写法。★ 两个 `0x00` 是**分隔符**：少了它们，
+ *   `id` 与 `version` 的边界就成了"前 26 个字节"，一个改包的人可以把 id 末尾几个
+ *   字节挪进 version 里，换出另一对 `(id, 版本)` 而两个 `0x00` 之外一字不改。
+ */
+function signedMessage(o) {
+  return Buffer.concat([
+    Buffer.from(o.id, 'ascii'), Buffer.from([0x00]),
+    Buffer.from(o.version, 'utf8'), Buffer.from([0x00]),
+    Buffer.from(o.digestSite, 'hex'), Buffer.from(o.digestClient, 'hex'),
+  ]);
+}
+
+/**
+ * 把一个负载**按侧**分成两半（§3.1 / §4.2）。
+ *
+ *   客户端侧 = `client/**` + `plugin.json` + `lineage.json`
+ *   站点侧   = 其余全部
+ *
+ * ★ 与打包器那一份**同一条规则**（`sidesOf`），而且是**按顶层前缀**判的，不是
+ *   "名字里有没有 client"：`clientfoo/x` 与 `a/client/x` 都不算客户端侧。
+ * ★ 两个顶层元数据文件**两侧都在**，所以两侧**会重叠** —— 这是定义的一部分。
+ */
+function isClientSidePath(p) {
+  return p.startsWith('client/') || p === MANIFEST || p === LINEAGE_FILE;
+}
+
+/** 分成两半，各自**保留原来的次序**。 */
+function sidesOf(files) {
+  return {
+    site: files.filter((f) => !f.path.startsWith('client/')),
+    client: files.filter((f) => isClientSidePath(f.path)),
+  };
+}
+
+/** 两侧的内容摘要。空的那一侧 = `sha256("")`，**有定义**（§3.1 允许某一侧为空）。 */
+function sideDigests(files) {
+  const s = sidesOf(files);
+  return { site: contentDigest(s.site), client: contentDigest(s.client) };
 }
 
 // ==============================================================================
@@ -355,18 +473,52 @@ function parsePackage(buf) {
     return bad(R.MANIFEST, `${MANIFEST} 的最外层不是一个 JSON 对象`);
   }
 
-  // 10 有签名块就验它
+  // 10 有签名块。**四小步，次序是规范的一部分**（附录 A.4）：
+  //    ① 形状 ② 身份（块里的 id/版本 vs 清单）③ 内容（重算的侧摘要 vs 块里那两个）
+  //    ④ 密码学（验签）。①③④ 报 `signature`，②报 `manifest`。
+  //
+  //    ★ ② 在 ③ 前面：`id`/`version` 是"这个包**是**什么"，摘要是"它**装着**什么"。
+  //      一个自己都没说清是什么的包，先说"哪一份文件对不上"是把人往错的方向带。
   let sig = null;
   if (sigLen !== 0) {
     const parsed = parseSigBlock(buf.subarray(off, off + sigLen));
+    // ① 形状
     if (!parsed) {
       return bad(R.SIGNATURE,
-        `签名块 ${sigLen} 字节，不是一个合法的 Ed25519 签名块（本格式是 ${SIG_BYTES} 字节、alg=1）`);
+        `签名块 ${sigLen} 字节，不是一个合法的 Ed25519 签名块`
+        + `（本格式是 ${SIG_MIN_BYTES}+版本号 字节、alg=1）`);
     }
-    const digest = contentDigest(files);
-    if (!verifyEd25519(parsed.pubkey, Buffer.from(digest, 'hex'), parsed.sig)) {
+    // ② 身份：块里的 id/版本必须与清单**逐字**相同。逐**字节**比，不比字符串。
+    if (typeof manifest.id !== 'string' || typeof manifest.version !== 'string'
+        || !Buffer.from(manifest.id, 'utf8').equals(Buffer.from(parsed.id, 'ascii'))
+        || !Buffer.from(manifest.version, 'utf8').equals(Buffer.from(parsed.version, 'utf8'))) {
+      return bad(R.MANIFEST,
+        `签名块说这一份是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}，`
+        + `而负载里那份 ${MANIFEST} 说是 ${JSON.stringify(manifest.id)}@${JSON.stringify(manifest.version)}`
+        + ' —— 同一个包里两处说了两个身份');
+    }
+    // ③ 内容：**这个包里在的那几侧**，从它们的字节重算 §3.4 摘要，与块里那两个比。
+    //    ★ 客户端侧**永远在**（`plugin.json` 是它的一员，第 9 步保证它在）⇒ 那一边
+    //      永远核。站点侧在不在，由"包里有没有一条**只属于站点侧**的路径"决定 ——
+    //      这正是"同一个内容、两个包"（§4.2）那一格：只发客户端侧的那个包里没有
+    //      `job/**`，于是它核不了、也不必核 `digestSite`。
+    const sd = sideDigests(files);
+    const sitePresent = files.some((f) => !isClientSidePath(f.path));
+    if (sd.client !== parsed.digestClient) {
       return bad(R.SIGNATURE,
-        `签名验不过 —— 它盖的必须是这个包的内容摘要（${digest}），`
+        `这一份的客户端侧算出来的内容摘要是 ${sd.client}，而签名块里写的是 `
+        + `${parsed.digestClient} —— 签名盖的不是这些字节`);
+    }
+    if (sitePresent && sd.site !== parsed.digestSite) {
+      return bad(R.SIGNATURE,
+        `这一份的站点侧算出来的内容摘要是 ${sd.site}，而签名块里写的是 `
+        + `${parsed.digestSite} —— 签名盖的不是这些字节`);
+    }
+    // ④ 验签：盖的是**四元组**那串字节，不是某一个摘要。
+    if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
+      return bad(R.SIGNATURE,
+        `签名验不过 —— 它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
+        + ' 这四个东西（A.3），而这一块盖的不是它。'
         + `签的人是 ${fingerprint(parsed.pubkey)}`);
     }
     sig = {
@@ -375,6 +527,10 @@ function parsePackage(buf) {
       // ★ 那 64 个字节本身也要带出来：调用方要把它**逐字**存进记录表
       //   （`envelope.signature`），而"重新验一次"要的正是原件。
       signature: Buffer.from(parsed.sig),
+      id: parsed.id,
+      version: parsed.version,
+      digestSite: parsed.digestSite,
+      digestClient: parsed.digestClient,
       fingerprint: fingerprint(parsed.pubkey),
     };
   }
@@ -446,7 +602,9 @@ function readPackageFile(file) {
 }
 
 module.exports = {
-  MAGIC, FORMAT, HEADER_BYTES, SIG_BYTES, SIG_ALG_ED25519, MAX_DEPTH, MANIFEST, R, PIN,
-  contentDigest, parsePackage, dataOf, readPackageFile, unpackTo,
-  parseSigBlock, fingerprint, verifyEd25519, keyVerdict,
+  MAGIC, FORMAT, HEADER_BYTES, SIG_ALG_ED25519, MAX_DEPTH, MANIFEST, LINEAGE_FILE, R, PIN,
+  SIG_MIN_BYTES, MAX_VERSION_BYTES,
+  contentDigest, isClientSidePath, sidesOf, sideDigests,
+  parsePackage, dataOf, readPackageFile, unpackTo,
+  parseSigBlock, buildSigBlock, signedMessage, fingerprint, verifyEd25519, keyVerdict,
 };
