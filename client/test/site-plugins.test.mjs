@@ -56,7 +56,8 @@ function makeSite() {
     // ── 唯一那条投递方式 ──
     pkgFormat: 2,              // `op_plugins` 里报出去的格式
     pkgByteDelta: 0,           // 报出去的字节数偏离真实值多少
-    pkgDigestLie: false,       // 报出去的内容摘要是假的
+    pkgDigestLie: false,       // `op_plugins` 报出去的内容摘要是假的
+    pkgRespDigestLie: false,   // ★ `plugin_package` **响应里**报的那个是假的（只改这一处）
     pkgCorrupt: false,         // `plugin_package` 发出来的字节被改了一位
     pkgTruncate: 0,            // 发出去之前把包截短几个字节（链表与负载对不上）
     pkgExtra: null,            // 往包里**追加**这几条负载 —— 造坏包用（见 pkgOf）
@@ -113,16 +114,22 @@ function makeSite() {
     //   —— 那些形状在磁盘上摆不出来（穿越路径、只差大小写的两条、一条超限的……
     //   `readPluginFiles` 会先跳过它们），而在**包里**它们表达得出来，正是解析器
     //   或读方该拒的东西。
-    const files = declared(key2).map((f) => ({
+    //   ★ v0.13 阶段 4 起它们必须**落在客户端侧**（`client/…`）：追加一条站点侧
+    //     路径的话，它根本不会被装进发出去的那个包，于是那条用例会**静默失效**
+    //     —— 绿着，而它什么也没测。
+    const all = declared(key2).map((f) => ({
       path: f.path,
       data: fs.readFileSync(path.join(e.dir, ...f.path.split('/'))),
       sha256: f.sha256,
     })).concat(state.pkgExtra || []);
-    const digest = PACKER.contentDigest(files);
     const k = key();
     // ★★ v0.13：签的是**四元组**（A.3）—— `{id, 版本, 站点侧摘要, 客户端侧摘要}`，
     //    两个摘要由**打包器那份实现**现算（与真守护进程走的是同一个函数）。
-    const sd = PACKER.sideDigests(files);
+    //    ★ 四元组算的是**整棵树**（那是插件的身份），而**发出去的只含客户端侧**
+    //      —— 与真守护进程逐字同构（`slurmate-sessiond` 的 `plugin_rebuild`：
+    //      对账对整棵树，打包只打客户端侧）。假站点要是继续发整包，这一整套用例
+    //      测的就是一个**已经不存在的**分发形状。
+    const sd = PACKER.sideDigests(all);
     const quad = { id: e.mf.id, version: e.mf.version,
                    digestSite: sd.site, digestClient: sd.client };
     // ★ 不签名的那一档：§5.4 要判"钉过之后收到一份没有签名的构件"。
@@ -132,8 +139,11 @@ function makeSite() {
         sig: crypto.sign(null, PACKER.signedMessage(quad), k.priv),
       }, quad))
       : Buffer.alloc(0);
-    const buf = PACKER.buildPackage(files, sigBlock);
-    const out = { buf, digest, fingerprint: state.pkgSign ? k.fingerprint : null };
+    const send = all.filter((f) => PACKER.isClientSidePath(f.path));
+    const buf = PACKER.buildPackage(send, sigBlock);
+    // ★ `digest` 是 `op_plugins` 报的那个 —— 发出去那一份的摘要（客户端侧），
+    //   不是整棵树的。客户端会自己从字节重算这一个再与它比。
+    const out = { buf, digest: sd.client, fingerprint: state.pkgSign ? k.fingerprint : null };
     pkgCache.set(key2, out);
     return out;
   }
@@ -212,7 +222,8 @@ function makeSite() {
         buf[buf.length - 1] ^= 0xff;
       }
       return { ok: true,
-               data: { format: 2, bytes: buf.length, digest: p.digest,
+               data: { format: 2, bytes: buf.length,
+                       digest: state.pkgRespDigestLie ? 'e'.repeat(64) : p.digest,
                        data: buf.toString('base64') } };
     }
     // ★ `plugin_file` **不在这里** —— v0.7 把它从协议里删掉了，真守护进程回的是
@@ -617,7 +628,11 @@ test('★ 写下去之后再从磁盘读回来验 —— 不能拿手里的 Buff
   const realWrite = fs.writeFileSync;
   fs.writeFileSync = function patched(file, data, opts) {
     const s = String(file);
-    if (s.startsWith(env.stagingRoot) && s.endsWith('job' + path.sep + 'start.sh')) {
+    // ★ v0.13 阶段 4 起站点侧**根本不下发**（判据①：用户机器上没有 `job/`），所以
+    //   "半份文件"这件事只能在**客户端侧**的那几份上造 —— 从前这里拦的是
+    //   `job/start.sh`，而那一份现在连暂存都到不了，patch 会**静默不生效**，
+    //   于是这条用例变成一条永远绿的用例。
+    if (s.startsWith(env.stagingRoot) && s.endsWith('client' + path.sep + 'index.js')) {
       return realWrite.call(fs, file, Buffer.from(String(data)).subarray(0, 3), opts);
     }
     return realWrite.call(fs, file, data, opts);
@@ -629,7 +644,7 @@ test('★ 写下去之后再从磁盘读回来验 —— 不能拿手里的 Buff
     fs.writeFileSync = realWrite;
   }
   assert.equal(r.failed.length, 1, `只写了一半也要被发现：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /start\.sh/, `要点名是哪一份：${r.failed[0].why}`);
+  assert.match(r.failed[0].why, /index\.js/, `要点名是哪一份：${r.failed[0].why}`);
   assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 站点池里不能留下半份');
 });
@@ -677,12 +692,17 @@ test('★ 取回来的每一份都与站点磁盘上逐字节相同', async () =
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 1);
   const staged = r.pendingConsent[0].stagedDir;
-  for (const rel of ['client/index.js', 'job/start.sh']) {
+  // ★ v0.13 阶段 4：暂存里**只有客户端侧** —— 站点的树上有 `job/start.sh`，而
+  //   客户端一个字节都不收（判据①）。所以这里比的是客户端侧那几份，而"站点侧
+  //   那一份**不在**暂存里"本身就是下面那条断言。
+  for (const rel of ['client/index.js', 'plugin.json']) {
     assert.deepEqual(
       fs.readFileSync(path.join(staged, ...rel.split('/'))),
       fs.readFileSync(path.join(p.dir, ...rel.split('/'))),
       `${rel} 要逐字节相同`);
   }
+  assert.equal(fs.existsSync(path.join(staged, 'job')), false,
+    '★★ 站点侧那一份不该出现在暂存里（它就是判据①要挡的东西）');
 });
 
 // ── 路径安全 ────────────────────────────────────────────────────────────────
@@ -716,8 +736,12 @@ test('★★ 路径穿越：六种坏 path 全部**整份拒绝**', async () => 
   const site = makeSite();
   const env = makeEnv();
   const pl = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  // ★ v0.13 阶段 4 起它必须**落在客户端侧**（`client/…`）：站点发给客户端的包里
+  //   只有客户端侧，追加一条顶层路径的话这条坏包根本装不进包，用例会静默失效。
+  //   ★ 而 `client/../escape.js` 仍然是一条穿越路径（判据是**路径里的 `..` 段**，
+  //     不是规范化之后的结果），所以它测的还是原来那件事。
   site.state.pkgExtra = [
-    { path: '../escape.js', data: Buffer.from('x'), sha256: sha256hex(Buffer.from('x')) },
+    { path: 'client/../escape.js', data: Buffer.from('x'), sha256: sha256hex(Buffer.from('x')) },
   ];
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 0, '说不清的包不许走进同意闸');
@@ -1196,7 +1220,9 @@ test('★ 包里的某一份超过单文件上限 ⇒ 明确拒绝，不是截�
   //   逐份取删掉之后，这几个负载上限**唯一的执行点**就是客户端读包那一步
   //   （`checkDeclared`）—— 所以造它就得造在**包里**，否则测的是一个没人走的入口。
   const big = Buffer.alloc(S.HARD_LIMITS.file_bytes + 1, 0x78);
-  site.state.pkgExtra = [{ path: 'big.bin', data: big, sha256: sha256hex(big) }];
+  // ★ 路径必须在**客户端侧**（`client/…`）：阶段 4 起站点发出去的包里只有客户端侧，
+  //   塞一条顶层路径的话这一份根本不在包里，用例会绿着什么也没测。
+  site.state.pkgExtra = [{ path: 'client/big.bin', data: big, sha256: sha256hex(big) }];
   const r = await callSync(site, env);
   assert.equal(r.failed.length, 1);
   assert.match(r.failed[0].why, /超过/, `要说清是超限，而不是一句"失败了"：${r.failed[0].why}`);
@@ -1321,6 +1347,24 @@ test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒�
     '★ 一个字节都不许进池');
 });
 
+test('★★ `plugin_package` 响应里那一处自述与包对不上 ⇒ 也拒（三处说法要一致）', async () => {
+  // ★ 关于同一份东西，站点有**三处**说法：`op_plugins` 那一轮、取包响应里这一次、
+  //   以及**我们自己从收到的字节算出来的**。前两处对不上 = 这个站点讲不圆自己的
+  //   故事 —— 而那种时候该做的事是拒绝，不是挑一个信。
+  //   ★ 这一条与上面那条（`pkgDigestLie`）**不同源**：那一条把**两处一起**改假，
+  //     于是 `op_plugins` 那一层就把它拦住了，**响应里那一层没人守**。
+  //     （变异验证里"客户端不再比响应里那个 digest"跑出来是**绿的**，就是这么发现的。）
+  const site = makeSite();
+  const env = makeEnv();
+  site.state.pkgRespDigestLie = true;
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  assert.equal(r.pendingConsent.length, 0, '对不上的东西不许走进同意闸');
+  assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
+  assert.match(r.failed[0].why, /响应里报的内容摘要/, r.failed[0].why);
+  assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false, '★ 一个字节都不许进池');
+});
+
 test('★ 包里的字节被改过 ⇒ 拒绝，而且**绝不退回逐份那条路**', async () => {
   // ★ 这条是这一组里最承重的一条。逐份那条路**没有签名**（它发的是散装字节），
   //   所以"包验不过就改用文件"等于给出一条绕过验签的路 —— 一个能让包验不过的人
@@ -1400,7 +1444,8 @@ test('★ 包里的内容超过**站点自报**的上限 ⇒ 拒绝（自述只�
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const big = Buffer.alloc(300 * 1024, 0x78);
-  site.state.pkgExtra = [{ path: 'big.txt', data: big, sha256: sha256hex(big) }];
+  // ★ 同样，必须在**客户端侧**（阶段 4 起站点只发客户端侧）。
+  site.state.pkgExtra = [{ path: 'client/big.txt', data: big, sha256: sha256hex(big) }];
   const orig = site.rpc;
   const rpc = async (req) => {
     const r = await orig(req);
@@ -1813,24 +1858,26 @@ test('★ 没有签名的那一份照常装得上 —— 而"两侧的配套关�
     '★ `signed: false` —— 调用方要能把它与"验过了"分开');
 
   const dest = poolTree(env, p, '1.0.0');
-  fs.appendFileSync(path.join(dest, 'job', 'start.sh'), '# 谁加的一行\n');
+  // ★ v0.13 阶段 4 起池子里**只有客户端侧**，所以"就地改一个字节"要在 `client/**`
+  //   上造 —— `job/` 那一半现在到不了本机（判据①），拿它当靶子会 ENOENT。
+  fs.appendFileSync(path.join(dest, 'client', 'index.js'), '// 谁加的一行\n');
   assert.notEqual(S.treeFault(dest, rec.files), null, '★ 逐份比对仍然守着（它与签名无关）');
   const r2 = await callSync(site, env);
   assert.equal(r2.added.length, 1, '★ 检出之后重取一份干净的');
 });
 
-test('★★ 被改的是**站点侧**那一半（表也一起改）⇒ 一样挡住 —— 这一版签名盖的是两个摘要', async () => {
-  // ★★ v0.13 新增的这一格：签名不再盖"整棵树一个摘要"，而是盖
-  //    `{id, 版本, digestSite, digestClient}` 四元组（A.3）。于是"改了树又改了表"
-  //    这件事要在**每一侧**分别被挡住：
+test('★★ 站点侧那一半**根本到不了客户端**（判据①），而记录表里也没有它', async () => {
+  // ★★ 这一格在阶段 3 是"客户端核 `digestSite`"：池子里还留着站点侧那一半，
+  //    改了它照样被逮住。**阶段 4 之后那一半不在手里了** —— 站点发给客户端的
+  //    包里只有客户端侧（`unpackTo` 拒站点侧，见 plugin-package 那一组用例）。
   //
-  //      · 改 `client/**` ⇒ `digestClient` 对不上；
-  //      · 改 `job/**` 或别的不属于客户端侧的路径 ⇒ `digestSite` 对不上。
+  //    ⇒ 守卫换了人，而**覆盖面一个都没少**：
+  //      · 站点侧**到不了**客户端 —— 下面断言池子与记录表里都没有它；
+  //      · "站点侧被改"由**站点自己**逮住（`plugin_reconcile` 核**两侧**，对不上
+  //        就不发）—— 那条在集群侧有用例（19.14 那一节与 `plugin_reconcile` 那一组）。
   //
-  //    ★ 第二条**只在池子里还留着站点侧那一半时才有意义**（阶段 3 就是这样；
-  //      阶段 4 之后客户端池里只剩 `client/**`，那一半自然不在手里，见
-  //      `treeSignature` 里 `sitePresent` 那一段）。
-  //    ★ 少了它，池里那一半站点侧字节就成了**改了没人管**的东西。
+  //    ★ 这是本版的主题判据（用户机器上没有 `job/`）。从前它只能靠"读代码看起来
+  //      是对的"，现在有断言了。
   const site = makeSite();
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, {
@@ -1841,23 +1888,23 @@ test('★★ 被改的是**站点侧**那一半（表也一起改）⇒ 一样�
   consentAll(env, r1);
 
   const dest = poolTree(env, p, '1.0.0');
-  const evil = Buffer.from('start_a() { rm -rf /; }\n');
-  fs.writeFileSync(path.join(dest, 'job', 'start.sh'), evil);
+  // ★★ 判据①：**池子里没有 `job/`**。站点的树上有它（`site.add` 写进磁盘了），
+  //    而客户端一个字节都不收。
+  assert.equal(fs.existsSync(path.join(dest, 'job')), false,
+    '★★ 池子里不该有 job/ —— 那是站点侧，用户机器上没有它的位置');
+  assert.equal(fs.existsSync(path.join(dest, 'client', 'index.js')), true,
+    '而客户端侧照常在');
+
+  // ★ 记录表描述的是**本机这一棵树**，所以它也只该有客户端侧 —— 记录表里留着一条
+  //   本机没有的路径的话，下一次对账会报"记录表里有 X、盘上没有它"，而那是一条
+  //   **假**的篡改指控。
   const rec = recOf(env, p, '1.0.0');
-  assert.ok(rec.files.some((f) => f.path === 'job/start.sh'),
-    '★ 这一份的记录表里要有站点侧那一半 —— 不然这一条测的是另一件事');
-  const row = rec.files.find((f) => f.path === 'job/start.sh');
-  row.size = evil.length;
-  row.sha256 = sha256hex(evil);
-  SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
-
-  assert.equal(S.treeFault(dest, rec.files), null, '前置：树与记录表两边自洽');
-
-  const r2 = await callSync(site, env);
-  assert.equal(r2.kept.length, 0, '★★ 自洽的伪造**绝不许**被当成"已经有一份"');
-  assert.equal(r2.added.length, 1, '★ 检出之后重取一份真的');
-  assert.deepEqual(fs.readFileSync(path.join(dest, 'job', 'start.sh')),
-    Buffer.from('start_a() { :; }\n'), '★ 池里那一份回到站点的内容');
+  const strays = rec.files.filter((f) => !PP.isClientSidePath(f.path));
+  assert.deepEqual(strays.map((f) => f.path), [], '★ 记录表里也只该有客户端侧');
+  assert.ok(rec.files.some((f) => f.path === 'client/index.js'),
+    `客户端侧的文件要在记录表里：${JSON.stringify(rec.files.map((f) => f.path))}`);
+  assert.equal(S.treeFault(dest, rec.files), null,
+    '前置：树与记录表两边自洽（这一份是**好**的）');
 });
 
 test('★ 记录表里那个信封的 id 被改 ⇒ 拒（签名盖的是四元组，改了它就验不过）', async () => {

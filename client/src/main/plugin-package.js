@@ -563,6 +563,9 @@ function dataOf(buf, f) {
  * ★ **不跟随、不链接、不建空目录**：格式里就没有这些东西（附录 A），所以这里
  *   只有普通文件与 `mkdir -p`。
  *
+ * ★ v0.13 阶段 4 起它还**拒收站点侧**（拒绝，不是过滤）—— 站点发给客户端的只该
+ *   是客户端侧（`client/**` + `plugin.json` + `lineage.json`）。理由写在函数里。
+ *
  * ★ 调用方**必须**在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` 与
  *   记录表逐份比，见 `site-plugins.js` 的 `treeFault`）—— "校验我收到的"不等于
  *   "校验我写下的"，磁盘满的时候 `writeFileSync` 会留下半份文件然后抛错。
@@ -573,6 +576,26 @@ function dataOf(buf, f) {
  *     这一份构件"。
  */
 function unpackTo(parsed, buf, dir) {
+  // ★★ v0.13 阶段 4：**包里不许出现站点侧路径**。
+  //
+  //   这是"用户机器上不该有站点端代码"这句话的**可执行形式**，也是它的回归测试。
+  //   站点侧里有 `job/start.sh` 之类 —— 一份以**提交者本人**的身份在集群上执行的
+  //   脚本。它会跑在谁的账号下，就决定了它有多不该躺在别人家的笔记本里。
+  //
+  //   ★ 它**不是**"过滤器"，是**断言**：判到了就拒掉**整份**，而不是把那几份跳过。
+  //     跳过的做法会把"有人在中间塞了东西"变成"安静地少装了几份"，而客户端手里
+  //     那一份构件于是与签名说的不是同一份东西了 —— 那正是最该响的时候。
+  //   ★ 也不能靠"站点不会那么干"：站点是本机之外的另一个信任域，而这一条是客户端
+  //     **自己**能判的、不依赖任何一方守规矩的那一条。
+  const strays = parsed.files.filter((f) => !isClientSidePath(f.path));
+  if (strays.length) {
+    return { ok: false, why:
+      `这一份包里带着站点侧的路径（${strays.map((f) => f.path).slice(0, 3).join('、')}`
+      + `${strays.length > 3 ? ` 等 ${strays.length} 份` : ''}）—— `
+      + '客户端只该收到客户端侧（`client/**` + `plugin.json` + `lineage.json`）。'
+      + '整份拒收：站点侧代码不该到这台机器上，而"少装几份"会让本机这一份'
+      + '与签名说的不是同一份构件。' };
+  }
   try {
     for (const f of parsed.files) {
       const full = path.join(dir, ...f.path.split('/'));

@@ -411,12 +411,13 @@ class FakeBackend extends Backend {
       // ★ `debugBloatPlugin` 造的那一份：往**包里**塞一个装不下的文件。
       //   客户端读包时执行那几条负载上限（`checkDeclared`），所以它会在那里被拒
       //   —— 造的正是"站点支持分发，但这一份装不上"。
+      //   ★ v0.13 阶段 4 起它必须落在**客户端侧**（`client/…`）：站点发出去的包里
+      //     只有客户端侧，塞在顶层的话它根本不在包里，这个调试开关就**静默失效**了。
       if (this._bloatPlugin === key) {
         const big = Buffer.alloc(DEMO_FILE_BYTES + 1, 0x78);
-        files.push({ path: 'bloat.bin', data: big,
+        files.push({ path: 'client/bloat.bin', data: big,
                      sha256: crypto.createHash('sha256').update(big).digest('hex') });
       }
-      const digest = packer.contentDigest(files);
       const priv = crypto.createPrivateKey({
         key: Buffer.concat([PKCS8_ED25519_PREFIX, DEMO_PKG_SEED]),
         format: 'der', type: 'pkcs8',
@@ -427,15 +428,20 @@ class FakeBackend extends Backend {
       //    实现（`sideDigests` / `signedMessage` / `buildSigBlock` 都从打包器来）。
       //    假站点在这里**再手搓一遍**就等于又实现了一次容器格式，而它与真格式分家
       //    的那天，假站点反而会说"一切正常"。
+      //    ★ 四元组算**整棵树**（身份），而**发出去的只含客户端侧** —— 与真守护
+      //      进程逐字同构（`plugin_rebuild`）。假站点要是继续发整包，它就不再是
+      //      真站点的一个像样的替身了。
       const sd = packer.sideDigests(files);
       const quad = { id: entry.id, version: entry.version,
                      digestSite: sd.site, digestClient: sd.client };
       const sig = crypto.sign(null, packer.signedMessage(quad), priv);
-      const buf = packer.buildPackage(files,
+      const send = files.filter((f) => packer.isClientSidePath(f.path));
+      const buf = packer.buildPackage(send,
         packer.buildSigBlock(Object.assign({ alg: 1, pubkey: pub, sig }, quad)));
       out = {
         buf,
-        meta: { format: 2, bytes: buf.length, digest },
+        // ★ `digest` 是 `op_plugins` 报的那个 —— 发出去那一份（客户端侧）的摘要。
+        meta: { format: 2, bytes: buf.length, digest: sd.client },
         fingerprint: crypto.createHash('sha256').update(pub).digest('hex'),
       };
     } catch {

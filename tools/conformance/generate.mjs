@@ -35,6 +35,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -636,6 +639,52 @@ function main() {
 
   const other = ed25519FromSeed(OTHER_SEED).raw;
 
+  // ==========================================================================
+  //  ★★ 站点**分发出去**的那一份：只含客户端侧（v0.13 阶段 4）
+  // ==========================================================================
+  //
+  //  做法与真守护进程逐字同构（`slurmate-sessiond` 的 `plugin_rebuild`）：签名块
+  //  **原样搬过去**，只把客户端侧那几份负载装进去。它成立靠的是 §4.2 那条
+  //  「禁止签名覆盖信封字节」—— 包小了，而 `digestClient` 覆盖的那几份一个字节没变。
+  //
+  //  ★ **这一处故意 import 真的打包器**（上面 `sidePairs` 那一段则刻意不 import）。
+  //    两件事要的东西相反：分侧摘要要的是"三份实现各自算、答案必须相同"；而这一份
+  //    字节要的**就是打包器的输出** —— 它是守护进程那份 Python 实现（第四份）重打
+  //    时要**逐字节**对齐的参照物（`tools/conformance/README.md` 与集群用例）。
+  const PACKER = require(path.join(ROOT, 'packer', 'slurmate-packer.js'));
+  const clientOnlyFiles = parts.recs.filter((r) => isClientSideBytes(r.pathBytes))
+    .map((r) => ({ path: r.pathBytes.toString('utf8'), data: r.data,
+                   sha256: r.sha256.toString('hex') }));
+  if (!clientOnlyFiles.length || clientOnlyFiles.length === parts.recs.length) {
+    throw new Error('夹具树必须**两侧都有** —— 只有一侧的话，"只发客户端侧"这件事'
+      + '在这里就没有可测的东西了');
+  }
+  const clientOnly = PACKER.buildPackage(clientOnlyFiles, sigBlock);
+  {
+    // ★ 自检（与上面那一处同源）：让**真的**打包器读一遍这一份只含客户端侧的包。
+    //   它必须**收下** —— "两侧都在"的包合法，"只有客户端侧"的包**同样**合法
+    //   （A.4 第 10 步③只核**包里在的那几侧**）。这一条同时钉住了那个"哪一侧在手里"
+    //   的判据：写反了的话，这一份会被报成"站点侧摘要对不上"。
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-confcli-'));
+    const cf = path.join(tmp, 'client.splug');
+    fs.writeFileSync(cf, clientOnly);
+    const fp = crypto.createHash('sha256').update(rawPub).digest('hex');
+    let ok = true;
+    let out = '';
+    try {
+      out = sh(process.execPath, [path.join(ROOT, 'packer', 'slurmate-packer.js'),
+        'verify', cf, '--expect-signer', fp], { encoding: 'utf8' });
+    } catch (e) {
+      ok = false;
+      out = String((e.stdout || '') + (e.stderr || '') + (e.message || ''));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+    if (!ok) {
+      throw new Error('只含客户端侧的那一份包，打包器自己读不过 —— "哪一侧在手里"'
+        + `那条判据与实现的其余部分对不上：\n${out}`);
+    }
+  }
+
   const ctx = { sigAt: tableEnd, otherPub: other, sigId: SIG_ID, sigVer: SIG_VER,
                 dsSite, dsClient, priv, rawPub };
 
@@ -706,6 +755,21 @@ function main() {
       signatureHex: signature.toString('hex'),
       otherPublicKeyHex: other.toString('hex'),
       ...serializableBytes(signed),
+    },
+    // ★★ v0.13 阶段 4：**站点→客户端那一段真正发出去的那一份** —— 只含客户端侧。
+    //
+    //  它是「第四份实现」（守护进程那份 Python 的 `package_build(side="client")`）
+    //  唯一的**字节级**对账点：同一条记录表、同一块签名（逐字照搬，§4.2），两份
+    //  实现打出来的必须逐字节相同。★ 少了它，第四份实现在"装哪几份"这一步上与
+    //  另外三份分家时，症状只会是"客户端报摘要对不上"—— 指向钥匙，不指向这里。
+    clientSide: {
+      _: '只含客户端侧的包（`client/**` + `plugin.json` + `lineage.json`）：站点发给'
+        + '客户端的就是它。签名块**逐字**照搬上面那一块 —— 包小了而签名不动，'
+        + '这正是 §4.2「禁止签名覆盖信封字节」的用处。'
+        + '★ 由**真的打包器**的 buildPackage 打的（见 generate.mjs）。',
+      files: sidePairs(parts, 'client').map((x) => x.p.toString('utf8')),
+      digest: dsClient,
+      ...serializableBytes(clientOnly),
     },
   };
 

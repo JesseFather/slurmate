@@ -1188,6 +1188,9 @@ PLUGIN_OLD_PREFIX = ".slurmate-old-"
 #
 # ★ 它是**拦得住**的：安装器拒绝装一个超过它的包（装了也发不出去，客户端永远
 #   取不回来），`op_plugin_package` 也再判一次（拦住绕过安装器放进来的）。
+#   ★ v0.13 阶段 4 起出口那一次判的是**发出去的那一份**（只含客户端侧），它比整包
+#     小 —— 于是两边严格说不是在判同一个数。**这是对的**：出口要判的是"这条链路
+#     装不装得下"，入口要判的才是"这个包本身有多大"。
 #   下面三个**负载内**的数字才是"只通报、不拦截"的那一类。
 PLUGIN_PACKAGE_MAX_BYTES = 2 << 20
 
@@ -2968,7 +2971,7 @@ def read_plugin_record(plugins_dir, plugin_id):
                                    "files": out}}
 
 
-def package_build(files, sig_block=b"", fmt=PACKAGE_FORMAT):
+def package_build(files, sig_block=b"", fmt=PACKAGE_FORMAT, side=None):
     """把「一组 `{path, data, sha256}`」组装成包字节（附录 A.2）。
 
     ★★ **这是第四份实现。** 另外三份是 `packer/slurmate-packer.js` 的
@@ -2983,7 +2986,23 @@ def package_build(files, sig_block=b"", fmt=PACKAGE_FORMAT):
           ‖ 负载   按**记录的同一顺序**逐份拼接
 
     ⇒ `20 + Σ(2+路径长+8+32) + sig_len + Σsize == len(包)`，一个字节不多不少。
+
+    ── v0.13：`side` 决定装**哪一半**（§3.1）────────────────────────────────
+
+      `None`     原样的全部（作者发的整包就是这个形状）
+      `"client"` 只装**客户端侧** —— 站点发给客户端的就是这一份
+
+    ★ 过滤发生在**这里**、而不是调用方：装哪几份与"它们怎么编"是同一件事，
+      分开放的话，"按记录表读树"与"编包"两处各有一张筛子，迟早会漏掉一处。
+    ★★ 签名块**逐字照搬**，一个字节都不改，也**不因为少了几份就重签**。只发
+      客户端侧之所以成立，靠的正是 §4.2 那条「禁止签名覆盖信封字节」：包变小了，
+      而签名盖的四元组原封不动，`digestClient` 覆盖的那几份一个字节没变。
+      ★ 站点**没有**私钥，本来也重签不了 —— 而这是设计，不是缺陷。
     """
+    if side not in (None, "client"):
+        raise ValueError("side 只认识 None 与 'client'，拿到 %r" % (side,))
+    if side == "client":
+        files = [f for f in files if package_is_client_side(f["path"])]
     sig = bytes(sig_block or b"")
     recs = []
     total = PACKAGE_HEADER_BYTES + len(sig)
@@ -3011,16 +3030,23 @@ def package_build(files, sig_block=b"", fmt=PACKAGE_FORMAT):
     return bytes(out)
 
 
-def record_container_bytes(record):
+def record_container_bytes(record, side=None):
     """记录表里这份安装**如果重新打成包**会有多少字节（不真的打）。
 
     ★ 与 `package_build()` 是同一条算式，只是不算负载内容 —— 自检与
       `op_plugins` 每次都要这个数，而它们没有一个字节需要真的分配出来。
       ★ 两处必须一起改：改了 `package_build` 的布局而没改这里，"报出去的包有多大"
         会与实际发出去的字节数不符，而客户端拿前者校验后者。
+
+    ★ `side` 的语义与 `package_build()` 逐字相同（`None` 整包 / `"client"` 只算
+      客户端侧）—— 同样，**筛选只写在这一处**。
     """
+    if side == "client":
+        listed = [f for f in record["files"] if package_is_client_side(f["path"])]
+    else:
+        listed = record["files"]
     n = PACKAGE_HEADER_BYTES + len(_envelope_bytes(record.get("envelope")))
-    for f in record["files"]:
+    for f in listed:
         n += 2 + len(f["path"].encode("utf-8")) + 8 + 32 + f["size"]
     return n
 
@@ -3288,55 +3314,82 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
             "digest": digest, "sig": sig, "files": files}
 
 
-def plugin_tree_files(plugins_dir, plugin_id, record):
+def plugin_tree_files(plugins_dir, plugin_id, record, side=None):
     """照记录表的次序把一棵树读成 `[{path, data, sha256}]`（重打包用）。
 
     ★ 只在**已经对过账**之后调用（`plugin_reconcile` 通过）—— 它自己不再判任何
       东西，读不到就抛。
+    ★ `side` 只决定**读哪几份**，不判真伪：真伪是整棵树的事（记录表覆盖全部
+      文件），而 `side` 说的是"这一次要发出去哪一半"。筛子是 `package_is_client_side`
+      —— 与 `package_build` / `record_container_bytes` 是**同一条规则那一份实现**。
     """
     root = plugin_tree_dir(plugins_dir, plugin_id)
     out = []
     for f in record["files"]:
+        if side == "client" and not package_is_client_side(f["path"]):
+            continue
         with open(os.path.join(root, f["path"].replace("/", os.sep)), "rb") as fh:
             out.append({"path": f["path"], "data": fh.read(),
                         "sha256": f["sha256"]})
     return out
 
 
-def plugin_rebuild(plugins_dir, plugin_id):
+def plugin_rebuild(plugins_dir, plugin_id, side="client"):
     """照记录表把一棵树重新打成一个包。返回 `(包字节, 对账结果)` 或 `(None, 失败)`。
 
     ★ 这是**站点→客户端**那一段的起点：容器在这一段活着，而它在盘上不存在。
+
+    ★★ 默认 `side="client"` —— 这个函数存在的理由**就是分发**，而分发只发客户端侧
+      （阶段 4 的主题）。要整包（比如拿它与作者原件逐字节比）得**显式**写 `side=None`：
+      默认值选错的方向会静默多发一份站点侧代码，而显式写错会当场看见。
+
+    ★ 对账**永远对整棵树**（`plugin_reconcile` 不改）：记录表覆盖的是全部文件，
+      "这一棵树是不是作者那一份"与"这一次发哪一半"是两个问题。
+    ★ 返回的对账结果里多一格 `dist`：**这一次要发的那些文件**的内容摘要与清单。
+      它与 `r["digest"]`（整棵树的）不是一个数 —— 后者是这个插件的身份，前者是
+      客户端拿到手之后会自己重算的那一个。两个都要，所以分开放。
     """
     r = plugin_reconcile(plugins_dir, plugin_id)
     if not r["ok"]:
         return None, r
     try:
-        files = plugin_tree_files(plugins_dir, plugin_id, r["record"])
+        files = plugin_tree_files(plugins_dir, plugin_id, r["record"], side=side)
     except OSError as e:
         return None, {"ok": False, "code": PACKAGE_CONTENT, "why": "读树失败：%s" % e}
-    return package_build(files, _envelope_bytes(r["record"].get("envelope"))), r
+    out = dict(r, dist={"side": side, "files": files,
+                        "digest": package_content_digest(files)})
+    return (package_build(files, _envelope_bytes(r["record"].get("envelope")),
+                          side=side), out)
 
 
 def plugin_inspect(plugins_dir, plugin_id, verify=True):
     """一棵已安装的树 + 记录表 → 给自检与 CLI 用的一份读数。
 
-    返回 `{"ok": True, "format", "files", "sig", "manifest", "digest", "bytes"}`，
+    返回 `{"ok": True, "format", "files", "sig", "manifest", "digest", "dist"}`，
     或者与 `plugin_reconcile` 同形的失败。**不抛。**
 
-    ★ `bytes` 是**重新打出来会有多少字节**（`record_container_bytes`，不真的打）：
-      容器在盘上不存在了，而"分发出去多大"这个问题仍然要答 —— 它是一条**链路**
-      约束（base64 之后要能装进一条应答）。为了取一个 `len()` 去分配一份 1.5 MB
-      的字节数组没有任何意义。
-    ★ `files` 的形状与 `package_parse()` 一模一样（`path` / `size` / `sha256`），
-      所以两个老读者（`--check-plugins` / `--check`）只换一个取值处就够。
+    ★ `files` / `digest` 说的是**整棵树**：`digest` 是这个插件的**身份**（§3.4），
+      而这一屏的用处之一就是让人拿它与作者发布时 `packer inspect` 报的那个
+      **逐个字符**比。它**不能**换成 `dist.digest` —— 那两个数不一样，换了这一屏
+      就不再回答"装上去的是不是作者那一份"。
+
+    ★ `dist` 说的是**要发给客户端的那一份**（v0.13 阶段 4 起只含客户端侧）：
+      `{side, files, bytes, digest}`。三个上限判据（整包 / 份数 / 负载）看的都是它
+      —— 客户端收到的就是这些字节，拿整棵树的数去判会把"发得出去"说成"发不出去"。
+    ★ 从前这里只有一个 `bytes`（整棵树重打成包多大）。**它删了**：v0.13 之后没有
+      任何一条路会发整包，"整包多大"没有一个问它的人，而留着两格字节数正是下一个人
+      拿错那一格的地方。
     """
     r = plugin_reconcile(plugins_dir, plugin_id, verify=verify)
     if not r["ok"]:
         return r
+    dist_files = [f for f in r["files"] if package_is_client_side(f["path"])]
     return {"ok": True, "format": r["record"]["format"], "files": r["files"],
             "sig": r["sig"], "manifest": r["manifest"], "digest": r["digest"],
-            "bytes": record_container_bytes(r["record"])}
+            "dist": {"side": "client",
+                     "bytes": record_container_bytes(r["record"], side="client"),
+                     "files": dist_files,
+                     "digest": package_content_digest(dist_files)}}
 
 
 def package_input_problem(path, want_uid=None, st=None):
@@ -9068,16 +9121,24 @@ class Sessiond(object):
                 # ── 站点分发：这个插件作为**一个包** ──
                 #
                 # ★ **只有这一条投递方式了。** v0.6 曾经同时报 `files`（逐份取，
-                #   配合 `plugin_file`）与 `package`（整包一次取，配合
+                #   配合 `plugin_file`）与 `package`（**一整份一次取走**，配合
                 #   `op_plugin_package`），那是加法过渡的形状；v0.7 把 `files` 与
                 #   `plugin_file` 删掉了。所以「本站支不支持分发」这个判据**换了**：
                 #   从前是"这一项里有没有 `files`"，现在是顶层**有没有 `limits`**。
                 #   两个都是稳定的协议事实（不是"这次下载失败了"），但只有后者
                 #   在这一版之后仍然存在。
                 #
+                #   ★ "一整份"从 v0.13 阶段 4 起指的是**只含客户端侧**的那一份
+                #     （站点现打），不是作者发的整包 —— 字段名没变，`bytes`/`digest`
+                #     的含义跟着分发形状一起换了。
+                #
                 # ★ `digest` 是**内容摘要**（§3.4 —— 签名盖的就是它、插件的身份就是它），
                 #   **不是**容器字节的 sha256：容器怎么编那张记录表、有没有签名块，
                 #   都不该动它。给同一个负载加一个签名块，容器字节变了而它**不变**。
+                #
+                # ★ v0.13 阶段 4 起它是**客户端侧那一半**的摘要（四元组里的
+                #   `digestClient`），因为发出去的就是那一半。★ 与 `plugin.digest`
+                #   **不是同一个数**：后者是整棵树的（插件的身份）。
                 #
                 # ★ 它是**本站自述**。客户端拿它的唯一正确用法是"与我**自己从下载到的
                 #   字节重算出来的**那个比"，而不是"拿它去校本站发回来的字节" ——
@@ -9130,7 +9191,11 @@ class Sessiond(object):
         })
 
     def plugin_snapshot(self, spec):
-        """**启动那一刻**这个插件分发出去会是什么样：容器格式 + 整包字节数 + 内容摘要。
+        """**启动那一刻**这个插件分发出去会是什么样：容器格式 + 字节数 + 内容摘要。
+
+        ★ v0.13 阶段 4 起分发的**只是客户端侧**（`plugin_rebuild` 的默认侧），
+          所以这三样说的都是那一份包 —— `digest` 就是四元组里的 `digestClient`，
+          也正是客户端收到之后会自己从字节重算、再与信封比的那一个。
 
         ★ 为什么"不失效"才是对的：守护进程对插件的认知**本来就是启动那一刻的快照**
           （`Config.__init__` 里跑一次 `scan_plugins()`，之后再不重扫）。所以取内容的
@@ -9142,6 +9207,10 @@ class Sessiond(object):
           缓存之后，这个场景在这里就有了名字：`plugin_package_changed`，附带一句
           "重装一次那个插件"。要换插件内容，本来就该升版本号 + 重新 `packer
           build` 再装 —— 就地改文件从来不是一条被支持的路径。
+
+          ★ v0.13 之后这一格的判据换了个说法：从前比的是"盘上那个 `.splug` 文件
+            还是不是原来那一份"，现在是"**重新打包之后的摘要**还是不是原来那一个"。
+            两者说的是同一件事（内容没变），而后者在容器不落盘之后仍然成立。
 
         ★ **三样事实装在一个缓存里**（而不是"字节数一个、摘要一个"）：它们必须出自
           同一次对账。分开放的话，两次之间树被换掉，报出去的摘要与发出去的字节就能
@@ -9172,7 +9241,7 @@ class Sessiond(object):
             if r["ok"] and blob is not None:
                 snap = {"package": {"format": PACKAGE_FORMAT,
                                     "bytes": len(blob),
-                                    "digest": r["digest"]}}
+                                    "digest": r["dist"]["digest"]}}
             else:
                 # ★ 如实回答"没有"（`package: null`），不编一个空的形状出来 ——
                 #   `{format: 1, bytes: 0, digest: "…"}` 会被读成"这个插件真是一个
@@ -9182,8 +9251,9 @@ class Sessiond(object):
         return snap
 
     def plugin_package(self, spec):
-        """这个插件分发出去作为**一个整体**的三样事实：`{format, bytes, digest}`，
-        或者 `None`（那棵树对不过账）。见 plugin_snapshot()。"""
+        """这个插件**分发出去**的那一份的三样事实：`{format, bytes, digest}`
+        （v0.13 阶段 4 起只含客户端侧），或者 `None`（那棵树对不过账）。
+        见 plugin_snapshot()。"""
         return self.plugin_snapshot(spec)["package"]
 
     def _plugin_by_key(self, plugin_id, version):
@@ -9199,12 +9269,21 @@ class Sessiond(object):
         return None
 
     def op_plugin_package(self, uid, req):
-        """把一个插件的**整个包**发给客户端（base64）—— **唯一**一条投递方式。
+        """把一个插件**要分发的那一份**发给客户端（base64）—— **唯一**一条投递方式。
+
+        ★ v0.13 阶段 4 起发出去的**只含客户端侧**（`plugin_rebuild` 的默认侧）：
+          `client/**` + `plugin.json` + `lineage.json`。站点侧的 `job/**` 之类一个
+          字节都不出本站 —— 用户机器上不该有一份以提交者身份在集群上执行的脚本，
+          这是本版的主题判据。
 
         ★ 发出去的是**容器本身**，不是"照着清单拼出来的字节"。这一点是承重的：
           客户端拿到整包之后能**自己**解析、自己重算内容摘要、自己验签
           （§4.2 / §6.1），于是本站报的 `digest` 与本站转发的字节是**分开的两件事**，
           客户端有办法发现它们对不上。
+
+          ★ 只发一半**不减安全**，机械地说：站点改了客户端侧任何一个字节 ⇒ 从树
+            重算的 `digestClient` ≠ 签名里的那一个 ⇒ 客户端自己算一遍就拒。站点
+            没有能力偷偷改任何东西 —— 它手里没有私钥，重签不了。
 
           ★ v0.6 曾经有第二条路（`op_plugin_file`，逐份取），它**做不到**这一点：
             那边只有"一份一份的字节"，客户端拼不出一份能被签名的东西。v0.7 把它删了
@@ -9234,6 +9313,9 @@ class Sessiond(object):
         # ★ 上限**先判**：超限的包连打都不打（打它只是白花内存再原样丢掉）。
         #   正常部署下这一条拦不到东西 —— 安装器在装的时候就拒绝了超过它的包。
         #   它拦住的是**绕过安装器**放进来的一份（root 的 cp、或者手工覆盖）。
+        #   ★ 判的是**分发出去的那一份**（客户端侧）：发出去的字节数才是链路约束，
+        #     拿整棵树的数去判会把一份发得出去的插件说成发不出去。整包的上限由
+        #     安装器在入口处判（它收到的就是整包）。
         if info["bytes"] > PLUGIN_PACKAGE_MAX_BYTES:
             return self._err(4, "plugin_package_too_large",
                              "%s@%s 重新打出来有 %d 字节，超过本站通报的整包上限 "
@@ -9259,13 +9341,16 @@ class Sessiond(object):
         # 摘要是"内容"的，格式是"信封"的，两者互补 —— 只比摘要的话，一个记录表被
         # 重排过的包会溜过去（内容一样、容器不一样），而客户端解析它得到的东西
         # 与本站报的那些字段就可能对不上。
-        if (len(data) != info["bytes"] or r["digest"] != info["digest"]
+        # ★ `r["dist"]["digest"]` 是**这一次打出来的那一份**（客户端侧）的内容摘要
+        #   —— 不是 `r["digest"]`（整棵树的）。与 `info["digest"]` 同源才比得了。
+        if (len(data) != info["bytes"] or r["dist"]["digest"] != info["digest"]
                 or PACKAGE_FORMAT != info["format"]):
             return self._err(9, "plugin_package_changed",
                              "%s@%s 装出来的那一份在扫描之后被换过（启动时 %d 字节 "
                              "/ %s，现在是 %d 字节 / %s）—— 重装一次那个插件再试"
                              % (plugin_id, version, info["bytes"],
-                                info["digest"][:16], len(data), r["digest"][:16]))
+                                info["digest"][:16], len(data),
+                                r["dist"]["digest"][:16]))
         return self._ok({"id": plugin_id, "version": version,
                          "format": info["format"], "bytes": info["bytes"],
                          "digest": info["digest"],
@@ -10333,7 +10418,8 @@ def main():
             print("  %-16s %s@%s  %s%s"
                   % (s.name, s.id, s.version,
                      "缺省开" if s.default_enabled else "缺省关", note))
-            # 分发是**另一个读者**：客户端连上之后**整包一次取走**（一次 RPC）。
+            # 分发是**另一个读者**：客户端连上之后**一次取走那一份**（一次 RPC）——
+            # v0.13 阶段 4 起是只含客户端侧的那一份。
             # ★ 这里从前还写着"或者按这份清单逐份取走（N 次 RPC）"—— **那条路在
             #   v0.7 删掉了**（`op_plugin_file`，见上面"站点分发"那一段）。所以
             #   下面这几项报的仍然是"这个插件分发不了"，但**已经没有第二条路**可退。
@@ -10349,22 +10435,40 @@ def main():
                 print("                  ⚠ 对不上账了（%s）—— 刚才还是好的，"
                       "是这两步之间被换掉的吗？" % _now["code"])
                 continue
-            _idx = {f["path"]: (f["size"], f["sha256"]) for f in _now["files"]}
+            # ★★ v0.13 阶段 4 起这里有**两个不同的量**，而从前只有一个：
+            #
+            #     树（整棵）  盘上装了什么 —— **全部**文件，这是插件的身份
+            #     分发出去    客户端会收到什么 —— **只含客户端侧**（`dist`）
+            #
+            #   下面那几个上限判据看的都是**分发出去的那一份**：客户端收到的就是
+            #   那些字节，拿整棵树的数去判会把一份发得出去的插件说成发不出去。
+            #   ★ 而"内容摘要"那一行仍然报**整棵树**的：它的用处是让人拿它与作者
+            #     发布时 `packer inspect` 报的那个逐个字符比，**不能**换成
+            #     `dist.digest` —— 那两个数不一样，换了这一屏就不再回答"装上去的
+            #     是不是作者那一份"。
+            _all = _now["files"]
+            _d = _now["dist"]
+            _idx = {f["path"]: (f["size"], f["sha256"]) for f in _d["files"]}
             _total = sum(v[0] for v in _idx.values())
             _big = max([v[0] for v in _idx.values()] or [0])
-            # ★ `bytes` 是**重新打出来会有多少字节**：容器在盘上不存在了，而"分发
-            #   出去多大"这个问题仍然要答（它是一条链路约束）。
-            _pkg_bytes = _now["bytes"]
-            print("                  装出来的包 %s / %d 份文件（负载 %s）"
+            # ★ `bytes` 是**重新打出来会有多少字节**（`record_container_bytes`，
+            #   不真的打）：容器在盘上不存在了，而"分发出去多大"这个问题仍然要答
+            #   —— 它是一条链路约束（base64 之后要能装进一条应答）。
+            _pkg_bytes = _d["bytes"]
+            print("                  树        %s（%d 份 / 负载 %s）"
+                  % (s.install_dir, len(_all),
+                     human_bytes(sum(f["size"] for f in _all))))
+            print("                  分发出去  %s（只含客户端侧 %d 份 / 负载 %s）"
                   % (human_bytes(_pkg_bytes), len(_idx), human_bytes(_total)))
             # ★ 内容摘要打**全 64 位十六进制，不截断**：它是这个插件的身份（§3.4），
             #   而这一行的用处就是让人拿它与作者发布时 `packer inspect` 报的那个
             #   **逐个字符**比。"装上去的那一份是不是作者发布的那一份"，在服务器上
             #   只有这两个数能回答（那里没有源码树可对照）。
-            print("                  内容摘要 %s" % _now["digest"])
-            print("                  树        %s" % s.install_dir)
+            print("                  内容摘要  %s（整棵树）" % _now["digest"])
+            print("                  分发摘要  %s（客户端侧，四元组里的 digestClient"
+                  " —— 客户端会自己重算再与它比）" % _d["digest"])
             if _pkg_bytes > PLUGIN_PACKAGE_MAX_BYTES:
-                print("                  ⚠ 装出来的包有 %s，超过本站通报的整包上限 "
+                print("                  ⚠ 分发出去的那一份有 %s，超过本站通报的整包上限 "
                       "%s —— 客户端取不走它"
                       % (human_bytes(_pkg_bytes),
                          human_bytes(PLUGIN_PACKAGE_MAX_BYTES)))
@@ -10530,11 +10634,15 @@ def main():
             #   （`plugin_package_changed`）。自检这一屏多打一句不会让它更早被发现，
             #   却会在"我明明装好了"这一屏上多出一条与此刻无关的话。
             _pr = plugin_inspect(cfg.plugins_dir, _p.spec.id)
-            _idx = ({f["path"]: (f["size"], f["sha256"]) for f in _pr["files"]}
-                    if _pr["ok"] else {})
+            # ★ v0.13 阶段 4 起这一行报的是**要发出去的那一份**（只含客户端侧）。
+            #   标签"分发"本来就是这么写的，而从前那个数（整棵树重打成包多大）
+            #   比实际发出去的大 —— 它把客户端永远不会收到的站点侧字节也算进去了。
+            _d = _pr["dist"] if _pr["ok"] else None
+            _idx = ({f["path"]: (f["size"], f["sha256"]) for f in _d["files"]}
+                    if _d else {})
             _total = sum(v[0] for v in _idx.values())
             print("      %-11s %s / %d 份文件（负载 %s）%s"
-                  % ("分发", human_bytes(_pr["bytes"]) if _pr["ok"] else "【对不上账】",
+                  % ("分发", human_bytes(_d["bytes"]) if _d else "【对不上账】",
                      len(_idx), human_bytes(_total),
                      "" if _p.enabled else "（本站没启用它，客户端不会来取）"))
             print("      %-11s %s（+ %s）"

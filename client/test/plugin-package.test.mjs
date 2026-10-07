@@ -38,6 +38,8 @@ const BAD = JSON.parse(fs.readFileSync(`${CONF}bad.json`, 'utf8'));
 const unhex = (lines) => Buffer.from(lines.join(''), 'hex');
 const GOOD = unhex(EXPECTED.package.hex);
 const SIGNED = unhex(EXPECTED.signed.hex);
+/** ★★ 站点→客户端那一段**真正发出去**的那一份：只含客户端侧（v0.13 阶段 4）。 */
+const CLIENT_SIDE = unhex(EXPECTED.clientSide.hex);
 
 /**
  * 从**夹具里那份带签名的包**切出 `{recs, sig, sigAt}`。
@@ -422,12 +424,14 @@ test('★ unpackTo 铺出来的树与包里的记录**逐字节相同**，权限
   // ★ 权限位**进摘要**（plugins.digestOf 里有 mode），所以"铺出来的文件是 0644"
   //   不是一件风格问题：两份实现（或者一次 umask 差异）漂开的那天，同一份内容会
   //   在机器上算出两个摘要，而症状是"明明装好了却一直说内容不一样"。
+  //   ★ v0.13 阶段 4 起这里铺的是**站点真的会发的那一份**（`CLIENT_SIDE`，只含
+  //     客户端侧）—— 从前用整包，而那个形状现在根本到不了客户端。
   const os = require('node:os');
   const path = require('node:path');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-'));
-  const r = PP.parsePackage(SIGNED);
+  const r = PP.parsePackage(CLIENT_SIDE);
   assert.equal(r.ok, true);
-  const u = PP.unpackTo(r, SIGNED, dir);
+  const u = PP.unpackTo(r, CLIENT_SIDE, dir);
   assert.equal(u.ok, true, u.why);
 
   const got = P.readPluginFiles(dir);
@@ -444,6 +448,31 @@ test('★ unpackTo 铺出来的树与包里的记录**逐字节相同**，权限
   for (const f of got) {
     assert.equal(f.mode, 0o644, `★ 权限位由格式定死：${f.path} 是 ${f.mode.toString(8)}`);
   }
+});
+
+test('★★ 含站点侧的包 ⇒ unpackTo **整份拒收**（判据①：用户机器上没有 job/）', () => {
+  // ★★ v0.13 阶段 4：站点发给客户端的**只含客户端侧**，而这一条是那句话的
+  //    可执行形式，也是它的回归测试 —— 少了它，"多发的站点侧字节"只会在下一次
+  //    有人真去翻池子目录时才发现，而那时它已经躺了很久。
+  //    ★ 判据是**拒绝整份**，不是把那几份跳过：跳过会把"有人在中间塞了东西"变成
+  //      "安静地少装了几份"，而客户端手里那一份构件于是与签名说的不是同一份东西
+  //      —— 那正是最该响的时候。
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-side-'));
+  const r = PP.parsePackage(SIGNED);        // 整包：两侧都在（作者发的那一份）
+  assert.equal(r.ok, true,
+    '★ 整包本身是**合法**的 —— 拒它的是落盘这一步，不是解析器（三端的解析器都要读得动它）');
+  const u = PP.unpackTo(r, SIGNED, dir);
+  assert.equal(u.ok, false, '★ 站点侧的路径到了客户端 ⇒ 拒');
+  // ★ 要点名是**哪几份**（与"改了一棵树要报出哪一份"同源：只说"拒了"等于让人去猜）。
+  const stray = EXPECTED.sides.site.files
+    .filter((p) => !EXPECTED.clientSide.files.includes(p));
+  assert.ok(stray.length > 0, '夹具里得有站点侧的文件 —— 不然这一条什么也没测');
+  assert.ok(u.why.includes(`等 ${stray.length} 份`),
+    `要说清一共几份（${stray.length}）：${u.why}`);
+  assert.ok(u.why.includes(stray[0]), `要点名第一份（${stray[0]}）：${u.why}`);
+  assert.equal(fs.readdirSync(dir).length, 0, '★ 一个字节都不许落盘（判在写盘之前）');
 });
 
 test('★ 客户端收得下的包，必须装得下它**自己允许的最大负载**', () => {

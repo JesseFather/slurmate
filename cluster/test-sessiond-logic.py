@@ -3637,16 +3637,19 @@ exit 0
         _info = (_pk4.get(_n) or {}).get("package") or {}
         # ★ v0.13 起"盘上那一份"是**一棵树 + 一份记录表**：把这两样现对一遍账，
         #   再照记录表重打一个包 —— 报出去的三样事实必须与它相符。
+        # ★ 阶段 4 起打出来的**只含客户端侧**（`plugin_rebuild` 的默认侧），所以
+        #   比的摘要是 `dist["digest"]`（= 四元组里的 `digestClient`），不是
+        #   `digest`（整棵树那个 —— 它是插件的身份，走另一条路报）。
         _blob, _disk = mod.plugin_rebuild(cfg.plugins_dir, _spec.id)
         check("★★ op_plugins 报的 package 三样事实与**现打出来的那一份**相符（「%s」）" % _n,
               _disk["ok"] and _blob is not None
               and _info.get("format") == mod.PACKAGE_FORMAT
               and _info.get("bytes") == len(_blob)
-              and _info.get("digest") == _disk.get("digest")
+              and _info.get("digest") == _disk["dist"]["digest"]
               and _info.get("digest"),
               "%s vs ok=%s bytes=%s digest=%s"
               % (_info, _disk.get("ok"), _blob and len(_blob),
-                 _disk.get("digest")))
+                 _disk.get("dist", {}).get("digest")))
 
     _lim4 = ((_pp({"op": "plugins"}).get("data") or {}).get("limits") or {})
     check("★ limits 里多报了 package_bytes（那是**链路**约束，与负载那三个不同口径）",
@@ -3662,7 +3665,10 @@ exit 0
     #    先在最底层分辨一次，再**走一遍 op** 分辨一次（下面那一段）。
     _dg_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
                                  b'"version":"1.0.0"}' % _cs4.id.encode()),
-                 ("client/index.js", b"module.exports = {};\n")]
+                 ("client/index.js", b"module.exports = {};\n"),
+                 # ★ 站点侧那一份**必须在**：下面判据①那一条要问"发出去的那一份里
+                 #   有没有站点侧路径"，而树上本来就没有的话那条断言是**空的**。
+                 ("job/start.sh", b"start_dg() { :; }\n")]
     # ★★ 那一个"补了签名块"的包**必须用真签名**：v0.13 起站点在**每次对账时**
     #   验签（记录表里的 sha256 列本身没有认证，签名是它的解药），所以一个随手编
     #   的签名块根本装不进去、也扫不出来。用假签名测，测到的是"验签把这一份拒了"，
@@ -3724,6 +3730,31 @@ exit 0
         check("★★ op_plugin_package 发回来的字节与你照记录表现打的那一份**逐字节全等**",
               _wr["ok"] and _got == _want4 and len(_got) > 0,
               "%d vs %d 字节" % (len(_got), len(_want4 or b"")))
+
+        # ★★★ 判据①（**本版的主题**）：站点真的发出去的那一串字节里**没有站点侧路径**。
+        #
+        #   ★ 这一条**不能**再拿 `plugin_rebuild` 自己算的东西当参照物 —— 上面那条
+        #     "逐字节全等"两边用的是**同一个函数**，于是"它默认发哪一侧"写错时两边
+        #     **同向漂移、谁也看不见**。这不是理论：变异验证 M3（把 `plugin_rebuild`
+        #     的默认侧从 `"client"` 改回 `None`）跑出来正是**绿的**，而那一刻站点
+        #     真的在往用户机器上发 `job/start.sh`。
+        #   ⇒ 参照物必须是**与实现无关**的东西：这里解析的是 RPC 响应里那一串 base64。
+        _gp = mod.package_parse(_got)
+        check("★★ 发出去的那一份里**没有一条站点侧路径**"
+              "（判据①：用户机器上没有 job/）",
+              _gp["ok"] and all(mod.package_is_client_side(f["path"])
+                                for f in _gp["files"]),
+              repr([f["path"] for f in (_gp["files"] if _gp["ok"] else [])]))
+        check("★ 对照：站点**自己的树**上确实有站点侧那一份（不是「本来就没有」）",
+              any(not mod.package_is_client_side(f["path"])
+                  for f in mod.plugin_reconcile(_fx4, _cs4.id)["files"]),
+              repr([f["path"] for f in mod.plugin_reconcile(_fx4, _cs4.id)["files"]]))
+        check("★ 而它**比整包小** —— 差的就是站点侧那几份的负载与记录"
+              "（发整包的话这两个数会相等）",
+              len(_got) < mod.record_container_bytes(
+                  mod.plugin_reconcile(_fx4, _cs4.id)["record"]),
+              "%d vs 整包 %d" % (len(_got), mod.record_container_bytes(
+                  mod.plugin_reconcile(_fx4, _cs4.id)["record"])))
         check("★ 报回的 format/bytes/digest 与 op_plugins 那一轮报的**同一个值**",
               (_pd.get("format"), _pd.get("bytes"), _pd.get("digest"))
               == (_b_pkg.get("format"), _b_pkg.get("bytes"), _b_pkg.get("digest")),
@@ -3769,9 +3800,12 @@ exit 0
 
         # ── 超过整包上限：明确拒绝，**不把 2 MiB 硬塞进一条应答** ──
         #    正常部署下安装器已经拦住了这种包；这一条拦的是绕过安装器放进来的一份。
+        # ★★ 超限的那一份必须**在客户端侧**（`client/big.bin`）：判据比的是**要发出
+        #    去的那一份**（阶段 4 起只含客户端侧），放在站点侧的话它根本不会被打进
+        #    那个包，于是这一条会**静默失效** —— 绿着，而它什么也没测。
         _big_files = [("plugin.json", b'{"id":"%s","name":"dg","displayName":"x",'
                                       b'"version":"1.0.0"}' % _cs4.id.encode()),
-                      ("big.bin", b"x" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 1))]
+                      ("client/big.bin", b"x" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 1))]
         install_package(_fx4, _big_files)
         _d4._plugin_cache.clear()
         _lc4, _lk4, _ld4 = _kindof(_pp({"op": "plugin_package",
@@ -4195,6 +4229,69 @@ exit 0
           _revb != _good
           and mod.package_parse(_revb)["digest"] == _exp["digest"],
           "%r" % (_revb == _good))
+
+    # ── ★★ 阶段 4：**站点发出去的那一份**（只含客户端侧）与第四份实现的对账 ──
+    #
+    # 上面那两条对的是**整包**（作者发的那一份）。这一条对的是**站点→客户端那一段
+    # 真正发出去的字节** —— 只含客户端侧。它是本版唯一一处"**装哪几份**"的跨实现
+    # 判据：另三份实现（打包器 / 客户端 / 夹具）从来都只处理"一整棵树"，按侧筛是
+    # 这一版新加的一步，而它只写在第四份实现里。
+    #
+    # ★ 参照物是**真的打包器**打的（`generate.mjs` 里 `PACKER.buildPackage`），
+    #   不是本文件手拼的 —— 手拼的话，这一条就退化成"我跟我自己比"。
+    _cli = _unhex(_exp["clientSide"]["hex"])
+    _c = mod.package_parse(_cli)
+    check("★★ 只含客户端侧的那一份是一个**合法包**"
+          "（A.4 第 10 步③只核**包里在的那几侧**）",
+          _c["ok"], "%s %s" % (_c.get("code"), _c.get("why")))
+    if _c["ok"] and _s["ok"] and _s.get("sig"):
+        check("★ 它里面**没有一条站点侧路径** —— 判据①（用户机器上没有 job/）"
+              "在这一层的可执行形式",
+              all(mod.package_is_client_side(f["path"]) for f in _c["files"]),
+              repr([f["path"] for f in _c["files"]]))
+        check("★ 它的份数与夹具里那几条**逐条、按序**相同（筛子只有一个方向）",
+              [f["path"] for f in _c["files"]] == _exp["clientSide"]["files"],
+              repr([f["path"] for f in _c["files"]]))
+        check("★ 从它算出来的摘要 == 四元组里的 digestClient"
+              "（客户端拿到手会自己算这一个）",
+              mod.package_content_digest(_c["files"]) == _exp["clientSide"]["digest"]
+              and _exp["clientSide"]["digest"] == _exp["signed"]["digestClient"],
+              mod.package_content_digest(_c["files"]))
+        # ★ 签名块**从包里原样切出来**，不用 `_envelope_bytes` 拼回去 —— 拼回去的
+        #   话，这一条就变成"用被测对象自己当参照物"。位置：头 20 字节 + 记录表。
+        _siglen = struct.unpack_from(">I", _cli, 16)[0]
+        _tab_end = 20 + sum(2 + len(f["path"].encode("utf-8")) + 8 + 32
+                            for f in _c["files"])
+        _sigblk_c = _cli[_tab_end:_tab_end + _siglen]
+        _c_files = [{"path": f["path"], "sha256": f["sha256"],
+                     "data": _cli[f["offset"]:f["offset"] + f["size"]]}
+                    for f in _c["files"]]
+        _c_again = mod.package_build(_c_files, _sigblk_c, side="client")
+        check("★★ 第四份实现重打**只含客户端侧**的那一份 ⇒ 与打包器的字节"
+              "**逐字节全等**（本版最值钱的那条跨实现判据）",
+              _c_again == _cli,
+              "%d vs %d 字节" % (len(_c_again), len(_cli)))
+        # ★★ 而把**整棵树**的记录喂进去、让实现**自己**筛，结果必须是同一串字节 ——
+        #    这一条钉的是"**筛子只有一处**"：调用方筛一遍、实现里再筛一遍，两处
+        #    迟早会漂开，而漂开的那天症状是"少发了一份客户端侧代码"。
+        _s_files = [{"path": f["path"], "sha256": f["sha256"],
+                     "data": _signed[f["offset"]:f["offset"] + f["size"]]}
+                    for f in _s["files"]]
+        _c_from_all = mod.package_build(_s_files, _sigblk_c, side="client")
+        check("★ 把**整棵树**喂进去让实现自己筛 ⇒ 打出来的是同一串字节"
+              "（筛子只有 `package_build` 那一处）",
+              _c_from_all == _cli,
+              "%d vs %d 字节" % (len(_c_from_all), len(_cli)))
+        # ★ 对照：**同一批整棵树的记录**，不带 `side` 打出来的是**整包**（与它不一样）
+        #   —— 否则上面那两条测的就是"两边都算了同一个常量"，而不是"按侧筛对了"。
+        _c_none = mod.package_build(_s_files, _sigblk_c)
+        check("★ 对照：同一批记录不带 `side` ⇒ 打出来是**整包**，与只发的那一份"
+              "**不一样**（不然 `side` 根本没起作用）",
+              _c_none == _signed and _c_none != _cli,
+              "不打 side 的那一串与整包%s" % ("相同" if _c_none == _signed else "不同"))
+        check("★ 而它比整包**小**，小的正好是站点侧那几份的负载与记录",
+              len(_cli) < len(_signed),
+              "%d vs %d" % (len(_cli), len(_signed)))
 
     _covered = {c["code"] for c in _bad["cases"]}
     _vocab = [mod.PACKAGE_LENGTH, mod.PACKAGE_MAGIC_BAD, mod.PACKAGE_FORMAT_BAD,
@@ -4699,14 +4796,17 @@ exit 0
         # 会被读成"换了一份包"，而按 §4.2 那还是同一份构件：管理员会得出**相反**的
         # 结论。
         _want_digest = mod.plugin_reconcile(_bypass, _UID_A)["digest"]
-        _blob_b, _rb_b = mod.plugin_rebuild(_bypass, _UID_A)
+        # ★ 这里**显式要整包**（`side=None`）：与 `_want_digest`（整棵树那一个）对照
+        #   的容器是**作者发的那一份**，而作者发的从来是整包。默认值（客户端侧）是
+        #   这一版**分发**出去的那一份，两者不是一回事。
+        _blob_b, _rb_b = mod.plugin_rebuild(_bypass, _UID_A, side=None)
         _container_sha = hashlib.sha256(_blob_b or b"").hexdigest()
         check("★★ 自检报出**完整的内容摘要**（拿它去与作者报的那个逐个字符比）",
-              ("内容摘要 %s" % _want_digest) in _crun.stdout,
+              ("内容摘要  %s（整棵树）" % _want_digest) in _crun.stdout,
               repr(_crun.stdout[-400:]))
         check("★ 而它**不是**容器字节的 sha256（补一个签名块不该动这个数）",
               _want_digest != _container_sha
-              and ("内容摘要 %s" % _container_sha) not in _crun.stdout,
+              and ("内容摘要  %s" % _container_sha) not in _crun.stdout,
               "%s vs %s" % (_want_digest[:16], _container_sha[:16]))
 
         # ── ⑨b `--check-plugins` 报的分发量 ──
@@ -4730,11 +4830,17 @@ exit 0
         _trun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _tsvdir],
                                capture_output=True, text=True)
-        # ★ 那一行「分发 N 字节 / M 份文件」**必须来自包里那张记录表**（而不是磁盘上
-        #   现数一遍）：报少了运维以为这个插件很小，报多了是在吓人。
-        check("★★ 自检报出的份数就是**包里那张记录表**的份数（2 份 / 1 份）",
-              "2 份文件" in _trun.stdout and "1 份文件" in _trun.stdout,
-              repr(_trun.stdout[-300:]))
+        # ★★ 「分发出去」那一行**只数客户端侧**（v0.13 阶段 4）：带 `job/` 的那一个
+        #   与不带的那一个，分发出去的份数**一样**（都只有 `plugin.json`）。这是
+        #   "用户机器上没有站点侧代码"这句话在自检这一屏上的可见形式 —— 也就是
+        #   阶段 4 的**主题判据**（客户端池里没有 `job/`）。
+        #   ★ 而「树」那一行报的仍然是**整棵树**的份数（2 / 1），它来自记录表 ——
+        #     自检要能同时回答"装了什么"与"发什么"，两个数都得在。
+        check("★★ 「分发出去」只数客户端侧：带 job 的与不带的，份数一样（各 1 份）",
+              _trun.stdout.count("只含客户端侧 1 份") == 2
+              and "（2 份 / 负载" in _trun.stdout
+              and "（1 份 / 负载" in _trun.stdout,
+              repr(_trun.stdout[-400:]))
 
         # ── ⑩ 用法错误：一个包都没给 ──
         _rc, _out = _install([], _INSDIR)
