@@ -426,3 +426,61 @@ test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）',
     rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'],
   }).ok, true, '★ 传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');
 });
+
+// ── ★★ 自动回收：哪些**该**自动收，哪些只是"能删" ──────────────────────────
+
+test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个都不许碰', () => {
+  // ★★ 这是本版唯一会**删用户数据**的那一步的判据，而它与"界面上能不能删"
+  //    **不是**同一条：界面上可删的有三档，自动收的只有两档。
+  //
+  //    `unused` 的那一份，它的布局组**还在配置里** —— 用户可能刚建了一个空白
+  //    布局（还没有连接指过去），也可能那条连接只是暂时被切走了。下一次有连接
+  //    指过去就会读它。所以它是"此刻没人用"，**不是**"没人会用"。
+  //    ⇒ 少了这一条判据（比如写成"deletable 的全收"），用户的编辑器数据会在
+  //      一个他根本不知道的时刻被删掉，而界面上一个字都不会说。
+  const rows = [
+    { kind: 'unused', deletable: true },
+    { kind: 'orphan', deletable: true },
+    { kind: 'legacy', deletable: true },
+    { kind: 'unknown', deletable: false },
+  ];
+  const auto = rows.filter(audit.reclaimable).map((r) => r.kind);
+  assert.deepEqual(auto, ['orphan', 'legacy'],
+    '★ 自动收的只有"按当前装着的插件再也读不到"的那两档');
+
+  // ★ 反过来钉半边：`deletable` 不是这条判据的输入。一个 `unused` 的行**可删**
+  //   而**不该自动删** —— 两件事同时成立，正是这条判据存在的理由。
+  const unused = rows[0];
+  assert.equal(unused.deletable, true, '前提：它在界面上是可删的');
+  assert.equal(audit.reclaimable(unused), false, '★ 但它不该被自动收掉');
+
+  // 认不出的那一档本来就没有删除按钮，自动回收也不能碰它。
+  assert.equal(audit.reclaimable(rows[3]), false, '一份不认识的东西，删掉不是"收拾"而是"猜"');
+  // 空值不炸（`rows` 是从别处传进来的）。
+  for (const junk of [null, undefined, {}]) {
+    assert.equal(audit.reclaimable(junk), false, `${JSON.stringify(junk)} 不该算作可回收`);
+  }
+});
+
+test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原样留着', () => {
+  // ★ 上一条判的是**判据**，这一条判它接在**真算出来的行**上还成立 ——
+  //   手搓的 `{kind:'unused'}` 与 `audit()` 真产出的那一行是两回事（前者不会
+  //   因为 `expected` 那张表变了而跟着变）。
+  const ghost = '01m2jkhtzgf12n0t9cb3xvk36h@default';   // 本机没有这个插件
+  const old = '01m2jkhtzgkjbfqqtwyxmqmf2v@0.9.0';       // 老版本留下的
+  const legacy = 'slot-2';                              // 0.7 之前的分区
+  const unusedName = disk(pluginData.identityOf(cs(), LAYOUT));  // 组还在配置里 ⇒ unused
+
+  const r = run({
+    names: [ghost, old, legacy, unusedName],
+    // 连接指着**另一个**组 ⇒ `LAYOUT` 那一份没人用（但那个组还在配置里）
+    connections: [conn(OTHER_LAYOUT)],
+    layouts: layouts(LAYOUT, OTHER_LAYOUT),
+  });
+
+  const kinds = new Map(r.rows.map((x) => [x.name, x.kind]));
+  assert.equal(kinds.get(unusedName), 'unused', '前提：那一份真的落在 unused 那一档');
+  const auto = r.rows.filter(audit.reclaimable).map((x) => x.name).sort();
+  assert.deepEqual(auto, [ghost, old, legacy].sort(),
+    '★ 自动收的是孤儿与旧形状；`unused` 那一份只列不删');
+});

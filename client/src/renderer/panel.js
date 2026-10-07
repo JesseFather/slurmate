@@ -1382,7 +1382,15 @@ function renderPluginData(d) {
     box.append(el('p', 'plug-desc', d.error || '本机的插件数据没能列出来。'));
     return;
   }
-  if (!rows.length && d && d.diskChecked) {
+  // ★★ **收掉过东西的时候，这一屏不许藏。**
+  //   自动回收把孤儿清干净之后 `rows` 正好是空的 —— 而"清单里没有东西了"与
+  //   "这一次启动清掉了三份"是两件完全不同的事：只判 `rows` 的话，那一行
+  //   **永远画不出来**（删除就成了用户看不见的），而它画的正是"删的是自动化，
+  //   不是可见性"这句唯一的兑现处。★ 与账本 F35 同一个形状：算出来了、没送到。
+  const reclaimed = (d && d.reclaimed) || { count: 0, items: [], failed: [] };
+  const didReclaim = reclaimed.count > 0
+    || (Array.isArray(reclaimed.failed) && reclaimed.failed.length > 0);
+  if (!rows.length && !didReclaim && d && d.diskChecked) {
     sec.classList.add('hidden');
     return;
   }
@@ -1401,6 +1409,27 @@ function renderPluginData(d) {
       ? `本机有 ${rows.length} 份插件数据没人在用`
       : '本机的插件数据')));
   wrap.append(head);
+
+  // ★★ **这一次运行收掉了什么** —— 自动回收的留痕（`index.js` 的 `reclaimOrphans`）。
+  //   它是"删的是自动化，不是可见性"这句话唯一的兑现处，所以话要说满：几份、都是谁。
+  //   ★ "本次运行"而不是"本次启动"：那一格是**累计**的，而回收跟着对账走 ——
+  //     对账今天只在打开客户端时跑一次，但这句话不该依赖那件事（见 `lastReclaim`）。
+  //   ★ 它排在下面那段说明**前面**：这一段说的是"刚刚发生过的事"，而下面那段说的是
+  //     "下面这份清单是干什么的"。
+  if (reclaimed.count > 0) {
+    const who = (reclaimed.items || []).map((i) => i.label).filter(Boolean);
+    wrap.append(el('p', 'plug-desc',
+      `本次运行清掉了 ${reclaimed.count} 份没人管的数据`
+      + (who.length ? `（${who.join('；')}）` : '')
+      + '。它们按现在装着的插件**再也读不到**了 —— 那个插件卸载了、那个布局组删了、'
+      + '或者插件换了共享组 —— 留着只会越攒越多，所以对账时自动收掉了。'));
+  }
+  if (Array.isArray(reclaimed.failed) && reclaimed.failed.length) {
+    wrap.append(el('p', 'plug-desc',
+      `★ 还有 ${reclaimed.failed.length} 份没能清掉`
+      + `（${reclaimed.failed.map((f) => `${f.name}：${f.error}`).join('；')}）。`
+      + '它们还在盘上，下一次对账会再试一次。'));
+  }
 
   if (!d || !d.diskChecked) {
     wrap.append(el('p', 'plug-desc', (d && d.why)

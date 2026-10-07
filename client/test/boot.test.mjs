@@ -3157,9 +3157,12 @@ test('★★ `app:pluginData` 的回包里带着界面要读的那几个字段',
     '`allUnknown` 必须是一个算出来的布尔，不是"缺了这个键"');
 
   // ★ 另一半（**值**对不对）在 `plugin-data-audit.test.mjs` 里；这里够不到它：
-  //   开发者模式下**不查磁盘** ⇒ `diskChecked:false`、`rows:[]`、`allUnknown` 恒 `false`。
-  //   所以这一条只保证"送到"，不保证"送对了"。
-  assert.equal(d.diskChecked, false, '前提：开发者模式不查磁盘（值那一半因此测不到）');
+  //   `diskChecked` 要求**两根都查成了**，而开发者模式下**分区那一根不查**
+  //   （它与真实那一份是同一棵树，照沙箱配置去认会毁掉真实的数据）⇒ `names` 恒
+  //   `null`、`diskChecked` 恒 `false`。所以这一条只保证"送到"，不保证"送对了"。
+  //   ★ 插件数据那一根**是查的**（它在沙箱里，与沙箱配置配套）—— 判据拆成两根
+  //     各判的理由见 `auditPluginData` 里那段。
+  assert.equal(d.diskChecked, false, '前提：分区那一根在开发者模式下不查');
 });
 
 test('★ 删除之后的回包与 `app:pluginData` **同一个形状**', async () => {
@@ -3675,6 +3678,115 @@ test('★★ 对账的 `held` 必须**两个根都收**（只收分区那一半�
     '★★ 插件数据目录由**会话**持有 —— 不收它，一个没有界面的插件（以及**临时实例**）'
     + '活着的时候那份数据就能被面板删掉');
 });
+
+test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用着的那一份一个字节都不动**',
+  async (t) => {
+    // ★★ 这是本版唯一会**删用户数据**的一步，而这一条钉的是它两个方向：
+    //    该清的清了（不然孤儿越攒越多），不该碰的一个字节没动（不然用户正在写的
+    //    那份数据就没了，而症状只是"那个页面忽然坏了"）。
+    //
+    // ★ 为什么造得出这个现场：**把那个插件从池里撤掉** —— 于是对账那张"该有的"
+    //   表（照**当前注册表**算）里没有这个身份了，而盘上那一份正被一条活会话写着。
+    //   真机上这条路的两个走法都落在同一格上：用户卸掉了那个版本，或者作者升了
+    //   版本而新版**改掉了共享组**（第二段的名字就此变了）。
+    //   ⇒ 那种处境下唯一还护着它的就是 `held`，所以 `held` 必须认得出
+    //     **一条活会话用过的每一个落点**。
+    t.after(() => { Module._load = origLoad; });
+    const idx = require('../src/main/index.js');
+    const P = require('../src/main/plugin-data.js');
+    const root = idx._test.getPluginDataRoot();
+    await openUpTo(idx, 2);
+    await connectDemo(idx);
+
+    // ── 一份**真的**没人认领的孤儿：一个本机不存在的插件留下的目录 ──
+    //    第二段取 `default`（不写 `data` 的插件在 0.12 之后就是这个名字）。
+    const ghost = `${mintId().toLowerCase()}@${P.DEFAULT_GROUP}`;
+    fs.mkdirSync(path.join(root, ghost), { recursive: true });
+    fs.writeFileSync(path.join(root, ghost, 'marker'), 'x');
+
+    // ── 一条**活着**的会话，它正用着一份目录（中转站：身份里没有实例段）──
+    await startRunning(idx, 'sshd');
+    const liveName = diskNameOf(idx, 'sshd');
+    const liveDir = path.join(root, liveName);
+    fs.mkdirSync(liveDir, { recursive: true });
+    fs.writeFileSync(path.join(liveDir, 'marker'), 'x');
+
+    setSitePlugins(['code-server']);
+    idx._test.getRegistry().reload();
+    t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
+    assert.equal(idx._test.getRegistry().list().some((p) => p.name === 'sshd'), false,
+      '夹具前提：注册表真的算不出它了 —— 否则这一条测的是别的东西');
+
+    // ── 对账（`app:pluginData` 就是那个时机：客户端启动时拉一次）──
+    const d = await invoke('app:pluginData');
+    assert.equal(d.ok, true, JSON.stringify(d));
+
+    // ★ 该清的：那份孤儿没了，而且**留下了一条界面读得到的记录**。
+    assert.equal(fs.existsSync(path.join(root, ghost)), false,
+      '★ 没人认领的孤儿要清掉 —— 不清的话它永远不会有人管');
+    assert.ok(d.reclaimed && d.reclaimed.count >= 1,
+      `★ 清掉了几份必须回给界面（"删的是自动化，不是可见性"）：${JSON.stringify(d.reclaimed)}`);
+    assert.ok((d.reclaimed.items || []).some((i) => i.name === ghost),
+      `★ 而且要说得出清掉的是哪一份：${JSON.stringify(d.reclaimed)}`);
+
+    // ★★ 承重格：活会话那一份**一个字节都不许动**。
+    assert.equal(fs.existsSync(path.join(liveDir, 'marker')), true,
+      '★★ 一条活会话正用着的目录被删了 —— 它写的数据就这么没了，而用户只看到'
+      + '"那个页面忽然坏了"。它已经不在"该有的"那张表里（插件从池里撤了），'
+      + '唯一还护着它的就是 `held`。');
+    assert.equal((d.reclaimed.items || []).some((i) => i.name === liveName), false,
+      '★ 那一份根本不该进"清掉了"的名单');
+    assert.equal(d.rows.some((r) => r.name === liveName), false,
+      '★★ 也不该出现在"没人用"的清单里 —— 否则界面上同样会给它一个删除按钮');
+
+    await invoke('app:disconnect');
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
+
+test('★★ 会话换过布局组之后，**两个**落点都护着 —— 被交给过的那个与现在这个',
+  async (t) => {
+    // ★ 这条钉的是 `liveDataDirs()` 那两个来源**各自**是承重的（少一个都红）：
+    //   · **被交给过的**（认领）：插件进程手里攥着的是它那一次拿到的那个路径 ——
+    //     我们这边算出"它现在应该在别处"，不等于那个进程不在旧路径上写；
+    //   · **现在这个**（推论）：会话刚被挪到另一个实例键、插件还没来得及问
+    //     `ctx.dataDir()` 的那一小段窗口。
+    //
+    // ★ 造法走的是**那个状态本身**：把这条会话的实例键换掉
+    //   （`controller.setLayout` —— `relisten` 成功之后做的也正是这一句，见
+    //   `session.js`）。刻意**不**走 `relisten` 那一趟：它要真的再绑一个端口，
+    //   而这条用例判的是 `held` 里有没有那两个名字，与端口毫无关系 ——
+    //   绑了反而在这台机器上留一根线，把后面某条用例的端口撞掉。
+    t.after(() => { Module._load = origLoad; });
+    const idx = require('../src/main/index.js');
+    await openUpTo(idx, 1);
+    await connectDemo(idx);
+
+    const a = await startRunning(idx, 'code-server');
+    const instA = a.ctl.layoutId;
+    assert.ok(instA, '前提：这条会话落在一个布局组上');
+
+    const instB = 'ldeadbeefdead';
+    a.ctl.setLayout(instB);
+    assert.equal(a.ctl.layoutId, instB, '前提：这条会话的实例键真的换了');
+
+    const live = idx._test.getLiveDataDirs();
+    assert.ok(live.includes(diskNameOf(idx, 'code-server', instA)),
+      `★★ 会话**被交给过**的那个落点要护着（它可能还在那儿写）：`
+      + `${JSON.stringify(live)}`);
+    assert.ok(live.includes(diskNameOf(idx, 'code-server', instB)),
+      `★★ 会话**现在**这个落点也要护着：${JSON.stringify(live)}`);
+
+    // ★ 而不相干的那一份照样不在 —— 少了这一条，一个"把什么都报一遍"的实现
+    //   也能让上面两条通过，而它会让**所有**垃圾都收不掉。
+    assert.equal(live.includes(`${'0'.repeat(26)}@editor@lffffffffffff`), false,
+      '没被任何活会话碰过的名字不该在 `held` 里');
+
+    await invoke('app:stop', { slot: a.slot });
+    await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
 
 test('★★ 重连：N 条会话各拿一个实例，不会只剩第一条', async (t) => {
   t.after(() => { Module._load = origLoad; });

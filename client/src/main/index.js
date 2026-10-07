@@ -218,6 +218,25 @@ let pendingConsent = [];
 let connectGeneration = 0;
 
 /**
+ * 这一次运行里，对账**收掉了哪些没人管的数据**（`reclaimOrphans` 维护的那一格）。
+ *
+ * ★ 它是一格**模块状态**而不是回包里现算的一个值，有两个理由：
+ *   · 两个处理器都要给出它 —— `app:pluginData` 是产生它的那一次，而
+ *     `app:deletePluginData` 要用它**重画同一块**（回包形状必须逐字相同，见那两处
+ *     的注释与 `boot.test.mjs` 里那条按 `panel.js` 现读字段的用例）；
+ *   · ★ 它是**累计**的（`count` / `items` 只增不减）。只报"最近一次"的话，
+ *     用户手动删掉一份、界面重画一次，那一行就凭空消失了 —— 而它说的是
+ *     "这一次运行发生过什么"，与用户刚做的动作无关。
+ *
+ * ★ `failed` 是**例外，它只报最近一次**：那些东西**现在还在盘上**，是一件当前状态
+ *   而不是一件发生过的事（累计的话同一份会每轮重复出现一次）。这条不对称是故意的。
+ *
+ * ★ 它**不落盘**：客户端没有日志文件，"留痕"的落点就是面板上那一行。跨重启的那
+ *   部分由守护进程那边的日志去管，客户端这一侧不做第二份状态。
+ */
+let lastReclaim = { count: 0, items: [], failed: [] };
+
+/**
  * 这台机器没有凭据库时，密钥只能留在内存里 —— 按 id 记着。
  *
  * 少了它，开发者模式（测试桩里 safeStorage 一律不可用）下每连一次就会换一把钥匙，
@@ -1668,7 +1687,9 @@ function pluginDataRoot() {
 }
 
 /**
- * 本机插件数据的对账：**谁在用、还剩几份**。只读，不改任何东西。
+ * 本机插件数据的对账：**谁在用、还剩几份**。★ 这个函数自己**只读**，不改任何东西 ——
+ * 动手删的是它的两个调用方：`reclaimOrphans()`（自动，只收没人管的那一档）与
+ * `app:deletePluginData`（用户点的，那一档由 `deletionVerdict` 判）。
  *
  * ★ **两个根一起查**：Electron 的存储分区，以及基座给插件的数据目录。一份身份可能
  *   在两个根下各有一半（浏览器攒的那半 + 插件自己写的那半），所以行由两个根的名字
@@ -1686,23 +1707,32 @@ function auditPluginData() {
   let why = pr.why || null;
   let dataNames = null;
   let dataWhy = null;
+  // ── ★★ 两根**分别判**，因为它们的性质不同 ──────────────────────────────────
+  //
+  //   · **分区根**（`Electron 的 sessionData/Partitions`）在开发者模式下与真实那一份
+  //     是**同一棵树**（它不由沙箱分岔），而配置是沙箱的 ⇒ 照沙箱的布局组去认，
+  //     真实的数据会整片看起来像孤儿，而删掉它们就是毁掉真实的那一份。
+  //     ⇒ 这一根在开发者模式下**不查**。
+  //   · **插件数据根**由 `cfgDir` 算出来（见 `pluginDataRoot`），开发者模式下
+  //     **就是沙箱里那一份** ⇒ 它与沙箱配置是配套的，照它认**是对的**。
+  //
+  // ★ 从前这里是"开发者模式下一根都不查"（一句话盖住两根）。那句话的**理由**只
+  //   对分区根成立，而代价落在数据根上：沙箱里攒的孤儿永远没人收，更要紧的是
+  //   **自动回收那条路在本机一次都跑不到**（`rows` 恒空 ⇒ 判据①没有能红的用例）。
+  //   ⇒ 拆成两根各判之后，那一半的行为在本机是真跑得到的。
   if (dev.developerMode) {
-    const sandboxWhy = '开发者模式不查磁盘：这里用的是一份沙箱配置，它里面的布局组 id 与'
-      + '真实那一份对不上 —— 照它去认，真实那一份数据会整片看起来像孤儿，而删掉它们'
-      + '就是毁掉真实的那一份。';
-    why = sandboxWhy;
-    dataWhy = sandboxWhy;
-  } else {
-    if (pr.root) {
-      const r = dataAudit.listDirs(pr.root);
-      names = r.names;
-      why = r.why || why;
-    }
-    if (dataRoot) {
-      const r = dataAudit.listDirs(dataRoot);
-      dataNames = r.names;
-      dataWhy = r.why;
-    }
+    why = '开发者模式不查这一根：它与真实那一份是同一棵树（分区目录不由沙箱分岔），'
+      + '而这里用的是一份沙箱配置 —— 照它去认，真实那一份数据会整片看起来像孤儿，'
+      + '而删掉它们就是毁掉真实的那一份。';
+  } else if (pr.root) {
+    const r = dataAudit.listDirs(pr.root);
+    names = r.names;
+    why = r.why || why;
+  }
+  if (dataRoot) {
+    const r = dataAudit.listDirs(dataRoot);
+    dataNames = r.names;
+    dataWhy = r.why;
   }
   return {
     ...dataAudit.audit({
@@ -1721,6 +1751,53 @@ function auditPluginData() {
     // ★ 两根都给出去：删除要按行的 `places` 分派，而它需要知道每一根在哪。
     roots: { partition: pr.root, data: dataRoot },
   };
+}
+
+/**
+ * 把**没人认领的**孤儿收掉 —— ★ 本版唯一会删用户数据的一步。
+ *
+ * 判据三层，缺一不可（前两层在 `plugin-data-audit.js`，第三层是这里的 `held`）：
+ *
+ *     磁盘上有 ∖ 当前注册表算得出 ∖ **没有任何活会话认领**
+ *
+ * ★ 只收 `reclaimable` 那一档（`orphan` / `legacy`）—— **不是**"界面上可删的全删"：
+ *   `unused` 的那个布局组还在配置里，下一次有连接指过去就会读它（见那个函数的注释）。
+ *
+ * ★ 时机与对账**同一次**（`app:pluginData`）。对账本身就是"打开客户端时跑一次"
+ *   （保留 ⑪），所以这条判据**没有多出一个时机、也没有多出一份状态**。
+ *   ★ 次序是承重的：**先收、再对账**。反过来的话，回给界面的 `rows` 里还列着刚刚
+ *   被收掉的那些，用户点一下「删掉这一份」会拿到一句"它已经不在清单里了"。
+ *
+ * ★ **删的是自动化，不是可见性**：这份记录一路送到面板上（"本次启动清掉了 N 份
+ *   没人管的数据"）。用户看不见的删除，与"数据自己消失了"是同一件事 —— 这正是
+ *   账本 F35 那个形状的另一面。
+ *
+ * ★ 清不掉的那些**如实带回去**（`failed`），不当成功：`removeDirChecked` 复核过
+ *   "它真的不在了"，而报成功却还在的话，下一次对账会把同一行再列出来。
+ *
+ * @returns {Promise<{count: number, items: Array<{name, label}>,
+ *                    failed: Array<{name, label, error}>}>}
+ *          累计到这一次运行上（见 `lastReclaim` 那段）
+ */
+async function reclaimOrphans() {
+  const report = auditPluginData();
+  const items = [];
+  const failed = [];
+  for (const row of report.rows.filter(dataAudit.reclaimable)) {
+    // 串行：一份一份地删。并行没有收益（一轮通常只有个位数），而串行让失败停在
+    // **那一份**上，`failed` 里的次序也就是盘上的次序。
+    const r = await clearOneRow(row, report.roots);
+    if (r.ok) items.push({ name: row.name, label: row.label });
+    else failed.push({ name: row.name, label: row.label, error: r.error });
+  }
+  // ★ 累加到"这一次运行"上（`count` / `items`），而 `failed` 是**覆盖**（只报
+  //   最近一次仍在盘上的那些）—— 两条不同的意思，见 `lastReclaim` 那段。
+  lastReclaim = {
+    count: lastReclaim.count + items.length,
+    items: [...lastReclaim.items, ...items],
+    failed,
+  };
+  return lastReclaim;
 }
 
 /**
@@ -1943,27 +2020,75 @@ function livePartitions() {
  *   · 分区是**窗口**持有的（构造 WebContentsView 时定下来），所以那里问的是
  *     "哪块视图显示着哪个分区"；
  *   · 插件数据目录**不由窗口持有** —— 它由 `ctx.dataDir()` 现算，唯一的主人是
- *     那条会话。所以这里必须问"哪条**活会话**落在哪个布局组上"。
- *   拿前者当后者用会**静默失效**：一个没有界面的插件（`hasInstance` 却没有
- *   `surface`）在窗口里没有位置，于是它正在用的那份目录会被当成没人用的。
+ *     那条会话。拿前者当后者用会**静默失效**：一个没有界面的插件（有实例段却
+ *     没有 `surface`）在窗口里没有位置，于是它正在用的那份目录会被当成没人用的。
  *
- * ★ 少了它的症状也是**静默**的：回收一个组时把一条正在跑的会话脚下那份数据删掉
- *   （`ssh slurmate` 忽然认证失败、编辑器状态没了），而用户只点过"换布局组"或
- *   "删连接"。这条路径**今天够得着**：
+ * ★★ **一条活会话要报**两个**落点：它**被交给过**的每一个，以及**现在**这一个。**
+ *   两者不是同一件事，各有一条自己的理由，缺一条都会删掉活数据。
+ *
+ *   **① 被交给过的（认领）—— 这是事实。** 一条会话一生里会被交给若干个目录
+ *   （`ctx.dataDir()` 每次现算），而**插件进程手里攥着的是它那一次拿到的那个路径**：
+ *   框架这边算出"它现在应该在别处"，不等于那个进程不在旧路径上写。所以"这条会话
+ *   被交给过哪些落点"只能**记下来**，算不出来。
+ *
+ *   **② 现在这一个 —— 这是推论。** 会话刚被挪到另一个实例键（`relisten`）、而
+ *   插件还没来得及调 `ctx.dataDir()` 时，新那个落点已经被交出去了吗？还没有 ——
+ *   但它下一秒就会有，而**空目录对插件是一个有定义的状态**（它自己按需建）。
+ *   ★ 这一条还有第二个作用：**没有实例段的那些插件**（`concurrent: false`，sshd
+ *   就是）照样有一个目录（`<id>@<组>`）。从前这里有一道
+ *   `if (!hasInstance(p)) continue` 的守卫把它们**整个跳过**，而它们在"该有的"那张
+ *   表里的那一格只靠这个身份撑着 —— 于是插件一离开注册表（用户卸了那个版本、
+ *   或者作者升了版本而新版改掉了共享组），**一条正在跑的会话脚下的那份数据就没
+ *   任何东西护着了**。那不是"漏删"，那是把用户正在写的钥匙与 ssh 配置删掉。
+ *
+ * ★ **只增不减**：一条会话用过的落点只增不减，所以护着的范围只会变大。方向是
+ *   故意的 —— **多护一份的代价是它晚一轮被收掉，漏护一份的代价是删掉用户正在
+ *   写的数据**。晚收的那一份会在那条会话结束之后的某一次对账里被 `reclaimOrphans`
+ *   收走（它那时才真的没人认领了）。
+ *
+ * ★ 少了它的症状是**静默**的：回收一个组、或者一次对账，把一条正在跑的会话脚下
+ *   那份数据删掉（`ssh slurmate` 忽然认证失败、编辑器状态没了），而用户只点过
+ *   "换布局组"或"删连接"。这条路径**今天够得着**：
  *     ① 会话跑在 C1 的组上 → ② 把活跃连接切成 C2（**不动引用计数、不停会话**）
  *     → ③ 从 C1 改布局组：`isActive` 是假、不走 relisten，而 C1 原来那个组
  *     引用计数归零、被回收。
+ *
+ * ★ 它**够不着**的那一格：会话记录已经收了（`occupied` 为假）而它的插件进程还
+ *   活着 —— 今天不存在（`stopAllSessions` 之后紧接着就是 `app.exit(0)`）。
  */
 function liveDataDirs() {
   const out = new Set();
   for (const rec of sessions.values()) {
     if (!occupied(rec.slot) || !rec.controller) continue;
     const p = rec.plugin;
-    if (!p || !pluginData.hasInstance(p) || !rec.controller.layoutId) continue;
+    if (!p) continue;                    // 认不出的服务：它没有插件，也就没有目录
+    // ① 事实：这条会话**被交给过**的那些落点（起点那一次，以及每一次 dataDir()）。
+    for (const name of rec.claims || []) out.add(name);
+    // ② 推论：现在这一刻按同样的输入算出来的那一个。★ 拿不到实例键时**只跳过它**
+    //    （① 已经在上面收过了）—— 那一条会话连 `ctx.dataDir()` 都调不通。
+    if (pluginData.hasInstance(p) && !rec.controller.layoutId) continue;
     out.add(pluginData.dataDirNameOf(
-      pluginData.identityOf(p, rec.controller.layoutId)));
+      pluginData.identityOf(p, rec.controller.layoutId || undefined)));
   }
   return out;
+}
+
+/**
+ * 把**这一条会话此刻的**数据落点记下来（认领）。
+ *
+ * ★ 算的是**同一个表达式** `ctx.dataDir()` 用的那一个（`dataDirNameOf(identityOf(…))`）
+ *   —— 分开算的话，"护着的"与"交出去的"会漂开，而漂开的症状正是这条判据要防的
+ *   那件事（护了个寂寞）。
+ *
+ * ★ 有实例段的插件**必须**拿得到实例（清单校验要求 `concurrent ⇒ layout`，而布局组
+ *   就是那个实例）；真拿不到时**不记**，也不抛 —— 那一条会话连 `ctx.dataDir()` 都
+ *   调不通，它的下场由那一次的抛去说，不该在会话刚建出来时就把它拦下。
+ */
+function claimDataDir(rec, plugin, layoutId) {
+  if (!rec || !rec.claims || !plugin) return;
+  if (pluginData.hasInstance(plugin) && !layoutId) return;
+  rec.claims.add(pluginData.dataDirNameOf(
+    pluginData.identityOf(plugin, layoutId || undefined)));
 }
 
 /**
@@ -2124,8 +2249,12 @@ async function startSession(resources, serviceKind) {
   // 上一个已经结束的那个记录该走了（它是给界面看"已结束"用的，新的一轮开始了）。
   reapSessions();
 
+  // ★ `claims` = **这条会话用过的插件数据落点**（认领，见 `liveDataDirs` 那段）。
+  //   它随这条记录生、随这条记录死 —— 记录一收，会话的插件进程也就没了，
+  //   那些目录从那一刻起是真的没人用了。
   const rec = { slot, plugin, pluginWhy: null, controller: null,
-                connectionId: conn ? conn.id : null };
+                connectionId: conn ? conn.id : null, claims: new Set() };
+  claimDataDir(rec, plugin, layoutId);
 
   // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
   //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会**复用**那个
@@ -2809,8 +2938,15 @@ function pluginContext(rec) {
       if (!root) {
         throw new Error('还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。');
       }
-      return path.join(root, pluginData.dataDirNameOf(
-        pluginData.identityOf(plugin, rec.controller && rec.controller.layoutId)));
+      const name = pluginData.dataDirNameOf(
+        pluginData.identityOf(plugin, rec.controller && rec.controller.layoutId));
+      // ★★ **认领的第二个写点**：目录是在这里交出去的，所以"这条会话用过哪些落点"
+      //    必须在这里长。★ 少了这一行，`relisten` 把会话挪到另一个组之后**新**那个
+      //    目录就没人护 —— 而它正是插件马上要写的那一份（见 `liveDataDirs` 那段）。
+      //    ★ 排在 `path.join` 之前没有讲究：这一行**不会**抛（上面那个表达式已经
+      //    算出来了），抛的是 `identityOf` 自己 —— 而它抛的时候这里根本走不到。
+      if (rec.claims) rec.claims.add(name);
+      return path.join(root, name);
     },
     /**
      * 自动登录。契约由**框架**从当前插件自己的清单里取，不由插件传进来 ——
@@ -3233,7 +3369,11 @@ async function reattachOne(s) {
   }
 
   const rec = { slot, plugin, pluginWhy: why, controller: null,
-                connectionId: conn ? conn.id : null };
+                connectionId: conn ? conn.id : null, claims: new Set() };
+  // ★ 接上来的那一条也要认领，理由与 `startSession` 那一处逐字相同：它的插件进程
+  //   是我们**重启之前**起的，而它正在写的那份目录，按当前输入可能已经算不出名字
+  //   （`tryReattach` 走的正是"这一次启动"—— 上一次运行里的插件版本可能已经不在了）。
+  claimDataDir(rec, plugin, layoutId);
   rec.controller = new SessionController({
     backend, layoutId,
     // 同上（startSession 那处）：只有**没有布局组**的会话要报实际端口。
@@ -3528,8 +3668,19 @@ function registerIpc() {
   // ── 本机的插件数据 ──
   //
   // 与 `app:bootstrap` 分开的**一次单独的对账**（理由见 auditPluginData 的注释）。
-  // 只读：它不清理、不回收，只回答"本机还剩几份、哪一份没人用"。
+  //
+  // ★★ **这一次对账顺手把孤儿收掉**（`reclaimOrphans` 那段）—— 从前这里写着
+  //    "只读：它不清理、不回收"，而那个形状在"没人管的数据越攒越多"这件事上没有
+  //    出路。收起它们的那一档与"界面上可删的"**不是**同一个集合（见
+  //    `plugin-data-audit.js` 的 `reclaimable`）：`unused` 那一档一个都不碰。
+  //
+  // ★ 时机就是**对账本身**：界面在首屏之后立刻拉一次（`panel.js` 的 init），而它
+  //   一次开机只发生一次（保留 ⑪）。所以"客户端启动时对一次账"这句话没有变，
+  //   变的只是这一次对账**会动手**了。
+  //   ★ 多拉几次也无害（收掉了的就不会再被收，`lastReclaim` 只增不减），所以这一
+  //     条不需要自己去数"第几次" —— 那会是一份与事实无关的状态。
   send('app:pluginData', async () => {
+    await reclaimOrphans();
     const a = auditPluginData();
     // ★★ 回包的形状**照界面读的那几个字段逐字给**（`panel.js` 的 `renderPluginData`）
     //   —— 少给一个不会红任何东西：界面读到 `undefined`，而 `Boolean(undefined)` 是
@@ -3540,6 +3691,9 @@ function registerIpc() {
     return {
       ok: true, rows: a.rows, diskChecked: a.diskChecked,
       allUnknown: a.allUnknown, why: a.why,
+      // ★ 这一次收掉了什么。界面读它、画一行（`panel.js` 的 `renderPluginData`）——
+      //   少了它，删除就是**用户看不见的**，而那是这条律里唯一不能松的一半。
+      reclaimed: lastReclaim,
     };
   });
 
@@ -3573,6 +3727,10 @@ function registerIpc() {
       ok: true, rows: after.rows, diskChecked: after.diskChecked,
       allUnknown: after.allUnknown, why: after.why,
       label: row.label,
+      // ★ 与 `app:pluginData` 逐字同一个字段（上面那条用例按 `panel.js` 现读的
+      //   字段逐个核）。★ 给的是**这一次运行累计**的结果，不是这一次删除的 ——
+      //   用户接着删一份，不该把"对账收掉了什么"那句话擦掉。
+      reclaimed: lastReclaim,
     };
   });
 
@@ -4433,5 +4591,14 @@ module.exports = {
      *   是第三件事 —— 少了它，一条"回收时只删了磁盘、没删注册表"的实现会全绿。
      */
     getTempLayouts: () => tempLayouts,
+    /**
+     * 对账的 `held` 里**会话那一半**（`liveDataDirs()` 现在报的那些目录名）。
+     *
+     * ★ 用例要断言的是"一条活会话正用着的那份数据**在护着**"，而那件事在开发者
+     *   模式下**没有别的观测面**：`app:pluginData` 那一屏里分区根不查，而
+     *   "护没护住"恰恰是"它有没有出现在那一屏里"的另一面 —— 隔着两层（根没查、
+     *   行又被滤过）判不出来。这一格给的是**判据本身**。
+     */
+    getLiveDataDirs: () => [...liveDataDirs()],
   },
 };
