@@ -403,7 +403,7 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
 
 2. **登录成败只看 cookie jar，不看 HTTP 状态码。**
    网页表单登录这一类协议里，口令错误时返回 **200** 且没有 `Set-Cookie` 是常见形态
-   （code-server 4.135.0 实测如此）。`if (status === 200)` 会在口令错时报成功。
+   （某些服务实测如此）。`if (status === 200)` 会在口令错时报成功。
    见 `weblogin.js`。
 
 3. **`goodbye` 返回 `ok:true` 不代表作业被取消了。**
@@ -439,7 +439,8 @@ ssh -T -p 10100 user@<登录节点> -- "/bin/bash -c '/usr/local/bin/slurmate rp
 验的就不是客户端真正发的那个了。
 
 请求体走 stdin，所以命令行是编译期常量 —— 这既是防注入，也是穿过登录节点上
-`codeserver-guard`（`ForceCommand`）的必要条件：命令串里不能出现 `code-server` 字面量。
+`ForceCommand` 守卫的必要条件：某些集群的守卫只放行白名单里的命令名，而固定 argv
+天然满足。
 
 **为什么显式包一层 `/bin/bash -c`**：sshd 执行 exec 请求用的是登录 shell
 （`$SHELL -c "…"`，值来自 /etc/passwd，HPC 上常是 zsh）。把解释器钉死成 bash，

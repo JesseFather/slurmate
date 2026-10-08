@@ -9183,6 +9183,12 @@ exit 0
     # ★★ 文档里那个数必须与 `GLOBAL_KEYS` 一致。它**本来就漂过一次**：写着
     #    「一共 13 个」而实际是 14 —— 一个没人验的数，迟早会变成一句错话，
     #    而"写进 conf 会被拒绝启动"的那些键正是靠这一节才找得到的。
+    #
+    # ★★ **v0.14 阶段 2：从"比个数"升级成"比集合"。** 个数相同而**键名**不同是
+    #    过得去的，而那正是这张表唯一能漂的方式 —— 凭空多一行、或把一行换成另一个
+    #    键名，只要行数不变，从前一条都不会红。（这条边界是阶段 1 的一次**等价变异**
+    #    划出来的：在表里加一行，套件干净地绿。）现在比的是**集合**：多一个、少一个、
+    #    写错一个名字，都红。
     _cn_at = _cfgdoc_src.find("站点通用键。一共 ")
     _cn_num = int(_cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0]) \
         if _cn_at >= 0 and _cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0].isdigit() \
@@ -9190,6 +9196,26 @@ exit 0
     check("★★ docs/CONFIGURATION.md 说「一共 N 个」的 N **等于** GLOBAL_KEYS 的个数",
           _cn_num == len(mod.GLOBAL_KEYS),
           "文档说 %s 个，实际 %d 个" % (_cn_num, len(mod.GLOBAL_KEYS)))
+    # ★ 而那个数对不对只是**一半**：个数对了而键名不对的表，读起来一样顺，
+    #   而"写进 conf 会被拒绝启动"的判据就错了。抽的是〈站点通用键〉那一节里
+    #   每张表的**第一格**（一行里可以列好几个键，`sinfo` / `sshare` / `sacct`
+    #   就是一行），取里面所有的反引号串 —— 表头与别的表第一格是中文，抓不到。
+    _doc_keys, _in_sec = set(), False
+    for _ln in _cfgdoc_src.splitlines():
+        if _ln.startswith("## 一、站点通用键"):
+            _in_sec = True
+            continue
+        if _in_sec and _ln.startswith("## "):
+            break
+        if _in_sec and _ln.startswith("| `"):
+            _doc_keys |= set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`",
+                                        _ln.split("|")[1]))
+    check("★★ 而那张表里列的键**正好就是** GLOBAL_KEYS（不是「个数相同」就够 ——"
+          "凭空多一行、或把一行换成别的键名，从前一条都不红）",
+          _doc_keys == set(mod.GLOBAL_KEYS),
+          "文档多出 %s；文档少了 %s" % (
+              sorted(_doc_keys - set(mod.GLOBAL_KEYS)),
+              sorted(set(mod.GLOBAL_KEYS) - _doc_keys)))
     check("★★ 三个新命令在配置白名单里（不在的话，写进 conf 会让守护进程拒绝启动）",
           all(k in mod.GLOBAL_KEYS for k in ("sinfo", "sshare", "sacct")),
           str(sorted(mod.GLOBAL_KEYS)))

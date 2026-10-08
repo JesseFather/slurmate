@@ -6,13 +6,13 @@
 > 不需要读本仓库的任何一行代码。
 > 这一份 README 讲**怎么做**，那一份讲**什么是不合规的**。
 
-**插件是独立项目。** 这个目录里放着两个现成的，但基座并不依赖它们 —— 一个插件
-都没有是**合法状态**，基座照常启动、照常工作，只是没有可提交的服务。
+**插件是独立项目。** 这个目录里放着两棵**开发样例**树，但基座并不依赖它们 ——
+一个插件都没有是**合法状态**，基座照常启动、照常工作，只是没有可提交的服务。
 
 ```
 plugins/
-  code-server/   浏览器里的 VS Code
-  sshd/          作业内的用户态 ssh（原生 VS Code Remote-SSH / codex 用）
+  <插件源码树>/   两棵：一个网页 IDE，一个作业内的用户态 ssh（给原生 VS Code
+                  Remote-SSH / codex 这类要求 ssh 连接的工具用）
 ```
 
 ---
@@ -116,8 +116,8 @@ sudo slurmate plugin install --from DIR
 需要改配置文件（它自己那份由安装器写出来）。★ **而整个过程不重启守护进程** ——
 装完它自己发一次重载信号，正在跑的会话一条都不受影响。
 
-★ **`plugins/code-server` 与 `plugins/sshd` 是两棵插件源码树，不是"基座自带的插件"
-—— 基座两端都不带任何插件。** 它们是**开发样例**（最早做"基座与插件对齐"时用的），
+★ **这个目录里那两棵树是插件源码树，不是"基座自带的插件" —— 基座两端都不带任何
+插件。** 它们是**开发样例**（最早做"基座与插件对齐"时用的），
 将来**像普通插件一样单独开发**。所以它们没有 `.splug` 是**正常状态**，不是一处欠着的
 成品。
 
@@ -175,19 +175,22 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 
 ## `plugin.json`
 
+下面这一份是**样例**：`id`、短名、可执行文件名、那个 `enumKeys` 的键名全都是编的，
+照抄时换成你自己的。
+
 ```json
 {
-  "id": "01M2JKHTZGKJBFQQTWYXMQMF2V",
-  "name": "code-server",
+  "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "name": "ide",
   "displayName": "开发环境",
   "version": "1.0.0",
   "description": "……",
-  "author": "slurmate",
+  "author": "example",
   "engines": { "slurmate": ">=0.5" },
 
   "contributes": {
     "surface": { "kind": "web", "path": "/" },
-    "login": { "path": "/login", "field": "password", "cookie": "code-server-session" },
+    "login": { "path": "/login", "field": "password", "cookie": "session-cookie" },
     "layout": true,
     "submitPubkey": false,
     "concurrent": true,
@@ -200,17 +203,20 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
     "defaultTime": "12:00:00",
     "defaultEnabled": true,
     "bin": {
-      "env": "SLURMATE_CS_BIN",
+      "env": "SLURMATE_IDE_BIN",
       "discovery": "which",
-      "name": "code-server",
-      "fallback": "/usr/local/bin/code-server"
+      "name": "ide",
+      "fallback": "/usr/local/bin/ide"
     },
     "enumKeys": {
-      "auth_mode": { "choices": ["password", "none"], "default": "password" }
+      "startup_mode": { "choices": ["normal", "safe"], "default": "normal" }
     }
   }
 }
 ```
+
+★ **`enumKeys` 那一条是本文件里唯一"键名由你定"的地方** —— 别的键名是框架认的，
+写错了不会被忽略（见下）。
 
 ★ **认得的键是一个封闭集合**：下面两张表里没有的键，写上去不会"配了但不生效"，
 而是**整份清单被拒**（客户端在装之前拒，站点在安装与分发时拒）。判据只有一份书面
@@ -237,8 +243,8 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 
 | 键 | 说明 |
 |---|---|
-| `surface` | `{ kind: "web", path: "/" }`。会话起来之后客户端往哪个路径装页面。没有它就表示这个插件不建视图（sshd 就是这样，它只把隧道指向端口，让用户拿原生工具去连）。 |
-| `login` | `{ path, field, cookie }`。**这是数据，不是代码** —— 基座实现的是「POST 一个表单、然后查 cookie」这个通用机制，端点/字段名/cookie 名三条具体值由插件自述。有了它，基座一个字都不知道 code-server 是什么，而任何 web 插件都能自动登录。 |
+| `surface` | `{ kind: "web", path: "/" }`。会话起来之后客户端往哪个路径装页面。没有它就表示这个插件不建视图（只做端口转发的插件就是这样，它把隧道指向端口，让用户拿原生工具去连）。 |
+| `login` | `{ path, field, cookie }`。**这是数据，不是代码** —— 基座实现的是「POST 一个表单、然后查 cookie」这个通用机制，端点/字段名/cookie 名三条具体值由插件自述。有了它，基座一个字都不知道对面是什么服务，而任何 web 插件都能自动登录。 |
 | `layout` | 这个插件的会话能不能共用布局。★ 它同时决定**本地端口从哪儿来**：声明了的会话用**布局组自己的端口**（一个组 = 一个端口 = 一个 `origin` = 一份浏览器存储），没声明的用**中转基准端口**。端口由基座算，**插件不自报** —— 从前那个 `preferredPort` 钩子已经收掉了。 |
 | `submitPubkey` | 提交时客户端要随请求带一行 ssh 公钥。**这一条两侧都读**：客户端据此取公钥，守护进程据此校验并下发 `SLURMATE_SSH_PUBKEY`。 |
 | `concurrent` | **必填**：`true` = 你的代码能同时处理两份（客户端允许同一时刻有两个这个插件的会话），`false` = 只能一个。★ **没有缺省** —— 只有你知道自己的代码能不能同时处理两份。见下一节。 |
@@ -311,8 +317,8 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 一行就是它俩合起来。这正是「看得见、删得掉」能成立的原因（面板上有一节
 「本机的插件数据」）。
 
-★ **别自己发明位置。** 从前 sshd 把东西写进 `~/.slurmate/ssh/` —— 那是插件自己挑的
-地方，基座既不知道它在哪儿，也没法列给用户看。用 `ctx.dataDir()`。
+★ **别自己发明位置。** 从前有插件把东西写进 `~/.slurmate/<它自己挑的名字>/` ——
+那是插件自己挑的地方，基座既不知道它在哪儿，也没法列给用户看。用 `ctx.dataDir()`。
 
 ★ **别把用户重建不出来的东西只放在这里**：用户点一下删除就没了，而且**没有任何东西
 会提醒你**。
@@ -321,7 +327,7 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 数据（即声明了 `concurrent: true` 的**第一份**），**在那个组被回收时自动删掉** ——
 最后一条指着那个组的连接被删掉、或被切到别的组的时候。★ 所以声明 `concurrent: true`
 等于说"这份数据跟着那个组的引用计数走"（**临时的那些副本**则跟着会话走：会话一结束
-就没了）；写 `false`（sshd 那一档）则相反 —— 它只有一份、不属于任何组，
+就没了）；写 `false` 则相反 —— 它只有一份、不属于任何组，
 **不会被任何一个组的回收带走**。哪一边是你想要的，取决于用户重建它有多贵。
 
 ★★ **第三种：你那份数据按当前装着的插件再也算不出来的时候，客户端会自己把它收掉**
@@ -356,13 +362,13 @@ packer build plugins/<你的插件>    # 要验"打出来的那一份能不能�
 | `bin` | | 作业里那个可执行文件在哪。`env` 是传给作业的环境变量名（**必须以 `SLURMATE_` 开头** —— 那个名字会被塞进作业的环境变量表，前缀是本系统的领地）；`discovery` 是 `which`（先查 PATH）或 `convention`（只用惯例路径）；`name` 是 `which` 时要找的文件名；`fallback` 是找不到时的路径。 |
 | `enumKeys` | | 取值只能固定的配置键：`{ 键名: { choices: [...], default: "..." } }`。它们同时**就是**这个插件那份配置里允许出现的额外键。 |
 
-★ **`defaultEnabled` 只有一种插件该标 `true`**：**本站人人都要用的那个服务**（今天
-只有 code-server）。它的用处是让「**一份插件配置都没写的站点**」装完就能用上它 ——
+★ **`defaultEnabled` 只有一种插件该标 `true`**：**本站人人都要用的那个服务**（一个
+站点通常只有一个这样的）。它的用处是让「**一份插件配置都没写的站点**」装完就能用上它 ——
 而不是"这个插件比较重要"。新插件标了它，等于给所有站点静默多开一个能力。
 
 ★ `bin.discovery` 的差别是真实的：守护进程在**登录节点**上跑，而作业跑在**计算
 节点**上。`which` 的结果只是推测；`convention` 反而比"登录节点上恰好有这个文件"
-更可信（sshd 就用 `convention`）。写错了只会在作业启动时暴露，`--check` 会把它
+更可信（不靠 PATH 查找的那些插件就用 `convention`）。写错了只会在作业启动时暴露，`--check` 会把它
 解析到了哪里如实打印出来。
 
 ★★ **这里没有 `defaultGpus`，而那不是疏忽 —— 它永远不会存在。**
@@ -450,11 +456,11 @@ NFS 上的 `~/.slurmate/logs/job-<id>.log`（作业结束后唯一能看的那�
 `$LOCAL_LOG`。**
 
 ```bash
-_cs_log="$LOCAL_LOG_DIR/code-server.log"
-nohup "$bin" ... >> "$_cs_log" 2>&1 &
+_svc_log="$LOCAL_LOG_DIR/service.log"
+nohup "$bin" ... >> "$_svc_log" 2>&1 &
 ...
-cleanup_code_server() {
-    tail -n 200 "$_cs_log" >> "$LOCAL_LOG" 2>/dev/null || true
+cleanup_my_plugin() {          # ← 短名，`-` 写成 `_`
+    tail -n 200 "$_svc_log" >> "$LOCAL_LOG" 2>/dev/null || true
 }
 ```
 

@@ -464,3 +464,19 @@ jobs:
         run: |
           python3 tools/check-plugin-docs.py
           python3 tools/check-plugin-docs.py --self-test
+
+      - name: 文档与源码注释里写的路径，指得到东西
+        # 判据只有一处：tools/check-doc-links.py，这里只调用它。
+        #
+        # ★ 为什么现在就要有：`docs/` 下那几份要按分发单元搬家，而**今天断一条
+        #   链接不会红任何东西** —— 二百多条相对链接、三十来处源码注释里的指路，
+        #   全靠人眼。搬完少改一处，读者点进去是空的，而没有一份检查会说话。
+        #   先立网再搬。
+        #
+        # ★ 第二行是**反向自测**：种三种坏样本（链接断链、源码注释里的
+        #   `docs/*.md` 不存在、子目录里的相对链接算错层），断言每一个都被抓到；
+        #   另种四种**假红**样本（围栏代码块里的举例、锚点、URL、指到一个目录），
+        #   断言一个都不误判 —— 假红会让这条检查被人绕过去。
+        run: |
+          python3 tools/check-doc-links.py
+          python3 tools/check-doc-links.py --self-test

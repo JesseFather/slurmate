@@ -153,10 +153,10 @@ sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 配置里没写 `default_plugin`（这是**推荐值**）。要么写上一个：
 
 ```ini
-default_plugin = code-server
+default_plugin = <短名>
 ```
 
-要么让调用方显式给：`slurmate submit --service-kind code-server`。
+要么让调用方显式给：`slurmate submit --service-kind <短名>`。
 
 ★ 守护进程**故意**没有内建缺省，也**故意**不选"表里唯一那个"当缺省：隐式缺省会让
 **装一个插件 / 卸一个插件**这种配置之外的动作悄悄改变行为 —— 今天提交成功的那条
@@ -277,9 +277,9 @@ sudo slurmate plugin install --from <放 .splug 的那个目录>
 先在作者机器上 `packer build` 打成包，别的确认无用之后人工删掉。
 
 **再确认配置里没有把它关掉。** 一份插件配置都没有时，缺省取插件清单里的
-`site.defaultEnabled`（code-server 是 true）；但只要你写了
-`slurmate.conf.d/code-server.conf` 而里面是 `enabled = no`（或者只写了
-`sshd.conf` 的 `enabled = yes` 并**同时**关了 code-server），那就只剩中转站。
+`site.defaultEnabled`（只有那份清单标了 `true` 的插件是开着的）；但只要你写了它那份
+`slurmate.conf.d/<短名>.conf` 而里面是 `enabled = no`（或者写了一份**别的**插件的
+`enabled = yes`、并**同时**把它关了），那本站就只剩那一个。
 
 ★ **装了但一个都没开**、以及**一个都没装**，两种都是**合法状态**（守护进程照常
 启动，已有会话照常能查能停），但 `--check` 会把它们明确说出来：

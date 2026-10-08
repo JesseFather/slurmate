@@ -235,7 +235,8 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
   但**登录 shell 的 rc 文件仍会执行**（zsh 的 `~/.zshenv` 连 `-c` 都读），
   所以客户端解析应答时从后往前找第一个合法信封，而不是假定它在最后一行。
 - argv 是编译期常量，用户输入永远不出现在命令串里。这既是防注入，也是穿过
-  登录节点上 `ForceCommand` 守卫的必要条件（命令串里不能出现 `code-server` 字面量）。
+  登录节点上 `ForceCommand` 守卫的必要条件（某些集群的守卫只放行白名单里的命令名
+  —— 固定 argv 天然满足）。
 - 中文 detail 以字面 UTF-8 输出（`ensure_ascii=False`，`cluster/slurmate`）；
   解析失败时报「守护进程返回的响应不是合法 JSON」（`cluster/slurmate`）。
 - 上限：CLI 侧最多读 4 MiB 或读到第一个换行（`cluster/slurmate` 的
@@ -470,8 +471,8 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 
 #### 三条边界
 
-- **通知里不含任何口令。** 它与 `list` 同构，用的是 `with_secret=False`，连作业内
-  的 sshd 主机公钥一起不给。需要它们的地方（真正要连的那一个会话）走 `status`。
+- **通知里不含任何口令。** 它与 `list` 同构，用的是 `with_secret=False`，连**作业内
+  那个 ssh 服务的主机公钥**一起不给。需要它们的地方（真正要连的那一个会话）走 `status`。
   所以"通知里没有秘密"是一条**结构性质**，不依赖任何一处判断。
   ★ 客户端那半边是它的对偶：**这两个键缺席时要保留旧值**，而"换了会话"时不保留。
 - **通知的 `sessions` 截断到最近 50 条**，与 `list` 同一条规则。所以它是
@@ -752,22 +753,22 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 成功 data：
 
 ```json
-{"plugins": [{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
-              "name": "code-server", "title": "开发环境", "enabled": true,
+{"plugins": [{"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "version": "1.0.0",
+              "name": "ide", "title": "开发环境", "enabled": true,
               "can_submit": true,
               "defaults": {"cpus": 2, "mem": "8G", "time": "12:00:00",
                            "gpus": null},
               "package": {"format": 2, "bytes": 19416, "digest": "…"}},
-             {"id": "01M2JKHTZGF12N0T9CB3XVK36H", "version": "1.0.0",
-              "name": "sshd", "title": "SSH 中转站", "enabled": false,
+             {"id": "01BX5ZZKBKACTAV9WEVGEMMVRZ", "version": "1.0.0",
+              "name": "relay", "title": "中转站", "enabled": false,
               "can_submit": false,
               "defaults": {"cpus": 1, "mem": "2G", "time": "12:00:00",
                            "gpus": {"name": "gpu", "type": null, "count": 1}},
               "package": {"format": 2, "bytes": 40000, "digest": "…"}}],
- "enabled": ["code-server"],
+ "enabled": ["ide"],
  "limits": {"file_bytes": 262144, "total_bytes": 1561905, "max_files": 256,
             "package_bytes": 2097152},
- "problems": ["插件 「jup」（01M2JKHTZGKJBFQQTWYXMQMF4C）没能加载：…"]}
+ "problems": ["插件 「x」（01E439TP9XJZ9RPFH3T1PYBCR8）没能加载：…"]}
 ```
 
 > ★ **每一项里只有名字、版本、开关、默认资源与一个 `package`。** v0.6 时这里还有
@@ -941,7 +942,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 成功 data：
 
 ```json
-{"id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "version": "1.0.0",
+{"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "version": "1.0.0",
  "format": 2, "bytes": 19416, "digest": "…", "data": "<base64>"}
 ```
 
@@ -1418,7 +1419,7 @@ tick 刷新的那份缓存。`users` 是"现在连着的用户"，tick 替他们
 成功 data：
 
 ```json
-{"history": [{"job_id": "5854", "name": "code-server", "state": "RUNNING",
+{"history": [{"job_id": "5854", "name": "sj-ide", "state": "RUNNING",
               "exit_code": "0:0", "elapsed": "10:13:12",
               "end": "Unknown", "partition": "A6000"}],
  "days": 7, "limit": 30}
@@ -1467,7 +1468,7 @@ tick 刷新的那份缓存。`users` 是"现在连着的用户"，tick 替他们
    │      "tunnel_target":"192.0.2.11:55017",
    │      "auth_password":"…"} ──────────── │                                   │
    │                                        │                                   │
-   │  建立 ssh -L 隧道，自动登录 code-server │                                   │
+   │  建立 ssh -L 隧道，自动登录服务页面     │                                   │
    │                                        │                                   │
    │   （每 45 秒）                         │                                   │
    │── {"op":"heartbeat","session_id":"…"} ►│── 更新 last_hb_socket ───────────► │

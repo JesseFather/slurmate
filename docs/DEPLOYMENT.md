@@ -156,7 +156,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 ```
 
 **若集群在 sshd 上挂了 `ForceCommand` 守卫**：`slurmate rpc` 的固定 argv 必须能穿过它
-（命令串里不能出现 `code-server` 字面量 —— 用固定 argv 恰好满足这个条件）。
+（某些集群的守卫只放行白名单里的命令名 —— 用固定 argv 恰好满足这个条件）。
 这条依赖必须**被证明**而不是假设，Phase 0 的两步实测见
 `client/src/main/backend-ssh.js`。
 
@@ -181,12 +181,12 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 **6b. 插件的依赖 —— 由你装的那些插件决定**
 
 ★ **这一段没有固定清单**，因为计算节点上需要什么完全取决于你装了哪些插件。
-每个插件在自己的 README 里写清楚，两份现成的：
+每个插件在**它自己的 README** 里写清楚：要哪些可执行文件、缺了会怎样 ——
+装之前看一眼那一节，比事后对着日志里那句"所有候选端口均失败"猜要省事。
 
-| 插件 | 计算节点上要什么 | 缺了会怎样 |
-|---|---|---|
-| code-server | `code-server`、`curl` | 没有 `code-server` → 每个候选端口都在启动后立刻退出 → 全部失败 → `exit 22`；没有 `curl` → 就绪探测拿不到结果 → **每个候选端口白等 45 秒**，默认 6 个候选共约 4.5 分钟后全部失败。见 [`plugins/code-server/README.md`](../plugins/code-server/README.md) |
-| sshd | `sshd`、`ssh-keygen` | 明确报错 → 每个候选端口都失败 → `exit 22`。见 [`plugins/sshd/README.md`](../plugins/sshd/README.md) |
+★ 那些表里有一个**共同的形状**值得先知道：插件**自己检查**的那个可执行文件缺了会
+当场点名（"$bin 不存在或不可执行"），而**只被探测步骤用到**的工具（`curl` 那一类）
+缺了不会明确报错 —— 每个候选端口都白等到超时（默认 6 个候选共约 4.5 分钟）。
 
 ★ **插件脚本自己负责把"缺了"说清楚。** 宿主只会在日志里记一句"所有候选端口均
 失败"—— 那句指不回是哪个可执行文件不见了。所以每个插件的 `start_<短名>` 里都有
@@ -317,12 +317,11 @@ node packer/slurmate-packer.js sign  <id>.splug              # 可选，但见 P
 sudo slurmate plugin install --from ~/下载的插件
 ```
 
-★ **安装器永不打包**：它只收成品。所以拿仓库里那两棵插件**源码树**
-（`plugins/code-server`、`plugins/sshd`）当那个目录用是**不行**的 —— 那里没有
-`.splug`，而它会**逐条点名**说"它不是一个插件包、不会被安装"并指路 `packer build`。
-那个失败是刻意的：包是**构建产物**，不进 git（二进制进 git 等于代码评审死掉）。
-★ 那两棵树是**开发样例**，**基座不带任何插件** —— 它们不是"仓库自带的插件"，
-所以这里没有一份欠着的成品要补。
+★ **安装器永不打包**：它只收成品。所以拿仓库顶层那几棵插件**源码树**当那个目录用是
+**不行**的 —— 那里没有 `.splug`，而它会**逐条点名**说"它不是一个插件包、不会被安装"
+并指路 `packer build`。那个失败是刻意的：包是**构建产物**，不进 git（二进制进 git
+等于代码评审死掉）。★ 那几棵树是**开发样例**，**基座不带任何插件** —— 它们不是
+"仓库自带的插件"，所以这里没有一份欠着的成品要补。
 
 ★★ **装插件不是部署的一部分** —— 基座装完之后随时可以装，装一个也不用重跑部署：
 
@@ -387,7 +386,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 写一份插件配置现在是一个**对外的**动作：
 
 ```ini
-# /etc/slurmate/slurmate.conf.d/code-server.conf
+# /etc/slurmate/slurmate.conf.d/<短名>.conf
 enabled = yes          # ← 这一行同时也意味着"把它发到用户的工作站上"
 ```
 
@@ -453,7 +452,7 @@ slurmate submit                      # 全部参数可省略：缺省由服务�
 slurmate wait --session <session_id>
 ```
 
-`wait` 拿到隧道目标后会一并打印 code-server 口令，可以直接手工验证：
+`wait` 拿到隧道目标后会一并打印那个会话的口令，可以直接手工验证：
 
 ```bash
 ssh -N -L 18080:<tunnel_target> alice@node01.example.com
