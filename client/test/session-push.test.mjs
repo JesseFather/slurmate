@@ -72,7 +72,7 @@ function view(extra = {}) {
 
 /** 把控制器推到 RUNNING —— 推送只在那一档上做事。 */
 function running(backend, init = {}) {
-  const ctrl = new SessionController({ backend, layoutId: 'L1' });
+  const ctrl = new SessionController({ backend, workspaceId: 'L1' });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view(init);
@@ -263,7 +263,7 @@ test('★★ 推送不来的时候，status 轮询与这一版之前**逐字相�
   t.after(keepAlive());
   const b = new StubBackend();
   b.reply = () => ok({ session: view() });
-  const ctrl = new SessionController({ backend: b, layoutId: 'L1', statusMs: 20 });
+  const ctrl = new SessionController({ backend: b, workspaceId: 'L1', statusMs: 20 });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view();
@@ -279,7 +279,7 @@ test('★ 推送健康时，到点的轮询**不问**（这就是省下来的那
   t.after(keepAlive());
   const b = new StubBackend();
   b.reply = () => ok({ session: view() });
-  const ctrl = new SessionController({ backend: b, layoutId: 'L1', statusMs: 20 });
+  const ctrl = new SessionController({ backend: b, workspaceId: 'L1', statusMs: 20 });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view();
@@ -301,7 +301,7 @@ test('★★ 推送停了超过看门狗 ⇒ 轮询自己接上（不是静默�
   const b = new StubBackend();
   b.reply = () => ok({ session: view() });
   const ctrl = new SessionController({
-    backend: b, layoutId: 'L1', statusMs: 20, pushStaleMs: 45 });
+    backend: b, workspaceId: 'L1', statusMs: 20, pushStaleMs: 45 });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view();
@@ -336,7 +336,7 @@ test('★ `stale` 要说出来（不说的话，画面比服务端旧而用户�
 test('★ 排队那一段不消费推送（那一段由 _waitForEnroll 的轮询负责）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
-  const ctrl = new SessionController({ backend: b, layoutId: 'L1' });
+  const ctrl = new SessionController({ backend: b, workspaceId: 'L1' });
   ctrl.state = State.QUEUED;
   ctrl.sessionId = 's1';
   ctrl._watchBackend(true);
@@ -389,7 +389,7 @@ test('★ 等登记那段轮询也走同一个合并入口（口令不许被一�
       // 第二次：登记完了，而这一次读会话文件失败了（没有口令）
       : ok({ session: view({ auth_password: undefined }) });
   };
-  const ctrl = new SessionController({ backend: b, layoutId: 'L1', queuedPollMs: 10 });
+  const ctrl = new SessionController({ backend: b, workspaceId: 'L1', queuedPollMs: 10 });
   ctrl.sessionId = 's1';
   t.after(() => { ctrl._stopped = true; });
   const enrolled = await ctrl._waitForEnroll();

@@ -83,7 +83,7 @@ const transportFail = () => ({
  *   整个测试进程退不掉（上一版就撞过一次，表现为文件多花几十秒）。
  */
 function running(backend) {
-  const ctrl = new SessionController({ backend, layoutId: 'L1' });
+  const ctrl = new SessionController({ backend, workspaceId: 'L1' });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view();

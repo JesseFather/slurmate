@@ -18,12 +18,12 @@
  *
  * `plugin-data.js` 回答"一份数据存在哪儿"。这里回答下一个问题：**它现在还在不在、
  * 还有没有主人**。在此之前，这件事在客户端**没有任何判据** —— 引用计数只活在
- * 配置里（`pruneLayouts`），而磁盘上到底躺着几份、哪几份是没人认领的，没有任何
+ * 配置里（`pruneWorkspaces`），而磁盘上到底躺着几份、哪几份是没人认领的，没有任何
  * 代码看过。
  *
  * ── ★ 判据是"正向算 + 两边折叠做差"，不是"逆向解析磁盘名" ────────────────────
  *
- *     该有的 = { 折叠(身份) : 有分区的插件 × 配置里的布局组 }
+ *     该有的 = { 折叠(身份) : 有分区的插件 × 配置里的工作区 }
  *              ∪ { 折叠(身份) : 有分区的插件、没声明分实例 }
  *     孤儿   = 磁盘上的目录名 − 该有的 − **活着的**
  *
@@ -47,8 +47,8 @@
  *
  * ── ★ 一行 = 一个身份（两个落点）────────────────────────────────────────────
  *
- * 这一层不按"插件"或"布局组"分组：**一份数据 = 一个身份**（见 plugin-data.js 的
- * 文件头）。所以"一个没人用的布局组"会在这一层展开成每个插件各一行 —— 那正是
+ * 这一层不按"插件"或"工作区"分组：**一份数据 = 一个身份**（见 plugin-data.js 的
+ * 文件头）。所以"一个没人用的工作区"会在这一层展开成每个插件各一行 —— 那正是
  * 可删除的单位。
  *
  * ★ **一份身份现在有两个落点**：Electron 的存储分区，以及基座给插件的数据目录
@@ -204,7 +204,7 @@ function recognized(place, name) {
  *
  * @param {object} o
  * @param {Array} o.plugins      注册表里的全部插件（`registry.list()`）
- * @param {Array} o.layouts      `cfg.layouts`
+ * @param {Array} o.workspaces      `cfg.workspaces`
  * @param {Array} o.connections  `cfg.connections`（算引用计数）
  * @param {string[]|null} o.names     分区目录那一根下的目录名；`null` = 没查
  * @param {string} [o.why]            没查分区那一根的原因（原样带给界面）
@@ -216,7 +216,7 @@ function recognized(place, name) {
  *        那些会被当成孤儿。
  *        ★ 那件事**够得着**，而且不止一种走法：一个声明了 `hasInstance` 却**没有界面**
  *        的插件（数据目录有、分区没有）活着的时候就是这样；**临时实例**更是天生如此
- *        （它的实例键只在内存里，配置里根本没有那个布局组 ⇒ 它永远不在"该有的"里）。
+ *        （它的实例键只在内存里，配置里根本没有那个工作区 ⇒ 它永远不在"该有的"里）。
  *        ⇒ 少了这个参数，界面上会给一份**正在被写**的数据一个删除按钮。
  *        ★ **两种写法都收**：分区名（`persist:…`，窗口那一半报上来的就是它）与
  *        目录名（磁盘上的样子）。判据是 `pluginData.samePartition` —— 少了这一步，
@@ -229,11 +229,11 @@ function recognized(place, name) {
  *          与逐行的 `kind: 'unknown'` 不是一回事：那一档说的是"这一行我不认识"，
  *          这一条说的是"**没有一个是我认识的** —— 那多半是某一根取错了"。
  */
-function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, held }) {
+function audit({ plugins, workspaces, connections, names, why, dataNames, dataWhy, held }) {
   const diskChecked = Array.isArray(names) && Array.isArray(dataNames);
   const list = Array.isArray(names) ? names : [];
   const dataList = Array.isArray(dataNames) ? dataNames : [];
-  const layoutsArr = Array.isArray(layouts) ? layouts : [];
+  const workspacesArr = Array.isArray(workspaces) ? workspaces : [];
   // ★ 归一：`held` 里**两种写法都收** —— 分区名（`persist:…`，窗口那一半
   //   `livePartitions()` 报的就是它）与目录名（磁盘上的样子，会话那一半
   //   `liveDataDirs()` 报的是它）。★ 少这一步的后果是**静默**的：分区那一半永远
@@ -262,26 +262,26 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
   // ★ 一张表服务两个根 —— 靠的是 `plugin-data.js` 里
   //   `dataDirNameOf === diskNameOf`（同一个身份在两个根下叫同一个名字）。
   const all = (plugins || []);
-  const expected = new Map();                 // 折叠过的名字 → {plugin, layoutId|null}
+  const expected = new Map();                 // 折叠过的名字 → {plugin, workspaceId|null}
   for (const p of all) {
     if (pluginData.hasInstance(p)) {
-      for (const l of layoutsArr) {
+      for (const l of workspacesArr) {
         if (!l || !l.id) continue;
         expected.set(pluginData.diskNameOf(pluginData.identityOf(p, l.id)),
-          { plugin: p, layoutId: l.id });
+          { plugin: p, workspaceId: l.id });
       }
     } else {
       expected.set(pluginData.diskNameOf(pluginData.identityOf(p)),
-        { plugin: p, layoutId: null });
+        { plugin: p, workspaceId: null });
     }
   }
 
-  // ── 引用计数：有几条连接指着这个布局组 ──
+  // ── 引用计数：有几条连接指着这个工作区 ──
   const refs = new Map();
   for (const c of (connections || [])) {
-    if (c && c.layoutId) refs.set(c.layoutId, (refs.get(c.layoutId) || 0) + 1);
+    if (c && c.workspaceId) refs.set(c.workspaceId, (refs.get(c.workspaceId) || 0) + 1);
   }
-  const layoutName = new Map(layoutsArr.filter((l) => l && l.id)
+  const workspaceName = new Map(workspacesArr.filter((l) => l && l.id)
     .map((l) => [l.id, l.name || l.id]));
 
   // 认插件用**折叠过**的 id（磁盘上那个就是折叠过的）。
@@ -327,17 +327,17 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
 
     if (hit) {
       // 在"该有的"里 ⇒ 不是孤儿。只有一种情况值得说出来：
-      // **没有任何连接指着它那个布局组**（数据在、没人用）。
-      //   没有实例段的那种存储不属于任何组（它本来就一直只有一份），不列。
-      if (hit.layoutId === null) continue;
-      if ((refs.get(hit.layoutId) || 0) > 0) continue;
+      // **没有任何连接指着它那个工作区**（数据在、没人用）。
+      //   没有实例段的那种存储不属于任何工作区（它本来就一直只有一份），不列。
+      if (hit.workspaceId === null) continue;
+      if ((refs.get(hit.workspaceId) || 0) > 0) continue;
       rows.push({
         name,
         places,
         kind: 'unused',
         label: `${hit.plugin.displayName} 的一份数据`,
-        why: `它在布局组「${layoutName.get(hit.layoutId) || hit.layoutId}」上，`
-          + '而那个布局组现在没有任何连接在用。',
+        why: `它在工作区「${workspaceName.get(hit.workspaceId) || hit.workspaceId}」上，`
+          + '而那个工作区现在没有任何连接在用。',
         deletable: true,
       });
       continue;
@@ -349,7 +349,7 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
     // 必然是"不在该有的清单里"的那些 —— 而那些里面混着两类完全不同的东西：
     // 真垃圾，以及**活得好好但算不出来**的。后者有两条来路，都不是假想：
     //   · 一个 `hasInstance` 却**没有界面**的插件（数据目录有、分区没有）；
-    //   · **临时实例** —— 它的实例键只在内存里，配置里没有那个布局组，
+    //   · **临时实例** —— 它的实例键只在内存里，配置里没有那个工作区，
     //     于是它**永远**不在"该有的"里。
     // ⇒ 少了这一行，用户在会话跑着的时候点一下删除，就抽掉了它脚下的那份数据，
     //   而症状只是「那个页面/那条命令忽然坏了」。
@@ -366,7 +366,7 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
           ? {
             name, places, kind: 'orphan',
             label: `${known.displayName} 的一份数据`,
-            why: `第三段是 ${parts.instance}，而配置里已经没有这个布局组了。`,
+            why: `第三段是 ${parts.instance}，而配置里已经没有这个工作区了。`,
             deletable: true,
           }
           : {
@@ -431,7 +431,7 @@ function audit({ plugins, layouts, connections, names, why, dataNames, dataWhy, 
   // ★ 它**够不到的**那一格要说清：一根取错了、而错的那个目录里恰好装着**合法形状**
   //   的名字（例如另一个 profile 的 `plugin-data/`），那些行会被判成孤儿而不是
   //   "认不出"，这条判据一个字都不会说。压住那一格的是**别的**性质（回收只在
-  //   `pruneLayouts` 真的回收了组时发生、而它在"一条连接都没有"时不回收），
+  //   `pruneWorkspaces` 真的回收了工作区时发生、而它在"一条连接都没有"时不回收），
   //   不是这一条 —— 账本 S23 里写着。别把这条读成"取错根这件事被根治了"。
   const allUnknown = diskChecked && rows.length > 0
     && rows.every((r) => r.kind === 'unknown');
@@ -496,11 +496,11 @@ function deletionVerdict({ rows, name }) {
  * 判据只有一句话：**按当前装着的插件，还读得到它吗。**
  *
  *   · `orphan` / `legacy` —— 读不到了。前者的名字按当前注册表**算不出来**（插件
- *     卸了、布局组删了、或者插件改了共享组），后者的形状早已废弃了
+ *     卸了、工作区删了、或者插件改了共享组），后者的形状早已废弃了
  *     （`LEGACY_RE` 那三种）。留着只有坏处：它们**永远不会**再被读到，只会越攒
  *     越多 —— 这正是用户要的那一条（「要么被新版本继承，要么没人用就把他删掉」）。
- *   · `unused` —— ★ **读得到。** 它的布局组还在配置里（用户可能刚建了一个空白
- *     布局，也可能那条连接暂时被切走了），下一次有连接指过去就会读它。所以它是
+ *   · `unused` —— ★ **读得到。** 它的工作区还在配置里（用户可能刚建了一个空白
+ *     工作区，也可能那条连接暂时被切走了），下一次有连接指过去就会读它。所以它是
  *     **"此刻没人用"，不是"没人会用"** —— 只列不删。
  *   · `unknown` —— 不知道。删一份我不认识的东西不是"收拾"而是"猜"。
  *

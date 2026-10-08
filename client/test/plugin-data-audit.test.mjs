@@ -38,8 +38,8 @@ const audit = require('../src/main/plugin-data-audit.js');
 
 const CS = '01M2JKHTZGKJBFQQTWYXMQMF2V';
 const SSHD = '01M2JKHTZGF12N0T9CB3XVK36H';
-const LAYOUT = 'l0123456789ab';
-const OTHER_LAYOUT = 'lffffffffffff';
+const WORKSPACE = 'w0123456789ab';
+const OTHER_WORKSPACE = 'wffffffffffff';
 
 /** 有界面、能同时开两份、跨版本共享的那种插件 —— code-server 真实的样子。 */
 const cs = (over = {}) => ({
@@ -51,15 +51,15 @@ const cs = (over = {}) => ({
   ...over,
 });
 
-/** 有界面、但**不能多开**：只有一份存储，不属于任何布局组。 */
+/** 有界面、但**不能多开**：只有一份存储，不属于任何工作区。 */
 const oneStore = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
   contributes: { surface: { kind: 'web', path: '/' }, layout: false, concurrent: false,
     data: null },
 });
 
-const layouts = (...ids) => ids.map((id, i) => ({ id, name: `组${i + 1}`, port: 51000 + i }));
-const conn = (layoutId, id = 'c1') => ({ id, layoutId });
+const workspaces = (...ids) => ids.map((id, i) => ({ id, name: `工作区${i + 1}`, port: 51000 + i }));
+const conn = (workspaceId, id = 'c1') => ({ id, workspaceId });
 const disk = (identity) => pluginData.diskNameOf(identity);
 
 /** sshd **实际的样子**：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
@@ -78,8 +78,8 @@ const relay = () => ({
  */
 const run = (o) => audit.audit({
   plugins: o.plugins || [cs()],
-  layouts: o.layouts === undefined ? layouts(LAYOUT) : o.layouts,
-  connections: o.connections === undefined ? [conn(LAYOUT)] : o.connections,
+  workspaces: o.workspaces === undefined ? workspaces(WORKSPACE) : o.workspaces,
+  connections: o.connections === undefined ? [conn(WORKSPACE)] : o.connections,
   names: o.names === undefined ? [] : o.names,
   why: o.why,
   dataNames: o.dataNames === undefined ? [] : o.dataNames,
@@ -92,12 +92,12 @@ const run = (o) => audit.audit({
 // ── ★ 活着的分区绝不能被报出来 ──────────────────────────────────────────────
 
 test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测函数自己算期望）', () => {
-  // 这份名字是**手写**的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab` 就是
+  // 这份名字是**手写**的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@w0123456789ab` 就是
   // Electron 会把 code-server 那个身份落成的目录名（id 段折叠过）。
-  const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab';
+  const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@w0123456789ab';
   const r = run({ names: [live] });
   assert.deepEqual(r.rows, [],
-    '有一份数据、也有一条连接正指着它那个布局组 —— 它**不是**孤儿');
+    '有一份数据、也有一条连接正指着它那个工作区 —— 它**不是**孤儿');
   assert.equal(r.diskChecked, true);
 
   // ★ 反例钉住"折叠"这件事：磁盘名写成大写时也必须认得出它（折叠是幂等的）。
@@ -106,22 +106,22 @@ test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测�
   const r2 = run({ names: [live.toUpperCase()] });
   assert.deepEqual(r2.rows, [], '大写的那一份也是它（折叠之后再比）');
 
-  // 反过来：连接指着**另一个**组时，它就没人用了。
-  const r3 = run({ names: [live], connections: [conn(OTHER_LAYOUT)],
-    layouts: layouts(LAYOUT, OTHER_LAYOUT) });
+  // 反过来：连接指着**另一个**工作区时，它就没人用了。
+  const r3 = run({ names: [live], connections: [conn(OTHER_WORKSPACE)],
+    workspaces: workspaces(WORKSPACE, OTHER_WORKSPACE) });
   assert.equal(r3.rows.length, 1);
   assert.equal(r3.rows[0].kind, 'unused');
   assert.equal(r3.rows[0].name, live, '回给界面的必须是**磁盘上的那个名字**');
 });
 
-test('★ 没声明分实例的插件那一份存储**永远不报**（它不属于任何组）', () => {
-  // 这种插件只有一份存储，它不挂在任何布局组上 —— 拿引用计数去判它，会在"一条连接
+test('★ 没声明分实例的插件那一份存储**永远不报**（它不属于任何工作区）', () => {
+  // 这种插件只有一份存储，它不挂在任何工作区上 —— 拿引用计数去判它，会在"一条连接
   // 都没有"时把这份唯一的数据报成"没人用"，而那正是最不能删的一份。
   const store = disk(pluginData.identityOf(oneStore()));
   const r = run({ plugins: [oneStore()], names: [store], connections: [] });
-  assert.deepEqual(r.rows, [], '它不属于任何组 ⇒ 引用计数这件事对它没有意义');
+  assert.deepEqual(r.rows, [], '它不属于任何工作区 ⇒ 引用计数这件事对它没有意义');
 
-  // 而一份**算不出来**的目录名照样是孤儿 —— 第二段不是一个认得出的组名时就是
+  // 而一份**算不出来**的目录名照样是孤儿 —— 第二段不是一个认得出的共享组名时就是
   // 这一档（`perVersion: true` 的插件升版留下的名字也是这个形状）。
   const old = '01m2jkhtzgf12n0t9cb3xvk36h@0.9.0';
   const r2 = run({ plugins: [oneStore()], names: [old, store] });
@@ -143,9 +143,9 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
   //   会话正靠它（`~/.ssh/config` 的 IdentityFile / UserKnownHostsFile 都指着那里）
   //   —— 症状是"`ssh slurmate` 忽然认证失败"，而用户刚刚点过一个他以为无害的按钮。
   const live = disk(pluginData.identityOf(relay()));
-  assert.equal(live, '01m2jkhtzgf12n0t9cb3xvk36h@relay', '手写形状：折叠过的 id + 声明的组名');
+  assert.equal(live, '01m2jkhtzgf12n0t9cb3xvk36h@relay', '手写形状：折叠过的 id + 声明的共享组名');
   const r = run({ plugins: [relay()], names: [], dataNames: [live], connections: [] });
-  assert.deepEqual(r.rows, [], '它没有实例段 ⇒ 不属于任何布局组 ⇒ 永远不列');
+  assert.deepEqual(r.rows, [], '它没有实例段 ⇒ 不属于任何工作区 ⇒ 永远不列');
   assert.equal(r.diskChecked, true);
 
   // ★ **反向**：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
@@ -157,11 +157,11 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
 });
 
 test('★ 两个根下的同一份身份 ⇒ **一行**，`places` 说清它在哪几处', () => {
-  const live = disk(pluginData.identityOf(cs(), LAYOUT));
+  const live = disk(pluginData.identityOf(cs(), WORKSPACE));
   const r = run({ names: [live], dataNames: [live] });
-  assert.deepEqual(r.rows, [], '有连接指着那个组 ⇒ 不是孤儿');
+  assert.deepEqual(r.rows, [], '有连接指着那个工作区 ⇒ 不是孤儿');
 
-  // 组没了 ⇒ 一行，两处都标出来 —— 用户不该为了同一份数据删两次，而"只列一处"
+  // 工作区没了 ⇒ 一行，两处都标出来 —— 用户不该为了同一份数据删两次，而"只列一处"
   // 会让删完的那一刻另一处把同一行带回来（"我明明删过了"）。
   const r2 = run({ names: [live], dataNames: [live], connections: [] });
   assert.equal(r2.rows.length, 1, '同一份身份只出一行 —— 不是"一个落点一行"');
@@ -190,7 +190,7 @@ test('★ 一处认得出、另一处认不出 ⇒ 整行**不给删除按钮**'
 });
 
 test('★ 一根没查成 ⇒ `diskChecked:false`，且 `why` 点名是**哪一根**', () => {
-  const live = disk(pluginData.identityOf(cs(), OTHER_LAYOUT));
+  const live = disk(pluginData.identityOf(cs(), OTHER_WORKSPACE));
   const r = run({ names: [live], dataNames: null, dataWhy: '读不动', connections: [] });
   assert.equal(r.diskChecked, false);
   assert.match(r.why, /插件数据目录那一根/, '必须说得出"我只看到了一半"');
@@ -200,20 +200,20 @@ test('★ 一根没查成 ⇒ `diskChecked:false`，且 `why` 点名是**哪一�
 
 // ── 四类"不是活着的" ────────────────────────────────────────────────────────
 
-test('组没了：第三段那个布局组已经不在配置里 ⇒ 一行，可删，说得出是哪个插件', () => {
-  const gone = disk(pluginData.identityOf(cs(), OTHER_LAYOUT));
+test('工作区没了：第三段那个工作区已经不在配置里 ⇒ 一行，可删，说得出是哪个插件', () => {
+  const gone = disk(pluginData.identityOf(cs(), OTHER_WORKSPACE));
   const r = run({ names: [gone] });
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'orphan');
   assert.equal(r.rows[0].deletable, true);
   assert.match(r.rows[0].label, /开发环境/, '标签要带插件的显示名，不是一串 ULID');
-  assert.match(r.rows[0].why, new RegExp(OTHER_LAYOUT), '得说清是哪一段对不上');
+  assert.match(r.rows[0].why, new RegExp(OTHER_WORKSPACE), '得说清是哪一段对不上');
 });
 
 test('插件没了：id 认得出、注册表里没有它 ⇒ 一行，可删', () => {
   // 末尾是 w（code-server 那个是 v）—— 一个**本机没有**的 id。
   const gone = '01m2jkhtzgkjbfqqtwyxmqmf2w';
-  const r = run({ names: [`${gone}@editor@${LAYOUT}`] });
+  const r = run({ names: [`${gone}@editor@${WORKSPACE}`] });
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'orphan');
   assert.equal(r.rows[0].deletable, true);
@@ -250,13 +250,13 @@ test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', ()
   //   东西"，而那正是"用户自己往那个目录里放了点别的"，不是根取错了。
   //
   //   ★ 这里要造一个**真的会产生行**的认得出的名字：**在用的那一份一行都不产生**
-  //     （它不是"问题"，见 `audit` 里那条 `continue`）—— 用一个"没人用的组"来造，
+  //     （它不是"问题"，见 `audit` 里那条 `continue`）—— 用一个"没人用的工作区"来造，
   //     否则这一条会因为"行里只剩认不出的那条"而假绿。
   const mixed = run({
     names: ['secrets.json'],
-    dataNames: [disk(pluginData.identityOf(cs(), LAYOUT))],
-    layouts: layouts(LAYOUT, OTHER_LAYOUT),
-    connections: [conn(OTHER_LAYOUT)],
+    dataNames: [disk(pluginData.identityOf(cs(), WORKSPACE))],
+    workspaces: workspaces(WORKSPACE, OTHER_WORKSPACE),
+    connections: [conn(OTHER_WORKSPACE)],
   });
   assert.ok(mixed.rows.some((x) => x.kind === 'unused'),
     '前提：那一行真的产生了（否则这一条测的是别的东西）');
@@ -276,25 +276,25 @@ test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', ()
   assert.equal(run({}).allUnknown, false, '一份都没有 ⇒ 不能报"根取错了"');
 });
 
-// ── 没人用的组（内存侧那一类）──────────────────────────────────────────────
+// ── 没人用的工作区（内存侧那一类）──────────────────────────────────────────────
 
-test('★ 没人用的组：数据在、而没有任何连接指着它 ⇒ 一行，标签里带**组的名字**', () => {
-  // 这一格来自 `pruneLayouts` 那条"一条连接都没有时不回收"的豁免：把连接全删了之后，
-  // 组和它的数据都还在，而界面上原本没有任何地方说得出来。
-  const live = disk(pluginData.identityOf(cs(), LAYOUT));
+test('★ 没人用的工作区：数据在、而没有任何连接指着它 ⇒ 一行，标签里带**工作区的名字**', () => {
+  // 这一格来自 `pruneWorkspaces` 那条"一条连接都没有时不回收"的豁免：把连接全删了之后，
+  // 工作区和它的数据都还在，而界面上原本没有任何地方说得出来。
+  const live = disk(pluginData.identityOf(cs(), WORKSPACE));
   const r = run({ names: [live], connections: [] });
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'unused');
   assert.equal(r.rows[0].deletable, true);
   assert.match(r.rows[0].label, /开发环境/);
-  assert.match(r.rows[0].why, /组1/, '要说清是哪个布局组 —— 名字才是用户认得的那个东西');
+  assert.match(r.rows[0].why, /工作区1/, '要说清是哪个工作区 —— 名字才是用户认得的那个东西');
 });
 
-test('★ 一个布局组 = 每个有分区的插件各一行（一份数据 = 一个分区）', () => {
+test('★ 一个工作区 = 每个有分区的插件各一行（一份数据 = 一个分区）', () => {
   const two = [cs(), { ...oneStore(), id: '01M2JKHTZGKJBFQQTWYXMQMF2W',
     contributes: { ...oneStore().contributes, layout: true, concurrent: true,
       data: { inherit: 'ssh' } } }];
-  const names = two.map((p) => disk(pluginData.identityOf(p, LAYOUT)));
+  const names = two.map((p) => disk(pluginData.identityOf(p, WORKSPACE)));
   const r = run({ plugins: two, names, connections: [] });
   assert.equal(r.rows.length, 2, '两个插件各有一份，就是两行（可删除的单位就是这一份）');
   assert.deepEqual([...new Set(r.rows.map((x) => x.kind))], ['unused']);
@@ -304,7 +304,7 @@ test('★ 一个布局组 = 每个有分区的插件各一行（一份数据 = �
 
 test('★ 没查磁盘 ⇒ 空清单 + `diskChecked:false` + 点名是**哪一根**没查', () => {
   const why = '开发者模式不查磁盘：这里用的是一份沙箱配置……';
-  const live = disk(pluginData.identityOf(cs(), LAYOUT));
+  const live = disk(pluginData.identityOf(cs(), WORKSPACE));
   const r = run({ names: null, why, connections: [] });
   assert.deepEqual(r.rows, []);
   assert.equal(r.diskChecked, false);
@@ -326,7 +326,7 @@ test('★ 没查磁盘 ⇒ 空清单 + `diskChecked:false` + 点名是**哪一�
 
 test('顺序稳定：可删的在前面，认不出的那堆在最后', () => {
   const names = ['zzz-unknown-thing', 'slot-1',
-    disk(pluginData.identityOf(cs(), OTHER_LAYOUT)), 'aaa-unknown'];
+    disk(pluginData.identityOf(cs(), OTHER_WORKSPACE)), 'aaa-unknown'];
   const first = run({ names }).rows.map((x) => `${x.kind}:${x.name}`);
   const second = run({ names: [...names].reverse() }).rows.map((x) => `${x.kind}:${x.name}`);
   assert.deepEqual(first, second, '同一个输入换个顺序进来，出去必须一模一样');
@@ -338,7 +338,7 @@ test('顺序稳定：可删的在前面，认不出的那堆在最后', () => {
 
 test('partitionRoot：探针的目录对得上就用它，对不上就说"查不了"（不说"没有"）', () => {
   const session = (p) => ({ fromPartition: (name) => ({ getStoragePath: () => p(name) }) });
-  const probe = `persist:${CS}@editor@${LAYOUT}`;
+  const probe = `persist:${CS}@editor@${WORKSPACE}`;
 
   // 对得上：Electron 说它在 <root>/<折叠过的名字>
   const ok = audit.partitionRoot({
@@ -383,10 +383,10 @@ test('listDirs：目录不存在 = 一份都没有（肯定的答案）；读不
 });
 
 test('★★ 正被活会话拿着的那一份**不进名单**（`held`）—— 而没拿着的照旧进', () => {
-  // 一份**临时实例**的身份：它的实例键（布局组 id）只在内存里，配置里根本没有
-  // 那个组 ⇒ 它**永远**不在"该有的"里。没有 `held` 的话，它在名单上就是一个
+  // 一份**临时实例**的身份：它的实例键（工作区 id）只在内存里，配置里根本没有
+  // 那个工作区 ⇒ 它**永远**不在"该有的"里。没有 `held` 的话，它在名单上就是一个
   // 可删的孤儿 —— 而那个删除按钮就落在用户正写着的那份数据上。
-  const temp = disk(pluginData.identityOf(cs(), 'l0123456789cd'));
+  const temp = disk(pluginData.identityOf(cs(), 'w0123456789cd'));
   const noHold = run({ names: [temp], dataNames: [temp] });
   assert.equal(noHold.rows.length, 1, '先说清前提：没有 held 时它确实像孤儿');
   assert.equal(noHold.rows[0].kind, 'orphan');
@@ -409,7 +409,7 @@ test('★★ 正被活会话拿着的那一份**不进名单**（`held`）——
 
   // ★ **反例**：没人拿着的同类名字照样是孤儿。少了这一条，一个"`held` 恒为真"
   //   的实现也能让上面那两条通过 —— 而那会让**所有**垃圾都删不掉。
-  const other = disk(pluginData.identityOf(cs(), 'l0123456789ef'));
+  const other = disk(pluginData.identityOf(cs(), 'w0123456789ef'));
   const stray = run({ names: [other], held: [temp] });
   assert.equal(stray.rows.length, 1, '★ 护的是**拿着的那一份**，不是"所有临时样子的"');
   assert.equal(stray.rows[0].deletable, true);
@@ -446,8 +446,8 @@ test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个
   // ★★ 这是本版唯一会**删用户数据**的那一步的判据，而它与"界面上能不能删"
   //    **不是**同一条：界面上可删的有三档，自动收的只有两档。
   //
-  //    `unused` 的那一份，它的布局组**还在配置里** —— 用户可能刚建了一个空白
-  //    布局（还没有连接指过去），也可能那条连接只是暂时被切走了。下一次有连接
+  //    `unused` 的那一份，它的工作区**还在配置里** —— 用户可能刚建了一个空白
+  //    工作区（还没有连接指过去），也可能那条连接只是暂时被切走了。下一次有连接
   //    指过去就会读它。所以它是"此刻没人用"，**不是**"没人会用"。
   //    ⇒ 少了这一条判据（比如写成"deletable 的全收"），用户的编辑器数据会在
   //      一个他根本不知道的时刻被删掉，而界面上一个字都不会说。
@@ -482,13 +482,13 @@ test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原�
   const ghost = '01m2jkhtzgf12n0t9cb3xvk36h@default';   // 本机没有这个插件
   const old = '01m2jkhtzgkjbfqqtwyxmqmf2v@0.9.0';       // 老版本留下的
   const legacy = 'slot-2';                              // 0.7 之前的分区
-  const unusedName = disk(pluginData.identityOf(cs(), LAYOUT));  // 组还在配置里 ⇒ unused
+  const unusedName = disk(pluginData.identityOf(cs(), WORKSPACE));  // 工作区还在配置里 ⇒ unused
 
   const r = run({
     names: [ghost, old, legacy, unusedName],
-    // 连接指着**另一个**组 ⇒ `LAYOUT` 那一份没人用（但那个组还在配置里）
-    connections: [conn(OTHER_LAYOUT)],
-    layouts: layouts(LAYOUT, OTHER_LAYOUT),
+    // 连接指着**另一个**工作区 ⇒ `WORKSPACE` 那一份没人用（但那个工作区还在配置里）
+    connections: [conn(OTHER_WORKSPACE)],
+    workspaces: workspaces(WORKSPACE, OTHER_WORKSPACE),
   });
 
   const kinds = new Map(r.rows.map((x) => [x.name, x.kind]));

@@ -60,27 +60,27 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 唯一的出口 —— 见 panel.js 的 renderInert。
   dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
 
-  // ── 布局组 ──
+  // ── 工作区 ──
   //
-  // 布局 = 那个网页应用自己的窗口布局/标签页/登录状态，按**本地监听端口**隔离
-  // （浏览器按 origin 存 localStorage）。一个布局组被若干条连接共用，
-  // 没有任何连接用它的组会被自动回收。只有声明了 contributes.layout 的插件要它。
+  // 工作区 = 那个网页应用自己的一份窗口布局/标签页/登录状态，按**本地监听端口**隔离
+  // （浏览器按 origin 存 localStorage）。一个工作区被若干条连接共用，
+  // 没有任何连接在用的工作区会被自动回收。只有声明了 contributes.layout 的插件要它。
   //
-  // layoutId 传空 = **新建一个空白布局并落进去，一次原子完成**。刻意不提供独立的
-  // 「建组」通道：单独建出来的组引用计数天然是 0，紧接着的回收会把它当场删掉 ——
+  // workspaceId 传空 = **新建一个空白工作区并落进去，一次原子完成**。刻意不提供独立的
+  // 「新建工作区」通道：单独建出来的工作区引用计数天然是 0，紧接着的回收会把它当场删掉 ——
   // 用户点了会没反应。
   //
-  // 返回 { ok, layouts, connections }；被拒绝时 code 是 'would_discard'
-  // （切走会把旧布局删掉，需要带 confirmDiscard 重来）或 'relisten_failed'
+  // 返回 { ok, workspaces, connections }；被拒绝时 code 是 'would_discard'
+  // （切走会把旧工作区删掉，需要带 confirmDiscard 重来）或 'relisten_failed'
   // （换端口失败，配置一个字没动）。
-  setConnectionLayout: (payload) => ipcRenderer.invoke('app:setConnectionLayout', payload),
+  setConnectionWorkspace: (payload) => ipcRenderer.invoke('app:setConnectionWorkspace', payload),
   // 改名。名字只是给人看的 —— 身份永远是 id（它决定存储分区，永不复用）。
-  renameLayout: (payload) => ipcRenderer.invoke('app:renameLayout', payload),
+  renameWorkspace: (payload) => ipcRenderer.invoke('app:renameWorkspace', payload),
 
   // ── 本机的插件数据 ──
   //
   // 插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在浏览器的
-  // 存储分区里，一份 = 一个插件 + 共享组 + 布局组。这一对方法回答"还剩几份、哪一份
+  // 存储分区里，一份 = 一个插件 + 共享组 + 工作区。这一对方法回答"还剩几份、哪一份
   // 没人用"，以及**删掉其中一份**。
   //
   // ★ 删除**不可逆**（那个插件下次打开会是一份全新的空白存储），所以界面必须先问过

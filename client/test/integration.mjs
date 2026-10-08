@@ -51,7 +51,7 @@ const SITE_PLUGIN_DIR = () => path.join(HERE, '..', '..', 'plugins');
 
 const NO_REDIRECT = { redirect: 'manual' };
 
-/** 拿一个当前空闲的端口，当作「布局组绑定端口」。 */
+/** 拿一个当前空闲的端口，当作「工作区绑定端口」。 */
 function freePort() {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
@@ -167,18 +167,18 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 300 });
 
-  const layoutPort = await freePort();
-  const ctl = new SessionController({ backend, layoutId: 'l1' });
+  const workspacePort = await freePort();
+  const ctl = new SessionController({ backend, workspaceId: 'w1' });
   const seen = [];
   ctl.on('change', (s) => seen.push(s.state));
 
   // ── 提交并一路推到 running ──
   // 不传任何资源 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
-  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
+  const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
   assert.ok(snap, '启动应当成功');
   assert.equal(ctl.state, State.RUNNING);
-  assert.equal(snap.localPort, layoutPort, '应当用上布局组绑定的端口');
-  assert.equal(snap.origin, `http://127.0.0.1:${layoutPort}`);
+  assert.equal(snap.localPort, workspacePort, '应当用上工作区绑定的端口');
+  assert.equal(snap.origin, `http://127.0.0.1:${workspacePort}`);
   assert.match(snap.tunnelTarget, /^127\.0\.0\.1:\d+$/);
   assert.equal(snap.dev, true);
 
@@ -237,7 +237,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
 
   // 隧道必须已经关掉：再连应当失败，而不是挂住
   const afterStop = await new Promise((resolve) => {
-    const s = net.connect(layoutPort, '127.0.0.1');
+    const s = net.connect(workspacePort, '127.0.0.1');
     s.setTimeout(1500);
     s.once('connect', () => { s.destroy(); resolve('connected'); });
     s.once('error', () => resolve('refused'));
@@ -250,7 +250,7 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
-  const ctl = new SessionController({ backend, layoutId: 'l1' });
+  const ctl = new SessionController({ backend, workspaceId: 'w1' });
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
@@ -272,7 +272,7 @@ test('★★ 取消失败时，那句「这一次没成功」必须一路走到�
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
   // ★ 先跑一遍**成功**的那条：一个永远失败的夹具，会让下面那条断言
   //   在"warning 是写死的"这种情况下也照样绿。
-  const ctlOk = new SessionController({ backend, layoutId: 'l1' });
+  const ctlOk = new SessionController({ backend, workspaceId: 'w1' });
   await ctlOk.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   const rOk = await ctlOk.stop();
   assert.equal(rOk.ok, true);
@@ -284,7 +284,7 @@ test('★★ 取消失败时，那句「这一次没成功」必须一路走到�
   // ── 失败那一条 ──
   const backend2 = await makeBackend(t, { enrollDelayMs: 200 });
   backend2.cancelFails = true;
-  const ctl = new SessionController({ backend: backend2, layoutId: 'l1' });
+  const ctl = new SessionController({ backend: backend2, workspaceId: 'w1' });
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   const res = await ctl.stop();
 
@@ -306,7 +306,7 @@ test('★ 意外消失（没来得及发 goodbye）时作业必须还在 —— 
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
 
-  const ctl = new SessionController({ backend, layoutId: 'l1' });
+  const ctl = new SessionController({ backend, workspaceId: 'w1' });
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
@@ -325,7 +325,7 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
   const backend = await makeBackend(t, { enrollDelayMs: 150 });
 
   // 心跳间隔压到 150ms，好在测试里观察到「反复失败但不放弃」
-  const ctl = new SessionController({ backend, layoutId: 'l1', heartbeatMs: 150, statusMs: 150 });
+  const ctl = new SessionController({ backend, workspaceId: 'w1', heartbeatMs: 150, statusMs: 150 });
   t.after(() => ctl.stop());
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
@@ -380,22 +380,22 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   });
 
   // _listen 从首选端口往后扫 20 个，所以要留出余量
-  let layoutPort = await freePort();
-  while (layoutPort > 65500) layoutPort = await freePort();
+  let workspacePort = await freePort();
+  while (workspacePort > 65500) workspacePort = await freePort();
 
   const ctl = new SessionController({
-    backend, layoutId: 'l1', statusMs: 80,
+    backend, workspaceId: 'w1', statusMs: 80,
   });
   t.after(() => ctl.stop());      // 见下方「服务端替用户做的决定」那条的说明
-  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
-  assert.equal(snap.localPort, layoutPort);
+  const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
+  assert.equal(snap.localPort, workspacePort);
 
   // ★ 这个控制器**没有** onTunnelPort —— 顺移后的端口不回报给任何人。写回配置会把
   //   一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也回不去，而
   //   原来那份布局本来是可以回来的（下一会话绑回原端口，那份布局也跟着回来）。
   //   ★ 这一条断言就是那道闸：那个钩子**在控制器上根本不存在**。
   assert.equal(typeof ctl.onTunnelPort, 'undefined',
-    '★ 布局组的端口是只读属性，控制器里不该有把它报告出去的钩子');
+    '★ 工作区的端口是只读属性，控制器里不该有把它报告出去的钩子');
 
   // 制造确定性的 EADDRINUSE：先停掉隧道（它自己正占着这个端口），
   // 再由**测试**把端口占住。不这么做的话，重建时端口是空的，永远不会顺移。
@@ -403,18 +403,18 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   const squatter = net.createServer();
   await new Promise((r, j) => {
     squatter.once('error', j);
-    squatter.listen(layoutPort, '127.0.0.1', r);
+    squatter.listen(workspacePort, '127.0.0.1', r);
   });
   t.after(() => new Promise((r) => squatter.close(r)));
 
   armed = true;
-  await until(() => ctl.snapshot().localPort !== layoutPort,
+  await until(() => ctl.snapshot().localPort !== workspacePort,
     { what: '隧道重建并顺移', timeout: 6000 });
 
   const moved = ctl.snapshot().localPort;
   // ★ 丢掉 Tunnel.start() 返回值的后果：localPort 停在旧值，界面上「本地地址」
   //   那一栏从此指向一个没人监听的端口 —— 而没有任何报错。
-  assert.ok(moved >= layoutPort + 1 && moved <= layoutPort + 19,
+  assert.ok(moved >= workspacePort + 1 && moved <= workspacePort + 19,
     `顺移应当落在扫描区间内，实际 ${moved}`);
   assert.equal(ctl.snapshot().origin, `http://127.0.0.1:${moved}`,
     'origin 必须跟着新端口走');
@@ -426,29 +426,29 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
     '★ 顺移不改写首选端口 —— 要告诉用户下一会话会回到原来的端口');
 });
 
-test('★ 端口报给谁：有布局组的会话一声不吭，没有布局组的必须报实际端口', () => {
+test('★ 端口报给谁：有工作区的会话一声不吭，没有工作区的必须报实际端口', () => {
   // ★ 这一条守的是 `_announcePort` 里那个**取反的判据**。写反的后果不是"报错"：
   //   一个中转站会话永远不报端口 ⇒ 用户那份 ssh 配置停在基准端口（或者根本没写），
   //   而面板上会话是绿的、「本地地址」那一栏也对（隧道真的在监听）——
   //   两边的日志里一个字都不提这个回调。
   //
-  //   另一头同样要钉住：**有布局组的会话什么都不做**。端口是布局组的只读属性，
+  //   另一头同样要钉住：**有工作区的会话什么都不做**。端口是工作区的只读属性，
   //   实际值就在快照里（`localPort` / `origin`），不需要再回报给谁。
   const seen = [];
   const be = { async rpc() { return { ok: true, code: 0, data: {} }; } };
 
-  const inLayout = new SessionController({
-    backend: be, layoutId: 'l1', onRelayPort: (p) => seen.push(['layout', p]),
+  const inWorkspace = new SessionController({
+    backend: be, workspaceId: 'w1', onRelayPort: (p) => seen.push(['workspace', p]),
   });
   const relay = new SessionController({
-    backend: be, layoutId: null, onRelayPort: (p) => seen.push(['relay', p]),
+    backend: be, workspaceId: null, onRelayPort: (p) => seen.push(['relay', p]),
   });
 
-  inLayout._announcePort(18080);
+  inWorkspace._announcePort(18080);
   relay._announcePort(18090);
 
   assert.deepEqual(seen, [['relay', 18090]],
-    '★ 有布局组的会话不该把端口报给任何人；没有布局组的必须报 —— 那一份 ssh 配置'
+    '★ 有工作区的会话不该把端口报给任何人；没有工作区的必须报 —— 那一份 ssh 配置'
     + '要反映当前真值，而用户认的别名恒定');
 });
 
@@ -456,12 +456,12 @@ test('★ 会话被守护进程回收后，本地监听必须一起收掉', asyn
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 100 });
 
-  const layoutPort = await freePort();
-  const ctl = new SessionController({ backend, layoutId: 'l1', statusMs: 80 });
+  const workspacePort = await freePort();
+  const ctl = new SessionController({ backend, workspaceId: 'w1', statusMs: 80 });
   t.after(() => ctl.stop());
-  await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
+  await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
-  assert.equal(await portState(layoutPort), 'connected', '跑起来时隧道应当通');
+  assert.equal(await portState(workspacePort), 'connected', '跑起来时隧道应当通');
 
   // 作业被回收（心跳断了 30 分钟后被 scancel 的那种）。
   // ★ 这条路径**不会**经过 stop() —— 用户什么都没点，是守护进程自己收的。
@@ -471,7 +471,7 @@ test('★ 会话被守护进程回收后，本地监听必须一起收掉', asyn
 
   // 留着监听的表现是「页面打不开，但也不报错」：浏览器连得上本地端口，
   // 却被 dial 接到一个已经不存在的目标上。
-  assert.equal(await portState(layoutPort), 'refused',
+  assert.equal(await portState(workspacePort), 'refused',
     '会话结束后本地端口必须拒绝连接（不能挂住，也不能还接着）');
 });
 
@@ -491,13 +491,13 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
     return resp;
   });
 
-  const layoutPort = await freePort();
-  const ctl = new SessionController({ backend, layoutId: 'l1' });
+  const workspacePort = await freePort();
+  const ctl = new SessionController({ backend, workspaceId: 'w1' });
   // ★ 必须注册清理。隧道是个真的 net.Server，不关掉的话 node --test 的事件循环
   //   永远不会空 —— 而 node 18 的 --test **不会**强制退出，于是整个套件挂到超时，
   //   且没有任何测试失败，只有沉默。
   t.after(() => ctl.stop());
-  const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
+  const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
 
   assert.ok(snap, '启动应当成功 —— 有 warning 不代表失败');
   assert.equal(ctl.state, State.RUNNING);

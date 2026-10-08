@@ -58,7 +58,7 @@ let boot = null;
 let connected = false;
 let whoami = null;
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
-let lastSnap = null;         // **前台**那一条的快照，供状态条与布局选择器读它
+let lastSnap = null;         // **前台**那一条的快照，供状态条与工作区选择器读它
 let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
 /**
  * 最近一次的插件清单。界面里有**两处**需要知道"这个会话的插件声明了界面没有"，
@@ -67,8 +67,8 @@ let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台
  */
 let lastPlugins = null;
 
-/** 布局下拉里「新建一个空白布局」那一项的值。不是布局 id，别混。 */
-const NEW_LAYOUT = '__new__';
+/** 工作区下拉里「新建一个空白工作区」那一项的值。不是工作区 id，别混。 */
+const NEW_WORKSPACE = '__new__';
 
 /**
  * 「新建／编辑」表单的状态。
@@ -291,13 +291,13 @@ function renderSnapshot(s) {
   const temp = frontTemporary();
   $('sb-temp').classList.toggle('hidden', !temp);
   $('temp-banner').classList.toggle('hidden', !temp);
-  // 布局选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
-  // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」布局，没有连接就没有对象。
-  // ★ 多一个条件：**前台那条会话真的有布局组**（`s.layoutId`）。
+  // 工作区选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
+  // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」工作区，没有连接就没有对象。
+  // ★ 多一个条件：**前台那条会话真的有工作区**（`s.workspaceId`）。
   //   漏了它的症状是：前台是个中转站会话时选择器还露着，用户改了**没反应** ——
-  //   那条路（`outsideLayout`）两条分支都不走，而界面上一切正常。
-  $('sb-layout-wrap').classList.toggle(
-    'hidden', !(running && boot && boot.activeConnectionId && s && s.layoutId));
+  //   那条路（`outsideWorkspace`）两条分支都不走，而界面上一切正常。
+  $('sb-workspace-wrap').classList.toggle(
+    'hidden', !(running && boot && boot.activeConnectionId && s && s.workspaceId));
 
   // ★★ 这一屏**不参与"露哪一屏"的判定** —— 那是路由的事（见 showScreen）。
   //   按会话状态切换 `sec-connect` / `sec-purpose` / `sec-session` 的话，"用户在
@@ -309,9 +309,9 @@ function renderSnapshot(s) {
   $('job-detail').classList.toggle('hidden', !(live && SCREEN === 'jobs'));
   if (live) renderKv(s);
 
-  renderLayoutSelectors();
-  // 布局下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
-  requestAnimationFrame(drawLayoutLines);
+  renderWorkspaceSelectors();
+  // 工作区下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
+  requestAnimationFrame(drawWorkspaceLines);
 }
 
 /**
@@ -535,7 +535,7 @@ function renderConnections(list) {
   $('conn-empty').classList.toggle('hidden', list.length > 0);
   $('conn-notes').classList.toggle('hidden', list.length === 0);
   // 映射图与列表同生共死：没有连接就没有可映射的东西
-  $('sec-layouts').classList.toggle('hidden', list.length === 0);
+  $('sec-workspaces').classList.toggle('hidden', list.length === 0);
   // 「临时离开」与「断开」只在连着的时候存在 —— 它们是**站点级**的动作（见
   // renderConnections 里那个「连接/进入」按钮的注释）。★ 两个一起切：只切一个的话，
   // 另一个会在没连上的时候露着，而它按下去只能得到一句"控制节点没有回应"。
@@ -581,19 +581,19 @@ function renderConnections(list) {
       m.classList.add('bad');
     }
 
-    // 布局组下拉。文案必须说清「切走会发生什么」—— 切走一个只被自己用着的布局
+    // 工作区下拉。文案必须说清「切走会发生什么」—— 切走一个只被自己用着的工作区
     // 就等于把它删掉（连同里面的标签页和登录状态），这是不可逆的，
-    // 只写一个布局名了事会让用户在毫无预告的情况下丢东西。
-    const lay = document.createElement('select');
-    lay.className = 'lay-pick';
-    lay.title = '这条连接用哪个布局（编辑器窗口布局、打开的标签页、登录状态）';
-    fillLayoutOptions(lay, c.layoutId, c.id);
-    lay.onchange = async () => {
-      const v = lay.value;
-      const r = await applyLayout(c.id, v === NEW_LAYOUT ? null : v);
+    // 只写一个工作区名了事会让用户在毫无预告的情况下丢东西。
+    const pick = document.createElement('select');
+    pick.className = 'ws-pick';
+    pick.title = '这条连接用哪个工作区（编辑器窗口布局、打开的标签页、登录状态）';
+    fillWorkspaceOptions(lay, c.workspaceId, c.id);
+    pick.onchange = async () => {
+      const v = pick.value;
+      const r = await applyWorkspace(c.id, v === NEW_WORKSPACE ? null : v);
       // 失败必须把下拉拨回去 —— 停在一个并未生效的选择上，
       // 界面就在显示一件不成立的事。
-      if (!r.ok) lay.value = c.layoutId;
+      if (!r.ok) pick.value = c.workspaceId;
     };
 
     // ★★ 这一格是**三屏的入口**，而不是"连接/断开"那个开关。
@@ -623,12 +623,12 @@ function renderConnections(list) {
       // 删除现在连带销毁这条连接的私钥，所以要先问一句 —— 它是一条不可逆的操作，
       // 而且用户已经拿去 IDM 注册过的公钥会就此作废（重新建一条要重新注册）。
       //
-      // ★ 还有一样会被删掉：**最后一个用某个布局组的连接被删掉时，那个布局组的
+      // ★ 还有一样会被删掉：**最后一个用某个工作区的连接被删掉时，那个工作区的
       //   数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）—— 主进程那边是
-      //   `commitConfig` → `pruneLayouts` → `clearLayoutStorage`。
-      //   判据与主进程**同源**：`layoutPlan` 的 `soleOwnerId` 就是从"只有这一条
-      //   连接在用它"推出来的，与 `pruneLayouts` 数的是同一件事。
-      const sole = (boot.layouts || []).find((l) => l.soleOwnerId === c.id);
+      //   `commitConfig` → `pruneWorkspaces` → `clearWorkspaceStorage`。
+      //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
+      //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
+      const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
       const sure = window.confirm(
         `删除「${c.user}@${c.host}:${c.port}」？\n\n`
         + '这条连接的私钥会一起删掉。你注册到 IDM 的那把公钥随之作废，'
@@ -655,32 +655,32 @@ function renderConnections(list) {
     box.append(li);
   }
 
-  renderLayoutMap();
+  renderWorkspaceMap();
 }
 
-// ── 布局组 ──────────────────────────────────────────────────────────────────
+// ── 工作区 ──────────────────────────────────────────────────────────────────
 /**
- * 一条连接只用一个布局，一个布局可以被多条连接共用；没有任何连接在用的布局
+ * 一条连接只用一个工作区，一个工作区可以被多条连接共用；没有任何连接在用的工作区
  * 会被主进程回收。
  *
- * ★ 这一段**不做任何推导**。`boot.layouts` 是主进程用 layoutPlan() 算好的
- *   （每组带 members / refCount / soleOwnerId），界面只负责渲染。
+ * ★ 这一段**不做任何推导**。`boot.workspaces` 是主进程用 workspacePlan() 算好的
+ *   （每个工作区带 members / refCount / soleOwnerId），界面只负责渲染。
  *   理由不是懒：界面手里那份随时可能已经陈旧（另一条连接刚被删），而
- *   「切走会不会把这个布局删掉」是一个**不可逆**的判断，必须由主进程说了算。
+ *   「切走会不会把这个工作区删掉」是一个**不可逆**的判断，必须由主进程说了算。
  */
 
-function layoutById(id) {
-  return (boot.layouts || []).find((l) => l.id === id) || null;
+function workspaceById(id) {
+  return (boot.workspaces || []).find((l) => l.id === id) || null;
 }
 
-/** 连接的名字。布局的说明文字里要引用成员，用同一条规则取名才不会两处对不上。 */
+/** 连接的名字。工作区的说明文字里要引用成员，用同一条规则取名才不会两处对不上。 */
 function connName(id) {
   const c = (boot.connections || []).find((x) => x.id === id);
   return c ? (c.label || `${c.user}@${c.host}`) : '另一条连接';
 }
 
-/** 一个布局组后面跟的那句说明。 */
-function layoutNote(l, connId) {
+/** 一个工作区后面跟的那句说明。 */
+function workspaceNote(l, connId) {
   if (!l) return '';
   if (l.refCount === 0) return '（空）';
   if (l.refCount === 1) {
@@ -692,24 +692,24 @@ function layoutNote(l, connId) {
   return `（${l.refCount} 条连接共用）`;
 }
 
-/** 当前活跃连接的布局组 id。 */
-function activeConnLayoutId() {
+/** 当前活跃连接的工作区 id。 */
+function activeConnWorkspaceId() {
   const id = boot && boot.activeConnectionId;
   const c = (boot && boot.connections || []).find((x) => x.id === id);
-  return c ? c.layoutId : null;
+  return c ? c.workspaceId : null;
 }
 
 /**
- * 把一个布局下拉填满。每条连接行一个、状态条一个，**共用同一份 boot.layouts**。
+ * 把一个工作区下拉填满。每条连接行一个、状态条一个，**共用同一份 boot.workspaces**。
  *
- * `keep` 是应当选中的那个组。**找不到就不选**（宁可空着）—— 让下拉停在一个
+ * `keep` 是应当选中的那个工作区。**找不到就不选**（宁可空着）—— 让下拉停在一个
  * 并不生效的值上，用户会以为自己已经切过去了。
  *
  * `sig` 是给状态条用的：它在每次快照推送时都会被重填，而重建 <select> 会把用户
  * 正在展开的列表收起来。内容没变就不动 DOM。
  */
-function fillLayoutOptions(sel, keep, connId) {
-  const list = boot.layouts || [];
+function fillWorkspaceOptions(sel, keep, connId) {
+  const list = boot.workspaces || [];
   const sig = connId + '|' + JSON.stringify(
     list.map((l) => [l.id, l.name, l.refCount, l.soleOwnerId]));
   if (sel.dataset.sig !== sig) {
@@ -717,32 +717,32 @@ function fillLayoutOptions(sel, keep, connId) {
     for (const l of list) {
       const o = document.createElement('option');
       o.value = l.id;
-      o.textContent = `${l.name}${layoutNote(l, connId)}`;
+      o.textContent = `${l.name}${workspaceNote(l, connId)}`;
       sel.append(o);
     }
     const nu = document.createElement('option');
-    nu.value = NEW_LAYOUT;
-    nu.textContent = '＋ 新建空白布局…';
+    nu.value = NEW_WORKSPACE;
+    nu.textContent = '＋ 新建空白工作区…';
     sel.append(nu);
     sel.dataset.sig = sig;
   }
   sel.value = list.some((l) => l.id === keep) ? keep : '';
 }
 
-/** 状态条里那个选择器。它改的是**当前活跃连接**的布局组。 */
-function renderLayoutSelectors() {
-  const sel = $('sb-layout');
+/** 状态条里那个选择器。它改的是**当前活跃连接**的工作区。 */
+function renderWorkspaceSelectors() {
+  const sel = $('sb-workspace');
   if (!sel) return;
-  // 运行期间以快照为准（那才是会话真正跑着的布局）；没有会话时用连接自己的标记。
-  const cur = (lastSnap && lastSnap.layoutId) || activeConnLayoutId();
-  fillLayoutOptions(sel, cur, boot && boot.activeConnectionId);
+  // 运行期间以快照为准（那才是会话真正跑着的工作区）；没有会话时用连接自己的标记。
+  const cur = (lastSnap && lastSnap.workspaceId) || activeConnWorkspaceId();
+  fillWorkspaceOptions(sel, cur, boot && boot.activeConnectionId);
 }
 
 /**
- * 切走一个独占布局之前的二次确认。
+ * 切走一个独占工作区之前的二次确认。
  *
- * 文案里必须出现「未保存的编辑内容会丢失」—— 这比「布局变了」严重得多：
- * 换布局 = 换 origin，浏览器是在**重新加载**那个页面，终端里没保存的东西就没了。
+ * 文案里必须出现「未保存的编辑内容会丢失」—— 这比「工作区变了」严重得多：
+ * 换工作区 = 换 origin，浏览器是在**重新加载**那个页面，终端里没保存的东西就没了。
  * 用户有权在按下去之前知道这一条。
  */
 function confirmDiscard(name) {
@@ -752,67 +752,67 @@ function confirmDiscard(name) {
     `「${name}」现在只有这一条连接在用，切走之后它会被删除。\n\n`
     + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，'
     + '插件写在磁盘上的那些文件也一样 —— 而且找不回来。\n'
-    + (live ? '\n★ 当前页面会重新加载到新布局，未保存的编辑内容会丢失。\n' : '')
+    + (live ? '\n★ 当前页面会重新加载到新工作区，未保存的编辑内容会丢失。\n' : '')
     + '\n确定要切换吗？');
 }
 
 /**
- * 把一条连接切到另一个布局组。**三条入口共用这一条**（连接行下拉、状态条、
+ * 把一条连接切到另一个工作区。**三条入口共用这一条**（连接行下拉、状态条、
  * 映射图上的改名按钮改的是名字，不走这里）。
  *
  * @param {string} connectionId
- * @param {string|null} layoutId  null = 新建一个空白布局并落进去
+ * @param {string|null} workspaceId  null = 新建一个空白工作区并落进去
  * @returns {Promise<{ok:boolean}>} 失败时调用方应把下拉拨回原值
  *
- * ★ 「切走会不会把旧布局删掉」的判定权在**主进程**，不在这里。先照常提交，
+ * ★ 「切走会不会把旧工作区删掉」的判定权在**主进程**，不在这里。先照常提交，
  *   主进程若回 would_discard，我们拿它的原话去问用户，确认了再带 confirmDiscard
  *   重来一次。这样无论界面手里那份 refCount 有多陈旧，问出来的问题都是真的。
  */
-async function applyLayout(connectionId, layoutId) {
-  let r = await window.slurmate.setConnectionLayout({ connectionId, layoutId });
+async function applyWorkspace(connectionId, workspaceId) {
+  let r = await window.slurmate.setConnectionWorkspace({ connectionId, workspaceId });
 
   if (!r.ok && r.code === 'would_discard') {
-    if (!confirmDiscard(r.layoutName)) return { ok: false };
-    r = await window.slurmate.setConnectionLayout(
-      { connectionId, layoutId, confirmDiscard: true });
+    if (!confirmDiscard(r.workspaceName)) return { ok: false };
+    r = await window.slurmate.setConnectionWorkspace(
+      { connectionId, workspaceId, confirmDiscard: true });
   }
   if (!r.ok) {
-    notice('error', r.error || '切换布局失败。');
+    notice('error', r.error || '切换工作区失败。');
     return { ok: false };
   }
 
   // 会话活着时，这一句要说清「作业没动」—— 用户看到页面重新加载，
   // 最容易的联想是「我的作业是不是被重启了」。它没有。
   const wasRunning = lastSnap && lastSnap.state === 'running';
-  boot.layouts = r.layouts || boot.layouts;
+  boot.workspaces = r.workspaces || boot.workspaces;
   boot.connections = r.connections || boot.connections;
   renderConnections(boot.connections);
   notice('info', wasRunning
-    ? '已切换布局。页面会重新加载一次；计算节点上的作业没有受影响，仍然在跑。'
-    : '已切换布局。');
-  // 拉一次权威状态：会话的 layoutId 刚变，界面手里那份还是旧的，而状态条正是
-  // 拿它显示当前布局的 —— 不拉就会继续显示上一个。
+    ? '已切换工作区。页面会重新加载一次；计算节点上的作业没有受影响，仍然在跑。'
+    : '已切换工作区。');
+  // 拉一次权威状态：会话的 workspaceId 刚变，界面手里那份还是旧的，而状态条正是
+  // 拿它显示当前工作区的 —— 不拉就会继续显示上一个。
   renderSessions(await window.slurmate.states());
   return { ok: true };
 }
 
 // ── 映射图 ──────────────────────────────────────────────────────────────────
 // 画线时要拿节点的几何位置，所以渲染出来的节点按 id 存着。
-const mapNodes = { conn: new Map(), layout: new Map() };
+const mapNodes = { conn: new Map(), workspace: new Map() };
 
-function renderLayoutMap() {
-  const connsCol = $('lmap-conns');
-  const laysCol = $('lmap-layouts');
-  if (!connsCol || !laysCol) return;
+function renderWorkspaceMap() {
+  const connsCol = $('wmap-conns');
+  const wsCol = $('wmap-workspaces');
+  if (!connsCol || !wsCol) return;
   connsCol.textContent = '';
-  laysCol.textContent = '';
-  $('lmap-lines').textContent = '';
+  wsCol.textContent = '';
+  $('wmap-lines').textContent = '';
   mapNodes.conn.clear();
-  mapNodes.layout.clear();
+  mapNodes.workspace.clear();
 
   for (const c of boot.connections || []) {
     const n = document.createElement('div');
-    n.className = 'lnode' + (c.id === boot.activeConnectionId ? ' cur' : '');
+    n.className = 'wnode' + (c.id === boot.activeConnectionId ? ' cur' : '');
     n.title = `${c.user}@${c.host}:${c.port}`;
     const nm = document.createElement('span');
     nm.className = 'nm';
@@ -822,16 +822,16 @@ function renderLayoutMap() {
     mapNodes.conn.set(c.id, n);
   }
 
-  const runtime = lastSnap && lastSnap.layoutId;
-  for (const l of boot.layouts || []) {
+  const runtime = lastSnap && lastSnap.workspaceId;
+  for (const l of boot.workspaces || []) {
     const n = document.createElement('div');
-    n.className = 'lnode lay' + (l.id === runtime ? ' cur' : '');
+    n.className = 'wnode ws' + (l.id === runtime ? ' cur' : '');
 
     const nm = document.createElement('span');
     nm.className = 'nm';
     nm.textContent = l.name;
 
-    // 引用计数直接摆出来 —— 「这个布局还有谁在用」正是这张图存在的理由
+    // 引用计数直接摆出来 —— 「这个工作区还有谁在用」正是这张图存在的理由
     const meta = document.createElement('span');
     meta.className = 'meta';
     meta.textContent = l.refCount === 0 ? '没人用'
@@ -843,11 +843,11 @@ function renderLayoutMap() {
     rn.onclick = () => startRename(l, nm);
 
     n.append(nm, meta, rn);
-    laysCol.append(n);
-    mapNodes.layout.set(l.id, n);
+    wsCol.append(n);
+    mapNodes.workspace.set(l.id, n);
   }
 
-  requestAnimationFrame(drawLayoutLines);
+  requestAnimationFrame(drawWorkspaceLines);
 }
 
 /**
@@ -857,11 +857,11 @@ function renderLayoutMap() {
  *   （它禁的是 style="…" 内联样式）。线的粗细颜色走 app.css 的 .edge 类。
  *   坐标全部由 getBoundingClientRect 现算 —— 所以任何一次布局变化之后都要重画。
  */
-function drawLayoutLines() {
-  const box = $('layout-map');
-  const svg = $('lmap-lines');
+function drawWorkspaceLines() {
+  const box = $('workspace-map');
+  const svg = $('wmap-lines');
   if (!box || !svg) return;
-  if (box.classList.contains('hidden') || $('sec-layouts').classList.contains('hidden')) return;
+  if (box.classList.contains('hidden') || $('sec-workspaces').classList.contains('hidden')) return;
   svg.textContent = '';
   const base = box.getBoundingClientRect();
   if (!base.width || !base.height) return;      // 这一屏还没被布局出来
@@ -871,7 +871,7 @@ function drawLayoutLines() {
 
   for (const c of boot.connections || []) {
     const a = mapNodes.conn.get(c.id);
-    const b = mapNodes.layout.get(c.layoutId);
+    const b = mapNodes.workspace.get(c.workspaceId);
     if (!a || !b) continue;                     // 只有一头在，宁可不画也不画半条
     const ra = a.getBoundingClientRect();
     const rb = b.getBoundingClientRect();
@@ -913,9 +913,9 @@ function startRename(l, nm) {
     if (!save) return;
     const name = input.value.trim();
     if (!name || name === l.name) return;
-    const r = await window.slurmate.renameLayout({ layoutId: l.id, name });
+    const r = await window.slurmate.renameWorkspace({ workspaceId: l.id, name });
     if (!r.ok) return notice('error', r.error || '改名失败。');
-    boot.layouts = r.layouts || boot.layouts;
+    boot.workspaces = r.workspaces || boot.workspaces;
     renderConnections(boot.connections);   // 三处入口用的是同一份数据，一起重画
   };
 
@@ -1368,7 +1368,7 @@ function renderInert(pv) {
  * 「本机的插件数据」那一块。
  *
  * 主进程已经把"没人用的"算好了（`app:pluginData`），这里只画。**在用的那些不列** ——
- * 它们不是"问题"，而且那件事有更好的走法：换一个布局组（`＋ 新建空白布局…`）会换
+ * 它们不是"问题"，而且那件事有更好的走法：换一个工作区（`＋ 新建空白工作区…`）会换
  * 分区、重建视图、由插件重新登录，那正是"重置"。
  *
  * ★ 两种"什么都没有"要分开：
@@ -1426,7 +1426,7 @@ function renderPluginData(d) {
     wrap.append(el('p', 'plug-desc',
       `本次运行清掉了 ${reclaimed.count} 份没人管的数据`
       + (who.length ? `（${who.join('；')}）` : '')
-      + '。它们按现在装着的插件**再也读不到**了 —— 那个插件卸载了、那个布局组删了、'
+      + '。它们按现在装着的插件**再也读不到**了 —— 那个插件卸载了、那个工作区删了、'
       + '或者插件换了共享组 —— 留着只会越攒越多，所以对账时自动收掉了。'));
   }
   if (Array.isArray(reclaimed.failed) && reclaimed.failed.length) {
@@ -1452,13 +1452,13 @@ function renderPluginData(d) {
         + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在；还在的话值得报出来。'));
     }
     wrap.append(el('p', 'plug-desc',
-      '插件在运行中攒下的东西按**份**存在本机，一份 = 一个插件 + 共享组 + 布局组。'
+      '插件在运行中攒下的东西按**份**存在本机，一份 = 一个插件 + 共享组 + 工作区。'
       + '一份数据有两个落点：**浏览器里的存储**（编辑器布局、打开的标签页、登录状态），'
       + '以及**插件自己写在磁盘上的文件**。下面这些**没有任何连接在用**：它们要么'
-      + '属于一个已经删掉的布局组，要么属于一个已经不在本机的插件版本。'));
+      + '属于一个已经删掉的工作区，要么属于一个已经不在本机的插件版本。'));
     wrap.append(el('p', 'plug-desc',
       '★ 删掉一份**找不回来** —— 那个插件下次打开会是一份全新的空白存储。'
-      + '想重置**正在用**的那一份，用布局下拉里的「＋ 新建空白布局…」。'));
+      + '想重置**正在用**的那一份，用工作区下拉里的「＋ 新建空白工作区…」。'));
   }
 
   for (const r of rows) {
@@ -2640,17 +2640,17 @@ async function init() {
   //   够得着的像素（与 `sb-reload` / `sb-temp` 同一条理由）。
   $('sb-end').onclick = () => endFrontSession();
 
-  // 状态条里的布局选择器 —— 会话跑起来之后唯一够得着的入口。
-  // 它改的是当前活跃连接的布局组（会话正跑在它上面，所以会立刻换端口重连隧道，
+  // 状态条里的工作区选择器 —— 会话跑起来之后唯一够得着的入口。
+  // 它改的是当前活跃连接的工作区（会话正跑在它上面，所以会立刻换端口重连隧道，
   // 而集群上的作业一动不动）。
-  $('sb-layout').onchange = async () => {
-    const v = $('sb-layout').value;
-    const r = await applyLayout(boot.activeConnectionId, v === NEW_LAYOUT ? null : v);
-    if (!r.ok) renderLayoutSelectors();     // 拨回真正的当前值
+  $('sb-workspace').onchange = async () => {
+    const v = $('sb-workspace').value;
+    const r = await applyWorkspace(boot.activeConnectionId, v === NEW_WORKSPACE ? null : v);
+    if (!r.ok) renderWorkspaceSelectors();     // 拨回真正的当前值
   };
 
   // 窗口大小变了，连线的坐标就全变了。rAF 里重画，等布局定下来。
-  window.addEventListener('resize', () => requestAnimationFrame(drawLayoutLines));
+  window.addEventListener('resize', () => requestAnimationFrame(drawWorkspaceLines));
 
   for (const b of document.querySelectorAll('[data-debug]')) {
     b.onclick = async () => {
@@ -2703,7 +2703,7 @@ async function init() {
       notice('info', (n.kind === 'key-blocked' ? '已拦截：' : '已放行：') + n.text);
       return;
     }
-    // ★ `warn` **要留住**：把它折成 `info` 的话，主进程发来的每一条警告（例如"布局组已删除，但它那份
+    // ★ `warn` **要留住**：把它折成 `info` 的话，主进程发来的每一条警告（例如"工作区已删除，但它那份
     //   浏览器存储没能清干净"）在日志里都长成「信息」—— 而一条显示成信息的失败，与一条
     //   被吞掉的失败是同一件事。
     notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);

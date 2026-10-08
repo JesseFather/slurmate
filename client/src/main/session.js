@@ -159,32 +159,32 @@ function mergeView(prev, next, { fromPush }) {
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
-   *   backend, layoutId, onRelayPort
-   *   getExcludedPorts {() => Set<number>}  「别的布局组占着的端口」，由 index.js
+   *   backend, workspaceId, onRelayPort
+   *   getExcludedPorts {() => Set<number>}  「别的工作区占着的端口」，由 index.js
    *                                        提供 —— 控制器不认识 config，所以注入。
    *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
    *
-   * layoutId 是**布局组**的 id（见 config.js）：它决定本地监听端口、从而决定
+   * workspaceId 是**工作区**的 id（见 config.js）：它决定本地监听端口、从而决定
    * 浏览器 origin 与存储分区。
    *
-   * ★ 但控制器**不解释它，也不把端口回报给谁**。那个数在布局组创建时就定下来了，
-   *   此后**只读**（`config.js` 的 `nextLayoutPort`）。顺移只影响**这一次**会话：
+   * ★ 但控制器**不解释它，也不把端口回报给谁**。那个数在工作区创建时就定下来了，
+   *   此后**只读**（`config.js` 的 `nextWorkspacePort`）。顺移只影响**这一次**会话：
    *   把顺移后的值写回配置，等于把一次**暂时**的冲突变成永久的 origin 变更 ——
    *   冲突消失之后 origin 也回不去了，而那份布局本来是可以回来的。
    *
-   * ★ 中转站会话的 layoutId 是 **null**。布局组存在的全部理由是「浏览器按 origin
+   * ★ 中转站会话的 workspaceId 是 **null**。工作区存在的全部理由是「浏览器按 origin
    *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 ——
-   *   给它分配一个布局组，等于凭空造出一个永远不会被创建的存储分区，还会让
-   *   「运行中切布局」那条路去挪一个 ssh 隧道在用的端口。所以它的端口要**报出去**
+   *   给它分配一个工作区，等于凭空造出一个永远不会被创建的存储分区，还会让
+   *   「运行中切工作区」那条路去挪一个 ssh 隧道在用的端口。所以它的端口要**报出去**
    *   （写进用户那份 ssh 配置的 `Port` 行 —— 那边必须反映当前真值），走 onRelayPort。
    */
-  constructor({ backend, layoutId, onRelayPort, getExcludedPorts,
+  constructor({ backend, workspaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, pushStaleMs,
                 requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
-    this.layoutId = layoutId;
+    this.workspaceId = workspaceId;
     this.onRelayPort = onRelayPort || (() => {});
     this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
@@ -280,7 +280,7 @@ class SessionController extends EventEmitter {
    *   见 plugins/index.js 的 `resolve()`。这里保持原样有两个理由：
    *
    *   一是这个文件不该认识任何插件名 —— 它对"服务种类"的全部知识就是"有这么
-   *   一个字符串"，以及（下面）"这个插件用不用布局组"。加第三个插件时它一行
+   *   一个字符串"，以及（下面）"这个插件用不用工作区"。加第三个插件时它一行
    *   都不用改。
    *
    *   二是**"服务端没说"要原样传下去**：注册表拿 `null`（守护进程明说它不知道）
@@ -322,7 +322,7 @@ class SessionController extends EventEmitter {
     const snap = {
       state: this.state,
       // 中转站会话是 null（见构造函数的说明）。
-      layoutId: this.layoutId,
+      workspaceId: this.workspaceId,
       // 已归一的三种取值之一。界面据此决定「连接」该做什么，**不要**自己猜：
       // null（服务端明说不知道）与 'code-server' 是完全不同的两件事。
       serviceKind: this.serviceKind(),
@@ -657,22 +657,22 @@ class SessionController extends EventEmitter {
   /**
    * 隧道起来了（或被顺移了），把**实际**端口告诉外面。
    *
-   * ★ **只有没有布局组的会话要报。** 它的端口要写进**用户那份 ssh 配置**的
+   * ★ **只有没有工作区的会话要报。** 它的端口要写进**用户那份 ssh 配置**的
    *   `Port` 那一行 —— 那份配置必须在会话活着的每一刻都指向真值，而用户手上
    *   认的那个名字（别名）恒定，端口漂移对他无害。
    *
-   * ★ **有布局组的会话什么都不做。** 那个数在布局组创建时就定下来了、此后只读；
+   * ★ **有工作区的会话什么都不做。** 那个数在工作区创建时就定下来了、此后只读；
    *   它的**实际**值在快照里（`snapshot().localPort` 与 `origin`），谁要用谁去读。
    *   ★ **不要把顺移后的端口写回 config.json**：那对这一次会话没有任何好处
    *   （端口一变 origin 就变、编辑器布局已经重置过了），却把一次**暂时**的冲突
    *   **永久化** —— 冲突消失之后 origin 也回不到最初那个，原来那份布局再也看不到了。
    *
-   * ★ 判据是 `this.layoutId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
-   *   等价（跑在浏览器里的插件才需要布局组），但前者是框架的事实，后者是一个
+   * ★ 判据是 `this.workspaceId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
+   *   等价（跑在浏览器里的插件才需要工作区），但前者是框架的事实，后者是一个
    *   插件名 —— 用名字判，加第三个插件时这里就得改。
    */
   _announcePort(port) {
-    if (!this.layoutId) this.onRelayPort(port);
+    if (!this.workspaceId) this.onRelayPort(port);
   }
 
   /** 建立隧道并开始心跳。 */
@@ -688,10 +688,10 @@ class SessionController extends EventEmitter {
       this._tunnelPort = port;
       this._lastTarget = target;
       this._announcePort(port);
-      if (shifted && this.layoutId) {
+      if (shifted && this.workspaceId) {
         // 换端口意味着 origin 变了，浏览器存在 localStorage 里的编辑器布局会重置。
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
-        // ★ 没有布局组的插件不适用：那边没有浏览器，名字恒定，端口在底下漂移
+        // ★ 没有工作区的插件不适用：那边没有浏览器，名字恒定，端口在底下漂移
         //   是无害的 —— 对它报"布局会重置"是一句纯粹的错误信息。
         //
         // ★ 末句是承重的：顺移**不写回**配置，所以首选端口没被改掉。占用它的是
@@ -716,47 +716,47 @@ class SessionController extends EventEmitter {
     return this.snapshot();
   }
 
-  // ── 换布局组（运行中）────────────────────────────────────────────────────
+  // ── 换工作区（运行中）────────────────────────────────────────────────────
   /**
    * 只把本地监听挪到另一个端口。**不碰会话、不碰心跳、不发任何 RPC。**
    *
-   * 这就是「运行中切换布局组」的全部机制：Slurm 作业、控制节点那边的 session、
+   * 这就是「运行中切换工作区」的全部机制：Slurm 作业、控制节点那边的 session、
    * sessionId、tunnel_target 全程不变 —— 变的只有浏览器这一侧的 origin 与存储分区。
    * 所以它是可断言的：切换前后 sessionId/state 不变，且 RPC 调用数增量为 0。
    *
    * **失败必须回滚**：先 stop 再 start，中间失败时用**空排除集**把原来的端口绑回来
-   * （不能带原来的排除集 —— 里面含着自己旧组的端口，那会把它跳过）。
+   * （不能带原来的排除集 —— 里面含着自己旧工作区的端口，那会把它跳过）。
    * 回滚也失败就进 ERROR 态：绝不留在「状态是 running、实际没有监听」那种状态，
    * 那会让界面显示一切正常而页面根本打不开。
    */
-  async relisten(newLayoutId, preferredPort, excludePorts) {
+  async relisten(newWorkspaceId, preferredPort, excludePorts) {
     const target = this.session && this.session.tunnel_target;
-    if (!target) return { ok: false, error: '还没有隧道目标，无法切换布局组。' };
-    const prevLayout = this.layoutId;
+    if (!target) return { ok: false, error: '还没有隧道目标，无法切换工作区。' };
+    const prevWorkspace = this.workspaceId;
     const prevPort = this._tunnelPort;
 
     await this.tunnel.stop();
     try {
       const { port, shifted } = await this.tunnel.start({
         preferredPort, target, excludePorts });
-      // ★ 换的是**这一次会话的** origin：`layoutId` 与 `_tunnelPort` 一起改，然后
+      // ★ 换的是**这一次会话的** origin：`workspaceId` 与 `_tunnelPort` 一起改，然后
       //   `_emit()` 把新的 origin 带出去。
-      //   **不写回配置** —— 新组的端口是它**被创建时**定下来的那个
-      //   （`config.js` 的 `nextLayoutPort`），顺移只是这一次的事。
-      this.layoutId = newLayoutId;
+      //   **不写回配置** —— 新工作区的端口是它**被创建时**定下来的那个
+      //   （`config.js` 的 `nextWorkspacePort`），顺移只是这一次的事。
+      this.workspaceId = newWorkspaceId;
       this._tunnelPort = port;
       this._emit();
       return { ok: true, port, shifted };
     } catch (e) {
       try {
-        // 回滚：原来的端口和原来的组都放回去（同理，两样一起还原再 _emit）
+        // 回滚：原来的端口和原来的工作区都放回去（同理，两样一起还原再 _emit）
         const back = await this.tunnel.start({ preferredPort: prevPort, target });
-        this.layoutId = prevLayout;
+        this.workspaceId = prevWorkspace;
         this._tunnelPort = back.port;
         this._emit();
       } catch (e2) {
         this._setState(State.ERROR, {
-          error: `切换布局组失败，且原端口 ${prevPort} 也绑不回来了：${e2.message}。`
+          error: `切换工作区失败，且原端口 ${prevPort} 也绑不回来了：${e2.message}。`
                + '作业未受影响，请重新连接。',
         });
         return { ok: false, error: e.message, fatal: true };
@@ -765,9 +765,9 @@ class SessionController extends EventEmitter {
     }
   }
 
-  /** 换一个布局组 id。**只改标记与快照**，端口的挪动由 relisten 负责。 */
-  setLayout(layoutId) {
-    this.layoutId = layoutId;
+  /** 换一个工作区 id。**只改标记与快照**，端口的挪动由 relisten 负责。 */
+  setWorkspace(workspaceId) {
+    this.workspaceId = workspaceId;
     this._emit();
   }
 
@@ -920,10 +920,10 @@ class SessionController extends EventEmitter {
                 excludePorts: this.getExcludedPorts() });
               this._tunnelPort = port;
               // 端口顺移**不写回配置**（理由见 `_announcePort`）。这里只把**实际**
-              // 端口告诉需要它的那一位 —— 没有布局组的会话（它的 ssh 配置里那行
-              // `Port` 必须反映当前真值）；有布局组的会话什么都不用做，实际值在快照里。
+              // 端口告诉需要它的那一位 —— 没有工作区的会话（它的 ssh 配置里那行
+              // `Port` 必须反映当前真值）；有工作区的会话什么都不用做，实际值在快照里。
               this._announcePort(port);
-              if (shifted && this.layoutId) {
+              if (shifted && this.workspaceId) {
                 this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
                              + '浏览器按端口隔离本地存储，编辑器布局会重置一次。'
                              + `首选端口没有被改掉：冲突消失之后，下次启动会回到 ${prevPort}。`;

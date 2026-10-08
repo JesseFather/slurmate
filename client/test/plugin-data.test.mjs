@@ -17,7 +17,7 @@
  *
  * 这一份要钉住的东西只有两样，而它们分属**两种不同的形状**：
  *
- *   · **共享组**那一格有**缺省**（两个键都不写 ⇒ 一个常量组名，所有版本共用一份）
+ *   · **共享组**那一格有**缺省**（两个键都不写 ⇒ 一个常量共享组名，所有版本共用一份）
  *     —— 两个方向基座都填得出来，所以缺省可以填，取哪一边是一个**产品判断**。
  *   · `concurrent` **没有缺省**（作者必须写：能同时开两份，还是只能开一份）——
  *     "你的代码能不能同时处理两份"只有作者知道。`false` ⇒ 身份里**没有实例段**
@@ -86,7 +86,7 @@ test('★★ 缺省：两个键都不写 ⇒ 共用一份，第二段是一个**
   }
 });
 
-test('★ 缺省那个常量本身必须是个**合法的组名**（它进磁盘目录名）', () => {
+test('★ 缺省那个常量本身必须是个**合法的共享组名**（它进磁盘目录名）', () => {
   assert.match(pluginData.DEFAULT_GROUP, pluginData.GROUP_RE,
     '改名改出格 ⇒ 磁盘上会出现一个 identityOfDiskName 认不出的段');
   // ★ 它与"作者显式写了这个名字"**同义** —— 缺省不是一种特殊状态，只是这个取值。
@@ -116,12 +116,12 @@ test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺�
 
 test('★ concurrent: false ⇒ 身份里没有实例段（那个插件同时只有一份）', () => {
   const p = plugin();
-  assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'),
+  assert.deepEqual(pluginData.identityOf(p, 'w0123456789ab'),
     [ID, pluginData.DEFAULT_GROUP],
     '★ 实例段**整段不存在** —— 不是"用一个常量占位"');
   // ★ 这一格就是「不能多开的插件不许同时开两份」那条规则的来源：实例不同而身份相同
   //   ⇒ 两份会话写的是同一个目录。它是声明 `false` 的**推论**，不是另焊上去的限制。
-  assert.equal(partitionOf(p, 'l0123456789ab'), partitionOf(p, 'lffffffffffff'),
+  assert.equal(partitionOf(p, 'w0123456789ab'), partitionOf(p, 'wffffffffffff'),
     '不能多开的插件，哪个实例来都是同一份存储');
   assert.equal(pluginData.hasInstance(p), false);
 });
@@ -129,31 +129,31 @@ test('★ concurrent: false ⇒ 身份里没有实例段（那个插件同时只
 test('声明了 concurrent: true ⇒ 每个实例一份，且插件的完整身份进分区名', () => {
   const p = concurrent();
   assert.equal(pluginData.hasInstance(p), true);
-  assert.deepEqual(pluginData.identityOf(p, 'l0123456789ab'),
-    [ID, 'editor', 'l0123456789ab']);
-  assert.equal(partitionOf(p, 'l0123456789ab'),
-    `persist:${ID}@editor@l0123456789ab`);
-  assert.notEqual(partitionOf(p, 'l0123456789ab'), partitionOf(p, 'lffffffffffff'),
+  assert.deepEqual(pluginData.identityOf(p, 'w0123456789ab'),
+    [ID, 'editor', 'w0123456789ab']);
+  assert.equal(partitionOf(p, 'w0123456789ab'),
+    `persist:${ID}@editor@w0123456789ab`);
+  assert.notEqual(partitionOf(p, 'w0123456789ab'), partitionOf(p, 'wffffffffffff'),
     '两个实例必须是两份存储');
 });
 
 test('声明了 inherit ⇒ 同一组的几个版本共用一份（这正是 code-server 保行为的那一条）', () => {
   const a = concurrent({ version: '1.0.0' });
   const b = concurrent({ version: '1.0.1' });
-  assert.equal(partitionOf(a, 'l0123456789ab'), partitionOf(b, 'l0123456789ab'),
+  assert.equal(partitionOf(a, 'w0123456789ab'), partitionOf(b, 'w0123456789ab'),
     '★ 升级不丢布局，靠的就是这一条 —— 而它今天是从清单里读出来的，'
     + '从前是硬编码在 ensureSurface 的三元表达式里的');
-  // 换了组就是另一份存储（实例轴仍然独立于版本轴）。
-  assert.notEqual(partitionOf(a, 'l0123456789ab'), partitionOf(a, 'lffffffffffff'));
+  // 换了工作区就是另一份存储（实例轴仍然独立于版本轴）。
+  assert.notEqual(partitionOf(a, 'w0123456789ab'), partitionOf(a, 'wffffffffffff'));
 });
 
-test('★ 别的插件共用同一个组名，也不会共用同一份存储', () => {
-  // 组名是**作者自己起的**，两个插件正好都叫 editor 是完全正常的。分区名的头一段
+test('★ 别的插件共用同一个共享组名，也不会共用同一份存储', () => {
+  // 共享组名是**作者自己起的**，两个插件正好都叫 editor 是完全正常的。分区名的头一段
   // 是插件 id，所以它们不会撞 —— 少了这一段（只有末段），
-  // 两个声明了 layout 的插件共用一个组时会读写同一份存储。
+  // 两个声明了 layout 的插件共用一个工作区时会读写同一份存储。
   const other = concurrent({ id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd' });
-  assert.notEqual(partitionOf(concurrent(), 'l0123456789ab'),
-    partitionOf(other, 'l0123456789ab'));
+  assert.notEqual(partitionOf(concurrent(), 'w0123456789ab'),
+    partitionOf(other, 'w0123456789ab'));
 });
 
 test('★ 声明了 concurrent: true 却拿不到实例 ⇒ 抛，不回落成两段', () => {
@@ -173,8 +173,8 @@ test('★ 声明了 concurrent: true 却拿不到实例 ⇒ 抛，不回落成�
 test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 那一段是小写）', () => {
   // Electron 44 的 `MakePartitionName` = `EscapePath(ToLowerASCII(分区名))`。
   assert.equal(pluginData.foldAscii('01M2ABC'), '01m2abc', 'A-Z 各减 32，别的原样');
-  assert.equal(pluginData.diskNameOf(['01M2ABC', 'editor', 'l0123456789ab']),
-    '01m2abc@editor@l0123456789ab');
+  assert.equal(pluginData.diskNameOf(['01M2ABC', 'editor', 'w0123456789ab']),
+    '01m2abc@editor@w0123456789ab');
   // ★ 折叠是对**整个字符串**做的（`MakePartitionName` 就是这样），而合法的那三段里
   //   只有 id 会变 —— 另外两段的字符集本来就只允许小写。这里钉的是"折叠本身作用于
   //   整串"，免得有人以为它只折第一段，然后按"只折第一段"去改它。
@@ -186,11 +186,11 @@ test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 
 
 test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份身份因此永远是兄弟', () => {
   const two = pluginData.dataDirNameOf(['01M2ABC', 'editor']);
-  const three = pluginData.dataDirNameOf(['01M2ABC', 'editor', 'l0123456789ab']);
+  const three = pluginData.dataDirNameOf(['01M2ABC', 'editor', 'w0123456789ab']);
   assert.equal(two, '01m2abc@editor');
-  assert.equal(three, '01m2abc@editor@l0123456789ab');
+  assert.equal(three, '01m2abc@editor@w0123456789ab');
   // ★ 这条断言就是全部。名字里没有分隔符 ⇒ `path.join(根, 名字)` 得到的两个目录
-  //   落在**同一个父目录**下。而如果改成三层目录（`<id>/<组>/<实例>`），`three`
+  //   落在**同一个父目录**下。而如果改成三层目录（`<id>/<共享组>/<实例>`），`three`
   //   就会落在 `two` **里面** —— 而这两份身份**真的会同时存在**：同一个插件 1.0.0
   //   声明 `{inherit:'editor'}`（两段）、2.0.0 声明 `{inherit:'editor',concurrent}`
   //   （三段），`inherit` 的语义正是"这几个版本共享一份"。那时"删掉没人用的
@@ -201,7 +201,7 @@ test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份�
 
 test('★ 两个根下的同一个身份必须同名（对账只有一张"该有的"表）', () => {
   for (const id of [['01M2ABC'], ['01M2ABC', 'editor'],
-    ['01M2ABC', 'editor', 'l0123456789ab']]) {
+    ['01M2ABC', 'editor', 'w0123456789ab']]) {
     assert.equal(pluginData.dataDirNameOf(id), pluginData.diskNameOf(id),
       '分区根与数据根下的同一个身份必须叫同一个名字 —— 对账把两个根放在一起做差，'
       + '靠的就是它。这条红了说明有人只改了其中一个函数。');
@@ -231,8 +231,8 @@ test('★ foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-
 const DISK_ID = '01m2jkhtzgkjbfqqtwyxmqmf2v';
 
 test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段，认不出残缺的', () => {
-  assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@editor@l0123456789ab`),
-    { id: DISK_ID, group: 'editor', instance: 'l0123456789ab' });
+  assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@editor@w0123456789ab`),
+    { id: DISK_ID, group: 'editor', instance: 'w0123456789ab' });
   // ★ 第二段**可以是版本号**（声明了 `data.perVersion: true` 的插件就是），而
   //   `1.0.0` 不匹配 `GROUP_RE` —— 这正是"拿逆向解析当判据"会删掉活数据的那条路：
   //   一个 `perVersion` 的插件，它**当前**那一份存储会被判成"认不出来"。
@@ -240,10 +240,10 @@ test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段�
     { id: DISK_ID, group: '1.0.0', instance: null });
 
   for (const bad of [
-    '', '..', 'editor@l0123456789ab',                    // 第一段不是 ULID
+    '', '..', 'editor@w0123456789ab',                    // 第一段不是 ULID
     '01m2abc@editor',                                    // 第一段长度不对
     `${DISK_ID}@editor@l1@l2`, `${DISK_ID}@editor@l1@l2@l3`,   // 段数不对
-    `${DISK_ID}@`, `${DISK_ID}@@l0123456789ab`,          // 空段
+    `${DISK_ID}@`, `${DISK_ID}@@w0123456789ab`,          // 空段
     DISK_ID,                                             // 只有一段
     `${ID}@editor`,                                      // 大写：磁盘上不会是大写（折叠过）
   ]) {
@@ -253,15 +253,15 @@ test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段�
 });
 
 test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', () => {
-  const a = pluginData.identityOf(concurrent(), 'l0123456789ab');
+  const a = pluginData.identityOf(concurrent(), 'w0123456789ab');
   const back = pluginData.identityOfDiskName(pluginData.diskNameOf(a));
   assert.deepEqual([back.id, back.group, back.instance],
-    [DISK_ID, 'editor', 'l0123456789ab']);
+    [DISK_ID, 'editor', 'w0123456789ab']);
 
   // 两段的那一种，而第二段**两种取值都要走一遍**：
-  //   · 缺省 ⇒ 常量组名；
+  //   · 缺省 ⇒ 常量共享组名；
   //   · `perVersion` ⇒ 版本号，★ 它不匹配 `GROUP_RE`，所以往返里它是承重的那一份
-  //     （"认得出"与"长得像组名"是两件事，`identityOfDiskName` 只要求前者）。
+  //     （"认得出"与"长得像共享组名"是两件事，`identityOfDiskName` 只要求前者）。
   const def = pluginData.identityOf({ id: ID, version: '2.3.4', contributes: {} });
   const back2 = pluginData.identityOfDiskName(pluginData.diskNameOf(def));
   assert.deepEqual([back2.id, back2.group, back2.instance],
@@ -274,41 +274,41 @@ test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', 
 });
 
 test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会**恒为假**', () => {
-  const id = pluginData.identityOf(concurrent(), 'l0123456789ab');
+  const id = pluginData.identityOf(concurrent(), 'w0123456789ab');
   const partition = pluginData.partitionOf(id);
   assert.equal(pluginData.samePartition(partition, pluginData.diskNameOf(id)), true);
   // 没折叠的那一份也认（磁盘上不会出现，但判据不该因此漏掉一整格）。
-  assert.equal(pluginData.samePartition(partition, `${ID}@editor@l0123456789ab`), true);
+  assert.equal(pluginData.samePartition(partition, `${ID}@editor@w0123456789ab`), true);
   // ★ 这一条是这道判据存在的理由：正被界面用着的那一份**最不能误判**
   //   （当成"没人用"就会把它抽掉，而症状只是「页面莫名其妙坏了」）。
-  assert.equal(pluginData.samePartition(partition, 'l0123456789ab'), false);
+  assert.equal(pluginData.samePartition(partition, 'w0123456789ab'), false);
   assert.equal(pluginData.samePartition('editor@x', 'editor@x'), false, '不是 persist: 前缀');
   assert.equal(pluginData.samePartition(null, 'x'), false);
   assert.equal(pluginData.samePartition(partition, null), false);
 });
 
-test('★ 两条判据不是一回事：hasSurface（有没有界面）与 hasLayoutStorage（按不按组）', () => {
+test('★ 两条判据不是一回事：hasSurface（有没有界面）与 hasWorkspaceStorage（按不按工作区分）', () => {
   const many = { inherit: 'editor' };
   const surface = { kind: 'web', path: '/' };
   const cases = [
-    // [contributes, hasSurface, hasLayoutStorage]
+    // [contributes, hasSurface, hasWorkspaceStorage]
     [{ surface, layout: true, concurrent: true, data: many }, true, true],
     // 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）
     [{ layout: true, concurrent: true, data: many }, false, false],
-    // ★ 有界面、但**不能多开**：它**照样有一份分区**，只是不按布局组分。
-    //   回收一个组时不该清它（那是它唯一的一份），而对账必须把它算进"该有的"
-    //   —— 用 hasLayoutStorage 当对账的入口，会让**它活着的那一份**看起来像孤儿，
+    // ★ 有界面、但**不能多开**：它**照样有一份分区**，只是不按工作区分。
+    //   回收一个工作区时不该清它（那是它唯一的一份），而对账必须把它算进"该有的"
+    //   —— 用 hasWorkspaceStorage 当对账的入口，会让**它活着的那一份**看起来像孤儿，
     //   而界面上会给它一个删除按钮。
     [{ surface, layout: true, concurrent: false, data: many }, true, false],
     [{ surface, layout: true, concurrent: false, data: null }, true, false],
   ];
-  for (const [contributes, wantSurface, wantLayout] of cases) {
+  for (const [contributes, wantSurface, wantWorkspace] of cases) {
     const p = { id: ID, version: '1.0.0', contributes };
     assert.equal(pluginData.hasSurface(p), wantSurface, JSON.stringify(contributes));
-    assert.equal(pluginData.hasLayoutStorage(p), wantLayout, JSON.stringify(contributes));
+    assert.equal(pluginData.hasWorkspaceStorage(p), wantWorkspace, JSON.stringify(contributes));
   }
   assert.equal(pluginData.hasSurface(null), false);
-  assert.equal(pluginData.hasLayoutStorage(null), false);
+  assert.equal(pluginData.hasWorkspaceStorage(null), false);
 });
 
 // ── 清单校验：contributes.concurrent 与 contributes.data ────────────────────
@@ -359,9 +359,9 @@ test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不�
   assert.match(bad.error, /contributes\.concurrent 必须是 true 或 false/);
 });
 
-test('contributes.concurrent：★ 能多开要求 layout —— 没有组就没有第二份实例可指', () => {
+test('contributes.concurrent：★ 能多开要求 layout —— 没有工作区就没有第二份实例可指', () => {
   // ★ 这一条是**组合**判定：两半各自都没错，错在放一起。实例键今天只有一个来源
-  //   ——布局组。没有布局组就没有"第二份实例"可指，所以它判在**装之前**
+  //   ——工作区。没有工作区就没有"第二份实例"可指，所以它判在**装之前**
   //   （与 engines 同一条纪律）。
   const noLayout = inspect(manifest({
     contributes: { layout: false, concurrent: true },
@@ -404,10 +404,10 @@ test('contributes.data：形状不对的一份都收不下，且报错说得清�
   // 认不得的键 —— 打错一个键名不该静默变成一个"配了但不生效"的插件
   assert.match(reject({ inheritTo: 'editor' }), /认不得的键：inheritTo/);
   assert.match(reject({ inherit: 'editor', copy: 'x' }), /认不得的键：copy/);
-  // 组名的字符集（它进分区名 = 磁盘目录名）
+  // 共享组名的字符集（它进分区名 = 磁盘目录名）
   for (const bad of ['..', 'a/b', 'Editor', '有中文', '-lead', '', 'a'.repeat(33)]) {
     assert.match(reject({ inherit: bad }), /inherit 必须匹配/,
-      `${JSON.stringify(bad)} 不是一个能进路径的组名`);
+      `${JSON.stringify(bad)} 不是一个能进路径的共享组名`);
   }
 });
 
@@ -459,26 +459,26 @@ test('contributes.data：一个声明都不写的插件是**正常**的（那一
 });
 
 test('★★ slotOf：一个活跃会话占的那个槽（多开的判据就是它）', () => {
-  // ★ 这一条是**整个并发层存在与否**的判据：改回"每次都不同"或者"两个无组插件
+  // ★ 这一条是**整个并发层存在与否**的判据：改回"每次都不同"或者"两个不要工作区的插件
   //   各一个槽"都会让它红，而红的方式正是它要防的那件事。
-  assert.equal(pluginData.slotOf('l0a1b2c3d4e5'), 'layout:l0a1b2c3d4e5');
+  assert.equal(pluginData.slotOf('w0a1b2c3d4e5'), 'workspace:w0a1b2c3d4e5');
 
-  // ★★ **不要布局组的那一整类共用一个槽** —— 这一档是**故意**粗的，而它现在有
+  // ★★ **不要工作区的那一整类共用一个槽** —— 这一档是**故意**粗的，而它现在有
   //    **两层**理由（见 plugin-data.js 的 slotOf 与账本〈保留⑥〉）：
-  //    · 架构层：**没有第二份实例键的来源** —— 实例键就是布局组，而这一类不要组；
+  //    · 架构层：**没有第二份实例键的来源** —— 实例键就是工作区，而这一类不要工作区；
   //    · 作者层：写进用户 ssh 配置的那个别名是插件自己的常量，基座**无从核对**
-  //      两个无组插件的别名会不会撞。
-  //    细一档（按插件 id 分槽）会让两个互不认识的无组插件并存着去抢同一个别名，
+  //      两个不要工作区的插件的别名会不会撞。
+  //    细一档（按插件 id 分槽）会让两个互不认识的不要工作区的插件并存着去抢同一个别名，
   //    而症状是"`ssh slurmate` 连到哪一个是不确定的"，两边都报"已就绪"。
   assert.equal(pluginData.slotOf(null), 'relay');
   assert.equal(pluginData.slotOf(undefined), pluginData.slotOf(null),
-    '两个不同的"不要布局组"的插件必须落进同一个槽');
+    '两个不同的"不要工作区"的插件必须落进同一个槽');
 
-  // 要布局组的：**同组 ⇒ 同槽**（无论是不是同一个插件）；不同组 ⇒ 不同槽。
+  // 要工作区的：**同一工作区 ⇒ 同槽**（无论是不是同一个插件）；不同工作区 ⇒ 不同槽。
   assert.equal(pluginData.slotOf('l1'), pluginData.slotOf('l1'));
   assert.notEqual(pluginData.slotOf('l1'), pluginData.slotOf('l2'));
-  // 要组的与不要组的，永远是两个槽 —— 那条能力（一个 IDE + 一个终端中转）靠它。
+  // 要工作区的与不要工作区的，永远是两个槽 —— 那条能力（一个 IDE + 一个终端中转）靠它。
   assert.notEqual(pluginData.slotOf('l1'), pluginData.slotOf(null));
-  // 两个槽名不会互撞（前缀把它们挡开了，而组 id 是 `l<hex>`，撞不上 `relay`）。
+  // 两个槽名不会互撞（前缀把它们挡开了，而工作区 id 是 `l<hex>`，撞不上 `relay`）。
   assert.notEqual(pluginData.slotOf(null), pluginData.slotOf('relay'));
 });

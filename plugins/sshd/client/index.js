@@ -23,7 +23,7 @@
  *   —— 用户要用的东西跑在他自己的机器上，客户端唯一要做的事就是让
  *   `ssh slurmate` 这个名字能连进来（见 sshconfig.js）。
  *
- * ★ 它也不需要布局组（`contributes.layout = false`）。布局组存在的理由是
+ * ★ 它也不需要工作区（`contributes.layout = false`）。工作区存在的理由是
  *   **浏览器的** localStorage 按 origin 隔离，而中转站没有浏览器。
  */
 

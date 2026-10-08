@@ -182,7 +182,7 @@ class ShellWindow {
    */
   async showSurface({ slot, url, partition, demo = false }) {
     // ★ WebContentsView 的 partition **只在构造时读一次**（就是下面那个 new）。
-    //   所以「换布局组」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
+    //   所以「换工作区」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
     //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
     //   而界面上完全看不出区别。
     //   ★ 判据是**这一个槽**自己的分区，不是"窗口里那块"的 —— 见 index.js 的
@@ -241,7 +241,7 @@ class ShellWindow {
     });
     // 这类页面最容易 OOM。挂了要能提示并重载，而不是留一块白。
     wc.on('render-process-gone', (_e, details) => {
-      // ★ 我们自己拆视图（换布局组）也会走到这里。不区分的话，用户每切一次布局
+      // ★ 我们自己拆视图（换工作区）也会走到这里。不区分的话，用户每切一次工作区
       //   就会看到一条「页面崩溃了」的**假警报** —— 系统报告了一件没发生的事，
       //   正是这个项目一路在清的那类。
       if (this._destroying.has(slot)) return;
@@ -250,7 +250,7 @@ class ShellWindow {
   }
 
   /**
-   * 销毁**某一个槽**的视图。**换布局组时必须走这条** —— partition 是构造期属性，
+   * 销毁**某一个槽**的视图。**换工作区时必须走这条** —— partition 是构造期属性，
    * 不重建就换不了存储分区。
    *
    * 顺序照文件头那条写死：removeChildView → webContents.close() → 引用置 null，
@@ -307,7 +307,7 @@ class ShellWindow {
   /**
    * **某一个槽**那块界面跑在哪个存储分区里。没有那一块时返回 null。
    *
-   * 回收一个布局组时要清它的浏览器存储 —— 而那**绝不能**发生在正被**任何一块**
+   * 回收一个工作区时要清它的浏览器存储 —— 而那**绝不能**发生在正被**任何一块**
    * 视图用着的那个分区上，否则那块界面会连 cookie 带 localStorage 一起被抽掉，
    * 症状只是「页面莫名其妙坏了」。
    */
@@ -455,7 +455,7 @@ class ShellWindow {
     this._layout();
     // ★ 改 URL 只有**一条**通路：index.js 的 `ensureSurface`（它同时看 url 和
     //   partition）。别再加一条「origin 变了就 loadURL」的自动 retarget —— 它只会
-    //   loadURL，**不换 partition、也不重跑登录**，而换布局组要的恰恰是前者，
+    //   loadURL，**不换 partition、也不重跑登录**，而换工作区要的恰恰是前者，
     //   于是两条路必然分叉。
   }
 

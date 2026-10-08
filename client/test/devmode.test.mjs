@@ -325,7 +325,7 @@ test('★ 插件来源：选完当场报"读到几个"，读不出插件就**不
 test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不到"的自己收掉，认不出的不给删',
   async (t) => {
       // ★ 这一条钉的是"认得出**再也读不到**的**自己收掉**"。★ 界面上那个
-      //   「删掉这一份」只服务剩下的那一档（`unused`：布局组还在配置里、只是此刻
+      //   「删掉这一份」只服务剩下的那一档（`unused`：工作区还在配置里、只是此刻
       //   没有连接用它），而"手动删一份真的存在的东西"这条路与自动回收**走的是
       //   同一个 `clearOneRow`**（下面那几条断言钉的正是它把两个根都删干净、并且
       //   让 Chromium 松手）。
@@ -333,11 +333,11 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
       require('../src/main/index.js');
       await new Promise((r) => setTimeout(r, 400));
 
-    // 一台**没配过任何东西**的机器：没有插件、也没有布局组 ⇒ 分区目录里的东西一份都
+    // 一台**没配过任何东西**的机器：没有插件、也没有工作区 ⇒ 分区目录里的东西一份都
     // 不该"有主"。这正是"插件卸载之后留下的那堆"的形状。
     const parts = path.join(userData, 'Partitions');
     const dataRoot = path.join(userData, 'plugin-data');
-    const orphan = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@l0123456789ab';
+    const orphan = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@w0123456789ab';
     fs.mkdirSync(path.join(parts, orphan), { recursive: true });
     fs.writeFileSync(path.join(parts, orphan, 'Cookies'), 'x');
     fs.mkdirSync(path.join(parts, 'slot-1'), { recursive: true });
@@ -352,7 +352,7 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
     // ★★ **0.12 起这两种"再也读不到"的目录由对账自己收掉**（`reclaimOrphans`）——
     //    它们**不再进清单**，因为清单是给用户看的，而这两类不需要他做任何决定
     //    （判据见 `plugin-data-audit.js` 的 `reclaimable`：能进这一档的只有"按当前
-    //    注册表算不出来"的那些；`unused` 那一档——布局组还在配置里——**一份都不碰**）。
+    //    注册表算不出来"的那些；`unused` 那一档——工作区还在配置里——**一份都不碰**）。
     const d = await invoke('app:pluginData');
     assert.equal(d.ok, true);
     assert.equal(d.diskChecked, true, '真实模式要看磁盘');

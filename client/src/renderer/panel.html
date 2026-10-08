@@ -29,14 +29,14 @@
   <span class="sep" id="sb-sep1">|</span>
   <span id="sb-detail"></span>
   <span class="spacer"></span>
-  <!-- 布局选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
-       连接列表和映射图都够不着，这是运行期间唯一还能改布局的入口。
-       它改的是**当前活跃连接**的布局组（没有连接时整个藏起来 —— 它改的是
-       「当前连接的」布局，没有连接就没有对象，摆一个选了也没用的下拉是在骗人）。 -->
-  <span id="sb-layout-wrap" class="sb-pick hidden">
+  <!-- 工作区选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
+       连接列表和映射图都够不着，这是运行期间唯一还能改工作区的入口。
+       它改的是**当前活跃连接**的工作区（没有连接时整个藏起来 —— 它改的是
+       「当前连接的」工作区，没有连接就没有对象，摆一个选了也没用的下拉是在骗人）。 -->
+  <span id="sb-workspace-wrap" class="sb-pick hidden">
     <span class="sep">|</span>
-    <span class="sb-lbl">布局</span>
-    <select id="sb-layout" class="sb-sel"></select>
+    <span class="sb-lbl">工作区</span>
+    <select id="sb-workspace" class="sb-sel"></select>
   </span>
   <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 code-server
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
@@ -130,33 +130,33 @@
         「断开」则<strong>把作业停掉</strong>。
       </p>
 
-      <!-- ── 连接 ↔ 布局 的映射图 ──
-           左列是连接，右列是布局，一条连线表示「这条连接用这个布局」。
-           一条连接的出边恒为 1（它只用一个布局），一个布局的入边不限
+      <!-- ── 连接 ↔ 工作区 的映射图 ──
+           左列是连接，右列是工作区，一条连线表示「这条连接用这个工作区」。
+           一条连接的出边恒为 1（它只用一个工作区），一个工作区的入边不限
            （可以被多条连接共用）—— 这件事看图比看下拉框直观。
            连线用 SVG 的 <path d="…">：`d` 是**几何**属性，不在文件头那条 CSP
            的管辖范围内（它禁的是 style="…"）。所以线的外观一律走 app.css 的
-           class，坐标由 panel.js 现算（见 drawLayoutLines）。 -->
-      <div id="sec-layouts" class="hidden">
-        <h3>连接与布局</h3>
+           class，坐标由 panel.js 现算（见 drawWorkspaceLines）。 -->
+      <div id="sec-workspaces" class="hidden">
+        <h3>连接与工作区</h3>
         <p class="sub">
-          一条连接只用一个布局，一个布局可以被多条连接共用。
-          <strong>没有任何连接在用的布局会被自动删掉</strong> ——
+          一条连接只用一个工作区，一个工作区可以被多条连接共用。
+          <strong>没有任何连接在用的工作区会被自动删掉</strong> ——
           它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。
         </p>
-        <div id="layout-map" class="lmap">
-          <svg id="lmap-lines" class="lmap-lines"></svg>
-          <div class="lmap-col" id="lmap-conns"></div>
-          <div class="lmap-col" id="lmap-layouts"></div>
+        <div id="workspace-map" class="wmap">
+          <svg id="wmap-lines" class="wmap-lines"></svg>
+          <div class="wmap-col" id="wmap-conns"></div>
+          <div class="wmap-col" id="wmap-workspaces"></div>
         </div>
       </div>
     </section>
 
     <!-- ── 本机的插件数据 ──
          插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在本机，
-         一份 = 一个插件 + 共享组 + 布局组（见 packer/docs/PLUGIN-SPEC.md）。这里只说**没有
+         一份 = 一个插件 + 共享组 + 工作区（见 packer/docs/PLUGIN-SPEC.md）。这里只说**没有
          任何连接在用**的那些 —— 在用的那些不是"问题"，而且它们有更好的走法（换一个
-         布局组）。
+         工作区）。
 
          ★ **独立一节，不放进插件列表那一屏**：那一屏要先连上站点才进得去，而
          "本机还剩几份数据"与有没有连接、有没有会话**无关** —— 塞进去会让这块清单

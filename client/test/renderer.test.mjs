@@ -140,17 +140,17 @@ test('panel.html 里没有内联 style —— CSP 会静默丢掉它', () => {
 });
 
 test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
-  for (const sel of ['.lmap-lines', '.lnode', '#statusbar .sb-sel']) {
+  for (const sel of ['.wmap-lines', '.wnode', '#statusbar .sb-sel']) {
     assert.ok(css.includes(sel), `app.css 缺少 ${sel}`);
   }
   // SVG <path> 的默认填充是黑色，不是透明。少了这一条，每条连线都会糊成一块黑斑。
-  assert.match(css, /\.lmap-lines\s+\.edge\s*\{[^}]*fill:\s*none/,
+  assert.match(css, /\.wmap-lines\s+\.edge\s*\{[^}]*fill:\s*none/,
     '.edge 必须显式 fill:none');
   // 连线的坐标是「节点的 getBoundingClientRect 减去容器的」—— 所以 SVG 必须
   // 绝对定位并贴着容器左上角。掉了这两条，SVG 会变成 grid 的第三个子项被排到
   // 两列下面去，而坐标仍按容器算：线会画到框外面，且不报任何错。
-  assert.match(css, /\.lmap\s*\{[^}]*position:\s*relative/, '.lmap 必须是定位容器');
-  assert.match(css, /\.lmap-lines\s*\{[^}]*position:\s*absolute/, '.lmap-lines 必须绝对定位');
+  assert.match(css, /\.wmap\s*\{[^}]*position:\s*relative/, '.wmap 必须是定位容器');
+  assert.match(css, /\.wmap-lines\s*\{[^}]*position:\s*absolute/, '.wmap-lines 必须绝对定位');
 });
 
 // ── ★★ 三屏（v0.9 阶段 5）────────────────────────────────────────────────────
@@ -397,13 +397,13 @@ test('panel.js 不用 window.prompt —— 它在 Electron 里直接抛异常', 
   assert.equal(/window\.prompt\s*\(/.test(js), false);
 });
 
-test('新增的两个布局通道同时登记在 preload 与 panel.js 两侧', () => {
+test('新增的两个工作区通道同时登记在 preload 与 panel.js 两侧', () => {
   // 少一边都是「点了没反应」：preload 少了 → 调不到方法；panel.js 少了 → 没有入口。
-  for (const m of ['setConnectionLayout', 'renameLayout']) {
+  for (const m of ['setConnectionWorkspace', 'renameWorkspace']) {
     assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
   }
-  assert.ok(bridgeCalls().has('setConnectionLayout'), 'panel.js 没有调用 setConnectionLayout');
-  assert.ok(bridgeCalls().has('renameLayout'), 'panel.js 没有调用 renameLayout');
+  assert.ok(bridgeCalls().has('setConnectionWorkspace'), 'panel.js 没有调用 setConnectionWorkspace');
+  assert.ok(bridgeCalls().has('renameWorkspace'), 'panel.js 没有调用 renameWorkspace');
 });
 
 /**
@@ -594,32 +594,32 @@ test('★ 删插件数据的确认框要说清**删的是哪几样**（磁盘上
   assert.match(js, /function placesText/, '清单里的每一行都要说清它在哪几个落点');
 });
 
-test('★ 删连接与切走布局的确认框都要说清「连带删掉那个布局组的数据」', () => {
-  // ★ 这一条与 boot.test.mjs 那条**行为**断言是成对的（「删掉最后一条用某个布局组的
-  //   连接 ⇒ 那个组的两份数据一起清掉」）。只留一边都不成立：
+test('★ 删连接与切走工作区的确认框都要说清「连带删掉那个工作区的数据」', () => {
+  // ★ 这一条与 boot.test.mjs 那条**行为**断言是成对的（「删掉最后一条用某个工作区的
+  //   连接 ⇒ 那个工作区的两份数据一起清掉」）。只留一边都不成立：
   //   · 只有行为断言 ⇒ 真删了而文案没提 = 没有知情同意；
   //   · 只有文本断言 ⇒ 文案说了而实现没做 = 一句不成立的承诺。
   //
-  // ★ 判据必须是"**最后一条**"而不是"删一条就删数据"：还有别的连接指着那个组时，
+  // ★ 判据必须是"**最后一条**"而不是"删一条就删数据"：还有别的连接指着那个工作区时，
   //   数据留着（下一会话还要用它）。文案说错这一点的后果与"没说"一样严重 ——
   //   它把一件**没有发生**的事告诉了用户。
   const delAt = js.indexOf('del.onclick = async () => {');
   assert.notEqual(delAt, -1, 'panel.js 里找不到「删除连接」那一段了');
   const del = js.slice(delAt, delAt + 1800);
   assert.match(del, /soleOwnerId/,
-    '判据要用 layoutPlan 的 soleOwnerId —— 它与主进程数的是同一件事');
+    '判据要用 workspacePlan 的 soleOwnerId —— 它与主进程数的是同一件事');
   assert.match(del, /写在磁盘上的那些文件/, '要说到插件写在磁盘上的那一份');
 
   const cdAt = js.indexOf('function confirmDiscard');
   assert.notEqual(cdAt, -1, 'panel.js 里找不到 confirmDiscard 了');
   const cd = js.slice(cdAt, cdAt + 900);
   assert.match(cd, /插件写在磁盘上的那些文件/,
-    '切走一个组也是回收它 —— 磁盘那一份同样会跟着走');
+    '切走一个工作区也是回收它 —— 磁盘那一份同样会跟着走');
 });
 
 test('★ 主进程发来的 warn 不许被折成 info（显示成信息的失败 = 被吞掉的失败）', () => {
   // 这一条钉的是一处**最坏形状**：`onNotice` 若把除 ok/error 之外的一切都画成
-  // 「信息」，"布局组已删除，但它的浏览器存储没能清干净"这条**警告**就会在日志里长成
+  // 「信息」，"工作区已删除，但它的浏览器存储没能清干净"这条**警告**就会在日志里长成
   // 「信息」—— 那样 `notice()` 的标签表里 `warn: '注意'` 成了一段死代码（没人产生得了
   // 那个 kind）。一条显示成信息的失败，与一条被吞掉的失败是同一件事。
   assert.match(js, /\['ok', 'error', 'warn'\]\s*\.includes\(n\.kind\)/,
@@ -667,11 +667,11 @@ test('★ 标签栏在这 30px 里 —— 它下面是原生视图，放外面�
   assert.match(css, /--bar-h:\s*30px/, '状态条高度还是那个常量');
 });
 
-test('★ 布局选择器只在**前台那条会话真的有布局组**时露出来', () => {
-  // 前台是中转站时（layoutId 为 null）选择器还露着的话，用户改了**没反应** ——
-  // 那条路径（outsideLayout）两条分支都不走，而界面上一切正常。
-  assert.match(js, /sb-layout-wrap[\s\S]{0,240}?layoutId/,
-    'sb-layout-wrap 的露出条件里必须有 layoutId');
+test('★ 工作区选择器只在**前台那条会话真的有工作区**时露出来', () => {
+  // 前台是中转站时（workspaceId 为 null）选择器还露着的话，用户改了**没反应** ——
+  // 那条路径（outsideWorkspace）两条分支都不走，而界面上一切正常。
+  assert.match(js, /sb-workspace-wrap[\s\S]{0,240}?workspaceId/,
+    'sb-workspace-wrap 的露出条件里必须有 workspaceId');
 });
 
 test('★★ 「临时副本」那条提示**两处都有**，而状态条那一份是必须的', () => {

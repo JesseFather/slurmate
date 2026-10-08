@@ -38,7 +38,7 @@ const crypto = require('crypto');
 const atomicWrite = require('./atomic-write.js');
 
 const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
-                    // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
+                    // 5：**工作区**（那时叫「布局组」）取代 slots —— 键本身也换过名字
                     // 6：**站点分发**（trustedPlugins 同意台账 + devPlugins 开关）
                     //
                     // ★ 删键**不升号**：升号是给"必须搬一次"的改动用的，不是给
@@ -69,14 +69,14 @@ const DEFAULTS = {
   schema: SCHEMA,
   // 登录节点连接条目。支持多条是因为同一个登录节点常有多个入口
   // （内网、公网域名、跳板机），换网络环境时不该重新填一遍。
-  connections: [],          // [{ id, label, user, host, port, layoutId }]
+  connections: [],          // [{ id, label, user, host, port, workspaceId }]
   activeConnectionId: null,
   // 主机密钥指纹（TOFU）。键是 "host:port"，值是 "SHA256:…"。
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
   hostKeys: {},
-  // 布局组。一组 = 一个**永不复用**的存储身份 = 一条 code-server 的编辑器布局。
+  // 工作区。一个工作区 = 一个**永不复用**的存储身份 = 一条 code-server 的编辑器布局。
   // 数组顺序即界面顺序（映射图的列序、下拉的选项序都靠它）。
-  layouts: [],              // [{ id, name, port }]
+  workspaces: [],          // [{ id, name, port }]
   // 插件在本机的开关：{ 插件名: { enabled: bool } }。
   //
   // ★ 这是「安装/卸载」在客户端那一半。**缺省是"跟着站点走"**：名字不在表里
@@ -441,41 +441,41 @@ function normalizeConnection(raw, fallbackId) {
     id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newConnectionId()),
     label: label === host ? '' : label,
     user, host, port,
-    // 指向哪个布局组。这里**绝不凭空造一个 id** —— 「连到哪个组」是调用方的决定，
-    // 不是规整函数该猜的（与上面 label 那条同一个道理）。指向不存在的组由
-    // loadLayouts 收束，不留 null 让界面去处理。
-    layoutId: (typeof raw.layoutId === 'string' && raw.layoutId) ? raw.layoutId : null,
+    // 指向哪个工作区。这里**绝不凭空造一个 id** —— 「连到哪个工作区」是调用方的决定，
+    // 不是规整函数该猜的（与上面 label 那条同一个道理）。指向不存在的工作区由
+    // loadWorkspaces 收束，不留 null 让界面去处理。
+    workspaceId: (typeof raw.workspaceId === 'string' && raw.workspaceId) ? raw.workspaceId : null,
   };
 }
 
-// ── 布局组 ──────────────────────────────────────────────────────────────────
+// ── 工作区 ──────────────────────────────────────────────────────────────────
 //
-// 一个布局组 = 一份浏览器存储 = 一份 code-server 的编辑器布局。
+// 一个工作区 = 一份浏览器存储 = 一份 code-server 的编辑器布局。
 //
-// 为什么需要「组」这一层：code-server（VS Code web）把 UI 布局存在浏览器 localStorage 里，
+// 为什么需要「工作区」这一层：code-server（VS Code web）把 UI 布局存在浏览器 localStorage 里，
 // 而 localStorage 按 **origin**（scheme://host:port）隔离 —— 客户端用隧道的本地监听端口
-// 构造 origin，所以「端口不同」就等于「布局不同」。布局组把「哪条连接用哪个端口」变成
-// 用户可控的映射：左侧连接条目、右侧布局组，多对一，引用计数归零即回收。
+// 构造 origin，所以「端口不同」就等于「浏览器存储不同」。工作区把「哪条连接用哪个端口」变成
+// 用户可控的映射：左侧连接条目、右侧工作区，多对一，引用计数归零即回收。
 //
-// ★ 组还担着第二个角色：它是插件运行时数据的**实例键**（见 plugin-data.js 的文件头
+// ★ 工作区还担着第二个角色：它是插件运行时数据的**实例键**（见 plugin-data.js 的文件头
 //   那两条轴）。两件事能共用同一个 id，正是因为它们要的是同一样东西 ——「这几条连接
-//   算同一个」这件事由用户说了算，而不是某个组件自己判。这一节只管组本身（端口、
+//   算同一个」这件事由用户说了算，而不是某个组件自己判。这一节只管工作区本身（端口、
 //   引用计数、回收），"一份数据落在哪个分区"在 plugin-data.js 里。
 
-const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上按需递增
+const WORKSPACE_PORT_BASE = 18080;   // 工作区的起手端口，从这里往上按需递增
 
 /**
- * 兜底那个布局组的 id：**一个常量**，不是铸出来的。
+ * 兜底那个工作区的 id：**一个常量**，不是铸出来的。
  *
- * 有连接、却一个 `layouts[]` 组都没有时（手改过配置，或者第一次配连接就写下了连接），
- * `loadLayouts` 就地补一个「默认布局」。★ 它是**单例** —— 每一次补出来的都是同一个
- * 组，所以它就该是同一个 id。
+ * 有连接、却一个 `workspaces[]` 都没有时（手改过配置，或者第一次配连接就写下了连接），
+ * `loadWorkspaces` 就地补一个「默认工作区」。★ 它是**单例** —— 每一次补出来的都是同一个
+ * 工作区，所以它就该是同一个 id。
  *
- * ★ **这与 `newLayoutId` 那条"永不复用"不冲突**，两者防的不是同一件事：那一条防的是
- *   "**一个随机 id 被发两次**"（A 组被回收之后，它的 id 落到一个**不相干**的新组头上，
- *   于是新组继承 A 的 localStorage）。这里只有一个组，不存在"落到别的组头上"。
+ * ★ **这与 `newWorkspaceId` 那条"永不复用"不冲突**，两者防的不是同一件事：那一条防的是
+ *   "**一个随机 id 被发两次**"（A 工作区被回收之后，它的 id 落到一个**不相干**的新工作区头上，
+ *   于是新工作区继承 A 的 localStorage）。这里只有一个工作区，不存在"落到别的工作区头上"。
  *
- * ★★ **这一格必须是常量，不能是 `newLayoutId()`（随机）**。后果不是"看起来不利索"，
+ * ★★ **这一格必须是常量，不能是 `newWorkspaceId()`（随机）**。后果不是"看起来不利索"，
  *   而是**丢数据**：`loadConfig` **自己不写盘**（见文件头那三条原则），于是
  *
  *       读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
@@ -483,32 +483,32 @@ const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上�
  *
  *   而随机 id 还会在「本机的插件数据」里攒下一份认不出的残留，用户得自己删。
  *
- * ★ 复用它是安全的：这一格唯一的来路是"一个组都没有"，而一个组被回收时
- *   `clearLayoutStorage` 已经把它的分区清掉了 —— 再补出来的那一份是空白的。
+ * ★ 复用它是安全的：这一格唯一的来路是"一个工作区都没有"，而一个工作区被回收时
+ *   `clearWorkspaceStorage` 已经把它的分区清掉了 —— 再补出来的那一份是空白的。
  *
- * 形状必须满足 `LAYOUT_ID_RE`（它进磁盘路径）。取全零是为了**一眼看出它不是铸的**。
+ * 形状必须满足 `WORKSPACE_ID_RE`（它进磁盘路径）。取全零是为了**一眼看出它不是铸的**。
  */
-const DEFAULT_LAYOUT_ID = 'l000000000000';
+const DEFAULT_WORKSPACE_ID = 'w000000000000';
 
 /**
  * 中转站隧道**优先**用的本地端口。
  *
- * ★ 它不是布局组端口，也**不进 config.json**。布局组的存在理由是「浏览器按 origin
+ * ★ 它不是工作区端口，也**不进 config.json**。工作区的存在理由是「浏览器按 origin
  *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 —— 它的
  *   「接口」是 ssh 配置里那个恒定别名，端口只是底下的一个实现细节，写在那边那份
  *   配置的 Port 行里。
  *
- * 所以这个值只是个**起手式**：真被占了（或撞上了某个布局组的端口 —— 排除集里
- * 有全部布局端口，见 index.js 的 getExcludedPorts）隧道会顺移，然后把**实际**
+ * 所以这个值只是个**起手式**：真被占了（或撞上了某个工作区的端口 —— 排除集里
+ * 有全部工作区端口，见 index.js 的 getExcludedPorts）隧道会顺移，然后把**实际**
  * 端口写进 ssh 配置。用户看到的永远是 `ssh slurmate` 这一个名字。
  *
- * 取 18090 而不再往上堆：布局组从 18080 起按需递增，两边各占一段，
+ * 取 18090 而不再往上堆：工作区从 18080 起按需递增，两边各占一段，
  * 日常看不到的碰撞由上面那条排除集兜住。
  */
 const RELAY_PORT_BASE = 18090;
 
 /**
- * 布局组 id 的**形状**。
+ * 工作区 id 的**形状**。
  *
  * ★ 它进分区名，而分区名就是磁盘上的目录名（见 plugin-data.js 的 partitionOf）——
  *   所以字符集必须钉死。`config.json` 是**用户能手改的**，没有这一条，`"id": "../x"`
@@ -516,34 +516,34 @@ const RELAY_PORT_BASE = 18090;
  *   （`persist:plugin-<ULID>` 那条之所以没事，是因为 ULID 有自己的白名单，
  *   **不是这一层在管**。）
  *
- * ★ 它钉的就是 `newLayoutId` 铸出来的那个形状。
+ * ★ 它钉的就是 `newWorkspaceId` 铸出来的那个形状。
  *
- * ★ 新模型还要往同一个字符串里再塞一个组名（清单里的 `contributes.data.inherit`，
+ * ★ 新模型还要往同一个字符串里再塞一个共享组名（清单里的 `contributes.data.inherit`，
  *   或者两个键都不写时那个缺省常量），所以这一格必须先关上。
  */
-const LAYOUT_ID_RE = /^l[0-9a-f]{12}$/;
+const WORKSPACE_ID_RE = /^w[0-9a-f]{12}$/;
 
-/** 随机、**永不复用**。复用会让一个已回收组的存储复活到新组头上。
- *  ——「新建空白布局真的空白」的全部依据：若按端口命名，A 组被回收后端口被新组 B
+/** 随机、**永不复用**。复用会让一个已回收工作区的存储复活到新工作区头上。
+ *  ——「新建空白工作区真的空白」的全部依据：若按端口命名，A 工作区被回收后端口被新工作区 B
  *  复用，B 就会继承 A 的 localStorage 和登录 cookie。 */
-function newLayoutId() {
-  return 'l' + crypto.randomBytes(6).toString('hex');
+function newWorkspaceId() {
+  return 'w' + crypto.randomBytes(6).toString('hex');
 }
 
 /**
- * 规整一个布局组；字段不合法则返回 null（与 normalizeConnection 同规矩，不静默填空）。
+ * 规整一个工作区；字段不合法则返回 null（与 normalizeConnection 同规矩，不静默填空）。
  *
- * ★ id 也要查形状（见 LAYOUT_ID_RE）。不合法的 id **丢掉整个组**，与其它字段不合法
- *   时一致 —— `loadLayouts` 会跳过它，并把原来指着它的连接收束到第一个组上。不这样
+ * ★ id 也要查形状（见 WORKSPACE_ID_RE）。不合法的 id **丢掉整个工作区**，与其它字段不合法
+ *   时一致 —— `loadWorkspaces` 会跳过它，并把原来指着它的连接收束到第一个工作区上。不这样
  *   做的话，一个手改出来的 id 会变成磁盘上一个谁也清不掉的目录。
  */
-function normalizeLayout(raw, fallbackId) {
+function normalizeWorkspace(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
   const port = Number(raw.port);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
   const id = typeof raw.id === 'string' && raw.id ? raw.id
-    : (typeof fallbackId === 'string' && fallbackId ? fallbackId : newLayoutId());
-  if (!LAYOUT_ID_RE.test(id)) return null;
+    : (typeof fallbackId === 'string' && fallbackId ? fallbackId : newWorkspaceId());
+  if (!WORKSPACE_ID_RE.test(id)) return null;
   return {
     id,
     name: String(raw.name || '').trim().slice(0, 40),
@@ -551,14 +551,14 @@ function normalizeLayout(raw, fallbackId) {
   };
 }
 
-function findLayout(cfg, id) {
-  return ((cfg && cfg.layouts) || []).find((l) => l.id === id) || null;
+function findWorkspace(cfg, id) {
+  return ((cfg && cfg.workspaces) || []).find((l) => l.id === id) || null;
 }
 
-/** 已被**其他**布局组占用的端口。给隧道的端口顺移用 —— 见 tunnel.js 的 excludePorts。 */
-function usedLayoutPorts(cfg, exceptId) {
+/** 已被**其他**工作区占用的端口。给隧道的端口顺移用 —— 见 tunnel.js 的 excludePorts。 */
+function usedWorkspacePorts(cfg, exceptId) {
   const s = new Set();
-  for (const l of ((cfg && cfg.layouts) || [])) {
+  for (const l of ((cfg && cfg.workspaces) || [])) {
     if (l && l.id !== exceptId) s.add(l.port);
   }
   return s;
@@ -570,78 +570,78 @@ function usedLayoutPorts(cfg, exceptId) {
  * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
  * 那就等于每次启动都可能换 origin。
  *
- * ★ **调用它的地方只有一个时机：一个布局组被创建的时候。** 此后再没有任何东西改
- *   这个值 —— 端口是布局组的**只读属性**（隧道顺移之后**不**把它写回来：写回来
+ * ★ **调用它的地方只有一个时机：一个工作区被创建的时候。** 此后再没有任何东西改
+ *   这个值 —— 端口是工作区的**只读属性**（隧道顺移之后**不**把它写回来：写回来
  *   等于把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin 也
  *   回不去，而原来那份布局本来是可以回来的）。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  *
  * @param {Set<number>} [extraPorts] **配置之外**还占着的端口。今天唯一的来源是
- *   临时实例那些组（它们**不在** `cfg.layouts` 里，见 index.js 的 `tempLayouts`）。
- *   ★ 不让这个函数自己去问临时组，是因为这一层**只认配置**（`usedLayoutPorts`
+ *   临时实例那些工作区（它们**不在** `cfg.workspaces` 里，见 index.js 的 `tempWorkspaces`）。
+ *   ★ 不让这个函数自己去问临时工作区，是因为这一层**只认配置**（`usedWorkspacePorts`
  *   的语义就是"配置里的"）—— 把第二个来源焊进来，这一层就再也说不清它数的是
  *   什么了。调用方把两半并好再传进来。
- *   ★ 不传 = 只有配置说了算（`app:setConnectionLayout` 那条路就是）。
+ *   ★ 不传 = 只有配置说了算（`app:setConnectionWorkspace` 那条路就是）。
  */
-function nextLayoutPort(cfg, extraPorts) {
-  const used = usedLayoutPorts(cfg, null);
+function nextWorkspacePort(cfg, extraPorts) {
+  const used = usedWorkspacePorts(cfg, null);
   if (extraPorts) for (const p of extraPorts) used.add(p);
-  let p = LAYOUT_PORT_BASE;
+  let p = WORKSPACE_PORT_BASE;
   while (p <= 65535 && used.has(p)) p += 1;
   return p;
 }
 
-/** 「布局 N」，N 取当前没被占用的最小正整数。确定性、不撞名。 */
-function nextLayoutName(cfg) {
-  const taken = new Set(((cfg && cfg.layouts) || [])
-    .map((l) => /^布局 (\d+)$/.exec((l && l.name) || ''))
+/** 「工作区 N」，N 取当前没被占用的最小正整数。确定性、不撞名。 */
+function nextWorkspaceName(cfg) {
+  const taken = new Set(((cfg && cfg.workspaces) || [])
+    .map((l) => /^工作区 (\d+)$/.exec((l && l.name) || ''))
     .filter(Boolean).map((m) => Number(m[1])));
   let n = 1;
   while (taken.has(n)) n += 1;
-  return `布局 ${n}`;
+  return `工作区 ${n}`;
 }
 
-// ★ **别在这里长出一条带回落的取端口函数** —— 一条"组不存在就回落到
-//   `LAYOUT_PORT_BASE`"的路是临时实例这条路上最危险的一格：临时组不在配置里，
+// ★ **别在这里长出一条带回落的取端口函数** —— 一条"工作区不存在就回落到
+//   `WORKSPACE_PORT_BASE`"的路是临时实例这条路上最危险的一格：临时工作区不在配置里，
 //   于是每一个临时实例都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局
 //   都推一条"端口被占、布局会重置"的**假警报**，而且同一份配置在不同启动顺序下会
-//   得到不同的 origin。取端口只有一条路：`index.js` 的 `layoutPortOf`（先查配置、
-//   再查临时组，都没有就抛）。
+//   得到不同的 origin。取端口只有一条路：`index.js` 的 `workspacePortOf`（先查配置、
+//   再查临时工作区，都没有就抛）。
 
 /**
- * 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。
+ * 改一条连接指向哪个工作区。**不落盘** —— 由调用方统一走 commitConfig()。
  */
-function setConnectionLayout(cfg, connId, layoutId) {
+function setConnectionWorkspace(cfg, connId, workspaceId) {
   if (!(cfg.connections || []).some((c) => c.id === connId)) {
     return { ok: false, error: '这条连接不存在。' };
   }
-  if (layoutId && !findLayout(cfg, layoutId)) {
-    return { ok: false, error: '这个布局组不存在。' };
+  if (workspaceId && !findWorkspace(cfg, workspaceId)) {
+    return { ok: false, error: '这个工作区不存在。' };
   }
   cfg.connections = cfg.connections.map(
-    (c) => (c.id === connId ? { ...c, layoutId } : c));
+    (c) => (c.id === connId ? { ...c, workspaceId } : c));
   return { ok: true };
 }
 
 /**
- * 回收引用计数归零的组。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
- * （commitConfig）—— 漏掉一处的后果是某个组永远不被回收。
+ * 回收引用计数归零的工作区。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
+ * （commitConfig）—— 漏掉一处的后果是某个工作区永远不被回收。
  *
- * @returns {{removed: string[]}} 被删掉的组 id（调用方据此清理它们的浏览器存储）
+ * @returns {{removed: string[]}} 被删掉的工作区 id（调用方据此清理它们的浏览器存储）
  */
-function pruneLayouts(cfg) {
+function pruneWorkspaces(cfg) {
   // ★ 一条连接都没有时**不回收**。演示模式（以及「全新安装、还没配任何连接」）
-  //   会有一个不属于任何连接的布局组 —— 它是那次会话的布局身份。在这里把它删掉，
+  //   会有一个不属于任何连接的工作区 —— 它是那次会话的工作区身份。在这里把它删掉，
   //   下次开会话又会造一个新的，而 id 一变 partition 就变，布局白重置一次。
   //   没有任何映射关系要维护的时候，「回收」无事可做。
   if (!(cfg.connections || []).length) return { removed: [] };
 
   const counts = new Map();
   for (const c of (cfg.connections || [])) {
-    if (c.layoutId) counts.set(c.layoutId, (counts.get(c.layoutId) || 0) + 1);
+    if (c.workspaceId) counts.set(c.workspaceId, (counts.get(c.workspaceId) || 0) + 1);
   }
   const removed = [];
-  cfg.layouts = (cfg.layouts || []).filter((l) => {
+  cfg.workspaces = (cfg.workspaces || []).filter((l) => {
     if ((counts.get(l.id) || 0) > 0) return true;
     removed.push(l.id);
     return false;
@@ -655,12 +655,12 @@ function pruneLayouts(cfg) {
  * 所以「要不要二次确认」的判定权必须在主进程。
  *
  * @returns {[{id, name, port, refCount, members:string[], soleOwnerId:string|null}]}
- *   soleOwnerId 非 null 表示「这个布局只被这一条连接使用，切走就会被丢弃」。
+ *   soleOwnerId 非 null 表示「这个工作区只被这一条连接使用，切走就会被丢弃」。
  */
-function layoutPlan(cfg) {
-  return ((cfg && cfg.layouts) || []).map((l) => {
+function workspacePlan(cfg) {
+  return ((cfg && cfg.workspaces) || []).map((l) => {
     const members = (cfg.connections || [])
-      .filter((c) => c.layoutId === l.id).map((c) => c.id);
+      .filter((c) => c.workspaceId === l.id).map((c) => c.id);
     return {
       id: l.id, name: l.name, port: l.port,
       refCount: members.length,
@@ -671,34 +671,34 @@ function layoutPlan(cfg) {
 }
 
 /**
- * 解析布局组列表。
+ * 解析工作区列表。
  *
- * 组只有**一条来路**：磁盘上的 `layouts[]`。一个都没有而有连接时，就地补一个默认组。
+ * 工作区只有**一条来路**：磁盘上的 `workspaces[]`。一个都没有而有连接时，就地补一个默认工作区。
  */
-function loadLayouts(raw, connections) {
+function loadWorkspaces(raw, connections) {
   const out = [];
   const seen = new Set();
-  if (Array.isArray(raw.layouts)) {
-    for (const l of raw.layouts) {
-      const n = normalizeLayout(l, l && l.id);
+  if (Array.isArray(raw.workspaces)) {
+    for (const l of raw.workspaces) {
+      const n = normalizeWorkspace(l, l && l.id);
       if (!n || seen.has(n.id)) continue;
-      // 端口撞车就地挪开 —— 两个组声称同一个端口会让它们每次启动互相抢，
-      // 布局在两个 origin 之间反复横跳，而界面上一切正常。
-      if (out.some((x) => x.port === n.port)) n.port = nextLayoutPort({ layouts: out });
+      // 端口撞车就地挪开 —— 两个工作区声称同一个端口会让它们每次启动互相抢，
+      // 工作区在两个 origin 之间反复横跳，而界面上一切正常。
+      if (out.some((x) => x.port === n.port)) n.port = nextWorkspacePort({ workspaces: out });
       seen.add(n.id);
       out.push(n);
     }
   }
-  // 兜底：有连接却一个组都没有（手改过配置，或第一次配连接就写下了连接）。
-  // ★ id 是**常量**，不是铸出来的 —— 理由写在 `DEFAULT_LAYOUT_ID` 那一段注释里。
+  // 兜底：有连接却一个工作区都没有（手改过配置，或第一次配连接就写下了连接）。
+  // ★ id 是**常量**，不是铸出来的 —— 理由写在 `DEFAULT_WORKSPACE_ID` 那一段注释里。
   if (out.length === 0 && connections.length > 0) {
-    out.push({ id: DEFAULT_LAYOUT_ID, name: '默认布局', port: LAYOUT_PORT_BASE });
+    out.push({ id: DEFAULT_WORKSPACE_ID, name: '默认工作区', port: WORKSPACE_PORT_BASE });
   }
-  // 每条连接都必须落在一个**存在**的组里。指向不存在的组 = 界面上一片空白，
+  // 每条连接都必须落在一个**存在**的工作区里。指向不存在的工作区 = 界面上一片空白，
   // 而用户看不出为什么。在这里收束掉，而不是让 UI 去处理 null。
   const first = out[0] ? out[0].id : null;
   for (const c of connections) {
-    if (!out.some((l) => l.id === c.layoutId)) c.layoutId = first;
+    if (!out.some((l) => l.id === c.workspaceId)) c.workspaceId = first;
   }
   return out;
 }
@@ -779,9 +779,9 @@ function loadConfig(dir) {
     ? raw.activeConnectionId
     : (list[0] ? list[0].id : null);
 
-  // 布局组必须在连接之后解析：loadLayouts 要读 connections 才能把每条连接收束到一个
-  // 存在的组里，而连接侧的去重可能已经剔掉了几条。
-  cfg.layouts = loadLayouts(raw, list);
+  // 工作区必须在连接之后解析：loadWorkspaces 要读 connections 才能把每条连接收束到一个
+  // 存在的工作区里，而连接侧的去重可能已经剔掉了几条。
+  cfg.workspaces = loadWorkspaces(raw, list);
 
   return cfg;
 }
@@ -794,13 +794,13 @@ function loadConfig(dir) {
  *   列表会越点越长，而用户分不清该点哪一条。
  *
  * @param {object} opts
- *   allowLayoutChange {boolean} 复用已有条目时是否允许改它的 layoutId。默认**不许**：
- *                               按地址命中另一条（用户没带 id）却把它的布局组改掉，
+ *   allowWorkspaceChange {boolean} 复用已有条目时是否允许改它的 workspaceId。默认**不许**：
+ *                               按地址命中另一条（用户没带 id）却把它的工作区改掉，
  *                               是一次完全看不见的副作用。
  *
- * 新建的那条**不在这里**决定布局组：`layoutId` 留 null，由 index.js 的
- * ensureConnectionLayout 统一分配（它需要 cfg 才能建新组）。两处都做会让
- * 「新连接落到哪个组」这条策略有两个说法。
+ * 新建的那条**不在这里**决定工作区：`workspaceId` 留 null，由 index.js 的
+ * ensureConnectionWorkspace 统一分配（它需要 cfg 才能建新工作区）。两处都做会让
+ * 「新连接落到哪个工作区」这条策略有两个说法。
  * @returns {{connection:object, created:boolean}
  *          | {conflict:object}
  *          | null}  输入不合法时返回 null
@@ -834,10 +834,10 @@ function upsertConnection(cfg, input, opts = {}) {
   }
 
   // 复用旧条目：**id 用回旧的那个**（可能已经被 activeConnectionId 之类引用着）。
-  // layoutId 由 ...prev 原样带过来 —— 「按地址命中已有条目」这条路径不该顺手改它的
-  // 布局组，那是一次完全看不见的副作用。要改必须显式传 allowLayoutChange。
+  // workspaceId 由 ...prev 原样带过来 —— 「按地址命中已有条目」这条路径不该顺手改它的
+  // 工作区，那是一次完全看不见的副作用。要改必须显式传 allowWorkspaceChange。
   const next = { ...prev, user: conn.user, host: conn.host, port: conn.port };
-  if (opts.allowLayoutChange && conn.layoutId) next.layoutId = conn.layoutId;
+  if (opts.allowWorkspaceChange && conn.workspaceId) next.workspaceId = conn.workspaceId;
 
   // 备注按两条不同的语义处理，因为**空备注在这两条路径上意思不同**：
   //   · 编辑（输入带了 id）—— 表单里那一栏就是当前值，清空即清空，必须写回去；
@@ -1026,11 +1026,11 @@ function removePendingGoodbye(dir, sessionId) {
 module.exports = {
   SCHEMA, DEFAULTS, PENDING_ID,
   loadConfig, saveConfig,
-  // 布局组
+  // 工作区
   RELAY_PORT_BASE,
-  newLayoutId, normalizeLayout, findLayout, usedLayoutPorts, nextLayoutPort,
-  nextLayoutName, setConnectionLayout,
-  pruneLayouts, layoutPlan,
+  newWorkspaceId, normalizeWorkspace, findWorkspace, usedWorkspacePorts, nextWorkspacePort,
+  nextWorkspaceName, setConnectionWorkspace,
+  pruneWorkspaces, workspacePlan,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled,
