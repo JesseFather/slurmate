@@ -169,7 +169,7 @@ class SessionController extends EventEmitter {
    * 监听端口、从而决定浏览器 origin 与存储分区。
    *
    * ★ 但控制器**不解释它，也不把端口回报给谁**。那个数在工作区创建时就定下来了，
-   *   此后**只读**（`config.js` 的 `nextSpacePort`）。顺移只影响**这一次**会话：
+   *   此后**只读**（`config.js` 的 `assignSpacePorts`）。顺移只影响**这一次**会话：
    *   把顺移后的值写回配置，等于把一次**暂时**的冲突变成永久的 origin 变更 ——
    *   冲突消失之后 origin 也回不去了，而那份布局本来是可以回来的。
    *
@@ -742,7 +742,7 @@ class SessionController extends EventEmitter {
       // ★ 换的是**这一次会话的** origin：`spaceId` 与 `_tunnelPort` 一起改，然后
       //   `_emit()` 把新的 origin 带出去。
       //   **不写回配置** —— 新工作区的端口是它**被创建时**定下来的那个
-      //   （`config.js` 的 `nextSpacePort`），顺移只是这一次的事。
+      //   （`config.js` 的 `assignSpacePorts`），顺移只是这一次的事。
       this.spaceId = newSpaceId;
       this._tunnelPort = port;
       this._emit();

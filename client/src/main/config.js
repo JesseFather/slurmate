@@ -610,9 +610,11 @@ function newSpaceId() {
  *     （"共享组名还是版本号"由 `inspectDir` 判，而一个值可能两者都是）；
  *   · `id`      —— 见 `SPACE_ID_RE`。
  *
- * ★ `ports` **必须是列表，而且从第一天就是列表** —— 个数由清单声明（今天恰好是 1）。
- *   写成"先一个数、以后再改 schema"会让"个数"这件事在盘上出现两种形状，而读的人
- *   得先猜是哪一种。
+ * ★ `ports` **必须是列表** —— 个数由清单声明（`contributes.ports`，见 `plugin-data.js`
+ *   的 `portCountOf`），今天每一个插件声明的都是 0 或 1。写成"就先一个数"会让"个数"
+ *   在盘上长出第二种形状，而读的人得先猜是哪一种；列表则从第一天就答得了"更多"，
+ *   到时不用动 schema。
+ *   ★ 而**列表不能空**：空的这一份整份丢掉（见下），于是引用表会指着一份不存在的数据。
  */
 function normalizeSpace(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
@@ -643,7 +645,8 @@ function usedSpacePorts(cfg, exceptId) {
 }
 
 /**
- * 下一个可用端口：从 18080 起，跳过已被占用的。**确定性**，不探测 OS。
+ * 一份数据**该占哪几个端口**：从 18080 起，取 `count` 个当前没被占用的。
+ * **确定性**，不探测 OS。
  *
  * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
  * 那就等于每次启动都可能换 origin。
@@ -654,19 +657,32 @@ function usedSpacePorts(cfg, exceptId) {
  *   回不去，而原来那份布局本来是可以回来的）。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  *
+ * ★ **它是"个数"唯一落地的地方。** 个数由清单声明（`plugin-data.js` 的
+ *   `portCountOf`），而"哪几个"由这里算 —— 这两件事分开是有意的：前者是作者的话，
+ *   后者是这台机器当前的占用情况。
+ *
+ * @param {number} count 要几个。**必须 ≥ 1** —— 一份数据的 ports 列表不能是空的
+ *   （空列表会让 `normalizeSpace` 把整份数据丢掉，于是引用表指着一份不存在的东西）。
+ *   调用方保证得到这一点：只有 `needsSpace` 为真的插件会走到这里。
  * @param {Set<number>} [extraPorts] **配置之外**还占着的端口。今天唯一的来源是
  *   临时那一份数据（它们**不在** `cfg.spaces` 里，见 index.js 的 `tempSpaces`）。
  *   ★ 不让这个函数自己去问临时那份，是因为这一层**只认配置**（`usedSpacePorts`
  *   的语义就是"配置里的"）—— 把第二个来源焊进来，这一层就再也说不清它数的是
  *   什么了。调用方把两半并好再传进来。
  *   ★ 不传 = 只有配置说了算。
+ * @returns {number[]} 升序，长度等于 `count`。够不够得看 65535 那道天花板 ——
+ *   取不满时返回的列表**短一截**，由 `normalizeSpace`（至少一个）与调用方各自把关。
  */
-function nextSpacePort(cfg, extraPorts) {
+function assignSpacePorts(cfg, count, extraPorts) {
   const used = usedSpacePorts(cfg, null);
   if (extraPorts) for (const p of extraPorts) used.add(p);
+  const out = [];
   let p = SPACE_PORT_BASE;
-  while (p <= 65535 && used.has(p)) p += 1;
-  return p;
+  while (out.length < count && p <= 65535) {
+    if (!used.has(p)) { used.add(p); out.push(p); }
+    p += 1;
+  }
+  return out;
 }
 
 /** 「工作区 N」，N 取当前没被占用的最小正整数。确定性、不撞名。 */
@@ -695,13 +711,15 @@ function nextWorkspaceName(cfg) {
  *        换了共享组（或者改了 `perVersion`），那一份数据这个插件已经**读不到**了
  *        （路径的中间那一段变了），必须新开一份。继续用旧的那份会让插件读写一份
  *        它自己声明过"不再继承"的数据。
- * @param {Set<number>} [extraPorts] 见 `nextSpacePort`
+ * @param {number} count 这一份数据要几个端口（`plugin-data.js` 的 `portCountOf`）。
+ *        ★ 同样由调用方给，理由同上：个数是作者的话，这一层只负责把它兑现成端口。
+ * @param {Set<number>} [extraPorts] 见 `assignSpacePorts`
  * @returns {{space:object, created:boolean}|null} 工作区不存在时 null。
  *   `created` 是**给调用方省一次无谓的落盘**用的（这一格绝大多数调用都命中已有的那一份）。
  *
  * ★ **不落盘** —— 由调用方统一走 saveConfig / commitConfig（与 setConnectionWorkspace 同规矩）。
  */
-function spaceFor(cfg, workspaceId, pluginId, group, extraPorts) {
+function spaceFor(cfg, workspaceId, pluginId, group, count, extraPorts) {
   const ws = findWorkspace(cfg, workspaceId);
   if (!ws) return null;
   if (!ws.refs || typeof ws.refs !== 'object') ws.refs = {};
@@ -710,11 +728,15 @@ function spaceFor(cfg, workspaceId, pluginId, group, extraPorts) {
   //   就地改 `cur.group` 是错的 —— 那等于把一份已经写好的数据改名，而它下面那份
   //   存储还在旧名字的目录里。
   if (cur && cur.group === group) return { space: cur, created: false };
+  // ★ 地板，不是缺省：一张 ports 列表**不能是空的**（`normalizeSpace` 会把空的那份
+  //   整份丢掉，于是引用表指着一份不存在的数据 —— 一个下次启动才会发作的静默损坏）。
+  //   走到这里的调用方都保证 ≥ 1（`needsSpace`），这一句只是让"万一"有一个说得清的下场。
+  const n = Number.isInteger(count) && count > 0 ? count : 1;
   const space = {
     id: newSpaceId(),
     pluginId,
     group,
-    ports: [nextSpacePort(cfg, extraPorts)],
+    ports: assignSpacePorts(cfg, n, extraPorts),
   };
   cfg.spaces = [...(cfg.spaces || []), space];
   ws.refs[pluginId] = space.id;
@@ -843,8 +865,10 @@ function loadSpaces(raw) {
       if (!n || seen.has(n.id)) continue;
       // 端口撞车就地挪开 —— 两份数据声称同一个端口会让它们每次启动互相抢，
       // 会话在两个 origin 之间反复横跳，而界面上一切正常。
+      //   ★ 整份列表一起挪（`assignSpacePorts` 按**个数**取），不是只挪撞上的那一个：
+      //     逐个挪的话，剩下那几个可能仍然与别人撞。
       if (n.ports.some((p) => out.some((x) => x.ports.includes(p)))) {
-        n.ports = [nextSpacePort({ spaces: out })];
+        n.ports = assignSpacePorts({ spaces: out }, n.ports.length, null);
       }
       seen.add(n.id);
       out.push(n);
@@ -1224,7 +1248,7 @@ module.exports = {
   pruneWorkspaces, workspacePlan,
   // 数据空间（一份存储 + 它自己的端口）
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
-  usedSpacePorts, nextSpacePort, spaceFor, spaceConsumers, pruneSpaces,
+  usedSpacePorts, assignSpacePorts, spaceFor, spaceConsumers, pruneSpaces,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled,

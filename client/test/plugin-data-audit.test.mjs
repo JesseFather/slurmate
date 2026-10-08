@@ -49,7 +49,7 @@ const OTHER_SPACE = 'sffffffffffff';
 const cs = (over = {}) => ({
   id: CS, name: 'code-server', displayName: '开发环境', version: '1.0.0',
   contributes: {
-    surface: { kind: 'web', path: '/' }, layout: true, concurrent: true,
+    surface: { kind: 'web', path: '/' }, ports: 1, concurrent: true,
     data: { inherit: 'editor' },
   },
   ...over,
@@ -58,7 +58,7 @@ const cs = (over = {}) => ({
 /** 有界面、但**不能多开**：只有一份存储，不属于任何工作区。 */
 const oneStore = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
-  contributes: { surface: { kind: 'web', path: '/' }, layout: false, concurrent: false,
+  contributes: { surface: { kind: 'web', path: '/' }, ports: 0, concurrent: false,
     data: null },
 });
 
@@ -86,7 +86,7 @@ const disk = (identity) => pluginData.diskNameOf(identity);
  *  框架连一块界面都不建），但声明了数据、而且**不能多开**。 */
 const relay = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
-  contributes: { layout: false, submitPubkey: true, concurrent: false,
+  contributes: { ports: 0, submitPubkey: true, concurrent: false,
     data: { inherit: 'relay' } },
 });
 
@@ -317,7 +317,7 @@ test('★ 没人用的工作区：数据在、而没有任何连接指着它 ⇒
 test('★ 一个工作区里两个插件 = 各一份数据各一行（一份数据 = 一个分区）', () => {
   const otherId = '01M2JKHTZGKJBFQQTWYXMQMF2W';
   const two = [cs(), { ...oneStore(), id: otherId,
-    contributes: { ...oneStore().contributes, layout: true, concurrent: true,
+    contributes: { ...oneStore().contributes, ports: 1, concurrent: true,
       data: { inherit: 'ssh' } } }];
   const spaces = [sp(SPACE, CS, 'editor', 18080), sp('s0000000000ff', otherId, 'ssh', 18081)];
   const names = [disk(csIn(SPACE)),

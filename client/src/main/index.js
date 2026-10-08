@@ -1328,12 +1328,14 @@ function ensureConnectionWorkspace(conn) {
  *
  * ★ 第二段（共享组）由 `pluginData.groupOf` 现算，交给 `config.spaceFor` 与记着的那一份
  *   对照 —— 对不上就新开一份，见那个函数的注释。
+ * ★ 端口个数同样由清单现算（`pluginData.portCountOf`）—— 一份新建的数据要几个端口
+ *   是作者的话，而**哪几个**由 `config.assignSpacePorts` 按这台机器当前的占用算出来。
  * ★ 落盘是承重的：这一份的 id 决定分区与目录名，下一次启动要能算出同一个名字。
  *   不写的话下一次开会话会铸一个新的 ⇒ **用户上一轮攒的布局凭空消失**（且不报错）。
  */
 function spaceForSession(workspaceId, plugin) {
   const r = config.spaceFor(cfg, workspaceId, plugin.id, pluginData.groupOf(plugin),
-    usedSpacePortsAll(null));
+    pluginData.portCountOf(plugin), usedSpacePortsAll(null));
   if (!r) return null;
   if (r.created) config.saveConfig(cfgDir, cfg);
   return r.space;
@@ -1394,7 +1396,11 @@ function liveSessionOnWorkspace(workspaceId) {
  *   （`SPACE_PORT_BASE`）的实现够得着**临时那一份**这条新路，而它给出的答案是持有者
  *   那个端口（见上）。
  *
- * ★ `ports` 是列表（个数由清单声明，今天恰好是 1），而**第一格是那个 origin**。
+ * ★ `ports` 是列表（个数由清单声明，见 `plugin-data.js` 的 `portCountOf`；上界今天
+ *   是 1），而**第一格就是那个 origin**。
+ *   ★★ 取**第一格**而不是"唯一那一格"是有意的：列表的形状从第一天就在（见
+ *     `config.js` 的 `normalizeSpace`），而"框架兑现得了几个"夹在清单校验那一侧
+ *     （`MAX_PLUGIN_PORTS`）。上界挪动的**那一天**，这个函数是唯一要跟着改的地方。
  */
 function spacePortOf(spaceId) {
   const s = findSpaceAll(spaceId);
@@ -1453,7 +1459,7 @@ function usedSpacePortsAll(exceptId) {
  * ★ 它**会造一份临时数据**，所以只在"这次会话确实要起"的路径上调（槽闸之前那一步），
  *   不要拿它去问"会是什么" —— 那样每问一次就漏一份临时数据。
  *
- * @param {object} baseSpace 引用表指着的那一份（调用方已经保证这个插件要工作区）
+ * @param {object} baseSpace 引用表指着的那一份（调用方已经保证这个插件要数据空间）
  * @param {object} plugin
  * @returns {object} 这次会话用的那一份
  */
@@ -1466,7 +1472,9 @@ function claimSpace(baseSpace, plugin) {
     group: baseSpace.group,
     // ★ 端口要跳过**两个来源**：配置里那些数据，以及本进程里已经活着的临时那些。
     //   少了后者，两份临时数据会拿到同一个首选端口（见 `usedSpacePortsAll`）。
-    ports: [config.nextSpacePort(cfg, usedSpacePortsAll(null))],
+    //   ★ 个数跟着**持有者那一份**走，不跟着清单现算：临时这份必须与 base 同形，
+    //     否则"多开＝同一份数据的副本"这件事在端口个数上就先不一致了。
+    ports: config.assignSpacePorts(cfg, baseSpace.ports.length, usedSpacePortsAll(null)),
   };
   tempSpaces.set(t.id, t);
   return t;
@@ -1535,7 +1543,7 @@ function snapshotTempData(plugin, baseSpace, tempSpace) {
  * 改主机密钥与引用计数无关。**那不是漏改。**
  *
  * ★ 而端口**没有**写盘点 —— 它在数据被创建时定下来、此后只读
- *   （见 config.js 的 `nextSpacePort`），所以 `pruneSpaces` 之外没有任何东西
+ *   （见 config.js 的 `assignSpacePorts`），所以 `pruneSpaces` 之外没有任何东西
  *   需要为它操心。
  */
 function commitConfig() {
@@ -2269,7 +2277,7 @@ async function startSession(resources, serviceKind) {
   // ★ 工作区是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
   //   编辑器布局），不跑浏览器的不给 —— 给它一个只会凭空造出一份永远不会被
   //   创建的存储，并让「运行中切工作区」去挪一个正在用的隧道端口。
-  const baseWorkspaceId = plugin.contributes.layout ? workspaceForSession(conn) : null;
+  const baseWorkspaceId = pluginData.needsSpace(plugin) ? workspaceForSession(conn) : null;
   // ★ 而工作区里还要有**这个插件的那一份数据** —— 端口、分区、数据目录全从它算。
   //   `spaceForSession` 会在没有时就地建一份并落盘（`0.y` 不迁移，所以每一份都是新的）。
   const baseSpace = baseWorkspaceId === null
@@ -2329,10 +2337,10 @@ async function startSession(resources, serviceKind) {
   //   它手里已经攥着那个对象了。
   // ★★ **这一段（controller 的构造与 `sessions.set`）排在 `prepare()` **之前**，
   //    是为了 `ctx.dataDir()`。** 那个能力从 `rec.controller.spaceId` 现算第三段，
-  //    而 `prepare()` 若跑在 controller **构造之前** ⇒ 一个「要工作区
-  //    （`layout: true`）**又**带 `prepare()`」的插件，一提交就撞上 `identityOf`
+  //    而 `prepare()` 若跑在 controller **构造之前** ⇒ 一个「要数据空间
+  //    （`ports` > 0）**又**带 `prepare()`」的插件，一提交就撞上 `identityOf`
   //    那个"没有给出那一份数据"的抛 —— 也就是说**这种插件根本提交不出去**。
-  //    （sshd 要工作区那一格是 `false`，所以这条路上从来没有人踩到过。）
+  //    （sshd 那一格是 `0`，所以这条路上从来没有人踩到过。）
   //
   //    ★ `rec.controller.spaceId` 是**唯一**的第三段来源，**不要在 `rec` 上另存
   //      一个**：两份会在 `relisten` 改了 controller 那一份之后分家，
@@ -3348,10 +3356,10 @@ async function reattachOne(s) {
   //     引用表里没有那一格时这一条接不上（下面 `return`）—— 那是对的：一份数据
   //     都没建过，说明这台机器上从来没起过这个插件的会话。
   const conn = config.activeConnection(cfg);
-  const baseSpace = (plugin && plugin.contributes.layout && conn)
+  const baseSpace = (plugin && pluginData.needsSpace(plugin) && conn)
     ? config.findSpace(cfg, ((config.findWorkspace(cfg, conn.workspaceId) || {}).refs || {})[plugin.id])
     : null;
-  if (plugin && plugin.contributes.layout && !baseSpace) return;   // 没配置连接，接不上
+  if (plugin && pluginData.needsSpace(plugin) && !baseSpace) return;   // 没配置连接，接不上
 
   // ★★ **重连必须走同一个 `claimSpace`**（不是"照抄 startSession 那两行"）。
   //
@@ -3677,7 +3685,7 @@ function registerIpc() {
         };
       }
       // ★ **不把 r.port 写回那一份数据** —— 端口是它**被创建时**定下来的那个
-      //   （`nextSpacePort`），顺移只是这一次会话的事。写回会把一次暂时的冲突
+      //   （`assignSpacePorts`），顺移只是这一次会话的事。写回会把一次暂时的冲突
       //   变成永久的 origin 变更，而冲突消失之后 origin 回不去、那份布局也跟着
       //   白丢。（`relisten` 的 warning 已经把这个取舍告诉用户了。）
     } else if (isActive && !sessionLive) {

@@ -141,8 +141,17 @@ const MANIFEST_KEYS = ['id', 'name', 'displayName', 'version', 'description',
 //   —— 那是**站点**的事（配置里的 `default_plugin`，见 `cluster/slurmate`），不是
 //   某个客户端本地的约定：两边各存一份只会漂开，而漂开时没有任何东西会红（客户端的
 //   界面**从不省略**服务名，每个启动按钮绑的都是 `startWith(p.name, btn)`）。
-const CONTRIBUTES_KEYS = ['surface', 'login', 'layout', 'submitPubkey',
+const CONTRIBUTES_KEYS = ['surface', 'login', 'ports', 'submitPubkey',
   'concurrent', 'data'];
+/**
+ * 一个插件的这一份数据最多占几个本地端口。
+ *
+ * ★ 今天恰好是 1，而它**不是**一条产品判断 —— 框架只用得到第一个：一条会话只有一条
+ *   隧道，而作业侧只报得到一个候选端口（`cluster/run.sbatch` 的 `SLURMATE_CANDIDATES`）。
+ *   所以 2 是一句**框架做不到的话**，判在装之前、报出原因（见下面 `ports` 那一段）。
+ *   ★ 挪这个数不需要动盘上的形状：`config.json` 里 `spaces[].ports` 从第一天就是列表。
+ */
+const MAX_PLUGIN_PORTS = 1;
 /** `contributes.data` 里认识的键 —— 见 plugin-data.js 的文件头。
  *  ★ 这两个键答的是**同一格**（身份的第二段），所以同时写是矛盾（判定在下面）。 */
 const DATA_KEYS = ['inherit', 'perVersion'];
@@ -152,10 +161,13 @@ const LOGIN_KEYS = ['path', 'field', 'cookie'];
 /**
  * 客户端代码允许导出的钩子。
  *
- * ★ **本地端口不是插件的事**：要工作区的会话用**它那一份数据**
+ * ★ **本地端口不是插件的事**：要数据空间的会话用**它那一份数据**
  *   的端口（`index.js` 的 `spacePortOf`：先查配置、再查临时那份），没有的用中转
  *   基准端口。这两个值基座自己就能算 —— 一个让插件回报端口的钩子只会让它把基座的
  *   值原样报回来。
+ *   ★ **声明要几个**（`contributes.ports`）与**自报是哪几个**是两件事：前者是这个
+ *     插件的界面要用几个 origin（只有作者知道），后者是这台机器此刻哪些端口空着
+ *     （只有基座知道）。清单里那一格要的就是前者。
  *   ★ 从一个客户端代码导出它是**错误**（`keysProblem` 会拒），不是"被忽略" ——
  *   静默忽略会让一个旧插件看起来装上了、而它的选择从头到尾没生效。
  *
@@ -692,6 +704,14 @@ function inspectDir(dir) {
   if (!mfc || typeof mfc !== 'object' || Array.isArray(mfc)) {
     return { error: `${mfPath}：contributes 必须是一个对象` };
   }
+  // ★ 改名提示要排在 `keysProblem` **之前**：否则一份老清单只会得到一句"认不得的键：
+  //   layout"，而那句话**指不到新名字**。与 `data.perInstance` 那一条同一个理由。
+  //   ★ 它同时是**改形**的提示（开关 → 个数），所以两个值都点出来。
+  if (mfc.layout !== undefined) {
+    return { error: `${mfPath}：contributes.layout 已经改名成 contributes.ports `
+      + '—— 而且从**开关**变成了**个数**（这一份数据要占几个本地端口）：'
+      + '要一份数据空间写 contributes.ports: 1，不要写 contributes.ports: 0' };
+  }
   why = keysProblem(mfc, CONTRIBUTES_KEYS, 'contributes');
   if (why) return { error: `${mfPath}：${why}` };
 
@@ -747,19 +767,45 @@ function inspectDir(dir) {
   }
 
   for (const k of CONTRIBUTES_KEYS) {
-    if (k === 'surface' || k === 'login' || k === 'data') continue;
+    if (k === 'surface' || k === 'login' || k === 'data' || k === 'ports') continue;
     if (mfc[k] !== undefined && typeof mfc[k] !== 'boolean') {
       return { error: `${mfPath}：contributes.${k} 必须是 true 或 false` };
+    }
+  }
+
+  // ── ports：这一份数据要几个本地端口 ─────────────────────────────────────────
+  //
+  // ★ 它是**个数**，不是开关。0 = 不要数据空间（= 从前的 `layout: false`）：没有端口
+  //   就没有 origin，也就没有浏览器存储可言。≥1 = 要一份数据空间，占这么多个端口。
+  //
+  // ★ **有缺省**（不写 = 0），与这一节里别的"事实类"声明同一条纪律：它答的是
+  //   "你的界面要几个 origin"，而那是基座**算得出来**的 —— 见 `plugin-data.js`
+  //   文件头那张"哪一格基座答得了吗"的表。
+  //
+  // ★ **上界今天恰好是 1**，而这**不是**一条产品判断：一条会话只有一条隧道、作业侧
+  //   只报得到一个候选端口（`cluster/run.sbatch` 的 `SLURMATE_CANDIDATES`），所以
+  //   第二个端口**框架兑现不了**。清单要一个兑现不了的数 ⇒ **拒**，而不是收下之后
+  //   只兑现第一个 —— 后者正是这个仓库一路在删的「配了但不生效」，而它的症状是
+  //   "插件以为自己在用第二个 origin"，没有任何东西会红。
+  //   ★ 上界挪动时盘上的形状不用动：`spaces[].ports` 从第一天就是列表。
+  if (mfc.ports !== undefined && mfc.ports !== null) {
+    if (!Number.isInteger(mfc.ports) || mfc.ports < 0 || mfc.ports > MAX_PLUGIN_PORTS) {
+      return { error: `${mfPath}：contributes.ports 必须是 0 到 ${MAX_PLUGIN_PORTS} `
+        + `之间的整数（0 = 不要数据空间），现在是 ${JSON.stringify(mfc.ports)}`
+        + (Number.isInteger(mfc.ports) && mfc.ports > MAX_PLUGIN_PORTS
+          ? ` —— 一个插件的数据最多占 ${MAX_PLUGIN_PORTS} 个本地端口`
+            + '（一条会话只有一条隧道，作业侧只报得到一个候选端口）'
+          : '') };
     }
   }
 
   // ── concurrent：这一节里**唯一必填**的一格 ──────────────────────────────
   //
   // ★ 它答的是"**这个插件的代码**能不能同时开两份" —— 一个只有作者知道的事实。
-  //   基座推不出来：「不要工作区」（`layout: false`）与「不能同时开两份」是两件事，
-  //   把它们焊成一件（`slotOf` 只收一个 workspaceId，**看不见插件**）就会读错。
+  //   基座推不出来：「一个端口都不要」（`ports: 0`）与「不能同时开两份」是两件事，
+  //   把它们焊成一件（`slotOf` 只收一个 spaceId，**看不见插件**）就会读错。
   //
-  // ★ **没有缺省**，与这个清单里**别的每一格**刻意相反：它们（`layout` / `submitPubkey`
+  // ★ **没有缺省**，与这个清单里**别的每一格**刻意相反：它们（`ports` / `submitPubkey`
   //   / `data` 底下那两个键）缺省取哪边都是基座**算得出来**的，所以它可以填
   //   （取哪边是产品判断，见 `data` 那一段）；
   //   而这一格无论缺省取哪一边，都是基座替作者表态 —— 取"不能"，一个真能多开的
@@ -773,13 +819,14 @@ function inspectDir(dir) {
       + '（true = 这个插件可以同时开两份，false = 只能开一份）—— 它答的是"你的代码'
       + '能不能同时处理两份"，只有你知道，基座替你答不了' };
   }
-  // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：实例键今天只有一个来源
-  //   —— 工作区（一条连接挂在一个工作区上）。没有工作区就没有"第二份实例"可指。
+  // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：第二份 = **第二份数据**
+  //   （一份临时的副本），而一份数据存在的全部理由就是它那个端口。一个端口都不要的
+  //   插件没有"第一份"可言，也就无所谓"第二份"。
   //   判在**装之前**，与 `engines` 同一条纪律。
-  if (mfc.concurrent === true && mfc.layout !== true) {
+  if (mfc.concurrent === true && !(mfc.ports >= 1)) {
     return { error: `${mfPath}：contributes.concurrent: true 要求同时有 `
-      + 'contributes.layout: true —— 实例键就是工作区，没有工作区就没有第二份实例可指'
-      + '（不要工作区的插件一律只能开一份）' };
+      + 'contributes.ports ≥ 1 —— 第二份就是第二份**数据**（一份临时的副本），'
+      + '而一个端口都不要的插件没有第二份可指（它一律只能开一份）' };
   }
 
   // data —— **给客户端自己读的那一段**：这个插件的运行时数据存在哪儿、和谁共用。
@@ -791,13 +838,13 @@ function inspectDir(dir) {
   //
   // ★ 深究到什么程度：共享组的字符集（它进分区名 = 磁盘目录名），两个键的类型，以及
   //   **两个键之间的关系**。
-  //   ★ 那条**组合**判定（`perInstance` 要求 `layout`）现在跟着那一格在
+  //   ★ 那条**组合**判定（`perInstance` 要求一个端口）现在跟着那一格在
   //     `concurrent` 上（见上面）。
   //
   // ★★ `inherit` 与 `perVersion` **答的是同一格**（身份的第二段：`plugin-data.js`
   //   的 `groupOf`），所以两个同时写是**矛盾**而不是"后者覆盖前者"。这类"两半各自
   //   都没错、错在放一起"的判定在这个函数里已经有一条先例（`concurrent` 要求
-  //   `layout`），纪律也一样：判在**装之前**，报错**点名两个键**。
+  //   端口 ≥ 1），纪律也一样：判在**装之前**，报错**点名两个键**。
   //   ★ 不判的话症状是两个都"成功"：清单里明明写着要共用一份，而实际落在哪一份
   //     取决于 `groupOf` 里两行的**先后次序** —— 一个改代码顺序就会变的结论，而
   //     没有任何东西会红。
@@ -884,7 +931,10 @@ function inspectDir(dir) {
     contributes: {
       surface,
       login,
-      layout: mfc.layout === true,
+      // ★ 落成**具体的数**（缺省 0），不是 `mfc.ports` —— 上面那一节查的就是它的形状，
+      //   而下游（`plugin-data.js` 的 `portCountOf`、`config.js` 的 `assignSpacePorts`）
+      //   要的是一个拿起来就能用的整数。与相邻那两格同一条纪律：形状在这一层查实。
+      ports: Number.isInteger(mfc.ports) && mfc.ports > 0 ? mfc.ports : 0,
       submitPubkey: mfc.submitPubkey === true,
       // ★ 这一格是**必填**的，所以它在这里**总是**一个实打实的布尔 —— 上面查过
       //   "缺席"与"类型不对"两种。与它相邻的那两个（上面两行）都有安全缺省。

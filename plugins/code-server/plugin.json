@@ -13,7 +13,7 @@
       "field": "password",
       "cookie": "code-server-session"
     },
-    "layout": true,
+    "ports": 1,
     "submitPubkey": false,
     "concurrent": true,
     "data": {

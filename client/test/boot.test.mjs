@@ -862,7 +862,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   //     复用」时，新工作区的「空白工作区」继承 A 的 localStorage 与登录 cookie；
   //   · 中间那段是清单里写的 `editor`（写死了几个版本共用一份，这正是 code-server
   //     升级不丢布局的原因）；
-  //   · 头一段是插件 id —— 少了它，两个都声明了 layout 的插件共用一个工作区时
+  //   · 头一段是插件 id —— 少了它，两个都声明了 ports 的插件共用一个工作区时
   //     会读写同一份存储（今天只有一个这样的插件，所以那是个还没炸的洞）。
   const partition = view._opts.webPreferences.partition;
   assert.match(partition, /^persist:[0-9A-HJKMNP-TV-Z]{26}@editor@s[0-9a-f]{12}$/,
@@ -2939,10 +2939,10 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     over: {
       displayName: 'Jupyter',
       description: '没有客户端代码的声明式插件。',
-      // 不能多开 → 身份里**没有实例段**，于是它只有一份
-      // 存储，与工作区无关。那一条分支在内建的两个插件上走不到（一个能多开，
+      // 一个端口都不要 → 身份里**没有第三段**，于是它只有一份存储，
+      // 与工作区无关。那一条分支在内建的两个插件上走不到（一个要端口，
       // 另一个根本不要界面）。
-      contributes: { surface: { kind: 'web', path: '/lab' }, layout: false,
+      contributes: { surface: { kind: 'web', path: '/lab' }, ports: 0,
         concurrent: false },
     },
   });
@@ -2971,17 +2971,31 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   '声明式插件的界面');
   assert.match(theView(w).webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
     'URL = 隧道 origin + 声明里的 path');
-  // ★ 分区按**插件**走 —— 一个网页应用自己的状态该跟它自己走。它没声明分实例，
-  //   所以身份是两段：插件 id @ 共享组。★ 而它两个键都没写 ⇒ 那一段是**缺省那个
-  //   常量**（缺省是"继承"）。
+  // ★ 分区按**插件**走 —— 一个网页应用自己的状态该跟它自己走。它不要数据空间
+  //   （`ports: 0`，缺省也是 0），所以身份是两段：插件 id @ 共享组。★ 而它两个键
+  //   都没写 ⇒ 那一段是**缺省那个常量**（缺省是"继承"）。
   //
   // ★ 这条断言**手写那个名字**、不引 `pluginData.DEFAULT_GROUP`：它进的是磁盘
   //   目录名，改一个字就是**所有人的那份数据重置一次** —— 那条契约值得在这里
   //   也钉一遍（单测里那几条钉的是"算得对不对"，这一条钉的是"真跑一条会话时
   //   落盘的确实是它"）。
+  //
+  // ★★ 而它**真的起来了** —— 这是「一个端口都不要的插件照常起」那一格：
+  //   不要数据空间**不是**一条残缺的配置，它是这一类插件的正常形态（没有浏览器，
+  //   就没有 origin 可言）。两条断言把它钉死：没有第三段，配置里也**没有**为它
+  //   造一份数据。
+  assert.equal(ctl.snapshot().spaceId, null,
+    '一个端口都不要 ⇒ 没有第三段（不是"分到了一个空的"）');
+  //   ★ 查的是**为它**那一份，不是"配置里空着"：这个套件里所有用例共用一份
+  //     配置目录，前面那些用例留下的数据都还在（夹具比想象中脏）—— 写成
+  //     `deepEqual(spaces, [])` 的话，红的会是别人留下的那一份，而指不回这里。
+  const mine = require('../src/main/config.js').loadConfig(DEV_CFG).spaces
+    .filter((x) => x.pluginId === p.id);
+  assert.deepEqual(mine, [],
+    '★ 而配置里不该为它多出一份数据 —— 端口是数据空间存在的理由，没有端口就没有它');
   assert.equal(w.surfacePartition(w.front),
     'persist:01M2JKM1M1M1M1M1M1M1M1M1M1@default',
-    `没声明分实例的插件要用按插件的分区，实际是 ${w.surfacePartition(w.front)}`);
+    `不要数据空间的插件要用按插件的分区，实际是 ${w.surfacePartition(w.front)}`);
 
   // ★ 而没有客户端代码就**没有登录那一步**。证据看它那个存储分区里的 cookie jar：
   //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架**不会去猜**一个
@@ -3033,8 +3047,8 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   assert.match(idx._test.getBackend()._relayPubkey, /^ssh-ed25519 [A-Za-z0-9+/]{68}$/,
     '公钥到了服务端要已经规范化：只有类型和 base64，注释被丢掉');
   assert.equal(snap.spaceId, null,
-    '中转站不分配工作区：它是给浏览器用的（端口 = origin = 一份编辑器布局），'
-    + '而中转站没有浏览器');
+    '中转站不要数据空间（`contributes.ports: 0`）：数据空间是给浏览器用的'
+    + '（端口 = origin = 一份浏览器存储），而中转站没有浏览器');
   assert.ok(snap.localPort > 0, '隧道必须真的在监听');
 
   // ★ 这一条是整节的重点：中转站**不该**建 code-server 视图。
@@ -3477,7 +3491,7 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
     id, name: 'single-slot',
     over: {
       contributes: {
-        layout: true, concurrent: false, surface: { kind: 'web', path: '/' },
+        ports: 1, concurrent: false, surface: { kind: 'web', path: '/' },
       },
     },
   });
@@ -3517,7 +3531,7 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   cleanupSiteState(idx);
 });
 
-test('★★ 同一个工作区里，**两个不同的要布局的插件**可以同时活着', async (t) => {
+test('★★ 同一个工作区里，**两个不同的要数据空间的插件**可以同时活着', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   await openUpTo(idx, 3);
@@ -3532,17 +3546,17 @@ test('★★ 同一个工作区里，**两个不同的要布局的插件**可以
   //      下面的断言就钉这件事：两个槽、两个端口、两个分区，而两条都活着。
   const id = mintId();
   putSitePlugin({
-    id, name: 'second-layout',
+    id, name: 'second-space',
     over: {
       contributes: {
-        layout: true, concurrent: false, surface: { kind: 'web', path: '/second' },
+        ports: 1, concurrent: false, surface: { kind: 'web', path: '/second' },
       },
     },
   });
-  idx._test.getBackend().debugAddSitePlugin('second-layout');
+  idx._test.getBackend().debugAddSitePlugin('second-space');
 
   const a = await startRunning(idx, 'code-server');
-  const b = await startRunning(idx, 'second-layout');
+  const b = await startRunning(idx, 'second-space');
 
   // ★ 判据一：**两个槽**。同一个工作区、同一个连接，而它们不是同一条会话。
   assert.notEqual(b.slot, a.slot, '★ 两个插件两份数据 ⇒ 两个槽 ⇒ 可以同时活着');
@@ -3689,7 +3703,7 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
 
   // ★ 判据五：**实际监听端口**必须分开，而**首选端口必须来自它自己那个工作区**。
   //
-  //   ★ 为什么不是简单的一句"不许有顺移警报"：`nextSpacePort` 是**确定性**的、
+  //   ★ 为什么不是简单的一句"不许有顺移警报"：`assignSpacePorts` 是**确定性**的、
   //     **不探测 OS** —— 所以一台机器上只要有个无关进程占着 18080，会话就会顺移，
   //     而那是**设计好的行为**（顺移只影响这一次会话），不是故障。在那种机器上
   //     "不许有警报"会假红（本机就是这种情况）。真正要钉的是**首选端口从哪来**：
@@ -4007,7 +4021,7 @@ test('★★ 会话换过工作区之后，**两个**落点都护着 —— 被�
     const otherWs = { id: config.newWorkspaceId(), name: '挪过去的工作区', refs: {} };
     cfg.workspaces = [...cfg.workspaces, otherWs];
     const cs = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
-    const moved = config.spaceFor(cfg, otherWs.id, cs.id, 'editor').space;
+    const moved = config.spaceFor(cfg, otherWs.id, cs.id, 'editor', 1).space;
     const instB = moved.id;
     a.ctl.setSpace(instB);
     assert.equal(a.ctl.spaceId, instB, '前提：这条会话的那一份真的换了');
@@ -4096,7 +4110,7 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
     id: mintId(), name: 'prep-fail',
     over: {
       contributes: {
-        layout: true, concurrent: true, surface: { kind: 'web', path: '/' },
+        ports: 1, concurrent: true, surface: { kind: 'web', path: '/' },
       },
     },
     clientSrc: 'module.exports = { prepare: (ctx) => ({ ok: false, message: ctx.dataDir() }) };',
@@ -4503,7 +4517,7 @@ test('★ 导出 preferredPort 的插件会被**拒绝** —— 那个钩子已�
   //   一个导出了不再存在的钩子的插件，就是**需要作者改一版**的插件。
   putSitePlugin({
     id: mintId(), name: 'stale', version: '1.0.0',
-    over: { contributes: { layout: false, concurrent: false } },
+    over: { contributes: { ports: 0, concurrent: false } },
     clientSrc: 'module.exports = { preferredPort() { return 18099; } };\n',
   });
   reg.reload();
@@ -4538,7 +4552,7 @@ function makePluginDataDir(idx, pluginName) {
   const conn = cfg.connections[0] || {};
   const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
   assert.ok(plugin && conn.workspaceId, `夹具前提：应当有一个 ${pluginName} 与一个工作区`);
-  const made = config.spaceFor(cfg, conn.workspaceId, plugin.id, P.groupOf(plugin));
+  const made = config.spaceFor(cfg, conn.workspaceId, plugin.id, P.groupOf(plugin), 1);
   assert.ok(made, '夹具前提：那条连接指着的工作区还在');
   const dir = path.join(idx._test.getPluginDataRoot(),
     P.dataDirNameOf(P.identityOf(plugin, made.space)));
@@ -4686,7 +4700,7 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
   //   而它不会在审计里露头（那张"该有的"表用的正是 `needsSpace`）。
   const headless = putSitePlugin({
     id: mintId(), name: 'headless', version: '1.0.0',
-    over: { contributes: { layout: true, concurrent: true } },
+    over: { contributes: { ports: 1, concurrent: true } },
   });
   t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
   const headlessPlugin = idx._test.getRegistry().list().find((p) => p.name === 'headless');

@@ -977,7 +977,7 @@ PLUGIN_NAME_RE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
 #   文案里"认识的只有 …"那一串的顺序。
 MANIFEST_KEYS = ("id", "name", "displayName", "version", "description",
                  "author", "engines", "contributes", "site")
-CONTRIBUTES_KEYS = ("surface", "login", "layout", "submitPubkey",
+CONTRIBUTES_KEYS = ("surface", "login", "ports", "submitPubkey",
                     "concurrent", "data")
 SURFACE_KEYS = ("kind", "path")
 LOGIN_KEYS = ("path", "field", "cookie")

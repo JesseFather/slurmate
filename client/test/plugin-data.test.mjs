@@ -49,20 +49,20 @@ const ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
 /** 一个注册表里的插件对象该有的样子（只列身份要用的那几项）。 */
 const plugin = (over = {}) => ({
   id: ID, name: 'code-server', version: '1.0.0',
-  contributes: { layout: true, concurrent: false, data: null },
+  contributes: { ports: 1, concurrent: false, data: null },
   ...over,
 });
 
 /** 声明了能同时开两份的那一个 —— code-server 真实的样子。 */
 const concurrent = (over = {}) => plugin({
-  contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } },
+  contributes: { ports: 1, concurrent: true, data: { inherit: 'editor' } },
   ...over,
 });
 
-/** 不要工作区的那一个 —— sshd 真实的样子（`layout: false`）。 */
+/** 不要数据空间的那一个 —— sshd 真实的样子（`ports: 0`）。 */
 const relay = (over = {}) => plugin({
   id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd',
-  contributes: { layout: false, concurrent: false, data: { inherit: 'relay' } },
+  contributes: { ports: 0, concurrent: false, data: { inherit: 'relay' } },
   ...over,
 });
 
@@ -98,7 +98,7 @@ test('★★ 缺省：两个键都不写 ⇒ 第二段是一个**常量**（不�
   // `data` 写了、但两个键都不写，与完全没写、与写成 null 都是同一件事 ——
   // ★ "缺省"不是**第三档**，它就是这个取值（所以没有"半个声明"这种状态）。
   for (const data of [{}, null, undefined]) {
-    const p = plugin({ contributes: { layout: true, concurrent: false, data } });
+    const p = plugin({ contributes: { ports: 1, concurrent: false, data } });
     assert.equal(groupOf(p), pluginData.DEFAULT_GROUP,
       `data = ${JSON.stringify(data)} 必须落在缺省上`);
   }
@@ -108,14 +108,14 @@ test('★ 缺省那个常量本身必须是个**合法的共享组名**（它进
   assert.match(pluginData.DEFAULT_GROUP, pluginData.GROUP_RE,
     '改名改出格 ⇒ 磁盘上会出现一个 identityOfDiskName 认不出的段');
   // ★ 它与"作者显式写了这个名字"**同义** —— 缺省不是一种特殊状态，只是这个取值。
-  const explicit = plugin({ contributes: { layout: true, concurrent: false,
+  const explicit = plugin({ contributes: { ports: 1, concurrent: false,
     data: { inherit: pluginData.DEFAULT_GROUP } } });
   assert.equal(groupOf(explicit), groupOf(plugin()));
 });
 
 test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺省**，现在要明写）', () => {
   const decl = (v) => plugin({ version: v,
-    contributes: { layout: true, concurrent: false, data: { perVersion: true } } });
+    contributes: { ports: 1, concurrent: false, data: { perVersion: true } } });
 
   assert.equal(groupOf(decl('1.0.0')), '1.0.0',
     '★ 第二段是**版本号** —— 所以它未必匹配 GROUP_RE，这正是 identityOfDiskName 不猜的原因');
@@ -132,7 +132,7 @@ test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺�
     'perVersion 与缺省必须落在两份不同的存储上');
 
   // 显式写 false 与不写它同义（那一格不是三态，是"要/不要"）。
-  const off = plugin({ contributes: { layout: true, concurrent: false,
+  const off = plugin({ contributes: { ports: 1, concurrent: false,
     data: { perVersion: false } } });
   assert.equal(groupOf(off), pluginData.DEFAULT_GROUP);
 });
@@ -150,13 +150,13 @@ test('★★ 要工作区的插件：身份是**三段**，而后两段全由那
 });
 
 test('★★ `concurrent` **不再**决定有没有第三段 —— 那是这次重做的中心', () => {
-  // ★ 从前第三段由 `contributes.concurrent` 说了算，于是一个**要工作区、却声明
+  // ★ 从前第三段由 `contributes.concurrent` 说了算，于是一个**要端口、却声明
   //   不能同时开两份**的插件整台机器上只有一份数据（所有工作区共用一份），
-  //   而它明明会拿到好几个端口。现在第三段由 `layout` 决定，`concurrent` 只管
-  //   "能不能同时开第二份"。
+  //   而它本来每个工作区里都该有自己的那一份。现在第三段由 `ports` 决定
+  //   （要不要数据空间），`concurrent` 只管"能不能同时开第二份"。
   const s = space({ group: 'editor' });
   const notConcurrent = plugin({
-    contributes: { layout: true, concurrent: false, data: { inherit: 'editor' } } });
+    contributes: { ports: 1, concurrent: false, data: { inherit: 'editor' } } });
   assert.deepEqual(pluginData.identityOf(notConcurrent, s), [ID, 'editor', s.id],
     '★ 不能多开的插件**照样有第三段**');
   // 两份数据就是两份存储 —— 它只是不许两份**同时活着**（那是运行期槽闸的事）。
@@ -167,7 +167,7 @@ test('★★ `concurrent` **不再**决定有没有第三段 —— 那是这次
   assert.equal(pluginData.canOpenSecond(concurrent()), true);
 });
 
-test('★★ 不要工作区的插件：两段，第二段只能从**清单**来', () => {
+test('★★ 不要数据空间的插件：两段，第二段只能从**清单**来', () => {
   const p = relay();
   assert.deepEqual(pluginData.identityOf(p), [p.id, 'relay'],
     '★ 它根本没有数据对象可问 —— 那一份 `<id>@relay` 不属于任何工作区');
@@ -177,17 +177,17 @@ test('★★ 不要工作区的插件：两段，第二段只能从**清单**来
   //   所以这里不钉它，免得把"不该发生的事"写成一条保证。
 });
 
-test('★★ 要工作区却拿不到那一份 ⇒ 抛，不回落成两段', () => {
+test('★★ 要数据空间却拿不到那一份 ⇒ 抛，不回落成两段', () => {
   const p = concurrent();
   for (const bad of [undefined, null]) {
-    assert.throws(() => pluginData.identityOf(p, bad), /layout: true/,
+    assert.throws(() => pluginData.identityOf(p, bad), /contributes\.ports: 1/,
       `那一份是 ${JSON.stringify(bad)} 时必须停下来 —— 回落成两段会让这个插件的`
       + '每一份都共用同一份数据，而两边都以为自己写进去了');
   }
   // 报错要点出**是哪个插件**：池里可以并存同一个插件的多个版本，只说"缺那一份"
   // 指不回那一份清单。
   assert.throws(() => pluginData.identityOf(p, null), /code-server/);
-  // ★ 而**不要工作区**的那一个拿不到也不抛 —— 它本来就没有第三段。
+  // ★ 而**不要数据空间**的那一个拿不到也不抛 —— 它本来就没有第三段。
   assert.doesNotThrow(() => pluginData.identityOf(relay(), null));
 });
 
@@ -206,7 +206,7 @@ test('★★ 第二段取自**那一份数据自己**，不是现从清单算', 
 test('★ 别的插件共用同一个共享组名，也不会共用同一份存储', () => {
   // 共享组名是**作者自己起的**，两个插件正好都叫 editor 是完全正常的。分区名的头一段
   // 是插件 id，所以它们不会撞 —— 少了这一段（只有末段），
-  // 两个声明了 layout 的插件共用一个工作区时会读写同一份存储。
+  // 两个声明了 ports 的插件共用一个工作区时会读写同一份存储。
   const other = concurrent({ id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'other' });
   const a = space({ group: 'editor' });
   const b = space({ pluginId: other.id, group: 'editor' });
@@ -336,30 +336,37 @@ test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会*
   assert.equal(pluginData.samePartition(partition, null), false);
 });
 
-test('★ 三条判据各管一件事：hasSurface / needsSpace / canOpenSecond', () => {
+test('★ 四条判据各管一件事：hasSurface / needsSpace / canOpenSecond / portCountOf', () => {
   const surface = { kind: 'web', path: '/' };
   const cases = [
-    // [contributes, 有界面, 要工作区（⇒ 有第三段）, 能同时开两份]
-    [{ surface, layout: true, concurrent: true }, true, true, true],
+    // [contributes, 有界面, 要数据空间（⇒ 有第三段）, 能同时开两份, 端口个数]
+    [{ surface, ports: 1, concurrent: true }, true, true, true, 1],
     // 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）
-    [{ layout: true, concurrent: true }, false, true, true],
+    [{ ports: 1, concurrent: true }, false, true, true, 1],
     // ★ 有界面、但**不能多开**：它照样有第三段（每个工作区里各一份），
     //   只是那两份不能同时活着。清理与对账**都按 needsSpace**，不按 canOpenSecond ——
     //   用后者会把好几份**活着的数据**判成"不属于这份数据"而漏删（或者根本算不出来）。
-    [{ surface, layout: true, concurrent: false }, true, true, false],
-    // 不要工作区的那一个（sshd）：整台机器上一份，没有第三段。
-    [{ surface, layout: false, concurrent: false }, true, false, false],
+    [{ surface, ports: 1, concurrent: false }, true, true, false, 1],
+    // 不要数据空间的那一个（sshd）：整台机器上一份，没有第三段。
+    [{ surface, ports: 0, concurrent: false }, true, false, false, 0],
+    // 缺省（不写这一格）= 0 —— 与写成 0 同义，与相邻那两格同一条纪律。
+    [{ surface, concurrent: false }, true, false, false, 0],
+    // ★ 形状不对的读成 0（这一层是**取值**不是判定，判定在清单校验那一侧）
+    [{ surface, ports: -1, concurrent: false }, true, false, false, 0],
+    [{ surface, ports: 'yes', concurrent: false }, true, false, false, 0],
   ];
-  for (const [contributes, wantSurface, wantSpace, wantSecond] of cases) {
+  for (const [contributes, wantSurface, wantSpace, wantSecond, wantPorts] of cases) {
     const p = { id: ID, version: '1.0.0', contributes };
     const tag = JSON.stringify(contributes);
     assert.equal(pluginData.hasSurface(p), wantSurface, tag);
     assert.equal(pluginData.needsSpace(p), wantSpace, tag);
     assert.equal(pluginData.canOpenSecond(p), wantSecond, tag);
+    assert.equal(pluginData.portCountOf(p), wantPorts, tag);
   }
   assert.equal(pluginData.hasSurface(null), false);
   assert.equal(pluginData.needsSpace(null), false);
   assert.equal(pluginData.canOpenSecond(null), false);
+  assert.equal(pluginData.portCountOf(null), 0);
 });
 
 // ── 清单校验：contributes.concurrent 与 contributes.data ────────────────────
@@ -368,7 +375,7 @@ test('★ 三条判据各管一件事：hasSurface / needsSpace / canOpenSecond'
 function manifest(over = {}) {
   return {
     id: ID, name: 'code-server', displayName: '开发环境', version: '1.0.0',
-    contributes: { layout: true, concurrent: false },
+    contributes: { ports: 1, concurrent: false },
     ...over,
   };
 }
@@ -380,9 +387,9 @@ function inspect(mf) {
   return P.inspectDir(dir);
 }
 
-/** 一份**有界面、要布局、不能多开**的清单，只换 `data` 那一段。 */
+/** 一份**有界面、要数据空间、不能多开**的清单，只换 `data` 那一段。 */
 const accept = (data) => inspect(manifest({
-  contributes: { layout: true, concurrent: false, data } }));
+  contributes: { ports: 1, concurrent: false, data } }));
 const reject = (data) => {
   const r = accept(data);
   assert.ok(r.error, `这份声明必须被拒：${JSON.stringify(data)}`);
@@ -390,46 +397,91 @@ const reject = (data) => {
 };
 
 test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不上（不是"当成不能"）', () => {
-  // ★ 这一条钉的是"**没有缺省**"，而它与同一个清单里另外两格（layout / submitPubkey）
+  // ★ 这一条钉的是"**没有缺省**"，而它与同一个清单里另外两格（ports / submitPubkey）
   //   刻意相反：那两个缺省都在安全侧，基座答得了。
   //   而"你的代码能不能同时处理两份"基座答不了 —— 缺省无论取哪边都是替作者表态。
-  const 没写 = inspect(manifest({ contributes: { layout: true } }));
+  const 没写 = inspect(manifest({ contributes: { ports: 1 } }));
   assert.match(没写.error || '', /contributes\.concurrent 是\*\*必填\*\*/,
     '缺了这一格必须**拒绝安装**，而不是静默当成 false');
   assert.equal(没写.entry, undefined);
 
   // ★ 反例：写了的照常收下，而且两种取值都收 —— 否则上面那一条会因为"什么都拒"而全绿。
   for (const v of [true, false]) {
-    const r = inspect(manifest({ contributes: { layout: true, concurrent: v } }));
+    const r = inspect(manifest({ contributes: { ports: 1, concurrent: v } }));
     assert.ok(!r.error, `concurrent: ${v} 是合法的：${r.error}`);
     assert.equal(r.entry.plugin.contributes.concurrent, v);
   }
 
-  // 类型不对由那条布尔循环管（与 layout / submitPubkey 同一句措辞）。
-  const bad = inspect(manifest({ contributes: { layout: true, concurrent: 'yes' } }));
+  // 类型不对由那条布尔循环管（与 submitPubkey 同一句措辞）。
+  const bad = inspect(manifest({ contributes: { ports: 1, concurrent: 'yes' } }));
   assert.match(bad.error, /contributes\.concurrent 必须是 true 或 false/);
 });
 
-test('contributes.concurrent：★ 能多开要求 layout —— 没有工作区就没有第二份实例可指', () => {
-  // ★ 这一条是**组合**判定：两半各自都没错，错在放一起。实例键今天只有一个来源
-  //   ——工作区。没有工作区就没有"第二份实例"可指，所以它判在**装之前**
-  //   （与 engines 同一条纪律）。
-  const noLayout = inspect(manifest({
-    contributes: { layout: false, concurrent: true },
+test('contributes.concurrent：★ 能多开要求一个端口 —— 没有第一份就没有第二份可指', () => {
+  // ★ 这一条是**组合**判定：两半各自都没错，错在放一起。第二份 = 第二份**数据**
+  //   （一份临时的副本），而一份数据存在的理由就是它那个端口 —— 所以
+  //   `ports: 0` 的插件没有"第二份"可指。判在**装之前**（与 engines 同一条纪律）。
+  const noPorts = inspect(manifest({
+    contributes: { ports: 0, concurrent: true },
   }));
-  assert.match(noLayout.error || '', /concurrent: true 要求同时有 contributes\.layout/);
+  assert.match(noPorts.error || '', /concurrent: true 要求同时有 contributes\.ports/);
 
-  // 而 layout: true 的那一份照常收下 —— 否则上面那一条会因为"什么都拒"而全绿。
-  const ok = inspect(manifest({ contributes: { layout: true, concurrent: true } }));
+  // 而 ports: 1 的那一份照常收下 —— 否则上面那一条会因为"什么都拒"而全绿。
+  const ok = inspect(manifest({ contributes: { ports: 1, concurrent: true } }));
   assert.ok(!ok.error, `这一份是合法的：${ok.error}`);
 
-  // ★ 反例也要钉：layout 那一段自己写错了（这里是字符串）时，报的必须是
-  //   "layout 必须是 true 或 false"，而不是被这一条抢先说成"concurrent 缺 layout"
+  // ★ 反例也要钉：ports 那一段自己写错了（这里是字符串）时，报的必须是
+  //   "ports 必须是 … 整数"，而不是被这一条抢先说成"concurrent 缺端口"
   //   —— 后者会把用户指去改一个本来没错的地方。
-  const badLayout = inspect(manifest({
-    contributes: { layout: 'true', concurrent: true },
+  const badPorts = inspect(manifest({
+    contributes: { ports: 'yes', concurrent: true },
   }));
-  assert.match(badLayout.error, /contributes\.layout 必须是 true 或 false/);
+  assert.match(badPorts.error, /contributes\.ports 必须是 0 到 1 之间的整数/);
+});
+
+test('★★ contributes.ports：是个数、有缺省、有一个说得出理由的上界', () => {
+  // ── 缺省 0 ──
+  const 没写 = inspect(manifest({ contributes: { concurrent: false } }));
+  assert.ok(!没写.error, `不写这一格是合法的：${没写.error}`);
+  assert.equal(没写.entry.plugin.contributes.ports, 0,
+    '缺省落成**具体的数** 0 —— 下游拿起来就能用，不必自己再判一次');
+  assert.equal(pluginData.needsSpace(没写.entry.plugin), false,
+    '缺省 0 ⇒ 不要数据空间（与从前的 `layout: false` 同义）');
+
+  // ── 1 是今天唯一"要一份"的取值 ──
+  const one = inspect(manifest({ contributes: { ports: 1, concurrent: false } }));
+  assert.ok(!one.error, `${one.error}`);
+  assert.equal(one.entry.plugin.contributes.ports, 1);
+
+  // ── 上界：2 是一句**框架做不到的话** ⇒ 拒，不是收下只兑现第一个 ──
+  //   ★ 一条会话只有一条隧道、作业侧只报得到一个候选端口，所以第二个端口兑不了。
+  //     收下的话症状是"插件以为自己在用第二个 origin"，而没有任何东西会红 ——
+  //     正是这个仓库一路在删的「配了但不生效」。
+  const two = inspect(manifest({ contributes: { ports: 2, concurrent: false } }));
+  assert.match(two.error || '', /contributes\.ports 必须是 0 到 1 之间的整数/);
+  assert.match(two.error, /最多占 1 个本地端口/, '拒的时候要说清为什么 —— 否则作者只能猜');
+
+  // ── 形状：负数 / 小数 / 字符串 / 布尔 / null 都不收 ──
+  for (const bad of [-1, 1.5, '1', true]) {
+    const r = inspect(manifest({ contributes: { ports: bad, concurrent: false } }));
+    assert.match(r.error || '', /contributes\.ports 必须是 0 到 1 之间的整数/,
+      `${JSON.stringify(bad)} 不是一个端口个数`);
+  }
+  // ★ 而 `null` **收**：与不写同义（这个清单里几处可选的格都是这个规矩）。
+  const nul = inspect(manifest({ contributes: { ports: null, concurrent: false } }));
+  assert.ok(!nul.error, `null 与不写同义：${nul.error}`);
+  assert.equal(nul.entry.plugin.contributes.ports, 0);
+});
+
+test('★ contributes.layout 已经没了 —— 老写法要**指得到新名字**', () => {
+  // ★ 与 `data.perInstance` 那条改名提示同一个理由：只说"认不得的键：layout"
+  //   的话，作者知道错了却不知道该改成什么，而这一格还**换了形**（开关 → 个数）。
+  const r = inspect(manifest({ contributes: { layout: true, concurrent: false } }));
+  assert.match(r.error || '', /contributes\.layout 已经改名成 contributes\.ports/);
+  assert.match(r.error, /ports: 1/, '两个取值都要点出来 —— 否则作者还得自己推');
+  assert.match(r.error, /ports: 0/);
+  // ★ 而它**不是**一条兼容路：写成 layout 的清单**装不上**。
+  assert.equal(r.entry, undefined);
 });
 
 test('contributes.data：合法的收下，并且**规整成固定形状**', () => {
@@ -463,7 +515,7 @@ test('contributes.data：形状不对的一份都收不下，且报错说得清�
 });
 
 test('★★ contributes.data：perVersion 与 inherit 同时写 ⇒ 拒，且点名两个键', () => {
-  // ★ 这是"两半各自都没错、错在放一起"的那一类（与 concurrent 要求 layout 同形）。
+  // ★ 这是"两半各自都没错、错在放一起"的那一类（与 concurrent 要求 ports 同形）。
   //   不判的话症状是**两个都"成功"**：清单里明明写着共用一份，实际落在哪一份却
   //   取决于 `groupOf` 里两行的先后次序 —— 一个改代码顺序就会变的结论，而没有任何
   //   东西会红。
@@ -503,7 +555,7 @@ test('contributes.data：一个声明都不写的插件是**正常**的（那一
   //   而这一格不写只是一个保守的选择。
   const r = inspect({
     id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd', displayName: 'SSH 中转站',
-    version: '1.0.0', contributes: { layout: false, concurrent: false },
+    version: '1.0.0', contributes: { ports: 0, concurrent: false },
   });
   assert.ok(!r.error, `不声明 data 必须合法：${r.error}`);
   assert.equal(r.entry.plugin.contributes.data, null);

@@ -57,10 +57,10 @@ const gid = (n) => 'w' + String(n).padStart(12, '0');
  */
 const sid = (n) => 's' + String(n).padStart(12, '0');
 
-/** 一个要工作区的插件（形状取真清单里那一个，但 id 是本文件自己编的）。 */
+/** 一个要数据空间（一个端口）的插件（形状取真清单里那一个，但 id 本文件自己编）。 */
 const LAYOUT_PLUGIN = {
   id: '01M2JKHTZGKJBFQQTWYXMQMF2V', name: 'cs', version: '1.0.0',
-  contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } },
+  contributes: { ports: 1, concurrent: true, data: { inherit: 'editor' } },
 };
 
 /** 一份合法形状的数据（`{id, pluginId, group, ports}`）。 */
@@ -394,7 +394,7 @@ test('★★ 数据**创建时定一次**、此后只读 —— 没有任何函�
   assert.deepEqual(cfg.spaces, [], '也不该有数据');
 
   // 一份数据 = 一个本地端口 = 一个 origin = 一份编辑器布局。端口只在它**被创建时**
-  // 定一次（`nextSpacePort`），此后再没有任何东西改它。
+  // 定一次（`assignSpacePorts`），此后再没有任何东西改它。
   cfg.spaces = [space(1)];
   assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18081], '端口是这份数据的一个属性');
   config.saveConfig(dir, cfg);
@@ -573,25 +573,34 @@ test('★★ spaceFor：没有就建一份并落进引用表；有就复用**同
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [{ id: gid(1), name: 'A', refs: {} }];
 
-  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
+  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
   assert.equal(a.created, true);
   assert.equal(a.space.pluginId, LAYOUT_PLUGIN.id);
   assert.equal(a.space.group, 'editor');
-  assert.equal(a.space.ports.length, 1, '一份数据一个端口（个数由清单声明，P3 才放开）');
+  assert.equal(a.space.ports.length, 1, '个数由调用方给（`pluginData.portCountOf`）');
   assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], a.space.id, '引用表要跟着写');
 
   // ★ 第二次问**必须是同一份**：铸一个新的等于每次开会话都换一个 origin，
   //   而用户看到的是"我的布局又没了"，且没有任何报错。
-  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
+  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
   assert.equal(b.created, false);
   assert.equal(b.space.id, a.space.id);
   assert.equal(cfg.spaces.length, 1, '不该多出一份');
 
   // 同一个工作区里**另一个插件**是另一份数据（两个端口、两份存储）——
-  // 这正是"一个工作区里两个要工作区的插件可以同时跑"的全部依据。
-  const other = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id.replace('2V', '3W'), 'other');
+  // 这正是"一个工作区里两个要数据空间的插件可以同时跑"的全部依据。
+  const other = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id.replace('2V', '3W'), 'other', 1);
   assert.notEqual(other.space.id, a.space.id);
   assert.equal(cfg.spaces.length, 2);
+
+  // ★ **个数是调用方给的**，这一层照数兑现：给 2 就占两个端口。
+  //   上界不在这里 —— 那是清单校验那一侧的事（`MAX_PLUGIN_PORTS`），因为
+  //   "框架兑现得了几个"是基座的能力，不是这份配置的形状。
+  //   这一条同时钉住"逐个取端口"那个写法的错误：那样两份会拿到同一个端口。
+  const two = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id.replace('3W', '4X'), 'two', 2);
+  assert.equal(two.space.ports.length, 2);
+  assert.equal(new Set(two.space.ports).size, 2, '同一份数据里不许有两个相同的端口');
+  assert.notEqual(two.space.ports[0], a.space.ports[0], '两份数据不能抢同一个 origin');
 });
 
 test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', () => {
@@ -602,8 +611,8 @@ test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', (
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [{ id: gid(1), name: 'A', refs: {} }];
 
-  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
-  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor2');
+  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
+  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor2', 1);
   assert.equal(b.created, true, '共享组变了 ⇒ 必须新开一份');
   assert.notEqual(b.space.id, a.space.id);
   assert.equal(b.space.group, 'editor2');
@@ -617,7 +626,7 @@ test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', (
 
 test('★ spaceFor 对不存在的工作区返回 null，不凭空造一个', () => {
   const cfg = config.loadConfig(tmpdir());
-  assert.equal(config.spaceFor(cfg, gid(9), LAYOUT_PLUGIN.id, 'editor'), null);
+  assert.equal(config.spaceFor(cfg, gid(9), LAYOUT_PLUGIN.id, 'editor', 1), null);
   assert.deepEqual(cfg.spaces, []);
 });
 
@@ -733,14 +742,27 @@ test('workspacePlan：把「这个工作区只被谁用」推导出来，rendere
   assert.equal(plan[0].port, undefined);
 });
 
-test('端口分配：从 18080 起，跳过已被占用的', () => {
+test('★ 端口分配：从 18080 起，跳过已被占用的，**一次取够要的个数**', () => {
   const cfg = config.loadConfig(tmpdir());
-  assert.equal(config.nextSpacePort(cfg), 18080, '空配置从基址开始');
+  assert.deepEqual(config.assignSpacePorts(cfg, 1), [18080], '空配置从基址开始');
 
   cfg.spaces = [space(1), space(2), space(4)];   // 18081 / 18082 / 18084
-  assert.equal(config.nextSpacePort(cfg), 18080, '基址空着就用基址');
+  assert.deepEqual(config.assignSpacePorts(cfg, 1), [18080], '基址空着就用基址');
   cfg.spaces = [space(0), space(1), space(3)];   // 18080 / 18081 / 18083
-  assert.equal(config.nextSpacePort(cfg), 18082, '必须填中间的空洞');
+  assert.deepEqual(config.assignSpacePorts(cfg, 1), [18082], '必须填中间的空洞');
+
+  // ★ 个数是多于一个时**一次算一整套**，而且彼此不重复、升序 —— 逐个调用
+  //   `assignSpacePorts(cfg, 1)` 拼起来会拿到同一个端口两次（它每次都从基址看，
+  //   而中间那些还没有任何东西记下来）。这一条钉的就是"个数"这件事真的落到了实现里。
+  cfg.spaces = [space(0), space(1), space(3)];   // 18080 / 18081 / 18083
+  assert.deepEqual(config.assignSpacePorts(cfg, 3), [18082, 18084, 18085],
+    '跳过被占的三个，按序取三个');
+
+  // ★ 而 extraPorts 里的那些也要跳过 —— 那是**配置之外**占着的（临时那一份数据）。
+  //   少了它，两份临时数据会拿到同一个首选端口，而症状是每次开局一条假警报。
+  assert.deepEqual(config.assignSpacePorts(cfg, 2, new Set([18082, 18084])),
+    [18085, 18086]);
+
   // usedSpacePorts 要能用 exceptId 把自己摘出去 —— 端口的顺移靠它，
   // 不摘的话目标那一份自己的端口会被当成「别人的」而永远绑不上。
   assert.deepEqual([...config.usedSpacePorts(cfg, sid(1))].sort(), [18080, 18083]);

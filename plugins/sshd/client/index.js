@@ -23,15 +23,15 @@
  *   —— 用户要用的东西跑在他自己的机器上，客户端唯一要做的事就是让
  *   `ssh slurmate` 这个名字能连进来（见 sshconfig.js）。
  *
- * ★ 它也不需要工作区（`contributes.layout = false`）。工作区存在的理由是
+ * ★ 它也不要数据空间（`contributes.ports = 0`）。数据空间存在的理由是
  *   **浏览器的** localStorage 按 origin 隔离，而中转站没有浏览器。
  */
 
 const sshconfig = require('./sshconfig.js');
 
 module.exports = {
-  // ★ 这里**没有** preferredPort。本地端口不是插件的事：这个插件没声明
-  //   `contributes.layout`，于是会话用中转基准端口（基座的常量）。真被占了隧道
+  // ★ 这里**没有** preferredPort。本地端口不是插件的事：这个插件一个端口都不要
+  //   （`contributes.ports = 0`），于是会话用中转基准端口（基座的常量）。真被占了隧道
   //   会顺移，而**实际**端口由 `attach()` 写进用户那份 ssh 配置的 `Port` 行 ——
   //   那边必须反映当前真值，而用户认的那个名字（别名）恒定，端口漂移对他无害。
 

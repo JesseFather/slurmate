@@ -92,7 +92,7 @@ function validManifest() {
     contributes: {
       surface: { kind: 'web', path: '/' },
       login: { path: '/login', field: 'password', cookie: 'cs' },
-      layout: true, submitPubkey: false, concurrent: true,
+      ports: 1, submitPubkey: false, concurrent: true,
       data: { inherit: 'editor' },
     },
     site: { defaultCpus: 2, defaultMem: '8G' },

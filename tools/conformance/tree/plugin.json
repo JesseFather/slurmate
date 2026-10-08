@@ -7,7 +7,7 @@
   "author": "slurmate",
   "engines": { "slurmate": ">=0.5" },
   "contributes": {
-    "layout": false,
+    "ports": 0,
     "submitPubkey": false
   }
 }
