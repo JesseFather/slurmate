@@ -60,6 +60,12 @@
   代价写明：`cluster/docs/TROUBLESHOOTING.md` 里「改成由插件自己在清单里声明…之后」
   这类**无锚的欠报**是接受的，由人工迁移兜底。
 
+★ **已知的过度报警一处**：`从…变成` 那条分不清「一次已经发生了的改写」与「一个
+  触发条件」。`packer/docs/README.md` 的「同一个 id 的签名者变了（…）」原先写作
+  「或从"有签名"变成"没签名"」—— 那描述的是**将来会触发一次提问的状态变化**，
+  不是历史。机械上分不开，所以那一处改写了措辞；再遇到同一形状，同样处理（或者
+  把整张表重新想一遍，别只在正则上打补丁）。
+
 用法：
     python3 tools/check-doc-prose.py                # 扫整个仓库
     python3 tools/check-doc-prose.py --self-test    # 种坏样本，断言它真的会红
@@ -79,37 +85,39 @@ ROOT = os.path.dirname(HERE)
 # 公开文档若想提历史，唯一的出路是把话搬进这里。
 EXEMPT = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
 
-# ★★ 迁移期棘轮。值 = 该文件**当前允许的违规条数**。
+# ★★ 夹具：**不判**，而理由与「记录类」不是一回事 —— 那一类叫「允许叙历史」，
+#    这一类叫「它不是散文」。`tools/conformance/tree/` 是一棵**被字节钉住的输入树**：
+#    `tools/conformance/expected.json` 逐份记着它的 sha256 与 size，外加一个整包
+#    `digest`，而三端用例（`packer/test-packer.mjs`、`cluster/test-sessiond-logic.py`、
+#    `client/test/plugin-package.test.mjs`）都拿那份期望值当答案。改一个字节 ⇒ 期望值
+#    过期 ⇒ 三端一起红。那一份 README 自己最后一行就写着这句话（「改这棵树 ⇒
+#    `expected.json` 会过期。**那是设计**」），它是夹具的**说明书**，不是公开文档。
+#    ⇒ 它落在棘轮里是阶段 1 建表时的一个**分类错误**，正确的处置是把它移出判据范围，
+#      而不是去改那棵树（改它等于把夹具挪到实现那边去）。
+FIXTURE = ("tools/conformance/tree/",)
+
+
+def judged(rel):
+    """这一份要不要判。"""
+    return rel not in EXEMPT and not rel.startswith(FIXTURE)
+
+# ★★ **迁移期棘轮 —— 已经清空。** 值 = 某文件**当前允许的违规条数**；不在表里 = 零容忍。
+#    v0.15 阶段 1 建表时是 **596 条 / 19 份**，阶段 5 清到最后一份，现在是空的。
 #
-#    清完一份，把那个数字**下调**；清干净，把键**删掉**。
-#    任何一次提交若某文件的违规数**上升**，这里立刻红。
+#    ★ 为什么当初不是「文件级豁免名单」（只列出文件、不列数字）：那个形状在**缩编
+#      期间**有一个真实的漏网窗口 —— 名单内的文件正是改动最频繁的，它新长出来的
+#      违规不会被任何人发现。数字让它上升即红。
 #
-#    ★ 为什么不是「文件级豁免名单」（只列出文件、不列数字）：那个形状在**缩编期间**
-#      有一个真实的漏网窗口 —— 名单内的文件正是改动最频繁的，它新长出来的违规
-#      不会被任何人发现。数字让它上升即红。
+#    ★★ **空是这条纪律的一部分，不是巧合。** 一张永久挂着的遮罩比没有检查更糟：
+#      它让「绿」伪装成「清完了」。所以本表非空时，`run()` 一定会打印「还剩 N 份」。
 #
-#    ★★ **全部清完之后这一张表必须是空的。** 非空时本脚本会打印「还剩 N 份没清」，
-#       让「绿」不会伪装成「清完了」—— 一个永久挂着的遮罩比没有检查更糟。
+#    ★ 这张表**只该在两种场合重新非空**：① 又一次大规模迁移（那是它的用途）；
+#      ② 某一份文档需要临时宽限 —— 而第二种要写清为什么、以及打算什么时候清掉。
+#      日常提交往这里加键 = 把检查关掉，不是"配置"。
 #
 #    ★ 数字是 F 与 G **合起来**的条数，不是分开两套：棘轮要守的是「不许上升」，
 #      不是「必须下降」，一条总数就够，少一处会漂的事实源。
-#
-#    ★ 下面是逐份清出来的进度。落地时是 596 条 / 19 份；阶段 1 顺手把
-#      `CONTRIBUTING.md` 自己那 5 条清了（立法的那一份自己不遵守，两条规矩就没人会
-#      当真），它的键因此**已经删掉** —— 那一份现在是零容忍。
-LEGACY = {
-    "packer/docs/PLUGIN-SPEC.md": 82,
-    "packer/docs/README.md": 76,
-    "client/README.md": 26,
-    "docs/CONTRACT.md": 22,
-    "plugins/sshd/README.md": 17,
-    "README.md": 13,
-    "packer/README.md": 11,
-    "docs/IMPLEMENTING.md": 5,
-    "packer/docs/PLUGIN-CONTAINER.md": 3,
-    "plugins/code-server/README.md": 5,
-    "tools/conformance/tree/README.md": 1,
-}
+LEGACY = {}
 
 # ── 判据 G：人称代词 ──────────────────────────────────────────────────────
 #
@@ -265,8 +273,8 @@ def problems_from(files):
     """
     out = []
     for rel, text in sorted(files.items()):
-        if rel in EXEMPT:
-            continue                         # 记录类：两条都不判
+        if not judged(rel):
+            continue                 # 记录类（允许叙历史）与夹具（不是散文）：都不判
 
         quote, code = masks(text)
         pos = 0
@@ -332,7 +340,16 @@ def run(root):
             print("    %-38s %3d / %3d" % (rel, n, LEGACY.get(rel, 0)))
     else:
         print("✓ %d 份公开文档：没有历史叙述，正文里也没有「你 / 我」"
-              % sum(1 for r in files if r not in EXEMPT))
+              % sum(1 for r in files if judged(r)))
+
+    # ★ 豁免集是**遮罩**，遮罩必须看得见 —— 悄悄跳过一份，绿就与「没在看」同形。
+    skipped = sorted(r for r in files if not judged(r))
+    if skipped:
+        print("\n· 不判的：%d 份是**记录类**（%s），%d 份是**夹具**（`%s` —— 字节被"
+              " `expected.json` 钉住，改它三端一起红）。"
+              % (sum(1 for r in skipped if r in EXEMPT),
+                 " / ".join(EXEMPT),
+                 sum(1 for r in skipped if r not in EXEMPT), FIXTURE[0]))
 
     if LEGACY:
         print("\n· ★ 棘轮还没清空：还剩 %d 份文档挂着额度。清完一份就把数字**下调**，"
@@ -421,6 +438,13 @@ def self_test():
          {"docs/A.md": "形状是 `{ \"uid\": \"<他>\" }`。\n"}, None),
         ("两份记录类不受 G 管",
          {"CHANGELOG.md": "我们当时改了你说的那处。\n"}, None),
+        # ── 夹具：整棵 `tools/conformance/tree/**` 都不判 ───────────────
+        ("夹具里的「我」不报（那一棵树的字节被 expected.json 钉住）",
+         {"tools/conformance/tree/README.md": "我第一版就叫了 `nul.bin`。\n"}, None),
+        ("夹具下**更深一层**的 md 同样不报（前缀匹配，不是逐份列名）",
+         {"tools/conformance/tree/sub/A.md": "从前这里有一份。\n"}, None),
+        ("★ 但 `tools/` 下**不在夹具里**的 md 照判",
+         {"tools/conformance/README.md": "你改这一份。\n"}, "「你」"),
     ]
     bad = []
     for why, files, expect in cases:
