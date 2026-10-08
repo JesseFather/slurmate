@@ -680,12 +680,54 @@ def _read_logs(home):
     return out
 
 
+def _stub_slurm_bins(tmpdir, names):
+    """把八个 Slurm 命令的**空桩**放进一个目录，并把它前置到 `PATH`。
+
+    ★★ 为什么整个测试进程都需要它：`Config.__init__` 用 `resolve_bin()` 解析这八个
+      命令在不在，**解析不到就让整份配置带上问题** —— 于是十来处「配置自检无错误」
+      的断言在**没有装 Slurm 的机器上**集体失败（CI 是裸的 ubuntu-latest）。
+      ★ 那不是那些用例写错了：它们要考的从来不是"这台机器是不是登录节点"，
+        而"这个仓库跑在一台真集群的计算节点上"只是开发机的偶然。
+
+    ★ 桩**从不被执行**：本文件的用例要么直接构造配置对象，要么把 `run_cmd` 换掉，
+      要么给子进程一整份假环境。它们只需要**存在且可执行**。
+
+    ★ 为什么是改 `PATH` 而不是替换 `resolve_bin`：这个文件里有几节**拉起真的
+      子进程**（`--check` 的退出码、`--gen-config`），替换函数管不到子进程，
+      改 `PATH` 管得到。★ 也正因如此，这里不能反过来拿 `PATH` 去造"**缺** Slurm"
+      —— `resolve_bin` 还有 `SLURM_BIN_DIRS` 那层兜底，本地照样会查到真的；
+      `--check` 那一节的注释记的是**同一条**教训。
+
+    ★ 名字从 `mod.SLURM_COMMANDS` 来，**不在这里抄第二份**。
+
+    ★★ 桩目录挂在 `PATH` 的**末尾**，不是开头 —— 这一条是有代价换来的：
+      挂在开头时，本文件里那些**真的拉起命令**的用例（`sinfo -N`、`scontrol show`
+      ……）拿到的是这个空桩，解析它的输出就炸；而炸在某个被 `with` 吞掉的地方时，
+      症状是**后面几节整段不跑**，汇总却照旧打印「全部用例都已实际执行」
+      （那段话只看 `FAIL == 0`，不看实际跑了多少）—— 一次**假绿**。
+      挂在末尾：本机仍然先找到 `/usr/bin/sbatch`（行为与从前逐字相同），
+      只有在**真的没有装 Slurm** 的机器上才落到桩。
+    """
+    d = os.path.join(tmpdir, "stub-bin")
+    os.makedirs(d, exist_ok=True)
+    for name in names:
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(p, 0o755)
+    os.environ["PATH"] = os.environ.get("PATH", "/usr/bin:/bin") + os.pathsep + d
+    return d
+
+
 def main():
     global PASS, FAIL
     tmpdir = tempfile.mkdtemp(prefix="slurmate-test-")
     print("测试临时目录: %s\n" % tmpdir)
 
     mod = load_module()
+    # ★★ 必须在**任何** `Config` 之前 —— 见 `_stub_slurm_bins` 的说明。
+    #    它排在第 1 节那句「配置自检无错误」的前面，也排在所有子进程用例的前面。
+    _stub_slurm_bins(tmpdir, mod.SLURM_COMMANDS)
     cfg = make_config(mod, tmpdir)
     os.makedirs(os.path.join(tmpdir, "state"), exist_ok=True)
     os.makedirs(os.path.join(tmpdir, "log"), exist_ok=True)
@@ -10417,7 +10459,6 @@ exit 0
 
     _saved_rl_dir = mod.default_plugins_dir
     _saved_rl_run = mod.run_cmd
-    _saved_rl_resolve = mod.resolve_bin
     mod.default_plugins_dir = lambda: _RL
     # ★★ 这一节里问 Slurm 的命令**一律走桩**（这一节真的会问）：
     #    热重载现在会跑 `crosscheck_cidr()`，而 `_do_reload()` 还会跑
@@ -10430,19 +10471,10 @@ exit 0
     #      `gres_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
     #      就会悄悄漏掉一个 —— 而"漏一个"正是 F45 的形状。
     mod.run_cmd = _rl_nodes_stub
-
-    # ★★ 还有**第二个**注入点，拦的是另一条路：`Config.__init__` 用 `resolve_bin()`
-    #    解析那八个 Slurm 命令在不在，**解析不到就整份配置带上问题** —— 而
-    #    `reload_config()` 见到问题就**拒绝**，于是这一节四十多条断言连锁红。
-    #    ★ 它的失败形态与上面那条**完全不同**：那条是"问错了集群"，这条是
-    #      "**配置压根没生效**" —— 报出来的是"热重载被拒"，一个字都不提 Slurm。
-    #    ★ **不能靠改 PATH 或改 `SLURM_BIN_DIRS` 来造"找得到"**：`resolve_bin`
-    #      在 PATH 之外还会查那几个硬编码目录，而本机（一台计算节点）的 /usr/bin
-    #      下真的装着它们 ⇒ 同一条用例在开发机上绿、在裸的 CI 上红。17 节与
-    #      `--check` 那一节记的是**同一条**教训。
-    #    ★ 这一节要考的从来不是"命令能不能解析到"（那是 `machine_selfcheck`
-    #      那一节的事），所以替换掉它不丢任何东西。
-    mod.resolve_bin = lambda name, explicit=None: explicit or "/bin/true"
+    # ★ 这一节里 `Config` 也要 `resolve_bin()` 解析得到那八个 Slurm 命令 ——
+    #   那是 `main()` 开头那个 **PATH 桩**给的（`_stub_slurm_bins`），
+    #   不是"这台机器上真装了什么"。少了它，这一节在裸的 CI 上会因为
+    #   「配置自检有 8 处问题」而让热重载**整份被拒**，四十多条断言连锁红。
     try:
         # 32.2 ★ `changed_*_keys`：判据是**配置里写了什么**
         #
@@ -10892,7 +10924,6 @@ exit 0
     finally:
         mod.default_plugins_dir = _saved_rl_dir
         mod.run_cmd = _saved_rl_run
-        mod.resolve_bin = _saved_rl_resolve
 
     for _dd in _rl_ds:
         try:
