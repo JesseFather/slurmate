@@ -9,7 +9,7 @@ ACL 的登记簿从「SSH 会话」改挂到「Slurm 作业」上** —— 于�
   作业模板 `run.sbatch`、部署脚本 `install-base.sh`、配置示例 `slurmate.conf.example`
 - **客户端（`client/`）** —— Electron 桌面应用
 - **插件（`plugins/`）** —— **独立项目**，基座两端都不依赖它们。契约见
-  [plugins/README.md](plugins/README.md)。**一个插件都不装是合法状态**，所以基座里
+  [packer/docs/README.md](packer/docs/README.md)。**一个插件都不装是合法状态**，所以基座里
   不许出现任何插件的名字、也不许出现「至少得有一个插件」的假设。
 
 > **如果你只读一节，读[《检查必须能真的失败》](#检查必须能真的失败)。**
@@ -224,7 +224,7 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
 **一条要求 = 一个可判定的句子。**「写得清楚一点」「尽量不要」这类句子不进公开文档 ——
 它们无法被判定，因此无法被守住，也无法被变异验证。
 
-**措辞只有三档**（含义与 [PLUGIN-SPEC.md §0.1](docs/PLUGIN-SPEC.md) 是同一套）：
+**措辞只有三档**（含义与 [PLUGIN-SPEC.md §0.1](packer/docs/PLUGIN-SPEC.md) 是同一套）：
 
 | 措辞 | 含义 |
 |---|---|

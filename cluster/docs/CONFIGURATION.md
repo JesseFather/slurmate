@@ -127,7 +127,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 **不再存包**：包是运输形状，不是存储形状。
 
 **加一个插件 = 给它一个 `.splug` 包 + 跑一次 `slurmate plugin install`。** 不需要改守护
-进程的源码，**也不需要动主配置**。契约见 [plugins/README.md](../plugins/README.md)。
+进程的源码，**也不需要动主配置**。契约见 [packer/docs/README.md](../../packer/docs/README.md)。
 
 ### 一个插件一个文件
 
@@ -145,7 +145,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | `<id>.conf` | **永远**可以，也是**撞名时唯一**的写法。安装器一律用这个 |
 
 短名**不需要本站内唯一**（v0.11 放开）：两个 `id` 不同、短名一样的插件允许并存，
-它们不是同一个东西（[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §2.2）。于是**撞名时写短名
+它们不是同一个东西（[PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md) §2.2）。于是**撞名时写短名
 指不到具体哪一个**：这一份会报一条警告 并把是哪几个 `id` 列出来，而**它不生效**
 （那两个插件各自按清单缺省跑）。挑一个的后果是"哪个生效"取决于遍历次序，所以
 **判据绝不替你挑** —— 但也不拦启动（见下方〈认不出的键 / 指不到插件的文件〉）。
@@ -189,7 +189,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 
 短名只是本站给人看的名字，**不是身份** —— 插件另有一个**铸造出来的全球唯一
 `id`**（ULID，写在插件清单里、永不改变），那一层是给客户端认"这是不是同一个插件"
-用的，见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+用的，见 [ARCHITECTURE.md](../../docs/ARCHITECTURE.md)。
 
 ### 「装了」和「开着」是两件事
 
@@ -318,7 +318,7 @@ sudo slurmate plugin install <包>    # 装一个包（装完自动补一次 syn
 
 **这几样不是一类东西**：`secrets.json` 的**私钥**与 `trustedPlugins` **同意台账**
 **永远不出本机**，而连接列表、布局组与插件运行时数据是运行时数据 —— 分类与各自的
-理由见 [SECURITY.md](../SECURITY.md) 的〈客户端的数据：哪一些永远不出本机〉。
+理由见 [SECURITY.md](../../SECURITY.md) 的〈客户端的数据：哪一些永远不出本机〉。
 
 > 这里从前写的是 `~/.slurmate/config.json`。**那个路径不存在** —— 客户端从来
 > 没有把配置写在 `~/.slurmate/` 下（那个目录只有 `site-plugins/` 一个东西是它的）。
@@ -410,7 +410,7 @@ sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 被漏过去的时候」。
 
 多网段集群目前无法表达 —— 这是本架构的已知边界，见
-[DEPLOYMENT.md](./DEPLOYMENT.md) 前置条件。
+[DEPLOYMENT.md](DEPLOYMENT.md) 前置条件。
 
 ## `readonly_paths`
 
@@ -593,7 +593,7 @@ v0.2 把整个 `[quota]` 节按那条理由收了起来，其中包含 `max_acti
 | | 谁定 | 范围 |
 |---|---|---|
 | `max_sessions_per_user` | **本站管理员**（这一格） | **全局** —— 跨客户端、跨连接，数的是**作业** |
-| `contributes.concurrent` | **插件作者**（清单里，见 [PLUGIN-SPEC.md](PLUGIN-SPEC.md)） | **本机** —— 基座在这台客户端上不给出第二份 |
+| `contributes.concurrent` | **插件作者**（清单里，见 [PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md)） | **本机** —— 基座在这台客户端上不给出第二份 |
 
 **这一格是唯一的全局闸。** 三条要照着配的后果：
 
@@ -624,7 +624,7 @@ v0.2 把整个 `[quota]` 节按那条理由收了起来，其中包含 `max_acti
 **为什么没有"顶掉"了。** "顶掉"那条路上**没有终点**：被顶掉的客户端自动重连 ⇒
 反过来顶掉对方 ⇒ 拉锯。v0.8 靠客户端一条「被顶掉的禁止自动重连」兜着，而那道闸
 一没了，这个形状就收不了场。v0.9 的替代品是**按会话的 `keeper` 一列**加两条显式的
-op：用户想换一台电脑看同一个作业，走 `takeover`（见 [PROTOCOL.md](PROTOCOL.md)）。
+op：用户想换一台电脑看同一个作业，走 `takeover`（见 [PROTOCOL.md](../../docs/PROTOCOL.md)）。
 
 **谁算一条连接。** 全部 —— 包括认不出身份的那些（`slurmate rpc`、`slurmate wait`、
 VS Code 的 Remote-SSH、你的终端）。同一个用户在同一个站点上本来就会有很多条 SSH
@@ -677,7 +677,7 @@ Slurm 拒绝」的错误，与真正的原因（配置里的副本过期了）�
 > `"gres": {"name": "gpu", "type": "a100", "count": 2}`（一个描述符）。理由是
 > GRES 是**管理员自定义的**，不是一个数字 —— 名字与型号随集群而定，而"上限是几"
 > 由集群自己配了几个决定（不再有 `MAX_GPUS_REQUEST`）。
-> 完整规则见 [PROTOCOL.md](PROTOCOL.md) 的〈`gres`：一个结构化描述符〉。
+> 完整规则见 [PROTOCOL.md](../../docs/PROTOCOL.md) 的〈`gres`：一个结构化描述符〉。
 
 > **v0.11 阶段 5 补上了最后一格 —— 缺省卡数**（账本 F15，已结清）。
 > 它在那个插件的配置文件里（`default_gpus`），**清单里没有对应的键**：作者写不出
@@ -869,7 +869,7 @@ sudo systemctl reload slurmate-sessiond
 "改了会不会被拒绝"。
 
 **而 `systemctl reload` 的退出码不表达"生效了没有"** —— 它只说**信号送到了**。
-要看结果得看 `journalctl`（这一条记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) §三 的 `S30`）。
+要看结果得看 `journalctl`（这一条记在 [KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) §三 的 `S30`）。
 
 装插件、`slurmate plugin sync` 这两条动线做完会**自己**发一次重载信号 —— 所以
 "装一个插件"今天不需要任何人记得去重启。
@@ -891,5 +891,5 @@ sudo systemctl reload slurmate-sessiond
 ## 还想知道「有什么是坏的」
 
 配置全部正确、自检全绿，不代表系统没有已知问题。**已核实的缺陷、从未实测过的
-假设、以及结构性欠账**都记在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) ——
+假设、以及结构性欠账**都记在 [KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) ——
 那是这个仓库唯一的账本，请不要在别处重新发现一遍。

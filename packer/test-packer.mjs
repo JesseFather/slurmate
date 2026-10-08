@@ -213,7 +213,7 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
 {
   // ★ 目录名故意与 id **没有任何关系**：从前包名是 `<目录名>-<版本>.splug`，
   //   于是"包叫什么"取决于你在自己的机器上把那个目录叫什么 —— 而身份来自清单
-  //   里的 `id`（`plugins/README.md` 那句"目录名不参与任何判定"）。
+  //   里的 `id`（`packer/docs/README.md` 那句"目录名不参与任何判定"）。
   const { base, plug, git } = mkRepo(baseFiles());
   const want = path.join(base, `${MF_ID}.splug`);
 
@@ -236,7 +236,7 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
   // ★★ 连带后果：**默认落点会把上一版盖掉**。同一个 id 的两个版本只有一个默认
   //    文件名，所以"多版本"必须由**作者自己分目录**表达（`dist/1.0.1/<id>.splug`）。
   //    把它钉成**已知行为**而不是让它成为惊喜：覆盖是静默的，而静默覆盖正是最该
-  //    写下来的那一种。这一条同时是 `plugins/README.md` 那段话的依据。
+  //    写下来的那一种。这一条同时是 `packer/docs/README.md` 那段话的依据。
   fs.writeFileSync(path.join(plug, 'plugin.json'), mf({ version: '1.0.1' }));
   git('add', '-A');
   git('commit', '-qm', '1.0.1');

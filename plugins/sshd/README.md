@@ -4,7 +4,7 @@
 连接**的工具都从这里接进来 —— 而用户不能直接 ssh 到计算节点。
 
 这是一个**独立项目** —— 它是 Slurmate 的一个插件，但 Slurmate 不依赖它。
-契约（目录形状、清单的每个键、作业侧钩子）见 [`../README.md`](../README.md)，
+契约（目录形状、清单的每个键、作业侧钩子）见 [`../README.md`](../../packer/docs/README.md)，
 这里只讲**这个插件自己**的事。
 
 ```
@@ -85,7 +85,7 @@ bin          =
 `precheck_sshd` 会在日志里写出「不存在或不可执行」。
 
 这六项**在别处都没有第二份**：站点主配置文件里一个字都不写它们（判据是
-「它是不是站点的事实」—— 见 [CONFIGURATION.md](../../docs/CONFIGURATION.md) 的
+「它是不是站点的事实」—— 见 [CONFIGURATION.md](../../cluster/docs/CONFIGURATION.md) 的
 〈为什么有些键不在这里〉）。
 
 **`defaultEnabled` 是 `false`，这是刻意的。** 那个标记为 `true` 的只有一种插件：
@@ -146,7 +146,7 @@ IDM 或集群的登录入口都不认识它**。
 时它会不会跟着走**。这里选"不跟着走"是因为 `config` 与 `id_ed25519` 重建要重新注册，
 而且它们与服务端那一份是配套的。
 
-**它为什么写 `concurrent: false`**（这一格是必填的，见 `plugins/README.md`）：
+**它为什么写 `concurrent: false`**（这一格是必填的，见 `packer/docs/README.md`）：
 两层理由都要说 —— **架构层**：它不要布局组，而实例键就是布局组，所以基座**发不出
 第二份**；**作者层**：写进用户 ssh 配置的那个别名 `slurmate` 是**一个常量**，两份
 实例写进去的是同一个 `Host` 块，后写的赢、前一个静默失效。

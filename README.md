@@ -3,7 +3,7 @@
 在 Slurm 集群上用远程开发环境，把网络 ACL 的登记簿**挂在作业上**而不是 SSH 会话上
 —— 于是 SSH 闪断不再丢会话。
 
-作业里跑什么由**插件**决定，而插件是**独立的项目**（[`plugins/`](plugins/)）：
+作业里跑什么由**插件**决定，而插件是**独立的项目**（[`plugins/`](plugins)）：
 基座两端都不带任何插件，**一个都不装是合法状态**。
 
 ---
@@ -99,7 +99,7 @@ cluster/          集群侧（部署到登录节点）
 client/           Electron 桌面客户端
 plugins/          插件的**独立项目** —— 基座不依赖它们，客户端打包不含它们
                    （这个目录里放着两棵**开发样例**树，用来在开发时对齐两侧的能力；
-                   一个插件都没有是**合法状态**），见 plugins/README.md
+                   一个插件都没有是**合法状态**），见 packer/docs/README.md
 packer/           插件**作者**的打包器（单文件、零依赖）—— 它跑在你的机器上，
                    产出 .splug；服务器上从头到尾没有源码树，install-base.sh 永不打包
 docs/             README.md 是**索引**（按读者分三组）；其余：架构、部署、配置、
@@ -150,7 +150,7 @@ npm start
 sudo bash tools/check-cluster.sh
 ```
 
-然后按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 走。**部署前请务必读那份文档的前置条件清单** ——
+然后按 [cluster/docs/DEPLOYMENT.md](cluster/docs/DEPLOYMENT.md) 走。**部署前请务必读那份文档的前置条件清单** ——
 Slurmate 对集群形态有几个硬性要求（单一登录节点、登录与计算节点同网段、
 共享家目录、root 有 Slurm operator 权限等），不满足时的失败方式往往很隐蔽。
 
@@ -202,9 +202,9 @@ sudo bash cluster/install-base.sh              # 部署
   Slurm 的 `NodeAddr` 交叉核对，对不上就拒绝启动。
 - **产物未签名**：Windows 首次运行会被 SmartScreen 拦，macOS 需要右键 →「打开」。
 - **基座不带任何插件**，两端都是。作业里能跑什么由**插件**决定，而插件是**独立的
-  项目**（[`plugins/`](plugins/)），基座里没有任何一个插件的名字。
+  项目**（[`plugins/`](plugins)），基座里没有任何一个插件的名字。
   **插件以一个包文件（`.splug`）分发**：作者在自己的机器上用
-  [`packer/`](packer/) 打包（**服务器上从头到尾没有源码树**），管理员把包装上去
+  [`packer/`](packer) 打包（**服务器上从头到尾没有源码树**），管理员把包装上去
   （`sudo slurmate plugin install <包>`，或 `sudo slurmate plugin install --from
   <放包的目录>` 整批对齐）。
   装的时候会**验签**，并按 `id` 记住签名者（§6.4）。代价写在明处：服务器上没有
@@ -226,7 +226,7 @@ sudo bash cluster/install-base.sh              # 部署
   提交的服务。**一个插件的包里没有 `job/start.sh` 也是合法状态**：它装得上、
   看得见，但提交不了（守护进程报 `service_kind_no_job`，界面上那个按钮是灰的）。
   加一个插件 = 打一个包 + 放进去 + 跑一次 `slurmate plugin install`，**不用改基座的源码**，
-  客户端那一侧一步人工动作都不需要。契约见 [plugins/README.md](plugins/README.md)。
+  客户端那一侧一步人工动作都不需要。契约见 [packer/docs/README.md](packer/docs/README.md)。
 - **站点分发的插件要你点一次同意**。每个 `(id + 版本 + 整目录摘要)` 第一次都要在
   界面上同意一次，不同意就不激活。四条护栏（**签名、钉公钥、逐插件同意、进程隔离**）
   **前三条都做了、第四条还欠着** —— `client/index.js` 仍然跑在主进程里，完整 Node

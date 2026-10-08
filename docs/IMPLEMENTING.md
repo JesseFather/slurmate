@@ -65,7 +65,7 @@
 - **为什么这么设计**（作业与 ACL 怎么绑、状态机、信任模型）→
   [ARCHITECTURE.md](ARCHITECTURE.md)。
 - **插件容器格式**（要写一个能读包的客户端就得看它）→
-  [PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md)（`PLUGIN-SPEC.md` 的附录 A）。
+  [PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md)（`PLUGIN-SPEC.md` 的附录 A）。
 - **已经知道但还没修的**按编号在 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。
 
 **这一篇里没有一条是"建议"。** 每一条都对应一个曾经真实发生过的静默失败 ——

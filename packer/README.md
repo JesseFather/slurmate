@@ -15,7 +15,7 @@ node slurmate-packer.js inspect your-plugin-1.0.0.splug
 产出的 `.splug` 发布到你的网站 / GitHub；站点管理员下载下来交给安装器。
 **服务器上从头到尾没有源码树** —— 打包发生在你的机器上。
 
-规范：`docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名）与 `docs/PLUGIN-CONTAINER.md`
+规范：`packer/docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名）与 `packer/docs/PLUGIN-CONTAINER.md`
 （容器格式，即那份规范的**附录 A**）。
 
 ## 六个动词
@@ -33,7 +33,7 @@ node slurmate-packer.js inspect your-plugin-1.0.0.splug
 ≤ 1,562,251 字节、份数 ≤ 256。超了它**拒绝**，并给出数字与是哪一条 —— 那是
 **发布之前**唯一会说话的地方（站点那边只有一条管理员看得见的告警，客户端那边要
 等包发出去、收下来才拒）。这几个数与守护进程、客户端那两份由用例钉着逐字相同；
-它们为什么长这样写在 `docs/PLUGIN-SPEC.md` 的 §3.7。
+它们为什么长这样写在 `packer/docs/PLUGIN-SPEC.md` 的 §3.7。
 
 ## 树里的、机器上的：三样东西分开放
 

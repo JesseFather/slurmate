@@ -209,7 +209,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 **注意 firewalld 与 nftables 并存的情况**：`tools/check-cluster.sh` 会打印
 两者的 active/enabled 状态；它也会检查 `/etc/nftables.conf`（RHEL 9 上是
 `/etc/sysconfig/nftables.conf`）里有没有 `flush ruleset`。有的话见
-[TROUBLESHOOTING.md](./TROUBLESHOOTING.md) 的「nft 规则消失」。
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) 的「nft 规则消失」。
 
 ### 8. python3 ≥ 3.9
 
@@ -329,7 +329,7 @@ sudo slurmate plugin install --from ~/下载的插件
 sudo slurmate plugin install ~/下载的插件/<id>.splug
 ```
 
-它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）、
+它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md) §6.4）、
 把包里有什么打一屏出来、
 按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装成
 `<prefix>/share/slurmate/plugins/<ULID>/` 一棵树加 `<ULID>.json` 一份记录表。
@@ -379,7 +379,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 - `cluster_cidr` —— 见前置条件 2。**它没有默认值，不填服务起不来**；
 - `readonly_paths` —— 见前置条件 3e。
 
-站点通用键一共 17 个，全部见 [CONFIGURATION.md](./CONFIGURATION.md)。
+站点通用键一共 17 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 **插件要不要开、开哪几个，也在这一步决定。** `enabled = yes` 的插件会被
 **分发到每一台连上来的客户端**（v0.6）—— 不只是"用户可以提交它"。所以
@@ -392,7 +392,7 @@ enabled = yes          # ← 这一行同时也意味着"把它发到用户的�
 
 一份插件配置都不写时行为与以前完全一样（缺省取插件清单里的 `site.defaultEnabled`），
 所以**升级本身不会静默多发一个插件出去**。
-逐条见 [CONFIGURATION.md](./CONFIGURATION.md) 的〈一之二、插件配置〉。
+逐条见 [CONFIGURATION.md](CONFIGURATION.md) 的〈一之二、插件配置〉。
 
 ### 步骤 3：演练（可选但推荐）
 
@@ -499,7 +499,7 @@ ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>
 用户机器上有过一份 `job/start.sh` 曾经是一个真实的缺陷（它是以**提交者本人**的身份
 在集群上执行的脚本），v0.13 修掉了，而且客户端解包时**拒绝**任何含站点侧路径的包。
 **这件事到今天为止一次都没在真集群上跑过**，而且**刻意押后了**（形状还会大动，
-现在验的结论留不住）—— 见 [docs/KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 U7，
+现在验的结论留不住）—— 见 [docs/KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) 的 U7，
 那里列着第一次跑要看什么（最要紧的仍然是那 4 MiB 的响应余量够不够，
 以及单线程守护进程扛不扛得住一次 2 MiB 级的响应）。
 
@@ -532,7 +532,7 @@ sudo bash cluster/install-base.sh --uninstall --purge-state
 
 - **`nftables.service` 重载会 flush 整个 ruleset。** 这是单元里
   `PartOf=nftables.service` 存在的原因；重载后表会被重建，规则由对账补齐。
-  详见 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)。
+  详见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 - **端口池的占用会随时间增长。** 每个会话占 `candidates_per_session` 个候选端口，
   释放时归还。
 - **用户家目录里的陈旧会话文件**由用户自己清理：
@@ -544,7 +544,7 @@ sudo bash cluster/install-base.sh --uninstall --purge-state
 
 `install-base.sh` 跑通 **不等于**系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
 **已核实的缺陷、从未在真机上跑过的路径、以及结构性欠账**都在
-[KNOWN-ISSUES.md](KNOWN-ISSUES.md)，每条写了位置、后果与修法。
+[KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md)，每条写了位置、后果与修法。
 
 与部署直接相关的两条按**编号**引用（编号是稳定的，复述会漂）：
 

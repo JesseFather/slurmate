@@ -682,7 +682,7 @@ PASSWORD_BYTES = 12
 #   就在配置里写 2 或更大。
 #
 # ★ v0.2 曾把配额整节从配置里收回去，理由是「只有一种正确取值」。这一格**被
-#   这一版证伪了** —— 理由与逐条症状见 docs/CONFIGURATION.md 的那一节。
+#   这一版证伪了** —— 理由与逐条症状见 cluster/docs/CONFIGURATION.md 的那一节。
 DEFAULT_MAX_SESSIONS_PER_USER = 1
 
 # 每人同时能有几条**连接**。**站点可配**（`max_connections_per_user`），这是它的
@@ -692,7 +692,7 @@ DEFAULT_MAX_SESSIONS_PER_USER = 1
 #    各算一条），**不是"几台电脑"**。它与 `max_sessions_per_user` 仍然是两个旋钮
 #    （一个管连接，一个管作业）—— 但别把这一格读回成"客户端配额"：那个东西叫
 #    `max_clients_per_user`，它按 uid **顶掉整个客户端**，而那个形状在 v0.9 整条
-#    删掉了（理由与逐条症状见 docs/CONFIGURATION.md 的那一节）。
+#    删掉了（理由与逐条症状见 cluster/docs/CONFIGURATION.md 的那一节）。
 #
 # ★ 超限时**拒绝新来的那一条**（`5 too_many_connections`），**不顶掉旧的**。
 #   "顶掉"那条路上没有终点：两台电脑互相顶下去，而这一次连"被顶掉的禁止自动重连"
@@ -726,7 +726,7 @@ CLIENT_NAME_MAX = 64
 #   而"放一个目录"那个动作也不再存在（作者 `packer build` 出包；**安装器与部署
 #   脚本都永不打包**）。**那三样东西仍然是插件的三半**，只是它们在一个包的负载里
 #   —— 见下面
-#   「站点侧的一个插件是【一个包文件】」那一段与 docs/PLUGIN-SPEC.md 附录 A。
+#   「站点侧的一个插件是【一个包文件】」那一段与 packer/docs/PLUGIN-SPEC.md 附录 A。
 #
 # ★ 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的分派结构性
 #   地保证（只有一个变量、一次分派，"两个都起来"这个状态写不出来）。
@@ -2142,7 +2142,7 @@ def default_jobs_dir():
       文档与排查里要认哪一份，看 `<jobs_dir>/<ULID>.sbatch` 与
       `<plugins_dir>/*/plugin.json` 里的 `id` 对不对得上。
 
-    ★ 为什么是一插件一份、不是所有插件织进同一份：见 plugins/README.md。
+    ★ 为什么是一插件一份、不是所有插件织进同一份：见 packer/docs/README.md。
       一句话 —— 同处一个文件时，插件里任何一行**不在函数里**的代码都会待在
       主流程中间，在**每一个**作业里执行，不管用的是哪个插件。
     """
@@ -2187,7 +2187,7 @@ def human_bytes(n):
 
 
 # ==============================================================================
-#  读一个 .splug（docs/PLUGIN-SPEC.md 附录 A）
+#  读一个 .splug（packer/docs/PLUGIN-SPEC.md 附录 A）
 # ==============================================================================
 #
 # ★ **集群侧读包只有这一份实现**，三个调用方共用它：
@@ -5102,13 +5102,13 @@ def resolve_plugin_spec(by_id, by_name, key, plugins_dir):
             "本站**一个插件都没装**，所以任何名字都配不上。插件安装目录 %s "
             "是空的。（装插件是放一个 .splug **包**进去："
             "`sudo slurmate plugin install --from <那个目录>`，"
-            "见 plugins/README.md。）" % plugins_dir)
+            "见 packer/docs/README.md。）" % plugins_dir)
     # ★ 那句话必须说清"装插件"是**放一个包**，不是"放一个目录" —— 它是管理员
     #   唯一会照着做的那句，说错对象等于把他指到一个不存在的动作上。
     return None, ("本站没有装叫 %r 的插件。装了的是：%s。"
                   "（装了的才认得 —— 装插件是放一个 .splug **包**进去："
                   "`sudo slurmate plugin install --from <那个目录>`，"
-                  "落到 %s，见 plugins/README.md。）"
+                  "落到 %s，见 packer/docs/README.md。）"
                   % (key, "、".join(sorted(by_name)) or "（一个都没有）",
                      plugins_dir))
 
@@ -5185,7 +5185,7 @@ def render_plugin_file(spec, enabled, commented):
         "#   插件（插件还在本站），下次 `slurmate plugin sync` 会重新生成一个。",
         "#   要卸载就把它那个 .splug 从插件目录里拿走。",
         "# （bin 不列在这里：它的缺省按**计算节点**算，写死一个登录节点上查到的",
-        "#   路径会指错 —— 见 docs/CONFIGURATION.md 的 bin 那一节。）",
+        "#   路径会指错 —— 见 cluster/docs/CONFIGURATION.md 的 bin 那一节。）",
     ]
     for key, val in commented:
         lines.append("# %s = %s" % (key, val))
@@ -5594,7 +5594,7 @@ class Config(object):
         self.renew_max_total = RENEW_MAX_TOTAL
         self.password_bytes = PASSWORD_BYTES
         # ── 配额 ──
-        # ★ 这一格是**变回**配置键的，理由与逐条症状见 docs/CONFIGURATION.md
+        # ★ 这一格是**变回**配置键的，理由与逐条症状见 cluster/docs/CONFIGURATION.md
         #   的〈max_sessions_per_user〉那一节：v0.2 收它的理由是「只有一种正确取值」，
         #   而这一版把那条理由证伪了 —— 客户端现在能同时挂两个会话（一个要布局组的、
         #   一个不要的），"一个人最多几个会话"于是重新变成一个**站点决定**。
@@ -10725,7 +10725,7 @@ def main():
                   "（`<id>/` 与 `<id>.json`）——")
             print("        容器（.splug）只在「作者→站点」与「站点→客户端」这两段"
                   "路上活着，站点盘上不留它。")
-            print("      见 plugins/README.md；插件落地在 %s。" % cfg.plugins_dir)
+            print("      见 packer/docs/README.md；插件落地在 %s。" % cfg.plugins_dir)
         for _p in sorted(cfg.plugins.values(), key=lambda c: (c.name, c.spec.id)):
             print("    %-12s %s  默认 %s 核 / %s / %s%s"
                   % (_p.name, "已启用" if _p.enabled else "已停用",

@@ -61,7 +61,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 // ==============================================================================
-//  容器格式（docs/PLUGIN-SPEC.md 附录 A）
+//  容器格式（packer/docs/PLUGIN-SPEC.md 附录 A）
 // ==============================================================================
 
 /** 8 字节。带 `\x1a\r\n` 是为了让文本工具一眼看出"这是二进制"，且能被老式工具截断。 */
@@ -1391,7 +1391,7 @@ function cmdKeygen(dir, opts) {
 //   里面**（`plugin.json` 的 `version`）—— 它没有消失，只是从文件名搬到了一个
 //   读得到的地方（站点上是 `<id>.json` 记录表，作者机器上是 `packer inspect`）。
 //
-//   ★ 连带后果一条，写进 `plugins/README.md`：**同一个 id 的多版本必须自己分
+//   ★ 连带后果一条，写进 `packer/docs/README.md`：**同一个 id 的多版本必须自己分
 //     目录**存放（`dist/1.0.0/<id>.splug`）。这不是偏好 —— 是"一个目录里同 id
 //     只能有一版"的推论。
 //   ★ 目录名从此**完全不参与**包名（从前它参与）。它与"目录名不参与任何判定"
@@ -1853,7 +1853,7 @@ function usage(code) {
            --against 顺带判 §3.6。
   inspect  打出包里到底有什么 —— 作者拿它对着规范逐行核对。
 
-规范：docs/PLUGIN-SPEC.md（尤其 §2、§3、§4、附录 A）。`);
+规范：packer/docs/PLUGIN-SPEC.md（尤其 §2、§3、§4、附录 A）。`);
   return code;
 }
 

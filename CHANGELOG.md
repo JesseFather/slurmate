@@ -6,7 +6,7 @@
 
 ★ **版本号不遵循语义化版本。** 这个项目的框架版本是 **`major.minor`，两段**
 （`major` 无上限、`minor` ∈ `0..255`、禁止前导零、超上界必须进位），插件的版本号
-才是三段（`x.y.z`，见 [docs/PLUGIN-SPEC.md](docs/PLUGIN-SPEC.md) §2.3）。从前的
+才是三段（`x.y.z`，见 [packer/docs/PLUGIN-SPEC.md](packer/docs/PLUGIN-SPEC.md) §2.3）。从前的
 那一行写着"遵循语义化版本"，而语义化版本要求三段 —— 那句话是错的。
 规则与判据见 `tools/version-fixtures.json`。
 
@@ -142,7 +142,7 @@
 从前是 `<目录名>-<版本>.splug` ⇒ 包叫什么取决于你在自己机器上把那个目录叫什么，
 而**身份来自清单里的 `id`**。现在文件名就是身份，**目录名不参与包名**。
 
-- ★ 两条连带后果，写进了 [`plugins/README.md`](plugins/README.md)：
+- ★ 两条连带后果，写进了 [`packer/docs/README.md`](packer/docs/README.md)：
   **① 同一个 id 的多版本必须自己分目录**（`dist/1.0.0/<id>.splug`）—— 这不是偏好，
   是"一个 id 只有一个默认文件名"的推论：不打 `--out` 的话，第二次打**会盖掉第一次**；
   **② 从文件名看不出版本**（版本在包**里面**）。★ 版本信息没有消失，只是从文件名
@@ -227,7 +227,7 @@
 声明 `perVersion`，或者新版本自己判断读不读（它拿到的是路径）。
 ★ 升级到 0.12 那一次，**没有声明 `data` 的**插件算出来的目录名会变
 （`<id>@1.0.0` ⇒ `<id>@default`），旧的那一份不再被读到 —— 见
-[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 那张症状表。
+[`cluster/docs/TROUBLESHOOTING.md`](cluster/docs/TROUBLESHOOTING.md) 那张症状表。
 
 ### Changed — ★★ 改配置不再需要重启：`SIGHUP` 是重载
 
@@ -278,8 +278,8 @@
   ★ `--check` 为此把退出码分成两档：**2 = 这台机器缺东西**（现在就停，一个字节都不
   装）、**1 = 这份配置写错了**。
 - **剩下的是基座安装**。★ 它**整个消失的那一天 = 基座软件包做出来的那一天**。
-- ★★ **收口时发现那次改名做的是纯字符串替换**：`plugins/README.md`、
-  `docs/PLUGIN-TROUBLESHOOTING.md`、`docs/ARCHITECTURE.md`、`docs/DEPLOYMENT.md`
+- ★★ **收口时发现那次改名做的是纯字符串替换**：`packer/docs/README.md`、
+  `cluster/docs/PLUGIN-TROUBLESHOOTING.md`、`docs/ARCHITECTURE.md`、`cluster/docs/DEPLOYMENT.md`
   等处把"插件那几件事"从 `deploy.sh` 名下换到了 `install-base.sh` 名下 —— 而那个
   脚本明确**不碰插件**，照那条命令敲会直接 `exit 2`（"插件不再经过本脚本"）。
   已经逐处改到**安装器**（`slurmate plugin install` / `plugin sync`）。同一个提交在
@@ -368,7 +368,7 @@ nft 规则 ⇒ 内核里那条旧网段的基础规则一直在。而文档说�
 ### Changed — ★★ 配置块按 **id** 寻址（破坏性）
 
 `[plugin:<名字>]` 的 `<名字>` 从前必须**站点内唯一**，而那条约束是**不必要**的：
-短名只是本站给人看的名字，**不是身份**（[docs/PLUGIN-SPEC.md](docs/PLUGIN-SPEC.md) §2.2）。
+短名只是本站给人看的名字，**不是身份**（[packer/docs/PLUGIN-SPEC.md](packer/docs/PLUGIN-SPEC.md) §2.2）。
 两个 `id` 不同、短名一样的插件**本来就该允许并存**（它们不是同一个东西）。
 
 - **短名不再要求唯一。** 短名（唯一时）与 `id`（永远唯一）都能写。
@@ -599,7 +599,7 @@ nft 规则 ⇒ 内核里那条旧网段的基础规则一直在。而文档说�
   的最坏情况 `534,901`（`20 + 97 + 256 × 2089`，最长路径按 §3.3 的 2047 字节算）。
   ★ 规范里写的是那条**关系**加一张"今天的值"的表，不是把数字钉进去 —— 附录 B 明写
   这些数值可以演进；数字住在 `tools/plugin-limits.json`。参见
-  [PLUGIN-SPEC.md](docs/PLUGIN-SPEC.md) §3.7。
+  [PLUGIN-SPEC.md](packer/docs/PLUGIN-SPEC.md) §3.7。
 
 ### Fixed — 四条拍完板的小改
 
@@ -1421,7 +1421,7 @@ powered off"，别的文档说成省电模式，还有版本把它关联到 `COM
 - ★ **升级那一刻正活着的中转站会话需要重开一次**：钥匙搬了家，客户端在新位置找不到会
   重新生成一把，而作业里 `authorized_keys` 装的还是**旧那一把**（症状是
   `Permission denied (publickey)`）。见
-  [PLUGIN-TROUBLESHOOTING.md](docs/PLUGIN-TROUBLESHOOTING.md)〈`ssh slurmate` 连不上〉。
+  [PLUGIN-TROUBLESHOOTING.md](cluster/docs/PLUGIN-TROUBLESHOOTING.md)〈`ssh slurmate` 连不上〉。
 - **`~/.ssh/config` 一个字都没搬**，也不该搬：别名 `slurmate` 必须由**用户自己的 ssh**
   认出来（他还在 VS Code 的远程连接、codex 的配置里写着它）。那一行 Include 的**自愈**
   多了一条判据（"紧跟在标记行后面那一条也算我们的"），原因是新路径不再含 `.slurmate/`，
@@ -1476,9 +1476,9 @@ powered off"，别的文档说成省电模式，还有版本把它关联到 `COM
 （`keepSites`）；用例：**新 `client/test/plugin-data-audit.test.mjs`**（判据那条正向钉子
 在这里）、`plugin-data.test.mjs`、`boot.test.mjs` 与 `devmode.test.mjs`（两个桩都补了
 `getPath('sessionData')` / `getStoragePath`，`clearStorageData` 顺手清 cookie jar）、
-`site-plugins.test.mjs`、`renderer.test.mjs`；文档：`docs/PLUGIN-SPEC.md` §2.7 的注记、
-`docs/ARCHITECTURE.md` 的〈还有第四样身份〉、`docs/TROUBLESHOOTING.md` 三行、
-`plugins/README.md`、账本 S17 / S21 / S22 与 F20 的一段注。
+`site-plugins.test.mjs`、`renderer.test.mjs`；文档：`packer/docs/PLUGIN-SPEC.md` §2.7 的注记、
+`docs/ARCHITECTURE.md` 的〈还有第四样身份〉、`cluster/docs/TROUBLESHOOTING.md` 三行、
+`packer/docs/README.md`、账本 S17 / S21 / S22 与 F20 的一段注。
 
 ★ **账本新增两条**：**S21**（`protectedVersions` 含**已经结束**的会话 ⇒ 那些版本永远
 不会被回收）、**S22**（对账只在打开客户端时跑一次，没有周期性对账）。★ **S17 没修**
@@ -1535,8 +1535,8 @@ powered off"，别的文档说成省电模式，还有版本把它关联到 `COM
 `partitionForLayout` 退休、`LAYOUT_ID_RE` 补上）、`index.js`（`ensureSurface` 与
 `clearLayoutStorage` 两个落点）、`windows.js` 的一处 jsdoc、`plugins/code-server/plugin.json`
 （`"data": {"inherit": "editor", "perInstance": true}` —— **两条都是保行为**，它今天
-就已经是"跨版本共享 + 按实例分"）、`plugins/README.md`、`docs/PLUGIN-SPEC.md` §2.7、
-`docs/TROUBLESHOOTING.md`、`docs/ARCHITECTURE.md`，以及用例
+就已经是"跨版本共享 + 按实例分"）、`packer/docs/README.md`、`packer/docs/PLUGIN-SPEC.md` §2.7、
+`cluster/docs/TROUBLESHOOTING.md`、`docs/ARCHITECTURE.md`，以及用例
 （`client/test/plugin-data.test.mjs` 是新的；`config.test.mjs` / `boot.test.mjs` 里
 钉住分区名与布局组 id 的那几条跟着改）。
 
@@ -1602,7 +1602,7 @@ SSH 端口，猜 sshd 会拿主机公钥去配一个 HTTP 端口。
 那个方法早就叫 `resolve()` 了 —— 改名时漏掉的注释。
 
 **跟着改的**：`docs/PROTOCOL.md`（`service_kind` 三态那一段与`service_plugin` 的
-说明）、`docs/IMPLEMENTING.md` 第 9 条、`plugins/README.md`、两个 `plugin.json`、
+说明）、`docs/IMPLEMENTING.md` 第 9 条、`packer/docs/README.md`、两个 `plugin.json`、
 `client/src/main/{index,session,backend-fake}.js` 的注释、`client/src/preload/api.js`、
 `cluster/slurmate-sessiond` 的 `session_view` 注释，以及符合性夹具
 （`tools/conformance/`，只有字节/摘要变，**理由词一条没动**）。
@@ -1624,7 +1624,7 @@ SSH 端口，猜 sshd 会拿主机公钥去配一个 HTTP 端口。
 一句话，且没有例外。
 
 ★ 用户看到的东西：从那样的配置上来，会得到**一个全新的空白组**（端口回落到基址、
-存储是另一个目录）与**一个空的连接列表**。这是预定的结局，`docs/TROUBLESHOOTING.md`
+存储是另一个目录）与**一个空的连接列表**。这是预定的结局，`cluster/docs/TROUBLESHOOTING.md`
 里那一节把"升级不会丢布局"的承诺改成了如实描述这件事。
 
 **连带删掉 `client/hosts.example.json` + `client/hosts.example.README.md`。** 这一对
@@ -1897,7 +1897,7 @@ scancel 掉。**判定只在连接时做一次，绝不在会话进行中重新�
 所以拷进去就生效，一个字都不问。
 
 ★★ **规范与代码当时是正面相反的，而两边都没有红过。**
-`docs/PLUGIN-SPEC.md` §5.1 写着「往池目录里手工放置内容**必须**不产生任何效果」、
+`packer/docs/PLUGIN-SPEC.md` §5.1 写着「往池目录里手工放置内容**必须**不产生任何效果」、
 §5.2 写着「**禁止**给任何一类插件开免同意的口子（理由：规则一有分支，绕过它的路
 就会长出来）」—— 而代码里 `allows` 是
 `entry.source !== 'site' || config.isTrusted(…)`，本机池**整类**落在那个 `||`
@@ -2065,7 +2065,7 @@ Windows 用户去哪里输入命令行」。
    那句话是错的（放进去的东西会被拒绝，这是刻意的）；
 2. `slurmate-sessiond` 里那条注释当时就写着"CLI 读响应的上限是 4 MiB"，而**那时
    它其实是 1 MiB** —— 它写的是目标状态（也就是这一版要做的事），不是当下的状态；
-3. `plugins/README.md` 还写着"含链接的插件 `--check-plugins` 会打 ⚠" ——
+3. `packer/docs/README.md` 还写着"含链接的插件 `--check-plugins` 会打 ⚠" ——
    而 `plugin_symlinks()` 在那个阶段就删掉了：链接**连包都编不出来**，
    表达不出来的东西谈不上警告。
 
@@ -2233,10 +2233,10 @@ Windows 用户去哪里输入命令行」。
 
 ### Changed — ★ 文档里那些"插件是一个目录"的说法跟着改了
 
-`plugins/README.md`、`docs/ARCHITECTURE.md`、`docs/DEPLOYMENT.md`、
-`docs/CONFIGURATION.md`、`docs/TROUBLESHOOTING.md`、`README.md`、`SECURITY.md`、
+`packer/docs/README.md`、`docs/ARCHITECTURE.md`、`cluster/docs/DEPLOYMENT.md`、
+`cluster/docs/CONFIGURATION.md`、`cluster/docs/TROUBLESHOOTING.md`、`README.md`、`SECURITY.md`、
 `tools/check-cluster.sh` 与 `docs/PROTOCOL.md` 一并改到"插件是一个包"。
-`docs/DEPLOYMENT.md` 新增〈步骤 0.5：把插件打成包〉—— 因为缺省 `--plugins-src`
+`cluster/docs/DEPLOYMENT.md` 新增〈步骤 0.5：把插件打成包〉—— 因为缺省 `--plugins-src`
 指向的是仓库的**源码树**，直接部署会在预检那一步停下来。
 
 ### Added — ★ 签名落地：一个 id 一把钥匙、一张血统表、一张钉子表
@@ -2374,7 +2374,7 @@ Windows 用户去哪里输入命令行」。
   （`1.255.255` 之后是 `2.0.0`）；**逐段按十进制字符串比较**（先比长度、再比
   字典序），**禁止转机器整数**。
 - ★ **`engines.slurmate` 现在必须写两段**（`>=0.5`）。写三段是一个**看不懂的
-  片段** ⇒ 这个插件**不被加载**。仓库里那两个插件、`plugins/README.md` 与
+  片段** ⇒ 这个插件**不被加载**。仓库里那两个插件、`packer/docs/README.md` 与
   Python 侧的夹具跟着改了。
 - ★ **只校验，不归一化**：谁都不许把 `1.256.0` 改写成 `2.0.0` —— 那是静默改
   版本号，与「一个 `(id, 版本)` 只有一份内容」直接冲突。
@@ -2428,7 +2428,7 @@ workflow 里再抄一份正则（正则的第二个抄本正是这条 lint 要�
 与**读包的能力**。站点仍然报 `files`、客户端仍然按 `files` 取，一个字没改。
 
 - **容器格式成为规范的一部分**（**附录 A，规范性**）。
-  ★ 它现在住在 [`docs/PLUGIN-CONTAINER.md`](docs/PLUGIN-CONTAINER.md) 里，
+  ★ 它现在住在 [`packer/docs/PLUGIN-CONTAINER.md`](packer/docs/PLUGIN-CONTAINER.md) 里，
   编号 `A.1`–`A.5` 沿用 —— 源码注释里那些「附录 A.4」指的就是那里。
   理由不是"别人要照着实现"（那个承诺已经在 §0 删掉了），而是两条更结实的：
   ① §3.6 的"不隐藏"承诺**必须有可验证的形式** —— 作者要能拿 `packer inspect`
@@ -2679,7 +2679,7 @@ lint 现在挡的是一件比"抄本漂了"更具体的事：**排除的那些�
   的一次完整分发从没跑过 —— 包括那个 1 MiB 上限到底够不够）。
 - 五处「将来站点分发走的也是这条路」从**将来时改成现在时，并且改成准确的样子**
   （分发走另一条路、落另一个根）。
-- ★ [docs/PLUGIN-SPEC.md](docs/PLUGIN-SPEC.md) 新增 **§2.3.1〈你还会写第二个版本
+- ★ [packer/docs/PLUGIN-SPEC.md](packer/docs/PLUGIN-SPEC.md) 新增 **§2.3.1〈你还会写第二个版本
   号：框架版本〉** —— `engines.slurmate` 这个字段**从前一个字都没写过**，而插件
   作者必须知道它要写两段、以及写三段会被拒。
 - ★ [docs/PROTOCOL.md](docs/PROTOCOL.md) 开头的〈协议版本与变更〉改成先讲清
@@ -2955,7 +2955,7 @@ Slurmate/
 ★ **已知退步，写在这里以便你需要时推翻它**：`sj-<短名>` 装不下会话的可辨认性。
 同一个人同时开两个同插件的会话，`squeue` 里那两行**一模一样**。补偿是
 `slurmate list` / `slurmate status` 给出会话 ID ↔ 作业 ID 的对应
-（`docs/TROUBLESHOOTING.md` 第 1a 节补了这一步），要同时看两者用
+（`cluster/docs/TROUBLESHOOTING.md` 第 1a 节补了这一步），要同时看两者用
 `squeue -o "%.10i %.16j"`。另一条路是 `sj-<短名><session前4位>`。
 
 ★ 插件脚本的**内容**因此拿到与 `cluster/` 下那些文件**同一道**信任门（root 拥有 +
@@ -3002,7 +3002,7 @@ Slurmate/
 | `validate()` | 零插件 = **启动错误**（守护进程 100% 起不来） | **合法状态**。`--check` 说出来并给出安装目录的路径。以前那样等于把"框架"和"插件"绑死，而按设计基座不该知道有没有插件 |
 | `op_submit` 的缺省服务 | 硬编码的 `code-server` | 全局键 **`default_plugin`**。没配就**要求显式给** `service_kind`（新错误码 `2 missing_service_kind`） |
 | 新增 `--check-plugins` | — | deploy.sh 用它校验插件清单，**规则只有一份**，不在部署脚本里另写一套 |
-| 插件**没有** `job/start.sh` | `deploy.sh` **中止部署**（而 `plugins/README.md` 与 `docs/ARCHITECTURE.md` 一直写着"可以没有"） | **合法状态**：装得上、看得见、**提交不了** |
+| 插件**没有** `job/start.sh` | `deploy.sh` **中止部署**（而 `packer/docs/README.md` 与 `docs/ARCHITECTURE.md` 一直写着"可以没有"） | **合法状态**：装得上、看得见、**提交不了** |
 
 ★ 缺省**不选**"表里唯一那个"：隐式缺省会让**装一个插件 / 卸一个插件**这种配置之外
 的动作悄悄改变行为 —— 今天提交成功的那条命令，明天可能落到另一个服务上。
@@ -3013,7 +3013,7 @@ Slurmate/
 ★ 「没有作业侧」这条路要说得出话，它一共有**六个**落点：`deploy.sh` 的 `warn` +
 跳过、`--check-plugins` 的 `⚠`、`op_submit` 的 `4 service_kind_no_job`、
 `op_plugins` 的 `can_submit`、`--check` 打印的逐插件作业脚本路径、以及
-`plugins/README.md` 的说明。**它刻意没有进 `validate()`** —— 那里面没有警告通道，
+`packer/docs/README.md` 的说明。**它刻意没有进 `validate()`** —— 那里面没有警告通道，
 加一条就是「一个这样的插件让整个站点起不来」，而那会连停掉正在跑的会话都做不到。
 它照 `plugin_problems` 的现成先例处理：`--check` 打印 `⚠`、启动时记一条
 `log.error`，但不拦启动。
@@ -3183,7 +3183,7 @@ NFS** —— 而"认证被拒"这类事实只有服务自己知道。
 
 这一版把两个插件改成这个形状时，它们当时还放在
 `client/src/main/plugins/<名字>/`（= **基座内部**）—— 0.5.0 把它们搬去了仓库顶层的
-[`plugins/`](plugins/)。这一节记的是那一版的设计，路径那部分请看 0.5.0。
+[`plugins/`](plugins)。这一节记的是那一版的设计，路径那部分请看 0.5.0。
 
 与站点分发的插件**走同一条加载路径** —— 后者只是多看一个目录，不是一套新机制。
 

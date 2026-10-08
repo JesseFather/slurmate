@@ -80,7 +80,7 @@ const DEFAULTS = {
   plugins: {},              // { [id]: { enabled: boolean } }
   // ★ 这里从前还有一个 `devPlugins`（"本机池加不加载"）。它随本机池一起删掉了 ——
   //   那个开关打开之后，`~/.slurmate/plugins/` 里**用户自己放进去的东西**会被加载，
-  //   而且是**不过同意闸**的。`docs/PLUGIN-SPEC.md` §5.2 明文禁止给任何一类插件开
+  //   而且是**不过同意闸**的。`packer/docs/PLUGIN-SPEC.md` §5.2 明文禁止给任何一类插件开
   //   免同意的口子，所以它连同它守着的那条路一起没了。今天池里有什么就加载什么。
   // 同意台账（TOFU 一致性）。`{ "<id>@<版本>": { digest, site, at } }`
   //

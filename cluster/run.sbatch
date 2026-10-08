@@ -10,7 +10,7 @@
 #  ★ **本文件里没有任何一个插件的名字。** 作业里跑什么由**插件**决定，插件的
 #    作业侧代码由**安装器**（`slurmate plugin install` / `sync`）从
 #    `<prefix>/share/slurmate/plugins/*/job/start.sh` 编织进下面那个
-#    `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处。契约见 plugins/README.md。
+#    `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处。契约见 packer/docs/README.md。
 #
 #  ★ **一个插件一份成品**：`<prefix>/share/slurmate/jobs/<ULID>.sbatch`。
 #    安装器对每个插件用本模板织一次，只放进**那一个**插件的块。本文件是
@@ -270,7 +270,7 @@ finally:
 # ★ 下面这个标记之后是 **安装器生成的**：它把每个插件的 job/start.sh 拼在
 #   那里。计算节点因此只读这一个文件。
 #
-# 契约（plugins/README.md 是权威版本）：
+# 契约（packer/docs/README.md 是权威版本）：
 #   · 插件**必须**定义 start_<短名>（短名里的 `-` 写成 `_`）
 #   · 可选 precheck_<短名> / cleanup_<短名>，宿主探测到才调
 #   · 其余函数一律用 _<短名>_ 前缀 —— **不许遮蔽宿主自己的函数**
@@ -387,7 +387,7 @@ cleanup() {
     #     上面那次 `plugin_call cleanup` 里追加到 LOCAL_LOG 的，也就是**在我们
     #     最后一行的后面**，所以天然落在水位之后、会被这一段带上去。
     #     （**不写具体是哪个插件的日志**：宿主不认识任何插件，注释里也不行 ——
-    #      下一个读的人会以为宿主认得它。规则见 plugins/README.md。）
+    #      下一个读的人会以为宿主认得它。规则见 packer/docs/README.md。）
     #
     # ★ 位置很要紧：`plugin_call cleanup` 必须在 `log "清理完成"` **之后**。
     #   它若在前面，插件追加的行会落在水位**之前**，于是**静默地进不了 NFS** ——

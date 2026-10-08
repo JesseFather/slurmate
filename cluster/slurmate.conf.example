@@ -1,4 +1,4 @@
-# 每个键的含义、取值与改错的后果：见《配置参考》（仓库里是 docs/CONFIGURATION.md）
+# 每个键的含义、取值与改错的后果：见《配置参考》（仓库里是 cluster/docs/CONFIGURATION.md）
 
 cluster_cidr =
 readonly_paths = /shared/home

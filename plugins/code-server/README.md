@@ -3,7 +3,7 @@
 浏览器里的 VS Code。作业里跑一个 `code-server`，客户端把它的页面装进窗口并自动登录。
 
 这是一个**独立项目** —— 它是 Slurmate 的一个插件，但 Slurmate 不依赖它。
-契约（目录形状、清单的每个键、作业侧钩子）见 [`../README.md`](../README.md)，
+契约（目录形状、清单的每个键、作业侧钩子）见 [`../README.md`](../../packer/docs/README.md)，
 这里只讲**这个插件自己**的事。
 
 ```
@@ -53,7 +53,7 @@ auth_mode    = password
 
 这七项**在别处都没有第二份**：站点主配置文件里一个字都不写它们（那是刻意的，
 判据是「它是不是站点的事实」—— 见
-[CONFIGURATION.md](../../docs/CONFIGURATION.md) 的〈为什么有些键不在这里〉）。
+[CONFIGURATION.md](../../cluster/docs/CONFIGURATION.md) 的〈为什么有些键不在这里〉）。
 
 **`default_gpus` 与另外三格有一个根本差别**：它只在这里。用户**拒绝得了它** ——
 客户端高级选项里「（用插件的默认）」与「（不占 GRES）」是两项，后者发一个显式的
@@ -104,13 +104,13 @@ Slurmate 的 nft ACL 挂在**登录节点**的 output 链上。它拦得住「�
 组**被创建时**就定下来、此后**只读** —— 顺移（端口被别的进程占了）只影响这一次会话，
 **不写回配置**。需要实际端口时读 `snap.origin` / `snap.localPort`。
 
-它声明了 **`"concurrent": true`**（必填的一格，见 `plugins/README.md`）—— 意思是
+它声明了 **`"concurrent": true`**（必填的一格，见 `packer/docs/README.md`）—— 意思是
 "这个插件可以同时开两份"。这个插件能这么声明，靠的是**它没有任何插件自己造的对外
 身份**：页面、cookie、编辑器布局都在**每个实例各自的 origin 与分区**里，两份之间
 天然不共享任何东西。而"两份"具体是什么：**第一份**（开局那一刻先来的）用连接
 那个布局组、数据持久；**第二份及以后**是**临时副本** —— 一个新的本地端口（于是
 一份**空的** localStorage，登录由框架的 `attach` + `ctx.login` 自动补上）、加上第一份
-数据的**快照**，而它的一切随会话结束消失（见 `plugins/README.md` 的
+数据的**快照**，而它的一切随会话结束消失（见 `packer/docs/README.md` 的
 「能不能同时开两份」那一节）。
 
 建视图的代码**不在这里** —— 那块界面由**框架**按清单里的
@@ -210,4 +210,4 @@ NFS 日志 —— **而且没有任何地方会报错**。作业在计算节点�
 | `curl` | `/healthz` 与 HTTP 兜底 | 两个探测都拿不到结果 → **每个候选端口白等 45 秒** → 默认 6 个候选共约 4.5 分钟后全部失败 |
 
 另外作业通用地需要 `mktemp`、`python3`、`ss` —— 那些是宿主的事，见
-[`../../docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) 的前提条件第 6 节。
+[`../../docs/DEPLOYMENT.md`](../../cluster/docs/DEPLOYMENT.md) 的前提条件第 6 节。

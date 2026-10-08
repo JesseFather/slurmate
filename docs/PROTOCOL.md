@@ -32,7 +32,7 @@
 > | `minor`（`y`） | **加东西但不破坏兼容**的那一档 | `0..255`，够用很久 |
 >
 > 这是这个项目里两套版本号中的一套。另一套是**插件**的版本号（`x.y.z`，见
-> [PLUGIN-SPEC.md](./PLUGIN-SPEC.md) §2.3），它比这个号多一段。两套的形状不同、
+> [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) §2.3），它比这个号多一段。两套的形状不同、
 > 用途不同（两段 vs 三段本身就是一眼能分开的标记），**只有一条共同的纪律**：
 > 逐段按十进制字符串比较、禁止转机器整数。写得下"补丁级"的只有插件那一套。
 >
@@ -148,7 +148,7 @@
 「一棵目录树」变成了「一个包文件」，于是那份清单由**包里的记录表**算出来 —— 字段、
 语义、顺序**一个字都没变**，老守护进程 ↔ 新客户端、新守护进程 ↔ 老客户端两个方向
 都照常。装一个插件改用 `slurmate plugin install <包>`（安装器会验签并按 `id` 记住
-签名者，见 [PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）。
+签名者，见 [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) §6.4）。
 
 **v0.13 又换了一次 —— 而这次换的是「存什么」，不是「清单从哪儿算」。** 站点上
 现在是**一棵树加一份记录表**（`<prefix>/share/slurmate/plugins/<id>/` 与
@@ -392,7 +392,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 #### 连接数上限
 
 - 全局 `CONN_MAX`（64 条），以及每个 uid 的 `max_connections_per_user`
-  （见 [CONFIGURATION.md](CONFIGURATION.md)）。
+  （见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)）。
 - 两处都是 **accept-then-reject**：超限那条连接**读到** `5 too_many_connections`
   再被关掉，而不是静默等在 backlog 里（那样客户端会在 40 秒后报一个方向反了的
   `daemon_unreachable`）。
@@ -801,8 +801,8 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > 不是"没有问题"（三态那条规矩），**不许**补一个空数组当作读过。
 >
 > `package` 里那三个数是**示意值**：本仓库那两个插件还没有包（要作者先
-> `packer init` / `keygen` / `build`，见 [plugins/README.md](../plugins/README.md)）。
-> `format` 是**容器**格式版本（[PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md) 的 A.1
+> `packer init` / `keygen` / `build`，见 [packer/docs/README.md](../packer/docs/README.md)）。
+> `format` 是**容器**格式版本（[PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md) 的 A.1
 > 里那个 `format`，不是插件的版本号；**本版是 `2`**），
 > `bytes` 是**要发出去的那一份**的字节数（客户端要下载的就是这么多），
 > `digest` 是**客户端侧的内容摘要**（§3.4 按侧算的那一份），
@@ -812,7 +812,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > 站点盘上是一棵**整树**（两侧都在，`job/**` 也在），而发给客户端的只有
 > **客户端侧**（`client/**` + `plugin.json` + `lineage.json`）⇒ 这三个数都比
 > "把整棵树重打一遍"小。
-> 而 `digest` **就是签名四元组里的 `digestClient`**（[PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md)
+> 而 `digest` **就是签名四元组里的 `digestClient`**（[PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md)
 > 的 A.3）—— 客户端收到字节之后**会自己重算一遍**再与它比，所以本站改客户端侧
 > 任何一个字节都拦得住，而"本站报的数"与"本站转发的字节"是**分开的两件事**。
 
@@ -913,7 +913,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
   从不参与拼路径"，那是 `plugin_file` 那条路的形状；**那条路删掉之后，没有任何
   一条对外应答是按路径逐份取的** —— 路径穿越这个形状现在只剩"进不进得了包"这一道。
 - **符号链接与空目录进不了负载。** 插件变成包之后这不是一条纪律，是**结构性的**：
-  包里的负载是一条条 `路径 | 字节`（[PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md) 的
+  包里的负载是一条条 `路径 | 字节`（[PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md) 的
   A.1），链接与目录
   条目**表达不出来**。所以这一条从"两端规则要一致"退化成"根本不会有"。
 - **分不发由站点的 `enabled` 决定。** 本站关着的插件照样*报*（上面那条契约：
@@ -946,7 +946,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
  "format": 2, "bytes": 19416, "digest": "…", "data": "<base64>"}
 ```
 
-**一整份一次取走**，`data` 是那一份 `.splug` 文件本身（[PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md)
+**一整份一次取走**，`data` 是那一份 `.splug` 文件本身（[PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md)
 那一套容器）的 base64。
 `format` / `bytes` / `digest` 与 `plugins` 里那一份**必须逐字相同**（客户端据此判断
 "这一轮清单说的"与"我拿到的"是不是同一个东西）。
@@ -1090,7 +1090,7 @@ GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`），名字与型�
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
 | `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**（部署不完整，`plugins/` 里有而 `jobs/` 里没有对应那一份） |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
-| `4` | `quota_active` | **占着位置**的会话数已达 `max_sessions_per_user`（站点可配，见 [CONFIGURATION.md](CONFIGURATION.md)）。**排队中的也算** |
+| `4` | `quota_active` | **占着位置**的会话数已达 `max_sessions_per_user`（站点可配，见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)）。**排队中的也算** |
 | `4` | `no_account` | 该用户没有 Slurm association |
 | `4` | `no_partition` | association 不允许这个分区 |
 | `5` | `no_port` | 端口池暂时没有可用端口 |

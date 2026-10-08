@@ -139,7 +139,7 @@ function fail(error, detail) { return { ok: false, error, detail: detail || null
  *
  * ★ **这一份是框架那一份（`client/src/main/atomic-write.js`）的对齐副本，删不得。**
  *   插件跑在池里（`~/.slurmate/site-plugins/<id>/<版本>/`），require 不到客户端的
- *   源码 —— 这是 `plugins/README.md` 里那条"插件不能 require 框架"的直接后果。
+ *   源码 —— 这是 `packer/docs/README.md` 里那条"插件不能 require 框架"的直接后果。
  *   两份**同形**这件事由 `client/test/boot.test.mjs` 里那条"同一张场景表喂两份实现"
  *   的用例守着：改一边而不改另一边会红。逐条对齐的清单是：临时名（前导点 + 随机
  *   后缀 —— `pid + Date.now()` 在同一毫秒内的两次写会撞名，而撞名的后果是另一份

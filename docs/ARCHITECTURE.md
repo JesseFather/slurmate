@@ -18,7 +18,7 @@ Slurmate 让用户在 Slurm 集群上用远程开发环境。它的核心动作�
 **把「谁能连我端口」这份网络 ACL 的登记簿，从「SSH 会话」改挂到「Slurm 作业」上。**
 于是 SSH 闪断不再等于会话终结 —— 作业还在跑，ACL 还在，重连即恢复。
 
-作业里跑什么由**插件**决定，而插件是**独立项目**（[`plugins/`](../plugins/)）：
+作业里跑什么由**插件**决定，而插件是**独立项目**（[`plugins/`](../plugins)）：
 基座两端都不带任何插件，一个都不装是合法状态。见〈插件〉那一节。
 
 ## 一、五个组件
@@ -107,7 +107,7 @@ sync`，装/卸插件时会自动跑一次）对每个插件把它的 `job/start
 `# @@SLURMATE_PLUGIN_BLOCKS@@` 标记处，装到
 `<prefix>/share/slurmate/jobs/<ULID>.sbatch` 的是一份**编织后的成品** ——
 **一个插件一份**，文件名是这个插件清单里的 `id`（ULID）。见
-[plugins/README.md](../plugins/README.md)〈作业侧契约〉。
+[packer/docs/README.md](../packer/docs/README.md)〈作业侧契约〉。
 
 **为什么一插件一份，而不是所有插件织进一份。** 同处一份文件时，插件里任何一行
 **不在函数里**的代码（一个多余的 `set -e`、一个变量赋值）都待在主流程中间 —— bash
@@ -161,7 +161,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 - **隧道**：本地 `127.0.0.1:<槽位端口>` → 计算节点的 `tunnel_target`
   （`client/src/main/tunnel.js`）；
 - **RPC 结果分类**：把「守护进程没回话」和「守护进程说了不行」严格分开
-  （`client/src/main/classify.js`，见 [PROTOCOL.md](./PROTOCOL.md)）。
+  （`client/src/main/classify.js`，见 [PROTOCOL.md](PROTOCOL.md)）。
 
 而它的**形状**在 v0.9 换过一次，那一换挂在集群侧的一格上：打开客户端**不再自动
 连上任何一台**，改成「**连接列表 → 插件列表 → 作业列表**」三屏。理由是「这台电脑在看
@@ -192,7 +192,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 （`slurmate plugin sync`）都会改 `slurmate.conf.d/`，而改完**自己**给守护进程发一次
 重载信号 —— **正在跑的会话一条都不**断。重载是**全有或全无**的（解析 → 重扫插件
 目录 → 校验，全过才原子替换）；碰到必须重启的键就**整个拒绝**，旧配置继续服务，
-日志点名是哪个键。见 [CONFIGURATION.md](./CONFIGURATION.md)〈配置改了之后〉。
+日志点名是哪个键。见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)〈配置改了之后〉。
 
 站点上它住在 `<prefix>/share/slurmate/plugins/<ULID>/` —— **一棵树加一份记录表**
 （`<ULID>.json`；容器只在「作者→站点」与「站点→客户端」这两段路上活着，v0.13 起）
@@ -217,11 +217,11 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 **客户端那一侧一步人工动作都不需要**（v0.6 起它自己取回来），
 **也不用改基座的任何一行源码。**
 
-仓库顶层 [`plugins/`](../plugins/) 下放着两棵**开发样例**树（一个网页 IDE、一个作业内
+仓库顶层 [`plugins/`](../plugins) 下放着两棵**开发样例**树（一个网页 IDE、一个作业内
 的用户态 ssh —— 后者给原生 VS Code Remote-SSH / codex 这类**要求 ssh 连接**的工具用），
 它们用来在开发时对齐两侧的能力，**不是**"基座自带的插件"。契约见
-[plugins/README.md](../plugins/README.md)，站点侧配置见
-[CONFIGURATION.md](CONFIGURATION.md) 的插件一节。
+[packer/docs/README.md](../packer/docs/README.md)，站点侧配置见
+[CONFIGURATION.md](../cluster/docs/CONFIGURATION.md) 的插件一节。
 
 ### 一个插件有三样身份，别把它们合并
 
@@ -235,7 +235,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 守护进程 / 协议三合一的那个，是**两段**（`major.minor`）。两者形状不同是有意的：
 写错了会被拒绝，而不是被悄悄当成另一个意思。规则、四处落点、以及"`engines.slurmate`
 写的是哪一个"见 [PROTOCOL.md](PROTOCOL.md) 的〈协议版本与变更〉与
-[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §2.3.1。
+[PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) §2.3.1。
 
 **为什么要铸造一个 id，而不是用名字**：插件由**站点**分发，没有市场能在线升级，
 而站点可能更新频繁、也可能长期不更新。名字答不了两个必须答的问题 ——
@@ -287,7 +287,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 同时处理两份"基座答不了，所以缺省无论取哪边都是替你表态）。`false` ⇒ **没有实例段**，
 那个插件同时只有一份。**"共享"不是三选一的模式**，而是同一格写了什么（都写同一个组名
 = 多对一；分组写 = 多组对多组；`perVersion` = 每个对每个；两个都不写 = 全员对一份）。
-完整的契约在 [PLUGIN-SPEC.md](PLUGIN-SPEC.md) §2.7 / §2.8。
+完整的契约在 [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) §2.7 / §2.8。
 
 **这份身份有两个落点，都从同一份身份长出来**（分别拼的话会漂开）：
 
@@ -505,7 +505,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 | 那一半 | 在哪 |
 |---|---|
-| 容器格式（规范性） | [PLUGIN-CONTAINER.md](PLUGIN-CONTAINER.md)（`PLUGIN-SPEC.md` 的**附录 A**） |
+| 容器格式（规范性） | [PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md)（`PLUGIN-SPEC.md` 的**附录 A**） |
 | 打包器（作者的工具，跑在作者的机器上） | `packer/` —— **服务器上从头到尾没有源码树** |
 | 读包：客户端 | `client/src/main/plugin-package.js` |
 | 读包：集群侧 | 守护进程的 `package_parse()` / `package_extract()`、`--extract-package` |
@@ -549,7 +549,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 单站点 / 站点即作者 / 站点上那份是 root 从源码装的）。**后来那个条件被两件事
 先后推翻**：
 
-1. [PLUGIN-SPEC.md](PLUGIN-SPEC.md) 的 **§5.4** 把签名（以"钉公钥"的形式）写成
+1. [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) 的 **§5.4** 把签名（以"钉公钥"的形式）写成
    客户端**必须履行**的一条保证 —— 因为发现了三个前提射程之外的第四个场景：
    **同一身份下面"作者换了人"**。那件事只有签名判得了（摘要是一致性判据，分身升个
    版本号在台账上就是一条正常条目）。
@@ -576,7 +576,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 
 **但第 1 层还带着一样别的东西：它整类绕过同意闸。** `allows` 从前写着
 `entry.source !== 'site' || config.isTrusted(…)` —— 站点那一类要过闸，本机池那一类
-不问。而 [PLUGIN-SPEC.md](PLUGIN-SPEC.md) **§5.2** 明文写着「**禁止**给任何一类插件
+不问。而 [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) **§5.2** 明文写着「**禁止**给任何一类插件
 开免同意的口子」，理由是"**规则一有分支，绕过它的路就会长出来**"；§5.1 还写着
 「往池目录里手工放置内容**必须**不产生任何效果」。
 
@@ -794,7 +794,7 @@ Slurmate 把登记簿的持有者换成 **Slurm 作业**：
 `max_sessions_per_user=1` 下那个用户**再也开不了新会话**。
 24 小时这个数**不是** `enroll_ttl`（1800 秒）能替代的：排队是集群的正常状态，
 拿半小时去收它等于自动取消用户特意提交、正在排队的作业。见账本 F27 与
-`docs/CONFIGURATION.md` 的〈会话停在 `submitted` 的两个超时〉。
+`cluster/docs/CONFIGURATION.md` 的〈会话停在 `submitted` 的两个超时〉。
 
 ### 3.1.1 还有第三条轴：**谁在看**这条会话
 
@@ -862,7 +862,7 @@ JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` **当
 差别是**谁知道本站管那张卡叫什么**：作者写不出来（`gpu` 还是 `mps`、型号叫 `a100`
 还是 `A100-PCIE-40GB`），那是管理员在 `gres.conf` 里定的事实。所以那是**站点**的
 政策，由站点写；而 `--check` 拿实际目录替他对一遍账（打一条警告，不拦启动）。
-见 [CONFIGURATION.md](CONFIGURATION.md) 的块键表与 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)
+见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md) 的块键表与 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)
 §四的 F15。
 
 ## 四、nft 规则为什么写成单条 `meta skuid != UID drop`
@@ -905,7 +905,7 @@ ip daddr <节点IP> tcp dport <端口> ct state new \
 （`cluster/slurmate-sessiond`）。它同时决定了部署的一个硬性前提 ——
 登录节点与计算节点必须能被**一个** CIDR 覆盖（否则计算节点的流量会被这条规则
 提前放行，会话规则永远匹配不到，ACL 静默失效）。详见
-[DEPLOYMENT.md](./DEPLOYMENT.md) 的「前置条件」第 2 条。
+[DEPLOYMENT.md](../cluster/docs/DEPLOYMENT.md) 的「前置条件」第 2 条。
 
 ### 跨表顺序：靠「集合不交」，不靠依赖顺序
 
@@ -1497,18 +1497,18 @@ off"，别的文档把它说成省电模式，还有版本把它关联到 `COMPL
 
 ## 延伸阅读
 
-**完整的文档索引在 [docs/README.md](./README.md)**（按"你是谁"分三组）。
+**完整的文档索引在 [docs/README.md](README.md)**（按"你是谁"分三组）。
 下面只列几份，因为它们是**从这一篇直接接下去**的：
 
-- RPC 契约与错误码：[PROTOCOL.md](./PROTOCOL.md)；写一个新后端从
-  [IMPLEMENTING.md](./IMPLEMENTING.md) 开始。
-- 安装与前置条件：[DEPLOYMENT.md](./DEPLOYMENT.md)；配置项参考：
-  [CONFIGURATION.md](./CONFIGURATION.md)。
-- 常见故障：[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)（会话与客户端）、
-  [PLUGIN-TROUBLESHOOTING.md](./PLUGIN-TROUBLESHOOTING.md)（插件与分发）。
-- **未修的缺陷、未实测的假设、结构性的欠账：[KNOWN-ISSUES.md](./KNOWN-ISSUES.md)**
+- RPC 契约与错误码：[PROTOCOL.md](PROTOCOL.md)；写一个新后端从
+  [IMPLEMENTING.md](IMPLEMENTING.md) 开始。
+- 安装与前置条件：[DEPLOYMENT.md](../cluster/docs/DEPLOYMENT.md)；配置项参考：
+  [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)。
+- 常见故障：[TROUBLESHOOTING.md](../cluster/docs/TROUBLESHOOTING.md)（会话与客户端）、
+  [PLUGIN-TROUBLESHOOTING.md](../cluster/docs/PLUGIN-TROUBLESHOOTING.md)（插件与分发）。
+- **未修的缺陷、未实测的假设、结构性的欠账：[KNOWN-ISSUES.md](KNOWN-ISSUES.md)**
   —— 那是唯一的账本。
-- 写一个插件：[plugins/README.md](../plugins/README.md)，契约是
-  [PLUGIN-SPEC.md](./PLUGIN-SPEC.md)。**动插件相关的任何东西之前先读它。** 它是
+- 写一个插件：[packer/docs/README.md](../packer/docs/README.md)，契约是
+  [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md)。**动插件相关的任何东西之前先读它。** 它是
   **契约**不是说明：正文里**没有**实现进度那一栏，进度各自记在自己的 README 与
   `KNOWN-ISSUES.md` 里。

@@ -11,7 +11,7 @@
  *
  * ★ **只能收成"一份 + 一份对齐的副本"，第三份够不着。**
  *   `plugins/sshd/client/sshconfig.js` 跑在池里（`~/.slurmate/site-plugins/<id>_<版本>/`），
- *   而 `plugins/README.md` 明文写着插件**不能 require 客户端的源码**（相对路径指不到，
+ *   而 `packer/docs/README.md` 明文写着插件**不能 require 客户端的源码**（相对路径指不到，
  *   打包器也不把它打进去）。所以那一份留在插件里，并按这份**逐条对齐**；
  *   两边同形这件事由 `test/boot.test.mjs` 里那条"同一张场景表喂两份实现"的用例守着
  *   —— **改一边而不改另一边会红**。看到这里的人请不要试图去删插件那一份。

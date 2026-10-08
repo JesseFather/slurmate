@@ -6384,7 +6384,7 @@ exit 0
     # ── 22d ★ 作业日志：我们自己的行**恰好一次**，插件的行**带得上去** ─────
     #
     # 这一段是本项目里最容易写成"看起来对"的地方，所以它有三条独立的断言。
-    # 契约（plugins/README.md〈服务进程的输出、以及作业日志〉）：
+    # 契约（packer/docs/README.md〈服务进程的输出、以及作业日志〉）：
     #
     #   · log() 双写（本地 + NFS），作业结束时的补写只补**水位之后**的部分
     #   · 服务进程的输出走它**自己的**文件，由 `cleanup_<短名>` 并进 LOCAL_LOG
@@ -9177,7 +9177,7 @@ exit 0
           "partitions" in _d29.cluster._v, str(sorted(_d29.cluster._v)))
     _c29b.close()
 
-    _cfgdoc_src = io.open(os.path.join(HERE, os.pardir, "docs",
+    _cfgdoc_src = io.open(os.path.join(HERE, os.pardir, "cluster", "docs",
                                        "CONFIGURATION.md"), encoding="utf-8").read()
     # ── 28.11 启动自检：八个命令 ────────────────────────────────────────
     # ★★ 文档里那个数必须与 `GLOBAL_KEYS` 一致。它**本来就漂过一次**：写着
@@ -9193,7 +9193,7 @@ exit 0
     _cn_num = int(_cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0]) \
         if _cn_at >= 0 and _cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0].isdigit() \
         else -1
-    check("★★ docs/CONFIGURATION.md 说「一共 N 个」的 N **等于** GLOBAL_KEYS 的个数",
+    check("★★ cluster/docs/CONFIGURATION.md 说「一共 N 个」的 N **等于** GLOBAL_KEYS 的个数",
           _cn_num == len(mod.GLOBAL_KEYS),
           "文档说 %s 个，实际 %d 个" % (_cn_num, len(mod.GLOBAL_KEYS)))
     # ★ 而那个数对不对只是**一半**：个数对了而键名不对的表，读起来一样顺，
@@ -9284,7 +9284,7 @@ exit 0
           "na() 函数体：%r" % _na_body[:90])
 
     # ── 28.13 ★★ 两道闸：能力（本机）与配额（全局）───────────────────────
-    # ★★ 这一段钉的是 docs/CONFIGURATION.md 里〈这一格与插件声明的 `concurrent`
+    # ★★ 这一段钉的是 cluster/docs/CONFIGURATION.md 里〈这一格与插件声明的 `concurrent`
     #    是两道闸〉那一节的两个**具体事实**。那一节的结论（"缺省 1 会让能多开的
     #    插件开不出第二份"）全部压在它们身上，而两者都会随着**别处**的改动悄悄
     #    变成假话 —— 而一句假话不会红任何东西。
@@ -9300,7 +9300,7 @@ exit 0
                  and len(ln.split("|")) == 6]
     _cap_doc = (_cap_rows[0].split("|")[3].strip().strip("`")
                 if len(_cap_rows) == 1 else None)
-    check("★★ docs/CONFIGURATION.md 里 `max_sessions_per_user` 的缺省值"
+    check("★★ cluster/docs/CONFIGURATION.md 里 `max_sessions_per_user` 的缺省值"
           "**等于**守护进程的常量（不等的话，这一节「缺省 1 压住了能力」"
           "整段就是一句错话）",
           _cap_doc is not None

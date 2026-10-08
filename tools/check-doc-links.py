@@ -18,7 +18,7 @@
     · **扫描集**（读谁的正文）＝ `git ls-files`，被跟踪的文件。那是"这个仓库
       **发布**出去的字节"。
     · **判据集**（什么算"存在"）＝ 盘上真实存在的路径 ＋ `--others` 那些未跟踪
-      但没被 ignore 的。**目录也算** —— `[plugins/](../plugins/)` 是一条合法指路。
+      但没被 ignore 的。**目录也算** —— `[plugins/](../plugins)` 是一条合法指路。
 
 已知的**故意**宽松，都写在这里，免得日后被当成漏洞：
 
@@ -51,10 +51,24 @@ ROOT = os.path.dirname(HERE)
 
 # A1：裸的仓库相对路径。负向断言挡住 URL 尾巴与 `../docs/` 那种写法
 # （`../` 打头的由 A2 在该文件自己的坐标系里管）。
-BARE = re.compile(r"(?<![A-Za-z0-9_./-])docs/[A-Za-z0-9_.-]+\.md")
+#
+# ★★ 路径前缀里**不含点**是故意的：文档按分发单元搬过家之后，源码注释里的
+#    指路会写成 `cluster/docs/DEPLOYMENT.md` 或 `packer/docs/PLUGIN-SPEC.md`，
+#    这一条要认得出它们。而 `../cluster/docs/x.md` 里那个 `.` 不在字符类里
+#    ⇒ 匹配从 `docs/` 起头 ⇒ 被前面的负向断言挡掉（相对路径归 A2 管）。
+BARE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_-]+/)*docs/[A-Za-z0-9_.-]+\.md")
 
 # A2：markdown 相对链接。
 LINK = re.compile(r"\]\(([^)\s]+)\)")
+
+# ★★ **一整条链接**（`[文字](目标)`）。A1 扫之前先把它们挖掉。
+#
+#    两条判据的**基准不一样**：A1 认的是**仓库相对**路径（源码注释里就那么写），
+#    A2 认的是**相对该文件**的路径。同一段文本里一条链接的**文字**与**目标**都
+#    长得像路径，于是 A1 会拿仓库根去解析一条本该按它所在目录解析的链接 ——
+#    这在 `cluster/README.md` 那种"用相对链接指自己那一侧的文档"里必红，
+#    而那是**完全合法**的写法。同一件事判两遍、其中一遍基准还错，是纯粹的假红。
+LINK_WHOLE = re.compile(r"\[[^\]]*\]\([^)\s]*\)")
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 
@@ -89,7 +103,7 @@ def stripped_lines(text):
 def with_dirs(paths):
     """把"存在的东西"补全：一个文件的存在蕴含它每一级祖先目录的存在。
 
-    ★ 少了这一步，`[plugins/](../plugins/)` 会被判成断链 —— 而它指的东西明明在。
+    ★ 少了这一步，`[plugins/](../plugins)` 会被判成断链 —— 而它指的东西明明在。
     """
     out = set(paths)
     for p in paths:
@@ -110,8 +124,9 @@ def problems_from(files, present):
 
     for rel, text in sorted(files.items()):
         for line in stripped_lines(text):
-            # ── A1：裸路径（源码注释、`.md` 里的反引号指路都算）────────────
-            for m in BARE.finditer(line):
+            # ── A1：裸路径（源码注释、`.md` 里反引号包的指路都算）──────────
+            # ★ 先把整条 markdown 链接挖掉：那些归 A2 管，基准不一样（见 LINK_WHOLE）。
+            for m in BARE.finditer(LINK_WHOLE.sub("", line)):
                 tgt = m.group(0)
                 if tgt not in present:
                     out.append("%s：写的路径不存在 —— `%s`" % (rel, tgt))
@@ -214,6 +229,16 @@ def self_test():
         ("子目录里的相对链接算错层",
          {"docs/A.md": "见 [B](sub/B.md)。\n"},
          "docs/A.md：断链"),
+        ("断链：搬运后的**多级** `docs/` 路径（`cluster/docs/` 那种）",
+         {"docs/A.md": "见 `cluster/docs/NOPE.md`。\n"},
+         "docs/A.md：写的路径不存在"),
+        ("`../` 打头的相对路径归 A2 管，A1 不重复判（假红防线）",
+         {"docs/A.md": "见 `../cluster/docs/REAL.md`。\n", "cluster/docs/REAL.md": ""},
+         None),
+        ("一条**链接**里的相对路径归 A2 管，A1 不重复判（假红防线）——"
+         " 文字与目标都长得像路径，而基准不一样",
+         {"cluster/README.md": "见 [docs/D.md](docs/D.md)。\n", "cluster/docs/D.md": ""},
+         None),
         ("围栏代码块里的举例**不**算指路（假红防线）",
          {"docs/A.md": "```\n见 [B](NOPE.md) 与 `docs/ALSO-NOPE.md`\n```\n"},
          None),
@@ -224,7 +249,7 @@ def self_test():
          {"docs/A.md": "见 [x](https://example.com/docs/NOPE.md)。\n"},
          None),
         ("指到一个**目录**是合法的（假红防线）",
-         {"docs/A.md": "见 [plugins](../plugins/)。\n", "plugins/x/.keep": ""},
+         {"docs/A.md": "见 [plugins](../plugins)。\n", "plugins/x/.keep": ""},
          None),
     ]
     bad = []
@@ -239,7 +264,7 @@ def self_test():
         for b in bad:
             print("✗ %s" % b)
         return 1
-    print("✓ 反向自测通过：三种坏样本都被抓到，四种假红样本都没被误判")
+    print("✓ 反向自测通过：四种坏样本都被抓到，六种假红样本都没被误判")
     return 0
 
 
