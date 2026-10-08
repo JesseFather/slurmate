@@ -70,7 +70,7 @@ import time
 #   ★ 第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.14"
+VERSION = "0.15"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。

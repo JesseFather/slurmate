@@ -14,12 +14,12 @@
 
 | 部分 | 状态 |
 |---|---|
-| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 **477 项**、比对器自测 23 项全过（这 477 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
-| **客户端**（Electron） | 代码完整，测试 **272 项**全过：真实 SSH 后端已实现（专用密钥认证、固定 argv 的 RPC、主机密钥 TOFU 校验）。**但从未连过真集群** —— SSH 握手、exec 通道与端口转发都还没有一次真实输出 |
+| **集群侧**（守护进程 / CLI / 作业模板 / 部署脚本） | 代码完整，自测 **1229 项**、比对器自测 23 项全过（这 1229 项在**一台完全没有 Slurm 的机器上**同样全过，见 `cluster/test-sessiond-logic.py` 的文件头）。**但从未在真实集群上跑过端到端流程** |
+| **客户端**（Electron） | 代码完整，测试 **546 项**全过：真实 SSH 后端已实现（专用密钥认证、固定 argv 的 RPC、主机密钥 TOFU 校验）。**但从未连过真集群** —— SSH 握手、exec 通道与端口转发都还没有一次真实输出 |
 
-也就是说：**现在把它装到集群上，客户端仍然连不上** —— 但原因和以前不一样了。
-两端协议已经同步（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），缺的不再是功能或协议，
-而是**一次真实的握手**：登录节点是否放行公钥认证、`ForceCommand` 是否放行固定 argv、
+也就是说：**现在把它装到集群上，客户端仍然连不上** —— 缺的不是功能，也不是协议
+（两端协议见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），而是**一次真实的握手**：
+登录节点是否放行公钥认证、`ForceCommand` 是否放行固定 argv、
 `direct-tcpip` 能否转发 —— 这三条至今只有推断，没有一次真实输出。
 
 任何一条不成立，客户端那一跳都要换方案。见 [client/README.md](client/README.md)，
@@ -253,4 +253,4 @@ sudo bash cluster/install-base.sh              # 部署
 
 [Apache-2.0](LICENSE)
 
-Copyright 2026 JesseFather（署名文件见 [NOTICE](NOTICE)）。
+Copyright 2026 JesseFather（署名文件见 [NOTICE](NOTICE)，源文件头另有一份同款声明）。

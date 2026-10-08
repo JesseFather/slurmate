@@ -488,7 +488,7 @@
 | `log(msg)` | 双写本地日志与 NFS 日志，并推进补写水位 |
 | `json_escape(s)` | `\` / `"` / 制表符 |
 | `write_atomic(dst, content)` | 写临时文件 + `mv -f`（NFSv4 RENAME 服务端原子） |
-| `write_session(state, ec)` | 写整个会话文件；你的 `PLUGIN_SESSION_FIELDS` 在此展开 |
+| `write_session(state, ec)` | 写整个会话文件；插件的 `PLUGIN_SESSION_FIELDS` 在此展开 |
 
 宿主**还定义了** `is_ipv4` / `write_jobhb` / `detect_node_ip` / `port_free` /
 `plugin_call` / `host_start_service` / `plugin_names` / `pick_port_and_start` /
@@ -535,7 +535,7 @@ precheck_<短名>                    ← ①  一次
   → 写 "starting"
   → pick_port_and_start            ← ②  每个候选端口各调一次 start_<短名>
   → 写 "running" + 起心跳循环
-  → wait "$SVC_PID"                ← 依赖你写了 SVC_PID
+  → wait "$SVC_PID"                ← 依赖插件写了 SVC_PID
   → cleanup(rc):
        kill 心跳 → kill SVC_PID → 写墓碑 → 清口令
        → log "清理完成"            ← 必须在下一行之前
@@ -546,7 +546,7 @@ precheck_<短名>                    ← ①  一次
 
 ### 5.6 会话文件与跨语言字段
 
-**你不直接写会话文件** —— 走 `PLUGIN_SESSION_FIELDS`。宿主写死的那一批字段
+**插件不直接写会话文件** —— 走 `PLUGIN_SESSION_FIELDS`。宿主写死的那一批字段
 由守护进程按白名单过滤后经 RPC 给客户端；**客户端从不直接读这个文件**。
 
 **`PLUGIN_SESSION_FIELDS` 的键必须登记**（等级 **稳定**，保证 **一句话** ——
@@ -602,16 +602,16 @@ precheck_<短名>                    ← ①  一次
 | R8 | 写 `config.json` | **机器** | 没有入口（不给 `config` 模块） |
 | R9 | 拿 `ctx.win` 去操作**别人的**会话 | **机器** | 入口绑在这一条会话上 |
 | R10 | 在**目录**形态下带 `node_modules` | **一句话**（目录）／**机器**（包） | 目录形态：摘要**不看**它，而 `require()` **会读**它 ⇒ **两棵摘要相同的树可以有不同行为**；包形态：被路径规则直接拒（见 R3/R4） —— 见 F24 |
-| R11 | 在 `attach` 里假设自己只被调一次 | 一句话 | 重复执行，症状由你自己承担 |
-| R12 | 作业片段里写 shebang 或 `#SBATCH` | **机器** | **部署中止**（不是安装被拒 —— 你在自己机器上看不到这个错） |
+| R11 | 在 `attach` 里假设自己只被调一次 | 一句话 | 重复执行，症状由插件自己承担 |
+| R12 | 作业片段里写 shebang 或 `#SBATCH` | **机器** | **部署中止**（不是安装被拒 —— 插件作者在自己机器上看不到这个错） |
 | R13 | 作业片段的其余函数不带 `_<短名>_` 前缀 | **机器** | 部署中止。理由不是"插件之间互相覆盖"（那已经不可能），而是**不许遮蔽宿主自己的函数** |
 | R14 | 依赖 §7 里"不提供"的东西 | —— | 不存在 |
 | R15 | 在 `start_<短名>` 里把服务输出直接重定向到 `$LOCAL_LOG` | **一句话** | 那些行**进不了 NFS**，而且**没有任何症状** —— 宿主按 `$LOCAL_LOG` 的行号水位决定补写哪些行，服务进程插话会让水位穿过去 |
 | R16 | 假设 `SLURMATE_CANDIDATES` 是逗号分隔 | 一句话 | 它是**分号**分隔（`--export` 按逗号切） |
 | R17 | 未经登记就往 `PLUGIN_SESSION_FIELDS` 里写键 | **一句话** | 守护进程的白名单**静默丢弃**它 —— 客户端永远看不到，**而没有任何报错** |
 | R18 | 依赖宿主那些**没有**正式承诺的函数（§5.3 下半） | 一句话 | 它们是内部实现，随时可变 |
-| ~~R19~~ | ~~假设"守护进程会报出清单里的未知键"~~ | **机器**（v0.10 阶段 4 起） | **已经不再是红线。** 两侧都报，判据是 [`tools/manifest-keys.json`](../tools/manifest-keys.json)，见 R1。编号保留、**不重用** |
-| R20 | 请求超过站点配额，或**同时开很多会话** | **机器**（`rate_limited`） | 见账本 S25。多开让这件事从理论问题变成日常问题 |
+| ~~R19~~ | ~~假设"守护进程会报出清单里的未知键"~~ | **机器** | **不是红线。** 两侧都报，判据是 [`tools/manifest-keys.json`](../tools/manifest-keys.json)，见 R1。编号保留、**不重用** |
+| R20 | 请求超过站点配额，或**同时开很多会话** | **机器**（`rate_limited`） | 见账本 S25。多开让这件事成了日常问题 |
 
 ---
 

@@ -390,7 +390,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 enabled = yes          # ← 这一行同时也意味着"把它发到用户的工作站上"
 ```
 
-一份插件配置都不写时行为与以前完全一样（缺省取插件清单里的 `site.defaultEnabled`），
+一份插件配置都不写时按缺省行事（取插件清单里的 `site.defaultEnabled`），
 所以**升级本身不会静默多发一个插件出去**。
 逐条见 [CONFIGURATION.md](CONFIGURATION.md) 的〈一之二、插件配置〉。
 

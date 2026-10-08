@@ -3,3 +3,6 @@ Slurmate
 Copyright 2026 JesseFather
 
 本产品的许可全文见 LICENSE（Apache-2.0）。
+
+每个源文件的头部另有一份同款声明 —— 那是 Apache-2.0 附录点名的另一个落点
+（"enclosed in the appropriate comment syntax for the file format"）。

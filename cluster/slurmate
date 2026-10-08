@@ -49,7 +49,7 @@ import time
 #   cluster/slurmate-sessiond、本文件）必须逐字相同，由 .github/workflows/checks.yml
 #   断言。★ 第四处（package-lock）是最容易漏的一处：`npm ci` 不比较 lock 里根那个
 #   version 字段，它停在旧值也没人会发现。
-VERSION = "0.14"
+VERSION = "0.15"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。★ 与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
