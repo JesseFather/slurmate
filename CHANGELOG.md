@@ -1372,10 +1372,10 @@ powered off"，别的文档说成省电模式，还有版本把它关联到 `COM
 > 四处版本号（`client/package.json`、`client/package-lock.json`、
 > `cluster/slurmate`、`cluster/slurmate-sessiond`）现在都是 **0.7**。
 >
-> ⚠️ **与 v0.2 → v0.5 那几次一样，这一版两端必须一起升。** 理由与逐条症状写在
-> [docs/PROTOCOL.md](docs/PROTOCOL.md) 的〈协议版本与变更〉—— 最短的版本是：
-> **`files` 与 `plugin_file` 被删掉了**，而 v0.6 的客户端判"站点支不支持分发"
-> 用的正是 `files`。
+> ⚠️ **与 v0.2 → v0.5 那几次一样，这一版两端必须一起升。** 理由与逐条症状记在
+> 本条目里（〈Removed — 一份内容只剩一条投递方式〉与〈Added — 版本握手〉）——
+> 最短的版本是：**`files` 与 `plugin_file` 被删掉了**，而 v0.6 的客户端判
+> "站点支不支持分发"用的正是 `files`。
 
 ### Changed — ★★ 并发由作者声明：`contributes.concurrent`（必填），`data.perInstance` 退出
 

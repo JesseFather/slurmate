@@ -421,7 +421,7 @@ function enginesProblem(manifest, host) {
 /**
  * 握手的判定：**客户端版本 × 服务端版本 → 一个态**。
  *
- * ★ 规则只有这一处书面形式（另一处在 docs/PROTOCOL.md 的〈协议版本与变更〉，
+ * ★ 规则只有这一处书面形式（另一处在 docs/PROTOCOL.md 的〈协议版本〉，
  *   夹具 tools/version-fixtures.json 的 `check` 段是它们的判据）：
  *
  *   · 两个 `x` 相同 ⇒ **保证兼容**，前提是客户端不低于服务端。这一格是承诺本身。
