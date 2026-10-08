@@ -86,12 +86,12 @@ class Tunnel extends EventEmitter {
    * @param {object} opts
    *   preferredPort {number}   优先端口（工作区绑定的端口）
    *   target        {string}   "IPv4:端口"
-   *   excludePorts  {Set|Array} **别的工作区占着的端口**，顺移时必须跳过。
-   *                            不跳的后果不是「换了个端口」：两个工作区会在配置里同时
-   *                            声称同一个端口，每次启动谁先绑谁赢，工作区在两个 origin
+   *   excludePorts  {Set|Array} **别的那几份数据占着的端口**，顺移时必须跳过。
+   *                            不跳的后果不是「换了个端口」：两份数据会在配置里同时
+   *                            声称同一个端口，每次启动谁先绑谁赢，会话在两个 origin
    *                            之间反复横跳，而界面上一切正常。
-   *                            调用方**必须**把目标工作区自己排除在外（用
-   *                            usedWorkspacePorts(cfg, 目标工作区id)），否则它自己的端口
+   *                            调用方**必须**把目标那一份自己排除在外（用
+   *                            usedSpacePorts(cfg, 目标那一份的 id)），否则它自己的端口
    *                            会被当成「别人的」而永远绑不上。
    * @returns {Promise<{port:number, shifted:boolean}>} shifted=true 表示首选端口被占，换过了
    */

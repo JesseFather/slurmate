@@ -293,11 +293,12 @@ function renderSnapshot(s) {
   $('temp-banner').classList.toggle('hidden', !temp);
   // 工作区选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
   // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」工作区，没有连接就没有对象。
-  // ★ 多一个条件：**前台那条会话真的有工作区**（`s.workspaceId`）。
+  // ★ 多一个条件：**前台那条会话真的有一份数据**（`s.spaceId`）—— 只有要工作区的
+  //   插件才有，不要工作区的（中转站）没有。
   //   漏了它的症状是：前台是个中转站会话时选择器还露着，用户改了**没反应** ——
   //   那条路（`outsideWorkspace`）两条分支都不走，而界面上一切正常。
   $('sb-workspace-wrap').classList.toggle(
-    'hidden', !(running && boot && boot.activeConnectionId && s && s.workspaceId));
+    'hidden', !(running && boot && boot.activeConnectionId && s && s.spaceId));
 
   // ★★ 这一屏**不参与"露哪一屏"的判定** —— 那是路由的事（见 showScreen）。
   //   按会话状态切换 `sec-connect` / `sec-purpose` / `sec-session` 的话，"用户在
@@ -700,6 +701,22 @@ function activeConnWorkspaceId() {
 }
 
 /**
+ * 前台那条会话跑在**哪一个工作区**里 —— 按它手里那份数据的 id，去引用表里反查。
+ *
+ * ★ 会话手里是**一份数据**（`snap.spaceId`），而用户认的是**工作区**这个单位。
+ *   两者不是一回事：一份数据可以被几个工作区同时引用（那正是引用表存在的理由）。
+ *   所以这一步只能查，不能推 —— 主进程给的那张表里每一行都带着它指着哪些数据。
+ * ★ 查不到就返回 null：**临时那一份**不在任何工作区里（它只活在内存里），
+ *   那时选择器退回活跃连接那个工作区。
+ */
+function frontWorkspaceId() {
+  const sid = lastSnap && lastSnap.spaceId;
+  if (!sid) return null;
+  const l = (boot.workspaces || []).find((x) => (x.spaces || []).includes(sid));
+  return l ? l.id : null;
+}
+
+/**
  * 把一个工作区下拉填满。每条连接行一个、状态条一个，**共用同一份 boot.workspaces**。
  *
  * `keep` 是应当选中的那个工作区。**找不到就不选**（宁可空着）—— 让下拉停在一个
@@ -733,8 +750,9 @@ function fillWorkspaceOptions(sel, keep, connId) {
 function renderWorkspaceSelectors() {
   const sel = $('sb-workspace');
   if (!sel) return;
-  // 运行期间以快照为准（那才是会话真正跑着的工作区）；没有会话时用连接自己的标记。
-  const cur = (lastSnap && lastSnap.workspaceId) || activeConnWorkspaceId();
+  // 运行期间以快照为准（那才是会话真正跑着的那一份数据所在的工作区）；
+  // 没有会话时用连接自己的标记 —— 它改的是「当前连接的」工作区。
+  const cur = frontWorkspaceId() || activeConnWorkspaceId();
   fillWorkspaceOptions(sel, cur, boot && boot.activeConnectionId);
 }
 
@@ -822,7 +840,7 @@ function renderWorkspaceMap() {
     mapNodes.conn.set(c.id, n);
   }
 
-  const runtime = lastSnap && lastSnap.workspaceId;
+  const runtime = frontWorkspaceId();
   for (const l of boot.workspaces || []) {
     const n = document.createElement('div');
     n.className = 'wnode ws' + (l.id === runtime ? ' cur' : '');

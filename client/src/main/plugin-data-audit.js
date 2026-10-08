@@ -23,9 +23,14 @@
  *
  * ── ★ 判据是"正向算 + 两边折叠做差"，不是"逆向解析磁盘名" ────────────────────
  *
- *     该有的 = { 折叠(身份) : 有分区的插件 × 配置里的工作区 }
- *              ∪ { 折叠(身份) : 有分区的插件、没声明分实例 }
+ *     该有的 = { 折叠(身份) : 配置里那份 **被某个工作区引用着的** 数据 }
+ *              ∪ { 折叠(身份) : 要工作区的插件、却一份数据都没有的那些（除非它不要）}
  *     孤儿   = 磁盘上的目录名 − 该有的 − **活着的**
+ *
+ * ★ "该有的"**从配置里那张数据表正向算**（`cfg.spaces`），不是"每个插件 × 每个工作区
+ *   各算一个" —— 后者在旧模型下等价，而新模型里**一个插件在一个工作区里只有一份**，
+ *   且那几份的 id 是铸出来的、不由工作区推得出来。照旧写法算，**每一份活着的数据都会
+ *   被算成孤儿**，界面上给它们各一个删除按钮。
  *
  * ★ **"活着的"那一项必须减掉**（`held`），而它**必须来自两个根** —— 见下面那段。
  *
@@ -204,7 +209,8 @@ function recognized(place, name) {
  *
  * @param {object} o
  * @param {Array} o.plugins      注册表里的全部插件（`registry.list()`）
- * @param {Array} o.workspaces      `cfg.workspaces`
+ * @param {Array} o.spaces        配置里的数据（`cfg.spaces`）—— **"该有的"由它正向算**
+ * @param {Array} o.workspaces      `cfg.workspaces`（引用表：谁指着哪一份）
  * @param {Array} o.connections  `cfg.connections`（算引用计数）
  * @param {string[]|null} o.names     分区目录那一根下的目录名；`null` = 没查
  * @param {string} [o.why]            没查分区那一根的原因（原样带给界面）
@@ -214,9 +220,9 @@ function recognized(place, name) {
  *        浏览器存储分区由窗口持有（`livePartitions()`），插件数据目录由会话持有
  *        （`liveDataDirs()`）—— 只收一半的话，另一半里"活着却不在该有的清单里"的
  *        那些会被当成孤儿。
- *        ★ 那件事**够得着**，而且不止一种走法：一个声明了 `hasInstance` 却**没有界面**
- *        的插件（数据目录有、分区没有）活着的时候就是这样；**临时实例**更是天生如此
- *        （它的实例键只在内存里，配置里根本没有那个工作区 ⇒ 它永远不在"该有的"里）。
+ *        ★ 那件事**够得着**，而且不止一种走法：一个要工作区却**没有界面**
+ *        的插件（数据目录有、分区没有）活着的时候就是这样；**临时那一份**更是天生如此
+ *        （它的 id 只在内存里，配置里根本没有它 ⇒ 它永远不在"该有的"里）。
  *        ⇒ 少了这个参数，界面上会给一份**正在被写**的数据一个删除按钮。
  *        ★ **两种写法都收**：分区名（`persist:…`，窗口那一半报上来的就是它）与
  *        目录名（磁盘上的样子）。判据是 `pluginData.samePartition` —— 少了这一步，
@@ -229,10 +235,11 @@ function recognized(place, name) {
  *          与逐行的 `kind: 'unknown'` 不是一回事：那一档说的是"这一行我不认识"，
  *          这一条说的是"**没有一个是我认识的** —— 那多半是某一根取错了"。
  */
-function audit({ plugins, workspaces, connections, names, why, dataNames, dataWhy, held }) {
+function audit({ plugins, spaces, workspaces, connections, names, why, dataNames, dataWhy, held }) {
   const diskChecked = Array.isArray(names) && Array.isArray(dataNames);
   const list = Array.isArray(names) ? names : [];
   const dataList = Array.isArray(dataNames) ? dataNames : [];
+  const spacesArr = Array.isArray(spaces) ? spaces : [];
   const workspacesArr = Array.isArray(workspaces) ? workspaces : [];
   // ★ 归一：`held` 里**两种写法都收** —— 分区名（`persist:…`，窗口那一半
   //   `livePartitions()` 报的就是它）与目录名（磁盘上的样子，会话那一半
@@ -261,18 +268,41 @@ function audit({ plugins, workspaces, connections, names, why, dataNames, dataWh
   //
   // ★ 一张表服务两个根 —— 靠的是 `plugin-data.js` 里
   //   `dataDirNameOf === diskNameOf`（同一个身份在两个根下叫同一个名字）。
+  //
+  // ★★ **两份来源，判据不同**（那是两条不同的轴，别合并）：
+  //   · **要工作区的插件**：它有多少份数据**只有配置那张表知道**（`cfg.spaces`）
+  //     —— 一个插件在一个工作区里一份，而 id 是铸出来的。照"每个工作区各算一个"
+  //     去推**推不出来**，推出来的会是些不存在的名字，而真正的那几份全变成孤儿。
+  //   · **不要工作区的插件**（sshd）：整台机器上一份，名字只由清单算得出来
+  //     （`<id>@<共享组>`），配置里没有它 —— 所以这一支仍然照旧。
   const all = (plugins || []);
-  const expected = new Map();                 // 折叠过的名字 → {plugin, workspaceId|null}
+
+  // 每一份数据被哪几个工作区引用着 —— 引用表是**唯一**的所有权凭据。
+  const spaceRefs = new Map();
+  for (const l of workspacesArr) {
+    for (const sid of Object.values((l && l.refs) || {})) {
+      if (!sid) continue;
+      if (!spaceRefs.has(sid)) spaceRefs.set(sid, []);
+      spaceRefs.get(sid).push(l.id);
+    }
+  }
+
+  // ★ 没有任何工作区指着的那一份**不进"该有的"** —— 它是一条待回收的引用残留
+  //   （`pruneSpaces` 下一次就会收掉它），把它算成"该有的"会让盘上那份数据
+  //   永远挂着一个删除按钮而**自动回收够不着它**。
+  const expected = new Map();                 // 折叠过的名字 → {plugin, space, workspaceIds}
   for (const p of all) {
-    if (pluginData.hasInstance(p)) {
-      for (const l of workspacesArr) {
-        if (!l || !l.id) continue;
-        expected.set(pluginData.diskNameOf(pluginData.identityOf(p, l.id)),
-          { plugin: p, workspaceId: l.id });
+    if (pluginData.needsSpace(p)) {
+      for (const s of spacesArr) {
+        if (!s || pluginData.foldAscii(s.pluginId) !== pluginData.foldAscii(p.id)) continue;
+        const wsIds = spaceRefs.get(s.id);
+        if (!wsIds || !wsIds.length) continue;
+        expected.set(pluginData.diskNameOf(pluginData.identityOf(p, s)),
+          { plugin: p, space: s, workspaceIds: wsIds });
       }
     } else {
       expected.set(pluginData.diskNameOf(pluginData.identityOf(p)),
-        { plugin: p, workspaceId: null });
+        { plugin: p, space: null, workspaceIds: [] });
     }
   }
 
@@ -327,17 +357,22 @@ function audit({ plugins, workspaces, connections, names, why, dataNames, dataWh
 
     if (hit) {
       // 在"该有的"里 ⇒ 不是孤儿。只有一种情况值得说出来：
-      // **没有任何连接指着它那个工作区**（数据在、没人用）。
-      //   没有实例段的那种存储不属于任何工作区（它本来就一直只有一份），不列。
-      if (hit.workspaceId === null) continue;
-      if ((refs.get(hit.workspaceId) || 0) > 0) continue;
+      // **引用它的每一个工作区都没有任何连接**（数据在、没人用）。
+      //   不要工作区的那种存储不属于任何工作区（它本来就一直只有一份），不列。
+      //
+      // ★ 判据是"**每一个**引用它的工作区都没人用"，不是"第一个工作区没人用" ——
+      //   一份数据可以被几个工作区同时引用，只要还有一个在工作，它就在工作。
+      if (!hit.space) continue;
+      if (hit.workspaceIds.some((id) => (refs.get(id) || 0) > 0)) continue;
+      const where = hit.workspaceIds
+        .map((id) => `「${workspaceName.get(id) || id}」`).join('、');
       rows.push({
         name,
         places,
         kind: 'unused',
         label: `${hit.plugin.displayName} 的一份数据`,
-        why: `它在工作区「${workspaceName.get(hit.workspaceId) || hit.workspaceId}」上，`
-          + '而那个工作区现在没有任何连接在用。',
+        why: `它在工作区 ${where} 上，而${hit.workspaceIds.length > 1 ? '那些工作区' : '那个工作区'}`
+          + '现在没有任何连接在用。',
         deletable: true,
       });
       continue;
@@ -348,8 +383,8 @@ function audit({ plugins, workspaces, connections, names, why, dataNames, dataWh
     // 它排在这里（"该有的"那支之后、孤儿那支之前），因为能走到这两行之间的名字
     // 必然是"不在该有的清单里"的那些 —— 而那些里面混着两类完全不同的东西：
     // 真垃圾，以及**活得好好但算不出来**的。后者有两条来路，都不是假想：
-    //   · 一个 `hasInstance` 却**没有界面**的插件（数据目录有、分区没有）；
-    //   · **临时实例** —— 它的实例键只在内存里，配置里没有那个工作区，
+    //   · 一个要工作区却**没有界面**的插件（数据目录有、分区没有）；
+    //   · **临时那一份** —— 它的 id 只在内存里，配置里根本没有它，
     //     于是它**永远**不在"该有的"里。
     // ⇒ 少了这一行，用户在会话跑着的时候点一下删除，就抽掉了它脚下的那份数据，
     //   而症状只是「那个页面/那条命令忽然坏了」。
@@ -366,7 +401,7 @@ function audit({ plugins, workspaces, connections, names, why, dataNames, dataWh
           ? {
             name, places, kind: 'orphan',
             label: `${known.displayName} 的一份数据`,
-            why: `第三段是 ${parts.instance}，而配置里已经没有这个工作区了。`,
+            why: `第三段是 ${parts.instance}，而配置里已经没有这一份数据了。`,
             deletable: true,
           }
           : {

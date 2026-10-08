@@ -342,7 +342,7 @@ draft Release 上。
 ```
 src/main/
   index.js         入口：单实例锁、生命周期、IPC、登录编排
-  config.js        配置 + safeStorage 口令 + 工作区的端口（**创建时定一次、此后只读**）
+  config.js        配置 + safeStorage 口令 + 工作区（一张引用表）与数据空间（**端口创建时定一次、此后只读**）
   hosts.js         登录节点地址表 + 并发探测（读 SSH banner 校验）
   classify.js      RPC 结果 → 客户端可行动作（纯函数，最容易写错的地方）
   weblogin.js      「POST 表单 + 查 cookie」这个**通用**登录机制（纯函数）

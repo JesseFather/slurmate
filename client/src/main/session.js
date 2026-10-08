@@ -159,32 +159,32 @@ function mergeView(prev, next, { fromPush }) {
 class SessionController extends EventEmitter {
   /**
    * @param {object} opts
-   *   backend, workspaceId, onRelayPort
+   *   backend, spaceId, onRelayPort
    *   getExcludedPorts {() => Set<number>}  「别的工作区占着的端口」，由 index.js
    *                                        提供 —— 控制器不认识 config，所以注入。
    *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
    *
-   * workspaceId 是**工作区**的 id（见 config.js）：它决定本地监听端口、从而决定
-   * 浏览器 origin 与存储分区。
+   * spaceId 是**这一份数据**的 id（见 config.js 的「数据空间」那一节）：它决定本地
+   * 监听端口、从而决定浏览器 origin 与存储分区。
    *
    * ★ 但控制器**不解释它，也不把端口回报给谁**。那个数在工作区创建时就定下来了，
-   *   此后**只读**（`config.js` 的 `nextWorkspacePort`）。顺移只影响**这一次**会话：
+   *   此后**只读**（`config.js` 的 `nextSpacePort`）。顺移只影响**这一次**会话：
    *   把顺移后的值写回配置，等于把一次**暂时**的冲突变成永久的 origin 变更 ——
    *   冲突消失之后 origin 也回不去了，而那份布局本来是可以回来的。
    *
-   * ★ 中转站会话的 workspaceId 是 **null**。工作区存在的全部理由是「浏览器按 origin
+   * ★ 中转站会话的 spaceId 是 **null**。一份数据存在的全部理由是「浏览器按 origin
    *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 ——
-   *   给它分配一个工作区，等于凭空造出一个永远不会被创建的存储分区，还会让
+   *   给它分配一份，等于凭空造出一个永远不会被创建的存储分区，还会让
    *   「运行中切工作区」那条路去挪一个 ssh 隧道在用的端口。所以它的端口要**报出去**
    *   （写进用户那份 ssh 配置的 `Port` 行 —— 那边必须反映当前真值），走 onRelayPort。
    */
-  constructor({ backend, workspaceId, onRelayPort, getExcludedPorts,
+  constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, pushStaleMs,
                 requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
-    this.workspaceId = workspaceId;
+    this.spaceId = spaceId;
     this.onRelayPort = onRelayPort || (() => {});
     this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
@@ -322,7 +322,7 @@ class SessionController extends EventEmitter {
     const snap = {
       state: this.state,
       // 中转站会话是 null（见构造函数的说明）。
-      workspaceId: this.workspaceId,
+      spaceId: this.spaceId,
       // 已归一的三种取值之一。界面据此决定「连接」该做什么，**不要**自己猜：
       // null（服务端明说不知道）与 'code-server' 是完全不同的两件事。
       serviceKind: this.serviceKind(),
@@ -667,12 +667,12 @@ class SessionController extends EventEmitter {
    *   （端口一变 origin 就变、编辑器布局已经重置过了），却把一次**暂时**的冲突
    *   **永久化** —— 冲突消失之后 origin 也回不到最初那个，原来那份布局再也看不到了。
    *
-   * ★ 判据是 `this.workspaceId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
-   *   等价（跑在浏览器里的插件才需要工作区），但前者是框架的事实，后者是一个
+   * ★ 判据是 `this.spaceId` **有没有**，不是"是哪个插件"。这两个条件今天恰好
+   *   等价（跑在浏览器里的插件才要工作区），但前者是框架的事实，后者是一个
    *   插件名 —— 用名字判，加第三个插件时这里就得改。
    */
   _announcePort(port) {
-    if (!this.workspaceId) this.onRelayPort(port);
+    if (!this.spaceId) this.onRelayPort(port);
   }
 
   /** 建立隧道并开始心跳。 */
@@ -688,7 +688,7 @@ class SessionController extends EventEmitter {
       this._tunnelPort = port;
       this._lastTarget = target;
       this._announcePort(port);
-      if (shifted && this.workspaceId) {
+      if (shifted && this.spaceId) {
         // 换端口意味着 origin 变了，浏览器存在 localStorage 里的编辑器布局会重置。
         // 用户有权知道为什么 —— 别让它变成一个「怎么布局又乱了」的谜。
         // ★ 没有工作区的插件不适用：那边没有浏览器，名字恒定，端口在底下漂移
@@ -729,21 +729,21 @@ class SessionController extends EventEmitter {
    * 回滚也失败就进 ERROR 态：绝不留在「状态是 running、实际没有监听」那种状态，
    * 那会让界面显示一切正常而页面根本打不开。
    */
-  async relisten(newWorkspaceId, preferredPort, excludePorts) {
+  async relisten(newSpaceId, preferredPort, excludePorts) {
     const target = this.session && this.session.tunnel_target;
     if (!target) return { ok: false, error: '还没有隧道目标，无法切换工作区。' };
-    const prevWorkspace = this.workspaceId;
+    const prevSpace = this.spaceId;
     const prevPort = this._tunnelPort;
 
     await this.tunnel.stop();
     try {
       const { port, shifted } = await this.tunnel.start({
         preferredPort, target, excludePorts });
-      // ★ 换的是**这一次会话的** origin：`workspaceId` 与 `_tunnelPort` 一起改，然后
+      // ★ 换的是**这一次会话的** origin：`spaceId` 与 `_tunnelPort` 一起改，然后
       //   `_emit()` 把新的 origin 带出去。
       //   **不写回配置** —— 新工作区的端口是它**被创建时**定下来的那个
-      //   （`config.js` 的 `nextWorkspacePort`），顺移只是这一次的事。
-      this.workspaceId = newWorkspaceId;
+      //   （`config.js` 的 `nextSpacePort`），顺移只是这一次的事。
+      this.spaceId = newSpaceId;
       this._tunnelPort = port;
       this._emit();
       return { ok: true, port, shifted };
@@ -751,7 +751,7 @@ class SessionController extends EventEmitter {
       try {
         // 回滚：原来的端口和原来的工作区都放回去（同理，两样一起还原再 _emit）
         const back = await this.tunnel.start({ preferredPort: prevPort, target });
-        this.workspaceId = prevWorkspace;
+        this.spaceId = prevSpace;
         this._tunnelPort = back.port;
         this._emit();
       } catch (e2) {
@@ -765,9 +765,9 @@ class SessionController extends EventEmitter {
     }
   }
 
-  /** 换一个工作区 id。**只改标记与快照**，端口的挪动由 relisten 负责。 */
-  setWorkspace(workspaceId) {
-    this.workspaceId = workspaceId;
+  /** 换一份数据。**只改标记与快照**，端口的挪动由 relisten 负责。 */
+  setSpace(spaceId) {
+    this.spaceId = spaceId;
     this._emit();
   }
 
@@ -923,7 +923,7 @@ class SessionController extends EventEmitter {
               // 端口告诉需要它的那一位 —— 没有工作区的会话（它的 ssh 配置里那行
               // `Port` 必须反映当前真值）；有工作区的会话什么都不用做，实际值在快照里。
               this._announcePort(port);
-              if (shifted && this.workspaceId) {
+              if (shifted && this.spaceId) {
                 this.warning = `隧道重建时端口 ${prevPort} 被占用，已改用 ${port}。`
                              + '浏览器按端口隔离本地存储，编辑器布局会重置一次。'
                              + `首选端口没有被改掉：冲突消失之后，下次启动会回到 ${prevPort}。`;

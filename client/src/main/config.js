@@ -36,10 +36,16 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const atomicWrite = require('./atomic-write.js');
+// ★ 只为一个东西：`PLUGIN_ID_RE`（插件 id 的形状）。数据空间那张表里有一格是插件 id，
+//   而它会进磁盘路径 —— `config.json` 是用户能手改的，所以那一格必须在这里查。
+//   ★ 从那边**取**而不是在这里再写一条正则：插件 id 的字母表只有一份（`ulid.ENCODING`）。
+const pluginData = require('./plugin-data.js');
 
-const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
+const SCHEMA = 7;   // 2：profile → connections；3：永远加密保存；4：每条连接一把密钥；
                     // 5：**工作区**（那时叫「布局组」）取代 slots —— 键本身也换过名字
                     // 6：**站点分发**（trustedPlugins 同意台账 + devPlugins 开关）
+                    // 7：**数据空间**独立成一层 —— 工作区只留一张引用表（`refs`），
+                    //    端口从工作区搬到数据空间上
                     //
                     // ★ 删键**不升号**：升号是给"必须搬一次"的改动用的，不是给
                     //   "少了一个键"用的 —— 一个没人读的键下一次 saveConfig 顺手
@@ -74,9 +80,13 @@ const DEFAULTS = {
   // 主机密钥指纹（TOFU）。键是 "host:port"，值是 "SHA256:…"。
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
   hostKeys: {},
-  // 工作区。一个工作区 = 一个**永不复用**的存储身份 = 一条 code-server 的编辑器布局。
-  // 数组顺序即界面顺序（映射图的列序、下拉的选项序都靠它）。
-  workspaces: [],          // [{ id, name, port }]
+  // 工作区。一个工作区 = **一张引用表**：这个工作区里，每个插件用哪一份数据。
+  // ★ 它**不拥有数据**，只拥有"指向"。数组顺序即界面顺序（映射图的列序、下拉的选项序都靠它）。
+  workspaces: [],           // [{ id, name, refs: { <插件 id>: <数据空间 id> } }]
+  // 数据空间。一份 = 一个插件的**一份存储 + 它自己的端口**（个数由插件声明）。
+  // ★ 它**不属于任何工作区** —— 一份数据可以被几个工作区同时引用，那正是这张表
+  //   与 `workspaces[].refs` 分开的理由。
+  spaces: [],               // [{ id, pluginId, group, ports: [18080] }]
   // 插件在本机的开关：{ 插件名: { enabled: bool } }。
   //
   // ★ 这是「安装/卸载」在客户端那一半。**缺省是"跟着站点走"**：名字不在表里
@@ -448,21 +458,18 @@ function normalizeConnection(raw, fallbackId) {
   };
 }
 
-// ── 工作区 ──────────────────────────────────────────────────────────────────
+// ── 工作区：一张引用表 ──────────────────────────────────────────────────────
 //
-// 一个工作区 = 一份浏览器存储 = 一份 code-server 的编辑器布局。
+// 一个工作区回答的是「**这几条连接算同一个**」—— 由用户说了算。它本身不拥有任何
+// 东西，只拥有一张表：这个工作区里，每个插件用哪一份数据。
 //
 // 为什么需要「工作区」这一层：code-server（VS Code web）把 UI 布局存在浏览器 localStorage 里，
 // 而 localStorage 按 **origin**（scheme://host:port）隔离 —— 客户端用隧道的本地监听端口
-// 构造 origin，所以「端口不同」就等于「浏览器存储不同」。工作区把「哪条连接用哪个端口」变成
+// 构造 origin，所以「端口不同」就等于「浏览器存储不同」。工作区把「哪条连接算同一个」变成
 // 用户可控的映射：左侧连接条目、右侧工作区，多对一，引用计数归零即回收。
 //
-// ★ 工作区还担着第二个角色：它是插件运行时数据的**实例键**（见 plugin-data.js 的文件头
-//   那两条轴）。两件事能共用同一个 id，正是因为它们要的是同一样东西 ——「这几条连接
-//   算同一个」这件事由用户说了算，而不是某个组件自己判。这一节只管工作区本身（端口、
-//   引用计数、回收），"一份数据落在哪个分区"在 plugin-data.js 里。
-
-const WORKSPACE_PORT_BASE = 18080;   // 工作区的起手端口，从这里往上按需递增
+// ★ 而**端口与身份都不属于工作区** —— 它们属于数据空间（见下一节）。这一节只管
+//   引用表本身：谁指着它、什么时候回收。
 
 /**
  * 兜底那个工作区的 id：**一个常量**，不是铸出来的。
@@ -472,37 +479,37 @@ const WORKSPACE_PORT_BASE = 18080;   // 工作区的起手端口，从这里往�
  * 工作区，所以它就该是同一个 id。
  *
  * ★ **这与 `newWorkspaceId` 那条"永不复用"不冲突**，两者防的不是同一件事：那一条防的是
- *   "**一个随机 id 被发两次**"（A 工作区被回收之后，它的 id 落到一个**不相干**的新工作区头上，
- *   于是新工作区继承 A 的 localStorage）。这里只有一个工作区，不存在"落到别的工作区头上"。
+ *   "**一个随机 id 被发两次**"（A 工作区被回收之后，它的 id 落到一个**不相干**的新工作区
+ *   头上，于是新工作区继承 A 的那张引用表）。这里只有一个工作区，不存在"落到别的工作区头上"。
  *
  * ★★ **这一格必须是常量，不能是 `newWorkspaceId()`（随机）**。后果不是"看起来不利索"，
  *   而是**丢数据**：`loadConfig` **自己不写盘**（见文件头那三条原则），于是
  *
- *       读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
+ *       读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一批数据空间
  *       ⇒ **上一轮刚攒的编辑器布局凭空消失**，且没有任何报错。
  *
  *   而随机 id 还会在「本机的插件数据」里攒下一份认不出的残留，用户得自己删。
  *
  * ★ 复用它是安全的：这一格唯一的来路是"一个工作区都没有"，而一个工作区被回收时
- *   `clearWorkspaceStorage` 已经把它的分区清掉了 —— 再补出来的那一份是空白的。
+ *   它那张引用表跟着没了、它名下的数据空间也归零回收（见 `pruneSpaces`）。
  *
- * 形状必须满足 `WORKSPACE_ID_RE`（它进磁盘路径）。取全零是为了**一眼看出它不是铸的**。
+ * 形状必须满足 `WORKSPACE_ID_RE`。取全零是为了**一眼看出它不是铸的**。
  */
 const DEFAULT_WORKSPACE_ID = 'w000000000000';
 
 /**
  * 中转站隧道**优先**用的本地端口。
  *
- * ★ 它不是工作区端口，也**不进 config.json**。工作区的存在理由是「浏览器按 origin
- *   隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 —— 它的
+ * ★ 它不是数据空间的端口，也**不进 config.json**。数据空间的存在理由是「浏览器按
+ *   origin 隔离 localStorage，所以端口 = 一份编辑器布局」，而中转站没有浏览器 —— 它的
  *   「接口」是 ssh 配置里那个恒定别名，端口只是底下的一个实现细节，写在那边那份
  *   配置的 Port 行里。
  *
- * 所以这个值只是个**起手式**：真被占了（或撞上了某个工作区的端口 —— 排除集里
- * 有全部工作区端口，见 index.js 的 getExcludedPorts）隧道会顺移，然后把**实际**
+ * 所以这个值只是个**起手式**：真被占了（或撞上了某个数据空间的端口 —— 排除集里
+ * 有全部数据空间端口，见 index.js 的 getExcludedPorts）隧道会顺移，然后把**实际**
  * 端口写进 ssh 配置。用户看到的永远是 `ssh slurmate` 这一个名字。
  *
- * 取 18090 而不再往上堆：工作区从 18080 起按需递增，两边各占一段，
+ * 取 18090 而不再往上堆：数据空间从 18080 起按需递增，两边各占一段，
  * 日常看不到的碰撞由上面那条排除集兜住。
  */
 const RELAY_PORT_BASE = 18090;
@@ -510,22 +517,18 @@ const RELAY_PORT_BASE = 18090;
 /**
  * 工作区 id 的**形状**。
  *
- * ★ 它进分区名，而分区名就是磁盘上的目录名（见 plugin-data.js 的 partitionOf）——
- *   所以字符集必须钉死。`config.json` 是**用户能手改的**，没有这一条，`"id": "../x"`
- *   会一路走到路径里 —— 查"非空字符串"挡不住它。
- *   （`persist:plugin-<ULID>` 那条之所以没事，是因为 ULID 有自己的白名单，
- *   **不是这一层在管**。）
+ * ★ 它**今天不进任何路径**（进路径的是数据空间 id，见 `SPACE_ID_RE`），但仍然要查：
+ *   `config.json` 是**用户能手改的**，而一个畸形 id 会让「这条连接指着哪个工作区」
+ *   变成一句读不懂的话，症状是界面上一片空白而没有任何报错。丢掉整个工作区、
+ *   让连接收束到第一个，是一个说得清的下场。
  *
  * ★ 它钉的就是 `newWorkspaceId` 铸出来的那个形状。
- *
- * ★ 新模型还要往同一个字符串里再塞一个共享组名（清单里的 `contributes.data.inherit`，
- *   或者两个键都不写时那个缺省常量），所以这一格必须先关上。
  */
 const WORKSPACE_ID_RE = /^w[0-9a-f]{12}$/;
 
-/** 随机、**永不复用**。复用会让一个已回收工作区的存储复活到新工作区头上。
+/** 随机、**永不复用**。复用会让一个已回收工作区的引用表复活到新工作区头上。
  *  ——「新建空白工作区真的空白」的全部依据：若按端口命名，A 工作区被回收后端口被新工作区 B
- *  复用，B 就会继承 A 的 localStorage 和登录 cookie。 */
+ *  复用，B 就会继承 A 的那张表（以及它指着的那些数据）。 */
 function newWorkspaceId() {
   return 'w' + crypto.randomBytes(6).toString('hex');
 }
@@ -535,19 +538,29 @@ function newWorkspaceId() {
  *
  * ★ id 也要查形状（见 WORKSPACE_ID_RE）。不合法的 id **丢掉整个工作区**，与其它字段不合法
  *   时一致 —— `loadWorkspaces` 会跳过它，并把原来指着它的连接收束到第一个工作区上。不这样
- *   做的话，一个手改出来的 id 会变成磁盘上一个谁也清不掉的目录。
+ *   做的话，一个手改出来的 id 会变成一张谁也清不掉的引用表。
+ *
+ * ★ `refs` 里认不出形状的条目**丢掉那一格**，不丢掉整张表：一格坏掉只该让那一个插件
+ *   少一份数据（下一次开会话会新开一份），不该让整个工作区连同别的插件的映射一起消失。
+ *   ★ 而**指向不存在的数据空间**的那一格由 `loadConfig` 收掉（那时 `spaces` 才读完）。
  */
 function normalizeWorkspace(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
-  const port = Number(raw.port);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
   const id = typeof raw.id === 'string' && raw.id ? raw.id
     : (typeof fallbackId === 'string' && fallbackId ? fallbackId : newWorkspaceId());
   if (!WORKSPACE_ID_RE.test(id)) return null;
+  const refs = {};
+  if (raw.refs && typeof raw.refs === 'object' && !Array.isArray(raw.refs)) {
+    for (const [pluginId, spaceId] of Object.entries(raw.refs)) {
+      if (!pluginData.PLUGIN_ID_RE.test(pluginId)) continue;
+      if (typeof spaceId !== 'string' || !SPACE_ID_RE.test(spaceId)) continue;
+      refs[pluginId] = spaceId;
+    }
+  }
   return {
     id,
     name: String(raw.name || '').trim().slice(0, 40),
-    port,
+    refs,
   };
 }
 
@@ -555,11 +568,76 @@ function findWorkspace(cfg, id) {
   return ((cfg && cfg.workspaces) || []).find((l) => l.id === id) || null;
 }
 
-/** 已被**其他**工作区占用的端口。给隧道的端口顺移用 —— 见 tunnel.js 的 excludePorts。 */
-function usedWorkspacePorts(cfg, exceptId) {
+// ── 数据空间：一份存储 + 它自己的端口 ────────────────────────────────────────
+//
+// 一份数据 = 一个插件的**一份存储**（浏览器分区 + 插件数据目录），加上**它自己的端口**
+// （端口 = origin = 那份浏览器存储）。它不属于任何工作区 —— 工作区只是**引用**它。
+//
+// ★ 为什么端口归数据、不归工作区：一个工作区里可以同时跑**两个不同的插件**
+//   （数据是按插件分的），而两个会话不能共用一个端口 —— 端口是 origin，共用就等于
+//   两份浏览器的数据落在同一份存储里。端口跟着数据走，这条就不需要任何检查去维持。
+//
+// ★ 为什么这一层独立成一张表：**一份数据可以被几个工作区同时引用**。引用计数归零
+//   （没有任何工作区指着它、也没有活会话拿着它）才回收 —— 见 `pruneSpaces`。
+
+const SPACE_PORT_BASE = 18080;   // 数据空间的起手端口，从这里往上按需递增
+
+/**
+ * 数据空间 id 的**形状**。
+ *
+ * ★ 它进分区名，而分区名就是磁盘上的目录名（见 plugin-data.js 的 partitionOf）——
+ *   所以字符集必须钉死。`config.json` 是**用户能手改的**，没有这一条，`"id": "../x"`
+ *   会一路走到路径里 —— 查"非空字符串"挡不住它。
+ *
+ * ★ 它钉的就是 `newSpaceId` 铸出来的那个形状。
+ */
+const SPACE_ID_RE = /^s[0-9a-f]{12}$/;
+
+/** 随机、**永不复用**。复用会让一份已回收数据的存储复活到新数据头上 ——
+ *  「新建一份数据真的空白」的全部依据：若按端口命名，A 回收后端口被新数据 B 复用，
+ *  B 就会继承 A 的 localStorage 和登录 cookie。 */
+function newSpaceId() {
+  return 's' + crypto.randomBytes(6).toString('hex');
+}
+
+/**
+ * 规整一份数据；字段不合法则返回 null（同 normalizeConnection 的规矩，不静默填空）。
+ *
+ * ★ 三格都进路径（`persist:<插件 id>@<共享组>@<数据空间 id>`），三格都要查：
+ *   · `pluginId` —— 形状取自 `plugin-data.js` 的 `PLUGIN_ID_RE`（从 ULID 字母表派生，
+ *     不是抄一份）；
+ *   · `group`   —— 这里查的是**进路径的安全性**（长度 + 字符集），**不是**清单那条规则
+ *     （"共享组名还是版本号"由 `inspectDir` 判，而一个值可能两者都是）；
+ *   · `id`      —— 见 `SPACE_ID_RE`。
+ *
+ * ★ `ports` **必须是列表，而且从第一天就是列表** —— 个数由清单声明（今天恰好是 1）。
+ *   写成"先一个数、以后再改 schema"会让"个数"这件事在盘上出现两种形状，而读的人
+ *   得先猜是哪一种。
+ */
+function normalizeSpace(raw, fallbackId) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = typeof raw.id === 'string' && raw.id ? raw.id
+    : (typeof fallbackId === 'string' && fallbackId ? fallbackId : newSpaceId());
+  if (!SPACE_ID_RE.test(id)) return null;
+  if (typeof raw.pluginId !== 'string' || !pluginData.PLUGIN_ID_RE.test(raw.pluginId)) return null;
+  if (typeof raw.group !== 'string' || !/^[a-z0-9][a-z0-9.-]{0,31}$/.test(raw.group)) return null;
+  const ports = (Array.isArray(raw.ports) ? raw.ports : [])
+    .map(Number)
+    .filter((p) => Number.isInteger(p) && p >= 1024 && p <= 65535);
+  if (!ports.length) return null;
+  return { id, pluginId: raw.pluginId, group: raw.group, ports };
+}
+
+function findSpace(cfg, id) {
+  return ((cfg && cfg.spaces) || []).find((s) => s.id === id) || null;
+}
+
+/** 已被**其他**数据空间占用的端口。给隧道的端口顺移用 —— 见 tunnel.js 的 excludePorts。 */
+function usedSpacePorts(cfg, exceptId) {
   const s = new Set();
-  for (const l of ((cfg && cfg.workspaces) || [])) {
-    if (l && l.id !== exceptId) s.add(l.port);
+  for (const sp of ((cfg && cfg.spaces) || [])) {
+    if (!sp || sp.id === exceptId) continue;
+    for (const p of (sp.ports || [])) s.add(p);
   }
   return s;
 }
@@ -570,23 +648,23 @@ function usedWorkspacePorts(cfg, exceptId) {
  * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
  * 那就等于每次启动都可能换 origin。
  *
- * ★ **调用它的地方只有一个时机：一个工作区被创建的时候。** 此后再没有任何东西改
- *   这个值 —— 端口是工作区的**只读属性**（隧道顺移之后**不**把它写回来：写回来
+ * ★ **调用它的地方只有一个时机：一份数据被创建的时候。** 此后再没有任何东西改
+ *   这些值 —— 端口是数据空间的**只读属性**（隧道顺移之后**不**把它写回来：写回来
  *   等于把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin 也
  *   回不去，而原来那份布局本来是可以回来的）。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  *
  * @param {Set<number>} [extraPorts] **配置之外**还占着的端口。今天唯一的来源是
- *   临时实例那些工作区（它们**不在** `cfg.workspaces` 里，见 index.js 的 `tempWorkspaces`）。
- *   ★ 不让这个函数自己去问临时工作区，是因为这一层**只认配置**（`usedWorkspacePorts`
+ *   临时那一份数据（它们**不在** `cfg.spaces` 里，见 index.js 的 `tempSpaces`）。
+ *   ★ 不让这个函数自己去问临时那份，是因为这一层**只认配置**（`usedSpacePorts`
  *   的语义就是"配置里的"）—— 把第二个来源焊进来，这一层就再也说不清它数的是
  *   什么了。调用方把两半并好再传进来。
- *   ★ 不传 = 只有配置说了算（`app:setConnectionWorkspace` 那条路就是）。
+ *   ★ 不传 = 只有配置说了算。
  */
-function nextWorkspacePort(cfg, extraPorts) {
-  const used = usedWorkspacePorts(cfg, null);
+function nextSpacePort(cfg, extraPorts) {
+  const used = usedSpacePorts(cfg, null);
   if (extraPorts) for (const p of extraPorts) used.add(p);
-  let p = WORKSPACE_PORT_BASE;
+  let p = SPACE_PORT_BASE;
   while (p <= 65535 && used.has(p)) p += 1;
   return p;
 }
@@ -601,12 +679,47 @@ function nextWorkspaceName(cfg) {
   return `工作区 ${n}`;
 }
 
-// ★ **别在这里长出一条带回落的取端口函数** —— 一条"工作区不存在就回落到
-//   `WORKSPACE_PORT_BASE`"的路是临时实例这条路上最危险的一格：临时工作区不在配置里，
-//   于是每一个临时实例都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局
+// ★ **别在这里长出一条带回落的取端口函数** —— 一条"数据空间不存在就回落到
+//   `SPACE_PORT_BASE`"的路是临时那一份最危险的一格：它不在配置里，
+//   于是每一份临时数据都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局
 //   都推一条"端口被占、布局会重置"的**假警报**，而且同一份配置在不同启动顺序下会
-//   得到不同的 origin。取端口只有一条路：`index.js` 的 `workspacePortOf`（先查配置、
-//   再查临时工作区，都没有就抛）。
+//   得到不同的 origin。取端口只有一条路：`index.js` 的 `spacePortOf`（先查配置、
+//   再查临时那份，都没有就抛）。
+
+/**
+ * 这个工作区里，这个插件该用**哪一份数据** —— 没有就地建一份。
+ *
+ * @param {string} group 这个插件**现在**算出来的共享组（`plugin-data.js` 的 `groupOf`）。
+ *        ★ 由调用方给，因为这一层不认识插件，也不该认识 —— 它只管存。
+ *        ★ 而它**必须**参与判据：记着的那一份共享组与现在算出来的不一致，说明作者
+ *        换了共享组（或者改了 `perVersion`），那一份数据这个插件已经**读不到**了
+ *        （路径的中间那一段变了），必须新开一份。继续用旧的那份会让插件读写一份
+ *        它自己声明过"不再继承"的数据。
+ * @param {Set<number>} [extraPorts] 见 `nextSpacePort`
+ * @returns {{space:object, created:boolean}|null} 工作区不存在时 null。
+ *   `created` 是**给调用方省一次无谓的落盘**用的（这一格绝大多数调用都命中已有的那一份）。
+ *
+ * ★ **不落盘** —— 由调用方统一走 saveConfig / commitConfig（与 setConnectionWorkspace 同规矩）。
+ */
+function spaceFor(cfg, workspaceId, pluginId, group, extraPorts) {
+  const ws = findWorkspace(cfg, workspaceId);
+  if (!ws) return null;
+  if (!ws.refs || typeof ws.refs !== 'object') ws.refs = {};
+  const cur = findSpace(cfg, ws.refs[pluginId]);
+  // ★ 共享组对不上（见上）时走这一支：**换掉引用、把旧那一份留给 `pruneSpaces`**。
+  //   就地改 `cur.group` 是错的 —— 那等于把一份已经写好的数据改名，而它下面那份
+  //   存储还在旧名字的目录里。
+  if (cur && cur.group === group) return { space: cur, created: false };
+  const space = {
+    id: newSpaceId(),
+    pluginId,
+    group,
+    ports: [nextSpacePort(cfg, extraPorts)],
+  };
+  cfg.spaces = [...(cfg.spaces || []), space];
+  ws.refs[pluginId] = space.id;
+  return { space, created: true };
+}
 
 /**
  * 改一条连接指向哪个工作区。**不落盘** —— 由调用方统一走 commitConfig()。
@@ -623,16 +736,27 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
   return { ok: true };
 }
 
+/** 谁在引用这一份数据 —— 指向它的工作区 id。 */
+function spaceConsumers(cfg, spaceId) {
+  const out = [];
+  for (const l of ((cfg && cfg.workspaces) || [])) {
+    if (Object.values((l && l.refs) || {}).includes(spaceId)) out.push(l.id);
+  }
+  return out;
+}
+
 /**
  * 回收引用计数归零的工作区。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
  * （commitConfig）—— 漏掉一处的后果是某个工作区永远不被回收。
  *
- * @returns {{removed: string[]}} 被删掉的工作区 id（调用方据此清理它们的浏览器存储）
+ * @returns {{removed: string[]}} 被删掉的工作区 id（调用方据此清理它们名下的数据空间）
+ *   ★ **它不碰数据空间**：一个被删的工作区指着的那些数据，可能还被别的工作区指着。
+ *     那一层由 `pruneSpaces` 数（见它那段）。
  */
 function pruneWorkspaces(cfg) {
   // ★ 一条连接都没有时**不回收**。演示模式（以及「全新安装、还没配任何连接」）
   //   会有一个不属于任何连接的工作区 —— 它是那次会话的工作区身份。在这里把它删掉，
-  //   下次开会话又会造一个新的，而 id 一变 partition 就变，布局白重置一次。
+  //   下次开会话又会造一个新的，而 id 一变引用表就变，布局白重置一次。
   //   没有任何映射关系要维护的时候，「回收」无事可做。
   if (!(cfg.connections || []).length) return { removed: [] };
 
@@ -650,49 +774,114 @@ function pruneWorkspaces(cfg) {
 }
 
 /**
+ * 回收**没人引用的**数据空间。
+ *
+ * ★ 判据两层，缺一不可：
+ *   · **没有任何工作区指着它**（引用表是唯一的所有权凭据）；
+ *   · **此刻没有活会话拿着它**（`keepIds`）—— ★ 少了这一条就是**删活数据**：
+ *     "把连接切到别的工作区"会让旧工作区引用计数归零、被回收，而那条会话**还跑在**
+ *     它指过的那一份数据上（`app:setConnectionWorkspace` 对非活跃连接正是这样）。
+ *
+ * ★ 它与 `pruneWorkspaces` 是**两层**，不是一件事：一个工作区没了，它名下那些数据
+ *   只有当**没有别的工作区**也指着它们时才会跟着没。一份数据被 A、B 两个工作区引用时，
+ *   删 A 不动它 —— 这条正是"引用"这个词在这里的全部意思。
+ *
+ * @param {Set<string>} [keepIds] 此刻正被活会话拿着的那些
+ * @returns {{removed: object[]}} 被删掉的那些（调用方据此清它们的两个落点）
+ */
+function pruneSpaces(cfg, keepIds) {
+  const referenced = new Set();
+  for (const l of ((cfg && cfg.workspaces) || [])) {
+    for (const sid of Object.values((l && l.refs) || {})) if (sid) referenced.add(sid);
+  }
+  const keep = keepIds instanceof Set ? keepIds : new Set();
+  const removed = [];
+  cfg.spaces = (cfg.spaces || []).filter((s) => {
+    if (referenced.has(s.id) || keep.has(s.id)) return true;
+    removed.push(s);
+    return false;
+  });
+  return { removed };
+}
+
+/**
  * 给界面用的**已推导**结构。renderer 只渲染、不做任何推导 ——
  * 它手里那份 refCount 随时可能已经陈旧（另一条连接刚被删），
  * 所以「要不要二次确认」的判定权必须在主进程。
  *
- * @returns {[{id, name, port, refCount, members:string[], soleOwnerId:string|null}]}
+ * @returns {[{id, name, refCount, members:string[], soleOwnerId:string|null, spaces:string[]}]}
  *   soleOwnerId 非 null 表示「这个工作区只被这一条连接使用，切走就会被丢弃」。
+ *   `spaces` = 这个工作区指着的那些数据（界面拿它把一条会话的 `spaceId` 对回工作区）。
+ *   ★ **没有 `port`** —— 端口是数据空间的属性，一个工作区可能同时有好几个。
  */
 function workspacePlan(cfg) {
   return ((cfg && cfg.workspaces) || []).map((l) => {
     const members = (cfg.connections || [])
       .filter((c) => c.workspaceId === l.id).map((c) => c.id);
     return {
-      id: l.id, name: l.name, port: l.port,
+      id: l.id, name: l.name,
       refCount: members.length,
       members,
       soleOwnerId: members.length === 1 ? members[0] : null,
+      spaces: Object.values(l.refs || {}),
     };
   });
+}
+
+/**
+ * 解析数据空间列表。
+ *
+ * 数据空间只有**一条来路**：磁盘上的 `spaces[]`（外加 index.js 里那张**只在内存里**的
+ * 临时表 —— 它不走这里，因为它本来就不该落盘）。
+ */
+function loadSpaces(raw) {
+  const out = [];
+  const seen = new Set();
+  if (Array.isArray(raw.spaces)) {
+    for (const s of raw.spaces) {
+      const n = normalizeSpace(s, s && s.id);
+      if (!n || seen.has(n.id)) continue;
+      // 端口撞车就地挪开 —— 两份数据声称同一个端口会让它们每次启动互相抢，
+      // 会话在两个 origin 之间反复横跳，而界面上一切正常。
+      if (n.ports.some((p) => out.some((x) => x.ports.includes(p)))) {
+        n.ports = [nextSpacePort({ spaces: out })];
+      }
+      seen.add(n.id);
+      out.push(n);
+    }
+  }
+  return out;
 }
 
 /**
  * 解析工作区列表。
  *
  * 工作区只有**一条来路**：磁盘上的 `workspaces[]`。一个都没有而有连接时，就地补一个默认工作区。
+ *
+ * @param {Array} spaces 已经解析好的数据空间 —— 引用表里指向不存在的那一格要在这里收掉
  */
-function loadWorkspaces(raw, connections) {
+function loadWorkspaces(raw, connections, spaces) {
   const out = [];
   const seen = new Set();
+  const known = new Set((spaces || []).map((s) => s.id));
   if (Array.isArray(raw.workspaces)) {
     for (const l of raw.workspaces) {
       const n = normalizeWorkspace(l, l && l.id);
       if (!n || seen.has(n.id)) continue;
-      // 端口撞车就地挪开 —— 两个工作区声称同一个端口会让它们每次启动互相抢，
-      // 工作区在两个 origin 之间反复横跳，而界面上一切正常。
-      if (out.some((x) => x.port === n.port)) n.port = nextWorkspacePort({ workspaces: out });
       seen.add(n.id);
+      // ★ 指向一份**不存在**的数据的那一格收掉（手改过配置，或那一份被回收了）。
+      //   留着它的症状是"这个插件忽然读回一份旧数据"或者"一条指向空气的引用" ——
+      //   而 `spaceFor` 下次开会话时会新开一份，所以收掉它是**安全的那一侧**。
+      for (const [pluginId, spaceId] of Object.entries(n.refs)) {
+        if (!known.has(spaceId)) delete n.refs[pluginId];
+      }
       out.push(n);
     }
   }
   // 兜底：有连接却一个工作区都没有（手改过配置，或第一次配连接就写下了连接）。
   // ★ id 是**常量**，不是铸出来的 —— 理由写在 `DEFAULT_WORKSPACE_ID` 那一段注释里。
   if (out.length === 0 && connections.length > 0) {
-    out.push({ id: DEFAULT_WORKSPACE_ID, name: '默认工作区', port: WORKSPACE_PORT_BASE });
+    out.push({ id: DEFAULT_WORKSPACE_ID, name: '默认工作区', refs: {} });
   }
   // 每条连接都必须落在一个**存在**的工作区里。指向不存在的工作区 = 界面上一片空白，
   // 而用户看不出为什么。在这里收束掉，而不是让 UI 去处理 null。
@@ -779,9 +968,11 @@ function loadConfig(dir) {
     ? raw.activeConnectionId
     : (list[0] ? list[0].id : null);
 
-  // 工作区必须在连接之后解析：loadWorkspaces 要读 connections 才能把每条连接收束到一个
-  // 存在的工作区里，而连接侧的去重可能已经剔掉了几条。
-  cfg.workspaces = loadWorkspaces(raw, list);
+  // 数据空间必须在工作区之前解析：引用表里指向不存在的那一格要按它收掉（loadWorkspaces
+  // 的第三个数）。而两者都必须在连接之后：loadWorkspaces 要读 connections 才能把每条连接
+  // 收束到一个存在的工作区里，而连接侧的去重可能已经剔掉了几条。
+  cfg.spaces = loadSpaces(raw);
+  cfg.workspaces = loadWorkspaces(raw, list, cfg.spaces);
 
   return cfg;
 }
@@ -1026,11 +1217,14 @@ function removePendingGoodbye(dir, sessionId) {
 module.exports = {
   SCHEMA, DEFAULTS, PENDING_ID,
   loadConfig, saveConfig,
-  // 工作区
   RELAY_PORT_BASE,
-  newWorkspaceId, normalizeWorkspace, findWorkspace, usedWorkspacePorts, nextWorkspacePort,
+  // 工作区（一张引用表）
+  newWorkspaceId, normalizeWorkspace, findWorkspace,
   nextWorkspaceName, setConnectionWorkspace,
   pruneWorkspaces, workspacePlan,
+  // 数据空间（一份存储 + 它自己的端口）
+  newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
+  usedSpacePorts, nextSpacePort, spaceFor, spaceConsumers, pruneSpaces,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled,

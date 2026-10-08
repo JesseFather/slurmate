@@ -380,22 +380,22 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   });
 
   // _listen 从首选端口往后扫 20 个，所以要留出余量
-  let workspacePort = await freePort();
-  while (workspacePort > 65500) workspacePort = await freePort();
+  let spacePort = await freePort();
+  while (spacePort > 65500) spacePort = await freePort();
 
   const ctl = new SessionController({
-    backend, workspaceId: 'w1', statusMs: 80,
+    backend, spaceId: 's0000000000a1', statusMs: 80,
   });
   t.after(() => ctl.stop());      // 见下方「服务端替用户做的决定」那条的说明
-  const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
-  assert.equal(snap.localPort, workspacePort);
+  const snap = await ctl.start({}, { preferredPort: spacePort, serviceKind: CS_MANIFEST.name });
+  assert.equal(snap.localPort, spacePort);
 
   // ★ 这个控制器**没有** onTunnelPort —— 顺移后的端口不回报给任何人。写回配置会把
   //   一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也回不去，而
   //   原来那份布局本来是可以回来的（下一会话绑回原端口，那份布局也跟着回来）。
   //   ★ 这一条断言就是那道闸：那个钩子**在控制器上根本不存在**。
   assert.equal(typeof ctl.onTunnelPort, 'undefined',
-    '★ 工作区的端口是只读属性，控制器里不该有把它报告出去的钩子');
+    '★ 那一份数据的端口是只读属性，控制器里不该有把它报告出去的钩子');
 
   // 制造确定性的 EADDRINUSE：先停掉隧道（它自己正占着这个端口），
   // 再由**测试**把端口占住。不这么做的话，重建时端口是空的，永远不会顺移。
@@ -403,18 +403,18 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   const squatter = net.createServer();
   await new Promise((r, j) => {
     squatter.once('error', j);
-    squatter.listen(workspacePort, '127.0.0.1', r);
+    squatter.listen(spacePort, '127.0.0.1', r);
   });
   t.after(() => new Promise((r) => squatter.close(r)));
 
   armed = true;
-  await until(() => ctl.snapshot().localPort !== workspacePort,
+  await until(() => ctl.snapshot().localPort !== spacePort,
     { what: '隧道重建并顺移', timeout: 6000 });
 
   const moved = ctl.snapshot().localPort;
   // ★ 丢掉 Tunnel.start() 返回值的后果：localPort 停在旧值，界面上「本地地址」
   //   那一栏从此指向一个没人监听的端口 —— 而没有任何报错。
-  assert.ok(moved >= workspacePort + 1 && moved <= workspacePort + 19,
+  assert.ok(moved >= spacePort + 1 && moved <= spacePort + 19,
     `顺移应当落在扫描区间内，实际 ${moved}`);
   assert.equal(ctl.snapshot().origin, `http://127.0.0.1:${moved}`,
     'origin 必须跟着新端口走');
@@ -426,29 +426,29 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
     '★ 顺移不改写首选端口 —— 要告诉用户下一会话会回到原来的端口');
 });
 
-test('★ 端口报给谁：有工作区的会话一声不吭，没有工作区的必须报实际端口', () => {
+test('★ 端口报给谁：要工作区的会话一声不吭，不要工作区的必须报实际端口', () => {
   // ★ 这一条守的是 `_announcePort` 里那个**取反的判据**。写反的后果不是"报错"：
   //   一个中转站会话永远不报端口 ⇒ 用户那份 ssh 配置停在基准端口（或者根本没写），
   //   而面板上会话是绿的、「本地地址」那一栏也对（隧道真的在监听）——
   //   两边的日志里一个字都不提这个回调。
   //
-  //   另一头同样要钉住：**有工作区的会话什么都不做**。端口是工作区的只读属性，
+  //   另一头同样要钉住：**要工作区的会话什么都不做**。端口是那一份数据的只读属性，
   //   实际值就在快照里（`localPort` / `origin`），不需要再回报给谁。
   const seen = [];
   const be = { async rpc() { return { ok: true, code: 0, data: {} }; } };
 
-  const inWorkspace = new SessionController({
-    backend: be, workspaceId: 'w1', onRelayPort: (p) => seen.push(['workspace', p]),
+  const withSpace = new SessionController({
+    backend: be, spaceId: 's0000000000a1', onRelayPort: (p) => seen.push(['space', p]),
   });
   const relay = new SessionController({
-    backend: be, workspaceId: null, onRelayPort: (p) => seen.push(['relay', p]),
+    backend: be, spaceId: null, onRelayPort: (p) => seen.push(['relay', p]),
   });
 
-  inWorkspace._announcePort(18080);
+  withSpace._announcePort(18080);
   relay._announcePort(18090);
 
   assert.deepEqual(seen, [['relay', 18090]],
-    '★ 有工作区的会话不该把端口报给任何人；没有工作区的必须报 —— 那一份 ssh 配置'
+    '★ 要工作区的会话不该把端口报给任何人；不要工作区的必须报 —— 那一份 ssh 配置'
     + '要反映当前真值，而用户认的别名恒定');
 });
 

@@ -44,10 +44,29 @@ function tmpdir() {
 /**
  * 一个**合法形状**的工作区 id（见 config.js 的 WORKSPACE_ID_RE）。
  *
- * ★ 用例里 `gid(1)` 比一串随机十六进制好读，而**它不能省**：id 进磁盘路径，所以
- *   `normalizeWorkspace` 会丢掉形状不对的那些 —— `'wa'` / `'wxyz'` 这类值过不了它。
+ * ★ 用例里 `gid(1)` 比一串随机十六进制好读，而**它不能省**：形状不对的那些会被
+ *   `normalizeWorkspace` 整条丢掉 —— `'wa'` / `'wxyz'` 这类值过不了它。
  */
 const gid = (n) => 'w' + String(n).padStart(12, '0');
+
+/**
+ * 一个**合法形状**的数据空间 id（见 config.js 的 SPACE_ID_RE）。
+ *
+ * ★ 与 `gid` 同一理由，而且**更要紧**：数据 id 进**磁盘路径**（分区名 =
+ *   `插件id@共享组@数据id`），所以手改过的配置里一个 `"../x"` 会一路走到路径里。
+ */
+const sid = (n) => 's' + String(n).padStart(12, '0');
+
+/** 一个要工作区的插件（形状取真清单里那一个，但 id 是本文件自己编的）。 */
+const LAYOUT_PLUGIN = {
+  id: '01M2JKHTZGKJBFQQTWYXMQMF2V', name: 'cs', version: '1.0.0',
+  contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } },
+};
+
+/** 一份合法形状的数据（`{id, pluginId, group, ports}`）。 */
+const space = (n, over = {}) => ({
+  id: sid(n), pluginId: LAYOUT_PLUGIN.id, group: 'editor', ports: [18080 + n], ...over,
+});
 
 /** 假的 safeStorage。真实现只在 Electron 里存在，测试不该依赖它。 */
 function fakeCrypto() {
@@ -70,11 +89,12 @@ const conn = (over = {}) => ({
 test('空目录加载出默认配置', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 6);
+  assert.equal(cfg.schema, 7);
   assert.deepEqual(cfg.connections, []);
   assert.equal(cfg.activeConnectionId, null);
   assert.deepEqual(cfg.hostKeys, {});
   assert.deepEqual(cfg.workspaces, []);
+  assert.deepEqual(cfg.spaces, []);
   // 私钥没有「保存方式」这个设置项 —— 任何一条配置都不该把它带回来
   assert.equal(cfg.secretMode, undefined);
 });
@@ -98,7 +118,7 @@ test('损坏的配置文件回落到默认值而不是崩溃', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), '{ 这不是 JSON');
   const cfg = config.loadConfig(dir);
-  assert.equal(cfg.schema, 6);
+  assert.equal(cfg.schema, 7);
   assert.deepEqual(cfg.connections, []);
 });
 
@@ -360,69 +380,90 @@ test('忘记主机密钥后回到 new', () => {
   assert.equal(config.checkHostKey(config.loadConfig(dir), 'h', 22, 'SHA256:a').status, 'new');
 });
 
-// ── 槽位端口 ────────────────────────────────────────────────────────────────
-
-// ── 工作区 ──────────────────────────────────────────────────────────────────
+// ── 工作区（一张引用表）与数据空间（一份存储 + 它自己的端口）─────────────────
 //
-// 一个工作区 = 一个本地端口 = 一个 origin = 一份 code-server 的编辑器布局。
+// 两个对象，别混：
+//   工作区 = **哪几条连接算同一个**（用户说了算），它只拥有一张 `refs` 表；
+//   数据空间 = **一个插件的一份存储 + 它自己的端口**，它不属于任何工作区
+//              （一份数据可以被几个工作区同时引用）。
 
-test('★★ 工作区的端口**创建时定一次、此后只读**（顺移不写回）', () => {
+test('★★ 数据**创建时定一次**、此后只读 —— 没有任何函数改得动它的端口', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   assert.deepEqual(cfg.workspaces, [], '一条连接都没有时不该有工作区');
+  assert.deepEqual(cfg.spaces, [], '也不该有数据');
 
-  // 一个工作区 = 一个本地端口 = 一个 origin = 一份编辑器布局。端口只在这个工作区**被创建
-  // 时**定一次（`nextWorkspacePort`），此后再没有任何东西改它。
-  cfg.workspaces = [{ id: gid(1), name: '工作区 1', port: 18080 }];
-  assert.equal(config.findWorkspace(cfg, gid(1)).port, 18080, '端口是这个工作区的一个属性');
+  // 一份数据 = 一个本地端口 = 一个 origin = 一份编辑器布局。端口只在它**被创建时**
+  // 定一次（`nextSpacePort`），此后再没有任何东西改它。
+  cfg.spaces = [space(1)];
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18081], '端口是这份数据的一个属性');
   config.saveConfig(dir, cfg);
-  assert.equal(config.findWorkspace(config.loadConfig(dir), gid(1)).port, 18080,
+  assert.deepEqual(config.findSpace(config.loadConfig(dir), sid(1)).ports, [18081],
     '存下来的端口读得回来');
 
   // ★★ 这一条钉的是"存下来的端口读得回来"真的被验过：取端口只有一条路
-  //    （见 `index.js` 的 `workspacePortOf`），它**没有回落** —— 拿一个刚从磁盘读回来
-  //    的配置去问，问的就是它自己存下的那些 `workspaces`。
+  //    （见 `index.js` 的 `spacePortOf`），它**没有回落** —— 拿一个刚从磁盘读回来的
+  //    配置去问，问的就是它自己存下的那些 `spaces`。
 
   // ★ 顺移**不**写回。把顺移后的值记下来，等于把一次**暂时**的冲突变成永久的
   //   origin 变更 —— 冲突消失之后 origin 也回不去，而那份布局本来是可以回来的
   //   （用户下一会话回到原端口，那份布局也跟着回来）。
   //   所以模块里**根本没有**改端口的函数 —— 这条断言就是那道闸。
-  assert.equal(typeof config.setWorkspacePort, 'undefined',
-    '★ 没有任何函数改得动一个已存在工作区的端口 —— 它是只读属性');
+  assert.equal(typeof config.setSpacePort, 'undefined',
+    '★ 没有任何函数改得动一份已存在数据的端口 —— 它是只读属性');
 });
 
-test('工作区：端口越界就整条不合法，不补默认值', () => {
-  // 与连接条目同规矩。补一个默认端口会让用户以为这个工作区还能用，
+test('数据：端口越界就整条不合法，不补默认值', () => {
+  // 与连接条目同规矩。补一个默认端口会让用户以为这份数据还能用，
   // 而它其实指向一份永远不会被打开的存储。
-  assert.equal(config.normalizeWorkspace({ id: gid(1), port: 80 }), null, '特权端口');
-  assert.equal(config.normalizeWorkspace({ id: gid(2), port: 99999 }), null, '越界端口');
-  assert.equal(config.normalizeWorkspace({ id: gid(3), port: 'x' }), null, '非数字');
-  assert.equal(config.normalizeWorkspace(null), null);
-  assert.equal(config.normalizeWorkspace({ id: gid(4), port: 18080 }).port, 18080);
+  assert.equal(config.normalizeSpace({ id: sid(1), pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: [80] }), null, '特权端口');
+  assert.equal(config.normalizeSpace({ id: sid(2), pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: [99999] }), null, '越界端口');
+  assert.equal(config.normalizeSpace({ id: sid(3), pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: ['x'] }), null, '非数字');
+  assert.equal(config.normalizeSpace({ id: sid(4), pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: [] }), null, '★ 空列表也不行 —— 端口是它非有不可的东西');
+  assert.equal(config.normalizeSpace(null), null);
+  assert.deepEqual(config.normalizeSpace(space(5)).ports, [18085]);
 });
 
-test('★ 工作区 id 的形状也要查 —— 它进磁盘路径', () => {
-  // ★ 这一格必须查：`normalizeWorkspace` 若只问"是不是非空字符串"，而这个 id 会被拼成
+test('★ 数据 id 的形状也要查 —— 它进磁盘路径', () => {
+  // ★ 这一格必须查：`normalizeSpace` 若只问"是不是非空字符串"，而这个 id 会被拼成
   //   分区名 = Electron 的存储目录名 —— 于是 `config.json` 里手写一个
   //   `"id": "../x"` 就会一路走到路径里。（`persist:plugin-<ULID>` 那条
   //   之所以没事，是因为 ULID 有自己的白名单，不是这一层在管。）
-  //   新模型还要往同一个字符串里再塞一个作者写的共享组名，所以这一格必须先关上。
-  for (const bad of ['../x', 'wa', 'w' + 'g'.repeat(12), 'w' + '0'.repeat(11),
-    '../../etc', 'w0123456789ab/../x']) {
-    assert.equal(config.normalizeWorkspace({ id: bad, port: 18080 }), null,
-      `${JSON.stringify(bad)} 不是合法的工作区 id，必须整条丢掉`);
+  for (const bad of ['../x', 'sa', 's' + 'g'.repeat(12), 's' + '0'.repeat(11),
+    '../../etc', 's0123456789ab/../x']) {
+    assert.equal(config.normalizeSpace({ id: bad, pluginId: LAYOUT_PLUGIN.id,
+      group: 'editor', ports: [18080] }), null,
+    `${JSON.stringify(bad)} 不是合法的数据 id，必须整条丢掉`);
   }
   // ★ **写了一个形状不对的 id ⇒ 整条丢掉**；而**根本没写 id** 走的是另一条路
   //   （补一个新的）。两者不是一回事，也不该合并：前者是一个**会进路径的字符串**
-  //   （必须拦），后者只是"这个工作区还没有身份"—— 拦下来只会让一份手写的配置整条丢掉。
-  assert.match(config.normalizeWorkspace({ port: 18080 }).id, /^w[0-9a-f]{12}$/,
-    '没写 id 的工作区补一个新的');
-  // 合法的那一个（`newWorkspaceId` 铸出来的形状）要收下 —— 否则上面那几条会因为
-  // "什么都拒"而全绿。
-  assert.equal(config.normalizeWorkspace({ id: gid(7), port: 18080 }).id, gid(7));
-  assert.match(config.newWorkspaceId(), /^w[0-9a-f]{12}$/,
-    '★ 铸出来的 id 与查的形状必须是同一条规则（两边分家的话，用户每次新建工作区都会'
+  //   （必须拦），后者只是"这份数据还没有身份"—— 拦下来只会让一份手写的配置整条丢掉。
+  assert.match(config.normalizeSpace({ pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: [18080] }).id, /^s[0-9a-f]{12}$/, '没写 id 的数据补一个新的');
+  // 合法的那两个（`newSpaceId` 铸出来的形状、与那条正则）必须是同一条规则。
+  assert.equal(config.normalizeSpace(space(7)).id, sid(7));
+  assert.match(config.newSpaceId(), /^s[0-9a-f]{12}$/,
+    '★ 铸出来的 id 与查的形状必须是同一条规则（两边分家的话，用户每次新建一份数据都会'
     + '在下次启动时丢掉它）');
+});
+
+test('★ 数据那两格也进路径：插件 id 与共享组的形状都要查', () => {
+  // ★ 插件 id 是 ULID（大写）；共享组名是清单里那一格，而第二段**还可能是版本号**
+  //   （`data.perVersion: true`），所以这里查的是**进路径的安全性**，不是清单那条规则。
+  const ok = (over) => config.normalizeSpace({ ...space(1), ...over });
+  assert.equal(ok({ pluginId: '../x' }), null, '插件 id 里一个斜杠就够走到路径外面');
+  assert.equal(ok({ pluginId: LAYOUT_PLUGIN.id.toLowerCase() }), null,
+    '★ 大小写也要一致：磁盘上那一段是折叠过的，而配置里那一份是原样的 ULID');
+  assert.equal(ok({ pluginId: LAYOUT_PLUGIN.id.slice(0, 25) }), null, '25 个字符不是 ULID');
+  assert.equal(ok({ group: '../x' }), null);
+  assert.equal(ok({ group: '' }), null);
+  assert.equal(ok({ group: 'e'.repeat(33) }), null, '比 GROUP_RE 的上限还长');
+  assert.equal(ok({ group: '1.0.0' }).group, '1.0.0',
+    '★ 第二段**可以是一个版本号**（perVersion），那是一条合法的取值');
 });
 
 test('★ 新建出来的名字是「工作区 N」，而 N 是**当前没被占用**的最小正整数', () => {
@@ -431,14 +472,14 @@ test('★ 新建出来的名字是「工作区 N」，而 N 是**当前没被占
   assert.equal(config.nextWorkspaceName({ workspaces: [] }), '工作区 1');
   // 连着占了 1、2 ⇒ 往后让到 3；而 2 空着时就用 2（不是"总在最大的后面加一"）。
   assert.equal(config.nextWorkspaceName({ workspaces: [
-    { id: gid(1), name: '工作区 1', port: 18080 },
-    { id: gid(2), name: '工作区 2', port: 18081 }] }), '工作区 3');
+    { id: gid(1), name: '工作区 1' },
+    { id: gid(2), name: '工作区 2' }] }), '工作区 3');
   assert.equal(config.nextWorkspaceName({ workspaces: [
-    { id: gid(1), name: '工作区 1', port: 18080 },
-    { id: gid(2), name: '工作区 3', port: 18081 }] }), '工作区 2');
+    { id: gid(1), name: '工作区 1' },
+    { id: gid(2), name: '工作区 3' }] }), '工作区 2');
   // 用户自己起的名字**不占号** —— 否则「我自己起的名字」会让下一个自动名跳过 1。
   assert.equal(config.nextWorkspaceName({ workspaces: [
-    { id: gid(1), name: '我自己起的名字', port: 18080 }] }), '工作区 1');
+    { id: gid(1), name: '我自己起的名字' }] }), '工作区 1');
 });
 
 test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"，就地补一个空白工作区', () => {
@@ -453,14 +494,15 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"
     slots: { 1: { port: 18093 } },
   }));
 
-  // 这条钉的是**实际发生的事**：一个全新的空白工作区，端口回落到基址，存储是另一个目录。
+  // 这条钉的是**实际发生的事**：一个全新的空白工作区（引用表空着），一条数据都没有。
   const cfg = config.loadConfig(dir);
   assert.equal(cfg.workspaces.length, 1);
-  assert.equal(cfg.workspaces[0].port, 18080, '不再继承 slots["1"].port');
+  assert.deepEqual(cfg.workspaces[0].refs, {}, '★ 工作区只带一张**空的**引用表 —— 数据是开会话时才建的');
+  assert.deepEqual(cfg.spaces, [], '不再继承 slots["1"].port（那条路整个删了）');
   // 旧字段自然消失（只认已知键，不写回）。留着它，将来读这份配置的人
   // 会以为它还有用，去代码里找一个早就不存在的行为。
   assert.equal(cfg.slots, undefined);
-  assert.equal(cfg.schema, 6);
+  assert.equal(cfg.schema, 7);
   // 两条连接收束到那一个工作区里 —— 这条与迁移无关，是 loadWorkspaces 自己的收束规则：
   // 指向不存在的工作区 = 界面上一片空白，而用户看不出为什么。
   for (const c of cfg.connections) {
@@ -475,13 +517,13 @@ test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次
   // ★★ 而 `loadConfig` **自己不写盘**（见 config.js 文件头那三条原则），所以
   //    这条兜底若用 `newWorkspaceId()`（随机），后果是**静默丢数据**：
   //
-  //        读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
-  //        ⇒ 上一轮刚攒的编辑器布局凭空消失（分区名就是磁盘上的目录名）。
+  //        读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一批数据
+  //        ⇒ 上一轮刚攒的编辑器布局凭空消失（数据 id 就是磁盘上的目录名）。
   //
   //    ★ 所以这里钉的是**确定性**这个性质：兜底那个 id 必须每次一样。
   const dir = tmpdir();
   const write = () => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    schema: 6,
+    schema: 7,
     connections: [{ id: 'c1', label: '内网', user: 'alice',
       host: '198.51.100.10', port: 10100 }],
     activeConnectionId: 'c1',
@@ -497,8 +539,8 @@ test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次
   write();
   const b = config.loadConfig(dir);
   assert.equal(b.workspaces[0].id, id,
-    '★★ 同一份配置读两次必须得到同一个工作区 id —— 换一个 id 就是换一个分区，'
-    + '而用户刚攒下的那份布局正在那个分区里');
+    '★★ 同一份配置读两次必须得到同一个工作区 id —— 换一个 id 就是换一批数据，'
+    + '而用户刚攒下的那份布局正在那些数据里');
 
   // ★ 判据二：它的形状必须过 `WORKSPACE_ID_RE`。兜底那一支是**直接 push** 的，
   //   不走 `normalizeWorkspace` —— 所以一个形状不对的常量能活过一次读、却会在
@@ -507,31 +549,86 @@ test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次
     '兜底 id 的形状必须与 WORKSPACE_ID_RE 是同一条规则');
 });
 
-test('★ 每个工作区一个独立的存储目录，且 id 不复用', () => {
-  // 工作区 id 是 partition 的**末段**，而整个 partition 名就是 Electron 的存储目录名 ——
-  // 「新建空白工作区真的空白」靠的是 id **永不复用**：若按端口命名，A 工作区被回收后端口
-  // 被新工作区 B 复用，B 就会继承 A 的 localStorage 和登录 cookie。
-  const cs = { id: '01M2JKHTZGKJBFQQTWYXMQMF2V', name: 'code-server', version: '1.0.0',
-    contributes: { layout: true, concurrent: true, data: { inherit: 'editor' } } };
-  const of = (workspaceId) => pluginData.partitionOf(pluginData.identityOf(cs, workspaceId));
+test('★ 每一个数据 id 一份独立的存储，且 id 不复用', () => {
+  // 数据 id 是 partition 的**末段**，而整个 partition 名就是 Electron 的存储目录名 ——
+  // 「新建一份数据真的空白」靠的是 id **永不复用**：若按端口命名，A 回收后端口
+  // 被新数据 B 复用，B 就会继承 A 的 localStorage 和登录 cookie。
+  const of = (s) => pluginData.partitionOf(pluginData.identityOf(LAYOUT_PLUGIN, s));
 
-  const a = config.newWorkspaceId();
-  const b = config.newWorkspaceId();
-  assert.match(a, /^w[0-9a-f]{12}$/);
+  const a = config.newSpaceId();
+  const b = config.newSpaceId();
+  assert.match(a, /^s[0-9a-f]{12}$/);
   assert.notEqual(a, b, 'id 永不复用');
-  assert.notEqual(of(a), of(b), '两个工作区必须是两份存储');
-  // ★ 整个身份都在里面：插件 id @ 共享组 @ 实例。少了前两段的话，"两个插件共用
-  //   同一个工作区"会读写同一份存储 —— 今天只有一个这样的插件，
-  //   所以那是一个还没炸的洞。
-  assert.equal(of(a), `persist:${cs.id}@editor@${a}`);
+  assert.notEqual(of({ id: a, pluginId: LAYOUT_PLUGIN.id, group: 'editor' }),
+    of({ id: b, pluginId: LAYOUT_PLUGIN.id, group: 'editor' }), '两份数据必须是两份存储');
+  // ★ 整个身份都在里面：插件 id @ 共享组 @ 数据 id。少了前两段的话，"同一个工作区里
+  //   两个插件"会读写同一份存储 —— 而那正是这次重做要放开的场景。
+  assert.equal(of({ id: a, pluginId: LAYOUT_PLUGIN.id, group: 'editor' }),
+    `persist:${LAYOUT_PLUGIN.id}@editor@${a}`);
 });
+
+// ── spaceFor：一个工作区里，一个插件用哪一份数据 ─────────────────────────────
+
+test('★★ spaceFor：没有就建一份并落进引用表；有就复用**同一份**', () => {
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [{ id: gid(1), name: 'A', refs: {} }];
+
+  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
+  assert.equal(a.created, true);
+  assert.equal(a.space.pluginId, LAYOUT_PLUGIN.id);
+  assert.equal(a.space.group, 'editor');
+  assert.equal(a.space.ports.length, 1, '一份数据一个端口（个数由清单声明，P3 才放开）');
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], a.space.id, '引用表要跟着写');
+
+  // ★ 第二次问**必须是同一份**：铸一个新的等于每次开会话都换一个 origin，
+  //   而用户看到的是"我的布局又没了"，且没有任何报错。
+  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
+  assert.equal(b.created, false);
+  assert.equal(b.space.id, a.space.id);
+  assert.equal(cfg.spaces.length, 1, '不该多出一份');
+
+  // 同一个工作区里**另一个插件**是另一份数据（两个端口、两份存储）——
+  // 这正是"一个工作区里两个要工作区的插件可以同时跑"的全部依据。
+  const other = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id.replace('2V', '3W'), 'other');
+  assert.notEqual(other.space.id, a.space.id);
+  assert.equal(cfg.spaces.length, 2);
+});
+
+test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', () => {
+  // `inherit` 的语义是"这几个版本共用一份"。作者把 `editor` 改成 `editor2`，
+  // 就是在说"我这份数据的格式变了，别继承" —— 于是第三段必须跟着变。
+  // ★ 就地改 `space.group` 是错的：那份存储还在旧名字的目录里，改名之后它就成了
+  //   一份**谁也读不到**的残留（而对账会把新名字当成一份不存在的活数据）。
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [{ id: gid(1), name: 'A', refs: {} }];
+
+  const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor');
+  const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor2');
+  assert.equal(b.created, true, '共享组变了 ⇒ 必须新开一份');
+  assert.notEqual(b.space.id, a.space.id);
+  assert.equal(b.space.group, 'editor2');
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], b.space.id, '引用表要指向新的那一份');
+  assert.equal(config.findSpace(cfg, a.space.id).group, 'editor',
+    '★ 旧那一份**一个字都不改** —— 它下面那份存储的名字就是按它算的');
+
+  // 而旧那一份现在没有任何工作区指着它了 ⇒ 下一层回收会收掉它（`pruneSpaces`）。
+  assert.deepEqual(config.pruneSpaces(cfg).removed.map((s) => s.id), [a.space.id]);
+});
+
+test('★ spaceFor 对不存在的工作区返回 null，不凭空造一个', () => {
+  const cfg = config.loadConfig(tmpdir());
+  assert.equal(config.spaceFor(cfg, gid(9), LAYOUT_PLUGIN.id, 'editor'), null);
+  assert.deepEqual(cfg.spaces, []);
+});
+
+// ── 两层回收 ────────────────────────────────────────────────────────────────
 
 test('回收：只删引用计数为 0 的工作区，并报出删了哪些', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [
-    { id: gid(1), name: 'A', port: 18080 },
-    { id: gid(2), name: 'B', port: 18081 },
-    { id: gid(3), name: 'C', port: 18082 },
+    { id: gid(1), name: 'A', refs: {} },
+    { id: gid(2), name: 'B', refs: {} },
+    { id: gid(3), name: 'C', refs: {} },
   ];
   cfg.connections = [
     { id: 'c1', user: 'a', host: 'h', port: 1, workspaceId: gid(1) },
@@ -546,22 +643,72 @@ test('回收：只删引用计数为 0 的工作区，并报出删了哪些', ()
 
 test('回收：一条连接都没有时**不**回收 —— 演示模式的那个工作区必须活下来', () => {
   const cfg = config.loadConfig(tmpdir());
-  cfg.workspaces = [{ id: gid(9), name: '演示工作区', port: 18080 }];
+  cfg.workspaces = [{ id: gid(9), name: '演示工作区', refs: {} }];
   cfg.connections = [];
 
   // 演示模式一个连接都没有，而它照样要开会话 —— 那个工作区是那次会话的工作区身份。
-  // 在这里把它回收掉，下次开会话又会造一个新的，id 一变 partition 就变，
+  // 在这里把它回收掉，下次开会话又会造一个新的，id 一变引用表就变，
   // 布局白重置一次，而用户看到的是「演示模式里布局老是丢」。
   const r = config.pruneWorkspaces(cfg);
   assert.deepEqual(r.removed, [], '没有映射关系要维护时，回收无事可做');
   assert.deepEqual(cfg.workspaces.map((l) => l.id), [gid(9)]);
 });
 
+test('★★ 数据那一层：没人引用的收掉 —— 但**被两个工作区引用时，删一个不动它**', () => {
+  // ★★ 这条是这次重做的中心性质，也是"数据不属于任何工作区"那句话的全部意思。
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [
+    { id: gid(1), name: 'A', refs: { [LAYOUT_PLUGIN.id]: sid(1) } },
+    { id: gid(2), name: 'B', refs: { [LAYOUT_PLUGIN.id]: sid(1) } },   // 同一份
+    { id: gid(3), name: 'C', refs: { [LAYOUT_PLUGIN.id]: sid(3) } },   // 独占一份
+  ];
+  cfg.spaces = [space(1), space(3)];
+
+  // 删掉 A ⇒ 那一份还被 B 引用着 ⇒ **一份都不该收**。
+  cfg.workspaces = cfg.workspaces.filter((l) => l.id !== gid(1));
+  assert.deepEqual(config.pruneSpaces(cfg).removed, [], '★ 还有 B 指着它，收它就是删活数据');
+
+  // 删掉 B ⇒ 现在没人指着了；但**没有工作区引用**才是判据，与"有没有连接"无关。
+  cfg.workspaces = cfg.workspaces.filter((l) => l.id !== gid(2));
+  assert.deepEqual(config.pruneSpaces(cfg).removed.map((s) => s.id), [sid(1)]);
+  assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(3)], 'C 那一份一个字都不该动');
+});
+
+test('★★ 数据那一层：**活会话拿着的**不许收 —— 那是"切工作区"那条路的护栏', () => {
+  // 场景：会话跑在 A 的某一份数据上 → 用户把这条连接切到工作区 B
+  // ⇒ A 的引用计数归零、被回收 ⇒ 它那张引用表跟着消失 ⇒ 那一份数据变得
+  // **没有任何工作区指着它** —— 而那一条会话**还跑在它上面**。
+  //   少了 `keepIds` 这一层，`clearSpaceStorage` 会把它脚下的存储抽掉：
+  //   症状只是「页面莫名其妙坏了」或「ssh 忽然认证失败」。
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [{ id: gid(1), name: 'A', refs: { [LAYOUT_PLUGIN.id]: sid(1) } }];
+  cfg.spaces = [space(1)];
+
+  cfg.workspaces = [];
+  const kept = config.pruneSpaces(cfg, new Set([sid(1)]));
+  assert.deepEqual(kept.removed, [], '★ 有一条活会话拿着它 ⇒ 不回收');
+  assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(1)]);
+
+  // 那条会话结束之后（下一轮 commitConfig 不再传它）才真的收掉。
+  assert.deepEqual(config.pruneSpaces(cfg).removed.map((s) => s.id), [sid(1)]);
+});
+
+test('spaceConsumers：谁在引用这一份数据', () => {
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [
+    { id: gid(1), name: 'A', refs: { aa: sid(1) } },
+    { id: gid(2), name: 'B', refs: { bb: sid(1) } },
+    { id: gid(3), name: 'C', refs: { cc: sid(3) } },
+  ];
+  assert.deepEqual(config.spaceConsumers(cfg, sid(1)), [gid(1), gid(2)]);
+  assert.deepEqual(config.spaceConsumers(cfg, sid(9)), []);
+});
+
 test('workspacePlan：把「这个工作区只被谁用」推导出来，renderer 不自己算', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [
-    { id: gid(1), name: '公用', port: 18080 },
-    { id: gid(2), name: '独占', port: 18081 },
+    { id: gid(1), name: '公用', refs: { [LAYOUT_PLUGIN.id]: sid(1) } },
+    { id: gid(2), name: '独占', refs: {} },
   ];
   cfg.connections = [
     { id: 'c1', user: 'a', host: 'h', port: 1, workspaceId: gid(1) },
@@ -578,45 +725,97 @@ test('workspacePlan：把「这个工作区只被谁用」推导出来，rendere
   // 界面据此在下拉里标注「只有这一条连接在用 —— 切走就会被丢弃」，
   // 并由主进程在真正切走时要求二次确认。
   assert.equal(plan[1].soleOwnerId, 'c3');
+  // ★ 每一行还要报出它指着哪些数据：界面拿它把一条会话的 `spaceId` 对回工作区
+  //   （会话手里是一份**数据**，而用户认的是**工作区**这个单位）。
+  assert.deepEqual(plan[0].spaces, [sid(1)]);
+  assert.deepEqual(plan[1].spaces, []);
+  // ★ 而它**不再报端口** —— 端口是数据的属性，一个工作区可能同时指着好几份。
+  assert.equal(plan[0].port, undefined);
 });
 
 test('端口分配：从 18080 起，跳过已被占用的', () => {
   const cfg = config.loadConfig(tmpdir());
-  assert.equal(config.nextWorkspacePort(cfg), 18080, '空配置从基址开始');
+  assert.equal(config.nextSpacePort(cfg), 18080, '空配置从基址开始');
 
-  cfg.workspaces = [
-    { id: gid(1), name: 'A', port: 18080 },
-    { id: gid(2), name: 'B', port: 18081 },
-    { id: gid(3), name: 'C', port: 18083 },
-  ];
-  assert.equal(config.nextWorkspacePort(cfg), 18082, '必须填中间的空洞');
-  // usedWorkspacePorts 要能用 exceptId 把自己摘出去 —— 端口的顺移靠它，
-  // 不摘的话目标工作区自己的端口会被当成「别人的」而永远绑不上。
-  assert.deepEqual([...config.usedWorkspacePorts(cfg, gid(2))].sort(), [18080, 18083]);
+  cfg.spaces = [space(1), space(2), space(4)];   // 18081 / 18082 / 18084
+  assert.equal(config.nextSpacePort(cfg), 18080, '基址空着就用基址');
+  cfg.spaces = [space(0), space(1), space(3)];   // 18080 / 18081 / 18083
+  assert.equal(config.nextSpacePort(cfg), 18082, '必须填中间的空洞');
+  // usedSpacePorts 要能用 exceptId 把自己摘出去 —— 端口的顺移靠它，
+  // 不摘的话目标那一份自己的端口会被当成「别人的」而永远绑不上。
+  assert.deepEqual([...config.usedSpacePorts(cfg, sid(1))].sort(), [18080, 18083]);
 });
 
-test('★ 往返：保存再读，工作区与连接指向都不能丢', () => {
+test('★ 往返：保存再读，引用表与连接指向都不能丢', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
-  cfg.workspaces = [{ id: gid(11), name: '生产集群', port: 18091 }];
+  cfg.workspaces = [{ id: gid(11), name: '生产集群',
+    refs: { [LAYOUT_PLUGIN.id]: sid(11) } }];
+  cfg.spaces = [space(11)];
   cfg.connections = [
     { id: 'c1', label: '', user: 'alice', host: '198.51.100.10', port: 10100, workspaceId: gid(11) },
   ];
   config.saveConfig(dir, cfg);
 
   // loadConfig 只认白名单键。漏搬一个键的后果不是「少个字段」——
-  // 是每次启动都丢掉全部工作区，所有连接塌回一个默认工作区，
+  // 是每次启动都丢掉全部工作区与数据，所有连接塌回一个默认工作区，
   // 而用户看到的只是「我配的映射关系没了」。
   const back = config.loadConfig(dir);
-  assert.deepEqual(back.workspaces, [{ id: gid(11), name: '生产集群', port: 18091 }]);
+  assert.deepEqual(back.workspaces,
+    [{ id: gid(11), name: '生产集群', refs: { [LAYOUT_PLUGIN.id]: sid(11) } }]);
+  assert.deepEqual(back.spaces, [{ id: sid(11), pluginId: LAYOUT_PLUGIN.id,
+    group: 'editor', ports: [18091] }]);
   assert.equal(back.connections[0].workspaceId, gid(11));
+});
+
+test('★ 引用表里指向**不存在**的那一格收掉，而不是留一条指向空气的引用', () => {
+  // 悬空引用的症状是"这个插件忽然读回一份旧数据"，或者一份数据被算成"该有的"
+  // 而它根本不在配置里。收掉它是**安全的那一侧**：`spaceFor` 下次开会话会新开一份。
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 7,
+    workspaces: [{ id: gid(1), name: 'A', refs: {
+      [LAYOUT_PLUGIN.id]: sid(1),                            // 指着存在的那一份 ⇒ 留
+      [LAYOUT_PLUGIN.id.replace('2V', '3W')]: sid(9),         // 指着不存在的那一份 ⇒ 丢
+      deadbeef: sid(1),                                      // 键不像插件 id ⇒ 丢
+    } }],
+    spaces: [space(1)],
+    connections: [{ id: 'c1', user: 'a', host: '198.51.100.10', port: 10100, workspaceId: gid(1) }],
+    activeConnectionId: 'c1',
+  }));
+  const cfg = config.loadConfig(dir);
+  assert.deepEqual(cfg.workspaces[0].refs, { [LAYOUT_PLUGIN.id]: sid(1) },
+    '★ 只留下**形状对、而且指着存在的那一份**的那一格');
+  // ★ 而不存在的那一份是**另一回事**：它是这一格指着的东西，不是这一格本身。
+  //   留着它并不会让谁来读它 —— `spaceFor` 会按引用表新开一份。
+  assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(1)]);
+});
+
+test('★ 引用表里形状不对的键值丢掉那一格，不丢掉整个工作区', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    schema: 7,
+    workspaces: [{ id: gid(1), name: 'A', refs: {
+      '../x': sid(1),                                     // 键不像插件 id
+      [LAYOUT_PLUGIN.id]: '../etc',                        // 值不像数据 id
+      [LAYOUT_PLUGIN.id.replace('2V', '3W')]: sid(1),       // 好的那一格
+    } }],
+    spaces: [space(1)],
+    connections: [{ id: 'c1', user: 'a', host: '198.51.100.10', port: 10100, workspaceId: gid(1) }],
+    activeConnectionId: 'c1',
+  }));
+  const cfg = config.loadConfig(dir);
+  // ★ 一格坏掉只该让那一个插件少一份数据（下次开会话新开一份），不该让整个工作区
+  //   连同别的插件的映射一起消失。
+  assert.deepEqual(Object.keys(cfg.workspaces[0].refs), [LAYOUT_PLUGIN.id.replace('2V', '3W')]);
+  assert.equal(cfg.workspaces.length, 1, '工作区本身要留着');
 });
 
 test('指向不存在的工作区时收束到第一个工作区，而不是留个悬空引用', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    schema: 5,
-    workspaces: [{ id: gid(1), name: 'A', port: 18080 }],
+    schema: 7,
+    workspaces: [{ id: gid(1), name: 'A', refs: {} }],
     connections: [{ id: 'c1', user: 'a', host: '198.51.100.10', port: 10100, workspaceId: '不存在' }],
     activeConnectionId: 'c1',
   }));
@@ -828,7 +1027,7 @@ test('★ 老配置里的 `devPlugins` 不再有任何效果（那条路已经�
   assert.equal(cfg.devPlugins, undefined,
     '★ 读进来就该是 undefined —— 留着它会让下一个人以为这个开关还有用，然后把它接回某条路上');
   // 而它**不是错误**：老配置不该让客户端起不来，也不该报一条用户看不懂的错。
-  assert.equal(cfg.schema, 6, 'schema 照常读出来，配置本身是好的');
+  assert.equal(cfg.schema, 7, 'schema 照常读出来，配置本身是好的');
 });
 
 // ── 钉子：按 id 记的签名公钥（§5.4）─────────────────────────────────────────

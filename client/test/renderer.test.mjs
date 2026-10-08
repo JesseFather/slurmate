@@ -667,11 +667,16 @@ test('★ 标签栏在这 30px 里 —— 它下面是原生视图，放外面�
   assert.match(css, /--bar-h:\s*30px/, '状态条高度还是那个常量');
 });
 
-test('★ 工作区选择器只在**前台那条会话真的有工作区**时露出来', () => {
-  // 前台是中转站时（workspaceId 为 null）选择器还露着的话，用户改了**没反应** ——
+test('★ 工作区选择器只在**前台那条会话真的有那一份数据**时露出来', () => {
+  // 前台是中转站时（spaceId 为 null）选择器还露着的话，用户改了**没反应** ——
   // 那条路径（outsideWorkspace）两条分支都不走，而界面上一切正常。
-  assert.match(js, /sb-workspace-wrap[\s\S]{0,240}?workspaceId/,
-    'sb-workspace-wrap 的露出条件里必须有 workspaceId');
+  assert.match(js, /sb-workspace-wrap[\s\S]{0,260}?s\.spaceId/,
+    'sb-workspace-wrap 的露出条件里必须有 spaceId');
+  // ★ 而会话手里是**一份数据**、用户认的是**工作区** —— 两者由引用表对上，
+  //   所以还要有一条按 id 反查的路径（`frontWorkspaceId`）。少了它，状态条上的
+  //   选择器在会话跑着的时候会停在"活跃连接那个工作区"上，而那可能不是它跑的那个。
+  assert.match(js, /function frontWorkspaceId\(\)[\s\S]{0,500}?lastSnap\.spaceId/,
+    'frontWorkspaceId 要按那一份数据的 id 反查工作区');
 });
 
 test('★★ 「临时副本」那条提示**两处都有**，而状态条那一份是必须的', () => {

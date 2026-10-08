@@ -139,24 +139,24 @@ let clientIdentity = null;
  */
 let sessions = new Map();
 /**
- * **临时工作区**：`id → {id, name, port}`，形状与 `config.normalizeWorkspace` 的产物
- * **逐字同形**（于是凡是拿一个工作区去用的地方，拿到临时工作区也不需要分支）。
+ * **临时的那些数据**：`id → {id, pluginId, group, ports}`，形状与 `config.normalizeSpace`
+ * 的产物**逐字同形**（于是凡是拿一份数据去用的地方，拿到临时的也不需要分支）。
  *
- * ★ **只在内存里，一个字都不落盘。** 它不是"一个还没保存的工作区"，而是**故意不存在于
- *   配置里**的一种工作区：配置里的工作区有引用计数、会被 `pruneWorkspaces` 回收、会被对账
- *   当成"该有的" —— 而临时工作区的全部意义就是"它属于**这一次会话**，会话结束就没了"。
- *   落盘会让它在下次启动时变成一个真的工作区（引用计数 0 ⇒ 当场被回收 ⇒ 但那之前
- *   `workspacePlan` 会把它报给界面，用户看到一堆自己没建过的工作区）。
+ * ★ **只在内存里，一个字都不落盘。** 它不是"一份还没保存的数据"，而是**故意不存在于
+ *   配置里**的一种数据：配置里的数据有引用计数、会被 `pruneSpaces` 回收、会被对账
+ *   当成"该有的" —— 而临时那一份的全部意义就是"它属于**这一次会话**，会话结束就没了"。
+ *   落盘会让它在下次启动时变成一份真的数据（没有任何工作区指着它 ⇒ 当场被回收 ⇒
+ *   但那之前 `workspacePlan` 会把它报给界面，用户看到一堆自己没建过的东西）。
  *
- * ★ **谁能进来只有一个来源**：`claimInstance` 造它。它今天只服务一件事 ——
+ * ★ **谁能进来只有一个来源**：`claimSpace` 造它。它今天只服务一件事 ——
  *   一个声明了 `concurrent: true` 的插件要开第二份时，给第二份一个**自己的**
- *   实例键（= 一个自己的端口 = 一个自己的 origin = 一份空的浏览器存储）。
+ *   数据（= 一个自己的端口 = 一个自己的 origin = 一份空的浏览器存储）。
  *
  * ★ **"这条会话是不是临时的"这个问题只问这一个 Map**（见 `sessionViews`）——
  *   绝不在会话记录上再存一个布尔：两份状态会漂，而漂的后果是**漏回收**（留一份
  *   永远没人清的目录）或者**误回收**（把持久那份的数据删掉）。
  */
-let tempWorkspaces = new Map();
+let tempSpaces = new Map();
 let cfgDir = null;
 let cfg = null;
 /**
@@ -1270,11 +1270,11 @@ function siteVersions() {
 // 登录机制（`webLogin`）在 `weblogin.js` 里 —— 它是**通用**的，契约由插件自己的
 // 清单提供。基座这一层不知道任何一个具体网页服务的端点或字段名。
 
-// ── 工作区 ──────────────────────────────────────────────────────────────────
+// ── 工作区与数据空间 ────────────────────────────────────────────────────────
 //
-// 一个工作区 = 一个本地端口 = 一个 origin = 一份 code-server 的编辑器布局。
-// 模型与纯函数在 config.js 的「工作区」一节；这里只做编排：
-// 谁指向谁、什么时候回收、回收时清理什么。
+// 工作区 = 一张**引用表**（哪条连接算同一个，由用户说了算）；数据空间 = 一份存储 +
+// 它自己的端口（一份 = 一个插件在某一个工作区里的那一份数据）。
+// 模型与纯函数在 config.js 的那两节；这里只做编排：谁指向谁、什么时候回收、回收时清理什么。
 
 /**
  * 这次会话该用哪个工作区。
@@ -1282,7 +1282,7 @@ function siteVersions() {
  * 有连接就用**它**的工作区（正常路径）。但**开发者模式里一个连接都没有**，那里也必须能
  * 开会话 —— 所以退回到「已有的第一个工作区，没有就建一个」。
  * （pruneWorkspaces 对「一条连接都没有」的情形不回收，正是为了让这一步造出来的工作区
- *   能活过下一次 commitConfig，否则每次开会话都会换一个 partition。）
+ *   能活过下一次 commitConfig，否则每次开会话都会换一个引用表。）
  *
  * ★ 收的是**那条连接**，不是"当前活跃的那条" —— 多开之后两者会分家。调用方读一次、
  *   让工作区与 `ctx.connection()` 共用**同一个**对象，它们就不会指向两条连接。
@@ -1294,10 +1294,6 @@ function workspaceForSession(conn) {
   const workspace = {
     id: config.newWorkspaceId(),
     name: config.nextWorkspaceName(cfg),
-    // ★ 端口要跳过**所有**还占着的（配置里的 ∪ 临时实例那些）—— 见
-    //   `usedWorkspacePortsAll`。只数配置里的，就会把一个活的临时实例脚下那个端口
-    //   分给一个新工作区，而症状是两条隧道抢一个端口、谁先绑谁赢。
-    port: config.nextWorkspacePort(cfg, usedWorkspacePortsAll(null)),
   };
   cfg.workspaces = [...cfg.workspaces, workspace];
   config.saveConfig(cfgDir, cfg);
@@ -1321,7 +1317,6 @@ function ensureConnectionWorkspace(conn) {
   const workspace = {
     id: config.newWorkspaceId(),
     name: config.nextWorkspaceName(cfg),   // 必须在入列之前算，否则会把自己算进去
-    port: config.nextWorkspacePort(cfg, usedWorkspacePortsAll(null)),   // 同上（含临时实例）
   };
   cfg.workspaces = [...cfg.workspaces, workspace];
   config.setConnectionWorkspace(cfg, conn.id, workspace.id);
@@ -1329,126 +1324,186 @@ function ensureConnectionWorkspace(conn) {
 }
 
 /**
- * 一个工作区（**持久的或临时的**）听在哪个端口。
+ * 这个工作区里，这个插件该用**哪一份数据** —— 没有就地建一份，并落盘。
+ *
+ * ★ 第二段（共享组）由 `pluginData.groupOf` 现算，交给 `config.spaceFor` 与记着的那一份
+ *   对照 —— 对不上就新开一份，见那个函数的注释。
+ * ★ 落盘是承重的：这一份的 id 决定分区与目录名，下一次启动要能算出同一个名字。
+ *   不写的话下一次开会话会铸一个新的 ⇒ **用户上一轮攒的布局凭空消失**（且不报错）。
+ */
+function spaceForSession(workspaceId, plugin) {
+  const r = config.spaceFor(cfg, workspaceId, plugin.id, pluginData.groupOf(plugin),
+    usedSpacePortsAll(null));
+  if (!r) return null;
+  if (r.created) config.saveConfig(cfgDir, cfg);
+  return r.space;
+}
+
+/**
+ * 一份数据（**持久的或临时的**）—— 两个来源合成一次查找。
+ *
+ * ★ 它**不是** `config.findSpace` 的替代品：那一个的语义是"配置里的"，要保持干净
+ *   （对账、`workspacePlan` 那些读者要的就是那个意思）。这一层负责把第二个来源并进来。
+ */
+function findSpaceAll(spaceId) {
+  if (!spaceId) return null;
+  return config.findSpace(cfg, spaceId) || tempSpaces.get(spaceId) || null;
+}
+
+/**
+ * 这一份数据被哪个**工作区**引用着（那个工作区的名字）。只用来把话说清楚 ——
+ * 引用表是"哪几个工作区算同一个"那张表，而用户认的是工作区的名字，不是数据 id。
+ * ★ 没人引用时返回 `null`（**临时那一份**就是这样：它不属于任何工作区）。
+ */
+function workspaceNameOf(spaceId) {
+  const ws = (cfg.workspaces || []).find(
+    (l) => Object.values(l.refs || {}).includes(spaceId));
+  return ws ? ws.name : null;
+}
+
+/**
+ * 这个工作区里有没有**活会话在跑**。
+ *
+ * ★ 判据是"有一条活会话拿着这个工作区引用着的某一份数据"，**不是**"这条连接是不是
+ *   活跃的那条" —— 后者在多开下会把另一条连接那个工作区里的会话当成这一个的。
+ *   ★ 也**不是**"有会话的 spaceId 等于工作区 id"：会话跑在**数据**上，一个工作区
+ *   可以同时指着好几份（每个插件一份），而 id 是两套。
+ *
+ * @returns {object|null} 挡着的那一条会话记录
+ */
+function liveSessionOnWorkspace(workspaceId) {
+  const ws = config.findWorkspace(cfg, workspaceId);
+  if (!ws) return null;
+  const ids = new Set(Object.values(ws.refs || {}));
+  return [...sessions.values()].find((r) => occupied(r.slot)
+    && r.controller && r.controller.spaceId && ids.has(r.controller.spaceId)) || null;
+}
+
+/**
+ * 一份数据听在哪个端口。
  *
  * ★ **没有回落分支，找不到就抛。** 而理由不是洁癖：一条回落的实现会把
- *   答案写成 `WORKSPACE_PORT_BASE`（18080），而它在临时工作区这条路上
- *   **够得着** —— 临时工作区不在 `cfg.workspaces` 里，于是每一个临时实例都会"回落到"
- *   18080，也就是**持有者那个工作区自己的端口**。症状有两条，都很难查：终端上推一条
+ *   答案写成 `SPACE_PORT_BASE`（18080），而它在临时那一份这条路上
+ *   **够得着** —— 临时那份不在 `cfg.spaces` 里，于是每一份临时数据都会"回落到"
+ *   18080，也就是**持有者那一份自己的端口**。症状有两条，都很难查：终端上推一条
  *   "端口被占、布局会重置"的**假警报**（而那个端口根本没有被抢），以及同一份配置
  *   在不同启动顺序下得到**不同的 origin**（localStorage 于是时有时无）。
  *   宁可停下来，也不要一个看起来像端口冲突的错。
  *
  * ★ 它是**唯一**的取端口入口。⇒ 别再长出第二条取端口的函数 —— 一条会回落到基址
- *   （`WORKSPACE_PORT_BASE`）的实现够得着**临时工作区**这条新路，而它给出的答案是持有者
+ *   （`SPACE_PORT_BASE`）的实现够得着**临时那一份**这条新路，而它给出的答案是持有者
  *   那个端口（见上）。
+ *
+ * ★ `ports` 是列表（个数由清单声明，今天恰好是 1），而**第一格是那个 origin**。
  */
-function workspacePortOf(workspaceId) {
-  const l = config.findWorkspace(cfg, workspaceId);
-  if (l) return l.port;
-  const t = tempWorkspaces.get(workspaceId);
-  if (t) return t.port;
-  throw new Error(`取不到工作区 ${workspaceId} 的端口：它既不在配置里，也不是一个`
-    + '本进程还在用的临时实例。（临时实例只活在内存里，进程一重启它就不存在了'
-    + '—— 那时应当重新认领，而不是去问一个已经没有的工作区。）');
+function spacePortOf(spaceId) {
+  const s = findSpaceAll(spaceId);
+  if (s) return s.ports[0];
+  throw new Error(`取不到数据 ${spaceId} 的端口：它既不在配置里，也不是一份`
+    + '本进程还在用的临时数据。（临时那份只活在内存里，进程一重启它就不存在了'
+    + '—— 那时应当重新认领，而不是去问一份已经没有的数据。）');
 }
 
 /**
- * 现在**所有还占着端口**的工作区：配置里的 ∪ 临时实例那些。
+ * 现在**所有还占着端口**的数据：配置里的 ∪ 临时那些。
  *
  * ★ 三个读者**全都走这一个入口**（`excludedPortsFor`、`app:setConnectionWorkspace`、
- *   新建临时工作区时挑端口）。少一个的后果都是**静默**的：
- *   · 隧道顺移时会挑走一个临时实例的端口 —— 而那条监听是活的，于是顺移**绑不上**，
+ *   新建临时那一份时挑端口）。少一个的后果都是**静默**的：
+ *   · 隧道顺移时会挑走一份临时数据的端口 —— 而那条监听是活的，于是顺移**绑不上**，
  *     用户看到"页面忽然打不开"，两边的日志里一个字都不提端口冲突；
- *   · 两条临时实例拿到同一个首选端口 —— 第二条起来时第一条的 origin 被顶掉。
+ *   · 两份临时数据拿到同一个首选端口 —— 第二份起来时第一份的 origin 被顶掉。
  *
- * ★ 它**不是** `config.usedWorkspacePorts` 的替代品：那一个的语义是"配置里的"，要
- *   保持干净（它还有别的读者）。这一层负责把第二个来源并进来。
+ * ★ 它**不是** `config.usedSpacePorts` 的替代品：那一个的语义是"配置里的"，
+ *   要保持干净（它还有别的读者）。这一层负责把第二个来源并进来。
  *
- * @param {string|null} [exceptId] 摘掉自己那一个（顺移时自己那个端口不能被当成
+ * @param {string|null} [exceptId] 摘掉自己那一份（顺移时自己那个端口不能被当成
  *        "别人的"，否则永远绑不上）。
  */
-function usedWorkspacePortsAll(exceptId) {
-  const s = config.usedWorkspacePorts(cfg, exceptId);
-  for (const [id, t] of tempWorkspaces) if (id !== exceptId) s.add(t.port);
+function usedSpacePortsAll(exceptId) {
+  const s = config.usedSpacePorts(cfg, exceptId);
+  for (const [id, t] of tempSpaces) {
+    if (id === exceptId) continue;
+    for (const p of t.ports) s.add(p);
+  }
   return s;
 }
 
 /**
- * 给这一次会话认领一个**实例键**（今天就是工作区 id）。
+ * 给这一次会话认领**一份数据**。
  *
  * ── 认领规则（**唯一**的实现，`startSession` 与 `reattachOne` 都走它）────────
  *
- * **持有者身份只在开局那一刻确定**：开局时那个工作区上**没有活会话** ⇒ 它就是持有者，
- * 用连接那个工作区（与这个机制存在之前**逐字相同**）；已经有 ⇒ 这是一份**临时实例**，
- * 给它一个新造的、只在内存里的临时工作区。
+ * **持有者身份只在开局那一刻确定**：开局时那份数据上**没有活会话** ⇒ 它就是持有者，
+ * 用工作区那张引用表指着的那一份（与这个机制存在之前**逐字相同**）；已经有 ⇒ 这是一份
+ * **临时数据**，给它一个新造的、只在内存里的。
  *
- * ★ **已经开着的实例永不接任**。一个正在跑的会话手里攥着它那个工作区 id（分区、数据
+ * ★ **已经开着的那一份永不接任**。一个正在跑的会话手里攥着它那份数据的 id（分区、数据
  *   目录、外面那个 origin 都从它算），把"持有者"这个身份挪到它头上等于在运行时
  *   迁移一份被活进程持有的存储 —— 做不到，而硬做的症状是页面忽然空掉。所以持有者
- *   结束之后，还开着的那一份**接着当临时实例**，下一个**新开**的会话才认领持有者。
+ *   结束之后，还开着的那一份**接着当临时的**，下一个**新开**的会话才认领持有者。
  *
  * ★ 分两处写必然漂：一处判 `occupied`、一处判 `sessions.has`；一处拷数据、一处不拷。
  *   而漂的后果是**静默的** —— `reattachOne` 那一侧漂了，重启之后 N 条会话全部落进
  *   同一个槽，只接回第一条，其余的在集群上继续跑而心跳没了（1800 秒后 scancel）。
  *
- * ★ `concurrent !== true` 的插件**恒返回 base**：它没有实例段（`identityOf` 不给
- *   第三段），所以"第二份"对它是**同一个身份**的两条会话 —— 那正是槽闸要拒的，
- *   交给槽闸拒（它的文案说得出是哪一个挡住了），而不是在这里悄悄给它一份假实例。
+ * ★ `concurrent !== true` 的插件**恒返回 base**：它不能同时开两份（第二份对它是**同一份
+ *   数据**上的两条会话），那正是槽闸要拒的 —— 交给槽闸拒（它的文案说得出是哪一个挡住了），
+ *   而不是在这里悄悄给它一份假数据。
  *
- * ★ 它**会造一个临时工作区**，所以只在"这次会话确实要起"的路径上调（槽闸之前那一步），
- *   不要拿它去问"会是什么" —— 那样每问一次就漏一个临时工作区。
+ * ★ 它**会造一份临时数据**，所以只在"这次会话确实要起"的路径上调（槽闸之前那一步），
+ *   不要拿它去问"会是什么" —— 那样每问一次就漏一份临时数据。
  *
- * @param {string} baseWorkspaceId 连接那个工作区（调用方已经保证这个插件要工作区）
+ * @param {object} baseSpace 引用表指着的那一份（调用方已经保证这个插件要工作区）
  * @param {object} plugin
- * @returns {string} 这次会话的实例键
+ * @returns {object} 这次会话用的那一份
  */
-function claimInstance(baseWorkspaceId, plugin) {
-  if (!pluginData.hasInstance(plugin)) return baseWorkspaceId;
-  if (!occupied(pluginData.slotOf(baseWorkspaceId))) return baseWorkspaceId;
+function claimSpace(baseSpace, plugin) {
+  if (!pluginData.canOpenSecond(plugin)) return baseSpace;
+  if (!occupied(pluginData.slotOf(baseSpace.id))) return baseSpace;
   const t = {
-    id: config.newWorkspaceId(),
-    name: '临时实例',
-    // ★ 端口要跳过**两个来源**：配置里那些工作区，以及本进程里已经活着的临时实例。
-    //   少了后者，两条临时实例会拿到同一个首选端口（见 `usedWorkspacePortsAll`）。
-    port: config.nextWorkspacePort(cfg, usedWorkspacePortsAll(null)),
+    id: config.newSpaceId(),
+    pluginId: baseSpace.pluginId,
+    group: baseSpace.group,
+    // ★ 端口要跳过**两个来源**：配置里那些数据，以及本进程里已经活着的临时那些。
+    //   少了后者，两份临时数据会拿到同一个首选端口（见 `usedSpacePortsAll`）。
+    ports: [config.nextSpacePort(cfg, usedSpacePortsAll(null))],
   };
-  tempWorkspaces.set(t.id, t);
-  return t.id;
+  tempSpaces.set(t.id, t);
+  return t;
 }
 
 /**
- * 把这一份**临时实例**的全部痕迹收掉：注册表里那一格，以及它名下的两个落点
- * （浏览器存储分区 + 各插件的插件数据目录）。
+ * 把这一份**临时数据**的全部痕迹收掉：注册表里那一格，以及它名下的两个落点
+ * （浏览器存储分区 + 插件的插件数据目录）。
  *
  * ★ **用 `Map.delete` 的返回值当"只回收一次"的旗子**，不在会话记录上再存一个
  *   `rec.reclaimed`：两份状态会漂，而漂的后果正是这个函数要防的那件事 ——
- *   多回收一次会把**另一个**已经复用了这个 id 的实例的数据删掉，少回收一次
+ *   多回收一次会把**另一个**已经复用了这个 id 的会话的数据删掉，少回收一次
  *   会漏一份永远没人清的目录。旗子和事实是同一个东西时，它不会漂。
  *
  * ★ 调用点的**次序是承重的**：必须排在 `win.destroySurface(slot)` **之后**。
  *   排在前面的话，`livePartitions()` 还看得见那块视图 ⇒ 分区那一半被静默跳过 ⇒
  *   **每一次回收都在盘上留一份垃圾**（而它看起来像"没清干净"，不像"顺序错了"）。
  *
- * ★ 不是临时实例时**什么都不做**（持久的工作区有它自己的回收路径：引用计数、或者
- *   用户删掉最后一条连接）。
+ * ★ 不是临时那些时**什么都不做**（持久的有它自己的回收路径：引用计数、
+ *   或者用户删掉最后一条连接）。
  */
-function releaseEphemeral(workspaceId) {
-  const t = tempWorkspaces.get(workspaceId);
-  if (!t || !tempWorkspaces.delete(workspaceId)) return;
-  clearWorkspaceStorage(workspaceId, t.name);
+function releaseEphemeral(spaceId) {
+  const t = tempSpaces.get(spaceId);
+  if (!t || !tempSpaces.delete(spaceId)) return;
+  clearSpaceStorage(t);
 }
 
 /**
- * 把持有者那份插件数据**拷一份**当临时实例的起点。
+ * 把持有者那份插件数据**拷一份**当临时那一份的起点。
  *
- * ★ 拷的是**那个工作区上这个插件那一份**（`identityOf(plugin, baseWorkspaceId)`），不是
+ * ★ 拷的是**那个工作区上这个插件那一份**（引用表指着的那一份），不是
  *   "持有者那条会话的" —— 持有者可能是**另一个**插件（同一个工作区上，code-server 与
  *   别人可以各有一份身份）。按会话去拷会拷到别人的数据。
  *
  * ★ **同步**（`fs.cpSync`），而且**调用点与认领之间不许有 `await`**：两条
- *   `app:start` 同时在飞时，若在"看那个工作区上有没有活会话"与 `sessions.set` 之间
- *   让出控制权，两条都会看到"没有持有者" ⇒ 都用连接那个工作区 ⇒ 后一条把前一条的
+ *   `app:start` 同时在飞时，若在"那份数据上有没有活会话"与 `sessions.set` 之间
+ *   让出控制权，两条都会看到"没有持有者" ⇒ 都用引用表那一份 ⇒ 后一条把前一条的
  *   记录**顶掉**，前一条的作业从此没有心跳、1800 秒后被 `scancel`，而界面上只有
  *   一条会话。异步拷贝会把那个窗口打开。
  *
@@ -1457,12 +1512,12 @@ function releaseEphemeral(workspaceId) {
  *   真拷不出来（权限、空间）时**照起会话** + 一条 warn：这一份本来就是临时的，
  *   因为读不到起点而拒绝开局，代价比"起点是空的"大得多。
  */
-function snapshotTempData(plugin, baseWorkspaceId, tempWorkspaceId) {
+function snapshotTempData(plugin, baseSpace, tempSpace) {
   const root = pluginDataRoot();
   if (!root) return;
-  const nameOf = (id) => pluginData.dataDirNameOf(pluginData.identityOf(plugin, id));
+  const nameOf = (s) => pluginData.dataDirNameOf(pluginData.identityOf(plugin, s));
   try {
-    fs.cpSync(path.join(root, nameOf(baseWorkspaceId)), path.join(root, nameOf(tempWorkspaceId)),
+    fs.cpSync(path.join(root, nameOf(baseSpace)), path.join(root, nameOf(tempSpace)),
       { recursive: true });
   } catch (e) {
     if (e && e.code === 'ENOENT') return;      // 没有起点：这一份本来就是空的
@@ -1474,20 +1529,24 @@ function snapshotTempData(plugin, baseWorkspaceId, tempWorkspaceId) {
 
 /**
  * **所有会改变引用计数的改动都必须走这里**，而不是直接 config.saveConfig。
- * 漏掉一处的后果是某个工作区永远不被回收 —— 它占着一个端口和一份浏览器存储。
+ * 漏掉一处的后果是某个工作区/某一份数据永远不被回收 —— 它占着一个端口和一份浏览器存储。
  *
  * 反过来，rememberHostKey / forgetHostKey 内部自己 saveConfig 是安全的：
  * 改主机密钥与引用计数无关。**那不是漏改。**
  *
- * ★ 而 `workspaces[].port` 已经**没有**写盘点 —— 它在工作区创建时定下来、此后只读
- *   （见 config.js 的 `nextWorkspacePort`），所以 `pruneWorkspaces` 之外没有任何东西
+ * ★ 而端口**没有**写盘点 —— 它在数据被创建时定下来、此后只读
+ *   （见 config.js 的 `nextSpacePort`），所以 `pruneSpaces` 之外没有任何东西
  *   需要为它操心。
  */
 function commitConfig() {
-  // ★ 工作区的**名字**要在 pruneWorkspaces 之前记下来：它一删，`cfg` 里就没有这个名字了，
-  //   而清理失败时那句话要说清是**哪一个**工作区（"某个工作区"对用户没有用）。
-  const names = new Map((cfg.workspaces || []).map((l) => [l.id, l.name]));
+  // ★★ **两层回收，次序是承重的**：工作区先走，它那张引用表跟着消失；然后才数
+  //    "还有没有工作区指着这一份数据"。
+  //   · 工作区那一层**只解引用、不碰数据** —— 它名下那些数据可能还被别的工作区指着。
+  //   · `keep` 是**此刻正被活会话拿着**的那些 —— 少了它，把一条**非活跃**连接切到
+  //     别的工作区会让旧工作区引用计数归零、被回收，而那条会话**还跑在**它指过的
+  //     那一份数据上（`clearSpaceStorage` 会把它脚下的存储抽掉）。
   const { removed } = config.pruneWorkspaces(cfg);
+  const { removed: goneSpaces } = config.pruneSpaces(cfg, liveSpaceIds());
   try {
     config.saveConfig(cfgDir, cfg);
   } catch (e) {
@@ -1495,12 +1554,30 @@ function commitConfig() {
     win.pushNotice('error',
       '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
   }
-  for (const id of removed) clearWorkspaceStorage(id, names.get(id));
+  for (const s of goneSpaces) clearSpaceStorage(s);
   return removed;
 }
 
 /**
- * 显式回收**一个指定的**工作区（连同它名下的数据）。
+ * 此刻**正被活会话拿着**的那些数据 id。
+ *
+ * ★★ **只有「还活着」的那些算数**（判据与 `liveDataDirs()` 同一个 `occupied`）。
+ *   已经走到终态的会话记录**还留在表里**（界面要显示"已结束"），而它名下的数据
+ *   从那一刻起是真的没人用了 —— 把它也算成持有者，那一份就**永远收不掉**。
+ *   ★ 而这一格**够得着**：用户结束最后一个会话、再删掉最后一条连接，
+ *   "删条目就删数据"那件事就不发生了，而界面上一切正常。
+ */
+function liveSpaceIds() {
+  const keep = new Set();
+  for (const rec of sessions.values()) {
+    if (!occupied(rec.slot)) continue;
+    if (rec.controller && rec.controller.spaceId) keep.add(rec.controller.spaceId);
+  }
+  return keep;
+}
+
+/**
+ * 显式回收**一个指定的**工作区（连同它名下没人再引用的数据）。
  *
  * ★ 它与 `commitConfig` 里那条**引用计数**回收不是同一件事，所以是两个入口：
  *   那一条数的是"还有几条连接指着它"，而这一条用在**数不出来**的场合 ——
@@ -1508,31 +1585,32 @@ function commitConfig() {
  *   `pruneWorkspaces` 那条「一条连接都没有时**不**回收」的守卫会把它拦下。
  *
  *   ★ 那条守卫守的是**从来没被任何连接指过**的兜底工作区（开发者模式、全新安装：
- *     回收掉它，下次开会话会造一个新的，id 一变 partition 就变，布局白重置一次）。
+ *     回收掉它，下次开会话会造一个新的，id 一变引用表就变，布局白重置一次）。
  *     而"用户亲手删掉了最后一条连接"是另一回事 —— 那个工作区已经没用了，而且那条
- *     连接**再建回来也是另一个工作区、另一份分区**，旧数据反正读不到。
+ *     连接**再建回来也是另一个工作区、另一批数据**，旧数据反正读不到。
  *     ★ 少了这一步，「删条目就删数据」在**只有一条连接**这个最常见的场合根本
  *     不发生 —— 而那正是用户提这件事的场景。
  */
-function reclaimWorkspace(workspaceId, workspaceName) {
+function reclaimWorkspace(workspaceId) {
   if (!workspaceId || !config.findWorkspace(cfg, workspaceId)) return false;
   cfg.workspaces = (cfg.workspaces || []).filter((l) => l.id !== workspaceId);
+  const { removed } = config.pruneSpaces(cfg, liveSpaceIds());
   try {
     config.saveConfig(cfgDir, cfg);
   } catch (e) {
     win.pushNotice('error',
       '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
   }
-  clearWorkspaceStorage(workspaceId, workspaceName);
+  for (const s of removed) clearSpaceStorage(s);
   return true;
 }
 
 /**
- * 回收一个工作区之后的卫生清理 —— **两个根一起清**：浏览器存储分区，以及各插件
- * 写在这个工作区名下那份数据目录（`ctx.dataDir()` 给的那个）。
+ * 回收**一份数据**之后的卫生清理 —— **两个根一起清**：浏览器存储分区，以及基座
+ * 给那个插件建的数据目录（`ctx.dataDir()` 给的那个）。
  *
- * **不是正确性必需** —— 名字永不复用（工作区 id 与 partition 都是），残留数据永远
- * 不会被新的工作区读到。是隐私：那个分区里躺着 code-server 的登录 cookie，那个目录里
+ * **不是正确性必需** —— 名字永不复用（数据 id 与 partition 都是），残留数据永远
+ * 不会被新的数据读到。是隐私：那个分区里躺着 code-server 的登录 cookie，那个目录里
  * 躺着插件自己的东西（sshd 的钥匙、别的插件的缓存）。
  *
  * ★ 有且只有一条致命前提：**绝不能对正被用着的那一份做**。那会把一条**正在跑**的
@@ -1540,71 +1618,58 @@ function reclaimWorkspace(workspaceId, workspaceName) {
  *   所以两半各有各的守卫：分区看 `livePartitions()`（窗口持有），数据目录看
  *   `liveDataDirs()`（会话持有）—— 两者的判据不同，理由见各自那一段。
  *
- * ★ **什么时候会发生**：只有 `commitConfig` 里 `pruneWorkspaces` 真的回收了工作区的时候
- *   （最后一条指着它的连接被删掉、或被切到别的工作区）。所以"删一条 ssh 条目就删掉它的
- *   用户数据"这件事**只在那是最后一个用某个工作区的连接时**成立 —— 还有别的连接指着
- *   那个工作区时，数据留着，因为下一会话还要用它。
+ * ★ **什么时候会发生**：`commitConfig` / `reclaimWorkspace` 里那一层真的回收了
+ *   数据的时候（最后一个指着它的工作区没了、或者用户删掉了最后一条连接）。
  *
- * 不 await：删一个工作区不该因为磁盘慢而卡住界面。
+ * ★ 判据**只认那一份数据自己**（`pluginId` / `group` / `id`），而不是"注册表里哪些
+ *   插件按工作区分" —— 后者要多一次注册表查询，而且**插件卸掉之后就问不出来了**。
+ *   消息面要不要动（有没有分区），由注册表回答（见下面那两处）。
  *
- * @param {string} workspaceId
- * @param {string} [workspaceName] 那个工作区的名字。只为了失败时说清是**哪一份** ——
- *   `pruneWorkspaces` 已经把它从配置里删掉了，所以这个名字由调用方在删之前记下来。
+ * 不 await：删一份数据不该因为磁盘慢而卡住界面。
+ *
+ * @param {object} space 那一份数据（`{id, pluginId, group, ports}`）
  */
-function clearWorkspaceStorage(workspaceId, workspaceName) {
-  const label = workspaceName ? `工作区「${workspaceName}」` : '那个工作区';
-  // 哪些插件的存储挂在这个工作区上：**有界面、而且声明了分实例**的那些。
-  //   · 没有界面 ⇒ 从来没有分区（ensureSurface 第一行就返回了）；
-  //   · 没声明分实例 ⇒ 只有一份存储，它不属于任何一个工作区 —— 跟着某个工作区一起清掉
-  //     就是把这个插件唯一的那份数据删了。判据只能看声明，不能看"哪个插件在跑"：
-  //     一个今天没在跑的插件，它的存储照样在这个工作区里。
-  //
-  // ★ 判据收在 pluginData.hasWorkspaceStorage 里：**"有界面 + 按工作区分"缺一不可**。
-  //   回收一个工作区时要清的是"属于这一个工作区"的那些存储；没声明分实例的插件只有一份，
-  //   它不属于任何工作区（对账那一侧用的是另一条 —— `hasSurface`）。
-  const partitions = registry.list()
-    .filter(pluginData.hasWorkspaceStorage)
-    .map((p) => {
-      const id = pluginData.identityOf(p, workspaceId);
-      // ★ 两个名字**都要**，它们不是一回事：分区名给 Electron，磁盘名给路径。
-      //   分区名里插件 id 那一段是**大写**的，而磁盘上的目录是**折叠过**的 ——
-      //   拿分区名去拼路径会静默落空（`force` 把 ENOENT 吞了，于是"删成功"而目录还在）。
-      return { partition: pluginData.partitionOf(id), disk: pluginData.diskNameOf(id) };
-    });
-  const root = partitionsRoot().root;
+function clearSpaceStorage(space) {
+  if (!space) return;
+  const plugin = registry.list().find((p) => p.id === space.pluginId) || null;
+  const label = plugin
+    ? `${plugin.displayName || plugin.name} 的一份数据`
+    : `插件 ${space.pluginId} 的一份数据`;
+  const identity = [space.pluginId, space.group, space.id];
 
-  for (const { partition, disk } of partitions) {
+  // ── ① 浏览器存储分区 ────────────────────────────────────────────────────
+  //
+  // ★ 只对**有界面**的插件做：没有界面就从来没有分区（`ensureSurface` 第一行就返回了），
+  //   而 `fromPartition` **会把目录建出来** —— 给一份没有分区的数据"清分区"，等于
+  //   在盘上凭空造一个没人认得的目录。
+  // ★ 插件不在注册表里（用户卸了它）时**也不做**：那时我们既不知道它有没有界面，
+  //   也不该替它造一个目录。盘上那一半由对账收（它会把那一份判成孤儿）。
+  if (plugin && pluginData.hasSurface(plugin)) {
+    const partition = pluginData.partitionOf(identity);
     // ★ 正被那块界面用着的分区**不能碰**（抽掉它会把用户当前那份数据连 cookie
     //   一起弄坏，而症状只是「页面莫名其妙坏了」）。要跳过的是**这一个**分区，
     //   不是整件事。
     //
-    //   ★★ 判据是"**任何一块**界面"（`livePartitions()`），不是"那一块"—— 只判
-    //     前台那一块的话，前台不是它的时候这一道就形同虚设，而那正是"回收一个工作区，
-    //     抽掉另一块正在跑的视图脚下的 localStorage"这条路径。
-    //
-    //   ★ 它是一道**正在生效**的防线，不是一个约定：完整的路径在
-    //     `app:deleteConnection` 那段注释里（切换活跃连接 → 删旧连接 → 工作区被回收）。
+    //   ★★ 判据是"**任何一块**界面"（`livePartitions()`），不是"那一块"。
     //
     //   ★ 跳过仍然是**静默**的，但那不等于"清理在瞒着用户"：这条路是"开关工作区 /
     //     删连接"带出来的，而那两步在动手之前都已经问过用户了（`would_discard`
     //     那个确认框）。**用户主动发起**的删除是另一条路（`app:deletePluginData`），
     //     那一条碰到同样的情形会**明确拒绝**并说清原因 —— 静默只在这一条路上关掉。
-    if (livePartitions().has(pluginData.foldAscii(partition))) continue;
-    clearPartitionStorage(partition, disk, root).then((r) => {
-      if (!r.ok) {
-        win.pushNotice('error',
-          `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
-      }
-    });
+    if (!livePartitions().has(pluginData.foldAscii(partition))) {
+      clearPartitionStorage(partition, pluginData.diskNameOf(identity), partitionsRoot().root)
+        .then((r) => {
+          if (!r.ok) {
+            win.pushNotice('error', `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
+          }
+        });
+    }
   }
 
-  // ── 插件写在磁盘上的那一份（`plugin-data/`）────────────────────────────────
+  // ── ② 插件写在磁盘上的那一份（`plugin-data/`）────────────────────────────
   //
-  // ★ 判据是 `hasInstance`，**不是** `hasWorkspaceStorage` —— 后者多一条"有界面"。
-  //   没有界面的插件照样可能在磁盘上留一份：它没有分区，但有数据目录。
-  // ★ 反过来：没声明分实例的插件**绝不能**跟着一个工作区被清 —— 它只有一份，不属于
-  //   任何一个工作区（sshd 的 `<ULID>@relay` 就是）。下面那行 filter 就是那道闸；
-  //   少了它，删一条连接会把 `~/.ssh/config` 那行 Include 指空。
+  // ★ 判据**不是**"有没有界面"：没有界面的插件照样可能在磁盘上留一份 ——
+  //   它没有分区，但有数据目录。
   // ★ 路径**现算**（与 `ctx.dataDir()` 同一个表达式），绝不从分区名拼 —— 分区名里
   //   插件 id 那一段是**大写**的，拼出来会静默落空，而 `force` 把 ENOENT 吞掉，
   //   于是"删成功"而目录还在。
@@ -1622,20 +1687,16 @@ function clearWorkspaceStorage(workspaceId, workspaceName) {
   try {
     const root = pluginDataRoot();
     if (root) {
-      const live = liveDataDirs();
-      for (const p of registry.list().filter(pluginData.hasInstance)) {
-        const name = pluginData.dataDirNameOf(pluginData.identityOf(p, workspaceId));
-        if (live.has(name)) continue;
+      const name = pluginData.dataDirNameOf(identity);
+      if (!liveDataDirs().has(name)) {
         const r = removeDirChecked(path.join(root, name));
         if (!r.ok) {
-          win.pushNotice('error', `${label}已经回收，但`
-            + `「${p.displayName || p.name}」那份磁盘数据没能清干净：${r.error}`);
+          win.pushNotice('error', `${label}已经回收，但那份磁盘数据没能清干净：${r.error}`);
         }
       }
     }
   } catch (e) {
-    win.pushNotice('error',
-      `${label}已经回收，但磁盘上那份数据没能清干净：${e.message}`);
+    win.pushNotice('error', `${label}已经回收，但磁盘上那份数据没能清干净：${e.message}`);
   }
 }
 
@@ -1648,16 +1709,20 @@ function clearWorkspaceStorage(workspaceId, workspaceName) {
  *   多看到一行"没人用的数据"，而那一行是我们自己造的。
  */
 function partitionsRoot() {
-  const workspaces = (cfg && cfg.workspaces) || [];
   const probePlugin = registry.list().find(pluginData.hasSurface);
   let probe = null;
   if (probePlugin) {
-    if (!pluginData.hasInstance(probePlugin)) {
+    if (!pluginData.needsSpace(probePlugin)) {
       probe = pluginData.partitionOf(pluginData.identityOf(probePlugin));
-    } else if (workspaces.length) {
-      probe = pluginData.partitionOf(pluginData.identityOf(probePlugin, workspaces[0].id));
+    } else {
+      // ★ 探针要用**一份真的数据**（`cfg.spaces` 里那一条），不是一个现编的 id ——
+      //   编一个的话，`fromPartition` 会把那个目录建出来，而它**不在"该有的"清单里**
+      //   ⇒ 用户下次打开客户端多看到一行"没人用的数据"，而那一行是我们自己造的。
+      //   ★ 一份数据都没有（全新安装、还没开过会话）⇒ **没有该有的身份可问**：
+      //   不探，用兜底那条路。
+      const s = (cfg && cfg.spaces || [])[0];
+      if (s) probe = pluginData.partitionOf(pluginData.identityOf(probePlugin, s));
     }
-    // 声明了分实例、而一个工作区都没有 ⇒ **没有该有的身份可问**：不探，用兜底那条路。
   }
   let fallbackRoot = null;
   try {
@@ -1695,7 +1760,7 @@ function pluginDataRoot() {
  *   界面进来之后单独拉一次（`app:pluginData`）。
  */
 function auditPluginData() {
-  const workspaces = (cfg && cfg.workspaces) || [];
+  const spaces = (cfg && cfg.spaces) || [];
   const pr = partitionsRoot();
   const dataRoot = pluginDataRoot();
   let names = null;
@@ -1731,7 +1796,7 @@ function auditPluginData() {
   }
   return {
     ...dataAudit.audit({
-      plugins: registry.list(), workspaces, connections: cfg.connections,
+      plugins: registry.list(), spaces, workspaces: cfg.workspaces, connections: cfg.connections,
       names, why, dataNames, dataWhy,
       // ★★ **现在正被活会话拿着的**（两个根都要）—— 少了它，一份正在被写的
       //    数据会被摆上一个删除按钮。★ 两个根各有各的持有者，所以**两句都要**：
@@ -1822,10 +1887,10 @@ function removeDirChecked(dir) {
  *   —— 那是常态，不是例外。**目录的消失是 `rmSync` 干的**：只清不删的话，那一行会
  *   永远留在对账的清单里，而用户会以为自己点了没反应。
  *
- * ★ 两条路都调它：对账里用户主动删那一行（`clearOneRow`），以及一个工作区被回收
- *   （`clearWorkspaceStorage`）。★ 但它**只管分区这一侧** —— 插件写在磁盘上的那份
- *   （`plugin-data/` 下）是**另一个根**，由 `clearWorkspaceStorage` 并列处理的另一段
- *   负责。两半的判据也不同：分区要 `hasWorkspaceStorage`，数据目录只要 `hasInstance`。
+ * ★ 两条路都调它：对账里用户主动删那一行（`clearOneRow`），以及一份数据被回收
+ *   （`clearSpaceStorage`）。★ 但它**只管分区这一侧** —— 插件写在磁盘上的那份
+ *   （`plugin-data/` 下）是**另一个根**，由 `clearSpaceStorage` 并列处理的另一段
+ *   负责。两半的判据也不同：分区要**有界面**，数据目录**不要**那一条。
  *
  * @param {string} partition 完整的 `persist:…`（给 Electron 的那个名字）
  * @param {string|null} diskName 磁盘上的目录名（**折叠过**的那一份）。给不出来就只清存储、不删目录。
@@ -1902,11 +1967,11 @@ function sessionViews() {
     slot: rec.slot,
     service: rec.plugin ? (rec.plugin.displayName || rec.plugin.name) : null,
     live: occupied(rec.slot),
-    // ★ 这一份是不是**临时实例**（第二份、数据是一份副本、会话结束就没了）。
-    //   判据只有**一个来源**：那张临时工作区注册表。**不要在会话记录上另存一个布尔**
+    // ★ 这一份是不是**临时数据**（第二份、数据是一份副本、会话结束就没了）。
+    //   判据只有**一个来源**：那张临时数据注册表。**不要在会话记录上另存一个布尔**
     //   —— 两份状态会漂，而漂的后果是"界面说它是临时的，而它其实已经变成持久的"
     //   或者反过来（用户据此以为自己的改动会留下，或者以为不会）。
-    temporary: Boolean(rec.controller && tempWorkspaces.has(rec.controller.workspaceId)),
+    temporary: Boolean(rec.controller && tempSpaces.has(rec.controller.spaceId)),
     snap: rec.controller ? rec.controller.snapshot() : null,
   }));
 }
@@ -2014,7 +2079,7 @@ function livePartitions() {
  *   · 分区是**窗口**持有的（构造 WebContentsView 时定下来），所以那里问的是
  *     "哪块视图显示着哪个分区"；
  *   · 插件数据目录**不由窗口持有** —— 它由 `ctx.dataDir()` 现算，唯一的主人是
- *     那条会话。拿前者当后者用会**静默失效**：一个没有界面的插件（有实例段却
+ *     那条会话。拿前者当后者用会**静默失效**：一个没有界面的插件（要工作区却
  *     没有 `surface`）在窗口里没有位置，于是它正在用的那份目录会被当成没人用的。
  *
  * ★★ **一条活会话要报**两个**落点：它**被交给过**的每一个，以及**现在**这一个。**
@@ -2029,7 +2094,7 @@ function livePartitions() {
  *   插件还没来得及调 `ctx.dataDir()` 时，新那个落点已经被交出去了吗？还没有 ——
  *   但它下一秒就会有，而**空目录对插件是一个有定义的状态**（它自己按需建）。
  *   ★ 这一条还有第二个作用：**没有实例段的那些插件**（`concurrent: false`，sshd
- *   就是）照样有一个目录（`<id>@<共享组>`）。按 `hasInstance` 把它们**整个跳过**的
+ *   就是）照样有一个目录（`<id>@<共享组>`）。按 `needsSpace` 把它们**整个跳过**的
  *   话，它们在"该有的"那张表里的那一格就只靠这个身份撑着 —— 于是插件一离开
  *   注册表（用户卸了那个版本、或者作者升了版本而新版改掉了共享组），**一条正在
  *   跑的会话脚下的那份数据就没任何东西护着了**。那不是"漏删"，那是把用户正在写
@@ -2058,11 +2123,11 @@ function liveDataDirs() {
     if (!p) continue;                    // 认不出的服务：它没有插件，也就没有目录
     // ① 事实：这条会话**被交给过**的那些落点（起点那一次，以及每一次 dataDir()）。
     for (const name of rec.claims || []) out.add(name);
-    // ② 推论：现在这一刻按同样的输入算出来的那一个。★ 拿不到实例键时**只跳过它**
+    // ② 推论：现在这一刻按同样的输入算出来的那一个。★ 拿不到那一份数据时**只跳过它**
     //    （① 已经在上面收过了）—— 那一条会话连 `ctx.dataDir()` 都调不通。
-    if (pluginData.hasInstance(p) && !rec.controller.workspaceId) continue;
-    out.add(pluginData.dataDirNameOf(
-      pluginData.identityOf(p, rec.controller.workspaceId || undefined)));
+    const space = findSpaceAll(rec.controller.spaceId);
+    if (pluginData.needsSpace(p) && !space) continue;
+    out.add(pluginData.dataDirNameOf(pluginData.identityOf(p, space)));
   }
   return out;
 }
@@ -2074,30 +2139,29 @@ function liveDataDirs() {
  *   —— 分开算的话，"护着的"与"交出去的"会漂开，而漂开的症状正是这条判据要防的
  *   那件事（护了个寂寞）。
  *
- * ★ 有实例段的插件**必须**拿得到实例（清单校验要求 `concurrent ⇒ layout`，而工作区
- *   就是那个实例）；真拿不到时**不记**，也不抛 —— 那一条会话连 `ctx.dataDir()` 都
- *   调不通，它的下场由那一次的抛去说，不该在会话刚建出来时就把它拦下。
+ * ★ 要工作区的插件**必须**拿得到那一份数据（`spaceFor` 保证工作区里它有一份）；
+ *   真拿不到时**不记**，也不抛 —— 那一条会话连 `ctx.dataDir()` 都调不通，
+ *   它的下场由那一次的抛去说，不该在会话刚建出来时就把它拦下。
  */
-function claimDataDir(rec, plugin, workspaceId) {
+function claimDataDir(rec, plugin, space) {
   if (!rec || !rec.claims || !plugin) return;
-  if (pluginData.hasInstance(plugin) && !workspaceId) return;
-  rec.claims.add(pluginData.dataDirNameOf(
-    pluginData.identityOf(plugin, workspaceId || undefined)));
+  if (pluginData.needsSpace(plugin) && !space) return;
+  rec.claims.add(pluginData.dataDirNameOf(pluginData.identityOf(plugin, space)));
 }
 
 /**
  * 这一次会话的端口排除集：**别人已经拿走的**都不许碰。
  *
- * ★ 「别人」不止别的工作区。只排别的**工作区**端口的话，中转站从中转基准端口起，
- *   而**没有任何东西**把它从工作区隧道的候选里排除掉。工作区隧道从工作区端口一路 +1 往上探（`tunnel.js` 的
- *   `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
+ * ★ 「别人」不止别的那几份数据。只排别的**数据**端口的话，中转站从中转基准端口起，
+ *   而**没有任何东西**把它从数据隧道的候选里排除掉。数据隧道从数据端口一路 +1 往上探
+ *   （`tunnel.js` 的 `PORT_SCAN_LIMIT`），撞上就把那条监听抢过来，而症状是"页面忽然打不开"，
  *   两边的日志里一个字都不提端口冲突。
  *
- * ★ 而"别的工作区"现在有**两个来源**（配置里的 + 临时实例那些），所以这里走
- *   `usedWorkspacePortsAll` 而不是 `config.usedWorkspacePorts` —— 见那个函数的注释。
+ * ★ 而"别人的"端口现在有**两个来源**（配置里的 + 临时那些），所以这里走
+ *   `usedSpacePortsAll` 而不是 `config.usedSpacePorts` —— 见那个函数的注释。
  */
 function excludedPortsFor(rec) {
-  const s = usedWorkspacePortsAll(rec.controller && rec.controller.workspaceId);
+  const s = usedSpacePortsAll(rec.controller && rec.controller.spaceId);
   for (const other of sessions.values()) {
     if (other === rec) continue;
     const p = other.controller && other.controller.snapshot().localPort;
@@ -2203,17 +2267,21 @@ async function startSession(resources, serviceKind) {
   const conn = config.activeConnection(cfg);
 
   // ★ 工作区是**按插件**的：跑在浏览器里的插件要一个（端口 = origin = 一份
-  //   编辑器布局），不跑浏览器的不给 —— 给它一个工作区只会凭空造出一个永远不会被
-  //   创建的存储分区，并让「运行中切工作区」去挪一个正在用的隧道端口。
+  //   编辑器布局），不跑浏览器的不给 —— 给它一个只会凭空造出一份永远不会被
+  //   创建的存储，并让「运行中切工作区」去挪一个正在用的隧道端口。
   const baseWorkspaceId = plugin.contributes.layout ? workspaceForSession(conn) : null;
+  // ★ 而工作区里还要有**这个插件的那一份数据** —— 端口、分区、数据目录全从它算。
+  //   `spaceForSession` 会在没有时就地建一份并落盘（`0.y` 不迁移，所以每一份都是新的）。
+  const baseSpace = baseWorkspaceId === null
+    ? null : spaceForSession(baseWorkspaceId, plugin);
 
-  // ★★ **认领**（见 `claimInstance`）：持有者身份只在这一刻确定。上面那一个是
-  //    "连接那个工作区"，而这一行回答的是"**这一次会话**用哪一个实例键" —— 那个工作区上
-  //    已经有活会话时，这一份是**临时实例**（一个只在内存里的新工作区、新端口、
+  // ★★ **认领**（见 `claimSpace`）：持有者身份只在这一刻确定。上面那一份是
+  //    "引用表指着的那一份"，而这一行回答的是"**这一次会话**用哪一份数据" —— 那一份上
+  //    已经有活会话时，这一份是**临时数据**（一个只在内存里的新 id、新端口、
   //    空的浏览器存储、持有者那份数据的快照）。
   //    ★ 它与下面那道槽闸的**次序是承重的**：认领先发生，于是"能多开"的插件拿到
-  //    一个新工作区、槽闸放行；"不能多开"的插件拿到原来那个工作区，槽闸照旧拒它并说出原因。
-  const workspaceId = baseWorkspaceId === null ? null : claimInstance(baseWorkspaceId, plugin);
+  //    一份新数据、槽闸放行；"不能多开"的插件拿到原来那一份，槽闸照旧拒它并说出原因。
+  const space = baseSpace === null ? null : claimSpace(baseSpace, plugin);
 
   // ── ★ 槽：一个活跃会话占一份「一个就够」的资源，同一个槽只能有一个 ──────────
   //
@@ -2221,14 +2289,15 @@ async function startSession(resources, serviceKind) {
   // 是哪一个挡住了**。只说一句「会话已在进行中」对用户毫无用处：它不说**是哪个**
   // 会话挡着，也不说该怎么办。而多开的代价更大：被拒绝的那条会静默地顶掉一条
   // 正在跑的。
-  const slot = pluginData.slotOf(workspaceId);
+  const slot = pluginData.slotOf(space && space.id);
   if (occupied(slot)) {
     const other = sessions.get(slot);
     const who = other.plugin ? `「${other.plugin.displayName || other.plugin.name}」` : '另一个会话';
-    win.pushNotice('error', workspaceId
-      ? `${who}正占着「${(config.findWorkspace(cfg, workspaceId) || {}).name || workspaceId}」`
-        + '这个工作区。一个工作区就是一个本地端口、一份浏览器存储，所以同一时刻'
-        + '只能有一个会话用它 —— 先结束那一个，或者到「工作区」那一栏换一个工作区。'
+    win.pushNotice('error', space
+      ? `${who}正用着「${workspaceNameOf(space.id) || '那个工作区'}」里`
+        + `「${plugin.displayName || plugin.name}」那一份数据。一份数据就是一个本地端口、`
+        + '一份浏览器存储，所以同一时刻只能有一个会话用它 —— 先结束那一个，'
+        + '或者到「工作区」那一栏给这条连接换一个工作区。'
       : `${who}正占着中转站的位置。不要工作区的会话共用同一份对外身份`
         + '（同一个 ssh 别名、同一个基准端口），所以同一时刻只能有一个 —— '
         + '先结束那一个。');
@@ -2242,7 +2311,7 @@ async function startSession(resources, serviceKind) {
   //   那些目录从那一刻起是真的没人用了。
   const rec = { slot, plugin, pluginWhy: null, controller: null,
                 connectionId: conn ? conn.id : null, claims: new Set() };
-  claimDataDir(rec, plugin, workspaceId);
+  claimDataDir(rec, plugin, space);
 
   // ★ RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
   //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会**复用**那个
@@ -2259,50 +2328,50 @@ async function startSession(resources, serviceKind) {
   //   顺带得到一个好性质：把一个插件从池里卸掉，正在跑的会话也完全不受影响 ——
   //   它手里已经攥着那个对象了。
   // ★★ **这一段（controller 的构造与 `sessions.set`）排在 `prepare()` **之前**，
-  //    是为了 `ctx.dataDir()`。** 那个能力从 `rec.controller.workspaceId` 现算实例段，
-  //    而 `prepare()` 若跑在 controller **构造之前** ⇒ 一个「能多开
-  //    （`concurrent: true`）**又**带 `prepare()`」的插件，一提交就撞上 `identityOf`
-  //    那个"没有给出实例"的抛 —— 也就是说**这种插件根本提交不出去**。
-  //    （sshd 把那个抛 catch 住了，而它是 `false`，所以这条路上从来没有人踩到过。）
+  //    是为了 `ctx.dataDir()`。** 那个能力从 `rec.controller.spaceId` 现算第三段，
+  //    而 `prepare()` 若跑在 controller **构造之前** ⇒ 一个「要工作区
+  //    （`layout: true`）**又**带 `prepare()`」的插件，一提交就撞上 `identityOf`
+  //    那个"没有给出那一份数据"的抛 —— 也就是说**这种插件根本提交不出去**。
+  //    （sshd 要工作区那一格是 `false`，所以这条路上从来没有人踩到过。）
   //
-  //    ★ `rec.controller.workspaceId` 是**唯一**的实例键来源，**不要在 `rec` 上另存
-  //      一个 `workspaceId`**：两份会在 `relisten` 改了 controller 那一份之后分家，
+  //    ★ `rec.controller.spaceId` 是**唯一**的第三段来源，**不要在 `rec` 上另存
+  //      一个**：两份会在 `relisten` 改了 controller 那一份之后分家，
   //      而 `liveDataDirs()` 走的是 controller 那个 —— 于是它看不见这条会话正用着
-  //      的目录，回收一个工作区时**把正在跑的数据删掉**。
+  //      的目录，回收一份数据时**把正在跑的数据删掉**。
 
   rec.controller = new SessionController({
       backend,
-      workspaceId,
-      // 没有工作区的插件：**实际**端口要交给插件自己去写进用户那份 ssh 配置
+      spaceId: space ? space.id : null,
+      // 不要工作区的插件：**实际**端口要交给插件自己去写进用户那份 ssh 配置
       // （见 plugins/sshd/client/sshconfig.js）。这里只需要「重新渲染一次」，插件
       // 按当前端口重写它那份配置；端口和主机公钥都没变时它会自己跳过
       // （那正是 ctx.once() 的用处）。
       //
-      // ★ 有工作区的会话**没有**对应的回调 —— 端口是工作区的只读属性，顺移只影响
+      // ★ 要工作区的会话**没有**对应的回调 —— 端口是那份数据的只读属性，顺移只影响
       //   这一次会话，实际值在快照里。见 session.js 的 `_announcePort`。
       onRelayPort: () => onSessionChange(slot),
-      // 端口顺移时必须跳过别的工作区占着的端口，否则两个工作区会声称同一个端口，
-      // 每次启动谁先绑谁赢，工作区在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
+      // 端口顺移时必须跳过别的那几份数据占着的端口，否则两份会声称同一个端口，
+      // 每次启动谁先绑谁赢，会话在两个 origin 之间反复横跳。排除集里要**摘掉自己**，
       // 不然自己那个端口会被当成「别人的」而永远绑不上。
       //
-      // 没有工作区的插件 workspaceId 是 null，于是这里排除掉**全部**工作区端口 ——
-      // 正是要的：它绝不能落到某个工作区的端口上。
-      // ★ 多开之后「别人」不止别的工作区，见 `excludedPortsFor`。
+      // 不要工作区的插件 spaceId 是 null，于是这里排除掉**全部**数据端口 ——
+      // 正是要的：它绝不能落到某一份数据的端口上。
+      // ★ 多开之后「别人」不止别的那几份，见 `excludedPortsFor`。
       getExcludedPorts: () => excludedPortsFor(rec),
   });
   rec.controller.on('change', () => onSessionChange(slot));
   rec.controller.on('retarget', () => onSessionChange(slot));
   sessions.set(slot, rec);
 
-  // ★★ **临时实例：开局把持有者那份插件数据拷一份当起点。**
+  // ★★ **临时那一份：开局把持有者那份插件数据拷一份当起点。**
   //    同步（见 `snapshotTempData`），而且**必须在 `sessions.set` 与 `prepare`
   //    之间不留 `await`** —— 这一段就是那条"两条 `app:start` 同时在飞"的竞态窗口，
   //    让出控制权会让后一条顶掉前一条的记录（前一条的作业从此没有心跳）。
   //
-  //    判据是"认领给的工作区与连接那个工作区不是同一个"，而**不是**问 `tempWorkspaces`：
-  //    两者今天等价，但将来多一个临时工作区的来源时，这一行仍然说得对。
-  if (baseWorkspaceId && workspaceId !== baseWorkspaceId) {
-    snapshotTempData(plugin, baseWorkspaceId, workspaceId);
+  //    判据是"认领给的与引用表指着的不是同一份"，而**不是**问 `tempSpaces`：
+  //    两者今天等价，但将来多一个临时来源时，这一行仍然说得对。
+  if (baseSpace && space.id !== baseSpace.id) {
+    snapshotTempData(plugin, baseSpace, space);
   }
 
   // 插件的提交前准备（sshd 要在这里备好那把一次性密钥：没有它守护进程会拒绝
@@ -2312,7 +2381,7 @@ async function startSession(resources, serviceKind) {
   //   用户没要求过的副作用。
   //
   // ★ 失败时**要把刚才那两条记录撤掉**：槽里留着一条假记录 ⇒ 那个槽再也开不了
-  //   新的（用户看到的是"某某正占着这个工作区"，而那个会话根本不存在）；临时实例
+  //   新的（用户看到的是"某某正占着那份数据"，而那个会话根本不存在）；临时那份
   //   留着 ⇒ 注册表里多一格、数据目录永远没人回收（面板上那一行还删不掉 ——
   //   `held` 会护着它）。
   let sshPubkey = null;
@@ -2320,24 +2389,24 @@ async function startSession(resources, serviceKind) {
     const pre = plugin.prepare(pluginContext(rec));
     if (!pre || !pre.ok) {
       sessions.delete(slot);
-      releaseEphemeral(workspaceId);
+      releaseEphemeral(space && space.id);
       win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
       return null;
     }
     sshPubkey = pre.sshPubkey || null;
   }
 
-  // 本地端口**不是插件的事**（插件没有取端口的钩子）：有工作区的会话用工作区自己
-  // 那个端口（它就是 origin），没有工作区的用中转基准端口。
+  // 本地端口**不是插件的事**（插件没有取端口的钩子）：要工作区的会话用那份数据
+  // 自己的端口（它就是 origin），不要工作区的用中转基准端口。
   //
-  // ★ **必须判 null**：没有工作区的会话拿的是 `RELAY_PORT_BASE`，而它绝不能落到
-  //   某个工作区的端口上 —— 那条路径**不报错**，症状是"浏览器那一块打到 ssh 端口
+  // ★ **必须判 null**：不要工作区的会话拿的是 `RELAY_PORT_BASE`，而它绝不能落到
+  //   某一份数据的端口上 —— 那条路径**不报错**，症状是"浏览器那一块打到 ssh 端口
   //   上，页面打不开"。
-  //   ★ 而 `workspacePortOf` 那条路**连回落都没有**（找不到就抛）：临时实例不在配置里，
-  //     一条会回落到基址（18080）的实现会让每一个临时实例都从 18080 起扫，也就是
+  //   ★ 而 `spacePortOf` 那条路**连回落都没有**（找不到就抛）：临时那份不在配置里，
+  //     一条会回落到基址（18080）的实现会让每一份临时的都从 18080 起扫，也就是
   //     **持有者自己那个端口**。
-  const preferredPort = workspaceId
-    ? workspacePortOf(workspaceId)
+  const preferredPort = space
+    ? spacePortOf(space.id)
     : config.RELAY_PORT_BASE;
   const snap = await rec.controller.start(resources, {
     preferredPort,
@@ -2496,16 +2565,17 @@ async function _renderSession(slot) {
   //   全都正常，只有用户的编辑器没了，而出路（重新加载）正压在那块页面底下。
   if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
     win.destroySurface(slot);
-    // ★★ **临时实例到这里就没了**（这一条会话结束了，那份副本的使命也就完了）。
+    // ★★ **临时那一份到这里就没了**（这一条会话结束了，那份副本的使命也就完了）。
     //
     //    ★ **必须排在 `destroySurface` 之后**，次序是承重的：那个调用会销毁这一块
-    //      视图，而 `releaseEphemeral` 里 `clearWorkspaceStorage` 拿 `livePartitions()`
+    //      视图，而 `releaseEphemeral` 里 `clearSpaceStorage` 拿 `livePartitions()`
     //      当"正被用着"的守卫。排在前面的话那块视图还在 ⇒ **分区那一半被静默跳过**
     //      ⇒ 每一次回收都在盘上留一份垃圾，而它看起来像"没清干净"，不像"顺序错了"。
     //
-    //    ★ 传的是 `rec.controller.workspaceId`（**这一次会话的**实例键），不是"当前
-    //      活跃连接"那个工作区 —— 多开时后者是别人的，传错会把别人那份正在跑的数据清掉。
-    releaseEphemeral(rec.controller.workspaceId);
+    //    ★ 传的是 `rec.controller.spaceId`（**这一次会话的**那一份），不是"当前
+    //      活跃连接那个工作区指着的那一份" —— 多开时后者是别人的，传错会把别人那份
+    //      正在跑的数据清掉。
+    releaseEphemeral(rec.controller.spaceId);
   }
 
   // ── 唯一的服务分派点 ──
@@ -2762,19 +2832,18 @@ async function ensureSurface(rec, snap) {
   const surface = plugin.contributes.surface;
   if (!surface) return;
 
-  // 分区：**由插件自己声明的身份长出来**（见 plugin-data.js）。声明了分实例的插件
-  // 按工作区分（同一个工作区的若干条连接共用一份 localStorage，那正是工作区存在的
-  // 理由）；没声明的只有一份 —— 一个网页应用自己的状态该跟它自己走，跟会话走会在
-  // 每次重开时重置。
+  // 分区：**由那份数据自己长出来**（见 plugin-data.js）。一分数据一份分区 ——
+  // 一个工作区里两个不同的插件各有各的一份（所以它们能同时跑），而"这几条连接算
+  // 同一个"由用户那张引用表说了算。
   //
-  // ★ 分区名由**插件声明的身份**长出来（见 plugin-data.js），不是一个硬编码的
-  //   三元表达式：跨版本共享与否、按不按实例分，都该由作者说，而"加一个作者写了
-  //   却没人读的字段"正是这个仓库一路在删的形状。
+  // ★ 分区名由**那份数据的身份**长出来（见 plugin-data.js），不是一个硬编码的
+  //   三元表达式：跨版本共享与否、第三段是什么，都该由作者与用户说，而"加一个
+  //   作者写了却没人读的字段"正是这个仓库一路在删的形状。
   const partition = pluginData.partitionOf(
-    pluginData.identityOf(plugin, snap.workspaceId));
+    pluginData.identityOf(plugin, findSpaceAll(snap.spaceId)));
 
-  // 换工作区 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局重置了）必须
-  // 说出来，否则他只会觉得"我的设置莫名其妙没了"。
+  // 换工作区 = 换那一份数据 = 换分区 = 销毁重建。用户看得见的那件事（编辑器布局
+  // 重置了）必须说出来，否则他只会觉得"我的设置莫名其妙没了"。
   //
   // ★ 判据是**这一个槽**自己的分区，不是"窗口里那一块"的分区 —— 后者在多开下
   //   会拿到**别人的**分区：该重建的判定成"没变"（页面继续跑在旧分区里，而界面上
@@ -2846,9 +2915,9 @@ function pluginContext(rec) {
      *   ssh 配置。唯一的例外是**重连接回来的**会话（它不知道自己属于谁，只能取活跃
      *   连接那个），见 `reattachOne` 与账本 S26。
      *
-     * ★ 只给"一条连接是什么"那几个字段。**工作区的事实不在这里** —— 那是另一条轴，
-     *   而快照里已经有了（`snap.workspaceId`）。在这里再放一份等于把两条轴又焊回一个
-     *   对象上。
+     * ★ 只给"一条连接是什么"那几个字段。**工作区与数据的事实不在这里** —— 那是
+     *   另一条轴，而快照里已经有了（`snap.spaceId`）。在这里再放一份等于把几条轴
+     *   又焊回一个对象上。
      */
     connection: () => {
       const c = (cfg.connections || []).find((x) => x.id === rec.connectionId);
@@ -2878,22 +2947,23 @@ function pluginContext(rec) {
      * 写它的那次写盘建出来（`atomic-write.js` 的 `mkdir` 默认开着）。
      *
      * ★ 与 `home()` 的分工：那个是"用户的家目录"（所有插件共用），这个是"你的落点"
-     *   （按身份分：插件 id / 共享组 / 可选实例）。★ 插件要存自己的东西，用这个 ——
-     *   自己发明一个位置会让基座既不知道它在哪儿、也没法把它列给用户看。
+     *   （按身份分：插件 id / 共享组 / 数据空间）。
+     *   ★ 插件要存自己的东西，用这个 —— 自己发明一个位置会让基座既不知道它在哪儿、
+     *   也没法把它列给用户看。
      *
      * ★ 路径由**身份**算出来（`plugin-data.js` 的第三个落点），所以它和对账看到的是
      *   同一个目录 —— 那是"用户看得见、删得掉"的前提。
      *
-     * ★ **没有实例参数了** —— 实例由框架从**这一条会话**填（今天就是它那个工作区）。
+     * ★ **没有数据空间参数了** —— 它由框架从**这一条会话**填（今天就是它那一份数据）。
      *   与 `login()` 同一条理由：插件没法把一个它不传的参数传错。
      *
-     *   让插件自己传实例（"声明了分实例却不传就抛"）守的是一条真实的不变量，
-     *   但它**够不着**：插件要拿实例只能从 `snap.workspaceId` 里拿，而 `prepare()`
-     *   根本没有 `snap` —— 一个能多开、又要在提交前写数据的插件，除了猜没有别的
+     *   让插件自己传（"声明了要工作区却不传就抛"）守的是一条真实的不变量，
+     *   但它**够不着**：插件要拿那一份只能从 `snap.spaceId` 里拿，而 `prepare()`
+     *   根本没有 `snap` —— 一个要工作区、又要在提交前写数据的插件，除了猜没有别的
      *   办法。由框架填之后，那个抛只剩最后一道（`identityOf` 自己那道，给
      *   `ensureSurface` / 对账那些走参数化的调用点用）。
-     *   ★ 而框架填的那一半**有一个前提**：`rec.controller` 得先构造出来（实例读的是
-     *   它那个 `workspaceId`）—— 见 `startSession` 里那段次序说明。
+     *   ★ 而框架填的那一半**有一个前提**：`rec.controller` 得先构造出来（读的是
+     *   它那个 `spaceId`）—— 见 `startSession` 里那段次序说明。
      *
      * ★ 算不出根来的时候**抛**，不返回 null：一个 null 会让插件拼出一个**相对路径**
      *   （落进进程的 cwd 里），那比抛严重得多。
@@ -2903,10 +2973,10 @@ function pluginContext(rec) {
       if (!root) {
         throw new Error('还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。');
       }
-      const name = pluginData.dataDirNameOf(
-        pluginData.identityOf(plugin, rec.controller && rec.controller.workspaceId));
+      const name = pluginData.dataDirNameOf(pluginData.identityOf(
+        plugin, findSpaceAll(rec.controller && rec.controller.spaceId)));
       // ★★ **认领的第二个写点**：目录是在这里交出去的，所以"这条会话用过哪些落点"
-      //    必须在这里长。★ 少了这一行，`relisten` 把会话挪到另一个工作区之后**新**那个
+      //    必须在这里长。★ 少了这一行，`relisten` 把会话挪到另一份数据之后**新**那个
       //    目录就没人护 —— 而它正是插件马上要写的那一份（见 `liveDataDirs` 那段）。
       //    ★ 排在 `path.join` 之前没有讲究：这一行**不会**抛（上面那个表达式已经
       //    算出来了），抛的是 `identityOf` 自己 —— 而它抛的时候这里根本走不到。
@@ -3021,15 +3091,15 @@ async function stopAllSessions() {
     if (c.suspended) continue;
     out.push({ slot: rec.slot, sessionId: c.sessionId, res: await c.stop() });
   }
-  // ★★ 临时实例的**后备回收**。正常路径是 `_renderSession` 里那一处（会话走到终态
+  // ★★ 临时那一份的**后备回收**。正常路径是 `_renderSession` 里那一处（会话走到终态
   //    时回收），但那一条依赖事件循环继续跑 —— 而 `before-quit` 那条路紧接着就是
   //    `app.exit(0)`，等不到。
   //
   //    ★ 与 `_renderSession` 那一处**不是重复**：`releaseEphemeral` 用 `Map.delete`
   //      当旗子，第二次调用是 no-op（见它的注释）。这里多一次调用换的是"进程退出
   //      这条路上也一定收干净"，而代价是零。
-  //    ★ 遍历一份**拷贝**：`releaseEphemeral` 会改 `tempWorkspaces`。
-  for (const id of [...tempWorkspaces.keys()]) releaseEphemeral(id);
+  //    ★ 遍历一份**拷贝**：`releaseEphemeral` 会改 `tempSpaces`。
+  for (const id of [...tempSpaces.keys()]) releaseEphemeral(id);
   return out;
 }
 
@@ -3264,7 +3334,7 @@ async function reattachOne(s) {
   //   服务只解释、不动作（绝不建 WebView、绝不 POST 口令）。
   //
   // 不跑浏览器的插件不走工作区（见 startSession）。这里**不需要**有连接也能接上，
-  // 因为它的端口不是工作区端口，没有「该用哪个工作区」这个问题。
+  // 因为它的端口不是数据端口，没有「该用哪一份数据」这个问题。
   // ★ **重启之后，"这条会话是哪条连接的"已经不知道了** —— 守护进程的会话视图里
   //   没有这个字段（它只知道是谁提交的、用的哪个插件版本）。唯一能用的是**当前
   //   活跃连接**，于是接回来的会话拿到的可能就是"不是它自己的"那条。
@@ -3272,32 +3342,36 @@ async function reattachOne(s) {
   //
   //   ★ 走的是 `conn.workspaceId` 而不是 `workspaceForSession(conn)`：接回一条会话是
   //     **只读**的一步，不该顺手造出一个工作区来（那条路只在开会话时走）。
-  //     ★ 而**认领**（下面那一行）会造一个**临时**工作区 —— 那不是"顺手造一个持久的工作区"，
-  //       它是这一次接管**必须要有的**实例键，见那段说明。
+  //     ★ 而**认领**（下面那一行）会造一份**临时**数据 —— 那不是"顺手造一份持久的"，
+  //       它是这一次接管**必须要有的**第三段，见那段说明。
+  //   ★ 而**不建数据空间**：`spaceForSession` 会落盘，而重连是一条只读的路。
+  //     引用表里没有那一格时这一条接不上（下面 `return`）—— 那是对的：一份数据
+  //     都没建过，说明这台机器上从来没起过这个插件的会话。
   const conn = config.activeConnection(cfg);
-  const baseWorkspaceId = (plugin && plugin.contributes.layout && conn)
-    ? conn.workspaceId : null;
-  if (plugin && plugin.contributes.layout && !baseWorkspaceId) return;   // 没配置连接，接不上
+  const baseSpace = (plugin && plugin.contributes.layout && conn)
+    ? config.findSpace(cfg, ((config.findWorkspace(cfg, conn.workspaceId) || {}).refs || {})[plugin.id])
+    : null;
+  if (plugin && plugin.contributes.layout && !baseSpace) return;   // 没配置连接，接不上
 
-  // ★★ **重连必须走同一个 `claimInstance`**（不是"照抄 startSession 那两行"）。
+  // ★★ **重连必须走同一个 `claimSpace`**（不是"照抄 startSession 那两行"）。
   //
-  //    临时工作区只存在于**上一个进程的内存**里 —— 配置里没有它。所以重启之后 N 条
-  //    code-server 会话全都算成"连接那个工作区" ⇒ 全部落进同一个槽 ⇒ **只接回第一条**，
+  //    临时那一份只存在于**上一个进程的内存**里 —— 配置里没有它。所以重启之后 N 条
+  //    code-server 会话全都算成"引用表指着的那一份" ⇒ 全部落进同一个槽 ⇒ **只接回第一条**，
   //    其余的在控制节点上继续跑、心跳没了 ⇒ 300 秒 `suspect`、1800 秒 **`scancel`**。
   //    而那条提示语还是错的（"想留住它就先用 `slurm` 把它的作业停掉" —— 那是
-  //    **我们自己的**会话）。走到认领之后：第一条认领连接那个工作区，其余各拿一个临时实例。
+  //    **我们自己的**会话）。走到认领之后：第一条认领那一份，其余各拿一份临时的。
   //
-  //    ★ 代价（账本 S26）：接回来的临时实例拿到的是**新**的临时 id ⇒ 新的分区，
+  //    ★ 代价（账本 S26）：接回来的临时那份拿到的是**新**的 id ⇒ 新的分区，
   //      重启前那一份 localStorage 变成孤儿（面板上看得见、删得掉）。这是"临时"的
   //      应有之义 —— 但界面上要说得出来（`temporary` 那一格就是为它留的）。
-  const workspaceId = baseWorkspaceId ? claimInstance(baseWorkspaceId, plugin) : null;
+  const space = baseSpace ? claimSpace(baseSpace, plugin) : null;
 
-  // ★ 临时实例的起点数据：与 `startSession` **同一个函数、同一句判据**（"认领给的工作区
-  //   不是连接那个工作区"）。★ 重连接回来的临时实例也必须是"持有者那份的快照" ——
+  // ★ 临时那份的起点数据：与 `startSession` **同一个函数、同一句判据**（"认领给的不是
+  //   引用表指着的那一份"）。★ 重连接回来的临时那份也必须是"持有者那份的快照" ——
   //   少了这一句，同一个插件在"开局"与"重启接回"两条路上会得到两种第二份
   //   （一种有起点、一种空着），而用户看不出为什么。
-  if (baseWorkspaceId && workspaceId !== baseWorkspaceId) {
-    snapshotTempData(plugin, baseWorkspaceId, workspaceId);
+  if (baseSpace && space.id !== baseSpace.id) {
+    snapshotTempData(plugin, baseSpace, space);
   }
 
   // ★ 还在排队（reserved/submitted）的会话**也必须接上**，哪怕它还没有 tunnel_target。
@@ -3320,14 +3394,14 @@ async function reattachOne(s) {
   //   它们还留在表里（界面要显示"已结束"），而它们**不占着槽** ——
   //   按 `sessions.has` 去判，一条已经死掉的记录会挡住一条真会话的重连。
   //   ★ 走到这里还没被拒的，只有"`concurrent: false` 的插件、而那个槽上真的
-  //     有一条活会话"（能多开的那些已经在上面的认领里各拿了一个新工作区）。
-  const slot = pluginData.slotOf(workspaceId);
+  //     有一条活会话"（能多开的那些已经在上面的认领里各拿了一份新数据）。
+  const slot = pluginData.slotOf(space && space.id);
   if (occupied(slot)) {
     const held = sessions.get(slot);
     win.pushNotice('warn',
       `控制节点上还有一个会话（作业 ${s.job_id}）与已经接上的`
       + `「${(held.plugin && (held.plugin.displayName || held.plugin.name)) || '某一条'}」`
-      + '占着同一个位置，没法同时接上。它仍然在跑，会在超时后被控制节点回收 —— '
+      + '占着同一份数据，没法同时接上。它仍然在跑，会在超时后被控制节点回收 —— '
       + '想留住它就先用 `slurm` 把它的作业停掉。');
     return;
   }
@@ -3337,10 +3411,10 @@ async function reattachOne(s) {
   // ★ 接上来的那一条也要认领，理由与 `startSession` 那一处逐字相同：它的插件进程
   //   是我们**重启之前**起的，而它正在写的那份目录，按当前输入可能已经算不出名字
   //   （`tryReattach` 走的正是"这一次启动"—— 上一次运行里的插件版本可能已经不在了）。
-  claimDataDir(rec, plugin, workspaceId);
+  claimDataDir(rec, plugin, space);
   rec.controller = new SessionController({
-    backend, workspaceId,
-    // 同上（startSession 那处）：只有**没有工作区**的会话要报实际端口。
+    backend, spaceId: space ? space.id : null,
+    // 同上（startSession 那处）：只有**不要工作区**的会话要报实际端口。
     onRelayPort: () => onSessionChange(slot),
     getExcludedPorts: () => excludedPortsFor(rec),
     // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
@@ -3356,10 +3430,10 @@ async function reattachOne(s) {
   // 认不出的插件用**非工作区**的基准端口：它的端口绝不能落进任何工作区（否则会与
   // 那个工作区的 origin 撞上），而它自己听在哪个端口我们并不知道。有工作区的会话用它自己
   // 那个端口 —— 判据是 workspaceId 有没有（框架的事实），不是"是哪个插件"。
-  // ★ 与 `startSession` 同一条：走 `workspacePortOf`（**没有回落**），临时实例不在
+  // ★ 与 `startSession` 同一条：走 `spacePortOf`（**没有回落**），临时那份不在
   //   配置里，回落到基址的实现会让它从 18080 起扫、撞上持有者那个端口。
-  const preferredPort = workspaceId
-    ? workspacePortOf(workspaceId)
+  const preferredPort = space
+    ? spacePortOf(space.id)
     : config.RELAY_PORT_BASE;
   if (queued) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
@@ -3463,29 +3537,25 @@ function registerIpc() {
   });
 
   send('app:deleteConnection', async (id) => {
-    // ★ 它的工作区上有会话在跑，就不许删。删掉的后果不是「少一条配置」：那个工作区会
-    //   引用计数归零 → 被回收 → 浏览器存储被清 —— 而那块页面正在用那份存储。
+    // ★ 它的工作区里有会话在跑，就不许删。删掉的后果不是「少一条配置」：那个工作区
+    //   会被回收 → 它指着的那些数据引用归零 → 浏览器存储被清 —— 而那块页面正在用
+    //   那份存储。
     //   界面已经禁用了按钮，这里只是把它变成**权威**。
     //
-    // ★★ 判据是「**那个工作区**上有没有会话」，不是「要删的是不是活跃连接」。
+    // ★★ 判据是「**那个工作区**里有没有会话」，不是「要删的是不是活跃连接」。
     //    后者是一个**已经错了**的判据，而多开把它变成一个**可达的删活数据**路径：
-    //     ① 连接 C1（工作区 l1）活跃，起一条会话落在 l1；
-    //     ② 把活跃连接切成 C2（工作区 l2）—— 这一步**不动引用计数**，C1 仍指着 l1；
-    //     ③ 删 C1 ⇒ l1 计数归零 ⇒ 回收 ⇒ 抽掉会话脚下那个分区。
-    //    唯一挡着它的是 `clearWorkspaceStorage` 里"正被那块界面用着就不清"，而多开
+    //     ① 连接 C1（工作区 w1）活跃，起一条会话落在 w1 的某一份数据上；
+    //     ② 把活跃连接切成 C2（工作区 w2）—— 这一步**不动引用计数**，C1 仍指着 w1；
+    //     ③ 删 C1 ⇒ w1 回收 ⇒ 它那份数据引用归零 ⇒ 回收 ⇒ 抽掉会话脚下那个分区。
+    //    唯一挡着它的是 `clearSpaceStorage` 里"正被那块界面用着就不清"，而多开
     //    之后那一句只能看到**前台**那一块 —— 前台不是它的时候形同虚设。
     const conn = (cfg.connections || []).find((c) => c.id === id);
-    // 工作区的**名字**要在 commitConfig 之前记下来 —— 一回收，`cfg` 里就没有这个名字了，
-    // 而清理失败时那句话要说清是**哪一个**工作区（"某个工作区"对用户没有用）。
-    const goneWorkspace = conn && conn.workspaceId
-      ? config.findWorkspace(cfg, conn.workspaceId) : null;
     const held = conn && conn.workspaceId
-      && [...sessions.values()].find((r) => occupied(r.slot)
-        && r.controller && r.controller.workspaceId === conn.workspaceId);
+      && liveSessionOnWorkspace(conn.workspaceId);
     if (held) {
       return {
         ok: false, code: 'in_use',
-        error: '这条连接的工作区上还有会话在跑，请先结束它再删除这条连接。',
+        error: '这条连接的工作区里还有会话在跑，请先结束它再删除这条连接。',
       };
     }
 
@@ -3494,14 +3564,14 @@ function registerIpc() {
       cfg.activeConnectionId = cfg.connections[0] ? cfg.connections[0].id : null;
     }
     // commitConfig 而不是 saveConfig：删掉最后一条指向它的连接之后，
-    // 它的工作区引用计数归零，必须被回收（并清掉它的浏览器存储）。
+    // 它的工作区引用计数归零，必须被回收（连带它名下没人再引用的数据）。
     commitConfig();
     // ★ 而**删掉的可能是最后一条连接**：那一步 `pruneWorkspaces` 会跳过（它的守卫是给
     //   "从来没被任何连接指过的兜底工作区"用的，见 `reclaimWorkspace` 的注释），
     //   所以这里要显式回收 —— 否则"删条目就删数据"在最常见的场合（只配了一条连接）
     //   根本不发生。
     if (!cfg.connections.length && conn && conn.workspaceId) {
-      reclaimWorkspace(conn.workspaceId, (goneWorkspace || {}).name);
+      reclaimWorkspace(conn.workspaceId);
     }
     // 这条连接的密钥跟着走 —— 留着它既无用，又会在界面上留下一条看不见的凭据。
     // 两处都要清：落盘的那份，以及「这台机器没有凭据库」时留在内存里的那份。
@@ -3534,9 +3604,12 @@ function registerIpc() {
    * 所以不提供独立的「新建工作区」通道。
    *
    * ★ 步骤顺序是刻意钉死的：**先做会失败的那一步（换端口），成功了才动配置**。
-   *   反过来的话，一旦换端口失败，配置说「在 B 工作区」而窗口还跑在 A 工作区的 origin 上，
-   *   而 A 工作区的引用计数已经是 0 → 会被回收 → 浏览器存储被清 ——
+   *   反过来的话，一旦换端口失败，配置说「在 B 工作区」而窗口还跑在 A 那份数据的
+   *   origin 上，而 A 的引用计数已经是 0 → 会被回收 → 浏览器存储被清 ——
    *   **把用户当前的页面连同登录 cookie 一起抽掉**。这是整块改动里最危险的路径。
+   *
+   * ★ 而"这个插件在新工作区里用哪一份数据"由 `spaceFor` 说了算（没有就地建一份）：
+   *   那正是窗口要搬过去的那一份，也是要落盘的那一格。
    */
   send('app:setConnectionWorkspace', async (payload = {}) => {
     const { connectionId, workspaceId, confirmDiscard } = payload;
@@ -3549,7 +3622,7 @@ function registerIpc() {
       target = {
         id: config.newWorkspaceId(),
         name: config.nextWorkspaceName(cfg),
-        port: config.nextWorkspacePort(cfg, usedWorkspacePortsAll(null)),
+        refs: {},
       };
     }
     if (target.id === conn.workspaceId) {
@@ -3569,27 +3642,33 @@ function registerIpc() {
     }
 
     const existed = Boolean(config.findWorkspace(cfg, target.id));
-    if (!existed) cfg.workspaces = [...cfg.workspaces, target];   // 只为算排除集，还没落盘
+    if (!existed) cfg.workspaces = [...cfg.workspaces, target];   // 还没落盘：下面的 spaceFor 要它
 
     const isActive = cfg.activeConnectionId === connectionId;
-    // ★★ 「有没有会话在跑」这个问题问的是「**这条连接的工作区上**有没有会话」。
-    //    拿"窗口里那一个"去判会在多开下把另一条连接那个工作区上的会话当成"这个工作区的"，
+    // ★★ 「有没有会话在跑」这个问题问的是「**这条连接的工作区里**有没有会话」。
+    //    拿"窗口里那一个"去判会在多开下把另一条连接那个工作区里的会话当成"这个工作区的"，
     //    于是挪一个与这条连接无关的隧道端口。
-    const live = [...sessions.values()].find((r) => occupied(r.slot)
-      && r.controller && r.controller.workspaceId === conn.workspaceId);
+    const live = conn.workspaceId ? liveSessionOnWorkspace(conn.workspaceId) : null;
     const sessionLive = Boolean(live);
-    // ★ 不要工作区的插件（没有工作区的那些）**不能走 relisten**：它的端口不在任何
-    //   工作区里，relisten 会去挪一个正在被使用的隧道端口 —— 而它对外的那份配置是
-    //   隧道起来时才写的，挪完那一瞬间用户手上的连接指向一个没人监听的端口。
-    //   所以那种会话只改配置、不动会话本身。
+    // ★ 不要工作区的插件**不能走 relisten**：它的端口不在任何工作区里，relisten 会去
+    //   挪一个正在被使用的隧道端口 —— 而它对外的那份配置是隧道起来时才写的，挪完那
+    //   一瞬间用户手上的连接指向一个没人监听的端口。所以那种会话只改配置、不动会话本身。
     //
-    //   判据是 workspaceId 有没有（框架的事实），不是"是哪个插件"（那是插件名）。
-    const sessionInWorkspace = sessionLive && live.controller.workspaceId !== null;
+    //   判据是 spaceId 有没有（框架的事实），不是"是哪个插件"（那是插件名）。
+    const sessionInWorkspace = sessionLive && live.controller.spaceId !== null;
     const outsideWorkspace = sessionLive && !sessionInWorkspace;
 
     if (isActive && live && !outsideWorkspace) {
-      const excluded = usedWorkspacePortsAll(target.id);
-      const r = await live.controller.relisten(target.id, target.port, excluded);
+      // ★ 会话要搬到**新工作区里这个插件那一份**上 —— 那一份可能还没有，就地建一份
+      //   （`created` 只在真的建了时才落盘）。
+      const moved = spaceForSession(target.id, live.plugin);
+      if (!moved) {
+        if (!existed) cfg.workspaces = cfg.workspaces.filter((l) => l.id !== target.id);
+        return { ok: false, code: 'relisten_failed',
+                 error: '换工作区失败，工作区没有改动：这个工作区不见了。' };
+      }
+      const excluded = usedSpacePortsAll(moved.id);
+      const r = await live.controller.relisten(moved.id, moved.ports[0], excluded);
       if (!r.ok) {
         if (!existed) cfg.workspaces = cfg.workspaces.filter((l) => l.id !== target.id);
         return {
@@ -3597,24 +3676,25 @@ function registerIpc() {
           error: '换端口失败，工作区没有改动：' + r.error,
         };
       }
-      // ★ **不把 r.port 写回 target** —— 新工作区的端口是它**被创建时**定下来的那个
-      //   （`nextWorkspacePort`），顺移只是这一次会话的事。写回会把一次暂时的冲突
+      // ★ **不把 r.port 写回那一份数据** —— 端口是它**被创建时**定下来的那个
+      //   （`nextSpacePort`），顺移只是这一次会话的事。写回会把一次暂时的冲突
       //   变成永久的 origin 变更，而冲突消失之后 origin 回不去、那份布局也跟着
       //   白丢。（`relisten` 的 warning 已经把这个取舍告诉用户了。）
     } else if (isActive && !sessionLive) {
-      // 没有会话在跑：只改标记，下次开会话就用它。
+      // 没有会话在跑：只改标记，下次开会话就用它（那时 `spaceForSession` 会建出
+      // 这个插件在新工作区里的那一份）。
       // ★ 只改标记，不碰任何会话：没有会话在跑时本来就没有"那个会话"可改，标记
       //   落在 `cfg` 里（下面那句 setConnectionWorkspace）。
     }
     // outsideWorkspace 时两条都不走：配置照改（下次起 code-server 就用新工作区了），
-    // 但这个正在跑的中转站会话不受任何影响 —— 它的 workspaceId 保持 null。
+    // 但这个正在跑的中转站会话不受任何影响 —— 它的 spaceId 保持 null。
 
     config.setConnectionWorkspace(cfg, connectionId, target.id);
     commitConfig();
     return { ok: true, workspaces: config.workspacePlan(cfg), connections: cfg.connections };
   });
 
-  /** 给工作区改名。名字只是给人看的 —— 身份永远是 id（它决定 partition，绝不复用）。 */
+  /** 给工作区改名。名字只是给人看的 —— 它不参与任何身份（进路径的是数据 id，绝不复用）。 */
   send('app:renameWorkspace', async (payload = {}) => {
     const { workspaceId, name } = payload;
     if (!config.findWorkspace(cfg, workspaceId)) {
@@ -4499,10 +4579,10 @@ module.exports = {
      *   进程退不掉（症状是整个测试文件凭空多花几十秒，而每条用例自己都是绿的）。
      *   所以旧的先 `abandon()` —— 只释放本地资源，一个字都不发给服务端。
      *
-     * ★ **临时实例那张表也要清**，理由与 `sessions` 逐字相同：真机上重启之后
+     * ★ **临时那份那张表也要清**，理由与 `sessions` 逐字相同：真机上重启之后
      *   它一定是空的（它只活在内存里）。不清的后果不是"用例红"那么轻 ——
-     *   一个**上一个进程的**临时实例会跟着新认领的那些一起数，于是"重启后各拿一个
-     *   实例"这条用例会以为认领多造了一个，而真实的路径上根本没有这一格。
+     *   一份**上一个进程的**临时数据会跟着新认领的那些一起数，于是"重启后各拿一份"
+     *   这条用例会以为认领多造了一份，而真实的路径上根本没有这一格。
      *   ★ 清的时候**不回收**（不调 `releaseEphemeral`）：真机上进程没了，那两份
      *   数据就留在盘上等着对账去认 —— 那正是"崩溃残留"该有的样子，别在夹具里
      *   把它抹平。
@@ -4510,7 +4590,7 @@ module.exports = {
     reattach: async () => {
       const old = [...sessions.values()];
       sessions = new Map();
-      tempWorkspaces = new Map();
+      tempSpaces = new Map();
       for (const rec of old) if (rec.controller) await rec.controller.abandon();
       return tryReattach();
     },
@@ -4525,14 +4605,14 @@ module.exports = {
     /** 站点池在哪（测试要直接看盘上的东西）。 */
     getSitePoolDir: () => sitePoolDir(),
     /**
-     * **临时实例**那张注册表（`id → {id, name, port}`，只活在内存里）。
+     * **临时那份数据**那张注册表（`id → {id, pluginId, group, ports}`，只活在内存里）。
      *
      * ★ 用例要断言的是"它**没了**"（会话结束之后回收干净），而那件事没有别的
-     *   观测面：那个工作区不在配置里（所以 `getCfg()` 看不见），它那条会话的记录也已经
+     *   观测面：那份数据不在配置里（所以 `getCfg()` 看不见），它那条会话的记录也已经
      *   被收掉了。盘上那两半各有一条用例（目录在不在），但"注册表里那一格清了"
      *   是第三件事 —— 少了它，一条"回收时只删了磁盘、没删注册表"的实现会全绿。
      */
-    getTempWorkspaces: () => tempWorkspaces,
+    getTempSpaces: () => tempSpaces,
     /**
      * 对账的 `held` 里**会话那一半**（`liveDataDirs()` 现在报的那些目录名）。
      *
