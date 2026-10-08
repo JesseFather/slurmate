@@ -98,15 +98,10 @@ EXEMPT = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
 #      `CONTRIBUTING.md` 自己那 5 条清了（立法的那一份自己不遵守，两条规矩就没人会
 #      当真），它的键因此**已经删掉** —— 那一份现在是零容忍。
 LEGACY = {
-    "packer/docs/PLUGIN-SPEC.md": 81,
-    "packer/docs/README.md": 74,
-    "cluster/docs/TROUBLESHOOTING.md": 60,
-    "cluster/docs/PLUGIN-TROUBLESHOOTING.md": 50,
-    "cluster/docs/CONFIGURATION.md": 41,
-    "SECURITY.md": 37,
+    "packer/docs/PLUGIN-SPEC.md": 82,
+    "packer/docs/README.md": 76,
     "client/README.md": 26,
     "docs/CONTRACT.md": 22,
-    "cluster/docs/DEPLOYMENT.md": 18,
     "plugins/sshd/README.md": 17,
     "README.md": 13,
     "packer/README.md": 11,
@@ -140,13 +135,17 @@ G_FIX = {
 # ★ 加粗的星号是 `\*{0,2}`（**可有可无**），不是 `\*\*?` —— 后者是「一个 `*`，
 #   第二个可选」，也就是**至少要有一个**，而 `**v0.13 起**` 里版本号后面跟的是
 #   空格、不是星号，于是它一个都匹配不上。这个错第一版真的犯了，自测当场抓住。
+# ★ 版本号的 `v` 前缀是**可有可无**的：`v0.13 起` 与 `0.13 起` 是同一句话。
+#   第一版只认带 `v` 的那种，于是全仓有 **10 处**裸版本锚点从判据底下溜过去
+#   （`0.6 起`、`0.7 之前`、`0.12 时`…）—— 而它们叙的是同一件史。
+#   ★ `(?<![\d.])` 是必需的：没有它，`§5.3 删掉` 那种节号也会被当版本锚点。
 V_ANCHOR = re.compile(
-    r"\*{0,2}v0\.\d+\*{0,2}"
+    r"\*{0,2}(?<![\d.])v?0\.\d+\*{0,2}"
     r"(?:\s*阶段\s*\d+)?"
     r"\s*(?:起|之前|以前|之后|后|时|放开|删掉|删除|改成|改为)"
 )
-FROM_V = re.compile(r"(?:从|自|于)\s*\*{0,2}v0\.\d+")
-PAREN_V = re.compile(r"（\s*\*{0,2}v0\.\d+[^）\n]*）")
+FROM_V = re.compile(r"(?:从|自|于)\s*\*{0,2}v?0\.\d+")
+PAREN_V = re.compile(r"（\s*\*{0,2}v?0\.\d+[^）\n]*）")
 UPGRADE = re.compile(r"(?:升级到|升到|旧版本)\s*（?\s*[0-9]+\.[0-9.]+")
 OR_EARLY = re.compile(r"[0-9]+\.[0-9.]+(?:\.[0-9]+)?\s*及更早")
 PAST = re.compile(r"从前|原先|曾经|后来|以往|当年|此前|彼时")
@@ -351,6 +350,8 @@ def self_test():
         # ── F 的坏样本 ─────────────────────────────────────────────────
         ("时间锚点：v0.13 起",
          {"docs/A.md": "插件 **v0.13 起** 是一棵树。\n"}, "版本时间锚点"),
+        ("时间锚点**不带 `v`** 也是同一个锚（`0.6 起`）",
+         {"docs/A.md": "0.6 起框架版本是两段。\n"}, "版本时间锚点"),
         ("括号版本注记",
          {"docs/A.md": "**`SIGHUP` 时整个重读**（v0.12 热重载）。\n"}, "括号版本注记"),
         ("「自 v0.1 起」—— 两条正则重叠，只报一条（去重）",
@@ -370,6 +371,8 @@ def self_test():
          {"docs/PROTOCOL.md": "`v0.14` **不是** `v0.1` —— `14` 比 `1` 大。\n"}, None),
         ("版本进位算术",
          {"docs/PROTOCOL.md": "超上界时**必须进位**（`0.255` 之后是 `1.0`）。\n"}, None),
+        ("`§5.3 删掉` 是节号，不是版本锚点",
+         {"docs/A.md": "见 §5.3 删掉那一段。\n"}, None),
         ("「不再」是当前规则（同行没有锚）",
          {"docs/A.md": "`submit` 超时后**不再重试**。\n"}, None),
         ("「改成」是操作指示（同行没有锚）",

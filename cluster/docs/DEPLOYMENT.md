@@ -27,8 +27,8 @@ sudo bash tools/check-cluster.sh
 （`cluster/slurmate-sessiond`）。
 
 **不满足会怎样失败**：多登录节点集群里，用户在 `node02` 登录时，`node02` 的
-`inet slurmate output` 链上没有任何规则。**用户本人不会有任何异常**（他自己的流量
-本来就被 accept），但同节点其他用户可以直接连他的端口 —— 保护静默消失，
+`inet slurmate output` 链上没有任何规则。**用户本人不会有任何异常**（那个
+用户自己的流量本来就被 accept），但同节点其他用户可以直接连那个端口 —— 保护静默消失，
 `slurmate doctor` 在 `node01` 上跑还会报「一致」。
 
 **怎么确认**：在**用户实际登录的那台机器**上确认表与链存在：
@@ -79,7 +79,7 @@ nft list chain inet slurmate output
 **3c. NFS 属性缓存会影响登记延迟**
 
 默认 `acdirmax=60s`，目录属性最长缓存 60 秒 —— **会话登记最多延迟 60 秒**。
-`tools/check-cluster.sh` 专门检查 `/shared/home`（或你的实际挂载点）有没有
+`tools/check-cluster.sh` 专门检查 `/shared/home`（或站点实际的那个挂载点）有没有
 显式设置 `actimeo` / `acdirmax` / `acregmax`，没有就给出 WARN。
 
 这不是故障，但会让人误判：客户端在「等待登记」期间每 3 秒轮询一次
@@ -178,9 +178,9 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 校验，不是起不来。这是刻意的：把一个"更好的校验"变成硬依赖，会让一个本来能跑的
 集群装不上。
 
-**6b. 插件的依赖 —— 由你装的那些插件决定**
+**6b. 插件的依赖 —— 由装了的那些插件决定**
 
-**这一段没有固定清单**，因为计算节点上需要什么完全取决于你装了哪些插件。
+**这一段没有固定清单**，因为计算节点上需要什么完全取决于装了哪些插件。
 每个插件在**它自己的 README** 里写清楚：要哪些可执行文件、缺了会怎样 ——
 装之前看一眼那一节，比事后对着日志里那句"所有候选端口均失败"猜要省事。
 
@@ -225,10 +225,10 @@ code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文
 
 ### 9. 其余预检项
 
-**「位置」那一列只有两个值**，因为 v0.12 起**同一件事只允许有一个判据**：凡是
+**「位置」那一列只有两个值**，因为**同一件事只允许有一个判据**：凡是
 守护进程自己判得了的（Slurm 命令齐备、`nft`、端口区间、`cluster_cidr` 与节点地址
 对账、`scontrol ping`、`ip_local_reserved_ports`），都由 `install-base.sh`
-**调用** `slurmate-sessiond --check` 来判 —— 脚本里从前那份孪生实现已经删了。
+**调用** `slurmate-sessiond --check` 来判 —— 脚本里没有第二份实现。
 只有**基座安装自己**的事（部署锁、哈希工具、目标路径占用）留在脚本里。
 
 | 检查 | 位置 | 不满足的后果 |
@@ -237,7 +237,7 @@ code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文
 | `scontrol ping` 成功 | `slurmate-sessiond --check`（只报，不打码） | 只警告。部署能完成，但提交与回收都会失败；守护进程的 `job_state()` 会把这种情况判为 `JOB_UNKNOWN` 并保持现状，**不会误释放会话** |
 | `sha256sum` 存在 | `cluster/install-base.sh` | 直接中止（无法校验现有文件是否被改动） |
 | `flock` 存在 | `cluster/install-base.sh` | 只警告，失去并发部署保护 |
-| 目标路径未被他人文件占用 | `cluster/install-base.sh` | 直接中止，绝不覆盖别人的文件 |
+| 目标路径未被别的文件占用 | `cluster/install-base.sh` | 直接中止，绝不覆盖不属于本系统的文件 |
 | 端口池与 `reserved_ranges` 不交 | `slurmate-sessiond --check`（退出码 **1**） | 直接中止。跨表顺序在 nftables 里没有保证，重叠会让行为不可预测 |
 | 端口池与 `ip_local_reserved_ports` 不交 | `slurmate-sessiond --check`（只报，不打码） | 只警告。作业脚本会跳过真被占的端口试下一个（`cluster/run.sbatch`），nft 规则匹配 `dport` 不受影响 |
 
@@ -292,7 +292,7 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 这条路是通的，但**部署完记得清理 `/root/slurmate-src.*`** —— 每次从非 root
 拥有的目录部署都会留下一份拷贝。
 
-> 如果你把 `cluster/` 挪到别的位置（例如把仓库结构改成 `src/cluster/`），
+> 若把 `cluster/` 挪到别的位置（例如把仓库结构改成 `src/cluster/`），
 > 自拷贝分支里的路径也要跟着改 —— `SRC_DIR` / `PLUGINS_SRC` 那两个变量，
 > 以及最后 `exec` 那一行。它们用的是相对于 `SECURE_DIR` 的位置，脚本名走
 > `basename "$0"` 所以改名字不受影响，但子目录层级变了要同步。
@@ -371,10 +371,10 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 所以推荐两种顺序之一：
 
 - 先部署，再编辑 `/etc/slurmate/slurmate.conf`，最后
-  `systemctl reload slurmate-sessiond`（v0.12 起改配置不需要重启）；
+  `systemctl reload slurmate-sessiond`（改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-至少要把这两项改成你站点的真实值：
+至少要把这两项改成站点的真实值：
 
 - `cluster_cidr` —— 见前置条件 2。**它没有默认值，不填服务起不来**；
 - `readonly_paths` —— 见前置条件 3e。
@@ -382,7 +382,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 站点通用键一共 17 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 **插件要不要开、开哪几个，也在这一步决定。** `enabled = yes` 的插件会被
-**分发到每一台连上来的客户端**（v0.6）—— 不只是"用户可以提交它"。所以
+**分发到每一台连上来的客户端** —— 不只是"用户可以提交它"。所以
 写一份插件配置现在是一个**对外的**动作：
 
 ```ini
@@ -464,7 +464,7 @@ curl -i http://127.0.0.1:18080/healthz
 ```bash
 # 1. 守护进程从包里读出来的那份清单 —— 这就是客户端会去取的那一份
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins
-# 2. **要发出去的那一份**一次取回来（客户端走的就是这条路 —— v0.7 起它是唯一一条）
+# 2. **要发出去的那一份**一次取回来（客户端走的就是这条路 —— 它是唯一一条）
 slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 ```
 
@@ -474,9 +474,8 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 `9 plugin_package_changed`，说明守护进程**起来之后**有人动过那个包（就地换了包而
 没重新部署）—— 那要重跑一次 install-base.sh，而不是重试这个请求。
 
-**v0.6 时这里还有第 3 步**（`plugin_file` 一份文件一次，用来验"逐份取"那条路）。
-那条 op 在 v0.7 删掉了，所以今天手工调它会回 `2 unknown_op` —— **那是预期的**，
-不是部署坏了。
+**手工调 `plugin_file` 会回 `2 unknown_op` —— 那是预期的**，不是部署坏了：
+那个 op 不存在，一份内容只有"整包"这一条投递方式。
 
 第 1 步的输出里还有一行「包 N 字节 / M 份文件」和一行**完整的内容摘要**。那个
 摘要是这个站点上**唯一**能回答"我装上去的是不是作者发布的那一份"的东西（服务器上
@@ -496,8 +495,8 @@ ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>
 **池子里没有 `.splug`** —— 容器解完就扔，它只在「作者→站点」与「站点→客户端」
 这两段路上活着。
 而这里是**只含客户端侧**的那一份：`job/` 那半边**根本不在这台机器上**。
-用户机器上有过一份 `job/start.sh` 曾经是一个真实的缺陷（它是以**提交者本人**的身份
-在集群上执行的脚本），v0.13 修掉了，而且客户端解包时**拒绝**任何含站点侧路径的包。
+把一份 `job/start.sh` 放到用户机器上是一个真实的缺陷形状（它是以**提交者本人**的
+身份在集群上执行的脚本）—— 所以客户端解包时**拒绝**任何含站点侧路径的包，拒**整份**。
 **这件事到今天为止一次都没在真集群上跑过**，而且**刻意押后了**（形状还会大动，
 现在验的结论留不住）—— 见 [docs/KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) 的 U7，
 那里列着第一次跑要看什么（最要紧的仍然是那 4 MiB 的响应余量够不够，
@@ -519,12 +518,12 @@ sudo bash cluster/install-base.sh --uninstall --purge-state
   回来（会打印「已删除」但实际还在），而 `Restart=always` 还会再起
   （`cluster/install-base.sh`）。
 - **删文件前逐项确认「这确实是本系统装的文件」**（内容里必须含 `slurmate`）。
-  早期版本在这里无条件 `rm -f`，在一台从未部署过 Slurmate 的机器上执行会删掉同名
-  的他人文件（`cluster/install-base.sh`）。
+  这里**不能**无条件 `rm -f`：在一台从未部署过 Slurmate 的机器上执行，它会删掉
+  同名的、不属于本系统的文件（`cluster/install-base.sh`）。
 
   `<prefix>/share/slurmate/jobs/` 里那些文件**文件名里没有 `slurmate`**（是插件的
   ULID），所以那道闸门对它们看的是**脚本内容** —— 里面必然有 `SLURMATE_*`。
-  卸载后这个目录里留下的东西就是"内容里连一个 `slurmate` 都没有"的，那不是我们放的。
+  卸载后这个目录里留下的东西就是"内容里连一个 `slurmate` 都没有"的，那不是本系统放的。
 
 ---
 
