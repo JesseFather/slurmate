@@ -299,7 +299,7 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 
 ### 步骤 0.5：把插件打成包（要装插件的话）
 
-★ **站点上的插件是一个包文件（`.splug`），不是一棵源码树。**
+★ **站点上铺开的是构建产物，不是一棵源码树。**
 服务器上从头到尾没有源码 —— 打包发生在**作者的机器**上：
 
 ```bash
@@ -332,8 +332,9 @@ sudo slurmate plugin install ~/下载的插件/<id>.splug
 
 它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）、
 把包里有什么打一屏出来、
-按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装进
-`<prefix>/share/slurmate/plugins/<ULID>.splug`。★ 装完它还会顺手做三件：写它那份
+按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装成
+`<prefix>/share/slurmate/plugins/<ULID>/` 一棵树加 `<ULID>.json` 一份记录表。
+★ 装完它还会顺手做三件：写它那份
 `slurmate.conf.d/<id>.conf`、织好作业脚本、让守护进程**重读一遍配置** ——
 全程不重启，正在跑的会话一条都不受影响。
 
@@ -464,12 +465,13 @@ curl -i http://127.0.0.1:18080/healthz
 ```bash
 # 1. 守护进程从包里读出来的那份清单 —— 这就是客户端会去取的那一份
 sudo /usr/local/sbin/slurmate-sessiond --check-plugins
-# 2. **整包**一次取回来（客户端走的就是这条路 —— v0.7 起它是唯一一条）
+# 2. **要发出去的那一份**一次取回来（客户端走的就是这条路 —— v0.7 起它是唯一一条）
 slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 ```
 
-第 2 步的输出里 `data` 是**整个 `.splug`** 的 base64，`digest` 要与作者那边
-`packer inspect` 报的**内容摘要**一致（第 1 步打印的那一行就是它）。若它回
+第 2 步的输出里 `data` 是**只含客户端侧那一份**容器的 base64，`digest` 要与作者那边
+`packer inspect` 报的**「客户端侧」那一行**一致 —— **不是**「内容摘要」那一行（那一行
+是整棵树的）。若它回
 `9 plugin_package_changed`，说明守护进程**起来之后**有人动过那个包（就地换了包而
 没重新部署）—— 那要重跑一次 install-base.sh，而不是重试这个请求。
 
