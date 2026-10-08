@@ -5,7 +5,7 @@
  *
  * 1. 「**绝不静默降级**」—— 安全存储不可用时，必须明确失败，而不是悄悄把私钥
  *    明文写盘。悄悄写明文正是这个项目一路在清的那类问题。私钥**只有加密一种存法**：
- *    界面上曾经那个「保存方式」下拉框已经删掉，因为让用户在安全和方便之间做选择，
+ *    界面上没有「保存方式」这个下拉框，因为让用户在安全和方便之间做选择，
  *    本身就意味着有人会选错。
  * 2. 「**不静默填空**」—— 不合法的连接条目一律拒绝并明确报错，
  *    而不是回落成某个默认值让用户以为设置生效了。
@@ -31,8 +31,7 @@ function tmpdir() {
  * 一个**合法形状**的布局组 id（见 config.js 的 LAYOUT_ID_RE）。
  *
  * ★ 用例里 `gid(1)` 比一串随机十六进制好读，而**它不能省**：id 进磁盘路径，所以
- *   `normalizeLayout` 会丢掉形状不对的那些 —— 从前这里写的是 `'la'` / `'lxyz'`，
- *   那些值之所以能用，正是因为当时**没有任何东西在查它们**。
+ *   `normalizeLayout` 会丢掉形状不对的那些 —— `'la'` / `'lxyz'` 这类值过不了它。
  */
 const gid = (n) => 'l' + String(n).padStart(12, '0');
 
@@ -62,8 +61,7 @@ test('空目录加载出默认配置', () => {
   assert.equal(cfg.activeConnectionId, null);
   assert.deepEqual(cfg.hostKeys, {});
   assert.deepEqual(cfg.layouts, []);
-  // 私钥没有「保存方式」这个设置项了 —— 它曾经存在过，删掉之后
-  // 不该有任何一条旧配置能把它带回来
+  // 私钥没有「保存方式」这个设置项 —— 任何一条配置都不该把它带回来
   assert.equal(cfg.secretMode, undefined);
 });
 
@@ -120,7 +118,7 @@ test('★ 备注留空就是「没起名」，不是回落成 host', () => {
   // 而界面要按这个区分决定显示备注还是显示地址。
   assert.equal(config.loadConfig(dir).connections[0].label, '');
 
-  // 旧版本写下的 label 恰好等于 host 的那些，读进来也归成「没起名」
+  // label 恰好等于 host 的那种，读进来也归成「没起名」
   const dir2 = tmpdir();
   fs.writeFileSync(path.join(dir2, 'config.json'), JSON.stringify({
     schema: 3,
@@ -257,7 +255,7 @@ test('★ 编辑时不改地址（只改别处）不该被自己的身份判成�
 
 test('★ 升级时顺手清掉旧版本攒下的一串相同条目', () => {
   const dir = tmpdir();
-  // 旧版本每次点「保存并连接」都会新建一条，配置里已经攒了三条一样的
+  // 同一个地址点了三次「保存并连接」，配置里攒了三条一样的
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 2,
     connections: [
@@ -295,13 +293,12 @@ test('★ 旧格式不再被读：schema 1 的 profile + extraHosts 读作"没�
     maxSessions: 1,
   }));
 
-  // 从前这里把它们合成两条连接（user/port 从 profile 继承过去）。那条路删掉了
-  // （0.y 不考虑兼容性）—— 所以这条钉的是**实际发生的事**：一条连接都没有，
-  // 用户在界面上重新填一次。写"应该会怎样"没有意义，写清楚"就是这样"才有。
+  // 这条钉的是**实际发生的事**：一条连接都没有，用户在界面上重新填一次。
+  // 写"应该会怎样"没有意义，写清楚"就是这样"才有。
   const cfg = config.loadConfig(dir);
   assert.deepEqual(cfg.connections, []);
   // 旧字段不会跟着活下去（只认已知键，不写回）。留着它们，将来读这份配置的人
-  // 会以为它们还有用，去代码里找一个早就不存在的行为。
+  // 会以为它们还有用，去代码里找一个并不存在的行为。
   assert.equal(cfg.profile, undefined);
   assert.equal(cfg.maxSessions, undefined);
 });
@@ -368,14 +365,9 @@ test('★★ 布局组的端口**创建时定一次、此后只读**（顺移不
   assert.equal(config.findLayout(config.loadConfig(dir), gid(1)).port, 18080,
     '存下来的端口读得回来');
 
-  // ★★ 这一条从前断言的是 `config.layoutPort(...)`，而那个函数**整个删掉了** ——
-  //    它整个就是一条回落（"组不存在 ⇒ 回落到基址"），而那条回落会给**临时实例**
-  //    算出持有者那个端口（见 `index.js` 的 `layoutPortOf`）。取端口现在只有那一条
-  //    路，而且它**没有回落**。
-  //    ★ 顺带记下：那条断言从前之所以能过，靠的**正是**那条回落 —— 它拿一个**刚
-  //    从磁盘读回来**的配置去问，而那一刻 `layouts` 还没落盘、里面是空的，于是
-  //    拿到的是回落值 18080，与它上面刚设的那个数字**恰好相同**。换句话说，
-  //    「存下来的端口读得回来」这句话当时**一个字都没有被验过**。
+  // ★★ 这一条钉的是"存下来的端口读得回来"真的被验过：取端口只有一条路
+  //    （见 `index.js` 的 `layoutPortOf`），它**没有回落** —— 拿一个刚从磁盘读回来
+  //    的配置去问，问的就是它自己存下的那些 `layouts`。
 
   // ★ 顺移**不**写回。把顺移后的值记下来，等于把一次**暂时**的冲突变成永久的
   //   origin 变更 —— 冲突消失之后 origin 也回不去，而那份布局本来是可以回来的
@@ -396,17 +388,17 @@ test('布局组：端口越界就整条不合法，不补默认值', () => {
 });
 
 test('★ 布局组 id 的形状也要查 —— 它进磁盘路径', () => {
-  // ★ 这一格从前**没有任何东西在查**：`normalizeLayout` 只问了"是不是非空字符串"，
-  //   而这个 id 会被拼成分区名 = Electron 的存储目录名 —— 于是 `config.json` 里
-  //   手写一个 `"id": "../x"` 就一路走到了路径里。（`persist:plugin-<ULID>` 那条
+  // ★ 这一格必须查：`normalizeLayout` 若只问"是不是非空字符串"，而这个 id 会被拼成
+  //   分区名 = Electron 的存储目录名 —— 于是 `config.json` 里手写一个
+  //   `"id": "../x"` 就会一路走到路径里。（`persist:plugin-<ULID>` 那条
   //   之所以没事，是因为 ULID 有自己的白名单，不是这一层在管。）
-  //   现在新模型还要往同一个字符串里再塞一个作者写的组名，所以这一格必须先关上。
+  //   新模型还要往同一个字符串里再塞一个作者写的组名，所以这一格必须先关上。
   for (const bad of ['../x', 'la', 'l' + 'g'.repeat(12), 'l' + '0'.repeat(11),
     '../../etc', 'l0123456789ab/../x']) {
     assert.equal(config.normalizeLayout({ id: bad, port: 18080 }), null,
       `${JSON.stringify(bad)} 不是合法的布局组 id，必须整条丢掉`);
   }
-  // ★ **写了一个形状不对的 id ⇒ 整条丢掉**；而**根本没写 id** 走的是原来那条路
+  // ★ **写了一个形状不对的 id ⇒ 整条丢掉**；而**根本没写 id** 走的是另一条路
   //   （补一个新的）。两者不是一回事，也不该合并：前者是一个**会进路径的字符串**
   //   （必须拦），后者只是"这个组还没有身份"—— 拦下来只会让一份手写的配置整组消失。
   assert.match(config.normalizeLayout({ port: 18080 }).id, /^l[0-9a-f]{12}$/,
@@ -431,9 +423,7 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有布局"，
     slots: { 1: { port: 18093 } },
   }));
 
-  // 从前这里把 slots 迁成**一个**组、沿用 18093 端口与 `persist:slot-1`，好让 0.2.0
-  // 及更早的用户不丢编辑器布局。那条路删掉了（0.y 不考虑兼容性）—— 所以这条钉的是
-  // **实际发生的事**：一个全新的空白组，端口回落到基址，存储是另一个目录。
+  // 这条钉的是**实际发生的事**：一个全新的空白组，端口回落到基址，存储是另一个目录。
   const cfg = config.loadConfig(dir);
   assert.equal(cfg.layouts.length, 1);
   assert.equal(cfg.layouts[0].port, 18080, '不再继承 slots["1"].port');
@@ -453,13 +443,12 @@ test('★★ 兜底那个组的 id 是**确定的** —— 不然读一次配置
   // `layouts[]` 是空的 ⇒ `loadLayouts` 就地补一个「默认布局」。
   //
   // ★★ 而 `loadConfig` **自己不写盘**（见 config.js 文件头那三条原则），所以
-  //    这条兜底从前用 `newLayoutId()`（随机）的后果是**静默丢数据**：
+  //    这条兜底若用 `newLayoutId()`（随机），后果是**静默丢数据**：
   //
   //        读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
   //        ⇒ 上一轮刚攒的编辑器布局凭空消失（分区名就是磁盘上的目录名）。
   //
-  //    ★ 它当年是被防过一次的 —— 迁移那条路用**字面量 id** 挡的正是这件事；
-  //      迁移删了，这条兜底却漏了。所以这里钉的是**确定性**这个性质。
+  //    ★ 所以这里钉的是**确定性**这个性质：兜底那个 id 必须每次一样。
   const dir = tmpdir();
   const write = () => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 6,
@@ -501,8 +490,8 @@ test('★ 每个组一个独立的存储目录，且 id 不复用', () => {
   assert.match(a, /^l[0-9a-f]{12}$/);
   assert.notEqual(a, b, 'id 永不复用');
   assert.notEqual(of(a), of(b), '两个组必须是两份存储');
-  // ★ 整个身份都在里面：插件 id @ 共享组 @ 实例。从前只有末段（`persist:layout-<id>`），
-  //   于是"两个插件共用同一个组"会读写同一份存储 —— 今天只有一个这样的插件，
+  // ★ 整个身份都在里面：插件 id @ 共享组 @ 实例。少了前两段的话，"两个插件共用
+  //   同一个组"会读写同一份存储 —— 今天只有一个这样的插件，
   //   所以那是一个还没炸的洞。
   assert.equal(of(a), `persist:${cs.id}@editor@${a}`);
 });
@@ -619,8 +608,8 @@ test('★ 机器没有安全存储 → 明确失败，且绝不写明文', () =>
   assert.equal(res.ok, false);
   assert.equal(res.reason, 'no_secure_storage');
 
-  // 关键：一个字节都不该落盘。以前这里还有一条「明文保存」的退路，
-  // 现在没有 —— 存不了就是存不了，由界面如实告诉用户，而不是换个方式偷偷存下来。
+  // 关键：一个字节都不该落盘。私钥没有「明文保存」这条退路 —— 存不了就是存不了，
+  // 由界面如实告诉用户，而不是换个方式偷偷存下来。
   assert.equal(fs.existsSync(secretsOf(dir)), false,
     '安全存储不可用时绝不能悄悄写明文');
 });
@@ -683,10 +672,9 @@ test('换过机器 / keyring 被重置：解密失败要明确报错，不能当
 
 test('★ 旧版本留下的明文私钥**不再被读出来** —— 报 bad_mode，而不是继续用它', () => {
   const dir = tmpdir();
-  // v0.7 之前这里读得出来，并带 legacy:true 让调用方加密重存。那条路删掉了：
   // 一份能被继续沿用的明文私钥，最该做的是被**发现**，而"顺手加密重存"等于让它
-  // 再活一轮（见 config.js 里 SECRET_ENCRYPTED 那段）。所以它今天与别的认不出的
-  // mode 走同一条路。
+  // 再活一轮（见 config.js 里 SECRET_ENCRYPTED 那段）。所以它与其他认不出的 mode
+  // 走同一条路。
   fs.writeFileSync(secretsOf(dir), JSON.stringify({
     schema: 6, keys: { c1: { mode: 'plain', data: 'PRIVATE-KEY-PEM' } },
   }));
@@ -695,9 +683,9 @@ test('★ 旧版本留下的明文私钥**不再被读出来** —— 报 bad_mo
   assert.equal(got.ok, false, '读出来就等于让那份明文再活一轮');
   assert.match(got.reason, /bad_mode: plain/, '错误里要带上是哪种 mode');
 
-  // 而**更旧**的那种形态（一份全局密钥、根本没有 keys 表）读作「没保存过」：
-  // 界面据此生成一把新的，用户重新注册一次。0.y 不考虑兼容性，这就是预定的结局
-  // —— 所以这里把**实际发生的事**钉住，免得下一个人以为它还读得出来。
+  // 而**另一种**形态（一份全局密钥、根本没有 keys 表）读作「没保存过」：
+  // 界面据此生成一把新的，用户重新注册一次 —— 这里把**实际发生的事**钉住，
+  // 免得下一个人以为它还读得出来。
   const dir2 = tmpdir();
   fs.writeFileSync(secretsOf(dir2), JSON.stringify({
     schema: 2, mode: 'plain', data: 'PRIVATE-KEY-PEM',
@@ -796,13 +784,9 @@ test('★ 写台账：摘要必须是全长的，短的要被拒', () => {
 
 test('★ 老配置里的 `devPlugins` 不再有任何效果（那条路已经删了）', () => {
   const dir = tmpdir();
-  // ★ 这一条换掉的是「开发者模式：缺省关着，且只认布尔值」。那个开关守的是
-  //   **本机池**（`~/.slurmate/plugins/`）加不加载，而本机池连同它那条**免同意**
-  //   的路一起删掉了（§5.2 禁止给任何一类插件开免同意的口子）。
-  //
-  //   ★ 留这一条而不是删干净，是因为**老 config.json 里那一条还在**：0.2.0 是
-  //     最后一个公开版本，而它带着本机池。要钉住的是"读到它等于没读到" ——
-  //     既不生效，也不报错，也不让 `loadConfig` 多出一个字段来。
+  // ★ 要钉住的是"读到 `devPlugins` 等于没读到" —— 既不生效，也不报错，也不让
+  //   `loadConfig` 多出一个字段来。手改的配置里可能留着这一条，它对客户端没有
+  //   任何含义（§5.2 禁止给任何一类插件开免同意的口子）。
   assert.equal(Object.prototype.hasOwnProperty.call(config.DEFAULTS, 'devPlugins'), false,
     '★ 缺省表里不该再有这个键 —— 它没有读者了');
   assert.equal(config.loadConfig(dir).devPlugins, undefined, '缺省下它不该出现');
@@ -827,7 +811,7 @@ test('★ 钉子表是**单独一个文件** —— 旧版本不认识它，也�
   const pins = config.loadPinnedKeys(dir);
   assert.equal(config.pinPluginKey(dir, pins, 'PLUG', FP).ok, true);
   assert.equal(fs.existsSync(path.join(dir, 'pinned-keys.json')), true);
-  // ★ 关键的一条：它**不在** config.json 里。放进那里的话，一个只认已知键的旧版本
+  // ★ 关键的一条：它**不在** config.json 里。放进那里的话，一个只认已知键的客户端
   //   读一遍再存一遍就会把它抹掉 —— 而丢掉钉子 = 静默回到"首次即信任"。
   assert.equal(fs.existsSync(path.join(dir, 'config.json')), false,
     '钉一件事不该顺手写出一份 config.json');

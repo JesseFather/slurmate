@@ -211,9 +211,9 @@ section('1. 一个提交 ⇒ 一份确定的字节');
 section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
 
 {
-  // ★ 目录名故意与 id **没有任何关系**：从前包名是 `<目录名>-<版本>.splug`，
-  //   于是"包叫什么"取决于你在自己的机器上把那个目录叫什么 —— 而身份来自清单
-  //   里的 `id`（`packer/docs/README.md` 那句"目录名不参与任何判定"）。
+  // ★ 目录名故意与 id **没有任何关系**：若包名里带上目录名，"包叫什么"就取决于你
+  //   在自己机器上把那个目录叫什么 —— 而身份只来自清单里的 `id`
+  //   （`packer/docs/README.md` 那句"目录名不参与任何判定"）。
   const { base, plug, git } = mkRepo(baseFiles());
   const want = path.join(base, `${MF_ID}.splug`);
 
@@ -487,7 +487,7 @@ section('4. 跨文件的常量');
     // 而这几行是打包器真正用的那几行。表达式按声明次序求值（`MAX_TOTAL_BYTES`
     // 引用了前两个），所以这里也按次序拼起来。
     const src = fs.readFileSync(PACKER, 'utf8');
-    // ★ 次序 = 源码里的**声明次序**（有几行引用了前面那几行）。v0.13 起信封那一项
+    // ★ 次序 = 源码里的**声明次序**（有几行引用了前面那几行）。信封那一项
     //   是 `SIG_MAX_BYTES` 推出来的，所以签名块那几个常量也得一起抠出来 ——
     //   抠漏了的话 `new Function` 会当场 `ReferenceError`（这条就变成一次崩溃，
     //   而不是一条"红了"的用例）。
@@ -805,7 +805,7 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const r = P.parsePackage(signed);
   check('★★ 签名**不改内容摘要**（§4.2：签名盖的是摘要，不覆盖信封）',
     r.ok && r.digest === digestBefore, r.ok ? `${r.digest} vs ${digestBefore}` : r.why);
-  // ★ v0.13：签名块的长度是 **188 + 版本号的字节数**（A.3），不再是定长 97。
+  // ★ 签名块的长度是 **188 + 版本号的字节数**（A.3），不再是定长 97。
   const verlen = Buffer.byteLength(MF_VER, 'utf8');
   check('★ 信封只长了 188+版本号 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
     signed.length === sizeBefore + 188 + verlen,
@@ -880,7 +880,7 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const sorted = P.sortByPathBytes(swapped);
   const mine = crypto.generateKeyPairSync('ed25519').privateKey;
   const myRaw = P.rawPubOf(mine);
-  // ★ v0.13：签的是四元组（A.3），所以这里得先把 `id`/版本与两个侧摘要拿出来。
+  // ★ 签的是四元组（A.3），所以这里得先把 `id`/版本与两个侧摘要拿出来。
   const sd = P.sideDigests(sorted);
   const quad = { id: MF_ID, version: MF_VER,
                  digestSite: sd.site, digestClient: sd.client };

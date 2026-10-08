@@ -25,8 +25,8 @@ contextBridge.exposeInMainWorld('slurmate', {
   //    · 断开：每一条会话都发 `goodbye` ⇒ 作业被 `scancel`。**彻底终止**。
   //    · 临时离开：发一条 `leave` ⇒ 看护者置空，**作业继续在集群上跑**，
   //      但倒计时从那一刻起算（300 秒 suspect → 1800 秒 orphaned → scancel）。
-  //    ★ 这一行从前写着"断开 = 作业继续在集群上跑，可以再连回来"—— 它**一直是
-  //      错的**，而错的方向恰好是最贵的那个：用户点了它，以为作业会留着。
+  //    ★ 别把【断开】读成"作业继续在集群上跑，可以再连回来"—— 那是**错的**，
+  //      而错的方向恰好是最贵的那个：用户点了它，以为作业会留着。
   disconnect: () => ipcRenderer.invoke('app:disconnect'),
   leave: () => ipcRenderer.invoke('app:leave'),
 
@@ -37,11 +37,6 @@ contextBridge.exposeInMainWorld('slurmate', {
   //
   // ★ 带客户端代码的插件要用户点一次同意才加载（`consentPlugin`）。同意闸的落点
   //   在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
-  //
-  // ★ **这里从前还有五个入口**：`installPlugin` / `uninstallPlugin` /
-  //   `rescanPlugins` / `openPluginDir` / `setDevPlugins`。它们服务的是"本机池"
-  //   —— 用户自己挑一个包、或者干脆拷一个插件目录进去，那条路**不过同意闸**。
-  //   它连同 `src/main/plugins/install.js` 整个文件一起删掉了（§5.1/§5.2）。
   //
   // 站点分发：手动对一次账 / 同意 / 不同意。
   syncPlugins: () => ipcRenderer.invoke('app:syncPlugins'),
@@ -117,7 +112,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 叫 jupyter 的插件而它们是两个不同的东西。不影响服务端。
   setPluginEnabled: (id, enabled) =>
     ipcRenderer.invoke('app:setPluginEnabled', id, enabled),
-  // **全部**会话 + 哪一个是前台。`app:state`（单数）已经删掉了 —— 它只会回
+  // **全部**会话 + 哪一个是前台。**不要**退回单数的 `app:state` —— 它只会回
   // 最后动过的那一个，而在多开下"某条会话在界面上根本不存在"是一种静默的丢失。
   states: () => ipcRenderer.invoke('app:states'),
   // ★★ 「作业列表」那一屏：**这个站点上我还有哪些作业**（服务端的 `op:list`）。

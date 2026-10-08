@@ -53,8 +53,8 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   **四处**声明（client/package.json、client/package-lock.json、cluster/slurmate、
 #   本文件）必须逐字相同，由 .github/workflows/checks.yml 断言。
-#   ★ 第四处（package-lock）是真的漏过一次的：`npm ci` 不比较 lock 里根那个
-#   version 字段，所以它从前停在 0.2.0 而没人发现。
+#   ★ 第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
+#   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
 VERSION = "0.14"
 SCHEMA_VERSION = 1
@@ -253,11 +253,11 @@ def parse_slurm_uid(v):
 
           UserId=litao(1019) JobState=PENDING Reason=JobHeldUser …
 
-    ★ 这一条从前是 `int(job.get("UserId", -1))`，于是带括号的形态抛 ValueError，
+    ★ 若用 `int(job.get("UserId", -1))`，带括号的形态会抛 ValueError，
       而唯一的调用点（recover_from_rules）把它当"这条规则不归我"跳过去 ——
-      结果是 DB 一丢就从 nft 规则恢复**不出任何一行**，静默，症状是
+      于是 DB 一丢就从 nft 规则恢复**不出任何一行**，静默，症状是
       `reconcile()` 把在跑的作业的规则全当成孤儿删掉（见那个函数的 docstring）。
-      ★ 它之所以一直没被发现，是因为测试桩喂的是**纯数字**的 UserId。
+      ★ 测试桩喂**纯数字**的 UserId 碰不到它，所以它不容易被发现。
 
     ★ 反过来，认不出来时**必须返回 None 而不是 -1**：-1 是个合法整数，会一路
       走进 `!= uid` 的比较里，看上去像"确认过不是这个人"。
@@ -296,8 +296,8 @@ def job_is_terminal(info):
 # ── GRES：一个结构化描述符，和一个拼法 ──────────────────────────────────────
 #
 # ★ 这一层为什么存在：GRES 是**管理员自定义的**（`GresTypes` + `gres.conf`，
-#   名字与类型随集群而定），而从前这里只认 `gpu:N` 一种形状 —— 写只写
-#   `"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`。于是异构集群上的表现是
+#   名字与类型随集群而定），而只认 `gpu:N` 一种形状（写只写
+#   `"gpu:%d"`、读只认 `re.fullmatch(r"gpu:(\d+)")`）的话，异构集群上的表现是
 #   **界面上显示"没有 GPU"，而作业正占着两张 A100**，且没有任何地方会报错。
 #
 # ★ `{name, type, count}` 是**唯一**的内部表示：线上（请求与响应）是它，
@@ -535,12 +535,10 @@ def crosscheck_cidr(cfg, run=None):
 def config_deploy_problems(cfg):
     """「这份配置能不能上线」的**全部**判据，返回 `(errors, cidr_errors)`。
 
-    ★★ 三个调用点（`Sessiond.start()` / `--check` / 热重载）共用**这一处**
-      （v0.13 阶段 5）。在那之前它们是各抄一份**子集**：`--check` 与 `start()`
-      抄的那两份恰好都没漏，于是"漏了一份"这件事一直没有症状 —— 直到 v0.12
-      开出热重载这条路：它只跑 `validate()`，**没有** `crosscheck_cidr()`。
-      一个 `cluster_cidr` 写错的站点于是可以 `systemctl reload` 成功，而
-      `Nft.ensure()` 按值比对把内核里那条基础规则换成**错的网段**。
+    ★★ 三个调用点（`Sessiond.start()` / `--check` / 热重载）共用**这一处**。
+      两个调用点各抄一份**子集**就会漏，而漏了未必有症状：热重载那条路上少一个
+      `crosscheck_cidr()`，一个 `cluster_cidr` 写错的站点就能 `systemctl reload`
+      成功，而 `Nft.ensure()` 按值比对把内核里那条基础规则换成**错的网段**。
       ⇒ 任意两个调用点之间都可能漏；**不会再漏的形状是只有一处**。
 
     ★ 两类**不合并成一个列表**，因为它们的出口不同：
@@ -560,7 +558,7 @@ def config_deploy_problems(cfg):
 
 # ── 不再是配置项的常量 ──────────────────────────────────────────────────────
 #
-# 这些值此前都是 slurmate.conf 里的键。它们被收起，是因为**它们只有一种正确
+# 这些值不放进 slurmate.conf，是因为**它们只有一种正确
 # 取值，而配置项的存在本身就制造了取错的可能**。
 #
 # 前四条尤其要紧：它们与 systemd 单元的 RuntimeDirectory / StateDirectory /
@@ -693,9 +691,8 @@ DEFAULT_MAX_SESSIONS_PER_USER = 1
 #
 # ★★ 它数的是**连接**（一条常驻通道、一次 `slurmate rpc`、一次 `slurmate wait`
 #    各算一条），**不是"几台电脑"**。它与 `max_sessions_per_user` 仍然是两个旋钮
-#    （一个管连接，一个管作业）—— 但别把这一格读回成"客户端配额"：那个东西叫
-#    `max_clients_per_user`，它按 uid **顶掉整个客户端**，而那个形状在 v0.9 整条
-#    删掉了（理由与逐条症状见 cluster/docs/CONFIGURATION.md 的那一节）。
+#    （一个管连接，一个管作业）—— 但别把这一格读回成"客户端配额"：那种语义
+#    （按 uid **顶掉整个客户端**）不是这一格。
 #
 # ★ 超限时**拒绝新来的那一条**（`5 too_many_connections`），**不顶掉旧的**。
 #   "顶掉"那条路上没有终点：两台电脑互相顶下去，而这一次连"被顶掉的禁止自动重连"
@@ -723,12 +720,11 @@ CLIENT_NAME_MAX = 64
 #   加一个插件因此是「放一个包 + 跑一次 `slurmate plugin install`」，不是
 #   「改守护进程的源码」—— 这是「插件是独立项目」在集群侧的落点。
 #
-# ★ **这一段从前写的是「一个插件是一个目录、三半」**（`plugin.json` /
-#   `client/index.js` / `job/start.sh` 三个文件）。它说的四件事今天全不对：形状
-#   是包不是目录、落点由安装器改名成 `<ULID>.splug`、扫法是**读包**不是列目录、
-#   而"放一个目录"那个动作也不再存在（作者 `packer build` 出包；**安装器与部署
-#   脚本都永不打包**）。**那三样东西仍然是插件的三半**，只是它们在一个包的负载里
-#   —— 见下面
+# ★ **一个插件是一个包，不是目录。** 形状是包不是目录、落点由安装器改名成
+#   `<ULID>.splug`、扫法是**读包**不是列目录，而"放一个目录"那个动作也不存在
+#   （作者 `packer build` 出包；**安装器与部署脚本都永不打包**）。**那三样东西
+#   仍然是插件的三半**（`plugin.json` / `client/index.js` / `job/start.sh`），
+#   只是它们在一个包的负载里 —— 见下面
 #   「站点侧的一个插件是【一个包文件】」那一段与 packer/docs/PLUGIN-SPEC.md 附录 A。
 #
 # ★ 一次会话只可能有一个插件在跑 —— 这一点由 run.sbatch 的分派结构性
@@ -806,7 +802,7 @@ CONN_OUT_HARD = 4 << 20
 #   一个方向完全反了的结论。所以超限时必须 **accept-then-reject**。
 CONN_MAX = 64
 
-# 一条请求行的长度上限（与从前的 handle_client 一致：读满这么多还没见到换行
+# 一条请求行的长度上限（读满这么多还没见到换行
 # 就放弃）。超了回一句 bad_request 再关，**不是静默丢弃**。
 CONN_IN_MAX = 65536
 
@@ -832,7 +828,7 @@ SNAPSHOT_INTERVAL = 30.0
 # 一次跑完的话期间 tick 与**所有别的连接**都停摆。
 MAX_DISPATCH_PER_WAKEUP = 8
 
-# `select` 一次最多阻塞这么久（v0.12 阶段 3）。
+# `select` 一次最多阻塞这么久。
 #
 # ★★ 它是"信号要等一个 tick 才被看见"的解药，而那个现象的来源是 PEP 475：
 #   被信号打断的系统调用会**自动重试**（超时按原起点重算），所以 `select` 不会
@@ -847,11 +843,11 @@ SIGNAL_POLL_SECONDS = 1.0
 #
 # ★★ 这一节要的是**一次查询服务所有连接**。
 #
-#   从前的形状是：每个 `partitions` / `submit` / `whoami` 请求各自去 fork 一次
-#   `scontrol`（其中分区表那条**连缓存都没有**）。N 个用户 × M 条连接 ⇒ N×M 次
+#   若每个 `partitions` / `submit` / `whoami` 请求各自去 fork 一次
+#   `scontrol`（其中分区表那条**连缓存都没有**），N 个用户 × M 条连接 ⇒ N×M 次
 #   fork，而它们问的是**同一个**集群、答案本该是**同一份**。
 #
-#   现在刷新跑在 **tick 里**，RPC 只读缓存 —— 于是一个 steady-state 的请求
+#   刷新因此跑在 **tick 里**，RPC 只读缓存 —— 于是一个 steady-state 的请求
 #   **一次 fork 都不发**。这既是 O(1)，也让"请求有多慢"与"集群有多慢"解耦：
 #   fork 落在 tick 上，而 tick 晚一轮没有后果（对账是幂等的）。
 #
@@ -897,7 +893,7 @@ HISTORY_MAX_ROWS = 30
 #   `site.defaultMem` 里，站点可以在**那个插件的配置**里覆盖它。
 #   这里只有"绝不能超过多少"这一条 —— 那是**框架**的策略，不是插件能自选的。
 MAX_CPUS_REQUEST = 64
-# ★ 这里此前有一个 `MAX_GPUS_REQUEST = 8`。它删掉了，因为**GRES 的上限不是框架的
+# ★ 框架不为 GRES 设上限，因为**GRES 的上限不是框架的
 #   策略，而是集群的事实** —— 每节点配了几张卡由管理员在 `gres.conf` 里定，写死在
 #   代码里等于替所有站点做了同一个决定（每节点 16 张卡的站点也只能要 8 张）。
 #   今天那个数来自 `Slurm.gres_catalog()`（`scontrol show node -o` 的 `Gres=`），
@@ -943,7 +939,7 @@ PLUGIN_VERSION_RE = re.compile(
     r"\A%s\.%s\.%s\Z" % (_SEG_ANY, _SEG_BYTE, _SEG_BYTE))
 # ★ 下面这两条也**与客户端 `plugins/index.js` 的 `ulid.isId` / `NAME_RE` 逐字一致**，
 #   理由与上面完全一样（一侧收下、另一侧拒了）。它们跟着版本号一起用 `\A … \Z`：
-#   `"code-server\n"` 那种值从前在这边是合法的。
+#   `"code-server\n"` 那种值（不带 `\A … \Z` 就会被放行）。
 # 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
 PLUGIN_ID_RE = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
 # 站点短名进配置文件名（`<名字>.conf`）、进会话文件、进日志与报错文案。
@@ -951,7 +947,7 @@ PLUGIN_NAME_RE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
 
 # ── 清单里认得的键 ──────────────────────────────────────────────────────────
 #
-# **未知键拒绝，不是忽略。** 用户从前只有客户端那一侧有这个白名单，而这边逐键
+# **未知键拒绝，不是忽略。** 若只有客户端那一侧有这个白名单，而这边逐键
 # 取值、多出来的键一律不管 —— 于是「一份把 contributes 拼错的清单：客户端拒、
 # 守护进程收」，站点能把一个任何客户端都装不上的插件正常分发出去，而**没有任何
 # 东西会红**（账本 S12）。判定与客户端**逐条一致**，判据的书面形式是
@@ -980,7 +976,7 @@ def _ver_segments(s, pattern):
     ★ 返回字符串而不是整数，是这套规则的全部要点（见上面关于 2^53 的那段）。
     ★ **不 strip**：`" 1.0"`、`"1.0\\n"` 都不是合法版本号。**校验用的是原串** ——
       清单那一层是 `need_str`（客户端侧是 `inspectDir` 的 `VERSION_RE.test`）。
-      这里从前先 `.strip()` 再匹配，于是"带空格的版本号"在这边被收下、在客户端
+      先 `.strip()` 再匹配的话，"带空格的版本号"会在这边被收下、在客户端
       被拒 —— 19.0b2 里那三条走 `_manifest` 的用例钉的就是它。
     ★ 在本文件里这一层同样**不可观测**（调用方喂进来的都过了 `need_str` 那道门），
       所以别把它当防线；真正的门在 `need_str`，那里的用例是红的。
@@ -1098,7 +1094,7 @@ def engines_problem(manifest, host_version):
       判据两边共用（tools/version-fixtures.json 的 `engines` 段），措辞各写各的
       —— 这边说"本站的守护进程是…"，那边说"本客户端是…"。
 
-    ★ 从前这里只认「`engines` 是 dict 且 `slurmate` 是非空字符串」，其余五种形状
+    ★ 若只认「`engines` 是 dict 且 `slurmate` 是非空字符串」，其余五种形状会
       **静默跳过**（当成没有限制），而客户端**全拒** —— 一侧收下、另一侧拒了，
       正是这个项目点名过的最坏形状。现在统一到**严格的那一侧**：严格的那一侧
       已经在拒，所以收紧不可能制造出新的分家，只会让拒绝来得更早
@@ -1158,7 +1154,7 @@ JOB_TEMPLATE_MARKER = "# @@SLURMATE_PLUGIN_BLOCKS@@"
 
 # ── 站点分发：把插件发出去 ──────────────────────────────────────────────────
 #
-# ★★ **站点侧一个插件的存储形状是一棵树加一份记录表**（v0.13 起）：
+# ★★ **站点侧一个插件的存储形状是一棵树加一份记录表**：
 #
 #       <plugins_dir>/<ULID>/            负载**原样铺开**（路径与包内逐字相同）
 #       <plugins_dir>/<ULID>.json        记录表 —— 这次安装的「提交点」
@@ -1169,14 +1165,10 @@ JOB_TEMPLATE_MARKER = "# @@SLURMATE_PLUGIN_BLOCKS@@"
 #   **每次启动对账**（`scan_plugins`），以及把内容发给客户端（`op_plugins` 报清单、
 #   `op_plugin_package` 现打一个包发出去）。
 #
-#   ★ v0.6 还有第三条 —— `op_plugin_file` 逐份发。**它在 v0.7 被删掉了**：留着它
-#     不只是多一条代码路径，是多一条**验签绕得过去**的路（散装字节证明不了签名者）。
-#     见 op_plugin_package 的注释与 docs/PROTOCOL.md 的版本表。
-#
 #   ★★ **中心句：容器是运输形状，不是存储形状。** 它只在两段路上活着：
 #      作者 → 站点（安装器解开它）、站点 → 客户端（站点现打一个）。
 #
-#   为什么**不是**"只存容器"（v0.12 及以前）：那样"安装"没有内容，它只是一次
+#   为什么**不是**"只存容器"：那样"安装"没有内容，它只是一次
 #   `os.replace` —— 盘上只留下字节本身，改一个字节没有对照物，"是安装器放的"
 #   只能靠纪律。拆成树之后树自己不自校验（容器是自校验的），**记录表就是它的
 #   解药**：逐份 sha256 + 内容摘要 + 签名 ⇒ 每次启动能对账，改一个字节当场查出来。
@@ -1206,14 +1198,14 @@ PLUGIN_OLD_PREFIX = ".slurmate-old-"
 # 约 2.7 MiB，再加信封，余量约 1.5 倍。
 #
 # ★ 这笔账**有对应用例**（19.11d 那条跨文件不变量读的是两个文件里的这两个数）。
-#   从前的毛病正是"数字改了、另一侧没跟上"：那时 CLI 的上限是 1 MiB，而本站通报
-#   的总量上限就是 1 MiB ⇒ **整包一次发时那个数是假的**（1 MiB 的负载 base64 之后
+#   这组数的毛病正是"数字改了、另一侧没跟上"：CLI 的上限与本站通报
+#   的总量上限若各自为政，**整包一次发时那个数就是假的**（1 MiB 的负载 base64 之后
 #   1.33 MiB，读不完）。症状还会被认错：CLI 报"响应太大"，而客户端把它归成
 #   `daemon_unreachable` 并退避重试 —— 一句"文件太大"变成"守护进程没响应"。
 #
 # ★ 它是**拦得住**的：安装器拒绝装一个超过它的包（装了也发不出去，客户端永远
 #   取不回来），`op_plugin_package` 也再判一次（拦住绕过安装器放进来的）。
-#   ★ v0.13 阶段 4 起出口那一次判的是**发出去的那一份**（只含客户端侧），它比整包
+#   ★ 出口那一次判的是**发出去的那一份**（只含客户端侧），它比整包
 #     小 —— 于是两边严格说不是在判同一个数。**这是对的**：出口要判的是"这条链路
 #     装不装得下"，入口要判的才是"这个包本身有多大"。
 #   下面三个**负载内**的数字才是"只通报、不拦截"的那一类。
@@ -1222,10 +1214,7 @@ PLUGIN_PACKAGE_MAX_BYTES = 2 << 20
 # 单文件上限。它是一条**负载内**的规则：本站不拦它，客户端读方拿它校验包里的
 # 每一份（`checkDeclared`），打包器在产出时也不同程度地照着它。
 #
-# ★ v0.7 之前它还是**一笔链路账** —— 逐份取那条路上每次应答装一份文件，这个数
-#   是按"1 MiB 的响应、base64 膨胀 4/3 ⇒ 256 KiB 约 342 KiB"反推出来的。
-#   `plugin_file` 删掉之后那条反推**没有了**，而这个数**留着**：客户端那份硬上限
-#   与它同名同义，改它等于改客户端的判据。
+# ★ 这个数与客户端那份硬上限**同名同义**，改它等于改客户端的判据。
 #
 # 今天最大的一份是 sshd 的 client/sshconfig.js（17.5 KB），余量 15 倍。
 PLUGIN_FILE_MAX_BYTES = 256 * 1024
@@ -1238,8 +1227,8 @@ PLUGIN_FILE_MAX_BYTES = 256 * 1024
 # ★ **负载的"整体字节上限"（`PLUGIN_TOTAL_MAX_BYTES`）不在这几行里。** 它是
 #   **推出来的**（包上限 − 信封的最坏情况），所以要用的那几个数（头的长度、
 #   签名的长度、路径深度上限）在哪儿它就在哪儿 —— 见下面容器格式常量那一段紧
-#   后面的〈负载的整体上限〉。从前它在这里，是个拍出来的 1 MiB：它和那个 2 MiB
-#   的包上限之间没有任何东西钉住，而"负载 1 MiB"这句话因此什么也没说明。
+#   后面的〈负载的整体上限〉。若把它写成一个拍出来的 1 MiB，它与那个 2 MiB
+#   的包上限之间就没有任何东西钉住，而"负载 1 MiB"这句话因此什么也没说明。
 PLUGIN_MAX_FILES = 256
 
 # 安装器写在 plugins_dir 里的两个东西（都以 `.` 开头，所以 scan_plugins 扫不到）：
@@ -1248,7 +1237,7 @@ PLUGIN_MAX_FILES = 256
 #                `<ULID>`）。安装器用它把"源里已经拿走的插件"真的从站点上
 #                删掉 —— 少了它，「把包从源目录移走再同步」这个最自然的卸载动作
 #                会**静默无效**。
-#                ★ v0.13 起每行是**裸 id**（从前是 `<ULID>.splug`）：一个插件在
+#                ★ 每行是**裸 id**：一个插件在
 #                  这个目录里占的是**两个**条目（一棵树 + 一份记录表），而它俩的
 #                  共同名字就是 id。标记说的是"哪个插件是我们装的"，不是"哪个
 #                  文件名是我们写的"。
@@ -1305,11 +1294,11 @@ class PluginSpec(object):
         # `service_kind`、日志与报错文案里出现的都是它。它不需要全球唯一 ——
         # 全球唯一是上面那个 id 的事。
         #
-        # ★★ **它也不再需要站点内唯一**（v0.11 放开）。两个 id 不同、短名一样的
+        # ★★ **它也不再需要站点内唯一**。两个 id 不同、短名一样的
         #    插件允许并存，它们**不是**同一个东西。于是"名字 → 哪一个"的判据只剩
         #    一处（`Config.resolve_plugin()`）：短名唯一时能写短名，**有歧义时
         #    要求写 id**，并把是哪几个列出来。★ 别在这里补一句"所以它是唯一的"：
-        #    从前那句"由配置校验保证"正是这么来的，而校验不再保证它了。
+        #    校验不保证它。
         self.name = name
         self.title = title
         # 这个插件在**本站上装在哪**（`<plugins_dir>/<ULID>/`）。
@@ -1317,9 +1306,7 @@ class PluginSpec(object):
         # ★ **它是承重字段**：站点分发的每一个字节都从这棵树里读，作业脚本也从
         #   它里面那 `job/start.sh` 织（`plugin_tree_dir()`）。
         #
-        # ★ 字段名的来路：`source_dir`（v0.12 之前，那时站点上真的是一棵目录树）
-        #   → `source_package`（v0.12，一个 `.splug` 文件）→ `install_dir`（v0.13，
-        #   又变回一棵树）。**没有改名回 `source_dir`** 是刻意的：那个名字与**作者
+        # ★ 字段名是 `install_dir` 而不是 `source_dir`：后者与**作者
         #   机器上的源码树**（打包器的输入）太像，而这是**本站上的安装结果** ——
         #   两者只差一个跳过集，混起来读不会报错，只会让人找错地方。
         #
@@ -1327,8 +1314,7 @@ class PluginSpec(object):
         #   的提交点。**判据永远来自记录表**，树只提供字节。
         self.install_dir = install_dir
         # 它有没有作业侧实现。**判据是记录表里有没有 `job/start.sh` 那一份**。
-        # 从前是"目录里有没有那个文件"、后来是"包里的负载有没有它" —— 问的对象
-        # 随着存储形状变了三次，而**答案始终是同一件事**：这一份装得上、看得见，
+        # 无论存储形状如何，**答案始终是同一件事**：这一份装得上、看得见，
         # 但它提交不了。
         #
         # 没有的话作业会在 run.sbatch 里以 24 明确失败 —— 但**织作业脚本时**就会
@@ -1410,8 +1396,8 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
     而插件清单是人手写的，一次写对三处的概率不高。
 
     ★ `where` 只是**报错时指给用户的那个位置**（现在形如
-      `…/<ULID>/plugin.json`），它**不**被拿来推路径 —— 从前这里用
-      `os.path.dirname(where)` 当插件目录，包之后那个推法是错的（那是包里的
+      `…/<ULID>/plugin.json`），它**不**被拿来推路径 ——
+      `os.path.dirname(where)` 那种推法是错的（那是包里的
       一个**名字**，不是磁盘上的路径）。谁读的清单，谁就把"这棵树在哪"和"有没有
       作业侧"两件事一起传进来（见 scan_plugins）。
     """
@@ -1432,9 +1418,9 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
             bad("%s里有认不得的键：%s（认识的只有 %s）"
                 % (what, "、".join(repr(k) for k in extra), "、".join(allowed)))
 
-    # ── 认不得的键：**报错，不是忽略**（v0.10 起，与客户端逐条一致）────────────
+    # ── 认不得的键：**报错，不是忽略**（与客户端逐条一致）────────────
     #
-    # ★ 从前这一层只有客户端有，于是"站点分发出去了、而任何客户端都装不上"
+    # ★ 若这一层只有客户端有，则"站点分发出去了、而任何客户端都装不上"
     #   从来不报错。**逐层判**（顶层 / contributes / 它的三个子对象），不是只判
     #   顶层：停在顶层的话，`contributes.login.pathh` 这种拼错仍然是一侧拒、
     #   一侧收 —— 同一个缺陷往下挪一层而已。
@@ -1450,7 +1436,7 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
             return bad("缺少非空字符串 %r" % key)
         # ★ 有 pattern 的字段（id / name / version）**拿原串匹配**，只有返回值 strip。
         #   清单是 JSON，`"version"` 就是它自己那串字符 —— 客户端那边也是拿原串
-        #   （`VERSION_RE.test(mf.version)`），从前这里先 strip 再匹配，于是
+        #   （`VERSION_RE.test(mf.version)`），若先 strip 再匹配，
         #   `" 1.0.0 "` 变成了"守护进程收下、客户端拒了"。报错里给**原串**，
         #   否则那句"取值不合法"会指着看上去完全正常的 `1.0.0`。
         #   strip 只留给没有 pattern 的字段（displayName 这类给人看的文本）。
@@ -1645,7 +1631,7 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
 def scan_plugins(plugins_dir):
     """扫插件目录，返回 `(specs, problems)`。
 
-        <plugins_dir>/<ULID>/            ← 唯一的形态（v0.13 起）
+        <plugins_dir>/<ULID>/            ← 唯一的形态
         <plugins_dir>/<ULID>.json        ← 它的记录表（提交点）
 
     ★★ **每扫一次就是一次对账**：读记录表 → 与盘上那棵树逐份比 → 重算摘要 → 验签
@@ -1654,7 +1640,7 @@ def scan_plugins(plugins_dir):
 
     ★ 为什么"不可用"是进 `problems` 而不是在 `specs` 里加一个标志位：客户端读的
       是**两条分开的通道**（`plugins[]` 是能用的，`problems[]` 是"另外还有些用不了
-      的，以及为什么"）。这正是账本 **F22** 修出来的形状 —— 从前坏掉的插件被整个
+      的，以及为什么"）。这正是账本 **F22** 的形状 —— 坏掉的插件若被整个
       丢掉，运维在客户端上看到的是「本站没有这个插件」，排查方向从第一步就是错的。
       ★ 而往 `plugins[]` 的每一项上加一个 `unavailable` 是**协议改动**，还会让
         `can_submit` 那一格变成两件事的合取 —— 没有理由走那条路。
@@ -1673,8 +1659,8 @@ def scan_plugins(plugins_dir):
     ★ `.splug` 出现在这个目录里是一条**明确的错误**，不是"旧形状、兼容一下"：
       `0.y` 不考虑兼容性，而"两种形状并存"正是这个项目一路在清的那类状态。
 
-    ★★ **id 撞那条去重（账本 F21）落到了 `plugin_reconcile` 里**，换了个形式：
-      从前是两个**文件名**各自声称同一个 id，现在是**目录名必须等于清单里的 id**
+    ★★ **id 撞那条去重（账本 F21）落到了 `plugin_reconcile` 里**：
+      **目录名必须等于清单里的 id**
       —— 一棵树顶着别人的目录名就是同一个身份的两份内容，而作业脚本按 id 命名，
       后织的会**静默覆盖**先织的那一份。**短名撞仍然不去重**（不同 id 同名是允许
       并存的，配置文件名写 `<id>.conf` 就分得开）。
@@ -1701,7 +1687,7 @@ def scan_plugins(plugins_dir):
             #   在这一格判定会把所有正常的记录表都当成孤儿（它们都是**文件**）。
             continue
         if not os.path.isdir(full):
-            # 文件（含旧形状的 `.splug`、手放的东西）都走这一条。**报出来必须给出
+            # 文件（含 `.splug`、手放的东西）都走这一条。**报出来必须给出
             # 下一步** —— 只诊断、不指出路，等于把"这怎么办"留给运维去猜。
             if entry.endswith(PLUGIN_PACKAGE_SUFFIX):
                 problems.append(
@@ -1803,12 +1789,10 @@ GLOBAL_KEYS = frozenset([
     # 而旧名字留在白名单外，正好让那条「老配置里的键会被明确拒绝」的用例
     # 一个字都不用改地继续守着。
     "max_sessions_per_user",
-    # 每人同时几条**连接**。★ 名字是 v0.9 换的：从前叫 `max_clients_per_user`，
-    # 而那个名字说的是**顶掉整个客户端**那种语义 —— 它连同 enforce_client_cap /
-    # displace 一起删掉了。这一格现在是"超限就拒绝新来的那一条"。
+    # 每人同时几条**连接**。超限就拒绝新来的那一条（不顶掉旧的）。
     "max_connections_per_user",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
-    # ★ 这三个是 v0.8 阶段 5 加的（集群信息）。**不能省** —— 它们是集群信息
+    # ★ 这三个是集群信息用的。**不能省** —— 它们是集群信息
     #   那三格的唯一来源，而 `resolve_bin` 找不到就返回 None，于是
     #   "这一格永远是取不到"变成一个看起来像集群问题的配置问题。
     "sinfo", "sshare", "sacct",
@@ -1845,8 +1829,8 @@ GLOBAL_KEYS = frozenset([
 #   ⇒ 对**改错了会静默失效**的键（不报错、只是那层保护从此不再生效），这一条是
 #      **硬要求**。全表只有 `cluster_cidr` 是这一种，拦住它的是
 #      `crosscheck_cidr()` —— 它现在在 `config_deploy_problems()` 里，所以
-#      `start()` / `--check` / 热重载**三条路都会跑**（v0.13 阶段 5 之前热重载
-#      那条路上没有它，见下面那一格）。
+#      `start()` / `--check` / 热重载**三条路都会跑**（为什么必须是三条，见下面
+#      `cluster_cidr` 那一格）。
 #   ⇒ 而改错了会**当场叫出来**的键（`sbatch` 路径写错 ⇒ 下一次 fork 就是 127）
 #      不需要额外的东西：那种错本来就会自己报。
 #
@@ -1874,10 +1858,10 @@ RELOAD_CLASS = {
     # 比对，见那一节）。说一句是因为"哪些流量被放行"在这一刻真的变了。
     # ★★ 而它之所以可热（不是 COLD），靠的是**改错了会被拦住**：重载的判据里
     #   有 `crosscheck_cidr()`，它拿新网段与 Slurm 的 NodeAddr 全集对一遍 ——
-    #   漏掉任何一个节点 ⇒ **整个重载被拒、一个字都不改**（v0.13 阶段 5 / F45）。
-    #   ★ 在那之前热重载那条路上**没有**这一道：改错一个数字能重载成功，而
-    #     `Nft.ensure()` 会把内核里那条基础规则换成错的网段 —— 被漏掉的节点流量
-    #     走到链尾的 `policy accept`，没有报错、没有日志、没有任何迹象。
+    #   漏掉任何一个节点 ⇒ **整个重载被拒、一个字都不改**（账本 F45）。
+    #   ★ 少了这一道，改错一个数字就能重载成功，而 `Nft.ensure()` 会把内核里
+    #     那条基础规则换成错的网段 —— 被漏掉的节点流量走到链尾的 `policy accept`，
+    #     没有报错、没有日志、没有任何迹象。
     #   ★ 这一格单独看会以为"网段只影响新发生的事"，而它其实是**几何约束**：
     #     它错了，此后每一条会话规则都匹配不到。所以它的"可热"是**有条件的**，
     #     条件写在上面那段"能不能可热"里。
@@ -1953,7 +1937,7 @@ def changed_notice_keys(old, new):
 #   （原子，没有中间态），而"这一份是谁写的"这个问题根本不用问 ——
 #   安装器只碰 `<id>.conf` 这一个名字（见 `plugin_conf_path`）。
 #
-# ★ 文件名就是身份，规则与从前的块名**逐字相同**：短名可以、撞名时必须写 id、
+# ★ 文件名就是身份：短名可以、撞名时必须写 id、
 #   歧义是错。文件内容只有 `键 = 值`，**没有块头**。
 #
 # ★ 主文件里**不许**出现 `[plugin:...]` 块（报错并指路）。于是一个插件一份配置、
@@ -2018,9 +2002,8 @@ def parse_config(path):
 # 「把插件的东西写回主文件」是一个**有理由**的直觉 —— 得说清格式为什么换了。
 # ★★ 这条报错要**说清该写到哪儿去**，并给出可照做的搬法 —— 只说"不合法"的话，
 #    管理员唯一想得到的动作是把那几行**删掉**，而那是把他的配置丢掉。
-#    ★ 这段话此前在 `install-base.sh` 里有一份**孪生兄弟**（它在装完 conf 之后自己
-#      扫一遍块头再 die）。v0.12 阶段 4 把那一份删了：判据只能有一处，而这里
-#      是唯一知道"主文件里为什么不能有块头"的地方。
+#    ★ 判据只有这里一处：只有这里知道"主文件里为什么不能有块头"，
+#      别处再抄一份就会分家。
 _MAIN_NO_SECTION = (
     "本版起插件配置**不写在这里**：一个插件一个文件，住在\n"
     "        `<本文件>.d/<名字>.conf`。这么改是因为「这一份是谁写的」必须由"
@@ -2182,11 +2165,6 @@ def human_bytes(n):
         n /= 1024.0
 
 
-# ★ 从前这里还有一个 `plugin_symlinks()` —— 插件目录里的符号链接，只给
-#   `--check-plugins` 打 ⚠ 用。**它随"插件是一个包"一起消失了**，而不是被删掉了
-#   一条检查：负载是「路径 → 字节」，格式里表达不出一个链接，所以"这个插件分发不了"
-#   这一态**不存在**了。留下一个永远返回空列表的函数，比没有它更糟 —— 它会让人
-#   以为这条路还有人守。
 
 
 # ==============================================================================
@@ -2197,8 +2175,6 @@ def human_bytes(n):
 #     安装器（`--install-plugins`）  解析 + 验签 + 同 id 检查
 #     `scan_plugins()`               从包里读插件表（守护进程与 --check-plugins）
 #     `--extract-package`            取包里的 job/start.sh 去织作业脚本（编织那一节）
-#   ★ 从前这里还列着 `plugin_payload_index()`（一个只读记录表的一行包装，给
-#     `--check` 报"分发出去多大"用）。**它删了** —— 详见 `main()` 里那一段。
 #
 # ★ **它是三份实现里的第三份。** 钉住它们的是 `tools/conformance/`：一份固定的
 #   输入树、一份期望的包字节、一批坏包（每条带一个期望的理由词）。所以下面这个
@@ -2209,7 +2185,7 @@ def human_bytes(n):
 # ★ **这一节不验签。** 它只回答"这个包自己跟自己一致吗"（记录表、逐份 sha256、
 #   长度方程）—— 签名块它只**解析并报出签名者**，不判它成不成立。
 #
-# ★★ **v0.13 起站点也验签了，只是在另一个地方**：`plugin_reconcile()`（每次启动
+# ★★ **站点也验签，只是在另一个地方**：`plugin_reconcile()`（每次启动
 #   对账、以及每次分发前现算）与安装器（`install_plugins`）。两处问的是**两个**
 #   问题，判据不能混：
 #     · 这一节：「包自己跟自己一致吗」—— 与钥匙无关，纯粹的形状与长度；
@@ -2266,7 +2242,7 @@ PACKAGE_MAX_SEGMENT_BYTES = 255      # §3.3。与客户端 MAX_SEGMENT_BYTES �
 #   而**安装器会拒**：一句话说不清的"明明合规却装不上"。
 PACKAGE_MAX_PATH_BYTES = (PACKAGE_MAX_DEPTH * PACKAGE_MAX_SEGMENT_BYTES
                           + (PACKAGE_MAX_DEPTH - 1))
-# ★ 签名那一项 v0.13 起是 PACKAGE_SIG_MAX_BYTES（443），不是 97：签名块盖的是四元组
+# ★ 签名那一项是 PACKAGE_SIG_MAX_BYTES（443）：签名块盖的是四元组
 #   {id, 版本, 站点侧摘要, 客户端侧摘要}，长度随版本号变（见 A.3）。
 PACKAGE_ENVELOPE_MAX_BYTES = (PACKAGE_HEADER_BYTES + PACKAGE_SIG_MAX_BYTES
                               + PLUGIN_MAX_FILES
@@ -2671,10 +2647,10 @@ def package_extract(path, inner):
 #   它做的事 = **把那个容器解开成一棵能对账的树**：解析 → 按 §3.3 判路径 → 验签 →
 #   查签名者记录 → 写树 → **最后原子地写记录表（提交点）**。
 #
-#   ★ v0.12 阶段 4 起**集群侧只有这一个入口**：`install-base.sh` 不再碰插件，而
+#   ★ **集群侧只有这一个入口**：`install-base.sh` 不再碰插件，而
 #     `--plugins-src DIR`（目录模式：枚举 + 信任检查 + 集合对账）也走它。
 #   ★ **服务器上从头到尾没有源码树** —— 打包是作者的事（`packer/`），这里只收包，
-#     而包**装完就不留在盘上**（v0.13 起：容器是运输形状，不是存储形状）。
+#     而包**装完就不留在盘上**（容器是运输形状，不是存储形状）。
 #
 # ★ 为什么安装器要长在守护进程这个文件里，而不是 CLI 里或 install-base.sh 里：
 #   读包、验签、"包里有没有 job/start.sh"、扫描器认不认这份清单 —— 这几件事全
@@ -2840,7 +2816,7 @@ def plugin_record_path(plugins_dir, plugin_id):
 def _atomic_write_bytes(path, blob, mode=0o644):
     """原子的"写一个文件"：同目录临时文件 → `os.replace`。
 
-    ★ 与 `write_plugin_keys()` 从前各写一遍的那段是同一件事，所以合成一处 ——
+    ★ 与 `write_plugin_keys()` 里那段是同一件事，所以合成一处 ——
       `os.replace` 就是 POSIX `rename`，**要么旧内容、要么新内容，不存在半个**。
       而这正是"记录表 = 提交点"能成立的那条依据。
     """
@@ -3170,8 +3146,8 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
     ⑥ 信封的形状、信封说的身份与清单**对得上**（v0.13：签的是四元组，见附录 A.3）；
     ⑦ 从表重算**两侧**的内容摘要 + 信封里的签名**验得过**。
 
-    ★★ **⑦ 是这个形状的全部意义。** 从前的 `.splug` 是自校验的（记录表 + 逐份
-      sha256 + 签名都在同一个文件里，改一个字节当场自相矛盾）。拆成树之后树自己
+    ★★ **⑦ 是这个形状的全部意义。** 一个自校验的容器（记录表 + 逐份
+      sha256 + 签名都在同一个文件里，改一个字节当场自相矛盾）拆成树之后，树自己
       什么校验信息都不带 —— 记录表是它的解药，而**签名是解药的解药**：有人改了
       `job/start.sh` 又同步改了表里那一行的 sha256，逐份对账会通过，而重算出来的
       摘要与签名对不上。少了 ⑦，改树与改表是配套的两步，而两步都做得到。
@@ -3418,11 +3394,11 @@ def plugin_inspect(plugins_dir, plugin_id, verify=True):
       **逐个字符**比。它**不能**换成 `dist.digest` —— 那两个数不一样，换了这一屏
       就不再回答"装上去的是不是作者那一份"。
 
-    ★ `dist` 说的是**要发给客户端的那一份**（v0.13 阶段 4 起只含客户端侧）：
+    ★ `dist` 说的是**要发给客户端的那一份**（只含客户端侧）：
       `{side, files, bytes, digest}`。三个上限判据（整包 / 份数 / 负载）看的都是它
       —— 客户端收到的就是这些字节，拿整棵树的数去判会把"发得出去"说成"发不出去"。
-    ★ 从前这里只有一个 `bytes`（整棵树重打成包多大）。**它删了**：v0.13 之后没有
-      任何一条路会发整包，"整包多大"没有一个问它的人，而留着两格字节数正是下一个人
+    ★ 只报 `dist` 那一份字节数（不报整棵树的）：没有任何一条路会发整包，
+      "整包多大"没有一个问它的人，而留两格字节数正是下一个人
       拿错那一格的地方。
     """
     r = plugin_reconcile(plugins_dir, plugin_id, verify=verify)
@@ -3480,8 +3456,7 @@ def package_input_problem(path, want_uid=None, st=None):
 
 # ── 「一个包来源目录里，哪些文件是包」 ────────────────────────────────────────
 #
-# ★ 这一条此前长在 `install-base.sh` 里（`plugin_src_files()`）。v0.12 阶段 4 把"插件
-#   那一半"从部署脚本搬进安装器，它跟着搬过来 —— **判据只能有一份**，而分家的
+# ★ **判据只能有一份**：这一条列的是"目录里哪些文件是要装的包"，而分家的
 #   失效方式是"部署放行了、安装器不认"（或者反过来）。
 #
 # ★ 它只回答**一个**问题：目录里哪几个文件是"要装的包"。别的东西（源码树、
@@ -3533,7 +3508,7 @@ def plugin_src_problems(src_dir):
             continue
         if os.path.isdir(path) and not os.path.islink(path):
             # ★★ 子目录里的包**一个都装不上**，而症状是"我明明把包放在那里了"。
-            #   v0.13 起包名统一成 `<id>.splug` ⇒ **同一个 id 的两个版本没法共用
+            #   包名统一成 `<id>.splug` ⇒ **同一个 id 的两个版本没法共用
             #   一个文件名** ⇒ 按版本分目录存放成了一种很自然的做法
             #   （`dist/1.0.0/<id>.splug`）。于是这一条从"理论上的"变成了
             #   "照着做就会踩的" —— 所以它必须**指路**，不能只说"不会被安装"。
@@ -3648,8 +3623,8 @@ def _remove_stale_plugins(plugins_dir, plugin_ids, say=print):
       的，而"按名字拼出来的路径删东西"是这个文件里少有的一处 rm。**判据是"它旁边
       有一份记录表"** —— 没有记录表就**不删**（那可能是管理员手放的，与
       `scan_plugins` 里那条"报但不删"是同一条纪律）。
-      ★ 从前这里的判据是"读一遍包头的魔数"，那个守卫随存储形状一起**退休**了：
-      "有没有记录表"表达了同一件事，而且**判得更准**（魔数只说明"这是一个包"，
+      ★ 判据是"它旁边有一份记录表"：它比"读一遍包头魔数"**判得更准**
+      （魔数只说明"这是一个包"，
       说不出"这是安装器装的那一个"）。
     """
     for pid in plugin_ids:
@@ -3810,10 +3785,9 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
     ③ **两个包不许同一个 id**（§6.4）。按 id 命名之后，两个同 id 的包**文件名
        本身就是 id** ⇒ 后装的那个**静默覆盖**前一个。它是这一次调用的内部检查
        （同一个包传两遍也算），因为跨次调用时后一次本来就是"替换"。
-       ★ **短名不在这一条里**（v0.11 阶段 2+3）：两个 id 不同、短名一样的包是
-       **允许并存**的 —— 短名只是本站给人看的名字，不是身份。从前这里把短名也
-       一起拒了，理由是"它同时是配置文件名与作业侧函数名的后缀"，而那个理由**已经
-       不成立**：作业脚本是**一个插件一份**（`jobs/<id>.sbatch`），两份
+       ★ **短名不在这一条里**：两个 id 不同、短名一样的包是
+       **允许并存**的 —— 短名只是本站给人看的名字，不是身份。作业脚本是
+       **一个插件一份**（`jobs/<id>.sbatch`），两份
        `start_<短名>` 各在自己那一份里，谁也盖不着谁。配置那一侧的歧义改由
        `resolve_plugin_spec()` 管（短名撞了就必须写 id）。
        ★ 这里因此**只**判 id。跨次调用判不了短名撞 —— 那要知道**整个站点**装了
@@ -3928,7 +3902,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
         #   ★ 判据是**内容摘要**（§3.4 那个，签名盖的就是它），不是容器字节的
         #     sha256 —— 补一个签名块会让容器字节变而摘要不变，那是**同一个构件**。
         #
-        #   ★ v0.13 起判据来自**记录表**（从前是现读盘上那个 `.splug`）：摘要从
+        #   ★ 判据来自**记录表**：摘要从
         #     `files` 重算（与 §3.4 同一个函数），版本从树上那份清单读。
         #     ★ 刻意**不**走 `plugin_reconcile` 的全程：那会顺便验签，而"验不了
         #       openssl"会让这一步变成一句与'比不比得上'无关的话。
@@ -4171,9 +4145,9 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
             set(spec.id for _p, _r, spec, _n in verified),
             say=say)
 
-    # ★ 这句从前是"下一步：跑一次 install-base.sh" —— v0.12 阶段 4 起**编织与配置
-    #   对齐都在安装器这一侧**（`--sync-plugins`），`slurmate plugin install`
-    #   自己会把它们跑完。所以这里说的是**调用方**该做的下一件事。
+    # ★ **编织与配置对齐都在安装器这一侧**（`--sync-plugins`），
+    #   `slurmate plugin install` 自己会把它们跑完。所以这里说的是**调用方**
+    #   该做的下一件事。
     if src_dir is None:
         say("下一步：让守护进程重读配置（`systemctl reload slurmate-sessiond`，"
             "热重载，不会断会话）。\n"
@@ -4368,7 +4342,7 @@ def uninstall_plugins(ids, plugins_dir, conf_path, jobs_dir, say=print,
 #  编织作业脚本（模板 + 每个插件的 job/start.sh → <jobs_dir>/<id>.sbatch）
 # ==============================================================================
 #
-#   ★★ 这一节同样是 v0.12 阶段 4 从 `install-base.sh` 搬进来的：插件是"安装器/卸载器
+#   ★★ 这一节的判据不在 `install-base.sh` 里：插件是"安装器/卸载器
 #     是唯一入口"的，而"装一个插件要再跑一次部署脚本"正是那句话没成立的证据。
 #     搬过来之后，装、卸、配置、作业脚本四件事都在这一侧说完。
 #
@@ -4476,7 +4450,7 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
     specs, problems = scan_plugins(plugins_dir)
     # ★★ **对不过账的那些不织，其余照常织** —— 不再整体中止。
     #
-    #    v0.13 起"不可用"是第一等的状态（一棵树被人动过一个字节就会落进去），
+    #    "不可用"是第一等的状态（一棵树被人动过一个字节就会落进去），
     #    而整体中止会让**一个字节**冻住整个站点的作业脚本对齐：修好它之前，别的
     #    插件装了新版本也织不出来。这与"一个插件坏了不该带走整个站点"（账本 F22）
     #    是同一条纪律在编织这一侧的落点。
@@ -4524,8 +4498,8 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
                 skipped.append(spec)
                 continue
             try:
-                # ★ v0.13 起**从树上直读**（从前是 `package_extract(spec.…, …)`
-                #   从包里取）。判据没变：扫描器说这一份"有作业侧"，而它是对过账
+                # ★ **从树上直读**（读 `spec.install_dir` 里那一份）。
+                #   判据没变：扫描器说这一份"有作业侧"，而它是对过账
                 #   之后才进 `specs` 的 —— 所以这里读不到只可能是"扫描之后被换掉"。
                 with open(os.path.join(spec.install_dir,
                                        PLUGIN_JOB_ENTRY.replace("/", os.sep)),
@@ -4644,7 +4618,7 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
 #     现在有什么，站点的**两份派生物**里就该有什么。对账拿状态判，一次覆盖全部
 #     路径，而且**幂等** —— 跑两遍与跑一遍的结果逐字节相同。
 #
-#   ★★ **两份派生物，一个判据**（v0.12 阶段 4 起）：
+#   ★★ **两份派生物，一个判据**：
 #       · `<conf>.d/<ULID>.conf`   插件**生效配置**的那一份（见 render_plugin_file）
 #       · `<jobs_dir>/<ULID>.sbatch`  织好的**作业脚本**（见 weave_plugin_jobs）
 #     它们都是"由插件目录**算得出来**的东西"，所以它们与插件目录对齐这件事是
@@ -4658,8 +4632,8 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
 #         都不动**。
 #
 #   ★★ "哪一份是我写的"这个问题现在由**文件名**回答，不由内容回答：安装器只按
-#     **id** 命名（`_looks_installer_named`）。从前那个 `# slurmate:auto` 标记
-#     要防的正是这件事，而标记是**内容判据** —— 改一行注释、挪一个空行就失效。
+#     **id** 命名（`_looks_installer_named`）。内容判据防不住这件事
+#     —— 改一行注释、挪一个空行就失效。
 #
 #   ★★ 生成物**不改变任何行为**：那一份里 `enabled` 写的是插件清单声明的缺省
 #     （见 render_plugin_file），别的项全是注释。所以"给一个零配置的站点补上索引"
@@ -4885,8 +4859,8 @@ def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
             "再跑一次 `slurmate plugin sync`。")
         return rc
 
-    # ★ v0.12 阶段 3：这句话从前是"改完记得 systemctl restart slurmate-sessiond"
-    #   —— 而配置改动现在是**热得起来**的，那句话会让管理员去断掉所有人的会话。
+    # ★ 配置改动是**热得起来**的，所以别写"改完记得 systemctl restart
+    #   slurmate-sessiond" —— 那会让管理员去断掉所有人的会话。
     #   ★ 这里只能**指路**、不能自己动手：这个函数跑在 `--sync-plugins` 那个
     #   一次性进程里，而"要不要让正在跑的那个重读"是**调用方**的事
     #   （`slurmate` CLI 与 main() 各自在合适的时机调 `systemctl reload`）。
@@ -4912,9 +4886,9 @@ class PluginConfig(object):
         self.name = spec.name
         self.title = spec.title
         self.present = present
-        # ★★ 取值校验的报错**点名这一份配置在哪个文件**，不再写 `[plugin:sshd] 的 …`。
-        #   那个写法是主文件里还有 `[plugin:…]` 段的年代留下的：今天照它去改，
-        #   写进主文件**本身就是一条硬错误**（守护进程拒绝启动）。指一个"照做就
+        # ★★ 取值校验的报错**点名这一份配置在哪个文件**，不写 `[plugin:sshd] 的 …`：
+        #   后者指的位置（主文件）**照做就会报错** —— 写 `[plugin:…]` 段本身就是
+        #   一条硬错误（守护进程拒绝启动）。指一个"照做就
         #   报错"的位置，比不指还坏。`where` 由 `build_plugin_configs` 传进来
         #   （它手上那个 `key` 就是 `_conf_file_of()` 的结果）。
         self.where = where or spec.name
@@ -4967,7 +4941,7 @@ class PluginConfig(object):
         else:
             self.default_time = spec.default_time
 
-        # 这个插件的会话**缺省占哪种卡、几张**。不写 = 不占（与 v0.11 之前一致）。
+        # 这个插件的会话**缺省占哪种卡、几张**。不写 = 不占。
         #
         # ★★ 这一格**只在站点的配置里**，清单里**没有对应的键** —— 与上面三项**不同**，
         #    而差别是刻意的：作者写不出本站管那张卡叫什么（`gpu` 还是 `mps`，
@@ -5051,9 +5025,9 @@ def build_plugin_configs(specs, plugin_raw):
 def plugin_indexes(specs):
     """`[PluginSpec]` → `(id → spec, 短名 → [spec, …])`。**两张表，别合并**。
 
-    ★★ 名字那一侧必须是**一对多**：v0.11 起不同 id 同名的插件允许并存（短名只是
+    ★★ 名字那一侧必须是**一对多**：不同 id 同名的插件允许并存（短名只是
       本站给人看的名字，id 才是身份）。用 `{s.name: s}` 收的话，后一个会**静默
-      盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
+      盖掉**前一个。
 
     ★ 两个调用方（`Config` 与 `sync_plugins`）都用它，所以表的形状只有一份
       定义。`resolve_plugin_spec()` 是"名字 → 具体哪一个"的唯一判据，别处不要再
@@ -5165,9 +5139,9 @@ def render_plugin_file(spec, enabled, commented):
 
     写进 `<配置路径>.d/<id>.conf` —— 文件名**只按 id 算**（`plugin_conf_path`）。
 
-    ★★ 与从前那个"块"最要紧的差别：这里**没有边界标记**，也**不再有**"说明
-      注释必须写在最后一行键的上面"那条约束。那一条是"按行号整块删"的产物
-      —— 删一个文件不需要知道任何行的范围。格式换了，约束跟着消失。
+    ★★ 这里**没有边界标记**，也**不再有**"说明
+      注释必须写在最后一行键的上面"那条约束 —— 删一个文件不需要知道任何行的
+      范围。
 
     ★★ `enabled` 写的是**插件自己声明的缺省**（`site.defaultEnabled`），不是
       写死的 `no`。写死 `no` 是一处**静默的行为改变**：一个"一份配置都没写"的
@@ -5217,11 +5191,10 @@ def stale_plugin_conf_problems(sections, meta, resolve):
       都做不到）。而这一份配置的后果只是**它自己不生效**（那个插件按清单里声明
       的缺省跑，其余一切照常）—— 让它带走整个站点是**过量**的。
 
-    ★★ 这个降级是 v0.12 阶段 2 做的，而它是阶段 1 那个格式换来的：判据从
-      **内容**（`# slurmate:auto` 那行标记）换到了**位置**（文件在不在 `.d/` 里、
-      名字是不是 ULID）之后，"这个文件指不到人"才成了**单看这一个文件就能判**的
-      事。在那之前它是一个块的残缺，而这种残缺说不清是"删到一半"还是"手写错了"
-      —— 于是只能当硬错误。
+    ★★ 它能只是一条 ⚠，是因为判据在**位置**（文件在不在 `.d/` 里、名字是不是
+      ULID），不在**内容**："这个文件指不到人"于是成了**单看这一个文件就能判**的
+      事。判据若落在"内容里有没有某个标记"，指不到人就只是残缺 —— 而残缺说不清是
+      "删到一半"还是"手写错了"，那就只能当硬错误。
 
     ★ 必须**说出来**，不能静默忽略：把文件命名成 `ssh.conf`（少个 d，而本站只有
       `sshd`）被吞掉的症状是「配了但它就是不生效」—— 与未知键那条要防的是同一类
@@ -5350,8 +5323,7 @@ def reserved_ports_warning(cfg, raw=None):
       都让守护进程拒绝启动，而这一条只意味着"偶尔要多试几个候选端口"）。
       调用方打一条 ⚠，退出码不动。
 
-    ★ 它此前长在 `install-base.sh` 的预检里（v0.12 阶段 4 搬进来）。搬的理由是那条
-      判据只能有一份，而且搬过来之后它跟着 `--check` 进了 `ExecStartPre`
+    ★ 判据只能有一份；它跟着 `--check` 进了 `ExecStartPre`
       —— **每次启动前都跑**，比"只在部署时跑一次"见得多。
 
     ★ `raw` 是给用例用的注入口（本机改不了那个 sysctl）。
@@ -5459,7 +5431,7 @@ class Config(object):
     def __init__(self, path):
         self.path = path
         raw, sections, self.plugin_conf_files = parse_config(path)
-        # ★ 原始键值**原样留着**（v0.12 阶段 3）：热重载要判"哪些键变了"，而判据
+        # ★ 原始键值**原样留着**：热重载要判"哪些键变了"，而判据
         #   必须是**配置里写了什么**，不是"解析出来的属性等不等"。后者会漏掉：
         #     · 两个写法不同而解析结果相同的值；
         #     · 以及**解析出来没进属性的键** —— 比如留空表示"去 PATH 上找"的那
@@ -5480,9 +5452,9 @@ class Config(object):
         #     身份，一个插件一份包，`scan_plugins` 已经保证它不重复。
         #   · `plugins_by_name` —— **短名 → [spec, …]**，**一对多**。
         #
-        # ★★ 名字那一侧必须是一对多：v0.11 起**不同 id 同名的插件允许并存**
+        # ★★ 名字那一侧必须是一对多：**不同 id 同名的插件允许并存**
         #   （短名只是本站给人看的名字）。用 `{s.name: s}` 收的话，后一个会
-        #   **静默盖掉**前一个 —— 那正是这一版要消灭的形状，只是换了个地方。
+        #   **静默盖掉**前一个。
         #
         # ★ 表的形状只有 `plugin_indexes()` 一处定义、"名字 → 具体哪一个"的判据
         #   只有 `resolve_plugin_spec()` 一处 —— `sync_plugins()` 用的是
@@ -5575,10 +5547,8 @@ class Config(object):
         self.audit_log = os.path.join(LOG_DIR, "audit.log")
         self.tick_seconds = TICK_SECONDS
         self.startup_grace_seconds = STARTUP_GRACE_SECONDS
-        # ★ 这里从前有 `self.default_time = DEFAULT_TIME`。缺省时限**按插件**之后
-        #   它就没有读者了（提交期那一处改读 `pcfg.default_time`），而一个没人读的
-        #   字段只会让下一个读到这里的人以为"站点有一份全局时限" —— 那件事已经
-        #   不是真的了。常量 `DEFAULT_TIME` 仍在，它现在的身份是"清单没声明时用
+        # ★ 缺省时限**按插件**（提交期那一处读 `pcfg.default_time`），站点没有
+        #   "一份全局时限"那一格。常量 `DEFAULT_TIME` 的身份是"清单没声明时用
         #   什么"，见 PluginSpec.default_time。
         self.max_time = MAX_TIME
         self.suspect_after = SUSPECT_AFTER
@@ -5637,8 +5607,8 @@ class Config(object):
         # 所以**没有作业侧的插件不在这个列表里** —— 那种插件是合法的，它只是
         # 不能提交，由 op_submit 的 service_kind_no_job 说清楚。
         #
-        # ★ 这里从前写的是"插件目录里有没有 job/start.sh"。**服务器上没有源码树**
-        #   —— `job/start.sh` 在我们这边只以"包里的一条负载记录"的形式存在
+        # ★ 判据是**包的负载里**有没有 `job/start.sh` —— **服务器上没有源码树**，
+        #   `job/start.sh` 在我们这边只以"包里的一条负载记录"的形式存在
         #   （见 `scan_plugins` 里 `has_job` 那一段）。
         self.plugin_job_missing = [
             s for s in self.plugin_specs
@@ -5687,7 +5657,7 @@ class Config(object):
     def cluster_cidr_problem(self):
         """cluster_cidr 的**形式**问题描述；没问题返回 None。
 
-        这一项此前只校验了「地址部分是合法 IPv4」，另外两件事一件没做，而它们的
+        这一项只校验「地址部分是合法 IPv4」不够，另外两件事若不校验，它们的
         失效方向**都是 fail-open**（不报错，只是 ACL 不再生效）：
           ① 前缀长度不校验 —— `192.0.2.0/99` 能通过自检，在 nft 里却是语法错误；
           ② 主机位不为 0 的写法（`192.0.2.5/24`）在 nft 里语义含糊。
@@ -5788,8 +5758,8 @@ class Config(object):
         errors.extend(self.bad_sections)
         errors.extend(self.bad_plugin_keys)
         # ★ **一个插件都没装、或一个都没开，都是合法的** —— 那正是"外壳"的定义：
-        #   基座的功能不因为插件的有无而缺一块。以前这里把零插件判成错误、让守护
-        #   进程 100% 起不来，那是把"框架"和"插件"绑死了。
+        #   基座的功能不因为插件的有无而缺一块。把零插件判成错误就是把"框架"和
+        #   "插件"绑死了。
         #   但它必须**说得出来**：否则表现是"客户端上一个按钮都没有"，而配置里
         #   一个字都不像有问题。所以它进的是 --check 的提示，不是错误。
         #
@@ -5860,18 +5830,16 @@ class Config(object):
         if self.suspect_after >= self.orphan_after:
             errors.append("suspect_after(%d) 必须小于 orphan_after(%d)"
                           % (self.suspect_after, self.orphan_after))
-        # ★ 这里此前有一条 `if not os.path.exists(self.job_script)` —— 那时作业
-        #   脚本是**一份**编织成品，不在就等于整个系统不能提交，判成启动错误是
-        #   合理的。现在一个插件一份，缺失的语义变成了「这个插件的部署不完整」：
+        # ★ 缺失的作业脚本的语义是「这个插件的部署不完整」，不是启动错误：
         #   **一个插件的问题不该让整个站点起不来**（起不来连"停掉正在跑的会话"
-        #   都做不到）。所以它改走 `plugin_job_missing` + `--check` 的 ⚠ 与
+        #   都做不到）。所以它走 `plugin_job_missing` + `--check` 的 ⚠ 与
         #   `start()` 的 log.error，与 `plugin_problems` 同一条路。
         #   **不要再把它加回这里** —— `validate()` 没有 warnings 通道。
         cidr_err = self.cluster_cidr_problem()
         if cidr_err:
             errors.append(cidr_err)
-        # ★ 八个命令全查。此前只查 sbatch/scancel/scontrol，而 squeue（job_state
-        #   的兜底查询）与 sacctmgr（账户与分区权限）可以是错路径而启动通过，
+        # ★ 八个命令全查。漏查 squeue（job_state
+        #   的兜底查询）或 sacctmgr（账户与分区权限）的话，它们可以是错路径而启动通过，
         #   运行时才失败 —— 那时报出来的是"查不到作业"或"没有账户"，与真正的
         #   原因（路径写错）隔了好几层。
         # ★ 阶段 5 加进来的 sinfo / sshare / sacct 是**同一个理由的第三次**：
@@ -6072,9 +6040,9 @@ class Store(object):
     def count_occupying(self, uid):
         """这个用户占着几个位置。
 
-        ★ 从前这里叫 `count_active`、只数 `ACL_STATES`，于是「已提交、尚未登记」
-          那个窗口里它**恒为 0** —— 配额拦不住并发的第二个提交（账本 F14）。
-          名字跟着含义一起改：它数的是"没走完的"，不只是"活跃的"。
+        ★ 它数的是"没走完的"（含「已提交、尚未登记」那一段），不只是"活跃的" ——
+          只数活跃的会在那个窗口里恒为 0，配额拦不住并发的第二个提交
+          （账本 F14）。
         """
         q = ",".join("?" * len(OCCUPYING_STATES))
         cur = self.conn.execute(
@@ -6189,8 +6157,8 @@ class Nft(object):
                            "oif", "lo", "accept", "comment", self.BASE_LO],
                           check=True)
                 log.warning("补齐基础规则 %s", self.BASE_LO)
-            # ★★ 判据是**值**，不是"comment 在不在"。v0.12 之前那个实现只看
-            #   comment：改掉 `cluster_cidr` 之后，那条规则**永远**走"已存在"
+            # ★★ 判据是**值**，不是"comment 在不在"。只看
+            #   comment 的话，改掉 `cluster_cidr` 之后那条规则**永远**走"已存在"
             #   这条路 —— 于是**连 restart 都不生效**，内核里那条旧网段的基础规则
             #   一直在。而文档说它是"即使前面所有校验都被绕过"的**最后一道几何
             #   约束**：它悄悄指着一个旧网段，是这条线上最不该有的一种失效。
@@ -6311,9 +6279,9 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
 
     # 作业名 `sj-<插件短名>`：squeue 里一眼看得出这是本系统的作业、而且是哪个插件。
     #
-    # ★ 这里此前是 `slurmate-<会话 id 前 8 位>`，理由是"多开时在 squeue 里分得清"。
-    #   换成插件短名之后，**同一用户同时开两个同插件的会话，squeue 里两行会完全
-    #   相同** —— 这是有意的取舍，不是遗漏：squeue 的 NAME 列默认只显示 8 个字符，
+    # ★ 作业名用插件短名，不用会话 id：**同一用户同时开两个同插件的会话，squeue
+    #   里两行会完全相同** —— 这是有意的取舍，不是遗漏：squeue 的 NAME 列默认只
+    #   显示 8 个字符，
     #   装不下「插件名 + 会话 id」两样。要分清哪一行是哪一次会话，看
     #   `slurmate list`（它列会话 ID ↔ 作业 ID），或 `squeue -o "%.10i %.16j"`。
     #
@@ -6335,7 +6303,7 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
     #
     # ★ 库里那一格存的是**描述符的 JSON**，交给 Slurm 的那个串在这里当场拼。
     #   全仓只有这一处把 GRES 变成 Slurm 的语法（gres_spec），所以"自己写进去的
-    #   值自己读不回来"这一类不会发生 —— 从前这里存的是 `"gpu:2"`，而读回时那句
+    #   值自己读不回来"这一类不会发生 —— 若把 `"gpu:2"` 那样的串直接存下来，读回时
     #   `re.fullmatch(r"gpu:(\d+)")` 一遇到 `gpu:a100:2` 就静默地报"没有 GPU"。
     gres = load_gres(sess.get("gres"))
     if gres:
@@ -6355,11 +6323,11 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
 class Slurm(object):
     """Slurm 的**查询**层：每个方法都是一次 fork，**自己什么都不缓存**。
 
-    ★★ 从前这里挂着三个各自的 TTL 缓存（`_acct_cache` / `_part_cache` /
-      `_gres_cache`，都是 300 秒），而 `partition_table()` 连缓存都没有。
-      那是**同一条规矩的四份实现**：每一处都要各自回答"这条数据多久算旧"，
-      而它们会漂 —— 漂的形态是"分区表 5 分钟、账户 5 分钟、GRES 5 分钟，
-      谁也不知道为什么是这个数"。
+    ★★ 本类**自己什么都不缓存**：查询结果统一归 `Cluster` 那一层的钟。若改成
+      三个各自的 TTL 缓存（`_acct_cache` / `_part_cache` / `_gres_cache`，都是
+      300 秒）加一个无缓存的 `partition_table()`，那就是**同一条规矩的四份实现**：
+      每一处都要各自回答"这条数据多久算旧"，而它们会漂 —— 漂的形态是
+      "分区表 5 分钟、账户 5 分钟、GRES 5 分钟，谁也不知道为什么是这个数"。
 
       现在钟只有一处：`Cluster` 的那三层。这个类只负责**问**，
       "多久问一次"归 `Cluster`。
@@ -6429,10 +6397,9 @@ class Slurm(object):
                              timeout=8)
         if rc == 0 and out.strip():
             d = {}
-            # ★ 只留**有人读**的字段。"解析了没人用"和死键一样是死重量，所以
-            #   StartTime / JobName 删掉了（零消费者），`RestartCnt` 也删掉了 ——
-            #   它是个**死键**：Slurm 输出里那一项的真名是 `Restarts=`，
-            #   于是那条正则从来没有命中过任何东西（本机实测）。
+            # ★ 只留**有人读**的字段。"解析了没人用"和死键一样是死重量。
+            #   别加 `RestartCnt` —— 它是个**死键**：Slurm 输出里那一项的真名是
+            #   `Restarts=`，于是那条正则从来命中不了任何东西（本机实测）。
             for key in ("JobState", "NodeList", "UserId", "TimeLimit", "EndTime",
                         "Partition", "Account", "Reason", "ExitCode", "Requeue",
                         "Restarts"):
@@ -6545,8 +6512,7 @@ class Slurm(object):
             这一条记在 `docs/KNOWN-ISSUES.md` 的〈未实测/取不到〉里。
 
         ★ 这个查询很贵（大集群上 `scontrol show node -o` 的输出很大），所以它归
-          `Cluster` 的**慢钟**。它从前自带一个 300 秒的 TTL —— 那个 TTL 删掉了，
-          因为钟只能有一处（见本类的 docstring）。
+          `Cluster` 的**慢钟** —— 钟只能有一处（见本类的 docstring）。
         """
         rc, out, err = run_cmd([self.cfg.scontrol, "show", "node", "-o"], timeout=10)
         if rc != 0:
@@ -6867,7 +6833,7 @@ class Slurm(object):
 
     def cancel(self, job_id, reason=""):
         """取消作业。**返回值必须被调用方看** —— 失败只记一行日志然后当没发生，
-        正是账本 F12 那条缺陷（`op_goodbye` 从前就是这么做的）。
+        正是账本 F12 那条缺陷。
 
         `reason` 只进日志：它回答"这一次是谁要取消的"（goodbye / orphaned /
         release_waiting / enroll_timeout），而一条失败的 `scancel` 行里没有它
@@ -6897,8 +6863,8 @@ class Slurm(object):
 class Cluster(object):
     """★★ 三层钟驱动的集群信息缓存 —— **一次查询服务所有连接**。
 
-    从前的形状是：每个 `partitions` / `submit` / `whoami` 请求各自去 fork 一次
-    `scontrol`（分区表那条连缓存都没有）。N 个用户 × M 条连接 ⇒ N×M 次 fork，
+    若每个 `partitions` / `submit` / `whoami` 请求各自去 fork 一次
+    `scontrol`（分区表那条连缓存都没有），N 个用户 × M 条连接 ⇒ N×M 次 fork，
     而它们问的是**同一个**集群、答案本该是**同一份**。
 
     现在刷新跑在 **tick 里**（`Sessiond.tick()` 调 `refresh()`），请求只读缓存
@@ -7060,8 +7026,7 @@ class Cluster(object):
         """丢掉很久没人问过的**按用户**条目。
 
         ★ 键来自 NSS 里的真实用户名，所以上界本来就有。但一个**只增**的字典与
-          一个泄漏的字典，从"会不会撑爆"的角度看没有区别 —— 而 `Slurm` 从前
-          那三个缓存正是只增的。这里给它们一个出口。
+          一个泄漏的字典，从"会不会撑爆"的角度看没有区别。这里给它们一个出口。
         """
         stale = [k for k, t in self._seen.items()
                  if self._is_user(k) and now - t > 2 * INFO_SLOW_SECONDS]
@@ -7279,7 +7244,7 @@ class Conn(object):
         self.want = 0               # 当前挂在 selector 上的事件掩码
         self.closing = False
         # ── 身份 ──
-        # ★ 它**不是**"席位"的一部分（席位那一套已经删掉了）：这条连接的 client_id
+        # ★ 它**不是**"席位"的一部分：这条连接的 client_id
         #   只有一个用途 —— 交给 op_submit / op_heartbeat / op_takeover，决定
         #   **它能不能写会话行上那一格 `keeper`**。见 op_heartbeat 的 docstring。
         self.client_id = None       # 自报的客户端 id；None = 没报名（老客户端）
@@ -7396,12 +7361,10 @@ class Sessiond(object):
         self._tick_job = {}
         # 本 tick 每个 uid 渲染一次的快照：uid -> (digest, [会话视图])。
         self._tick_snap = {}
-        # ★ **这里从前有一张「席位表」**（`self.clients`，uid -> client_id -> 首次
-        #   出现的时刻），它服务的是"同一个 uid 只让一台电脑管"。v0.9 把它整条删了：
-        #   那个形状按 uid **顶掉整个客户端**，于是"接管作业 1"会连坐"作业 2"
-        #   （那台电脑上另一条会话被一起踢掉），而它的替代品是**会话行上那一格
-        #   `keeper`** —— 席位一开始就该按会话排（见 op_takeover / op_leave）。
-        #   连接数不再需要一张表：`uid_conn_count()` 从 selector 现读。
+        # ★ 看护者按**会话**排（会话行上那一格 `keeper`，见 op_takeover /
+        #   op_leave）：按 uid **顶掉整个客户端**会连坐（"接管作业 1"连"作业 2"
+        #   那台电脑上另一条会话被一起踢掉）。
+        #   连接数不需要一张表：`uid_conn_count()` 从 selector 现读。
 
     # ── 审计 ────────────────────────────────────────────────────────────────
     def audit(self, event, **kw):
@@ -7424,7 +7387,7 @@ class Sessiond(object):
         ★★ 为什么热重载也要调（F46，v0.13 阶段 5）：`reload_config()` 换掉
           `Config` 对象之后，`plugin_problems` / `plugin_job_missing` /
           `stale_conf_problems` / `plugin_gres_problems` 是**新的一组值** ——
-          而从前的出口只有 `start()` 与 `--check` 两个 ⇒ 卸掉一个插件再 reload，
+          若出口只有 `start()` 与 `--check` 两个，则卸掉一个插件再 reload，
           那些话**只在下次重启时才说**。而 `stale_plugin_conf_problems` 自己的
           注释写着它要防的正是"不说的话，管理员的症状是『我明明配了啊』，而日志里
           一个字都没有"。
@@ -7438,8 +7401,8 @@ class Sessiond(object):
           `config_deploy_problems()` 是**两回事**，别合并：那个的每一条都拒绝启动。
 
         ★ 抽出来**同时解决了"它测不动"**：端到端用例走的是 `setup_socket()` +
-          `run()`，绕过 `start()`，所以这几段从前一条用例都没有（v0.12 已如实
-          记在账上）。现在 `_do_reload()` 可以直接调，日志用 handler 抓即可。
+          `run()`，绕过 `start()`；现在 `_do_reload()` 可以直接调，日志用
+          handler 抓即可。
         """
         cfg = self.cfg
         # 插件：坏掉的目录在这里逐条说出来。**不是启动错误** —— 一个插件坏了不该
@@ -7477,7 +7440,7 @@ class Sessiond(object):
     def start(self):
         """启动。返回 False 表示"拒绝启动"（原因已写进日志，且必须是可照做的）。"""
         # ★★ 判据只有一处（`config_deploy_problems`）—— 与 `--check`、热重载
-        #   是**同一个函数**。三条路各抄一份子集的形状在 v0.13 阶段 5 结束了，
+        #   是**同一个函数**。三条路各抄一份子集就会漏，
         #   而 F45 正是那么来的（热重载那一份少了交叉核对那一半）。
         # ★ 交叉核对那一条尤其要放在【最前面】：网段漏掉一个节点的后果是去往它的
         #   流量被链首的基础规则放行，而链的 policy 是 accept —— 没有报错、没有
@@ -7689,10 +7652,10 @@ class Sessiond(object):
             #   旧配置继续服务，正在跑的会话一条都不会断。
             log.error("热重载失败：新配置读不动（**旧配置继续服务**）：%s", e)
             return False, []
-        # ★★ 判据是 `config_deploy_problems`，不是 `validate()`（v0.13 阶段 5）。
-        #   上面那句 docstring 从前就写着"cidr 与节点的交叉核对"—— 而它在
-        #   `validate()` 里**并不存在**：写它的人以为在，代码里没有，也没有一条
-        #   用例能发现（F45）。这正是"三条路各抄一份子集"的典型症状。
+        # ★★ 判据是 `config_deploy_problems`，不是 `validate()`。
+        #   "cidr 与节点的交叉核对"只在 `config_deploy_problems` 里 ——
+        #   若只指望 `validate()`，那正是"三条路各抄一份子集"的典型症状，
+        #   也没有一条用例能发现（F45）。
         errs, cidr_errs = config_deploy_problems(new)
         if errs:
             log.error("热重载失败：新配置有 %d 处过不了自检（**旧配置继续服务**）："
@@ -7751,8 +7714,7 @@ class Sessiond(object):
             self.port_cursor = new.port_start
 
         # 插件包的快照缓存：**必须失效**。插件目录在这期间可能变了（装上、
-        # 卸掉、升级），而它本来标注的是"刻意不失效"—— 那说的是从前那个进程对
-        # 插件的认知一辈子只有启动那一刻，热重载之后那句话不再成立。
+        # 卸掉、升级）—— 进程对插件的认知不能停在启动那一刻。
         self._plugin_cache = {}
 
         # ★ 启动宽限（`hb_grace_until`）**不动**：它是"这个进程刚起来，先别急着
@@ -7787,10 +7749,10 @@ class Sessiond(object):
     def _on_signal(self, signum, _frame):
         """SIGHUP = **重载**；SIGTERM / SIGINT = 退出。
 
-        ★★ 从前三个信号走的是同一条路（都退出），而 systemd 单元的 `ExecReload`
-          写的正是 `kill -HUP` —— 于是 `systemctl reload` 的实际语义与它声明的
+        ★★ 若三个信号走同一条路（都退出），而 systemd 单元的 `ExecReload`
+          写的正是 `kill -HUP`，则 `systemctl reload` 的实际语义与它声明的
           **相反**：它是"杀进程 + 5 秒后被 `Restart=always` 拉起来"，所有会话在
-          那 5 秒里断一次。v0.12 阶段 3 把这头修好，两者才一致。
+          那 5 秒里断一次。
 
         ★ SIGHUP **只置一个标志**，重活在主循环顶部做（见 `run()`）：信号会打断
           循环里任意一行，而"读到一半的配置"不该被另一次读配置打断。
@@ -8017,9 +7979,9 @@ class Sessiond(object):
 
             # ── 唯一的释放判据：这是个**真终态**吗 ──────────────────────────
             #
-            # ★ 判据是"是不是终态"，不是"是不是 RUNNING"。从前这里写的是
-            #   `if jstate != "RUNNING": begin_release(...)`，于是 PENDING 与
-            #   CONFIGURING 之外的一切都被当成"作业结束了" —— 而其中
+            # ★ 判据是"是不是终态"，不是"是不是 RUNNING"。用
+            #   `if jstate != "RUNNING": begin_release(...)` 的话，PENDING 与
+            #   CONFIGURING 之外的一切都会被当成"作业结束了" —— 而其中
             #   REQUEUED / SUSPENDED / STOPPED / PREEMPTED / COMPLETING /
             #   STAGE_OUT … 都是**作业还在或还会回来**的状态。判错的后果见
             #   TERMINAL_JOB_STATES 上面那一段。
@@ -8105,8 +8067,8 @@ class Sessiond(object):
             self.job_stuck[sid] = now
             # ★ 只在**不是** PENDING / CONFIGURING 时说一句。那两档是每个会话刚
             #   提交时必经的普通等待，每个会话都报一行是纯噪音；而其余几档
-            #   （暂停 / 暂态 / 会回来）从前会被判成"作业结束了"，现在改成保留 ——
-            #   那正是运维需要看见的一行。
+            #   （暂停 / 暂态 / 会回来）若被判成"作业结束了"就会漏报 ——
+            #   保留它们正是运维需要看见的那一行。
             if jstate not in ("PENDING", "CONFIGURING"):
                 log.info("会话 %s（job=%s）的作业处于 %s，保留防护（不再当成结束）",
                          sid, s["job_id"], jstate)
@@ -8174,8 +8136,8 @@ class Sessiond(object):
                             s["session_id"], s["job_id"], why)
                 # ★★ **不在这里 scancel，也不在这里写终态**（账本 F32）。
                 #   交给 begin_release → phase_release 那道闸：它**先确认作业真的
-                #   停了**，然后才拆 ACL / 会话文件。从前这两句是 `self.slurm.cancel(...)`
-                #   加一句 `state=ST_EXPIRED`，而**返回值丢掉** —— scancel 失败时作业
+                #   停了**，然后才拆 ACL / 会话文件。若这里直接 `self.slurm.cancel(...)`
+                #   加一句 `state=ST_EXPIRED` 而**丢掉返回值**，scancel 失败时作业会
                 #   继续占着节点跑到 TimeLimit，而这条会话不在 phase_running 的扫描
                 #   集合里、也不在 ACL_STATES 里，再也没人回收它（与 F12/F13 同形）。
                 self.audit("expired", session=s["session_id"], reason="enroll_timeout",
@@ -8370,9 +8332,9 @@ class Sessiond(object):
         `reason` 是**为什么走到这里**（进 `note` 列，也进审计）；
         `final_state` 是**走完之后叫什么**（进 `final_state` 列）。
 
-        ★★ 两者分开是账本 F32 的落点。在那之前，`reject()` 与
-        `try_enroll()` 的超时那一条**自己跳到终态**：各自 `scancel` 一次、**返回值
-        丢掉**，然后直接写 `rejected` / `expired`。形态与 F12/F13 一模一样 ——
+        ★★ 两者分开是账本 F32 的落点。若让 `reject()` 与 `try_enroll()` 的超时
+        那一条**自己跳到终态** —— 各自 `scancel` 一次、**返回值丢掉**，然后直接写
+        `rejected` / `expired` —— 形态与 F12/F13 一模一样：
         `scancel` 失败时作业继续占着节点跑到 `TimeLimit`（GPU 分区上那是 12 小时
         实打实的算力），而那两条会话不在 `phase_running()` 的扫描集合里、也不在
         `ACL_STATES` 里 ⇒ **再也没有任何人回收它**。
@@ -8395,11 +8357,11 @@ class Sessiond(object):
         终态之前规则一定在，之后规则一定不在。
 
         ★ 落哪个终态由 `begin_release()` 的 `final_state` 决定（缺省 `released`，
-        见那一处）；**所有**终态都从这里出 —— `rejected` 与 `expired` 从前是例外，
-        而那两个例外正是账本 F32。
+        见那一处）；**所有**终态都从这里出 —— 别让 `rejected` / `expired` 走别的路，
+        那两个例外正是账本 F32。
 
-        ★★ v0.9 多了一道闸，而它是账本 F13 的落点。从前这里**从不确认作业是否
-        还在** —— 于是「已释放」这句话可以是假的：作业占着节点跑到 `TimeLimit`
+        ★★ 这道闸是账本 F13 的落点。不确认作业是否
+        还在，则「已释放」这句话可以是假的：作业占着节点跑到 `TimeLimit`
         （GPU 分区上那是 12 小时实打实的算力），而会话文件已经删了、`released`
         又不在 `phase_running` 的扫描集合里 ⇒ **再也找不回来**。
 
@@ -8724,8 +8686,8 @@ class Sessiond(object):
             self.throttled[s["uid"]] = now + self.cfg.throttle_seconds
             self.audit("throttled", uid=s["uid"], until=self.throttled[s["uid"]])
         # ★★ **不在这里 scancel，也不在这里写终态**（账本 F32）。
-        #    从前这两句是 `state=ST_REJECTED` 加一次 `self.slurm.cancel(...)`，而
-        #    **返回值丢掉** —— 一条校验没过、但作业**确实在跑**的会话（它就是写了
+        #    若这里直接写 `state=ST_REJECTED` 加一次 `self.slurm.cancel(...)` 而
+        #    **丢掉返回值**，一条校验没过、但作业**确实在跑**的会话（它就是写了
         #    会话文件才被拒的）会因为一次失败的 scancel 继续占着节点跑到 TimeLimit，
         #    而这条会话不在 phase_running 的扫描集合里、也不在 ACL_STATES 里
         #    ⇒ 再也没人回收它。
@@ -9033,7 +8995,7 @@ class Sessiond(object):
             #   rid**。把订阅挂在 rid 上，"老客户端收不到推送"就成为一个
             #   **结构事实**，而不是一句承诺 —— 否则一次恰好落在 tick 上的
             #   推送会被它当成响应读走，症状是随机的、说不清的失败。
-            #   （那条路径上"线上的字节与从前逐字相同"也由它保证。）
+            #   （那条路径上"线上字节不带 rid"也由它保证。）
             conn.subscribed = True
             rid = got
         # ★ `client` 与 `rid` 在**同一个位置**、同一条理由上被认领：只有常驻通道
@@ -9045,7 +9007,7 @@ class Sessiond(object):
         #   见 op_heartbeat() 的 docstring（「没有身份 = 不被排除」）。
         resp = self.dispatch(conn.uid, conn.gid, req, conn.client_id)
         if rid is not None:
-            # ★ rid 是**加法**：不带就不回填，线路上与从前逐字相同。
+            # ★ rid 是**加法**：不带就不回填，线路上与不带 rid 时逐字相同。
             resp["rid"] = rid
         conn.queue_msg(resp)
 
@@ -9064,7 +9026,7 @@ class Sessiond(object):
           —— 那条连接下一秒就没了，于是它刚认领的会话立刻变成"没人看"，
           倒计时开始跑。症状是"作业莫名其妙开始倒计时"，而两边各自都自洽。
 
-          钉在 rid 上之后，"exec 那条路上的字节与从前逐字相同"仍然是一条
+          钉在 rid 上之后，"exec 那条路上的字节不带 rid"仍然是一条
           **结构事实** —— 与"老客户端收不到推送"用的是同一条理由。
 
         ★ 一条连接只认一次（`conn.client_id` 已设就返回）：连接的身份是**连接
@@ -9238,15 +9200,11 @@ class Sessiond(object):
                              "time": p.default_time, "gpus": p.default_gpus},
                 # ── 站点分发：这个插件作为**一个包** ──
                 #
-                # ★ **只有这一条投递方式了。** v0.6 曾经同时报 `files`（逐份取，
-                #   配合 `plugin_file`）与 `package`（**一整份一次取走**，配合
-                #   `op_plugin_package`），那是加法过渡的形状；v0.7 把 `files` 与
-                #   `plugin_file` 删掉了。所以「本站支不支持分发」这个判据**换了**：
-                #   从前是"这一项里有没有 `files`"，现在是顶层**有没有 `limits`**。
-                #   两个都是稳定的协议事实（不是"这次下载失败了"），但只有后者
-                #   在这一版之后仍然存在。
+                # ★ 投递方式是**一整份一次取走**（`op_plugin_package`）；「本站
+                #   支不支持分发」这个判据是顶层**有没有 `limits`**。
+                #   它是一个稳定的协议事实（不是"这次下载失败了"）。
                 #
-                #   ★ "一整份"从 v0.13 阶段 4 起指的是**只含客户端侧**的那一份
+                #   ★ "一整份"指的是**只含客户端侧**的那一份
                 #     （站点现打），不是作者发的整包 —— 字段名没变，`bytes`/`digest`
                 #     的含义跟着分发形状一起换了。
                 #
@@ -9254,7 +9212,7 @@ class Sessiond(object):
                 #   **不是**容器字节的 sha256：容器怎么编那张记录表、有没有签名块，
                 #   都不该动它。给同一个负载加一个签名块，容器字节变了而它**不变**。
                 #
-                # ★ v0.13 阶段 4 起它是**客户端侧那一半**的摘要（四元组里的
+                # ★ 它是**客户端侧那一半**的摘要（四元组里的
                 #   `digestClient`），因为发出去的就是那一半。★ 与 `plugin.digest`
                 #   **不是同一个数**：后者是整棵树的（插件的身份）。
                 #
@@ -9273,9 +9231,9 @@ class Sessiond(object):
             # ── ★★ 站点级的插件问题（账本 **F22**）─────────────────────────
             #
             # 那些**没能加载**的包（同 id 两个包、不是一个包、清单读不出来……）
-            # 从前只有登录节点上的人看得见：`--check-plugins` 打一行、`--check`
-            # 打一条 ⚠、`start()` 记一条日志 —— 而**协议里一个字都没有**。
-            # 于是客户端看到的是「本站没有这个插件」，真相却是「本站有两个、
+            # 若只在登录节点上可见（`--check-plugins` 打一行、`--check`
+            # 打一条 ⚠、`start()` 记一条日志），而**协议里一个字都没有**，
+            # 客户端看到的就是「本站没有这个插件」，真相却是「本站有两个、
             # 因为撞了没被加载」：**运维在客户端上排查，方向从第一步就是错的。**
             #
             # ★ 形状与 `limits` 同一档：**顶层、站点级、有就有没有就没有**。
@@ -9297,10 +9255,10 @@ class Sessiond(object):
             #   上的（base64 之后要能装进一条应答）。两个口径别混：一个插件可以三个
             #   负载数字都合格、而整个包仍然太大 —— 那时客户端连一次都取不回来。
             #
-            # ★ 删掉 `plugin_file` 之后，前三个**一个字节都不走线**了：本站不拦它们，
+            # ★ 前三个**一个字节都不走线**：本站不拦它们，
             #   也没有一条"一份多大"的应答需要它们来兜底。它们仍然报出来，是因为
-            #   客户端读方拿它校验**包里的负载**（`checkDeclared`），而那正是它从
-            #   v0.6 起就有的用法 —— 少了它，一个包会被收下而客户端自己的硬上限
+            #   客户端读方拿它校验**包里的负载**（`checkDeclared`）—— 少了它，一个
+            #   包会被收下而客户端自己的硬上限
             #   成了唯一的一道。
             "limits": {"file_bytes": PLUGIN_FILE_MAX_BYTES,
                        "total_bytes": PLUGIN_TOTAL_MAX_BYTES,
@@ -9311,7 +9269,7 @@ class Sessiond(object):
     def plugin_snapshot(self, spec):
         """**启动那一刻**这个插件分发出去会是什么样：容器格式 + 字节数 + 内容摘要。
 
-        ★ v0.13 阶段 4 起分发的**只是客户端侧**（`plugin_rebuild` 的默认侧），
+        ★ 分发的**只是客户端侧**（`plugin_rebuild` 的默认侧），
           所以这三样说的都是那一份包 —— `digest` 就是四元组里的 `digestClient`，
           也正是客户端收到之后会自己从字节重算、再与信封比的那一个。
 
@@ -9326,15 +9284,14 @@ class Sessiond(object):
           "重装一次那个插件"。要换插件内容，本来就该升版本号 + 重新 `packer
           build` 再装 —— 就地改文件从来不是一条被支持的路径。
 
-          ★ v0.13 之后这一格的判据换了个说法：从前比的是"盘上那个 `.splug` 文件
-            还是不是原来那一份"，现在是"**重新打包之后的摘要**还是不是原来那一个"。
-            两者说的是同一件事（内容没变），而后者在容器不落盘之后仍然成立。
+          ★ 这一格的判据是"**重新打包之后的摘要**还是不是原来那一个"
+            （内容没变）：容器不落盘，盘上没有现成的文件可比。
 
         ★ **三样事实装在一个缓存里**（而不是"字节数一个、摘要一个"）：它们必须出自
           同一次对账。分开放的话，两次之间树被换掉，报出去的摘要与发出去的字节就能
           各说各话 —— 那正是上面那条要防的事，而它会从一个更难发现的入口进来。
 
-        ★ v0.13 起**没有一个现成的容器可读**：这三样都从"照记录表重打一个包"来
+        ★ **没有一个现成的容器可读**：这三样都从"照记录表重打一个包"来
           （`plugin_rebuild`）。★ 仍然是**不缓存字节** —— 出口每次都重新对账、重新
           打、再与快照比。缓存住字节等于把"那一棵树被换过"这件事一起缓存掉了，
           而那正是它要报的东西。
@@ -9370,7 +9327,7 @@ class Sessiond(object):
 
     def plugin_package(self, spec):
         """这个插件**分发出去**的那一份的三样事实：`{format, bytes, digest}`
-        （v0.13 阶段 4 起只含客户端侧），或者 `None`（那棵树对不过账）。
+        （只含客户端侧），或者 `None`（那棵树对不过账）。
         见 plugin_snapshot()。"""
         return self.plugin_snapshot(spec)["package"]
 
@@ -9389,7 +9346,7 @@ class Sessiond(object):
     def op_plugin_package(self, uid, req):
         """把一个插件**要分发的那一份**发给客户端（base64）—— **唯一**一条投递方式。
 
-        ★ v0.13 阶段 4 起发出去的**只含客户端侧**（`plugin_rebuild` 的默认侧）：
+        ★ 发出去的**只含客户端侧**（`plugin_rebuild` 的默认侧）：
           `client/**` + `plugin.json` + `lineage.json`。站点侧的 `job/**` 之类一个
           字节都不出本站 —— 用户机器上不该有一份以提交者身份在集群上执行的脚本，
           这是本版的主题判据。
@@ -9403,9 +9360,9 @@ class Sessiond(object):
             重算的 `digestClient` ≠ 签名里的那一个 ⇒ 客户端自己算一遍就拒。站点
             没有能力偷偷改任何东西 —— 它手里没有私钥，重签不了。
 
-          ★ v0.6 曾经有第二条路（`op_plugin_file`，逐份取），它**做不到**这一点：
-            那边只有"一份一份的字节"，客户端拼不出一份能被签名的东西。v0.7 把它删了
-            —— 留着它不只是多一条代码路径，是多一条**验签绕得过去**的路。
+          ★ 逐份取**做不到**这一点：
+            那边只有"一份一份的字节"，客户端拼不出一份能被签名的东西 ——
+            那是一条**验签绕得过去**的路。
 
         ★ 一条 RPC 换 N 份文件：一次对账从 1 + 1 + N 次降到 1 + 1 + 1 次。这不是
           省事，是**限流**：桶是按"人点一下按钮"设计的（每 uid 每秒 10 次），而两个
@@ -9521,7 +9478,7 @@ class Sessiond(object):
             if unknown:
                 d["reason"] = "暂时无法确认分区权限（查询失败）"
             out.append(d)
-        # ★ 这里此前还返回一个 `defaults`（全局的 2 核 / 8G）。默认资源现在是
+        # ★ 不在这里返回全局 `defaults`（2 核 / 8G）：默认资源是
         #   **按插件**的 —— 在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是
         #   一回事 —— 所以它跟着插件走，由 `op_plugins` 通报。留一个全局的
         #   `defaults` 在这里就是**两份真相**：界面显示 2 核/8G，而实际提交
@@ -9921,9 +9878,9 @@ class Sessiond(object):
     def op_goodbye(self, uid, req):
         """显式结束一条会话：发 `scancel`，然后交给 phase_release 去**确认**。
 
-        ★★ v0.9（账本 F12）：`cancel()` 的返回值从前在这里被**丢掉**，于是
-        `scancel` 失败时照样回一个干净的 `ok:true` —— 而用户与客户端都会把它读成
-        "作业停了"。现在它看得见那个结果，并且**说得出来**：失败时带 `warning`。
+        ★★ 账本 F12：`cancel()` 的返回值若在这里被**丢掉**，
+        `scancel` 失败时就会照样回一个干净的 `ok:true` —— 而用户与客户端都会把它
+        读成"作业停了"。这里看得见那个结果，并且**说得出来**：失败时带 `warning`。
 
         ★ 为什么是 `ok:true` + `warning`，不是 `ok:false`：这条请求**被受理了**
         —— 会话已经进了 `releasing`，而守护进程会一直重试到确认作业消失为止
@@ -9959,8 +9916,8 @@ class Sessiond(object):
     def fit_gres(self, g, partition):
         """把请求的 GRES 与这个分区**实际有的**对一对。返回 `(描述符, 错误说明)`。
 
-        ★ **"上限由站点的实际配置定"就落在这一句上。** 从前是一个写死的
-          `MAX_GPUS_REQUEST = 8`，于是每节点 16 张卡的站点也只能要 8 张 —— 那是
+        ★ **"上限由站点的实际配置定"就落在这一句上。** 写死一个
+          `MAX_GPUS_REQUEST = 8` 会让每节点 16 张卡的站点也只能要 8 张 —— 那是
           替所有站点做了同一个决定。
 
         ★ 查不到目录（`scontrol` 失败/超时）时**放行**：报错就等于一次控制器抖动
@@ -10012,14 +9969,14 @@ class Sessiond(object):
         if self.is_throttled(uid):
             return self._err(4, "throttled", "请求被拒绝次数过多，请稍后再试")
 
-        # ★ **一次调用，一个判据。** 从前这里是两道检查、两个集合，而它们数的
-        #   东西差一个「已提交、尚未登记」的窗口 —— 那个窗口里 count_active 恒为 0，
-        #   于是并发第二次提交一路穿过（账本 F14）。现在只有一个集合，而它含
+        # ★ **一次调用，一个判据。** 两道检查、两个集合会差一个
+        #   「已提交、尚未登记」的窗口 —— 那个窗口里计数恒为 0，
+        #   于是并发第二次提交一路穿过（账本 F14）。只有一个集合，而它含
         #   reserved/submitted。
         #
         # ★ 这里**不需要锁**，唯一的依据是：dispatch() 在事件循环线程里
         #   **同步跑到底**，内部没有任何让出点 —— 也就是**不可重入**。
-        #   （常驻通道之后不再写"单线程串行"：那个词会让人以为它指的是"没有
+        #   （别写"单线程串行"：那个词会让人以为它指的是"没有
         #   并发"，而要传出去的其实是"从检查到写入之间没有让出点"。见
         #   docs/ARCHITECTURE.md〈六之二〉最后那一节。）
         #   所以两次 submit 不可能交错；而这道检查在 store.insert **之前**，
@@ -10059,8 +10016,8 @@ class Sessiond(object):
                                     or "（一个插件都没有）"))
             kind = cfg.default_plugin
         # ★ 解析走**同一处**（`resolve_plugin`）：短名有歧义时它会说清"是哪几个
-        #   id"并让人改用 id —— 从前这里只认短名，"两个插件同名"在这一格上
-        #   是没有出路的（`plugin_by_name` 那张 dict 静默只留了一个）。
+        #   id"并让人改用 id —— 只认短名的话，"两个插件同名"在这一格上
+        #   是没有出路的（`plugin_by_name` 那张 dict 会静默只留一个）。
         spec, why = cfg.resolve_plugin(kind)
         if spec is None:
             return self._err(2, "bad_service_kind",
@@ -10145,8 +10102,8 @@ class Sessiond(object):
             return self._err(2, "bad_gres", gres_err)
         warning = []
         if mem_rejected:
-            # 此前这条只进日志。用户填了 `--mem 0`（在 Slurm 里是"整机内存"）
-            # 会被静默换成默认值，而他以为自己的设置生效了。
+            # 这条不能只进日志：用户填了 `--mem 0`（在 Slurm 里是"整机内存"）
+            # 若被静默换成默认值，他以为自己的设置生效了。
             warning.append("内存参数无法识别，已改用 %s。" % mem)
 
         # ── 分区 ────────────────────────────────────────────────────────────
@@ -10516,7 +10473,7 @@ def main():
         #   开成什么样。所以那一列说的是**插件清单里声明的缺省**，
         #   措辞必须与 `--check` 的「已启用/已停用」（那才是本站状态）分得开。
         #
-        #   ★ 从前两屏都写「启用/停用」—— 同一个词、两件事，而部署脚本里它们
+        #   ★ 别让两屏都用「启用/停用」—— 同一个词、两件事，而部署脚本里它们
         #     前后紧挨着打印。站点写了 `[plugin:sshd] enabled = yes` 而这一屏说
         #     「停用」时，"我明明开了"与"它说停用"之间的那一步排查，方向从第一
         #     步就是错的。（见 KNOWN-ISSUES 的 F39。）
@@ -10537,10 +10494,9 @@ def main():
                   % (s.name, s.id, s.version,
                      "缺省开" if s.default_enabled else "缺省关", note))
             # 分发是**另一个读者**：客户端连上之后**一次取走那一份**（一次 RPC）——
-            # v0.13 阶段 4 起是只含客户端侧的那一份。
-            # ★ 这里从前还写着"或者按这份清单逐份取走（N 次 RPC）"—— **那条路在
-            #   v0.7 删掉了**（`op_plugin_file`，见上面"站点分发"那一段）。所以
-            #   下面这几项报的仍然是"这个插件分发不了"，但**已经没有第二条路**可退。
+            # 是只含客户端侧的那一份。
+            # ★ 分发只有**一整份一次取走**这一条路（没有"按这份清单逐份取走"那种
+            #   退路）。下面这几项报的仍然是"这个插件分发不了"，而**没有第二条路**可退。
             # 下面四项都**只报不拦** —— 它们不是部署错误，是"这个插件分发不了"。
             #
             # ★ 那些事实在本节里**只对账一遍**：这一屏要的是"这一次读到的全部事实"，
@@ -10553,7 +10509,7 @@ def main():
                 print("                  ⚠ 对不上账了（%s）—— 刚才还是好的，"
                       "是这两步之间被换掉的吗？" % _now["code"])
                 continue
-            # ★★ v0.13 阶段 4 起这里有**两个不同的量**，而从前只有一个：
+            # ★★ 这里有**两个不同的量**：
             #
             #     树（整棵）  盘上装了什么 —— **全部**文件，这是插件的身份
             #     分发出去    客户端会收到什么 —— **只含客户端侧**（`dist`）
@@ -10640,7 +10596,7 @@ def main():
     #   集群信息那一段（读者在那儿找它），不是因为判据分两次跑。
     errors, cidr_errors = config_deploy_problems(cfg)
 
-    # ★★ `--check` 的退出码分两档（v0.12 阶段 4）：**2 = 这台机器缺东西**，
+    # ★★ `--check` 的退出码分两档：**2 = 这台机器缺东西**，
     #   1 = 这份配置写错了。判据与整段理由写在 `machine_selfcheck()` 上面 ——
     #   一句话：部署脚本要在**装任何文件之前**就知道该不该停，而它分得清这两档
     #   才做得到那件事。
@@ -10668,7 +10624,7 @@ def main():
         else:
             print("配置 OK: %s" % args.config)
         print("  端口池        : %d-%d" % (cfg.port_start, cfg.port_end))
-        # ★ 端口池与本机保留端口的重叠（v0.12 阶段 4 从 install-base.sh 搬进来）。
+        # ★ 端口池与本机保留端口的重叠（判据住在守护进程这一侧）。
         #   一条 ⚠，**不动退出码** —— 它只意味着作业偶尔要多试几个候选端口。
         _rp = reserved_ports_warning(cfg)
         if _rp:
@@ -10706,7 +10662,7 @@ def main():
                   "sync` 会织出它）"
                   % (_s.name, os.path.join(cfg.jobs_dir, _s.id + ".sbatch")))
         # 「有一份配置指不到本站任何插件」—— 同上，**报告但不算错误**。
-        # ★ 这一档是 v0.12 阶段 2 从"硬错误"降下来的（见
+        # ★ 这一档是 ⚠ 不是硬错误（见
         #   stale_plugin_conf_problems 的说明）：判据从内容换到位置之后，"这个文件
         #   指不到人"才成了单看一个文件就能判的事。
         # ★ 它必须**真的打出来** —— 算出来了不送出去就是又一个 F35，而这一条的
@@ -10746,19 +10702,15 @@ def main():
             # ★ 这一屏**现对一遍账**（不缓存、也不与别处共用），与 `--check-plugins`
             #   那一屏同一个口径。两屏各有各的"只对一遍"纪律，所以不互相借。
             #
-            # ★ 从前这里是一个叫 `plugin_payload_index()` 的函数。**它删了** ——
-            #   它只剩这一个调用方，而这一屏**没有用例**，于是那个函数是"一行包装 +
-            #   一份没人验的注释"。（那个注释还写错了调用方是谁。）
-            #
             # ★ 这里的 `_pr` 对不上账时**不报错、只留白**：能进 `cfg.plugins` 的
             #   都是启动时对过账的，所以走到这里只可能是"启动之后被换掉" ——
             #   而那件事由 `op_plugin_package` 在真的有人来取的时候明确报出来
             #   （`plugin_package_changed`）。自检这一屏多打一句不会让它更早被发现，
             #   却会在"我明明装好了"这一屏上多出一条与此刻无关的话。
             _pr = plugin_inspect(cfg.plugins_dir, _p.spec.id)
-            # ★ v0.13 阶段 4 起这一行报的是**要发出去的那一份**（只含客户端侧）。
-            #   标签"分发"本来就是这么写的，而从前那个数（整棵树重打成包多大）
-            #   比实际发出去的大 —— 它把客户端永远不会收到的站点侧字节也算进去了。
+            # ★ 这一行报的是**要发出去的那一份**（只含客户端侧）——
+            #   标签"分发"本来就是这么写的。用整棵树重打成包的那个数
+            #   会比实际发出去的大：它把客户端永远不会收到的站点侧字节也算进去了。
             _d = _pr["dist"] if _pr["ok"] else None
             _idx = ({f["path"]: (f["size"], f["sha256"]) for f in _d["files"]}
                     if _d else {})
@@ -10784,8 +10736,8 @@ def main():
         # 控制器与版本：集群那一屏最上面两格，而"连不上控制器"是所有故障里
         # 最该先排除的那一个 —— 放在 --check 的第一段里，而不是让人去开客户端。
         _h = slurm.controller_health()
-        # ★ 这一行是**唯一**说"控制器此刻可不可达"的地方（部署脚本从前自己
-        #   `scontrol ping` 一次 —— 那是同一件事的第二份实现，v0.12 阶段 4 删了）。
+        # ★ 这一行是**唯一**说"控制器此刻可不可达"的地方（别处的第二份实现会
+        #   分家）。
         #   所以后果也要在这里说完：它不是启动错误（起得来），但每一件要让
         #   Slurm 动起来的事都会失败。
         print("  控制器        : %s" % ("在线" if _h["up"] else

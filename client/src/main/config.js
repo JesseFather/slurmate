@@ -8,7 +8,7 @@
  * 三条设计原则，都是被这个项目里反复出现的「静默失败」逼出来的：
  *
  * 1. **写盘一律原子**（写临时文件 + rename），且**显式 chmod**。`writeFileSync` 的
- *    mode 参数在文件已存在时不生效 —— 光靠它会让一个曾经 0644 的凭据文件永远是 0644。
+ *    mode 参数在文件已存在时不生效 —— 光靠它会让一个已经是 0644 的凭据文件永远是 0644。
  *
  * 2. **凭据存储绝不静默降级**。Linux 上没有 keyring 时 `safeStorage.isEncryptionAvailable()`
  *    返回 false；此时【不能】悄悄改成明文写盘。调用方必须拿到一个明确的结果，
@@ -27,18 +27,15 @@ const SCHEMA = 6;   // 2：profile → connections；3：永远加密保存；4�
                     // 5：**布局组**（layouts[] + connections[].layoutId）取代 slots
                     // 6：**站点分发**（trustedPlugins 同意台账 + devPlugins 开关）
                     //
-                    // ★ 6 之后**删掉过一个键**：`devPlugins`（本机池加不加载）。
-                    //   **没有升号**，因为删键不需要迁移 —— 老 config.json 里那一条
-                    //   今天没有任何读者，下一次 saveConfig 顺手就把它丢了。升号是
-                    //   给"必须搬一次"的改动用的，不是给"少了一个键"用的。
+                    // ★ 删键**不升号**：升号是给"必须搬一次"的改动用的，不是给
+                    //   "少了一个键"用的 —— 一个没人读的键下一次 saveConfig 顺手
+                    //   就丢了。
 
 // 私钥在磁盘上的存放形态。**只有一种能写、也只有一种能读**：encrypted。
 //
-// ★ v0.7 之前还有 'plain' —— 旧界面上有一个「明文保存（不推荐）」的选项，于是
-//   磁盘上可能留着一份明文。读它的那条路删掉了。理由：一份能被读出来继续用的明文
-//   私钥，最该做的事是**被发现**，而"顺手把它加密重存"等于让它再活一轮；在没有旧
-//   部署的前提下（0.y），那条路只有成本。今天遇到它，与遇到别的认不出的 mode 是
-//   同一条路：报 bad_mode。
+// ★ **只有一种 mode 能读**：别的值（包括明文）一律报 `bad_mode`，**不**顺手加密
+//   重存 —— 一份能被读出来继续用的明文私钥，最该做的事是**被发现**，而"顺手把它
+//   加密重存"等于让它再活一轮。
 const SECRET_ENCRYPTED = 'encrypted';
 
 /**
@@ -74,14 +71,12 @@ const DEFAULTS = {
   // ★ 它**不**影响服务端：站点仍然可以提交那个插件的会话（用户自己用 CLI 就行），
   //   客户端只是不再给出那个按钮。两边是两件事，见 plugins/index.js 的边界说明。
   // 键是插件的 **id**（那个铸造出来的 ULID），**不是短名**。
-  // ★ 这个文件头里以前写的是"插件名" —— 而 `pluginsView()` 与 `app:setPluginEnabled`
-  //   从头到尾用的是 `plugin.id`。按那句注释去写代码，得到的是一个"开关莫名失效"
-  //   的症状（池是全局的，两个站点可以各有一个叫 jupyter 的插件而它们是两个东西）。
+  // ★ 用错成**短名**的症状是"开关莫名失效"：池是全局的，两个站点可以各有一个叫
+  //   jupyter 的插件而它们是两个东西 —— `pluginsView()` 与 `app:setPluginEnabled`
+  //   从头到尾用的是 `plugin.id`。
   plugins: {},              // { [id]: { enabled: boolean } }
-  // ★ 这里从前还有一个 `devPlugins`（"本机池加不加载"）。它随本机池一起删掉了 ——
-  //   那个开关打开之后，`~/.slurmate/plugins/` 里**用户自己放进去的东西**会被加载，
-  //   而且是**不过同意闸**的。`packer/docs/PLUGIN-SPEC.md` §5.2 明文禁止给任何一类插件开
-  //   免同意的口子，所以它连同它守着的那条路一起没了。今天池里有什么就加载什么。
+  // ★ **不给任何一类插件开免同意的口子**（`packer/docs/PLUGIN-SPEC.md` §5.2）：池里
+  //   有什么就加载什么，但每一份都过同意闸。
   // 同意台账（TOFU 一致性）。`{ "<id>@<版本>": { digest, site, at } }`
   //
   // ★ 键里带**版本**：同一个插件的新版本是**另一份构件**，要重新同意一次。
@@ -153,8 +148,8 @@ function trustAlgOf(entry) {
 /**
  * 台账里有这个 `(id, 版本)` 且摘要相符吗？
  *
- * ★ 判据必须是**全长的**摘要。`plugin.digest` 以前是截断到 16 位的，拿它当信任
- *   台账的键就是一个 64 位的碰撞面 —— 截断只留给显示。
+ * ★ 判据必须是**全长的**摘要：拿一个截断的摘要当信任台账的键就是一个碰撞面 ——
+ *   截断只留给显示。
  *
  * ★ **算法版本也必须相符。** 见上面那一段：不同公式算出来的两个值本来就不可比，
  *   让它们互相作证等于把"换了尺子"读成"东西变了"。
@@ -380,17 +375,15 @@ function loadClientId(dir) {
 
 // ── 底层：原子写 ────────────────────────────────────────────────────────────
 //
-// ★ 实现搬去了 `atomic-write.js`（框架里唯一的那一份 —— 这个文件与
-//   `site-plugins.js` 从前各有一份，逐字差别好几处，而且都会漂开）。
+// ★ 实现住在 `atomic-write.js`（框架里唯一的那一份）。
 //
 // ★ 留下这个三行的适配，是因为**"配置写不下去必须炸"是配置模块的策略，不是写盘的
 //   策略**：通用实现只返回结构化结果（它还要服务那些"失败了就如实告诉用户"的调用
-//   点），而下面那 6 个调用点一直靠抛异常把失败传到 IPC 处理器。所以外部契约一个字
-//   没变 —— 这是一次纯内部重构。
+//   点），而下面那 6 个调用点靠抛异常把失败传到 IPC 处理器。
 //
-// ★ 顺手修掉的一个洞：从前这里有一个 `ensureDir`，它对**已经存在**的目录也
-//   `chmodSync(dir, 0o700)` —— 也就是每次写配置都会去 chmod 那个 `userData`。
-//   通用实现只在"这个目录是我刚建的"时设权限（`mkdirSync` 的 `mode` 天生如此）。
+// ★ **权限只在目录是新建的时候设**：对一个**已经存在**的目录（比如 `userData`）
+//   `chmodSync(dir, 0o700)` 会在每次写配置时改它的权限。通用实现靠 `mkdirSync` 的
+//   `mode`（天生只在新建时生效）做到这一点。
 const writeAtomic = (file, text, mode) => atomicWrite.writeAtomicOrThrow(file, text, { mode });
 
 function readJson(file) {
@@ -419,9 +412,8 @@ function connectionKey(c) { return `${c.user}@${c.host}:${c.port}`; }
  * 把任意输入规整成一条合法连接；字段不合法则返回 null（由调用方报错，不静默填空）。
  *
  * **备注（label）为空是合法状态**，表示「用户没起名」。界面上据此回落成显示地址。
- * 这里曾经把空备注回落成 host，那让「没起名」和「名字就叫这个地址」变得无法区分 ——
- * 而界面要按这个区分决定显示哪一样。
- * 旧版本写下的 label 恰好等于 host 的那些，也在这里一并归成「没起名」。
+ * **不要把空备注回落成 host** —— 那让「没起名」和「名字就叫这个地址」变得无法区分，
+ * 而界面要按这个区分决定显示哪一样。label 恰好等于 host 的，也在这里一并归成「没起名」。
  */
 function normalizeConnection(raw, fallbackId) {
   if (!raw || typeof raw !== 'object') return null;
@@ -469,15 +461,13 @@ const LAYOUT_PORT_BASE = 18080;   // 布局组的起手端口，从这里往上�
  *   "**一个随机 id 被发两次**"（A 组被回收之后，它的 id 落到一个**不相干**的新组头上，
  *   于是新组继承 A 的 localStorage）。这里只有一个组，不存在"落到别的组头上"。
  *
- * ★★ 从前这里写的是 `newLayoutId()`（随机）。后果不是"看起来不利索"，而是**丢数据**：
- *   `loadConfig` **自己不写盘**（见文件头那三条原则），于是
+ * ★★ **这一格必须是常量，不能是 `newLayoutId()`（随机）**。后果不是"看起来不利索"，
+ *   而是**丢数据**：`loadConfig` **自己不写盘**（见文件头那三条原则），于是
  *
  *       读完配置 → 一次都没保存就退出 → 下次启动换一个 id → 换一个分区
  *       ⇒ **上一轮刚攒的编辑器布局凭空消失**，且没有任何报错。
  *
- *   （v0.7 之后还多一层：每次启动都在「本机的插件数据」里攒一份认不出的残留，
- *   用户得自己删。）当年那条〈升级必须确定性〉的洞，迁移那条路用**字面量 id** 防的
- *   正是这件事 —— 迁移删了、这条兜底却漏了。
+ *   而随机 id 还会在「本机的插件数据」里攒下一份认不出的残留，用户得自己删。
  *
  * ★ 复用它是安全的：这一格唯一的来路是"一个组都没有"，而一个组被回收时
  *   `clearLayoutStorage` 已经把它的分区清掉了 —— 再补出来的那一份是空白的。
@@ -507,12 +497,12 @@ const RELAY_PORT_BASE = 18090;
  * 布局组 id 的**形状**。
  *
  * ★ 它进分区名，而分区名就是磁盘上的目录名（见 plugin-data.js 的 partitionOf）——
- *   所以字符集必须钉死。`config.json` 是**用户能手改的**，在补上这一条之前
- *   `"id": "../x"` 会一路走到路径里：`normalizeLayout` 当时只查了"非空字符串"。
+ *   所以字符集必须钉死。`config.json` 是**用户能手改的**，没有这一条，`"id": "../x"`
+ *   会一路走到路径里 —— 查"非空字符串"挡不住它。
  *   （`persist:plugin-<ULID>` 那条之所以没事，是因为 ULID 有自己的白名单，
  *   **不是这一层在管**。）
  *
- * ★ 这是**补上从前的洞**，不是新规矩：它钉的就是 `newLayoutId` 铸出来的那个形状。
+ * ★ 它钉的就是 `newLayoutId` 铸出来的那个形状。
  *
  * ★ 新模型还要往同一个字符串里再塞一个组名（清单里的 `contributes.data.inherit`，
  *   或者两个键都不写时那个缺省常量），所以这一格必须先关上。
@@ -567,9 +557,9 @@ function usedLayoutPorts(cfg, exceptId) {
  * 那就等于每次启动都可能换 origin。
  *
  * ★ **调用它的地方只有一个时机：一个布局组被创建的时候。** 此后再没有任何东西改
- *   这个值 —— 端口是布局组的**只读属性**。（从前隧道顺移之后会把它写回来，
- *   那等于把一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也
- *   回不去，而原来那份布局本来是可以回来的。）
+ *   这个值 —— 端口是布局组的**只读属性**（隧道顺移之后**不**把它写回来：写回来
+ *   等于把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin 也
+ *   回不去，而原来那份布局本来是可以回来的）。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  *
  * @param {Set<number>} [extraPorts] **配置之外**还占着的端口。今天唯一的来源是
@@ -577,8 +567,7 @@ function usedLayoutPorts(cfg, exceptId) {
  *   ★ 不让这个函数自己去问临时组，是因为这一层**只认配置**（`usedLayoutPorts`
  *   的语义就是"配置里的"）—— 把第二个来源焊进来，这一层就再也说不清它数的是
  *   什么了。调用方把两半并好再传进来。
- *   ★ 不传 = 只有配置说了算，那是这个函数从前的语义（`app:setConnectionLayout`
- *   那条路就是）。
+ *   ★ 不传 = 只有配置说了算（`app:setConnectionLayout` 那条路就是）。
  */
 function nextLayoutPort(cfg, extraPorts) {
   const used = usedLayoutPorts(cfg, null);
@@ -598,13 +587,12 @@ function nextLayoutName(cfg) {
   return `布局 ${n}`;
 }
 
-// ★ 这里从前有一个 `layoutPort(cfg, id)`：取一个组的端口，**组不存在时回落到
-//   `LAYOUT_PORT_BASE`**。它整个删掉了 —— 而理由不是"没人用"（那只是结果）：
-//   那条回落**正是**临时实例这条路上最危险的一格。临时组不在配置里，于是每一个
-//   临时实例都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局都推一条
-//   "端口被占、布局会重置"的**假警报**，而且同一份配置在不同启动顺序下会得到
-//   不同的 origin。取端口现在只有一条路：`index.js` 的 `layoutPortOf`（先查配置、
-//   再查临时组，都没有就抛）。**别在这里再长出一条带回落的取端口函数。**
+// ★ **别在这里长出一条带回落的取端口函数** —— 一条"组不存在就回落到
+//   `LAYOUT_PORT_BASE`"的路是临时实例这条路上最危险的一格：临时组不在配置里，
+//   于是每一个临时实例都会"回落到" 18080，也就是**持有者自己那个端口** ⇒ 每次开局
+//   都推一条"端口被占、布局会重置"的**假警报**，而且同一份配置在不同启动顺序下会
+//   得到不同的 origin。取端口只有一条路：`index.js` 的 `layoutPortOf`（先查配置、
+//   再查临时组，都没有就抛）。
 
 /**
  * 改一条连接指向哪个组。**不落盘** —— 由调用方统一走 commitConfig()。
@@ -672,8 +660,6 @@ function layoutPlan(cfg) {
  * 解析布局组列表。
  *
  * 组只有**一条来路**：磁盘上的 `layouts[]`。一个都没有而有连接时，就地补一个默认组。
- * （0.2.0 及更早的 `slots` 那一路 —— 一个槽位、端口从配置里继承 —— 随"读旧配置"
- * 一起删掉了，见 CHANGELOG 的 0.7 那一节。）
  */
 function loadLayouts(raw, connections) {
   const out = [];
@@ -690,8 +676,7 @@ function loadLayouts(raw, connections) {
     }
   }
   // 兜底：有连接却一个组都没有（手改过配置，或第一次配连接就写下了连接）。
-  // ★ id 是**常量**，不是铸出来的 —— 理由（以及从前随机 id 造成的那次丢数据）
-  //   写在 `DEFAULT_LAYOUT_ID` 那一段注释里。
+  // ★ id 是**常量**，不是铸出来的 —— 理由写在 `DEFAULT_LAYOUT_ID` 那一段注释里。
   if (out.length === 0 && connections.length > 0) {
     out.push({ id: DEFAULT_LAYOUT_ID, name: '默认布局', port: LAYOUT_PORT_BASE });
   }
@@ -708,18 +693,17 @@ function loadLayouts(raw, connections) {
 function configPath(dir) { return path.join(dir, 'config.json'); }
 
 /**
- * 读配置。**只认已知键**（见下面那段），而且**只认当前格式** —— 旧格式不再有读取
- * 路径，它们读作"没有配过"（0.y 不考虑兼容性，见 CHANGELOG 的 0.7 那一节）。
+ * 读配置。**只认已知键**（见下面那段），而且**只认当前格式** —— 旧格式读作
+ * "没有配过"（0.y 不考虑兼容性）。
  */
 function loadConfig(dir) {
   const raw = readJson(configPath(dir));
   if (!raw || typeof raw !== 'object') return structuredClone(DEFAULTS);
 
   // **只认已知键**，不用 `...raw` 整包展开。
-  // 整包展开的后果不是「多几个字段」那么轻：旧版本留下的 profile / passwordMode /
-  // maxSessions 会一直跟着配置文件活下去，每次保存都被原样写回，永远不消失 ——
-  // 将来读这份配置的人（包括三个月后的我们）会以为它们还有用，去代码里找一个
-  // 早就不存在的行为。
+  // 整包展开的后果不是「多几个字段」那么轻：一个不认识的键会一直跟着配置文件活
+  // 下去，每次保存都被原样写回，永远不消失 —— 将来读这份配置的人会以为它还有用，
+  // 去代码里找一个早就不存在的行为。
   const cfg = structuredClone(DEFAULTS);
   if (raw.hostKeys && typeof raw.hostKeys === 'object') cfg.hostKeys = raw.hostKeys;
   // 插件开关。**只收布尔值**：配置文件是用户可以手改的，而一个 `"enabled": "no"`
@@ -730,9 +714,8 @@ function loadConfig(dir) {
       if (v && typeof v.enabled === 'boolean') cfg.plugins[name] = { enabled: v.enabled };
     }
   }
-  // ★ 老 config.json 里可能还有 `devPlugins`。**不读它** —— 那个开关守的那条路
-  //   已经删了。这里不要"读进来但不用"：一个没有读者的字段留在这里，下一个人会
-  //   以为它还有用，然后把它接回某条路上。
+  // ★ **不认识的字段不要"读进来但不用"** —— 一个没有读者的字段留在这里，下一个人
+  //   会以为它还有用，然后把它接回某条路上。
 
   // 同意台账。**只收形状完整的条目**：`digest` 必须是全长 64 位十六进制。
   //
@@ -901,8 +884,7 @@ function forgetHostKey(dir, cfg, host, port) {
 // 磁盘形态（一个文件装全部，0600）：
 //   { schema: 4, keys: { "<连接 id 或 PENDING_ID>": { mode, data } } }
 //
-// 旧形态（schema ≤ 3）是 { schema, mode, data } 一份全局密钥。**不再读它** ——
-// 它读作"没有这条密钥"（见 SECRET_ENCRYPTED 那段）。
+// **只读当前形态（schema 4）** —— 别的形状读作"没有这条密钥"（见 SECRET_ENCRYPTED 那段）。
 
 function secretPath(dir) { return path.join(dir, 'secrets.json'); }
 
@@ -1019,19 +1001,12 @@ function removePendingGoodbye(dir, sessionId) {
   }
 }
 
-// ★ **导出表是这个模块对外的承诺**，所以这里只留今天真有人读的名字。
+// ★ **导出表是这个模块对外的承诺**，所以这里只留今天真有人读的名字 —— 谁在读它，
+//   是靠"整个仓库搜一遍这个标识符"量出来的，不是靠感觉。它们都还在文件里、还在被
+//   本文件用着，只是不**承诺**给别人。
 //
-//   v0.7 之前它长得多，其中这一批**一个外部读者都没有**（谁在读它，是靠
-//   "整个仓库搜一遍这个标识符"量出来的，不是靠感觉）：`SECRET_ENCRYPTED`、
-//   `LAYOUT_PORT_BASE`、`newConnectionId`、`normalizeConnection`、
-//   `connectionKey`、`hostKeyId`、`readSecretFile`。它们都还在文件里、还在被
-//   本文件用着，只是不再**承诺**给别人。
-//
-//   ★ 一起删掉的还有整个 `_internal`（`writeAtomic` / `readJson` / `configPath` /
-//     `secretPath` / `pendingGoodbyePath` / `pinnedKeysPath` / `PINNED_SCHEMA`）——
-//     它的注释写着"导出给测试用"，而 `config.test.mjs` **一个都没用过**。那句话
-//     就是"意图写了、测试没写"的原文：留着一个没人读的接缝，读代码的人会以为
-//     某条用例正踩着它。`config.test.mjs` 走的是这个模块的**公开面**
+//   ★ **别为了"导出给测试用"留一个 `_internal`**：一个没人读的接缝会让读代码的人
+//     以为某条用例正踩着它。`config.test.mjs` 走的是这个模块的**公开面**
 //     （`loadConfig` / `saveConfig` / `setKey` / `loadPinnedKeys` …），那才是它
 //     该走的路；真需要某个内部函数时，加回一行就是一次**看得出来**的动作。
 module.exports = {

@@ -31,9 +31,8 @@ const SESSION_COOKIE = LOGIN.cookie;
 // ★ 假站点的**分发源**：仓库里的 `plugins/` 目录 —— 与 app 在开发者模式下用的是
 //   同一个（见 index.js 的 `sitePluginDir`）。后端自己从那棵树上读清单、现打真包。
 //
-//   ★ 这里从前是"把一份插件描述直接注入给后端"（`opts.sitePlugins`）。那个入口
-//     随本机池一起删掉了 —— 它当初的用途是"让站点报客户端池里装了什么"，而那正是
-//     要消灭的那条路。现在两边走的是**同一条**：站点报的是它自己发得出来的东西。
+//   ★ 两边走的是**同一条**：站点报的是它自己发得出来的东西，不是客户端池里装了
+//     什么。
 const SITE_PLUGIN_DIR = () => path.join(HERE, '..', '..', 'plugins');
 
 const NO_REDIRECT = { redirect: 'manual' };
@@ -241,10 +240,9 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
-  // 老接口上那个 farewell:false（「只关窗口，作业继续跑」）已经删掉了。
-  // 就算有人照着旧代码传进来，也**必须**被当成一次正常的释放 ——
-  // 一个能被用户点击触发的「不释放」开关，只会误伤：它命中的所有场景
-  // 都是用户明确表达了终止意图的场景。
+  // 就算有人传进来一个 `farewell: false`（「只关窗口，作业继续跑」），也**必须**
+  // 被当成一次正常的释放 —— 一个能被用户点击触发的「不释放」开关，只会误伤：
+  // 它命中的所有场景都是用户明确表达了终止意图的场景。
   const res = await ctl.stop({ farewell: false });
   assert.equal(res.ok, true);
   assert.equal(res.state, 'releasing', '必须真的走释放，不能把作业留在集群上');
@@ -483,7 +481,7 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
   const ctl = new SessionController({ backend, layoutId: 'l1' });
   // ★ 必须注册清理。隧道是个真的 net.Server，不关掉的话 node --test 的事件循环
   //   永远不会空 —— 而 node 18 的 --test **不会**强制退出，于是整个套件挂到超时，
-  //   且没有任何测试失败，只有沉默。这条曾经真的漏了。
+  //   且没有任何测试失败，只有沉默。
   t.after(() => ctl.stop());
   const snap = await ctl.start({}, { preferredPort: layoutPort, serviceKind: CS_MANIFEST.name });
 

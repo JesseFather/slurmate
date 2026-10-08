@@ -66,7 +66,7 @@ const { execFileSync } = require('child_process');
 
 /** 8 字节。带 `\x1a\r\n` 是为了让文本工具一眼看出"这是二进制"，且能被老式工具截断。 */
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
-/** ★ v0.13 起是 **2**；`1` 一律拒（`0.y` 不考虑兼容性）。差在签名块：v1 只盖一个
+/** ★ 当前格式版本是 **2**；`1` 一律拒（`0.y` 不考虑兼容性）。差在签名块：v1 只盖一个
  *  整棵树的摘要，v2 盖 `{id, 版本, digestSite, digestClient}` 四元组 —— 见 A.3。 */
 const FORMAT = 2;
 const HEADER_BYTES = 20;
@@ -150,9 +150,9 @@ const MAX_SEGMENT_BYTES = 255;
 // 这里 import 不到仓库里的任何东西（与 COPY_SKIP 同一个处境）；那份代价由 CI 的
 // lint 与 `packer/test-packer.mjs` 一起付。
 //
-// ★ **为什么闸要装在这里**（§3.7 的由来）：上限从前只有**站点**知道 ——
-//   作者要等包发出去、装不上、再回头问，才知道自己超了。而打包器是他手上唯一的
-//   工具，所以这里是唯一能"在他发布之前就说话"的地方。
+// ★ **为什么闸要装在这里**（§3.7 的由来）：上限若只有**站点**知道，作者就得等包
+//   发出去、装不上、再回头问，才知道自己超了。而打包器是他手上唯一的工具，所以这里
+//   是唯一能"在他发布之前就说话"的地方。
 const MAX_FILES = 256;
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -169,8 +169,8 @@ const MAX_PATH_BYTES = MAX_DEPTH * MAX_SEGMENT_BYTES + (MAX_DEPTH - 1);
  *     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 188+verlen) ‖ 负载 Σsize
  *
  * ★ 路径那一项按**最长的一条**算（2047 字节），不按常见的十几字节算 —— 见
- *   MAX_TOTAL_BYTES 的注释。★ 签名那一项按 **`SIG_MAX_BYTES`（443）**算：v0.13 起
- *   签名块的长度随版本号变（`188 + verlen`），而"最坏情况"必须按最长的那个取。
+ *   MAX_TOTAL_BYTES 的注释。★ 签名那一项按 **`SIG_MAX_BYTES`（443）**算：签名块的
+ *   长度随版本号变（`188 + verlen`），而"最坏情况"必须按最长的那个取。
  */
 const MAX_ENVELOPE_BYTES = 20 + SIG_MAX_BYTES + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
 
@@ -179,11 +179,9 @@ const MAX_ENVELOPE_BYTES = 20 + SIG_MAX_BYTES + MAX_FILES * (2 + MAX_PATH_BYTES 
  * 情况，于是"按上限做出来的包一定装得进 `MAX_PACKAGE_BYTES`"是**算出来的**，
  * 不是碰巧成立的。
  *
- * ★ 从前这里没有这个数，客户端与守护进程那份是拍出来的 1 MiB；而"负载 1 MiB"
- *   与"包 2 MiB"之间没有任何东西钉住。若照直觉把它提到 `2 MiB − 64 KiB`，一棵
- *   256 份、路径都顶到 2047 字节的树会打出约 **2.44 MiB** 的包（实测：负载只有
- *   512 字节时包本身就有 532,515 字节），而**安装器会拒** —— 一句话说不清的
- *   "明明合规却装不上"。
+ * ★ 它必须是**推出来的**：若照直觉把它提到 `2 MiB − 64 KiB`，一棵 256 份、路径都
+ *   顶到 2047 字节的树会打出约 **2.44 MiB** 的包（实测：负载只有 512 字节时包本身
+ *   就有 532,515 字节），而**安装器会拒** —— 一句话说不清的"明明合规却装不上"。
  */
 const MAX_TOTAL_BYTES = MAX_PACKAGE_BYTES - MAX_ENVELOPE_BYTES;
 
@@ -287,8 +285,8 @@ function contentDigest(files) {
   // ★ **在这里排序**，不是在调用方。记录表里的次序是**别人给的**：
   //   一个手写的包完全可以把它们按别的次序排。摘要要是跟着记录表的次序走，
   //   同一个包就会算出两个摘要 —— 而签名盖的是摘要，于是它**先**以
-  //   "签名验不过"的形式响，排查的人会去查钥匙。（这个 bug 真的写出来过：
-  //   早先版本忘了这一行，用例当场抓住。）
+  //   "签名验不过"的形式响，排查的人会去查钥匙。（漏了这一行，同一个包就会算出
+  //   两个摘要 —— 用例当场抓住。）
   const sorted = sortByPathBytes(files);
   const h = crypto.createHash('sha256');
   for (const f of sorted) {
@@ -981,8 +979,8 @@ function insertId(text, id) {
   const head = text.slice(0, at);
   const tail = text.slice(at);
   // ★ 逗号**总是**要加：`id` 插在第一个键**之前**，所以它永远不是最后一个键
-  //   （上面那个 `multi` 判据已经保证这棵树里至少有一个键）。早先这里写的是
-  //   "看 tail 里有没有逗号"—— 于是单键的清单（`{ "a": 1 }` 多行写法）会漏掉
+  //   （上面那个 `multi` 判据已经保证这棵树里至少有一个键）。判据若换成
+  //   "看 tail 里有没有逗号"，单键的清单（`{ "a": 1 }` 多行写法）就会漏掉
   //   逗号，产出一份**不合法的 JSON**。这正是"不要手搓字符串拼接"的那类教训：
   //   能靠结构推出来的东西，别去正则里猜。
   return `${head}"id": ${JSON.stringify(id)},${lf}${indent}${tail}`;
@@ -1383,7 +1381,7 @@ function cmdKeygen(dir, opts) {
   return 0;
 }
 
-// ★★ 包名 = **纯 `<id>.splug`**（v0.13）。从前是 `<目录名>-<版本>.splug`。
+// ★★ 包名 = **纯 `<id>.splug`**。
 //
 //   判据是"**一个 id 只有一份内容**"（§2.4）—— 而那个 `(id, 版本)` 二元组里
 //   能进文件名的只有版本，于是同一个 id 的两个版本在同一个目录里只能靠**名字**
@@ -1394,7 +1392,7 @@ function cmdKeygen(dir, opts) {
 //   ★ 连带后果一条，写进 `packer/docs/README.md`：**同一个 id 的多版本必须自己分
 //     目录**存放（`dist/1.0.0/<id>.splug`）。这不是偏好 —— 是"一个目录里同 id
 //     只能有一版"的推论。
-//   ★ 目录名从此**完全不参与**包名（从前它参与）。它与"目录名不参与任何判定"
+//   ★ 目录名**完全不参与**包名。它与"目录名不参与任何判定"
 //     那条本来就一致：身份来自清单里的 `id`。
 function defaultOut(dir, id) {
   return path.join(path.dirname(path.resolve(dir)), `${id}.splug`);
@@ -1614,7 +1612,7 @@ function cmdSign(file, opts) {
       + '不是一个版本号（x.y.z，§2.3）—— 不签一份身份都立不住的清单。');
   }
 
-  // ★★ **签的是四元组**（v0.13，附录 A.3）：`{id, 版本, 站点侧摘要, 客户端侧摘要}`。
+  // ★★ **签的是四元组**（附录 A.3）：`{id, 版本, 站点侧摘要, 客户端侧摘要}`。
   //   v1 只盖"整棵树一个摘要"，于是站点要**单独**给客户端发一半时，那一半没有任何
   //   东西把它与作者绑起来 —— 两个摘要把这件事说清楚了。
   const sd = sideDigests(r.files);
@@ -1927,7 +1925,7 @@ if (require.main === module) {
 //   而**钥匙库与血统表那一组**（`LINEAGE_FILE` / `LINEAGE_SCHEMA` / `mintUlid` /
 //   `insertId` / `replaceId` / `packerHome` / `keyFilePath` / `releasesPath` /
 //   `saveKey` / `loadKey` / `readLineage` / `lineageEntry` / `writeLineage` /
-//   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）**从导出表里删掉了**
+//   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）**不在导出表里**
 //   —— 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
 //   仍然被那些动词用着；只是不再对外承诺。这与 `plugin_payload_index()` 是同一条
 //   纪律：一个没人读的导出就是一句没人守的承诺。

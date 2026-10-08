@@ -554,7 +554,7 @@ sec "插件"
 # 它去计算节点核对。
 _plugdir="/usr/local/share/slurmate/plugins"
 _daemon="/usr/local/sbin/slurmate-sessiond"
-# ★★ 站点上的一个插件是**一棵树 + 一份记录表**（v0.13 起）：
+# ★★ 站点上的一个插件是**一棵树 + 一份记录表**：
 #       <plugins_dir>/<ULID>/        负载原样铺开
 #       <plugins_dir>/<ULID>.json    记录表（这次安装的「提交点」）
 #   容器（`.splug`）**装完就不在盘上了** —— 它只在「作者→站点」与「站点→客户端」
@@ -623,8 +623,8 @@ if [[ -d "$_plugdir" ]]; then
             r INFO "判不了「这一份对不对」：${_daemon} 不在（还没部署？）"
         fi
     fi
-    # ★ **不该在这儿的东西**：一个散落的 `.splug`（旧形状，或放错的成品包）、
-    #   一个普通文件。守护进程只认 `<ULID>/` 与 `<ULID>.json`，所以那些东西既不会
+    # ★ **不该在这儿的东西**：一个散落的 `.splug`（放错的成品包）、一个普通文件。
+    #   守护进程只认 `<ULID>/` 与 `<ULID>.json`，所以那些东西既不会
     #   被分发、也不会被扫到 —— 留着它们的后果是"一份 root 拥有的、含客户端代码的
     #   副本永久残留而界面上看不见"。
     _stray="$(find "$_plugdir" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name '*.json' -not -type d 2>/dev/null)"

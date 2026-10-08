@@ -245,7 +245,7 @@ def selftest():
                      "handle": 90, "expr": [6], "comment": "job-5712-0"}})),
          "ALIEN")
 
-    # ── 必须抓住的：对生产表的规则级改动（这三种以前会被误判为 DYNAMIC）──
+    # ── 必须抓住的：对生产表的规则级改动（它们最容易被误判为 DYNAMIC）──
     case("★ 往 codeserver 表塞规则",
          ruleset(),
          ruleset(include_ours=True,
@@ -301,7 +301,7 @@ def selftest():
          {"nftables": [{"metainfo": {"version": "1.0.9"}}]},
          {"nftables": [{"metainfo": {"version": "1.0.9"}}]}, "SAME")
 
-    # ── ★ 顺序与重复次数（旧版用 set 比较，这两类完全看不见）──
+    # ── ★ 顺序与重复次数（用 set 比较的话，这两类完全看不见）──
     def reorder(items):
         # 把前两条规则对调（内容不变，只改顺序）
         items[2], items[3] = items[3], items[2]

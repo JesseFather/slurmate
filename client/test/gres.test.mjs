@@ -1,10 +1,10 @@
 /**
  * gres.test.mjs —— 界面那一行的 GRES 部分怎么念。
  *
- * ★★ 这个模块存在的理由是**这一行曾经假定 GRES 只有一种形状**。
- *   panel.js 从前写的是 `typeof r.gpus === 'number' && r.gpus > 0`，
- *   而守护进程发的是 `resources.gpus` 那个数字。GRES 是管理员在
- *   `GresTypes` + `gres.conf` 里自定义的：名字可以是 `gpu`，也可以是 `mps`；
+ * ★★ 这个模块存在的理由是**这一行不能假定 GRES 只有一种形状**。
+ *   若按数字字段读（`typeof r.gpus === 'number' && r.gpus > 0`），就漏掉了
+ *   GRES 是管理员在 `GresTypes` + `gres.conf` 里自定义的这件事：名字可以是
+ *   `gpu`，也可以是 `mps`；
  *   同一个名字还可以带型号（`gpu:a100`）。
  *   ⇒ 带型号的集群上作业占着两张 A100，而界面上那一段**整个不出现** ——
  *   不报错、不提示，用户以为它没要卡。

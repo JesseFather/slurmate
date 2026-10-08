@@ -25,8 +25,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// ★ 这个文件一直是**纯文本比对**（本机起不了 Electron），所以从前不需要 require。
-//   推送那一组要真的造一个假后端来验它的行为，于是需要它。
+// ★ 这个文件一直是**纯文本比对**（本机起不了 Electron）。推送那一组要真的造一个
+//   假后端来验它的行为，所以这里要 require。
 const require = createRequire(import.meta.url);
 const ROOT = path.join(here, '..', '..');
 const FAKE = fs.readFileSync(
@@ -38,7 +38,7 @@ const DAEMON = fs.readFileSync(
 function daemonViewBody() {
   // ★ 锚点是**完整签名**，这是有意的：签名变了就说明"这一份视图由谁渲染、
   //   渲染时要不要现查 Slurm"变了，而假后端演的是同一件事 —— 那正是这一条要
-  //   盯住的东西。v0.8 阶段 3 加了 `job_live`（推送那条路只读本 tick 已经取过的
+  //   盯住的东西。`job_live` 那一格是这么来的（推送那条路只读本 tick 已经取过的
   //   作业信息，绝不在这里 fork），锚点跟着改；**默认值不变**，所以假后端
   //   （它演的是 `list` / `status` 那一侧）一个字都不用动。
   const at = DAEMON.indexOf(
@@ -258,14 +258,13 @@ test('★ 假后端收下了身份 —— 不收的话「身份根本没送到�
 });
 
 test('★★ 假后端的 `ping` 真的答得出来（那一行曾经是睡着的笔误）', async () => {
-  // ★★ 这一条守的是一个**已经发生过一次**的缺陷：`case 'ping'` 里写的是**裸的**
+  // ★★ 这一条守的是一个**最坏形状**：`case 'ping'` 里若写的是**裸的**
   //    `hostVersion()`，而本文件里根本没有这个名字 —— 那一支一被调用就抛
-  //    `ReferenceError`。它此前是睡着的：生产代码里唯一发 `ping` 的是 SSH 后端，
-  //    而假后端没有常驻通道，所以谁都没走到那一行。
+  //    `ReferenceError`。它很容易**睡着**：生产代码里唯一发 `ping` 的是 SSH 后端，
+  //    而假后端没有常驻通道，所以谁都不会走到那一行。
   //
-  //    ★ 它值得有一条**自己的**用例，是因为守护它的那条用例（v0.8 阶段 4 的
-  //      "假后端也实现 displaced"）在 v0.9 阶段 3 连同被顶替那个形状一起删掉了 ——
-  //      "缺陷修好了、而守它的用例随别的功能一起消失"正是它会**第二次睡着**的方式。
+  //    ★ 所以它值得有一条**自己的**用例：一个缺陷修好了、而守它的用例随别的功能
+  //      一起消失，正是它会**第二次睡着**的方式。
   const b = new FakeBackend({ rpcLatencyMs: 0 });
   await b.connect({ user: 'demo', host: '127.0.0.1', port: 1 });
   try {

@@ -105,8 +105,8 @@ const tick = () => new Promise((r) => setImmediate(r));
 
 // ── 刷新视图 ──────────────────────────────────────────────────────────────
 test('★★ 推送让作业状态立刻更新，而且**一次 status 都不问**', async (t) => {
-  // ★ 这就是常驻通道省下来的那个 exec：从前 job_state 要等下一轮 60 秒的
-  //   status 才会变，而现在它随推送（有变化 2 秒内）就到。
+  // ★ 这就是常驻通道省下来的那个 exec：没有推送的话，job_state 要等下一轮 60 秒的
+  //   status 才会变；现在它随推送（有变化 2 秒内）就到。
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = running(b);

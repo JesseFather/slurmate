@@ -183,9 +183,9 @@ test('连接前缺私钥/缺字段时明确失败，不去尝试握手', async (
 });
 
 test('★ 私钥解析不了时返回明确的错误，而不是抛异常穿出去', async () => {
-  // 这条曾经是真 bug：ssh2 的 Client.connect() 对无法解析的私钥**同步抛异常**，
-  // 而它在 Promise 执行器里 —— 于是变成 rejection 穿出「不抛异常」的契约，
-  // 在真机上表现为主进程一个没人处理的 rejection，界面什么都不显示。
+  // 缺陷形态：ssh2 的 Client.connect() 对无法解析的私钥**同步抛异常**，而它在
+  // Promise 执行器里 —— 于是变成 rejection 穿出「不抛异常」的契约，在真机上表现为
+  // 主进程一个没人处理的 rejection，界面什么都不显示。
   const bogus = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n';
   const b = new sshBackend.SshBackend({ privateKey: bogus });
   const r = await b.connect({ user: 'a', host: 'h', port: 22 });   // 必须 resolve，不能 reject

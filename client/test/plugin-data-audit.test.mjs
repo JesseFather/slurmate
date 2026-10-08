@@ -107,8 +107,8 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
   const r = run({ plugins: [oneStore()], names: [store], connections: [] });
   assert.deepEqual(r.rows, [], '它不属于任何组 ⇒ 引用计数这件事对它没有意义');
 
-  // 而一份**算不出来**的旧目录照样是孤儿 —— 那些名字有两条来路：v0.12 之前
-  // "缺省 = 版本号"那个缺省留下的，以及今天 `perVersion: true` 的插件升版留下的。
+  // 而一份**算不出来**的目录名照样是孤儿 —— 第二段不是一个认得出的组名时就是
+  // 这一档（`perVersion: true` 的插件升版留下的名字也是这个形状）。
   const old = '01m2jkhtzgf12n0t9cb3xvk36h@0.9.0';
   const r2 = run({ plugins: [oneStore()], names: [old, store] });
   assert.deepEqual(r2.rows.map((x) => x.name), [old]);
@@ -122,8 +122,8 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
 // 被用的**数据摆上删除按钮。
 
 test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）—— 那一份**永远不报**', () => {
-  // ★ 这一条守的是本阶段**最贵的一处**。对账"该有的"入口是从前那个 `hasSurface`
-  //   （有没有界面）—— 照它算，sshd 那份数据目录**一诞生就是孤儿**：sshd 没有
+  // ★ 这一条守的是本阶段**最贵的一处**。若对账"该有的"入口按"有没有界面"算
+  //   （`hasSurface`），sshd 那份数据目录就**一诞生就是孤儿**：sshd 没有
   //   `contributes.surface`（它的东西跑在用户自己的机器上，框架连一块界面都不建），
   //   而它**会写数据**（`ctx.dataDir()`）。于是界面上一个删除按钮，而一个跑着的
   //   会话正靠它（`~/.ssh/config` 的 IdentityFile / UserKnownHostsFile 都指着那里）
@@ -417,11 +417,10 @@ test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）',
   const ok = audit.deletionVerdict({ rows, name: 'aa@bb@cc' });
   assert.equal(ok.ok, true);
   assert.equal(ok.row, rows[0]);
-  // ★★ **"正被用着"那一格已经搬走了**：它从前是这里的一个 `in_use` 分支，收一个
-  //    `surfacePartitions`。现在由 `audit` 的 `held` 在算行的时候就挡掉（见上一条）——
-  //    所以这里**只剩两个下场**。留一个第三态的话，它是一条恒不可达的分支：
-  //    它比的是**分区**，而"有一条活会话"不止体现在分区上（没有界面的插件、
-  //    临时实例都没有分区）。这一条钉的就是"它没有回来"。
+  // ★★ "正被用着"由 `audit` 的 `held` 在算行的时候就挡掉（见上一条）—— 所以这里
+  //    **只剩两个下场**。若留一个按 `surfacePartitions` 判的第三态，它是一条恒不可达
+  //    的分支：它比的是**分区**，而"有一条活会话"不止体现在分区上（没有界面的
+  //    插件、临时实例都没有分区）。这一条钉的就是"它没有回来"。
   assert.equal(audit.deletionVerdict({
     rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'],
   }).ok, true, '★ 传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');

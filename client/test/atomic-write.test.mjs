@@ -1,10 +1,10 @@
 /**
  * atomic-write.test.mjs —— 框架里唯一那份原子写。
  *
- * 它取代了三份逐字不同的实现（`config.js` / `site-plugins.js` / `sshconfig.js`）。
- * 前两份删掉了，**第三份删不掉**：`plugins/sshd/client/sshconfig.js` 跑在池里，
- * require 不到客户端的源码（`packer/docs/README.md` 那条纪律）。所以本文件后半段是那条
- * 事实的**唯一防腐剂** —— 同一张场景表喂两份实现，只改一边就红。
+ * ★ `plugins/sshd/client/sshconfig.js` 跑在池里，require 不到客户端的源码
+ * （`packer/docs/README.md` 那条纪律），所以同一份原子写逻辑在客户端与那个插件里各
+ * 有一份。本文件后半段是那件事实的**唯一防腐剂** —— 同一张场景表喂两份实现，
+ * 只改一边就红。
  *
  * ★ 每条用例都要能回答"改坏了会红，而且报出来的是真正的原因"：
  *   · "不留临时文件"红 ⇒ 报告里会列出那个残留的名字；
