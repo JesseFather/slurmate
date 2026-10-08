@@ -10328,6 +10328,15 @@ exit 0
     _seq_rl = [0]
     _rl_ds = []
 
+    # 这一节问 Slurm 用的**桩**（整节替换 `mod.run_cmd`，见下面那一段）。
+    # ★ 喂**一个**节点，于是这一节里所有配置的 `cluster_cidr` 都必须是
+    #   `192.0.2.0/24` —— 那正是它们本来就写的值（32.8 改成了 `192.0.0.0/16`，
+    #   仍然覆盖它；32.14 故意改成不覆盖它的那个，用来测「改错了会被拦住」）。
+    def _rl_nodes_stub(argv, timeout=10, check=False):
+        if "show node" in " ".join(str(a) for a in argv):
+            return 0, "NodeName=nA NodeAddr=192.0.2.11 State=IDLE\n", ""
+        return 1, "", "unexpected"
+
     def _mk_reload_d(cpath):
         """一个**能从盘上那份配置重读**的守护进程（这一节专用）。
 
@@ -10353,7 +10362,19 @@ exit 0
         return dd
 
     _saved_rl_dir = mod.default_plugins_dir
+    _saved_rl_run = mod.run_cmd
     mod.default_plugins_dir = lambda: _RL
+    # ★★ 这一节里问 Slurm 的命令**一律走桩**（v0.13 阶段 5 起这一节真的会问）：
+    #    热重载现在会跑 `crosscheck_cidr()`，而 `_do_reload()` 还会跑
+    #    `announce_config_state()` —— 后者里那条 GRES 对账要 `scontrol show node -o`。
+    #    ★ 不换的话，用例的结论取决于"跑它的那台机器上有没有真的 `scontrol`、
+    #      以及那个集群的节点地址长什么样"：开发会话恰好跑在一个真集群的**计算
+    #      节点**上，于是同一条用例在开发机上红、在 CI 上绿（或者反过来）——
+    #      17 节里那条注释记的正是**同一条**教训。而这一节要考的从来不是集群事实。
+    #    ★ 一个注入点就够：`run_cmd` 正是 `Slurm` / `crosscheck_cidr()` /
+    #      `gres_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
+    #      就会悄悄漏掉一个 —— 而"漏一个"正是 F45 的形状。
+    mod.run_cmd = _rl_nodes_stub
     try:
         # 32.2 ★ `changed_*_keys`：判据是**配置里写了什么**
         #
@@ -10522,13 +10543,16 @@ exit 0
         _d_cidr.nft.ensure()
         check("（夹具）基础规则建好了，网段是配置里那个",
               _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
+        # ★ 新网段**仍然覆盖桩里那个节点**（192.0.2.11）—— 换成一个不含它的网段
+        #   会让这一条被 v0.13 阶段 5 新加的交叉核对正确地拦下（那正是 32.12
+        #   要测的那件事），而这里要测的是"换网段这件事本身生效了"。
         with open(_CIDR, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 198.51.100.0/24\n"
+            _f.write("cluster_cidr = 192.0.0.0/16\n"
                      "range_start = 55001\nrange_end = 55099\n")
         _rl_ok, _rl_notes = _d_cidr.reload_config()
         check("★★ 改了 cluster_cidr + 热重载 ⇒ **内核里那条基础规则的网段真的变了**"
               "（今天连 restart 都不变：实现只看 comment 在不在）",
-              _rl_ok is True and _nftsim.cidr() == "198.51.100.0/24",
+              _rl_ok is True and _nftsim.cidr() == "192.0.0.0/16",
               "ok=%s / nft 里现在是 %s" % (_rl_ok, _nftsim.cidr()))
         check("★★ 而那条规则**只剩一条**（是删旧插新，不是两条并存）",
               sum(1 for r in _nftsim.rules
@@ -10663,8 +10687,144 @@ exit 0
               and any("config_reload_rejected" in m for m in _ja),
               str(_ja)[:400])
 
+        class _LogCap(logging.Handler):
+            """把守护进程那一个 logger 的记录收下来（等级 + 正文）。
+
+            ★ 判"说了什么"要看**真的发出去的**，不是"代码里写了" ——
+              `_do_reload()` 与 `announce_config_state()` 之间隔着一次 `Config`
+              重建，两边都对才叫"说出来了"。
+            """
+
+            def __init__(self):
+                logging.Handler.__init__(self)
+                self.lines = []
+
+            def emit(self, rec):
+                self.lines.append((rec.levelname, rec.getMessage()))
+
+        # 32.14 ★★ 改错一个数字的 `cluster_cidr` ⇒ **整个重载被拒、一个字都不改**
+        #        （F45，v0.13 阶段 5）
+        #
+        # ★★ 在那之前热重载的拒绝判据比启动的**少一半**：它只跑 `validate()`，
+        #    没有 `crosscheck_cidr()` —— 而 `cluster_cidr` 在 `RELOAD_CLASS` 里是
+        #    NOTICE 档（可热）⇒ 改错一个数字之后 `systemctl reload` **成功**，
+        #    而 `_adopt_config()` 里 `Nft.ensure()` 按值比对，把内核里那条基础规则
+        #    换成**错的网段**。
+        #    后果：被漏掉的节点，流量走到链尾那条 `policy accept` —— 没有报错、
+        #    没有日志、没有任何迹象。而文档说它是"即使前面所有校验都被绕过"的
+        #    **最后一道几何约束**。
+        _F45 = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                          "range_start = 55001\nrange_end = 55099\n"
+                          "max_sessions_per_user = 2\n", "rl-f45.conf")
+        _d_f45 = _mk_reload_d(_F45)
+        _nftsim.rules = []                    # 从干净的规则集开始
+        _d_f45.nft.ensure()
+        check("（夹具）改之前：基础规则的网段覆盖桩里那个节点",
+              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
+        # ★ 漏掉半个网段：桩里那个节点是 192.0.2.11，而 /25 的**后半段**是
+        #   .128–.255 —— 它落在外面。（账本 F45 举的就是这个例子。）
+        # ★ 顺带还改了一个**本来可热**的键（`max_sessions_per_user`）：一次证明
+        #   "拒绝"是**整份**拒绝，不是"跳过那一个、别的照旧"。
+        with open(_F45, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.2.128/25\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 5\n")
+        _lc45 = _LogCap()
+        _saved_lvl45 = mod.log.level
+        mod.log.addHandler(_lc45)
+        mod.log.setLevel(logging.DEBUG)
+        try:
+            _rl_ok45, _rl_notes45 = _d_f45.reload_config()
+        finally:
+            mod.log.removeHandler(_lc45)
+            mod.log.setLevel(_saved_lvl45)
+        check("★★ 改错一个数字（`/24` → `/25` 的后半段）⇒ 重载**被拒**"
+              "（桩里那个节点落在新网段外面 ⇒ 交叉核对逮住它）",
+              _rl_ok45 is False and _rl_notes45 == [],
+              "ok=%s / notes=%s" % (_rl_ok45, _rl_notes45))
+        check("★★ 而且**一个字都没改**：`cluster_cidr` 还是旧的，连那个本来可热的"
+              "`max_sessions_per_user` 也没跟过去（全有或全无）",
+              _d_f45.cfg.cluster_cidr == "192.0.2.0/24"
+              and _d_f45.cfg.max_sessions_per_user == 2,
+              "%s / %s" % (_d_f45.cfg.cluster_cidr,
+                           _d_f45.cfg.max_sessions_per_user))
+        check("★★ 内核里那条基础规则**还是旧网段** —— 它没被换掉"
+              "（`_adopt_config()` 里那一步根本没跑到：这是最直接的那一条判据）",
+              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
+        check("★★ 而日志**点名**了是哪个键（只说「配置有问题」的话，管理员不知道"
+              "该去改哪一个）",
+              any(lv == "ERROR" and "cluster_cidr" in m for lv, m in _lc45.lines),
+              str(_lc45.lines)[:400])
+
+        # ★★ 反过来的一半 —— 少了它，"把热重载整个禁掉"也能让上面几条绿。
+        with open(_F45, "w", encoding="utf-8") as _f:
+            _f.write("cluster_cidr = 192.0.0.0/16\n"
+                     "range_start = 55001\nrange_end = 55099\n"
+                     "max_sessions_per_user = 5\n")
+        _rl_ok45b, _rl_notes45b = _d_f45.reload_config()
+        check("★★ 对照：改成一个**仍然覆盖全部节点**的网段 ⇒ 照常生效"
+              "（这一条是上面那几条的**反面**：新判据拦的是「改错了」，"
+              "不是「改了 cluster_cidr」）",
+              _rl_ok45b is True
+              and _d_f45.cfg.cluster_cidr == "192.0.0.0/16"
+              and _d_f45.cfg.max_sessions_per_user == 5,
+              "ok=%s / %s / %s" % (_rl_ok45b, _d_f45.cfg.cluster_cidr,
+                                   _d_f45.cfg.max_sessions_per_user))
+
+        # 32.15 ★★ 热重载之后，站点级那几条 ⚠ **重打一遍**（F46，v0.13 阶段 5）
+        #
+        # ★★ 与 F45 **同源**：reload 抄了启动判据的一个子集 —— 而 v0.12 之前
+        #    根本没有 reload 这条路（那时的"reload"是 restart，必然经过
+        #    `start()`）。`reload_config()` 换掉 `Config` 对象之后，
+        #    `stale_conf_problems` 这些字段是**新的一组值**，而从前的出口只有
+        #    `start()` 与 `--check` 两个 ⇒ 卸掉一个插件再 reload，那条 ⚠
+        #    **只在下次重启时才说**。症状正是 `stale_plugin_conf_problems` 自己的
+        #    注释要防的那句话：「我明明配了啊」，而日志里一个字都没有。
+        _F46 = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                          "range_start = 55001\nrange_end = 55099\n", "rl-f46.conf")
+        # ★ 一份**安装器起名**的配置（ULID 文件名 ⇒ 判据落在位置上，不是文件里
+        #   写了什么）。此刻它指得到 alpha。
+        write_plugin_conf(_F46, _RU1, "enabled = yes\n")
+        _d_f46 = _mk_reload_d(_F46)
+        _conf_f46 = os.path.join(mod.plugin_conf_dir(_F46), _RU1 + ".conf")
+        check("（夹具）此刻那份配置指得到 alpha ⇒ 一条 ⚠ 都没有",
+              _d_f46.cfg.stale_conf_problems == []
+              and any(s.id == _RU1 for s in _d_f46.cfg.plugin_specs),
+              "%s / %s" % (_d_f46.cfg.stale_conf_problems,
+                           [s.id for s in _d_f46.cfg.plugin_specs]))
+
+        _lc46 = _LogCap()
+        _saved_lvl46 = mod.log.level
+        mod.log.addHandler(_lc46)
+        mod.log.setLevel(logging.DEBUG)
+        try:
+            _d_f46._do_reload()          # ① 什么都没变
+            _n46_before = [m for _, m in _lc46.lines if _RU1 in m]
+            # ② 把 alpha 从本站拿走 —— 树与记录表**两处一起**（这就是卸载器做的
+            #    那两件事；这里不调卸载器，因为要考的是"下一个 reload 会看见什么"，
+            #    而不是"卸载删得干不干净"，那是 30 节的事）。
+            shutil.rmtree(os.path.join(_RL, _RU1))
+            os.unlink(mod.plugin_record_path(_RL, _RU1))
+            _d_f46._do_reload()          # ③ 新扫出来的插件表里没有 alpha 了
+        finally:
+            mod.log.removeHandler(_lc46)
+            mod.log.setLevel(_saved_lvl46)
+        _n46_after = [m for _, m in _lc46.lines if _RU1 in m]
+        check("★★ ① 没变化的那一轮重载**不说**这条 ⚠（不然每次 reload 都是一堆"
+              "噪音，而噪音里的真话没人看得见）",
+              _n46_before == [], str(_n46_before)[:300])
+        check("★★ ② 插件被拿走之后、**同一份配置**再重载 ⇒ 那条 ⚠ 就出现在日志里"
+              "（判据是**那份配置的路径**，不是笼统的「有没有 warning」）",
+              len(_n46_after) >= 1, str(_n46_after)[:300])
+        check("★★ ③ 而且它是**在重载这一轮**说的，不是等下次重启 —— 这正是 F46 "
+              "要的那件事",
+              any(_conf_f46 in w or _RU1 in w
+                  for w in _d_f46.cfg.stale_conf_problems),
+              str(_d_f46.cfg.stale_conf_problems)[:300])
+
     finally:
         mod.default_plugins_dir = _saved_rl_dir
+        mod.run_cmd = _saved_rl_run
 
     for _dd in _rl_ds:
         try:

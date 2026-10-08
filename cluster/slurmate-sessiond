@@ -529,6 +529,28 @@ def crosscheck_cidr(cfg, run=None):
             % (cfg.cluster_cidr, len(outside), shown)]
 
 
+def config_deploy_problems(cfg):
+    """「这份配置能不能上线」的**全部**判据，返回 `(errors, cidr_errors)`。
+
+    ★★ 三个调用点（`Sessiond.start()` / `--check` / 热重载）共用**这一处**
+      （v0.13 阶段 5）。在那之前它们是各抄一份**子集**：`--check` 与 `start()`
+      抄的那两份恰好都没漏，于是"漏了一份"这件事一直没有症状 —— 直到 v0.12
+      开出热重载这条路：它只跑 `validate()`，**没有** `crosscheck_cidr()`。
+      一个 `cluster_cidr` 写错的站点于是可以 `systemctl reload` 成功，而
+      `Nft.ensure()` 按值比对把内核里那条基础规则换成**错的网段**。
+      ⇒ 任意两个调用点之间都可能漏；**不会再漏的形状是只有一处**。
+
+    ★ 两类**不合并成一个列表**，因为它们的出口不同：
+        `errors`      这一行字本身就不成立（`Config.validate()`），问谁都是这个答案；
+        `cidr_errors` 要**问 Slurm** 才知道（`crosscheck_cidr()`），而它查询失败
+                      时返回空（fail-open，理由见那个函数）。
+      `--check` 靠这个区分打出两档退出码（2 = 这台机器缺东西 / 1 = 这份配置写错
+      了），而部署脚本要靠那个区分决定"现在就停"还是"装完再判"。★ 顺序也照旧：
+      配置级在前、交叉核对在后（`--check` 的次序注释里写了为什么）。
+    """
+    return list(cfg.validate()), crosscheck_cidr(cfg)
+
+
 # ==============================================================================
 #  配置
 # ==============================================================================
@@ -1814,6 +1836,17 @@ GLOBAL_KEYS = frozenset([
 #          ★ 碰到它 ⇒ **整个 reload 拒绝**（用户 2026-10-07 拍板：校验不全过就
 #          一个字都不改），报错点名是哪个键。
 #
+# ★★ 而"能不能可热"还有一个**前提**，与上面那个判据是**两件事**：
+#   **它改错了会不会被拦住**。影响哪段时间决定它进哪一档；而它**能不能进
+#   HOT/NOTICE**（而不是被踢进 COLD）还要看它改错之后有没有人逮得住。
+#   ⇒ 对**改错了会静默失效**的键（不报错、只是那层保护从此不再生效），这一条是
+#      **硬要求**。全表只有 `cluster_cidr` 是这一种，拦住它的是
+#      `crosscheck_cidr()` —— 它现在在 `config_deploy_problems()` 里，所以
+#      `start()` / `--check` / 热重载**三条路都会跑**（v0.13 阶段 5 之前热重载
+#      那条路上没有它，见下面那一格）。
+#   ⇒ 而改错了会**当场叫出来**的键（`sbatch` 路径写错 ⇒ 下一次 fork 就是 127）
+#      不需要额外的东西：那种错本来就会自己报。
+#
 # ★ **插件配置里那些键**（`enabled` / `default_*` / `bin` / `auth_mode`）全在 HOT
 #   那一档，所以它们不在这张表里 —— 这张表管的是**主文件**里的站点通用键。它们的
 #   "只影响新发生的事"由 `PluginConfig` 的读者保证：会话一旦提交，它的资源与端口
@@ -1836,6 +1869,15 @@ RELOAD_CLASS = {
     # ── 可热，但要说一句 ──────────────────────────────────────────────────
     # 集群网段：换了之后**内核里那一条基础规则要跟着换**（`Nft.ensure()` 按值
     # 比对，见那一节）。说一句是因为"哪些流量被放行"在这一刻真的变了。
+    # ★★ 而它之所以可热（不是 COLD），靠的是**改错了会被拦住**：重载的判据里
+    #   有 `crosscheck_cidr()`，它拿新网段与 Slurm 的 NodeAddr 全集对一遍 ——
+    #   漏掉任何一个节点 ⇒ **整个重载被拒、一个字都不改**（v0.13 阶段 5 / F45）。
+    #   ★ 在那之前热重载那条路上**没有**这一道：改错一个数字能重载成功，而
+    #     `Nft.ensure()` 会把内核里那条基础规则换成错的网段 —— 被漏掉的节点流量
+    #     走到链尾的 `policy accept`，没有报错、没有日志、没有任何迹象。
+    #   ★ 这一格单独看会以为"网段只影响新发生的事"，而它其实是**几何约束**：
+    #     它错了，此后每一条会话规则都匹配不到。所以它的"可热"是**有条件的**，
+    #     条件写在上面那段"能不能可热"里。
     "cluster_cidr": RELOAD_NOTICE,
     # 端口区间与避让区间：已经在跑的会话，它的端口可能落在**新区间之外**。
     # ★ 不拦：那些会话该跑完就跑完（拆的时候按会话记录里的端口拆，与区间无关），
@@ -7354,16 +7396,78 @@ class Sessiond(object):
                 pass
 
     # ── 启动 ────────────────────────────────────────────────────────────────
+    def announce_config_state(self):
+        """把这份配置里**站点级**的那几条结论逐条说出来 —— `start()` 与每次
+        热重载都调。
+
+        ★★ 为什么热重载也要调（F46，v0.13 阶段 5）：`reload_config()` 换掉
+          `Config` 对象之后，`plugin_problems` / `plugin_job_missing` /
+          `stale_conf_problems` / `plugin_gres_problems` 是**新的一组值** ——
+          而从前的出口只有 `start()` 与 `--check` 两个 ⇒ 卸掉一个插件再 reload，
+          那些话**只在下次重启时才说**。而 `stale_plugin_conf_problems` 自己的
+          注释写着它要防的正是"不说的话，管理员的症状是『我明明配了啊』，而日志里
+          一个字都没有"。
+
+        ★ 重打**全部**，不与上一轮求差。判据是**读者**：看日志的人要拿到的是
+          "现在的结论"。求差要多存一份上一轮的快照，而"上一轮是什么"这个状态
+          恰恰是 F45/F46 这一族病的来源 —— 两条路各拿一个子集，谁也不完整。
+
+        ★ 这几条**都不是启动错误**（一个插件坏了不该带走整个站点；真拦下来连
+          "停掉正在跑的会话"都做不到）⇒ 出口是日志，不是返回值。它们与
+          `config_deploy_problems()` 是**两回事**，别合并：那个的每一条都拒绝启动。
+
+        ★ 抽出来**同时解决了"它测不动"**：端到端用例走的是 `setup_socket()` +
+          `run()`，绕过 `start()`，所以这几段从前一条用例都没有（v0.12 已如实
+          记在账上）。现在 `_do_reload()` 可以直接调，日志用 handler 抓即可。
+        """
+        cfg = self.cfg
+        # 插件：坏掉的目录在这里逐条说出来。**不是启动错误** —— 一个插件坏了不该
+        # 带走整个站点，而其余插件照常工作。但静默跳过是绝对不能接受的：那会让
+        # "我明明装了啊"变成一句谁也答不上来的话。
+        for p in cfg.plugin_problems:
+            log.error("插件有问题（已跳过，其余插件照常工作）：%s", p)
+        # 「有作业侧、却找不到那份作业脚本」—— 同上，**不是启动错误**。
+        # 会走到的情形：装了包却没有跑过对账，或者上一次编织失败了。
+        for s in cfg.plugin_job_missing:
+            log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
+                      "不了。跑一次 `slurmate plugin sync` 会织出它。", s.name,
+                      cfg.jobs_dir)
+        # 「有一份配置指不到本站任何插件」—— 同上，**不是启动错误**。
+        # ★ 后果只是那一份**不生效**（那个插件按清单缺省跑），但它**必须说出来**：
+        #   不说的话，管理员的症状是"我明明配了啊"，而日志里一个字都没有。
+        #   与上面两条要防的是同一件事，只是后果轻得多 —— 而轻，正是不该让它
+        #   拦住启动的理由（那样连"停掉正在跑的会话"都做不到）。
+        for w in cfg.stale_conf_problems:
+            log.error("%s", w)
+        # 插件那份配置里配的 GRES 与本站实际有的对不上 —— 同上，**不是启动错误**。
+        # ★ 判据与 `--check` **共用一处**（`plugin_gres_problems`），只有出口不同：
+        #   这里进日志，那里打 ⚠。少了这一边，症状是"文件里配着，而日志里一个字
+        #   都没有"—— 正是上面那两段要防的同一件事。
+        #   查询失败时它返回空（fail-open，与 `fit_gres()` 同一条）。
+        for w in plugin_gres_problems(cfg.plugins.values(), self.cluster.gres()):
+            log.error("%s", w)
+        if not cfg.plugins:
+            log.warning("本站没有安装任何插件（%s）—— 会话能查、能停，"
+                        "但没有可提交的服务。这是合法状态。", cfg.plugins_dir)
+        elif not cfg.enabled_kinds:
+            log.warning("装了 %d 个插件，但没有一个启用（%s）",
+                        len(cfg.plugins), cfg.plugins_dir)
+
     def start(self):
         """启动。返回 False 表示"拒绝启动"（原因已写进日志，且必须是可照做的）。"""
-        # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对，放在【最前面】：
-        # 网段漏掉一个节点的后果是去往它的流量被链首的基础规则放行，而链的
-        # policy 是 accept —— 没有报错、没有日志、没有任何迹象。这是唯一能在
-        # 装上规则【之前】发现它的地方，等到会话跑起来就晚了。
-        cidr_errors = crosscheck_cidr(self.cfg)
-        if cidr_errors:
-            for e in cidr_errors:
-                log.error("拒绝启动：%s", e)
+        # ★★ 判据只有一处（`config_deploy_problems`）—— 与 `--check`、热重载
+        #   是**同一个函数**。三条路各抄一份子集的形状在 v0.13 阶段 5 结束了，
+        #   而 F45 正是那么来的（热重载那一份少了交叉核对那一半）。
+        # ★ 交叉核对那一条尤其要放在【最前面】：网段漏掉一个节点的后果是去往它的
+        #   流量被链首的基础规则放行，而链的 policy 是 accept —— 没有报错、没有
+        #   日志、没有任何迹象。这是唯一能在装上规则【之前】发现它的地方，等到
+        #   会话跑起来就晚了。
+        errs, cidr_errors = config_deploy_problems(self.cfg)
+        for e in errs:
+            log.error("拒绝启动：%s", e)
+        for e in cidr_errors:
+            log.error("拒绝启动：%s", e)
+        if errs or cidr_errors:
             return False
 
         for d in (self.cfg.state_dir, self.cfg.rejected_dir, self.cfg.log_dir):
@@ -7389,37 +7493,8 @@ class Sessiond(object):
                    port_range=[self.cfg.port_start, self.cfg.port_end],
                    plugins=list(self.cfg.enabled_kinds))
 
-        # 插件：坏掉的目录在这里逐条说出来。**不是启动错误** —— 一个插件坏了不该
-        # 带走整个站点，而其余插件照常工作。但静默跳过是绝对不能接受的：那会让
-        # "我明明装了啊"变成一句谁也答不上来的话。
-        for p in self.cfg.plugin_problems:
-            log.error("插件有问题（已跳过，其余插件照常工作）：%s", p)
-        # 「有作业侧、却找不到那份作业脚本」—— 同上，**不是启动错误**。
-        # 会走到的情形：装了包却没有跑过对账，或者上一次编织失败了。
-        for s in self.cfg.plugin_job_missing:
-            log.error("插件「%s」有作业侧实现，但作业脚本不在 %s —— 这个插件提交"
-                      "不了。跑一次 `slurmate plugin sync` 会织出它。", s.name,
-                      self.cfg.jobs_dir)
-        # 「有一份配置指不到本站任何插件」—— 同上，**不是启动错误**。
-        # ★ 后果只是那一份**不生效**（那个插件按清单缺省跑），但它**必须说出来**：
-        #   不说的话，管理员的症状是"我明明配了啊"，而日志里一个字都没有。
-        #   与上面两条要防的是同一件事，只是后果轻得多 —— 而轻，正是不该让它
-        #   拦住启动的理由（那样连"停掉正在跑的会话"都做不到）。
-        for w in self.cfg.stale_conf_problems:
-            log.error("%s", w)
-        # 插件那份配置里配的 GRES 与本站实际有的对不上 —— 同上，**不是启动错误**。
-        # ★ 判据与 `--check` **共用一处**（`plugin_gres_problems`），只有出口不同：
-        #   这里进日志，那里打 ⚠。少了这一边，症状是"文件里配着，而日志里一个字
-        #   都没有"—— 正是上面那两段要防的同一件事。
-        #   查询失败时它返回空（fail-open，与 `fit_gres()` 同一条）。
-        for w in plugin_gres_problems(self.cfg.plugins.values(), self.cluster.gres()):
-            log.error("%s", w)
-        if not self.cfg.plugins:
-            log.warning("本站没有安装任何插件（%s）—— 会话能查、能停，"
-                        "但没有可提交的服务。这是合法状态。", self.cfg.plugins_dir)
-        elif not self.cfg.enabled_kinds:
-            log.warning("装了 %d 个插件，但没有一个启用（%s）",
-                        len(self.cfg.plugins), self.cfg.plugins_dir)
+        # 站点级的那几条结论（插件状态那一族）—— 抽成方法之后热重载也调它。
+        self.announce_config_state()
 
         log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds, "
                  "插件 %s)",
@@ -7576,7 +7651,9 @@ class Sessiond(object):
         四步，任何一步不过就停在那里：
           1. 重新解析（主文件 + `drop-in` 目录）**并重扫插件目录** —— 两件事都在
              `Config()` 里，所以新装的插件在这一步就进来了；
-          2. `validate()` 为空（自相矛盾的配置、区间、cidr 与节点的交叉核对……）；
+          2. `config_deploy_problems()` 为空 —— 它是「这份配置能不能上线」的
+             **全部**判据（`validate()` + `crosscheck_cidr()`），与 `start()` /
+             `--check` **共用一处**（见那个函数的 docstring）；
           3. **可热重载性**：变了的键里只要有一个在 COLD 档 ⇒ 拒绝（见 RELOAD_CLASS）；
           4. 全过 ⇒ `_adopt_config()`。
 
@@ -7591,11 +7668,25 @@ class Sessiond(object):
             #   旧配置继续服务，正在跑的会话一条都不会断。
             log.error("热重载失败：新配置读不动（**旧配置继续服务**）：%s", e)
             return False, []
-        errs = new.validate()
+        # ★★ 判据是 `config_deploy_problems`，不是 `validate()`（v0.13 阶段 5）。
+        #   上面那句 docstring 从前就写着"cidr 与节点的交叉核对"—— 而它在
+        #   `validate()` 里**并不存在**：写它的人以为在，代码里没有，也没有一条
+        #   用例能发现（F45）。这正是"三条路各抄一份子集"的典型症状。
+        errs, cidr_errs = config_deploy_problems(new)
         if errs:
             log.error("热重载失败：新配置有 %d 处过不了自检（**旧配置继续服务**）："
                       "%s", len(errs), errs[0])
             for e in errs[1:]:
+                log.error("  %s", e)
+            return False, []
+        if cidr_errs:
+            # ★ 点名是**哪个键**（用户要的措辞）：这一档的读者要去改的是
+            #   `cluster_cidr`。照着改完热重载是**能生效**的，所以这里不必说
+            #   "去重启" —— 与上面那两档（COLD、自检不过）的出路不同。
+            log.error("热重载**拒绝**：cluster_cidr 与 Slurm 的节点地址对不上，"
+                      "新配置一个字都没被采用（**旧配置继续服务**）。改对之后"
+                      "再发一次 reload 即可，不必重启。")
+            for e in cidr_errs:
                 log.error("  %s", e)
             return False, []
 
@@ -7662,6 +7753,12 @@ class Sessiond(object):
             # NOTICE 档：**说一句**。不说的话，"改完之后某个已经在跑的会话出了
             # 怪事"与这次改动之间的关系，没有任何地方连得上。
             log.warning("热重载：%s", n)
+        if ok:
+            # ★★ 站点级那几条结论**重打一遍**（F46）。新扫出来的插件表与旧的那份
+            #   不同时（卸了一个插件、有人 rm 掉一棵树而没跑对账……），"有一份
+            #   配置指不到本站任何插件"这件事不该等到下次重启才说。
+            # ★ 只在**成功**时打：被拒的那几次旧配置一个字都没改，再说一遍是噪音。
+            self.announce_config_state()
         self.audit("config_reload" if ok else "config_reload_rejected",
                    notes=list(notes))
         return ok
@@ -10516,7 +10613,11 @@ def main():
         log.error("读取配置失败 %s: %s", args.config, e)
         return 1
 
-    errors = cfg.validate()
+    # ★★ 判据只有一处（`config_deploy_problems`）—— 与 `start()`、热重载是
+    #   同一个函数。★ `cidr_errors` 在这一行就**算出来**了，而打它、用它算退出码
+    #   都在下面"集群那一屏"附近 —— 那两处相隔两百行是因为**打印的位置**要在
+    #   集群信息那一段（读者在那儿找它），不是因为判据分两次跑。
+    errors, cidr_errors = config_deploy_problems(cfg)
 
     # ★★ `--check` 的退出码分两档（v0.12 阶段 4）：**2 = 这台机器缺东西**，
     #   1 = 这份配置写错了。判据与整段理由写在 `machine_selfcheck()` 上面 ——
@@ -10728,7 +10829,8 @@ def main():
                 sum(d["running"] for d in _q["depth"].values())))
         # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对 —— 这是唯一能发现
         # 「网段漏掉了某个节点」的地方，而漏掉的后果是静默失效。
-        cidr_errors = crosscheck_cidr(cfg)
+        # ★ 结果在**上面**就算好了（`config_deploy_problems` 一次算完两样），
+        #   这里只负责**打在读者会去找它的位置**。
         for _e in cidr_errors:
             print("  ⚠ %s" % _e)
         nft = Nft(cfg)
