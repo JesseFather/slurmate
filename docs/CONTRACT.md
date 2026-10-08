@@ -639,12 +639,12 @@ precheck_<短名>                    ← ①  一次
 | 文档 | 写给谁 | 回答什么 |
 |---|---|---|
 | **本页** | 维护者 | 每一样东西**是承诺还是细节**、**被什么守住** |
-| `PLUGIN-SPEC.md` | 插件作者 | **必须**做什么才能被装上、被分发 |
-| `PLUGIN-CONTAINER.md` | 读包的人 | 字节长什么样 |
-| `PLUGIN-TROUBLESHOOTING.md` | 插件作者 | 出问题了怎么查 |
-| `PROTOCOL.md` | 写守护进程的人 | 客户端与守护进程之间说什么 |
-| `ARCHITECTURE.md` | 维护者 | 为什么长这样 |
-| `KNOWN-ISSUES.md` | 维护者 | 哪些已知不成立 |
+| [PLUGIN-SPEC.md](../packer/docs/PLUGIN-SPEC.md) | 插件作者 | **必须**做什么才能被装上、被分发 |
+| [PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md) | 读包的人 | 字节长什么样 |
+| [PLUGIN-TROUBLESHOOTING.md](../cluster/docs/PLUGIN-TROUBLESHOOTING.md) | 插件作者 | 出问题了怎么查 |
+| [PROTOCOL.md](PROTOCOL.md) | 写守护进程的人 | 客户端与守护进程之间说什么 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 维护者 | 为什么长这样 |
+| [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 维护者 | 哪些已知不成立 |
 
 **本页不重复它们的正文。** 本页只说"这一格属于哪一档"，把"是什么"留给
 上面那几份。一处定义、别处指路。
