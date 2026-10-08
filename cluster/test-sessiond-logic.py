@@ -393,14 +393,21 @@ def make_config(mod, tmpdir):
     # 示例配置里 cluster_cidr 故意留空（它没有安全的默认值），测试里填一个
     # 合法网段 —— 同时后面还有专门一节验证"留空会被拒绝"。
     #
-    # 顺便补上 default_plugin：示例配置里它是**注释掉的**（推荐值），而这一份测试
-    # 配置要的是「一个升级前的老站点」的样子 —— 那时不带 service_kind 的提交落到
-    # code-server。第 19 节用**不带这一项**的另一份配置测"没配就该被明确拒绝"。
-    # 就插在 cluster_cidr 那一行后面 —— v0.12 起主文件里只有 `键 = 值`（插件配置
-    # 住进 slurmate.conf.d/ 了），所以原先那条"通用键不许落在块之后"的约束**已经
-    # 不存在**，插在哪儿都行。
-    text = re.sub(r"(?m)^cluster_cidr\s*=.*$",
-                  "cluster_cidr = 192.0.2.0/24\ndefault_plugin = code-server", text)
+    # 顺便补上 default_plugin：这一份测试配置要的是「一个升级前的老站点」的样子
+    # —— 那时不带 service_kind 的提交落到 code-server。第 19 节用**不带这一项**的
+    # 另一份配置测"没配就该被明确拒绝"。
+    #
+    # ★ 这两行是**替换**，不是"插在 cluster_cidr 后面"（v0.14 之前是插）。
+    #   理由：示例配置现在把 17 个键**一个不少**地列出来（注释整批搬进了文档），
+    #   所以 `default_plugin` 是一个**空值的真行** —— 再插一行就会撞上那条
+    #   "同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把"这两行
+    #   必须在示例里"变成一条**当场说得出话**的前置条件。
+    for _k, _v in (("cluster_cidr", "192.0.2.0/24"),
+                   ("default_plugin", "code-server")):
+        text, _n = re.subn(r"(?m)^%s\s*=.*$" % _k, "%s = %s" % (_k, _v), text)
+        if _n != 1:
+            raise ValueError("示例配置 %s 里应当恰好有一行 `%s =`（实际 %d 行）"
+                             % (CONF, _k, _n))
     for name in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
         stub = write_stub(os.path.join(bindir, name), "exit 0\n")
         text = re.sub(r"(?m)^%s\s*=.*$" % name, "%s = %s" % (name, stub), text)
@@ -9275,15 +9282,23 @@ exit 0
           "命中 %d 行；文档说 %r，代码是 %r"
           % (len(_cap_rows), _cap_doc, mod.DEFAULT_MAX_SESSIONS_PER_USER))
 
-    # ★ 那一节举的例子是 code-server。举错例子的症状是"文档里的反例在真站点上
-    #   并不成立"，而它读起来一点问题都没有 —— 所以例子本身也要有人守。
+    # ★ 上面那一节的例子**搬走了**（v0.14：基座文档不再点名任何插件，例子住进
+    #   插件自己的 README）。举错例子的症状没变 —— "文档里的反例在真站点上并不
+    #   成立"，而它读起来一点问题都没有 —— 所以这一条守的东西也没变，只是换了个
+    #   文件读：**文档说的**与**清单里真的**都要看，两边各说各的时错的那一份不会
+    #   红任何东西。
+    _cs_readme = io.open(
+        os.path.join(HERE, os.pardir, "plugins", "code-server", "README.md"),
+        encoding="utf-8").read()
     _cs_manifest = json.load(io.open(
         os.path.join(HERE, os.pardir, "plugins", "code-server", "plugin.json"),
         encoding="utf-8"))
     _cs_conc = (_cs_manifest.get("contributes") or {}).get("concurrent")
-    check("★ docs/CONFIGURATION.md 举的那个例子（code-server）真的声明了 "
-          "`concurrent: true`",
-          _cs_conc is True, str(_cs_conc))
+    check("★ plugins/code-server/README.md 说这个插件声明了 `concurrent: true`，"
+          "而插件清单里**真的**是",
+          '"concurrent": true' in _cs_readme and _cs_conc is True,
+          "README 里有那句话=%s；清单里是 %r"
+          % ('"concurrent": true' in _cs_readme, _cs_conc))
 
     # ══════════════════════════════════════════════════════════════════════
     #  29. 看护者：谁在看这条会话（v0.9 阶段 1）
