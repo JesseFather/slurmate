@@ -480,3 +480,21 @@ jobs:
         run: |
           python3 tools/check-doc-links.py
           python3 tools/check-doc-links.py --self-test
+
+      - name: 公开文档里不用图形符号做强调
+        # 判据只有一处：tools/check-doc-style.py，这里只调用它。
+        #
+        # ★ 为什么值得一条机器判据：`CONTRIBUTING.md`〈公开文档用规范体〉那条规矩
+        #   （不用 ★ / ⚠ / ✅ / emoji 做强调）如果只有文字，它会在第一次赶时间的
+        #   提交里失效 —— 而"又长出一个 ★"这种事，人眼在 diff 里看不见。
+        #
+        # ★ 判定线是"图形符号"与"排版符号"两件事：禁 Unicode 的
+        #   Misc Symbols / Dingbats / Emoji 区；`→` `←` `↔` `⇒`（Arrows 区）
+        #   **允许** —— 它们表意（"变成"、"推出"），不表强调。
+        #
+        # ★ 第二行是**反向自测**：种五种坏样本（★、⚠、✅❌、📌、围栏里的 ★），
+        #   断言每一个都被抓到；另种四种**假红**样本（反引号里的字面量、
+        #   夹具文件名里的 emoji、箭头、两份记录类），断言一个都不误判。
+        run: |
+          python3 tools/check-doc-style.py
+          python3 tools/check-doc-style.py --self-test

@@ -20,12 +20,20 @@
     · **判据集**（什么算"存在"）＝ 盘上真实存在的路径 ＋ `--others` 那些未跟踪
       但没被 ignore 的。**目录也算** —— `[plugins/](../plugins/)` 是一条合法指路。
 
-已知的两条**故意**的宽松，都写在这里，免得日后被当成漏洞：
+已知的**故意**宽松，都写在这里，免得日后被当成漏洞：
 
   · **不查锚点**（`foo.md#某一节` 只查 `foo.md`）。锚点 slug 的算法是各渲染器
     自己的事，按它判会制造一批假红，而假红会让这条检查被绕过。
   · **不查 URL**（`http://` / `https://` / `mailto:`）。那是别人的可达性，
     不是这个仓库的形状。
+  · **`tools/check-*.py` 不进扫描集**。那几个文件讲的就是路径本身：它们的自测
+    样本里写着一些**故意不存在**的 `docs/*.md`（`docs/A.md` 之类）—— 那是判据的
+    **输入**，不是一条指路。不排除的话，这条检查会被自己的样本喂出十几条假红。
+    ★ 代价写明：在那几个文件里**真的**写一条指路，这条检查看不见 —— 它们是检查器，
+    守的是别人，不是自己，这个代价划算。
+    ★★ 而这个坑踩过一次，值得记：第一版没排除，**而它当时是绿的** —— 因为
+    `check-doc-links.py` 自己还没 `git add`，根本不在扫描集里。提交之后才红。
+    「新加的检查器要 `git add` 之后再验一遍」是这一步的教训。
 
 用法：
     python3 tools/check-doc-links.py                # 扫整个仓库
@@ -49,6 +57,9 @@ BARE = re.compile(r"(?<![A-Za-z0-9_./-])docs/[A-Za-z0-9_.-]+\.md")
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 FENCE = re.compile(r"^\s*(```|~~~)")
+
+# 不进扫描集：检查器脚本自己 —— 它们的自测样本里写着**故意不存在**的路径（见文件头）。
+SKIP_SCAN = re.compile(r"^tools/check-[^/]*\.py$")
 
 
 def is_text(path):
@@ -131,9 +142,15 @@ def _ls_files(root, *extra):
 
 
 def read_repo(root):
-    """**扫描集**：被跟踪的文本文件 —— 发布出去的字节。"""
+    """**扫描集**：被跟踪的文本文件 —— 发布出去的字节。
+
+    ★ 检查器脚本自己（`SKIP_SCAN`）不在其中：它们的正文是判据的**输入**，
+      不是给读者的指路。见文件头。
+    """
     files = {}
     for rel in _ls_files(root):
+        if SKIP_SCAN.match(rel):
+            continue
         full = os.path.join(root, rel)
         if not os.path.isfile(full) or not is_text(full):
             continue
@@ -166,10 +183,13 @@ def run(root):
         return 1
     n_md = sum(1 for r in files if r.endswith(".md"))
     extra = len(present - set(files))
+    n_skip = sum(1 for r in _ls_files(root) if SKIP_SCAN.match(r))
     print("✓ %d 份文档、%d 份被跟踪的文件：每条相对链接与每处 `docs/*.md` 指路都指得到"
           % (n_md, len(files)))
     print("  （判据集另有 %d 个目录／未跟踪但盘上存在的东西 —— 指到它们是合法的）"
           % extra)
+    print("  （另有 %d 份检查器脚本没扫 —— 它们的样本里写着故意不存在的路径，"
+          "那不是指路）" % n_skip)
     return 0
 
 
