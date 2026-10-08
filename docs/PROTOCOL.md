@@ -13,9 +13,12 @@
 ## 〇、协议版本
 
 **当前版本：v0.15。** 协议版本、客户端版本、服务端版本是**同一个号** —— 它们不是
-三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言必须
-逐字相同：`client/package.json`、`client/package-lock.json`、`cluster/slurmate`、
-`cluster/slurmate-sessiond`。
+三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.15`，而
+`client/package.json` 与 `client/package-lock.json` 的 `version` 是**三段**
+（`0.15.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+语义化版本，两段会被构建工具直接拒掉。**协议版本 = 包版本的前两段**，断言比的
+就是这四处的前两段。
 
 **这个号是 `major.minor`：两段。** `major` 无上限，`minor` ∈ `0..255`，
 **禁止前导零**（写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串）。
@@ -40,7 +43,9 @@
 > **同一份** —— 两侧规则必须逐条一致，而"只有一份"比"两份抄本 + 一条比对 lint"
 > 结实。
 >
-> 语义化版本要求三段，而这里只有两段 —— 所以本项目的版本号**不遵循语义化版本**。
+> 语义化版本要求三段，而协议版本只有两段 —— 所以**协议版本不遵循语义化版本**。
+> 客户端发行包的 `version` 是三段（npm 与 electron-builder 的要求），它的
+> **前两段**就是协议版本；客户端对站点自报的是那前两段。
 
 ### 三方：谁不低于谁
 

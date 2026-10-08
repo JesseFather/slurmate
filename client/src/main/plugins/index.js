@@ -230,10 +230,11 @@ const VERSION_RE = new RegExp(`^${SEG_ANY}\\.${SEG_BYTE}\\.${SEG_BYTE}$`);
  *   一侧被收下、在另一侧被拒 —— 同一份夹具里那几条带空白的用例钉的就是它。
  *
  * ★ 这里是**第三处**同样的纪律，而它今天是**不可观测的**：所有调用方喂进来的串
- *   都已经过了上面那道门（`hostVersion()` 读的是 `package.json`，范围片段被
- *   `split(/\\s+/)` 切过，`cmpPluginVer` 的两个参数来自已校验的清单）。留着它是
- *   为了不让这里悄悄变成一个**更松的入口** —— 也正因为它不可观测，夹具钉不住它，
- *   **别把它当成防线**（变异验证里把这一行改成 `.trim()` 不会让任何用例变红）。
+ *   都已经过了上面那道门（`hostVersion()` 读的是 `package.json` 版本号的**前两段**，
+ *   范围片段被 `split(/\\s+/)` 切过，`cmpPluginVer` 的两个参数来自已校验的清单）。
+ *   留着它是为了不让这里悄悄变成一个**更松的入口** —— 也正因为它不可观测，
+ *   夹具钉不住它，**别把它当成防线**（变异验证里把这一行改成 `.trim()` 不会让
+ *   任何用例变红）。
  */
 function parseVer(s, re) {
   const t = typeof s === 'string' ? s : '';
@@ -482,10 +483,23 @@ function versionCheck(clientVersion, serverVersion) {
   return { verdict: 'client_behind', blocked: !devPeriod, order };
 }
 
-/** 本客户端的版本（`engines.slurmate` 拿它比）。读不到就跳过这项检查。 */
+/**
+ * 本客户端的**协议版本**（`engines.slurmate` 与 `versionCheck` 拿它比）。
+ * 读不到就跳过这项检查。
+ *
+ * ★ 取的是 `client/package.json` 那个 `version` 的**前两段**，不是整串。
+ *   那个字段是三段：npm 与 electron-builder 都要求语义化版本，写 `0.15` 会被
+ *   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"）。
+ *   而协议版本是两段（docs/PROTOCOL.md §〇）。**协议版本 = 包版本的前两段** ——
+ *   这条关系就落在下面这一行。
+ * ★ 少切这一刀的症状指不回本文件：对站点自报 `0.15.0`，而 `FRAMEWORK_VERSION_RE`
+ *   只认两段 ⇒ `parseVer` 给 null ⇒ `versionCheck` 落到 `unknown_host`，
+ *   用户看到的是"对面不是我们的守护进程"。
+ */
 function hostVersion() {
   try {
-    return require('../../../package.json').version;   // client/package.json
+    return require('../../../package.json').version
+      .split('.').slice(0, 2).join('.');
   } catch {
     return null;
   }

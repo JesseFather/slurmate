@@ -131,10 +131,17 @@ jobs:
           done
           exit $fail
 
-      - name: 版本号：四处逐字一致、形状是 x.y，文档里的「当前版本」也跟着走
+      - name: 版本号：协议版本四处一致、客户端那两处是三段、文档里的「当前版本」也跟着走
         # 协议版本、客户端版本、服务端版本**是同一个号** —— 它落在四个文件里
         # （client/package.json、client/package-lock.json、cluster/slurmate、
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
+        #
+        # ★ **客户端那两处写的是三段**（`0.15.0`）：那个 `version` 字段同时是 npm
+        #   包的版本号，而 npm 与 electron-builder 都要求语义化版本 —— 写两段会被
+        #   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"），
+        #   一个安装包都打不出来。**协议版本 = 包版本的前两段**，客户端对站点自报
+        #   的就是这两段（`client/src/main/plugins/index.js` 的 `hostVersion()`）。
+        #   所以这一条断言比的是**四处的协议版本**，不是四个字符串逐字相同。
         #
         # ★ **第四处是真的漏过一次的**：client/package-lock.json 从前停在 0.2.0，
         #   而 package.json 已经走到 0.6.0 —— 因为 `npm ci` **不比较**lock 里那个
@@ -155,6 +162,10 @@ jobs:
           ldr.exec_module(mod)
           SHAPE = mod.FRAMEWORK_VERSION_RE
 
+          # npm 那一侧的写法。**不**从别处 import：它只在这两处用得上，而这两处
+          # 正是本仓库里唯一的 npm 包。与 SHAPE 一样是"禁前导零"的逐段十进制。
+          PKG_SHAPE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
           def daemon_version(path):
               src = open(path, encoding="utf-8").read()
               m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M)
@@ -163,21 +174,40 @@ jobs:
           def from_json(path):
               return json.load(open(path, encoding="utf-8")).get("version") or ""
 
+          def proto(v, is_pkg):
+              """这一处声明的**协议版本**；形状不对时给 None。
+
+              客户端那两处先按三段校验，再取**前两段** —— 那一刀与
+              `hostVersion()` 里的是同一条规则，两边必须一起改。
+              """
+              if not v:
+                  return None
+              if is_pkg:
+                  if PKG_SHAPE.match(v) is None:
+                      return None
+                  v = ".".join(v.split(".")[:2])
+              return v if SHAPE.match(v) is not None else None
+
           places = [
-              ("client/package.json", from_json("client/package.json")),
-              ("client/package-lock.json", from_json("client/package-lock.json")),
-              ("cluster/slurmate", daemon_version("cluster/slurmate")),
-              ("cluster/slurmate-sessiond", daemon_version("cluster/slurmate-sessiond")),
+              ("client/package.json", from_json("client/package.json"), True),
+              ("client/package-lock.json", from_json("client/package-lock.json"), True),
+              ("cluster/slurmate", daemon_version("cluster/slurmate"), False),
+              ("cluster/slurmate-sessiond", daemon_version("cluster/slurmate-sessiond"), False),
           ]
           bad = 0
-          for name, v in places:
-              ok = bool(v) and SHAPE.match(v) is not None
-              print("  %-26s %-10s %s" % (name, v or "(空)", "ok" if ok else "FAIL 不是 x.y"))
-              if not ok:
+          protos = []
+          for name, v, is_pkg in places:
+              p = proto(v, is_pkg)
+              print("  %-26s %-10s %s" % (name, v or "(空)",
+                      ("ok  协议版本 %s" % p) if p else
+                      "FAIL 不是 %s" % ("x.y.z" if is_pkg else "x.y")))
+              if p is None:
                   bad = 1
-          if len({v for _n, v in places}) > 1:
-              print("✗ 四处版本号不一致：%s" % sorted(v for _n, v in places))
-              print("  改版本时四处都要改（或改成本 workflow 从单一来源派生）。")
+              else:
+                  protos.append(p)
+          if len(set(protos)) > 1:
+              print("✗ 协议版本不一致：%s" % sorted(set(protos)))
+              print("  改版本时四处都要改（客户端那两处写成三段，前两段就是协议版本）。")
               bad = 1
           # ── 文档里那几处「当前版本」必须跟着走 ────────────────────────────
           #
@@ -192,7 +222,9 @@ jobs:
           #
           #   ★ 两份**记录类**文档排除在外：它们讲的就是各个版本。
           DOC_CUR = re.compile(r"(?:当前维护的版本|当前版本)：\**\s*`?v?([0-9]+\.[0-9]+)")
-          want = places[0][1]
+          # ★ 比的是**协议版本**（两段），不是 `places[0][1]` —— 后者现在是客户端
+          #   那个三段的包版本（`0.15.0`），拿它去比文档里的 `v0.15` 会一路误红。
+          want = protos[0] if protos else ""
           skip_doc = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
           found = []
           ls = subprocess.run(["git", "ls-files", "*.md"], capture_output=True,
@@ -215,7 +247,7 @@ jobs:
                   bad = 1
           if bad:
               sys.exit(1)
-          print("✓ 四处一致，且都是 x.y；文档里那几处「当前版本」也跟着走")
+          print("✓ 四处的协议版本一致；文档里那几处「当前版本」也跟着走")
           PY
 
       - name: 插件的跳过表三端必须一致

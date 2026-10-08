@@ -4,11 +4,17 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-★ **版本号不遵循语义化版本。** 这个项目的框架版本是 **`major.minor`，两段**
+★ **版本号不遵循语义化版本。** 这个项目的**协议版本**是 **`major.minor`，两段**
 （`major` 无上限、`minor` ∈ `0..255`、禁止前导零、超上界必须进位），插件的版本号
 才是三段（`x.y.z`，见 [packer/docs/PLUGIN-SPEC.md](packer/docs/PLUGIN-SPEC.md) §2.3）。从前的
 那一行写着"遵循语义化版本"，而语义化版本要求三段 —— 那句话是错的。
 规则与判据见 `tools/version-fixtures.json`。
+
+★ **客户端那个 npm 包的 `version` 是个例外：它必须是三段。** npm 与 electron-builder
+都要求语义化版本，写两段会被 electron-builder 的 `fixVersionField` 直接拒掉
+（`Invalid version`），一个安装包都打不出来。**它的前两段就是协议版本**，客户端对
+站点自报的也是那两段。这条关系落在 `client/src/main/plugins/index.js` 的
+`hostVersion()` 里，由 `.github/workflows/checks.yml` 那条版本号断言钉住。
 
 ★ **0.2.0 及更早的标题保持原样**：它们是**当时的字符串**，那时的规定就是三段。
 把历史条目改写成两段，等于声称发布过一个从没存在过的版本号。
@@ -30,12 +36,13 @@
 
 ## [0.15] — 未发布
 
-> 四处版本号（`client/package.json`、`client/package-lock.json`、
-> `cluster/slurmate`、`cluster/slurmate-sessiond`）现在都是 **0.15**。
+> 协议版本是 **0.15**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
+> `0.15`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
+> **`0.15.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
 
-★ **这一版改的是文档与源文件头，不是程序。** 协议线上没有新的 op、也没有新的字段，
-两端的任何**行为**都没有变。★ 所以这一节**没有"破坏性变更"那一段** —— 按本文件
-顶部那条发布纪律，只有破坏兼容才需要写它。
+★ **这一版改的是文档、源文件头与两处构建接线，不是协议。** 协议线上没有新的 op、
+也没有新的字段。★ 所以这一节**没有"破坏性变更"那一段** —— 按本文件顶部那条发布
+纪律，只有破坏兼容才需要写它。
 
 ### Changed — 公开文档只陈述「现在是什么」
 
@@ -164,6 +171,28 @@ F 禁的是**事实**，`` `v0.13 起` `` 包在反引号里也仍然是历史�
 2. **两处历史因在字符串里而留着**：`client/src/main/plugin-data-audit.js` 的
    `label: '0.7 之前的旧分区'`（面板上真的会显示）与 `client/test/site-plugins.test.mjs`
    的一条断言消息。它们是**产品输出**，不是注释。
+
+### Fixed — 构建与 CI
+
+**两条 CI 从头到尾没绿过，都不是这一版的正文改动引起的。**
+
+- **客户端打包：`Invalid version: "0.15"`。** electron-builder 对 `package.json` 的
+  `version` 是**硬校验**（`fixVersionField`，已经是宽松模式，没有开关可绕），而协议
+  版本是**两段** —— 同一个字段不可能同时满足两个规范。⇒ 客户端那个 npm 包的
+  `version` 写成三段（`0.15.0`），**协议版本 = 前两段**：`hostVersion()` 取前两段
+  再对站点自报，CI 那条版本号断言也比四处的**协议版本**。
+  ★ **只改 `package.json` 是不够的** —— 客户端对站点自报 `0.15.0` 会落进
+  `versionCheck` 的 `unknown_host` 分支，而用户看到的报错是"对面不是我们的守护
+  进程"，一个字都指不回版本号。★ `cluster/slurmate` 与 `cluster/slurmate-sessiond`
+  不动，仍然是 `0.15`。
+- **`cluster/test-sessiond-logic.py` 第 32 节（热重载）在 CI 上 43 条连锁红。**
+  根因与协议无关：`Config` 用 `resolve_bin()` 解析那八个 Slurm 命令，**解析不到就
+  让整份配置带上问题**，而 `reload_config()` 见到问题就**拒绝** ⇒ 热重载一条都跑
+  不成。开发会话跑在**计算节点**上（`/usr/bin` 下真有那些命令），CI 是裸的
+  ubuntu ⇒ 同一条用例两边结论相反。⇒ 那一节加**第二个注入点**（`mod.resolve_bin`），
+  与它已有的 `run_cmd` 注入点同形。
+  ★ **不能靠改 PATH 来造"找得到"**：`resolve_bin` 在 PATH 之外还会查那几个硬编码
+  目录，本机照样会查到真的 —— 那正是要消除的那种差异。
 
 ## [0.14] — 未发布
 

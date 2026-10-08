@@ -10417,6 +10417,7 @@ exit 0
 
     _saved_rl_dir = mod.default_plugins_dir
     _saved_rl_run = mod.run_cmd
+    _saved_rl_resolve = mod.resolve_bin
     mod.default_plugins_dir = lambda: _RL
     # ★★ 这一节里问 Slurm 的命令**一律走桩**（这一节真的会问）：
     #    热重载现在会跑 `crosscheck_cidr()`，而 `_do_reload()` 还会跑
@@ -10429,6 +10430,19 @@ exit 0
     #      `gres_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
     #      就会悄悄漏掉一个 —— 而"漏一个"正是 F45 的形状。
     mod.run_cmd = _rl_nodes_stub
+
+    # ★★ 还有**第二个**注入点，拦的是另一条路：`Config.__init__` 用 `resolve_bin()`
+    #    解析那八个 Slurm 命令在不在，**解析不到就整份配置带上问题** —— 而
+    #    `reload_config()` 见到问题就**拒绝**，于是这一节四十多条断言连锁红。
+    #    ★ 它的失败形态与上面那条**完全不同**：那条是"问错了集群"，这条是
+    #      "**配置压根没生效**" —— 报出来的是"热重载被拒"，一个字都不提 Slurm。
+    #    ★ **不能靠改 PATH 或改 `SLURM_BIN_DIRS` 来造"找得到"**：`resolve_bin`
+    #      在 PATH 之外还会查那几个硬编码目录，而本机（一台计算节点）的 /usr/bin
+    #      下真的装着它们 ⇒ 同一条用例在开发机上绿、在裸的 CI 上红。17 节与
+    #      `--check` 那一节记的是**同一条**教训。
+    #    ★ 这一节要考的从来不是"命令能不能解析到"（那是 `machine_selfcheck`
+    #      那一节的事），所以替换掉它不丢任何东西。
+    mod.resolve_bin = lambda name, explicit=None: explicit or "/bin/true"
     try:
         # 32.2 ★ `changed_*_keys`：判据是**配置里写了什么**
         #
@@ -10878,6 +10892,7 @@ exit 0
     finally:
         mod.default_plugins_dir = _saved_rl_dir
         mod.run_cmd = _saved_rl_run
+        mod.resolve_bin = _saved_rl_resolve
 
     for _dd in _rl_ds:
         try:
