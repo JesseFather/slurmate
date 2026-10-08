@@ -216,8 +216,9 @@ sudo bash cluster/install-base.sh              # 部署
     —— 0.2.0 时代它可以让用户自己往里放一份，那条路整类绕过同意闸，已经删掉
     （理由见 [SECURITY.md](SECURITY.md) 的〈逐插件同意〉）。里面**已有的文件不删**，
     客户端下一次启动会说一句它不生效了；
-  - 集群侧：插件装在 `<prefix>/share/slurmate/plugins/`（**一个插件一个
-    `<ULID>.splug`**），安装器把它的作业侧**逐插件编织**成
+  - 集群侧：插件装在 `<prefix>/share/slurmate/plugins/` —— **一棵树加一份记录表**
+    （`<ULID>/` 与 `<ULID>.json`，v0.13 起；容器 `.splug` 只在「作者→站点」与
+    「站点→客户端」这两段路上活着），安装器把它的作业侧**逐插件编织**成
     `<prefix>/share/slurmate/jobs/<ULID>.sbatch` —— **一个插件一份**。
     一份一个插件是刻意的：同处一份文件时，插件里任何一行不在函数里的代码都会
     在**每一个**作业里执行，不管用的是哪个插件。

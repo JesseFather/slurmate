@@ -53,7 +53,7 @@ import time
 # ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
 #   三处声明（client/package.json、cluster/slurmate、本文件）必须逐字相同，
 #   由 .github/workflows/checks.yml 断言。规则见下面「版本号：两套方案」。
-VERSION = "0.12"
+VERSION = "0.13"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -3528,6 +3528,24 @@ def plugin_src_problems(src_dir):
         path = os.path.join(src_dir, name)
         if path in accepted:
             continue
+        if os.path.isdir(path) and not os.path.islink(path):
+            # ★★ 子目录里的包**一个都装不上**，而症状是"我明明把包放在那里了"。
+            #   v0.13 起包名统一成 `<id>.splug` ⇒ **同一个 id 的两个版本没法共用
+            #   一个文件名** ⇒ 按版本分目录存放成了一种很自然的做法
+            #   （`dist/1.0.0/<id>.splug`）。于是这一条从"理论上的"变成了
+            #   "照着做就会踩的" —— 所以它必须**指路**，不能只说"不会被安装"。
+            try:
+                inner = [n for n in sorted(os.listdir(path))
+                         if n.endswith(PLUGIN_PACKAGE_SUFFIX)]
+            except OSError:
+                inner = []
+            if inner:
+                out.append(
+                    "%s：它是个**目录**，里面有 %d 个包（%s）—— 它们**不会被安装**。\n"
+                    "        `--from` 一次只认**一个**目录、而且**不递归**："
+                    "要装它们请各自来一次，`--from %s`。"
+                    % (path, len(inner), "、".join(inner[:3]), path))
+                continue
         if name.endswith(PLUGIN_PACKAGE_SUFFIX):
             why = ("它是一个**符号链接**（链接指向的东西可以换，于是校验过的"
                    "与读到的不一定是同一份）" if os.path.islink(path)

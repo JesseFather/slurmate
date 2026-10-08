@@ -307,8 +307,8 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 node packer/slurmate-packer.js init  path/to/your-plugin     # 铸一个 id（只做一次）
 node packer/slurmate-packer.js keygen path/to/your-plugin    # 想签名才需要（只做一次）
 git commit -am "铸一个 id"
-node packer/slurmate-packer.js build path/to/your-plugin     # → your-plugin-1.0.0.splug
-node packer/slurmate-packer.js sign  your-plugin-1.0.0.splug # 可选，但见 PLUGIN-SPEC.md §6.4
+node packer/slurmate-packer.js build path/to/your-plugin     # → <id>.splug（落在源码树的上一层）
+node packer/slurmate-packer.js sign  <id>.splug              # 可选，但见 PLUGIN-SPEC.md §6.4
 ```
 
 把那几个 `.splug` 收集到一个目录，拷到登录节点上，然后装：
@@ -327,7 +327,7 @@ sudo slurmate plugin install --from ~/下载的插件
 ★★ **装插件不是部署的一部分** —— 基座装完之后随时可以装，装一个也不用重跑部署：
 
 ```bash
-sudo slurmate plugin install ~/下载的插件/foo-1.0.0.splug
+sudo slurmate plugin install ~/下载的插件/<id>.splug
 ```
 
 它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](PLUGIN-SPEC.md) §6.4）、
@@ -483,14 +483,20 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 
 ★ **客户端那一侧只有在一台真的客户端上才验得到**：连上去之后应该出现
 「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
-点完同意之后看一眼池子 —— 每个版本应该是**两样挨着**：
+点完同意之后看一眼池子 —— 每个版本是**一棵树加一份记录表**：
 
 ```bash
-ls -l ~/.slurmate/site-plugins/<ULID>/     # 一个 <版本>/ 目录 + 一个 <版本>.splug
+ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>.json
 ```
 
-那个 `.splug` 是这一份的**来路凭证**（也是验签的原料）。它单独不在了不构成撤回，
-但界面上会如实写"只有解出来的树，没有包"。
+那份 `.json` 是这一份的**提交点**：树在、记录表不在 ⇒ 这一次安装**没提交** ⇒
+下一轮**清掉重取**（手造一个这样的目录出来玩也行：下一轮它会自己消失，那是自愈）。
+
+★ **池子里没有 `.splug`** —— 容器解完就扔，它只在「作者→站点」与「站点→客户端」
+这两段路上活着。
+★★ 而这里是**只含客户端侧**的那一份：`job/` 那半边**根本不在这台机器上**。
+用户机器上有过一份 `job/start.sh` 曾经是一个真实的缺陷（它是以**提交者本人**的身份
+在集群上执行的脚本），v0.13 修掉了，而且客户端解包时**拒绝**任何含站点侧路径的包。
 **这件事到今天为止一次都没在真集群上跑过**，而且**刻意押后了**（形状还会大动，
 现在验的结论留不住）—— 见 [docs/KNOWN-ISSUES.md](KNOWN-ISSUES.md) 的 U7，
 那里列着第一次跑要看什么（最要紧的仍然是那 4 MiB 的响应余量够不够，

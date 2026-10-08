@@ -3985,6 +3985,20 @@ exit 0
               "notes.txt" in _ptxt and "不是一个插件包" in _ptxt
               and "符号链接" not in _ptxt.split("notes.txt")[1].split("\n")[0],
               _ptxt[:400])
+        # ★★ v0.13 加的一条**指路**，它是"包名统一成 `<id>.splug`"的连带后果：
+        #    同一个 id 的两个版本**没法共用一个文件名** ⇒ 按版本分目录存放成了很
+        #    自然的做法（`dist/1.0.0/<id>.splug`）⇒ 而 `--from` **不递归**，
+        #    那几份包一个都装不上。
+        #    ★ 只说"不会被安装"是不够的：管理员接着要问的正是"那我该怎么装"，
+        #      而答案（`--from` 各自来一次）**只有这里能说**。
+        check("★★ 子目录里有包 ⇒ 那条话要**指路**（一次只认一个目录、不递归）",
+              "nested" in _ptxt and "不递归" in _ptxt and "--from" in _ptxt,
+              _ptxt[:600])
+        check("★ 而「里面没有包的目录」走的是原来那条（两种成因的修法不一样："
+              "一种是把里面的包搬出来，一种是它压根不该在这儿）",
+              os.path.join(_gate, "old") in _ptxt
+              and "不是一个插件包" in _ptxt.split(os.path.join(_gate, "old"))[1][:200],
+              _ptxt[:600])
         # ★★ 上一条的**正对照**：一个只有包的目录必须一条问题都不报 —— 少了它，
         #    "什么都报"也能让上一条通过。
         _clean = tempfile.mkdtemp(prefix="slurmate-gate-clean-")

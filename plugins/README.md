@@ -27,7 +27,7 @@ plugins/
 ```
 
 ```bash
-node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0.splug
+node packer/slurmate-packer.js build <插件目录>      # → <id>.splug（落在源码树的上一层）
 ```
 
 ★ **分发与安装在服务器上的那一个是 `.splug`（一个文件），不是这棵树。**
@@ -73,14 +73,18 @@ node packer/slurmate-packer.js build <插件目录>      # → your-plugin-1.0.0
 
 ```bash
 # ① 一个动词装一个包
-sudo slurmate plugin install ~/下载/your-plugin-1.0.0.splug
+sudo slurmate plugin install ~/下载/<id>.splug
 # ② 或者把一批 .splug 收在一个目录里，一次对齐
 sudo slurmate plugin install --from DIR
 # ③ 一个都不装（合法状态）
 ```
 
-★ **`--from DIR` 只认 `.splug`。** 仓库顶层的 `plugins/` 放的是**源码树**，拿它
-当那个目录用不会装上任何东西 —— 包是构建产物，不进 git，要先 `packer build`。
+★ **`--from DIR` 只认 `.splug`，而且一次只认一个目录、不递归。** 仓库顶层的
+`plugins/` 放的是**源码树**，拿它当那个目录用不会装上任何东西 —— 包是构建产物，
+不进 git，要先 `packer build`。
+★ 而**子目录里的包也扫不到**（`--from dist` 一个包都装不上）。安装器会把那个目录
+逐条点名说出来，并给出该怎么写 —— 见下面〈打成一个包〉那一节里"多版本必须自己
+分目录"那条。
 
 安装器做这些事（`slurmate plugin install` 会一件件说给人听）：
 
@@ -527,7 +531,7 @@ bash 自上而下解析整个文件，那一行于是在**每一个**作业里�
 
 ### 打成一个包（`.splug`）
 
-插件最终以**一个文件**分发：`<id>-<版本>.splug`，由 [`packer/`](../packer/) 打出来
+插件最终以**一个文件**分发：**`<id>.splug`**，由 [`packer/`](../packer/) 打出来
 （单文件、零依赖，跑在**你的**机器上）：
 
 ```sh
@@ -541,6 +545,20 @@ node packer/slurmate-packer.js inspect <那个 .splug>
 
 写树的动词与打包的动词是两条命令，因为前者会弄脏源码树而后者要求树干净 ——
 §2.1 / §2.5 与 §3.5 的要求合起来只能是两条。
+
+★ **包名就是 `<id>.splug`**（v0.13 起；从前是 `<目录名>-<版本>.splug`）。身份来自
+清单里的 `id`，所以**目录名不参与包名** —— 与上面那句"目录名不参与任何判定"一致。
+两条连带后果，作者会踩：
+
+- **同一个 id 的多版本必须自己分目录**（`dist/1.0.0/<id>.splug`、
+  `dist/1.0.1/<id>.splug`）。这不是偏好，是"一个 id 只有一个默认文件名"的推论：
+  不打 `--out` 的话，第二次打**会盖掉第一次**。★ 而安装器 `--from DIR`
+  **不递归** ⇒ 每个版本目录各来一次；拿 `dist` 当那个目录用，安装器会告诉你
+  "它是个目录，里面有 N 个包"以及该怎么写。
+- **从文件名看不出版本**。版本在包**里面**（`plugin.json` 的 `version`）。要看装的
+  是哪一版：站点上是 `<id>.json` 记录表或者 `slurmate plugins` 那一屏，作者机器上
+  是 `packer inspect <包>`。★ 版本信息没有消失，只是**从文件名搬到了一个读得到的
+  地方**。
 
 ★ **本仓库这两棵源码树真要发布时，跑一次 `init --adopt`。** 它们的 id 铸在血统表
 存在之前，所以血统表不认识它们，而 `build` 会（正确地）停下来问 —— `--adopt` 就是

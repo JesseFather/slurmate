@@ -205,6 +205,56 @@ section('1. 一个提交 ⇒ 一份确定的字节');
 }
 
 // ==============================================================================
+//  1b. 默认输出名 = 纯 `<id>.splug`
+// ==============================================================================
+
+section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
+
+{
+  // ★ 目录名故意与 id **没有任何关系**：从前包名是 `<目录名>-<版本>.splug`，
+  //   于是"包叫什么"取决于你在自己的机器上把那个目录叫什么 —— 而身份来自清单
+  //   里的 `id`（`plugins/README.md` 那句"目录名不参与任何判定"）。
+  const { base, plug, git } = mkRepo(baseFiles());
+  const want = path.join(base, `${MF_ID}.splug`);
+
+  const r = packer('build', plug, '--commit', 'HEAD');
+  check('★★ 不带 `--out` ⇒ 落在源码树的**上一层**，名字是纯 id',
+    r.code === 0 && fs.existsSync(want), r.out + r.err + JSON.stringify(fs.readdirSync(base)));
+  check('★★ 而那个名字里**没有版本、也没有目录名**'
+        + '（`plug-1.0.0.splug` 是 v0.12 的形状，不该再出现）',
+    !fs.existsSync(path.join(base, `plug-${MF_VER}.splug`))
+    && !fs.existsSync(path.join(base, 'plug.splug')), JSON.stringify(fs.readdirSync(base)));
+
+  const ins = packer('inspect', want, '--json');
+  let ij = null;
+  try { ij = JSON.parse(ins.out); } catch { ij = null; }
+  check('★ 版本**没有消失**，它在包里（`packer inspect --json` 读得到）——'
+        + '名字里没有它，只是「从名字搬到了一个读得到的地方」',
+    ij && ij.ok && ij.manifest && ij.manifest.version === MF_VER,
+    ins.out.slice(0, 200) + ins.err.slice(0, 120));
+
+  // ★★ 连带后果：**默认落点会把上一版盖掉**。同一个 id 的两个版本只有一个默认
+  //    文件名，所以"多版本"必须由**作者自己分目录**表达（`dist/1.0.1/<id>.splug`）。
+  //    把它钉成**已知行为**而不是让它成为惊喜：覆盖是静默的，而静默覆盖正是最该
+  //    写下来的那一种。这一条同时是 `plugins/README.md` 那段话的依据。
+  fs.writeFileSync(path.join(plug, 'plugin.json'), mf({ version: '1.0.1' }));
+  git('add', '-A');
+  git('commit', '-qm', '1.0.1');
+  const r2 = packer('build', plug, '--commit', 'HEAD');
+  const pkgs = fs.readdirSync(base).filter((n) => n.endsWith('.splug'));
+  check('★★ 打第二个版本 ⇒ 落在**同一个**默认路径上（不是并排两份）——'
+        + '所以多版本要自己分目录，这一条是那个要求的依据',
+    r2.code === 0 && pkgs.length === 1 && pkgs[0] === `${MF_ID}.splug`,
+    JSON.stringify(pkgs));
+  const ins2 = packer('inspect', want, '--json');
+  let ij2 = null;
+  try { ij2 = JSON.parse(ins2.out); } catch { ij2 = null; }
+  check('★ 而留在那个名字下的是**后打的那一版**（覆盖是真的发生了）',
+    ij2 && ij2.ok && ij2.manifest && ij2.manifest.version === '1.0.1',
+    ins2.out.slice(0, 200));
+}
+
+// ==============================================================================
 //  2. 不该进包的东西
 // ==============================================================================
 

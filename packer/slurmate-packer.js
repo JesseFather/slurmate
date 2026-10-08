@@ -1383,9 +1383,21 @@ function cmdKeygen(dir, opts) {
   return 0;
 }
 
-function defaultOut(dir, version) {
-  return path.join(path.dirname(path.resolve(dir)),
-    `${path.basename(path.resolve(dir))}-${version}.splug`);
+// ★★ 包名 = **纯 `<id>.splug`**（v0.13）。从前是 `<目录名>-<版本>.splug`。
+//
+//   判据是"**一个 id 只有一份内容**"（§2.4）—— 而那个 `(id, 版本)` 二元组里
+//   能进文件名的只有版本，于是同一个 id 的两个版本在同一个目录里只能靠**名字**
+//   区分开，而"这份是谁"要靠人去对。改成纯 id 之后文件名就是身份，而**版本在包
+//   里面**（`plugin.json` 的 `version`）—— 它没有消失，只是从文件名搬到了一个
+//   读得到的地方（站点上是 `<id>.json` 记录表，作者机器上是 `packer inspect`）。
+//
+//   ★ 连带后果一条，写进 `plugins/README.md`：**同一个 id 的多版本必须自己分
+//     目录**存放（`dist/1.0.0/<id>.splug`）。这不是偏好 —— 是"一个目录里同 id
+//     只能有一版"的推论。
+//   ★ 目录名从此**完全不参与**包名（从前它参与）。它与"目录名不参与任何判定"
+//     那条本来就一致：身份来自清单里的 `id`。
+function defaultOut(dir, id) {
+  return path.join(path.dirname(path.resolve(dir)), `${id}.splug`);
 }
 
 function cmdBuild(dir, opts) {
@@ -1442,14 +1454,14 @@ function cmdBuild(dir, opts) {
       + (linFile ? '（有这份文件，但里面没有这一条）' : '（这个提交里没有这份文件）'));
   }
 
-  const out = path.resolve(opts.out || defaultOut(dir, manifest.version));
+  const out = path.resolve(opts.out || defaultOut(dir, manifest.id));
   // ★ 包**禁止**落在自己的源码树里：它下一次就会被当成一份普通文件进负载，
   //   于是摘要每次都变。这是"同一输入产出不同包"的第一号现场，所以在写之前拦。
   const inTree = path.relative(path.resolve(dir), out);
   if (inTree && !inTree.startsWith('..') && !path.isAbsolute(inTree)) {
     throw new Error(`输出的包在插件自己的源码树里（${inTree}）——\n`
       + '  下一次打包时它会被当成一份普通文件进负载，摘要于是每次都变。\n'
-      + `  换一个位置（默认是 ${defaultOut(dir, manifest.version)}），或者用 --out 指定。`);
+      + `  换一个位置（默认是 ${defaultOut(dir, manifest.id)}），或者用 --out 指定。`);
   }
 
   const digest = contentDigest(files);
