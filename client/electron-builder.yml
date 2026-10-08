@@ -1,6 +1,8 @@
 appId: io.github.jessefather.slurmate
 productName: Slurmate
-copyright: Slurmate
+# 安装包属性里的版权行（Windows 的 LegalCopyright、Linux 的 deb control 都从这里取）。
+# ★ 与根目录 NOTICE 说的是同一件事 —— 署名只有一处定义，这里跟着它。
+copyright: Copyright 2026 JesseFather
 
 directories:
   output: dist

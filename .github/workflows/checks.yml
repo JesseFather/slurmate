@@ -131,7 +131,7 @@ jobs:
           done
           exit $fail
 
-      - name: 版本号：四处逐字一致，且形状是 x.y
+      - name: 版本号：四处逐字一致、形状是 x.y，文档里的「当前版本」也跟着走
         # 协议版本、客户端版本、服务端版本**是同一个号** —— 它落在四个文件里
         # （client/package.json、client/package-lock.json、cluster/slurmate、
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
@@ -147,7 +147,7 @@ jobs:
         #   tools/version-fixtures.json 与两边的用例对齐）。
         run: |
           python3 - <<'PY'
-          import importlib.machinery, importlib.util, json, re, sys
+          import importlib.machinery, importlib.util, json, re, subprocess, sys
 
           ldr = importlib.machinery.SourceFileLoader("d", "cluster/slurmate-sessiond")
           mod = importlib.util.module_from_spec(
@@ -179,9 +179,43 @@ jobs:
               print("✗ 四处版本号不一致：%s" % sorted(v for _n, v in places))
               print("  改版本时四处都要改（或改成本 workflow 从单一来源派生）。")
               bad = 1
+          # ── 文档里那几处「当前版本」必须跟着走 ────────────────────────────
+          #
+          #   ★ 这一条抓的是一个**真的发生过**的 staleness：仓库走到 0.13 的时候
+          #     `SECURITY.md` 还写着 0.12，而**没有任何东西会红**。文档里的版本号
+          #     不是装饰 —— 报漏洞的人按它挑该报哪一版。
+          #
+          #   ★★ 只认这两种提法（`当前版本：vX.Y` 与 `当前维护的版本：X.Y`）。
+          #      文档里满篇是 `v0.13 起……` 那种**历史叙述**，它们**必须**留在
+          #      原地 —— 把历史条目改成新版本号，等于声称发生过没发生过的事
+          #      （CHANGELOG 顶部那条纪律说的是同一件事）。
+          #
+          #   ★ 两份**记录类**文档排除在外：它们讲的就是各个版本。
+          DOC_CUR = re.compile(r"(?:当前维护的版本|当前版本)：\**\s*`?v?([0-9]+\.[0-9]+)")
+          want = places[0][1]
+          skip_doc = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
+          found = []
+          ls = subprocess.run(["git", "ls-files", "*.md"], capture_output=True,
+                              text=True, check=True).stdout.split()
+          for name in ls:
+              if name in skip_doc:
+                  continue
+              for i, line in enumerate(open(name, encoding="utf-8"), 1):
+                  m = DOC_CUR.search(line)
+                  if m:
+                      found.append((name, i, m.group(1)))
+          if not found:
+              print("✗ 一份文档里都没有「当前版本」那一句 —— 这条判据失去目标了")
+              bad = 1
+          for name, i, v in found:
+              ok = (v == want)
+              print("  %-32s %-10s %s" % ("%s:%d" % (name, i), v,
+                                          "ok" if ok else "FAIL 与四处版本号不同"))
+              if not ok:
+                  bad = 1
           if bad:
               sys.exit(1)
-          print("✓ 四处一致，且都是 x.y")
+          print("✓ 四处一致，且都是 x.y；文档里那几处「当前版本」也跟着走")
           PY
 
       - name: 插件的跳过表三端必须一致
@@ -481,7 +515,7 @@ jobs:
           python3 tools/check-doc-links.py
           python3 tools/check-doc-links.py --self-test
 
-      - name: 公开文档里不用图形符号做强调
+      - name: 公开文档的正文：不用图形符号做强调，也不许出现真的 ULID
         # 判据只有一处：tools/check-doc-style.py，这里只调用它。
         #
         # ★ 为什么值得一条机器判据：`CONTRIBUTING.md`〈公开文档用规范体〉那条规矩

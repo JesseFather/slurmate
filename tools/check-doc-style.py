@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""公开文档里不用图形符号做强调（`CONTRIBUTING.md`〈公开文档用规范体〉）。
+"""公开文档的正文：不用图形符号做强调，也不许出现真的 ULID。
 
-判据一条，是机械的：
+体例见 `CONTRIBUTING.md`〈公开文档用规范体〉。
+
+判据两条，都是机械的：
 
     B1  公开文档的正文里，不许出现 Unicode 那几个"图形符号"区里的字符 ——
         Miscellaneous Symbols（U+2600–U+26FF）、Dingbats（U+2700–U+27BF）、
         Miscellaneous Symbols and Arrows（U+2B00–U+2BFF）、Emoji（U+1F000–U+1FAFF）、
         以及变体选择符（U+FE0F）。
+
+    B2  任何 `.md` 里不许出现一个**真的 ULID** —— 只许用 ULID 规范自己的示例值
+        （见下面的 `ULID_OK`）。★ 从前 `docs/PROTOCOL.md` 的 `op_plugins` 示例里
+        **真的**硬编码过两个真实站点的插件 id（连同短名与标题）。
+
+★ **两条的豁免不一样，这是故意的。** B1 豁免反引号跨度（那是程序真的会打印的
+  字面量）与两份记录类（它们要 ★ 做强调）；**B2 两条都不豁免** —— ULID 恰恰通常
+  写在反引号里，而记录类里一样不该出现真实值。
 
 ★ **"公开文档"按文件判，不按"公开"这个形容词判**：`git ls-files '*.md'` 减去
   `CHANGELOG.md` 与 `docs/KNOWN-ISSUES.md`。那两份是**记录** —— 按时间累积、按编号
@@ -45,6 +55,20 @@ EXEMPT = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
 # 反引号跨度。奇数索引那几段是**代码**，它们豁免。
 CODE = re.compile(r"(`[^`]*`)")
 
+# ── B2 的白名单：ULID 规范自己的示例值 ────────────────────────────────────
+#
+# ★★ 判据为什么是**白名单**、而不是"看起来像不像"：规范里那两个示例值有
+#    **合理的时间戳**（`01ARZ3NDEKTSV4RRFFQ69G5FAV` 解出来是 2016-07-30），
+#    所以"把前 10 个字符解成时间、看它像不像真的"这条路走不通。
+# ★ 误报的把握：白名单外的任何 ULID 形状串，在文档里都没有理由出现。
+ULID_OK = {
+    "01ARZ3NDEKTSV4RRFFQ69G5FAV",     # ULID 规范里的示例
+    "01BX5ZZKBKACTAV9WEVGEMMVRZ",     # 同上
+    "01E439TP9XJZ9RPFH3T1PYBCR8",     # 同上
+}
+# 26 个 Crockford base32 字符（字母表里没有 I / L / O / U）。
+ULID = re.compile(r"(?<![0-9A-Za-z])[0-9A-HJKMNP-TV-Z]{26}(?![0-9A-Za-z])")
+
 # 禁的区间（含端点）。Arrows（U+2190–U+21FF）**不在**这里 —— 见文件头。
 BANNED = (
     (0x2600, 0x27BF, "Miscellaneous Symbols / Dingbats"),
@@ -80,8 +104,16 @@ def problems_from(files):
     """
     out = []
     for rel, text in sorted(files.items()):
+        # ── B2：真的 ULID —— **所有** `.md`，含那两份记录类，含反引号跨度 ────
+        for i, line in enumerate(text.splitlines(), 1):
+            for m in ULID.finditer(line):
+                if m.group(0) not in ULID_OK:
+                    out.append("%s:%d：出现一个 ULID 形状的串 `%s` —— 文档里只许用"
+                               "规范的示例值（见文件头 B2）" % (rel, i, m.group(0)))
+
         if rel in EXEMPT:
             continue
+        # ── B1：图形符号（只扫**正文**，反引号跨度豁免）────────────────────
         for i, line in enumerate(text.splitlines(), 1):
             bad = []
             for part in prose(line):
@@ -137,6 +169,8 @@ def run(root):
     print("  （另有 %d 处在反引号跨度里 —— 那是字面量（程序真的会打印它们），"
           "不是排版）" % exempt_count(files))
     print("  （箭头 `→` `←` `↔` `⇒` 是允许的：它们表意，不表强调）")
+    print("✓ 全部 %d 份 `.md` 里没有真的 ULID —— 示例值都用规范里那几个"
+          % len(files))
     return 0
 
 
@@ -154,14 +188,21 @@ def self_test():
         ("📌 这类 emoji", {"docs/A.md": "> 📌 记一笔。\n"}, "U+1F4CC"),
         ("围栏代码块里的也**要**抓（目录树是正文）",
          {"docs/A.md": "```\nplugins/   ★ 独立项目\n```\n"}, "U+2605"),
-        # ── 四种假红防线：一个都不许误判 ────────────────────────────────
+        ("文档里粘了一个**真的** ULID（还包在反引号里）",
+         {"docs/A.md": "示例插件 `01M2JKHTZGKJBFQQTWYXMQMF2V`。\n"}, "ULID 形状的串"),
+        ("**记录类**里也不许出现真的 ULID（它们一样不该有真实值）",
+         {"CHANGELOG.md": "修了 `01M2JKHTZGKJBFQQTWYXMQMF2V` 那个槽位。\n"},
+         "ULID 形状的串"),
+        # ── 五种假红防线：一个都不许误判 ────────────────────────────────
         ("反引号里的字面量不算（程序真的会打印它）",
          {"docs/A.md": "`--check` 打印 `⚠`、`slurmate` 打 `★`。\n"}, None),
         ("夹具文件名里的 emoji 不算（它在反引号里）",
          {"docs/A.md": "`cases/😀.txt` 就是为这条准备的。\n"}, None),
         ("箭头是允许的",
          {"docs/A.md": "作者 → 站点，而 A ⇒ B。\n"}, None),
-        ("两份记录类不受这条管",
+        ("规范自己的示例值不算（它长得跟真的一模一样）",
+         {"docs/A.md": "例子：`01ARZ3NDEKTSV4RRFFQ69G5FAV`。\n"}, None),
+        ("两份记录类不受**图形符号**那条管",
          {"CHANGELOG.md": "★ 这一版记一笔\n", "docs/KNOWN-ISSUES.md": "⚠ 未实测\n"}, None),
     ]
     bad = []
@@ -176,7 +217,7 @@ def self_test():
         for b in bad:
             print("✗ %s" % b)
         return 1
-    print("✓ 反向自测通过：五种坏样本都被抓到，四种假红样本都没被误判")
+    print("✓ 反向自测通过：七种坏样本都被抓到，五种假红样本都没被误判")
     return 0
 
 

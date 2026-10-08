@@ -28,6 +28,178 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.14] — 未发布
+
+> 四处版本号（`client/package.json`、`client/package-lock.json`、
+> `cluster/slurmate`、`cluster/slurmate-sessiond`）现在都是 **0.14**。
+
+★ **这一版改的是文档，不是程序。** 协议线上没有新的 op、也没有新的字段，
+两端的任何**行为**都没有变。★ 所以这一节**没有"破坏性变更"那一段** ——
+按本文件顶部那条发布纪律，只有破坏兼容才需要写它。
+
+★★ 但有两处**对用户可见**的变化，所以它仍然是一个要跟着升的版本：
+
+1. **仓库里文档的位置变了**（见〈文档按分发单元归位〉）。按 `0.y` 不考虑兼容性的
+   规矩，**不 redirect、也不留副本** —— 一条老链接会点空。★ 这一版**没有发布过**，
+   受影响的只有手上的 clone。
+2. **安装包的版权行变了**（见〈署名〉）。Windows 的「属性 → 详细信息」与 Linux 的
+   deb `control` 里都能看到。
+
+### Changed — ★★ 文档按「读者拿到的那个分发单元」重新归位
+
+**一份文档的「家」＝ 它的读者拿到的那个分发单元。** 这个仓库有四个：
+
+| 单元 | 谁拿 | 带文档吗 | 文档在哪 |
+|---|---|---|---|
+| **客户端** | 用集群的人 | **不带** —— 步骤与提示全在**界面**上 | —— |
+| **站点端** | 站点管理员 | 带（**将来**进 deb） | `cluster/README.md` ＋ `cluster/docs/` 四份 |
+| **打包器** | 插件作者 | 内容已整理（分发方式待定） | `packer/docs/` 三份 |
+| **插件** | 站点 | 不带 | 包里只有代码 |
+
+搬动是**纯搬家**（`git mv`，六份的相似度 98–99%），正文一个字没动。
+
+| 从前 | 现在 |
+|---|---|
+| `docs/DEPLOYMENT.md` | `cluster/docs/DEPLOYMENT.md` |
+| `docs/CONFIGURATION.md` | `cluster/docs/CONFIGURATION.md` |
+| `docs/TROUBLESHOOTING.md` | `cluster/docs/TROUBLESHOOTING.md` |
+| `docs/PLUGIN-TROUBLESHOOTING.md` | `cluster/docs/PLUGIN-TROUBLESHOOTING.md` |
+| `docs/PLUGIN-SPEC.md` | `packer/docs/PLUGIN-SPEC.md` |
+| `docs/PLUGIN-CONTAINER.md` | `packer/docs/PLUGIN-CONTAINER.md` |
+| `plugins/README.md` | `packer/docs/README.md`（`plugins/README.md` 留一份只含指路的短文件） |
+
+**留在 `docs/` 的**（扁平五份 ＋ 一张地图）：`ARCHITECTURE.md`、`PROTOCOL.md`、
+`IMPLEMENTING.md`、`CONTRACT.md`、`KNOWN-ISSUES.md`，以及 `docs/README.md`
+—— 它现在是一张**地图**：每份文档写给谁、跟着谁分发。
+
+**新建两份入口**：`cluster/README.md`（管理员的入口 ＋ 文档索引）、
+`plugins/README.md`（只含指路）。
+
+★ **搬迁不回填"从前在哪"。** 搬完就是搬完了；留一句"本文件原在 `docs/`"，
+读者读到的是一个**已经不存在**的位置。
+
+★ 为什么客户端**不带**文档：用户要的是直观、易用 —— 该说的字在**界面**上。
+⇒ 那些只对用户成立的排障内容，归宿只有两个：**变成界面上的字**，或者**删掉**。
+★ 这一版**只清点了，没有改界面**（改界面是代码）。清点的结论在
+[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) 的 **S34**。
+
+### Changed — 公开文档换成规范体
+
+**一条要求一个可判定的句子**；理由与后果**不进要求句**；措辞收进三档
+（**必须/禁止**、**应当/不应当**、**可以**）；**不用图形符号做强调**。
+体例写在 [CONTRIBUTING.md](CONTRIBUTING.md) 的〈公开文档用规范体〉一节。
+
+★ **两份记录类文档豁免**：`CHANGELOG.md`（这一份）与
+[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) —— 它们是**记录**，不是要求。
+
+★ 箭头 `→` `←` `↔` `⇒` **保留**：它们表意（"变成"、"来自"、"推出"），与 `+` `=`
+同类，不是排版装饰。★ 反引号跨度里的字面量也保留 —— 程序**真的会打印**那些字符
+（`cluster/slurmate` 用 `★` 打注意、`--check` 用 `⚠`）。
+
+### Changed — ★ `slurmate.conf.example` 只留键与值
+
+`cluster/slurmate.conf.example` 从前 **296 行里有 264 行是注释**（89%），而真正的
+键只有 **16** 个。那些注释**全部**搬进了
+[cluster/docs/CONFIGURATION.md](cluster/docs/CONFIGURATION.md)（每个键的语义、取值、
+以及**改错的后果**），示例文件只留**键与值**，第一行留一条指路。
+
+★ **这不会破坏首次部署**：`cluster/install-base.sh` 的预检本来就**容忍**
+`cluster_cidr` 是空的 —— 那个分支的注释写着"首次部署时它是随仓库分发的示例"。
+
+★ 为什么：**同一件事写两遍，第二遍先漂**。配置的权威是守护进程的校验与配置参考，
+示例文件里那一份是**第三份** —— 而它没有读者（管理员读文档，程序读配置）。
+
+### Removed — `slurmate.conf.example` 里落后于形状的那两段
+
+`:164-202` 与 `:221` 写着盘上是 `<id>.splug`，而 v0.13 起站点上是**一棵树 ＋
+一份记录表**。★ 这两段是**删掉**，不是搬走 —— 搬一份已经过期的正文，
+等于把一句假话换个地方放着。★ 它们是 v0.13 阶段 6「文档跟上形状」漏掉的。
+
+### Added — 插件自带管理员文档（配置条目逐键表）
+
+每份 `plugins/*/README.md` 多了一节〈配置条目〉：**逐键**写清取值、不写时取什么、
+改了会怎样。
+
+★ 它**不需要新机制** —— 插件的 `README.md` 本来就在包里、也在站点上（三端的跳过表
+都只有 `.git` / `.github` / `.gitignore` / `.gitattributes` / `node_modules`），
+装完住在 `<plugins_dir>/<id>/README.md`，**管理员当场读得到**。缺的只是内容。
+
+★ 它因此**是被签名的字节**：README 进负载、进摘要 ⇒ 改它要重新打包；站点侧
+"树被动过"的对账会如实报出来（这是对的）。
+
+### Changed — 基座文档里不再出现任何**具体**插件
+
+根 `README.md`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/**`、`cluster/**` 里
+**一个插件名都没有**了。★ 两处例外**如实记**：
+
+- [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) —— 它是**记录**，条目点名当事插件
+  是必要的；
+- `plugins/**` 与 `tools/conformance/**`、各处测试 —— 插件在**自己的树**里有话要说，
+  夹具本来就得是真的。
+
+★ 从前有过这样的写法：拿某个插件的**实测行为**（code-server 4.135.0 在口令错时
+返回 200 且不带 `Set-Cookie`）当作**基座级**的登录判据。那个判据**本来就在契约里**
+（`contributes.login` 要求认证失败时不发 cookie），所以它被改写成契约语言，
+实测那一句搬进了那个插件自己的 README。
+
+★ 为什么：仓库里那两个插件是**开发时对齐两边能力**用的，它们**不是基座的一部分**。
+基座**一个插件都不装是合法状态**。
+
+### Added — 署名
+
+- 新建 **`NOTICE`**（Apache-2.0 §4(d) 的正规落点）：`Copyright 2026 JesseFather`；
+- 根 [`README.md`](README.md) 的〈许可证〉一节与 [`SECURITY.md`](SECURITY.md)
+  各补一行署名，指向 `NOTICE`；
+- `client/electron-builder.yml` 的 `copyright` 从 `Slurmate` 改成
+  `Copyright 2026 JesseFather` —— ★ **这一处是安装包属性里看得到的**。
+
+★ **`LICENSE` 正文一个字没动。** 它是 Apache-2.0 的**原文**，里面第 190 行那个
+`Copyright [yyyy] [name of copyright owner]` 是 Apache 给的**附录模板说明**
+（第 181-188 行自己写着"把方括号里的字段换成你自己的"），**不是我们的署名位** ——
+改它会让"这是 Apache-2.0 全文"这句话不再成立。
+
+### Added — ★★ 文档第一次有了机器判据
+
+这一版之前，**碰文档的检查只有脱敏那一条**。于是"文档里写的东西不对"这一类问题
+**没有任何东西会红** —— 而它抓到的第一个实例就是这一版修的：`SECURITY.md` 的
+「当前维护的版本」停在 `0.12`，而仓库已经走到 `0.13`。
+
+| 判据 | 守什么 |
+|---|---|
+| `tools/check-doc-links.py` | `.md` 里的相对链接**以及源码注释里写的 `docs/*.md` 路径**，都必须指得到东西 |
+| `tools/check-doc-style.py` | 公开文档的正文里不许用图形符号（`★` / `⚠` / emoji）做强调；**任何 `.md` 里不许出现真的 ULID**（判据是一条白名单 —— 只认 ULID 规范自己的示例值） |
+| `tools/check-plugin-docs.py` | 每份 `plugins/*/README.md` 的〈配置条目〉表要与它的 `plugin.json` **逐字**一致 |
+| `.github/workflows/checks.yml` 的版本那一步 | 四处版本号之外，**文档里那几处「当前版本」也要跟着走** |
+
+★ 每条都有**反向自测**（种坏样本 ⇒ 断言它真的红），而两个文档检查器的自测里
+**有一半是"假红样本"**：种一个**不该报**的东西，断言它**不**报。
+理由是**假红会让一条检查被绕过**，而绕过之后就没有人再看它了。
+
+★★ 链接检查**当场抓到了 42 处断链** —— 而它们**大部分是这条检查自己的盲区**：
+① 引用者**自己也搬了家**，相对链接要重算；② 它的路径判据**写死了 `docs/`**，
+认不出搬完之后的 `cluster/docs/DEPLOYMENT.md`；③ 它与原生的 markdown 链接检查
+对**同一条链接判两遍、而基准不同**（一个按仓库根、一个按文件所在目录）。
+★ 三条都修了。**先立网再搬**的意思就是这个网得先**自己对**。
+
+### Fixed
+
+- **`SECURITY.md` 的「当前维护的版本」停在 `0.12`**，而仓库已经走到 `0.13` ——
+  而**没有任何东西会红**。现在它跟着四处版本号走，由 CI 断言。
+- **`cluster/slurmate` 与 `cluster/slurmate-sessiond` 的注释写着版本号是"三处声明"**，
+  而 CI 检查的是**四处** —— `client/package-lock.json` 那一处后来才补上。
+- **`client/package-lock.json` 里根包的 `license` 写着 `UNLICENSED`**，而
+  `package.json` 是 `Apache-2.0`。
+- **[`docs/CONTRACT.md`](docs/CONTRACT.md) §8** 那张"这一页与其它文档的分工"表里，
+  三行指的是**裸文件名**而不是路径，搬家之后读者找不到（表里另外三份同目录的
+  一起补链接，让整张表可点）。
+- ★★ **[CONTRIBUTING.md](CONTRIBUTING.md) 的〈脱敏〉一节还写着"这个仓库装着一个
+  集群的全部内网拓扑，它是私有的，也会一直保持私有"** —— 而它**2026-09-14 就已经
+  转公开**了。★ 这一处比上面那个版本号严重得多：它会让贡献者以为"泄露了也不要紧"。
+  现在那一节说的是实话（仓库是公开的、脱敏是**一次性**的、公开之后改回来也收不回）。
+- **[`docs/CONTRACT.md`](docs/CONTRACT.md) 里还有两处点名插件**（拿 `code-server`
+  当函数名举例、"`sshd` 插件用"），是"基座文档里插件零出现"那一条的漏网 ⇒ 换成
+  占位短名与机制语言。
+
 ## [0.13] — 未发布
 
 > 四处版本号（`client/package.json`、`client/package-lock.json`、

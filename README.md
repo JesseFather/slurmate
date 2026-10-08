@@ -252,3 +252,5 @@ sudo bash cluster/install-base.sh              # 部署
 ## 许可证
 
 [Apache-2.0](LICENSE)
+
+Copyright 2026 JesseFather（署名文件见 [NOTICE](NOTICE)）。

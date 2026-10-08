@@ -77,6 +77,15 @@ FENCE = re.compile(r"^\s*(```|~~~)")
 # 不进扫描集：检查器脚本自己 —— 它们的自测样本里写着**故意不存在**的路径（见文件头）。
 SKIP_SCAN = re.compile(r"^tools/check-[^/]*\.py$")
 
+# ★★ A1 的**记录类豁免**：这两份记的是"当时发生了什么"，它们**必然**要提到**从前**
+#    的路径 —— 而按这份检查自己的立场，那些路径今天就**该**不存在。
+#    （`CHANGELOG.md` 里那张「旧路径 → 新路径」的对照表就是最直接的例子：左边那一列
+#      每一行都**必须**是断的，否则这张表就没在说搬家。）
+#
+#    ★ 但**只豁免 A1**：那两份里的 markdown **链接**仍然归 A2 管 —— 链接说的是
+#      "现在可以点它"，与"从前叫什么"是两件事。
+A1_EXEMPT = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
+
 
 def is_text(path):
     """二进制文件不扫 —— 里面偶然出现的一串字节不是一条指路。"""
@@ -128,10 +137,12 @@ def problems_from(files, present):
         for line in stripped_lines(text):
             # ── A1：裸路径（源码注释、`.md` 里反引号包的指路都算）──────────
             # ★ 先把整条 markdown 链接挖掉：那些归 A2 管，基准不一样（见 LINK_WHOLE）。
-            for m in BARE.finditer(LINK_WHOLE.sub("", line)):
-                tgt = m.group(0)
-                if tgt not in present:
-                    out.append("%s：写的路径不存在 —— `%s`" % (rel, tgt))
+            # ★ 记录类豁免（见 A1_EXEMPT）：它们**要**写从前的路径。
+            if rel not in A1_EXEMPT:
+                for m in BARE.finditer(LINK_WHOLE.sub("", line)):
+                    tgt = m.group(0)
+                    if tgt not in present:
+                        out.append("%s：写的路径不存在 —— `%s`" % (rel, tgt))
 
             # ── A2：`.md` 里的相对链接 ─────────────────────────────────
             if not rel.endswith(".md"):
@@ -207,6 +218,8 @@ def run(root):
           % extra)
     print("  （另有 %d 份检查器脚本没扫 —— 它们的样本里写着故意不存在的路径，"
           "那不是指路）" % n_skip)
+    print("  （记录类那两份的**裸路径**没查 —— 它们要写从前的路径；"
+          "它们的**链接**仍然查）")
     return 0
 
 
@@ -222,6 +235,7 @@ def self_test():
         "docs/C.md": "# C\n",
     }
     cases = [
+        # ── 五种坏样本：每一种都必须被抓到 ──────────────────────────────
         ("断链：链接指到一个不存在的文件",
          {"docs/A.md": "见 [B](B.md) 与 [D](D.md)。\n", "docs/B.md": ""},
          "docs/A.md：断链"),
@@ -234,6 +248,14 @@ def self_test():
         ("断链：搬运后的**多级** `docs/` 路径（`cluster/docs/` 那种）",
          {"docs/A.md": "见 `cluster/docs/NOPE.md`。\n"},
          "docs/A.md：写的路径不存在"),
+        ("**记录类**里的 markdown **链接**仍然要查（豁免只管 A1）",
+         {"CHANGELOG.md": "见 [A](docs/NOPE.md)。\n"},
+         "CHANGELOG.md：断链"),
+        # ── 假红防线 ────────────────────────────────────────────────────
+        ("**记录类**里的**裸路径**不查 —— 它要写从前的路径",
+         {"CHANGELOG.md": "| 从前 | `docs/OLD.md` |\n",
+          "docs/KNOWN-ISSUES.md": "那一份从前住在 `docs/GONE.md`。\n"},
+         None),
         ("`../` 打头的相对路径归 A2 管，A1 不重复判（假红防线）",
          {"docs/A.md": "见 `../cluster/docs/REAL.md`。\n", "cluster/docs/REAL.md": ""},
          None),
@@ -266,7 +288,7 @@ def self_test():
         for b in bad:
             print("✗ %s" % b)
         return 1
-    print("✓ 反向自测通过：四种坏样本都被抓到，六种假红样本都没被误判")
+    print("✓ 反向自测通过：五种坏样本都被抓到，七种假红样本都没被误判")
     return 0
 
 
