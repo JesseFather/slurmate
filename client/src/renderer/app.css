@@ -259,6 +259,17 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 .conn .m.bad { color: var(--err); }
 .conn .m.good { color: var(--ok); font-weight: 600; }
 
+/* 内置那条连接的名字后面那颗标记（「内置」）。★ 它替代的是那两颗按钮
+   （「编辑」「删除」）—— 这一行为什么与上面那些不一样，必须由**这一行自己**
+   回答得了，否则那是一处看起来像漏画了的地方。⇒ 它得是一眼看得见的标记，
+   而不是一句解释。名字那一格是等宽字体，标记跟着等宽会显得像地址的一部分。 */
+.conn .t .b {
+  margin-left: 6px; padding: 0 5px; border-radius: 3px;
+  background: #3a3d41; color: var(--fg-dim);
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 10px; letter-spacing: .5px;
+}
+
 /* 「删除」那一段两段式的确认行。★ 它是**唯一**一处长在 `.conn` 这一行 flex 里的
    两段式，而 `.armed` 在别处（状态条）是 `flex: none`、里面那句后果只有十几个字。
    这里那句有上百个字，照旧不换行的话，它会把这四颗按钮挤着一起横向溢出去

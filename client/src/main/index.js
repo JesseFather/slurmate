@@ -445,6 +445,12 @@ function bootstrap() {
 
     registerIpc();
 
+    // ★ 开发者模式那条内置的假连接。**播在这里**，不是 `loadConfig` 里：那一个只收到
+    //   一个目录，它必须继续不知道"开发者模式"这件事（见那个函数）。放在这个位置有
+    //   两个理由：`win` 已经在了（播种失败要报得出来），而第一屏还没拿到数据
+    //   （`app:bootstrap` 由渲染进程发，它在窗口加载完之后）。
+    ensureBuiltinDevConnection();
+
     // 开局那一屏：**零条会话**（`_sessions` 空 ⇒ 关窗不会问，正是要的）。
     win.setSessions([]);
     win.pushSessions([], null);
@@ -716,7 +722,12 @@ async function doConnect(conn, extra = {}) {
   pendingConsent = [];
   // 这条连接自己的那把私钥。没有就生成一把 —— 但**读不出来时绝不生成**
   // （见 ensureKey）：那会作废用户已经注册到 IDM 的公钥，而症状只是「认证失败」。
-  const key = ensureKey(conn.id);
+  //
+  // ★ 内置那条**不要密钥**：假后端不做认证（`backend-fake.js` 的 `connect` 连
+  //   `privateKey` 都不读）。为一条永远不会认证的连接造一把私钥，等于在沙盒的密钥表
+  //   里留一份永远没人用的凭据，而用户还会多看到一句"请把公钥注册到 IDM"——
+  //   那是在让他去注册一把没有任何用处的公钥。
+  const key = conn.builtin ? { ok: true } : ensureKey(conn.id);
   if (!key.ok) {
     return { ok: false, code: 'key_unavailable', error: key.detail || key.error };
   }
@@ -770,7 +781,12 @@ async function doConnect(conn, extra = {}) {
     await refreshPartitions();
     // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
     reconcileSitePlugins();
-    win.setTitle(`Slurmate — ${conn.user}@${conn.host}`);
+    // ★★ 假站点这条路上标题**不许**被写成 `user@host`：那是三重互锁的第二重，
+    //   而"连上假站点的那一刻把整块标注抹掉"正是它唯一要防的事（`user@host` 印在
+    //   标题栏上，看起来与真集群一模一样）。`announceBackend` 那一边同理。
+    win.setTitle(backend.kind === KIND.FAKE
+      ? 'Slurmate — 开发者模式 · 假站点'
+      : `Slurmate — ${conn.user}@${conn.host}`);
     // ★ **「接上上次的会话」这一步的触发点是"用户显式点了这条连接"。**
     //
     //   启动不连站点，接回就必然挂在**这一次连接**上：用户点「连接」＝"我要用
@@ -1428,6 +1444,56 @@ function ensureConnectionWorkspace(conn, want) {
   cfg.workspaces = [...cfg.workspaces, workspace];
   config.setConnectionWorkspace(cfg, conn.id, workspace.id);
   return workspace.id;
+}
+
+/**
+ * 开发者模式**那条内置的假连接** —— 按保留 id 播种，幂等。
+ *
+ * ★ 它播在这里而不是 `config.js`：`loadConfig(dir)` 只收到一个目录，它必须继续
+ *   不知道"开发者模式"这件事（那正是 `dev-mode.json` 单独一个文件的理由）。
+ *
+ * ★ 为什么要有这一条：开发者模式是给**插件作者**调插件用的，而"假站点在连接列表里
+ *   就是一条普通的连接"这条设计有一个很贵的代价 —— 沙盒第一次打开时列表是**空的**，
+ *   作者得照文档手填一次 `demo` / `127.0.0.1` / `1`，而填错一个格子的症状是
+ *   "连不上"。现在这一条是**结构性的**：勾上开关、重启，它就在那儿。
+ *
+ * ★★ 它与一条普通连接的差别**只有两处**，而且都在这里：不可删（删了开发者模式
+ *   就没东西可连）、不可编辑（它指向的是本机的假后端，改地址没有意义）。
+ *   「连接」「进入」以及进去之后的一切**完全相同** —— 那正是它存在的唯一理由。
+ *   界面据此**不画**那两颗按钮，而不是画成禁用的。
+ *
+ * ★ 它**只长在沙盒里**：`cfgDir` 只在开发者模式下指向 `<userData>/dev-sandbox`，
+ *   而这个函数只在开发者模式里跑 ⇒ 关掉开关重启，它自然不在；再打开，按保留 id
+ *   找回来，**不重复播**（下面是幂等的）。
+ */
+function ensureBuiltinDevConnection() {
+  if (!dev.developerMode) return;
+  const id = config.DEV_CONNECTION_ID;
+  const addr = config.connectionKey(config.DEV_CONNECTION);
+  const hit = cfg.connections.find((c) => c.id === id);
+  // ★ 沙盒里可能还留着**从前照着文档手填的那一条**（同一个人/主机/端口）——
+  //   两条同地址在界面上是两行一模一样的东西，而其中一行不可删。
+  //   `0.y` 不考虑兼容性：那条手填的记录由播种顶掉。
+  const dup = cfg.connections.filter((c) => c.id !== id && config.connectionKey(c) === addr);
+  // 幂等：已经播好、没被顶掉、工作区还在 ⇒ 一个字节都不写。
+  if (hit && hit.builtin === true && !dup.length
+      && hit.workspaceId && config.findWorkspace(cfg, hit.workspaceId)) return;
+
+  const drop = new Set([id, ...dup.map((c) => c.id)]);
+  cfg.connections = cfg.connections.filter((c) => !drop.has(c.id));
+  const conn = { id, ...config.DEV_CONNECTION, builtin: true, workspaceId: null };
+  cfg.connections = [...cfg.connections, conn];
+  // ★ 活跃连接那一格也要收好。`loadConfig` 是在**这条连接还不存在**的时候跑的
+  //   （那时列表是空的 ⇒ 它把 activeConnectionId 置成 null），所以播种之后
+  //   `cfg` 会停在「有一条连接、却没有活跃连接」这个**读出来会被收束掉**的状态里
+  //   —— 而那正是 `loadConfig` 每次启动都要修一遍的那种半截状态。
+  if (!cfg.activeConnectionId) cfg.activeConnectionId = id;
+  // ★ 走**既有的那个 helper**，不另手搓一条建工作区的路。传 `null` = "要一个新的
+  //   空白工作区"（那条来路记在 `ensureConnectionWorkspace` 的 ② 上）：内置这条
+  //   **必须自己占一个** —— 与一条用户连接共用的话，"删掉那条连接 ⇒ 它独占的工作区
+  //   连同里面的数据一起清"会**静默地不成立**（内置这条还指着它，引用计数不归零）。
+  ensureConnectionWorkspace(conn, null);
+  commitConfig();
 }
 
 /**
@@ -3928,7 +3994,9 @@ function registerIpc() {
     version: app.getVersion(),
   }));
 
-  send('app:probeHosts', async () => hosts.probeAll(cfg.connections));
+  // ★ 内置那条**不探**：它是本机的假站点，探出来的"可达 / 不可达"两边都是假话
+  //   （`127.0.0.1:1` 后面什么都没有，而"什么都没有"与"这个站点用不了"是两件事）。
+  send('app:probeHosts', async () => hosts.probeAll(cfg.connections.filter((c) => !c.builtin)));
 
   // ── 连接条目的增删改 ──
   send('app:saveConnection', async (input) => {
@@ -3946,9 +4014,18 @@ function registerIpc() {
       return { ok: false, error: '连接信息不完整：用户名、主机、端口（1-65535）都必填。' };
     }
     if (up.conflict) {
+      const c = up.conflict;
+      // ★★ 内置那条改不动。这句与"和另一条撞了"是**两件事**，不能合成一句：
+      //   这里用户该做的是"别改它、另建一条"，那里该做的是"改地址或删掉重复的"。
+      if (c.builtin) {
+        return {
+          ok: false, code: 'builtin',
+          error: `「${c.label}」是开发者模式内置的那条假连接，改不了 —— `
+               + '要连别的站点，请新建一条。',
+        };
+      }
       // 编辑时把地址改成了另一条已有的连接。两条同身份、各带一把密钥，
       // 界面完全看不出差别 —— 与其替用户挑一条，不如让他自己决定。
-      const c = up.conflict;
       return {
         ok: false, code: 'duplicate',
         error: `已经有一条 ${c.user}@${c.host}:${c.port} 了（备注「${c.label}」）。`
@@ -4008,6 +4085,15 @@ function registerIpc() {
     //    唯一挡着它的是 `clearSpaceStorage` 里"正被那块界面用着就不清"，而多开
     //    之后那一句只能看到**前台**那一块 —— 前台不是它的时候形同虚设。
     const conn = (cfg.connections || []).find((c) => c.id === id);
+    // ★★ 内置那条删不掉。界面上它**根本没有那颗按钮**（不是禁用的 —— 一颗永远点不亮
+    //   的按钮正是"系统声称了不成立的事"），所以这一句只是把它变成**权威**，
+    //   与下面那条 `held` 同一层。
+    if (conn && conn.builtin) {
+      return {
+        ok: false, code: 'builtin',
+        error: '这是开发者模式内置的那条假连接，删不掉 —— 关掉开发者模式它就不在了。',
+      };
+    }
     const held = conn && conn.workspaceId
       && liveSessionOnWorkspace(conn.workspaceId);
     if (held) {
@@ -4959,6 +5045,9 @@ function registerIpc() {
   send('app:probeActive', async () => {
     const conn = (cfg.connections || []).find((c) => c.id === connectedConnId);
     if (!conn) return { ok: false, error: '没有连着的站点。' };
+    // ★ 内置那条同样不探（见 `app:probeHosts`）。★ 回的是 `ok:false` + 一句实话，
+    //   不是一个编出来的毫秒数 —— 那一位在界面上是"延迟 N ms"。
+    if (conn.builtin) return { ok: false, error: '这是本机的假站点，没有可探测的地址。' };
     const r = await hosts.probeHost(conn);
     return r && r.reachable
       ? { ok: true, rttMs: r.rttMs }
@@ -5319,6 +5408,15 @@ module.exports = {
       for (const rec of old) if (rec.controller) await rec.controller.abandon();
       return tryReattach();
     },
+    /**
+     * **重跑一次内置连接的播种**（它只在启动时跑一次）。
+     *
+     * ★ 用例要验的是"沙盒里从前照着文档手填的那一条会被**顶掉**"，而那条路只在
+     *   启动时走 —— 不重跑就没法验。先往 `cfg.connections` 里塞一条同地址的、
+     *   再调它，是**还原现场**（真机上那一条本来就在启动时躺在文件里），
+     *   不是绕过什么。
+     */
+    seedBuiltinDevConnection: () => ensureBuiltinDevConnection(),
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
     getRegistry: () => registry,
     /** 界面会看到的插件视图（四个条件求交的结果，见 pluginsView）。 */

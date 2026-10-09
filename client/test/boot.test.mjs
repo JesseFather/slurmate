@@ -531,18 +531,55 @@ const noticesOf = () =>
  *   **跨用例共享**的（同一个进程、同一份开发者模式配置）。少了这一步，上一条用例
  *   留下的连接会让"最后一条"这个前提不成立，而失败信息看着像清理逻辑坏了。
  */
+/**
+ * **用户自己配的**那些连接 —— 不含开发者模式内置的那一条。
+ *
+ * ★ 条数断言必须走它。写成 `connections.length` 的话，每条用例都要手工把那一条算进去
+ *   （算漏一处就是一条看运气的红），而"用户配了几条"这件事本身就与那条结构性的连接
+ *   无关 —— 这份文件里几乎所有条数断言想说的都是前者。
+ */
+const mine = (list) => (list || []).filter((c) => !c.builtin);
+
+/** 收尾：把**用户自己配的**连接删干净。内置那条留着（它删不掉，也不该删）。 */
+async function dropMyConnections() {
+  for (const c of mine((await invoke('app:bootstrap')).connections)) {
+    await invoke('app:deleteConnection', c.id);
+  }
+}
+
 async function onlyDemoConnection(idx) {
   const cfg = idx._test.getCfg();
-  const demo = (cfg.connections || []).find((c) => c.user === 'demo' && c.host === '127.0.0.1');
-  assert.ok(demo, '夹具前提：先跑 connectDemo');
+  const demo = (cfg.connections || []).find((c) => c.builtin);
+  assert.ok(demo, '夹具前提：开发者模式里应当有一条内置的假连接');
   for (const c of [...cfg.connections]) {
-    if (c.id !== demo.id) {
-      const r = await invoke('app:deleteConnection', c.id);
-      assert.equal(r.ok, true, `收尾没删掉 ${c.id}：${JSON.stringify(r)}`);
-    }
+    // ★ 内置那条**跳过**：主进程会拒掉它的删除（它删不掉），而它本来就该留着 ——
+    //   它不是"上一条用例留下的残留"，是开发者模式的结构。
+    if (c.id === demo.id) continue;
+    const r = await invoke('app:deleteConnection', c.id);
+    assert.equal(r.ok, true, `收尾没删掉 ${c.id}：${JSON.stringify(r)}`);
   }
   await invoke('app:setActiveConnection', demo.id);
   return demo;
+}
+
+/**
+ * 收成「只剩**一条用户自己的**连接」（内置那条当然还在）。返回那条用户连接。
+ *
+ * ★ 从前这一段就是 `onlyDemoConnection` —— 但内置那条**删不掉**（主进程会拒，
+ *   那正是要测的一件事），而下面那几条用例要的恰恰是"把这条连接删掉，看它的工作区
+ *   与数据跟着走"。⇒ 内置那条留着不管，另建一条用户连接当"那一条"。
+ * ★ 它落在**自己**的工作区里：`defaultWorkspaceFor` 不把内置那条算作候选
+ *   （见那里的注释），所以这不是"恰好"，是那条规则的结果。
+ */
+async function onlyMyConnection(idx) {
+  await onlyDemoConnection(idx);
+  const r = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100, workspaceId: null });
+  assert.equal(r.ok, true, `夹具没建出用户连接：${JSON.stringify(r)}`);
+  const conn = r.connection;
+  assert.ok(conn.workspaceId, '夹具前提：新连接要落在一个工作区里');
+  await invoke('app:setActiveConnection', conn.id);
+  return conn;
 }
 
 test('index.js 能加载并完成整个启动流程', async (t) => {
@@ -574,8 +611,17 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
     '★ 启动之后后端必须**没有**被连上（从前 announceBackend 的最后一句就是 doConnect）');
   assert.equal((await invoke('app:states')).sessions.length, 0,
     '启动时不该有任何会话被接回来');
-  assert.equal((await invoke('app:bootstrap')).connections.length, 0,
-    '前置：这个沙盒里一条连接都还没配（下面各条用例自己建）');
+  // ★ 开发者模式里，连接表**启动时就已经有内置的那一条**了（播种在 main() 里，
+  //   见 `ensureBuiltinDevConnection`）—— 它不是"下面哪条用例留下的"。
+  const seed = (await invoke('app:bootstrap')).connections;
+  assert.equal(seed.length, 1, '前置：沙盒里只有内置的那一条');
+  assert.equal(seed[0].builtin, true, '而它就是内置的那条假连接');
+  assert.ok(seed[0].workspaceId, '★ 它必须**播种时就落进一个工作区** —— '
+    + '留 null 会被 loadWorkspaces 收束掉，而那条连接下一次启动就没了');
+  // ★ 活跃那一格也要收好：`loadConfig` 是在这条连接还不存在的时候跑的，播种不补的话
+  //   `cfg` 会停在「有一条连接、却没有活跃连接」这个半截状态里。
+  assert.equal((await invoke('app:bootstrap')).activeConnectionId, seed[0].id,
+    '★ 播种要顺手把活跃连接设成它（列表里唯一的一条）');
   // ★ 旁证：整条启动路径上一次 `connect` 都没发生 —— 界面收到的通知里
   //   不该有那一句（它只在 handleConnectResult 里推）。
   assert.equal(noticesOf().some((n) => /已连接：/.test(n.text || '')), false,
@@ -651,12 +697,107 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   assert.equal(b.dev, true);
   assert.equal(b.secureStorageAvailable, false);
   assert.equal(b.backendLabel, '本地模拟站点');
-  // 一条连接都没配 —— 这是**真实状态**，界面上要如实显示「还没有配置登录节点」，
-  // 而不是编一个默认地址出来。断言它：防的是有人"顺手"把某个集群的真实地址
-  // 写回源码，那样每个 clone 的人都会带着那个集群的 IP。
+  // ★ 这里断言的是**同一件事**，只是写法跟着结构性那一行变了：源码里**不许**烙进
+  //   任何真集群的地址。从前查的是"一条连接都没有"，现在是"**恰好**只有内置的那一条，
+  //   而它的地址是留白的那个"—— 后者更强：它连"顺手多塞一条真地址进来"也一起挡住。
   assert.ok(Array.isArray(b.connections), 'connections 必须是数组');
-  assert.equal(b.connections.length, 0, '不得有任何内置的登录节点地址');
+  assert.equal(b.connections.length, 1, '沙盒里应当恰好有内置的那一条');
+  assert.equal(b.connections[0].builtin, true, '而它必须是内置的（不是谁手配的一条）');
+  assert.equal(b.connections[0].host, '127.0.0.1',
+    '★ 内置那条的地址必须是**留白**的那个（环回），不许是一个真集群');
+  assert.equal(b.connections[0].port, 1, '端口同理 —— 假后端不看它，那三个格子只是必须有值');
   assert.equal(b.connection, undefined, "活动连接不再随 bootstrap 一起下发（它唯一的用途是预填表单，那个行为已删）");
+});
+
+test('★★ 内置那条假连接：改不动、删不掉、探不了 —— 而它照样是一条普通连接', async (t) => {
+  t.after(async () => { Module._load = origLoad; await dropMyConnections(); });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  const seed = (await invoke('app:bootstrap')).connections.find((c) => c.builtin);
+  assert.ok(seed, '前置：开发者模式里应当有一条内置的假连接');
+  assert.match(seed.id, /^__/,
+    '★ 保留 id 与 PENDING_ID 同一个形状 —— `c<hex>` 那条路永远铸不出它来');
+  assert.equal(seed.label, '本机假站点');
+  assert.equal(seed.host, '127.0.0.1');
+  assert.ok(seed.workspaceId, '它要落在**自己**的工作区里');
+
+  // ① 改不了 —— 主进程是**权威**（界面上那颗「编辑」压根不画，不是画成禁用的）
+  const edited = await invoke('app:saveConnection',
+    { id: seed.id, user: 'nobody', host: '203.0.113.9', port: 10100 });
+  assert.equal(edited.ok, false);
+  assert.equal(edited.code, 'builtin');
+  assert.match(edited.error, /内置/, '要说清为什么改不了，而不是一句"失败了"');
+
+  // ①′ 照着旧文档手填的那个地址也一样拒 —— 两条同地址在界面上是两行一模一样的东西，
+  //     而其中一行不可删。它**由播种顶掉**（见 `ensureBuiltinDevConnection`），不并存。
+  const sameAddr = await invoke('app:saveConnection',
+    { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal(sameAddr.ok, false);
+  assert.equal(sameAddr.code, 'builtin');
+
+  // ①″ 而**自己带一个 `builtin: true` 提交**也没用：它存得上（就是一条普通连接），
+  //     但那个字段进门就被剥掉了 —— 用户提交的字段里不许有一个能改结构位的开关。
+  const forged = await invoke('app:saveConnection',
+    { user: 'mallory', host: '203.0.113.11', port: 10100, builtin: true });
+  assert.equal(forged.ok, true, '它是一条普通的连接，存得上');
+  assert.equal(forged.connection.builtin, undefined,
+    '★★ 提交里的 `builtin` 必须被剥掉 —— 否则谁都能造出一条删不掉的连接');
+  assert.equal((await invoke('app:deleteConnection', forged.connection.id)).ok, true,
+    '而它删得掉 —— 造出来的不是内置那条');
+
+  // ② 删不掉。★ 而**它还在** —— 只判"返回了 false"的话，一个"删了但报了错"的实现
+  //    照样绿，那比不判更坏。
+  const del = await invoke('app:deleteConnection', seed.id);
+  assert.equal(del.ok, false);
+  assert.equal(del.code, 'builtin');
+  assert.equal((await invoke('app:bootstrap')).connections.some((c) => c.id === seed.id), true,
+    '★ 拒绝归拒绝，那一条必须原样还在');
+
+  // ③ 探不了：它是本机的假站点，"可达 / 不可达"两边都是假话。
+  //   连接表里此刻**只有**它 ⇒ 探测结果必须是**空的**。
+  assert.deepEqual(await invoke('app:probeHosts'), [],
+    '★ 内置那条不许进探测结果 —— 探出来那句话两边都是假的');
+
+  // ④ ★★ 而**其余操作完全相同**：能设为活跃、能连上，连上之后那个「测一次延迟」
+  //    如实说探不了（而不是编一个毫秒数）。
+  await invoke('app:setActiveConnection', seed.id);
+  assert.equal((await invoke('app:bootstrap')).activeConnectionId, seed.id,
+    '它是列表里最早的一条，设成活跃这一步与别的连接走的是同一条路');
+  const saidBefore = noticesOf().length;
+  await connectDemo(idx);
+  const p = await invoke('app:probeActive');
+  assert.equal(p.ok, false);
+  assert.match(p.error, /本机/, '要说"这是本机的假站点"，不是一句笼统的失败');
+
+  // ⑤ ★ 内置那条**不要密钥**：假后端不做认证，为它造一把私钥只会把用户打发去
+  //   IDM 注册一把没有任何用处的公钥（那句提示只在"刚生成"时推）。
+  const said = noticesOf().slice(saidBefore).map((n) => n.text || '').join('\n');
+  assert.equal(/注册到你的 IDM/.test(said), false,
+    `★ 不许为内置那条造密钥：${said}`);
+
+  // ⑥ ★★ 连上假站点之后，窗口标题**仍然是**开发者模式那一句 —— 它是三重互锁的
+  //   第二重，而"连上的那一刻把标注抹掉"正是它唯一要防的事（`user@host` 印在标题
+  //   栏上，看起来与真集群一模一样）。
+  const last = calls.titles[calls.titles.length - 1];
+  assert.match(last, /开发者模式/, `连上之后标题必须保住那一句，实际是「${last}」`);
+  assert.equal(/demo@127\.0\.0\.1/.test(last), false,
+    '★ 假站点那条路上标题不许被写成 user@host');
+  assert.equal((await invoke('app:disconnect')).ok, true);
+
+  // ⑦ ★ 沙盒里从前照着文档手填的那一条（**同一个地址**、不带 `builtin`）——
+  //   播种要**顶掉它**，而不是留下两行一模一样的东西（其中一行还不可删）。
+  //   `0.y` 不考虑兼容性：那条旧记录没有存在的理由。
+  const cfg = idx._test.getCfg();
+  cfg.connections = [...cfg.connections, {
+    id: 'coldemo000001', label: '', user: 'demo', host: '127.0.0.1', port: 1,
+    workspaceId: seed.workspaceId,
+  }];
+  idx._test.seedBuiltinDevConnection();
+  const after = (await invoke('app:bootstrap')).connections;
+  assert.equal(after.filter((c) => c.host === '127.0.0.1' && c.port === 1).length, 1,
+    '★★ 同地址的老记录由播种顶掉 —— 两条同地址在界面上是两行一样的东西');
+  assert.equal(after.find((c) => c.host === '127.0.0.1').builtin, true,
+    '★ 活下来的必须是**内置**那一条，不是手填那条');
 });
 
 test('★★ 点开「新建」密钥就已经生成好了，而且**每点一次都是一把新的**', async (t) => {
@@ -751,14 +892,22 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(bad.ok, false);
 
   const b = await invoke('app:bootstrap');
-  assert.equal(b.connections.length, 1);
-  assert.equal(b.connections[0].host, '198.51.100.10');
-  assert.equal(b.activeConnectionId, saved.connection.id, '第一条应当自动成为活动连接');
+  // ★ `mine()` 是"用户自己配的那些" —— 内置那条假连接不算（见它的定义处）。
+  assert.equal(mine(b.connections).length, 1);
+  assert.equal(mine(b.connections)[0].host, '198.51.100.10');
+  // ★ 「新建的第一条自动成为活跃连接」这条规矩现在由**内置那条在播种时**用掉
+  //   （沙盒里第一次有连接就是它）—— 所以这里不再断言 alice 变成活跃。而活跃那一格
+  //   必须指向一条**真的存在**的连接：悬空的 id 正是这条规矩坏掉的样子。
+  assert.equal(b.connections.some((c) => c.id === b.activeConnectionId), true,
+    '活跃连接必须指向一条真的存在的连接，不能悬空');
 
   // 落盘了：重新读配置文件也该看到
   const onDisk = JSON.parse(
     fs.readFileSync(path.join(userData, 'dev-sandbox', 'config.json'), 'utf8'));
-  assert.equal(onDisk.connections.length, 1);
+  assert.equal(mine(onDisk.connections).length, 1);
+  // ★ 而内置那条**也落了盘** —— 它要是只在内存里，重启之后沙盒就又空了。
+  assert.equal(onDisk.connections.some((c) => c.builtin === true), true,
+    '内置那条必须真的写进沙盒的 config.json');
 
   // ★ 相同条目检测：界面上的「保存并连接」不改任何字段再点一次，
   //   绝不能又冒出一条 —— 用户看到的是列表越点越长，而分不清该点哪条。
@@ -766,7 +915,7 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
     { user: 'alice', host: '198.51.100.10', port: 10100 });
   assert.equal(again.ok, true);
   assert.equal(again.created, false, '第二次必须报告「复用了已有的那条」');
-  assert.equal(again.connections.length, 1, '列表里不能出现第二条一样的');
+  assert.equal(mine(again.connections).length, 1, '列表里不能出现第二条一样的');
   assert.equal(again.connection.id, saved.connection.id, '必须复用同一个 id');
   assert.equal(again.connection.label, '内网', '复用不得把已有的备注冲掉');
 
@@ -778,13 +927,14 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(clash.ok, false);
   assert.equal(clash.code, 'duplicate');
   assert.match(clash.error, /203\.0\.113\.7/, '要说清楚撞上的是哪个地址');
-  assert.equal((await invoke('app:bootstrap')).connections.length, 2, '两条都该原样留着');
+  assert.equal(mine((await invoke('app:bootstrap')).connections).length, 2, '两条都该原样留着');
   await invoke('app:deleteConnection', other.connection.id);
 
   const del = await invoke('app:deleteConnection', saved.connection.id);
   assert.equal(del.ok, true);
-  assert.deepEqual(del.connections, []);
-  assert.equal(del.activeConnectionId, null, '删掉活动连接后不能留一个悬空的 id');
+  assert.deepEqual(mine(del.connections), []);
+  assert.equal(del.connections.some((c) => c.id === del.activeConnectionId), true,
+    '★ 活跃那一格不能悬空 —— 删掉的正好是活跃连接时，它要落到还剩下的那条上');
 });
 
 test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选的那一条', async (t) => {
@@ -796,6 +946,15 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.equal(a.ok, true);
   const aWs = a.connection.workspaceId;
   assert.ok(aWs, '第一条连接也要落在一个工作区里');
+  // ★★ 而它**不许落进内置那条的工作区**。工作区的含义是"这几条连接算同一个站点"
+  //   （一份浏览器存储、一份 origin），而内置那条指向的是本机的假站点 —— 与用户
+  //   真正要连的集群是两个站点。落进去的后果很具体：那个工作区从此**永远收不掉**
+  //   （引用计数永远 ≥1），用户看到的是"删了最后一条连接，数据却还在"。
+  //   ⇒ `defaultWorkspaceFor` 两条规则都不把内置那条当候选（见那里的注释）。
+  const seedWs = (await invoke('app:bootstrap')).connections
+    .find((c) => c.builtin).workspaceId;
+  assert.notEqual(aWs, seedWs,
+    '★★ 用户自己的连接不许落进内置那条的工作区 —— 那会让它永远收不掉');
 
   // ── 同一台机器再加一条（换个账号）：落到**同一个**工作区 ──
   //   ★ 这是整条规则存在的理由：连同一台集群两次，用户要的是**同一份**编辑器布局
@@ -853,10 +1012,9 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.equal(q2.ok, true);
   assert.equal(q2.workspaceId, far.connection.workspaceId);
 
-  for (const c of (await invoke('app:bootstrap')).connections) {
-    await invoke('app:deleteConnection', c.id);
-  }
-  assert.deepEqual((await invoke('app:bootstrap')).connections, []);
+  await dropMyConnections();
+  assert.deepEqual(mine((await invoke('app:bootstrap')).connections), [],
+    '★ 内置那条当然还在 —— 收尾只收用户自己配的那些');
 });
 
 test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒', async (t) => {
@@ -1153,7 +1311,14 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   const hasWs = (wsId) => cfgOf().workspaces.some((l) => l.id === wsId);
   const hasSpace = (sid) => cfgOf().spaces.some((s) => s.id === sid);
 
-  const a = await onlyDemoConnection(idx);      // 理由同上一组：连接表跨用例共享
+  // ★ 连接表跨用例共享 ⇒ 先把用户那几条收干净，再摆出这一条 `a`。
+  //   ★ 这条**不能**是内置那条：下面要删掉它来看工作区怎么收 —— 而内置那条删不掉
+  //     （那正是要测的一件事）。
+  await onlyDemoConnection(idx);
+  const aR = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100, workspaceId: null });
+  assert.equal(aR.ok, true, `夹具没建出连接：${JSON.stringify(aR)}`);
+  const a = aR.connection;
   const wsA = a.workspaceId;
   const nameA = cfgOf().workspaces.find((l) => l.id === wsA).name;
 
@@ -1200,7 +1365,7 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   cleanupSiteState(idx);
 });
 
-test('★★ 活会话护着它那个工作区 —— **一条连接都没有**时也一样', async (t) => {
+test('★★ 活会话护着它那个工作区 —— 连接全挪走了也一样', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   await openUpTo(idx, 1);
@@ -1213,18 +1378,36 @@ test('★★ 活会话护着它那个工作区 —— **一条连接都没有**�
   });
   idx._test.getBackend().debugAddSitePlugin('dev-ws');
 
-  // 「用户把连接全删了」—— 从此没有活跃连接，而会话照起（开发者模式那条路）
-  for (const c of [...(await invoke('app:bootstrap')).connections]) {
-    await invoke('app:deleteConnection', c.id);
-  }
-  assert.deepEqual((await invoke('app:bootstrap')).connections, []);
+  // ★★ 这一条从前的前提是「用户把连接全删了」。开发者模式里现在**总有内置的那一条**
+  //   （它删不掉），那个状态不再存在 —— 而要验的东西一个字没变：**一个没有连接指着、
+  //   却有活会话跑着的工作区，不许被回收**。
+  //   造法因此换成"把连接从那个工作区挪走"：挪走之后它的引用计数同样是 **0**，
+  //   而那条会话照样跑在它上面。
+  const cfgOf = () => idx._test.getCfg();
+  await onlyDemoConnection(idx);
+  const aR = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100, workspaceId: null });
+  assert.equal(aR.ok, true, `夹具没建出连接：${JSON.stringify(aR)}`);
+  const conn = aR.connection;
+  const w1 = conn.workspaceId;
+  await invoke('app:setActiveConnection', conn.id);
 
   const run = await startRunning(idx, 'dev-ws');
-  const ws = (idx._test.getCfg().workspaces || [])
-    .find((l) => Object.keys(l.refs || {}).length);
-  assert.ok(ws, '会话起来之后要有一个装着它那一份数据的工作区');
+  const ws = cfgOf().workspaces.find((l) => l.id === w1);
+  assert.ok(ws, '会话起来之后那个工作区还在');
   const sid = ws.refs[id];
   assert.ok(sid, '前提：那个工作区里指着这个插件的那一份');
+
+  // ★ 先把活跃连接换成内置那条（这一步**不动引用计数**），再把这条连接挪到一个新
+  //   工作区 —— 至此 w1 没有任何连接指着它了，而那条会话正跑在上面。
+  //   （不先换活跃的话，挪这一下会顺手把会话也搬到新工作区去，那就没得验了。）
+  const seed = (await invoke('app:bootstrap')).connections.find((c) => c.builtin);
+  await invoke('app:setActiveConnection', seed.id);
+  const moved = await invoke('app:setConnectionWorkspace',
+    { connectionId: conn.id, workspaceId: null, confirmDiscard: true });
+  assert.equal(moved.ok, true, `挪不动：${JSON.stringify(moved)}`);
+  assert.equal(cfgOf().connections.some((c) => c.workspaceId === w1), false,
+    '前提：已经没有任何连接指着 w1 了（引用计数归零）');
 
   // ★★ 一个**与引用计数无关**的改动（改个名字）也会把 commitConfig 叫起来，而那一句
   //    `pruneWorkspaces` 数的是"还有几条连接指着它" —— 此刻是 **0**。
@@ -1232,16 +1415,17 @@ test('★★ 活会话护着它那个工作区 —— **一条连接都没有**�
   //    就不回收」的豁免删掉之后，这个场景唯一还站得住的东西。
   //    少了它，开发者模式里每次改动都会把工作区连同它指着的那些数据收掉，而那条
   //    会话正跑在上面 —— 症状是「演示模式里布局老是丢」，且没有任何一处会红。
-  const rn = await invoke('app:renameWorkspace', { workspaceId: ws.id, name: '演示工作区' });
+  const rn = await invoke('app:renameWorkspace', { workspaceId: w1, name: '演示工作区' });
   assert.equal(rn.ok, true);
-  assert.equal(idx._test.getCfg().workspaces.some((l) => l.id === ws.id), true,
+  assert.equal(cfgOf().workspaces.some((l) => l.id === w1), true,
     '★★ 会话还跑在它上面 —— 收掉它就是把那条会话脚下的数据抽掉');
-  assert.equal(idx._test.getCfg().spaces.some((s) => s.id === sid), true,
+  assert.equal(cfgOf().spaces.some((s) => s.id === sid), true,
     '那份数据也不许动');
   assert.equal(run.ctl.state, 'running', '那条会话一动不动');
 
   await invoke('app:stop', { slot: run.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await invoke('app:deleteConnection', conn.id);
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });
@@ -1257,8 +1441,9 @@ test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉'
   // 断开的是「这一跳」，不是「这条连接」—— 配置里必须还在，
   // 否则用户再点「连接」会发现地址没了，得重填一遍
   const b = await invoke('app:bootstrap');
-  assert.equal(b.connections.length, 1);
-  assert.equal(b.activeConnectionId, saved.connection.id);
+  assert.equal(mine(b.connections).length, 1, '条目必须留着（断开断的是这一跳）');
+  assert.equal(b.connections.some((c) => c.id === b.activeConnectionId), true,
+    '活跃那一格不能悬空');
   assert.equal(b.whoami, null, '断开后不能再声称知道对面是谁');
 
   // 这个文件里所有用例共用同一个 Electron 实例，假后端也被真的关掉了 ——
@@ -1389,11 +1574,9 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
 
   // 这个文件里所有用例共用同一个 Electron 实例，假后端刚被真的关掉了 ——
   // 接回来，否则后面的用例会撞上「假后端尚未 connect()」
-  const demoConn = await invoke('app:saveConnection',
-    { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: demoConn.connection.id })).ok, true,
+  const conn = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
     '断开之后必须能重新接上，否则「断开」就成了单向门');
-  await invoke('app:deleteConnection', demoConn.connection.id);
 });
 
 /** 等一个新的 code-server 视图出现。loadURL 在自动登录之前就返回了，所以只能轮询。 */
@@ -1682,8 +1865,8 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
   // 造一个会话，但**不经过 controller** —— 这样测试结束时不会留下别的定时器。
   const b = idx._test.getBackend();
   await invoke('app:debug', 'reset');
-  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true,
+  const conn = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
     '前置条件：要先连上 —— 没连上时 tryReattach 会（正确地）直接返回');
   await b.rpc({ op: 'submit', cpus: 2, mem: '8G' });
   await new Promise((r) => setTimeout(r, 400));      // 假后端 200ms 登记
@@ -1710,7 +1893,6 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
   // 收尾：结束这个会话，让 _waitForEnroll 的轮询自己走到终态停下
   await invoke('app:stop', { slot: await frontSlotOf() });
   await Promise.race([p, new Promise((r) => setTimeout(r, 5000))]);
-  await invoke('app:deleteConnection', conn.connection.id);
   await invoke('app:debug', 'reset');
 });
 
@@ -3442,8 +3624,8 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
 
   await invoke('app:debug', 'reset');
   await invoke('app:debug', 'extra-plugin');          // 假站点"也开了它"
-  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
+  const conn = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
   const w = idx._test.getWindow();
   const started = await invoke('app:start', null, 'jupyter');
@@ -3509,8 +3691,8 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   await waitUntil(async () => !onlyFake(b)
     || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
-  const conn = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: conn.connection.id })).ok, true);
+  const conn = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
   const viewsBefore = calls.views.length;
   const started = await invoke('app:start', null, 'sshd');
@@ -3858,11 +4040,27 @@ async function openUpTo(idx, n) {
   return b;
 }
 
+/**
+ * 「demo 那条连接」= 开发者模式里**内置的那一条**。
+ *
+ * ★ 夹具从前是自己 `app:saveConnection` 一条 `demo@127.0.0.1:1`。现在那个地址属于
+ *   内置的那一条（播种时就落在那儿），再存一次会被主进程按「改不了内置的」拒掉，
+ *   于是 `conn.connection` 是 undefined，几十条用例一起以
+ *   `Cannot read properties of undefined` 收场 —— 而那句报错指不回这里。
+ *   ★ 而"再存一次会被拒"正是**要测的一件事**（见「内置的那条」那几条用例）。
+ *   ⇒ 夹具改成"**找到它**"，而不是"造一条"。
+ */
+async function builtinConn() {
+  const b = await invoke('app:bootstrap');
+  const c = (b.connections || []).find((x) => x.builtin);
+  assert.ok(c, '夹具前提：开发者模式里应当有一条内置的假连接');
+  return c;
+}
+
 async function connectDemo(idx) {
   await invoke('app:debug', 'reset');
-  const conn = await invoke('app:saveConnection',
-    { user: 'demo', host: '127.0.0.1', port: 1 });
-  const r = await invoke('app:connect', { connectionId: conn.connection.id });
+  const conn = await builtinConn();
+  const r = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(r.ok, true, `连接失败：${JSON.stringify(r)}`);
 }
 
@@ -3880,13 +4078,10 @@ async function connectDemo(idx) {
 async function ensureConnected(idx) {
   const b = idx._test.getBackend();
   if (b.connected) return b;
-  let boot = await invoke('app:bootstrap');
-  if (!boot.connections.length) {
-    await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-    boot = await invoke('app:bootstrap');
-  }
+  const boot = await invoke('app:bootstrap');
   const conn = boot.connections.find((c) => c.id === boot.activeConnectionId)
             || boot.connections[0];
+  assert.ok(conn, '夹具前提：开发者模式里应当有内置的那一条（连接表不会是空的）');
   const r = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(r.ok, true, `补一次连接失败：${JSON.stringify(r)}`);
   return b;
@@ -5035,7 +5230,11 @@ function makePluginDataDir(idx, pluginName) {
   const P = require('../src/main/plugin-data.js');
   const config = require('../src/main/config.js');
   const cfg = idx._test.getCfg();
-  const conn = cfg.connections[0] || {};
+  // ★ 取**活跃**那条，不是列表里第一条：下面那几条用例的现场是
+  //   `onlyMyConnection` 摆出来的（用户那条是活跃的），而列表第一条现在是内置那条
+  //   —— 它自己的工作区跟这些用例要删的东西无关。
+  const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId)
+    || cfg.connections[0] || {};
   const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
   assert.ok(plugin && conn.workspaceId, `夹具前提：应当有一个 ${pluginName} 与一个工作区`);
   const made = config.spaceFor(cfg, conn.workspaceId, plugin.id, P.groupOf(plugin), 1);
@@ -5053,7 +5252,7 @@ test('★★ 删掉最后一条用某个工作区的连接 ⇒ 那个工作区�
   const P = require('../src/main/plugin-data.js');
   await openUpTo(idx, 1);
   await connectDemo(idx);
-  await onlyDemoConnection(idx);
+  const conn = await onlyMyConnection(idx);
 
   const { dir, workspaceId, space, plugin } = makePluginDataDir(idx, 'code-server');
   const partition = P.partitionOf(P.identityOf(plugin, space));
@@ -5068,8 +5267,7 @@ test('★★ 删掉最后一条用某个工作区的连接 ⇒ 那个工作区�
   fs.writeFileSync(path.join(realDir, 'marker'), 'x');
   t.after(() => { fs.rmSync(realRoot, { recursive: true, force: true }); });
 
-  const connId = idx._test.getCfg().connections[0].id;
-  const r = await invoke('app:deleteConnection', connId);
+  const r = await invoke('app:deleteConnection', conn.id);
   assert.equal(r.ok, true, JSON.stringify(r));
   await waitUntil(() => !fs.existsSync(dir), '插件数据目录被清掉', 5000);
 
@@ -5187,7 +5385,7 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
   const P = require('../src/main/plugin-data.js');
   await openUpTo(idx, 1);
   await connectDemo(idx);
-  await onlyDemoConnection(idx);
+  const conn = await onlyMyConnection(idx);
 
   // ★ 第三种：**要工作区、却没有界面**的插件。它照样在磁盘上留一份，
   //   而"属于这一份数据"的判据是 `needsSpace`，**不是** `hasSurface`
@@ -5218,8 +5416,7 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
   fs.mkdirSync(relayDir, { recursive: true });
   fs.writeFileSync(path.join(relayDir, 'marker'), 'x');
 
-  const connId = idx._test.getCfg().connections[0].id;
-  assert.equal((await invoke('app:deleteConnection', connId)).ok, true);
+  assert.equal((await invoke('app:deleteConnection', conn.id)).ok, true);
 
   // ★ 三个方向一起断言 —— 只钉一边的话，"什么都不清"与"什么都清"各能骗过一条。
   assert.equal(fs.existsSync(path.join(cs.dir, 'marker')), false,
@@ -5240,7 +5437,7 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
   const idx = require('../src/main/index.js');
   await openUpTo(idx, 1);
   await connectDemo(idx);
-  await onlyDemoConnection(idx);
+  const conn = await onlyMyConnection(idx);
 
   const { dir } = makePluginDataDir(idx, 'code-server');
   const dataRoot = idx._test.getPluginDataRoot();
@@ -5248,12 +5445,11 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
   fs.chmodSync(dataRoot, 0o500);
   t.after(() => { try { fs.chmodSync(dataRoot, 0o700); } catch { /* 尽力而为 */ } });
 
-  const connId = idx._test.getCfg().connections[0].id;
-  const r = await invoke('app:deleteConnection', connId);
+  const r = await invoke('app:deleteConnection', conn.id);
   // ★ 抛出去的后果：`commitConfig` 抛穿 IPC ⇒ 用户看到"删除失败"，而配置其实
   //   已经删了、也存了 —— 一句指不回根因的话，而界面上那一条已经不见了。
   assert.equal(r.ok, true, `清理失败不该把删除本身变成失败：${JSON.stringify(r)}`);
-  assert.equal(idx._test.getCfg().connections.some((c) => c.id === connId), false,
+  assert.equal(idx._test.getCfg().connections.some((c) => c.id === conn.id), false,
     '配置那一侧必须真的删掉了');
   await waitUntil(() => noticesOf().some((n) => /没能清干净/.test(n.text || '')),
     '要有一条说清磁盘没清干净的提示', 5000);
@@ -5915,8 +6111,8 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
     return all.length ? all[all.length - 1].state : null;
   };
 
-  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true,
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true,
     '前置：连上假站点');
 
   // ① 一切正常
@@ -5942,7 +6138,7 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
   const back = idx._test.getBackend();
   back.debugClusterMissing();
   await invoke('app:disconnect');
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(dot(), 'na',
     '★ 站点答话但那几格取不到 —— 这一点必须是"没问到"，不是"正常"');
@@ -5983,8 +6179,8 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
   assert.equal(typeof ssh.SshBackend.prototype.prepare, 'function');
 
   const before = noticesOf().length;
-  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   assert.equal(
     noticesOf().slice(before).some((n) => /作业日志目录/.test(n.text)), false,
     '★ 建成功时**一个字都不说** —— 它不是提示，是背景动作');
@@ -5994,7 +6190,7 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
   back.prepareError = '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？';
   const before2 = noticesOf().length;
   await invoke('app:disconnect');
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok,
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok,
     true, '★ 建不出目录**不算连接失败** —— 连上了就是连上了');
   const said = noticesOf().slice(before2).map((n) => n.text).join('\n');
   assert.match(said, /作业日志目录/, `实际说了：${said}`);
@@ -6013,8 +6209,8 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
     calls.cursor.x = 0; calls.cursor.y = 0;
   });
   await invoke('app:debug', 'reset');
-  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   await new Promise((r) => setTimeout(r, 50));
 
   // ★★ 判据是**发出去的 RPC 条数**，不是"推了多少份数据"。
@@ -6098,8 +6294,8 @@ test('★ 作业屏「看作业日志」：没连站点时如实说，而不是�
 
   // 连上之后：这条 op 走的是**直连 RPC**，不经过"前台是哪一条" —— 作业结束之后
   // 右栏就收了，而"为什么失败"恰恰在那一刻最该看得见。
-  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   const r2 = await invoke('app:jobLog', { session_id: 'nope', lines: 50 });
   assert.equal(r2.ok, false, '假站点里没有这条会话 ⇒ not_found，而不是一份编出来的日志');
   assert.equal(await invoke('app:outMore').then((x) => x.ok), true);
@@ -6112,8 +6308,8 @@ test('★★ 作业一结束，右栏自己收起来（那时它没有内容可�
   const idx = require('../src/main/index.js');
   t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
   await invoke('app:debug', 'reset');
-  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
-  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   const back0 = idx._test.getBackend();
   back0.enrollDelayMs = 300;   // 同上：这条用例不考登记延迟
   // ★★ 先清掉**站点**上还占着位置的会话：本站上限是 1，而前面那条用例开的会话

@@ -837,7 +837,11 @@ function renderConnections(list) {
   // 没有站点就既没有可问的也没有可看的。见 panel.html 那一段。
   document.body.classList.toggle('connected', connected);
 
-  for (const c of list) {
+  // ★★ 内置那条**排最前**（其余保持用户的顺序）。它在这个列表里是"起点"，
+  //   而不是又一条记录：勾上开发者模式、重启，第一个看见的就是它。
+  //   ★ 用两趟 `filter` 拼，不调 `sort` —— `sort` 对**全部**元素重排，而其余那些
+  //     用户的连接顺序是用户自己攒出来的（新建的排在最后），不该被这一次重排打乱。
+  for (const c of list.filter((x) => x.builtin).concat(list.filter((x) => !x.builtin))) {
     const li = document.createElement('li');
     // 「当前」和「已连接」是两回事：断开之后活动连接还是它，但没有连着。
     const live = c.id === boot.activeConnectionId && connected;
@@ -851,6 +855,10 @@ function renderConnections(list) {
     t.textContent = connLabel(c);
     // 地址仍然在，只是不占地方 —— 鼠标停一下就能看到。
     t.title = `${c.user}@${c.host}:${c.port}`;
+    // ★ 内置那条加一颗看得见的标记。它没有「编辑」「删除」两颗按钮，而"这一行为什么
+    //   与上面那些不一样"必须是**这一行自己**回答得了的 —— 否则那是一处看起来像
+    //   漏画了的地方。
+    if (c.builtin) t.append(el('span', 'b', '内置'));
 
     const probe = lastProbe.find((p) => p.id === c.id);
     const m = document.createElement('span');
@@ -868,6 +876,12 @@ function renderConnections(list) {
       const n = known ? JOBS.list.filter((j) => j.live).length : null;
       m.textContent = known ? `已连接 · ${n} 个作业在跑` : '已连接';
       m.classList.add('good');
+    } else if (c.builtin) {
+      // ★ 内置那条**这一格留空**，而不是写「未探测」。探测那三个状态在这里全是假话：
+      //   主进程不探它（`app:probeHosts` 把它滤掉了），所以「未探测」是在说"还没轮到
+      //   它"—— 而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
+      //   这一行说什么，上面那颗「内置」与名字已经说完了。
+      m.textContent = '';
     } else if (!probe) {
       m.textContent = '未探测';
     } else if (probe.reachable) {
@@ -935,7 +949,17 @@ function renderConnections(list) {
       });
     };
 
-    li.append(t, m, main, edit, del);
+    // ★★ 内置那条**不画**「编辑」「删除」两颗按钮 —— 不是画成禁用的。一颗永远点不亮
+    //   的按钮正是"系统声称了不成立的事"：它在说"这里有一个可以编辑的东西"。
+    //   它与一条普通连接的差别**只有这一处**（加上主进程那两道权威闸）；
+    //   「连接」「进入」以及进去之后的一切完全相同。
+    if (c.builtin) {
+      li.title = '开发者模式内置的假连接：在本机的假站点上调试插件用的。'
+        + '不可编辑、不可删除 —— 关掉开发者模式它就不在了。';
+      li.append(t, m, main);
+    } else {
+      li.append(t, m, main, edit, del);
+    }
     box.append(li);
   }
 
@@ -3546,7 +3570,12 @@ async function doProbe() {
     if (lastProbe.length === 0) {
       // 「一条都没配」和「配了但都不通」是两回事，文案必须分开 ——
       // 不能写死成「三个地址都不可达」，候选可能是 0 个。
-      notice('info', '还没有保存任何连接。填好上面的用户名、主机、端口，点「保存并连接」。');
+      // ★ 还有第三种：**只有内置那条假站点**。主进程不探它（它在本机，见
+      //   `app:probeHosts`），于是探测结果是空的，而列表上明明有一条连接 ——
+      //   写成"还没有保存任何连接"是在说一件用户一眼就能看见不成立的事。
+      notice('info', (boot.connections || []).length
+        ? '内置的那条是本机的假站点，没有可探测的地址 —— 没有别的连接可探。'
+        : '还没有保存任何连接。填好上面的用户名、主机、端口，点「保存并连接」。');
       return;
     }
     const ok = lastProbe.filter((h) => h.reachable);

@@ -296,6 +296,44 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
   }
 });
 
+test('★★ 内置那条假连接：排最前、没有「编辑」「删除」，而别的行一个都不少', () => {
+  // ★ 判据是**画出来的东西**，不是源码文本：那一行是不是真的排在最前、它那行里
+  //   是不是真的只有三样，只有画完之后才说得清。
+  const list = [
+    CONNS[0],
+    { ...CONNS[1], id: 'c9', builtin: true, label: '本机假站点' },
+    { id: 'c3', user: 'carol', host: '203.0.113.9', port: 10100, workspaceId: 'w000000000001' },
+  ];
+  const h = start({ connections: list, workspaces: WSS, activeConnectionId: 'c1' });
+  h.fn('renderConnections')(list);
+  const rows = h.byId.get('conn-list').children;
+  assert.equal(rows.length, 3, '三条连接就该画三行');
+
+  // ── ① 排最前，而其余保持用户的顺序 ──
+  assert.deepEqual(rows.map((r) => r.children[0]._text),
+    ['本机假站点', 'alice@198.51.100.7:10100', 'carol@203.0.113.9:10100'],
+    '★ 内置那条排最前（它是这个列表的起点），其余按原来的顺序 —— 不是整表重排');
+
+  // ── ② 它那行里**没有**「编辑」「删除」──
+  assert.equal(rows[0].children.length, 3,
+    '★ 内置那条只有「连接」一颗按钮 —— 那两颗是**不画**，不是画成禁用的'
+    + '（一颗永远点不亮的按钮正是"系统声称了不成立的事"）');
+  assert.deepEqual(rows[0].children.slice(2).map((x) => x._text), ['连接']);
+  assert.equal(rows[0].children[0].children[0]._text, '内置',
+    '★ 名字后面要有一颗看得见的标记 —— 这一行为什么与上面那些不一样，得它自己说得出来');
+
+  // ── ③ 而普通那几行一个都不少 ──
+  assert.deepEqual(rows[1].children.slice(2).map((x) => x._text), ['连接', '编辑', '删除']);
+  assert.deepEqual(rows[2].children.slice(2).map((x) => x._text), ['连接', '编辑', '删除']);
+  assert.equal(rows[1].children[0].children.length, 0, '普通的行没有那颗标记');
+
+  // ── ④ 状态那一格：内置那条留空，而不是「未探测」──
+  //   ★ 主进程不探它（`app:probeHosts` 把它滤掉了）⇒「未探测」是在说"还没轮到它"，
+  //     而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
+  assert.equal(rows[0].children[1]._text, '', '★ 内置那条的状态格留空');
+  assert.equal(rows[1].children[1]._text, '未探测', '而普通那几行照旧');
+});
+
 test('★★ 两段式确认：第一下只是把那一格换成一行确认，第二下才真的做', () => {
   // ★★ 这一条守的是**设计律 2**：代价大的动作由"必须先经过的那一步"承载。
   //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——

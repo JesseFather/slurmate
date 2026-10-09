@@ -71,11 +71,29 @@ const SECRET_ENCRYPTED = 'encrypted';
  */
 const PENDING_ID = '__pending__';
 
+/**
+ * 开发者模式那条**内置假连接**的 id 与它长什么样。
+ *
+ * ★ 它由 `index.js` 的 `ensureBuiltinDevConnection()` 播种（只有开发者模式开着时
+ *   才播），而**不是** `loadConfig` 造的 —— 那一个只收到一个目录，它必须继续不知道
+ *   "开发者模式"这件事（那正是 `dev-mode.json` 单独一个文件的理由）。
+ *
+ * ★ id 与 `PENDING_ID` 同一个形状，而且同样**不取 `c<hex>`** ——
+ *   `newConnectionId()` 永远铸不出它，所以"保留 id"这件事不需要任何额外的检查
+ *   就成立。这一族名字在配置里一眼看得出来是**框架的**，不是用户的。
+ *
+ * ★ 地址是**留白**的：假后端不看它（`backend-fake.js` 的 `connect` 只读 `user`
+ *   那一格），但三个格子都得有值 —— 而它必须落在**文档用的**地址上
+ *   （环回 / RFC 5737），绝不能是一个真集群。
+ */
+const DEV_CONNECTION_ID = '__dev__';
+const DEV_CONNECTION = { user: 'demo', host: '127.0.0.1', port: 1, label: '本机假站点' };
+
 const DEFAULTS = {
   schema: SCHEMA,
   // 登录节点连接条目。支持多条是因为同一个登录节点常有多个入口
   // （内网、公网域名、跳板机），换网络环境时不该重新填一遍。
-  connections: [],          // [{ id, label, user, host, port, workspaceId }]
+  connections: [],          // [{ id, label, user, host, port, workspaceId, builtin? }]
   activeConnectionId: null,
   // 主机密钥指纹（TOFU）。键是 "host:port"，值是 "SHA256:…"。
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
@@ -447,7 +465,7 @@ function normalizeConnection(raw, fallbackId) {
   if (!user || !host) return null;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const label = String(raw.label || '').trim();
-  return {
+  const out = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : (fallbackId || newConnectionId()),
     label: label === host ? '' : label,
     user, host, port,
@@ -456,6 +474,12 @@ function normalizeConnection(raw, fallbackId) {
     // loadWorkspaces 收束，不留 null 让界面去处理。
     workspaceId: (typeof raw.workspaceId === 'string' && raw.workspaceId) ? raw.workspaceId : null,
   };
+  // ★ 「结构性」那一格只认 `true` 这一个字面值。它在这里被读出来，是为了让播种
+  //   的那一条**能从文件里原样读回来**（`loadConfig` 走的就是这个函数）。
+  //   ★ 而它**不是**给界面用的入口：`upsertConnection` 进门就把它剥掉（见那里的
+  //     注释）—— 用户提交的字段里有一个能改结构位的开关，正是要被堵死的那类形状。
+  if (raw.builtin === true) out.builtin = true;
+  return out;
 }
 
 // ── 工作区：一张引用表 ──────────────────────────────────────────────────────
@@ -801,18 +825,28 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
  */
 function defaultWorkspaceFor(cfg, conn) {
   const host = conn && conn.host;
+  // ★★ **内置那条假连接不参与这两条规则**（开发者模式）。
+  //   工作区的定义是「**这几条连接算同一个站点**」——它决定的是一份浏览器存储与
+  //   一份插件数据（同一个 origin），而内置那条指向的是**本机的假站点**，与用户
+  //   真正要连的集群是两个站点。
+  //   ⇒ 让它当"同址那条"或"活跃那条"的候选，后果是**用户的第一条连接直接落进沙盒
+  //     那个工作区里**，从此那个工作区永远收不掉（引用计数永远 ≥1），而用户在界面上
+  //     看到的是"删了最后一条连接，数据却还在"。
+  //   ★ 判据落在**连接**上（它是结构性的那一格），不是"地址是不是 127.0.0.1"。
+  const usable = (c) => Boolean(c) && c.builtin !== true;
   // ★ 端口一律收成**数**再比：`conn.port` 存进来时是数（`normalizeConnection`），
   //   而问这条规则的那个调用方是从输入框里读的（可能是个字符串）。
   //   不收的话症状是"同址那条默认**静默**失效"—— 退回"活跃连接的"，
   //   界面上看不出任何异常，而用户拿到的是另一份空白存储。
   const port = Number(conn && conn.port);
   if (host && Number.isInteger(port) && port > 0) {
-    const same = ((cfg && cfg.connections) || []).find((c) => c.id !== conn.id
+    const same = ((cfg && cfg.connections) || []).find((c) => usable(c) && c.id !== conn.id
       && c.host === host && c.port === port && findWorkspace(cfg, c.workspaceId));
     if (same) return same.workspaceId;
   }
   const active = activeConnection(cfg);
-  if (active && active.id !== (conn && conn.id) && findWorkspace(cfg, active.workspaceId)) {
+  if (usable(active) && active.id !== (conn && conn.id)
+      && findWorkspace(cfg, active.workspaceId)) {
     return active.workspaceId;
   }
   return null;
@@ -1136,6 +1170,14 @@ function loadConfig(dir) {
   return cfg;
 }
 
+/** 撞车时回给界面的那一份。「内置」也带上：那两句话不一样（"改不了内置的"与"和另一条撞了"）。 */
+function conflictOf(c) {
+  return {
+    id: c.id, label: c.label, user: c.user, host: c.host, port: c.port,
+    builtin: c.builtin === true,
+  };
+}
+
 /**
  * 新增一条连接，或复用已有那条一模一样的。
  *
@@ -1159,6 +1201,12 @@ function upsertConnection(cfg, input, opts = {}) {
   const conn = normalizeConnection(input, input && input.id);
   if (!conn) return null;
 
+  // ★★ 「内置」那一格**只能由播种产生**（`index.js` 的 `ensureBuiltinDevConnection`）。
+  //   输入里带来的 `builtin` 在这里剥掉，于是界面**没有任何一条路**能造出第二条
+  //   内置的、也没有任何一条路能把一条普通连接变成内置的 —— 而"用户提交的字段里
+  //   有一个能改结构位的开关"正是要被堵死的那类形状。
+  delete conn.builtin;
+
   const key = connectionKey(conn);
   const idx = cfg.connections.findIndex((c) => c.id === conn.id || connectionKey(c) === key);
 
@@ -1169,19 +1217,17 @@ function upsertConnection(cfg, input, opts = {}) {
 
   const prev = cfg.connections[idx];
 
+  // ★★ 内置那条**改不动**。这不是"判一个标志位然后禁掉按钮"，而是它根本不在用户
+  //   那张表里 —— 主进程这一侧把它变成**权威**（界面上那颗「编辑」压根不画）。
+  //   `builtin` 一起回给界面：那两句话不一样（"改不了内置的"与"和另一条撞了"）。
+  if (prev.builtin) return { conflict: conflictOf(prev) };
+
   // ★ 编辑场景：输入的 id 指向 A，但 user@host:port 撞上了另一条 B。
   //   照直改下去，A 和 B 会变成同一身份的两份副本 —— 之后「相同条目检测」
   //   再也说不清该复用哪一条，而且两条各有各的密钥，界面却完全看不出差别。
   //   所以明确拒绝，让用户改地址或者删掉重复的那条，而不是替他们挑一条。
   const clash = cfg.connections.find((c) => c.id !== prev.id && connectionKey(c) === key);
-  if (clash) {
-    return {
-      conflict: {
-        id: clash.id, label: clash.label,
-        user: clash.user, host: clash.host, port: clash.port,
-      },
-    };
-  }
+  if (clash) return { conflict: conflictOf(clash) };
 
   // 复用旧条目：**id 用回旧的那个**（可能已经被 activeConnectionId 之类引用着）。
   // workspaceId 由 ...prev 原样带过来 —— 「按地址命中已有条目」这条路径不该顺手改它的
@@ -1374,7 +1420,7 @@ function removePendingGoodbye(dir, sessionId) {
 //     （`loadConfig` / `saveConfig` / `setKey` / `loadPinnedKeys` …），那才是它
 //     该走的路；真需要某个内部函数时，加回一行就是一次**看得出来**的动作。
 module.exports = {
-  SCHEMA, DEFAULTS, PENDING_ID,
+  SCHEMA, DEFAULTS, PENDING_ID, DEV_CONNECTION_ID, DEV_CONNECTION,
   loadConfig, saveConfig,
   RELAY_PORT_BASE,
   // 工作区（一张引用表）
@@ -1385,7 +1431,7 @@ module.exports = {
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
   usedSpacePorts, assignSpacePorts, spaceFor, newSpace, spaceConsumers, pruneSpaces,
   setWorkspaceRef,
-  activeConnection, upsertConnection,
+  activeConnection, upsertConnection, connectionKey,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled,
   trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,

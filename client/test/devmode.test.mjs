@@ -238,6 +238,12 @@ test('★ 一台没配过任何东西的机器**不会**自己进开发者模式
   assert.equal(b.developerMode.on, false);
   assert.equal(b.developerMode.saved, false);
 
+  // ★★ **内置那条假连接只在沙盒里。** 少了这一条，"播种忘了看开发者模式"的症状是
+  //   **每个用户的配置里凭空多出一条删不掉的假连接** —— 而那份配置就是他们真正
+  //   在用的那一份（`cfgDir` 在非开发者模式下是 `userData` 本身）。
+  assert.deepEqual(b.connections, [],
+    '没开开发者模式就不该有任何连接，更不该有内置的那一条');
+
   // ★ 沙盒目录**一个都不该建**。建了的话，一个有洁癖的用户什么都没干就在自己
   //   的 userData 里多出一个目录，而他永远不知道那是干什么的。
   assert.equal(fs.existsSync(SANDBOX), false, '没开开发者模式就不该建沙盒目录');
