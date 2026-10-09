@@ -974,6 +974,37 @@ class SessionController extends EventEmitter {
     if (this._statusTimer) { clearInterval(this._statusTimer); this._statusTimer = null; }
   }
 
+  /**
+   * 取这个会话的作业日志尾部。**只读** —— 它不动状态机、不改任何字段。
+   *
+   * ★ 它**不走 `classify()`**：那个函数是给会话生命周期那四个 op（submit /
+   *   status / heartbeat / goodbye）用的，它的清单是"这四种之下的动作"。把一个
+   *   只读展示塞进去，那条清单就走了样 —— 而走了样的清单比没有更坏（下一个人会
+   *   照着它去 classify 一个不该进来的 op）。
+   *
+   * ★★ 老守护进程没有这个 op ⇒ **能力缺席，不是失败**：回一句 `unsupported`，
+   *   界面据此禁用那一块并说明，**不重试**（与 `backend-ssh.js` 对 `ping` 的
+   *   处理同源：`unknown_op` 说的是"对面没有这个功能"，不是"这一次没成"）。
+   */
+  async jobLog(lines) {
+    if (!this.sessionId) return { ok: false, error: '这条会话还没有登记。' };
+    const req = { op: 'job_log', session_id: this.sessionId };
+    if (lines) req.lines = lines;
+    let resp = null;
+    try {
+      resp = await this.backend.rpc(req);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || '没有回应' };
+    }
+    if (resp && resp.ok && resp.data) return { ok: true, data: resp.data };
+    const err = (resp && resp.error) || {};
+    if (err.kind === 'unknown_op') {
+      return { ok: false, unsupported: true,
+               error: '这个站点的守护进程还没有"看作业日志"这个能力（升级之后才有）。' };
+    }
+    return { ok: false, error: err.detail || err.kind || '控制节点没有说明原因' };
+  }
+
   // ── 停止 ────────────────────────────────────────────────────────────────
   /**
    * **只释放本地资源，一个字都不发给服务端。**

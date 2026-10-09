@@ -45,4 +45,11 @@ contextBridge.exposeInMainWorld('hover', {
   },
   /** 对**当前活跃连接**测一次延迟（TCP + 读 SSH banner）。用户按的那一下才有。 */
   probe: () => ipcRenderer.invoke('app:probeActive'),
+  /**
+   * 右栏那个「更多」：把行数提到上限（2000）再拉一次。
+   *
+   * ★ 它**不是一次查询**，是"我要看得更多"—— 与 `probe` 同类：用户按下去的那一下
+   *   才有。浮窗自己不去问后端（那是主进程的事，见文件头），这里只是转达一下。
+   */
+  more: () => ipcRenderer.invoke('app:outMore'),
 });

@@ -402,9 +402,18 @@
       <p class="sub bad hidden" id="jobs-error"></p>
       <ul id="job-list" class="jobs"></ul>
       <p class="sub" id="jobs-empty">这个站点上还没有你的作业。点「新建…」挑一个插件起一条。</p>
+      <!-- ★★ 这一块在**作业结束之后仍然留着**：失败原因（「作业状态」那一句，
+           含退出码）从前恰好在结束那一刻从界面上消失 —— 而那正是唯一想看它的时候。
+           ★ 底下那个按钮按需取一次日志（走的是右栏同一条 op）。作业结束之后右栏
+           就收了（那时它没有内容可说），而"为什么失败"恰恰在那一刻最该看得见。 -->
       <div id="job-detail" class="hidden">
         <h3>选中的那一条</h3>
         <dl class="kv" id="kv"></dl>
+        <p class="sub">
+          <button id="btn-joblog" class="ghost tiny">看作业日志</button>
+          <span id="joblog-meta" class="dim"></span>
+        </p>
+        <div id="joblog-body" class="joblog hidden"></div>
       </div>
       <p class="sub row-spaced">
         <strong>关掉窗口同样会结束会话</strong>；但合盖、断网、断电不会 ——

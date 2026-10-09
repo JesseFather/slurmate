@@ -54,3 +54,35 @@ function agoText(ts) {
   const m = Math.floor(s / 60);
   return m < 90 ? `${m} 分钟前` : `${Math.floor(m / 60)} 小时前`;
 }
+
+/** 字节数说成人话。日志的体量从几 KB 到几十 MB，用同一个单位都不好读。 */
+function bytesText(n) {
+  if (typeof n !== 'number') return '';
+  if (n < 1024) return `${n} 字节`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 一格作业日志（`op_job_log` 回来的那一格）该怎么读。**三态在这里判定，只此一处。**
+ *
+ * ★★ 两个渲染页面都要画同一份数据（浮窗右栏、作业屏的详情），而"把取不到画成
+ *    确实没有"正是这一整块最容易犯的错 —— 一份数据两处画法，漂的那一处不会报错。
+ *    所以判定收在这里，两边只负责把结果摆上去。
+ *
+ * ★ 返回的 `kind` 是三种**互斥**的形态：
+ *      'absent'  —— **确实没有这一份**（文件不在）。不出现，而不是画一个空框
+ *      'na'      —— **取不到**（文件在，但过不了安全检查 / 打不开）。要说明是哪一条
+ *      'text'    —— 读到了。`text` 可能是空串（"它确实还没有说任何话"）
+ */
+function logCellOf(cell) {
+  if (cell === null || cell === undefined) return { kind: 'absent' };
+  const path = cell.path || '';
+  if (cell.why) return { kind: 'na', why: cell.why, path };
+  const bits = [];
+  if (cell.lines) bits.push(`${cell.lines} 行`);
+  if (cell.bytes) bits.push(bytesText(cell.bytes));
+  // ★ 「这是尾部」必须说出来：拿不全的时候不说，用户会以为那就是全部。
+  if (cell.truncated) bits.push('（这是尾部，前面还有）');
+  return { kind: 'text', text: cell.text || '', meta: bits.join('　'), path };
+}

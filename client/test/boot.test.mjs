@@ -602,6 +602,8 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 连接测一次延迟（`app:probeActive`）。少了它们，那两条栏停上去
                     // 什么都不发生 —— 而"点了没反应"在界面上是查不出原因的。
                     'app:hover', 'app:probeActive',
+                    // 右栏那两条：那个「更多」按钮，以及作业屏上按需取一次日志。
+                    'app:outMore', 'app:jobLog',
                     // 工作区：一条连接指到一个工作区（多对一），工作区被引用计数回收。
                     // 切走一个「独占」的工作区会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
@@ -5990,4 +5992,151 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
   assert.match(said, /作业日志目录/, `实际说了：${said}`);
   assert.match(said, /提交的作业会起不来/, '要说清后果，不是一句"没成"');
   assert.match(said, /Permission denied/, '根因（远端那句原话）也要带上');
+});
+
+test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后不再白花 RPC）', async (t) => {
+  // ★★ 「收起」走的是窗口那一层（鼠标几何 / Esc），主进程**拿不到回调** —— 所以
+  //    "停"这件事只能由那个定时器自己发现（它每拍看一眼 `hoverOpenSide()`）。
+  //    靠别处记得来停一次的话，一次没停住的后果是**永远**每 1.5 秒问一次站点。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+    calls.cursor.x = 0; calls.cursor.y = 0;
+  });
+  await invoke('app:debug', 'reset');
+  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // ★★ 判据是**发出去的 RPC 条数**，不是"推了多少份数据"。
+  //    推那一头本来就有一道闸（`pushOutToHover` 自己看 `hoverOpenSide()`），
+  //    所以"收起之后不再推"在**没停轮询**的代码上也成立 —— 用推来判的话，
+  //    这条判据对"定时器还在跑"这件事完全失明（实测：变异 R8 就是这么逃过去的）。
+  //    而真正要紧的代价在 RPC 上：1.5 秒一次，一直问下去。
+  // 起一条会话：**没有 `session_id` 时那条 op 根本不会被发出去**
+  // （`jobLog()` 在登记之前就返回了），于是"问了多少次"这个判据恒为 0 ——
+  // 一条永远绿的断言。
+  // ★ 夹具的登记延迟默认是 8 秒（真集群上的样子）。这条用例不考它，压到 300 毫秒。
+  idx._test.getBackend().enrollDelayMs = 300;
+  assert.equal((await invoke('app:start', {}, 'code-server')).ok, true);
+  const ctl = onlyCtl(idx);
+  for (let i = 0; i < 60 && !ctl.sessionId; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(ctl.sessionId, '前置：这条会话要真的登记上');
+
+  const back = idx._test.getBackend();
+  const realRpc = back.rpc.bind(back);
+  let jobLogCalls = 0;
+  back.rpc = (req) => {
+    if (req && req.op === 'job_log') jobLogCalls += 1;
+    return realRpc(req);
+  };
+  t.after(() => { back.rpc = realRpc; });
+
+  // ★ 用**钉住**而不是"停靠一下就松手"：浮窗是懒建的、而且整个用例文件共用同一个
+  //   窗口，`calls.views` 里还压着前面几十条用例建的**插件视图** —— 拿"最后一个"
+  //   当浮窗会拿到别的东西。这里按它收到的通道找它。
+  //   钉住还顺带免掉鼠标看门狗：不钉的话，夹具的鼠标坐标（上一条用例留下的 0,0）
+  //   落在左边那条栏上，120 毫秒之后浮窗就被收掉了。
+  await invoke('app:hover', { side: 'right', pin: true });
+  const hv = calls.views.find((v) => v.webContents.handlers['send:hover:state']);
+  assert.ok(hv, '浮窗那一层要建出来');
+  const rd = () => (hv.webContents.handlers['send:hover:data'] || [])
+    .filter((m) => m && m.side === 'right');
+  // ★ 那一份是**问出来的**，而 `app:hover` 不等它（主进程那边 `startOutPoll` 立刻返回，
+  //   数据到了才推）。当场断言的话，判据变成"IPC 的回程比一次 RPC 还慢"。
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.ok(rd().length >= 1, '★ 一停靠就该推一份（那时右栏是空的，看起来像坏了）');
+  assert.ok('out' in rd()[rd().length - 1], '推的是作业输出那一份');
+  assert.ok(jobLogCalls >= 1, '而那一份是**问出来的**');
+  await new Promise((r) => setTimeout(r, 2000));
+  assert.ok(jobLogCalls >= 2, '开着的时候它一直在问（1.5 秒一拍）');
+
+  // 收起 ⇒ 一拍之后它自己停
+  await invoke('app:hover', { side: null });
+  assert.equal(idx._test.getWindow().hoverOpenSide(), null, '前置：确实收起来了');
+  const n1 = jobLogCalls;
+  await new Promise((r) => setTimeout(r, 2500));
+  assert.equal(jobLogCalls, n1,
+    '★ 收起之后**一次都不许再问** —— 没有读者的轮询只是在两个进程之间搬字节，'
+    + '而退化成 exec 时那还是每 1.5 秒一个 sshd fork');
+
+  // ★★ 另一条路（**不钉住**，只是停靠）也要起轮询。
+  //    两条路在界面上看起来一模一样，而代码里是两个分支 —— 只给其中一条加上
+  //    `startOutPoll()` 的话，另一条的症状是"点一下钉住，右栏永远是空的"。
+  //    （实测：这一条正是写这段时抓出来的 —— 钉住那条路漏掉了。）
+  calls.cursor.x = 1275; calls.cursor.y = 400;      // 落到右边那条栏上
+  const n2 = jobLogCalls;
+  await invoke('app:hover', { side: 'right' });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(jobLogCalls > n2, '★ 不钉住那条路也要起轮询');
+  assert.equal(idx._test.getWindow().hoverOpenSide(), 'right', '前置：它还开着');
+  await invoke('app:hover', { side: null });
+});
+
+test('★ 作业屏「看作业日志」：没连站点时如实说，而不是画一个空框', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
+  await invoke('app:debug', 'reset');
+  // ★ 先断开：上一条用例可能刚连过，而"没连站点"这一支只在真的没连时走得到
+  //   （不显式断的话它会落到 RPC 上，报一句 `not_found` —— 而那条路是另一件事）。
+  await invoke('app:disconnect');
+  const r = await invoke('app:jobLog', { session_id: 'whatever' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /没有连着的站点/);
+
+  // 连上之后：这条 op 走的是**直连 RPC**，不经过"前台是哪一条" —— 作业结束之后
+  // 右栏就收了，而"为什么失败"恰恰在那一刻最该看得见。
+  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const r2 = await invoke('app:jobLog', { session_id: 'nope', lines: 50 });
+  assert.equal(r2.ok, false, '假站点里没有这条会话 ⇒ not_found，而不是一份编出来的日志');
+  assert.equal(await invoke('app:outMore').then((x) => x.ok), true);
+});
+
+test('★★ 作业一结束，右栏自己收起来（那时它没有内容可说）', async (t) => {
+  // ★ 判据与面板上那个点、以及那个轮询自己停下来的判据**同源**（有没有作业在跑）。
+  //   三处各写一份的话，漂的那一处表现为"作业停了，浮窗还挂在那儿显示旧内容" ——
+  //   用户看到的是"它还在跑"。
+  const idx = require('../src/main/index.js');
+  t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
+  await invoke('app:debug', 'reset');
+  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  const back0 = idx._test.getBackend();
+  back0.enrollDelayMs = 300;   // 同上：这条用例不考登记延迟
+  // ★★ 先清掉**站点**上还占着位置的会话：本站上限是 1，而前面那条用例开的会话
+  //    一直跑着 —— 不清的话这一次 `app:start` 会被站点拒（"已经有 1 个会话占着位置"），
+  //    而症状是"这条用例的前置条件永远不成立"，指不回原因。
+  back0.debugReap();
+  assert.equal((await invoke('app:start', {}, 'code-server')).ok, true);
+  // ★ 按**槽**取那一条，不用 `onlyRec`（它取的是 map 里的**第一个**，
+  //   而前面几条用例可能还留着一条没被回收的记录 —— 于是这条判据会去问一个
+  //   根本不是刚起来的那条会话，症状是"前置不成立"）。
+  const shell = idx._test.getWindow();
+  const rec = idx._test.getSessions().get(shell.front);
+  assert.ok(rec && rec.controller, '前置：刚起来的那条会话要在表里');
+  const ctl = rec.controller;
+  for (let i = 0; i < 60 && !ctl.sessionId; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(ctl.sessionId, '前置：这条会话要真的登记上');
+  await invoke('app:hover', { side: 'right', pin: true });
+  assert.equal(shell.hoverOpenSide(), 'right', '前置：右栏开着');
+
+  const live = () => {
+    const all = calls.windows[0].webContents.handlers['send:session:states'] || [];
+    const last = all[all.length - 1];
+    return Boolean(last && (last.sessions || []).some((x) => x.live));
+  };
+  await invoke('app:stop', { slot: shell.front });
+  for (let i = 0; i < 80 && live(); i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(live(), false, '前置：作业确实停了');
+  assert.equal(shell.hoverOpenSide(), null,
+    '★ 作业停了右栏就该收 —— 挂在那儿显示旧内容，看起来像它还在跑');
 });

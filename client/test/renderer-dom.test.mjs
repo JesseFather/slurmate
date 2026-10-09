@@ -47,6 +47,15 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'panel.js'), 'utf8');
+/**
+ * 两个渲染页面共用的那三个小东西（`cel` / `na` / `agoText`）。
+ *
+ * ★★ **必须一起载进来**，而且顺序在前：`panel.html` 就是这么排的（见那里那段
+ *    注释），而这位置一旦反了 `panel.js` 一进来就 ReferenceError。
+ *    ★ 少了它，"面板上某一块真的画出来了"这类断言会在一个**空壳**上通过 ——
+ *      因为用到它的那几条路径一进去就抛，而 harness 把它们咽在 Promise 里了。
+ */
+const DOM_SRC = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'dom.js'), 'utf8');
 
 /** 摘掉最后那一行 `init().catch(...)`。 */
 function withoutInit(src) {
@@ -132,6 +141,7 @@ function boot(src) {
     requestAnimationFrame: (f) => { f(); return 1; },
     setTimeout, clearTimeout, console, Promise, JSON, Math, Number, String, Object, Array,
   });
+  vm.runInContext(DOM_SRC, ctx, { filename: 'dom.js' });
   vm.runInContext(withoutInit(src), ctx, { filename: 'panel.js' });
   return {
     byId,
@@ -557,3 +567,102 @@ function childrenOf(e) {
   }
   return out;
 }
+
+test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在那一刻被藏起来）', () => {
+  // ★★ 这一条守的是一个"最该看见的时候看不见"的缺陷：`#kv`（含「作业状态」那一句，
+  //    也就是 `jobstate.js` 译好的失败原因与退出码）从前的可见性判据是
+  //    `st !== 'ended'` —— 而作业一结束会话就进 `ended` ⇒ **原因当场消失**。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'jobs';"
+    + "SESS = { sessions: [{ slot: 'a', service: '编辑器', live: false, snap: null }],"
+    + " front: 'a' };");
+  h.fn('renderSnapshot')({
+    state: 'ended', sessionId: 's1', jobId: '42',
+    jobText: '被抢占（Slurm: PREEMPTED）', jobExitCode: '143:0',
+    hbAgeMs: 1000, tunnelState: 'stopped', resources: {}, gresText: null,
+  });
+  assert.equal(h.byId.get('job-detail').classList.contains('hidden'), false,
+    '★ 结束之后那一格仍然要露 —— 失败原因正是在那一刻才要看');
+  const kv = h.byId.get('kv');
+  assert.match(kv._text || childrenOf(kv).map((x) => x._text).join(' '), /作业状态/,
+    '而「作业状态」那一行要在里面');
+
+  // ★ 反过来的那一半：`idle`（还没有过任何会话）仍然不露 —— 那时没有任何东西可说。
+  h.run("SESS = { sessions: [], front: null };");
+  h.fn('renderSnapshot')(null);
+  assert.equal(h.byId.get('job-detail').classList.contains('hidden'), true,
+    '一会儿都没跑过的时候不该摆一个空的详情块');
+});
+
+test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按退出码分**', () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const notices = () => h.byId.get('notices').children.map(
+    (n) => (n.children || []).map((c) => c._text).join(' '));
+  h.run("SCREEN = 'jobs';"
+    + "SESS = { sessions: [{ slot: 'a', live: false, snap: null }], front: 'a' };");
+
+  const ended = (slot, ec) => h.fn('renderSnapshot')({
+    state: 'ended', sessionId: 's1', jobId: '42', jobText: `结束了（退出码 ${ec}）`,
+    jobExitCode: ec, hbAgeMs: 0, tunnelState: 'stopped', resources: {},
+  });
+
+  ended('a', '143:0');
+  const after1 = notices();
+  assert.match(after1[0] || '', /结束了/);
+  assert.match(after1[0] || '', /错误/, '★ 非零退出码 ⇒ 那一档是「错误」，不是一句平静的信息');
+  assert.equal(after1.length, 1);
+
+  // ★ 同一份快照再来一次（推送会反复来）**不许再报一遍** —— 判据是"上一轮还不是
+  //   终态"，不是"状态是 ended"；后者会在每一次推送时都重复一遍。
+  ended('a', '143:0');
+  assert.equal(notices().length, 1, '同一件事只说一次');
+
+  // 而干净收尾是 info 那一档
+  h.run("SESS = { sessions: [{ slot: 'b', live: false, snap: null }], front: 'b' };");
+  ended('b', '0:0');
+  const n0 = notices()[0] || '';
+  assert.match(n0, /0:0/);
+  assert.equal(/错误/.test(n0), false, '★ `0:0` 是干净收尾 —— 报成错误会让用户去查一个不存在的问题');
+});
+
+test('★★ 「看作业日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'jobs';"
+    + "SESS = { sessions: [{ slot: 'a', live: false, snap: { sessionId: 's1' } }], front: 'a' };");
+  const shown = () => {
+    const b = h.byId.get('joblog-body');
+    return [b._text].concat(childrenOf(b).map((x) => x._text)).join(' | ');
+  };
+
+  // ① 两份都有；`.err` 是 `null` ⇒ 那一块**不出现**（设计律 1：空框在说"本该有东西"）
+  h.run('window.slurmate.jobLog = async () => ({ ok: true, data: {'
+    + " out: { path: '/h/.slurmate/logs/slurm-1.out', bytes: 40000, lines: 200,"
+    + " truncated: true, mtime: 1, text: '宿主的一行\\n服务的一行', why: null },"
+    + ' err: null } });');
+  await h.run('loadJobLog()');
+  assert.match(shown(), /标准输出/);
+  assert.match(shown(), /服务的一行/);
+  assert.match(shown(), /这是尾部/, '★ 拿不全的时候必须说出来 —— 不说的话用户会以为那就是全部');
+  assert.equal(/标准错误/.test(shown()), false, '`.err` 是 null ⇒ 那一块不出现');
+
+  // ② 「取不到」与「确实没有」长得**不一样**（并成一句的话，一个模式不对的日志
+  //    会被读成"这台站点上没有日志"）
+  h.run('window.slurmate.jobLog = async () => ({ ok: true, data: {'
+    + " out: { path: '/h/a.out', bytes: null, lines: null, truncated: null,"
+    + " mtime: null, text: null, why: 'component_group_or_world_writable' },"
+    + ' err: null } });');
+  await h.run('loadJobLog()');
+  assert.match(shown(), /取不到：component_group_or_world_writable/);
+  assert.match(shown(), /\/h\/a\.out/, '路径要给出来（可复制）');
+
+  // ③ 两份都没有 ⇒ 一句"还没有写出任何东西"，而不是一个空框
+  h.run("window.slurmate.jobLog = async () => ({ ok: true, data: { out: null, err: null } });");
+  await h.run('loadJobLog()');
+  assert.match(shown(), /还没有写出任何东西/);
+
+  // ④ 整条 op 失败（老守护进程没有这个能力）⇒ 如实说，不画空框
+  h.run("window.slurmate.jobLog = async () => ({ ok: false, unsupported: true,"
+    + " error: '这个站点太旧' });");
+  await h.run('loadJobLog()');
+  assert.match(shown(), /这个站点太旧/);
+});

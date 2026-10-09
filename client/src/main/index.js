@@ -2690,6 +2690,15 @@ async function onSessionChange(slot) {
       plugin: (sessions.get(v.slot) || {}).plugin || null,
     })));
     win.pushSessions(views, frontSlot());
+    // ★ 「作业一结束右栏就收起来」那条规矩的落点。判据与面板上那个点、以及
+    //   `startOutPoll` 自己那一条**同源**（有没有作业在跑）—— 三处各写一份的话，
+    //   漂的那一处表现为"作业停了，浮窗还挂在那儿显示旧内容"，看起来像它还在跑。
+    //   ★ 位置在这里而不是 `startOutPoll` 的定时器里：那个定时器 1.5 秒才看一眼，
+    //     而"结束了"这件事本身有推送，不必等下一拍。
+    if (win.hoverOpenSide() === 'right'
+        && ![...sessions.keys()].some((k) => occupied(k))) {
+      win.hideHover();
+    }
   } catch (e) {
     win.pushNotice('error', '更新界面时出错：' + e.message);
   }
@@ -3383,6 +3392,113 @@ function hoverLink() {
   };
 }
 
+// ── 右栏：作业输出 ──────────────────────────────────────────────────────────
+//
+// ★★ 间隔**跟着通道形态走**，判据与 `sitePollMs()` 逐字相同（`backend.resident`）：
+//    常驻通道健康时 1.5 秒；退化成 exec 时 10 秒。1.5 秒一次 exec 不是"实时"，
+//    那是每 1.5 秒 fork 一个 python —— 会话里那条 `status` 从 30s 提到 60s 正是
+//    为同一件事。
+//
+// ★ 它**只在右栏开着的时候**跑（`win.hoverOpenSide() === 'right'`）。没有读者的时候
+//   轮询只是在两个进程之间搬字节，还白花一次 RPC。
+//
+// ★ 「作业一结束右栏就收了」那条规矩的落点在这里：定时器自己发现前台那条不再活着，
+//   停掉并把最后取回的那一段留在 `out.data` 里（作业屏按需再取一次走的是同一条 op，
+//   见 `app:jobLog`）。
+const OUT_POLL_MS = 1500;
+const OUT_POLL_EXEC_MS = 10000;
+const OUT_LINES = 200;
+const OUT_LINES_MORE = 2000;
+const OUT_STALE_MS = 5000;
+let out = { slot: null, data: null, error: null, unsupported: false, at: 0 };
+let outTimer = null;
+let outFetching = false;
+let outLines = OUT_LINES;
+
+function outPollMs() {
+  return backend && backend.resident === true ? OUT_POLL_MS : OUT_POLL_EXEC_MS;
+}
+
+/** 前台那一条的会话记录（没有会话时 null）。 */
+function frontRec() {
+  const slot = frontSlot();
+  return slot ? (sessions.get(slot) || null) : null;
+}
+
+async function refreshOut() {
+  const slot = frontSlot();
+  const rec = slot ? sessions.get(slot) : null;
+  const c = rec && rec.controller;
+  if (!c) {
+    out = { slot, data: null, error: null, unsupported: false, at: Date.now() };
+    pushOutToHover();
+    return;
+  }
+  // ★ 一次只飞一个：1.5 秒一拍，而一次 RPC 完全可能比一拍还慢（退化成 exec 时
+  //   尤其如此）。并发两次的结果是"后回来的可能是更旧的一份"，而它们写的还是
+  //   同一个 `out`。
+  if (outFetching) return;
+  outFetching = true;
+  try {
+    const r = await c.jobLog(outLines);
+    out = {
+      slot,
+      data: r.ok ? r.data : null,
+      error: r.ok ? null : (r.error || '没有说明原因'),
+      unsupported: Boolean(r.unsupported),
+      at: Date.now(),
+    };
+  } finally {
+    outFetching = false;
+  }
+  pushOutToHover();
+}
+
+/** 把右栏要的那一份推给浮窗。**只在右边那一块开着的时候** —— 没有读者。 */
+function pushOutToHover() {
+  if (!win || win.hoverOpenSide() !== 'right') return;
+  win.pushHoverData({
+    side: 'right',
+    out: out.data,
+    outError: out.error,
+    outUnsupported: out.unsupported,
+    outLines,
+    // 前台那一条的作业号与状态 —— 右栏的标题要能说出"这是哪一份作业"。
+    outJobId: (frontRec() || {}).controller
+      ? (frontRec().controller.snapshot().jobId || null) : null,
+  });
+}
+
+function startOutPoll() {
+  stopOutPoll();
+  outLines = OUT_LINES;
+  refreshOut();
+  outTimer = setInterval(() => {
+    // ★ 两个"该停了"的判据都在这里，而不是靠别处记得来停一次：
+    //   · 右栏收起来了（浮窗收起走的是窗口那一层，主进程拿不到回调）
+    //   · 前台那条不再活着（作业结束了 —— 右栏那时没有内容可说）
+    if (!win || win.hoverOpenSide() !== 'right' || !occupied(frontSlot())) {
+      stopOutPoll();
+      return;
+    }
+    refreshOut();
+  }, outPollMs());
+  if (outTimer.unref) outTimer.unref();
+}
+
+function stopOutPoll() {
+  if (outTimer) { clearInterval(outTimer); outTimer = null; }
+  out = { slot: null, data: null, error: null, unsupported: false, at: 0 };
+  outLines = OUT_LINES;
+}
+
+/** 用户按了「更多」：把行数提到上限再拉一次。 */
+async function outMore() {
+  outLines = OUT_LINES_MORE;
+  await refreshOut();
+  return { ok: true, lines: outLines };
+}
+
 /**
  * 左栏那个圆点该是什么颜色。**不显示、不弹窗、不写日志** —— 它是状态，不是提示。
  *
@@ -3434,6 +3550,7 @@ function stopSitePoll() {
 
 async function teardownConnection() {
   stopSitePoll();
+  stopOutPoll();
   await backend.close();
   whoami = null;
   connectedConnId = null;   // 与 whoami 同生共死，理由见它的声明处
@@ -4849,13 +4966,55 @@ function registerIpc() {
       //   `pushSiteToHover` 会推给一个还不存在的 webContents（静默丢掉），
       //   而症状是"头一次点钉住，面板是空的，得挪开再停一次才好"。
       const pinned = await win.toggleHoverPin(side);
-      if (pinned) pushSiteToHover(side);
+      // 解开钉住 = 收起来了（那一下不推、也不起轮询）。
+      if (!pinned) return { ok: true, pinned };
+      if (side === 'left') pushSiteToHover(side);
+      if (side === 'right') startOutPoll();
       return { ok: true, pinned };
     }
     await win.showHover(side);
-    if (side === 'left') refreshSiteIfStale();
-    pushSiteToHover(side);
+    // ★ 两条路（停靠 / 钉住）都要做同样的事：那条"钉住走的是另一个分支"的缝
+    //   漏掉任何一半，症状是"点一下钉住，右栏永远是空的"（或者左边不刷新）——
+    //   而两条路在界面上看起来一样。
+    if (side === 'left') { refreshSiteIfStale(); pushSiteToHover(side); }
+    // ★ 右栏一开就起轮询，而**它自己会停**（见 `startOutPoll` 里那两条判据）——
+    //   「收起」走的是窗口那一层（鼠标几何 / Esc），主进程拿不到回调，所以停这件事
+    //   只能由这个定时器自己发现。`pushSiteToHover` 那一套同理：左边那份是**推**
+    //   过来的，右边这份要**拉**（它在跑着的时候一直在变）。
+    if (side === 'right') startOutPoll();
     return { ok: true, pinned: null };
+  });
+
+  /** 右栏那个「更多」：把行数提到上限再拉一次（用户往上滚要更多历史时按）。 */
+  send('app:outMore', async () => outMore());
+
+  /**
+   * 按需取**某一个会话**的作业日志（作业屏上那份详情用）。
+   *
+   * ★ 它与右栏那个轮询走**同一条 op**，但**不经过 `frontSlot()`**：作业结束之后
+   *   右栏就收了，而"为什么失败"恰恰在那一刻最该看得见 —— 那条会话行在站点的
+   *   `released_keep` 窗口内还在，所以同一条 op 照样答得上来。
+   *   ★ 这也让它能问**不是前台**的那一条（作业屏上点哪条就问哪条）。
+   */
+  send('app:jobLog', async (payload = {}) => {
+    const sid = payload && payload.session_id;
+    if (!sid) return { ok: false, error: '没有说清是哪一条会话。' };
+    if (!backend || !backend.connected) return { ok: false, error: '没有连着的站点。' };
+    const req = { op: 'job_log', session_id: sid };
+    if (payload.lines) req.lines = payload.lines;
+    let resp = null;
+    try {
+      resp = await backend.rpc(req);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || '没有回应' };
+    }
+    if (resp && resp.ok && resp.data) return { ok: true, data: resp.data };
+    const err = (resp && resp.error) || {};
+    if (err.kind === 'unknown_op') {
+      return { ok: false, unsupported: true,
+               error: '这个站点的守护进程还没有"看作业日志"这个能力（升级之后才有）。' };
+    }
+    return { ok: false, error: err.detail || err.kind || '控制节点没有说明原因' };
   });
 
   /** 把某一条会话抬到面板上面。**纯界面动作** —— 它不改任何框架状态。 */

@@ -288,6 +288,22 @@ function frontSlot() {
   return (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot || null;
 }
 
+/**
+ * 作业结束那一刻，那一句提示该是哪一档。
+ *
+ * ★ 判据是**退出码**（`jobExitCode` 是 Slurm 的原话 `"143:0"`），不是状态名字：
+ *   状态名字已经被 `jobstate.js` 译成人话了，而"好没好"这件事在那个译文里读不出来
+ *   （"完成"与"被抢占"都可能带一个非零退出码）。`0:0` 是"干净地结束"。
+ * ★ 退出码缺席时按 info —— **猜一个"失败"比不猜更坏**（用户会去查一个不存在的问题）。
+ */
+function jobEndedKind(sn) {
+  const ec = sn && sn.jobExitCode;
+  return typeof ec === 'string' && !/^0:0$/.test(ec) ? 'error' : 'info';
+}
+
+/** 上一次为**哪个槽**报过"作业结束了"（只报一次，见 renderSnapshot 里那一条）。 */
+let lastEndedSlot = null;
+
 function renderSnapshot(s) {
   lastSnap = s || null;
   const bar = $('statusbar');
@@ -355,9 +371,23 @@ function renderSnapshot(s) {
   //   他刚才点开的作业列表就没了。
   //
   //   这里只留**它确实该管的那两格**：状态条上的按钮、以及前台那一条的详情。
-  const live = Boolean(s) && st !== 'idle' && st !== 'ended';
-  $('job-detail').classList.toggle('hidden', !(live && SCREEN === 'jobs'));
-  if (live) renderKv(s);
+  // ★★ `ended` **也要留**。从前这一格判的是 `st !== 'ended'`，而作业一结束会话就
+  //    进 `ended` ⇒ **失败原因（「作业状态」那一句，含退出码）恰好在结束那一刻从
+  //    界面上消失** —— 而那正是唯一想看它的时候。
+  //    `idle`（还没有过任何会话）仍然不露：那时没有任何东西可说。
+  const hasDetail = Boolean(s) && st !== 'idle';
+  $('job-detail').classList.toggle('hidden', !(hasDetail && SCREEN === 'jobs'));
+  if (hasDetail) renderKv(s);
+
+  // ★ 作业**刚刚**结束的那一下，把那一句也送进提示流：切一屏之后再回来，它还在。
+  //   判据是"上一轮还不是终态、这一轮是了"，不是"状态是 ended" —— 后者会在每一次
+  //   推送时都重复一遍。
+  const endedNow = (st === 'ended' || st === 'error')
+    && lastEndedSlot !== (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
+  if (endedNow) {
+    lastEndedSlot = (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
+    if (s) notice(jobEndedKind(s), s.jobText || '作业已结束。');
+  }
 
   renderWorkspaceSelectors();
   // 工作区下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
@@ -583,6 +613,49 @@ function renderKv(s) {
     dd.textContent = v;
     dl.append(dt, dd);
   }
+}
+
+/**
+ * 按需取一次日志并画在详情底下。走的是**右栏同一条 op**。
+ *
+ * ★ 之所以是"按需"而不是"转存一份在这里"：作业结束之后那条会话行在站点的
+ *   `released_keep` 窗口内还在，同一条 op 照样答得上来 —— 再取一次与服务端记一份，
+ *   结果一样而少一处会漂的状态。
+ *
+ * ★ 三态怎么判在 `dom.js` 的 `logCellOf()` 里（浮窗那一页用的是同一个函数）：
+ *   两处各判一遍的话，漂的那一处不会报错。
+ */
+async function loadJobLog() {
+  const s = frontSnap();
+  const box = $('joblog-body');
+  const meta = $('joblog-meta');
+  if (!s || !s.sessionId) { meta.textContent = '这一条还没有会话 ID。'; return; }
+  meta.textContent = '正在取…';
+  box.classList.remove('hidden');
+  box.textContent = '';
+  const r = await window.slurmate.jobLog({ session_id: s.sessionId, lines: 500 });
+  box.textContent = '';
+  if (!r || !r.ok) {
+    // **取不到**（或者这个站点太旧没有这个能力）—— 如实说，不画一个空框。
+    meta.textContent = '';
+    box.append(cel('p', 'na', (r && r.error) || '控制节点没有说明原因'));
+    return;
+  }
+  const d = r.data || {};
+  meta.textContent = '';
+  let any = false;
+  for (const [key, title] of [['out', '标准输出'], ['err', '标准错误']]) {
+    const it = logCellOf(d[key] === undefined ? null : d[key]);
+    if (it.kind === 'absent') continue;
+    any = true;
+    const blk = cel('div', 'block');
+    blk.append(cel('div', 'hd2', `${title}　${it.kind === 'text' ? it.meta : ''}`));
+    if (it.kind === 'na') blk.append(cel('p', 'na', `取不到：${it.why}`));
+    else blk.append(cel('div', null, it.text || '（这一份还是空的）'));
+    if (it.path) blk.append(cel('div', 'hd2', it.path));
+    box.append(blk);
+  }
+  if (!any) box.append(cel('p', 'sub', '这个作业还没有写出任何东西。'));
 }
 
 // ── 公钥 ────────────────────────────────────────────────────────────────────
@@ -2964,6 +3037,9 @@ async function init() {
   //   一条查询（守护进程会同步 fork `sacct`），而它回答的"过去发生了什么"不会
   //   自己变新。
   $('btn-history').onclick = () => loadHistory();
+  // 按需取一次日志。★ 它**不自动跑**：那是一次真的 RPC（退化成 exec 时是一次
+  // sshd fork），而作业屏是要反复刷的 —— 自动取等于每刷一次多 fork 一个 python。
+  $('btn-joblog').onclick = () => loadJobLog();
 
   // 重新加载打的是**前台**那一条 —— 屏幕只有一块，用户看的正是它。
   // ★ 面板里那一份挪到作业列表那一屏了（`#btn-jobs-reload`，打的是**选中**的

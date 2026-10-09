@@ -180,6 +180,18 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 .keyid code { font-size: 13px; color: #9cdcfe; word-break: break-all; }
 
 .mono { font-family: ui-monospace, Consolas, monospace; }
+
+/* 作业屏里那一块日志（按需取一次的那种）。★ 要能选中复制 —— 用户来这儿就是为了
+   把报错拿去搜。所以它不像界面文字那样禁止选中。 */
+.joblog {
+  margin: 8px 0 0; padding: 8px 10px; max-height: 320px; overflow-y: auto;
+  background: var(--bg-alt); border: 1px solid var(--border); border-radius: 3px;
+  font: 11px/1.6 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all; user-select: text;
+}
+.joblog .hd2 { color: var(--fg-dim); }
+.joblog .na { color: var(--warn); }
+.joblog .block + .block { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
 .grow-note { margin: 0 0 0 4px; align-self: center; }
 
 /* ── 区块标题行 ──

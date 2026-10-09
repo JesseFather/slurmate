@@ -185,6 +185,12 @@ contextBridge.exposeInMainWorld('slurmate', {
   //   （浮窗是原生视图，鼠标一进去边栏就收不到事件了，见 windows.js）。
   //   这里只表达"我停上去了"与"我点了一下"。
   hover: (payload) => ipcRenderer.invoke('app:hover', payload),
+  // 右栏那个「更多」：把行数提到上限再拉一次（用户往上滚要更多历史时按）。
+  outMore: () => ipcRenderer.invoke('app:outMore'),
+  // 按需取**某一条会话**的作业日志（作业屏上那份详情用）。它与右栏那个轮询走
+  // 同一条 op，但不经过"前台是哪一条"—— 作业结束之后右栏就收了，而"为什么失败"
+  // 恰恰在那一刻最该看得见。
+  jobLog: (payload) => ipcRenderer.invoke('app:jobLog', payload),
   reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 

@@ -16,7 +16,7 @@
 /**
  * hover.js —— 浮窗那一层（两条边栏滑出来的那块）。
  *
- * 左边 = **站点状态**，右边 = **作业输出**。一次只露一块。
+ * 左边 = **站点状态**，右边 = **作业输出**（标准输出 / 标准错误两块）。一次只露一块。
  *
  * ★★ **它不自己向后端问话。** 数据由主进程推 —— `op_cluster` 什么时候该问、
  *    问到了什么、有多旧，都由主进程那一处决定（`index.js` 的 `refreshSite`）。
@@ -38,6 +38,8 @@ const $ = (id) => document.getElementById(id);
 /** 最近一次推来的站点状态与链路状态。两样都在，因为浮窗里画的是它们的合影。 */
 let SITE = { data: null, error: null };
 let LINK = { connected: false, detail: null, hbAgeMs: null, rttMs: null, probeError: null };
+/** 右栏那一份：作业日志的两块。`data` 就是 `op_job_log` 的 `{out, err}`。 */
+let OUT = { data: null, error: null, unsupported: false, lines: 0, jobId: null };
 
 // ── 开 / 关 ────────────────────────────────────────────────────────────────
 window.hover.onState((m) => {
@@ -48,6 +50,9 @@ window.hover.onState((m) => {
   // ★ 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
   //   而"打开的那一瞬间是空的"看起来就像坏了。
   if (side === 'left') { renderLink(); renderCluster(); }
+  // ★ 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
+  //   而"打开的那一瞬间是空的"看起来就像坏了。
+  if (side === 'right') renderOut();
 });
 
 window.hover.onData((m) => {
@@ -56,8 +61,18 @@ window.hover.onData((m) => {
     SITE = { data: m.cluster, error: m.clusterError || null };
   }
   if (m.link !== undefined) LINK = Object.assign({}, LINK, m.link);
+  if (m.out !== undefined || m.outError !== undefined) {
+    OUT = {
+      data: m.out || null,
+      error: m.outError || null,
+      unsupported: Boolean(m.outUnsupported),
+      lines: m.outLines || 0,
+      jobId: m.outJobId || null,
+    };
+  }
   renderLink();
   renderCluster();
+  renderOut();
 });
 
 // ── 链路 ──────────────────────────────────────────────────────────────────
@@ -94,6 +109,160 @@ $('cl-probe').onclick = async () => {
   } finally {
     btn.disabled = false;
     renderLink();
+  }
+};
+
+// ── 右栏：作业输出 ────────────────────────────────────────────────────────
+//
+// ★★ **追加式绘制**，不是每轮重画。1.5 秒重画一次会把用户正在拖的选区**当场毁掉**
+//    —— 而"输出要能选中复制"正是这块浮窗存在的理由之一（另一条是能滚动）。
+//    所以：把这一轮拿到的尾部和**已经画进去的**那一份比对，只把多出来的那几行接上去。
+//
+// ★ 比对的是**行**，而且只往回找 600 行：窗口是"最后 N 行"，两次之间它只滑了几行，
+//   所以重叠一定在末尾附近。找不到重叠（文件被截断过、换过一份）就整块重画 ——
+//   那一次会毁掉选区，但它罕见，而"接错了"会把两段不相干的日志粘在一起。
+//
+// ★ **末尾那半行不画**：文件可能正被写到一半，最后一行还没有换行符。画出去的话，
+//   下一次它就会以完整的样子再出现一遍（重复），而且中间那一刻显示的是半句话。
+//   与服务端那边"丢掉窗口开头那半行"是同一条规矩的两头。
+const OUT_MAX_LINES = 4000;
+const OUT_LOOKBACK = 600;
+
+const lastCompleteLine = (t) => {
+  if (!t) return '';
+  if (t.endsWith('\n')) return t;
+  const i = t.lastIndexOf('\n');
+  return i < 0 ? '' : t.slice(0, i + 1);
+};
+
+const atBottomOf = (el) => (el.scrollHeight - el.scrollTop - el.clientHeight) < 4;
+
+function paintHalf(box, text) {
+  const neu = lastCompleteLine(text || '').split('\n');
+  if (neu.length && neu[neu.length - 1] === '') neu.pop();
+  const old = box._lines || [];
+  const atBottom = atBottomOf(box);
+
+  let k = -1;
+  if (old.length && neu.length) {
+    const max = Math.min(old.length, neu.length);
+    const floor = Math.max(1, max - OUT_LOOKBACK);
+    for (let n = max; n >= floor; n -= 1) {
+      let ok = true;
+      for (let i = 0; i < n; i += 1) {
+        if (old[old.length - n + i] !== neu[i]) { ok = false; break; }
+      }
+      if (ok) { k = n; break; }
+    }
+  }
+
+  if (k < 0) {
+    // 接不上（第一次、或者文件被截断/换过）⇒ 整块重画。
+    box.textContent = '';
+    box.append(document.createTextNode(neu.join('\n')));
+    box._lines = neu.slice();
+  } else if (k < neu.length) {
+    const add = neu.slice(k);
+    box.append(document.createTextNode((old.length ? '\n' : '') + add.join('\n')));
+    box._lines = old.concat(add);
+  }
+
+  // 顶上的上限：钉住很久的时候，DOM 不能无限涨。★ 只在**贴底**时砍，否则用户
+  // 正在看的那一段会在他眼皮底下移位。
+  if (atBottom && box._lines.length > OUT_MAX_LINES) {
+    box._lines = box._lines.slice(-Math.floor(OUT_MAX_LINES / 2));
+    box.textContent = '';
+    box.append(document.createTextNode(box._lines.join('\n')));
+  }
+
+  // ★★ **只在贴底时自动滚** —— 这是尾部视图唯一一条真正的交互规矩：用户翻上去
+  //    看历史时不许把他拽回来。
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+/**
+ * 一块（标准输出 / 标准错误）。`cell` 是 `op_job_log` 给的那一格。
+ *
+ * ★ 三态怎么判在 `dom.js` 的 `logCellOf()` 里，**只此一处** —— 作业屏那一块画的是
+ *   同一份数据，两处各判一遍的话，漂的那一处不会报错。
+ */
+function paintPane(halfId, boxId, metaId, cell) {
+  const half = $(halfId);
+  const box = $(boxId);
+  const meta = $(metaId);
+  const it = logCellOf(cell);
+  meta.textContent = it.kind === 'text' ? it.meta : '';
+  meta.title = it.path;
+
+  if (it.kind === 'absent') {
+    // **确实没有这一份**。空的那一块不出现（设计律 1）—— 一个空的输出框是在说
+    // "这里本该有东西"，而 `.err` 在正常情况下**就是**空的。
+    half.classList.add('hidden');
+    box.textContent = '';
+    box._lines = [];
+    return;
+  }
+  half.classList.remove('hidden');
+  if (it.kind === 'na') {
+    // **取不到**：文件在，但过不了安全检查或者打不开。★ 与"确实没有"必须长得
+    // 不一样 —— 并成一句的话，一个模式不对的日志会被读成"这台站点上没有日志"。
+    box.textContent = '';
+    box._lines = [];
+    box.append(cel('p', 'na', `取不到：${it.why}`));
+    meta.textContent = it.path;
+    return;
+  }
+  paintHalf(box, it.text);
+}
+
+function renderOut() {
+  const when = $('out-when');
+  const d = OUT.data;
+  when.textContent = '';
+
+  if (OUT.unsupported || OUT.error) {
+    // 整块取不到：两块都收起来，只留一句。**能力缺席与一次失败在这一层是同一种
+    // 画法**（都看不到东西），而区别由那句话本身说清。
+    $('out-half-out').classList.add('hidden');
+    $('out-half-err').classList.add('hidden');
+    when.className = 'dim';
+    when.textContent = OUT.unsupported ? '' : '';
+    const box = $('out-out');
+    const half = $('out-half-out');
+    half.classList.remove('hidden');
+    box.textContent = '';
+    box._lines = [];
+    box.append(cel('p', 'na', OUT.error || '取不到'));
+    $('out-out-meta').textContent = '';
+    return;
+  }
+  if (!d) {
+    when.textContent = '正在取…';
+    $('out-half-err').classList.add('hidden');
+    $('out-half-out').classList.remove('hidden');
+    return;
+  }
+  if (OUT.jobId) when.textContent = `作业 ${OUT.jobId}`;
+  paintPane('out-half-out', 'out-out', 'out-out-meta', d.out === undefined ? null : d.out);
+  paintPane('out-half-err', 'out-err', 'out-err-meta', d.err === undefined ? null : d.err);
+  // 两块都空 ⇒ 什么也不显示（一个空的输出框在说"这里本该有东西"）。
+  if ($('out-half-out').classList.contains('hidden')
+      && $('out-half-err').classList.contains('hidden')) {
+    $('out-half-out').classList.remove('hidden');
+    const box = $('out-out');
+    box.textContent = '';
+    box._lines = [];
+    box.append(cel('p', 'sub', '这个作业还没有写出任何东西。'));
+  }
+}
+
+$('out-more').onclick = async () => {
+  const btn = $('out-more');
+  btn.disabled = true;
+  try {
+    await window.hover.more();
+  } finally {
+    btn.disabled = false;
   }
 };
 

@@ -42,6 +42,8 @@ function mkEl(tag) {
     tagName: String(tag).toUpperCase(),
     children: [], className: '', value: '', title: '', disabled: false,
     onclick: null, _text: '',
+    // 右栏那两块各自滚动，"只在贴底时自动滚"要读这三个数（见 hover.js 的 atBottomOf）。
+    scrollTop: 0, scrollHeight: 0, clientHeight: 0,
     append(...kids) { for (const k of kids) e.children.push(k); },
     appendChild(k) { e.children.push(k); return k; },
     addEventListener() {},
@@ -71,6 +73,8 @@ function boot() {
   const subs = {};
   const doc = {
     createElement: (t) => mkEl(t),
+    // 追加式绘制就是靠文本节点把"多出来的那几行"接上去的（见 hover.js 的 paintHalf）。
+    createTextNode: (t) => ({ nodeType: 3, _text: String(t), textContent: String(t) }),
     getElementById(id) {
       if (!byId.has(id)) byId.set(id, mkEl('div'));
       return byId.get(id);
@@ -82,8 +86,10 @@ function boot() {
       onState: (fn) => { subs.state = fn; },
       onData: (fn) => { subs.data = fn; },
       probe: async () => ({ ok: true, rttMs: 12 }),
+      more: async () => { calls.more += 1; return { ok: true }; },
     },
   };
+  const calls = { more: 0 };
   const ctx = vm.createContext({ document: doc, window: win, Date, Promise, JSON,
     Math, Number, String, Object, Array, console });
   // ★ 顺序是承重的：`cel` / `na` / `agoText` 是**普通脚本之间的全局名字**
@@ -100,7 +106,19 @@ function boot() {
     walk(byId.get(id));
     return out.join(' | ');
   };
-  return { byId, text, subs, run: (e) => vm.runInContext(e, ctx) };
+  /** 与 `text` 同一趟走，但**不加分隔符** —— 右栏那两块是**追加式**画出来的，
+   *  "接上去的那一段"必须能一个字一个字地看（`text` 会在每段之间插 ` | `）。 */
+  const raw = (id) => {
+    const out = [];
+    const walk = (e) => {
+      if (!e) return;
+      if (e._text) out.push(e._text);
+      for (const k of e.children || []) walk(k);
+    };
+    walk(byId.get(id));
+    return out.join('');
+  };
+  return { byId, text, raw, subs, calls, run: (e) => vm.runInContext(e, ctx) };
 }
 
 /** 一份 `op_cluster` 的答案。`omit` 里列出的格子**整个键都不给**（= 取不到）。 */
@@ -216,4 +234,120 @@ test('★ 取不到集群信息时，那一句是**错误**，不是空白', () 
   const h = boot();
   h.subs.data({ cluster: null, clusterError: '守护进程没有响应', link: { connected: true } });
   assert.match(h.text('cl-body'), /取不到集群信息：守护进程没有响应/);
+});
+
+// ── 右栏：作业输出 ──────────────────────────────────────────────────────────
+
+/** 一格日志。`text` 走 `op_job_log` 给的那个形状（**止于换行**，见 paintHalf）。 */
+const cellOf = (text, extra = {}) => Object.assign({
+  path: '/h/.slurmate/logs/slurm-1.out', bytes: 100, lines: text.split('\n').length,
+  truncated: false, mtime: 1, text, why: null,
+}, extra);
+
+/**
+ * 推一份右边那一栏的数据。`out` / `err` 是**日志的两格**，而推过去的那个信封里
+ * `out` 是 `{out, err}` **整个容器** —— 与 `index.js` 的 `pushOutToHover` 逐字同形。
+ * ★ 夹具这里包错一层的话，`renderOut` 拿到的是"一格"，于是每一块都判成 absent，
+ *   而症状是"右栏永远说还没有写出任何东西" —— 一个看起来像后端没数据的现象。
+ */
+const pushOut = (h, out, err, more = {}) => h.subs.data(
+  Object.assign({ side: 'right', out: { out, err }, outLines: 200 }, more));
+
+test('★★ 右栏两块各画各的，而**空的那一块不出现**', () => {
+  const h = boot();
+  pushOut(h, cellOf('宿主的一行\n服务的一行\n'), cellOf('认证被拒\n'));
+  assert.match(h.text('out-out'), /服务的一行/);
+  assert.match(h.text('out-err'), /认证被拒/);
+  assert.doesNotMatch(h.text('out-out'), /认证被拒/, '两块不许串');
+  assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), false);
+
+  // ★ 空的那一块不出现（设计律 1）—— 一个空的输出框是在说"这里本该有东西"，
+  //   而 `.err` 在正常情况下**就是**空的。
+  pushOut(h, cellOf('宿主的一行\n'), null);
+  assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true,
+    '`.err` 是 null ⇒ 那一块不出现');
+});
+
+test('★★ 「取不到」与「确实没有」在右栏里长得必须不一样', () => {
+  const h = boot();
+  pushOut(h, cellOf('', { text: null, why: 'component_group_or_world_writable',
+                          bytes: null, lines: null }), null);
+  assert.match(h.text('out-out'), /取不到：component_group_or_world_writable/,
+    '★ 文件在、但读不了 —— 要说清是哪一条判据');
+  assert.equal(h.byId.get('out-half-out').classList.contains('hidden'), false);
+
+  // 而"确实没有这一份"是**不出现**，不是一行"取不到"
+  pushOut(h, null, null);
+  assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true);
+  assert.doesNotMatch(h.text('out-out'), /取不到/, '确实没有 ≠ 取不到');
+});
+
+test('★★ 追加式绘制：第二帧只接新行，不重画（重画会毁掉用户正在拖的选区）', () => {
+  const h = boot();
+  const box = () => h.byId.get('out-out');
+  pushOut(h, cellOf('A\nB\nC\n'), null);
+  assert.equal(h.raw('out-out'), 'A\nB\nC');
+  const nodes1 = box().children.length;
+
+  pushOut(h, cellOf('A\nB\nC\nD\nE\n'), null);
+  const t = h.raw('out-out');
+  assert.equal(t, 'A\nB\nC\nD\nE', '新的两行要接上去，而且接在旧的那一段之后');
+  assert.equal((t.match(/C/g) || []).length, 1, '★ 不许把已经画过的重画一遍（重复）');
+  assert.equal(box().children.length, nodes1 + 1,
+    '★ 只追加了一个节点 —— 整块重画的话节点数会变（而那正是毁掉选区的那种做法）');
+});
+
+test('★★ 窗口滑动之后仍然接得上（尾部视图最常见的那一帧）', () => {
+  const h = boot();
+  // 第一帧给 1..5，第二帧服务端只回 3..8（`lines` 是窗口，窗口会滑）
+  pushOut(h, cellOf('1\n2\n3\n4\n5\n'), null);
+  pushOut(h, cellOf('3\n4\n5\n6\n7\n8\n'), null);
+  assert.equal(h.raw('out-out'), '1\n2\n3\n4\n5\n6\n7\n8',
+    '★ 滑掉的那两行留在 DOM 里（用户翻上去还看得到），新接上的是 6/7/8');
+  assert.equal((h.raw('out-out').match(/5/g) || []).length, 1,
+    '★ 重叠的那一段不许画第二遍（拿"上一次的末尾"与"这一次的开头"对一遍正是为此）');
+});
+
+test('★★ 接不上就整块重画（文件被截断过 / 换过一份）', () => {
+  const h = boot();
+  pushOut(h, cellOf('甲\n乙\n丙\n'), null);
+  pushOut(h, cellOf('戊\n己\n庚\n'), null);
+  assert.equal(h.raw('out-out'), '戊\n己\n庚',
+    '★ 不相干的两段粘在一起比重新画一遍更坏');
+  assert.equal(/[甲乙丙]/.test(h.raw('out-out')), false, '旧的整段要被换掉，不是接在后面');
+});
+
+test('★★ 末尾那半行不画 —— 它下一次会以完整的样子再出现一遍', () => {
+  // ★ 作业正把一行写了一半（还没有换行符）时，日志文件里就是"半句话"。
+  //   画出去的话：中间那一刻显示的是半句，而下一帧那一行会**完整地再出现一次**
+  //   （两行一模一样的开头），看起来像服务把同一句说了两遍。
+  //   服务端那一头"丢掉窗口开头那半行"是同一条规矩的另一半。
+  const h = boot();
+  pushOut(h, cellOf('A\nB\n半'), null);
+  assert.equal(h.raw('out-out'), 'A\nB', '没写完的那一行不许画出去');
+  pushOut(h, cellOf('A\nB\n半行写完了\n'), null);
+  assert.equal(h.raw('out-out'), 'A\nB\n半行写完了', '写完了才出现，而且只出现一次');
+});
+
+test('★★ 「只在贴底时自动滚」—— 用户翻上去看历史时不许把他拽回来', () => {
+  const h = boot();
+  // ★ 先画一次：元素是 `getElementById` **按需建**的，没画过之前 `byId` 里没有它。
+  pushOut(h, cellOf('A\n'), null);
+  const box = () => h.byId.get('out-out');
+  // 贴底：滚到底之后新的内容要把它带着走
+  box().scrollHeight = 100; box().clientHeight = 100; box().scrollTop = 0;
+  pushOut(h, cellOf('A\n'), null);
+  pushOut(h, cellOf('A\nB\n'), null);
+  assert.equal(box().scrollTop, box().scrollHeight, '贴底时要跟着走');
+
+  // 翻上去了：不许动他的滚动位置
+  box().scrollHeight = 1000; box().clientHeight = 100; box().scrollTop = 10;
+  pushOut(h, cellOf('A\nB\nC\n'), null);
+  assert.equal(box().scrollTop, 10, '★ 用户在看历史 —— 拽回去就是把他正在读的那一段抽走');
+});
+
+test('★ 右栏「更多」按下去走桥上的 more()（浮窗自己不去问后端）', async () => {
+  const h = boot();
+  assert.equal(await h.byId.get('out-more').onclick(), undefined);
+  assert.equal(h.calls.more, 1);
 });

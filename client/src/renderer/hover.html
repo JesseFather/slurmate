@@ -31,11 +31,31 @@
 </div>
 
 <!-- ── 右边栏滑出来的那一块：**作业输出** ─────────────────────────────────
-     ★ 这一块在 P2 落地。它现在**什么都不显示**：没有作业在跑的时候，右栏本来
-       就没有内容可说，而一个空的输出框是在说"这里本该有东西"。 -->
+     ★ 按**流**分成上下两块：上面是标准输出（`.out`），下面是标准错误（`.err`）——
+       那就是作业日志的那两个文件。合成一块的话，"这个服务往 stderr 上抱怨了什么"
+       就没法单独看，而出故障时那恰恰是唯一有用的那半。
+
+     ★★ **空的那一块不出现**（设计律 1）：一个空的输出框是在说"这里本该有东西"，
+       而 `.err` 在正常情况下**就是**空的。哪一块有内容，哪一块才占地方。
+
+     ★ 两块各自独立滚动，所以"只在贴底时自动滚"是**逐块**判的：用户在上面那块
+       翻历史时，下面那块照样跟着新的走。 -->
 <div id="pane-right" class="pane hidden">
-  <div class="hd"><span class="st">作业输出</span></div>
-  <div id="out-body" class="body mono"></div>
+  <div class="hd">
+    <span class="st">作业输出</span>
+    <span id="out-when" class="dim"></span>
+    <span class="spacer"></span>
+    <button id="out-more" class="ghost tiny" type="button"
+            title="往上要更多历史（最多 2000 行）">更多</button>
+  </div>
+  <div class="half" id="out-half-out">
+    <div class="halfhd"><span class="nm">标准输出</span><span id="out-out-meta" class="dim"></span></div>
+    <div id="out-out" class="body mono"></div>
+  </div>
+  <div class="half" id="out-half-err">
+    <div class="halfhd"><span class="nm">标准错误</span><span id="out-err-meta" class="dim"></span></div>
+    <div id="out-err" class="body mono"></div>
+  </div>
 </div>
 
 <script src="dom.js"></script>
