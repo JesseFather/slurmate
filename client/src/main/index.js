@@ -1301,18 +1301,31 @@ function workspaceForSession(conn) {
 }
 
 /**
- * 保证这条连接落在一个**存在**的工作区里。
+ * 给一条**新建的**连接定下它的工作区。三种来路，按优先级：
  *
- * 新建的连接默认落到**当前活跃连接所在的工作区**（用户拍板的行为）；
- * 那也为空时（第一条连接、或活跃连接指向的工作区已经没了）才给它建一个新的空白工作区。
+ *   ① `want` 是一个工作区 id ⇒ 用它（界面在表单里显式选了那一个）
+ *   ② `want === null` ⇒ 建一个**空白**工作区（界面选了「＋ 新建空白工作区…」）
+ *   ③ `want === undefined` ⇒ 界面**没表态**，走默认规则
+ *      （`config.defaultWorkspaceFor`：同址已有连接 → 活跃连接的 → 都没有就建一个）
+ *
+ * ★ 「没表态」与「要一个新的」是**两件事**，所以一个用**缺席**、一个用 `null` 表示。
+ *   混起来的话，「同址已有连接」那条默认规则会被表单里那个默认选中项悄悄吃掉 ——
+ *   而它正是这次重做要修的那个症状（连同一台机器两次，拿到两份空白存储）。
+ *
+ * ★ 默认规则本身在 `config.js` 里，因为**界面也要读它**（表单那个下拉要把默认值
+ *   显示出来）。这里只负责把它落成配置。
+ *
+ * ★ `want` 那个工作区存不存在由**调用方**先查（`app:saveConnection` 在动配置之前
+ *   就查了）—— 那条路报错时不该留下半截改动。这里再查一次是给 ③ 用的：默认规则
+ *   给出的 id 可能已经没了（工作区被回收），那时落回 ② 。
  */
-function ensureConnectionWorkspace(conn) {
+function ensureConnectionWorkspace(conn, want) {
   if (conn.workspaceId && config.findWorkspace(cfg, conn.workspaceId)) return conn.workspaceId;
 
-  const active = config.activeConnection(cfg);
-  if (active && active.id !== conn.id && config.findWorkspace(cfg, active.workspaceId)) {
-    config.setConnectionWorkspace(cfg, conn.id, active.workspaceId);
-    return active.workspaceId;
+  const pick = want === undefined ? config.defaultWorkspaceFor(cfg, conn) : want;
+  if (pick && config.findWorkspace(cfg, pick)) {
+    config.setConnectionWorkspace(cfg, conn.id, pick);
+    return pick;
   }
   const workspace = {
     id: config.newWorkspaceId(),
@@ -3500,6 +3513,13 @@ function registerIpc() {
 
   // ── 连接条目的增删改 ──
   send('app:saveConnection', async (input) => {
+    // ★ 显式选的那个工作区**先查存在性**，查在 `upsertConnection` **之前**：
+    //   那一步会改 `cfg`（新条目进列表），而报错返回时不该留下半截改动。
+    //   `null` = 界面要一个新的空白工作区（那一种不需要查）。
+    //   ★ 只在**新建**时认这一格（见下面 `up.created` 那一段）。
+    if (input && input.workspaceId && !config.findWorkspace(cfg, input.workspaceId)) {
+      return { ok: false, error: '这个工作区不存在。' };
+    }
     // created=false 表示这条连接本来就在（同一个人、同一台主机、同一个端口）。
     // 界面据此说明「已存在，直接用它」，而不是让列表里悄悄多出一条一模一样的。
     const up = config.upsertConnection(cfg, input);
@@ -3532,9 +3552,20 @@ function registerIpc() {
     }
 
     if (!cfg.activeConnectionId) cfg.activeConnectionId = up.connection.id;
-    // 新连接要落进一个工作区 —— 默认是**当前活跃连接所在的工作区**，没有就建一个空白工作区。
-    // 复用已有条目那条路径走不到这里（它的 workspaceId 由 upsertConnection 原样带过来）。
-    if (up.created) ensureConnectionWorkspace(up.connection);
+    // 新连接要落进一个工作区。三种来路见 `ensureConnectionWorkspace`：
+    // 界面显式选的（表单里的「③ 工作区」）／界面要一个新的／界面没表态（默认规则）。
+    // ★ 「没表态」用**键缺席**表示 —— 不能用空串或 undefined 顶替：`null` 这个位置
+    //   已经被「要一个新的空白工作区」占了。
+    // ★ 复用已有条目那条路径走不到这里（它的 workspaceId 由 upsertConnection 原样带过来）。
+    if (up.created) {
+      ensureConnectionWorkspace(up.connection,
+        input && Object.prototype.hasOwnProperty.call(input, 'workspaceId')
+          ? input.workspaceId : undefined);
+      // ★ 上面那一步通过 `setConnectionWorkspace` 换的是**列表里那一份**（它 map 出
+      //   一份新的），所以返回给界面的那个对象要重新取一次。不取的话界面拿到的是
+      //   一个 `workspaceId` 为空的连接 —— 而它明明已经落进工作区了。
+      up.connection = cfg.connections.find((c) => c.id === up.connection.id) || up.connection;
+    }
     commitConfig();
     return {
       ok: true, connection: up.connection, created: up.created,
@@ -3619,6 +3650,20 @@ function registerIpc() {
    * ★ 而"这个插件在新工作区里用哪一份数据"由 `spaceFor` 说了算（没有就地建一份）：
    *   那正是窗口要搬过去的那一份，也是要落盘的那一格。
    */
+  /**
+   * 表单里那个「③ 工作区」要在用户**按保存之前**就把默认值显示出来，所以它得问一句。
+   *
+   * ★ 规则本身只有一份（`config.js` 的 `defaultWorkspaceFor`）—— 界面自己算一遍的话，
+   *   两处会漂开，而漂开的症状是「表单里显示 A、存进去的是 B」，两边都不报错。
+   * ★ 它是一句**纯查询**（不落盘、不改任何东西），所以在用户敲地址的时候可以反复问。
+   * ★ 返回 `workspaceId: null` 表示"会新建一个空白工作区" —— 那是**一个答案**，
+   *   不是"取不到"。
+   */
+  send('app:defaultWorkspace', async (payload = {}) => ({
+    ok: true,
+    workspaceId: config.defaultWorkspaceFor(cfg, payload),
+  }));
+
   send('app:setConnectionWorkspace', async (payload = {}) => {
     const { connectionId, workspaceId, confirmDiscard } = payload;
     const conn = cfg.connections.find((c) => c.id === connectionId);

@@ -760,6 +760,78 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(del.activeConnectionId, null, '删掉活动连接后不能留一个悬空的 id');
 });
 
+test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选的那一条', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // ── 第一条连接：没有任何可参照的 ⇒ 新建一个空白工作区 ──
+  const a = await invoke('app:saveConnection',
+    { user: 'alice', host: '198.51.100.10', port: 10100 });
+  assert.equal(a.ok, true);
+  const aWs = a.connection.workspaceId;
+  assert.ok(aWs, '第一条连接也要落在一个工作区里');
+
+  // ── 同一台机器再加一条（换个账号）：落到**同一个**工作区 ──
+  //   ★ 这是整条规则存在的理由：连同一台集群两次，用户要的是**同一份**编辑器布局
+  //     与登录状态，不是一张白纸。
+  const same = await invoke('app:saveConnection',
+    { user: 'bob', host: '198.51.100.10', port: 10100 });
+  assert.equal(same.connection.workspaceId, aWs, '同址 ⇒ 同一个工作区');
+
+  // ── 换一台机器：再把活跃连接切到"另一台"上，然后新建一条**回到第一台**的 ——
+  //   默认规则要按**地址**找，而不是按"活跃"。这一格正是两条规则分得开的地方：
+  //   按活跃找的话它会落到 203.0.113.7 那个工作区里，而用户拿到的是一张白纸。
+  const far = await invoke('app:saveConnection',
+    { user: 'alice', host: '203.0.113.7', port: 10100 });
+  await invoke('app:setActiveConnection', far.connection.id);
+  const back = await invoke('app:saveConnection',
+    { user: 'carol', host: '198.51.100.10', port: 10100 });
+  assert.equal(back.connection.workspaceId, aWs,
+    '★ 同址那条**赢过**活跃连接那条 —— 活跃在 203.0.113.7 上也不行');
+
+  // ── 而一条不认识的地址：跟着活跃连接走 ──
+  const other = await invoke('app:saveConnection',
+    { user: 'alice', host: '192.0.2.44', port: 10100 });
+  assert.equal(other.connection.workspaceId, far.connection.workspaceId,
+    '不认识的地址 ⇒ 跟着活跃连接那个工作区');
+
+  // ── 界面**显式**选一个（表单里的「③ 工作区」）：它赢过默认规则 ──
+  const picked = await invoke('app:saveConnection',
+    { user: 'dave', host: '192.0.2.99', port: 10100, workspaceId: aWs });
+  assert.equal(picked.connection.workspaceId, aWs);
+
+  // ── 界面要一个新的（`null`）：新建一个空白工作区，**不是**一个已存在的 ──
+  const before = (await invoke('app:bootstrap')).workspaces.length;
+  const fresh = await invoke('app:saveConnection',
+    { user: 'erin', host: '192.0.2.98', port: 10100, workspaceId: null });
+  const after = (await invoke('app:bootstrap')).workspaces;
+  assert.equal(after.length, before + 1, '要一个新的就真的多一个');
+  assert.ok(after.some((l) => l.id === fresh.connection.workspaceId));
+  assert.notEqual(fresh.connection.workspaceId, aWs);
+
+  // ── 一个**不存在**的工作区：拒，而且不许留下半截改动 ──
+  const ghost = await invoke('app:saveConnection',
+    { user: 'frank', host: '192.0.2.97', port: 10100, workspaceId: 'wffffffffffff' });
+  assert.equal(ghost.ok, false);
+  assert.match(ghost.error, /工作区不存在/);
+  assert.equal((await invoke('app:bootstrap')).connections.some((c) => c.user === 'frank'), false,
+    '★ 被拒的那一条不该留在配置里（查存在性必须排在改配置之前）');
+
+  // ── 界面读默认值的那一句查询：与保存时用的是**同一份**规则 ──
+  const q = await invoke('app:defaultWorkspace', { host: '198.51.100.10', port: 10100 });
+  assert.deepEqual(q, { ok: true, workspaceId: aWs },
+    '★ 表单显示的默认值就是保存时会落进的那个 —— 两份实现会漂开，而症状是'
+    + '「界面说 A、存进去是 B」，两边都不报错');
+  // 一个从没见过的地址：给的是一个具体的工作区（活跃那个）或 null，**不能**是"取不到"
+  const q2 = await invoke('app:defaultWorkspace', { host: '192.0.2.250', port: 10100 });
+  assert.equal(q2.ok, true);
+  assert.equal(q2.workspaceId, far.connection.workspaceId);
+
+  for (const c of (await invoke('app:bootstrap')).connections) {
+    await invoke('app:deleteConnection', c.id);
+  }
+  assert.deepEqual((await invoke('app:bootstrap')).connections, []);
+});
+
 test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉', async (t) => {
   t.after(() => { Module._load = origLoad; });
 

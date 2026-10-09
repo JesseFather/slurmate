@@ -179,7 +179,7 @@
     <section id="sec-form" class="hidden">
       <h2 id="form-title">新建连接</h2>
       <p class="sub" id="form-hint">
-        两步：把下面的公钥注册到你的 IDM 账户，再填登录节点的地址。
+        三步：把下面的公钥注册到你的 IDM 账户，填登录节点的地址，再挑一个工作区。
       </p>
 
       <h3>① 这条连接的密钥</h3>
@@ -214,6 +214,23 @@
         <div><label for="f-port">端口</label>
              <input type="number" id="f-port" min="1" max="65535" placeholder="10100"></div>
       </div>
+      <!-- ── ③ 工作区 ──
+           ★ 它从**连接行**搬到了这里（见 panel.js 里那一段的注释）：改工作区的代价
+             远大于改一个地址 —— 切走一个独占地工作区就等于把它删掉（连同里面的
+             编辑器布局、标签页与登录状态）。放进表单里，这个动作才有它该有的分量。
+           ★ 默认值是**算出来的**（同址已有的连接 → 活跃连接的 → 新建一个），
+             规则住在主进程（`config.js` 的 `defaultWorkspaceFor`），这里只负责显示。
+             所以用户敲地址的时候这个下拉的第一项会跟着变 —— 那是它在**说实话**：
+             这一格的内容取决于上面那个地址。 -->
+      <h3>③ 工作区</h3>
+      <div class="row">
+        <div class="grow">
+          <label for="f-workspace">这条连接用哪个工作区</label>
+          <select id="f-workspace" class="full"></select>
+        </div>
+      </div>
+      <p class="sub" id="ws-hint"></p>
+
       <div class="row row-spaced">
         <button id="btn-save">保存并连接</button>
         <button id="btn-cancel-form" class="ghost">取消</button>

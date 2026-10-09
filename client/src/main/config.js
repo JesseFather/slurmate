@@ -758,6 +758,47 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
   return { ok: true };
 }
 
+/**
+ * **新建**一条连接时，它默认落在哪个工作区 —— 一条规则，两个读者。
+ *
+ *   ① **同址**（同一台机器的同一个端口）已经有一条连接 ⇒ 就用它那个工作区。
+ *      用户是在同一台集群上再加一条（换个账号、或者删了再建），他要的是**同一份**
+ *      编辑器布局与登录状态，而不是一份全新的空白存储 —— 后者正是这次重做要消灭的
+ *      那个症状：「布局没了、登录又得重来」，而**没有任何一处会红**。
+ *   ② 否则用**活跃连接**那个 —— 「我正看着这台，再连一台就是接着它用」。
+ *   ③ 都没有 ⇒ `null`：调用方新建一个空白工作区。
+ *
+ * ★ 两个读者是**界面**（表单那个下拉要把默认值**显示**出来，用户按保存之前就看得见）
+ *   与**主进程**（保存时定下来）。两处各写一遍必然漂开，而漂开的症状是
+ *   「表单里显示的是 A，存进去的是 B」—— 用户按了保存得到另一个东西，两边都不报错。
+ *
+ * ★ 「同址」比的是 **host + port**，**不含用户名**：同一台机器上换一个账号，
+ *   该复用的仍然是那一份**本机**的浏览器存储（它与远端是哪个账号无关）。
+ *   要改成 `user@host:port` 全同才算同址，就是这一行的事 —— 而那是另一个产品判断。
+ *
+ * ★ ① ② 两路各自查过那个工作区**还在**，所以返回值要么是 `null`、要么是这一刻
+ *   存在的一个 id。★ 但调用方**不要**把它当成"一定存在"就不查了：它可能在这一刻
+ *   到落盘之间被回收（那是调用方的事，与这条规则无关）。
+ */
+function defaultWorkspaceFor(cfg, conn) {
+  const host = conn && conn.host;
+  // ★ 端口一律收成**数**再比：`conn.port` 存进来时是数（`normalizeConnection`），
+  //   而问这条规则的那个调用方是从输入框里读的（可能是个字符串）。
+  //   不收的话症状是"同址那条默认**静默**失效"—— 退回"活跃连接的"，
+  //   界面上看不出任何异常，而用户拿到的是另一份空白存储。
+  const port = Number(conn && conn.port);
+  if (host && Number.isInteger(port) && port > 0) {
+    const same = ((cfg && cfg.connections) || []).find((c) => c.id !== conn.id
+      && c.host === host && c.port === port && findWorkspace(cfg, c.workspaceId));
+    if (same) return same.workspaceId;
+  }
+  const active = activeConnection(cfg);
+  if (active && active.id !== (conn && conn.id) && findWorkspace(cfg, active.workspaceId)) {
+    return active.workspaceId;
+  }
+  return null;
+}
+
 /** 谁在引用这一份数据 —— 指向它的工作区 id。 */
 function spaceConsumers(cfg, spaceId) {
   const out = [];
@@ -1244,7 +1285,7 @@ module.exports = {
   RELAY_PORT_BASE,
   // 工作区（一张引用表）
   newWorkspaceId, normalizeWorkspace, findWorkspace,
-  nextWorkspaceName, setConnectionWorkspace,
+  nextWorkspaceName, setConnectionWorkspace, defaultWorkspaceFor,
   pruneWorkspaces, workspacePlan,
   // 数据空间（一份存储 + 它自己的端口）
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,

@@ -338,6 +338,11 @@ async function openNewForm() {
   $('f-host').value = '';
   $('f-port').value = '';
   $('key-hint').textContent = '正在生成密钥…';
+  // 「③ 工作区」：初值跟随默认，而默认值要问主进程 —— 地址还空着，问出来的就是
+  // 「活跃连接那个」或「新建一个」。用户敲了地址之后 `refreshFormWsDefault` 再问一次。
+  wsPicked = '';
+  wsDefault = null;
+  renderFormWorkspace();
   hideKeyMessages();
   renderConnEmpty();
 
@@ -348,6 +353,7 @@ async function openNewForm() {
     ? '这把密钥属于下面这条新连接，还没有别的连接用它。'
     : '这把密钥是上次「新建」时生成的（如果你已经把它注册过了，直接往下填就行）。';
   renderKey(r.key);
+  await refreshFormWsDefault();
 }
 
 /** 打开某条连接的编辑表单。 */
@@ -364,6 +370,11 @@ async function openEditForm(c) {
   $('f-host').value = c.host;
   $('f-port').value = c.port;
   $('key-hint').textContent = '正在读取密钥…';
+  // 「③ 工作区」：编辑时**没有**"跟随默认"那一项 —— 这条连接已经有一个了，
+  // 这一格答的是"要不要换"，而 `''` 在这里的意思是"不变"。
+  wsPicked = '';
+  wsDefault = null;
+  renderFormWorkspace();
   hideKeyMessages();
   renderConnEmpty();
 
@@ -379,6 +390,7 @@ async function openEditForm(c) {
 /** 收起表单，回到「已保存的连接」那一屏。 */
 function closeForm() {
   form = { open: false, mode: 'new', id: null };
+  wsPicked = '';
   $('sec-form').classList.add('hidden');
   $('btn-new').classList.remove('hidden');
   renderConnEmpty();
@@ -389,6 +401,78 @@ function renderConnEmpty() {
   $('conn-empty').textContent = form.open
     ? '还没有保存任何登录节点。填好下面的用户名、主机和端口，点「保存并连接」。'
     : '还没有保存任何登录节点。点右上角的「新建连接」填一个 —— 只需要用户名、主机和端口。';
+}
+
+// ── 表单里的「③ 工作区」 ────────────────────────────────────────────────────
+//
+// 这一格有两个状态，必须分开记：
+//
+//   `''`             —— **跟随默认**（新建时的初值）／**不变**（编辑时）。
+//                       新建时默认值随上面的地址变（同址已经有连接就用它那个工作区），
+//                       所以它**不是一个定值**。
+//   `NEW_WORKSPACE`  —— 用户要一个新的空白工作区。
+//   一个工作区 id     —— 用户挑定了那一个。
+//
+// ★ 为什么不把默认值直接**选中**在那个下拉的某一项上：那样"用户没表态"与"用户挑的
+//   正好是默认那个"就分不出来了，而两者保存时的下场不同 —— 前者要由主进程在**存的
+//   那一刻**现算（用户可能在敲完地址之后立刻按保存，而界面手里那个默认值是上一个字
+//   算出来的）。所以默认值在这里只用来**显示**，判定权在 `app:saveConnection`。
+
+/** 用户显式挑的那个值；`''` = 跟随默认（新建）／不变（编辑）。 */
+let wsPicked = '';
+
+/** 最近一次问到的默认值（工作区 id 或 null = 会新建一个）。**只用来显示。** */
+let wsDefault = null;
+
+/** 问一遍默认值并重画。用户敲地址时会被反复调用 —— 它是一句纯查询。 */
+async function refreshFormWsDefault() {
+  const port = Number($('f-port').value);
+  const r = await window.slurmate.defaultWorkspace({
+    host: $('f-host').value.trim(),
+    port: Number.isInteger(port) ? port : 0,
+  });
+  if (!form.open || form.mode !== 'new') return;   // 用户已经关掉或切走了
+  wsDefault = (r && r.ok) ? r.workspaceId : null;
+  renderFormWorkspace();
+}
+
+/**
+ * 重画「③ 工作区」那个下拉，并把当前选择的**后果**写成一句话。
+ *
+ * ★ 内容没变就不动 DOM（`dataset.sig`）：重建 <select> 会把用户正在展开的列表收起来，
+ *   而地址那几个框每敲一个字都会走到这里。
+ */
+function renderFormWorkspace() {
+  const sel = $('f-workspace');
+  const editing = form.mode === 'edit';
+  const cur = editing
+    ? ((boot.connections || []).find((c) => c.id === form.id) || {}).workspaceId
+    : null;
+  // ★ 编辑时**没有**"默认"那一项 —— 这条连接已经有一个工作区了，这一格答的是
+  //   「要不要换」，而 `''` 在这里的意思是"不变"。
+  const head = editing ? null : {
+    value: '',
+    text: workspaceById(wsDefault) ? `默认：${workspaceById(wsDefault).name}`
+      : '默认：新建一个空白工作区',
+  };
+  fillWorkspaceOptions(sel, wsPicked || (editing ? cur : ''), editing ? cur : null, head);
+  $('ws-hint').textContent = wsHintText(sel.value, editing ? cur : undefined);
+}
+
+/** 当前选择的那一句**后果**。短 —— 长解释在下拉的 title 里。 */
+function wsHintText(v, cur) {
+  const name = (id) => (workspaceById(id) || {}).name || '那个工作区';
+  if (v === NEW_WORKSPACE) return '保存后会新建一个空白工作区。';
+  if (cur !== undefined) {                 // 编辑
+    if (v === cur || v === '') return '不变。';
+    return `保存后切到「${name(v)}」—— 原来那个里面的东西不会跟着走。`;
+  }
+  if (v === '') {                          // 新建，跟随默认
+    return wsDefault
+      ? `跟随默认：现在会落在「${name(wsDefault)}」。`
+      : '跟随默认：现在会新建一个空白工作区。';
+  }
+  return `会用「${name(v)}」。`;
 }
 
 /**
@@ -582,21 +666,6 @@ function renderConnections(list) {
       m.classList.add('bad');
     }
 
-    // 工作区下拉。文案必须说清「切走会发生什么」—— 切走一个只被自己用着的工作区
-    // 就等于把它删掉（连同里面的标签页和登录状态），这是不可逆的，
-    // 只写一个工作区名了事会让用户在毫无预告的情况下丢东西。
-    const pick = document.createElement('select');
-    pick.className = 'ws-pick';
-    pick.title = '这条连接用哪个工作区（编辑器窗口布局、打开的标签页、登录状态）';
-    fillWorkspaceOptions(lay, c.workspaceId, c.id);
-    pick.onchange = async () => {
-      const v = pick.value;
-      const r = await applyWorkspace(c.id, v === NEW_WORKSPACE ? null : v);
-      // 失败必须把下拉拨回去 —— 停在一个并未生效的选择上，
-      // 界面就在显示一件不成立的事。
-      if (!r.ok) pick.value = c.workspaceId;
-    };
-
     // ★★ 这一格是**三屏的入口**，而不是"连接/断开"那个开关。
     //
     //   连着的时候点它 = **进去看这个站点的插件与作业**（第二屏）；没连的时候
@@ -652,12 +721,23 @@ function renderConnections(list) {
         + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
     };
 
-    li.append(t, m, lay, main, edit, del);
+    li.append(t, m, main, edit, del);
     box.append(li);
   }
 
   renderWorkspaceMap();
 }
+
+/**
+ * 「这条连接用哪个工作区」那一格从**连接行**搬到了**连接表单**里（「③ 工作区」）。
+ *
+ * ★ 搬的理由：那一格是**这条连接的一个属性**，与地址、用户名同一类 —— 摆在行上时
+ *   它是一条「随时可改」的快捷方式，而改它的代价（切走一个独占的工作区 = 把它连同
+ *   里面的东西一起删掉）远大于改一个地址。放进表单里，"改"这个动作就有了它该有的
+ *   分量：按「保存」才算数。
+ * ★ 运行期间那个入口还在（状态条的 `#sb-workspace`）—— 会话跑起来之后窗口主体被
+ *   原生视图盖住，那是唯一够得着的像素。
+ */
 
 // ── 工作区 ──────────────────────────────────────────────────────────────────
 /**
@@ -717,20 +797,34 @@ function frontWorkspaceId() {
 }
 
 /**
- * 把一个工作区下拉填满。每条连接行一个、状态条一个，**共用同一份 boot.workspaces**。
+ * 把工作区那几项填进一个 <select>。**三个下拉共用这一份**：状态条那个、表单里的
+ * 新建与编辑。各写一份的话，那句说明（「只有这一条连接在用 —— 切走就会被丢弃」）
+ * 迟早会在其中一处走样，而它正是用户按下之前唯一的机会。
  *
- * `keep` 是应当选中的那个工作区。**找不到就不选**（宁可空着）—— 让下拉停在一个
+ * `keep` 是应当选中的那个值。**找不到就不选**（宁可空着）—— 让下拉停在一个
  * 并不生效的值上，用户会以为自己已经切过去了。
+ *
+ * `connId` 只影响那句说明（"谁在用"）：状态条给活跃连接，表单给正在编辑的那条，
+ * **新建时给 null**（这时问的是"还有谁在用"，这条连接自己还不算）。
+ *
+ * `head` 是可选的**第一项**（表单新建时那一项「默认：X」）。它的 `value` 是空串，
+ * 而空串恰好落在下面那条"找不到就不选"的兜底上，所以跟随默认天然会被选中。
  *
  * `sig` 是给状态条用的：它在每次快照推送时都会被重填，而重建 <select> 会把用户
  * 正在展开的列表收起来。内容没变就不动 DOM。
  */
-function fillWorkspaceOptions(sel, keep, connId) {
+function fillWorkspaceOptions(sel, keep, connId, head) {
   const list = boot.workspaces || [];
-  const sig = connId + '|' + JSON.stringify(
-    list.map((l) => [l.id, l.name, l.refCount, l.soleOwnerId]));
+  const sig = JSON.stringify([head || null, connId == null ? '' : connId,
+    list.map((l) => [l.id, l.name, l.refCount, l.soleOwnerId])]);
   if (sel.dataset.sig !== sig) {
     sel.textContent = '';
+    if (head) {
+      const o = document.createElement('option');
+      o.value = head.value;
+      o.textContent = head.text;
+      sel.append(o);
+    }
     for (const l of list) {
       const o = document.createElement('option');
       o.value = l.id;
@@ -743,7 +837,14 @@ function fillWorkspaceOptions(sel, keep, connId) {
     sel.append(nu);
     sel.dataset.sig = sig;
   }
-  sel.value = list.some((l) => l.id === keep) ? keep : '';
+  // ★ `NEW_WORKSPACE` 与 `''` 都要原样留住 —— 前者是用户**显式**要一个新的，
+  //   后者是"跟随默认"，两者都不是"选不中任何一项"（那才落到空串上）。
+  sel.value = (keep === '' || keep === NEW_WORKSPACE || list.some((l) => l.id === keep))
+    ? keep : '';
+  // 长解释进 title（悬停才看得到），正文只留那一句**后果**（表单里的 `#ws-hint`）。
+  sel.title = '这个工作区里，各个插件用哪一份数据 —— 编辑器窗口布局、打开的标签页、'
+    + '登录状态都在这儿。一个工作区可以被多条连接共用；'
+    + '切走一个只有这条连接在用的工作区，它会被删掉。';
 }
 
 /** 状态条里那个选择器。它改的是**当前活跃连接**的工作区。 */
@@ -775,12 +876,16 @@ function confirmDiscard(name) {
 }
 
 /**
- * 把一条连接切到另一个工作区。**三条入口共用这一条**（连接行下拉、状态条、
- * 映射图上的改名按钮改的是名字，不走这里）。
+ * 把一条连接切到另一个工作区。**两个入口共用这一条**：状态条那个下拉，
+ * 以及连接表单里的「③ 工作区」（保存时那一趟，见 `btn-save` 那段）。
+ *
+ * ★ 从前还有第三个入口 —— **连接行上**那个下拉。它删掉了（见 `renderConnections`
+ *   后面那一段）：改工作区的代价远大于改一个地址，摆在一行上等于把它降级成一次
+ *   "随手一点"。搬进表单之后，这个动作要按「保存」才算数。
  *
  * @param {string} connectionId
  * @param {string|null} workspaceId  null = 新建一个空白工作区并落进去
- * @returns {Promise<{ok:boolean}>} 失败时调用方应把下拉拨回原值
+ * @returns {Promise<{ok:boolean}>} 失败（含用户取消）时调用方应把下拉拨回原值
  *
  * ★ 「切走会不会把旧工作区删掉」的判定权在**主进程**，不在这里。先照常提交，
  *   主进程若回 would_discard，我们拿它的原话去问用户，确认了再带 confirmDiscard
@@ -2491,6 +2596,19 @@ async function init() {
   $('btn-new').onclick = () => openNewForm();
   $('btn-cancel-form').onclick = () => closeForm();
 
+  // 「③ 工作区」：用户一动手就不再跟随默认（`wsPicked` 记下来）。
+  $('f-workspace').onchange = () => {
+    wsPicked = $('f-workspace').value;
+    renderFormWorkspace();
+  };
+  // ★ 默认值取决于**上面的地址**，所以敲地址时要重问一遍 —— 它是纯查询，不落盘。
+  //   不这么做的话，那一项会一直写着「默认：新建一个空白工作区」，
+  //   而用户按保存却落进了另一个工作区：界面在显示一件不成立的事。
+  //   （只在**新建**时问：编辑时这一格没有"默认"那一项。）
+  for (const id of ['f-host', 'f-port']) {
+    $(id).oninput = () => { if (form.open && form.mode === 'new') refreshFormWsDefault(); };
+  }
+
   $('btn-copykey').onclick = async () => {
     const r = await window.slurmate.copyPublicKey(keyPayload());
     notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : (r && r.error) || '复制失败。');
@@ -2536,6 +2654,18 @@ async function init() {
     const input = { user, host, port };
     if (editing) input.id = editing;
     if (editing || label) input.label = label;
+    // 「③ 工作区」。三种取值分开传，因为它们在主进程那边是**三件事**：
+    //   · 键**缺席**   = 用户没表态，按默认规则（同址已有的连接 → 活跃连接的 → 新建）
+    //   · `null`       = 要一个新的空白工作区
+    //   · 一个工作区 id = 就用那一个
+    // ★ 前两种**不能合并**：把"没表态"也发成一个具体 id 的话，默认规则就永远
+    //   跑不到了（界面手里那个默认值是按上一个字算的，用户敲完立刻按保存就错），
+    //   而它正是这个下拉存在的一半理由。
+    const wsWant = $('f-workspace').value;
+    if (!editing) {
+      if (wsWant === NEW_WORKSPACE) input.workspaceId = null;
+      else if (wsWant) input.workspaceId = wsWant;
+    }
 
     const saved = await window.slurmate.saveConnection(input);
     if (!saved.ok) return notice('error', saved.error);
@@ -2563,6 +2693,17 @@ async function init() {
       if (wasLive) {
         // 地址改了但 SSH 连接还挂在旧地址上。不说的话，用户会以为改动没生效。
         notice('info', '这条连接正连着 —— 新地址要重新点一次「连接」才会生效。');
+      }
+      // ★ 换工作区是**第二趟**，不并进上面那一次保存里：它有自己的两道闸
+      //   （切走会不会把一个独占的工作区删掉 → 需要用户确认；有没有会话在跑 →
+      //   要挪隧道端口）。那两条各有各的失败方式，焊进来的话一次保存就有四种
+      //   下场，而其中三种会让用户不知道地址到底存进去没有。
+      //   分两趟之后每一趟各自原子，代价是"地址存了、工作区没换"这种半截结果 ——
+      //   它看得见、也说得出（下面那条 notice）。
+      if (wsWant && wsWant !== saved.connection.workspaceId) {
+        const r = await applyWorkspace(saved.connection.id,
+          wsWant === NEW_WORKSPACE ? null : wsWant);
+        if (!r.ok) notice('info', '地址已经保存了，但工作区没有换。');
       }
       return;
     }

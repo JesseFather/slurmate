@@ -77,6 +77,11 @@ contextBridge.exposeInMainWorld('slurmate', {
   setConnectionWorkspace: (payload) => ipcRenderer.invoke('app:setConnectionWorkspace', payload),
   // 改名。名字只是给人看的 —— 进存储分区的是**数据 id**，那个永不复用。
   renameWorkspace: (payload) => ipcRenderer.invoke('app:renameWorkspace', payload),
+  // **新建**一条连接时，它默认落在哪个工作区 —— 表单在用户敲地址的时候问它，
+  // 好把默认值显示出来（规则住在主进程：`config.js` 的 `defaultWorkspaceFor`）。
+  // 返回 { ok, workspaceId }；`null` 是**一个答案**（"会新建一个空白工作区"），
+  // 不是"取不到"。纯查询，不改任何东西，所以敲一个字问一次也没关系。
+  defaultWorkspace: (conn) => ipcRenderer.invoke('app:defaultWorkspace', conn),
 
   // ── 本机的插件数据 ──
   //
