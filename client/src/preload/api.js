@@ -82,6 +82,19 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 返回 { ok, workspaceId }；`null` 是**一个答案**（"会新建一个空白工作区"），
   // 不是"取不到"。纯查询，不改任何东西，所以敲一个字问一次也没关系。
   defaultWorkspace: (conn) => ipcRenderer.invoke('app:defaultWorkspace', conn),
+  // 改**这张引用表里的一格**：这个工作区的这个插件以后用哪一份数据（插件块上那一格）。
+  // 与上面那一格**同一套三态约定**（一份约定、两处不各写一遍）：
+  //
+  //   workspaceId + pluginId + **键缺席** = 界面没表态 ⇒ 什么都不做
+  //   spaceId: null                       = 要一份**新的**（哪怕现在已经有一份）
+  //   spaceId: <数据 id>                   = 就用那一份（必须是**这个插件**的那一份）
+  //
+  // 返回 { ok, workspaces, spaces, connections, droppedOld }。被拒时 code 有两个：
+  //   `would_discard`    —— 换走会把旧那一份删掉（它没有别的工作区在用了），
+  //                         要带 confirmDiscard 重来一次。**不可逆**，所以必须先问。
+  //   `session_running`  —— 这个插件在这个工作区里正跑着一条会话。那一条手里攥着的是
+  //                         开局时那一份，改掉之后重启客户端就接不回来了 ⇒ **拒**，不是提示。
+  setWorkspaceRef: (payload) => ipcRenderer.invoke('app:setWorkspaceRef', payload),
 
   // ── 本机的插件数据 ──
   //

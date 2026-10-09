@@ -1058,6 +1058,16 @@ function pluginsView() {
       description: plugin.description,
       hasClientCode: plugin.hasClientCode,
       surface: plugin.contributes.surface,
+      // ★ 这一份数据要几个端口（`contributes.ports`，已在校验时落成具体的数）。
+      //   界面拿它决定**画不画**「这个插件用哪一份数据」那一格：0 个端口的插件
+      //   根本没有那一份数据，画一个空下拉等于凭空许诺一个不存在的东西。
+      ports: plugin.contributes.ports,
+      // ★ 共享组由 `plugin-data.js` 现算，界面**不自己推**：它是身份的中间那一段，
+      //   而界面拿它做的事只有一件 —— 把"这个插件现在读得到的那几份数据"筛出来。
+      //   筛错了比不筛更坏：列一份指过去也读不通的数据，用户点下去只会得到一句报错。
+      //   ★ 不要数据空间的那些（`ports: 0`）给 `null`，不给一个 `'default'`：
+      //     它们根本没有那一份数据，"这个插件的共享组是 default"是一句不成立的话。
+      group: pluginData.needsSpace(plugin) ? pluginData.groupOf(plugin) : null,
       // 站点那边报的是哪一版。**这是"站点升级了而本机还是旧的"的唯一线索** ——
       // 两半代码是配套的，对不上时必须让用户看得见。
       siteVersion: (s && s.version) || null,
@@ -1363,6 +1373,39 @@ function spaceForSession(workspaceId, plugin) {
 function findSpaceAll(spaceId) {
   if (!spaceId) return null;
   return config.findSpace(cfg, spaceId) || tempSpaces.get(spaceId) || null;
+}
+
+/**
+ * 这个工作区里，**这个插件**有没有活会话在跑。
+ *
+ * ★ 它是"改这个插件的引用之前要先看一眼"的那道闸，判据必须比
+ *   `liveSessionOnWorkspace` 窄一格：那个问的是"这个工作区有没有人在用"（换工作区
+ *   时问的，代价是挪端口），而这里问的是"我接下来要改的那一格有没有人正攥着"。
+ *   ★ 不窄的话，同一个工作区里跑着**另一个**插件时，连"给这个插件换一份数据"都做不了
+ *   —— 那两件事之间没有任何牵连。
+ *
+ * ★ 两句话都要有，缺一不可（`||` 的两边）：
+ *   · **持久那一份**：会话手里的 `spaceId` 就在这个工作区的引用表里 —— 正常路径。
+ *   · **临时副本**（`claimSpace` 造的那些）：它不在引用表里，可它是从这个工作区里
+ *     那一份拷出来的。少这一句的后果不是"拒绝失效"，而是**误放行**：用户趁多开时
+ *     改掉引用，那条会话结束之后再接回来时，`reattachOne` 会按**新的**引用去算
+ *     分区与数据目录，而作业实际跑在旧的那一份上 —— 接不回来，且看不出为什么。
+ */
+function liveSessionForPlugin(workspaceId, pluginId) {
+  const ws = config.findWorkspace(cfg, workspaceId);
+  if (!ws) return null;
+  const ids = new Set(Object.values(ws.refs || {}));
+  for (const rec of sessions.values()) {
+    if (!occupied(rec.slot)) continue;
+    if (!rec.plugin || rec.plugin.id !== pluginId) continue;
+    const sid = rec.controller && rec.controller.spaceId;
+    if (sid && ids.has(sid)) return rec;
+    if (sid && tempSpaces.has(sid)) {
+      const conn = (cfg.connections || []).find((c) => c.id === rec.connectionId);
+      if (conn && conn.workspaceId === workspaceId) return rec;
+    }
+  }
+  return null;
 }
 
 /**
@@ -3506,6 +3549,11 @@ function registerIpc() {
     // 而「切走这个工作区会不会把它删掉」必须由主进程说了算。
     // 注意与上面的 `partitions` 不是一个东西：那是 Slurm 的分区，同词不同义。
     workspaces: config.workspacePlan(cfg),
+    // 数据空间那一层（一份存储 + 它自己的端口）。界面拿它列出「这个插件现在有
+    // 哪几份数据可以复用」—— 一张普通的列表，界面只做筛选与显示，不推导任何东西。
+    // ★ **不含临时那一份**：它只活在内存里（`tempSpaces`），会随会话结束消失，
+    //   列出来等于让用户去选一个明天不存在的东西。
+    spaces: cfg.spaces,
     version: app.getVersion(),
   }));
 
@@ -3745,6 +3793,124 @@ function registerIpc() {
     config.setConnectionWorkspace(cfg, connectionId, target.id);
     commitConfig();
     return { ok: true, workspaces: config.workspacePlan(cfg), connections: cfg.connections };
+  });
+
+  /**
+   * 改一个工作区里**某个插件用哪一份数据**（插件块上那一格）。
+   *
+   * 三种取值，与「③ 工作区」那一格**同一套约定**（一份实现、一个约定，两处不各写一遍）：
+   *
+   *   键缺席（`undefined`） = 界面**没表态** ⇒ 什么都不做（引用表原样，下次开会话时
+   *                           `spaceForSession` 该建就建）。★ 不能在界面里算好"应当
+   *                           是哪一份"再发过来 —— 那个值是上一个字算的。
+   *   `null`               = 要一份**新的**（哪怕现在已经有一份）—— 从空白开始。
+   *   一个 id              = 就用那一份（先查它存不存在、是不是**这个插件**的）。
+   *
+   * ★★ **有活会话就拒**（见 `liveSessionForPlugin`）。改的是"下次开会话读哪里"，
+   *    而一条跑着的会话手里攥着的那一份是**开局那一刻**定下来的：改了这一格之后
+   *    它照旧跑在旧的那一份上，一旦客户端重启、`reattachOne` 按新引用去算分区与
+   *    数据目录，那条作业就**接不回来了**。所以不是"提示一下"，是拒。
+   *
+   * ★★ **换走会把旧那一份收掉**（如果它没有别的工作区在引用、也没有活会话拿着）——
+   *    这是 `pruneSpaces` 的规则，不是这里额外做的事。它**不可逆**，所以照
+   *    `app:setConnectionWorkspace` 的老样子：先做，主进程回 `would_discard`，
+   *    界面拿这句原话去问，用户认了再带 `confirmDiscard` 重来一次。判定权在主进程，
+   *    因为界面手里那份引用计数随时可能已经陈旧。
+   */
+  send('app:setWorkspaceRef', async (payload = {}) => {
+    const { workspaceId, pluginId, spaceId, confirmDiscard } = payload;
+    if (!config.findWorkspace(cfg, workspaceId)) {
+      return { ok: false, error: '这个工作区不存在。' };
+    }
+    // 按 **id** 找插件（池里可以有同名不同 id 的两个），与 `pluginsView` 同一条规矩。
+    const plugin = registry.list().find((p) => p.id === pluginId);
+    if (!plugin) return { ok: false, error: '本机没有这个插件。' };
+    // 不要数据空间的插件**没有这一格**。界面不会画那一格，但这一句要留着：
+    // 少它的后果是凭空造出一份这个插件永远不会去读的数据。
+    if (!pluginData.needsSpace(plugin)) {
+      return { ok: false, error: '这个插件不要数据空间 —— 它没有"用哪一份数据"这回事。' };
+    }
+
+    const ws = config.findWorkspace(cfg, workspaceId);
+    const oldId = (ws.refs || {})[pluginId] || null;
+
+    const live = liveSessionForPlugin(workspaceId, pluginId);
+    if (live) {
+      return {
+        ok: false, code: 'session_running',
+        error: `「${plugin.displayName || plugin.name}」在「${ws.name}」里正跑着一条会话。`
+          + '换一份数据要让那条会话先结束 —— 它手里攥着的是开局时那一份，'
+          + '现在改掉，客户端重启之后那条作业就接不回来了。',
+      };
+    }
+
+    // ── 定下要用哪一份 ──────────────────────────────────────────────────────
+    //
+    // ★ 次序是**刻意的**：先查「这一份能不能用」（会失败、且一个字都不改），
+    //   再问「换走会不会删掉东西」（可能被用户否掉），**最后**才造新的一份。
+    //   反过来的话，每一次"用户点了又取消"都会在 `cfg.spaces` 里留下一份没人要的
+    //   数据 —— 它虽然在下次 `commitConfig` 时会被收掉，但那中间有一段窗口里
+    //   `app:bootstrap` 会把一份多余的数据报给界面。
+    const group = pluginData.groupOf(plugin);
+    let targetId = oldId;
+    if (spaceId !== undefined && spaceId !== null) {
+      const space = config.findSpace(cfg, spaceId);
+      if (!space) return { ok: false, error: '这一份数据不存在。' };
+      // 共享组也要对得上，判据与 `config.spaceFor` 那一支**同源**：作者换过共享组
+      // 的那一份数据，这个插件按现在的身份**读不到**（路径中间那一段变了）。
+      // 指过去只会得到一份"看起来换好了、开会话时又变回新的"的假动作。
+      if (space.group !== group) {
+        return { ok: false, error: '这一份数据与这个插件现在的版本对不上（共享组变了），不能复用。' };
+      }
+      targetId = space.id;
+    }
+
+    // 什么都不用改：**没表态**（`undefined`，于是 `targetId` 就是 `oldId`），或者
+    // 选中的就是现在这一份。**不落盘** —— 这一格绝大多数调用都走这里。
+    // ★ 判据里那个 `spaceId !== null` 是**承重**的：`null`（要一份新的）那一支在
+    //   这之后才 `newSpace`，所以此刻 `targetId` 还等于 `oldId`（两者都是 null 时
+    //   尤其如此 —— 那正是"这个工作区还没有这个插件的数据"这个最常见的起点）。
+    //   少了它，用户点「另开一份」会得到一个**静默的空操作**：返回 ok，什么都没发生。
+    if (spaceId !== null && targetId === oldId) {
+      return { ok: true, workspaces: config.workspacePlan(cfg), spaces: cfg.spaces,
+               connections: cfg.connections, droppedOld: false };
+    }
+
+    // ── 换走之后旧那一份还活不活得下来（不可逆，所以要问）────────────────────
+    //
+    // ★ 判据是 `pruneSpaces` 那条的**反面**，逐字抄过来（有工作区指着 / 有活会话拿着
+    //   ⇒ 留着），不是另写一个"看起来等价"的判断：这两处一旦分家，这句话就会在
+    //   **不会删**的时候说"会删掉"（或者反过来），而用户是按它做决定的。
+    //   ★ 前面那道"有活会话就拒"已经拦掉了本工作区里同插件的那一条，所以这里的
+    //   `held` 实际上够不着 —— 留着它是因为它让这条判据与 `pruneSpaces` 同形。
+    const others = oldId ? config.spaceConsumers(cfg, oldId).filter((id) => id !== workspaceId) : [];
+    const held = oldId ? liveSpaceIds().has(oldId) : false;
+    if (oldId && !others.length && !held && !confirmDiscard) {
+      return {
+        ok: false, code: 'would_discard', spaceId: oldId,
+        error: `「${plugin.displayName || plugin.name}」现在用的那一份数据没有别的工作区在用，`
+          + '换掉之后它会被删掉 —— 它的浏览器存储（登录状态、窗口布局）和这个插件写在'
+          + '磁盘上的文件会一起没掉，找不回来。',
+      };
+    }
+
+    // ── 真动手 ──────────────────────────────────────────────────────────────
+    // ★ 一次调用盖住两支：`null` 那一支造出来的那一份也走这儿指过去（`newSpace`
+    //   只负责把它放进 `cfg.spaces`，指给谁是这个调用方的事）。
+    if (spaceId === null) {
+      targetId = config.newSpace(cfg, plugin.id, group,
+        pluginData.portCountOf(plugin), usedSpacePortsAll(null)).id;
+    }
+    const r = config.setWorkspaceRef(cfg, workspaceId, plugin.id, targetId);
+    if (!r.ok) return r;
+
+    commitConfig();
+    // ★ `droppedOld` 是**事后**数的（commitConfig 里那句 pruneSpaces 才是决定性的），
+    //   不是把上面那个预判原样返回 —— 预判与事实会分家，而分家的那一格正是用户
+    //   最需要听真话的地方（"我删掉了你那份数据"）。
+    const droppedOld = Boolean(oldId) && !config.findSpace(cfg, oldId);
+    return { ok: true, workspaces: config.workspacePlan(cfg), spaces: cfg.spaces,
+             connections: cfg.connections, droppedOld };
   });
 
   /** 给工作区改名。名字只是给人看的 —— 它不参与任何身份（进路径的是数据 id，绝不复用）。 */

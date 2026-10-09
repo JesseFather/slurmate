@@ -789,6 +789,70 @@ test('workspacePlan：把「这个工作区只被谁用」推导出来，rendere
   assert.deepEqual(plan[1].spaces, []);
   // ★ 而它**不再报端口** —— 端口是数据的属性，一个工作区可能同时指着好几份。
   assert.equal(plan[0].port, undefined);
+
+  // ★ `refs` 是那张引用表的**原样**（键值对照），`spaces` 是同一些值的集合。
+  //   界面上「这个插件用哪一份数据」那一格要的是前者 —— 少了它，界面只能拿到
+  //   一堆数据 id，猜不出哪个是哪一份。★ 而它必须是**拷贝**：计划对象是递给界面
+  //   的一份快照，界面照着它把下拉拨来拨去，不应该能改到 `cfg` 里的那一张。
+  plan[0].refs[LAYOUT_PLUGIN.id] = sid(9);
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(1), '★ 计划的 refs 是拷贝');
+});
+
+test('★ setWorkspaceRef：改一格引用，且只认**这个插件自己的**那一份', () => {
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [{ id: gid(1), name: 'A', refs: { [LAYOUT_PLUGIN.id]: sid(1) } }];
+  cfg.spaces = [space(1), space(2)];
+
+  assert.equal(config.setWorkspaceRef(cfg, gid(1), LAYOUT_PLUGIN.id, sid(2)).ok, true);
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(2));
+
+  // 工作区不存在 ⇒ 拒（调用方拿这句话去报错，所以它得说得出是哪一个不在了）
+  const noWs = config.setWorkspaceRef(cfg, gid(9), LAYOUT_PLUGIN.id, sid(2));
+  assert.equal(noWs.ok, false);
+  assert.match(noWs.error, /工作区/);
+  // 那一份数据不存在 ⇒ 拒。★ 少了这一句，引用表会指着一个**不存在**的 id，
+  //   而它要到下一次开会话（`spacePortOf` 取不到端口、抛）才发作 —— 一个隔了一层
+  //   启动周期的静默损坏。
+  const noSp = config.setWorkspaceRef(cfg, gid(1), LAYOUT_PLUGIN.id, sid(9));
+  assert.equal(noSp.ok, false);
+  assert.match(noSp.error, /数据/);
+  // ★ **不是这个插件的那一份** ⇒ 拒。数据的身份是 `<插件 id>/<共享组>/<数据 id>`，
+  //   指过去之后这个插件会去读写一份路径中间那段属于别人的存储 —— 而它**读得通**
+  //   （路径是拼出来的），只是里面是另一个插件的文件。
+  cfg.spaces = [...cfg.spaces, space(3, { pluginId: '01OTHERPLUGIN0000000000000' })];
+  const wrong = config.setWorkspaceRef(cfg, gid(1), LAYOUT_PLUGIN.id, sid(3));
+  assert.equal(wrong.ok, false);
+  assert.match(wrong.error, /不是这个插件/);
+  // 拒了之后引用表**一个字都没动**
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(2));
+});
+
+test('★ newSpace：无条件造一份新的（`spaceFor` 是"取现成的"，那是两回事）', () => {
+  const cfg = config.loadConfig(tmpdir());
+  cfg.spaces = [space(1)];
+
+  const a = config.newSpace(cfg, LAYOUT_PLUGIN.id, 'editor', 1);
+  assert.equal(cfg.spaces.length, 2, '★ 已经有一份也要再给一份 —— 这就是"另开一份"');
+  assert.notEqual(a.id, sid(1));
+  assert.equal(a.group, 'editor');
+  assert.equal(a.ports.length, 1);
+  // 端口不与已有的撞：撞了的后果是两份数据同一个 origin，第二份起来时第一份被顶掉
+  assert.equal(a.ports.includes(18081), false);
+
+  // ★ 它与 `spaceFor` 的差别，逐字钉住：引用表已经指着那一份时，`spaceFor` **取现成的**
+  //   并原样返回（`created:false`）—— 拿它去做"另开一份"的话，用户点了什么都不会发生。
+  const ws = { id: gid(1), name: 'A', refs: { [LAYOUT_PLUGIN.id]: cfg.spaces[0].id } };
+  cfg.workspaces = [ws];
+  const got = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
+  assert.equal(got.created, false);
+  assert.equal(got.space.id, cfg.spaces[0].id, '★ 取的是**现成的**那一份');
+  assert.equal(config.newSpace(cfg, LAYOUT_PLUGIN.id, 'editor', 1).id === cfg.spaces[0].id,
+    false, '★ 而 `newSpace` 给的永远是一个**新的**');
+
+  // 一份 `ports` 为空的列表会被 `normalizeSpace` 整份丢掉 ⇒ 引用表指着不存在的数据。
+  // 地板是 1（不是缺省），走到这里只是让"万一"有一个说得清的下场。
+  const floor = config.newSpace(cfg, LAYOUT_PLUGIN.id, 'editor', 0);
+  assert.equal(floor.ports.length, 1);
 });
 
 test('★ 端口分配：从 18080 起，跳过已被占用的，**一次取够要的个数**', () => {

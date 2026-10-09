@@ -151,6 +151,16 @@ test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
   // 两列下面去，而坐标仍按容器算：线会画到框外面，且不报任何错。
   assert.match(css, /\.wmap\s*\{[^}]*position:\s*relative/, '.wmap 必须是定位容器');
   assert.match(css, /\.wmap-lines\s*\{[^}]*position:\s*absolute/, '.wmap-lines 必须绝对定位');
+
+  // ★★ **三列**：连接 / 工作区 / 数据。两列的话第三列会被 grid **挤到下一行**
+  //   （`grid-template-columns` 只声明了两条轨道 ⇒ 第三个子项自动流到第二行），
+  //   而 SVG 仍然按容器左上角算坐标 —— 于是数据那一列跑到线画的区域**下面**，
+  //   看起来像"图下面多了一排盒子"，没有一行报错。
+  assert.match(css, /\.wmap\s*\{[^}]*grid-template-columns:\s*1fr\s+1fr\s+1fr/,
+    '★ .wmap 必须是**三**列 —— 少了第三列，数据那一列会被挤到下一行');
+  for (const id of ['wmap-conns', 'wmap-workspaces', 'wmap-spaces']) {
+    assert.ok(html.includes(`id="${id}"`), `panel.html 缺少 #${id}`);
+  }
 });
 
 // ── ★★ 三屏（v0.9 阶段 5）────────────────────────────────────────────────────

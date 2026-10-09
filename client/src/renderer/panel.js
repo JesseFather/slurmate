@@ -71,6 +71,15 @@ let lastPlugins = null;
 const NEW_WORKSPACE = '__new__';
 
 /**
+ * 插件块那个「用哪一份数据」下拉里「另开一份」那一项的值。同样不是数据 id。
+ *
+ * ★ 它**不能**用一个空串代替：「空串」在下拉里是"这一格还没有值"（跟随默认），
+ *   而这里要的是"**另开一份**，哪怕现在已经有一份" —— 两件事，两种值。
+ *   混起来的症状是用户点了「＋ 新建一份」却什么都没发生（见下面那个兜底那段）。
+ */
+const NEW_SPACE = '__new_space__';
+
+/**
  * 「新建／编辑」表单的状态。
  *   mode='new'  → 展示那把还没有归属的密钥（新建时生成的）
  *   mode='edit' → 展示 id 指向的那条连接的密钥
@@ -921,17 +930,39 @@ async function applyWorkspace(connectionId, workspaceId) {
 
 // ── 映射图 ──────────────────────────────────────────────────────────────────
 // 画线时要拿节点的几何位置，所以渲染出来的节点按 id 存着。
-const mapNodes = { conn: new Map(), workspace: new Map() };
+//
+// ★ **三列**：连接 / 工作区 / 数据。两段关系各画一段线（连接→工作区、工作区→数据），
+//   于是"一份数据被两个工作区共用"这件事在图上就是**两条线汇到同一个节点** ——
+//   那正是这张图存在的理由，而在下拉框里看不出来。
+const mapNodes = { conn: new Map(), workspace: new Map(), space: new Map() };
+
+/**
+ * 某个插件 id 的标题。查不到就返回 null —— 「查不到」与「它叫这个」是两件事
+ * （那一份数据还在、而插件已经卸载了的时候就是这样，那时**不编一个名字**）。
+ *
+ * ★ 两个来源，缺一不可：`lastPlugins` 是最新那次对账的结果，而**第一屏画的时候它
+ *   还没有**（`init()` 里 `renderConnections` 排在 `renderPlugins` 前面）——
+ *   只读它的话，映射图左列那行插件名要等到下一次重画才出现，而那时用户早就
+ *   看过一眼"只有连接名"的图了。`boot.plugins` 是同一份视图的启动快照。
+ */
+function pluginTitleOf(pluginId) {
+  const src = lastPlugins || (boot && boot.plugins);
+  const p = ((src && src.plugins) || []).find((x) => x.id === pluginId);
+  return p ? p.title : null;
+}
 
 function renderWorkspaceMap() {
   const connsCol = $('wmap-conns');
   const wsCol = $('wmap-workspaces');
-  if (!connsCol || !wsCol) return;
+  const spCol = $('wmap-spaces');
+  if (!connsCol || !wsCol || !spCol) return;
   connsCol.textContent = '';
   wsCol.textContent = '';
+  spCol.textContent = '';
   $('wmap-lines').textContent = '';
   mapNodes.conn.clear();
   mapNodes.workspace.clear();
+  mapNodes.space.clear();
 
   for (const c of boot.connections || []) {
     const n = document.createElement('div');
@@ -941,6 +972,19 @@ function renderWorkspaceMap() {
     nm.className = 'nm';
     nm.textContent = c.label || `${c.user}@${c.host}`;
     n.append(nm);
+    // 这条连接的工作区里**已经建了数据**的那几个插件 —— 名字从本机装着的插件来。
+    // ★ 名字不是"这条连接会跑哪几个插件"：一个插件只有真开过一次会话之后才有那一份
+    //   数据，所以这里列的是"这个工作区里有它的一份了"。悬停那一句把这件事说清楚。
+    // ★ 查不到名字的（那一份数据还在、而插件已经卸载了）**不编一个**，整块小字就不画：
+    //   右边那一列仍然按端口把那一份列出来，看图的人不会以为它不存在。
+    const ws = workspaceById(c.workspaceId);
+    const names = Object.keys((ws && ws.refs) || {}).map(pluginTitleOf).filter(Boolean);
+    if (names.length) {
+      const chips = el('span', 'plug-chips', names.join(' · '));
+      chips.title = `这个工作区里已经有这几份数据：${names.join('、')}。`
+        + '一个插件要先开过一次会话才会有它那一份。';
+      n.append(chips);
+    }
     connsCol.append(n);
     mapNodes.conn.set(c.id, n);
   }
@@ -970,6 +1014,36 @@ function renderWorkspaceMap() {
     mapNodes.workspace.set(l.id, n);
   }
 
+  // ── 右列：数据（一份 = 一个插件的存储 + 它自己的端口）──
+  //
+  // ★ 每一份都列出来，**包括没有连接在用的那些**：它们由 `pruneSpaces` 在每次改动后
+  //   收掉，所以正常情况下一条都是"有人指着"的 —— 而万一还剩一条（比如某个工作区
+  //   刚刚被回收，配置还没落盘），**画出来**比让它凭空消失诚实。
+  for (const s of boot.spaces || []) {
+    const n = document.createElement('div');
+    n.className = 'wnode sp';
+
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = `端口 ${(s.ports || [])[0]}`;
+
+    const title = pluginTitleOf(s.pluginId);
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const users = (boot.workspaces || [])
+      .filter((l) => Object.values(l.refs || {}).includes(s.id)).length;
+    meta.textContent = (title ? `${title} · ` : '')
+      + (users === 0 ? '没有工作区在用' : users === 1 ? '1 个工作区' : `${users} 个工作区`);
+
+    n.append(nm, meta);
+    // 长解释进 title（悬停才看得到）：这块图上的字够多了，正文只留"这是什么"。
+    n.title = (title ? `${title} 的一份数据` : '一份数据')
+      + `。端口 ${(s.ports || [])[0]} 就是它的对外地址（换端口 = 换一份浏览器存储）。`
+      + '一个工作区里每个插件各用一份；几个工作区可以指着同一份。';
+    spCol.append(n);
+    mapNodes.space.set(s.id, n);
+  }
+
   requestAnimationFrame(drawWorkspaceLines);
 }
 
@@ -992,10 +1066,10 @@ function drawWorkspaceLines() {
   svg.setAttribute('width', String(base.width));
   svg.setAttribute('height', String(base.height));
 
-  for (const c of boot.connections || []) {
-    const a = mapNodes.conn.get(c.id);
-    const b = mapNodes.workspace.get(c.workspaceId);
-    if (!a || !b) continue;                     // 只有一头在，宁可不画也不画半条
+  // ★ 两段用**同一个**画法：抽出来是为了让"线是怎么画的"只有一处 —— 两段各写一遍
+  //   的话，改了曲率或留白只会改到其中一段，而图上看起来仍然像一张完整的图。
+  const edge = (a, b, cur) => {
+    if (!a || !b) return;                       // 只有一头在，宁可不画也不画半条
     const ra = a.getBoundingClientRect();
     const rb = b.getBoundingClientRect();
     const x1 = ra.right - base.left;
@@ -1009,8 +1083,22 @@ function drawWorkspaceLines() {
       + `C ${(x1 + dx).toFixed(1)} ${y1.toFixed(1)}, `
       + `${(x2 - dx).toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`);
     // className 在 SVG 元素上是只读的，只能走 setAttribute
-    p.setAttribute('class', c.id === boot.activeConnectionId ? 'edge cur' : 'edge');
+    p.setAttribute('class', cur ? 'edge cur' : 'edge');
     svg.append(p);
+  };
+
+  // 连接 → 工作区
+  for (const c of boot.connections || []) {
+    edge(mapNodes.conn.get(c.id), mapNodes.workspace.get(c.workspaceId),
+      c.id === boot.activeConnectionId);
+  }
+  // 工作区 → 它引用的每一份数据。**同一份被两个工作区指着就是两条线** —— 那张图要说的
+  // 就是这件事（各自一个下拉里看不出来）。
+  for (const l of boot.workspaces || []) {
+    const wnode = mapNodes.workspace.get(l.id);
+    for (const sid of Object.values(l.refs || {})) {
+      edge(wnode, mapNodes.space.get(sid), false);
+    }
   }
 }
 
@@ -1713,6 +1801,155 @@ function whyNotRunnable(p) {
   return WHY_NOT_RUNNABLE.noJob.replace('%s', p.title);
 }
 
+/** 当前活跃那条连接。插件块上那一格问的就是**它**的工作区 —— 与「开始会话」同一条。 */
+function activeConn() {
+  const id = boot && boot.activeConnectionId;
+  return ((boot && boot.connections) || []).find((c) => c.id === id) || null;
+}
+
+/**
+ * 「还有谁在用这一份数据」—— 一句跟在端口后面的小字。
+ *
+ * ★ 它是**反查**，不是推导：`boot.workspaces` 是主进程算好的那张引用表，这里只是
+ *   拿一个数据 id 去问"哪几个工作区的表里指着它"。查错了的代价是一句注释不准
+ *   （不是一次删错东西）—— 真正不可逆的判断全部留在主进程。
+ * ★ 不含**当前这个**工作区：用户看的是"除了我这里，还有谁"。
+ */
+function spaceUsersOf(spaceId, workspaceId) {
+  const names = (boot.workspaces || [])
+    .filter((l) => l.id !== workspaceId
+      && Object.values(l.refs || {}).includes(spaceId))
+    .map((l) => `「${l.name}」`);
+  return names.length ? `${names.join('、')}也在用` : '';
+}
+
+/**
+ * 插件块上那一格：**这个插件用哪一份数据**。
+ *
+ * ★ 主体是**当前活跃连接的工作区**（与旁边那个「开始会话」按钮同一条连接）——
+ *   用户在连接列表里选哪条，这一格说的就是哪条。没有活跃连接（开发者模式、或者
+ *   一条连接都还没有）时**不画**：那一格答的问题在那时不存在，画一个空下拉
+ *   等于凭空许诺一个不存在的东西。
+ *
+ * ★ 三种取值与「③ 工作区」**同一套约定**（键缺席 / `null` / 一个 id），
+ *   逐一写在 `applyPluginSpace` 上面。
+ *
+ * ★ 选项只有**这个插件现在读得到的那几份**（`pluginId` 与 `group` 都要对得上，
+ *   由主进程现算的 `p.group` 给判据）。列一份指过去读不通的数据，用户点下去
+ *   只会得到一句报错 —— 那比不列更坏。
+ */
+function pluginSpaceRow(p) {
+  const conn = activeConn();
+  const ws = conn ? workspaceById(conn.workspaceId) : null;
+  if (!ws) return null;
+
+  const usable = (boot.spaces || [])
+    .filter((s) => s.pluginId === p.id && s.group === p.group);
+  const cur = (ws.refs || {})[p.id] || '';
+  const known = usable.some((s) => s.id === cur);
+
+  const row = document.createElement('div');
+  row.className = 'plug-data';
+
+  const lab = document.createElement('label');
+  lab.className = 'plug-data-lbl';
+  lab.textContent = '数据';
+  lab.title = `这条连接（${conn.label || `${conn.user}@${conn.host}`}）的`
+    + `「${ws.name}」里，这个插件用哪一份数据。一份数据 = 一个本地端口 + 一份浏览器`
+    + '存储（登录状态、窗口布局），它可以被几个工作区共用 —— 共用就是它们看到同一份。';
+
+  const sel = document.createElement('select');
+  sel.className = 'plug-space';
+  sel.setAttribute('aria-label', '这个插件用哪一份数据');
+
+  // ★ 只在**这一格还是空的**时候才有"跟随默认"那一项：已经有了的那一份**就是**
+  //   现在的值，再摆一个"默认"只会让下拉停在一个不生效的值上。
+  if (!known) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '默认：第一次开会话时新建一份';
+    sel.append(o);
+  }
+  usable.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = s.id;
+    const users = spaceUsersOf(s.id, ws.id);
+    o.textContent = `数据 ${i + 1} · 端口 ${(s.ports || [])[0]}`
+      + (users ? `（${users}）` : '');
+    sel.append(o);
+  });
+  const nu = document.createElement('option');
+  nu.value = NEW_SPACE;
+  nu.textContent = '＋ 另开一份（从空白开始）';
+  sel.append(nu);
+
+  // ★ `NEW_SPACE` 与 `''` 都要**原样留住**：前者是用户显式要另开一份，后者是"这一格
+  //   还没有值"。一个"找不到就空着"的兜底会把它们悄悄换成空串 —— 于是"另开一份"
+  //   变成"什么都不做"，而用户看到的是下拉弹回了默认那一项，没有任何一句话解释。
+  sel.value = (cur === '' || cur === NEW_SPACE || known) ? cur : '';
+
+  sel.onchange = async () => {
+    const v = sel.value;
+    // 键**缺席** = 没表态（只有"默认"那一项给得出这个值）。
+    const arg = v === NEW_SPACE ? null : (v === '' ? undefined : v);
+    const r = await applyPluginSpace(ws.id, p.id, arg);
+    // 没成功就把下拉拨回真实的那一格（重建整块 → 下拉按 `refs` 重新选中）。
+    // ★ `lastPlugins` 为空时**什么都不做**：`renderPlugins(null)` 会把整块插件列表
+    //   清空 —— 那比"下拉停在错的值上"严重得多。
+    if (!r.ok && lastPlugins) renderPlugins(lastPlugins);
+  };
+
+  row.append(lab, sel);
+  return row;
+}
+
+/**
+ * 换「这个插件用哪一份数据」。
+ *
+ * ★ 今天只有**一个**入口（插件块上那一格），但仍然单独成一个函数：它与
+ *   `applyWorkspace` 是同一条路子（先做、被拒了再问、成了再重画），而那一条路里
+ *   每一格都是踩过的坑。等"从别的工作区复用一份过来"那个入口出现时，它走这里 ——
+ *   而不是在旁边长出第二份长得差不多的实现。
+ *
+ * ★ 三种取值（与「③ 工作区」同一套，主进程那边是**三件事**）：
+ *     键**缺席**（`undefined`）= 用户没表态 ⇒ 什么都不做
+ *     `null`                  = 要一份**新的**（哪怕现在已经有一份）
+ *     一个 id                 = 就用那一份
+ *   ★ 界面**不自己算**"应当是哪一份"：那样算出来的值是上一个字算的（工作区刚换过、
+ *     或者插件刚重新同步过），而用户按下去的是此刻。
+ *
+ * ★ 先做、被拒了再问（与 `applyWorkspace` 同一套路）：旧那一份会不会被删掉由**主进程**
+ *   判定 —— 界面手里那份引用计数随时可能已经陈旧，而"我删掉了你那份数据"必须是真的
+ *   才会说出口。
+ */
+async function applyPluginSpace(workspaceId, pluginId, spaceId) {
+  const arg = { workspaceId, pluginId };
+  if (spaceId !== undefined) arg.spaceId = spaceId;
+
+  let r = await window.slurmate.setWorkspaceRef(arg);
+  if (!r.ok && r.code === 'would_discard') {
+    if (!window.confirm(`${r.error}\n\n确定要换吗？`)) return { ok: false };
+    r = await window.slurmate.setWorkspaceRef({ ...arg, confirmDiscard: true });
+  }
+  if (!r.ok) {
+    notice('error', r.error || '没能换这一份数据。');
+    return { ok: false };
+  }
+
+  boot.workspaces = r.workspaces || boot.workspaces;
+  boot.spaces = r.spaces || boot.spaces;
+  boot.connections = r.connections || boot.connections;
+  // 三处都跟着变：插件块上那一格、映射图、连接列表（它按工作区算独占与引用数）。
+  renderConnections(boot.connections);
+  if (lastPlugins) renderPlugins(lastPlugins);
+  // ★ 删掉东西的时候要说出来。不说的话它是一次**没有任何痕迹**的删除 ——
+  //   用户在别处找不到那一份数据，而界面上一切正常。
+  notice('info', r.droppedOld
+    ? '换好了。旧的那一份数据没有别的工作区在用，已经删掉；下一次开会话就用新的那一份。'
+    : '换好了。下一次开会话时，这个插件就用新的那一份数据。');
+  return { ok: true };
+}
+
 function pluginBlock(p) {
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
@@ -1794,6 +2031,16 @@ function pluginBlock(p) {
     d.append(el('p', 'why',
       `站点用的是 ${p.siteVersion} 版，而本机这一份是 ${p.version} 版。`
       + '会话仍然起得来，但界面可能连不上 —— 升级客户端通常就好了。'));
+  }
+
+  // ── 这个插件用哪一份数据 ──
+  //
+  // ★ 只画给**真的有一份数据**的插件（`p.ports > 0`，清单里那一格）：0 个端口的
+  //   插件没有存储、没有端口、没有那一格，画一个空下拉等于凭空许诺一个不存在的东西。
+  // ★ 它在**按钮之前**：那一格决定的是"按下去会用哪一份数据"，先看得见再按。
+  if (p.ports > 0) {
+    const row = pluginSpaceRow(p);
+    if (row) d.append(row);
   }
 
   const btn = document.createElement('button');

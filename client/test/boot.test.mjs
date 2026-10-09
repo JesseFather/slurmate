@@ -832,6 +832,162 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.deepEqual((await invoke('app:bootstrap')).connections, []);
 });
 
+test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  // 一个**要一份数据**的插件（`ports: 1` ⇒ 它有一份"用哪一份数据"）。
+  const id = mintId();
+  putSitePlugin({
+    id, name: 'space-swap',
+    over: { contributes: { ports: 1, concurrent: false, surface: { kind: 'web', path: '/' } } },
+  });
+  idx._test.getBackend().debugAddSitePlugin('space-swap');
+
+  const wsRefs = (wsId) => {
+    const ws = idx._test.getCfg().workspaces.find((l) => l.id === wsId);
+    return (ws && ws.refs) || {};
+  };
+  const wsA = (await invoke('app:bootstrap')).connections[0].workspaceId;
+  // 第二条连接**另起一个空工作区**（显式要一个新的），好试"复用别处的"那一支
+  const b = await invoke('app:saveConnection',
+    { user: 'bob', host: '198.51.100.20', port: 10100, workspaceId: null });
+  const wsB = b.connection.workspaceId;
+  assert.notEqual(wsB, wsA);
+
+  // ── ① 界面**没表态**（键缺席）⇒ 一个字都不改，也不造数据 ──
+  const quiet = await invoke('app:setWorkspaceRef', { workspaceId: wsA, pluginId: id });
+  assert.equal(quiet.ok, true);
+  assert.equal(quiet.droppedOld, false);
+  assert.deepEqual(wsRefs(wsA), {}, '★ 没表态不该凭空造出一份数据来');
+  assert.equal(quiet.spaces.length, 0);
+
+  // ── ② 另开一份（`null`）⇒ 造一份、指过去 ──
+  const made = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null });
+  assert.equal(made.ok, true);
+  const s1 = wsRefs(wsA)[id];
+  assert.ok(s1, '另开一份之后引用表要指着它');
+  assert.equal(made.droppedOld, false, '第一次没有"旧的那一份"可删');
+
+  // ── ③ 再另开一份：旧那一份**会被删掉** ⇒ 没确认之前必须拒，且什么都不动 ──
+  const ask = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null });
+  assert.equal(ask.ok, false);
+  assert.equal(ask.code, 'would_discard');
+  // ★ 这句话要说得**足够**：用户是按它做决定的（不可逆），所以"会被删掉"三个字
+  //   必须在里面，而不是一句"会影响一些数据"。
+  assert.match(ask.error, /会被删掉/);
+  assert.equal(wsRefs(wsA)[id], s1, '★ 没确认之前配置一个字都不许动');
+  // 而**没确认时也不许已经把新数据造出来**（次序：先问，后动手）
+  const cfg1 = idx._test.getCfg();
+  assert.equal(cfg1.spaces.filter((s) => s.pluginId === id).length, 1,
+    '★ 被否掉的那一次不该在配置里留下一份没人要的数据');
+
+  const again = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, confirmDiscard: true });
+  assert.equal(again.ok, true);
+  const s2 = wsRefs(wsA)[id];
+  assert.notEqual(s2, s1);
+  // ★ 而"删掉了"这件事要**如实**报出来（界面拿它给用户一句话）—— 这一格是事后
+  //   数的，不是把上面那个预判原样返回。
+  assert.equal(again.droppedOld, true);
+  assert.equal(again.spaces.some((s) => s.id === s1), false, '旧那一份真的不在了');
+
+  // ── ④ 复用**别的工作区**那一份：两个工作区指着同一份数据 ──
+  const madeB = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsB, pluginId: id, spaceId: null });
+  assert.equal(madeB.ok, true);
+  const sB = wsRefs(wsB)[id];
+  // ★ 这一句钉的是**最常见的那条起点**：这个工作区还没有这个插件的数据（`oldId`
+  //   是 null），而用户要一份新的。少了下面 `null` 那一支的那个判据，这里会返回
+  //   `ok: true` 而**什么都没发生** —— 一个静默的空操作。
+  assert.ok(sB, '★ 从一个空引用表出发也要真的建出一份来');
+  const reuse = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: sB, confirmDiscard: true });
+  assert.equal(reuse.ok, true);
+  assert.equal(wsRefs(wsA)[id], sB, '★ 指过去了 —— 共用同一份');
+  assert.equal(reuse.droppedOld, true, '自己那一份 s2 没人指着了，收掉');
+  // ★ 这一份被**两个**工作区指着 ⇒ 它**必须还在**。这正是"数据与工作区是两层"
+  //   那句话的可执行版本：收的是"没人指着的那一份"，不是"我刚换掉的那一份"。
+  assert.equal(reuse.spaces.some((s) => s.id === sB), true);
+  const plan = reuse.workspaces;
+  assert.deepEqual(plan.find((l) => l.id === wsA).refs[id], sB);
+  assert.deepEqual(plan.find((l) => l.id === wsB).refs[id], sB);
+  assert.equal(plan.find((l) => l.id === wsA).spaces.includes(sB), true);
+
+  // ── ⑤ 三种"指不过去" ──
+  const noPlugin = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: '01ZZZZZZZZZZZZZZZZZZZZZZZZ', spaceId: sB });
+  assert.equal(noPlugin.ok, false);
+  assert.match(noPlugin.error, /没有这个插件/);
+
+  const noWs = await invoke('app:setWorkspaceRef',
+    { workspaceId: 'wffffffffffff', pluginId: id, spaceId: sB });
+  assert.equal(noWs.ok, false);
+  assert.match(noWs.error, /工作区不存在/);
+
+  // ★ 一份**别的插件**的数据：拒。指过去之后这个插件会去读写一份路径中间那段
+  //   属于别人的存储 —— 而路径是拼出来的，它**读得通**，只是里面是别人的文件。
+  const other = mintId();
+  putSitePlugin({
+    id: other, name: 'other-space',
+    over: { contributes: { ports: 1, concurrent: false, surface: { kind: 'web', path: '/o' } } },
+  });
+  const madeOther = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsB, pluginId: other, spaceId: null });
+  assert.equal(madeOther.ok, true);
+  const sOther = wsRefs(wsB)[other];
+  const cross = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: sOther });
+  assert.equal(cross.ok, false);
+  assert.match(cross.error, /不是这个插件/);
+  assert.equal(wsRefs(wsA)[id], sB, '拒了之后引用表一个字都没动');
+
+  // ★ **共享组对不上**的那一份：拒。指过去只会得到"看起来换好了、开会话时又变回
+  //   新的"的假动作 —— 因为 `spaceFor` 发现记着的组与现算的不一致时会**另开一份**。
+  //   这一格够得着：作者改了 `contributes.data.inherit`（或者 `perVersion`）之后，
+  //   盘上那一份就永远落在这个判据的"对不上"那一侧。
+  idx._test.getCfg().spaces.push(
+    { id: 'sffffffffffff', pluginId: id, group: 'old-group', ports: [18099] });
+  const stale = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: 'sffffffffffff' });
+  assert.equal(stale.ok, false);
+  assert.match(stale.error, /共享组/);
+
+  // ★ 不要数据空间的插件**没有这一格**（界面根本不会画）。这一句留着是因为
+  //   少了它会给一个永远不会读它的插件凭空造一份数据。
+  const noNeed = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: sshdId(), spaceId: null });
+  assert.equal(noNeed.ok, false);
+  assert.match(noNeed.error, /不要数据空间/);
+
+  // ── ⑥ 这个插件在这个工作区里**正跑着**⇒ 拒（不是提示，是拒）──
+  //
+  //   ★ 理由：跑着的那一条手里攥着的是**开局那一刻**的那一份。改掉这一格之后它照旧
+  //     跑在旧的那一份上，而客户端一重启、`reattachOne` 会按新引用去算分区与数据
+  //     目录 —— 那条作业就**接不回来了**，且看不出为什么。
+  await invoke('app:setActiveConnection', (await invoke('app:bootstrap')).connections[0].id);
+  const run = await startRunning(idx, 'space-swap');
+  const live = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, confirmDiscard: true });
+  assert.equal(live.ok, false);
+  assert.equal(live.code, 'session_running');
+  assert.match(live.error, /space-swap/, '★ 要说得出是哪个插件、哪个工作区');
+  assert.equal(run.ctl.state, 'running', '★ 被拒之后那条会话一动不动');
+
+  await invoke('app:stop', { slot: run.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+
+  for (const c of (await invoke('app:bootstrap')).connections) {
+    await invoke('app:deleteConnection', c.id);
+  }
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉', async (t) => {
   t.after(() => { Module._load = origLoad; });
 

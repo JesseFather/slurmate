@@ -180,18 +180,23 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
   max-width: 200px; border-radius: 3px;
 }
 
-/* 连接 ↔ 工作区 的映射图：两列，连线是盖在上面的 SVG。
-   CSP 里没有 unsafe-inline，所以这里全走 class，一个 style="…" 都不能有。 */
+/* 连接 ↔ 工作区 ↔ 数据 的映射图：三列，连线是盖在上面的 SVG。
+   CSP 里没有 unsafe-inline，所以这里全走 class，一个 style="…" 都不能有。
+   ★ 两段线走**同一个**画法（panel.js 的 `edge`）：起点是左列节点的**右边缘**、
+     终点是右列节点的**左边缘**。所以中间那一列（工作区）**要拉伸**（默认），
+     它的左右两条边才是齐的 —— 按内容定宽的话，每条线会从各自不同宽的节点右边出发，
+     图上看起来像散开的，而这件事不会有任何东西报错。 */
 .wmap {
   position: relative;
-  display: grid; grid-template-columns: 1fr 1fr; gap: 0 56px;
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 44px;
   margin: 4px 0 6px;
 }
 .wmap-lines { position: absolute; left: 0; top: 0; pointer-events: none; }
 .wmap-lines .edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
 .wmap-lines .edge.cur { stroke: var(--accent-hover); stroke-width: 2; }
 .wmap-col { display: flex; flex-direction: column; gap: 6px; }
-/* 右列不拉伸：工作区节点按内容定宽、左边缘对齐，线才落在同一个 x 上 */
+/* **末列**（数据）不拉伸：它按内容定宽、左边缘对齐，指着它的线才都落在同一个 x 上。
+   中间那一列反过来 —— 它要拉伸，见上面 `.wmap` 那一段。 */
 .wmap-col:last-child { align-items: flex-start; }
 .wnode {
   display: flex; align-items: center; gap: 8px;
@@ -204,7 +209,10 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .wnode.cur { border-color: var(--accent); background: #0e3a5c; }
-.wnode.ws .meta { color: var(--fg-dim); font-size: 11px; flex: none; }
+.wnode.ws .meta, .wnode.sp .meta { color: var(--fg-dim); font-size: 11px; flex: none; }
+/* 连接节点上那一行插件名（小字）。★ 它不是一条线的一端 —— 数据那一列才是；
+   它说的是"这个工作区里已经有它的一份数据了"，所以刻意做得比 `nm` 轻。 */
+.wnode .plug-chips { color: var(--fg-dim); font-size: 11px; flex: none; }
 .wnode input.rename { width: 130px; padding: 1px 6px; font-size: 12px; }
 
 /* ── 高级选项 ── */
@@ -260,6 +268,15 @@ p.alarm {
                user-select: none; }
 .plug-toggle input { margin: 0; cursor: pointer; }
 .plug .why { font-size: 12px; color: var(--warn); margin: 0 0 10px; }
+/* 插件块上那一格「这个插件用哪一份数据」。长解释在 title= 里（悬停），正文只有
+   标签 + 下拉：那一行要说的事（谁在用这一份）已经在下拉的选项文字里了。 */
+.plug-data { display: flex; align-items: center; gap: 8px; font-size: 12px;
+             margin-bottom: 10px; }
+.plug-data-lbl { color: var(--fg-dim); flex: none; }
+.plug-space {
+  font: inherit; font-size: 12px; padding: 2px 6px; height: 24px;
+  max-width: 380px; border-radius: 3px;
+}
 /* ★ 这里从前有一条 `.plug-src`（来源标签：「站点分发 + 本机安装」）。池只剩一个
    之后每个插件都是站点分发的，那条标签恒为空，所以样式跟着一起删了。 */
 

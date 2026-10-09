@@ -70,7 +70,10 @@ function mkEl(tag) {
     _text: '', className: '', value: '', title: '', type: '', disabled: false,
     onclick: null, onchange: null, oninput: null, style: {},
     append(...kids) { for (const k of kids) e.children.push(k); },
+    prepend(k) { e.children.unshift(k); },
     appendChild(k) { e.children.push(k); return k; },
+    remove() {},
+    get lastChild() { return e.children[e.children.length - 1] || null; },
     setAttribute(k, v) { e.attrs[k] = String(v); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
     querySelectorAll() { return []; },
@@ -136,10 +139,33 @@ const CONNS = [
   { id: 'c1', user: 'alice', host: '198.51.100.7', port: 10100, workspaceId: 'w000000000001' },
   { id: 'c2', user: 'bob', host: '198.51.100.9', port: 10100, workspaceId: 'w000000000002' },
 ];
-const WSS = [
-  { id: 'w000000000001', name: '工作区 1', refCount: 1, members: ['c1'], soleOwnerId: 'c1', spaces: [] },
-  { id: 'w000000000002', name: '工作区 2', refCount: 1, members: ['c2'], soleOwnerId: 'c2', spaces: [] },
+/** 两份数据，**各归一个工作区**。`refs` 是那张引用表（`插件 id → 数据 id`）。 */
+const SPACES = [
+  { id: 's000000000001', pluginId: 'p1', group: 'editor', ports: [18080] },
+  { id: 's000000000002', pluginId: 'p1', group: 'editor', ports: [18081] },
 ];
+const WSS = [
+  { id: 'w000000000001', name: '工作区 1', refCount: 1, members: ['c1'], soleOwnerId: 'c1',
+    refs: { p1: 's000000000001' }, spaces: ['s000000000001'] },
+  { id: 'w000000000002', name: '工作区 2', refCount: 1, members: ['c2'], soleOwnerId: 'c2',
+    refs: { p1: 's000000000002' }, spaces: ['s000000000002'] },
+];
+
+/** 一份界面视图（`pluginsView` 的形状，只留这一组用例真读到的那些格）。 */
+const PV = {
+  plugins: [
+    { id: 'p1', name: 'cs', title: '编辑器', version: '1.0.0', description: '',
+      ports: 1, group: 'editor', runnable: true, hasClientCode: true,
+      siteEnabled: true, siteKnown: true, locallyEnabled: true, canSubmit: true,
+      defaults: null },
+    // 不要数据空间的那一种：它**没有**「用哪一份数据」这一格。
+    { id: 'p2', name: 'relay', title: '中转站', version: '1.0.0', description: '',
+      ports: 0, group: 'relay', runnable: true, hasClientCode: false,
+      siteEnabled: true, siteKnown: true, locallyEnabled: true, canSubmit: true,
+      defaults: null },
+  ],
+  errors: [], problems: [], missing: [], consent: [], inert: [], site: null,
+};
 
 /** 起一个装好数据的 panel.js。`extra` 是往 vm 里再跑的一段赋值（设 form / wsPicked…）。 */
 function start(bootObj, extra = '') {
@@ -168,19 +194,49 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
   }
 });
 
-test('★ 映射图：连接与工作区各一列，每一条连接一条线', () => {
-  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES });
   h.fn('renderConnections')(CONNS);
 
   assert.equal(h.byId.get('wmap-conns').children.length, 2, '左列两条连接');
-  assert.equal(h.byId.get('wmap-workspaces').children.length, 2, '右列两个工作区');
+  assert.equal(h.byId.get('wmap-workspaces').children.length, 2, '中列两个工作区');
+  assert.equal(h.byId.get('wmap-spaces').children.length, 2, '右列两份数据');
+  // 数据那一列说的是"这一份是谁的、有几个工作区指着它"——端口就是它的对外身份
+  const sp0 = h.byId.get('wmap-spaces').children[0];
+  assert.match(sp0.children[0].textContent, /18080/);
+  assert.match(sp0.children[1].textContent, /1 个工作区/);
+
   // renderWorkspaceMap 结尾是 requestAnimationFrame(drawWorkspaceLines)，而架子里的
   // rAF 是**立刻执行**的 —— 所以矩形非零时线就该已经画好了。
+  // ★ 两段线各两条：连接→工作区、工作区→数据。少了第二段的话，图上"哪个工作区
+  //   指着哪一份"就只剩一列孤零零的方框，而这张图存在的理由正是那一段。
   const lines = h.byId.get('wmap-lines').children;
-  assert.equal(lines.length, 2, '两条连接各一条线');
+  assert.equal(lines.length, 4, '两段关系各两条线');
   assert.match(lines[0].attrs.d, /^M [\d.]+ [\d.]+ C /, '线是三次贝塞尔');
   assert.equal(lines[0].attrs.class, 'edge cur', '正连着的那条要高亮');
   assert.equal(lines[1].attrs.class, 'edge');
+  for (const l of lines.slice(2)) assert.equal(l.attrs.class, 'edge', '数据那一段不高亮');
+});
+
+test('★★ 同一份数据被两个工作区指着 ⇒ 两条线汇到同一个节点', () => {
+  // ★ 这就是这张图存在的**全部理由**：在下拉框里，"我和 2 号工作区共用同一份登录
+  //   状态"这件事一个字都看不出来。
+  const shared = [
+    WSS[0],
+    { ...WSS[1], refs: { p1: 's000000000001' }, spaces: ['s000000000001'] },
+  ];
+  const h = start({ connections: CONNS, workspaces: shared, activeConnectionId: 'c1',
+    spaces: [SPACES[0]] });
+  h.fn('renderConnections')(CONNS);
+  assert.equal(h.byId.get('wmap-spaces').children.length, 1, '只有一份数据');
+  assert.match(h.byId.get('wmap-spaces').children[0].children[1].textContent, /2 个工作区/);
+  const lines = h.byId.get('wmap-lines').children;
+  // 2 条（连接→工作区）+ 2 条（两个工作区都指向同一份）—— 它们是**同一个终点**：
+  // 那正是"共用"在图上长的样子。
+  assert.equal(lines.length, 4);
+  assert.equal(lines[2].attrs.d.split('C')[1], lines[3].attrs.d.split('C')[1],
+    '★ 两条线的终点必须重合（同一份数据）');
 });
 
 test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那一句后果', () => {
@@ -248,6 +304,92 @@ test('★ 状态条那个选择器：共用同一份工作区列表，选中"该
   h.run('boot = { connections: [], workspaces: [], activeConnectionId: null };');
   h.fn('renderWorkspaceSelectors')();
   assert.equal(h.byId.get('sb-workspace').value, '');
+});
+
+test('★★ 插件块上的「用哪一份数据」：三种取值各发各的，一个都不许合并', async () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES },
+  'lastPlugins = { plugins: [{ id: "p1", title: "编辑器" }, { id: "p2", title: "中转站" }] };'
+  + 'window.__calls = [];'
+  + 'window.slurmate.setWorkspaceRef = (p) => { window.__calls.push(p);'
+  + ' return Promise.resolve({ ok: true, droppedOld: false }); };');
+  h.fn('renderPlugins')(PV);
+
+  const blocks = h.byId.get('plugin-blocks').children;
+  assert.equal(blocks.length, 2);
+  const selOf = (b) => childrenOf(b).find((x) => x.tagName === 'SELECT') || null;
+  // ★ 发出去的那个对象是在 vm 另一个 Realm 里造的，`deepStrictEqual` 会拿**原型**
+  //   去比，于是两个字段完全一样的对象也说"不相等"。所以比字段时走一趟 JSON。
+  const raw = (i) => h.run(`window.__calls[${i}]`);
+  const sent = (i) => JSON.parse(JSON.stringify(raw(i)));
+  // ★★ 而**"键在不在"必须查在原对象上** —— `JSON.stringify` 会把值为 `undefined`
+  //    的键**整个丢掉**，于是"没有 `spaceId` 这个键"与"有、值是 undefined"在
+  //    `sent()` 眼里长得一模一样。第一版的判据就戴了这个遮罩：把界面那边改成
+  //    「永远发一个 `spaceId: undefined`」时它**照样绿**。见下面第 ③ 段。
+
+  // ★ 不要数据空间的插件**没有这一格**（`ports: 0`）。画一个空下拉等于凭空许诺
+  //   一个不存在的东西 —— 它没有存储、没有端口，也就没有"用哪一份"。
+  assert.equal(selOf(blocks[1]), null, '★ 0 个端口的插件不该有那一格');
+
+  const sel = selOf(blocks[0]);
+  assert.ok(sel, '要数据的插件必须有那一格');
+  // 选项 = 这个插件的两份 + 「另开一份」。★ **没有"跟随默认"那一项** ——
+  // 这个工作区已经指着一份了，再摆一个"默认"只会让下拉停在一个不生效的值上。
+  assert.deepEqual(sel.children.map((o) => o.value),
+    ['s000000000001', 's000000000002', '__new_space__']);
+  assert.equal(sel.value, 's000000000001', '初值是它现在指着的那一份');
+  // ★ 「还有谁在用」：s2 被 2 号工作区指着，s1 没有别人 —— 两句话必须**分开**，
+  //   因为用户按它决定"改这一格会不会动到别人"。
+  assert.match(sel.children[0].textContent, /数据 1 · 端口 18080$/);
+  assert.match(sel.children[1].textContent, /数据 2 · 端口 18081（「工作区 2」也在用）/);
+
+  // ── ① 选另一份已存在的 ⇒ 发一个**数据 id** ──
+  sel.value = 's000000000002';
+  await sel.onchange();
+  assert.deepEqual(sent(0),
+    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: 's000000000002' });
+
+  // ── ② 选「另开一份」⇒ 发 `null`（**不是**空串、也不是某个 id）──
+  sel.value = '__new_space__';
+  await sel.onchange();
+  assert.deepEqual(sent(1),
+    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: null });
+
+  // ── ③ 这一格还没有值（引用表里没有这个插件）⇒ 发的是**没有 spaceId 这个键** ──
+  //   ★ 这一条是整个协议里最容易写错的一格：「没表态」与「要一个新的」合并成一种
+  //     值时，用户点了「另开一份」而系统理解成"什么都不做"（或者反过来，用户什么都
+  //     没做而系统又开了一份）—— 两边都不报错。
+  const empty = WSS.map((l) => ({ ...l, refs: {}, spaces: [] }));
+  h.run(`boot = { connections: ${JSON.stringify(CONNS)}, workspaces: ${JSON.stringify(empty)},`
+    + ` activeConnectionId: 'c1', spaces: ${JSON.stringify(SPACES)} };`);
+  h.fn('renderPlugins')(PV);
+  const sel2 = selOf(h.byId.get('plugin-blocks').children[0]);
+  assert.equal(sel2.children[0].value, '', '还没有值 ⇒ 第一项是"跟随默认"');
+  assert.match(sel2.children[0].textContent, /第一次开会话时新建一份/);
+  assert.equal(sel2.value, '', '初值选中"跟随默认"');
+  assert.equal(sel2.children.length, 4, '默认 + 两份数据 + 另开一份');
+
+  // 选「跟随默认」（什么都没改）
+  sel2.value = '';
+  await sel2.onchange();
+  // ★ 查在**原对象**上（`sent` 会把这一格抹平，见上面那段）：
+  assert.equal('spaceId' in raw(2), false,
+    '★ 「没表态」必须是**键缺席** —— 界面不许把一个显式的 `spaceId: undefined` 发出去：'
+    + '那是"这一格有值、值是空的"，它与"这一格没有值"是不是同一件事，取决于**传输层**'
+    + '怎么看待 undefined（跨 IPC 一路序列化下来，两种形状能不能分开不由我们说了算）。'
+    + '而这一格一旦被读成"要一个新的"，用户什么都没做、每开一次会话就多一份数据。');
+
+  // 而这一格还没有值的时候选「另开一份」，发的仍然是 `null`
+  sel2.value = '__new_space__';
+  await sel2.onchange();
+  assert.deepEqual(sent(3),
+    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: null });
+
+  // ── ④ 一条连接都没有（开发者模式）⇒ 整格不画 ──
+  h.run('boot = { connections: [], workspaces: [], activeConnectionId: null, spaces: [] };');
+  h.fn('renderPlugins')(PV);
+  assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,
+    '★ 没有活跃连接时那一格没有对象 —— 画一个空的等于凭空许诺');
 });
 
 test('★★ 这个架子真的抓得住 P1 那个缺陷（拿一个故意的错来验）', () => {

@@ -728,6 +728,26 @@ function spaceFor(cfg, workspaceId, pluginId, group, count, extraPorts) {
   //   就地改 `cur.group` 是错的 —— 那等于把一份已经写好的数据改名，而它下面那份
   //   存储还在旧名字的目录里。
   if (cur && cur.group === group) return { space: cur, created: false };
+  const space = newSpace(cfg, pluginId, group, count, extraPorts);
+  ws.refs[pluginId] = space.id;
+  return { space, created: true };
+}
+
+/**
+ * 造一份**新的**数据（进 `cfg.spaces`，**不指给任何工作区**）。
+ *
+ * ★ 它与 `spaceFor` 分开是**故意的**：那一个是"取现成的那一份，没有才建"，
+ *   而"给这个插件另开一份空白的"要的是**无条件新建**（哪怕已经有一份）——
+ *   用 `spaceFor` 去做那件事，它会命中已有的那一份并原样返回，于是用户点了
+ *   「＋ 新建一份」而**什么都没发生**，还没有任何一处会报错。
+ *
+ * ★ 造一份数据只有这一处实现。第二个实现（哪怕只有六行）迟早会在端口个数、
+ *   或"地板不是缺省"这一格上与这里分家，而分家的后果要么是一份永远收不掉的
+ *   存储，要么是一份 `ports` 为空、下次启动就消失的数据。
+ *
+ * @returns {object} 造出来的那一份 —— **不落盘**，由调用方统一走 commitConfig()。
+ */
+function newSpace(cfg, pluginId, group, count, extraPorts) {
   // ★ 地板，不是缺省：一张 ports 列表**不能是空的**（`normalizeSpace` 会把空的那份
   //   整份丢掉，于是引用表指着一份不存在的数据 —— 一个下次启动才会发作的静默损坏）。
   //   走到这里的调用方都保证 ≥ 1（`needsSpace`），这一句只是让"万一"有一个说得清的下场。
@@ -739,8 +759,7 @@ function spaceFor(cfg, workspaceId, pluginId, group, count, extraPorts) {
     ports: assignSpacePorts(cfg, n, extraPorts),
   };
   cfg.spaces = [...(cfg.spaces || []), space];
-  ws.refs[pluginId] = space.id;
-  return { space, created: true };
+  return space;
 }
 
 /**
@@ -872,10 +891,15 @@ function pruneSpaces(cfg, keepIds) {
  * 它手里那份 refCount 随时可能已经陈旧（另一条连接刚被删），
  * 所以「要不要二次确认」的判定权必须在主进程。
  *
- * @returns {[{id, name, refCount, members:string[], soleOwnerId:string|null, spaces:string[]}]}
+ * @returns {[{id, name, refCount, members:string[], soleOwnerId:string|null,
+ *            refs:object, spaces:string[]}]}
  *   soleOwnerId 非 null 表示「这个工作区只被这一条连接使用，切走就会被丢弃」。
  *   `spaces` = 这个工作区指着的那些数据（界面拿它把一条会话的 `spaceId` 对回工作区）。
  *   ★ **没有 `port`** —— 端口是数据空间的属性，一个工作区可能同时有好几个。
+ *   ★ `refs`（`插件 id → 数据 id`）是**原样**那张引用表，给界面回答"这个工作区的这个
+ *     插件指着哪一份"。它与 `spaces` 不是冗余：那一个是**值的集合**（反查会话的
+ *     `spaceId` 属于哪个工作区），这一张是**键值对照**（哪个插件指着哪一份）。
+ *     界面要的是后者，两处各留一份会漂。
  */
 function workspacePlan(cfg) {
   return ((cfg && cfg.workspaces) || []).map((l) => {
@@ -886,9 +910,41 @@ function workspacePlan(cfg) {
       refCount: members.length,
       members,
       soleOwnerId: members.length === 1 ? members[0] : null,
+      refs: { ...(l.refs || {}) },
       spaces: Object.values(l.refs || {}),
     };
   });
+}
+
+/**
+ * 改这张引用表里的一格：**这个工作区的这个插件以后用哪一份数据**。
+ *
+ * ★ 它只改引用，**不建数据、也不删数据**：
+ *   · 要一份新的那一支（`null`）由调用方先建出来 —— 建一份要共享组与端口个数，
+ *     而那两样是**插件**的话（`plugin-data.js`），这一层不认识插件，也不该认识
+ *     （同 `spaceFor` 的理由）。
+ *   · 旧那一份**不在这里动**：它还有没有别的持有者，由 `pruneSpaces` 数 —— 那才是
+ *     "引用"这个词在这里的全部意思。
+ *
+ * ★ 指向的那一份必须**属于同一个插件**（`pluginId` 对得上）。不查的话，
+ *   一份数据的身份是 `<插件 id>/<共享组>/<数据 id>`，把 A 插件的引用表格子指到
+ *   B 插件的数据上，等于让 A 去读写一份路径中间那段属于 B 的存储 —— 而它**读得通**
+ *   （路径是拼出来的，不是查出来的），只是里面是另一个插件的文件。
+ *
+ * @param {string|null} spaceId 已经存在的那一份的 id（`null` 一律由调用方挡掉）
+ * @returns {{ok:boolean, error?:string}} **不落盘** —— 由调用方统一走 commitConfig()。
+ */
+function setWorkspaceRef(cfg, workspaceId, pluginId, spaceId) {
+  const ws = findWorkspace(cfg, workspaceId);
+  if (!ws) return { ok: false, error: '这个工作区不存在。' };
+  const space = findSpace(cfg, spaceId);
+  if (!space) return { ok: false, error: '这一份数据不存在。' };
+  if (space.pluginId !== pluginId) {
+    return { ok: false, error: '这一份数据不是这个插件的 —— 不能指过去。' };
+  }
+  if (!ws.refs || typeof ws.refs !== 'object') ws.refs = {};
+  ws.refs[pluginId] = space.id;
+  return { ok: true };
 }
 
 /**
@@ -1289,7 +1345,8 @@ module.exports = {
   pruneWorkspaces, workspacePlan,
   // 数据空间（一份存储 + 它自己的端口）
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
-  usedSpacePorts, assignSpacePorts, spaceFor, spaceConsumers, pruneSpaces,
+  usedSpacePorts, assignSpacePorts, spaceFor, newSpace, spaceConsumers, pruneSpaces,
+  setWorkspaceRef,
   activeConnection, upsertConnection,
   // 插件在本机的开关，与站点分发的同意台账
   pluginEnabledLocally, setPluginEnabled,
