@@ -5943,3 +5943,51 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(dot(), 'bad', '断开之后那个点必须是红的');
 });
+
+test('★★ 连上之后先建作业日志目录：成了不吭声，没成要说一句话', async (t) => {
+  // ★★ 这一步挡的是一个**只能由真集群回答**的失败：`sbatch -o <日志目录>/slurm-%j.out`
+  //    的父目录是 Slurm 在**跑作业脚本之前**打开的，而作业脚本自己那一次
+  //    `mkdir -p` 排在它后面。目录不存在 ⇒ 那一次提交连启动都启动不了。
+  //    守护进程建不了它（共享家目录对它只读），所以这一步落在客户端：
+  //    `backend-ssh.js` 的 `prepare()`，在 `_openOnce` 的 ready 里。
+  //
+  // ★ 这一条只验**转发那一半**（后端报不报、界面说不说）。"真的发了那条命令"
+  //   在 `backend-ssh.test.mjs` 里 —— 那里有 SSH 那一层的桩，这里没有。
+  const idx = require('../src/main/index.js');
+  const ssh = require('../src/main/backend-ssh.js');
+  const back = idx._test.getBackend();
+  t.after(async () => {
+    Module._load = origLoad;
+    delete back.prepareError;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+
+  // ★ 两个后端**都必须有**这个方法。写成"调用方去 typeof 一下"的话，
+  //   下一个忘了实现它的后端会**静默地**跳过这一步 —— 而症状要到用户提交
+  //   作业时才出现，隔着一个失败作业。
+  const { Backend } = require('../src/main/backend.js');
+  assert.equal(typeof Backend.prototype.prepare, 'function',
+    '接口上要有它，子类才有东西可覆盖');
+  assert.equal(typeof back.prepare, 'function', '假后端也要有（继承的默认实现即可）');
+  assert.equal(typeof ssh.SshBackend.prototype.prepare, 'function');
+
+  const before = noticesOf().length;
+  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  assert.equal(
+    noticesOf().slice(before).some((n) => /作业日志目录/.test(n.text)), false,
+    '★ 建成功时**一个字都不说** —— 它不是提示，是背景动作');
+
+  // 而没成的时候：连上仍然是连上，但要说清**后果**（提交会起不来），
+  // 而不是一句"失败了" —— 用户拿那句没法做任何事。
+  back.prepareError = '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？';
+  const before2 = noticesOf().length;
+  await invoke('app:disconnect');
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok,
+    true, '★ 建不出目录**不算连接失败** —— 连上了就是连上了');
+  const said = noticesOf().slice(before2).map((n) => n.text).join('\n');
+  assert.match(said, /作业日志目录/, `实际说了：${said}`);
+  assert.match(said, /提交的作业会起不来/, '要说清后果，不是一句"没成"');
+  assert.match(said, /Permission denied/, '根因（远端那句原话）也要带上');
+});

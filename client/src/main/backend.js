@@ -112,6 +112,24 @@ class Backend extends EventEmitter {
    */
   get resident() { return null; }
 
+  /**
+   * 连上之后把站点上**这次连接迟早要用**的东西备好。今天是**作业日志目录**
+   * （`sbatch -o` 的父目录是 Slurm 在跑作业脚本之前打开的，而作业脚本那一次
+   * `mkdir -p` 排在它后面 —— 见 `backend-ssh.js` 的 `PREPARE_CMD`）。
+   *
+   * ★ 它**不是**连接的一部分：返回值只用来告诉调用方"有没有成"，
+   *   失败与否都不影响"连上了"这个事实。写成"失败就让 connect() 失败"的话，
+   *   一个建不出目录的家目录会让用户**连都连不上** —— 而他真正失去的是提交，
+   *   不是连接。
+   *
+   * ★ 默认实现是**空操作**：假后端在本地跑，没有远端目录可建。它必须存在
+   *   （而不是让调用方去 `typeof backend.prepare === 'function'`）—— 那种写法
+   *   会让"下一个忘了实现它的后端"静默地跳过这一步，而症状要到用户提交作业时
+   *   才出现，隔着一个失败作业。
+   */
+  // eslint-disable-next-line no-unused-vars
+  async prepare() { return { ok: true }; }
+
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }
   // eslint-disable-next-line no-unused-vars

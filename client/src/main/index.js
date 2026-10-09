@@ -753,6 +753,17 @@ async function doConnect(conn, extra = {}) {
     }
     whoami = res.whoami;
     connectedConnId = conn.id;      // 见它的声明处：换站点时要收的就是这一条的尾巴
+    // ★ 「连上了，但有一样东西没备好」。作业日志目录是**提交之前**就必须存在的
+    //   （`sbatch -o` 的父目录由 Slurm 在跑作业脚本之前打开），所以客户端在连上
+    //   那一刻建它（`backend-ssh.js` 的 `prepare()`）。
+    //   ★ 它**不算连接失败**：连上了就是连上了。但"建不出来"意味着**提交会失败**，
+    //     而那时用户看到的是作业起来又立刻没了 —— 一句话现在说掉，比让他去查
+    //     一个隔着一层作业日志的现场便宜得多。
+    if (backend.prepareError) {
+      win.pushNotice('warn',
+        '连上了，但没能在站点上建出作业日志目录：' + backend.prepareError
+        + '　提交的作业会起不来。');
+    }
     // 站点现状从"连上"这一刻开始问。★ 它**不 await**：那是一个每 30 秒重来一次
     // 的轮询，而连接这条路上等着的是一个用户。第一次问的结果到了就推给界面。
     startSitePoll();

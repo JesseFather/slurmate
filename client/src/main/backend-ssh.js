@@ -122,12 +122,32 @@ const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
  */
 const STREAM_CMD = "/bin/bash -c '/usr/local/bin/slurmate stream'";
 
+/**
+ * 连上之后**先把作业日志目录建出来**。
+ *
+ * ★★ 为什么客户端要干这一件事：`sbatch -o <日志目录>/slurm-%j.out` 的父目录是
+ *    **Slurm 在跑作业脚本之前**打开的，而作业脚本自己那一次 `mkdir -p` 排在它后面
+ *    —— 目录不存在，那一次提交的作业连启动都启动不了。而守护进程**建不了它**：
+ *    systemd 单元把共享家目录挂成只读（`ReadOnlyPaths`），那是"root 身上没有
+ *    『写用户文件』这条攻击面"那层保护。
+ *
+ *    于是三层里只剩客户端这一层。一次连接一个 exec，而它把"第一条作业会不会因为
+ *    目录不存在而起不来"从**一个要赌的版本相关行为**变成**确定的**。
+ *
+ * ★ 与另外两条一样是**编译期常量**：不接受任何用户输入拼接。
+ * ★ `umask 077` 与作业脚本里那个一致 —— 建出来的目录是 0700。
+ *   `$HOME` 由**内层** bash 展开（外层那对单引号里的内容是原样传过去的）。
+ */
+const PREPARE_CMD = "/bin/bash -c 'umask 077; mkdir -p \"$HOME/.slurmate/logs\"'";
+
 const READY_TIMEOUT_MS = 20000;
 const KEEPALIVE_INTERVAL_MS = 10000;
 const KEEPALIVE_COUNT_MAX = 6;
 /** 单次应答的上限。正常响应是几百字节；超过这个数说明对面回的不是我们的协议。 */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const RECONNECT_MIN_MS = 1000;
+/** 建日志目录那一步的上限。它只是一条 `mkdir`，比 RPC 该快得多。 */
+const PREPARE_TIMEOUT_MS = 15000;
 const RECONNECT_MAX_MS = 30000;
 
 /**
@@ -486,6 +506,8 @@ class SshBackend extends Backend {
     this._resident = null;
     /** 常驻通道**没能**建起来的原因。给诊断用 —— 它不是错误，只是一种降级。 */
     this.residentError = null;
+    /** 建作业日志目录没成的原因（见 `prepare()`）。同样是"连上了，但有一件事没成"。 */
+    this.prepareError = null;
     this._streamTimer = null;
     this._streamAttempt = 0;
   }
@@ -630,6 +652,10 @@ class SshBackend extends Backend {
         //   ★ 它**绝不**让 connect() 失败：建不起来就退回去用 exec，而"为什么
         //     建不起来"记在 `residentError` 里。理由见文件头那一段。
         await this._openStream();
+
+        // ★ 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放在这儿而不是
+        //   `connect()` 的开头：它要一条**真的通了**的 SSH 连接。
+        await this.prepare();
 
         // ★ 版本握手 —— **在 whoami 之前**问一次 ping。
         //
@@ -788,6 +814,58 @@ class SshBackend extends Backend {
       this._open().catch(() => { /* 下一轮 close 会再排 */ });
     }, delay);
     this._reconnectTimer.unref?.();
+  }
+
+  // ── 作业日志目录 ────────────────────────────────────────────────────────
+  /**
+   * 在站点上把这个用户的作业日志目录建出来。**每次连接一次**，幂等（`mkdir -p`）。
+   *
+   * 尽力而为：失败只把原因记进 `prepareError`，**不抛异常、也不让 connect() 失败**。
+   * 理由与常驻通道那条一样 —— 连上是连上，而"以后提交的作业会起不来"是另一件事，
+   * 该由调用方决定怎么告诉用户（`index.js` 的 `doConnect` 把它转成一条告警）。
+   *
+   * ★ 它与 `$HOME` 有关，而客户端从来不知道远端的家目录是什么（那是 NSS 的事）。
+   *   所以命令串里是 `$HOME`，由**远端**的 bash 展开 —— 客户端一个路径都不拼。
+   *
+   * ★ 不做成"每次提交之前建一次"：那是给每一条提交加一个来回，而目录建出来之后
+   *   就一直在了（作业脚本每次也会 `mkdir -p` 一次，删掉也会被补回来）。
+   */
+  prepare() {
+    if (!this._conn || this._closed) return Promise.resolve({ ok: false });
+    const conn = this._conn;
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (res) => { if (!settled) { settled = true; resolve(res); } };
+      // ★ 兜底：`conn.exec` 的回调**不保证会来**（连接正好在那一瞬间断掉时它
+      //   永远不触发）。没有它，`_openOnce` 的 ready 会停在这里，而
+      //   `readyTimeout` 只管握手那一段 —— 用户看到的是"点了没反应"。
+      const timer = setTimeout(() => {
+        this.prepareError = '建作业日志目录超时（命令通道没有回应）';
+        done({ ok: false, error: this.prepareError });
+      }, PREPARE_TIMEOUT_MS);
+      conn.exec(PREPARE_CMD, (err, stream) => {
+        if (err) {
+          clearTimeout(timer);
+          this.prepareError = '无法在登录节点上执行命令：' + err.message;
+          return done({ ok: false, error: this.prepareError });
+        }
+        let stderr = '';
+        stream.stderr.on('data', (d) => { stderr += d; });
+        stream.on('error', (e) => {
+          clearTimeout(timer);
+          this.prepareError = '建作业日志目录时通道出错：' + e.message;
+          done({ ok: false, error: this.prepareError });
+        });
+        stream.on('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0) { this.prepareError = null; return done({ ok: true }); }
+          this.prepareError = '建作业日志目录失败（rc=' + code + '）'
+            + (stderr.trim() ? '：' + stderr.trim().split('\n')[0] : '')
+            + ' —— 家目录可写吗？';
+          done({ ok: false, error: this.prepareError });
+        });
+      });
+    });
   }
 
   // ── 常驻通道 ────────────────────────────────────────────────────────────
@@ -1069,7 +1147,7 @@ function isImplemented() {
 }
 
 module.exports = {
-  isImplemented, SshBackend, RPC_CMD, STREAM_CMD,
+  isImplemented, SshBackend, RPC_CMD, STREAM_CMD, PREPARE_CMD,
   hostKeyFingerprint, hostKeyAlgorithm,
   pickEnvelope,       // 导出给测试：它是纯函数，规则又值得钉住
   parseEnvelopeLine,  // 同上：exec 与常驻通道共用同一条「什么算一条消息」的判据

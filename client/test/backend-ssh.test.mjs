@@ -451,6 +451,30 @@ function fakeConn() {
   return c;
 }
 
+/**
+ * `prepare()` 用的假 channel：按给定退出码关掉。
+ *
+ * ★ 与 `FakeExecStream` 分开写，是因为它那条 `close` **不带退出码**（RPC 那条路
+ *   不看退出码，只看有没有解析出信封）。而 `prepare()` 的判据恰恰是退出码 ——
+ *   复用那一份的话，"rc≠0 要报失败"这条永远走不到，而它会**静默地**通过。
+ */
+function prepareConn(code, stderrText = '') {
+  return {
+    execs: [],
+    exec(cmd, cb) {
+      this.execs.push(cmd);
+      const s = new EventEmitter();
+      s.stderr = new EventEmitter();
+      s.close = () => {};
+      setImmediate(() => {
+        if (stderrText) s.stderr.emit('data', Buffer.from(stderrText, 'utf8'));
+        s.emit('close', code);
+      });
+      cb(null, s);
+    },
+  };
+}
+
 /** 造一个"已经连着 SSH"的后端（这一层不碰网络）。 */
 function connectedBackend() {
   const b = new sshBackend.SshBackend({});
@@ -459,6 +483,106 @@ function connectedBackend() {
   b._closed = false;
   return b;
 }
+
+test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"）', async (t) => {
+  // ★★ 上面那条只证明 `prepare()` 本身对。**没人调它**的话目录照样不存在，
+  //    而失败要到用户提交作业时才出现（作业起来了又立刻没了，隔着一层作业日志）。
+  //    所以这一条把 `connect()` 整条路真的跑一遍 —— 用一个假的 ssh2 Client 顶掉
+  //    真握手（本机连不了集群），其余一步都不跳。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); this.execs = []; made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec(cmd, cb) {
+      this.execs.push(cmd);
+      // 常驻通道起不来（这条用例不考它）—— 让它快速退回 exec 那条路。
+      if (cmd === sshBackend.STREAM_CMD) {
+        return setImmediate(() => cb(new Error('用例里不建常驻通道')));
+      }
+      const s = new FakeExecStream(JSON.stringify(PONG));
+      return setImmediate(() => cb(null, s));
+    }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  const r = await b.connect({ user: 'u', host: 'h', port: 22 });
+  assert.equal(r.ok, true, r.error);
+  assert.ok(made.length === 1, '夹具该只造一个 Client');
+  assert.ok(made[0].execs.includes(sshBackend.PREPARE_CMD),
+    '★★ 连上之后必须**真的**发这条命令 —— 少了它，"目录一定存在"这条前提没了，'
+    + '而症状是提交的作业起不来（`sbatch -o` 的父目录不存在）');
+  // ★ 而它排在**握手那两条之前**：ping/whoami 是"这条链路通不通"的判据，
+  //   它们失败会让整次连接失败；而建目录失败不影响"连上了"。次序反了的话，
+  //   一个建不出目录的家目录会报成"无法执行 slurmate rpc"—— 一句指错方向的话。
+  assert.ok(made[0].execs.indexOf(sshBackend.PREPARE_CMD)
+    < made[0].execs.indexOf(sshBackend.RPC_CMD),
+    `次序不对：${JSON.stringify(made[0].execs)}`);
+});
+
+test('★★ 连上之后先把作业日志目录建出来（提交之前它必须存在）', async () => {
+  // ★★ 这一条挡的是一个**只能由真集群回答**的失败：`sbatch -o <日志目录>/slurm-%j.out`
+  //    的父目录是 Slurm 在**跑作业脚本之前**打开的，而作业脚本自己那一次
+  //    `mkdir -p` 排在它后面。目录不存在 ⇒ 那一次提交连启动都启动不了。
+  //    守护进程建不了它（共享家目录对它只读，那是"root 不写用户文件"那层保护），
+  //    所以这一步只能落在客户端。
+  //
+  // ★ 判据是"连接那条路上真的发了这条命令"，不是"常量长得对"—— 后者由下一条判。
+  const b = new sshBackend.SshBackend({});
+  b._conn = prepareConn(0);
+  b._closed = false;
+  const r = await b.prepare();
+  assert.equal(r.ok, true);
+  assert.deepEqual(b._conn.execs, [sshBackend.PREPARE_CMD],
+    'prepare() 要发的正是那一条常量命令');
+  assert.equal(b.prepareError, null, '成了就不该留着一句原因');
+});
+
+test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就是连上了）', async () => {
+  // 与常驻通道同一条纪律：这一步失败**不算连接失败**。算的话，一个建不出目录的
+  // 家目录会让用户**连都连不上** —— 而他真正失去的是提交，不是连接。
+  const b = new sshBackend.SshBackend({});
+  b._conn = prepareConn(1, 'mkdir: cannot create directory: Permission denied\n');
+  b._closed = false;
+  let r = null;
+  await assert.doesNotReject(async () => { r = await b.prepare(); });
+  assert.equal(r.ok, false);
+  assert.match(b.prepareError, /rc=1/);
+  assert.match(b.prepareError, /Permission denied/, '把远端那句原话带上 —— 那才是根因');
+  // ★ 而它说的是**后果**，不是一句"失败了"：提交会起不来。界面直接把这一句转给用户。
+  assert.match(b.prepareError, /家目录可写吗/);
+});
+
+test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同一个目录', () => {
+  const cmd = sshBackend.PREPARE_CMD;
+  assert.equal(typeof cmd, 'string');
+  // ★ 与另外两条不同：这一条**故意**带一个 shell 变量。客户端从来不知道远端的
+  //   家目录是什么（那是 NSS 的事），所以命令串里写 `$HOME`、由**远端**的 bash
+  //   展开 —— 客户端一个路径都不拼。禁止的是**客户端这一侧**的插值。
+  assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
+  assert.deepEqual(
+    [...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]), ['HOME'],
+    '命令串里唯一的变量必须是 $HOME —— 客户端拼不出远端家目录');
+  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
+  assert.match(cmd, /umask 077/, '与作业脚本里那个 umask 一致 —— 目录要是 0700');
+  assert.match(cmd, /mkdir -p/);
+  // ★★ 目录名是**跨文件契约**：作业脚本按 `$HOME/.slurmate/logs` 算 `-o/-e` 的落点
+  //    （守护进程的 `job_log_dir_for()` 也是同一个），而这里建的是同一个。
+  //    两处漂开的表现是"客户端建了一个没人用的目录，作业写去另一个不存在的地方" ——
+  //    提交照样失败，而错误信息一个字都不提这里的目录。
+  assert.match(cmd, /\.slurmate\/logs/, '必须与守护进程的 JOB_LOG_SUBDIR 是同一个');
+  const daemon = fs.readFileSync(
+    path.join(ROOT, '..', 'cluster', 'slurmate-sessiond'), 'utf8');
+  const m = daemon.match(/^JOB_LOG_SUBDIR = "([^"]+)"/m);
+  assert.ok(m, '守护进程里找不到 JOB_LOG_SUBDIR');
+  assert.ok(cmd.includes(m[1]),
+    `命令串里的目录（${cmd}）与守护进程的 JOB_LOG_SUBDIR（${m[1]}）对不上`);
+});
 
 test('★ 两条命令只差最后一个词：同一个解释器、同一个二进制路径', () => {
   // 分头写死是有意的（上面那条用例要求它是常量），代价就是路径写了两遍 ——

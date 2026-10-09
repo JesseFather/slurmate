@@ -200,9 +200,10 @@ TOMBSTONE_WRITTEN=0
 #
 # ★ 目录必须在**脚本开始之前**就存在（`-o` 是 Slurm 在跑脚本之前打开的）。守护
 #   进程建不了它 —— systemd 单元把共享家目录挂成只读（ReadOnlyPaths），那是
-#   "root 身上没有『写用户文件』这条攻击面"那层保护，不该为了这个破掉。所以：
-#   这里 `mkdir -p`，此后每个作业都安全；**第一条**作业靠 Slurm 自己建 `-o` 的父
-#   目录（实测本集群会建）。这一条在登录节点上验不了，只能由第一条作业回答。
+#   "root 身上没有『写用户文件』这条攻击面"那层保护，不该为了这个破掉。所以那一
+#   步由**客户端在连上站点时**做（`backend-ssh.js` 的 `PREPARE_CMD`，一次连接一次）。
+#   这里再 `mkdir -p` 一次是兜底 —— 目录被谁删掉之后，下一个作业会把它补回来，
+#   而不是让此后每一次提交都起不来。
 mkdir -p "$SLURMATE_SESS_DIR" "$SLURMATE_LOG_DIR" 2>/dev/null || true
 OUT_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.out"
 ERR_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.err"
