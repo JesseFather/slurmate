@@ -177,14 +177,14 @@ contextBridge.exposeInMainWorld('slurmate', {
   // ★ **必须指名 slot**：省略会被主进程拒绝，而不是"停那唯一的一个"。
   stop: (slot) => ipcRenderer.invoke('app:stop', { slot }),
   doctor: () => ipcRenderer.invoke('app:doctor'),
-  // 集群这一侧的现状：控制器、分区、节点忙闲、队列、GRES，加自己那一份
-  // （账户、公平份额、排队名次）。**只读**，不改任何状态。
-  // ★ 每一格都是三态的：键不存在 = 【取不到】，`null`/`[]`/`{}` = 【确实没有】。
-  //   界面必须把"取不到"画成"取不到" —— 画成"没有"就是在替集群说话。
-  cluster: () => ipcRenderer.invoke('app:cluster'),
   // 最近几天的作业（`sacct`）。**按需拉**：它是最贵的一条查询，而它回答的
   // "过去发生了什么"不会自己变新，所以不进任何一层缓存。
   history: () => ipcRenderer.invoke('app:history'),
+  // 边栏那两格：停靠（`{side}`）/ 钉住（`{side, pin:true}`）/ 收起（`{side:null}`）。
+  // ★ 收起**主要不靠这个**：浮窗的收起判据是**鼠标几何**，那在主进程那一侧
+  //   （浮窗是原生视图，鼠标一进去边栏就收不到事件了，见 windows.js）。
+  //   这里只表达"我停上去了"与"我点了一下"。
+  hover: (payload) => ipcRenderer.invoke('app:hover', payload),
   reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
@@ -224,5 +224,19 @@ contextBridge.exposeInMainWorld('slurmate', {
     const h = (_e, view) => fn(view);
     ipcRenderer.on('ui:plugins', h);
     return () => ipcRenderer.removeListener('ui:plugins', h);
+  },
+  // ★ 链路状态（**此刻**这条链路活没活），事件驱动。
+  //   它与"上一次点连接成没成"是两件事 —— 后者只在用户动作时变，而这条链路
+  //   会在他什么都没做的时候断掉（合盖、换网、登录节点重启）。
+  onConn: (fn) => {
+    const h = (_e, s) => fn(s);
+    ipcRenderer.on('ui:conn', h);
+    return () => ipcRenderer.removeListener('ui:conn', h);
+  },
+  // 左栏那个圆点的三态（`ok` / `bad` / `na`）。★ 它是**状态**，不是提示。
+  onSite: (fn) => {
+    const h = (_e, s) => fn(s);
+    ipcRenderer.on('ui:site', h);
+    return () => ipcRenderer.removeListener('ui:site', h);
   },
 });

@@ -252,7 +252,13 @@ setSitePlugins(SAMPLE_PLUGINS);
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [],
   /** 被 `clearStorageData()` 清过的 partition，按先后顺序。 */
-  cleared: [] };
+  cleared: [],
+  /**
+   * 假的鼠标位置（屏幕坐标）。用例直接改它 —— 浮窗的收起判据是**几何**的
+   * （见 windows.js 的 `_startCursorWatch`），所以"鼠标走开了"这件事只能这样造：
+   * 没有别的事件可以触发它，那正是它不用 `mouseleave` 的理由。
+   */
+  cursor: { x: 0, y: 0 } };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
 
@@ -311,6 +317,9 @@ class FakeBrowserWindow {
   on(ev, fn) { (this._handlers[ev] = this._handlers[ev] || []).push(fn); return this; }
   isDestroyed() { return this._destroyed; }
   getContentSize() { return this._size; }
+  // 内容区在屏幕坐标里的位置与大小。浮窗的收起判据要拿鼠标的屏幕坐标减掉它
+  // —— 桩里窗口在 (0,0)，于是窗口坐标与屏幕坐标一致，用例算起来直白。
+  getContentBounds() { return { x: 0, y: 0, width: this._size[0], height: this._size[1] }; }
   setMenuBarVisibility() {}
   setTitle(t) { calls.titles.push(t); }
   setProgressBar() {}
@@ -391,6 +400,10 @@ const electronStub = {
     encryptString: () => { throw new Error('不该被调用'); },
     decryptString: () => { throw new Error('不该被调用'); },
   },
+  // 只有浮窗的收起判据用得到它。★ 桩里如果**没有** `screen`，`windows.js`
+  //   一 require 就拿到 undefined，而它只在"浮窗开着"时才被调用 ——
+  //   于是缺了这一格的表现是"测试全绿，真机上停靠一次就崩"。补上。
+  screen: { getCursorScreenPoint: () => ({ x: calls.cursor.x, y: calls.cursor.y }) },
   shell: { openExternal: async () => {} },
   dialog: { showMessageBox: async () => ({ response: 2 }) },
   clipboard: { writeText: (t) => { calls.clipboard = t; } },
@@ -585,6 +598,10 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 下拉框已经删掉，私钥永远加密保存。
                     'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey', 'app:newKey',
                     'app:trustHostKey', 'app:forgetHostKey',
+                    // 两条边栏的两格：停靠 / 钉住（`app:hover`），以及对当前那条
+                    // 连接测一次延迟（`app:probeActive`）。少了它们，那两条栏停上去
+                    // 什么都不发生 —— 而"点了没反应"在界面上是查不出原因的。
+                    'app:hover', 'app:probeActive',
                     // 工作区：一条连接指到一个工作区（多对一），工作区被引用计数回收。
                     // 切走一个「独占」的工作区会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
@@ -5805,4 +5822,124 @@ test('★★ 站点版本漂移那句话按 **id** 认亲 —— 短名撞了的
     + `实际说了：${said}`);
   // ★ 这条判据**不是**在说"没跑到也对"：它要真的走到 `warnVersionDrift` 那一格，
   //   而"走到了"由变异验证回答 —— 把那一处改回按短名找，这条当场红。
+});
+
+test('★★ 两条边栏：停靠滑出、移开收起、点一下钉住（钉住之后鼠标走了也留着）', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+    calls.cursor.x = 0; calls.cursor.y = 0;
+  });
+  await invoke('app:debug', 'reset');
+
+  const before = calls.views.length;
+  await invoke('app:hover', { side: 'left' });
+  assert.equal(calls.views.length, before + 1, '★ 浮窗那一层是**懒建**的：头一次停靠才建');
+  const view = calls.views[calls.views.length - 1];
+  assert.equal(view._visible, true, '停靠之后它要露出来');
+
+  // ★ 摆位是**算出来的**（`layout.js`）而不是写死的：窗口 1280×860，左栏 10px，
+  //   浮窗 340px。这一条把"算式"与"真的发了这个 bounds"接上 ——
+  //   `layout.test.mjs` 判的是算式本身。
+  assert.deepEqual(view._bounds, { x: 10, y: 30, width: 340, height: 830 },
+    '浮窗要贴着左栏的内侧、在状态条下面');
+  // 而它自己的页面收到了"开着"这一句 —— 少了它，那一页是空的。
+  const st = (view.webContents.handlers['send:hover:state'] || []).pop();
+  assert.ok(st && st.open === true && st.side === 'left', '要告诉浮窗那一页它开着');
+
+  // ★★ 鼠标走开 → 收起。**这条判据只能这样造**：浮窗是原生视图，鼠标一进它，
+  //   边栏那一格就再也收不到事件了 —— 靠 `mouseleave` 关的话浮窗会闪一下就没了。
+  calls.cursor.x = 640; calls.cursor.y = 400;
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(view._visible, false, '鼠标移开之后要收起来');
+
+  // 钉住：再停靠一次，然后点一下（`pin: true`），鼠标走开也不收。
+  await invoke('app:hover', { side: 'left' });
+  await invoke('app:hover', { side: 'left', pin: true });
+  assert.equal(view._visible, true);
+  calls.cursor.x = 640; calls.cursor.y = 400;
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(view._visible, true,
+    '★ 钉住之后鼠标走了也要留着 —— 输出那一块要滚动、要选中复制，'
+    + '鼠标一挪开就没的话那两件事都做不了');
+
+  // 而它仍然收得掉：再点一下（`pin: true` 是**切换**）。
+  await invoke('app:hover', { side: 'left', pin: true });
+  assert.equal(view._visible, false, '再点一下要能收起来');
+});
+
+test('★ 浮窗的收 / 放，窗口那一侧记得住（`hoverOpenSide` 是"要不要推数据"的判据）', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+    calls.cursor.x = 0; calls.cursor.y = 0;
+  });
+  await invoke('app:debug', 'reset');
+  const shell = idx._test.getWindow();
+
+  assert.equal(shell.hoverOpenSide(), null, '没停靠过任何一边时是收着的');
+  await invoke('app:hover', { side: 'left' });
+  // ★ 这一格是**承重的**：`refreshSite` / 后端状态变化都拿它判"要不要把数据推过去"。
+  //   它答错的表现是"浮窗开着，而里面永远是空的" —— 因为推的时候以为没人看。
+  assert.equal(shell.hoverOpenSide(), 'left');
+  await invoke('app:hover', { side: null });
+  assert.equal(shell.hoverOpenSide(), null, '收起之后要答 null');
+
+  // 不认的边：**拒绝，而不是当成左边**。含混地兜底会让一个拼错的 side 静默地
+  // 打开另一半，而"打开的不是我要的那块"在界面上看起来像数据错了。
+  const bad = await invoke('app:hover', { side: 'middle' });
+  assert.equal(bad.ok, false);
+  assert.equal(shell.hoverOpenSide(), null);
+});
+
+test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— 而且"取不到"不许画成"正常"', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
+  await invoke('app:debug', 'reset');
+
+  /** 左栏那个点的三态是主进程算好推来的（`ui:site`）。取最后一条。 */
+  const dot = () => {
+    const all = calls.windows[0].webContents.handlers['send:ui:site'] || [];
+    return all.length ? all[all.length - 1].state : null;
+  };
+
+  const c = await invoke('app:saveConnection', { user: 'demo', host: '127.0.0.1', port: 1 });
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true,
+    '前置：连上假站点');
+
+  // ① 一切正常
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(dot(), 'ok', '链路活着、站点也答得上话 —— 绿灯');
+
+  // ② 站点**答得上话**、但那几格取不到 —— 这一点必须是"没问到"，不是"正常"
+  //
+  // ★★ 这一条是**这一格存在的理由**：把"没问到"画成"正常"，用户看到的是一颗
+  //    安稳的绿点，而底下那几格写着「取不到」。而真正的原因（守护进程问不到
+  //    控制器）在界面上一个字都没有。
+  //
+  //    ★ 这一条**真的抓到过缺陷**：第一版的判据是"有没有 data" —— 而
+  //      `debugClusterMissing()` 让守护进程**照常答 `ok:true`**、只是少了
+  //      `health` 那一格，于是那颗点绿灯照亮。修法在 `siteDotState()` 里：
+  //      控制器那一格**缺席**判 `na`。
+  //
+  //    ★ 怎么让它重问一次：轮询是 30 秒一拍，用例等不起；而"打开浮窗补一次"
+  //      那条路（`refreshSiteIfStale`）有 5 秒的陈旧阈值 —— 刚连上就打开，
+  //      它**故意**不重问。所以这里走**重连**：断、连，链路那一次 false→true
+  //      会补问一次（`backend.on('state')` 里那一句）。那是真的代码路径，
+  //      不是为用例开的缝。
+  const back = idx._test.getBackend();
+  back.debugClusterMissing();
+  await invoke('app:disconnect');
+  assert.equal((await invoke('app:connect', { connectionId: c.connection.id })).ok, true);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(dot(), 'na',
+    '★ 站点答话但那几格取不到 —— 这一点必须是"没问到"，不是"正常"');
+
+  // ③ 断开 —— 与"取不到"是**两句话**（一个是对面真的没了，一个是我们没问到）
+  await invoke('app:hover', { side: null });
+  await invoke('app:disconnect');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(dot(), 'bad', '断开之后那个点必须是红的');
 });

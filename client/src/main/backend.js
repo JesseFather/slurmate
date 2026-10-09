@@ -92,6 +92,26 @@ class Backend extends EventEmitter {
    */
   get connected() { throw new Error('未实现 connected'); }
 
+  /**
+   * 这个后端**每一次 RPC 的代价是不是"一条常驻通道上的一个来回"**。
+   *
+   *   true  —— 常驻通道在（一次 RPC = 往已有的 duplex 上写一行 JSON）
+   *   false —— 退化成了 exec（一次 RPC = **一个 SSH channel** = sshd fork + PAM +
+   *            bash + python3 冷启动）
+   *   null  —— 没连上，或者这个后端根本没有"退化"这回事
+   *
+   * ★★ **它是给"多久问一次"用的，不是给"通不通"用的。** 这两者的区别很大：
+   *   一个每 1.5 秒问一次的轮询，在常驻通道上是一条推送的成本，在 exec 上
+   *   是把登录节点打满 —— 而**同一份代码**在两种通道下跑。没有这一格的话，
+   *   间隔只能按最坏情况定（那会让常驻通道上白白慢十倍），或者按最好情况定
+   *   （那会在退化时压垮登录节点）。见 `client/src/main/index.js` 的
+   *   `SITE_POLL_MS` / `sitePollMs()`。
+   *
+   * ★ 默认实现返回 `null`（"不知道"）—— 调用方按**最保守**的那一档处理。
+   *   写成"默认 true"的话，下一个后端忘了实现它就会以最快节奏跑。
+   */
+  get resident() { return null; }
+
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }
   // eslint-disable-next-line no-unused-vars

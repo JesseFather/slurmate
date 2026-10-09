@@ -92,7 +92,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | `reserved_ranges` | `起-止,起-止` | 空（无） | 要避让的其他区间。见下方专节 |
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
 | `sbatch` / `scancel` / `squeue` / `scontrol` / `sacctmgr` | 路径 | 空 = 自动查找 | 见下方专节 |
-| `sinfo` / `sshare` / `sacct` | 路径 | 空 = 自动查找 | 只被「集群状态」那一屏用。见下方专节 |
+| `sinfo` / `sshare` / `sacct` | 路径 | 空 = 自动查找 | 只被客户端那一块「站点状态」与「最近作业」用。见下方专节 |
 | `default_plugin` | 短名 | **空**（无默认值） | 提交时不带 `service_kind` 用哪个插件。**留空 = 必填**，见〈一之二〉 |
 | `max_sessions_per_user` | 正整数 | `1` | 每人最多几个会话。**排队中的也算占着位置**。见下方专节 |
 | `max_connections_per_user` | 正整数 | `8` | 每人同时几条**连接**。超限的回 `too_many_connections`，**不动已在的**。与上一格是**两个旋钮**，见下方专节 |

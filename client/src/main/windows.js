@@ -58,9 +58,19 @@
  */
 
 const path = require('path');
-const { BrowserWindow, WebContentsView, dialog, shell } = require('electron');
+const { BrowserWindow, WebContentsView, dialog, screen, shell } = require('electron');
+const {
+  STATUS_BAR_HEIGHT, stageRect, hoverRect, inHoverZone,
+} = require('./layout');
 
-const STATUS_BAR_HEIGHT = 30;
+/**
+ * 浮窗开着的时候，多久看一次鼠标还在不在它那一片上。
+ *
+ * ★ 120ms 是"跟手"与"别空转"之间的取值：再密一点，一个静止的鼠标会被反复问同一件
+ *   事；再疏一点，用户已经走开了浮窗还挂着。★ 它**只在浮窗开着且没被钉住时**跑，
+ *   收起即停 —— 不是一个常驻的心跳。
+ */
+const CURSOR_POLL_MS = 120;
 
 /**
  * 从一个 URL 里取出 origin（`http://127.0.0.1:18080`）。取不出来返回 null。
@@ -141,6 +151,20 @@ class ShellWindow {
      */
     this._front = null;
     this.overlayView = null;
+    /**
+     * 浮窗那一层。**懒建**（头一次停靠时才建），建成之后跨次复用 ——
+     * 与遮罩同一条理由：每次停靠都新建的话，鼠标来回扫几下就堆出几十个进程。
+     */
+    this.hoverView = null;
+    /**
+     * 浮窗现在的状态。`side` 是 `'left' | 'right' | null`（null = 收起），
+     * `pinned` 说的是"用户点了那一条栏把它钉住了"。
+     *
+     * ★ `pinned` 归**窗口**管，不归那个页面管：收起判据（鼠标几何）也在这里，
+     *   两处各存一份的话，钉住之后浮窗照样会被鼠标判走。
+     */
+    this._hover = { side: null, pinned: false };
+    this._cursorTimer = null;
     // 正被我们自己拆掉的那些视图（见 _destroySurface / render-process-gone）。
     // 用 Set 而不是一个布尔：多块视图时，甲块在被拆不该让乙块的崩溃报告被吞掉。
     this._destroying = new Set();
@@ -408,22 +432,196 @@ class ShellWindow {
   _layout() {
     if (this.win.isDestroyed()) return;
     const [w, h] = this.win.getContentSize();
-    const top = STATUS_BAR_HEIGHT;
-    const body = Math.max(0, h - top);
     // 用 setBounds 而不是靠 CSS —— WebContentsView 是原生层，不参与页面布局
+    //
+    // ★ 摆位那几条算式在 layout.js（纯函数，有判据）。这里只负责"把算出来的
+    //   矩形发给谁" —— 三个内边距算错一个的症状是"插件页面被边栏压住一角"，
+    //   在真机上极不显眼，所以它们不该埋在这个进不去的文件里。
     //
     // ★ 可见性：**只有前台那一块**。其余各块 setVisible(false) 但**留着** ——
     //   它们背后是还活着的服务器，切回去时必须是同一个页面（`setBounds(0,0,0,0)`
     //   那种"藏法"会把页面尺寸打乱，切回来要重排）。
+    const stage = stageRect(w, h);
     for (const [slot, s] of this.surfaces) {
       if (!s.view.webContents || s.view.webContents.isDestroyed()) continue;
       const on = slot === this._front;
       s.view.setVisible(on);
-      if (on) s.view.setBounds({ x: 0, y: top, width: w, height: body });
+      if (on) s.view.setBounds(stage);
     }
     if (this.overlayView && !this.overlayView.webContents.isDestroyed()) {
-      this.overlayView.setBounds({ x: 0, y: top, width: w, height: body });
+      this.overlayView.setBounds(stage);
     }
+    if (this.hoverView && !this.hoverView.webContents.isDestroyed()) {
+      if (this._hover.side) this.hoverView.setBounds(hoverRect(w, h, this._hover.side));
+    }
+  }
+
+  // ── 浮窗（两条边栏停靠时滑出来的那一块）────────────────────────────────
+  /**
+   * 滑出**某一边**的浮窗。`side` 是 `'left'`（站点状态）或 `'right'`（作业输出）。
+   *
+   * ★★ 浮窗**必须**由一块原生视图画。它在**插件那块界面之上**，而插件那块界面是
+   *    原生的 —— 画在面板的 DOM 里的话，它会被那块原生视图物理盖住，一个像素都露不出来。
+   *
+   * ★ 为什么不让插件视图"让位"（下移/右移一格，收起还原）：那会让插件那款软件在
+   *   每一次鼠标扫过边栏时**重排一次页面**（终端重新折行、编辑器跳滚动位置）。
+   *   而停靠是随手就会发生的动作 —— 代价落在最频繁的那条路上。
+   */
+  async showHover(side) {
+    if (side !== 'left' && side !== 'right') return;
+    if (this.win.isDestroyed()) return;
+    this._hover.side = side;
+    if (!this.hoverView) await this._createHoverView();
+    if (this.win.isDestroyed() || !this.hoverView) return;
+    const wc = this.hoverView.webContents;
+    if (wc.isDestroyed()) return;
+    // ★ 置顶：遮罩可能比它晚建，也可能早建。而这两层谁在上面是有讲究的 ——
+    //   断线时用户最想看的就是站点状态，浮窗被一句"连接暂时中断"盖住正好反了。
+    //   `addChildView` 是**追加**，所以先摘再挂就保证在最上面。
+    try { this.win.contentView.removeChildView(this.hoverView); } catch { /* 可能还没挂上 */ }
+    this.win.contentView.addChildView(this.hoverView);
+    this.hoverView.setVisible(true);
+    this._layout();
+    wc.focus();
+    this._sendHover({ open: true, side, pinned: this._hover.pinned });
+    this._syncCursorWatch();
+  }
+
+  /**
+   * 收起浮窗。**钉住也一起解掉** —— 收起是用户明确说"我不要看它了"，
+   * 而留着那个 pin 的后果是下一次滑出时它自己不肯走。
+   */
+  hideHover() {
+    if (!this._hover.side && !this.hoverView) return;
+    this._hover.side = null;
+    this._hover.pinned = false;
+    this._syncCursorWatch();
+    if (this.hoverView && !this.hoverView.webContents.isDestroyed()) {
+      this.hoverView.setVisible(false);
+      this._sendHover({ open: false });
+    }
+    this._layout();
+    // ★ 焦点还给**前台**那一块：浮窗走掉之后用户要继续打字，而焦点留在一个
+    //   看不见的页面上，症状是"键盘没反应" —— 又一个静默失败（与 hideOverlay 同）。
+    const s = this._front ? this.surfaces.get(this._front) : null;
+    if (s && s.view.webContents && !s.view.webContents.isDestroyed()) {
+      s.view.webContents.focus();
+    }
+  }
+
+  /**
+   * 钉住 / 解开。点一下边栏就是它 —— 浮窗要能滚动、要能选中复制，
+   * 而鼠标一挪开就没了的话，那两件事都做不了。
+   *
+   * 返回钉住之后的 side（解开之后是 null），调用方据此更新界面。
+   */
+  async toggleHoverPin(side) {
+    if (this._hover.side !== side) {
+      // ★ 先定态再开：`showHover` 会照着 `pinned` 决定要不要起鼠标看门狗，
+      //   反过来的话它会先起一次、再被下面这一句停掉 —— 中间那一瞬间的失败形态
+      //   是"点了钉住，浮窗却闪了一下才稳住"。
+      this._hover.pinned = true;
+      await this.showHover(side);
+      this._syncCursorWatch();
+      return side;
+    }
+    if (this._hover.pinned) {
+      this.hideHover();
+      return null;
+    }
+    this._hover.pinned = true;
+    this._syncCursorWatch();
+    this._sendHover({ open: true, side, pinned: true });
+    return side;
+  }
+
+  /** 浮窗现在露的是哪一块（`'left' | 'right' | null`）。供"要不要推数据"判用。 */
+  hoverOpenSide() { return this._hover.side; }
+
+  /** 左栏那个圆点的三态。★ 它是**状态**，不是提示：不弹窗、不写日志、不发声。 */
+  pushSite(summary) {
+    const wc = this.win.webContents;
+    if (!wc.isDestroyed()) wc.send('ui:site', summary);
+  }
+
+  /** 浮窗那一页要的数据（站点状态 / 作业输出）。没开着就丢掉 —— 没有读者。 */
+  pushHoverData(payload) {
+    if (!this.hoverView || this.hoverView.webContents.isDestroyed()) return;
+    if (!this._hover.side) return;
+    this.hoverView.webContents.send('hover:data', payload);
+  }
+
+  _sendHover(msg) {
+    if (!this.hoverView || this.hoverView.webContents.isDestroyed()) return;
+    this.hoverView.webContents.send('hover:state', msg);
+  }
+
+  async _createHoverView() {
+    const v = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: path.join(__dirname, '..', 'preload', 'hover.js'),
+      },
+    });
+    this.hoverView = v;
+    this.win.contentView.addChildView(v);
+    v.setVisible(false);
+    // Esc 收起：装在**主进程**这一侧，不靠页面自己听键盘 —— 焦点在哪儿不确定，
+    // 而"按了 Esc 没反应"是一个用户会重复按的动作。
+    v.webContents.on('before-input-event', (_e, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') this.hideHover();
+    });
+    await v.webContents.loadFile(path.join(__dirname, '..', 'renderer', 'hover.html'));
+  }
+
+  /**
+   * 浮窗开着（且没被钉住）的时候，看鼠标还在不在它那一片上。
+   *
+   * ★★ **为什么不用页面的 `mouseleave`**：浮窗是原生视图，鼠标一进它，边栏那一格
+   *    就再也收不到事件了 —— 两个 renderer 之间必然有一段交接的真空，而它的表现
+   *    是浮窗**闪一下就没了**。几何判定没有交接，只有一条规则。
+   */
+  /**
+   * 现在该不该看鼠标：**浮窗开着，而且没被钉住**。
+   *
+   * ★★ 全文件**只有这一处**判它。理由是一条真发生过的教训：这条规矩原先散在
+   *    三个地方（起定时器时判一次、定时器回调里再判一次、点钉住时又停一次），
+   *    于是**单独去掉任何一处，行为都不变** —— 看起来有三道防线，实际一道都不
+   *    承重。变异验证对那三处**一条都不红**，而那意味着这条行为根本没被守住。
+   *    （"没红"有八种读法，这是新的一种：互为冗余的判据。）
+   */
+  _watchWanted() {
+    return Boolean(this._hover.side) && !this._hover.pinned;
+  }
+
+  /** 按 `_watchWanted()` 把看门狗对齐。三处状态变化都只调它，不各判各的。 */
+  _syncCursorWatch() {
+    if (!this._watchWanted()) { this._stopCursorWatch(); return; }
+    this._startCursorWatch();
+  }
+
+  _startCursorWatch() {
+    if (this._cursorTimer) return;
+    this._cursorTimer = setInterval(() => {
+      if (!this._hover.side || this.win.isDestroyed()) {
+        this._stopCursorWatch();
+        return;
+      }
+      const b = this.win.getContentBounds();
+      const p = screen.getCursorScreenPoint();
+      if (inHoverZone(b.width, b.height, this._hover.side, p.x - b.x, p.y - b.y)) return;
+      this.hideHover();
+    }, CURSOR_POLL_MS);
+    // 它不该拖住进程退出。
+    if (this._cursorTimer.unref) this._cursorTimer.unref();
+  }
+
+  _stopCursorWatch() {
+    if (!this._cursorTimer) return;
+    clearInterval(this._cursorTimer);
+    this._cursorTimer = null;
   }
 
   // ── 面板通信 ────────────────────────────────────────────────────────────
@@ -469,6 +667,20 @@ class ShellWindow {
   pushNotice(kind, text) {
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) wc.send('ui:notice', { kind, text });
+  }
+
+  /**
+   * 链路状态。`connected` 说的是**此刻这条链路活没活**，而那与"上一次点连接
+   * 成没成"是两件事。
+   *
+   * ★ 这条通道存在的理由很具体：后端的 `on('state')` 一直在发，而**全仓库
+   *   没有一个订阅者** —— 于是 SSH 掉线在界面上是一个静默事件，用户看到的是
+   *   "界面还停在原处"，直到某次操作失败。一条一直在发出、没有收件人的事件，
+   *   和没有这条事件是一样的。
+   */
+  pushConn(state) {
+    const wc = this.win.webContents;
+    if (!wc.isDestroyed()) wc.send('ui:conn', state);
   }
 
   /**
@@ -573,14 +785,18 @@ class ShellWindow {
     // ★ 遍历的是**一份拷贝**：`_destroySurface` 会改 `this.surfaces`。
     for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
     this._front = null;
-    // overlayView 与 partition 无关，照旧走通用清理
-    const v = this.overlayView;
-    if (!v) return;
-    try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
-    try {
-      if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
-    } catch { /* 同上 */ }
-    this.overlayView = null;
+    this._stopCursorWatch();
+    // overlayView 与 hoverView 都与 partition 无关，走同一段通用清理
+    for (const key of ['overlayView', 'hoverView']) {
+      const v = this[key];
+      if (!v) continue;
+      try { this.win.contentView.removeChildView(v); } catch { /* 窗口可能已销毁 */ }
+      try {
+        if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
+      } catch { /* 同上 */ }
+      this[key] = null;
+    }
+    this._hover = { side: null, pinned: false };
   }
 }
 

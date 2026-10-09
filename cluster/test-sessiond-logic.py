@@ -9277,34 +9277,46 @@ exit 0
                         encoding="utf-8").read()
     _be_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
                                    "backend-fake.js"), encoding="utf-8").read()
-    _pn_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
-                                   "panel.js"), encoding="utf-8").read()
-    _ph_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
-                                   "panel.html"), encoding="utf-8").read()
+    _idx_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
+                                    "index.js"), encoding="utf-8").read()
+    # ★ 这一条判的是**真的发出去的那个 op 名**与守护进程那一侧逐字相同。
+    #   从前客户端那一半查的是 IPC 通道名（`app:cluster`）—— 界面上那一屏自己去拉。
+    #   现在那一屏没有了：站点状态由**主进程**定时问（`refreshSite`），再推给边栏
+    #   浮窗。所以判据跟着挪到请求本身 —— 那才是漂了会变成 `unknown_op` 的东西。
     check("★★ 两个新 op 的名字两边逐字相同（漂了不是「少一格」，是"
           "**unknown_op** —— 而界面会把它画成一次失败）",
-          'op == "cluster"' in _sess_src and "'app:cluster'" in io.open(
-              os.path.join(HERE, os.pardir, "client", "src", "main", "index.js"),
-              encoding="utf-8").read()
+          'op == "cluster"' in _sess_src and "op: 'cluster'" in _idx_src
           and "case 'cluster':" in _be_src and "case 'history':" in _be_src,
           "")
     check("★★ 假后端也认这两个 op —— 它的全部价值就是「演的是同一件事」"
           "（一份只在它身上成立的协议比没有它更坏）",
           "case 'cluster':" in _be_src and "case 'history':" in _be_src,
           "")
-    check("★★ 面板上那四个 id 与 panel.js 读的逐字相同"
-          "（漂了的形态是按钮点了没反应，而控制台里什么都不说）",
-          all(k in _ph_src for k in ('id="btn-cluster"', 'id="sec-cluster"',
-                                     'id="cluster-body"', 'id="btn-history"'))
-          and all(("$('%s')" % k) in _pn_src for k in
-                  ("btn-cluster", "sec-cluster", "cluster-body", "btn-history")),
-          "")
+    # ★★ 这里从前还有一条：「面板上那四个 id 与 panel.js 读的逐字相同」。
+    #    那四个 id 里三个（`btn-cluster` / `sec-cluster` / `cluster-body`）**跟着
+    #    「集群状态」那一节一起删掉了**，第四个（`btn-history`）搬去了作业那一屏，
+    #    而站点状态现在住在**另一个 renderer**（`hover.html` + `hover.js`）。
+    #    ⇒ 判据跟着渲染实现走，不删：`client/test/hover.test.mjs` 里有一条
+    #      「hover.js 用到的每个 id 都在 hover.html 里」，面板那一侧照旧在
+    #      `renderer.test.mjs`。**不在这里再写第三遍** —— 同一件事写三处，漂的是两处。
+    #
     # ★★ 判据要落在 `na()` 的**函数体**上，不是只数调用点：调用点还在、
     #    而函数体被改成返回一个空元素的话，界面上"取不到"就是一格**空白** ——
     #    而那正是这一条要防的那件事（"忘了写数据"与"确实没有"长得一样）。
     #    实测：只数调用点的版本，对上面那种改动**一条都不红**。
-    _na_at = _pn_src.find("function na(")
-    _na_body = _pn_src[_na_at:_pn_src.find("\n}", _na_at)] if _na_at >= 0 else ""
+    #
+    # ★ `na()` 从 `panel.js` 搬到了 `dom.js`（面板与浮窗两个渲染页面共用的那三个
+    #   小东西）—— 判据跟着它走。**读的是它现在住的那个文件**，否则这条会变成
+    #   查一个不存在的函数（`_na_at = -1` ⇒ 空串 ⇒ 判据变红，而那看起来像
+    #   "有人把「取不到」删了"）。
+    _dom_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
+                                    "dom.js"), encoding="utf-8").read()
+    _na_at = _dom_src.find("function na(")
+    _na_body = _dom_src[_na_at:_dom_src.find("\n}", _na_at)] if _na_at >= 0 else ""
+    # 调用点也数一遍：**函数体对、而没有人调用**是一句空话。`na(...)` 的调用点
+    # 现在全在浮窗那一页（`hover.js`）—— 站点状态是它一个 renderer 在画。
+    _hv_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
+                                   "hover.js"), encoding="utf-8").read()
     # ★★ 同一个分区的 GRES 有两个显示出口（表单里那一行、集群状态那一格），
     #    而"名字怎么拼"在客户端只该有一处（`gres.js` 的 `gresLabel`）。
     #    过了拼法与没过拼法，两边**都没错**，只是会显示成 `gpu:a6000` 与 `gpu` ——
@@ -9322,8 +9334,8 @@ exit 0
           "「取不到」这三个字，而且它要落在**看得见的**元素上（返回一个空元素"
           "等于把「取不到」画成一片空白，而那与「确实没有」长得一样）",
           _na_at >= 0 and "取不到" in _na_body and "'na'" in _na_body
-          and _pn_src.count("na('") >= 4,
-          "na() 函数体：%r" % _na_body[:90])
+          and _hv_src.count("na('") >= 4,
+          "na() 函数体：%r（调用点 %d 处）" % (_na_body[:90], _hv_src.count("na('")))
 
     # ── 28.13 ★★ 两道闸：能力（本机）与配额（全局）───────────────────────
     # ★★ 这一段钉的是 cluster/docs/CONFIGURATION.md 里〈这一格与插件声明的 `concurrent`

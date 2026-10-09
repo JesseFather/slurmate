@@ -311,6 +311,69 @@ test('★ 状态条那个选择器：共用同一份工作区列表，选中"该
   assert.equal(h.byId.get('sb-workspace').value, '');
 });
 
+test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {
+  // ★★ 这一条守的是**多开**（`contributes.concurrent: true`：第二份拿到自己的
+  //   临时数据 = 自己的槽，于是两条同时在跑）。标签上写的是插件的显示名，
+  //   于是**两个标签一模一样** —— 而它们指着两份不同的数据、两个不同的本地端口。
+  //   用户点哪一个都有一半概率点错，而"点错了"的表现是"我的编辑器里东西不对了"。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run('SESS = { sessions: ['
+    + '{ slot: "a", service: "编辑器", live: true, snap: { localPort: 18080 } },'
+    + '{ slot: "b", service: "编辑器", live: true, snap: { localPort: 18081 } }'
+    + '], front: "a" };');
+  h.fn('renderTabs')();
+  const tabs = h.byId.get('session-tabs').children;
+  assert.equal(tabs.length, 2, '两条会话两个标签');
+  assert.notEqual(tabs[0].textContent, tabs[1].textContent,
+    '★ 同名时必须补区分符 —— 两个一模一样的标签等于没有标签');
+  assert.match(tabs[0].textContent, /18080/, '区分符是本地端口');
+  assert.match(tabs[1].textContent, /18081/);
+  // 而**不同名时一个字都不加**：给每一条都挂一个端口，等于把"这两条需要分"
+  // 说给所有人听（设计律：非必要不提示）。
+  h.run(`SESS = { sessions: [
+    { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } },
+    { slot: 'b', service: '中转站', live: true, snap: {} } ], front: 'a' };`);
+  h.fn('renderTabs')();
+  const t2 = h.byId.get('session-tabs').children;
+  assert.equal(t2[0].textContent, '编辑器', '不重名就不加字');
+  assert.equal(t2[1].textContent, '中转站');
+  // 一条会话时整条栏收起来：它不提供任何选择，只占掉 30px 里的一行地方。
+  h.run(`SESS = { sessions: [
+    { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`);
+  h.fn('renderTabs')();
+  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
+});
+
+test('★★ 右栏那个点只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const dot = () => h.byId.get('rail-right-dot').className;
+  // 一条会话都没有
+  h.run('SESS = { sessions: [], front: null };');
+  h.fn('renderRails')();
+  assert.equal(dot(), 'rail-dot', '没作业就不亮');
+  // 有一条活的
+  h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true, snap: {} }], front: "a" };');
+  h.fn('renderRails')();
+  assert.equal(dot(), 'rail-dot hot', '有作业在跑才亮');
+  // ★ 而"已经结束但记录还在"那一条**不算**：`live` 是主进程给的判据，
+  //   拿"这张表非空"当判据的话，一个只剩尸体的槽会让右栏一直亮着。
+  h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: false, snap: {} }], front: "a" };');
+  h.fn('renderRails')();
+  assert.equal(dot(), 'rail-dot', '结束了的会话不算"有作业在跑"');
+});
+
+test('★★ 连上之后才有两条边栏，而且它们是在状态条**下面**那一段', () => {
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  // 没连上：`body` 上没有那个 class，两条栏由 CSS 收起来。
+  h.fn('renderConnections')(CONNS);
+  assert.equal(h.run('document.body.classList.contains("connected")'), false,
+    '没连上就不该有边栏');
+  h.run('connected = true;');
+  h.fn('renderConnections')(CONNS);
+  assert.equal(h.run('document.body.classList.contains("connected")'), true,
+    '连上之后两条栏才出现');
+});
+
 test('★★ 插件块上的「用哪一份数据」：三种取值各发各的，一个都不许合并', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },

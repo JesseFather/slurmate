@@ -22,6 +22,10 @@
      真实的会话、真实的作业，只是它那份数据不会被记录。 */
   --temp: #e0a458;
   --bar-h: 30px;
+  /* 两条边栏的宽度。★ 必须是**同一个数**：`layout.js` 的 `RAIL_W` 决定插件那块
+     原生视图与遮罩让出多少，这一格决定那两条栏画多宽 —— 对不上的表现是插件页面
+     被压住一角，或者两条栏外面露出一线背景色。 */
+  --rail-w: 10px;
 }
 
 * { box-sizing: border-box; }
@@ -87,12 +91,53 @@ html, body {
   color: var(--temp); font-weight: 700; letter-spacing: .3px;
 }
 
+/* ── 两条边栏 ─────────────────────────────────────────────────────────────
+   ★ 它们是**占位边框**，不装内容：鼠标停上去滑出浮窗（见 panel.html 那一段）。
+     所以这里只有一条窄边、一个圆点、以及"停上去要看得出来"这一点反馈。
+
+   ★★ **只有连上之后才出现**（`body.connected`）。主界面上必然是没连上的状态 ——
+     那两条栏既没有站点可问也没有作业可看，摆在那儿只是两道装饰，而且会把
+     "连上了没有"这个界面自己在说的状态又说一遍。 */
+.rail {
+  display: none;
+  position: fixed; top: var(--bar-h); bottom: 0;
+  width: var(--rail-w);
+  padding: 0; border: 0; margin: 0;
+  background: var(--bg-alt);
+  cursor: default;
+  z-index: 5;
+}
+body.connected .rail { display: block; }
+.rail-l { left: 0; border-right: 1px solid var(--border); }
+.rail-r { right: 0; border-left: 1px solid var(--border); }
+/* 停上去亮起来：这是那条"这里可以停"唯一的提示。不做的话，10px 宽的一条边跟
+   窗口边框长得一模一样，没有人会想到去停它。 */
+.rail:hover, .rail:focus-visible { background: #2f2f30; outline: none; }
+
+.rail-dot {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fg-dim);
+}
+/* 三态（与站点状态那一块同源）：正常 / 断开 / 取不到。
+   ★ 取不到**不画成"没有"** —— 它与"断开"是两句话（一个是我们没问到，一个是
+     对面真的没了），所以颜色也不同（灰 vs 红）。 */
+.rail-dot.ok { background: var(--ok); }
+.rail-dot.bad { background: var(--err); }
+.rail-dot.na { background: var(--fg-dim); }
+/* ★ 右栏那个点**只在有作业的时候亮**（没有作业时右栏什么都不显示，见 plan）。
+   它亮起来说的是"这里有一份输出可看"，所以用中性色，不用红/绿 —— 它不是状态。 */
+.rail-dot.hot { background: var(--warn); }
+
 /* ── 面板主体 ── */
 #panel {
   height: calc(100% - var(--bar-h));
   overflow-y: auto;
   padding: 22px 26px 40px;
 }
+/* 连上之后两条栏占住两边，面板的内容跟着让开 —— 不让的话最左边那一列文字会被
+   边栏压住，而那是"看起来只是有点挤"的那类问题。 */
+body.connected #panel { padding-left: calc(26px + var(--rail-w)); padding-right: calc(26px + var(--rail-w)); }
 .wrap { max-width: 760px; margin: 0 auto; }
 h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
 h2 { font-size: 13px; margin: 26px 0 10px; color: #9cdcfe; font-weight: 600; }
@@ -383,19 +428,14 @@ dialog p#fork-body { white-space: pre-line; }
 }
 .hidden { display: none !important; }
 
-/* ── 集群状态（只读的那一节）─────────────────────────────────────────────
-   分区 / 队列两张紧凑表。用 grid 而不是 <table>：行数由数据定，而这里既没有
-   表头排序也没有跨列，<table> 那套语义（thead/tbody/scope）在这里只是噪音。 */
-.ctable { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px;
-  font-size: 12px; font-family: ui-monospace, Consolas, monospace; margin: 0 0 6px; }
-.ctable .k { color: var(--fg-dim); }
-/* 一个分区一条：左边名字加默认标记，右边一行忙闲。 */
+/* ── 作业历史那张紧凑表 ──────────────────────────────────────────────────
+   ★ `.ctable` 与 `.na` 两条**跟着「集群状态」那一节一起删掉了**：那一节整个搬进了
+     边栏浮窗（另一个 renderer，样式在 `hover.css` 里）。留在这里的规则没有任何
+     元素会命中 —— 而"没有人命中的 CSS"在下一次改动里会被当成"某处在用"。
+     这两条规矩（grid 两列表、`取不到` 那一行）现在住在 `hover.css`。 */
 .crow { margin: 0 0 6px; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
 .crow .nm { color: #9cdcfe; }
 .crow .dim { color: var(--fg-dim); }
-/* 「取不到」那一句。**它是默认就有的**，不是错误态才插进去的 —— 见 panel.html
-   里那一段注释：忘了写数据的那条路要让它露出来，而不是让空的看起来像"没有"。 */
-.na { color: var(--warn); font-size: 12px; margin: 0 0 6px; }
 
 /* ── 三屏的路由 ──────────────────────────────────────────────────────────────
    ▶ 一个站点的三个层次（连接 → 插件 → 作业），同时只露一个。**"露哪一个"由

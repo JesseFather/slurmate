@@ -1,0 +1,80 @@
+/* 浮窗那一层的样式。
+   ★ 与面板同一套配色 —— 它紧挨着面板的状态条出现，颜色不一样会很突兀。
+   ★ 单独一份文件而不是页面里一段 <style>：CSP 是 `style-src 'self'`，
+     内联样式块会被静默丢掉（见 panel.html 那段注释），而表现只是"没上样式"。 */
+
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --bg-alt: #252526;
+  --border: #3c3c3c;
+  --fg: #d4d4d4;
+  --fg-dim: #8a8a8a;
+  --ok: #4ec9b0;
+  --warn: #dcdcaa;
+  --err: #f48771;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg); color: var(--fg);
+  font: 12px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+/* 一整个页面就是一块面板。★ 左边一条竖线：它贴在边栏内侧，没有这条线的话，
+   面板与插件那块页面之间没有边界（两者底色都可能是暗的）。 */
+.pane { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.pane.hidden { display: none; }
+#pane-left { border-right: 1px solid var(--border); }
+#pane-right { border-left: 1px solid var(--border); }
+
+.hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; flex: none;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.hd .st { font-weight: 600; }
+.hd .spacer { flex: 1; }
+
+.body { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+/* 输出那一块要**能选中**（用户要复制报错去搜），所以这一条是承重的 ——
+   继承面板那种"界面文字不许选"的做法会让整块失去意义。 */
+.body.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+             white-space: pre-wrap; word-break: break-all; user-select: text; }
+
+h3 { font-size: 12px; margin: 14px 0 6px; color: #9cdcfe; font-weight: 600; }
+h3:first-child { margin-top: 0; }
+p { margin: 4px 0; }
+.sub { color: var(--fg-dim); }
+.bad { color: var(--err); }
+/* 「取不到」那一行。★ 与"确实没有"长得不一样是**故意的** —— 见 hover.html 那段。 */
+.na { color: var(--warn); }
+
+/* 键值两列：左边窄、右边占满。 */
+.ctable { display: grid; grid-template-columns: 5.5em 1fr; gap: 2px 8px; }
+.ctable .k { color: var(--fg-dim); }
+
+/* 分区那一块：一个分区几行，行与行之间留一点，不然读不出是一组。 */
+.crow { margin: 0 0 10px; }
+.crow .nm { color: var(--fg); font-weight: 600; }
+.crow .dim { color: var(--fg-dim); }
+
+/* 链路那一行。它是**常驻**的（浮窗一打开就在最上面），因为它回答的是
+   "现在这一刻还通不通" —— 而其余每一格都可能旧到 5 分钟。 */
+.link { padding: 8px 12px; flex: none; border-bottom: 1px solid var(--border); color: var(--fg-dim); }
+.link .ok { color: var(--ok); }
+.link .bad { color: var(--err); }
+
+button.ghost {
+  font: inherit; font-size: 11px; line-height: 1;
+  padding: 4px 8px; border-radius: 3px;
+  border: 1px solid var(--border); background: transparent; color: var(--fg-dim);
+  cursor: pointer;
+}
+button.ghost:hover { color: var(--fg); border-color: var(--fg-dim); }
+button.ghost:disabled { opacity: .5; cursor: default; }

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 与面板同一条 CSP，理由也同：渲染进程只加载本地资源。
+     ⚠️ 没有 'unsafe-inline' ⇒ **样式全在 hover.css 里**，页面里不许出现
+     style="..."（见 panel.html 那段注释：被静默丢弃，表现是布局莫名其妙不对）。 -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+<title>浮窗</title>
+<link rel="stylesheet" href="hover.css">
+</head>
+<body>
+
+<!-- ── 左边栏滑出来的那一块：**站点状态** ─────────────────────────────────
+     ★ 它是 `op_cluster` 那一份答案**唯一**的落点（从前是「集群状态」整屏，
+       浮窗接手之后那一屏整个删掉了）。
+
+     ★★ 三态是承重的，与 hover.js 逐字同一条规矩：
+          键不在 / 取不到  = 【没问到】 → `na(...)` 那一行
+          `null` / `[]` / `{}` = 【确实没有】
+       把前者画成后者，用户会去查一个不存在的问题。 -->
+<div id="pane-left" class="pane hidden">
+  <div class="hd">
+    <span id="cl-health" class="st">正在取…</span>
+    <span class="spacer"></span>
+    <button id="cl-probe" class="ghost tiny" type="button">测一次延迟</button>
+  </div>
+  <div id="cl-link" class="link"></div>
+  <div id="cl-body" class="body"></div>
+</div>
+
+<!-- ── 右边栏滑出来的那一块：**作业输出** ─────────────────────────────────
+     ★ 这一块在 P2 落地。它现在**什么都不显示**：没有作业在跑的时候，右栏本来
+       就没有内容可说，而一个空的输出框是在说"这里本该有东西"。 -->
+<div id="pane-right" class="pane hidden">
+  <div class="hd"><span class="st">作业输出</span></div>
+  <div id="out-body" class="body mono"></div>
+</div>
+
+<script src="dom.js"></script>
+<script src="hover.js"></script>
+</body>
+</html>

@@ -23,8 +23,9 @@
   <!-- 会话标签：**两条以上**才出现（一条时它不提供任何选择，只占地方）。
        ★ 它必须待在这 30px 里：窗口主体会被原生视图整块盖住，把标签放在下面
          等于它们永远点不到。见 windows.js 的 setFront。
-       ★ 名字是**服务名**：同一个槽只能有一条会话，所以两条会话的插件必然不同，
-         服务名在这里天然唯一，不需要再造一个编号。 -->
+       ★ 名字是**插件名**，而**同名时会补一个本地端口**（见 panel.js 的
+         `renderTabs`）：同一个插件开两份是合法的（第二份拿到自己的临时数据 =
+         自己的槽），那时两个标签会一模一样，而它们指着两份不同的数据。 -->
   <span id="session-tabs" class="hidden"></span>
   <span class="sep" id="sb-sep1">|</span>
   <span id="sb-detail"></span>
@@ -50,6 +51,27 @@
   <span id="sb-temp" class="temp-tag hidden">临时副本 · 改动不会被记录</span>
   <span id="sb-dev" class="dev-tag hidden">开发者模式 · 未连接集群</span>
 </div>
+
+<!-- ── 两条边栏 ─────────────────────────────────────────────────────────────
+     ★ 它们是**占位边框**：很窄，不装内容，作用只有一个 —— 鼠标停上去滑出浮窗
+       （左 = 站点状态，右 = 作业输出）。窗口主体要留给插件那块界面。
+
+     ★★ **连上之后才有。** 主界面（连接列表）上必然是没连上的状态 —— 那时候既
+       没有站点可问，也没有作业可看，摆两条栏在那里只是两道装饰。
+       开关是 `<body>` 上的 `.connected`（见 panel.js 的 renderConnState）。
+
+     ★ 它们是**按钮**而不是装饰性 div：停靠是可以不看就走的（第一段），而**点一下
+       会把它钉住**（第二段）—— 输出那一块要滚动、要选中复制，鼠标一挪开就没了的
+       话那两件事都做不了。所以它得能 Tab 到、能回车，也就得是个真控件。
+
+     ★ 圆点说的是**站点**的现状，不是会话的：`.ok` 正常 / `.bad` 断开 /
+       `.na` 取不到。三态与站点状态那一块逐字同源（见 hover.js）。 -->
+<button id="rail-left" class="rail rail-l" type="button" title="站点状态">
+  <span id="rail-left-dot" class="rail-dot"></span>
+</button>
+<button id="rail-right" class="rail rail-r" type="button" title="作业输出">
+  <span id="rail-right-dot" class="rail-dot"></span>
+</button>
 
 <div id="panel">
   <div class="wrap">
@@ -105,9 +127,6 @@
                 title="回到这个列表，作业继续在集群上跑。★ 但没人看着它 35 分钟之后，它会被自动回收。">临时离开</button>
         <button id="btn-disconnect" class="ghost danger-ghost hidden"
                 title="停掉这些作业并断开连接。">断开</button>
-        <!-- 集群现状是**只读**的，而且与"有没有会话"无关 —— 所以入口在这一屏
-             （第一屏），不在插件列表那一屏里：那一屏要先连上才进得去。 -->
-        <button id="btn-cluster" class="ghost">集群状态</button>
       </div>
       <ul id="conn-list" class="conns"></ul>
       <!-- 文案由 renderConnEmpty 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
@@ -391,31 +410,16 @@
         <strong>关掉窗口同样会结束会话</strong>；但合盖、断网、断电不会 ——
         那些情况客户端说不上话，作业会被保留，下次连上时自动接回。
       </p>
-    </section>
 
-    <!-- ── 集群状态（只读）──
-         ★★ 这一节里每一格都是**三态**的：数据不在 = 【取不到】，界面要照实说
-            "取不到"，**不能**画成"没有"。一个把"问不到"画成"这台集群没有分区"
-            的界面，会把用户送去查一个不存在的问题。所以下面每一块都有一个
-            `<p class="na">`（`panel.js` 的 `na()`）专门说那句话，而它是**默认**
-            可见的 —— 忘了写数据的那条路会让它露出来，而不是让空的看起来像"没有"。 -->
-    <section id="sec-cluster" class="hidden">
-      <div class="sec-head">
-        <h2>集群状态</h2>
-        <button id="btn-cluster-reload" class="ghost">刷新</button>
-        <button id="btn-cluster-back" class="ghost">返回</button>
-      </div>
-      <p class="sub" id="cluster-when">正在取…</p>
-      <div id="cluster-body"></div>
-
+      <!-- ── 最近作业（`sacct`）──
+           ★ 它从「集群状态」那一屏搬到这里：那是一张**作业**的表，前台这些行是
+             "现在有哪些"，这一段是"最近跑过哪些" —— 同一件事的两个时间尺度。
+             住在站点状态那边的时候，看"我现在有哪些作业"要翻两张表。 -->
       <h2>最近作业</h2>
       <p class="sub">
-        最近 7 天，最多 30 条。<strong>按需拉</strong> —— 它是最贵的一条查询，
-        所以不跟着上面那张表一起刷。
+        最近 7 天，最多 30 条。
+        <button id="btn-history" class="ghost tiny">取最近作业</button>
       </p>
-      <div class="row">
-        <button id="btn-history" class="ghost">取最近作业</button>
-      </div>
       <div id="history-body"></div>
     </section>
 
@@ -531,6 +535,9 @@
   </div>
 </dialog>
 
+<!-- `dom.js` 在 `panel.js` 之前：两个渲染页面（面板与浮窗）共用的那三个小东西
+     在那里，而它们是普通脚本之间的全局名字，顺序不能反。 -->
+<script src="dom.js"></script>
 <script src="panel.js"></script>
 </body>
 </html>

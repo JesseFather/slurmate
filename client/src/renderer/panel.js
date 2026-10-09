@@ -150,18 +150,17 @@ function notice(kind, text) {
  *   会话此刻是什么状态。按后者判的话（`idle` 露连接列表、跑起来露当前会话），
  *   用户点进作业列表看一眼，下一次快照回来就被弹回另一屏——而他什么都没做。
  *
- * ★「集群状态」那一节是**盖在三屏上面**的，不是第四屏：它是只读的现状，
- *   从哪儿打开的就该回到哪儿去。所以它开着的时候三屏一起让位，关掉时按
- *   `SCREEN` 原样恢复。
+ * ★ **站点状态不在这里**：它从边栏的浮窗里看（`hover.html`）。从前它是一个盖在
+ *   三屏上面的节（`#sec-cluster`），于是同一份 `op_cluster` 的答案有两个落点 ——
+ *   浮窗接手之后那个节整个删掉，不留第二份渲染。
  */
 function showScreen(name) {
   SCREEN = name;
   for (const [key, id] of [['conns', 'screen-conns'],
                            ['plugins', 'screen-plugins'],
                            ['jobs', 'screen-jobs']]) {
-    $(id).classList.toggle('hidden', CLUSTER.open || key !== name);
+    $(id).classList.toggle('hidden', key !== name);
   }
-  $('sec-cluster').classList.toggle('hidden', !CLUSTER.open);
   // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（判据是
   // "用户走开了"，不是"会话跑起来了"）。不收的话，用户从第二屏退回来会看见一个半填的表单，
   // 而它上面那个地址可能已经连过了。
@@ -177,7 +176,7 @@ function showScreen(name) {
   // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
   renderSnapshot(lastSnap);
-  if (name === 'jobs' && !CLUSTER.open) refreshJobs();
+  if (name === 'jobs') refreshJobs();
 }
 
 /**
@@ -194,6 +193,10 @@ function renderSessions(payload) {
     front: p.front || null,
   };
   renderTabs();
+  // ★ 右栏那个点跟着"有没有作业在跑"走，而那个判据刚刚才更新 —— 所以它必须在
+  //   `SESS` 写完之后算（放在 renderTabs 之前会让它慢一拍，而"慢一拍"的表现是
+  //   作业起来了右边那个点却要等下一次推送才亮）。
+  renderRails();
   renderSnapshot(frontSnap());
 }
 
@@ -222,25 +225,62 @@ function frontTemporary() {
  * 状态条底下那一排标签。**一条会话一个**。
  *
  * ★ 只在**两条以上**时露出来：一条的时候它不提供任何选择，只占掉一行地方。
- * ★ 每一条都要能点 —— 那是"我还能切回去"的唯一入口。前端那条加一个 class，
- *   而**标签上写的是服务名**：两条会话的插件必然不同（同一个槽只能有一条），
- *   所以服务名在这里天然是唯一的，不需要再造一个编号。
+ * ★ 每一条都要能点 —— 那是"我还能切回去"的唯一入口。前端那条加一个 class。
+ *
+ * ★★ **标签重名时要补一个区分符。** 标签上写的是插件的显示名，而**同一个插件
+ *    开两份**（`contributes.concurrent: true`，第二份拿到自己的临时数据 = 自己的
+ *    槽）是完全合法的一件事 —— 那时顶栏上会出现两个一模一样的标签，而它们指着
+ *    两份不同的数据、两个不同的本地端口。用户点哪一个都有一半概率点错。
+ *
+ *    区分符用**本地端口**：它就是"这一条在哪个地址上"，而且与"哪一份浏览器存储"
+ *    一一对应。★ 只在**真的重名**时才加（不重名一个字不加）—— 给每一条都挂一个
+ *    端口号，等于把"这两条需要分"这件事说给所有人听。
+ *
+ *    ⚠️ 曾经这里有一句注释说"两条会话的插件必然不同，所以服务名天然唯一" ——
+ *    那是工作区那一轮**之前**的形状（当时槽是按工作区分的，同一个工作区同时只能
+ *    有一条要界面的会话）。现在不成立了，留着会让下一个人以为重名不可能。
  */
 function renderTabs() {
   const box = $('session-tabs');
   const list = SESS.sessions;
   box.classList.toggle('hidden', list.length < 2);
   box.textContent = '';
+  // 先数一遍名字：**同名**的那些才需要区分符。
+  const seen = new Map();
+  for (const s of list) {
+    const n = s.service || '（未知服务）';
+    seen.set(n, (seen.get(n) || 0) + 1);
+  }
   for (const s of list) {
     const b = document.createElement('button');
     b.className = 'tab' + (s.slot === SESS.front ? ' on' : '')
       + (s.live ? '' : ' dead');
-    b.textContent = s.service || '（未知服务）';
+    const name = s.service || '（未知服务）';
+    const port = s.snap && s.snap.localPort;
+    b.textContent = seen.get(name) > 1 && port ? `${name} · ${port}` : name;
     const st = s.snap && s.snap.state;
     b.title = STATE_TEXT[st] || st || '';
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }
+}
+
+/** 这个窗口里有没有**真的在跑**的会话。右栏开不开就是问它。 */
+function hasRunningSession() {
+  return SESS.sessions.some((s) => s && s.live);
+}
+
+/**
+ * 两条边栏上那两个小点。
+ *
+ * ★ 左栏那个点**不在这里画** —— 它的三态由主进程算好了推过来（`ui:site`，
+ *   见 init 里那个 `onSite`）：链路活没活是主进程才知道的事，界面这一层自己
+ *   算就是第二个判据，而它会与主进程那个漂开。
+ * ★ 右栏那个点说的是"这里有一份输出可看"，所以它跟着**有没有作业在跑**走，
+ *   与左栏那个（站点现在怎么样）毫无关系。
+ */
+function renderRails() {
+  $('rail-right-dot').className = 'rail-dot' + (hasRunningSession() ? ' hot' : '');
 }
 
 /** 前台那一条的槽（按钮要指名停哪一个）。没有会话时 null。 */
@@ -635,6 +675,9 @@ function renderConnections(list) {
   // 另一个会在没连上的时候露着，而它按下去只能得到一句"控制节点没有回应"。
   $('btn-leave').classList.toggle('hidden', !connected);
   $('btn-disconnect').classList.toggle('hidden', !connected);
+  // 两条边栏同理：它们是**站点级**的两格（站点状态、这个站点上的作业输出），
+  // 没有站点就既没有可问的也没有可看的。见 panel.html 那一段。
+  document.body.classList.toggle('connected', connected);
 
   for (const c of list) {
     const li = document.createElement('li');
@@ -2196,198 +2239,16 @@ async function startWith(serviceKind, btn) {
   }
 }
 
-// ── 集群状态（只读）────────────────────────────────────────────────────────
+// ── 最近作业（`sacct`，按需拉）─────────────────────────────────────────────
 //
-// ★★ 这一节里每一格都是**三态**的，与服务端逐字同一条规矩：
+// ★ 它**不在**站点状态那一块里。从前它挂在整个「集群状态」屏的底下，而那是
+//   一张**作业**的表 —— 站点状态回答的是"这台集群现在怎么样"，这张表回答的是
+//   "我最近跑过什么"。两者唯一的共同点是都要向控制节点问一次，而那不足以让它们
+//   住在一起（见浮窗那一侧的注释）。
 //
-//      键不存在 / 值为 null 且带原因  = 【取不到】（我们没问到）
-//      `null` / `[]` / `{}`           = 【确实没有】
-//
-//   而这两句在界面上必须长得不一样。把"取不到"画成"没有"，用户会去查一个
-//   不存在的问题（"为什么这台集群没有分区"），而真正的原因在守护进程那一侧。
-//   所以下面每一块都有 `na(...)` 那一行，**它是数据缺席时才出现的**，
-//   而不是包在一个 try 里等出错。
-let CLUSTER = { open: false, data: null, error: null, history: null, historyError: null };
-
-/** 造一个元素。职责很小，但这一节里要造几十个 —— 手写三行的地方容易漏掉
- *  `textContent` 而改用 `innerHTML`，那正是这里唯一不能出的事。 */
-function cel(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined && text !== null) e.textContent = String(text);
-  return e;
-}
-
-/** 「取不到」那一行。**每一次缺席都要说清是哪一格**，否则用户只知道"少了点东西"。 */
-function na(what) {
-  return cel('p', 'na', `取不到：${what}。这一格是「没问到」，不是「没有」。`);
-}
-
-/** 一个时间戳有多旧。服务端的慢钟是 5 分钟，所以"这一份有多旧"是用户要看的。 */
-function agoText(ts) {
-  if (typeof ts !== 'number') return null;
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-  if (s < 90) return `${s} 秒前`;
-  const m = Math.floor(s / 60);
-  return m < 90 ? `${m} 分钟前` : `${Math.floor(m / 60)} 小时前`;
-}
-
-/**
- * 节点忙闲：`{counts: {base_state: n}, flags: {后缀: n}}` 画成一行。
- *
- * ★ 后缀**只做展示**，而且与计数分开画（`idle 1  drain 1  （后缀 *×1）`）——
- *   把它并进状态名里等于对它做了一次判定，而它跨 Slurm 版本含义不一致
- *   （见 `Slurm.node_table()`）。这里一个字都不解释它是什么意思。
- */
-function nodeCountsText(n) {
-  const c = Object.entries((n && n.counts) || {})
-    .sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `${k} ${v}`);
-  const f = Object.entries((n && n.flags) || {})
-    .sort()
-    .map(([k, v]) => `${k}×${v}`);
-  if (!c.length) return null;
-  return c.join('  ') + (f.length ? `  （后缀 ${f.join(' ')}）` : '');
-}
-
-/** 分区一行：`A6000  UP  默认  183-00:00:00  mix 2  gpu:a6000 ×4/节点` */
-function partitionRow(name, info, nodes, queue, gres) {
-  const row = cel('div', 'crow');
-  row.append(cel('span', 'nm', name));
-
-  const bits = [];
-  if (info.state) bits.push(info.state);
-  if (info.is_default) bits.push('默认');
-  bits.push(info.max_time ? `时限 ${info.max_time}` : '无时限');
-  if (typeof info.nodes === 'number') bits.push(`${info.nodes} 节点`);
-  if (typeof info.cpus === 'number') bits.push(`${info.cpus} 核`);
-  row.append(cel('span', 'dim', '  ' + bits.join('  ·  ')));
-
-  const nc = nodeCountsText(nodes && nodes[name]);
-  row.append(cel('div', 'dim', `　　节点　${nc || '（这一格没有数据）'}`));
-
-  const q = queue && queue.depth && queue.depth[name];
-  const qs = q ? `排队 ${q.pending}　在跑 ${q.running}`
-    + (q.other ? `　其它 ${q.other}` : '') : '（这一格没有数据）';
-  row.append(cel('div', 'dim', `　　队列　${qs}`));
-
-  const g = gres && gres[name];
-  // ★ 三态：`gres` 整个键缺席 = 取不到；`[]` = 这个分区确实一张卡都没有。
-  const gs = !gres ? '取不到'
-    : (g === undefined ? '（这个分区不在 GRES 清单里）'
-      : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`).join('，')
-        : '确实一张都没有'));
-  row.append(cel('div', 'dim', `　　GRES　${gs}`));
-  return row;
-}
-
-/** 把整份 `op_cluster` 的答案画出来。**纯函数式地照着数据画，不做任何判定。** */
-function renderCluster() {
-  const box = $('cluster-body');
-  box.textContent = '';
-
-  if (CLUSTER.error) {
-    $('cluster-when').textContent = '';
-    box.append(cel('p', 'bad', `取不到集群信息：${CLUSTER.error}`));
-    return;
-  }
-  const d = CLUSTER.data;
-  if (!d) { $('cluster-when').textContent = '正在取…'; return; }
-
-  const h = d.health;
-  $('cluster-when').textContent = h
-    ? `控制器${h.up ? '在线' : '连不上'}　·　取数于 ${agoText(h.at) || '刚刚'}`
-    : '控制器状态取不到';
-
-  // 控制器与版本：两个**互相独立**的格子，所以各说各的。
-  if (!h) box.append(na('控制器状态（scontrol ping）'));
-  else if (!h.up) box.append(cel('p', 'bad', '控制器连不上 —— 提交、心跳、查询都会失败。'));
-
-  const ver = cel('div', 'ctable');
-  ver.append(cel('div', 'k', 'Slurm'));
-  ver.append(cel('div', null, d.version || '取不到'));
-  ver.append(cel('div', 'k', '分区表'), cel('div', null,
-    d.partitions ? `${Object.keys(d.partitions).length} 个` +
-      (agoText(d.taken && d.taken.partitions) ? `（${agoText(d.taken.partitions)}）` : '')
-      : '取不到'));
-  ver.append(cel('div', 'k', '节点忙闲'), cel('div', null,
-    d.nodes ? '见下' : '取不到'));
-  box.append(ver);
-
-  // ── 分区 ──
-  box.append(cel('h3', null, '分区'));
-  if (!d.partitions) {
-    box.append(na('分区列表（scontrol show partition）'));
-  } else if (!Object.keys(d.partitions).length) {
-    box.append(cel('p', 'sub', '这台集群确实一个分区都没有。'));
-  } else {
-    const names = Object.keys(d.partitions).sort(
-      (a, b) => (Number(Boolean(d.partitions[b].is_default))
-        - Number(Boolean(d.partitions[a].is_default))) || a.localeCompare(b));
-    for (const n of names) {
-      box.append(partitionRow(n, d.partitions[n], d.nodes, d.queue, d.gres));
-    }
-    if (!d.nodes) box.append(na('节点忙闲（sinfo -N）'));
-    if (!d.queue) box.append(na('队列（squeue）'));
-    if (!d.gres) box.append(na('GRES 清单（scontrol show node）'));
-  }
-
-  // ── 我自己 ──
-  box.append(cel('h3', null, '我的'));
-  const me = d.me || {};
-  const mine = cel('div', 'ctable');
-  mine.append(cel('div', 'k', '账户'), cel('div', null,
-    me.account || (me.account_error ? '无' : '取不到')));
-  if (me.account_error) mine.append(cel('div', 'k', ''), cel('div', 'bad', me.account_error));
-  // ★ 三态：`null` = 不限（这是**答案**，不是没问到）。
-  mine.append(cel('div', 'k', '可提交分区'), cel('div', null,
-    me.allowed_partitions === undefined ? '取不到'
-      : (me.allowed_partitions === null ? '不限制'
-        : me.allowed_partitions.join('，') || '一个都没有')));
-  mine.append(cel('div', 'k', '公平份额'), cel('div', null,
-    me.fairshare ? `${me.fairshare.fair_share || '—'}`
-      + `（账户 ${me.fairshare.account || '—'}，`
-      + `已用 ${me.fairshare.effectv_usage || '—'}）` : '取不到'));
-  if (typeof me.pending_count === 'number') {
-    const fi = Object.entries(me.first_in || {})
-      .map(([p, i]) => `${p} 第 ${i} 位`).join('，');
-    mine.append(cel('div', 'k', '排队中'), cel('div', null,
-      `${me.pending_count} 条` + (fi ? `（${fi}）` : '')));
-  }
-  box.append(mine);
-  if (me.pending_count === undefined) box.append(na('排队名次（squeue）'));
-  box.append(cel('p', 'sub',
-    '「第几位」是在那个分区的排队队伍里排第几，**不是**还要等多久 ——'
-    + '前面那些作业有多少会同时开跑，取决于分区此刻有多少空闲节点。'));
-}
-
-/**
- * 开/关「集群状态」。
- *
- * ★ 它是**盖在三屏上面**的一层，不是第四屏：只读的现状，从哪儿打开的就该回到
- *   哪儿去。所以关的时候**交回给路由**（`showScreen(SCREEN)`），而不是自己把
- *   某一屏显示出来 —— 那两处的判据会漂，而漂的形态是"从集群页退回去之后回到了
- *   错误的一屏"。
- * ★ **不重建 `SCREEN`**：它记的正是"打开集群页之前我在哪"，所以这里一个字都不用改。
- */
-function showCluster(on) {
-  CLUSTER.open = Boolean(on);
-  showScreen(SCREEN);
-}
-
-async function loadCluster() {
-  CLUSTER.data = null;
-  CLUSTER.error = null;
-  renderCluster();
-  const r = await window.slurmate.cluster();
-  if (!r || !r.ok) {
-    CLUSTER.error = (r && r.error && r.error.detail) || '控制节点没有说明原因';
-  } else {
-    CLUSTER.data = r.data || {};
-  }
-  renderCluster();
-}
-
+// ★★ **它是按需拉的，绝不跟着别的东西一起刷。** 它是这一组里最贵的一条查询：
+//   守护进程是单线程同步的，`op_history` 会**同步 fork `sacct`（最长 20 秒）**
+//   阻塞整个 daemon —— 所有会话的 tick 都停在那儿。所以它只有一个入口：那个按钮。
 async function loadHistory() {
   const box = $('history-body');
   box.textContent = '';
@@ -3099,12 +2960,9 @@ async function init() {
     else notice('ok', `体检通过：${d.rules_count} 条 ACL 规则，${d.active_sessions} 个活跃会话。`);
   };
 
-  // ── 集群状态（只读的那一节）──
-  $('btn-cluster').onclick = () => { showCluster(true); loadCluster(); };
-  $('btn-cluster-back').onclick = () => showCluster(false);
-  $('btn-cluster-reload').onclick = () => loadCluster();
   // ★ 「最近作业」是一个**按需拉**的动作，不跟着上面那张表一起刷：它是最贵的
-  //   一条查询（账本库要按时间窗扫描），而它回答的"过去发生了什么"不会自己变新。
+  //   一条查询（守护进程会同步 fork `sacct`），而它回答的"过去发生了什么"不会
+  //   自己变新。
   $('btn-history').onclick = () => loadHistory();
 
   // 重新加载打的是**前台**那一条 —— 屏幕只有一块，用户看的正是它。
@@ -3172,6 +3030,31 @@ async function init() {
     const r = await window.slurmate.restart();
     if (r && !r.ok) notice('error', r.error || '重启失败。');
   };
+
+  // ── 两条边栏 ──
+  //
+  // ★ 停靠（鼠标进去）与钉住（点一下）是**两段**：第一段可退（移开就收），第二段
+  //   把它钉住。理由是输出那一块**要滚动、要选中复制**，鼠标一挪开就没的话那两件
+  //   事都做不了。见 windows.js 的 `toggleHoverPin`。
+  //
+  // ★ **收起不在这里**：它是鼠标几何判的（浮窗是原生视图，鼠标一进去这一格就再也
+  //   收不到事件了 —— 靠 `mouseleave` 关的话，浮窗会闪一下就没了）。
+  // ★★ **右栏在没有作业在跑的时候不开。** 它那一块是**作业输出**，而这份东西只有
+  //   一个来源：一条在跑的会话。没有会话还滑出一块空面板，等于说"这里本该有东西"
+  //   —— 而它本来就没有（设计律：非必要不提示，是一点都不提示）。
+  for (const side of ['left', 'right']) {
+    const el = $(`rail-${side}`);
+    const wanted = () => side === 'left' || hasRunningSession();
+    el.addEventListener('mouseenter', () => { if (wanted()) window.slurmate.hover({ side }); });
+    el.onclick = () => { if (wanted()) window.slurmate.hover({ side, pin: true }); };
+  }
+  renderRails();
+  // 左栏那个圆点。★ 主进程算好了三态才推过来 —— 界面这里**不重算**：
+  //   重算的地方就是第二个"什么时候算断线"的判据，而它会与主进程那个漂开。
+  window.slurmate.onSite((s) => {
+    const d = $('rail-left-dot');
+    d.className = 'rail-dot ' + ((s && s.state) || 'na');
+  });
 
   window.slurmate.onStates(renderSessions);
   window.slurmate.onNotice((n) => {

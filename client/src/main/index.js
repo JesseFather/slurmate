@@ -184,6 +184,47 @@ let whoami = null;
  */
 let connectedConnId = null;
 let partitions = [];
+
+/**
+ * 站点现状（`op_cluster` 那一份）与链路现状。两者一起喂给**边栏浮窗**与**左栏那个圆点**。
+ *
+ * ★★ **取数点只有这一处。** 浮窗不自己拉（见 hover.js 的文件头），面板也不拉：
+ *    `op_cluster` 是"现在这台集群怎么样"，而它每一格都有自己的钟（服务端 2s / 30s /
+ *    300s 三层）。两个取数点必然漂成两句话，而两句都标着"现在"。
+ *
+ * ★ `data` 与 `error` **分开存**，不合成一个。`data: null` 有两种意思 ——
+ *   "还没问到"与"问失败了" —— 而它们在界面上是不同的话（"正在取…" vs "取不到"）。
+ */
+let site = { data: null, error: null, at: 0 };
+let siteTimer = null;
+let siteFetching = false;
+
+/**
+ * 链路现状。它**不是**"上一次点连接成没成"，而是**此刻这条链路活没活**。
+ *
+ * ★★ 这一格原先根本不存在：后端的 `on('state')` 一直在发，而**全仓库没有一个
+ *    订阅者**。于是 SSH 掉线在界面上是一个静默事件 —— 界面照旧显示"已连接"，
+ *    直到某一次操作失败（而那时用户已经在怀疑别的东西了）。
+ */
+let link = { connected: false, detail: null };
+
+/**
+ * 多久问一次站点现状。
+ *
+ * ★★ **间隔跟着通道走**，这不是优化，是"不在别人的登录节点上每 30 秒 fork 一次"：
+ *   · 常驻通道在（`backend.resident === true`）—— 一次 RPC 是往已有 duplex 上写一行，
+ *     30 秒一次基本免费；
+ *   · 退化成了 exec —— 一次 RPC = 一个 SSH channel = sshd fork + PAM + bash +
+ *     python3 冷启动。那是 `status` 轮询从 30s 被提到 60s 的同一个理由
+ *     （见 session.js 的 `STATUS_MS` 注释），这里取 120s。
+ *   ★ `null`（这个后端没说）按**最保守**的那一档 —— 见 backend.js 的 `resident`。
+ */
+const SITE_POLL_MS = 30000;
+const SITE_POLL_EXEC_MS = 120000;
+
+function sitePollMs() {
+  return backend && backend.resident === true ? SITE_POLL_MS : SITE_POLL_EXEC_MS;
+}
 /**
  * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
  * 不支持这个 op）—— 那时按"站点没说"处理，而不是当成"一个都没有"。
@@ -335,6 +376,34 @@ function bootstrap() {
     win = new ShellWindow({
       onClose: handleWindowClose,
       onAction: handleWindowAction,
+    });
+
+    /**
+     * 链路状态：**后端一直在发，从前没有一个收件人。**
+     *
+     * ★ 订阅点是这里（`main()` 里，两个后端唯一的交汇处）—— 假后端也走同一条，
+     *   否则"开发模式能跑、真集群跑不了"又会在这个接缝上重演一次。
+     *
+     * ★ 它做三件事，每一件都对应一个"不说就没人知道"的事实：
+     *   · 推给面板（浮窗里那一行"已连接 / 已断开"）
+     *   · 重算左栏那个圆点（链路断了它就是红的，**不管集群那一份有多旧**）
+     *   · 链路回来时立刻问一次站点现状 —— 掉线期间那份是旧的，而用户此刻正
+     *     盯着圆点看
+     */
+    backend.on('state', (s) => {
+      const was = link.connected;
+      link = {
+        connected: Boolean(s && s.connected),
+        detail: (s && s.detail) || null,
+      };
+      if (win) {
+        win.pushConn(link);
+        pushSiteDot();
+        if (win.hoverOpenSide() === 'left') pushSiteToHover('left');
+      }
+      // 刚连上（或刚重连上）的那一刻补一次：`startSitePoll` 那个定时器要等到
+      // 下一拍，而圆点在那之前是灰的。
+      if (!was && link.connected) refreshSite();
     });
 
     // ★ **本机池那个目录不再被读了，说一句。** 它是用户自己装插件的地方。
@@ -684,6 +753,9 @@ async function doConnect(conn, extra = {}) {
     }
     whoami = res.whoami;
     connectedConnId = conn.id;      // 见它的声明处：换站点时要收的就是这一条的尾巴
+    // 站点现状从"连上"这一刻开始问。★ 它**不 await**：那是一个每 30 秒重来一次
+    // 的轮询，而连接这条路上等着的是一个用户。第一次问的结果到了就推给界面。
+    startSitePoll();
     await refreshPartitions();
     // 站点分发：连上之后才开始，**不 await**（理由见 reconcileSitePlugins）。
     reconcileSitePlugins();
@@ -3204,7 +3276,153 @@ async function stopAllSessions() {
  *   而症状是"临时离开之后再连回来，界面上还挂着上一个站点的东西"—— 一句指不回
  *   根因的话，因为两边都"看起来对"。
  */
+/**
+ * 问一次站点现状，然后喂给两个读者（左栏那个圆点、浮窗那一块）。
+ *
+ * ★ **成功也覆盖，失败也覆盖**：失败时把 `data` 清成 `null` 并留下 `error`
+ *   —— 留着上一次那份"一切正常"是最坏的一种：圆点继续绿着，而它基于的是一次
+ *   五分钟前的成功查询。三态里"取不到"是**一个要显示出来的状态**，不是"保留旧值"。
+ */
+/**
+ * 用户**正要去看**那块面板的时候，补一次。
+ *
+ * ★ 轮询是 30 秒一拍，所以打开浮窗时手上那一份最多可能是 29 秒前的 —— 而他要看的
+ *   正是"现在怎么样"。★ 但不能每次停靠都问：鼠标沿着边栏扫过去会连着触发好几次，
+ *   那就是把 30 秒一拍的轮询变成了一次连发。所以只在**上一次取数超过
+ *   `SITE_STALE_MS`** 时补。
+ */
+const SITE_STALE_MS = 5000;
+
+function refreshSiteIfStale() {
+  if (Date.now() - site.at < SITE_STALE_MS) return;
+  refreshSite();
+}
+
+async function refreshSite() {
+  if (!backend || !backend.connected) return;
+  // ★ 一次只飞一个。两个触发点是**真的会撞上**的：连上那一刻 `startSitePoll`
+  //   先问一次，而同一秒里后端的 `state` 事件（"连上了"）也会补一次。两次并发
+  //   的 `op_cluster` 不产生错误，只是白花一个来回，而"白花一个来回"在退化成
+  //   exec 的通道上是一次 sshd fork。
+  if (siteFetching) return;
+  siteFetching = true;
+  // ★★ 整段包在 try/finally 里，**只在 finally 里放旗子**。中间任何一步抛出
+  //    （`withGresCatalogLabels` 就在这一段的半路上），旗子会永远立着 ——
+  //    而它的症状是"那个圆点从此不再更新"，一个不报错、不崩溃、只是慢慢变成
+  //    一句假话的失败。轮询还在跑，只是每次都从这一句早返回出去。
+  try {
+    let resp = null;
+    try {
+      resp = await backend.rpc({ op: 'cluster' });
+    } catch (e) {
+      resp = { ok: false, error: { detail: (e && e.message) || '没有回应' } };
+    }
+    if (resp && resp.ok && resp.data) {
+      // GRES 那一格要经过**客户端唯一的那处拼法**（`gres.js` 的 `gresLabel`），
+      // 与 `loadPartitions()` 走同一条路 —— 少这一步，同一个分区在表单里显示
+      // `gpu:a6000 ×4`、在浮窗里显示 `gpu ×4`。
+      withGresCatalogLabels(resp.data.gres);
+      site = { data: resp.data, error: null, at: Date.now() };
+    } else {
+      site = {
+        data: null,
+        error: (resp && resp.error && resp.error.detail) || '控制节点没有说明原因',
+        at: Date.now(),
+      };
+    }
+  } finally {
+    siteFetching = false;
+  }
+  pushSiteDot();
+  if (win && win.hoverOpenSide() === 'left') pushSiteToHover('left');
+}
+
+/**
+ * 把站点现状推给浮窗。**只在左边那一块开着的时候** —— 没有读者的时候推过去
+ * 只是在两个进程之间搬字节。
+ *
+ * ★ 链路那一份**每次一起带上**：它在浮窗里是独立的一行，而且它变的原因
+ *   （掉线）与站点那一份变的原因（慢钟到点）毫无关系。
+ */
+function pushSiteToHover(side) {
+  if (!win || side !== 'left') return;
+  win.pushHoverData({
+    side: 'left',
+    cluster: site.data,
+    clusterError: site.error,
+    link: hoverLink(),
+  });
+}
+
+/**
+ * 链路那一份给浮窗看的样子。
+ *
+ * ★ 「最近一次心跳多久以前」取自**前台那一条会话**的快照 —— 心跳是逐会话的，
+ *   而这个界面同时只连一个站点、能看见的也只有前台那一条。没有会话时它是
+ *   `null`（而不是 0）：`null` 说的是"没有心跳可谈"，`0` 说的是"刚刚跳过一次"。
+ */
+function hoverLink() {
+  const slot = frontSlot();
+  const rec = slot ? sessions.get(slot) : null;
+  const snap = rec && rec.controller ? rec.controller.snapshot() : null;
+  return {
+    connected: Boolean(link.connected),
+    detail: link.detail,
+    hbAgeMs: snap ? snap.hbAgeMs : null,
+  };
+}
+
+/**
+ * 左栏那个圆点该是什么颜色。**不显示、不弹窗、不写日志** —— 它是状态，不是提示。
+ *
+ * ★★ 四态，而它们**不是**两两可以合并的：
+ *
+ *   `bad`  链路断了 —— 此刻的事实，而且是用户唯一能自己动手查的一件事
+ *   `bad`  链路活着，而**控制器明确连不上** —— 也是"确实有事"
+ *   `na`   取不到（整份失败，或控制器那一格**缺席**）—— 我们没问到
+ *   `ok`   其余
+ *
+ * ★ **控制器那一格缺席要判 `na`，不能判 `ok`。** 这是这一格最容易犯的错，
+ *   也是用例抓出来的：守护进程答了话（`ok:true`）、其余格子都在、只有 `health`
+ *   不在的时候，一个只看"有没有 data"的判据会亮绿灯 —— 而用户看到的是一颗
+ *   安稳的绿点加一屏"取不到：控制器状态"。★ 那颗点说的是"站点现在怎么样"，
+ *   而"我们不知道控制器在不在"不是"好"。
+ *
+ * ★ 判据的次序是刻意的：链路先说话（它是**此刻**的事实），链路活着才轮到
+ *   集群那一份。
+ */
+function siteDotState() {
+  if (!link.connected) return 'bad';
+  if (site.error) return 'na';
+  if (!site.data) return 'na';
+  const h = site.data.health;
+  if (!h) return 'na';
+  return h.up ? 'ok' : 'bad';
+}
+
+function pushSiteDot() {
+  if (!win) return;
+  win.pushSite({ state: siteDotState() });
+}
+
+function startSitePoll() {
+  stopSitePoll();
+  refreshSite();
+  siteTimer = setInterval(() => {
+    if (!backend || !backend.connected) { stopSitePoll(); return; }
+    refreshSite();
+  }, sitePollMs());
+  if (siteTimer.unref) siteTimer.unref();
+}
+
+function stopSitePoll() {
+  if (siteTimer) { clearInterval(siteTimer); siteTimer = null; }
+  site = { data: null, error: null, at: 0 };
+  pushSiteDot();
+}
+
 async function teardownConnection() {
+  stopSitePoll();
   await backend.close();
   whoami = null;
   connectedConnId = null;   // 与 whoami 同生共死，理由见它的声明处
@@ -4580,31 +4798,54 @@ function registerIpc() {
     return resp;
   });
 
-  /**
-   * 集群这一侧的现状（`op_cluster`）。
-   *
-   * ★ **这里没有任何加工。** 协议里每一格都是三态的（键不存在 = 取不到；
-   *   `null`/`[]`/`{}` = 确实没有），而把"取不到"在客户端抹平成"没有"，就是在
-   *   替集群说一句我们并不知道的话 —— 用户会去查一个不存在的问题（"为什么这台
-   *   集群没有分区"），而真正的原因是守护进程没问到。原样递给界面。
-   *
-   * ★ 反过来，**这里也不缓存**。服务端那一侧已经有三层钟了（见 `Cluster`），
-   *   客户端再存一份就是第三个"这份数据有多旧"的判据，而它会漂。
-   */
-  send('app:cluster', async () => {
-    const resp = await backend.rpc({ op: 'cluster' });
-    if (resp && resp.ok && resp.data) {
-      // ★★ GRES 那一格要经过**客户端唯一的那处拼法**（`gres.js` 的 `gresLabel`）——
-      //    与 `loadPartitions()` 走同一条路。少了这一步，同一个分区在表单里显示
-      //    `gpu:a6000 ×4`、在集群状态里显示 `gpu ×4`，而两边都没错、只是**两个
-      //    拼法**。★ 缺席仍然是缺席（不因为"顺手补一个空对象"变成"确实没有"）。
-      withGresCatalogLabels(resp.data.gres);
-    }
-    return resp;
-  });
+  // ★ `app:cluster` 这个通道**没有了**。它原先服务的是「集群状态」那一屏，而那一屏
+  //   整个搬进了左边栏的浮窗 —— 浮窗的数据由主进程推（见 `refreshSite`），不自己拉。
+  //   留着它等于给同一份答案留第二个取数点，而两个取数点必然漂成两句都标着"现在"
+  //   的话。★ 三态怎么递的没有变：`refreshSite` 原样保留"取不到"与"确实没有"的
+  //   区别（见那里的注释）。
 
   /** 最近几天的作业（`sacct`）。**按需拉** —— 不进任何一层缓存，见 op_history。 */
   send('app:history', async () => backend.rpc({ op: 'history' }));
+
+  /**
+   * 对**当前活跃连接**测一次延迟（TCP + 读 SSH banner）。
+   *
+   * ★ 与 `app:probeHosts`（探全部）分开：那个是"这一屏上哪几台通"的一次性体检，
+   *   而这一条是浮窗上那个按钮 —— 用户问的是"我现在这一台，此刻，延迟多少"。
+   *   拿探全部去顶替，等于为了回答一个问题去敲 N 台机器。
+   */
+  send('app:probeActive', async () => {
+    const conn = (cfg.connections || []).find((c) => c.id === connectedConnId);
+    if (!conn) return { ok: false, error: '没有连着的站点。' };
+    const r = await hosts.probeHost(conn);
+    return r && r.reachable
+      ? { ok: true, rttMs: r.rttMs }
+      : { ok: false, error: (r && r.error) || '没有回应' };
+  });
+
+  /**
+   * 边栏那两格的停靠 / 钉住 / 收起。
+   *
+   * ★ 收起**不走这里**（除了显式的那一种）：它是**鼠标几何**判的，在主进程那一侧
+   *   （见 windows.js 的 `_startCursorWatch`）。界面只说"我停上去了"与"我点了一下"。
+   */
+  send('app:hover', async (payload = {}) => {
+    const side = payload && payload.side;
+    if (!side) { win.hideHover(); return { ok: true, pinned: null }; }
+    if (side !== 'left' && side !== 'right') return { ok: false, error: '没有那一条边栏。' };
+    if (payload.pin) {
+      // ★ await：`showHover` 要懒建那一层并等它 loadFile 完。不等的话，紧跟着的
+      //   `pushSiteToHover` 会推给一个还不存在的 webContents（静默丢掉），
+      //   而症状是"头一次点钉住，面板是空的，得挪开再停一次才好"。
+      const pinned = await win.toggleHoverPin(side);
+      if (pinned) pushSiteToHover(side);
+      return { ok: true, pinned };
+    }
+    await win.showHover(side);
+    if (side === 'left') refreshSiteIfStale();
+    pushSiteToHover(side);
+    return { ok: true, pinned: null };
+  });
 
   /** 把某一条会话抬到面板上面。**纯界面动作** —— 它不改任何框架状态。 */
   send('app:setFront', async (payload = {}) => {
