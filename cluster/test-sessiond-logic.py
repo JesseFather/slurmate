@@ -9375,6 +9375,168 @@ exit 0
           not with_stub(mod, _dead, lambda: _d28.op_history(UID)).get("ok"),
           str(with_stub(mod, _dead, lambda: _d28.op_history(UID))))
 
+    # ── 28.9b `op_job_log`：作业日志的尾部，两条流各一份 ─────────────────
+    #
+    # ★★ 这个 op 是**唯一一条通往用户家目录里某个文件内容**的路径，所以它的
+    #    判据分两半：**路径不许由客户端决定**，以及**给不给要看归属**。
+    #    两半漏掉任何一半，"看自己的日志"就变成了"读别人家目录里的东西"。
+    _dj = _mkd()
+    _djhome = _dj.user_home(UID)
+    _djlog = os.path.join(_djhome, ".slurmate", "logs")
+    os.makedirs(_djlog, exist_ok=True)
+    _dj.store = mod.Store(os.path.join(tmpdir, "joblog.db"))
+    _dj.store.insert(session_id="s-jl", uid=UID, user="alice", job_id=4242,
+                     state=mod.ST_ENROLLED, created_at=mod.now_ts(),
+                     service_kind=SSHD, candidates="55003", account="acct",
+                     cpus=1, mem="1G", requested_time="1:00:00")
+    _dj.store.insert(session_id="s-other", uid=UID + 1, user="bob", job_id=4243,
+                     state=mod.ST_ENROLLED, created_at=mod.now_ts(),
+                     service_kind=SSHD, candidates="55003", account="acct",
+                     cpus=1, mem="1G", requested_time="1:00:00")
+
+    def _jlog(**over):
+        req = {"op": "job_log", "session_id": "s-jl"}
+        req.update(over)
+        return _dj.op_job_log(UID, req)
+
+    # ① 归属：不是你的 / 不存在 / 没给 —— **同一个答案**
+    _n1 = _jlog(session_id="s-other")
+    _n2 = _jlog(session_id="s-nope")
+    _n3 = _dj.op_job_log(UID, {"op": "job_log"})
+    # ★ 取键一律用 `.get()`：变异把 `code` 改名时，`d["code"]` 会抛 KeyError，
+    #   整个脚本当场崩掉、后面几十条一条都不跑 —— 而"崩掉"与"守住"在
+    #   "有没有红"这个判据上完全一样。
+    check("★★ 别人的会话与不存在的会话回**同一个** `3 not_found`"
+          "（分开的话，这个 op 就成了一个「探别人作业是否存在」的神谕）",
+          not _n1.get("ok") and _n1.get("code") == 3
+          and (_n1.get("error") or {}).get("kind") == (_n2.get("error") or {}).get("kind")
+          and _n2.get("code") == 3,
+          "%r / %r" % (_n1, _n2))
+    check("★ 不给 session_id 也是同一个答案（没有「默认最新那条」这种缺省 ——"
+          "日志是逐会话的东西，猜一个等于给另一个会话的日志）",
+          not _n3.get("ok") and _n3.get("code") == 3, str(_n3))
+    # ★ 路径根本不来自请求：把 `..` 塞进 session_id 也只会得到 not_found
+    #   （它先去 store 里找那条会话），而不是去读一个文件。
+    check("★★ 路径**一个字节都不来自客户端**（塞 `../` 进去只会得到 not_found）",
+          not _jlog(session_id="../../etc/passwd").get("ok"),
+          str(_jlog(session_id="../../etc/passwd")))
+
+    # ② 「确实没有」：文件不在 ⇒ `null`，**不是错误**
+    _e = _jlog()
+    check("★★ 作业还没写出日志 ⇒ 每一格是 `null`，而**不是错误**"
+          "（把「还没有」画成一屏报错，用户会以为出了事）",
+          _e.get("ok") and (_e.get("data") or {}).get("out") is None
+          and (_e.get("data") or {}).get("err") is None,
+          str(_e)[:300])
+
+    # ③ 读到了：两份分开、内容就是文件内容
+    with io.open(os.path.join(_djlog, "slurm-4242.out"), "w", encoding="utf-8") as f:
+        f.write("宿主的一行\n服务写到 stdout 的一行\n")
+    with io.open(os.path.join(_djlog, "slurm-4242.err"), "w", encoding="utf-8") as f:
+        f.write("认证被拒\n")
+    _r = _jlog()
+    _ro = (_r.get("data") or {}).get("out") or {}
+    _re = (_r.get("data") or {}).get("err") or {}
+    check("★★ 两份日志分别来自 `.out` 与 `.err`（合成一份读的话，"
+          "「这个服务往 stderr 上抱怨了什么」就没法单独看）",
+          "服务写到 stdout 的一行" in (_ro.get("text") or "")
+          and "认证被拒" in (_re.get("text") or "")
+          and "认证被拒" not in (_ro.get("text") or ""),
+          "%r / %r" % (_ro.get("text"), _re.get("text")))
+    check("★ 每一格带着**路径**（界面要能把它显示出来让人复制）与**字节数**",
+          str(_ro.get("path", "")).endswith("slurm-4242.out") and _ro.get("bytes") == len(
+              "宿主的一行\n服务写到 stdout 的一行\n".encode("utf-8")),
+          "%r bytes=%r" % (_ro.get("path"), _ro.get("bytes")))
+    check("★ 而那个路径在**服务端自己算出来的**日志目录里（不是客户端给的）",
+          _ro.get("path") == os.path.join(_djlog, "slurm-4242.out"), _ro.get("path"))
+
+    # ④ 空文件不是「没有文件」—— 三态里的第三格
+    with io.open(os.path.join(_djlog, "slurm-4242.err"), "w", encoding="utf-8") as f:
+        f.write("")
+    _re2 = (_jlog().get("data") or {}).get("err")
+    check("★★ 空文件**不是** `null`：`null` 是「确实没有这一份」，空文件是"
+          "「它确实还没有说任何话」—— 两句话",
+          _re2 is not None and _re2.get("text") == "" and _re2.get("bytes") == 0
+          and _re2.get("lines") == 0,
+          str(_re2))
+
+    # ⑤ 只读尾部：大文件不许整个读进来
+    _big = os.path.join(_djlog, "slurm-4242.out")
+    with io.open(_big, "w", encoding="utf-8") as f:
+        f.write("".join("第 %d 行\n" % i for i in range(20000)))
+    _rb = ((_jlog(lines=5).get("data") or {}).get("out")) or {}
+    check("★★ 给的是**尾部**，而且 `truncated` 说了「这不是整份」"
+          "（日志不轮转，一个跑了一整天的会话可以几十 MB —— 从不读整份是硬要求）",
+          str(_rb.get("text", "")).endswith("第 19999 行")
+          and "第 0 行" not in str(_rb.get("text", ""))
+          and _rb.get("truncated") is True and _rb.get("lines") == 5,
+          "lines=%r truncated=%r 尾=%r" % (_rb.get("lines"), _rb.get("truncated"),
+                                           str(_rb.get("text", ""))[-40:]))
+    with io.open(_big, "w", encoding="utf-8") as f:
+        f.write("a\nb\n")            # 两行，远不到上限
+    check("★★ 而**没被截过的小文件**要说 `truncated` 为假"
+          "（恒为真的话，那一格什么都不说明）",
+          ((_jlog().get("data") or {}).get("out") or {}).get("truncated") is False,
+          str(_jlog()))
+
+    # ⑥ `lines` 被钳住
+    check("★★ `lines` 钳到 `[1, 2000]`（上界不设的话，一次请求就能把响应撑到几 MB）；"
+          "**非整数取缺省**而不是报错 —— 这是只读展示，手抖一个参数不该让人看不到日志",
+          mod.clamp_tail_lines(999999) == mod.LOG_TAIL_MAX_LINES
+          and mod.clamp_tail_lines(0) == 1
+          and mod.clamp_tail_lines(-5) == 1
+          and mod.clamp_tail_lines("abc") == mod.LOG_TAIL_DEFAULT_LINES
+          and mod.clamp_tail_lines(None) == mod.LOG_TAIL_DEFAULT_LINES
+          and mod.clamp_tail_lines("7") == 7,
+          "%r %r %r" % (mod.clamp_tail_lines(None), mod.clamp_tail_lines(0),
+                        mod.clamp_tail_lines(999999)))
+
+    # ⑦ 逐行检查本身（纯函数，直接喂）
+    # ★ 上面那一条把 `_big` 改小了（去验 `truncated` 为假那一头），这里重新写回
+    #   一份大的 —— 夹具在两条判据之间被改掉，下一条就会在验别的东西，而它照样绿。
+    # ★★ 夹具要**行长大于窗口能装下的行数**：短行的话，窗口里有一万多行，
+    #    而行数上限（`lines`）会把开头那些**连半行一起**裁掉 —— 于是"丢不丢半行"
+    #    这条判据在**有没有修**两种情况下给出同一份结果，一条都不红。
+    #    （第一版就是这么写的，变异 Q7 逃了过去。）
+    _long = os.path.join(_djlog, "slurm-4242.out")
+    with io.open(_long, "w", encoding="utf-8") as f:
+        f.write("".join("第 %d 行 " % i + "x" * 180 + "\n" for i in range(3000)))
+    _cell = mod.read_log_tail((_djhome, os.path.join(_djhome, ".slurmate"), _djlog),
+                              UID, _long, 2000)
+    _cell_lines = ((_cell or {}).get("text") or "").split("\n")
+    check("★ 从文件中间切进来时，**第一行半截的要丢掉**"
+          "（印出去的话，人会以为那一行本来就长那样）",
+          bool(_cell_lines) and re.match(r"^第 \d+ 行 x+$", _cell_lines[0]) is not None
+          and _cell_lines[-1].startswith("第 2999 行 "),
+          repr(_cell_lines[0][:30] if _cell_lines else None))
+    check("★ 而那条判据不是空断言：窗口确实从中间切进来了（`truncated` 为真）",
+          (_cell or {}).get("truncated") is True, str(_cell)[:120])
+    _why = mod.read_log_tail((os.path.join(tmpdir, "nosuch-a"),
+                              os.path.join(tmpdir, "nosuch-a", ".slurmate")),
+                             UID, "/x", 3)
+    check("★★ 目录链**根本不存在** ⇒ `null`（「这个作业还没有日志」），"
+          "而目录链**存在但不可信** ⇒ 一格带 `why` 的「取不到」—— 两者不能并成一句",
+          _why is None, str(_why))
+    _bad_dir = os.path.join(tmpdir, "wl-logdir")
+    os.makedirs(_bad_dir, exist_ok=True)
+    os.chmod(_bad_dir, 0o777)
+    _badcell = mod.read_log_tail((_bad_dir,), UID, os.path.join(_bad_dir, "x"), 3)
+    check("★★ 而目录链上有**组/其他可写**的一级 ⇒ 不读，并如实说清是哪一条判据"
+          "（并进 `null` 的话，一个模式不对的目录会让你看到「这台站点上没有日志」，"
+          "而它明明在那里）",
+          _badcell is not None and _badcell.get("text") is None
+          and _badcell.get("why") == "component_group_or_world_writable",
+          str(_badcell))
+    check("★★ 而**文件**那一侧**不查 mode** —— 会话文件那条 `mode & 0o077` 的规矩"
+          "照抄过来的话，`slurm-*.err` 会**永远**判「取不到」，而症状看起来像"
+          "「站点上没有日志」",
+          (lambda: (os.chmod(_bad_dir, 0o700),
+                    os.chmod(_big, 0o644),
+                    mod.read_log_tail(
+                        (_djhome, os.path.join(_djhome, ".slurmate"), _djlog),
+                        UID, _big, 3).get("text") is not None))(),
+          "0644 的日志必须读得到")
+
     # ── 28.10 tick 里刷，而且只给**连着**的用户预热 ────────────────────
     _d29 = _mkd()
     _d29.slurm = _CountSlurm()
@@ -9494,6 +9656,43 @@ exit 0
           "（一份只在它身上成立的协议比没有它更坏）",
           "case 'cluster':" in _be_src and "case 'history':" in _be_src,
           "")
+    # ★★ **假后端的 op 集合必须 ⊆ 真守护进程的 op 集合。**
+    #
+    # 这一条是"假后端不许比真守护进程多知道任何东西"那条纪律在 **op 一级**的落点。
+    # 一条只在假后端上存在的 op 比没有更坏：开发者模式里它会**成功地**返回一份
+    # 编出来的数据，于是"这条路是通的"变成一个在真站点上不成立的结论 ——
+    # 而那正是假站点存在的全部意义所在。
+    #
+    # ★ 判据是**集合**而不是某几个名字：逐个点名的话，下一个加 op 的人只要漏掉
+    # 这里一格，那一条就永远不会被检查（而它看起来与"检查过了"一样）。
+    #
+    # ★ 反过来**不要求相等**：真守护进程有假后端还没演出来的 op（比如 `doctor`），
+    #   那是"开发者模式里看不到这一格"，不是缺陷。要求相等会逼着假后端去编一个
+    #   它并不知道的东西。
+    # ★★ 两条都要**锚在行首**（`^\s*`，配 `re.M`）：不锚的话，把那一行**注释掉**
+    #    （`// case 'job_log': …`）时它照样能被抽出来 —— 而那一行确实没接上。
+    #    变异 Q8 第一轮就是这么逃过去的。
+    _be_ops = set(re.findall(r"^\s*case '([a-z_]+)':", _be_src, re.M))
+    _sd_ops = set(re.findall(r'^\s*if op == "([a-z_]+)":', _sess_src, re.M))
+    check("★★★ 假后端的每一个 op 在真守护进程里都存在（一条只在假后端上成立的 op，"
+          "比没有更坏 —— 它会让「这条路是通的」变成一个在真站点上不成立的结论）",
+          bool(_be_ops) and bool(_sd_ops) and _be_ops <= _sd_ops,
+          "假后端多出：%s（假后端 %d 个 / 守护进程 %d 个）"
+          % (sorted(_be_ops - _sd_ops), len(_be_ops), len(_sd_ops)))
+    check("★ 而这一条不是空断言：两个集合都抽到了东西",
+          len(_be_ops) >= 8 and len(_sd_ops) >= 8,
+          "假后端 %d 个 / 守护进程 %d 个" % (len(_be_ops), len(_sd_ops)))
+    # ★★ 而上面那一条**盖不住这一种**：`op_job_log()` 这个函数写好了、dispatch 里
+    #    却没有那一行。它照样不会让"假后端 ⊆ 守护进程"红（守护进程那边少一格，
+    #    子集关系反而更容易成立），症状是真站点回 `unknown_op`、**而开发者模式里
+    #    一切正常** —— 正是这一整块最会犯的那类错（有函数、没人调）。
+    # ★★ 判据必须是**抽出来的集合**，不能是"源码里有这一串"：把那一行注释掉
+    #    （`// case 'job_log': ...`）时，子串判据照样为真 —— 而那一行确实没接上。
+    #    变异 Q8 第一轮就是这么逃过去的。
+    check("★★ `job_log` 在**两边都真的接上了**：守护进程的 dispatch 里有一行、"
+          "假后端的 dispatch 里有一个 case",
+          "job_log" in _be_ops and "job_log" in _sd_ops,
+          "假后端 %s / 守护进程 %s" % (sorted(_be_ops), sorted(_sd_ops)))
     # ★★ 这里从前还有一条：「面板上那四个 id 与 panel.js 读的逐字相同」。
     #    那四个 id 里三个（`btn-cluster` / `sec-cluster` / `cluster-body`）**跟着
     #    「集群状态」那一节一起删掉了**，第四个（`btn-history`）搬去了作业那一屏，

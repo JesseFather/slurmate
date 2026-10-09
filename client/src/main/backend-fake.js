@@ -731,6 +731,7 @@ class FakeBackend extends Backend {
       case 'doctor':     return this._doctor();
       case 'cluster':    return this._cluster();
       case 'history':    return this._history();
+      case 'job_log':    return this._jobLog(req);
       default:           return err(2, 'unknown_op', op);
     }
   }
@@ -1059,6 +1060,60 @@ class FakeBackend extends Backend {
   _history() {
     if (this._historyDown) return err(6, 'history_unknown', '开发者模式：模拟取不到历史');
     return ok({ history: HISTORY.map((h) => ({ ...h })), days: 7, limit: 30 });
+  }
+
+  /**
+   * 作业日志的尾部。**演的是同一件事** —— 与守护进程的 `op_job_log` 同一个形状：
+   * 两份（`out` / `err`）、每一格是 `null`（没有这一份）或一个对象。
+   *
+   * ★★ 内容**随时间增长**：每 2 秒多一行。开发者模式要能看见"边跑边刷"这件事
+   *    本身 —— 一个静态的日志在假站点里长得跟真的一样，而真站点上那条通路
+   *    （轮询、重叠比对、贴底才自动滚）在它身上一格都验不到。
+   *
+   * ★ 归属照 `_status`：找不到就 `3 not_found`。不带 `session_id` 同样是
+   *   `not_found` —— 真守护进程那边没有"默认最新那条"这种缺省（日志是逐会话的），
+   *   假站点要是给它一个，开发者模式里就会演出一件真集群上不会发生的事。
+   */
+  _jobLog(req) {
+    const sid = req && req.session_id;
+    const s = sid ? this._find(sid) : null;
+    if (!s) return err(3, 'not_found');
+
+    const cap = Math.max(1, Math.min(2000, Number(req && req.lines) || 200));
+    const home = '/home/' + (this.user || 'demo');
+    const dir = home + '/.slurmate/logs';
+    const started = s.created_at;
+    const at = nowSec();
+    const tick = Math.max(0, Math.floor((at - started) / 2));
+
+    const out = [
+      `[假站点] 启动 session=${s.session_id} job=${s.job_id}`,
+      '[假站点] 候选端口: 55101',
+      `[假站点] 服务就绪: 127.0.0.1:${s.service_port || 0}`,
+    ];
+    for (let i = 1; i <= Math.min(tick, 400); i += 1) {
+      out.push(`[假站点] 服务第 ${i} 次输出（每 2 秒一行，用来演示"边跑边刷"）`);
+    }
+    const errLines = [];
+    if (tick >= 3) errLines.push('[假站点] 这一份是标准错误 —— 这里的行不会出现在 .out 里');
+
+    const cell = (path, all) => {
+      const drop = Math.max(0, all.length - cap);
+      const kept = all.slice(drop);
+      return {
+        path,
+        bytes: all.reduce((n, x) => n + Buffer.byteLength(x, 'utf8') + 1, 0),
+        lines: kept.length,
+        truncated: drop > 0,
+        mtime: at,
+        text: kept.join('\n'),
+        why: null,
+      };
+    };
+    return ok({
+      out: cell(dir + `/slurm-${s.job_id}.out`, out),
+      err: errLines.length ? cell(dir + `/slurm-${s.job_id}.err`, errLines) : null,
+    });
   }
 
   _partitions() {
