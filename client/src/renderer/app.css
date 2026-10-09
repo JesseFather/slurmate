@@ -143,9 +143,24 @@ h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
 /* 「关于」的入口就是这一行标题。★ 它得看得出来能点：这一屏上没有任何别的东西
    提示"这里可以点"，而一个看不见的入口等于没有入口。悬停变色是唯一的提示，
    所以它必须真的变色。 */
-#about-head { cursor: pointer; }
+#about-head { cursor: pointer; position: relative; }
 #about-head:hover h1, #about-head:focus-visible h1 { color: #9cdcfe; }
 #about-head:focus-visible { outline: 1px solid var(--accent); }
+/* ★ 那颗「关于」是**记号**：整行才是入口，它是给"这里可以点"一个看得见的说法。
+   从前这件事只靠 `cursor: pointer` 与悬停变色说 —— 而两者都要**先想到去指它**
+   才看得见，于是入口等于没有入口（用户报的就是"找不到「关于」"）。
+   ★ 它**绝对定位**，不进这一行的流：进了流就会把 h1 / 副标题挤成一行。 */
+.about-marker {
+  position: absolute; right: 0; top: 4px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--fg-dim);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 0 8px;
+}
+#about-head:hover .about-marker,
+#about-head:focus-visible .about-marker {
+  color: var(--fg); border-color: var(--fg-dim);
+}
 #sec-about { border-left: 3px solid var(--border); padding-left: 14px; margin-top: 4px; }
 h2 { font-size: 13px; margin: 26px 0 10px; color: #9cdcfe; font-weight: 600; }
 /* 「新建连接」里的两步编号。比 h2 再低一级 —— 它们是同一屏内的分段，
@@ -454,6 +469,16 @@ dialog p#fork-body { white-space: pre-line; }
   background: #3a0f36; border: 1px solid var(--dev); color: var(--dev);
   font-weight: 600;
 }
+/* 初始化失败那条横幅。★ 颜色用 `--err`：它说的就是"出错了"，
+   **不另起一个红**（同一种意思两个色号，下一个人会以为它们有区别），
+   也**不是洋红**（那个颜色在这个仓库里等于「假后端」，见文件头那条三重互锁）。
+   它在面板最上面、`.wrap` 的第一个孩子，与 `.banner-dev` 同一个形状。 */
+.banner-fatal {
+  margin: 0 0 16px; padding: 10px 14px; border-radius: 4px;
+  background: #3a1a14; border: 1px solid var(--err); color: var(--err);
+}
+.banner-fatal .mono { color: var(--fg); }
+
 /* 「临时副本」那条横幅。与 `.banner-dev` 同一个形状、**另一个颜色**（见 --temp
    那条注释：洋红留给假后端）。 */
 .banner-temp {

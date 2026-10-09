@@ -161,8 +161,12 @@ let armed = null;
  *   还在按 `running` 去 toggle 它的 `hidden`，删掉的话那是作用在 null 上。
  *
  * @param {HTMLElement} anchor 那一格的按钮
- * @param {{why?: string, yes: string, run: () => any}} opts
+ * @param {{why?: string, yes: string, run: () => any, onDisarm?: () => void}} opts
  *   `why` 是**后果**，不是解释：设计律 2 要的是"把警告变成动作的前置状态"。
+ *   `onDisarm` 只在**退回去**的时候跑（点别处 / Esc / 点「取消」/ 被后来那一次
+ *   顶掉 / 重画之前收起），**第二段执行时不跑** —— 那一格已经被改动了，
+ *   "拨回旧值"会让界面说一件没发生的事。见切走工作区那一条（下拉停在待定的新值上，
+ *   退回去才拨回来）。
  */
 function armConfirm(anchor, opts) {
   disarmArmed();
@@ -174,13 +178,15 @@ function armConfirm(anchor, opts) {
   cluster.append(go, no);
 
   const here = {};
-  const disarm = () => {
+  /** @param {boolean} [acted] 第二段真的执行了 —— 那时**不**跑 `onDisarm`。 */
+  const disarm = (acted) => {
     if (armed !== here) return;         // 已经被后来那一次顶掉了，别把它的界面收掉
     armed = null;
     document.removeEventListener('click', outside, true);
     document.removeEventListener('keydown', onKey, true);
     cluster.remove();
     anchor.classList.remove('armed-off');
+    if (!acted && opts.onDisarm) opts.onDisarm();
   };
   // ★ 捕获阶段，而且判的是"点在不在这一行里面"：用户点到别处时他心里想的是
   //   "算了"，那一下不该**顺带**触发别的东西（他已经在收手了）。
@@ -188,7 +194,7 @@ function armConfirm(anchor, opts) {
   const onKey = (ev) => { if (ev.key === 'Escape') disarm(); };
 
   // 第二段：先把这一行收掉再执行 —— 执行里可能又把界面整个重画一遍。
-  go.onclick = () => { disarm(); return opts.run(); };
+  go.onclick = () => { disarm(true); return opts.run(); };
   no.onclick = () => disarm();
 
   here.disarm = disarm;
@@ -468,8 +474,12 @@ function renderSnapshot(s) {
  *
  * ★ 密钥**在这一步生成**，早于用户填地址 —— 他得先把公钥复制去 IDM 注册，
  *   回来才连得上。所以这一步是异步的：公钥框会先显示「正在生成密钥…」。
- *   主进程那边是幂等的：已经有一把还没归属的密钥就复用它，不会又换一把
- *   （那会作废用户可能已经注册好的公钥）。
+ *
+ * ★★ **每打开一次「新建」都是一把新的。** 主进程那边从前是幂等的（留着上一把
+ *   就复用它，理由是"用户可能已经注册过了"），结果是：点「新建」→ 关掉表单 →
+ *   再点「新建」，公钥一模一样，而用户**没有任何地方**能要到一把干净的钥匙。
+ *   ⇒ 代价交给密钥那一行说（关掉表单=放弃这一把），**不再另加确认**：
+ *     它不是"丢掉了什么"的动作，见本文件顶部那条"非必要不问"。
  */
 async function openNewForm() {
   form = { open: true, mode: 'new', id: null };
@@ -497,9 +507,11 @@ async function openNewForm() {
   const r = await window.slurmate.newKey();
   if (!form.open || form.mode !== 'new') return;    // 用户已经关掉或切走了
   if (!r || !r.ok) return showKeyError((r && r.error) || '生成密钥失败。');
-  $('key-hint').textContent = r.generated
-    ? '这把密钥属于下面这条新连接，还没有别的连接用它。'
-    : '这把密钥是上次「新建」时生成的（如果你已经把它注册过了，直接往下填就行）。';
+  // ★ 这一行**必须**说出"关掉就放弃"：这一版起每次新建都换一把，
+  //   而这一步没有确认（它不是"丢掉了什么"的动作，见本文件顶部那条）。
+  //   不说的话，用户会在注册完公钥之后随手关掉表单，然后对着"认证失败"发愣。
+  $('key-hint').textContent = '这把密钥属于下面这条新连接 —— '
+    + '关掉表单就等于放弃它（公钥要重新注册一遍）。';
   renderKey(r.key);
   await refreshFormWsDefault();
 }
@@ -887,38 +899,35 @@ function renderConnections(list) {
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
     del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
-    del.onclick = () => {
-      // ★ 两段式。删除连带销毁这条连接的私钥，所以后果必须在按下去**之前**说
-      //   出来 —— 而且它是一条不可逆的操作：用户拿去 IDM 注册过的公钥就此作废，
-      //   重建一条要重新注册。
-      //
-      // ★ 还有一样会被删掉：**最后一个用某个工作区的连接被删掉时，那个工作区的
-      //   数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）—— 主进程那边是
-      //   `commitConfig` → `pruneWorkspaces` → `clearWorkspaceStorage`。
-      //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
-      //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
-      const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
-      armConfirm(del, {
-        why: `删除「${c.user}@${c.host}:${c.port}」？`
-          + '它的私钥一并作废，你得重新注册一把新公钥。'
-          + (sole
-            ? `「${sole.name}」也只有这一条连接在用，会跟着删掉 —— 里面的编辑器`
-              + '布局、登录状态，以及插件写在磁盘上的那些文件都找不回来。'
-            : ''),
-        yes: '删除',
-        run: async () => {
-          const r = await window.slurmate.deleteConnection(c.id);
-          if (!r.ok) return notice('error', r.error);
-          boot.connections = r.connections;
-          boot.activeConnectionId = r.activeConnectionId;
-          // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
-          if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
-          renderConnections(boot.connections);
-          notice('info', '已删除该连接。'
-            + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
-            + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
-        },
-      });
+    // ★★ **一下就走，没有确认。** 它从前是两段式的，改回来了 —— 判据是**代价**，
+    //   不是"不可逆"：这条连接再建一条就是了，它不属于"丢掉了什么"那一类
+    //   （用户 2026-10-09 定的规矩；两段式只留给结束会话/断开、切走工作区、
+    //    删除插件数据那三处，见 `armConfirm`）。
+    //
+    // ★ 但**后果照样要说**，只是换了个地方：它连带销毁这条连接的私钥（拿去 IDM
+    //   注册过的那把公钥就此作废），而**最后一个用某个工作区的连接被删掉时，
+    //   那个工作区的数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）——
+    //   主进程那边是 `commitConfig` → `pruneWorkspaces` → `clearWorkspaceStorage`。
+    //   这些进 `title`：一行里已经挤着「连接」「编辑」「删除」三颗按钮了。
+    //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
+    //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
+    const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
+    del.title = '删除这条连接。它的私钥一并作废，你得重新注册一把新公钥。'
+      + (sole
+        ? `「${sole.name}」也只有这一条连接在用，会跟着删掉 —— 里面的编辑器`
+          + '布局、登录状态，以及插件写在磁盘上的那些文件都找不回来。'
+        : '');
+    del.onclick = async () => {
+      const r = await window.slurmate.deleteConnection(c.id);
+      if (!r.ok) return notice('error', r.error);
+      boot.connections = r.connections;
+      boot.activeConnectionId = r.activeConnectionId;
+      // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
+      if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
+      renderConnections(boot.connections);
+      notice('info', '已删除该连接。'
+        + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
+        + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
     };
 
     li.append(t, m, main, edit, del);
@@ -1058,8 +1067,18 @@ function fillWorkspaceOptions(sel, keep, connId, head) {
     + '切走一个只有这条连接在用的工作区，它会被删掉。';
 }
 
-/** 状态条里那个选择器。它改的是**当前活跃连接**的工作区。 */
+/**
+ * 状态条里那个选择器。它改的是**当前活跃连接**的工作区。
+ *
+ * ★★ 它重画的正是两段式第一段挂身的那一格（`$('sb-workspace')`）⇒ **先收第一段**。
+ *   不收的话，"待定"的那一行确认会与刚被拨回真值的下拉同时摆在界面上 ——
+ *   界面在说一件没发生的事（同 `renderConnections` 那条规矩）。
+ * ★ 递归是安全的：`disarm()` 先把 `armed` 置空再跑 `onDisarm`，而 `onDisarm`
+ *   走的正是这个函数 —— 里面那次 `disarmArmed()` 看到的已经是 `null`，
+ *   代价只是多重建一次下拉。
+ */
 function renderWorkspaceSelectors() {
+  disarmArmed();
   const sel = $('sb-workspace');
   if (!sel) return;
   // 运行期间以快照为准（那才是会话真正跑着的那一份数据所在的工作区）；
@@ -1069,21 +1088,23 @@ function renderWorkspaceSelectors() {
 }
 
 /**
- * 切走一个独占工作区之前的二次确认。
+ * 切走一个独占工作区的**后果** —— 交给两段式的第一段去说。
  *
  * 文案里必须出现「未保存的编辑内容会丢失」—— 这比「工作区变了」严重得多：
  * 换工作区 = 换 origin，浏览器是在**重新加载**那个页面，终端里没保存的东西就没了。
  * 用户有权在按下去之前知道这一条。
+ *
+ * ★ 它从前是一句 `window.confirm` 的正文。改成两段式之后它**只剩这段文字** ——
+ *   谁来问、什么时候问、退了怎么收，全在 `armConfirm` 那一层（见 `applyWorkspace`）。
+ *   把"问"留在函数的返回值里，正是这条路当初错的地方。
  */
-function confirmDiscard(name) {
+function discardWhy(name) {
   const live = lastSnap && lastSnap.state
     && lastSnap.state !== 'idle' && lastSnap.state !== 'ended';
-  return window.confirm(
-    `「${name}」现在只有这一条连接在用，切走之后它会被删除。\n\n`
+  return `「${name}」现在只有这一条连接在用，切走之后它会被删除。`
     + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，'
-    + '插件写在磁盘上的那些文件也一样 —— 而且找不回来。\n'
-    + (live ? '\n当前页面会重新加载到新工作区，未保存的编辑内容会丢失。\n' : '')
-    + '\n确定要切换吗？');
+    + '插件写在磁盘上的那些文件也一样 —— 而且找不回来。'
+    + (live ? '当前页面会重新加载到新工作区，未保存的编辑内容会丢失。' : '');
 }
 
 /**
@@ -1096,19 +1117,44 @@ function confirmDiscard(name) {
  *
  * @param {string} connectionId
  * @param {string|null} workspaceId  null = 新建一个空白工作区并落进去
- * @returns {Promise<{ok:boolean}>} 失败（含用户取消）时调用方应把下拉拨回原值
+ * @param {object} [opts]
+ *   anchor    {HTMLElement} 第一段挂在哪一格上（状态条那个下拉，或表单里「保存」）
+ *   revert    {() => void}  第一段**退回去**时把界面拨回原样
+ *   confirmed {boolean}     内部用：这是答过之后的第二趟，直接带 `confirmDiscard` 发
+ * @returns {Promise<{ok:boolean, armed?:boolean}>}
+ *   失败（含用户取消）时调用方应把下拉拨回原值；`armed:true` 表示**问题还摆在那儿
+ *   没答**（既不是成功也不是失败），调用方不要当失败处理、也不要去重画那一格 ——
+ *   重画会把那行确认连同它的 `armed` 一起丢掉。
  *
- * ★ 「切走会不会把旧工作区删掉」的判定权在**主进程**，不在这里。先照常提交，
- *   主进程若回 would_discard，我们拿它的原话去问用户，确认了再带 confirmDiscard
- *   重来一次。这样无论界面手里那份 refCount 有多陈旧，问出来的问题都是真的。
+ * ★★ 「切走会不会把旧工作区删掉」的判定权在**主进程**，不在这里。先照常提交，
+ *   主进程若回 `would_discard`，我们拿它的原话**摆出第一段**（`armConfirm`），
+ *   用户点了才带 `confirmDiscard` 重来一次。这样无论界面手里那份 refCount 有多
+ *   陈旧，问出来的问题都是真的。
+ *   ★ 它从前是一句 `window.confirm` —— 而那是这条路最别扭的地方：**主进程先拒、
+ *     界面再问、然后整趟重发**，三段挤在一个 `if` 里，而那个框按下去的时候
+ *     用户已经没有第二次机会了。两段式把"问"摊回界面自己的状态里（`armed`）。
  */
-async function applyWorkspace(connectionId, workspaceId) {
-  let r = await window.slurmate.setConnectionWorkspace({ connectionId, workspaceId });
+async function applyWorkspace(connectionId, workspaceId, opts = {}) {
+  const payload = { connectionId, workspaceId };
+  if (opts.confirmed) payload.confirmDiscard = true;
+  let r = await window.slurmate.setConnectionWorkspace(payload);
 
   if (!r.ok && r.code === 'would_discard') {
-    if (!confirmDiscard(r.workspaceName)) return { ok: false };
-    r = await window.slurmate.setConnectionWorkspace(
-      { connectionId, workspaceId, confirmDiscard: true });
+    // ★ 没有可挂的那一格就不问（防御：不该发生，但 `armConfirm` 拿到 undefined
+    //   会当场抛，而那个抛发生在一次用户点击里，看起来像"点了没反应"）。
+    if (!opts.anchor) {
+      notice('error', r.error || '切换工作区失败。');
+      return { ok: false };
+    }
+    armConfirm(opts.anchor, {
+      why: discardWhy(r.workspaceName),
+      yes: '切走',
+      // 第二趟带上 `confirmed`，其余照原样 —— 包括 `anchor` / `revert`，
+      // 万一主进程再拒一次（那时它已经答过一次了，`armConfirm` 会再摆一段）。
+      run: () => applyWorkspace(connectionId, workspaceId, { ...opts, confirmed: true }),
+      onDisarm: opts.revert,
+    });
+    return { ok: false, armed: true };
   }
   if (!r.ok) {
     notice('error', r.error || '切换工作区失败。');
@@ -1911,7 +1957,17 @@ function renderPluginData(d) {
     if (r.deletable) {
       const row = document.createElement('div');
       row.className = 'plug-meta';
-      row.append(button('删掉这一份', () => dropPluginData(r), 'ghost'));
+      // ★ **两段式**（`armConfirm`）：这一份删了就没了 —— 浏览器里的布局/标签页/
+      //   登录状态，以及插件自己写在磁盘上的东西（那个插件最可能放"重建不出来"
+      //   的文件的地方）。这是留存下来的三处两段式之一，判据是**代价**，不是
+      //   "不可逆"（同一条规矩下，删除一条连接是一下就走）。
+      const del = button('删掉这一份', null, 'ghost');
+      del.onclick = () => armConfirm(del, {
+        why: `删掉「${r.label}」？${placesText(r.places)}删掉之后找不回来。`,
+        yes: '删掉',
+        run: () => dropPluginData(r),
+      });
+      row.append(del);
       one.append(row);
     }
     wrap.append(one);
@@ -1935,15 +1991,16 @@ function placesText(places) {
   return '它在浏览器里（那个插件没有另外往磁盘上写东西）。';
 }
 
-/** 删掉一份插件数据。**不可逆**，所以先问一句（照「删除连接」那条的语气）。 */
+/**
+ * 删掉一份插件数据。**真的删**。
+ *
+ * ★★ 那个"问一句"在**调用点**（`renderPluginData` 里那颗按钮上的 `armConfirm`），
+ *   不在这里。它从前是这里的一句 `window.confirm` —— 换掉的理由与别处同源：
+ *   `window.confirm` 给不了两段（框弹出来的时候用户**已经按下去**了），
+ *   而样式也不受控（在 Electron 里那是一块系统窗口）。
+ *   ★ 于是这个函数可以被任何调用点直接用而不会弹框 —— 它只做那件事。
+ */
 async function dropPluginData(r) {
-  const parts = (r.places || []).includes('data')
-    ? '其中包括那个插件写在磁盘上的文件，它下次会从零开始'
-    : '那是它在本机攒下的编辑器布局、打开的标签页和登录状态';
-  const sure = window.confirm(
-    `删掉「${r.label}」？\n\n`
-    + `${parts}，删掉之后找不回来。\n\n确定要删吗？`);
-  if (!sure) return;
   const res = await window.slurmate.deletePluginData({ name: r.name });
   if (!res || !res.ok) {
     // `stale` 由主进程给一句能直接读的话（判定权在它那儿）。
@@ -2910,37 +2967,31 @@ function renderDevMode(dm) {
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
-async function init() {
-  boot = await window.slurmate.bootstrap();
+//
+// ★★ **这里分成两段，顺序不许调换**（见下面 `bindEvents` 的注释）：
+//   先 `bindEvents()`（纯同步），再 `bootUI()`（所有 await 与首屏渲染）。
 
-  if (boot.dev) {
-    $('dev-banner').classList.remove('hidden');
-    $('app-sub').textContent = '开发者模式 · 未连接集群';
-  } else if (boot.backendLabel) {
-    $('app-sub').textContent = boot.backendLabel;
-  }
-  renderDevMode(boot.developerMode);
+/** 当前表单在操作哪把密钥。新建时是那把还没有归属的，编辑时是这条连接的。 */
+const keyPayload = () =>
+  (form.mode === 'edit' && form.id ? { connectionId: form.id } : undefined);
 
-  // ★ bootstrap 里**没有**公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
-  //   单独去问（app:publicKey / app:newKey）。每个字段都是问出来的、当场渲染的。
-  renderConnections(boot.connections);
-  renderPartitions(boot.partitions || []);
-  renderPlugins(boot.plugins);
-  renderConnEmpty();
-  // 本机的插件数据是一次**单独的对账**（它要读磁盘、还问一次 Electron 分区目录在
-  // 哪儿）。★ **不 await 在首屏里**：让它挡住首屏就是把"面板画出来"与"磁盘快不快"
-  // 绑在一起。回来之后再画那一块（它与 `bootstrap` 的关系见 index.js 的注释）。
-  window.slurmate.pluginData().then(renderPluginData, (e) => {
-    notice('error', '本机的插件数据没能列出来：'
-      + ((e && e.message) ? e.message : e));
-  });
-  // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
-  if ((boot.connections || []).length === 0) await openNewForm();
-
-  // 当前表单在操作哪把密钥。新建时是那把还没有归属的，编辑时是这条连接的。
-  const keyPayload = () =>
-    (form.mode === 'edit' && form.id ? { connectionId: form.id } : undefined);
-
+/**
+ * 挂上所有事件监听。**纯同步 —— 一个 `await` 都不许有。**
+ *
+ * ★★ 为什么这件事值得单开一个函数、还排在取数据前面：这一整块从前排在
+ *    `init()` 里那几个 await 的**后面**。于是只要 `bootstrap()` 或者
+ *    `openNewForm()`（它里面还有 `await newKey()` —— 在 Windows 上那是 DPAPI
+ *    那一条路）有一次 reject，`init()` 就在那一行**整体中止**，
+ *    **这一整块一个监听都不挂**：标题、新建、表单、作业屏、开发者开关、
+ *    重新加载、结束会话全在内 —— 而唯一的症状是提示流里多一行字。
+ *    用户看到的是"这个界面上有一半按钮点了没反应"，而它指不回任何一处。
+ *
+ * ★ 它与 P1 那次白屏（`renderConnections` 里一个 `ReferenceError`，560 条用例
+ *   一条没红）是**同一类**：本项目一路上在清的那种「看起来正常但就是不工作」。
+ *   ⇒ 首屏数据拿不到是**一个**故障，界面因此变成哑的是**另一个**，
+ *     这一句把它们解耦：前者只该让首屏空着并说一句。
+ */
+function bindEvents() {
   // ── 事件 ──
   // 「关于」的入口是**最上面那一行标题**（`#about-head`）。它装的是这一版的说明与
   // 开发者模式，而那两样都不是每次打开都要看的 —— 所以它是一个可以点开、也可以
@@ -2975,12 +3026,15 @@ async function init() {
     notice(r.ok ? 'ok' : 'error', r.ok ? '公钥已复制到剪贴板。' : (r && r.error) || '复制失败。');
   };
 
+  // ★★ **一下就走，没有确认。** 判据是**代价**，不是"不可逆"：再换一把就是了，
+  //   而真正的代价（新公钥必须重新注册到 IDM，否则连不上）由两处承载 ——
+  //   这颗按钮的 `title`（按下去**之前**看得见），以及动作之后那句 `notice`
+  //   （按下去**之后**看得见）。★ 从前这里是一句 `window.confirm`，而它问的
+  //   与后面那句提示是同一件事：同一句话问一遍、做完再说一遍。
+  $('btn-regen').title = '作废这条连接现在的密钥、换一把新的 —— '
+    + '新的公钥必须重新注册到 IDM，否则这条连接连不上。';
+
   $('btn-regen').onclick = async () => {
-    const which = form.mode === 'edit' ? '这条连接的' : '这把';
-    const yes = window.confirm(
-      `重新生成会作废${which}密钥。\n\n`
-      + '你必须把新的公钥重新注册到 IDM，否则连不上。\n\n确定要重新生成吗？');
-    if (!yes) return;
     const r = await window.slurmate.regenerateKey(keyPayload());
     if (!r || !r.key || !r.key.publicKey) {
       return notice('error', (r && r.error) || '重新生成失败。');
@@ -3063,8 +3117,13 @@ async function init() {
       //   它看得见、也说得出（下面那条 notice）。
       if (wsWant && wsWant !== saved.connection.workspaceId) {
         const r = await applyWorkspace(saved.connection.id,
-          wsWant === NEW_WORKSPACE ? null : wsWant);
-        if (!r.ok) notice('info', '地址已经保存了，但工作区没有换。');
+          wsWant === NEW_WORKSPACE ? null : wsWant,
+          // ★ 第一段挂在「保存」那颗按钮上（用户刚按的就是它），退回时把「③ 工作区」
+          //   那一格拨回**不变**—— 它停在"待定"的那个新值上，那不是已发生的事。
+          { anchor: $('btn-save'), revert: () => { wsPicked = ''; renderFormWorkspace(); } });
+        // ★ `armed` 那一支不说这句：问题还摆在那儿没答，说"工作区没有换"
+        //   等于替用户答了"不换"。
+        if (!r.ok && !r.armed) notice('info', '地址已经保存了，但工作区没有换。');
       }
       return;
     }
@@ -3185,9 +3244,17 @@ async function init() {
   // 它改的是当前活跃连接的工作区（会话正跑在它上面，所以会立刻换端口重连隧道，
   // 而集群上的作业一动不动）。
   $('sb-workspace').onchange = async () => {
-    const v = $('sb-workspace').value;
-    const r = await applyWorkspace(boot.activeConnectionId, v === NEW_WORKSPACE ? null : v);
-    if (!r.ok) renderWorkspaceSelectors();     // 拨回真正的当前值
+    const sel = $('sb-workspace');
+    const v = sel.value;
+    const r = await applyWorkspace(boot.activeConnectionId,
+      v === NEW_WORKSPACE ? null : v,
+      // ★★ 第一段挂在这颗下拉自己身上，而**下拉停在"待定"的新值上**（用户刚选的那
+      //   一项）—— 它不是已发生的事，是"你要是确定就是这个"。所以退回去时必须
+      //   `revert` 把它拨回真正的当前值，否则界面在说一件没发生的事。
+      //   ★ `armed` 那一支**不重画**：重画会把那行确认连它的 `armed` 一起丢掉
+      //   （见 `applyWorkspace` 的返回值注释）。
+      { anchor: sel, revert: renderWorkspaceSelectors });
+    if (!r.ok && !r.armed) renderWorkspaceSelectors();   // 拨回真正的当前值
   };
 
   // 窗口大小变了，连线的坐标就全变了。rAF 里重画，等布局定下来。
@@ -3274,6 +3341,40 @@ async function init() {
     //   被吞掉的失败是同一件事。
     notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);
   });
+}
+
+/**
+ * 取首屏数据，画出来。**所有 `await` 都在这里。**
+ *
+ * ★ 它 reject 只该是"首屏空着" —— 事件监听已经在 `bindEvents()` 里挂好了，
+ *   与这里的成败无关。见那个函数的注释。
+ */
+async function bootUI() {
+  boot = await window.slurmate.bootstrap();
+
+  if (boot.dev) {
+    $('dev-banner').classList.remove('hidden');
+    $('app-sub').textContent = '开发者模式 · 未连接集群';
+  } else if (boot.backendLabel) {
+    $('app-sub').textContent = boot.backendLabel;
+  }
+  renderDevMode(boot.developerMode);
+
+  // ★ bootstrap 里**没有**公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
+  //   单独去问（app:publicKey / app:newKey）。每个字段都是问出来的、当场渲染的。
+  renderConnections(boot.connections);
+  renderPartitions(boot.partitions || []);
+  renderPlugins(boot.plugins);
+  renderConnEmpty();
+  // 本机的插件数据是一次**单独的对账**（它要读磁盘、还问一次 Electron 分区目录在
+  // 哪儿）。★ **不 await 在首屏里**：让它挡住首屏就是把"面板画出来"与"磁盘快不快"
+  // 绑在一起。回来之后再画那一块（它与 `bootstrap` 的关系见 index.js 的注释）。
+  window.slurmate.pluginData().then(renderPluginData, (e) => {
+    notice('error', '本机的插件数据没能列出来：'
+      + ((e && e.message) ? e.message : e));
+  });
+  // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
+  if ((boot.connections || []).length === 0) await openNewForm();
 
   // 拉一次全部会话。
   //
@@ -3293,6 +3394,11 @@ async function init() {
   //   `hidden` 的一屏），但路由的 `SCREEN` 还是上一次的值 —— 两份"我在哪一屏"
   //   会漂，而漂的形态是"点了返回，页面没动"。
   showScreen('conns');
+}
+
+async function init() {
+  bindEvents();
+  await bootUI();
 }
 
 /**
@@ -3389,21 +3495,20 @@ async function doLeave() {
  *   反过来，合盖/断网/断电时这个函数不会被调用 —— 那条路走守护进程的
  *   suspect/orphaned 容错窗口，客户端下次启动自动接回。
  *
- * ★★ 所以它**先问一句**，而旁边的「临时离开」不问。这不是双重标准：断开是这一屏
- *   上唯一一个会**销毁正在跑的计算**的按钮，它和"回列表"那颗按钮紧挨着，而误点的
- *   代价是一个可能已经跑了几小时的作业加一份 12 小时的机时 —— 不可逆，也不会有
- *   第二次机会。★ 这句话里要带上**有几个作业会没**：只说"确定断开吗"，用户答不了。
+ * ★★ 它走**两段式**（`#btn-disconnect` 那颗按钮上的 `armConfirm`），而旁边的
+ *   「临时离开」一下就走。这不是双重标准：断开是这一屏上唯一一个会**销毁正在跑的
+ *   计算**的按钮，它和"回列表"那颗紧挨着，而误点的代价是一个可能已经跑了几小时的
+ *   作业加一份 12 小时的机时 —— 不可逆，也没有第二次机会。
+ *   ★ 那段后果（**有几个作业会没**）由第一段说出来：只说"确定断开吗"，用户答不了。
+ *
+ * ★★ **这个函数自己不再问第二遍。** 它从前在 `armConfirm` 之外还有一句
+ *   `window.confirm`，于是同一个动作问两遍（第一段一行确认 + 一个系统对话框），
+ *   而那两句话说的是同一件事。用户 2026-10-09 明说"所有都确认好几遍这不是很烦人么"。
+ *   ⇒ 那句话里唯一**不是**后果的那半句（"只是想回列表就点「临时离开」"）
+ *     搬进了这颗按钮的 `title`：它是一个**别的选择**，不是一个"你确定吗"。
+ *   ★ 于是这个函数可以被别处直接调用而不会弹框 —— 它只做那件事。
  */
 async function doDisconnect() {
-  const n = (SESS.sessions || []).filter((s) => s.live).length;
-  const sure = window.confirm(
-    (n
-      ? `断开连接会结束 ${n} 个会话 —— 集群上的作业会被取消，`
-        + '已经跑掉的时间不会回来。\n\n'
-      : '断开与登录节点的连接。\n\n')
-    + '如果你只是想回到这个列表、让作业继续跑，点「临时离开」。');
-  if (!sure) return;
-
   const r = await window.slurmate.disconnect();
   if (!r || !r.ok) return notice('error', (r && r.error) || '断开失败。');
   connected = false;
@@ -3451,4 +3556,21 @@ async function doProbe() {
   }
 }
 
-init().catch((e) => notice('error', '界面初始化失败：' + e.message));
+/**
+ * 初始化中途失败。
+ *
+ * ★★ 它**不再只走 `notice`**。理由是一条实测过的失败形状：`bindEvents()` 从前排在
+ *    `bootUI()` 那几个 await 的后面，于是一次 reject 就让**整块监听一个都不挂** ——
+ *    而症状只有提示流里一行字，用户看到的是"一半按钮点了没反应"，指不回任何一处。
+ *    监听那半边已经解耦（见 `bindEvents`），这一半是另一半：**剩下会坏的，
+ *    也得让人第一眼看见**。
+ * ★ 只写横幅、不另写一条 `notice`：同一条消息两个落点就是两份实现，
+ *    而它们会漂。横幅常驻在最上面，比会滚走的提示流更该是那唯一一处。
+ */
+function onInitFailed(e) {
+  const why = (e && e.message) ? e.message : String(e);
+  $('fatal-why').textContent = why;
+  $('fatal-banner').classList.remove('hidden');
+}
+
+init().catch(onInitFailed);

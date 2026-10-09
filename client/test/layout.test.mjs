@@ -125,3 +125,31 @@ test('★★ 同一组数字在三个文件里必须一致（对不上的症状�
   assert.equal(Number(barPx[1]), STATUS_BAR_HEIGHT,
     'app.css 的 --bar-h 与 layout.js 的 STATUS_BAR_HEIGHT 是一个数');
 });
+
+test('★★ 窗口最小宽度装得下面板（这是第四个数，前三个上面已经钉住）', () => {
+  // ★ 从前这条**根本不存在**：`windows.js` 一 require 就要 Electron，本机进不去，
+  //   而那三个数（状态条高、边栏宽、浮窗宽）都由 `layout.js` 那一份管着 ——
+  //   窗口自己的最小尺寸落在**没有判据**的那一边。症状是"窗口能缩到面板被压窄"，
+  //   不报错、不崩溃，只有人眼看得见。
+  const win = fs.readFileSync(path.join(here, '..', 'src', 'main', 'windows.js'), 'utf8');
+  const mw = /minWidth:\s*(\d+)/.exec(win);
+  const mh = /minHeight:\s*(\d+)/.exec(win);
+  assert.ok(mw && mh, 'windows.js 的 BrowserWindow 上要能读到 minWidth / minHeight');
+
+  // ★★ 地板从**另外两个文件现读出来**，不手抄一份数：手抄的那份会在
+  //    `.wrap` 变宽或内边距改了之后照样绿 —— 而那正是这条要拦的形状
+  //    （同 F35 那条教训：手抄的清单会在源头新增一项时照样通过）。
+  const css = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'app.css'), 'utf8');
+  const pad = /#panel\s*\{[^}]*?padding:\s*\d+px\s+(\d+)px/.exec(css);
+  const wrap = /\.wrap\s*\{[^}]*?max-width:\s*(\d+)px/.exec(css);
+  assert.ok(pad, 'app.css 的 #panel 上要能读到左右内边距');
+  assert.ok(wrap, 'app.css 的 .wrap 上要能读到 max-width');
+  const floor = 2 * Number(pad[1]) + Number(wrap[1]) + 2 * RAIL_W;
+
+  assert.ok(Number(mw[1]) >= floor,
+    `最小宽度 ${mw[1]} 装不下面板：左右内边距 ${pad[1]}×2 + 内容 ${wrap[1]}`
+    + ` + 连上之后两条边栏各 ${RAIL_W} = ${floor}`);
+  // ★ 高度那一条**没有算式**：状态条（30px）之外，面板本来就是纵向滚动的，
+  //   所以它没有一个"装不下"的硬地板。这里只给一个不至于把会话区压成一条缝的下限。
+  assert.ok(Number(mh[1]) >= 480, `最小高度 ${mh[1]} 太矮`);
+});

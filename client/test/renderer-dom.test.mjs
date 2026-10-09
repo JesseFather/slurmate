@@ -119,6 +119,16 @@ function mkEl(tag) {
       return e.children.some((c) => c && typeof c.contains === 'function' && c.contains(k));
     },
     focus() { e._focused = true; },
+    // ★ 元素级的监听。**两条边栏**（`rail-left` / `rail-right`）的 `mouseenter`
+    //   走的是这一对 —— `bindEvents()` 一跑就要用它，缺了就是一次 TypeError，
+    //   而那看起来像"这一组用例本身坏了"，与"守住了"分不开。
+    //   ★ 与 `doc._ls`（文档级那两条）分开记：它们是两码事，混在一起数不清。
+    _ls: [],
+    addEventListener(t, f) { e._ls.push([t, f]); },
+    removeEventListener(t, f) {
+      const i = e._ls.findIndex((x) => x[0] === t && x[1] === f);
+      if (i >= 0) e._ls.splice(i, 1);
+    },
     // ★ **真的**从父节点摘掉自己。壳里它是空的（`remove() {}`），而两段式确认
     //   靠"这一行还在不在"判可退 —— 摘不掉的壳会让"收起"这件事**测不出来**。
     remove() {
@@ -247,6 +257,27 @@ function start(bootObj, extra = '') {
   return h;
 }
 
+/**
+ * 把 `bindEvents()` 在假环境里**真的跑一遍** —— 它就是真机上启动的第一件事。
+ *
+ * ★ 这一组从前只测得到"某个 render 函数画出了什么"。而"点下去走的是哪条路"
+ *   落在**绑定**上，绑定在 `bindEvents()` 里 ⇒ 不跑它就一个都测不到。
+ *
+ * ★★ 它同时是那条缺陷的守卫：绑定从前排在 `init()` 那几个 `await` 的**后面**，
+ *   一次 reject 就让整块都不执行。这里从"跑不跑得完"那一侧判 —— 跑得完，
+ *   那几格就有动作（见下面那条"bootstrap 挂了"的用例）。
+ *
+ * 那几样是壳里没有、而 `bindEvents` 会碰的运行期接口（真机上由 preload 提供）。
+ */
+function bindAll(bootObj, extra = '') {
+  const h = start(bootObj, extra);
+  h.run('window.addEventListener = () => {};'
+    + 'window.slurmate.onSite = () => {}; window.slurmate.onStates = () => {};'
+    + 'window.slurmate.onNotice = () => {}; window.slurmate.onPlugins = () => {};');
+  h.fn('bindEvents')();
+  return h;
+}
+
 test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守卫）', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   // 从前这里抛 `ReferenceError: lay is not defined`，而它是画**第一屏**的函数：
@@ -266,41 +297,52 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
 });
 
 test('★★ 两段式确认：第一下只是把那一格换成一行确认，第二下才真的做', () => {
-  // ★★ 这一条守的是**设计律 2**：不可逆的动作由"必须先经过的那一步"承载。
+  // ★★ 这一条守的是**设计律 2**：代价大的动作由"必须先经过的那一步"承载。
   //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——
   //   而 `window.confirm` 给不了两段：框弹出来的时候用户**已经按下去**了。
   //
   // ★ 四条判据，缺一条这条规矩就不成立：
-  //   · 第一下**一个请求都不发**（"点了就删"= 没有第二段）；
+  //   · 第一下**一个请求都不发**（"点了就发"= 没有第二段）；
   //   · 那一行里要**说出后果**（只说"确定吗"，用户答不了）；
   //   · 第二下才发，而且**恰好一次**；
   //   · 原来那颗按钮**还在 DOM 里**（只加一个 class 不显示）—— 删掉它的话，
   //     `renderSnapshot` 下一次按 `running` 去 toggle 它的 `hidden` 就作用在 null 上。
-  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
-    'window.__calls = [];'
-    + 'window.slurmate.deleteConnection = (id) => { window.__calls.push(id);'
-    + ' return Promise.resolve({ ok: true, connections: [], activeConnectionId: null }); };');
-  h.fn('renderConnections')(CONNS);
+  //
+  // ★★ 载体是状态条上的「结束会话」（`#sb-end`）：留下的四处两段式里，它是唯一
+  //   一颗**固定在 HTML 里**的按钮 —— 另外三处（断开也固定，但切走工作区的第一段
+  //   挂在运行期画的那个下拉上、插件数据那颗按钮也是运行期画的）驱动起来都要先
+  //   把一整块画出来。机制是同一份（`armConfirm`），所以拿它当代表最省事也最直接。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'SESS = { sessions: [{ slot: "s1", live: true }], front: "s1" };'
+    + 'window.__calls = [];'
+    + 'window.slurmate.stop = (slot) => { window.__calls.push(slot);'
+    + ' return Promise.resolve({ ok: true }); };');
+  // ★ 那一行确认是 `insertBefore(cluster, anchor.nextSibling)` 插进去的 ⇒ 锚点
+  //   得**真的在文档里**才看得见它。壳里 `$()` 现造的元素没有父节点。
+  h.run("document.body.append($('sb-end'));");
+  const end = h.byId.get('sb-end');
 
-  const row = h.byId.get('conn-list').children[0];
-  const del = childrenOf(row).find((x) => x._text === '删除');
-  assert.ok(del, '第一行里要有那颗「删除」');
-  const armedRow = () => row.children[row.children.length - 1];
+  const clusterOf = () => {
+    const p = end.parentNode;
+    return p.children[p.children.indexOf(end) + 1];
+  };
 
   // ── 第一段 ──
-  del.onclick();
+  end.onclick();
   assert.equal(h.run('window.__calls.length'), 0,
-    '★★ 第一下**不许**删 —— 它是第一段，只把那一格换成一行确认');
+    '★★ 第一下**不许**发 —— 它是第一段，只把那一格换成一行确认');
   assert.notEqual(h.run('armed'), null, '第一段要挂在 armed 上（否则没有任何东西收得掉它）');
-  assert.equal(del.classList.contains('armed-off'), true,
+  assert.equal(end.classList.contains('armed-off'), true,
     '★ 原来那颗按钮留在 DOM 里、只是不显示');
-  const cluster = armedRow();
+  const cluster = clusterOf();
+  assert.ok(cluster, '那一行确认要插在锚点后面');
   assert.equal(cluster.className, 'armed');
   const why = cluster.children[0]._text;
-  assert.match(why, /私钥/, '后果要说出来 —— 只说"确定吗"，用户答不了');
-  assert.match(why, /工作区 1/,
-    '★ 「这个工作区会跟着被删掉」也要说 —— 判据是 soleOwnerId（与主进程数的是同一件事）');
-  assert.match(why, /写在磁盘上的那些文件/);
+  assert.match(why, /作业会被取消/, '后果要说出来 —— 只说"确定吗"，用户答不了');
+  // ★ 条数那一格（`liveCount()`）长在「断开」那一行上（它一次结束好几条），
+  //   而这条挂的是「结束这一条会话」—— 判据在那一条用例里。
+  assert.match(h.run("$('sb-end').onclick.toString()"), /armConfirm/,
+    '★ 状态条那颗「结束会话」走的是两段式（不是直接 endFrontSession）');
 
   // ★ 那一行里两颗按钮**必须长得不一样**：一颗是不可逆的第二段（danger），
   //   一颗是回到原样（ghost）。画成一样的，用户分不清自己按下去的是哪个 ——
@@ -314,42 +356,187 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   // ── 取消：一行收掉，回到原样，一个字节都没发 ──
   cluster.children[2].onclick();
   assert.equal(h.run('armed'), null, '取消之后不该还挂着一个第一段');
-  assert.equal(del.classList.contains('armed-off'), false, '取消之后那颗按钮要回来');
-  assert.equal(row.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
+  assert.equal(end.classList.contains('armed-off'), false, '取消之后那颗按钮要回来');
+  assert.equal(end.parentNode.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
   assert.equal(h.run('window.__calls.length'), 0, '取消 = 什么都没发生');
   assert.equal(h.run('document._ls.length'), 0,
     '★ 那两个"点别处 / 按 Esc"的监听也要一起摘掉 —— 每点一次多挂一个，它们会越攒越多');
 
   // ── 第二段 ──
-  del.onclick();
-  const again = armedRow();
-  const p = again.children[1].onclick();          // 「删除」
+  end.onclick();
+  const p = clusterOf().children[1].onclick();
   assert.equal(h.run('armed'), null, '执行的那一下要先把这一行收掉');
   assert.equal(h.run('document._ls.length'), 0);
   return p.then(() => {
-    assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__calls))'), ['c1'],
-      '★ 第二下才发，而且恰好一次');
+    assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__calls))'), ['s1'],
+      '★ 第二下才发，而且恰好一次（发的正是**前台那一条**的槽）');
     assert.equal(h.run('document._ls.length'), 0);
   });
 });
 
-test('★★ 重画那一屏会把没走完的第一段收掉（它挂在某一行的里面）', () => {
+test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（切走工作区靠它）', () => {
+  // ★★ 「切走工作区」的第一段挂在一个**下拉**上，而那个下拉停在用户刚选的
+  //   "待定"的新值上 —— 那不是已发生的事。退回去（取消 / 点别处 / Esc / 被重画
+  //   收掉）时如果不把它拨回旧值，界面就在说一件没发生的事。
+  //   ⇒ 这正是 `armConfirm` 那个 `onDisarm` 存在的唯一理由。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("document.body.append($('sb-end'));");
+  h.run('window.__revert = () => { window.__revN = (window.__revN || 0) + 1; };');
+  h.fn('armConfirm')(h.byId.get('sb-end'), {
+    why: '后果', yes: '切走', run: () => {}, onDisarm: h.run('window.__revert'),
+  });
+  h.run('window.__revN = 0;');
+  h.run('armed.disarm()');
+  assert.equal(h.run('window.__revN'), 1, '★ 退回去要调 `onDisarm`');
+
+  // ★ 而**第二段执行时不许调** —— 那一格已经被改动了，"拨回旧值"会让界面
+  //   说一件没发生的事。
+  h.fn('armConfirm')(h.byId.get('sb-end'), {
+    why: '后果', yes: '切走', run: () => {}, onDisarm: h.run('window.__revert'),
+  });
+  h.run('window.__revN = 0;');
+  h.run('armed.disarm(true)');
+  assert.equal(h.run('window.__revN'), 0,
+    '★★ 第二段（`disarm(true)`）不许跑 `onDisarm` —— 动作已经发生了');
+});
+
+test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆一行确认，第二趟才带 confirmDiscard', async () => {
+  // ★★ 这一条替掉的是从前那句 `window.confirm`。它守三件事：
+  //   · 第一下**不弹框**、也不发第二次请求 —— 只是把那一格摆成一行确认；
+  //   · 下拉**停在新值上**（那是"待定"，不是已发生的事），退回去才拨回来；
+  //   · 第二趟**恰好带 `confirmDiscard: true`** 再发一次。
+  //   ★ 判定权在主进程（`would_discard` 是它算的），界面只负责问 —— 所以这条
+  //     路的形状是"先发、被拒了再问、答了再发"，不是"先问再发"。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__calls = []; window.__asked = 0;'
+    + 'window.slurmate.states = () => Promise.resolve({ sessions: [], front: null });'
+    + 'window.slurmate.setConnectionWorkspace = (p) => {'
+    + '  window.__calls.push(JSON.parse(JSON.stringify(p)));'
+    + '  if (p.confirmDiscard) {'
+    // ★ 这两份数据得**内联**进去：`WSS` / `CONNS` 是这一侧的常量，
+    //   不是 vm 上下文里的名字 —— 直接写名字是一次 `ReferenceError`，
+    //   而那看起来像"这条用例坏了"，与"守住了"分不开。
+    + `    return Promise.resolve({ ok: true, workspaces: ${JSON.stringify(WSS)},`
+    + `      connections: ${JSON.stringify(CONNS)} }); }`
+    + '  return Promise.resolve({ ok: false, code: "would_discard",'
+    + '    workspaceName: "工作区 1" });'
+    + '};'
+    // ★ 壳里 `window.confirm` 默认是 `() => true` —— 换成一个会记账的，
+    //   这样"到底有没有弹框"才是**测出来**的，而不是假设的。
+    + 'window.confirm = () => { window.__asked += 1; return true; };');
+
+  h.fn('renderWorkspaceSelectors')();
+  const sel = h.byId.get('sb-workspace');
+  assert.equal(sel.value, 'w000000000001',
+    '（前提）那一格显示的是这条连接当前的工作区');
+  h.run("document.body.append($('sb-workspace'));");
+
+  sel.value = 'w000000000002';
+  await sel.onchange();
+
+  assert.equal(h.run('window.__asked'), 0,
+    '★★ 不许弹 `window.confirm` —— 它给不了两段，而这正是这条路从前最别扭的地方');
+  assert.equal(h.run('window.__calls.length'), 1, '第一下只发那一次（照常提交，判定权在主进程）');
+  assert.equal(h.run('window.__calls[0].confirmDiscard'), undefined,
+    '第一趟**不许**带 confirmDiscard —— 它是"照常试一次"');
+  assert.notEqual(h.run('armed'), null, '被拒之后要摆出第一段');
+  assert.equal(h.byId.get('sb-workspace').value, 'w000000000002',
+    '★ 下拉**停在待定的新值上** —— 它不是已发生的事，是"你要是确定就是这个"');
+  const p = sel.parentNode;
+  const cluster = p.children[p.children.indexOf(sel) + 1];
+  assert.match(cluster.children[0]._text, /工作区 1/, '第一段要说出**哪一个**工作区会没');
+
+  // ── 退回去：下拉拨回真值，一个请求都不多发 ──
+  cluster.children[2].onclick();
+  assert.equal(h.run('armed'), null, '取消之后不该还挂着第一段');
+  assert.equal(h.byId.get('sb-workspace').value, 'w000000000001',
+    '★★ 退回去要把下拉**拨回真正的当前值** —— 留着待定的新值就是界面在说一件没发生的事');
+  assert.equal(h.run('window.__calls.length'), 1, '取消 = 什么都没发生');
+
+  // ── 答"切走"：第二趟照常先发一次，再**恰好**带 confirmDiscard 发一次 ──
+  const n0 = h.run('window.__calls.length');
+  sel.value = 'w000000000002';
+  await sel.onchange();
+  assert.equal(h.run('window.__calls.length'), n0 + 1,
+    '第二趟也照常先提交一次（判定权始终在主进程）');
+  const p2 = sel.parentNode;
+  const again = p2.children[p2.children.indexOf(sel) + 1];
+  await again.children[1].onclick();
+  assert.equal(h.run('window.__calls.length'), n0 + 2, '答「切走」之后**恰好**再发一次');
+  assert.equal(h.run(`window.__calls[${n0 + 1}].confirmDiscard`), true,
+    '★★ 第二趟必须**明确**带上 confirmDiscard —— 少这一格就是同一个框弹两遍');
+  assert.equal(h.run('window.__asked'), 0, '全程没有弹过框');
+});
+
+test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许拆掉整块监听）', async () => {
+  // ★★ 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
+  //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的**后面**，于是
+  //   `bootstrap()` 或 `openNewForm()`（里面有 `await newKey()`，在 Windows 上
+  //   走 DPAPI）任何一次 reject，`init()` 就在那一行整体中止，**2950 行往后
+  //   一个监听都不挂**，而唯一的症状是提示流里多一行字。
+  //   ⇒ 现在分成 `bindEvents()`（纯同步，先跑）与 `bootUI()`（所有 await）。
+  const h = bindAll({}, 'window.slurmate.bootstrap ='
+    + ' () => Promise.reject(new Error("假装取不到"));'
+    + 'window.slurmate.pluginData = () => Promise.resolve({});');
+
+  // ── 让 bootUI 照真机那条路失败 ──
+  await h.fn('bootUI')().then(
+    () => { throw new Error('bootUI 本该 reject'); },
+    (e) => h.fn('onInitFailed')(e));
+
+  // ── 那几格必须仍然有动作 ──
+  // ★ 一律走 `$()` 取元素：`byId` 是**取过才有**的缓存，而 `sec-about` 只在
+  //   `toggleAbout` 被调用时才第一次被取到。
+  const head = h.run("$('about-head')");
+  assert.equal(typeof head.onclick, 'function',
+    '★★ 标题那一行仍然要挂着动作 —— 首屏数据拿不到**不该**让入口变成哑的');
+  // ★ 壳里的 `$()` 是**现造**一个空元素，它不会去读 panel.html —— 所以
+  //   `hidden` 那一格得自己摆成初始状态（真机上由 panel.html 上的 class 给）。
+  h.run("$('sec-about').classList.add('hidden');");
+  assert.equal(h.run("$('sec-about').classList.contains('hidden')"), true, '（前提：它本来是收着的）');
+  head.onclick();
+  assert.equal(h.run("$('sec-about').classList.contains('hidden')"), false,
+    '★★ 点下去要开 —— 用户报的就是"点了没反应"');
+
+  // ── 而失败本身第一眼看得见（不再只滚进提示流）──
+  const banner = h.byId.get('fatal-banner');
+  assert.equal(banner.classList.contains('hidden'), false,
+    '★ 初始化失败要有一块**常驻**的地方说出来 —— 提示流会滚过去、也会被顶下去');
+  assert.match(h.byId.get('fatal-why').textContent, /假装取不到/,
+    '而原因要照原话说出来');
+});
+
+test('★★ 重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {
   // ★ 不收的后果是**静默的**：那一行连同确认一起被丢掉，而 `armed` 还指着它 ——
   //   用户接着点"别处"收的是一个已经不在文档里的节点，看起来像没反应；
-  //   更糟的是 `armed` 从此不为 null，下一次点另一行那颗按钮时 `disarmArmed()`
+  //   更糟的是 `armed` 从此不为 null，下一次点另一处时 `disarmArmed()`
   //   先把**这个幽灵**收掉（白做一次），真正的第二段反而没了。
-  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
-  h.fn('renderConnections')(CONNS);
-  const del = childrenOf(h.byId.get('conn-list').children[0]).find((x) => x._text === '删除');
-  del.onclick();
-  assert.notEqual(h.run('armed'), null, '前提：这里确实有一个没走完的第一段');
+  //
+  // ★★ 两条路各自都判，因为它们重画的是**不同的**一片：
+  //   · `renderConnections` —— 收掉挂在连接列表那一片上的第一段；
+  //   · `renderWorkspaceSelectors` —— 它重画的正是切走工作区第一段挂身的那一格
+  //     （状态条那个下拉）。不收的话，"待定"的那行确认会与刚被拨回真值的下拉
+  //     同时摆在界面上 —— 界面在说一件没发生的事。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'SESS = { sessions: [{ slot: "s1", live: true }], front: "s1" };'
+    + 'window.slurmate.stop = () => Promise.resolve({ ok: true });');
+  h.run("document.body.append($('sb-end'));");
+  const end = h.byId.get('sb-end');
 
+  end.onclick();
+  assert.notEqual(h.run('armed'), null, '前提：这里确实有一个没走完的第一段');
   h.fn('renderConnections')(CONNS);               // 探测 / 删掉一条 / 连上一条都会走这里
-  assert.equal(h.run('armed'), null, '重画之前必须先把它收掉');
+  assert.equal(h.run('armed'), null, '重画连接列表之前必须先把它收掉');
   assert.equal(h.run('document._ls.length'), 0);
-  assert.equal(del.classList.contains('armed-off'), false,
-    '★ 那颗按钮的 class 也要拨回来 —— 它现在是一棵被丢掉的老树，而下次重画会造一颗新的；'
-    + '残留的 `armed-off` 属于"那颗按钮永远不显示"这一类看不见的坏法');
+  assert.equal(end.classList.contains('armed-off'), false,
+    '★ 那颗按钮的 class 也要拨回来 —— 残留的 `armed-off` 属于'
+    + '"那颗按钮永远不显示"这一类看不见的坏法');
+
+  end.onclick();
+  assert.notEqual(h.run('armed'), null, '（前提）再摆一个');
+  h.fn('renderWorkspaceSelectors')();
+  assert.equal(h.run('armed'), null,
+    '★★ 重画工作区那个下拉之前也必须先收掉 —— 它重画的正是那一段挂身的一格');
 });
 
 test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title', () => {

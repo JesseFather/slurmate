@@ -4512,19 +4512,33 @@ function registerIpc() {
   });
 
   /**
-   * 「新建连接」时生成（或取回）那把还没有归属的密钥。
+   * 「新建连接」时生成那把还没有归属的密钥。
    *
    * ★ 生成发生在**用户填地址之前**：他要把公钥复制去 IDM 注册，回来才能连上。
-   *   generated=false 表示这把是上次新建时留下的 —— 用户可能已经注册过它，
-   *   界面据此说明「已经注册过就直接用」。绝不在这里无声地换一把。
+   *
+   * ★★ **每问一次就换一把新的。** 它从前是幂等的 —— 「新建位」上还留着上一把就
+   *   复用它，理由是"用户可能已经把它注册到 IDM 了，无声换一把会作废它"。
+   *   那条理由的代价是：点「新建」→ 关掉表单 → 再点「新建」，**公钥一模一样**，
+   *   而用户在界面上没有任何办法要到一把干净的钥匙（新建表单里那个
+   *   「重新生成密钥」按钮，除了这一条路没有别的用处，也没有任何地方说它该按）。
+   *   ⇒ 规矩改成（用户 2026-10-09 定的）：**「新建」永远给一把新的；
+   *     只有已经保存的连接才留住自己的密钥**，而"要不要换掉一条已保存连接的"
+   *     是那个显式的按钮（`app:regenerateKey`）。
+   *   ★ 代价如实说：关掉表单就等于**放弃**这一把，那把公钥要是已经注册进 IDM，
+   *     就得重新注册一次。界面在密钥那一行说出来，**不再另加确认** ——
+   *     它不是一个"丢掉了什么"的动作。
+   *   ★ 这条路径**不产生孤儿**：先删后建，落盘的永远只有一把。
    */
   send('app:newKey', async () => {
-    const existed = Boolean(memKeys.get(config.PENDING_ID))
-      || config.hasKey(cfgDir, config.PENDING_ID);
+    // 先作废上一把没归属的。它要么是上一次「新建」留下的，要么已经被
+    // `app:saveConnection` 过户给某条连接了 —— 后者那次删除发生在那边，
+    // 这里删的是一个本来就空的位，两条路合起来保证"至多一把"。
+    config.deleteKey(cfgDir, config.PENDING_ID);
+    memKeys.delete(config.PENDING_ID);
     const r = ensureKey(config.PENDING_ID);
     if (!r.ok) return { ok: false, error: r.detail || r.error };
     return {
-      ok: true, generated: !existed,
+      ok: true,
       key: {
         publicKey: r.publicKeyLine, fingerprint: r.fingerprint,
         persisted: r.persisted, error: null, detail: null, missing: false,

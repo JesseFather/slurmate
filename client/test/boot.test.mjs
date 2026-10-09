@@ -659,24 +659,32 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   assert.equal(b.connection, undefined, "活动连接不再随 bootstrap 一起下发（它唯一的用途是预填表单，那个行为已删）");
 });
 
-test('★ 点开「新建」密钥就已经生成好了，公钥可查（用户要拿去注册）', async (t) => {
+test('★★ 点开「新建」密钥就已经生成好了，而且**每点一次都是一把新的**', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const r = await invoke('app:newKey');
   assert.equal(r.ok, true);
   assert.match(r.key.publicKey, /^ssh-ed25519 [A-Za-z0-9+/]+=* slurmate-\d{8}-\d{4}$/,
     '公钥必须是 OpenSSH 一行格式，用户要原样粘到 IDM 里');
   assert.match(r.key.fingerprint, /^SHA256:/);
-  assert.equal(r.generated, true, '第一次问当然要真的生成一把');
   // 这台机器没有凭据库 —— 密钥只能留在内存里，绝不该悄悄写明文落盘
   assert.equal(r.key.persisted, false, '没有安全存储时不得自动落盘');
   assert.equal(fs.existsSync(path.join(userData, 'dev-sandbox', 'secrets.json')), false,
     '一个字节都不该落盘');
 
-  // ★ 幂等。每次点开「新建」就换一把的话，用户刚复制去 IDM 注册的那把公钥
-  //   会当场作废，而他看到的只是「认证失败」。
+  // ★★ **再问一次必须是一把新的。** 它从前是复用的（"用户可能已经把它注册到 IDM
+  //    了"），而那条理由的代价是：点两次「新建」拿到两把一模一样的钥匙，而界面上
+  //   除了这个按钮**没有别的地方**能要一把干净的 —— 新建表单里那个「重新生成密钥」
+  //    按钮，除了补这一刀没有别的用处。用户 2026-10-09 定的规矩是：
+  //    「新建」永远给一把新的，只有已经保存的连接才留住自己的密钥。
   const again = await invoke('app:newKey');
-  assert.equal(again.generated, false, '第二次必须是复用，不是重新生成');
-  assert.equal(again.key.publicKey, r.key.publicKey);
+  assert.notEqual(again.key.publicKey, r.key.publicKey,
+    '再点一次「新建」必须换一把新的，不许复用上一把');
+
+  // ★ 也不许把上一把留在「新建位」上：先删后建，那个位上永远只有最后一把
+  //   （留着的话，`app:saveConnection` 过户的可能是**更早**那一把）。
+  const pub = await invoke('app:publicKey');
+  assert.equal(pub.key.publicKey, again.key.publicKey,
+    '「新建位」上只能是最后生成的那一把');
 });
 
 test('★ 没有安全存储时，重新生成密钥要明确报告「存不下来」，绝不静默写明文', async (t) => {

@@ -79,6 +79,17 @@
 <div id="panel">
   <div class="wrap">
 
+    <!-- ── 初始化失败 ──
+         ★★ 它**必须常驻在面板最上面**，不能只走 `#notices`：初始化失败意味着
+           **有一批按钮根本没挂上监听**（见 panel.js 的 `bindEvents`），
+           而"有一半按钮点了没反应"这件事，只有摆在第一眼的地方才说得清。
+           提示流是会滚过去、也会被后面来的提示顶下去的一条流水。
+         ★ 颜色用 `--err`，**不用洋红** —— 洋红在这个仓库里等于「假后端」。 -->
+    <div id="fatal-banner" class="banner-fatal hidden">
+      界面没能初始化完 —— <strong>下面的按钮点了可能没反应</strong>。
+      原因：<span id="fatal-why" class="mono"></span>
+    </div>
+
     <!-- ★ 三重互锁的第二重：真实模式里绝不会出现的一种颜色（洋红）。做了假后端却
          不标注，正是这个项目一路在清的那类问题 —— 系统声称了不成立的事。 -->
     <div id="dev-banner" class="banner-dev hidden">
@@ -95,13 +106,21 @@
 
     <!-- ── 标题那一行 = 「关于」的入口 ──
          ★ 它是**点出来的**，不是一个常驻的节：这一版要说明的东西（这是什么、
-           开发者模式）没有一件是每次打开都要看的。入口放在这一行，是因为它
-           在每一屏都在，而且它本来就是"关于这个客户端"最自然的那一格。
+           开发者模式）没有一件是每次打开都要看的。
+         ★★ **它只在"没在跑会话"的时候露得出来。** 会话一跑起来，窗口主体就被
+           插件那块**原生视图**从 y=30 往下整块盖住（见 windows.js 的 `_layout`），
+           标题这一行一个像素都露不出来。所以这里从前写的那句「每一屏都在」是**假的** ——
+           而「关于」本来也没有会话期间要看的东西：那时候真正要紧的那一格是状态条里的
+           `开发者模式 · 未连接集群`（`#sb-dev`），它在状态条里，盖不住。
+         ★ 右端那颗「关于」是**记号，不是第二个入口** —— 整行仍然可点，那颗不另绑
+           动作：两处绑同一个动作就是两份实现，而它们会漂。
          ★ 用 div + role 而不是 <button>：button 里不许放 h1/p（内容模型是
-           phrasing content），浏览器会把它拆开重排。 -->
+           phrasing content），浏览器会把它拆开重排。那颗记号也**不是** button，
+           理由同上（它在这个 div 里面）。 -->
     <div id="about-head" role="button" tabindex="0" title="关于这个客户端 · 开发者模式">
       <h1>Slurmate</h1>
       <p class="sub" id="app-sub">远程开发会话</p>
+      <span class="about-marker">关于</span>
     </div>
 
     <!-- ── 关于 ──
@@ -220,8 +239,12 @@
         <button id="btn-probe" class="ghost">探测全部</button>
         <button id="btn-leave" class="ghost hidden"
                 title="回到这个列表，作业继续在集群上跑。★ 但没人看着它 35 分钟之后，它会被自动回收。">临时离开</button>
+        <!-- ★ 最后那一句是从 `doDisconnect` 里搬过来的：那句话从前长在
+             `window.confirm` 里，而断开现在走两段式（第一段已经把后果说出来了）。
+             它不是后果，是**另一个选择** —— 所以它挂在这颗按钮的悬停上，
+             贴着「临时离开」那颗一起看。 -->
         <button id="btn-disconnect" class="ghost danger-ghost hidden"
-                title="停掉这些作业并断开连接。">断开</button>
+                title="停掉这些作业并断开连接。只是想回到这个列表、让作业继续跑的话，点「临时离开」。">断开</button>
       </div>
       <ul id="conn-list" class="conns"></ul>
       <!-- 文案由 renderConnEmpty 按「表单开着没有」改写：表单开着时那个按钮是收起来的，

@@ -406,19 +406,24 @@ test('★★【临时离开】与【断开】：两个方向相反的动作，�
     '状态条与明细要印主进程给的那句原因，而不是自己编一句');
 });
 
-test('★★ 三处不可逆动作都走**两段式**，而且两段都收得回来', () => {
-  // ★★ 设计律 2：不可逆的动作由"必须先经过的那一步"承载，而不是一句写在旁边的
-  //   说明。机制本身（第一下不发请求、第二下才发、取消回到原样、两个监听摘干净）
+test('★★ 该两段式的四处走两段式 —— 而**删除连接不是**（判据是代价，不是"不可逆"）', () => {
+  // ★★ 设计律 2：**代价大**的动作由"必须先经过的那一步"承载，而不是一句写在旁边
+  //   的说明。机制本身（第一下不发请求、第二下才发、取消回到原样、两个监听摘干净）
   //   的判据在 `renderer-dom.test.mjs`；这里守的是**绑定** —— 本机跑不起
   //   `init()`（那一组用例把它整段摘掉了），所以"那颗按钮点下去走的是哪条路"
   //   只有这里判得了。
   //
-  // ★ 而这条规矩最容易烂的方式是**漏一处**：三颗按钮在界面上长得都不一样，
-  //   少一颗在真机上看不出来 —— 除非你真的按下去，而那时已经来不及了。
+  // ★★ **判据是代价，不是"不可逆"**（用户 2026-10-09 定的）。于是这一份清单**两个
+  //   方向都要钉**：
+  //     要走两段式的四处 —— 结束会话 / 断开（取消集群上正在跑的作业）、
+  //       切走工作区（旧工作区的浏览器存储与磁盘文件一起没）、删除插件数据；
+  //     而 **删除一条连接不是**（再建一条就是了），**重新生成密钥也不是**。
+  //   ★ 只钉"哪几处要走"的话，"顺手给删除连接也加一道"照样全绿 —— 而那正是
+  //     用户抱怨的"所有都确认好几遍"。
   //
   // ★★ 为什么不用 `window.confirm`：它给不了两段（框弹出来的时候用户已经按下去
   //   了），样式也不受控（Electron 里那是一块系统窗口，尺寸、语言、焦点行为都不
-  //   归我们管）—— 于是同一个客户端里三处不可逆动作会长得不一样。
+  //   归我们管）—— 于是同一个客户端里几处不可逆动作会长得都不一样。
   for (const [id, what] of [['sb-end', '状态条上的「结束会话」'],
                             ['btn-disconnect', '「断开」']]) {
     const at = js.indexOf(`$('${id}').onclick =`);
@@ -426,8 +431,51 @@ test('★★ 三处不可逆动作都走**两段式**，而且两段都收得回
     assert.match(js.slice(at, at + 700), new RegExp(`armConfirm\\(\\$\\('${id}'\\)`),
       `★★ ${what}必须走两段式 —— 它会把集群上正在跑的作业取消掉`);
   }
-  assert.match(js, /armConfirm\(del,/,
-    '★★ 删除连接必须走两段式 —— 它连带销毁这条连接的私钥');
+
+  // ★ 这两处**没有一颗固定的按钮**可以按 id 找：切走工作区的第一段挂在状态条那个
+  //   下拉（或表单里的「保存」）上，插件数据那颗按钮是运行期画出来的。
+  //   ⇒ 判据落在**函数体**上。
+  const awFn = /async function applyWorkspace\([\s\S]*?\n\}/.exec(js);
+  assert.ok(awFn, 'panel.js 里应当有 applyWorkspace()');
+  assert.match(awFn[0], /armConfirm\(opts\.anchor,/,
+    '★★ 切走工作区必须走两段式 —— 旧工作区的浏览器存储与磁盘文件会一起没');
+  assert.match(awFn[0], /onDisarm: opts\.revert/,
+    '★ 第一段退回去要把那一格拨回原样（下拉停在"待定"的新值上，那不是已发生的事）');
+  assert.equal(/window\.confirm/.test(awFn[0]), false,
+    '★ 这条路里不许再有 window.confirm —— 那正是它从前最别扭的地方');
+
+  const rpdFn = /function renderPluginData\([\s\S]*?\n\}/.exec(js);
+  assert.ok(rpdFn, 'panel.js 里应当有 renderPluginData()');
+  assert.match(rpdFn[0], /armConfirm\(del, \{/,
+    '★★ 删除插件数据必须走两段式 —— 浏览器存储与插件写在磁盘上的东西一起没');
+  assert.match(js, /async function dropPluginData\([\s\S]*?\n\}/,
+    'dropPluginData 还在（它只做那件事，问在调用点）');
+  const dpFn = /async function dropPluginData\([\s\S]*?\n\}/.exec(js)[0];
+  assert.equal(/window\.confirm/.test(dpFn), false,
+    '★ "问"搬到了调用点 —— 这里再留一句就是问两遍');
+
+  // ★★ 反方向：**删除一条连接不再是两段式**。它再建一条就是 —— 不属于"丢掉了
+  //   什么"那一类。而它照样要**说清后果**，只是搬到了那颗按钮的 `title` 上。
+  const delAt = js.indexOf('del.onclick = async () => {');
+  assert.notEqual(delAt, -1, '删除连接那颗按钮的绑定没找到');
+  const delBlock = js.slice(delAt - 400, delAt + 700);
+  assert.equal(/armConfirm/.test(delBlock), false,
+    '★★ 删除连接**不再**是两段式 —— 判据是代价（再建一条就是），不是"不可逆"');
+  assert.equal(/window\.confirm/.test(delBlock), false, '★ 也不许退回 window.confirm');
+  assert.match(delBlock, /del\.title/,
+    '★ 但那两样后果仍然要说（私钥作废、独占工作区跟着清）—— 它们搬到了 title 上');
+
+  // ★ 重新生成密钥同样不是。它从前有一句 `window.confirm`，而那句问的与做完之后
+  //   那条 notice 是同一件事。
+  const regenAt = js.indexOf("$('btn-regen').onclick =");
+  assert.notEqual(regenAt, -1, '没找到「重新生成密钥」的绑定');
+  // ★ 剥掉注释再判 —— 注释里写着"从前这里是一句 `window.confirm`"，
+  //   而那正是**说明**为什么改掉它。不剥的话这条判据会被自己的注释打红。
+  const regen = stripJsComments(js.slice(regenAt - 400, regenAt + 400));
+  assert.equal(/window\.confirm/.test(regen), false,
+    '★ 「重新生成密钥」一下就走 —— 代价（新公钥要重新注册）在 title 与事后的 notice 里');
+  assert.match(regen, /btn-regen'\)\.title/,
+    '★ 而那条代价必须在**按下去之前**看得见（title 就是它住的地方）');
 
   // ★★ 「断开」那一行里必须带上**有几个作业会没**。只说"确定断开吗"，用户答不了：
   //   他不知道代价是 1 个会话还是 5 个。
@@ -451,12 +499,47 @@ test('★★ 三处不可逆动作都走**两段式**，而且两段都收得回
     '★★ 重画连接列表之前先收掉没走完的第一段');
 });
 
-test('★ 「关于」的入口是标题那一行，而开发者模式整个搬进去了', () => {
+test('★ 「关于」的入口是标题那一行 —— 而它**看得见**能点，且点得动', () => {
   // ★ 入口**必须看得见能点**：这一屏上没有任何别的东西提示"这里可以点"，
-  //   而一个看不见的入口等于没有入口（悬停变色是唯一的提示）。
+  //   而一个看不见的入口等于没有入口。
+  //   ★★ 光靠 `cursor: pointer` 与悬停变色是**不够**的 —— 两者都要先想到去指它
+  //   才看得见。用户 2026-10-09 报的原话就是"我没有找到「关于」按钮"。
+  //   ⇒ 标题那一行右端得有一个写着「关于」的记号。
   assert.match(html, /id="about-head"/, 'panel.html 里要有那个入口');
+  assert.match(html, /class="about-marker"[^>]*>关于</,
+    '★ 标题那一行右端要有那颗写着「关于」的记号 —— 不然它还是一行看不出来的标题');
+  assert.match(css, /\.about-marker\s*\{[^}]*position:\s*absolute/,
+    '★ 那颗记号必须**绝对定位**：进了这一行的流就会把 h1 与副标题挤成一行');
   assert.match(css, /#about-head\s*\{[^}]*cursor:\s*pointer/,
     '★ 那个入口要看得出来能点 —— 少了 cursor，它长得就是一行普通标题');
+
+  // ★★ 那一行**只在"没在跑会话"的时候露得出来**：会话一跑起来，窗口主体就被插件
+  //   那块原生视图从 y=30 往下整块盖住（`layout.js` 的 `stageRect`），
+  //   这一行一个像素都露不出来。⇒ 从前那句"它在每一屏都在"是**假的**，
+  //   留着它会让下一个人以为"会话期间也能从这里进关于"，而那时点不到。
+  assert.match(html, /只在"没在跑会话"的时候露得出来/,
+    '★★ 那句"每一屏都在"是**假的**（原生视图盖住面板时它根本露不出来）—— '
+    + '注释里要写清它**只在什么时候**露得出来，否则下一个人会以为会话期间也能从这里进');
+  assert.equal(/它在每一屏都在/.test(html), false,
+    '★ 而那句错的断言一个字都不许留着（它是一句**承诺**，不是一段历史）');
+
+  // ★★ **点得动**：绑定必须**先于任何 await** 挂完。
+  //   它从前排在 `init()` 那几个 await 的后面，于是一次 reject（`bootstrap()` 或
+  //   新建表单里的 `newKey()` —— 在 Windows 上那是 DPAPI 那一条路）就让
+  //   **整块监听一个都不挂**，而唯一的症状是提示流里多一行字。
+  //   用户报的就是"点标题那一行没有反应"。
+  assert.match(js, /function bindEvents\(\) \{/, 'panel.js 里应当有 bindEvents()');
+  const bindFn = /function bindEvents\(\) \{[\s\S]*?\n\}/.exec(js);
+  assert.ok(bindFn, 'bindEvents 的函数体没找到');
+  assert.equal(/^  [^ \n].*await /m.test(stripJsComments(bindFn[0])), false,
+    '★★ bindEvents 里不许有**顶层** await —— 它自己一旦排在某个 await 后面，'
+    + '前面任何一次 reject 就让它整个不执行，而症状是"一半按钮点了没反应"');
+  assert.match(js, /async function init\(\) \{\s*bindEvents\(\);\s*await bootUI\(\);/,
+    '★★ init 必须**先挂监听、再取数据**');
+  assert.match(js, /function onInitFailed\(/,
+    '★ 初始化失败要有一个说得出话的落点（不再只走 notice）');
+  assert.match(html, /id="fatal-banner"/,
+    '★ 而那句话得有一块**常驻**的地方 —— 提示流是会滚过去、也会被顶下去的一条流水');
   assert.match(js, /const aboutHead = \$\('about-head'\);/,
     'panel.js 里找不到那个入口');
   assert.match(js, /aboutHead\.onclick = toggleAbout;/,
@@ -834,20 +917,26 @@ test('★ 「站点太新」那一句必须按握手结论分叉（并钉住两�
     + '而它对"站点自己不一致"这种情况没有用');
 });
 
-test('★ 删插件数据的确认框要说清**删的是哪几样**（磁盘上那份也得讲）', () => {
-  const at = js.indexOf('async function dropPluginData');
-  assert.notEqual(at, -1, 'panel.js 里找不到 dropPluginData 了');
-  const body = js.slice(at, at + 1200);
+test('★ 删插件数据的第一段要说清**删的是哪几样**（磁盘上那份也得讲）', () => {
+  // ★ 问的那句话住在**调用点**（`renderPluginData` 里那颗按钮的 `armConfirm`），
+  //   不在 `dropPluginData` 里 —— 它只做那件事。
+  const at = js.indexOf('function renderPluginData');
+  assert.notEqual(at, -1, 'panel.js 里找不到 renderPluginData 了');
+  const body = js.slice(at, at + 6000);
   // ★ 两个落点不能混成一句：浏览器那份是布局/标签页/登录状态，而磁盘那份是插件
   //   自己写的文件 —— 后者正是作者最可能放"重建不出来"的东西的地方。两者都不可逆，
-  //   但**用户能预期的东西不同**，所以确认框必须分叉。
-  assert.match(body, /places/, '要按 places 分叉，而不是所有情况念同一句');
-  assert.match(body, /写在磁盘上的文件/, '含磁盘那一份时必须把它说出来');
+  //   但**用户能预期的东西不同**，所以那句话必须分叉。
+  assert.match(body, /placesText\(r\.places\)/,
+    '要按 places 分叉，而不是所有情况念同一句');
+  assert.match(body, /armConfirm\(del, \{/,
+    '★ 删插件数据要走两段式（它是留存下来的四处之一）');
   // 清单里也要说清"这一份在哪儿"（用户看到的是一行行，每行是什么得看得出来）。
   assert.match(js, /function placesText/, '清单里的每一行都要说清它在哪几个落点');
+  assert.match(js, /function placesText[\s\S]{0,700}?写在磁盘上的文件/,
+    '含磁盘那一份时必须把它说出来');
 });
 
-test('★ 删连接与切走工作区都要说清「连带删掉那个工作区的数据」，而删连接是两段式', () => {
+test('★ 删连接与切走工作区都要说清「连带删掉那个工作区的数据」', () => {
   // ★ 这一条与 boot.test.mjs 那条**行为**断言是成对的（「删掉最后一条用某个工作区的
   //   连接 ⇒ 那个工作区的两份数据一起清掉」）。只留一边都不成立：
   //   · 只有行为断言 ⇒ 真删了而文案没提 = 没有知情同意；
@@ -857,25 +946,26 @@ test('★ 删连接与切走工作区都要说清「连带删掉那个工作区�
   //   数据留着（下一会话还要用它）。文案说错这一点的后果与"没说"一样严重 ——
   //   它把一件**没有发生**的事告诉了用户。
   //
-  // ★★ 这一版「删除连接」改成了**两段式**（见 panel.js 的 `armConfirm`）：后果那句
-  //   话现在坐在第一段那一行里。判据跟着挪，而"必须说清后果"这条一个字没松。
-  const delAt = js.indexOf('del.onclick = () => {');
+  // ★★ 「删除连接」不再是两段式了（判据是**代价**：再建一条就是），
+  //   但那两样后果照样要说 —— 它们搬到了那颗按钮的 `title` 上。
+  const delAt = js.indexOf('del.onclick = async () => {');
   assert.notEqual(delAt, -1, 'panel.js 里找不到「删除连接」那一段了');
-  const del = js.slice(delAt, delAt + 1800);
+  const del = js.slice(delAt - 400, delAt + 1500);
   assert.match(del, /soleOwnerId/,
     '判据要用 workspacePlan 的 soleOwnerId —— 它与主进程数的是同一件事');
   assert.match(del, /写在磁盘上的那些文件/, '要说到插件写在磁盘上的那一份');
-  assert.match(del, /armConfirm\(del,/,
-    '★ 删除连接要走两段式 —— 它是这一屏上唯一一个删掉私钥的动作');
+  assert.match(del, /del\.title/, '★ 后果进 title（按下去之前看得见）');
   assert.equal(/window\.confirm/.test(del), false,
-    '★ 那两处 `window.confirm` 一并去掉了：它给不了两段（框弹出来的时候用户'
-    + '已经按下去了），样式也不受控（Electron 里那是一块系统窗口）');
+    '★ 不许退回 `window.confirm`：它问不出两段，样式也不受控');
 
-  const cdAt = js.indexOf('function confirmDiscard');
-  assert.notEqual(cdAt, -1, 'panel.js 里找不到 confirmDiscard 了');
+  const cdAt = js.indexOf('function discardWhy');
+  assert.notEqual(cdAt, -1, 'panel.js 里找不到 discardWhy 了');
   const cd = js.slice(cdAt, cdAt + 900);
   assert.match(cd, /插件写在磁盘上的那些文件/,
     '切走一个工作区也是回收它 —— 磁盘那一份同样会跟着走');
+  assert.match(cd, /未保存的编辑内容会丢失/,
+    '★ 换工作区 = 换 origin，浏览器是在重新加载那个页面 —— 这一条比"工作区变了"严重');
+  assert.equal(/window\.confirm/.test(cd), false, '★ 它只产出文字，不问');
 });
 
 test('★ 主进程发来的 warn 不许被折成 info（显示成信息的失败 = 被吞掉的失败）', () => {

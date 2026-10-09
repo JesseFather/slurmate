@@ -109,11 +109,21 @@ class ShellWindow {
     this.onClose = opts.onClose || (() => {});
     this.onAction = opts.onAction || (() => {});
 
+    // ── 尺寸 ──
+    // ★★ 最小宽度**由面板定，不由浮窗定**。别把这两个数搞混：
+    //     面板：左边距 26 + `.wrap` 最宽 760 + 右边距 26 = **812**，连上之后
+    //           两条边栏各占 10（`body.connected #panel` 把内边距让出去）⇒ **832**；
+    //     浮窗：只要 `2*RAIL_W + HOVER_W = 360`，低于它浮窗才开始缩水
+    //           （`layout.js` 那条用例钉着）。
+    //   浮窗那个地板低得多，所以定这个数的**只有面板** —— 记错主次的人会以为
+    //   840 就够（它确实够浮窗），然后在连上之后看到面板被压窄。
+    //   ★ 今天 `layout.test.mjs` 用的是它自己那份 1280×860，**不读这个文件** ——
+    //     所以这两个数有一条单独的用例守着（见该文件末尾那条），别把守卫撤了。
     this.win = new BrowserWindow({
       width: 1280,
       height: 860,
-      minWidth: 640,
-      minHeight: 420,
+      minWidth: 1024,
+      minHeight: 640,
       show: false,
       backgroundColor: '#1e1e1e',
       // 不用 autoHideMenuBar：那会让 Alt 弹出菜单栏，而 Alt 是 VS Code 的菜单助记键
