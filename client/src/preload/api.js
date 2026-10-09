@@ -89,11 +89,21 @@ contextBridge.exposeInMainWorld('slurmate', {
   //   spaceId: null                       = 要一份**新的**（哪怕现在已经有一份）
   //   spaceId: <数据 id>                   = 就用那一份（必须是**这个插件**的那一份）
   //
-  // 返回 { ok, workspaces, spaces, connections, droppedOld }。被拒时 code 有两个：
-  //   `would_discard`    —— 换走会把旧那一份删掉（它没有别的工作区在用了），
-  //                         要带 confirmDiscard 重来一次。**不可逆**，所以必须先问。
+  // 返回 { ok, workspaces, spaces, connections, droppedOld, forked }。
+  // `forked` 是新表的名字（没分叉就是 null）—— 它一起把 connections 变掉了，
+  // 所以调用方要重画连接列表。
+  //
+  // 被拒时 code 有三个：
   //   `session_running`  —— 这个插件在这个工作区里正跑着一条会话。那一条手里攥着的是
   //                         开局时那一份，改掉之后重启客户端就接不回来了 ⇒ **拒**，不是提示。
+  //   `shared`           —— 这张表还有别的连接在用（`others` 是那几条的 id，名字由界面取）。
+  //                         改一格它们会一起变，所以要带 scope 重来一次：
+  //                         `'all'` 就改这张共用的表 / `'fork'` 先给这条连接复制一张
+  //                         （要连 connectionId 一起给 —— 分叉是"给哪一条连接分"）。
+  //   `would_discard`    —— 换走会把旧那一份删掉（它没有别的工作区在用了），
+  //                         要带 confirmDiscard 重来一次。**不可逆**，所以必须先问。
+  //                         ★ 它排在 `shared` 之后，而重试时 scope 要**一起带上**，
+  //                           否则第二次又会被 `shared` 拦下（界面那边用同一个 extra）。
   setWorkspaceRef: (payload) => ipcRenderer.invoke('app:setWorkspaceRef', payload),
 
   // ── 本机的插件数据 ──

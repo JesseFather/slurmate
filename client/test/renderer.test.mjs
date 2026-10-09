@@ -416,6 +416,36 @@ test('新增的两个工作区通道同时登记在 preload 与 panel.js 两侧'
   assert.ok(bridgeCalls().has('renameWorkspace'), 'panel.js 没有调用 renameWorkspace');
 });
 
+test('★★ 分叉弹窗的三个按钮：必须存在、必须绑了动作，而且不能有第四个答案', () => {
+  // ★ 它比上面那条通用的 id 检查强在哪：那一条只查「panel.js 用到的 id 在
+  //   panel.html 里都有」，所以**把一个按钮整个删掉**它一个字都不会说
+  //   （用的人也一起没了）。而这一格少一个按钮的后果是：用户**没有别的路可走**，
+  //   只能选剩下的那一个 —— 而"把另外几条连接一起改了"是不可逆的。
+  const dlg = /<dialog id="fork-dlg">[\s\S]*?<\/dialog>/.exec(html);
+  assert.ok(dlg, 'panel.html 里应当有 #fork-dlg —— 共用的一张表要靠它来问');
+  const trio = [
+    ['fork-all', "'all'"],
+    ['fork-one', "'fork'"],
+  ];
+  for (const [bid, val] of trio) {
+    assert.match(dlg[0], new RegExp(`id="${bid}"`), `#${bid} 必须在那个对话框里`);
+    assert.match(js, new RegExp(`\\$\\('${bid}'\\)\\.onclick\\s*=\\s*\\(\\) => done\\(${val}\\)`),
+      `panel.js 没有把 #${bid} 绑到 ${val} —— 点了没反应，或者绑错了答案`);
+  }
+  // 取消是第三个按钮，而且它**回的必须是 null**（"没选"与"选了某一边"是两件事：
+  // 前者调用方什么都不发，后者要带 scope 重发一次）。
+  assert.match(dlg[0], /id="fork-cancel"/);
+  assert.match(js, /\$\('fork-cancel'\)\.onclick\s*=\s*\(\) => done\(null\)/);
+  // Esc 也要回"没选" —— 少了这一句，Promise 永远悬着，那一格从此再也改不动。
+  assert.match(js, /dlg\.oncancel\s*=\s*\(\) => resolve\(null\)/);
+  // ★ 而它**不是** window.confirm：三个答案塞不进两个按钮，而"确定"在同一句话里
+  //   可以指任意一个 —— 用户点下去分不清自己选的是哪个。
+  //   （查的是**去掉注释**之后的那一段：解释这条禁令的那句注释本身会让检查红掉。）
+  const askFn = /function askFork[\s\S]*?\n\}/.exec(stripJsComments(js))[0];
+  assert.equal(/confirm\(/.test(askFn), false,
+    'askFork 里不许出现 confirm —— confirm 只有两个按钮，而这里有三个答案');
+});
+
 /**
  * 去掉 JS 里的注释，字符串原样留下。
  *

@@ -763,9 +763,20 @@ function workspaceById(id) {
   return (boot.workspaces || []).find((l) => l.id === id) || null;
 }
 
+/**
+ * 按 id 找一条连接。**这个名字这一层只有一处** —— `connName`（工作区的说明文字）
+ * 与 `askFork`（分叉弹窗里"还有谁"）都要走它，各写一遍 `find` 迟早会漂开。
+ *
+ * ★ 带 `boot &&` 的兜底：`activeConn()` 从前就是这么写的，说明这一层**够得着**
+ *   在 `init()` 设好 `boot` 之前被调用。
+ */
+function connById(id) {
+  return ((boot && boot.connections) || []).find((x) => x.id === id) || null;
+}
+
 /** 连接的名字。工作区的说明文字里要引用成员，用同一条规则取名才不会两处对不上。 */
 function connName(id) {
-  const c = (boot.connections || []).find((x) => x.id === id);
+  const c = connById(id);
   return c ? (c.label || `${c.user}@${c.host}`) : '另一条连接';
 }
 
@@ -980,7 +991,10 @@ function renderWorkspaceMap() {
     const ws = workspaceById(c.workspaceId);
     const names = Object.keys((ws && ws.refs) || {}).map(pluginTitleOf).filter(Boolean);
     if (names.length) {
-      const chips = el('span', 'plug-chips', names.join(' · '));
+      // ★ 「已有」两个字是**承重**的：这行小字挂在一个**连接**节点底下，光看名字很
+      //   容易被读成"这条连接会跑这几个插件"。它说的是"这个工作区里已经有它们的一份
+      //   数据了"—— 而那是一个**已经发生**的事实（插件要先开过一次会话才有那一份）。
+      const chips = el('span', 'plug-chips', `已有 ${names.join(' · ')}`);
       chips.title = `这个工作区里已经有这几份数据：${names.join('、')}。`
         + '一个插件要先开过一次会话才会有它那一份。';
       n.append(chips);
@@ -1918,18 +1932,33 @@ function pluginSpaceRow(p) {
  *   ★ 界面**不自己算**"应当是哪一份"：那样算出来的值是上一个字算的（工作区刚换过、
  *     或者插件刚重新同步过），而用户按下去的是此刻。
  *
- * ★ 先做、被拒了再问（与 `applyWorkspace` 同一套路）：旧那一份会不会被删掉由**主进程**
- *   判定 —— 界面手里那份引用计数随时可能已经陈旧，而"我删掉了你那份数据"必须是真的
- *   才会说出口。
+ * ★ 先做、被拒了再问（与 `applyWorkspace` 同一套路）：旧那一份会不会被删掉、以及
+ *   这张表是不是被几条连接共用，都由**主进程**判定 —— 界面手里那份引用计数随时
+ *   可能已经陈旧，而"我删掉了你那份数据"必须是真的才会说出口。
+ *
+ * ★ **两道问按主进程给的次序走，而重试要把前面已经答过的带上**（`extra`）：
+ *   分叉之后旧那一份通常还是不会被删（原表还在指着它），但如果用户选了「全部一起改」，
+ *   第二问照样会来 —— 那时若把 `scope` 丢了，请求会被 `shared` 再拦一次，
+ *   而用户看到的是同一个框弹两遍。
  */
 async function applyPluginSpace(workspaceId, pluginId, spaceId) {
+  const conn = activeConn();
   const arg = { workspaceId, pluginId };
   if (spaceId !== undefined) arg.spaceId = spaceId;
+  // 分叉要指名"给哪一条连接分" —— 主进程不拿"谁活跃"去猜。
+  if (conn) arg.connectionId = conn.id;
 
-  let r = await window.slurmate.setWorkspaceRef(arg);
+  let extra = {};
+  let r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra });
+  if (!r.ok && r.code === 'shared') {
+    const pick = await askFork(r.workspaceName, r.others || []);
+    if (!pick) return { ok: false };
+    extra = { scope: pick };
+    r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra });
+  }
   if (!r.ok && r.code === 'would_discard') {
     if (!window.confirm(`${r.error}\n\n确定要换吗？`)) return { ok: false };
-    r = await window.slurmate.setWorkspaceRef({ ...arg, confirmDiscard: true });
+    r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra, confirmDiscard: true });
   }
   if (!r.ok) {
     notice('error', r.error || '没能换这一份数据。');
@@ -1941,13 +1970,56 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
   boot.connections = r.connections || boot.connections;
   // 三处都跟着变：插件块上那一格、映射图、连接列表（它按工作区算独占与引用数）。
   renderConnections(boot.connections);
+  // ★ 分叉会把**活跃连接**挪到另一张表上，而状态条那个下拉显示的正是"活跃连接的
+  //   工作区" —— 不重填的话它会继续说着上一个，直到下一次快照推送。
+  renderWorkspaceSelectors();
   if (lastPlugins) renderPlugins(lastPlugins);
-  // ★ 删掉东西的时候要说出来。不说的话它是一次**没有任何痕迹**的删除 ——
-  //   用户在别处找不到那一份数据，而界面上一切正常。
-  notice('info', r.droppedOld
-    ? '换好了。旧的那一份数据没有别的工作区在用，已经删掉；下一次开会话就用新的那一份。'
-    : '换好了。下一次开会话时，这个插件就用新的那一份数据。');
+  // ★ 改动了什么要说出来：分叉（表分了、数据没复制）与删除（那一份真的没了）
+  //   都是**别的屏幕上才看得见**的变化，不说的话界面上一切正常。
+  const said = [];
+  if (r.forked) {
+    said.push(`已经给这条连接分了一张自己的表（「${r.forked}」）—— `
+      + '从现在起它和别的连接各改各的。里面的数据还是同一份，一个字节都没复制。');
+  }
+  said.push('换好了。下一次开会话时，这个插件就用新的那一份数据。');
+  if (r.droppedOld) {
+    said.push('旧的那一份数据没有别的工作区在用，已经删掉，找不回来。');
+  }
+  notice('info', said.join(' '));
   return { ok: true };
+}
+
+/**
+ * 改一张**被几条连接共用**的引用表之前的那一问：一起改，还是先分一张自己的。
+ *
+ * ★ 判定权在主进程（它才知道那张表现在有几条连接在用），这里只负责**问**。
+ * ★ 名字在这里取（`connLabel`）而不是让主进程拼：备注/地址的回落规则只有一条，
+ *   主进程再拼一遍就是同一条规矩的第二份实现。
+ *
+ * @param {string[]} others 除这条连接以外，还在用那张表的连接 id
+ * @returns {Promise<'all'|'fork'|null>} null = 用户取消（含 Esc）
+ */
+function askFork(wsName, others) {
+  const dlg = $('fork-dlg');
+  // 兜底：模板里少了这个对话框时**不猜**，直接当作取消（界面上那一格会弹回去）。
+  if (!dlg) return Promise.resolve(null);
+  $('fork-body').textContent =
+    `「${wsName}」这张表还有 ${others.length} 条连接在用：`
+    // ★ 用 `connLabel`（带端口）而不是 `connName`：同一台机器上两条连接的区别
+    //   往往就在端口或账号上，这里正是要用户认出"还有谁"的地方。
+    + `${others.map((cid) => { const c = connById(cid); return c ? connLabel(c) : '另一条连接'; })
+      .join('、')}。\n\n`
+    + '「全部一起改」= 它们跟着一起变。「只改这条连接」= 先给你分一张自己的表，'
+    + '分出来的表一开始与现在这张一模一样，之后各改各的 —— 数据还是同一份，不会复制。';
+  return new Promise((resolve) => {
+    const done = (v) => { dlg.close(); resolve(v); };
+    $('fork-cancel').onclick = () => done(null);
+    $('fork-all').onclick = () => done('all');
+    $('fork-one').onclick = () => done('fork');
+    // Esc 走的是 cancel 事件（对话框会自己关掉），所以这里只 resolve。
+    dlg.oncancel = () => resolve(null);
+    dlg.showModal();
+  });
 }
 
 function pluginBlock(p) {

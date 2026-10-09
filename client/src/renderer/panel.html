@@ -153,7 +153,7 @@
           <div class="wmap-col" id="wmap-spaces"></div>
         </div>
         <p class="sub">
-          <strong>没有任何连接在用的工作区会被自动删掉</strong> ——
+          <strong>没有连接在用、也没有会话在跑的工作区会被自动删掉</strong> ——
           它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。
         </p>
       </div>
@@ -502,6 +502,22 @@
 
   </div>
 </div>
+
+<!-- 改一张**被几条连接共用**的引用表之前的那一问：一起改，还是先分一张自己的。
+
+     ★ 它**不能**用 window.confirm：confirm 只有两个按钮，而这里有**三个**答案
+       （取消 / 全部一起改 / 只改这条连接）—— 把三个塞进两个按钮里，"确定"在同一句
+       话里可以指任意一个，用户点下去分不清自己选的是哪个。
+       （主机密钥那一处用 confirm 是因为它真的只有两个答案。） -->
+<dialog id="fork-dlg">
+  <h2 id="fork-title">这张表还有别的连接在用</h2>
+  <p id="fork-body"></p>
+  <div class="row">
+    <button id="fork-cancel" class="ghost">取消</button>
+    <button id="fork-all">全部一起改</button>
+    <button id="fork-one" class="ghost">只改这条连接</button>
+  </div>
+</dialog>
 
 <!-- 主机密钥确认。用 <dialog> 而不是自绘遮罩：它的模态语义、Esc 行为、
      焦点陷阱都是浏览器给的，自己写一遍只会少几个细节。 -->

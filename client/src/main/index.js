@@ -1291,8 +1291,9 @@ function siteVersions() {
  *
  * 有连接就用**它**的工作区（正常路径）。但**开发者模式里一个连接都没有**，那里也必须能
  * 开会话 —— 所以退回到「已有的第一个工作区，没有就建一个」。
- * （pruneWorkspaces 对「一条连接都没有」的情形不回收，正是为了让这一步造出来的工作区
- *   能活过下一次 commitConfig，否则每次开会话都会换一个引用表。）
+ * ★ 这样造出来的工作区**没有任何连接指着它**，能活过下一次 commitConfig 靠的是
+ *   `liveWorkspaceIds`（那条活会话）—— 不是"一条连接都没有就不回收"那条例外，
+ *   它已经整条删掉了。少了 `liveWorkspaceIds` 那一层，每次改动都会换一张引用表。
  *
  * ★ 收的是**那条连接**，不是"当前活跃的那条" —— 多开之后两者会分家。调用方读一次、
  *   让工作区与 `ctx.connection()` 共用**同一个**对象，它们就不会指向两条连接。
@@ -1606,10 +1607,11 @@ function commitConfig() {
   // ★★ **两层回收，次序是承重的**：工作区先走，它那张引用表跟着消失；然后才数
   //    "还有没有工作区指着这一份数据"。
   //   · 工作区那一层**只解引用、不碰数据** —— 它名下那些数据可能还被别的工作区指着。
-  //   · `keep` 是**此刻正被活会话拿着**的那些 —— 少了它，把一条**非活跃**连接切到
-  //     别的工作区会让旧工作区引用计数归零、被回收，而那条会话**还跑在**它指过的
+  //   · 两层各自都有"活会话拿着"这一条 —— 少了它，把一条**非活跃**连接切到别的
+  //     工作区会让旧工作区引用计数归零、被回收，而那条会话**还跑在**它指过的
   //     那一份数据上（`clearSpaceStorage` 会把它脚下的存储抽掉）。
-  const { removed } = config.pruneWorkspaces(cfg);
+  //     ★ 两层各数各的，因为它们认的不是同一样东西（一个按工作区 id，一个按数据 id）。
+  const { removed } = config.pruneWorkspaces(cfg, liveWorkspaceIds());
   const { removed: goneSpaces } = config.pruneSpaces(cfg, liveSpaceIds());
   try {
     config.saveConfig(cfgDir, cfg);
@@ -1619,7 +1621,61 @@ function commitConfig() {
       '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
   }
   for (const s of goneSpaces) clearSpaceStorage(s);
+  reportReclaimed(removed, goneSpaces);
   return removed;
+}
+
+/**
+ * 此刻**正被活会话用着**的那些工作区 id。
+ *
+ * ★ 它是 `liveSpaceIds()` 的**姊妹，不是它的副本** —— 两者判据同源（同一个
+ *   `occupied`），问的却不是一件事：那一个问"哪几份**数据**正被拿着"（`pruneSpaces`
+ *   按数据 id 认），这一个问"哪几张**引用表**里躺着那些数据"（`pruneWorkspaces`
+ *   按工作区 id 认）。会话手里是一个 `spaceId`，工作区只能由它反查 —— 查不到就
+ *   不保留，那一格与 `liveSessionOnWorkspace` 用的是同一个反查。
+ *
+ * ★ 少了它，开发者模式（一个连接都没有）里那个工作区会在下一次 commitConfig 时
+ *   被收掉，连同它指着的那些数据 —— 而那条会话正跑在上面。
+ */
+function liveWorkspaceIds() {
+  const keep = new Set();
+  for (const ws of cfg.workspaces || []) {
+    if (liveSessionOnWorkspace(ws.id)) keep.add(ws.id);
+  }
+  return keep;
+}
+
+/**
+ * 真的收掉了东西，就说一句。**没东西被收就不出声** —— 每一次改动都推一句"什么都没删"
+ * 会把日志刷成噪声，而用户就不再读它了。
+ *
+ * ★ 落在 `#notices`（那个日志区），不是模态框：这是一件**已经发生**的事，不是要用户
+ *   做决定的事。该在动手**之前**拦下来的那两处（`would_discard`）已经问过了。
+ *
+ * ★ 两层分开说，因为它们是两件不同的事：工作区没了**不等于**它的数据没了
+ *   （那些数据可能还被别的工作区指着），反之数据的引用计数归零也一定是先有表没了。
+ *   合成一句"回收了 N 项"的话，用户就分不出自己那份额外的布局是不是还在。
+ */
+function reportReclaimed(workspaces, spaces) {
+  const parts = [];
+  for (const ws of workspaces) parts.push(`工作区「${ws.name}」`);
+  for (const s of spaces) parts.push(`「${spaceLabelOf(s)}」`);
+  if (!parts.length) return;
+  win.pushNotice('info', `${parts.join('、')}没有谁在用了，已经收掉 —— `
+    + '它们的浏览器存储（登录状态、窗口布局）与插件写在磁盘上的文件一起没了。');
+}
+
+/**
+ * 一份数据在人面前的名字（"<插件>的一份数据"）。
+ *
+ * ★ **一处定义**：回收提示与回收失败的报错都要说得出"是哪一份"，各写一遍的话，
+ *   两处会慢慢漂开，而阅读者会把它们当成两样东西。
+ */
+function spaceLabelOf(space) {
+  const plugin = registry.list().find((p) => p.id === space.pluginId) || null;
+  return plugin
+    ? `${plugin.displayName || plugin.name}的一份数据`
+    : `插件 ${space.pluginId} 的一份数据`;
 }
 
 /**
@@ -1641,35 +1697,6 @@ function liveSpaceIds() {
 }
 
 /**
- * 显式回收**一个指定的**工作区（连同它名下没人再引用的数据）。
- *
- * ★ 它与 `commitConfig` 里那条**引用计数**回收不是同一件事，所以是两个入口：
- *   那一条数的是"还有几条连接指着它"，而这一条用在**数不出来**的场合 ——
- *   今天只有一个：`app:deleteConnection` 删掉了**最后一条**连接，于是
- *   `pruneWorkspaces` 那条「一条连接都没有时**不**回收」的守卫会把它拦下。
- *
- *   ★ 那条守卫守的是**从来没被任何连接指过**的兜底工作区（开发者模式、全新安装：
- *     回收掉它，下次开会话会造一个新的，id 一变引用表就变，布局白重置一次）。
- *     而"用户亲手删掉了最后一条连接"是另一回事 —— 那个工作区已经没用了，而且那条
- *     连接**再建回来也是另一个工作区、另一批数据**，旧数据反正读不到。
- *     ★ 少了这一步，「删条目就删数据」在**只有一条连接**这个最常见的场合根本
- *     不发生 —— 而那正是用户提这件事的场景。
- */
-function reclaimWorkspace(workspaceId) {
-  if (!workspaceId || !config.findWorkspace(cfg, workspaceId)) return false;
-  cfg.workspaces = (cfg.workspaces || []).filter((l) => l.id !== workspaceId);
-  const { removed } = config.pruneSpaces(cfg, liveSpaceIds());
-  try {
-    config.saveConfig(cfgDir, cfg);
-  } catch (e) {
-    win.pushNotice('error',
-      '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
-  }
-  for (const s of removed) clearSpaceStorage(s);
-  return true;
-}
-
-/**
  * 回收**一份数据**之后的卫生清理 —— **两个根一起清**：浏览器存储分区，以及基座
  * 给那个插件建的数据目录（`ctx.dataDir()` 给的那个）。
  *
@@ -1682,8 +1709,8 @@ function reclaimWorkspace(workspaceId) {
  *   所以两半各有各的守卫：分区看 `livePartitions()`（窗口持有），数据目录看
  *   `liveDataDirs()`（会话持有）—— 两者的判据不同，理由见各自那一段。
  *
- * ★ **什么时候会发生**：`commitConfig` / `reclaimWorkspace` 里那一层真的回收了
- *   数据的时候（最后一个指着它的工作区没了、或者用户删掉了最后一条连接）。
+ * ★ **什么时候会发生**：`commitConfig` 里那一层真的回收了数据的时候（最后一个
+ *   指着它的工作区没了 —— 而工作区自己又是被 `pruneWorkspaces` 收掉的）。
  *
  * ★ 判据**只认那一份数据自己**（`pluginId` / `group` / `id`），而不是"注册表里哪些
  *   插件按工作区分" —— 后者要多一次注册表查询，而且**插件卸掉之后就问不出来了**。
@@ -1696,9 +1723,7 @@ function reclaimWorkspace(workspaceId) {
 function clearSpaceStorage(space) {
   if (!space) return;
   const plugin = registry.list().find((p) => p.id === space.pluginId) || null;
-  const label = plugin
-    ? `${plugin.displayName || plugin.name} 的一份数据`
-    : `插件 ${space.pluginId} 的一份数据`;
+  const label = spaceLabelOf(space);
   const identity = [space.pluginId, space.group, space.id];
 
   // ── ① 浏览器存储分区 ────────────────────────────────────────────────────
@@ -3650,16 +3675,13 @@ function registerIpc() {
     if (cfg.activeConnectionId === id) {
       cfg.activeConnectionId = cfg.connections[0] ? cfg.connections[0].id : null;
     }
-    // commitConfig 而不是 saveConfig：删掉最后一条指向它的连接之后，
-    // 它的工作区引用计数归零，必须被回收（连带它名下没人再引用的数据）。
+    // commitConfig 而不是 saveConfig：删掉指向它的连接之后，它的工作区引用计数归零，
+    // 会被回收（连带它名下没人再引用的数据）。
+    // ★ 这里**不需要**为"删掉的是最后一条连接"补一步显式回收 —— 那正是
+    //   `pruneWorkspaces` 那条「一条连接都没有时不回收」的豁免在时唯一的用处，
+    //   而豁免已经整条删掉了（活会话现在是它的守卫）。多一步的结果是同一件事
+    //   两份实现，而两份实现在"什么时候算没人用"上迟早会漂开。
     commitConfig();
-    // ★ 而**删掉的可能是最后一条连接**：那一步 `pruneWorkspaces` 会跳过（它的守卫是给
-    //   "从来没被任何连接指过的兜底工作区"用的，见 `reclaimWorkspace` 的注释），
-    //   所以这里要显式回收 —— 否则"删条目就删数据"在最常见的场合（只配了一条连接）
-    //   根本不发生。
-    if (!cfg.connections.length && conn && conn.workspaceId) {
-      reclaimWorkspace(conn.workspaceId);
-    }
     // 这条连接的密钥跟着走 —— 留着它既无用，又会在界面上留下一条看不见的凭据。
     // 两处都要清：落盘的那份，以及「这台机器没有凭据库」时留在内存里的那份。
     const gone = config.deleteKey(cfgDir, id).removed;
@@ -3816,12 +3838,20 @@ function registerIpc() {
    *    `app:setConnectionWorkspace` 的老样子：先做，主进程回 `would_discard`，
    *    界面拿这句原话去问，用户认了再带 `confirmDiscard` 重来一次。判定权在主进程，
    *    因为界面手里那份引用计数随时可能已经陈旧。
+   *
+   * ★★ **第三道闸：这张表是不是被几条连接共用**（`code: 'shared'`）。
+   *    前面两道问的都是"这一份数据会不会没了"，这一道问的是**改动会落到谁头上**：
+   *    表是共用的，改一格就是几条连接一起变，而另外几条的界面上什么都没发生。
+   *    界面拿这句原话去问，用户选完再带 `scope` 重来一次：
+   *      · `'all'`  —— 就改这张共用的表，共享者一起变；
+   *      · `'fork'` —— 先给这条连接复制一张自己的表（`cloneWorkspace`），在**那张**上改。
+   *    ★ `'fork'` 要连 `connectionId` 一起给：分叉是"给**哪一条**连接分"，
+   *      而那件事只有界面知道（插件块画的是活跃连接那个工作区，但那是界面状态）。
    */
   send('app:setWorkspaceRef', async (payload = {}) => {
-    const { workspaceId, pluginId, spaceId, confirmDiscard } = payload;
-    if (!config.findWorkspace(cfg, workspaceId)) {
-      return { ok: false, error: '这个工作区不存在。' };
-    }
+    const { workspaceId, pluginId, spaceId, confirmDiscard, scope, connectionId } = payload;
+    const ws = config.findWorkspace(cfg, workspaceId);
+    if (!ws) return { ok: false, error: '这个工作区不存在。' };
     // 按 **id** 找插件（池里可以有同名不同 id 的两个），与 `pluginsView` 同一条规矩。
     const plugin = registry.list().find((p) => p.id === pluginId);
     if (!plugin) return { ok: false, error: '本机没有这个插件。' };
@@ -3831,7 +3861,6 @@ function registerIpc() {
       return { ok: false, error: '这个插件不要数据空间 —— 它没有"用哪一份数据"这回事。' };
     }
 
-    const ws = config.findWorkspace(cfg, workspaceId);
     const oldId = (ws.refs || {})[pluginId] || null;
 
     const live = liveSessionForPlugin(workspaceId, pluginId);
@@ -3873,7 +3902,52 @@ function registerIpc() {
     //   少了它，用户点「另开一份」会得到一个**静默的空操作**：返回 ok，什么都没发生。
     if (spaceId !== null && targetId === oldId) {
       return { ok: true, workspaces: config.workspacePlan(cfg), spaces: cfg.spaces,
-               connections: cfg.connections, droppedOld: false };
+               connections: cfg.connections, droppedOld: false, forked: null };
+    }
+
+    // ── ★ 这一格改的是**一张表**，而一张表可以被几条连接共用 ────────────────────
+    //
+    //   改它 = 那几条连接**一起**变。主进程不替用户拿主意，先回一句让界面问：
+    //   ① 全部一起改（`scope: 'all'`）② 先给这条连接分一张自己的表（`scope: 'fork'`）。
+    //
+    //   ★ 「给哪一条」由 `connectionId` **指名**，不拿 `activeConnectionId` 去猜 ——
+    //     那是一个界面状态（用户在列表里点出来的），而这是一次会改配置的写。
+    //   ★ 分叉出来的那张表**指着同一批数据**（`cloneWorkspace` 只复制引用），所以
+    //     旧那一份数据一个字都不会动 —— 见下面那道 `would_discard`。
+    //
+    //   ★ 顺序是**刻意的**：它排在"什么都不用改"那个早返回之后 —— 没改东西就没有
+    //     共享可言，为一次空操作弹一个"这会影响到别人"的框，只会训练用户闭眼点确定。
+    let targetWsId = workspaceId;
+    let forkedName = null;              // 分叉出来的那张表叫什么（没分叉就是 null）
+    const members = config.workspacePlan(cfg).find((l) => l.id === workspaceId).members;
+    if (members.length > 1 && scope !== 'all') {
+      // 问"是替哪一条连接改的" —— 答不上来就不能分叉，也不该替它选一条。
+      const conn = (cfg.connections || []).find((c) => c.id === connectionId);
+      if (!conn || conn.workspaceId !== workspaceId) {
+        return {
+          ok: false,
+          error: '这个工作区有几条连接在用 —— 要改它，得指名是替哪一条连接改的。',
+        };
+      }
+      if (!scope) {
+        const others = members.filter((id) => id !== connectionId);
+        return {
+          ok: false, code: 'shared', workspaceId, workspaceName: ws.name,
+          // ★ 只回 id：**名字由界面取**（`connLabel` 那一条规则）—— 在这里再拼一遍
+          //   备注/地址的回落规则，就是同一条规矩的第二份实现，而它会漂开。
+          others,
+          error: `「${ws.name}」这张表还有 ${others.length} 条连接在用。`
+            + '改这一格，它们会一起变。',
+        };
+      }
+      if (scope !== 'fork') {
+        return { ok: false, error: 'scope 只能是 all 或 fork。' };
+      }
+      const copy = config.cloneWorkspace(cfg, workspaceId);
+      if (!copy) return { ok: false, error: '这个工作区不存在。' };
+      config.setConnectionWorkspace(cfg, connectionId, copy.id);
+      targetWsId = copy.id;
+      forkedName = copy.name;
     }
 
     // ── 换走之后旧那一份还活不活得下来（不可逆，所以要问）────────────────────
@@ -3881,11 +3955,14 @@ function registerIpc() {
     // ★ 判据是 `pruneSpaces` 那条的**反面**，逐字抄过来（有工作区指着 / 有活会话拿着
     //   ⇒ 留着），不是另写一个"看起来等价"的判断：这两处一旦分家，这句话就会在
     //   **不会删**的时候说"会删掉"（或者反过来），而用户是按它做决定的。
+    //   ★ 数的对象是 `targetWsId`（真正要改的那张表）—— 分叉那一支里，原来那张表
+    //     还在原处指着旧那一份，于是这里**自然**得出"不会被删"，不必为它开特例。
     //   ★ 前面那道"有活会话就拒"已经拦掉了本工作区里同插件的那一条，所以这里的
     //   `held` 实际上够不着 —— 留着它是因为它让这条判据与 `pruneSpaces` 同形。
-    const others = oldId ? config.spaceConsumers(cfg, oldId).filter((id) => id !== workspaceId) : [];
+    const stillUses = oldId
+      ? config.spaceConsumers(cfg, oldId).filter((id) => id !== targetWsId) : [];
     const held = oldId ? liveSpaceIds().has(oldId) : false;
-    if (oldId && !others.length && !held && !confirmDiscard) {
+    if (oldId && !stillUses.length && !held && !confirmDiscard) {
       return {
         ok: false, code: 'would_discard', spaceId: oldId,
         error: `「${plugin.displayName || plugin.name}」现在用的那一份数据没有别的工作区在用，`
@@ -3897,11 +3974,13 @@ function registerIpc() {
     // ── 真动手 ──────────────────────────────────────────────────────────────
     // ★ 一次调用盖住两支：`null` 那一支造出来的那一份也走这儿指过去（`newSpace`
     //   只负责把它放进 `cfg.spaces`，指给谁是这个调用方的事）。
+    // ★ 走到这里之后的失败面已经空了（工作区/插件/那一份/共享组都在上面查过），
+    //   所以分叉那一步不会留下"表分了、引用没改成"的半截状态。
     if (spaceId === null) {
       targetId = config.newSpace(cfg, plugin.id, group,
         pluginData.portCountOf(plugin), usedSpacePortsAll(null)).id;
     }
-    const r = config.setWorkspaceRef(cfg, workspaceId, plugin.id, targetId);
+    const r = config.setWorkspaceRef(cfg, targetWsId, plugin.id, targetId);
     if (!r.ok) return r;
 
     commitConfig();
@@ -3910,7 +3989,9 @@ function registerIpc() {
     //   最需要听真话的地方（"我删掉了你那份数据"）。
     const droppedOld = Boolean(oldId) && !config.findSpace(cfg, oldId);
     return { ok: true, workspaces: config.workspacePlan(cfg), spaces: cfg.spaces,
-             connections: cfg.connections, droppedOld };
+             connections: cfg.connections, droppedOld,
+             // ★ 新表的名字（没分叉就是 null）——界面拿它说"表分了、数据没复制"。
+             forked: forkedName };
   });
 
   /** 给工作区改名。名字只是给人看的 —— 它不参与任何身份（进路径的是数据 id，绝不复用）。 */

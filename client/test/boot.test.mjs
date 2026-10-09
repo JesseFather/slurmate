@@ -988,6 +988,237 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   cleanupSiteState(idx);
 });
 
+test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const id = mintId();
+  putSitePlugin({
+    id, name: 'shared-ref',
+    over: { contributes: { ports: 1, concurrent: false, surface: { kind: 'web', path: '/' } } },
+  });
+  idx._test.getBackend().debugAddSitePlugin('shared-ref');
+
+  const cfgOf = () => idx._test.getCfg();
+  const refsOf = (wsId) => {
+    const ws = cfgOf().workspaces.find((l) => l.id === wsId);
+    return (ws && ws.refs) || {};
+  };
+  const wsOf = (connId) =>
+    (cfgOf().connections.find((c) => c.id === connId) || {}).workspaceId;
+
+  // ★ 连接表是**跨用例共享**的（同一个进程、同一份开发者模式配置）。不先收干净，
+  //   上一批用例留下的连接会让"这条工作区有几条连接在用"这个前提不成立 ——
+  //   而失败信息看着像分叉逻辑坏了。
+  const a = await onlyDemoConnection(idx);
+  const wsA = a.workspaceId;
+  assert.equal(cfgOf().connections.filter((c) => c.workspaceId === wsA).length, 1,
+    '前提：这条连接一开始独占那张表');
+
+  // 先给这张表建一份数据 —— ★ 要**在第二条连接进来之前**做：那之后这张表就有
+  //   两个共享者了，这一发本身会被 `shared` 拦下（那正是下面要验的东西）。
+  const made = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id });
+  assert.equal(made.ok, true);
+  const s1 = refsOf(wsA)[id];
+  assert.ok(s1, '前提：这个工作区里有这个插件的一份数据');
+
+  // 第二条连接**显式**落进同一个工作区 —— 默认规则做不到这一点（它按地址找同址的）
+  const b = await invoke('app:saveConnection',
+    { user: 'bob', host: '198.51.100.20', port: 10100, workspaceId: wsA });
+  assert.equal(b.connection.workspaceId, wsA, '前提：两条连接共用一张表');
+  const bId = b.connection.id;
+
+  // ── ① 没表态 scope ⇒ 回 `shared`，而且**配置一个字都不动** ──
+  //   ★ 这一问问的不是"会不会删东西"（那是 would_discard），是**改动会落到谁头上**。
+  //     少了它，用户在这条连接上改一格，另外几条跟着一起变 —— 而它们各自的界面上
+  //     什么都没发生，要到下一次开会话才发现自己用了别的数据。
+  const ask = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id, confirmDiscard: true });
+  assert.equal(ask.ok, false);
+  assert.equal(ask.code, 'shared');
+  // ★ 只回 id：名字由界面取（它才有那条"有备注用备注"的规则）
+  assert.deepEqual(ask.others, [bId]);
+  assert.match(ask.error, /还有 1 条连接在用/);
+  assert.equal(refsOf(wsA)[id], s1, '★ 还没拿定主意之前配置一个字都不许动');
+
+  // ── ② 分叉：先给这条连接复制一张自己的表，在**那张**上改 ──
+  const fork = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id,
+      scope: 'fork', confirmDiscard: true });
+  assert.equal(fork.ok, true);
+  assert.ok(fork.forked, '分叉了就要说得出新表叫什么（界面拿它告诉用户）');
+  const wsA2 = wsOf(a.id);
+  assert.notEqual(wsA2, wsA, '★ 这条连接要挪到新表上');
+  assert.equal(wsOf(bId), wsA, '★ 另一条连接不许被挪');
+  assert.equal(refsOf(wsA)[id], s1, '★ 原来那张表的这一格一个字都没动');
+  const s2 = refsOf(wsA2)[id];
+  assert.ok(s2 && s2 !== s1, '新表里换成了一份新的');
+  // ★★ 而旧那一份**必须还在**：原来那张表还指着它。这一格正是"分叉"与"一起改"
+  //    的全部差别 —— 分叉不该顺手把别人正在用的东西删掉。
+  assert.equal(fork.spaces.some((s) => s.id === s1), true,
+    '★ 分叉把旧那一份删掉的话，另外那条连接脚下的数据就没了');
+  assert.equal(fork.droppedOld, false);
+
+  // ── ③ 「全部一起改」：这一张表上的人一起变 ──
+  const c = await invoke('app:saveConnection',
+    { user: 'carol', host: '198.51.100.30', port: 10100, workspaceId: wsA });
+  const all = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: bId,
+      scope: 'all', confirmDiscard: true });
+  assert.equal(all.ok, true);
+  assert.equal(all.forked, null, '「一起改」不分叉 —— 没有新表可报');
+  assert.equal(wsOf(bId), wsA, '一起改不动连接指向哪张表');
+  const s3 = refsOf(wsA)[id];
+  assert.notEqual(s3, s1);
+  assert.notEqual(s3, s2, 's2 在新表上，这张表上要另开一份');
+  assert.equal(all.droppedOld, true, 's1 现在没人指着了 ⇒ 收掉');
+  assert.equal(c.connection.workspaceId, wsA, '前提：第三条也在这张表上');
+
+  // ── ④ 一个人独占一张表时**不问**（没有第二个受影响的人）──
+  const alone = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA2, pluginId: id, spaceId: null, connectionId: a.id, confirmDiscard: true });
+  assert.equal(alone.ok, true, '只有一条连接在用 ⇒ 直接改，不弹框');
+
+  // ── ⑤ 分叉要**指名**：答不出来就不许猜 ──
+  const noName = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, scope: 'fork' });
+  assert.equal(noName.ok, false);
+  assert.match(noName.error, /指名/);
+  // 指了一条**不在这个工作区**的连接：同样拒（拿"谁活跃"去猜的话，这一格会
+  // 悄悄把活跃那条挪走 —— 而用户按的是另一条连接的插件块）
+  const wrongConn = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, scope: 'fork', connectionId: a.id });
+  assert.equal(wrongConn.ok, false);
+  assert.match(wrongConn.error, /指名/);
+  const badScope = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: bId, scope: 'maybe' });
+  assert.equal(badScope.ok, false);
+  assert.match(badScope.error, /all 或 fork/);
+
+  for (const x of (await invoke('app:bootstrap')).connections) {
+    await invoke('app:deleteConnection', x.id);
+  }
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个工作区**不动它**', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const id = mintId();
+  putSitePlugin({
+    id, name: 'two-layer',
+    over: { contributes: { ports: 1, concurrent: false, surface: { kind: 'web', path: '/' } } },
+  });
+  idx._test.getBackend().debugAddSitePlugin('two-layer');
+
+  const cfgOf = () => idx._test.getCfg();
+  const refsOf = (wsId) => {
+    const ws = cfgOf().workspaces.find((l) => l.id === wsId);
+    return (ws && ws.refs) || {};
+  };
+  const hasWs = (wsId) => cfgOf().workspaces.some((l) => l.id === wsId);
+  const hasSpace = (sid) => cfgOf().spaces.some((s) => s.id === sid);
+
+  const a = await onlyDemoConnection(idx);      // 理由同上一组：连接表跨用例共享
+  const wsA = a.workspaceId;
+  const nameA = cfgOf().workspaces.find((l) => l.id === wsA).name;
+
+  const b = await invoke('app:saveConnection',
+    { user: 'bob', host: '198.51.100.20', port: 10100, workspaceId: null });
+  const wsB = b.connection.workspaceId;
+  assert.notEqual(wsB, wsA);
+
+  // wA 里建一份，再让 wB **复用**它 ⇒ 一份数据被两个工作区指着
+  await invoke('app:setWorkspaceRef',
+    { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id });
+  const s1 = refsOf(wsA)[id];
+  const reuse = await invoke('app:setWorkspaceRef',
+    { workspaceId: wsB, pluginId: id, spaceId: s1, connectionId: b.connection.id });
+  assert.equal(reuse.ok, true);
+  assert.equal(refsOf(wsB)[id], s1, '前提：两个工作区指着同一份');
+
+  // ── ① 删掉第一条连接 ⇒ wA 那一层收掉，**数据那一层一个字都不动** ──
+  const before = noticesOf().length;
+  const d1 = await invoke('app:deleteConnection', a.id);
+  assert.equal(d1.ok, true);
+  assert.equal(hasWs(wsA), false, '没有连接在用、也没有会话在跑 ⇒ 这张表该收掉');
+  assert.equal(hasSpace(s1), true,
+    '★★ 还有 wB 指着它 —— 收它就是删活数据。这一格就是"数据不属于任何工作区"那句话');
+  // ★ 而且要说出来：这是**别的屏幕上才看得见**的变化（用户是在连接列表上按的删除）。
+  const said = noticesOf().slice(before).map((n) => n.text).join('\n');
+  assert.match(said, /没有谁在用了/, `收掉了要出声：${said}`);
+  assert.match(said, new RegExp(nameA), `要说清收掉的是哪一个：${said}`);
+
+  // ── ② 删掉最后那条 ⇒ 数据那一层才归零 ──
+  const before2 = noticesOf().length;
+  const d2 = await invoke('app:deleteConnection', b.connection.id);
+  assert.equal(d2.ok, true);
+  assert.equal(hasWs(wsB), false);
+  assert.equal(hasSpace(s1), false, '这下真的没人指着了');
+  const said2 = noticesOf().slice(before2).map((n) => n.text).join('\n');
+  assert.match(said2, /没有谁在用了/, `收掉了要出声：${said2}`);
+  // ★ 两层要**分开报**：工作区没了不等于它的数据没了（上面那一格刚验过），而数据
+  //   没了也一定伴随一张表没了。合成一句"回收了 N 项"的话，用户分不出自己那份数据
+  //   是不是还在 —— 而那是他此刻唯一想问的事。
+  assert.match(said2, /的一份数据/, `数据那一层也要说得出是哪一份：${said2}`);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 活会话护着它那个工作区 —— **一条连接都没有**时也一样', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const id = mintId();
+  putSitePlugin({
+    id, name: 'dev-ws',
+    over: { contributes: { ports: 1, concurrent: false, surface: { kind: 'web', path: '/' } } },
+  });
+  idx._test.getBackend().debugAddSitePlugin('dev-ws');
+
+  // 「用户把连接全删了」—— 从此没有活跃连接，而会话照起（开发者模式那条路）
+  for (const c of [...(await invoke('app:bootstrap')).connections]) {
+    await invoke('app:deleteConnection', c.id);
+  }
+  assert.deepEqual((await invoke('app:bootstrap')).connections, []);
+
+  const run = await startRunning(idx, 'dev-ws');
+  const ws = (idx._test.getCfg().workspaces || [])
+    .find((l) => Object.keys(l.refs || {}).length);
+  assert.ok(ws, '会话起来之后要有一个装着它那一份数据的工作区');
+  const sid = ws.refs[id];
+  assert.ok(sid, '前提：那个工作区里指着这个插件的那一份');
+
+  // ★★ 一个**与引用计数无关**的改动（改个名字）也会把 commitConfig 叫起来，而那一句
+  //    `pruneWorkspaces` 数的是"还有几条连接指着它" —— 此刻是 **0**。
+  //    护住它的是**那条活会话**（`liveWorkspaceIds`）—— 这正是那条「一条连接都没有
+  //    就不回收」的豁免删掉之后，这个场景唯一还站得住的东西。
+  //    少了它，开发者模式里每次改动都会把工作区连同它指着的那些数据收掉，而那条
+  //    会话正跑在上面 —— 症状是「演示模式里布局老是丢」，且没有任何一处会红。
+  const rn = await invoke('app:renameWorkspace', { workspaceId: ws.id, name: '演示工作区' });
+  assert.equal(rn.ok, true);
+  assert.equal(idx._test.getCfg().workspaces.some((l) => l.id === ws.id), true,
+    '★★ 会话还跑在它上面 —— 收掉它就是把那条会话脚下的数据抽掉');
+  assert.equal(idx._test.getCfg().spaces.some((s) => s.id === sid), true,
+    '那份数据也不许动');
+  assert.equal(run.ctl.state, 'running', '那条会话一动不动');
+
+  await invoke('app:stop', { slot: run.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('★ 主动断开：没开会话时可用，且活动连接不会被忘掉', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
@@ -4843,11 +5074,17 @@ test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收�
   // ★ 这条路径**今天够得着**，而且每一步都是用户做得到的：
   //   ① 会话跑在 C1 的工作区上 → ② 把活跃连接切成 C2（**不动引用计数、不停会话**）
   //   → ③ 给 C1 换一个工作区：`isActive` 是假，于是不走 relisten，而 C1 原来那个
-  //   工作区引用计数归零、被回收。
+  //   工作区的**连接**引用计数归零。
   //
-  //   ★ C2 必须落在**另一个**工作区上，否则它替 C1 撑着引用计数、那个工作区根本不会被
-  //     回收 —— 而"回收"正是这条用例要造出来的东西（新连接默认落进活跃连接的工作区，
-  //     所以这里要显式给它一个）。
+  //   ★ C2 必须落在**另一个**工作区上，否则它替 C1 撑着引用计数（新连接默认落进
+  //     活跃连接的工作区，所以这里要显式给它一个）。
+  //
+  //   ★★ 而"连接引用计数归零"**不等于**"那个工作区没人用"：那条会话还跑在它指着
+  //      的某一份数据上。两层回收各有一条"活会话拿着"的守卫（`pruneWorkspaces` 收
+  //      `liveWorkspaceIds`、`pruneSpaces` 收 `liveSpaceIds`），所以那张表**和**
+  //      它指着的那一份都不许动。少了上面那一条，表会在会话脚下消失（数据靠下面
+  //      那一条侥幸留着）；少了下面那一条，数据直接没 —— 而症状都只是"页面莫名
+  //      其妙坏了"。
   const c2 = await invoke('app:saveConnection',
     { user: 'demo', host: '127.0.0.3', port: 1 });
   await invoke('app:setConnectionWorkspace',
@@ -4858,8 +5095,11 @@ test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收�
   const sw = await invoke('app:setConnectionWorkspace',
     { connectionId: c1Id, workspaceId: null, confirmDiscard: true });
   assert.equal(sw.ok, true, JSON.stringify(sw));
-  assert.equal(idx._test.getCfg().workspaces.some((l) => l.id === workspaceId), false,
-    '前提：那个工作区真的被回收了');
+  // ★★ 换了工作区是**那条连接**的事 —— 那个工作区本身还在，因为会话还拿着它。
+  //    （这条断言从前是反的：那时工作区会被收掉、只剩数据靠 `liveSpaceIds` 留着。
+  //      现在两层由同一条规则管，表也不在会话脚下消失了。）
+  assert.equal(idx._test.getCfg().workspaces.some((l) => l.id === workspaceId), true,
+    '★★ 会话还跑在那张表指着的一份数据上 —— 表也不许收');
   assert.equal(ctl.state, 'running', '前提：那条会话还跑着');
 
   // ★★ 少了守卫的后果是**静默**的：一条正在跑的会话脚下的数据被删掉

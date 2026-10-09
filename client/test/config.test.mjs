@@ -695,21 +695,42 @@ test('回收：只删引用计数为 0 的工作区，并报出删了哪些', ()
   ];
 
   const r = config.pruneWorkspaces(cfg);
-  assert.deepEqual(r.removed, [gid(3)], '只有 0 引用的那个该被删');
+  assert.deepEqual(r.removed.map((l) => l.id), [gid(3)], '只有 0 引用的那个该被删');
   assert.deepEqual(cfg.workspaces.map((l) => l.id), [gid(1), gid(2)], '顺序必须保持');
 });
 
-test('回收：一条连接都没有时**不**回收 —— 演示模式的那个工作区必须活下来', () => {
+test('★★ 回收：**活会话拿着的那一个**不许收 —— 演示模式那个工作区靠的是这一条', () => {
   const cfg = config.loadConfig(tmpdir());
-  cfg.workspaces = [{ id: gid(9), name: '演示工作区', refs: {} }];
+  cfg.workspaces = [
+    { id: gid(8), name: '演示工作区', refs: {} },
+    { id: gid(9), name: '没人用的', refs: {} },
+  ];
   cfg.connections = [];
 
-  // 演示模式一个连接都没有，而它照样要开会话 —— 那个工作区是那次会话的工作区身份。
-  // 在这里把它回收掉，下次开会话又会造一个新的，id 一变引用表就变，
-  // 布局白重置一次，而用户看到的是「演示模式里布局老是丢」。
+  // 演示模式（一个连接都没有）照样要开会话 —— 那个工作区是那次会话的工作区身份。
+  // 把它回收掉，下次开会话又会造一个新的，id 一变引用表就变，布局白重置一次，
+  // 而用户看到的是「演示模式里布局老是丢」。
+  //
+  // ★★ 而挡住它的**不是**"一条连接都没有"（那条豁免整条删掉了），是**那条活会话**：
+  //    一个没有连接也没有会话的工作区是**真的没人用**，留着它就是一张谁也看不见、
+  //    谁也删不掉的引用表（用户把连接全删了之后就是这样）。
+  const r = config.pruneWorkspaces(cfg, new Set([gid(8)]));
+  assert.deepEqual(r.removed.map((l) => l.id), [gid(9)], '没有会话的那个才该收');
+  assert.deepEqual(cfg.workspaces.map((l) => l.id), [gid(8)], '会话跑着的那个一个字都不许动');
+
+  // 那条会话结束之后（下一轮 commitConfig 不再传它）才真的收掉。
+  assert.deepEqual(config.pruneWorkspaces(cfg).removed.map((l) => l.id), [gid(8)]);
+  assert.deepEqual(cfg.workspaces, []);
+});
+
+test('回收：报出的是**带名字的**工作区，不是一串 id', () => {
+  // 调用方要拿它给用户一句话（"工作区「X」没有谁在用了，已经收掉"）。
+  // 只回 id 的话那句话里只能出现一串十六进制 —— 而用户认不出那是什么。
+  const cfg = config.loadConfig(tmpdir());
+  cfg.workspaces = [{ id: gid(7), name: '临时的', refs: {} }];
+  cfg.connections = [];
   const r = config.pruneWorkspaces(cfg);
-  assert.deepEqual(r.removed, [], '没有映射关系要维护时，回收无事可做');
-  assert.deepEqual(cfg.workspaces.map((l) => l.id), [gid(9)]);
+  assert.deepEqual(r.removed.map((l) => l.name), ['临时的']);
 });
 
 test('★★ 数据那一层：没人引用的收掉 —— 但**被两个工作区引用时，删一个不动它**', () => {
@@ -760,6 +781,43 @@ test('spaceConsumers：谁在引用这一份数据', () => {
   ];
   assert.deepEqual(config.spaceConsumers(cfg, sid(1)), [gid(1), gid(2)]);
   assert.deepEqual(config.spaceConsumers(cfg, sid(9)), []);
+});
+
+test('★★ cloneWorkspace：复制的是**引用**，不是数据 —— 改副本不动原件', () => {
+  // 这是"分叉"的底座：一张表被几条连接共用时，其中一条要改一格而又不想动别人，
+  // 就得先有一张自己的表。复制引用而不是复制存储，正是"数据不属于工作区"那句话
+  // 的用处 —— 新表里那些格子指着**同一批**数据。
+  const cfg = config.loadConfig(tmpdir());
+  const P = LAYOUT_PLUGIN.id;
+  cfg.workspaces = [
+    { id: gid(1), name: '共用的', refs: { [P]: sid(1), other: sid(2) } },
+  ];
+  cfg.spaces = [space(1), space(2)];
+  cfg.connections = [
+    { id: 'c1', user: 'a', host: 'h', port: 1, workspaceId: gid(1) },
+    { id: 'c2', user: 'b', host: 'h', port: 1, workspaceId: gid(1) },
+  ];
+
+  const copy = config.cloneWorkspace(cfg, gid(1));
+  assert.ok(copy, '源在 ⇒ 必须复制得出来');
+  assert.notEqual(copy.id, gid(1), '新表要有自己的 id');
+  assert.notEqual(copy.name, '共用的', '名字走 nextWorkspaceName，不叫「…的副本」');
+  assert.equal(copy.name, '工作区 1', '取当前没被占用的最小正整数 —— 原件叫「共用的」，不占号');
+  assert.deepEqual(copy.refs, { [P]: sid(1), other: sid(2) }, '引用逐格照抄');
+
+  // ★ **不是同一张表**：改副本一格，原件一个字都不许动。
+  const w = config.setWorkspaceRef(cfg, copy.id, P, sid(2));
+  assert.equal(w.ok, true, '改写副本会被拒的话，分叉这条路根本走不通');
+  assert.equal(config.findWorkspace(cfg, copy.id).refs[P], sid(2));
+  assert.equal(config.findWorkspace(cfg, gid(1)).refs[P], sid(1),
+    '★ 改了副本而原件跟着变的话，这个函数就没有意义了');
+
+  // ★ 而数据那一边：sid(1) 仍然被原件指着 ⇒ 两层回收都不该收它。
+  assert.deepEqual(config.spaceConsumers(cfg, sid(1)), [gid(1)]);
+  assert.deepEqual(config.pruneSpaces(cfg).removed, [], '还有工作区指着它');
+
+  // 源不存在 ⇒ null（不编一张空表出来 —— 那会是一张谁也没要过的表）
+  assert.equal(config.cloneWorkspace(cfg, gid(9)), null);
 });
 
 test('workspacePlan：把「这个工作区只被谁用」推导出来，renderer 不自己算', () => {

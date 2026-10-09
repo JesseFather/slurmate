@@ -323,6 +323,10 @@ dialog .fp {
   white-space: pre-wrap; margin: 12px 0;
 }
 dialog .row { justify-content: flex-end; }
+/* 分叉那一问的正文里有两段（"还有谁在用" / "两个选择各是什么意思"），而
+   `dialog p` 默认会把换行折成一个空格 —— 那两段会糊成一句读不断的话。
+   只给这一个元素开 pre-line，不动那条共用规则（主机密钥那一份是一整段，没有换行）。 */
+dialog p#fork-body { white-space: pre-line; }
 
 /* ── 提示与日志 ──
    日志**自己滚**。不设上限的话它会一直往下长，把上面的表单顶出屏幕 ——

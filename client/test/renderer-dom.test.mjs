@@ -68,7 +68,12 @@ function mkEl(tag) {
     tagName: String(tag).toUpperCase(),
     children: [], dataset: {}, attrs: {},
     _text: '', className: '', value: '', title: '', type: '', disabled: false,
-    onclick: null, onchange: null, oninput: null, style: {},
+    onclick: null, onchange: null, oninput: null, oncancel: null, style: {},
+    open: false,
+    // <dialog> 的那两个方法：`askFork` 会真的调用它们，缺了就是一次 TypeError
+    // ——而"那一格按下去炸了"与"按下去没反应"在这一组眼里必须分得开。
+    showModal() { e.open = true; },
+    close() { e.open = false; },
     append(...kids) { for (const k of kids) e.children.push(k); },
     prepend(k) { e.children.unshift(k); },
     appendChild(k) { e.children.push(k); return k; },
@@ -344,16 +349,19 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   assert.match(sel.children[1].textContent, /数据 2 · 端口 18081（「工作区 2」也在用）/);
 
   // ── ① 选另一份已存在的 ⇒ 发一个**数据 id** ──
+  //   ★ `connectionId` 也一起发：主进程要拿它回答"这张表是替**哪一条**连接改的"
+  //     （共用的一张表要分叉时，得指名分给谁）—— 它不拿"谁活跃"去猜。
   sel.value = 's000000000002';
   await sel.onchange();
   assert.deepEqual(sent(0),
-    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: 's000000000002' });
+    { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1',
+      spaceId: 's000000000002' });
 
   // ── ② 选「另开一份」⇒ 发 `null`（**不是**空串、也不是某个 id）──
   sel.value = '__new_space__';
   await sel.onchange();
   assert.deepEqual(sent(1),
-    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: null });
+    { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1', spaceId: null });
 
   // ── ③ 这一格还没有值（引用表里没有这个插件）⇒ 发的是**没有 spaceId 这个键** ──
   //   ★ 这一条是整个协议里最容易写错的一格：「没表态」与「要一个新的」合并成一种
@@ -383,13 +391,85 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   sel2.value = '__new_space__';
   await sel2.onchange();
   assert.deepEqual(sent(3),
-    { workspaceId: 'w000000000001', pluginId: 'p1', spaceId: null });
+    { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1', spaceId: null });
 
   // ── ④ 一条连接都没有（开发者模式）⇒ 整格不画 ──
   h.run('boot = { connections: [], workspaces: [], activeConnectionId: null, spaces: [] };');
   h.fn('renderPlugins')(PV);
   assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,
     '★ 没有活跃连接时那一格没有对象 —— 画一个空的等于凭空许诺');
+});
+
+test('★★ 共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
+  // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面**不许**替用户选一个：
+  // 选错的那一个会让另外几条连接跟着一起变，而它们各自的界面上什么都没发生 ——
+  // 用户要到下一次开会话时才发现自己动了别人的数据。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES },
+  'window.__calls = [];'
+  + 'window.__replies = ['
+  + '  { ok: false, code: "shared", workspaceName: "工作区 1", others: ["c2"] },'
+  + '  { ok: true, droppedOld: false, forked: "工作区 3" }'
+  + '];'
+  + 'window.slurmate.setWorkspaceRef = (p) => { window.__calls.push(p);'
+  + ' return Promise.resolve(window.__replies.shift()); };');
+
+  const raw = (i) => h.run(`window.__calls[${i}]`);
+  const sent = (i) => JSON.parse(JSON.stringify(raw(i)));
+  const body = () => h.byId.get('notices').children[0].children[1].textContent;
+
+  const p = h.run('applyPluginSpace("w000000000001","p1","s000000000002")');
+  await new Promise((r) => setImmediate(r));       // 让第一发走完，框弹出来
+
+  const dlg = h.byId.get('fork-dlg');
+  assert.equal(dlg.open, true, '★ 共用的一张表必须先问 —— 替用户选一个就是把别人改了');
+  // ★ 名字由**界面**取（同一条 `connLabel` 规则），主进程只回 id ——
+  //   两处各拼一遍备注/地址的回落规则迟早会漂开。
+  assert.match(h.byId.get('fork-body').textContent, /bob@198\.51\.100\.9:10100/,
+    '要说得出"还有谁在用" —— 只说"还有 1 条连接"等于没说');
+  assert.equal(raw(1), undefined, '★ 还没选之前不许发第二发');
+  assert.deepEqual(sent(0), { workspaceId: 'w000000000001', pluginId: 'p1',
+    connectionId: 'c1', spaceId: 's000000000002' }, '第一发不带 scope');
+
+  // ── 选「只改这条连接」⇒ 带 scope: 'fork' ──
+  h.run('$("fork-one").onclick()');
+  const r = await p;
+  assert.equal(r.ok, true);
+  assert.equal(dlg.open, false, '选完要把框关掉');
+  assert.deepEqual(sent(1), { workspaceId: 'w000000000001', pluginId: 'p1',
+    connectionId: 'c1', spaceId: 's000000000002', scope: 'fork' });
+  // ★ 分叉这件事要**说出来**，而且要说清"数据没复制" —— 否则用户会以为
+  //   自己刚才复制了一份存储（那正是他不会轻易按的一个键）。
+  assert.match(body(), /分了一张自己的表/);
+  assert.match(body(), /数据还是同一份/);
+
+  // ── 取消（含 Esc）：什么都不发，那一格由调用方拨回去 ──
+  h.run('window.__replies = [{ ok: false, code: "shared", workspaceName: "工作区 1",'
+    + ' others: ["c2"] }]; window.__calls.length = 0;');
+  const q = h.run('applyPluginSpace("w000000000001","p1","s000000000002")');
+  await new Promise((r2) => setImmediate(r2));
+  assert.equal(h.byId.get('fork-dlg').open, true);
+  h.run('$("fork-dlg").oncancel()');               // Esc 走的是 cancel 事件
+  assert.equal((await q).ok, false);
+  assert.equal(h.run('window.__calls.length'), 1, '★ 取消之后不许再发一发');
+
+  // ── 选「全部一起改」⇒ scope: 'all'，而且**第二问（would_discard）要把它带上** ──
+  //   ★ 这一格是最容易漏的：`would_discard` 的重试如果只补 `confirmDiscard`、
+  //     丢了 `scope`，请求会被 `shared` 再拦一次 —— 用户看到同一个框弹两遍，
+  //     而"再选一次"的结果与上一次未必一样。
+  h.run('window.__replies = ['
+    + '  { ok: false, code: "shared", workspaceName: "工作区 1", others: ["c2"] },'
+    + '  { ok: false, code: "would_discard", error: "换掉之后它会被删掉" },'
+    + '  { ok: true, droppedOld: true, forked: null }'
+    + ']; window.__calls.length = 0;');
+  const s = h.run('applyPluginSpace("w000000000001","p1","s000000000002")');
+  await new Promise((r3) => setImmediate(r3));
+  h.run('$("fork-all").onclick()');
+  assert.equal((await s).ok, true);
+  assert.equal(raw(1).scope, 'all');
+  assert.equal(raw(2).scope, 'all', '★ 第二问的重试必须把 scope 一起带上');
+  assert.equal(raw(2).confirmDiscard, true);
+  assert.match(body(), /已经删掉/);
 });
 
 test('★★ 这个架子真的抓得住 P1 那个缺陷（拿一个故意的错来验）', () => {

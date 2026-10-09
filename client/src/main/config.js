@@ -828,28 +828,38 @@ function spaceConsumers(cfg, spaceId) {
 }
 
 /**
- * 回收引用计数归零的工作区。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
+ * 回收**没人引用的**工作区。**由 index.js 在每一次会改变引用计数的改动之后统一调用**
  * （commitConfig）—— 漏掉一处的后果是某个工作区永远不被回收。
  *
- * @returns {{removed: string[]}} 被删掉的工作区 id（调用方据此清理它们名下的数据空间）
+ * ★ 判据两层，与 `pruneSpaces` **同形**（这两处一旦分家，症状要么是某个工作区永远
+ *   收不掉，要么是一个还跑着的工作区被收掉）：
+ *   · **没有任何连接指着它**（`connections[].workspaceId` 是唯一的所有权凭据）；
+ *   · **此刻没有活会话拿着它**（`keepIds`）—— ★ 少了这一条就是**删活数据**：
+ *     开发者模式（一个连接都没有）里那个工作区，连同它指着的那些数据，会在下一次
+ *     commitConfig 时被收掉，而那条会话正跑在它们上面。
+ *
+ * ★★ 从前这里有一条「一条连接都没有时**不**回收」的豁免，**整条删掉了**。它守的是
+ *   "演示模式里那个不属于任何连接的工作区"，而那个工作区的真正持有者是**那条活会话**
+ *   —— 把活会话算作消费者，豁免就不需要了。它换来的是一格**收不掉的工作区**：
+ *   用户把连接全删了，盘上还留着一张没人认得的引用表，界面上没有任何地方说得出来。
+ *
+ * @param {Set<string>} [keepIds] 此刻正被活会话拿着的工作区 id
+ * @returns {{removed: object[]}} 被删掉的那些，**带着名字** —— 调用方要拿它给用户
+ *   一句话，而只给 id 的话那句话里只能出现一串十六进制。
  *   ★ **它不碰数据空间**：一个被删的工作区指着的那些数据，可能还被别的工作区指着。
  *     那一层由 `pruneSpaces` 数（见它那段）。
  */
-function pruneWorkspaces(cfg) {
-  // ★ 一条连接都没有时**不回收**。演示模式（以及「全新安装、还没配任何连接」）
-  //   会有一个不属于任何连接的工作区 —— 它是那次会话的工作区身份。在这里把它删掉，
-  //   下次开会话又会造一个新的，而 id 一变引用表就变，布局白重置一次。
-  //   没有任何映射关系要维护的时候，「回收」无事可做。
-  if (!(cfg.connections || []).length) return { removed: [] };
-
+function pruneWorkspaces(cfg, keepIds) {
   const counts = new Map();
   for (const c of (cfg.connections || [])) {
     if (c.workspaceId) counts.set(c.workspaceId, (counts.get(c.workspaceId) || 0) + 1);
   }
+  const keep = keepIds instanceof Set ? keepIds : new Set();
   const removed = [];
   cfg.workspaces = (cfg.workspaces || []).filter((l) => {
     if ((counts.get(l.id) || 0) > 0) return true;
-    removed.push(l.id);
+    if (keep.has(l.id)) return true;
+    removed.push(l);
     return false;
   });
   return { removed };
@@ -945,6 +955,34 @@ function setWorkspaceRef(cfg, workspaceId, pluginId, spaceId) {
   if (!ws.refs || typeof ws.refs !== 'object') ws.refs = {};
   ws.refs[pluginId] = space.id;
   return { ok: true };
+}
+
+/**
+ * 把一张引用表**复制一份**出来（分叉）。**不落盘** —— 由调用方统一走 commitConfig()。
+ *
+ * ★ 用途只有一个：一张表被几条连接共用时，其中一条想把"某个插件用哪一份数据"改成
+ *   **只对自己生效** —— 那就得先有一张自己的表，否则改的是大家共用的那一张
+ *   （而另外几条的界面上什么都没发生，它们只是下次开会话时用了别的东西）。
+ *
+ * ★ 复制的是**引用**，不是数据：新表里每一格指着**同一份**（`refs` 的值一个字不改）。
+ *   这正是"数据不属于工作区"那句话的用处 —— 分叉一张表不复制任何存储。
+ *   两边在那个插件上看到的仍然是同一份，直到有人改掉自己那一格。
+ *
+ * ★ 名字走 `nextWorkspaceName`（「工作区 N」），**不叫「X 的副本」**：名字是用户
+ *   自己会改的东西，编一个"副本"进去等于替他记下一件他随时会推翻的事。
+ *
+ * @returns {object|null} 新那张表（源不存在时 null）
+ */
+function cloneWorkspace(cfg, workspaceId) {
+  const src = findWorkspace(cfg, workspaceId);
+  if (!src) return null;
+  const copy = {
+    id: newWorkspaceId(),
+    name: nextWorkspaceName(cfg),
+    refs: { ...(src.refs || {}) },
+  };
+  cfg.workspaces = [...(cfg.workspaces || []), copy];
+  return copy;
 }
 
 /**
@@ -1342,7 +1380,7 @@ module.exports = {
   // 工作区（一张引用表）
   newWorkspaceId, normalizeWorkspace, findWorkspace,
   nextWorkspaceName, setConnectionWorkspace, defaultWorkspaceFor,
-  pruneWorkspaces, workspacePlan,
+  pruneWorkspaces, workspacePlan, cloneWorkspace,
   // 数据空间（一份存储 + 它自己的端口）
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
   usedSpacePorts, assignSpacePorts, spaceFor, newSpace, spaceConsumers, pruneSpaces,
