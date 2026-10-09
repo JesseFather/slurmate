@@ -140,6 +140,13 @@ body.connected .rail { display: block; }
 body.connected #panel { padding-left: calc(26px + var(--rail-w)); padding-right: calc(26px + var(--rail-w)); }
 .wrap { max-width: 760px; margin: 0 auto; }
 h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+/* 「关于」的入口就是这一行标题。★ 它得看得出来能点：这一屏上没有任何别的东西
+   提示"这里可以点"，而一个看不见的入口等于没有入口。悬停变色是唯一的提示，
+   所以它必须真的变色。 */
+#about-head { cursor: pointer; }
+#about-head:hover h1, #about-head:focus-visible h1 { color: #9cdcfe; }
+#about-head:focus-visible { outline: 1px solid var(--accent); }
+#sec-about { border-left: 3px solid var(--border); padding-left: 14px; margin-top: 4px; }
 h2 { font-size: 13px; margin: 26px 0 10px; color: #9cdcfe; font-weight: 600; }
 /* 「新建连接」里的两步编号。比 h2 再低一级 —— 它们是同一屏内的分段，
    不该和「登录节点」这样的区块标题抢注意力。 */
@@ -167,6 +174,21 @@ button.ghost:hover { background: #45494e; }
 button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
+
+/* ── 两段式确认 ──────────────────────────────────────────────────────────────
+   第一段把那一格的按钮换成这一行：**后果 + 确定 + 取消**。它可退 —— 点到别处、
+   按 Esc、点「取消」都回到原样；不可逆的只有第二段（那颗 `danger`）。
+
+   ★ 不用 `window.confirm`：框弹出来的时候用户**已经按下去**了，而这里要的正是
+     "按下去之后还有一次可退的机会"。它的样式也不受控（Electron 里那是一块系统
+     窗口），于是同一个客户端里几处不可逆动作会长得不一样。
+   ★ `.armed` 与 `.armed-off` 是一对：那一行出现的同时，原来那颗按钮**留在 DOM 里
+     但不显示** —— 删掉它的话，`renderSnapshot` 下一次按 `running` 去 toggle 它的
+     `hidden` 就作用在一个已经不存在的元素上（`$()` 拿到 null），而那是一次
+     静默的 TypeError。 */
+.armed { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.armed-why { color: var(--warn); font-size: 12px; }
+.armed-off { display: none; }
 
 /* ── 密钥指纹 ──
    这里**故意不显示公钥本身**：所有 ed25519 公钥的前 40 个字符逐字相同，看不出

@@ -141,6 +141,71 @@ function notice(kind, text) {
   while (box.children.length > 80) box.lastChild.remove();
 }
 
+// ── 两段式确认 ──────────────────────────────────────────────────────────────
+/**
+ * 当前正处在第一段的那个确认。**同时只允许一个** —— 界面上摆着两行"确定吗"，
+ * 用户按了其中一行那颗按钮，另一行还挂在那儿，而他分不清刚才确认掉的是哪个。
+ */
+let armed = null;
+
+/**
+ * 两段式：第一次点只是**把那一格换成一行确认**，第二次点才真的做。
+ *
+ * ★★ 为什么不可逆的动作不能用 `window.confirm`：它给不了两段 —— 框弹出来的
+ *   时候用户**已经按下去**了，而这里要的正是"按下去之后还有一次可退的机会"。
+ *   它的样式也不受控（在 Electron 里那是一块系统窗口，尺寸、语言、焦点行为都不
+ *   归我们管），于是同一个客户端里几处不可逆动作会长得不一样。
+ *
+ * ★ 第一段**可退**：点到别处、按 Esc、点「取消」，都回到原样。不可逆的只有第二段。
+ * ★ 原来那颗按钮**留在 DOM 里**（加一个 `.armed-off`），不删 —— `renderSnapshot`
+ *   还在按 `running` 去 toggle 它的 `hidden`，删掉的话那是作用在 null 上。
+ *
+ * @param {HTMLElement} anchor 那一格的按钮
+ * @param {{why?: string, yes: string, run: () => any}} opts
+ *   `why` 是**后果**，不是解释：设计律 2 要的是"把警告变成动作的前置状态"。
+ */
+function armConfirm(anchor, opts) {
+  disarmArmed();
+  const cluster = document.createElement('span');
+  cluster.className = 'armed';
+  if (opts.why) cluster.append(el('span', 'armed-why', opts.why));
+  const go = el('button', 'danger tiny', opts.yes);
+  const no = el('button', 'ghost tiny', '取消');
+  cluster.append(go, no);
+
+  const here = {};
+  const disarm = () => {
+    if (armed !== here) return;         // 已经被后来那一次顶掉了，别把它的界面收掉
+    armed = null;
+    document.removeEventListener('click', outside, true);
+    document.removeEventListener('keydown', onKey, true);
+    cluster.remove();
+    anchor.classList.remove('armed-off');
+  };
+  // ★ 捕获阶段，而且判的是"点在不在这一行里面"：用户点到别处时他心里想的是
+  //   "算了"，那一下不该**顺带**触发别的东西（他已经在收手了）。
+  const outside = (ev) => { if (!cluster.contains(ev.target)) disarm(); };
+  const onKey = (ev) => { if (ev.key === 'Escape') disarm(); };
+
+  // 第二段：先把这一行收掉再执行 —— 执行里可能又把界面整个重画一遍。
+  go.onclick = () => { disarm(); return opts.run(); };
+  no.onclick = () => disarm();
+
+  here.disarm = disarm;
+  armed = here;
+  anchor.classList.add('armed-off');
+  const parent = anchor.parentNode;
+  if (parent) parent.insertBefore(cluster, anchor.nextSibling || null);
+  document.addEventListener('click', outside, true);
+  document.addEventListener('keydown', onKey, true);
+  if (go.focus) go.focus();
+}
+
+/** 把可能正开着的那个第一段收掉。重画一个会被它改动的区域之前调。 */
+function disarmArmed() {
+  if (armed) armed.disarm();
+}
+
 // ── 三屏的路由 ──────────────────────────────────────────────────────────────
 /**
  * 把三屏之一露出来。**同时只露一个。**
@@ -343,6 +408,10 @@ function renderSnapshot(s) {
   $('sb-detail').textContent = detail;
 
   const running = (st === 'running' || st === 'releasing');
+  // ★ 会话一停，「结束会话」那个第一段就不该再等着第二段了 —— 留着它，用户按下去
+  //   的第二段没有对象（会话已经结束了）。收起是**这一格自己的**事，与 `hidden`
+  //   无关：那两件事一个是"这一格该不该在"，一个是"它现在是第几段"。
+  if (!running) disarmArmed();
   $('sb-reload').classList.toggle('hidden', !running);
   $('sb-end').classList.toggle('hidden', !running);
   $('sb-dev').classList.toggle('hidden', !(s && s.dev));
@@ -739,8 +808,11 @@ function connLabel(c) {
 function renderConnections(list) {
   const box = $('conn-list');
   box.textContent = '';
+  // ★ 这一屏会被整块重画，而第一段那个确认就挂在某一行里 —— 不先收掉的话，
+  //   那一行连同它一起被丢掉，而 `armed` 还指着它（下一次点"别处"收的是一个
+  //   已经不在文档里的节点，看起来像没反应）。
+  disarmArmed();
   $('conn-empty').classList.toggle('hidden', list.length > 0);
-  $('conn-notes').classList.toggle('hidden', list.length === 0);
   // 映射图与列表同生共死：没有连接就没有可映射的东西
   $('sec-workspaces').classList.toggle('hidden', list.length === 0);
   // 「临时离开」与「断开」只在连着的时候存在 —— 它们是**站点级**的动作（见
@@ -777,7 +849,8 @@ function renderConnections(list) {
       //
       //   ★ 而**别的站点上的作业数，这一屏本来就答不了** —— 要答就得连上去，
       //     而"打开客户端连着几个站点挨个查一遍"是一条被刻意避开的形状。
-      //     所以列表下面那一句（`#conn-notes`）把这条边界明说出来。
+      //     这一条边界从前面板底下有一段话专门解释它，删掉了：不知道就写
+      //     「已连接」是**对**的，而一句解释不改变任何人的动作 —— 想数就点进去。
       const known = JOBS.list && JOBS.forConn === c.id;
       const n = known ? JOBS.list.filter((j) => j.live).length : null;
       m.textContent = known ? `已连接 · ${n} 个作业在跑` : '已连接';
@@ -814,9 +887,10 @@ function renderConnections(list) {
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
     del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
-    del.onclick = async () => {
-      // 删除现在连带销毁这条连接的私钥，所以要先问一句 —— 它是一条不可逆的操作，
-      // 而且用户已经拿去 IDM 注册过的公钥会就此作废（重新建一条要重新注册）。
+    del.onclick = () => {
+      // ★ 两段式。删除连带销毁这条连接的私钥，所以后果必须在按下去**之前**说
+      //   出来 —— 而且它是一条不可逆的操作：用户拿去 IDM 注册过的公钥就此作废，
+      //   重建一条要重新注册。
       //
       // ★ 还有一样会被删掉：**最后一个用某个工作区的连接被删掉时，那个工作区的
       //   数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）—— 主进程那边是
@@ -824,26 +898,27 @@ function renderConnections(list) {
       //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
       //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
       const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
-      const sure = window.confirm(
-        `删除「${c.user}@${c.host}:${c.port}」？\n\n`
-        + '这条连接的私钥会一起删掉。你注册到 IDM 的那把公钥随之作废，'
-        + '重建一条需要重新注册。\n'
-        + (sole
-          ? `\n★ 「${sole.name}」只有这一条连接在用，所以它也会被删掉 —— 里面的`
-            + '编辑器布局、登录状态，以及插件写在磁盘上的那些文件都会一起没掉，'
-            + '而且找不回来。\n'
-          : ''));
-      if (!sure) return;
-      const r = await window.slurmate.deleteConnection(c.id);
-      if (!r.ok) return notice('error', r.error);
-      boot.connections = r.connections;
-      boot.activeConnectionId = r.activeConnectionId;
-      // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
-      if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
-      renderConnections(boot.connections);
-      notice('info', '已删除该连接。'
-        + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
-        + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
+      armConfirm(del, {
+        why: `删除「${c.user}@${c.host}:${c.port}」？`
+          + '它的私钥一并作废，你得重新注册一把新公钥。'
+          + (sole
+            ? `「${sole.name}」也只有这一条连接在用，会跟着删掉 —— 里面的编辑器`
+              + '布局、登录状态，以及插件写在磁盘上的那些文件都找不回来。'
+            : ''),
+        yes: '删除',
+        run: async () => {
+          const r = await window.slurmate.deleteConnection(c.id);
+          if (!r.ok) return notice('error', r.error);
+          boot.connections = r.connections;
+          boot.activeConnectionId = r.activeConnectionId;
+          // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
+          if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
+          renderConnections(boot.connections);
+          notice('info', '已删除该连接。'
+            + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
+            + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
+        },
+      });
     };
 
     li.append(t, m, main, edit, del);
@@ -1007,7 +1082,7 @@ function confirmDiscard(name) {
     `「${name}」现在只有这一条连接在用，切走之后它会被删除。\n\n`
     + '它的编辑器窗口布局、打开的标签页和登录状态都会一起没掉，'
     + '插件写在磁盘上的那些文件也一样 —— 而且找不回来。\n'
-    + (live ? '\n★ 当前页面会重新加载到新工作区，未保存的编辑内容会丢失。\n' : '')
+    + (live ? '\n当前页面会重新加载到新工作区，未保存的编辑内容会丢失。\n' : '')
     + '\n确定要切换吗？');
 }
 
@@ -1425,6 +1500,20 @@ function emptyPool(pv) {
  * ★ 这里唯一值得显示的东西是**每个版本被哪些站点要** —— 它是"为什么这台机器上
  *   会有两个版本"这个问题的答案。没有它，用户面对两个同名的块只能猜。
  */
+/**
+ * 「站点太新」那一句：**正文一行**（事实 + 该做什么），理由挂 `title`。
+ *
+ * ★ 它不是一个泛泛的"解释收进悬停"：这句话有**两个方向**（升级客户端 / 升级没用），
+ *   指错了用户就会去做一件解决不了问题的事。所以正文那一行必须是**那个方向**，
+ *   而 `title` 里放的是"凭什么这么判"。
+ */
+function versionWhy(host, line, why) {
+  const p = el('p', 'why', line);
+  p.title = why;
+  host.append(p);
+  return p;
+}
+
 function renderSitePlugins(pv) {
   const box = $('site-plugins');
   box.textContent = '';
@@ -1466,15 +1555,20 @@ function renderSitePlugins(pv) {
       //       格式比客户端新只可能是**站点自己不一致**（版本号没升而格式升了，
       //       违反了"格式号只因基座版本升而升"那条纪律）。说成"升级客户端"会把
       //       用户指去干一件**解决不了问题**的事。
+      // ★★ 正文只留**一行**：说事实 + 说该做什么。上面那一大段推理（为什么这一支
+      //    说"升级客户端"、那一支说"升级解决不了"）搬进 `title` —— 它是**理由**，
+      //    而用户此刻的动作只有两个方向，一行就够把他指对。这也正是它必须分叉的
+      //    理由：指错了方向，用户会去做一件解决不了问题的事。
       if (site.daemonVersionVerdict === 'cross_major') {
-        d.append(el('p', 'why', '这个站点发的插件包用的是更新的格式，而这个客户端还不认识 ——'
-          + '这一版的客户端没有别的办法把它取回来。这个集群的服务端与本客户端**大版本'
-          + '不同**，请升级这个客户端。'));
+        versionWhy(d, '这个站点发的插件包格式比本客户端新，这一版取不回来 —— 请升级这个客户端。',
+          '这个集群的服务端与本客户端大版本不同，所以那些插件包用的是更新的格式，'
+          + '而这一版的客户端没有别的办法把它取回来。请升级这个客户端。');
       } else {
-        d.append(el('p', 'why', '这个站点发的插件包用的是更新的格式，而这个客户端还不认识 ——'
-          + '这一版的客户端没有别的办法把它取回来。★ 而这个站点报的基座版本并不比本'
-          + '客户端新，所以**升级客户端解决不了它**：是站点自己不一致（版本号没升，'
-          + '包格式却升了）。请让管理员看这个站点的部署。'));
+        versionWhy(d, '这个站点发的插件包格式比本客户端新，而它报的基座版本并不更新 —— 升级客户端解决不了它。',
+          '升级客户端解决不了它：这个站点报的基座版本并不比本客户端新，'
+          + '所以"包格式比客户端新"只可能是站点自己不一致（版本号没升，包格式却升了'
+          + '—— 那违反了"格式号只因基座版本升而升"这条纪律）。升级客户端是把用户指去'
+          + '干一件解决不了问题的事，所以这一支必须明说。请让管理员看这个站点的部署。');
       }
     } else if (site.error) {
       d.append(el('p', 'why', site.error));
@@ -1490,7 +1584,7 @@ function renderSitePlugins(pv) {
     // 他可能发现池子越来越大，而原因在这里。
     if (site.snapshotOk === false) {
       d.append(el('p', 'why',
-        '站点的插件快照表读不出来（或者写不下去），所以这一轮**没有回收任何旧版本** —— '
+        '站点的插件快照表读不出来（或者写不下去），所以这一轮没有回收任何旧版本 —— '
         + '不知道谁在引用的时候，唯一安全的动作是什么都不删。'));
     }
 
@@ -1500,7 +1594,7 @@ function renderSitePlugins(pv) {
       d.append(el('p', 'why',
         `有 ${site.withdrawn} 个插件本机那一份已经不在了，所以它们上一次的同意已经作废 —— `
         + '本轮会重新问一次。删掉本机一份就等于撤回同意：不这么算的话，下一次对账会'
-        + '按"摘要与上次一致"把它**静默装回来**。'));
+        + '按"摘要与上次一致"把它静默装回来。'));
     }
 
     const vs = site.versions || [];
@@ -1568,9 +1662,9 @@ function renderConsent(pv) {
   const anyNew = list.some((c) => !c.existing);
   const anyHere = list.some((c) => c.existing);
   d.append(el('p', 'plug-desc',
-    (anyNew ? '它们已经取回到本机、包里每一份都核过了，但**还没有装上去** —— 要你先点一下同意。' : '')
+    (anyNew ? '它们已经取回到本机、包里每一份都核过了，但还没有装上去 —— 要你先点一下同意。' : '')
     + (anyNew && anyHere ? '\n' : '')
-    + (anyHere ? '另外有几个**本机已经有一份**，而它没有在同意台账里（你换过机器、'
+    + (anyHere ? '另外有几个本机已经有一份，而它没有在同意台账里（你换过机器、'
       + '删过配置、或者上一次的同意已经作废）。它们的客户端代码没有在跑 —— '
       + '同意就是认领本机那一份，不同意就是把它从本机删掉。' : '')));
 
@@ -1632,15 +1726,18 @@ function renderConsent(pv) {
     who2.textContent = c.fingerprint
       ? `签名者指纹 ${c.fingerprint}。本机第一次接受这个 id 时会记下它，`
         + '此后同一个 id 的每一份都必须由同一把钥匙签 —— 换了人就会拒绝。'
-      : '这一份**没有签名**。签名在插件规范里是可选的（§4.1），所以这不是错误；'
+      : '这一份没有签名。签名在插件规范里是可选的（§4.1），所以这不是错误；'
         + '但它意味着"内容与上次一致"是这里唯一能给你的保证。';
     one.append(who2);
 
+    // ★ 这一句**留着**，而且是这一版唯一的安全边界（进程隔离还没做）：
+    //   同意一个带客户端代码的插件 = 把工作站的代码执行权交给集群管理员。
+    //   压到一行：「不同意会怎样」由那颗按钮自己的措辞说（「不同意，删掉本机
+    //   这一份」/「不同意」）—— 按钮能说清的事，不必再写一句在旁边。
     const warn = document.createElement('p');
     warn.className = 'why';
     warn.textContent = '同意之后，这个插件的客户端代码会在你这台机器上运行'
-      + '（与客户端同一个进程、同样的权限，目前**没有进程隔离**）。'
-      + '不确定来源时不要同意 —— 不同意的话，它在暂存里那一份会被删掉，站点上那份不受影响。';
+      + '（与客户端同一个进程、同样的权限，目前没有进程隔离）。不确定来源时不要同意。';
     one.append(warn);
 
     const row = document.createElement('div');
@@ -1681,10 +1778,10 @@ function renderInert(pv) {
   d.append(head);
   d.append(el('p', 'plug-desc',
     '它们已经在你的本机上了（是站点分发下来的），而它们的客户端代码没有在跑。'
-    + '原因只有一个：**你还没有同意过这一份**，而本站此刻没有在报它们 ——'
+    + '原因只有一个：你还没有同意过这一份，而本站此刻没有在报它们 ——'
     + '所以暂时没有"同意"这个入口（管理员把插件关掉了的时候就是这样）。'));
   d.append(el('p', 'plug-desc',
-    '它们不会被加载，也不会被回收：**站点不报一个插件不构成删除它的理由** ——'
+    '它们不会被加载，也不会被回收：站点不报一个插件不构成删除它的理由 ——'
     + '它随时可能再打开。把你不要的那一份删掉就行，下一次对账会重新问你一次。'));
 
   for (const p of list) {
@@ -1767,12 +1864,12 @@ function renderPluginData(d) {
     wrap.append(el('p', 'plug-desc',
       `本次运行清掉了 ${reclaimed.count} 份没人管的数据`
       + (who.length ? `（${who.join('；')}）` : '')
-      + '。它们按现在装着的插件**再也读不到**了 —— 那个插件卸载了、那个工作区删了、'
+      + '。它们按现在装着的插件再也读不到了 —— 那个插件卸载了、那个工作区删了、'
       + '或者插件换了共享组 —— 留着只会越攒越多，所以对账时自动收掉了。'));
   }
   if (Array.isArray(reclaimed.failed) && reclaimed.failed.length) {
     wrap.append(el('p', 'plug-desc',
-      `★ 还有 ${reclaimed.failed.length} 份没能清掉`
+      `还有 ${reclaimed.failed.length} 份没能清掉`
       + `（${reclaimed.failed.map((f) => `${f.name}：${f.error}`).join('；')}）。`
       + '它们还在盘上，下一次对账会再试一次。'));
   }
@@ -1786,20 +1883,19 @@ function renderPluginData(d) {
       //   没有任何探针能当场核对它 —— 见 plugin-data-audit.js 里 `allUnknown`）。
       //   所以话要说满：说出"多半是根取错了"，也说出"下面为什么一个按钮都没有"。
       wrap.append(issueBox('warn', '这一屏的目录一个都认不出',
-        '本机有两处放插件数据：Electron 那棵**存储分区目录**（那一根是问 Electron'
-        + '要来的，还当场核对过名字），以及**本程序自己拼出来**的插件数据目录。'
+        '本机有两处放插件数据：Electron 那棵存储分区目录（那一根是问 Electron'
+        + '要来的，还当场核对过名字），以及本程序自己拼出来的插件数据目录。'
         + '一整屏都认不出，更像"其中某一根指到了别的地方"，而不是"你攒了一堆垃圾"。'
         + '⇒ 下面一个删除按钮都没有，这是故意的：一份我不认识的东西，'
         + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在；还在的话值得报出来。'));
     }
+    // ★ 这里从前有一段解释"一份数据是什么、它的两个落点在哪"。删掉了：**每一行
+    //   自己就在说这件事**（`placesText(r.places)` 逐行说清它在浏览器里、在磁盘上
+    //   还是两处都有），而那张映射图的右列说的是"它被谁指着"。一段统论说不出
+    //   单行说不出的事，只会让人多读一遍。
     wrap.append(el('p', 'plug-desc',
-      '插件在运行中攒下的东西按**份**存在本机，一份 = 一个插件 + 共享组 + 工作区。'
-      + '一份数据有两个落点：**浏览器里的存储**（编辑器布局、打开的标签页、登录状态），'
-      + '以及**插件自己写在磁盘上的文件**。下面这些**没有任何连接在用**：它们要么'
-      + '属于一个已经删掉的工作区，要么属于一个已经不在本机的插件版本。'));
-    wrap.append(el('p', 'plug-desc',
-      '★ 删掉一份**找不回来** —— 那个插件下次打开会是一份全新的空白存储。'
-      + '想重置**正在用**的那一份，用工作区下拉里的「＋ 新建空白工作区…」。'));
+      '删掉一份找不回来 —— 那个插件下次打开会是一份全新的空白存储。'
+      + '想重置正在用的那一份，用工作区下拉里的「＋ 新建空白工作区…」。'));
   }
 
   for (const r of rows) {
@@ -1834,19 +1930,19 @@ function placesText(places) {
   const p = (places || []).includes('partition');
   const d = (places || []).includes('data');
   if (p && d) return '它有两部分：浏览器里的存储（布局、标签页、登录状态），'
-    + '以及那个插件**写在磁盘上的文件**。';
-  if (d) return '它是那个插件**写在磁盘上的文件**。';
+    + '以及那个插件写在磁盘上的文件。';
+  if (d) return '它是那个插件写在磁盘上的文件。';
   return '它在浏览器里（那个插件没有另外往磁盘上写东西）。';
 }
 
 /** 删掉一份插件数据。**不可逆**，所以先问一句（照「删除连接」那条的语气）。 */
 async function dropPluginData(r) {
   const parts = (r.places || []).includes('data')
-    ? '其中包括那个插件**写在磁盘上的文件**，它下次会从零开始'
+    ? '其中包括那个插件写在磁盘上的文件，它下次会从零开始'
     : '那是它在本机攒下的编辑器布局、打开的标签页和登录状态';
   const sure = window.confirm(
     `删掉「${r.label}」？\n\n`
-    + `${parts}，删掉之后**找不回来**。\n\n确定要删吗？`);
+    + `${parts}，删掉之后找不回来。\n\n确定要删吗？`);
   if (!sure) return;
   const res = await window.slurmate.deletePluginData({ name: r.name });
   if (!res || !res.ok) {
@@ -2846,6 +2942,18 @@ async function init() {
     (form.mode === 'edit' && form.id ? { connectionId: form.id } : undefined);
 
   // ── 事件 ──
+  // 「关于」的入口是**最上面那一行标题**（`#about-head`）。它装的是这一版的说明与
+  // 开发者模式，而那两样都不是每次打开都要看的 —— 所以它是一个可以点开、也可以
+  // 不点的地方，而不是常驻的一块。
+  // ★ 用 `role="button"` + tabindex 而不是 `<button>`：button 里不许放 h1/p，
+  //   浏览器会把它们拆开重排。手写的那两条键盘路径（回车 / 空格）就是代价。
+  const aboutHead = $('about-head');
+  const toggleAbout = () => $('sec-about').classList.toggle('hidden');
+  aboutHead.onclick = toggleAbout;
+  aboutHead.onkeydown = (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleAbout(); }
+  };
+
   $('btn-new').onclick = () => openNewForm();
   $('btn-cancel-form').onclick = () => closeForm();
 
@@ -2988,7 +3096,22 @@ async function init() {
   //   做的事正好相反，而共用一个实现的话，其中一个的语义迟早会被"顺手统一"掉 ——
   //   漂的方向是"点了临时离开，作业被停了"。
   $('btn-leave').onclick = doLeave;
-  $('btn-disconnect').onclick = doDisconnect;
+  // ★★ 【断开】是**两段式**，而【临时离开】不是。这不是双重标准：断开是这一屏上
+  //   唯一一个会**销毁正在跑的计算**的按钮，它和"回列表"那颗紧挨着，而误点的代价
+  //   是一个可能已经跑了几小时的作业加一份机时 —— 不可逆，也没有第二次机会。
+  //   ★ 那句话里必须带上**有几个作业会没**：只说"确定断开吗"，用户答不了。
+  //   ★ 条数现算（`liveCount()`，与 `allowSwitchTo` / `#dev-restart` 同一份定义）：
+  //     写在别处缓存着的话，漂开的方向是"这个框说 2 条、那个框说 1 条"。
+  $('btn-disconnect').onclick = () => {
+    const n = liveCount();
+    armConfirm($('btn-disconnect'), {
+      why: n
+        ? `断开连接会结束 ${n} 个会话 —— 集群上的作业会被取消，已经跑掉的时间不会回来。`
+        : '断开与登录节点的连接。',
+      yes: '断开',
+      run: doDisconnect,
+    });
+  };
 
   // ── 三屏之间的前后关系 ──
   // ★ 它们是**一个站点的三个层次**，所以靠前后关系走，不是一排平级标签：
@@ -3050,7 +3173,13 @@ async function init() {
   //   【结束】（`#btn-jobs-end`，结束选中的那一条）接过。状态条上这一个留着，
   //   而且必须留着：会话跑起来之后窗口主体被原生视图整块盖住，那 30px 是唯一
   //   够得着的像素（与 `sb-reload` / `sb-temp` 同一条理由）。
-  $('sb-end').onclick = () => endFrontSession();
+  // ★★ 两段式（见 armConfirm）：它会取消集群上正在跑的作业，而它旁边紧挨着
+  //   「重新加载」。第一段可退，第二段才真的结束。
+  $('sb-end').onclick = () => armConfirm($('sb-end'), {
+    why: '结束这一条会话，集群上的作业会被取消。',
+    yes: '结束',
+    run: endFrontSession,
+  });
 
   // 状态条里的工作区选择器 —— 会话跑起来之后唯一够得着的入口。
   // 它改的是当前活跃连接的工作区（会话正跑在它上面，所以会立刻换端口重连隧道，

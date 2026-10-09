@@ -42,6 +42,9 @@
   <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 code-server
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
   <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
+  <!-- ★ 「结束会话」是**两段式**的（见 panel.js 的 armConfirm）：点一下只是把这一格
+       换成一行确认，第二下才真的结束。理由与那两个出口同源 —— 它会把集群上正在跑的
+       作业取消掉，而它旁边紧挨着「重新加载」。 -->
   <button id="sb-end" class="danger tiny hidden">结束会话</button>
   <!-- ★ 「这一份是临时副本」。它**必须**待在状态条里 —— 与上面那两个按钮、
        以及 #sb-dev 同一条理由：会话一跑起来，面板那一块就被原生视图整块盖住，
@@ -90,8 +93,100 @@
       这里改的东西不会被记录，关掉它就没了。
     </div>
 
-    <h1>Slurmate</h1>
-    <p class="sub" id="app-sub">远程开发会话</p>
+    <!-- ── 标题那一行 = 「关于」的入口 ──
+         ★ 它是**点出来的**，不是一个常驻的节：这一版要说明的东西（这是什么、
+           开发者模式）没有一件是每次打开都要看的。入口放在这一行，是因为它
+           在每一屏都在，而且它本来就是"关于这个客户端"最自然的那一格。
+         ★ 用 div + role 而不是 <button>：button 里不许放 h1/p（内容模型是
+           phrasing content），浏览器会把它拆开重排。 -->
+    <div id="about-head" role="button" tabindex="0" title="关于这个客户端 · 开发者模式">
+      <h1>Slurmate</h1>
+      <p class="sub" id="app-sub">远程开发会话</p>
+    </div>
+
+    <!-- ── 关于 ──
+         内容 = 这一版的说明 + **开发者模式**。开发者模式从前是面板最下面一节、
+         永远露着的；搬进来之后那个理由（开关必须够得着，否则打开了就关不掉）
+         由"点标题就能进来"接住，而主界面让出来一块。
+         ★ 状态条那格 `开发者模式 · 未连接集群` **留着**：会话一跑起来窗口主体
+           就被原生视图盖住，那是唯一还看得见的地方（见状态条那一段）。 -->
+    <section id="sec-about" class="hidden">
+      <h2>关于</h2>
+      <p class="sub">
+        Slurmate 把集群上的一个作业变成一个你能在里面干活的远程开发会话。
+        连接、密钥与插件数据都在本机；站点那一侧是 <code>slurmate-sessiond</code>。
+      </p>
+
+      <h3>开发者模式</h3>
+      <!-- ★ 从前这里是**两段**（它是干什么的 / 它是给谁用的）。合成一句 ——
+           一行的位置够说清"换掉整个后端、配置完全独立"，而"给谁用"由名字自己说。 -->
+      <p class="sub">
+        打开之后客户端<strong>不连集群</strong>，改用本地一个模拟的站点（真的 HTTP、
+        真的分发、真的走同意闸，只有 SSH 那一跳是假的），配置完全独立、绝不会碰真配置。
+      </p>
+
+      <div class="row">
+        <label class="check">
+          <input type="checkbox" id="dev-on"> 打开开发者模式
+        </label>
+      </div>
+      <!-- ★ 「重启后生效」必须说出来。静默的半生效（界面变了、后端没换）正是这个
+           项目一路上在清的那类问题。 -->
+      <p id="dev-pending" class="sub hidden"></p>
+      <div class="row">
+        <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
+      </div>
+
+      <div id="dev-src" class="hidden">
+        <h3>假站点的插件来源</h3>
+        <p class="sub">
+          假站点从这里读插件：<strong>每个子目录是一个插件</strong>（里面有
+          plugin.json）。默认是仓库里的 <code>plugins/</code>；插件作者可以把它
+          指到自己那棵树上。
+        </p>
+        <p>当前：<code id="dev-src-path" class="mono"></code></p>
+        <p id="dev-src-count" class="sub"></p>
+        <div class="row">
+          <button id="dev-pick" class="ghost">选择目录…</button>
+          <button id="dev-reset-src" class="ghost">恢复默认</button>
+        </div>
+        <p class="sub">
+          它与真的守护进程一样，插件清单是<strong>启动时的快照</strong> ——
+          所以换了目录也要重启。
+        </p>
+      </div>
+
+      <div id="dev-debug" class="debug hidden">
+        <h3>调试开关</h3>
+        <p class="sub">
+          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
+          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+        </p>
+        <div class="row">
+          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
+          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
+          <button class="ghost" data-debug="reap">模拟会话被回收</button>
+          <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
+               要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
+          <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
+               而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
+          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
+          <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
+               而【接管】这个按钮的全部意义就是那一刻。 -->
+          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
+          <button class="ghost" data-debug="reset">复位</button>
+        </div>
+        <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
+             限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
+             混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
+        <div class="row">
+          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
+          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
+          <button class="ghost" data-debug="rate-limited">站点在限流</button>
+          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+        </div>
+      </div>
+    </section>
 
     <!-- ══ 三屏 ══════════════════════════════════════════════════════════════
          连接列表 → 插件列表 → 作业列表。**同时只露一个**（见 panel.js 的
@@ -135,19 +230,16 @@
         还没有保存任何登录节点。点右上角的「新建连接」填一个 ——
         只需要用户名、主机和端口。
       </p>
-      <!-- ★ 这一句是**边界**，不是客套话：打开客户端确实不会连上任何一台，
-           而"某个站点上还有没有作业在跑"这件事，不连上去就无从知道（作业在
-           服务端，客户端手上没有它的影子）。★ 所以第二句同样要紧 ——
-           连上去**不会动任何作业**，于是"点一下看看"是一个没有代价的动作。 -->
-      <p class="sub" id="conn-notes">
-        打开客户端<strong>不会自动连上任何一台</strong>。
-        想知道某个站点上还有没有作业在跑，点它那一行的「连接」——
-        连上去<strong>不会动任何作业</strong>，只是把还在跑的那些接回来看着。
-        <br>
-        连着的时候有两个出口，它们对作业做的事<strong>正好相反</strong>：
-        「临时离开」让作业<strong>继续跑</strong>（但没人看着它 35 分钟就会被回收），
-        「断开」则<strong>把作业停掉</strong>。
-      </p>
+      <!-- ★ 这一屏底下的那两段解释删掉了（「不会自动连上」「两个出口正好相反」）。
+           三条理由，各自都不是"这句可以省"：
+             · "不自动连"由界面自己说 —— 打开就停在这一屏，没有别的地方可落；
+             · "两个出口相反"由那两颗按钮的措辞与颜色说 —— 「临时离开」是 ghost、
+               「断开」是 danger，它们就并排在标题栏上；
+             · 承重的那一句（**没人看着它 35 分钟就会被回收**）留在 `#btn-leave`
+               自己的 title 里 —— 那是按下去之前唯一必须知道的事。
+           ★ 删掉它同时带走一个坑：那一段话是**运行期**跟着列表显隐的
+             （`renderConnections` 里那一句 toggle），而它说的事情与"有没有连接"
+             没有关系。 -->
 
       <!-- ── 连接 ↔ 工作区 ↔ 数据 的映射图 ──
            三列，两段线：左列连接 →（它用哪个工作区）中列工作区 →（它引用哪几份数据）
@@ -158,23 +250,20 @@
            连线用 SVG 的 <path d="…">：`d` 是**几何**属性，不在文件头那条 CSP
            的管辖范围内（它禁的是 style="…"）。所以线的外观一律走 app.css 的
            class，坐标由 panel.js 现算（见 drawWorkspaceLines）。 -->
+      <!-- ★ 这里从前有**两段**说明（这个关系是什么 / 工作区什么时候会被回收）。
+           第一段删掉：**映射图就是那个关系** —— 三列、两段线，一根线说的是
+           "它用哪个"，两根线汇到同一个盒子说的是"这一份被两个工作区共用"，
+           而在下拉框里后一件事一个字都看不出来。用文字再讲一遍，讲的是同一件事，
+           而且讲得不如图准（图的连线是现算的，文字是写死的）。
+           第二段是**后果**，不是解释，所以留着 —— 压成一行 title。 -->
       <div id="sec-workspaces" class="hidden">
-        <h3>连接、工作区与数据</h3>
-        <p class="sub">
-          一条连接只用一个工作区，一个工作区可以被多条连接共用。工作区里每个插件
-          各用一份数据；<strong>一份数据可以被几个工作区共用</strong>，共用的那几个
-          看到的是同一份登录状态与布局。
-        </p>
+        <h3 title="没有连接在用、也没有会话在跑的工作区会被自动删掉 —— 它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。">连接、工作区与数据</h3>
         <div id="workspace-map" class="wmap">
           <svg id="wmap-lines" class="wmap-lines"></svg>
           <div class="wmap-col" id="wmap-conns"></div>
           <div class="wmap-col" id="wmap-workspaces"></div>
           <div class="wmap-col" id="wmap-spaces"></div>
         </div>
-        <p class="sub">
-          <strong>没有连接在用、也没有会话在跑的工作区会被自动删掉</strong> ——
-          它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。
-        </p>
       </div>
     </section>
 
@@ -278,11 +367,6 @@
       <!-- ★ 这一屏的标题在上面那个 `.sec-head` 里（`#plugins-title`，由 panel.js
            写成「插件 · user@host」—— 用户在几个站点之间来回时，最要紧的一件事
            就是"我现在看的是哪一台"）。所以这里不再另起一个 h2。 -->
-      <p class="sub" id="purpose-hint">
-        分区由集群从你有权限的分区里随机挑一个，节点和端口都自动分配。
-        会话到期前会自动续期。<strong>默认资源按插件不同</strong>，见每一块里那行。
-      </p>
-
       <!--
         每个插件一块，由 pluginsView() 画出来。这里**一个插件名都不写** ——
         站点装了哪些、本机认得哪些，都是运行期知道的（见 panel.js 的 renderPlugins）。
@@ -326,10 +410,10 @@
         三个按钮（从一个包安装… / 打开插件目录 / 重新扫描）。它随本机池一起删掉了 ——
         插件只有一条来的路，所以没有"装"这个动作需要藏起来。
 
-        ★ 今天另有一个**同名但不同事**的「开发者模式」，在面板最下面单独一节
-        （`#sec-dev`）：那个开关换的是**整个后端**（不连集群、改用本地模拟站点），
-        与"多加载一个插件目录"没有关系。两者的区别值得记一笔 —— 同名而不同事，
-        正是最容易把下一个人带偏的那种重名。
+        ★ 今天另有一个**同名但不同事**的「开发者模式」，在「关于」里（`#sec-about`，
+        入口是最上面那一行标题）：那个开关换的是**整个后端**（不连集群、改用本地
+        模拟站点），与"多加载一个插件目录"没有关系。两者的区别值得记一笔 ——
+        同名而不同事，正是最容易把下一个人带偏的那种重名。
       -->
 
       <details id="adv">
@@ -392,7 +476,11 @@
         <button id="btn-to-plugins" class="ghost">← 插件</button>
         <button id="btn-jobs-new">新建…</button>
         <button id="btn-jobs-takeover" class="ghost">接管</button>
-        <button id="btn-jobs-end" class="danger">结束</button>
+        <!-- ★ 「关掉窗口同样会结束会话，但合盖/断网/断电不会」这一段从原来那一屏的
+             底部搬到了这颗按钮的 title 里 —— 它是**这一颗按钮的后果**，摆在一屏的
+             末尾等于让人先读完再回头看是哪一颗。格式与 `#btn-leave` 那个 title 同形。 -->
+        <button id="btn-jobs-end" class="danger"
+                title="结束这一条会话，集群上的作业会被取消。★ 关掉窗口同样会结束会话；但合盖、断网、断电不会 —— 那些情况客户端说不上话，作业会被保留，下次连上时自动接回。">结束</button>
         <button id="btn-jobs-reload" class="ghost">重新加载页面</button>
         <button id="btn-jobs-refresh" class="ghost">刷新</button>
       </div>
@@ -415,11 +503,6 @@
         </p>
         <div id="joblog-body" class="joblog hidden"></div>
       </div>
-      <p class="sub row-spaced">
-        <strong>关掉窗口同样会结束会话</strong>；但合盖、断网、断电不会 ——
-        那些情况客户端说不上话，作业会被保留，下次连上时自动接回。
-      </p>
-
       <!-- ── 最近作业（`sacct`）──
            ★ 它从「集群状态」那一屏搬到这里：那是一张**作业**的表，前台这些行是
              "现在有哪些"，这一段是"最近跑过哪些" —— 同一件事的两个时间尺度。
@@ -430,84 +513,6 @@
         <button id="btn-history" class="ghost tiny">取最近作业</button>
       </p>
       <div id="history-body"></div>
-    </section>
-
-    <!-- ── 开发者模式 ──
-         这一节**永远露出来**（不像从前那样只在演示模式下露）：开关必须够得着，
-         否则打开了就再也关不掉。打开之后它里面那两块配置才出现。 -->
-    <section id="sec-dev">
-      <h2>开发者模式</h2>
-      <p>
-        打开之后，客户端<strong>不连集群</strong>，改用本地一个模拟的站点：真的 HTTP
-        服务、真的分发插件、真的走同意闸，只有 SSH 那一跳是假的。它有自己的配置
-        （连接、密钥、插件、同意台账），<strong>绝不会碰上面那些真配置</strong>。
-      </p>
-      <p class="sub">
-        它是给写插件的人和改客户端的人用的。普通用户不需要它 —— 关着的时候客户端
-        与它完全无关。
-      </p>
-
-      <div class="row">
-        <label class="check">
-          <input type="checkbox" id="dev-on"> 打开开发者模式
-        </label>
-      </div>
-      <!-- ★ 「重启后生效」必须说出来。静默的半生效（界面变了、后端没换）正是这个
-           项目一路上在清的那类问题。 -->
-      <p id="dev-pending" class="sub hidden"></p>
-      <div class="row">
-        <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
-      </div>
-
-      <div id="dev-src" class="hidden">
-        <h3>假站点的插件来源</h3>
-        <p class="sub">
-          假站点从这里读插件：<strong>每个子目录是一个插件</strong>（里面有
-          plugin.json）。默认是仓库里的 <code>plugins/</code>；插件作者可以把它
-          指到自己那棵树上。
-        </p>
-        <p>当前：<code id="dev-src-path" class="mono"></code></p>
-        <p id="dev-src-count" class="sub"></p>
-        <div class="row">
-          <button id="dev-pick" class="ghost">选择目录…</button>
-          <button id="dev-reset-src" class="ghost">恢复默认</button>
-        </div>
-        <p class="sub">
-          它与真的守护进程一样，插件清单是<strong>启动时的快照</strong> ——
-          所以换了目录也要重启。
-        </p>
-      </div>
-
-      <div id="dev-debug" class="debug hidden">
-        <h3>调试开关</h3>
-        <p class="sub">
-          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
-          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
-        </p>
-        <div class="row">
-          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
-          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
-          <button class="ghost" data-debug="reap">模拟会话被回收</button>
-          <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
-               要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
-          <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
-               而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
-          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
-          <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
-               而【接管】这个按钮的全部意义就是那一刻。 -->
-          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
-          <button class="ghost" data-debug="reset">复位</button>
-        </div>
-        <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
-             限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
-             混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
-        <div class="row">
-          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
-          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
-          <button class="ghost" data-debug="rate-limited">站点在限流</button>
-          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
-        </div>
-      </div>
     </section>
 
     <h2>日志</h2>

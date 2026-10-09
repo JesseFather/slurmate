@@ -77,16 +77,57 @@ function mkEl(tag) {
     tagName: String(tag).toUpperCase(),
     children: [], dataset: {}, attrs: {},
     _text: '', className: '', value: '', title: '', type: '', disabled: false,
-    onclick: null, onchange: null, oninput: null, oncancel: null, style: {},
+    onclick: null, onchange: null, oninput: null, onkeydown: null, oncancel: null,
+    style: {},
     open: false,
     // <dialog> 的那两个方法：`askFork` 会真的调用它们，缺了就是一次 TypeError
     // ——而"那一格按下去炸了"与"按下去没反应"在这一组眼里必须分得开。
     showModal() { e.open = true; },
     close() { e.open = false; },
-    append(...kids) { for (const k of kids) e.children.push(k); },
-    prepend(k) { e.children.unshift(k); },
-    appendChild(k) { e.children.push(k); return k; },
-    remove() {},
+    append(...kids) { for (const k of kids) e.adopt(k); },
+    prepend(k) {
+      if (k && typeof k === 'object') k.parentNode = e;
+      e.children.unshift(k);
+    },
+    appendChild(k) { e.adopt(k); return k; },
+    // ★ `parentNode` / `insertBefore` / `nextSibling` / `contains` / `focus` 是被
+    //   **两段式确认**（panel.js 的 `armConfirm`）拉进来的：它要把那一行确认插到
+    //   那颗按钮**后面**，并把按钮自己留在 DOM 里（只加一个 class 不显示）。
+    //   没有这几样的话，那一段代码一进去就 TypeError —— 而"炸了"与"守住了"
+    //   在这一组眼里必须分得开。
+    adopt(k) {
+      if (k && typeof k === 'object') { k.parentNode = e; e.children.push(k); }
+      return k;
+    },
+    insertBefore(k, ref) {
+      const i = ref ? e.children.indexOf(ref) : -1;
+      if (i < 0) return e.adopt(k);
+      if (k && typeof k === 'object') k.parentNode = e;
+      e.children.splice(i, 0, k);
+      return k;
+    },
+    get parentNode() { return e._parent || null; },
+    set parentNode(p) { e._parent = p; },
+    get nextSibling() {
+      const p = e._parent;
+      if (!p) return null;
+      const i = p.children.indexOf(e);
+      return i < 0 ? null : (p.children[i + 1] || null);
+    },
+    contains(k) {
+      if (k === e) return true;
+      return e.children.some((c) => c && typeof c.contains === 'function' && c.contains(k));
+    },
+    focus() { e._focused = true; },
+    // ★ **真的**从父节点摘掉自己。壳里它是空的（`remove() {}`），而两段式确认
+    //   靠"这一行还在不在"判可退 —— 摘不掉的壳会让"收起"这件事**测不出来**。
+    remove() {
+      const p = e._parent;
+      if (!p) return;
+      const i = p.children.indexOf(e);
+      if (i >= 0) p.children.splice(i, 1);
+      e._parent = null;
+    },
     get lastChild() { return e.children[e.children.length - 1] || null; },
     setAttribute(k, v) { e.attrs[k] = String(v); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
@@ -110,7 +151,14 @@ function mkEl(tag) {
   };
   Object.defineProperty(e, 'textContent', {
     get() { return e._text; },
-    set(v) { e._text = String(v); e.children.length = 0; },
+    set(v) {
+      e._text = String(v);
+      // ★ 被清掉的那些孩子要**脱离文档**（`parentNode` 归零）—— 两段式确认收
+      //   第一段时用的就是"这一行还在不在文档里"，而"清空 textContent"是重画
+      //   一整块最常用的写法。
+      for (const k of e.children) if (k && typeof k === 'object') k._parent = null;
+      e.children.length = 0;
+    },
   });
   return e;
 }
@@ -132,7 +180,15 @@ function boot(src) {
       return byId.get(id);
     },
     querySelectorAll: () => [],
-    addEventListener() {},
+    // ★ 两段式确认在**捕获阶段**挂一个"点到别处就收起"的监听（见 armConfirm）。
+    //   壳里这两条只记账：本机没有事件循环，而"点别处收起"那件事由那条**真实的
+    //   几何判据**在真机上守，这里要守的是"挂上了、也摘掉了"。
+    addEventListener(t, f) { doc._ls.push([t, f]); },
+    removeEventListener(t, f) {
+      const i = doc._ls.findIndex((x) => x[0] === t && x[1] === f);
+      if (i >= 0) doc._ls.splice(i, 1);
+    },
+    _ls: [],
     body: mkEl('body'),
   };
   const ctx = vm.createContext({
@@ -144,7 +200,7 @@ function boot(src) {
   vm.runInContext(DOM_SRC, ctx, { filename: 'dom.js' });
   vm.runInContext(withoutInit(src), ctx, { filename: 'panel.js' });
   return {
-    byId,
+    byId, doc,
     run: (expr) => vm.runInContext(expr, ctx),
     fn: (name) => vm.runInContext(name, ctx),
   };
@@ -207,6 +263,152 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
     assert.equal(childrenOf(r).some((x) => x.tagName === 'SELECT'), false,
       '连接行里不该再有下拉（工作区那一格在连接表单里）');
   }
+});
+
+test('★★ 两段式确认：第一下只是把那一格换成一行确认，第二下才真的做', () => {
+  // ★★ 这一条守的是**设计律 2**：不可逆的动作由"必须先经过的那一步"承载。
+  //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——
+  //   而 `window.confirm` 给不了两段：框弹出来的时候用户**已经按下去**了。
+  //
+  // ★ 四条判据，缺一条这条规矩就不成立：
+  //   · 第一下**一个请求都不发**（"点了就删"= 没有第二段）；
+  //   · 那一行里要**说出后果**（只说"确定吗"，用户答不了）；
+  //   · 第二下才发，而且**恰好一次**；
+  //   · 原来那颗按钮**还在 DOM 里**（只加一个 class 不显示）—— 删掉它的话，
+  //     `renderSnapshot` 下一次按 `running` 去 toggle 它的 `hidden` 就作用在 null 上。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__calls = [];'
+    + 'window.slurmate.deleteConnection = (id) => { window.__calls.push(id);'
+    + ' return Promise.resolve({ ok: true, connections: [], activeConnectionId: null }); };');
+  h.fn('renderConnections')(CONNS);
+
+  const row = h.byId.get('conn-list').children[0];
+  const del = childrenOf(row).find((x) => x._text === '删除');
+  assert.ok(del, '第一行里要有那颗「删除」');
+  const armedRow = () => row.children[row.children.length - 1];
+
+  // ── 第一段 ──
+  del.onclick();
+  assert.equal(h.run('window.__calls.length'), 0,
+    '★★ 第一下**不许**删 —— 它是第一段，只把那一格换成一行确认');
+  assert.notEqual(h.run('armed'), null, '第一段要挂在 armed 上（否则没有任何东西收得掉它）');
+  assert.equal(del.classList.contains('armed-off'), true,
+    '★ 原来那颗按钮留在 DOM 里、只是不显示');
+  const cluster = armedRow();
+  assert.equal(cluster.className, 'armed');
+  const why = cluster.children[0]._text;
+  assert.match(why, /私钥/, '后果要说出来 —— 只说"确定吗"，用户答不了');
+  assert.match(why, /工作区 1/,
+    '★ 「这个工作区会跟着被删掉」也要说 —— 判据是 soleOwnerId（与主进程数的是同一件事）');
+  assert.match(why, /写在磁盘上的那些文件/);
+
+  // ★ 那一行里两颗按钮**必须长得不一样**：一颗是不可逆的第二段（danger），
+  //   一颗是回到原样（ghost）。画成一样的，用户分不清自己按下去的是哪个 ——
+  //   而这一整条规矩（不可逆的动作要有"必须先经过的那一步"）要成立，靠的正是
+  //   "第二段看得出来是第二段"。
+  assert.match(cluster.children[1].className, /danger/,
+    '★ 第二段那颗按钮要是 danger —— 它才是不可逆的那一下');
+  assert.match(cluster.children[2].className, /ghost/,
+    '而「取消」是 ghost：它与第二段不是同一类动作');
+
+  // ── 取消：一行收掉，回到原样，一个字节都没发 ──
+  cluster.children[2].onclick();
+  assert.equal(h.run('armed'), null, '取消之后不该还挂着一个第一段');
+  assert.equal(del.classList.contains('armed-off'), false, '取消之后那颗按钮要回来');
+  assert.equal(row.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
+  assert.equal(h.run('window.__calls.length'), 0, '取消 = 什么都没发生');
+  assert.equal(h.run('document._ls.length'), 0,
+    '★ 那两个"点别处 / 按 Esc"的监听也要一起摘掉 —— 每点一次多挂一个，它们会越攒越多');
+
+  // ── 第二段 ──
+  del.onclick();
+  const again = armedRow();
+  const p = again.children[1].onclick();          // 「删除」
+  assert.equal(h.run('armed'), null, '执行的那一下要先把这一行收掉');
+  assert.equal(h.run('document._ls.length'), 0);
+  return p.then(() => {
+    assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__calls))'), ['c1'],
+      '★ 第二下才发，而且恰好一次');
+    assert.equal(h.run('document._ls.length'), 0);
+  });
+});
+
+test('★★ 重画那一屏会把没走完的第一段收掉（它挂在某一行的里面）', () => {
+  // ★ 不收的后果是**静默的**：那一行连同确认一起被丢掉，而 `armed` 还指着它 ——
+  //   用户接着点"别处"收的是一个已经不在文档里的节点，看起来像没反应；
+  //   更糟的是 `armed` 从此不为 null，下一次点另一行那颗按钮时 `disarmArmed()`
+  //   先把**这个幽灵**收掉（白做一次），真正的第二段反而没了。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.fn('renderConnections')(CONNS);
+  const del = childrenOf(h.byId.get('conn-list').children[0]).find((x) => x._text === '删除');
+  del.onclick();
+  assert.notEqual(h.run('armed'), null, '前提：这里确实有一个没走完的第一段');
+
+  h.fn('renderConnections')(CONNS);               // 探测 / 删掉一条 / 连上一条都会走这里
+  assert.equal(h.run('armed'), null, '重画之前必须先把它收掉');
+  assert.equal(h.run('document._ls.length'), 0);
+  assert.equal(del.classList.contains('armed-off'), false,
+    '★ 那颗按钮的 class 也要拨回来 —— 它现在是一棵被丢掉的老树，而下次重画会造一颗新的；'
+    + '残留的 `armed-off` 属于"那颗按钮永远不显示"这一类看不见的坏法');
+});
+
+test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title', () => {
+  // ★★ 这一条守的是"一段 → 一行 title"这个改动**本身**。原来那段话有三个句子
+  //   （事实 / 为什么取不回来 / 该怎么办），而它读起来像一段讨论。
+  //
+  //   ★ 而它必须**分叉**：两种情形要用户做的事**方向相反**（升级客户端 /
+  //     升级没用，得找管理员）。指错了方向，用户会去做一件解决不了问题的事 ——
+  //     所以正文那一行必须是**那个方向**，理由放在 title 里。
+  //
+  //   ★ 判据是"正文短 + title 非空"，不是"某句话在不在"：后者在"整段又长回来"
+  //     的时候照样绿。
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  const show = (verdict) => {
+    h.fn('renderSitePlugins')({ sitePoolDir: '/p',
+      site: { label: '本站', reason: 'site_too_new', daemonVersionVerdict: verdict,
+        versions: [], strays: [] } });
+    return childrenOf(h.byId.get('site-plugins')).find((x) => x.className === 'why');
+  };
+
+  const cross = show('cross_major');
+  assert.ok(cross, '跨大版本那一支要画出一句话');
+  assert.match(cross._text, /请升级这个客户端/, '这一支的动作是"升级客户端"');
+  assert.equal(cross._text.length <= 60, true,
+    `★ 正文只剩**一行**：${cross._text.length} 个字 —— 又长回去了。`
+    + '理由进 title（下面那一句判它）');
+  assert.match(cross.title || '', /大版本/,
+    '★ 理由要挂在 `title` 上 —— 没有它的话，这一行就是一个没有出处的断言');
+
+  const other = show('same_major');
+  assert.match(other._text, /升级客户端解决不了它/,
+    '★ 另一支必须**明确否掉**"升级客户端" —— 那是用户看了这句话唯一会去做的事，'
+    + '而它对"站点自己不一致"这种情况没有用');
+  assert.equal(other._text.length <= 60, true, '正文同样只留一行');
+  assert.match(other.title || '', /站点自己不一致/,
+    '★ 而"凭什么这么判"要说得出来 —— 判定归握手（`daemonVersionVerdict`），'
+    + '界面只负责按它选一句话');
+});
+
+test('★★ 同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
+  // ★ 这是这一版唯一的安全边界（进程隔离还没做），所以它**留着**；但它原来是
+  //   三句 —— 第三句讲的是"不同意会怎样"，而那件事那颗按钮自己的措辞已经说了
+  //   （「不同意，删掉本机这一份」）。按钮能说清的事不必再写一句在旁边。
+  //
+  //   ★ 判据用**句数**而不是字数：字数会随措辞漂，而"两行以内"约束的正是句子数。
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  h.fn('renderConsent')({ consent: [{
+    id: 'p1', name: 'p1', title: '编辑器', version: '1.0.0', fileCount: 3,
+    existing: false, siteLabel: '本站', digest: 'abcdef0123456789', digestAlg: 1,
+    previous: null, fingerprint: null,
+  }] });
+  const warn = childrenOf(h.byId.get('plugin-consent'))
+    .find((x) => /^同意之后/.test(x._text || ''));
+  assert.ok(warn, '同意那一块里找不到那句警告了 —— 它是用户做决定时缺不得的一条信息');
+  assert.match(warn._text, /没有进程隔离/, '★ 必须说清"目前没有进程隔离"');
+  assert.match(warn._text, /在你这台机器上运行/, '★ 必须说清客户端代码会在本机运行');
+  assert.equal((warn._text.match(/。/g) || []).length, 2,
+    `★ 这一句应当是**两句**：现在 ${JSON.stringify(warn._text)}　——`
+    + '第三句讲"不同意会怎样"，而那件事按钮自己会说了');
 });
 
 test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () => {

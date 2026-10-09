@@ -130,6 +130,63 @@ test('★ 插件起不来的四条原因，四句话互不相同', () => {
   assert.ok(vals.some((s) => s.includes('%s')), '「没有作业侧」那一句要留出插件名的位置');
 });
 
+/**
+ * 一个 JS 文件里所有**字符串字面量**的内容（注释里的不算）。
+ *
+ * ★ 与 `stripJsComments` 是两件事：那个把注释挖掉、把字符串留下（用来查"某句话
+ *   在不在代码里"），这个只要字符串本身。查 `**` 这种记号必须用它 —— 注释里
+ *   到处都是 `**强调**`，那是写给读代码的人的，不是写给用户的。
+ */
+function stringLiterals(src) {
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c; i++;
+      let buf = '';
+      while (i < src.length) {
+        if (src[i] === '\\') { buf += src[i] + (src[i + 1] || ''); i += 2; continue; }
+        if (src[i] === q) { i++; break; }
+        buf += src[i]; i++;
+      }
+      out.push(buf);
+      continue;
+    }
+    i++;
+  }
+  return out;
+}
+
+test('★★ 界面文字里不许出现 markdown 记号 —— 那些字符串是按**字面**画的', () => {
+  // ★★ 这是一个**真的发生过**的缺陷：`el()` / `cel()` / `notice()` 一律走
+  //   `textContent`（那样才不会被当成 HTML 插进来），于是写进字符串里的
+  //   `**强调**` 和 `★` 会在界面上**原样**显示出来 —— 用户看到的是
+  //   「删掉一份**找不回来**」。
+  //
+  //   ★ 它在本机看不出来：没有图形环境，而所有文本判据读的都是源码 ——
+  //     `**` 在源码里是**对的**（那一段注释确实在强调）。只有人眼看得见。
+  //   ★ 这条判据与 docs 那三个守卫是同一类东西（`check-doc-style.py` 管的是
+  //     公开文档正文里的图形符号），只是它管的是**界面**。
+  const BAD = /\*\*|★/;
+  for (const f of ['panel.js', 'hover.js', 'dom.js']) {
+    const src = f === 'panel.js' ? js : fs.readFileSync(path.join(R, f), 'utf8');
+    const hits = stringLiterals(src).filter((s) => BAD.test(s));
+    assert.deepEqual(hits, [],
+      `${f} 里有 ${hits.length} 处字符串带着 markdown 记号，它们会在界面上原样显示：`
+      + `\n${hits.map((h) => '  · ' + h.slice(0, 90)).join('\n')}`
+      + '\n★ 要强调就靠位置/颜色/措辞，不要靠记号 —— 这些字符串走的是 textContent。');
+  }
+});
+
 test('panel.html 里没有内联 style —— CSP 会静默丢掉它', () => {
   // 先把注释去掉：文件头那段注释里就写着 `style="..."` 这几个字，
   // 它是在**解释**这条禁令，不是在违反它。
@@ -347,6 +404,154 @@ test('★★【临时离开】与【断开】：两个方向相反的动作，�
     '★ 界面上不该再出现"顶掉"这个说法 —— 现在发生的是**逐会话**的接管');
   assert.match(codeOnly, /s\.suspended/,
     '状态条与明细要印主进程给的那句原因，而不是自己编一句');
+});
+
+test('★★ 三处不可逆动作都走**两段式**，而且两段都收得回来', () => {
+  // ★★ 设计律 2：不可逆的动作由"必须先经过的那一步"承载，而不是一句写在旁边的
+  //   说明。机制本身（第一下不发请求、第二下才发、取消回到原样、两个监听摘干净）
+  //   的判据在 `renderer-dom.test.mjs`；这里守的是**绑定** —— 本机跑不起
+  //   `init()`（那一组用例把它整段摘掉了），所以"那颗按钮点下去走的是哪条路"
+  //   只有这里判得了。
+  //
+  // ★ 而这条规矩最容易烂的方式是**漏一处**：三颗按钮在界面上长得都不一样，
+  //   少一颗在真机上看不出来 —— 除非你真的按下去，而那时已经来不及了。
+  //
+  // ★★ 为什么不用 `window.confirm`：它给不了两段（框弹出来的时候用户已经按下去
+  //   了），样式也不受控（Electron 里那是一块系统窗口，尺寸、语言、焦点行为都不
+  //   归我们管）—— 于是同一个客户端里三处不可逆动作会长得不一样。
+  for (const [id, what] of [['sb-end', '状态条上的「结束会话」'],
+                            ['btn-disconnect', '「断开」']]) {
+    const at = js.indexOf(`$('${id}').onclick =`);
+    assert.notEqual(at, -1, `panel.js 没给${what}（#${id}）绑动作`);
+    assert.match(js.slice(at, at + 700), new RegExp(`armConfirm\\(\\$\\('${id}'\\)`),
+      `★★ ${what}必须走两段式 —— 它会把集群上正在跑的作业取消掉`);
+  }
+  assert.match(js, /armConfirm\(del,/,
+    '★★ 删除连接必须走两段式 —— 它连带销毁这条连接的私钥');
+
+  // ★★ 「断开」那一行里必须带上**有几个作业会没**。只说"确定断开吗"，用户答不了：
+  //   他不知道代价是 1 个会话还是 5 个。
+  const discAt = js.indexOf("$('btn-disconnect').onclick =");
+  const disc = js.slice(discAt, discAt + 700);
+  assert.match(disc, /liveCount\(\)/,
+    '★ 条数要问 `liveCount()` —— 与 `allowSwitchTo`、`#dev-restart` **同一份定义**，'
+    + '各写一遍的话，漂开的方向是"这个框说 2 条、那个框说 1 条"');
+  assert.match(disc, /\$\{n\} 个会话/, '要把**几条**说出来');
+
+  // ★★ 两条"收得回来"的规矩。写错了在真机上都是**静默**的：
+  //   · 会话一停，那一格就不该再等着第二段（按下去没有对象了）；
+  //   · 重画那一屏之前必须先收掉 —— 那一行连同确认一起被丢掉，而 `armed` 还指着
+  //     一个不在文档里的节点：用户接着点"别处"看起来没反应，而下一次真正的第一段
+  //     会被这个幽灵顶掉。
+  assert.match(js, /if \(!running\) disarmArmed\(\);/,
+    '★★ 会话停下之后要把那个第一段收掉（它挂在 `running` 那一格的判断里）');
+  const rcFn2 = /function renderConnections\(list\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(rcFn2, 'panel.js 里应当有 renderConnections()');
+  assert.match(rcFn2[0], /disarmArmed\(\)/,
+    '★★ 重画连接列表之前先收掉没走完的第一段');
+});
+
+test('★ 「关于」的入口是标题那一行，而开发者模式整个搬进去了', () => {
+  // ★ 入口**必须看得见能点**：这一屏上没有任何别的东西提示"这里可以点"，
+  //   而一个看不见的入口等于没有入口（悬停变色是唯一的提示）。
+  assert.match(html, /id="about-head"/, 'panel.html 里要有那个入口');
+  assert.match(css, /#about-head\s*\{[^}]*cursor:\s*pointer/,
+    '★ 那个入口要看得出来能点 —— 少了 cursor，它长得就是一行普通标题');
+  assert.match(js, /const aboutHead = \$\('about-head'\);/,
+    'panel.js 里找不到那个入口');
+  assert.match(js, /aboutHead\.onclick = toggleAbout;/,
+    '★ panel.js 没给它绑动作 —— 点了没反应。而那正是最难查的一种：'
+    + '界面上一切正常，只是这个入口按下去什么都不发生');
+  assert.match(js, /aboutHead\.onkeydown[\s\S]{0,120}?Enter/,
+    '★ 它是一个 `role="button"` 的 div（button 里放不下 h1/p），所以回车那条路'
+    + '要自己接 —— 不接的话它 Tab 得到、按下去没反应');
+
+  // ★ 它装的是「关于」+ 开发者模式，而开发者模式**从前是常驻的**：搬进来之后
+  //   它必须整个在 `#sec-about` **里面**。留在外面的话，"收起来"就只收掉了说明，
+  //   开关还挂在主界面上 —— 而这一版的全部目的就是把主界面让出来。
+  const sec = /<section id="sec-about"[\s\S]*?<\/section>/.exec(html);
+  assert.ok(sec, 'panel.html 里应当有 #sec-about');
+  const bare = sec[0].replace(/<!--[\s\S]*?-->/g, '');
+  for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-src', 'dev-src-path',
+                    'dev-src-count', 'dev-pick', 'dev-reset-src', 'dev-debug']) {
+    assert.ok(bare.includes(`id="${id}"`),
+      `#${id} 要搬进 #sec-about 里面 —— 留在外面就是"收起来了但开关还在"`);
+  }
+  // ★ 调试开关那 10 颗按钮一个都不许少（它们存在的全部理由就是造出真集群上造不
+  //   出来的状态，少一颗就少验一条路）。数目钉着，多一颗也要看一眼。
+  assert.equal([...bare.matchAll(/data-debug="/g)].length, 10,
+    '调试开关那 10 颗按钮要一起搬进来');
+
+  // ★ 状态条那格**留着**：会话跑起来之后窗口主体被原生视图盖住，那是唯一还看得见
+  //   开发者模式的地方。
+  assert.match(html, /id="sb-dev"/, '★ 状态条那格不能跟着搬走');
+  assert.match(js, /\$\('sb-dev'\)\.classList\.toggle\('hidden',\s*!\(s && s\.dev\)\)/,
+    '★ 而它仍然由前台那一条的 `dev` 驱动');
+
+  // ★ 「从前那两段」压成了一句 —— 它是干什么的留下，它是**给谁用的**删掉（名字
+  //   自己说）。★ 只数**开发者模式那一段自己**（到 `#dev-src` 为止）：底下
+  //   `#dev-src` / `#dev-debug` 各自那句说明不在这条判据里，它们说的是各自那一块
+  //   怎么用，不是"这个模式是什么"。
+  const head = sec[0].slice(sec[0].indexOf('<h3>开发者模式</h3>'),
+    sec[0].indexOf('<div id="dev-src"'));
+  assert.equal([...head.matchAll(/<p class="sub">/g)].length, 1,
+    '开发者模式那一段只留一句 —— 多一句就是那两段又长回来了');
+});
+
+test('★★ 删掉的那些长解释：一个都不许回来，而承重的那句换了地方住', () => {
+  // ★ 这一版的减字是**逐处指定去向**的（见 plan 里那张表），而"删干净"这件事
+  //   没有任何东西会替我们看着：一句话删掉之后，代码里少一行，谁也不报错。
+  //   半年后有人"顺手把有用的说明加回来"，缺的就是这一条。
+  //
+  // ★★ 而每一条都要**说清它去哪了** —— 只判"不在"的话，把承重的那一句一起删掉
+  //   也能全绿。
+  const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
+
+  // ① `#conn-notes`（两个出口的区别 + 不会自动连）⇒ 删。
+  //    承重的那一句（35 分钟被回收）搬到了 `#btn-leave` 的 title 里（下面那一条判）。
+  assert.equal(htmlBare.includes('id="conn-notes"'), false,
+    '★ #conn-notes 删掉了 —— "不自动连"由界面自己说（打开就停在这一屏），'
+    + '"两个出口相反"由那两颗按钮的措辞与颜色说');
+  assert.equal(/\$\('conn-notes'\)/.test(js), false, 'panel.js 里那一句 toggle 也要删');
+
+  // ② `#purpose-hint`（随机挑分区 / 自动续期 / 默认资源）⇒ 删。
+  //    "随机挑"在下拉的选项文字里，"默认资源"在每一块插件里。
+  assert.equal(htmlBare.includes('id="purpose-hint"'), false,
+    '★ #purpose-hint 删掉了（"随机挑"在下拉那一项里，默认资源在插件块里）');
+  assert.equal(/purpose-hint/.test(js), false, 'panel.js 里也不该再有它');
+
+  // ③ `#sec-workspaces` 那两段说明 ⇒ 删；**后果**（工作区什么时候被回收）改成
+  //    那个标题的一行 title。
+  assert.equal((screenBlock('screen-conns').match(/<p class="sub">/g) || []).length, 0,
+    '★ 第一屏里那几段长说明都删掉了 —— 映射图就是那个关系');
+  assert.match(html, /<h3 title="没有连接在用、也没有会话在跑的工作区会被自动删掉[^"]*">/,
+    '★ 而"工作区会被自动回收"是**后果**，不是解释 —— 它要换成一个 title 留下来');
+
+  // ④ `#sec-dev` 那个容器整个没了（内容是搬走，不是复制一份）。
+  assert.equal(htmlBare.includes('id="sec-dev"'), false,
+    '★ #sec-dev 那个容器删掉了 —— 内容搬进 #sec-about，留下一个空壳等于两处都能改');
+
+  // ⑤ `#sec-data` 那段统论（"一份 = 一个插件 + 共享组 + 工作区"、"一份数据有两个
+  //    落点"）⇒ 删。它说的是**每一行自己就在说**的话（`placesText` 逐行说清它在
+  //    浏览器里、在磁盘上还是两处都有）。★ 而「这一轮清掉了 N 份」**留着** ——
+  //    那是**结果**，不是解释。
+  assert.equal(/一份 = 一个插件 \+ 共享组 \+ 工作区/.test(js), false,
+    '★ #sec-data 那段统论删掉了 —— 一段说不出单行说不出的事，只会让人多读一遍');
+  assert.match(js, /function placesText/,
+    '★ 而"这一份在哪儿"没有跟着丢 —— 它改成**逐行**说了');
+
+  // ⑥ 作业屏底部那一句 ⇒ 换成 `#btn-jobs-end` 的 title。
+  assert.equal(/关掉窗口同样会结束会话<\/strong>/.test(html), false,
+    '★ 那一句从作业屏底部搬走了 —— 它是**那颗按钮的后果**，摆在一屏末尾等于'
+    + '让人先读完再回头看是哪一颗');
+  const endBtn = /<button id="btn-jobs-end"[^>]*>/.exec(html);
+  assert.ok(endBtn, '找不到 #btn-jobs-end');
+  assert.match(endBtn[0], /title="[^"]*合盖、断网、断电不会/,
+    '★★ 而它必须**搬进那颗按钮的 title** —— 只判"不在页面上"的话，'
+    + '把这条承重的后果一起删掉也能全绿（同形：`#btn-leave` 的 title）');
+  //   ★ 与 `#btn-leave` 那个 title 同形：都说清"另一个出口/另一条路会怎样"。
+  assert.match(screenBlock('screen-jobs'), /id="btn-jobs-end"[\s\S]{0,400}?title="/,
+    'title 要挂在那颗按钮自己身上');
 });
 
 test('★★ 换站点那道闸：连着一条、而它上面还有会话在跑时，不切', () => {
@@ -642,7 +847,7 @@ test('★ 删插件数据的确认框要说清**删的是哪几样**（磁盘上
   assert.match(js, /function placesText/, '清单里的每一行都要说清它在哪几个落点');
 });
 
-test('★ 删连接与切走工作区的确认框都要说清「连带删掉那个工作区的数据」', () => {
+test('★ 删连接与切走工作区都要说清「连带删掉那个工作区的数据」，而删连接是两段式', () => {
   // ★ 这一条与 boot.test.mjs 那条**行为**断言是成对的（「删掉最后一条用某个工作区的
   //   连接 ⇒ 那个工作区的两份数据一起清掉」）。只留一边都不成立：
   //   · 只有行为断言 ⇒ 真删了而文案没提 = 没有知情同意；
@@ -651,12 +856,20 @@ test('★ 删连接与切走工作区的确认框都要说清「连带删掉那�
   // ★ 判据必须是"**最后一条**"而不是"删一条就删数据"：还有别的连接指着那个工作区时，
   //   数据留着（下一会话还要用它）。文案说错这一点的后果与"没说"一样严重 ——
   //   它把一件**没有发生**的事告诉了用户。
-  const delAt = js.indexOf('del.onclick = async () => {');
+  //
+  // ★★ 这一版「删除连接」改成了**两段式**（见 panel.js 的 `armConfirm`）：后果那句
+  //   话现在坐在第一段那一行里。判据跟着挪，而"必须说清后果"这条一个字没松。
+  const delAt = js.indexOf('del.onclick = () => {');
   assert.notEqual(delAt, -1, 'panel.js 里找不到「删除连接」那一段了');
   const del = js.slice(delAt, delAt + 1800);
   assert.match(del, /soleOwnerId/,
     '判据要用 workspacePlan 的 soleOwnerId —— 它与主进程数的是同一件事');
   assert.match(del, /写在磁盘上的那些文件/, '要说到插件写在磁盘上的那一份');
+  assert.match(del, /armConfirm\(del,/,
+    '★ 删除连接要走两段式 —— 它是这一屏上唯一一个删掉私钥的动作');
+  assert.equal(/window\.confirm/.test(del), false,
+    '★ 那两处 `window.confirm` 一并去掉了：它给不了两段（框弹出来的时候用户'
+    + '已经按下去了），样式也不受控（Electron 里那是一块系统窗口）');
 
   const cdAt = js.indexOf('function confirmDiscard');
   assert.notEqual(cdAt, -1, 'panel.js 里找不到 confirmDiscard 了');
