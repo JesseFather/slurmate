@@ -810,8 +810,9 @@ function renderKey(k) {
 /**
  * 一条连接在界面上叫什么：**有备注就用备注，没有才回落成地址**。
  *
- * ★ 一处定义、别处指路。列表那一行用的是它，"换站点"那道闸说的话里也要点名
- *   当前这条 —— 各写一遍的话，漂开的方向是"框里说的那条，用户在这一屏上找不到"。
+ * ★ 一处定义、别处指路。列表那一行、"换站点"那道闸、以及「删除」那一段两段式
+ *   都指名道姓地要用它 —— 各写一遍的话，漂开的方向是"框里说的那条，用户在这一屏
+ *   上找不到"（写地址就正是那个漂法：界面上印的是备注）。
  */
 function connLabel(c) {
   return (c && c.label) || `${c.user}@${c.host}:${c.port}`;
@@ -899,35 +900,39 @@ function renderConnections(list) {
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
     del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
-    // ★★ **一下就走，没有确认。** 它从前是两段式的，改回来了 —— 判据是**代价**，
-    //   不是"不可逆"：这条连接再建一条就是了，它不属于"丢掉了什么"那一类
-    //   （用户 2026-10-09 定的规矩；两段式只留给结束会话/断开、切走工作区、
-    //    删除插件数据那三处，见 `armConfirm`）。
-    //
-    // ★ 但**后果照样要说**，只是换了个地方：它连带销毁这条连接的私钥（拿去 IDM
-    //   注册过的那把公钥就此作废），而**最后一个用某个工作区的连接被删掉时，
-    //   那个工作区的数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）——
-    //   主进程那边是 `commitConfig` → `pruneWorkspaces` → `clearWorkspaceStorage`。
-    //   这些进 `title`：一行里已经挤着「连接」「编辑」「删除」三颗按钮了。
-    //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
-    //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
-    const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
-    del.title = '删除这条连接。它的私钥一并作废，你得重新注册一把新公钥。'
-      + (sole
-        ? `「${sole.name}」也只有这一条连接在用，会跟着删掉 —— 里面的编辑器`
-          + '布局、登录状态，以及插件写在磁盘上的那些文件都找不回来。'
-        : '');
-    del.onclick = async () => {
-      const r = await window.slurmate.deleteConnection(c.id);
-      if (!r.ok) return notice('error', r.error);
-      boot.connections = r.connections;
-      boot.activeConnectionId = r.activeConnectionId;
-      // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
-      if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
-      renderConnections(boot.connections);
-      notice('info', '已删除该连接。'
-        + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
-        + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
+    del.onclick = () => {
+      // ★ 两段式。删除连带销毁这条连接的私钥，所以后果必须在按下去**之前**说
+      //   出来 —— 用户拿去 IDM 注册过的公钥就此作废，重建一条要重新注册。
+      //
+      // ★ 还有一样会被删掉：**最后一个用某个工作区的连接被删掉时，那个工作区的
+      //   数据也一起清**（浏览器存储 + 插件写到磁盘上的文件）—— 主进程那边是
+      //   `commitConfig` → `pruneWorkspaces` → `clearWorkspaceStorage`。
+      //   判据与主进程**同源**：`workspacePlan` 的 `soleOwnerId` 就是从"只有这一条
+      //   连接在用它"推出来的，与 `pruneWorkspaces` 数的是同一件事。
+      //
+      // ★ 名字走 `connLabel(c)` 而不是地址：这一行界面上印的**是备注**（有的话），
+      //   确认那一行印地址的话，它指的是一条"在这一屏上找不到"的连接。
+      const sole = (boot.workspaces || []).find((l) => l.soleOwnerId === c.id);
+      armConfirm(del, {
+        why: `删除「${connLabel(c)}」？它的私钥一并作废，你得重新注册一把新公钥。`
+          + (sole
+            ? `「${sole.name}」也只有这一条连接在用，会跟着删掉 —— 里面的编辑器`
+              + '布局、登录状态，以及插件写在磁盘上的那些文件都找不回来。'
+            : ''),
+        yes: '删除',
+        run: async () => {
+          const r = await window.slurmate.deleteConnection(c.id);
+          if (!r.ok) return notice('error', r.error);
+          boot.connections = r.connections;
+          boot.activeConnectionId = r.activeConnectionId;
+          // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
+          if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
+          renderConnections(boot.connections);
+          notice('info', '已删除该连接。'
+            + (r.keyDeleted ? '它的私钥也一并删掉了。' : '')
+            + (sole ? `「${sole.name}」的数据也一起清掉了。` : ''));
+        },
+      });
     };
 
     li.append(t, m, main, edit, del);
@@ -1959,8 +1964,9 @@ function renderPluginData(d) {
       row.className = 'plug-meta';
       // ★ **两段式**（`armConfirm`）：这一份删了就没了 —— 浏览器里的布局/标签页/
       //   登录状态，以及插件自己写在磁盘上的东西（那个插件最可能放"重建不出来"
-      //   的文件的地方）。这是留存下来的三处两段式之一，判据是**代价**，不是
-      //   "不可逆"（同一条规矩下，删除一条连接是一下就走）。
+      //   的文件的地方）。这是五处两段式之一，判据是**代价**，不是"不可逆"
+      //   （同一条规矩下，「重新生成密钥」是一下就走 —— 它要作废的是一把还没
+      //   派上用场的公钥，而它旁边就写着"新公钥必须重新注册"）。
       const del = button('删掉这一份', null, 'ghost');
       del.onclick = () => armConfirm(del, {
         why: `删掉「${r.label}」？${placesText(r.places)}删掉之后找不回来。`,

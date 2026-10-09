@@ -246,6 +246,7 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 }
 .conn {
   display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;                  /* 见下面 `.conn .armed` */
   padding: 8px 12px; margin-bottom: 6px;
   border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt);
   font-size: 12px;
@@ -257,6 +258,14 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 .conn .m { color: var(--fg-dim); flex: none; }
 .conn .m.bad { color: var(--err); }
 .conn .m.good { color: var(--ok); font-weight: 600; }
+
+/* 「删除」那一段两段式的确认行。★ 它是**唯一**一处长在 `.conn` 这一行 flex 里的
+   两段式，而 `.armed` 在别处（状态条）是 `flex: none`、里面那句后果只有十几个字。
+   这里那句有上百个字，照旧不换行的话，它会把这四颗按钮挤着一起横向溢出去
+   （`.conns` 会因此多一条横向滚动条）。⇒ 让它 `1 0 100%` 自己占一整行，
+   里面的两颗按钮 `flex: none`，免得被那句话压扁。 */
+.conn .armed { flex: 1 0 100%; }
+.conn .armed > button { flex: none; }
 
 /* ── 工作区 ──
    一条连接只用一个工作区，一个工作区可以被多条连接共用。

@@ -308,10 +308,11 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   //   · 原来那颗按钮**还在 DOM 里**（只加一个 class 不显示）—— 删掉它的话，
   //     `renderSnapshot` 下一次按 `running` 去 toggle 它的 `hidden` 就作用在 null 上。
   //
-  // ★★ 载体是状态条上的「结束会话」（`#sb-end`）：留下的四处两段式里，它是唯一
-  //   一颗**固定在 HTML 里**的按钮 —— 另外三处（断开也固定，但切走工作区的第一段
-  //   挂在运行期画的那个下拉上、插件数据那颗按钮也是运行期画的）驱动起来都要先
-  //   把一整块画出来。机制是同一份（`armConfirm`），所以拿它当代表最省事也最直接。
+  // ★★ 载体是状态条上的「结束会话」（`#sb-end`）：留下的五处两段式里，它是唯一
+  //   一颗**固定在 HTML 里**的按钮 —— 另外四处（断开也固定，但切走工作区的第一段
+  //   挂在运行期画的那个下拉上，插件数据与「删除一条连接」那两颗按钮也是运行期
+  //   画的）驱动起来都要先把一整块画出来。机制是同一份（`armConfirm`），所以拿它
+  //   当代表最省事也最直接。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
     'SESS = { sessions: [{ slot: "s1", live: true }], front: "s1" };'
     + 'window.__calls = [];'
@@ -371,6 +372,66 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
     assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__calls))'), ['s1'],
       '★ 第二下才发，而且恰好一次（发的正是**前台那一条**的槽）');
     assert.equal(h.run('document._ls.length'), 0);
+  });
+});
+
+test('★★ 「删除一条连接」走两段式：第一下只摆一行确认，第二下才真的删', () => {
+  // ★ 它是**运行期画出来的**那一颗（在 `renderConnections` 里），没有 id 可找 ——
+  //   得先把那一屏画出来，再从行里把它取出来。上面那条用的 `#sb-end` 是固定的。
+  //
+  // ★★ 为什么它要两段式（判据是**代价**，不是"不可逆"）：删掉一条连接会
+  //   **作废它的私钥**（拿去 IDM 注册过的那把公钥就此失效），而它若是某个工作区
+  //   最后一个主人，**那个工作区的两份数据也一起清**。这两样都不是"再建一条就是"。
+  const named = [{ ...CONNS[0], label: '集群 A' }, CONNS[1]];
+  const h = start({ connections: named, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__deleted = [];'
+    + 'window.slurmate.deleteConnection = (id) => { window.__deleted.push(id);'
+    + '  return Promise.resolve({ ok: true, connections: [], activeConnectionId: null,'
+    + '    keyDeleted: true }); };');
+  h.fn('renderConnections')(named);
+
+  const row = h.byId.get('conn-list').children[0];
+  // 行里的顺序是 `li.append(t, m, main, edit, del)` ⇒ 最后一颗就是「删除」。
+  const del = row.children[row.children.length - 1];
+  assert.equal(del.textContent, '删除', '行里最后一颗按钮应当是「删除」');
+  const clusterOf = () => row.children[row.children.indexOf(del) + 1];
+
+  // ── 第一段 ──
+  del.onclick();
+  assert.equal(h.run('window.__deleted.length'), 0,
+    '★★ 第一下**不许**发 —— 它是第一段，只把那一格换成一行确认');
+  const cluster = clusterOf();
+  assert.ok(cluster && cluster.className === 'armed', '那一行确认要插在锚点后面');
+  assert.equal(del.classList.contains('armed-off'), true,
+    '★ 原来那颗按钮留在 DOM 里、只是不显示');
+  const why = cluster.children[0]._text;
+  assert.match(why, /私钥一并作废/, '第一段要说清代价 —— 只说"确定吗"，用户答不了');
+  // ★ 而这句里的名字必须是**这一行上印着的那个**（有备注就是备注）：印地址的话，
+  //   它指的就是一条"在这一屏上找不到"的连接。
+  assert.equal(row.children[0]._text, '集群 A', '有备注的那一行印的就是备注');
+  assert.equal(why.includes('集群 A'), true, '★ 确认那一行要点名这一行上印着的那个名字');
+  assert.equal(why.includes('alice@'), false, '★ 而不是回落成地址');
+  // 独占工作区那一条（`soleOwnerId` 与主进程数的是同一件事）
+  assert.equal(why.includes('工作区 1'), true, '独占的工作区会跟着删 —— 这一句要说出来');
+  assert.equal(why.includes('写在磁盘上的那些文件'), true, '磁盘上那一份也要说到');
+
+  // ── 退回去：一个字节都没发 ──
+  cluster.children[2].onclick();
+  assert.equal(h.run('armed'), null, '取消之后不该还挂着一个第一段');
+  assert.equal(del.classList.contains('armed-off'), false, '取消之后那颗按钮要回来');
+  assert.equal(row.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
+  assert.equal(h.run('window.__deleted.length'), 0, '取消 = 什么都没发生');
+  assert.equal(h.run('document._ls.length'), 0, '★ 那两个"点别处 / 按 Esc"的监听也要摘干净');
+
+  // ── 第二段：这才真的删 ──
+  del.onclick();
+  const p = clusterOf().children[1].onclick();
+  assert.equal(h.run('armed'), null, '执行的那一下要先把这一行收掉');
+  return p.then(() => {
+    assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__deleted))'), ['c1'],
+      '★ 第二下才发，而且恰好一次、发的正是这一条');
+    assert.equal(h.byId.get('conn-list').children.length, 0,
+      '删完那一行就没了 —— 列表按主进程回的那份重画');
   });
 });
 
