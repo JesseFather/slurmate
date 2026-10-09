@@ -49,14 +49,22 @@
 #    - 退出前必须在 KillWait 内写完墓碑（Slurm 默认 30 秒，见你集群的
 #      KillWait 配置；trap 里的工作必须能在这个窗口内做完）
 #
-#  退出码（本文件添补的几位）：20 无法确定节点 IPv4 / 22 候选端口全部失败 /
-#    23 配置要口令却生成不出来 / 24 **这份脚本里没有请求的那个服务**（下面那道
-#    守卫）、或插件的预检没过、或认证方式宿主不认识
+#  退出码（本文件添补的几位）：20 无法确定节点 IPv4 / 21 作业日志打不开 /
+#    22 候选端口全部失败 / 23 配置要口令却生成不出来 / 24 **这份脚本里没有请求的
+#    那个服务**（下面那道守卫）、或插件的预检没过、或认证方式宿主不认识 /
+#    25 **插件把服务进程的输出重定向走了**（见 svc_stream_ok）
 #
-#  产出（家目录，NFS 共享）：
-#    ~/.slurmate/sessions/job-<id>.json    会话身份、隧道目标、口令
-#    ~/.slurmate/sessions/job-<id>.jobhb   作业侧心跳（证明作业还活着）
-#    ~/.slurmate/logs/job-<id>.log         作业日志
+#  产出：
+#    <家目录>/.slurmate/sessions/job-<id>.json   会话身份、隧道目标、口令
+#    <家目录>/.slurmate/sessions/job-<id>.jobhb  作业侧心跳（证明作业还活着）
+#    <日志目录>/slurm-<id>.out                   作业日志 · 标准输出
+#    <日志目录>/slurm-<id>.err                   作业日志 · 标准错误
+#
+#    ★ 日志目录**写死**在 `<家目录>/.slurmate/logs`，不是配置项。它必须两边都挂得着：
+#      写它的是这里（计算节点），读它的是登录节点上的守护进程 —— 而客户端自己
+#      没有任何一条读取路径。"位置、保留期、总量上限"三件事由同一个地方说了算。
+#    ★ 这两份日志**实时**写：宿主的每一行与服务进程的每一行都在产生的那一刻落盘，
+#      没有"作业结束才并进来"那回事（见下面第 1 节）。
 #
 #  安全：
 #    口令由【作业自己生成】并写进 0600 的会话文件里，守护进程全程不写用户家目录
@@ -128,17 +136,17 @@ MY_UID="$(id -u)"
 MY_USER="$(id -un)"
 SESS_FILE="${SLURMATE_SESS_DIR}/job-${JOB_ID}.json"
 JOBHB_FILE="${SLURMATE_SESS_DIR}/job-${JOB_ID}.jobhb"
-# 计算节点本地日志。用 mktemp -d 建【私有】目录而不是可预测的 /tmp/slurmate-<jobid>.log：
-# 作业号能从 squeue 公开看到，同一节点上的其他租户可以在作业启动前抢先创建
-# 那个路径（做成符号链接或 FIFO），让受害进程往攻击者指定的地方追加、或直接挂死。
+# 计算节点上**唯一的**临时文件落点。用 mktemp -d 建私有目录而不是可预测的
+# /tmp/slurmate-<jobid>：作业号能从 squeue 公开看到，同一节点上的其他租户可以在
+# 作业启动前抢先创建那个路径（做成符号链接或 FIFO），让受害进程往攻击者指定的
+# 地方写、或直接挂死。
+#
+# ★ 它**不是**日志的落点。日志走 Slurm 抓的那两个文件（见下面第 1 节）——
+#   放在这里的东西登录节点看不见，而"作业跑着的时候能看见日志"正是要的东西。
 LOCAL_LOG_DIR="$(mktemp -d /tmp/slurmate-XXXXXX 2>/dev/null || true)"
 if [[ -n "$LOCAL_LOG_DIR" ]]; then
     chmod 700 "$LOCAL_LOG_DIR" 2>/dev/null || true
-    LOCAL_LOG="${LOCAL_LOG_DIR}/job.log"
-else
-    LOCAL_LOG="/dev/null"
 fi
-NFS_LOG=""
 STARTED_AT="$(date +%s)"
 
 # 服务的 pid。名字是通用的（`SVC_` 而不是某个插件的前缀），因为心跳的存活门、
@@ -163,29 +171,126 @@ declare -A PLUGIN_SESSION_FIELDS=()
 TOMBSTONE_WRITTEN=0
 
 # ─── 1. 日志 ────────────────────────────────────────────────────────────────
-if mkdir -p "$SLURMATE_SESS_DIR" "$SLURMATE_LOG_DIR" 2>/dev/null \
-   && { : > "${SLURMATE_LOG_DIR}/.wtest.$$"; } 2>/dev/null; then
-    rm -f "${SLURMATE_LOG_DIR}/.wtest.$$" 2>/dev/null
-    NFS_LOG="${SLURMATE_LOG_DIR}/job-${JOB_ID}.log"
-fi
-
-# 补写窗口的水位。它记的是 **LOCAL_LOG 的行数**，不是"我们写过几行"。
 #
-# ★ 这个区别是必须的：服务进程的输出是**直接重定向**到 LOCAL_LOG 的
-#   （`nohup <服务> >> "$LOCAL_LOG" 2>&1`，插件的 start_* 里都这么写），
-#   它插在我们两行日志中间。若水位记的是"log() 调过几次"，补写窗口就会错位 ——
-#   症状是 NFS 日志的**末尾若干行重复一遍**，其中包括已经写过的那行"清理完成"，
-#   看上去像清理跑了两次。变异验证就是靠这个发现的。
-NFS_SYNCED_LOCAL=0
+# ★★ 作业的输出**只有一处**：Slurm 给的那两个文件。
+#
+#     sbatch -o <日志目录>/slurm-<作业号>.out \
+#            -e <日志目录>/slurm-<作业号>.err --open-mode=append
+#
+# 宿主自己写的每一行、以及服务进程写的每一行，都落在它们上面，**产生的那一刻**
+# 就落盘。分成两份是按**流**分：`.out` 是标准输出，`.err` 是标准错误 ——
+# "哪一条是抱怨"这件事由流本身说，不靠"行首有『错误：』"那种约定。
+#
+# ★★ 从前不是这样，这里删掉的是一整套机制。从前宿主有"节点本地日志 + 往 NFS
+#    补写"两份，而服务进程的输出由插件重定向到它**自己的**文件、只在作业结束时
+#    由 `cleanup_<短名>` 取尾部 200 行并回来。后果是：**作业跑着的时候，服务的
+#    输出在站点上根本看不到** —— 而"作业起不来了，为什么"恰恰是那十几分钟里
+#    最需要回答的问题。那套东西连同它的水位（`NFS_SYNCED_LOCAL`）、
+#    `$LOCAL_LOG` / `$NFS_LOG` 两个契约变量、以及"服务进程不许写 LOCAL_LOG"
+#    那条禁令（它存在的唯一理由是水位会错位）一起删掉了。
+#
+# ★★ `exec` 这一句是**实时性**的前提：
+#
+#   · bash 的 `printf` 一次 `write(2)` 直接落到文件上，中间没有缓冲，也不经过
+#     slurmstepd 那一跳。（服务进程自己的 libc 仍然按 4 KiB 块缓冲 —— 那是服务
+#     自己的事，与输出接到哪里无关，重定向到文件时也一样。）
+#   · `>>` 开出来的是 **O_APPEND**，而 `sbatch --open-mode=append` 是同一件事的
+#     另一半：Slurm 自己也握着这两个文件。两边都必须是 append —— 否则 Slurm 那一侧
+#     的 fd 带着自己的偏移量，它收尾时的那一次写会**盖掉文件开头**。
+#
+# ★ 目录必须在**脚本开始之前**就存在（`-o` 是 Slurm 在跑脚本之前打开的）。守护
+#   进程建不了它 —— systemd 单元把共享家目录挂成只读（ReadOnlyPaths），那是
+#   "root 身上没有『写用户文件』这条攻击面"那层保护，不该为了这个破掉。所以：
+#   这里 `mkdir -p`，此后每个作业都安全；**第一条**作业靠 Slurm 自己建 `-o` 的父
+#   目录（实测本集群会建）。这一条在登录节点上验不了，只能由第一条作业回答。
+mkdir -p "$SLURMATE_SESS_DIR" "$SLURMATE_LOG_DIR" 2>/dev/null || true
+OUT_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.out"
+ERR_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.err"
+
+# 先探一次可写性再 `exec`：`exec` 的重定向失败会让整个 shell 当场退出，而那时
+# 连一句"为什么"都没地方写。探过之后 `exec` 不可能失败（除非并发有人把目录删了）。
+if ! { : >> "$OUT_LOG"; } 2>/dev/null || ! { : >> "$ERR_LOG"; } 2>/dev/null; then
+    printf '%s [slurmate/%s] 作业日志打不开：%s —— 这个目录存在吗、可写吗？\n' \
+        "$(date -Is)" "$JOB_ID" "$SLURMATE_LOG_DIR" >&2
+    exit 21
+fi
+exec 1>>"$OUT_LOG" 2>>"$ERR_LOG"
+
+# 宿主自己的日志行。**只写一处**，不双写 —— 这条流就是文件。
 log() {
-    local line
-    line="$(date -Is) [slurmate/${JOB_ID}] $*"
-    printf '%s\n' "$line" >> "$LOCAL_LOG" 2>/dev/null || true
-    if [[ -n "$NFS_LOG" ]] && printf '%s\n' "$line" >> "$NFS_LOG" 2>/dev/null; then
-        NFS_SYNCED_LOCAL="$(wc -l < "$LOCAL_LOG" 2>/dev/null || echo 0)"
-    fi
+    printf '%s [slurmate/%s] %s\n' "$(date -Is)" "$JOB_ID" "$*"
+}
+
+# 出事的那几行走 stderr（⇒ `.err`）。不是把 `log` 加个前缀：那样两份文件里都会
+# 混着同一种行，"打开 `.err` 就能看到全部问题"这条性质就没了。
+log_err() {
+    printf '%s [slurmate/%s] %s\n' "$(date -Is)" "$JOB_ID" "$*" >&2
+}
+
+# ─── 1b. 日志的保留期与总量上限 ─────────────────────────────────────────────
+#
+# 两条都是**插件无关**的，也都只碰这个目录里我们自己那两个名字。
+#
+# ① **7 天**：删掉 7 天前的整份。
+#    跑在这里而不是守护进程的定时器里，因为它是**按用户**的策略，而守护进程为了
+#    "root 不写用户文件"把共享家目录挂成了只读 —— 它删不掉。放在作业里还顺带对上
+#    了"没有新作业 ⇒ 没有新增长"。
+#
+# ② **整个目录 10 GiB**：超了就从**最老的**开始删，删到不超为止。
+#    ★★ 为什么是"目录总量"而不是"单份文件的上限"：**正在被写入的文件截不了**。
+#      写者握着那个 inode，`mv` 改不了它接下来写哪儿、`truncate` 只会把尾部切掉
+#      （我们要留的恰恰是尾部）。所以"单份截断"这条路上没有正确的做法 ——
+#      换一条能做的：总量超了就按时间淘汰**整份**。
+#    ★ 于是失控的服务最坏只能吃掉这 10 GiB，而这只影响日志目录、不影响用户的
+#      家目录配额里别的东西。
+#    ★ **当前这个作业自己的两份永远不动**：它们是正在写的，删掉就等于"作业还在跑，
+#      日志凭空没了"。越界时先淘汰别人的，实在只有自己那一份超了，就让它超着。
+# ★ 两个数可以用环境变量顶掉，**唯一**的用途是让用例用一个很小的数字把这条路走
+#   一遍（10 GiB 造不出来）。作业的环境由守护进程在提交时给，用户注入不了。
+JOB_LOG_KEEP_DAYS="${SLURMATE_LOG_KEEP_DAYS:-7}"
+JOB_LOG_DIR_MAX_BYTES="${SLURMATE_LOG_DIR_MAX_BYTES:-10737418240}"
+
+# 日志目录里我们自己那些文件的总字节数。
+job_log_dir_bytes() {
+    local f n=0 sz
+    for f in "$SLURMATE_LOG_DIR"/slurm-*.out "$SLURMATE_LOG_DIR"/slurm-*.err; do
+        [[ -f "$f" ]] || continue
+        sz="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+        [[ "$sz" =~ ^[0-9]+$ ]] || continue
+        n=$(( n + sz ))
+    done
+    printf '%s' "$n"
+}
+
+log_housekeeping() {
+    # ① 7 天前的整份删掉。`-maxdepth 1` + 名字白名单：只碰我们自己那两个形状。
+    find "$SLURMATE_LOG_DIR" -maxdepth 1 -type f \
+         \( -name 'slurm-*.out' -o -name 'slurm-*.err' \) \
+         -mtime "+${JOB_LOG_KEEP_DAYS}" -delete 2>/dev/null || true
+
+    # ② 总量超了就淘汰最老的。
+    # ★ 名单只列**一次**（`ls -1tr` 由旧到新），总量在循环外算一次、每删一个减一次。
+    #   在循环条件里重算总量、或者每轮重新 `ls` 一遍的话，第一次撞上限（积了几千份）
+    #   会把整个目录反复 stat 几千遍 —— 而那正是最需要它跑得快的一次。
+    local total f sz
+    total="$(job_log_dir_bytes)"
+    (( total > JOB_LOG_DIR_MAX_BYTES )) || return 0
+    while IFS= read -r f; do
+        (( total > JOB_LOG_DIR_MAX_BYTES )) || break
+        sz="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+        rm -f -- "$f" 2>/dev/null || continue
+        [[ "$sz" =~ ^[0-9]+$ ]] && total=$(( total - sz ))
+        log "日志目录超过 ${JOB_LOG_DIR_MAX_BYTES} 字节，删掉了最老的一份：$f"
+    done < <(ls -1tr "$SLURMATE_LOG_DIR"/slurm-*.out "$SLURMATE_LOG_DIR"/slurm-*.err \
+                 2>/dev/null | grep -v -x -e "$OUT_LOG" -e "$ERR_LOG" || true)
     return 0
 }
+
+# 每 60 秒看一眼。周期不影响任何一条判据：保留期是**天**粒度，总量上限是"超了才动"。
+# ★ 它在 cleanup 里被收掉（与 JOBHB_PID 同一个形状），不是靠"父进程死了自己退出"。
+HOUSEKEEPING_PID=""
+( while sleep 60; do log_housekeeping; done ) &
+HOUSEKEEPING_PID=$!
 
 is_ipv4() { [[ "${1:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
@@ -232,6 +337,35 @@ write_jobhb() {
     kill -0 "$SVC_PID" 2>/dev/null || return 0
     write_atomic "$JOBHB_FILE" \
         "$(printf '{"job_id":%s,"at":%s,"service_pid":%s}\n' "$JOB_ID" "$(date +%s)" "$SVC_PID")"
+}
+
+# ─── 2b. 服务进程的输出必须还在作业自己的那条流上 ───────────────────────────
+#
+# ★★ 这一条是"插件想把输出藏起来也藏不成"那个要求的**落点**。
+#
+# 契约要求 `start_<短名>` 起的服务**继承**宿主的 stdout/stderr —— 那两条流就是
+# Slurm 抓的 `.out` / `.err`（见第 1 节）。插件若把它们重定向到自己的文件里，
+# 服务的输出在站点上就**一个字都看不到**，而且**不报错**：界面上是"作业起来了，
+# 日志只有宿主那几行"，看起来完全正常。
+#
+# ★ 判据是 **`/proc/<pid>/fd/N` 与宿主自己的 `fd/N` 是不是同一个对象**，不是去扫
+#   插件的源码：扫 shell 扫不干净（变量、`exec 3>`、命令替换、函数的间接调用，
+#   写法无穷无尽），而内核里那张 fd 表**骗不过去** —— 重定向之后它就是一个不同的
+#   文件，没重定向就逐字相同（管道是 `pipe:[N]`，子进程继承的正是同一个 N）。
+#
+# ★ 读不到就不判（进程已经没了、或这台机器没有 /proc）—— 判不了的时候拦住一个
+#   合法的插件，比漏掉一个违规的插件更糟。返回 0 = 通过，非 0 = **那个 fd 号**。
+svc_stream_ok() {
+    local pid="$1" n a b
+    for n in 1 2; do
+        a="$(readlink "/proc/$pid/fd/$n" 2>/dev/null || true)"
+        b="$(readlink "/proc/$$/fd/$n" 2>/dev/null || true)"
+        [[ -z "$a" || -z "$b" ]] && continue
+        [[ "$a" == "$b" ]] && continue
+        printf '%s' "$n"
+        return 1
+    done
+    return 0
 }
 
 # ─── 3. 节点 IPv4 ───────────────────────────────────────────────────────────
@@ -348,6 +482,23 @@ pick_port_and_start() {
             n_busy=$((n_busy + 1)); continue
         fi
         if host_start_service "$p"; then
+            # ★ 服务起来了，但它的输出还在不在作业的那条流上？（见 svc_stream_ok）
+            #   不在了就**当场判失败并以 25 结束**，不试下一个端口 —— 这是插件的
+            #   缺陷，换端口不会好，而"悄悄跑起来、日志一个字都没有"才是最难查的。
+            local _bad
+            if ! _bad="$(svc_stream_ok "$SVC_PID")"; then
+                log_err "服务进程的 fd ${_bad} 被重定向到了 $(readlink "/proc/$SVC_PID/fd/$_bad" 2>/dev/null || echo '?')，"
+                log_err "  而作业自己的 fd ${_bad} 指向 $(readlink "/proc/$$/fd/$_bad" 2>/dev/null || echo '?')。"
+                log_err "  契约要求 start_<短名> 起的服务**继承**宿主的 stdout/stderr —— 那两条流"
+                log_err "  就是作业日志（.out / .err）。这个插件把服务的输出重定向到别处去了，"
+                log_err "  于是作业日志里永远看不到那个服务说的话。拒绝启动。"
+                kill -TERM "$SVC_PID" 2>/dev/null || true
+                sleep 1
+                kill -0 "$SVC_PID" 2>/dev/null && kill -KILL "$SVC_PID" 2>/dev/null || true
+                SVC_PID=""
+                write_session "failed" 25 || true
+                exit 25
+            fi
             SVC_PORT="$p"
             return 0
         fi
@@ -360,14 +511,21 @@ pick_port_and_start() {
 
 # ─── 5. 清理 ────────────────────────────────────────────────────────────────
 # 必须在 KillWait 内完成（Slurm 默认 30 秒）。只做一件要紧事：写墓碑，
-# 让守护进程立刻知道会话结束。日志搬运放后台，绝不阻塞退出 ——
-# 超时的后果是 SIGKILL，墓碑写不下去，会话要多等一个 orphan 周期才回收。
+# 让守护进程立刻知道会话结束。超时的后果是 SIGKILL，墓碑写不下去，
+# 会话要多等一个 orphan 周期才回收。
+#
+# ★ 日志不在这条路上做任何搬运 —— 它从一开始就是实时写的（见第 1 节）。
+#   从前这里有一段"把节点本地日志补齐到 NFS"，那是"日志先写本地、结束才并回来"
+#   那套设计的收尾；日志改成 Slurm 直接抓之后，它连同它依赖的水位一起删掉了。
 cleanup() {
     local rc="${1:-$?}"
     trap - EXIT TERM INT HUP USR1
 
     if [[ -n "$JOBHB_PID" ]]; then
         kill "$JOBHB_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$HOUSEKEEPING_PID" ]]; then
+        kill "$HOUSEKEEPING_PID" 2>/dev/null || true
     fi
     if [[ -n "$SVC_PID" ]] && kill -0 "$SVC_PID" 2>/dev/null; then
         kill -TERM "$SVC_PID" 2>/dev/null || true
@@ -387,48 +545,29 @@ cleanup() {
 
     log "清理完成 rc=$rc"
 
-    # 插件自己的收尾（例如把某个服务自己的日志并进作业日志）。
-    # ★ 位置很要紧：必须在下面那段"NFS 补写"【之前】，插件日志才会被一起带上去。
-    #   不并的话，"认证被拒"这类只有那个服务知道的事实在作业结束后就永远消失了 ——
-    #   客户端只看到一句"认证失败"，而原因躺在计算节点上一个已经删掉的临时目录里。
+    # 插件自己的收尾。★ 与日志**没有**关系了 —— 服务的输出从一开始就实时落在
+    #   作业日志上（`.out` / `.err`），没有"结束时并进来"这一步，因此也没有
+    #   "必须排在宿主最后一行之后"这种位置约束。留在这里的是插件自己的收尾
+    #   （删临时文件、通知某个外部系统之类）。
     # ★ `|| true`：插件钩子出错不该拦住墓碑之后的任何事。而墓碑在上面已经写完了。
     plugin_call cleanup || true
 
-    # 把这个作业的日志补齐到 NFS。两件事共用这一段：
-    #
-    #  ① **NFS 中途不可用**时，log() 那些行没落上去 —— 水位落在后面，这里补齐。
-    #  ② **插件在 cleanup_<短名> 里并进来的、它自己那份服务日志** —— 它们是在
-    #     上面那次 `plugin_call cleanup` 里追加到 LOCAL_LOG 的，也就是**在我们
-    #     最后一行的后面**，所以天然落在水位之后、会被这一段带上去。
-    #     （**不写具体是哪个插件的日志**：宿主不认识任何插件，注释里也不行 ——
-    #      下一个读的人会以为宿主认得它。规则见 packer/docs/README.md。）
-    #
-    # ★ 位置很要紧：`plugin_call cleanup` 必须在 `log "清理完成"` **之后**。
-    #   它若在前面，插件追加的行会落在水位**之前**，于是**静默地进不了 NFS** ——
-    #   而"认证被拒"这类事实只有服务自己知道。
-    #
-    # ★ 水位是 **LOCAL_LOG 的行号**而不是"我们写过几行"（见 log() 上方那段）：
-    #   后者在服务进程插话时会错位，症状是 NFS 日志末尾重复若干行。
-    if [[ -n "$NFS_LOG" && -f "$LOCAL_LOG" ]]; then
-        local total
-        total="$(wc -l < "$LOCAL_LOG" 2>/dev/null || echo 0)"
-        if (( total > NFS_SYNCED_LOCAL )); then
-            tail -n +"$((NFS_SYNCED_LOCAL + 1))" "$LOCAL_LOG" >> "$NFS_LOG" 2>/dev/null || true
-        fi
-    fi
+    # 最后再看一眼保留期与总量上限 —— 这个作业自己那两份始终在名单外（见 1b）。
+    log_housekeeping
 
-    # 删掉私有的本地日志目录（必须在上面补写 NFS 之后，否则会丢掉最后几行）
+    # 删掉私有的临时目录。★ 这里的东西登录节点看不见（那是它被选作临时落点的
+    # 原因），所以删它不会动到作业日志一个字。
     [[ -n "$LOCAL_LOG_DIR" && -d "$LOCAL_LOG_DIR" ]] && rm -rf "$LOCAL_LOG_DIR" 2>/dev/null
     exit "$rc"
 }
 
 trap 'cleanup $?' EXIT
-trap 'log "收到 SIGTERM（可能是 scancel）"; exit 143' TERM
-trap 'log "收到 SIGINT"; exit 130' INT
-trap 'log "收到 SIGHUP"; exit 129' HUP
+trap 'log_err "收到 SIGTERM（可能是 scancel）"; exit 143' TERM
+trap 'log_err "收到 SIGINT"; exit 130' INT
+trap 'log_err "收到 SIGHUP"; exit 129' HUP
 # 守护进程在续期失败/即将到期时用 SIGUSR1 通知作业（作业自身无法延长 TimeLimit，
 # 只有 root 可以，所以这只是个提示信号，用来让日志和会话文件反映状态）
-trap 'log "收到 SIGUSR1：作业即将到期"; [[ -n "$SVC_PORT" ]] && write_session "near_expiry" 0' USR1
+trap 'log_err "收到 SIGUSR1：作业即将到期"; [[ -n "$SVC_PORT" ]] && write_session "near_expiry" 0' USR1
 
 # ─── 6. 主流程 ──────────────────────────────────────────────────────────────
 log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
@@ -437,7 +576,7 @@ log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
 log "候选端口: $SLURMATE_CANDIDATES"
 
 NODE_IP="$(detect_node_ip)" || {
-    log "无法确定节点 IPv4，退出（ACL 依赖字面 IP，宁可不启动）"
+    log_err "无法确定节点 IPv4，退出（ACL 依赖字面 IP，宁可不启动）"
     exit 20
 }
 log "节点 IPv4 = $NODE_IP"
@@ -452,7 +591,7 @@ log "节点 IPv4 = $NODE_IP"
 # 没有这道网的话，唯一的替代是作业跑完所有候选端口之后报一句"全部失败" ——
 # 那指不回根因。
 if ! declare -F "start_${SLURMATE_SERVICE_KIND//-/_}" >/dev/null 2>&1; then
-    log "错误：这份作业脚本里没有服务 '$SLURMATE_SERVICE_KIND' 的作业侧实现"
+    log_err "这份作业脚本里没有服务 '$SLURMATE_SERVICE_KIND' 的作业侧实现"
     log "      这份脚本里有的是：$(plugin_names)（短名里的 - 在函数名里写作 _）"
     log "      一个插件一份作业脚本，文件名是它的 ULID。两者对不上说明"
     log "      提交时选错了脚本，或者这份脚本是旧版本留下的。"
@@ -489,7 +628,7 @@ if (( _pre_rc == 0 )); then
 elif (( _pre_rc == 3 )); then
     log "（「$SLURMATE_SERVICE_KIND」没有预检钩子，跳过）"
 else
-    log "错误：服务种类 '$SLURMATE_SERVICE_KIND' 的预检未通过（rc=$_pre_rc，原因见上）"
+    log_err "服务种类 '$SLURMATE_SERVICE_KIND' 的预检未通过（rc=$_pre_rc，原因见上）"
     write_session "failed" 24 || true
     exit 24
 fi
@@ -505,7 +644,7 @@ case "$SLURMATE_AUTH_MODE" in
             # 绝不静默降级为 auth=none：那恰好会移除唯一的实质保护
             # （nft ACL 挂在登录节点的 output 链，挡不住同节点的其他作业）。
             # 配置要的是 password，就得给到 password，否则这个会话不该起来。
-            log "错误：无法生成口令（/dev/urandom 不可读且 openssl 缺失）"
+            log_err "无法生成口令（/dev/urandom 不可读且 openssl 缺失）"
             log "      配置要求 auth_mode=password，拒绝以 auth=none 启动"
             exit 23
         fi
@@ -520,7 +659,7 @@ case "$SLURMATE_AUTH_MODE" in
         log "按配置以 auth=none 启动（保护仅靠 nft ACL，同节点其他作业可直连）"
         ;;
     *)
-        log "错误：认证方式 '$SLURMATE_AUTH_MODE' 宿主不认识"
+        log_err "认证方式 '$SLURMATE_AUTH_MODE' 宿主不认识"
         log "      （宿主只认 password / publickey / none；其余由插件自己定义，"
         log "        而插件定义的认证方式需要插件自己在 start_ 里实现）"
         write_session "failed" 24 || true
@@ -529,15 +668,15 @@ case "$SLURMATE_AUTH_MODE" in
 esac
 AUTH_MODE="$SLURMATE_AUTH_MODE"
 
-write_session "starting" null || log "警告：写会话文件失败（NFS 不可写？）"
+write_session "starting" null || log_err "写会话文件失败（NFS 不可写？）"
 
 if ! pick_port_and_start; then
-    log "所有候选端口均失败，退出"
+    log_err "所有候选端口都失败了，退出"
     write_session "failed" 22 || true
     exit 22
 fi
 
-write_session "running" null || log "警告：写会话文件失败"
+write_session "running" null || log_err "写会话文件失败"
 write_jobhb
 log "会话就绪: tunnel_target=${NODE_IP}:${SVC_PORT}"
 

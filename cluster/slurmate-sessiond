@@ -1770,6 +1770,8 @@ def scan_plugins(plugins_dir):
     #   会跟着目录遍历的次序变 —— 而"每次启动顺序都不一样"是最难查的那类。
     return tuple(sorted(specs, key=lambda s: (s.name, s.id))), tuple(problems)
 
+# 作业日志落在用户家目录里的哪一格。**写死，不是配置项** —— 位置、保留期、
+# 总量上限三件事必须由同一个地方说了算，解析只有一处，见 `job_log_dir_for()`。
 JOB_LOG_SUBDIR = ".slurmate/logs"
 
 # Slurm 命令的候选目录。配置里留空时按这个顺序找。
@@ -5603,6 +5605,9 @@ class Config(object):
         self.eof_linger = EOF_LINGER
         self.snapshot_interval = SNAPSHOT_INTERVAL
         self.jobs_dir = default_jobs_dir()
+        # ★ 作业日志的落点**不是一个配置项**，见 `job_log_dir_for()`：它是本系统
+        #   自己管的东西（那两份文件的保留期与总量上限都由作业脚本维护），
+        #   站点把它挪走只会让"客户端读哪一个目录"跟着变成一个可漂的约定。
         self.job_log_subdir = JOB_LOG_SUBDIR
 
         # ── 「有作业侧、却找不到那份脚本」的插件 ──────────────────────────
@@ -6267,7 +6272,28 @@ class Nft(object):
 #  Slurm
 # ==============================================================================
 
-def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
+def job_log_dir_for(uid):
+    """这个用户的作业日志目录（**绝对路径**）。全仓唯一的一处解析。
+
+    ★★ **位置写死，不可配置。** 它是本系统自己管的东西：那两份文件写在哪儿、
+      留多久、总量到多少开始删，三件事必须由同一个地方说了算，站点把它挪走只会让
+      "客户端读哪一个目录"跟着变成一个会漂的约定。缺省就是唯一的取值。
+
+    ★★ 它必须**两边都挂得着**：写它的是计算节点上的作业，读它的是登录节点上的
+      守护进程（客户端自己没有任何一条读取路径）。计算节点的本地盘（`/tmp`、
+      `/dev/shm`）不满足这一条 —— 这正是"服务日志留在节点本地"那条老路走不通的
+      原因，也是家目录一直是唯一通道的原因（会话文件、口令、心跳走的都是它）。
+
+    ★ 家目录从 NSS 取，不拼字符串 —— 理由与 `Sessiond.user_home()` 逐字相同
+      （目录名不保证等于用户名；家目录前缀是按站点配的）。
+    """
+    try:
+        return os.path.join(pwd.getpwuid(uid).pw_dir, JOB_LOG_SUBDIR)
+    except KeyError:
+        return None
+
+
+def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
     """拼 sbatch 的命令行。**纯函数** —— 不 fork、不切身份，所以可以直接断言。
 
     `job_script` 与 `service_kind` 由调用方显式传入（`op_submit` 从 `spec` 取），
@@ -6280,16 +6306,26 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
       （比如缺了 `-p` 是不是真的落到了 Slurm 的默认分区）。拆出来之后，每一条
       分支都能在本机断言，而不是靠"上线后看一眼"。
 
-    `-o/-e` 的落点：优先 ~/.slurmate/logs/（作业脚本会在启动早期创建它；实测
-    本集群的 Slurm 也会自动创建 -o 的父目录）。但"Slurm 自动建目录"是版本相关
-    行为，万一哪天不成立，作业会在启动阶段静默失败、用户干等 —— 那是最难排查
-    的故障。所以退一步：目录不存在时把输出放到家目录根下（家目录一定存在）。
+    `logdir` 由调用方用 `job_log_dir_for()` 算好 —— 这一层不认识用户。
+
+    ★★ `-o` 与 `-e` 是**两个**文件。作业的输出从此按流分开：`.out` 是标准输出、
+      `.err` 是标准错误。合成一个的话，"这个服务往 stderr 上抱怨了什么"就没法单独
+      看 —— 而那恰恰是出故障时唯一有用的那半。
+
+    ★★ `--open-mode=append` 不是可选项，它是**体积上限**那条性质的前提：
+      作业脚本自己也会 `exec >>` 这两个文件（见 run.sbatch），两边的每一次写都必须是
+      O_APPEND —— 只有这样，"把尾部搬到开头、再截短"才不会把并发写进去的行盖掉。
+      默认的 truncate 模式下 Slurm 那一侧的 fd 带自己的偏移量，一次收尾写入就能把
+      文件开头盖掉。
+
+    ★ **不再往家目录根下退让。** 从前目录不存在时会把输出落到 `$HOME` 根下，
+      那是为了绕开"Slurm 到底会不会建 `-o` 的父目录"这个版本相关问题。现在不行了：
+      输出分成两份、还有运行时上限与 7 天清理在那两个目录里做，路径必须是**一个**
+      确定的目录。作业脚本在启动早期 `mkdir -p` 它（此后每个作业都安全），而
+      第一条作业靠 Slurm 自己建父目录（实测本集群会建）。
     """
-    logdir = os.path.join(home, cfg.job_log_subdir)
-    if os.path.isdir(logdir):
-        outpat = os.path.join(logdir, "slurm-%j.out")
-    else:
-        outpat = os.path.join(home, "slurm-%j.out")
+    outpat = os.path.join(logdir, "slurm-%j.out")
+    errpat = os.path.join(logdir, "slurm-%j.err")
 
     # 作业名 `sj-<插件短名>`：squeue 里一眼看得出这是本系统的作业、而且是哪个插件。
     #
@@ -6307,7 +6343,9 @@ def build_sbatch_argv(cfg, sess, env, home, job_script, service_kind):
             "-c", str(sess["cpus"]),
             "--mem=%s" % sess["mem"],
             "--time=%s" % sess["requested_time"],
-            "-o", outpat, "-e", outpat]
+            # 两份，不合成一份 —— 见函数头那段。`--open-mode=append` 是体积上限
+            # 那条性质的前提，也是可选的：见同一段。
+            "-o", outpat, "-e", errpat, "--open-mode=append"]
     # 分区可以是空串 —— 见 op_submit 里「缺省随机」那一节的说明：权限查不到时
     # 我们退化为不带 -p，把选择权交回 Slurm 的默认分区。
     if sess.get("partition"):
@@ -6819,8 +6857,14 @@ class Slurm(object):
         不走 shell、不做字符串拼接 —— 参数全部是 argv 元素。
 
         `job_script` / `service_kind` 一路显式传下来，见 build_sbatch_argv。
+
+        ★ 日志目录在这里现算（`job_log_dir_for`），不从调用方传进来：它按 uid
+          取家目录，而这一层是唯一握着 uid 的地方。
         """
-        argv = build_sbatch_argv(self.cfg, sess, env, home,
+        logdir = job_log_dir_for(uid)
+        if not logdir:
+            return None, "查不到这个 uid 的家目录（NSS），无法确定作业日志的落点"
+        argv = build_sbatch_argv(self.cfg, sess, env, logdir,
                                  job_script, service_kind)
         pw = pwd.getpwnam(user)
         try:
@@ -10267,7 +10311,10 @@ class Sessiond(object):
             # SLURMATE_CS_BIN，sshd 是 SLURMATE_SSHD_BIN）。加第三个插件不用动这里。
             **({spec.bin_env: pcfg.bin} if spec.bin_env else {}),
             "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
-            "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
+            # 作业日志目录。★ 它必须与 `build_sbatch_argv` 那个 `-o/-e` 的**同一个**
+            # 目录 —— 作业脚本据此 `exec >>` 到那两个文件上、并在同一个目录里做
+            # 保留期与总量上限。两处各算一次的话，症状是"日志写在 A，脚本去删 B"。
+            "SLURMATE_LOG_DIR": job_log_dir_for(uid) or "",
             "SLURMATE_PORT_MIN": str(cfg.port_start),
             "SLURMATE_PORT_MAX": str(cfg.port_end),
             # ── 服务种类与它需要的东西 ──

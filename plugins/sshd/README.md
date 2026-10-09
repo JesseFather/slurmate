@@ -191,7 +191,7 @@ IDM 或集群的登录入口都不认识它**。
 |---|---|
 | `precheck_sshd` | 查公钥形态 + 查私有临时目录。**非 0 → 宿主写墓碑并以 24 结束，不会开始挑端口** |
 | `start_sshd` | 生成/复用主机密钥、写 config 与 authorized_keys、起 sshd、嗅探版本行 |
-| `cleanup_sshd` | 把 sshd 自己的日志并进作业日志（在宿主的最后一行之后、NFS 补写之前） |
+| （无 `cleanup_sshd`） | 不需要 —— `-e` 让 sshd 直接往作业日志的 `.err` 上写，从它启动那一刻起 |
 
 外加一个 `PLUGIN_SESSION_FIELDS[ssh_host_key]`：主机公钥通过**宿主**写进会话文件。
 

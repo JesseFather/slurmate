@@ -27,9 +27,12 @@ slurmate doctor
 slurmate list
 slurmate status --json
 
-# 4. 作业日志（计算节点上，也可在登录节点通过共享家目录看）
-ls -l ~/.slurmate/logs/job-*.log
-tail -100 ~/.slurmate/logs/job-<job_id>.log
+# 4. 作业日志（作业在计算节点上写，日志目录在共享家目录里 —— 登录节点也看得见）
+#    两份：.out 是宿主的 log() 与服务的标准输出，.err 是标准错误。
+#      它们**实时**写：作业跑着的时候就能看，不必等它结束。
+ls -l ~/.slurmate/logs/slurm-*.{out,err}
+tail -100 ~/.slurmate/logs/slurm-<job_id>.out
+tail -100 ~/.slurmate/logs/slurm-<job_id>.err     # 抱怨都在这一份里
 ```
 
 审计日志里的事件名是最快的线索（`audit()`，`cluster/slurmate-sessiond`）：
@@ -988,7 +991,8 @@ scontrol ping
 
 # 作业侧（计算节点上写，登录节点上也能通过共享家目录看）
 ls -l ~/.slurmate/sessions/
-tail -100 ~/.slurmate/logs/job-<job_id>.log
+tail -100 ~/.slurmate/logs/slurm-<job_id>.out    # 宿主与服务的标准输出
+tail -100 ~/.slurmate/logs/slurm-<job_id>.err    # 标准错误 —— 认证被拒这类都在这
 cat ~/.slurmate/sessions/job-<job_id>.json     # 0600，含 tunnel_target 与口令
 
 # 审计
@@ -1002,7 +1006,7 @@ sudo tail -100 /var/log/slurmate/audit.log
 1. `slurmate doctor` 的完整输出；
 2. `slurmate status --json`（**先自行确认里面没有不宜公开的口令字段**）；
 3. `journalctl -u slurmate-sessiond -n 200` 的对应时间段；
-4. `~/.slurmate/logs/job-<job_id>.log` 的尾部；
+4. `~/.slurmate/logs/slurm-<job_id>.out` 与 `.err` 的尾部；
 5. `nft list chain inet slurmate output`；
 6. 客户端面板上的告警文案（它已经把「隧道断开」「心跳没落地」「会话已不存在」
    区分开了，比一句「连不上」有用得多）。

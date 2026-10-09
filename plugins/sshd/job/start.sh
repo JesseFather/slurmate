@@ -44,12 +44,13 @@
 #  非 root 的 sshd 根本无法切换成别的用户，所以最坏情况就是作业属主让别人用**他
 #  自己的**账号 —— 那是他本来就有的权力，不产生任何新访问。
 #
-#  ── 与宿主的两处接口（其余全靠 $1 / $NODE_IP / $LOCAL_LOG / $LOCAL_LOG_DIR）──
+#  ── 与宿主的接口（其余全靠 $1 / $NODE_IP / $LOCAL_LOG_DIR）──────────────────
 #
 #    precheck_sshd   起服务之前的校验。返回非 0 → 宿主写墓碑并以 24 结束作业，
 #                    **不会**开始挑端口。公钥在这里查。
-#    start_sshd      返回 0 时必须把 pid 写进 $SVC_PID（见宿主契约）。
-#    cleanup_sshd    宿主在【NFS 补写之前】调它，把 sshd 自己的日志并进作业日志。
+#    start_sshd      返回 0 时必须把 pid 写进 $SVC_PID（见宿主契约），而且
+#                    **不许把服务进程的 stdout/stderr 重定向走** —— 那两条流就是
+#                    作业日志，宿主会核对（`svc_stream_ok`）。
 #    PLUGIN_SESSION_FIELDS[ssh_host_key]
 #                    主机公钥。宿主负责把它转义成 JSON 写进会话文件 ——
 #                    让每个插件自己拼 JSON 片段等于把转义责任推给每一个插件，
@@ -117,8 +118,10 @@ _sshd_ensure_host_key() {
     # -N ''：带口令的主机密钥无法无人值守启动。
     # </dev/null：目标已存在时 ssh-keygen 会【交互式】问是否覆盖 —— 少了这个重定向
     # 它会一直等下去（表现为作业永远卡在"启动中"，日志里一句错都没有）。
+    # ★ 输出**不重定向**：`-q` 让它成功时一声不吭，而失败时那几句诊断正好落在
+    #   作业日志的 `.err` 上 —— 那正是排查要看的东西。
     if ! ssh-keygen -q -t ed25519 -N '' -C 'slurmate-jobhost' \
-             -f "$tmp" </dev/null >>"$LOCAL_LOG" 2>&1; then
+             -f "$tmp" </dev/null; then
         log "错误：ssh-keygen 生成主机密钥失败"
         rm -f "$tmp" "$tmp.pub" 2>/dev/null || true
         return 1
@@ -210,7 +213,6 @@ start_sshd() {
 
     cfg="$LOCAL_LOG_DIR/sshd_config"
     authkeys="$LOCAL_LOG_DIR/authorized_keys"
-    _sshd_log="$LOCAL_LOG_DIR/sshd.log"
 
     printf '%s\n' "$SLURMATE_SSH_PUBKEY" > "$authkeys" 2>/dev/null || {
         log "错误：无法写 $authkeys"
@@ -275,19 +277,25 @@ EOF
     chmod 600 "$cfg" 2>/dev/null || true
 
     log "尝试在 ${NODE_IP}:${p} 启动用户态 sshd (hostkey=$_sshd_host_key)"
-    log "已授权提交时带上来的公钥: $SLURMATE_SSH_PUBKEY"
     # ★ -D 是必需的，不是风格问题：不加它 sshd 会 daemon(1,0) —— fork + setsid，
     #   **父进程立刻退出**，$! 当场变成死 pid，wait 立即返回 → 作业在服务起来的
     #   同一秒就结束；心跳的存活门 kill -0 也会失败、心跳根本不会写。
-    # -E 把 sshd 自己的日志落到作业本地目录：认证失败这类事实只有它知道，
-    #   不落盘的话作业结束后就永远查不到了（cleanup_sshd 会把它并进 NFS 日志）。
-    nohup "$bin" -D -f "$cfg" -E "$_sshd_log" >> "$LOCAL_LOG" 2>&1 &
+    #
+    # ★★ `-e` 把 sshd 自己的日志写到**标准错误**，而**不做任何重定向**：那一条
+    #   流就是作业日志的 `.err`（见 run.sbatch 第 1 节）。认证失败、StrictModes
+    #   不满意某级目录的权限这类事实**只有 sshd 知道**，而它们从作业跑起来的那一刻
+    #   起就该看得见 —— 从前用的是 `-E <自己的文件>` + 结束时由 `cleanup_sshd`
+    #   取尾部 200 行并回作业日志，那意味着**认证被拒**的那几分钟里站点上什么都
+    #   没有，而"认证为什么失败"正是那时候唯一想知道的事。
+    #
+    # ★ 具体做法是**继承**宿主的 stdout/stderr（一个重定向都不加）。宿主会在
+    #   start_sshd 返回之后核对这一点（`svc_stream_ok`）—— 重定向走就判失败。
+    nohup "$bin" -D -e -f "$cfg" &
     SVC_PID=$!
 
     for i in $(seq 1 20); do
         if ! kill -0 "$SVC_PID" 2>/dev/null; then
-            log "sshd 在端口 $p 上提前退出（配置不合法？端口被占？）"
-            log "sshd 日志尾部: $(tail -n 5 "$_sshd_log" 2>/dev/null | tr '\n' '|')"
+            log "sshd 在端口 $p 上提前退出（配置不合法？端口被占？）—— 原因就在上面几行里"
             SVC_PID=""
             return 1
         fi
@@ -300,7 +308,6 @@ EOF
     done
 
     log "sshd 在端口 $p 上 20 秒未就绪，放弃该端口"
-    log "sshd 日志尾部: $(tail -n 5 "$_sshd_log" 2>/dev/null | tr '\n' '|')"
     kill -TERM "$SVC_PID" 2>/dev/null || true
     sleep 1
     kill -KILL "$SVC_PID" 2>/dev/null || true
@@ -308,13 +315,6 @@ EOF
     return 1
 }
 
-# 把 sshd 自己的日志并进作业日志。宿主在【NFS 补写之前】调它，所以这些行会被
-# 一起带上去。不并的话，"认证被拒"这类只有 sshd 知道的事实在作业结束后就永远
-# 消失了 —— 客户端只看到一句"认证失败"，而原因（比如 StrictModes 不满意某级目录
-# 的权限）躺在计算节点上一个已经删掉的临时目录里。
-cleanup_sshd() {
-    if [[ -n "${_sshd_log:-}" && -f "${_sshd_log:-}" ]]; then
-        tail -n 200 "$_sshd_log" >> "$LOCAL_LOG" 2>/dev/null || true
-    fi
-    return 0
-}
+# ★ 这里**没有** `cleanup_sshd`。它从前做的那件事（把 sshd 自己的日志并进作业
+#   日志）已经不需要了：`-e` 让 sshd 直接往作业日志的 `.err` 上写，从它启动的
+#   那一刻起。少一个"必须排在宿主最后一行之后"的时序约束，就少一类静默失败。

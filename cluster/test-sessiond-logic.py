@@ -680,6 +680,19 @@ def _read_logs(home):
     return out
 
 
+def _read_logs_part(home, suffix):
+    """只读日志目录里某一类文件（`.out` 或 `.err`）。作业日志按**流**分两份，
+    所以"这一句落在哪一份里"本身就是要断言的东西 —— 合起来读就断言不了。"""
+    d = os.path.join(home, ".slurmate", "logs")
+    out = ""
+    if os.path.isdir(d):
+        for fn in sorted(os.listdir(d)):
+            if fn.endswith(suffix):
+                with open(os.path.join(d, fn), encoding="utf-8") as f:
+                    out += f.read()
+    return out
+
+
 def _stub_slurm_bins(tmpdir, names):
     """把八个 Slurm 命令的**空桩**放进一个目录，并把它前置到 `PATH`。
 
@@ -1386,11 +1399,14 @@ exit 0
 
     # 作业脚本与短名现在是**显式入参**（见 build_sbatch_argv 的 docstring）——
     # 这条链路是"到底提交了哪一份"的唯一落点，所以它必须能被纯函数钉住。
+    # 日志目录是入参（`job_log_dir_for()` 在调用方算好），不再是"家目录 + 一个子目录"。
+    _logdir = os.path.join(home, ".slurmate", "logs")
+
     def argv_of(**over):
         js = over.pop("job_script", "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch")
         sk = over.pop("service_kind", "code-server")
         return mod.build_sbatch_argv(cfg, dict(base_sess, **over), {"A": "1"},
-                                     home, js, sk)
+                                     _logdir, js, sk)
 
     a = argv_of()
     check("指定了分区 → 带 -p", "-p" in a and "2080TI" in a, str(a))
@@ -1442,10 +1458,36 @@ exit 0
           mod.load_gres(json.dumps({"name": "gpu", "count": 2}))
           == {"name": "gpu", "type": None, "count": 2}
           and mod.load_gres("gpu:2") is None, "load_gres 的两种输入")
-    a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, tmpdir,
+    # ── 17a. 作业日志：两个文件、按流分开、append 模式 ────────────────────────
+    #
+    # ★★ 这一组是**这一轮唯一的落点**：作业脚本那一侧的 `exec >>` 由 22d 的运行时
+    #    用例钉着，**而 sbatch 这一侧的 `-o/-e` 只有这里能验**（那些用例是直接
+    #    `bash <脚本>` 跑的，根本不经过 sbatch）。变异"M6 把 -e 改回 outpat"
+    #    第一轮就是这么逃过去的 —— 它一条都不红。
+    #
+    # ★ 从前这里有一条"目录不存在时回退到家目录根"。那条回退**整个删掉了**：
+    #   输出分成两份、还有保留期与总量上限在那两个目录里做，落点必须是**一个**
+    #   确定的目录。作业脚本会 `mkdir -p` 它，此后每个作业都安全。
+    a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, _logdir,
                               "/tmp/j.sbatch", "code-server")
-    check("家目录下没有日志子目录时回退到家目录根",
-          any(x.endswith("slurm-%j.out") and tmpdir in x for x in a), str(a))
+    def _pat(flag):
+        return a[a.index(flag) + 1] if flag in a else None
+    _o, _e = _pat("-o"), _pat("-e")
+    check("★★ `-o` 与 `-e` 是**两个不同的**文件，而且就是 `slurm-%j.out` / "
+          "`slurm-%j.err`（合成一个的话，「这个服务往 stderr 上抱怨了什么」就没法"
+          "单独看 —— 而出故障时那恰恰是唯一有用的那半）",
+          _o is not None and _e is not None and _o != _e
+          and _o.endswith("slurm-%j.out") and _e.endswith("slurm-%j.err"),
+          "out=%r err=%r" % (_o, _e))
+    check("★★ 而两份都落在**传进来的那个**日志目录里（不是家目录根、也不是别处）—— "
+          "作业脚本据此 `exec >>` 过去、并在同一个目录里做保留期与总量上限",
+          bool(_o) and bool(_e)
+          and os.path.dirname(_o) == _logdir and os.path.dirname(_e) == _logdir,
+          "out=%r err=%r logdir=%r" % (_o, _e, _logdir))
+    check("★★ `--open-mode=append`：Slurm 那一侧的 fd 必须与作业脚本的 `>>` 同为 "
+          "O_APPEND。默认的 truncate 下它带着自己的偏移量，收尾时那一次写会"
+          "**盖掉文件开头**",
+          "--open-mode=append" in a, str(a))
 
     # ── 17b. ★ 环境变量**只**靠命令行传（F19）────────────────────────────────
     #
@@ -6426,36 +6468,36 @@ exit 0
     check("★ 预检没过时**不会**开始挑端口（服务一次都没被启动）",
           "不该走到这里" not in _log3, _log3[-300:])
 
-    # ── 22d ★ 作业日志：我们自己的行**恰好一次**，插件的行**带得上去** ─────
+    # ── 22d ★ 作业日志：一份实时、按流分开、而且插件藏不走 ────────────────
     #
-    # 这一段是本项目里最容易写成"看起来对"的地方，所以它有三条独立的断言。
-    # 契约（packer/docs/README.md〈服务进程的输出、以及作业日志〉）：
+    # 契约（run.sbatch 第 1 节 + packer/docs/README.md〈作业日志〉）：作业的输出
+    # **只有一处** —— Slurm 抓的那两个文件 `slurm-<作业号>.out` / `.err`。宿主自己
+    # 写的每一行、以及服务进程写的每一行，都在产生的那一刻落在那上面。
     #
-    #   · log() 双写（本地 + NFS），作业结束时的补写只补**水位之后**的部分
-    #   · 服务进程的输出走它**自己的**文件，由 `cleanup_<短名>` 并进 LOCAL_LOG
-    #   · `cleanup_<短名>` 在宿主最后一行**之后**被调，所以并进来的行天然在水位
-    #     之后、会被补写带上去
+    # ★★ 这一节从前判的是**另一套机制**：宿主"本地日志 + 往 NFS 补写"双写、服务
+    #    进程把输出重定向到自己的文件、结束时由 `cleanup_<短名>` 取尾部并回来；
+    #    三条断言分别盯着"水位不许错位""并进来的行要上得去""偷偷写 LOCAL_LOG 的
+    #    行进不去"。那套东西整段删掉了（连同水位、`$LOCAL_LOG` / `$NFS_LOG` 两个
+    #    契约变量），所以这里的判据换成它替换成的那几条 —— **判据跟着被守的东西
+    #    走**，不是删掉了事。
     #
-    # 变异验证发现的：写这一节时随手让假插件直接 printf 到 LOCAL_LOG，于是日志末尾
-    # 出现了**两行**"清理完成 rc=24" —— 因为水位那时记的是"log() 调过几次"，
-    # 而服务进程的插话让它错位了。
+    # ★ 而"服务进程的输出**实时**可见"这条性质在真机上的失败形态是静默的：日志
+    #   文件建出来了、宿主的行进得去、一切看起来正常，只有服务那部分**一个字都没有**。
+    #   这里用"起一个真的往两条流上各写一行的服务"把它钉住。
     _woven_raw = os.path.join(tmpdir, "woven-raw.sbatch")
     with open(os.path.join(tmpdir, "blocks_r.sh"), "w", encoding="utf-8") as _f:
         _f.write(
-            # 服务进程的输出 → 它自己的文件（契约要求的形状）
+            # 服务进程：stdout 一行、stderr 一行，然后挂住（让存活门看得见它）。
+            # ★ **一个重定向都不加** —— 这正是契约要求的形状，宿主会在 start_ 返回
+            #   之后核对（`svc_stream_ok`）。
             "start_thing() {\n"
-            "    _thing_log=\"$LOCAL_LOG_DIR/thing.log\"\n"
-            "    ( printf '服务自己的第 1 行\\n'; printf '服务自己的第 2 行\\n';"
-            " sleep 60 ) >> \"$_thing_log\" 2>&1 &\n"
+            "    ( printf '服务写到 stdout 的一行\\n'\n"
+            "      printf '服务写到 stderr 的一行\\n' >&2\n"
+            "      sleep 60 ) &\n"
             "    SVC_PID=$!\n"
-            # ★ 这一行是**故意违规**的：契约说服务进程的输出不该直接写 LOCAL_LOG。
-            #   它同时是水位那条断言的试金石 —— 它插在两次 log() **中间**，
-            #   于是"水位记行号"与"水位记 log() 次数"两种实现会给出不同的答案。
-            "    printf '水位之前偷偷写的一行\\n' >> \"$LOCAL_LOG\"\n"
             "    log '插件用 log() 写的一行'\n"
             "    return 0\n"
-            "}\n"
-            "cleanup_thing() { tail -n 200 \"$_thing_log\" >> \"$LOCAL_LOG\" 2>/dev/null || true; }\n")
+            "}\n")
     _awk_r = subprocess.run(
         ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_r.sh"),
          '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
@@ -6502,19 +6544,179 @@ exit 0
         _p.kill()
         _p.wait()
     _rlog = _read_logs(_hr)
+    # ★ 两份分开读：这一节有好几条判据问的是"**哪一份**里有它"。合起来读的话
+    #   "out 和 err 分开了"这件事本身就没法断言。
+    _ldir = os.path.join(_hr, ".slurmate", "logs")
+    _lout = _read_logs_part(_hr, ".out")
+    _lerr = _read_logs_part(_hr, ".err")
     _rlines = [x for x in _rlog.split("\n") if x.strip()]
     _dupes = sorted({x for x in _rlines if _rlines.count(x) > 1})
     check("★ 会话确实跑到了 running（下面几条不是在一个早退的作业上验的）",
           any("会话就绪" in x for x in _rlines), _rlog[-400:])
-    check("★ 宿主自己的日志行在 NFS 里**恰好出现一次**（水位不许错位）",
+    check("★★ 两份日志都在，而且名字就是 `slurm-<作业号>.{out,err}`"
+          "（合成一份的话，「这个服务往 stderr 上抱怨了什么」就没法单独看 —— "
+          "而出故障时那恰恰是唯一有用的那半）",
+          os.path.isfile(os.path.join(_ldir, "slurm-777001.out"))
+          and os.path.isfile(os.path.join(_ldir, "slurm-777001.err")),
+          str(sorted(os.listdir(_ldir))))
+    check("★★ 服务进程写到 **stdout** 的行实时落在 `.out` 上"
+          "（从前它落在计算节点一个登录节点看不见的临时文件里，作业结束才并回来 —— "
+          "于是「作业跑着的时候为什么起不来」在站点上无话可说）",
+          "服务写到 stdout 的一行" in _lout, _lout[-300:])
+    check("★★ 服务进程写到 **stderr** 的行落在 `.err` 上，**不在** `.out` 里"
+          "（分开是按流分，不是按内容猜 —— 两边都留一份的话，"
+          "「打开 .err 就能看到全部问题」这条性质就没了）",
+          "服务写到 stderr 的一行" in _lerr
+          and "服务写到 stderr 的一行" not in _lout,
+          "out=%r err=%r" % (_lout[-200:], _lerr[-200:]))
+    check("★ 宿主自己的日志行**恰好出现一次**（从前这里守的是「水位不许错位」；"
+          "现在是另一个理由：只有一处写，任何一处重复写都会让它在两份文件里各出现一次）",
           _dupes == [], "重复了：%s" % [x[-70:] for x in _dupes])
-    check("★ 插件在 cleanup_<短名> 里并进来的服务日志确实上了 NFS",
-          any("服务自己的第 1 行" in x for x in _rlines)
-          and any("服务自己的第 2 行" in x for x in _rlines),
-          _rlog[-500:])
-    check("★ 而在 start_<短名> 里直接写 LOCAL_LOG 的行进不了 NFS"
-          "（这正是契约要禁止那种写法的原因 —— 它是静默丢失）",
-          not any("水位之前偷偷写的一行" in x for x in _rlines), _rlog[-500:])
+    check("★ 插件用 log() 写的行也在（宿主与插件共用同一条流）",
+          "插件用 log() 写的一行" in _rlog, _rlog[-300:])
+    check("★ 而作业结束时**没有**任何「补写」动作 —— 收尾那几行本来就是实时的",
+          "清理完成" in _rlog, _rlog[-300:])
+
+    # ── 22d-1b ★★ 插件把服务的输出藏起来 ⇒ 拒绝启动 ────────────────────────
+    #
+    # ★★ 这一条是"插件想走歪门邪道也走不通"那个要求的落点。契约要求 start_<短名>
+    #    起的服务**继承**宿主的 stdout/stderr；重定向走 = 服务的输出在站点上永远
+    #    看不到，而且**不报错**（界面上是"作业起来了，日志只有宿主那几行"）。
+    #
+    # ★ 判据是 `/proc/<pid>/fd/N` 与宿主自己的 fd 是不是同一个对象，**不是**扫插件
+    #   源码：扫 shell 扫不干净（变量、exec 3>、命令替换、函数的间接调用）。这里
+    #   用的正是那种"扫不出来"的写法之一 —— 路径存在变量里、重定向写在子 shell 上。
+    _woven_bad = os.path.join(tmpdir, "woven-steal.sbatch")
+    with open(os.path.join(tmpdir, "blocks_steal.sh"), "w", encoding="utf-8") as _f:
+        _f.write(
+            "start_thing() {\n"
+            "    local mine=\"$LOCAL_LOG_DIR/service.log\"\n"
+            "    ( sleep 60 ) >> \"$mine\" 2>&1 &\n"
+            "    SVC_PID=$!\n"
+            "    log '我把服务的输出藏起来了'\n"
+            "    return 0\n"
+            "}\n")
+    _awk_b = subprocess.run(
+        ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_steal.sh"),
+         '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+         ' while ((getline line < blocks) > 0) print line;'
+         ' close(blocks); found = 1; next }'
+         ' { print } END { if (!found) exit 9 }', _rb],
+        capture_output=True, text=True)
+    with open(_woven_bad, "w", encoding="utf-8") as _f:
+        _f.write(_awk_b.stdout)
+    _hb = os.path.join(tmpdir, "jobsh-steal")
+    os.makedirs(os.path.join(_hb, "bin"), exist_ok=True)
+    write_stub(os.path.join(_hb, "bin", "scontrol"),
+               'echo "NodeName=node01 NodeAddr=192.0.2.20 State=IDLE"\n')
+    _env_b = dict(_env_full)
+    _env_b.update({"HOME": _hb, "SLURM_JOB_ID": "777002",
+                   "PATH": os.path.join(_hb, "bin") + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+                   "SLURMATE_SESS_DIR": os.path.join(_hb, ".slurmate", "sessions"),
+                   "SLURMATE_LOG_DIR": os.path.join(_hb, ".slurmate", "logs")})
+    _rb2 = subprocess.run(["bash", _woven_bad], capture_output=True, text=True,
+                          env=_env_b, timeout=120)
+    _rblog = _read_logs(_hb)
+    check("★★ 插件把服务进程的输出重定向走了 ⇒ 作业以 **25** 结束，"
+          "而且**当场**（不是跑完所有候选端口才失败）",
+          _rb2.returncode == 25, "rc=%s 日志=%s" % (_rb2.returncode, _rblog[-300:]))
+    check("★★ 而它说清了是哪一条流、指到了哪里 —— 报错要能照着改",
+          "重定向" in _rblog and "fd 1" in _rblog, _rblog[-500:])
+    check("★ 而且那句抱怨落在 **.err** 上（它是抱怨，不是进展）",
+          "拒绝启动" in _read_logs_part(_hb, ".err"),
+          _read_logs_part(_hb, ".err")[-400:])
+
+    # ── 22d-1c ★ 日志的保留期与总量上限 ────────────────────────────────────
+    #
+    # 两条性质，都是**用户会直接感受到**的：老日志会自己消失、日志目录不会无限涨。
+    # 而它们的失败形态是**反过来的** —— 不删，用户的家目录被日志吃满（赔上的是整个
+    # 家目录配额），所以这里真的去跑一遍。
+    #
+    # ★ 体积上限是 10 GiB，造不出来 ⇒ 用 `SLURMATE_LOG_DIR_MAX_BYTES` 顶掉它
+    #   （那是这两个常数唯一的用途，见 run.sbatch 第 1b 节）。
+    #
+    # ★★ 最要紧的一条是**当前这个作业自己的两份不许动**：它们是正在写的，删掉就等于
+    #    "作业还在跑，日志凭空没了"。越界时先淘汰别人的。
+    def _run_keep_case(tag, cap, pre):
+        home = os.path.join(tmpdir, "jobsh-keep-" + tag)
+        ldir = os.path.join(home, ".slurmate", "logs")
+        os.makedirs(os.path.join(home, "bin"), exist_ok=True)
+        os.makedirs(ldir, exist_ok=True)
+        write_stub(os.path.join(home, "bin", "scontrol"),
+                   'echo "NodeName=node01 NodeAddr=192.0.2.20 State=IDLE"\n')
+        for name, days, size in pre:
+            f = os.path.join(ldir, name)
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write("x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(f, (stamp, stamp))
+        env = dict(_env_full)
+        env.update({
+            "HOME": home, "SLURM_JOB_ID": "777003",
+            "PATH": os.path.join(home, "bin") + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+            "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
+            "SLURMATE_LOG_DIR": ldir,
+            "SLURMATE_LOG_DIR_MAX_BYTES": str(cap),
+        })
+        proc = subprocess.Popen(["bash", _woven_raw], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, env=env)
+        for _ in range(60):
+            time.sleep(0.5)
+            if "会话就绪" in _read_logs(home):
+                break
+        proc.send_signal(_sig.SIGTERM)
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        return home, ldir
+
+    # ① 7 天：30 天前的那一份没了，昨天的那一份还在。
+    _hk1, _hk1d = _run_keep_case("days", 10 ** 12, [
+        ("slurm-200000.out", 30, 100),
+        ("slurm-200001.out", 1, 100),
+    ])
+    _names1 = sorted(os.listdir(_hk1d))
+    check("★★ 7 天前的日志整份删掉、昨天的留着（不删的话，用户的家目录会被日志吃满 —— "
+          "而那赔上的是**整个家目录配额**）",
+          "slurm-200000.out" not in _names1 and "slurm-200001.out" in _names1,
+          str(_names1))
+
+    # ② 总量超限：从**最老的**开始淘汰，而且**当前这个作业自己的两份一个字都不动**。
+    #
+    # ★★ 上限的取法是**故意**的：三份各 1 MiB、上限 2.5 MiB ⇒ **恰好删掉一份就能
+    #    回到线下**。写成"上限很小、删到只剩自己"的话，三份都会被删光 ——
+    #    而那时"先删老的"与"先删新的"留下的都是同一个空集，这条判据就
+    #    **一条都不红**（变异验证第一轮正是这么逃过去的）。
+    _hk2, _hk2d = _run_keep_case("size", 2560 * 1024, [
+        ("slurm-200010.out", 3, 1024 * 1024),      # 最老
+        ("slurm-200011.out", 2, 1024 * 1024),
+        ("slurm-200012.out", 1, 1024 * 1024),
+    ])
+    _names2 = sorted(os.listdir(_hk2d))
+    _all3 = ["slurm-200010.out", "slurm-200011.out", "slurm-200012.out"]
+    _kept = [n for n in _all3 if n in _names2]
+    check("★★ 目录总量超上限 ⇒ 从**最老的**开始淘汰，删到不超为止 —— "
+          "留在这里的必须是最新的那两份（「删了新的、留着老的」就该红）",
+          _kept == ["slurm-200011.out", "slurm-200012.out"],
+          "留下 %s（全部 %s）" % (_kept, _names2))
+    # ③ 上限小到**只留得下当前这个作业自己**：那才是"不许删自己"这条能验出来的
+    #    唯一形状。与 ② 分开跑正是为此 —— ② 里自己是最新的，轮到它之前就已经回到
+    #    线下了，删不删自己**行为完全一样**（变异验证第一轮就是这么逃过去的）。
+    _hk3, _hk3d = _run_keep_case("self", 400, [
+        ("slurm-200020.out", 3, 500),
+    ])
+    _names3 = sorted(os.listdir(_hk3d))
+    check("★★ 目录总量超上限时，**当前这个作业自己的两份无论如何都不动** "
+          "（它们是正在写的 —— 删掉就等于「作业还在跑，日志凭空没了」）；"
+          "别人的照删",
+          "slurm-200020.out" not in _names3
+          and "slurm-777003.out" in _names3 and "slurm-777003.err" in _names3,
+          str(_names3))
+    check("★ 淘汰是**说出来**的，不是悄悄删（日志里能读到删了哪一份）",
+          "删掉了最老的一份" in _read_logs(_hk3),
+          _read_logs(_hk3)[-300:])
 
     # ── 22d-2 ★ 「每一个候选端口都失败」这条路（F16）────────────────────────
     #

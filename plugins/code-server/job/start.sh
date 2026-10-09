@@ -40,7 +40,6 @@
 #    $1                 宿主挑好的端口
 #    $NODE_IP           本节点的**字面 IPv4**（ACL 的 ip daddr 依赖它；别自己解析
 #                       节点名 —— 解析结果与集群侧写进 nft 的不一致时 ACL 会静默失效）
-#    $LOCAL_LOG         节点本地日志文件，必定可写
 #    $SLURMATE_CS_BIN   本插件的可执行文件路径，由守护进程按站点那份插件配置
 #                       （slurmate.conf.d/code-server.conf）里的 bin 解析后传下来
 #                       （这个变量名由 plugin.json 的 site.bin.env
@@ -54,6 +53,10 @@
 #        cleanup 里的杀进程、以及主流程最后的 `wait` 三处都读它。不写它的话作业会
 #        在"会话就绪"那一行之后立刻结束。
 #        返回非 0 = 这个端口失败，宿主换下一个候选。
+#
+#        ★★ **不许把服务进程的 stdout/stderr 重定向走** —— 那两条流就是作业日志
+#        （`.out` / `.err`），宿主在 start_ 返回之后会核对（`svc_stream_ok`）。
+#        改到自己的文件里 = 服务的输出在站点上一个字都看不到，而且不报错。
 #
 # ==============================================================================
 
@@ -80,16 +83,15 @@ start_code_server() {
 
     _code_server_scrub_env
 
-    # ★ code-server 的 stdout/stderr 落到**它自己的**文件，不是 $LOCAL_LOG ——
-    #   两个理由，都是硬理由：
-    #     1. 宿主按"LOCAL_LOG 的行号"决定哪些行还没进 NFS（见宿主里 log() 上方
-    #        那段）。服务进程往 LOCAL_LOG 里插话会让那个水位**穿过去**，于是那些
-    #        行永远进不了 NFS —— 而且没有任何地方会报错。
-    #     2. 并进 NFS 的那一步必须在 `cleanup_code_server` 里、且要在宿主的
-    #        最后一行**之后**（宿主那一段补写的注释解释了为什么）。
-    #   sshd 插件用的是同一个形状（它的 `-E` 日志）。
-    _cs_log="$LOCAL_LOG_DIR/code-server.log"
-
+    # ★★ 服务的 stdout/stderr **一个重定向都不加** —— 它们继承宿主的那两条流，
+    #   而那两条就是作业日志的 `.out` / `.err`（见 run.sbatch 第 1 节）。
+    #   code-server 的正常日志走标准输出、抱怨走标准错误，于是打开右栏就能看到
+    #   **实时**的 IDE 日志。
+    #
+    #   从前这里写着 `>> "$LOCAL_LOG_DIR/code-server.log" 2>&1`，只在作业结束时由
+    #   `cleanup_code_server` 取尾部 200 行并回作业日志 —— 那意味着"IDE 起不来了"
+    #   的那几分钟里，站点上只有宿主那几行，而真正的原因（端口、扩展、权限）
+    #   躺在计算节点一个登录节点看不见的临时目录里。
     log "尝试在 ${NODE_IP}:${p} 启动 code-server (auth=${AUTH_MODE})"
     nohup "$bin" \
         --bind-addr "${NODE_IP}:${p}" \
@@ -97,8 +99,7 @@ start_code_server() {
         --disable-telemetry \
         --disable-update-check \
         --user-data-dir "$HOME/.local/share/code-server" \
-        --extensions-dir "$HOME/.local/share/code-server/extensions" \
-        >> "$_cs_log" 2>&1 &
+        --extensions-dir "$HOME/.local/share/code-server/extensions" &
     SVC_PID=$!
 
     # 就绪判定：优先 /healthz 返回 2xx；若将来 code-server 版本改了这个端点，
@@ -131,21 +132,15 @@ start_code_server() {
         sleep 1
     done
 
-    log "code-server 在端口 $p 上 45 秒未就绪，放弃该端口"
-    log "code-server 日志尾部: $(tail -n 5 "$_cs_log" 2>/dev/null | tr '\n' '|')"
+    log "code-server 在端口 $p 上 45 秒未就绪，放弃该端口 —— 原因就在上面的 IDE 输出里"
     kill -TERM "$SVC_PID" 2>/dev/null; sleep 1
     kill -KILL "$SVC_PID" 2>/dev/null
     SVC_PID=""
     return 1
 }
 
-# 把 code-server 自己的输出并进作业日志。宿主在 `log "清理完成"` **之后**、
-# **NFS 补写之前**调它 —— 那两个条件缺一不可，宿主那一段的注释解释了原因。
-cleanup_code_server() {
-    if [[ -n "${_cs_log:-}" && -f "${_cs_log:-}" ]]; then
-        # 只取尾部：IDE 的日志很吵（几十万行是常态），全量并进去会让补写撑爆
-        # KillWait 窗口，而超时的后果是墓碑写不下去。
-        tail -n 200 "$_cs_log" >> "$LOCAL_LOG" 2>/dev/null || true
-    fi
-    return 0
-}
+# ★ 这里**没有** `cleanup_code_server`。它从前做的那件事（结束时把 IDE 的日志尾部
+#   并进作业日志）已经不需要了：IDE 的输出从启动那一刻起就直接落在作业日志上。
+#   ★ 顺带解决了它当年的另一个毛病：只取尾部 200 行是**因为 IDE 的日志很吵**
+#     （几十万行是常态），全量并在 KillWait 窗口里会超时。现在不必挑了 ——
+#     日志的保留期与体积上限由宿主统一管（`log_housekeeping`），与插件无关。
