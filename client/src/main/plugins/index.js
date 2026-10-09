@@ -500,11 +500,11 @@ function versionCheck(clientVersion, serverVersion) {
  * 读不到就跳过这项检查。
  *
  * ★ 取的是 `client/package.json` 那个 `version` 的**前两段**，不是整串。
- *   那个字段是三段：npm 与 electron-builder 都要求语义化版本，写 `0.15` 会被
+ *   那个字段是三段：npm 与 electron-builder 都要求语义化版本，写 `0.16` 会被
  *   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"）。
  *   而协议版本是两段（docs/PROTOCOL.md §〇）。**协议版本 = 包版本的前两段** ——
  *   这条关系就落在下面这一行。
- * ★ 少切这一刀的症状指不回本文件：对站点自报 `0.15.0`，而 `FRAMEWORK_VERSION_RE`
+ * ★ 少切这一刀的症状指不回本文件：对站点自报 `0.16.0`，而 `FRAMEWORK_VERSION_RE`
  *   只认两段 ⇒ `parseVer` 给 null ⇒ `versionCheck` 落到 `unknown_host`，
  *   用户看到的是"对面不是我们的守护进程"。
  */

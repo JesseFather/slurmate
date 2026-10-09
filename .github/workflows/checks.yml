@@ -136,7 +136,7 @@ jobs:
         # （client/package.json、client/package-lock.json、cluster/slurmate、
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
         #
-        # ★ **客户端那两处写的是三段**（`0.15.0`）：那个 `version` 字段同时是 npm
+        # ★ **客户端那两处写的是三段**（`0.16.0`）：那个 `version` 字段同时是 npm
         #   包的版本号，而 npm 与 electron-builder 都要求语义化版本 —— 写两段会被
         #   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"），
         #   一个安装包都打不出来。**协议版本 = 包版本的前两段**，客户端对站点自报
@@ -223,7 +223,7 @@ jobs:
           #   ★ 两份**记录类**文档排除在外：它们讲的就是各个版本。
           DOC_CUR = re.compile(r"(?:当前维护的版本|当前版本)：\**\s*`?v?([0-9]+\.[0-9]+)")
           # ★ 比的是**协议版本**（两段），不是 `places[0][1]` —— 后者现在是客户端
-          #   那个三段的包版本（`0.15.0`），拿它去比文档里的 `v0.15` 会一路误红。
+          #   那个三段的包版本（`0.16.0`），拿它去比文档里的 `v0.16` 会一路误红。
           want = protos[0] if protos else ""
           skip_doc = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
           found = []
