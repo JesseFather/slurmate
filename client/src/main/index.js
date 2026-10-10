@@ -1304,6 +1304,18 @@ function pluginsView() {
       error: siteSync.error || null,
       label: siteSync.label || null,
       syncedAt: siteSync.syncedAt || null,
+      /**
+       * 这个站点**能不能装插件** —— 界面靠它决定画不画那颗「安装插件…」。
+       *
+       * ★ 它是**主进程给的能力位**，不是界面按后端名现判的：判据在渲染层写一遍，
+       *   那个"哪一条路属于哪一侧"的分界就会随界面那份代码散布开，而这条分界
+       *   正是 `app:installSitePlugin` 那道闸门守的东西（权威闸门在主进程，
+       *   一颗藏起来的按钮从来不算防线）。
+       *
+       * ★ 只有假站点能：它就在本机，写进去就是它自己的插件目录。真站点上装插件
+       *   是**管理员**的事（`slurmate plugin install`），客户端这一侧没有那条路。
+       */
+      canInstall: Boolean(backend && backend.kind === KIND.FAKE),
       // 连接期那次版本判定（见 applyVersionGate）。界面用它把 `site_too_new`
       // 那一句说准 —— 那是**唯一**一处界面的说法取决于握手结论的地方，理由见
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
@@ -4809,6 +4821,58 @@ function registerIpc() {
   });
 
   /**
+   * 往**假站点**上装一个 `.splug`（开发者模式专有）。
+   *
+   * ★ **权威闸门在这一侧**：判据是后端种类，不是界面上那颗按钮画没画 ——
+   *   一颗藏起来的按钮从来不算防线，而"客户端不许往真站点上写文件"这条分界
+   *   只有主进程判得了。真站点上装插件是**管理员**的事（`slurmate plugin install`）。
+   *
+   * ★ 装完之后**走既有那条对账**（`reconcileSitePlugins`），不另写一遍同步：
+   *   站点报了它 ⇒ 与真站点逐字一样地下来、过同意闸、然后才加载。开发者模式的
+   *   全部价值就是它演的是**同一件事** —— 在这里抄一条"装完直接放进池子"的捷径，
+   *   等于把下载校验与同意闸那两段在开发者模式里整段跳过，而那两段正是最该被演的。
+   *
+   * ★ 选空了（`cancelled`）**不出提示**：用户按了取消，那不是一次失败。
+   */
+  send('app:installSitePlugin', async () => {
+    if (!backend || backend.kind !== KIND.FAKE) {
+      return { ok: false, code: 'not_fake',
+               error: '只有开发者模式那个假站点上才装得了插件 —— 真站点的插件由'
+                 + '管理员在集群上用 `slurmate plugin install` 装。' };
+    }
+    const r = await dialog.showOpenDialog(win.win, {
+      title: '挑一个 .splug 装到假站点上',
+      message: '真站点上装的就是这个文件（`slurmate plugin install <文件.splug>`）',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '插件包', extensions: ['splug'] }],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths.length) {
+      return { ok: false, cancelled: true };
+    }
+
+    const out = backend.installPlugins(r.filePaths);
+    if (!out.ok) return { ok: false, code: out.code, error: out.error };
+
+    for (const c of out.unchanged) {
+      win.pushNotice('info', `「${c.title}」已经在假站点上了（${c.dir}）—— 它与`
+        + '这一份是同一棵树，所以一个字节都没有写。');
+    }
+    if (out.installed.length) {
+      const names = out.installed.map((x) => `「${x.title}」${x.version}`).join('、');
+      const where = out.installed.map((x) => x.dir).join('、');
+      win.pushNotice('info', `已把 ${names} 装到假站点上（${where}）。`
+        + (backend.connected
+          ? '站点这就报它了，接下来与真站点一样：取回来、过同意闸，然后才可用。'
+          : '连上假站点之后它才会下来 —— 插件是从站点取回来的。'));
+      // ★ `await`（与连接那一次"不 await"不同）：用户按了按钮，而这一次的结果
+      //   就是"装上了没有、接下来该看哪儿"。连接那一次是后台的事，这一次不是。
+      await reconcileSitePlugins();
+    }
+    return { ok: true, installed: out.installed, unchanged: out.unchanged,
+             plugins: pluginsView() };
+  });
+
+  /**
    * 同意一个待分发的插件。
    *
    * ★ **落点是有讲究的**：下载后、暂存里验完、`rename` 之前。见 site-plugins.js。
@@ -5258,9 +5322,14 @@ function registerIpc() {
       else backend.debugClusterMissing(arg || null);
     }
     else if (what === 'reset') backend.debugReset();
-    // 让假站点"装了本客户端不认识的插件" / "把某个插件关掉" ——
-    // 这两条路是"插件增减不许崩"的验收路径，必须能在开发者模式里走到。
-    else if (what === 'extra-plugin') backend.debugAddSitePlugin('jupyter', 'JupyterLab');
+    // 让假站点"装了本客户端不认识的插件" —— 这一条路是"插件增减不许崩"的验收
+    //   路径，必须能在开发者模式里走到。
+    //   ★ 短名**由假站点自己取**（见 backend-fake 的 DEMO_EXTRA_NAME）：那一格要造的
+    //     是"站点上有一个本机不认识的插件"，与它叫什么无关 —— 而基座里不许出现
+    //     任何真插件的名字，所以这里连缺省值都不写。
+    //   ★ 带 `arg` = 指名一个短名（DevTools 那条路，以及"要它和池里某个同名插件
+    //     对上"的用例）。界面上那颗按钮不带。
+    else if (what === 'extra-plugin') backend.debugAddSitePlugin(arg || null);
     // ★ 站点侧那三个开关作用在**哪一个**插件上由调用方指定（不指定就取列表里
     //   第一个）—— 基座里没有插件名可写。一个都没装时这些开关无事可做，如实
     //   说出来，而不是静默地什么也没发生。
@@ -5417,6 +5486,18 @@ module.exports = {
      *   不是绕过什么。
      */
     seedBuiltinDevConnection: () => ensureBuiltinDevConnection(),
+    /**
+     * 把假站点的**插件来源**就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
+     *
+     * ★ 这个接缝做的是真机上**重启才会有的那两件事**（换生效值 + 重扫）：用例要验
+     *   的是"装上去之后站点**当场**就报它"，而那份现场只能这么造 —— 一个进程里
+     *   index.js 只加载一次，而 `dev` 是启动时读的。
+     *   ★ 它**不碰** `dev-mode.json`：那是 `app:pickDevPluginDir` 的事（那一条要重启）。
+     */
+    setDevPluginDir: (dir) => {
+      dev = { ...dev, pluginDir: dir || null };
+      backend.forgetSiteIndex();
+    },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
     getRegistry: () => registry,
     /** 界面会看到的插件视图（四个条件求交的结果，见 pluginsView）。 */

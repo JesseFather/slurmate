@@ -675,6 +675,63 @@ test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title'
     + '界面只负责按它选一句话');
 });
 
+test('★★ 「安装插件…」只在假站点上画，而点它走的就是那条 IPC', async () => {
+  // ★ 判据是**主进程给的能力位**（`site.canInstall`），不是界面按后端名现判 ——
+  //   所以这一条同时钉住了两件事：假站点上它在，真站点上它一颗都没有。
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  h.run('window.__install = 0; window.__result = { cancelled: true };'
+    + 'window.slurmate.installSitePlugin = () => { window.__install += 1;'
+    + '  return Promise.resolve(window.__result); };');
+
+  const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
+  // ★ 按**文字**找，不是"这一块里第一颗按钮"：站点分发那一节本来就有别的按钮
+  //   （「重新同步」），而按位置找的话，这一条会在"那颗按钮没画出来"的时候
+  //   拿到另一颗，然后**绿着**。
+  const btnIn = () => childrenOf(h.byId.get('site-plugins'))
+    .find((x) => x.tagName === 'BUTTON' && x._text === '安装插件…');
+
+  // ① 假站点（能力位为真）⇒ 画出来，而且说得清它收的是什么文件
+  draw({ label: '本站', canInstall: true, versions: [], strays: [] });
+  assert.ok(btnIn(), '假站点上必须画出那颗「安装插件…」');
+  assert.equal(btnIn()._text, '安装插件…');
+  assert.match(btnIn().title || '', /\.splug/, '要说清它挑的是打包器产出的那个文件');
+
+  // ② 真站点（能力位缺席）⇒ **一颗都不画**
+  draw({ label: '本站', versions: [], strays: [] });
+  assert.equal(btnIn(), undefined,
+    '★★ 真站点上不许有这颗按钮 —— 它是主进程给的能力位说了算的，界面不猜');
+
+  // ③ 点一下（用户按了取消）：走那条 IPC，**一声不吭**
+  //   ★ 提示流那一格要**现取**（`doc.getElementById` 会建它）：`$()` 没碰过的 id
+  //     在 `byId` 里根本不存在，而"读一个 undefined 的 children"会以 TypeError
+  //     收场 —— 那看起来像这一组用例坏了，与"守住了"分不开。
+  const notices = () => childrenOf(h.doc.getElementById('notices'));
+  draw({ label: '本站', canInstall: true, versions: [], strays: [] });
+  const before = notices().length;
+  await btnIn().onclick();
+  assert.equal(h.run('window.__install'), 1, '点一下就走那条 IPC');
+  assert.equal(notices().length, before,
+    '★ 取消不是失败，不许出一条提示（"我按了取消"不该被当成一次错误报出来）');
+
+  // ④ 装不上：那句错话要**原样**出来（主进程才知道站上有什么，界面不重写判据）
+  h.run('window.__result = { ok: false, code: "rejected",'
+    + ' error: "站点上已经有一棵「示例盒子」，在 /p/01M2… —— 版本不一样。" };');
+  await btnIn().onclick();
+  const said = notices().map((x) => x._text || '').join('\n');
+  assert.match(said, /站点上已经有一棵「示例盒子」/,
+    '★ 装不上要说清为什么 —— 而那句话是主进程给的，界面原样转述');
+
+  // ⑤ 装上了：那一次返回的视图**当场画上去**（不然用户得等下一次推送才看得见）
+  h.run('window.__result = { ok: true, installed: [{ id: "p9", version: "1.0.0",'
+    + ' title: "示例" }], unchanged: [],'
+    + ' plugins: { plugins: [], errors: [], problems: [], missing: [], consent: [],'
+    + '   inert: [], sitePoolDir: "/p",'
+    + '   site: { label: "装完的站点", canInstall: true, versions: [], strays: [] } } };');
+  await btnIn().onclick();
+  assert.match(childrenOf(h.byId.get('site-plugins')).map((x) => x._text || '').join('|'),
+    /装完的站点/, '★ 装完返回的那份视图要当场画上去');
+});
+
 test('★★ 同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
   // ★ 这是这一版唯一的安全边界（进程隔离还没做），所以它**留着**；但它原来是
   //   三句 —— 第三句讲的是"不同意会怎样"，而那件事那颗按钮自己的措辞已经说了

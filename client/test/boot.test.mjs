@@ -405,7 +405,14 @@ const electronStub = {
   //   于是缺了这一格的表现是"测试全绿，真机上停靠一次就崩"。补上。
   screen: { getCursorScreenPoint: () => ({ x: calls.cursor.x, y: calls.cursor.y }) },
   shell: { openExternal: async () => {} },
-  dialog: { showMessageBox: async () => ({ response: 2 }) },
+  // `showMessageBox` 只被「有会话在跑就别重启」那一条用得到；`showOpenDialog`
+  // 只在用例自己把它换掉之后才有人调（见「安装插件…」那一组）—— 这里给一个
+  // **默认的"用户按了取消"**，于是忘了换的用例不会卡在一个 undefined 上，
+  // 而是走到"选空了"那一条（恰好是真实用户最常见的那一下）。
+  dialog: {
+    showMessageBox: async () => ({ response: 2 }),
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+  },
   clipboard: { writeText: (t) => { calls.clipboard = t; } },
 };
 
@@ -2678,6 +2685,278 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
   });
 });
 
+// ── ★ 假站点上那颗「安装插件…」──────────────────────────────────────────────
+//
+// 这一组验的是**一条与真站点同构的路**：往站点的插件目录里放进一棵真的插件树，
+// 站点当场重扫，然后一切照旧（站点报它 → 客户端取回来 → 过同意闸 → 加载）。
+// ★ 判据里最要紧的一条是**没有特判**：装上去的那一份必须与"站点本来就有的那一份"
+//   走**逐字相同**的那条路。
+
+/**
+ * 现打一个 `.splug` —— **整包**（站点侧 + 客户端侧都在），也就是真站点上
+ * `slurmate plugin install` 收到的那个文件。
+ *
+ * ★ 走**打包器那份实现**（`sideDigests` / `signedMessage` / `buildSigBlock`），
+ *   不在这里手搓字节：手搓一份就是在用例里又实现了一遍容器格式，而它与真格式
+ *   分家的那天，这一组会一起绿着说"装得上"。
+ * ★ 签名者是谁**不影响**结果：假站点收到包之后会用自己的钥匙**重签**再发给客户端
+ *   （见 backend-fake 的 `_pkgOf`），那正是"假站点与真站点同构"的一部分。
+ */
+function buildSplug(treeDir, outFile) {
+  const PACKER = require('../../packer/slurmate-packer.js');
+  const P = require('../src/main/plugins/index.js');
+  const crypto = require('node:crypto');
+  const mf = JSON.parse(fs.readFileSync(path.join(treeDir, 'plugin.json'), 'utf8'));
+  const files = P.readPluginFiles(treeDir).filter((f) => f.kind === 'f').map((f) => ({
+    path: f.path,
+    data: fs.readFileSync(path.join(treeDir, ...f.path.split('/'))),
+    sha256: f.sha256,
+  }));
+  const sd = PACKER.sideDigests(files);
+  const quad = { id: mf.id, version: mf.version,
+                 digestSite: sd.site, digestClient: sd.client };
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = crypto.createPublicKey(privateKey)
+    .export({ format: 'der', type: 'spki' }).subarray(-32);
+  const sigBlock = PACKER.buildSigBlock(Object.assign({
+    alg: 1, pubkey: pub,
+    sig: crypto.sign(null, PACKER.signedMessage(quad), privateKey),
+  }, quad));
+  fs.writeFileSync(outFile, PACKER.buildPackage(files, sigBlock));
+  return { id: mf.id, version: mf.version, name: mf.name, title: mf.displayName };
+}
+
+/**
+ * 一棵**合法**的插件树（真文件，两半都有）。
+ *
+ * ★ 它必须过得了 `inspectDir`（假站点在装的那一刻就拿它当闸）—— 少一个
+ *   `displayName`、id 不是 ULID、版本不是 `x.y.z`，装的当场就会被拒。
+ */
+function writePluginTree(root, { id, name, title, version = '1.0.0', extra = {} }) {
+  const dir = path.join(root, name);
+  fs.mkdirSync(path.join(dir, 'client'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'job'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plugin.json'), JSON.stringify({
+    id, name, displayName: title, version,
+    contributes: { concurrent: false },
+    ...extra,
+  }, null, 2));
+  fs.writeFileSync(path.join(dir, 'client', 'index.js'),
+    'module.exports = { attach() {} };\n');
+  // 站点侧：真站点上那是**以提交者本人的身份在集群上跑**的脚本，也正是
+  // "客户端侧与站点侧是两个方向"这句话的物证。
+  fs.writeFileSync(path.join(dir, 'job', 'start.sh'), '#!/bin/sh\necho demo\n');
+  return dir;
+}
+
+/** 那一棵树里每一份普通文件的 mtime —— 「一个字节都没写」的判据。 */
+function treeStamps(dir) {
+  const out = {};
+  const walk = (abs, rel) => {
+    for (const n of fs.readdirSync(abs).sort()) {
+      const full = path.join(abs, n);
+      const r = rel ? `${rel}/${n}` : n;
+      const st = fs.lstatSync(full);
+      if (st.isDirectory()) walk(full, r);
+      else out[r] = `${st.size}:${st.mtimeMs}`;
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+/** 装一个包：换掉文件选择器 → 调那次 IPC → 还原。 */
+async function installSplug(t, files) {
+  const stub = electronStub.dialog;
+  const orig = stub.showOpenDialog;
+  const seen = [];
+  stub.showOpenDialog = async (_w, opts) => {
+    seen.push(opts);
+    return { canceled: false, filePaths: files };
+  };
+  t.after(() => { stub.showOpenDialog = orig; });
+  const r = await invoke('app:installSitePlugin');
+  r.__dialog = seen[0] || null;
+  return r;
+}
+
+/** 一个"假站点指向空目录"的干净现场：本机一个插件、站点一个插件都没有。 */
+async function emptyFakeSite(idx, dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  idx._test.setDevPluginDir(dir);
+  await connectDemo(idx);
+  // ★ 连接那一次的对账是**不 await** 的（真集群上它是几秒的后台事），所以这里
+  //   自己再对一次 —— 不然紧接着读视图会读到 `site: null`，而那个失败的形状是
+  //   "Cannot read properties of null"，指不回"对账还没跑完"。
+  const s = await invoke('app:syncPlugins');
+  assert.equal(s.ok, true, `对账失败：${JSON.stringify(s)}`);
+  const v = idx._test.getPluginsView();
+  assert.equal(v.plugins.length, 0, `夹具前提：本机一个插件都不该有：${JSON.stringify(v.plugins)}`);
+  assert.equal(idx._test.getBackend()._sitePlugins().length, 0, '夹具前提：站点也不该报插件');
+}
+
+test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端走的还是与真站点同一条路',
+  async (t) => {
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-splug-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setDevPluginDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(src, { recursive: true, force: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      // ★ 界面画不画那颗按钮，靠的是这一个**能力位**（不是界面按后端名现判）——
+      //   所以它属于这一侧：主进程说有，界面才画。
+      assert.equal(idx._test.getPluginsView().site.canInstall, true,
+        '假站点上那个能力位要是 true —— 界面按它画「安装插件…」');
+      const tree = writePluginTree(path.join(tmp, 'tree'), {
+        id: '01M2JKM1M1M1M1M1M1M1M1M1M7', name: 'demo-box', title: '示例盒子' });
+      const pkg = path.join(tmp, 'demo-box.splug');
+      const want = buildSplug(tree, pkg);
+
+      const r = await installSplug(t, [pkg]);
+      assert.equal(r.ok, true, `装不上：${JSON.stringify(r)}`);
+      assert.deepEqual(r.__dialog.filters[0].extensions, ['splug'],
+        '挑的必须是打包器的产物（`.splug`），不是随便什么文件');
+
+      // ── ① 站点的插件目录里真的多了一棵树，而**两半都在** ──
+      const dest = path.join(src, want.id);
+      assert.equal(fs.existsSync(path.join(dest, 'plugin.json')), true,
+        `站点上该多出一棵 ${dest}`);
+      assert.equal(fs.existsSync(path.join(dest, 'job', 'start.sh')), true,
+        '★★ 站点侧必须一起落地 —— 只铺客户端侧的话，这个假站点演的是一个'
+        + '真站点不可能有的形状');
+
+      // ── ② 站点**当场**就报它（不用重启） ──
+      const reported = idx._test.getBackend()._sitePlugins();
+      assert.equal(reported.some((p) => p.id === want.id), true,
+        '★ 装完站点当场就得报它 —— 少了这一下，用户看到的是"装上了而站点没有它"');
+
+      // ── ③ 客户端走的还是那条路：它在**待同意**里，一个字节都没进池子 ──
+      const pending = idx._test.getPendingConsent();
+      assert.equal(pending.length, 1,
+        `★ 装上去的那一份要先过同意闸 —— 这条路上没有捷径：${JSON.stringify(pending)}`);
+      assert.equal(pending[0].id, want.id);
+      const pool = idx._test.getSitePoolDir();
+      assert.equal(fs.existsSync(poolTreeOf(pool, want.id, want.version)), false,
+        '★★ 没同意就不许进池子 —— 连"往站点上装"这条路也不许绕过同意闸');
+
+      // ── ④ 同意之后才可用，而且站点的短名就是界面上的服务名 ──
+      const c = await invoke('app:consentPlugin', want.id, want.version);
+      assert.equal(c.ok, true, `同意应当成功：${JSON.stringify(c)}`);
+      const landed = idx._test.getRegistry().get(want.id, want.version);
+      assert.ok(landed, '同意之后要真的用得上');
+      assert.equal(landed.name, 'demo-box', '短名要跟着包里的清单走');
+      const view = idx._test.getPluginsView();
+      assert.equal(view.plugins.some((p) => p.id === want.id), true,
+        '它要出现在界面那一列里（可用的那一种，与站点本来就有的那些没有区别）');
+
+      // ── ⑤ 装上去的那一份**进得了会话那套解析**（这才是"可用"的意思）──
+      const st = await invoke('app:states');
+      assert.equal(st.sessions.length, 0, '这一条不起会话，只看它有没有被认成服务');
+      assert.equal(landed.active === false, false, '★ 同意过的那一份必须带钩子');
+    });
+  });
+
+test('★★ 装不上的那几种，每一种都说得出是哪一种', async (t) => {
+  const idx = require('../src/main/index.js');
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-splug-'));
+  t.after(async () => {
+    Module._load = origLoad;
+    idx._test.setDevPluginDir(null);
+    cleanupSiteState(idx);
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  await withSitePlugins([], async () => {
+    await emptyFakeSite(idx, src);
+
+    const idA = '01M2JKM1M1M1M1M1M1M1M1M1M7';
+    const treeA = writePluginTree(path.join(tmp, 'a'), {
+      id: idA, name: 'demo-box', title: '示例盒子' });
+    const pkgA = path.join(tmp, 'a.splug');
+    buildSplug(treeA, pkgA);
+
+    // ── ① 装一次：成功 ──
+    assert.equal((await installSplug(t, [pkgA])).ok, true);
+    const destA = path.join(src, idA);
+    const before = treeStamps(destA);
+
+    // ── ② 同一份再装一次：**一个字节都不写**，如实说"站上已经是这一份了" ──
+    const again = await installSplug(t, [pkgA]);
+    assert.equal(again.ok, true, JSON.stringify(again));
+    assert.equal(again.installed.length, 0, '★ 站上已经是这一份了，不该再写一遍');
+    assert.equal(again.unchanged.length, 1, `要如实说出"它已经在站上了"：${JSON.stringify(again)}`);
+    assert.equal(again.unchanged[0].dir, destA);
+    // ★ 判据是**盘上那棵树一个字节都没动**（mtime 也一起比）—— 只看返回值的话，
+    //   "重写了一遍同样内容再报 unchanged" 会全绿。
+    assert.deepEqual(treeStamps(destA), before, '★ 说"已经在站上了"就必须真的没碰它');
+
+    // ── ③ 同一个 id 的**另一个版本**：拒，而且说清那一棵在哪儿 ──
+    const treeB = writePluginTree(path.join(tmp, 'b'), {
+      id: idA, name: 'demo-box', title: '示例盒子', version: '2.0.0' });
+    const pkgB = path.join(tmp, 'b.splug');
+    buildSplug(treeB, pkgB);
+    const clash = await installSplug(t, [pkgB]);
+    assert.equal(clash.ok, false, '一个 id 在站点上只留一棵树 —— 不许覆盖');
+    assert.match(clash.error, /2\.0\.0/, '要说清这一份是什么版本');
+    assert.match(clash.error, /1\.0\.0/, '也要说清站上那棵是什么版本');
+    assert.match(clash.error, new RegExp(destA.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      '★ 要指出站上那一棵树在**哪个目录** —— 那句话是用户唯一的出路');
+    assert.deepEqual(treeStamps(destA), before, '★ 拒了就不许碰站上那一棵');
+
+    // ── ④ 坏包：一个字节都不写 ──
+    const bad = path.join(tmp, 'bad.splug');
+    fs.writeFileSync(bad, Buffer.from('这不是一个 .splug，只是一串字节'));
+    const no = await installSplug(t, [bad]);
+    assert.equal(no.ok, false);
+    assert.match(no.error, /不是一个合法的插件包/);
+    assert.match(no.error, /bad\.splug/, '要说清是哪一个文件');
+    assert.deepEqual(fs.readdirSync(src), [idA], '★ 坏包不许在站点的目录里留下任何东西');
+
+    // ── ⑤ 清单装上去客户端也加载不了 ⇒ 装的当场就拒（不推迟到"同意之后"）──
+    const treeC = writePluginTree(path.join(tmp, 'c'), {
+      id: '01M2JKM1M1M1M1M1M1M1M1M1M8', name: 'demo-broken', title: '示例',
+      version: '不是版本号' });
+    const pkgC = path.join(tmp, 'c.splug');
+    buildSplug(treeC, pkgC);
+    const broken = await installSplug(t, [pkgC]);
+    assert.equal(broken.ok, false);
+    assert.match(broken.error, /加载不了|version/, `要说清它装上去也用不了：${broken.error}`);
+    // ★ 而那句错话里**不许出现暂存目录**：它此刻已经没了，指着它等于让人去
+    //   找一个不存在的地方。
+    assert.equal(/\.slurmate-stage-/.test(broken.error), false,
+      `★ 暂存目录的路径不该漏到用户那句话里：${broken.error}`);
+    assert.deepEqual(fs.readdirSync(src), [idA], '★ 验不过的包不许落地');
+
+    // ── ⑥ 一次给两个、其中一个是坏的 ⇒ **一条都不装**（两遍式）──
+    const treeD = writePluginTree(path.join(tmp, 'd'), {
+      id: '01M2JKM1M1M1M1M1M1M1M1M1M9', name: 'demo-ok', title: '示例乙' });
+    const pkgD = path.join(tmp, 'd.splug');
+    buildSplug(treeD, pkgD);
+    const mixed = await installSplug(t, [pkgD, bad]);
+    assert.equal(mixed.ok, false, '★ 一条不过就一条都不装（与真守护进程同一句话）');
+    assert.deepEqual(fs.readdirSync(src), [idA],
+      '★★ 好的那一个也不许落地 —— "装了一半"是最坏的那种中间态');
+
+    // ── ⑦ 选空了：什么都不发生，也不出提示 ──
+    const stub = electronStub.dialog;
+    const orig = stub.showOpenDialog;
+    stub.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+    t.after(() => { stub.showOpenDialog = orig; });
+    const cancel = await invoke('app:installSitePlugin');
+    assert.equal(cancel.cancelled, true, '取消要如实回一个 cancelled');
+    assert.deepEqual(fs.readdirSync(src), [idA], '取消什么都不该动');
+  });
+});
+
 test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问一次（绝不静默装回来）', async (t) => {
   // §5.3。★ 不这么做的话，用户删掉池里那一份之后，下一次对账会按"摘要与台账相符"
   //   **静默装回来、一个字都不问** —— 那不是"当作从来没有过"，那是"用户想让它
@@ -3138,7 +3417,10 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
 test('★ 站点装了客户端不认识的插件：不崩，而且说得出该怎么办', async (t) => {
   t.after(() => { Module._load = origLoad; });
   await invoke('app:debug', 'reset');
-  await invoke('app:debug', 'extra-plugin');
+  // ★ 指名一个短名：这一条要的是"站点上多了一个本机没有的插件"，而它随后
+  //   要按名字出现在 `missing` 里。名字由用例给（假站点那个缺省名是它自己编的，
+  //   与这一条无关）。
+  await invoke('app:debug', 'extra-plugin', 'jupyter');
   try {
     const r = await invoke('app:partitions');
     assert.equal(r.ok, true, '站点有客户端不认识的插件，不影响任何别的查询');
@@ -3154,6 +3436,34 @@ test('★ 站点装了客户端不认识的插件：不崩，而且说得出该�
 
     // 而且它绝不能出现在"能起会话"的那一类里 —— 客户端不知道怎么接它。
     assert.ok(!r.plugins.plugins.some((p) => p.name === 'jupyter'));
+  } finally {
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  }
+});
+
+test('★ 那个调试开关**不带名字**也造得出来 —— 界面上那颗按钮走的就是这一条', async (t) => {
+  // ★ 短名由**假站点自己**取（`backend-fake.js` 的 DEMO_EXTRA_NAME），因为基座里
+  //   不许出现任何真插件的名字。而"缺省值在不在"这件事有一条真实的失败形态：
+  //   一个**要点名才生效**的调试动作，挂在那颗按钮上就是一次静默的什么都没发生 ——
+  //   按下去、界面上没有任何变化，也没有任何一句话说为什么。
+  const idx = require('../src/main/index.js');
+  t.after(() => { Module._load = origLoad; });
+  await invoke('app:debug', 'reset');
+  try {
+    await invoke('app:debug', 'extra-plugin');        // ← 界面上那颗按钮的调法
+    const extra = idx._test.getBackend()._extraSitePlugins;
+    assert.equal(extra.length, 1, '不带名字也要真的造出那一格');
+    assert.equal(typeof extra[0].name, 'string');
+    assert.ok(extra[0].name.length > 0, '它得有个短名（界面要按它显示）');
+    // ★ 而它必须是**本机池里没有的**：这一格造的是"站点有个本机没有的插件"，
+    //   取一个池里已有的短名就等于什么都没造。
+    const pool = idx._test.getRegistry().list().map((p) => p.name);
+    assert.equal(pool.includes(extra[0].name), false,
+      `那个名字不能撞上本机已有的插件（${pool.join('、')}）—— 撞上就不是"本机没有"了`);
+    const r = await invoke('app:partitions');
+    assert.deepEqual(r.plugins.missing.map((p) => p.name), [extra[0].name],
+      '它要出现在「本站有、本机没有」那一列里');
   } finally {
     await invoke('app:debug', 'reset');
     await invoke('app:partitions');
@@ -3623,7 +3933,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     '但它**声明了**一块界面');
 
   await invoke('app:debug', 'reset');
-  await invoke('app:debug', 'extra-plugin');          // 假站点"也开了它"
+  await invoke('app:debug', 'extra-plugin', 'jupyter');   // 假站点"也开了它"
   const conn = await builtinConn();
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
@@ -3833,7 +4143,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin,
     '会话进入 running', 20000);
 
-  await invoke('app:debug', 'extra-plugin');
+  await invoke('app:debug', 'extra-plugin', 'jupyter');
   await invoke('app:partitions');
   // 假站点"装了 jupyter，而本客户端没有它" —— 拿它的 id 当作那个会话的解析键。
   const siteJup = idx._test.getBackend()._extraSitePlugins.find((p) => p.name === 'jupyter');

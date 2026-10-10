@@ -54,6 +54,16 @@ const pluginFiles = require('./plugins/index.js');
 // 假站点里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
+/**
+ * 上面那一条的**短名与显示名**。
+ *
+ * ★ 它们是**这个假站点自己编的**，与 DEMO_EXTRA_ID 同一类东西（谁也不认识这个名字，
+ *   那正是这一格要造的状态）。而基座里**不许出现任何一个真插件的短名** ——
+ *   一个长在框架代码里的插件名，是"基座不认识任何插件"这句话的反例，
+ *   也正是这一路上一直在清的那种。
+ */
+const DEMO_EXTRA_NAME = 'demo-service';
+const DEMO_EXTRA_TITLE = '本机没有的一个示例插件';
 
 /**
  * 假站点里那次"变化的判据"，多久扫一遍。
@@ -513,6 +523,24 @@ class FakeBackend extends Backend {
   }
 
   /**
+   * 把那张**启动快照**丢掉，下一次现扫。
+   *
+   * ★ 只有两个调用方，各有一条理由：
+   *
+   *   · `installPlugins` 装着插件 —— 站点"装完当场就报它"靠的就是这一下
+   *     （真守护进程那边是 `plugin install` 之后的重载）。
+   *   · 用例要换一个假站点的插件来源（`_test.setDevPluginDir`）—— 那在真机上
+   *     等于重启，而一个进程里 index.js 只加载一次。
+   *
+   *   ★ 除这两处**没有别人该调它**：这张快照是**启动**快照，随手丢它就等于把
+   *     "清单、文件、包三者说的是同一棵树"那条保证松掉（`_pkgOf` 依赖它）。
+   */
+  forgetSiteIndex() {
+    this._indexCache = null;
+    this._pkgCache.clear();
+  }
+
+  /**
    * 假站点当前报出去的插件清单。
    *
    * ★ 每次现算，不缓存：用户可以在开发者模式里装/卸插件，而站点"看到"的东西
@@ -539,6 +567,155 @@ class FakeBackend extends Backend {
     //   代价如实记着：**打包版会一个插件都不报**（仓库目录不在包里）。账本里
     //   有一条。别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
     return [...distributed, ...this._extraSitePlugins];
+  }
+
+  /**
+   * 把一个 `.splug` 装到假站点上 —— 与真站点 `slurmate plugin install <文件.splug>` 同形。
+   *
+   * ★ **落点就是假站点的插件目录**（`_sitePluginDir()`，界面上「关于 → 假站点的
+   *   插件来源」那一行印的就是它）。一棵树一个 id，与真站点一样 —— 所以"同一个 id
+   *   已经有另一棵树"是**拒**，不是覆盖。真站点上那条路是 `uninstall` 之后再装
+   *   （它那句提示就是这么说的），而这句话里要说清**删掉哪个目录**。
+   *
+   * ★ **两遍式**（与守护进程的 `install_plugins` 逐字同形）：第一遍只把每份包铺到
+   *   一个**暂存目录**里并逐份校验，一条不过就**一个字节都不落地**。于是"装了一半"
+   *   这件事不会发生在一个能被读到的中间态上（`rename` 才是那一下开关）。
+   *
+   * ★ **清单校验用客户端那一份**（`pluginFiles.inspectDir`）。假站点没有站点侧那套
+   *   （它在守护进程的 Python 里），而这是**更严**的那一侧：一棵客户端注定加载不了
+   *   的树，让它装上去只会把失败推迟到"用户已经点过同意之后" —— 那时用户已经为
+   *   一个装不上的东西负过责任了。代价如实记着：真站点上装得上、而本客户端加载
+   *   不了的（比如 `engines` 不满足），这里会在装的那一刻就拒。
+   *
+   * @param {string[]} paths `.splug` 的路径，可以给多个（与真站点一样）。
+   * @returns {{ok:true, installed:object[], unchanged:object[]}
+   *          |{ok:false, code:string, error:string}}
+   */
+  installPlugins(paths) {
+    // 惰性取，理由与 `_pkgOf` 里那句一样：这个模块在加载期与 site-plugins 那条链
+    // 有来回，而它只在这一条路上用得到。
+    const PP = require('./plugin-package.js');
+    const list = Array.isArray(paths) ? paths : [];
+    if (!list.length) return { ok: false, code: 'nothing', error: '没有挑到任何 .splug。' };
+
+    const dir = this._sitePluginDir();
+    let usable = false;
+    try { usable = Boolean(dir) && fs.statSync(dir).isDirectory(); } catch { usable = false; }
+    if (!usable) {
+      return { ok: false, code: 'no_dir', error: dir
+        ? `假站点的插件目录「${dir}」不是一个能放东西的目录。`
+        : '假站点没有插件目录 —— 默认那个位置是仓库里的 `plugins/`，打包之后没有它。'
+          + '先在「关于 → 假站点的插件来源」里选一个目录。' };
+    }
+
+    // ── 站上现在有哪几棵树。**一次扫完**：逐份现扫的话，自己刚铺下的暂存目录
+    //    会进到"站上已有的"里（它在同一个目录下）。 ──
+    const onSite = pluginFiles.scanPluginCollection(dir).plugins;
+    /** 这一次调用里出现过的 id → 是哪个文件带来的（§6.4：两个同 id 的都不装）。 */
+    const seenId = new Map();
+
+    const problems = [];
+    const staged = [];          // 已经铺好、验过，**还没就位**的
+    const unchanged = [];       // 站上本来就是这一份
+
+    for (const p of list) {
+      const base = path.basename(p);
+
+      let buf;
+      try { buf = fs.readFileSync(p); }
+      catch (e) { problems.push(`${base}：读不到：${e.message}`); continue; }
+
+      const r = PP.parsePackage(buf);
+      if (!r.ok) {
+        problems.push(`${base}：不是一个合法的插件包（${r.code}）—— ${r.why}`);
+        continue;
+      }
+      const { id, version } = r.manifest;
+      const title = r.manifest.displayName || r.manifest.name;
+
+      if (seenId.has(id)) {
+        problems.push(`${base}：id ${id} 与 ${seenId.get(id)} 是同一个插件 —— 两个都不装`
+          + '（站点按 id 给那棵树命名，两个会互相覆盖，而覆盖是静默的）。');
+        continue;
+      }
+
+      const hit = onSite.find((x) => x.manifest.id === id) || null;
+      if (hit) {
+        const hitTitle = hit.manifest.displayName || hit.name;
+        // 是同一棵吗？比的是 **§3.4 那个内容摘要** —— 站点报给客户端、签名盖着、
+        // 用户同意时看的都是它。拿别的判据（比如"文件数一样"）就是第二个说法。
+        let same = false;
+        try {
+          same = r.digest === PP.contentDigest(
+            pluginFiles.readPluginFiles(hit.dir).filter((f) => f.kind === 'f')
+              .map((f) => ({ path: f.path, sha256: f.sha256 })));
+        } catch { same = false; }
+        if (same) {
+          unchanged.push({ id, version, name: r.manifest.name, title, dir: hit.dir });
+          seenId.set(id, base);
+          continue;
+        }
+        problems.push(`${base}：站点上已经有一棵「${hitTitle}」，在 ${hit.dir} —— `
+          + (hit.manifest.version === version
+            ? `版本一样（都是 ${version}）而内容不是同一份`
+            : `站上那棵是 ${hit.manifest.version}，这一份是 ${version}`)
+          + '。\n        一个 id 在站点上只留一棵树。要装这一份，先把那一棵从站点上'
+          + `撤掉（真站点上是 \`slurmate plugin uninstall ${id}\`；这个假站点上就是`
+          + '删掉那个目录），再来装。');
+        continue;
+      }
+
+      // ── 铺到暂存并校验。**还没有落地。** ──
+      const stage = path.join(dir,
+        `.slurmate-stage-${crypto.randomBytes(6).toString('hex')}`);
+      const w = PP.unpackTo(r, buf, stage, { onto: 'site' });
+      if (!w.ok) { problems.push(`${base}：${w.why}`); continue; }
+
+      const ins = pluginFiles.inspectDir(stage);
+      if (ins.error) {
+        fs.rmSync(stage, { recursive: true, force: true });
+        // 那句错话里带着暂存目录的路径，而那个目录**此刻已经没了** —— 把它换成
+        // "这一份里"，否则读的人会去找一个不存在的地方。
+        problems.push(`${base}：这个包装上去本客户端也加载不了 —— `
+          + ins.error.split(stage).join('这一份里'));
+        continue;
+      }
+
+      seenId.set(id, base);
+      staged.push({ stage, dest: path.join(dir, id), id, version,
+                    name: r.manifest.name, title });
+    }
+
+    // ── 第一遍没过 ⇒ 收掉暂存，一个字节都不落地（与守护进程同一句话）。 ──
+    if (problems.length) {
+      for (const s of staged) fs.rmSync(s.stage, { recursive: true, force: true });
+      return { ok: false, code: 'rejected', error: problems.join('\n') };
+    }
+
+    // ── 第二遍：就位。`rename` 就是那一下开关（真守护进程的 `_install_plugin_tree`
+    //    同一个形状）。 ──
+    const installed = [];
+    for (const s of staged) {
+      try {
+        fs.renameSync(s.stage, s.dest);
+      } catch (e) {
+        fs.rmSync(s.stage, { recursive: true, force: true });
+        // ★ 已经就位的那几棵**不回滚**：每一棵都是完整的（`rename` 是原子的），
+        //   而回滚会把"装上了两棵、第三棵没成"说成"一棵都没装" —— 后者更假。
+        return { ok: false, code: 'partial', error:
+          `「${s.title}」挪到 ${s.dest} 失败：${e.message}\n`
+          + (installed.length
+            ? `已经装上的（这几棵是完整的）：${installed.map((x) => x.title).join('、')}`
+            : '（还没有一棵装上去。）') };
+      }
+      installed.push({ id: s.id, version: s.version, name: s.name, title: s.title, dir: s.dest });
+    }
+
+    // ★ 装完**当场重扫** —— 站点"立刻报它"靠的就是这一下。少了它，用户看到的是
+    //   "装上了、而站点还是没报它"，那个症状指不回这里。
+    if (installed.length) this.forgetSiteIndex();
+
+    return { ok: true, installed, unchanged };
   }
 
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
@@ -801,15 +978,21 @@ class FakeBackend extends Backend {
    * 这是**必须能演**的一种情况：站点升级了、装了新插件，而用户的客户端还没升级。
    * 没有它，"未知服务"那条路在开发者模式下永远走不到，而那正是最需要用户看懂的一条
    * 提示（他该升级客户端，不是该找管理员）。
+   *
+   * ★ **短名与显示名都可以不给**（不给就用 DEMO_EXTRA_NAME）：那个调试按钮只关心
+   *   "站点上多了一个本机不认识的插件"，不关心它叫什么 —— 而缺省值写在这里而不是
+   *   写在调用点，是因为**基座里不许出现任何真插件的名字**，一个长在框架代码里的
+   *   插件名正是"基座不认识任何插件"这句话的反例。
    */
-  debugAddSitePlugin(name, title = null) {
-    if (!this._extraSitePlugins.some((p) => p.name === name)) {
+  debugAddSitePlugin(name = null, title = null) {
+    const short = name || DEMO_EXTRA_NAME;
+    if (!this._extraSitePlugins.some((p) => p.name === short)) {
       // ★ `noPackage`：**这个站点不分发它**。三态里那个 `undefined` 与 `null`
       //   （"此刻生产不出来"）是两件事，而这个假插件属于前者 —— 它压根没有包。
       //   两者今天的行为碰巧一样（都跳过），但把它们写成同一个形状，等于让这个
       //   假站点再也造不出那个区别。
-      this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name, version: '1.0.0',
-                                    title: title || name, enabled: true,
+      this._extraSitePlugins.push({ id: DEMO_EXTRA_ID, name: short, version: '1.0.0',
+                                    title: title || short, enabled: true,
                                     can_submit: true, noPackage: true });
     }
   }

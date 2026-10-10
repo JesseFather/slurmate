@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld('slurmate', {
   // §5.3：删掉本机那一份 = 撤回同意（下一次对账重新问）。给的是"没被加载的那些"
   // 唯一的出口 —— 见 panel.js 的 renderInert。
   dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
+  // ★ **往站点的反方向**：挑一个 `.splug` 装到**假站点**上。它只在开发者模式里
+  //   存在（主进程按后端种类拒真站点 —— 那边的插件由管理员用
+  //   `slurmate plugin install` 装）。见 panel.js 的 siteInstallButton。
+  installSitePlugin: () => ipcRenderer.invoke('app:installSitePlugin'),
 
   // ── 工作区 ──
   //

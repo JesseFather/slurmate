@@ -328,6 +328,30 @@ test('★ 插件来源：选完当场报"读到几个"，读不出插件就**不
   assert.equal(readDevFile().pluginDir, null);
 });
 
+test('★★ 「安装插件…」在真站点上是一条**不存在**的路 —— 而闸门在主进程，不在按钮上',
+  async (t) => {
+    t.after(() => { Module._load = origLoad; });
+    const idx = require('../src/main/index.js');
+    // 这个进程跑在**真后端**上（见本文件开头：这一组验的是"关着"那一半），
+    // 所以这一条调的正是真站点那一侧。
+    assert.equal(idx._test.getBackend().kind, 'ssh', '前提：这个文件跑在真后端上');
+
+    // ★ 界面按能力位决定画不画那颗按钮（`site.canInstall`），而**闸门在主进程**：
+    //   一颗藏起来的按钮从来不算防线，所以这里直接把那条 IPC 调下去，
+    //   而它必须自己拒 —— 判据是后端种类，不是"界面上有没有那颗按钮"。
+    const stub = electronStub.dialog;
+    const orig = stub.showOpenDialog;
+    let opened = 0;
+    stub.showOpenDialog = async () => { opened += 1; return { canceled: true, filePaths: [] }; };
+    t.after(() => { stub.showOpenDialog = orig; });
+
+    const r = await invoke('app:installSitePlugin');
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'not_fake');
+    assert.match(r.error, /管理员/, `要说清这条路归谁：${r.error}`);
+    assert.equal(opened, 0, '★ 拒了就不该弹文件选择器 —— 让用户挑完再说"不行"是最坏的那种');
+  });
+
 test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不到"的自己收掉，认不出的不给删',
   async (t) => {
       // ★ 这一条钉的是"认得出**再也读不到**的**自己收掉**"。★ 界面上那个

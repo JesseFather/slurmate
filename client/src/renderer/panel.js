@@ -1589,6 +1589,33 @@ function versionWhy(host, line, why) {
   return p;
 }
 
+/**
+ * 「安装插件…」—— **只在假站点上画**（判据是主进程给的能力位 `site.canInstall`）。
+ *
+ * ★ 它装的是**真站点上装的同一个东西**：一个 `.splug`，放进站点的插件目录里，
+ *   站点当场重扫。所以那之后的每一步（站点报它 → 客户端取回来 → 过同意闸 →
+ *   加载）**没有一处特判** —— 这颗按钮存在的全部意义，就是让那条路在开发者模式
+ *   里也真的走一遍。
+ *
+ * ★ 装不上就说清为什么（同 id 已有一棵树、包装不上、清单不合法……），而那些话
+ *   **由主进程给**：只有它知道站上现在有什么。界面不在这里重写一遍判据。
+ */
+function siteInstallButton() {
+  const btn = button('安装插件…', async () => {
+    const r = await window.slurmate.installSitePlugin();
+    // 选空了 = 用户按了取消。那不是一次失败，一声不吭。
+    if (r && r.cancelled) return;
+    if (r && r.plugins) renderPlugins(r.plugins);
+    // ★ 装上去了那一条由**主进程**推进提示流（它顺带说了装到哪儿、接下来会怎样）——
+    //   这里再说一遍就是同一件事说两次。失败要说：那时主进程只回了一个返回值。
+    if (!r || !r.ok) notice('error', (r && r.error) || '没能把这个包装到假站点上。');
+  }, 'ghost tiny');
+  btn.title = '挑一个 .splug（打包器产出的那个文件）装到这台假站点上 —— 与真站点上'
+    + ' `slurmate plugin install` 装的是同一份东西。装上去之后站点当场就报它，'
+    + '接下来与真站点逐字一样：取回来、过同意闸，然后才可用。';
+  return btn;
+}
+
 function renderSitePlugins(pv) {
   const box = $('site-plugins');
   box.textContent = '';
@@ -1602,6 +1629,11 @@ function renderSitePlugins(pv) {
   const head = document.createElement('div');
   head.className = 'plug-head';
   head.append(el('h3', null, '站点分发'));
+  // ★ 「安装插件…」**只在假站点上画**，判据是主进程给的能力位（`site.canInstall`），
+  //   不是在这里问后端叫什么 —— "哪条路属于哪一侧"那条分界只有主进程判得了，
+  //   而权威闸门也在那边（见 `app:installSitePlugin`）。这里画的是一颗**按钮**，
+  //   不是一道防线：真站点上它不出现，真出现了主进程也会拒。
+  if (site && site.canInstall) head.append(siteInstallButton());
   d.append(head);
 
   if (!site) {

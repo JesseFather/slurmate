@@ -489,6 +489,35 @@ test('★★ 含站点侧的包 ⇒ unpackTo **整份拒收**（判据①：用�
   assert.equal(fs.readdirSync(dir).length, 0, '★ 一个字节都不许落盘（判在写盘之前）');
 });
 
+test('★★ `{onto:"site"}` 才铺站点侧 —— 方向是判据，不是一个"允许不允许"的开关', () => {
+  // ★★ 这是**唯一**一条把站点侧写进文件的合法路径：假站点那个「安装插件…」。
+  //    它收到的正是作者发的那一份整包（`slurmate plugin install` 收的同一个文件），
+  //    而那个方向要落到磁盘上的**就是整棵树** —— 站点侧正是那台机器要拿去跑作业的
+  //    东西。
+  //
+  //    ★ 判据是**方向**而不是"打开一个允许站点侧的开关"：开关一打开，上面那条
+  //      "从站点收下时拒站点侧"的断言在哪儿都不再拦 —— 一条只在特定调用点成立的
+  //      防线，等于没有防线。
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-onto-'));
+  const r = PP.parsePackage(SIGNED);        // 整包：两侧都在
+  assert.equal(r.ok, true);
+  const u = PP.unpackTo(r, SIGNED, dir, { onto: 'site' });
+  assert.equal(u.ok, true, u.why);
+
+  const got = P.readPluginFiles(dir).filter((f) => f.kind === 'f')
+    .map((f) => f.path).sort();
+  const want = r.files.map((f) => f.path).sort();
+  assert.deepEqual(got, want,
+    '★ 整棵树都要落地 —— 少一份站点侧的，这个假站点演的就是一个真站点不可能有的形状');
+  assert.equal(got.some((p) => p === 'job/start.sh'), true,
+    '夹具里那份站点侧的脚本必须真的铺出来（它是这条判据的物证）');
+  for (const f of P.readPluginFiles(dir).filter((x) => x.kind === 'f')) {
+    assert.equal(f.mode, 0o644, `★ 权限位仍然由格式定死：${f.path}`);
+  }
+});
+
 test('★ 客户端收得下的包，必须装得下它**自己允许的最大负载**', () => {
   // ★ 跨语言那一条（客户端这份上限 vs 守护进程的 PLUGIN_PACKAGE_MAX_BYTES）由
   //   集群侧的用例 19.11d 钉着；这里钉的是客户端**自己**的那笔账：一个合法到
