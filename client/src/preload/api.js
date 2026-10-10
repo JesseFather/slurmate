@@ -153,8 +153,11 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 只作用于不带 service_kind 的 `slurmate submit`）。漏传会当场拿到一句说明。
   // 客户端再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。
   // 本机一个插件都没装时，主进程会拒绝并说清该往哪放。
-  start: (resources, serviceKind) =>
-    ipcRenderer.invoke('app:start', resources, serviceKind),
+  // portChoice：用户在「端口被占」那一行上答过的（只认 'shift' = 临时换一个）。
+  // 主进程回 `code:'port_conflict'` 时**什么都没提交**，那一行重发时带上它 ——
+  // 它唯一的作用是别再问第二遍。
+  start: (resources, serviceKind, portChoice) =>
+    ipcRenderer.invoke('app:start', resources, serviceKind, portChoice),
   // 本机要不要某个插件。**按 id**（不是短名）：池是全局的，两个站点可以各有一个
   // 叫 jupyter 的插件而它们是两个不同的东西。不影响服务端。
   setPluginEnabled: (id, enabled) =>

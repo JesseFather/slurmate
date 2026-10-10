@@ -30,6 +30,22 @@
   <span class="sep" id="sb-sep1">|</span>
   <span id="sb-detail"></span>
   <span class="spacer"></span>
+  <!-- ★★ 「首选端口被占着 —— 临时换一个，还是不启动」。
+       ★ 它是**二选一，不是确认**：两个答案都是用户主动要的，按哪一颗都当场生效，
+         没有"第一下只是摆出来"那一段。观感照 `armConfirm`（同一套 `.armed` 类），
+         但别照它的语义读 —— 见 panel.js 的 `renderPortAsk`。
+       ★ 它**排在 `.spacer` 后面**是承重的：`.spacer` 会把富余的空间让出来，所以
+         这一行**永远不会被挤出去**；排在 `#sb-detail` 后面的话，一句长一点的错误
+         （`#sb-detail` 就装那个）会把它顶到 `overflow:hidden` 的边界之外 ——
+         而它是唯一能回答"要不要继续"的那一格。状态条右端本来就是两段式动词住的地方
+         （「结束会话」就在隔壁）。
+       ★ 它必须待在这 30px 里：会话一跑起来窗口主体就被原生视图整块盖住，
+         而这一行是在**提交之前**问的（见 index.js 的 `startSession`）。 -->
+  <span id="sb-port" class="armed hidden">
+    <span id="sb-port-why" class="armed-why"></span>
+    <button id="sb-port-shift" class="tiny">临时换一个</button>
+    <button id="sb-port-abort" class="ghost tiny">不启动</button>
+  </span>
   <!-- 工作区选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
        连接列表和映射图都够不着，这是运行期间唯一还能改工作区的入口。
        它改的是**当前活跃连接**的工作区（没有连接时整个藏起来 —— 它改的是

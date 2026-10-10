@@ -212,6 +212,56 @@ function disarmArmed() {
   if (armed) armed.disarm();
 }
 
+// ── 「端口被占：临时换一个 / 不启动」────────────────────────────────────────
+/**
+ * 上一次提交被端口挡住的那一趟，等着用户答。没问过就是 `null`。
+ *
+ * 它记着 `{serviceKind, btn}` —— 答「临时换一个」时要把**同一件事**重发一次。
+ */
+let portAsk = null;
+
+/**
+ * 摆出那一行二选一。**它不是确认。**
+ *
+ * ★★ 与 `armConfirm` 的分别只有一条，但读错了就会写歪：`armConfirm` 是"第一下只是
+ *   摆出来，第二下才真的做"；这里**两颗按钮都是当场生效的动作**。两个答案都是用户
+ *   主动要的：答「临时换一个」= 带 `portChoice:'shift'` 把刚才那一趟重发一次
+ *   （走既有的顺移扫描，仍然**不写回**配置）；答「不启动」= 就地回退，而**此刻本来
+ *   就什么都没提交**（作业、会话记录、占位都没有）—— 所以那一句不是安慰，是事实。
+ *   ⇒ 别照 `armConfirm` 的路子给它加一段"再点一下才执行"。
+ *
+ * ★ 它因此**不自带 `armed-off`**：那个类是为了"原来那颗按钮留在原地但不显示"，
+ *   而这里没有任何一颗按钮要被顶掉。
+ *
+ * ★ 那个**理由**由主进程给（`app:start` 的 `error`）：界面不自己编一句 —— 两处
+ *   各写一句的漂法是"主进程说端口被占、界面说别的"，而用户会去查一个不存在的区别。
+ */
+function renderPortAsk(r, pending) {
+  portAsk = pending;
+  $('sb-port-why').textContent = r.error || '首选端口被占着。';
+  // ★ 两颗按钮各自说清代价 —— 长解释进 `title`，正文只留动作。
+  $('sb-port-shift').title =
+    `不碰那份数据记着的端口（还是 ${r.port && r.port.want}），只把这一次会话换到`
+    + '别的端口上。浏览器按端口隔离本地存储，所以编辑器的布局与最近打开的文件会重置'
+    + '一次；占用它的程序退出之后，下次启动会回到原端口，那份布局也还在。';
+  $('sb-port-abort').title =
+    '什么都不做：集群上不会出现作业，也不会占住那份数据。'
+    + '想让这一次会话跑起来的话，先去腾出那个端口，再点一次「开始会话」。';
+  $('sb-port').classList.remove('hidden');
+}
+
+/**
+ * 把那一行收掉（答过了、或者用户走开了）。
+ *
+ * ★ 收掉**不等于**答了「不启动」：没有提交过任何东西，所以"没答"的后果与
+ *   "答了不启动"逐字相同 —— 但**话不能反过来说**（见 `showScreen` 里那一条：
+ *   走到别的屏去了也不留一句"你没有启动"）。
+ */
+function clearPortAsk() {
+  portAsk = null;
+  $('sb-port').classList.add('hidden');
+}
+
 // ── 三屏的路由 ──────────────────────────────────────────────────────────────
 /**
  * 把三屏之一露出来。**同时只露一个。**
@@ -227,6 +277,12 @@ function disarmArmed() {
  */
 function showScreen(name) {
   SCREEN = name;
+  // ★ 换屏（以及连上/断开那三处收尾）把「端口被占」那一问收掉：它问的是**当前这条
+  //   连接的那些数据的**端口**，而用户已经走开了 —— 把一个问题留在状态条上等着答，
+  //   而它描述的东西可能已经不是他现在看的这一条了，那是界面在说一件不成立的事。
+  //   ★ 收掉**不等于**答了「不启动」：没提交过就是没提交过，所以不补一句
+  //     "你没有启动" —— 那会是一条凭空造出来的对话记录。
+  clearPortAsk();
   for (const [key, id] of [['conns', 'screen-conns'],
                            ['plugins', 'screen-plugins'],
                            ['jobs', 'screen-jobs']]) {
@@ -2479,8 +2535,14 @@ function el(tag, cls, text) {
  * ★ 高级选项里**只带上真正填了的键**。留空 = 让服务端用它的默认值 —— 客户端不
  *   自己编默认值，否则默认值就成了两份真相：界面显示 2 核 / 8G，而实际拿到的是
  *   别的，且没有任何地方会为此报错。默认资源是**管理员的策略**，不是用户偏好。
+ *
+ * @param {object} [opts] `portChoice: 'shift'` = 用户在「端口被占」那一行上答的
+ *   「临时换一个」，把同一趟重发一次。见 `renderPortAsk`。
  */
-async function startWith(serviceKind, btn) {
+async function startWith(serviceKind, btn, opts = {}) {
+  // 上一次那一问先收掉：这一趟给出的答案会取代它（重发的那一趟自己会走完同一条路，
+  // 真又被挡就再摆一次）。留着的话，两行"要不要临时换"会同时挂在界面上。
+  clearPortAsk();
   btn.disabled = true;
   notice('info', '正在提交会话…');
   try {
@@ -2514,8 +2576,14 @@ async function startWith(serviceKind, btn) {
       res.gres = { name: e.name, type: e.type || null, count: n };
     }
 
-    const r = await window.slurmate.start(res, serviceKind);
+    const r = await window.slurmate.start(res, serviceKind, opts.portChoice || null);
     if (r && r.sessions) renderSessions({ sessions: r.sessions, front: r.front });
+    // ★★ 首选端口被占着：**什么都没提交**，摆出那一行二选一等着答。
+    //    它必须排在下面那条"失败就刷新清单"之前 —— 这一支不是失败，插件清单
+    //    一个字都没变，而去问一次 `app:partitions` 只是白花一趟往返。
+    if (r && r.code === 'port_conflict') {
+      return renderPortAsk(r, { serviceKind, btn });
+    }
     // 提交失败（比如版本对不上被服务端拒了）时把清单刷新一遍 —— 那句话要落到
     // 界面上，不能只在日志里。
     if (r && !r.ok) {
@@ -3301,6 +3369,26 @@ function bindEvents() {
     yes: '结束',
     run: endFrontSession,
   });
+
+  // ★★ 「端口被占」那一行的两颗按钮 —— **二选一，两颗都是当场生效的动作**。
+  //    它们不是两段式（见 `renderPortAsk`）：答「临时换一个」就重发那一趟，
+  //    答「不启动」就地回退，而此刻本来什么都没提交。
+  //
+  //    ★ 重发用的是**用户刚才点的那一颗按钮**（`pending.btn`），不是"当前前台
+  //      那一条" —— 插件页上可以有好几个「开始会话」，重发必须是同一个插件那一颗，
+  //      否则用户答的是甲、起来的是乙。
+  $('sb-port-shift').onclick = () => {
+    const p = portAsk;
+    if (!p) return;                       // 防御：那一行已经收掉了
+    return startWith(p.serviceKind, p.btn, { portChoice: 'shift' });
+  };
+  $('sb-port-abort').onclick = () => {
+    clearPortAsk();
+    // ★ 说这一句是**承重**的：用户刚点过「开始会话」，界面又静了下来，他分不清
+    //   那是"起来了"还是"没起来"。而这一句说的是**事实**（那时确实什么都没提交），
+    //   不是安慰。
+    notice('info', '没有提交：集群上不会出现作业，那份数据也没有被占住。');
+  };
 
   // 状态条里的工作区选择器 —— 会话跑起来之后唯一够得着的入口。
   // 它改的是当前活跃连接的工作区（会话正跑在它上面，所以会立刻换端口重连隧道，

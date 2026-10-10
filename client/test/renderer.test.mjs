@@ -446,6 +446,33 @@ test('★★ 该两段式的五处走两段式 —— 而**重新生成密钥不
   assert.equal(/window\.confirm/.test(awFn[0]), false,
     '★ 这条路里不许再有 window.confirm —— 那正是它从前最别扭的地方');
 
+  // ★★ 「端口被占」那一行**混不进这份清单**：它长得像两段式（同一套 `.armed` 类、
+  //   同一格位置），而它是**二选一** —— 两颗按钮都是当场生效的动作，没有"第一下
+  //   只是摆出来"那一段。判据落在源码文本上，因为"别照 armConfirm 的路子读它"
+  //   这件事一旦被下一个人做反，行为层的用例会以为那是设计。
+  const askFn = /function renderPortAsk\(r, pending\) \{[\s\S]*?\n\}/.exec(js);
+  assert.ok(askFn, 'panel.js 里应当有 renderPortAsk()');
+  assert.equal(/armConfirm/.test(askFn[0]), false,
+    '★★ 那一行**不是** armConfirm：它不是"再点一下才执行"，两个答案都是主动要的');
+  // ★ 而它必须**在 panel.html 里**（两段式那一行是运行期造的，这一行是静态的：
+  //   它得待在状态条那 30px 里，会话一跑起来窗口主体就被原生视图整块盖住）。
+  assert.match(html, /id="sb-port"/, 'panel.html 里要有那一行');
+  for (const [id, label] of [['sb-port-shift', '临时换一个'],
+                             ['sb-port-abort', '不启动']]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*>${label}<`),
+      `#${id} 那颗按钮要写着「${label}」—— 两个答案都必须是**动作**，`
+      + '而不是一句"确定吗"');
+    assert.match(js, new RegExp(`\\$\\('${id}'\\)\\.onclick\\s*=`),
+      `panel.js 没给 #${id} 绑动作 —— 那一行上就有一颗按钮点了没反应`);
+  }
+  // ★ 它**排在 `.spacer` 后面**是承重的：排在 `#sb-detail` 后面的话，一句长一点的
+  //   错误会把它顶到 `overflow:hidden` 的边界之外，而它是唯一能回答"要不要继续"
+  //   的那一格。
+  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
+  assert.ok(bar, 'panel.html 里应当有状态条');
+  assert.ok(bar[0].indexOf('class="spacer"') < bar[0].indexOf('id="sb-port"'),
+    '★ 那一行要排在 `.spacer` **之后** —— 它永远不会被挤出去');
+
   const rpdFn = /function renderPluginData\([\s\S]*?\n\}/.exec(js);
   assert.ok(rpdFn, 'panel.js 里应当有 renderPluginData()');
   assert.match(rpdFn[0], /armConfirm\(del, \{/,

@@ -79,6 +79,7 @@ const hosts = require('./hosts.js');
 //   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
 const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
+const { probeLocalPort } = require('./tunnel.js');
 const { gresLabel, gresText } = require('./gres.js');
 const { sessionStateText } = require('./sessionstate.js');
 const { ShellWindow } = require('./windows.js');
@@ -2410,14 +2411,19 @@ function claimDataDir(rec, plugin, space) {
  * ★ 而"别人的"端口现在有**两个来源**（配置里的 + 临时那些），所以这里走
  *   `usedSpacePortsAll` 而不是 `config.usedSpacePorts` —— 见那个函数的注释。
  */
-function excludedPortsFor(rec) {
-  const s = usedSpacePortsAll(rec.controller && rec.controller.spaceId);
+function excludedPortsFor(spaceId, except) {
+  const s = usedSpacePortsAll(spaceId);
   for (const other of sessions.values()) {
-    if (other === rec) continue;
+    if (other === except) continue;
     const p = other.controller && other.controller.snapshot().localPort;
     if (p) s.add(p);
   }
   return s;
+}
+
+/** 一条会话**正在**用的那份数据要排除掉哪些端口 —— 隧道绑定时用。 */
+function excludedPortsOfRec(rec) {
+  return excludedPortsFor(rec.controller && rec.controller.spaceId, rec);
 }
 
 // ── 会话编排 ────────────────────────────────────────────────────────────────
@@ -2426,8 +2432,12 @@ function excludedPortsFor(rec) {
  *
  * @param {object} resources 高级选项里的临时覆盖（见 session.js 的 start）
  * @param {string} serviceKind 这一次要哪个**插件**（注册表里的名字）。**必填。**
+ * @param {string} [portChoice] 用户在「端口被占」那一行上答过的（只认 `'shift'`）。
+ *        见下面那一节 —— 它唯一的作用是**不再问第二遍**。
+ * @returns {Promise<{slot, snap}|{conflict:{want,spaceId}}|null>}
+ *   `conflict` 这一支表示"首选端口被占着，等用户答"，**此刻什么都没提交**。
  */
-async function startSession(resources, serviceKind) {
+async function startSession(resources, serviceKind, portChoice) {
   // ★ **必须写明要哪一个插件**。
   //
   //   省略服务种类就去猜一个缺省的话，问题在于缺省是"**本站**的缺省服务是哪一
@@ -2556,6 +2566,61 @@ async function startSession(resources, serviceKind) {
   // 上一个已经结束的那个记录该走了（它是给界面看"已结束"用的，新的一轮开始了）。
   reapSessions();
 
+  // 本地端口**不是插件的事**（插件没有取端口的钩子）：要工作区的会话用那份数据
+  // 自己的端口（它就是 origin），不要工作区的用中转基准端口。
+  //
+  // ★ **必须判 null**：不要工作区的会话拿的是 `RELAY_PORT_BASE`，而它绝不能落到
+  //   某一份数据的端口上 —— 那条路径**不报错**，症状是"浏览器那一块打到 ssh 端口
+  //   上，页面打不开"。
+  //   ★ 而 `spacePortOf` 那条路**连回落都没有**（找不到就抛）：临时那份不在配置里，
+  //     一条会回落到基址（18080）的实现会让每一份临时的都从 18080 起扫，也就是
+  //     **持有者自己那个端口**。
+  const preferredPort = space
+    ? spacePortOf(space.id)
+    : config.RELAY_PORT_BASE;
+
+  // ── ★★ 端口冲突：在**提交之前**问 ──────────────────────────────────────────
+  //
+  // 一份数据的端口是它**被创建时**定下来的，此后只读（`config.js` 的
+  // `assignSpacePorts`）。而真正的绑定发生在**提交与登记之后**
+  // （`session.js` 的 `_bringUpTunnel`）—— 所以"要不要临时换一个"这个问题必须在
+  // 这里问：等到绑定那一刻，作业已经在集群上了，用户答"不启动"就是一句空话。
+  //
+  // ★ 只对**持久的那份数据**问，判据是两个框架事实，**永远不是插件名**：
+  //   · 没有数据空间（中转站）—— 它用的是那个共用的基准端口，无所谓"这一份数据的
+  //     地址"，顺移也不改变任何持久的东西；
+  //   · 临时副本（多开的第二份）—— 它只活在这一次会话里，端口是当场从空位里挑的。
+  //   两者都照旧自动避让（顺移 + 如实说明），不问。
+  //
+  // ★ 探测用的是 `probeLocalPort`，不是"查一下谁在听"之类的近似判据：它试绑的是
+  //   `127.0.0.1:<port>`，与隧道**同一个地址**，而且只认 EADDRINUSE / EACCES ——
+  //   近似判据报出来的问题会与接下来真绑时撞上的不是同一件事。
+  //
+  // ★ 排除集与隧道绑定时用的是**同一份来源**：别的工作区占着的端口由分配器负责
+  //   跳过，那是**照旧的静默顺移**，不是冲突 —— 在这里问一句"要不要临时换"，
+  //   等于把一个已经由分配器答过的问题再问用户一遍。
+  //
+  // ★ `portChoice === 'shift'` ⇒ **用户已经答过了**（界面把那一下重发到这里）：
+  //   不再探、不再问 —— 否则一个真被占着的端口会让那一行永远问下去。
+  const persistentSpace = Boolean(space) && !tempSpaces.has(space.id);
+  if (persistentSpace && portChoice !== 'shift'
+      && !excludedPortsFor(space.id, null).has(preferredPort)) {
+    let probe;
+    try {
+      probe = await probeLocalPort(preferredPort);
+    } catch (e) {
+      // 探不动**不是**"端口被占"：报成冲突会让用户去关一个无关的程序。
+      win.pushNotice('error', `探测本地端口 ${preferredPort} 失败：${e.message}`);
+      return null;
+    }
+    if (!probe.free) {
+      // ★ 此刻**什么都没有发生**：没有作业、没有会话记录、没有占位、配置一个字
+      //   都没动。这正是"不启动"能是字面意思的原因 —— 界面那一行二选一，答
+      //   「不启动」就地回退，没有任何东西要撤。
+      return { conflict: { want: preferredPort, spaceId: space.id } };
+    }
+  }
+
   // ★ `claims` = **这条会话用过的插件数据落点**（认领，见 `liveDataDirs` 那段）。
   //   它随这条记录生、随这条记录死 —— 记录一收，会话的插件进程也就没了，
   //   那些目录从那一刻起是真的没人用了。
@@ -2607,7 +2672,7 @@ async function startSession(resources, serviceKind) {
       // 不要工作区的插件 spaceId 是 null，于是这里排除掉**全部**数据端口 ——
       // 正是要的：它绝不能落到某一份数据的端口上。
       // ★ 多开之后「别人」不止别的那几份，见 `excludedPortsFor`。
-      getExcludedPorts: () => excludedPortsFor(rec),
+      getExcludedPorts: () => excludedPortsOfRec(rec),
   });
   rec.controller.on('change', () => onSessionChange(slot));
   rec.controller.on('retarget', () => onSessionChange(slot));
@@ -2646,23 +2711,14 @@ async function startSession(resources, serviceKind) {
     sshPubkey = pre.sshPubkey || null;
   }
 
-  // 本地端口**不是插件的事**（插件没有取端口的钩子）：要工作区的会话用那份数据
-  // 自己的端口（它就是 origin），不要工作区的用中转基准端口。
-  //
-  // ★ **必须判 null**：不要工作区的会话拿的是 `RELAY_PORT_BASE`，而它绝不能落到
-  //   某一份数据的端口上 —— 那条路径**不报错**，症状是"浏览器那一块打到 ssh 端口
-  //   上，页面打不开"。
-  //   ★ 而 `spacePortOf` 那条路**连回落都没有**（找不到就抛）：临时那份不在配置里，
-  //     一条会回落到基址（18080）的实现会让每一份临时的都从 18080 起扫，也就是
-  //     **持有者自己那个端口**。
-  const preferredPort = space
-    ? spacePortOf(space.id)
-    : config.RELAY_PORT_BASE;
+  // ★ `preferredPort` 在上面（端口那道闸那一节）就算出来了 —— 探测要用它。
   const snap = await rec.controller.start(resources, {
     preferredPort,
     serviceKind: plugin.name,
     needsPubkey: plugin.contributes.submitPubkey,
     sshPubkey,
+    // 用户在那道闸上答过的（没问过就是 null）。见 `SessionController._portChoice`。
+    portChoice,
   });
   if (!snap) onSessionChange(slot);
   // ★ 回**槽**：界面拿它指着说"我起的是这一个"（`app:start` 的回包）。
@@ -3929,7 +3985,7 @@ async function reattachOne(s) {
     backend, spaceId: space ? space.id : null,
     // 同上（startSession 那处）：只有**不要工作区**的会话要报实际端口。
     onRelayPort: () => onSessionChange(slot),
-    getExcludedPorts: () => excludedPortsFor(rec),
+    getExcludedPorts: () => excludedPortsOfRec(rec),
     // 接上来的这个会话是哪个插件的 —— 快照要靠它分派（见 serviceKind 的说明）。
     // 认不出时**原样**记下，于是界面仍然得出「未知」。
     requestedKind: plugin ? plugin.name : s.service_kind,
@@ -4777,9 +4833,31 @@ function registerIpc() {
    * @param {string} serviceKind 插件名（站点内的**短名**）。**必填** —— 客户端
    *        这一侧没有"缺省插件"，缺省是**站点**的事（配置里的 `default_plugin`，
    *        它只作用于不带 `service_kind` 的 `slurmate submit`）。
+   * @param {string} [portChoice] 用户在「端口被占」那一行上答过的（只认 `'shift'`
+   *        = 临时换一个）。界面上那一行重发时带上它。
+   *
+   * ★ `code: 'port_conflict'` 这一支是**唯一**一个"没成，但也没失败"的答案：
+   *   它说的是"首选端口被占着，**什么都没提交**，等你答"。界面上那一行二选一，
+   *   两个答案都是用户主动要的（见 panel.js 的 `renderPortAsk`）—— 它**不是**
+   *   一次确认，别照 `armConfirm`"第一下 arm、第二下执行"的路子读它。
    */
-  send('app:start', async (resources, serviceKind) => {
-    const r = await startSession(resources, serviceKind);
+  send('app:start', async (resources, serviceKind, portChoice) => {
+    const r = await startSession(resources, serviceKind, portChoice);
+    if (r && r.conflict) {
+      return {
+        ok: false,
+        code: 'port_conflict',
+        // `want` 让界面能把那个端口念出来（那句后果里要用它）。
+        port: r.conflict,
+        sessions: sessionViews(),
+        front: frontSlot(),
+        // 那一行上那句**后果**由这一侧给（界面不自己编一句，同 `suspended` 那条
+        // 规矩）。它只说**为什么**：两个答案各自的代价是那两颗按钮自己的事。
+        // ★ 排在状态条上那一行的**正文**里，所以它得短：两个答案各自的代价在那两颗
+        //   按钮的 `title` 上（那是界面自己的事）。
+        error: `首选端口 ${r.conflict.want} 被别的程序占着（它是这份数据在浏览器里的地址）。`,
+      };
+    }
     return {
       ok: Boolean(r),
       slot: r ? r.slot : null,

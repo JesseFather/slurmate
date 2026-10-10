@@ -46,6 +46,75 @@ const { EventEmitter } = require('events');
 /** 端口被占时向后试多少个。 */
 const PORT_SCAN_LIMIT = 20;
 
+/**
+ * 端口必须是 1–65535 的整数。**监听与探测共用这一个判据。**
+ *
+ * ★★ **先校验，再动手。** `preferredPort + i` 对 `null` / `undefined` 是**合法的
+ *    JS**：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是**随便挑一个**
+ *    —— 于是它会**成功地**绑到一个临时端口，`start()` 返回 `{port: 0}`，
+ *    `snapshot().localPort` 从此指向一个并不存在的端口、`origin` 是 null。
+ *    全程没有一处报错：这是"安静地做错事"，而不是"响亮地坏"。
+ *
+ *    它今天够不到（两个调用点分别写的是 `preferredPort || 18080` 和"上一次的
+ *    实际端口"，后者必然是真的端口号），所以这是一条**潜伏**的路 —— 而它是
+ *    被一条用例撞见的：那条用例把控制器推到 RUNNING 却没给它端口，现象是
+ *    "隧道重建成功了，而 `_tunnelPort` 是 0"。
+ *
+ *    ★ 判据是 1–65535 的**整数**：`'18080'`（字符串）与 `18080.5` 也拒绝 ——
+ *      `'18080' + 0 === '180800'`，那是另一个安静的错。
+ *
+ * ★ 探测（下面那个 `probeLocalPort`）在**同一个位置**上，不合法就不是"端口被占"，
+ *   所以两边必须是同一条判据：分开写的话，一个不合法端口会先被探测当成"占着"报给
+ *   用户，而真正的绑定随后抛的却是另一回事。
+ */
+function assertPort(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`端口不合法：${JSON.stringify(port)}（要求 1–65535 的整数）`);
+  }
+}
+
+/**
+ * 试绑一下这个端口、**立刻放开** —— 回答"此刻这个端口能不能用"。
+ *
+ * 它存在的唯一理由是**时序**：「端口被占了，要不要临时换一个」这个问题必须在
+ * **提交作业之前**问，否则用户答"不启动"的时候作业已经在集群上了 —— 那时那句话
+ * 就不是字面意思了。而真正的绑定发生在提交与登记**之后**（几秒到几分钟）。
+ *
+ * ★ 它绑的是 `127.0.0.1`，与隧道**同一个地址**：不传 host 的话（Node 默认绑 `::`）
+ *   它回答的是另一个问题 —— 一个只占着 IPv4 的进程会让探测说"空着"，而隧道紧接着
+ *   就 EADDRINUSE。探测的全部意义在于它问的与真绑的是同一件事。
+ *
+ * ★ 它**只回答此刻**，不做任何承诺：探测到绑定之间端口可能被别的进程拿走。
+ *   那一段由 `_listen` 的顺移兜底（照旧换端口 + 如实说出来），不走用户提问 ——
+ *   作业已经提交了，那时问"要不要启动"是骗人的。
+ *
+ * ★ 失败只认 EADDRINUSE / EACCES 之外**什么都不吞**：其它错误（比如地址不可用）
+ *   是环境坏了，把它报成"端口被占"会让用户照着一条不成立的建议去关掉一个无关的程序。
+ *
+ * ★ 它是 `async` 的，于是"端口不合法"是一次 **rejection**、不是一次同步抛 ——
+ *   调用方只有一条路要写（`try { await probeLocalPort(p) } catch`），而同步抛的
+ *   那一半会绕过它。
+ *
+ * @returns {Promise<{free:boolean, code:string|null}>}
+ */
+async function probeLocalPort(port) {
+  assertPort(port);
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', (e) => {
+      if (e.code === 'EADDRINUSE' || e.code === 'EACCES') {
+        resolve({ free: false, code: e.code });
+      } else {
+        reject(e);
+      }
+    });
+    server.listen(port, '127.0.0.1', () => {
+      // 关掉再回答：留着这个监听器的话，探测本身就把端口占住了。
+      server.close(() => resolve({ free: true, code: null }));
+    });
+  });
+}
+
 class Tunnel extends EventEmitter {
   constructor({ backend }) {
     super();
@@ -114,24 +183,8 @@ class Tunnel extends EventEmitter {
   }
 
   async _listen(preferredPort, excludePorts) {
-    // ★★ **先校验，再动手。** `preferredPort + i` 对 `null` / `undefined` 是**合法的
-    //    JS**：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是**随便挑一个**
-    //    —— 于是它会**成功地**绑到一个临时端口，`start()` 返回 `{port: 0}`，
-    //    `snapshot().localPort` 从此指向一个并不存在的端口、`origin` 是 null。
-    //    全程没有一处报错：这是"安静地做错事"，而不是"响亮地坏"。
-    //
-    //    它今天够不到（两个调用点分别写的是 `preferredPort || 18080` 和"上一次的
-    //    实际端口"，后者必然是真的端口号），所以这是一条**潜伏**的路 —— 而它是
-    //    被一条用例撞见的：那条用例把控制器推到 RUNNING 却没给它端口，现象是
-    //    "隧道重建成功了，而 `_tunnelPort` 是 0"。
-    //
-    //    ★ 判据是 1–65535 的**整数**：`'18080'`（字符串）与 `18080.5` 也拒绝 ——
-    //      `'18080' + 0 === '180800'`，那是另一个安静的错。
-    if (!Number.isInteger(preferredPort)
-        || preferredPort < 1 || preferredPort > 65535) {
-      throw new Error(`首选端口不合法：${JSON.stringify(preferredPort)}`
-        + '（要求 1–65535 的整数）');
-    }
+    // ★★ **先校验，再动手** —— 理由与那个判据本身都在 `assertPort` 上。
+    assertPort(preferredPort);
     const reserved = excludePorts instanceof Set
       ? excludePorts : new Set(excludePorts || []);
     let lastErr = null;
@@ -240,4 +293,4 @@ class Tunnel extends EventEmitter {
   }
 }
 
-module.exports = { Tunnel };
+module.exports = { Tunnel, probeLocalPort };

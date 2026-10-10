@@ -732,6 +732,94 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
     /装完的站点/, '★ 装完返回的那份视图要当场画上去');
 });
 
+test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效，而且它不是失败', async () => {
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES },
+  'window.__starts = [];'
+  + 'window.__reply = { ok: false, code: "port_conflict",'
+  + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
+  + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };'
+  + 'window.slurmate.start = (res, kind, choice) => {'
+  + '  window.__starts.push([kind, choice]); return Promise.resolve(window.__reply); };'
+  + 'window.slurmate.partitions = () => Promise.resolve({ ok: true, plugins: null });');
+
+  const row = h.doc.getElementById('sb-port');
+  const notices = () => childrenOf(h.doc.getElementById('notices'));
+  const sent = (i) => h.run(`JSON.stringify(window.__starts[${i}])`);
+  const btn = h.doc.getElementById('start-btn');
+
+  // ★ 开局没有待答的一问。**不在这一层判"那一行是收着的"** —— 这个架子不解析
+  //   `panel.html`，`#sb-port` 身上那个 `hidden` 类是 HTML 写的，在这里根本看不见。
+  //   那一半由 `renderer.test.mjs` 从源码文本上钉（id 在不在、两颗按钮叫什么）。
+  assert.equal(h.run('portAsk'), null, '开局不该有待答的一问');
+
+  // ── ① 被挡下 ⇒ 摆出那一行，理由**照念主进程给的那句** ──
+  await h.fn('startWith')('cs', btn);
+  assert.equal(h.run('window.__starts.length'), 1);
+  assert.equal(sent(0), '["cs",null]',
+    '★ 第一趟**不带作答** —— 要不要问是主进程按后端与那一份数据判的，界面不猜');
+  assert.equal(row.classList.contains('hidden'), false, '★ 被挡下时那一行要摆出来');
+  assert.match(h.doc.getElementById('sb-port-why')._text, /18080/, '理由里要念出那个端口');
+  assert.match(h.doc.getElementById('sb-port-why')._text, /被别的程序占着/,
+    '★ 那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
+  // ★ 两颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
+  assert.match(h.doc.getElementById('sb-port-shift').title || '', /布局/,
+    '「临时换一个」要说清它的代价（origin 变了，编辑器布局会重置）');
+  assert.match(h.doc.getElementById('sb-port-shift').title || '', /回到/,
+    '★ 还要说清它是**暂时**的：端口没有被改掉，下次启动会回到原处');
+  assert.match(h.doc.getElementById('sb-port-abort').title || '', /不会出现作业/,
+    '「不启动」要说清它真的什么都没做');
+  // ★ 而它**不是**失败：这一支不该去刷新插件清单（那是"提交被拒"才有的事）。
+  assert.equal(h.run('window.__starts.length'), 1, '只走了一趟 IPC，没有别的东西跟着发');
+
+  // ── ② 答「临时换一个」⇒ 带 `'shift'` 重发**一次**，而且重发的还是同一个插件 ──
+  await h.doc.getElementById('sb-port-shift').onclick();
+  assert.equal(h.run('window.__starts.length'), 2, '★ 答一下正好重发一次');
+  assert.equal(sent(1), '["cs","shift"]',
+    '★★ 那个作答是**用户的意思**：主进程据此顺移，不再问第二遍');
+
+  // ── ③ 这一趟成了 ⇒ 那一行收掉 ──
+  h.run('window.__reply = { ok: true, slot: 1, sessions: [], front: null };');
+  await h.doc.getElementById('sb-port-shift').onclick();
+  assert.equal(row.classList.contains('hidden'), true, '成了就不该再挂着那一行');
+
+  // ── ④ 答「不启动」⇒ 就地收掉，**一个字节都不发**，而且说一句实话 ──
+  h.run('window.__reply = { ok: false, code: "port_conflict",'
+    + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
+    + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
+  await h.fn('startWith')('cs', btn);
+  assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
+  const calls = h.run('window.__starts.length');
+  const before = notices().length;
+  await h.doc.getElementById('sb-port-abort').onclick();
+  assert.equal(h.run('window.__starts.length'), calls,
+    '★★ 「不启动」不跟主进程说话 —— 因为此刻**本来就没有东西要撤**');
+  assert.equal(row.classList.contains('hidden'), true, '那一行要收掉');
+  // ★ 提示流是 **prepend**（新的在最前），所以"这一下新出来的"是**开头那几条** ——
+  //   取尾巴会把上一次那一句当成这一次说的。
+  const said = notices().slice(0, notices().length - before)
+    .flatMap((x) => childrenOf(x)).map((x) => x._text || '').join('\n');
+  assert.match(said, /没有提交/,
+    '★ 用户刚点过「开始会话」而界面静了下来，要说清那是"没起来"而不是"起来了"');
+
+  // ── ⑤ 别的失败**不摆这一行**（它不是"被端口挡住"，两个答案都不成立）──
+  h.run('window.__reply = { ok: false, code: "rejected", error: "版本对不上。" };');
+  await h.fn('startWith')('cs', btn);
+  assert.equal(row.classList.contains('hidden'), true,
+    '★★ 只有 `port_conflict` 才摆这一行 —— 别的失败摆它等于给两个不成立的答案');
+
+  // ── ⑥ 走开（换屏 / 连上 / 断开都走这条路）⇒ 那一行收掉 ──
+  h.run('window.__reply = { ok: false, code: "port_conflict",'
+    + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
+    + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
+  await h.fn('startWith')('cs', btn);
+  assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
+  h.fn('showScreen')('conns');
+  assert.equal(row.classList.contains('hidden'), true,
+    '★ 走到别的屏去了，那一问就该收掉 —— 它问的是**当前这条连接**的那些数据的端口，'
+    + '把一个问题留着等答，而它描述的东西可能已经不是他现在看的这一条了');
+});
+
 test('★★ 同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
   // ★ 这是这一版唯一的安全边界（进程隔离还没做），所以它**留着**；但它原来是
   //   三句 —— 第三句讲的是"不同意会怎样"，而那件事那颗按钮自己的措辞已经说了

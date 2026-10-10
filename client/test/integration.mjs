@@ -31,7 +31,7 @@ const fs = require('fs');
 const path = require('path');
 const { FakeBackend, DEMO_PASSWORD } = require('../src/main/backend-fake.js');
 const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/session.js');
-const { Tunnel } = require('../src/main/tunnel.js');
+const { Tunnel, probeLocalPort } = require('../src/main/tunnel.js');
 
 // ★ 假后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它
 //   （`opts.sitePlugins`）—— 它自己不认识任何插件，基座也不认识。这里给它的是
@@ -138,6 +138,50 @@ test('★★ 首选端口必须是 1–65535 的整数：null 会**安静地**�
     } finally {
       if (t.server) await t.stop();
     }
+  }
+});
+
+test('★★ 端口探测：问的必须与真绑的是**同一件事**，而且探完不许占着', async () => {
+  // ★ 它是「端口被占了，要不要临时换」那个问题的**全部依据**（见 index.js 的
+  //   `startSession`）：探测与真绑不是同一件事的话，用户答的是一个问题、撞上的是
+  //   另一个 —— 而两次都"成功"了，只是中间那个端口不对。
+  const port = await freePort();
+  assert.deepEqual(await probeLocalPort(port), { free: true, code: null },
+    '空着的端口要报空着');
+
+  // ★ **探完必须放开。** 忘了 `close()` 的话，探测自己就把端口占住了 ——
+  //   于是"空着的端口"探测一次之后永远报"被占"，而症状是"每个会话第一次都能起、
+  //   第二次起不来"，且每次报的都是同一句关于端口被占的话。
+  assert.deepEqual(await probeLocalPort(port), { free: true, code: null },
+    '★ 探测过一遍之后那个端口还得是空着的（它不许把自己算成占用者）');
+
+  const squatter = net.createServer();
+  await new Promise((r, j) => { squatter.once('error', j); squatter.listen(port, '127.0.0.1', r); });
+  try {
+    const got = await probeLocalPort(port);
+    assert.equal(got.free, false, '★ 真的被占着就要报被占');
+    assert.equal(got.code, 'EADDRINUSE');
+    // ★ 而它必须与隧道**是同一个判据**：探测说"被占"的那个端口，隧道也必须绑不上
+    //   从而顺移。两边分家的话，用户答的是"端口被占了"，而真绑时换的是另一个
+    //   判断 —— 探测就成了一个与事实无关的仪式。
+    const t = new Tunnel({ backend: new FakeBackend() });
+    try {
+      const r = await t.start({ preferredPort: port, target: '203.0.113.9:9999' });
+      assert.equal(r.shifted, true, '★ 探测说被占，隧道就必须顺移');
+      assert.notEqual(r.port, port);
+    } finally {
+      if (t.server) await t.stop();
+    }
+  } finally {
+    await new Promise((r) => squatter.close(r));
+  }
+
+  // ★ 不合法端口**当场抛**，不许变成"这个端口被占着"：后者会让用户去关一个
+  //   无关的程序。判据与隧道那一份是同一个（`assertPort`）—— 两份实现会漂开，
+  //   而漂开的形态是"探测说占着、真绑抛的是另一回事"。
+  for (const bad of [null, 0, 65536, '18080', 18080.5]) {
+    await assert.rejects(() => probeLocalPort(bad), /端口/,
+      `不合法端口 ${JSON.stringify(bad)} 应当当场抛，而不是答"被占着"`);
   }
 });
 
@@ -424,6 +468,53 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   //   原来那份布局也跟着回来。不说这一句，用户会以为自己被永久搬走了。
   assert.match(ctl.snapshot().warning || '', /回到/,
     '★ 顺移不改写首选端口 —— 要告诉用户下一会话会回到原来的端口');
+});
+
+test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过的要说清"为什么没问你"', async (t) => {
+  t.after(keepAlive());
+  // ★★ 这一条守的是那个**接缝的位置**。「端口被占，要不要临时换」这个问题只能在
+  //    **提交之前**问（见 index.js 的 `startSession`）—— 到了控制器这一层，作业
+  //    已经在集群上了，那时问"要不要启动"是骗人的。所以控制器里**没有**
+  //    `resolvePortConflict` 之类的回调，只有"这一趟答过没有"这一个事实。
+  //    ⇒ 判据是那句**话**：答过的不多话，没答过的那一趟必须自己说明白，
+  //      否则用户会把一个"提交之后才发现"的窗口当成一条漏掉的询问。
+  // ★ 每一趟一个**新后端**：假后端按真实守护进程的样子给每个 uid 限一个活跃会话，
+  //   连着跑两趟会让第二趟撞上配额（拿回一句"已经有 1 个活跃会话"），而那与
+  //   端口这件事毫无关系。
+  const body = async (portChoice) => {
+    const backend = await makeBackend(t, { enrollDelayMs: 100 });
+    const port = await freePort();
+    const squatter = net.createServer();
+    await new Promise((r, j) => { squatter.once('error', j); squatter.listen(port, '127.0.0.1', r); });
+    const ctl = new SessionController({ backend, spaceId: 's0000000000b1', statusMs: 80 });
+    try {
+      await ctl.start({}, { preferredPort: port, serviceKind: CS_MANIFEST.name, portChoice });
+      return ctl.snapshot().warning || '';
+    } finally {
+      await ctl.stop();
+      await new Promise((r) => squatter.close(r));
+    }
+  };
+
+  const answered = await body('shift');
+  assert.match(answered, /被占用/, '顺移这件事本身照旧要说出来');
+  assert.match(answered, /回到/, '★ 那句"下次会回到原端口"一个字都不能少');
+  assert.doesNotMatch(answered, /没有问你/,
+    '★ 用户刚答过「临时换一个」，再补一句"没有问你"就是多余的');
+
+  const unanswered = await body(null);
+  assert.match(unanswered, /没有问你/,
+    '★★ 没人答过的那一趟必须说明白它为什么没问 —— 那时作业已经提交了，'
+    + '「不启动」不是字面意思，所以只能顺移');
+
+  // ★ 而**没有任何别的地方**会替它问：那个接缝在控制器上根本不存在。
+  //   （判据取的是"没有这个钩子"，不是"钩子返回了什么" —— 一个只有一种返回值的
+  //   接缝是走不到的码。）
+  const ctl = new SessionController({ backend: await makeBackend(t, {}) });
+  for (const name of ['resolvePortConflict', 'onPortConflict', 'askPort', 'onTunnelPort']) {
+    assert.equal(typeof ctl[name], 'undefined',
+      `★ 控制器上不该有 ${name} —— 提问的位置在提交之前，不在这里`);
+  }
 });
 
 test('★ 端口报给谁：要工作区的会话一声不吭，不要工作区的必须报实际端口', () => {

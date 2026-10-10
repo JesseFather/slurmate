@@ -1515,7 +1515,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   const before = calls.views.length;
   // 高级选项的临时覆盖：只传真实填了的键。这里模拟用户填了 4 核，
   // 内存不填 → 由服务端用自己的默认值（而不是客户端编一个）。
-  await invoke('app:start', { cpus: 4 }, 'code-server');
+  await appStart({ cpus: 4 }, 'code-server');
 
   // 等登记完成（假后端 200ms）+ 建隧道 + 登录
   const view = await (async () => {
@@ -1630,7 +1630,7 @@ test('★ 运行中切换工作区：只换本地端口与存储分区，作业�
     '假后端应当连得上');
 
   const before = calls.views.length;
-  const started = await invoke('app:start', {}, 'code-server');
+  const started = await appStart({}, 'code-server');
   assert.equal(started.ok, true, `开会话应当成功：${JSON.stringify(started)}`);
   const view1 = await waitForView(before);
 
@@ -2031,7 +2031,7 @@ test('★★ 漏传服务名**当场拒绝** —— 客户端这一侧没有"缺
   // ★ 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, btn)`，
   //   服务名永远显式传），所以这一条是这段逻辑**唯一**的守门人。
   const before = noticesOf().length;
-  const r = await invoke('app:start', { cpus: 1 });
+  const r = await appStart({ cpus: 1 });
   assert.equal(r.ok, false, '漏传服务名必须被拦住，而不是起一个会话');
   assert.equal(r.slot, null, '而且不许留下一个槽');
   const said = noticesOf().slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
@@ -2604,7 +2604,7 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
 
     // ★ 一个插件都没有时，提交必须被**明确拦住**并给出路，而不是起一个
     //   看起来起来了但连不上的作业，也不是一句"本版支持：（一个都没有）"。
-    const started = await invoke('app:start', {}, 'code-server');
+    const started = await appStart({}, 'code-server');
     assert.equal(started.ok, false, '没有插件就起不了会话 —— 必须在提交前拦住');
     const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
       .map((n) => n.text).join('\n');
@@ -3864,7 +3864,7 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   //   「等待超时」收场 —— 红的理由和它想验的事情毫无关系，而真正想验的那条
   //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
   const w = idx._test.getWindow();
-  await invoke('app:start', null, 'code-server');
+  await appStart(null, 'code-server');
   await waitUntil(() => (theView(w) && !theView(w).webContents.isDestroyed()
     && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(theView(w).webContents._url)
     ? theView(w) : null), '插件声明的那块界面');
@@ -3938,7 +3938,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
   const w = idx._test.getWindow();
-  const started = await invoke('app:start', null, 'jupyter');
+  const started = await appStart(null, 'jupyter');
   assert.equal(started.ok, true, `提交失败：${JSON.stringify(started.snapshot || started)}`);
   const ctl = onlyCtl(idx);
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin, '会话进入 running', 20000);
@@ -4005,7 +4005,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
   const viewsBefore = calls.views.length;
-  const started = await invoke('app:start', null, 'sshd');
+  const started = await appStart(null, 'sshd');
   assert.equal(started.ok, true, `提交中转站会话失败：${JSON.stringify(started.snapshot)}`);
 
   // 等它跑到 running（假后端 200ms 登记）
@@ -4134,7 +4134,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个**真的在监听**
   // 的端口。起完再把这个会话的 service_kind 换成客户端不认识的名字，正是
   // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
-  const started = await invoke('app:start', { cpus: 2 }, 'code-server');
+  const started = await appStart({ cpus: 2 }, 'code-server');
   assert.equal(started.ok, true,
     `开会话失败：${JSON.stringify(started.sessions || started)}`);
   // ★ 取**刚起的这一条**的 controller（`onlyCtl` 取的是表里第一个，而多开之后
@@ -4405,7 +4405,7 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
   await connectDemo(idx);
 
   // ── 起甲：code-server（有界面）──
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `甲提交失败：${JSON.stringify(a)}`);
   const ctlA = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctlA.state === 'running' && ctlA.snapshot().origin,
@@ -4415,7 +4415,7 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
   const viewA = viewFor(w, a.slot);
 
   // ── 起乙：中转站（**不要界面**）──
-  const bs = await invoke('app:start', null, 'sshd');
+  const bs = await appStart(null, 'sshd');
   assert.equal(bs.ok, true, `乙提交失败：${JSON.stringify(bs)}`);
   assert.notEqual(bs.slot, a.slot,
     '★ 要工作区与不要工作区的是**两个槽** —— 那条能力（IDE + 终端中转）靠它');
@@ -4490,7 +4490,7 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   //   所以那句"它不需要假站点认识它"当时成立、现在不成立了）。
   idx._test.getBackend().debugAddSitePlugin('single-slot');
 
-  const a = await invoke('app:start', null, 'single-slot');
+  const a = await appStart(null, 'single-slot');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
   const ctlA = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctlA.state === 'running', '甲进入 running', 30000);
@@ -4500,7 +4500,7 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   // 再起一条**同一个槽**的（同一个插件、同一个工作区 ⇒ 同一份数据）—— 必须被
   // **客户端**拦住，而不是提交到服务端之后才拿到一句 quota_active。理由：一份数据 =
   // 一个本地端口 = 一份浏览器存储，同一份数据上的第二条会把第一条的端口与存储**当场抢掉**。
-  const b2 = await invoke('app:start', null, 'single-slot');
+  const b2 = await appStart(null, 'single-slot');
   assert.equal(b2.ok, false, '★ 同一个槽的第二个会话必须在提交**之前**就被拒');
   assert.equal(ctlA.state, 'running', '★ 甲必须一动不动');
   assert.equal(ctlA.sessionId, sidA, '★ 甲连会话号都不该变');
@@ -4594,9 +4594,35 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
 // 这一组用例的共同前提：**同一个插件（code-server）要能同时开两份**，所以
 // `openUpTo(idx, 2)` 是配额，`connectDemo` 给出那条连接 —— 而**第一份认领它**。
 
+/**
+ * 提交一条会话 —— **首选端口被占着时，按用户会按的那一下答**。
+ *
+ * ★★ 为什么夹具要替用户答一下：这一版起，首选端口被别的程序占着时**不再静默顺移**，
+ *    而是先问一句「临时换一个 / 不启动」（见 `index.js` 的 `startSession`）。而
+ *    **这台开发机上 18080 就是被占着的** —— 那是这台机器的别的东西（不是我们的
+ *    会话、也不在任何配置里，探测只能看见"占着"）。于是那个端口上的每一条"起会话"
+ *    用例都会撞上那一问，而它与那条用例要验的事情毫无关系。
+ *    ⇒ 这一层把那一问答掉，用的就是界面上那颗「临时换一个」发出去的
+ *    `portChoice:'shift'`，与用户在真机上会做的事逐字相同。
+ *
+ * ★ 判据是**主进程回的那一格**（`code === 'port_conflict'`），不是"这台机器是不是
+ *   开发机"：在 18080 空着的机器上（CI）它一次都不会触发，重发的路径也走不到。
+ *
+ * ★★ **那一问本身**由两条专门用例看着（〈首选端口被占住：先问…〉与〈临时副本那一份：
+ *    端口被占不问…〉）—— 它们直接调 `invoke('app:start')`，一个字节都不经过这里。
+ *    ⇒ 这一层替用户答的是"起得起来吗"那一路，挡不住"它还问不问"那一路。
+ */
+async function appStart(resources, serviceKind) {
+  const r = await invoke('app:start', resources, serviceKind);
+  if (r && r.code === 'port_conflict') {
+    return invoke('app:start', resources, serviceKind, 'shift');
+  }
+  return r;
+}
+
 /** 起一条会话并等它真的跑起来。返回 `{slot, ctl}`。 */
 async function startRunning(idx, name, ms = 30000) {
-  const r = await invoke('app:start', null, name);
+  const r = await appStart(null, name);
   assert.equal(r.ok, true, `${name} 没起来：${JSON.stringify(r.sessions)}`);
   const ctl = idx._test.sessionAt(r.slot).controller;
   await waitUntil(() => ctl.state === 'running', `${name} 进入 running`, ms);
@@ -5120,7 +5146,7 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
   //   这一条会红在一个与它无关的地方）。
   const tempsBefore = new Set(idx._test.getTempSpaces().keys());
 
-  const r = await invoke('app:start', null, 'prep-fail');
+  const r = await appStart(null, 'prep-fail');
   assert.equal(r.ok, false, '★ prepare 失败必须拦住这次提交');
 
   // ★★ 三样都不许留下：会话表里那一格（留着的话那个槽再也开不了新的，而提示会说
@@ -5156,9 +5182,9 @@ test('★★ 崩溃重连要接回**全部**会话，而不是最新那一条', 
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await invoke('app:start', null, 'sshd');
+  const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -5186,9 +5212,9 @@ test('★ 关窗确认要数**全部**活着的会话（说一句不成立的话
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await invoke('app:start', null, 'sshd');
+  const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -5235,9 +5261,9 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await invoke('app:start', null, 'sshd');
+  const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -5264,7 +5290,7 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
 //  阶段 5：端口只读 / ctx.connection() / 删连接删数据
 // ════════════════════════════════════════════════════════════════════════════
 
-test('★★ 端口顺移**不写回**：localPort 与 origin 跟着实际端口走，而配置里那个字不动', async (t) => {
+test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答了才动，而顺移仍然不写回', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const config = require('../src/main/config.js');
@@ -5287,14 +5313,40 @@ test('★★ 端口顺移**不写回**：localPort 与 origin 跟着实际端口
 
   // ★ 由**测试**把首选端口占住。不这么做的话，"顺移了"可能是这台机器上恰好有
   //   别的东西在用那个端口 —— 而那时这条用例验的是运气，不是代码。
+  // ★ **这台机器上那个端口可能本来就被别的程序占着** —— 那正是这条用例要的场景，
+  //   不必自己再占一次（占不上说明它已经占着了）。占得上才需要收尾。
   const squatter = net.createServer();
-  await new Promise((r, j) => {
-    squatter.once('error', j);
-    squatter.listen(want, '127.0.0.1', r);
+  const held = await new Promise((resolve, reject) => {
+    squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
+    squatter.listen(want, '127.0.0.1', () => resolve(squatter));
   });
-  t.after(() => new Promise((r) => squatter.close(r)));
+  t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
-  const a = await invoke('app:start', null, 'code-server');
+  // ── ① 被占住 ⇒ **什么都不提交**，先问一句 ────────────────────────────────
+  //   ★★ 这一支是整条路存在的理由：探测发生在**提交之前**，所以此刻作业还没有
+  //     上集群 —— 界面上那个「不启动」才是**字面意思**。等绑定那一刻再问，作业
+  //      已经在跑了，用户答"不启动"是一句空话。
+  const ask = await invoke('app:start', null, 'code-server');
+  assert.equal(ask.ok, false, `被占住时不该报成功：${JSON.stringify(ask)}`);
+  assert.equal(ask.code, 'port_conflict',
+    '★ 被占住要作为一件事**问出来**，而不是悄悄顺移');
+  assert.equal(ask.port.want, want, '★ 念出来的必须是**这一份数据的**端口');
+  assert.equal(ask.port.spaceId, wantSpace.id);
+  assert.match(ask.error || '', new RegExp(String(want)),
+    `那句理由里要念出端口号：${ask.error}`);
+  assert.deepEqual(ask.sessions, [], '★★ 不许有会话记录');
+  assert.equal(idx._test.getBackend()._occupying().length, 0, '★★ 集群上不许有作业');
+  assert.equal(idx._test.getTempSpaces().size, 0, '★ 不许留下一份临时数据');
+  const stillThere = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === wantSpace.id);
+  assert.equal(stillThere.ports[0], want, '★ 被挡下的这一趟一个字都不许写进配置');
+
+  // ── ② 用户答「不启动」⇒ 就到这里（界面上那一行收掉，没有别的动作）──
+  //   那一下在界面上是 `clearPortAsk()`（renderer-dom 有它自己的用例），主进程
+  //   这一侧**没有对应的 IPC** —— 因为此刻本来就没有东西要撤。这一条断言就是
+  //   那句话的证据：①之后系统仍然是一个干净的"什么都没发生"。
+
+  // ── ③ 用户答「临时换一个」⇒ 带上作答重发，走既有的顺移扫描 ──
+  const a = await invoke('app:start', null, 'code-server', 'shift');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -5307,6 +5359,11 @@ test('★★ 端口顺移**不写回**：localPort 与 origin 跟着实际端口
   // ★ 实际端口必须走到快照里 —— 界面和插件都靠它（`origin` 是给浏览器的那一个）。
   assert.equal(snap.origin, `http://127.0.0.1:${snap.localPort}`,
     'origin 必须跟着**实际**端口走');
+  // ★ 而这一趟**是答过的**：那句"没有问你"只属于"提交之后才发现"那个窗口
+  //   （见 session.js 的 `_portChoice`）。答过还补一句，就是在编造一次对话。
+  assert.doesNotMatch(snap.warning || '', /没有问你/,
+    '★ 用户刚答过「临时换一个」，那句说明里不许再补一句"没有问你"');
+  assert.match(snap.warning || '', /回到/, '★ 顺移仍然要说清"下次会回到原端口"');
 
   // ★★ 本阶段的重点：**配置里那个端口一个字都不动。**
   //    写回会把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin
@@ -5318,6 +5375,116 @@ test('★★ 端口顺移**不写回**：localPort 与 origin 跟着实际端口
     + '写回等于把一次暂时的冲突永久化');
 
   await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 那个端口**归别人**（配置里另一份数据声称着它）⇒ 照旧静默顺移，不问', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const net = require('net');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await onlyDemoConnection(idx);
+
+  const { space, workspaceId } = makePluginDataDir(idx, 'code-server');
+  const want = space.ports[0];
+  const ws = idx._test.getCfg().workspaces.find((l) => l.id === workspaceId);
+
+  // ★★ 这一条守的是那道闸里**最容易被漏掉**的一半：与隧道顺移时用的是**同一份**
+  //   排除集（`excludedPortsFor`）—— 凡是"分配器会负责跳过"的端口，都不该再问用户
+  //    一遍。问了的后果不是报错：用户答「临时换一个」，而那本来就是这一趟必然会
+  //    发生的事（隧道扫描会跳过它），于是那一问成了一个**没有信息量的问题**。
+  //    ★ 造现场：配置里**另一份**数据也声称着同一个端口。它挂在那个工作区的
+  //      `spaces` 里 ⇒ `pruneSpaces` 不会把它收走（"活工作区持有的"就是活的）。
+  const ghost = { id: 'sffffffffffff', pluginId: space.pluginId,
+                  group: space.group, ports: [want] };
+  idx._test.getCfg().spaces.push(ghost);
+  if (!Array.isArray(ws.spaces)) ws.spaces = [];
+  ws.spaces.push(ghost.id);
+  const drop = () => {
+    const c = idx._test.getCfg();
+    c.spaces = c.spaces.filter((x) => x.id !== ghost.id);
+    const w = c.workspaces.find((l) => l.id === workspaceId);
+    if (w && Array.isArray(w.spaces)) w.spaces = w.spaces.filter((x) => x !== ghost.id);
+  };
+
+  // ★ 由**测试**把那个端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
+  const squatter = net.createServer();
+  const held = await new Promise((resolve, reject) => {
+    squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
+    squatter.listen(want, '127.0.0.1', () => resolve(squatter));
+  });
+  t.after(() => { drop(); });
+  t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
+
+  // ★ **直接调 IPC**：这一条要看见的正是"它**没有**问"，而夹具那一层会把问答题掉。
+  const a = await invoke('app:start', null, 'code-server');
+  assert.equal(a.code, undefined,
+    '★ 那个端口归别人 ⇒ 照旧静默顺移，不许问：'
+    + JSON.stringify({ code: a.code, port: a.port }));
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '进入 running', 20000);
+  assert.ok(ctl.snapshot().localPort > want,
+    `★ 顺移照旧（不问 ≠ 不顺移），实际 ${ctl.snapshot().localPort}`);
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它是这一次会话里当场挑的）', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const net = require('net');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // ★ **只对持久的那份数据问**（见 index.js 的 `startSession`）。临时副本是**框架
+  //   事实**（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
+  //   为它摆一行"临时换 / 不启动"是问一个没有代价的问题。
+  //
+  // ★★ 怎么把"它没问"变成可判的：临时那份的端口是**确定性**算出来的
+  //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下**两次**拿到的是
+  //   同一个端口。先起一遍把那个号记下来、收掉，再把那个号占住重起一次 ——
+  //   若它也走"问一句"那条路，第二次就会拿回 `port_conflict`。
+  const a = await startRunning(idx, 'code-server');       // 持有者（持久那份）
+  const b = await startRunning(idx, 'code-server');       // 临时副本
+  assert.equal(idx._test.getTempSpaces().has(b.ctl.spaceId), true,
+    '夹具前提：第二份是临时的');
+  const tempPort = idx._test.getTempSpaces().get(b.ctl.spaceId).ports[0];
+  assert.ok(Number.isInteger(tempPort), '夹具前提：临时那份有一个首选端口');
+
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(() => !idx._test.getBackend()._occupying()
+    .some((x) => x.session_id === b.ctl.sessionId), '乙在服务端也放掉了', 20000);
+
+  // ★ 同上面那一条：它可能**本来就被占着**，那正是要的场景。
+  const squatter = net.createServer();
+  const held = await new Promise((resolve, reject) => {
+    squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
+    squatter.listen(tempPort, '127.0.0.1', () => resolve(squatter));
+  });
+  t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
+
+  const again = await invoke('app:start', null, 'code-server');
+  assert.equal(again.code, undefined,
+    `★★ 临时副本上不许问"要不要临时换" —— 它是这一次会话当场挑的端口：`
+    + `${JSON.stringify({ code: again.code, port: again.port })}`);
+  assert.equal(again.ok, true, `提交失败：${JSON.stringify(again)}`);
+  const c2 = idx._test.sessionAt(again.slot).controller;
+  await waitUntil(() => c2.state === 'running' && c2.snapshot().localPort,
+    '第三份进入 running', 20000);
+  const snap = c2.snapshot();
+  assert.ok(snap.localPort > tempPort && snap.localPort <= tempPort + 20,
+    `★ 照旧顺移（落在扫描区间 ${tempPort + 1}–${tempPort + 20}），实际 ${snap.localPort}`);
+  assert.match(snap.warning || '', /被占用/, '★ 顺移这件事照旧要说出来（不问 ≠ 不说）');
+
+  for (const s of [a, { slot: again.slot }]) await invoke('app:stop', { slot: s.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
@@ -5336,7 +5503,7 @@ test('★★ 中转站的端口绝不能落进任何一份数据', async (t) => 
   assert.ok(spacePorts.every((p) => Number.isInteger(p)),
     `★ 那些端口要是**数**（端口从工作区搬到数据上之后，这一条曾经静默失效过 —— `
     + `工作区上没有 \`port\` 了，\`map\` 出来一串 undefined，而 \`includes\` 于是恒为假）`);
-  const b = await invoke('app:start', null, 'sshd');
+  const b = await appStart(null, 'sshd');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -5369,7 +5536,7 @@ test('★★ ctx.connection() 只回这一条会话所属的那条连接 —— 
   await connectDemo(idx);                       // C1：user=demo
   await onlyDemoConnection(idx);
 
-  const b = await invoke('app:start', null, 'sshd');
+  const b = await appStart(null, 'sshd');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -5419,7 +5586,7 @@ test('★★ 换一条连接 = 离开上一个站点：本机那些记录一条�
   await connectDemo(idx);                        // C1
   await onlyDemoConnection(idx);
 
-  const b = await invoke('app:start', null, 'sshd');
+  const b = await appStart(null, 'sshd');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -5601,7 +5768,7 @@ test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收�
   await onlyDemoConnection(idx);
 
   const { dir, workspaceId } = makePluginDataDir(idx, 'code-server');
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
@@ -5656,7 +5823,7 @@ test('★★ 而会话结束之后，同一份必须清得掉（反向的那一�
   await onlyDemoConnection(idx);
 
   const { dir, workspaceId } = makePluginDataDir(idx, 'code-server');
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
@@ -5790,7 +5957,7 @@ test('★★ 作业列表来自服务端（`op:list`），不是本机那张会�
     '还没有活着的作业时，活的那一批是空的（已经结束的那些会照旧留着 —— 服务端也是这样）');
 
   // ── 起一条，再看 ──
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   r = await invoke('app:jobs');
   assert.equal(r.ok, true);
@@ -5845,7 +6012,7 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true);
   const before = await invoke('app:jobs');
   const row = liveJobs(before)[0];
@@ -5954,7 +6121,7 @@ test('★★ 端到端：点「连接」之后，作业列表里就看得见那�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6007,7 +6174,7 @@ test('★★ 连着的时候再点一次「连接」：已经在手上的那几�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6072,7 +6239,7 @@ test('★★【临时离开】：看护者交回去，作业一个字都没动',
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6120,7 +6287,7 @@ test('★★ 闪断（连接掉了，没点任何按钮）⇒ 看护者保留，
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6167,7 +6334,7 @@ test('★★ 被接管之后又点【接管】：本机是**真的**把它拿回
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6206,7 +6373,7 @@ test('★★【断开】是【临时离开】的反面：它真的把作业停�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await appStart(null, 'code-server');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -6301,7 +6468,7 @@ test('★★ 短名有歧义时**不替用户挑一个**，而是把那几个 id
   await invoke('app:partitions');
 
   const before = noticesOf().length;
-  const r = await invoke('app:start', {}, 'code-server');
+  const r = await appStart({}, 'code-server');
   assert.equal(r.ok, false, '★★ 短名指不出是哪一个 ⇒ 必须在**提交之前**拦下，不许挑一个');
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
   assert.match(said, /都叫/, `要说清是**短名撞了**（不是"不认识这个插件"）：${said}`);
@@ -6327,7 +6494,7 @@ test('★★ 站点版本漂移那句话按 **id** 认亲 —— 短名撞了的
   await invoke('app:partitions');
 
   const before = noticesOf().length;
-  await invoke('app:start', {}, 'code-server');
+  await appStart({}, 'code-server');
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
 
   assert.doesNotMatch(said, /站点那边/,
@@ -6533,7 +6700,7 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   // 一条永远绿的断言。
   // ★ 夹具的登记延迟默认是 8 秒（真集群上的样子）。这条用例不考它，压到 300 毫秒。
   idx._test.getBackend().enrollDelayMs = 300;
-  assert.equal((await invoke('app:start', {}, 'code-server')).ok, true);
+  assert.equal((await appStart({}, 'code-server')).ok, true);
   const ctl = onlyCtl(idx);
   for (let i = 0; i < 60 && !ctl.sessionId; i += 1) {
     await new Promise((r) => setTimeout(r, 100));
@@ -6626,7 +6793,7 @@ test('★★ 作业一结束，右栏自己收起来（那时它没有内容可�
   //    一直跑着 —— 不清的话这一次 `app:start` 会被站点拒（"已经有 1 个会话占着位置"），
   //    而症状是"这条用例的前置条件永远不成立"，指不回原因。
   back0.debugReap();
-  assert.equal((await invoke('app:start', {}, 'code-server')).ok, true);
+  assert.equal((await appStart({}, 'code-server')).ok, true);
   // ★ 按**槽**取那一条，不用 `onlyRec`（它取的是 map 里的**第一个**，
   //   而前面几条用例可能还留着一条没被回收的记录 —— 于是这条判据会去问一个
   //   根本不是刚起来的那条会话，症状是"前置不成立"）。

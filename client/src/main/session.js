@@ -212,6 +212,17 @@ class SessionController extends EventEmitter {
     this._requestedKind = requestedKind || null;
     /** 这个插件提交时要不要公钥。由调用方从插件元数据里取，这里不认插件名。 */
     this._needsPubkey = Boolean(needsPubkey);
+    /**
+     * 用户在「端口被占」那一行上答的是哪一条（`'shift'`），没问过就是 `null`。
+     *
+     * ★ 控制器**不问任何人**。它只记着"这一趟是不是已经答过了"：答过 ⇒ 顺移是
+     *   用户要的，不再多话；没答过 ⇒ 这一处的占用是**提交之后**才冒出来的
+     *   （探测到绑定之间那个窗口），只能顺移，并在那句说明里补一句"没有问你"。
+     *   ⇒ 所以这里没有"问用户的回调"，也没有默认答案 —— 一个只有一种返回值的
+     *   接缝是走不到的码，而"隧道重建 / 换工作区"那两条路本来就没有用户动作
+     *   （在用户打字的时候弹一行是敌意行为），它们连这一格都不看。
+     */
+    this._portChoice = null;
     this._tunnelPort = null;
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
     this._hbTimer = null;
@@ -501,7 +512,9 @@ class SessionController extends EventEmitter {
    *   全部可选。**缺省由服务端填**（2 CPU / 8G / 从有权限的分区里随机挑一个）——
    *   默认值不由客户端填，否则一个改过的客户端省略字段就能要到整机。
    *   只传用户**真的填了**的键，不要用 undefined 覆盖服务端的默认值。
-   * @param {object} opts { preferredPort, serviceKind, sshPubkey }
+   * @param {object} opts { preferredPort, serviceKind, sshPubkey, portChoice }
+   *   `portChoice` 是用户在「端口被占」那一行上答过的（`'shift'` = 临时换一个）；
+   *   没问过就不传。见 `this._portChoice`。
    */
   async start(resources, opts = {}) {
     if (this.state !== State.IDLE && this.state !== State.ENDED && this.state !== State.ERROR) {
@@ -516,6 +529,7 @@ class SessionController extends EventEmitter {
     this._pushSeq = 0;
     this._requestedKind = opts.serviceKind || null;
     this._needsPubkey = Boolean(opts.needsPubkey);
+    this._portChoice = opts.portChoice || null;
     this._setState(State.SUBMITTING);
 
     // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
@@ -697,7 +711,16 @@ class SessionController extends EventEmitter {
         // ★ 末句是承重的：顺移**不写回**配置，所以首选端口没被改掉。占用它的是
         //   **这一次**的冲突，冲突一消失，下次启动就绑回原处、原来那份布局也跟着
         //   回来。不说这一句，用户会以为自己被永久搬走了。
+        //
+        // ★★ 中间那一句只在**没人问过**的时候出现，而它解释的是"为什么没问我"：
+        //    正常的冲突在提交**之前**就探测到了（`startSession` 里那一次试绑），
+        //    那时用户答的是「临时换」。走到这里还带着一句没答过的冲突，只可能是
+        //    探测与绑定之间那个窗口 —— 那时作业已经在集群上了，「不启动」不是
+        //    字面意思，所以只能顺移。不说这一句，用户会把一个**窗口**当成一条
+        //    漏掉的询问。反过来，用户刚答过的那一趟说这句就是多余的。
         this.warning = `首选端口 ${want} 被占用，已改用 ${port}。`
+                     + (this._portChoice === 'shift'
+                       ? '' : '（这一处在作业提交之后才发现，所以没有问你。）')
                      + '由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。'
                      + `首选端口没有被改掉：占用它的进程退出之后，下次启动会回到 ${want}，`
                      + '那份布局也还在。';
