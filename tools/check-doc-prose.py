@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""公开文档的正文：不叙历史，也不用「你 / 我」。
+"""公开文档的正文：不叙历史，不用「你 / 我」，也不堆记号与长段。
 
-体例见 `CONTRIBUTING.md`〈公开文档用规范体〉。
+体例见 `CONTRIBUTING.md`〈公开文档用规范体〉与〈写得短〉。
 
-判据两条，都是机械的：
+判据四条，都是机械的：
 
     F  公开文档里不许出现**历史叙述** —— 时间锚点（`v0.13 起`）、括号版本注记
        （`（v0.12 热重载）`）、对比叙述（`从前 X，现在 Y`）。「现在是什么」直接
@@ -26,6 +26,14 @@
     G  公开文档的正文里不许出现**人称代词**（`你` / `我` / `我们` / `他`）。文档是
        陈述，不是对话。读者由**角色名词**指名（管理员 / 插件作者 / 实现者 / 用户），
        叙述者不现身。
+
+    H  公开文档的正文里不许出现 `⇒`。它表「推出」，实际当连词与强调用，
+       一句话里出现一次就够扎眼。`★` 与 `⚠` 由 `tools/check-doc-style.py`
+       的 B1 管着，那一条更早。反引号跨度豁免：那是程序真的会打印的字面量。
+
+    I  一段最多三句，且不超过 120 个汉字。句子本身不长（实测中位 17 字），
+       堆成一段就没人读了。围栏代码块与表格行不算段落；列表项各自成段，
+       所以一份清单不会因为条目多而被判红。
 
 ★ `他` 进判据，而排除它的是**一个负向环视**：`(?<!其)他`。阶段 1 立法时我把它整个
   排除了，理由是"过半是「其他」" —— **那个理由站不住**：`其他` 的 `他` 前面永远是
@@ -45,6 +53,9 @@
   · F 禁的是**事实**。`v0.13 起` 这种话，包在反引号里也仍然是历史叙述。
     ⇒ F **不豁免**任何跨度，包括围栏代码块（那里装的是目录树与伪代码，是给人读的
     正文，与 `check-doc-style.py` 的 B1 同一条理由）。
+
+  · H 禁的是**字符**，立场与 G 相同：反引号里装的是字面量，豁免。I 数的是
+    段落，与遮罩无关。
 
   ⇒ 这也是**为什么本文件独立存在、不并进 `tools/check-doc-style.py`**：那一份里
     B1 豁免反引号、B2 不豁免，两套相反立场已经并存；再加两套，读的人会默认一种政策，
@@ -115,8 +126,9 @@ def judged(rel):
     """这一份要不要判。"""
     return rel not in EXEMPT and not rel.startswith(FIXTURE)
 
-# ★★ **迁移期棘轮 —— 已经清空。** 值 = 某文件**当前允许的违规条数**；不在表里 = 零容忍。
-#    这张表在 v0.15 的文档去史里用过：建表时 19 份文档、清到最后一份归零。
+# ★★ **迁移期棘轮。** 值 = 某文件**当前允许的违规条数**；不在表里 = 零容忍。
+#    用过两次：v0.15 的文档去史（建表 19 份、清到归零），以及 v0.18 的〈写得短〉
+#    （F/G/H/I 四条一起，建表时 21 份、逐份往下清）。
 #
 #    ★ 为什么当初不是「文件级豁免名单」（只列出文件、不列数字）：那个形状在**缩编
 #      期间**有一个真实的漏网窗口 —— 名单内的文件正是改动最频繁的，它新长出来的
@@ -129,9 +141,34 @@ def judged(rel):
 #      ② 某一份文档需要临时宽限 —— 而第二种要写清为什么、以及打算什么时候清掉。
 #      日常提交往这里加键 = 把检查关掉，不是"配置"。
 #
-#    ★ 数字是 F 与 G **合起来**的条数，不是分开两套：棘轮要守的是「不许上升」，
+#    ★ 数字是 F、G、H、I **合起来**的条数，不是四套：棘轮要守的是「不许上升」，
 #      不是「必须下降」，一条总数就够，少一处会漂的事实源。
-LEGACY = {}
+#
+#    ★ 建表数字是 0.18 时实测的：423 条，其中 `⇒` 183 条、长段 240 条。
+#      F 与 G 两条当时已经是 0，所以这 423 条全是 H 与 I 的。
+LEGACY = {
+    "CONTRIBUTING.md": 7,
+    "README.md": 5,
+    "SECURITY.md": 21,
+    "client/README.md": 35,
+    "cluster/README.md": 2,
+    "cluster/docs/CONFIGURATION.md": 30,
+    "cluster/docs/DEPLOYMENT.md": 10,
+    "cluster/docs/PLUGIN-TROUBLESHOOTING.md": 11,
+    "cluster/docs/TROUBLESHOOTING.md": 15,
+    "docs/ARCHITECTURE.md": 75,
+    "docs/CONTRACT.md": 22,
+    "docs/IMPLEMENTING.md": 5,
+    "docs/PROTOCOL.md": 76,
+    "docs/README.md": 2,
+    "packer/README.md": 8,
+    "packer/docs/PLUGIN-CONTAINER.md": 8,
+    "packer/docs/PLUGIN-SPEC.md": 53,
+    "packer/docs/README.md": 27,
+    "plugins/code-server/README.md": 3,
+    "plugins/sshd/README.md": 5,
+    "tools/conformance/README.md": 3,
+}
 
 # ── 判据 G：人称代词 ──────────────────────────────────────────────────────
 #
@@ -188,6 +225,23 @@ WEAK = re.compile(r"不再|改成|改为|换了")
 
 # 含这两个提法的行整行豁免：那是**活的事实**，不是历史。见文件头。
 CURRENT = re.compile(r"当前维护的版本|当前版本")
+
+# ── 判据 H：正文里的 `⇒` ──────────────────────────────────────────────────
+#
+# 它表「推出」，实际当连词与强调用。反引号跨度豁免 —— 与 check-doc-style.py
+# 的 B1 同一条理由：代码格式里的是字面量。
+ARROW = "⇒"
+
+# ── 判据 I：段落长度 ──────────────────────────────────────────────────────
+#
+# 120 是实测来的：公开文档的段落 p90 正好在 122。取 120 就是砍掉最长的那 10%。
+HAN = re.compile(r"[一-鿿]")
+SENT_END = re.compile(r"[。！？；]")
+PARA_MAX_HAN = 120
+PARA_MAX_SENT = 3
+# 列表项各自成段：一份清单不该因为条目多而被判红。
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+FENCE = re.compile(r"^(?:```|~~~)")
 
 # 反引号跨度。★ **跨度内部没有转义**（跟随 Markdown 规则）—— `` `\` `` 是一个内容为
 # 反斜杠的**完整**跨度，不是"转义反引号的开头"。
@@ -297,6 +351,65 @@ def masks(text):
     return quote, code
 
 
+def paragraphs(text):
+    """文档的段落：`[(起始行号, 原文), ...]`。
+
+    剥掉围栏代码块与表格行。引用块（`>`）当正文。列表项各自成段，缩进的续行
+    并进它上面那一条。
+    """
+    out, cur, start, infence = [], [], 0, False
+    for i, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if FENCE.match(s):
+            infence = not infence
+            if cur:
+                out.append((start, " ".join(cur)))
+                cur = []
+            continue
+        if infence:
+            continue
+        if s.startswith("|") or not s:
+            if cur:
+                out.append((start, " ".join(cur)))
+                cur = []
+            continue
+        if s.startswith(">"):
+            s = s.lstrip("> ").strip()
+            if not s:
+                continue
+        if LIST_ITEM.match(line) and cur:
+            out.append((start, " ".join(cur)))
+            cur = []
+        if not cur:
+            start = i
+        cur.append(s)
+    if cur:
+        out.append((start, " ".join(cur)))
+    return out
+
+
+def paragraph_hits(text):
+    """这一份文档里要拆的段落。"""
+    hits = []
+    for ln, p in paragraphs(text):
+        body = BACKTICK.sub("", p)
+        n = len(HAN.findall(body))
+        if n < 10:
+            continue
+        n_sent = len([x for x in SENT_END.split(body)
+                      if len(HAN.findall(x)) >= 6])
+        if n <= PARA_MAX_HAN and n_sent <= PARA_MAX_SENT:
+            continue
+        why = []
+        if n > PARA_MAX_HAN:
+            why.append("%d 字" % n)
+        if n_sent > PARA_MAX_SENT:
+            why.append("%d 句" % n_sent)
+        hits.append("%d 行那段有 %s，上限是 %d 字 / %d 句 —— 拆开"
+                    % (ln, "、".join(why), PARA_MAX_HAN, PARA_MAX_SENT))
+    return hits
+
+
 def f_hits(line):
     """这一行里 F 抓到的东西 —— `[(起点, 终点, 名目, 原文), ...]`。"""
     raw = []
@@ -350,7 +463,20 @@ def problems_from(files):
                     w = m.group(0)
                     out.append((rel, "%d 行正文里的人称代词「%s」—— %s"
                                 % (i, w, G_FIX[w])))
+
+            # ── H：`⇒`（只豁免反引号 —— 那是字面量）───────────────────
+            k = line.find(ARROW)
+            while k != -1:
+                if not code[pos + k]:
+                    out.append((rel, "%d 行正文里有 `⇒` —— 换成「所以」「因此」，"
+                                     "或者拆成两句" % i))
+                k = line.find(ARROW, k + 1)
+
             pos += len(line)
+
+        # ── I：段落（整篇一起看，逐行看不出段落边界）──────────────────
+        for msg in paragraph_hits(text):
+            out.append((rel, msg))
     return out
 
 
@@ -386,8 +512,9 @@ def run(root):
             for r, msg in problems:
                 if r == rel:
                     print("      %s" % msg)
-        print("\n✗ 有 %d 份公开文档的违规数**上升了**。历史叙述与「你 / 我」不许再长 ——"
-              " 见 `CONTRIBUTING.md`〈公开文档用规范体〉。" % len(over))
+        print("\n✗ 有 %d 份公开文档的违规数**上升了**。历史叙述、「你 / 我」、`⇒` 与"
+              "长段都不许再长 —— 见 `CONTRIBUTING.md`〈公开文档用规范体〉与〈写得短〉。"
+              % len(over))
         return 1
 
     if problems:
@@ -396,8 +523,8 @@ def run(root):
         for rel, n in sorted(counts.items()):
             print("    %-38s %3d / %3d" % (rel, n, LEGACY.get(rel, 0)))
     else:
-        print("✓ %d 份公开文档：没有历史叙述，正文里也没有「你 / 我」"
-              % sum(1 for r in files if judged(r)))
+        print("✓ %d 份公开文档：没有历史叙述，正文里也没有「你 / 我」、没有 `⇒`、"
+              "没有长段" % sum(1 for r in files if judged(r)))
 
     # ★ 豁免集是**遮罩**，遮罩必须看得见 —— 悄悄跳过一份，绿就与「没在看」同形。
     skipped = sorted(r for r in files if not judged(r))
@@ -457,6 +584,28 @@ def self_test():
         ("两份记录类不受 F 管",
          {"CHANGELOG.md": "v0.13 起把它们都删了。\n",
           "docs/KNOWN-ISSUES.md": "从前这里有 F20。\n"}, None),
+        # ── H 的坏样本与假红防线 ───────────────────────────────────────
+        ("正文里的 `⇒`", {"docs/A.md": "作者交上去，站点收下 ⇒ 客户端看得到。\n"}, "`⇒`"),
+        ("表格行里的 `⇒` 也判",
+         {"docs/A.md": "| 甲 | 乙 ⇒ 丙 |\n"}, "`⇒`"),
+        ("反引号里的 `⇒` 是字面量（程序真的会打印它）",
+         {"docs/A.md": "`--check` 会打印 `⇒` 这个字符。\n"}, None),
+        # ── I 的坏样本与假红防线 ───────────────────────────────────────
+        ("段落超过 120 字", {"docs/A.md": "%s。\n" % ("中" * 121)}, "上限是"),
+        ("段落超过 3 句",
+         {"docs/A.md": "作业在跑着不停。插件在跑着不停。会话在跑着不停。隧道在跑着不停。\n"},
+         "上限是"),
+        ("120 字正好在上限上（不报）",
+         {"docs/A.md": "%s。\n" % ("中" * 120)}, None),
+        ("三句正好在上限上（不报）",
+         {"docs/A.md": "作业在跑着不停。插件在跑着不停。会话在跑着不停。\n"}, None),
+        ("列表项各自成段 —— 一份长清单不算一段长文字",
+         {"docs/A.md": "- 作业在跑的时候不要关机。\n- 插件在跑的时候不要关机。\n"
+                       "- 会话在跑的时候不要关机。\n- 隧道在跑的时候不要关机。\n"}, None),
+        ("表格行不算段落",
+         {"docs/A.md": "| 甲 | 乙 |\n| 丙 | 丁 |\n"}, None),
+        ("围栏代码块里不算段落（那是目录树，是正文但不是段落）",
+         {"docs/A.md": "```\n%s\n```\n" % ("中" * 200)}, None),
         # ── 遮罩：这三条守的是**判据看得见多少正文** ───────────────────────
         #
         # ★★ 它们不是"多加一条判据"，而是**判据本身会不会静默失明**的样本。

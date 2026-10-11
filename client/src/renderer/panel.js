@@ -1957,8 +1957,8 @@ function renderConsent(pv) {
     if (c.previous && !algChanged) {
       digestLine.textContent = c.previous.digest === c.digest
         ? `内容摘要 ${c.digest}（与上次同意的一致）`
-        : `⚠ 内容摘要从 ${c.previous.digest} 变成了 ${c.digest} —— `
-          + '同一个版本号下的内容变了。请确认这是你要的，再决定。';
+        : `内容摘要变了：从 ${c.previous.digest} 变成 ${c.digest}。`
+          + '同一个版本号下的内容变了，请确认是你要的再决定。';
     } else if (c.previous) {
       digestLine.textContent = `内容摘要 ${c.digest}（本机记的那一条是另一种算法算的，`
         + '两者不可比 —— 所以这一次要你重新确认一遍。这不是"内容变了"）';
@@ -2147,7 +2147,7 @@ function renderPluginData(d) {
         '本机有两处放插件数据：Electron 那棵存储分区目录（那一根是问 Electron'
         + '要来的，还当场核对过名字），以及本程序自己拼出来的插件数据目录。'
         + '一整屏都认不出，更像"其中某一根指到了别的地方"，而不是"你攒了一堆垃圾"。'
-        + '⇒ 下面一个删除按钮都没有，这是故意的：一份我不认识的东西，'
+        + '下面一个删除按钮都没有，这是故意的：一份不认识的东西，'
         + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在；还在的话值得报出来。'));
     }
     // ★ 这里从前有一段解释"一份数据是什么、它的两个落点在哪"。删掉了：**每一行
@@ -3215,7 +3215,7 @@ function askHostKey(res) {
     const dlg = $('hostkey-dlg');
     const changed = res.code === 'host_key_changed';
 
-    $('hk-title').textContent = changed ? '⚠ 登录节点的主机密钥已改变' : '确认登录节点身份';
+    $('hk-title').textContent = changed ? '登录节点的主机密钥已改变' : '确认登录节点身份';
     $('hk-body').textContent = changed
       ? '这与上次连接时记录的不一致。可能是服务器重装过，也可能有人在中间拦截。'
         + '在弄清原因之前请不要继续 —— 继续就等于把这把私钥的认证交给一个不确定的对端。'

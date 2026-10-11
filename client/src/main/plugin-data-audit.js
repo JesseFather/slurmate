@@ -145,7 +145,7 @@ function partitionRoot({ session, probe, fallbackRoot }) {
         return {
           root: null, verified: false,
           why: `Electron 把这个分区的目录放在 ${base}，而按名字算它应该是 ${want} —— `
-            + '分区目录的命名约定与我们知道的不一样，所以这一次**没有**去认磁盘上的东西。',
+            + '分区目录的命名约定与我们知道的不一样，所以这一次没有去认磁盘上的东西。',
         };
       }
     } catch {
@@ -341,12 +341,12 @@ function audit({ plugins, spaces, workspaces, connections, names, why, dataNames
         name, places, kind: 'unknown',
         label: `认不出的目录「${name}」`,
         why: places.includes('data')
-          ? '它在**插件数据目录**里，而这个名字不像一份插件数据（三段身份）。那个'
+          ? '它在插件数据目录里，而这个名字不像一份插件数据（三段身份）。那个'
             + '目录里不可能有更早版本留下的形状（它从诞生起只有这个客户端写过），'
-            + '所以这多半意味着**数据目录那一根取错了** —— 而一份我不认识的东西，'
+            + '所以这多半意味着数据目录那一根取错了。一份不认识的东西，'
             + '删掉它不是"收拾"而是"猜"。'
           : '它在这个目录里，而它的名字既不像一份插件数据（三段身份），也不像更早'
-            + '版本留下的那几种形状。**所以这里不提供删除** —— 一份我不认识的东西，'
+            + '版本留下的那几种形状。所以这里不提供删除：一份不认识的东西，'
             + '删掉它就不是"收拾"而是"猜"。',
         deletable: false,
       });
@@ -429,7 +429,7 @@ function audit({ plugins, spaces, workspaces, connections, names, why, dataNames
         name, places, kind: 'legacy',
         label: '0.7 之前的旧分区',
         why: `它的名字是 ${name.split('-')[0]}-… 那种形状 —— 这份数据的身份被改成`
-          + '「插件 id / 共享组 / 实例」三段之前留下的。**它不会再被任何东西读到**，'
+          + '「插件 id / 共享组 / 实例」三段之前留下的。它不会再被任何东西读到，'
           + '而里面躺着当年的登录 cookie。',
         deletable: true,
       });

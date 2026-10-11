@@ -240,9 +240,9 @@ function keyVerdict(pinned, pkg) {
       code: PIN.UNSIGNED,
       pinned,
       got: null,
-      why: `这个 id 你以前同意过一份**带签名**的构件（签名者 ${pinned}），`
-        + '而这一份没有签名。§5.4：此后这个 id 的每一份都必须由同一把钥匙签 ——'
-        + '一份不带签名的构件没法证明它是同一个人做的，所以只能拒绝。',
+      why: `这个 id 以前同意过一份带签名的构件（签名者 ${pinned}），`
+        + '这一份没有签名。按 §5.4，此后这个 id 的每一份都必须由同一把钥匙签。'
+        + '不带签名的构件无法证明出自同一个人，所以拒绝。',
     };
   }
   if (got === pinned) return { ok: true, first: false, fingerprint: pinned };
@@ -251,8 +251,8 @@ function keyVerdict(pinned, pkg) {
     code: PIN.CHANGED,
     pinned,
     got,
-    why: `这个 id 你以前同意的是 ${pinned} 签的，而这一份是 ${got} 签的。`
-      + '内容可能与上次一模一样，但**签名的人换了** —— §5.4 要求这必须是同一个人。'
+    why: `这个 id 以前同意的是 ${pinned} 签的，这一份是 ${got} 签的。`
+      + '内容可能与上次一模一样，但签名的人换了。§5.4 要求这必须是同一个人。'
       + '（丢了私钥的作者只能给插件铸一个新 id，所以这不是一次正常的升级。）',
   };
 }
@@ -434,7 +434,7 @@ function parsePackage(buf) {
     return bad(R.LENGTH,
       `头部+记录表+签名块+Σsize = ${want} 字节，而文件是 ${buf.length} 字节`
       + (want < BigInt(buf.length)
-        ? '（多出来的字节**没有任何声明** —— 信封里不许有白送的字节，§3.6）'
+        ? '（多出来的字节没有任何声明，信封里不许有白送的字节，§3.6）'
         : '（负载被截断了）'));
   }
 

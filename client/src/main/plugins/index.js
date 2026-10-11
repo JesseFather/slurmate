@@ -721,8 +721,8 @@ function inspectDir(dir) {
   //   layout"，而那句话**指不到新名字**。与 `data.perInstance` 那一条同一个理由。
   //   ★ 它同时是**改形**的提示（开关 → 个数），所以两个值都点出来。
   if (mfc.layout !== undefined) {
-    return { error: `${mfPath}：contributes.layout 已经改名成 contributes.ports `
-      + '—— 而且从**开关**变成了**个数**（这一份数据要占几个本地端口）：'
+    return { error: `${mfPath}：contributes.layout 已经改名成 contributes.ports，`
+      + '而且从开关变成了个数（这一份数据要占几个本地端口）：'
       + '要一份数据空间写 contributes.ports: 1，不要写 contributes.ports: 0' };
   }
   why = keysProblem(mfc, CONTRIBUTES_KEYS, 'contributes');
@@ -828,9 +828,9 @@ function inspectDir(dir) {
   // ★ 值是**能/不能**，不是数量：能的话开多少份都是同一个逻辑，总数由站点那一侧管
   //   （`max_sessions_per_user`）。类型检查在上面那条循环里（它是布尔键）。
   if (mfc.concurrent === undefined) {
-    return { error: `${mfPath}：contributes.concurrent 是**必填**的`
-      + '（true = 这个插件可以同时开两份，false = 只能开一份）—— 它答的是"你的代码'
-      + '能不能同时处理两份"，只有你知道，基座替你答不了' };
+    return { error: `${mfPath}：contributes.concurrent 是必填的`
+      + '（true = 这个插件可以同时开两份，false = 只能开一份）。它答的是"插件的代码'
+      + '能不能同时处理两份"，只有插件作者知道，基座替不了' };
   }
   // ★ 这一条是**组合**判定，两侧各自都不错，错在放一起：第二份 = **第二份数据**
   //   （一份临时的副本），而一份数据存在的全部理由就是它那个端口。一个端口都不要的
@@ -838,7 +838,7 @@ function inspectDir(dir) {
   //   判在**装之前**，与 `engines` 同一条纪律。
   if (mfc.concurrent === true && !(mfc.ports >= 1)) {
     return { error: `${mfPath}：contributes.concurrent: true 要求同时有 `
-      + 'contributes.ports ≥ 1 —— 第二份就是第二份**数据**（一份临时的副本），'
+      + 'contributes.ports ≥ 1。第二份就是第二份数据（一份临时的副本），'
       + '而一个端口都不要的插件没有第二份可指（它一律只能开一份）' };
   }
 

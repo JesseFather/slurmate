@@ -35,7 +35,7 @@ module.exports = {
   // 关窗会杀掉什么。见 windows.js 的确认对话框。
   closeWarning: {
     message: '关闭窗口会结束这个开发会话。',
-    detail: '作业会被取消，编辑器里**没有保存的改动会丢失**。',
+    detail: '作业会被取消，编辑器里没有保存的改动会丢失。',
   },
 
   attach,

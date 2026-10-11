@@ -147,7 +147,7 @@ async function attach(ctx, snap) {
   if (!inc.ok) {
     ctx.notice('warn',
       `没能把 Include 加进 ${inc.path}（${inc.detail}）。`
-      + '请手工在那个文件的**最上面**加一行：\n'
+      + '请手工在那个文件的最上面加一行：\n'
       + `Include ${sshconfig.pathsFor(dataDir).config}`);
   } else if (inc.changed) {
     ctx.notice('info',

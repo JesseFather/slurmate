@@ -1,0 +1,482 @@
+{
+ "client/src/demo/app.html": {
+  "btn": 0,
+  "long": 0,
+  "star": 0,
+  "strm": 3
+ },
+ "client/src/main/atomic-write.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 11,
+  "strm": 0
+ },
+ "client/src/main/backend-fake.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 174,
+  "strm": 6
+ },
+ "client/src/main/backend-ssh.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 74,
+  "strm": 4
+ },
+ "client/src/main/backend.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 15,
+  "strm": 0
+ },
+ "client/src/main/classify.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/src/main/config.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 126,
+  "strm": 3
+ },
+ "client/src/main/demo-server.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 8,
+  "strm": 0
+ },
+ "client/src/main/fake-job-host.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 32,
+  "strm": 2
+ },
+ "client/src/main/fake-job.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 17,
+  "strm": 2
+ },
+ "client/src/main/gres.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 4,
+  "strm": 0
+ },
+ "client/src/main/hosts.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/src/main/index.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 697,
+  "strm": 36
+ },
+ "client/src/main/jobstate.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 7,
+  "strm": 0
+ },
+ "client/src/main/keys.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/src/main/layout.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 8,
+  "strm": 0
+ },
+ "client/src/main/plugin-data-audit.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 67,
+  "strm": 3
+ },
+ "client/src/main/plugin-data.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 96,
+  "strm": 1
+ },
+ "client/src/main/plugin-package.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 39,
+  "strm": 7
+ },
+ "client/src/main/plugin-slot.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 21,
+  "strm": 0
+ },
+ "client/src/main/plugins/index.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 154,
+  "strm": 9
+ },
+ "client/src/main/plugins/ulid.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/src/main/session.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 106,
+  "strm": 1
+ },
+ "client/src/main/sessionstate.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 5,
+  "strm": 0
+ },
+ "client/src/main/shortcuts.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/src/main/site-plugins.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 215,
+  "strm": 20
+ },
+ "client/src/main/tunnel.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 12,
+  "strm": 0
+ },
+ "client/src/main/weblogin.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 3,
+  "strm": 0
+ },
+ "client/src/main/windows.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 68,
+  "strm": 1
+ },
+ "client/src/preload/api.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 26,
+  "strm": 0
+ },
+ "client/src/preload/demo.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 1,
+  "strm": 0
+ },
+ "client/src/preload/hover.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 4,
+  "strm": 0
+ },
+ "client/src/renderer/app.css": {
+  "btn": 0,
+  "long": 0,
+  "star": 25,
+  "strm": 2
+ },
+ "client/src/renderer/dom.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 7,
+  "strm": 0
+ },
+ "client/src/renderer/hover.css": {
+  "btn": 0,
+  "long": 0,
+  "star": 3,
+  "strm": 0
+ },
+ "client/src/renderer/hover.html": {
+  "btn": 1,
+  "long": 0,
+  "star": 0,
+  "strm": 0
+ },
+ "client/src/renderer/hover.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 23,
+  "strm": 1
+ },
+ "client/src/renderer/panel.html": {
+  "btn": 23,
+  "long": 3,
+  "star": 27,
+  "strm": 9
+ },
+ "client/src/renderer/panel.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 401,
+  "strm": 53
+ },
+ "client/test/atomic-write.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 7,
+  "strm": 0
+ },
+ "client/test/backend-fake.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 22,
+  "strm": 0
+ },
+ "client/test/backend-ssh.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 35,
+  "strm": 0
+ },
+ "client/test/boot.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 584,
+  "strm": 0
+ },
+ "client/test/cluster.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 6,
+  "strm": 0
+ },
+ "client/test/config.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 77,
+  "strm": 0
+ },
+ "client/test/contract.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 2,
+  "strm": 0
+ },
+ "client/test/devmode.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 29,
+  "strm": 0
+ },
+ "client/test/gres-rules.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 11,
+  "strm": 0
+ },
+ "client/test/gres.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 4,
+  "strm": 0
+ },
+ "client/test/hover.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 20,
+  "strm": 0
+ },
+ "client/test/integration.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 47,
+  "strm": 0
+ },
+ "client/test/jobstate.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 9,
+  "strm": 0
+ },
+ "client/test/layout.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 12,
+  "strm": 0
+ },
+ "client/test/limits.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 22,
+  "strm": 0
+ },
+ "client/test/manifest-keys.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 7,
+  "strm": 0
+ },
+ "client/test/plugin-data-audit.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 40,
+  "strm": 0
+ },
+ "client/test/plugin-data.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 55,
+  "strm": 0
+ },
+ "client/test/plugin-package.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 34,
+  "strm": 0
+ },
+ "client/test/plugin-slot.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 16,
+  "strm": 0
+ },
+ "client/test/renderer-dom.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 125,
+  "strm": 0
+ },
+ "client/test/renderer.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 232,
+  "strm": 0
+ },
+ "client/test/resident-channel.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 5,
+  "strm": 0
+ },
+ "client/test/session-push.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 20,
+  "strm": 0
+ },
+ "client/test/sessionstate.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 8,
+  "strm": 0
+ },
+ "client/test/site-plugins.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 154,
+  "strm": 0
+ },
+ "client/test/suspended.test.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 30,
+  "strm": 0
+ },
+ "cluster/install-base.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 52,
+  "strm": 21
+ },
+ "cluster/nft-compare.py": {
+  "btn": 0,
+  "long": 0,
+  "star": 1,
+  "strm": 13
+ },
+ "cluster/run.sbatch": {
+  "btn": 0,
+  "long": 0,
+  "star": 41,
+  "strm": 2
+ },
+ "cluster/test-sessiond-logic.py": {
+  "btn": 0,
+  "long": 0,
+  "star": 834,
+  "strm": 0
+ },
+ "packer/slurmate-packer.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 85,
+  "strm": 86
+ },
+ "packer/test-packer.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 45,
+  "strm": 0
+ },
+ "plugins/code-server/client/index.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 3,
+  "strm": 0
+ },
+ "plugins/code-server/job/start.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 10,
+  "strm": 1
+ },
+ "plugins/sshd/client/index.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 8,
+  "strm": 4
+ },
+ "plugins/sshd/client/sshconfig.js": {
+  "btn": 0,
+  "long": 0,
+  "star": 21,
+  "strm": 3
+ },
+ "plugins/sshd/job/start.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 15,
+  "strm": 1
+ },
+ "tools/check-cluster.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 10,
+  "strm": 30
+ },
+ "tools/check-sanitized.sh": {
+  "btn": 0,
+  "long": 0,
+  "star": 0,
+  "strm": 2
+ },
+ "tools/conformance/generate.mjs": {
+  "btn": 0,
+  "long": 0,
+  "star": 23,
+  "strm": 61
+ }
+}

@@ -701,7 +701,7 @@ async function applyVersionGate(res) {
 
   if (g.verdict === 'cross_major') {
     win.pushNotice('warn',
-      `这个集群的服务端是 ${res.daemonVersion}，本客户端是 ${mine} —— 两端**大版本不同**。`
+      `这个集群的服务端是 ${res.daemonVersion}，本客户端是 ${mine}。两端的大版本不同。`
       + (g.order < 0
         ? '服务端更新，本客户端不一定兼容它。'
         : '这个集群是更老的一代；本客户端不一定兼容它。')
@@ -709,16 +709,16 @@ async function applyVersionGate(res) {
   } else if (g.verdict === 'unknown_server') {
     win.pushNotice('info',
       `没有问到站点的基座版本（对面的守护进程没有 \`ping\` 这个 op，也就是比本客户端旧），`
-      + '所以这一次**没有做版本判定**。这不会让判定变松：一个连 `ping` 都没有的'
+      + '所以这一次没有做版本判定。判定也不会因此变松：一个连 `ping` 都没有的'
       + '守护进程不可能比本客户端新。');
   } else if (g.verdict === 'not_our_daemon') {
     win.pushNotice('warn',
       `站点答的版本号 ${theirs} 不合 x.y 的形状 —— 这条链路上答话的恐怕不是 `
-      + 'Slurmate 的守护进程。这一次**没有做版本判定**：那不是"通过了"，是"没判"。');
+      + 'Slurmate 的守护进程。这一次没有做版本判定：那不是"通过了"，是"没判"。');
   } else if (g.verdict === 'unknown_host') {
     win.pushNotice('warn',
       '本客户端读不到自己的版本号（client/package.json），所以这一次没有做版本判定。'
-      + '插件仍然可以同步，但**一个都装不上** —— 装之前要拿本客户端的版本去比'
+      + '插件仍然可以同步，但一个都装不上：装之前要拿本客户端的版本去比'
       + '插件声明的引擎范围，而那个版本现在读不到。');
   }
   return res;
@@ -2516,7 +2516,7 @@ async function startSession(resources, serviceKind, portChoice) {
         + (canSync
           ? '本站会分发插件 —— 用插件那一栏的「重新同步」取一次，'
             + '带客户端代码的要你点一下同意。'
-          : '而这个站点**不分发**插件 —— 插件只能由站点发下来，所以客户端这一侧'
+          : '而这个站点不分发插件。插件只能由站点发下来，所以客户端这一侧'
             + '没有别的办法。请联系这个站点的管理员。'));
     } else {
       win.pushNotice('error',
@@ -3404,7 +3404,7 @@ async function warnUnknownService(slot, snap) {
   win.pushNotice('warn',
     `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${unknownWhy(slot, snap)}\n`
     + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。'
-    + '（能结束、能看，是因为状态、心跳和结束这三件事**从不查插件** —— 只认会话号。）');
+    + '（能结束、能看，是因为状态、心跳和结束这三件事从不查插件，只认会话号。）');
 }
 
 /**

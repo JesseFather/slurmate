@@ -401,7 +401,7 @@ test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不�
   //   刻意相反：那两个缺省都在安全侧，基座答得了。
   //   而"你的代码能不能同时处理两份"基座答不了 —— 缺省无论取哪边都是替作者表态。
   const 没写 = inspect(manifest({ contributes: { ports: 1 } }));
-  assert.match(没写.error || '', /contributes\.concurrent 是\*\*必填\*\*/,
+  assert.match(没写.error || '', /contributes\.concurrent 是必填的/,
     '缺了这一格必须**拒绝安装**，而不是静默当成 false');
   assert.equal(没写.entry, undefined);
 

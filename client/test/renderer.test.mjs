@@ -41,6 +41,20 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const R = path.join(here, '..', 'src', 'renderer');
+const SRC = path.join(here, '..', 'src');
+const PLUGINS = path.join(here, '..', '..', 'plugins');
+
+/** 一个目录下（含子目录）里以某几个后缀结尾的文件。`node_modules` 不进去。 */
+function walk(dir, exts) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === 'node_modules') continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walk(p, exts));
+    else if (exts.some((x) => e.name.endsWith(x))) out.push(p);
+  }
+  return out;
+}
 const html = fs.readFileSync(path.join(R, 'panel.html'), 'utf8');
 const js = fs.readFileSync(path.join(R, 'panel.js'), 'utf8');
 const css = fs.readFileSync(path.join(R, 'app.css'), 'utf8');
@@ -140,6 +154,7 @@ test('★ 插件起不来的四条原因，四句话互不相同', () => {
 function stringLiterals(src) {
   const out = [];
   let i = 0;
+  let prev = '';
   while (i < src.length) {
     const c = src[i];
     const d = src[i + 1];
@@ -148,6 +163,24 @@ function stringLiterals(src) {
       i += 2;
       while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
       i += 2;
+      continue;
+    }
+    // 正则字面量要整段跳掉。`site-plugins.js` 里有一句
+    // `const WIN_BAD_CHARS = /[\\:*?"<>|]/;` —— 字符类里那个 `"` 会让不认正则的
+    // 词法器从它开始"开一个字符串"，一路吃到几百行之后，把整段代码连注释都当成
+    // 字面量。扩宽扫描集之前，那三份文件里恰好没有这种写法。
+    if (c === '/' && regexAllowed(prev, src.slice(0, i))) {
+      i++;
+      let inClass = false;
+      while (i < src.length) {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (src[i] === '[') inClass = true;
+        else if (src[i] === ']') inClass = false;
+        else if (src[i] === '/' && !inClass) { i++; break; }
+        else if (src[i] === '\n') break;
+        i++;
+      }
+      prev = '/';
       continue;
     }
     if (c === '"' || c === "'" || c === '`') {
@@ -159,11 +192,23 @@ function stringLiterals(src) {
         buf += src[i]; i++;
       }
       out.push(buf);
+      prev = q;
       continue;
     }
+    if (!/\s/.test(c)) prev = c;
     i++;
   }
   return out;
+}
+
+/** 关键字收尾时，`/` 开的是正则而不是除号。 */
+const BEFORE_REGEX = /(?:^|[^\w$])(?:return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)\s*$/;
+
+/** 这个位置的 `/` 是正则的开头，还是除号。 */
+function regexAllowed(prev, before) {
+  if (prev === '') return true;
+  if (!/[A-Za-z0-9_$)\]'"`]/.test(prev)) return true;
+  return BEFORE_REGEX.test(before);
 }
 
 test('★★ 界面文字里不许出现 markdown 记号 —— 那些字符串是按**字面**画的', () => {
@@ -176,12 +221,32 @@ test('★★ 界面文字里不许出现 markdown 记号 —— 那些字符串�
   //     `**` 在源码里是**对的**（那一段注释确实在强调）。只有人眼看得见。
   //   ★ 这条判据与 docs 那三个守卫是同一类东西（`check-doc-style.py` 管的是
   //     公开文档正文里的图形符号），只是它管的是**界面**。
-  const BAD = /\*\*|★/;
-  for (const f of ['panel.js', 'hover.js', 'dom.js']) {
-    const src = f === 'panel.js' ? js : fs.readFileSync(path.join(R, f), 'utf8');
-    const hits = stringLiterals(src).filter((s) => BAD.test(s));
+  //
+  //
+  //   扫的范围原来是渲染进程那三个文件，现在扩到主进程与插件：`plugin-package.js`
+  //   的拒绝理由、`code-server` 的原生对话框 detail 都带着 `**`，一样按字面显示。
+  //
+  //   `**` 成对才算记号。`client/**` 那种 glob 里的两个星号不是强调。
+  const BAD = /\*\*[^*\n]+\*\*|★|⚠|⇒/;
+  const targets = [
+    ...['panel.js', 'hover.js', 'dom.js'].map((f) => path.join(R, f)),
+    ...walk(path.join(SRC, 'main'), ['.js']),
+    ...walk(PLUGINS, ['.js'])
+      .filter((p) => p.split(path.sep).includes('client')),
+  ];
+  // 扫描集空了或缩水了，这条判据就变成"永远通过" —— 与"没在看"同形。
+  assert.ok(targets.length >= 15,
+    `只扫到 ${targets.length} 份文件，判据失去目标了（目录改名了？）`);
+  for (const file of targets) {
+    const src = fs.readFileSync(file, 'utf8');
+    const lits = stringLiterals(src);
+    // 词法器塌掉的方向是**少**抽出字面量，那时这条判据就静默失明了。给一个下限。
+    assert.ok(lits.length >= 3,
+      `${path.relative(here, file)} 只抽出 ${lits.length} 个字面量 —— 词法器塌了？`);
+    const hits = lits.filter((s) => BAD.test(s));
     assert.deepEqual(hits, [],
-      `${f} 里有 ${hits.length} 处字符串带着 markdown 记号，它们会在界面上原样显示：`
+      `${path.relative(here, file)} 里有 ${hits.length} 处字符串带着 markdown 记号，`
+      + `它们会在界面上原样显示：`
       + `\n${hits.map((h) => '  · ' + h.slice(0, 90)).join('\n')}`
       + '\n★ 要强调就靠位置/颜色/措辞，不要靠记号 —— 这些字符串走的是 textContent。');
   }

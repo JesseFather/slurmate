@@ -169,8 +169,8 @@ function createBackend(opts = {}) {
   }
   const ssh = require('./backend-ssh.js');
   if (!ssh.isImplemented()) {
-    throw new Error('这个构建里没有可用的 SSH 后端。假后端只由**开发者模式**开关'
-      + '进入 —— 它不再作为"真后端不可用"时的兜底，因为那样的降级会让用户以为'
+    throw new Error('这个构建里没有可用的 SSH 后端。假后端只能由开发者模式开关'
+      + '进入。它不再作为"真后端不可用"时的兜底，因为那样的降级会让用户以为'
       + '自己连上了集群。');
   }
   // ssh 选项（私钥、主机密钥裁决）由 index.js 提供 —— 它们来自配置与 keys.js，

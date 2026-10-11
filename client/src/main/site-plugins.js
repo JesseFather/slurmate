@@ -812,15 +812,15 @@ function treeSignature(treeDir, record) {
   //      核不了，也不必核。
   if (sd.client !== got.sig.digestClient) {
     return { ok: false, signed: true,
-      why: `从树重算的**客户端侧**摘要是 ${sd.client}，而记录表里那个签名块写的是 `
-        + `${got.sig.digestClient} —— 这一份构件在本机被改过`
+      why: `从树重算的客户端侧摘要是 ${sd.client}，记录表里那个签名块写的是 `
+        + `${got.sig.digestClient}。这一份构件在本机被改过`
         + `（签的人是 ${got.sig.fingerprint}）` };
   }
   const sitePresent = (record.files || []).some((f) => !PP().isClientSidePath(f.path));
   if (sitePresent && sd.site !== got.sig.digestSite) {
     return { ok: false, signed: true,
-      why: `从树重算的**站点侧**摘要是 ${sd.site}，而记录表里那个签名块写的是 `
-        + `${got.sig.digestSite} —— 这一份构件在本机被改过`
+      why: `从树重算的站点侧摘要是 ${sd.site}，记录表里那个签名块写的是 `
+        + `${got.sig.digestSite}。这一份构件在本机被改过`
         + `（签的人是 ${got.sig.fingerprint}）` };
   }
   return { ok: true, signed: true, sig: got.sig, fingerprint: got.sig.fingerprint, digests: sd };
@@ -1167,7 +1167,7 @@ async function sync(o) {
     protectedKnown = false;
   }
   if (!protectedKnown) {
-    out.notices.push('没能从站点问到本机还管着哪些会话，所以这一次**不会回收**任何版本。');
+    out.notices.push('没能从站点问到本机还管着哪些会话，所以这一次不会回收任何版本。');
   }
 
   // ── 3. 读记录 + 拿锁 ──
@@ -1197,7 +1197,7 @@ async function sync(o) {
       snapshot = emptySnapshot();
     } else {
       snapshotOk = false;
-      out.notices.push(`读不到站点的插件快照表（${rr.why}）—— 这一次**不会回收**任何版本。`);
+      out.notices.push(`读不到站点的插件快照表（${rr.why}）。这一次不会回收任何版本。`);
     }
     out.snapshot = { ok: snapshotOk, why: rr.ok ? null : rr.why };
     return await run();
@@ -1397,7 +1397,7 @@ async function sync(o) {
           //   （上面那行三元），②不过时它是签名那一句。写成 `sv.ok ? … : …` 会
           //   在"两道都不过"时选到同一个值，看着像在挑，其实没有第二个可能。
           fail(`本机已有的 ${label} 不可用（${sv.why}），但它正被一个`
-            + '**活着的会话**用着 —— 所以没有动它（换了会把它脚下的代码换掉）。'
+            + '活着的会话用着，所以没有动它（换了会把它脚下的代码换掉）。'
             + '结束那个会话之后再同步一次。');
           continue;
         }
@@ -1532,7 +1532,7 @@ async function sync(o) {
         //   把另一个站点还要的版本删掉 —— 这是本设计里唯一会真丢数据的地方。
         snapshotOk = false;
         out.snapshot = { ok: false, why: `写快照表失败：${e.message}` };
-        out.notices.push(`记录写不下去（${e.message}）—— 这一次**不会回收**任何版本。`);
+        out.notices.push(`记录写不下去（${e.message}）。这一次不会回收任何版本。`);
       }
     }
 

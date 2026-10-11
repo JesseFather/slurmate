@@ -566,12 +566,15 @@ jobs:
           python3 tools/check-doc-style.py
           python3 tools/check-doc-style.py --self-test
 
-      - name: 公开文档的正文：不叙历史、不用人称代词
+      - name: 公开文档的正文：不叙历史、不用人称代词、不堆记号与长段
         # 判据只有一处：tools/check-doc-prose.py，这里只调用它。
         #
         # ★ 为什么值得一条机器判据：`CONTRIBUTING.md`〈公开文档用规范体〉那两条
         #   （不叙历史、不用人称代词）如果只有文字，会在第一次赶时间的提交里
         #   失效 —— 而"又冒出一句 v0.13 起""又出现一个你"，人眼在 diff 里看不见。
+        #
+        # H 与 I 是后加的，管〈写得短〉那一半：正文里不许有 `⇒`；一段最多三句、
+        # 不超过 120 字。120 是实测来的，公开文档段落的 p90 正好在 122。
         #
         # ★★ 这一条多一样别人没有的东西：**迁移期棘轮**。改造是逐份文档做的，
         #   中间提交必然挂着还没改完的。脚本里那张 LEGACY 表记着每份文件
@@ -588,3 +591,21 @@ jobs:
         run: |
           python3 tools/check-doc-prose.py
           python3 tools/check-doc-prose.py --self-test
+
+      - name: 源码里的中文：不用记号做强调，界面文字要短
+        # 判据只有一处：tools/check-copy-style.py，这里只调用它。
+        #
+        # 为什么要有：公开文档那一侧早就禁了 `★`，而源码注释里一个约束都没有，
+        # 长出了 5247 处。界面字符串漏得更直接 —— `**` 会按字面画到用户眼前。
+        #
+        # 三条：注释里不许有 `★ ⚠ ⇒`；字符串里不许有 `** ★ ⚠ ⇒ ——`；
+        # 单条中文字符串不超过 60 字，HTML 控件文字不超过 4 字。
+        #
+        # 迁移期棘轮在 `tools/copy-style-baseline.json`。与 doc-prose 那张表同一个
+        # 道理，只是数字放在 JSON 里（80 份文件，写进代码太长）。清干净一份就把
+        # 那个键删掉；基线里留着一份已经不存在的文件也会红。
+        #
+        # 第二行是反向自测：19 种坏样本断言都被抓到，10 种假红样本断言都不误判。
+        run: |
+          python3 tools/check-copy-style.py
+          python3 tools/check-copy-style.py --self-test
