@@ -340,19 +340,36 @@ test('★ 作业列表那一屏只说服务端给的事实，不自己编', () =
     '作业那一行要印主进程译好的 keeper_text（本机在看 / 另一台电脑在看 / 没人在看）');
 });
 
-test('★★【临时离开】与【断开】：两个方向相反的动作，各自只有一个入口', () => {
+test('★★【临时离开】与【断开】：方向相反的两个动作，都在第二屏', () => {
   // ★★ 这两个按钮对作业做的事**正好相反** —— 一个发 `leave`（看护者置空、作业继续
   //    跑），一个发 `goodbye`（作业被 `scancel`）—— 而它们在界面上挨着。
   //    ⇒ 判据只能是"它们绑到两个不同的函数上，而且各自**只**调用自己那一个通道"。
   //      共用一个实现、或者互相调对方的通道，症状都是**"点了临时离开，作业被停了"**：
   //      一句与提示相反的、不可撤销的事实。
-  const conns = screenBlock('screen-conns');
+  //
+  // ★★ 2026-10-11 改：它们从**第一屏**搬到了**第二屏的标题带**上。理由是那条
+  //    不变量：**站在第一屏上就一定不在任何站点里**（回第一屏的两条路各自把连接
+  //    收掉了），而这两颗是**站点级**的动作。从前第二屏那颗「← 登录节点」只是一句
+  //    `showScreen('conns')` —— 会话还在跑、心跳还在，而界面已经回到了"不在任何
+  //    站点里"的样子，那是在说一件不成立的事。
+  const plugins = screenBlock('screen-plugins');
   for (const [id, what] of [['btn-leave', '临时离开'], ['btn-disconnect', '断开']]) {
-    assert.match(conns, new RegExp(`id="${id}"`),
-      `${what}按钮（#${id}）必须在连接列表那一屏里`);
+    assert.match(plugins, new RegExp(`id="${id}"`),
+      `${what}按钮（#${id}）必须在**第二屏**里 —— 站在第一屏上就意味着不在站点里，`
+      + '而那两颗是站点级的动作');
     assert.match(js, new RegExp(`\\$\\('${id}'\\)\\.onclick\\s*=`),
       `panel.js 没给 ${what}绑动作 —— 点了没反应`);
   }
+  // ★ 而第一屏上**一个都不许再有**：留着它们就是"连着回到列表"那条路的影子，
+  //   而那条路整个删掉了（连同那颗「← 登录节点」）。
+  const connsHead = screenBlock('screen-conns');
+  for (const id of ['btn-leave', 'btn-disconnect', 'btn-plugins-back']) {
+    assert.equal(connsHead.includes(`id="${id}"`), false,
+      `★ 第一屏上不该再有 #${id} —— 回第一屏只有「临时离开」与「断开」两条路，`
+      + '而那两颗在第二屏的标题带上');
+  }
+  assert.equal(/\$\('btn-plugins-back'\)/.test(js), false,
+    '★ 那颗「← 登录节点」整个删掉了 —— 它的绑定也不许留着');
 
   const leaveFn = /async function doLeave\(\)[\s\S]*?\n\}/.exec(js);
   const discFn = /async function doDisconnect\(\)[\s\S]*?\n\}/.exec(js);
@@ -367,18 +384,21 @@ test('★★【临时离开】与【断开】：两个方向相反的动作，�
   assert.equal([...js.matchAll(/slurmate\.leave\(/g)].length, 1,
     '`leave` 只该在 doLeave 里被调用一次');
 
-  // ★★ 两个按钮的显隐**必须一起**跟着 `connected` 走。少了「临时离开」那一句，
-  //    它会永远停在初始的 `hidden` 上 —— 一个**存在、绑了动作、但永远不出现**的
-  //    按钮，比没有它更坏：读代码的人会以为这条路走得通。
-  //    ★ 查的是**那一句表达式本身**，不是"函数体里出现过 `btn-leave`"（后者在
-  //      下面 `renderConnections` 那一大段里到处都是，是一条永远绿的断言）。
-  const rcFn = /function renderConnections\(list\)[\s\S]*?\n\}/.exec(js);
-  assert.ok(rcFn, 'panel.js 里应当有 renderConnections()');
-  for (const id of ['btn-leave', 'btn-disconnect']) {
-    assert.match(rcFn[0],
-      new RegExp(`\\$\\('${id}'\\)\\.classList\\.toggle\\('hidden',\\s*!connected\\)`),
-      `#${id} 要跟着 connected 一起显隐（这一句里，不是别处）`);
-  }
+  // ★★ 显隐（2026-10-11 改）：**「断开」常在** —— 第二屏只有连着才进得来，所以它
+  //    在那条带子上一直在；**「临时离开」只在真有作业在跑时出现** —— 没有作业可
+  //    "离开"的时候摆一颗按下去什么也不发生的按钮，是在说一件不成立的事。
+  //    ★ 少了那一句 toggle 的话它会永远停在初始的 `hidden` 上：一个**存在、绑了
+  //      动作、但永远不出现**的按钮，比没有它更坏（读代码的人会以为这条路走得通）。
+  assert.match(html, /id="btn-disconnect" class="ghost danger-ghost"/,
+    '★ 「断开」不许再带 `hidden` —— 它在第二屏上一直在');
+  //    ★ 查的是**那一句表达式本身**，不是"函数体里出现过 `btn-leave`"（后者在别处
+  //      到处都是，是一条永远绿的断言）。
+  const rsFn = /function renderSessions\(payload\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(rsFn, 'panel.js 里应当有 renderSessions()');
+  assert.match(rsFn[0],
+    /\$\('btn-leave'\)\.classList\.toggle\('hidden',\s*!hasRunningSession\(\)\)/,
+    '★ 「临时离开」要跟着**有没有作业在跑**显隐 —— 而且挂在这一路上（作业会在用户'
+    + '待在这一屏的时候起停），不是"进这一屏的时候算一次"');
 
   // ★★ 那句最要紧的话必须**画在函数体里**（失败形态 ③ 的判据落在函数体上，
   //    不落在调用点上）：离开**不是暂停**，倒计时从这一刻起算。
@@ -392,7 +412,7 @@ test('★★【临时离开】与【断开】：两个方向相反的动作，�
   assert.match(leaveFn[0], /35 分钟内没有人回来接着看/,
     '★★ doLeave 必须把"没人看着它 35 分钟就会被回收"说出来');
   // ★ 而按钮自己的 title 也要写出后果 —— 不点下去也看得见。
-  assert.match(conns, /id="btn-leave"[\s\S]{0,240}?35 分钟/,
+  assert.match(plugins, /id="btn-leave"[\s\S]{0,240}?35 分钟/,
     '#btn-leave 的 title 里要写明后果（临时离开不是免费的）');
 
   // ★★ 「被接管」那句话由**主进程**给（`suspend()` 的那句原因），界面只印。
@@ -803,61 +823,83 @@ test('★★ 删掉的那些长解释：一个都不许回来，而承重的那�
     'title 要挂在那颗按钮自己身上');
 });
 
-test('★★ 换站点那道闸：连着一条、而它上面还有会话在跑时，不切', () => {
-  // ★★ 客户端只保持**一条活跃连接**（产品约定，见 KNOWN-ISSUES 的 S26(a)）。
-  //    连着 A 的时候点 B，A 上那些正在跑的会话从此**不再被这台电脑看护**
-  //    （心跳没了 ⇒ 300 秒 `suspect`、1800 秒 `orphaned`、然后 `scancel`），
-  //    而用户点那个按钮的时候未必是这么想的。
-  //    ⇒ 有会话在跑时**不切**，并且**把话说清楚**：几条、当前是哪一条、
-  //      该去按哪两个按钮。只说"确定吗"，用户答不了 —— 他不知道代价是什么。
-  const gate = /function allowSwitchTo\(connId\)[\s\S]*?\n\}/.exec(js);
-  assert.ok(gate, 'panel.js 里应当有 allowSwitchTo()');
-  assert.match(gate[0], /liveCount\(\)/,
-    '条数要问 `liveCount()` —— 与【断开】、【重启】**同一份定义**，各写一遍就会漂');
-  assert.match(gate[0], /window\.alert\(/,
-    '★ 用 alert 而不是 confirm：这里**没有第二个选项**可给（那句话不是"确定吗"）');
-  assert.match(gate[0], /\$\{n\} 条会话/,
-    '要点名**几条** —— 只说"确定吗"，用户答不了');
-  assert.match(gate[0], /【临时离开】/, '要说出去哪两个按钮');
-  assert.match(gate[0], /【断开】/, '★ 两个都要说 —— 一个作业继续跑，一个把作业停掉');
-  assert.match(gate[0], /connLabel\(cur\)/,
-    '要点名**当前连着的是哪一条** —— 这一屏上可能有好几条，说"当前这条"指不出来');
+test('★★ 站在第一屏上就一定不在连接里 ——「换站点」那条路因此不存在了', () => {
+  // ★★ 这是用户 2026-10-11 定的不变量（原话："只要在首页一定不在当前的连接中，
+  //    保活必须暂停"）。它一次解决了三件事：
+  //      · 「连着 A 的时候点 B」这条路**没有了** —— 而那正是从前的 `allowSwitchTo`
+  //        要拦的那一件事（见 KNOWN-ISSUES 的 S26(a)）；
+  //      · 于是那道闸（连同它那句"去这一屏的标题栏上按两颗按钮"的 alert）成了
+  //        **一段走不到、而且话是错的**码，一并删掉了；
+  //      · `bootUI` 里"有活会话就直接进第二屏"（面板被重新加载的那条路）。
+  //    ★ 判据是**结构**：`showScreen('conns')` 只许出现在三处（开局、临时离开、
+  //      断开），而那三处各自把 `connected` 收成 false 或者根本没有连接。
+  //    ★ 数的是**代码里**的出现（注释里留着"它从前是什么样"是刻意的 —— 而那种
+  //      查"出现过"的判据会把一段解释也数进去，所以先剥注释）。
+  const at = [...stripJsComments(js).matchAll(/showScreen\('conns'\)/g)];
+  assert.equal(at.length, 3,
+    `showScreen('conns') 只该出现在三处（开局 / 临时离开 / 断开），现在是 ${at.length} 处`
+    + ' —— 多一处就是"连着回到列表"那条路又长回来了');
+  const bootFn = /async function bootUI\(\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(bootFn, 'panel.js 里应当有 bootUI()');
+  for (const fn of ['doLeave', 'doDisconnect']) {
+    const body = new RegExp(`async function ${fn}\\(\\)[\\s\\S]*?\\n\\}`).exec(js);
+    assert.ok(body, `panel.js 里应当有 ${fn}()`);
+    assert.match(body[0], /connected = false;/,
+      `★★ ${fn} 必须把 connected 收掉 —— 不收的话"回到第一屏"就是一句空话`);
+    assert.match(body[0], /showScreen\('conns'\)/, `★ ${fn} 是回第一屏的那条路`);
+  }
+  // ★ 开局那一条有个例外：**人还在连接里的时候不许落在第一屏**（面板被重新加载
+  //   的情形）—— 否则那条不变量当场破掉，出现一个"站在第一屏却说自己在连接中"。
+  assert.match(bootFn[0], /if \(attached\) showScreen\('plugins'\)/,
+    '★★ 有活会话 ⇒ 直接进第二屏');
+  // ★★ 而那道闸**整个删掉**了（代码里一次都不许再有调用；注释里留着"它去哪了"
+  //    是刻意的 —— 那条查的是**代码**）。
+  assert.equal(/allowSwitchTo\s*\(/.test(stripJsComments(js)), false,
+    '★★ 「换站点那道闸」删掉了 —— 它守的那件事现在由界面的形状承担（站在第一屏上'
+    + '就够不着别的连接的「连接」），而它那句话会叫人去一屏之外按两颗按钮');
+  assert.equal(/这一屏的标题栏上/.test(js), false,
+    '★ 那句 alert 的落点也一个字不许留（它说的是一个已经不存在的位置）');
+  // ★★ 而"有没有作业在跑"**只有一份定义**：`hasRunningSession()` 就是
+  //    `liveCount() > 0`。右栏那个点、第二屏那颗「临时离开」、以及那几个确认框里
+  //    的条数，问的都是它 —— 各写一遍的话，漂开的方向是"右栏亮着、而「临时离开」
+  //    不见了"这种自相矛盾的样子（同一条规矩两份实现）。
+  const hrs = /function hasRunningSession\(\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(hrs, 'panel.js 里应当有 hasRunningSession()');
+  assert.match(hrs[0], /liveCount\(\) > 0/,
+    '★ 它就是 `liveCount() > 0`，不是把那个判据再写一遍');
+  // ★★ 而那两条**没有任何元素会命中**的规则也一起删掉了：`.conn.active`（"正连着
+  //    那条才高亮"）与 `.conn .m.good`（"已连接 · N 个作业在跑"那一格）。留着的
+  //    症状不是"多了几条样式"，而是下一个人以为某个地方还在用它们（同 `.ctable`
+  //    那两条的教训）。
+  //    ★ 查之前先**剥注释**：注释里正写着这两个名字（说明它们去哪了）——
+  //      直接查全文是一条**永远红**的判据。
+  const cssCode = stripJsComments(css);
+  for (const sel of ['.conn.active', '.conn .m.good']) {
+    const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.equal(new RegExp(`${esc}\\s*\\{`).test(cssCode), false,
+      `★ ${sel} 那条规则该删掉了 —— 界面里没有任何元素会命中它`);
+  }
 
-  // ★★ 判据落在**动词的次序**上：拦下时 `setActiveConnection` 一次都不许被调到 ——
-  //    它一调，配置里"活跃连接"就已经是新那条了，而实际连着的是旧那条，
-  //    两份事实从此对不上（下一次启动会重连到用户没打算去的那台）。
-  const fn = /async function doConnectTo\(c\)[\s\S]*?\n\}/.exec(js);
-  assert.ok(fn, 'panel.js 里应当有 doConnectTo()');
-  const gi = fn[0].indexOf('allowSwitchTo(');
-  const si = fn[0].indexOf('setActiveConnection(');
-  assert.notEqual(gi, -1, 'doConnectTo 必须先过那道闸');
-  assert.ok(gi < si,
-    '★★ 闸要在 `setActiveConnection` **之前** —— 反过来的话，"拦下"这件事发生时'
-    + '活跃连接已经被改掉了');
-
-  // ★ 「保存并连接」是**第二个**能换站点的入口：少了这道闸，用户从「新建连接」
-  //   那条路照样绕得过去，而"不许换"就成了摆设。
+  // ★★ 而**保存并连接**那条路上的次序判据原样留着（与那道闸无关）：活跃连接必须
+  //    在 `if (editing)` **之后**才被设成目标那条。
   const save = /\$\('btn-save'\)\.onclick = async \(\) => \{[\s\S]*?\n  \};/.exec(js);
   assert.ok(save, "panel.js 里应当有 btn-save 的处理函数");
-  const bi = save[0].indexOf('allowSwitchTo(');
-  assert.notEqual(bi, -1, '「保存并连接」那条路也要过同一道闸');
   const bj = save[0].indexOf('boot.activeConnectionId = saved.connection.id');
   assert.notEqual(bj, -1, '这条路上还是要把它设成活跃的（连的就是它）');
-  assert.ok(bi < bj,
-    '★ 闸要在**改 `boot.activeConnectionId` 之前**问 —— 改完之后"这次要连的是不是'
-    + '另一条"就永远问不出真话了（那一刻它已经等于目标）');
+  assert.equal(save[0].includes('allowSwitchTo('), false,
+    '★ 那条路上也不许再有那道闸');
 
   // ★★ 而**编辑**一条连接那条路一个字都不许碰它：那个按钮这时写的是「保存」
   //    （不是「保存并连接」），主进程那边活跃连接也一个字都没动
   //    （`app:saveConnection` 只在从来没有活跃连接时才设它）。把它指过去的话，
-  //    界面会当场把一条**没连着**的连接画成「已连接」—— 而"哪一条连着"是这一屏
-  //    上最要紧的一格。同一个赋值**若放在** `if (editing)` 之前，`wasLive` 那个
-  //    比较就恒为真：「这条连接正连着」这句会被念给一条没连着的连接。
+  //    界面手上那一格"现在用的是哪一条"就与主进程说的分家了。
+  //    ★ 同一个赋值**若放在** `if (editing)` 之前，`wasLive` 那个比较就恒为真：
+  //    「这条连接正连着」这句会被念给一条没连着的连接。
   const ei = save[0].indexOf('if (editing)');
   assert.notEqual(ei, -1, '编辑那条路还在这个函数里');
   assert.ok(bj > ei,
     '★★ `boot.activeConnectionId = …` 必须排在 `if (editing)` **之后**（只有真的'
-    + '去连它时才设），否则编辑一条没连着的连接会把它画成「已连接」');
+    + '去连它时才设）');
   const wi = save[0].indexOf('const wasLive =');
   assert.ok(wi !== -1 && wi < bj,
     '★ `wasLive` 要在**改它之前**算 —— 之后算的话那个比较恒为真');

@@ -328,6 +328,13 @@ function renderSessions(payload) {
   //   `SESS` 写完之后算（放在 renderTabs 之前会让它慢一拍，而"慢一拍"的表现是
   //   作业起来了右边那个点却要等下一次推送才亮）。
   renderRails();
+  // ★★ 第二屏那颗「临时离开」也只在**真有作业在跑**时出现（2026-10-11 改）：
+  //   没有作业可"离开"的时候摆一颗按下去什么也不发生的按钮，是在说一件不成立的事。
+  //   ★ 它挂在这一路上，不是"进第二屏的时候算一次"：作业会在用户**待在这一屏
+  //   的时候**起停 —— 另一台电脑接管、作业自己跑完、或者他从作业那一屏起了一条新的。
+  //   判据 `hasRunningSession()` 与右栏那一条**同源**（同一个函数，不是各算一遍）。
+  //   ★ 而「断开」不需要这句：第二屏只有连着才进得来，它在那一屏上一直在。
+  $('btn-leave').classList.toggle('hidden', !hasRunningSession());
   renderSnapshot(frontSnap());
 }
 
@@ -396,9 +403,16 @@ function renderTabs() {
   }
 }
 
-/** 这个窗口里有没有**真的在跑**的会话。右栏开不开就是问它。 */
+/**
+ * 这个窗口里有没有**真的在跑**的会话。右栏开不开、第二屏那颗「临时离开」露不露，
+ * 都是问它。
+ *
+ * ★ 它就是 `liveCount() > 0` —— **不是**把那个判据再写一遍：两处各写一遍的话，
+ *   漂开的方向是"右栏亮着、而「临时离开」不见了"这种自相矛盾的样子
+ *   （同一条规矩两份实现，见 `liveCount` 那一段）。
+ */
 function hasRunningSession() {
-  return SESS.sessions.some((s) => s && s.live);
+  return liveCount() > 0;
 }
 
 /**
@@ -891,13 +905,12 @@ function renderConnections(list) {
   $('conn-empty').classList.toggle('hidden', list.length > 0);
   // 映射图与列表同生共死：没有连接就没有可映射的东西
   $('sec-workspaces').classList.toggle('hidden', list.length === 0);
-  // 「临时离开」与「断开」只在连着的时候存在 —— 它们是**站点级**的动作（见
-  // renderConnections 里那个「连接/进入」按钮的注释）。★ 两个一起切：只切一个的话，
-  // 另一个会在没连上的时候露着，而它按下去只能得到一句"控制节点没有回应"。
-  $('btn-leave').classList.toggle('hidden', !connected);
-  $('btn-disconnect').classList.toggle('hidden', !connected);
-  // 两条边栏同理：它们是**站点级**的两格（站点状态、这个站点上的作业输出），
+  // 两条边栏：它们是**站点级**的两格（站点状态、这个站点上的作业输出），
   // 没有站点就既没有可问的也没有可看的。见 panel.html 那一段。
+  // ★★ 而在这条不变量下（**站在这第一屏上就一定不在站点里**），这个 class 在第一屏
+  //   上恒为 false —— 它只在"连上的那一刻"被置真（`handleConnectResult` 会先画一遍
+  //   这里，再进第二屏），以及开局那一次。★ 「临时离开 / 断开」两颗**不在这儿**了：
+  //   它们搬到了第二屏的标题带上（见 panel.html 里 `#screen-plugins` 那一段）。
   document.body.classList.toggle('connected', connected);
 
   // ★★ 内置那条**排最前**（其余保持用户的顺序）。它在这个列表里是"起点"，
@@ -906,9 +919,12 @@ function renderConnections(list) {
   //     用户的连接顺序是用户自己攒出来的（新建的排在最后），不该被这一次重排打乱。
   for (const c of list.filter((x) => x.builtin).concat(list.filter((x) => !x.builtin))) {
     const li = document.createElement('li');
-    // 「当前」和「已连接」是两回事：断开之后活动连接还是它，但没有连着。
-    const live = c.id === boot.activeConnectionId && connected;
-    li.className = 'conn' + (live ? ' active' : '');
+    // ★★ 这一行**没有"已连接"那一种形态**（2026-10-11 改）：站在这一屏上就意味着
+    //   **不在任何站点里**（回这一屏的两条路各自把连接收掉了，见 doLeave /
+    //   doDisconnect），所以"这条正连着"在这里永远不成立。那一支 —— `.conn.active`
+    //   的高亮、「进入」那颗按钮、以及删除那颗按钮的禁用 —— 连同它的 CSS 一起删了：
+    //   留着就是一段走不到的码，而下一个人会以为"连着 A 的时候点 B"这条路存在。
+    li.className = 'conn';
 
     const t = document.createElement('span');
     t.className = 't';
@@ -926,20 +942,10 @@ function renderConnections(list) {
     const probe = lastProbe.find((p) => p.id === c.id);
     const m = document.createElement('span');
     m.className = 'm';
-    if (live) {
-      // ★ 「这个站点上我还有几个作业」——**只有在它身上取过作业列表时才说得出来**。
-      //   没取过就只说"已连接"，绝不补一个 0：`0` 会被读成"一个作业都没有"，
-      //   而那是我们并不知道的一件事（同一条三态纪律）。
-      //
-      //   ★ 而**别的站点上的作业数，这一屏本来就答不了** —— 要答就得连上去，
-      //     而"打开客户端连着几个站点挨个查一遍"是一条被刻意避开的形状。
-      //     这一条边界从前面板底下有一段话专门解释它，删掉了：不知道就写
-      //     「已连接」是**对**的，而一句解释不改变任何人的动作 —— 想数就点进去。
-      const known = JOBS.list && JOBS.forConn === c.id;
-      const n = known ? JOBS.list.filter((j) => j.live).length : null;
-      m.textContent = known ? `已连接 · ${n} 个作业在跑` : '已连接';
-      m.classList.add('good');
-    } else if (c.builtin) {
+    // ★ 从前的「已连接 · N 个作业在跑」那一支删掉了（理由见上面 `li.className`
+    //   那一段）：这一屏上不存在"正连着"这一格。★ 而"这个站点上还有几个作业"这件事
+    //   现在只有**进去看**才知道（作业列表那一屏）—— 那是它本来该在的地方。
+    if (c.builtin) {
       // ★ 内置那条**这一格留空**，而不是写「未探测」。探测那三个状态在这里全是假话：
       //   主进程不探它（`app:probeHosts` 把它滤掉了），所以「未探测」是在说"还没轮到
       //   它"—— 而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
@@ -954,18 +960,19 @@ function renderConnections(list) {
       m.classList.add('bad');
     }
 
-    // ★★ 这一格是**三屏的入口**，而不是"连接/断开"那个开关。
+    // ★★ 这一格是**这个站点的入口**（也是第二屏的入口），而不是"连接/断开"那个开关。
     //
-    //   连着的时候点它 = **进去看这个站点的插件与作业**（第二屏）；没连的时候
-    //   点它 = 连上它（连上之后自动进第二屏，见 handleConnectResult）。
+    //   点它 = 连上它（连上之后自动进第二屏，见 handleConnectResult）—— 而那是
+    //   **唯一**进得去的一条路：站在这一屏上就没有"正连着"这回事，所以从前那个
+    //   两种含义（连着时是「进入」、没连时是「连接」）现在只剩一种。
     //
-    //   ★ 「断开」因此挪到了这一屏的标题栏上（`#btn-disconnect`）：它是一个
-    //     **站点级**的动作（同时最多连着一个站点），而不是某一条连接自己的属性 ——
-    //     挂在每一条行上，等于在说"你可以同时断开好几条"。
+    //   ★ 「断开」也不在每一条行上：它是一个**站点级**的动作（同时最多连着一个
+    //     站点），而不是某一条连接自己的属性 —— 挂在行上，等于在说"你可以同时断开
+    //     好几条"。它现在在第二屏的标题带上（`#btn-disconnect`）。
     const main = document.createElement('button');
     main.className = 'tiny';
-    main.textContent = live ? '进入' : '连接';
-    main.onclick = () => (live ? showScreen('plugins') : doConnectTo(c));
+    main.textContent = '连接';
+    main.onclick = () => doConnectTo(c);
 
     // 编辑：地址 / 这条连接自己的密钥。
     const edit = document.createElement('button');
@@ -976,7 +983,12 @@ function renderConnections(list) {
     const del = document.createElement('button');
     del.className = 'ghost tiny danger-ghost';
     del.textContent = '删除';
-    del.disabled = live;              // 连着的时候先断开再删，别让作业失去主人
+    // ★ 从前这里有一句 `del.disabled = live`（连着的时候先断开再删，别让作业失去
+    //   主人），跟着 `.conn.active` 一起删了 —— 这一屏上不存在"正连着"那一条
+    //   （见上面 `li.className` 那一段）。★ 而"别让作业失去主人"这件事**仍然被守着**，
+    //   而且守着的那一道更强：主进程的 `app:deleteConnection` 数的是**这个工作区里
+    //   还有没有会话在跑**（`liveSessionOnWorkspace`），有就拒（`code: 'in_use'`）。
+    //   界面这一句从前只是它的一个近似（"连着"比"有作业在跑"宽），删掉不少守什么。
     del.onclick = () => {
       // ★ 两段式。删除连带销毁这条连接的私钥，所以后果必须在按下去**之前**说
       //   出来 —— 用户拿去 IDM 注册过的公钥就此作废，重建一条要重新注册。
@@ -3040,7 +3052,9 @@ async function handleConnectResult(res) {
  *   决定要不要点下去的。
  */
 function liveCount() {
-  return SESS.sessions.filter((s) => s.live).length;
+  // ★ `s &&` 那一截是给 `hasRunningSession()` 用的：它现在是 `liveCount() > 0`，
+  //   而这个函数从前按 `s.live` 直接取（表里混进一个 null 就是一次 TypeError）。
+  return SESS.sessions.filter((s) => s && s.live).length;
 }
 
 /** 上一次从主进程拿到的开发者模式设置。**只由 renderDevMode 更新**。 */
@@ -3221,19 +3235,18 @@ function bindEvents() {
     if (!saved.ok) return notice('error', saved.error);
     boot.connections = saved.connections;
 
-    // ★★ 两道判据都必须在**动 `boot.activeConnectionId` 之前**问，而且它们问的
-    //    都是同一件事："这一刻哪一条才是活着的"。它一旦被改掉，两句话就都算错了。
+    // ★★ `wasLive` 必须在**动 `boot.activeConnectionId` 之前**问：在赋值**之后**
+    //    算的话那个比较恒为真 —— 编辑任何一条连接都会得到「这条连接正连着 ——
+    //    新地址要重新点一次连接才会生效」，而用户可能压根没连着它。
     //
-    //    · `wasLive` —— 编辑**这一条**时它正连着吗？在赋值**之后**算的话，那个
-    //      比较恒为真：编辑任何一条连接都会得到「这条连接正连着 ——
-    //      新地址要重新点一次连接才会生效」，而用户可能压根没连着它。
-    //    · `allowSwitchTo` —— 这一步要不要**换站点**（见它的注释）。
+    //    ★ 编辑这条路上**根本不该**碰 `boot.activeConnectionId`：这个按钮这时写的
+    //      是「保存」（不是「保存并连接」，见 openEditForm），而主进程那边活跃连接
+    //      一个字都没动（`app:saveConnection` 只在从来没有活跃连接时才设它）。
     //
-    //    ★ 还有一层：编辑这条路上**根本不该**碰 `boot.activeConnectionId`。
-    //      这个按钮这时写的是「保存」（不是「保存并连接」，见 openEditForm），
-    //      而主进程那边活跃连接一个字都没动（`app:saveConnection` 只在从来没有
-    //      活跃连接时才设它）。把它指过去的话，界面会当场把一条**没连着**的连接
-    //      画成「已连接」—— 而"哪一条连着"是这一屏上最要紧的一格。
+    //    ★★ 而在这条不变量下（**站在第一屏上就一定不在任何站点里**）它恒为 false：
+    //      表单只在第一屏上开得出来。**留着**是因为它那句话在万一成立时仍然是**真的**
+    //      —— 同一个位置上从前还并排着一道「换站点」的闸（`allowSwitchTo`），那一道
+    //      删掉了，理由正是它那句不是真的（它会叫人去一屏之外按两颗按钮）。
     const wasLive = connected && saved.connection.id === boot.activeConnectionId;
 
     if (editing) {
@@ -3263,17 +3276,9 @@ function bindEvents() {
       return;
     }
 
-    // ★ 换站点那道闸（见 `allowSwitchTo`）问在**改 `boot` 之前**：这一刻
-    //   `boot.activeConnectionId` 还是"正连着的那条"，所以"这次要连的是不是
-    //   另一条"问得准。
-    // ★ 被拦下时这条连接**留着**（已经存进去了、也在列表里），只是这一次不连它 ——
-    //   那句话由 `allowSwitchTo` 说。
-    if (!allowSwitchTo(saved.connection.id)) {
-      renderConnections(boot.connections);
-      notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
-      return closeForm();
-    }
-
+    // ★★ 这里从前也要过一道「换站点」的闸（与 `doConnectTo` 那一道同一个函数，
+    //   2026-10-11 整个删掉了）：这条路上**不可能**发生"换站点"—— 表单只在第一屏
+    //   上开得出来，而站在第一屏上就一定不在任何站点里。
     boot.activeConnectionId = saved.connection.id;
     renderConnections(boot.connections);
     notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
@@ -3294,7 +3299,7 @@ function bindEvents() {
   //   唯一一个会**销毁正在跑的计算**的按钮，它和"回列表"那颗紧挨着，而误点的代价
   //   是一个可能已经跑了几小时的作业加一份机时 —— 不可逆，也没有第二次机会。
   //   ★ 那句话里必须带上**有几个作业会没**：只说"确定断开吗"，用户答不了。
-  //   ★ 条数现算（`liveCount()`，与 `allowSwitchTo` / `#dev-restart` 同一份定义）：
+  //   ★ 条数现算（`liveCount()`，与 `#dev-restart` 同一份定义）：
   //     写在别处缓存着的话，漂开的方向是"这个框说 2 条、那个框说 1 条"。
   $('btn-disconnect').onclick = () => {
     const n = liveCount();
@@ -3308,9 +3313,15 @@ function bindEvents() {
   };
 
   // ── 三屏之间的前后关系 ──
-  // ★ 它们是**一个站点的三个层次**，所以靠前后关系走，不是一排平级标签：
-  //   进去要连着，退回不用。
-  $('btn-plugins-back').onclick = () => showScreen('conns');
+  // ★ 它们是**一个站点的三个层次**，所以靠前后关系走，不是一排平级标签。
+  //   ★★ 而"退回去"在这一版里**不是一条导航**（2026-10-11）：回到第一屏只有
+  //      「临时离开」与「断开」两条路，它们各自把连接收掉 —— 站在这第一屏上就
+  //      一定不在任何站点里。第二/三屏之间来回走仍然是纯粹的导航（`#btn-to-jobs`
+  //      与 `#btn-to-plugins` 那两个）。
+  // ★★ 这里从前有一颗「← 登录节点」—— 它只是一句 `showScreen('conns')`，会话还在
+  //   跑、心跳还在，而界面已经回到了"不在任何站点里"的样子。它整个删掉了：回第一屏
+  //   的两条路是 `#btn-leave`（临时离开）与 `#btn-disconnect`（断开），见 panel.html
+  //   里 `#screen-plugins` 那一段。
   $('btn-to-jobs').onclick = () => showScreen('jobs');
   $('btn-to-plugins').onclick = () => showScreen('plugins');
 
@@ -3537,18 +3548,27 @@ async function bootUI() {
   //   一份空表。留着这一问是因为它同时回答了"这个客户端手上还有没有会话记录"
   //   —— 那与"连没连上"是两件事（比如上个进程留下的已经结束的记录）。
   const st = await window.slurmate.states();
-  if (st && st.sessions && st.sessions.some((x) => x.live)) connected = true;
-  // connected 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
-  // 补一次，否则那一条不会显示「已连接」
+  // ★★ 手上还有活会话 ⇒ 这次面板的加载发生在一个**已经连上的客户端**里面（面板被
+  //   重新加载过，而会话记录是本进程的），所以下面直接进第二屏 —— 站在第一屏上就
+  //   意味着"不在任何站点里"，而这里明明还在连接里（见 panel.html 里
+  //   `#screen-plugins` 那一段那条不变量）。★ 启动时这一句通常**不**成立：新起的
+  //   进程手上一条会话记录都没有（`index.js` 不自动连、也不接回）。
+  const attached = Boolean(st && st.sessions && st.sessions.some((x) => x.live));
+  if (attached) connected = true;
+  // `connected` 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
+  // 补一次，否则**两条边栏**不会出现（它们跟着 `body.connected` 走）。
   renderConnections(boot.connections);
   renderSessions(st || { sessions: [], front: null });
 
   // ★★ **开局落在第一屏**（连接列表），而且没有任何自动连接。
-  //   这一句是「不自动连」在界面这一侧的落点：`index.js` 那边不连，
-  //   这里不跳。没有它的话，`screen-conns` 那份 HTML 是露着的（它是唯一没有
-  //   `hidden` 的一屏），但路由的 `SCREEN` 还是上一次的值 —— 两份"我在哪一屏"
-  //   会漂，而漂的形态是"点了返回，页面没动"。
-  showScreen('conns');
+  //   这一句是「不自动连」在界面这一侧的落点：`index.js` 那边不连，这里不跳。
+  //   没有它的话，`screen-conns` 那份 HTML 是露着的（它是唯一没有 `hidden` 的一屏），
+  //   但路由的 `SCREEN` 还是上一次的值 —— 两份"我在哪一屏"会漂，而漂的形态是
+  //   "点了返回，页面没动"。
+  //   ★ 唯一的例外就是上面那个 `attached`：人还在连接里的时候不许落在第一屏，
+  //     否则那条不变量当场破掉（一个"站在第一屏却说自己在连接中"的状态）。
+  if (attached) showScreen('plugins');
+  else showScreen('conns');
 }
 
 async function init() {
@@ -3556,45 +3576,14 @@ async function init() {
   await bootUI();
 }
 
-/**
- * 换站点之前的那道闸：**连着一条、而它上面还有会话在跑时，不切。**
- *
- * ★★ 这不是一句"确定吗"。客户端只保持**一条活跃连接**（见 KNOWN-ISSUES 的
- *   S26(a)）—— 连着 A 的时候点 B，A 上那些正在跑的会话从此**不再被这台电脑
- *   看护**（心跳没了 ⇒ 300 秒 `suspect`、1800 秒 `orphaned`、然后 `scancel`），
- *   而用户点那个按钮时未必是这么想的。⇒ 有会话在跑时**不切**，把话说清楚，
- *   让他自己去按那一个**说得出后果**的按钮 —— 两个就在这一屏的标题栏上：
- *   【临时离开】（作业继续跑）与【断开】（作业停掉）。
- *   ★ 所以这里**没有第二个选项**可给，用的是 alert 而不是 confirm：confirm 的
- *     "确定"会把上面那句后果变成一个用户随手按掉的开关。
- *
- * ★ 拦的是"换到**别的**连接"，不是"重连当前这一条"：目标是当前活跃连接时直接
- *   放行（否则地址没变的重连会被自己挡住）。
- * ★ 判据用 `liveCount()`，与【断开】、【重启】那两处**同一份定义** —— 各写一遍的话，
- *   漂开的方向是"这个框说 2 条、那个框说 1 条"，而用户会以为自己看错了。
- *
- * @returns {boolean} true = 可以继续；false = 已经拦下、并且把话说完了
- */
-function allowSwitchTo(connId) {
-  const n = liveCount();
-  if (!connected || !n) return true;
-  if (connId && connId === boot.activeConnectionId) return true;   // 重连当前这条
-  const cur = (boot.connections || []).find((x) => x.id === boot.activeConnectionId);
-  window.alert(
-    `当前还连着「${cur ? connLabel(cur) : '这一条'}」，它上面有 ${n} 条会话在跑。\n\n`
-    + '一个客户端同时只连一个站点。要换过去，请先在这一屏把当前这条收掉：\n'
-    + '· 【临时离开】—— 作业继续在集群上跑（但没人看着它 35 分钟就会被回收）\n'
-    + '· 【断开】—— 把作业停掉\n\n'
-    + '这两个按钮就在这一屏的标题栏上。');
-  return false;
-}
-
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
 async function doConnectTo(c) {
-  // ★★ 闸在**改任何状态之前**：拦下时 `setActiveConnection` 一次都不许被调到 ——
-  //   它一调，配置里"活跃连接"就已经是新那条了，而实际连着的是旧那条，
-  //   两份事实从此对不上（下一次启动重连会连到用户没打算去的那台）。
-  if (!allowSwitchTo(c.id)) return;
+  // ★★ 这里从前有一道闸（`allowSwitchTo`）：连着 A 的时候点 B 会被拦下，并把
+  //   "还连着哪一条、上面有几条会话在跑"说出来。它**整个删掉了**（2026-10-11）——
+  //   它守的那件事现在**由界面的形状承担**：站在第一屏上就一定不在任何站点里，
+  //   所以"连着 A 又去点 B"这条路根本不存在（见 panel.html 里 `#screen-plugins`
+  //   那一段）。★ 而主进程那一道**一个字都没动**：`app:connect` 换站点时仍然先
+  //   `leaveSite()` —— IPC 层的防线不该假设界面的形状。
   const r = await window.slurmate.setActiveConnection(c.id);
   if (!r.ok) return notice('error', r.error);
   boot.activeConnectionId = c.id;

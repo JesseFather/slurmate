@@ -1011,6 +1011,26 @@ test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它�
   assert.equal(rail(), 'rail rail-r', '结束了的会话不算"有作业在跑"');
 });
 
+test('★★ 第二屏那颗「临时离开」只在真有作业在跑时出现', () => {
+  // ★★ 2026-10-11：它从第一屏搬到了第二屏的标题带上，判据也从 `connected`
+  //   （那一屏只有连着才进得来，于是那个条件恒为真）换成了**有没有作业在跑** ——
+  //   没有作业可"离开"的时候摆一颗按下去什么也不发生的按钮，是在说一件不成立的事。
+  //   ★ 而它必须挂在 `renderSessions` 那一路上：作业会在用户**待在这一屏的时候**
+  //     起停（另一台电脑接管、作业自己跑完、从作业那一屏起了一条新的）。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const hidden = () => h.byId.get('btn-leave').classList.contains('hidden');
+  h.fn('renderSessions')({ sessions: [], front: null });
+  assert.equal(hidden(), true, '没有作业可"离开"的时候不摆它');
+  h.fn('renderSessions')({ sessions: [
+    { slot: 'a', service: '编辑器', live: true, snap: {} }], front: 'a' });
+  assert.equal(hidden(), false, '有作业在跑才出现');
+  // ★ 而"已经结束但记录还在"那一条**不算** —— 与右栏那一条**同一个判据**
+  //   （`hasRunningSession()` 就是 `liveCount() > 0`，不是各写一遍）。
+  h.fn('renderSessions')({ sessions: [
+    { slot: 'a', service: '编辑器', live: false, snap: {} }], front: 'a' });
+  assert.equal(hidden(), true, '结束了的会话不算"有作业在跑"');
+});
+
 test('★★ 连上之后才有两条边栏，而且它们是在状态条**下面**那一段', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   // 没连上：`body` 上没有那个 class，两条栏由 CSS 收起来。

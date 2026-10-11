@@ -283,13 +283,13 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
   border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt);
   font-size: 12px;
 }
-/* 只有**正连着**的那条才高亮。「当前但已断开」不高亮 ——
-   高亮是给「这个正在跑」用的，滥用它就等于没有信号。 */
-.conn.active { border-color: var(--accent); background: #0e3a5c; }
+/* ★★ `.conn.active`（"只有正连着的那条才高亮"）与 `.conn .m.good`（那一格里
+   "已连接 · N 个作业在跑"）**一起删掉了**（2026-10-11）：站在第一屏上就一定不在
+   任何站点里，所以这两条规则**没有任何元素会命中** —— 而"没有人命中的 CSS"在
+   下一次改动里会被当成"某处在用"（同 `.ctable` 那两条的教训）。 */
 .conn .t { flex: 1; font-family: ui-monospace, Consolas, monospace; }
 .conn .m { color: var(--fg-dim); flex: none; }
 .conn .m.bad { color: var(--err); }
-.conn .m.good { color: var(--ok); font-weight: 600; }
 
 /* 内置那条连接的名字后面那颗标记（「内置」）。★ 它替代的是那两颗按钮
    （「编辑」「删除」）—— 这一行为什么与上面那些不一样，必须由**这一行自己**
@@ -624,8 +624,8 @@ dialog p#fork-body { white-space: pre-line; }
   border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt);
   font-size: 12px;
 }
-/* 选中的那一行。★ 它与 `.conn.active` 用的是同一个颜色 —— 两处都是"当前这一条"，
-   而"当前"在这个界面里只能有一个颜色。 */
+/* 选中的那一行。★ 从前它与 `.conn.active` 用的是同一个颜色（两处都是"当前这一条"）
+   —— 后者随"这条正连着"那一支一起删掉之后（2026-10-11），这个颜色只剩这一处用。 */
 .job.on { border-color: var(--accent); background: #0e3a5c; }
 /* 已经结束的那些**照旧列出来**（服务端要留到 `released_keep`），但画得轻一点：
    它们还是"我的作业"，只是不再占着任何东西。 */
