@@ -374,6 +374,11 @@ function bootstrap() {
         //   必须是每次现算的结果。
         samplePluginsDir,
         siteInstalledDir,
+        // ★ 假站点**真的把插件的作业侧跑起来**（见 backend-fake.js 的 `_startJob`），
+        //   而作业要有地方待：它会写出会话文件与两条作业日志，还会有一个家目录
+        //   （插件的 `start_*` 会往里写东西）。三样都落在沙盒里一处 ——
+        //   与 `sitePoolDir()` 同一条理由：开发者模式那一整份数据都在沙盒里。
+        jobsDir: siteJobsDir,
       },
     });
 
@@ -3114,6 +3119,17 @@ function siteInstalledDir() {
 }
 
 /**
+ * 假站点上**作业侧**那一处的根 —— 会话文件、作业日志、以及那个假用户的家目录。
+ *
+ * ★ 它落在沙盒里，与上面那两个目录同一条理由。★ 与它们**不同的是**：这里面是
+ *   **真的进程写出来的东西**（插件的 `job/start.sh` 在这台机器上真的跑起来），
+ *   而不是演出来的账。
+ */
+function siteJobsDir() {
+  try { return path.join(cfgDir || '.', 'site-jobs'); } catch { return null; }
+}
+
+/**
  * 「假站点那两处各读到几个插件」—— 给调试那一屏（第四屏）报数用。
  *
  * ★ 报的是**扫描结果**，不是站点最终报出去的清单：坏清单在这里要说出来（作者的
@@ -5587,10 +5603,15 @@ module.exports = {
      * ★ 用例要的现场是"站上一个插件都没有"（那里放一个空目录），而真机上那意味着
      *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次，所以只能这么造。
      *   ★ 它**只动样例那一处**：装上去的东西在沙盒里，用例自己那份 userData 本来就是空的。
+     *
+     * ★★ `backend` 可能**还没有**（`bootstrap` 之后才建）：那种情况下这一句仍然是
+     *   有效的 —— override 是**每次现算**的（后端建起来读的正是它），而没有后端也
+     *   就没有那张快照要丢。少了这一格的话，"在第一条用例之前把树指过去"这件事
+     *   根本做不到（那正是它现在的第一个调用者要做的）。
      */
     setDevSampleDir: (dir) => {
       sampleDirOverride = dir || null;
-      backend.forgetSiteIndex();
+      if (backend) backend.forgetSiteIndex();
     },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
     getRegistry: () => registry,

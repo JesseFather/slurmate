@@ -16,7 +16,12 @@
  * integration.mjs —— 端到端跑一遍**除 Electron 之外**的全部链路。
  *
  * 覆盖：假后端 → SessionController 状态机 → Tunnel（真的本地中继）→
- *       模拟用的假 web 服务（真的 HTTP）→ 登录契约 → goodbye → 释放。
+ *       **插件自己的作业侧**（夹具，真的进程、真的 HTTP）→ 登录契约 →
+ *       goodbye → 释放。
+ *
+ * ★★ 隧道那头**不再是一个内置的假网页**：假站点现在真的把插件的 `job/start.sh`
+ *    跑起来（见 fake-job.js），于是"服务是谁"这件事在开发者模式里也成立 ——
+ *    它是**这个插件的作业侧**，口令由它自己生成、写进会话文件。
  *
  * 这台机器上没有 Xvfb，Electron 界面跑不了。但界面之下的每一层都能在这里真跑，
  * 所以这一层出问题一定不是「Electron 的锅」—— 这正是分层验证的意义。
@@ -29,26 +34,79 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const fs = require('fs');
 const path = require('path');
-const { FakeBackend, DEMO_PASSWORD } = require('../src/main/backend-fake.js');
+const { FakeBackend } = require('../src/main/backend-fake.js');
 const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/session.js');
 const { Tunnel, probeLocalPort } = require('../src/main/tunnel.js');
 
-// ★ 假后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它
-//   （`opts.sitePlugins`）—— 它自己不认识任何插件，基座也不认识。这里给它的是
-//   仓库里真那个 code-server 插件，契约值直接从清单里读，不另抄一份。
+// ★ 假后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它 ——
+//   它自己不认识任何插件，基座也不认识。这里给它的是仓库里真那个 code-server 插件。
 const HERE = path.dirname(new URL(import.meta.url).pathname);
+const REPO = path.join(HERE, '..', '..');
 const CS_MANIFEST = JSON.parse(fs.readFileSync(
-  path.join(HERE, '..', '..', 'plugins', 'code-server', 'plugin.json'), 'utf8'));
+  path.join(REPO, 'plugins', 'code-server', 'plugin.json'), 'utf8'));
 const LOGIN = CS_MANIFEST.contributes.login;
 const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
-// ★ 假站点那棵**开发样例**树：仓库里的 `plugins/` 目录 —— 与 app 在开发者模式下
-//   读到的是同一棵（见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
-//   后端自己从那棵树上读清单、现打真包。
-//
-//   ★ 两边走的是**同一条**：站点报的是它自己发得出来的东西，不是客户端池里装了
-//     什么。
-const SITE_PLUGIN_DIR = () => path.join(HERE, '..', '..', 'plugins');
+
+/**
+ * 夹具的**站点树**：仓库里那棵 code-server 树的一份拷贝，只换掉**站点侧那一半**。
+ *
+ * ★★ 为什么必须换：假站点现在**真的把 `job/start.sh` 跑起来**，而仓库里那一份
+ *    要这台机器上真的有一个 `code-server`（CI 上没有）。换掉的是 `job/start.sh`
+ *    与它旁边的 `job/serve.js` —— **客户端那一半一个字节都不动**，清单还是那份
+ *    清单，登录契约还是那份契约。
+ *
+ * ★ 那个 serve.js 跑的是客户端里那个假 web 服务（`demo-server.js`），而契约从
+ *   **这份插件自己的清单**里读：于是一条会话两端都是真的 —— 隧道那头是这段代码
+ *   起的进程，登录走的是清单声明的那一套。
+ *
+ * ★ 它同时是"作业侧那三条硬规矩"的一个真例子：**不重定向输出**（契约 §5.5）、
+ *   等就绪、成功时写 `$SVC_PID`。
+ */
+function fixtureSiteTree() {
+  const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-site-'));
+  const dest = path.join(root, 'code-server');
+  fs.cpSync(path.join(REPO, 'plugins', 'code-server'), dest, { recursive: true });
+  const short = String(CS_MANIFEST.name).replace(/-/g, '_');
+  fs.writeFileSync(path.join(dest, 'job', 'serve.js'), [
+    '// ★ 夹具：这个插件的**作业侧服务**（真站点上这里跑的是 code-server 那个真程序）。',
+    "const fs = require('fs');",
+    `const { createDemoWebService } = require(${JSON.stringify(path.join(HERE, '..', 'src', 'main', 'demo-server.js'))});`,
+    `const mf = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(dest, 'plugin.json'))}, 'utf8'));`,
+    'const srv = createDemoWebService({',
+    "  password: process.env.PASSWORD || '', port: Number(process.argv[2]) });",
+    'srv.setContract({ surface: mf.contributes.surface, login: mf.contributes.login });',
+    "srv.listen().then((p) => fs.writeFileSync(process.argv[3], String(p)));",
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(dest, 'job', 'start.sh'), [
+    '#!/bin/sh',
+    '# ★ 夹具（见 integration.mjs 的 fixtureSiteTree）：作业侧那三条硬规矩一条不少。',
+    `start_${short}() {`,
+    '    local p="$1"',
+    '    log "夹具的服务在 ${NODE_IP}:${p} 上起来"',
+    '    node "$(dirname "${BASH_SOURCE[0]}")/serve.js" "$p" "${LOCAL_LOG_DIR}/ready" &',
+    '    SVC_PID=$!',
+    '    local i',
+    '    for i in $(seq 1 50); do',
+    '        kill -0 "$SVC_PID" 2>/dev/null || { SVC_PID=""; return 1; }',
+    '        [[ -f "${LOCAL_LOG_DIR}/ready" ]] && return 0',
+    '        sleep 0.1',
+    '    done',
+    '    log "夹具的服务 5 秒没就绪"',
+    '    kill -TERM "$SVC_PID" 2>/dev/null; sleep 0.2; kill -KILL "$SVC_PID" 2>/dev/null',
+    '    SVC_PID=""',
+    '    return 1',
+    '}',
+    '',
+  ].join('\n'));
+  return root;
+}
+
+// ★ 一棵，全程共用：假站点那棵**样例**树（与 app 在开发者模式下读到的是同一处，
+//   见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
+const SITE_TREE = fixtureSiteTree();
+const SITE_PLUGIN_DIR = () => SITE_TREE;
 
 const NO_REDIRECT = { redirect: 'manual' };
 
@@ -87,8 +145,12 @@ function keepAlive() {
  * 那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
  */
 async function makeBackend(t, opts = {}) {
+  // ★ 假站点**真的起进程**，所以它要一处地方放会话文件、作业日志与那个假用户的家
+  //   目录 —— 与 app 里那一条一样（index.js 传 `siteJobsDir`）。不给它的症状是
+  //   "会话起不来"，而报出来的话指的是作业目录，不是这一行。
+  const jobsRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-jobs-'));
   const backend = new FakeBackend({
-    rpcLatencyMs: 0, samplePluginsDir: SITE_PLUGIN_DIR, ...opts,
+    rpcLatencyMs: 0, samplePluginsDir: SITE_PLUGIN_DIR, jobsDir: () => jobsRoot, ...opts,
   });
   await backend.connect({ user: 'demo' });
   t.after(async () => { await backend.close(); });
@@ -241,6 +303,15 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.ok(seen.includes('queued'), '应当经过 queued');
 
   // ── 通过**真的隧道**打 HTTP ──
+  //
+  // ★★ 口令是**作业侧自己生成、写进会话文件**的那一个（真站点上正是这么来的：
+  //    宿主 `gen_password` → 导出给服务 → 写进会话文件 → 守护进程给客户端）。
+  //    从前这里是一个写死的常量，而它与隧道那头是谁无关 —— 那是这个假站点最
+  //    不像真站点的一处。
+  const PASSWORD = ctl.session.auth_password;
+  assert.ok(typeof PASSWORD === 'string' && PASSWORD.length >= 8,
+    `会话文件里该有一个作业侧生成的口令，实际：${JSON.stringify(PASSWORD)}`);
+
   const base = snap.origin;
   const hz = await fetch(`${base}/healthz`, NO_REDIRECT);
   assert.equal(hz.status, 200, '经隧道访问 /healthz 应为 200');
@@ -259,7 +330,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   const good = await fetch(`${base}/login`, {
     ...NO_REDIRECT, method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ password: DEMO_PASSWORD }).toString(),
+    body: new URLSearchParams({ password: PASSWORD }).toString(),
   });
   assert.equal(good.status, 302);
   const cookie = good.headers.get('set-cookie').split(';')[0];

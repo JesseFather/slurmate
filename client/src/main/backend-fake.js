@@ -48,8 +48,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Backend, KIND } = require('./backend.js');
-const { createDemoWebService } = require('./demo-server.js');
 const pluginFiles = require('./plugins/index.js');
+const fakeJob = require('./fake-job.js');
 
 // 假站点里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
@@ -214,7 +214,6 @@ function sumCounts(counts) {
 const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00', gpus: null };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
-const DEMO_PASSWORD = 'demo-1a2b3c4d5e6f7081';  // 固定值，方便你手动 curl 验证
 
 /** 假站点里「作业内 sshd」听在哪个端口。**没有真的 sshd** —— 见 _submit 的说明。 */
 const DEMO_SSHD_PORT = 55901;
@@ -263,6 +262,8 @@ class FakeBackend extends Backend {
    *   rpcLatencyMs   {number}  每次 RPC 的人为延迟，默认 40（贴近真实的 exec channel 开销）
    *   user           {string}  假站点里的用户名
    *   pickPartition  {function} 覆盖随机挑分区的行为，仅供测试固定结果用
+   *   jobsDir        {function} 作业目录的根（一条会话一个子目录）。**传函数**：
+   *                             它在不在、在哪，都是每次现算的事实。
    */
   constructor(opts = {}) {
     super();
@@ -272,8 +273,18 @@ class FakeBackend extends Backend {
     this.rpcLatencyMs = Number.isFinite(opts.rpcLatencyMs) ? opts.rpcLatencyMs : 40;
     this.user = opts.user || 'demo';
     this._pickPartition = typeof opts.pickPartition === 'function' ? opts.pickPartition : null;
+    this._jobsRoot = typeof opts.jobsDir === 'function' ? opts.jobsDir : () => null;
+    /** 见 `debugNoBash`。 */
+    this._noBash = false;
 
-    this._server = null;
+    /**
+     * 正在跑的**作业侧**：`session_id → FakeJob`。
+     *
+     * ★★ 从前这里是一个 `_server`（一个内置的假网页服务），而**每一条会话的隧道都
+     *   指向它** —— 于是"点启动打开的那个页面"与是哪个插件无关。现在那条路没有了：
+     *   有界面的插件**真的把自己的作业侧跑起来**，隧道指向它，日志是它自己说的。
+     */
+    this._jobs = new Map();
     /**
      * 假站点上的全部会话。
      *
@@ -537,6 +548,13 @@ class FakeBackend extends Backend {
         if (cache.has(key)) continue;
         cache.set(key, {
           dir, files, name: mf.name, title: mf.displayName || mf.name,
+          // ★ 「这个插件有没有作业侧」的判据是**记录表里有没有那一份**
+          //   （`job/start.sh`）—— 与守护进程 `plugin_scan` 那一句逐字同形。
+          //   ★ 从前假站点不判这一格（它也不跑作业侧，判了没用）；现在它真的起
+          //     那个片段，于是这一格从"演得像"变成了**它自己要知道的事实**：
+          //     没有作业侧的插件**提交不了**（`can_submit: false`），
+          //     而不是"提交得出去、起来的时候说找不到那个文件"。
+          hasJob: files.some((f) => f.path === pluginFiles.JOB_ENTRY),
           // ★ 内部用（不在 `plugins` 响应里）：**现打一个包要签四元组**（A.3），
           //   而四元组的头两段就是这两个。从 `key` 那个串里切是不行的 —— 版本号
           //   里可能出现 `@`，而身份不该由一个给人看的字符串反推出来。
@@ -584,7 +602,12 @@ class FakeBackend extends Backend {
       name: v.name,
       title: v.title,
       enabled: !this._siteDisabled.has(v.name),
-      can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name),
+      // ★ 没有作业侧的插件**提交不了** —— 与守护进程同一条判据（它数的是记录表里
+      //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份**真站点上根本
+      //   提交不出去**的东西，而失败出现在起会话那一步（"读不到那个片段"），
+      //   指不回"这个插件没有作业侧"。
+      can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name)
+        && v.hasJob !== false,
       surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
     }));
     // ★ **别把"客户端池里装了什么"补进站点要报的插件**（那两处都空的时候，
@@ -765,7 +788,7 @@ class FakeBackend extends Backend {
   get connected() { return this._connected; }
 
   /**
-   * 假后端**永远"常驻"**：对面就是一个本地 HTTP 服务，一次 RPC 是一个本进程内的
+   * 假后端**永远"常驻"**：对面就是这个进程自己起的东西，一次 RPC 是一个本进程内的
    * 函数调用 —— 没有 exec 那回事，也就没有"退化"这一档。
    *
    * ★ 不能省掉这一格而落到基类那个 `null`：那会让开发者模式按**最保守**的节奏
@@ -777,10 +800,6 @@ class FakeBackend extends Backend {
 
   // ── 生命周期 ────────────────────────────────────────────────────────────
   async connect(profile) {
-    if (!this._server) {
-      this._server = createDemoWebService({ password: DEMO_PASSWORD });
-      await this._server.listen();
-    }
     this._connected = true;
     this._startPushSweep();
     this._emitState(true, '假后端已就绪');
@@ -801,13 +820,28 @@ class FakeBackend extends Backend {
   }
 
   async close() {
-    this._clearTimers();
+    // ★★ 只取消**等待登记**那一拍，**释放那一拍留着**。
+    //
+    //   两者的区别是"这件事还属不属于这次连接"：
+    //     · `submitted` 还等着登记 —— 连接都断了，登记已经没有意义，取消它是对的；
+    //     · `releasing` 是**站点自己**在收尾（`scancel` 已经发出去了），它一定会
+    //       在那之后变成 `released`，与客户端在不在无关。
+    //
+    //   一起取消的后果是假站点把一个会话留在了一个**它永远不会离开**的状态里，
+    //   而 `_occupying()` 会把下一条用例的提交挡在「已经有 1 个会话占着位置」上
+    //   —— 那个症状排查的是它自己，指不回这里。
+    //   ★ 定时器是 unref 的，所以留着它不会拖住进程退出。
+    for (const s of this._sessions) {
+      if (s._enrollTimer) { clearTimeout(s._enrollTimer); s._enrollTimer = null; }
+    }
     this._stopPushSweep();
     this._connected = false;
-    if (this._server) {
-      await this._server.close();
-      this._server = null;
-    }
+    // ★ **每一个作业侧都要收掉**。不关的话留下的是**真的进程**：端口还听着、
+    //   用例跑完了而整个套件不退出 —— 而那个症状指不回这里。
+    const jobs = [...this._jobs.values()];
+    this._jobs.clear();
+    for (const s of this._sessions) s._job = null;
+    await Promise.all(jobs.map((j) => j.stop().catch(() => {})));
     this._emitState(false, '已关闭');
   }
 
@@ -991,6 +1025,17 @@ class FakeBackend extends Backend {
   debugHistoryDown(on = true) { this._historyDown = Boolean(on); }
 
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
+
+  /**
+   * 让假站点**假装这台机器上没有 bash**。
+   *
+   * ★ 作业侧是一段 shell 片段，而 Windows 上（以及 macOS 自带那个 bash 3.2 上）
+   *   它跑不起来 —— 那句提示必须说得清"为什么"，而不是让作者去查自己的插件。
+   *   ★ 而这个现场在开发/CI 机器上**造不出来**（那里一定有能用的 bash），
+   *   于是那条失败路会变成一个**没人跑过的分支**（那句话对不对，谁也不知道）。
+   *   这个开关就是让它跑得到。
+   */
+  debugNoBash(on = true) { this._noBash = Boolean(on); }
   /** 模拟作业被回收（比如心跳断了 30 分钟后被 scancel）。 */
   debugReap() {
     const live = this._occupying();
@@ -999,6 +1044,9 @@ class FakeBackend extends Backend {
     //   制造"上一个会话已经走完了"的现场。
     for (const s of live) {
       this._clearTimers(s);
+      // ★ 回收 = 作业被 scancel 了，作业侧也要跟着停。漏了这一句的症状是
+      //   "会话结束之后端口上还有人听着"，而下一条用例起同名会话时会撞端口。
+      this._stopJob(s);
       s.state = 'released';
       s.tunnel_target = null;
     }
@@ -1292,9 +1340,9 @@ class FakeBackend extends Backend {
    * 作业日志的尾部。**演的是同一件事** —— 与守护进程的 `op_job_log` 同一个形状：
    * 两份（`out` / `err`）、每一格是 `null`（没有这一份）或一个对象。
    *
-   * ★★ 内容**随时间增长**：每 2 秒多一行。开发者模式要能看见"边跑边刷"这件事
-   *    本身 —— 一个静态的日志在假站点里长得跟真的一样，而真站点上那条通路
-   *    （轮询、重叠比对、贴底才自动滚）在它身上一格都验不到。
+   * ★★ 内容是**作业侧真的写到那两个文件里的东西**（宿主那一句 `exec 1>>…` 之后，
+   *    服务进程继承的正是它们）。这让"边跑边刷"、"起不来为什么"、以及"服务说的
+   *    原话"三件事同时成立 —— 而它们是这个假站点唯一值得存在的那条性质。
    *
    * ★ 归属照 `_status`：找不到就 `3 not_found`。不带 `session_id` 同样是
    *   `not_found` —— 真守护进程那边没有"默认最新那条"这种缺省（日志是逐会话的），
@@ -1306,28 +1354,22 @@ class FakeBackend extends Backend {
     if (!s) return err(3, 'not_found');
 
     const cap = Math.max(1, Math.min(2000, Number(req && req.lines) || 200));
-    const home = '/home/' + (this.user || 'demo');
-    const dir = home + '/.slurmate/logs';
-    const started = s.created_at;
-    const at = nowSec();
-    const tick = Math.max(0, Math.floor((at - started) / 2));
+    const home = this._siteHome();
+    if (!home) return ok({ out: null, err: null });
+    const dir = path.join(home, '.slurmate', 'logs');
 
-    const out = [
-      `[假站点] 启动 session=${s.session_id} job=${s.job_id}`,
-      '[假站点] 候选端口: 55101',
-      `[假站点] 服务就绪: 127.0.0.1:${s.service_port || 0}`,
-    ];
-    for (let i = 1; i <= Math.min(tick, 400); i += 1) {
-      out.push(`[假站点] 服务第 ${i} 次输出（每 2 秒一行，用来演示"边跑边刷"）`);
-    }
-    const errLines = [];
-    if (tick >= 3) errLines.push('[假站点] 这一份是标准错误 —— 这里的行不会出现在 .out 里');
-
-    const cell = (path, all) => {
+    // ★★ 这两个文件**就是作业的日志** —— 宿主自己写的每一行、以及服务进程写的
+    //    每一行，从产生那一刻起就落在它们上面（替身宿主开头那一句 `exec 1>>…`）。
+    //    假站点不另记一份、也不编一行：右栏看到的**就是那个服务说的话**。
+    //
+    //    ⇒ 于是"边跑边刷"是真的（文件在长），"作业起不来了为什么"在**跑着的时候**
+    //      就看得见，而作者看到的是自己进程的原话 —— 这三条从前一条都不成立
+    //      （那时这里是每 2 秒编一行）。
+    const cell = (p, all, at) => {
       const drop = Math.max(0, all.length - cap);
       const kept = all.slice(drop);
       return {
-        path,
+        path: p,
         bytes: all.reduce((n, x) => n + Buffer.byteLength(x, 'utf8') + 1, 0),
         lines: kept.length,
         truncated: drop > 0,
@@ -1336,9 +1378,23 @@ class FakeBackend extends Backend {
         why: null,
       };
     };
+    const one = (p) => {
+      let text, st;
+      try {
+        st = fs.statSync(p);
+        text = fs.readFileSync(p, 'utf8');
+      } catch {
+        // ★ `null` = **确实没有这一份**（这个插件还没有作业侧，或者它一个字都还
+        //   没说），不是"取不到" —— 两者在界面上是两句不同的话（见 dom.js 的三态）。
+        return null;
+      }
+      const all = text.split('\n');
+      if (all.length && all[all.length - 1] === '') all.pop();
+      return cell(p, all, Math.floor(st.mtimeMs / 1000));
+    };
     return ok({
-      out: cell(dir + `/slurm-${s.job_id}.out`, out),
-      err: errLines.length ? cell(dir + `/slurm-${s.job_id}.err`, errLines) : null,
+      out: one(path.join(dir, `slurm-${s.job_id}.out`)),
+      err: one(path.join(dir, `slurm-${s.job_id}.err`)),
     });
   }
 
@@ -1395,11 +1451,6 @@ class FakeBackend extends Backend {
     //   去写，会把客户端的公钥**全部**拒掉；而如果反过来原样收下，那个注释里的
     //   逗号会把 `--export=ALL,k=v,…` 劈成两个变量（守护进程那边这一步是真的，
     //   不是理论问题 —— 见 test-sessiond-logic.py 19.9）。
-    // 假服务现在扮演**这个**插件：界面路径与登录契约都来自它的清单。
-    // （服务是在 connect() 里起的，那时还不知道会有哪个会话。）
-    if (this._server) {
-      this._server.setContract({ surface: sitePlugin.surface, login: sitePlugin.login });
-    }
     // ★ 判据是插件**声明了什么**，不是它叫什么名字 —— 与客户端框架同一条规矩。
     //   `submitPubkey` 是"提交时要带公钥"，`surface` 是"有一个网页界面"。
     if (sitePlugin.submitPubkey) {
@@ -1410,13 +1461,6 @@ class FakeBackend extends Backend {
         return err(2, 'bad_ssh_pubkey', `「${sitePlugin.title}」的会话必须带上一把合法的 ssh-ed25519 公钥`);
       }
       this._relayPubkey = 'ssh-ed25519 ' + m[1];      // 规范化：注释在这里被丢掉
-    }
-    // 有界面的插件要在本地有个 HTTP 服务给它。那个服务是在 connect() 里起的，
-    // 没起就说明调用方漏了 connect —— 那样会产出一个 service_port=0 的会话，
-    // 隧道目标变成 "127.0.0.1:0"，会话在「已登记」之后才炸。宁可在这里响亮地失败。
-    // （没有界面的插件不需要它：那个端口后面不是 HTTP。）
-    if (!this._server && sitePlugin.surface) {
-      return err(9, 'internal', '假后端尚未 connect()，本地服务未启动');
     }
     // 与真实守护进程一致：**占着位置的**（含排队中的）都算一个名额，
     // 上限来自配置键 `max_sessions_per_user`（`this.maxActive`）。
@@ -1469,6 +1513,10 @@ class FakeBackend extends Backend {
       renew_count: 0,
       requested_time: '12:00:00',
       note: null,
+      // 站点分配下去的候选端口（真守护进程那一格也是这么来的：它在**登录节点**
+      // 上挑，够不着计算节点那一刻的端口占用）。★ 真正交给作业的是其中**实测过
+      // 能绑上**的那些（见 `_startJob`）。
+      _candidates: fakeJob.nominalCandidates(),
       // ★★ **谁在看这条会话** —— 与真守护进程的 `op_submit(client_id)`
       //   同一个位置、同一个含义。提交这条连接的客户端就是它的第一个看护者；
       //   没有身份（CLI、老客户端）⇒ `null`，而 `null` 是**合法状态**：
@@ -1504,39 +1552,227 @@ class FakeBackend extends Backend {
     };
 
     this._sessions.push(sess);
-    sess._enrollTimer = setTimeout(() => {
-      if (!this._find(sid)) return;
-      sess.state = 'enrolled';
-      sess.enrolled_at = nowSec();
-      sess.node = part.name === '2080TI' ? 'node04' : 'node01';
-      // 假站点里 tunnel_target 指向本地的假 code-server（中转站则指向一个**没有
-      // 东西在监听**的端口 —— 那边真正的 sshd 假不出来，见 DEMO_HOST_KEY）。
-      // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
-      sess.node_ip = '127.0.0.1';
-      const relay = sess.site_pubkey;
-      sess.service_port = relay
-        ? DEMO_SSHD_PORT : (this._server ? this._server.port : 0);
-      sess.tunnel_target = `127.0.0.1:${sess.service_port}`;
-      if (relay) {
-        sess.ssh_host_key = DEMO_HOST_KEY;
-      } else {
-        sess.auth_password = DEMO_PASSWORD;
-      }
-      sess.job_state = 'RUNNING';
-      // ★ 排队原因**必须跟着清掉**。真集群上跑起来的作业报的是 `Reason=None`
-      //   （守护进程把它滤掉），不清的话开发模式里会显示
-      //   「运行中 · 在等空闲资源」—— 一句自相矛盾的话，而它在真集群上不出现。
-      sess.job_reason = null;
-      this._emitState(true, '会话已登记');
-    }, this.enrollDelayMs).unref?.();
+
+    // ── ★★ 站点这一侧：把这个插件的**作业侧真的跑起来** ────────────────────
+    //
+    // 真站点上这一步是 sbatch：作业在计算节点上挑端口、调 `start_<短名>`，服务的
+    // 输出落在作业日志上，然后守护进程读**会话文件**把它登记进来。这里补的就是
+    // 那一段（见 `fake-job.js`）—— 于是"点启动打开的那个页面"是**这个插件自己**
+    // 的服务，右栏那些行是**它自己**说的话。
+    //
+    // ★ 判据是 `surface`（"这个插件有一个网页界面"）：有界面的那一类真跑作业侧；
+    //   中转站那一类今天仍指向一个**没有东西在监听**的端口 —— 那边真正的 sshd
+    //   需要一个站点侧装好的 sshd 与主机密钥，假站点演不出来（记在 KNOWN-ISSUES）。
+    if (sitePlugin.surface) {
+      this._startJob(sess, sitePlugin)
+        .catch((e) => this._jobFailed(sess, `作业侧起不来：${e.message}`));
+    }
+
+    // 登记那一步。**它不再是无条件的**：作业还没起来就再等一等（真守护进程每个
+    // tick 都试一次，直到 `enroll_ttl` 到期）。
+    sess._enrollTimer = setTimeout(() => this._enroll(sess), this.enrollDelayMs).unref?.();
 
     return ok({
       session_id: sid, job_id: sess.job_id, state: 'submitted',
       partition: part.name,
       resources: { cpus, mem, gres },
-      candidates: [55101, 55102, 55103, 55104, 55105, 55106],
+      // ★ 这一格是**守护进程分配的候选表**（真守护进程也是这么来的：它在登录
+      //   节点上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是**实测过
+      //   能绑上**的那几个（见 `_jobEnv`）—— 与真宿主逐条同形：分配是一件事，
+      //   计算节点上那一趟 `port_free` 是另一件。
+      candidates: sess._candidates,
       requested_time: '12:00:00',
     });
+  }
+
+  // ── 作业侧（假站点真的跑它）─────────────────────────────────────────────
+
+  /**
+   * 起这一条会话的作业侧。**调用方不 await** —— 提交那条 RPC 立刻回 `submitted`
+   * （真站点上 sbatch 回的正是"已提交"），作业那边跑它的。
+   */
+  async _startJob(sess, sitePlugin) {
+    const home = this._siteHome();
+    const entry = this._siteIndex().get(sess.service_plugin);
+    if (!home || !entry) {
+      this._jobFailed(sess, '假站点拿不到这个插件的作业目录（沙盒还没定下来？）');
+      return;
+    }
+    const cands = await fakeJob.pickCandidates(sess._candidates);
+    if (!cands.length) {
+      this._jobFailed(sess, '挑不到空闲端口了（候选区间 '
+        + `${fakeJob.PORT_MIN}–${fakeJob.PORT_MAX} 都被占着）`);
+      return;
+    }
+    const logDir = path.join(home, '.slurmate', 'logs');
+    fakeJob.pruneLogs(logDir);
+    const job = new fakeJob.FakeJob({
+      // ★ 作业侧从**站点那一侧**那棵树里读。客户端从来不读它 —— "两半"就是这个意思。
+      entry: path.join(entry.dir, ...pluginFiles.JOB_ENTRY.split('/')),
+      env: this._jobEnv(sess, entry, cands, home),
+      cwd: home,
+      noBash: this._noBash,
+      sessFile: path.join(home, '.slurmate', 'sessions', `job-${sess.job_id}.json`),
+      outPath: path.join(logDir, `slurm-${sess.job_id}.out`),
+      errPath: path.join(logDir, `slurm-${sess.job_id}.err`),
+      onExit: (j) => this._jobEnded(sess, j),
+    });
+    sess._job = job;
+    this._jobs.set(sess.session_id, job);
+
+    const r = await job.start();
+    if (!r.ok) { this._jobFailed(sess, r.why, r.exitCode); return; }
+    // 登记那一步先到、作业后起来 —— 那时它留了个记号，这里补上。
+    if (sess._waitingEnroll) { sess._waitingEnroll = false; this._enroll(sess); }
+  }
+
+  /**
+   * 宿主给插件的环境（`docs/CONTRACT.md` §5.2）。
+   *
+   * ★ 真站点上这一份是**守护进程**造的（它读站点配置、按插件的清单解析 bin），
+   *   假站点在这一处把它们合起来 —— 分两个文件会让"起一个作业侧"散在两处，
+   *   而这条路上只有一个读者（开发者模式）。
+   *
+   * ★ 缺 `SLURMATE_GRES`：它在契约里是"带缺省"的那一档，作业侧只把它记进日志与
+   *   会话文件、不做任何判断，而客户端没有那份串的拼法。见替身宿主的开头那一段。
+   */
+  _jobEnv(sess, entry, cands, home) {
+    const env = {
+      // 硬断言那四个（缺一个作业当场死）
+      SLURMATE_SESSION_ID: sess.session_id,
+      SLURMATE_CANDIDATES: cands.join(';'),
+      SLURMATE_SERVICE_KIND: sess.service_kind,
+      SLURMATE_AUTH_MODE: sess.auth_mode,
+      // 带缺省的那一批
+      SLURMATE_PARTITION: sess.partition,
+      SLURMATE_CPUS: String(sess.resources.cpus),
+      SLURMATE_MEM: sess.resources.mem,
+      SLURMATE_PORT_MIN: String(fakeJob.PORT_MIN),
+      SLURMATE_PORT_MAX: String(fakeJob.PORT_MAX),
+      SLURMATE_PASSWORD_BYTES: '12',
+      SLURMATE_SESS_DIR: path.join(home, '.slurmate', 'sessions'),
+      SLURMATE_LOG_DIR: path.join(home, '.slurmate', 'logs'),
+      // 作业号与节点名：真站点上由 Slurm 给。
+      JOB_ID: String(sess.job_id),
+      NODE: sess.node || 'localhost',
+      // ★ 家目录指到沙盒里那一处（见 `_siteHome`）：插件的 `start_*` 会往里写
+      //   东西，而 `/home/demo` 在这台机器上不存在 —— 那会让一个**没写错的**插件
+      //   在一个与它无关的原因上失败。uid/用户名跟着这个假站点自称的那一份
+      //   （与 `whoami` 同源），否则会话文件里的 uid 与界面上的对不上。
+      HOME: home,
+      USER: this.user,
+      LOGNAME: this.user,
+      MY_UID: '1000',
+      MY_USER: this.user,
+    };
+    // 插件专属那一个（`site.bin.env` 声明的名字，宿主不认识它）。
+    const bin = fakeJob.resolvePluginBin(entry.manifest);
+    if (bin) env[bin.env] = bin.value;
+    return env;
+  }
+
+  /**
+   * 登记这一步。判据是**这个插件的作业侧起来了没有**。
+   *
+   * ★ 真守护进程每 2 秒的 tick 上做一次，判据是**会话文件写着 running**；
+   *   还没起来就再等一个 tick（直到 `enroll_ttl` 到期才回收）。这里同形：
+   *   作业还在起就留个记号，它起来时（`_startJob` 那个 then）补一次。
+   */
+  _enroll(sess) {
+    if (sess.state !== 'submitted') return;              // 已经被别人收掉了
+    const job = sess._job;
+    if (job && !job.running) {
+      if (job.state === 'starting') { sess._waitingEnroll = true; return; }
+      return;                                            // 失败那一路已经收过尾了
+    }
+    sess.state = 'enrolled';
+    sess.enrolled_at = nowSec();
+    sess.node = sess.partition === '2080TI' ? 'node04' : 'node01';
+    // 用字面 IPv4 —— tunnel.js 会用 net.isIPv4() 校验，这一步是真跑的。
+    sess.node_ip = '127.0.0.1';
+    if (job && job.running) {
+      sess.service_port = job.port;
+      // ★ 口令是**作业侧自己生成、写进会话文件**的那一个（真站点上正是这么来的：
+      //   宿主 `gen_password` 生成 → 导出给服务 → 写进会话文件 → 守护进程再给
+      //   客户端）。从前这里是一个写死的假口令，而那个口令与隧道那头是谁无关。
+      sess.auth_password = (job.info && job.info.auth_password) || null;
+    } else {
+      // 中转站：那边真正的 sshd 假不出来，见 DEMO_HOST_KEY。
+      sess.service_port = DEMO_SSHD_PORT;
+      sess.ssh_host_key = DEMO_HOST_KEY;
+    }
+    sess.tunnel_target = `127.0.0.1:${sess.service_port}`;
+    sess.job_state = 'RUNNING';
+    // ★ 排队原因**必须跟着清掉**。真集群上跑起来的作业报的是 `Reason=None`
+    //   （守护进程把它滤掉），不清的话开发模式里会显示
+    //   「运行中 · 在等空闲资源」—— 一句自相矛盾的话，而它在真集群上不出现。
+    sess.job_reason = null;
+    this._emitState(true, '会话已登记');
+  }
+
+  /**
+   * 服务自己没了 ⇒ 作业结束。
+   *
+   * ★ 判据与真守护进程逐字同形（`phase_running`）：作业进了**终态**就释放会话，
+   *   不管它是正常结束还是炸了。而"为什么"在日志里 —— 那正是作者要看的东西。
+   */
+  _jobEnded(sess, job) {
+    if (['released', 'rejected', 'expired', 'releasing'].includes(sess.state)) return;
+    this._stopJob(sess);
+    this._endSession(sess, '服务退出了，作业随之结束',
+      job && job.exitCode ? 'FAILED' : 'COMPLETED', job ? job.exitCode : null);
+  }
+
+  /** 作业侧**没起来**（起不来、或者起来的路上炸了）。会话不许判成功。 */
+  _jobFailed(sess, why, code = null) {
+    if (['released', 'rejected', 'expired', 'releasing'].includes(sess.state)) return;
+    this._stopJob(sess);
+    this._endSession(sess, why, 'FAILED', code);
+  }
+
+  /**
+   * 收尾一个会话：`releasing` → `released`。
+   *
+   * ★ 分两步、而且中间隔一下 —— 真守护进程释放一条会话就是这个样子（`begin_release`
+   *   之后作业要先被确认停掉）。一步跳到 `released` 的话，界面上的「正在释放」
+   *   那一格在开发者模式里**一次都走不到**，而那是用户真的会看到的一格。
+   */
+  _endSession(sess, note, jobState, exitCode) {
+    this._clearTimers(sess);
+    sess.state = 'releasing';
+    sess.note = note;
+    sess.tunnel_target = null;
+    sess.job_state = jobState;
+    sess.job_terminal = true;
+    sess.job_exit_code = exitCode;
+    sess.job_reason = null;
+    sess._releaseTimer = setTimeout(() => {
+      sess.state = 'released';
+      this._emitState(false, '会话已释放');
+    }, 1600).unref?.();
+  }
+
+  /**
+   * 假站点上那个用户的**家目录**：沙盒里一处。
+   *
+   * ★ 为什么不写死 `/home/demo`（`whoami` 报的那个）：插件的 `start_*` 会往家里
+   *   写东西，而那台机器上**没有** `/home/demo` —— 那会让一个没写错的插件在一个
+   *   与它无关的原因上失败（"权限不够/目录不存在"），而作者会去改自己的代码。
+   *   指到沙盒里，作业日志与**会话文件**就落在与真站点同形的相对位置上
+   *   （`~/.slurmate/logs/slurm-<作业号>.out`），`op_job_log` 报的路径也就是真的。
+   */
+  _siteHome() {
+    const root = this._jobsRoot();
+    return root ? path.join(root, 'home') : null;
+  }
+
+  /** 把这一条会话的作业侧收掉（杀进程组）。**幂等**。 */
+  _stopJob(sess) {
+    const job = sess._job;
+    if (!job) return;
+    sess._job = null;
+    this._jobs.delete(sess.session_id);
+    job.stop().catch(() => { /* 收尾失败不该再掀波澜 */ });
   }
 
   _status(req) {
@@ -1670,6 +1906,9 @@ class FakeBackend extends Backend {
     // ★ 只清**这一条**的定时器。清全部的话，另一条会话的登记定时器被清掉，
     //   它就永远停在 submitted —— 而界面上一切正常。
     this._clearTimers(s);
+    // ★ 真站点上这一步是 scancel：作业被杀，插件的服务跟着没了（那是同一件事的
+    //   两端）。**收在这里而不是等 released**：那一刻作业侧就该停了。
+    this._stopJob(s);
     s.state = 'releasing';
     s.note = 'goodbye';
     // 真实守护进程会回 releasing，然后下一个 tick（最多 2 秒）才置 released。
@@ -1896,5 +2135,5 @@ function gresFor(raw, part) {
 
 // ★ 只导出真有人读的：`PARTITIONS` 不在这里，它只在**本文件内**被用
 //   （测试要看分区表时走的是 `app:partitions` 那条真路，不是这个常量）。
-module.exports = { FakeBackend, DEFAULTS, DEMO_PASSWORD,
+module.exports = { FakeBackend, DEFAULTS,
   PUSH_INTERVAL_MS, PUSH_SWEEP_MS, DEMO_SITE_LIMITS };

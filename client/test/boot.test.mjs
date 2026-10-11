@@ -22,10 +22,11 @@
  * 本机没有 Xvfb 跑不了真 Electron，所以用一个够完整的桩把整个 boot 走一遍。
  * 这不替代真机验证，但能把「根本起不来」这一类和「界面画得对不对」分开。
  */
-import test, { after } from 'node:test';
+import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -67,6 +68,15 @@ const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '.
 const DEV_CFG = path.join(userData, 'dev-sandbox');
 const SITE_POOL = path.join(DEV_CFG, 'site-plugins');
 const SAMPLE_PLUGINS = ['code-server', 'sshd'];
+/**
+ * 假站点**样例树**那一处的固定位置（见 `buildFixtureSiteTree`）。
+ * ★ 固定而不是每次 mkdtemp：`setDevSampleDir` 存的是**路径**，而用例会在
+ *   `cleanupSiteState` 里反复把它指回来 —— 换个路径就等于每次都要重指一遍，
+ *   漏一次的症状是"站点报的插件与池里的对不上"。
+ */
+const SITE_TREE = path.join(userData, 'fixture-site');
+/** 夹具的作业侧服务要 require 的那一个（客户端里那个假 web 服务）。 */
+const DEMO_SERVER_JS = path.join(REPO, 'client', 'src', 'main', 'demo-server.js');
 
 const require = createRequire(import.meta.url);
 
@@ -85,6 +95,80 @@ const require = createRequire(import.meta.url);
  *   手搓的话写错一个字段会被 `loadConfig` **静默丢掉**，症状同样是"两个插件都是
  *   active:false"，而原因完全指不出来。
  */
+/**
+ * 夹具的**站点树** —— 假站点上"那个管理员装了什么"的答案，而且它必须是一棵
+ * **跑得起来**的树。
+ *
+ * ★★ 为什么不能直接用仓库里那两棵：假站点现在**真的把插件的作业侧跑起来**
+ *    （见 fake-job.js）。仓库里的 `code-server/job/start.sh` 要这台机器上真的有一个
+ *    `code-server` —— 开发机上也许有，CI 上一定没有。用真树的话，几十条会话用例
+ *    会一起红在"作业侧起不来"上，而那条报错与它们要验的事情毫无关系。
+ *
+ * ★★ 换掉的是**只有站点侧那一半**（`job/start.sh`，以及它旁边那个 `job/serve.js`）。
+ *    **客户端那一半一个字节都不动** —— 池里装的还是仓库里那两棵真树
+ *    （见 `setSitePlugins` 的拷贝步骤），清单、`client/index.js`、摘要全都逐字相同。
+ *    这不是"用替身测了个寂寞"：这个假站点演的正是真站点的分工 ——
+ *    **作业侧跑在集群上，客户端这一半跑在这里**，而夹具只是让集群那一半有个
+ *    本机跑得起来的实现。
+ *
+ * ★ 它同时钉住了一件真事：作业侧**不重定向**输出（契约 §5.5），起服务之前
+ *   等就绪，成功时写 `$SVC_PID`。这三条正是那份契约里最容易写错的地方。
+ *
+ * @param {string[]} names `<repo>/plugins/<名字>`
+ * @returns {string} 那棵树的根
+ */
+function buildFixtureSiteTree(names) {
+  fs.rmSync(SITE_TREE, { recursive: true, force: true });
+  fs.mkdirSync(SITE_TREE, { recursive: true });
+  for (const n of names) {
+    const src = path.join(REPO, 'plugins', n);
+    const dest = path.join(SITE_TREE, n);
+    fs.cpSync(src, dest, { recursive: true });
+    const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
+    // ★ 只换**有界面**的那一类：没有界面的（中转站）今天的作业侧不跑
+    //   （see backend-fake.js 的 `_submit`），换它只是多一份没人读的文件。
+    if (!(mf.contributes && mf.contributes.surface)) continue;
+    const short = String(mf.name).replace(/-/g, '_');
+    fs.writeFileSync(path.join(dest, 'job', 'serve.js'), [
+      '// ★ 夹具：这个插件的**作业侧服务**（真站点上这里跑的是 code-server 那个',
+      '//   真程序）。它跑的是客户端里那个假 web 服务，而契约从**这份插件自己的',
+      '//   清单**里读 —— 于是一条会话两端都是真的。',
+      "const fs = require('fs');",
+      `const { createDemoWebService } = require(${JSON.stringify(DEMO_SERVER_JS)});`,
+      `const mf = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(dest, 'plugin.json'))}, 'utf8'));`,
+      'const port = Number(process.argv[2]);',
+      'const readyFile = process.argv[3];',
+      "const srv = createDemoWebService({ password: process.env.PASSWORD || '', port });",
+      'srv.setContract({ surface: mf.contributes.surface, login: mf.contributes.login });',
+      "srv.listen().then((p) => fs.writeFileSync(readyFile, String(p)));",
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dest, 'job', 'start.sh'), [
+      '#!/bin/sh',
+      '# ★ 夹具（见 boot.test.mjs 的 buildFixtureSiteTree）。作业侧那三条硬规矩',
+      '#   这里一条不少：不重定向输出、等就绪、成功时写 $SVC_PID。',
+      `start_${short}() {`,
+      '    local p="$1"',
+      '    log "夹具的服务在 ${NODE_IP}:${p} 上起来"',
+      '    node "$(dirname "${BASH_SOURCE[0]}")/serve.js" "$p" "${LOCAL_LOG_DIR}/ready" &',
+      '    SVC_PID=$!',
+      '    local i',
+      '    for i in $(seq 1 50); do',
+      '        kill -0 "$SVC_PID" 2>/dev/null || { SVC_PID=""; return 1; }',
+      '        [[ -f "${LOCAL_LOG_DIR}/ready" ]] && return 0',
+      '        sleep 0.1',
+      '    done',
+      '    log "夹具的服务 5 秒没就绪"',
+      '    kill -TERM "$SVC_PID" 2>/dev/null; sleep 0.2; kill -KILL "$SVC_PID" 2>/dev/null',
+      '    SVC_PID=""',
+      '    return 1',
+      '}',
+      '',
+    ].join('\n'));
+  }
+  return SITE_TREE;
+}
+
 function setSitePlugins(names) {
   const config = require('../src/main/config.js');
   const P = require('../src/main/plugins/index.js');
@@ -136,7 +220,7 @@ async function withSitePlugins(names, fn) {
   try {
     return await fn();
   } finally {
-    setSitePlugins(SAMPLE_PLUGINS);
+    resetFixture();
   }
 }
 
@@ -147,7 +231,23 @@ async function withSitePlugins(names, fn) {
  * —— 收尾那一步如果自己删池子而不恢复，从那条用例起后面**所有**会话用例都会红在
  * "没有可以提交的服务"上，而失败点离夹具十万八千里。
  */
-function resetFixture() { setSitePlugins(SAMPLE_PLUGINS); }
+/**
+ * 把夹具恢复成缺省：**站点池** = 两个插件都装着，而**假站点那棵样例树**指回夹具
+ * 那一棵。
+ *
+ * ★★ 后一半与 `setSitePlugins` 是**两件事**，别合并：那份池是**本机**装了哪几个
+ *    （`withSitePlugins([])` 要的正是"本机一个都没有、而站点照样发那两个"），
+ *   而样例树是**站点**上有什么。合并的话，那一整组用例会红在"站点什么都没报"上。
+ *
+ * ★ 它也是"样例树指回来"**唯一**的地方 —— 用例可以临时把它换掉
+ *   （`emptyFakeSite`、以及那几条装插件的用例），而漏掉这一句的症状是：从那条
+ *   用例起，后面的会话用例拿仓库里那棵真树去跑作业侧，红在"起不来"上。
+ */
+function resetFixture() {
+  setSitePlugins(SAMPLE_PLUGINS);
+  const entry = idxLoaded();
+  if (entry) entry.exports._test.setDevSampleDir(SITE_TREE);
+}
 
 /**
  * 收尾：**把夹具恢复成缺省**，并复位假后端。
@@ -248,6 +348,10 @@ function dropSlot(sitePool, id, version) {
 
 // 全套件的缺省：两个插件都装着，而且**都过了同意闸**。
 setSitePlugins(SAMPLE_PLUGINS);
+// ★ 而**站点那一侧**是另一件事：它给的是真实文件，客户端那一半逐字来自仓库那两棵，
+//   只有作业侧换成了本机跑得起来的一份（见 buildFixtureSiteTree）。谁把它指过去，
+//   见 `before()` 与 `resetFixture()`。
+buildFixtureSiteTree(SAMPLE_PLUGINS);
 
 // ── Electron 桩 ─────────────────────────────────────────────────────────────
 const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], views: [],
@@ -435,6 +539,22 @@ fs.writeFileSync(path.join(userData, 'dev-mode.json'),
 process.env.SLURMATE_DEV_ENROLL_MS = '200';
 
 /**
+ * ★★ 假站点那棵**样例树**指向夹具（见 `buildFixtureSiteTree`）。
+ *
+ * 必须在**第一条用例之前**、而且要在 index.js 起来之后：
+ *   · 文件顶层那时 index.js 还没加载（它的 `_test` 不存在，硬 require 它会在一个
+ *     没有 electron 的环境里启动整个客户端 —— 见 `setSitePlugins` 那一段）；
+ *   · 而 `setSitePlugins` 里那一句只在"已经加载过"时才生效，第一条用例之前没人
+ *     加载过它。
+ *
+ * ★ 只此一处：指过来之后，**换回来**由 `setSitePlugins` 负责（每条用例的收尾都会
+ *   走到它）。整个套件里"样品树在哪"只有一个答案。
+ */
+before(() => {
+  require('../src/main/index.js')._test.setDevSampleDir(SITE_TREE);
+});
+
+/**
  * session.js 里的定时器全都 unref 了 —— 在 Electron 里这是对的（窗口/应用撑着事件
  * 循环，定时器不该反过来续命），但在测试进程里没有别的东西撑着，事件循环会在
  * 「等待登记」期间直接排空，测试以 "event loop has already resolved" 收场。
@@ -447,9 +567,9 @@ setInterval(() => console.error('PROBE', Date.now() - T0), 2000).unref?.();
 /**
  * 收尾。
  *
- * 必须把假后端关掉 —— 它有一个**真的在监听的 HTTP 服务**，不关的话
- * `node --test` 会一直等这个子进程退出，整个套件就挂住了
- * （表现为：本文件的 8 个用例全过，然后没有 summary、没有退出）。
+ * 必须把假后端关掉 —— 它**真的起了几个进程**（每一条会话一个作业侧，每个都在
+ * 监听一个端口），不关的话 `node --test` 会一直等它们退出，整个套件就挂住了
+ * （表现为：本文件的用例全过，然后没有 summary、没有退出）。
  */
 after(async () => {
   console.error('PROBE-after-start', Date.now() - T0);
@@ -2993,6 +3113,255 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     assert.equal(cancel.cancelled, true, '取消要如实回一个 cancelled');
     assert.deepEqual(fs.readdirSync(installed), [idA], '取消什么都不该动');
   });
+});
+
+/**
+ * 那个端口上还有人在听吗。
+ *
+ * ★ 判据是**内核**（能不能连上），不是"我们记着的那个 pid 还在不在" ——
+ *   假站点杀的是**进程组**，而一个 fork 出去的子进程不会被 pid 那一条判据看见。
+ */
+function portAlive(port) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    s.setTimeout(1500);
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('error', () => resolve(false));
+    s.once('timeout', () => { s.destroy(); resolve(false); });
+  });
+}
+
+test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头是它，结束之后它真的没了', async (t) => {
+  // ★★ 这一条是本阶段的**重心**。从前假站点把隧道永远指向一个内置的假网页，
+  //    与是哪个插件无关 —— 于是"点启动打开的那个页面"在开发者模式里根本不是
+  //    这个插件的界面。现在：会话登记那一刻，站点**真的把 `job/start.sh` 跑起来**，
+  //    服务真的在听一个端口，日志是它自己说的话。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  const run = await startRunning(idx, 'code-server');
+  const sess = run.ctl.session;
+  assert.equal(sess.state, 'enrolled', '会话要登记上');
+
+  // ── ① 会话报的那个端口上**真的有人听着**，而且那一段内容来自作业侧 ──
+  const port = sess.service_port;
+  assert.match(sess.tunnel_target, /^127\.0\.0\.1:\d+$/, '隧道目标要是字面 IPv4');
+  assert.equal(sess.tunnel_target, `127.0.0.1:${port}`);
+  assert.ok(port >= 55001 && port <= 55999,
+    `服务端口要落在站点那个区间里（假站点对外报的就是它），实际 ${port}`);
+  assert.equal(await portAlive(port), true,
+    `★ 隧道那头必须真的有一个进程在听（${port}）—— 这正是这一阶段要的东西`);
+
+  const hz = await fetch(`http://127.0.0.1:${port}/healthz`);
+  assert.equal(hz.status, 200, '作业侧那个服务要真的应答');
+
+  // ── ② 口令是**作业侧生成的**，不是假站点写死的那一个 ──
+  assert.ok(typeof sess.auth_password === 'string' && sess.auth_password.length >= 8,
+    `会话文件里该有作业侧生成的口令，实际 ${JSON.stringify(sess.auth_password)}`);
+
+  // ── ③ 日志是**它自己说的**：宿主那几行 + 作业侧那句 log，而且落在一个真的文件上 ──
+  const jl = await invoke('app:jobLog', { session_id: sess.session_id, lines: 200 });
+  assert.equal(jl.ok, true, JSON.stringify(jl));
+  assert.match(jl.data.out.path, /\.slurmate[/\\]logs[/\\]slurm-\d+\.out$/,
+    '报出去的路径要是**站点上那个真文件**（与真站点同形），不是编的');
+  assert.match(jl.data.out.text, /会话就绪: tunnel_target=127\.0\.0\.1:\d+/,
+    '★ 宿主自己的那几行要在里面');
+  assert.match(jl.data.out.text, new RegExp(`夹具的服务在 127\\.0\\.0\\.1:${port} 上起来`),
+    '★★ 而那一行是**这个插件的作业侧**打印的 —— 它才算"作业日志"');
+
+  // ── ④ 结束会话 ⇒ **那个进程真的被收掉了**（端口上没人听了） ──
+  const stopped = await invoke('app:stop', { slot: run.slot });
+  assert.equal(stopped.ok, true, JSON.stringify(stopped));
+  await waitUntil(async () => (await portAlive(port)) === false,
+    '那个端口上没人听了', 15000);
+});
+
+/**
+ * 换一份**作业侧**：拷贝那棵夹具树，把 `job/start.sh` 换成给的那一段（还可以顺带
+ * 往那一层里多写几个文件）。
+ *
+ * ★ 客户端那一半（清单、`client/index.js`）一个字节都不动 —— 站点报的还是同一个
+ *   `id@版本`，于是池里那一份照旧对得上，验的就纯粹是**作业侧**那件事。
+ */
+function siteTreeWithJobSide(script, extra = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-badjob-'));
+  fs.cpSync(SITE_TREE, root, { recursive: true });
+  const jobDir = path.join(root, 'code-server', 'job');
+  fs.writeFileSync(path.join(jobDir, 'start.sh'), script);
+  for (const [name, text] of Object.entries(extra)) {
+    fs.writeFileSync(path.join(jobDir, name), text);
+  }
+  return root;
+}
+
+test('★★ 作业侧起不来 ⇒ 会话**不许判成功**，而原因要说得出是这个服务说的', async (t) => {
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    // ★★ **这一条用例的会话是故意失败的**，它在客户端那张表里停在 `error`。
+    //    不清掉的话，后面第一个拿 `onlyCtl` 取"唯一那条会话"的用例会取到**它**，
+    //    而症状是那条用例红在"会话没有登记上"上 —— 指不回这里。
+    for (const rec of [...idx._test.getSessions().values()]) {
+      if (rec.controller) await rec.controller.abandon();
+    }
+    idx._test.getSessions().clear();
+    cleanupSiteState(idx);                    // 顺带把样例树指回夹具那一棵
+  });
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  idx._test.setDevSampleDir(siteTreeWithJobSide([
+    '#!/bin/sh',
+    'start_code_server() {',
+    '    log "这个插件在这台机器上起不来：本机没有 code-server"',
+    '    return 1',
+    '}',
+    '',
+  ].join('\n')));
+  await invoke('app:syncPlugins');
+
+  const r = await appStart(null, 'code-server');
+  assert.equal(r.ok, true, `★ 提交本身要成功（站点收下了它）：${JSON.stringify(r)}`);
+  const ctl = idx._test.sessionAt(r.slot).controller;
+
+  // ★ 判据一：会话**不会**走到 running。它的归宿由守护进程（假站点）给，
+  //   客户端只照着念 —— 所以这里等的是"不再是活的"。
+  await waitUntil(() => ['error', 'ended'].includes(ctl.state),
+    '会话不许判成功', 30000);
+  assert.notEqual(ctl.state, 'running', '★ 起不来就是起不来，不许当成起来了');
+
+  // ★ 判据二：**站点那一侧**也没有登记过（`ctl.session` 是服务端那一份视图）。
+  assert.notEqual(ctl.session.state, 'enrolled', '★★ "登记"这一步在站点上必须没有发生');
+  assert.equal(ctl.session.tunnel_target, null, '★ 更不许留下一个隧道目标');
+  assert.match(String(ctl.snapshot().error || ''), /起不来|没有起来|已结束/,
+    '★ 而界面上那句话要指得出"是作业侧起不来"，不是一句"未知错误"');
+
+  // ★ 判据二：为什么起不来，**在作业日志里，而且是它自己说的**。
+  const jl = await invoke('app:jobLog', { session_id: ctl.sessionId, lines: 200 });
+  assert.equal(jl.ok, true, JSON.stringify(jl));
+  assert.match(jl.data.out.text, /这个插件在这台机器上起不来：本机没有 code-server/,
+    '★★ 作者的原话要在日志里 —— 那正是他排查的起点');
+  assert.match(jl.data.err.text, /所有候选端口都失败了/,
+    '★ 宿主那一句也要在（说的是"每一个候选都试过了"）');
+  assert.equal(jl.data.out.truncated, false);
+});
+
+test('★ 作业侧把服务的输出重定向走 ⇒ 宿主**拒绝启动**，并说出那两个 fd', async (t) => {
+  // 契约 §5.5：服务的 stdout/stderr 必须**继承**宿主的那两条流 —— 那两条就是作业
+  // 日志。重定向走 = 服务的输出在站点上一个字都看不到，**而且不报错**：界面上是
+  // "作业起来了，日志只有宿主那几行"，看起来完全正常。所以宿主当场判失败。
+  //
+  // ★ 这一条钉的是**替身宿主里那一句**（`svc_stream_ok`）。没有它，假站点会把一个
+  //   真站点上**起不来**的插件演成"起来了" —— 而作者会在开发者模式里验过、
+  //   上了真集群才发现日志是空的。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    for (const rec of [...idx._test.getSessions().values()]) {
+      if (rec.controller) await rec.controller.abandon();
+    }
+    idx._test.getSessions().clear();
+    cleanupSiteState(idx);
+  });
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  idx._test.setDevSampleDir(siteTreeWithJobSide([
+    '#!/bin/sh',
+    'start_code_server() {',
+    '    node "$(dirname "${BASH_SOURCE[0]}")/hidden.js" "$1" >/dev/null 2>&1 &',
+    '    SVC_PID=$!',
+    '    sleep 0.3',
+    '    kill -0 "$SVC_PID" 2>/dev/null || { SVC_PID=""; return 1; }',
+    '    return 0',
+    '}',
+    '',
+  ].join('\n'), {
+    'hidden.js': 'require("http").createServer((q, r) => r.end("x"))'
+      + '.listen(Number(process.argv[2]), "127.0.0.1");\n',
+  }));
+  await invoke('app:syncPlugins');
+
+  const r = await appStart(null, 'code-server');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const ctl = idx._test.sessionAt(r.slot).controller;
+  await waitUntil(() => ['error', 'ended'].includes(ctl.state), '会话不许判成功', 30000);
+  assert.equal(ctl.session.tunnel_target, null, '★ 不许登记');
+
+  const jl = await invoke('app:jobLog', { session_id: ctl.sessionId, lines: 200 });
+  assert.equal(jl.ok, true, JSON.stringify(jl));
+  assert.match(jl.data.err.text, /被重定向到了/,
+    '★★ 宿主那一句要说得出"服务的 fd 被重定向到了哪儿" —— 那是这件事的根因');
+  assert.match(jl.data.err.text, /继承\*\*宿主的 stdout\/stderr/,
+    '★ 还要说清契约要求的是什么（作者据此知道该删掉哪个重定向）');
+});
+
+test('★ 那棵树里没有 `job/start.sh` ⇒ 站点当场说"提交不了"，不是等提交时才炸', async (t) => {
+  // 「这个插件有没有作业侧」的判据是**记录表里有没有那一份**（与守护进程
+  // `plugin_scan` 那一句同形）。少了它，假站点会放行一份真站点上根本提交不出去的
+  // 东西 —— 而失败会出现在起会话那一步（"读不到那个片段"），指不回"它没有作业侧"。
+  const idx = require('../src/main/index.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    cleanupSiteState(idx);
+  });
+  await invoke('app:debug', 'reset');
+  const c = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-nojob-'));
+  fs.cpSync(SITE_TREE, root, { recursive: true });
+  fs.rmSync(path.join(root, 'code-server', 'job', 'start.sh'));
+  idx._test.setDevSampleDir(root);
+
+  const byName = (n) => idx._test.getBackend()._sitePlugins().find((p) => p.name === n);
+  const noJob = byName('code-server');
+  assert.ok(noJob, '夹具前提：站点照样要报它（装得上、看得见）');
+  assert.equal(noJob.enabled, true, '★ 装了、也开着 —— 与"本站关了它"是两件事');
+  assert.equal(noJob.can_submit, false, '★★ 没有作业侧 ⇒ 提交不了');
+  assert.equal(byName('sshd').can_submit, true,
+    '★ 一条坏的不许把整张表带下去（另一个照样提交得了）');
+});
+
+test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不来', async (t) => {
+  const idx = require('../src/main/index.js');
+  const fakeJob = require('../src/main/fake-job.js');
+  t.after(async () => {
+    Module._load = origLoad;
+    idx._test.getBackend().debugNoBash(false);
+    // ★ 同上：这条会话也停在 error，别把它留给后面的用例。
+    for (const rec of [...idx._test.getSessions().values()]) {
+      if (rec.controller) await rec.controller.abandon();
+    }
+    idx._test.getSessions().clear();
+    cleanupSiteState(idx);
+  });
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  // ── 那两句提示本身：一个**纯函数**，两种现场各说一句话 ──
+  //   ★ 这里造的是"PATH 上没有 bash"与"那个 bash 太老"两个真现场（临时目录里
+  //     放一个假的可执行文件），而不是断言源码里有那几行字。
+  const noBash = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-nobash-'));
+  assert.equal(fakeJob.findBash([path.join(noBash, 'bash')]).path, undefined);
+  assert.match(fakeJob.findBash([path.join(noBash, 'bash')]).why, /没有 bash/);
+  const oldBash = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-oldbash-'));
+  fs.writeFileSync(path.join(oldBash, 'bash'), '#!/bin/sh\nprintf 3\n', { mode: 0o755 });
+  assert.match(fakeJob.findBash([path.join(oldBash, 'bash')]).why, /太老/,
+    '★ bash 3 上那句 `declare -A: invalid option` 必须换来一句人话');
+
+  // ── 而它**接得上**：整条路上真的走到那句，而且会话不许判成功 ──
+  idx._test.getBackend().debugNoBash(true);
+  const r = await appStart(null, 'code-server');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const ctl = idx._test.sessionAt(r.slot).controller;
+  await waitUntil(() => ['error', 'ended'].includes(ctl.state), '会话不许判成功', 30000);
+  assert.match(String(ctl.snapshot().error || ''), /没有 bash/,
+    '★ 那句话要说出的是"这台机器上没有 bash"，不是"服务没起来" ——'
+    + '前者用户能动手解决（换个平台跑），后者他只能去查一个没错的插件');
+  assert.equal(ctl.session.tunnel_target, null, '★ 一样不许登记');
 });
 
 test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问一次（绝不静默装回来）', async (t) => {
@@ -6813,6 +7182,12 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   // 一条永远绿的断言。
   // ★ 夹具的登记延迟默认是 8 秒（真集群上的样子）。这条用例不考它，压到 300 毫秒。
   idx._test.getBackend().enrollDelayMs = 300;
+  // ★ 这条用例不走 `openUpTo`（它自己连、自己 reset），所以"没有别的会话占着位置"
+  //   这条前提要**自己确立**：前面某条用例可能留了一条**本机已经不看了**的会话在
+  //   站点上（`abandon()` 是不告诉服务端的），而名额上限是 1 —— 提交会被
+  //   「已经有 1 个会话占着位置」挡掉，症状是"这条会话没有登记上"。
+  //   ★ 与下面那条（`back0.debugReap()`）同一条理由，同一个动词。
+  idx._test.getBackend().debugReap();
   assert.equal((await appStart({}, 'code-server')).ok, true);
   const ctl = onlyCtl(idx);
   for (let i = 0; i < 60 && !ctl.sessionId; i += 1) {

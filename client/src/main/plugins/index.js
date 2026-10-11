@@ -96,6 +96,18 @@ const SLOT = require('../plugin-slot.js');
 
 const MANIFEST = 'plugin.json';
 const CLIENT_ENTRY = path.join('client', 'index.js');
+/**
+ * 作业侧的入口。**一个插件的包里没有它也是合法状态**（见文件头那三分）：
+ * 那样的插件装得上、看得见，但提交不了（`can_submit: false`）。
+ *
+ * ★ 分隔符是 `/` 而**不是** `path.join`：它是**记录表里的那一格**（跨语言的那份
+ *   清单，见 `readPluginFiles`），不是本机的文件路径。用 `path.join` 的话，同一份
+ *   东西在 Windows 上会写成 `job\start.sh`，而那个比较**永远为假**（`can_submit`
+ *   恒为 false，症状是"插件明明有作业侧，站点却说没有"）。
+ * ★ 它与守护进程的 `PLUGIN_JOB_ENTRY` 是**同一条契约的两端**
+ *   （`cluster/slurmate-sessiond`），改一处必须改另一处。
+ */
+const JOB_ENTRY = 'job/start.sh';
 
 /**
  * 一个插件目录里**不算插件**的东西：版本控制的内部状态，以及"依赖"那一类。
@@ -1443,6 +1455,8 @@ module.exports = {
   versionCheck,        // 握手：客户端版本 × 服务端版本 → 一个态
   // ── 站点分发那条路要用的（见 site-plugins.js）──
   COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
+  // 作业侧入口那一格（**只有它有跨语言的那一份**：守护进程里叫 PLUGIN_JOB_ENTRY）
+  JOB_ENTRY,
   // ── 读一棵**源**插件树（不是池）—— 打包器与开发者模式的假站点用 ──
   scanPluginCollection,
 };
