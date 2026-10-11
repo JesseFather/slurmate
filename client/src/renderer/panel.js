@@ -57,6 +57,24 @@ const STATE_TEXT = {
 let boot = null;
 let connected = false;
 let whoami = null;
+
+/**
+ * **在 / 不在这个站点里**。★ 这一格只有这一个入口改 —— 因为有两个东西跟着它走，
+ * 而它们都**当场**要重画：
+ *
+ *   · 两条边栏（`body.connected`）：它们是**站点级**的两格，不在站点里就没有可问的
+ *     也没有可看的（见 renderConnections）；
+ *   · 状态条上那颗「调试」标签（见 renderTabs）：它的判据里有 `connected`。
+ *
+ * ★★ 少画一次的症状是**静默的**：连上那一刻主进程推来的会话表可能**早于**这一句
+ *   到达（那时标签是按"没连上"画的），而它此后不会自己再画一次 —— 下一次推送要等到
+ *   某条会话变动。表现是"我明明在开发者模式里连着，状态条上却没有那颗调试"。
+ */
+function setConnected(on) {
+  connected = Boolean(on);
+  document.body.classList.toggle('connected', connected);
+  renderTabs();
+}
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
 let lastSnap = null;         // **前台**那一条的快照，供状态条与工作区选择器读它
 let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
@@ -281,12 +299,13 @@ function clearPortAsk() {
 
 // ── 三屏的路由 ──────────────────────────────────────────────────────────────
 /**
- * 把三屏之一露出来。**同时只露一个。**
+ * 把四屏之一露出来。**同时只露一个。**
  *
- * ★★ 为什么"我在哪一屏"必须是一个显式的状态：这三屏是**一个站点的三个层次**
- *   （连接 → 插件 → 作业），而"在哪一层"取决于用户刚才点了什么，不取决于
- *   会话此刻是什么状态。按后者判的话（`idle` 露连接列表、跑起来露当前会话），
- *   用户点进作业列表看一眼，下一次快照回来就被弹回另一屏——而他什么都没做。
+ * ★★ 为什么"我在哪一屏"必须是一个显式的状态：这几屏是**一个站点的几个层次**
+ *   （连接 → 插件 → 作业，外加开发者模式下的「调试」），而"在哪一层"取决于用户
+ *   刚才点了什么，不取决于会话此刻是什么状态。按后者判的话（`idle` 露连接列表、
+ *   跑起来露当前会话），用户点进作业列表看一眼，下一次快照回来就被弹回另一屏
+ *   ——而他什么都没做。
  *
  * ★ **站点状态不在这里**：它从边栏的浮窗里看（`hover.html`）。从前它是一个盖在
  *   三屏上面的节（`#sec-cluster`），于是同一份 `op_cluster` 的答案有两个落点 ——
@@ -300,9 +319,14 @@ function showScreen(name) {
   //   ★ 收掉**不等于**答了「取消」：没提交过就是没提交过，所以不补一句
   //     "你没有启动" —— 那会是一条凭空造出来的对话记录。
   clearPortAsk();
+  // ★ 第四屏（调试）也在这张表里：它的显隐同样**只由这一句**决定 —— 进了站点才
+  //   到得了它（入口是状态条上那颗「调试」，见 `renderTabs`），而"进不进得来"是
+  //   那颗标签的事，不是这一屏自己的事（`showScreen('debug')` 只在这两处被调到：
+  //   那颗标签，以及下面那条按需刷新）。
   for (const [key, id] of [['conns', 'screen-conns'],
                            ['plugins', 'screen-plugins'],
-                           ['jobs', 'screen-jobs']]) {
+                           ['jobs', 'screen-jobs'],
+                           ['debug', 'screen-debug']]) {
     $(id).classList.toggle('hidden', key !== name);
   }
   // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（判据是
@@ -320,11 +344,15 @@ function showScreen(name) {
   const site = conn ? ` · ${conn.user}@${conn.host}` : '';
   $('plugins-title').textContent = '插件' + site;
   $('jobs-title').textContent = '作业' + site;
+  $('debug-title').textContent = '调试' + site;
   // 屏一换，那些**跟着当前这一屏走**的小块都要重算一次：作业详情（只在这一屏里
   // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
   renderSnapshot(lastSnap);
   if (name === 'jobs') refreshJobs();
+  // ★ 第四屏那两处目录**现取一次**（与 `refreshJobs` 同一条理由：它回答的是
+  //   "此刻磁盘上是什么"，而缓存下来的答案在一个刚装完插件的人眼里正好是错的）。
+  if (name === 'debug') refreshSiteDirs();
 }
 
 /**
@@ -398,7 +426,17 @@ function frontTemporary() {
 function renderTabs() {
   const box = $('session-tabs');
   const list = SESS.sessions;
-  box.classList.toggle('hidden', list.length < 2);
+  // ★★ 开发者模式里多一颗「调试」（2026-10-11 加），而它**不是**会话标签：
+  //   点它做的是"把面板抬到会话页面上面"（`app:showPanel`），不是切到哪一条会话。
+  //   判据是 `devState.on && connected` —— 也就是**在假站点里**：那些开关说的是
+  //   假站点自己的事，真实模式里一颗都不出现，第一屏（没连上）也不出现（还没进去，
+  //   也就没有"被盖住的面板"这回事）。
+  //   ★ 它必须长在这条栏里：会话的页面一起来，窗口主体就被那块原生视图整块盖住，
+  //     面板自己身上的按钮一个都够不着 —— 而这 30px 里的东西还点得到。
+  //   ★ 于是"少于两条就整条收起来"要给它让路：一颗会话 + 开发者模式时，这一条
+  //     仍然要露出来（那颗标签是**唯一**回得来的路）。
+  const dev = Boolean(devState && devState.on && connected);
+  box.classList.toggle('hidden', list.length < 2 && !dev);
   box.textContent = '';
   // 先数一遍名字：**同名**的那些才需要区分符。
   const seen = new Map();
@@ -416,6 +454,24 @@ function renderTabs() {
     const st = s.snap && s.snap.state;
     b.title = STATE_TEXT[st] || st || '';
     b.onclick = () => window.slurmate.setFront(s.slot);
+    box.appendChild(b);
+  }
+  if (dev) {
+    const b = document.createElement('button');
+    // ★ 那个 `dev` class 是承重的：这一颗与上面那几颗**长得必须不一样**（见
+    //   app.css）。点它们俩做的是相反的事 —— 一颗把会话页面抬上来，一颗把面板
+    //   抬回来。
+    b.className = 'tab dev';
+    b.textContent = '调试';
+    b.title = '把面板抬到会话页面上面 —— 会话一跑起来，窗口主体就被它盖住，'
+      + '这里是回到面板的唯一入口。';
+    // ★ 抬不起来要**说出来**：静默失败在这一处的表现是"我点了一下，什么都没发生"，
+    //   而那正好与"这一颗本来就没事可做"长得一样。
+    b.onclick = async () => {
+      const r = await window.slurmate.showPanel();
+      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); return; }
+      showScreen('debug');
+    };
     box.appendChild(b);
   }
 }
@@ -928,7 +984,9 @@ function renderConnections(list) {
   //   上恒为 false —— 它只在"连上的那一刻"被置真（`handleConnectResult` 会先画一遍
   //   这里，再进第二屏），以及开局那一次。★ 「临时离开 / 断开」两颗**不在这儿**了：
   //   它们搬到了第二屏的标题带上（见 panel.html 里 `#screen-plugins` 那一段）。
-  document.body.classList.toggle('connected', connected);
+  // ★★ 而这一句**不在这儿算**了：`connected` 那一格只有 `setConnected` 改，而它
+  //   顺手把这两个跟着它走的东西都重画一遍（见那个函数）。两处各写一遍的话，漂开的
+  //   方向是"边栏亮着、而状态条上那颗调试没有"。
 
   // ★★ 内置那条**排最前**（其余保持用户的顺序）。它在这个列表里是"起点"，
   //   而不是又一条记录：勾上开发者模式、重启，第一个看见的就是它。
@@ -3022,7 +3080,7 @@ function askHostKey(res) {
 /** 统一的连接结果处理：主机密钥要用户拍板时弹框，其余按结果报错。 */
 async function handleConnectResult(res) {
   if (res.ok) {
-    connected = true;
+    setConnected(true);
     whoami = res.whoami || null;
     const acct = whoami && whoami.account;
     notice('ok', `已连接：${(whoami && whoami.user) || ''}（账户 ${acct || '未分配'}）`);
@@ -3055,7 +3113,7 @@ async function handleConnectResult(res) {
     return handleConnectResult(again);
   }
 
-  connected = false;
+  setConnected(false);
   notice('error', res.error || '连接失败');
   return false;
 }
@@ -3087,7 +3145,6 @@ let devState = null;
  *   |---|---|---|
  *   | 复选框 | `saved` | 用户刚点的就是它。跟着 `on` 走的话，点完它会自己弹回去 |
  *   | 「重启后生效」那一行 | 两者是否相等 | 不相等就是有改动悬着 |
- *   | 调试开关那一块 | `on` | 假后端没在跑的话，那些按钮点了只会报"仅开发者模式可用" |
  *
  *   全都跟着 `on` 走的话，点了开关**界面上什么都不会发生** —— 而那正是"点了没反应"
  *   这一类问题里最难查的一种：其实它生效了，只是要重启。
@@ -3095,6 +3152,12 @@ let devState = null;
  * ★ 从前这里还画过一块「假站点的插件来源」（一个目录选择器 + 一句"读到几个插件"）。
  *   整块删掉了：假站点上的插件**只有一条来的路** —— 装上去（插件页那颗「安装插件…」）。
  *   站点上现在有什么，由**调试那一屏**如实说（那是"假站点自己的事"）。
+ *
+ * ★ 而调试开关那一块**从前也挂在这一行上**（`$('dev-debug').toggle('hidden', !d.on)`）
+ *   —— 它搬去第四屏之后**这一句删掉了**：那一屏只从状态条那颗「调试」标签进得来，
+ *   而那颗标签的判据（`renderTabs` 里的 `devState.on && connected`）比 `on` 更严。
+ *   留着它会是**第二处**说"这些按钮什么时候露"的地方，而两处迟早漂开（漂开的形态
+ *   是"标签在、里面却是空的"）。
  */
 function renderDevMode(dm) {
   if (dm) devState = dm;
@@ -3112,9 +3175,63 @@ function renderDevMode(dm) {
       + (d.on ? '开发者模式' : '真集群那一份配置') + '。';
   }
   $('dev-restart').classList.toggle('hidden', !pending);
+}
 
-  // 调试开关跟 **`on`**：假后端没在跑，那些按钮按下去只会回一句"仅开发者模式可用"。
-  $('dev-debug').classList.toggle('hidden', !d.on);
+/**
+ * 把假站点那两处插件目录**现读一遍**，画在第四屏上。**只读** —— 这里一颗按钮都没有。
+ *
+ * ★★ 它是排查「站上一个插件都发不出来」的**唯一线索**：站点报出去的清单是那两处合
+ *   起来的，而"装上去的东西"落在沙盒里 —— 那个目录用户在别的地方根本看不到。
+ *
+ * ★ 两处**分开报**，因为它们的出路不同：样例那一处没有了是"打包版本来就该没有"
+ *   （**基座两端都不带任何插件**），而装上去那一处是"还没装过，去装一个"。
+ *
+ * ★ 报的是**扫描结果**，不是站点最终报出去的清单 —— 坏清单要在这里说出来（作者的
+ *   清单里少一个字段，他要看到的是"3 个目录里只有 1 个能用"，而不是"一个都没有"）。
+ *   站点那边照守护进程的样子**静默跳过**坏清单，那是另一件事（见 index.js 的
+ *   `sitePluginReport`）。
+ */
+async function refreshSiteDirs() {
+  const box = $('site-dirs');
+  box.textContent = '';
+  let r;
+  try {
+    r = await window.slurmate.sitePlugins();
+  } catch (e) {
+    r = { ok: false, error: (e && e.message) || String(e) };
+  }
+  if (!r || !r.ok) {
+    // ★ 取不到就说取不到（三态里的"缺席"那一态）—— 画成"那两处都是空的"是在说
+    //   一件不成立的事，而作者会照着那句话去查一个不存在的问题。
+    box.appendChild(na('假站点那两处目录'));
+    return;
+  }
+  const rep = r.report || {};
+  const rows = [
+    ['样例（开发样例那一棵，打包版里没有它）', rep.samples],
+    ['装上去的（只有「安装插件…」写它）', rep.installed],
+  ];
+  for (const [title, one] of rows) {
+    const d = (one && one.dir) || null;
+    const n = (one && one.plugins ? one.plugins.length : 0);
+    const bad = (one && one.skipped) || [];
+    const p = cel('p', 'sub');
+    // 目录不存在（`null`）= 这一处**不在场**，与"在、但是空的"是两件事 ——
+    // 前者是打包版的样子（那一处根本不该有），后者是"还没装过"。
+    p.textContent = `${title}：${d ? `${n} 个插件` : '这一处不在场'}`
+      + (d ? `　${d}` : '')
+      + (bad.length ? `　（另有 ${bad.length} 个目录读不出清单）` : '');
+    box.appendChild(p);
+    if (n) {
+      const names = cel('p', 'sub dim', one.plugins.join('、'));
+      box.appendChild(names);
+    }
+    for (const s of bad) {
+      // ★ 坏清单的**原话**照抄：那一句正是作者要看的（少一个字段 / JSON 坏了 /
+      //   目录名与 id 对不上 —— 各自指回清单里不同的地方）。
+      box.appendChild(cel('p', 'sub bad', `${s.name}：${s.why}`));
+    }
+  }
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
@@ -3324,6 +3441,10 @@ function bindEvents() {
   //   里 `#screen-plugins` 那一段。
   $('btn-to-jobs').onclick = () => showScreen('jobs');
   $('btn-to-plugins').onclick = () => showScreen('plugins');
+  // ★ 第四屏（调试）回到插件那一屏 —— 与上面两颗同一类：**屏与屏之间**的导航，
+  //   不动连接、也不动会话。★ 它**不**把面板收回去（那要等用户点某条会话的标签，
+  //   或者起一条新会话）—— 站在调试那一屏上本来就是"我要看着面板"。
+  $('btn-debug-back').onclick = () => showScreen('plugins');
 
   // ── 作业列表那一屏 ──
   // ★ 这三个 id（`btn-jobs-new` / `btn-jobs-takeover` / `btn-jobs-end`）与
@@ -3545,10 +3666,10 @@ async function bootUI() {
   //   `#screen-plugins` 那一段那条不变量）。★ 启动时这一句通常**不**成立：新起的
   //   进程手上一条会话记录都没有（`index.js` 不自动连、也不接回）。
   const attached = Boolean(st && st.sessions && st.sessions.some((x) => x.live));
-  if (attached) connected = true;
-  // `connected` 是刚刚才定下来的，而连接列表在上面就已经渲染过了 ——
-  // 补一次，否则**两条边栏**不会出现（它们跟着 `body.connected` 走）。
-  renderConnections(boot.connections);
+  if (attached) setConnected(true);
+  // ★ 从前这里要补一次 `renderConnections`（那一句原话是"否则**两条边栏**不会出现
+  //   —— 它们跟着 `body.connected` 走"）。那个理由随 `setConnected` 一起没有了：
+  //   那一格现在把跟着它走的东西**当场**重画，不必等谁补一遍。
   renderSessions(st || { sessions: [], front: null });
 
   // ★★ **开局落在第一屏**（连接列表），而且没有任何自动连接。
@@ -3599,7 +3720,7 @@ async function doConnectTo(c) {
 async function doLeave() {
   const r = await window.slurmate.leave();
   if (!r || !r.ok) return notice('error', (r && r.error) || '临时离开失败。');
-  connected = false;
+  setConnected(false);
   whoami = null;
   const left = r.left;
   if (left && !left.ok) {
@@ -3646,7 +3767,7 @@ async function doLeave() {
 async function doDisconnect() {
   const r = await window.slurmate.disconnect();
   if (!r || !r.ok) return notice('error', (r && r.error) || '断开失败。');
-  connected = false;
+  setConnected(false);
   whoami = null;
   const rel = r.released;
   if (rel && !rel.ok) {

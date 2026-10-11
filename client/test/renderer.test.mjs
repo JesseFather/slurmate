@@ -229,15 +229,19 @@ function screenBlock(id) {
   return m[0];
 }
 
-test('★★ 三屏都在，而且路由只认这三个 id', () => {
+test('★★ 四屏都在，而且路由只认这四个 id', () => {
   // ★★ 这一条守的是「打开客户端落在哪一屏」这件事**有唯一一处判据**。
   //   若"露哪一屏"是 renderSnapshot() 按**会话状态**算出来的（空闲露连接列表、
   //   跑起来露当前会话），"用户在哪儿"就没有地方记着 —— 他去作业列表看一眼，
   //   下一次快照回来就被弹回另一屏，而他什么都没做。
-  const ids = ['screen-conns', 'screen-plugins', 'screen-jobs'];
+  // ★ 第四屏（调试）2026-10-11 加：它从前是「关于」里最下面那一块，而「关于」只在
+  //   第一屏上 —— 连着站点之后够不着。★ 它与其他三屏**不是并列关系**：只有开发者
+  //   模式下才进得来（入口是状态条那颗「调试」标签），但"露哪一屏"这件事仍然是
+  //   同一句判据，所以它在同一张表里。
+  const ids = ['screen-conns', 'screen-plugins', 'screen-jobs', 'screen-debug'];
   for (const id of ids) screenBlock(id);
 
-  // 路由里**恰好**列着这三个 —— 少一个 = 那一屏永远藏不起来（叠在别的屏上面）；
+  // 路由里**恰好**列着这四个 —— 少一个 = 那一屏永远藏不起来（叠在别的屏上面）；
   // 多一个（比如某个屏被拆成两半）= 露一个的时候另一个还开着。
   const fn = /function showScreen\(name\)[\s\S]*?\n\}/.exec(js);
   assert.ok(fn, 'panel.js 里应当有 showScreen()');
@@ -274,6 +278,15 @@ test('★★ 三屏都在，而且路由只认这三个 id', () => {
   assert.match(fn[0], /plugins-title/, '第二屏的标题要在路由里按当前站点写一次');
   assert.match(fn[0], /activeConnectionId/,
     '★ 而它的判据必须是**主进程给的活跃连接**，不是界面自己记的"刚才点了谁"');
+  // ★ 第四屏顶着与第二/三屏**同一条身份带**，标题也照同一条规矩写（活跃连接给的
+  //   user@host）—— 它同样只在一个站点里才进得来。
+  assert.match(fn[0], /\$\('debug-title'\)\.textContent = '调试' \+ site/,
+    '★ 第四屏的标题要与 `plugins-title` / `jobs-title` **用同一个判据**，不是各算一份');
+  assert.match(html, /id="screen-debug"[\s\S]*id="debug-title"/, '★ 而它在那一屏里');
+  // ★ 进那一屏时**现取一次**那两处目录（与 `refreshJobs` 同形）：缓存下来的答案在
+  //   一个刚装完插件的人眼里正好是错的。
+  assert.match(fn[0], /if \(name === 'debug'\) refreshSiteDirs\(\);/,
+    '★ 第四屏要现取一次假站点那两处目录 —— 缓存的那一份可能刚过期');
 });
 
 test('★★ 用例 12：作业列表那一屏的三个动作按钮，两侧逐字相同', () => {
@@ -665,7 +678,7 @@ test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那�
   const sec = /<section id="sec-about"[\s\S]*?<\/section>/.exec(html);
   assert.ok(sec, 'panel.html 里应当有 #sec-about');
   const bare = sec[0].replace(/<!--[\s\S]*?-->/g, '');
-  for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-debug']) {
+  for (const id of ['dev-on', 'dev-pending', 'dev-restart']) {
     assert.ok(bare.includes(`id="${id}"`),
       `#${id} 要搬进 #sec-about 里面 —— 留在外面就是"收起来了但开关还在"`);
   }
@@ -677,10 +690,28 @@ test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那�
     assert.equal(bare.includes(`id="${id}"`), false,
       `#${id} 还在 —— 「假站点的插件来源」那条路应该整个删掉`);
   }
-  // ★ 调试开关那 10 颗按钮一个都不许少（它们存在的全部理由就是造出真集群上造不
-  //   出来的状态，少一颗就少验一条路）。数目钉着，多一颗也要看一眼。
-  assert.equal([...bare.matchAll(/data-debug="/g)].length, 10,
-    '调试开关那 10 颗按钮要一起搬进来');
+  // ★★ 调试开关那一块**搬去第四屏了**（2026-10-11）—— 它住在这里的时候，连着站点
+  //   之后根本够不着：会话的页面一起来，窗口主体就被那块原生视图整块盖住，而「关于」
+  //   只在第一屏上。用户的原话是「一个东西该属于哪个层级就不要乱窜」。
+  assert.equal(bare.includes('id="dev-debug"'), false,
+    '★ 调试开关那一块搬去第四屏了 —— 留在「关于」里等于它还是够不着');
+  assert.equal(/data-debug="/.test(bare), false,
+    '★ 那 10 颗按钮一颗都不许留在「关于」里（同一件事摆两处，改一处就漏一处）');
+  const dbg = screenBlock('screen-debug');
+  assert.match(dbg, /id="dev-debug"/, '★ 而那一块自己的容器跟过去（那个洋红虚线框）');
+  // ★ 那 10 颗一个都不许少（它们存在的全部理由就是造出真集群上造不出来的状态，
+  //   少一颗就少验一条路）。数目钉着，多一颗也要看一眼。
+  assert.equal([...dbg.matchAll(/data-debug="/g)].length, 10,
+    '调试开关那 10 颗按钮要一起搬进第四屏');
+  // ★ 第四屏还带一段**只读**的「站点上的插件从哪来」—— 它是排查「站上一个插件都
+  //   发不出来」的唯一线索（装上去的东西落在沙盒里，用户在别处看不到那个目录）。
+  //   ★ 只读：那一块里一颗按钮都没有 —— 装/卸走插件页那条路。
+  assert.match(dbg, /id="site-dirs"/, '★ 第四屏要说得出假站点那两处目录各读到什么');
+  const others = [...dbg.matchAll(/<button[^>]*>/g)].map((m) => m[0])
+    .filter((b) => !b.includes('data-debug='));
+  assert.deepEqual(others, ['<button id="btn-debug-back" class="ghost">'],
+    '★ 第四屏上除了那 10 颗调试开关，只该有一颗「← 插件」—— 它是**只读**的，'
+    + '装/卸那件事走插件页那条路（与真站点上"只有管理员能装"同形）');
 
   // ★ 状态条那格**留着**：会话跑起来之后窗口主体被原生视图盖住，那是唯一还看得见
   //   开发者模式的地方。
@@ -689,10 +720,10 @@ test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那�
     '★ 而它仍然由前台那一条的 `dev` 驱动');
 
   // ★ 「从前那两段」压成了一句 —— 它是干什么的留下，它是**给谁用的**删掉（名字
-  //   自己说）。★ 只数**开发者模式那一段自己**（到 `#dev-debug` 为止）：底下那一块
-  //   自己的说明不在这条判据里，它说的是"那些按钮怎么用"，不是"这个模式是什么"。
+  //   自己说）。★ 只数**开发者模式那一段自己**（到那个复选框那一行为止 —— 那一行是
+  //   这一节的下一格，而不是另一段说明）。
   const head = sec[0].slice(sec[0].indexOf('<h3>开发者模式</h3>'),
-    sec[0].indexOf('<div id="dev-debug"'));
+    sec[0].indexOf('<div class="row">'));
   assert.equal([...head.matchAll(/<p class="sub">/g)].length, 1,
     '开发者模式那一段只留一句 —— 多一句就是那两段又长回来了');
 });
@@ -737,9 +768,10 @@ test('★★ 第二/三屏顶上那条身份带（翻页感由**结构**给，�
   //   而第一屏顶着的是客户端的名字（masthead）。
   // ★ 用户把这件事定死了：**底色不变**（原话是"底色不变是（主题统一）的表现，
   //   而不是证明翻页了"）—— 所以这一条既查那条带子，也查"没有谁在换底色"。
-  assert.match(css, /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head\s*\{/,
-    '★ 两屏的标题行要**一起**画成带子（各写一份的话两处会漂，而漂的方向是'
-    + '"其中一屏看起来还是旧的那一版"）');
+  assert.match(css,
+    /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head,\s*\n#screen-debug > \.sec-head\s*\{/,
+    '★ 进了站点的那几屏（第二/三屏 + 开发者模式下的第四屏）标题行要**一起**画成'
+    + '带子（各写一份的话几处会漂，而漂的方向是"其中一屏看起来还是旧的那一版"）');
   const band = /#screen-plugins > \.sec-head,[\s\S]*?\n\}/.exec(css);
   assert.ok(band, 'app.css 里应当有那条带子');
   assert.match(band[0], /background:\s*var\(--bg-alt\)/, '★ 带子自己有底色');
@@ -882,7 +914,10 @@ test('★★ 站在第一屏上就一定不在连接里 ——「换站点」那
   for (const fn of ['doLeave', 'doDisconnect']) {
     const body = new RegExp(`async function ${fn}\\(\\)[\\s\\S]*?\\n\\}`).exec(js);
     assert.ok(body, `panel.js 里应当有 ${fn}()`);
-    assert.match(body[0], /connected = false;/,
+    // ★ 收的方式是 `setConnected(false)`（2026-10-11 改）：那一格只有这一个入口，
+    //   因为它顺手要把**跟着它走的两个东西**当场重画（两条边栏、状态条上那颗
+    //   「调试」标签）。写成裸赋值的话，那颗标签会等到下一次推送才更新。
+    assert.match(body[0], /setConnected\(false\)/,
       `★★ ${fn} 必须把 connected 收掉 —— 不收的话"回到第一屏"就是一句空话`);
     assert.match(body[0], /showScreen\('conns'\)/, `★ ${fn} 是回第一屏的那条路`);
   }
@@ -1123,11 +1158,15 @@ test('★ 开发者模式：「想要的」与「生效的」在界面上必须�
   const code = stripJsComments(js);
   assert.match(code, /\$\('dev-on'\)\.checked = Boolean\(d\.saved\)/,
     '复选框要画 **saved**（用户要的那个），不是 on');
-  assert.match(code, /\$\('dev-debug'\)\.classList\.toggle\('hidden', !d\.on\)/,
-    '调试开关那一块要画 **on**（这次进程真的在不在开发者模式）');
   assert.match(code, /有改动等着重启/,
     '两侧不一致时必须说出来 —— 不说的话，用户勾了开关、界面没变，'
     + '他会以为功能坏了（更糟的是他以为没生效，重启之后进了沙盒对着假集群干活）');
+  // ★★ 而"调试开关那一块画 **on**"那一条**删掉了**（2026-10-11）：那一块搬去第四屏
+  //   之后不再自带显隐开关 —— 留一句 `toggle('hidden', !d.on)` 就是**第二处**说
+  //   "这些按钮什么时候露"的地方，而它比第四屏真正的入口（`devState.on && connected`）
+  //   更宽：漂开的形态是"标签在、里面却是空的"。
+  assert.equal(/\$\('dev-debug'\)\.classList\.toggle/.test(code), false,
+    '★ 第四屏里那一块不再自己管显隐 —— 进不进得来是那颗「调试」标签的事（见 renderTabs）');
 });
 
 test('★ 站点分发那四条桥同时登记在 preload 与 panel.js 两侧', () => {
@@ -1292,6 +1331,39 @@ test('★ 标签栏在这 30px 里 —— 它下面是原生视图，放外面�
   assert.match(bar[0], /id="session-tabs"/,
     '会话标签必须在状态条**里面**：窗口主体被原生视图整块盖住');
   assert.match(css, /--bar-h:\s*30px/, '状态条高度还是那个常量');
+});
+
+test('★★ 那颗「调试」标签：只在假站点里出现，而且与会话标签长得不一样', () => {
+  // ★★ 它 2026-10-11 加，理由是**物理**的：会话的页面是原生视图，从 y=30 往下盖住
+  //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
+  //   而"把人从那一屏救回来"的东西必须住在这 30px 里。
+  const code = stripJsComments(js);
+  const fn = /function renderTabs\(\)[\s\S]*?\n\}/.exec(code);
+  assert.ok(fn, 'panel.js 里应当有 renderTabs()');
+  // ★ 判据是 `devState.on && connected` —— **在假站点里**。真实模式一颗不出现，
+  //   第一屏（没连上）也不出现：还没进去，也就没有"被盖住的面板"这回事。
+  assert.match(fn[0], /const dev = Boolean\(devState && devState\.on && connected\)/,
+    '★ 那一颗的判据是 `devState.on && connected`（两个都要）');
+  // ★ 而"少于两条会话就整条收起来"那条规矩要**给它让路**：一颗会话 + 开发者模式时，
+  //   这一条仍然要露出来（那颗标签是唯一回得来的路）。
+  assert.match(fn[0], /classList\.toggle\('hidden',\s*list\.length < 2 && !dev\)/,
+    '★ 会话少于两条也要留一颗位置给「调试」—— 少了它，一颗会话时那颗标签整个消失');
+  // ★ 点它做的是"把面板抬回来"，**不是**切到哪一条会话。
+  assert.match(fn[0], /window\.slurmate\.showPanel\(\)/,
+    '★ 点它要调 `showPanel`（把面板抬到会话页面上面）');
+  assert.match(fn[0], /showScreen\('debug'\)/, '★ 抬回来之后要切到第四屏');
+  assert.match(fn[0], /b\.className = 'tab dev'/, '★ 那一颗自己的类（长相要与邻居分开）');
+  // ★ 抬不起来要**说出来**：静默失败在这一处的表现是"我点了一下，什么都没发生"。
+  assert.match(fn[0], /notice\('error'/,
+    '★ showPanel 失败要报出来 —— 静默失败与"这一颗本来就没事可做"长得一样');
+  // ★ 而它**长在那条栏里**（不是状态条上另起一格）：那 30px 是唯一还点得到的地方。
+  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
+  assert.match(bar[0], /id="session-tabs"/);
+  // ★ CSS：那一颗的颜色与邻居不同（洋红 = 这个仓库里的「假后端」），而 `:hover`
+  //   要在它**后面**再写一遍 —— 选择器同权重，靠位置分胜负。
+  assert.match(css, /#session-tabs \.tab\.dev \{ color: var\(--dev\); border-color: var\(--dev\); \}/);
+  assert.match(css, /#session-tabs \.tab\.dev:hover \{ color: var\(--fg\); \}/,
+    '★ 少了这一句，鼠标停上去它反而不变色（比邻居更迟钝）');
 });
 
 test('★ 工作区选择器只在**前台那条会话真的有那一份数据**时露出来', () => {

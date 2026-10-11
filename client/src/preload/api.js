@@ -180,6 +180,14 @@ contextBridge.exposeInMainWorld('slurmate', {
   takeover: (sessionId) => ipcRenderer.invoke('app:takeover', { sessionId }),
   // 把某一条抬到面板上面。**纯界面动作**，不改任何框架状态。
   setFront: (slot) => ipcRenderer.invoke('app:setFront', { slot }),
+  // 反过来：把**面板**抬到会话页面上面（会话那块原生视图从 y=30 往下盖住整块主体，
+  // 面板自己的按钮那时一个都够不着）。它同样是纯界面动作 —— 一个字都不动会话。
+  // ★ 入口只有一处：状态条上那颗「调试」标签（只在开发者模式里出现）。
+  showPanel: () => ipcRenderer.invoke('app:showPanel'),
+  // 假站点那两处插件目录各读到什么（第四屏那一段**只读**信息）。
+  // ★ 它是排查「站上一个插件都发不出来」的唯一线索：装上去的东西落在沙盒里，
+  //   用户在别处看不到那个目录。
+  sitePlugins: () => ipcRenderer.invoke('app:sitePlugins'),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
   // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。
   // ★ **必须指名 slot**：省略会被主进程拒绝，而不是"停那唯一的一个"。

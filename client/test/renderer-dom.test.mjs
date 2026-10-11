@@ -1005,6 +1005,70 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 });
 
+test('★★ 那颗「调试」标签：只在假站点里出现，点它是把面板抬回来', async () => {
+  // ★★ 它 2026-10-11 加，理由是**物理**的：会话的页面是原生视图，从 y=30 往下盖住
+  //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
+  //   所以"回到面板"这件事只能由这 30px 里的一颗标签做。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__shown = 0; window.__front = null;'
+    + 'window.slurmate.showPanel = () => { window.__shown += 1;'
+    + ' return Promise.resolve({ ok: true }); };'
+    + 'window.slurmate.setFront = (slot) => { window.__front = slot; };');
+  const one = (h) => h.byId.get('session-tabs').children;
+  /** 那条栏里**叫「调试」的那一颗**（会话标签与它同住一条栏，所以不能数总数）。 */
+  const devTab = (h) => one(h).filter((b) => b.textContent === '调试');
+  const ONE_SESSION = `SESS = { sessions: [
+    { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`;
+
+  // ── ① 真实模式（`devState.on === false`）：一颗都不出现，一条会话时整条收起来 ──
+  h.run(`devState = { on: false, saved: false }; connected = true; ${ONE_SESSION}`);
+  h.fn('renderTabs')();
+  assert.deepEqual(devTab(h), [], '★ 真实模式里不许出现那颗「调试」');
+  assert.equal(one(h).length, 1, '（那一条会话自己的标签照旧在，只是整条栏收着）');
+  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'),
+    '★ 一条会话 + 没有调试 ⇒ 整条收起来（它不提供任何选择）');
+
+  // ── ② 开发者模式，但**没连上**（站在第一屏）：也不出现 ──
+  //   还没进去，也就没有"被盖住的面板"这回事。
+  h.run('devState = { on: true, saved: true }; connected = false;');
+  h.fn('renderTabs')();
+  assert.deepEqual(devTab(h), [], '★ 没连上（还在第一屏）时不许出现');
+  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
+
+  // ── ③ 在假站点里：出现，而且**一条会话时也在**（那是唯一回得来的路）──
+  h.run('connected = true;');
+  h.fn('renderTabs')();
+  assert.equal(one(h).length, 2, '一条会话 + 一颗「调试」');
+  assert.equal(one(h)[0].textContent, '编辑器');
+  assert.equal(devTab(h).length, 1);
+  assert.match(devTab(h)[0].className, /\bdev\b/,
+    '★ 它自己的类要挂上 —— 它与会话标签**做的是相反的事**，长相必须分得开');
+  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
+    '★★ 一条会话时这一条也要露出来 —— 少了它那颗标签整个消失，面板就再也抬不回来');
+
+  // ── ④ 点它：调 showPanel（抬面板）+ 切到第四屏 ──
+  h.run("$('screen-plugins').classList.remove('hidden'); $('screen-debug').classList.add('hidden');");
+  await devTab(h)[0].onclick();
+  assert.equal(h.run('window.__shown'), 1, '★ 点它要调 `showPanel`（把面板抬到页面上）');
+  assert.equal(h.run('window.__front'), null,
+    '★ 而它**不是**会话标签：不许顺手调 setFront（那会把面板再盖回去）');
+  assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), false,
+    '★ 抬回来之后要切到第四屏');
+  assert.equal(h.byId.get('screen-plugins').classList.contains('hidden'), true,
+    '★ 同时只露一个（路由那一句管着所有屏）');
+  assert.equal(h.byId.get('debug-title').textContent, '调试 · alice@198.51.100.7',
+    '★ 第四屏的标题同样要带上是哪一个站点');
+
+  // ── ⑤ 抬不起来要**说出来**：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
+  h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"
+    + "$('screen-debug').classList.add('hidden');");
+  await devTab(h)[0].onclick();
+  assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), true,
+    '★ 失败时不许切屏（切了就是"面板被盖着、而界面上写着调试那一屏"）');
+  const last = () => h.byId.get('notices').children[0].children[1].textContent;
+  assert.match(last(), /假装抬不起来/, '★ 而原因要照原话说出来');
+});
+
 test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
   // ★★ 2026-10-11 改：上色的对象从那个 6px 的圆点换成了**边栏自己** ——
   //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。
@@ -1052,8 +1116,10 @@ test('★★ 连上之后才有两条边栏，而且它们是在状态条**下�
   h.fn('renderConnections')(CONNS);
   assert.equal(h.run('document.body.classList.contains("connected")'), false,
     '没连上就不该有边栏');
-  h.run('connected = true;');
-  h.fn('renderConnections')(CONNS);
+  // ★ 走 `setConnected`（2026-10-11 起那一格只有这一个入口）：它顺手把跟着
+  //   `connected` 走的两个东西当场重画 —— 两条边栏与状态条上那颗「调试」标签。
+  //   裸赋值 + 重画列表那条老路已经删掉了（两处各写一遍迟早漂开）。
+  h.run('setConnected(true);');
   assert.equal(h.run('document.body.classList.contains("connected")'), true,
     '连上之后两条栏才出现');
 });

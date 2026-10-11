@@ -21,6 +21,10 @@
   <span class="dot"></span>
   <span class="st" id="sb-state">未开始</span>
   <!-- 会话标签：**两条以上**才出现（一条时它不提供任何选择，只占地方）。
+       ★★ 而开发者模式里**多一颗「调试」**（2026-10-11 加），那一颗的判据是
+         `devState.on && connected` —— 于是"少于两条就整条收起来"要给它让路
+         （见 panel.js 的 `renderTabs`）。它出现的理由与那几颗不同：点它是**把面板
+         抬回来**（`app:showPanel`），不是切到哪一条会话。
        ★ 它必须待在这 30px 里：窗口主体会被原生视图整块盖住，把标签放在下面
          等于它们永远点不到。见 windows.js 的 setFront。
        ★ 名字是**插件名**，而**同名时会补一个本地端口**（见 panel.js 的
@@ -343,6 +347,7 @@
       <p class="sub">
         打开之后客户端<strong>不连集群</strong>，改用本地一个模拟的站点（真的 HTTP、
         真的分发、真的走同意闸，只有 SSH 那一跳是假的），配置完全独立、绝不会碰真配置。
+        重启之后连着这个假站点时，状态条上会多一颗「调试」—— 那些开关住在它里面。
       </p>
 
       <div class="row">
@@ -356,37 +361,10 @@
       <div class="row">
         <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
       </div>
-
-      <div id="dev-debug" class="debug hidden">
-        <h3>调试开关</h3>
-        <p class="sub">
-          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
-          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
-        </p>
-        <div class="row">
-          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
-          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
-          <button class="ghost" data-debug="reap">模拟会话被回收</button>
-          <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
-               要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
-          <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
-               而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
-          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
-          <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
-               而【接管】这个按钮的全部意义就是那一刻。 -->
-          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
-          <button class="ghost" data-debug="reset">复位</button>
-        </div>
-        <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
-             限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
-             混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
-        <div class="row">
-          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
-          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
-          <button class="ghost" data-debug="rate-limited">站点在限流</button>
-          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
-        </div>
-      </div>
+      <!-- ★★ 那一块调试开关（10 颗按钮）**搬去第四屏了**（`#screen-debug`）。
+           它住在这里的时候，连着站点之后根本够不着它 —— 「关于」只在第一屏上，
+           而会话的页面一起来，窗口主体就被原生视图整块盖住（见 `#screen-debug`
+           那一段）。★ 它不再放一份在这里：同一件事摆两处，改一处就漏一处。 -->
     </section>
     </section><!-- /screen-conns -->
 
@@ -571,6 +549,73 @@
         <button id="btn-history" class="ghost tiny">取最近作业</button>
       </p>
       <div id="history-body"></div>
+    </section>
+
+    <!-- ── 第四屏：调试（**只在开发者模式里进得来**）──
+         ★★ 它从前是「关于」最下面那一块（10 颗按钮），而「关于」只在**第一屏**上
+           —— 连着站点的时候够不着它：会话的页面一起来，窗口主体就被原生视图整块
+           盖住（面板那 30px 状态条以下全在它底下）。用户的原话是「我一再强调层级的
+           概念，一个东西该属于哪个层级就不要乱窜」—— 那些开关说的是**假站点**里
+           的事，「关于」说的是这个客户端是什么，两件事。
+         ★ 入口是**状态条上那颗「调试」标签**（见 panel.js 的 `renderTabs`）：它住在
+           那 30px 里，所以会话页面盖着面板的时候它仍然点得到 —— 而这一屏恰恰是
+           "面板被盖住时"要去的地方（见 windows.js 的 `_panelFront`）。
+         ★ 判据是 `devState.on && connected`：真实模式与第一屏（没连上）一颗标签都
+           不出现，这一屏也就进不来。 -->
+    <section id="screen-debug" class="screen hidden">
+      <div class="sec-head">
+        <!-- ★ 「调试 · user@host」由 panel.js 的 `showScreen` 写成（与
+             `#plugins-title` / `#jobs-title` 同一个理由：用户在几台机器之间来回时，
+             最要紧的一件事就是"我现在看的是哪一台"）。 -->
+        <h2 id="debug-title">调试</h2>
+        <button id="btn-debug-back" class="ghost">← 插件</button>
+      </div>
+
+      <div id="dev-debug" class="debug">
+        <h3>调试开关</h3>
+        <p class="sub">
+          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
+          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+        </p>
+        <div class="row">
+          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
+          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
+          <button class="ghost" data-debug="reap">模拟会话被回收</button>
+          <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
+               要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
+          <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
+               而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
+          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
+          <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
+               而【接管】这个按钮的全部意义就是那一刻。 -->
+          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
+          <button class="ghost" data-debug="reset">复位</button>
+        </div>
+        <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
+             限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
+             混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
+        <div class="row">
+          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
+          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
+          <button class="ghost" data-debug="rate-limited">站点在限流</button>
+          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+        </div>
+      </div>
+
+      <!-- ── 假站点上的插件是从哪来的（**只读**）──
+           ★ 它属于"假站点自己的事"，而且它是排查「站上一个插件都发不出来」的
+             **唯一线索**：站点报出去的清单是下面两处合起来的，而"装上去的东西"
+             落在沙盒里（用户在别处看不到那个目录）。
+           ★ 只读：这里一颗按钮都没有 —— 装/卸走插件页那条路（与真站点上"只有
+             管理员能装"同形），改写不写是两件事。
+           ★ 内容是**现取的**（进这一屏时问一次，见 panel.js 的 `refreshSiteDirs`）：
+             装完一个插件再进来，看到的必须是刚刚那一次的结果。 -->
+      <h3>站点上的插件从哪来</h3>
+      <p class="sub">
+        假站点报出去的清单是下面两处合起来的，两处都空 = 站点上确实一个插件都没有
+        （那是合法状态）。这里说的是**站点那一侧读到了什么**，与客户端装了哪些无关。
+      </p>
+      <div id="site-dirs"></div>
     </section>
 
     <h2>日志</h2>

@@ -160,6 +160,29 @@ class ShellWindow {
      *   由 `pushSessions` 从 `index.js` 的 `frontSlot()` 带过来：**决定权只有一处**。
      */
     this._front = null;
+    /**
+     * **面板自己**要不要盖在那块会话页面上面（开发者模式的「调试」标签要它）。
+     *
+     * ★★ 这一格存在的理由是一条物理事实：会话那块界面是**原生视图**，从 y=30 往下
+     *   盖住整个窗口主体 —— 面板上任何属于自己的按钮都够不着。所以"我要看面板"这件
+     *   事只能由窗口这一层记着并让那块视图**让开**（`_layout` 里那一句）。
+     *
+     *   | 谁把它置真 | 谁把它清掉 |
+     *   |---|---|
+     *   | `showPanel()`（状态条那颗「调试」标签） | ① `setFront()`：用户点了某条会话的标签<br>② `pushSessions()` 里**前台换了**那一下<br>③ `showSurface()` 里**前台那条的页面刚建出来**那一下 |
+     *
+     * ★★ ②③ 两条**一条都不许少**，而它们各自堵的是一格不同的缝：
+     *   · ②：起了一条新会话（或者前台那条结束了）⇒ 前台**换了个槽名**；
+     *   · ③：一次会话结束之后**同一个槽被下一轮复用** —— 那时前台从头到尾都是同一个
+     *     槽名（`reapSessions` 把旧记录删掉，新的那条又按同一个槽名建回来），②**判
+     *     不出来**，而页面上来了。
+     *   两条都少了的话，症状是"我点了开始会话，什么都没出来" —— 而用户手上唯一的
+     *   解释是"这个客户端坏了"。
+     *
+     * ★ 而"离开站点"（临时离开 / 断开）**不需要单独一条**：那两条路都会把会话全收掉，
+     *   于是 `frontSlot()` 变成 null ⇒ 前台换了 ⇒ 在这里就清掉了。
+     */
+    this._panelFront = false;
     this.overlayView = null;
     /**
      * 浮窗那一层。**懒建**（头一次停靠时才建），建成之后跨次复用 ——
@@ -246,6 +269,17 @@ class ShellWindow {
       // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是**新对象**，
       // 必须重新装一遍 —— 否则新视图的 will-navigate 不设防、崩溃也不报错。
       this._wireSurface(view.webContents, slot);
+      // ★★ **前台那一条的页面刚建出来 ⇒ 面板让开**（2026-10-11 加）。这一句补的是
+      //   `pushSessions` 里那一句够不着的一格：**一次会话结束之后，同一个槽被下一轮
+      //   复用**。那时 `frontSlot()` 从头到尾都是同一个槽名（记录被 `reapSessions`
+      //   删掉、又被新的那条按同一个槽名建回来），前台**一个字都没变** —— 而页面上
+      //   来了，用户正站在「调试」那一屏上等它（症状：点了开始会话，什么都没出来）。
+      //   ★ 判据是"这一块**是新建的**"（上面那一支只在真的没有那一块时走）—— 放在
+      //     这个函数的出口处的话，每一次心跳（`ensureSurface` 会被反复调到）都会把
+      //     面板收回去，那一屏就没法用了。
+      //   ★ 而它**只对前台那一块**做：起一条**后台**会话时把前台那块旧页面顶上来，
+      //     是另一个方向的意外（用户会以为"我起的是它吗"）。
+      if (slot === this._front) this._panelFront = false;
       await view.webContents.loadURL(url);
     } else {
       // 隧道换端口：origin 变了，但**不重装监听器**（它们读的是 s.origin）。
@@ -327,10 +361,31 @@ class ShellWindow {
    */
   setFront(slot) {
     this._front = slot || null;
+    // ★ 用户点了一条会话的标签 ⇒ 他要的就是那块页面 —— 面板让开（见 `_panelFront`）。
+    //   少了这一句，「调试」那一屏上点会话标签会"什么都不发生"。
+    this._panelFront = false;
+    this._layout();
+  }
+
+  /**
+   * 反过来：**把面板抬到会话页面上面**（不发 `pushSessions` —— 会话那一份数据
+   * 一个字都没变，变的只是"屏幕上看得见谁"）。
+   *
+   * ★ 会话那块视图不会被销毁、也不会被隐藏到"重置"：它只是 `setVisible(false)`，
+   *   背后那条隧道与那个页面照旧活着 —— 所以再点回去时编辑器里那些没保存的改动
+   *   还在（见 `_layout` 与 `_destroySurface` 那两段的区别）。
+   *
+   * ★ 没有会话在跑的时候它也无害（那时没有任何一块视图要收）。
+   */
+  showPanel() {
+    this._panelFront = true;
     this._layout();
   }
 
   get front() { return this._front; }
+
+  /** 面板现在是不是被顶到前面了（用例要读它）。 */
+  get panelFront() { return this._panelFront; }
 
   /** 取**某一个槽**那块界面用的 session（要在同一个分区里发请求才带得上它的 cookie）。 */
   surfaceSession(slot) {
@@ -454,7 +509,9 @@ class ShellWindow {
     const stage = stageRect(w, h);
     for (const [slot, s] of this.surfaces) {
       if (!s.view.webContents || s.view.webContents.isDestroyed()) continue;
-      const on = slot === this._front;
+      // ★★ `_panelFront` 那一格在这里生效：它说"面板要露出来"，于是**每一块**会话
+      //   页面都让开。判据只有这一句 —— 别处再判一遍就是第二个"谁在上面"。
+      const on = !this._panelFront && slot === this._front;
       s.view.setVisible(on);
       if (on) s.view.setBounds(stage);
     }
@@ -657,7 +714,14 @@ class ShellWindow {
    *   也没有「结束会话」的入口，而它在集群上占着资源。
    */
   pushSessions(list, front) {
-    this._front = front || null;
+    const next = front || null;
+    // ★★ **前台换了 ⇒ 面板让开**（2026-10-11 加，与 `setFront` 里那一句同一件事的
+    //   另一半）。少了它的症状是"我点了开始会话，什么都没出来"：用户可能正站在
+    //   「调试」那一屏上，而新会话的页面被 `_panelFront` 按着不让露。
+    //   ★ 只在**真的换了**的时候清：用户站在调试那一屏、而会话表每隔几秒推一次
+    //     （心跳），每推一次都把面板收回去的话，那一屏会用不了。
+    if (next !== this._front) this._panelFront = false;
+    this._front = next;
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) wc.send('session:states', { sessions: list, front: this._front });
     this._layout();
@@ -795,6 +859,9 @@ class ShellWindow {
     // ★ 遍历的是**一份拷贝**：`_destroySurface` 会改 `this.surfaces`。
     for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
     this._front = null;
+    // ★ 与 `_front` 一起归零：两块"谁在上面"的状态留在这儿没有意义，而留着它的
+    //   代价是下一次重画时面板莫名其妙地按着页面不让露。
+    this._panelFront = false;
     this._stopCursorWatch();
     // overlayView 与 hoverView 都与 partition 无关，走同一段通用清理
     for (const key of ['overlayView', 'hoverView']) {

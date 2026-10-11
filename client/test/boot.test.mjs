@@ -4864,6 +4864,113 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
   cleanupSiteState(idx);
 });
 
+test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回来', async (t) => {
+  // ★★ 这一条守的是那颗「调试」标签的意义（2026-10-11 加）：会话那块页面是**原生
+  //   视图**，从 y=30 往下盖住整个窗口主体 —— 面板上任何属于自己的按钮（包括那些
+  //   调试开关）那时一个都够不着。而"抬回来"有三条路，**一条都不许少**。
+  //
+  //   ②③ 两条各自堵的是一格不同的缝，而它们常常被当成同一件事：
+  //     · ② 前台**换了个槽名**（旧记录被 `reapSessions` 收掉，新的那条落在别的槽上）；
+  //     · ③ **同一个槽被下一轮复用** —— 那时前台从头到尾都是同一个槽名，②判不出来。
+  //   少了③的症状正是"我点了开始会话，什么都没出来"（单开的人碰到的都是这一格）。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await openUpTo(idx, 3);
+  await connectDemo(idx);
+
+  // ── 甲：一条有页面的会话 ──
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `甲提交失败：${JSON.stringify(a)}`);
+  const ctlA = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctlA.state === 'running' && ctlA.snapshot().origin, '甲进入 running', 30000);
+  const viewA = await waitUntil(() => viewFor(w, a.slot) || null, '甲那块界面');
+  assert.equal(viewA._visible, true, '前置：那块页面本来就盖在面板上面');
+  assert.equal(w.panelFront, false, '前置：面板本来不在前面');
+  assert.equal(w.front, a.slot, '前置：它就是前台');
+
+  // ── 抬面板：那颗「调试」标签走的就是这一条 ──
+  assert.equal((await invoke('app:showPanel')).ok, true);
+  assert.equal(w.panelFront, true);
+  assert.equal(viewA._visible, false, '★ 面板要露出来 —— 那一块原生视图整块让开');
+  assert.equal(viewFor(w, a.slot), viewA, '★ 而它是**藏起来**，不是拆掉');
+  assert.equal(viewA.webContents.isDestroyed(), false,
+    '★★ 页面**没有被销毁**：抬回来之后切回去还是同一个页面（编辑器里那些没保存的'
+    + '改动还在）。销毁重建的话表现是"我的东西不见了"，而日志里一个字都没有');
+
+  // ── 路①：点某条会话的标签 ──
+  await invoke('app:setFront', { slot: a.slot });
+  assert.equal(viewA._visible, true, '★ 路①：点了会话标签，页面要回来');
+  assert.equal(w.panelFront, false);
+
+  // ── 路③：**同一个槽被下一轮复用**（前台一个字都没变）──
+  //   结束甲之后，前台仍然指着**它那个槽**（记录留着，界面要显示"已结束"）—— 然后再
+  //   起同一个插件、同一份数据，槽名与前台都是同一个。
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(() => !occupiedOf(idx, a.slot), '甲那个槽松开', 20000);
+  assert.equal(w.front, a.slot,
+    '★ 前置：前台**仍旧是那个槽**（记录留着，界面要显示"已结束"）—— 这正是②判不出来的那一格');
+  // ★ 用户又点了一次那颗「调试」（面板本来就露着 —— 那条会话已经没了），这一步只是
+  //   把标志重新立起来。而这正是③要守的现场：**前台一个字没变，而页面是新的一块**。
+  await invoke('app:showPanel');
+  assert.equal(w.panelFront, true, '★ 前置：标志立着，而那个槽上此刻没有页面');
+
+  const a3 = await appStart(null, 'code-server');
+  assert.equal(a3.ok, true, `甲′提交失败：${JSON.stringify(a3)}`);
+  assert.equal(a3.slot, a.slot,
+    '★ 前置：同一个插件 + 同一份数据 ⇒ **同一个槽**（这条用例的整个意义就在这里）');
+  const ctlA3 = idx._test.sessionAt(a3.slot).controller;
+  await waitUntil(() => ctlA3.state === 'running' && ctlA3.snapshot().origin, '甲′进入 running', 30000);
+  const viewA3 = await waitUntil(() => viewFor(w, a3.slot) || null, '甲′那块界面');
+  assert.equal(w.panelFront, false,
+    '★★ 路③：这一块页面**刚建出来**，而前台一个字都没变 —— 面板必须让开。'
+    + '少了这一格的症状就是"我点了开始会话，什么都没出来"');
+  assert.equal(viewA3._visible, true, '★ 页面要自己上来');
+
+  // ── 路②：前台**换了**（那条会话结束之后，新的一条落在别的槽上）──
+  await invoke('app:showPanel');
+  assert.equal(w.panelFront, true);
+  await invoke('app:stop', { slot: a3.slot });
+  await waitUntil(() => !occupiedOf(idx, a3.slot), '甲′那个槽松开', 20000);
+  const b = await appStart(null, 'sshd');          // 另一个插件 ⇒ 另一个槽
+  assert.equal(b.ok, true, `乙提交失败：${JSON.stringify(b)}`);
+  assert.notEqual(b.slot, a.slot, '前置：它落在**另一个槽**上');
+  await waitUntil(() => w.front === b.slot, '前台换到乙那个槽上', 20000);
+  assert.equal(w.panelFront, false,
+    '★★ 路②：前台换了 ⇒ 面板让开（少了它，页面上来了而面板还按着它）');
+
+  // ── ★ 反过来：起一条**后台**会话时，面板不许被顶掉 ──
+  //   判据是"这一块**是不是前台**"（见 windows.js 的 `showSurface`）。少了这一半的话，
+  //   用户站在调试那一屏上起第二条会话，冒出来的是**第一条**那个旧页面。
+  await invoke('app:stop', { slot: b.slot });
+  await waitUntil(() => !occupiedOf(idx, b.slot), '乙那个槽松开', 20000);
+  const c1 = await appStart(null, 'code-server');
+  assert.equal(c1.ok, true, `丙提交失败：${JSON.stringify(c1)}`);
+  const ctlC1 = idx._test.sessionAt(c1.slot).controller;
+  await waitUntil(() => ctlC1.state === 'running' && ctlC1.snapshot().origin, '丙进入 running', 30000);
+  await waitUntil(() => w.front === c1.slot, '前台是丙', 20000);
+  await invoke('app:showPanel');
+  assert.equal(w.panelFront, true);
+  const c2 = await appStart(null, 'code-server');   // 同一个插件开第二份 = 临时副本
+  assert.equal(c2.ok, true, `丁提交失败：${JSON.stringify(c2)}`);
+  assert.notEqual(c2.slot, c1.slot, '★ 两份数据 ⇒ 两个槽');
+  const ctlC2 = idx._test.sessionAt(c2.slot).controller;
+  await waitUntil(() => ctlC2.state === 'running' && ctlC2.snapshot().origin, '丁进入 running', 30000);
+  const backView = await waitUntil(() => viewFor(w, c2.slot) || null, '丁那块界面');
+  assert.equal(w.front, c1.slot, '★ 前置：前台没有换（用户没有点过任何标签）');
+  assert.equal(w.panelFront, true,
+    '★ 后台那条起来了**不该**把面板顶掉 —— 用户还在调试那一屏上');
+  assert.equal(backView._visible, false,
+    '★ 而**后台**那一条的页面不许自己顶上来（那会让用户以为"我起的是它吗"）');
+
+  // 收尾：两条都结束，把现场还给后面的用例
+  await invoke('app:stop', { slot: c1.slot });
+  await invoke('app:stop', { slot: c2.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '两条都释放', 30000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡住了', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
