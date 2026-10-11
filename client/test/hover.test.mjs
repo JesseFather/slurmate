@@ -351,3 +351,25 @@ test('★ 右栏「更多」按下去走桥上的 more()（浮窗自己不去问
   assert.equal(await h.byId.get('out-more').onclick(), undefined);
   assert.equal(h.calls.more, 1);
 });
+
+test('★★ 浮窗的滚动条也是我们自己画的，而且永远占着那条槽', () => {
+  // ★★ 2026-10-11：浮窗是**另一个文档**（另一个 BrowserWindow），它有自己那份样式表
+  //   —— 面板那一边（app.css）画的滚动条管不到这里，所以这一套得在这儿再写一遍。
+  //   这也是这个文件头那句"与面板同一套配色"的同一个理由。
+  const css = read('hover.css');
+  assert.match(css, /::-webkit-scrollbar\s*\{\s*width:\s*\d+px/,
+    '★ 宽度要自己定死（不写的话露出来的就是系统那一条）');
+  assert.match(css, /::-webkit-scrollbar-thumb\s*\{[^}]*border-radius/,
+    '★ 滑块要是我们的');
+  // ★ 作业输出是一行一行长出来的：不留那条槽，正文会在每一条新输出到来时缩一下。
+  const at = css.indexOf('.body {');
+  assert.notEqual(at, -1, 'hover.css 里应当有 .body 那一条规则');
+  const block = css.slice(at, css.indexOf('}', at));
+  assert.match(block, /scrollbar-gutter:\s*stable/,
+    '★★ 右栏那一块要永远留着那条槽 —— 输出是一行一行长出来的，不留的话正文会跟着缩');
+  // ★★ 同上：`scrollbar-width` / `scrollbar-color` 一旦出现就会盖掉上面那一套。
+  for (const f of ['width', 'color']) {
+    assert.equal(new RegExp(`scrollbar-${f}\\s*:`).test(css), false,
+      `★★ 不许写 scrollbar-${f} —— 它会盖掉 ::-webkit-scrollbar 那一套`);
+  }
+});

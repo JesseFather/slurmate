@@ -292,13 +292,17 @@ function showScreen(name) {
   // "用户走开了"，不是"会话跑起来了"）。不收的话，用户从第二屏退回来会看见一个半填的表单，
   // 而它上面那个地址可能已经连过了。
   if (name !== 'conns') closeForm();
-  // 第二屏的标题带上**是哪一个站点** —— 用户在几台机器之间来回时，最要紧的
-  // 一件事就是"我现在看的是哪一台"。
+  // 第二**和第三屏**的标题都带上**是哪一个站点** —— 用户在几台机器之间来回时，
+  // 最要紧的一件事就是"我现在看的是哪一台"。
+  // ★ 2026-10-11 补上作业那一屏：它从前只写着一个死的「作业」，而它恰恰是最容易
+  //   忘了自己在哪一台上的地方（几条会话、几个站点）。
   // ★ 判据是**活跃连接**（主进程那一格），不是"上次点了哪一行"：删掉一条连接、
   //   或者从别处改了活跃连接之后，界面手上那份"我刚才点的是谁"就已经过期了。
   const conn = ((boot && boot.connections) || [])
     .find((c) => c.id === (boot && boot.activeConnectionId));
-  $('plugins-title').textContent = conn ? `插件 · ${conn.user}@${conn.host}` : '插件';
+  const site = conn ? ` · ${conn.user}@${conn.host}` : '';
+  $('plugins-title').textContent = '插件' + site;
+  $('jobs-title').textContent = '作业' + site;
   // 屏一换，那些**跟着当前这一屏走**的小块都要重算一次：作业详情（只在这一屏里
   // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
@@ -398,16 +402,19 @@ function hasRunningSession() {
 }
 
 /**
- * 两条边栏上那两个小点。
+ * 右栏那一条的**颜色**（左栏那一条不在这里，见下）。
  *
- * ★ 左栏那个点**不在这里画** —— 它的三态由主进程算好了推过来（`ui:site`，
- *   见 init 里那个 `onSite`）：链路活没活是主进程才知道的事，界面这一层自己
- *   算就是第二个判据，而它会与主进程那个漂开。
- * ★ 右栏那个点说的是"这里有一份输出可看"，所以它跟着**有没有作业在跑**走，
- *   与左栏那个（站点现在怎么样）毫无关系。
+ * ★★ **整条边栏就是那个记号**（2026-10-11 改）：从前它是一条中性底 + 一个 6px 的
+ *   圆点，而 10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户的原话是
+ *   "圆点太不明显"）。现在颜色直接上在边栏自己身上（见 app.css 的 `.rail.hot`）。
+ * ★ 左栏**不在这里画** —— 它的三态由主进程算好了推过来（`ui:site`，见 `bindEvents`
+ *   里那个 `onSite`）：链路活没活是主进程才知道的事，界面这一层自己算就是第二个
+ *   判据，而它会与主进程那个漂开。
+ * ★ 右栏说的是"这里有一份输出可看"，所以它跟着**有没有作业在跑**走，与左栏那个
+ *   （站点现在怎么样）毫无关系。
  */
 function renderRails() {
-  $('rail-right-dot').className = 'rail-dot' + (hasRunningSession() ? ' hot' : '');
+  $('rail-right').className = 'rail rail-r' + (hasRunningSession() ? ' hot' : '');
 }
 
 /** 前台那一条的槽（按钮要指名停哪一个）。没有会话时 null。 */
@@ -3123,17 +3130,15 @@ const keyPayload = () =>
  */
 function bindEvents() {
   // ── 事件 ──
-  // 「关于」的入口是**最上面那一行标题**（`#about-head`）。它装的是这一版的说明与
-  // 开发者模式，而那两样都不是每次打开都要看的 —— 所以它是一个可以点开、也可以
-  // 不点的地方，而不是常驻的一块。
-  // ★ 用 `role="button"` + tabindex 而不是 `<button>`：button 里不许放 h1/p，
-  //   浏览器会把它们拆开重排。手写的那两条键盘路径（回车 / 空格）就是代价。
-  const aboutHead = $('about-head');
-  const toggleAbout = () => $('sec-about').classList.toggle('hidden');
-  aboutHead.onclick = toggleAbout;
-  aboutHead.onkeydown = (ev) => {
-    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleAbout(); }
-  };
+  // 「关于」的入口是**第一屏最末那一行**（`#about-foot`，见 panel.html 那一段）。
+  // 它装的是这一版的说明与开发者模式，而那两样都不是每次打开都要看的 —— 所以它是
+  // 一块可以点开、也可以不点的地方，而不是常驻的一节。
+  // ★ 它现在是**真 `<button>`**：那一行里没有 h1/p，内容模型没有限制，于是键盘与
+  //   焦点行为是白拿的（从前那个 `role="button"` 的 div 得手写回车/空格两条路）。
+  // ★ 而**标题那一行不再可点**（2026-10-11 改）："点标题"在任何一个界面里都是
+  //   "回首页"的意思，而这里的返回方式已经由各处动作约束好了 —— 见 panel.html
+  //   上 `#about-head` 那一段。
+  $('about-foot').onclick = () => $('sec-about').classList.toggle('hidden');
 
   $('btn-new').onclick = () => openNewForm();
   $('btn-cancel-form').onclick = () => closeForm();
@@ -3471,11 +3476,11 @@ function bindEvents() {
     el.onclick = () => { if (wanted()) window.slurmate.hover({ side, pin: true }); };
   }
   renderRails();
-  // 左栏那个圆点。★ 主进程算好了三态才推过来 —— 界面这里**不重算**：
-  //   重算的地方就是第二个"什么时候算断线"的判据，而它会与主进程那个漂开。
+  // 左栏那一条的颜色（**整条**，不是圆点 —— 理由见 `renderRails` 那一段）。
+  // ★ 三态**由主进程算好了推过来**，界面这里**不重算**：重算的地方就是第二个
+  //   "什么时候算断线"的判据，而它会与主进程那个漂开。
   window.slurmate.onSite((s) => {
-    const d = $('rail-left-dot');
-    d.className = 'rail-dot ' + ((s && s.state) || 'na');
+    $('rail-left').className = 'rail rail-l ' + ((s && s.state) || 'na');
   });
 
   window.slurmate.onStates(renderSessions);

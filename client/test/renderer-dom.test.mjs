@@ -585,15 +585,18 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
 
   // ── 那几格必须仍然有动作 ──
   // ★ 一律走 `$()` 取元素：`byId` 是**取过才有**的缓存，而 `sec-about` 只在
-  //   `toggleAbout` 被调用时才第一次被取到。
-  const head = h.run("$('about-head')");
-  assert.equal(typeof head.onclick, 'function',
-    '★★ 标题那一行仍然要挂着动作 —— 首屏数据拿不到**不该**让入口变成哑的');
+  //   下面那一下被点到时才第一次被取到。
+  // ★ 入口是**第一屏最末那一行**那颗按钮（`#about-foot`），**不是标题那一行**
+  //   （2026-10-11 改：点标题在任何一个界面里都是"回首页"的意思，而这里的返回
+  //   方式已经由各处动作约束好了）。
+  const foot = h.run("$('about-foot')");
+  assert.equal(typeof foot.onclick, 'function',
+    '★★ 「关于」那颗按钮仍然要挂着动作 —— 首屏数据拿不到**不该**让入口变成哑的');
   // ★ 壳里的 `$()` 是**现造**一个空元素，它不会去读 panel.html —— 所以
   //   `hidden` 那一格得自己摆成初始状态（真机上由 panel.html 上的 class 给）。
   h.run("$('sec-about').classList.add('hidden');");
   assert.equal(h.run("$('sec-about').classList.contains('hidden')"), true, '（前提：它本来是收着的）');
-  head.onclick();
+  foot.onclick();
   assert.equal(h.run("$('sec-about').classList.contains('hidden')"), false,
     '★★ 点下去要开 —— 用户报的就是"点了没反应"');
 
@@ -987,22 +990,25 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 });
 
-test('★★ 右栏那个点只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
+test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
+  // ★★ 2026-10-11 改：上色的对象从那个 6px 的圆点换成了**边栏自己** ——
+  //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。
+  //   于是这个壳里取的元素也跟着换，而判据一个字没变（三档、各是什么）。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
-  const dot = () => h.byId.get('rail-right-dot').className;
+  const rail = () => h.byId.get('rail-right').className;
   // 一条会话都没有
   h.run('SESS = { sessions: [], front: null };');
   h.fn('renderRails')();
-  assert.equal(dot(), 'rail-dot', '没作业就不亮');
+  assert.equal(rail(), 'rail rail-r', '没作业就不亮');
   // 有一条活的
   h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true, snap: {} }], front: "a" };');
   h.fn('renderRails')();
-  assert.equal(dot(), 'rail-dot hot', '有作业在跑才亮');
+  assert.equal(rail(), 'rail rail-r hot', '有作业在跑才亮');
   // ★ 而"已经结束但记录还在"那一条**不算**：`live` 是主进程给的判据，
   //   拿"这张表非空"当判据的话，一个只剩尸体的槽会让右栏一直亮着。
   h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: false, snap: {} }], front: "a" };');
   h.fn('renderRails')();
-  assert.equal(dot(), 'rail-dot', '结束了的会话不算"有作业在跑"');
+  assert.equal(rail(), 'rail rail-r', '结束了的会话不算"有作业在跑"');
 });
 
 test('★★ 连上之后才有两条边栏，而且它们是在状态条**下面**那一段', () => {

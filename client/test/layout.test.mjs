@@ -140,7 +140,10 @@ test('★★ 窗口最小宽度装得下面板（这是第四个数，前三个�
   //    `.wrap` 变宽或内边距改了之后照样绿 —— 而那正是这条要拦的形状
   //    （同 F35 那条教训：手抄的清单会在源头新增一项时照样通过）。
   const css = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'app.css'), 'utf8');
-  const pad = /#panel\s*\{[^}]*?padding:\s*\d+px\s+(\d+)px/.exec(css);
+  // ★ 上内边距那一格**允许是无单位的 0**（2026-10-11 改）：面板的上内边距挪给了
+  //   各屏自己的第一块，好让第二/三屏那条身份带能贴到状态条底下（见 app.css 里
+  //   `#panel` 那一段）。这一条要的是**左右**那两个数，它们一个字没变。
+  const pad = /#panel\s*\{[^}]*?padding:\s*(?:\d+px|0)\s+(\d+)px/.exec(css);
   const wrap = /\.wrap\s*\{[^}]*?max-width:\s*(\d+)px/.exec(css);
   assert.ok(pad, 'app.css 的 #panel 上要能读到左右内边距');
   assert.ok(wrap, 'app.css 的 .wrap 上要能读到 max-width');

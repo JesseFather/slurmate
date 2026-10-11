@@ -529,19 +529,50 @@ test('★★ 该两段式的五处走两段式 —— 而**重新生成密钥不
     '★★ 重画连接列表之前先收掉没走完的第一段');
 });
 
-test('★ 「关于」的入口是标题那一行 —— 而它**看得见**能点，且点得动', () => {
-  // ★ 入口**必须看得见能点**：这一屏上没有任何别的东西提示"这里可以点"，
-  //   而一个看不见的入口等于没有入口。
-  //   ★★ 光靠 `cursor: pointer` 与悬停变色是**不够**的 —— 两者都要先想到去指它
-  //   才看得见。用户 2026-10-09 报的原话就是"我没有找到「关于」按钮"。
-  //   ⇒ 标题那一行右端得有一个写着「关于」的记号。
-  assert.match(html, /id="about-head"/, 'panel.html 里要有那个入口');
-  assert.match(html, /class="about-marker"[^>]*>关于</,
-    '★ 标题那一行右端要有那颗写着「关于」的记号 —— 不然它还是一行看不出来的标题');
-  assert.match(css, /\.about-marker\s*\{[^}]*position:\s*absolute/,
-    '★ 那颗记号必须**绝对定位**：进了这一行的流就会把 h1 与副标题挤成一行');
-  assert.match(css, /#about-head\s*\{[^}]*cursor:\s*pointer/,
-    '★ 那个入口要看得出来能点 —— 少了 cursor，它长得就是一行普通标题');
+test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那一行**不再是**入口', () => {
+  // ★★ 2026-10-11 改：入口从"标题那一行"换成**第一屏最末那一颗按钮**。用户把
+  //   那件事想通了：「点击标题一般情况是想要返回主页面」—— 而这个界面里的返回
+  //   方式已经由各处动作约束好了（回第一屏只有临时离开 / 断开两条路，见
+  //   `doLeave` / `doDisconnect`）。一个点下去做着别的事的标题，比一个不能点的
+  //   标题坏得多。
+  //
+  // ★ 新入口**必须看得出来能点**（一颗 ghost 小按钮，不是一行灰字）：用户
+  //   2026-10-09 报的原话就是"我没有找到「关于」按钮"，而这一版它是**唯一**的入口。
+  assert.match(html, /id="about-foot"[^>]*>关于这个客户端</,
+    '★ 第一屏最末要有那颗写着「关于这个客户端」的按钮 —— 它是「关于」唯一的入口');
+  assert.match(js, /\$\('about-foot'\)\.onclick\s*=/,
+    '★ panel.js 没给它绑动作 —— 点了没反应。而那正是最难查的一种：界面上一切'
+    + '正常，只是这个入口按下去什么都不发生');
+  // ★★ 它与它下面那一段都在 `#screen-conns` **里面**：于是"只在主页面显示"由
+  //   **屏的显隐那一句**自动成立，不需要第二处判据（`showScreen` 里再 toggle
+  //   一次就是第二个"我在哪一屏"）。
+  const c0 = html.indexOf('<section id="screen-conns" class="screen">');
+  const c1 = html.indexOf('</section><!-- /screen-conns -->');
+  const fo = html.indexOf('id="about-foot"');
+  const ab = html.indexOf('id="sec-about"');
+  assert.ok(c0 !== -1 && c1 !== -1, 'panel.html 里应当有第一屏那一对起止标记');
+  assert.ok(c0 < fo && fo < ab && ab < c1,
+    '★★ 「关于」的入口与那一段都必须在第一屏**里面**（落在那一屏的起止标记之间）—— '
+    + '留在外面的话，点开它再连上站点，关于那一整块会跟着飘到第二屏上去');
+  // ★ 光看"次序对"是不够的：在开头多插一个 `</section>` 就能把那一屏**提前关掉**，
+  //   而上面那条次序断言一个字都不会说（顺序没变，只是那一屏在中间就结束了）。
+  //   ⇒ 那一段还必须是**自成一个整体**的（开合配平）。变异验证实测：这一条抓得住。
+  const inside = html.slice(
+    c0 + '<section id="screen-conns" class="screen">'.length, c1);
+  assert.equal((inside.match(/<section[\s>]/g) || []).length,
+    (inside.match(/<\/section>/g) || []).length,
+    '★ 第一屏那一段要开合配平 —— 多一个 `</section>` 就等于把它整个甩到屏外去了');
+  assert.match(html, /<div id="about-head">/,
+    '★ 标题那一行**留着**（它仍然是这一屏的身份），只是不再能点');
+  assert.equal(/about-marker/.test(html), false,
+    '★ 标题那一行右端那颗「关于」记号删掉了 —— 它指的那个入口已经不存在');
+  assert.equal(/aboutHead/.test(js), false,
+    '★ panel.js 里不该再有任何 aboutHead 的东西 —— 标题那一行不再是入口');
+  assert.equal(/id="about-head"[^>]*role="button"/.test(html), false,
+    '★ 而它不再是 `role="button"`：那是在说"这里可以点"');
+  assert.equal(/#about-head\s*\{[^}]*cursor:\s*pointer/.test(css), false,
+    '★ 光标也不该再是手型 —— 一个看起来能点、点下去什么都不发生的标题，正是'
+    + '用户报的那个"找不到关于"的镜像（这次是"找得到但没用"）');
 
   // ★★ 那一行**只在"没在跑会话"的时候露得出来**：会话一跑起来，窗口主体就被插件
   //   那块原生视图从 y=30 往下整块盖住（`layout.js` 的 `stageRect`），
@@ -570,14 +601,11 @@ test('★ 「关于」的入口是标题那一行 —— 而它**看得见**能�
     '★ 初始化失败要有一个说得出话的落点（不再只走 notice）');
   assert.match(html, /id="fatal-banner"/,
     '★ 而那句话得有一块**常驻**的地方 —— 提示流是会滚过去、也会被顶下去的一条流水');
-  assert.match(js, /const aboutHead = \$\('about-head'\);/,
-    'panel.js 里找不到那个入口');
-  assert.match(js, /aboutHead\.onclick = toggleAbout;/,
-    '★ panel.js 没给它绑动作 —— 点了没反应。而那正是最难查的一种：'
-    + '界面上一切正常，只是这个入口按下去什么都不发生');
-  assert.match(js, /aboutHead\.onkeydown[\s\S]{0,120}?Enter/,
-    '★ 它是一个 `role="button"` 的 div（button 里放不下 h1/p），所以回车那条路'
-    + '要自己接 —— 不接的话它 Tab 得到、按下去没反应');
+  // ★ 新入口是一颗**真 `<button>`**（不是从前那个 `role="button"` 的 div）：那一行
+  //   里没有 h1/p，内容模型没有限制 —— 于是"Tab 得到、回车按得下去"是白拿的，
+  //   不必再手写（从前那个 div 的 `onkeydown` 就是为这个存在的）。
+  assert.match(html, /<button id="about-foot"/,
+    '★ 它必须是真按钮：键盘与焦点行为白拿，而手写的那两条路会漂');
 
   // ★ 它装的是「关于」+ 开发者模式，而开发者模式**从前是常驻的**：搬进来之后
   //   它必须整个在 `#sec-about` **里面**。留在外面的话，"收起来"就只收掉了说明，
@@ -609,6 +637,114 @@ test('★ 「关于」的入口是标题那一行 —— 而它**看得见**能�
     sec[0].indexOf('<div id="dev-src"'));
   assert.equal([...head.matchAll(/<p class="sub">/g)].length, 1,
     '开发者模式那一段只留一句 —— 多一句就是那两段又长回来了');
+});
+
+test('★★ 两条边栏整条吃状态色（那个圆点没有了）', () => {
+  // ★★ 2026-10-11 改：上色的对象从"6px 的圆点"换成**边栏自己**。用户报的原话是
+  //   "圆点太不明显" —— 10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样。
+  //   判据落在三处：DOM 里没有那个点、CSS 里那四档还在、panel.js 把状态写在
+  //   **边栏**身上（而不是某个子元素上）。
+  assert.equal(/rail-dot/.test(html), false, '★ 圆点那两颗 span 删掉了');
+  assert.equal(/rail-dot/.test(css), false,
+    '★ 而它的四条规则也要一起删 —— 没有元素会命中的 CSS 会让下一个人以为某处在用');
+  assert.equal(/rail-dot/.test(js), false, '★ panel.js 里也不该再提那个圆点');
+  // ★ 四档各自的颜色**必须是已有的语义色**：这几档在这个仓库里的含义是钉死的
+  //   （绿=正常、红=断开、灰=取不到、黄=有一份输出可看）。另起一个色号就等于
+  //   说了一件新的事，而下一个人会以为它们有区别。
+  assert.match(css, /\.rail\.ok\s*\{\s*background:\s*var\(--ok\)/, '★ 左栏「正常」');
+  assert.match(css, /\.rail\.bad\s*\{\s*background:\s*var\(--err\)/, '★ 左栏「断开」');
+  assert.match(css, /\.rail\.na\s*\{\s*background:\s*var\(--fg-dim\)/,
+    '★ 左栏「取不到」—— 它与"断开"是两句话（一个是我们没问到，一个是对面真的没了），'
+    + '所以颜色也不同（灰 vs 红）');
+  assert.match(css, /\.rail\.hot\s*\{\s*background:\s*var\(--warn\)/,
+    '★ 右栏「这里有一份输出可看」');
+  // ★★ 而**悬停不许再改背景**：背景现在被状态占着，改它等于把"这一刻站点怎么了"
+  //   抹掉。但那条 10px 的边唯一的"这里可以停"提示仍然要有 —— 换一条通道（提亮）。
+  const hover = /\.rail:hover[^{]*\{([^}]*)\}/.exec(css);
+  assert.ok(hover, 'app.css 里应当有 .rail:hover 那一条');
+  assert.equal(/background/.test(hover[1]), false,
+    '★ 悬停不许再改背景 —— 那会把整条的状态色盖掉');
+  assert.match(hover[1], /filter:\s*brightness/,
+    '★ 但仍然要看得出来能停（那是那条 10px 的边唯一的提示）');
+  // ★ 状态写在哪一格：左栏那个三态**由主进程算好推过来**（`ui:site`），右栏那个
+  //   跟着"有没有作业在跑"走 —— 两者都上在**边栏自己**身上。
+  assert.match(js, /\$\('rail-left'\)\.className\s*=\s*'rail rail-l '/,
+    '★ 左栏那一条由 onSite 上色（三态是主进程给的，界面不重算）');
+  assert.match(js, /\$\('rail-right'\)\.className\s*=\s*'rail rail-r'/,
+    '★ 右栏那一条由 renderRails 上色');
+});
+
+test('★★ 第二/三屏顶上那条身份带（翻页感由**结构**给，不是换底色）', () => {
+  // ★★ 2026-10-11 加：进第二/三屏时顶上顶着的是**站点的地址与这一屏的名字**，
+  //   而第一屏顶着的是客户端的名字（masthead）。
+  // ★ 用户把这件事定死了：**底色不变**（原话是"底色不变是（主题统一）的表现，
+  //   而不是证明翻页了"）—— 所以这一条既查那条带子，也查"没有谁在换底色"。
+  assert.match(css, /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head\s*\{/,
+    '★ 两屏的标题行要**一起**画成带子（各写一份的话两处会漂，而漂的方向是'
+    + '"其中一屏看起来还是旧的那一版"）');
+  const band = /#screen-plugins > \.sec-head,[\s\S]*?\n\}/.exec(css);
+  assert.ok(band, 'app.css 里应当有那条带子');
+  assert.match(band[0], /background:\s*var\(--bg-alt\)/, '★ 带子自己有底色');
+  assert.match(band[0], /margin:\s*0 calc\(-26px - var\(--sb-w\)\) 14px -26px/,
+    '★ 而它是**通栏**的：左右各抵消 `#panel` 的 26px 内边距，**右边还要多减一条'
+    + '滚动条的槽**（`--sb-w`）—— 少了那一条，带子会在右边栏前面停住 10px，'
+    + '留出一条左边没有、右边有的异色缝');
+  // ★★ 面板与三屏的底色一个字没改。
+  const panelRule = /#panel\s*\{([^}]*)\}/.exec(css);
+  assert.ok(panelRule, 'app.css 里应当有 #panel');
+  assert.equal(/background/.test(panelRule[1]), false,
+    '★★ 面板的底色不许动 —— 主题统一，翻页感由结构给');
+  assert.equal(/\.screen[^{]*\{[^}]*background/.test(css), false,
+    '★★ "某一屏换底色"同样不许有');
+  // ★ 两屏的标题都写上是哪一个站点 —— 作业那一屏从前是一个死的「作业」。
+  assert.match(html, /id="screen-plugins"[\s\S]*id="plugins-title"/,
+    '★ 第二屏的标题在那一屏里');
+  assert.match(html, /id="screen-jobs"[\s\S]*id="jobs-title"/, '★ 第三屏的标题同理');
+  assert.match(js, /\$\('jobs-title'\)\.textContent = '作业' \+ site/,
+    '★ 而它要和 `plugins-title` **用同一个判据**（活跃连接给的 user@host），'
+    + '不是各算一份');
+});
+
+test('★★ 滚动条自己画，而且永远占着那条槽', () => {
+  // ★★ 2026-10-11：用户报的是"有条和没条是页面布局微调、遮挡"。
+  assert.match(css, /::-webkit-scrollbar\s*\{\s*width:\s*\d+px/,
+    '★ 宽度要自己定死（不写的话露出来的就是系统那一条）');
+  assert.match(css, /::-webkit-scrollbar-thumb\s*\{[^}]*border-radius/,
+    '★ 滑块要是我们的（圆角、中性灰）');
+  // ★★ 那个宽度与 `--sb-w` 必须是**同一个数**：一个说"这条槽有多宽"（第二/三屏
+  //   那条通栏的带子要拿它算到右边栏的内边线），一个说"滚动条画多宽"。两者对不上
+  //   的症状是带子右边差一截 —— 而且只在真机上看得出。
+  const sbVar = /--sb-w:\s*(\d+)px/.exec(css);
+  const sbPx = /::-webkit-scrollbar\s*\{\s*width:\s*(\d+)px/.exec(css);
+  assert.ok(sbVar && sbPx, 'app.css 里要有 --sb-w，以及 ::-webkit-scrollbar 的宽度');
+  assert.equal(sbPx[1], sbVar[1],
+    '★★ `::-webkit-scrollbar` 的宽度必须等于 `--sb-w` —— 带子的算式拿后者算了右边那一截');
+  // ★★ 「永远留着那条槽」是另一半，而且缺了它前半截白做：**只画不占位**的话，
+  //   滚动条出现的那一刻内容照样会缩一下 —— 而那正是用户报的那件事。
+  for (const [sel, why] of [['#panel', '面板整页'], ['.conns', '连接列表'],
+                            ['.jobs', '作业列表'], ['.notices', '提示流'],
+                            ['.joblog', '作业日志']]) {
+    const at = css.indexOf(`${sel} {`);
+    assert.notEqual(at, -1, `app.css 里找不到 ${sel} 那一条规则`);
+    const block = css.slice(at, css.indexOf('}', at));
+    assert.match(block, /scrollbar-gutter:\s*stable/,
+      `★ ${why}（${sel}）要永远留着那条槽 —— 不然"有滚动条/没滚动条"会让它里面`
+      + '的东西缩一下，而那就是用户报的「页面布局微调」');
+  }
+  // ★★ 而**只写 `::-webkit-scrollbar*`**：在 Chromium 里 `scrollbar-width` /
+  //   `scrollbar-color` 一旦出现就**胜出**，滑块会退回系统那种细线，而上面那几条
+  //   规则静默失效（没有提示，只是"看起来没生效"）。
+  for (const f of ['width', 'color']) {
+    assert.equal(new RegExp(`scrollbar-${f}\\s*:`).test(css), false,
+      `★★ 不许写 scrollbar-${f} —— 它会盖掉 ::-webkit-scrollbar 那一套`);
+  }
+  // ★ 面板连上之后让位用 **margin**：`padding` 移不动滚动条，于是它会正好钻到
+  //   右边栏底下（10px 盖 10px，一个像素都看不见）。
+  const conn = /body\.connected #panel\s*\{([^}]*)\}/.exec(css);
+  assert.ok(conn, 'app.css 里应当有 body.connected #panel 那一条');
+  assert.match(conn[1], /margin-right:\s*var\(--rail-w\)/,
+    '★ 让位要用 margin —— 用 padding 的话滚动条会钻到右边栏底下');
+  assert.equal(/padding/.test(conn[1]), false, '★ 那一格不该再有 padding');
 });
 
 test('★★ 删掉的那些长解释：一个都不许回来，而承重的那句换了地方住', () => {
