@@ -735,7 +735,7 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
     /装完的站点/, '★ 装完返回的那份视图要当场画上去');
 });
 
-test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效，而且它不是失败', async () => {
+test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效，而且它不是失败', async () => {
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },
   'window.__starts = [];'
@@ -753,7 +753,7 @@ test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效
 
   // ★ 开局没有待答的一问。**不在这一层判"那一行是收着的"** —— 这个架子不解析
   //   `panel.html`，`#sb-port` 身上那个 `hidden` 类是 HTML 写的，在这里根本看不见。
-  //   那一半由 `renderer.test.mjs` 从源码文本上钉（id 在不在、两颗按钮叫什么）。
+  //   那一半由 `renderer.test.mjs` 从源码文本上钉（id 在不在、三颗按钮叫什么）。
   assert.equal(h.run('portAsk'), null, '开局不该有待答的一问');
 
   // ── ① 被挡下 ⇒ 摆出那一行，理由**照念主进程给的那句** ──
@@ -765,28 +765,43 @@ test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效
   assert.match(h.doc.getElementById('sb-port-why')._text, /18080/, '理由里要念出那个端口');
   assert.match(h.doc.getElementById('sb-port-why')._text, /被别的程序占着/,
     '★ 那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
-  // ★ 两颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
+  // ★ 三颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /布局/,
-    '「临时换一个」要说清它的代价（origin 变了，编辑器布局会重置）');
+    '「启动」要说清它的代价（origin 变了，编辑器布局会重置）');
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /回到/,
     '★ 还要说清它是**暂时**的：端口没有被改掉，下次启动会回到原处');
+  // ★★ 中间那一颗是这一行上唯一**会改配置**的一颗，所以它的话必须说清"不可逆"
+  //    （原来那个端口与它上面那份布局都回不来）—— 只写"记住"是不够的。
+  assert.match(h.doc.getElementById('sb-port-remember').title || '', /不可逆/,
+    '「记住新配置并启动」要说清它不可逆 —— 那是它与「启动」唯一的分界');
+  assert.match(h.doc.getElementById('sb-port-remember').title || '', /18080/,
+    '★ 还要念出**原来那个端口**：用户就是拿它对照着决定要不要改');
   assert.match(h.doc.getElementById('sb-port-abort').title || '', /不会出现作业/,
-    '「不启动」要说清它真的什么都没做');
+    '「取消」要说清它真的什么都没做');
   // ★ 而它**不是**失败：这一支不该去刷新插件清单（那是"提交被拒"才有的事）。
   assert.equal(h.run('window.__starts.length'), 1, '只走了一趟 IPC，没有别的东西跟着发');
 
-  // ── ② 答「临时换一个」⇒ 带 `'shift'` 重发**一次**，而且重发的还是同一个插件 ──
+  // ── ② 答「启动」⇒ 带 `'shift'` 重发**一次**，而且重发的还是同一个插件 ──
   await h.doc.getElementById('sb-port-shift').onclick();
   assert.equal(h.run('window.__starts.length'), 2, '★ 答一下正好重发一次');
   assert.equal(sent(1), '["cs","shift"]',
     '★★ 那个作答是**用户的意思**：主进程据此顺移，不再问第二遍');
+
+  // ── ②b 答「记住新配置并启动」⇒ 带 `'remember'` 重发，而它仍然只发一趟 ──
+  //    ★★ 两个作答走的是**同一条重发路**（`startWith`），分别只在那个字符串上：
+  //      界面这一层不做任何"要不要写配置"的判断 —— 写配置那一步在主进程里，而且
+  //      排在绑定成功之后（它才知道隧道真绑上了哪个端口）。
+  await h.doc.getElementById('sb-port-remember').onclick();
+  assert.equal(h.run('window.__starts.length'), 3, '答「记住…」也是一下重发一次');
+  assert.equal(sent(2), '["cs","remember"]',
+    '★★ 那个作答要说清是**哪一种**：主进程据此把新端口记进配置，而这是不可逆的一步');
 
   // ── ③ 这一趟成了 ⇒ 那一行收掉 ──
   h.run('window.__reply = { ok: true, slot: 1, sessions: [], front: null };');
   await h.doc.getElementById('sb-port-shift').onclick();
   assert.equal(row.classList.contains('hidden'), true, '成了就不该再挂着那一行');
 
-  // ── ④ 答「不启动」⇒ 就地收掉，**一个字节都不发**，而且说一句实话 ──
+  // ── ④ 答「取消」⇒ 就地收掉，**一个字节都不发**，而且说一句实话 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
     + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
@@ -796,7 +811,7 @@ test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效
   const before = notices().length;
   await h.doc.getElementById('sb-port-abort').onclick();
   assert.equal(h.run('window.__starts.length'), calls,
-    '★★ 「不启动」不跟主进程说话 —— 因为此刻**本来就没有东西要撤**');
+    '★★ 「取消」不跟主进程说话 —— 因为此刻**本来就没有东西要撤**');
   assert.equal(row.classList.contains('hidden'), true, '那一行要收掉');
   // ★ 提示流是 **prepend**（新的在最前），所以"这一下新出来的"是**开头那几条** ——
   //   取尾巴会把上一次那一句当成这一次说的。
@@ -805,7 +820,7 @@ test('★★ 「端口被占」那一行是**二选一**：两颗都当场生效
   assert.match(said, /没有提交/,
     '★ 用户刚点过「开始会话」而界面静了下来，要说清那是"没起来"而不是"起来了"');
 
-  // ── ⑤ 别的失败**不摆这一行**（它不是"被端口挡住"，两个答案都不成立）──
+  // ── ⑤ 别的失败**不摆这一行**（它不是"被端口挡住"，三个答案都不成立）──
   h.run('window.__reply = { ok: false, code: "rejected", error: "版本对不上。" };');
   await h.fn('startWith')('cs', btn);
   assert.equal(row.classList.contains('hidden'), true,

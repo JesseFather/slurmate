@@ -4598,12 +4598,14 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
  * 提交一条会话 —— **首选端口被占着时，按用户会按的那一下答**。
  *
  * ★★ 为什么夹具要替用户答一下：这一版起，首选端口被别的程序占着时**不再静默顺移**，
- *    而是先问一句「临时换一个 / 不启动」（见 `index.js` 的 `startSession`）。而
+ *    而是先问一句「启动 / 记住新配置并启动 / 取消」（见 `index.js` 的 `startSession`）。而
  *    **这台开发机上 18080 就是被占着的** —— 那是这台机器的别的东西（不是我们的
  *    会话、也不在任何配置里，探测只能看见"占着"）。于是那个端口上的每一条"起会话"
  *    用例都会撞上那一问，而它与那条用例要验的事情毫无关系。
- *    ⇒ 这一层把那一问答掉，用的就是界面上那颗「临时换一个」发出去的
+ *    ⇒ 这一层把那一问答掉，用的就是界面上那颗「启动」发出去的
  *    `portChoice:'shift'`，与用户在真机上会做的事逐字相同。
+ *    ★ 而「记住新配置并启动」那一条**不走这一层**：它要验的正是"配置真的被改了"，
+ *      所以那几条用例直接调 IPC（见下面那一条）。
  *
  * ★ 判据是**主进程回的那一格**（`code === 'port_conflict'`），不是"这台机器是不是
  *   开发机"：在 18080 空着的机器上（CI）它一次都不会触发，重发的路径也走不到。
@@ -5290,7 +5292,7 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
 //  阶段 5：端口只读 / ctx.connection() / 删连接删数据
 // ════════════════════════════════════════════════════════════════════════════
 
-test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答了才动，而顺移仍然不写回', async (t) => {
+test('★★ 首选端口被占住：**先问**「启动 / 记住新配置并启动 / 取消」，答了才动，而顺移仍然不写回', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const config = require('../src/main/config.js');
@@ -5324,8 +5326,8 @@ test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答
 
   // ── ① 被占住 ⇒ **什么都不提交**，先问一句 ────────────────────────────────
   //   ★★ 这一支是整条路存在的理由：探测发生在**提交之前**，所以此刻作业还没有
-  //     上集群 —— 界面上那个「不启动」才是**字面意思**。等绑定那一刻再问，作业
-  //      已经在跑了，用户答"不启动"是一句空话。
+  //     上集群 —— 界面上那个「取消」才是**字面意思**。等绑定那一刻再问，作业
+  //      已经在跑了，用户答"取消"是一句空话。
   const ask = await invoke('app:start', null, 'code-server');
   assert.equal(ask.ok, false, `被占住时不该报成功：${JSON.stringify(ask)}`);
   assert.equal(ask.code, 'port_conflict',
@@ -5340,12 +5342,12 @@ test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答
   const stillThere = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === wantSpace.id);
   assert.equal(stillThere.ports[0], want, '★ 被挡下的这一趟一个字都不许写进配置');
 
-  // ── ② 用户答「不启动」⇒ 就到这里（界面上那一行收掉，没有别的动作）──
+  // ── ② 用户答「取消」⇒ 就到这里（界面上那一行收掉，没有别的动作）──
   //   那一下在界面上是 `clearPortAsk()`（renderer-dom 有它自己的用例），主进程
   //   这一侧**没有对应的 IPC** —— 因为此刻本来就没有东西要撤。这一条断言就是
   //   那句话的证据：①之后系统仍然是一个干净的"什么都没发生"。
 
-  // ── ③ 用户答「临时换一个」⇒ 带上作答重发，走既有的顺移扫描 ──
+  // ── ③ 用户答「启动」⇒ 带上作答重发，走既有的顺移扫描 ──
   const a = await invoke('app:start', null, 'code-server', 'shift');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
@@ -5362,7 +5364,7 @@ test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答
   // ★ 而这一趟**是答过的**：那句"没有问你"只属于"提交之后才发现"那个窗口
   //   （见 session.js 的 `_portChoice`）。答过还补一句，就是在编造一次对话。
   assert.doesNotMatch(snap.warning || '', /没有问你/,
-    '★ 用户刚答过「临时换一个」，那句说明里不许再补一句"没有问你"');
+    '★ 用户刚答过「启动」，那句说明里不许再补一句"没有问你"');
   assert.match(snap.warning || '', /回到/, '★ 顺移仍然要说清"下次会回到原端口"');
 
   // ★★ 本阶段的重点：**配置里那个端口一个字都不动。**
@@ -5375,6 +5377,79 @@ test('★★ 首选端口被占住：**先问**「临时换 / 不启动」，答
     + '写回等于把一次暂时的冲突永久化');
 
   await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('★★ 答「记住新配置并启动」⇒ 那份数据的端口真的改了，而下次不再问', async (t) => {
+  // ★★ 2026-10-11：那一行从二选一变成三选一。中间那一颗是**全界面唯一**会改配置的
+  //    按钮（"这份数据的端口以后就用这个"），而它写的是**隧道真正绑上的那一个**
+  //    （`snap.localPort`）—— 不是自己按顺移规则重算一遍：同一条规则两份实现迟早
+  //    漂开，而漂开的形态是"记下来的端口没人在用"。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const config = require('../src/main/config.js');
+  const net = require('net');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const conn = await onlyDemoConnection(idx);
+
+  const cfgNow = idx._test.getCfg();
+  const wsRef = (cfgNow.workspaces.find((l) => l.id === conn.workspaceId) || {}).refs || {};
+  const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  const wantSpace = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === wsRef[csPlugin.id]);
+  assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 code-server 的那一份）');
+  const want = wantSpace.ports[0];
+
+  // 由**测试**把首选端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
+  const squatter = net.createServer();
+  const held = await new Promise((resolve, reject) => {
+    squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
+    squatter.listen(want, '127.0.0.1', () => resolve(squatter));
+  });
+  t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
+
+  // ── ① 先问一句（与上一条同形：被占就什么都不提交）──
+  const ask = await invoke('app:start', null, 'code-server');
+  assert.equal(ask.code, 'port_conflict', '被占住仍然要先问，不许自己决定');
+
+  // ── ② 用户选「记住新配置并启动」⇒ 带 `'remember'` 重发 ──
+  const a = await invoke('app:start', null, 'code-server', 'remember');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
+    '进入 running', 20000);
+  const snap = ctl.snapshot();
+  assert.notEqual(snap.localPort, want, '这一次仍然顺移 —— "记住"不等于"不顺移"');
+
+  // ★★ 而配置里那份数据的端口已经改成**隧道真正绑上的那一个**。
+  const after = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === snap.spaceId);
+  assert.ok(after, '那一份数据不该被顺手回收');
+  assert.equal(after.ports[0], snap.localPort,
+    '★★ 用户选的是「记住新配置并启动」，配置里就该是那个**实际**端口'
+    + `（期望 ${snap.localPort}，实际 ${after.ports[0]}）`);
+  assert.match(snap.warning || '', /被占用/, '顺移这件事照旧要说出来');
+  assert.doesNotMatch(snap.warning || '', /回到/,
+    '★★ 这一趟不许再说"下次会回到原端口" —— 配置已经改了，那句话是假的');
+
+  await invoke('app:stop', { slot: a.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+
+  // ── ③ 再开一次：**不再问**（首选端口现在就是那个新端口，而它空着）──
+  //   ★ 占住者占的是**旧**端口，与新的首选端口无关 —— 这正是"记住"要买到的东西：
+  //     那个程序一直占着的时候，用户只在第一次被问一遍。
+  const b = await invoke('app:start', null, 'code-server');
+  assert.equal(b.code, undefined,
+    `★ 记住之后不该再问：${JSON.stringify({ code: b.code, port: b.port })}`);
+  assert.equal(b.ok, true, `再开一次失败：${JSON.stringify(b)}`);
+  const ctl2 = idx._test.sessionAt(b.slot).controller;
+  await waitUntil(() => ctl2.state === 'running' && ctl2.snapshot().localPort,
+    '第二次进入 running', 20000);
+  assert.equal(ctl2.snapshot().localPort, snap.localPort,
+    '★ 而它绑的就是记下来的那个端口 —— origin 从此稳定，那份布局不用再重置');
+
+  await invoke('app:stop', { slot: b.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
@@ -5394,7 +5469,7 @@ test('★★ 那个端口**归别人**（配置里另一份数据声称着它）
 
   // ★★ 这一条守的是那道闸里**最容易被漏掉**的一半：与隧道顺移时用的是**同一份**
   //   排除集（`excludedPortsFor`）—— 凡是"分配器会负责跳过"的端口，都不该再问用户
-  //    一遍。问了的后果不是报错：用户答「临时换一个」，而那本来就是这一趟必然会
+  //    一遍。问了的后果不是报错：用户答「启动」，而那本来就是这一趟必然会
   //    发生的事（隧道扫描会跳过它），于是那一问成了一个**没有信息量的问题**。
   //    ★ 造现场：配置里**另一份**数据也声称着同一个端口。它挂在那个工作区的
   //      `spaces` 里 ⇒ `pruneSpaces` 不会把它收走（"活工作区持有的"就是活的）。
@@ -5446,7 +5521,7 @@ test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它
 
   // ★ **只对持久的那份数据问**（见 index.js 的 `startSession`）。临时副本是**框架
   //   事实**（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
-  //   为它摆一行"临时换 / 不启动"是问一个没有代价的问题。
+  //   为它摆一行"启动 / 记住新配置并启动 / 取消"是问一个没有代价的问题。
   //
   // ★★ 怎么把"它没问"变成可判的：临时那份的端口是**确定性**算出来的
   //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下**两次**拿到的是

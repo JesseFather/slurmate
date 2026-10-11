@@ -675,10 +675,11 @@ function usedSpacePorts(cfg, exceptId) {
  * 不探测的理由：探测是一次有竞态的快照，而且会让「同一份配置在不同时刻算出不同端口」——
  * 那就等于每次启动都可能换 origin。
  *
- * ★ **调用它的地方只有一个时机：一份数据被创建的时候。** 此后再没有任何东西改
- *   这些值 —— 端口是数据空间的**只读属性**（隧道顺移之后**不**把它写回来：写回来
- *   等于把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin 也
- *   回不去，而原来那份布局本来是可以回来的）。
+ * ★ **分配只发生在一个时机：一份数据被创建的时候**（此后**没有**什么"按需重算"）。
+ *   而**改**它的入口只有一个：`recordSpacePort` —— 那是用户在界面上明确选了
+ *   「记住新配置并启动」时才走的一步（"这份数据的端口以后就用这个"）。
+ *   ★ 隧道顺移**仍然不写回**：写回来等于把一次**暂时**的冲突变成永久的 origin
+ *   变更 —— 冲突消失之后 origin 也回不去，而原来那份布局本来是可以回来的。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
  *
  * ★ **它是"个数"唯一落地的地方。** 个数由清单声明（`plugin-data.js` 的
@@ -707,6 +708,51 @@ function assignSpacePorts(cfg, count, extraPorts) {
     p += 1;
   }
   return out;
+}
+
+/**
+ * **用户明确要求**把这份数据的首选端口改成另一个。
+ *
+ * 界面上只有一个调用点：那一行三选一里的「记住新配置并启动」（见 `index.js` 的
+ * `startSession`）。它是唯一一个改得动一份**已存在**数据的端口的入口。
+ *
+ * ★★ 它与"隧道顺移之后写回"不是同一件事，分别只有一个字：**谁说**。顺移是这台
+ *   机器当下的占用情况说的，**结果只属于这一次会话**；而这里是**用户**说的 ——
+ *   他先看见了「首选端口 X 被占着」，然后选了"记住新配置"。把两者混起来，就等于
+ *   让一次暂时的冲突自己变成永久的 origin 变更。
+ *
+ * ★ **只改 `ports[0]`**：要数据空间的那种会话绑的就是它（见 `spacePortOf`）。
+ *   多端口插件另外那几个端口是**别的东西**在用（插件自己声明的），与"这一份数据
+ *   在浏览器里的地址"不是一回事 —— 一起改会把它们静默地挪到别处。
+ *
+ * ★ **先校验再动手**：
+ *   · 这一份数据在不在配置里（不在就没得改 —— 临时那一份根本不在 `cfg.spaces` 里，
+ *     而它的端口是当场挑的，没有"记住"可言）；
+ *   · 端口是不是 1–65535 的整数（与 `tunnel.js` 的 `assertPort` 同一条规矩）；
+ *   · **这个端口有没有被另一份数据声称着**（`usedSpacePorts` 排除自己）。
+ *     最后那一条不是多余的谨慎：两份数据同时声称一个端口的话，每次启动谁先绑谁赢，
+ *     会话会在两个 origin 之间反复横跳，而界面上一切正常。
+ *
+ * @param {object} cfg
+ * @param {string} spaceId 要改的那一份数据
+ * @param {number} port 新的首选端口（应当是隧道**真正绑上**的那一个 —— 别自己重算
+ *   一遍顺移规则：同一条规则两份实现迟早漂开，而漂开的形态是"记下来的端口没人在用"）
+ * @returns {{ok:true, space:object, from:number}|{ok:false, error:string}}
+ */
+function recordSpacePort(cfg, spaceId, port) {
+  const space = ((cfg && cfg.spaces) || []).find((s) => s && s.id === spaceId);
+  if (!space) {
+    return { ok: false, error: `取不到数据 ${spaceId}：它不在配置里（临时那一份是当场挑的端口，没有"记住"可言）。` };
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, error: `端口不合法：${JSON.stringify(port)}（要求 1–65535 的整数）` };
+  }
+  if (usedSpacePorts(cfg, spaceId).has(port)) {
+    return { ok: false, error: `端口 ${port} 已经被另一份数据声称着，不能记给它。` };
+  }
+  const from = space.ports[0];
+  space.ports = [port, ...space.ports.slice(1)];
+  return { ok: true, space, from };
 }
 
 /** 「工作区 N」，N 取当前没被占用的最小正整数。确定性、不撞名。 */
@@ -1430,6 +1476,7 @@ module.exports = {
   // 数据空间（一份存储 + 它自己的端口）
   newSpaceId, SPACE_ID_RE, normalizeSpace, findSpace,
   usedSpacePorts, assignSpacePorts, spaceFor, newSpace, spaceConsumers, pruneSpaces,
+  recordSpacePort,
   setWorkspaceRef,
   activeConnection, upsertConnection, connectionKey,
   // 插件在本机的开关，与站点分发的同意台账

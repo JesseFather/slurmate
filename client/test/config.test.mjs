@@ -405,12 +405,51 @@ test('★★ 数据**创建时定一次**、此后只读 —— 没有任何函�
   //    （见 `index.js` 的 `spacePortOf`），它**没有回落** —— 拿一个刚从磁盘读回来的
   //    配置去问，问的就是它自己存下的那些 `spaces`。
 
-  // ★ 顺移**不**写回。把顺移后的值记下来，等于把一次**暂时**的冲突变成永久的
-  //   origin 变更 —— 冲突消失之后 origin 也回不去，而那份布局本来是可以回来的
-  //   （用户下一会话回到原端口，那份布局也跟着回来）。
-  //   所以模块里**根本没有**改端口的函数 —— 这条断言就是那道闸。
+  // ★★ 顺移**不**写回（那条规矩没变）。把顺移后的值**自动**记下来，等于把一次
+  //    **暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin 也回不去，
+  //    而原来那份布局本来是可以回来的。
+  //    ⇒ 模块里**仍然没有**一个通用的 `setSpacePort`：改端口的入口只有一个
+  //      （`recordSpacePort`），而它只被"用户明确选了记住"那一下调到（见下面那条）。
   assert.equal(typeof config.setSpacePort, 'undefined',
-    '★ 没有任何函数改得动一份已存在数据的端口 —— 它是只读属性');
+    '★ 不许有通用的端口 setter —— 改端口只有一个入口，就是下面那条钉的那个');
+});
+
+test('★★ 改端口只有一个入口：`recordSpacePort`，而且它只改 ports[0]', () => {
+  const cfg = config.loadConfig(tmpdir());
+  cfg.spaces = [space(1), space(2),
+                { id: sid(3), pluginId: LAYOUT_PLUGIN.id, group: 'g',
+                  ports: [18083, 18084, 18085] }];
+
+  // ① 正常一次
+  const r = config.recordSpacePort(cfg, sid(1), 18100);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.from, 18081, '要把**原来那个**带回来 —— 界面与日志都要拿它说"从 X 改成 Y"');
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '改的就是它');
+  assert.deepEqual(config.findSpace(cfg, sid(2)).ports, [18082], '★ 别的那一份一个字都没动');
+
+  // ② **只改 `ports[0]`**：多端口插件另外那几个端口是别的东西在用（插件自己声明的），
+  //    与"这一份数据在浏览器里的地址"不是一回事 —— 一起改会把它们静默地挪到别处。
+  assert.equal(config.recordSpacePort(cfg, sid(3), 19000).ok, true);
+  assert.deepEqual(config.findSpace(cfg, sid(3)).ports, [19000, 18084, 18085],
+    '★ 只改第一个');
+
+  // ③ 这个端口**归别人** ⇒ 拒。两份数据同时声称一个端口的话，每次启动谁先绑谁赢，
+  //    会话会在两个 origin 之间反复横跳（见隧道那一段注释）。
+  const clash = config.recordSpacePort(cfg, sid(1), 18082);
+  assert.equal(clash.ok, false, '★ 已经被另一份数据声称着的端口不能记给它');
+  assert.match(clash.error, /18082/, '而那句话要念出是哪个端口');
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '★ 拒了就不许改半个字');
+
+  // ④ 不在配置里的那一份 ⇒ 拒。临时那一份就是这种：它不在 `cfg.spaces` 里，而它的
+  //    端口是这次会话当场挑的 —— 没有"记住"可言。
+  assert.equal(config.recordSpacePort(cfg, sid(9), 19100).ok, false);
+
+  // ⑤ 端口不合法 ⇒ 拒（与 `tunnel.js` 的 `assertPort` 同一条规矩）。
+  for (const bad of [0, -1, 65536, 1.5, '18080', null, undefined]) {
+    assert.equal(config.recordSpacePort(cfg, sid(1), bad).ok, false,
+      `★ ${JSON.stringify(bad)} 不是合法端口，不该被记下来`);
+  }
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '★ 上面那几次一次都没改成');
 });
 
 test('数据：端口越界就整条不合法，不补默认值', () => {

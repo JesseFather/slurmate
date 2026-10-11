@@ -473,18 +473,50 @@ test('★★ 该两段式的五处走两段式 —— 而**重新生成密钥不
   const askFn = /function renderPortAsk\(r, pending\) \{[\s\S]*?\n\}/.exec(js);
   assert.ok(askFn, 'panel.js 里应当有 renderPortAsk()');
   assert.equal(/armConfirm/.test(askFn[0]), false,
-    '★★ 那一行**不是** armConfirm：它不是"再点一下才执行"，两个答案都是主动要的');
+    '★★ 那一行**不是** armConfirm：它不是"再点一下才执行"，三个答案都是主动要的');
   // ★ 而它必须**在 panel.html 里**（两段式那一行是运行期造的，这一行是静态的：
   //   它得待在状态条那 30px 里，会话一跑起来窗口主体就被原生视图整块盖住）。
   assert.match(html, /id="sb-port"/, 'panel.html 里要有那一行');
-  for (const [id, label] of [['sb-port-shift', '临时换一个'],
-                             ['sb-port-abort', '不启动']]) {
+  for (const [id, label] of [['sb-port-shift', '启动'],
+                             ['sb-port-remember', '记住新配置并启动'],
+                             ['sb-port-abort', '取消']]) {
     assert.match(html, new RegExp(`id="${id}"[^>]*>${label}<`),
-      `#${id} 那颗按钮要写着「${label}」—— 两个答案都必须是**动作**，`
+      `#${id} 那颗按钮要写着「${label}」—— 三个答案都必须是**动作**，`
       + '而不是一句"确定吗"');
     assert.match(js, new RegExp(`\\$\\('${id}'\\)\\.onclick\\s*=`),
       `panel.js 没给 #${id} 绑动作 —— 那一行上就有一颗按钮点了没反应`);
   }
+  // ★★ 三颗里**只有中间那颗会改配置**（把这数据的首选端口记成新的那个），所以它
+  //    必须长得与旁边两颗不一样：没有这一条的话，"顺手把三颗画成一样的"没有人会
+  //    发现 —— 而用户正是靠颜色分清自己选的是哪一种。
+  assert.match(html, /id="sb-port-remember"[^>]*class="tiny remember"/,
+    '★ 「记住新配置并启动」要带上 `remember` 那个类');
+  //    ★ 判据分两条，因为变异验证实测：只查"那条规则里出现过 `var(--warn)`"是**太松**
+  //      的（把底色拿掉、只留那圈琥珀描边，它照样命中）—— 而"它有自己的一块底色"
+  //      才是"一眼看得出不一样"那件事本身。
+  const rem = /button\.remember\s*\{([^}]*)\}/.exec(css);
+  assert.ok(rem, 'app.css 里应当有 button.remember 那一条');
+  assert.match(rem[1], /background:/,
+    '★ 它得有**自己的一块底色** —— 不是与旁边两颗一样的默认蓝');
+  assert.match(rem[1], /var\(--warn\)/,
+    '★ 而那个颜色是琥珀 —— 在这个仓库里等于"注意"');
+  // ★ 次序是「启动 / 记住新配置并启动 / 取消」：唯一不可逆的那一颗夹在中间，
+  //   最右是退路（与别处"危险的那个不在最边上"同一个道理的反面：这里它不是危险，
+  //   是"要付代价"，所以摆在两个出口中间）。
+  assert.ok(html.indexOf('sb-port-shift') < html.indexOf('sb-port-remember')
+    && html.indexOf('sb-port-remember') < html.indexOf('sb-port-abort'),
+    '三颗的次序：启动 → 记住新配置并启动 → 取消');
+  // ★★ 而窗口**窄**的时候：先裁理由，**不裁按钮**（2026-10-11 加）。三选一之后
+  //    它长了一截，而它是这一屏上唯一能做决定的地方 —— 裁掉一颗按钮，用户就答不了。
+  //    ⇒ 那一格要允许被压缩，而理由那一格要被省略号截。
+  assert.match(css, /#sb-port\s*\{[^}]*min-width:\s*0/,
+    '★ 那一行要**允许被压缩**（`.armed` 的缺省是 `flex: none`，不覆盖的话它按内容'
+    + '宽度撑着，窄窗口里被裁掉的是最右那颗按钮）');
+  assert.match(css, /#sb-port-why\s*\{[^}]*text-overflow:\s*ellipsis/,
+    '★ 而先被裁短的是**理由**那一段 —— 被裁掉的是一句解释，不是一颗按钮');
+  assert.match(js, /\$\('sb-port-why'\)\.title\s*=/,
+    '★ 被裁掉的那半句要挂在 `title` 上（停一下还读得全）');
+
   // ★ 它**排在 `.spacer` 后面**是承重的：排在 `#sb-detail` 后面的话，一句长一点的
   //   错误会把它顶到 `overflow:hidden` 的边界之外，而它是唯一能回答"要不要继续"
   //   的那一格。

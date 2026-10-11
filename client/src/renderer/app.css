@@ -217,6 +217,17 @@ button.ghost:hover { background: #45494e; }
 button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
+/* ★★ 「记住新配置并启动」—— 那一行三颗里唯一**会改配置**的一颗。
+   用琥珀（`--warn`）：那个颜色在这个仓库里等于「注意」，而它要提示的正是"这一步会
+   把这份数据的端口改掉"。★ 它与两段式那颗 `danger`（红）**不是**同一件事：这里
+   不可逆，但它是用户自己选的；`danger` 说的是"你要失去什么"。
+   ★ 描边用 `box-shadow: inset` 而不是 `border`：真边框会把这一颗画得比旁边那两颗
+   高 2px（`button` 是 `border: 0`），而它们并排在同一行里。 */
+button.remember {
+  background: #4a3f1c; color: var(--warn);
+  box-shadow: inset 0 0 0 1px var(--warn);
+}
+button.remember:hover { background: #5c4e22; }
 
 /* ── 两段式确认 ──────────────────────────────────────────────────────────────
    第一段把那一格的按钮换成这一行：**后果 + 确定 + 取消**。它可退 —— 点到别处、
@@ -231,6 +242,16 @@ button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
      静默的 TypeError。 */
 .armed { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .armed-why { color: var(--warn); font-size: 12px; }
+/* ★★ 「端口被占」那一行在窗口窄的时候**先裁理由，不裁按钮**（2026-10-11 加）：
+   从二选一变成三选一之后它长了一截（「记住新配置并启动」比「临时换一个」长得多），
+   而它是这一屏上**唯一**能做决定的地方 —— 裁掉一颗按钮，用户就答不了这一问。
+   ★ 两处都要写：这一格得**允许被压缩**（`flex: none` 是 `.armed` 的默认，不覆盖的话
+   它按内容宽度撑着，谁都挤不动它）；而理由那一格要给出省略号的行为
+   （`white-space: nowrap` 从 `#statusbar` 继承下来，所以省略号在三颗旁边生效）。
+   ★ 被裁短的那段话由主进程给（见 panel.js 的 `renderPortAsk`），长度不由我们定 ——
+   所以这里不能指望它自己短。 */
+#sb-port { flex: 0 1 auto; min-width: 0; }
+#sb-port-why { overflow: hidden; text-overflow: ellipsis; }
 .armed-off { display: none; }
 
 /* ── 密钥指纹 ──

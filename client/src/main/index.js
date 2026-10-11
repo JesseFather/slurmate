@@ -2583,8 +2583,9 @@ async function startSession(resources, serviceKind, portChoice) {
   //
   // 一份数据的端口是它**被创建时**定下来的，此后只读（`config.js` 的
   // `assignSpacePorts`）。而真正的绑定发生在**提交与登记之后**
-  // （`session.js` 的 `_bringUpTunnel`）—— 所以"要不要临时换一个"这个问题必须在
-  // 这里问：等到绑定那一刻，作业已经在集群上了，用户答"不启动"就是一句空话。
+  // （`session.js` 的 `_bringUpTunnel`）—— 所以"要不要换一个（只换这一次，还是记住
+  // 新配置）"这个问题必须在这里问：等到绑定那一刻，作业已经在集群上了，用户答
+  // "取消"就是一句空话。
   //
   // ★ 只对**持久的那份数据**问，判据是两个框架事实，**永远不是插件名**：
   //   · 没有数据空间（中转站）—— 它用的是那个共用的基准端口，无所谓"这一份数据的
@@ -2600,10 +2601,14 @@ async function startSession(resources, serviceKind, portChoice) {
   //   跳过，那是**照旧的静默顺移**，不是冲突 —— 在这里问一句"要不要临时换"，
   //   等于把一个已经由分配器答过的问题再问用户一遍。
   //
-  // ★ `portChoice === 'shift'` ⇒ **用户已经答过了**（界面把那一下重发到这里）：
-  //   不再探、不再问 —— 否则一个真被占着的端口会让那一行永远问下去。
+  // ★★ `'shift'` 与 `'remember'` ⇒ **用户已经答过了**（界面把那一下重发到这里）：
+  //    不再探、不再问 —— 否则一个真被占着的端口会让那一行永远问下去。
+  //    ★ 两者的分别**不在这一层**（这里对它们做的是同一件事：别拦他）：`'remember'`
+  //      还多一步"把新端口记进配置"，而那一步排在**绑定成功之后**（见下面那一段）
+  //      —— 此刻还没有"新端口"这回事。
   const persistentSpace = Boolean(space) && !tempSpaces.has(space.id);
-  if (persistentSpace && portChoice !== 'shift'
+  const answered = portChoice === 'shift' || portChoice === 'remember';
+  if (persistentSpace && !answered
       && !excludedPortsFor(space.id, null).has(preferredPort)) {
     let probe;
     try {
@@ -2615,8 +2620,8 @@ async function startSession(resources, serviceKind, portChoice) {
     }
     if (!probe.free) {
       // ★ 此刻**什么都没有发生**：没有作业、没有会话记录、没有占位、配置一个字
-      //   都没动。这正是"不启动"能是字面意思的原因 —— 界面那一行二选一，答
-      //   「不启动」就地回退，没有任何东西要撤。
+      //   都没动。这正是「取消」能是字面意思的原因 —— 界面那一行三选一，答
+      //   「取消」就地回退，没有任何东西要撤。
       return { conflict: { want: preferredPort, spaceId: space.id } };
     }
   }
@@ -2721,6 +2726,28 @@ async function startSession(resources, serviceKind, portChoice) {
     portChoice,
   });
   if (!snap) onSessionChange(slot);
+
+  // ── ★★ 「记住新配置并启动」：把这份数据的首选端口**改成隧道真正绑上的那一个** ──
+  //
+  // ★ 写的是 `snap.localPort`（真绑上的那个），**不是**自己按顺移规则重算一遍 ——
+  //   同一条规则不许有两份实现，而两份漂开的形态是"记下来的端口没人在用"。
+  // ★ 临时副本与中转站进不来：判据是上面那两个**框架事实**（`persistentSpace`），
+  //   永远不是插件名。`localPort === preferredPort` 时什么也不做（那一趟没顺移）。
+  // ★ 而写不进去要**如实说出来**：用户点的是"记住"，而它没记住 —— 静默的话，他
+  //   下次开局还会被问一遍，却以为自己已经答过了。
+  if (snap && portChoice === 'remember' && persistentSpace
+      && snap.localPort && snap.localPort !== preferredPort) {
+    const wrote = config.recordSpacePort(cfg, space.id, snap.localPort);
+    if (!wrote.ok) {
+      win.pushNotice('error', `端口没能记进配置：${wrote.error}`
+        + `　这一次会话照常跑着（用的是 ${snap.localPort}），但下次启动还会问你一次。`);
+    } else {
+      commitConfig();
+      win.pushNotice('info', `这份数据的端口已记成 ${snap.localPort}`
+        + `（原来是 ${preferredPort}）—— 下次启动直接用它，不会再问。`);
+    }
+  }
+
   // ★ 回**槽**：界面拿它指着说"我起的是这一个"（`app:start` 的回包）。
   return { slot, snap };
 }
@@ -4835,12 +4862,14 @@ function registerIpc() {
    * @param {string} serviceKind 插件名（站点内的**短名**）。**必填** —— 客户端
    *        这一侧没有"缺省插件"，缺省是**站点**的事（配置里的 `default_plugin`，
    *        它只作用于不带 `service_kind` 的 `slurmate submit`）。
-   * @param {string} [portChoice] 用户在「端口被占」那一行上答过的（只认 `'shift'`
-   *        = 临时换一个）。界面上那一行重发时带上它。
+   * @param {string} [portChoice] 用户在「端口被占」那一行上答过的：`'shift'`
+   *        （启动 —— 只把这一次会话换到别的端口）或 `'remember'`（记住新配置并启动
+   *        —— 绑定成功之后把这份数据的首选端口记成新的那个）。界面上那一行重发时
+   *        带上它。
    *
    * ★ `code: 'port_conflict'` 这一支是**唯一**一个"没成，但也没失败"的答案：
-   *   它说的是"首选端口被占着，**什么都没提交**，等你答"。界面上那一行二选一，
-   *   两个答案都是用户主动要的（见 panel.js 的 `renderPortAsk`）—— 它**不是**
+   *   它说的是"首选端口被占着，**什么都没提交**，等你答"。界面上那一行三选一，
+   *   三个答案都是用户主动要的（见 panel.js 的 `renderPortAsk`）—— 它**不是**
    *   一次确认，别照 `armConfirm`"第一下 arm、第二下执行"的路子读它。
    */
   send('app:start', async (resources, serviceKind, portChoice) => {
