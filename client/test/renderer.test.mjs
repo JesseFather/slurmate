@@ -665,10 +665,17 @@ test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那�
   const sec = /<section id="sec-about"[\s\S]*?<\/section>/.exec(html);
   assert.ok(sec, 'panel.html 里应当有 #sec-about');
   const bare = sec[0].replace(/<!--[\s\S]*?-->/g, '');
-  for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-src', 'dev-src-path',
-                    'dev-src-count', 'dev-pick', 'dev-reset-src', 'dev-debug']) {
+  for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-debug']) {
     assert.ok(bare.includes(`id="${id}"`),
       `#${id} 要搬进 #sec-about 里面 —— 留在外面就是"收起来了但开关还在"`);
+  }
+  // ★ 而「假站点的插件来源」那一块（一个目录选择器 + 一句"读到几个"）**整块没有了**：
+  //   站上的插件只有一条来的路 —— 装上去（插件页那颗「安装插件…」）。留在这一节里
+  //   就等于说"站点上有什么可以由你挑"，而那件事真站点上只取决于管理员装了什么。
+  for (const id of ['dev-src', 'dev-src-path', 'dev-src-count',
+                    'dev-pick', 'dev-reset-src']) {
+    assert.equal(bare.includes(`id="${id}"`), false,
+      `#${id} 还在 —— 「假站点的插件来源」那条路应该整个删掉`);
   }
   // ★ 调试开关那 10 颗按钮一个都不许少（它们存在的全部理由就是造出真集群上造不
   //   出来的状态，少一颗就少验一条路）。数目钉着，多一颗也要看一眼。
@@ -682,11 +689,10 @@ test('★ 「关于」的入口是第一屏最末那一行 —— 而标题那�
     '★ 而它仍然由前台那一条的 `dev` 驱动');
 
   // ★ 「从前那两段」压成了一句 —— 它是干什么的留下，它是**给谁用的**删掉（名字
-  //   自己说）。★ 只数**开发者模式那一段自己**（到 `#dev-src` 为止）：底下
-  //   `#dev-src` / `#dev-debug` 各自那句说明不在这条判据里，它们说的是各自那一块
-  //   怎么用，不是"这个模式是什么"。
+  //   自己说）。★ 只数**开发者模式那一段自己**（到 `#dev-debug` 为止）：底下那一块
+  //   自己的说明不在这条判据里，它说的是"那些按钮怎么用"，不是"这个模式是什么"。
   const head = sec[0].slice(sec[0].indexOf('<h3>开发者模式</h3>'),
-    sec[0].indexOf('<div id="dev-src"'));
+    sec[0].indexOf('<div id="dev-debug"'));
   assert.equal([...head.matchAll(/<p class="sub">/g)].length, 1,
     '开发者模式那一段只留一句 —— 多一句就是那两段又长回来了');
 });
@@ -1060,20 +1066,48 @@ test('★ 本机池那几个入口从 preload / panel.js / panel.html 三处一�
     'panel.html 里还留着 #plugin-dev 那个容器');
 });
 
-test('★ 开发者模式那四个入口同时登记在 preload / panel.js / panel.html 三侧', () => {
+test('★ 开发者模式那两个入口同时登记在 preload / panel.js / panel.html 三侧', () => {
   // 与前面那两条同一个道理：少一边就是"点了没反应"（桥没暴露 ⇒ 调不到方法；
   // 面板没调 ⇒ 没有入口；HTML 里没那个 id ⇒ 面板一上来就 TypeError 白屏）。
   //
-  // ★ 这四个动词是这一版**新加**的，而且它们的"没反应"格外难查：开关点了之后
-  //   界面本来就不该有变化（要重启才生效），所以"点了没反应"与"正常"长得一样。
-  for (const m of ['setDeveloperMode', 'pickDevPluginDir', 'clearDevPluginDir', 'restart']) {
+  // ★ 这两个动词的"没反应"格外难查：开关点了之后界面本来就不该有变化
+  //   （要重启才生效），所以"点了没反应"与"正常"长得一样。
+  //   ★ 从前这里是四个（还有"选/清假站点的插件来源"两个）—— 那两个整条删掉了，
+  //     devmode.test.mjs 有一条断言它们**不在**桥上。
+  for (const m of ['setDeveloperMode', 'restart']) {
     assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
     assert.ok(bridgeCalls().has(m), `panel.js 没有调用 ${m}`);
   }
   const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
-  for (const id of ['dev-on', 'dev-pick', 'dev-reset-src', 'dev-restart',
-                    'dev-pending', 'dev-src-count']) {
+  for (const id of ['dev-on', 'dev-restart', 'dev-pending']) {
     assert.ok(htmlBare.includes(`id="${id}"`), `panel.html 缺少 #${id}`);
+  }
+  // 桥上不许再有那两个动词 —— 留着的话下一个人会以为那条路还在。
+  for (const m of ['pickDevPluginDir', 'clearDevPluginDir']) {
+    assert.equal(bridgeMethods().has(m), false, `preload 上还有 ${m}`);
+    assert.equal(bridgeCalls().has(m), false, `panel.js 还在调 ${m}`);
+  }
+});
+
+test('★★ 「假站点的插件来源」这个说法在客户端里**一处都不剩**', () => {
+  // ★ 为什么值得单开一条：那条路（用户把站点读插件的目录指到别处）删掉之后，最容易
+  //   留下的不是代码，而是**话** —— 一句"就在下面「插件来源」里选一个目录"指回一个
+  //   已经不存在的控件，比没有这句话坏得多：用户会去界面上找它。
+  //
+  // ★ 四处一起查，缺一处就等于只删了一半：界面、渲染层、桥、以及**主进程里那几句
+  //   提示**（它们正是最可能留下来的地方）。判据是**来源文本**，不是运行行为 ——
+  //   本机跑不起 Electron，而这几句都是在没有窗口的情况下才会出现的话。
+  //
+  // ★★ **注释剥掉再查**，这是承重的：一段写着"这条路从前在这儿、后来为什么删了"
+  //   的注释是好东西（下一个人正需要它），而**用户读得到的那句话**才是要查的 ——
+  //   指回一个不存在的控件的那一句，恰恰只会出现在**字符串**里，不会只出现在注释里。
+  const main = fs.readFileSync(path.join(here, '..', 'src', 'main', 'index.js'), 'utf8');
+  const bareHtml = html.replace(/<!--[\s\S]*?-->/g, '');
+  for (const [who, src] of [['panel.html', bareHtml], ['panel.js', stripJsComments(js)],
+                            ['preload/api.js', stripJsComments(api)],
+                            ['main/index.js', stripJsComments(main)]]) {
+    assert.equal(src.includes('插件来源'), false,
+      `${who} 里还写着「插件来源」—— 那条路已经整个删掉了`);
   }
 });
 

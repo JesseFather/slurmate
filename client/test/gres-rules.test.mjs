@@ -51,7 +51,7 @@ const KIND = 'sshd';
 const PUBKEY = 'ssh-ed25519 ' + 'A'.repeat(68) + ' slurmate-test';
 
 function make() {
-  return new FakeBackend({ rpcLatencyMs: 0, enrollDelayMs: 0, sitePluginDir: SITE });
+  return new FakeBackend({ rpcLatencyMs: 0, enrollDelayMs: 0, samplePluginsDir: SITE });
 }
 
 /**

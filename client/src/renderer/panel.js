@@ -3087,11 +3087,14 @@ let devState = null;
  *   |---|---|---|
  *   | 复选框 | `saved` | 用户刚点的就是它。跟着 `on` 走的话，点完它会自己弹回去 |
  *   | 「重启后生效」那一行 | 两者是否相等 | 不相等就是有改动悬着 |
- *   | 插件来源那一段 | `saved` | 同上：刚选完就要看见 |
  *   | 调试开关那一块 | `on` | 假后端没在跑的话，那些按钮点了只会报"仅开发者模式可用" |
  *
  *   全都跟着 `on` 走的话，点了开关**界面上什么都不会发生** —— 而那正是"点了没反应"
  *   这一类问题里最难查的一种：其实它生效了，只是要重启。
+ *
+ * ★ 从前这里还画过一块「假站点的插件来源」（一个目录选择器 + 一句"读到几个插件"）。
+ *   整块删掉了：假站点上的插件**只有一条来的路** —— 装上去（插件页那颗「安装插件…」）。
+ *   站点上现在有什么，由**调试那一屏**如实说（那是"假站点自己的事"）。
  */
 function renderDevMode(dm) {
   if (dm) devState = dm;
@@ -3102,34 +3105,13 @@ function renderDevMode(dm) {
 
   // 有改动等着重启：说得出来，并且给一个按得下去的按钮（不然用户只能自己去
   // 关掉再打开 —— 那正是命令行开关那种"你得知道怎么做"的体验）。
-  const pending = (d.saved !== d.on) || (d.pluginDirSaved !== d.pluginDir);
+  const pending = d.saved !== d.on;
   $('dev-pending').classList.toggle('hidden', !pending);
   if (pending) {
     $('dev-pending').textContent = '有改动等着重启 —— 这个客户端现在跑的还是'
       + (d.on ? '开发者模式' : '真集群那一份配置') + '。';
   }
   $('dev-restart').classList.toggle('hidden', !pending);
-
-  // 插件来源：路径跟 `saved`（用户要的那个），**数目只在两者相同时才敢报** ——
-  // 主进程给的数目是**生效**那棵树扫出来的，拿它去配一个新选还没生效的路径，
-  // 就是一句对不上号的话。
-  $('dev-src').classList.toggle('hidden', !d.saved);
-  const wantDir = d.pluginDirSaved || d.defaultPluginDir;
-  $('dev-src-path').textContent = wantDir || '（默认那个位置不存在：仓库里的 plugins/）';
-  const cnt = $('dev-src-count');
-  if (d.pluginDirSaved !== d.pluginDir) {
-    cnt.textContent = '重启之后才会按这个来源读。';
-  } else if (d.source.plugins.length) {
-    cnt.textContent = `读到 ${d.source.plugins.length} 个插件：`
-      + d.source.plugins.join('、')
-      + (d.source.skipped.length
-        ? `（另有 ${d.source.skipped.length} 个目录读不出清单，假站点不会报它们）` : '');
-  } else if (d.source.skipped.length) {
-    cnt.textContent = `一个插件都没有 —— ${d.source.skipped.length} 个目录都读不出清单：`
-      + `${d.source.skipped[0].name}：${d.source.skipped[0].why}`;
-  } else {
-    cnt.textContent = '一个插件都没有 —— 每个子目录应该是一个插件（里面有 plugin.json）。';
-  }
 
   // 调试开关跟 **`on`**：假后端没在跑，那些按钮按下去只会回一句"仅开发者模式可用"。
   $('dev-debug').classList.toggle('hidden', !d.on);
@@ -3457,27 +3439,12 @@ function bindEvents() {
     };
   }
 
-  // ── 开发者模式那三个动词 ──
-  // 三个都会**改一个要重启才生效的东西**，所以三个都不在这里"假装已经生效"：
-  // 主进程回一份新的设置，照它重画（那一行「重启后生效」就是重画的产物）。
+  // ── 开发者模式 ──
+  // 开关改的是**要重启才生效**的东西，所以这里不"假装已经生效"：主进程回一份新的
+  // 设置，照它重画（那一行「重启后生效」就是重画的产物）。
   $('dev-on').onchange = async () => {
     const r = await window.slurmate.setDeveloperMode($('dev-on').checked);
     if (!r.ok) { notice('error', r.error || '改不了开发者模式。'); renderDevMode(); return; }
-    renderDevMode(r.developerMode);
-  };
-
-  $('dev-pick').onclick = async () => {
-    const r = await window.slurmate.pickDevPluginDir();
-    if (r.cancelled) return;
-    // 失败（目录里读不出插件）时主进程**没有**保存，也没有推通知 —— 那句话由这里说，
-    // 它带着"为什么"，而用户正盯着这个按钮。
-    if (!r.ok) { notice('error', r.error); return; }
-    renderDevMode(r.developerMode);
-  };
-
-  $('dev-reset-src').onclick = async () => {
-    const r = await window.slurmate.clearDevPluginDir();
-    if (!r.ok) { notice('error', r.error || '改不回来。'); return; }
     renderDevMode(r.developerMode);
   };
 

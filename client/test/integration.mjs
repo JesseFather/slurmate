@@ -42,8 +42,9 @@ const CS_MANIFEST = JSON.parse(fs.readFileSync(
 const LOGIN = CS_MANIFEST.contributes.login;
 const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
-// ★ 假站点的**分发源**：仓库里的 `plugins/` 目录 —— 与 app 在开发者模式下用的是
-//   同一个（见 index.js 的 `sitePluginDir`）。后端自己从那棵树上读清单、现打真包。
+// ★ 假站点那棵**开发样例**树：仓库里的 `plugins/` 目录 —— 与 app 在开发者模式下
+//   读到的是同一棵（见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
+//   后端自己从那棵树上读清单、现打真包。
 //
 //   ★ 两边走的是**同一条**：站点报的是它自己发得出来的东西，不是客户端池里装了
 //     什么。
@@ -87,7 +88,7 @@ function keepAlive() {
  */
 async function makeBackend(t, opts = {}) {
   const backend = new FakeBackend({
-    rpcLatencyMs: 0, sitePluginDir: SITE_PLUGIN_DIR, ...opts,
+    rpcLatencyMs: 0, samplePluginsDir: SITE_PLUGIN_DIR, ...opts,
   });
   await backend.connect({ user: 'demo' });
   t.after(async () => { await backend.close(); });

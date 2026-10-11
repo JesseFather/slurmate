@@ -107,25 +107,30 @@ const DEMO_PKG_SEED = Buffer.from('slurmate-demo-package-key-v1!!!!', 'utf8');
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
 
-// ★ **假站点报的插件 = 仓库里的 `<repo>/plugins/`。** 只有一个来源。
+// ★ **假站点报的插件 = 那两处目录加起来**（`_siteDirs()`），两处两个角色：
+//
+//   · **装上去的**（`siteInstalledDir`，沙盒里程序自己的一处）—— 这才是"站点上
+//     有什么"的答案，而它只有一条来的路：`installPlugins`（与真站点上管理员
+//     `plugin install` 同形）。
+//   · **开发样例**（`samplePluginsDir`，仓库里的 `plugins/`）—— **基座两端都不带
+//     任何插件**（`plugins/README.md` 第一行），那两棵是开发基座时用来对齐插件两侧
+//     能力的样例。**打包版没有它们 —— 那是对的，不是降级。**
 //
 //   两条走不通的路值得写明，它们各自会造出一个假现场：
 //
-//   · **写死几个插件**（名字与 id 抄那两个内置插件）是一句谎话 —— 基座
-//     不自带插件，于是满屏"本站有而本机没有"，一个**故意不带插件的基座**看起来
-//     像坏了。
+//   · **写死几个插件**（名字与 id 抄那两个样例）是一句谎话 —— 基座不带插件，于是
+//     满屏"本站有而本机没有"，一个**故意不带插件的基座**看起来像坏了。
 //   · **报"本机池里装了什么"** 留下一个更隐蔽的死角：站点报的就是本机有的那些，
 //     于是「站点有而本机没有」这条**最重要的**路径在假站点里永远走不到 —— 而
 //     开发者模式恰恰是这个项目里唯一能造出那些状态的地方。
 //
-//   所以站点从仓库里读**真文件**（真的 sha256、真的字节），客户端真的走一遍
+//   所以站点从盘上读**真文件**（真的 sha256、真的字节），客户端真的走一遍
 //   下载 → 暂存校验 → 同意闸 → 换入。这才是"它演的是生产那条路"该有的样子。
 //
 //   ★ 池只剩一个（站点池），于是"报本机池"读的就是站点自己刚发下去的东西 ——
 //     那条路**没有**，也不该有。
 //
-//   打包之后没有仓库目录，`_sitePluginDir` 返回 null ⇒ **站点一个插件都不报**。
-//   这条降级如实记在账本里（从这里跑都是源码树，所以正常的开发流程看不到它）。
+//   ★ 两处都空 ⇒ **站点一个插件都不报，这是合法状态**（一个插件都不装是合法状态）。
 
 // 模拟用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
@@ -348,13 +353,17 @@ class FakeBackend extends Backend {
     /** 调试用：站点多出来的插件（模拟"站点升级了、客户端没跟上"）。 */
     this._extraSitePlugins = [];
     /**
-     * 假站点的**分发源**：仓库里的 `plugins/` 目录。
+     * 假站点上那两处目录（见文件头）。**两处，两个角色**：
+     *   · `siteInstalledDir` —— 装上去的东西落的地方（也是 `installPlugins` 的落点）
+     *   · `samplePluginsDir` —— 开发样例住的地方（打包版没有它，那是对的）
      *
-     * 传函数而不是路径 —— 打包之后那个目录不存在，而"不存在"必须是**每次现算**
-     * 的结果（从源码跑与从安装包跑是两个事实）。
+     * 传函数而不是路径 —— 打包之后样例那棵树不存在、沙盒那处要等 userData 定下来，
+     * 而"这个目录现在在哪／在不在"必须是**每次现算**的结果。
      */
-    this._sitePluginDir = typeof opts.sitePluginDir === 'function'
-      ? opts.sitePluginDir : () => null;
+    this._siteInstalledDir = typeof opts.siteInstalledDir === 'function'
+      ? opts.siteInstalledDir : () => null;
+    this._siteSampleDir = typeof opts.samplePluginsDir === 'function'
+      ? opts.samplePluginsDir : () => null;
     /** 调试用：让某一份的**包**里多一个超过单文件上限的文件。见 debugBloatPlugin。 */
     this._bloatPlugin = null;
     /** 调试用：让站点在 `plugin_package` 上回 rate_limited 若干次。 */
@@ -466,7 +475,7 @@ class FakeBackend extends Backend {
       };
     } catch {
       // 打包器不在（打包之后的安装包里没有 `packer/`）⇒ 这个站点**不发包**。
-      // 与 `_sitePluginDir` 返回 null 是同一种降级：不是错误，是"这里没有它"。
+      // 与"那两处目录一个都不存在"是同一种降级：不是错误，是"这里没有它"。
       out = null;
     }
     this._pkgCache.set(key, out);
@@ -474,7 +483,22 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 假站点的**分发索引**：`(id@版本) → {dir, files}`，来自仓库里的 `plugins/`。
+   * 假站点上那两处目录（装上去的 + 开发样例），**装上去的排在前面**。
+   *
+   * ★ 顺序是承重的：同一个 id 在两处都有时，先扫到的那个进索引（下面 `has` 那一句
+   *   决定谁赢）—— 而"站上已经有一棵"这条判据也因此看得见两处。
+   */
+  _siteDirs() {
+    const out = [];
+    for (const f of [this._siteInstalledDir, this._siteSampleDir]) {
+      const d = f();
+      if (d && !out.includes(d)) out.push(d);
+    }
+    return out;
+  }
+
+  /**
+   * 假站点的**分发索引**：`(id@版本) → {dir, files}`，来自那两处目录。
    *
    * ★ 这里那个 `files` 是**包里的记录表**（打包时要喂给打包器的负载清单），
    *   **不是**协议字段 —— 协议里没有 `files` 这个字段，两件事同名，所以写清楚。
@@ -485,11 +509,10 @@ class FakeBackend extends Backend {
   _siteIndex() {
     if (this._indexCache) return this._indexCache;
     const cache = new Map();
-    const base = this._sitePluginDir();
-    if (base) {
+    for (const base of this._siteDirs()) {
       // ★ 扫树的规矩**只有一份**（`plugins/index.js` 的 scanPluginCollection）——
-      //   开发者模式那个「插件来源」也是用它报"这个目录里读到几个插件"的。两处
-      //   各写一遍的话，界面说"读到 3 个"而站点只报 2 个，谁也不知道差在哪。
+      //   调试那一屏也是用它报"这个目录里读到几个插件"的。两处各写一遍的话，
+      //   界面说"读到 3 个"而站点只报 2 个，谁也不知道差在哪。
       //   `skipped` 这里**不用**：坏清单就是发不出来的一份东西，站点不报它
       //   （与守护进程一致）；那是界面上那句"只有 N 个能用"的事。
       const { plugins: found } = pluginFiles.scanPluginCollection(base);
@@ -505,7 +528,14 @@ class FakeBackend extends Backend {
             .map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }));
         } catch { continue; }
         const c = (mf.contributes && typeof mf.contributes === 'object') ? mf.contributes : {};
-        cache.set(`${mf.id}@${mf.version}`, {
+        const key = `${mf.id}@${mf.version}`;
+        // ★ 两处都有同一个 `id@版本` ⇒ **先扫到的那个算数**（装上去的排在前）。
+        //   同一棵树在两处各有一份不是错误（从源码跑时把样例也装了一遍就会这样），
+        //   而"站点上有哪几棵树"必须只有一个答案 —— 让后扫到的覆盖掉，
+        //   会让 `installPlugins` 里那条"同 id 拒装"的判据看到一个和它刚看过的
+        //   不一样的 `dir`。
+        if (cache.has(key)) continue;
+        cache.set(key, {
           dir, files, name: mf.name, title: mf.displayName || mf.name,
           // ★ 内部用（不在 `plugins` 响应里）：**现打一个包要签四元组**（A.3），
           //   而四元组的头两段就是这两个。从 `key` 那个串里切是不行的 —— 版本号
@@ -529,7 +559,7 @@ class FakeBackend extends Backend {
    *
    *   · `installPlugins` 装着插件 —— 站点"装完当场就报它"靠的就是这一下
    *     （真守护进程那边是 `plugin install` 之后的重载）。
-   *   · 用例要换一个假站点的插件来源（`_test.setDevPluginDir`）—— 那在真机上
+   *   · 用例要换掉假站点那棵**样例**树（`_test.setDevSampleDir`）—— 那在真机上
    *     等于重启，而一个进程里 index.js 只加载一次。
    *
    *   ★ 除这两处**没有别人该调它**：这张快照是**启动**快照，随手丢它就等于把
@@ -547,7 +577,7 @@ class FakeBackend extends Backend {
    *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
    */
   _sitePlugins() {
-    // ── 分发源：仓库里的真文件 ──
+    // ── 分发源：盘上的真文件（装上去的那一处 + 开发样例那一处）──
     const distributed = [...this._siteIndex().entries()].map(([key, v]) => ({
       id: key.slice(0, key.lastIndexOf('@')),
       version: key.slice(key.lastIndexOf('@') + 1),
@@ -557,25 +587,27 @@ class FakeBackend extends Backend {
       can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name),
       surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
     }));
-    // ★ **别把"客户端池里装了什么"补进站点要报的插件**（打包版没有仓库目录时，
-    //   有人会觉得那是唯一的来源）。理由不只是"池只剩一个"：那一段让假站点的
+    // ★ **别把"客户端池里装了什么"补进站点要报的插件**（那两处都空的时候，
+    //   有人会觉得本机池是唯一的来源）。理由不只是"池只剩一个"：那一段让假站点的
     //   清单**由客户端自己的池决定** —— 而"站点有、本机没有"这条最重要的路径
     //   正是被它盖住的（站点报的就是本机有的那些，于是 `missing` 永远是空的）。
     //   开发者模式的全部价值是它演的是**同一件事**，而兜底演的是一件自证成立的
     //   事。
     //
-    //   代价如实记着：**打包版会一个插件都不报**（仓库目录不在包里）。账本里
-    //   有一条。别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
+    //   ★ 打包版没有样例那棵树（**基座两端都不带任何插件**，那是对的），于是新装的
+    //     客户端上假站点是空的 —— **一个插件都不装是合法状态**，出路是去装一个。
+    //     别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
     return [...distributed, ...this._extraSitePlugins];
   }
 
   /**
    * 把一个 `.splug` 装到假站点上 —— 与真站点 `slurmate plugin install <文件.splug>` 同形。
    *
-   * ★ **落点就是假站点的插件目录**（`_sitePluginDir()`，界面上「关于 → 假站点的
-   *   插件来源」那一行印的就是它）。一棵树一个 id，与真站点一样 —— 所以"同一个 id
-   *   已经有另一棵树"是**拒**，不是覆盖。真站点上那条路是 `uninstall` 之后再装
-   *   （它那句提示就是这么说的），而这句话里要说清**删掉哪个目录**。
+   * ★ **落点是"装上去的东西"那一处**（`_siteInstalledDir()`，沙盒里、程序自己的），
+   *   与**样例**那一棵分家 —— 用户装什么，都不该动到开发样例。一棵树一个 id，与真
+   *   站点一样 —— 所以"同一个 id 已经有另一棵树"是**拒**，不是覆盖（那棵树可能在
+   *   两处中的任何一处，那句错话里印的就是它的 `dir`）。真站点上那条路是
+   *   `uninstall` 之后再装，而这句话要说清**删掉哪个目录**。
    *
    * ★ **两遍式**（与守护进程的 `install_plugins` 逐字同形）：第一遍只把每份包铺到
    *   一个**暂存目录**里并逐份校验，一条不过就**一个字节都不落地**。于是"装了一半"
@@ -598,19 +630,30 @@ class FakeBackend extends Backend {
     const list = Array.isArray(paths) ? paths : [];
     if (!list.length) return { ok: false, code: 'nothing', error: '没有挑到任何 .splug。' };
 
-    const dir = this._sitePluginDir();
-    let usable = false;
-    try { usable = Boolean(dir) && fs.statSync(dir).isDirectory(); } catch { usable = false; }
-    if (!usable) {
-      return { ok: false, code: 'no_dir', error: dir
-        ? `假站点的插件目录「${dir}」不是一个能放东西的目录。`
-        : '假站点没有插件目录 —— 默认那个位置是仓库里的 `plugins/`，打包之后没有它。'
-          + '先在「关于 → 假站点的插件来源」里选一个目录。' };
+    const dir = this._siteInstalledDir();
+    if (!dir) {
+      return { ok: false, code: 'no_dir',
+               error: '拿不到"装上去的东西"放哪儿 —— 客户端的数据目录还没定下来。' };
+    }
+    // ★ 目录**由这里建**：它是程序自己的一处，第一次装东西之前它不存在，
+    //   而"还没有这个目录"不是错误（"站点上还没装过东西"就是这个样子）。
+    //
+    // ★★ 这一行的价值**只在出错那一条路上**，写清楚免得下一个人以为它多余：
+    //   正常路径上，下面铺暂存那一步（`unpackTo` 往 `dir/.slurmate-stage-…` 写）
+    //   本来就会顺手把父目录造出来。所以"把它删掉"是一个**等价变异** —— 用例一条
+    //   都不会红（这一轮真撞上过）。留着它是因为它把"这一处建不出来"（权限、
+    //   或者那个路径上躺着一个**文件**）变成一句说得清的错，而不是让后面某一步
+    //   以一句看不出所以然的话收场。
+    try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); }
+    catch (e) {
+      return { ok: false, code: 'no_dir',
+               error: `装插件的地方「${dir}」建不出来：${e.message}` };
     }
 
-    // ── 站上现在有哪几棵树。**一次扫完**：逐份现扫的话，自己刚铺下的暂存目录
-    //    会进到"站上已有的"里（它在同一个目录下）。 ──
-    const onSite = pluginFiles.scanPluginCollection(dir).plugins;
+    // ── 站上现在有哪几棵树（**那两处一起扫**，装上去的排在前）。**一次扫完**：
+    //    逐份现扫的话，自己刚铺下的暂存目录会进到"站上已有的"里（它在同一个目录下）。 ──
+    const onSite = this._siteDirs()
+      .flatMap((d) => pluginFiles.scanPluginCollection(d).plugins);
     /** 这一次调用里出现过的 id → 是哪个文件带来的（§6.4：两个同 id 的都不装）。 */
     const seenId = new Map();
 

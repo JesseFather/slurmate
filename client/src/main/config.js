@@ -328,7 +328,7 @@ function pinPluginKey(dir, pins, id, fingerprint) {
   return { ok: true };
 }
 
-// ── 开发者模式的两个设置：**不在 config.json 里** ────────────────────────────
+// ── 开发者模式：**不在 config.json 里** ──────────────────────────────────────
 //
 // ★ **为什么单独一个文件**：`developerMode` 这个键要回答的是"这次启动读**哪一份**
 //   配置"（用户自己那份，还是沙盒那一份）。把它放进 `config.json`，就先得知道读
@@ -348,31 +348,30 @@ const DEV_FILE = 'dev-mode.json';
 function devSettingsPath(dir) { return path.join(dir, DEV_FILE); }
 
 /**
- * 读开发者模式的设置。
+ * 读开发者模式的设置。**只有一个键。**
  *
- * @returns {{developerMode:boolean, pluginDir:string|null}}
- *   `pluginDir` = **假站点的插件来源**（插件作者指向自己那棵树用的）。`null`
- *   = 用默认的（仓库里的 `plugins/`）。见 index.js 的 devPluginSourceDir。
+ * ★ 从前这里还有一个 `pluginDir`（"假站点的插件来源"，插件作者可以指向自己那棵树）。
+ *   它整个删掉了：假站点上的插件**只有一条来的路** —— 装上去（见 index.js 的
+ *   `siteInstalledDir` / `samplePluginsDir`），而装上去是那条与真站点同形的路。
+ *   一个可以由用户改的来源会让"站点上有什么"取决于一个界面上的选择，
+ *   而真站点上那件事只取决于管理员装了什么。
+ *
+ * @returns {{developerMode:boolean}}
  */
 function loadDevSettings(dir) {
   const raw = readJson(devSettingsPath(dir));
   const shaped = Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw);
-  return {
-    developerMode: shaped && raw.developerMode === true,
-    pluginDir: (shaped && typeof raw.pluginDir === 'string' && raw.pluginDir)
-      ? raw.pluginDir : null,
-  };
+  return { developerMode: shaped && raw.developerMode === true };
 }
 
 /**
  * 写开发者模式的设置，返回**规整之后**的那一份 —— 调用方拿它更新自己手里那份，
  * 免得"我写下去的是什么"与"盘上是什么"有两份算法。
+ *
+ * ★ 写的是**整个文件**：旧版本留下的 `pluginDir` 因此不会被写回去（`0.y` 不考虑兼容）。
  */
 function saveDevSettings(dir, s) {
-  const next = {
-    developerMode: Boolean(s && s.developerMode),
-    pluginDir: (s && typeof s.pluginDir === 'string' && s.pluginDir) ? s.pluginDir : null,
-  };
+  const next = { developerMode: Boolean(s && s.developerMode) };
   writeAtomic(devSettingsPath(dir), JSON.stringify(next, null, 2), 0o600);
   return next;
 }

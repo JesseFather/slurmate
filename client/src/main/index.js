@@ -101,14 +101,14 @@ const shortDigest = plugins.shortDigest;
  *   两者不同 = 有改动等着重启 —— 界面据此说「重启后生效」，而不是让人以为点了没反应。
  *   ★ 判据只有一个：**别拿 `saved` 去决定这次进程怎么跑**。
  *
- * ★ `pluginDir` 是**假站点的插件来源**（插件作者指向自己那棵树用的）。`null` =
- *   用默认的（仓库里的 `plugins/`）。同样有生效值/盘上值两份，理由同上。
+ * ★ 从前这里还有一个 `pluginDir`（假站点的插件来源，用户能改）—— 整条删掉了。
+ *   假站点上的插件只有一条来的路：**装上去**（见 `samplePluginsDir` / `siteInstalledDir`）。
  *
  * ★ 模块加载期是"关着"的：真值要等 app ready 之后读得到 userData 才知道，而
  *   `registry` 是在模块加载期构造的 —— 那一刻看到一个"关着"的世界是对的。
  */
-let dev = { developerMode: false, pluginDir: null };
-let devSaved = { developerMode: false, pluginDir: null };
+let dev = { developerMode: false };
+let devSaved = { developerMode: false };
 
 let win = null;
 let backend = null;
@@ -363,14 +363,17 @@ function bootstrap() {
         // 或者反过来跳过它。真实后端完全不读这个。
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEV_ENROLL_MS))
           ? Number(process.env.SLURMATE_DEV_ENROLL_MS) : undefined,
-        // ★ 假站点的**分发源**：默认是仓库里的 `plugins/`，插件作者可以在界面上
-        //   改成自己那棵树（见 devPluginSourceDir）。那是一份真实文件（真的
-        //   sha256、真的字节），于是「站点有而本机没有」这条最重要的路径真的走得到：
-        //   池空的时候站点照样报那些插件，对账真的把它们取下来、真的要求同意。
+        // ★ 假站点上那两个目录，两个角色是分开的（见下面那一段的注释）：
+        //   `samplePluginsDir` 是**开发样例**住的地方（从源码跑时才有），
+        //   `siteInstalledDir` 是**装上去的东西**落的地方（沙盒里，程序自己的一处）。
+        //   都是一份真实文件（真的 sha256、真的字节），于是「站点有而本机没有」这条
+        //   最重要的路径真的走得到：池空的时候站点照样报那些插件，对账真的把它们
+        //   取下来、真的要求同意。
         //
-        // ★ 传**函数**而不是路径：来源可以在运行期被改（重启后生效），而"这个目录
-        //   现在在哪"必须是每次现算的结果。
-        sitePluginDir: devPluginSourceDir,
+        // ★ 传**函数**而不是路径：打包版没有样例那棵树，而"这个目录现在在哪／在不在"
+        //   必须是每次现算的结果。
+        samplePluginsDir,
+        siteInstalledDir,
       },
     });
 
@@ -413,10 +416,11 @@ function bootstrap() {
     //   ★ 只在**真的有东西**时说：空目录、或者从来没用过本机池的人，不该看见一条
     //     关于它的话 —— 那是噪音，而且会让人以为自己做错了什么。
     warnLegacyPool();
-    // ★ 假站点的插件来源一个插件都读不出来时**说一句**。这一步不是美化：来源可能
-    //   是"安装包里根本没有仓库的 plugins/"，也可能是作者刚选错了一个目录 ——
-    //   两种情况的症状都是"假站点一个插件都不报"，而界面上那句话说不清是为什么。
-    warnDevPluginSource();
+    // ★ 假站点上一个插件都发不出来时**说一句**。这一步不是美化：可能是"安装包里
+    //   本来就没有那两棵样例"（打包版），也可能是"站上还没装过东西"，
+    //   而两种情况的症状都是"假站点一个插件都不报"，界面上一句话说不清为什么。
+    //   ★ 那句话必须**说出路**（去点「安装插件…」），因为站点上的插件只有那一条来的路。
+    warnEmptyFakeSite();
 
     // 快捷键拦截：黑名单 + 诊断。
     //
@@ -3061,80 +3065,107 @@ function warnLegacyPool() {
     + '那个目录没有被动过，里面的文件还在原处。');
 }
 
-// ── 开发者模式：假站点的插件来源 ────────────────────────────────────────────
+// ── 开发者模式：假站点上那两个目录 ──────────────────────────────────────────
+//
+// ★★ **两处，两个角色，别再合成一个**：
+//
+//   · `siteInstalledDir()` —— **装上去的东西**。这才是"站点上有什么"的答案，
+//     而它只有一条来的路：「安装插件…」（与真站点上管理员 `plugin install` 同形）。
+//     落在**沙盒**里，与 `sitePoolDir()` 同一条理由：开发者模式那一整份数据都在
+//     沙盒里，站点装的东西不该例外。
+//   · `samplePluginsDir()` —— **开发样例**住的地方（仓库里的 `plugins/`）。
+//     ★★ **基座两端都不带任何插件**（`plugins/README.md` 第一行）：那两棵是**开发
+//     基座**时用来对齐插件两侧能力的样例，**打包版没有它们 —— 那是对的，不是降级**。
+//     从源码跑时它们在场，只是"开发基座要有东西可对齐"。**一个插件都不装是合法状态。**
+//
+// ★ 从前这两件事是**一个目录**，而它还能由用户在界面上改（`pluginDir`）—— 于是
+//   "站点上有什么"取决于一个界面上的选择，而真站点上那件事只取决于管理员装了什么。
+//   那条来源整根删掉了：用户能改的只有"装哪一个包上去"。
 
 /**
- * 假站点默认分发哪棵树 —— **仓库里的 `plugins/`**。
+ * 测试接缝：把**样例**那一棵换掉（`null` = 恢复默认）。
  *
- * ★ 传函数而不是路径的地方（backend-fake）看的是**每次现算**：从源码跑与从安装包
- *   跑是两个事实。返回 `null` = 这个目录不存在（安装包里没有它）。
+ * ★ 用例要造"站上一个插件都没有"的现场（那里放一个空目录），而真机上那意味着
+ *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次。★ 它**只动样例那一处**：
+ *   装上去的东西在沙盒里，用例自己那份 userData 本来就是空的。
  */
-function defaultDevPluginSourceDir() {
+let sampleDirOverride = null;
+
+/**
+ * 开发样例住的地方 —— 仓库里的 `plugins/`。打包版没有它，而**那是对的**。
+ *
+ * ★ 传**函数**而不是路径的地方（backend-fake）看的是每次现算：从源码跑与从安装包
+ *   跑是两个事实。返回 `null` = 这个位置不存在（安装包里没有它）。
+ */
+function samplePluginsDir() {
+  if (sampleDirOverride !== null) return sampleDirOverride || null;
   const d = path.join(__dirname, '..', '..', '..', 'plugins');
   try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
 }
 
 /**
- * 假站点这次从哪个目录读插件：用户选过的那个，没选过就是默认那棵。
+ * **装上去的东西**落在哪 —— 沙盒里的一处，程序自己的。
  *
- * ★ 用的是**生效值**（`dev`），不是盘上那个值（`devSaved`）—— 换来源要重启，
- *   理由与那个开关一样：假站点和真的守护进程一样，插件清单是**启动时的快照**。
+ * ★ 目录由 `installPlugins` 自己建（它落东西之前先确保那处存在）。这里只回答
+ *   "在哪"：**一个还不存在的目录不是错误**，而是"这个站点上还没装过东西"。
  */
-function devPluginSourceDir() {
-  return dev.pluginDir || defaultDevPluginSourceDir();
+function siteInstalledDir() {
+  try { return path.join(cfgDir || '.', 'site-installed'); } catch { return null; }
 }
 
 /**
- * 「这个目录里有几个插件」—— 给界面上那个选择目录的按钮报数用。
+ * 「假站点那两处各读到几个插件」—— 给调试那一屏（第四屏）报数用。
  *
  * ★ 报的是**扫描结果**，不是站点最终报出去的清单：坏清单在这里要说出来（作者的
  *   清单里少一个字段，他要看到的是"3 个目录只有 1 个能用"，而不是一句"一个都没有"）。
  *   站点那边照守护进程的样子**静默跳过**坏清单，那是另一件事。
  *
- * @returns {{dir:string|null, plugins:string[], skipped:object[]}}
+ * ★ 两处分开报，因为**它们的出路不同**：样例那一处没有了是"打包版本来就该没有"，
+ *   而装上去那一处是"还没装过，去装一个"。
  */
-function devSourceReport(dir) {
-  const target = dir === undefined ? devPluginSourceDir() : dir;
-  const r = plugins.scanPluginCollection(target || '');
-  return {
-    dir: target || null,
-    plugins: r.plugins.map((p) => p.name),
-    skipped: r.skipped.map((s) => ({ name: s.name, why: s.why })),
+function sitePluginReport() {
+  const each = (dir) => {
+    const r = plugins.scanPluginCollection(dir || '');
+    return {
+      dir: dir || null,
+      plugins: r.plugins.map((p) => p.name),
+      skipped: r.skipped.map((s) => ({ name: s.name, why: s.why })),
+    };
   };
+  return { samples: each(samplePluginsDir()), installed: each(siteInstalledDir()) };
 }
 
 /**
- * 开发者模式那一组字段，给界面用。**一处形状**：bootstrap 与那三个动词共用它 ——
+ * 开发者模式那一组字段，给界面用。**一处形状**：bootstrap 与那个开关共用它 ——
  * 各拼一份的话，`on` 与 `saved` 迟早有一处写错，而那个错的症状是"点了一下没反应"。
  */
 function devView() {
   return {
     on: dev.developerMode,
     saved: devSaved.developerMode,
-    pluginDir: dev.pluginDir,
-    pluginDirSaved: devSaved.pluginDir,
-    defaultPluginDir: defaultDevPluginSourceDir(),
-    source: devSourceReport(),
   };
 }
 
-/** 开发者模式下，假站点的插件来源一个插件都读不出来时**说一句**。 */
-function warnDevPluginSource() {
+/**
+ * 开发者模式下假站点上**一个插件都发不出来**时说一句（**说出路**）。
+ *
+ * ★ 判据是"两处都没有插件"：从源码跑时样例那一处有东西，所以它只在打包版上、
+ *   或者样例树被动过的时候才说 —— 那正是需要有人告诉用户"下一步在哪"的两种现场。
+ * ★ 坏清单（读得到目录、读不出 `plugin.json`）也要说：那句症状是"装了它就是不生效"，
+ *   而用户没有任何线索。
+ */
+function warnEmptyFakeSite() {
   if (!dev.developerMode) return;
-  const rep = devSourceReport();
-  if (rep.plugins.length) return;                 // 有东西就什么都不说
-  const where = rep.dir ? `「${rep.dir}」` : '默认的位置';
-  const why = rep.skipped.length
-    ? `那里有 ${rep.skipped.length} 个目录，但没有一个读得出清单：`
-      + `${rep.skipped[0].name}：${rep.skipped[0].why}`
-    : (rep.dir
-      ? '那个目录里一个子目录都没有（每个子目录应该是一个插件，里面有 plugin.json）。'
-      // ★ 只说**事实**（那个位置不存在），不断言"为什么" —— 那个位置的来历是
-      //   "仓库里的 `plugins/`"，而不存在的原因可能是打包、可能是被人挪走了。
-      : '默认那个位置（仓库里的 `plugins/`）不存在。');
-  win && win.pushNotice('warn',
-    `开发者模式：假站点从 ${where} 一个插件都读不出来 —— ${why}`
-    + '要让它有东西分发，就在下面「插件来源」里选一个你自己的插件目录。');
+  const rep = sitePluginReport();
+  const n = rep.samples.plugins.length + rep.installed.plugins.length;
+  if (n) return;                                  // 有东西就什么都不说
+  const bad = [...rep.installed.skipped, ...rep.samples.skipped];
+  const why = bad.length
+    ? `读到的 ${bad.length} 个目录里没有一个读得出清单：${bad[0].name}：${bad[0].why}`
+    : '那两处都还没有插件。';
+  win && win.pushNotice('info',
+    `开发者模式：假站点上一个插件都没有 —— ${why}`
+    + '站点上的插件只有一条来的路：在插件页点「安装插件…」把一个包装上去。');
 }
 
 /** 暂存根：站点池的**兄弟目录**（换入用的 `rename` 要求同一个文件系统）。 */
@@ -5328,11 +5359,14 @@ function registerIpc() {
 
   // ── 开发者模式 ────────────────────────────────────────────────────────────
   //
-  // ★ 这三个动词都**只写那个小文件**（`<userData>/dev-mode.json`，见 config.js），
-  //   不碰 `cfg` —— 那个开关回答的是"这次启动读哪一份配置"，它自己不属于任何一份。
+  // ★ 这个开关**只写那个小文件**（`<userData>/dev-mode.json`，见 config.js），
+  //   不碰 `cfg` —— 它回答的是"这次启动读哪一份配置"，它自己不属于任何一份。
   //
-  // ★ 它们都**不立即生效**。界面必须说清「重启后生效」，并且给一个重启的按钮；
+  // ★ 它**不立即生效**。界面必须说清「重启后生效」，并且给一个重启的按钮；
   //   静默的半生效（后端没换、配置换了）是这个仓库一路上在清的那类问题。
+  //
+  // ★ 从前这里还有两个动词（选/清「假站点的插件来源」）—— 整条删掉了：假站点上的
+  //   插件只有一条来的路，就是装上去（见 `siteInstalledDir`）。
 
   /**
    * 打开/关闭开发者模式。
@@ -5343,8 +5377,7 @@ function registerIpc() {
    */
   send('app:setDeveloperMode', async (on) => {
     const want = Boolean(on);
-    devSaved = config.saveDevSettings(app.getPath('userData'),
-      { developerMode: want, pluginDir: devSaved.pluginDir });
+    devSaved = config.saveDevSettings(app.getPath('userData'), { developerMode: want });
     if (want === dev.developerMode) {
       // 改回了生效值（或者本来就想要这个）—— 没有悬着的改动，就不提"重启"那件事。
       win.pushNotice('info', want ? '开发者模式是开着的。' : '开发者模式是关着的。');
@@ -5353,53 +5386,6 @@ function registerIpc() {
     win.pushNotice('warn', (want ? '已打开开发者模式' : '已关闭开发者模式')
       + ' —— 重启客户端之后生效。'
       + (want ? '沙盒里的一切（连接、密钥、插件）留在本机，下次打开还在。' : ''));
-    return { ok: true, developerMode: devView() };
-  });
-
-  /**
-   * 选一个目录当假站点的插件来源（插件作者那条轻路径）。
-   *
-   * ★ **选完当场报"这个目录里读到几个插件"。** 不报的话，选错了的症状是
-   *   "重启之后假站点一个插件都不报"，而那句话指不回原因 —— 作者会去查插件本身，
-   *   而问题在他选的那个目录。
-   *
-   * ★ 一个插件都读不出来 ⇒ **不保存**，并如实说明。存下去的话它会一路生效到
-   *   界面上那句"本站不分发插件"，而用户已经忘了自己选过什么。
-   */
-  send('app:pickDevPluginDir', async () => {
-    const r = await dialog.showOpenDialog(win.win, {
-      title: '选一个目录当假站点的插件来源',
-      message: '每个子目录是一个插件（里面有 plugin.json）',
-      properties: ['openDirectory'],
-    });
-    if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, cancelled: true };
-    const dir = r.filePaths[0];
-    const rep = devSourceReport(dir);
-    if (!rep.plugins.length) {
-      return { ok: false, dir, error: rep.skipped.length
-        ? `「${dir}」里有 ${rep.skipped.length} 个目录，但没有一个读得出清单：`
-          + `${rep.skipped[0].name}：${rep.skipped[0].why}`
-        : `「${dir}」里一个插件都没有 —— 每个子目录应该是一个插件（里面有 plugin.json）。`
-          + '没有保存。' };
-    }
-    devSaved = config.saveDevSettings(app.getPath('userData'),
-      { developerMode: devSaved.developerMode, pluginDir: dir });
-    win.pushNotice('info',
-      `假站点的插件来源已改成「${dir}」（读到 ${rep.plugins.length} 个插件：`
-      + `${rep.plugins.join('、')}）。重启客户端之后生效。`);
-    return { ok: true, dir, plugins: rep.plugins, skipped: rep.skipped,
-             developerMode: devView() };
-  });
-
-  /** 插件的来源改回默认（仓库里的 `plugins/`）。 */
-  send('app:clearDevPluginDir', async () => {
-    devSaved = config.saveDevSettings(app.getPath('userData'),
-      { developerMode: devSaved.developerMode, pluginDir: null });
-    const rep = devSourceReport(defaultDevPluginSourceDir());
-    win.pushNotice('info', rep.dir
-      ? `假站点的插件来源已改回默认的「${rep.dir}」。重启客户端之后生效。`
-      : '已改回默认来源 —— 但那个位置（仓库里的 `plugins/`）不存在，所以假站点'
-        + '依旧一个插件都发不出来。重启客户端之后生效。');
     return { ok: true, developerMode: devView() };
   });
 
@@ -5596,15 +5582,14 @@ module.exports = {
      */
     seedBuiltinDevConnection: () => ensureBuiltinDevConnection(),
     /**
-     * 把假站点的**插件来源**就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
+     * 把假站点的**样例那一棵**就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
      *
-     * ★ 这个接缝做的是真机上**重启才会有的那两件事**（换生效值 + 重扫）：用例要验
-     *   的是"装上去之后站点**当场**就报它"，而那份现场只能这么造 —— 一个进程里
-     *   index.js 只加载一次，而 `dev` 是启动时读的。
-     *   ★ 它**不碰** `dev-mode.json`：那是 `app:pickDevPluginDir` 的事（那一条要重启）。
+     * ★ 用例要的现场是"站上一个插件都没有"（那里放一个空目录），而真机上那意味着
+     *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次，所以只能这么造。
+     *   ★ 它**只动样例那一处**：装上去的东西在沙盒里，用例自己那份 userData 本来就是空的。
      */
-    setDevPluginDir: (dir) => {
-      dev = { ...dev, pluginDir: dir || null };
+    setDevSampleDir: (dir) => {
+      sampleDirOverride = dir || null;
       backend.forgetSiteIndex();
     },
     /** 插件注册表。测试用它验证「未知插件不崩」「重新扫描模拟装/卸插件」。 */
@@ -5617,6 +5602,13 @@ module.exports = {
     getPendingConsent: () => pendingConsent,
     /** 站点池在哪（测试要直接看盘上的东西）。 */
     getSitePoolDir: () => sitePoolDir(),
+    /**
+     * **"装上去的东西"那一处**在哪（测试要直接看盘上的东西，见 `installPlugins`）。
+     *
+     * ★ 它与站点池是两个方向：站点池是**客户端**从站点取回来的，这一处是
+     *   **站点上**装着的（假站点拿它当分发源）。别拿一个当另一个。
+     */
+    getSiteInstalledDir: () => siteInstalledDir(),
     /**
      * **临时那份数据**那张注册表（`id → {id, pluginId, group, ports}`，只活在内存里）。
      *

@@ -357,25 +357,6 @@
         <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
       </div>
 
-      <div id="dev-src" class="hidden">
-        <h3>假站点的插件来源</h3>
-        <p class="sub">
-          假站点从这里读插件：<strong>每个子目录是一个插件</strong>（里面有
-          plugin.json）。默认是仓库里的 <code>plugins/</code>；插件作者可以把它
-          指到自己那棵树上。
-        </p>
-        <p>当前：<code id="dev-src-path" class="mono"></code></p>
-        <p id="dev-src-count" class="sub"></p>
-        <div class="row">
-          <button id="dev-pick" class="ghost">选择目录…</button>
-          <button id="dev-reset-src" class="ghost">恢复默认</button>
-        </div>
-        <p class="sub" title="目录的**设置**要重启：假站点与真的守护进程一样，插件清单是启动时的快照；在这个目录里手改文件同样要重启。而插件页那颗「安装插件…」装进来的**当场生效** —— 装完站点立刻重扫一次，与真站点 `plugin install` 之后的重载同形。">
-          它与真的守护进程一样，插件清单是<strong>启动时的快照</strong> ——
-          所以换了目录要重启。
-        </p>
-      </div>
-
       <div id="dev-debug" class="debug hidden">
         <h3>调试开关</h3>
         <p class="sub">

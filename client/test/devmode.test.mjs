@@ -190,8 +190,8 @@ const electronStub = {
     decryptString: () => { throw new Error('不该被调用'); },
   },
   shell: { openExternal: async () => {} },
-  // ★ 目录选择器：默认「用户什么都没选」。要造"选了一个目录"的用例自己
-  //   换掉这个方法（见「插件来源」那一条）—— 对话框本身没有可测的东西。
+  // ★ 目录选择器：默认「用户什么都没选」。要造"挑了一个文件"的用例自己换掉这个
+  //   方法（见 boot.test.mjs 里「安装插件…」那一组）—— 对话框本身没有可测的东西。
   dialog: {
     showMessageBox: async () => ({ response: 2 }),
     showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
@@ -267,7 +267,7 @@ test('★ 开关那条路就是产品那条路：写的是同一个文件', asyn
   // 所以那边不是在给测试开旁门。
   const r = await invoke('app:setDeveloperMode', true);
   assert.equal(r.ok, true);
-  assert.deepEqual(readDevFile(), { developerMode: true, pluginDir: null },
+  assert.deepEqual(readDevFile(), { developerMode: true },
     '开关要落在 dev-mode.json 里，而不是任何一份 config.json');
 
   // ★ **启用要重启**：这次进程仍然跑在真后端上，而接口如实报出"你要的是开、现在
@@ -281,52 +281,33 @@ test('★ 开关那条路就是产品那条路：写的是同一个文件', asyn
 
   // 关回去（用例之间不留状态：后一条会假设它关着）
   await invoke('app:setDeveloperMode', false);
-  assert.deepEqual(readDevFile(), { developerMode: false, pluginDir: null });
+  assert.deepEqual(readDevFile(), { developerMode: false });
 });
 
-test('★ 插件来源：选完当场报"读到几个"，读不出插件就**不保存**', async (t) => {
-  t.after(() => { Module._load = origLoad; });
+test('★★ 「假站点的插件来源」这条路**整个不存在了** —— 站上的插件只有装上去这一条路',
+  async (t) => {
+    t.after(() => { Module._load = origLoad; });
 
-  // 一棵好树：一个子目录，里面有清单。
-  const good = path.join(userData, 'my-plugins');
-  fs.mkdirSync(path.join(good, 'my-plugin'), { recursive: true });
-  fs.writeFileSync(path.join(good, 'my-plugin', 'plugin.json'),
-    JSON.stringify({ id: '01M2JKM1M1M1M1M1M1M1M1M1M1', version: '1.0.0', name: 'my-plugin' }));
+    // ★ 判据分三层，缺一层就会有人把它加回来：
+    //   ① 两个 IPC 动词**没有注册**（不是"注册了但拒绝"）；
+    //   ② 那个文件里**只有** `developerMode` 一个键；
+    //   ③ 旧版本留下的 `pluginDir` **不会被写回**（`0.y` 不考虑兼容，而"读不出来
+    //      就不管"与"存的时候照抄一遍"是两件不同的事 —— 后者会让那个键永远活着）。
+    require('../src/main/index.js');
+    for (const ch of ['app:pickDevPluginDir', 'app:clearDevPluginDir']) {
+      assert.equal(calls.ipc.has(ch), false, `IPC 通道 ${ch} 还在`);
+    }
 
-  // 一棵坏树：有目录，但清单读不动。
-  const bad = path.join(userData, 'not-plugins');
-  fs.mkdirSync(path.join(bad, 'oops'), { recursive: true });
-  fs.writeFileSync(path.join(bad, 'oops', 'plugin.json'), '{ 这不是 JSON');
+    // 先塞一份**旧形状**的文件（带 pluginDir），再走一次开关：
+    fs.writeFileSync(DEV_FILE, JSON.stringify(
+      { developerMode: false, pluginDir: '/somewhere/else' }, null, 2));
+    await invoke('app:setDeveloperMode', true);
+    assert.deepEqual(Object.keys(readDevFile()), ['developerMode'],
+      '存下去的那一份只该有 developerMode —— 旧键照抄回去等于让它永远活着');
 
-  const pick = async (dir) => {
-    electronStub.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] });
-    return invoke('app:pickDevPluginDir');
-  };
-
-  // ① 好东西：保存，并且**报出读到几个**
-  const ok = await pick(good);
-  assert.equal(ok.ok, true, ok.error);
-  assert.deepEqual(ok.plugins, ['my-plugin']);
-  assert.equal(readDevFile().pluginDir, good);
-
-  // ② 读不出插件：**不保存**，并说清为什么。存下去的话它会一路生效到界面上那句
-  //    "本站不分发插件"，而用户早就忘了自己选过什么。
-  const no = await pick(bad);
-  assert.equal(no.ok, false, '一个插件都读不出来时不许保存');
-  assert.match(no.error, /读不到|读不出|一个插件都没有/);
-  assert.equal(readDevFile().pluginDir, good, '失败时不许覆盖掉上一次那个能用的来源');
-
-  // ③ 取消：什么都不发生
-  electronStub.dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
-  const cancelled = await invoke('app:pickDevPluginDir');
-  assert.equal(cancelled.cancelled, true);
-  assert.equal(readDevFile().pluginDir, good);
-
-  // ④ 恢复默认
-  const reset = await invoke('app:clearDevPluginDir');
-  assert.equal(reset.ok, true);
-  assert.equal(readDevFile().pluginDir, null);
-});
+    // 关回去（用例之间不留状态：后面那几条假设它关着）
+    await invoke('app:setDeveloperMode', false);
+  });
 
 test('★★ 「安装插件…」在真站点上是一条**不存在**的路 —— 而闸门在主进程，不在按钮上',
   async (t) => {

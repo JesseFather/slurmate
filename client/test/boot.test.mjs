@@ -430,7 +430,7 @@ Module._load = function (request, ...rest) {
 //
 // ★ 必须在 `require` index.js **之前**写：那个文件在模块加载期只读一次。
 fs.writeFileSync(path.join(userData, 'dev-mode.json'),
-  JSON.stringify({ developerMode: true, pluginDir: null }, null, 2));
+  JSON.stringify({ developerMode: true }, null, 2));
 // 把「等待登记」压到 200ms，好在测试里走到 running 态。真实后端不读这个。
 process.env.SLURMATE_DEV_ENROLL_MS = '200';
 
@@ -661,12 +661,14 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 切走一个「独占」的工作区会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
                     'app:setConnectionWorkspace', 'app:renameWorkspace',
-                    // 开发者模式那三个设置动词 + 重启。它们的**行为**在
+                    // 开发者模式那一个设置动词 + 重启。它们的**行为**在
                     // devmode.test.mjs 里验（那个文件跑的是"关着"那一半：这个文件
                     // 整个跑在"开着"那一半里）；这里只查通道在不在 —— 这台机器上
-                    // 界面上那几个按钮就指着它们。
-                    'app:setDeveloperMode', 'app:pickDevPluginDir',
-                    'app:clearDevPluginDir', 'app:restart']) {
+                    // 界面上那几个控件就指着它们。
+                    // ★ 从前这里还有「选/清假站点的插件来源」两个通道 —— 整条删掉了
+                    //   （站上的插件只有装上去这一条路），devmode.test.mjs 有一条
+                    //   断言它们**不在**。
+                    'app:setDeveloperMode', 'app:restart']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
 
@@ -2780,10 +2782,19 @@ async function installSplug(t, files) {
   return r;
 }
 
-/** 一个"假站点指向空目录"的干净现场：本机一个插件、站点一个插件都没有。 */
+/**
+ * 一个"假站点上什么都没有"的干净现场：本机一个插件都没有，站点那两处都是空的。
+ *
+ * ★ 两处都要清，而且理由不同：
+ *   · `dir`（样例那一棵）是**这条用例自己给的临时目录**（真机上那是"换一棵树 + 重启"）；
+ *   · `siteInstalledDir`（装上去的那一处）是**同一个沙盒目录**，会在同一个文件里
+ *     几条用例之间留着 —— 不清的话，前一条装上去的插件会在后一条里"本来就在站上"，
+ *     而那个症状是"站点报了它、而夹具说站点是空的"。
+ */
 async function emptyFakeSite(idx, dir) {
   fs.mkdirSync(dir, { recursive: true });
-  idx._test.setDevPluginDir(dir);
+  idx._test.setDevSampleDir(dir);
+  fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
   await connectDemo(idx);
   // ★ 连接那一次的对账是**不 await** 的（真集群上它是几秒的后台事），所以这里
   //   自己再对一次 —— 不然紧接着读视图会读到 `site: null`，而那个失败的形状是
@@ -2802,8 +2813,9 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-splug-'));
     t.after(async () => {
       Module._load = origLoad;
-      idx._test.setDevPluginDir(null);
+      idx._test.setDevSampleDir(null);
       cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
       fs.rmSync(src, { recursive: true, force: true });
       fs.rmSync(tmp, { recursive: true, force: true });
     });
@@ -2824,13 +2836,17 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
       assert.deepEqual(r.__dialog.filters[0].extensions, ['splug'],
         '挑的必须是打包器的产物（`.splug`），不是随便什么文件');
 
-      // ── ① 站点的插件目录里真的多了一棵树，而**两半都在** ──
-      const dest = path.join(src, want.id);
+      // ── ① 「装上去的东西」那一处真的多了一棵树，而**两半都在** ──
+      //   ★ 落点是**沙盒里那一处**，不是样例那棵 —— 用户装什么，都不该动到开发样例。
+      const dest = path.join(idx._test.getSiteInstalledDir(), want.id);
       assert.equal(fs.existsSync(path.join(dest, 'plugin.json')), true,
         `站点上该多出一棵 ${dest}`);
       assert.equal(fs.existsSync(path.join(dest, 'job', 'start.sh')), true,
         '★★ 站点侧必须一起落地 —— 只铺客户端侧的话，这个假站点演的是一个'
         + '真站点不可能有的形状');
+      assert.deepEqual(fs.readdirSync(src), [],
+        '★★ 装上去的东西**不许**落在**样例**那一棵里 —— 那是开发基座用的样例，'
+        + '用户装什么都会动到它的话，那两棵树就不再是"仓库此刻的样子"了');
 
       // ── ② 站点**当场**就报它（不用重启） ──
       const reported = idx._test.getBackend()._sitePlugins();
@@ -2869,8 +2885,9 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-splug-'));
   t.after(async () => {
     Module._load = origLoad;
-    idx._test.setDevPluginDir(null);
+    idx._test.setDevSampleDir(null);
     cleanupSiteState(idx);
+    fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   });
@@ -2886,7 +2903,8 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
 
     // ── ① 装一次：成功 ──
     assert.equal((await installSplug(t, [pkgA])).ok, true);
-    const destA = path.join(src, idA);
+    const installed = idx._test.getSiteInstalledDir();
+    const destA = path.join(installed, idA);
     const before = treeStamps(destA);
 
     // ── ② 同一份再装一次：**一个字节都不写**，如实说"站上已经是这一份了" ──
@@ -2919,7 +2937,7 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     assert.equal(no.ok, false);
     assert.match(no.error, /不是一个合法的插件包/);
     assert.match(no.error, /bad\.splug/, '要说清是哪一个文件');
-    assert.deepEqual(fs.readdirSync(src), [idA], '★ 坏包不许在站点的目录里留下任何东西');
+    assert.deepEqual(fs.readdirSync(installed), [idA], '★ 坏包不许在站点的目录里留下任何东西');
 
     // ── ⑤ 清单装上去客户端也加载不了 ⇒ 装的当场就拒（不推迟到"同意之后"）──
     const treeC = writePluginTree(path.join(tmp, 'c'), {
@@ -2934,7 +2952,7 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     //   找一个不存在的地方。
     assert.equal(/\.slurmate-stage-/.test(broken.error), false,
       `★ 暂存目录的路径不该漏到用户那句话里：${broken.error}`);
-    assert.deepEqual(fs.readdirSync(src), [idA], '★ 验不过的包不许落地');
+    assert.deepEqual(fs.readdirSync(installed), [idA], '★ 验不过的包不许落地');
 
     // ── ⑥ 一次给两个、其中一个是坏的 ⇒ **一条都不装**（两遍式）──
     const treeD = writePluginTree(path.join(tmp, 'd'), {
@@ -2943,17 +2961,37 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     buildSplug(treeD, pkgD);
     const mixed = await installSplug(t, [pkgD, bad]);
     assert.equal(mixed.ok, false, '★ 一条不过就一条都不装（与真守护进程同一句话）');
-    assert.deepEqual(fs.readdirSync(src), [idA],
+    assert.deepEqual(fs.readdirSync(installed), [idA],
       '★★ 好的那一个也不许落地 —— "装了一半"是最坏的那种中间态');
 
-    // ── ⑦ 选空了：什么都不发生，也不出提示 ──
+    // ── ⑦ **样例**那一棵里的 id 同样参与"一个 id 只留一棵树" ──
+    //   ★★ 两处必须**一起看**：只查"装上去的"那一处的话，样例里已经有的那个 id
+    //      会被再装一份上去 —— 而站点上从此有两棵同 id 的树，正是这条规矩要挡的形状
+    //      （守护进程那边两棵树会互相覆盖，而覆盖是静默的）。
+    const sampleId = '01M2JKM1M1M1M1M1M1M1M1M1M2';
+    writePluginTree(src, { id: sampleId, name: 'demo-sample', title: '样例盒子' });
+    // 换一棵树 = 真机上重启一次（那份启动快照要重建，见 forgetSiteIndex 的注释）
+    idx._test.setDevSampleDir(src);
+    const pkgE = path.join(tmp, 'e.splug');
+    // ★ 版本要与样例那一棵**不同**：两份一模一样的话，站点会如实回"站上已经是这一份
+    //   了"（那是另一条路，而且它是对的）—— 那样这一条就验不到"同 id 拒装"。
+    buildSplug(writePluginTree(path.join(tmp, 'e'), {
+      id: sampleId, name: 'demo-sample', title: '样例盒子', version: '2.0.0' }), pkgE);
+    const clashSample = await installSplug(t, [pkgE]);
+    assert.equal(clashSample.ok, false, '★ 样例那一棵里已经有这个 id 了，不许再装一份');
+    const sampleDir = path.join(src, 'demo-sample');
+    assert.match(clashSample.error,
+      new RegExp(sampleDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      '★ 同样要指出那一棵树在**哪个目录** —— 这次它在样例那一处');
+
+    // ── ⑧ 选空了：什么都不发生，也不出提示 ──
     const stub = electronStub.dialog;
     const orig = stub.showOpenDialog;
     stub.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
     t.after(() => { stub.showOpenDialog = orig; });
     const cancel = await invoke('app:installSitePlugin');
     assert.equal(cancel.cancelled, true, '取消要如实回一个 cancelled');
-    assert.deepEqual(fs.readdirSync(src), [idA], '取消什么都不该动');
+    assert.deepEqual(fs.readdirSync(installed), [idA], '取消什么都不该动');
   });
 });
 
