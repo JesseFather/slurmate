@@ -763,6 +763,63 @@ test('★★ 两条边栏整条吃状态色（那个圆点没有了）', () => {
     '★ 右栏那一条由 renderRails 上色');
 });
 
+test('★★ 高级选项长在**每一块里**，不是全屏共用的一份', () => {
+  // ★★ 2026-10-11 加（界面第三轮 F4）。从前 `panel.html` 里有一个 `#adv`，长在
+  //   第二屏**最底下**，全屏共用 —— 而它喂的是**某一块**的「开始会话」。三四个插件
+  //   并排时，用户看不出自己填的 4 核是给谁的。现在一块一份、画在那一块的
+  //   「开始会话」**之前**。
+  //
+  //   判据分四段，缺一段这条就有一条路可以漏过去：
+  //     ① 那个共用的 `#adv` **整个不见了**（连同它那五格）；
+  //     ② 那几格改由 `pluginBlock` 画进**那一块**里，而且只给起得来的画；
+  //     ③ `startWith` 读的是**传进来的那一份**，不许再按 id 去捞（同一个 id
+  //        出现 N 次时 `getElementById` 只认第一个 ⇒ 第二块往后那几格永远读不到）；
+  //     ④ 「端口被占」那条重发路也带着**同一份**（否则用户答的是甲、起来的是乙）。
+  const bare = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.equal(bare.includes('id="adv"'), false,
+    '★ panel.html 里那个全屏共用的 #adv 还在 —— 那几格已经搬进每一块里了');
+  for (const id of ['f-cpus', 'f-mem', 'f-gres', 'f-gres-n', 'f-part']) {
+    assert.equal(html.includes(`id="${id}"`), false,
+      `★ panel.html 里还有 #${id} —— 它现在是每一块里画出来的，不再是一个固定的 id`);
+    assert.equal(js.includes(`$('${id}')`), false,
+      `★★ panel.js 还在按 id 去捞 #${id} —— 那几格每一块一份，同一个 id 出现 N 次时`
+      + '`getElementById` 只认**第一个**：第 2 块往后读到的都是第 1 块填的值');
+  }
+
+  // ② 画在那一块里，而且只给起得来的那些画。
+  const blockFn = /function pluginBlock\(p\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(blockFn, 'panel.js 里应当有 pluginBlock()');
+  assert.match(blockFn[0], /if \(p\.runnable\) \{[\s\S]{0,120}?pluginAdv\(\)/,
+    '★ 高级选项要画在**那一块里**，而且只给起得来的那些画 —— 一颗灰着的'
+    + '「开始会话」不需要资源，摆在那里等于说"这一块能起"');
+  assert.match(blockFn[0], /const a = pluginAdv\(\);[\s\S]{0,40}?d\.append\(a\.box\);/,
+    '★ 而它要挂进**这一块**里：挂到屏上那个容器上就是又变回"全屏共用的一份"');
+  assert.match(blockFn[0], /startWith\(p\.name, adv, btn\)/,
+    '★ 「开始会话」交出去的必须是**这一块**那一份');
+
+  // ③ `startWith` 只读传进来的那一份。
+  const startFn = /async function startWith\(serviceKind, adv, btn[\s\S]*?\n\}/.exec(js);
+  assert.ok(startFn, 'panel.js 里应当有 startWith(serviceKind, adv, btn, opts)');
+  assert.equal(/\$\('f-/.test(startFn[0]), false,
+    '★★ startWith 里还在按 id 捞那几格 —— 它读的必须是传进来的 adv');
+  for (const cell of ['adv.cpus', 'adv.mem', 'adv.part', 'adv.gres', 'adv.gresN']) {
+    assert.ok(startFn[0].includes(cell), `startWith 没有读 ${cell}`);
+  }
+
+  // ④ 分区表变了要**每一块**都跟上，而重发那一趟带着同一份。
+  assert.match(js, /function renderPartitions\(list\)[\s\S]{0,200}?for \(const st of advCells\)/,
+    '★ 分区表是站点级的：它变了，**每一块**里那一格都要跟着换（名单就是 advCells）');
+  assert.match(js, /startWith\(p\.serviceKind, p\.adv, p\.btn, \{ portChoice: 'shift' \}\)/,
+    '★ 「端口被占 → 启动」重发的是**同一块、同一份填写**');
+  assert.match(js, /startWith\(p\.serviceKind, p\.adv, p\.btn, \{ portChoice: 'remember' \}\)/,
+    '★ 「记住新配置并启动」同理');
+
+  // ★ 而它的形状**一个字没改** —— 这一轮只把这几格从公共区域搬进去（用户说过：
+  //   插件块的形状等第一个插件联合调试时再仔细设计）。所以块里那几样照旧：
+  assert.match(blockFn[0], /btn\.textContent = '开始会话'/,
+    '★ 「开始会话」这颗按钮本身没动');
+});
+
 test('★★ 第二/三屏顶上那条身份带（翻页感由**结构**给，不是换底色）', () => {
   // ★★ 2026-10-11 加：进第二/三屏时顶上顶着的是**站点的地址与这一屏的名字**，
   //   而第一屏顶着的是客户端的名字（masthead）。

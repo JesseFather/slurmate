@@ -368,9 +368,14 @@
     </section>
     </section><!-- /screen-conns -->
 
-    <!-- ── 第二屏：插件列表（每个插件一块，高级选项折叠在下面）──
+    <!-- ── 第二屏：插件列表（每个插件一块，高级选项长在**它自己那一块里**）──
          ★ 这一屏的入口只有一个：连接列表上那条**已经连上**的连接（行上的「进入」）。
-           所以它不需要自己的"还没连上"空态 —— 走不到那儿。 -->
+           所以它不需要自己的"还没连上"空态 —— 走不到那儿。
+         ★★ 高级选项（CPU / 内存 / GRES / 数量 / 分区）从前是**这一屏最底下共用的一份**
+           （一个 `#adv`）—— 而它喂的是**某一块**的「开始会话」，三四个插件并排时
+           用户看不出自己填的 4 核是给谁的。那几格现在由 `pluginBlock` 画进**每一块
+           里**（`pluginAdv()`，在那一块的「开始会话」之前），所以这里**一个格子都
+           不再有** —— 别在这儿补一份"公共的"，那正是这一轮修掉的东西。 -->
     <section id="screen-plugins" class="screen hidden">
       <!-- ★★ 「回第一屏」**不是一个"返回"**（2026-10-11 改）。用户定下的不变量：
            **只要在首页就一定不在当前的连接中，保活必须暂停**。而站在这一屏上就意味着
@@ -449,40 +454,6 @@
         模拟站点），与"多加载一个插件目录"没有关系。两者的区别值得记一笔 ——
         同名而不同事，正是最容易把下一个人带偏的那种重名。
       -->
-
-      <details id="adv">
-        <summary>高级选项</summary>
-        <div class="row">
-          <!--
-            占位符**不写具体数字**：默认资源现在按插件不同（跑 IDE 和跑中转站不是
-            一回事），写一个数字就是在替另一个插件说话。真实默认值在每一块里那行。
-          -->
-          <div><label for="f-cpus">CPU 核数</label>
-               <input type="number" id="f-cpus" min="1" max="64" placeholder="留空 = 默认"></div>
-          <div><label for="f-mem">内存</label>
-               <input type="text" id="f-mem" class="narrow" placeholder="留空 = 默认" spellcheck="false"></div>
-          <!--
-            GRES 是**两个格子**：要哪一种（选项由服务端给，因为名字与型号是
-            管理员在集群上定的）+ 要几个。★ 这里**没有**卡名是写死的，
-            也**没有** `max="8"` 这种数字 —— 上限来自服务端那份清单里每个节点的
-            实际配置，"每个站点都最多 8 张卡"是一个我们无权做的假设。
-            ★ 下面那个占位选项由 `renderGresOptions()` 整个换掉（它要建**两项**：
-            「用插件的默认」与「不占 GRES」，两者不是一回事）。这里留着只是为了
-            JS 跑起来之前那一瞬间不是空的。
-          -->
-          <div><label for="f-gres">GRES</label>
-               <select id="f-gres"><option value="">（用插件的默认）</option></select></div>
-          <div><label for="f-gres-n">数量</label>
-               <input type="number" id="f-gres-n" min="1" placeholder="—" disabled></div>
-          <div class="grow"><label for="f-part">分区</label>
-               <select id="f-part" class="full"><option value="">（随机挑一个有权限的）</option></select></div>
-        </div>
-        <p class="sub adv-note">
-          <strong>留空就用服务端的默认值</strong>（每个插件各有一份，见上面每一块里那行）。
-          这些设置不会被记住 —— 关掉窗口或下次连接后即恢复默认。
-          唯一的例外是作业没结束时的闪断重连，那时会沿用它。
-        </p>
-      </details>
 
       <div class="row row-spaced">
         <button id="btn-doctor" class="ghost">体检集群</button>

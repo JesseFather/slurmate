@@ -393,8 +393,17 @@ button.remember:hover { background: #5c4e22; }
 .wnode .plug-chips { color: var(--fg-dim); font-size: 11px; flex: none; }
 .wnode input.rename { width: 130px; padding: 1px 6px; font-size: 12px; }
 
-/* ── 高级选项 ── */
-details { border: 1px solid var(--border); border-radius: 4px; padding: 10px 14px; }
+/* ── 高级选项（**每一块插件自己一份**）──
+   它从前是全屏共用的一份（`#adv`），长在第二屏最底下 —— 而它喂的是**某一块**的
+   「开始会话」。现在它长在那一块里（panel.js 的 `pluginAdv`），所以这里只有
+   "怎么摆"的样式：那几个格子本身复用 `.row` / `label` / `.narrow` / `.full`。
+   ★ 这是全界面**唯一**一个 `<details>`（从前那条通用的 `details` 规则并入这里，
+   不留一条谁也匹配不到的规矩）。 */
+.plug-adv {
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 10px 14px; margin: 10px 0 0;
+}
+details[open].plug-adv { margin-bottom: 10px; }
 summary { cursor: pointer; color: #9cdcfe; font-weight: 600; font-size: 12px; }
 details[open] summary { margin-bottom: 12px; }
 .adv-note { margin: 10px 0 0; }

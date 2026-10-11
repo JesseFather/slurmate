@@ -234,8 +234,9 @@ function disarmArmed() {
 /**
  * 上一次提交被端口挡住的那一趟，等着用户答。没问过就是 `null`。
  *
- * 它记着 `{serviceKind, btn}` —— 用户答下那两颗"继续"里的任意一颗时，要把
- * **同一件事**重发一次（分别只在带上去的那个作答上）。
+ * 它记着 `{serviceKind, adv, btn}` —— 用户答下那两颗"继续"里的任意一颗时，要把
+ * **同一件事**重发一次（分别只在带上去的那个作答上）。`adv` 是**那一块**那几格
+ * 高级选项（见 `pluginAdv`）：重发时读的仍是用户刚才填的那一份。
  */
 let portAsk = null;
 
@@ -1598,6 +1599,9 @@ function renderPlugins(pv) {
   renderInert(pv);
 
   const list = pv.plugins || [];
+  // ★★ 这一屏上那些块连同**它们各自的高级选项**一起重建（下面那几格住在闭包上）：
+  //   名单跟着换一批，否则 `renderPartitions` 会去改一批已经不在文档里的格子。
+  advCells = [];
   // ★ 空池是**正常状态**，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
   //   道歉，是给出路：池在哪、怎么装、装完怎么让它出现。
   if (!list.length) box.append(emptyPool(pv));
@@ -2596,10 +2600,26 @@ function pluginBlock(p) {
     if (row) d.append(row);
   }
 
+  // ── 这一块**自己**的高级选项 ──
+  //
+  // ★★ 它从前是**全屏共用的一份**（panel.html 里那个 `#adv`），长在第二屏**最底下**
+  //   —— 而它喂的是**某一块**的「开始会话」。三四个插件并排时，用户看不出"我填的
+  //   这 4 核是给谁的"（那正是"语义不清晰"那句话）。现在一块一份，而且画在
+  //   **这一块**的「开始会话」之前：先看得见、再按。
+  // ★ 只给**起得来的**那些画（`p.runnable`）：一颗灰着的「开始会话」不需要资源，
+  //   而填了也用不上 —— 摆在那里等于说"这一块能起"。
+  let adv = null;
+  if (p.runnable) {
+    const a = pluginAdv();
+    adv = a.st;
+    d.append(a.box);
+  }
+
   const btn = document.createElement('button');
   btn.textContent = '开始会话';
   btn.disabled = !p.runnable;
-  btn.onclick = () => startWith(p.name, btn);
+  // ★ 交出去的是**这一块**那一份（`adv`），不是"界面上当前那份" —— 见 pluginAdv。
+  btn.onclick = () => startWith(p.name, adv, btn);
   d.append(btn);
   return d;
 }
@@ -2630,11 +2650,17 @@ function el(tag, cls, text) {
  *   自己编默认值，否则默认值就成了两份真相：界面显示 2 核 / 8G，而实际拿到的是
  *   别的，且没有任何地方会为此报错。默认资源是**管理员的策略**，不是用户偏好。
  *
+ * ★★ 那几格读的是传进来的 `adv` —— **按下去那一块**自己的那一份（见 `pluginAdv`）。
+ *   从前它们按 id 去捞（`#f-cpus` / `#f-gres` 那一套），而那时全屏只有一份；现在每一块一份，
+ *   按 id 捞会读到**第一块**填的值，症状是"我给甲填的 8 核，起来的是乙"。
+ *
+ * @param {object} adv 那一块那几格（`pluginAdv()` 返回的 `st`）
+ * @param {object} btn 那一块的「开始会话」那颗按钮（只用来按下去时禁用一下）
  * @param {object} [opts] `portChoice` = 用户在「端口被占」那一行上答过的：
  *   `'shift'`（「启动」，只换这一次）或 `'remember'`（「记住新配置并启动」，主进程
  *   在绑定成功之后把新端口记进配置）。把同一趟重发一次，见 `renderPortAsk`。
  */
-async function startWith(serviceKind, btn, opts = {}) {
+async function startWith(serviceKind, adv, btn, opts = {}) {
   // 上一次那一问先收掉：这一趟给出的答案会取代它（重发的那一趟自己会走完同一条路，
   // 真又被挡就再摆一次）。留着的话，两行"要不要临时换"会同时挂在界面上。
   clearPortAsk();
@@ -2642,24 +2668,24 @@ async function startWith(serviceKind, btn, opts = {}) {
   notice('info', '正在提交会话…');
   try {
     const res = {};
-    const cpus = $('f-cpus').value.trim();
-    const mem = $('f-mem').value.trim();
-    const part = $('f-part').value;
+    const cpus = adv.cpus.value.trim();
+    const mem = adv.mem.value.trim();
+    const part = adv.part.value;
     if (cpus) res.cpus = Number(cpus);
     if (mem) res.mem = mem;
     if (part) res.partition = part;
     // GRES：选了名字才发。**数量是必填的** —— 发一个没有数量的 GRES 等于让服务端
     // 去猜要几个，而服务端不猜（它只校验与钳制），回一句"不合法"才是对的。
-    // ★ 描述符按**序号**取回（选项的 value 就是 curGres 的下标）：不从 option 的
-    //   文字里再拆一遍 `gpu:a100` —— 那等于在客户端再造一个语法解析器。
-    const gi = $('f-gres').value;
+    // ★ 描述符按**序号**取回（选项的 value 就是那一块的 `curGres` 的下标）：
+    //   不从 option 的文字里再拆一遍 `gpu:a100` —— 那等于在客户端再造一个语法解析器。
+    const gi = adv.gres.value;
     if (gi === 'none') {
       // ★ 显式「不占」发的是 `null`，与"没碰这一项"（不发这个键）**不是**同一件事：
-      //   后者让服务端用那个插件的默认卡，前者盖过它。见 renderGresOptions 那段。
+      //   后者让服务端用那个插件的默认卡，前者盖过它。见 renderGresFor 那段。
       res.gres = null;
     } else if (gi !== '') {
-      const e = curGres[Number(gi)];
-      const n = Number($('f-gres-n').value);
+      const e = adv.curGres[Number(gi)];
+      const n = Number(adv.gresN.value);
       if (!e) {
         notice('error', 'GRES 那一项已经失效了（分区是不是换过？），请重新选一次。');
         return;
@@ -2677,7 +2703,7 @@ async function startWith(serviceKind, btn, opts = {}) {
     //    它必须排在下面那条"失败就刷新清单"之前 —— 这一支不是失败，插件清单
     //    一个字都没变，而去问一次 `app:partitions` 只是白花一趟往返。
     if (r && r.code === 'port_conflict') {
-      return renderPortAsk(r, { serviceKind, btn });
+      return renderPortAsk(r, { serviceKind, adv, btn });
     }
     // 提交失败（比如版本对不上被服务端拒了）时把清单刷新一遍 —— 那句话要落到
     // 界面上，不能只在日志里。
@@ -2925,26 +2951,137 @@ async function takeoverSelectedJob() {
   refreshJobs();
 }
 
-// ── 分区 ────────────────────────────────────────────────────────────────────
+// ── 分区与高级选项（**每一块自己一份**）──────────────────────────────────────
+//
+// ★★ 这几格从前是**全屏共用的一份**（panel.html 里那个 `#adv`），长在第二屏**最底下**
+//   —— 而它喂的是**某一块**的「开始会话」。现在它画在**那一块**里（见 `pluginAdv`），
+//   一块一份。语义一个字没改：只对下一次「开始会话」有效、不记住、关掉窗口回默认
+//   （唯一例外仍是作业没结束时的闪断重连沿用）。
+//
+// ★ 分区表（`partList`）**仍然是全局一份** —— 它是站点级的，与是哪个插件无关。
+//   如实的代价：分区那一格会在每一块里各画一份（同一个事实的 N 个选择器）。这是拿
+//   "同一件事不许摆两处"换来的（那一格若留在公共区域，就又是"我填的是给谁的"）。
+//   记在 CHANGELOG 里。
+
 /** 最近一次拿到的分区表（含每个分区的 GRES 清单）。换分区时要拿它重画 GRES。 */
 let partList = [];
-/**
- * 当前 GRES 下拉里每一项对应的描述符。
- * ★ 选项的 `value` 是它的**下标**，不是拼出来的字符串 —— 见 startWith 里那段。
- */
-let curGres = [];
 
-function renderPartitions(list) {
-  const sel = $('f-part');
+/**
+ * 这一屏上**活着的**那些块的那几格（`renderPlugins` 每重画一次就整个换一批）。
+ *
+ * ★ 为什么要有一份名单：分区表是**站点级**的，它到得比插件块早、也可能中途变
+ *   （连上站点时、提交失败之后都会重取一次）—— 那时得把**每一块**里那一格都跟着
+ *   换掉。名单换来的是"每块各留一个引用"：按 id 去捞那几格（`#f-part` 那种写法）
+ *   在这里必然错 —— 同一个 id 出现 N 次时 `getElementById` 只认**第一个**，
+ *   第 2 块往后那几格从此再也读不到、也改不动，而它们看起来完全正常。
+ */
+let advCells = [];
+
+/**
+ * 界面上「CPU 核数」那一格的上限。
+ *
+ * ★★ 它必须与守护进程的 `MAX_CPUS_REQUEST`（以及假后端里那道钳制）**相等**。
+ *   两处不一致的漂法是静默的，而且方向很难看：界面若比服务端**松**，用户填的数
+ *   被服务端悄悄钳掉；界面若比服务端**紧**，用户被界面拦住，而服务端那道闸从此
+ *   再也没有人走到过。
+ * ★ 渲染层在隔离的上下文里跑（`contextIsolation`），读不到主进程的常量，所以这里
+ *   只能再写一遍 —— 与协议里那几个上限同一个处境。三个数由 `test/limits.test.mjs`
+ *   交叉盯着（改一处漏另一处 = 当场红）。
+ */
+const UI_MAX_CPUS = 64;
+
+/**
+ * 一块插件自己那几格高级选项。
+ *
+ * ★ 它返回 `{ box, st }`：`box` 挂进那一块里，`st` 是那几格本身 —— `startWith` 读它、
+ *   分区表变了的时候改它。**状态挂在闭包上，不挂在 id 上。**
+ * ★ 这几格跟着块一起**重画**（`renderPlugins` 每次都重建所有块）：填了一半的值会在
+ *   站点推一份新清单过来的时候回到空白。它与"不记住"是同一条语义的两个面，而代价
+ *   如实说在 CHANGELOG 里 —— 别为了留住它去造一份"临时状态"的缓存。
+ */
+function pluginAdv() {
+  const box = document.createElement('details');
+  box.className = 'plug-adv';
+  box.append(el('summary', null, '高级选项'));
+
+  /** 一格 = 一个标签 + 那个控件（CSP 里没有内联 style，布局一律走 class）。 */
+  const field = (labelText, cell, cls) => {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.append(el('label', null, labelText));
+    d.append(cell);
+    return d;
+  };
+
+  const st = { curGres: [] };
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  // ★ 占位符**不写具体数字**：默认资源按插件不同（跑 IDE 和跑中转站不是一回事），
+  //   写一个数字就是在替另一个插件说话。真实默认值在**这一块**上面那行。
+  st.cpus = document.createElement('input');
+  st.cpus.type = 'number';
+  st.cpus.min = '1';
+  st.cpus.max = String(UI_MAX_CPUS);
+  st.cpus.placeholder = '留空 = 默认';
+  row.append(field('CPU 核数', st.cpus));
+
+  st.mem = document.createElement('input');
+  st.mem.type = 'text';
+  st.mem.className = 'narrow';
+  st.mem.placeholder = '留空 = 默认';
+  st.mem.spellcheck = false;
+  row.append(field('内存', st.mem));
+
+  // GRES 是**两个格子**：要哪一种（选项由服务端给，因为名字与型号是管理员在集群上
+  // 定的）+ 要几个。★ 这里**没有**卡名是写死的，也**没有** `max="8"` 这种数字 ——
+  // 上限来自服务端那份清单里每个节点的实际配置，"每个站点都最多 8 张卡"是一个我们
+  // 无权做的假设。
+  st.gres = document.createElement('select');
+  row.append(field('GRES', st.gres));
+
+  st.gresN = document.createElement('input');
+  st.gresN.type = 'number';
+  st.gresN.min = '1';
+  st.gresN.placeholder = '—';
+  st.gresN.disabled = true;
+  row.append(field('数量', st.gresN));
+
+  st.part = document.createElement('select');
+  st.part.className = 'full';
+  row.append(field('分区', st.part, 'grow'));
+
+  box.append(row);
+  box.append(el('p', 'sub adv-note',
+    '留空就用服务端的默认值（每个插件各有一份，见这一块上面那行）。'
+    + '这些设置不会被记住 —— 关掉窗口或下次连接后即恢复默认。'
+    + '唯一的例外是作业没结束时的闪断重连，那时会沿用它。'));
+
+  // 换分区 ⇒ 可选的 GRES 跟着换（上限是**分区自己**的：同一个集群上一种卡每节点
+  // 8 张、另一种 4 张）。这里绑一次，之后由 onchange 接着画。
+  st.part.onchange = () => renderGresFor(st);
+  fillPartSelect(st);
+  advCells.push(st);
+  return { box, st };
+}
+
+/**
+ * 把**一块**里那个分区下拉按当前的 `partList` 重画一遍，接着重画它的 GRES。
+ *
+ * ★ 保留这一块自己选着的那个：重画发生在"分区表变了"的时候，不是"用户换了分区"
+ *   的时候 —— 若每次重画都把选择抹掉，用户挑好的分区会在一次后台刷新之后自己弹回
+ *   "随机挑一个"。
+ */
+function fillPartSelect(st) {
+  const sel = st.part;
   const keep = sel.value;
-  partList = list || [];
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
   none.textContent = '（随机挑一个有权限的）';
   sel.append(none);
 
-  for (const p of list) {
+  for (const p of partList) {
     const o = document.createElement('option');
     o.value = p.name;
     o.textContent = p.allowed ? p.name : `${p.name}（无权限）`;
@@ -2954,10 +3091,18 @@ function renderPartitions(list) {
     sel.append(o);
   }
   sel.value = keep;
-  // 换分区 ⇒ 可选的 GRES 跟着换（上限是**分区自己**的：同一个集群上
-  // 一种卡每节点 8 张、另一种 4 张）。这里画一次，之后由 onchange 接着画。
-  sel.onchange = renderGresOptions;
-  renderGresOptions();
+  renderGresFor(st);
+}
+
+/**
+ * 分区表变了：**每一块**里那一格都跟着换。
+ *
+ * ★ 它是这张表唯一的落点（连上站点、提交失败后各调一次）—— 少了它，新拿到的分区
+ *   只能等下一次重画插件块才出现，而那可能是几分钟之后。
+ */
+function renderPartitions(list) {
+  partList = list || [];
+  for (const st of advCells) fillPartSelect(st);
 }
 
 /**
@@ -2998,10 +3143,16 @@ function gresChoicesFor(partName) {
   return { list: [...byKey.values()], absent };
 }
 
-function renderGresOptions() {
-  const sel = $('f-gres');
-  const { list, absent } = gresChoicesFor($('f-part').value);
-  curGres = list;
+/**
+ * 把**一块**里那个 GRES 下拉按它当前选的分区重画一遍。
+ *
+ * ★ 从前它读写固定的 `#f-gres` / `#f-part`（全屏只有一份）；现在那几格住在
+ *   `st` 里 —— 见 `pluginAdv` 上面那段（同一个 id 出现 N 次时只认第一个）。
+ */
+function renderGresFor(st) {
+  const sel = st.gres;
+  const { list, absent } = gresChoicesFor(st.part.value);
+  st.curGres = list;
   sel.textContent = '';
   // ★★ 这里的两项**不是**同一件事，别合并：
   //   · `''`  = **不碰**（省略这个字段）⇒ 用**这个插件的** `default_gpus`。
@@ -3018,9 +3169,10 @@ function renderGresOptions() {
   none.value = 'none';
   none.textContent = '（不占 GRES）';
   sel.append(none);
-  for (let i = 0; i < curGres.length; i++) {
-    const e = curGres[i];
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
     const o = document.createElement('option');
+    // ★ 选项的 `value` 是它的**下标**，不是拼出来的字符串 —— 见 startWith 里那段。
     o.value = String(i);
     // ★ 问的是 `per_node_max`（`--gres=gpu:N` 是**每节点** N 个），不是 total：
     //   "本分区一共 8 张"与"一个作业最多能要 4 张"是两个不同的问题。
@@ -3030,14 +3182,21 @@ function renderGresOptions() {
   sel.title = absent
     ? '服务端暂时查不到这台集群的 GRES 清单（scontrol 没答上来）' : '';
   sel.value = '';
-  sel.onchange = applyGresMax;
-  applyGresMax();
+  sel.onchange = () => applyGresMaxFor(st);
+  applyGresMaxFor(st);
 }
 
-/** GRES 的数量上限跟着选中的那一项走。**客户端不写死任何数字。** */
-function applyGresMax() {
-  const cnt = $('f-gres-n');
-  const e = curGres[Number($('f-gres').value)];
+/** GRES 的数量上限跟着**这一块**选中的那一项走。**客户端不写死任何数字。** */
+function applyGresMaxFor(st) {
+  const cnt = st.gresN;
+  // ★★ 只有**点名了某一张卡**才谈得上"要几个"：`''`（用插件的默认）与 `'none'`
+  //   （不占）都不是数量问题，那两格必须是灰的。
+  //   ★ 而 `Number('')` 是 **0**，拿它直接当下标会**指到第一张卡**上 —— 于是
+  //     "用插件的默认"选着，数量那一格却是亮的、还挂着第一张卡的上限（一个用户
+  //     看得见、却与下拉说的不是一回事的状态）。下标只有在 value 真的是个下标时
+  //     才算数。
+  const v = st.gres.value;
+  const e = (v === '' || v === 'none') ? null : st.curGres[Number(v)];
   if (!e) {
     cnt.value = '';
     cnt.disabled = true;
@@ -3512,18 +3671,19 @@ function bindEvents() {
   //    并启动」也重发（多带一个"记住"的作答，写配置那一步在主进程、而且排在绑定
   //    成功之后），答「取消」就地回退，而此刻本来什么都没提交。
   //
-  //    ★ 重发用的是**用户刚才点的那一颗按钮**（`pending.btn`），不是"当前前台
-  //      那一条" —— 插件页上可以有好几个「开始会话」，重发必须是同一个插件那一颗，
+  //    ★ 重发用的是**用户刚才点的那一颗按钮**（`pending.btn`）**连它那一块的那几格**
+  //      （`pending.adv`），不是"当前前台那一条" —— 插件页上每一块都有自己的
+  //      「开始会话」和它自己那份高级选项，重发必须是同一个插件、同一份填写，
   //      否则用户答的是甲、起来的是乙。
   $('sb-port-shift').onclick = () => {
     const p = portAsk;
     if (!p) return;                       // 防御：那一行已经收掉了
-    return startWith(p.serviceKind, p.btn, { portChoice: 'shift' });
+    return startWith(p.serviceKind, p.adv, p.btn, { portChoice: 'shift' });
   };
   $('sb-port-remember').onclick = () => {
     const p = portAsk;
     if (!p) return;
-    return startWith(p.serviceKind, p.btn, { portChoice: 'remember' });
+    return startWith(p.serviceKind, p.adv, p.btn, { portChoice: 'remember' });
   };
   $('sb-port-abort').onclick = () => {
     clearPortAsk();

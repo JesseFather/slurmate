@@ -41,11 +41,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(here, '..', '..');
 const DAEMON = path.join(ROOT, 'cluster', 'slurmate-sessiond');
 const PANEL_HTML = path.join(ROOT, 'client', 'src', 'renderer', 'panel.html');
+const PANEL_JS = path.join(ROOT, 'client', 'src', 'renderer', 'panel.js');
 const FAKE = path.join(ROOT, 'client', 'src', 'main', 'backend-fake.js');
 const LIMITS_JSON = path.join(ROOT, 'tools', 'plugin-limits.json');
 
 const daemon = fs.readFileSync(DAEMON, 'utf8');
 const html = fs.readFileSync(PANEL_HTML, 'utf8');
+const js = fs.readFileSync(PANEL_JS, 'utf8');
 const fake = fs.readFileSync(FAKE, 'utf8');
 
 /** 从源码里抠一个 `[const] 名字 = 数字` 的常量。抠不到就抛（不返回 undefined）。 */
@@ -57,12 +59,16 @@ function constOf(src, name, file) {
 
 test('★★ MAX_CPUS_REQUEST：守护进程、界面、假后端三处一致', () => {
   const d = constOf(daemon, 'MAX_CPUS_REQUEST', 'slurmate-sessiond');
-  // 界面那一格：`<input ... id="f-cpus" min="1" max="64" ...>`
-  const m = /id="f-cpus"[^>]*\bmax="(\d+)"/.exec(html);
-  assert.ok(m, 'panel.html 里 #f-cpus 上没有 max —— 那用户就看不到上限了');
-  assert.equal(Number(m[1]), d,
-    `界面上限 ${m[1]} 与服务端的 MAX_CPUS_REQUEST ${d} 不一致：`
+  // 界面那一格（★ v0.18：高级选项搬进了**每一块**里，于是这一格从 panel.html 的
+  // `max="64"` 变成了 panel.js 里的一个常量 —— 判据跟着元素搬了家，强度没减）。
+  const u = constOf(js, 'UI_MAX_CPUS', 'panel.js');
+  assert.equal(u, d,
+    `界面上限 ${u} 与服务端的 MAX_CPUS_REQUEST ${d} 不一致：`
     + '用户照着界面填，而服务端按另一个数钳制');
+  // ★ 而那个常量**真的被设到那一格上**了：只声明不用的常量是一条永远绿的判据 ——
+  //   用户照样能填 999，而服务端会把它悄悄钳掉。
+  assert.match(js, /st\.cpus\.max = String\(UI_MAX_CPUS\);/,
+    'panel.js 里「CPU 核数」那一格要把 UI_MAX_CPUS 设成 max');
   const f = /clampInt\(req && req\.cpus, DEFAULTS\.cpus, 1, (\d+)\)/.exec(fake);
   assert.ok(f, 'backend-fake.js 里 cpus 的钳制那一行找不到（改过写法？）');
   assert.equal(Number(f[1]), d,
@@ -80,21 +86,39 @@ test('★★ MAX_GRES_COUNT：守护进程与假后端一致', () => {
 });
 
 test('★ 界面上 GRES 的上限是**从服务端来的**，不是写死的', () => {
-  const m = /id="f-gres-n"[^>]*/.exec(html);
-  assert.ok(m, 'panel.html 里找不到 #f-gres-n（数量那一格）');
-  assert.equal(/\bmax="/.test(m[0]), false,
-    '数量那一格的 max 写死在 HTML 里了 —— 它必须跟着服务端给的 per_node_max 走 '
+  // ★★ v0.18：数量那一格随高级选项搬进了每一块里，从 HTML 变成了 panel.js 里
+  //   画出来的一个 `<input>` —— 判据跟着元素搬家，而"上限只能来自服务端"这句话
+  //   一个字没变。两半都要查，缺一半这条就废了：
+  //     ① 画出来的时候**不许带 max**：带了就是写死一个数（"每台集群都最多 8 张"
+  //        是一个我们无权做的假设）；
+  //     ② 而它确实是被设上去的，并且来源**只有** `per_node_max` 一处。
+  const built = /st\.gresN = document\.createElement\('input'\);([\s\S]*?)row\.append\(field\('数量'/,
+    m0 = built.exec(js);
+  assert.ok(m0, 'panel.js 里找不到数量那一格的构造那一段 —— 它改了形状？');
+  assert.equal(/\bmax\b/.test(m0[1]), false,
+    '数量那一格在**画出来的时候**就带上了 max —— 它必须跟着服务端给的 per_node_max 走 '
     + '（同一个集群上不同分区的上限可以不同）');
-  // 而那个 max 确实是被设上去的（在 panel.js 里）。
-  const js = fs.readFileSync(path.join(ROOT, 'client', 'src', 'renderer', 'panel.js'),
-    'utf8');
-  assert.match(js, /cnt\.max = String\(e\.per_node_max\)/,
-    'panel.js 要拿 per_node_max 设 max —— 那一格是这一版唯一的上限来源');
+  // ② 整份 panel.js 里对 `.max` 的赋值**恰好这两处**，而且各有各的来源：
+  //    CPU 那一格取那个与服务端交叉校验过的常量；数量那一格取 `per_node_max`。
+  const sets = [...js.matchAll(/\.max\s*=\s*([^;\n]+);/g)].map((m) => m[1].trim());
+  assert.deepEqual(sets.sort(), ['String(UI_MAX_CPUS)', 'String(e.per_node_max)'].sort(),
+    'panel.js 里对 `.max` 的赋值应当恰好两处（CPU 那一格取 UI_MAX_CPUS、数量那一格取 '
+    + `per_node_max）—— 现在是 ${JSON.stringify(sets)}。多出来的那一处多半就是写死的上限`);
+  // ③ 而**一个数字都不许直接写在 max 上**（`max = 8` / `max = '8'`）：那正是这条
+  //    守的东西 —— 上限只能来自服务端，或者来自那个有人交叉盯着、一漂就红的常量。
+  //    ★ 查的是**赋值**（`.max = 数字`）：注释里那句"没有 `max="8"` 这种数字"是
+  //      在解释这条规矩，不是违反它。
+  assert.equal(/\.max\s*=\s*['"]?\d/.test(js), false,
+    'panel.js 里有一个数字直接写在 max 上 —— 上限必须来自服务端给的 per_node_max');
 });
 
 test('★ 旧的 `GPU 数` 那一格整个不存在了（不是一个数字输入框）', () => {
-  assert.equal(/id="f-gpus"/.test(html), false,
+  // ★ v0.18：这一格从 panel.html 搬进了 panel.js（每一块里画一份），所以两处都查 ——
+  //   只查 HTML 的话，这条会变成一条**永远绿的空断言**（那些 id 已经不在那儿了）。
+  assert.equal(/f-gpus/.test(html), false,
     'panel.html 里还有 #f-gpus —— GRES 是"名字 + 型号 + 数量"，不是"GPU 数"');
+  assert.equal(/f-gpus/.test(js), false,
+    'panel.js 里还有 f-gpus —— 同上');
 });
 
 // ── ★★ 插件负载的上限：三侧各持一份常量，书面判据在 tools/ ──────────────────

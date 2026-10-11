@@ -2150,7 +2150,7 @@ test('★★ 漏传服务名**当场拒绝** —— 客户端这一侧没有"缺
   //   就是**那句报错**。没有它，用户拿到的是一句关于"服务种类"的"不认识"，
   //   把根因指向站点；而根因在调用方少传了一个实参。所以这一条钉的正是那句话。
   //
-  // ★ 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, btn)`，
+  // ★ 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, adv, btn)`，
   //   服务名永远显式传），所以这一条是这段逻辑**唯一**的守门人。
   const before = noticesOf().length;
   const r = await appStart({ cpus: 1 });

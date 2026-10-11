@@ -141,6 +141,11 @@ function mkEl(tag) {
     get lastChild() { return e.children[e.children.length - 1] || null; },
     setAttribute(k, v) { e.attrs[k] = String(v); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
+    // ★ 数量那一格（GRES 的「几个」）在没有选中任何卡的时候会把 `max` **摘掉** ——
+    //   而那一格现在是每一块画出来的时候就会走一遍（`applyGresMaxFor`），所以这个
+    //   法子从"用不到"变成了"一画就调"。缺了它就是一次 TypeError，看起来像"这一组
+    //   用例本身坏了"，与"守住了"分不开。
+    removeAttribute(k) { delete e.attrs[k]; },
     querySelectorAll() { return []; },
     // 给一个**非零**的矩形：这样 drawWorkspaceLines 那条路真的会走完
     // （全零的话它在 `if (!base.width)` 就返回了，而那条路正是"线画不画得出来"）。
@@ -750,6 +755,9 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   const notices = () => childrenOf(h.doc.getElementById('notices'));
   const sent = (i) => h.run(`JSON.stringify(window.__starts[${i}])`);
   const btn = h.doc.getElementById('start-btn');
+  // ★★ 那几格高级选项现在是**每一块自己一份**（`startWith` 读的就是它）——
+  //   这里现造一份用：它在真机上是 pluginBlock 画出来的那一份。
+  const adv = h.fn('pluginAdv')().st;
 
   // ★ 开局没有待答的一问。**不在这一层判"那一行是收着的"** —— 这个架子不解析
   //   `panel.html`，`#sb-port` 身上那个 `hidden` 类是 HTML 写的，在这里根本看不见。
@@ -757,7 +765,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.equal(h.run('portAsk'), null, '开局不该有待答的一问');
 
   // ── ① 被挡下 ⇒ 摆出那一行，理由**照念主进程给的那句** ──
-  await h.fn('startWith')('cs', btn);
+  await h.fn('startWith')('cs', adv, btn);
   assert.equal(h.run('window.__starts.length'), 1);
   assert.equal(sent(0), '["cs",null]',
     '★ 第一趟**不带作答** —— 要不要问是主进程按后端与那一份数据判的，界面不猜');
@@ -805,7 +813,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
     + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
-  await h.fn('startWith')('cs', btn);
+  await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
   const calls = h.run('window.__starts.length');
   const before = notices().length;
@@ -822,7 +830,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
 
   // ── ⑤ 别的失败**不摆这一行**（它不是"被端口挡住"，三个答案都不成立）──
   h.run('window.__reply = { ok: false, code: "rejected", error: "版本对不上。" };');
-  await h.fn('startWith')('cs', btn);
+  await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), true,
     '★★ 只有 `port_conflict` 才摆这一行 —— 别的失败摆它等于给两个不成立的答案');
 
@@ -830,7 +838,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
     + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
-  await h.fn('startWith')('cs', btn);
+  await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
   h.fn('showScreen')('conns');
   assert.equal(row.classList.contains('hidden'), true,
@@ -1135,7 +1143,9 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
 
   const blocks = h.byId.get('plugin-blocks').children;
   assert.equal(blocks.length, 2);
-  const selOf = (b) => childrenOf(b).find((x) => x.tagName === 'SELECT') || null;
+  const selOf = (b) => childrenOf(b).find((x) => x.className === 'plug-space') || null;
+  // ★ 按 class 找，不按"块里第一个 SELECT"找：块里现在还有一个 GRES 下拉（高级选项
+  //   那一格，v0.18 起长在每一块里）—— 而这条用例问的是**数据**那一格。
   // ★ 发出去的那个对象是在 vm 另一个 Realm 里造的，`deepStrictEqual` 会拿**原型**
   //   去比，于是两个字段完全一样的对象也说"不相等"。所以比字段时走一趟 JSON。
   const raw = (i) => h.run(`window.__calls[${i}]`);
@@ -1211,6 +1221,83 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   h.fn('renderPlugins')(PV);
   assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,
     '★ 没有活跃连接时那一格没有对象 —— 画一个空的等于凭空许诺');
+});
+
+test('★★ 高级选项：一块一份，两块各填各的，值不串到另一块', async () => {
+  // ★★ 2026-10-11 加（界面第三轮 F4）。那几格从前是**全屏共用的一份**，长在第二屏
+  //   最底下 —— 而它喂的是**某一块**的「开始会话」。三四个插件并排时，"我填的 4 核
+  //   是给谁的"在界面上根本表达不出来。
+  //
+  //   ★ 这条盯的是**串味**：甲填的 4 核出现在乙的提交里，而界面上一切正常、
+  //     两个下拉也各自显示着各自的值。判据只能是"按下去之后**发出去的那一份**"。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES },
+  'window.__subs = [];'
+  + 'window.slurmate.start = (res, kind, port) => { window.__subs.push({ res, kind, port });'
+  + '  return Promise.resolve({ ok: true }); };');
+  h.fn('renderPlugins')(PV);
+  // 分区表是**站点级**的（全局一份），它到得比插件块早或晚都可能 —— 这里刻意在
+  // 块画好**之后**才给，验的是"它变了，每一块里那一格都跟着换"。
+  h.fn('renderPartitions')([
+    { name: 'gpu', allowed: true,
+      gres: [{ name: 'gpu', type: 'a100', per_node_max: 4, label: 'a100' }] },
+    { name: 'cpu', allowed: false, reason: '这个分区要另外申请' },
+  ]);
+
+  const kidsOf = (e) => (e.children || []).filter((k) => k && k.tagName);
+  const blockOf = (i) => h.byId.get('plugin-blocks').children[i];
+  const advOf = (b) => kidsOf(b).find((x) => x.tagName === 'DETAILS');
+  /** 那一块里那几格：CPU / 内存 / GRES / 数量 / 分区（`field()` 造 div>label+控件）。 */
+  const cellsOf = (b) => {
+    const row = kidsOf(advOf(b)).find((x) => x.className === 'row');
+    return kidsOf(row).map((w) => kidsOf(w)[1]);
+  };
+  const btnOf = (b) => kidsOf(b).find((x) => x.tagName === 'BUTTON');
+
+  const [b0, b1] = [blockOf(0), blockOf(1)];
+  const a0 = cellsOf(b0);
+  const a1 = cellsOf(b1);
+  assert.equal(a0.length, 5, '一块里那几格：CPU / 内存 / GRES / 数量 / 分区');
+  assert.notEqual(advOf(b0), advOf(b1), '★ 两块各有一份，不是同一个元素被塞两次');
+
+  // ── 两块里那一格都要跟着站点给的分区表走 ──
+  for (const a of [a0, a1]) {
+    assert.deepEqual(a[4].children.map((o) => o.value), ['', 'gpu', 'cpu']);
+    assert.match(a[4].children[2].textContent, /cpu（无权限）/);
+    assert.equal(a[4].children[2].disabled, true, '没权限的那个选项要灰着');
+    assert.equal(a[4].children[2].title, '这个分区要另外申请',
+      '★ 而灰着必须给出理由 —— 让用户猜为什么点不动是不行的');
+  }
+
+  // ── 甲填满 ──
+  a0[0].value = '4';        // CPU 核数
+  a0[1].value = '16G';      // 内存
+  a0[4].value = 'gpu';      // 分区 ⇒ 它自己那一格的 GRES 跟着换
+  a0[4].onchange();
+  assert.deepEqual(a0[2].children.map((o) => o.value), ['', 'none', '0'],
+    '这个分区的 GRES：默认 / 不占 / a100（下标就是选项的 value）');
+  a0[2].value = '0';
+  a0[2].onchange();
+  assert.equal(a0[3].disabled, false, '挑了卡，数量那一格才填得动');
+  assert.equal(a0[3].max, '4', '★ 上限来自服务端给的 per_node_max，不是写死的数');
+  a0[3].value = '2';
+
+  // ── 乙一个字没动：它那几格必须是**它自己**的样子 ──
+  assert.deepEqual([a1[0].value, a1[1].value, a1[4].value], ['', '', '']);
+  assert.equal(a1[2].value, '', '★ 乙的 GRES 还停在"用插件的默认"');
+  assert.equal(a1[3].disabled, true, '★ 而乙的数量那一格还是灰的（甲挑了卡不影响它）');
+
+  const sent = (i) => JSON.parse(JSON.stringify(h.run(`window.__subs[${i}]`)));
+  await btnOf(b0).onclick();
+  await btnOf(b1).onclick();
+  assert.deepEqual(sent(0), {
+    res: { cpus: 4, mem: '16G', partition: 'gpu',
+      gres: { name: 'gpu', type: 'a100', count: 2 } },
+    kind: 'cs', port: null,
+  }, '★ 甲交出去的是**甲**填的那一份');
+  assert.deepEqual(sent(1), { res: {}, kind: 'relay', port: null },
+    '★★ 乙那一块什么都没填 ⇒ 发的是**空对象**：留空不是"0 核"，是"让服务端用它自己'
+    + '的默认值"。串味的话这里会看到甲的那 4 核');
 });
 
 test('★★ 共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
