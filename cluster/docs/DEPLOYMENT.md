@@ -1,9 +1,9 @@
 # Slurmate 部署指南
 
-本文分两部分：**前置条件**（每一条都注明「不满足会怎样失败」）和**部署流程**。
+本文分两部分：前置条件（每一条都注明「不满足会怎样失败」）和部署流程。
 前置条件全部从代码核实，不是经验之谈。
 
-部署脚本是 `cluster/install-base.sh`，在**登录节点（控制节点）**上以 root 运行。
+部署脚本是 `cluster/install-base.sh`，在登录节点（控制节点）上以 root 运行。
 源码树里还有一份只读的自检脚本 `tools/check-cluster.sh`，建议在部署前先跑它。
 
 ---
@@ -22,16 +22,16 @@ sudo bash tools/check-cluster.sh
 
 ### 1. 单一登录节点，且 nft 规则挂在它的 output 链上
 
-**依据**：`Nft.CHAIN = "output"`（`cluster/slurmate-sessiond`），链由守护进程在
+依据：`Nft.CHAIN = "output"`（`cluster/slurmate-sessiond`），链由守护进程在
 自身所在主机上创建：`type filter hook output priority filter; policy accept;`
 （`cluster/slurmate-sessiond`）。
 
-**不满足会怎样失败**：多登录节点集群里，用户在 `node02` 登录时，`node02` 的
-`inet slurmate output` 链上没有任何规则。**用户本人不会有任何异常**（那个
+不满足会怎样失败：多登录节点集群里，用户在 `node02` 登录时，`node02` 的
+`inet slurmate output` 链上没有任何规则。用户本人不会有任何异常（那个
 用户自己的流量本来就被 accept），但同节点其他用户可以直接连那个端口 —— 保护静默消失，
 `slurmate doctor` 在 `node01` 上跑还会报「一致」。
 
-**怎么确认**：在**用户实际登录的那台机器**上确认表与链存在：
+怎么确认：在用户实际登录的那台机器上确认表与链存在：
 
 ```bash
 nft list chain inet slurmate output
@@ -39,16 +39,16 @@ nft list chain inet slurmate output
 
 ### 2. 登录节点与全部计算节点在同一 IPv4 网段内，且能用一个 CIDR 表达
 
-**依据**：`cluster_cidr` **只接受一个** CIDR，且**没有默认值** —— 留空、写成文档占位
+依据：`cluster_cidr` 只接受一个 CIDR，且没有默认值 —— 留空、写成文档占位
 网段、前缀长度非法、主机位不为 0，都会被自检拒绝启动。这个值被写进基础规则
 `ip daddr != <cluster_cidr> accept`（`Nft.ensure()`）。
 
-**不满足会怎样失败**：如果计算节点落在 `cluster_cidr` 之外，去往它们的流量会先被
-这条基础规则放行，**所有会话规则永远匹配不到**。链的 policy 是 `accept`，
+不满足会怎样失败：如果计算节点落在 `cluster_cidr` 之外，去往它们的流量会先被
+这条基础规则放行，所有会话规则永远匹配不到。链的 policy 是 `accept`，
 所以不会有任何报错 —— 表现为「一切正常，只是没有保护」。
 
-**怎么确认**：不用手工确认 —— 守护进程启动时与 `--check` 时都会拿
-`scontrol show node -o` 的 `NodeAddr` 全集与 CIDR 求交，**发现节点在网段外就拒绝启动**
+怎么确认：不用手工确认 —— 守护进程启动时与 `--check` 时都会拿
+`scontrol show node -o` 的 `NodeAddr` 全集与 CIDR 求交，发现节点在网段外就拒绝启动
 并逐个点名。`tools/check-cluster.sh` 也会打印
 `NodeName=/NodeAddr=` 对照表。
 
@@ -58,7 +58,7 @@ nft list chain inet slurmate output
 （`cluster/run.sbatch`，`cluster/slurmate-sessiond`）。这条链路有四层
 要求，每一层的失败模式都不同。
 
-**3a. 家目录必须在登录节点与计算节点上都能看到**
+3a. 家目录必须在登录节点与计算节点上都能看到
 
 - 不满足：守护进程读不到会话文件。会话停在 `submitted`，到 `ENROLL_TTL`（默认
   1800 秒）超时后进 `releasing`、记 `expired`，作业被取消。作业一直在排队时
@@ -69,16 +69,16 @@ nft list chain inet slurmate output
   所以「超时了但作业还在烧」表现为会话停在 `releasing`，不是静默消失。
 - 用户看到的现象：界面一直停在「排队中 · 等待调度与登记」。
 
-**3b. rename 必须是原子的（NFSv4 的 RENAME 是服务端原子的）**
+3b. rename 必须是原子的（NFSv4 的 RENAME 是服务端原子的）
 
 作业侧用「写临时文件 + `mv -f`」落盘（`cluster/run.sbatch`），守护进程侧
 要求常规文件、大小上限、`st_nlink == 1`。若底层实现让 rename 退化成非原子，
 守护进程会读到半截文件并判 `bad_json`，于是每个 tick 重试一次直到 3a 的超时。
 表现为登记被无限推迟，而不是立刻报错。
 
-**3c. NFS 属性缓存会影响登记延迟**
+3c. NFS 属性缓存会影响登记延迟
 
-默认 `acdirmax=60s`，目录属性最长缓存 60 秒 —— **会话登记最多延迟 60 秒**。
+默认 `acdirmax=60s`，目录属性最长缓存 60 秒 —— 会话登记最多延迟 60 秒。
 `tools/check-cluster.sh` 专门检查 `/shared/home`（或站点实际的那个挂载点）有没有
 显式设置 `actimeo` / `acdirmax` / `acregmax`，没有就给出 WARN。
 
@@ -86,40 +86,40 @@ nft list chain inet slurmate output
 （`client/src/main/session.js`），用户很容易以为卡住了。想缩短首连体验就往挂载
 参数里加 `actimeo=5` 之类的值。
 
-**3d. 家目录必须能由 uid 反查**
+3d. 家目录必须能由 uid 反查
 
 守护进程取家目录的唯一途径是 `pwd.getpwuid(uid).pw_dir`
-（`cluster/slurmate-sessiond`）。**绝不拼「前缀 + 用户名」**，两个独立理由：
+（`cluster/slurmate-sessiond`）。绝不拼「前缀 + 用户名」，两个独立理由：
 用户名与目录名不保证一致；前缀本身也是站点配置。
 
 - 不满足：`user_home()` 返回 `None` → 该用户所有涉及家目录的操作直接失败
   （`uid_unknown`）。
 
-注意：很多集群的 NSS（SSSD/LDAP）**没有开启枚举**，`getent passwd` 全量列表里
+注意：很多集群的 NSS（SSSD/LDAP）没有开启枚举，`getent passwd` 全量列表里
 只有本地账号。这不影响按 uid 直查（`getent passwd <uid>`），守护进程走的正是直查，
 不做任何枚举（`tools/check-cluster.sh`）。
 
-**3e. 家目录在 systemd 下被挂成只读**
+3e. 家目录在 systemd 下被挂成只读
 
 `install-base.sh` 按 `readonly_paths` 渲染 `ReadOnlyPaths=`（`cluster/install-base.sh`）。
-填错的后果是守护进程在一个不存在的路径上做只读挂载，**systemd 直接拒绝启动**
+填错的后果是守护进程在一个不存在的路径上做只读挂载，systemd 直接拒绝启动
 （`cluster/install-base.sh`）。留空则整行被删除，保护随之消失（会打印警告）。
 
 ### 4. root 需要 Slurm operator 权限
 
-**依据**：续期用 `scontrol update JobId=<id> TimeLimit=+<增量>`
+依据：续期用 `scontrol update JobId=<id> TimeLimit=+<增量>`
 （`Slurm.renew()`，`cluster/slurmate-sessiond`）。注释写得很直白：
-**只有 root/Slurm 管理员能增加 `TimeLimit`，普通用户不行 —— 这就是为什么续期必须
-是守护进程的职责**。
+只有 root/Slurm 管理员能增加 `TimeLimit`，普通用户不行 —— 这就是为什么续期必须
+是守护进程的职责。
 
-**不满足会怎样失败**：`renew` 每次都返回失败，审计日志记 `renew_failed`，守护进程
+不满足会怎样失败：`renew` 每次都返回失败，审计日志记 `renew_failed`，守护进程
 只打一条 warning（`cluster/slurmate-sessiond`）。会话会在 `TimeLimit`
 到期时被 Slurm 正常杀死 —— 用户正在编辑的内容随作业一起消失，而在此之前界面上
 没有任何异常，只是「剩余时间」在稳步减少。
 
 守护进程还必须能以 root 身份执行 `sbatch`（它用 `user=`/`group=`/`extra_groups=`
 切到目标用户，`cluster/slurmate-sessiond`）、`scancel`、`scontrol`、
-`sacctmgr`，以及**只读的** `squeue` / `sinfo` / `sshare` / `sacct`。
+`sacctmgr`，以及只读的 `squeue` / `sinfo` / `sshare` / `sacct`。
 
 后四个服务于客户端那一块「站点状态」与「最近作业」。它们都要能读：守护进程启动时
 逐个校验它们的路径（`Config.validate()`），缺一个就拒绝启动。理由与另外几个相同 ——
@@ -128,7 +128,7 @@ nft list chain inet slurmate output
 
 它们全都只读，这一块不改集群上的任何东西。
 
-**怎么确认**：`slurmate doctor` 之外，直接看一眼续期是否真的在发生：
+怎么确认：`slurmate doctor` 之外，直接看一眼续期是否真的在发生：
 
 ```bash
 sudo journalctl -u slurmate-sessiond | grep -i renew
@@ -136,9 +136,9 @@ sudo journalctl -u slurmate-sessiond | grep -i renew
 
 ### 5. sshd 允许 direct-tcpip 转发，并允许用户的认证方式
 
-**依据**：客户端的隧道走 SSH 的数据通道 —— 真实模式是 ssh2 的
+依据：客户端的隧道走 SSH 的数据通道 —— 真实模式是 ssh2 的
 `forwardOut(...)`（即 direct-tcpip），见 `client/src/main/backend-ssh.js`、
-`client/src/main/tunnel.js`。同时客户端探测登录地址时会**读 SSH banner**
+`client/src/main/tunnel.js`。同时客户端探测登录地址时会读 SSH banner
 并校验 `SSH-2.0-` 前缀（`client/src/main/hosts.js`）。
 
 - 不允许 `AllowTcpForwarding`：本地 `127.0.0.1:<槽位端口>` 仍然会监听成功
@@ -150,22 +150,22 @@ sudo journalctl -u slurmate-sessiond | grep -i renew
   （`client/src/main/backend-ssh.js`），所以用户必须已经能用密钥或已保存的
   口令完成认证。密钥认证缺失时，用户在客户端里会卡在连接阶段。
 
-**怎么确认**：
+怎么确认：
 
 ```bash
 sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwordauthentication)'
 ```
 
-**若集群在 sshd 上挂了 `ForceCommand` 守卫**：`slurmate rpc` 的固定 argv 必须能穿过它
+若集群在 sshd 上挂了 `ForceCommand` 守卫：`slurmate rpc` 的固定 argv 必须能穿过它
 （某些集群的守卫只放行白名单里的命令名 —— 用固定 argv 恰好满足这个条件）。
-这条依赖必须**被证明**而不是假设，Phase 0 的两步实测见
+这条依赖必须被证明而不是假设，Phase 0 的两步实测见
 `client/src/main/backend-ssh.js`。
 
-### 6. 计算节点上要有 `python3` / `ss` / `curl`，以及**每个插件自己的**可执行文件
+### 6. 计算节点上要有 `python3` / `ss` / `curl`，以及每个插件自己的可执行文件
 
-分成两半：**宿主的依赖**（与哪个插件无关）和**插件的依赖**（跟着插件走）。
+分成两半：宿主的依赖（与哪个插件无关）和插件的依赖（跟着插件走）。
 
-**6a. 宿主的依赖 —— 作业模板自己要用**
+6a. 宿主的依赖 —— 作业模板自己要用
 
 | 命令 | 用在哪 | 缺失后的表现 |
 |---|---|---|
@@ -175,21 +175,21 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 | `date` | `log()` 的时间戳 | — |
 | `/dev/urandom` 或 `openssl` | 生成会话口令 | **两者都拿不到时作业明确拒绝启动（`exit 23`）**，不会静默降级成 `auth=none` —— 静默降级恰好会移除唯一的实质保护 |
 
-`port_free()` 里那两个探测**都是 `command -v` 允许缺失的** —— 缺了只是少一道
+`port_free()` 里那两个探测都是 `command -v` 允许缺失的 —— 缺了只是少一道
 校验，不是起不来。这是刻意的：把一个"更好的校验"变成硬依赖，会让一个本来能跑的
 集群装不上。
 
-**6b. 插件的依赖 —— 由装了的那些插件决定**
+6b. 插件的依赖 —— 由装了的那些插件决定
 
-**这一段没有固定清单**，因为计算节点上需要什么完全取决于装了哪些插件。
-每个插件在**它自己的 README** 里写清楚：要哪些可执行文件、缺了会怎样 ——
+这一段没有固定清单，因为计算节点上需要什么完全取决于装了哪些插件。
+每个插件在它自己的 README 里写清楚：要哪些可执行文件、缺了会怎样 ——
 装之前看一眼那一节，比事后对着日志里那句"所有候选端口均失败"猜要省事。
 
-那些表里有一个**共同的形状**值得先知道：插件**自己检查**的那个可执行文件缺了会
-当场点名（"$bin 不存在或不可执行"），而**只被探测步骤用到**的工具（`curl` 那一类）
+那些表里有一个共同的形状值得先知道：插件自己检查的那个可执行文件缺了会
+当场点名（"$bin 不存在或不可执行"），而只被探测步骤用到的工具（`curl` 那一类）
 缺了不会明确报错 —— 每个候选端口都白等到超时（默认 6 个候选共约 4.5 分钟）。
 
-**插件脚本自己负责把"缺了"说清楚。** 宿主只会在日志里记一句"所有候选端口均
+插件脚本自己负责把"缺了"说清楚。宿主只会在日志里记一句"所有候选端口均
 失败"—— 那句指不回是哪个可执行文件不见了。所以每个插件的 `start_<短名>` 里都有
 一条显式的存在性检查（`[[ -x "$bin" ]] || { log "错误：$bin 不存在或不可执行"; return 1; }`）。
 
@@ -202,37 +202,37 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 
 ### 7. systemd + nftables + `nft -j`
 
-- **systemd**：服务单元与 `StateDirectory` / `LogsDirectory` / `RuntimeDirectory`
+- systemd：服务单元与 `StateDirectory` / `LogsDirectory` / `RuntimeDirectory`
   都依赖它。
-- **nftables**：`install-base.sh` 要求 `nft list tables` 成功（`cluster/install-base.sh`）。
-- **`nft -j list ruleset` 必须可用**：这是硬性要求，取不到就**拒绝部署**
+- nftables：`install-base.sh` 要求 `nft list tables` 成功（`cluster/install-base.sh`）。
+- `nft -j list ruleset` 必须可用：这是硬性要求，取不到就拒绝部署
   （`cluster/install-base.sh`）。理由是没有这道校验就无法证明部署没有破坏现有
   规则集 —— 宁可现在拒绝，也不要事后给一个证明不了任何东西的绿灯。
 
-**注意 firewalld 与 nftables 并存的情况**：`tools/check-cluster.sh` 会打印
+注意 firewalld 与 nftables 并存的情况：`tools/check-cluster.sh` 会打印
 两者的 active/enabled 状态；它也会检查 `/etc/nftables.conf`（RHEL 9 上是
 `/etc/sysconfig/nftables.conf`）里有没有 `flush ruleset`。有的话见
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) 的「nft 规则消失」。
 
 ### 8. python3 ≥ 3.9
 
-**依据**：`Slurm.submit()` 用 `subprocess.run(..., user=uid, group=..., extra_groups=...)`
+依据：`Slurm.submit()` 用 `subprocess.run(..., user=uid, group=..., extra_groups=...)`
 （`cluster/slurmate-sessiond`），注释明确写着「Python 3.9+」。
 
-**不满足会怎样失败**：3.8 及以下不认识这些关键字 → 抛 `TypeError` → 被
+不满足会怎样失败：3.8 及以下不认识这些关键字 → 抛 `TypeError` → 被
 `except Exception` 捕获并返回 `(None, "提交失败: ...")` → `op_submit` 返回
-code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文的提交失败提示。
+code 6 `submit_failed`。每一次提交都失败，用户看到的是中文的提交失败提示。
 
 部署脚本还会断言 `socket.SO_PEERCRED` 与 `sqlite3` 可用，缺一即中止
 （`cluster/install-base.sh`）。
 
 ### 9. 其余预检项
 
-**「位置」那一列只有两个值**，因为**同一件事只允许有一个判据**：凡是
+「位置」那一列只有两个值，因为同一件事只允许有一个判据：凡是
 守护进程自己判得了的（Slurm 命令齐备、`nft`、端口区间、`cluster_cidr` 与节点地址
 对账、`scontrol ping`、`ip_local_reserved_ports`），都由 `install-base.sh`
-**调用** `slurmate-sessiond --check` 来判 —— 脚本里没有第二份实现。
-只有**基座安装自己**的事（部署锁、哈希工具、目标路径占用）留在脚本里。
+调用 `slurmate-sessiond --check` 来判 —— 脚本里没有第二份实现。
+只有基座安装自己的事（部署锁、哈希工具、目标路径占用）留在脚本里。
 
 | 检查 | 位置 | 不满足的后果 |
 |---|---|---|
@@ -259,7 +259,7 @@ code 6 `submit_failed`。**每一次提交都失败**，用户看到的是中文
 Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进程立刻知道会话结束；
 日志搬运放后台、绝不阻塞退出（`cluster/run.sbatch`）。
 
-**不满足会怎样失败**：超时的后果是 SIGKILL，墓碑写不下去，会话要多等一个 orphan
+不满足会怎样失败：超时的后果是 SIGKILL，墓碑写不下去，会话要多等一个 orphan
 周期（默认 1800 秒）才回收 —— 期间计算节点被白占。
 
 ### 11. SELinux（若启用）
@@ -271,7 +271,7 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 2. 守护进程能通过 netlink 调 `nft`；
 3. 守护进程能读 NFS 上的用户家目录。
 
-另有一项**最关键**的实测：用 `systemd-run` 起一个带完整加固指令的瞬时
+另有一项最关键的实测：用 `systemd-run` 起一个带完整加固指令的瞬时
 单元跑 `scontrol ping`，验证沙箱里 munge socket 与 nft 都还能用。加固指令一放宽
 就是安全增量的损失，所以这一步值得做。
 
@@ -287,7 +287,7 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 
 ### 步骤 0：把源码放到 root 拥有的目录
 
-部署脚本会以 root 身份**安装并执行** `cluster/` 下的文件。若它们能被普通用户改写，
+部署脚本会以 root 身份安装并执行 `cluster/` 下的文件。若它们能被普通用户改写，
 等于把 root 权限交出去（`cluster/install-base.sh`）。判据是：每个源文件必须 root
 拥有，且组/其他不可写；目录同理。
 
@@ -295,7 +295,7 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 时改用 `/var/tmp`，避免把目录拷进自己里面）再重新执行
 （`cluster/install-base.sh`）。
 
-这条路是通的，但**部署完记得清理 `/root/slurmate-src.*`** —— 每次从非 root
+这条路是通的，但部署完记得清理 `/root/slurmate-src.*` —— 每次从非 root
 拥有的目录部署都会留下一份拷贝。
 
 > 若把 `cluster/` 挪到别的位置（例如把仓库结构改成 `src/cluster/`），
@@ -305,8 +305,8 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 
 ### 步骤 0.5：把插件打成包（要装插件的话）
 
-**站点上铺开的是构建产物，不是一棵源码树。**
-服务器上从头到尾没有源码 —— 打包发生在**作者的机器**上：
+站点上铺开的是构建产物，不是一棵源码树。
+服务器上从头到尾没有源码 —— 打包发生在作者的机器上：
 
 ```bash
 # 在插件的源码树里（可以是另一个仓库）
@@ -332,21 +332,21 @@ sudo slurmate plugin install --from ~/下载的插件
 那几棵树是开发样例，基座不带任何插件。它们不是"仓库自带的插件"，所以这里没有一份
 欠着的成品要补。
 
-**装插件不是部署的一部分** —— 基座装完之后随时可以装，装一个也不用重跑部署：
+装插件不是部署的一部分 —— 基座装完之后随时可以装，装一个也不用重跑部署：
 
 ```bash
 sudo slurmate plugin install ~/下载的插件/<id>.splug
 ```
 
-它做四件事，每一件都会**说给人听**：验签（[PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md) §6.4）、
+它做四件事，每一件都会说给人听：验签（[PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md) §6.4）、
 把包里有什么打一屏出来、
-按 `(id)` 记住签名者（同一个 id 换了钥匙会**停下来问**）、装成
+按 `(id)` 记住签名者（同一个 id 换了钥匙会停下来问）、装成
 `<prefix>/share/slurmate/plugins/<ULID>/` 一棵树加 `<ULID>.json` 一份记录表。
 装完它还会顺手做三件：写它那份
-`slurmate.conf.d/<id>.conf`、织好作业脚本、让守护进程**重读一遍配置** ——
+`slurmate.conf.d/<id>.conf`、织好作业脚本、让守护进程重读一遍配置 ——
 全程不重启，正在跑的会话一条都不受影响。
 
-**服务器上没有源码可以对照**，所以那一屏是管理员手上唯一的依据 —— 它也是这条
+服务器上没有源码可以对照，所以那一屏是管理员手上唯一的依据 —— 它也是这条
 路上已知的取舍之一，见 `README.md` 的〈已知限制〉。
 
 ### 步骤 1：先 `--check`
@@ -358,22 +358,22 @@ sudo bash cluster/install-base.sh --check
 `--check` 承诺零改动：不安装文件、不启动服务、不改动 nftables，快照也只写到
 `/tmp`（`cluster/install-base.sh`）。它把所有预检跑一遍并打印一份可存档的
 报告 —— 警告与失败都走 stdout，就是为了让报告能整份重定向保存
-（`cluster/install-base.sh`）。它跑的就是守护进程**自己的** `--check`
+（`cluster/install-base.sh`）。它跑的就是守护进程自己的 `--check`
 （同一份判据），所以"预检放行、守护进程起不来"那种两套解释器的错配不会发生。
 
-**要体检一批包**，用守护进程自己的 `--check-plugins`（还没装基座时，仓库里
+要体检一批包，用守护进程自己的 `--check-plugins`（还没装基座时，仓库里
 那份也能跑）：
 
 ```bash
 python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插件
 ```
 
-它会逐条点名目录里**除 `.splug` 之外的任何东西** —— 那些东西不会被安装，
+它会逐条点名目录里除 `.splug` 之外的任何东西 —— 那些东西不会被安装，
 所以不在这里说的话就是静默忽略。
 
 ### 步骤 2：准备站点配置
 
-`install-base.sh` **只在配置不存在时安装** `slurmate.conf.example`
+`install-base.sh` 只在配置不存在时安装 `slurmate.conf.example`
 （`cluster/install-base.sh`）—— 重复部署时覆盖等于把站点的调优悄悄抹掉，
 而且故障要等下次重启守护进程才出现。
 
@@ -385,14 +385,14 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 
 至少要把这两项改成站点的真实值：
 
-- `cluster_cidr` —— 见前置条件 2。**它没有默认值，不填服务起不来**；
+- `cluster_cidr` —— 见前置条件 2。它没有默认值，不填服务起不来；
 - `readonly_paths` —— 见前置条件 3e。
 
 站点通用键一共 17 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
 
-**插件要不要开、开哪几个，也在这一步决定。** `enabled = yes` 的插件会被
-**分发到每一台连上来的客户端** —— 不只是"用户可以提交它"。所以
-写一份插件配置现在是一个**对外的**动作：
+插件要不要开、开哪几个，也在这一步决定。`enabled = yes` 的插件会被
+分发到每一台连上来的客户端 —— 不只是"用户可以提交它"。所以
+写一份插件配置现在是一个对外的动作：
 
 ```ini
 # /etc/slurmate/slurmate.conf.d/<短名>.conf
@@ -400,7 +400,7 @@ enabled = yes          # ← 这一行同时也意味着"把它发到用户的�
 ```
 
 一份插件配置都不写时按缺省行事（取插件清单里的 `site.defaultEnabled`），
-所以**升级本身不会静默多发一个插件出去**。
+所以升级本身不会静默多发一个插件出去。
 逐条见 [CONFIGURATION.md](CONFIGURATION.md) 的〈一之二、插件配置〉。
 
 ### 步骤 3：演练（可选但推荐）
@@ -468,7 +468,7 @@ ssh -N -L 18080:<tunnel_target> alice@node01.example.com
 curl -i http://127.0.0.1:18080/healthz
 ```
 
-**分发这一条也要单独验一次**（而且它有一个只在这里才看得见的失败形态）：
+分发这一条也要单独验一次（而且它有一个只在这里才看得见的失败形态）：
 
 ```bash
 # 1. 守护进程从包里读出来的那份清单 —— 这就是客户端会去取的那一份
@@ -477,22 +477,22 @@ sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 ```
 
-第 2 步的输出里 `data` 是**只含客户端侧那一份**容器的 base64，`digest` 要与作者那边
-`packer inspect` 报的**「客户端侧」那一行**一致 —— **不是**「内容摘要」那一行（那一行
+第 2 步的输出里 `data` 是只含客户端侧那一份容器的 base64，`digest` 要与作者那边
+`packer inspect` 报的「客户端侧」那一行一致 —— 不是「内容摘要」那一行（那一行
 是整棵树的）。若它回
-`9 plugin_package_changed`，说明守护进程**起来之后**有人动过那个包（就地换了包而
+`9 plugin_package_changed`，说明守护进程起来之后有人动过那个包（就地换了包而
 没重新部署）—— 那要重跑一次 install-base.sh，而不是重试这个请求。
 
-**手工调 `plugin_file` 会回 `2 unknown_op` —— 那是预期的**，不是部署坏了：
+手工调 `plugin_file` 会回 `2 unknown_op` —— 那是预期的，不是部署坏了：
 那个 op 不存在，一份内容只有"整包"这一条投递方式。
 
-第 1 步的输出里还有一行「包 N 字节 / M 份文件」和一行**完整的内容摘要**。那个
-摘要是这个站点上**唯一**能回答"我装上去的是不是作者发布的那一份"的东西（服务器上
-没有源码树可对照）—— 它要与作者那边 `packer inspect` 报的**逐个字符**比。
+第 1 步的输出里还有一行「包 N 字节 / M 份文件」和一行完整的内容摘要。那个
+摘要是这个站点上唯一能回答"我装上去的是不是作者发布的那一份"的东西（服务器上
+没有源码树可对照）—— 它要与作者那边 `packer inspect` 报的逐个字符比。
 
-**客户端那一侧只有在一台真的客户端上才验得到**：连上去之后应该出现
+客户端那一侧只有在一台真的客户端上才验得到：连上去之后应该出现
 「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
-点完同意之后看一眼池子 —— 每个版本是**一棵树加一份记录表**：
+点完同意之后看一眼池子 —— 每个版本是一棵树加一份记录表：
 
 ```bash
 ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>.json
@@ -519,47 +519,47 @@ sudo bash cluster/install-base.sh --uninstall              # 保留状态与日�
 sudo bash cluster/install-base.sh --uninstall --purge-state
 ```
 
-卸载路径**永远可用** —— 它不做任何多余的预检，出故障时管理员最需要的就是能干净地
+卸载路径永远可用 —— 它不做任何多余的预检，出故障时管理员最需要的就是能干净地
 把它拿掉（`cluster/install-base.sh`）。
 
 两处刻意的保守行为：
 
-- **必须确认服务真的停了再删表和文件**，否则删表后守护进程下一个 tick 就把表重建
+- 必须确认服务真的停了再删表和文件，否则删表后守护进程下一个 tick 就把表重建
   回来（会打印「已删除」但实际还在），而 `Restart=always` 还会再起
   （`cluster/install-base.sh`）。
-- **删文件前逐项确认「这确实是本系统装的文件」**（内容里必须含 `slurmate`）。
-  这里**不能**无条件 `rm -f`：在一台从未部署过 Slurmate 的机器上执行，它会删掉
+- 删文件前逐项确认「这确实是本系统装的文件」（内容里必须含 `slurmate`）。
+  这里不能无条件 `rm -f`：在一台从未部署过 Slurmate 的机器上执行，它会删掉
   同名的、不属于本系统的文件（`cluster/install-base.sh`）。
 
-  `<prefix>/share/slurmate/jobs/` 里那些文件**文件名里没有 `slurmate`**（是插件的
-  ULID），所以那道闸门对它们看的是**脚本内容** —— 里面必然有 `SLURMATE_*`。
+  `<prefix>/share/slurmate/jobs/` 里那些文件文件名里没有 `slurmate`（是插件的
+  ULID），所以那道闸门对它们看的是脚本内容 —— 里面必然有 `SLURMATE_*`。
   卸载后这个目录里留下的东西就是"内容里连一个 `slurmate` 都没有"的，那不是本系统放的。
 
 ---
 
 ## 部署后仍会长期存在的运维事项
 
-- **`nftables.service` 重载会 flush 整个 ruleset。** 这是单元里
+- `nftables.service` 重载会 flush 整个 ruleset。这是单元里
   `PartOf=nftables.service` 存在的原因；重载后表会被重建，规则由对账补齐。
   详见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
-- **端口池的占用会随时间增长。** 每个会话占 `candidates_per_session` 个候选端口，
+- 端口池的占用会随时间增长。每个会话占 `candidates_per_session` 个候选端口，
   释放时归还。
-- **用户家目录里的陈旧会话文件**由用户自己清理：
+- 用户家目录里的陈旧会话文件由用户自己清理：
   `slurmate gc --older-than 604800`（`cluster/slurmate`）。
 
 ---
 
 ## 部署完仍然要注意的
 
-`install-base.sh` 跑通 **不等于**系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
-**已核实的缺陷、从未在真机上跑过的路径、以及结构性欠账**都在
+`install-base.sh` 跑通 不等于系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
+已核实的缺陷、从未在真机上跑过的路径、以及结构性欠账都在
 [KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md)，每条写了位置、后果与修法。
 
-与部署直接相关的两条按**编号**引用（编号是稳定的，复述会漂）：
+与部署直接相关的两条按编号引用（编号是稳定的，复述会漂）：
 
-- **U2** —— `install-base.sh` 整条从来没在真机上跑过。那一条里列着"第一次真机部署要
+- U2 —— `install-base.sh` 整条从来没在真机上跑过。那一条里列着"第一次真机部署要
   重点看的几件事"（`plugins/` 与 `jobs/` 里那几个 ULID 对不对得上、属主与权限、
   卸载清干净没有）。
-- **U6** —— **线上那份守护进程比仓库旧**，带着一个让 `submit` 必然失败的缺陷。
-  重新部署之后，**提交会第一次真正创建 Slurm 作业** —— 那是行为变化，不是回归。
+- U6 —— 线上那份守护进程比仓库旧，带着一个让 `submit` 必然失败的缺陷。
+  重新部署之后，提交会第一次真正创建 Slurm 作业 —— 那是行为变化，不是回归。
   在把客户端接上去之前，先用普通用户身份把整条路走一遍（U6 里给了那串命令）。
