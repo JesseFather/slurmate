@@ -80,11 +80,11 @@ const { execFileSync } = require('child_process');
 
 /** 8 字节。带 `\x1a\r\n` 是为了让文本工具一眼看出"这是二进制"，且能被老式工具截断。 */
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
-/** ★ 当前格式版本是 **2**；`1` 一律拒（`0.y` 不考虑兼容性）。差在签名块：v1 只盖一个
+/** 当前格式版本是 2；`1` 一律拒（`0.y` 不考虑兼容性）。差在签名块：v1 只盖一个
  *  整棵树的摘要，v2 盖 `{id, 版本, digestSite, digestClient}` 四元组，见 A.3。 */
 const FORMAT = 2;
 const HEADER_BYTES = 20;
-/** 摘要的字节数。sha256 ⇒ 32。 */
+/** 摘要的字节数。sha256 是 32 字节。 */
 const DIGEST_BYTES = 32;
 const SIG_ALG_ED25519 = 1;
 /** 签名块的**定长头**：`alg u8 | pubkey 32 | sig 64`。 */
@@ -104,7 +104,7 @@ const SIG_TAIL_BYTES = 1 + DIGEST_BYTES + DIGEST_BYTES;
 const SIG_MIN_BYTES = SIG_PREFIX_BYTES + SIG_ID_BYTES + SIG_TAIL_BYTES;
 const MAX_VERSION_BYTES = 255;
 const SIG_MAX_BYTES = SIG_MIN_BYTES + MAX_VERSION_BYTES;
-/** Ed25519 裸公钥的 SPKI 前缀 —— Node 只认 DER，裸 32 字节要包一层。 */
+/** Ed25519 裸公钥的 SPKI 前缀，Node 只认 DER，裸 32 字节要包一层。 */
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 /**
@@ -394,7 +394,7 @@ function verifyEd25519(raw32, msg, sig) {
   try {
     return crypto.verify(null, msg, ed25519PublicKey(raw32), sig) === true;
   } catch {
-    return false;                     // 公钥不是一条合法曲线点之类 —— 一律当"验不过"
+    return false;                     // 公钥不是一条合法曲线点之类，一律当"验不过"
   }
 }
 
@@ -707,11 +707,11 @@ function parsePackage(buf) {
     files,
     sig,
     manifest,
-    /** 记录表的末尾 —— 签名块就从这里开始（`sign` 要往这里插，附录 A.3）。 */
+    /** 记录表的末尾，签名块就从这里开始（`sign` 要往这里插，附录 A.3）。 */
     tableEnd: off,
-    /** 负载的第一字节 —— 签名块占 `[tableEnd, payloadStart)`（可能是 0 字节）。 */
+    /** 负载的第一字节，签名块占 `[tableEnd, payloadStart)`（可能是 0 字节）。 */
     payloadStart: off + sigLen,
-    /** 内容摘要 —— 判"是不是同一份构件"的**唯一**判据（§3.4）。 */
+    /** 内容摘要，判"是不是同一份构件"的**唯一**判据（§3.4）。 */
     digest: contentDigest(files),
     payloadOf: (p) => {
       const f = files.find((x) => x.path === p);
@@ -998,7 +998,7 @@ function insertId(text, id) {
   return `${head}"id": ${JSON.stringify(id)},${lf}${indent}${tail}`;
 }
 
-/** 从一段 JSON 文本里读清单 —— 只解析，不改写。 */
+/** 从一段 JSON 文本里读清单，只解析，不改写。 */
 function readManifest(file) {
   let text;
   try {
@@ -1048,7 +1048,7 @@ function packerHome(opt) {
 
 function keyFilePath(home, id) { return path.join(home, 'keys', `${id}.pem`); }
 
-/** 公钥的 32 个**裸字节** —— 附录 A.3 要的就是这个形状，指纹也是对它算的。 */
+/** 公钥的 32 个**裸字节**，附录 A.3 要的就是这个形状，指纹也是对它算的。 */
 function rawPubOf(keyObject) {
   const der = crypto.createPublicKey(keyObject).export({ format: 'der', type: 'spki' });
   if (der.length !== ED25519_SPKI_PREFIX.length + 32
@@ -1082,7 +1082,7 @@ function loadKey(home, id) {
 
 function lineagePath(dir) { return path.join(dir, LINEAGE_FILE); }
 
-/** 读一棵树里的血统表。**文件不在 ⇒ `obj: null`** —— 新树就是这样，不是错误。 */
+/** 读一棵树里的血统表。文件不在就是 `obj: null`，新树就是这样，不是错误。 */
 function readLineage(dir) {
   const file = lineagePath(dir);
   let text;
@@ -1102,7 +1102,7 @@ function readLineage(dir) {
   return { file, obj };
 }
 
-/** 这个 id 在血统表里的那一条。**`undefined` = 不认识它** —— 那就是 §2.5 的判据。 */
+/** 这个 id 在血统表里的那一条。**`undefined` = 不认识它**，那就是 §2.5 的判据。 */
 function lineageEntry(obj, id) {
   if (!obj || !obj.lineage) return undefined;
   return Object.prototype.hasOwnProperty.call(obj.lineage, id) ? obj.lineage[id] : undefined;
@@ -1830,7 +1830,7 @@ function humanBytes(n) {
 
 function usage(code) {
   const out = code ? console.error : console.log;
-  out(`slurmate-packer —— 插件作者的打包器（单文件、零依赖）
+  out(`slurmate-packer，插件作者的打包器（单文件、零依赖）
 
 用法：
   node slurmate-packer.js init    <插件目录> [--fork]
@@ -1843,10 +1843,10 @@ function usage(code) {
 
   --home <目录> 可以跟在任何动词后面（等价于 $SLURMATE_PACKER_HOME）。默认
   ~/.config/slurmate/packer，里面是 keys/<id>.pem（私钥）与 releases.json（发布表）。
-  ★ 这两样**不进源码树**：进了就把树弄脏，而 §3.5 拒绝脏树。
+  这两样不进源码树：进了就把树弄脏，而 §3.5 拒绝脏树。
 
   init     铸一个 id（只在树里没有的时候）并**插入**写回 plugin.json，同时给血统表
-           记一条。它会弄脏树，所以之后要你自己提交 —— 与 build 分成两个动词是故意的。
+           记一条。它会弄脏树，所以之后要你自己提交，与 build 分成两个动词是故意的。
            树里**已经有** id 而血统表不认识它时，它会停下来问（§2.5），而两个答案是：
            --fork   承认这是**另一个插件**：把 id 换掉（代价：所有已同意的用户要
                     重新同意一次）。
@@ -1854,13 +1854,13 @@ function usage(code) {
                     存在之前铸的）：给它补一条记录。
   keygen   给这个 id 定一把 Ed25519 钥匙：公钥写进血统表，私钥进钥匙库（0600）。
            钥匙库里已经有一把（§4.1 的〈换机器 = 复制 .pem〉）就**认它**，不铸新的。
-           一个 id 只有一把 —— 丢了私钥就只能 --fork（§4.1）。
+           一个 id 只有一把，丢了私钥就只能 --fork（§4.1）。
   build    从一个**提交**打出 .splug。工作树脏时拒绝（§3.5）。它**不看钥匙库**：
            输出只是 (提交, 选项) 的函数。
   sign     给一个已经打好的包盖签名。它**不改内容摘要**（§4.2），所以不必重新打包。
   verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者对不对得上。
            --against 顺带判 §3.6。
-  inspect  打出包里到底有什么 —— 作者拿它对着规范逐行核对。
+  inspect  打出包里到底有什么，作者拿它对着规范逐行核对。
 
 规范：packer/docs/PLUGIN-SPEC.md（尤其 §2、§3、§4、附录 A）。`);
   return code;
