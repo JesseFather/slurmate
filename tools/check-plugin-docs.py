@@ -211,8 +211,8 @@ def run(plugins_dir):
         print("✗ %s" % p)
     if problems:
         print("\n✗ 手写的键表与权威键集对不上（%d 处）。前者的权威是 plugin.json 与"
-              " PLUGIN_COMMON_KEYS，后者的权威是 tools/manifest-keys.json —— 改键"
-              " 就要改表。" % len(problems))
+              " PLUGIN_COMMON_KEYS，后者的权威是 tools/manifest-keys.json ——"
+              "改键就要改表。" % len(problems))
         return 1
     n = sum(1 for d in sorted(os.listdir(plugins_dir))
             if os.path.isfile(os.path.join(plugins_dir, d, "plugin.json")))
