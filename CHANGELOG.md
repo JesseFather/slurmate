@@ -67,6 +67,10 @@
 都没有。完整的一份现在在它的 §2 开头，键集与 `tools/manifest-keys.json` 逐字相同，
 由 `tools/check-plugin-docs.py` 的一条新判据钉住。
 
+`packer/docs/README.md` 的两张键表（顶层与 `contributes`）跟着削掉了形状片段
+（`^[a-z][a-z0-9-]{0,31}$`、`{ kind: "web", path: "/" }` 这一类），只留说明 ——
+形状从此只有那一处权威。`site` 那一段的键不在那张表里，表不动。
+
 同批修掉三处已经写错的事实。`packer/docs/README.md` 说身份的第三段由
 `contributes.concurrent` 决定，实际是 `contributes.ports` 大于 0
 （`client/src/main/plugin-data.js` 的 `portCountOf`）。
