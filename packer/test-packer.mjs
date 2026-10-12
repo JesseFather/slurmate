@@ -784,7 +784,7 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
       key2.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
     const k2 = packer('keygen', p2);
     check('★★ 库里已经有一把（复制过来的）⇒ **认它**，不铸新的',
-      k2.code === 0 && /没有\*\*铸新的/.test(k2.out), k2.err + k2.out.slice(0, 200));
+      k2.code === 0 && /没有铸新的/.test(k2.out), k2.err + k2.out.slice(0, 200));
     const l2 = readJsonOrNull(path.join(p2, 'lineage.json')) || {};
     check('★ 记进血统表的是**库里那把**的公钥（指纹对得上）',
       l2.lineage && l2.lineage[MF_ID] && l2.lineage[MF_ID].key === raw2.toString('hex'),
@@ -935,7 +935,7 @@ section('8b. --adopt：承认这个 id 归这棵树（记录丢了的那种情�
   check('★ 血统表里有了这个 id，`key: null`', l.lineage && l.lineage[MF_ID]
     && l.lineage[MF_ID].key === null, JSON.stringify(l));
   check('★ 它把"这记下的是你的一次声明"说在明处（不许读成"证明"）',
-    /你的一次声明/.test(r.out) && /不\*\*证明/.test(r.out), r.out.slice(-320));
+    /你的一次声明/.test(r.out) && /不证明/.test(r.out), r.out.slice(-320));
   check('★ 也指出了真正守这件事的是客户端那张钉表（§5.4）', /§5\.4/.test(r.out), '');
 
   check('★ 再 --adopt 一次是"什么都不做"（不重复写、不报错）',

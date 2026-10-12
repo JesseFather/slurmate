@@ -15,54 +15,54 @@
 
 'use strict';
 /**
- * slurmate-packer.js —— 插件作者的打包器。
+ * slurmate-packer.js，插件作者的打包器。
  *
  * ── 它是谁的 ────────────────────────────────────────────────────────────────
  *
- * ★ **这是作者的工具，不是部署工具。** 它跑在**你**的机器上（写插件的那台），
+ * 这是作者的工具，不是部署工具。 它跑在你的机器上（写插件的那台），
  *   产出 `.splug` 之后发布到网站 / GitHub；管理员下载下来交给安装器。
- *   **服务器上从头到尾没有源码树** —— 所以 `cluster/install-base.sh` 永不打包。
+ *   服务器上从头到尾没有源码树，所以 `cluster/install-base.sh` 永不打包。
  *
- * ★ **单文件、零依赖**：只用 `crypto` / `fs` / `os` / `path` / `child_process`。
- *   下载这个文件夹就能用（`node slurmate-packer.js …`）。所以它**不**从
- *   `client/` 里 import 任何东西 —— 那会让"下载这个文件夹"变成"下载整个仓库"。
+ * 单文件、零依赖：只用 `crypto` / `fs` / `os` / `path` / `child_process`。
+ *   下载这个文件夹就能用（`node slurmate-packer.js …`）。所以它不从
+ *   `client/` 里 import 任何东西，那会让"下载这个文件夹"变成"下载整个仓库"。
  *   代价是几处常量在这里有第二份（跳过表、版本号形状），
  *   由 `.github/workflows/checks.yml` 里的 lint 与 `tools/conformance/` 的向量钉住。
  *
  * ── 六个动词 ────────────────────────────────────────────────────────────────
  *
- *   init    铸一个 id（只在源码树里没有的时候）并**插入**写回 plugin.json，
+ *   init    铸一个 id（只在源码树里没有的时候）并插入写回 plugin.json，
  *           同时给血统表记一条。`--fork` / `--adopt` 是 §2.5 那次"停下来问"的
  *           两个答案（这是另一个东西 / 这是同一个东西、记录丢了）
  *   keygen  给这个 id 定一把 Ed25519 钥匙：公钥进血统表，私钥进钥匙库
- *           （库里已经有一把就认它 —— 〈换机器 = 复制 .pem〉那条路）
- *   build   从一个**提交**打出一个 `.splug`（它**不看钥匙库**）
- *   sign    给一个已经打好的包盖上签名（**不改内容摘要**，所以不必重新打包）
+ *           （库里已经有一把就认它，〈换机器 = 复制 .pem〉那条路）
+ *   build   从一个提交打出一个 `.splug`（它不看钥匙库）
+ *   sign    给一个已经打好的包盖上签名（不改内容摘要，所以不必重新打包）
  *   verify  校验一个 `.splug`：逐份字节、内容摘要、签名、血统表与签名者对得上吗
  *   inspect 把人该看的东西打出来（作者拿它对着规范逐行核对）
  *
- * ★ **写树的动词与打包的动词不能合并。** `init` / `keygen` 会弄脏源码树，
- *   而 §3.5 要求打包的输入是一个**干净的提交** —— 一条命令做完两件事必然自相
- *   矛盾。所以它们只改树、把树弄脏，然后**停下来让你提交**。
+ * 写树的动词与打包的动词不能合并。 `init` / `keygen` 会弄脏源码树，
+ *   而 §3.5 要求打包的输入是一个干净的提交，一条命令做完两件事必然自相
+ *   矛盾。所以它们只改树、把树弄脏，然后停下来让你提交。
  *
- * ★ **`sign` 是独立的一步，因为签名不改内容摘要**（§4.2：它盖的是摘要那 32 个
+ * `sign` 是独立的一步，因为签名不改内容摘要（§4.2：它盖的是摘要那 32 个
  *   字节，不覆盖信封）。两个后果：`build` 的输出只是 (提交, 选项) 的函数，
  *   与这台机器上有什么钥匙无关；而"给已经打好的包补签名"是合法的（§2.4 之下
  *   它还是同一份构件）。
  *
  * ── 三条容易写错的地方，先说清楚 ────────────────────────────────────────────
  *
- * ★ **不用 `git archive`。** 它会读 `.gitattributes` 的 `export-ignore` /
- *   `export-subst`，于是**包的负载可以被仓库里一份属性文件改掉** —— 少了或多
+ * 不用 `git archive`。 它会读 `.gitattributes` 的 `export-ignore` /
+ *   `export-subst`，于是包的负载可以被仓库里一份属性文件改掉，少了或多
  *   几份文件，而打包的人看不出来。这里走 `git ls-tree -r -z` + `git cat-file`，
  *   `.gitattributes` 一个字都不参与。（它本身还在跳过表里。）
  *
- * ★ **排序按 UTF-8 字节，不按 JS 的 `<`。** JS 的 `<` 比的是 **UTF-16 码元**，
- *   与 UTF-8 字节序在非 BMP 字符上给出**相反的答案** —— 于是同一棵树在两台机器上
+ * 排序按 UTF-8 字节，不按 JS 的 `<`。 JS 的 `<` 比的是 UTF-16 码元，
+ *   与 UTF-8 字节序在非 BMP 字符上给出相反的答案，于是同一棵树在两台机器上
  *   会算出两个摘要。全仓唯一正确的写法是 `Buffer.compare`。
  *
- * ★ **路径取自 `ls-tree`，不取自 `readdir`。** macOS 的文件系统会把文件名做 NFD
- *   归一化，`readdir` 拿到的字节与 git 里存的不一样 ⇒ 同一棵树在不同机器上摘
+ * 路径取自 `ls-tree`，不取自 `readdir`。 macOS 的文件系统会把文件名做 NFD
+ *   归一化，`readdir` 拿到的字节与 git 里存的不一样，同一棵树在不同机器上摘
  *   不同。`ls-tree` 给的是 git 里存的那串字节。
  *
  * 用法见 `packer/README.md`。
@@ -81,7 +81,7 @@ const { execFileSync } = require('child_process');
 /** 8 字节。带 `\x1a\r\n` 是为了让文本工具一眼看出"这是二进制"，且能被老式工具截断。 */
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
 /** ★ 当前格式版本是 **2**；`1` 一律拒（`0.y` 不考虑兼容性）。差在签名块：v1 只盖一个
- *  整棵树的摘要，v2 盖 `{id, 版本, digestSite, digestClient}` 四元组 —— 见 A.3。 */
+ *  整棵树的摘要，v2 盖 `{id, 版本, digestSite, digestClient}` 四元组，见 A.3。 */
 const FORMAT = 2;
 const HEADER_BYTES = 20;
 /** 摘要的字节数。sha256 ⇒ 32。 */
@@ -94,13 +94,13 @@ const SIG_ID_BYTES = 26;
 /** `id` 之后那一段的**定长部分**：`verlen u8 | digestSite 32 | digestClient 32`。 */
 const SIG_TAIL_BYTES = 1 + DIGEST_BYTES + DIGEST_BYTES;
 /**
- * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 **u8**。
+ * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 u8。
  *
- * ⇒ 版本号超过 255 字节的插件**签不了名**（它能打成一个不带签名的包，`build` 不拦
- *   它；`sign` 会明确拒绝）。★ 这不是理论问题：`PLUGIN_VERSION_RE` 的 major 段是
- *   `(?:0|[1-9][0-9]*)`，**没有上限**。
+ * 版本号超过 255 字节的插件签不了名（它能打成一个不带签名的包，`build` 不拦
+ *   它；`sign` 会明确拒绝）。这不是理论问题：`PLUGIN_VERSION_RE` 的 major 段是
+ *   `(?:0|[1-9][0-9]*)`，没有上限。
  */
-//   ⇒ 最短 97 + 26 + 65 = 188 字节，最长 188 + 255 = 443 字节。
+//   最短 97 + 26 + 65 = 188 字节，最长 188 + 255 = 443 字节。
 const SIG_MIN_BYTES = SIG_PREFIX_BYTES + SIG_ID_BYTES + SIG_TAIL_BYTES;
 const MAX_VERSION_BYTES = 255;
 const SIG_MAX_BYTES = SIG_MIN_BYTES + MAX_VERSION_BYTES;
@@ -108,10 +108,10 @@ const SIG_MAX_BYTES = SIG_MIN_BYTES + MAX_VERSION_BYTES;
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 /**
- * 拒绝的理由词表。**三份实现共用这一份**，字面相同 —— 于是"同一个坏包在三端
+ * 拒绝的理由词表。三份实现共用这一份，字面相同，于是"同一个坏包在三端
  * 得到同一个答案"变成一句可以断言的话，而不是一句期望。
  *
- * ★ 词表是规范的一部分（附录 A.4）：判**的次序**也是。一个包同时犯两条时，
+ * 词表是规范的一部分（附录 A.4）：判的次序也是。一个包同时犯两条时，
  *   先判哪条决定了拿到哪个词，所以次序写死在附录里，三端照抄。
  */
 const R = {
@@ -131,16 +131,16 @@ const CLIENT_ENTRY = 'client/index.js';
 const JOB_ENTRY = 'job/start.sh';
 
 /**
- * ★ 血统表：**在源码树里**、提交进版本控制（§2.5）。
+ * 血统表：在源码树里、提交进版本控制（§2.5）。
  *
- * 它在插件目录的根上，所以它**也是负载的一部分**（§3.6：负载 = 源码树 − 跳过集，
+ * 它在插件目录的根上，所以它也是负载的一部分（§3.6：负载 = 源码树 − 跳过集，
  * 而它不在跳过集里）。这是故意的，两个好处：
  *
- *   1. "这个 id 是谁签的"跟着包走 —— `sign` 不必知道源码树在哪就能核对血统；
+ *   1. "这个 id 是谁签的"跟着包走，`sign` 不必知道源码树在哪就能核对血统；
  *   2. 包自己带着它，于是 `verify` / `inspect` 能发现"表里说归 K1、
  *      而签这个包的是 K2"这种陈旧。
  *
- * 代价说在明处：**它是内容**，所以给它加一条记录就是在改内容 ⇒ §2.4 要你升版本号。
+ * 代价说在明处：它是内容，所以给它加一条记录就是在改内容，§2.4 要你升版本号。
  * 所以正常的次序是「init → keygen → 提交 → build」，而不是"发出去之后再补签"。
  */
 const LINEAGE_FILE = 'lineage.json';
@@ -159,12 +159,12 @@ const MAX_SEGMENT_BYTES = 255;
 
 // ── 负载的大小上限（§3.7） ──────────────────────────────────────────────────
 //
-// 书面判据在 `tools/plugin-limits.json` —— 打包器、客户端、守护进程三侧各持一份
-// 常量，那个文件是它们共同指向的那句话。★ 这个文件夹**要能单独下载来用**，所以
+// 书面判据在 `tools/plugin-limits.json`，打包器、客户端、守护进程三侧各持一份
+// 常量，那个文件是它们共同指向的那句话。这个文件夹要能单独下载来用，所以
 // 这里 import 不到仓库里的任何东西（与 COPY_SKIP 同一个处境）；那份代价由 CI 的
 // lint 与 `packer/test-packer.mjs` 一起付。
 //
-// ★ **为什么闸要装在这里**（§3.7 的由来）：上限若只有**站点**知道，作者就得等包
+// 为什么闸要装在这里（§3.7 的由来）：上限若只有站点知道，作者就得等包
 //   发出去、装不上、再回头问，才知道自己超了。而打包器是他手上唯一的工具，所以这里
 //   是唯一能"在他发布之前就说话"的地方。
 const MAX_FILES = 256;
@@ -178,31 +178,31 @@ const MAX_PACKAGE_BYTES = 2 << 20;
 const MAX_PATH_BYTES = MAX_DEPTH * MAX_SEGMENT_BYTES + (MAX_DEPTH - 1);
 
 /**
- * 信封在**最坏情况**下占多少字节（附录 A.1）。
+ * 信封在最坏情况下占多少字节（附录 A.1）。
  *
  *     包 = 头(20) ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名(0 或 188+verlen) ‖ 负载 Σsize
  *
- * ★ 路径那一项按**最长的一条**算（2047 字节），不按常见的十几字节算 —— 见
- *   MAX_TOTAL_BYTES 的注释。★ 签名那一项按 **`SIG_MAX_BYTES`（443）**算：签名块的
+ * 路径那一项按最长的一条算（2047 字节），不按常见的十几字节算，见
+ *   MAX_TOTAL_BYTES 的注释。签名那一项按 `SIG_MAX_BYTES`（443）算：签名块的
  *   长度随版本号变（`188 + verlen`），而"最坏情况"必须按最长的那个取。
  */
 const MAX_ENVELOPE_BYTES = 20 + SIG_MAX_BYTES + MAX_FILES * (2 + MAX_PATH_BYTES + 8 + 32);
 
 /**
- * 负载的**整体**上限。★ **它是推出来的，不是挑出来的**：包上限减掉信封的最坏
- * 情况，于是"按上限做出来的包一定装得进 `MAX_PACKAGE_BYTES`"是**算出来的**，
+ * 负载的整体上限。它是推出来的，不是挑出来的：包上限减掉信封的最坏
+ * 情况，于是"按上限做出来的包一定装得进 `MAX_PACKAGE_BYTES`"是算出来的，
  * 不是碰巧成立的。
  *
- * ★ 它必须是**推出来的**：若照直觉把它提到 `2 MiB − 64 KiB`，一棵 256 份、路径都
- *   顶到 2047 字节的树会打出约 **2.44 MiB** 的包（实测：负载只有 512 字节时包本身
- *   就有 532,515 字节），而**安装器会拒** —— 一句话说不清的"明明合规却装不上"。
+ * 它必须是推出来的：若照直觉把它提到 `2 MiB − 64 KiB`，一棵 256 份、路径都顶到
+ * 2047 字节的树会打出约 2.44 MiB 的包（实测：负载只有 512 字节时包本身就有
+ * 532,515 字节），而安装器会拒，成了一句说不清的"明明合规却装不上"。
  */
 const MAX_TOTAL_BYTES = MAX_PACKAGE_BYTES - MAX_ENVELOPE_BYTES;
 
 /**
  * 这一棵树的负载合不合 §3.7。返回 `null`（可以）或一句为什么不行。
  *
- * ★ 报错里要**给数字**：作者拿着"太大了"三个字没有任何下一步。
+ * 报错里要给数字：作者拿着"太大了"三个字没有任何下一步。
  */
 function payloadSizeProblem(files) {
   if (files.length > MAX_FILES) {
@@ -219,19 +219,19 @@ function payloadSizeProblem(files) {
   if (total > MAX_TOTAL_BYTES) {
     return `这些文件加起来 ${total} 字节（${humanBytes(total)}），`
       + `超过负载上限 ${MAX_TOTAL_BYTES} 字节（${humanBytes(MAX_TOTAL_BYTES)}）（§3.7）。\n`
-      + `  站点愿意收的**包**最大是 ${humanBytes(MAX_PACKAGE_BYTES)}，减去最坏情况下的`
+      + `  站点愿意收的包最大是 ${humanBytes(MAX_PACKAGE_BYTES)}，减去最坏情况下的`
       + `信封（记录表与签名块，${humanBytes(MAX_ENVELOPE_BYTES)}）就只剩这么多。\n`
-      + '  ★ 这不是本站的偏好：**任何**站点都收不下比这更大的负载。';
+      + '  这不是本站的偏好：任何站点都收不下比这更大的负载。';
   }
   return null;
 }
 
 /**
- * 跳过集合：**不进负载**的那几个名字。与客户端 `plugins/index.js` 的 `COPY_SKIP`
- * 和守护进程的 `PLUGIN_COPY_SKIP` 逐字相同 —— CI 有一条 lint 比对三份。
+ * 跳过集合：不进负载的那几个名字。与客户端 `plugins/index.js` 的 `COPY_SKIP`
+ * 和守护进程的 `PLUGIN_COPY_SKIP` 逐字相同，CI 有一条 lint 比对三份。
  *
- * ★ 它与 §3.3 里"禁止出现下列跳过集合里的任何一段"是**同一条规则的两种用法**：
- *   打包器**排除**它们，读方**拒绝**含它们的包。同一份名单，两个方向。
+ * 它与 §3.3 里"禁止出现下列跳过集合里的任何一段"是同一条规则的两种用法：
+ * 打包器排除它们，读方拒绝含它们的包。同一份名单，两个方向。
  */
 const COPY_SKIP = new Set(['.git', '.github', '.gitignore', '.gitattributes', 'node_modules']);
 
@@ -242,14 +242,14 @@ const WIN_BAD_CHARS = /[:*?"<>|]/;
 /**
  * 一条相对路径合不合 §3.3。返回 `null`（可以）或一句为什么不行。
  *
- * ★ 这一份与客户端的 `checkRelPath` 是**同一条规则的两份实现**，而它们是
- *   `tools/conformance/` 那份向量里的"坏包"用例钉住的：一个路径不合规的包，
- *   三端必须都拒、且给出同一个理由词。
+ * 这一份与客户端的 `checkRelPath` 是同一条规则的两份实现，而它们是
+ * `tools/conformance/` 那份向量里的"坏包"用例钉住的：一个路径不合规的包，
+ * 三端必须都拒、且给出同一个理由词。
  */
 function checkRelPath(rel, maxDepth) {
   if (typeof rel !== 'string' || !rel) return '路径是空的';
   if (rel.includes('\0')) return '路径里有 NUL';
-  if (rel.includes('\\')) return '路径里有反斜杠（不翻译成 / —— 一侧翻译另一侧不翻译就是歧义）';
+  if (rel.includes('\\')) return '路径里有反斜杠（不翻译成 /，一侧翻译另一侧不翻译就是歧义）';
   if (rel.startsWith('/')) return '路径是绝对的';
   if (rel.endsWith('/')) return '路径以 / 结尾';
   if (rel.includes('//')) return '路径里有连续的两个 /';
@@ -271,10 +271,10 @@ function checkRelPath(rel, maxDepth) {
 /**
  * ASCII-only 的小写折叠（§3.3 的"只差大小写"判据）。
  *
- * ★ **不能**用 `String.prototype.toLowerCase()`：它是**全 Unicode** 的，
- *   于是 `İ`（U+0130）与 `i` 会折叠到一起，`K`（U+212A KELVIN）与 `k` 也是。
- *   三个实现只要有一个用了它，就会出现"一边收、一边拒"，而这是一条**拒绝**规则。
- *   ASCII-only 的折叠在三种语言里逐字节相同，没有区域设置、没有版本差异。
+ * 不能用 `String.prototype.toLowerCase()`：它是全 Unicode 的，于是 `İ`（U+0130）
+ * 与 `i` 会折叠到一起，`K`（U+212A KELVIN）与 `k` 也是。三个实现只要有一个用了
+ * 它，就会出现"一边收、一边拒"，而这是一条拒绝规则。ASCII-only 的折叠在三种语言
+ * 里逐字节相同，没有区域设置、没有版本差异。
  */
 function foldAscii(s) {
   let out = '';
@@ -292,15 +292,14 @@ function foldAscii(s) {
 /**
  * 内容摘要 = sha256( 按路径排序后，逐份拼接「路径UTF-8 ‖ 0x00 ‖ sha256(内容) 小写hex ‖ 0x0A」)
  *
- * ★ 排序按 **UTF-8 字节**（见文件头那条）。★ **不含**容器字节、信封头、时间戳、
- *   打包器版本、目录名 —— 于是"同一棵树谁在哪台机器上打包都是同一个摘要"。
+ * 排序按 UTF-8 字节（见文件头那条）。不含容器字节、信封头、时间戳、打包器版本、
+ * 目录名，于是"同一棵树谁在哪台机器上打包都是同一个摘要"。
  */
 function contentDigest(files) {
-  // ★ **在这里排序**，不是在调用方。记录表里的次序是**别人给的**：
-  //   一个手写的包完全可以把它们按别的次序排。摘要要是跟着记录表的次序走，
-  //   同一个包就会算出两个摘要 —— 而签名盖的是摘要，于是它**先**以
-  //   "签名验不过"的形式响，排查的人会去查钥匙。（漏了这一行，同一个包就会算出
-  //   两个摘要 —— 用例当场抓住。）
+  // 在这里排序，不是在调用方。记录表里的次序是别人给的：一个手写的包完全可以
+  // 把它们按别的次序排。摘要要是跟着记录表的次序走，同一个包就会算出两个摘要，
+  // 而签名盖的是摘要，于是它先以"签名验不过"的形式响，排查的人会去查钥匙。
+  // （漏了这一行，同一个包就会算出两个摘要，用例当场抓住。）
   const sorted = sortByPathBytes(files);
   const h = crypto.createHash('sha256');
   for (const f of sorted) {
@@ -312,7 +311,7 @@ function contentDigest(files) {
   return h.digest('hex');
 }
 
-/** §3.4 的排序判据。★ 必须是这一个，不是 `a < b`。 */
+/** §3.4 的排序判据。必须是这一个，不是 `a < b`。 */
 function sortByPathBytes(files) {
   return files.slice().sort((a, b) => Buffer.compare(
     Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
@@ -323,37 +322,37 @@ function sha256(buf) {
 }
 
 // ==============================================================================
-//  §3.1 / §4.2：把一个负载**按侧**分成两半
+//  §3.1 / §4.2：把一个负载按侧分成两半
 // ==============================================================================
 //
 //   客户端侧 = `client/**` + `plugin.json` + `lineage.json`
 //   站点侧   = 其余全部（也就是"原树 − `client/**`"，两个顶层元数据文件同时属于两侧）
 //
-// ★ **只有这一条规则**，而且它是**按顶层前缀**判的，不是按"名字里有没有 client"：
-//   `clientfoo/x` 与 `a/client/x` 都不算客户端侧。路径已经在 §3.3 那关排除了 `..`
-//   与空段，所以前缀比较在这里是安全的。
+// 只有这一条规则，而且它是按顶层前缀判的，不是按"名字里有没有 client"：
+// `clientfoo/x` 与 `a/client/x` 都不算客户端侧。路径已经在 §3.3 那关排除了 `..`
+// 与空段，所以前缀比较在这里是安全的。
 //
-// ★ `plugin.json` 与 `lineage.json` **两侧都在**（逐字节相同，各自进两次摘要）：
-//   客户端要读清单才知道自己装的是什么，而血统表跟着包走（§2.5）。
-//   切清单那一刀在 2026-10-07 被否掉了，理由写在计划里（§3.6 那条"负载 = 源码树"
-//   很值钱，每加一个机械变换规范就烂一格）。
+// `plugin.json` 与 `lineage.json` 两侧都在（逐字节相同，各自进两次摘要）：客户端
+// 要读清单才知道自己装的是什么，而血统表跟着包走（§2.5）。切清单那一刀在
+// 2026-10-07 被否掉了，理由写在计划里（§3.6 那条"负载 = 源码树"很值钱，每加一个
+// 机械变换规范就烂一格）。
 //
-// ★ **两侧的摘要是同一个 §3.4 公式作用在两个子集上**，不是另立一套算法。于是
-//   "同一份内容、两个包"这件事成立：站点把客户端侧那半单独打一个包发出去，那个包
-//   的 §3.4 摘要**逐字等于**作者原件里那一半 —— 作者签名里的 `digestClient` 照样
-//   说得通（§4.2 那条「签名不覆盖信封」在这里第一次真的被用上）。
+// 两侧的摘要是同一个 §3.4 公式作用在两个子集上，不是另立一套算法。于是"同一份
+// 内容、两个包"这件事成立：站点把客户端侧那半单独打一个包发出去，那个包的 §3.4
+// 摘要逐字等于作者原件里那一半，作者签名里的 `digestClient` 照样说得通（§4.2 那条
+// 「签名不覆盖信封」在这里第一次真的被用上）。
 
 const CLIENT_DIR = 'client/';
 
-/** 这一条路径属不属于**客户端侧**。 */
+/** 这一条路径属不属于客户端侧。 */
 function isClientSidePath(p) {
   return p.startsWith(CLIENT_DIR) || p === MANIFEST || p === LINEAGE_FILE;
 }
 
 /**
- * 把一份负载分成两半。返回 `{site, client}`，两侧都**保留原来的次序**。
+ * 把一份负载分成两半。返回 `{site, client}`，两侧都保留原来的次序。
  *
- * ★ 两侧**会重叠**（两个顶层元数据文件各进两次），这是定义的一部分，不是 bug。
+ * 两侧会重叠（两个顶层元数据文件各进两次），这是定义的一部分，不是 bug。
  */
 function sidesOf(files) {
   return {
@@ -365,8 +364,8 @@ function sidesOf(files) {
 /**
  * 两侧的内容摘要。返回 `{site, client}`，两个都是 64 位小写十六进制。
  *
- * ★ 空的那一侧摘要 = `sha256("")` = `e3b0c442…`，**有定义**（§3.1 允许某一侧为空）。
- *   给它一个 `null` 的话，"这一侧是空的"与"这一侧不知道"就分不开了。
+ * 空的那一侧摘要 = `sha256("")` = `e3b0c442…`，有定义（§3.1 允许某一侧为空）。
+ * 给它一个 `null` 的话，"这一侧是空的"与"这一侧不知道"就分不开了。
  */
 function sideDigests(files) {
   const s = sidesOf(files);
@@ -388,8 +387,8 @@ function ed25519PublicKey(raw32) {
 }
 
 /**
- * 验一段 Ed25519 签名。**签名的是内容摘要那 32 个字节的原值**，不是它的十六进制
- * 写法（附录 A.3 写死了是哪一个 —— 两种写法只能选一种）。
+ * 验一段 Ed25519 签名。签名的是内容摘要那 32 个字节的原值，不是它的十六进制写法
+ * （附录 A.3 写死了是哪一个，两种写法只能选一种）。
  */
 function verifyEd25519(raw32, msg, sig) {
   try {
@@ -405,16 +404,16 @@ function fingerprint(raw32) {
 }
 
 /**
- * 一块签名块的**内容** → 字节（附录 A.3）。
+ * 一块签名块的内容 → 字节（附录 A.3）。
  *
  * ```
  * alg u8(=1) ｜ pubkey 32 ｜ sig 64 ｜ id 26(ASCII) ｜ verlen u8 ｜ version ｜
  * digestSite 32 ｜ digestClient 32          长度 = 188 + verlen
  * ```
  *
- * ★ **版本号放不进 256 字节就签不了名**（`verlen` 是一个 u8）。这里**抛**，因为
- *   调用方全都是"作者正在打包"这条路，而它要的是一句能照着改的错话，不是一次
- *   静默降级成一个空签名块 —— 后者会让一个签了名的包看起来"作者选择不签名"。
+ * 版本号放不进 256 字节就签不了名（`verlen` 是一个 u8）。这里抛，因为调用方全都是
+ * "作者正在打包"这条路，而它要的是一句能照着改的错话，不是一次静默降级成一个空
+ * 签名块。后者会让一个签了名的包看起来像"作者选择不签名"。
  */
 function buildSigBlock(o) {
   const idb = Buffer.from(o.id, 'ascii');
@@ -425,7 +424,7 @@ function buildSigBlock(o) {
   }
   if (ver.length > MAX_VERSION_BYTES) {
     throw new Error(`版本号 ${JSON.stringify(o.version)} 有 ${ver.length} 字节，`
-      + `超过 ${MAX_VERSION_BYTES} —— 它放不进签名块（A.3：那里给版本号一个字节的长度）。`);
+      + `超过 ${MAX_VERSION_BYTES}，放不进签名块（A.3：那里给版本号一个字节的长度）。`);
   }
   const out = Buffer.alloc(SIG_MIN_BYTES + ver.length);
   out[0] = o.alg;
@@ -444,11 +443,10 @@ function buildSigBlock(o) {
  *
  *     id(26) ‖ 0x00 ‖ version(verlen) ‖ 0x00 ‖ digestSite(32 原值) ‖ digestClient(32 原值)
  *
- * ★ 两个摘要是**原值**，不是它们的十六进制写法 —— 与 v1 那条"签的是摘要的 32 个
- *   字节"一脉相承，两种写法只能选一种。
- * ★ 两个 `0x00` 是**分隔符**：没有它们，`id` 与 `version` 的边界就成了"前 26 个
- *   字节"，而一个改包的人可以把 id 的最后几个字节挪进 version 里换出另一对
- *   `(id, 版本)` —— 那种包在两端都解析得动，只有分隔符挡得住。
+ * 两个摘要是原值，不是它们的十六进制写法，与 v1 那条"签的是摘要的 32 个字节"
+ * 一脉相承，两种写法只能选一种。两个 `0x00` 是分隔符：没有它们，`id` 与 `version`
+ * 的边界就成了"前 26 个字节"，而一个改包的人可以把 id 的最后几个字节挪进 version
+ * 里换出另一对 `(id, 版本)`。那种包在两端都解析得动，只有分隔符挡得住。
  */
 function signedMessage(o) {
   const ver = Buffer.from(o.version, 'utf8');
@@ -462,8 +460,8 @@ function signedMessage(o) {
 /**
  * 从一块签名块里取出那七个字段；不合形状时返回 `null`。
  *
- * ★ "不合形状"包括三种：长度不等于 `188 + verlen`、`alg` 认不得、`id`/`version`
- *   那两段不是合法的 ASCII / UTF-8。★ 后两条用**逐字节回比**判，与路径那一条
+ * "不合形状"包括三种：长度不等于 `188 + verlen`、`alg` 认不得、`id`/`version`
+ *   那两段不是合法的 ASCII / UTF-8。后两条用逐字节回比判，与路径那一条
  *   同源：`toString` 会把坏字节悄悄换成 U+FFFD，于是两端算的不是同一份东西。
  */
 function parseSigBlock(buf) {
@@ -501,7 +499,7 @@ function parseSigBlock(buf) {
  *   头 20B：magic(8) | format(u32) | file_count(u32) | sig_len(u32)
  *   记录表：逐份 pathlen(u16) | path | size(u64) | sha256(32)
  *   签名块：sig_len 字节（0 就是没有）
- *   负载：  按**记录的同一顺序**逐份拼接
+ *   负载：  按记录的同一顺序逐份拼接
  *
  * 所以 `20 + Σ(2+路径长+8+32) + sig_len + Σsize == 文件长度`，一个字节不多不少。
  */
@@ -532,13 +530,13 @@ function buildPackage(files, sigBlock) {
 }
 
 /**
- * 严格解析一个包。**按附录 A.4 的次序判**，返回
+ * 严格解析一个包。按附录 A.4 的次序判，返回
  * `{ok:true, format, files, sig, digest, payloadOf}` 或 `{ok:false, code, why}`。
  *
- * ★ 这个次序是规范的一部分：一个包同时犯两条时，先判哪条决定了拿到哪个理由词。
+ * 这个次序是规范的一部分：一个包同时犯两条时，先判哪条决定了拿到哪个理由词。
  *   三份实现照抄同一次序，"同一个坏包在三端得到同一个答案"才是可以断言的。
  *
- * ★ **尾随字节、空洞、多余记录一律拒绝** —— 信封不进摘要，所以信封里任何一个
+ * 尾随字节、空洞、多余记录一律拒绝，信封不进摘要，所以信封里任何一个
  *   "被忽略的字节"都是无认证的夹带面（§3.6）。
  */
 function parsePackage(buf) {
@@ -566,7 +564,7 @@ function parsePackage(buf) {
     const raw = buf.subarray(off + 2, off + 2 + pathlen);
     const p = raw.toString('utf8');
     // 路径必须是合法的 UTF-8：不是的话 `toString` 会把坏字节换成 U+FFFD，而那是
-    // **悄悄改了一个字节** —— 摘要按它算，于是两边算的就不是同一份东西。
+    // 悄悄改了一个字节，摘要按它算，于是两边算的就不是同一份东西。
     if (!Buffer.from(p, 'utf8').equals(raw)) {
       return bad(R.PATH, `第 ${i} 条记录的路径不是合法的 UTF-8`);
     }
@@ -579,7 +577,7 @@ function parsePackage(buf) {
     off = end;
   }
 
-  // 5 长度必须**精确**
+  // 5 长度必须精确
   let sum = 0n;
   for (const f of files) {
     if (f.size > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -591,7 +589,7 @@ function parsePackage(buf) {
   if (want !== BigInt(buf.length)) {
     return bad(R.LENGTH,
       `头部+记录表+签名块+Σsize = ${want} 字节，而文件是 ${buf.length} 字节`
-      + (want < BigInt(buf.length) ? '（多出来的字节没有任何声明 —— 信封里不许有白送的字节）' : '（负载被截断了）'));
+      + (want < BigInt(buf.length) ? '（多出来的字节没有任何声明，信封里不许有白送的字节）' : '（负载被截断了）'));
   }
 
   // 6 路径规则
@@ -606,8 +604,8 @@ function parsePackage(buf) {
     if (seen.has(k)) {
       const prev = seen.get(k);
       return bad(R.DUPLICATE, prev === f.path
-        ? `${JSON.stringify(f.path)} 出现了两次 —— 解出来的树是歧义的`
-        : `${JSON.stringify(prev)} 与 ${JSON.stringify(f.path)} 只差大小写 —— 落盘时会互相覆盖，`
+        ? `${JSON.stringify(f.path)} 出现了两次，解出来的树是歧义的`
+        : `${JSON.stringify(prev)} 与 ${JSON.stringify(f.path)} 只差大小写，落盘时会互相覆盖，`
           + '而摘要按落盘之后算，于是"同意的"与"装上的"可以不是同一棵树');
     }
     seen.set(k, f.path);
@@ -625,7 +623,7 @@ function parsePackage(buf) {
     pay += n;
   }
 
-  // 9 负载里必须有 plugin.json，且是合法的 JSON **对象**
+  // 9 负载里必须有 plugin.json，且是合法的 JSON 对象
   const mf = files.find((f) => f.path === MANIFEST);
   if (!mf) return bad(R.MANIFEST, `负载里没有 ${MANIFEST}`);
   let manifest;
@@ -638,11 +636,11 @@ function parsePackage(buf) {
     return bad(R.MANIFEST, `${MANIFEST} 的最外层不是一个 JSON 对象`);
   }
 
-  // 10 有签名块。**四小步，次序是规范的一部分**（附录 A.4）：
+  // 10 有签名块。四小步，次序是规范的一部分（附录 A.4）：
   //    ① 形状 ② 身份（块里的 id/版本 vs 清单）③ 内容（重算的侧摘要 vs 块里那两个）
   //    ④ 密码学（验签）。①③④ 报 `signature`，②报 `manifest`。
   //
-  //    ★ 为什么 ② 在 ③ 前面：`id`/`version` 是"这个包**是**什么"，摘要是"它**装着**
+  //    为什么 ② 在 ③ 前面：`id`/`version` 是"这个包是什么"，摘要是"它装着
   //      什么"。一个自己都没说清是什么的包，先说"哪一份文件对不上"是把人往错的方向带。
   let sig = null;
   if (sigLen !== 0) {
@@ -653,8 +651,8 @@ function parsePackage(buf) {
         `签名块 ${sigLen} 字节，不是一个合法的 Ed25519 签名块`
         + `（本格式是 ${SIG_MIN_BYTES}+版本号 字节、alg=1）`);
     }
-    // ② 身份：块里的 id/版本必须与清单**逐字**相同。
-    //    ★ 逐字节比，不比字符串 —— 版本那一段在块里是字节，而 `toString('utf8')`
+    // ② 身份：块里的 id/版本必须与清单逐字相同。
+    //    逐字节比，不比字符串，版本那一段在块里是字节，而 `toString('utf8')`
     //      会把坏字节悄悄换成 U+FFFD（那条坑与路径那一条是同一个）。
     if (typeof manifest.id !== 'string' || typeof manifest.version !== 'string'
         || !Buffer.from(manifest.id, 'utf8').equals(Buffer.from(parsed.id, 'ascii'))
@@ -662,36 +660,36 @@ function parsePackage(buf) {
       return bad(R.MANIFEST,
         `签名块说这一份是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}，`
         + `而负载里那份 ${MANIFEST} 说是 ${JSON.stringify(manifest.id)}@${JSON.stringify(manifest.version)}`
-        + ' —— 同一个包里两处说了两个身份');
+        + '，同一个包里两处说了两个身份');
     }
-    // ③ 内容：**这个包里在的那几侧**，从它们的字节重算 §3.4 摘要，与块里那两个比。
-    //    ★ 客户端侧**永远在**（`plugin.json` 是它的一员，而第 9 步保证它存在），
-    //      所以那一边永远核。站点侧在不在，由"包里有没有一条**只属于站点侧**的路径"
-    //      决定 —— 这正是"同一个内容、两个包"（§4.2）那一格：只发客户端侧的那个包
+    // ③ 内容：这个包里在的那几侧，从它们的字节重算 §3.4 摘要，与块里那两个比。
+    //    客户端侧永远在（`plugin.json` 是它的一员，而第 9 步保证它存在），
+    //      所以那一边永远核。站点侧在不在，由"包里有没有一条只属于站点侧的路径"
+    //      决定，这正是"同一个内容、两个包"（§4.2）那一格：只发客户端侧的那个包
     //      里没有 `job/**`，于是它核不了、也不必核 `digestSite`。
     const sd = sideDigests(files);
     const sitePresent = files.some((f) => !isClientSidePath(f.path));
     if (sd.client !== parsed.digestClient) {
       return bad(R.SIGNATURE,
         `这一份的客户端侧算出来的内容摘要是 ${sd.client}，而签名块里写的是 `
-        + `${parsed.digestClient} —— 签名盖的不是这些字节`);
+        + `${parsed.digestClient}，签名盖的不是这些字节`);
     }
     if (sitePresent && sd.site !== parsed.digestSite) {
       return bad(R.SIGNATURE,
         `这一份的站点侧算出来的内容摘要是 ${sd.site}，而签名块里写的是 `
-        + `${parsed.digestSite} —— 签名盖的不是这些字节`);
+        + `${parsed.digestSite}，签名盖的不是这些字节`);
     }
-    // ④ 验签：盖的是**四元组**那串字节（`signedMessage`），不是某一个摘要。
+    // ④ 验签：盖的是四元组那串字节（`signedMessage`），不是某一个摘要。
     if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
       return bad(R.SIGNATURE,
-        `签名验不过 —— 它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
+        `签名验不过，它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
         + ' 这四个东西（A.3），而这一块盖的不是它。'
         + `签的人是 ${fingerprint(parsed.pubkey)}`);
     }
     sig = {
       alg: parsed.alg,
       pubkey: Buffer.from(parsed.pubkey),
-      // ★ 那 64 个字节本身也要带出来：调用方要把它**逐字**存进记录表
+      // 那 64 个字节本身也要带出来：调用方要把它逐字存进记录表
       //   （`envelope.signature`），而"重新验一次"要的正是原件。
       signature: Buffer.from(parsed.sig),
       id: parsed.id,
@@ -735,7 +733,7 @@ function repoRootOf(dir) {
   try {
     return git(dir, ['rev-parse', '--show-toplevel']).toString('utf8').trim();
   } catch {
-    throw new Error(`${dir} 不在一个 git 仓库里 —— 打包的输入必须是一个提交（§3.5）`);
+    throw new Error(`${dir} 不在一个 git 仓库里，打包的输入必须是一个提交（§3.5）`);
   }
 }
 
@@ -748,7 +746,7 @@ function relToRepo(repo, dir) {
 }
 
 /**
- * ★ §3.5：工作树必须干净。**只判这个插件目录那一份** —— 仓库别处脏不该拦住
+ * §3.5：工作树必须干净。只判这个插件目录那一份，仓库别处脏不该拦住
  *   你打包（你改的可能是客户端），而这一份脏了就说明"提交里的那棵树"与
  *   "你看到的这棵树"不是一回事，那正是 §3.5 要拦的。
  */
@@ -759,16 +757,16 @@ function ensureClean(repo, rel) {
     throw new Error(
       `${rel || '仓库根'} 相对工作树不干净：\n`
       + out.split('\n').map((l) => `    ${l}`).join('\n')
-      + '\n  §3.5 要求打包的输入是一个**提交**，不是工作树。先提交（或 stash）再来。');
+      + '\n  §3.5 要求打包的输入是一个提交，不是工作树。先提交（或 stash）再来。');
   }
 }
 
 /**
  * 一个提交里某个子目录的文件清单：`[{pathBytes, path, mode, oid}]`。
  *
- * ★ `-z` 不能省：路径里可以有换行与引号，不带 `-z` 时 git 会**加引号并转义**，
+ * `-z` 不能省：路径里可以有换行与引号，不带 `-z` 时 git 会加引号并转义，
  *   于是拿到的路径与真实字节不是一回事。
- * ★ `toString('latin1')` 是为了**逐字节**切分（`\0` 与 `\t` 都是单字节），
+ * `toString('latin1')` 是为了逐字节切分（`\0` 与 `\t` 都是单字节），
  *   切完再按 UTF-8 解码每一步。用 `'utf8'` 切会在多字节字符上错位。
  */
 function lsTree(repo, commit, subdir) {
@@ -815,18 +813,18 @@ function catBlobs(repo, oids) {
 }
 
 /**
- * 读出一个提交里那个插件目录的**负载**（§3.6：负载逐字节等于源码树）。
+ * 读出一个提交里那个插件目录的负载（§3.6：负载逐字节等于源码树）。
  *
  * 返回 `{files, skipped, notes}`：
- *   `skipped` —— 被跳过表排除的条目（**要说出来**，不能静默少东西）
- *   `notes`   —— 归一化之类"确实丢了信息"的事（权限位）
+ *   `skipped`，被跳过表排除的条目（要说出来，不能静默少东西）
+ *   `notes`，归一化之类"确实丢了信息"的事（权限位）
  *
- * ★ **负载的字节取自 git 里的 blob，不是 checkout 之后的字节。** 两者在
+ * 负载的字节取自 git 里的 blob，不是 checkout 之后的字节。 两者在
  *   `text=auto` 之类的属性下可以不同（检出时行尾被改过），而 §3.4 要的是
- *   "谁在哪台机器上打包都是同一个摘要" —— 只有 blob 满足这一条。
+ *   "谁在哪台机器上打包都是同一个摘要"，只有 blob 满足这一条。
  *
- * ★ **空目录不可能出现**：git 根本不存它。§3.2 那句"禁止空目录 —— 它没有
- *   表达形式"在这里是**结构性**的，不是纪律性的。
+ * 空目录不可能出现：git 根本不存它。§3.2 那句"禁止空目录，它没有
+ *   表达形式"在这里是结构性的，不是纪律性的。
  */
 function readTree(repo, commit, subdir) {
   const entries = lsTree(repo, commit, subdir);
@@ -835,12 +833,12 @@ function readTree(repo, commit, subdir) {
   const keep = [];
   for (const e of entries) {
     if (e.mode === '120000') {
-      throw new Error(`${JSON.stringify(e.path)} 是一个符号链接（mode 120000）——`
+      throw new Error(`${JSON.stringify(e.path)} 是一个符号链接（mode 120000），`
         + ' 包里的负载只允许普通文件（§3.2），而"它是指向 x 的链接"与"它的内容恰好是 x"'
         + '是两份行为完全不同的东西。请把它换成一份普通文件。');
     }
     if (e.mode === '160000') {
-      throw new Error(`${JSON.stringify(e.path)} 是一个 gitlink（mode 160000）—— 子模块进不了负载，`
+      throw new Error(`${JSON.stringify(e.path)} 是一个 gitlink（mode 160000），子模块进不了负载，`
         + ' 请把那份代码直接放进这棵树。');
     }
     if (e.type !== 'blob') {
@@ -851,33 +849,33 @@ function readTree(repo, commit, subdir) {
       skipped.push(e.path);
       continue;
     }
-    // ★ 输出不能是自己输入的一部分：作者把上一次的 `.splug` 落在插件树里再打包，
-    //   它会被当成普通文件进负载 ⇒ 摘要每次都不一样，而"同一台机器打两次得到
-    //   两个包"是第一号现场。这里排掉它，并且**说出来**。
+    // 输出不能是自己输入的一部分：作者把上一次的 `.splug` 落在插件树里再打包，
+    //   它会被当成普通文件进负载，摘要每次都不一样，而"同一台机器打两次得到
+    //   两个包"是第一号现场。这里排掉它，并且说出来。
     if (e.pathBytes.toString('latin1').endsWith('.splug')) {
       skipped.push(e.path);
       continue;
     }
     if (!Buffer.from(e.path, 'utf8').equals(e.pathBytes)) {
-      throw new Error(`${JSON.stringify(e.pathBytes.toString('latin1'))} 不是合法的 UTF-8 路径 ——`
+      throw new Error(`${JSON.stringify(e.pathBytes.toString('latin1'))} 不是合法的 UTF-8 路径，`
         + ' 包里的路径必须是 UTF-8 字节（附录 A.2）');
     }
     const why = checkRelPath(e.path, MAX_DEPTH);
     if (why) throw new Error(`${JSON.stringify(e.path)}：${why}`);
     if (e.mode === '100755') {
-      notes.push(`${e.path} 在版本控制里是 100755；包里的权限位由格式定死 0644（§3.2），这一位**丢掉了**`);
+      notes.push(`${e.path} 在版本控制里是 100755；包里的权限位由格式定死 0644（§3.2），这一位丢掉了`);
     } else if (e.mode !== '100644') {
       throw new Error(`${JSON.stringify(e.path)} 的 mode 是 ${e.mode}，本实现只认识 100644 / 100755`);
     }
     keep.push(e);
   }
 
-  // ★ 重复路径的判据是 ASCII-only 折叠（见 foldAscii 那段注释）。
+  // 重复路径的判据是 ASCII-only 折叠（见 foldAscii 那段注释）。
   const seen = new Map();
   for (const e of keep) {
     const k = foldAscii(e.path);
     if (seen.has(k)) {
-      throw new Error(`源码树里 ${JSON.stringify(seen.get(k))} 与 ${JSON.stringify(e.path)} 只差大小写 ——`
+      throw new Error(`源码树里 ${JSON.stringify(seen.get(k))} 与 ${JSON.stringify(e.path)} 只差大小写，`
         + ' 它们在 macOS / Windows 的磁盘上会互相覆盖，而摘要按磁盘算（§3.3）。');
     }
     seen.set(k, e.path);
@@ -905,20 +903,20 @@ const PLUGIN_VERSION_RE = /^(?:0|[1-9][0-9]*)\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9
 const FRAMEWORK_VERSION_RE = /^(?:0|[1-9][0-9]*)\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 
 /**
- * `engines.slurmate` 的**形状**判定：没有形状问题返回 `null`，否则一句话。
+ * `engines.slurmate` 的形状判定：没有形状问题返回 `null`，否则一句话。
  *
- * ★ 打包器**只判形状，不判满足**。满足性取决于"目标站点是哪一版"，而打包时那个
- *   站点还不存在 —— 同一个包装到 0.6 的站点上是好的，装到 0.4 上就装不上。
- *   所以这个函数**没有 host 参数**，也永远不会说"不满足"。
+ * 打包器只判形状，不判满足。满足性取决于"目标站点是哪一版"，而打包时那个
+ *   站点还不存在，同一个包装到 0.6 的站点上是好的，装到 0.4 上就装不上。
+ *   所以这个函数没有 host 参数，也永远不会说"不满足"。
  *
- * ★ 但形状**必须**在这里判，因为读不懂的范围串（`^0.5`、`>=0.5.0`）是**规范**的
+ * 但形状必须在这里判，因为读不懂的范围串（`^0.5`、`>=0.5.0`）是规范的
  *   拒绝（§2.3.1 明令不支持 `^` / `~` / `||` / 逗号 / 三段）。不拦的话，作者
- *   一路绿灯把包发出去，而拒绝要等到**别人的站点**上才出现，还长得像一句
- *   "本站版本低" —— 一个形状错误被说成一个版本问题。
+ *   一路绿灯把包发出去，而拒绝要等到别人的站点上才出现，还长得像一句
+ *   "本站版本低"，一个形状错误被说成一个版本问题。
  *
- * ★ 判据必须与另外两端**逐条一致**（客户端 `enginesProblem`、守护进程
+ * 判据必须与另外两端逐条一致（客户端 `enginesProblem`、守护进程
  *   `engines_problem`），共用 tools/version-fixtures.json 的 `engines` 段。
- *   各写各的下一次就会漂成"同一个包，打包器说行、客户端说不行" —— 那正是
+ *   各写各的下一次就会漂成"同一个包，打包器说行、客户端说不行"，那正是
  *   规范 §0.2 承诺"三端同一个答案"要防的事。
  */
 function enginesShapeProblem(manifest) {
@@ -962,11 +960,11 @@ function mintUlid(now) {
 }
 
 /**
- * ★ **插入**写回 `"id"`，不是解析再序列化（§2.1）。
+ * 插入写回 `"id"`，不是解析再序列化（§2.1）。
  *
  * `JSON.parse` 再 `JSON.stringify` 会重排键序、把 `\u` 转义还原成字符、
- * 把 `1e3` 写成 `1000` —— 于是"只改了一个键"对任何一份真实的清单都是假的。
- * 这里只做一次文本插入，缩进取自**文件里已有的**那一行。
+ * 把 `1e3` 写成 `1000`，于是"只改了一个键"对任何一份真实的清单都是假的。
+ * 这里只做一次文本插入，缩进取自文件里已有的那一行。
  */
 function insertId(text, id) {
   const brace = text.indexOf('{');
@@ -975,7 +973,7 @@ function insertId(text, id) {
   const nl = text.indexOf('\n', brace);
   const lf = nl < 0 ? '\n' : (text[nl - 1] === '\r' ? '\r\n' : '\n');
 
-  // 一行一个键（真实的清单都是这样）。插在第一行的**行首**，缩进取自那一行。
+  // 一行一个键（真实的清单都是这样）。插在第一行的行首，缩进取自那一行。
   const firstNl = rest.indexOf('\n');
   const close = rest.indexOf('}');
   const multi = firstNl >= 0 && (close < 0 || firstNl < close);
@@ -992,10 +990,10 @@ function insertId(text, id) {
   const at = brace + 1 + m.index + 1 + indent.length;    // 第一行的**行首**
   const head = text.slice(0, at);
   const tail = text.slice(at);
-  // ★ 逗号**总是**要加：`id` 插在第一个键**之前**，所以它永远不是最后一个键
+  // 逗号总是要加：`id` 插在第一个键之前，所以它永远不是最后一个键
   //   （上面那个 `multi` 判据已经保证这棵树里至少有一个键）。判据若换成
   //   "看 tail 里有没有逗号"，单键的清单（`{ "a": 1 }` 多行写法）就会漏掉
-  //   逗号，产出一份**不合法的 JSON**。这正是"不要手搓字符串拼接"的那类教训：
+  //   逗号，产出一份不合法的 JSON。这正是"不要手搓字符串拼接"的那类教训：
   //   能靠结构推出来的东西，别去正则里猜。
   return `${head}"id": ${JSON.stringify(id)},${lf}${indent}${tail}`;
 }
@@ -1025,20 +1023,20 @@ function readManifest(file) {
 //
 //  三张表，三种生命周期，分开放：
 //
-//    血统表   id → 签名者公钥        在**源码树里**、提交进 git（§2.5）
-//    发布表   (id, 版本) → 内容摘要   作者机器上，**不进树**（每打一次就变）
-//    私钥     ——                     作者机器上，**不进树**（§4.1）
+//    血统表   id → 签名者公钥        在源码树里、提交进 git（§2.5）
+//    发布表   (id, 版本) → 内容摘要   作者机器上，不进树（每打一次就变）
+//    私钥     作者机器上，不进树（§4.1）
 //
-//  ★ 血统表在树里，是因为 clone 要带着它走 —— 那正是 §2.5 说的"分支判定必须
+//  血统表在树里，是因为 clone 要带着它走，那正是 §2.5 说的"分支判定必须
 //    本地可判"。发布表与私钥不能进树，因为进树就会把树弄脏，而 §3.5 拒绝脏树。
 // ==============================================================================
 
 /**
  * 打包器在这台机器上的家：`<home>/keys/<id>.pem` 与 `<home>/releases.json`。
  *
- * 默认 `~/.config/slurmate/packer`。`--home` 或 `$SLURMATE_PACKER_HOME` 可以换掉 ——
- * ★ **用例与 CI 必须换掉**：不换的话跑一次测试就往作者的家目录里写字，而且第二次
- *   跑会因为发布表里已经有那一版而**拒绝打包**（那正是它该做的事，但在测试里是噪音）。
+ * 默认 `~/.config/slurmate/packer`。`--home` 或 `$SLURMATE_PACKER_HOME` 可以换掉，
+ * 用例与 CI 必须换掉：不换的话跑一次测试就往作者的家目录里写字，而且第二次
+ *   跑会因为发布表里已经有那一版而拒绝打包（那正是它该做的事，但在测试里是噪音）。
  */
 function packerHome(opt) {
   if (opt && opt.home) return path.resolve(opt.home);
@@ -1076,7 +1074,7 @@ function loadKey(home, id) {
   try { return { file, key: crypto.createPrivateKey(pem) }; }
   catch (e) {
     throw new Error(`${file} 读不成一把私钥：${e.message}\n`
-      + '  它是打包器写的 PKCS#8 PEM。换机器的方式是**整份复制这个文件**（§4.1）。');
+      + '  它是打包器写的 PKCS#8 PEM。换机器的方式是整份复制这个文件（§4.1）。');
   }
 }
 
@@ -1094,7 +1092,7 @@ function readLineage(dir) {
   try { obj = JSON.parse(text); }
   catch (e) {
     throw new Error(`${file} 不是合法的 JSON：${e.message}\n`
-      + '  这份表是打包器写的，**别手改**。真弄坏了就删掉它，下一次 init 会停下来问。');
+      + '  这份表是打包器写的，别手改。真弄坏了就删掉它，下一次 init 会停下来问。');
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)
       || !obj.lineage || typeof obj.lineage !== 'object' || Array.isArray(obj.lineage)) {
@@ -1116,13 +1114,13 @@ function writeLineage(dir, lineage) {
 }
 
 /**
- * ★ §2.5 的那次"停下来问"。**这是本文件里最要紧的一段话。**
+ * §2.5 的那次"停下来问"。这是本文件里最要紧的一段话。
  *
- * 规范：一棵树带着 id、而血统表不认识它时，打包器**禁止**静默换 id、也**禁止**
- * 静默沿用 id，**必须**停下来把两种可能连同各自的后果说清，由作者决定。
+ * 规范：一棵树带着 id、而血统表不认识它时，打包器禁止静默换 id、也禁止
+ * 静默沿用 id，必须停下来把两种可能连同各自的后果说清，由作者决定。
  *
- * ★ 两条路的后果**相反**，所以这件事不能替你选：真分身铸新 id 是**正解**；
- *   而"我丢了钥匙 / 这条记录不在了"铸新 id 是**代价**（所有已同意的用户重新
+ * 两条路的后果相反，所以这件事不能替你选：真分身铸新 id 是正解；
+ *   而"我丢了钥匙 / 这条记录不在了"铸新 id 是代价（所有已同意的用户重新
  *   同意一次，正在跑的会话变成"未知服务"）。把后者按前者处理，就是把
  *   "我丢了钥匙"说成"我换了个插件"。
  */
@@ -1130,29 +1128,29 @@ function lineageStopAndAsk(detail) {
   throw new Error(
     `${detail}\n`
     + '\n§2.5：这一条不许静默处理，因为两种可能的后果相反：\n'
-    + '\n  ① 这**是另一个东西**（复制来的 plugin.json，或者一次真分身）\n'
-    + '     ⇒ 铸一个新的 id：`init <插件目录> --fork`。\n'
+    + '\n  ① 这是另一个东西（复制来的 plugin.json，或者一次真分身）\n'
+    + '     铸一个新的 id：`init <插件目录> --fork`。\n'
     + '        两个不同的东西抢同一个 (id, 版本)，会让一个站点把另一个站点正在用的\n'
-    + '        插件弄坏（§2.4、§2.6）—— 这一条要拦的就是它。\n'
-    + '\n  ② 这**是同一个插件**，只是这条记录不在了（换了机器 / 表被删过 / 你正在用\n'
+    + '        插件弄坏（§2.4、§2.6），这一条要拦的就是它。\n'
+    + '\n  ② 这是同一个插件，只是这条记录不在了（换了机器 / 表被删过 / 你正在用\n'
     + '     另一把钥匙签）\n'
-    + '     ⇒ 先把记录找回来：血统表**应当**提交在版本控制里（§2.5），私钥**应当**\n'
+    + '     先把记录找回来：血统表应当提交在版本控制里（§2.5），私钥应当\n'
     + '        有备份（§4.1）。找回来之后这里什么都不用改。\n'
-    + '     ⇒ 找不回来（比如这个 id 是**在血统表存在之前**铸的）⇒ `init <插件目录>\n'
+    + '     找不回来（比如这个 id 是在血统表存在之前铸的），`init <插件目录>\n'
     + '        --adopt`：承认这个 id 归这棵树，给它补一条记录。\n'
-    + '     ⇒ 找不回来而又要**换一把钥匙**：只剩 `--fork`，而代价是\n'
-    + '        **所有已同意的用户要重新同意一次**，正在跑的会话变成"未知服务"。\n');
+    + '     找不回来而又要换一把钥匙：只剩 `--fork`，而代价是\n'
+    + '        所有已同意的用户要重新同意一次，正在跑的会话变成"未知服务"。\n');
 }
 
 // ── 发布表（在这台机器上）────────────────────────────────────────────────────
 //
-// ★ 它挡的是**手滑**，不是攻击 —— 与"同一个 `(id, 版本)` 只能对应一份内容"
+// 它挡的是手滑，不是攻击，与"同一个 `(id, 版本)` 只能对应一份内容"
 //   （规范 §2.4）自带的是同一个保留：它不进树（每打一次就变，进树就把树弄脏、
 //   与 §3.5 打架），所以换一台机器就没有它。
 //
-// ★ 它守的是 §2.4：一个 (id, 版本) 只有一份内容。而"改了内容"里最容易被忘掉的
-//   一种，是**往树里加了一个文件**（比如给老插件补一条血统记录）—— 那会让同一个
-//   版本号算出第二个摘要，而按 §2.4 收包方**两个都不加载**。
+// 它守的是 §2.4：一个 (id, 版本) 只有一份内容。而"改了内容"里最容易被忘掉的
+//   一种，是往树里加了一个文件（比如给老插件补一条血统记录），那会让同一个
+//   版本号算出第二个摘要，而按 §2.4 收包方两个都不加载。
 
 function releasesPath(home) { return path.join(home, 'releases.json'); }
 
@@ -1184,15 +1182,15 @@ function writeReleases(home, map) {
 }
 
 /**
- * 判 §2.4。返回 `{note, rel}`：`note` 是一句**要打出来**的话（没有就是 `null`），
+ * 判 §2.4。返回 `{note, rel}`：`note` 是一句要打出来的话（没有就是 `null`），
  * `rel` 是待写回的发布表（读不动时是 `null`）。
  */
 function oneContentPerVersion(home, id, version, digest, out, opts) {
   const rel = readReleases(home);
   if (!rel.ok) {
-    // ★ 读不动时**不拦**，但一定要**说出来**：一条静默消失的防线比没有更糟 ——
+    // 读不动时不拦，但一定要说出来：一条静默消失的防线比没有更糟，
     //   它让人以为还有。所以这一句不是可选的。
-    return { rel: null, note: `发布表读不动（${rel.why}）—— 这一次 §2.4 那条检查**没有生效**` };
+    return { rel: null, note: `发布表读不动（${rel.why}），这一次 §2.4 那条检查没有生效` };
   }
   const key = `${id}@${version}`;
   const prev = rel.map.get(key);
@@ -1203,11 +1201,11 @@ function oneContentPerVersion(home, id, version, digest, out, opts) {
       + `    记过的   ${prev.digest}`
       + (prev.at ? `（${new Date(prev.at).toISOString().slice(0, 10)}，落在 ${prev.out || '?'}）` : '')
       + `\n    这一次   ${digest}\n`
-      + '\n§2.4：一个 (id, 版本) 只有一份内容 —— 改了内容的**任何**字节就必须升版本号。\n'
+      + '\n§2.4：一个 (id, 版本) 只有一份内容，改了内容的任何字节就必须升版本号。\n'
       + '  不升的话，拿过旧那一份的人和拿到新那一份的人会各说各话，而按 §2.4 客户端\n'
-      + '  **两个都不加载**。\n'
-      + '  ★ 最容易被忘掉的一种"改了内容"：往树里加了一个文件（比如给老插件补一条血统记录）。\n'
-      + '\n★ 如果这一版**从来没发出去过**（没有站点分过、没有人装过），加\n'
+      + '  两个都不加载。\n'
+      + '  最容易被忘掉的一种"改了内容"：往树里加了一个文件（比如给老插件补一条血统记录）。\n'
+      + '\n如果这一版从来没发出去过（没有站点分过、没有人装过），加\n'
       + '  `--reuse-version` 覆盖这条记录，然后照常发。\n');
   }
   rel.map.set(key, { digest, at: Date.now(), out });
@@ -1219,10 +1217,10 @@ function oneContentPerVersion(home, id, version, digest, out, opts) {
 // ==============================================================================
 
 /**
- * ★ `--fork`：把树里那个 id **换掉**（§2.5 里"真分身"那条路）。
+ * `--fork`：把树里那个 id 换掉（§2.5 里"真分身"那条路）。
  *
- * 与 `insertId` 同一条纪律：**只动那一个值**，其余字节一个都不许动。所以这里做的是
- * "已知旧值"的定点替换，不是 `JSON.parse` 再 `stringify` —— 后者会重排键序、把
+ * 与 `insertId` 同一条纪律：只动那一个值，其余字节一个都不许动。所以这里做的是
+ * "已知旧值"的定点替换，不是 `JSON.parse` 再 `stringify`，后者会重排键序、把
  * `\u` 转义还原成汉字、把 `1e3` 写成 `1000`（见 insertId 那段注释）。
  */
 function replaceId(text, oldId, newId) {
@@ -1231,7 +1229,7 @@ function replaceId(text, oldId, newId) {
   const hits = text.match(re);
   if (!hits || hits.length !== 1) {
     throw new Error(`plugin.json 里的 "id": ${JSON.stringify(oldId)} 找到了 ${hits ? hits.length : 0} 处，`
-      + '而 --fork 只认恰好一处 —— 这份清单不是打包器写出来的那一份。');
+      + '而 --fork 只认恰好一处，这份清单不是打包器写出来的那一份。');
   }
   return text.replace(re, `$1${JSON.stringify(newId)}`);
 }
@@ -1255,12 +1253,12 @@ function cmdInit(dir, opts) {
         + `    血统表  ${lfile}${lobj ? '' : '（文件不存在）'}`);
     }
     if (entry === undefined) {
-      // ★ `--adopt`：§2.5 那次"停下来问"的**第二个答案**（"这是同一个插件"）。
-      //   没有它的话，那个答案在工具里**没有可执行的形式** —— 作者只能手写
+      // `--adopt`：§2.5 那次"停下来问"的第二个答案（"这是同一个插件"）。
+      //   没有它的话，那个答案在工具里没有可执行的形式，作者只能手写
       //   `lineage.json`，而手写一张由机器维护的表正是 typo 走进安全判据的路。
       //
-      //   ★ 它**不**证明这棵树就是当初铸这个 id 的那一棵：打包器判不了这件事
-      //     （这就是为什么那次要停下来问）。它记录的是**作者的一次声明**。
+      //   它不证明这棵树就是当初铸这个 id 的那一棵：打包器判不了这件事
+      //     （这就是为什么那次要停下来问）。它记录的是作者的一次声明。
       //     真正守这件事的是客户端那张按 id 的钉表（§5.4）。
       const repo = repoRootOf(dir);
       const rel = relToRepo(repo, dir);
@@ -1271,11 +1269,11 @@ function cmdInit(dir, opts) {
       console.log(`--adopt：给 ${id} 在血统表里补了一条（钥匙还没定）。`);
       console.log(`    血统表  ${path.join(rel || '.', LINEAGE_FILE)}`);
       console.log('');
-      console.log('★ 它记下的是**你的一次声明**："这个 id 归这棵树"。');
-      console.log('  ★ 它**不**证明这棵树就是当初铸出这个 id 的那一棵 —— 打包器判不了这件事，');
+      console.log('它记下的是你的一次声明："这个 id 归这棵树"。');
+      console.log('  它不证明这棵树就是当初铸出这个 id 的那一棵，打包器判不了这件事，');
       console.log('    所以刚才才停下来问。真正守这件事的是客户端那张按 id 的钉表（§5.4）：');
       console.log('    换了一把钥匙签，老用户会拒绝，而没有任何本地操作能绕过它。');
-      console.log('★ 树现在是脏的：先提交，再 `keygen` / `build`。');
+      console.log('树现在是脏的：先提交，再 `keygen` / `build`。');
       return 0;
     }
     console.log(`这个插件已经有 id 了：${id}`);
@@ -1304,16 +1302,16 @@ function cmdInit(dir, opts) {
   } else {
     console.log(`分身：把 id 换掉了，并写回 ${mfRel}：`);
     console.log(`    ${oldId}  →  ${id}`);
-    console.log('★ 旧的 id **留在血统表里** —— 那是它的祖先，不是要被抹掉的东西。');
-    console.log('★ §2.5 的代价，说在明处：所有已同意过那个 id 的用户要**重新同意一次**，');
+    console.log('旧的 id 留在血统表里，那是它的祖先，不是要被抹掉的东西。');
+    console.log('§2.5 的代价，说在明处：所有已同意过那个 id 的用户要重新同意一次，');
     console.log('  正在跑的会话会变成"未知服务"。');
   }
   console.log('');
   console.log(`血统表 ${linRel} 里给它记了一条（钥匙还没定）：`);
   console.log(`    { "${id}": { "key": null } }`);
   console.log('');
-  console.log('★ 写回是**插入/替换**，不是重新序列化整份 JSON —— 其余字节一个都没动。');
-  console.log('★ 树现在是脏的，而且**必须脏**：请先提交，再 `keygen` / `build`。');
+  console.log('写回是插入/替换，不是重新序列化整份 JSON，其余字节一个都没动。');
+  console.log('树现在是脏的，而且必须脏：请先提交，再 `keygen` / `build`。');
   console.log('  §3.5 要求打包的输入是一个提交，所以这些动词不能合并成一条命令。');
   return 0;
 }
@@ -1321,15 +1319,15 @@ function cmdInit(dir, opts) {
 /**
  * `keygen`：给这个 id 铸一把签名钥匙。
  *
- * ★ 为什么不是 `init` 顺手做掉：`init` 管的是 §2.1（id），而签名是**可选**的
- *   （§4.1）—— 一条命令顺带铸钥匙，会让"我没打算签名"变成"我说不清我有没有签"。
+ * 为什么不是 `init` 顺手做掉：`init` 管的是 §2.1（id），而签名是可选的
+ *   （§4.1），一条命令顺带铸钥匙，会让"我没打算签名"变成"我说不清我有没有签"。
  *   两个动词都只弄脏树一次，都提示你提交，代价一样。
  */
 function cmdKeygen(dir, opts) {
   const { obj } = readManifest(path.join(dir, MANIFEST));
   const id = String(obj.id || '');
   if (!ULID_RE.test(id)) {
-    throw new Error(`${MANIFEST} 里还没有一个合法的 id —— 先跑 init（§2.1）。`);
+    throw new Error(`${MANIFEST} 里还没有一个合法的 id，先跑 init（§2.1）。`);
   }
   const { file: lfile, obj: lobj } = readLineage(dir);
   const entry = lineageEntry(lobj, id);
@@ -1342,12 +1340,12 @@ function cmdKeygen(dir, opts) {
     throw new Error(`这个 id 已经有钥匙了：\n`
       + `    指纹    ${fp}\n`
       + `    记在    ${lfile}\n`
-      + '\n§4.1：换一把钥匙**不是升级，是断了血统** —— 老用户会拒绝（§5.4），\n'
+      + '\n§4.1：换一把钥匙不是升级，是断了血统，老用户会拒绝（§5.4），\n'
       + '  也就是说这里铸的这把钥匙发出去的包，装得上的人一个都没有。\n'
-      + '  真的丢了私钥 ⇒ `init <插件目录> --fork`（代价：所有用户重新同意一次）。\n'
-      + '  有备份 ⇒ 把那份 .pem 复制成\n'
+      + '  真的丢了私钥，`init <插件目录> --fork`（代价：所有用户重新同意一次）。\n'
+      + '  有备份，把那份 .pem 复制成\n'
       + `    ${keyFilePath(packerHome(opts), id)}\n`
-      + '  然后直接 `sign` —— 什么都不用改。');
+      + '  然后直接 `sign`，什么都不用改。');
   }
 
   const repo = repoRootOf(dir);
@@ -1361,20 +1359,20 @@ function cmdKeygen(dir, opts) {
   const linRel = path.join(rel || '.', LINEAGE_FILE);
 
   if (mine) {
-    // ★ 库里**已经**有这一把：**认它**，不铸新的。
-    //   这条路的来处是 §4.1 那句"换机器的方式是复制私钥" —— 作者把 .pem 拷过来，
+    // 库里已经有这一把：认它，不铸新的。
+    //   这条路的来处是 §4.1 那句"换机器的方式是复制私钥"，作者把 .pem 拷过来，
     //   而血统表里这一条还没记。铸一把新的会把拷过来的那一份变成孤儿，而它才是
-    //   老用户钉住的那一把。所以这里做的事只是**把它记下来**。
+    //   老用户钉住的那一把。所以这里做的事只是把它记下来。
     const raw = rawPubOf(mine.key);
     lineage[id] = { key: raw.toString('hex') };
     writeLineage(dir, lineage);
-    console.log(`钥匙库里已经有一把了 —— 就认它，**没有**铸新的：`);
+    console.log(`钥匙库里已经有一把了，就认它，没有铸新的：`);
     console.log(`    指纹    ${fingerprint(raw)}`);
     console.log(`    私钥    ${kf}`);
     console.log(`    记进了  ${linRel}`);
     console.log('');
-    console.log('★ 这是"换机器"那条路（§4.1）：把 .pem 整份复制过来，再跑一次 keygen。');
-    console.log('★ 树现在是脏的：先提交，再 `build` / `sign`。');
+    console.log('这是"换机器"那条路（§4.1）：把 .pem 整份复制过来，再跑一次 keygen。');
+    console.log('树现在是脏的：先提交，再 `build` / `sign`。');
     return 0;
   }
 
@@ -1388,26 +1386,25 @@ function cmdKeygen(dir, opts) {
   console.log(`    指纹    ${fingerprint(raw)}`);
   console.log(`    私钥    ${kf}（0600）`);
   console.log('');
-  console.log('★ **私钥要备份。** 丢了它就是血统断了：老用户会拒绝你签的任何东西，');
+  console.log('私钥要备份。 丢了它就是血统断了：老用户会拒绝你签的任何东西，');
   console.log('  你只能给这个插件铸一个新 id，让所有人重新同意一遍（§4.1）。');
-  console.log('  换机器的方式是把这个 .pem **整份复制**过去，不是在新机器上再铸一把。');
-  console.log('★ 树现在是脏的：先提交，再 `build` / `sign`。');
+  console.log('  换机器的方式是把这个 .pem 整份复制过去，不是在新机器上再铸一把。');
+  console.log('树现在是脏的：先提交，再 `build` / `sign`。');
   return 0;
 }
 
-// ★★ 包名 = **纯 `<id>.splug`**。
+// 包名 = 纯 `<id>.splug`。
 //
-//   判据是"**一个 id 只有一份内容**"（§2.4）—— 而那个 `(id, 版本)` 二元组里
-//   能进文件名的只有版本，于是同一个 id 的两个版本在同一个目录里只能靠**名字**
-//   区分开，而"这份是谁"要靠人去对。改成纯 id 之后文件名就是身份，而**版本在包
-//   里面**（`plugin.json` 的 `version`）—— 它没有消失，只是从文件名搬到了一个
+//   判据是"一个 id 只有一份内容"（§2.4），而那个 `(id, 版本)` 二元组里
+//   能进文件名的只有版本，于是同一个 id 的两个版本在同一个目录里只能靠名字
+//   区分开，而"这份是谁"要靠人去对。改成纯 id 之后文件名就是身份，而版本在包
+//   里面（`plugin.json` 的 `version`），它没有消失，只是从文件名搬到了一个
 //   读得到的地方（站点上是 `<id>.json` 记录表，作者机器上是 `packer inspect`）。
 //
-//   ★ 连带后果一条，写进 `packer/docs/README.md`：**同一个 id 的多版本必须自己分
-//     目录**存放（`dist/1.0.0/<id>.splug`）。这不是偏好 —— 是"一个目录里同 id
-//     只能有一版"的推论。
-//   ★ 目录名**完全不参与**包名。它与"目录名不参与任何判定"
-//     那条本来就一致：身份来自清单里的 `id`。
+//   连带后果一条，写进 `packer/docs/README.md`：同一个 id 的多版本必须自己分
+//   目录存放（`dist/1.0.0/<id>.splug`）。这不是偏好，是"一个目录里同 id 只能有
+//   一版"的推论。目录名完全不参与包名，它与"目录名不参与任何判定"那条本来就
+//   一致：身份来自清单里的 `id`。
 function defaultOut(dir, id) {
   return path.join(path.dirname(path.resolve(dir)), `${id}.splug`);
 }
@@ -1418,13 +1415,13 @@ function cmdBuild(dir, opts) {
   ensureClean(repo, rel);
   const commit = opts.commit || 'HEAD';
 
-  // 清单从**那个提交**里读 —— 工作树里那份可能还没提交
+  // 清单从那个提交里读，工作树里那份可能还没提交
   const entries = lsTree(repo, commit, rel);
-  if (!entries.length) throw new Error(`${commit}:${rel || '.'} 里一个文件都没有 —— 目录还没提交？`);
+  if (!entries.length) throw new Error(`${commit}:${rel || '.'} 里一个文件都没有，目录还没提交？`);
 
   const { files, skipped, notes } = readTree(repo, commit, rel);
   const mf = files.find((f) => f.path === MANIFEST);
-  if (!mf) throw new Error(`${commit}:${rel} 里没有 ${MANIFEST} —— 一个插件必须有清单（§3.1）`);
+  if (!mf) throw new Error(`${commit}:${rel} 里没有 ${MANIFEST}，一个插件必须有清单（§3.1）`);
 
   let manifest;
   try {
@@ -1432,13 +1429,13 @@ function cmdBuild(dir, opts) {
   } catch (e) {
     throw new Error(`${MANIFEST} 不是合法的 JSON：${e.message}`);
   }
-  // ★ 这两条**拿原串比**，不 `String(...)` 强转。强转是一个假入口：
-  //   `["1.0.0"]` 经 `String()` 变成 `"1.0.0"` 于是**打包器收下**，而客户端
-  //   （`typeof mf.version !== 'string'`）与守护进程（`need_str`）都会拒 ——
+  // 这两条拿原串比，不 `String(...)` 强转。强转是一个假入口：
+  //   `["1.0.0"]` 经 `String()` 变成 `"1.0.0"` 于是打包器收下，而客户端
+  //   （`typeof mf.version !== 'string'`）与守护进程（`need_str`）都会拒，
   //   又一个"一侧收下、另一侧拒了"，而且它只在包真的发出去之后才发作。
   //   与 §2.3「只校验，不归一化」是同一条纪律。
   if (typeof manifest.id !== 'string' || !ULID_RE.test(manifest.id)) {
-    throw new Error(`${MANIFEST} 里的 id ${JSON.stringify(manifest.id)} 不是一个 ULID —— 先跑 init（§2.1）`);
+    throw new Error(`${MANIFEST} 里的 id ${JSON.stringify(manifest.id)} 不是一个 ULID，先跑 init（§2.1）`);
   }
   if (typeof manifest.version !== 'string' || !PLUGIN_VERSION_RE.test(manifest.version)) {
     throw new Error(`${MANIFEST} 里的 version ${JSON.stringify(manifest.version)} 不合 x.y.z 的形状（§2.3）`);
@@ -1446,13 +1443,13 @@ function cmdBuild(dir, opts) {
   const engWhy = enginesShapeProblem(manifest);
   if (engWhy) throw new Error(`${MANIFEST} 里的 ${engWhy}（§2.3.1）`);
 
-  // §3.7：负载的大小上限。★ 判在**这里**、而且是**发布之前**，正是 §3.7 存在的
-  //   理由：站点那边只有 `--check-plugins` 对管理员打 ⚠，客户端那边要等包发出去、
-  //   收下来才拒 —— 作者拿到的都是"装不上"，而那时他已经发布出去了。
+  // §3.7：负载的大小上限。判在这里、而且是发布之前，正是 §3.7 存在的
+  //   理由：站点那边只有 `--check-plugins` 对管理员打，客户端那边要等包发出去、
+  //   收下来才拒，作者拿到的都是"装不上"，而那时他已经发布出去了。
   const sizeWhy = payloadSizeProblem(files);
   if (sizeWhy) throw new Error(sizeWhy);
 
-  // §2.5：这个 id 得在这棵树**这个提交**的血统表里。表从提交里读（不是从盘上）——
+  // §2.5：这个 id 得在这棵树这个提交的血统表里。表从提交里读（不是从盘上），
   // 于是"我们判的那张表"与"进负载的那张表"是同一次读出来的同一份字节。
   const linFile = files.find((f) => f.path === LINEAGE_FILE);
   let lineage = null;
@@ -1467,11 +1464,11 @@ function cmdBuild(dir, opts) {
   }
 
   const out = path.resolve(opts.out || defaultOut(dir, manifest.id));
-  // ★ 包**禁止**落在自己的源码树里：它下一次就会被当成一份普通文件进负载，
+  // 包禁止落在自己的源码树里：它下一次就会被当成一份普通文件进负载，
   //   于是摘要每次都变。这是"同一输入产出不同包"的第一号现场，所以在写之前拦。
   const inTree = path.relative(path.resolve(dir), out);
   if (inTree && !inTree.startsWith('..') && !path.isAbsolute(inTree)) {
-    throw new Error(`输出的包在插件自己的源码树里（${inTree}）——\n`
+    throw new Error(`输出的包在插件自己的源码树里（${inTree}），\n`
       + '  下一次打包时它会被当成一份普通文件进负载，摘要于是每次都变。\n'
       + `  换一个位置（默认是 ${defaultOut(dir, manifest.id)}），或者用 --out 指定。`);
   }
@@ -1479,7 +1476,7 @@ function cmdBuild(dir, opts) {
   const digest = contentDigest(files);
   const home = packerHome(opts);
 
-  // §2.4：同一个 (id, 版本) 不许有第二份内容。**先判后写** —— 写下去再判，
+  // §2.4：同一个 (id, 版本) 不许有第二份内容。先判后写，写下去再判，
   // 那个包已经在磁盘上了，而"报错"与"产出"同时发生是最难收拾的一种状态。
   const rec = oneContentPerVersion(home, manifest.id, manifest.version, digest, out, opts);
   if (rec.note) notes.push(rec.note);
@@ -1492,7 +1489,7 @@ function cmdBuild(dir, opts) {
     try {
       writeReleases(home, rec.rel.map);
     } catch (e) {
-      console.log(`  ⚠ 发布表写不下去（${e.message}）—— 下一次打这个版本时 §2.4 那条检查不会生效`);
+      console.log(`  发布表写不下去（${e.message}），下一次打这个版本时 §2.4 那条检查不会生效`);
     }
   }
 
@@ -1505,20 +1502,20 @@ function cmdBuild(dir, opts) {
   console.log(`  ${files.length} 份文件 / ${humanBytes(pkg.length)}`
     + `（负载 ${humanBytes(payload)} + 信封 ${humanBytes(pkg.length - payload)}）`);
   console.log(`  输入     ${commit}:${rel || '.'}`);
-  for (const n of notes) console.log(`  ⚠ ${n}`);
+  for (const n of notes) console.log(`  ${n}`);
   if (skipped.length) {
     console.log(`  跳过 ${skipped.length} 项（不在分发范围内）：${skipped.slice(0, 5).join('、')}`);
   }
   if (files.some((f) => f.path === CLIENT_ENTRY)) console.log('  有客户端侧 client/index.js');
   if (files.some((f) => f.path === JOB_ENTRY)) {
-    console.log('  有作业侧 job/start.sh（★ 它的 0755 没进包 —— 作业脚本是被拼进 sbatch 的，不靠权限位）');
+    console.log('  有作业侧 job/start.sh（ 它的 0755 没进包，作业脚本是被拼进 sbatch 的，不靠权限位）');
   }
   const entry = lineageEntry(lineage, manifest.id);
   if (!entry.key) {
-    console.log('  签名     （没有）—— §4.1 允许，但客户端第一次见它会"首次即信任"。');
-    console.log('           要签就 `sign <包>`（它**不改内容摘要**，所以不必重新打包）。');
+    console.log('  签名     （没有），§4.1 允许，但客户端第一次见它会"首次即信任"。');
+    console.log('           要签就 `sign <包>`（它不改内容摘要，所以不必重新打包）。');
   } else {
-    console.log('  签名     （还没签）—— 血统表说这个 id 归 '
+    console.log('  签名     （还没签），血统表说这个 id 归 '
       + `${fingerprint(Buffer.from(String(entry.key), 'hex'))}，跑 \`sign ${path.basename(out)}\` 盖上。`);
   }
   return 0;
@@ -1534,10 +1531,10 @@ function entryKeyBytes(entry, where) {
 }
 
 /**
- * 从包的**负载**里读血统表里这个 id 的那一条。
+ * 从包的负载里读血统表里这个 id 的那一条。
  *
- * ★ 表在负载里（见 `LINEAGE_FILE` 那段），所以 `sign` 不必知道源码树在哪 ——
- *   别人打好的包也签得动。`undefined` = 不认识这个 id ⇒ §2.5 停下来问。
+ * 表在负载里（见 `LINEAGE_FILE` 那段），所以 `sign` 不必知道源码树在哪，
+ *   别人打好的包也签得动。`undefined` = 不认识这个 id，§2.5 停下来问。
  */
 function lineageEntryOfPackage(r, id) {
   const raw = r.payloadOf(LINEAGE_FILE);
@@ -1550,11 +1547,11 @@ function lineageEntryOfPackage(r, id) {
 /**
  * `sign`：给一个已经打好的包盖上签名。
  *
- * ★ 它**不改内容摘要** —— 签名盖的是摘要（§4.2），而摘要是负载算出来的。
+ * 它不改内容摘要，签名盖的是摘要（§4.2），而摘要是负载算出来的。
  *   所以"给一个已经打好的包补签名"是合法的：按 §2.4，它还是同一份构件。
- *   这也是 `sign` 能是一个**独立动词**的全部理由（`build` 只管内容）。
+ *   这也是 `sign` 能是一个独立动词的全部理由（`build` 只管内容）。
  *
- * ★ 也正因为如此，`build` **不**看钥匙库：它的输出只是 (提交, 选项) 的函数，
+ * 也正因为如此，`build` 不看钥匙库：它的输出只是 (提交, 选项) 的函数，
  *   与这台机器上有什么钥匙无关。§3.5 那句"同一输入逐字节相同"因此没有星号。
  */
 function cmdSign(file, opts) {
@@ -1567,12 +1564,12 @@ function cmdSign(file, opts) {
   }
   const r = parsePackage(buf);
   if (!r.ok) {
-    console.error(`✗ ${file}：不合规（${r.code}）—— ${r.why}`);
+    console.error(`✗ ${file}：不合规（${r.code}），${r.why}`);
     return 1;
   }
   const id = String(r.manifest.id || '');
   if (!ULID_RE.test(id)) {
-    throw new Error(`包里的 ${MANIFEST} 的 id ${JSON.stringify(r.manifest.id)} 不是一个 ULID（§2.1）——`
+    throw new Error(`包里的 ${MANIFEST} 的 id ${JSON.stringify(r.manifest.id)} 不是一个 ULID（§2.1），`
       + '不签一份身份都立不住的清单。');
   }
 
@@ -1584,15 +1581,15 @@ function cmdSign(file, opts) {
   }
   const where = `${path.basename(file)} 里的 ${LINEAGE_FILE}`;
   if (!entry.key) {
-    throw new Error(`血统表说这个 id **不签名**，而 sign 只按血统表办事：\n`
+    throw new Error(`血统表说这个 id 不签名，而 sign 只按血统表办事：\n`
       + `    ${id}  →  { "key": null }\n`
       + `    （${where}）\n`
       + '\n两条路，看你想要哪一条：\n'
-      + '  · 这个插件本来就不签名（§4.1 允许）⇒ 什么都不用做，这个包照样能发。\n'
+      + '  · 这个插件本来就不签名（§4.1 允许），什么都不用做，这个包照样能发。\n'
       + '    客户端第一次见它会"首次即信任"（§5.4）。\n'
-      + '  · 现在想开始签 ⇒ 在源码树里 `keygen <插件目录>`，提交，再 `build` 一个\n'
-      + '    **新版本号**。血统表在负载里，给它补上钥匙就是改了内容 ⇒ §2.4。\n'
-      + '    ★ 已经发出去的那一版**不能**这样补：那会让同一个版本号出现两份内容。\n');
+      + '  · 现在想开始签，在源码树里 `keygen <插件目录>`，提交，再 `build` 一个\n'
+      + '    新版本号。血统表在负载里，给它补上钥匙就是改了内容，§2.4。\n'
+      + '    已经发出去的那一版不能这样补：那会让同一个版本号出现两份内容。\n');
   }
 
   const home = packerHome(opts);
@@ -1602,11 +1599,11 @@ function cmdSign(file, opts) {
     throw new Error(`本机没有这个 id 的私钥：\n`
       + `    应该有    ${keyFilePath(home, id)}\n`
       + `    血统表说  ${fingerprint(entryRaw)}\n`
-      + '\n§4.1：私钥属于**这个插件**，换机器的方式是把它**整份复制**过去。\n'
-      + '  · 有备份 ⇒ 复制到上面那个路径，再跑一次 sign。\n'
-      + '  · 找不回来 ⇒ 血统断了：老用户会拒绝你签的任何东西（§5.4），只能\n'
+      + '\n§4.1：私钥属于这个插件，换机器的方式是把它整份复制过去。\n'
+      + '  · 有备份，复制到上面那个路径，再跑一次 sign。\n'
+      + '  · 找不回来，血统断了：老用户会拒绝你签的任何东西（§5.4），只能\n'
       + '    `init <插件目录> --fork` 铸新 id，代价是所有用户重新同意一次（§2.5）。\n'
-      + '  ★ 在这里另铸一把新钥匙没有用 —— 客户端钉住的是**旧**那一把。');
+      + '  在这里另铸一把新钥匙没有用，客户端钉住的是旧那一把。');
   }
   const raw = rawPubOf(k.key);
   if (!raw.equals(entryRaw)) {
@@ -1614,23 +1611,23 @@ function cmdSign(file, opts) {
       + `    血统表    ${fingerprint(entryRaw)}\n`
       + `    本机钥匙  ${fingerprint(raw)}   （${k.file}）\n`
       + '\n两份记录分家了，先弄清哪一份是对的（血统表在版本控制里，看得见历史），\n'
-      + '再决定是找回对的私钥，还是走 §2.5 的 --fork。**不要**在这里覆盖任何一份。');
+      + '再决定是找回对的私钥，还是走 §2.5 的 --fork。不要在这里覆盖任何一份。');
   }
 
-  // ★ 版本号从**清单**里取（§2.3：版本是包里面的一个属性，不是文件名的一部分），
-  //   并在这里再判一次形状 —— `sign` 收的是一个**已经打好的包**，它可能是别人用手
+  // 版本号从清单里取（§2.3：版本是包里面的一个属性，不是文件名的一部分），
+  //   并在这里再判一次形状，`sign` 收的是一个已经打好的包，它可能是别人用手
   //   拼出来的，而"拼的那个人已经把清单判过一遍"不构成省略的理由。
   const version = String(r.manifest.version || '');
   if (!PLUGIN_VERSION_RE.test(version)) {
     throw new Error(`包里的 ${MANIFEST} 的 version ${JSON.stringify(r.manifest.version)} `
-      + '不是一个版本号（x.y.z，§2.3）—— 不签一份身份都立不住的清单。');
+      + '不是一个版本号（x.y.z，§2.3），不签一份身份都立不住的清单。');
   }
 
-  // ★★ **签的是四元组**（附录 A.3）：`{id, 版本, 站点侧摘要, 客户端侧摘要}`。
-  //   v1 只盖"整棵树一个摘要"，于是站点要**单独**给客户端发一半时，那一半没有任何
-  //   东西把它与作者绑起来 —— 两个摘要把这件事说清楚了。
+  // 签的是四元组（附录 A.3）：`{id, 版本, 站点侧摘要, 客户端侧摘要}`。
+  //   v1 只盖"整棵树一个摘要"，于是站点要单独给客户端发一半时，那一半没有任何
+  //   东西把它与作者绑起来，两个摘要把这件事说清楚了。
   const sd = sideDigests(r.files);
-  // Ed25519 是**确定性**签名：同一个包同一把钥匙签两次，逐字节相同。
+  // Ed25519 是确定性签名：同一个包同一把钥匙签两次，逐字节相同。
   // 所以 sign 不需要任何随机源，也不会破坏 §3.5 那条"同输入同输出"。
   const quad = { id, version, digestSite: sd.site, digestClient: sd.client };
   const sig = crypto.sign(null, signedMessage(quad), k.key);
@@ -1639,19 +1636,19 @@ function cmdSign(file, opts) {
   }, quad));
   const head = Buffer.from(buf.subarray(0, HEADER_BYTES));
   head.writeUInt32BE(sigBlock.length, 16);
-  // 签名块插在**记录表之后、负载之前**（附录 A.2/A.3），已有的签名块被换掉。
+  // 签名块插在记录表之后、负载之前（附录 A.2/A.3），已有的签名块被换掉。
   const out = Buffer.concat([
     head, buf.subarray(HEADER_BYTES, r.tableEnd), sigBlock, buf.subarray(r.payloadStart),
   ]);
 
-  // ★ 自己读回来一遍：拼接出错的话，错误应该在这里响，而不是在别人机器上响。
+  // 自己读回来一遍：拼接出错的话，错误应该在这里响，而不是在别人机器上响。
   const back = parsePackage(out);
-  if (!back.ok) throw new Error(`签名之后这个包自己读不回来了（${back.code}）—— 这是打包器的 bug`);
+  if (!back.ok) throw new Error(`签名之后这个包自己读不回来了（${back.code}），这是打包器的 bug`);
   if (back.digest !== r.digest) {
-    throw new Error('签名改了内容摘要 —— 那是打包器的 bug（§4.2：签名盖摘要，不覆盖信封）');
+    throw new Error('签名改了内容摘要，那是打包器的 bug（§4.2：签名盖摘要，不覆盖信封）');
   }
   if (back.sig.digestSite !== sd.site || back.sig.digestClient !== sd.client) {
-    throw new Error('签名块里的两个摘要与从负载算出来的不是一回事 —— 这是打包器的 bug');
+    throw new Error('签名块里的两个摘要与从负载算出来的不是一回事，这是打包器的 bug');
   }
 
   const outFile = path.resolve(opts.out || file);
@@ -1663,7 +1660,7 @@ function cmdSign(file, opts) {
   console.log(`             客户端侧摘要 ${sd.client}`);
   console.log(`  签名者   ${fingerprint(raw)}`);
   console.log(`  内容摘要 ${r.digest}`);
-  console.log('           ★ 与签之前**一字不差** —— 签名盖的是摘要，不覆盖信封（§4.2）。');
+  console.log('           与签之前一字不差，签名盖的是摘要，不覆盖信封（§4.2）。');
   console.log(`  信封     ${HEADER_BYTES} + ${r.tableEnd - HEADER_BYTES}（记录表） + ${sigBlock.length}（签名块）`
     + ` + ${out.length - r.payloadStart - sigBlock.length}（负载）`);
   if (outFile === path.resolve(file)) {
@@ -1683,7 +1680,7 @@ function cmdVerify(file, opts) {
   }
   const r = parsePackage(buf);
   if (!r.ok) {
-    console.error(`✗ ${file}：不合规（${r.code}）—— ${r.why}`);
+    console.error(`✗ ${file}：不合规（${r.code}），${r.why}`);
     return 1;
   }
   let bad = 0;
@@ -1697,8 +1694,8 @@ function cmdVerify(file, opts) {
     console.log(`  签名     Ed25519，签名者 ${r.sig.fingerprint}`);
     console.log(`           盖的是 ${r.sig.id}@${r.sig.version}（A.3 的四元组）`);
   } else {
-    console.log('  签名     （没有）—— §4.1 允许，但客户端第一次见它会"首次即信任"');
-    console.log('           ★ 没有签名 ⇒ 两侧的**配套关系**没有任何东西保证（§3.1）。');
+    console.log('  签名     （没有），§4.1 允许，但客户端第一次见它会"首次即信任"');
+    console.log('           没有签名，两侧的配套关系没有任何东西保证（§3.1）。');
   }
   if (opts.expectDigest && opts.expectDigest !== r.digest) {
     console.error(`✗ 内容摘要不是期望的那个：期望 ${opts.expectDigest}`);
@@ -1713,22 +1710,22 @@ function cmdVerify(file, opts) {
       bad = 1;
     }
   }
-  // §2.5：包里那份血统表说这个 id 归谁 —— 与**签这个包的人**对得上吗。
+  // §2.5：包里那份血统表说这个 id 归谁，与签这个包的人对得上吗。
   // 这是 §2.5 判据的第二个落点（第一个是打包时的"停下来问"），而且是唯一一个
-  // 在**已经打好的包**上还能查的地方。
+  // 在已经打好的包上还能查的地方。
   if (r.sig) {
     const entry = lineageEntryOfPackage(r, String(r.manifest.id || ''));
     if (entry && entry.key) {
       const want = entryKeyBytes(entry, `包里的 ${LINEAGE_FILE}`);
       if (!want.equals(r.sig.pubkey)) {
         console.error(`✗ 包里那份 ${LINEAGE_FILE} 说这个 id 归 ${fingerprint(want)}，`);
-        console.error(`  而这个包的签名者是 ${r.sig.fingerprint} —— 两份记录分家了（§2.5）。`);
+        console.error(`  而这个包的签名者是 ${r.sig.fingerprint}，两份记录分家了（§2.5）。`);
         console.error('  换一把钥匙不是升级，是断了血统：客户端钉住的是旧那一把，会直接拒绝。');
         bad = 1;
       }
     }
   }
-  // §3.6 的"负载等于源码树"—— 部署期做不了这件事（那里没有源码树），
+  // §3.6 的"负载等于源码树"，部署期做不了这件事（那里没有源码树），
   // 所以它的用例住在这里、住在 CI 里。源码在这台机器上，这一条才判得了。
   if (opts.against) {
     const dir = opts.against.replace(/@[^@]*$/, '');
@@ -1779,7 +1776,7 @@ function cmdInspect(file, opts) {
   }
   const r = parsePackage(buf);
   if (!r.ok) {
-    console.error(`✗ 这个包不合规（${r.code}）—— ${r.why}`);
+    console.error(`✗ 这个包不合规（${r.code}），${r.why}`);
     return 1;
   }
   const le = lineageEntryOfPackage(r, String(r.manifest.id || ''));
@@ -1803,10 +1800,10 @@ function cmdInspect(file, opts) {
       const lf = fingerprint(Buffer.from(String(le.key), 'hex'));
       const clash = r.sig && !r.sig.pubkey.equals(Buffer.from(String(le.key), 'hex'));
       console.log(`  血统     ${LINEAGE_FILE} 说这个 id 归 ${lf}`
-        + (clash ? '  ★ 与签名者不符（§2.5）' : ''));
+        + (clash ? '  与签名者不符（§2.5）' : ''));
     }
   } else {
-    console.log(`  血统     ${LINEAGE_FILE} 里没有这个 id —— 这张表不认识它（§2.5）`);
+    console.log(`  血统     ${LINEAGE_FILE} 里没有这个 id，这张表不认识它（§2.5）`);
   }
   console.log('');
   console.log(`  清单（${MANIFEST}，它自己也在下面这份清单里）`);
@@ -1814,7 +1811,7 @@ function cmdInspect(file, opts) {
     console.log(`    ${k.padEnd(14)} ${typeof v === 'string' ? v : JSON.stringify(v)}`);
   }
   console.log('');
-  console.log(`  负载 ${r.fileCount} 份 —— **就是这些，没有别的**（§3.6）`);
+  console.log(`  负载 ${r.fileCount} 份，就是这些，没有别的（§3.6）`);
   for (const f of r.files) {
     console.log(`    ${String(f.size).padStart(8)}  ${f.sha256.slice(0, 12)}…  ${f.path}`);
   }
@@ -1931,16 +1928,16 @@ if (require.main === module) {
   process.exit(main(process.argv.slice(2)));
 }
 
-// ★ 这个文件的**身份是一个 CLI**（六个动词，见文件头），而导出表只服务两种读者：
+// 这个文件的身份是一个 CLI（六个动词，见文件头），而导出表只服务两种读者：
 //   演示后端（`client/src/main/backend-fake.js` 拿它现打一个真包）与
-//   `test-packer.mjs` / `tools/conformance/` 的向量。所以这里留的是**包格式那一层**
+//   `test-packer.mjs` / `tools/conformance/` 的向量。所以这里留的是包格式那一层
 //   （常量、解析/构造、规范化）。
 //
-//   而**钥匙库与血统表那一组**（`LINEAGE_FILE` / `LINEAGE_SCHEMA` / `mintUlid` /
+//   而钥匙库与血统表那一组（`LINEAGE_FILE` / `LINEAGE_SCHEMA` / `mintUlid` /
 //   `insertId` / `replaceId` / `packerHome` / `keyFilePath` / `releasesPath` /
 //   `saveKey` / `loadKey` / `readLineage` / `lineageEntry` / `writeLineage` /
-//   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）**不在导出表里**
-//   —— 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
+//   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）不在导出表里
+// 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
 //   仍然被那些动词用着；只是不再对外承诺。这与 `plugin_payload_index()` 是同一条
 //   纪律：一个没人读的导出就是一句没人守的承诺。
 module.exports = {

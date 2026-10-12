@@ -407,17 +407,17 @@
   "star": 41,
   "strm": 2
  },
+ "cluster/slurmate-sessiond": {
+  "btn": 0,
+  "long": 0,
+  "star": 552,
+  "strm": 242
+ },
  "cluster/test-sessiond-logic.py": {
   "btn": 0,
   "long": 0,
   "star": 834,
   "strm": 0
- },
- "packer/slurmate-packer.js": {
-  "btn": 0,
-  "long": 0,
-  "star": 85,
-  "strm": 86
  },
  "packer/test-packer.mjs": {
   "btn": 0,

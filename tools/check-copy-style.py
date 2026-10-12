@@ -19,8 +19,8 @@
 
 判据三条，都是机械的：
 
-    J   注释行里不许出现 `★` `⚠` `⇒`。反引号跨度豁免：那是程序真的会打印的
-        字面量（`cluster/slurmate --check` 就打印 `★`）。
+    J   注释行里不许出现 `★` `⚠` `⇒`。反引号跨度豁免：那是在引用这个字符
+        本身，不是在喊话。
 
     J2  字符串里的 `**` `★` `⚠` `⇒` `——` 一个都不许有。这些字符串走
         `textContent` 或终端，会被原样画出来，看见的是字面的星号。
@@ -51,6 +51,10 @@
   · `tools/check-*.py` 与 `tools/self-test-*`（样本里写着故意违规的字面量）。
   · `tools/conformance/tree/**`（字节被 `expected.json` 钉住，改一个字节三端一起红）。
 
+按哪种语言判，先看扩展名；`cluster/slurmate` 与 `cluster/slurmate-sessiond`
+没有扩展名，按 shebang 认成 Python。这两个是命令行入口，用户看得见它们打印的
+每一个字 —— 按扩展名过滤会把它们**整份**漏掉，"不判"与"没在看"在那里同形。
+
 已知的粗处：不解析语法树，字符串靠正则认。
 
   · 注释按行判（只看行首的 `#` 与 `//`）。
@@ -79,6 +83,8 @@ ROOT = os.path.dirname(HERE)
 BASELINE_PATH = os.path.join(HERE, "copy-style-baseline.json")
 
 EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css")
+# 没有扩展名的按 shebang 认。`LICENSE` 与 `NOTICE` 首行不是 shebang，于是不判。
+SHEBANG_PY = re.compile(r"^#!.*\bpython[0-9.]*\b")
 
 # 不判的：夹具（字节被钉住）与检查器自己（样本里是故意违规的字面量）。
 SKIP_PREFIX = ("tools/conformance/tree/",)
@@ -115,6 +121,16 @@ HTML_ATTR = re.compile(r'\b(?:title|placeholder|aria-label)\s*=\s*"([^"]*)"', re
 
 STRING_MAX_HAN = 60
 BUTTON_MAX_HAN = 6
+
+
+def ext_of(rel, text):
+    """这份文件按哪种语言判。认不出来的返回空串，等于不判。"""
+    ext = os.path.splitext(rel)[1]
+    if ext:
+        return ext
+    if SHEBANG_PY.match(text):
+        return ".py"
+    return ""
 
 
 def is_test_file(rel):
@@ -172,10 +188,12 @@ def counts_of(rel, text):
     `long`  K：超过 60 汉字的字符串。
     `btn`   K：超过 4 汉字的控件文字（只有 `.html` 数得出来）。
     """
-    ext = os.path.splitext(rel)[1]
+    ext = ext_of(rel, text)
     test = is_test_file(rel)
     c = {"star": 0, "strm": 0, "long": 0, "btn": 0,
          "han": 0, "bold": 0, "dash": 0}
+    if not ext:
+        return c
 
     # ── 注释：按行。`#` 与 `//` 只看行首，免得把 URL 里的 `//` 当成注释。 ──
     for line in text.splitlines():
@@ -227,13 +245,19 @@ def read_repo(root):
                              capture_output=True, text=True, check=True).stdout
     files = {}
     for rel in listing.splitlines():
-        if not rel.endswith(EXT) or rel.startswith(SKIP_PREFIX):
+        if rel.startswith(SKIP_PREFIX):
+            continue
+        # 有扩展名的只读要判的那几种；没有扩展名的得先读进来看 shebang，
+        # 所以它们绕不开这一遍读盘。全仓只有 4 份，代价可以忽略。
+        if os.path.splitext(rel)[1] and not rel.endswith(EXT):
             continue
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as f:
-                files[rel] = f.read()
+                text = f.read()
         except (OSError, UnicodeDecodeError):
             continue
+        if ext_of(rel, text):
+            files[rel] = text
     return files
 
 
@@ -377,6 +401,11 @@ def self_test():
          {"cluster/slurmate": "#!/usr/bin/env python3\n# 打 `★` 和 `★`。\n"}, None),
         ("代码里的 `//` 不是注释（那可能是 URL）",
          {"client/src/a.js": "const u = 'http://x/中文';\n"}, None),
+        # ── 按 shebang 认语言（`cluster/slurmate` 与 `-sessiond` 没有扩展名） ──
+        ("没有扩展名的 Python 脚本照判 —— 只看扩展名会把整份漏掉",
+         {"cluster/a-entry": "#!/usr/bin/env python3\n# ★ 踩过\n"}, "star"),
+        ("没有扩展名、首行也不是 shebang 的不判（`LICENSE` 就是）",
+         {"LICENSE": "Apache License\n★ 这一段不是代码\n"}, None),
         # ── J2：字符串里的记号 ─────────────────────────────────────────
         ("字符串里的 `**`", {"client/src/a.js": "const s = '删掉一份**找不回来**';\n"},
          "strm"),

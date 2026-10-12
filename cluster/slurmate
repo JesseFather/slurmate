@@ -27,7 +27,7 @@ slurmate — Slurmate 用户态 CLI
 
     ssh -T -o BatchMode=yes -p 10100 user@host -- /usr/local/bin/slurmate rpc
 
-这样命令行是编译期常量，用户输入永远不可能出现在 SSH 命令串里 ——
+这样命令行是编译期常量，用户输入永远不可能出现在 SSH 命令串里，
 从构造上消除注入，而不是靠"记得别用某个词"。
 
 退出码：
@@ -44,16 +44,17 @@ import subprocess
 import sys
 import time
 
-# ★ 框架版本是 **x.y**（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。
-#   **四处**声明（client/package.json、client/package-lock.json、
-#   cluster/slurmate-sessiond、本文件）必须逐字相同，由 .github/workflows/checks.yml
-#   断言。★ 第四处（package-lock）是最容易漏的一处：`npm ci` 不比较 lock 里根那个
-#   version 字段，它停在旧值也没人会发现。
+# 框架版本是 x.y（`major` 无上限、`minor` ∈ 0..255，禁止前导零）。四处声明
+# （client/package.json、client/package-lock.json、cluster/slurmate-sessiond、
+# 本文件）必须逐字相同，由 .github/workflows/checks.yml 断言。
+#
+# 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
+# 它停在旧值也没人会发现。
 VERSION = "0.18"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
-# systemd 单元的名字。★ 与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
-# 部署脚本里那个变量是同一个事实，三处各写一遍（有 lint 的机会再说 —— 目前单元
+# systemd 单元的名字。与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
+# 部署脚本里那个变量是同一个事实，三处各写一遍（有 lint 的机会再说：目前单元
 # 名字只在部署期用一次，改错的话 `systemctl` 会当场说"没有这个单元"）。
 SERVICE = "slurmate-sessiond"
 
@@ -68,36 +69,36 @@ EXIT_RATELIMIT = 7
 
 # 一条应答最多读多少字节。
 #
-# ★ 这是**链路**上最窄的那一节，协议里那几个上限都是从它反推的（不是反过来）：
-#   守护进程一次最多发一个 `PLUGIN_PACKAGE_MAX_BYTES`（2 MiB）的包，base64 膨胀
-#   4/3 ⇒ 约 2.7 MiB，再加一层 JSON 信封 —— 4 MiB 是约 1.5 倍余量。
+# 这是链路上最窄的那一节，协议里那几个上限都是从它反推的（不是反过来）：守护进程
+# 一次最多发一个 `PLUGIN_PACKAGE_MAX_BYTES`（2 MiB）的包，base64 膨胀 4/3 约
+# 2.7 MiB，再加一层 JSON 信封，4 MiB 是约 1.5 倍余量。
 #
-# ★ 这个数与守护进程的 PLUGIN_PACKAGE_MAX_BYTES **是从两侧各写一遍的**，所以有一条
-#   用例钉着两者的关系（`cluster/test-sessiond-logic.py` 的 19.11d）。★ 它必须比站点
-#   通报的**总量**上限大：两者相等的话，"整包一次发"就是一句假话（1 MiB 的负载 base64
-#   之后是 1.33 MiB，根本读不完），症状还会被认错 —— 这里报"响应太大"，客户端却把它
-#   归成 `daemon_unreachable`（code 5）并**退避重试**，一次"文件太大"被报成"控制节点
-#   上的守护进程没有响应"。
+# 这个数与守护进程的 PLUGIN_PACKAGE_MAX_BYTES 是从两侧各写一遍的，所以有一条用例
+# 钉着两者的关系（`cluster/test-sessiond-logic.py` 的 19.11d）。它必须比站点通报的
+# 总量上限大：两者相等的话，"整包一次发"就是一句假话（1 MiB 的负载 base64 之后是
+# 1.33 MiB，根本读不完），症状还会被认错：这里报"响应太大"，客户端却把它归成
+# `daemon_unreachable`（code 5）并退避重试，一次"文件太大"被报成"控制节点上的
+# 守护进程没有响应"。
 RPC_MAX_RESPONSE_BYTES = 4 << 20
 
-# `slurmate stream` 连上守护进程要等多久。连上之后**不再有任何超时** ——
-# 它是常驻通道，空闲是正常的。
+# `slurmate stream` 连上守护进程要等多久。连上之后不再有任何超时，它是常驻通道，
+# 空闲是正常的。
 STREAM_CONNECT_TIMEOUT = 40.0
 
 
 def socket_path():
     """socket 的位置。
 
-    ★ 这里不读 /etc/slurmate/slurmate.conf 找 `socket_path`，原因有两条：
+    这里不读 /etc/slurmate/slurmate.conf 找 `socket_path`，原因有两条：
 
-      一是那个键没有了 —— socket 路径与 systemd 单元的 RuntimeDirectory 是同一个
-      事实，写在两处就有一处会过期。守护进程那边现在从常量取，这边必须取同一个。
+    一是那个键没有了。socket 路径与 systemd 单元的 RuntimeDirectory 是同一个
+    事实，写在两处就有一处会过期。守护进程那边现在从常量取，这边必须取同一个。
 
-      二是读配置这条路本身就脆弱：CLI 是【用户身份】的进程，它的解析能力
-      决定了它能不能连上守护进程，而它用的是与守护进程完全不同的解析器（一个
-      configparser、一个手写扫描）。配置文件末尾多一个空行、注释换一种写法，
-      两边就可能对同一个文件得出不同的结论 —— 而症状只是"连不上守护进程"。
-      客户端只经 `rpc` 进来，它的失败模式必须是确定的。
+    二是读配置这条路本身就脆弱：CLI 是【用户身份】的进程，它的解析能力决定了它
+    能不能连上守护进程，而它用的是与守护进程完全不同的解析器（一个 configparser、
+    一个手写扫描）。配置文件末尾多一个空行、注释换一种写法，两边就可能对同一个
+    文件得出不同的结论，而症状只是"连不上守护进程"。客户端只经 `rpc` 进来，它的
+    失败模式必须是确定的。
     """
     return DEFAULT_SOCKET
 
@@ -105,73 +106,72 @@ def socket_path():
 def sessiond_path():
     """守护进程那个脚本在哪。
 
-    ★ 为什么 CLI 要去找它：**安装器长在那份脚本里**，不在这里。读一个 `.splug`、
-      验签、判断包里有没有作业侧 —— 这几件事守护进程本来就要做，而且各自只能有
-      一份实现。这里再抄一份的失效方式是这一版最想避免的那种：**装得上、守护进程
-      不认**，症状要到用户点提交时才出现。
+    为什么 CLI 要去找它：安装器长在那份脚本里，不在这里。读一个 `.splug`、验签、
+    判断包里有没有作业侧，这几件事守护进程本来就要做，而且各自只能有一份实现。
+    这里再抄一份的失效方式是这一版最想避免的那种：装得上但守护进程不认，症状要到
+    用户点提交时才出现。
 
-    所以 `plugin install` 只是一层壳：找到那份脚本、把参数原样转发过去。
-    与部署脚本调 `--check` 是同一个路子（它也是直接跑那份脚本）。
+    所以 `plugin install` 只是一层壳：找到那份脚本、把参数原样转发过去。与部署
+    脚本调 `--check` 是同一个路子（它也是直接跑那份脚本）。
 
-    ★ 覆盖用的环境变量叫 `SLURMATE_SESSIOND`：部署脚本把守护进程装在
-      `<prefix>/sbin/slurmate-sessiond`，而前缀可以改，所以留一个出口。
+    覆盖用的环境变量叫 `SLURMATE_SESSIOND`：部署脚本把守护进程装在
+    `<prefix>/sbin/slurmate-sessiond`，而前缀可以改，所以留一个出口。
     """
     return os.environ.get("SLURMATE_SESSIOND") or DEFAULT_SESSIOND
 
 
 def reload_daemon():
-    """配置改完之后，让**正在跑的**守护进程重新读一遍。
+    """配置改完之后，让正在跑的守护进程重新读一遍。
 
-    ★★ 这是热重载在**运维动线**上的落点：装插件、对齐配置都会改配置文件 —— 让
-      守护进程自己重读一遍，而不是重跑一次基座安装脚本（stop + start，导致**所有
-      会话都断一次**）。
+    这是热重载在运维动线上的落点：装插件、对齐配置都会改配置文件，要让守护进程
+    自己重读一遍，而不是重跑一次基座安装脚本（stop + start，会导致所有会话都断
+    一次）。
 
-    ★ 用 `systemctl reload`（单元的 `ExecReload` 是 `kill -HUP`），**不是 restart**
-      —— 这正是这一版要的东西：正在跑的会话一条都不该断。
+    用 `systemctl reload`（单元的 `ExecReload` 是 `kill -HUP`），不是 restart：
+    正在跑的会话一条都不该断。
 
-    ★ 失败**只报一句、绝不致命**：配置已经写好了，而"服务没在跑"是最常见的情形
-      （首次部署、或者管理员刚把它停掉），那不是错误。
-    ★★ 但**不许说谎**：三条路各说各的话 —— "重载过了" / "服务没在跑，下次启动
-      用上" / "重载没成功，得重启"。把这三件事混成一句"配置已生效"，就是这一版
-      一路在清的那种静默。
+    失败只报一句、绝不致命：配置已经写好了，而"服务没在跑"是最常见的情形（首次
+    部署、或者管理员刚把它停掉），那不是错误。但不许说谎，三条路各说各的话：
+    "重载过了" / "服务没在跑，下次启动用上" / "重载没成功，得重启"。把这三件事
+    混成一句"配置已生效"，就是这一路在清的那种静默。
     """
     try:
         act = subprocess.run(["systemctl", "is-active", SERVICE],
                              capture_output=True, text=True)
     except OSError:
-        return          # 这台机器上没有 systemctl（开发机 / 容器）—— 什么都不说
+        return          # 这台机器上没有 systemctl（开发机 / 容器），什么都不说
     if act.stdout.strip() != "active":
-        print("（守护进程没在跑，配置已经写好 —— 下次启动就会用上。）")
+        print("（守护进程没在跑。配置已经写好，下次启动就会用上。）")
         return
     try:
         rc = subprocess.run(["systemctl", "reload", SERVICE]).returncode
     except OSError as e:
-        print("★ 配置写好了，但没能让守护进程重读（%s）。" % e, file=sys.stderr)
+        print("配置写好了，但没能让守护进程重读（%s）。" % e, file=sys.stderr)
         return
     if rc == 0:
-        # ★★ 说准：`systemctl reload` 回 0 只表示**信号送到了** —— systemd 不知道
-        #   服务内部接不接受这次改动（守护进程可能**整个拒绝**，见它的
-        #   `reload_config()`）。所以这句话**不能**是"配置已生效"。
-        print("已让守护进程重读配置（`systemctl reload`）——"
+        # 说准：`systemctl reload` 回 0 只表示信号送到了，systemd 不知道服务内部
+        # 接不接受这次改动（守护进程可能整个拒绝，见它的 `reload_config()`）。
+        # 所以这句话不能是"配置已生效"。
+        print("已让守护进程重读配置（`systemctl reload`），"
               "正在跑的会话一条都没断。")
         print("  它有没有接受这次改动，看它自己的日志："
               "journalctl -u %s -n 20" % SERVICE)
     else:
-        print("★ 配置写好了，但 `systemctl reload` 没成功。它会在下次重启时生效；"
+        print("配置写好了，但 `systemctl reload` 没成功。它会在下次重启时生效；"
               "想立刻生效：sudo systemctl restart %s" % SERVICE, file=sys.stderr)
 
 
 def cmd_plugin_install(args):
-    """`slurmate plugin install <文件…>` —— 把作者发布的 `.splug` 装到本站。
+    """`slurmate plugin install <文件…>`：把作者发布的 `.splug` 装到本站。
 
-    ★ 与这台机器上的 `slurmate` 其余动词不同，它**不经 socket、不连守护进程**：
-      它是一个管理动作（要以 root 跑，写的是 `<prefix>/share/slurmate/plugins/`），
-      与"这台机器上的守护进程此刻在不在"无关。
+    与这台机器上的 `slurmate` 其余动词不同，它不经 socket、不连守护进程：
+    它是一个管理动作（要以 root 跑，写的是 `<prefix>/share/slurmate/plugins/`），
+    与"这台机器上的守护进程此刻在不在"无关。
     """
     if os.geteuid() != 0:
-        # 早说。装进去的包会成为**每一个用户提交的作业**的一部分，所以这件事
-        # 只能 root 做 —— 让它在写文件那一刻以 EACCES 失败，报出来的会是一句
-        # 权限错误，而管理员要的是"该加 sudo"。
+        # 早说。装进去的包会成为每一个用户提交的作业的一部分，所以这件事只能
+        # root 做。让它在写文件那一刻以 EACCES 失败，报出来的会是一句权限错误，
+        # 而管理员要的是"该加 sudo"。
         print("装插件要以 root 运行：包会落到 <prefix>/share/slurmate/plugins/，\n"
               "而它的作业侧会被编织进每一个用户提交的作业。\n"
               "  sudo slurmate plugin install %s"
@@ -180,7 +180,7 @@ def cmd_plugin_install(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s —— 安装器在它里面。\n"
+        print("找不到守护进程脚本 %s，安装器在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
               "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
@@ -199,8 +199,8 @@ def cmd_plugin_install(args):
         argv += ["--plugins-dir", args.plugins_dir]
     if args.replace_key:
         argv += ["--replace-key", args.replace_key]
-    # ★ 不用 os.execv：留一层能让退出码原样传上去，也让这条路在用例里跑得动
-    #   （execv 会把跑用例的那个进程换掉）。
+    # 不用 os.execv：留一层能让退出码原样传上去，也让这条路在用例里跑得动
+    # （execv 会把跑用例的那个进程换掉）。
     try:
         rc = subprocess.run(argv).returncode
     except OSError as e:
@@ -209,16 +209,16 @@ def cmd_plugin_install(args):
     if rc != 0:
         return rc
 
-    # ★★ 装完立刻把配置对齐（见守护进程的 `sync_plugin_config`）：装了插件而配置
-    #   里看不见它，管理员就少了一处能改开关的地方 —— 而"装了什么"与"配置里写了
-    #   什么"不一致正是这一版要消灭的形状。
+    # 装完立刻把配置对齐（见守护进程的 `sync_plugin_config`）：装了插件而配置里
+    # 看不见它，管理员就少了一处能改开关的地方，而"装了什么"与"配置里写了什么"
+    # 不一致正是这一版要消灭的形状。
     #
-    # ★ 但 `--plugins-dir` 指到别处时**不动配置**：那是一条排查路径（把包装到
-    #   一个临时目录里看看），拿它去对齐站点配置会把**真正的**插件配置全删掉
-    #   （目录里当然没有它们）。这个口子必须在这里堵住，因为在那边堵不住 ——
-    #   守护进程只知道"你给了我一个目录"，不知道那是本站还是别处。
+    # 但 `--plugins-dir` 指到别处时不动配置：那是一条排查路径（把包装到一个临时
+    # 目录里看看），拿它去对齐站点配置会把真正的插件配置全删掉（目录里当然没有
+    # 它们）。这个口子必须在这里堵住，因为在那边堵不住：守护进程只知道"你给了一
+    # 个目录"，不知道那是本站还是别处。
     if args.plugins_dir:
-        print("★ 装到了 %s 而不是本站的插件目录 ⇒ **没有**动站点的那两份派生物。"
+        print("装到了 %s 而不是本站的插件目录，所以没动站点的那两份派生物。"
               % args.plugins_dir, file=sys.stderr)
         return 0
     sync = [sys.executable, exe, "--sync-plugins"]
@@ -230,23 +230,23 @@ def cmd_plugin_install(args):
         print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if src != 0:
-        # ★ 包装好了，而站点那两份派生物没对上。**分开说**：把这两件事混成一句
-        #   "装插件失败"，管理员会去重装那个已经装好了的包。
-        print("★ 插件包**已经装好**了，但站点的配置/作业脚本没能对齐（原因见上）"
-              "—— 在它们对上之前，这个插件可能起不来或提交不了。", file=sys.stderr)
+        # 包装好了，而站点那两份派生物没对上。分开说：把这两件事混成一句"装插件
+        # 失败"，管理员会去重装那个已经装好了的包。
+        print("插件包已经装好了，但站点的配置/作业脚本没能对齐（原因见上）。"
+              "在它们对上之前，这个插件可能起不来或提交不了。", file=sys.stderr)
         return src
-    # ★ 装好了、配置也对齐了 ⇒ 让守护进程**重读一遍**（热重载），而不是重跑一次
-    #   基座安装脚本（stop + start）—— 那样所有人的会话要断一次，就为了加一个插件。
+    # 装好了、配置也对齐了，就让守护进程重读一遍（热重载），而不是重跑一次基座
+    # 安装脚本（stop + start）：那样所有人的会话要断一次，就为了加一个插件。
     reload_daemon()
     return 0
 
 
 def cmd_plugin_uninstall(args):
-    """`slurmate plugin uninstall <id>…` —— 把插件从本站卸掉。
+    """`slurmate plugin uninstall <id>…`：把插件从本站卸掉。
 
-    ★ 卸掉的四处痕迹（包 / 它那份配置 / 它那份作业脚本 / 站点侧那条签名者记录）
-      由守护进程的 `uninstall_plugins()` 一处说了算 —— 与安装对称，都是"唯一
-      入口"。CLI 这一层只负责找到那份脚本、把参数转过去。
+    卸掉的四处痕迹（包 / 它那份配置 / 它那份作业脚本 / 站点侧那条签名者记录）由
+    守护进程的 `uninstall_plugins()` 一处说了算，与安装对称，都是唯一入口。CLI
+    这一层只负责找到那份脚本、把参数转过去。
     """
     if os.geteuid() != 0:
         print("卸插件要动 <prefix>/share/slurmate/ 与 %s.d/，所以要 root：\n"
@@ -261,7 +261,7 @@ def cmd_plugin_uninstall(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s —— 卸载的判据在它里面。\n"
+        print("找不到守护进程脚本 %s，卸载的判据在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
               "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
@@ -280,20 +280,22 @@ def cmd_plugin_uninstall(args):
         print("启动卸载器失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if rc == 0:
-        # ★ 卸掉一个插件会删掉它那一份配置 ⇒ 让守护进程重读一遍（见 reload_daemon）。
-        #   不说这一句的话，表现是"卸了但它好像还在" —— 直到下次重启才消失。
+        # 卸掉一个插件会删掉它那一份配置，所以要让守护进程重读一遍（见
+        # reload_daemon）。不说这一句的话，表现是"卸了但它好像还在"，直到下次
+        # 重启才消失。
         reload_daemon()
     return rc
 
 
 def cmd_plugin_sync(args):
-    """`slurmate plugin sync` —— 把站点的两份派生物与插件目录对齐。
+    """`slurmate plugin sync`：把站点的两份派生物与插件目录对齐。
 
-    ★ 它**不装也不卸任何插件**，只对账：某个插件的那份配置（`<ULID>.conf`）或
-      作业脚本（`<ULID>.sbatch`）在而插件没了 ⇒ 删掉；装了而没有配置的 ⇒ 写一份；
-      有作业侧的 ⇒ 织一份作业脚本。见守护进程的 `sync_plugins()`。
-      ★ "插件没了"的判据是 `<ULID>/` 那一棵树 —— 管理员直接
-      `rm -r` 掉它（或者用 `slurmate plugin uninstall`）之后，就是跑这一条。
+    它不装也不卸任何插件，只对账：某个插件的那份配置（`<ULID>.conf`）或作业脚本
+    （`<ULID>.sbatch`）在而插件没了，就删掉；装了而没有配置的，就写一份；有作业侧
+    的，就织一份作业脚本。见守护进程的 `sync_plugins()`。
+
+    "插件没了"的判据是 `<ULID>/` 那一棵树。管理员直接 `rm -r` 掉它（或者用
+    `slurmate plugin uninstall`）之后，就是跑这一条。
     """
     if os.geteuid() != 0:
         print("对齐要写 %s.d/ 与作业脚本目录，所以要 root：\n"
@@ -304,7 +306,7 @@ def cmd_plugin_sync(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s —— 对账的判据在它里面。\n"
+        print("找不到守护进程脚本 %s，对账的判据在它里面。\n"
               "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
               "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
@@ -321,9 +323,9 @@ def cmd_plugin_sync(args):
         print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if rc == 0:
-        # ★ 对齐动了配置文件 ⇒ 让守护进程重读一遍（见 reload_daemon）。
-        #   否则管理员还得记得"改完要重启"，忘了的后果是"配了但它就是不生效"
-        #   —— 正是这一类症状要消灭的。
+        # 对齐动了配置文件，所以要守护进程重读一遍（见 reload_daemon）。否则
+        # 管理员还得记得"改完要重启"，忘了的后果是"配了但它就是不生效"，而这类
+        # 症状正是要消灭的。
         reload_daemon()
     return rc
 
@@ -363,9 +365,9 @@ def rpc(req, timeout=40.0):
             s.close()
         except OSError:
             pass
-    # ★ 先说"读不下了"，再说"解析不了"。这两件事的症状一样（`json.loads` 都失败），
-    #   但原因差得远：截断的那一份报出来会是「响应不是合法 JSON」，于是下一次有人
-    #   会去查守护进程为什么不响应 —— 而真正的原因是**这个响应本来就很大**。
+    # 先说"读不下了"，再说"解析不了"。这两件事的症状一样（`json.loads` 都失败），
+    # 但原因差得远：截断的那一份报出来会是「响应不是合法 JSON」，于是下一次有人会
+    # 去查守护进程为什么不响应，而真正的原因是这一条响应本来就很大。
     #
     #   什么响应会这么大：`plugin_package` 一次发一整个包（base64 之后还要大三分
     #   之一），或者插件多得那份逐文件的清单本身就装不下。所以出路是"少装几个插件
@@ -375,10 +377,10 @@ def rpc(req, timeout=40.0):
                        "守护进程的响应超过了 %d 字节，这一条读不完整。\n"
                        "多半是插件的整包太大（`plugin_package` 一次发一整个包，"
                        "base64 之后还要大三分之一）。\n"
-                       "这不是守护进程没响应 —— 是这一条应答本身超出了 CLI 的读取"
+                       "这不是守护进程没响应，是这一条应答本身超出了 CLI 的读取"
                        "上限。\n"
                        "要真的放宽，得同时抬这里的 RPC_MAX_RESPONSE_BYTES 与守护"
-                       "进程的 PLUGIN_PACKAGE_MAX_BYTES —— 只抬一边等于把这句话往后"
+                       "进程的 PLUGIN_PACKAGE_MAX_BYTES。只抬一边等于把这句话往后"
                        "挪一格。" % RPC_MAX_RESPONSE_BYTES)
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
@@ -440,7 +442,7 @@ def _code_to_exit(resp):
 
 
 def _human_bytes(n):
-    """给人看的字节数。守护进程那一侧有一份同名的，两边都是给人看输出的 —— 它们是
+    """给人看的字节数。守护进程那一侧有一份同名的，两边都是给人看输出的。它们是
     两个独立安装的程序（CLI 在 <prefix>/bin，守护进程在 <prefix>/sbin），不共享模块，
     所以这点重复是布局带来的，不是抄漏了。"""
     try:
@@ -468,16 +470,16 @@ def human_state(state):
 
 
 def parse_gres_spec(s):
-    """`--gres` 的取值 → 描述符。**写法就是 sbatch 那个**：`名字[:型号]:数量`。
+    """`--gres` 的取值 → 描述符。写法就是 sbatch 那个：`名字[:型号]:数量`。
 
-    空串 = 没要（返回 `(None, None)`）。这里只做**拆词**，不判名字合不合法 ——
-    那是服务端的事（它不认识的一切都会拒），而且拒的那句话由服务端说，
-    两边各写一套判断就会漂成"这里放过去了、那边说不认识"。
+    空串 = 没要（返回 `(None, None)`）。这里只做拆词，不判名字合不合法：那是服务端
+    的事（它不认识的一切都会拒），而且拒的那句话由服务端说。两边各写一套判断就会
+    漂成"这里放过去了、那边说不认识"。
 
-    ★ 这个函数与守护进程的 `gres_spec()` 是一对（一个拆、一个拼）。它们住在两个
-      文件里，因为 CLI 与守护进程是**两个独立安装的程序**（见 _human_bytes 那段
-      说明）。一对拆/拼会漂开，所以 `cluster/test-sessiond-logic.py` 里有一条
-      往返用例把两个文件都抠出来真跑。
+    这个函数与守护进程的 `gres_spec()` 是一对（一个拆、一个拼），住在两个文件里，
+    因为 CLI 与守护进程是两个独立安装的程序（见 `_human_bytes` 那段说明）。一对
+    拆/拼会漂开，所以 `cluster/test-sessiond-logic.py` 里有一条往返用例把两个文件
+    都抠出来真跑。
     """
     s = (s or "").strip()
     if not s:
@@ -498,11 +500,11 @@ def parse_gres_spec(s):
 def gres_label(g):
     """描述符 → 名字（不含数量）：`gpu` 或 `gpu:a100`。
 
-    ★ 守护进程里有一份同名的。两边是**两个独立安装的程序**（CLI 在 <prefix>/bin、
-      守护进程在 <prefix>/sbin），不共享模块 —— 与 `_human_bytes` 同一情形。
-      要盯的不是这两份（它们只是给人看的字），而是**拆词与拼词那一对**：
-      `parse_gres_spec()` 与守护进程的 `gres_spec()` 必须互相认得，
-      `cluster/test-sessiond-logic.py` 里有一条往返用例把两个文件都抠出来真跑。
+    守护进程里有一份同名的。两边是两个独立安装的程序（CLI 在 <prefix>/bin、守护
+    进程在 <prefix>/sbin），不共享模块，与 `_human_bytes` 同一情形。要盯的不是
+    这两份（它们只是给人看的字），而是拆词与拼词那一对：`parse_gres_spec()` 与
+    守护进程的 `gres_spec()` 必须互相认得，`cluster/test-sessiond-logic.py` 里有
+    一条往返用例把两个文件都抠出来真跑。
     """
     if not isinstance(g, dict) or not g.get("name"):
         return "?"
@@ -593,35 +595,34 @@ def cmd_rpc(args):
 def cmd_stream(args):                                          # noqa: ARG001
     """常驻通道：把 stdin 的一行行请求转给守护进程，把它吐的每一行写回 stdout。
 
-        stdin   一行一条请求（**可以带 `rid`**，带了的才会收到推送）
+        stdin   一行一条请求（可以带 `rid`，带了的才会收到推送）
         stdout  一行一条：响应带 `rid`，通知带 `seq`
 
-    ★★ 它是一个**字节泵**，不是第二套协议实现：不解析、不校验、不重排、
-      **不做任何用户态缓冲**（读多少写多少）。
+    它是一个字节泵，不是第二套协议实现：不解析、不校验、不重排、不做任何用户态
+    缓冲（读多少写多少）。
 
-      "不做用户态缓冲"是整条背压链上唯一可能引入无界缓冲的地方，所以它必须
-      没有。链条这样闭合：
+    "不做用户态缓冲"是整条背压链上唯一可能引入无界缓冲的地方，所以它必须没有。
+    链条这样闭合：
 
-          客户端不读 stdout
-            ⇒ 本进程阻塞在 write(1)            （内核管道缓冲满）
-            ⇒ 它不再 read(socket)              （单线程，顺序执行）
-            ⇒ 守护进程的 send 拿到 EAGAIN
-            ⇒ 它按水位丢**推送**（响应绝不丢）
+        客户端不读 stdout
+          → 本进程阻塞在 write(1)            （内核管道缓冲满）
+          → 它不再 read(socket)              （单线程，顺序执行）
+          → 守护进程的 send 拿到 EAGAIN
+          → 它按水位丢推送（响应绝不丢）
 
-      中间任何一级加了队列，这条链就断了，而断掉的症状是"内存慢慢涨" ——
-      指不回任何一行。
+    中间任何一级加了队列，这条链就断了，而断掉的症状是"内存慢慢涨"，指不回任何
+    一行。
 
-    ★ 它**不加限速**：它以用户自己的身份跑，限自己防不了任何东西；而"一个判据
-      两处实现会漂"，漂的方向是心跳发不出去 ⇒ 被判定孤儿 ⇒ scancel。
-      限流的权威位置只有守护进程那一处。
+    它不加限速：它以用户自己的身份跑，限自己防不了任何东西；而"一个判据两处实现
+    会漂"，漂的方向是心跳发不出去、被判定孤儿、scancel。限流的权威位置只有守护
+    进程那一处。
 
-    ★ 它**不加空闲超时**：它不理解心跳的语义（谁在心跳、多久算超时，是
-      session.js 的事）。按"多久没说话"在这里关连接，会在用户只是停下来看
-      界面的时候把通道掐掉。
+    它不加空闲超时：它不理解心跳的语义（谁在心跳、多久算超时，是 session.js 的
+    事）。按"多久没说话"在这里关连接，会在用户只是停下来看界面的时候把通道掐掉。
 
-    ★ 两个方向的限长**不一样**（请求 64 KiB / 响应 4 MiB），但这里一条都不实现
-      —— 请求那一侧由守护进程的 `CONN_IN_MAX` 管，响应那一侧由
-      `RPC_MAX_RESPONSE_BYTES` 管。此处再加一遍就是第三份真相。
+    两个方向的限长不一样（请求 64 KiB / 响应 4 MiB），但这里一条都不实现：请求那
+    一侧由守护进程的 `CONN_IN_MAX` 管，响应那一侧由 `RPC_MAX_RESPONSE_BYTES` 管。
+    此处再加一遍就是第三份真相。
     """
     path = socket_path()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -637,7 +638,7 @@ def cmd_stream(args):                                          # noqa: ARG001
     except OSError as e:
         sys.stderr.write("连接守护进程失败（%s）：%s\n" % (path, e))
         return EXIT_NODAEMON
-    # 连上之后**不再有超时**：这是一条常驻通道，空闲是正常的。
+    # 连上之后不再有超时：这是一条常驻通道，空闲是正常的。
     s.settimeout(None)
 
     sel = selectors.DefaultSelector()
@@ -653,9 +654,9 @@ def cmd_stream(args):                                          # noqa: ARG001
                     except OSError:
                         data = b""
                     if not data:
-                        # stdin 关了（客户端退出）。**半关，不是断开** ——
-                        # 已经发出去的请求还要把响应收回来，而守护进程那边
-                        # 正是靠"半关 ≠ 断线"把响应写完的。
+                        # stdin 关了（客户端退出）。半关，不是断开：已经发出去的
+                        # 请求还要把响应收回来，而守护进程那边正是靠"半关 ≠
+                        # 断线"把响应写完的。
                         try:
                             sel.unregister(0)
                         except (KeyError, ValueError):
@@ -674,11 +675,11 @@ def cmd_stream(args):                                          # noqa: ARG001
                         sys.stderr.write("与守护进程的通道断了：%s\n" % e)
                         return EXIT_NODAEMON
                     if not data:
-                        # ★ 两种"对面关了"要分开：
-                        #   · 我们自己先半关过（客户端收摊了）⇒ 这是**正常的终点**，
+                        # 两种"对面关了"要分开：
+                        #   · 我们自己先半关过（客户端收摊了），这是正常的终点，
                         #     退出码 0。守护进程会在 EOF_LINGER 之后把这半条关掉，
                         #     所以走到这里就是"该发的都发完了"。
-                        #   · 没半关过 ⇒ 守护进程不在了，报 5 让客户端去重连。
+                        #   · 没半关过，就是守护进程不在了，报 5 让客户端去重连。
                         if not in_closed:
                             sys.stderr.write("守护进程关闭了通道\n")
                             return EXIT_NODAEMON
@@ -687,7 +688,7 @@ def cmd_stream(args):                                          # noqa: ARG001
     except KeyboardInterrupt:
         return EXIT_OK
     except BrokenPipeError:
-        # stdout 没了（客户端进程退出了）。**不是错误** —— 走的人不需要解释。
+        # stdout 没了（客户端进程退出了）。不是错误：走的人不需要解释。
         return EXIT_OK
     finally:
         try:
@@ -701,11 +702,11 @@ def cmd_stream(args):                                          # noqa: ARG001
 
 
 def _write_all(fd, data):
-    """往一个**阻塞** fd 写完。写不完就一直写 —— 这就是背压本身。
+    """往一个阻塞 fd 写完。写不完就一直写，这就是背压本身。
 
-    ★ 不用 `print` / `sys.stdout`：那是带缓冲的文本层，而这条通道上跑的是
-      **字节**（一行 JSON，可能很长）。文本层会引入一层用户态缓冲，
-      正是上面那条链要避免的东西。
+    不用 `print` / `sys.stdout`：那是带缓冲的文本层，而这条通道上跑的是字节
+    （一行 JSON，可能很长）。文本层会引入一层用户态缓冲，正是上面那条链要避免
+    的东西。
     """
     view = memoryview(data)
     while view:
@@ -727,7 +728,7 @@ def cmd_whoami(args):
     if d.get("can_submit"):
         print("计算账户  : %s" % d.get("account"))
     else:
-        print("计算账户  : 无 —— %s" % (d.get("account_error") or "未分配"))
+        print("计算账户  : 无（%s）" % (d.get("account_error") or "未分配"))
     ap = d.get("allowed_partitions")
     print("可用分区  : %s" % ("不限" if ap is None else ", ".join(ap)))
     return 0
@@ -744,8 +745,8 @@ def cmd_partitions(args):
     print("-" * 86)
     for p in d["partitions"]:
         mark = "" if p.get("allowed") else "  [无权限]"
-        # GRES 那一列**三态**，与协议同一条规矩：`gres` 这个键不存在 = 服务端
-        # 查不到（它没有说"这个分区没有卡"的资格），`[]` = 确实一个都没配。
+        # GRES 那一列三态，与协议同一条规矩：`gres` 这个键不存在 = 服务端查不到
+        # （它没有说"这个分区没有卡"的资格），`[]` = 确实一个都没配。
         if "gres" not in p:
             gres = "（查不到）"
         else:
@@ -755,9 +756,9 @@ def cmd_partitions(args):
               % (p["name"], "是" if p.get("is_default") else "",
                  p.get("max_time") or "无上限", gres, p.get("reason", ""), mark))
     print()
-    print("GRES 那一列是**每个节点**最多几个（`--gres` 就是按节点算的）。")
+    print("GRES 那一列是每个节点最多几个（`--gres` 就是按节点算的）。")
     print("不指定 --partition 时，会从有权限的分区里随机挑一个。")
-    print("缺省资源是**按插件**的，见 `slurmate plugins`。")
+    print("缺省资源是按插件的，见 `slurmate plugins`。")
     return 0
 
 
@@ -768,32 +769,33 @@ def cmd_plugins(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    # ★ 缺省资源那一列比别的宽：它现在装四样（核 / 内存 / 时限 / 卡），因为它们
-    #   回答的是**同一个问题**（"这个插件缺省给多少"）。分成几列的话，管理员问
-    #   "这个插件缺省配的什么"就要横着读几个地方。
+    # 缺省资源那一列比别的宽：它装四样（核 / 内存 / 时限 / 卡），因为它们回答的
+    # 是同一个问题（"这个插件缺省给多少"）。分成几列的话，管理员问"这个插件缺省
+    # 配的什么"就要横着读几个地方。
     print("%-14s %-8s %-9s %-30s %-10s %s"
           % ("插件", "状态", "版本", "缺省资源", "分发", "说明"))
     print("-" * 104)
-    # 「本站支不支持分发」的判据是**顶层有没有 `limits`**（见守护进程 `op_plugins`
+    # 「本站支不支持分发」的判据是顶层有没有 `limits`（见守护进程 `op_plugins`
     # 的注释）。
     _has_delivery = isinstance(d.get("limits"), dict)
     for p in d["plugins"]:
         df = p.get("defaults") or {}
-        # ★★ 分发那一列（账本 **F37**）：判据是顶层 `limits` + 这一项的 `package`
-        #   （三态：老守护进程 / 支持但这一份的包不见了 / 有一份包）。★ 判据选错的
-        #   后果是：这一列会对**每一个**站点都显示 `—`（连最新那一个也说"这一版守护
-        #   进程不支持分发"）—— 一句系统并不知道的话，与这个仓库一路在清的是同一类。
+        # 分发那一列（账本 F37）：判据是顶层 `limits` 加这一项的 `package`，三态
+        # 是「老守护进程 / 支持但这一份的包不见了 / 有一份包」。判据选错的后果是：
+        # 这一列会对每一个站点都显示 `—`（连最新那一个也说"这一版守护进程不支持
+        # 分发"），一句系统并不知道的话。
         if not _has_delivery:
             _deliv = "—"
         elif p.get("package") is None:
             _deliv = "缺"
         else:
             _deliv = "1 个包"
-        # ★ 时限那一格在**老守护进程**上是缺席的 ——
-        #   与这一屏其它地方同一个惯例：缺席显示 `?`，不替它编一个值。
-        # ★ 卡那一格相反：**没配就不说**。`null`（本站确实没给这个插件配默认卡）
-        #   与"这一格不在"（老守护进程）在这一屏上是同一句话，而两者都**不是**
-        #   "有卡但数量不明" —— 写一个 `—` 会让人那样读。
+        # 时限那一格在老守护进程上是缺席的，与这一屏其它地方同一个惯例：缺席显示
+        # `?`，不替它编一个值。
+        #
+        # 卡那一格相反：没配就不说。`null`（本站确实没给这个插件配默认卡）与
+        # "这一格不在"（老守护进程）在这一屏上是同一句话，而两者都不是"有卡但数量
+        # 不明"，写一个 `—` 会让人那样读。
         print("%-14s %-8s %-9s %-30s %-10s %s"
               % (p.get("name"), "已启用" if p.get("enabled") else "已停用",
                  p.get("version") or "?",
@@ -802,48 +804,47 @@ def cmd_plugins(args):
                      (" / " + gres_text(df["gpus"])) if df.get("gpus") else ""),
                  _deliv, p.get("title") or ""))
 
-    # ★★ 那些**没能加载**的包（账本 **F22**）必须出现在这一屏上 —— 否则这一屏
-    #   说的就是"本站有这几个插件"，而真相是"另外还有几个因为撞名/撞 id 没被
-    #   加载"。少了这一段，运维看到的是"本站没有这个插件"，方向从第一步就错了。
+    # 那些没能加载的包（账本 F22）必须出现在这一屏上，否则这一屏说的就是"本站有
+    # 这几个插件"，而真相是"另外还有几个因为撞名/撞 id 没被加载"。少了这一段，
+    # 运维看到的是"本站没有这个插件"，方向从第一步就错了。
     _probs = d.get("problems") or []
     if _probs:
         print()
-        print("★ 本站有 %d 个插件**没能加载**（它们不在上面的表里）：" % len(_probs))
+        print("本站有 %d 个插件没能加载（它们不在上面的表里）：" % len(_probs))
         for _x in _probs:
             print("  · %s" % _x)
     if not d["plugins"]:
-        # ★ 零插件是**合法状态**，不是"这台机器坏了"。所以这里给的是出路，
-        #   不是故障描述 —— 而 99% 的人看到"一个都没有"时的第一个问题是"那我
-        #   该往哪放"，所以答案必须在这一屏里。
+        # 零插件是合法状态，不是"这台机器坏了"。所以这里给的是出路，不是故障
+        # 描述：看到"一个都没有"时的第一个问题就是"该往哪放"，答案必须在这一屏里。
         print("  （本站没有安装任何插件）")
         print()
         print("这是合法状态：守护进程照常运行，已有会话照常能查、能停，")
         print("只是没有可提交的服务。装插件：")
         print("  sudo slurmate plugin install <作者发布的 .splug>")
         print("  或者从一个目录整批对齐：sudo slurmate plugin install --from <目录>")
-        # ★ 站点上的插件只能是一个包：把源码树目录直接放进去会被（正确地）拒绝 ——
-        #   装出来的是**一棵树 + 一份记录表**（`<ULID>/` 与 `<ULID>.json`），
-        #   容器只在两段运输里活着，站点盘上不留它。
-        print("站点上的插件是**一棵树 + 一份记录表**（`<ULID>/` 与 `<ULID>.json`）：")
+        # 站点上的插件只能是一个包：把源码树目录直接放进去会被（正确地）拒绝。
+        # 装出来的是一棵树加一份记录表（`<ULID>/` 与 `<ULID>.json`），容器只在
+        # 两段运输里活着，站点盘上不留它。
+        print("站点上的插件是一棵树加一份记录表（`<ULID>/` 与 `<ULID>.json`）：")
         print("  · 源码树直接放上去会被拒绝（它没有记录表，也不该有）；")
         print("  · 包（.splug）要在作者那边用 packer build 打出来，再 plugin install；")
-        print("  · 装完之后那个包**不在盘上**了 —— 容器只是运输形状。")
+        print("  · 装完之后那个包不在盘上了，容器只是运输形状。")
         return 0
     print()
     print("只有【已启用】的插件能提交（slurmate submit --service-kind <名字>）。")
-    print("缺省资源由服务端定并在提交时钳制 —— 客户端不填这些值。")
-    # 「分发」那一列的口径写出来：它**只对已启用的插件有意义**（客户端只来取
-    # 启用的那些），而 `—` 表示这一版守护进程不支持分发，不是一个数字。
+    print("缺省资源由服务端定并在提交时钳制，客户端不填这些值。")
+    # 「分发」那一列的口径写出来：它只对已启用的插件有意义（客户端只来取启用的
+    # 那些），而 `—` 表示这一版守护进程不支持分发，不是一个数字。
     if _has_delivery:
-        # ★ **只有一条投递方式**：整包一次取走。
-        print("「分发」= 客户端连上之后要把**整个包**取走一次（只取已启用的；")
-        print("  而这个包是站点从盘上那棵树**现打**的 —— 盘上没有现成的容器）。")
+        # 只有一条投递方式：整包一次取走。
+        print("「分发」= 客户端连上之后要把整个包取走一次（只取已启用的；")
+        print("  而这个包是站点从盘上那棵树现打的，盘上没有现成的容器）。")
         print("  单份上限 %s，另有份数与总量上限；客户端取两边的更严者。"
               % _human_bytes(d["limits"].get("file_bytes")))
         _pb = d["limits"].get("package_bytes")
         if isinstance(_pb, int):
-            print("  整包上限 %s —— 它是**链路**上的约束（base64 之后要装进一条"
-                  "应答），与上面那三个负载内的上限不是一个口径。"
+            print("  整包上限 %s，它是链路上的约束（base64 之后要装进一条应答），"
+                  "与上面那三个负载内的上限不是一个口径。"
                   % _human_bytes(_pb))
     else:
         print("「分发」显示为 — ：这一版守护进程不支持插件分发"
@@ -856,8 +857,8 @@ def cmd_plugins(args):
 
 def cmd_submit(args):
     # 所有字段都是可选的：不传 = 让服务端用它的默认值（2 核 / 8G / 随机分区）。
-    # 这里【不】替服务端填默认值 —— 客户端填了就等于客户端说了算，
-    # 而"省略字段"必须表达"用你的默认"，不是"我要 0 核"。
+    # 这里【不】替服务端填默认值：客户端填了就等于客户端说了算，而"省略字段"
+    # 必须表达"用你的默认"，不是"我要 0 核"。
     req = {"op": "submit"}
     if args.partition:
         req["partition"] = args.partition
@@ -865,9 +866,9 @@ def cmd_submit(args):
         req["cpus"] = args.cpus
     if args.mem:
         req["mem"] = args.mem
-    # ★ `--no-gres` 发的是**显式 `null`**，与"没写 `--gres`"是两件事：
-    #   不写 = 用**这个插件的** `default_gpus`；写了 `--no-gres` = 不占，盖过它。
-    #   （两者互斥由 argparse 的 add_mutually_exclusive_group 保证。）
+    # `--no-gres` 发的是显式 `null`，与"没写 `--gres`"是两件事：不写 = 用这个
+    # 插件的 `default_gpus`；写了 `--no-gres` = 不占，盖过它。（两者互斥由
+    # argparse 的 add_mutually_exclusive_group 保证。）
     if args.no_gres:
         req["gres"] = None
     elif args.gres:
@@ -897,11 +898,11 @@ def cmd_submit(args):
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
                                 "，%s" % gt if gt else ""))
     if d.get("warning"):
-        # 服务端替用户做了决定（截断时间、回退内存、没按他以为的方式挑分区）
-        # 时必须说出来 —— 静默地替他决定，他会以为自己要到了。
+        # 服务端替用户做了决定（截断时间、回退内存、没按他以为的方式挑分区）时
+        # 必须说出来：静默地替他决定，他会以为自己要到了。
         print("[注意] %s" % d["warning"], file=sys.stderr)
     print()
-    print("下一步：等待调度完成后即可连接 ——")
+    print("下一步：等待调度完成后即可连接。")
     print("  slurmate wait --session %s" % d.get("session_id"))
     return 0
 
@@ -972,7 +973,7 @@ def cmd_wait(args):
                 print("就绪：隧道目标 %s" % s["tunnel_target"])
                 if s.get("auth_password"):
                     # 只有需要口令的插件才有这个字段（中转站走公钥，永远没有口令）。
-                    # 这里不写死插件名 —— 加第三个插件时它不该变成一句谎话。
+                    # 这里不写死插件名：加第三个插件时它不该变成一句谎话。
                     print("会话口令 %s（%s）"
                           % (s["auth_password"], s.get("service_kind") or "?"))
             return 0
@@ -1006,9 +1007,9 @@ def _simple(req, args, okmsg):
     if not isinstance(r, dict):
         return 1
     print("%s（状态: %s）" % (okmsg, human_state(r["data"].get("state"))))
-    # ★ 协议里 `warning` 这个字段存在的**唯一**理由就是被显示出来 —— 命令行也是
-    #   客户端。`goodbye` 用它说"这一次 scancel 没成功，我在继续重试"，
-    #   而那句话没人看见的话，用户就会以为作业已经停了。
+    # 协议里 `warning` 这个字段存在的唯一理由就是被显示出来，命令行也是客户端。
+    # `goodbye` 用它说"这一次 scancel 没成功，我在继续重试"，而那句话没人看见的
+    # 话，用户就会以为作业已经停了。
     _w = r["data"].get("warning")
     if _w:
         print("[注意] %s" % _w, file=sys.stderr)
@@ -1033,7 +1034,7 @@ def cmd_doctor(args):
     print("  规则与会话一致     : %s" % (ok if d.get("consistent") else bad))
     print("  端口池             : %s-%s" % tuple(d.get("port_range", ["?", "?"])))
     ex = d.get("existing") or {}
-    print("  --- 现有系统（只读体检，本系统不碰它们）---")
+    print("  --- 现有系统（只读检查，本系统不碰它们）---")
     print("    控制节点 inet codeserver 表 : %s"
           % (ok if ex.get("codeserver_table") else bad))
     print("    port-daemon DNAT 表        : %s"
@@ -1083,7 +1084,7 @@ def cmd_gc(args):
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="slurmate",
-        description="Slurmate — 远程开发会话管理（客户端请用 `slurmate rpc`）")
+        description="Slurmate：远程开发会话管理（客户端请用 `slurmate rpc`）")
     ap.add_argument("--version", action="version", version=VERSION)
     sub = ap.add_subparsers(dest="cmd")
 
@@ -1095,26 +1096,26 @@ def build_parser():
     p = add("rpc", cmd_rpc, "从 stdin 读 JSON 请求、向 stdout 写 JSON 响应（客户端入口）")
 
     # 常驻版：一条连接上可以问很多次，服务端还会主动说。老客户端继续用 rpc，
-    # 两者是**同一个状态机**，差别只在客户端什么时候关（见守护进程的 Conn）。
+    # 两者是同一个状态机，差别只在客户端什么时候关（见守护进程的 Conn）。
     p = add("stream", cmd_stream,
             "常驻通道：stdin 一行一条请求、stdout 一行一条（响应带 rid，通知带 seq）")
 
-    # `plugin` 是一个**管理**动词（要 root），与其余那些用户动词不是一类 ——
-    # 所以它有自己的一层子命令，而不是 `slurmate install-plugin` 这样一个动词名。
+    # `plugin` 是一个管理动词（要 root），与其余那些用户动词不是一类，所以它有
+    # 自己的一层子命令，而不是 `slurmate install-plugin` 这样一个动词名。
     p = add("plugin", None, "管理本站的插件（装包；要 root）")
     psub = p.add_subparsers(dest="plugin_cmd")
     pi = psub.add_parser("install", help="把作者发布的 .splug 装到本站")
     pi.add_argument("files", nargs="*", metavar="包",
                     help="一个或多个 .splug 文件（作者 `packer build` 的产物）")
     pi.add_argument("--from", dest="from_dir", default=None, metavar="目录",
-                    help="**目录模式**：这次要装的整批包取自这个目录，而站点的"
-                         "插件集合随之对齐 —— 上一次由本模式装过、这次目录里没有"
-                         "了的包会被卸掉。空目录合法（= 本站一个插件都没有）")
+                    help="目录模式：这次要装的整批包取自这个目录，站点的插件集合"
+                         "随之对齐。上一次由本模式装过、这次目录里没有了的包会被"
+                         "卸掉。空目录合法（= 本站一个插件都没有）")
     pi.add_argument("--plugins-dir", default="",
                     help="装到这个目录而不是安装目录（排查用；此时不动站点配置）")
     pi.add_argument("--replace-key", default=None, metavar="旧指纹",
                     help="确认「这个 id 换了签名者」（§2.5）。取值必须是记录里"
-                         "那把旧指纹 —— 确认要有依据，不是随手加一个开关")
+                         "那把旧指纹。确认要有依据，不是随手加一个开关")
     pi.add_argument("--config", default="",
                     help="站点配置文件。省略 = 用守护进程的缺省路径"
                          "（/etc/slurmate/slurmate.conf）")
@@ -1122,10 +1123,10 @@ def build_parser():
 
     pu = psub.add_parser("uninstall", help="把插件从本站卸掉")
     pu.add_argument("ids", nargs="*", metavar="id",
-                    help="插件的 id（26 位 ULID —— 是**身份**，不是短名）。"
+                    help="插件的 id（26 位 ULID，是身份不是短名）。"
                          "看本站装了哪些：`slurmate plugins`")
     pu.add_argument("--all", action="store_true",
-                    help="卸掉本站的**全部**插件（不给 id）")
+                    help="卸掉本站的全部插件（不给 id）")
     pu.add_argument("--plugins-dir", default="",
                     help="用这个插件目录而不是安装目录（排查用）")
     pu.add_argument("--config", default="",
@@ -1160,18 +1161,18 @@ def build_parser():
     _gres = p.add_mutually_exclusive_group()
     _gres.add_argument("--gres",
                        help="要哪种 GRES、几个，写法同 sbatch：名字[:型号]:数量，"
-                            "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 用**该插件**"
+                            "例如 gpu:2 / gpu:a100:2 / mps:100。省略 = 用该插件"
                             "的默认（`slurmate plugins` 那一列）。"
                             "本站有哪些、每个节点最多几个，看 `slurmate partitions`")
     _gres.add_argument("--no-gres", action="store_true",
-                       help="明确**不占** GRES，盖过该插件的默认 —— 与"
+                       help="明确不占 GRES，盖过该插件的默认，与"
                             "「没写 --gres」是两件事")
     p.add_argument("--time",
                    help="时间上限，如 12:00:00（省略 = 该插件的缺省时限；"
                         "到期会自动续期）")
     p.add_argument("--service-kind",
                    help="插件名。见 `slurmate plugins`。省略时用配置里的 "
-                        "default_plugin；没配就是必填（没有内建缺省 —— 隐式缺省"
+                        "default_plugin；没配就是必填（没有内建缺省，隐式缺省"
                         "会让装/卸一个插件悄悄改变行为）")
     p.add_argument("--ssh-pubkey",
                    help="一行 ssh-ed25519 公钥。清单元数据里要求公钥的插件"
