@@ -19,26 +19,26 @@
  * ── 这一节推翻了一个很自然但错误的设想 ────────────────────────────────────
  *
  * 直觉方案是「用 before-input-event 拦下 Ctrl+W，再转发给 code-server」。
- * **这在 API 语义上做不到。** Electron 文档原文：调用 `event.preventDefault()`
- * 会阻止页面的 keydown/keyup **和**菜单加速键 —— 两者一起掐，不存在「只拦浏览器
+ * 这在 API 语义上做不到。Electron 文档原文：调用 `event.preventDefault()`
+ * 会阻止页面的 keydown/keyup 和菜单加速键 —— 两者一起掐，不存在「只拦浏览器
  * 默认行为、把按键继续交给页面」这回事。
  *
- * 而好消息是：**根本不需要拦。** Ctrl+W / Ctrl+R / F5 在 Electron 里没有默认行为，
+ * 而好消息是：根本不需要拦。Ctrl+W / Ctrl+R / F5 在 Electron 里没有默认行为，
  * 它们全部挂在菜单项的 role 上。Electron 不是 Chrome，没有标签页，所以
- * 「浏览器抢走 Ctrl+W 关掉页面」这个痛点**在 Electron 里自动消失**。
+ * 「浏览器抢走 Ctrl+W 关掉页面」这个痛点在 Electron 里自动消失。
  *
- * 所以 `before-input-event` 的职责只剩一件：**吞掉我们永远不想要的键**。
+ * 所以 `before-input-event` 的职责只剩一件：吞掉我们永远不想要的键。
  * 默认方向是放行，黑名单尽量短 —— 每加一条就多一份吃掉输入法/吃掉快捷键的风险。
  *
  * ── 菜单为什么不能一律置 null ──────────────────────────────────────────────
  *
  * `Menu.setApplicationMenu(null)` 在 Windows/Linux 上是对的（去掉全部加速键，
- * 键盘完全交给页面）。但在 **macOS 上会让 Cmd+C/V/Q 直接失效** —— 那些功能硬依赖
+ * 键盘完全交给页面）。但在 macOS 上会让 Cmd+C/V/Q 直接失效 —— 那些功能硬依赖
  * 菜单 role。所以 macOS 走一条最小菜单。
  *
  * ── 输入法 ─────────────────────────────────────────────────────────────────
  *
- * 拦截器的第一行**必须**是 `if (input.isComposing) return;`。否则拼音输入过程中
+ * 拦截器的第一行必须是 `if (input.isComposing) return;`。否则拼音输入过程中
  * 的按键会被吞掉，中文输入法直接废掉 —— 这是这类拦截器最经典的事故。
  */
 
@@ -47,7 +47,7 @@ const { Menu } = require('electron');
 /**
  * 黑名单：这些键永远不给页面、也不给菜单。
  *
- * 刻意**不含**缩放键（Ctrl+= / Ctrl+- / Ctrl+0）：它们没有菜单 role 就没有默认行为，
+ * 刻意不含缩放键（Ctrl+= / Ctrl+- / Ctrl+0）：它们没有菜单 role 就没有默认行为，
  * 而 VS Code 自己绑了它们（编辑器缩放）。多拦一条就会把编辑器的缩放抢走。
  *
  * 同理不含 Ctrl+P（VS Code 的快速打开）、Ctrl+W（关闭编辑器）、Ctrl+R / F5。
@@ -75,10 +75,10 @@ function normalizeKey(input) {
 /**
  * 光秃秃的修饰键本身（Ctrl / Shift / Alt / Meta）。
  *
- * ★ 这个判断存在，是因为按住 Ctrl 会**连续**产生 keyDown（操作系统的自动重复），
+ * 这个判断存在，是因为按住 Ctrl 会连续产生 keyDown（操作系统的自动重复），
  *   每一次的 `input.key` 都是 'Control' —— 于是诊断日志里刷满
  *   「已放行：Ctrl+Control」。用户按住 Ctrl 是为了配一个组合键，不是为了看这个。
- *   修饰键单独按下**不携带任何信息**：它既没有被吞掉的可能，也不是一个动作。
+ *   修饰键单独按下不携带任何信息：它既没有被吞掉的可能，也不是一个动作。
  */
 const BARE_MODIFIERS = new Set(['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']);
 
@@ -126,7 +126,7 @@ function describe(input) {
 function installMenu() {
   if (process.platform === 'darwin') {
     // macOS：最小菜单。Cmd+Q / Cmd+C/V 硬依赖菜单 role，无法隐藏。
-    // 但**刻意不放 undo/redo** —— Monaco 有自己的撤销栈，菜单 role 会双重触发。
+    // 但刻意不放 undo/redo —— Monaco 有自己的撤销栈，菜单 role 会双重触发。
     // 复制粘贴就算偶尔重复触发也无害，撤销重复触发是会毁掉用户工作的。
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'appMenu' },
@@ -159,7 +159,7 @@ function installMenu() {
  */
 function attachKeyGuard(wc, opts = {}) {
   const handler = (event, input) => {
-    // ★ 第一行。输入法组合期间必须放行，否则中文输入法会被吃掉。
+    // 第一行。输入法组合期间必须放行，否则中文输入法会被吃掉。
     if (input.isComposing) return;
 
     // 我们自己要处理的键：拦下并执行动作

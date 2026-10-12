@@ -16,18 +16,18 @@
 /**
  * hover.js —— 浮窗那一层（两条边栏滑出来的那块）。
  *
- * 左边 = **站点状态**，右边 = **作业输出**（标准输出 / 标准错误两块）。一次只露一块。
+ * 左边 = 站点状态，右边 = 作业输出（标准输出 / 标准错误两块）。一次只露一块。
  *
- * ★★ **它不自己向后端问话。** 数据由主进程推 —— `op_cluster` 什么时候该问、
+ * 它不自己向后端问话。数据由主进程推 —— `op_cluster` 什么时候该问、
  *    问到了什么、有多旧，都由主进程那一处决定（`index.js` 的 `refreshSite`）。
  *    浮窗自己再拉一次的话，同一份答案就有了第二个取数点，而它与"什么时候该问"
  *    那条判据必然漂开：某一次浮窗里是新的、面板上的圆点是旧的，而两个都在说
  *    "现在"。
  *
- * ★ 开关由主进程说了算（`hover:state`）：收起判据是**鼠标几何**，那在窗口那一层
+ * 开关由主进程说了算（`hover:state`）：收起判据是鼠标几何，那在窗口那一层
  *   （见 windows.js 的 `_startCursorWatch`）。这一页只负责画。
  *
- * ★ 三态是承重的，与服务端逐字同一条规矩：
+ * 三态是承重的，与服务端逐字同一条规矩：
  *     键不在 / `undefined`   = 【取不到】→ `na(...)` 那一行
  *     `null` / `[]` / `{}`    = 【确实没有】
  *   把前者画成后者，用户会去查一个不存在的问题。
@@ -47,10 +47,10 @@ window.hover.onState((m) => {
   const side = open ? m.side : null;
   $('pane-left').classList.toggle('hidden', side !== 'left');
   $('pane-right').classList.toggle('hidden', side !== 'right');
-  // ★ 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
+  // 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
   //   而"打开的那一瞬间是空的"看起来就像坏了。
   if (side === 'left') { renderLink(); renderCluster(); }
-  // ★ 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
+  // 打开时把这一块重画一遍：收起期间推来的数据是丢掉的（没有读者），
   //   而"打开的那一瞬间是空的"看起来就像坏了。
   if (side === 'right') renderOut();
 });
@@ -79,7 +79,7 @@ window.hover.onData((m) => {
 /**
  * 链路那一行。
  *
- * ★ 它与下面那些格子**不是一个时间尺度**：链路状态是主进程**事件驱动**推来的
+ * 它与下面那些格子不是一个时间尺度：链路状态是主进程事件驱动推来的
  *   （后端掉线的那一刻），而集群那一份最多可能旧 5 分钟（服务端的慢钟）。
  *   所以它单独占一行、而且排在最上面 —— 用户第一眼要回答的是"现在还通不通"。
  */
@@ -114,15 +114,15 @@ $('cl-probe').onclick = async () => {
 
 // ── 右栏：作业输出 ────────────────────────────────────────────────────────
 //
-// ★★ **追加式绘制**，不是每轮重画。1.5 秒重画一次会把用户正在拖的选区**当场毁掉**
+// 追加式绘制，不是每轮重画。1.5 秒重画一次会把用户正在拖的选区当场毁掉
 //    —— 而"输出要能选中复制"正是这块浮窗存在的理由之一（另一条是能滚动）。
-//    所以：把这一轮拿到的尾部和**已经画进去的**那一份比对，只把多出来的那几行接上去。
+//    所以：把这一轮拿到的尾部和已经画进去的那一份比对，只把多出来的那几行接上去。
 //
-// ★ 比对的是**行**，而且只往回找 600 行：窗口是"最后 N 行"，两次之间它只滑了几行，
+// 比对的是行，而且只往回找 600 行：窗口是"最后 N 行"，两次之间它只滑了几行，
 //   所以重叠一定在末尾附近。找不到重叠（文件被截断过、换过一份）就整块重画 ——
 //   那一次会毁掉选区，但它罕见，而"接错了"会把两段不相干的日志粘在一起。
 //
-// ★ **末尾那半行不画**：文件可能正被写到一半，最后一行还没有换行符。画出去的话，
+// 末尾那半行不画：文件可能正被写到一半，最后一行还没有换行符。画出去的话，
 //   下一次它就会以完整的样子再出现一遍（重复），而且中间那一刻显示的是半句话。
 //   与服务端那边"丢掉窗口开头那半行"是同一条规矩的两头。
 const OUT_MAX_LINES = 4000;
@@ -157,7 +157,7 @@ function paintHalf(box, text) {
   }
 
   if (k < 0) {
-    // 接不上（第一次、或者文件被截断/换过）⇒ 整块重画。
+    // 接不上（第一次、或者文件被截断/换过），整块重画。
     box.textContent = '';
     box.append(document.createTextNode(neu.join('\n')));
     box._lines = neu.slice();
@@ -167,7 +167,7 @@ function paintHalf(box, text) {
     box._lines = old.concat(add);
   }
 
-  // 顶上的上限：钉住很久的时候，DOM 不能无限涨。★ 只在**贴底**时砍，否则用户
+  // 顶上的上限：钉住很久的时候，DOM 不能无限涨。只在贴底时砍，否则用户
   // 正在看的那一段会在他眼皮底下移位。
   if (atBottom && box._lines.length > OUT_MAX_LINES) {
     box._lines = box._lines.slice(-Math.floor(OUT_MAX_LINES / 2));
@@ -175,7 +175,7 @@ function paintHalf(box, text) {
     box.append(document.createTextNode(box._lines.join('\n')));
   }
 
-  // ★★ **只在贴底时自动滚** —— 这是尾部视图唯一一条真正的交互规矩：用户翻上去
+  // 只在贴底时自动滚 —— 这是尾部视图唯一一条真正的交互规矩：用户翻上去
   //    看历史时不许把他拽回来。
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
@@ -183,7 +183,7 @@ function paintHalf(box, text) {
 /**
  * 一块（标准输出 / 标准错误）。`cell` 是 `op_job_log` 给的那一格。
  *
- * ★ 三态怎么判在 `dom.js` 的 `logCellOf()` 里，**只此一处** —— 作业屏那一块画的是
+ * 三态怎么判在 `dom.js` 的 `logCellOf()` 里，只此一处 —— 作业屏那一块画的是
  *   同一份数据，两处各判一遍的话，漂的那一处不会报错。
  */
 function paintPane(halfId, boxId, metaId, cell) {
@@ -195,8 +195,8 @@ function paintPane(halfId, boxId, metaId, cell) {
   meta.title = it.path;
 
   if (it.kind === 'absent') {
-    // **确实没有这一份**。空的那一块不出现（设计律 1）—— 一个空的输出框是在说
-    // "这里本该有东西"，而 `.err` 在正常情况下**就是**空的。
+    // 确实没有这一份。空的那一块不出现（设计律 1）—— 一个空的输出框是在说
+    // "这里本该有东西"，而 `.err` 在正常情况下就是空的。
     half.classList.add('hidden');
     box.textContent = '';
     box._lines = [];
@@ -204,7 +204,7 @@ function paintPane(halfId, boxId, metaId, cell) {
   }
   half.classList.remove('hidden');
   if (it.kind === 'na') {
-    // **取不到**：文件在，但过不了安全检查或者打不开。★ 与"确实没有"必须长得
+    // 取不到：文件在，但过不了安全检查或者打不开。与"确实没有"必须长得
     // 不一样 —— 并成一句的话，一个模式不对的日志会被读成"这台站点上没有日志"。
     box.textContent = '';
     box._lines = [];
@@ -245,7 +245,7 @@ function renderOut() {
   if (OUT.jobId) when.textContent = `作业 ${OUT.jobId}`;
   paintPane('out-half-out', 'out-out', 'out-out-meta', d.out === undefined ? null : d.out);
   paintPane('out-half-err', 'out-err', 'out-err-meta', d.err === undefined ? null : d.err);
-  // 两块都空 ⇒ 什么也不显示（一个空的输出框在说"这里本该有东西"）。
+  // 两块都空，什么也不显示（一个空的输出框在说"这里本该有东西"）。
   if ($('out-half-out').classList.contains('hidden')
       && $('out-half-err').classList.contains('hidden')) {
     $('out-half-out').classList.remove('hidden');
@@ -268,14 +268,14 @@ $('out-more').onclick = async () => {
 
 // ── 站点状态 ──────────────────────────────────────────────────────────────
 //
-// ★ 这一整块是从 `panel.js` **搬**过来的（从前它是盖在三屏上面的
+// 这一整块是从 `panel.js` 搬过来的（从前它是盖在三屏上面的
 //   `#sec-cluster`）。搬而不是抄：同一份数据只留一个渲染实现 —— 两份的漂开形态
 //   是"浮窗说是这样、面板说是那样"，而两边都标着"现在"。
 
 /**
  * 节点忙闲：`{counts: {base_state: n}, flags: {后缀: n}}` 画成一行。
  *
- * ★ 后缀**只做展示**，而且与计数分开画（`idle 1  drain 1  （后缀 *×1）`）——
+ * 后缀只做展示，而且与计数分开画（`idle 1  drain 1  （后缀 *×1）`）——
  *   把它并进状态名里等于对它做了一次判定，而它跨 Slurm 版本含义不一致
  *   （见 `Slurm.node_table()`）。这里一个字都不解释它是什么意思。
  */
@@ -311,7 +311,7 @@ function partitionBlock(name, info, nodes, queue, gres) {
   row.append(cel('div', 'dim', `队列　${qs}`));
 
   const g = gres && gres[name];
-  // ★ 三态：`gres` 整个键缺席 = 取不到；`[]` = 这个分区确实一张卡都没有。
+  // 三态：`gres` 整个键缺席 = 取不到；`[]` = 这个分区确实一张卡都没有。
   const gs = !gres ? '取不到'
     : (g === undefined ? '（不在 GRES 清单里）'
       : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`).join('，')
@@ -320,7 +320,7 @@ function partitionBlock(name, info, nodes, queue, gres) {
   return row;
 }
 
-/** 把整份 `op_cluster` 的答案画出来。**纯函数式地照着数据画，不做任何判定。** */
+/** 把整份 `op_cluster` 的答案画出来。纯函数式地照着数据画，不做任何判定。 */
 function renderCluster() {
   const box = $('cl-body');
   box.textContent = '';
@@ -345,7 +345,7 @@ function renderCluster() {
   $('cl-health').className = 'st' + (h && !h.up ? ' bad' : '');
   if (h) box.append(cel('p', 'sub', `取数于 ${agoText(h.at) || '刚刚'}`));
 
-  // 控制器与版本：两个**互相独立**的格子，所以各说各的。
+  // 控制器与版本：两个互相独立的格子，所以各说各的。
   if (!h) box.append(na('控制器状态（scontrol ping）'));
   else if (!h.up) box.append(cel('p', 'bad', '控制器连不上，提交、心跳、查询都会失败。'));
 
@@ -383,7 +383,7 @@ function renderCluster() {
   mine.append(cel('div', 'k', '账户'), cel('div', null,
     me.account || (me.account_error ? '无' : '取不到')));
   if (me.account_error) mine.append(cel('div', 'k', ''), cel('div', 'bad', me.account_error));
-  // ★ 三态：`null` = 不限（这是**答案**，不是没问到）。
+  // 三态：`null` = 不限（这是答案，不是没问到）。
   mine.append(cel('div', 'k', '可提交分区'), cel('div', null,
     me.allowed_partitions === undefined ? '取不到'
       : (me.allowed_partitions === null ? '不限制'
@@ -397,7 +397,7 @@ function renderCluster() {
       .map(([p, i]) => `${p} 第 ${i} 位`).join('，');
     mine.append(cel('div', 'k', '排队中'), cel('div', null,
       `${me.pending_count} 条` + (fi ? `（${fi}）` : '')));
-    // ★ 一行，不是一段 —— 而这一行是**必要**的：不说的话"第 3 位"会被读成
+    // 一行，不是一段 —— 而这一行是必要的：不说的话"第 3 位"会被读成
     //   "还有 3 个就到我了"，而它们完全可能同时开跑、也可能一个都不开。
     mine.append(cel('div', 'k', ''), cel('div', 'sub', '名次，不是还要等多久。'));
   }

@@ -15,11 +15,11 @@
 /**
  * jobstate.test.mjs —— 作业状态那一行说的话。
  *
- * ★ 这个模块存在的理由是界面不该印 Slurm 的原文大写枚举
+ * 这个模块存在的理由是界面不该印 Slurm 的原文大写枚举
  *   （`OUT_OF_MEMORY` / `REQUEUE_HOLD`）—— 那是说给管理员听的话。
  *
- * ★★ 而它**不做任何生命周期判定** —— "算不算结束"由守护进程判，它把结论放在
- *    `job_terminal` 里发过来。所以这一组用例有一半在验**它照着念**：
+ * 而它不做任何生命周期判定 —— "算不算结束"由守护进程判，它把结论放在
+ *    `job_terminal` 里发过来。所以这一组用例有一半在验它照着念：
  *    同一个状态名，`job_terminal: true` 与 `false` 必须说出两件完全不同的事。
  */
 import test from 'node:test';
@@ -75,7 +75,7 @@ test('★ 每个终态都给一句中文，且说得出**为什么结束**', () 
 });
 
 test('★★ 同一个状态名，job_terminal 不同就说两件完全不同的事', () => {
-  // ★ 这条钉的正是"客户端不做判定"这件事：PREEMPTED 与 TIMEOUT 到底算不算结束
+  // 这条钉的正是"客户端不做判定"这件事：PREEMPTED 与 TIMEOUT 到底算不算结束
   //   取决于 `Requeue`，而客户端手上没有那个字段 —— 所以它只能照着念。
   //   两条都印"已结束（被抢占）"的话，作业几分钟后回来了（正是这一版要修的
   //   那个缺陷的另一半），用户已经被告知结束了。
@@ -87,7 +87,7 @@ test('★★ 同一个状态名，job_terminal 不同就说两件完全不同的
     assert.equal(/已结束/.test(back), false,
       `${st}: 判定为"没结束"时不许说出「已结束」：${back}`);
   }
-  // ★ 反过来也要成立：一个**非终态**的状态名不许被印成结束。
+  // 反过来也要成立：一个非终态的状态名不许被印成结束。
   for (const st of Object.keys(WAITING)) {
     assert.equal(/已结束/.test(jobText(snap({ jobState: st, jobTerminal: false }))), false, st);
   }
@@ -114,7 +114,7 @@ test('★ 排队原因要说出来，尤其是「等下去没有用」的那些'
   const got = jobText(snap({ jobState: 'PENDING', jobTerminal: false,
     jobReason: 'Resources' }));
   assert.equal(got, `${WAITING.PENDING} · ${REASON.Resources}`);
-  // ★ 这是整张表最要紧的一类：用户看到"排队中"会一直等，而被 hold 住、
+  // 这是整张表最要紧的一类：用户看到"排队中"会一直等，而被 hold 住、
   //   或者账户到了限额时，等多久都不会开始。
   for (const r of ['JobHeldUser', 'JobHeldAdmin', 'AssocGrpCPUMinutesLimit',
                    'QOSMaxJobsPerUserLimit', 'AssocMaxSubmitJobLimit']) {
@@ -136,7 +136,7 @@ test('★ 结束时才说退出码，且 0:0 不说（那是正常退出）', ()
     jobExitCode: '1:0' })), '已结束（失败）（退出码 1:0）');
   assert.equal(jobText(snap({ jobState: 'COMPLETED', jobTerminal: true,
     jobExitCode: '0:0' })), '已结束');
-  // ★ 还没结束时退出码恒为 `0:0`，说出来只会让人以为"它正常退出了"。
+  // 还没结束时退出码恒为 `0:0`，说出来只会让人以为"它正常退出了"。
   assert.equal(jobText(snap({ jobState: 'RUNNING', jobTerminal: false,
     jobExitCode: '0:0' })), RUNNING.RUNNING);
 });
@@ -156,15 +156,15 @@ test('★ 重启过就要说 —— 跑着的东西已经不是原来那个了',
 });
 
 test('★★ 客户端那张措辞表与守护进程的状态表对得上', () => {
-  // ★ 跨文件不变量（与「跳过表两边必须逐字一致」同一个做法）。三件事：
+  // 跨文件不变量（与「跳过表两边必须逐字一致」同一个做法）。三件事：
   //
-  //   ① 守护进程会**释放**的每一个状态，客户端都得说得出话（不然用户在
+  //   ① 守护进程会释放的每一个状态，客户端都得说得出话（不然用户在
   //      "作业没了"之后看到的是一个英文枚举）；
   //   ② 客户端 ENDED 里多出来的状态必须是真的终态 —— 多印一句"已结束"不算错，
   //      但那张表会被人当成判据读，所以它必须与守护进程的表一致；
   //   ③ 非终态的措辞表里也不许混进终态（那会让"没结束"印成"已结束"）。
   //
-  // ★ 解析的是守护进程源码里的**常量定义**，不是"文件里出现过这个字符串"。
+  // 解析的是守护进程源码里的常量定义，不是"文件里出现过这个字符串"。
   const src = fs.readFileSync(DAEMON, 'utf8');
   const grab = (name) => {
     const m = new RegExp(`^${name} = frozenset\\(\\(([^)]*)\\)\\)`, 'm').exec(src);
@@ -194,7 +194,7 @@ test('★★ 客户端那张措辞表与守护进程的状态表对得上', () =
 
 test('★ 界面印的是 jobText，不是 jobState 原文', async () => {
   // 本机起不了 Electron（panel.js 跑不起来），所以这一条只能做文本检查。
-  // 它拦的是**退回去印原文**这个退化 —— 那正是这一版要修的东西。
+  // 它拦的是退回去印原文这个退化 —— 那正是这一版要修的东西。
   const js = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'panel.js'),
     'utf8');
   assert.match(js, /\['作业状态',\s*s\.jobText\s*\|\|\s*'—'\]/,

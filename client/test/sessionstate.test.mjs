@@ -13,16 +13,16 @@
 // limitations under the License.
 
 /**
- * sessionstate.test.mjs —— **会话状态**那张表，以及它与另外两处的逐字一致性。
+ * sessionstate.test.mjs —— 会话状态那张表，以及它与另外两处的逐字一致性。
  *
- * ★★ 为什么这一条测试值得单独一个文件：同一份状态词表在这个仓库里有**三处**，
- *   而它们住在三个**独立分发**的程序里，没有共享代码的路：
+ * 为什么这一条测试值得单独一个文件：同一份状态词表在这个仓库里有三处，
+ *   而它们住在三个独立分发的程序里，没有共享代码的路：
  *
  *       守护进程 `cluster/slurmate-sessiond`   —— 定义（`ST_*` 那一组常量）
  *       命令行   `cluster/slurmate`            —— `human_state()` 那张表
  *       客户端   `src/main/sessionstate.js`    —— 同一张表
  *
- *   于是这份重复是**结构性的**，删不掉；能做的只有把它**钉住**。
+ *   于是这份重复是结构性的，删不掉；能做的只有把它钉住。
  *   漂开的后果不是风格问题：同一台集群上，用户在命令行看到「连接中断（作业仍在
  *   运行）」而在界面上看到「已结束」，他会去重新提交一个还在烧着 GPU 的作业。
  *   （同一形状的先例是 `cluster/slurmate` 的 `parse_gres_spec` 与守护进程的
@@ -48,14 +48,14 @@ test('认得的状态译成人话，认不得的原样印出去（不猜）', ()
   assert.equal(sessionStateText('enrolled'), '运行中');
   assert.equal(sessionStateText('released'), '已结束');
 
-  // ★★ 这一句是这张表里最要紧的一句：`suspect` 是「**我们**不知道它还在不在」，
+  // 这一句是这张表里最要紧的一句：`suspect` 是「我们不知道它还在不在」，
   //   不是「它没了」。印成一句光秃秃的「连接中断」，用户会去重新提交一个作业 ——
   //   而原来那个还在跑。
   const sus = sessionStateText('suspect');
   assert.match(sus, /作业仍在运行/,
     `会话 suspect ≠ 作业没了，这句话必须带上后半句：${JSON.stringify(sus)}`);
 
-  // ★ 认不出来的一律原样印。守护进程可以比这个客户端新，而"印一个我不认识的
+  // 认不出来的一律原样印。守护进程可以比这个客户端新，而"印一个我不认识的
   //   状态名"是诚实的，"猜一个可能是错的说法"不是。
   assert.equal(sessionStateText('SOMETHING_NEW'), 'SOMETHING_NEW');
   assert.equal(sessionStateText(''), '');
@@ -73,7 +73,7 @@ test('★ 这张表只译**会话**状态，不译作业状态（两张表别混
   }
 });
 
-// ── ★★ 跨文件：三处必须说同一件事 ───────────────────────────────────────────
+// ── 跨文件：三处必须说同一件事 ───────────────────────────────────────────
 
 /** 从 `cluster/slurmate-sessiond` 抠出 `ST_XXX = "..."` 那一组常量。 */
 function daemonStates() {
@@ -105,7 +105,7 @@ test('★★ 同一张会话状态表：守护进程、命令行、客户端三�
   assert.ok(Object.keys(daemon).length >= 5,
     `从守护进程里只抠出 ${Object.keys(daemon).length} 个会话状态 —— 正则多半没匹配上`);
 
-  // ① 守护进程定义了哪些状态 ⇒ 另外两处一个都不能漏。
+  // ① 守护进程定义了哪些状态，另外两处一个都不能漏。
   const missCli = Object.keys(daemon).filter((s) => !(s in cli));
   const missClient = Object.keys(daemon).filter((s) => !(s in client));
   assert.deepEqual(missCli, [],

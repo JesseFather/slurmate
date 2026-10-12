@@ -16,10 +16,10 @@
 /**
  * hosts.js —— 登录节点地址的并发探测。
  *
- * 地址从哪来：**连接列表**（`config.connections`），由用户在界面上填。只有一个
+ * 地址从哪来：连接列表（`config.connections`），由用户在界面上填。只有一个
  * 来源 —— 少一处合并，就少一处「我配了却没生效」的可能。
  *
- * 探测方式：TCP 连上以后**读 SSH banner**（`SSH-2.0-...`），而不是只做 TCP connect。
+ * 探测方式：TCP 连上以后读 SSH banner（`SSH-2.0-...`），而不是只做 TCP connect。
  * 只连不读的话，任何在这个端口上监听的东西都会被判成「登录节点可达」—— 一个端口转发
  * 中间盒、一个防火墙的 REJECT-then-accept，都会给出假绿。
  */
@@ -80,9 +80,9 @@ function probeHost(entry, timeoutMs = DEFAULT_TIMEOUT_MS) {
 }
 
 /**
- * 并发探测全部地址，按 priority 排序返回**全部**结果（含失败的）。
+ * 并发探测全部地址，按 priority 排序返回全部结果（含失败的）。
  *
- * ★ 返回全部而不是只返回可达的：界面需要能在**全部失败**时逐个报出失败原因，
+ * 返回全部而不是只返回可达的：界面需要能在全部失败时逐个报出失败原因，
  *   而不是给一句笼统的「连接失败」。而且在一条连接都没配的情况下，调用方要能
  *   分清「候选为空」与「候选都不可达」—— 前者该提示「还没有配置任何连接」。
  */
@@ -100,6 +100,6 @@ async function pickHost(entries, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return results.find((r) => r.reachable) || null;
 }
 
-// ★ 只留 `probeAll` —— 用例踩的是它。`DEFAULT_TIMEOUT_MS` / `probeHost` /
+// 只留 `probeAll` —— 用例踩的是它。`DEFAULT_TIMEOUT_MS` / `probeHost` /
 //   `pickHost` 只在本文件内被用（`probeAll` 与 `pickHost` 各自调 `probeHost`）。
 module.exports = { probeAll };

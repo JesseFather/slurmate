@@ -13,18 +13,18 @@
 // limitations under the License.
 
 /**
- * resident-channel.test.mjs —— 常驻通道**客户端那一半**的字节层。
+ * resident-channel.test.mjs —— 常驻通道客户端那一半的字节层。
  *
- * ★ 这一份之所以验得了，是因为 `ResidentChannel` 只认字节与行、不认识 SSH：
- *   传进去的就是一个 duplex。真起一条 SSH 才跑得起来的话，下面这几条**最要紧**
+ * 这一份之所以验得了，是因为 `ResidentChannel` 只认字节与行、不认识 SSH：
+ *   传进去的就是一个 duplex。真起一条 SSH 才跑得起来的话，下面这几条最要紧
  *   的性质一条都测不到 —— 而它们的坏法全是静默的：
  *
- *   - 断开时在途请求**永远挂着**（`await` 不回，调用方的定时器一轮轮往上叠）
- *   - 迟到的响应被当成一条**通知**处理
- *   - 一个多字节字符被两个 chunk 从中间切开 ⇒ 界面上出现一个 ""，
- *     而且是**间歇性**的，本地永远复现不了
+ *   - 断开时在途请求永远挂着（`await` 不回，调用方的定时器一轮轮往上叠）
+ *   - 迟到的响应被当成一条通知处理
+ *   - 一个多字节字符被两个 chunk 从中间切开，界面上出现一个 ""，
+ *     而且是间歇性的，本地永远复现不了
  *
- * ★ 真 SSH 那一层只在 backend-ssh.test.mjs 里验（用一条假 conn），
+ * 真 SSH 那一层只在 backend-ssh.test.mjs 里验（用一条假 conn），
  *   而那一条验的是别的东西：什么时候走通道、什么时候退回 exec。
  */
 import test from 'node:test';
@@ -36,7 +36,7 @@ const require = createRequire(import.meta.url);
 const { ResidentChannel, parseEnvelopeLine, RPC_TIMEOUT_MS } =
   require('../src/main/backend-ssh.js');
 
-/** 一个够用的 duplex：能写、能喂数据、能关。**不做任何流控**。 */
+/** 一个够用的 duplex：能写、能喂数据、能关。不做任何流控。 */
 class FakeDuplex extends EventEmitter {
   constructor() {
     super();
@@ -46,7 +46,7 @@ class FakeDuplex extends EventEmitter {
 
   write(s) { this.written += s; return true; }
   close() { this.closed = true; this.emit('close'); }
-  /** 把服务端要说的话送进来（**按原样**，一个字节都不合并）。 */
+  /** 把服务端要说的话送进来（按原样，一个字节都不合并）。 */
   feedRaw(buf) { this.emit('data', Buffer.isBuffer(buf) ? buf : Buffer.from(buf, 'utf8')); }
   feed(s) { this.feedRaw(Buffer.from(s, 'utf8')); }
   /** 已经写出去的那几行，解析成对象。 */
@@ -58,9 +58,9 @@ class FakeDuplex extends EventEmitter {
 /**
  * 所有用例都过这一层。
  *
- * ★ `backend-ssh.js` 里的定时器都 `unref` 了 —— 在 Electron 主进程里这是对的
+ * `backend-ssh.js` 里的定时器都 `unref` 了 —— 在 Electron 主进程里这是对的
  *   （应用自己撑着事件循环）。而测试进程没有别的事可做，于是 node:test 会在一条
- *   Promise 还没落地的时候报「事件循环已经空了」，把用例**取消**掉。
+ *   Promise 还没落地的时候报「事件循环已经空了」，把用例取消掉。
  *   同一形状的 `keepAlive` 在 integration.mjs 里也有。
  */
 function keepAlive() {
@@ -155,7 +155,7 @@ t2('一个 chunk 里多条消息、一条消息跨多个 chunk，都拼得出来
 
 t2('★★ 一个多字节字符被 chunk 从中间切开，**不许**变成 U+FFFD', async () => {
   // 这是真会发生的：分片边界由传输层决定，落在哪个字节上完全随机 ——
-  // 所以坏法是**间歇性**的，而症状是插件标题/分区名里偶尔多一个 ""。
+  // 所以坏法是间歇性的，而症状是插件标题/分区名里偶尔多一个 ""。
   const { stream, ch } = makeChannel();
   const p = ch.request({ op: 'plugins' });
   const line = Buffer.from(okEnv(1, { title: '代码服务器 · A6000 分区' }) + '\n', 'utf8');
@@ -184,7 +184,7 @@ t2('噪声行（登录 shell 的 rc 文件打印的东西）被忽略', async ()
 
 // ── 断开与上限 ────────────────────────────────────────────────────────────
 t2('★★ 通道断了 ⇒ 在途请求**全部**拿到答复，不是永远挂着', async () => {
-  // ★ 这条是承重的：漏掉它的症状是 `await` 永远不回，而调用方（心跳那一类
+  // 这条是承重的：漏掉它的症状是 `await` 永远不回，而调用方（心跳那一类
   //   定时器）会一轮轮往上叠新的请求 —— 每 45 秒一条，永远不清理。
   const { stream, ch } = makeChannel();
   const a = ch.request({ op: 'a' });
@@ -232,7 +232,7 @@ t2('对端关掉是 **non**-deliberate（这条才该重开）', async () => {
 });
 
 t2('写完超时不影响通道本身，只丢那一条请求', async () => {
-  // 一条请求超时**不是**通道坏了（submit 合法地要跑 45 秒）。判死通道的话，
+  // 一条请求超时不是通道坏了（submit 合法地要跑 45 秒）。判死通道的话，
   // 一次慢提交会把所有人都从常驻通道上踢回 exec。
   const { stream, ch } = makeChannel();
   const slow = ch.request({ op: 'slow' }, 10);
@@ -245,7 +245,7 @@ t2('写完超时不影响通道本身，只丢那一条请求', async () => {
 
 t2('兜底的请求超时比任何一个调用点的语义超时都长', () => {
   // 语义超时在调用点（submit 45s / goodbye 10s / claim 20s）。兜底比它们短的
-  // 后果是**它抢先切断一条合法请求**，而用户看到的是"提交超时"——
+  // 后果是它抢先切断一条合法请求，而用户看到的是"提交超时"——
   // 一句把根因指向集群的话。
   assert.ok(RPC_TIMEOUT_MS > 60000, `兜底超时太小了：${RPC_TIMEOUT_MS}`);
 });

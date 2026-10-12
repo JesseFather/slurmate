@@ -18,14 +18,14 @@
  *
  * ── 认证方式：只用密钥，不接受密码 ──────────────────────────────────────────
  *
- * 私钥由客户端自托管（`keys.js` 生成，`config.js` 保管），**不读用户的 ~/.ssh**。
+ * 私钥由客户端自托管（`keys.js` 生成，`config.js` 保管），不读用户的 ~/.ssh。
  * 公钥由用户在界面上复制、自己去 IDM 注册。理由见 keys.js 的文件头。
  *
- * ⚠️ 走这条路之前，有三条假设必须先用系统 ssh 实测证明（五分钟，零代码）。
- *    仓库里**至今没有一条实测结论**，全是推断；第 1、2 条不成立则本文件整个作废：
+ * ️ 走这条路之前，有三条假设必须先用系统 ssh 实测证明（五分钟，零代码）。
+ *    仓库里至今没有一条实测结论，全是推断；第 1、2 条不成立则本文件整个作废：
  *
  *      # 假设 A：sshd 的 ForceCommand（若你的集群装了）放行固定 argv 的 slurmate rpc
- *      #   ★ 必须**原样**用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
+ *      # 必须原样用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
  *      #     引号吃掉，ssh 发过去的是另一个命令串，验的就不是客户端真正发的那个了。
  *      ssh -T -p 10100 user@<登录节点> \
  *          -- "/bin/bash -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
@@ -45,42 +45,42 @@
  *
  * ── 固定 argv ──────────────────────────────────────────────────────────────
  *
- * RPC_CMD 是**编译期字符串常量**，用户输入永远不出现在命令串里。这既是防注入，
+ * RPC_CMD 是编译期字符串常量，用户输入永远不出现在命令串里。这既是防注入，
  * 也是穿过上面那个 guard 的必要条件（命令里不能出现 code-server 字面量）。
  * 【不提供】让用户自定义命令行的开关 —— 自定义的命令行不通用，而这个客户端
  * 没有大模型能自适应，它只能跑预设的辅助命令。
  *
  * ── 主机密钥 ───────────────────────────────────────────────────────────────
  *
- * ssh2 **默认不校验主机密钥**。只走公钥认证却不校验对端，会退化成一个
+ * ssh2 默认不校验主机密钥。只走公钥认证却不校验对端，会退化成一个
  * 「不校验身份的加密连接」—— 比口令认证更糟。所以这里实现 TOFU：
  *   已知且一致 → 放行
  *   第一次见   → 拒绝，并把指纹交回给界面让用户确认（确认后由调用方记住再重连）
- *   **变了**   → 永远拒绝。不是警告：主机密钥变了意味着中间人或者服务器重装，
+ *   变了   → 永远拒绝。不是警告：主机密钥变了意味着中间人或者服务器重装，
  *                两种情况下继续连都是把私钥认证交给一个不确定的对端。
  *
  * ── 两条链路：exec 与常驻通道 ─────────────────────────────────────────────
  *
  * 一次 `slurmate rpc` = 一个 exec channel = sshd fork + PAM session + bash +
- * python3 冷启动。而守护进程是**单线程同步**的，tick 里的 phase_running 会为
+ * python3 冷启动。而守护进程是单线程同步的，tick 里的 phase_running 会为
  * 所有用户的所有会话各 fork 一次 squeue。所以高频轮询是在给这个循环加压，
  * 受害的是所有人。
  *
- * 第二条链路是 `slurmate stream`：**一条**常驻连接承载很多请求，
+ * 第二条链路是 `slurmate stream`：一条常驻连接承载很多请求，
  * 服务端还能主动推。收益不只是省掉每次的 python 冷启动 —— session.js 的
  * 60 秒对账由推送驱动（快照 30 秒一次、有变化 2 秒内到），exec 只在
- * **实质变化**时发生。
+ * 实质变化时发生。
  *
- * ★★ 而 exec 那条链路**没有删，它是退路**。"起不来就退回去"不是容错装饰：
+ * 而 exec 那条链路没有删，它是退路。"起不来就退回去"不是容错装饰：
  *    常驻通道会因为"登录节点上的 CLI 还是旧的（没有 `stream` 这个子命令）"、
  *    "ForceCommand 拦了"、"守护进程没在跑"而起不来，这几种情况下客户端必须
  *    照常能用。判据在 session.js 的推送看门狗（`PUSH_STALE_MS`）—— 一条推送
- *    都没收到时，那边的对账**逐字回到纯 exec 轮询**。
+ *    都没收到时，那边的对账逐字回到纯 exec 轮询。
  *
  * ── 提交（submit）的特殊约束 ────────────────────────────────────────────
  *
- * `op_submit` **非幂等**，且 `count_active` 只数 ACL_STATES（`submitted` 不在内），
- * 配额拦不住并发的第二个。所以：超时必须 ≥ 45s，**超时绝不重试**，
+ * `op_submit` 非幂等，且 `count_active` 只数 ACL_STATES（`submitted` 不在内），
+ * 配额拦不住并发的第二个。所以：超时必须 ≥ 45s，超时绝不重试，
  * 改为调一次不带 session_id 的 status 去认领。见 session.js 的 SUBMIT_TIMEOUT_MS。
  */
 
@@ -91,17 +91,17 @@ const ssh2 = require('ssh2');
 const { Backend, KIND } = require('./backend.js');
 
 /**
- * 固定 argv。**常量**，不接受任何用户输入拼接。
+ * 固定 argv。常量，不接受任何用户输入拼接。
  *
- * ★ 显式走 `/bin/bash -c`，不用「登录 shell 是什么就用什么」。
+ * 显式走 `/bin/bash -c`，不用「登录 shell 是什么就用什么」。
  *
  *   sshd 执行 exec 请求的方式是 `$SHELL -c "<命令串>"`，而 `$SHELL` 来自
  *   /etc/passwd —— 在 HPC 登录节点上经常是 zsh。zsh 与 bash 并非完全互通，
- *   同一条命令串在一边能跑、在另一边是语法错误。我们发的是**写死的**命令串，
+ *   同一条命令串在一边能跑、在另一边是语法错误。我们发的是写死的命令串，
  *   一旦它用上某个 shell 的方言，症状会是「在这台机器上能连、换一台就认证失败」
  *   这类指不回根因的问题。把解释器钉死，等于把这条变量从等式里去掉。
  *
- *   ★ 但它**挡不住 rc 文件**，别把这两件事混起来：sshd 仍然先用登录 shell 解释
+ * 但它挡不住 rc 文件，别把这两件事混起来：sshd 仍然先用登录 shell 解释
  *     整个命令串，所以 zsh 的 `~/.zshenv` 照样会被 source（zsh 连非交互、非登录的
  *     `-c` 都会读它 —— 这是它与 bash 的一处真实差异，bash 的 `-c` 不读任何 rc）。
  *     `~/.zshenv` 若往 stdout 打印东西，就会混进 RPC 的应答里。
@@ -113,30 +113,30 @@ const { Backend, KIND } = require('./backend.js');
 const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
 
 /**
- * 常驻通道的命令行。同样是**编译期常量**，与 `RPC_CMD` 只有子命令那一个词不同。
+ * 常驻通道的命令行。同样是编译期常量，与 `RPC_CMD` 只有子命令那一个词不同。
  *
- * ★ 两条命令共用同一个二进制路径，而**分头写死是有意的**（而不是拼出来的）：
+ * 两条命令共用同一个二进制路径，而分头写死是有意的（而不是拼出来的）：
  *   上面那条用例的判据是"这一串是常量、不含任何模板语法"，拼出来的写法会让
- *   "用户输入永远不出现在命令串里"这条性质从**看一眼就知道**变成**要推理**。
+ *   "用户输入永远不出现在命令串里"这条性质从看一眼就知道变成要推理。
  *   代价是路径写了两遍 —— 所以有一条用例钉住"两者只差最后那个词"。
  */
 const STREAM_CMD = "/bin/bash -c '/usr/local/bin/slurmate stream'";
 
 /**
- * 连上之后**先把作业日志目录建出来**。
+ * 连上之后先把作业日志目录建出来。
  *
- * ★★ 为什么客户端要干这一件事：`sbatch -o <日志目录>/slurm-%j.out` 的父目录是
- *    **Slurm 在跑作业脚本之前**打开的，而作业脚本自己那一次 `mkdir -p` 排在它后面
- *    —— 目录不存在，那一次提交的作业连启动都启动不了。而守护进程**建不了它**：
+ * 为什么客户端要干这一件事：`sbatch -o <日志目录>/slurm-%j.out` 的父目录是
+ *    Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次 `mkdir -p` 排在它后面
+ *    —— 目录不存在，那一次提交的作业连启动都启动不了。而守护进程建不了它：
  *    systemd 单元把共享家目录挂成只读（`ReadOnlyPaths`），那是"root 身上没有
  *    『写用户文件』这条攻击面"那层保护。
  *
  *    于是三层里只剩客户端这一层。一次连接一个 exec，而它把"第一条作业会不会因为
- *    目录不存在而起不来"从**一个要赌的版本相关行为**变成**确定的**。
+ *    目录不存在而起不来"从一个要赌的版本相关行为变成确定的。
  *
- * ★ 与另外两条一样是**编译期常量**：不接受任何用户输入拼接。
- * ★ `umask 077` 与作业脚本里那个一致 —— 建出来的目录是 0700。
- *   `$HOME` 由**内层** bash 展开（外层那对单引号里的内容是原样传过去的）。
+ * 与另外两条一样是编译期常量：不接受任何用户输入拼接。
+ * `umask 077` 与作业脚本里那个一致 —— 建出来的目录是 0700。
+ *   `$HOME` 由内层 bash 展开（外层那对单引号里的内容是原样传过去的）。
  */
 const PREPARE_CMD = "/bin/bash -c 'umask 077; mkdir -p \"$HOME/.slurmate/logs\"'";
 
@@ -151,10 +151,10 @@ const PREPARE_TIMEOUT_MS = 15000;
 const RECONNECT_MAX_MS = 30000;
 
 /**
- * 常驻通道的**探针**超时：建起来之后先问一句 `ping`，答得上来才算这条通道可用。
+ * 常驻通道的探针超时：建起来之后先问一句 `ping`，答得上来才算这条通道可用。
  *
- * ★ 必须有这一句，否则"通道起来了"与"通道能用"会被当成同一件事 ——
- *   `exec` 请求成功只说明**命令被启动了**，而 `slurmate stream` 完全可能
+ * 必须有这一句，否则"通道起来了"与"通道能用"会被当成同一件事 ——
+ *   `exec` 请求成功只说明命令被启动了，而 `slurmate stream` 完全可能
  *   立刻报错退出（旧 CLI 没有这个子命令时 argparse 就是这样：一行 usage、
  *   退出码 2）。不探针的话，第一条真请求才会发现，而那时客户端已经在
  *   等一个永远不会来的响应了。
@@ -164,11 +164,11 @@ const RECONNECT_MAX_MS = 30000;
 const STREAM_PROBE_MS = 8000;
 
 /**
- * 常驻通道上**单条请求**的兜底超时。
+ * 常驻通道上单条请求的兜底超时。
  *
- * ★★ 它是**兜底**，不是语义上的超时 —— 语义超时在调用点各自有
+ * 它是兜底，不是语义上的超时 —— 语义超时在调用点各自有
  *    （submit 45 秒、goodbye 10 秒、claim 20 秒，见 session.js）。
- *    取一个比它们都大的值，否则它会**抢先**切断一条合法请求，而症状是
+ *    取一个比它们都大的值，否则它会抢先切断一条合法请求，而症状是
  *    "提交超时"——一句把根因指向集群的话。这里真正要防的是另一件事：
  *    一条永远不回答的请求会把 `_pending` 撑住、让调用方的 `await` 永远挂着。
  *    （exec 那条路上不需要它：通道断了 Node 会报错；常驻通道上断了也会，
@@ -182,30 +182,30 @@ const STREAM_REOPEN_MAX_MS = 60000;
 /**
  * 连续失败多少次之后不再重开。
  *
- * ★ 必须有个头。**登录节点上的 CLI 是旧的**（没有 `stream` 这个子命令）时，
+ * 必须有个头。登录节点上的 CLI 是旧的（没有 `stream` 这个子命令）时，
  *   每一次重开都是一次注定失败的 exec —— 而它换来的是**每分钟多 fork 一个
  *   python**，比这一版想省掉的那个还贵。那种情况下正确的是：记下原因、退回
  *   exec、不再试。
- * ★ 而"连着三次都失败"与"曾经成功过又断了"要分得开：后者会把计数清零，
+ * 而"连着三次都失败"与"曾经成功过又断了"要分得开：后者会把计数清零，
  *   于是重开一条曾经好用的通道永远有配额（见 `_openStream` 成功那一支）。
  */
 const STREAM_ATTEMPT_MAX = 3;
 
 /**
- * 一行是不是协议消息。**这条判据只有一份** —— exec 那条路（从一坨噪声里挑信封）
+ * 一行是不是协议消息。这条判据只有一份 —— exec 那条路（从一坨噪声里挑信封）
  * 与常驻通道（每一行都过一遍）都用它。
  *
- * ★ 两处各写一遍的后果不是"多几行"，是**两条链路对"什么算一条消息"给出不同答案**
+ * 两处各写一遍的后果不是"多几行"，是两条链路对"什么算一条消息"给出不同答案
  *   —— 而那正好是 `rid` 回填、推送识别、噪声丢弃三件事共同依赖的那一条。
  *
  * 判据（两种形状，缺一不可）：
  *
- * - **响应**：对象、且 `ok` 是布尔。只看"是个 JSON 对象"太松 —— rc 文件里打印一段
+ * - 响应：对象、且 `ok` 是布尔。只看"是个 JSON 对象"太松 —— rc 文件里打印一段
  *   恰好是对象的 JSON，会被当成守护进程的应答送进 classify()，然后被解释成一个
  *   关于协议的错误，而真正的原因（shell 环境不干净）连提都不会被提到。
- * - **通知**：对象、`push` 是字符串、`seq` 是数字。通知**没有 `ok`**，所以上面那
+ * - 通知：对象、`push` 是字符串、`seq` 是数字。通知没有 `ok`，所以上面那
  *   一条接不住它。加这一条会不会让 exec 那条路把通知误当应答？不会，而且是**结构性
- *   的**：通知只发给**订阅过**的连接，订阅的判据是"这个连接发过带 `rid` 的请求"
+ *   的：通知只发给订阅过**的连接，订阅的判据是"这个连接发过带 `rid` 的请求"
  *   （见守护进程的 `handle_line`），而 exec 那条路每次都是新连接、永远不带 `rid`。
  *
  * @returns {object|null} 这一行对应的消息；是噪声就返回 null
@@ -222,13 +222,13 @@ function parseEnvelopeLine(line) {
 /**
  * 从命令的原始 stdout 里挑出协议应答。
  *
- * ★ 这是「这台机器的 shell 环境干不干净」与「协议解析」之间唯一的一道缝，
+ * 这是「这台机器的 shell 环境干不干净」与「协议解析」之间唯一的一道缝，
  *   所以规则要写死在这里，而不是散在回调里靠运气。
  *
- * 规则：**从后往前**找第一个 `parseEnvelopeLine` 认得的行。
+ * 规则：从后往前找第一个 `parseEnvelopeLine` 认得的行。
  *
- * 从后往前：sshd 用**登录 shell** 解释我们发过去的命令串，登录 shell 的 rc 文件
- * 可能在应答**之前**打印东西（zsh 的 `~/.zshenv` 连 `-c` 都会读）。取「最后一行」
+ * 从后往前：sshd 用登录 shell 解释我们发过去的命令串，登录 shell 的 rc 文件
+ * 可能在应答之前打印东西（zsh 的 `~/.zshenv` 连 `-c` 都会读）。取「最后一行」
  * 是个碰巧够用的启发式，从后往前扫才两边都不怕。
  *
  * @returns {{found:true, envelope:object} | {found:false, lines:string[]}}
@@ -272,11 +272,11 @@ const AUTH_FAILED_RE = /all configured authentication methods failed/i;
 /**
  * 把认证失败翻译成能指向根因的话。
  *
- * ★ 「All configured authentication methods failed」是 ssh2 的原话，唯一含义是
- *   **服务器拒绝了客户端出示的全部认证方式**。这里只配了公钥一种，所以它就是
+ * 「All configured authentication methods failed」是 ssh2 的原话，唯一含义是
+ *   服务器拒绝了客户端出示的全部认证方式。这里只配了公钥一种，所以它就是
  *   「服务器不认这把钥匙」—— 既不是网络不通，也不是协议不匹配。
  *
- *   问题在于这句话**完全不提用的是哪把钥匙**，于是用户唯一能做出的反应是反复重试。
+ *   问题在于这句话完全不提用的是哪把钥匙，于是用户唯一能做出的反应是反复重试。
  *   所以这里把指纹和公钥原样给出来，并列出三条要核对的实事：它们分别对应三种
  *   完全不同的修法，而在这句英文报错里长得一模一样。
  *
@@ -300,30 +300,30 @@ function authFailureDetail(info) {
 }
 
 /**
- * 常驻通道的**客户端这一半**：一条 duplex 上跑多个请求，并收服务端主动推的消息。
+ * 常驻通道的客户端这一半：一条 duplex 上跑多个请求，并收服务端主动推的消息。
  *
  * 它只认字节与行，不认识 SSH —— 传进来的就是一个 duplex（ssh2 的 channel、或者
- * 用例里的一对 `PassThrough`）。**这样它才验得了**：真起一条 SSH 才能跑的话，
+ * 用例里的一对 `PassThrough`）。这样它才验得了：真起一条 SSH 才能跑的话，
  * `rid` 关联、乱序响应、断开时在途请求的下场，这几条最要紧的性质一条都测不到。
  *
  * ── 它保证的四件事 ────────────────────────────────────────────────────────
  *
- * 1. **`rid` 关联**。每条请求一个自增的 `rid`，响应按 `rid` 回到它自己的 Promise
- *    上。并发发出去的请求**不保证**按序回来，也不该假设。
- * 2. **断开时在途请求全部拿到答复**。它们拿到的是 `kind='transport'` 的信封，
- *    不是永远挂着。★ 这条是承重的：常驻通道上"断了"与"没答"是两件事，
+ * 1. `rid` 关联。每条请求一个自增的 `rid`，响应按 `rid` 回到它自己的 Promise
+ *    上。并发发出去的请求不保证按序回来，也不该假设。
+ * 2. 断开时在途请求全部拿到答复。它们拿到的是 `kind='transport'` 的信封，
+ *    不是永远挂着。这条是承重的：常驻通道上"断了"与"没答"是两件事，
  *    漏掉它的症状是 `await` 永远不回、调用方的定时器一轮轮往上叠。
- * 3. **多字节字符不会被撕开**。见 `_dec`。
- * 4. **一行有多长是有上限的**。见 `MAX_RESPONSE_BYTES` 那一条。
+ * 3. 多字节字符不会被撕开。见 `_dec`。
+ * 4. 一行有多长是有上限的。见 `MAX_RESPONSE_BYTES` 那一条。
  */
 class ResidentChannel {
   /**
    * @param {object} stream  duplex（可写请求、可读消息）
    * @param {object} opts
    *   onNotify {function}  收到一条通知时调用（`{push, seq, at, sessions, stale?}`）
-   *   onClose  {function}  这条通道死了（参数是原因字符串）。**无论是谁先动的手**
+   *   onClose  {function}  这条通道死了（参数是原因字符串）。无论是谁先动的手
    *                        ——对端关了、写失败了、超长了，都走这一个出口。
-   *   client   {object}     这台电脑的客户端身份 `{id, name}`。**每一条请求都带上它**
+   *   client   {object}     这台电脑的客户端身份 `{id, name}`。每一条请求都带上它
    *                         （见 request()）。
    */
   constructor(stream, opts = {}) {
@@ -331,20 +331,20 @@ class ResidentChannel {
     this._onNotify = opts.onNotify || (() => {});
     this._onClose = opts.onClose || (() => {});
     this._client = opts.client || null;
-    /** rid → {resolve, timer}。**只有**在途的请求在里面。 */
+    /** rid → {resolve, timer}。只有在途的请求在里面。 */
     this._pending = new Map();
     this._nextRid = 1;
     /** 半个行。只会有半个 —— 完整行当场处理掉。 */
     this._buf = '';
     this.dead = null;
     /**
-     * ★★ 必须用 `StringDecoder`，不能 `chunk.toString('utf8')` 了事。
+     * 必须用 `StringDecoder`，不能 `chunk.toString('utf8')` 了事。
      *
-     *   一个 UTF-8 字符会被 TCP/SSH 从**中间**切开，而每一片各转一次字符串就会
+     *   一个 UTF-8 字符会被 TCP/SSH 从中间切开，而每一片各转一次字符串就会
      *   各自变出一个 U+FFFD。症状是插件标题、分区名、`note` 里偶尔出现一个""，
-     *   **而且是间歇性的** —— 取决于分片边界落在哪，本地永远复现不了。
+     *   而且是间歇性的 —— 取决于分片边界落在哪，本地永远复现不了。
      *
-     *   ★ exec 那条路（`stdout += d`，`d` 是 Buffer）同样要过 `StringDecoder`，
+     * exec 那条路（`stdout += d`，`d` 是 Buffer）同样要过 `StringDecoder`，
      *     否则会各自变出 U+FFFD —— 那边的响应里恰好没有中文，所以坏得一直没人
      *     注意。两处一起修 —— "怎么把字节拼成一行"是一条规矩，两份实现会漂。
      */
@@ -368,7 +368,7 @@ class ResidentChannel {
   _onData(d) {
     if (this.dead) return;
     this._buf += this._dec.write(d);
-    // ★ 上限判在**拼出来的那一整行**上，而不是单个 chunk 上：chunk 的大小由
+    // 上限判在拼出来的那一整行上，而不是单个 chunk 上：chunk 的大小由
     //   传输层决定（几 KiB），拿它当判据等于没判。
     if (this._buf.length > MAX_RESPONSE_BYTES) {
       return this._die('常驻通道上有一行过大，已中止（对面回的可能不是 Slurmate 的协议）。');
@@ -389,7 +389,7 @@ class ResidentChannel {
     if (!env) return;
     if (env.rid !== undefined && env.rid !== null) {
       const p = this._pending.get(env.rid);
-      // ★ 找不到就丢掉。这条**不是**漏网的响应，而是**迟到的**：它已经超时、
+      // 找不到就丢掉。这条不是漏网的响应，而是迟到的：它已经超时、
       //   调用方早就拿到了 transport 错误。当成通知处理的话，一个迟到的响应
       //   会被读成一条推送。
       if (!p) return;
@@ -416,15 +416,15 @@ class ResidentChannel {
       }, timeoutMs);
       timer.unref?.();
       this._pending.set(rid, { resolve, timer });
-      // ★ **`rid` 只从这条路径上发。** 它在守护进程那边是"这条连接从此收推送"
-      //   的判据，而 exec 那条路是**一次性的**：带上它，守护进程会把推送写进一条
+      // `rid` 只从这条路径上发。它在守护进程那边是"这条连接从此收推送"
+      //   的判据，而 exec 那条路是一次性的：带上它，守护进程会把推送写进一条
       //   已经没人读的连接。见 rpc() 里那一句。
       try {
-        // ★★ `client` 与 `rid` **只在同一条路径上、同一个理由上发出去**：
+        // `client` 与 `rid` 只在同一条路径上、同一个理由上发出去：
         //   守护进程认身份的判据就是"这条连接发过带 rid 的请求"（见
         //   register_client）。exec 那条路上一个都不带 —— 带上 `rid` 会让守护
         //   进程把推送写进一条已经没人读的连接；带上 `client` 会让看护者那一格
-        //   跟着一条**下一秒就没了**的连接走（它刚认领的会话立刻变成没人看）。
+        //   跟着一条下一秒就没了的连接走（它刚认领的会话立刻变成没人看）。
         this._stream.write(JSON.stringify(
           this._client ? { ...req, rid, client: this._client } : { ...req, rid }
         ) + '\n');
@@ -438,9 +438,9 @@ class ResidentChannel {
 
   /**
    * @param {string}  why
-   * @param {boolean} deliberate  是不是**我们自己**关的（探针失败、后端在拆）
+   * @param {boolean} deliberate  是不是我们自己关的（探针失败、后端在拆）
    *
-   * ★ 这个区分是承重的：调用方（`SshBackend`）拿到 non-deliberate 的关闭会**重开**
+   * 这个区分是承重的：调用方（`SshBackend`）拿到 non-deliberate 的关闭会重开
    *   一条。把它和"自己关的"混在一起，探针一失败就会变成重开风暴 —— 而风暴的症状
    *   是登录节点上每两秒一个 `slurmate stream` 进程，日志里什么都没有。
    */
@@ -458,7 +458,7 @@ class ResidentChannel {
   /** 主动关掉（探针失败、后端在拆）。已死的通道上什么都不做。 */
   close() {
     if (this.dead) return;
-    // ★ 先判死再关流：反过来的话，`close()` 触发的 'close' 事件会先跑进 `_die`，
+    // 先判死再关流：反过来的话，`close()` 触发的 'close' 事件会先跑进 `_die`，
     //   于是这次关闭的原因被记成"对端关了"，而它其实是我们自己关的 ——
     //   排查的时候这两个原因的下一步完全不同。
     this._die('常驻通道已被客户端关闭', true);
@@ -487,7 +487,7 @@ class SshBackend extends Backend {
     /**
      * 握手问到的基座版本（三态，见 `connect()` 的接口注释）。
      *
-     * ★ 它是**这一条连接**的事实，所以要跟 `_conn` 同生共死：断开时清掉，
+     * 它是这一条连接的事实，所以要跟 `_conn` 同生共死：断开时清掉，
      *   否则下一条连接会把上一条的版本号报出去 —— 而"上一条是哪一台"这件事
      *   在两条连接之间没有任何保证。
      */
@@ -501,12 +501,12 @@ class SshBackend extends Backend {
     this._lastHostKey = null;   // { fingerprint, algorithm } —— 供界面展示
 
     /**
-     * 常驻通道（`slurmate stream`）。**没有它一切照常** —— `rpc()` 会走 exec。
+     * 常驻通道（`slurmate stream`）。没有它一切照常 —— `rpc()` 会走 exec。
      *
-     * ★ 它跟 `_conn` 同生共死：SSH 断了它就没了，`_conn` 重建时要重新开一条。
+     * 它跟 `_conn` 同生共死：SSH 断了它就没了，`_conn` 重建时要重新开一条。
      */
     this._resident = null;
-    /** 常驻通道**没能**建起来的原因。给诊断用 —— 它不是错误，只是一种降级。 */
+    /** 常驻通道没能建起来的原因。给诊断用 —— 它不是错误，只是一种降级。 */
     this.residentError = null;
     /** 建作业日志目录没成的原因（见 `prepare()`）。同样是"连上了，但有一件事没成"。 */
     this.prepareError = null;
@@ -517,7 +517,7 @@ class SshBackend extends Backend {
   /**
    * 常驻通道现在是不是可用。界面与用例问的是这个，不是私有字段叫什么。
    *
-   * ★ 三态是**故意**的：`null` = 还没试过（还没连上登录节点），`false` = 试过、
+   * 三态是故意的：`null` = 还没试过（还没连上登录节点），`false` = 试过、
    *   不通，`true` = 在。把"还没试"和"试过不通"合并成 `false`，会让启动阶段
    *   的日志说出一句当时并不成立的话。
    */
@@ -535,7 +535,7 @@ class SshBackend extends Backend {
    *                   {ok:false, error, code?, hostKey?}>}
    *   code='host_key_unknown' —— 第一次见到这台主机，hostKey 里带指纹，界面确认后
    *                              用 trustHostKey 重连一次
-   *   code='host_key_changed' —— 主机密钥变了，**永远拒绝**
+   *   code='host_key_changed' —— 主机密钥变了，永远拒绝
    */
   async connect(profile, opts = {}) {
     if (!profile || !profile.user || !profile.host || !Number.isInteger(profile.port)) {
@@ -547,12 +547,12 @@ class SshBackend extends Backend {
     if (!this._opts.privateKey) {
       return { ok: false, error: '还没有可用的 SSH 私钥。请先在设置里生成密钥并把公钥注册到 IDM。' };
     }
-    // ★ 先自己解析一遍私钥再交给 ssh2。
-    //   `Client.connect()` 遇到不能解析的私钥会**同步抛异常**，穿出本模块
+    // 先自己解析一遍私钥再交给 ssh2。
+    //   `Client.connect()` 遇到不能解析的私钥会同步抛异常，穿出本模块
     //   「不抛异常」的契约 —— 在真机上表现为主进程里一个没人处理的 rejection，
     //   而用户看到的只是「点了没反应」。宁可在这里明确地失败。
     const parsed = ssh2.utils.parseKey(this._opts.privateKey);
-    // parseKey 在输入里含多把密钥时返回**数组**。不先摊平的话，下面 `.isPrivateKey()`
+    // parseKey 在输入里含多把密钥时返回数组。不先摊平的话，下面 `.isPrivateKey()`
     // 会在数组上抛 TypeError，穿出「不抛异常」的契约。
     const key = Array.isArray(parsed)
       ? parsed.find((k) => k && typeof k.isPrivateKey === 'function' && k.isPrivateKey())
@@ -566,7 +566,7 @@ class SshBackend extends Backend {
              + '请在这一条连接的「编辑」里重新生成密钥，并把新的公钥重新注册到 IDM。',
       };
     }
-    // 记下**这次真正出示的是哪把钥匙**。认证失败时唯一有价值的线索就是它 ——
+    // 记下这次真正出示的是哪把钥匙。认证失败时唯一有价值的线索就是它 ——
     // 没有它，用户只能对着一句「认证失败」反复重试。
     this._offeredKey = {
       keyType: key.type || null,
@@ -576,20 +576,20 @@ class SshBackend extends Backend {
         return Buffer.isBuffer(blob) ? `${key.type} ${blob.toString('base64')} slurmate` : null;
       })(),
     };
-    // ★★ **换一台**：先把上一条连接拆掉，再拨号。
+    // 换一台：先把上一条连接拆掉，再拨号。
     //
-    //    `_open()` 在 `this._conn` 还在的时候是**短路返回**上一条连接的
+    //    `_open()` 在 `this._conn` 还在的时候是短路返回上一条连接的
     //    `whoami` / `daemonVersion` 的 —— 那是给"同一台机器的第二次 `connect`"
-    //    准备的（每一次重连都真拨一次号没有意义）。可它**不看要连的是哪一台**：
-    //    少了下面这一段，"换一条连接"会拿**上一台**的身份回来 —— 拨号次数 0、
+    //    准备的（每一次重连都真拨一次号没有意义）。可它不看要连的是哪一台：
+    //    少了下面这一段，"换一条连接"会拿上一台的身份回来 —— 拨号次数 0、
     //    `_conn` 还是旧的那条、`_profile` 却已经写成了新的（三种事实互相矛盾），
     //    而调用方（`index.js` 的 `doConnect`）会把它当成"连上了新站点"：
-    //    **窗口标题写新站点、界面上新站点显示「已连接」，而每一次 RPC 都发给旧站点**。
+    //    窗口标题写新站点、界面上新站点显示「已连接」，而每一次 RPC 都发给旧站点。
     //    这是"系统报告成功，而事情没成"里最坏的一种 —— 它连"没成"都看不出来。
     //
-    //    ★ 判据是**三元组**而不是连接的 id：这一层不认识 id（id 是配置那一侧的事，
+    //    判据是三元组而不是连接的 id：这一层不认识 id（id 是配置那一侧的事，
     //      见 backend.js 的接口注释）。同一台机器的重复 `connect` 照旧短路。
-    //    ★ 位置在**私钥解析之后**：新那条的私钥要是不合法，本不该把旧连接拆掉。
+    //    位置在私钥解析之后：新那条的私钥要是不合法，本不该把旧连接拆掉。
     const sameTarget = this._profile
       && this._profile.user === profile.user
       && this._profile.host === profile.host
@@ -612,9 +612,9 @@ class SshBackend extends Backend {
   }
 
   _open() {
-    // ★ 短路这一支**也必须带上 `daemonVersion`**。少了它，调用方（index.js 的
+    // 短路这一支也必须带上 `daemonVersion`。少了它，调用方（index.js 的
     //   版本闸）在"已经连着、再连一次"时会拿到 `undefined`，而 `undefined` 在
-    //   那条判定的三态里是"答了却没有版本号" ⇒ 每一次重连都误报一句
+    //   那条判定的三态里是"答了却没有版本号"，每一次重连都误报一句
     //   "对面不是我们的守护进程"。它连的明明就是上一次那一台。
     if (this._conn) {
       return Promise.resolve({
@@ -622,7 +622,7 @@ class SshBackend extends Backend {
       });
     }
     if (this._connecting) return this._connecting;
-    // ★ `.catch` 是兜底：ssh2 有几处在**同步**路径上抛异常（比如私钥格式），
+    // `.catch` 是兜底：ssh2 有几处在同步路径上抛异常（比如私钥格式），
     //   而 Promise 执行器里同步抛出的东西会变成 rejection。少了这一层，
     //   它就会以「未处理的 rejection」出现在主进程里 —— 界面什么都不显示。
     this._connecting = this._openOnce()
@@ -645,28 +645,28 @@ class SshBackend extends Backend {
         this._attempt = 0;
         this._emitState(true, `${user}@${host}:${port}`);
 
-        // ★★ **先把常驻通道建起来（尽力而为）**，再走下面那套握手。
+        // 先把常驻通道建起来（尽力而为），再走下面那套握手。
         //
-        //   放在这里而不是 connect() 的开头：它要在 SSH 通了**之后**、第一条
-        //   RPC **之前**。放后面的话，握手那两条（ping/whoami）会白走一次 exec，
+        //   放在这里而不是 connect() 的开头：它要在 SSH 通了之后、第一条
+        //   RPC 之前。放后面的话，握手那两条（ping/whoami）会白走一次 exec，
         //   而它们正是最该走常驻通道的那两条 —— 每次连接都多 fork 一个 python。
         //
-        //   ★ 它**绝不**让 connect() 失败：建不起来就退回去用 exec，而"为什么
+        //   它绝不让 connect() 失败：建不起来就退回去用 exec，而"为什么
         //     建不起来"记在 `residentError` 里。理由见文件头那一段。
         await this._openStream();
 
-        // ★ 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放在这儿而不是
-        //   `connect()` 的开头：它要一条**真的通了**的 SSH 连接。
+        // 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放在这儿而不是
+        //   `connect()` 的开头：它要一条真的通了的 SSH 连接。
         await this.prepare();
 
-        // ★ 版本握手 —— **在 whoami 之前**问一次 ping。
+        // 版本握手 —— 在 whoami 之前问一次 ping。
         //
-        //   `ping` 与它返回的 `version` **每一个守护进程都有**，所以这一问对
-        //   **任何一版**都有效 —— 这正是"客户端要能兼容老版本
+        //   `ping` 与它返回的 `version` 每一个守护进程都有，所以这一问对
+        //   任何一版都有效 —— 这正是"客户端要能兼容老版本
         //   服务端"那条要求能成立的前提。反过来（让守护进程问客户端）做不到：
         //   老客户端不带版本，见 docs/PROTOCOL.md。
         //
-        //   ★ **判定不在这里**：规则在 plugins/index.js 的 `versionCheck` 里，
+        //   判定不在这里：规则在 plugins/index.js 的 `versionCheck` 里，
         //     闸在 index.js —— 演示后端也要过同一道闸，而 index.js 是这两个后端
         //     唯一的交汇点。这里只负责"把版本问出来"，以及把"问不到"的几种情况
         //     分开（它们是三个不同的结论，不是一个）。
@@ -682,8 +682,8 @@ class SshBackend extends Backend {
         if (ping && ping.ok) {
           daemonVersion = (ping.data || {}).version;
         } else if (!noPing) {
-          // 问不到、也不是"对面没有这个 op" ⇒ 这条链路本身有问题。
-          // 与下面 whoami 的失败走同一条路：**如实报告**，别以为连上了。
+          // 问不到、也不是"对面没有这个 op"，这条链路本身有问题。
+          // 与下面 whoami 的失败走同一条路：如实报告，别以为连上了。
           const why = (ping && ping.error && (ping.error.detail || ping.error.kind))
             || '未知原因';
           try { client.end(); } catch { /* 尽力 */ }
@@ -696,7 +696,7 @@ class SshBackend extends Backend {
         }
 
         // 顺手拿一次 whoami：它既验证「RPC 这条链路真的通」（而不只是 SSH 握手成功），
-        // 又给界面提供账户与分区权限。**失败要如实报告** —— 这条链路不通时，
+        // 又给界面提供账户与分区权限。失败要如实报告 —— 这条链路不通时，
         // 界面必须知道，而不是以为连上了。
         const resp = await this.rpc({ op: 'whoami' });
         if (resp && resp.ok) {
@@ -723,9 +723,9 @@ class SshBackend extends Backend {
           return done({ ok: false, code: rejected.code, error: rejected.error, hostKey: rejected.hostKey });
         }
         const msg = (e && e.message) || '未知错误';
-        // ★ 认证失败要单独识别。ssh2 的原话（「All configured authentication
+        // 认证失败要单独识别。ssh2 的原话（「All configured authentication
         //   methods failed」）直接透出去，用户看到的是又一句不指向任何根因的英文，
-        //   而它的真实含义很具体：**服务器不认这把钥匙**。
+        //   而它的真实含义很具体：服务器不认这把钥匙。
         if (AUTH_FAILED_RE.test(msg)) {
           const { user, host, port } = this._profile;
           return done({
@@ -742,8 +742,8 @@ class SshBackend extends Backend {
           this._conn = null;
           this._whoami = null;
           this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
-          // ★ 常驻通道也同生共死，而且要**先摘掉重开定时器** —— 不摘的话，SSH
-          //   断开之后那个定时器会去重开一条属于**上一条 SSH 连接**的通道，
+          // 常驻通道也同生共死，而且要先摘掉重开定时器 —— 不摘的话，SSH
+          //   断开之后那个定时器会去重开一条属于上一条 SSH 连接的通道，
           //   而它现在连 `_conn` 都是 null，只会在日志里留下一句莫名其妙的失败。
           this._teardownStream();
           this._emitState(false, '连接已断开');
@@ -756,7 +756,7 @@ class SshBackend extends Backend {
         port,
         username: user,
         privateKey: this._opts.privateKey,
-        // ★ 必须实现。ssh2 默认不校验主机密钥，不做的后果是裸奔。
+        // 必须实现。ssh2 默认不校验主机密钥，不做的后果是裸奔。
         hostVerifier: (key) => {
           const verdict = this._judgeHostKey(key);
           if (verdict === 'accept') return true;
@@ -786,7 +786,7 @@ class SshBackend extends Backend {
     const status = typeof check === 'function' ? check(fingerprint) : 'new';
 
     if (status === 'known') return 'accept';
-    // 用户刚在界面上确认过这一个指纹 —— 放行，但**只放行这一个**
+    // 用户刚在界面上确认过这一个指纹 —— 放行，但只放行这一个
     if (status === 'new' && this._opts.trustHostKey === fingerprint) return 'accept';
 
     if (status === 'changed') {
@@ -820,16 +820,16 @@ class SshBackend extends Backend {
 
   // ── 作业日志目录 ────────────────────────────────────────────────────────
   /**
-   * 在站点上把这个用户的作业日志目录建出来。**每次连接一次**，幂等（`mkdir -p`）。
+   * 在站点上把这个用户的作业日志目录建出来。每次连接一次，幂等（`mkdir -p`）。
    *
-   * 尽力而为：失败只把原因记进 `prepareError`，**不抛异常、也不让 connect() 失败**。
+   * 尽力而为：失败只把原因记进 `prepareError`，不抛异常、也不让 connect() 失败。
    * 理由与常驻通道那条一样 —— 连上是连上，而"以后提交的作业会起不来"是另一件事，
    * 该由调用方决定怎么告诉用户（`index.js` 的 `doConnect` 把它转成一条告警）。
    *
-   * ★ 它与 `$HOME` 有关，而客户端从来不知道远端的家目录是什么（那是 NSS 的事）。
-   *   所以命令串里是 `$HOME`，由**远端**的 bash 展开 —— 客户端一个路径都不拼。
+   * 它与 `$HOME` 有关，而客户端从来不知道远端的家目录是什么（那是 NSS 的事）。
+   *   所以命令串里是 `$HOME`，由远端的 bash 展开 —— 客户端一个路径都不拼。
    *
-   * ★ 不做成"每次提交之前建一次"：那是给每一条提交加一个来回，而目录建出来之后
+   * 不做成"每次提交之前建一次"：那是给每一条提交加一个来回，而目录建出来之后
    *   就一直在了（作业脚本每次也会 `mkdir -p` 一次，删掉也会被补回来）。
    */
   prepare() {
@@ -838,7 +838,7 @@ class SshBackend extends Backend {
     return new Promise((resolve) => {
       let settled = false;
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
-      // ★ 兜底：`conn.exec` 的回调**不保证会来**（连接正好在那一瞬间断掉时它
+      // 兜底：`conn.exec` 的回调不保证会来（连接正好在那一瞬间断掉时它
       //   永远不触发）。没有它，`_openOnce` 的 ready 会停在这里，而
       //   `readyTimeout` 只管握手那一段 —— 用户看到的是"点了没反应"。
       const timer = setTimeout(() => {
@@ -872,12 +872,12 @@ class SshBackend extends Backend {
 
   // ── 常驻通道 ────────────────────────────────────────────────────────────
   /**
-   * 建一条常驻通道，并**探一次针**证明它真的能用。
+   * 建一条常驻通道，并探一次针证明它真的能用。
    *
    * 尽力而为：任何一步失败都只是把 `_resident` 留在 null（于是 `rpc()` 走 exec），
-   * 并把原因记进 `residentError`。它**不抛异常**、也**不**让 connect() 失败。
+   * 并把原因记进 `residentError`。它不抛异常、也不让 connect() 失败。
    *
-   * ★ 探针（一句 `ping`）不是多余的谨慎：`exec` 成功只说明**命令被启动了**。
+   * 探针（一句 `ping`）不是多余的谨慎：`exec` 成功只说明命令被启动了。
    *   旧 CLI 上 `slurmate stream` 会立刻以 argparse 的退出码 2 结束（一行 usage
    *   进 stderr），而那条通道在客户端看来与一条正常的通道别无二致 —— 直到第一条
    *   真请求永远等不到响应。见 STREAM_PROBE_MS。
@@ -898,11 +898,11 @@ class SshBackend extends Backend {
         if (timer) { clearTimeout(timer); timer = null; }
         resolve(v);
       };
-      // ★★ 外层的兜底：`conn.exec` 的回调**不保证会来** —— SSH 连接正好在那一瞬间
+      // 外层的兜底：`conn.exec` 的回调不保证会来 —— SSH 连接正好在那一瞬间
       //    断掉时它永远不触发。没有它，`connect()` 的 ready 处理会停在这里，
       //    而 `readyTimeout` 只管握手那一段，管不到这里 ——
       //    用户看到的是"点了没反应"，没有任何地方报错。
-      //    ★ 它比探针宽 2 秒：正常情况下结束这次等待的**总是**探针。
+      //    它比探针宽 2 秒：正常情况下结束这次等待的总是探针。
       timer = setTimeout(() => {
         this.residentError = '建立常驻通道时超时（命令通道没有回应）';
         this._scheduleStreamReopen();
@@ -922,18 +922,18 @@ class SshBackend extends Backend {
           const ch = new ResidentChannel(stream, {
             onNotify: (msg) => this._onResidentNotify(msg),
             onClose: (why, deliberate) => this._onResidentClose(ch, why, deliberate),
-            // 这台电脑是谁。**每一条请求都带上**（见 ResidentChannel.request）。
+            // 这台电脑是谁。每一条请求都带上（见 ResidentChannel.request）。
             client: this._opts.client || null,
           });
           ch.request({ op: 'ping' }, STREAM_PROBE_MS).then((resp) => {
-            // ★ 判据是"**对面**答了一个信封"，**不是** `ok:true`：限流
+            // 判据是"对面答了一个信封"，不是 `ok:true`：限流
             //   （`rate_limited`）也是一次正常的往返，它同样证明这条通道是通的。
             //   拿 `ok` 去判会把一次限流记成"这是条坏通道"，然后降级一整个进程。
             //
-            // ★★ 而 `kind: 'transport'` 必须**排除掉** —— 那是**我们自己**合成的
+            // 而 `kind: 'transport'` 必须排除掉 —— 那是我们自己合成的
             //    信封（见 `transportError`），通道一死 `request()` 就立刻拿它结账。
             //    它有布尔 `ok`（false），所以只判 `typeof ok === 'boolean'` 的话，
-            //    **一条刚建立就死掉的通道会被判成可用**：`_resident` 挂上去，
+            //    一条刚建立就死掉的通道会被判成可用：`_resident` 挂上去，
     //    此后每一条 rpc 都发进一条死通道，而 `resident` 还报 true。
             //    这个 `kind` 是客户端独有的，守护进程从不发（它的所有错误都走
             //    `_err(code, kind)`，kind 是 `not_found` / `rate_limited` 那几种）。
@@ -948,8 +948,8 @@ class SshBackend extends Backend {
             this.residentError = (resp && resp.error
               && (resp.error.detail || resp.error.kind)) || '这条通道没有应答';
             ch.close();
-            // ★ 失败也要排下一次：这一句覆盖的是"**登录节点上的守护进程正好在
-            //   重启**"这一类**暂时**的失败。而"CLI 是旧的"那种**永久**的失败由
+            // 失败也要排下一次：这一句覆盖的是"**登录节点上的守护进程正好在
+            //   重启"这一类暂时的失败。而"CLI 是旧的"那种永久**的失败由
             //   `_scheduleStreamReopen` 里的次数上限挡住 —— 两者的现场一模一样
             //   （一行 usage + 退出码 2），区分不了，所以只能靠"试几次就不再试"。
             this._scheduleStreamReopen();
@@ -967,16 +967,16 @@ class SshBackend extends Backend {
   /**
    * 常驻通道断了。
    *
-   * ★ **不放弃**：SSH 本身还活着的话就再开一条。只降级不回补的话，这条通道一辈子
-   *   只坏一次，客户端此后永远按 60 秒轮询 —— 也就是**静默地**退回纯 exec 轮询，
+   * 不放弃：SSH 本身还活着的话就再开一条。只降级不回补的话，这条通道一辈子
+   *   只坏一次，客户端此后永远按 60 秒轮询 —— 也就是静默地退回纯 exec 轮询，
    *   而界面上没有任何东西会提这件事。
    *
-   * ★ 我们自己关的（探针失败、后端在拆）**不重开**：那两种情况下重开都是错的，
+   * 我们自己关的（探针失败、后端在拆）不重开：那两种情况下重开都是错的，
    *   而探针失败重开还会变成一个重开风暴。
    */
-  /** 常驻通道上来了一个通知。**直接往上抛**，一行都不留在这里。
+  /** 常驻通道上来了一个通知。直接往上抛，一行都不留在这里。
    *
-   * ★ 通道上只有一种通知：**全量快照** —— 它逐条都属于某一条会话，本来就该归
+   * 通道上只有一种通知：全量快照 —— 它逐条都属于某一条会话，本来就该归
    *   `session.js`，所以直接往上抛，一行都不留在这里。
    */
   _onResidentNotify(msg) {
@@ -990,11 +990,11 @@ class SshBackend extends Backend {
     this._scheduleStreamReopen();
   }
 
-  /** 排一次重开。**只在真的能重开时才排**，理由见下面那两行。 */
+  /** 排一次重开。只在真的能重开时才排，理由见下面那两行。 */
   _scheduleStreamReopen() {
     if (this._closed || !this._conn || this._streamTimer) return;
     // 连着失败够多次就不再试 —— 见 STREAM_ATTEMPT_MAX。此后这一条 SSH 连接上
-    // 一直走 exec，这是**正常的退路**，不是坏掉的状态。
+    // 一直走 exec，这是正常的退路，不是坏掉的状态。
     if (this._streamAttempt >= STREAM_ATTEMPT_MAX) return;
     const delay = Math.min(
       STREAM_REOPEN_MIN_MS * (2 ** this._streamAttempt), STREAM_REOPEN_MAX_MS);
@@ -1007,7 +1007,7 @@ class SshBackend extends Backend {
     this._streamTimer.unref?.();
   }
 
-  /** 拆掉常驻通道与它的重开定时器。**不重开。** */
+  /** 拆掉常驻通道与它的重开定时器。不重开。 */
   _teardownStream() {
     if (this._streamTimer) { clearTimeout(this._streamTimer); this._streamTimer = null; }
     this._streamAttempt = 0;
@@ -1019,13 +1019,13 @@ class SshBackend extends Backend {
   /**
    * 发一次 RPC。
    *
-   * **契约：不抛异常。** 传输层失败返回一个 `kind='transport'` 的信封，由
+   * 契约：不抛异常。传输层失败返回一个 `kind='transport'` 的信封，由
    * classify.js 统一分类 —— 调用方（session.js）从不 try/catch rpc 的返回值。
    */
   async rpc(req) {
-    // ★★ 常驻通道在，就走它。**这是这一版唯一改变行为的一行。**
+    // 常驻通道在，就走它。这是这一版唯一改变行为的一行。
     //
-    //   判据是"现在有没有一条活的常驻通道"，而它是一条**每时每刻都在变**的事实：
+    //   判据是"现在有没有一条活的常驻通道"，而它是一条每时每刻都在变的事实：
     //   没建起来、断了、正在重开，都落到下面那条 exec 路上 ——
     //   于是"降级"不需要任何一处 try/catch，它就是同一个函数的下一个分支。
     if (this._resident && !this._resident.dead) {
@@ -1039,17 +1039,17 @@ class SshBackend extends Backend {
     }
     if (!conn) return transportError('尚未连接到登录节点');
 
-    // ★★★ **exec 这条路上永远不发 `rid`。**
+    // exec 这条路上永远不发 `rid`。
     //
     //   它在守护进程那边是"这条连接从此收推送"的判据（见 handle_line），而这条
-    //   连接是**一次性的**：发了 `rid`，守护进程会把推送写进一条马上要被关掉的
-    //   连接。更糟的是那条连接上的响应**与推送共用同一个输出队列** —— 于是
+    //   连接是一次性的：发了 `rid`，守护进程会把推送写进一条马上要被关掉的
+    //   连接。更糟的是那条连接上的响应与推送共用同一个输出队列 —— 于是
     //   一次恰好落在 tick 上的推送会被读成这条请求的应答。
     //
     //   写成"复制一份再删掉"而不是"要求调用方别传"：调用方（session.js）
-    //   只发业务字段，但**不变量不能住在调用方的自觉里**。
+    //   只发业务字段，但不变量不能住在调用方的自觉里。
     //
-    // ★★ `client` 与 `rid` 在这里是**同一条规矩**：它也一样只在常驻通道上发。
+    // `client` 与 `rid` 在这里是同一条规矩：它也一样只在常驻通道上发。
     //    守护进程那边的门槛是 `conn.subscribed`（"这条连接发过带 rid 的请求"），
     //    所以今天即使漏了这一行也不会出事 —— 但那正是"两层各守一半"，
     //    而两层里任何一层被下一个人改掉，症状都是「看护者那一格跟着一条一次性的
@@ -1066,8 +1066,8 @@ class SshBackend extends Backend {
         let stderr = '';
         let gotExit = false;
         let finished = false;
-        // ★ 与常驻通道同一个理由（见 ResidentChannel 里的 `_dec`）：按 chunk 各转一次
-        //   字符串会把跨边界的多字节字符撕成 U+FFFD，而那是**间歇性**的。
+        // 与常驻通道同一个理由（见 ResidentChannel 里的 `_dec`）：按 chunk 各转一次
+        //   字符串会把跨边界的多字节字符撕成 U+FFFD，而那是间歇性的。
         const dec = new StringDecoder('utf8');
         const finish = (res) => { if (!finished) { finished = true; resolve(res); } };
 
@@ -1087,7 +1087,7 @@ class SshBackend extends Backend {
           const picked = pickEnvelope(stdout);
           if (picked.found) return finish(picked.envelope);
 
-          // 一行都没解析出来。把**原始输出**一并报出来，别只留一句「解析失败」——
+          // 一行都没解析出来。把原始输出一并报出来，别只留一句「解析失败」——
           // 这正是「rc 文件污染 / 守护进程没装 / 被 guard 拦了 / python 崩了」
           // 四种情况的共同现场，而它们的修法完全不同。
           const parts = ['登录节点没有返回可解析的应答'];
@@ -1102,7 +1102,7 @@ class SshBackend extends Backend {
           finish(transportError(parts.join('')));
         });
 
-        // 请求体走 **stdin**，绝不进命令行 —— argv 是常量这件事靠这里保持。
+        // 请求体走 stdin，绝不进命令行 —— argv 是常量这件事靠这里保持。
         stream.end(JSON.stringify(body) + '\n');
       });
     });
@@ -1111,8 +1111,8 @@ class SshBackend extends Backend {
   /**
    * 建立一条到目标的数据通道（隧道用）。
    *
-   * ★ host 必须是守护进程给的 `tunnel_target` 里那个**字面 IPv4**，禁止再解析节点名。
-   *   解析结果与 nft 的 `ip daddr` 不一致会导致 ACL **静默失效**
+   * host 必须是守护进程给的 `tunnel_target` 里那个字面 IPv4，禁止再解析节点名。
+   *   解析结果与 nft 的 `ip daddr` 不一致会导致 ACL 静默失效
    *   （cluster/slurmate-sessiond:1674-1680 对此有强措辞的注释）。
    *   这个检查的权威位置在 tunnel.js（它拿得到原始 tunnel_target 字符串），
    *   这里只保证不自己动手解析。

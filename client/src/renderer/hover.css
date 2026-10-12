@@ -1,6 +1,6 @@
 /* 浮窗那一层的样式。
-   ★ 与面板同一套配色 —— 它紧挨着面板的状态条出现，颜色不一样会很突兀。
-   ★ 单独一份文件而不是页面里一段 <style>：CSP 是 `style-src 'self'`，
+   与面板同一套配色 —— 它紧挨着面板的状态条出现，颜色不一样会很突兀。
+   单独一份文件而不是页面里一段 <style>：CSP 是 `style-src 'self'`，
      内联样式块会被静默丢掉（见 panel.html 那段注释），而表现只是"没上样式"。 */
 
 :root {
@@ -24,7 +24,7 @@ html, body {
   overflow: hidden;
 }
 
-/* 一整个页面就是一块面板。★ 左边一条竖线：它贴在边栏内侧，没有这条线的话，
+/* 一整个页面就是一块面板。左边一条竖线：它贴在边栏内侧，没有这条线的话，
    面板与插件那块页面之间没有边界（两者底色都可能是暗的）。 */
 .pane { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .pane.hidden { display: none; }
@@ -41,10 +41,10 @@ html, body {
 .hd .st { font-weight: 600; }
 .hd .spacer { flex: 1; }
 
-/* ★ 永远留着滚动条那条槽：作业输出一行一行地长出来，不留的话正文会跟着缩一下
+/* 永远留着滚动条那条槽：作业输出一行一行地长出来，不留的话正文会跟着缩一下
    （见文件末尾那一段，与 panel 的 app.css 是同一套做法）。 */
 .body { flex: 1; overflow-y: auto; padding: 10px 12px 16px; scrollbar-gutter: stable; }
-/* 输出那一块要**能选中**（用户要复制报错去搜），所以这一条是承重的 ——
+/* 输出那一块要能选中（用户要复制报错去搜），所以这一条是承重的 ——
    继承面板那种"界面文字不许选"的做法会让整块失去意义。 */
 .body.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
              white-space: pre-wrap; word-break: break-all; user-select: text; }
@@ -54,7 +54,7 @@ h3:first-child { margin-top: 0; }
 p { margin: 4px 0; }
 .sub { color: var(--fg-dim); }
 .bad { color: var(--err); }
-/* 「取不到」那一行。★ 与"确实没有"长得不一样是**故意的** —— 见 hover.html 那段。 */
+/* 「取不到」那一行。与"确实没有"长得不一样是故意的 —— 见 hover.html 那段。 */
 .na { color: var(--warn); }
 
 /* 键值两列：左边窄、右边占满。 */
@@ -66,7 +66,7 @@ p { margin: 4px 0; }
 .crow .nm { color: var(--fg); font-weight: 600; }
 .crow .dim { color: var(--fg-dim); }
 
-/* 链路那一行。它是**常驻**的（浮窗一打开就在最上面），因为它回答的是
+/* 链路那一行。它是常驻的（浮窗一打开就在最上面），因为它回答的是
    "现在这一刻还通不通" —— 而其余每一格都可能旧到 5 分钟。 */
 .link { padding: 8px 12px; flex: none; border-bottom: 1px solid var(--border); color: var(--fg-dim); }
 .link .ok { color: var(--ok); }
@@ -96,10 +96,10 @@ button.ghost:hover { color: var(--fg); border-color: var(--fg-dim); }
 button.ghost:disabled { opacity: .5; cursor: default; }
 
 /* ── 滚动条：自己画 ──────────────────────────────────────────────────────────
-   ★ 与 `app.css` 那一段**逐字同一套**。这一层是一个独立的文档（浮窗是另一个
+   与 `app.css` 那一段逐字同一套。这一层是一个独立的文档（浮窗是另一个
      BrowserWindow），它有自己的样式表，所以那一套在这里得再写一遍 ——
      与文件头 `:root` 那一段重复的理由完全相同。
-   ★★ 只写 `::-webkit-scrollbar*`，不写 `scrollbar-width` / `scrollbar-color`：
+   只写 `::-webkit-scrollbar*`，不写 `scrollbar-width` / `scrollbar-color`：
      两者同时存在时标准属性在 Chromium 里胜出，而这几条会静默失效。 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

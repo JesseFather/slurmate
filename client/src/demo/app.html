@@ -46,9 +46,9 @@
     <h2>页面收到的按键（快捷键接管验证）</h2>
     <p class="hint">
       在这里按 <code>Ctrl+W</code> / <code>Ctrl+N</code> / <code>F5</code>，
-      它们应当出现在下面的列表里 —— 说明按键到达了页面而不是被外壳吞掉。
+      它们应当出现在下面的列表里，说明按键到达了页面，而不是被外壳吞掉。
       <br>
-      再按 <code>Ctrl+Shift+I</code> 和 <code>F11</code>，它们应当<b>不</b>出现 —— 那是被刻意拦截的。
+      再按 <code>Ctrl+Shift+I</code> 和 <code>F11</code>，它们应当<b>不</b>出现，那是被刻意拦截的。
       <br>
       切到中文输入法打一段拼音，按键不该出现在列表里（输入法组合期间必须放行给输入法）。
     </p>
@@ -56,7 +56,7 @@
   </section>
   <section class="pane">
     <h2>被外壳吞掉的按键</h2>
-    <p class="hint">这一侧由外壳的 <code>before-input-event</code> 黑名单决定，页面收不到，所以它记录不了自己 —— 由外壳通过 IPC 回灌。</p>
+    <p class="hint">这一侧由外壳的 <code>before-input-event</code> 黑名单决定，页面收不到这些按键，所以列表由外壳通过 IPC 回灌。</p>
     <ul id="swallowed"><li class="empty">（还没有被吞掉的按键）</li></ul>
   </section>
 </main>

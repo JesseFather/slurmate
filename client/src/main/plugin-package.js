@@ -18,41 +18,41 @@
  *
  * ── 它是什么 ────────────────────────────────────────────────────────────────
  *
- * 严格解析容器（packer/docs/PLUGIN-SPEC.md 附录 A）、**逐份用记录里的 sha256 校字节**、
- * 算内容摘要（§3.4）、验签（§4.2）。它**不执行任何东西**，也**不落盘** ——
+ * 严格解析容器（packer/docs/PLUGIN-SPEC.md 附录 A）、逐份用记录里的 sha256 校字节、
+ * 算内容摘要（§3.4）、验签（§4.2）。它不执行任何东西，也不落盘 ——
  * 把负载写出来是调用方的事，那一步要与同意闸绑在一起（§5.2）。
  *
- * ★ 它还带着 `keyVerdict` —— §5.4 那条"签名者与钉住的那一把是不是同一把"。
- *   它判、**不写**：钉住发生在用户点同意的那一刻（调用方 `config.js` 的
- *   `pinPluginKey`）。这两个函数的**判据与写点分开**是故意的，见 `keyVerdict` 的注释。
+ * 它还带着 `keyVerdict` —— §5.4 那条"签名者与钉住的那一把是不是同一把"。
+ *   它判、不写：钉住发生在用户点同意的那一刻（调用方 `config.js` 的
+ *   `pinPluginKey`）。这两个函数的判据与写点分开是故意的，见 `keyVerdict` 的注释。
  *
- * ── ★ 它与 `packer/slurmate-packer.js` 是同一条规则的**两份实现** ──────────
+ * ── 它与 `packer/slurmate-packer.js` 是同一条规则的两份实现 ──────────
  *
  * 这是没办法的事：打包器要"下载这个文件夹就能用"，所以它不 import 客户端里的
  * 任何东西。两份解析器漂开的后果很具体 —— **同一个包，打包器说它合规、客户端
  * 说它不合规**，而用户看到的是"作者说打好了、我就是装不上"。
  *
  * 钉住它们的是 `tools/conformance/`：一份固定的输入树、一份期望的包字节、
- * 一批坏包，**每一条都带一个期望的理由词**，两端各跑一遍。所以下面这个 `R`
- * 词表与判**的次序**必须与打包器、与守护进程逐字一致 —— 次序也是规范的一部分
+ * 一批坏包，每一条都带一个期望的理由词，两端各跑一遍。所以下面这个 `R`
+ * 词表与判的次序必须与打包器、与守护进程逐字一致 —— 次序也是规范的一部分
  * （附录 A.4），一个包同时犯两条时，先判哪条决定了拿到哪个词。
  *
  * ── 那些"看起来多余"的检查 ──────────────────────────────────────────────────
  *
- * `checkRelPath` 在客户端侧是**再判一遍**：服务端可能被换过，"对面已经判过"
+ * `checkRelPath` 在客户端侧是再判一遍：服务端可能被换过，"对面已经判过"
  * 不构成省略的理由（与 `validate_session()` 对会话文件的态度同源）。
  *
  * ── 谁在用这一份 ────────────────────────────────────────────────────────────
  *
- *   `site-plugins.js`  —— **唯一**的读者。站点分发那条路上 `plugin_package` 取回来
+ *   `site-plugins.js`  —— 唯一的读者。站点分发那条路上 `plugin_package` 取回来
  *                      的字节在这里解析、验签、重算摘要，再 `unpackTo` 铺成树
  *                      （见那边的 fetchPackage）。
- *                       ★ 而**解析完就丢**：容器不落盘，留在盘上的是树加
+ * 而解析完就丢：容器不落盘，留在盘上的是树加
  *                       一张记录表（`plugin-slot.js`）。
  *
- * ★ `keyVerdict`（§5.4 那三个判词）**是唯一的判据**，每一个包都过钉子：钉子防的
+ * `keyVerdict`（§5.4 那三个判词）是唯一的判据，每一个包都过钉子：钉子防的
  *   是"远端把一个 id 换成别人做的构件"，而"用户自己在自己机器上挑了一个文件"钉不住
- *   （他本来就能改这台机器上的任何东西）。既然**每一份构件都是从远端来的**，
+ *   （他本来就能改这台机器上的任何东西）。既然每一份构件都是从远端来的，
  *   就没有哪一条路能绕过钉子。
  */
 
@@ -67,22 +67,22 @@ const sitePlugins = require('./site-plugins.js');
 
 /** 8 字节。末三字节是 `\x1a\r\n` —— 让文本工具一眼看出"这是二进制"。 */
 const MAGIC = Buffer.from('splug\x1a\r\n', 'latin1');
-/** 本实现认识的容器格式版本。别的值 ⇒ **拒绝**（客户端那一态叫"站点太新"）。 */
+/** 本实现认识的容器格式版本。别的值，拒绝（客户端那一态叫"站点太新"）。 */
 const FORMAT = 2;
 const HEADER_BYTES = 20;
 const SIG_ALG_ED25519 = 1;
-/** 签名块的**定长头**：`alg u8 | 公钥 32 | 签名 64`。 */
+/** 签名块的定长头：`alg u8 | 公钥 32 | 签名 64`。 */
 const SIG_PREFIX_BYTES = 1 + 32 + 64;
-/** 块里的 `id`：**26 个 ASCII 字节**（一个 ULID 的写法）。 */
+/** 块里的 `id`：26 个 ASCII 字节（一个 ULID 的写法）。 */
 const SIG_ID_BYTES = 26;
-/** `id` 之后那一段的**定长部分**：`verlen u8 | digestSite 32 | digestClient 32`。 */
+/** `id` 之后那一段的定长部分：`verlen u8 | digestSite 32 | digestClient 32`。 */
 const SIG_TAIL_BYTES = 1 + 32 + 32;
 /**
- * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 **u8**：
- * 最短 **188** 字节，最长 **443**（`188 + 255`）。
+ * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 u8：
+ * 最短 188 字节，最长 443（`188 + 255`）。
  *
- * ★ 那两端的数由 `tools/plugin-limits.json` 的 `signature_max_bytes` 与 CI 的 lint
- *   在**三侧之间**钉着；这个模块自己只用到 `SIG_MIN_BYTES`（判长度）与
+ * 那两端的数由 `tools/plugin-limits.json` 的 `signature_max_bytes` 与 CI 的 lint
+ *   在三侧之间钉着；这个模块自己只用到 `SIG_MIN_BYTES`（判长度）与
  *   `MAX_VERSION_BYTES`（判版本号放不放得下），所以只导出这两个 ——
  *   "一个没人读的导出就是一句没人守的承诺"。
  */
@@ -92,30 +92,30 @@ const MAX_VERSION_BYTES = 255;
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 const MANIFEST = 'plugin.json';
-/** 血统表。与 `plugin.json` 一样**两侧都在**（见 site-plugins.js 的 `isClientSidePath`）。 */
+/** 血统表。与 `plugin.json` 一样两侧都在（见 site-plugins.js 的 `isClientSidePath`）。 */
 const LINEAGE_FILE = 'lineage.json';
 
 /** §3.3 的深度上限。与 site-plugins.js 的 `HARD_LIMITS.max_depth` 是同一个数。 */
 const MAX_DEPTH = 8;
 
-// ── ★ 这个读方**不**执行"单文件多少字节 / 一共几份"那三个上限 ──────────────
+// ── 这个读方不执行"单文件多少字节 / 一共几份"那三个上限 ──────────────
 //
-// 那三个数在**协议**里是站点自述的 `limits`。包模式下它们变成**负载内**规则：
-// 由打包器与**调用方**执行（`site-plugins.js` 的 `fetchPackage` 拿包里的记录去走
-// `checkDeclared` —— 与逐份那条路**同一个函数**），不再需要走线。
+// 那三个数在协议里是站点自述的 `limits`。包模式下它们变成负载内规则：
+// 由打包器与调用方执行（`site-plugins.js` 的 `fetchPackage` 拿包里的记录去走
+// `checkDeclared` —— 与逐份那条路同一个函数），不再需要走线。
 //
-// ★ 为什么不在**这里**执行：这一层只回答"这些字节是不是一个合规的包"，而"这个
+// 为什么不在这里执行：这一层只回答"这些字节是不是一个合规的包"，而"这个
 //   站点发的东西我收不收得下"是调用方的 DoS 护栏（`HARD_LIMITS` 与站点自述两者
 //   取更严）。两件事混在一起，`parsePackage` 就会需要一个它不该知道的参数。
 //
-// ★ 而这一层不吃它们**不是**一个敞口：`file_count` 被长度方程夹住了（每条记录至少
+// 而这一层不吃它们不是一个敞口：`file_count` 被长度方程夹住了（每条记录至少
 //   42 字节，整张记录表必须放得进这个文件），真正需要"份数上限"的是**收下来的包
 //   文件**有多大 —— 那是链路约束，跟着 `package_bytes` 一起判。
 
 /**
- * 拒绝的理由词表。**三份实现字面相同**（见文件头）。
+ * 拒绝的理由词表。三份实现字面相同（见文件头）。
  *
- * ★ 它同时是一句对用户的话的原材料：将来界面上那一句"这个包为什么装不上"
+ * 它同时是一句对用户的话的原材料：将来界面上那一句"这个包为什么装不上"
  *   应当直接由这个词与它带的那句 `why` 拼出来，而不是另写一套文案 ——
  *   另写的那套迟早与这里的判据分家，而分家之后用户看到的是"校验失败"四个字。
  */
@@ -138,12 +138,12 @@ const R = {
 /**
  * 内容摘要 = sha256( 按路径排序后，逐份拼接「路径UTF-8 ‖ 0x00 ‖ sha256(内容)小写hex ‖ 0x0A」)
  *
- * ★ 排序按 **UTF-8 字节**（`Buffer.compare`），**不是** `a < b`：JS 的 `<` 比的是
- *   UTF-16 码元，与 UTF-8 字节序在非 BMP 字符上给出**相反的答案**。用 `<` 排的
+ * 排序按 UTF-8 字节（`Buffer.compare`），不是 `a < b`：JS 的 `<` 比的是
+ *   UTF-16 码元，与 UTF-8 字节序在非 BMP 字符上给出相反的答案。用 `<` 排的
  *   实现会在 `😀.txt` 与 `￿.txt` 这类名字上算出另一个摘要 —— 而那种 bug 只在
  *   有人恰好用了 emoji 文件名时才出现。`tools/conformance/` 的输入树里有这一对。
  *
- * ★ **不含**容器字节、信封头、签名、时间戳、打包器版本、目录名。签名**盖**的
+ * 不含容器字节、信封头、签名、时间戳、打包器版本、目录名。签名盖的
  *   就是这个值（§4.2），所以两者绝不能互相包含。
  */
 function contentDigest(files) {
@@ -173,10 +173,10 @@ function fingerprint(raw32) {
 }
 
 /**
- * 验一段 Ed25519 签名。**签名的是内容摘要那 32 个字节的原值**，不是它的十六进制
+ * 验一段 Ed25519 签名。签名的是内容摘要那 32 个字节的原值，不是它的十六进制
  * 写法（附录 A.3 写死了是哪一个）。
  *
- * ★ 验不过一律返回 `false`，**不抛**：一个畸形公钥不是"程序出错了"，是"这个包
+ * 验不过一律返回 `false`，不抛：一个畸形公钥不是"程序出错了"，是"这个包
  *   的签名不成立"。抛出去的话调用方要写 try/catch，而漏掉的那个 catch 会变成崩溃。
  */
 function verifyEd25519(raw32, msg, sig) {
@@ -191,8 +191,8 @@ function verifyEd25519(raw32, msg, sig) {
 }
 
 /**
- * §5.4 那三个判词。★ 它们**不是** `R` 里那九个 —— 那些是**格式**的理由
- * （包本身合不合规），这三个是**信任**的理由：包可以完全合规，而这一份不能收。
+ * §5.4 那三个判词。它们不是 `R` 里那九个 —— 那些是格式的理由
+ * （包本身合不合规），这三个是信任的理由：包可以完全合规，而这一份不能收。
  * 混在一起会让"这个包坏了"与"这个包换人了"看起来是同一件事。
  */
 const PIN = {
@@ -204,17 +204,17 @@ const PIN = {
 /**
  * §5.4：这个包的签名者，与本机钉住的那一把是同一把吗。
  *
- * `pinned` 是 `config.js` 的 `pinnedKeyOf(pins, id)`：**`undefined` = 从没钉过**
- * （首次即信任），其余一律是"钉过、值是这个"—— 其中**不是全长十六进制的那些**
+ * `pinned` 是 `config.js` 的 `pinnedKeyOf(pins, id)`：`undefined` = 从没钉过
+ * （首次即信任），其余一律是"钉过、值是这个"—— 其中不是全长十六进制的那些
  * 表示那条记录读不动（见下）。
  *
  * 返回 `{ok:true, first, fingerprint}` 或 `{ok:false, code, pinned, got, why}`。
- * ★ `why` 是**给用户看的那句话**的原材料：它必须把两把指纹都说出来（§5.4），
+ * `why` 是给用户看的那句话的原材料：它必须把两把指纹都说出来（§5.4），
  *   而且要能直接放进同意界面 —— 另写一套文案迟早与这里的判据分家。
  *
- * ★ 首次即信任（`first:true`）：调用方在这时**才**该 `pinPluginKey`。这里只判，
+ * 首次即信任（`first:true`）：调用方在这时才该 `pinPluginKey`。这里只判，
  *   不写 —— 写的时机与同意闸绑在一起（§5.2：先写台账、后激活）。
- *   而 `first` 时 `fingerprint` 可能是 `null`（这一份没签名）：那就**什么都不钉**，
+ *   而 `first` 时 `fingerprint` 可能是 `null`（这一份没签名）：那就什么都不钉，
  *   于是一个作者"先发不带签名的版本、后来开始签"不会被这里拒绝 —— 该被拒绝的是
  *   反过来的顺序（钉过之后又收到不带签名的）。
  */
@@ -258,13 +258,13 @@ function keyVerdict(pinned, pkg) {
 }
 
 /**
- * 那七个字段 → 一块签名块的字节（附录 A.3）。**`sign` 不用它**（客户端不签名），
- * 它服务的是**记录表那一条回路**：记录表里存的是拆开的字段，而形状判据必须与容器
- * 那一份**同一处实现**（`parseSigBlock`）—— 否则"什么算一块合法的签名块"就有了
+ * 那七个字段 → 一块签名块的字节（附录 A.3）。`sign` 不用它（客户端不签名），
+ * 它服务的是记录表那一条回路：记录表里存的是拆开的字段，而形状判据必须与容器
+ * 那一份同一处实现（`parseSigBlock`）—— 否则"什么算一块合法的签名块"就有了
  * 第二份说法，而两份漂开的方向是"一边收、一边拒"。
  *
- * ★ 拼不出来时**抛**（id 不是 26 字节、版本超过 255 字节）。调用方 `recordSig`
- *   把它折成 `{ok:false}` —— 那正是"这张记录表里的信封**被改过**"。
+ * 拼不出来时抛（id 不是 26 字节、版本超过 255 字节）。调用方 `recordSig`
+ *   把它折成 `{ok:false}` —— 那正是"这张记录表里的信封被改过"。
  */
 function buildSigBlock(o) {
   const idb = Buffer.from(o.id, 'ascii');
@@ -293,8 +293,8 @@ function buildSigBlock(o) {
  * digestSite 32 ｜ digestClient 32          长度 = 188 + verlen
  * ```
  *
- * ★ "不合形状"三种：长度不等于 `188 + verlen`、`alg` 认不得、`id`/`version` 那两段
- *   不是合法的 ASCII / UTF-8。★ 后两条靠**逐字节回比**判 —— 与路径那一条同源：
+ * "不合形状"三种：长度不等于 `188 + verlen`、`alg` 认不得、`id`/`version` 那两段
+ *   不是合法的 ASCII / UTF-8。后两条靠逐字节回比判 —— 与路径那一条同源：
  *   `toString` 会把坏字节悄悄换成 U+FFFD，于是两端算的不是同一份东西。
  */
 function parseSigBlock(buf) {
@@ -325,7 +325,7 @@ function parseSigBlock(buf) {
  *
  *     id(26) ‖ 0x00 ‖ version(verlen) ‖ 0x00 ‖ digestSite(32 原值) ‖ digestClient(32 原值)
  *
- * ★ 两个摘要是**原值**，不是十六进制写法。★ 两个 `0x00` 是**分隔符**：少了它们，
+ * 两个摘要是原值，不是十六进制写法。两个 `0x00` 是分隔符：少了它们，
  *   `id` 与 `version` 的边界就成了"前 26 个字节"，一个改包的人可以把 id 末尾几个
  *   字节挪进 version 里，换出另一对 `(id, 版本)` 而两个 `0x00` 之外一字不改。
  */
@@ -338,20 +338,20 @@ function signedMessage(o) {
 }
 
 /**
- * 把一个负载**按侧**分成两半（§3.1 / §4.2）。
+ * 把一个负载按侧分成两半（§3.1 / §4.2）。
  *
  *   客户端侧 = `client/**` + `plugin.json` + `lineage.json`
  *   站点侧   = 其余全部
  *
- * ★ 与打包器那一份**同一条规则**（`sidesOf`），而且是**按顶层前缀**判的，不是
+ * 与打包器那一份同一条规则（`sidesOf`），而且是按顶层前缀判的，不是
  *   "名字里有没有 client"：`clientfoo/x` 与 `a/client/x` 都不算客户端侧。
- * ★ 两个顶层元数据文件**两侧都在**，所以两侧**会重叠** —— 这是定义的一部分。
+ * 两个顶层元数据文件两侧都在，所以两侧会重叠 —— 这是定义的一部分。
  */
 function isClientSidePath(p) {
   return p.startsWith('client/') || p === MANIFEST || p === LINEAGE_FILE;
 }
 
-/** 分成两半，各自**保留原来的次序**。 */
+/** 分成两半，各自保留原来的次序。 */
 function sidesOf(files) {
   return {
     site: files.filter((f) => !f.path.startsWith('client/')),
@@ -359,7 +359,7 @@ function sidesOf(files) {
   };
 }
 
-/** 两侧的内容摘要。空的那一侧 = `sha256("")`，**有定义**（§3.1 允许某一侧为空）。 */
+/** 两侧的内容摘要。空的那一侧 = `sha256("")`，有定义（§3.1 允许某一侧为空）。 */
 function sideDigests(files) {
   const s = sidesOf(files);
   return { site: contentDigest(s.site), client: contentDigest(s.client) };
@@ -370,7 +370,7 @@ function sideDigests(files) {
 // ==============================================================================
 
 /**
- * 严格解析一个包。**按附录 A.4 的次序判**。
+ * 严格解析一个包。按附录 A.4 的次序判。
  *
  * 返回 `{ok:true, format, files, sig, manifest, digest}` 或 `{ok:false, code, why}`。
  * `files` 里每一项是 `{path, size, sha256, offset}`，`offset` 是它在**原始
@@ -407,8 +407,8 @@ function parsePackage(buf) {
     }
     const raw = buf.subarray(off + 2, off + 2 + pathlen);
     const p = raw.toString('utf8');
-    // ★ 不合法的 UTF-8 会被 `toString` **悄悄换成 U+FFFD** —— 摘要把那个替换字符
-    //   算进去，于是两端算的不是同一份东西。所以要在**解码之前**比字节。
+    // 不合法的 UTF-8 会被 `toString` 悄悄换成 U+FFFD —— 摘要把那个替换字符
+    //   算进去，于是两端算的不是同一份东西。所以要在解码之前比字节。
     if (!Buffer.from(p, 'utf8').equals(raw)) {
       return bad(R.PATH, `第 ${i} 条记录的路径不是合法的 UTF-8`);
     }
@@ -421,7 +421,7 @@ function parsePackage(buf) {
     off = end;
   }
 
-  // 5 长度必须**精确**（尾随字节、空洞、截断一律在这里响）
+  // 5 长度必须精确（尾随字节、空洞、截断一律在这里响）
   let sum = 0n;
   for (const f of files) {
     if (f.size > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -438,7 +438,7 @@ function parsePackage(buf) {
         : '（负载被截断了）'));
   }
 
-  // 6 路径规则（§3.3，客户端侧**再判一遍**）
+  // 6 路径规则（§3.3，客户端侧再判一遍）
   for (const f of files) {
     const why = sitePlugins.checkRelPath(f.path, MAX_DEPTH);
     if (why) return bad(R.PATH, `${JSON.stringify(f.path)}：${why}`);
@@ -446,7 +446,7 @@ function parsePackage(buf) {
   // 7 重复路径
   const seen = new Map();
   for (const f of files) {
-    // ★ `plugins.foldAscii`，不是 `toLowerCase()` —— 见 plugins/index.js 里那段。
+    // `plugins.foldAscii`，不是 `toLowerCase()` —— 见 plugins/index.js 里那段。
     const k = plugins.foldAscii(f.path);
     if (seen.has(k)) {
       const prev = seen.get(k);
@@ -471,7 +471,7 @@ function parsePackage(buf) {
     pay += n;
   }
 
-  // 9 负载里必须有 plugin.json，且是合法的 JSON **对象**
+  // 9 负载里必须有 plugin.json，且是合法的 JSON 对象
   const mf = files.find((f) => f.path === MANIFEST);
   if (!mf) return bad(R.MANIFEST, `负载里没有 ${MANIFEST}`);
   let manifest;
@@ -484,11 +484,11 @@ function parsePackage(buf) {
     return bad(R.MANIFEST, `${MANIFEST} 的最外层不是一个 JSON 对象`);
   }
 
-  // 10 有签名块。**四小步，次序是规范的一部分**（附录 A.4）：
+  // 10 有签名块。四小步，次序是规范的一部分（附录 A.4）：
   //    ① 形状 ② 身份（块里的 id/版本 vs 清单）③ 内容（重算的侧摘要 vs 块里那两个）
   //    ④ 密码学（验签）。①③④ 报 `signature`，②报 `manifest`。
   //
-  //    ★ ② 在 ③ 前面：`id`/`version` 是"这个包**是**什么"，摘要是"它**装着**什么"。
+  //    ② 在 ③ 前面：`id`/`version` 是"这个包是什么"，摘要是"它装着什么"。
   //      一个自己都没说清是什么的包，先说"哪一份文件对不上"是把人往错的方向带。
   let sig = null;
   if (sigLen !== 0) {
@@ -499,7 +499,7 @@ function parsePackage(buf) {
         `签名块 ${sigLen} 字节，不是一个合法的 Ed25519 签名块`
         + `（本格式是 ${SIG_MIN_BYTES}+版本号 字节、alg=1）`);
     }
-    // ② 身份：块里的 id/版本必须与清单**逐字**相同。逐**字节**比，不比字符串。
+    // ② 身份：块里的 id/版本必须与清单逐字相同。逐字节比，不比字符串。
     if (typeof manifest.id !== 'string' || typeof manifest.version !== 'string'
         || !Buffer.from(manifest.id, 'utf8').equals(Buffer.from(parsed.id, 'ascii'))
         || !Buffer.from(manifest.version, 'utf8').equals(Buffer.from(parsed.version, 'utf8'))) {
@@ -508,9 +508,9 @@ function parsePackage(buf) {
         + `而负载里那份 ${MANIFEST} 说是 ${JSON.stringify(manifest.id)}@${JSON.stringify(manifest.version)}`
         + '，同一个包里两处说了两个身份');
     }
-    // ③ 内容：**这个包里在的那几侧**，从它们的字节重算 §3.4 摘要，与块里那两个比。
-    //    ★ 客户端侧**永远在**（`plugin.json` 是它的一员，第 9 步保证它在）⇒ 那一边
-    //      永远核。站点侧在不在，由"包里有没有一条**只属于站点侧**的路径"决定 ——
+    // ③ 内容：这个包里在的那几侧，从它们的字节重算 §3.4 摘要，与块里那两个比。
+    //    客户端侧永远在（`plugin.json` 是它的一员，第 9 步保证它在），那一边
+    //      永远核。站点侧在不在，由"包里有没有一条只属于站点侧的路径"决定 ——
     //      这正是"同一个内容、两个包"（§4.2）那一格：只发客户端侧的那个包里没有
     //      `job/**`，于是它核不了、也不必核 `digestSite`。
     const sd = sideDigests(files);
@@ -525,7 +525,7 @@ function parsePackage(buf) {
         `这一份的站点侧算出来的内容摘要是 ${sd.site}，而签名块里写的是 `
         + `${parsed.digestSite}，签名盖的不是这些字节`);
     }
-    // ④ 验签：盖的是**四元组**那串字节，不是某一个摘要。
+    // ④ 验签：盖的是四元组那串字节，不是某一个摘要。
     if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
       return bad(R.SIGNATURE,
         `签名验不过：它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
@@ -535,7 +535,7 @@ function parsePackage(buf) {
     sig = {
       alg: parsed.alg,
       pubkey: Buffer.from(parsed.pubkey),
-      // ★ 那 64 个字节本身也要带出来：调用方要把它**逐字**存进记录表
+      // 那 64 个字节本身也要带出来：调用方要把它逐字存进记录表
       //   （`envelope.signature`），而"重新验一次"要的正是原件。
       signature: Buffer.from(parsed.sig),
       id: parsed.id,
@@ -553,65 +553,65 @@ function parsePackage(buf) {
     files,
     sig,
     manifest,
-    /** 内容摘要 —— 判"是不是同一份构件"的**唯一**判据（§3.4）。 */
+    /** 内容摘要 —— 判"是不是同一份构件"的唯一判据（§3.4）。 */
     digest: contentDigest(files),
   };
 }
 
-/** 某一份的字节。★ 只在解析**通过之后**调用 —— 它按记录里的 size 切片。 */
+/** 某一份的字节。只在解析通过之后调用 —— 它按记录里的 size 切片。 */
 function dataOf(buf, f) {
   return buf.subarray(f.offset, f.offset + Number(f.size));
 }
 
 /**
- * 把解析出来的负载**写到磁盘上**。
+ * 把解析出来的负载写到磁盘上。
  *
- * ★ 这是这个模块里**唯一**落盘的地方，而且它是给调用方用的 —— 上面那句"它不落盘"
+ * 这是这个模块里唯一落盘的地方，而且它是给调用方用的 —— 上面那句"它不落盘"
  *   说的是解析本身。放在这里而不是各调用方自己写，理由是"把字节铺成一棵树"这条
- *   规则要有**一份实现**：权限位（`0644`）在这里定死，而权限位**进摘要** ——
+ *   规则要有一份实现：权限位（`0644`）在这里定死，而权限位进摘要 ——
  *   两份实现漂开的那天，同一份内容会在两台机器上算出两个摘要。
  *
- * ★ **不跟随、不链接、不建空目录**：格式里就没有这些东西（附录 A），所以这里
+ * 不跟随、不链接、不建空目录：格式里就没有这些东西（附录 A），所以这里
  *   只有普通文件与 `mkdir -p`。
  *
- * ★ 它还**拒收站点侧**（拒绝，不是过滤）—— 站点发给客户端的只该
+ * 它还拒收站点侧（拒绝，不是过滤）—— 站点发给客户端的只该
  *   是客户端侧（`client/**` + `plugin.json` + `lineage.json`）。理由写在函数里。
  *
- * ★ 调用方**必须**在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` 与
+ * 调用方必须在写完之后从磁盘读回来再核一遍（`plugins.readPluginFiles` 与
  *   记录表逐份比，见 `site-plugins.js` 的 `treeFault`）—— "校验我收到的"不等于
  *   "校验我写下的"，磁盘满的时候 `writeFileSync` 会留下半份文件然后抛错。
  *
- *   ★ 这条做法是**更强**的那一种：它比的是"我写下的那棵树是不是这一份构件"，
+ * 这条做法是更强的那一种：它比的是"我写下的那棵树是不是这一份构件"，
  *     而不是"包里的字节对不对"。容器不落盘（池里只有树 + 记录表），所以也只有
  *     这一种做法。
  *
  * @param {object} [opts]
- * @param {'client'|'site'} [opts.onto='client']  **这棵树铺给谁**：
+ * @param {'client'|'site'} [opts.onto='client']  这棵树铺给谁：
  *
- *   · `client`（缺省）= 从站点**收下**一份构件 —— 站点侧一律拒收，见下面那一段。
- *   · `site` = **装到站点上**（假站点那个「安装插件…」）。这个方向上两半**都**该
+ *   · `client`（缺省）= 从站点收下一份构件 —— 站点侧一律拒收，见下面那一段。
+ *   · `site` = 装到站点上（假站点那个「安装插件…」）。这个方向上两半都该
  *     落地：站点侧正是那台机器要拿去跑作业的东西，而客户端侧是它要分发出去的
  *     那一半。真守护进程的 `_install_plugin_tree` 铺的就是整棵。
  *
- *   ★ 两个方向合用一个函数，是因为**"把字节铺成一棵树"这条规则只该有一份** ——
- *     权限位 `0644` 在这里定死，而权限位**进摘要**。各写一份的那天，同一份内容
+ * 两个方向合用一个函数，是因为"把字节铺成一棵树"这条规则只该有一份 ——
+ *     权限位 `0644` 在这里定死，而权限位进摘要。各写一份的那天，同一份内容
  *     会在两台机器上铺出两个摘要。
  */
 function unpackTo(parsed, buf, dir, opts = {}) {
-  // ★★ **包里不许出现站点侧路径** —— 只在"从站点收下"这个方向上成立。
+  // 包里不许出现站点侧路径 —— 只在"从站点收下"这个方向上成立。
   //
-  //   这是"用户机器上不该有站点端代码"这句话的**可执行形式**，也是它的回归测试。
-  //   站点侧里有 `job/start.sh` 之类 —— 一份以**提交者本人**的身份在集群上执行的
+  //   这是"用户机器上不该有站点端代码"这句话的可执行形式，也是它的回归测试。
+  //   站点侧里有 `job/start.sh` 之类 —— 一份以提交者本人的身份在集群上执行的
   //   脚本。它会跑在谁的账号下，就决定了它有多不该躺在别人家的笔记本里。
   //
-  //   ★ 它**不是**"过滤器"，是**断言**：判到了就拒掉**整份**，而不是把那几份跳过。
+  //   它不是"过滤器"，是断言：判到了就拒掉整份，而不是把那几份跳过。
   //     跳过的做法会把"有人在中间塞了东西"变成"安静地少装了几份"，而客户端手里
   //     那一份构件于是与签名说的不是同一份东西了 —— 那正是最该响的时候。
-  //   ★ 也不能靠"站点不会那么干"：站点是本机之外的另一个信任域，而这一条是客户端
-  //     **自己**能判的、不依赖任何一方守规矩的那一条。
+  //   也不能靠"站点不会那么干"：站点是本机之外的另一个信任域，而这一条是客户端
+  //     自己能判的、不依赖任何一方守规矩的那一条。
   //
-  //   ★ 反过来，`onto: 'site'` 时这条断言**必须不成立** —— 那棵树要去的地方就是
-  //     站点，`job/start.sh` 正是它该有的东西。所以判据是**方向**，不是一个
+  //   反过来，`onto: 'site'` 时这条断言必须不成立 —— 那棵树要去的地方就是
+  //     站点，`job/start.sh` 正是它该有的东西。所以判据是方向，不是一个
   //     "允不允许站点侧"的开关：开关开着的时候，这条防线在哪儿都不再拦。
   const strays = opts.onto === 'site'
     ? [] : parsed.files.filter((f) => !isClientSidePath(f.path));
@@ -628,7 +628,7 @@ function unpackTo(parsed, buf, dir, opts = {}) {
       const full = path.join(dir, ...f.path.split('/'));
       fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
       fs.writeFileSync(full, dataOf(buf, f), { mode: 0o644 });
-      // 显式 chmod：writeFileSync 的 mode 会被 umask 削，而**摘要里有权限位**。
+      // 显式 chmod：writeFileSync 的 mode 会被 umask 削，而摘要里有权限位。
       try { fs.chmodSync(full, 0o644); } catch { /* Windows */ }
     }
   } catch (e) {

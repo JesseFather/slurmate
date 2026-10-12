@@ -38,8 +38,8 @@ nft-compare.py — 规则集「非干扰」比对
     job-<jobid>-<idx>    port-daemon 的每作业 DNAT 标记（用户提交带转发的作业）
     dnat-automasq        port-daemon 的 masquerade 基础规则（守护进程重启时可能补建）
 
-**必须按 comment 精确匹配**。早期版本曾按"表名是 codeserver/port-daemon"来判定，
-那等于放行对这两张表的**任何**规则级改动 —— 往生产表里塞一条规则、改一条规则、
+必须按 comment 精确匹配。早期版本曾按"表名是 codeserver/port-daemon"来判定，
+那等于放行对这两张表的任何规则级改动 —— 往生产表里塞一条规则、改一条规则、
 删一条规则全都会被判成 DYNAMIC 并静默通过。这是最危险的假绿，已修正。
 """
 
@@ -149,7 +149,7 @@ def compare(before_path, after_path):
     if na == nb:
         return "SAME", []
 
-    # 用 Counter 做**多重集**比较（含重复次数），而不是 set。
+    # 用 Counter 做多重集比较（含重复次数），而不是 set。
     # 集合比较有个致命盲区：规则【重排】和【重复次数变化】都看不见 ——
     # 而 nftables 链内的顺序是有语义的（drop 放在 accept 前后是真实的行为变更）。
     ca, cb = Counter(na), Counter(nb)
@@ -315,7 +315,7 @@ def selftest():
          {"nftables": [{"metainfo": {"version": "1.0.9"}}]},
          {"nftables": [{"metainfo": {"version": "1.0.9"}}]}, "SAME")
 
-    # ── ★ 顺序与重复次数（用 set 比较的话，这两类完全看不见）──
+    # ── 顺序与重复次数（用 set 比较的话，这两类完全看不见）──
     def reorder(items):
         # 把前两条规则对调（内容不变，只改顺序）
         items[2], items[3] = items[3], items[2]

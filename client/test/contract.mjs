@@ -13,16 +13,16 @@
 // limitations under the License.
 
 /**
- * contract.mjs —— 验证那个假 web 服务**忠实复刻**了网页表单登录的契约，
+ * contract.mjs —— 验证那个假 web 服务忠实复刻了网页表单登录的契约，
  *                 以及基座的登录判定确实按那份契约写。
  *
  * 这个测试的意义不在于「测试通过」，而在于它把契约钉死成了可执行的断言。
  * 形态一旦漂移（比如有人「顺手」把错误口令改成返回 401 —— 那反而更符合直觉，
  * 但会让客户端的判定逻辑失效），这里会失败。
  *
- * ★ 契约值**从插件清单里读**，不在这里另抄一份。抄的那份迟早会与清单分叉，
+ * 契约值从插件清单里读，不在这里另抄一份。抄的那份迟早会与清单分叉，
  *   而分叉的表现是"登录莫名其妙失败"，指不回根因。同时这也钉住了一件事：
- *   假服务扮演的是**那个插件声明的**服务，不是某个写死的服务。
+ *   假服务扮演的是那个插件声明的服务，不是某个写死的服务。
  *
  * 不需要 Electron，直接打真实 HTTP。
  */
@@ -116,7 +116,7 @@ test('口令正确：302 + Set-Cookie', async () => {
     assert.match(setCookie, new RegExp(`^${CONTRACT.cookie}=`));
     assert.match(setCookie, /Path=\//);
 
-    // cookie jar 里能查到 → 判定成功。走**真的** jar 形状，不手搓一个布尔。
+    // cookie jar 里能查到 → 判定成功。走真的 jar 形状，不手搓一个布尔。
     const token = setCookie.split(';')[0].split('=').slice(1).join('=');
     const r = await webLogin(
       {
@@ -165,7 +165,7 @@ test('作废会话后旧 cookie 失效 —— 客户端必须重登而不是以�
     const after = await fetch(`${srv.url}${SURFACE.path}`, { ...NO_REDIRECT, headers: { cookie } });
     assert.equal(after.status, 302);
     // 这正是「cookie 还在但作业换了口令」时的表现：页面静默变成登录表单。
-    // ★ 客户端**目前还没有**监听 did-navigate 去重登（isLoginPath 没有任何调用者，
+    // 客户端目前还没有监听 did-navigate 去重登（isLoginPath 没有任何调用者，
     //   见 weblogin.js）—— 所以这里只断言"能认出它是登录页"，不断言会自动重登。
     assert.equal(isLoginPath(new URL(after.headers.get('location'), srv.url).href, CONTRACT.path), true);
   });
@@ -175,7 +175,7 @@ test('★ 换一份契约，假服务就扮另一个服务 —— 基座里没�
   // 一个假想的 Jupyter 式契约：路径、字段名、cookie 名全都不一样。
   const other = { path: '/auth/token', field: 'token', cookie: 'jupyter-session' };
   await withServer(async (srv) => {
-    // 旧的路径在这个契约下**不再是登录页**，而是需要登录的普通路径
+    // 旧的路径在这个契约下不再是登录页，而是需要登录的普通路径
     const old = await fetch(`${srv.url}${CONTRACT.path}`, NO_REDIRECT);
     assert.equal(old.status, 302);
     assert.equal(new URL(old.headers.get('location'), srv.url).pathname, other.path,
@@ -196,7 +196,7 @@ test('★ 基座的登录判定只认契约里的 cookie', async () => {
     fetch: async () => ({ status: 200 }),
     cookies: { get: async ({ name }) => (names.includes(name) ? [{ name, value: 'x' }] : []) },
   });
-  // 名字对不上就是没登录 —— 哪怕 jar 里**有**一个 cookie
+  // 名字对不上就是没登录 —— 哪怕 jar 里有一个 cookie
   assert.equal((await webLogin(jar(['别的']), 'http://x', 'pw', CONTRACT)).ok, false);
   assert.equal((await webLogin(jar([CONTRACT.cookie]), 'http://x', 'pw', CONTRACT)).ok, true);
 

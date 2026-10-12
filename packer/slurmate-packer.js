@@ -87,11 +87,11 @@ const HEADER_BYTES = 20;
 /** 摘要的字节数。sha256 是 32 字节。 */
 const DIGEST_BYTES = 32;
 const SIG_ALG_ED25519 = 1;
-/** 签名块的**定长头**：`alg u8 | pubkey 32 | sig 64`。 */
+/** 签名块的定长头：`alg u8 | pubkey 32 | sig 64`。 */
 const SIG_PREFIX_BYTES = 1 + 32 + 64;
-/** 签名块里的 `id`：**26 个 ASCII 字节**（一个 ULID 的写法）。 */
+/** 签名块里的 `id`：26 个 ASCII 字节（一个 ULID 的写法）。 */
 const SIG_ID_BYTES = 26;
-/** `id` 之后那一段的**定长部分**：`verlen u8 | digestSite 32 | digestClient 32`。 */
+/** `id` 之后那一段的定长部分：`verlen u8 | digestSite 32 | digestClient 32`。 */
 const SIG_TAIL_BYTES = 1 + DIGEST_BYTES + DIGEST_BYTES;
 /**
  * 签名块的长度 = `SIG_MIN_BYTES + verlen`，而 `verlen` 是一个 u8。
@@ -170,7 +170,7 @@ const MAX_SEGMENT_BYTES = 255;
 const MAX_FILES = 256;
 const MAX_FILE_BYTES = 256 * 1024;
 
-/** 站点愿意收的**整包**上限（§3.7 那条链路账）。与守护进程的
+/** 站点愿意收的整包上限（§3.7 那条链路账）。与守护进程的
  *  `PLUGIN_PACKAGE_MAX_BYTES` 是同一个数。 */
 const MAX_PACKAGE_BYTES = 2 << 20;
 
@@ -711,7 +711,7 @@ function parsePackage(buf) {
     tableEnd: off,
     /** 负载的第一字节，签名块占 `[tableEnd, payloadStart)`（可能是 0 字节）。 */
     payloadStart: off + sigLen,
-    /** 内容摘要，判"是不是同一份构件"的**唯一**判据（§3.4）。 */
+    /** 内容摘要，判"是不是同一份构件"的唯一判据（§3.4）。 */
     digest: contentDigest(files),
     payloadOf: (p) => {
       const f = files.find((x) => x.path === p);
@@ -1048,7 +1048,7 @@ function packerHome(opt) {
 
 function keyFilePath(home, id) { return path.join(home, 'keys', `${id}.pem`); }
 
-/** 公钥的 32 个**裸字节**，附录 A.3 要的就是这个形状，指纹也是对它算的。 */
+/** 公钥的 32 个裸字节，附录 A.3 要的就是这个形状，指纹也是对它算的。 */
 function rawPubOf(keyObject) {
   const der = crypto.createPublicKey(keyObject).export({ format: 'der', type: 'spki' });
   if (der.length !== ED25519_SPKI_PREFIX.length + 32
@@ -1066,7 +1066,7 @@ function saveKey(home, id, privateKey) {
   return file;
 }
 
-/** 本机有没有这个 id 的私钥。**读不动要抛**（那不是"没有"）。 */
+/** 本机有没有这个 id 的私钥。读不动要抛（那不是"没有"）。 */
 function loadKey(home, id) {
   const file = keyFilePath(home, id);
   let pem;
@@ -1102,7 +1102,7 @@ function readLineage(dir) {
   return { file, obj };
 }
 
-/** 这个 id 在血统表里的那一条。**`undefined` = 不认识它**，那就是 §2.5 的判据。 */
+/** 这个 id 在血统表里的那一条。`undefined` = 不认识它，那就是 §2.5 的判据。 */
 function lineageEntry(obj, id) {
   if (!obj || !obj.lineage) return undefined;
   return Object.prototype.hasOwnProperty.call(obj.lineage, id) ? obj.lineage[id] : undefined;

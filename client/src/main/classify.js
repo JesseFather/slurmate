@@ -53,7 +53,7 @@ const BACKOFF_MS = {
  * @param {object|null} resp   守护进程返回的 JSON（{ok,code,data,error}）；传输失败时传 null
  * @param {object}      ctx    { op: 'submit'|'status'|'heartbeat'|'goodbye',
  *                               transportError: Error|null }
- * ★ 就这四个 —— 它们都是 `session.js` 里那条**会话生命周期**的路径。
+ * 就这四个 —— 它们都是 `session.js` 里那条会话生命周期的路径。
  *   `whoami` 与 `doctor` 直接看 `ok`，从不经过这里；把它们列进来，清单就走了样。
  *   一张走了样的清单比没有清单更坏：下一个人会照着它去 `classify` 一个不该进来的
  *   op，然后以为某条分支被覆盖过了。
@@ -78,7 +78,7 @@ function classify(resp, ctx) {
   }
   // 后端已经判定为传输层失败时，它可以合成一个 kind='transport' 的信封返回
   // （而不是抛异常 —— 后端的契约是「rpc 不抛异常」）。这里认这个标记，
-  // 好让「命令没跑起来」「stdout 不是 JSON」这类失败带上**具体原因**，
+  // 好让「命令没跑起来」「stdout 不是 JSON」这类失败带上具体原因，
   // 而不是退化成上面那句笼统的「没有返回任何应答」。
   if (resp.ok === false && resp.error && resp.error.kind === 'transport') {
     return mk(Action.TRANSPORT, null, 'transport',
@@ -179,6 +179,6 @@ function shouldRetry(result) {
       || result.action === Action.RETRY_BACKOFF;
 }
 
-// ★ `BACKOFF_MS` 不导出：它只被本文件用（`classify` 拿它填
+// `BACKOFF_MS` 不导出：它只被本文件用（`classify` 拿它填
 //   `retryAfterMs`），仓库里没有任何外部读者。
 module.exports = { Action, classify, shouldRetry };

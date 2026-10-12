@@ -13,20 +13,20 @@
 // limitations under the License.
 
 /**
- * jobstate.js —— 把 Slurm 的作业状态译成**给人看的一句话**。
+ * jobstate.js —— 把 Slurm 的作业状态译成给人看的一句话。
  *
  * 界面不直接印 `jobState` 的原文大写枚举（`PENDING` / `RUNNING` / `OUT_OF_MEMORY`），
  * 那是 Slurm 说给管理员听的话，不是给用集群的人听的话。这一模块把它译成中文，
  * 并把「为什么还没跑」那一句（`Reason`）一并说出来 —— 那是排队的人最想知道的。
  *
- * ★★ 一条不变量：**本模块不做任何生命周期判定。**
+ * 一条不变量：本模块不做任何生命周期判定。
  *    "这个作业算不算结束了"由守护进程判（`job_is_terminal()`），它把结论放在
  *    `job_terminal` 里发过来。这里只照着念。
- *    自己再实现一遍的理由看起来成立（状态名都在手上），代价是**两处判据会漂**，
+ *    自己再实现一遍的理由看起来成立（状态名都在手上），代价是两处判据会漂，
  *    漂的方向是界面说"已结束（被抢占）"而作业几分钟后又回来了 ——
  *    而 PREEMPTED / TIMEOUT 到底算不算结束取决于 `Requeue`，客户端手上根本没有那个字段。
  *
- * ★ 认不出来的状态一律**原样印出去**，不猜。这个模块会随着 Slurm 的版本落后，
+ * 认不出来的状态一律原样印出去，不猜。这个模块会随着 Slurm 的版本落后，
  *   而"印一个我不认识的状态名"是诚实的，"猜一个可能是错的说法"不是。
  */
 
@@ -65,7 +65,7 @@ const PAUSED = {
 /**
  * 真终态 → 结束的原因。说得出具体原因就说，说不出来就说"已结束"。
  *
- * ★ 这一张表是**措辞**表，不是判据表 —— 状态在不在这里只决定说哪句话，
+ * 这一张表是措辞表，不是判据表 —— 状态在不在这里只决定说哪句话，
  *   不决定它算不算结束（那由 `job_terminal` 说了算）。
  */
 const ENDED = {
@@ -85,7 +85,7 @@ const ENDED = {
 /**
  * 排队原因 → 那句话。
  *
- * ★ 最要紧的是最后那一类：**等下去没有用**的原因。用户看到"排队中"会一直等，
+ * 最要紧的是最后那一类：等下去没有用的原因。用户看到"排队中"会一直等，
  *   而作业被 hold 住、或者账户到了限额时，等多久都不会开始 —— 那正是他需要
  *   有人告诉他的那一句。
  */
@@ -99,7 +99,7 @@ const REASON = {
   ReqNodeNotAvail: '指定要求的节点当前不可用',
   NodeDown: '节点故障，正在等别的节点',
   BeginTime: '还没到它的开始时间',
-  // ★ 等下去没用
+  // 等下去没用
   JobHeldUser: '被挂起了（hold），不 release 就不会开始',
   JobHeldAdmin: '被管理员挂起了（hold），等没有用',
   AssocGrpCPUMinutesLimit: '账户的 CPU 额度用完了，等没有用',
@@ -129,8 +129,8 @@ function jobText(snap) {
   const raw = typeof s.jobState === 'string' ? s.jobState.trim().toUpperCase() : '';
   if (!raw) return null;
 
-  // ★ 老守护进程（0.7 及更早）**不发 `job_terminal`**。那时我们手上只有一个状态名，
-  //   而"算不算结束"的判据不在客户端 —— 所以这里也**不猜**：把原文印出去。
+  // 老守护进程（0.7 及更早）不发 `job_terminal`。那时我们手上只有一个状态名，
+  //   而"算不算结束"的判据不在客户端 —— 所以这里也不猜：把原文印出去。
   //   客户端与守护进程总是一起升的，这条退路只在"新客户端对着没升的站点"时走到。
   if (typeof s.jobTerminal !== 'boolean') return raw;
 
@@ -140,17 +140,17 @@ function jobText(snap) {
 
   const why = typeof s.jobReason === 'string' ? s.jobReason.trim() : '';
   if (why && !s.jobTerminal) {
-    // 认不出来的原因**原样带上**：Slurm 的原因有好几十种，而且各站点版本不同，
+    // 认不出来的原因原样带上：Slurm 的原因有好几十种，而且各站点版本不同，
     // 宁可让用户看到 `AssocGrpGRESMinutesLimit` 这样的原文，也别什么都不说 ——
     // 那正是"排队中"三个字最让人无从下手的地方。
     text += ` · ${REASON[why] || why}`;
   }
 
-  // 退出码只在**结束了**之后才有意义（没结束时它恒为 0:0）。
+  // 退出码只在结束了之后才有意义（没结束时它恒为 0:0）。
   const code = typeof s.jobExitCode === 'string' ? s.jobExitCode.trim() : '';
   if (s.jobTerminal && code && code !== '0:0') text += `（退出码 ${code}）`;
 
-  // 重启过就要说 —— 作业被重新排队之后，跑着的东西是**新的**，
+  // 重启过就要说 —— 作业被重新排队之后，跑着的东西是新的，
   // 用户在 code-server 里没保存的状态已经没了，而他不会知道。
   const n = Number.parseInt(s.jobRestarts, 10);
   if (Number.isFinite(n) && n > 0) text += ` · 已重启 ${n} 次`;

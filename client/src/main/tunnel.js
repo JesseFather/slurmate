@@ -21,22 +21,22 @@
  *
  * ── 三条硬约束，每条都对应一个具体的失败 ──────────────────────────────────
  *
- * 1. **只听 127.0.0.1，绝不能只听端口。** Node 的 `server.listen(port)` 默认绑 `::`
+ * 1. 只听 127.0.0.1，绝不能只听端口。Node 的 `server.listen(port)` 默认绑 `::`
  *    （双栈全部网卡）。那会把隧道暴露到局域网上 —— 任何能连到你机器的人都能直接
  *    进你的 IDE。必须显式传 host。
  *
- * 2. **目标地址只从 tunnel_target 解析，且必须是字面 IPv4。**
+ * 2. 目标地址只从 tunnel_target 解析，且必须是字面 IPv4。
  *    守护进程写进 nft 规则的是 `ip daddr <字面IP>`；如果客户端把节点名重新解析一遍，
- *    解析结果与 nft 里的不一致时 ACL 会**静默失效** —— 一切看起来正常，只是没有保护。
+ *    解析结果与 nft 里的不一致时 ACL 会静默失效 —— 一切看起来正常，只是没有保护。
  *    见 cluster/slurmate-sessiond:1674-1680 那段强措辞的注释。所以这里过
  *    `net.isIPv4()`，不过就拒绝建隧道，绝不交给 DNS。
  *
- * 3. **只允许 backend.dial 这一条拨号路径。** 不得出现直接 `net.connect(远端IP)` ——
+ * 3. 只允许 backend.dial 这一条拨号路径。不得出现直接 `net.connect(远端IP)` ——
  *    那会绕过 SSH 隧道，让它变成一个裸的、无 ACL 保护的直连。
  *
  * ── 半开连接 ───────────────────────────────────────────────────────────────
  * `a.pipe(b).pipe(a)` 是能透明支持 HTTP + WebSocket + Upgrade 的最简写法，但任一侧
- * 出错时另一侧**不会**自动销毁，会留下半开连接把浏览器吊死。所以两侧都要挂 error，
+ * 出错时另一侧不会自动销毁，会留下半开连接把浏览器吊死。所以两侧都要挂 error，
  * 并在任一侧 error/close 时销毁另一侧。
  */
 
@@ -47,23 +47,23 @@ const { EventEmitter } = require('events');
 const PORT_SCAN_LIMIT = 20;
 
 /**
- * 端口必须是 1–65535 的整数。**监听与探测共用这一个判据。**
+ * 端口必须是 1–65535 的整数。监听与探测共用这一个判据。
  *
- * ★★ **先校验，再动手。** `preferredPort + i` 对 `null` / `undefined` 是**合法的
- *    JS**：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是**随便挑一个**
- *    —— 于是它会**成功地**绑到一个临时端口，`start()` 返回 `{port: 0}`，
+ * 先校验，再动手。 `preferredPort + i` 对 `null` / `undefined` 是**合法的
+ *    JS：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是随便挑一个**
+ *    —— 于是它会成功地绑到一个临时端口，`start()` 返回 `{port: 0}`，
  *    `snapshot().localPort` 从此指向一个并不存在的端口、`origin` 是 null。
  *    全程没有一处报错：这是"安静地做错事"，而不是"响亮地坏"。
  *
  *    它今天够不到（两个调用点分别写的是 `preferredPort || 18080` 和"上一次的
- *    实际端口"，后者必然是真的端口号），所以这是一条**潜伏**的路 —— 而它是
+ *    实际端口"，后者必然是真的端口号），所以这是一条潜伏的路 —— 而它是
  *    被一条用例撞见的：那条用例把控制器推到 RUNNING 却没给它端口，现象是
  *    "隧道重建成功了，而 `_tunnelPort` 是 0"。
  *
- *    ★ 判据是 1–65535 的**整数**：`'18080'`（字符串）与 `18080.5` 也拒绝 ——
+ * 判据是 1–65535 的整数：`'18080'`（字符串）与 `18080.5` 也拒绝 ——
  *      `'18080' + 0 === '180800'`，那是另一个安静的错。
  *
- * ★ 探测（下面那个 `probeLocalPort`）在**同一个位置**上，不合法就不是"端口被占"，
+ * 探测（下面那个 `probeLocalPort`）在同一个位置上，不合法就不是"端口被占"，
  *   所以两边必须是同一条判据：分开写的话，一个不合法端口会先被探测当成"占着"报给
  *   用户，而真正的绑定随后抛的却是另一回事。
  */
@@ -74,25 +74,25 @@ function assertPort(port) {
 }
 
 /**
- * 试绑一下这个端口、**立刻放开** —— 回答"此刻这个端口能不能用"。
+ * 试绑一下这个端口、立刻放开 —— 回答"此刻这个端口能不能用"。
  *
- * 它存在的唯一理由是**时序**：「端口被占了，要不要换一个（只换这一次，还是记住
- * 新配置）」这个问题必须在**提交作业之前**问，否则用户答"取消"的时候作业已经在
- * 集群上了 —— 那时那句话就不是字面意思了。而真正的绑定发生在提交与登记**之后**
+ * 它存在的唯一理由是时序：「端口被占了，要不要换一个（只换这一次，还是记住
+ * 新配置）」这个问题必须在提交作业之前问，否则用户答"取消"的时候作业已经在
+ * 集群上了 —— 那时那句话就不是字面意思了。而真正的绑定发生在提交与登记之后
  * （几秒到几分钟）。
  *
- * ★ 它绑的是 `127.0.0.1`，与隧道**同一个地址**：不传 host 的话（Node 默认绑 `::`）
+ * 它绑的是 `127.0.0.1`，与隧道同一个地址：不传 host 的话（Node 默认绑 `::`）
  *   它回答的是另一个问题 —— 一个只占着 IPv4 的进程会让探测说"空着"，而隧道紧接着
  *   就 EADDRINUSE。探测的全部意义在于它问的与真绑的是同一件事。
  *
- * ★ 它**只回答此刻**，不做任何承诺：探测到绑定之间端口可能被别的进程拿走。
+ * 它只回答此刻，不做任何承诺：探测到绑定之间端口可能被别的进程拿走。
  *   那一段由 `_listen` 的顺移兜底（照旧换端口 + 如实说出来），不走用户提问 ——
  *   作业已经提交了，那时问"要不要启动"是骗人的。
  *
- * ★ 失败只认 EADDRINUSE / EACCES 之外**什么都不吞**：其它错误（比如地址不可用）
+ * 失败只认 EADDRINUSE / EACCES 之外什么都不吞：其它错误（比如地址不可用）
  *   是环境坏了，把它报成"端口被占"会让用户照着一条不成立的建议去关掉一个无关的程序。
  *
- * ★ 它是 `async` 的，于是"端口不合法"是一次 **rejection**、不是一次同步抛 ——
+ * 它是 `async` 的，于是"端口不合法"是一次 rejection、不是一次同步抛 ——
  *   调用方只有一条路要写（`try { await probeLocalPort(p) } catch`），而同步抛的
  *   那一半会绕过它。
  *
@@ -129,7 +129,7 @@ class Tunnel extends EventEmitter {
   }
 
   /**
-   * 解析 `"IPv4:端口"`。**这是本文件唯一的地址来源。**
+   * 解析 `"IPv4:端口"`。这是本文件唯一的地址来源。
    * @returns {{host:string, port:number, raw:string}}
    * @throws  {Error} 不是合法 IPv4 或端口越界
    */
@@ -156,11 +156,11 @@ class Tunnel extends EventEmitter {
    * @param {object} opts
    *   preferredPort {number}   优先端口（工作区绑定的端口）
    *   target        {string}   "IPv4:端口"
-   *   excludePorts  {Set|Array} **别的那几份数据占着的端口**，顺移时必须跳过。
+   *   excludePorts  {Set|Array} 别的那几份数据占着的端口，顺移时必须跳过。
    *                            不跳的后果不是「换了个端口」：两份数据会在配置里同时
    *                            声称同一个端口，每次启动谁先绑谁赢，会话在两个 origin
    *                            之间反复横跳，而界面上一切正常。
-   *                            调用方**必须**把目标那一份自己排除在外（用
+   *                            调用方必须把目标那一份自己排除在外（用
    *                            usedSpacePorts(cfg, 目标那一份的 id)），否则它自己的端口
    *                            会被当成「别人的」而永远绑不上。
    * @returns {Promise<{port:number, shifted:boolean}>} shifted=true 表示首选端口被占，换过了
@@ -184,7 +184,7 @@ class Tunnel extends EventEmitter {
   }
 
   async _listen(preferredPort, excludePorts) {
-    // ★★ **先校验，再动手** —— 理由与那个判据本身都在 `assertPort` 上。
+    // 先校验，再动手 —— 理由与那个判据本身都在 `assertPort` 上。
     assertPort(preferredPort);
     const reserved = excludePorts instanceof Set
       ? excludePorts : new Set(excludePorts || []);
@@ -192,7 +192,7 @@ class Tunnel extends EventEmitter {
     for (let i = 0; i < PORT_SCAN_LIMIT; i++) {
       const p = preferredPort + i;
       if (p > 65535) break;
-      // ★ 绝不落到**别的工作区**的端口上。落上去的后果不是「换了个端口」：
+      // 绝不落到别的工作区的端口上。落上去的后果不是「换了个端口」：
       //   两个工作区会在配置里同时声称同一个端口，下次启动谁先绑谁赢、另一个再顺移，
       //   于是每次启动工作区都在两个 origin 之间反复横跳 —— 而界面一切正常。
       if (reserved.has(p)) {
@@ -220,7 +220,7 @@ class Tunnel extends EventEmitter {
     return new Promise((resolve, reject) => {
       const server = net.createServer((local) => this._onConnection(local));
       server.once('error', reject);
-      // ★ 显式绑 127.0.0.1。不传 host 会绑到所有网卡，等于把 IDE 挂在局域网上。
+      // 显式绑 127.0.0.1。不传 host 会绑到所有网卡，等于把 IDE 挂在局域网上。
       server.listen(port, '127.0.0.1', () => {
         server.removeListener('error', reject);
         server.on('error', (e) => {
@@ -241,7 +241,7 @@ class Tunnel extends EventEmitter {
     try {
       upstream = await this.backend.dial(this.target.host, this.target.port);
     } catch (e) {
-      // 隧道断了。**立刻销毁本地连接**，让浏览器拿到一个明确的失败（RST），
+      // 隧道断了。立刻销毁本地连接，让浏览器拿到一个明确的失败（RST），
       // 而不是让它永远 pending —— 后者看起来像界面卡死，是最难排查的表现。
       local.destroy();
       this.state = 'down';
@@ -287,7 +287,7 @@ class Tunnel extends EventEmitter {
     this.emit('state', { state: 'stopped', port: this.port });
   }
 
-  /** 当前本地 URL 的 origin。**固定用字面量 127.0.0.1**，不用 localhost ——
+  /** 当前本地 URL 的 origin。固定用字面量 127.0.0.1，不用 localhost ——
    *  两者在 Chromium 里是不同 origin，且 localhost 可能解析成 ::1。 */
   get origin() {
     return this.port ? `http://127.0.0.1:${this.port}` : null;

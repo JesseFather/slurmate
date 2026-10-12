@@ -14,29 +14,29 @@
 
 'use strict';
 /**
- * fake-job.js —— 假站点上**一条会话的作业侧**：起进程、等登记、收尾。
+ * fake-job.js —— 假站点上一条会话的作业侧：起进程、等登记、收尾。
  *
  * ── 它在整条流程里的位置 ───────────────────────────────────────────────────
  *
- * 真站点上，一次「开始会话」是：守护进程 sbatch 一份**织好了插件作业侧**的作业
+ * 真站点上，一次「开始会话」是：守护进程 sbatch 一份织好了插件作业侧的作业
  * 脚本 → 计算节点上挑端口、调 `start_<短名>` → 服务的输出直接落在作业日志上 →
- * 守护进程读**会话文件**登记会话 → 客户端拿到 `tunnel_target` 打开界面。
+ * 守护进程读会话文件登记会话 → 客户端拿到 `tunnel_target` 打开界面。
  *
- * 开发者模式里没有 Slurm、没有计算节点。这个文件补的就是**那一段**：
+ * 开发者模式里没有 Slurm、没有计算节点。这个文件补的就是那一段：
  *
  *   · 挑候选端口（每一个都真的 bind 过一次 —— `port_free` 那条规矩**只有这一份
  *     实现**，替身宿主里故意没有第二份，见 `fake-job-host.sh`）；
  *   · 起 `fake-job-host.sh`（替身宿主，见它自己的文件头：复刻到契约为止）；
- *   · 读**会话文件**（宿主写、真守护进程也读的那一份）直到登记或失败；
- *   · 收尾时**杀进程组** —— 插件的服务多半是 `&` 起来的，只杀直接子进程会留下它。
+ *   · 读会话文件（宿主写、真守护进程也读的那一份）直到登记或失败；
+ *   · 收尾时杀进程组 —— 插件的服务多半是 `&` 起来的，只杀直接子进程会留下它。
  *
  * ── 两条如实的限制（界面会在起不来时把它们说出来）──────────────────────────
  *
- *   1. **需要 bash**：`job/start.sh` 是一段被 `source` 进来的 shell 片段，两个
+ *   1. 需要 bash：`job/start.sh` 是一段被 `source` 进来的 shell 片段，两个
  *      样例都用到了 `[[ ]]`、`local`、关联数组。Windows 的客户端上没有它 ——
  *      那时这里返回一句说得清的错，而不是一次静默失败。
- *   2. **插件的依赖得装在这台机器上**：code-server 那棵树要真的有一个 code-server，
- *      sshd 那棵要起得起一个 sshd。★ 起不来**不许静默、也不许拿别的东西顶替** ——
+ *   2. 插件的依赖得装在这台机器上：code-server 那棵树要真的有一个 code-server，
+ *      sshd 那棵要起得起一个 sshd。起不来不许静默、也不许拿别的东西顶替 ——
  *      它的 stdout/stderr 就是答案（`why` 里那一句给界面，全文在两个日志文件里）。
  */
 
@@ -49,9 +49,9 @@ const path = require('path');
 const HOST_SH = path.join(__dirname, 'fake-job-host.sh');
 
 /**
- * 登记要等多久看一次**会话文件**。
+ * 登记要等多久看一次会话文件。
  *
- * ★ 真守护进程挂在 2 秒的 tick 上；这里读的是本进程刚写的那个文件，快一点只是让
+ * 真守护进程挂在 2 秒的 tick 上；这里读的是本进程刚写的那个文件，快一点只是让
  *   开发者模式里的等待短一点 —— 它不改变任何一条判据（谁写的、写的是什么、
  *   谁读它，全都一样）。
  */
@@ -64,14 +64,14 @@ const TERM_GRACE_MS = 1200;
  *  账**，假站点照它做一件最小的事：别让沙盒无限长大。 */
 const KEEP_DAYS = 7;
 
-/** 候选端口按区间挑。★ 与假站点 `_doctor` 报出去的那个区间**同一个数**。 */
+/** 候选端口按区间挑。与假站点 `_doctor` 报出去的那个区间同一个数。 */
 const PORT_MIN = 55001;
 const PORT_MAX = 55999;
 
 /** 一次挑几个候选。真守护进程那几个是配置项；这里是它那个量级。 */
 const CANDIDATES = 6;
 
-/** 「这台机器上没有 bash」那一句 —— **只此一处**：真的是没找到、和用例造出来的
+/** 「这台机器上没有 bash」那一句 —— 只此一处：真的是没找到、和用例造出来的
  *  那个现场，说的是同一句话（`NO_BASH`）。 */
 const NO_BASH = { why: '这台机器上没有 bash，插件的作业侧是一段 shell 片段'
   + '（`job/start.sh`），它要一个 bash 才跑得起来。Windows 上今天起不了会话，'
@@ -100,13 +100,13 @@ function bashMajor(p) {
 }
 
 /**
- * 找一个**能用的** bash。返回 `{path}` 或 `{why}`。
+ * 找一个能用的 bash。返回 `{path}` 或 `{why}`。
  *
- * ★ 不 shell 出去问 `which`：那要起一个进程，而且 `which` 自己也可能不在。
+ * 不 shell 出去问 `which`：那要起一个进程，而且 `which` 自己也可能不在。
  *   按 PATH 逐段看有没有可执行的 `bash`，是最直白的那一种。
  *
- * ★★ 还要问一句**它是不是 bash 4 或更新**。这不是洁癖：契约里的
- *   `PLUGIN_SESSION_FIELDS` 是**关联数组**（§5.2），而 bash 3 没有它 ——
+ * 还要问一句它是不是 bash 4 或更新。这不是洁癖：契约里的
+ *   `PLUGIN_SESSION_FIELDS` 是关联数组（§5.2），而 bash 3 没有它 ——
  *   而不查这一下的症状是 `declare -A: invalid option` 这行字躺在作业日志里，
  *   作者会去查自己的插件（他没写错）。macOS 自带的 `/bin/bash` 正是 3.2。
  */
@@ -129,7 +129,7 @@ function findBash(search = defaultBashSearch()) {
 }
 
 /**
- * 先按区间随便挑几个（**不探测**）—— 真守护进程发下去的候选表就是这么来的：
+ * 先按区间随便挑几个（不探测）—— 真守护进程发下去的候选表就是这么来的：
  * 它在登录节点上挑，够不着计算节点那一刻的端口占用。
  */
 function nominalCandidates(n = CANDIDATES) {
@@ -152,13 +152,13 @@ function portBindable(port) {
 }
 
 /**
- * 候选表里**真的能绑上**的那些。
+ * 候选表里真的能绑上的那些。
  *
- * ★★ 这是契约里「`$1` 已实测可绑定」（§5.2，稳定 / **机器**）那一条的落点。
- *   真宿主在**计算节点上**逐个端口查（`port_free`：`ss` 快查 + 一次真 bind）；
- *   假站点在这台机器上查，判据是同一条 —— 而它**只此一份**。
+ * 这是契约里「`$1` 已实测可绑定」（§5.2，稳定 / 机器）那一条的落点。
+ *   真宿主在计算节点上逐个端口查（`port_free`：`ss` 快查 + 一次真 bind）；
+ *   假站点在这台机器上查，判据是同一条 —— 而它只此一份。
  *
- * ★ 一个都绑不上时再随机试几轮（那说明这个区间真的很挤）；还是空就返回空，
+ * 一个都绑不上时再随机试几轮（那说明这个区间真的很挤）；还是空就返回空，
  *   调用方如实说"挑不到空闲端口"。
  */
 async function pickCandidates(nominal = nominalCandidates()) {
@@ -190,12 +190,12 @@ function whichSync(name) {
 /**
  * 这个插件的可执行文件该走哪个环境变量、值是什么。
  *
- * ★ 真站点上这一步在**守护进程**里（`PluginConfig` 的 `bin`）：站点配置里写了
+ * 真站点上这一步在守护进程里（`PluginConfig` 的 `bin`）：站点配置里写了
  *   就用它，没写就按清单声明的 `site.bin.discovery` 求一个缺省。假站点**没有
  *   站点配置**（没有管理员），于是走的正是后面那一支 —— 那不是简化，那正是
  *   "这个站点没给这个插件配 bin"时真守护进程会做的事。
  *
- * ★ `convention` 那一种**不做 PATH 查找**（与守护进程逐字同一条理由：这一项在
+ * `convention` 那一种不做 PATH 查找（与守护进程逐字同一条理由：这一项在
  *   登录节点上求值，而真正的执行发生在计算节点上 —— 登录节点上恰好有这个文件，
  *   对计算节点不是证据）。
  *
@@ -218,9 +218,9 @@ function resolvePluginBin(manifest) {
 /**
  * 删掉太旧的作业日志。
  *
- * ★ 按**年纪**删，不按条数：一次测试跑几十条会话，按条数会把正在跑的那一条的
+ * 按年纪删，不按条数：一次测试跑几十条会话，按条数会把正在跑的那一条的
  *   日志删掉 —— 而那个症状是"日志忽然空了"，指不回这里。
- * ★ 只碰我们自己那两个文件（`slurm-<作业号>.out` / `.err`）：那正是真宿主的
+ * 只碰我们自己那两个文件（`slurm-<作业号>.out` / `.err`）：那正是真宿主的
  *   housekeeping 的判据（"只碰这个目录里我们自己那两个名字"）。
  */
 function pruneLogs(logDir, now = Date.now()) {
@@ -244,7 +244,7 @@ function pruneLogs(logDir, now = Date.now()) {
  * 一条会话的作业侧。
  *
  * 用法：`new FakeJob({...})` → `await start()` → 起来了是 `{ok:true, port, pid}`，
- * 没起来是 `{ok:false, why}`（`why` 那一句是**给人看的**，真正的原因在日志里）。
+ * 没起来是 `{ok:false, why}`（`why` 那一句是给人看的，真正的原因在日志里）。
  * 起得来之后服务自己退出（或被 `stop()` 收掉）会调到 `onExit(job)`。
  */
 class FakeJob {
@@ -256,10 +256,10 @@ class FakeJob {
    *   outPath   {string}   标准输出那一份
    *   errPath   {string}   标准错误那一份
    *   cwd       {string}   宿主的工作目录（真宿主是用户的家目录）
-   *   noBash    {boolean}  **假装这台机器上没有 bash**（调试开关，见
+   *   noBash    {boolean}  假装这台机器上没有 bash（调试开关，见
    *                        `FakeBackend.debugNoBash`）—— 那条失败路要能走到，
    *                        否则它的那句话就是一个没人跑过的分支
-   *   onExit    {function} 服务自己退出时调一次（`stop()` 收的**不会**调）
+   *   onExit    {function} 服务自己退出时调一次（`stop()` 收的不会调）
    */
   constructor(opts) {
     this.entry = opts.entry;
@@ -305,7 +305,7 @@ class FakeJob {
   }
 
   _spawn() {
-    // ★ 那两条限制里的第一条，而且它必须**说得清**：这不是"这个插件写错了"。
+    // 那两条限制里的第一条，而且它必须说得清：这不是"这个插件写错了"。
     const found = this.noBash ? NO_BASH : findBash();
     if (!found.path) {
       this._fail(found.why);
@@ -316,7 +316,7 @@ class FakeJob {
       child = spawn(found.path, [HOST_SH, this.entry], {
         cwd: this.cwd,
         env: { ...process.env, ...this.env },
-        // ★ **自成进程组**（pgid = 这个 pid）：收尾时那一刀要能落在**整组**上 ——
+        // 自成进程组（pgid = 这个 pid）：收尾时那一刀要能落在整组上 ——
         //   插件的服务多半是 `&` 起来的，只杀宿主会留下它，而那个症状是
         //   "会话结束了，端口上还有人听着"。
         detached: true,
@@ -329,7 +329,7 @@ class FakeJob {
     this.child = child;
     this.pid = child.pid;
 
-    // 宿主在 `exec 1>>…` **之前**写的那几行（环境缺变量、片段读不到）走的是管子。
+    // 宿主在 `exec 1>>…` 之前写的那几行（环境缺变量、片段读不到）走的是管子。
     // 留着它们，失败时才有一句原话可说 —— 那时日志文件可能压根还没建出来。
     let pre = '';
     const keep = (buf) => { pre = (pre + buf.toString()).slice(-4000); };
@@ -344,7 +344,7 @@ class FakeJob {
     this._poll.unref?.();
   }
 
-  /** 看一眼宿主的会话文件。**这是登记的唯一依据** —— 与真守护进程同一个来源。 */
+  /** 看一眼宿主的会话文件。这是登记的唯一依据 —— 与真守护进程同一个来源。 */
   _look() {
     if (this._settled) return;
     let info = null;
@@ -383,7 +383,7 @@ class FakeJob {
 
   _fail(why, code = null) {
     if (this._settled) {
-      // 已经在跑的作业忽然失败：那是**结束**，不是"没能起来"。
+      // 已经在跑的作业忽然失败：那是结束，不是"没能起来"。
       this.state = 'failed';
       this.exitCode = code;
       this.why = why;
@@ -405,7 +405,7 @@ class FakeJob {
   _onChildExit(code, signal) {
     this.exitCode = typeof code === 'number' ? code : null;
     if (!this._settled) {
-      // ★ 还没登记就退出了：那就是**没起来**，而原话就在日志里。
+      // 还没登记就退出了：那就是没起来，而原话就在日志里。
       const how = signal ? `被信号 ${signal} 结束` : `退出码 ${code}`;
       this._fail(`作业侧在登记之前就结束了（${how}）${this._tailWhy()}`,
         typeof code === 'number' ? code : null);
@@ -418,9 +418,9 @@ class FakeJob {
   }
 
   /**
-   * 收尾：杀**整个进程组**（先 TERM，再 KILL）。
+   * 收尾：杀整个进程组（先 TERM，再 KILL）。
    *
-   * ★ `_stopping` 一置上，服务退出就**不再回调** —— 那正是"这一次是我们收的，
+   * `_stopping` 一置上，服务退出就不再回调 —— 那正是"这一次是我们收的，
    *   不要再去改会话状态"。
    */
   async stop() {
@@ -432,10 +432,10 @@ class FakeJob {
       const kill = (sig) => {
         try { process.kill(-pid, sig); } catch { /* 整组都没了 */ }
       };
-      // ★ **等它真的退出**，而不是无条件睡满宽限期：宿主收到 TERM 就把服务收掉、
+      // 等它真的退出，而不是无条件睡满宽限期：宿主收到 TERM 就把服务收掉、
       //   写墓碑、退出，通常几十毫秒。睡满的话，一个套件里几十条会话每条都白等
-      //   一秒多 —— 而那些秒数是加在**总时长**上的，看起来会像"这套东西很慢"。
-      //   宽限期只对**卡住的服务**生效（那时才真的 KILL）。
+      //   一秒多 —— 而那些秒数是加在总时长上的，看起来会像"这套东西很慢"。
+      //   宽限期只对卡住的服务生效（那时才真的 KILL）。
       const exited = new Promise((r) => {
         if (child.exitCode !== null || child.signalCode !== null) { r(); return; }
         child.once('exit', r);

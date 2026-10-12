@@ -21,19 +21,19 @@
  *   ┌──────────────────────────────────────────┐
  *   │  BrowserWindow 自己的 webContents         │  ← 面板：状态条 + 设置/排队/重连/已结束
  *   │  ├── 顶部状态条（30px）                    │
- *   │  └── 下方留空，由**界面**覆盖               │
+ *   │  └── 下方留空，由界面覆盖               │
  *   ├──────────────────────────────────────────┤
  *   │  WebContentsView（懒创建）                 │  ← 插件声明的那块界面
  *   └──────────────────────────────────────────┘
  *
  * 为什么不把状态条也做成独立的 WebContentsView（即 BaseWindow + 2 views）：
- * BrowserWindow 自己的 webContents **会自动清理**，BaseWindow 不会。少一个需要手动
+ * BrowserWindow 自己的 webContents 会自动清理，BaseWindow 不会。少一个需要手动
  * close 的 webContents，就少一处泄漏面。何况状态条与面板本来就是同一个页面的两块 DOM，
  * 不需要在两个 renderer 之间走 IPC。
  *
- * ── ★ 这个文件里没有 IDE，也没有任何插件名 ─────────────────────────────────
+ * ── 这个文件里没有 IDE，也没有任何插件名 ─────────────────────────────────
  *
- * 它只知道一件事：**有一块原生视图盖在面板上，它加载某个 URL，它属于某个存储分区**。
+ * 它只知道一件事：有一块原生视图盖在面板上，它加载某个 URL，它属于某个存储分区。
  * URL 后面是 VS Code、是 Jupyter、还是别的什么，这里一概不知道 —— 那是插件在
  * `plugin.json` 的 `contributes.surface` 里声明的，由 index.js 读出来之后调
  * `showSurface({url, partition})`。
@@ -42,13 +42,13 @@
  * 代码**的声明式插件照样能开界面（开界面本来就不需要代码，只需要一句声明）。
  *
  * ── 隧道未就绪时不需要「不污染界面」的技巧 ─────────────────────────────────
- * 因为那块视图**根本还没被创建**。未就绪期间窗口里只有面板自己。视图在拿到
+ * 因为那块视图根本还没被创建。未就绪期间窗口里只有面板自己。视图在拿到
  * tunnel_target 之后才懒创建 —— 提前建会白养一个 renderer 进程，还可能闪一下
  * about:blank。
  *
  * ── 清理必须写死 ───────────────────────────────────────────────────────────
- * `removeChildView()` **不销毁 webContents**，也不终止 renderer 进程；而
- * `WebContentsView` 至今**没有 destroy() 方法**（Electron issue #42884）。
+ * `removeChildView()` 不销毁 webContents，也不终止 renderer 进程；而
+ * `WebContentsView` 至今没有 destroy() 方法（Electron issue #42884）。
  * 所以顺序必须是：removeChildView → webContents.close() → 引用置 null，
  * 且每一步都要 isDestroyed() 兜底。
  *
@@ -66,8 +66,8 @@ const {
 /**
  * 浮窗开着的时候，多久看一次鼠标还在不在它那一片上。
  *
- * ★ 120ms 是"跟手"与"别空转"之间的取值：再密一点，一个静止的鼠标会被反复问同一件
- *   事；再疏一点，用户已经走开了浮窗还挂着。★ 它**只在浮窗开着且没被钉住时**跑，
+ * 120ms 是"跟手"与"别空转"之间的取值：再密一点，一个静止的鼠标会被反复问同一件
+ *   事；再疏一点，用户已经走开了浮窗还挂着。它只在浮窗开着且没被钉住时跑，
  *   收起即停 —— 不是一个常驻的心跳。
  */
 const CURSOR_POLL_MS = 120;
@@ -90,7 +90,7 @@ function originOf(url) {
 /**
  * 没有插件信息时关窗确认的文案。
  *
- * 这不是"兜底文案"，而是**未知服务**那个情形的正确文案：我们不知道那个会话是
+ * 这不是"兜底文案"，而是未知服务那个情形的正确文案：我们不知道那个会话是
  * 什么，就不该替它说"你的终端会断"或者"你的编辑器会丢改动"—— 两句都可能是假的。
  * 说得出确定的那一部分（作业会被取消）就够了。
  */
@@ -110,14 +110,14 @@ class ShellWindow {
     this.onAction = opts.onAction || (() => {});
 
     // ── 尺寸 ──
-    // ★★ 最小宽度**由面板定，不由浮窗定**。别把这两个数搞混：
-    //     面板：左边距 26 + `.wrap` 最宽 760 + 右边距 26 = **812**，连上之后
-    //           两条边栏各占 10（`body.connected #panel` 把内边距让出去）⇒ **832**；
+    // 最小宽度由面板定，不由浮窗定。别把这两个数搞混：
+    //     面板：左边距 26 + `.wrap` 最宽 760 + 右边距 26 = 812，连上之后
+    //           两条边栏各占 10（`body.connected #panel` 把内边距让出去），832；
     //     浮窗：只要 `2*RAIL_W + HOVER_W = 360`，低于它浮窗才开始缩水
     //           （`layout.js` 那条用例钉着）。
-    //   浮窗那个地板低得多，所以定这个数的**只有面板** —— 记错主次的人会以为
+    //   浮窗那个地板低得多，所以定这个数的只有面板 —— 记错主次的人会以为
     //   840 就够（它确实够浮窗），然后在连上之后看到面板被压窄。
-    //   ★ 今天 `layout.test.mjs` 用的是它自己那份 1280×860，**不读这个文件** ——
+    //   今天 `layout.test.mjs` 用的是它自己那份 1280×860，不读这个文件 ——
     //     所以这两个数有一条单独的用例守着（见该文件末尾那条），别把守卫撤了。
     this.win = new BrowserWindow({
       width: 1280,
@@ -144,48 +144,48 @@ class ShellWindow {
     this.win.once('ready-to-show', () => this.win.show());
 
     /**
-     * 窗口里现在有几块界面：**槽 → { view, origin, partition }**。
+     * 窗口里现在有几块界面：槽 → { view, origin, partition }。
      *
-     * ★ 为什么是**一张表**而不是**一个** `surfaceView`：单值能成立，靠的是"同一时刻
+     * 为什么是一张表而不是一个 `surfaceView`：单值能成立，靠的是"同一时刻
      *   只有一个会话"这条假设，而它的失败形态很具体：起中转站时那条「这个插件不要
      *   界面」的分支会把 code-server 那块正跑着的页面一起销毁，用户看到的是"我的
      *   编辑器忽然没了"，日志里一个字都没有。
      */
     this.surfaces = new Map();
     /**
-     * 哪一块**盖在面板上面**。
+     * 哪一块盖在面板上面。
      *
-     * ★ 原生视图只有一块地方，所以窗口这一层**必须**有这个"前台"的概念。它**不是**
+     * 原生视图只有一块地方，所以窗口这一层必须有这个"前台"的概念。它不是
      *   "当前会话" —— 它只回答"屏幕上看得见哪一块"。
-     *   由 `pushSessions` 从 `index.js` 的 `frontSlot()` 带过来：**决定权只有一处**。
+     *   由 `pushSessions` 从 `index.js` 的 `frontSlot()` 带过来：决定权只有一处。
      */
     this._front = null;
     /**
-     * **面板自己**要不要盖在那块会话页面上面（开发者模式的「调试」标签要它）。
+     * 面板自己要不要盖在那块会话页面上面（开发者模式的「调试」标签要它）。
      *
-     * ★★ 这一格存在的理由是一条物理事实：会话那块界面是**原生视图**，从 y=30 往下
+     * 这一格存在的理由是一条物理事实：会话那块界面是原生视图，从 y=30 往下
      *   盖住整个窗口主体 —— 面板上任何属于自己的按钮都够不着。所以"我要看面板"这件
-     *   事只能由窗口这一层记着并让那块视图**让开**（`_layout` 里那一句）。
+     *   事只能由窗口这一层记着并让那块视图让开（`_layout` 里那一句）。
      *
      *   | 谁把它置真 | 谁把它清掉 |
      *   |---|---|
-     *   | `showPanel()`（状态条那颗「调试」标签） | ① `setFront()`：用户点了某条会话的标签<br>② `pushSessions()` 里**前台换了**那一下<br>③ `showSurface()` 里**前台那条的页面刚建出来**那一下 |
+     *   | `showPanel()`（状态条那颗「调试」标签）| ① `setFront()`：用户点了某条会话的标签<br>② `pushSessions()` 里前台换了那一下<br>③ `showSurface()` 里前台那条的页面刚建出来那一下 |
      *
-     * ★★ ②③ 两条**一条都不许少**，而它们各自堵的是一格不同的缝：
-     *   · ②：起了一条新会话（或者前台那条结束了）⇒ 前台**换了个槽名**；
-     *   · ③：一次会话结束之后**同一个槽被下一轮复用** —— 那时前台从头到尾都是同一个
+     * ②③ 两条一条都不许少，而它们各自堵的是一格不同的缝：
+     *   · ②：起了一条新会话（或者前台那条结束了），前台换了个槽名；
+     *   · ③：一次会话结束之后同一个槽被下一轮复用 —— 那时前台从头到尾都是同一个
      *     槽名（`reapSessions` 把旧记录删掉，新的那条又按同一个槽名建回来），②**判
      *     不出来**，而页面上来了。
      *   两条都少了的话，症状是"我点了开始会话，什么都没出来" —— 而用户手上唯一的
      *   解释是"这个客户端坏了"。
      *
-     * ★ 而"离开站点"（临时离开 / 断开）**不需要单独一条**：那两条路都会把会话全收掉，
-     *   于是 `frontSlot()` 变成 null ⇒ 前台换了 ⇒ 在这里就清掉了。
+     * 而"离开站点"（临时离开 / 断开）不需要单独一条：那两条路都会把会话全收掉，
+     *   于是 `frontSlot()` 变成 null，前台换了，在这里就清掉了。
      */
     this._panelFront = false;
     this.overlayView = null;
     /**
-     * 浮窗那一层。**懒建**（头一次停靠时才建），建成之后跨次复用 ——
+     * 浮窗那一层。懒建（头一次停靠时才建），建成之后跨次复用 ——
      * 与遮罩同一条理由：每次停靠都新建的话，鼠标来回扫几下就堆出几十个进程。
      */
     this.hoverView = null;
@@ -193,7 +193,7 @@ class ShellWindow {
      * 浮窗现在的状态。`side` 是 `'left' | 'right' | null`（null = 收起），
      * `pinned` 说的是"用户点了那一条栏把它钉住了"。
      *
-     * ★ `pinned` 归**窗口**管，不归那个页面管：收起判据（鼠标几何）也在这里，
+     * `pinned` 归窗口管，不归那个页面管：收起判据（鼠标几何）也在这里，
      *   两处各存一份的话，钉住之后浮窗照样会被鼠标判走。
      */
     this._hover = { side: null, pinned: false };
@@ -203,8 +203,8 @@ class ShellWindow {
     this._destroying = new Set();
     this._closing = false;
     this._closeConfirmed = false;
-    // 窗口这一层只需要两件事：活着的会话**有几个**、各自的 `closeWarning`。
-    // 由 setSessions 设。**窗口不认识任何插件**（见 _confirmClose）。
+    // 窗口这一层只需要两件事：活着的会话有几个、各自的 `closeWarning`。
+    // 由 setSessions 设。窗口不认识任何插件（见 _confirmClose）。
     this._sessions = [];
     this._overlayText = null;
 
@@ -225,24 +225,24 @@ class ShellWindow {
   /**
    * 把插件声明的那块界面显示出来。
    *
-   * @param {string} slot      这是**哪一条会话**的界面（见 plugin-data.js 的 slotOf）
+   * @param {string} slot      这是哪一条会话的界面（见 plugin-data.js 的 slotOf）
    * @param {string} url       完整 URL，形如 http://127.0.0.1:18080/lab
-   *                           （主机部分**字面 127.0.0.1**，隧道在这一头）
+   *                           （主机部分字面 127.0.0.1，隧道在这一头）
    * @param {string} partition 形如 'persist:<插件 id>@<共享组>[@<实例>]'
    *                           （结构见 plugin-data.js 的文件头）
    * @param {boolean} demo     true 时注入 demo.js preload 用于快捷键对照。
-   *                           **真实模式绝不注入任何 preload** —— 那会污染那款软件。
+   *                           真实模式绝不注入任何 preload —— 那会污染那款软件。
    *
-   * ★ 这里**只看 slot、url 和 partition**，不看是谁。`origin` 这个字眼在本文件里
+   * 这里只看 slot、url 和 partition，不看是谁。`origin` 这个字眼在本文件里
    *   已经没有意义：URL 的路径部分由插件声明（`contributes.surface.path`），所以
    *   "同一个隧道端口、不同路径"也是合法的。
    */
   async showSurface({ slot, url, partition, demo = false }) {
-    // ★ WebContentsView 的 partition **只在构造时读一次**（就是下面那个 new）。
-    //   所以「换工作区」= 换 partition，必须**销毁重建** —— 只 loadURL 是没用的，
+    // WebContentsView 的 partition 只在构造时读一次（就是下面那个 new）。
+    //   所以「换工作区」= 换 partition，必须销毁重建 —— 只 loadURL 是没用的，
     //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
     //   而界面上完全看不出区别。
-    //   ★ 判据是**这一个槽**自己的分区，不是"窗口里那块"的 —— 见 index.js 的
+    //   判据是这一个槽自己的分区，不是"窗口里那块"的 —— 见 index.js 的
     //     `ensureSurface`。
     let s = this.surfaces.get(slot);
     if (s && s.partition !== partition) { this._destroySurface(slot); s = null; }
@@ -256,7 +256,7 @@ class ShellWindow {
           sandbox: true,
           // 这类页面是最不该被 Chromium 节流的：后台标签页限速会让终端和
           // 语言服务器看起来「卡住」，而且没有任何报错。
-          // ★ 多开之后它更要紧：**后台那个标签页里的终端还在跑**，限速它等于
+          // 多开之后它更要紧：后台那个标签页里的终端还在跑，限速它等于
           //   让用户切回去时发现命令停了半天。
           backgroundThrottling: false,
           ...(demo ? { preload: path.join(__dirname, '..', 'preload', 'demo.js') } : {}),
@@ -265,24 +265,24 @@ class ShellWindow {
       s = { view, origin: originOf(url), partition };
       this.surfaces.set(slot, s);
       this.win.contentView.addChildView(view);
-      // 「只装一次」是针对**同一个 webContents 对象**说的：origin 由 `s.origin`
-      // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是**新对象**，
+      // 「只装一次」是针对同一个 webContents 对象说的：origin 由 `s.origin`
+      // 提供，所以隧道换端口（origin 变）不需要重装。但上面换 partition 时是新对象，
       // 必须重新装一遍 —— 否则新视图的 will-navigate 不设防、崩溃也不报错。
       this._wireSurface(view.webContents, slot);
-      // ★★ **前台那一条的页面刚建出来 ⇒ 面板让开**（2026-10-11 加）。这一句补的是
+      // 前台那一条的页面刚建出来，面板让开（2026-10-11 加）。这一句补的是
       //   `pushSessions` 里那一句够不着的一格：**一次会话结束之后，同一个槽被下一轮
       //   复用**。那时 `frontSlot()` 从头到尾都是同一个槽名（记录被 `reapSessions`
-      //   删掉、又被新的那条按同一个槽名建回来），前台**一个字都没变** —— 而页面上
+      //   删掉、又被新的那条按同一个槽名建回来），前台一个字都没变 —— 而页面上
       //   来了，用户正站在「调试」那一屏上等它（症状：点了开始会话，什么都没出来）。
-      //   ★ 判据是"这一块**是新建的**"（上面那一支只在真的没有那一块时走）—— 放在
+      //   判据是"这一块是新建的"（上面那一支只在真的没有那一块时走）—— 放在
       //     这个函数的出口处的话，每一次心跳（`ensureSurface` 会被反复调到）都会把
       //     面板收回去，那一屏就没法用了。
-      //   ★ 而它**只对前台那一块**做：起一条**后台**会话时把前台那块旧页面顶上来，
+      //   而它只对前台那一块做：起一条后台会话时把前台那块旧页面顶上来，
       //     是另一个方向的意外（用户会以为"我起的是它吗"）。
       if (slot === this._front) this._panelFront = false;
       await view.webContents.loadURL(url);
     } else {
-      // 隧道换端口：origin 变了，但**不重装监听器**（它们读的是 s.origin）。
+      // 隧道换端口：origin 变了，但不重装监听器（它们读的是 s.origin）。
       s.origin = originOf(url);
       if (s.view.webContents.getURL() !== url) await s.view.webContents.loadURL(url);
     }
@@ -309,8 +309,8 @@ class ShellWindow {
     });
     // 这类页面最容易 OOM。挂了要能提示并重载，而不是留一块白。
     wc.on('render-process-gone', (_e, details) => {
-      // ★ 我们自己拆视图（换工作区）也会走到这里。不区分的话，用户每切一次工作区
-      //   就会看到一条「页面崩溃了」的**假警报** —— 系统报告了一件没发生的事，
+      // 我们自己拆视图（换工作区）也会走到这里。不区分的话，用户每切一次工作区
+      //   就会看到一条「页面崩溃了」的假警报 —— 系统报告了一件没发生的事，
       //   正是这个项目一路在清的那类。
       if (this._destroying.has(slot)) return;
       this.onAction('renderer-gone', { slot, reason: details && details.reason });
@@ -318,17 +318,17 @@ class ShellWindow {
   }
 
   /**
-   * 销毁**某一个槽**的视图。**换工作区时必须走这条** —— partition 是构造期属性，
+   * 销毁某一个槽的视图。换工作区时必须走这条 —— partition 是构造期属性，
    * 不重建就换不了存储分区。
    *
    * 顺序照文件头那条写死：removeChildView → webContents.close() → 引用置 null，
    * 每一步 isDestroyed() 兜底。`removeChildView()` 自己不销毁 webContents。
    *
-   * ★★ **名字里必须带"销毁"两个字。** 一个叫 `hideSurface()` 的名字会同时表示
+   * 名字里必须带"销毁"两个字。一个叫 `hideSurface()` 的名字会同时表示
    *    两件事（"这个会话结束了，拆掉"与"用户切了标签，藏起来"），
-   *    而这两件事的差别是**页面会不会被重置**：藏起来的那一块必须原样留着，
+   *    而这两件事的差别是页面会不会被重置：藏起来的那一块必须原样留着，
    *    否则用户切一次标签，另一个会话的编辑器就重新加载一次、自动登录再跑一遍。
-   *    隐藏是 `setFront` + `_layout` 的事，**不在这条路上**。
+   *    隐藏是 `setFront` + `_layout` 的事，不在这条路上。
    */
   _destroySurface(slot) {
     const s = this.surfaces.get(slot);
@@ -345,7 +345,7 @@ class ShellWindow {
     if (this._front === slot) this._front = null;
   }
 
-  /** 收起**某一个槽**的界面（销毁那一块）。会话结束时走这条。 */
+  /** 收起某一个槽的界面（销毁那一块）。会话结束时走这条。 */
   destroySurface(slot) {
     if (!this.surfaces.has(slot)) return;
     this._destroySurface(slot);
@@ -354,28 +354,28 @@ class ShellWindow {
   }
 
   /**
-   * 把**某一个槽**那块抬到面板上面。其余各块 `setVisible(false)` —— **不销毁**：
+   * 把某一个槽那块抬到面板上面。其余各块 `setVisible(false)` —— 不销毁：
    * 它们背后是还活着的服务器，藏起来只是不占屏幕。
    *
-   * ★ 这是切标签走的那条路，与 `destroySurface` **不是一回事**（见那里的注释）。
+   * 这是切标签走的那条路，与 `destroySurface` 不是一回事（见那里的注释）。
    */
   setFront(slot) {
     this._front = slot || null;
-    // ★ 用户点了一条会话的标签 ⇒ 他要的就是那块页面 —— 面板让开（见 `_panelFront`）。
+    // 用户点了一条会话的标签，他要的就是那块页面 —— 面板让开（见 `_panelFront`）。
     //   少了这一句，「调试」那一屏上点会话标签会"什么都不发生"。
     this._panelFront = false;
     this._layout();
   }
 
   /**
-   * 反过来：**把面板抬到会话页面上面**（不发 `pushSessions` —— 会话那一份数据
+   * 反过来：把面板抬到会话页面上面（不发 `pushSessions` —— 会话那一份数据
    * 一个字都没变，变的只是"屏幕上看得见谁"）。
    *
-   * ★ 会话那块视图不会被销毁、也不会被隐藏到"重置"：它只是 `setVisible(false)`，
+   * 会话那块视图不会被销毁、也不会被隐藏到"重置"：它只是 `setVisible(false)`，
    *   背后那条隧道与那个页面照旧活着 —— 所以再点回去时编辑器里那些没保存的改动
    *   还在（见 `_layout` 与 `_destroySurface` 那两段的区别）。
    *
-   * ★ 没有会话在跑的时候它也无害（那时没有任何一块视图要收）。
+   * 没有会话在跑的时候它也无害（那时没有任何一块视图要收）。
    */
   showPanel() {
     this._panelFront = true;
@@ -387,16 +387,16 @@ class ShellWindow {
   /** 面板现在是不是被顶到前面了（用例要读它）。 */
   get panelFront() { return this._panelFront; }
 
-  /** 取**某一个槽**那块界面用的 session（要在同一个分区里发请求才带得上它的 cookie）。 */
+  /** 取某一个槽那块界面用的 session（要在同一个分区里发请求才带得上它的 cookie）。 */
   surfaceSession(slot) {
     const s = this.surfaces.get(slot);
     return s ? s.view.webContents.session : null;
   }
 
   /**
-   * **某一个槽**那块界面跑在哪个存储分区里。没有那一块时返回 null。
+   * 某一个槽那块界面跑在哪个存储分区里。没有那一块时返回 null。
    *
-   * 回收一个工作区时要清它的浏览器存储 —— 而那**绝不能**发生在正被**任何一块**
+   * 回收一个工作区时要清它的浏览器存储 —— 而那绝不能发生在正被任何一块
    * 视图用着的那个分区上，否则那块界面会连 cookie 带 localStorage 一起被抽掉，
    * 症状只是「页面莫名其妙坏了」。
    */
@@ -405,7 +405,7 @@ class ShellWindow {
     return s ? s.partition : null;
   }
 
-  /** **某一个槽**那块界面加载的 origin（隧道换端口后它会变）。 */
+  /** 某一个槽那块界面加载的 origin（隧道换端口后它会变）。 */
   surfaceOrigin(slot) {
     const s = this.surfaces.get(slot);
     return s ? s.origin : null;
@@ -416,22 +416,22 @@ class ShellWindow {
   /**
    * 收起界面，把窗口主体还给面板。
    *
-   * ★ 两处必须调用，缺一个都会留下同一类症状：**用户看着一个打不开的页面，
+   * 两处必须调用，缺一个都会留下同一类症状：**用户看着一个打不开的页面，
    *   而唯一能救他的按钮被那块页面盖住了**（surfaceView 是原生层，覆在面板上方，
    *   面板那 30px 状态条以下的部分全在它底下）。
    *
    *   1. 会话结束时（ended / error）。那个页面背后的服务器已经没了 —— 隧道停了、
    *      作业也快没了 —— 留着它只有坏处；漏了这一步，「结束会话」之后用户看到的
    *      是一张加载不出来的网页，出路只剩重启客户端。
-   *   2. 起一个**不声明 surface** 的会话时（比如中转站）。**它自己那一块**（本来
-   *      就没有）让开即可 —— ★ 而"把窗口里那一块收掉"是一次**越权**：它会把
+   *   2. 起一个不声明 surface 的会话时（比如中转站）。它自己那一块（本来
+   *      就没有）让开即可 —— 而"把窗口里那一块收掉"是一次越权：它会把
    *      code-server 那块正跑着的页面一起销毁。
    *
-   * 是**销毁**而不是 setVisible(false)：唤醒一个已经死掉的页面没有意义，而且
+   * 是销毁而不是 setVisible(false)：唤醒一个已经死掉的页面没有意义，而且
    * ensureSurface 是按 (url, partition) 判定要不要重建的，一个被藏起来的
    * 旧页面会正好命中「没变」而永远不再加载。销毁之后下次一定是干净的新页面。
    *
-   * ★ **切标签不走这条**，走 `setFront` —— 那里藏起来的那一块背后还活着。
+   * 切标签不走这条，走 `setFront` —— 那里藏起来的那一块背后还活着。
    */
   async reloadSurface(slot) {
     const s = this.surfaces.get(slot);
@@ -451,7 +451,7 @@ class ShellWindow {
 
   // ── 遮罩（断线提示）────────────────────────────────────────────────────
   /**
-   * 显示遮罩。**懒创建、跨事件复用** —— 每次断开都新建的话，反复断线会瞬间堆出
+   * 显示遮罩。懒创建、跨事件复用 —— 每次断开都新建的话，反复断线会瞬间堆出
    * 几十个 renderer 进程。
    */
   async showOverlay(text) {
@@ -477,9 +477,9 @@ class ShellWindow {
   hideOverlay() {
     this._overlayText = null;
     if (this.overlayView) this.overlayView.setVisible(false);
-    // ★ 移除遮罩后必须把焦点还给界面那块视图，否则用户打字没反应 ——
+    // 移除遮罩后必须把焦点还给界面那块视图，否则用户打字没反应 ——
     //   又一个「看起来正常但就是不工作」的静默失败。
-    //   还给的必须是**前台**那一块：遮罩底下看得见的就是它。
+    //   还给的必须是前台那一块：遮罩底下看得见的就是它。
     const s = this._front ? this.surfaces.get(this._front) : null;
     if (s && !s.view.webContents.isDestroyed()) s.view.webContents.focus();
     this._layout();
@@ -499,17 +499,17 @@ class ShellWindow {
     const [w, h] = this.win.getContentSize();
     // 用 setBounds 而不是靠 CSS —— WebContentsView 是原生层，不参与页面布局
     //
-    // ★ 摆位那几条算式在 layout.js（纯函数，有判据）。这里只负责"把算出来的
+    // 摆位那几条算式在 layout.js（纯函数，有判据）。这里只负责"把算出来的
     //   矩形发给谁" —— 三个内边距算错一个的症状是"插件页面被边栏压住一角"，
     //   在真机上极不显眼，所以它们不该埋在这个进不去的文件里。
     //
-    // ★ 可见性：**只有前台那一块**。其余各块 setVisible(false) 但**留着** ——
+    // 可见性：只有前台那一块。其余各块 setVisible(false) 但留着 ——
     //   它们背后是还活着的服务器，切回去时必须是同一个页面（`setBounds(0,0,0,0)`
     //   那种"藏法"会把页面尺寸打乱，切回来要重排）。
     const stage = stageRect(w, h);
     for (const [slot, s] of this.surfaces) {
       if (!s.view.webContents || s.view.webContents.isDestroyed()) continue;
-      // ★★ `_panelFront` 那一格在这里生效：它说"面板要露出来"，于是**每一块**会话
+      // `_panelFront` 那一格在这里生效：它说"面板要露出来"，于是每一块会话
       //   页面都让开。判据只有这一句 —— 别处再判一遍就是第二个"谁在上面"。
       const on = !this._panelFront && slot === this._front;
       s.view.setVisible(on);
@@ -525,13 +525,13 @@ class ShellWindow {
 
   // ── 浮窗（两条边栏停靠时滑出来的那一块）────────────────────────────────
   /**
-   * 滑出**某一边**的浮窗。`side` 是 `'left'`（站点状态）或 `'right'`（作业输出）。
+   * 滑出某一边的浮窗。`side` 是 `'left'`（站点状态）或 `'right'`（作业输出）。
    *
-   * ★★ 浮窗**必须**由一块原生视图画。它在**插件那块界面之上**，而插件那块界面是
+   * 浮窗必须由一块原生视图画。它在插件那块界面之上，而插件那块界面是
    *    原生的 —— 画在面板的 DOM 里的话，它会被那块原生视图物理盖住，一个像素都露不出来。
    *
-   * ★ 为什么不让插件视图"让位"（下移/右移一格，收起还原）：那会让插件那款软件在
-   *   每一次鼠标扫过边栏时**重排一次页面**（终端重新折行、编辑器跳滚动位置）。
+   * 为什么不让插件视图"让位"（下移/右移一格，收起还原）：那会让插件那款软件在
+   *   每一次鼠标扫过边栏时重排一次页面（终端重新折行、编辑器跳滚动位置）。
    *   而停靠是随手就会发生的动作 —— 代价落在最频繁的那条路上。
    */
   async showHover(side) {
@@ -542,9 +542,9 @@ class ShellWindow {
     if (this.win.isDestroyed() || !this.hoverView) return;
     const wc = this.hoverView.webContents;
     if (wc.isDestroyed()) return;
-    // ★ 置顶：遮罩可能比它晚建，也可能早建。而这两层谁在上面是有讲究的 ——
+    // 置顶：遮罩可能比它晚建，也可能早建。而这两层谁在上面是有讲究的 ——
     //   断线时用户最想看的就是站点状态，浮窗被一句"连接暂时中断"盖住正好反了。
-    //   `addChildView` 是**追加**，所以先摘再挂就保证在最上面。
+    //   `addChildView` 是追加，所以先摘再挂就保证在最上面。
     try { this.win.contentView.removeChildView(this.hoverView); } catch { /* 可能还没挂上 */ }
     this.win.contentView.addChildView(this.hoverView);
     this.hoverView.setVisible(true);
@@ -555,7 +555,7 @@ class ShellWindow {
   }
 
   /**
-   * 收起浮窗。**钉住也一起解掉** —— 收起是用户明确说"我不要看它了"，
+   * 收起浮窗。钉住也一起解掉 —— 收起是用户明确说"我不要看它了"，
    * 而留着那个 pin 的后果是下一次滑出时它自己不肯走。
    */
   hideHover() {
@@ -568,7 +568,7 @@ class ShellWindow {
       this._sendHover({ open: false });
     }
     this._layout();
-    // ★ 焦点还给**前台**那一块：浮窗走掉之后用户要继续打字，而焦点留在一个
+    // 焦点还给前台那一块：浮窗走掉之后用户要继续打字，而焦点留在一个
     //   看不见的页面上，症状是"键盘没反应" —— 又一个静默失败（与 hideOverlay 同）。
     const s = this._front ? this.surfaces.get(this._front) : null;
     if (s && s.view.webContents && !s.view.webContents.isDestroyed()) {
@@ -584,7 +584,7 @@ class ShellWindow {
    */
   async toggleHoverPin(side) {
     if (this._hover.side !== side) {
-      // ★ 先定态再开：`showHover` 会照着 `pinned` 决定要不要起鼠标看门狗，
+      // 先定态再开：`showHover` 会照着 `pinned` 决定要不要起鼠标看门狗，
       //   反过来的话它会先起一次、再被下面这一句停掉 —— 中间那一瞬间的失败形态
       //   是"点了钉住，浮窗却闪了一下才稳住"。
       this._hover.pinned = true;
@@ -605,7 +605,7 @@ class ShellWindow {
   /** 浮窗现在露的是哪一块（`'left' | 'right' | null`）。供"要不要推数据"判用。 */
   hoverOpenSide() { return this._hover.side; }
 
-  /** 左栏那个圆点的三态。★ 它是**状态**，不是提示：不弹窗、不写日志、不发声。 */
+  /** 左栏那个圆点的三态。它是状态，不是提示：不弹窗、不写日志、不发声。 */
   pushSite(summary) {
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) wc.send('ui:site', summary);
@@ -635,7 +635,7 @@ class ShellWindow {
     this.hoverView = v;
     this.win.contentView.addChildView(v);
     v.setVisible(false);
-    // Esc 收起：装在**主进程**这一侧，不靠页面自己听键盘 —— 焦点在哪儿不确定，
+    // Esc 收起：装在主进程这一侧，不靠页面自己听键盘 —— 焦点在哪儿不确定，
     // 而"按了 Esc 没反应"是一个用户会重复按的动作。
     v.webContents.on('before-input-event', (_e, input) => {
       if (input.type === 'keyDown' && input.key === 'Escape') this.hideHover();
@@ -646,17 +646,17 @@ class ShellWindow {
   /**
    * 浮窗开着（且没被钉住）的时候，看鼠标还在不在它那一片上。
    *
-   * ★★ **为什么不用页面的 `mouseleave`**：浮窗是原生视图，鼠标一进它，边栏那一格
+   * 为什么不用页面的 `mouseleave`：浮窗是原生视图，鼠标一进它，边栏那一格
    *    就再也收不到事件了 —— 两个 renderer 之间必然有一段交接的真空，而它的表现
-   *    是浮窗**闪一下就没了**。几何判定没有交接，只有一条规则。
+   *    是浮窗闪一下就没了。几何判定没有交接，只有一条规则。
    */
   /**
-   * 现在该不该看鼠标：**浮窗开着，而且没被钉住**。
+   * 现在该不该看鼠标：浮窗开着，而且没被钉住。
    *
-   * ★★ 全文件**只有这一处**判它。理由是一条真发生过的教训：这条规矩原先散在
+   * 全文件只有这一处判它。理由是一条真发生过的教训：这条规矩原先散在
    *    三个地方（起定时器时判一次、定时器回调里再判一次、点钉住时又停一次），
-   *    于是**单独去掉任何一处，行为都不变** —— 看起来有三道防线，实际一道都不
-   *    承重。变异验证对那三处**一条都不红**，而那意味着这条行为根本没被守住。
+   *    于是单独去掉任何一处，行为都不变 —— 看起来有三道防线，实际一道都不
+   *    承重。变异验证对那三处一条都不红，而那意味着这条行为根本没被守住。
    *    （"没红"有八种读法，这是新的一种：互为冗余的判据。）
    */
   _watchWanted() {
@@ -695,43 +695,43 @@ class ShellWindow {
   /**
    * 告诉窗口「现在有几条会话、各自由哪个插件在接」。
    *
-   * 窗口只用它两件事：**有几条活着**（关窗确认要数）、以及各自的 `closeWarning`
+   * 窗口只用它两件事：有几条活着（关窗确认要数）、以及各自的 `closeWarning`
    * （要掐断的东西不一样，话也得不一样）。传整个插件对象而不是一句文案，是为了
-   * 让窗口在将来需要别的插件信息时不必再开一个方法 —— 但它**不**应该去读
+   * 让窗口在将来需要别的插件信息时不必再开一个方法 —— 但它不应该去读
    * `attach` 之类的东西：那是框架与插件之间的事。
    *
-   * ★ 收**一个** plugin（`setSessionService`）的失败形态不是崩溃而是
-   *   **说一句假话**：两条会话（开发环境 + 中转站）时，窗口会把"关闭会结束这个
-   *   开发会话，编辑器里**没有保存的改动会丢失**"念给一个只用着终端的人听。
+   * 收一个 plugin（`setSessionService`）的失败形态不是崩溃而是
+   *   说一句假话：两条会话（开发环境 + 中转站）时，窗口会把"关闭会结束这个
+   *   开发会话，编辑器里没有保存的改动会丢失"念给一个只用着终端的人听。
    */
   setSessions(list) { this._sessions = Array.isArray(list) ? list : []; }
 
   /**
-   * 把**全部**会话推给面板，并顺手把前台记下来。
+   * 把全部会话推给面板，并顺手把前台记下来。
    *
-   * ★ 界面唯一的数据来源是这一份**列表**，不是"最后动过的那一个快照"：后者在多开
+   * 界面唯一的数据来源是这一份列表，不是"最后动过的那一个快照"：后者在多开
    *   下的失败形态是"某一条会话在界面上根本不存在" —— 既没有标签、
    *   也没有「结束会话」的入口，而它在集群上占着资源。
    */
   pushSessions(list, front) {
     const next = front || null;
-    // ★★ **前台换了 ⇒ 面板让开**（2026-10-11 加，与 `setFront` 里那一句同一件事的
+    // 前台换了，面板让开（2026-10-11 加，与 `setFront` 里那一句同一件事的
     //   另一半）。少了它的症状是"我点了开始会话，什么都没出来"：用户可能正站在
     //   「调试」那一屏上，而新会话的页面被 `_panelFront` 按着不让露。
-    //   ★ 只在**真的换了**的时候清：用户站在调试那一屏、而会话表每隔几秒推一次
+    //   只在真的换了的时候清：用户站在调试那一屏、而会话表每隔几秒推一次
     //     （心跳），每推一次都把面板收回去的话，那一屏会用不了。
     if (next !== this._front) this._panelFront = false;
     this._front = next;
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) wc.send('session:states', { sessions: list, front: this._front });
     this._layout();
-    // ★ 改 URL 只有**一条**通路：index.js 的 `ensureSurface`（它同时看 url 和
+    // 改 URL 只有一条通路：index.js 的 `ensureSurface`（它同时看 url 和
     //   partition）。别再加一条「origin 变了就 loadURL」的自动 retarget —— 它只会
-    //   loadURL，**不换 partition、也不重跑登录**，而换工作区要的恰恰是前者，
+    //   loadURL，不换 partition、也不重跑登录，而换工作区要的恰恰是前者，
     //   于是两条路必然分叉。
   }
 
-  /** 把被外壳吞掉的按键推给**前台**那个假页面（仅开发者模式用，用于对照）。 */
+  /** 把被外壳吞掉的按键推给前台那个假页面（仅开发者模式用，用于对照）。 */
   pushSwallowed(desc) {
     const s = this._front ? this.surfaces.get(this._front) : null;
     if (!s || s.view.webContents.isDestroyed()) return;
@@ -744,10 +744,10 @@ class ShellWindow {
   }
 
   /**
-   * 链路状态。`connected` 说的是**此刻这条链路活没活**，而那与"上一次点连接
+   * 链路状态。`connected` 说的是此刻这条链路活没活，而那与"上一次点连接
    * 成没成"是两件事。
    *
-   * ★ 这条通道存在的理由很具体：后端的 `on('state')` 一直在发，而**全仓库
+   * 这条通道存在的理由很具体：后端的 `on('state')` 一直在发，而**全仓库
    *   没有一个订阅者** —— 于是 SSH 掉线在界面上是一个静默事件，用户看到的是
    *   "界面还停在原处"，直到某次操作失败。一条一直在发出、没有收件人的事件，
    *   和没有这条事件是一样的。
@@ -760,7 +760,7 @@ class ShellWindow {
   /**
    * 主动推一份新的插件视图。
    *
-   * ★ 站点对账是**后台**跑的（连上之后才开始取文件，一次一份，真集群上一份就是
+   * 站点对账是后台跑的（连上之后才开始取文件，一次一份，真集群上一份就是
    *   一次 `ssh` exec）。不推的话，用户看到的是连接那一刻的旧视图 —— 而"插件
    *   明明是站点说要给的，界面上却什么都没有"正是这个功能最该避免的那句话。
    */
@@ -784,19 +784,19 @@ class ShellWindow {
   /**
    * 关窗前的确认。
    *
-   * ★ 只在**真的有会话在跑**时才问。没有会话时关闭是无害的，弹一个「要结束吗？」
+   * 只在真的有会话在跑时才问。没有会话时关闭是无害的，弹一个「要结束吗？」
    *   只会训练用户闭着眼睛回车，等到某次真的有作业在跑时，那一下回车就是 12 小时。
    *
    * 也没有「保持作业运行」这个选项 —— 关闭就是结束（见 session.js 的 stop()）。
-   * 保留确认这一步不是为了让用户选择要不要结束，而是为了让**误点 × **
+   * 保留确认这一步不是为了让用户选择要不要结束，而是为了让误点 ×
    * 不至于直接毁掉一个正在跑的作业。
    */
   async _confirmClose() {
     if (this._closing) return;
     this._closing = true;
     try {
-      // ★ **数活着的条数**，不是"有没有会话"。一个布尔在多开下的失败形态
-      //   是一句**不成立的话**：关窗只说了"会结束这个会话"，而实际掐断两条 ——
+      // 数活着的条数，不是"有没有会话"。一个布尔在多开下的失败形态
+      //   是一句不成立的话：关窗只说了"会结束这个会话"，而实际掐断两条 ——
       //   用户以为自己只损失一个。（与账本 F13 同一类：说了一句话，而它不成立
       //   —— 那条说的是"已释放"，而作业可能还在跑。）
       const live = this._sessions.filter((s) => s && s.live);
@@ -810,10 +810,10 @@ class ShellWindow {
       // 「编辑器里没保存的改动会丢失」指的是另一回事 —— 而这一下点错，断掉的是
       // 他正在跑的编译或对话。
       //
-      // ★ 文案由**插件**提供（见 plugins/*.js 的 closeWarning），窗口不认识任何
+      // 文案由插件提供（见 plugins/*.js 的 closeWarning），窗口不认识任何
       //   插件名。没有插件信息时用中性的那句 —— 见 NEUTRAL_CLOSE_WARNING。
       //
-      // ★ 一条一条**各念各的**：两条会话各掐断什么，只有各自的插件说得清。合成
+      // 一条一条各念各的：两条会话各掐断什么，只有各自的插件说得清。合成
       //   一句"会结束 2 个会话"等于把"你的编辑器里有没保存的改动"这件**只对其中
       //   一条成立**的事说成对两条都成立。
       const warn = (s) => (s.plugin && s.plugin.closeWarning) || NEUTRAL_CLOSE_WARNING;
@@ -856,10 +856,10 @@ class ShellWindow {
 
   _destroyViews() {
     // 每一块界面走它自己那条（还要清 partition、立 _destroying 旗子）。
-    // ★ 遍历的是**一份拷贝**：`_destroySurface` 会改 `this.surfaces`。
+    // 遍历的是一份拷贝：`_destroySurface` 会改 `this.surfaces`。
     for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
     this._front = null;
-    // ★ 与 `_front` 一起归零：两块"谁在上面"的状态留在这儿没有意义，而留着它的
+    // 与 `_front` 一起归零：两块"谁在上面"的状态留在这儿没有意义，而留着它的
     //   代价是下一次重画时面板莫名其妙地按着页面不让露。
     this._panelFront = false;
     this._stopCursorWatch();

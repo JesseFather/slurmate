@@ -36,41 +36,41 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-boot-'));
 /**
  * 假的「家目录」。
  *
- * ★ 不能用 os.tmpdir()：真正模式下的中转站会往 `app.getPath('home')` 写
- *   `~/.ssh/config`，而 `os.tmpdir()` 是一个**大家共用、且会被之前的运行留下东西**
+ * 不能用 os.tmpdir()：真正模式下的中转站会往 `app.getPath('home')` 写
+ *   `~/.ssh/config`，而 `os.tmpdir()` 是一个大家共用、且会被之前的运行留下东西
  *   的目录 —— 拿它当断言目标，「开发者模式没碰真家目录」这条会变成一个看运气的用例
  *   （跑过一次真写之后，后面每次都会红）。给一个每次全新的空目录，这条断言就
  *   真的在断言「我们没往那儿写」，而不是在断言「这个目录恰好不存在」。
  */
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 
-// ── 插件池（**站点池**，唯一的一个）────────────────────────────────────────
+// ── 插件池（站点池，唯一的一个）────────────────────────────────────────
 //
 // 开发者模式的站点池 = `<userData>/dev-sandbox/site-plugins`（见 index.js 的 sitePoolDir）。
 //
-// ★ 装进去的是仓库里**真的**那两个插件（`<repo>/plugins/`），不是测试里合成的
+// 装进去的是仓库里真的那两个插件（`<repo>/plugins/`），不是测试里合成的
 //   替身。这两个插件与基座的接口正是这次改动反复在动的东西 —— 用替身测等于
 //   测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被真正验过。
 //
-// ★ **布局是 `<id>_<版本>/` 加旁边那张记录表** —— 站点池唯一的形状，也就是安装器
+// 布局是 `<id>_<版本>/` 加旁边那张记录表 —— 站点池唯一的形状，也就是安装器
 //   写出来的形状（v0.13）。
 //   一层布局（`<池>/<名字>/plugin.json`）是"把插件目录拷进去"得到的形状，
 //   `PLUGIN-SPEC` §5.1 明文禁止它产生任何效果。要造那个现场的是 §5.1 那条用例，
-//   它**故意**造一层 —— 夹具这里不许再造。
+//   它故意造一层 —— 夹具这里不许再造。
 //
-// ★ **而且台账里要记一条。** 站点池**每一份都过闸**，所以夹具必须像
+// 而且台账里要记一条。站点池每一份都过闸，所以夹具必须像
 //   "用户点过同意"那样把台账写上 —— 否则那两个插件会以 `active: false` 进来，
 //   而症状是几十条会话用例各红一次在"解析不到插件"上（离夹具十万八千里）。
 //
-// ★ **必须在 app 起来之前写进去**：注册表在启动时扫一次，而 `loadConfig` 在
+// 必须在 app 起来之前写进去：注册表在启动时扫一次，而 `loadConfig` 在
 //   bootstrap 里也只跑一次（index.js 只 require 一次）。
 const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 const DEV_CFG = path.join(userData, 'dev-sandbox');
 const SITE_POOL = path.join(DEV_CFG, 'site-plugins');
 const SAMPLE_PLUGINS = ['code-server', 'sshd'];
 /**
- * 假站点**样例树**那一处的固定位置（见 `buildFixtureSiteTree`）。
- * ★ 固定而不是每次 mkdtemp：`setDevSampleDir` 存的是**路径**，而用例会在
+ * 假站点样例树那一处的固定位置（见 `buildFixtureSiteTree`）。
+ * 固定而不是每次 mkdtemp：`setDevSampleDir` 存的是路径，而用例会在
  *   `cleanupSiteState` 里反复把它指回来 —— 换个路径就等于每次都要重指一遍，
  *   漏一次的症状是"站点报的插件与池里的对不上"。
  */
@@ -83,35 +83,35 @@ const require = createRequire(import.meta.url);
 /**
  * 把站点池设成指定的几个插件（名字对应 `<repo>/plugins/<名字>`），并重扫。
  *
- * 传空数组 = **一个插件都没有、也什么都没同意过** —— 那是基座的正常状态，
+ * 传空数组 = 一个插件都没有、也什么都没同意过 —— 那是基座的正常状态，
  * 也得能被测到。
  *
- * ★ 池与台账**一起清、一起写**：只清池不清台账的话，站点分发那几条用例会看到
+ * 池与台账一起清、一起写：只清池不清台账的话，站点分发那几条用例会看到
  *   "这两个早就同意过了"，于是 `pendingConsent` 是 0 —— 而失败信息长得像
  *   "同意闸没问"。
  *
- * ★ 台账走 **`config.trustPlugin`（产品里那个动词）**，不在这里手搓一个对象：
+ * 台账走 `config.trustPlugin`（产品里那个动词），不在这里手搓一个对象：
  *   它自己校验"摘要必须是 64 位十六进制"并返回 `{ok, error}`，写坏了当场就红。
- *   手搓的话写错一个字段会被 `loadConfig` **静默丢掉**，症状同样是"两个插件都是
+ *   手搓的话写错一个字段会被 `loadConfig` 静默丢掉，症状同样是"两个插件都是
  *   active:false"，而原因完全指不出来。
  */
 /**
- * 夹具的**站点树** —— 假站点上"那个管理员装了什么"的答案，而且它必须是一棵
- * **跑得起来**的树。
+ * 夹具的站点树 —— 假站点上"那个管理员装了什么"的答案，而且它必须是一棵
+ * 跑得起来的树。
  *
- * ★★ 为什么不能直接用仓库里那两棵：假站点现在**真的把插件的作业侧跑起来**
+ * 为什么不能直接用仓库里那两棵：假站点现在真的把插件的作业侧跑起来
  *    （见 fake-job.js）。仓库里的 `code-server/job/start.sh` 要这台机器上真的有一个
  *    `code-server` —— 开发机上也许有，CI 上一定没有。用真树的话，几十条会话用例
  *    会一起红在"作业侧起不来"上，而那条报错与它们要验的事情毫无关系。
  *
- * ★★ 换掉的是**只有站点侧那一半**（`job/start.sh`，以及它旁边那个 `job/serve.js`）。
- *    **客户端那一半一个字节都不动** —— 池里装的还是仓库里那两棵真树
+ * 换掉的是只有站点侧那一半（`job/start.sh`，以及它旁边那个 `job/serve.js`）。
+ *    客户端那一半一个字节都不动 —— 池里装的还是仓库里那两棵真树
  *    （见 `setSitePlugins` 的拷贝步骤），清单、`client/index.js`、摘要全都逐字相同。
  *    这不是"用替身测了个寂寞"：这个假站点演的正是真站点的分工 ——
- *    **作业侧跑在集群上，客户端这一半跑在这里**，而夹具只是让集群那一半有个
+ *    作业侧跑在集群上，客户端这一半跑在这里，而夹具只是让集群那一半有个
  *    本机跑得起来的实现。
  *
- * ★ 它同时钉住了一件真事：作业侧**不重定向**输出（契约 §5.5），起服务之前
+ * 它同时钉住了一件真事：作业侧不重定向输出（契约 §5.5），起服务之前
  *   等就绪，成功时写 `$SVC_PID`。这三条正是那份契约里最容易写错的地方。
  *
  * @param {string[]} names `<repo>/plugins/<名字>`
@@ -125,7 +125,7 @@ function buildFixtureSiteTree(names) {
     const dest = path.join(SITE_TREE, n);
     fs.cpSync(src, dest, { recursive: true });
     const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
-    // ★ 只换**有界面**的那一类：没有界面的（中转站）今天的作业侧不跑
+    // 只换有界面的那一类：没有界面的（中转站）今天的作业侧不跑
     //   （see backend-fake.js 的 `_submit`），换它只是多一份没人读的文件。
     if (!(mf.contributes && mf.contributes.surface)) continue;
     const short = String(mf.name).replace(/-/g, '_');
@@ -176,8 +176,8 @@ function setSitePlugins(names) {
   fs.rmSync(SITE_POOL, { recursive: true, force: true });
   fs.mkdirSync(SITE_POOL, { recursive: true });
 
-  // ★ **必须改 index.js 手里那一个 cfg 对象**，不能另 `loadConfig` 一份来改。
-  //   同意闸的闭包读的是**模块里那个变量**指向的对象；另取一份的话磁盘上写对了，
+  // 必须改 index.js 手里那一个 cfg 对象，不能另 `loadConfig` 一份来改。
+  //   同意闸的闭包读的是模块里那个变量指向的对象；另取一份的话磁盘上写对了，
   //   而注册表看不见 —— 症状是"两个插件都 `active: false`"，几十条会话用例各红
   //   一次在"解析不到插件"上，而原因指不出来。
   //
@@ -186,7 +186,7 @@ function setSitePlugins(names) {
   const entry = require.cache[require.resolve('../src/main/index.js')];
   const cfg = entry ? entry.exports._test.getCfg() : config.loadConfig(DEV_CFG);
 
-  // 台账**整个清空再重记**。逐条删会漏掉将来可能存在的第二种键。
+  // 台账整个清空再重记。逐条删会漏掉将来可能存在的第二种键。
   cfg.trustedPlugins = {};
   config.saveConfig(DEV_CFG, cfg);
 
@@ -199,7 +199,7 @@ function setSitePlugins(names) {
     fs.cpSync(src, dest, { recursive: true });
     writeFixtureRecord(SITE_POOL, dest, mf.id, mf.version);
 
-    // ★ 摘要**在目标那棵树上**算，不是在源上 —— 闸门那一趟算的是目标那棵树。
+    // 摘要在目标那棵树上算，不是在源上 —— 闸门那一趟算的是目标那棵树。
     //   两处各算各的话，哪天摘要公式或拷贝行为变了（权限位、符号链接）会分叉，
     //   而症状是"插件明明装着，却要你重新同意"。
     const r = P.inspectDir(dest, 'site');
@@ -208,7 +208,7 @@ function setSitePlugins(names) {
     assert.ok(t.ok, `台账没记上：${t.error}`);
   }
 
-  // ★ 只在 index.js **已经加载过**的时候重扫。夹具是在文件顶层被调用的，而那时
+  // 只在 index.js 已经加载过的时候重扫。夹具是在文件顶层被调用的，而那时
   //   Electron 桩还没装、index.js 也还没被 require —— 直接 require 它会用一个
   //   不存在的 electron 环境启动整个客户端。
   if (entry) entry.exports._test.getRegistry().reload();
@@ -225,21 +225,21 @@ async function withSitePlugins(names, fn) {
 }
 
 /**
- * ★ 收尾用：把夹具恢复成缺省。**每一条动过站点池的用例都要调它。**
+ * 收尾用：把夹具恢复成缺省。每一条动过站点池的用例都要调它。
  *
- * `withSitePlugins` 的 `finally` 已经恢复过一次，但 `t.after` 是在它**之后**跑的
- * —— 收尾那一步如果自己删池子而不恢复，从那条用例起后面**所有**会话用例都会红在
+ * `withSitePlugins` 的 `finally` 已经恢复过一次，但 `t.after` 是在它之后跑的
+ * —— 收尾那一步如果自己删池子而不恢复，从那条用例起后面所有会话用例都会红在
  * "没有可以提交的服务"上，而失败点离夹具十万八千里。
  */
 /**
- * 把夹具恢复成缺省：**站点池** = 两个插件都装着，而**假站点那棵样例树**指回夹具
+ * 把夹具恢复成缺省：站点池 = 两个插件都装着，而假站点那棵样例树指回夹具
  * 那一棵。
  *
- * ★★ 后一半与 `setSitePlugins` 是**两件事**，别合并：那份池是**本机**装了哪几个
+ * 后一半与 `setSitePlugins` 是两件事，别合并：那份池是本机装了哪几个
  *    （`withSitePlugins([])` 要的正是"本机一个都没有、而站点照样发那两个"），
- *   而样例树是**站点**上有什么。合并的话，那一整组用例会红在"站点什么都没报"上。
+ *   而样例树是站点上有什么。合并的话，那一整组用例会红在"站点什么都没报"上。
  *
- * ★ 它也是"样例树指回来"**唯一**的地方 —— 用例可以临时把它换掉
+ * 它也是"样例树指回来"唯一的地方 —— 用例可以临时把它换掉
  *   （`emptyFakeSite`、以及那几条装插件的用例），而漏掉这一句的症状是：从那条
  *   用例起，后面的会话用例拿仓库里那棵真树去跑作业侧，红在"起不来"上。
  */
@@ -250,11 +250,11 @@ function resetFixture() {
 }
 
 /**
- * 收尾：**把夹具恢复成缺省**，并复位假后端。
+ * 收尾：把夹具恢复成缺省，并复位假后端。
  *
- * ★ 这个函数是唯一允许动站点池收尾的地方。**不许裸着写
+ * 这个函数是唯一允许动站点池收尾的地方。**不许裸着写
  *   `fs.rmSync(idx._test.getSitePoolDir(), …)`** —— 删完不恢复的话，从那条用例起
- *   后面**所有**会话用例都会红在"没有可以提交的服务"上，而失败点离夹具十万八千里。
+ *   后面所有会话用例都会红在"没有可以提交的服务"上，而失败点离夹具十万八千里。
  */
 function cleanupSiteState(idx) {
   resetFixture();
@@ -267,7 +267,7 @@ function idxLoaded() {
 }
 
 /**
- * 在台账里记一条"用户同意过这一份"。摘要**从磁盘上那棵树**算 —— 与闸门那一趟
+ * 在台账里记一条"用户同意过这一份"。摘要从磁盘上那棵树算 —— 与闸门那一趟
  * 算的是同一棵树（分两处算的话，公式一漂，症状是"插件明明装着却要重新同意"）。
  */
 function trustSitePlugin(dir, id, version) {
@@ -283,10 +283,10 @@ function trustSitePlugin(dir, id, version) {
 }
 
 /**
- * 往**站点池**里放一份插件，并（默认）记一条台账 —— 于是它立刻可用。
+ * 往站点池里放一份插件，并（默认）记一条台账 —— 于是它立刻可用。
  *
- * ★ 摆的是 v0.13 那个形状（`<id>_<版本>/` **加旁边那张记录表**）。要造 §5.1 说的
- *   **非法**形状（`<池>/<任意名>/plugin.json`）不要用这个函数 —— 那条用例自己摆，
+ * 摆的是 v0.13 那个形状（`<id>_<版本>/` 加旁边那张记录表）。要造 §5.1 说的
+ *   非法形状（`<池>/<任意名>/plugin.json`）不要用这个函数 —— 那条用例自己摆，
  *   因为"摆错了会发生什么"正是它要测的东西。
  *
  * `trust: false` 用来造"有内容、但用户没同意过"的现场（§5.2 那条要用）。
@@ -310,14 +310,14 @@ function putSitePlugin({ id, name, version = '1.0.0', over = {}, clientSrc, trus
 }
 
 /**
- * 往池里摆一份**已提交的槽位**（v0.13 的形状：`<id>_<版本>/` + `<id>_<版本>.json`）。
+ * 往池里摆一份已提交的槽位（v0.13 的形状：`<id>_<版本>/` + `<id>_<版本>.json`）。
  *
- * ★ 记录表由**生产代码**的形状摆出来：逐份 `path/size/sha256` 从**磁盘上那棵树**
+ * 记录表由生产代码的形状摆出来：逐份 `path/size/sha256` 从磁盘上那棵树
  *   算（与注册表、与对账算的是同一棵树），`envelope: null` = 这一份没有签名。
- *   ★ 为什么不拿打包器现打一个真包来取记录表：这些夹具摆的是"盘上已经有一份"，
- *   不是"刚从站点取回来"；而**有签名**那条路由 `app:syncPlugins` 那些用例覆盖
- *   （它们走的是真下载）。★ 但**形状**不能省：记录表是提交点，少了它这一份
- *   在注册表眼里**不存在** —— 那时红的会是一堆与夹具无关的用例。
+ * 为什么不拿打包器现打一个真包来取记录表：这些夹具摆的是"盘上已经有一份"，
+ *   不是"刚从站点取回来"；而有签名那条路由 `app:syncPlugins` 那些用例覆盖
+ *   （它们走的是真下载）。但形状不能省：记录表是提交点，少了它这一份
+ *   在注册表眼里不存在 —— 那时红的会是一堆与夹具无关的用例。
  */
 function writeFixtureRecord(root, dir, id, version) {
   const P = require('../src/main/plugins/index.js');
@@ -331,7 +331,7 @@ function writeFixtureRecord(root, dir, id, version) {
   return dir;
 }
 
-/** 池里一个槽位的树在哪。 ★ 走生产代码算路径，不在用例里拼一遍命名规则。 */
+/** 池里一个槽位的树在哪。走生产代码算路径，不在用例里拼一遍命名规则。 */
 const poolTreeOf = (sitePool, id, version) =>
   require('../src/main/plugin-slot.js').treeDirOf(sitePool, id, version);
 
@@ -346,9 +346,9 @@ function dropSlot(sitePool, id, version) {
   fs.rmSync(SLOT.treeDirOf(sitePool, id, version), { recursive: true, force: true });
 }
 
-// 全套件的缺省：两个插件都装着，而且**都过了同意闸**。
+// 全套件的缺省：两个插件都装着，而且都过了同意闸。
 setSitePlugins(SAMPLE_PLUGINS);
-// ★ 而**站点那一侧**是另一件事：它给的是真实文件，客户端那一半逐字来自仓库那两棵，
+// 而站点那一侧是另一件事：它给的是真实文件，客户端那一半逐字来自仓库那两棵，
 //   只有作业侧换成了本机跑得起来的一份（见 buildFixtureSiteTree）。谁把它指过去，
 //   见 `before()` 与 `resetFixture()`。
 buildFixtureSiteTree(SAMPLE_PLUGINS);
@@ -358,7 +358,7 @@ const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], 
   /** 被 `clearStorageData()` 清过的 partition，按先后顺序。 */
   cleared: [],
   /**
-   * 假的鼠标位置（屏幕坐标）。用例直接改它 —— 浮窗的收起判据是**几何**的
+   * 假的鼠标位置（屏幕坐标）。用例直接改它 —— 浮窗的收起判据是几何的
    * （见 windows.js 的 `_startCursorWatch`），所以"鼠标走开了"这件事只能这样造：
    * 没有别的事件可以触发它，那正是它不用 `mouseleave` 的理由。
    */
@@ -440,9 +440,9 @@ const P = require('../src/main/plugins/index.js');
 
 const electronStub = {
   app: {
-    // ★ `sessionData` 必须**显式**支持：Electron 里"分区目录住在哪儿"问的就是它
-    //   （`DIR_SESSION_DATA` + `Partitions`），而它的默认值**就是** `userData`
-    //   ——没人调过 `app.setPath`。这个桩若对认不得的键**静默**返回 `fakeHome`：
+    // `sessionData` 必须显式支持：Electron 里"分区目录住在哪儿"问的就是它
+    //   （`DIR_SESSION_DATA` + `Partitions`），而它的默认值就是 `userData`
+    //   ——没人调过 `app.setPath`。这个桩若对认不得的键静默返回 `fakeHome`：
     //   于是 `app.getPath('sessionData')` 拿到一个和分区毫无关系的目录，而症状是
     //   "本机的插件数据"那一块永远列不出东西（不报错，只是空）。
     getPath: (k) => ((k === 'userData' || k === 'sessionData') ? userData : fakeHome),
@@ -474,15 +474,15 @@ const electronStub = {
         cookies: {
           get: async ({ name }) => (jar.has(name) ? [{ name, value: jar.get(name) }] : []),
         },
-        // 回收一个工作区之后的卫生清理。★ 桩里若**没有**这个方法，那条路就会
+        // 回收一个工作区之后的卫生清理。桩里若没有这个方法，那条路就会
         // 每次都抛进 catch 里变成一条没人看的警告 —— 而"清理"正是最容易做错的一格
         // （清错一个分区就是把用户当前那份数据抽掉）。
         //
-        // ★ 顺手把 jar 也清掉。不清的话，「删掉之后那份数据还在」这个**真机症状**
+        // 顺手把 jar 也清掉。不清的话，「删掉之后那份数据还在」这个真机症状
         //   在桩里根本不存在（登录仍然是登录、布局仍然是布局）—— 于是一整类错误
         //   测不出来，而"删了却还在"正是最该被测到的那一类。
         clearStorageData: async () => { calls.cleared.push(partition); jar.clear(); },
-        // 分区在磁盘上的目录。★ 名字是**折叠过**的（`MakePartitionName`，见
+        // 分区在磁盘上的目录。名字是折叠过的（`MakePartitionName`，见
         // plugin-data.js 的文件头）—— 桩要如实模拟这一步，否则"拿分区名直接拼路径"
         // 这种错在测试里永远是绿的。
         getStoragePath: () => path.join(userData, 'Partitions',
@@ -504,14 +504,14 @@ const electronStub = {
     encryptString: () => { throw new Error('不该被调用'); },
     decryptString: () => { throw new Error('不该被调用'); },
   },
-  // 只有浮窗的收起判据用得到它。★ 桩里如果**没有** `screen`，`windows.js`
+  // 只有浮窗的收起判据用得到它。桩里如果没有 `screen`，`windows.js`
   //   一 require 就拿到 undefined，而它只在"浮窗开着"时才被调用 ——
   //   于是缺了这一格的表现是"测试全绿，真机上停靠一次就崩"。补上。
   screen: { getCursorScreenPoint: () => ({ x: calls.cursor.x, y: calls.cursor.y }) },
   shell: { openExternal: async () => {} },
   // `showMessageBox` 只被「有会话在跑就别重启」那一条用得到；`showOpenDialog`
   // 只在用例自己把它换掉之后才有人调（见「安装插件…」那一组）—— 这里给一个
-  // **默认的"用户按了取消"**，于是忘了换的用例不会卡在一个 undefined 上，
+  // 默认的"用户按了取消"，于是忘了换的用例不会卡在一个 undefined 上，
   // 而是走到"选空了"那一条（恰好是真实用户最常见的那一下）。
   dialog: {
     showMessageBox: async () => ({ response: 2 }),
@@ -528,26 +528,26 @@ Module._load = function (request, ...rest) {
 
 // ── 让这次启动进开发者模式 ────────────────────────────────────────────────
 //
-// ★ **写的是产品那条路。** 开发者模式是 `<userData>/dev-mode.json` 里的一个设置，
+// 写的是产品那条路。开发者模式是 `<userData>/dev-mode.json` 里的一个设置，
 //   界面上的开关写的是同一个文件。于是这一句与"用户在界面上勾了一下、然后重启"
-//   **是同一件事**，而不是给测试单开的一条路。
+//   是同一件事，而不是给测试单开的一条路。
 //
-// ★ 必须在 `require` index.js **之前**写：那个文件在模块加载期只读一次。
+// 必须在 `require` index.js 之前写：那个文件在模块加载期只读一次。
 fs.writeFileSync(path.join(userData, 'dev-mode.json'),
   JSON.stringify({ developerMode: true }, null, 2));
 // 把「等待登记」压到 200ms，好在测试里走到 running 态。真实后端不读这个。
 process.env.SLURMATE_DEV_ENROLL_MS = '200';
 
 /**
- * ★★ 假站点那棵**样例树**指向夹具（见 `buildFixtureSiteTree`）。
+ * 假站点那棵样例树指向夹具（见 `buildFixtureSiteTree`）。
  *
- * 必须在**第一条用例之前**、而且要在 index.js 起来之后：
+ * 必须在第一条用例之前、而且要在 index.js 起来之后：
  *   · 文件顶层那时 index.js 还没加载（它的 `_test` 不存在，硬 require 它会在一个
  *     没有 electron 的环境里启动整个客户端 —— 见 `setSitePlugins` 那一段）；
  *   · 而 `setSitePlugins` 里那一句只在"已经加载过"时才生效，第一条用例之前没人
  *     加载过它。
  *
- * ★ 只此一处：指过来之后，**换回来**由 `setSitePlugins` 负责（每条用例的收尾都会
+ * 只此一处：指过来之后，换回来由 `setSitePlugins` 负责（每条用例的收尾都会
  *   走到它）。整个套件里"样品树在哪"只有一个答案。
  */
 before(() => {
@@ -567,7 +567,7 @@ setInterval(() => console.error('PROBE', Date.now() - T0), 2000).unref?.();
 /**
  * 收尾。
  *
- * 必须把假后端关掉 —— 它**真的起了几个进程**（每一条会话一个作业侧，每个都在
+ * 必须把假后端关掉 —— 它真的起了几个进程（每一条会话一个作业侧，每个都在
  * 监听一个端口），不关的话 `node --test` 会一直等它们退出，整个套件就挂住了
  * （表现为：本文件的用例全过，然后没有 summary、没有退出）。
  */
@@ -598,7 +598,7 @@ const invoke = (ch, ...args) => {
 /**
  * ── 多开之后用例要用的三个小工具 ───────────────────────────────────────────
  *
- * ★ 会话不再是"那一个"，而是**一张表**。这些用例绝大多数时候只有一条会话，
+ * 会话不再是"那一个"，而是一张表。这些用例绝大多数时候只有一条会话，
  *   所以这里把"唯一那一条"的取法收成三个函数 —— 而不是让每条断言各写一遍
  *   `[...map.values()][0]`（写错了不会报错，只会取到 undefined 然后断言以错误的
  *   理由变绿）。
@@ -614,7 +614,7 @@ const occupiedOf = (idx, slot) => {
   return Boolean(r) && r.controller
     && !['ended', 'error', 'idle', 'releasing'].includes(r.controller.state);
 };
-/** **某一个槽**那块视图（多开用例要按槽取，不能拿"唯一那一块"）。 */
+/** 某一个槽那块视图（多开用例要按槽取，不能拿"唯一那一块"）。 */
 const viewFor = (w, slot) => {
   const it = w.surfaces.get(slot);
   return it ? it.view : null;
@@ -632,17 +632,17 @@ const frontSnap = async () => {
   const hit = (r.sessions || []).find((x) => x.slot === r.front);
   return (hit && hit.snap) || null;
 };
-/** 前台那一条的槽 —— **停会话必须指名**，不收名字的 stop 会被拒绝。 */
+/** 前台那一条的槽 —— 停会话必须指名，不收名字的 stop 会被拒绝。 */
 const frontSlotOf = async () => {
   const r = await invoke('app:states');
   return r.front;
 };
 /**
- * 作业列表里**还活着**的那些。
+ * 作业列表里还活着的那些。
  *
- * ★ 为什么要有这一条糖：`op:list` 返回的是**服务端记着的每一行**，包括已经结束、
+ * 为什么要有这一条糖：`op:list` 返回的是服务端记着的每一行，包括已经结束、
  *   还没被 `released_keep` 回收的那些（照实说：真守护进程也是这样，那一行要留
- *   一阵子）。所以 `jobs[0]` 完全可能是上一次用例留下的**已结束**那一条 ——
+ *   一阵子）。所以 `jobs[0]` 完全可能是上一次用例留下的已结束那一条 ——
  *   直接取下标，红的理由会和想验的事情毫无关系。
  */
 const liveJobs = (r) => ((r && r.jobs) || []).filter((j) => j.live);
@@ -652,22 +652,22 @@ const noticesOf = () =>
   (calls.windows[0] && calls.windows[0].webContents.handlers['send:ui:notice']) || [];
 
 /**
- * 把连接表收成**只剩 demo 那一条**（并把它设为活跃）。
+ * 把连接表收成只剩 demo 那一条（并把它设为活跃）。
  *
- * ★ 阶段 5 那几条用例的前提是「**最后一条**用某个工作区的连接」—— 而连接表是
- *   **跨用例共享**的（同一个进程、同一份开发者模式配置）。少了这一步，上一条用例
+ * 阶段 5 那几条用例的前提是「最后一条用某个工作区的连接」—— 而连接表是
+ *   跨用例共享的（同一个进程、同一份开发者模式配置）。少了这一步，上一条用例
  *   留下的连接会让"最后一条"这个前提不成立，而失败信息看着像清理逻辑坏了。
  */
 /**
- * **用户自己配的**那些连接 —— 不含开发者模式内置的那一条。
+ * 用户自己配的那些连接 —— 不含开发者模式内置的那一条。
  *
- * ★ 条数断言必须走它。写成 `connections.length` 的话，每条用例都要手工把那一条算进去
+ * 条数断言必须走它。写成 `connections.length` 的话，每条用例都要手工把那一条算进去
  *   （算漏一处就是一条看运气的红），而"用户配了几条"这件事本身就与那条结构性的连接
  *   无关 —— 这份文件里几乎所有条数断言想说的都是前者。
  */
 const mine = (list) => (list || []).filter((c) => !c.builtin);
 
-/** 收尾：把**用户自己配的**连接删干净。内置那条留着（它删不掉，也不该删）。 */
+/** 收尾：把用户自己配的连接删干净。内置那条留着（它删不掉，也不该删）。 */
 async function dropMyConnections() {
   for (const c of mine((await invoke('app:bootstrap')).connections)) {
     await invoke('app:deleteConnection', c.id);
@@ -679,7 +679,7 @@ async function onlyDemoConnection(idx) {
   const demo = (cfg.connections || []).find((c) => c.builtin);
   assert.ok(demo, '夹具前提：开发者模式里应当有一条内置的假连接');
   for (const c of [...cfg.connections]) {
-    // ★ 内置那条**跳过**：主进程会拒掉它的删除（它删不掉），而它本来就该留着 ——
+    // 内置那条跳过：主进程会拒掉它的删除（它删不掉），而它本来就该留着 ——
     //   它不是"上一条用例留下的残留"，是开发者模式的结构。
     if (c.id === demo.id) continue;
     const r = await invoke('app:deleteConnection', c.id);
@@ -690,12 +690,12 @@ async function onlyDemoConnection(idx) {
 }
 
 /**
- * 收成「只剩**一条用户自己的**连接」（内置那条当然还在）。返回那条用户连接。
+ * 收成「只剩一条用户自己的连接」（内置那条当然还在）。返回那条用户连接。
  *
- * ★ 从前这一段就是 `onlyDemoConnection` —— 但内置那条**删不掉**（主进程会拒，
+ * 从前这一段就是 `onlyDemoConnection` —— 但内置那条删不掉（主进程会拒，
  *   那正是要测的一件事），而下面那几条用例要的恰恰是"把这条连接删掉，看它的工作区
- *   与数据跟着走"。⇒ 内置那条留着不管，另建一条用户连接当"那一条"。
- * ★ 它落在**自己**的工作区里：`defaultWorkspaceFor` 不把内置那条算作候选
+ *   与数据跟着走"。，内置那条留着不管，另建一条用户连接当"那一条"。
+ * 它落在自己的工作区里：`defaultWorkspaceFor` 不把内置那条算作候选
  *   （见那里的注释），所以这不是"恰好"，是那条规则的结果。
  */
 async function onlyMyConnection(idx) {
@@ -728,28 +728,28 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
   assert.ok((win.webContents.handlers['send:session:states'] || []).length >= 1,
     '应当向面板推过状态');
 
-  // ★★ v0.9：**启动不自动连。**
+  // v0.9：启动不自动连。
   //
-  //   这一条必须查在**这里** —— 这个文件里所有用例共用同一个进程，后面的用例
+  //   这一条必须查在这里 —— 这个文件里所有用例共用同一个进程，后面的用例
   //   都会自己连上，那时再查就查不出"启动那一刻连没连"了。而它是这一整版最
-  //   要紧的一条行为：接管必须是**用户的一个动作**，不能是打开客户端的副作用。
+  //   要紧的一条行为：接管必须是用户的一个动作，不能是打开客户端的副作用。
   const idx = require('../src/main/index.js');
   assert.equal(idx._test.getBackend().connected, false,
     '★ 启动之后后端必须**没有**被连上（从前 announceBackend 的最后一句就是 doConnect）');
   assert.equal((await invoke('app:states')).sessions.length, 0,
     '启动时不该有任何会话被接回来');
-  // ★ 开发者模式里，连接表**启动时就已经有内置的那一条**了（播种在 main() 里，
+  // 开发者模式里，连接表启动时就已经有内置的那一条了（播种在 main() 里，
   //   见 `ensureBuiltinDevConnection`）—— 它不是"下面哪条用例留下的"。
   const seed = (await invoke('app:bootstrap')).connections;
   assert.equal(seed.length, 1, '前置：沙盒里只有内置的那一条');
   assert.equal(seed[0].builtin, true, '而它就是内置的那条假连接');
   assert.ok(seed[0].workspaceId, '★ 它必须**播种时就落进一个工作区** —— '
     + '留 null 会被 loadWorkspaces 收束掉，而那条连接下一次启动就没了');
-  // ★ 活跃那一格也要收好：`loadConfig` 是在这条连接还不存在的时候跑的，播种不补的话
+  // 活跃那一格也要收好：`loadConfig` 是在这条连接还不存在的时候跑的，播种不补的话
   //   `cfg` 会停在「有一条连接、却没有活跃连接」这个半截状态里。
   assert.equal((await invoke('app:bootstrap')).activeConnectionId, seed[0].id,
     '★ 播种要顺手把活跃连接设成它（列表里唯一的一条）');
-  // ★ 旁证：整条启动路径上一次 `connect` 都没发生 —— 界面收到的通知里
+  // 旁证：整条启动路径上一次 `connect` 都没发生 —— 界面收到的通知里
   //   不该有那一句（它只在 handleConnectResult 里推）。
   assert.equal(noticesOf().some((n) => /已连接：/.test(n.text || '')), false,
     '★ 启动这一路上不许有过一次成功的连接');
@@ -763,7 +763,7 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
                     // 一律彻底终止（取消作业 + 释放资源），不留下还在烧的作业
                     'app:disconnect',
-                    // ★ 与断开**方向相反**的那一个：它只放开看护者，
+                    // 与断开方向相反的那一个：它只放开看护者，
                     // 作业继续在集群上跑。少了这个通道，界面上那颗按钮点了没反应。
                     'app:leave',
                     // 密钥与主机密钥。生成只有两个入口：「新建」时的 app:newKey，
@@ -781,13 +781,13 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 切走一个「独占」的工作区会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
                     'app:setConnectionWorkspace', 'app:renameWorkspace',
-                    // 开发者模式那一个设置动词 + 重启。它们的**行为**在
+                    // 开发者模式那一个设置动词 + 重启。它们的行为在
                     // devmode.test.mjs 里验（那个文件跑的是"关着"那一半：这个文件
                     // 整个跑在"开着"那一半里）；这里只查通道在不在 —— 这台机器上
                     // 界面上那几个控件就指着它们。
-                    // ★ 从前这里还有「选/清假站点的插件来源」两个通道 —— 整条删掉了
+                    // 从前这里还有「选/清假站点的插件来源」两个通道 —— 整条删掉了
                     //   （站上的插件只有装上去这一条路），devmode.test.mjs 有一条
-                    //   断言它们**不在**。
+                    //   断言它们不在。
                     'app:setDeveloperMode', 'app:restart']) {
     assert.ok(calls.ipc.has(ch), `缺少 IPC 通道 ${ch}`);
   }
@@ -798,17 +798,17 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
 });
 
 test('★★ 启动那一路上一次 `doConnect` / `backend.connect` 都不许有', () => {
-  // ★★ 为什么这条只能查源码：**真后端那一支在开发者模式里够不着。**
+  // 为什么这条只能查源码：真后端那一支在开发者模式里够不着。
   //   `announceBackend()` 第一句就是"假后端 → 只推通知、直接返回"，所以开发者
   //   模式永远走不到下面那一段（`const conn = config.activeConnection(cfg)`）。
   //   上面那条用例能验的是"假后端启动时没被 connect"，而"真后端启动时不会连上
-  //   上次那条"是**行为上验不了**的一格。
+  //   上次那条"是行为上验不了的一格。
   //
-  //   这确实是弱判据（"源码里有没有这个词"），所以把范围收窄到**这个函数体**、
+  //   这确实是弱判据（"源码里有没有这个词"），所以把范围收窄到这个函数体、
   //   把两个词都列上：`doConnect(` 在别的函数里到处都是（`app:connect`、
   //   `app:trustHostKey`），不收紧的话它是一条永远绿的空断言。
   //
-  //   ★ 这一格的诚实说法是：**它是"不许再写回去"的封印，不是"它确实不连"的证明。**
+  //   这一格的诚实说法是：它是"不许再写回去"的封印，不是"它确实不连"的证明。
   //     要真的验它，得有一台真集群（或一个能演真后端的桩）——那属于账本里
   //     「从未实测过」那一类。
   const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
@@ -826,8 +826,8 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   assert.equal(b.dev, true);
   assert.equal(b.secureStorageAvailable, false);
   assert.equal(b.backendLabel, '本地模拟站点');
-  // ★ 这里断言的是**同一件事**，只是写法跟着结构性那一行变了：源码里**不许**烙进
-  //   任何真集群的地址。从前查的是"一条连接都没有"，现在是"**恰好**只有内置的那一条，
+  // 这里断言的是同一件事，只是写法跟着结构性那一行变了：源码里不许烙进
+  //   任何真集群的地址。从前查的是"一条连接都没有"，现在是"恰好只有内置的那一条，
   //   而它的地址是留白的那个"—— 后者更强：它连"顺手多塞一条真地址进来"也一起挡住。
   assert.ok(Array.isArray(b.connections), 'connections 必须是数组');
   assert.equal(b.connections.length, 1, '沙盒里应当恰好有内置的那一条');
@@ -850,7 +850,7 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
   assert.equal(seed.host, '127.0.0.1');
   assert.ok(seed.workspaceId, '它要落在**自己**的工作区里');
 
-  // ① 改不了 —— 主进程是**权威**（界面上那颗「编辑」压根不画，不是画成禁用的）
+  // ① 改不了 —— 主进程是权威（界面上那颗「编辑」压根不画，不是画成禁用的）
   const edited = await invoke('app:saveConnection',
     { id: seed.id, user: 'nobody', host: '203.0.113.9', port: 10100 });
   assert.equal(edited.ok, false);
@@ -858,13 +858,13 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
   assert.match(edited.error, /内置/, '要说清为什么改不了，而不是一句"失败了"');
 
   // ①′ 照着旧文档手填的那个地址也一样拒 —— 两条同地址在界面上是两行一模一样的东西，
-  //     而其中一行不可删。它**由播种顶掉**（见 `ensureBuiltinDevConnection`），不并存。
+  //     而其中一行不可删。它由播种顶掉（见 `ensureBuiltinDevConnection`），不并存。
   const sameAddr = await invoke('app:saveConnection',
     { user: 'demo', host: '127.0.0.1', port: 1 });
   assert.equal(sameAddr.ok, false);
   assert.equal(sameAddr.code, 'builtin');
 
-  // ①″ 而**自己带一个 `builtin: true` 提交**也没用：它存得上（就是一条普通连接），
+  // ①″ 而自己带一个 `builtin: true` 提交也没用：它存得上（就是一条普通连接），
   //     但那个字段进门就被剥掉了 —— 用户提交的字段里不许有一个能改结构位的开关。
   const forged = await invoke('app:saveConnection',
     { user: 'mallory', host: '203.0.113.11', port: 10100, builtin: true });
@@ -874,7 +874,7 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
   assert.equal((await invoke('app:deleteConnection', forged.connection.id)).ok, true,
     '而它删得掉 —— 造出来的不是内置那条');
 
-  // ② 删不掉。★ 而**它还在** —— 只判"返回了 false"的话，一个"删了但报了错"的实现
+  // ② 删不掉。而它还在 —— 只判"返回了 false"的话，一个"删了但报了错"的实现
   //    照样绿，那比不判更坏。
   const del = await invoke('app:deleteConnection', seed.id);
   assert.equal(del.ok, false);
@@ -883,11 +883,11 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
     '★ 拒绝归拒绝，那一条必须原样还在');
 
   // ③ 探不了：它是本机的假站点，"可达 / 不可达"两边都是假话。
-  //   连接表里此刻**只有**它 ⇒ 探测结果必须是**空的**。
+  //   连接表里此刻只有它，探测结果必须是空的。
   assert.deepEqual(await invoke('app:probeHosts'), [],
     '★ 内置那条不许进探测结果 —— 探出来那句话两边都是假的');
 
-  // ④ ★★ 而**其余操作完全相同**：能设为活跃、能连上，连上之后那个「测试延迟」
+  // ④ 而其余操作完全相同：能设为活跃、能连上，连上之后那个「测试延迟」
   //    如实说探不了（而不是编一个毫秒数）。
   await invoke('app:setActiveConnection', seed.id);
   assert.equal((await invoke('app:bootstrap')).activeConnectionId, seed.id,
@@ -898,13 +898,13 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
   assert.equal(p.ok, false);
   assert.match(p.error, /本机/, '要说"这是本机的假站点"，不是一句笼统的失败');
 
-  // ⑤ ★ 内置那条**不要密钥**：假后端不做认证，为它造一把私钥只会把用户打发去
+  // ⑤ 内置那条不要密钥：假后端不做认证，为它造一把私钥只会把用户打发去
   //   IDM 注册一把没有任何用处的公钥（那句提示只在"刚生成"时推）。
   const said = noticesOf().slice(saidBefore).map((n) => n.text || '').join('\n');
   assert.equal(/注册到你的 IDM/.test(said), false,
     `★ 不许为内置那条造密钥：${said}`);
 
-  // ⑥ ★★ 连上假站点之后，窗口标题**仍然是**开发者模式那一句 —— 它是三重互锁的
+  // ⑥ 连上假站点之后，窗口标题仍然是开发者模式那一句 —— 它是三重互锁的
   //   第二重，而"连上的那一刻把标注抹掉"正是它唯一要防的事（`user@host` 印在标题
   //   栏上，看起来与真集群一模一样）。
   const last = calls.titles[calls.titles.length - 1];
@@ -913,8 +913,8 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
     '★ 假站点那条路上标题不许被写成 user@host');
   assert.equal((await invoke('app:disconnect')).ok, true);
 
-  // ⑦ ★ 沙盒里从前照着文档手填的那一条（**同一个地址**、不带 `builtin`）——
-  //   播种要**顶掉它**，而不是留下两行一模一样的东西（其中一行还不可删）。
+  // ⑦ 沙盒里从前照着文档手填的那一条（同一个地址、不带 `builtin`）——
+  //   播种要顶掉它，而不是留下两行一模一样的东西（其中一行还不可删）。
   //   `0.y` 不考虑兼容性：那条旧记录没有存在的理由。
   const cfg = idx._test.getCfg();
   cfg.connections = [...cfg.connections, {
@@ -941,17 +941,17 @@ test('★★ 点开「新建」密钥就已经生成好了，而且**每点一�
   assert.equal(fs.existsSync(path.join(userData, 'dev-sandbox', 'secrets.json')), false,
     '一个字节都不该落盘');
 
-  // ★★ **再问一次必须是一把新的。** 它从前是复用的（"用户可能已经把它注册到 IDM
+  // 再问一次必须是一把新的。它从前是复用的（"用户可能已经把它注册到 IDM
   //    了"），而那条理由的代价是：点两次「新建」拿到两把一模一样的钥匙，而界面上
-  //   除了这个按钮**没有别的地方**能要一把干净的 —— 新建表单里那个「重新生成密钥」
+  //   除了这个按钮没有别的地方能要一把干净的 —— 新建表单里那个「重新生成密钥」
   //    按钮，除了补这一刀没有别的用处。用户 2026-10-09 定的规矩是：
   //    「新建」永远给一把新的，只有已经保存的连接才留住自己的密钥。
   const again = await invoke('app:newKey');
   assert.notEqual(again.key.publicKey, r.key.publicKey,
     '再点一次「新建」必须换一把新的，不许复用上一把');
 
-  // ★ 也不许把上一把留在「新建位」上：先删后建，那个位上永远只有最后一把
-  //   （留着的话，`app:saveConnection` 过户的可能是**更早**那一把）。
+  // 也不许把上一把留在「新建位」上：先删后建，那个位上永远只有最后一把
+  //   （留着的话，`app:saveConnection` 过户的可能是更早那一把）。
   const pub = await invoke('app:publicKey');
   assert.equal(pub.key.publicKey, again.key.publicKey,
     '「新建位」上只能是最后生成的那一把');
@@ -980,7 +980,7 @@ test('★ 没有安全存储时，重新生成密钥要明确报告「存不下�
 test('★ 密钥按连接隔离：新建那条拿走「新建位」的钥匙，别的连接不受影响', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // 「新建」时用户已经把公钥复制去 IDM 注册了 —— 保存时必须**原样**把那把交出去
+  // 「新建」时用户已经把公钥复制去 IDM 注册了 —— 保存时必须原样把那把交出去
   const pending = (await invoke('app:newKey')).key;
   const a = await invoke('app:saveConnection', { user: 'alice', host: '198.51.100.10', port: 10100 });
   assert.equal(a.ok, true);
@@ -1021,12 +1021,12 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(bad.ok, false);
 
   const b = await invoke('app:bootstrap');
-  // ★ `mine()` 是"用户自己配的那些" —— 内置那条假连接不算（见它的定义处）。
+  // `mine()` 是"用户自己配的那些" —— 内置那条假连接不算（见它的定义处）。
   assert.equal(mine(b.connections).length, 1);
   assert.equal(mine(b.connections)[0].host, '198.51.100.10');
-  // ★ 「新建的第一条自动成为活跃连接」这条规矩现在由**内置那条在播种时**用掉
+  // 「新建的第一条自动成为活跃连接」这条规矩现在由内置那条在播种时用掉
   //   （沙盒里第一次有连接就是它）—— 所以这里不再断言 alice 变成活跃。而活跃那一格
-  //   必须指向一条**真的存在**的连接：悬空的 id 正是这条规矩坏掉的样子。
+  //   必须指向一条真的存在的连接：悬空的 id 正是这条规矩坏掉的样子。
   assert.equal(b.connections.some((c) => c.id === b.activeConnectionId), true,
     '活跃连接必须指向一条真的存在的连接，不能悬空');
 
@@ -1034,11 +1034,11 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   const onDisk = JSON.parse(
     fs.readFileSync(path.join(userData, 'dev-sandbox', 'config.json'), 'utf8'));
   assert.equal(mine(onDisk.connections).length, 1);
-  // ★ 而内置那条**也落了盘** —— 它要是只在内存里，重启之后沙盒就又空了。
+  // 而内置那条也落了盘 —— 它要是只在内存里，重启之后沙盒就又空了。
   assert.equal(onDisk.connections.some((c) => c.builtin === true), true,
     '内置那条必须真的写进沙盒的 config.json');
 
-  // ★ 相同条目检测：界面上的「保存并连接」不改任何字段再点一次，
+  // 相同条目检测：界面上的「保存并连接」不改任何字段再点一次，
   //   绝不能又冒出一条 —— 用户看到的是列表越点越长，而分不清该点哪条。
   const again = await invoke('app:saveConnection',
     { user: 'alice', host: '198.51.100.10', port: 10100 });
@@ -1048,7 +1048,7 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
   assert.equal(again.connection.id, saved.connection.id, '必须复用同一个 id');
   assert.equal(again.connection.label, '内网', '复用不得把已有的备注冲掉');
 
-  // ★ 编辑时把地址改成另一条已有的 —— 拒绝，而不是留下两条同身份、各带一把密钥的
+  // 编辑时把地址改成另一条已有的 —— 拒绝，而不是留下两条同身份、各带一把密钥的
   const other = await invoke('app:saveConnection',
     { user: 'alice', host: '203.0.113.7', port: 10100 });
   const clash = await invoke('app:saveConnection',
@@ -1069,31 +1069,31 @@ test('连接条目：新增 / 设为活动 / 删除，且落盘', async (t) => {
 test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选的那一条', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // ── 第一条连接：没有任何可参照的 ⇒ 新建一个空白工作区 ──
+  // ── 第一条连接：没有任何可参照的，新建一个空白工作区 ──
   const a = await invoke('app:saveConnection',
     { user: 'alice', host: '198.51.100.10', port: 10100 });
   assert.equal(a.ok, true);
   const aWs = a.connection.workspaceId;
   assert.ok(aWs, '第一条连接也要落在一个工作区里');
-  // ★★ 而它**不许落进内置那条的工作区**。工作区的含义是"这几条连接算同一个站点"
+  // 而它不许落进内置那条的工作区。工作区的含义是"这几条连接算同一个站点"
   //   （一份浏览器存储、一份 origin），而内置那条指向的是本机的假站点 —— 与用户
-  //   真正要连的集群是两个站点。落进去的后果很具体：那个工作区从此**永远收不掉**
+  //   真正要连的集群是两个站点。落进去的后果很具体：那个工作区从此永远收不掉
   //   （引用计数永远 ≥1），用户看到的是"删了最后一条连接，数据却还在"。
-  //   ⇒ `defaultWorkspaceFor` 两条规则都不把内置那条当候选（见那里的注释）。
+  //   `defaultWorkspaceFor` 两条规则都不把内置那条当候选（见那里的注释）。
   const seedWs = (await invoke('app:bootstrap')).connections
     .find((c) => c.builtin).workspaceId;
   assert.notEqual(aWs, seedWs,
     '★★ 用户自己的连接不许落进内置那条的工作区 —— 那会让它永远收不掉');
 
-  // ── 同一台机器再加一条（换个账号）：落到**同一个**工作区 ──
-  //   ★ 这是整条规则存在的理由：连同一台集群两次，用户要的是**同一份**编辑器布局
+  // ── 同一台机器再加一条（换个账号）：落到同一个工作区 ──
+  //   这是整条规则存在的理由：连同一台集群两次，用户要的是同一份编辑器布局
   //     与登录状态，不是一张白纸。
   const same = await invoke('app:saveConnection',
     { user: 'bob', host: '198.51.100.10', port: 10100 });
   assert.equal(same.connection.workspaceId, aWs, '同址 ⇒ 同一个工作区');
 
-  // ── 换一台机器：再把活跃连接切到"另一台"上，然后新建一条**回到第一台**的 ——
-  //   默认规则要按**地址**找，而不是按"活跃"。这一格正是两条规则分得开的地方：
+  // ── 换一台机器：再把活跃连接切到"另一台"上，然后新建一条回到第一台的 ——
+  //   默认规则要按地址找，而不是按"活跃"。这一格正是两条规则分得开的地方：
   //   按活跃找的话它会落到 203.0.113.7 那个工作区里，而用户拿到的是一张白纸。
   const far = await invoke('app:saveConnection',
     { user: 'alice', host: '203.0.113.7', port: 10100 });
@@ -1109,12 +1109,12 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.equal(other.connection.workspaceId, far.connection.workspaceId,
     '不认识的地址 ⇒ 跟着活跃连接那个工作区');
 
-  // ── 界面**显式**选一个（表单里的「③ 工作区」）：它赢过默认规则 ──
+  // ── 界面显式选一个（表单里的「③ 工作区」）：它赢过默认规则 ──
   const picked = await invoke('app:saveConnection',
     { user: 'dave', host: '192.0.2.99', port: 10100, workspaceId: aWs });
   assert.equal(picked.connection.workspaceId, aWs);
 
-  // ── 界面要一个新的（`null`）：新建一个空白工作区，**不是**一个已存在的 ──
+  // ── 界面要一个新的（`null`）：新建一个空白工作区，不是一个已存在的 ──
   const before = (await invoke('app:bootstrap')).workspaces.length;
   const fresh = await invoke('app:saveConnection',
     { user: 'erin', host: '192.0.2.98', port: 10100, workspaceId: null });
@@ -1123,7 +1123,7 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.ok(after.some((l) => l.id === fresh.connection.workspaceId));
   assert.notEqual(fresh.connection.workspaceId, aWs);
 
-  // ── 一个**不存在**的工作区：拒，而且不许留下半截改动 ──
+  // ── 一个不存在的工作区：拒，而且不许留下半截改动 ──
   const ghost = await invoke('app:saveConnection',
     { user: 'frank', host: '192.0.2.97', port: 10100, workspaceId: 'wffffffffffff' });
   assert.equal(ghost.ok, false);
@@ -1131,12 +1131,12 @@ test('★★ 新建连接落在哪个工作区：默认规则 + 表单显式选�
   assert.equal((await invoke('app:bootstrap')).connections.some((c) => c.user === 'frank'), false,
     '★ 被拒的那一条不该留在配置里（查存在性必须排在改配置之前）');
 
-  // ── 界面读默认值的那一句查询：与保存时用的是**同一份**规则 ──
+  // ── 界面读默认值的那一句查询：与保存时用的是同一份规则 ──
   const q = await invoke('app:defaultWorkspace', { host: '198.51.100.10', port: 10100 });
   assert.deepEqual(q, { ok: true, workspaceId: aWs },
     '★ 表单显示的默认值就是保存时会落进的那个 —— 两份实现会漂开，而症状是'
     + '「界面说 A、存进去是 B」，两边都不报错');
-  // 一个从没见过的地址：给的是一个具体的工作区（活跃那个）或 null，**不能**是"取不到"
+  // 一个从没见过的地址：给的是一个具体的工作区（活跃那个）或 null，不能是"取不到"
   const q2 = await invoke('app:defaultWorkspace', { host: '192.0.2.250', port: 10100 });
   assert.equal(q2.ok, true);
   assert.equal(q2.workspaceId, far.connection.workspaceId);
@@ -1152,7 +1152,7 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  // 一个**要一份数据**的插件（`ports: 1` ⇒ 它有一份"用哪一份数据"）。
+  // 一个要一份数据的插件（`ports: 1` 它有一份"用哪一份数据"）。
   const id = mintId();
   putSitePlugin({
     id, name: 'space-swap',
@@ -1165,20 +1165,20 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
     return (ws && ws.refs) || {};
   };
   const wsA = (await invoke('app:bootstrap')).connections[0].workspaceId;
-  // 第二条连接**另起一个空工作区**（显式要一个新的），好试"复用别处的"那一支
+  // 第二条连接另起一个空工作区（显式要一个新的），好试"复用别处的"那一支
   const b = await invoke('app:saveConnection',
     { user: 'bob', host: '198.51.100.20', port: 10100, workspaceId: null });
   const wsB = b.connection.workspaceId;
   assert.notEqual(wsB, wsA);
 
-  // ── ① 界面**没表态**（键缺席）⇒ 一个字都不改，也不造数据 ──
+  // ── ① 界面没表态（键缺席），一个字都不改，也不造数据 ──
   const quiet = await invoke('app:setWorkspaceRef', { workspaceId: wsA, pluginId: id });
   assert.equal(quiet.ok, true);
   assert.equal(quiet.droppedOld, false);
   assert.deepEqual(wsRefs(wsA), {}, '★ 没表态不该凭空造出一份数据来');
   assert.equal(quiet.spaces.length, 0);
 
-  // ── ② 另开一份（`null`）⇒ 造一份、指过去 ──
+  // ── ② 另开一份（`null`），造一份、指过去 ──
   const made = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null });
   assert.equal(made.ok, true);
@@ -1186,16 +1186,16 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   assert.ok(s1, '另开一份之后引用表要指着它');
   assert.equal(made.droppedOld, false, '第一次没有"旧的那一份"可删');
 
-  // ── ③ 再另开一份：旧那一份**会被删掉** ⇒ 没确认之前必须拒，且什么都不动 ──
+  // ── ③ 再另开一份：旧那一份会被删掉，没确认之前必须拒，且什么都不动 ──
   const ask = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null });
   assert.equal(ask.ok, false);
   assert.equal(ask.code, 'would_discard');
-  // ★ 这句话要说得**足够**：用户是按它做决定的（不可逆），所以"会被删掉"三个字
+  // 这句话要说得足够：用户是按它做决定的（不可逆），所以"会被删掉"三个字
   //   必须在里面，而不是一句"会影响一些数据"。
   assert.match(ask.error, /会被删掉/);
   assert.equal(wsRefs(wsA)[id], s1, '★ 没确认之前配置一个字都不许动');
-  // 而**没确认时也不许已经把新数据造出来**（次序：先问，后动手）
+  // 而没确认时也不许已经把新数据造出来（次序：先问，后动手）
   const cfg1 = idx._test.getCfg();
   assert.equal(cfg1.spaces.filter((s) => s.pluginId === id).length, 1,
     '★ 被否掉的那一次不该在配置里留下一份没人要的数据');
@@ -1205,26 +1205,26 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   assert.equal(again.ok, true);
   const s2 = wsRefs(wsA)[id];
   assert.notEqual(s2, s1);
-  // ★ 而"删掉了"这件事要**如实**报出来（界面拿它给用户一句话）—— 这一格是事后
+  // 而"删掉了"这件事要如实报出来（界面拿它给用户一句话）—— 这一格是事后
   //   数的，不是把上面那个预判原样返回。
   assert.equal(again.droppedOld, true);
   assert.equal(again.spaces.some((s) => s.id === s1), false, '旧那一份真的不在了');
 
-  // ── ④ 复用**别的工作区**那一份：两个工作区指着同一份数据 ──
+  // ── ④ 复用别的工作区那一份：两个工作区指着同一份数据 ──
   const madeB = await invoke('app:setWorkspaceRef',
     { workspaceId: wsB, pluginId: id, spaceId: null });
   assert.equal(madeB.ok, true);
   const sB = wsRefs(wsB)[id];
-  // ★ 这一句钉的是**最常见的那条起点**：这个工作区还没有这个插件的数据（`oldId`
+  // 这一句钉的是最常见的那条起点：这个工作区还没有这个插件的数据（`oldId`
   //   是 null），而用户要一份新的。少了下面 `null` 那一支的那个判据，这里会返回
-  //   `ok: true` 而**什么都没发生** —— 一个静默的空操作。
+  //   `ok: true` 而什么都没发生 —— 一个静默的空操作。
   assert.ok(sB, '★ 从一个空引用表出发也要真的建出一份来');
   const reuse = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: sB, confirmDiscard: true });
   assert.equal(reuse.ok, true);
   assert.equal(wsRefs(wsA)[id], sB, '★ 指过去了 —— 共用同一份');
   assert.equal(reuse.droppedOld, true, '自己那一份 s2 没人指着了，收掉');
-  // ★ 这一份被**两个**工作区指着 ⇒ 它**必须还在**。这正是"数据与工作区是两层"
+  // 这一份被两个工作区指着，它必须还在。这正是"数据与工作区是两层"
   //   那句话的可执行版本：收的是"没人指着的那一份"，不是"我刚换掉的那一份"。
   assert.equal(reuse.spaces.some((s) => s.id === sB), true);
   const plan = reuse.workspaces;
@@ -1243,8 +1243,8 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   assert.equal(noWs.ok, false);
   assert.match(noWs.error, /工作区不存在/);
 
-  // ★ 一份**别的插件**的数据：拒。指过去之后这个插件会去读写一份路径中间那段
-  //   属于别人的存储 —— 而路径是拼出来的，它**读得通**，只是里面是别人的文件。
+  // 一份别的插件的数据：拒。指过去之后这个插件会去读写一份路径中间那段
+  //   属于别人的存储 —— 而路径是拼出来的，它读得通，只是里面是别人的文件。
   const other = mintId();
   putSitePlugin({
     id: other, name: 'other-space',
@@ -1260,8 +1260,8 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   assert.match(cross.error, /不是这个插件/);
   assert.equal(wsRefs(wsA)[id], sB, '拒了之后引用表一个字都没动');
 
-  // ★ **共享组对不上**的那一份：拒。指过去只会得到"看起来换好了、开会话时又变回
-  //   新的"的假动作 —— 因为 `spaceFor` 发现记着的组与现算的不一致时会**另开一份**。
+  // 共享组对不上的那一份：拒。指过去只会得到"看起来换好了、开会话时又变回
+  //   新的"的假动作 —— 因为 `spaceFor` 发现记着的组与现算的不一致时会另开一份。
   //   这一格够得着：作者改了 `contributes.data.inherit`（或者 `perVersion`）之后，
   //   盘上那一份就永远落在这个判据的"对不上"那一侧。
   idx._test.getCfg().spaces.push(
@@ -1271,18 +1271,18 @@ test('★★ 换一份数据：另开一份 / 复用别处的 / 有会话就拒'
   assert.equal(stale.ok, false);
   assert.match(stale.error, /共享组/);
 
-  // ★ 不要数据空间的插件**没有这一格**（界面根本不会画）。这一句留着是因为
+  // 不要数据空间的插件没有这一格（界面根本不会画）。这一句留着是因为
   //   少了它会给一个永远不会读它的插件凭空造一份数据。
   const noNeed = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: sshdId(), spaceId: null });
   assert.equal(noNeed.ok, false);
   assert.match(noNeed.error, /不要数据空间/);
 
-  // ── ⑥ 这个插件在这个工作区里**正跑着**⇒ 拒（不是提示，是拒）──
+  // ── ⑥ 这个插件在这个工作区里正跑着，拒（不是提示，是拒）──
   //
-  //   ★ 理由：跑着的那一条手里攥着的是**开局那一刻**的那一份。改掉这一格之后它照旧
+  //   理由：跑着的那一条手里攥着的是开局那一刻的那一份。改掉这一格之后它照旧
   //     跑在旧的那一份上，而客户端一重启、`reattachOne` 会按新引用去算分区与数据
-  //     目录 —— 那条作业就**接不回来了**，且看不出为什么。
+  //     目录 —— 那条作业就接不回来了，且看不出为什么。
   await invoke('app:setActiveConnection', (await invoke('app:bootstrap')).connections[0].id);
   const run = await startRunning(idx, 'space-swap');
   const live = await invoke('app:setWorkspaceRef',
@@ -1323,7 +1323,7 @@ test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', asyn
   const wsOf = (connId) =>
     (cfgOf().connections.find((c) => c.id === connId) || {}).workspaceId;
 
-  // ★ 连接表是**跨用例共享**的（同一个进程、同一份开发者模式配置）。不先收干净，
+  // 连接表是跨用例共享的（同一个进程、同一份开发者模式配置）。不先收干净，
   //   上一批用例留下的连接会让"这条工作区有几条连接在用"这个前提不成立 ——
   //   而失败信息看着像分叉逻辑坏了。
   const a = await onlyDemoConnection(idx);
@@ -1331,7 +1331,7 @@ test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', asyn
   assert.equal(cfgOf().connections.filter((c) => c.workspaceId === wsA).length, 1,
     '前提：这条连接一开始独占那张表');
 
-  // 先给这张表建一份数据 —— ★ 要**在第二条连接进来之前**做：那之后这张表就有
+  // 先给这张表建一份数据 —— 要在第二条连接进来之前做：那之后这张表就有
   //   两个共享者了，这一发本身会被 `shared` 拦下（那正是下面要验的东西）。
   const made = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id });
@@ -1339,26 +1339,26 @@ test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', asyn
   const s1 = refsOf(wsA)[id];
   assert.ok(s1, '前提：这个工作区里有这个插件的一份数据');
 
-  // 第二条连接**显式**落进同一个工作区 —— 默认规则做不到这一点（它按地址找同址的）
+  // 第二条连接显式落进同一个工作区 —— 默认规则做不到这一点（它按地址找同址的）
   const b = await invoke('app:saveConnection',
     { user: 'bob', host: '198.51.100.20', port: 10100, workspaceId: wsA });
   assert.equal(b.connection.workspaceId, wsA, '前提：两条连接共用一张表');
   const bId = b.connection.id;
 
-  // ── ① 没表态 scope ⇒ 回 `shared`，而且**配置一个字都不动** ──
-  //   ★ 这一问问的不是"会不会删东西"（那是 would_discard），是**改动会落到谁头上**。
+  // ── ① 没表态 scope，回 `shared`，而且配置一个字都不动 ──
+  //   这一问问的不是"会不会删东西"（那是 would_discard），是改动会落到谁头上。
   //     少了它，用户在这条连接上改一格，另外几条跟着一起变 —— 而它们各自的界面上
   //     什么都没发生，要到下一次开会话才发现自己用了别的数据。
   const ask = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id, confirmDiscard: true });
   assert.equal(ask.ok, false);
   assert.equal(ask.code, 'shared');
-  // ★ 只回 id：名字由界面取（它才有那条"有备注用备注"的规则）
+  // 只回 id：名字由界面取（它才有那条"有备注用备注"的规则）
   assert.deepEqual(ask.others, [bId]);
   assert.match(ask.error, /还有 1 条连接在用/);
   assert.equal(refsOf(wsA)[id], s1, '★ 还没拿定主意之前配置一个字都不许动');
 
-  // ── ② 分叉：先给这条连接复制一张自己的表，在**那张**上改 ──
+  // ── ② 分叉：先给这条连接复制一张自己的表，在那张上改 ──
   const fork = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id,
       scope: 'fork', confirmDiscard: true });
@@ -1370,7 +1370,7 @@ test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', asyn
   assert.equal(refsOf(wsA)[id], s1, '★ 原来那张表的这一格一个字都没动');
   const s2 = refsOf(wsA2)[id];
   assert.ok(s2 && s2 !== s1, '新表里换成了一份新的');
-  // ★★ 而旧那一份**必须还在**：原来那张表还指着它。这一格正是"分叉"与"一起改"
+  // 而旧那一份必须还在：原来那张表还指着它。这一格正是"分叉"与"一起改"
   //    的全部差别 —— 分叉不该顺手把别人正在用的东西删掉。
   assert.equal(fork.spaces.some((s) => s.id === s1), true,
     '★ 分叉把旧那一份删掉的话，另外那条连接脚下的数据就没了');
@@ -1391,17 +1391,17 @@ test('★★ 共用的一张表：分叉 / 一起改 / 指名不了就拒', asyn
   assert.equal(all.droppedOld, true, 's1 现在没人指着了 ⇒ 收掉');
   assert.equal(c.connection.workspaceId, wsA, '前提：第三条也在这张表上');
 
-  // ── ④ 一个人独占一张表时**不问**（没有第二个受影响的人）──
+  // ── ④ 一个人独占一张表时不问（没有第二个受影响的人）──
   const alone = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA2, pluginId: id, spaceId: null, connectionId: a.id, confirmDiscard: true });
   assert.equal(alone.ok, true, '只有一条连接在用 ⇒ 直接改，不弹框');
 
-  // ── ⑤ 分叉要**指名**：答不出来就不许猜 ──
+  // ── ⑤ 分叉要指名：答不出来就不许猜 ──
   const noName = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, scope: 'fork' });
   assert.equal(noName.ok, false);
   assert.match(noName.error, /指名/);
-  // 指了一条**不在这个工作区**的连接：同样拒（拿"谁活跃"去猜的话，这一格会
+  // 指了一条不在这个工作区的连接：同样拒（拿"谁活跃"去猜的话，这一格会
   // 悄悄把活跃那条挪走 —— 而用户按的是另一条连接的插件块）
   const wrongConn = await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, scope: 'fork', connectionId: a.id });
@@ -1440,8 +1440,8 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   const hasWs = (wsId) => cfgOf().workspaces.some((l) => l.id === wsId);
   const hasSpace = (sid) => cfgOf().spaces.some((s) => s.id === sid);
 
-  // ★ 连接表跨用例共享 ⇒ 先把用户那几条收干净，再摆出这一条 `a`。
-  //   ★ 这条**不能**是内置那条：下面要删掉它来看工作区怎么收 —— 而内置那条删不掉
+  // 连接表跨用例共享，先把用户那几条收干净，再摆出这一条 `a`。
+  //   这条不能是内置那条：下面要删掉它来看工作区怎么收 —— 而内置那条删不掉
   //     （那正是要测的一件事）。
   await onlyDemoConnection(idx);
   const aR = await invoke('app:saveConnection',
@@ -1456,7 +1456,7 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   const wsB = b.connection.workspaceId;
   assert.notEqual(wsB, wsA);
 
-  // wA 里建一份，再让 wB **复用**它 ⇒ 一份数据被两个工作区指着
+  // wA 里建一份，再让 wB 复用它，一份数据被两个工作区指着
   await invoke('app:setWorkspaceRef',
     { workspaceId: wsA, pluginId: id, spaceId: null, connectionId: a.id });
   const s1 = refsOf(wsA)[id];
@@ -1465,19 +1465,19 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   assert.equal(reuse.ok, true);
   assert.equal(refsOf(wsB)[id], s1, '前提：两个工作区指着同一份');
 
-  // ── ① 删掉第一条连接 ⇒ wA 那一层收掉，**数据那一层一个字都不动** ──
+  // ── ① 删掉第一条连接，wA 那一层收掉，数据那一层一个字都不动 ──
   const before = noticesOf().length;
   const d1 = await invoke('app:deleteConnection', a.id);
   assert.equal(d1.ok, true);
   assert.equal(hasWs(wsA), false, '没有连接在用、也没有会话在跑 ⇒ 这张表该收掉');
   assert.equal(hasSpace(s1), true,
     '★★ 还有 wB 指着它 —— 收它就是删活数据。这一格就是"数据不属于任何工作区"那句话');
-  // ★ 而且要说出来：这是**别的屏幕上才看得见**的变化（用户是在连接列表上按的删除）。
+  // 而且要说出来：这是别的屏幕上才看得见的变化（用户是在连接列表上按的删除）。
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
   assert.match(said, /没有谁在用了/, `收掉了要出声：${said}`);
   assert.match(said, new RegExp(nameA), `要说清收掉的是哪一个：${said}`);
 
-  // ── ② 删掉最后那条 ⇒ 数据那一层才归零 ──
+  // ── ② 删掉最后那条，数据那一层才归零 ──
   const before2 = noticesOf().length;
   const d2 = await invoke('app:deleteConnection', b.connection.id);
   assert.equal(d2.ok, true);
@@ -1485,7 +1485,7 @@ test('★★ 分层回收：一份数据被两个工作区引用 ⇒ 删一个�
   assert.equal(hasSpace(s1), false, '这下真的没人指着了');
   const said2 = noticesOf().slice(before2).map((n) => n.text).join('\n');
   assert.match(said2, /没有谁在用了/, `收掉了要出声：${said2}`);
-  // ★ 两层要**分开报**：工作区没了不等于它的数据没了（上面那一格刚验过），而数据
+  // 两层要分开报：工作区没了不等于它的数据没了（上面那一格刚验过），而数据
   //   没了也一定伴随一张表没了。合成一句"回收了 N 项"的话，用户分不出自己那份数据
   //   是不是还在 —— 而那是他此刻唯一想问的事。
   assert.match(said2, /的一份数据/, `数据那一层也要说得出是哪一份：${said2}`);
@@ -1507,10 +1507,10 @@ test('★★ 活会话护着它那个工作区 —— 连接全挪走了也一�
   });
   idx._test.getBackend().debugAddSitePlugin('dev-ws');
 
-  // ★★ 这一条从前的前提是「用户把连接全删了」。开发者模式里现在**总有内置的那一条**
+  // 这一条从前的前提是「用户把连接全删了」。开发者模式里现在总有内置的那一条
   //   （它删不掉），那个状态不再存在 —— 而要验的东西一个字没变：**一个没有连接指着、
   //   却有活会话跑着的工作区，不许被回收**。
-  //   造法因此换成"把连接从那个工作区挪走"：挪走之后它的引用计数同样是 **0**，
+  //   造法因此换成"把连接从那个工作区挪走"：挪走之后它的引用计数同样是 0，
   //   而那条会话照样跑在它上面。
   const cfgOf = () => idx._test.getCfg();
   await onlyDemoConnection(idx);
@@ -1527,7 +1527,7 @@ test('★★ 活会话护着它那个工作区 —— 连接全挪走了也一�
   const sid = ws.refs[id];
   assert.ok(sid, '前提：那个工作区里指着这个插件的那一份');
 
-  // ★ 先把活跃连接换成内置那条（这一步**不动引用计数**），再把这条连接挪到一个新
+  // 先把活跃连接换成内置那条（这一步不动引用计数），再把这条连接挪到一个新
   //   工作区 —— 至此 w1 没有任何连接指着它了，而那条会话正跑在上面。
   //   （不先换活跃的话，挪这一下会顺手把会话也搬到新工作区去，那就没得验了。）
   const seed = (await invoke('app:bootstrap')).connections.find((c) => c.builtin);
@@ -1538,9 +1538,9 @@ test('★★ 活会话护着它那个工作区 —— 连接全挪走了也一�
   assert.equal(cfgOf().connections.some((c) => c.workspaceId === w1), false,
     '前提：已经没有任何连接指着 w1 了（引用计数归零）');
 
-  // ★★ 一个**与引用计数无关**的改动（改个名字）也会把 commitConfig 叫起来，而那一句
-  //    `pruneWorkspaces` 数的是"还有几条连接指着它" —— 此刻是 **0**。
-  //    护住它的是**那条活会话**（`liveWorkspaceIds`）—— 这正是那条「一条连接都没有
+  // 一个与引用计数无关的改动（改个名字）也会把 commitConfig 叫起来，而那一句
+  //    `pruneWorkspaces` 数的是"还有几条连接指着它" —— 此刻是 0。
+  //    护住它的是那条活会话（`liveWorkspaceIds`）—— 这正是那条「一条连接都没有
   //    就不回收」的豁免删掉之后，这个场景唯一还站得住的东西。
   //    少了它，开发者模式里每次改动都会把工作区连同它指着的那些数据收掉，而那条
   //    会话正跑在上面 —— 症状是「演示模式里布局老是丢」，且没有任何一处会红。
@@ -1601,8 +1601,8 @@ test('app:debug 在开发者模式下可用（真机上造不出来的状态）'
     const r = await invoke('app:debug', what);
     assert.equal(r.ok, true, `${what} 应当可用，实际：${JSON.stringify(r)}`);
   }
-  // ★ 认不出的动作必须**说它认不出**，而且要连着那句措辞一起钉住：这一条防的是
-  //   一种已经发生过的残留 —— 调用方写了一个**已经被删掉**的动作、又不看返回值，
+  // 认不出的动作必须说它认不出，而且要连着那句措辞一起钉住：这一条防的是
+  //   一种已经发生过的残留 —— 调用方写了一个已经被删掉的动作、又不看返回值，
   //   于是那一行一直绿着、什么都没做（`boot.test.mjs` 里原来那行 `'packages'`
   //   就是这个形状）。只断言 `ok === false` 不够：有人把兜底改成别的话时，
   //   "认不出"与"临时不可用"会变成同一句话，而它们要用户做的事完全不同。
@@ -1622,7 +1622,7 @@ test('★ 分区来自 Slurm（不是配置里的「用途」），且没权限�
   t.after(() => { Module._load = origLoad; });
   const r = await invoke('app:partitions');
   assert.equal(r.ok, true);
-  // 分区是**查出来的**，客户端不再自己维护一份「用途 → 分区」的声明式配置
+  // 分区是查出来的，客户端不再自己维护一份「用途 → 分区」的声明式配置
   assert.deepEqual(r.partitions.map((p) => p.name).sort(),
     ['2080TI', 'A6000', 'DEBUG', 'RTX8000']);
   // 没权限的分区必须带 allowed:false 与原因，界面据此禁用并说明
@@ -1653,12 +1653,12 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
     }
   })();
 
-  // 视图必须加载**字面 127.0.0.1** 的地址 —— 用 localhost 会是另一个 origin，
+  // 视图必须加载字面 127.0.0.1 的地址 —— 用 localhost 会是另一个 origin，
   // localStorage 不共享，而且可能解析成 ::1。
   assert.match(view.webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
-  // ★ partition = **这个插件的完整身份**（见 plugin-data.js 的文件头）：插件 id @
+  // partition = 这个插件的完整身份（见 plugin-data.js 的文件头）：插件 id @
   //   共享组 @ 实例。三样缺一不可：
-  //   · 末段是**工作区 id**，不是端口 —— 按端口命名会让「A 工作区被回收后端口被新工作区
+  //   · 末段是工作区 id，不是端口 —— 按端口命名会让「A 工作区被回收后端口被新工作区
   //     复用」时，新工作区的「空白工作区」继承 A 的 localStorage 与登录 cookie；
   //   · 中间那段是清单里写的 `editor`（写死了几个版本共用一份，这正是 code-server
   //     升级不丢布局的原因）；
@@ -1672,8 +1672,8 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
   assert.equal(view._opts.webPreferences.backgroundThrottling, false,
     'IDE 不能被 Chromium 节流 —— 那会让终端看起来「卡住」且没有报错');
 
-  // ★ 登录成功的判据是 **cookie jar 里有没有 cookie**，不是 HTTP 状态码。
-  //   注意要**等** —— 视图的 loadURL 在自动登录之前就返回了，立刻断言会撞上竞态。
+  // 登录成功的判据是 cookie jar 里有没有 cookie，不是 HTTP 状态码。
+  //   注意要等 —— 视图的 loadURL 在自动登录之前就返回了，立刻断言会撞上竞态。
   const jar = partitionJars[partition];
   const ok = await (async () => {
     const deadline = Date.now() + 8000;
@@ -1690,7 +1690,7 @@ test('★ 开会话：创建 code-server 视图，并真的自动登录成功', 
       + '\n  jars: ' + JSON.stringify(Object.keys(partitionJars)));
   }
 
-  // ★ 主动断开 = 彻底终止。会话跑着的时候点「断开」，必须先取消作业、释放资源，
+  // 主动断开 = 彻底终止。会话跑着的时候点「断开」，必须先取消作业、释放资源，
   //   而不是把作业留在集群上继续占着节点，界面上却显示「未连接」。
   const dis = await invoke('app:disconnect');
   assert.equal(dis.ok, true);
@@ -1740,10 +1740,10 @@ test('★ 运行中切换工作区：只换本地端口与存储分区，作业�
   // 被清掉了 —— 于是那个会话卡在 releasing，_submit 会以 quota_active 拒绝。
   // 真集群上守护进程的 phase_release 会自己收掉它（最多一个 tick），这里手动收。
   //
-  // ★★ 这一步必须排在 `app:connect` **前面**。连接现在会跑
-  //   `tryReattach()`（`doConnect` 的最后一步），而它会把**还占着位置**的会话
+  // 这一步必须排在 `app:connect` 前面。连接现在会跑
+  //   `tryReattach()`（`doConnect` 的最后一步），而它会把还占着位置的会话
   //   接回来 —— `releasing` 就在那个集合里。接回来之后：那个槽被它占着，于是
-  //   下面这一条新会话拿的是一个**临时实例**（另一个工作区、另一个端口），而这条
+  //   下面这一条新会话拿的是一个临时实例（另一个工作区、另一个端口），而这条
   //   用例要验的"换工作区会重建视图"就永远走不到（判据是 `workspaceId` 与连接那个工作区
   //   相等）。症状是"换 partition 必须重建视图"这一条红，而原因完全不在这里。
   idx._test.getBackend().debugReap();
@@ -1762,12 +1762,12 @@ test('★ 运行中切换工作区：只换本地端口与存储分区，作业�
   const oldGroupId = ctl.snapshot().spaceId;
   const oldPartition = view1._opts.webPreferences.partition;
   const oldWc = view1.webContents;
-  // 清单件是一条**累积**的记录（前面几条用例回收工作区时也清过），所以这里只看这一
+  // 清单件是一条累积的记录（前面几条用例回收工作区时也清过），所以这里只看这一
   // 步新产生的那几条。
   const clearedBefore = calls.cleared.length;
 
   // ① 切走一个「独占」的工作区（它只被这一条连接用）→ 主进程必须先回 would_discard，
-  //    并且**配置一个字都不动**。判定权在主进程：界面手里那份 refCount 随时可能
+  //    并且配置一个字都不动。判定权在主进程：界面手里那份 refCount 随时可能
   //    已经陈旧（另一条连接刚被删），它只负责弹确认。
   const ask = await invoke('app:setConnectionWorkspace', { connectionId: conn.id, workspaceId: null });
   assert.equal(ask.ok, false);
@@ -1785,11 +1785,11 @@ test('★ 运行中切换工作区：只换本地端口与存储分区，作业�
   backend.rpc = realRpc;
 
   assert.equal(r.ok, true, JSON.stringify(r));
-  // ★ 全程不碰 submit / heartbeat / status / goodbye —— Slurm 作业、控制节点那边的
+  // 全程不碰 submit / heartbeat / status / goodbye —— Slurm 作业、控制节点那边的
   //   session、sessionId、tunnel_target 都不变，变的只有浏览器这一侧。
   assert.equal(rpcCount, 0, '切换工作区不该向守护进程说任何话');
 
-  // ③ partition 是**构造期属性**，所以换工作区必须销毁重建 ——
+  // ③ partition 是构造期属性，所以换工作区必须销毁重建 ——
   //   只 loadURL 是没用的，页面会继续跑在旧的存储分区里而看不出来。
   assert.equal(calls.views.length, before + 2, '换 partition 必须重建视图');
   const view2 = calls.views[calls.views.length - 1];
@@ -1805,20 +1805,20 @@ test('★ 运行中切换工作区：只换本地端口与存储分区，作业�
   assert.notEqual(ctl.snapshot().spaceId, oldGroupId, '控制器要跟着换工作区');
 
   // ⑤ 被回收的那个工作区的存储要清掉（它的分区里躺着登录 cookie），换过去的那个不能清。
-  //    ★ 判据是**两个方向**：清对了哪一个，且没清新那个。只钉一边的话，"什么都清"
+  //    判据是两个方向：清对了哪一个，且没清新那个。只钉一边的话，"什么都清"
   //      与"什么都不清"各能骗过一条。
-  //    ★ 这一条钉**不是**那条"别清正在被界面用着的分区"的守卫 —— 那条守卫今天
+  //    这一条钉不是那条"别清正在被界面用着的分区"的守卫 —— 那条守卫今天
   //      够不着（见 clearWorkspaceStorage 的注释），删掉它这里照样是绿的。
-  //   ★ `calls.cleared` 是**整个文件共用**的一条累积记录（前面几条用例回收时也清过，
+  //   `calls.cleared` 是整个文件共用的一条累积记录（前面几条用例回收时也清过，
   //     而清分区是异步的，上一条用例尾部的清理可能刚刚才落地）。所以这里判的是
-  //     **成员关系**加一条更强的不变量，不是"这一片恰好只有一条"。
+  //     成员关系加一条更强的不变量，不是"这一片恰好只有一条"。
   const cleared = calls.cleared.slice(clearedBefore);
   assert.ok(cleared.includes(oldPartition),
     `★ 被回收那一份的存储要清掉，实际清了 ${JSON.stringify(cleared)}`);
   assert.ok(!cleared.includes(view2._opts.webPreferences.partition),
     '正在显示的那个分区绝不能被清');
-  // ★★ 「只清该清的」那半边，换成一条**更强**的判据：清掉的每一份都必须是
-  //    **已经不在配置里**的数据。少了它，一个"把配置里的数据也顺手清了"的实现
+  // 「只清该清的」那半边，换成一条更强的判据：清掉的每一份都必须是
+  //    已经不在配置里的数据。少了它，一个"把配置里的数据也顺手清了"的实现
   //    也能让上面两条通过 —— 而那正好是会删活数据的那一类。
   const liveSpaces = new Set(idx._test.getCfg().spaces.map((x) => x.id));
   for (const part of cleared) {
@@ -1834,7 +1834,7 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
   const idx = require('../src/main/index.js');
   const { webLogin } = idx;
 
-  // ★ 契约现在由**插件**给，不由基座写死。这份契约直接从装着的那个插件清单里取
+  // 契约现在由插件给，不由基座写死。这份契约直接从装着的那个插件清单里取
   //   —— 测试因此钉住的是"真插件声明的值"，而不是测试里另抄一份（抄的那份迟早
   //   会与清单分叉，而分叉的表现是"登录莫名其妙失败"）。
   const cs = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
@@ -1860,7 +1860,7 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
   };
   assert.equal((await webLogin(ses2, 'http://127.0.0.1:1', 'pw', contract)).ok, true);
 
-  // ★ 契约换一个服务就整套换掉 —— 字段名与 cookie 名都来自它，基座一个字不知道。
+  // 契约换一个服务就整套换掉 —— 字段名与 cookie 名都来自它，基座一个字不知道。
   const other = { path: '/auth', field: 'token', cookie: 'jupyter-session' };
   const ses3 = {
     fetch: async (url, opts) => {
@@ -1882,25 +1882,25 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
 test('★ 服务端通报的默认资源要真的送到界面上，不能又在客户端硬编码一份', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // ★ 默认资源现在是**按插件**的，所以它跟 `op:plugins` 走，不挂在 `partitions`
+  // 默认资源现在是按插件的，所以它跟 `op:plugins` 走，不挂在 `partitions`
   //   的响应上（协议里没有全局的 `defaults` 字段 —— 留一个在那里就是
   //   两份真相：界面显示 2 核 / 8G，而实际提交中转站会话拿到的是 1 核 / 2G，
   //   且没有任何地方会为此报错）。
   //
-  //   客户端**不自己定一份**：界面只读地显示它，提交时靠【省略】cpus/mem 让服务端
+  //   客户端不自己定一份：界面只读地显示它，提交时靠【省略】cpus/mem 让服务端
   //   填当下那份默认值。回发旧值的客户端会把管理员的改动永远钉死。
   const r = await invoke('app:partitions');
   assert.equal(r.ok, true);
   const codeServer = r.plugins.plugins.find((p) => p.name === 'code-server');
   assert.ok(codeServer, '代码宿主插件必须出现在可用的插件里');
-  // ★ 时限在**同一格**里 —— 它是"这个插件缺省给多少"的第三个答案，
+  // 时限在同一格里 —— 它是"这个插件缺省给多少"的第三个答案，
   //   而不是另一件事。少了它界面就说不出"这个会话能跑多久"，用户只能在作业被
   //   `TimeLimit` 砍掉的那一刻第一次知道。
   assert.deepEqual(codeServer.defaults,
     { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     '服务端通报的默认资源必须原样带回来（含时限与卡）');
-  // ★ 卡那一格是**描述符或 null**，而 `null` 是"本站确实没给这个插件配默认卡"
-  //   ——一个**确定的事实**，与"这一格整个不在"（老守护进程）不是一回事。
+  // 卡那一格是描述符或 null，而 `null` 是"本站确实没给这个插件配默认卡"
+  //   ——一个确定的事实，与"这一格整个不在"（老守护进程）不是一回事。
   assert.equal(codeServer.defaultsGresText, null,
     '没配默认卡 ⇒ 那句话里不说 GRES（不编一个，也不显示一个裸对象）');
 
@@ -1914,10 +1914,10 @@ test('★ 服务端通报的默认资源要真的送到界面上，不能又在�
 test('★★ 站点配了默认卡 ⇒ 那句「默认 …」里出现它，且走唯一那处拼法', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // ★ 卡那一格的文本由**主进程**译好（`gres.js` 的 `gresText`）再递给界面 ——
+  // 卡那一格的文本由主进程译好（`gres.js` 的 `gresText`）再递给界面 ——
   //   与 `session.js` 给会话快照加 `gresText` 是同一条路。渲染层自己拼
-  //   `name:type × n` 的话，同一个插件在选择器里与在插件卡片上会有**两个拼法**，
-  //   而两边都没错、只是不一样。所以这里断言的是**译好的那一串**。
+  //   `name:type × n` 的话，同一个插件在选择器里与在插件卡片上会有两个拼法，
+  //   而两边都没错、只是不一样。所以这里断言的是译好的那一串。
   await invoke('app:debug', 'default-gpus',
     { name: 'gpu', type: 'a6000', count: 1 });
   try {
@@ -1936,13 +1936,13 @@ test('★★ 站点配了默认卡 ⇒ 那句「默认 …」里出现它，且�
 test('★ 老守护进程的 `defaults` 里没有 time：缺了就是缺了，不许编一个', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
-  // ★ 这一条钉的是**三态**，不是"老版本兼容"：`defaults.time` 是 v0.11 才加进
+  // 这一条钉的是三态，不是"老版本兼容"：`defaults.time` 是 v0.11 才加进
   //   那一格的，v0.5 的守护进程只报 cpus / mem。界面必须能在那条路上照常画出
-  //   那句话 —— 而"照常"的唯一判据是**它不凭空多出一个时限**。
+  //   那句话 —— 而"照常"的唯一判据是它不凭空多出一个时限。
   //   写成 `def.time || '12:00:00'` 之类的兜底，用户看到一个他从没被承诺过的
   //   数字，而站点那一侧的真相在别处。
   //
-  //   `old-distribute`（有 `plugins`、没有 `limits`）是**更细的那一档** ——
+  //   `old-distribute`（有 `plugins`、没有 `limits`）是更细的那一档 ——
   //   `old-daemon` 是整个 op 都没有，那时 `defaults` 根本没有出处，验不到这一格。
   await invoke('app:debug', 'old-distribute');
   try {
@@ -1973,7 +1973,7 @@ test('★ 取不到分区时必须说出来，不能谎报「这台集群没有�
     assert.ok(r.error, '必须给出原因 —— 否则界面只能显示一个空列表');
     assert.match(r.error, /分区列表/, `错误里要说清是取分区列表失败：${r.error}`);
     assert.deepEqual(r.partitions, [], '失败时列表为空，但区别在 error 上');
-    // 插件清单拿不到时**不能**当成"一个插件都没开"—— 那会让升级客户端的用户
+    // 插件清单拿不到时不能当成"一个插件都没开"—— 那会让升级客户端的用户
     // 突然一个按钮都看不到。这里只要求它不谎报。
     assert.ok(r.plugins, '插件视图始终要有，界面靠它决定画哪些按钮');
 
@@ -1991,7 +1991,7 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
 
-  // 造一个会话，但**不经过 controller** —— 这样测试结束时不会留下别的定时器。
+  // 造一个会话，但不经过 controller —— 这样测试结束时不会留下别的定时器。
   const b = idx._test.getBackend();
   await invoke('app:debug', 'reset');
   const conn = await builtinConn();
@@ -2027,9 +2027,9 @@ test('★ 还在排队的会话必须被接上，而不是当成「没有会话�
 
 // ── SSH 中转站 ──────────────────────────────────────────────────────────────
 //
-// 这个功能的界面在**用户的终端里**，客户端这边唯一要做的事就是让 `ssh slurmate`
+// 这个功能的界面在用户的终端里，客户端这边唯一要做的事就是让 `ssh slurmate`
 // 能连进来。所以这一节的断言几乎全部落在文件上：写出来的 ssh 配置对不对、
-// 有没有动用户别的东西、以及**有没有建一个不该建的视图**。
+// 有没有动用户别的东西、以及有没有建一个不该建的视图。
 
 test('ULID：铸造出来的标识符，不是名字', (t) => {
   t.after(() => { Module._load = origLoad; });
@@ -2041,18 +2041,18 @@ test('ULID：铸造出来的标识符，不是名字', (t) => {
   assert.equal(u.isId(a.toLowerCase()), false,
     '小写不合法 —— 字母表是大写的 Crockford base32，允许小写会让"同一个 id"有两种写法');
 
-  // ★ 字母表刻意去掉了 I / L / O / U：手抄或口头念给管理员听时不会和 1 / 0 混。
+  // 字母表刻意去掉了 I / L / O / U：手抄或口头念给管理员听时不会和 1 / 0 混。
   for (const bad of ['I', 'L', 'O', 'U']) {
     assert.equal(u.isId(bad.repeat(26)), false, `${bad} 不在字母表里`);
   }
   assert.equal(u.isId(a.slice(0, 25)), false, '短一位不合法');
   assert.equal(u.isId(a + 'X'), false, '长一位不合法');
 
-  // ★ 时间在前、随机在后 → **字典序 = 铸造序**。池里的目录列表靠它天然有序。
+  // 时间在前、随机在后 → 字典序 = 铸造序。池里的目录列表靠它天然有序。
   assert.ok(u.mint(1700000000000) < u.mint(1700000000001), '毫秒递增 → 字典序递增');
   assert.ok(u.mintedAt(a) > Date.UTC(2020, 0, 1), '反解出来的铸造时间要合理');
 
-  // ★「生成即唯一」靠的是随机位，不是协调。同一毫秒里铸的也必须互不相同 ——
+  // 「生成即唯一」靠的是随机位，不是协调。同一毫秒里铸的也必须互不相同 ——
   //   否则批量铸造（比如一次装一批插件）会撞。
   const batch = Array.from({ length: 200 }, () => u.mint(1700000000000));
   assert.equal(new Set(batch).size, 200, '同一毫秒内铸 200 个不能重样');
@@ -2062,12 +2062,12 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
   const u = require('../src/main/plugins/ulid.js');
-  // ★ 用**真的池**（装着仓库里那两个插件），不是 `new Registry()` —— 后者现在
+  // 用真的池（装着仓库里那两个插件），不是 `new Registry()` —— 后者现在
   //   是"一个插件都没有"，而这一条测的是解析语义，得有东西可解析。
   //
-  // ★ 这里传 `source: 'site'` 是**安全的**，而且理由要说清：**同意闸是构造参数**，
+  // 这里传 `source: 'site'` 是安全的，而且理由要说清：同意闸是构造参数，
   //   不传就恒真（见 `Registry` 的文档）；`index.js` 那一个传了闸，所以它走台账。
-  //   ★ 这两件事**不能互相类推** —— 把 `index.js` 那个根的 source 改成 site 而
+  //   这两件事不能互相类推 —— 把 `index.js` 那个根的 source 改成 site 而
   //   不管台账，会让池里每一份都变成 `active: false`。
   const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
   const cs = reg.list().find((p) => p.name === 'code-server');
@@ -2076,20 +2076,20 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
 
   assert.equal(reg.resolve(cs.id, ref).plugin.name, 'code-server', '解析键查得到就是它');
 
-  // ★ **服务端没说**是哪一种服务时，一律不猜 —— 而且是**两种"没说"同一个答案**：
-  //     · `null`     守护进程**明说**它不知道（会话是从 nft 规则恢复出来的）
+  // 服务端没说是哪一种服务时，一律不猜 —— 而且是两种"没说"同一个答案：
+  //     · `null`     守护进程明说它不知道（会话是从 nft 规则恢复出来的）
   //     · 键不存在   更旧的守护进程根本没有这个字段
   //
-  //   这两种"没说"都**不许**兜到某个默认插件上 —— 兜过去违反这个协议的三态纪律：
-  //   **缺席不等于可以猜**。
+  //   这两种"没说"都不许兜到某个默认插件上 —— 兜过去违反这个协议的三态纪律：
+  //   缺席不等于可以猜。
   //
-  //   ★ 这里的"不猜"是承重的：猜 code-server 会拿口令去 POST 一个 SSH 端口，
+  //   这里的"不猜"是承重的：猜 code-server 会拿口令去 POST 一个 SSH 端口，
   //     猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
   assert.equal(reg.resolve(undefined, undefined).plugin, null,
     '键不存在时绝不猜（从前会兜到 legacyDefault 那个插件上）');
   assert.equal(reg.resolve(null, undefined).plugin, null,
     '守护进程明说不知道时绝不猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
-  // ★ 只给了**短名**、没有解析键，也**不足以定位**：池是全局的，两个站点可以各有
+  // 只给了短名、没有解析键，也不足以定位：池是全局的，两个站点可以各有
   //   一个叫同一个名字的插件，而它们是两个不同的东西。哪怕短名唯一命中也不猜 ——
   //   命中唯一只说明"本机只有一个叫这个名字的"，没说明这个会话用的是哪一版。
   assert.equal(reg.resolve('code-server', undefined).plugin, null,
@@ -2097,10 +2097,10 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   assert.equal(reg.resolve('ssh', undefined).plugin, null, '认不出的短名也不许退回默认');
   assert.equal(reg.resolve('code-server', 'garbage').plugin, null, '坏掉的解析键不许退回默认');
 
-  // ★ 认得出 id、但**本机没有那一版** —— 这是"站点升级了插件而客户端还没跟上"的
+  // 认得出 id、但本机没有那一版 —— 这是"站点升级了插件而客户端还没跟上"的
   //   形态，也是用户最需要一句话的时候。必须说得出缺的是哪一版，而不是笼统的"未知"。
   const miss = reg.resolve(cs.id, `${cs.id}@99.0.0`);
-  // ★ 这条断言**必须自己带 message**：不带的话失败块里只有一段对象 diff，
+  // 这条断言必须自己带 message：不带的话失败块里只有一段对象 diff，
   //   看不出是"解析键查不到"这一条红的 —— 而"红了，但看不出为什么红"与
   //   "因为错误的理由红"在排查时一样难用。（同一个坑这个项目里踩过一次。）
   assert.equal(miss.plugin, null,
@@ -2116,12 +2116,12 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
 });
 
 test('★★ contributes.defaultService 已经删掉 —— 写了它的清单**装不上**，且点名那个键', (t) => {
-  // ★ 删它的理由：那一格答的是"**本站**的缺省服务是哪一个"，而那是**站点**的事
+  // 删它的理由：那一格答的是"本站的缺省服务是哪一个"，而那是站点的事
   //   （配置里的 `default_plugin`，见 cluster/slurmate）。客户端这一侧再存一份的话，
-  //   两份可以指向两个不同的插件，而**没有任何东西会红**（账本 S19）—— 就是本文件
+  //   两份可以指向两个不同的插件，而没有任何东西会红（账本 S19）—— 就是本文件
   //   一路在记的那个形状：同一条规矩两份实现，漂开时静默。
   //
-  // ★ 这一条钉的是**键真的没了**，不是"键被忽略了"。静默忽略会让一份写着它的清单
+  // 这一条钉的是键真的没了，不是"键被忽略了"。静默忽略会让一份写着它的清单
   //   看起来好好的、被收下、被分发出去，而作者以为自己在配置本站的缺省服务 ——
   //   正是这个仓库把"未知键"判成错误而不是忽略的那条理由。
   const { Registry } = require('../src/main/plugins/index.js');
@@ -2142,16 +2142,16 @@ test('★★ contributes.defaultService 已经删掉 —— 写了它的清单**
 });
 
 test('★★ 漏传服务名**当场拒绝** —— 客户端这一侧没有"缺省插件"', async () => {
-  // ★ 省略 serviceKind = **调用方漏了一个实参** —— 客户端这一侧没有"缺省插件"
-  //   那个概念（见上一条：缺省服务是**站点**的事）。
+  // 省略 serviceKind = 调用方漏了一个实参 —— 客户端这一侧没有"缺省插件"
+  //   那个概念（见上一条：缺省服务是站点的事）。
   //
-  // ★ 它要挡住的失败方式很具体：兜底那一支删掉之后，什么都不做也能让这段请求
-  //   **失败**（`pickForSubmit(undefined)` 查不到东西）—— 于是这道闸的全部内容
-  //   就是**那句报错**。没有它，用户拿到的是一句关于"服务种类"的"不认识"，
+  // 它要挡住的失败方式很具体：兜底那一支删掉之后，什么都不做也能让这段请求
+  //   失败（`pickForSubmit(undefined)` 查不到东西）—— 于是这道闸的全部内容
+  //   就是那句报错。没有它，用户拿到的是一句关于"服务种类"的"不认识"，
   //   把根因指向站点；而根因在调用方少传了一个实参。所以这一条钉的正是那句话。
   //
-  // ★ 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, adv, btn)`，
-  //   服务名永远显式传），所以这一条是这段逻辑**唯一**的守门人。
+  // 界面上走不到这里（`panel.js` 每个启动按钮绑的都是 `startWith(p.name, adv, btn)`，
+  //   服务名永远显式传），所以这一条是这段逻辑唯一的守门人。
   const before = noticesOf().length;
   const r = await appStart({ cpus: 1 });
   assert.equal(r.ok, false, '漏传服务名必须被拦住，而不是起一个会话');
@@ -2171,8 +2171,8 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
   const b1 = bucketOf(cs);
   const b2 = bucketOf(ss);
 
-  // ★ `bucketOf(null)` 不能抛 —— 今天到不了（ctx 只在插件非空时递给插件），
-  //   但那是框架里**最容易漏写一个守卫**的位置，而踩上去的报错会是一个
+  // `bucketOf(null)` 不能抛 —— 今天到不了（ctx 只在插件非空时递给插件），
+  //   但那是框架里最容易漏写一个守卫的位置，而踩上去的报错会是一个
   //   `TypeError`，读不出任何线索。
   assert.doesNotThrow(() => bucketOf(null), 'bucketOf 必须能接住 null');
 
@@ -2180,8 +2180,8 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
   // attach() 多半在写文件或弹通知 —— 不去重用户每 45 秒收到一条一模一样的通知。
   assert.equal(reg.once(b1, 'k1'), true, '第一次要放行');
   assert.equal(reg.once(b1, 'k1'), false, '同一个桶同一个键再来一次要拦住');
-  // ★ 关键的一条，而且**必须紧接着上面**：此刻 b1 的槽里正是 'k1'，
-  //   所以另一个插件拿**同一个键**来问必须放行。共用一个槽的话它会拿到 false ——
+  // 关键的一条，而且必须紧接着上面：此刻 b1 的槽里正是 'k1'，
+  //   所以另一个插件拿同一个键来问必须放行。共用一个槽的话它会拿到 false ——
   //   症状是其中一个插件的通知永远不出现。
   //   （顺序不能挪：先让槽里换成别的键再问这一条，共享槽也会通过，这条断言就退化成
   //     走过场了。变异验证 C6 第一次就是这么活下来的。）
@@ -2194,46 +2194,46 @@ test('去重是**按插件**分桶的：两个插件各记各的"上次值"', (t
   assert.equal(reg.once(b1, 'k2'), false, '重新扫描后去重状态还在');
 });
 
-// ── ★ 装一个插件、卸一个插件，客户端都不许崩 ─────────────────────────────────
+// ── 装一个插件、卸一个插件，客户端都不许崩 ─────────────────────────────────
 //
 // 这是这次改动的验收标准，也是整块重构存在的理由。用一个临时目录模拟
 // 「站点分发的插件」，逐条验四件事：坏文件不拖垮别人、装上就认得、
 // 卸掉之后会话仍然能管（这是"通用层"的核心断言）、名字与文件不一致时宁可跳过。
 
 /**
- * 在一个临时根目录下造一个**已提交的槽位**。返回 `{dir, slot, id, version}`。
+ * 在一个临时根目录下造一个已提交的槽位。返回 `{dir, slot, id, version}`。
  *
- * ★ 造的是 v0.13 的形状：`<根>/<id>_<版本>/plugin.json` **加旁边那张记录表**。
+ * 造的是 v0.13 的形状：`<根>/<id>_<版本>/plugin.json` 加旁边那张记录表。
  *   一层布局（`<根>/<名字>/plugin.json`）是"把插件目录拷进池里"得到的形状，
  *   §5.1 明文禁止它产生任何效果 —— 所以夹具也不许再造它。要造那个现场的是
- *   §5.1 那条用例，它**故意**造一层。
+ *   §5.1 那条用例，它故意造一层。
  *
- * ★ 名字里那个 id 与**清单里**那个是**分开**算的：名字里总是新铸一个 ULID，而
+ * 名字里那个 id 与清单里那个是分开算的：名字里总是新铸一个 ULID，而
  *   清单里那个来自 `over.id`（不写就是同一个）。有几条用例正是要造"清单里的 id
  *   不合法 / 与名字对不上"的现场，而那种现场只有在两者可以不同时才摆得出来。
- *   ★ 而 `slotNameOf` 拒绝一切不是 ULID 的 id ⇒ 名字那一半永远是安全的。
+ * 而 `slotNameOf` 拒绝一切不是 ULID 的 id，名字那一半永远是安全的。
  *
- * ★ 版本那一半取 `over.version` 里**合形状**的那一个，不合形状就用 `1.0.0`：
+ * 版本那一半取 `over.version` 里合形状的那一个，不合形状就用 `1.0.0`：
  *   有几条用例正是要喂坏版本号（`' 1.0.0'`、`'1.0.0\n'` 之类），拿它当目录名
- *   会造出带空格或换行的目录 —— 而那种名字**根本不是一个槽位**，于是它们会被静静
+ *   会造出带空格或换行的目录 —— 而那种名字根本不是一个槽位，于是它们会被静静
  *   跳过，用例红在一个与版本号无关的地方。
  */
 function writePlugin(root, over = {}, clientSrc = undefined, opts = {}) {
   const SLOT = require('../src/main/plugin-slot.js');
   const mf = {
     id: mintId(), name: 'temp', displayName: '临时', version: '1.0.0',
-    // `concurrent` 是**必填**的（见 plugins/index.js）—— 夹具不写它，每一条用例都会
+    // `concurrent` 是必填的（见 plugins/index.js）—— 夹具不写它，每一条用例都会
     // 红在"清单不合法"上，而那个红离它们各自要测的东西十万八千里。
     contributes: { concurrent: false },
     ...over,
   };
   const vdir = /^\d+\.\d+\.\d+$/.test(String(mf.version)) ? String(mf.version) : '1.0.0';
-  // ★ **清单里那个 id 与名字里那个**：正常形状下它们是**同一个**。两处会分家的
+  // 清单里那个 id 与名字里那个：正常形状下它们是同一个。两处会分家的
   //   只有两种现场，各自要显式地说出来：
-  //     · 清单里的 id 根本不是 ULID（`{id: 'code-server'}`）⇒ 名字那一半只能另铸一个，
-  //       否则夹具自己都拼不出一个合法的槽位名，那一份会被**静静跳过**，用例红在
+  //     · 清单里的 id 根本不是 ULID（`{id: 'code-server'}`），名字那一半只能另铸一个，
+  //       否则夹具自己都拼不出一个合法的槽位名，那一份会被静静跳过，用例红在
   //       一个与被测规则无关的地方；
-  //     · 要造"名字与清单对不上"（`{nameId: 另一个 ULID}`）⇒ 显式给。
+  //     · 要造"名字与清单对不上"（`{nameId: 另一个 ULID}`），显式给。
   const nameId = opts.nameId || (SLOT.slotNameOf(mf.id, vdir) ? mf.id : mintId());
   const slot = SLOT.slotNameOf(nameId, vdir);
   assert.ok(slot, `夹具自己都拼不出一个槽位名：${nameId}_${vdir}`);
@@ -2269,7 +2269,7 @@ test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) 
   const good = writePlugin(tmp, { name: 'good', displayName: '好的' }, 'module.exports = {};\n');
   // 客户端代码语法错
   const broken = writePlugin(tmp, { name: 'broken' }, 'this is not javascript at all((((\n');
-  // 清单不是合法 JSON。★ 手写这一份时也要摆成**一个已提交的槽位** —— 摆错了它会
+  // 清单不是合法 JSON。手写这一份时也要摆成一个已提交的槽位 —— 摆错了它会
   //   被静静跳过，而这条用例会红在"五个坏插件只报出四个"上，看起来像扫描器漏了。
   const badJson = writePlugin(tmp, { name: 'badjson' });
   fs.writeFileSync(path.join(badJson.dir, 'plugin.json'), '{ not json');
@@ -2279,7 +2279,7 @@ test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) 
   const badkey = writePlugin(tmp, { contribution: {} });
   // 客户端代码导出里打错了一个钩子名
   const badhook = writePlugin(tmp, { name: 'badhook' }, 'module.exports = { attch() {} };\n');
-  // 不是插件目录（没有清单）—— 应当被**静静跳过**，不是报错
+  // 不是插件目录（没有清单）—— 应当被静静跳过，不是报错
   fs.mkdirSync(path.join(tmp, 'not-a-plugin'), { recursive: true });
 
   const reg = new Registry([{ dir: tmp, source: 'pool' }]);
@@ -2289,17 +2289,17 @@ test('★ 插件目录：坏插件只影响它自己，其余照常工作', (t) 
   assert.equal(reg.errors.length, 5, `五个坏插件各记一条：${JSON.stringify(reg.errors, null, 2)}`);
   assert.ok(reg.errors.every((e) => typeof e === 'string' && e.length > 0),
     '每条都要说得出是哪个目录、坏在哪');
-  // ★ 报错必须**指名道姓**。含糊的一句"有插件加载失败"等于没有报错 ——
+  // 报错必须指名道姓。含糊的一句"有插件加载失败"等于没有报错 ——
   //   症状是"加了插件它就是不生效"，而这是用户唯一的线索来源。
   const all = reg.errors.join('\n');
-  // ★ 报错里那个"名字"就是**槽位名**（`<id>_<版本>`）—— 目录名带身份，
+  // 报错里那个"名字"就是槽位名（`<id>_<版本>`）—— 目录名带身份，
   //   所以它就是这一份最准确的地址。
   for (const [what, o] of [['语法错', broken], ['清单坏', badJson],
     ['id 不合法', badid], ['未知键', badkey], ['钩子名打错', badhook]]) {
     assert.match(all, new RegExp(o.slot), `${what} 那条报错要说得出是哪一份：${all}`);
   }
   assert.ok(!all.includes(good.slot), `好的那一份不该出现在报错里：${all}`);
-  // ★ 关键：注册表本身可用 —— 一个坏插件不能把客户端带崩。
+  // 关键：注册表本身可用 —— 一个坏插件不能把客户端带崩。
   assert.equal(reg.latestByName('good').name, 'good');
   assert.equal(reg.resolve('broken', undefined).plugin, null);
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -2311,13 +2311,13 @@ test('★★ 身份是铸造出来的：**池里的名字必须与清单逐字�
   const src = 'module.exports = {};\n';
   const id = mintId();
 
-  // ── 池里的名字**带身份**（`<id>_<版本>`），而它必须与清单里那个逐字相同。
-  //    这条规则换来的是**结构性**的一条保证：同一个 `(id, 版本)` 在池里
-  //    **只可能有一份**（同名就是同一个路径）。
+  // ── 池里的名字带身份（`<id>_<版本>`），而它必须与清单里那个逐字相同。
+  //    这条规则换来的是结构性的一条保证：同一个 `(id, 版本)` 在池里
+  //    只可能有一份（同名就是同一个路径）。
   //
-  //    ★ 名字与清单不符时**两个都不许加载**，因为挑谁都不对：
-  //      · 信名字 ⇒ 会话按 `(id, 版本)` 取到一份**自报是别的**构件；
-  //      · 信清单 ⇒ 池里两份不同的东西顶着同一个键，而"哪一份在哪"说不清。
+  //    名字与清单不符时两个都不许加载，因为挑谁都不对：
+  //      · 信名字，会话按 `(id, 版本)` 取到一份自报是别的构件；
+  //      · 信清单，池里两份不同的东西顶着同一个键，而"哪一份在哪"说不清。
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
   const underName = writePlugin(root, { id, name: 'jup', displayName: 'J' }, src);
   const withWrongName = writePlugin(root, { id, name: 'jup', displayName: 'J' },
@@ -2325,20 +2325,20 @@ test('★★ 身份是铸造出来的：**池里的名字必须与清单逐字�
     { nameId: mintId() });                           // 名字另铸一个 ⇒ 与清单不符
 
   const reg = new Registry([{ dir: root, source: 'site' }]);
-  // ★ 名字**对得上**的那一份照常装上（旁边有一个错的，不该把好的也带走 —— F22）。
+  // 名字对得上的那一份照常装上（旁边有一个错的，不该把好的也带走 —— F22）。
   assert.equal(reg.get(id, '1.0.0').dir, underName.dir, '对得上的那一份正常加载');
   assert.equal(reg.list().length, 1, '而名字对不上的那一份**不许**顶上来');
   assert.equal(reg.errors.length, 1, `只有错的那一份该报：${JSON.stringify(reg.errors)}`);
-  // ★ 报错要**指名道姓**（槽位名就是地址），而且说清是哪两样对不上。
+  // 报错要指名道姓（槽位名就是地址），而且说清是哪两样对不上。
   const e0 = reg.errors[0];
   assert.match(e0, new RegExp(withWrongName.slot), `要点名是哪一份：${e0}`);
   assert.match(e0, /目录名说的是/, `要说清是哪两样对不上：${e0}`);
   assert.match(e0, /逐字相同/, `而且要给出判据：${e0}`);
-  // ★ 而 `underName.slot` 里那个 id 与清单里的 id 是**同一个** —— 那才是正常形状。
+  // 而 `underName.slot` 里那个 id 与清单里的 id 是同一个 —— 那才是正常形状。
   assert.equal(underName.id, id);
   assert.ok(underName.slot.startsWith(`${id}_`));
 
-  // ── 同 id **不同版本** → **并存**（名字不同 ⇒ 路径不同 ⇒ 天生允许）──
+  // ── 同 id 不同版本 → 并存（名字不同，路径不同，天生允许）──
   const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-v-'));
   const id2 = mintId();
   writePlugin(root2, { id: id2, name: 'jup2', displayName: 'J', version: '1.0.0' }, src);
@@ -2349,7 +2349,7 @@ test('★★ 身份是铸造出来的：**池里的名字必须与清单逐字�
   assert.equal(reg2.latestByName('jup2').version, '2.0.0', '按短名取时给最高的那一版');
   assert.equal(reg2.get(id2, '1.0.0').version, '1.0.0', '按解析键取时给的就是那一版');
 
-  // ★ 去重桶要**带上版本**：池里并存同一个插件的多个版本是常态（站点更新频繁、
+  // 去重桶要带上版本：池里并存同一个插件的多个版本是常态（站点更新频繁、
   //   也可能拒绝更新）。只按 id 分桶的话，刚装上的新版本那句话会被旧版本压掉 ——
   //   而"这个版本已经说过这句话了"与"那个版本说过了"是两件事。
   const { bucketOf } = require('../src/main/plugins/index.js');
@@ -2388,19 +2388,19 @@ test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个�
 });
 
 /**
- * ★★ 版本号：两套方案，一条比较规则 —— 夹具与 Python 读的是**同一份**。
+ * 版本号：两套方案，一条比较规则 —— 夹具与 Python 读的是同一份。
  *
- * 这个仓库里有**两套**版本号，它们长得像、纪律共用，但**不是一回事**：
- *   · **框架版本** `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号
+ * 这个仓库里有两套版本号，它们长得像、纪律共用，但不是一回事：
+ *   · 框架版本 `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号
  *     （`client/package.json` 的 version）。`x` 是"可以不兼容"那一档，`y` 是
- *     "加东西但不破坏兼容"那一档 —— 所以**同 x 且客户端不低于服务端 ⇒ 保证
- *     兼容**。运行期有**一条版本握手**（客户端连上时问一次 `ping`），判定在
+ *     "加东西但不破坏兼容"那一档 —— 所以**同 x 且客户端不低于服务端，保证
+ *     兼容。运行期有一条版本握手**（客户端连上时问一次 `ping`），判定在
  *     `plugins.versionCheck` 里，闸在 index.js 的 `applyVersionGate`。
- *   · **插件版本** `x.y.z` —— 清单里的 `version`，`(id, 版本)` 那个槽位的键。
+ *   · 插件版本 `x.y.z` —— 清单里的 `version`，`(id, 版本)` 那个槽位的键。
  *
- * ★ 夹具在 `tools/version-fixtures.json`，`cluster/test-sessiond-logic.py` 的
+ * 夹具在 `tools/version-fixtures.json`，`cluster/test-sessiond-logic.py` 的
  *   19.0b2 节读的是同一个文件。两套实现各写一遍规则，"逐条一致"靠两份抄本
- *   加一条比对 lint 是**抓不到漂的**（lint 只看得见已经漂了的那部分）。
+ *   加一条比对 lint 是抓不到漂的（lint 只看得见已经漂了的那部分）。
  */
 test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对上共用夹具', () => {
   const M = require('../src/main/plugins/index.js');
@@ -2419,8 +2419,8 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
     }
   }
 
-  // 2) 大小。两条都走**生产路径**的对外比较器（`Registry.list()` 用 cmpPluginVer，
-  //    握手用 cmpFramework）。★ 不能用 `satisfies` 的两个闭区间夹出大小比较 ——
+  // 2) 大小。两条都走生产路径的对外比较器（`Registry.list()` 用 cmpPluginVer，
+  //    握手用 cmpFramework）。不能用 `satisfies` 的两个闭区间夹出大小比较 ——
   //    那是"拿范围判定去测大小比较"：排序规则一旦写错，夹具跟着一起错，而它
   //    看不出来。所以两侧都要有真的比较器。
   for (const [a, b, want] of fx.order.plugin) {
@@ -2434,43 +2434,43 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
       `框架版本 ${a} 与 ${b}：夹具说 ${want}，得到 ${got}`);
   }
 
-  // 3) 范围。★ 后半段是「被拒绝的形状」（`>=0.5.0`、`^0.5`、`||`……），它们与
-  //    「不满足」都返回 ok:false，但都**不能**被当成"没限制"放过去。
+  // 3) 范围。后半段是「被拒绝的形状」（`>=0.5.0`、`^0.5`、`||`……），它们与
+  //    「不满足」都返回 ok:false，但都不能被当成"没限制"放过去。
   for (const c of fx.ranges.cases) {
     assert.equal(M.satisfies(c.host, c.range).ok, c.ok,
       `host=${JSON.stringify(c.host)} range=${JSON.stringify(c.range)}`);
   }
 
-  // 3b) ★★ engines 这个键的**字段级**规则 —— 与守护进程 `engines_problem`
+  // 3b) engines 这个键的字段级规则 —— 与守护进程 `engines_problem`
   //     逐条一致：守护进程只认「dict 且 slurmate 是非空字符串」，若其余形状
-  //     **静默跳过**（当成没有限制），而客户端全拒，就成了一侧收下、
+  //     静默跳过（当成没有限制），而客户端全拒，就成了一侧收下、
   //     另一侧拒了，正是这个仓库点名过的最坏形状。
-  //     ★ `ranges` 那一段钉不住它：那一段喂的是 `host + range`，不构造清单。
+  //     `ranges` 那一段钉不住它：那一段喂的是 `host + range`，不构造清单。
   fx.engines.cases.forEach((c, i) => {
     const where = `engines 夹具第 ${i} 条：${JSON.stringify(c)}`;
-    // 键不出现 = JS 的 undefined（它是**通过**），null 是**出现过的值**（拒）。
+    // 键不出现 = JS 的 undefined（它是通过），null 是出现过的值（拒）。
     const mf = 'engines' in c ? { engines: c.engines } : {};
     const ret = M.enginesProblem(mf, c.host);
     assert.equal(ret === null, c.ok, `${where} 夹具说 ok=${c.ok}，得到 ${JSON.stringify(ret)}`);
-    // ★ kind 一并断言。只断言 ok 的话，"读不懂的范围串"（`^0.5`）与"不满足"
+    // kind 一并断言。只断言 ok 的话，"读不懂的范围串"（`^0.5`）与"不满足"
     //   会被混成一件事 —— 而它们对作者的含义完全不同：前者是"你这行写错了"
     //   （打包器当场就该拦住），后者才是"这个站点版本低"。
     if (!c.ok) assert.equal(ret.kind, c.kind, `${where} 夹具说 kind=${c.kind}，得到 ${ret.kind}`);
   });
 
-  // 3c) ★ 握手：客户端版本 × 服务端版本 → 一个态。**只有客户端读这一段**
+  // 3c) 握手：客户端版本 × 服务端版本 → 一个态。只有客户端读这一段
   //     （守护进程不执行这条检查，它拿不到客户端的版本 —— 见 PROTOCOL）。
   for (const c of fx.check.cases) {
     const client = 'client' in c ? c.client : null;
-    // ★ 键不写 = JS 的 undefined："答了，但里面没有一个能用的版本号"。
-    //   它与 null（"没问到"）是**两件事**，而夹具里两条都有。
+    // 键不写 = JS 的 undefined："答了，但里面没有一个能用的版本号"。
+    //   它与 null（"没问到"）是两件事，而夹具里两条都有。
     const server = 'server' in c ? c.server : undefined;
     const g = M.versionCheck(client, server);
     const where = `握手夹具 ${JSON.stringify(c)}`;
     assert.equal(g.verdict, c.verdict, `${where} 夹具说 ${c.verdict}，得到 ${g.verdict}`);
     assert.equal(g.blocked, c.blocked, `${where} 夹具说 blocked=${c.blocked}，得到 ${g.blocked}`);
   }
-  // ★ 内测期那条例外必须**明确地**红一次：`0.y` 里 client_behind 不拦人。
+  // 内测期那条例外必须明确地红一次：`0.y` 里 client_behind 不拦人。
   //   1.0 发布时那条例外要删掉，而"删掉一行 if"与"手滑删掉一行 if"在代码里
   //   长得一模一样 —— 这条断言就是那个区别。
   assert.equal(M.versionCheck('0.6', '0.7').blocked, false,
@@ -2479,21 +2479,21 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
     '★ 同 x 内客户端落后要拦 —— 这条与上面那条是同一个判定的两半，'
     + '删掉内测例外时这一条必须仍然红');
 
-  // 4) ★ 两条"不许静静通过"的路径。
-  //    段数不同 ⇒ 抛，而不是把 `0.6` 与 `0.6.0` 比出一个"相等"来；
-  //    插件版本不合形状 ⇒ 抛（走到那里说明清单校验漏了）。
+  // 4) 两条"不许静静通过"的路径。
+  //    段数不同，抛，而不是把 `0.6` 与 `0.6.0` 比出一个"相等"来；
+  //    插件版本不合形状，抛（走到那里说明清单校验漏了）。
   assert.throws(() => M.cmpVer(['0', '6'], ['0', '6', '0']), /段数不同/);
   assert.throws(() => M.cmpPluginVer('1.0', '1.0.0'), /不合形状/);
 
-  // 5) ★ 本客户端自己的版本号必须合框架版本的形状 —— 忘了改 package.json 时
+  // 5) 本客户端自己的版本号必须合框架版本的形状 —— 忘了改 package.json 时
   //    这条会红在本地，而不是等到 CI。（集群侧 19.0b2 有一条同样的。）
   assert.ok(M.FRAMEWORK_VERSION_RE.test(M.hostVersion()),
     `client/package.json 的版本 ${JSON.stringify(M.hostVersion())} 必须是 x.y`);
 
-  // 6) ★ 上面那张表测的是**正则**，而"清单里的版本号按**原串**匹配"是**另一条
+  // 6) 上面那张表测的是正则，而"清单里的版本号按原串匹配"是**另一条
   //    规则** —— 它住在 parseVer / inspectDir 里，而夹具表抓不到它：只要有人先
-  //    trim 一下，`" 1.0.0 "` 当然就过正则了（变异验证里这一条**真的**没红）。
-  //    所以这里走一遍**真的清单加载**。Python 侧同一件事在 19.0b2 的 need_str
+  //    trim 一下，`" 1.0.0 "` 当然就过正则了（变异验证里这一条真的没红）。
+  //    所以这里走一遍真的清单加载。Python 侧同一件事在 19.0b2 的 need_str
   //    那一条上 —— 若先 strip 再匹配，两头带空白的版本号就会被收下。
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-ver-'));
   try {
@@ -2508,8 +2508,8 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  // 7) ★ 上面 3b 钉的是**纯函数**。这一条钉它**真的接在清单那条路上** ——
-  //    函数写了却没人调（或者调用点又被内联逻辑取代），3b 那一类是**绿的**。
+  // 7) 上面 3b 钉的是纯函数。这一条钉它真的接在清单那条路上 ——
+  //    函数写了却没人调（或者调用点又被内联逻辑取代），3b 那一类是绿的。
   //    这个仓库里"一行包装 + 一份没人验的注释"已经出现过不止一次。
   const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-eng-'));
   try {
@@ -2535,11 +2535,11 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
 });
 
 test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪一项检查没做"', (t) => {
-  // ★ 这一格若是 fail-open，就比"跳过一项检查"更糟：`inspectDir` 里的短路
-  //   （`&& host`）在 host 读不到时**同时跳过了两项**（形状检查与范围检查），
+  // 这一格若是 fail-open，就比"跳过一项检查"更糟：`inspectDir` 里的短路
+  //   （`&& host`）在 host 读不到时同时跳过了两项（形状检查与范围检查），
   //   于是 `engines: "slurmate"`（一个字符串）也会被收下。
   //
-  // ★ 它还有一句话必须说对：这是**客户端自己**的安装问题（读不到 package.json），
+  // 它还有一句话必须说对：这是客户端自己的安装问题（读不到 package.json），
   //   不是插件的问题。说成"这个插件用不了"会把用户指去找作者或管理员，而他们
   //   什么也做不了。
   const origLoad = Module._load;
@@ -2563,7 +2563,7 @@ test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪
   assert.ok(!/这个插件用不了/.test(r.why),
     '★ 这是客户端这一侧的安装问题，说成"插件用不了"会把用户指去找作者');
 
-  // 反侧：**没有** engines 的插件照样收下 —— 读不到自己的版本不该把能做的事也拦掉。
+  // 反侧：没有 engines 的插件照样收下 —— 读不到自己的版本不该把能做的事也拦掉。
   assert.equal(M.enginesProblem({}, null), null, '没有这个键 ⇒ 没有范围要判 ⇒ 收下');
   assert.equal(M.enginesProblem({ engines: {} }, null), null, '空对象 ⇒ 同上');
 
@@ -2571,12 +2571,12 @@ test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪
 });
 
 /**
- * ★★ 版本闸：同 x 内客户端落后 ⇒ 拦住，一次会话都不建。
+ * 版本闸：同 x 内客户端落后，拦住，一次会话都不建。
  *
- * ★ 为什么要把 `package.json` 桩掉：今天客户端是 `0.y`，而 **`0.y` 是内测期、
+ * 为什么要把 `package.json` 桩掉：今天客户端是 `0.y`，而 **`0.y` 是内测期、
  *   不受版本约束**（`versionCheck` 里那条带到期条件的例外）。所以"拦住"那一格
- *   用真版本号**走不到** —— 而它恰恰是这条规则唯一会拦人的一格。
- *   规则本身（含那条例外）在上一条用例里按夹具逐条钉着；这一条钉的是**接线**：
+ *   用真版本号走不到 —— 而它恰恰是这条规则唯一会拦人的一格。
+ *   规则本身（含那条例外）在上一条用例里按夹具逐条钉着；这一条钉的是接线：
  *   index.js 真的调了它、真的在 `blocked` 时停了下来。
  */
 test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放行但出声', async (t) => {
@@ -2589,16 +2589,16 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
 
   const idx = require('../src/main/index.js');
 
-  // ★★ 前提由这一条用例**自己建**：手上那张表清空、连在 demo 那条上，然后
-  //    **连的就是它**（一次"重连"，不是换站点）。两件事都得自己说，否则会红在一个
+  // 前提由这一条用例自己建：手上那张表清空、连在 demo 那条上，然后
+  //    连的就是它（一次"重连"，不是换站点）。两件事都得自己说，否则会红在一个
   //    与这道闸无关的地方：
   //    · 这个文件里的用例共用一个 Electron 实例，上一个用例留下的记录会出现在
   //      下面那个"前后对比"里；
-  //    · "正连着的那条"可能是**已经被删掉**的那一条（别的用例会删连接），那时连
-  //      任何一条都是换站点 ⇒ `app:connect` 会先 `leaveSite()` 把记录收掉
+  //    · "正连着的那条"可能是已经被删掉的那一条（别的用例会删连接），那时连
+  //      任何一条都是换站点，`app:connect` 会先 `leaveSite()` 把记录收掉
   //      （见 index.js 那一段的注释）。
-  //    ★ 目标也不能随手写 `getCfg().activeConnectionId`：那答的是"下一次要用哪一条"，
-  //      而界面是**先** `setActiveConnection` **再** `connect` —— 两块事实不一样时，
+  //    目标也不能随手写 `getCfg().activeConnectionId`：那答的是"下一次要用哪一条"，
+  //      而界面是先 `setActiveConnection` 再 `connect` —— 两块事实不一样时，
   //      拿它当目标同样会让这一步变成一次换站点。
   await openUpTo(idx, 1);
   await connectDemo(idx);
@@ -2608,17 +2608,17 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   const target = idx._test.getCfg().connections.find((c) => c.id === here);
   assert.ok(target, '前提：正连着的那条还在配置里');
 
-  // ★ "一次会话都不许建"拿**前后对比**来说：这样它证的是"这一步没让表长出东西来"，
-  //   而不是"表恰好是空的"。★ 这道闸的牙齿其实是上面那两条（`code === 'client_behind'`
+  // "一次会话都不许建"拿前后对比来说：这样它证的是"这一步没让表长出东西来"，
+  //   而不是"表恰好是空的"。这道闸的牙齿其实是上面那两条（`code === 'client_behind'`
   //   与"连接已经关掉"）—— 那个 code 只有 `applyVersionGate` 产得出来。
   const sidBefore = (await frontSnap())?.sessionId ?? null;
 
-  // ① 服务端更新、**同一个大版本** —— 那条要求咬人的那一格。
+  // ① 服务端更新、同一个大版本 —— 那条要求咬人的那一格。
   await invoke('app:debug', 'daemon-version', '2.5');
   const r = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r.ok, false, `客户端落后必须被拦住：${JSON.stringify(r)}`);
   assert.equal(r.code, 'client_behind', JSON.stringify(r));
-  // ★ 两个版本号都要在：用户唯一能做的动作是升级客户端，他得知道升到哪一版。
+  // 两个版本号都要在：用户唯一能做的动作是升级客户端，他得知道升到哪一版。
   assert.match(r.error, /2\.5/, r.error);
   assert.match(r.error, /2\.4/, r.error);
   assert.equal(idx._test.getBackend().connected, false,
@@ -2629,13 +2629,13 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   // "这道闸真的跑过"由上面的 `code === 'client_behind'` 保证：那个 code 只有
   // `applyVersionGate` 产得出来。
 
-  // ② 反方向：同 x 而客户端**更新** —— 这是被承诺过的那一格，必须放行。
+  // ② 反方向：同 x 而客户端更新 —— 这是被承诺过的那一格，必须放行。
   await invoke('app:debug', 'daemon-version', '2.3');
   const r2 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r2.ok, true,
     `同 x 且客户端更新 ⇒ 必须放行（"同 x 保证兼容"承诺的就是这一格）：${JSON.stringify(r2)}`);
 
-  // ③ 跨大版本：**不拦**，但要说出来。
+  // ③ 跨大版本：不拦，但要说出来。
   await invoke('app:debug', 'daemon-version', '1.28');
   const r3 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r3.ok, true,
@@ -2652,11 +2652,11 @@ test('★★ 版本闸：同 x 内客户端落后 ⇒ 拦住；其余各态放�
   assert.equal(back.ok, true, `还原现场失败（后面的用例都假定连着）：${JSON.stringify(back)}`);
   assert.equal(idx._test.getBackend().connected, true,
     '收尾之后假后端必须还是连着的 —— 这个文件里后面的用例没做重连');
-  // ★ 而"连着"还不够：连接之后那一次**站点对账**是后台跑的（`reconcileSitePlugins`
+  // 而"连着"还不够：连接之后那一次站点对账是后台跑的（`reconcileSitePlugins`
   //   故意不 await，理由见它自己的注释）。不等它落地，下一条用例的夹具（`setSitePlugins`
-  //   会**清空站点池那一棵树**）就会和它抢同一个目录 —— 症状是后面那条用例红在
+  //   会清空站点池那一棵树）就会和它抢同一个目录 —— 症状是后面那条用例红在
   //   "这个站点不分发插件"上，而它排查的是它自己。
-  //   ★ 走**产品里那个动词**（`app:syncPlugins` 自己 await 到对账跑完才返回），
+  //   走产品里那个动词（`app:syncPlugins` 自己 await 到对账跑完才返回），
   //     不在这里 sleep 一段猜出来的时间。
   await invoke('app:syncPlugins');
 });
@@ -2672,14 +2672,14 @@ test('★ 卸载一个插件：立刻认不出来，但已有会话仍然能被�
   const reg = new Registry([{ dir: tmp, source: 'pool' }]);
   assert.equal(reg.get(id, '1.0.0').name, 'temp', '装上之后认得');
 
-  // ★ 卸载 = 把那个槽位收掉（记录表 + 树）。★ 两样都要删：只删树的话，那一份
+  // 卸载 = 把那个槽位收掉（记录表 + 树）。两样都要删：只删树的话，那一份
   //   仍然"没提交"，而这一条用例要测的是"卸掉之后认不出来"——留一张孤儿记录表
-  //   也能过这一关，但它同时会让这条用例对**错误的卸载实现**说 OK。
+  //   也能过这一关，但它同时会让这条用例对错误的卸载实现说 OK。
   dropSlot(tmp, id, '1.0.0');
   reg.reload();
   assert.equal(reg.get(id, '1.0.0'), null,
     '卸掉之后认不出来 —— 而"认不出来"的归宿是"只解释、不动作"，不是崩溃');
-  // ★ 会话本身不受影响：状态/心跳/停止只认 session_id，一次都不查插件。
+  // 会话本身不受影响：状态/心跳/停止只认 session_id，一次都不查插件。
   //   这条断言是"卸载插件之后用户仍然能停掉作业"的全部依据。
   const { SessionController } = require('../src/main/session.js');
   const sess = new SessionController({
@@ -2705,58 +2705,58 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     const pv = r.plugins;
 
     assert.deepEqual(pv.plugins, [], '一个按钮都不该画出来');
-    // ★ 这两条是承重的：界面靠它们把「你还没装插件」与「站点升级了而本机是旧的」
+    // 这两条是承重的：界面靠它们把「你还没装插件」与「站点升级了而本机是旧的」
     //   分开 —— 而这两种情况在 `missing` 里长得一模一样。没有它们，零插件时
     //   界面对站点上每一个插件都会喊"升级客户端"。
     assert.equal(pv.installedCount, 0, '要能分辨"池是空的"');
     assert.ok(pv.errors.length === 0, '池空不是错误');
-    // ★ 这里断言 `pv.poolDir` 是 undefined：插件只有站点分发一条来的路，用户没有
+    // 这里断言 `pv.poolDir` 是 undefined：插件只有站点分发一条来的路，用户没有
     //   任何"往目录里放东西"的场合，界面上不许教用户去做那件事。
     assert.equal(pv.poolDir, undefined, '本机池的路径不该再下发给界面');
 
-    // ★ 假站点报的是仓库里那两个**真插件**（见 backend-fake 的 _siteIndex），
+    // 假站点报的是仓库里那两个真插件（见 backend-fake 的 _siteIndex），
     //   不是"本机池里有什么"（那样「站点有而本机没有」在这里永远走不到）。
-    //   于是池空 + 本机没有它们 ⇒ `missing`
-    //   里就是它们，而且每一份都**带着文件清单**（`distributed: true`）——
+    //   于是池空 + 本机没有它们，`missing`
+    //   里就是它们，而且每一份都带着文件清单（`distributed: true`）——
     //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
     assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['code-server', 'sshd'],
       '站点照实报了它要分发的两个插件，而本机一个都没有');
     assert.ok(pv.missing.every((m) => m.distributed === true),
       `每一份都要标出"站点会发它"：${JSON.stringify(pv.missing)}`);
 
-    // ★ 一个插件都没有时，提交必须被**明确拦住**并给出路，而不是起一个
+    // 一个插件都没有时，提交必须被明确拦住并给出路，而不是起一个
     //   看起来起来了但连不上的作业，也不是一句"本版支持：（一个都没有）"。
     const started = await appStart({}, 'code-server');
     assert.equal(started.ok, false, '没有插件就起不了会话 —— 必须在提交前拦住');
     const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
       .map((n) => n.text).join('\n');
     assert.match(notices, /还没有装上任何插件/, `要说清是"还没装"：${notices}`);
-    // ★ 出路只有一条：站点分发 —— 除了"去同步"要说对，还要钉住**不许出现**
+    // 出路只有一条：站点分发 —— 除了"去同步"要说对，还要钉住不许出现
     //   任何让用户"往目录里放东西"的话（本机池不存在）。
     assert.match(notices, /本站会分发插件/, `站点会分发时要说去同步：${notices}`);
-    // ★ 这里禁的是"往目录里放东西"这一类句子（"插件目录"/"放进去"/"勾上"）；
-    //   **「开发者模式」这四个字不是禁词** —— 它今天指的是另一件事
+    // 这里禁的是"往目录里放东西"这一类句子（"插件目录"/"放进去"/"勾上"）；
+    //   「开发者模式」这四个字不是禁词 —— 它今天指的是另一件事
     //   （换掉整个后端，见 devmode.test.mjs）。
     assert.doesNotMatch(notices, /插件目录|打开插件目录|放进去|勾上/,
       `★ 本机池没了，任何一句"把目录放进去"都是一句让用户去干没用的事的话：${notices}`);
   });
 });
 
-// ── ★ 站点分发：端到端走一遍（下载 → 同意 → 换入 → 加载）────────────────────
+// ── 站点分发：端到端走一遍（下载 → 同意 → 换入 → 加载）────────────────────
 
 test('★★ 站点分发端到端：下来了但**没同意就不加载**，同意之后才装上', async (t) => {
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    // ★ 收尾必须把**站点池**恢复成缺省：这台机器上的其余用例共用同一个 userData，
+    // 收尾必须把站点池恢复成缺省：这台机器上的其余用例共用同一个 userData，
     //   留下一个装好的站点插件会让它们的 `missing` / `installedCount` 断言
     //   因为错误的理由通过或失败。同一条规矩见文件头的池设置那一段。
     cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
   await withSitePlugins([], async () => {
-    // 池子空、开发者模式开着 ⇒ 本机一个插件都没有，而站点报了两个
-    // **真文件**（仓库里的 plugins/，见 backend-fake 的 _siteIndex）。
+    // 池子空、开发者模式开着，本机一个插件都没有，而站点报了两个
+    // 真文件（仓库里的 plugins/，见 backend-fake 的 _siteIndex）。
     const r = await invoke('app:syncPlugins');
     assert.equal(r.ok, true, JSON.stringify(r));
 
@@ -2765,7 +2765,7 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
     const pending = idx._test.getPendingConsent();
     assert.equal(pending.length, 2, `站点那两个插件都要先过同意闸：${JSON.stringify(r.plugins.consent)}`);
 
-    // ★ 换入**还没发生** —— 站点池里一个版本都不该有。
+    // 换入还没发生 —— 站点池里一个版本都不该有。
     const sitePool = idx._test.getSitePoolDir();
     for (const p of pending) {
       assert.equal(fs.existsSync(poolTreeOf(sitePool, p.id, p.version)), false,
@@ -2773,7 +2773,7 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
       assert.equal(fs.existsSync(poolRecordOf(sitePool, p.id, p.version)), false,
         '★ 连记录表都不许有 —— 没有它那一份本来也不可见');
     }
-    // ★ 而且它**没有被加载**（同意闸的全部意义）：池子空着，而它还没换入，
+    // 而且它没有被加载（同意闸的全部意义）：池子空着，而它还没换入，
     //   所以注册表里根本查不到它。
     for (const p of pending) {
       assert.equal(idx._test.getRegistry().get(p.id, p.version), null,
@@ -2791,7 +2791,7 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
       '同意之后它才进站点池');
     assert.equal(fs.existsSync(poolRecordOf(sitePool, first.id, first.version)), true,
       '★ 而"进池"这件事是在**记录表写下去**那一刻完成的（提交点）');
-    // ★ 台账里要有它，而且存的是**全长摘要**（64 位）—— 拿 16 位当键就是个碰撞面。
+    // 台账里要有它，而且存的是全长摘要（64 位）—— 拿 16 位当键就是个碰撞面。
     const led = idx._test.getCfg().trustedPlugins[`${first.id}@${first.version}`];
     assert.ok(led, '同意要写进台账');
     assert.equal(led.digest.length, 64, '★ 台账里的摘要必须是全长的，截断只留给显示');
@@ -2807,21 +2807,21 @@ test('★★ 站点分发端到端：下来了但**没同意就不加载**，同
   });
 });
 
-// ── ★ 假站点上那颗「安装插件…」──────────────────────────────────────────────
+// ── 假站点上那颗「安装插件…」──────────────────────────────────────────────
 //
-// 这一组验的是**一条与真站点同构的路**：往站点的插件目录里放进一棵真的插件树，
+// 这一组验的是一条与真站点同构的路：往站点的插件目录里放进一棵真的插件树，
 // 站点当场重扫，然后一切照旧（站点报它 → 客户端取回来 → 过同意闸 → 加载）。
-// ★ 判据里最要紧的一条是**没有特判**：装上去的那一份必须与"站点本来就有的那一份"
-//   走**逐字相同**的那条路。
+// 判据里最要紧的一条是没有特判：装上去的那一份必须与"站点本来就有的那一份"
+//   走逐字相同的那条路。
 
 /**
- * 现打一个 `.splug` —— **整包**（站点侧 + 客户端侧都在），也就是真站点上
+ * 现打一个 `.splug` —— 整包（站点侧 + 客户端侧都在），也就是真站点上
  * `slurmate plugin install` 收到的那个文件。
  *
- * ★ 走**打包器那份实现**（`sideDigests` / `signedMessage` / `buildSigBlock`），
+ * 走打包器那份实现（`sideDigests` / `signedMessage` / `buildSigBlock`），
  *   不在这里手搓字节：手搓一份就是在用例里又实现了一遍容器格式，而它与真格式
  *   分家的那天，这一组会一起绿着说"装得上"。
- * ★ 签名者是谁**不影响**结果：假站点收到包之后会用自己的钥匙**重签**再发给客户端
+ * 签名者是谁不影响结果：假站点收到包之后会用自己的钥匙重签再发给客户端
  *   （见 backend-fake 的 `_pkgOf`），那正是"假站点与真站点同构"的一部分。
  */
 function buildSplug(treeDir, outFile) {
@@ -2849,9 +2849,9 @@ function buildSplug(treeDir, outFile) {
 }
 
 /**
- * 一棵**合法**的插件树（真文件，两半都有）。
+ * 一棵合法的插件树（真文件，两半都有）。
  *
- * ★ 它必须过得了 `inspectDir`（假站点在装的那一刻就拿它当闸）—— 少一个
+ * 它必须过得了 `inspectDir`（假站点在装的那一刻就拿它当闸）—— 少一个
  *   `displayName`、id 不是 ULID、版本不是 `x.y.z`，装的当场就会被拒。
  */
 function writePluginTree(root, { id, name, title, version = '1.0.0', extra = {} }) {
@@ -2865,7 +2865,7 @@ function writePluginTree(root, { id, name, title, version = '1.0.0', extra = {} 
   }, null, 2));
   fs.writeFileSync(path.join(dir, 'client', 'index.js'),
     'module.exports = { attach() {} };\n');
-  // 站点侧：真站点上那是**以提交者本人的身份在集群上跑**的脚本，也正是
+  // 站点侧：真站点上那是以提交者本人的身份在集群上跑的脚本，也正是
   // "客户端侧与站点侧是两个方向"这句话的物证。
   fs.writeFileSync(path.join(dir, 'job', 'start.sh'), '#!/bin/sh\necho demo\n');
   return dir;
@@ -2905,9 +2905,9 @@ async function installSplug(t, files) {
 /**
  * 一个"假站点上什么都没有"的干净现场：本机一个插件都没有，站点那两处都是空的。
  *
- * ★ 两处都要清，而且理由不同：
- *   · `dir`（样例那一棵）是**这条用例自己给的临时目录**（真机上那是"换一棵树 + 重启"）；
- *   · `siteInstalledDir`（装上去的那一处）是**同一个沙盒目录**，会在同一个文件里
+ * 两处都要清，而且理由不同：
+ *   · `dir`（样例那一棵）是这条用例自己给的临时目录（真机上那是"换一棵树 + 重启"）；
+ *   · `siteInstalledDir`（装上去的那一处）是同一个沙盒目录，会在同一个文件里
  *     几条用例之间留着 —— 不清的话，前一条装上去的插件会在后一条里"本来就在站上"，
  *     而那个症状是"站点报了它、而夹具说站点是空的"。
  */
@@ -2916,7 +2916,7 @@ async function emptyFakeSite(idx, dir) {
   idx._test.setDevSampleDir(dir);
   fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
   await connectDemo(idx);
-  // ★ 连接那一次的对账是**不 await** 的（真集群上它是几秒的后台事），所以这里
+  // 连接那一次的对账是不 await 的（真集群上它是几秒的后台事），所以这里
   //   自己再对一次 —— 不然紧接着读视图会读到 `site: null`，而那个失败的形状是
   //   "Cannot read properties of null"，指不回"对账还没跑完"。
   const s = await invoke('app:syncPlugins');
@@ -2942,7 +2942,7 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
 
     await withSitePlugins([], async () => {
       await emptyFakeSite(idx, src);
-      // ★ 界面画不画那颗按钮，靠的是这一个**能力位**（不是界面按后端名现判）——
+      // 界面画不画那颗按钮，靠的是这一个能力位（不是界面按后端名现判）——
       //   所以它属于这一侧：主进程说有，界面才画。
       assert.equal(idx._test.getPluginsView().site.canInstall, true,
         '假站点上那个能力位要是 true —— 界面按它画「安装插件…」');
@@ -2956,8 +2956,8 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
       assert.deepEqual(r.__dialog.filters[0].extensions, ['splug'],
         '挑的必须是打包器的产物（`.splug`），不是随便什么文件');
 
-      // ── ① 「装上去的东西」那一处真的多了一棵树，而**两半都在** ──
-      //   ★ 落点是**沙盒里那一处**，不是样例那棵 —— 用户装什么，都不该动到开发样例。
+      // ── ① 「装上去的东西」那一处真的多了一棵树，而两半都在 ──
+      //   落点是沙盒里那一处，不是样例那棵 —— 用户装什么，都不该动到开发样例。
       const dest = path.join(idx._test.getSiteInstalledDir(), want.id);
       assert.equal(fs.existsSync(path.join(dest, 'plugin.json')), true,
         `站点上该多出一棵 ${dest}`);
@@ -2968,12 +2968,12 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
         '★★ 装上去的东西**不许**落在**样例**那一棵里 —— 那是开发基座用的样例，'
         + '用户装什么都会动到它的话，那两棵树就不再是"仓库此刻的样子"了');
 
-      // ── ② 站点**当场**就报它（不用重启） ──
+      // ── ② 站点当场就报它（不用重启）──
       const reported = idx._test.getBackend()._sitePlugins();
       assert.equal(reported.some((p) => p.id === want.id), true,
         '★ 装完站点当场就得报它 —— 少了这一下，用户看到的是"装上了而站点没有它"');
 
-      // ── ③ 客户端走的还是那条路：它在**待同意**里，一个字节都没进池子 ──
+      // ── ③ 客户端走的还是那条路：它在待同意里，一个字节都没进池子 ──
       const pending = idx._test.getPendingConsent();
       assert.equal(pending.length, 1,
         `★ 装上去的那一份要先过同意闸 —— 这条路上没有捷径：${JSON.stringify(pending)}`);
@@ -2992,7 +2992,7 @@ test('★★ 往假站点上装一个 .splug：站点当场报它，而客户端
       assert.equal(view.plugins.some((p) => p.id === want.id), true,
         '它要出现在界面那一列里（可用的那一种，与站点本来就有的那些没有区别）');
 
-      // ── ⑤ 装上去的那一份**进得了会话那套解析**（这才是"可用"的意思）──
+      // ── ⑤ 装上去的那一份进得了会话那套解析（这才是"可用"的意思）──
       const st = await invoke('app:states');
       assert.equal(st.sessions.length, 0, '这一条不起会话，只看它有没有被认成服务');
       assert.equal(landed.active === false, false, '★ 同意过的那一份必须带钩子');
@@ -3027,17 +3027,17 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     const destA = path.join(installed, idA);
     const before = treeStamps(destA);
 
-    // ── ② 同一份再装一次：**一个字节都不写**，如实说"站上已经是这一份了" ──
+    // ── ② 同一份再装一次：一个字节都不写，如实说"站上已经是这一份了" ──
     const again = await installSplug(t, [pkgA]);
     assert.equal(again.ok, true, JSON.stringify(again));
     assert.equal(again.installed.length, 0, '★ 站上已经是这一份了，不该再写一遍');
     assert.equal(again.unchanged.length, 1, `要如实说出"它已经在站上了"：${JSON.stringify(again)}`);
     assert.equal(again.unchanged[0].dir, destA);
-    // ★ 判据是**盘上那棵树一个字节都没动**（mtime 也一起比）—— 只看返回值的话，
+    // 判据是盘上那棵树一个字节都没动（mtime 也一起比）—— 只看返回值的话，
     //   "重写了一遍同样内容再报 unchanged" 会全绿。
     assert.deepEqual(treeStamps(destA), before, '★ 说"已经在站上了"就必须真的没碰它');
 
-    // ── ③ 同一个 id 的**另一个版本**：拒，而且说清那一棵在哪儿 ──
+    // ── ③ 同一个 id 的另一个版本：拒，而且说清那一棵在哪儿 ──
     const treeB = writePluginTree(path.join(tmp, 'b'), {
       id: idA, name: 'demo-box', title: '示例盒子', version: '2.0.0' });
     const pkgB = path.join(tmp, 'b.splug');
@@ -3059,7 +3059,7 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     assert.match(no.error, /bad\.splug/, '要说清是哪一个文件');
     assert.deepEqual(fs.readdirSync(installed), [idA], '★ 坏包不许在站点的目录里留下任何东西');
 
-    // ── ⑤ 清单装上去客户端也加载不了 ⇒ 装的当场就拒（不推迟到"同意之后"）──
+    // ── ⑤ 清单装上去客户端也加载不了，装的当场就拒（不推迟到"同意之后"）──
     const treeC = writePluginTree(path.join(tmp, 'c'), {
       id: '01M2JKM1M1M1M1M1M1M1M1M1M8', name: 'demo-broken', title: '示例',
       version: '不是版本号' });
@@ -3068,13 +3068,13 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     const broken = await installSplug(t, [pkgC]);
     assert.equal(broken.ok, false);
     assert.match(broken.error, /加载不了|version/, `要说清它装上去也用不了：${broken.error}`);
-    // ★ 而那句错话里**不许出现暂存目录**：它此刻已经没了，指着它等于让人去
+    // 而那句错话里不许出现暂存目录：它此刻已经没了，指着它等于让人去
     //   找一个不存在的地方。
     assert.equal(/\.slurmate-stage-/.test(broken.error), false,
       `★ 暂存目录的路径不该漏到用户那句话里：${broken.error}`);
     assert.deepEqual(fs.readdirSync(installed), [idA], '★ 验不过的包不许落地');
 
-    // ── ⑥ 一次给两个、其中一个是坏的 ⇒ **一条都不装**（两遍式）──
+    // ── ⑥ 一次给两个、其中一个是坏的，一条都不装（两遍式）──
     const treeD = writePluginTree(path.join(tmp, 'd'), {
       id: '01M2JKM1M1M1M1M1M1M1M1M1M9', name: 'demo-ok', title: '示例乙' });
     const pkgD = path.join(tmp, 'd.splug');
@@ -3084,8 +3084,8 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     assert.deepEqual(fs.readdirSync(installed), [idA],
       '★★ 好的那一个也不许落地 —— "装了一半"是最坏的那种中间态');
 
-    // ── ⑦ **样例**那一棵里的 id 同样参与"一个 id 只留一棵树" ──
-    //   ★★ 两处必须**一起看**：只查"装上去的"那一处的话，样例里已经有的那个 id
+    // ── ⑦ 样例那一棵里的 id 同样参与"一个 id 只留一棵树" ──
+    //   两处必须一起看：只查"装上去的"那一处的话，样例里已经有的那个 id
     //      会被再装一份上去 —— 而站点上从此有两棵同 id 的树，正是这条规矩要挡的形状
     //      （守护进程那边两棵树会互相覆盖，而覆盖是静默的）。
     const sampleId = '01M2JKM1M1M1M1M1M1M1M1M1M2';
@@ -3093,7 +3093,7 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
     // 换一棵树 = 真机上重启一次（那份启动快照要重建，见 forgetSiteIndex 的注释）
     idx._test.setDevSampleDir(src);
     const pkgE = path.join(tmp, 'e.splug');
-    // ★ 版本要与样例那一棵**不同**：两份一模一样的话，站点会如实回"站上已经是这一份
+    // 版本要与样例那一棵不同：两份一模一样的话，站点会如实回"站上已经是这一份
     //   了"（那是另一条路，而且它是对的）—— 那样这一条就验不到"同 id 拒装"。
     buildSplug(writePluginTree(path.join(tmp, 'e'), {
       id: sampleId, name: 'demo-sample', title: '样例盒子', version: '2.0.0' }), pkgE);
@@ -3118,8 +3118,8 @@ test('★★ 装不上的那几种，每一种都说得出是哪一种', async (
 /**
  * 那个端口上还有人在听吗。
  *
- * ★ 判据是**内核**（能不能连上），不是"我们记着的那个 pid 还在不在" ——
- *   假站点杀的是**进程组**，而一个 fork 出去的子进程不会被 pid 那一条判据看见。
+ * 判据是内核（能不能连上），不是"我们记着的那个 pid 还在不在" ——
+ *   假站点杀的是进程组，而一个 fork 出去的子进程不会被 pid 那一条判据看见。
  */
 function portAlive(port) {
   return new Promise((resolve) => {
@@ -3132,9 +3132,9 @@ function portAlive(port) {
 }
 
 test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头是它，结束之后它真的没了', async (t) => {
-  // ★★ 这一条是本阶段的**重心**。从前假站点把隧道永远指向一个内置的假网页，
+  // 这一条是本阶段的重心。从前假站点把隧道永远指向一个内置的假网页，
   //    与是哪个插件无关 —— 于是"点启动打开的那个页面"在开发者模式里根本不是
-  //    这个插件的界面。现在：会话登记那一刻，站点**真的把 `job/start.sh` 跑起来**，
+  //    这个插件的界面。现在：会话登记那一刻，站点真的把 `job/start.sh` 跑起来，
   //    服务真的在听一个端口，日志是它自己说的话。
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -3145,7 +3145,7 @@ test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头�
   const sess = run.ctl.session;
   assert.equal(sess.state, 'enrolled', '会话要登记上');
 
-  // ── ① 会话报的那个端口上**真的有人听着**，而且那一段内容来自作业侧 ──
+  // ── ① 会话报的那个端口上真的有人听着，而且那一段内容来自作业侧 ──
   const port = sess.service_port;
   assert.match(sess.tunnel_target, /^127\.0\.0\.1:\d+$/, '隧道目标要是字面 IPv4');
   assert.equal(sess.tunnel_target, `127.0.0.1:${port}`);
@@ -3157,11 +3157,11 @@ test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头�
   const hz = await fetch(`http://127.0.0.1:${port}/healthz`);
   assert.equal(hz.status, 200, '作业侧那个服务要真的应答');
 
-  // ── ② 口令是**作业侧生成的**，不是假站点写死的那一个 ──
+  // ── ② 口令是作业侧生成的，不是假站点写死的那一个 ──
   assert.ok(typeof sess.auth_password === 'string' && sess.auth_password.length >= 8,
     `会话文件里该有作业侧生成的口令，实际 ${JSON.stringify(sess.auth_password)}`);
 
-  // ── ③ 日志是**它自己说的**：宿主那几行 + 作业侧那句 log，而且落在一个真的文件上 ──
+  // ── ③ 日志是它自己说的：宿主那几行 + 作业侧那句 log，而且落在一个真的文件上 ──
   const jl = await invoke('app:jobLog', { session_id: sess.session_id, lines: 200 });
   assert.equal(jl.ok, true, JSON.stringify(jl));
   assert.match(jl.data.out.path, /\.slurmate[/\\]logs[/\\]slurm-\d+\.out$/,
@@ -3171,7 +3171,7 @@ test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头�
   assert.match(jl.data.out.text, new RegExp(`夹具的服务在 127\\.0\\.0\\.1:${port} 上起来`),
     '★★ 而那一行是**这个插件的作业侧**打印的 —— 它才算"作业日志"');
 
-  // ── ④ 结束会话 ⇒ **那个进程真的被收掉了**（端口上没人听了） ──
+  // ── ④ 结束会话，那个进程真的被收掉了（端口上没人听了）──
   const stopped = await invoke('app:stop', { slot: run.slot });
   assert.equal(stopped.ok, true, JSON.stringify(stopped));
   await waitUntil(async () => (await portAlive(port)) === false,
@@ -3179,11 +3179,11 @@ test('★★ 假站点真的把这个插件的作业侧跑起来：隧道那头�
 });
 
 /**
- * 换一份**作业侧**：拷贝那棵夹具树，把 `job/start.sh` 换成给的那一段（还可以顺带
+ * 换一份作业侧：拷贝那棵夹具树，把 `job/start.sh` 换成给的那一段（还可以顺带
  * 往那一层里多写几个文件）。
  *
- * ★ 客户端那一半（清单、`client/index.js`）一个字节都不动 —— 站点报的还是同一个
- *   `id@版本`，于是池里那一份照旧对得上，验的就纯粹是**作业侧**那件事。
+ * 客户端那一半（清单、`client/index.js`）一个字节都不动 —— 站点报的还是同一个
+ *   `id@版本`，于是池里那一份照旧对得上，验的就纯粹是作业侧那件事。
  */
 function siteTreeWithJobSide(script, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-badjob-'));
@@ -3200,8 +3200,8 @@ test('★★ 作业侧起不来 ⇒ 会话**不许判成功**，而原因要说�
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
-    // ★★ **这一条用例的会话是故意失败的**，它在客户端那张表里停在 `error`。
-    //    不清掉的话，后面第一个拿 `onlyCtl` 取"唯一那条会话"的用例会取到**它**，
+    // 这一条用例的会话是故意失败的，它在客户端那张表里停在 `error`。
+    //    不清掉的话，后面第一个拿 `onlyCtl` 取"唯一那条会话"的用例会取到它，
     //    而症状是那条用例红在"会话没有登记上"上 —— 指不回这里。
     for (const rec of [...idx._test.getSessions().values()]) {
       if (rec.controller) await rec.controller.abandon();
@@ -3226,19 +3226,19 @@ test('★★ 作业侧起不来 ⇒ 会话**不许判成功**，而原因要说�
   assert.equal(r.ok, true, `★ 提交本身要成功（站点收下了它）：${JSON.stringify(r)}`);
   const ctl = idx._test.sessionAt(r.slot).controller;
 
-  // ★ 判据一：会话**不会**走到 running。它的归宿由守护进程（假站点）给，
+  // 判据一：会话不会走到 running。它的归宿由守护进程（假站点）给，
   //   客户端只照着念 —— 所以这里等的是"不再是活的"。
   await waitUntil(() => ['error', 'ended'].includes(ctl.state),
     '会话不许判成功', 30000);
   assert.notEqual(ctl.state, 'running', '★ 起不来就是起不来，不许当成起来了');
 
-  // ★ 判据二：**站点那一侧**也没有登记过（`ctl.session` 是服务端那一份视图）。
+  // 判据二：站点那一侧也没有登记过（`ctl.session` 是服务端那一份视图）。
   assert.notEqual(ctl.session.state, 'enrolled', '★★ "登记"这一步在站点上必须没有发生');
   assert.equal(ctl.session.tunnel_target, null, '★ 更不许留下一个隧道目标');
   assert.match(String(ctl.snapshot().error || ''), /起不来|没有起来|已结束/,
     '★ 而界面上那句话要指得出"是作业侧起不来"，不是一句"未知错误"');
 
-  // ★ 判据二：为什么起不来，**在作业日志里，而且是它自己说的**。
+  // 判据二：为什么起不来，在作业日志里，而且是它自己说的。
   const jl = await invoke('app:jobLog', { session_id: ctl.sessionId, lines: 200 });
   assert.equal(jl.ok, true, JSON.stringify(jl));
   assert.match(jl.data.out.text, /这个插件在这台机器上起不来：本机没有 code-server/,
@@ -3249,12 +3249,12 @@ test('★★ 作业侧起不来 ⇒ 会话**不许判成功**，而原因要说�
 });
 
 test('★ 作业侧把服务的输出重定向走 ⇒ 宿主**拒绝启动**，并说出那两个 fd', async (t) => {
-  // 契约 §5.5：服务的 stdout/stderr 必须**继承**宿主的那两条流 —— 那两条就是作业
-  // 日志。重定向走 = 服务的输出在站点上一个字都看不到，**而且不报错**：界面上是
+  // 契约 §5.5：服务的 stdout/stderr 必须继承宿主的那两条流 —— 那两条就是作业
+  // 日志。重定向走 = 服务的输出在站点上一个字都看不到，而且不报错：界面上是
   // "作业起来了，日志只有宿主那几行"，看起来完全正常。所以宿主当场判失败。
   //
-  // ★ 这一条钉的是**替身宿主里那一句**（`svc_stream_ok`）。没有它，假站点会把一个
-  //   真站点上**起不来**的插件演成"起来了" —— 而作者会在开发者模式里验过、
+  // 这一条钉的是替身宿主里那一句（`svc_stream_ok`）。没有它，假站点会把一个
+  //   真站点上起不来的插件演成"起来了" —— 而作者会在开发者模式里验过、
   //   上了真集群才发现日志是空的。
   const idx = require('../src/main/index.js');
   t.after(async () => {
@@ -3294,12 +3294,12 @@ test('★ 作业侧把服务的输出重定向走 ⇒ 宿主**拒绝启动**，�
   assert.equal(jl.ok, true, JSON.stringify(jl));
   assert.match(jl.data.err.text, /被重定向到了/,
     '★★ 宿主那一句要说得出"服务的 fd 被重定向到了哪儿" —— 那是这件事的根因');
-  assert.match(jl.data.err.text, /继承\*\*宿主的 stdout\/stderr/,
+  assert.match(jl.data.err.text, /继承宿主的 stdout\/stderr/,
     '★ 还要说清契约要求的是什么（作者据此知道该删掉哪个重定向）');
 });
 
 test('★ 那棵树里没有 `job/start.sh` ⇒ 站点当场说"提交不了"，不是等提交时才炸', async (t) => {
-  // 「这个插件有没有作业侧」的判据是**记录表里有没有那一份**（与守护进程
+  // 「这个插件有没有作业侧」的判据是记录表里有没有那一份（与守护进程
   // `plugin_scan` 那一句同形）。少了它，假站点会放行一份真站点上根本提交不出去的
   // 东西 —— 而失败会出现在起会话那一步（"读不到那个片段"），指不回"它没有作业侧"。
   const idx = require('../src/main/index.js');
@@ -3331,7 +3331,7 @@ test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不
   t.after(async () => {
     Module._load = origLoad;
     idx._test.getBackend().debugNoBash(false);
-    // ★ 同上：这条会话也停在 error，别把它留给后面的用例。
+    // 同上：这条会话也停在 error，别把它留给后面的用例。
     for (const rec of [...idx._test.getSessions().values()]) {
       if (rec.controller) await rec.controller.abandon();
     }
@@ -3341,8 +3341,8 @@ test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // ── 那两句提示本身：一个**纯函数**，两种现场各说一句话 ──
-  //   ★ 这里造的是"PATH 上没有 bash"与"那个 bash 太老"两个真现场（临时目录里
+  // ── 那两句提示本身：一个纯函数，两种现场各说一句话 ──
+  //   这里造的是"PATH 上没有 bash"与"那个 bash 太老"两个真现场（临时目录里
   //     放一个假的可执行文件），而不是断言源码里有那几行字。
   const noBash = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-nobash-'));
   assert.equal(fakeJob.findBash([path.join(noBash, 'bash')]).path, undefined);
@@ -3352,7 +3352,7 @@ test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不
   assert.match(fakeJob.findBash([path.join(oldBash, 'bash')]).why, /太老/,
     '★ bash 3 上那句 `declare -A: invalid option` 必须换来一句人话');
 
-  // ── 而它**接得上**：整条路上真的走到那句，而且会话不许判成功 ──
+  // ── 而它接得上：整条路上真的走到那句，而且会话不许判成功 ──
   idx._test.getBackend().debugNoBash(true);
   const r = await appStart(null, 'code-server');
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -3365,12 +3365,12 @@ test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不
 });
 
 test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问一次（绝不静默装回来）', async (t) => {
-  // §5.3。★ 不这么做的话，用户删掉池里那一份之后，下一次对账会按"摘要与台账相符"
-  //   **静默装回来、一个字都不问** —— 那不是"当作从来没有过"，那是"用户想让它
+  // §5.3。不这么做的话，用户删掉池里那一份之后，下一次对账会按"摘要与台账相符"
+  //   静默装回来、一个字都不问 —— 那不是"当作从来没有过"，那是"用户想让它
   //   消失，它自己回来了"。
   const idx = require('../src/main/index.js');
   const sitePlugin = require('../src/main/site-plugins.js');
-  // ★ 钉子表是**模块级**的、而且是**跨用例**活着的（它在另一个文件里，不在
+  // 钉子表是模块级的、而且是跨用例活着的（它在另一个文件里，不在
   //   cfg 里）。这一条会往里塞一把假钥匙，所以跑完必须把整张表还原 —— 不然
   //   下一条用例会拿到一把不属于它的钉子，而症状是"莫名其妙说签名者换了人"。
   const pinsBefore = { ...idx._test.getPinnedKeys() };
@@ -3393,12 +3393,12 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     const c = await invoke('app:consentPlugin', first.id, first.version);
     assert.equal(c.ok, true, JSON.stringify(c));
 
-    // §5.4：同意那一刻要**钉住**签名者。它在**另一个文件**里（不是 config.json）。
+    // §5.4：同意那一刻要钉住签名者。它在另一个文件里（不是 config.json）。
     const pins = idx._test.getPinnedKeys();
     assert.equal(pins[first.id] && pins[first.id].fingerprint, first.fingerprint,
       '★ 同意一个签过名的构件 = 记下它的公钥，此后只能相符');
 
-    // 池里**两样**：解出来的树 + 它的记录表。★ **没有容器** —— 容器只在链路与
+    // 池里两样：解出来的树 + 它的记录表。没有容器 —— 容器只在链路与
     // 内存里活（v0.13）。
     const sitePool = idx._test.getSitePoolDir();
     assert.equal(fs.existsSync(poolTreeOf(sitePool, first.id, first.version)), true);
@@ -3421,8 +3421,8 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     const c2 = await invoke('app:consentPlugin', again.id, again.version);
     assert.equal(c2.ok, true, `撤回之后必须还能再同意一次：${JSON.stringify(c2)}`);
 
-    // ── §5.4：钉住的那把钥匙与这一份的签名者不符 ⇒ 拒绝，而且两份指纹都说出来 ──
-    // ★ 这一条钉的是**主进程那一边的接线**（`pinnedKey` 有没有真的接进对账）。
+    // ── §5.4：钉住的那把钥匙与这一份的签名者不符，拒绝，而且两份指纹都说出来 ──
+    // 这一条钉的是主进程那一边的接线（`pinnedKey` 有没有真的接进对账）。
     //   site-plugins 那一层自己注入这个回调，所以它测不到"index.js 忘了传"。
     const bogus = 'b'.repeat(64);
     idx._test.getPinnedKeys()[first.id] = { fingerprint: bogus, at: 1 };
@@ -3437,7 +3437,7 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
     assert.equal(idx._test.getPendingConsent().some((p) => p.id === first.id), false,
       '签名者对不上时**连同意按钮都不该出现** —— 用户同意什么都改不了这一条');
 
-    // ── 而"不同意"那一份：删的是**池里那一份**（如果它已经在池里）──
+    // ── 而"不同意"那一份：删的是池里那一份（如果它已经在池里）──
     const rest = idx._test.getPendingConsent();
     for (const p of rest) {
       const rej = await invoke('app:rejectPlugin', p.id, p.version);
@@ -3448,10 +3448,10 @@ test('★★ 撤回同意：删掉本机那一份 ⇒ 台账消失 ⇒ 重新问
 });
 
 test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能点同意（那个洞）', async (t) => {
-  // ★ 在这条路补上之前：插件在注册表里（`active: false`），于是"本站有而本机没有"
-  //   那一列不认领它（那边要求注册表里**查不到**），而插件那一列又滤掉了它 ——
+  // 在这条路补上之前：插件在注册表里（`active: false`），于是"本站有而本机没有"
+  //   那一列不认领它（那边要求注册表里查不到），而插件那一列又滤掉了它 ——
   //   界面上彻底看不见，连"点同意"的入口都没有，重新同步也救不回来。
-  //   摘要换一次公式，这件事会对**每个用户的每个插件**同时成立。
+  //   摘要换一次公式，这件事会对每个用户的每个插件同时成立。
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
@@ -3468,7 +3468,7 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
     delete cfg.trustedPlugins[`${first.id}@${first.version}`];
     idx._test.getRegistry().reload();
 
-    // ★ 洞的样子：它在注册表里，但没有钩子；而"本机没有"那一列也不认领它。
+    // 洞的样子：它在注册表里，但没有钩子；而"本机没有"那一列也不认领它。
     const p = idx._test.getRegistry().get(first.id, first.version);
     assert.ok(p, '它还在注册表里（这正是"本机没有"那一列不认领它的原因）');
     assert.equal(p.active, false, '而没有钩子 —— 它的代码不许跑');
@@ -3479,7 +3479,7 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
     assert.ok(consent, `★★ 它必须出现在待同意那一列里 —— 这就是那个洞：${JSON.stringify(view.consent)}`);
     assert.equal(consent.existing, true, '★ 而且要标明"本机已经有一份"（出路与草稿不同）');
 
-    // 点同意 ⇒ 原地认领，不重下。
+    // 点同意，原地认领，不重下。
     const c = await invoke('app:consentPlugin', first.id, first.version);
     assert.equal(c.ok, true, JSON.stringify(c));
     assert.equal(fs.existsSync(poolTreeOf(idx._test.getSitePoolDir(), first.id, first.version)),
@@ -3487,10 +3487,10 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
     assert.notEqual(idx._test.getRegistry().get(first.id, first.version).active, false,
       '认领之后它要真的被加载');
 
-    // ── 再来一次，这回点"不同意"：删的必须是**池里那一份** ──
-    // ★ 不删的话它就是一个"用户在界面上拒绝了、却仍然躺在磁盘上"的插件，而且
+    // ── 再来一次，这回点"不同意"：删的必须是池里那一份 ──
+    // 不删的话它就是一个"用户在界面上拒绝了、却仍然躺在磁盘上"的插件，而且
     //   下次对账会以同一个形状回来 —— 用户点一百次不同意也去不掉它。
-    // 埋一条**摘要对不上**的旧记录：于是"不同意"那一步除了删构件，还该把它清掉
+    // 埋一条摘要对不上的旧记录：于是"不同意"那一步除了删构件，还该把它清掉
     // （留着的话，下次对账会按"摘要与台账相符"把这一份静默装回来）。
     cfg.trustedPlugins[`${first.id}@${first.version}`] =
       { digest: 'e'.repeat(64), alg: 1, site: 'old', at: 1 };
@@ -3508,16 +3508,16 @@ test('★★ 池里有一份而台账对不上 ⇒ 界面上**看得见**、能�
 });
 
 test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布局）⇒ 什么也不发生', async (t) => {
-  // ★ `packer/docs/PLUGIN-SPEC.md` §5.1 写着：
+  // `packer/docs/PLUGIN-SPEC.md` §5.1 写着：
   //
-  //     「往池目录里手工放置内容**必须**不产生任何效果：那些内容**禁止**出现在
-  //       插件列表里、**禁止**被加载，**禁止**被当作"某个站点要给你装的东西"
+  //     「往池目录里手工放置内容必须不产生任何效果：那些内容禁止出现在
+  //       插件列表里、禁止被加载，禁止被当作"某个站点要给你装的东西"
   //       呈现给用户。」
   //
   //   这条用例把那一整条规范性条款钉成一条正向用例。
   //
-  //   ★ 同一个形状在**站点**那一侧是**明令报错**的（守护进程的 `scan_plugins`：
-  //     见到目录要指名道姓地说出来）—— 因为那边那些目录是**我们自己的安装器**
+  //   同一个形状在站点那一侧是明令报错的（守护进程的 `scan_plugins`：
+  //     见到目录要指名道姓地说出来）—— 因为那边那些目录是我们自己的安装器
   //     留下的、root 拥有的一整套副本，不说就永远没人知道。两边读者不同，判断
   //     也不同，理由写在 `plugins/index.js` 的 `findPluginDirs` 上。
   const idx = require('../src/main/index.js');
@@ -3525,7 +3525,7 @@ test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布�
   await invoke('app:debug', 'reset');
 
   await withSitePlugins([], async () => {
-    // 造一份**完全合法**的插件：真 id、真版本、真的 `client/index.js`。
+    // 造一份完全合法的插件：真 id、真版本、真的 `client/index.js`。
     // 唯一的"错"是层次 —— 这正是"用户把插件目录整个拷进去"得到的那个形状。
     const id = mintId();
     const dir = path.join(SITE_POOL, 'my-plugin');       // ← 一层：名字直接挂在池下
@@ -3550,7 +3550,7 @@ test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布�
         `手放的那一份不许出现在「${what}」那一列里（§5.1 第二、三句）`);
     }
 
-    // ★ 也**不许报错**。它不是坏插件，它是**不存在的东西** —— 为它报一条错，等于
+    // 也不许报错。它不是坏插件，它是不存在的东西 —— 为它报一条错，等于
     //   在界面上承认"这个形状有意义"。§5.1 的措辞正是「不产生任何效果」。
     assert.equal(reg.errors.some((e) => /handplaced|my-plugin/.test(e)), false,
       `手放的东西不该产生任何效果，包括一条报错：${JSON.stringify(reg.errors)}`);
@@ -3558,31 +3558,31 @@ test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布�
 });
 
 test('★★ §5.2：客户端只挂一个根，而那个根上的每一份都必须过同意闸', async (t) => {
-  // ★ 这里钉的是 §5.2 最后那句：「**禁止**给任何一类插件开免同意的口子」。
+  // 这里钉的是 §5.2 最后那句：「禁止给任何一类插件开免同意的口子」。
   //   按来源开免同意口子（`entry.source !== 'site' || …`）会把一条**没有分支的
-  //   规则**变成一条**有例外的规则** —— 豁免的理由（"用户自己刚放进去的，让他
+  //   规则变成一条有例外的规则** —— 豁免的理由（"用户自己刚放进去的，让他
   //   同意自己是空话"）看着成立，而 §5.2 紧跟那句禁令写着理由：
   //   「规则一有分支，绕过它的路就会长出来」。
   const idx = require('../src/main/index.js');
   t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
   await invoke('app:debug', 'reset');
 
-  // ① 根的**集合**。少一个不少，多一个就多一条绕过的路。
+  // ① 根的集合。少一个不少，多一个就多一条绕过的路。
   assert.deepEqual(idx._test.getRegistry().roots.map((r) => r.source), ['site'],
     '★ 多挂一个根就多一条绕过同意闸的路 —— §5.2 禁止任何例外。加之前先回答：'
     + '它上面每一份凭什么免同意？');
 
-  // ② ★ 而**"按来源开豁免"这个形状本身**也要钉住 —— 退一步做一次**文本检查**。
+  // ② 而"按来源开豁免"这个形状本身也要钉住 —— 退一步做一次文本检查。
   //
   //   为什么行为用例够不着：只剩一个根之后，`entry.source !== 'site'` 这样的句子
-  //   **永远不会生效**（每一份都是 site），所以把它加回去，一条行为用例都不会红
+  //   永远不会生效（每一份都是 site），所以把它加回去，一条行为用例都不会红
   //   —— 变异验证实测过，加回去之后 51 条用例全绿。
   //
-  //   可它正是 §5.2 禁止的那件事的**全部形态**：口子就是这么开出来的（先有一句
+  //   可它正是 §5.2 禁止的那件事的全部形态：口子就是这么开出来的（先有一句
   //   `|| entry.source !== 'site'`，然后那个来源就长出来了）。而 §5.2 自己写着
   //   理由：「规则一有分支，绕过它的路就会长出来」。
   //
-  //   ★ 这条检查不优雅，它拦的是一个**今天不可达、明天会长出路**的分支。这个仓库
+  //   这条检查不优雅，它拦的是一个今天不可达、明天会长出路的分支。这个仓库
   //     在别处也这么做（`renderer.test.mjs` 整套都是文本检查）—— 判据是"行为够
   //     不着，而它真的会漂"。
   const mainSrc = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
@@ -3592,13 +3592,13 @@ test('★★ §5.2：客户端只挂一个根，而那个根上的每一份都�
     '★ 同意闸里又出现了 `entry.source` —— 那正是 §5.2 禁止的口子（按来源开豁免）。'
     + '要加一个来源，先回答"它上面每一份凭什么免同意？"');
 
-  // ② 没台账 ⇒ 不加载（**新用户的默认状态**就是这一格）。
-  // ③ 补上台账 ⇒ 加载。
-  //    ★ **两半都要。** 只有 ② 的话，一个"永远不加载"的实现全绿 —— 而那是把
+  // ② 没台账，不加载（新用户的默认状态就是这一格）。
+  // ③ 补上台账，加载。
+  //    两半都要。只有 ② 的话，一个"永远不加载"的实现全绿 —— 而那是把
   //      插件分发整个关掉，不是"同意闸生效"。
   await withSitePlugins([], async () => {
     const id = mintId();
-    // ★ 客户端代码**带一个 attach** —— 只有这样"接上了没有"才是可观测的。
+    // 客户端代码带一个 attach —— 只有这样"接上了没有"才是可观测的。
     //   给一个空模块的话，`attach` 本来就是 null，两半断言都会过，而这条用例
     //   就退化成走过场（它要钉的恰恰是"钩子挂上了没有"）。
     const dir = putSitePlugin({ id, name: 'gated', trust: false,
@@ -3621,18 +3621,18 @@ test('★★ §5.2：客户端只挂一个根，而那个根上的每一份都�
 });
 
 test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —— 池里看得见它、下一轮会收掉', async (t) => {
-  // ★ 「本机池里有东西，但**没有任何站点报过它**」是一条真实的状态，而它与
-  //   "站点有而本机没有"要做的事完全不同。手工放进去的东西**禁止**被加载
+  // 「本机池里有东西，但没有任何站点报过它」是一条真实的状态，而它与
+  //   "站点有而本机没有"要做的事完全不同。手工放进去的东西禁止被加载
   //   （§5.1：装插件只有"安装一个包"这一条路）。
   //
-  // ★★ v0.13 把这一条**一分为二**，因为"手放的东西"现在有两种，而它们的来历不同
-  //    ⇒ 处置也**必须**不同（见 plugin-slot.js 的文件头那段）：
+  // v0.13 把这一条一分为二，因为"手放的东西"现在有两种，而它们的来历不同
+  //    处置也必须不同（见 plugin-slot.js 的文件头那段）：
   //
-  //     · 不是槽位的形状（`<任意名>/…`、两层目录）⇒ 一个字节都不动，
-  //       但**要把名字数出来交给界面**。§5.1 说"不产生任何效果"，而"删掉它"是
+  //     · 不是槽位的形状（`<任意名>/…`、两层目录），一个字节都不动，
+  //       但要把名字数出来交给界面。§5.1 说"不产生任何效果"，而"删掉它"是
   //       一种效果；可"藏起来"也不行 —— 用户会问"我放的那个东西去哪了"。
-  //     · 槽位名 + 没有记录表 ⇒ 那是**我们自己崩在中间**留下的（池里唯一的写方
-  //       是安装器）⇒ **收掉**。客户端与站点在这一点上方向相反，是刻意的。
+  //     · 槽位名 + 没有记录表，那是我们自己崩在中间留下的（池里唯一的写方
+  //       是安装器），收掉。客户端与站点在这一点上方向相反，是刻意的。
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
@@ -3642,14 +3642,14 @@ test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —�
   await withSitePlugins([], async () => {
     const pool = idx._test.getSitePoolDir();
 
-    // ── ① 一个**不是槽位**的目录（两层的那种）──
+    // ── ① 一个不是槽位的目录（两层的那种）──
     const stray = path.join(pool, 'my-handmade-plugin');
     fs.mkdirSync(path.join(stray, '1.0.0'), { recursive: true });
     fs.writeFileSync(path.join(stray, '1.0.0', 'plugin.json'), JSON.stringify(
       { id: mintId(), name: 'handmade', displayName: '手放的', version: '1.0.0',
         contributes: { concurrent: false } }, null, 2));
 
-    // ── ② 一个**槽位名、但没有记录表**的树（"没提交"）──
+    // ── ② 一个槽位名、但没有记录表的树（"没提交"）──
     const halfId = mintId();
     const half = path.join(pool, `${halfId}_1.0.0`);
     fs.mkdirSync(half, { recursive: true });
@@ -3658,7 +3658,7 @@ test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —�
         contributes: { concurrent: false } }, null, 2));
     idx._test.getRegistry().reload();
 
-    // ★ 两个都**不许加载**，而且都**不许报错** —— 它们不是坏插件，是"不生效的东西"；
+    // 两个都不许加载，而且都不许报错 —— 它们不是坏插件，是"不生效的东西"；
     //   为它们报一条错等于在界面上承认这个形状有意义（§5.1）。
     assert.equal(idx._test.getRegistry().get(halfId, '1.0.0'), null,
       '★ 槽位名 + 没有记录表 ⇒ 提交点不成立 ⇒ 它不存在');
@@ -3672,7 +3672,7 @@ test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —�
     assert.equal((view.missing || []).some((x) => x.name === 'handmade'), false,
       '也不在"站点有而本机没有"里');
 
-    // ── ★ 而它要**看得见**：池里"不是插件的那几项"数得出来 ──
+    // ── 而它要看得见：池里"不是插件的那几项"数得出来 ──
     const r = await invoke('app:syncPlugins');
     assert.ok(r.ok, JSON.stringify(r));
     const after = r.plugins.site;
@@ -3680,12 +3680,12 @@ test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —�
       `★★ 手放的东西必须有一个地方看得见它 —— 否则用户面对的是"我放的东西凭空消失"：${JSON.stringify(after.strays)}`);
     assert.equal(fs.existsSync(stray), true, '★ 而它一个字节都不许被动');
 
-    // ── ★★ 而"半份"那一个：下一轮对账把它清掉（客户端与站点方向相反）──
+    // ── 而"半份"那一个：下一轮对账把它清掉（客户端与站点方向相反）──
     assert.equal(fs.existsSync(half), false, '没提交的树要被清掉');
     assert.ok((r.plugins.site.strays || []).includes(`${halfId}_1.0.0`) === false,
       '它不在"不是槽位"那一档里 —— 它是我们自己的半成品，处置是收掉');
 
-    // ── ★ 第三格：一个**已提交的槽位**，而台账对不上 —— 这是"看得见"那一句真正
+    // ── 第三格：一个已提交的槽位，而台账对不上 —— 这是"看得见"那一句真正
     //    管的那一格（它是一条真插件，只是用户没同意过/同意记录丢了）──
     //    出口是"删掉本机这一份"，而那条路要顺手把台账那条也清掉（§5.3）。
     const id = mintId();
@@ -3722,11 +3722,11 @@ test('★ §5.1③：往池里手放东西**不生效**，但**不静默** —�
 });
 
 test('★ 「站点愿不愿意发这一份」：有 `package` 就算，而且**一次都不用真去取**', async (t) => {
-  // ★ 这条判据是界面上分开两种出路的那道闸（一个去同步、一个去问管理员），而它
+  // 这条判据是界面上分开两种出路的那道闸（一个去同步、一个去问管理员），而它
   //   换过两次判据：`Array.isArray(p.files)` → "两条路有没有一条能走" → 今天
-  //   "`package` 在不在"。三次都是同一个理由：判据必须是**协议事实**。
+  //   "`package` 在不在"。三次都是同一个理由：判据必须是协议事实。
   //
-  //   ★ 它同时钉着一件事：这一步**一个字节都不下载** —— `missing` 是拿清单算的，
+  //   它同时钉着一件事：这一步一个字节都不下载 —— `missing` 是拿清单算的，
   //     不是拿对账的结果算的。所以"本机一个都没同意"时，界面照样能说清每一份
   //     到底该走哪条路。
   const idx = require('../src/main/index.js');
@@ -3735,7 +3735,7 @@ test('★ 「站点愿不愿意发这一份」：有 `package` 就算，而且**
     cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
-  // ★ `pluginsView()` 里那份"站点有哪些插件"来自**连接时**的 `op:plugins`
+  // `pluginsView()` 里那份"站点有哪些插件"来自连接时的 `op:plugins`
   //   （`refreshPartitions`），不是对账那一轮 —— 所以开关改完要重新问一次，
   //   否则断言的是一个开关改之前就取到的清单（那样这条用例永远绿）。
   await invoke('app:partitions');
@@ -3753,11 +3753,11 @@ test('★ 「站点愿不愿意发这一份」：有 `package` 就算，而且**
 
 test('★ F18 回归：改了 client/ 下的文件而不动 plugin.json，摘要必须变', (t) => {
   t.after(() => { Module._load = origLoad; });
-  // ★ 改之前这条会红：摘要只算了「清单 + client/index.js」两个文件，于是
-  //   `client/sshconfig.js` 被换掉、摘要纹丝不动 —— 而它是**真的代码**。
+  // 改之前这条会红：摘要只算了「清单 + client/index.js」两个文件，于是
+  //   `client/sshconfig.js` 被换掉、摘要纹丝不动 —— 而它是真的代码。
   const P = require('../src/main/plugins/index.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-f18-'));
-  // ★ 用 `writePlugin` 的**返回值**，不要自己拼路径 —— 布局是 `<名字>/<版本>/`，
+  // 用 `writePlugin` 的返回值，不要自己拼路径 —— 布局是 `<名字>/<版本>/`，
   //   拼错了会红在一个与摘要无关的地方（"文件不存在"）。
   const { dir: aDir } = writePlugin(root, { name: 'a', displayName: 'A' }, 'module.exports = {};\n');
   fs.writeFileSync(path.join(aDir, 'client', 'sshconfig.js'), '// 第一版\n');
@@ -3766,8 +3766,8 @@ test('★ F18 回归：改了 client/ 下的文件而不动 plugin.json，摘要
   const d2 = P.digestOf(P.readPluginFiles(aDir));
   assert.notEqual(d1, d2, '★ 只改 client/ 下的一个文件，摘要也必须变（F18）');
 
-  // ★ 而"摘要相同 ⇒ 树相同"的另一半：一条符号链接与一个内容恰好等于链接目标串
-  //   的普通文件，**摘要必须不同**（前者加载 y.js，后者导出一个字符串）。
+  // 而"摘要相同，树相同"的另一半：一条符号链接与一个内容恰好等于链接目标串
+  //   的普通文件，摘要必须不同（前者加载 y.js，后者导出一个字符串）。
   const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sym-'));
   const a = path.join(root2, 'a'); const b = path.join(root2, 'b');
   for (const d of [a, b]) {
@@ -3797,8 +3797,8 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
   const idx = require('../src/main/index.js');
   await invoke('app:debug', 'reset');
   await withSitePlugins([], async () => {
-    // ★ **先把站点池清空**。不清的话，前面那条端到端用例已经同意并装上了
-    //   code-server，`registry.get()` 查得到它 —— 于是这条用例会**因为错误的理由**
+    // 先把站点池清空。不清的话，前面那条端到端用例已经同意并装上了
+    //   code-server，`registry.get()` 查得到它 —— 于是这条用例会因为错误的理由
     //   通过（"本机已经有它"而不是"站点关掉的不算数"），变异验证 M12 就是这样
     //   漏过去的。
     fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
@@ -3808,9 +3808,9 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
     assert.ok(r0.plugins.missing.map((m) => m.name).includes('code-server'),
       '前置：清空之后站点开着、本机没有 ⇒ 它必须在 missing 里');
 
-    // 站点把 code-server 关掉。`op_plugins` 按协议**必须报它**（带 enabled:false），
-    // 而 `missing` 若不按 enabled 过滤 —— 于是管理员关掉一个插件，界面上会**永远**挂着
-    // 一句"站点有而本机没有 ⇒ 升级客户端"。
+    // 站点把 code-server 关掉。`op_plugins` 按协议必须报它（带 enabled:false），
+    // 而 `missing` 若不按 enabled 过滤 —— 于是管理员关掉一个插件，界面上会永远挂着
+    // 一句"站点有而本机没有，升级客户端"。
     idx._test.getBackend().debugDisableSitePlugin('code-server');
     const r = await invoke('app:partitions');
     const names = r.plugins.missing.map((m) => m.name);
@@ -3824,7 +3824,7 @@ test('★ `missing` 不说谎：站点**关掉**的插件不算"本机没有"', 
 test('★ 站点装了客户端不认识的插件：不崩，而且说得出该怎么办', async (t) => {
   t.after(() => { Module._load = origLoad; });
   await invoke('app:debug', 'reset');
-  // ★ 指名一个短名：这一条要的是"站点上多了一个本机没有的插件"，而它随后
+  // 指名一个短名：这一条要的是"站点上多了一个本机没有的插件"，而它随后
   //   要按名字出现在 `missing` 里。名字由用例给（假站点那个缺省名是它自己编的，
   //   与这一条无关）。
   await invoke('app:debug', 'extra-plugin', 'jupyter');
@@ -3835,7 +3835,7 @@ test('★ 站点装了客户端不认识的插件：不崩，而且说得出该�
     // 客户端认识的那两个照常
     assert.deepEqual(r.plugins.plugins.map((p) => p.name).sort(),
       ['code-server', 'sshd']);
-    // ★ 认不出的那个**要被报出来**，而不是被过滤掉 —— 它是升级提示的唯一来源。
+    // 认不出的那个要被报出来，而不是被过滤掉 —— 它是升级提示的唯一来源。
     //   过滤掉的话，用户面对的就是"按钮凭空少了一个"，而没有任何地方解释为什么。
     const miss = r.plugins.missing.map((p) => p.name);
     assert.deepEqual(miss, ['jupyter'],
@@ -3850,9 +3850,9 @@ test('★ 站点装了客户端不认识的插件：不崩，而且说得出该�
 });
 
 test('★ 那个调试开关**不带名字**也造得出来 —— 界面上那颗按钮走的就是这一条', async (t) => {
-  // ★ 短名由**假站点自己**取（`backend-fake.js` 的 DEMO_EXTRA_NAME），因为基座里
+  // 短名由假站点自己取（`backend-fake.js` 的 DEMO_EXTRA_NAME），因为基座里
   //   不许出现任何真插件的名字。而"缺省值在不在"这件事有一条真实的失败形态：
-  //   一个**要点名才生效**的调试动作，挂在那颗按钮上就是一次静默的什么都没发生 ——
+  //   一个要点名才生效的调试动作，挂在那颗按钮上就是一次静默的什么都没发生 ——
   //   按下去、界面上没有任何变化，也没有任何一句话说为什么。
   const idx = require('../src/main/index.js');
   t.after(() => { Module._load = origLoad; });
@@ -3863,7 +3863,7 @@ test('★ 那个调试开关**不带名字**也造得出来 —— 界面上那�
     assert.equal(extra.length, 1, '不带名字也要真的造出那一格');
     assert.equal(typeof extra[0].name, 'string');
     assert.ok(extra[0].name.length > 0, '它得有个短名（界面要按它显示）');
-    // ★ 而它必须是**本机池里没有的**：这一格造的是"本站缺少插件"，
+    // 而它必须是本机池里没有的：这一格造的是"本站缺少插件"，
     //   取一个池里已有的短名就等于什么都没造。
     const pool = idx._test.getRegistry().list().map((p) => p.name);
     assert.equal(pool.includes(extra[0].name), false,
@@ -3891,7 +3891,7 @@ test('★ 站点关掉一个插件：客户端看得见它、但起不了 ——
     sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
     assert.equal(sshd.siteEnabled, false, '站点关掉了');
     assert.equal(sshd.runnable, false, '站点关了就不能起');
-    // ★ 但**仍然列出来**：把它藏掉，用户看到的是"按钮少了一个"，
+    // 但仍然列出来：把它藏掉，用户看到的是"按钮少了一个"，
     //   而不知道该找管理员。留着它，界面才能说清是站点没开。
     assert.ok(sshd, '站点关掉的插件仍然要在表里，只是不能起');
   } finally {
@@ -3919,7 +3919,7 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
   assert.equal(sshd.siteEnabled, true, '★ 站点那边一点没动 —— 两件事');
   assert.equal(sshd.runnable, false);
 
-  // ★ 开关按 **id** 记，不按短名：池是全局的，两个站点可以各有一个叫 `jupyter`
+  // 开关按 id 记，不按短名：池是全局的，两个站点可以各有一个叫 `jupyter`
   //   的插件而它们是两个不同的东西（两个 id）。按短名记会让一个站点的开关管到
   //   另一个站点的那个。
   const byName = await invoke('app:setPluginEnabled', 'sshd', false);
@@ -3929,8 +3929,8 @@ test('★ 本机关掉一个插件：站点照旧，只是本机不再给按钮'
 });
 
 test('★ 站点装了它但没有作业侧实现：看得见、开着的、就是提交不了', async (t) => {
-  // 这一格与上一条**不是同一件事**：那条是管理员的开关没开（开一下就好），
-  // 这条是本站的部署没跟上（管理员去开开关**没有用**，得重新跑 install-base.sh）。
+  // 这一格与上一条不是同一件事：那条是管理员的开关没开（开一下就好），
+  // 这条是本站的部署没跟上（管理员去开开关没有用，得重新跑 install-base.sh）。
   // 合成一格的话，其中一句话就永远走不到，而用户会照着错的那句去行动。
   t.after(async () => {
     Module._load = origLoad;
@@ -3959,10 +3959,10 @@ test('★ 站点装了它但没有作业侧实现：看得见、开着的、就�
 
 test('★ 三态纪律：老守护进程不报 can_submit ⇒ 缺席，不是"否"', async (t) => {
   // 两种"缺席"都要能过：
-  //   (a) 老守护进程**根本没报这个字段**（op 在，字段不在）；
-  //   (b) 老守护进程**连这个 op 都没有**（客户端连站点清单都拿不到）。
+  //   (a) 老守护进程根本没报这个字段（op 在，字段不在）；
+  //   (b) 老守护进程连这个 op 都没有（客户端连站点清单都拿不到）。
   //
-  // ★ 反过来算（缺席即否）的话，升级一次客户端就会让所有老服务端的插件按钮
+  // 反过来算（缺席即否）的话，升级一次客户端就会让所有老服务端的插件按钮
   //   在某一刻同时变灰 —— 而用户完全不知道为什么，服务端那边一个字都没变。
   t.after(async () => {
     Module._load = origLoad;
@@ -3975,7 +3975,7 @@ test('★ 三态纪律：老守护进程不报 can_submit ⇒ 缺席，不是"�
   const idx = require('../src/main/index.js');
   const backend = idx._test.getBackend();
 
-  // (a) op 在、字段不在：把 can_submit 从**每一份**响应里抹掉
+  // (a) op 在、字段不在：把 can_submit 从每一份响应里抹掉
   const origSite = backend._sitePlugins.bind(backend);
   backend._sitePlugins = () => origSite().map((p) => {
     const { can_submit: _drop, ...rest } = p;
@@ -4010,7 +4010,7 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-'));
-  // ★ 两个根了：`dataDir` 是**插件自己的**落点（框架给的），`home` 是**用户的**
+  // 两个根了：`dataDir` 是插件自己的落点（框架给的），`home` 是用户的
   //   家目录（`~/.ssh/config` 在那儿 —— 那是他的东西，我们只借两行）。
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-data-'));
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
@@ -4036,7 +4036,7 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   assert.equal(r2.changed, false, '第二次不该再动这个文件');
   assert.equal(fs.readFileSync(userCfg, 'utf8'), after1);
 
-  // 自愈之一：**搬家前那个形状**的路径要被换掉，而不是并排留着两份
+  // 自愈之一：搬家前那个形状的路径要被换掉，而不是并排留着两份
   // （并排留着的话，第一条仍然生效，而且指向一个不存在的地方）
   fs.writeFileSync(userCfg,
     after1.replace(sshc.pathsFor(dataDir).config, '/old/home/.slurmate/ssh/config'));
@@ -4045,10 +4045,10 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   assert.equal(fs.readFileSync(userCfg, 'utf8'), after1,
     '旧的那一行要被换掉，不能两份并存');
 
-  // ★ 自愈之二：**标记行下面那一条 Include**，不管它指向哪儿。这一条是搬家带来的：
+  // 自愈之二：标记行下面那一条 Include，不管它指向哪儿。这一条是搬家带来的：
   //   新路径不含 `.slurmate/`，所以上面那条按路径形状认的判据认不出它 —— 靠的是
-  //   "紧跟在标记行后面"这件事本身。少了它，旧行会**幸存**，留下一条悬空的 Include，
-  //   而悬空**不致命**（ssh 会忽略它继续读后面的内容）—— 也就是说改错了**没有任何
+  //   "紧跟在标记行后面"这件事本身。少了它，旧行会幸存，留下一条悬空的 Include，
+  //   而悬空不致命（ssh 会忽略它继续读后面的内容）—— 也就是说改错了**没有任何
   //   症状**，这正是它必须有用例钉着的原因。
   const elsewhere = path.join(path.dirname(dataDir), 'plugin-data', 'X@relay', 'config');
   fs.writeFileSync(userCfg, after1.replace(sshc.pathsFor(dataDir).config, elsewhere));
@@ -4056,7 +4056,7 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   assert.equal(r5.changed, true, '换了根之后那一条也要被替换掉');
   assert.equal(fs.readFileSync(userCfg, 'utf8'), after1, '不能两份并存');
 
-  // ★ 读不出来时**绝不能**当作空文件往下写 —— 那会把用户**全部**的 ssh 配置抹掉，
+  // 读不出来时绝不能当作空文件往下写 —— 那会把用户全部的 ssh 配置抹掉，
   //   而这是整个客户端里后果最严重的一次写盘。
   const bad = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-bad-'));
   fs.mkdirSync(path.join(bad, '.ssh', 'config'), { recursive: true });   // 是个目录
@@ -4093,7 +4093,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   assert.match(cfg, /^\s+User alice$/m);
   assert.match(cfg, /^\s+HostName 127\.0\.0\.1$/m);
   assert.match(cfg, /^\s+IdentityFile .*id_ed25519$/m);
-  // ★ 不写这一条的话，ssh 会先把 agent 里的、~/.ssh 下的每一把都试一遍，
+  // 不写这一条的话，ssh 会先把 agent 里的、~/.ssh 下的每一把都试一遍，
   //   失败会计进 MaxAuthTries（默认 6）—— 钥匙一多，还没轮到我们这把就被断开了，
   //   症状是一句「认证失败」，指不回根因。
   assert.match(cfg, /^\s+IdentitiesOnly yes$/m);
@@ -4102,7 +4102,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   assert.equal(fs.statSync(p.config).mode & 0o777, 0o600);
   assert.equal(fs.statSync(p.identity).mode & 0o777, 0o600);
 
-  // ★ **两处路径都必须在新位置。** 搬家最容易犯的错是改漏一条 —— 那时 `IdentityFile`
+  // 两处路径都必须在新位置。搬家最容易犯的错是改漏一条 —— 那时 `IdentityFile`
   //   或 `UserKnownHostsFile` 还指着旧目录（而那里的文件刚被删掉），症状是"昨天还能
   //   用，今天连不上"，而 ssh 只会给一句 `Permission denied`，完全指不到这里。
   assert.ok(cfg.includes(p.identity), 'IdentityFile 必须指向插件的落点');
@@ -4113,7 +4113,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
     `[127.0.0.1]:18090 ${hostKey}\n`);
 
-  // 拿不到主机公钥（守护进程还是旧版本）时退回首次信任 —— **能用但降级**
+  // 拿不到主机公钥（守护进程还是旧版本）时退回首次信任 —— 能用但降级
   // 好过写出一个 ssh 直接拒绝连接的配置。
   const w2 = sshc.writeRelayConfig({ dataDir, port: 18091, user: 'alice', hostKey: null });
   assert.equal(w2.ok, true);
@@ -4122,7 +4122,7 @@ test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙
   assert.match(cfg2, /^\s+Port 18091$/m, '端口要跟着隧道走');
   assert.match(cfg2, /^\s+StrictHostKeyChecking accept-new$/m);
   // 形状不对的"主机公钥"绝不能被写进 known_hosts：一行一个条目，
-  // 值里的换行能让它变成**两行**，也就是凭空多出一个主机条目。
+  // 值里的换行能让它变成两行，也就是凭空多出一个主机条目。
   assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
     `[127.0.0.1]:18090 ${hostKey}\n`, '没有可信公钥时不许动 known_hosts');
   const evil = sshc.writeRelayConfig({ dataDir, port: 18092, user: 'alice',
@@ -4197,8 +4197,8 @@ test('★ 搬家的清理：只删我们那三个文件，目录里的别的东�
     [old.identity, '旧的钥匙\n']]) {
     fs.writeFileSync(f, c, { mode: 0o600 });
   }
-  // ★ 集群侧的作业 sshd 把主机密钥写在**同一个目录**里（`plugins/sshd/job/start.sh`），
-  //   而客户端的家目录与集群账号的家目录在 HPC 上**常常就是同一个**（共享 NFS）。
+  // 集群侧的作业 sshd 把主机密钥写在同一个目录里（`plugins/sshd/job/start.sh`），
+  //   而客户端的家目录与集群账号的家目录在 HPC 上常常就是同一个（共享 NFS）。
   //   所以这里放一个"别人的文件"，钉住"清理只认那三个名字"。
   const jobKey = path.join(old.dir, 'host_ed25519');
   fs.writeFileSync(jobKey, '作业侧的主机密钥\n', { mode: 0o600 });
@@ -4228,10 +4228,10 @@ test('★★ 时序：新位置**写成功**才清旧的；写失败时旧的**�
   fs.writeFileSync(old.config, '# 旧的\n', { mode: 0o600 });
 
   const notices = [];
-  // ★ 本仓库的第一个假 ctx。它存在的理由只有一个：这条**时序**只能从 `attach`
+  // 本仓库的第一个假 ctx。它存在的理由只有一个：这条时序只能从 `attach`
   //   那一层测（写盘的成功与失败各跑一遍），而 `attach` 的入口就是一个 ctx。
   const ctx = {
-    // ★ 是 `connection()` 而不是 `config` / `cfg` —— 插件不该拿到整个 config.json
+    // 是 `connection()` 而不是 `config` / `cfg` —— 插件不该拿到整个 config.json
     //   的写权，也不该拿"当前活跃连接"当"我这条会话的连接"。
     connection: () => ({ id: 'c1', label: '', user: 'alice', host: 'h', port: 22 }),
     dataDir: () => dataDir,
@@ -4241,7 +4241,7 @@ test('★★ 时序：新位置**写成功**才清旧的；写失败时旧的**�
   };
   const snap = { localPort: 18090, sshHostKey: 'ssh-ed25519 ' + 'A'.repeat(68) };
 
-  // ① 写不进去（数据目录只读）⇒ 旧的**必须原封不动**。
+  // ① 写不进去（数据目录只读），旧的必须原封不动。
   fs.chmodSync(dataDir, 0o500);
   t.after(() => { try { fs.chmodSync(dataDir, 0o700); } catch { /* 尽力而为 */ } });
   await relay.attach(ctx, snap);
@@ -4250,7 +4250,7 @@ test('★★ 时序：新位置**写成功**才清旧的；写失败时旧的**�
     + '谁也不认');
   assert.ok(notices.some((n) => n.kind === 'error'), '而且必须如实说出来');
 
-  // ② 能写了 ⇒ 旧的才清掉。
+  // ② 能写了，旧的才清掉。
   fs.chmodSync(dataDir, 0o700);
   await relay.attach(ctx, snap);
   assert.equal(fs.existsSync(old.config), false, '新位置写成功之后，旧的才清');
@@ -4266,7 +4266,7 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
   await waitUntil(async () => !onlyFake(b)
     || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
-  // ★ 盯**窗口当前那一个视图**，不去数 calls.views 的下标。
+  // 盯窗口当前那一个视图，不去数 calls.views 的下标。
   //   数下标的话，如果中途有一次「视图被复用了、没有新建」，这个用例会以
   //   「等待超时」收场 —— 红的理由和它想验的事情毫无关系，而真正想验的那条
   //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
@@ -4276,7 +4276,7 @@ test('★ 会话一结束就要收起 code-server 视图，把面板还给用户
     && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(theView(w).webContents._url)
     ? theView(w) : null), '插件声明的那块界面');
 
-  // 结束会话。★ 用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
+  // 结束会话。用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
   //   就是死的 —— 而状态要等下一次 status 轮询（60 秒）才可能从 releasing 变成
   //   ended。所以收起视图必须发生在 releasing，不能等 ended：否则用户还要盯着
   //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
@@ -4305,17 +4305,17 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   await waitUntil(async () => !onlyFake(b)
     || ['released', 'rejected', 'expired'].includes(onlyFake(b).state), '上一个会话释放');
 
-  // ★ 这一条测的是**框架与插件的分工**，也是下一阶段（站点分发声明式插件）的形状：
-  //   界面由**框架**按 `contributes.surface` 打开，不由插件代码打开。所以一个
-  //   **没有 `client/index.js`** 的插件也能开界面 —— 开界面本来就不需要代码。
+  // 这一条测的是框架与插件的分工，也是下一阶段（站点分发声明式插件）的形状：
+  //   界面由框架按 `contributes.surface` 打开，不由插件代码打开。所以一个
+  //   没有 `client/index.js` 的插件也能开界面 —— 开界面本来就不需要代码。
   //
   //   没有这一条的话，「按 contributes.surface 分派」与「按插件有没有 attach 分派」
-  //   在内建的两个插件上**行为完全一样**（两个都有 attach，而 sshd 的 surface 是
+  //   在内建的两个插件上行为完全一样（两个都有 attach，而 sshd 的 surface 是
   //   空、两种写法都不建视图），于是那条分派线根本没有被验到。
-  // ★ 装进**站点池**（`<id>_<版本>/` + 记录表）并记一条台账 —— 池里每一份都过同意闸，
+  // 装进站点池（`<id>_<版本>/` + 记录表）并记一条台账 —— 池里每一份都过同意闸，
   //   没有台账的会以 `active: false` 进来，而这条用例要的是它能真的跑起来。
   //
-  //   ★ 这一条测的是**框架与插件的分工**，与"它是怎么装进来的"无关 —— 装法走闸，
+  //   这一条测的是框架与插件的分工，与"它是怎么装进来的"无关 —— 装法走闸，
   //     测的东西一个字没变（往本机池里拷一棵树属于 §5.1 禁止的那件事，见下面
   //     §5.1 那条用例）。
   putSitePlugin({
@@ -4324,7 +4324,7 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     over: {
       displayName: 'Jupyter',
       description: '没有客户端代码的声明式插件。',
-      // 一个端口都不要 → 身份里**没有第三段**，于是它只有一份存储，
+      // 一个端口都不要 → 身份里没有第三段，于是它只有一份存储，
       // 与工作区无关。那一条分支在内建的两个插件上走不到（一个要端口，
       // 另一个根本不要界面）。
       contributes: { surface: { kind: 'web', path: '/lab' }, ports: 0,
@@ -4350,28 +4350,28 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
   const ctl = onlyCtl(idx);
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin, '会话进入 running', 20000);
 
-  // ★ 界面开了，而且开的是**声明里那个路径** —— 框架读的是 contributes，不是插件名。
+  // 界面开了，而且开的是声明里那个路径 —— 框架读的是 contributes，不是插件名。
   await waitUntil(() => (theView(w) && !theView(w).webContents.isDestroyed()
     && /\/lab$/.test(theView(w).webContents._url) ? theView(w) : null),
   '声明式插件的界面');
   assert.match(theView(w).webContents._url, /^http:\/\/127\.0\.0\.1:\d+\/lab$/,
     'URL = 隧道 origin + 声明里的 path');
-  // ★ 分区按**插件**走 —— 一个网页应用自己的状态该跟它自己走。它不要数据空间
-  //   （`ports: 0`，缺省也是 0），所以身份是两段：插件 id @ 共享组。★ 而它两个键
-  //   都没写 ⇒ 那一段是**缺省那个常量**（缺省是"继承"）。
+  // 分区按插件走 —— 一个网页应用自己的状态该跟它自己走。它不要数据空间
+  //   （`ports: 0`，缺省也是 0），所以身份是两段：插件 id @ 共享组。而它两个键
+  //   都没写，那一段是缺省那个常量（缺省是"继承"）。
   //
-  // ★ 这条断言**手写那个名字**、不引 `pluginData.DEFAULT_GROUP`：它进的是磁盘
-  //   目录名，改一个字就是**所有人的那份数据重置一次** —— 那条契约值得在这里
+  // 这条断言手写那个名字、不引 `pluginData.DEFAULT_GROUP`：它进的是磁盘
+  //   目录名，改一个字就是所有人的那份数据重置一次 —— 那条契约值得在这里
   //   也钉一遍（单测里那几条钉的是"算得对不对"，这一条钉的是"真跑一条会话时
   //   落盘的确实是它"）。
   //
-  // ★★ 而它**真的起来了** —— 这是「一个端口都不要的插件照常起」那一格：
-  //   不要数据空间**不是**一条残缺的配置，它是这一类插件的正常形态（没有浏览器，
-  //   就没有 origin 可言）。两条断言把它钉死：没有第三段，配置里也**没有**为它
+  // 而它真的起来了 —— 这是「一个端口都不要的插件照常起」那一格：
+  //   不要数据空间不是一条残缺的配置，它是这一类插件的正常形态（没有浏览器，
+  //   就没有 origin 可言）。两条断言把它钉死：没有第三段，配置里也没有为它
   //   造一份数据。
   assert.equal(ctl.snapshot().spaceId, null,
     '一个端口都不要 ⇒ 没有第三段（不是"分到了一个空的"）');
-  //   ★ 查的是**为它**那一份，不是"配置里空着"：这个套件里所有用例共用一份
+  //   查的是为它那一份，不是"配置里空着"：这个套件里所有用例共用一份
   //     配置目录，前面那些用例留下的数据都还在（夹具比想象中脏）—— 写成
   //     `deepEqual(spaces, [])` 的话，红的会是别人留下的那一份，而指不回这里。
   const mine = require('../src/main/config.js').loadConfig(DEV_CFG).spaces
@@ -4382,8 +4382,8 @@ test('★ 声明式插件：没有一行客户端代码，照样开界面', asyn
     'persist:01M2JKM1M1M1M1M1M1M1M1M1M1@default',
     `不要数据空间的插件要用按插件的分区，实际是 ${w.surfacePartition(w.front)}`);
 
-  // ★ 而没有客户端代码就**没有登录那一步**。证据看它那个存储分区里的 cookie jar：
-  //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架**不会去猜**一个
+  // 而没有客户端代码就没有登录那一步。证据看它那个存储分区里的 cookie jar：
+  //   登录成功会往里塞一个会话 cookie，没登录就一个都没有。框架不会去猜一个
   //   口令该怎么用 —— 它手里根本没有"这个插件要 POST 什么"的知识。
   const jar = partitionJars[w.surfacePartition(w.front)];
   assert.equal(jar ? jar.size : 0, 0,
@@ -4402,7 +4402,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // 等上一个用例的会话真的被释放。假后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
-  // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是**上一个用例**的会话，
+  // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是上一个用例的会话，
   // 排查起来会以为是中转站本身的问题。
   const b = idx._test.getBackend();
   await waitUntil(async () => !onlyFake(b)
@@ -4426,7 +4426,7 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
   }
   assert.ok(snap && snap.state === 'running', `没跑到 running：${JSON.stringify(snap)}`);
   assert.equal(snap.serviceKind, 'sshd');
-  // 客户端发上去的是 OpenSSH 的**一整行**（带注释，那正是用户能分辨「哪把是哪把」
+  // 客户端发上去的是 OpenSSH 的一整行（带注释，那正是用户能分辨「哪把是哪把」
   // 的唯一依据），由服务端规范化掉注释 —— 注释里的逗号会劈开 `--export=ALL,k=v,…`，
   // 而那是服务端那边要挡的事（见 test-sessiond-logic.py 19.9）。
   assert.match(idx._test.getBackend()._relayPubkey, /^ssh-ed25519 [A-Za-z0-9+/]{68}$/,
@@ -4436,13 +4436,13 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
     + '（端口 = origin = 一份浏览器存储），而中转站没有浏览器');
   assert.ok(snap.localPort > 0, '隧道必须真的在监听');
 
-  // ★ 这一条是整节的重点：中转站**不该**建 code-server 视图。
+  // 这一条是整节的重点：中转站不该建 code-server 视图。
   //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西（ssh 怎么连）
   //   恰好写在被盖住的那块面板上。
   assert.equal(calls.views.length, viewsBefore,
     '中转站不需要 WebContentsView —— 用户要看的东西在他自己的终端里');
 
-  // ★ 先查「有没有碰不该碰的地方」，再查「有没有写出该写的东西」。
+  // 先查「有没有碰不该碰的地方」，再查「有没有写出该写的东西」。
   //   顺序有讲究：反过来写的话，一个「把配置写进真家目录」的改动会先被
   //   「沙盒目录里没有文件」那条拦下，而报出来的原因和真正的问题不是一回事。
   assert.equal(fs.existsSync(path.join(fakeHome, '.slurmate')), false,
@@ -4451,10 +4451,10 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
     '★ 尤其不能碰 ~/.ssh/config —— 那是用户**全部** ssh 都要经过的地方，'
     + '比 config.json 严重得多');
 
-  // 开发者模式必须落在**它自己的**配置目录里。两个根**都在沙盒里**：
+  // 开发者模式必须落在它自己的配置目录里。两个根都在沙盒里：
   //   · `home`    —— 沙盒根（用户的 `~/.ssh/config` 在它下面）
-  //   · `dataDir` —— 沙盒里的**插件数据目录**，框架按身份算出来的
-  // ★ 这条断言用的路径是**从框架现算的**（`getPluginDataRoot` + 身份），而插件是
+  //   · `dataDir` —— 沙盒里的插件数据目录，框架按身份算出来的
+  // 这条断言用的路径是从框架现算的（`getPluginDataRoot` + 身份），而插件是
   //   通过 `ctx.dataDir()` 写的 —— 两边算出来必须是同一个目录，否则"界面上说没有、
   //   插件却在写"这件事会从这里开始。
   const P = require('../src/main/plugin-data.js');
@@ -4483,11 +4483,11 @@ test('★ 中转站：起 sshd 会话不建视图，而是把本地 ssh 配置�
 });
 
 
-// ── ★ 未知服务的会话：接上隧道，但只解释、不动作 ──────────────────────────────
+// ── 未知服务的会话：接上隧道，但只解释、不动作 ──────────────────────────────
 //
-// 这条是"站点装了本客户端不认识的插件"在**会话层**的表现。它要同时成立两件看起来
-// 相反的事：隧道**要**接起来（那是用户唯一的出路 —— 他能直接连上去看看那是什么，
-// 也能结束它），而"怎么用它"**一件都不能做**（那个端口上跑的可能是任何东西，
+// 这条是"站点装了本客户端不认识的插件"在会话层的表现。它要同时成立两件看起来
+// 相反的事：隧道要接起来（那是用户唯一的出路 —— 他能直接连上去看看那是什么，
+// 也能结束它），而"怎么用它"一件都不能做（那个端口上跑的可能是任何东西，
 // 拿口令去 POST 或者给它配主机公钥都是在声称一件我们并不知道的事）。
 
 test('配置里认不出的 enabled 值按「跟着站点走」处理，不读成「关掉」', (t) => {
@@ -4500,7 +4500,7 @@ test('配置里认不出的 enabled 值按「跟着站点走」处理，不读�
   }));
   const cfg = config.loadConfig(tmp);
 
-  // ★ 认不出的形状（这里是字符串 'no'）**丢掉**，回到"跟着站点走" ——
+  // 认不出的形状（这里是字符串 'no'）丢掉，回到"跟着站点走" ——
   //   而"跟着站点走"是 true。读成 false 的话，配置文件里一个笔误就让一个功能
   //   凭空消失，而界面上只会少一个按钮、没有任何地方解释为什么。
   assert.equal(config.pluginEnabledLocally(cfg, 'sshd'), true,
@@ -4516,7 +4516,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   t.after(async () => {
   await ensureConnected(idx);
     Module._load = origLoad;
-    // ★ 这一条不只是打扫卫生：如果 tryReattach 提前返回（正是 C10 那个变异），
+    // 这一条不只是打扫卫生：如果 tryReattach 提前返回（正是 C10 那个变异），
     //   controller 会是 null 而隧道还活着 —— 事件循环被它撑住，
     //   整轮 `node --test` 不会结束。收尾要能覆盖"没有 controller"那种情况。
     const c = onlyCtl(idx);
@@ -4530,7 +4530,7 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   // 先把上一个用例可能留下的会话收干净 —— 「单一启动」是服务端强制的，
   // 带着一个在跑的会话去开新的只会拿到「已有 1 个活跃会话」。
   // 假后端的 _goodbye 只把 state 置成 released、不把对象清掉（真守护进程也是
-  // 这样：终态记录会留着），所以判据是**状态**而不是对象在不在。
+  // 这样：终态记录会留着），所以判据是状态而不是对象在不在。
   const dead = () => !onlyFake(b)
     || ['released', 'rejected', 'expired'].includes(onlyFake(b).state);
   if (!dead()) {
@@ -4538,13 +4538,13 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
     await waitUntil(dead, '上一个会话释放', 20000);
   }
 
-  // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个**真的在监听**
+  // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个真的在监听
   // 的端口。起完再把这个会话的 service_kind 换成客户端不认识的名字，正是
   // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
   const started = await appStart({ cpus: 2 }, 'code-server');
   assert.equal(started.ok, true,
     `开会话失败：${JSON.stringify(started.sessions || started)}`);
-  // ★ 取**刚起的这一条**的 controller（`onlyCtl` 取的是表里第一个，而多开之后
+  // 取刚起的这一条的 controller（`onlyCtl` 取的是表里第一个，而多开之后
   //   表里可能还留着别的槽的记录 —— 拿错了不会报错，只会以错误的理由变绿）。
   const ctl = idx._test.sessionAt(started.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().origin,
@@ -4557,9 +4557,9 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   assert.ok(siteJup, '前置条件：假站点要有一个客户端不认识的插件');
   const ref = `${siteJup.id}@${siteJup.version}`;
 
-  // ── ★ 不变量一：跑了之后**改站点状态也不影响这个会话** ──
+  // ── 不变量一：跑了之后改站点状态也不影响这个会话 ──
   //
-  // 插件对象是在**会话创建时捕获**的，之后所有状态变化都用它、不再查注册表。
+  // 插件对象是在会话创建时捕获的，之后所有状态变化都用它、不再查注册表。
   // 所以就算这个会话的 service_kind 凭空变成别的，客户端也照旧按它起时那个插件
   // 渲染 —— 这正是"站点升级插件不该弄坏正在跑的会话"的落点。
   w.destroySurface(w.front);
@@ -4570,23 +4570,23 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   ctl.session.service_plugin = ref;
   ctl.emit('change', ctl.snapshot());
   await new Promise((r) => setTimeout(r, 300));
-  // ★ 判据必须是**行为**（界面还按不按那个插件渲染），不能只看 `controller.plugin`
+  // 判据必须是行为（界面还按不按那个插件渲染），不能只看 `controller.plugin`
   //   那个字段：在"捕获了但不用"的实现里那个字段照样是对的，于是断言会因为错误的
   //   理由变绿。所以强的那一条放在前面。
   assert.equal(calls.views.length, viewsBefore + 1,
     '★ 会话跑起来之后改这些字段不该换掉它的插件 —— 框架用的仍是它起时捕获的那一个'
     + '（那个插件声明了 surface，所以界面会被重新建起来）');
-  // ★ 插件对象住在**记录**上（`rec.plugin`），不在 controller 上 —— 多开之后
+  // 插件对象住在记录上（`rec.plugin`），不在 controller 上 —— 多开之后
   //   "这个 controller 属于谁"必须由表来回答，controller 自己不该认识插件。
   const recNow = idx._test.sessionAt(started.slot);
   assert.equal(recNow.plugin && recNow.plugin.name, 'code-server', '而且攥着的确实还是它');
   w.destroySurface(w.front);
 
-  // ── ★ 不变量二：走**客户端重启**那条路时，认不出的插件要接隧道、不建视图 ──
+  // ── 不变量二：走客户端重启那条路时，认不出的插件要接隧道、不建视图 ──
   //
   // 这才是"站点装了新插件而客户端没跟上"在现实里的样子：会话是别人提交的，
   // 客户端是刚启动的。上一段用的 controller 隧道是现成的，那条"隧道在"的断言
-  // 会因为错误的理由变绿；这一段把 controller 清掉重建，隧道必须**由这条路**
+  // 会因为错误的理由变绿；这一段把 controller 清掉重建，隧道必须由这条路
   // 接起来。
   const viewsNow = calls.views.length;
   // 通知走的是 webContents 的 'ui:notice' 通道（外壳把它渲染成提示条），
@@ -4605,11 +4605,11 @@ test('★ 未知服务的会话：接上隧道、不建视图，并说清该升�
   assert.equal(Boolean(theView(w)), false, '窗口里不该留下任何视图');
 
   const said = notices.slice(before).map((n) => `${n.kind}: ${n.text}`).join('\n');
-  // ★ 要害二：**点名**是哪个插件、并说清该怎么办。用户该升级客户端，不是找管理员 ——
+  // 要害二：点名是哪个插件、并说清该怎么办。用户该升级客户端，不是找管理员 ——
   //   不说这一句，他只能去猜。
   assert.match(said, /jupyter/i, `提示里要点名是哪个插件：${said}`);
   assert.match(said, /升级客户端/, `而且要说出该怎么办：${said}`);
-  // ★ 要害三：隧道**在**（用户有出路）。
+  // 要害三：隧道在（用户有出路）。
   assert.ok(ctl2.snapshot().origin, '隧道要接起来，否则用户连那个端口都够不着');
 
   await invoke('app:stop', { slot: await frontSlotOf() });
@@ -4621,9 +4621,9 @@ test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说
   require('../src/main/index.js');
   await new Promise((r) => setTimeout(r, 400));
 
-  // 在**真实**的分区目录里放两份东西（一份三段身份、一份任意的名字）。
+  // 在真实的分区目录里放两份东西（一份三段身份、一份任意的名字）。
   // 开发者模式那份配置与它们不可比（沙箱里的工作区 id 与真实那一份对不上），
-  // 所以**一个都不该被列出来** —— 而这是这条用例唯一有意义的形状：不是"清单恰好
+  // 所以一个都不该被列出来 —— 而这是这条用例唯一有意义的形状：不是"清单恰好
   // 是空的"，是"我们没去认它"。认了的话，用户会照着这份清单把自己的真实数据删掉。
   const parts = path.join(userData, 'Partitions');
   const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@w0123456789ab';
@@ -4633,11 +4633,11 @@ test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说
   const d = await invoke('app:pluginData');
   assert.equal(d.ok, true);
   assert.deepEqual(d.rows, [], '开发者模式下不许拿沙箱那份配置去认真实的分区');
-  // ★ 这一格是"我没去看"，不是"没有" —— 界面按它换一句话（缺席 ≠ 否）。
+  // 这一格是"我没去看"，不是"没有" —— 界面按它换一句话（缺席 ≠ 否）。
   assert.equal(d.diskChecked, false);
   assert.match(d.why, /开发者模式/, '要如实说清为什么没看');
 
-  // 没被列出来的东西也删不掉：判定要**重新对一遍账**，而这一次它没看到它。
+  // 没被列出来的东西也删不掉：判定要重新对一遍账，而这一次它没看到它。
   const r = await invoke('app:deletePluginData', { partition: 'slot-1' });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'stale');
@@ -4647,8 +4647,8 @@ test('★ 本机的插件数据：开发者模式**不碰磁盘**，并如实说
 /**
  * `panel.js` 的 `renderPluginData(d)` 里读到的那些 `d.xxx`。
  *
- * ★ 这份清单是**现读出来的**，不是在这里手抄一份 —— 手抄的那份会在 panel.js 新增一个
- *   `d.xxx` 时**照样绿**，而那正是下面那条用例要拦的形状。
+ * 这份清单是现读出来的，不是在这里手抄一份 —— 手抄的那份会在 panel.js 新增一个
+ *   `d.xxx` 时照样绿，而那正是下面那条用例要拦的形状。
  */
 function fieldsReadFromPluginData() {
   const src = fs.readFileSync(
@@ -4656,7 +4656,7 @@ function fieldsReadFromPluginData() {
     'utf8');
   const start = src.indexOf('function renderPluginData(d) {');
   assert.ok(start >= 0, '前提：panel.js 里还有 renderPluginData');
-  // 那个函数的结尾是**第 0 列**的 `}`（里面每一层都缩进着）。
+  // 那个函数的结尾是第 0 列的 `}`（里面每一层都缩进着）。
   const end = src.indexOf('\n}', start);
   assert.ok(end > start, '前提：找得到那个函数的结尾');
   const out = new Set();
@@ -4665,12 +4665,12 @@ function fieldsReadFromPluginData() {
 }
 
 test('★★ `app:pluginData` 的回包里带着界面要读的那几个字段', async (t) => {
-  // 这一条判的是**线**，不是函数 —— 与 `plugin-data-audit.test.mjs` 那条并存：
-  // 那条判 `audit()` 算出来的值对不对，这一条判那个值**到不到得了界面**。
+  // 这一条判的是线，不是函数 —— 与 `plugin-data-audit.test.mjs` 那条并存：
+  // 那条判 `audit()` 算出来的值对不对，这一条判那个值到不到得了界面。
   //
-  // ★ 为什么必须有这一条：`allUnknown` 若算出来了、却**没进回包**，界面读到的就是一个
+  // 为什么必须有这一条：`allUnknown` 若算出来了、却没进回包，界面读到的就是一个
   //   永远不存在的字段 —— `Boolean(undefined)` 是 `false`，于是那句提示永远不出现。
-  //   而全程**没有任何东西会红**：算的那一半有用例（绿），丢的那一半没有。
+  //   而全程没有任何东西会红：算的那一半有用例（绿），丢的那一半没有。
   //   见 KNOWN-ISSUES 的 F35。
   t.after(() => { Module._load = origLoad; });
   require('../src/main/index.js');
@@ -4679,7 +4679,7 @@ test('★★ `app:pluginData` 的回包里带着界面要读的那几个字段',
   const d = await invoke('app:pluginData');
   assert.equal(d.ok, true, JSON.stringify(d));
 
-  // `error` 只在**失败**回包那一支里（`d.ok === false`），成功回包不欠它。
+  // `error` 只在失败回包那一支里（`d.ok === false`），成功回包不欠它。
   const onFailureOnly = new Set(['error']);
   const want = [...fieldsReadFromPluginData()].filter((f) => !onFailureOnly.has(f));
   assert.ok(want.includes('allUnknown'), '前提：界面确实在读它（否则这一条测的是别的东西）');
@@ -4688,23 +4688,23 @@ test('★★ `app:pluginData` 的回包里带着界面要读的那几个字段',
       + `界面会读到 undefined，然后安静地走另一条分支。回包的键：${Object.keys(d).join('、')}`);
   }
   // 类型也要对：`Boolean(undefined)` 与 `false` 在 `if` 里是同一件事，但在
-  // 「查不了」与「没有」之间不是 —— 这一格必须是**算出来的**真布尔。
+  // 「查不了」与「没有」之间不是 —— 这一格必须是算出来的真布尔。
   assert.equal(typeof d.allUnknown, 'boolean',
     '`allUnknown` 必须是一个算出来的布尔，不是"缺了这个键"');
 
-  // ★ 另一半（**值**对不对）在 `plugin-data-audit.test.mjs` 里；这里够不到它：
-  //   `diskChecked` 要求**两根都查成了**，而开发者模式下**分区那一根不查**
-  //   （它与真实那一份是同一棵树，照沙箱配置去认会毁掉真实的数据）⇒ `names` 恒
+  // 另一半（值对不对）在 `plugin-data-audit.test.mjs` 里；这里够不到它：
+  //   `diskChecked` 要求两根都查成了，而开发者模式下分区那一根不查
+  //   （它与真实那一份是同一棵树，照沙箱配置去认会毁掉真实的数据），`names` 恒
   //   `null`、`diskChecked` 恒 `false`。所以这一条只保证"送到"，不保证"送对了"。
-  //   ★ 插件数据那一根**是查的**（它在沙箱里，与沙箱配置配套）—— 判据拆成两根
+  //   插件数据那一根是查的（它在沙箱里，与沙箱配置配套）—— 判据拆成两根
   //     各判的理由见 `auditPluginData` 里那段。
   assert.equal(d.diskChecked, false, '前提：分区那一根在开发者模式下不查');
 });
 
 test('★ 删除之后的回包与 `app:pluginData` **同一个形状**', async () => {
-  // 界面拿这份回包**重画同一块**（`panel.js` 的 `dropPluginData` 最后一句就是
-  // `renderPluginData(res)`）⇒ 少一个字段，症状与上面那一条逐字相同。
-  // ★ 这一条是**读源码**（开发者模式下删不掉任何东西 ⇒ 走不到成功那条回包）。
+  // 界面拿这份回包重画同一块（`panel.js` 的 `dropPluginData` 最后一句就是
+  // `renderPluginData(res)`），少一个字段，症状与上面那一条逐字相同。
+  // 这一条是读源码（开发者模式下删不掉任何东西，走不到成功那条回包）。
   const src = fs.readFileSync(
     path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main', 'index.js'),
     'utf8');
@@ -4713,7 +4713,7 @@ test('★ 删除之后的回包与 `app:pluginData` **同一个形状**', async 
     assert.ok(start >= 0, `前提：index.js 里还有 ${ch}`);
     const end = src.indexOf('\n  });', start);
     assert.ok(end > start, `前提：找得到 ${ch} 那个处理器的结尾`);
-    // 只看**最后那个** `return {`（回包本身）—— 处理器中间还有别的 return
+    // 只看最后那个 `return {`（回包本身）—— 处理器中间还有别的 return
     // （`stale` 那一条），拿整个函数体去搜会让"写在别处、没进回包"也绿。
     const whole = src.slice(start, end);
     const body = whole.slice(whole.lastIndexOf('return {'));
@@ -4729,24 +4729,24 @@ test('★ 删除之后的回包与 `app:pluginData` **同一个形状**', async 
 
 // ── 多开（并发层）───────────────────────────────────────────────────────────
 //
-// ★ 这一组用例是**唯一**能验多开的地方：真集群上要造出"两个会话同时活着"极难，
+// 这一组用例是唯一能验多开的地方：真集群上要造出"两个会话同时活着"极难，
 //   而假后端本来就是为这种现场存在的（见 `tryReattach` 那段注释里的教训 ——
 //   一条路在"唯一能测它的地方"不可达，等于没有验过）。
 //   `maxActive` 就是真集群上的 `max_sessions_per_user`（站点可配，缺省 1）。
 
 /**
  * 把假站点的上限放开到 n（真集群上等价于配置里写 `max_sessions_per_user = n`），
- * 并把上一个用例可能留下的会话**收干净**。
+ * 并把上一个用例可能留下的会话收干净。
  *
- * ★ 配额是**跨用例**累积的（同一个进程、同一个假站点），所以少了这一步的后果不是
- *   "这条用例红"，而是**下一条**红 —— 而那时排查的人看的是另一条用例。
+ * 配额是跨用例累积的（同一个进程、同一个假站点），所以少了这一步的后果不是
+ *   "这条用例红"，而是下一条红 —— 而那时排查的人看的是另一条用例。
  */
 async function openUpTo(idx, n) {
   const b = idx._test.getBackend();
   b.maxActive = n;
   b.debugReap();
-  // ★ **客户端那一侧也要清**：假站点把它的会话标成 released 了，而客户端手里的
-  //   controller 还停在 running，而"这个槽被占了"是**客户端**的判据
+  // 客户端那一侧也要清：假站点把它的会话标成 released 了，而客户端手里的
+  //   controller 还停在 running，而"这个槽被占了"是客户端的判据
   //   （`occupied`）。只清服务端的话，下一个用例会拿到一句"工作区被占着"，
   //   而它排查的是自己。
   for (const rec of [...idx._test.getSessions().values()]) {
@@ -4758,14 +4758,14 @@ async function openUpTo(idx, n) {
 }
 
 /**
- * 「demo 那条连接」= 开发者模式里**内置的那一条**。
+ * 「demo 那条连接」= 开发者模式里内置的那一条。
  *
- * ★ 夹具从前是自己 `app:saveConnection` 一条 `demo@127.0.0.1:1`。现在那个地址属于
+ * 夹具从前是自己 `app:saveConnection` 一条 `demo@127.0.0.1:1`。现在那个地址属于
  *   内置的那一条（播种时就落在那儿），再存一次会被主进程按「改不了内置的」拒掉，
  *   于是 `conn.connection` 是 undefined，几十条用例一起以
  *   `Cannot read properties of undefined` 收场 —— 而那句报错指不回这里。
- *   ★ 而"再存一次会被拒"正是**要测的一件事**（见「内置的那条」那几条用例）。
- *   ⇒ 夹具改成"**找到它**"，而不是"造一条"。
+ * 而"再存一次会被拒"正是要测的一件事（见「内置的那条」那几条用例）。
+ *，夹具改成"找到它"，而不是"造一条"。
  */
 async function builtinConn() {
   const b = await invoke('app:bootstrap');
@@ -4782,13 +4782,13 @@ async function connectDemo(idx) {
 }
 
 /**
- * 保证「连着」这件事成立 —— **不清假站点的状态**。
+ * 保证「连着」这件事成立 —— 不清假站点的状态。
  *
- * ★★ 为什么这一条需要每个用例自己说：**启动不自动连**。用例若依赖
- *   "bootstrap 已经替它连上了"这种隐含前提，症状是"改了启动序列 ⇒ 一堆用例以
+ * 为什么这一条需要每个用例自己说：启动不自动连。用例若依赖
+ *   "bootstrap 已经替它连上了"这种隐含前提，症状是"改了启动序列，一堆用例以
  *   `app:start` 失败收场，而报出来的原因指不回启动序列"。
  *
- * ★ 它与 `connectDemo` 的差别只有一处：**不 reset**。`connectDemo` 用来开一个
+ * 它与 `connectDemo` 的差别只有一处：不 reset。`connectDemo` 用来开一个
  *   干净的现场（服务端状态 + 客户端记录一起清），而这一条只补上"连上"那一步 ——
  *   对着一个已经摆好现场的用例调用它，reset 会把现场一起抹掉。
  */
@@ -4821,7 +4821,7 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
     ? viewFor(w, a.slot) : null), '甲那块界面');
   const viewA = viewFor(w, a.slot);
 
-  // ── 起乙：中转站（**不要界面**）──
+  // ── 起乙：中转站（不要界面）──
   const bs = await appStart(null, 'sshd');
   assert.equal(bs.ok, true, `乙提交失败：${JSON.stringify(bs)}`);
   assert.notEqual(bs.slot, a.slot,
@@ -4829,30 +4829,30 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
   const ctlB = idx._test.sessionAt(bs.slot).controller;
   await waitUntil(() => ctlB.state === 'running', '乙进入 running', 20000);
 
-  // ★ 判据一：两条都在跑，本地端口**不同**（同一个端口的两条隧道会互相抢）。
+  // 判据一：两条都在跑，本地端口不同（同一个端口的两条隧道会互相抢）。
   const pA = ctlA.snapshot().localPort;
   const pB = ctlB.snapshot().localPort;
   assert.ok(pA && pB, `两条都该有本地端口：${pA} / ${pB}`);
   assert.notEqual(pA, pB, '★ 两个隧道的本地端口必须不同');
 
-  // ★★ 判据二（本阶段最贵的一处）：**甲那块页面没有被乙收掉**。
+  // 判据二（本阶段最贵的一处）：甲那块页面没有被乙收掉。
   //    若 `_renderSession` 里那句 `win.hideSurface()` 收的是"窗口里那唯一一块"，
   //    起中转站（以及它每次心跳）就会把用户的编辑器页面销毁掉，而日志里一个字都没有。
   assert.equal(w.hasSurface(a.slot), true, '★ 甲那块界面必须还在');
   assert.equal(viewFor(w, a.slot), viewA, '★ 而且是**同一块**视图对象，不是重建出来的');
   assert.equal(w.hasSurface(bs.slot), false, '中转站不该有界面');
 
-  // ★ 判据三：两条都在 `app:states` 里（不是"最后动过的那一条"）。
+  // 判据三：两条都在 `app:states` 里（不是"最后动过的那一条"）。
   const st = await invoke('app:states');
   assert.equal(st.sessions.length, 2, `界面上应当看得见两条：${JSON.stringify(st.sessions)}`);
   assert.ok(st.sessions.every((x) => x.live), '两条都该是"活着"的');
   assert.ok(st.sessions.every((x) => x.service), '每条都要报得出是哪个插件');
 
-  // ★★ 判据四：结束甲，**乙完全不受影响**。
+  // 判据四：结束甲，乙完全不受影响。
   await invoke('app:stop', { slot: a.slot });
   assert.equal(ctlB.state, 'running', '★ 结束甲不该动到乙');
   assert.equal(idx._test.getSessions().has(bs.slot), true);
-  // ★ 记录**留着**（界面要显示"已结束"那一屏），只是它不再占着那个槽 ——
+  // 记录留着（界面要显示"已结束"那一屏），只是它不再占着那个槽 ——
   //   判据是 `occupied`（与 index.js 同一个口径），不是"记录还在不在"。
   assert.ok(idx._test.getSessions().get(a.slot), '甲那条记录该留着（界面要显示"已结束"）');
   assert.equal(occupiedOf(idx, a.slot), false, '★ 甲那个槽要能被下一轮用起来');
@@ -4865,13 +4865,13 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
 });
 
 test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回来', async (t) => {
-  // ★★ 这一条守的是那颗「调试」标签的意义（2026-10-11 加）：会话那块页面是**原生
+  // 这一条守的是那颗「调试」标签的意义（2026-10-11 加）：会话那块页面是**原生
   //   视图**，从 y=30 往下盖住整个窗口主体 —— 面板上任何属于自己的按钮（包括那些
-  //   调试开关）那时一个都够不着。而"抬回来"有三条路，**一条都不许少**。
+  //   调试开关）那时一个都够不着。而"抬回来"有三条路，一条都不许少。
   //
   //   ②③ 两条各自堵的是一格不同的缝，而它们常常被当成同一件事：
-  //     · ② 前台**换了个槽名**（旧记录被 `reapSessions` 收掉，新的那条落在别的槽上）；
-  //     · ③ **同一个槽被下一轮复用** —— 那时前台从头到尾都是同一个槽名，②判不出来。
+  //     · ② 前台换了个槽名（旧记录被 `reapSessions` 收掉，新的那条落在别的槽上）；
+  //     · ③ 同一个槽被下一轮复用 —— 那时前台从头到尾都是同一个槽名，②判不出来。
   //   少了③的症状正是"我点了开始会话，什么都没出来"（单开的人碰到的都是这一格）。
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -4903,15 +4903,15 @@ test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回�
   assert.equal(viewA._visible, true, '★ 路①：点了会话标签，页面要回来');
   assert.equal(w.panelFront, false);
 
-  // ── 路③：**同一个槽被下一轮复用**（前台一个字都没变）──
-  //   结束甲之后，前台仍然指着**它那个槽**（记录留着，界面要显示"已结束"）—— 然后再
+  // ── 路③：同一个槽被下一轮复用（前台一个字都没变）──
+  //   结束甲之后，前台仍然指着它那个槽（记录留着，界面要显示"已结束"）—— 然后再
   //   起同一个插件、同一份数据，槽名与前台都是同一个。
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(() => !occupiedOf(idx, a.slot), '甲那个槽松开', 20000);
   assert.equal(w.front, a.slot,
     '★ 前置：前台**仍旧是那个槽**（记录留着，界面要显示"已结束"）—— 这正是②判不出来的那一格');
-  // ★ 用户又点了一次那颗「调试」（面板本来就露着 —— 那条会话已经没了），这一步只是
-  //   把标志重新立起来。而这正是③要守的现场：**前台一个字没变，而页面是新的一块**。
+  // 用户又点了一次那颗「调试」（面板本来就露着 —— 那条会话已经没了），这一步只是
+  //   把标志重新立起来。而这正是③要守的现场：前台一个字没变，而页面是新的一块。
   await invoke('app:showPanel');
   assert.equal(w.panelFront, true, '★ 前置：标志立着，而那个槽上此刻没有页面');
 
@@ -4927,7 +4927,7 @@ test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回�
     + '少了这一格的症状就是"我点了开始会话，什么都没出来"');
   assert.equal(viewA3._visible, true, '★ 页面要自己上来');
 
-  // ── 路②：前台**换了**（那条会话结束之后，新的一条落在别的槽上）──
+  // ── 路②：前台换了（那条会话结束之后，新的一条落在别的槽上）──
   await invoke('app:showPanel');
   assert.equal(w.panelFront, true);
   await invoke('app:stop', { slot: a3.slot });
@@ -4939,9 +4939,9 @@ test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回�
   assert.equal(w.panelFront, false,
     '★★ 路②：前台换了 ⇒ 面板让开（少了它，页面上来了而面板还按着它）');
 
-  // ── ★ 反过来：起一条**后台**会话时，面板不许被顶掉 ──
-  //   判据是"这一块**是不是前台**"（见 windows.js 的 `showSurface`）。少了这一半的话，
-  //   用户站在调试那一屏上起第二条会话，冒出来的是**第一条**那个旧页面。
+  // ── 反过来：起一条后台会话时，面板不许被顶掉 ──
+  //   判据是"这一块是不是前台"（见 windows.js 的 `showSurface`）。少了这一半的话，
+  //   用户站在调试那一屏上起第二条会话，冒出来的是第一条那个旧页面。
   await invoke('app:stop', { slot: b.slot });
   await waitUntil(() => !occupiedOf(idx, b.slot), '乙那个槽松开', 20000);
   const c1 = await appStart(null, 'code-server');
@@ -4978,18 +4978,18 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // ★★ 这条用例用的是**合成**插件，理由必须写下来：它要的是
-  //    「**要工作区、但不能多开**」这一格 —— 而那正是"认领"与"槽闸"唯一分得开
+  // 这条用例用的是合成插件，理由必须写下来：它要的是
+  //    「要工作区、但不能多开」这一格 —— 而那正是"认领"与"槽闸"唯一分得开
   //    的地方。
-  //    · 拿 **code-server** 来测会**测到一句不再成立的话**：它今天是
+  //    · 拿 code-server 来测会测到一句不再成立的话：它今天是
   //      `concurrent: true`，于是第二个会话会正常起来（见下一条用例），
   //      而这条用例断言的是"必须在提交之前被拒"。
-  //    · 拿 **sshd** 来测则相反 —— 它不要工作区，`spaceId` 在 `claimSpace`
-  //      之前就已经是 null，于是**认领那一步根本走不到**：去掉认领这条用例照样
+  //    · 拿 sshd 来测则相反 —— 它不要工作区，`spaceId` 在 `claimSpace`
+  //      之前就已经是 null，于是认领那一步根本走不到：去掉认领这条用例照样
   //      绿，那半边就是装饰。
-  //    ★ 它**不需要假站点认识它**：被拒发生在提交**之前**，这个插件到不了后端。
-  //    ★★ **两条会话用同一个插件**：槽是按**那一份数据**分的，而两个不同的插件
-  //      天然是两份数据（各拿各的槽）—— 那是这次重做**故意**放开的，见下一条用例。
+  //    它不需要假站点认识它：被拒发生在提交之前，这个插件到不了后端。
+  //    两条会话用同一个插件：槽是按那一份数据分的，而两个不同的插件
+  //      天然是两份数据（各拿各的槽）—— 那是这次重做故意放开的，见下一条用例。
   //      拿两个插件来测这一条，测到的会是"它放行了"，而那正是它该做的事。
   const id = mintId();
   putSitePlugin({
@@ -5000,7 +5000,7 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
       },
     },
   });
-  // ★ 而它**要**让假站点认识：这一次它真的会提交上去（从前一次都不提交，
+  // 而它要让假站点认识：这一次它真的会提交上去（从前一次都不提交，
   //   所以那句"它不需要假站点认识它"当时成立、现在不成立了）。
   idx._test.getBackend().debugAddSitePlugin('single-slot');
 
@@ -5011,21 +5011,21 @@ test('★ 同一个槽不许两条：拒绝，而且说得出是**哪一个**挡
   const sidA = ctlA.sessionId;
   const viewA = viewFor(w, a.slot);
 
-  // 再起一条**同一个槽**的（同一个插件、同一个工作区 ⇒ 同一份数据）—— 必须被
-  // **客户端**拦住，而不是提交到服务端之后才拿到一句 quota_active。理由：一份数据 =
-  // 一个本地端口 = 一份浏览器存储，同一份数据上的第二条会把第一条的端口与存储**当场抢掉**。
+  // 再起一条同一个槽的（同一个插件、同一个工作区，同一份数据）—— 必须被
+  // 客户端拦住，而不是提交到服务端之后才拿到一句 quota_active。理由：一份数据 =
+  // 一个本地端口 = 一份浏览器存储，同一份数据上的第二条会把第一条的端口与存储当场抢掉。
   const b2 = await appStart(null, 'single-slot');
   assert.equal(b2.ok, false, '★ 同一个槽的第二个会话必须在提交**之前**就被拒');
   assert.equal(ctlA.state, 'running', '★ 甲必须一动不动');
   assert.equal(ctlA.sessionId, sidA, '★ 甲连会话号都不该变');
   assert.equal(viewFor(w, a.slot), viewA, '★ 甲那块视图一个字都不该动');
-  // ★ 说得出**是哪一个**挡住了（这才是这条提示存在的理由）—— 而不是一句
-  //   「会话已在进行中」。名字取的是**挡着的那一条**的插件。
+  // 说得出是哪一个挡住了（这才是这条提示存在的理由）—— 而不是一句
+  //   「会话已在进行中」。名字取的是挡着的那一条的插件。
   const said = noticesOf().filter((n) => n.kind === 'error').map((n) => n.text);
   const last = said[said.length - 1] || '';
   assert.match(last, /single-slot/, `★ 提示里要点名是哪一个挡着：${last}`);
   assert.match(last, /那一份数据/, `★ 而且要说清占的是**那一份数据**：${last}`);
-  // ★ 而**不能**走到提交：那说明被拒的时机错了（服务端只会回一句 quota_active，
+  // 而不能走到提交：那说明被拒的时机错了（服务端只会回一句 quota_active，
   //   而那时第二条已经占住了那一份数据的端口与存储）。
   assert.equal(idx._test.getBackend()._occupying().length, 1,
     '★ 必须在提交**之前**就拒掉 —— 后端不该多出一条会话');
@@ -5042,12 +5042,12 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
   await openUpTo(idx, 3);
   await connectDemo(idx);
 
-  // ★★ 这条是这次重做的**中心收益**，而它从前做不到：槽名里带的是**工作区 id**，
-  //    于是"同一个工作区的第二条会话"一律被拒 —— **哪怕它是另一个插件**。
+  // 这条是这次重做的中心收益，而它从前做不到：槽名里带的是工作区 id，
+  //    于是"同一个工作区的第二条会话"一律被拒 —— 哪怕它是另一个插件。
   //    而那条拒绝自己写的理由两半都不成立：端口有 `excludedPortsFor` 排开，
   //    分区名里本来就带着插件 id（`<插件 id>@<共享组>@<数据 id>`）。
   //
-  //    ⇒ 现在槽是**按那一份数据**分的，而数据是按插件分的：两个插件天然两份数据。
+  //    现在槽是按那一份数据分的，而数据是按插件分的：两个插件天然两份数据。
   //      下面的断言就钉这件事：两个槽、两个端口、两个分区，而两条都活着。
   const id = mintId();
   putSitePlugin({
@@ -5063,10 +5063,10 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
   const a = await startRunning(idx, 'code-server');
   const b = await startRunning(idx, 'second-space');
 
-  // ★ 判据一：**两个槽**。同一个工作区、同一个连接，而它们不是同一条会话。
+  // 判据一：两个槽。同一个工作区、同一个连接，而它们不是同一条会话。
   assert.notEqual(b.slot, a.slot, '★ 两个插件两份数据 ⇒ 两个槽 ⇒ 可以同时活着');
 
-  // ★ 判据二：两份**数据**（第三段不是一个），而它们落在同一个工作区里
+  // 判据二：两份数据（第三段不是一个），而它们落在同一个工作区里
   //   —— 那正是"数据与工作区是两层"的直接体现。
   const cfg = idx._test.getCfg();
   const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId) || cfg.connections[0];
@@ -5078,21 +5078,21 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
   assert.equal(a.ctl.spaceId, sidA);
   assert.equal(b.ctl.spaceId, sidB);
 
-  // ★ 判据三：**两个本地端口**。一份数据一个端口（端口 = origin = 一份浏览器存储），
+  // 判据三：两个本地端口。一份数据一个端口（端口 = origin = 一份浏览器存储），
   //   共用端口就等于两份浏览器的数据落在同一份存储里。
   const pA = a.ctl.snapshot().localPort;
   const pB = b.ctl.snapshot().localPort;
   assert.ok(pA && pB, `两条都该有本地端口：${pA} / ${pB}`);
   assert.notEqual(pA, pB, '★ 两条隧道的本地端口必须不同');
 
-  // ★ 判据四：**两个存储分区**，而且分区名里能看出是**两个插件**。
+  // 判据四：两个存储分区，而且分区名里能看出是两个插件。
   const w = idx._test.getWindow();
   const partA = w.surfacePartition(a.slot);
   const partB = w.surfacePartition(b.slot);
   assert.notEqual(partA, partB, '★ 两份必须是两个存储分区');
   assert.notEqual(partA.split('@')[0], partB.split('@')[0], '头一段是插件 id，必须不同');
 
-  // ★ 判据五：结束其中一个，另一个完全不受影响（两条各有各的记录）。
+  // 判据五：结束其中一个，另一个完全不受影响（两条各有各的记录）。
   await invoke('app:stop', { slot: a.slot });
   assert.equal(b.ctl.state, 'running', '★ 结束甲不该动到乙');
   assert.equal(w.hasSurface(b.slot), true, '★ 乙那块界面必须还在');
@@ -5105,28 +5105,28 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
 
 // ── 阶段 7：第二份从哪来（认领 + 临时实例）──────────────────────────────────
 //
-// 这一组用例的共同前提：**同一个插件（code-server）要能同时开两份**，所以
-// `openUpTo(idx, 2)` 是配额，`connectDemo` 给出那条连接 —— 而**第一份认领它**。
+// 这一组用例的共同前提：同一个插件（code-server）要能同时开两份，所以
+// `openUpTo(idx, 2)` 是配额，`connectDemo` 给出那条连接 —— 而第一份认领它。
 
 /**
- * 提交一条会话 —— **首选端口被占着时，按用户会按的那一下答**。
+ * 提交一条会话 —— 首选端口被占着时，按用户会按的那一下答。
  *
- * ★★ 为什么夹具要替用户答一下：这一版起，首选端口被别的程序占着时**不再静默顺移**，
+ * 为什么夹具要替用户答一下：这一版起，首选端口被别的程序占着时不再静默顺移，
  *    而是先问一句「启动 / 记住并启动 / 取消」（见 `index.js` 的 `startSession`）。而
- *    **这台开发机上 18080 就是被占着的** —— 那是这台机器的别的东西（不是我们的
+ *    这台开发机上 18080 就是被占着的 —— 那是这台机器的别的东西（不是我们的
  *    会话、也不在任何配置里，探测只能看见"占着"）。于是那个端口上的每一条"起会话"
  *    用例都会撞上那一问，而它与那条用例要验的事情毫无关系。
- *    ⇒ 这一层把那一问答掉，用的就是界面上那颗「启动」发出去的
+ *，这一层把那一问答掉，用的就是界面上那颗「启动」发出去的
  *    `portChoice:'shift'`，与用户在真机上会做的事逐字相同。
- *    ★ 而「记住并启动」那一条**不走这一层**：它要验的正是"配置真的被改了"，
+ * 而「记住并启动」那一条不走这一层：它要验的正是"配置真的被改了"，
  *      所以那几条用例直接调 IPC（见下面那一条）。
  *
- * ★ 判据是**主进程回的那一格**（`code === 'port_conflict'`），不是"这台机器是不是
+ * 判据是主进程回的那一格（`code === 'port_conflict'`），不是"这台机器是不是
  *   开发机"：在 18080 空着的机器上（CI）它一次都不会触发，重发的路径也走不到。
  *
- * ★★ **那一问本身**由两条专门用例看着（〈首选端口被占住：先问…〉与〈临时副本那一份：
+ * 那一问本身由两条专门用例看着（〈首选端口被占住：先问…〉与〈临时副本那一份：
  *    端口被占不问…〉）—— 它们直接调 `invoke('app:start')`，一个字节都不经过这里。
- *    ⇒ 这一层替用户答的是"起得起来吗"那一路，挡不住"它还问不问"那一路。
+ *，这一层替用户答的是"起得起来吗"那一路，挡不住"它还问不问"那一路。
  */
 async function appStart(resources, serviceKind) {
   const r = await invoke('app:start', resources, serviceKind);
@@ -5145,12 +5145,12 @@ async function startRunning(idx, name, ms = 30000) {
   return { slot: r.slot, ctl };
 }
 
-/** 某一份数据在**磁盘上**的目录名（两个根同名，见 plugin-data.js）。 */
+/** 某一份数据在磁盘上的目录名（两个根同名，见 plugin-data.js）。 */
 function diskNameOf(idx, pluginName, spaceId) {
   const P = require('../src/main/plugin-data.js');
   const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
   assert.ok(plugin, `夹具前提：注册表里应当有 ${pluginName}`);
-  // ★ 不要工作区的插件没有第三段（sshd 那份就只有一个 `<id>@<共享组>`）——
+  // 不要工作区的插件没有第三段（sshd 那份就只有一个 `<id>@<共享组>`）——
   //   那时不传 `spaceId` 正是对的，传了反而会把一个不存在的身份算出来。
   if (!spaceId) return P.dataDirNameOf(P.identityOf(plugin));
   const space = idx._test.getCfg().spaces.find((x) => x.id === spaceId)
@@ -5159,7 +5159,7 @@ function diskNameOf(idx, pluginName, spaceId) {
   return P.dataDirNameOf(P.identityOf(plugin, space));
 }
 
-/** 活跃连接那个工作区里，某个插件那一份**数据**（引用表指着的那一份）。 */
+/** 活跃连接那个工作区里，某个插件那一份数据（引用表指着的那一份）。 */
 function refSpaceOf(idx, pluginName) {
   const cfg = idx._test.getCfg();
   const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId) || cfg.connections[0];
@@ -5194,8 +5194,8 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
   const cfg = idx._test.getCfg();
   const refSpace = refSpaceOf(idx, 'code-server');
 
-  // ★ 判据一：**第一份仍然是持久的，一个字都没变**。它认领的就是引用表指着的那一份
-  //   （与这个机制存在之前**逐字相同**），分区名也就是那一份算出来的那一个。
+  // 判据一：第一份仍然是持久的，一个字都没变。它认领的就是引用表指着的那一份
+  //   （与这个机制存在之前逐字相同），分区名也就是那一份算出来的那一个。
   assert.equal(idA, refSpace.id, '★ 第一份认领的是连接那个工作区里这个插件的那一份');
   assert.equal(partA, P.partitionOf(P.identityOf(
     idx._test.getRegistry().list().find((p) => p.name === 'code-server'), refSpace)),
@@ -5204,15 +5204,15 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
   const b = await startRunning(idx, 'code-server');
   const idB = b.ctl.spaceId;
 
-  // ★ 判据二：两份落在**两个槽**、两个**实例键**上 —— 而第二份那个键
-  //   **不在配置里**（它只活在内存里，这就是"临时"的全部含义）。
+  // 判据二：两份落在两个槽、两个实例键上 —— 而第二份那个键
+  //   不在配置里（它只活在内存里，这就是"临时"的全部含义）。
   assert.notEqual(b.slot, a.slot, '★ 两份必须是两个槽（同一个槽就是同一个端口）');
   assert.notEqual(idB, idA, '★ 两份的实例键必须不同');
   assert.equal(config.findSpace(cfg, idB), null, '★ 第二份那份数据不在配置里');
   assert.equal(idx._test.getTempSpaces().has(idB), true, '★ 它在内存那张表里');
   assert.equal(idx._test.getTempSpaces().size, 1, '而只有它一个是临时的');
 
-  // ★ 判据三：**另一个端口**、**另一份浏览器存储**（新 origin ⇒ localStorage 天然
+  // 判据三：另一个端口、另一份浏览器存储（新 origin，localStorage 天然
   //   是空的，这正是"临时副本"在浏览器那一侧的样子）。
   const temp = idx._test.getTempSpaces().get(idB);
   assert.notEqual(temp.ports[0], spacePort(idx, idA), '★ 端口不能是持有者那个');
@@ -5226,7 +5226,7 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
     idx._test.getRegistry().list().find((p) => p.name === 'code-server'), temp)));
   assert.equal(refSpace.id === idB, false, '★ 而第二份**不属于任何工作区**');
 
-  // ★ 判据四：界面上两条都看得见，而**只有第二份**带 `temporary`（那个标记是
+  // 判据四：界面上两条都看得见，而只有第二份带 `temporary`（那个标记是
   //   常驻提示唯一的数据来源，见 sessionViews）。
   const st = await invoke('app:states');
   const vA = st.sessions.find((x) => x.slot === a.slot);
@@ -5234,25 +5234,25 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
   assert.equal(vA.temporary, false, '★ 持有者不是临时的');
   assert.equal(vB.temporary, true, '★ 第二份是');
 
-  // ★ 判据五：**实际监听端口**必须分开，而**首选端口必须来自它自己那个工作区**。
+  // 判据五：实际监听端口必须分开，而首选端口必须来自它自己那个工作区。
   //
-  //   ★ 为什么不是简单的一句"不许有顺移警报"：`assignSpacePorts` 是**确定性**的、
-  //     **不探测 OS** —— 所以一台机器上只要有个无关进程占着 18080，会话就会顺移，
-  //     而那是**设计好的行为**（顺移只影响这一次会话），不是故障。在那种机器上
-  //     "不许有警报"会假红（本机就是这种情况）。真正要钉的是**首选端口从哪来**：
-  //     临时那一份必须用**它自己**那个端口，而**不是**回落到 `SPACE_PORT_BASE`
+  //   为什么不是简单的一句"不许有顺移警报"：`assignSpacePorts` 是确定性的、
+  //     不探测 OS —— 所以一台机器上只要有个无关进程占着 18080，会话就会顺移，
+  //     而那是设计好的行为（顺移只影响这一次会话），不是故障。在那种机器上
+  //     "不许有警报"会假红（本机就是这种情况）。真正要钉的是首选端口从哪来：
+  //     临时那一份必须用它自己那个端口，而不是回落到 `SPACE_PORT_BASE`
   //     （18080 = 持有者那个端口）—— 那正是"每一次开局都推一条假警报 + 同一份配置
   //     在不同启动顺序下得到不同 origin"那条路。
   const wantOf = (ctl) => {
     const m = /首选端口 (\d+)/.exec(ctl.snapshot().warning || '');
     return m ? Number(m[1]) : null;
   };
-  // ★★ **必须到三条会话才守得住上面那条"没有回落"。** 回落值是
-  //    `SPACE_PORT_BASE`（18080），而**至多一条**会话能真的绑上 18080 ——
-  //    两份临时的里有回落时，**必然有一条要顺移**（或者被排除集跳过），而那一步的
+  // 必须到三条会话才守得住上面那条"没有回落"。回落值是
+  //    `SPACE_PORT_BASE`（18080），而至多一条会话能真的绑上 18080 ——
+  //    两份临时的里有回落时，必然有一条要顺移（或者被排除集跳过），而那一步的
   //    警报里报的会是 18080，与它自己那个端口对不上，于是这条断言当场红。
-  //    只查两条的话，回落值恰好等于某一份临时数据自己的端口时**什么都看不出来**——
-  //    而那不是假想：夹具里配置的端口是**跨用例累积**的，新算出来的临时端口
+  //    只查两条的话，回落值恰好等于某一份临时数据自己的端口时什么都看不出来——
+  //    而那不是假想：夹具里配置的端口是跨用例累积的，新算出来的临时端口
   //    真的会回到 18080（变异验证抓到过这一格）。
   //
   //    顺带把"两份临时的绝不能拿到同一个首选端口"也钉住（`usedSpacePortsAll`
@@ -5266,7 +5266,7 @@ test('★★ 同一个插件开两份：第二份是**临时实例**（另一个
   assert.equal(new Set(ports3).size, 3, `★ 三条三个本地端口：${JSON.stringify(ports3)}`);
   for (const [ctl, id] of xs) {
     const want = wantOf(ctl);
-    // 没顺移就是最干净的形态；顺移了的话，报出来的"首选端口"必须是它**自己那个工作区**
+    // 没顺移就是最干净的形态；顺移了的话，报出来的"首选端口"必须是它自己那个工作区
     // 的端口（回落的话这里会是 18080）。
     if (want !== null) {
       assert.equal(want, spacePort(idx, id),
@@ -5300,7 +5300,7 @@ test('★★ 临时实例的插件数据目录是持有者那一份的**快照**
   assert.equal(a.ctl.spaceId, space.id, '夹具前提：第一份认领的就是引用表指着的那一份');
   const b = await startRunning(idx, 'code-server');
 
-  // ★ 起点是**持有者那一份**（整个目录，含嵌套），而且是**开局就有**的 ——
+  // 起点是持有者那一份（整个目录，含嵌套），而且是开局就有的 ——
   //   不是"插件第一次写的时候才去拿"。少了这一步，第二份看到的是一间空屋子，
   //   而用户会以为自己的设置丢了。
   const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', b.ctl.spaceId));
@@ -5309,7 +5309,7 @@ test('★★ 临时实例的插件数据目录是持有者那一份的**快照**
   assert.equal(fs.readFileSync(path.join(tempDir, 'nested', 'deep.txt'), 'utf8'), 'deep',
     '★ 嵌套目录也要跟着走（`recursive`）');
 
-  // ★ **两份是两份**：在临时那一份里改一个字节，持有者那一份一个字都不能动。
+  // 两份是两份：在临时那一份里改一个字节，持有者那一份一个字都不能动。
   //   （拷贝而不是共享 —— 共享的话两边会互相踩，而症状是"我改了它，它自己变回去了"。）
   fs.writeFileSync(path.join(tempDir, 'settings.json'), '{"theme":"light"}');
   assert.equal(fs.readFileSync(path.join(baseDir, 'settings.json'), 'utf8'),
@@ -5329,9 +5329,9 @@ test('★★ 持有者结束之后，还开着的那一份**不接任**；下一
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // ★ 持有者名下有"用户攒出来的数据"——它**必须活过这一次会话**（那个工作区是持久的，
+  // 持有者名下有"用户攒出来的数据"——它必须活过这一次会话（那个工作区是持久的，
   //   下一次开会话还要用它）。这条断言同时守着 `releaseEphemeral` 那两个前提里的
-  //   后一个：**只回收临时实例**（把 `Map.delete` 那道守卫去掉，它就会连持久的
+  //   后一个：只回收临时实例（把 `Map.delete` 那道守卫去掉，它就会连持久的
   //   那份一起清掉 —— 而症状是"关掉一个会话，另一个的编辑器设置没了"）。
   const { dir: baseDir } = makePluginDataDir(idx, 'code-server');
 
@@ -5344,15 +5344,15 @@ test('★★ 持有者结束之后，还开着的那一份**不接任**；下一
   const idB = b.ctl.spaceId;
   assert.equal(idx._test.getTempSpaces().has(idB), true, '夹具前提：乙是临时实例');
 
-  // ★ 持有者结束。**乙一个字都不许变**：它手里攥着的那个数据 id 就是它的分区、它的
+  // 持有者结束。乙一个字都不许变：它手里攥着的那个数据 id 就是它的分区、它的
   //   数据目录、外面那个 origin —— 把"持有者"这个身份挪到一个正在跑的会话头上，
   //   等于在运行时迁移一份被活进程持有的存储（做不到；硬做的症状是页面忽然空掉）。
   const sidA = a.ctl.sessionId;
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(() => occupiedOf(idx, a.slot) === false, '甲真的结束', 20000);
-  // ★ **还要等服务端也真的释放它**：客户端那一侧进入终态是**立刻**的，而假后端
-  //   照真实守护进程的样子**延迟**才把它移出「占着位置」那一档（`_goodbye` 里那个
-  //   定时器，最多 2 秒）。不等的话，下面那条**新开的**会话会撞上配额，拿回一句
+  // 还要等服务端也真的释放它：客户端那一侧进入终态是立刻的，而假后端
+  //   照真实守护进程的样子延迟才把它移出「占着位置」那一档（`_goodbye` 里那个
+  //   定时器，最多 2 秒）。不等的话，下面那条新开的会话会撞上配额，拿回一句
   //   "已经有 N 个会话占着位置"，而失败信息看着像"多开坏了"。
   await waitUntil(() => !idx._test.getBackend()._occupying()
     .some((x) => x.session_id === sidA), '甲在服务端也真的释放了', 20000);
@@ -5362,7 +5362,7 @@ test('★★ 持有者结束之后，还开着的那一份**不接任**；下一
   assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true,
     '★★ 持有者那份数据必须原样在 —— 回收只该回收**临时**那一份');
 
-  // ★ 而**下一个新开的**会话认领持有者那一份 —— 认领只在开局那一刻发生。
+  // 而下一个新开的会话认领持有者那一份 —— 认领只在开局那一刻发生。
   const c = await startRunning(idx, 'code-server');
   assert.equal(c.ctl.spaceId, refSpace.id,
     '★★ 新开的那一条才认领持有者（那个槽已经空了）');
@@ -5390,19 +5390,19 @@ test('★★ 临时实例结束 ⇒ 它的两份数据一起没，而持久那�
   const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', idB));
   assert.equal(fs.existsSync(tempDir), true, '夹具前提：临时那一份真的建出来了');
 
-  // ★ 结束**临时那一份**（持有者继续跑）。
+  // 结束临时那一份（持有者继续跑）。
   await invoke('app:stop', { slot: b.slot });
   await waitUntil(() => !idx._test.getTempSpaces().has(idB), '临时实例被回收', 20000);
 
-  // ★★ 三样一起没：注册表那一格、磁盘上那份目录、浏览器存储那个分区。
-  //    次序是承重的（回收必须排在 `destroySurface` **之后**）—— 排在前面的话
+  // 三样一起没：注册表那一格、磁盘上那份目录、浏览器存储那个分区。
+  //    次序是承重的（回收必须排在 `destroySurface` 之后）—— 排在前面的话
   //    `livePartitions()` 还看得见那块视图，分区那一半被静默跳过，而症状是
   //    "每次回收都在盘上留一份垃圾"。
   assert.equal(fs.existsSync(tempDir), false, '★ 临时那份数据目录要跟着会话一起走');
   await waitUntil(() => calls.cleared.includes(partB),
     `★ 临时那份浏览器存储也要清（清过的：${JSON.stringify(calls.cleared)}）`, 5000);
 
-  // ★ 反过来：**持久那一份一个字节都不许动**（这是这条用例的另一半，不是顺带）。
+  // 反过来：持久那一份一个字节都不许动（这是这条用例的另一半，不是顺带）。
   assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true,
     '★★ 持有者那份数据必须原样在');
   assert.equal(w.surfacePartition(a.slot) !== null, true, '★ 持有者那块视图也还在');
@@ -5427,7 +5427,7 @@ test('★★ 断开（= 客户端退出前走的那条路）也要把临时实�
     diskNameOf(idx, 'code-server', idB));
   assert.equal(idx._test.getTempSpaces().has(idB), true, '夹具前提：乙是临时实例');
 
-  // ★★ 走的是 `stopAllSessions` —— `before-quit` 与关窗收尾的**同一条**路。
+  // 走的是 `stopAllSessions` —— `before-quit` 与关窗收尾的同一条路。
   //    那条路紧接着就是 `app.exit(0)`：等不到事件循环再去跑 `_renderSession`，
   //    所以回收在 `stopAllSessions` 里还有一次后备（同一个函数，第二次是 no-op）。
   await invoke('app:disconnect');
@@ -5441,13 +5441,13 @@ test('★★ 断开（= 客户端退出前走的那条路）也要把临时实�
 });
 
 test('★★ 对账的 `held` 必须**两个根都收**（只收分区那一半是一个删活数据的口子）', () => {
-  // ★ 为什么这一条是**读源码**而不是跑一遍：对账在**开发者模式下一律不查磁盘**
+  // 为什么这一条是读源码而不是跑一遍：对账在开发者模式下一律不查磁盘
   //   （`auditPluginData()` 自己那段：沙箱那份配置里的工作区 id 与真实那一份对不上，
   //   照它去认会把真实的数据整片看成孤儿）。而这些用例全都跑在假后端上 ——
-  //   所以 `app:pluginData` 在这里**永远是空名单**，拿它测不出任何东西。
+  //   所以 `app:pluginData` 在这里永远是空名单，拿它测不出任何东西。
   //   行为那一半在 `plugin-data-audit.test.mjs`（`held` 护住整行、而没拿着照旧进），
-  //   这里守的是**接线**：两个根都要有人报，否则那一半的行为永远收不到名字。
-  //   ★ 变异「去掉 liveDataDirs」打红的就是这一条。
+  //   这里守的是接线：两个根都要有人报，否则那一半的行为永远收不到名字。
+  //   变异「去掉 liveDataDirs」打红的就是这一条。
   const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
   const m = /held:\s*\[([^\]]*)\]/.exec(src);
   assert.ok(m, 'index.js 应当把 held 交给 auditPluginData');
@@ -5460,16 +5460,16 @@ test('★★ 对账的 `held` 必须**两个根都收**（只收分区那一半�
 
 test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用着的那一份一个字节都不动**',
   async (t) => {
-    // ★★ 这是本版唯一会**删用户数据**的一步，而这一条钉的是它两个方向：
+    // 这是本版唯一会删用户数据的一步，而这一条钉的是它两个方向：
     //    该清的清了（不然孤儿越攒越多），不该碰的一个字节没动（不然用户正在写的
     //    那份数据就没了，而症状只是"那个页面忽然坏了"）。
     //
-    // ★ 为什么造得出这个现场：**把那个插件从池里撤掉** —— 于是对账那张"该有的"
-    //   表（照**当前注册表**算）里没有这个身份了，而盘上那一份正被一条活会话写着。
+    // 为什么造得出这个现场：把那个插件从池里撤掉 —— 于是对账那张"该有的"
+    //   表（照当前注册表算）里没有这个身份了，而盘上那一份正被一条活会话写着。
     //   真机上这条路的两个走法都落在同一格上：用户卸掉了那个版本，或者作者升了
-    //   版本而新版**改掉了共享组**（第二段的名字就此变了）。
-    //   ⇒ 那种处境下唯一还护着它的就是 `held`，所以 `held` 必须认得出
-    //     **一条活会话用过的每一个落点**。
+    //   版本而新版改掉了共享组（第二段的名字就此变了）。
+    //   那种处境下唯一还护着它的就是 `held`，所以 `held` 必须认得出
+    //     一条活会话用过的每一个落点。
     t.after(() => { Module._load = origLoad; });
     const idx = require('../src/main/index.js');
     const P = require('../src/main/plugin-data.js');
@@ -5477,13 +5477,13 @@ test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用�
     await openUpTo(idx, 2);
     await connectDemo(idx);
 
-    // ── 一份**真的**没人认领的孤儿：一个本机不存在的插件留下的目录 ──
+    // ── 一份真的没人认领的孤儿：一个本机不存在的插件留下的目录 ──
     //    第二段取 `default`（不写 `data` 的插件在 0.12 之后就是这个名字）。
     const ghost = `${mintId().toLowerCase()}@${P.DEFAULT_GROUP}`;
     fs.mkdirSync(path.join(root, ghost), { recursive: true });
     fs.writeFileSync(path.join(root, ghost, 'marker'), 'x');
 
-    // ── 一条**活着**的会话，它正用着一份目录（中转站：身份里没有实例段）──
+    // ── 一条活着的会话，它正用着一份目录（中转站：身份里没有实例段）──
     await startRunning(idx, 'sshd');
     const liveName = diskNameOf(idx, 'sshd');
     const liveDir = path.join(root, liveName);
@@ -5500,7 +5500,7 @@ test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用�
     const d = await invoke('app:pluginData');
     assert.equal(d.ok, true, JSON.stringify(d));
 
-    // ★ 该清的：那份孤儿没了，而且**留下了一条界面读得到的记录**。
+    // 该清的：那份孤儿没了，而且留下了一条界面读得到的记录。
     assert.equal(fs.existsSync(path.join(root, ghost)), false,
       '★ 没人认领的孤儿要清掉 —— 不清的话它永远不会有人管');
     assert.ok(d.reclaimed && d.reclaimed.count >= 1,
@@ -5508,7 +5508,7 @@ test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用�
     assert.ok((d.reclaimed.items || []).some((i) => i.name === ghost),
       `★ 而且要说得出清掉的是哪一份：${JSON.stringify(d.reclaimed)}`);
 
-    // ★★ 承重格：活会话那一份**一个字节都不许动**。
+    // 承重格：活会话那一份一个字节都不许动。
     assert.equal(fs.existsSync(path.join(liveDir, 'marker')), true,
       '★★ 一条活会话正用着的目录被删了 —— 它写的数据就这么没了，而用户只看到'
       + '"那个页面忽然坏了"。它已经不在"该有的"那张表里（插件从池里撤了），'
@@ -5525,15 +5525,15 @@ test('★★ 自动回收：没人认领的孤儿清掉，而**活会话正用�
 
 test('★★ 会话换过工作区之后，**两个**落点都护着 —— 被交给过的那个与现在这个',
   async (t) => {
-    // ★ 这条钉的是 `liveDataDirs()` 那两个来源**各自**是承重的（少一个都红）：
-    //   · **被交给过的**（认领）：插件进程手里攥着的是它那一次拿到的那个路径 ——
+    // 这条钉的是 `liveDataDirs()` 那两个来源各自是承重的（少一个都红）：
+    //   · 被交给过的（认领）：插件进程手里攥着的是它那一次拿到的那个路径 ——
     //     我们这边算出"它现在应该在别处"，不等于那个进程不在旧路径上写；
-    //   · **现在这个**（推论）：会话刚被挪到另一个实例键、插件还没来得及问
+    //   · 现在这个（推论）：会话刚被挪到另一个实例键、插件还没来得及问
     //     `ctx.dataDir()` 的那一小段窗口。
     //
-    // ★ 造法走的是**那个状态本身**：把这条会话的实例键换掉
+    // 造法走的是那个状态本身：把这条会话的实例键换掉
     //   （`controller.setSpace` —— `relisten` 成功之后做的也正是这一句，见
-    //   `session.js`）。刻意**不**走 `relisten` 那一趟：它要真的再绑一个端口，
+    //   `session.js`）。刻意不走 `relisten` 那一趟：它要真的再绑一个端口，
     //   而这条用例判的是 `held` 里有没有那两个名字，与端口毫无关系 ——
     //   绑了反而在这台机器上留一根线，把后面某条用例的端口撞掉。
     t.after(() => { Module._load = origLoad; });
@@ -5545,9 +5545,9 @@ test('★★ 会话换过工作区之后，**两个**落点都护着 —— 被�
     const instA = a.ctl.spaceId;
     assert.ok(instA, '前提：这条会话落在一份数据上');
 
-    // ★ 换到**另一份真的数据**上（另一个工作区里 code-server 的那一份）。
+    // 换到另一份真的数据上（另一个工作区里 code-server 的那一份）。
     //   一份真的数据才算出得了名字 —— 而这条用例判的就是那个名字在不在 `held` 里。
-    //   ★ 那个新工作区没有任何连接，所以下一轮 `commitConfig` 会把它连同这一份
+    //   那个新工作区没有任何连接，所以下一轮 `commitConfig` 会把它连同这一份
     //     数据一起回收掉；用例末尾本来就走了一次收尾，这里不必额外造一个连接。
     const cfg = idx._test.getCfg();
     const config = require('../src/main/config.js');
@@ -5567,8 +5567,8 @@ test('★★ 会话换过工作区之后，**两个**落点都护着 —— 被�
       `★★ 会话**现在**这个落点也要护着（它下一秒就要往里写）：`
       + `${JSON.stringify(live)}`);
 
-    // ★ 而不相干的那一份照样不在 —— 少了这一条，一个"把什么都报一遍"的实现
-    //   也能让上面两条通过，而它会让**所有**垃圾都收不掉。
+    // 而不相干的那一份照样不在 —— 少了这一条，一个"把什么都报一遍"的实现
+    //   也能让上面两条通过，而它会让所有垃圾都收不掉。
     assert.equal(live.includes(`${'0'.repeat(26)}@editor@sffffffffffff`), false,
       '没被任何活会话碰过的名字不该在 `held` 里');
 
@@ -5592,26 +5592,26 @@ test('★★ 重连：N 条会话各拿一个实例，不会只剩第一条', as
   // 模拟"客户端整个进程没了再起来"。
   await idx._test.reattach();
 
-  // ★★ 判据是**两条都在**，而不是"接回了一条"。
-  //    临时工作区只活在**上一个进程的内存**里 —— 不重新认领的话，两条都会算成
-  //    "连接那个工作区" ⇒ 落进同一个槽 ⇒ 只接回第一条，另一条在控制节点上继续跑、
-  //    心跳没了 ⇒ 300 秒 suspect、1800 秒 **scancel**（用户的作业被悄悄杀掉）。
+  // 判据是两条都在，而不是"接回了一条"。
+  //    临时工作区只活在上一个进程的内存里 —— 不重新认领的话，两条都会算成
+  //    "连接那个工作区"，落进同一个槽，只接回第一条，另一条在控制节点上继续跑、
+  //    心跳没了，300 秒 suspect、1800 秒 scancel（用户的作业被悄悄杀掉）。
   await waitUntil(() => idx._test.getSessions().size === 2, '两条都接回来', 30000);
   const ids = [...idx._test.getSessions().values()].map((r) => r.controller.spaceId);
   assert.equal(new Set(ids).size, 2, `★ 两条必须落在两个实例键上：${JSON.stringify(ids)}`);
-  // ★ 而**接回来的**临时实例拿到的是**新**的 id（旧那个只活在死掉那个进程里）——
+  // 而接回来的临时实例拿到的是新的 id（旧那个只活在死掉那个进程里）——
   //   于是旧的 localStorage 变成孤儿。这是"临时"的应有之义，账本 S26 记着。
-  //   ★ 判据是"**新的那个**在表里、旧的**不在**"，而不是"表里恰好一条"：
-  //     `reattach()` 会**清空**那张表（真机上重启就是这个效果），所以这条用例
+  //   判据是"新的那个在表里、旧的不在"，而不是"表里恰好一条"：
+  //     `reattach()` 会清空那张表（真机上重启就是这个效果），所以这条用例
   //     守的是"重新认领了"，不是某个绝对数字。
   assert.equal(ids.includes(idB), false, '★ 旧的临时 id 已经不存在了');
   assert.equal(idx._test.getTempSpaces().has(ids.find((x) => x !== a.ctl.spaceId)), true,
     '接回来的那一条又重新认领了一个临时实例');
 
-  // ★ 收尾走**逐条 stop**，不走 `app:disconnect`：后者会 `backend.close()`，而假后端
+  // 收尾走逐条 stop，不走 `app:disconnect`：后者会 `backend.close()`，而假后端
   //   的 `close()` 会 `_clearTimers()` —— 那些"已发 goodbye、还在释放中"的会话于是
-  //   永远停在 releasing，`_occupying()` 再也不会空。那是**夹具的**性质（真机上客户端
-  //   退出之后不需要服务端把状态走完），不是被测行为。★ "断开那条路也要收干净"由
+  //   永远停在 releasing，`_occupying()` 再也不会空。那是夹具的性质（真机上客户端
+  //   退出之后不需要服务端把状态走完），不是被测行为。"断开那条路也要收干净"由
   //   另一条用例守着（那里等的是临时实例那张表，不是服务端的会话状态）。
   const after = await invoke('app:states');
   for (const x of after.sessions) await invoke('app:stop', { slot: x.slot });
@@ -5627,17 +5627,17 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // 一个「能多开 + 带 prepare」的插件，而它的 prepare 永远失败。★ 它**不需要**
-  // 假站点认识它：prepare 跑在提交**之前**，这个插件到不了后端。
+  // 一个「能多开 + 带 prepare」的插件，而它的 prepare 永远失败。它不需要
+  // 假站点认识它：prepare 跑在提交之前，这个插件到不了后端。
   //
-  // ★★ 而它失败的理由**故意是 `ctx.dataDir()` 的结果**（把那个路径原样当 message）——
+  // 而它失败的理由故意是 `ctx.dataDir()` 的结果（把那个路径原样当 message）——
   //    这一句话同时钉住两件事：
   //      · 失败信息原样传给用户（下面断言它出现了）；
-  //      · **`prepare()` 看得到实例段**。`ctx.dataDir()` 从 `rec.controller.spaceId`
-  //        现算那一格，而 `prepare()` 若跑在 controller **构造之前** ⇒ 这条会变成
+  //      · `prepare()` 看得到实例段。`ctx.dataDir()` 从 `rec.controller.spaceId`
+  //        现算那一格，而 `prepare()` 若跑在 controller 构造之前，这条会变成
   //        `identityOf` 那个"没有给出实例"的抛（`app:start` 把它变成一句 error），
   //        于是下面那条"路径的第三段是一个临时实例键"当场变红。
-  //        少了这句 `ctx.dataDir()`，把 controller 挪回去这个变异**打不红任何东西**
+  //        少了这句 `ctx.dataDir()`，把 controller 挪回去这个变异打不红任何东西
   //        —— 那正是"一条看起来在守什么、其实什么也没守的用例"。
   putSitePlugin({
     id: mintId(), name: 'prep-fail',
@@ -5649,15 +5649,15 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
     clientSrc: 'module.exports = { prepare: (ctx) => ({ ok: false, message: ctx.dataDir() }) };',
   });
 
-  // ★ 让 code-server 先跑起来：它证明"同一时刻还有别的会话在跑"，而 prep-fail
-  //   落到的是**它自己那份数据**。
-  //   ★★ 注意它**不再**把 prep-fail 挤成"临时的"：槽是按**那一份数据**分的，
-  //     而两个不同的插件天然是两份数据 —— 那是这次重做**故意**放开的
+  // 让 code-server 先跑起来：它证明"同一时刻还有别的会话在跑"，而 prep-fail
+  //   落到的是它自己那份数据。
+  //   注意它不再把 prep-fail 挤成"临时的"：槽是按那一份数据分的，
+  //     而两个不同的插件天然是两份数据 —— 那是这次重做故意放开的
   //     （见上面「两个不同的要布局的插件可以同时活着」那一条）。
   const a = await startRunning(idx, 'code-server');
   const prepFail = idx._test.getRegistry().list().find((p) => p.name === 'prep-fail');
   const before = idx._test.getSessions().size;
-  // ★ 用**差集**而不是"表是空的"：这条用例要说的是"**这一次**什么都没留下"，
+  // 用差集而不是"表是空的"：这条用例要说的是"这一次什么都没留下"，
   //   而"表里一条都没有"多断言了别人的家务事（上一条用例万一留下过什么，
   //   这一条会红在一个与它无关的地方）。
   const tempsBefore = new Set(idx._test.getTempSpaces().keys());
@@ -5665,7 +5665,7 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
   const r = await appStart(null, 'prep-fail');
   assert.equal(r.ok, false, '★ prepare 失败必须拦住这次提交');
 
-  // ★★ 三样都不许留下：会话表里那一格（留着的话那个槽再也开不了新的，而提示会说
+  // 三样都不许留下：会话表里那一格（留着的话那个槽再也开不了新的，而提示会说
   //    "某某正占着那份数据" —— 而那个会话根本不存在）、临时那份那张注册表里的一格、
   //    以及它在磁盘上那份起点目录（永远没人回收）。
   assert.equal(idx._test.getSessions().size, before, '★ 不许留下一条假记录');
@@ -5673,7 +5673,7 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
     [], '★ 这一次认领的临时实例要一起撤掉');
   assert.equal(a.ctl.state, 'running', '★ 持有者一动不动');
 
-  // ★ 失败原因（= 那个数据目录的路径）原样说出来，而且它的**第三段就是这一次的
+  // 失败原因（= 那个数据目录的路径）原样说出来，而且它的**第三段就是这一次的
   //   那一份** —— 一份临时数据（不在配置里、与持有者那一份不同）。这一条就是
   //   "prepare 看得到第三段"的可自动化证明。
   const said = noticesOf().filter((n) => n.text.startsWith(idx._test.getPluginDataRoot()));
@@ -5738,8 +5738,8 @@ test('★ 关窗确认要数**全部**活着的会话（说一句不成立的话
 
   // 打桩那个确认框：把弹出来的话记下来，并回"取消"（不真的关窗）。
   //
-  // ★ 用**模块作用域里那个桩对象**，不要 `require('electron')` —— 每个用例结束时
-  //   `Module._load` 都被还原了，而 `require` 的缓存里只有**本仓源码**那几个模块；
+  // 用模块作用域里那个桩对象，不要 `require('electron')` —— 每个用例结束时
+  //   `Module._load` 都被还原了，而 `require` 的缓存里只有本仓源码那几个模块；
   //   在用例体里现 require 一次会真的去解析 `node_modules/electron`，而这个仓库
   //   里没有 Electron 二进制（症状是一句 "failed to install correctly"，
   //   指向一个跟本用例毫无关系的东西）。
@@ -5758,8 +5758,8 @@ test('★ 关窗确认要数**全部**活着的会话（说一句不成立的话
   assert.equal(dialogs.length, 1, '有会话在跑就一定要问一句');
   const d = dialogs[0];
   assert.match(d.message, /2|两个/, `★ 要说出**几条**：${d.message}`);
-  // ★ 不能只念一条插件的话 —— 那等于把"你的编辑器里有没保存的改动"这件
-  //   **只对其中一条成立**的事说成对两条都成立。
+  // 不能只念一条插件的话 —— 那等于把"你的编辑器里有没保存的改动"这件
+  //   只对其中一条成立的事说成对两条都成立。
   assert.match(d.detail, /开发环境|code-server/, `要念到第一条：${d.detail}`);
   assert.match(d.detail, /中转站|sshd/, `也要念到第二条：${d.detail}`);
 
@@ -5785,14 +5785,14 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
   '两条都跑起来', 20000);
 
-  // ★ 主动断开 = 彻底终止，而它与关窗、退出收尾**共用同一个 `stopAllSessions`**。
+  // 主动断开 = 彻底终止，而它与关窗、退出收尾共用同一个 `stopAllSessions`。
   //   在这里钉住它，等于同时钉住那三条路 —— 而"只在其中一条里少停一个"正是
-  //   「关掉窗口会结束会话」这句话**不成立**的形状（账本 F13 的同一类）。
+  //   「关掉窗口会结束会话」这句话不成立的形状（账本 F13 的同一类）。
   const dis = await invoke('app:disconnect');
   assert.equal(dis.ok, true, JSON.stringify(dis));
   assert.equal(dis.released.state, 'releasing', '要有释放的结果回给界面');
 
-  // ★ 判据放在**服务端**那一侧：每条会话都必须收到过一句 goodbye。
+  // 判据放在服务端那一侧：每条会话都必须收到过一句 goodbye。
   const bs = idx._test.getBackend();
   const left = bs._sessions.filter((s) => !['releasing', 'released'].includes(s.state));
   assert.deepEqual(left.map((s) => s.session_id), [],
@@ -5815,10 +5815,10 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
   await connectDemo(idx);
   const conn = await onlyDemoConnection(idx);
 
-  // 这条连接那个工作区里、code-server 那一份数据的端口 = 这次会话的**首选**端口。
-  // ★ 它得**先有一次会话**才会被建出来 —— 这份夹具在这一行之前跑过一次
+  // 这条连接那个工作区里、code-server 那一份数据的端口 = 这次会话的首选端口。
+  // 它得先有一次会话才会被建出来 —— 这份夹具在这一行之前跑过一次
   //   `connectDemo`，而数据的 id 是开会话时铸的（`spaceFor`）。所以这里在
-  //   `app:start` **之前**先问：那一份在不在，不在就说明夹具的前提不成立。
+  //   `app:start` 之前先问：那一份在不在，不在就说明夹具的前提不成立。
   const cfgNow = idx._test.getCfg();
   const wsRef = (cfgNow.workspaces.find((l) => l.id === conn.workspaceId) || {}).refs || {};
   const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
@@ -5827,9 +5827,9 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
   const want = wantSpace.ports[0];
   assert.ok(want > 0, '那一份数据应当有一个首选端口');
 
-  // ★ 由**测试**把首选端口占住。不这么做的话，"顺移了"可能是这台机器上恰好有
+  // 由测试把首选端口占住。不这么做的话，"顺移了"可能是这台机器上恰好有
   //   别的东西在用那个端口 —— 而那时这条用例验的是运气，不是代码。
-  // ★ **这台机器上那个端口可能本来就被别的程序占着** —— 那正是这条用例要的场景，
+  // 这台机器上那个端口可能本来就被别的程序占着 —— 那正是这条用例要的场景，
   //   不必自己再占一次（占不上说明它已经占着了）。占得上才需要收尾。
   const squatter = net.createServer();
   const held = await new Promise((resolve, reject) => {
@@ -5838,9 +5838,9 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
   });
   t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
-  // ── ① 被占住 ⇒ **什么都不提交**，先问一句 ────────────────────────────────
-  //   ★★ 这一支是整条路存在的理由：探测发生在**提交之前**，所以此刻作业还没有
-  //     上集群 —— 界面上那个「取消」才是**字面意思**。等绑定那一刻再问，作业
+  // ── ① 被占住，什么都不提交，先问一句 ────────────────────────────────
+  //   这一支是整条路存在的理由：探测发生在提交之前，所以此刻作业还没有
+  //     上集群 —— 界面上那个「取消」才是字面意思。等绑定那一刻再问，作业
   //      已经在跑了，用户答"取消"是一句空话。
   const ask = await invoke('app:start', null, 'code-server');
   assert.equal(ask.ok, false, `被占住时不该报成功：${JSON.stringify(ask)}`);
@@ -5856,12 +5856,12 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
   const stillThere = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === wantSpace.id);
   assert.equal(stillThere.ports[0], want, '★ 被挡下的这一趟一个字都不许写进配置');
 
-  // ── ② 用户答「取消」⇒ 就到这里（界面上那一行收掉，没有别的动作）──
+  // ── ② 用户答「取消」，就到这里（界面上那一行收掉，没有别的动作）──
   //   那一下在界面上是 `clearPortAsk()`（renderer-dom 有它自己的用例），主进程
-  //   这一侧**没有对应的 IPC** —— 因为此刻本来就没有东西要撤。这一条断言就是
+  //   这一侧没有对应的 IPC —— 因为此刻本来就没有东西要撤。这一条断言就是
   //   那句话的证据：①之后系统仍然是一个干净的"什么都没发生"。
 
-  // ── ③ 用户答「启动」⇒ 带上作答重发，走既有的顺移扫描 ──
+  // ── ③ 用户答「启动」，带上作答重发，走既有的顺移扫描 ──
   const a = await invoke('app:start', null, 'code-server', 'shift');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
@@ -5872,17 +5872,17 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
   assert.notEqual(snap.localPort, want, '★ 首选端口被占，必须顺移');
   assert.ok(snap.localPort > want && snap.localPort <= want + 20,
     `顺移要落在扫描区间 ${want + 1}–${want + 20}，实际 ${snap.localPort}`);
-  // ★ 实际端口必须走到快照里 —— 界面和插件都靠它（`origin` 是给浏览器的那一个）。
+  // 实际端口必须走到快照里 —— 界面和插件都靠它（`origin` 是给浏览器的那一个）。
   assert.equal(snap.origin, `http://127.0.0.1:${snap.localPort}`,
     'origin 必须跟着**实际**端口走');
-  // ★ 而这一趟**是答过的**：那句"没有问你"只属于"提交之后才发现"那个窗口
+  // 而这一趟是答过的：那句"没有问你"只属于"提交之后才发现"那个窗口
   //   （见 session.js 的 `_portChoice`）。答过还补一句，就是在编造一次对话。
   assert.doesNotMatch(snap.warning || '', /没有问你/,
     '★ 用户刚答过「启动」，那句说明里不许再补一句"没有问你"');
   assert.match(snap.warning || '', /回到/, '★ 顺移仍然要说清"下次会回到原端口"');
 
-  // ★★ 本阶段的重点：**配置里那个端口一个字都不动。**
-  //    写回会把一次**暂时**的冲突变成永久的 origin 变更 —— 冲突消失之后 origin
+  // 本阶段的重点：配置里那个端口一个字都不动。
+  //    写回会把一次暂时的冲突变成永久的 origin 变更 —— 冲突消失之后 origin
   //    也回不去，而原来那份编辑器布局本来是可以回来的。
   const onDisk = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === snap.spaceId);
   assert.ok(onDisk, '那一份数据不该被顺手回收');
@@ -5897,8 +5897,8 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取
 });
 
 test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而下次不再问', async (t) => {
-  // ★★ 2026-10-11：那一行从二选一变成三选一。中间那一颗是**全界面唯一**会改配置的
-  //    按钮（"这份数据的端口以后就用这个"），而它写的是**隧道真正绑上的那一个**
+  // 2026-10-11：那一行从二选一变成三选一。中间那一颗是全界面唯一会改配置的
+  //    按钮（"这份数据的端口以后就用这个"），而它写的是隧道真正绑上的那一个
   //    （`snap.localPort`）—— 不是自己按顺移规则重算一遍：同一条规则两份实现迟早
   //    漂开，而漂开的形态是"记下来的端口没人在用"。
   t.after(() => { Module._load = origLoad; });
@@ -5916,7 +5916,7 @@ test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而
   assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 code-server 的那一份）');
   const want = wantSpace.ports[0];
 
-  // 由**测试**把首选端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
+  // 由测试把首选端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
   const squatter = net.createServer();
   const held = await new Promise((resolve, reject) => {
     squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
@@ -5928,7 +5928,7 @@ test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而
   const ask = await invoke('app:start', null, 'code-server');
   assert.equal(ask.code, 'port_conflict', '被占住仍然要先问，不许自己决定');
 
-  // ── ② 用户选「记住并启动」⇒ 带 `'remember'` 重发 ──
+  // ── ② 用户选「记住并启动」，带 `'remember'` 重发 ──
   const a = await invoke('app:start', null, 'code-server', 'remember');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
@@ -5937,7 +5937,7 @@ test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而
   const snap = ctl.snapshot();
   assert.notEqual(snap.localPort, want, '这一次仍然顺移 —— "记住"不等于"不顺移"');
 
-  // ★★ 而配置里那份数据的端口已经改成**隧道真正绑上的那一个**。
+  // 而配置里那份数据的端口已经改成隧道真正绑上的那一个。
   const after = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === snap.spaceId);
   assert.ok(after, '那一份数据不该被顺手回收');
   assert.equal(after.ports[0], snap.localPort,
@@ -5950,8 +5950,8 @@ test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
 
-  // ── ③ 再开一次：**不再问**（首选端口现在就是那个新端口，而它空着）──
-  //   ★ 占住者占的是**旧**端口，与新的首选端口无关 —— 这正是"记住"要买到的东西：
+  // ── ③ 再开一次：不再问（首选端口现在就是那个新端口，而它空着）──
+  //   占住者占的是旧端口，与新的首选端口无关 —— 这正是"记住"要买到的东西：
   //     那个程序一直占着的时候，用户只在第一次被问一遍。
   const b = await invoke('app:start', null, 'code-server');
   assert.equal(b.code, undefined,
@@ -5981,12 +5981,12 @@ test('★★ 那个端口**归别人**（配置里另一份数据声称着它）
   const want = space.ports[0];
   const ws = idx._test.getCfg().workspaces.find((l) => l.id === workspaceId);
 
-  // ★★ 这一条守的是那道闸里**最容易被漏掉**的一半：与隧道顺移时用的是**同一份**
+  // 这一条守的是那道闸里最容易被漏掉的一半：与隧道顺移时用的是同一份
   //   排除集（`excludedPortsFor`）—— 凡是"分配器会负责跳过"的端口，都不该再问用户
   //    一遍。问了的后果不是报错：用户答「启动」，而那本来就是这一趟必然会
-  //    发生的事（隧道扫描会跳过它），于是那一问成了一个**没有信息量的问题**。
-  //    ★ 造现场：配置里**另一份**数据也声称着同一个端口。它挂在那个工作区的
-  //      `spaces` 里 ⇒ `pruneSpaces` 不会把它收走（"活工作区持有的"就是活的）。
+  //    发生的事（隧道扫描会跳过它），于是那一问成了一个没有信息量的问题。
+  //    造现场：配置里另一份数据也声称着同一个端口。它挂在那个工作区的
+  //      `spaces` 里，`pruneSpaces` 不会把它收走（"活工作区持有的"就是活的）。
   const ghost = { id: 'sffffffffffff', pluginId: space.pluginId,
                   group: space.group, ports: [want] };
   idx._test.getCfg().spaces.push(ghost);
@@ -5999,7 +5999,7 @@ test('★★ 那个端口**归别人**（配置里另一份数据声称着它）
     if (w && Array.isArray(w.spaces)) w.spaces = w.spaces.filter((x) => x !== ghost.id);
   };
 
-  // ★ 由**测试**把那个端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
+  // 由测试把那个端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
   const squatter = net.createServer();
   const held = await new Promise((resolve, reject) => {
     squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
@@ -6008,7 +6008,7 @@ test('★★ 那个端口**归别人**（配置里另一份数据声称着它）
   t.after(() => { drop(); });
   t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
-  // ★ **直接调 IPC**：这一条要看见的正是"它**没有**问"，而夹具那一层会把问答题掉。
+  // 直接调 IPC：这一条要看见的正是"它没有问"，而夹具那一层会把问答题掉。
   const a = await invoke('app:start', null, 'code-server');
   assert.equal(a.code, undefined,
     '★ 那个端口归别人 ⇒ 照旧静默顺移，不许问：'
@@ -6033,12 +6033,12 @@ test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // ★ **只对持久的那份数据问**（见 index.js 的 `startSession`）。临时副本是**框架
+  // 只对持久的那份数据问（见 index.js 的 `startSession`）。临时副本是**框架
   //   事实**（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
   //   为它摆一行"启动 / 记住并启动 / 取消"是问一个没有代价的问题。
   //
-  // ★★ 怎么把"它没问"变成可判的：临时那份的端口是**确定性**算出来的
-  //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下**两次**拿到的是
+  // 怎么把"它没问"变成可判的：临时那份的端口是确定性算出来的
+  //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下两次拿到的是
   //   同一个端口。先起一遍把那个号记下来、收掉，再把那个号占住重起一次 ——
   //   若它也走"问一句"那条路，第二次就会拿回 `port_conflict`。
   const a = await startRunning(idx, 'code-server');       // 持有者（持久那份）
@@ -6052,7 +6052,7 @@ test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它
   await waitUntil(() => !idx._test.getBackend()._occupying()
     .some((x) => x.session_id === b.ctl.sessionId), '乙在服务端也放掉了', 20000);
 
-  // ★ 同上面那一条：它可能**本来就被占着**，那正是要的场景。
+  // 同上面那一条：它可能本来就被占着，那正是要的场景。
   const squatter = net.createServer();
   const held = await new Promise((resolve, reject) => {
     squatter.once('error', (e) => (e.code === 'EADDRINUSE' ? resolve(null) : reject(e)));
@@ -6100,9 +6100,9 @@ test('★★ 中转站的端口绝不能落进任何一份数据', async (t) => 
 
   const snap = ctl.snapshot();
   assert.equal(snap.spaceId, null, '中转站没有第三段');
-  // ★ 端口的**键**归基座之后，这里最容易踩的是"忘了判 spaceId 是不是 null"：
+  // 端口的键归基座之后，这里最容易踩的是"忘了判 spaceId 是不是 null"：
   //   取端口一旦回落，答案就是 SPACE_PORT_BASE(18080)，于是中转站会话去抢
-  //   某一份数据的 origin。那条路**不报错**，症状是"浏览器那一块打到 ssh 端口上，
+  //   某一份数据的 origin。那条路不报错，症状是"浏览器那一块打到 ssh 端口上，
   //   页面打不开"，而日志里一个字都不提端口。
   assert.ok(snap.localPort >= RELAY,
     `★ 中转站必须从中转基准端口（${RELAY}）起，实际 ${snap.localPort} —— `
@@ -6137,7 +6137,7 @@ test('★★ ctx.connection() 只回这一条会话所属的那条连接 —— 
   const conf = sshc.pathsFor(dataDir).config;
   assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m, '前提：先写的是 C1 的用户');
 
-  // 再配一条**另一个用户**的连接，并把它设为活跃。这一步**不停任何会话** ——
+  // 再配一条另一个用户的连接，并把它设为活跃。这一步不停任何会话 ——
   // 那正是"按当前活跃连接去取"会出错的地方。
   const c2 = await invoke('app:saveConnection',
     { user: 'other', host: '127.0.0.2', port: 1 });
@@ -6149,14 +6149,14 @@ test('★★ ctx.connection() 只回这一条会话所属的那条连接 —— 
   // 用例等不了那么久，而 `emit('change')` 触发的正是同一个回调
   // （`session.js` 的 `_emit()` 就是这个形状）。
   ctl.emit('change', ctl.snapshot());
-  // ★ `attach` 是异步的，而 `emit` 不等它 —— 必须给它一点时间落地（写的是本地
-  //   文件，没有网络）。**不等的后果是这条用例形同虚设**：文件还没被改写就去读，
+  // `attach` 是异步的，而 `emit` 不等它 —— 必须给它一点时间落地（写的是本地
+  //   文件，没有网络）。不等的后果是这条用例形同虚设：文件还没被改写就去读，
   //   于是"没变"这个答案永远拿到，而它证明不了任何事。
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(idx._test.getCfg().activeConnectionId, c2.connection.id,
     '前提：活跃连接真的切过去了');
 
-  // ★★ 这份 ssh 配置属于**这条会话**，而这条会话属于 C1。按"当前活跃"去取会把
+  // 这份 ssh 配置属于这条会话，而这条会话属于 C1。按"当前活跃"去取会把
   //    C2 的用户名写进去 —— 而症状是"ssh 连上了，但不是你要的那台机器"，
   //    用户完全看不出为什么。
   assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m,
@@ -6183,33 +6183,33 @@ test('★★ 换一条连接 = 离开上一个站点：本机那些记录一条�
   const sid = ctl.sessionId;
   assert.ok(sid, '前提：这条会话在服务端有号了');
 
-  // 换一条连接（C2）。**这一步不停作业** —— 它只是让本机不再看着上一个站点那些
-  // 会话。而正是"不停"决定了本机手上那份记录必须**当场丢掉**：
+  // 换一条连接（C2）。这一步不停作业 —— 它只是让本机不再看着上一个站点那些
+  // 会话。而正是"不停"决定了本机手上那份记录必须当场丢掉：
   const c2 = await invoke('app:saveConnection', { user: 'other', host: '127.0.0.2', port: 1 });
   assert.equal(c2.ok, true, JSON.stringify(c2));
-  // ★★ 两步都要走，而且**次序照界面上那条路**（`doConnectTo`：先设活跃、再连）。
+  // 两步都要走，而且次序照界面上那条路（`doConnectTo`：先设活跃、再连）。
   //    只走第二步的话，这条用例就漏掉了判据最容易写错的那一格 —— 那一刻
-  //    `cfg.activeConnectionId` **已经等于目标**了，拿它去判"换没换"永远判不出来，
+  //    `cfg.activeConnectionId` 已经等于目标了，拿它去判"换没换"永远判不出来，
   //    于是这条收尾在界面上一次都不会发生（而别的入口照常发生）。
   await invoke('app:setActiveConnection', c2.connection.id);
   const r = await invoke('app:connect', { connectionId: c2.connection.id });
   assert.equal(r.ok, true, JSON.stringify(r));
 
-  // ★★ 那一条记录不许还留在表里。它带着**上一个站点**的 session_id，而
-  //    session_id 是各个守护进程**各自编**的 —— 留着它，接下来的心跳、以及用户
-  //    点【结束】时那条 `goodbye`，就会拿旧站点的号去打**新站点**的守护进程；
-  //    两个站点上同一个 uid 是常事，撞上了就是一次打在**别人作业**上的 scancel。
+  // 那一条记录不许还留在表里。它带着上一个站点的 session_id，而
+  //    session_id 是各个守护进程各自编的 —— 留着它，接下来的心跳、以及用户
+  //    点【结束】时那条 `goodbye`，就会拿旧站点的号去打新站点的守护进程；
+  //    两个站点上同一个 uid 是常事，撞上了就是一次打在别人作业上的 scancel。
   for (const rec of idx._test.getSessions().values()) {
     assert.notEqual(rec.controller, ctl,
       '★★ 旧站点那条会话的 controller 不许还留在表里 —— 它带着旧站点的 session_id');
   }
-  // ★ 而它是被 `abandon()` 收掉的（隧道拆了、心跳停了、**一个字都没发给服务端**），
+  // 而它是被 `abandon()` 收掉的（隧道拆了、心跳停了、一个字都没发给服务端），
   //   不是被 `stop()` —— 那会发 `goodbye`，而 `goodbye` 会让守护进程 scancel 作业。
   assert.equal(ctl.snapshot().tunnelState, 'stopped',
     '★ 走的是 abandon 那条路（隧道拆掉），不是 stop');
 
-  // ★★ 服务端那一条**一个字都没动**：这是"离开"（回列表 / 换站点）与"断开"的分界。
-  //    ★ 判据是 `state === 'enrolled'`（还在跑）而**不是**"没有 released" ——
+  // 服务端那一条一个字都没动：这是"离开"（回列表 / 换站点）与"断开"的分界。
+  //    判据是 `state === 'enrolled'`（还在跑）而不是"没有 released" ——
   //    走错成 `stop()` 时守护进程收到的是 `goodbye`，它先把会话推进 `releasing`
   //    （`phase_release` 里 scancel 作业），而 'releasing' 并不在
   //    `['released','rejected','expired']` 里，那种写法会放它过去。
@@ -6232,11 +6232,11 @@ test('★★ 拿不到连接就不写 ssh 配置 —— 绝不回落到 whoami�
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-noconn-data-'));
   const notices = [];
   const ctx = {
-    // ★ 拿不到 —— 这条会话所属的连接已经不在了（被删掉，或者它是重连接回来的、
+    // 拿不到 —— 这条会话所属的连接已经不在了（被删掉，或者它是重连接回来的、
     //   而客户端根本不知道它属于谁）。
     connection: () => null,
-    // ★★ `whoami` **故意给一个别的用户**：它答的是"最近一次连上的是谁"，
-    //    是一个模块级单值，而切换活跃连接**不会**停掉已经在跑的会话 ——
+    // `whoami` 故意给一个别的用户：它答的是"最近一次连上的是谁"，
+    //    是一个模块级单值，而切换活跃连接不会停掉已经在跑的会话 ——
     //    按它回落就会把另一个站点的用户名写进这一条会话的 ssh 配置。
     whoami: () => ({ user: 'alice' }),
     dataDir: () => dataDir,
@@ -6259,9 +6259,9 @@ test('★ 导出 preferredPort 的插件会被**拒绝** —— 那个钩子已�
   const idx = require('../src/main/index.js');
   const reg = idx._test.getRegistry();
 
-  // ★ 为什么是"拒绝"而不是"忽略"：静默忽略会让一个旧插件看起来装上了，而它的
+  // 为什么是"拒绝"而不是"忽略"：静默忽略会让一个旧插件看起来装上了，而它的
   //   选择从头到尾没生效 —— 症状是"我明明写了 18099，它却听在 18080"。
-  //   一个导出了不再存在的钩子的插件，就是**需要作者改一版**的插件。
+  //   一个导出了不再存在的钩子的插件，就是需要作者改一版的插件。
   putSitePlugin({
     id: mintId(), name: 'stale', version: '1.0.0',
     over: { contributes: { ports: 0, concurrent: false } },
@@ -6284,11 +6284,11 @@ test('★ 导出 preferredPort 的插件会被**拒绝** —— 那个钩子已�
 /**
  * 造一份"插件写在磁盘上的数据"，并返回它在沙盒里那个目录。
  *
- * ★ 路径**现算**（`getPluginDataRoot` + 身份），与 `ctx.dataDir()` 同源 ——
+ * 路径现算（`getPluginDataRoot` + 身份），与 `ctx.dataDir()` 同源 ——
  *   另拼一遍的话，用例守着的会是用户永远拿不到的一个路径。
  *
- * ★★ **那一份数据要先真的进配置**（工作区那张引用表里的一格）。它不是在
- *    "每个工作区 × 每个插件"上推出来的 —— 数据是**开会话时**按需建的。少了这一步，
+ * 那一份数据要先真的进配置（工作区那张引用表里的一格）。它不是在
+ *    "每个工作区 × 每个插件"上推出来的 —— 数据是开会话时按需建的。少了这一步，
  *    那个工作区名下一份数据都没有，而"删连接该清掉的那一份"根本不存在，
  *    这条用例守的东西就整个落空了（它还会照常绿）。
  */
@@ -6296,7 +6296,7 @@ function makePluginDataDir(idx, pluginName) {
   const P = require('../src/main/plugin-data.js');
   const config = require('../src/main/config.js');
   const cfg = idx._test.getCfg();
-  // ★ 取**活跃**那条，不是列表里第一条：下面那几条用例的现场是
+  // 取活跃那条，不是列表里第一条：下面那几条用例的现场是
   //   `onlyMyConnection` 摆出来的（用户那条是活跃的），而列表第一条现在是内置那条
   //   —— 它自己的工作区跟这些用例要删的东西无关。
   const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId)
@@ -6325,7 +6325,7 @@ test('★★ 删掉最后一条用某个工作区的连接 ⇒ 那个工作区�
   assert.equal(space.id, (idx._test.getCfg().spaces.find((x) => x.id === space.id) || {}).id,
     '那一份数据真的在配置里');
 
-  // ★ 在**真根**下放一份**同名**的目录：开发者模式绝不能删到真实那一份。
+  // 在真根下放一份同名的目录：开发者模式绝不能删到真实那一份。
   //   （两个根只差一级：`<userData>/dev-sandbox/plugin-data` 与 `<userData>/plugin-data`。）
   const realRoot = path.join(userData, 'plugin-data');
   const realDir = path.join(realRoot, path.basename(dir));
@@ -6362,17 +6362,17 @@ test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收�
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
 
-  // ★ 这条路径**今天够得着**，而且每一步都是用户做得到的：
-  //   ① 会话跑在 C1 的工作区上 → ② 把活跃连接切成 C2（**不动引用计数、不停会话**）
+  // 这条路径今天够得着，而且每一步都是用户做得到的：
+  //   ① 会话跑在 C1 的工作区上 → ② 把活跃连接切成 C2（不动引用计数、不停会话）
   //   → ③ 给 C1 换一个工作区：`isActive` 是假，于是不走 relisten，而 C1 原来那个
-  //   工作区的**连接**引用计数归零。
+  //   工作区的连接引用计数归零。
   //
-  //   ★ C2 必须落在**另一个**工作区上，否则它替 C1 撑着引用计数（新连接默认落进
+  //   C2 必须落在另一个工作区上，否则它替 C1 撑着引用计数（新连接默认落进
   //     活跃连接的工作区，所以这里要显式给它一个）。
   //
-  //   ★★ 而"连接引用计数归零"**不等于**"那个工作区没人用"：那条会话还跑在它指着
+  //   而"连接引用计数归零"不等于"那个工作区没人用"：那条会话还跑在它指着
   //      的某一份数据上。两层回收各有一条"活会话拿着"的守卫（`pruneWorkspaces` 收
-  //      `liveWorkspaceIds`、`pruneSpaces` 收 `liveSpaceIds`），所以那张表**和**
+  //      `liveWorkspaceIds`、`pruneSpaces` 收 `liveSpaceIds`），所以那张表和
   //      它指着的那一份都不许动。少了上面那一条，表会在会话脚下消失（数据靠下面
   //      那一条侥幸留着）；少了下面那一条，数据直接没 —— 而症状都只是"页面莫名
   //      其妙坏了"。
@@ -6386,14 +6386,14 @@ test('★★ 会话跑着的时候，它脚下那份数据目录不能被回收�
   const sw = await invoke('app:setConnectionWorkspace',
     { connectionId: c1Id, workspaceId: null, confirmDiscard: true });
   assert.equal(sw.ok, true, JSON.stringify(sw));
-  // ★★ 换了工作区是**那条连接**的事 —— 那个工作区本身还在，因为会话还拿着它。
+  // 换了工作区是那条连接的事 —— 那个工作区本身还在，因为会话还拿着它。
   //    （这条断言从前是反的：那时工作区会被收掉、只剩数据靠 `liveSpaceIds` 留着。
   //      现在两层由同一条规则管，表也不在会话脚下消失了。）
   assert.equal(idx._test.getCfg().workspaces.some((l) => l.id === workspaceId), true,
     '★★ 会话还跑在那张表指着的一份数据上 —— 表也不许收');
   assert.equal(ctl.state, 'running', '前提：那条会话还跑着');
 
-  // ★★ 少了守卫的后果是**静默**的：一条正在跑的会话脚下的数据被删掉
+  // 少了守卫的后果是静默的：一条正在跑的会话脚下的数据被删掉
   //    （`ssh slurmate` 忽然认证失败、编辑器状态没了），而用户只点过"换工作区"。
   assert.equal(fs.existsSync(path.join(dir, 'marker')), true,
     '★★ 会话还跑着，它脚下那份数据一个字节都不能动');
@@ -6420,7 +6420,7 @@ test('★★ 而会话结束之后，同一份必须清得掉（反向的那一�
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(() => !occupiedOf(idx, a.slot), '会话结束', 20000);
 
-  // C2 要落在**另一个**工作区上（新连接默认落进活跃连接的工作区），否则它替 C1 撑着
+  // C2 要落在另一个工作区上（新连接默认落进活跃连接的工作区），否则它替 C1 撑着
   // 引用计数、那个工作区根本不会被回收。
   const c2 = await invoke('app:saveConnection',
     { user: 'demo', host: '127.0.0.3', port: 1 });
@@ -6436,7 +6436,7 @@ test('★★ 而会话结束之后，同一份必须清得掉（反向的那一�
     '前提：那个工作区真的被回收了');
   await waitUntil(() => !fs.existsSync(path.join(dir, 'marker')), '数据被清掉', 5000);
 
-  // ★ 与上一条**必须成对**：只钉"跑着的时候留着"，一个"什么都不清"的实现照样绿。
+  // 与上一条必须成对：只钉"跑着的时候留着"，一个"什么都不清"的实现照样绿。
   assert.equal(fs.existsSync(path.join(dir, 'marker')), false,
     '★ 会话结束了，那份数据就该跟着工作区一起走');
 
@@ -6453,9 +6453,9 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
   await connectDemo(idx);
   const conn = await onlyMyConnection(idx);
 
-  // ★ 第三种：**要工作区、却没有界面**的插件。它照样在磁盘上留一份，
-  //   而"属于这一份数据"的判据是 `needsSpace`，**不是** `hasSurface`
-  //   （后者多一条"有界面"）。抄错那个判据的后果是这一份**永远不被回收** ——
+  // 第三种：要工作区、却没有界面的插件。它照样在磁盘上留一份，
+  //   而"属于这一份数据"的判据是 `needsSpace`，不是 `hasSurface`
+  //   （后者多一条"有界面"）。抄错那个判据的后果是这一份永远不被回收 ——
   //   而它不会在审计里露头（那张"该有的"表用的正是 `needsSpace`）。
   const headless = putSitePlugin({
     id: mintId(), name: 'headless', version: '1.0.0',
@@ -6465,17 +6465,17 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
   const headlessPlugin = idx._test.getRegistry().list().find((p) => p.name === 'headless');
   assert.ok(headlessPlugin, `夹具没装进去：${JSON.stringify(idx._test.getRegistry().errors)}`);
   assert.equal(fs.existsSync(headless), true, '前提：它真的装上了');
-  // ★ 它在那个工作区里也有**一份数据**（引用表里的一格）—— 判据是 `needsSpace`。
+  // 它在那个工作区里也有一份数据（引用表里的一格）—— 判据是 `needsSpace`。
   const { space: headlessSpace } = makePluginDataDir(idx, 'headless');
   const headlessDir = path.join(idx._test.getPluginDataRoot(),
     P.dataDirNameOf(P.identityOf(headlessPlugin, headlessSpace)));
   fs.mkdirSync(headlessDir, { recursive: true });
   fs.writeFileSync(path.join(headlessDir, 'marker'), 'x');
 
-  // code-server 那一份：**属于**这个工作区，会被清。
+  // code-server 那一份：属于这个工作区，会被清。
   const cs = makePluginDataDir(idx, 'code-server');
 
-  // sshd 那一份：身份里**没有实例段**，它不属于任何一个工作区。
+  // sshd 那一份：身份里没有实例段，它不属于任何一个工作区。
   const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
   const relayDir = path.join(idx._test.getPluginDataRoot(),
     P.dataDirNameOf(P.identityOf(sshdPlugin)));
@@ -6484,7 +6484,7 @@ test('★ 没声明分实例的那一份不跟着任何工作区走', async (t) 
 
   assert.equal((await invoke('app:deleteConnection', conn.id)).ok, true);
 
-  // ★ 三个方向一起断言 —— 只钉一边的话，"什么都不清"与"什么都清"各能骗过一条。
+  // 三个方向一起断言 —— 只钉一边的话，"什么都不清"与"什么都清"各能骗过一条。
   assert.equal(fs.existsSync(path.join(cs.dir, 'marker')), false,
     '属于那个工作区的、有界面的那一份要跟着走');
   assert.equal(fs.existsSync(path.join(headlessDir, 'marker')), false,
@@ -6507,12 +6507,12 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
 
   const { dir } = makePluginDataDir(idx, 'code-server');
   const dataRoot = idx._test.getPluginDataRoot();
-  // 让那个目录**删不动**：把它的父层设成不可写。
+  // 让那个目录删不动：把它的父层设成不可写。
   fs.chmodSync(dataRoot, 0o500);
   t.after(() => { try { fs.chmodSync(dataRoot, 0o700); } catch { /* 尽力而为 */ } });
 
   const r = await invoke('app:deleteConnection', conn.id);
-  // ★ 抛出去的后果：`commitConfig` 抛穿 IPC ⇒ 用户看到"删除失败"，而配置其实
+  // 抛出去的后果：`commitConfig` 抛穿 IPC，用户看到"删除失败"，而配置其实
   //   已经删了、也存了 —— 一句指不回根因的话，而界面上那一条已经不见了。
   assert.equal(r.ok, true, `清理失败不该把删除本身变成失败：${JSON.stringify(r)}`);
   assert.equal(idx._test.getCfg().connections.some((c) => c.id === conn.id), false,
@@ -6528,7 +6528,7 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
 // ════════════════════════════════════════════════════════════════════════════
 //  v0.9 阶段 5：三屏（连接 → 插件 → 作业）
 //
-//  ★ "不自动连"那一条查在**第一个用例**里（必须在那儿 —— 启动那一刻只发生一次）。
+//  "不自动连"那一条查在第一个用例里（必须在那儿 —— 启动那一刻只发生一次）。
 //    这里查的是第三屏的数据与那三个动作。
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -6538,7 +6538,7 @@ test('★★ 作业列表来自服务端（`op:list`），不是本机那张会�
   await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  // ── 一条活着的都没有时：**确实没有**（空的），不是"取不到"（那要报错） ──
+  // ── 一条活着的都没有时：确实没有（空的），不是"取不到"（那要报错）──
   let r = await invoke('app:jobs');
   assert.equal(r.ok, true, `这份查询本身应当成功：${JSON.stringify(r)}`);
   assert.ok(Array.isArray(r.jobs), 'jobs 必须是一个数组（不是 null）');
@@ -6553,7 +6553,7 @@ test('★★ 作业列表来自服务端（`op:list`），不是本机那张会�
   assert.equal(liveJobs(r).length, 1, `应当刚好一条活着的：${JSON.stringify(r.jobs)}`);
   const j = liveJobs(r)[0];
 
-  // ★ 每一格都是界面要用的那一格，而且名字与 panel.js 读的**逐字相同**。
+  // 每一格都是界面要用的那一格，而且名字与 panel.js 读的逐字相同。
   for (const k of ['session_id', 'state', 'state_text', 'live', 'job_id', 'partition',
                    'node', 'expires_at', 'job_state', 'service', 'service_kind',
                    'attached', 'slot', 'keeper', 'keeper_text', 'keeper_is_me']) {
@@ -6562,17 +6562,17 @@ test('★★ 作业列表来自服务端（`op:list`），不是本机那张会�
   assert.equal(j.live, true);
   assert.equal(j.attached, true, '刚提交的这一条本机接着它');
   assert.ok(j.slot, '接着的必须给出 slot —— 结束那条路要指名停哪一个');
-  // ★ 会话状态译成人话（与**作业状态**是两张表，见 src/main/sessionstate.js）
+  // 会话状态译成人话（与作业状态是两张表，见 src/main/sessionstate.js）
   assert.match(j.state_text, /[一-鿿]/, `state_text 要是人话：${j.state_text}`);
   assert.notEqual(j.state_text, j.state, '不该把状态原文当译文发出去');
-  // ★ 「谁在看」：提交这条连接就是它的第一个看护者（与守护进程的
+  // 「谁在看」：提交这条连接就是它的第一个看护者（与守护进程的
   //   `op_submit(client_id)` 同一个位置）。
   assert.equal(j.keeper_is_me, true, `提交者应当是看护者：${JSON.stringify(j)}`);
   assert.equal(j.keeper_text, '本机在看');
 
-  // ★★ **决定性的一格：这一屏问的是服务端，不是本机手上那张表。**
+  // 决定性的一格：这一屏问的是服务端，不是本机手上那张表。
   //
-  //   只把**客户端这一侧**清掉（模拟"这条作业是在别处提交的、本机还没接上它"），
+  //   只把客户端这一侧清掉（模拟"这条作业是在别处提交的、本机还没接上它"），
   //   服务端那条作业一个字不动。作业列表必须照样看得见它 —— 拿本机那张表当答案
   //   的话，用户在这里看到的是"我没有作业了"，而作业正在集群上烧着 GPU。
   for (const rec of [...idx._test.getSessions().values()]) {
@@ -6607,9 +6607,9 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
   const row = liveJobs(before)[0];
   assert.equal(row.keeper_is_me, true, '前置：先得是自己在看');
 
-  // ★★ 服务端那一行**逐字段**记下来 —— 接管之后要比对的是它，不是作业列表
+  // 服务端那一行逐字段记下来 —— 接管之后要比对的是它，不是作业列表
   //   加工过的那一份。作业列表只带客户端要用的那几格，而"接管一个字都不动会话"
-  //   这条不变量说的是**服务端那一行**：`last_hb_at`、`job_id`、`node`、
+  //   这条不变量说的是服务端那一行：`last_hb_at`、`job_id`、`node`、
   //   `service_port`、`tunnel_target`、`state`、`partition` 一个都不许动。
   const srvBefore = { ...onlyFake(b) };
 
@@ -6620,9 +6620,9 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
   assert.equal(liveJobs(r)[0].keeper_text, '另一台电脑在看',
     `★ 三句话里的第二句：${JSON.stringify(liveJobs(r)[0])}`);
 
-  // ★ 第三句：**没人在看** —— `keeper` 为空是**合法状态**（会话是 CLI 提交的
+  // 第三句：没人在看 —— `keeper` 为空是合法状态（会话是 CLI 提交的
   //   那种），不是"不知道"。它与第二句必须画得不一样：一件是"那台电脑在看着"，
-  //   一件是"**倒计时已经在跑**，谁先认领就是谁的"。
+  //   一件是"倒计时已经在跑，谁先认领就是谁的"。
   await invoke('app:debug', 'foreign-keeper', '');
   r = await invoke('app:jobs');
   assert.equal(liveJobs(r)[0].keeper, null, 'keeper 为空就是**为空**（不是空串、不是 unknown）');
@@ -6642,7 +6642,7 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
   assert.equal(after.keeper_is_me, true, '接管之后看护者是本机');
   assert.equal(after.keeper_text, '本机在看');
 
-  // ★★ **接管只动一格。** 逐字段比对会话行 —— 动了别的任何一个字，这条功能的
+  // 接管只动一格。逐字段比对会话行 —— 动了别的任何一个字，这条功能的
   //   语义就从"换一台电脑看同一个作业"变成"结束并重开"，而那是另一个按钮
   //   （用户已明确："布局之类的不同无所谓，但后台作业是同一个是根本原则"）。
   for (const k of ['session_id', 'state', 'state_text', 'live', 'job_id', 'partition',
@@ -6651,12 +6651,12 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
     assert.deepEqual(after[k], row[k], `接管动了 ${k} —— 它只该动 keeper`);
   }
 
-  // ★★ 而**服务端那一行**是更严的那一半：作业列表里根本没有 `last_hb_at`、
+  // 而服务端那一行是更严的那一半：作业列表里根本没有 `last_hb_at`、
   //   `service_port`、`tunnel_target` 这几格，所以"接管顺手把别的东西也改了"
-  //   在上面那一轮比对里**看不出来**。
+  //   在上面那一轮比对里看不出来。
   //
-  //   ★ 这里允许两个字段变，而且只有这两个：`keeper`（接管的内容本身）与
-  //     `last_hb_at`（**客户端**在接管成功之后补的那一次心跳 —— 守护进程刻意
+  //   这里允许两个字段变，而且只有这两个：`keeper`（接管的内容本身）与
+  //     `last_hb_at`（客户端在接管成功之后补的那一次心跳 —— 守护进程刻意
   //     没有在 op 里顺手刷新它，代价是"在 1800 秒大限前 40 秒才点接管"有一个窄
   //     窗口，那一半补在客户端，见 index.js 的 app:takeover）。
   const srvAfter = onlyFake(b);
@@ -6665,24 +6665,24 @@ test('★★ 【接管】只换看护者那一格，会话其余部分一动都�
       && JSON.stringify(srvBefore[k]) !== JSON.stringify(srvAfter[k]));
   assert.deepEqual(changed, [],
     `接管动了服务端那一行的这几个字段：${changed.join('、')} —— 它只该动 keeper 与那一次心跳`);
-  // ★ `keeper` **不在上面那个清单里**，因为「另一台电脑在看」是**覆盖层**
+  // `keeper` 不在上面那个清单里，因为「另一台电脑在看」是覆盖层
   //   （`debugForeignKeeper`），它不写进会话行 —— 所以行上那一格从头到尾都是本机。
   //   "它真的换人了"这件事由下一段（走 op 本身、行上那一格真的是别人）来证。
   assert.equal(onlyFake(b).keeper, b._client.id, '这一层的覆盖撤掉之后，行上是本机');
   assert.ok(srvAfter.last_hb_at >= srvBefore.last_hb_at,
     '★ 客户端补的那一次心跳只能让时刻往前走，不能往回拨');
 
-  // ★★ 而"接管**本身**只动一格"要单独验一次 —— 走**服务端那条 op**，
+  // 而"接管本身只动一格"要单独验一次 —— 走服务端那条 op，
   //   不经过客户端那层包装。这两件事必须分得开：
-  //     · op 只改 keeper（**连 `last_hb_socket` 都不碰**）—— 守护进程那一侧的
+  //     · op 只改 keeper（连 `last_hb_socket` 都不碰）—— 守护进程那一侧的
   //       不变量。碰了的话，"新看护者要等它自己下一次心跳才真的接手"这件事
   //       就被掩盖了，而那条窄窗口正是客户端要补的那一格。
-  //     · 客户端补心跳是**另一条请求**，不是接管的一部分。
-  //   ★ 这一段的看护者是**真的写在会话行上**（不是那一层覆盖）：直接改掉它，
+  //     · 客户端补心跳是另一条请求，不是接管的一部分。
+  //   这一段的看护者是真的写在会话行上（不是那一层覆盖）：直接改掉它，
   //     于是"这一格换人了没有"在行本身上看得出来。
   onlyFake(b).keeper = 'demo-other-machine-0001';
-  //   ★★ 心跳时刻也要**先按到一个一眼看得出是旧的值**上。不这么做的话，
-  //     "接管顺手把 `last_hb_socket` 刷成现在"这个改动**在这一秒里看不出来**
+  //   心跳时刻也要先按到一个一眼看得出是旧的值上。不这么做的话，
+  //     "接管顺手把 `last_hb_socket` 刷成现在"这个改动在这一秒里看不出来
   //     （`nowSec()` 是一秒的分辨率，而这一整段跑在同一秒内）—— 变异验证实测：
   //     用当前时刻当基准时，那条变异一次都不红。按到一小时前之后，任何"顺手刷新"
   //     都会留下一个差一小时的痕迹。
@@ -6715,16 +6715,16 @@ test('★★ 端到端：点「连接」之后，作业列表里就看得见那�
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
 
-  // ── 模拟"客户端进程没了再起来"：**只清客户端这一侧**，服务端那条作业还在跑 ──
+  // ── 模拟"客户端进程没了再起来"：只清客户端这一侧，服务端那条作业还在跑 ──
   //   （这与「崩溃重连」那条用例的前半段是同一件事，只是这里不走 reattach()，
-  //    走的是**用户点「连接」**那条路。）
+  //    走的是用户点「连接」那条路。）
   for (const rec of [...idx._test.getSessions().values()]) {
     if (rec.controller) await rec.controller.abandon();   // 一个字都不发给服务端
   }
   idx._test.getSessions().clear();
   assert.equal((await invoke('app:states')).sessions.length, 0, '前置：本机手上已经没有它了');
 
-  // ★★ 给假后端的每一次 RPC 加一点延迟。**这一格是这条用例的全部要害**：
+  // 给假后端的每一次 RPC 加一点延迟。这一格是这条用例的全部要害：
   //   没有它，"接回做完才返回"与"发出去就返回"在几十微秒里分不出来，
   //   而那条差别正是用户看到的"点了连接，进去却是空的、要等一会儿才有"。
   const latency0 = b.rpcLatencyMs;
@@ -6733,14 +6733,14 @@ test('★★ 端到端：点「连接」之后，作业列表里就看得见那�
   try {
     res = await invoke('app:connect', {});
   } finally {
-    // 还原成**它原来的值**，不是写死一个 0 —— 假后端的缺省就是 40ms（贴近真实的
+    // 还原成它原来的值，不是写死一个 0 —— 假后端的缺省就是 40ms（贴近真实的
     // exec channel 开销），写死 0 会把后面那些用例一起加速，而它们的时间假设
     // 是照着 40ms 定的。
     b.rpcLatencyMs = latency0;
   }
   assert.equal(res.ok, true, `连接失败：${JSON.stringify(res)}`);
 
-  // ★ **紧接着**查，中间不等任何东西 —— 连接返回时接回就该已经做完了。
+  // 紧接着查，中间不等任何东西 —— 连接返回时接回就该已经做完了。
   const st = await invoke('app:states');
   assert.equal(st.sessions.filter((x) => x.live).length, 1,
     '★★ 点完「连接」之后，接回必须**已经做完**（`doConnect` 的最后一步 await 了 '
@@ -6773,7 +6773,7 @@ test('★★ 连着的时候再点一次「连接」：已经在手上的那几�
   const sidsBefore = [...map.values()]
     .map((r) => r.controller && r.controller.sessionId).sort();
 
-  // ★★ 再连一次 —— 用户在连接列表上又点了一下「连接」，或者换了一条连接又换回来。
+  // 再连一次 —— 用户在连接列表上又点了一下「连接」，或者换了一条连接又换回来。
   //   服务端那条会话从头到尾都在跑，所以 `op:list` 一定会列出它；而**本机已经在
   //   管它了**。这正是 v0.9 新加的那道守卫要拦的现场。
   const r = await invoke('app:connect', {});
@@ -6816,9 +6816,9 @@ test('★ 没连上的时候问作业列表 ⇒ 说"取不到"，不是"你没�
 //  v0.9 阶段 6：四个动作里剩下的那两个（【临时离开】/【断开】）
 //
 //  【结束】与【接管】在阶段 5 就接上了（它们住在作业列表那一屏上）。这里查的是
-//  **连接级**那一对，加上"闪断不算离开"那条分工。
+//  连接级那一对，加上"闪断不算离开"那条分工。
 //
-//  ★★ 这三条用例守的是**同一件事的三种问法**：一条作业在服务端归谁看着，以及
+//  这三条用例守的是同一件事的三种问法：一条作业在服务端归谁看着，以及
 //     "本机不再看着它"之后它会不会被误杀。
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -6833,10 +6833,10 @@ test('★★【临时离开】：看护者交回去，作业一个字都没动',
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
 
-  // ★★ **先显式打一拍，而且等它落地，再记基准。**
-  //    入会时那一次心跳是**异步**的（`_startHeartbeat()` 里那次 `_beat()` 没人
+  // 先显式打一拍，而且等它落地，再记基准。
+  //    入会时那一次心跳是异步的（`_startHeartbeat()` 里那次 `_beat()` 没人
   //    await），所以"state 变成 running"并不等于"心跳已经落过地"。不等它，
-  //    下面那次逐字段比对会把**那一次心跳**算成"临时离开干的事"—— 症状是本条
+  //    下面那次逐字段比对会把那一次心跳算成"临时离开干的事"—— 症状是本条
   //    用例红在 `last_hb_at` 上，而它指的方向完全是错的。
   await ctl.heartbeatNow();
   const before = { ...onlyFake(b) };
@@ -6848,7 +6848,7 @@ test('★★【临时离开】：看护者交回去，作业一个字都没动',
   assert.equal(r.left.ok, true, `应当把那条会话交回去了：${JSON.stringify(r.left)}`);
   assert.deepEqual(r.left.cleared, [before.session_id], '要如实说出交回去了哪几条');
 
-  // ── 服务端那一行：**只有 keeper 变了** ──
+  // ── 服务端那一行：只有 keeper 变了 ──
   const after = onlyFake(b);
   assert.ok(after, '作业必须还在 —— 临时离开不是结束');
   assert.equal(after.keeper, null,
@@ -6883,15 +6883,15 @@ test('★★ 闪断（连接掉了，没点任何按钮）⇒ 看护者保留，
   const sid = onlyFake(b).session_id;
   assert.equal(onlyFake(b).keeper, b._client.id, '前置：提交者就是看护者');
 
-  // ── 闪断：连接**直接掉了**，客户端一个字都没发出去 ──
-  //   ★ 这是断电 / 合盖 / 网线被拔 / sshd 抖一下在客户端这一侧的形状，也是它与
-  //     【临时离开】的**全部分工**：那边有一条显式的 `leave`，这边什么都没有。
+  // ── 闪断：连接直接掉了，客户端一个字都没发出去 ──
+  //   这是断电 / 合盖 / 网线被拔 / sshd 抖一下在客户端这一侧的形状，也是它与
+  //     【临时离开】的全部分工：那边有一条显式的 `leave`，这边什么都没有。
   //
-  //   ★ 说清这条用例**证得了什么、证不了什么**：它证的是"连接掉了一次之后，
-  //     服务端那一格**没有被本机动过**"（本机没有可以清空它的代码路径 —— 唯一
-  //     会发 `leave` 的地方是 `app:leave`）。★ 它**证不了**"闪断期间心跳发不出去"：
+  //   说清这条用例证得了什么、证不了什么：它证的是"连接掉了一次之后，
+  //     服务端那一格没有被本机动过"（本机没有可以清空它的代码路径 —— 唯一
+  //     会发 `leave` 的地方是 `app:leave`）。它证不了"闪断期间心跳发不出去"：
   //     假后端的 `rpc()` 不看 `_connected`，所以那条路上的心跳照旧成功。那一半
-  //     在 `suspended.test.mjs` 里单独验（传输失败 ⇒ 不接管、继续重试）。
+  //     在 `suspended.test.mjs` 里单独验（传输失败，不接管、继续重试）。
   await b.close();
 
   assert.equal(b.connected, false, '前提：连接真的断了');
@@ -6900,7 +6900,7 @@ test('★★ 闪断（连接掉了，没点任何按钮）⇒ 看护者保留，
     + '而用户回来时作业已经在回收路上了');
   assert.equal(onlyFake(b).state, 'enrolled', '会话本身也一个字都不动');
 
-  // ── 重连：心跳必须**接着**续，而不是从此没有人在看这条作业 ──
+  // ── 重连：心跳必须接着续，而不是从此没有人在看这条作业 ──
   await ensureConnected(idx);
   const ctl2 = idx._test.sessionAt(a.slot).controller;
   assert.ok(ctl2, '重连之后那条 controller 应当还在本机手上（闪断不动本机的记录）');
@@ -6929,8 +6929,8 @@ test('★★ 被接管之后又点【接管】：本机是**真的**把它拿回
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
   const sid = onlyFake(b).session_id;
 
-  // ── 造出「另一台电脑把它拿走了」，而且走**心跳**那条真路 ──
-  //   `foreign-keeper` 只改服务端那一格，本机还照常心跳 ⇒ 它会收到 `ignored:
+  // ── 造出「另一台电脑把它拿走了」，而且走心跳那条真路 ──
+  //   `foreign-keeper` 只改服务端那一格，本机还照常心跳，它会收到 `ignored:
   //   not_keeper` —— 这正是真集群上发生的那件事（也是客户端认出"我被接管了"的
   //   唯一信号）。
   await invoke('app:debug', 'foreign-keeper');
@@ -6970,13 +6970,13 @@ test('★★【断开】是【临时离开】的反面：它真的把作业停�
   const r = await invoke('app:disconnect');
   assert.equal(r.ok, true, `断开失败：${JSON.stringify(r)}`);
 
-  // ★ 紧接着查，不等任何东西：假站点把 `releasing` 置成 `released` 是 1.6 秒之后
-  //   的事，而这里要的是**那一刻**的行（`_occupying()` 会把已结束的滤掉）。
+  // 紧接着查，不等任何东西：假站点把 `releasing` 置成 `released` 是 1.6 秒之后
+  //   的事，而这里要的是那一刻的行（`_occupying()` 会把已结束的滤掉）。
   const row = onlyFake(b);
   assert.ok(row, '断开之后那条会话应当还在释放流程里 —— 马上查，别等那个 1.6 秒的定时器');
   assert.ok(['releasing', 'released'].includes(row.state),
     `★★ 断开必须把作业停掉（它发的是 goodbye）：${row.state}`);
-  // ★★ 而看护者**还在本机名下** —— 这一格是"断开**没有**顺手走 leave 那条路"的
+  // 而看护者还在本机名下 —— 这一格是"断开没有顺手走 leave 那条路"的
   //    证据，也是这两个按钮唯一一个能把它们分开、又不依赖"数一数发了几条请求"
   //    的判据（数请求在任何一次重试或改道之后都会失效）。
   assert.equal(row.keeper, b._client.id,
@@ -6989,9 +6989,9 @@ test('★★【断开】是【临时离开】的反面：它真的把作业停�
 
 // ── v0.11 阶段 2+3 · 第三层：站点侧的插件问题与同名 ─────────────────────────
 //
-// ★ 这四条的判据都是**那条线通没通**，不是某个函数的返回值。账本 F35 的教训：
-//   `audit()` 算出 `allUnknown`、用例绿着，而那一句提示**永远到不了界面** ——
-//   因为 `app:pluginData` 的回包里根本没有那个字段。**变异打红的是函数，不是线。**
+// 这四条的判据都是那条线通没通，不是某个函数的返回值。账本 F35 的教训：
+//   `audit()` 算出 `allUnknown`、用例绿着，而那一句提示永远到不了界面 ——
+//   因为 `app:pluginData` 的回包里根本没有那个字段。变异打红的是函数，不是线。
 
 test('★★ F22：站点报的 `problems` 必须一路到界面（算出来了没送出去 = 又一个 F35）', async (t) => {
   const idx = require('../src/main/index.js');
@@ -7001,13 +7001,13 @@ test('★★ F22：站点报的 `problems` 必须一路到界面（算出来了�
   });
   await invoke('app:debug', 'reset');
 
-  // 站点上有一条**没能加载**的包。文案照守护进程 `scan_plugins()` 那一条的形状写
-  // （多行、带**站点上的**路径）—— 界面原样显示它，一个字都不改写。
+  // 站点上有一条没能加载的包。文案照守护进程 `scan_plugins()` 那一条的形状写
+  // （多行、带站点上的路径）—— 界面原样显示它，一个字都不改写。
   const line = '/opt/slurmate/plugins/old：这是一个目录，不是一个插件包。'
     + '站点上的插件只能是 *.splug 文件 —— 它既不会被分发、也不会被读到。';
   idx._test.getBackend().debugPluginProblems([line]);
 
-  // ★ 走**真的那条线**：`op_plugins` → `loadPlugins()` → `sitePlugins` →
+  // 走真的那条线：`op_plugins` → `loadPlugins()` → `sitePlugins` →
   //   `pluginsView()` → 回包。分段断言（比如直接读 `getPluginsView()`）会漏掉
   //   "中间某一节把它丢了" —— 而那正是 F35 的形状。
   const r = await invoke('app:partitions');
@@ -7026,8 +7026,8 @@ test('★★ 同名不同 id 的两条站点插件都进视图 —— 按短名�
   });
   await invoke('app:debug', 'reset');
 
-  // ★ 造"**同名、不同 id**"的现场：短名撞上仓库里真的 code-server，id 是假站点
-  //   自己那一个（`DEMO_EXTRA_ID`）。这是**合法**的一种站点 ——
+  // 造"同名、不同 id"的现场：短名撞上仓库里真的 code-server，id 是假站点
+  //   自己那一个（`DEMO_EXTRA_ID`）。这是合法的一种站点 ——
   //   两个不同的插件可以同名，配置文件名写 `<id>.conf` 就分得开。
   idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
 
@@ -7053,7 +7053,7 @@ test('★★ 短名有歧义时**不替用户挑一个**，而是把那几个 id
   await invoke('app:debug', 'reset');
   idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
 
-  // ★ 先让 `sitePlugins` 带上那两条（它来自**连接时**的 `op:plugins`，不是现算的）。
+  // 先让 `sitePlugins` 带上那两条（它来自连接时的 `op:plugins`，不是现算的）。
   await invoke('app:partitions');
 
   const before = noticesOf().length;
@@ -7073,13 +7073,13 @@ test('★★ 站点版本漂移那句话按 **id** 认亲 —— 短名撞了的
   });
   await invoke('app:debug', 'reset');
 
-  // ★ 池里装着**另一个**插件：短名也叫 code-server，但 id 与站点报的那个不是一回事
+  // 池里装着另一个插件：短名也叫 code-server，但 id 与站点报的那个不是一回事
   //   —— 这是合法的（两个不同的插件可以同名，配置里用 id 各配一块）。
   const mine = '01M2JKM1M1M1M1M1M1M1M1M1M9';
   setSitePlugins([]);                       // 先清干净：池里只留下面这一个
   putSitePlugin({ id: mine, name: 'code-server', version: '2.0.0' });
 
-  // 站点报的是**它那个** code-server（仓库里的真插件，1.0.0）。
+  // 站点报的是它那个 code-server（仓库里的真插件，1.0.0）。
   await invoke('app:partitions');
 
   const before = noticesOf().length;
@@ -7092,7 +7092,7 @@ test('★★ 站点版本漂移那句话按 **id** 认亲 —— 短名撞了的
     + '「站点那边是 1.0.0 版，本机这一份是 2.0.0 版」—— 那是一句**指错对象**的话，'
     + '它把用户指去升级一个本来没问题的插件。'
     + `实际说了：${said}`);
-  // ★ 这条判据**不是**在说"没跑到也对"：它要真的走到 `warnVersionDrift` 那一格，
+  // 这条判据不是在说"没跑到也对"：它要真的走到 `warnVersionDrift` 那一格，
   //   而"走到了"由变异验证回答 —— 把那一处改回按短名找，这条当场红。
 });
 
@@ -7111,7 +7111,7 @@ test('★★ 两条边栏：停靠滑出、移开收起、点一下钉住（钉�
   const view = calls.views[calls.views.length - 1];
   assert.equal(view._visible, true, '停靠之后它要露出来');
 
-  // ★ 摆位是**算出来的**（`layout.js`）而不是写死的：窗口 1280×860，左栏 10px，
+  // 摆位是算出来的（`layout.js`）而不是写死的：窗口 1280×860，左栏 10px，
   //   浮窗 340px。这一条把"算式"与"真的发了这个 bounds"接上 ——
   //   `layout.test.mjs` 判的是算式本身。
   assert.deepEqual(view._bounds, { x: 10, y: 30, width: 340, height: 830 },
@@ -7120,7 +7120,7 @@ test('★★ 两条边栏：停靠滑出、移开收起、点一下钉住（钉�
   const st = (view.webContents.handlers['send:hover:state'] || []).pop();
   assert.ok(st && st.open === true && st.side === 'left', '要告诉浮窗那一页它开着');
 
-  // ★★ 鼠标走开 → 收起。**这条判据只能这样造**：浮窗是原生视图，鼠标一进它，
+  // 鼠标走开 → 收起。这条判据只能这样造：浮窗是原生视图，鼠标一进它，
   //   边栏那一格就再也收不到事件了 —— 靠 `mouseleave` 关的话浮窗会闪一下就没了。
   calls.cursor.x = 640; calls.cursor.y = 400;
   await new Promise((r) => setTimeout(r, 400));
@@ -7136,7 +7136,7 @@ test('★★ 两条边栏：停靠滑出、移开收起、点一下钉住（钉�
     '★ 钉住之后鼠标走了也要留着 —— 输出那一块要滚动、要选中复制，'
     + '鼠标一挪开就没的话那两件事都做不了');
 
-  // 而它仍然收得掉：再点一下（`pin: true` 是**切换**）。
+  // 而它仍然收得掉：再点一下（`pin: true` 是切换）。
   await invoke('app:hover', { side: 'left', pin: true });
   assert.equal(view._visible, false, '再点一下要能收起来');
 });
@@ -7153,13 +7153,13 @@ test('★ 浮窗的收 / 放，窗口那一侧记得住（`hoverOpenSide` 是"�
 
   assert.equal(shell.hoverOpenSide(), null, '没停靠过任何一边时是收着的');
   await invoke('app:hover', { side: 'left' });
-  // ★ 这一格是**承重的**：`refreshSite` / 后端状态变化都拿它判"要不要把数据推过去"。
+  // 这一格是承重的：`refreshSite` / 后端状态变化都拿它判"要不要把数据推过去"。
   //   它答错的表现是"浮窗开着，而里面永远是空的" —— 因为推的时候以为没人看。
   assert.equal(shell.hoverOpenSide(), 'left');
   await invoke('app:hover', { side: null });
   assert.equal(shell.hoverOpenSide(), null, '收起之后要答 null');
 
-  // 不认的边：**拒绝，而不是当成左边**。含混地兜底会让一个拼错的 side 静默地
+  // 不认的边：拒绝，而不是当成左边。含混地兜底会让一个拼错的 side 静默地
   // 打开另一半，而"打开的不是我要的那块"在界面上看起来像数据错了。
   const bad = await invoke('app:hover', { side: 'middle' });
   assert.equal(bad.ok, false);
@@ -7185,20 +7185,20 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(dot(), 'ok', '链路活着、站点也答得上话 —— 绿灯');
 
-  // ② 站点**答得上话**、但那几格取不到 —— 这一点必须是"没问到"，不是"正常"
+  // ② 站点答得上话、但那几格取不到 —— 这一点必须是"没问到"，不是"正常"
   //
-  // ★★ 这一条是**这一格存在的理由**：把"没问到"画成"正常"，用户看到的是一颗
+  // 这一条是这一格存在的理由：把"没问到"画成"正常"，用户看到的是一颗
   //    安稳的绿点，而底下那几格写着「取不到」。而真正的原因（守护进程问不到
   //    控制器）在界面上一个字都没有。
   //
-  //    ★ 这一条**真的抓到过缺陷**：第一版的判据是"有没有 data" —— 而
-  //      `debugClusterMissing()` 让守护进程**照常答 `ok:true`**、只是少了
+  //    这一条真的抓到过缺陷：第一版的判据是"有没有 data" —— 而
+  //      `debugClusterMissing()` 让守护进程照常答 `ok:true`、只是少了
   //      `health` 那一格，于是那颗点绿灯照亮。修法在 `siteDotState()` 里：
-  //      控制器那一格**缺席**判 `na`。
+  //      控制器那一格缺席判 `na`。
   //
-  //    ★ 怎么让它重问一次：轮询是 30 秒一拍，用例等不起；而"打开浮窗补一次"
+  //    怎么让它重问一次：轮询是 30 秒一拍，用例等不起；而"打开浮窗补一次"
   //      那条路（`refreshSiteIfStale`）有 5 秒的陈旧阈值 —— 刚连上就打开，
-  //      它**故意**不重问。所以这里走**重连**：断、连，链路那一次 false→true
+  //      它故意不重问。所以这里走重连：断、连，链路那一次 false→true
   //      会补问一次（`backend.on('state')` 里那一句）。那是真的代码路径，
   //      不是为用例开的缝。
   const back = idx._test.getBackend();
@@ -7209,7 +7209,7 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
   assert.equal(dot(), 'na',
     '★ 站点答话但那几格取不到 —— 这一点必须是"没问到"，不是"正常"');
 
-  // ③ 断开 —— 与"取不到"是**两句话**（一个是对面真的没了，一个是我们没问到）
+  // ③ 断开 —— 与"取不到"是两句话（一个是对面真的没了，一个是我们没问到）
   await invoke('app:hover', { side: null });
   await invoke('app:disconnect');
   await new Promise((r) => setTimeout(r, 60));
@@ -7217,13 +7217,13 @@ test('★★ 左栏那个圆点的三态：正常 / 取不到 / 断开 —— �
 });
 
 test('★★ 连上之后先建作业日志目录：成了不吭声，没成要说一句话', async (t) => {
-  // ★★ 这一步挡的是一个**只能由真集群回答**的失败：`sbatch -o <日志目录>/slurm-%j.out`
-  //    的父目录是 Slurm 在**跑作业脚本之前**打开的，而作业脚本自己那一次
-  //    `mkdir -p` 排在它后面。目录不存在 ⇒ 那一次提交连启动都启动不了。
+  // 这一步挡的是一个只能由真集群回答的失败：`sbatch -o <日志目录>/slurm-%j.out`
+  //    的父目录是 Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次
+  //    `mkdir -p` 排在它后面。目录不存在，那一次提交连启动都启动不了。
   //    守护进程建不了它（共享家目录对它只读），所以这一步落在客户端：
   //    `backend-ssh.js` 的 `prepare()`，在 `_openOnce` 的 ready 里。
   //
-  // ★ 这一条只验**转发那一半**（后端报不报、界面说不说）。"真的发了那条命令"
+  // 这一条只验转发那一半（后端报不报、界面说不说）。"真的发了那条命令"
   //   在 `backend-ssh.test.mjs` 里 —— 那里有 SSH 那一层的桩，这里没有。
   const idx = require('../src/main/index.js');
   const ssh = require('../src/main/backend-ssh.js');
@@ -7235,8 +7235,8 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
   });
   await invoke('app:debug', 'reset');
 
-  // ★ 两个后端**都必须有**这个方法。写成"调用方去 typeof 一下"的话，
-  //   下一个忘了实现它的后端会**静默地**跳过这一步 —— 而症状要到用户提交
+  // 两个后端都必须有这个方法。写成"调用方去 typeof 一下"的话，
+  //   下一个忘了实现它的后端会静默地跳过这一步 —— 而症状要到用户提交
   //   作业时才出现，隔着一个失败作业。
   const { Backend } = require('../src/main/backend.js');
   assert.equal(typeof Backend.prototype.prepare, 'function',
@@ -7251,7 +7251,7 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
     noticesOf().slice(before).some((n) => /作业日志目录/.test(n.text)), false,
     '★ 建成功时**一个字都不说** —— 它不是提示，是背景动作');
 
-  // 而没成的时候：连上仍然是连上，但要说清**后果**（提交会起不来），
+  // 而没成的时候：连上仍然是连上，但要说清后果（提交会起不来），
   // 而不是一句"失败了" —— 用户拿那句没法做任何事。
   back.prepareError = '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？';
   const before2 = noticesOf().length;
@@ -7265,9 +7265,9 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
 });
 
 test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后不再白花 RPC）', async (t) => {
-  // ★★ 「收起」走的是窗口那一层（鼠标几何 / Esc），主进程**拿不到回调** —— 所以
+  // 「收起」走的是窗口那一层（鼠标几何 / Esc），主进程拿不到回调 —— 所以
   //    "停"这件事只能由那个定时器自己发现（它每拍看一眼 `hoverOpenSide()`）。
-  //    靠别处记得来停一次的话，一次没停住的后果是**永远**每 1.5 秒问一次站点。
+  //    靠别处记得来停一次的话，一次没停住的后果是永远每 1.5 秒问一次站点。
   const idx = require('../src/main/index.js');
   t.after(async () => {
     Module._load = origLoad;
@@ -7279,21 +7279,21 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   await new Promise((r) => setTimeout(r, 50));
 
-  // ★★ 判据是**发出去的 RPC 条数**，不是"推了多少份数据"。
+  // 判据是发出去的 RPC 条数，不是"推了多少份数据"。
   //    推那一头本来就有一道闸（`pushOutToHover` 自己看 `hoverOpenSide()`），
-  //    所以"收起之后不再推"在**没停轮询**的代码上也成立 —— 用推来判的话，
+  //    所以"收起之后不再推"在没停轮询的代码上也成立 —— 用推来判的话，
   //    这条判据对"定时器还在跑"这件事完全失明（实测：变异 R8 就是这么逃过去的）。
   //    而真正要紧的代价在 RPC 上：1.5 秒一次，一直问下去。
-  // 起一条会话：**没有 `session_id` 时那条 op 根本不会被发出去**
+  // 起一条会话：没有 `session_id` 时那条 op 根本不会被发出去
   // （`jobLog()` 在登记之前就返回了），于是"问了多少次"这个判据恒为 0 ——
   // 一条永远绿的断言。
-  // ★ 夹具的登记延迟默认是 8 秒（真集群上的样子）。这条用例不考它，压到 300 毫秒。
+  // 夹具的登记延迟默认是 8 秒（真集群上的样子）。这条用例不考它，压到 300 毫秒。
   idx._test.getBackend().enrollDelayMs = 300;
-  // ★ 这条用例不走 `openUpTo`（它自己连、自己 reset），所以"没有别的会话占着位置"
-  //   这条前提要**自己确立**：前面某条用例可能留了一条**本机已经不看了**的会话在
+  // 这条用例不走 `openUpTo`（它自己连、自己 reset），所以"没有别的会话占着位置"
+  //   这条前提要自己确立：前面某条用例可能留了一条本机已经不看了的会话在
   //   站点上（`abandon()` 是不告诉服务端的），而名额上限是 1 —— 提交会被
   //   「已经有 1 个会话占着位置」挡掉，症状是"这条会话没有登记上"。
-  //   ★ 与下面那条（`back0.debugReap()`）同一条理由，同一个动词。
+  //   与下面那条（`back0.debugReap()`）同一条理由，同一个动词。
   idx._test.getBackend().debugReap();
   assert.equal((await appStart({}, 'code-server')).ok, true);
   const ctl = onlyCtl(idx);
@@ -7311,8 +7311,8 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   };
   t.after(() => { back.rpc = realRpc; });
 
-  // ★ 用**钉住**而不是"停靠一下就松手"：浮窗是懒建的、而且整个用例文件共用同一个
-  //   窗口，`calls.views` 里还压着前面几十条用例建的**插件视图** —— 拿"最后一个"
+  // 用钉住而不是"停靠一下就松手"：浮窗是懒建的、而且整个用例文件共用同一个
+  //   窗口，`calls.views` 里还压着前面几十条用例建的插件视图 —— 拿"最后一个"
   //   当浮窗会拿到别的东西。这里按它收到的通道找它。
   //   钉住还顺带免掉鼠标看门狗：不钉的话，夹具的鼠标坐标（上一条用例留下的 0,0）
   //   落在左边那条栏上，120 毫秒之后浮窗就被收掉了。
@@ -7321,7 +7321,7 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   assert.ok(hv, '浮窗那一层要建出来');
   const rd = () => (hv.webContents.handlers['send:hover:data'] || [])
     .filter((m) => m && m.side === 'right');
-  // ★ 那一份是**问出来的**，而 `app:hover` 不等它（主进程那边 `startOutPoll` 立刻返回，
+  // 那一份是问出来的，而 `app:hover` 不等它（主进程那边 `startOutPoll` 立刻返回，
   //   数据到了才推）。当场断言的话，判据变成"IPC 的回程比一次 RPC 还慢"。
   await new Promise((r) => setTimeout(r, 400));
 
@@ -7331,7 +7331,7 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   await new Promise((r) => setTimeout(r, 2000));
   assert.ok(jobLogCalls >= 2, '开着的时候它一直在问（1.5 秒一拍）');
 
-  // 收起 ⇒ 一拍之后它自己停
+  // 收起，一拍之后它自己停
   await invoke('app:hover', { side: null });
   assert.equal(idx._test.getWindow().hoverOpenSide(), null, '前置：确实收起来了');
   const n1 = jobLogCalls;
@@ -7340,7 +7340,7 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
     '★ 收起之后**一次都不许再问** —— 没有读者的轮询只是在两个进程之间搬字节，'
     + '而退化成 exec 时那还是每 1.5 秒一个 sshd fork');
 
-  // ★★ 另一条路（**不钉住**，只是停靠）也要起轮询。
+  // 另一条路（不钉住，只是停靠）也要起轮询。
   //    两条路在界面上看起来一模一样，而代码里是两个分支 —— 只给其中一条加上
   //    `startOutPoll()` 的话，另一条的症状是"点一下钉住，右栏永远是空的"。
   //    （实测：这一条正是写这段时抓出来的 —— 钉住那条路漏掉了。）
@@ -7357,14 +7357,14 @@ test('★ 作业屏「查看日志」：没连站点时如实说，而不是画�
   const idx = require('../src/main/index.js');
   t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
   await invoke('app:debug', 'reset');
-  // ★ 先断开：上一条用例可能刚连过，而"没连站点"这一支只在真的没连时走得到
+  // 先断开：上一条用例可能刚连过，而"没连站点"这一支只在真的没连时走得到
   //   （不显式断的话它会落到 RPC 上，报一句 `not_found` —— 而那条路是另一件事）。
   await invoke('app:disconnect');
   const r = await invoke('app:jobLog', { session_id: 'whatever' });
   assert.equal(r.ok, false);
   assert.match(r.error, /没有连着的站点/);
 
-  // 连上之后：这条 op 走的是**直连 RPC**，不经过"前台是哪一条" —— 作业结束之后
+  // 连上之后：这条 op 走的是直连 RPC，不经过"前台是哪一条" —— 作业结束之后
   // 右栏就收了，而"为什么失败"恰恰在那一刻最该看得见。
   const c = await builtinConn();
   assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
@@ -7374,7 +7374,7 @@ test('★ 作业屏「查看日志」：没连站点时如实说，而不是画�
 });
 
 test('★★ 作业一结束，右栏自己收起来（那时它没有内容可说）', async (t) => {
-  // ★ 判据与面板上那个点、以及那个轮询自己停下来的判据**同源**（有没有作业在跑）。
+  // 判据与面板上那个点、以及那个轮询自己停下来的判据同源（有没有作业在跑）。
   //   三处各写一份的话，漂的那一处表现为"作业停了，浮窗还挂在那儿显示旧内容" ——
   //   用户看到的是"它还在跑"。
   const idx = require('../src/main/index.js');
@@ -7384,12 +7384,12 @@ test('★★ 作业一结束，右栏自己收起来（那时它没有内容可�
   assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
   const back0 = idx._test.getBackend();
   back0.enrollDelayMs = 300;   // 同上：这条用例不考登记延迟
-  // ★★ 先清掉**站点**上还占着位置的会话：本站上限是 1，而前面那条用例开的会话
+  // 先清掉站点上还占着位置的会话：本站上限是 1，而前面那条用例开的会话
   //    一直跑着 —— 不清的话这一次 `app:start` 会被站点拒（"已经有 1 个会话占着位置"），
   //    而症状是"这条用例的前置条件永远不成立"，指不回原因。
   back0.debugReap();
   assert.equal((await appStart({}, 'code-server')).ok, true);
-  // ★ 按**槽**取那一条，不用 `onlyRec`（它取的是 map 里的**第一个**，
+  // 按槽取那一条，不用 `onlyRec`（它取的是 map 里的第一个，
   //   而前面几条用例可能还留着一条没被回收的记录 —— 于是这条判据会去问一个
   //   根本不是刚起来的那条会话，症状是"前置不成立"）。
   const shell = idx._test.getWindow();

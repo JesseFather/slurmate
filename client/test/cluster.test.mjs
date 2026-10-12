@@ -13,22 +13,22 @@
 // limitations under the License.
 
 /**
- * cluster.test.mjs —— 集群信息那一块，**假后端演的是同一件事**。
+ * cluster.test.mjs —— 集群信息那一块，假后端演的是同一件事。
  *
  * 服务端那一半（三层钟、零 fork、节点后缀只做展示、`-u` 而不是 `-U`）由
  * `cluster/test-sessiond-logic.py` 第 28 节守着。这一组守的是**客户端这一侧的
  * 三个接缝**，它们在本机都没有别的东西挡得住：
  *
- *   1. **假后端有没有那两个 op。** 少了 `case 'cluster':`，开发者模式里点
+ *   1. 假后端有没有那两个 op。少了 `case 'cluster':`，开发者模式里点
  *      「集群状态」拿到的是 `unknown_op`，而界面会把它画成一次失败 ——
- *      开发模式于是对**真集群上好好的**功能报错。反过来"假后端多知道一点"
+ *      开发模式于是对真集群上好好的功能报错。反过来"假后端多知道一点"
  *      在 `backend-fake.test.mjs` 里另有一条守着。
  *
- *   2. **三态。** 「取不到」与「确实没有」在这一块里是两句不同的话，而它们
+ *   2. 三态。「取不到」与「确实没有」在这一块里是两句不同的话，而它们
  *      在界面上长得一样（都是一片空）。真集群上"取不到"要等一次故障才看得到，
- *      所以它必须能**立刻造出来**（`debugClusterMissing`）。
+ *      所以它必须能立刻造出来（`debugClusterMissing`）。
  *
- *   3. **`history` 取不到时是错误，不是空列表。** 空列表的意思是"你这几天
+ *   3. `history` 取不到时是错误，不是空列表。空列表的意思是"你这几天
  *      没有作业" —— 一句我们并不知道的话。
  */
 import test from 'node:test';
@@ -81,7 +81,7 @@ test('★★★ 「取不到」能立刻造出来，而且它是**缺席**、不
     for (const k of ['health', 'version', 'partitions', 'gres', 'nodes', 'queue']) {
       assert.equal(k in d, false, `${k} 应当缺席：${JSON.stringify(d[k])}`);
     }
-    // ★ 而 `me` 那一块**照常**在：一格取不到不该让整屏都空掉。
+    // 而 `me` 那一块照常在：一格取不到不该让整屏都空掉。
     assert.ok(d.me && typeof d.me === 'object', JSON.stringify(d.me));
     assert.equal(d.me.fairshare, null, '公平份额那一格是 null，不是缺席');
   } finally {
@@ -111,7 +111,7 @@ test('★★ 节点表**故意比真集群脏**：带后缀的那两个只在开
     const flags = Object.values(d.nodes).flatMap((n) => Object.keys(n.flags || {}));
     assert.ok(flags.includes('*') && flags.includes('~'),
       `节点表里要有带后缀的：${JSON.stringify(d.nodes)}`);
-    // ★ counts 的键必须是**剥干净的** base state —— 后缀漏进去就说明剥法坏了。
+    // counts 的键必须是剥干净的 base state —— 后缀漏进去就说明剥法坏了。
     for (const n of Object.values(d.nodes)) {
       for (const st of Object.keys(n.counts)) {
         assert.ok(!/[*~#!%@^+-]$/.test(st), `counts 里出现了没剥干净的状态：${st}`);
@@ -147,7 +147,7 @@ test('★★ history 取不到时是**错误**，不是空列表', async () => {
     const r = await b.rpc({ op: 'history' });
     assert.equal(r.ok, false, JSON.stringify(r));
     assert.equal(r.error.kind, 'history_unknown', JSON.stringify(r.error));
-    // ★ 关键：**不是** `ok:true` + `[]` —— 那是"你这几天没有作业"。
+    // 关键：不是 `ok:true` + `[]` —— 那是"你这几天没有作业"。
     assert.equal(r.data, null, JSON.stringify(r.data));
   } finally {
     await b.close();
@@ -158,13 +158,13 @@ test('★ history 里只有**作业级**记录（作业步不算），且倒序'
   const b = fresh();
   try {
     const rows = (await b.rpc({ op: 'history' })).data.history;
-    // ★★ 至少两条 —— 一条的时候下面那条"倒序"是**永真**的，而永真的断言
+    // 至少两条 —— 一条的时候下面那条"倒序"是永真的，而永真的断言
     //    与没有断言在输出上分不开。实测：把夹具砍到一条，这条用例照样绿。
     assert.ok(rows.length >= 2, `夹具至少要两条（现在 ${rows.length} 条）`);
     for (const r of rows) {
       assert.ok(!r.job_id.includes('.'), `作业步混进来了：${r.job_id}`);
     }
-    // ★ 倒序：最新的在最前。守护进程那边负责倒，这一条钉的是"客户端拿到的
+    // 倒序：最新的在最前。守护进程那边负责倒，这一条钉的是"客户端拿到的
     //   就是那个顺序"—— 假后端要是给正序，开发者模式里看到的就是最后那件事
     //   排在最后，而真集群上不是。
     const ids = rows.map((r) => Number(r.job_id));

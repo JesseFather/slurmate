@@ -15,12 +15,12 @@
 /**
  * layout.test.mjs —— 窗口里那几块原生视图的摆位。
  *
- * ★ 这一组判据是**补上的**：这几条算式原先埋在 `windows.js` 的 `_layout()` 里，
- *   而那个文件一 `require` 就要 Electron ⇒ 本机（没有图形环境）根本进不去 ⇒
- *   **一个判据都没有**。而它们算错的症状是"插件页面被边栏压住一角"，不报错、
+ * 这一组判据是补上的：这几条算式原先埋在 `windows.js` 的 `_layout()` 里，
+ *   而那个文件一 `require` 就要 Electron，本机（没有图形环境）根本进不去，
+ *   一个判据都没有。而它们算错的症状是"插件页面被边栏压住一角"，不报错、
  *   不崩溃、在真机上极不显眼。
  *
- * ★ 还有一条**跨文件**的：同一组数字（状态条 30px、边栏 10px）在三个地方出现 ——
+ * 还有一条跨文件的：同一组数字（状态条 30px、边栏 10px）在三个地方出现 ——
  *   `layout.js`（原生视图让开多少）、`app.css`（那两条栏画多宽）、`panel.html`
  *   （状态条的高度由 CSS 变量给）。对不上的表现是插件页面被压住一角，或者两条栏
  *   外面露出一线背景色。`limits.test.mjs` 钉的是同类的另一组数，这条跟着它。
@@ -48,7 +48,7 @@ test('★★ 主体那块：上面让开状态条，左右各让开一条边栏'
   assert.equal(r.x, RAIL_W, '左边要让开左栏');
   assert.equal(r.width, W - 2 * RAIL_W, '宽度要扣掉**两条**栏');
   assert.equal(r.height, H - STATUS_BAR_HEIGHT);
-  // ★ 右边那条栏的内侧 = 主体块的右边界。差一个像素的话，右边会露出一线背景色。
+  // 右边那条栏的内侧 = 主体块的右边界。差一个像素的话，右边会露出一线背景色。
   assert.equal(r.x + r.width, W - RAIL_W);
 });
 
@@ -69,7 +69,7 @@ test('★★ 浮窗贴着**那一条栏的内侧**，高度与主体齐平', () 
   const r = hoverRect(W, H, 'right');
   assert.equal(r.x + r.width, W - RAIL_W, '右栏的浮窗紧挨着右栏的左边');
   assert.equal(r.width, HOVER_W);
-  // ★ 两边对称：左栏的浮窗与右栏的浮窗只差一个镜像。
+  // 两边对称：左栏的浮窗与右栏的浮窗只差一个镜像。
   assert.equal(r.x, W - RAIL_W - HOVER_W);
 });
 
@@ -86,11 +86,11 @@ test('★★ 收起判据：栏里算在里面，浮窗里也算，两者之间�
   const y = STATUS_BAR_HEIGHT + 5;
   assert.ok(inHoverZone(W, H, 'left', 1, y), '鼠标在栏上');
   assert.ok(inHoverZone(W, H, 'left', RAIL_W + 5, y), '鼠标在浮窗里');
-  // ★ 这条是"移开就收"的正身：中间那一大片不属于它。
+  // 这条是"移开就收"的正身：中间那一大片不属于它。
   assert.ok(!inHoverZone(W, H, 'left', W / 2, y), '鼠标在窗口中间 —— 该收');
   // 状态条不算：用户移上去点会话标签时，浮窗不该赖着不走。
   assert.ok(!inHoverZone(W, H, 'left', 1, 5), '鼠标在状态条上 —— 该收');
-  // 右栏那一边同理，而且**左栏开着时鼠标跑到右栏去**也要收。
+  // 右栏那一边同理，而且左栏开着时鼠标跑到右栏去也要收。
   assert.ok(!inHoverZone(W, H, 'left', W - 2, y), '鼠标跑去右栏 —— 该收');
   assert.ok(inHoverZone(W, H, 'right', W - 2, y));
 });
@@ -127,22 +127,22 @@ test('★★ 同一组数字在三个文件里必须一致（对不上的症状�
 });
 
 test('★★ 窗口最小宽度装得下面板（这是第四个数，前三个上面已经钉住）', () => {
-  // ★ 从前这条**根本不存在**：`windows.js` 一 require 就要 Electron，本机进不去，
+  // 从前这条根本不存在：`windows.js` 一 require 就要 Electron，本机进不去，
   //   而那三个数（状态条高、边栏宽、浮窗宽）都由 `layout.js` 那一份管着 ——
-  //   窗口自己的最小尺寸落在**没有判据**的那一边。症状是"窗口能缩到面板被压窄"，
+  //   窗口自己的最小尺寸落在没有判据的那一边。症状是"窗口能缩到面板被压窄"，
   //   不报错、不崩溃，只有人眼看得见。
   const win = fs.readFileSync(path.join(here, '..', 'src', 'main', 'windows.js'), 'utf8');
   const mw = /minWidth:\s*(\d+)/.exec(win);
   const mh = /minHeight:\s*(\d+)/.exec(win);
   assert.ok(mw && mh, 'windows.js 的 BrowserWindow 上要能读到 minWidth / minHeight');
 
-  // ★★ 地板从**另外两个文件现读出来**，不手抄一份数：手抄的那份会在
+  // 地板从另外两个文件现读出来，不手抄一份数：手抄的那份会在
   //    `.wrap` 变宽或内边距改了之后照样绿 —— 而那正是这条要拦的形状
   //    （同 F35 那条教训：手抄的清单会在源头新增一项时照样通过）。
   const css = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'app.css'), 'utf8');
-  // ★ 上内边距那一格**允许是无单位的 0**（2026-10-11 改）：面板的上内边距挪给了
+  // 上内边距那一格允许是无单位的 0（2026-10-11 改）：面板的上内边距挪给了
   //   各屏自己的第一块，好让第二/三屏那条身份带能贴到状态条底下（见 app.css 里
-  //   `#panel` 那一段）。这一条要的是**左右**那两个数，它们一个字没变。
+  //   `#panel` 那一段）。这一条要的是左右那两个数，它们一个字没变。
   const pad = /#panel\s*\{[^}]*?padding:\s*(?:\d+px|0)\s+(\d+)px/.exec(css);
   const wrap = /\.wrap\s*\{[^}]*?max-width:\s*(\d+)px/.exec(css);
   assert.ok(pad, 'app.css 的 #panel 上要能读到左右内边距');
@@ -152,7 +152,7 @@ test('★★ 窗口最小宽度装得下面板（这是第四个数，前三个�
   assert.ok(Number(mw[1]) >= floor,
     `最小宽度 ${mw[1]} 装不下面板：左右内边距 ${pad[1]}×2 + 内容 ${wrap[1]}`
     + ` + 连上之后两条边栏各 ${RAIL_W} = ${floor}`);
-  // ★ 高度那一条**没有算式**：状态条（30px）之外，面板本来就是纵向滚动的，
+  // 高度那一条没有算式：状态条（30px）之外，面板本来就是纵向滚动的，
   //   所以它没有一个"装不下"的硬地板。这里只给一个不至于把会话区压成一条缝的下限。
   assert.ok(Number(mh[1]) >= 480, `最小高度 ${mh[1]} 太矮`);
 });

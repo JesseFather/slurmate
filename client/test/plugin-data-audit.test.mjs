@@ -15,17 +15,17 @@
 /**
  * plugin-data-audit.test.mjs —— 「本机还剩几份插件数据、哪一份没人用」的判据。
  *
- * ★ 这一份的主体是一条**会删错数据**的错误的反面：
+ * 这一份的主体是一条会删错数据的错误的反面：
  *
- *   判据是「**正向算出该有哪些**，两边折叠做差」，**不是**「逆向解析磁盘上的名字」。
- *   后者有两个坑，各自都够把**活着的**一份判成垃圾：`identityOf` 的第二段可以是
+ *   判据是「正向算出该有哪些，两边折叠做差」，不是「逆向解析磁盘上的名字」。
+ *   后者有两个坑，各自都够把活着的一份判成垃圾：`identityOf` 的第二段可以是
  *   版本号（`1.0.0` 不匹配 `GROUP_RE`），而磁盘上的名字是折叠过的（id 那一段小写）。
  *   两次变形叠加之后，"我解析不出来"与"这是老垃圾"就分家了 —— 而界面上给一份活着的
  *   cookie 一个删除按钮，代价是用户重配一遍。
  *
- * 所以下面每一条都要求：**该在的说得出来、不该在的说不出来**，而不是只测一半。
+ * 所以下面每一条都要求：该在的说得出来、不该在的说不出来，而不是只测一半。
  *
- * 第二件事：**认不出的目录只列不删**。分区目录的根是推出来的（`partitionRoot`），
+ * 第二件事：认不出的目录只列不删。分区目录的根是推出来的（`partitionRoot`），
  * 万一推错，那个列表会把 `secrets.json`、`dev-sandbox` 之类摆上删除按钮。
  */
 import test from 'node:test';
@@ -42,7 +42,7 @@ const WORKSPACE = 'w0123456789ab';
 const OTHER_WORKSPACE = 'wffffffffffff';
 /** code-server 在 `WORKSPACE` 里的那一份数据。 */
 const SPACE = 's0123456789ab';
-/** 一个**不在配置里**的数据 id（用来造"那一份已经没了"那一档）。 */
+/** 一个不在配置里的数据 id（用来造"那一份已经没了"那一档）。 */
 const OTHER_SPACE = 'sffffffffffff';
 
 /** 有界面、能同时开两份、跨版本共享的那种插件 —— code-server 真实的样子。 */
@@ -55,7 +55,7 @@ const cs = (over = {}) => ({
   ...over,
 });
 
-/** 有界面、但**不能多开**：只有一份存储，不属于任何工作区。 */
+/** 有界面、但不能多开：只有一份存储，不属于任何工作区。 */
 const oneStore = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
   contributes: { surface: { kind: 'web', path: '/' }, ports: 0, concurrent: false,
@@ -65,12 +65,12 @@ const oneStore = () => ({
 /**
  * 一份数据（`config.js` 数据空间那一节的形状）。
  *
- * ★ 身份的三段**全由它说了算**（见 plugin-data.js 的 `identityOf`）—— 所以 `pluginId`
+ * 身份的三段全由它说了算（见 plugin-data.js 的 `identityOf`）—— 所以 `pluginId`
  *   这一格是承重的：同一个插件在两份数据里就是两份存储。
  */
 const sp = (id, pluginId, group, port = 18080) => ({ id, pluginId, group, ports: [port] });
 
-/** 一个工作区 = **一张引用表**（它不拥有数据，只拥有"指向"）。 */
+/** 一个工作区 = 一张引用表（它不拥有数据，只拥有"指向"）。 */
 const ws = (id, name, refs) => ({ id, name, refs: refs || {} });
 
 /** `WORKSPACE` 那一份，加上它那一格引用 —— 大多数用例要的就是这个。 */
@@ -82,8 +82,8 @@ const csIn = (spaceId, group = 'editor') => pluginData.identityOf(cs(), sp(space
 const conn = (workspaceId, id = 'c1') => ({ id, workspaceId });
 const disk = (identity) => pluginData.diskNameOf(identity);
 
-/** sshd **实际的样子**：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
- *  框架连一块界面都不建），但声明了数据、而且**不能多开**。 */
+/** sshd 实际的样子：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
+ *  框架连一块界面都不建），但声明了数据、而且不能多开。 */
 const relay = () => ({
   id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
   contributes: { ports: 0, submitPubkey: true, concurrent: false,
@@ -93,12 +93,12 @@ const relay = () => ({
 /**
  * 一次只读对账。
  *
- * ★ 两个根的名字**默认都是 `[]`**（= 查过了、是空的）。要表达"没查那一根"必须显式
+ * 两个根的名字默认都是 `[]`（= 查过了、是空的）。要表达"没查那一根"必须显式
  *   传 `null` —— 这两件事在界面上是两句完全不同的话（"没有" vs "查不了"）。
  */
 const run = (o) => audit.audit({
   plugins: o.plugins || [cs()],
-  // ★ "该有的"由**配置里那张数据表正向算**（不是"每个插件 × 每个工作区"）——
+  // "该有的"由配置里那张数据表正向算（不是"每个插件 × 每个工作区"）——
   //   一份数据的 id 是铸出来的，照后者去推会推出一些不存在的名字，
   //   而真正的那几份全变成孤儿。
   spaces: o.spaces === undefined ? [sp(SPACE, CS, 'editor')] : o.spaces,
@@ -108,15 +108,15 @@ const run = (o) => audit.audit({
   why: o.why,
   dataNames: o.dataNames === undefined ? [] : o.dataNames,
   dataWhy: o.dataWhy,
-  // ★ `held` 的缺省是**空的一列**（= "此刻没有任何活会话"）。它不是"没查"——
+  // `held` 的缺省是空的一列（= "此刻没有任何活会话"）。它不是"没查"——
   //   "谁活着"这件事在调用方那里永远是知道的（进程就是它自己），所以没有三态。
   held: o.held === undefined ? [] : o.held,
 });
 
-// ── ★ 活着的分区绝不能被报出来 ──────────────────────────────────────────────
+// ── 活着的分区绝不能被报出来 ──────────────────────────────────────────────
 
 test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测函数自己算期望）', () => {
-  // 这份名字是**手写**的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab` 就是
+  // 这份名字是手写的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab` 就是
   // Electron 会把 code-server 那个身份落成的目录名（id 段折叠过）。
   const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab';
   const r = run({ names: [live] });
@@ -124,13 +124,13 @@ test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测�
     '有一份数据、也有一条连接正指着它那个工作区 —— 它**不是**孤儿');
   assert.equal(r.diskChecked, true);
 
-  // ★ 反例钉住"折叠"这件事：磁盘名写成大写时也必须认得出它（折叠是幂等的）。
-  //   少这一条的话，一个"忘了折叠"的实现会让**每一份活着的存储**都变成孤儿 ——
+  // 反例钉住"折叠"这件事：磁盘名写成大写时也必须认得出它（折叠是幂等的）。
+  //   少这一条的话，一个"忘了折叠"的实现会让每一份活着的存储都变成孤儿 ——
   //   而它照样能让上面那条通过（上面那条的期望是空的）。
   const r2 = run({ names: [live.toUpperCase()] });
   assert.deepEqual(r2.rows, [], '大写的那一份也是它（折叠之后再比）');
 
-  // 反过来：连接指着**另一个**工作区时，它就没人用了。
+  // 反过来：连接指着另一个工作区时，它就没人用了。
   const r3 = run({ names: [live], connections: [conn(OTHER_WORKSPACE)],
     workspaces: [wsOne(), ws(OTHER_WORKSPACE, '工作区2', {})] });
   assert.equal(r3.rows.length, 1);
@@ -145,7 +145,7 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
   const r = run({ plugins: [oneStore()], names: [store], connections: [] });
   assert.deepEqual(r.rows, [], '它不属于任何工作区 ⇒ 引用计数这件事对它没有意义');
 
-  // 而一份**算不出来**的目录名照样是孤儿 —— 第二段不是一个认得出的共享组名时就是
+  // 而一份算不出来的目录名照样是孤儿 —— 第二段不是一个认得出的共享组名时就是
   // 这一档（`perVersion: true` 的插件升版留下的名字也是这个形状）。
   const old = '01m2jkhtzgf12n0t9cb3xvk36h@0.9.0';
   const r2 = run({ plugins: [oneStore()], names: [old, store] });
@@ -153,17 +153,17 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
   assert.equal(r2.rows[0].kind, 'orphan');
 });
 
-// ── ★★ 第二个根：插件数据目录 ──────────────────────────────────────────────
+// ── 第二个根：插件数据目录 ──────────────────────────────────────────────
 //
 // 一份身份现在有两个落点（Electron 的存储分区，以及基座给插件的数据目录）。下面
-// 这几条守的是**第二根带回来的那类事故**：照搬分区那一侧的入口条件，会把一份**正在
+// 这几条守的是第二根带回来的那类事故：照搬分区那一侧的入口条件，会把一份**正在
 // 被用的**数据摆上删除按钮。
 
 test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）—— 那一份**永远不报**', () => {
-  // ★ 这一条守的是本阶段**最贵的一处**。若对账"该有的"入口按"有没有界面"算
-  //   （`hasSurface`），sshd 那份数据目录就**一诞生就是孤儿**：sshd 没有
+  // 这一条守的是本阶段最贵的一处。若对账"该有的"入口按"有没有界面"算
+  //   （`hasSurface`），sshd 那份数据目录就一诞生就是孤儿：sshd 没有
   //   `contributes.surface`（它的东西跑在用户自己的机器上，框架连一块界面都不建），
-  //   而它**会写数据**（`ctx.dataDir()`）。于是界面上一个删除按钮，而一个跑着的
+  //   而它会写数据（`ctx.dataDir()`）。于是界面上一个删除按钮，而一个跑着的
   //   会话正靠它（`~/.ssh/config` 的 IdentityFile / UserKnownHostsFile 都指着那里）
   //   —— 症状是"`ssh slurmate` 忽然认证失败"，而用户刚刚点过一个他以为无害的按钮。
   const live = disk(pluginData.identityOf(relay()));
@@ -172,7 +172,7 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
   assert.deepEqual(r.rows, [], '它没有实例段 ⇒ 不属于任何工作区 ⇒ 永远不列');
   assert.equal(r.diskChecked, true);
 
-  // ★ **反向**：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
+  // 反向：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
   //   一个"什么都报不出来"的实现也能让上面那条绿。
   const old = disk([SSHD, '0.9.0']);           // 算不出来的第二段：版本形状的那一种
   const r2 = run({ plugins: [relay()], names: [], dataNames: [old], connections: [] });
@@ -185,7 +185,7 @@ test('★ 两个根下的同一份身份 ⇒ **一行**，`places` 说清它在�
   const r = run({ names: [live], dataNames: [live] });
   assert.deepEqual(r.rows, [], '有连接指着那个工作区 ⇒ 不是孤儿');
 
-  // 工作区没了 ⇒ 一行，两处都标出来 —— 用户不该为了同一份数据删两次，而"只列一处"
+  // 工作区没了，一行，两处都标出来 —— 用户不该为了同一份数据删两次，而"只列一处"
   // 会让删完的那一刻另一处把同一行带回来（"我明明删过了"）。
   const r2 = run({ names: [live], dataNames: [live], connections: [] });
   assert.equal(r2.rows.length, 1, '同一份身份只出一行 —— 不是"一个落点一行"');
@@ -198,8 +198,8 @@ test('★ 两个根下的同一份身份 ⇒ **一行**，`places` 说清它在�
 });
 
 test('★ 一处认得出、另一处认不出 ⇒ 整行**不给删除按钮**', () => {
-  // 分区根里有历史形状（`slot-…`）是正常的；而**数据根里不可能有** —— 那个目录从
-  // 诞生起只有这个客户端写过。所以一条 `slot-1` 在两处都出现，说明**数据根取错了**，
+  // 分区根里有历史形状（`slot-…`）是正常的；而数据根里不可能有 —— 那个目录从
+  // 诞生起只有这个客户端写过。所以一条 `slot-1` 在两处都出现，说明数据根取错了，
   // 而那正是"把 secrets.json、dev-sandbox 摆上删除按钮"那条路的入口。
   const r = run({ names: ['slot-1'], dataNames: ['slot-1'] });
   assert.equal(r.rows.length, 1);
@@ -207,7 +207,7 @@ test('★ 一处认得出、另一处认不出 ⇒ 整行**不给删除按钮**'
   assert.equal(r.rows[0].deletable, false, '有一处认不出 ⇒ 整行都不许删');
   assert.match(r.rows[0].why, /数据目录/, '要说清是**哪一处**认不出');
 
-  // 反向：同一条 `slot-1` **只在分区根里** ⇒ 照旧是认得出来的旧分区，可以删。
+  // 反向：同一条 `slot-1` 只在分区根里，照旧是认得出来的旧分区，可以删。
   const r2 = run({ names: ['slot-1'], dataNames: [] });
   assert.equal(r2.rows[0].kind, 'legacy');
   assert.equal(r2.rows[0].deletable, true);
@@ -235,7 +235,7 @@ test('那一份没了：第三段那个数据 id 已经不在配置里 ⇒ 一�
 });
 
 test('插件没了：id 认得出、注册表里没有它 ⇒ 一行，可删', () => {
-  // 末尾是 w（code-server 那个是 v）—— 一个**本机没有**的 id。
+  // 末尾是 w（code-server 那个是 v）—— 一个本机没有的 id。
   const gone = '01m2jkhtzgkjbfqqtwyxmqmf2w';
   const r = run({ names: [`${gone}@editor@${SPACE}`] });
   assert.equal(r.rows.length, 1);
@@ -254,7 +254,7 @@ test('0.7 之前的旧分区：三种旧形状都认得，可删', () => {
 
 test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
   // 这一条防的是"分区目录的根取错了"：那时这个列表会读出 `secrets.json`、
-  // `dev-sandbox` 之类的东西，而它们**绝不能**有删除按钮。
+  // `dev-sandbox` 之类的东西，而它们绝不能有删除按钮。
   const r = run({ names: ['secrets.json', 'dev-sandbox', 'Partitions', '..', '01m2abc'] });
   assert.equal(r.rows.length, 5, '一个都不许瞒着');
   assert.ok(r.rows.every((x) => x.kind === 'unknown' && x.deletable === false),
@@ -263,17 +263,17 @@ test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
 });
 
 test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', () => {
-  // 上面那一条说的是"认不出就不给删除按钮"（逐行的防线）。这一条说的是**全局**：
+  // 上面那一条说的是"认不出就不给删除按钮"（逐行的防线）。这一条说的是全局：
   // 一整屏都认不出时，读的人会以为"我攒了一堆垃圾"，而真相多半是**这一根指到了
   // 别的地方** —— 插件数据目录那一根是本程序自己拼的，没有任何探针能当场核对它。
-  // ⇒ 它是那一根**唯一**的防线，所以得有话可说。
+  // 它是那一根唯一的防线，所以得有话可说。
   const r = run({ names: ['secrets.json', 'dev-sandbox', 'Partitions'] });
   assert.equal(r.allUnknown, true, '一个都认不出来 ⇒ 这一根多半取错了');
 
-  // ★ 反例一：**有一行认得出**就不成立 —— 那时屏幕上是"我认识的东西 + 不认识的
+  // 反例一：有一行认得出就不成立 —— 那时屏幕上是"我认识的东西 + 不认识的
   //   东西"，而那正是"用户自己往那个目录里放了点别的"，不是根取错了。
   //
-  //   ★ 这里要造一个**真的会产生行**的认得出的名字：**在用的那一份一行都不产生**
+  //   这里要造一个真的会产生行的认得出的名字：在用的那一份一行都不产生
   //     （它不是"问题"，见 `audit` 里那条 `continue`）—— 用一个"没人用的工作区"来造，
   //     否则这一条会因为"行里只剩认不出的那条"而假绿。
   const mixed = run({
@@ -287,14 +287,14 @@ test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', ()
   assert.equal(mixed.allUnknown, false,
     '有一行认得出 ⇒ 不是"整屏认不出"，不能报"根取错了"');
 
-  // ★ 反例二：**一根没查成**就不成立。那是"查不了"，`why` 已经如实说了，
+  // 反例二：一根没查成就不成立。那是"查不了"，`why` 已经如实说了，
   //   不该被这一句盖过去（"问不到"与"认不出"是两件事）。
   assert.equal(run({ names: null, dataNames: ['secrets.json'] }).allUnknown, false,
     '分区那一根没查成 ⇒ 这是"查不了"，不是"认不出"');
   assert.equal(run({ names: ['secrets.json'], dataNames: null }).allUnknown, false,
     '数据那一根没查成 ⇒ 同上');
 
-  // ★ 反例三：**空清单**不成立。那是"本机一份插件数据都没有"—— 一个**肯定**的
+  // 反例三：空清单不成立。那是"本机一份插件数据都没有"—— 一个肯定的
   //   答案。（`every` 对空数组恒真，所以少了 `rows.length > 0` 这一条，
   //   一个全新安装会被告知"你的数据目录取错了"。）
   assert.equal(run({}).allUnknown, false, '一份都没有 ⇒ 不能报"根取错了"');
@@ -303,11 +303,11 @@ test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', ()
 // ── 没人用的工作区（内存侧那一类）──────────────────────────────────────────────
 
 test('★ 没人用的工作区：数据在、而没有任何连接指着它 ⇒ 一行，标签里带**工作区的名字**', () => {
-  // 这一格说的是**配置里有一张没人用的引用表**（数据在、而没有任何连接指着它）。
-  // ★ 从前它由 `pruneWorkspaces` 那条"一条连接都没有时不回收"的豁免**制造**出来；
-  //   豁免删掉之后（活会话现在是它的守卫），这个状态仍然够得着，只是变得**短暂**：
+  // 这一格说的是配置里有一张没人用的引用表（数据在、而没有任何连接指着它）。
+  // 从前它由 `pruneWorkspaces` 那条"一条连接都没有时不回收"的豁免制造出来；
+  //   豁免删掉之后（活会话现在是它的守卫），这个状态仍然够得着，只是变得短暂：
   //   它活在"上一次落盘"到"下一次 commitConfig"之间，或者一条会话正拿着它的时候。
-  //   对账是**只看配置**的纯函数，所以这一档照样要有。
+  //   对账是只看配置的纯函数，所以这一档照样要有。
   const live = disk(csIn(SPACE));
   const r = run({ names: [live], connections: [] });
   assert.equal(r.rows.length, 1);
@@ -339,13 +339,13 @@ test('★ 没查磁盘 ⇒ 空清单 + `diskChecked:false` + 点名是**哪一�
   const r = run({ names: null, why, connections: [] });
   assert.deepEqual(r.rows, []);
   assert.equal(r.diskChecked, false);
-  // ★ 现在有两个根，所以"没查"必须说得出是**哪一根** —— 一句不点名的原因在两根
+  // 现在有两个根，所以"没查"必须说得出是哪一根 —— 一句不点名的原因在两根
   //   之间是歧义的，而界面拿它当"这一次为什么没看"的唯一说明。
   assert.match(r.why, /分区目录那一根/, '必须点名');
   assert.match(r.why, /开发者模式不查磁盘/, '原因本身要原样带给界面');
 
-  // ★ 反例：查过了、真的没有 ⇒ 也是空清单，但 `diskChecked` 是 true。
-  //   两件事在界面上是**两句不同的话**（一句"没有"，一句"我没能去看"）。
+  // 反例：查过了、真的没有，也是空清单，但 `diskChecked` 是 true。
+  //   两件事在界面上是两句不同的话（一句"没有"，一句"我没能去看"）。
   const r2 = run({ names: [] });
   assert.deepEqual(r2.rows, []);
   assert.equal(r2.diskChecked, true);
@@ -379,7 +379,7 @@ test('partitionRoot：探针的目录对得上就用它，对不上就说"查不
   assert.equal(ok.root, '/tmp/xx/Partitions');
   assert.equal(ok.verified, true);
 
-  // ★ 对不上（命名约定变了）⇒ **root 为 null**：调用方要如实说"查不了"，
+  // 对不上（命名约定变了），root 为 null：调用方要如实说"查不了"，
   //   而不是拿一个错的根去认，然后把别人的目录摆上删除按钮。
   const bad = audit.partitionRoot({
     session: session((n) => `/tmp/xx/Partitions/hashed-${n.length}`),
@@ -389,7 +389,7 @@ test('partitionRoot：探针的目录对得上就用它，对不上就说"查不
   assert.equal(bad.verified, false);
   assert.match(bad.why, /命名约定/);
 
-  // 问不出来（没有这个方法 / 抛）= 落到兜底根：这一步是**加固**，不是前提。
+  // 问不出来（没有这个方法 / 抛）= 落到兜底根：这一步是加固，不是前提。
   const fallback = audit.partitionRoot({
     session: { fromPartition: () => ({}) }, probe, fallbackRoot: '/tmp/yy/Partitions',
   });
@@ -397,7 +397,7 @@ test('partitionRoot：探针的目录对得上就用它，对不上就说"查不
   assert.equal(fallback.verified, false);
   assert.equal(fallback.why, null);
 
-  // 没有该有的身份可问 ⇒ 一个号都不创建，直接用兜底根。
+  // 没有该有的身份可问，一个号都不创建，直接用兜底根。
   const none = audit.partitionRoot({ session: session(() => {
     throw new Error('不该被调用 —— 没有该有的身份就不要去问 Electron');
   }), probe: null, fallbackRoot: '/tmp/zz/Partitions' });
@@ -414,8 +414,8 @@ test('listDirs：目录不存在 = 一份都没有（肯定的答案）；读不
 });
 
 test('★★ 正被活会话拿着的那一份**不进名单**（`held`）—— 而没拿着的照旧进', () => {
-  // 一份**临时实例**的身份：它的实例键（工作区 id）只在内存里，配置里根本没有
-  // 那个工作区 ⇒ 它**永远**不在"该有的"里。没有 `held` 的话，它在名单上就是一个
+  // 一份临时实例的身份：它的实例键（工作区 id）只在内存里，配置里根本没有
+  // 那个工作区，它永远不在"该有的"里。没有 `held` 的话，它在名单上就是一个
   // 可删的孤儿 —— 而那个删除按钮就落在用户正写着的那份数据上。
   const temp = disk(csIn('s0123456789cd'));
   const noHold = run({ names: [temp], dataNames: [temp] });
@@ -426,20 +426,20 @@ test('★★ 正被活会话拿着的那一份**不进名单**（`held`）——
   const withHold = run({ names: [temp], dataNames: [temp], held: [temp] });
   assert.deepEqual(withHold.rows, [], '★ 拿着它的人说它活着 ⇒ 不许出现在名单里');
 
-  // ★ 折叠是**幂等**的：调用方折过没折过都对。写大写的那一份照样护得住 ——
+  // 折叠是幂等的：调用方折过没折过都对。写大写的那一份照样护得住 ——
   //   两个根的名字在折叠这件事上本来就不同源（分区名里 id 段是大写的）。
   assert.deepEqual(run({ names: [temp], held: [temp.toUpperCase()] }).rows, [],
     '★ held 里的名字大写也认（折叠在这里再做一遍）');
 
-  // ★★ **两个根报上来的写法不一样，而这一条是承重的**：窗口那一半
-  //    （`livePartitions()`）报的是**分区名**（`persist:…`），会话那一半
-  //    （`liveDataDirs()`）报的是**目录名**。少了前缀那一步归一，分区那一半
-  //    **永远匹配不上** —— 而症状是"护了个寂寞"：一份活着的临时实例照样在名单里。
+  // 两个根报上来的写法不一样，而这一条是承重的：窗口那一半
+  //    （`livePartitions()`）报的是分区名（`persist:…`），会话那一半
+  //    （`liveDataDirs()`）报的是目录名。少了前缀那一步归一，分区那一半
+  //    永远匹配不上 —— 而症状是"护了个寂寞"：一份活着的临时实例照样在名单里。
   assert.deepEqual(run({ names: [temp], held: [`persist:${temp}`] }).rows, [],
     '★ 带 persist: 前缀的那种写法也要认（窗口那一半报的就是它）');
 
-  // ★ **反例**：没人拿着的同类名字照样是孤儿。少了这一条，一个"`held` 恒为真"
-  //   的实现也能让上面那两条通过 —— 而那会让**所有**垃圾都删不掉。
+  // 反例：没人拿着的同类名字照样是孤儿。少了这一条，一个"`held` 恒为真"
+  //   的实现也能让上面那两条通过 —— 而那会让所有垃圾都删不掉。
   const other = disk(csIn('s0123456789ef'));
   const stray = run({ names: [other], held: [temp] });
   assert.equal(stray.rows.length, 1, '★ 护的是**拿着的那一份**，不是"所有临时样子的"');
@@ -458,29 +458,29 @@ test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）',
     assert.equal(v.code, 'stale');
     assert.match(v.error, /重新看一下/, '拒绝也要说清下一步');
   }
-  // 没在用的放行，而且回的是**这次算出来的那一行**（拼路径要用它）。
+  // 没在用的放行，而且回的是这次算出来的那一行（拼路径要用它）。
   const ok = audit.deletionVerdict({ rows, name: 'aa@bb@cc' });
   assert.equal(ok.ok, true);
   assert.equal(ok.row, rows[0]);
-  // ★★ "正被用着"由 `audit` 的 `held` 在算行的时候就挡掉（见上一条）—— 所以这里
-  //    **只剩两个下场**。若留一个按 `surfacePartitions` 判的第三态，它是一条恒不可达
-  //    的分支：它比的是**分区**，而"有一条活会话"不止体现在分区上（没有界面的
+  // "正被用着"由 `audit` 的 `held` 在算行的时候就挡掉（见上一条）—— 所以这里
+  //    只剩两个下场。若留一个按 `surfacePartitions` 判的第三态，它是一条恒不可达
+  //    的分支：它比的是分区，而"有一条活会话"不止体现在分区上（没有界面的
   //    插件、临时实例都没有分区）。这一条钉的就是"它没有回来"。
   assert.equal(audit.deletionVerdict({
     rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'],
   }).ok, true, '★ 传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');
 });
 
-// ── ★★ 自动回收：哪些**该**自动收，哪些只是"能删" ──────────────────────────
+// ── 自动回收：哪些该自动收，哪些只是"能删" ──────────────────────────
 
 test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个都不许碰', () => {
-  // ★★ 这是本版唯一会**删用户数据**的那一步的判据，而它与"界面上能不能删"
-  //    **不是**同一条：界面上可删的有三档，自动收的只有两档。
+  // 这是本版唯一会删用户数据的那一步的判据，而它与"界面上能不能删"
+  //    不是同一条：界面上可删的有三档，自动收的只有两档。
   //
-  //    `unused` 的那一份，它的工作区**还在配置里** —— 用户可能刚建了一个空白
+  //    `unused` 的那一份，它的工作区还在配置里 —— 用户可能刚建了一个空白
   //    工作区（还没有连接指过去），也可能那条连接只是暂时被切走了。下一次有连接
-  //    指过去就会读它。所以它是"此刻没人用"，**不是**"没人会用"。
-  //    ⇒ 少了这一条判据（比如写成"deletable 的全收"），用户的编辑器数据会在
+  //    指过去就会读它。所以它是"此刻没人用"，不是"没人会用"。
+  //    少了这一条判据（比如写成"deletable 的全收"），用户的编辑器数据会在
   //      一个他根本不知道的时刻被删掉，而界面上一个字都不会说。
   const rows = [
     { kind: 'unused', deletable: true },
@@ -492,8 +492,8 @@ test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个
   assert.deepEqual(auto, ['orphan', 'legacy'],
     '★ 自动收的只有"按当前装着的插件再也读不到"的那两档');
 
-  // ★ 反过来钉半边：`deletable` 不是这条判据的输入。一个 `unused` 的行**可删**
-  //   而**不该自动删** —— 两件事同时成立，正是这条判据存在的理由。
+  // 反过来钉半边：`deletable` 不是这条判据的输入。一个 `unused` 的行可删
+  //   而不该自动删 —— 两件事同时成立，正是这条判据存在的理由。
   const unused = rows[0];
   assert.equal(unused.deletable, true, '前提：它在界面上是可删的');
   assert.equal(audit.reclaimable(unused), false, '★ 但它不该被自动收掉');
@@ -507,7 +507,7 @@ test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个
 });
 
 test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原样留着', () => {
-  // ★ 上一条判的是**判据**，这一条判它接在**真算出来的行**上还成立 ——
+  // 上一条判的是判据，这一条判它接在真算出来的行上还成立 ——
   //   手搓的 `{kind:'unused'}` 与 `audit()` 真产出的那一行是两回事（前者不会
   //   因为 `expected` 那张表变了而跟着变）。
   const ghost = '01m2jkhtzgf12n0t9cb3xvk36h@default';   // 本机没有这个插件
@@ -517,7 +517,7 @@ test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原�
 
   const r = run({
     names: [ghost, old, legacy, unusedName],
-    // 连接指着**另一个**工作区 ⇒ `WORKSPACE` 那一份没人用（但那个工作区还在配置里）
+    // 连接指着另一个工作区，`WORKSPACE` 那一份没人用（但那个工作区还在配置里）
     connections: [conn(OTHER_WORKSPACE)],
     workspaces: [wsOne(), ws(OTHER_WORKSPACE, '工作区2', {})],
   });

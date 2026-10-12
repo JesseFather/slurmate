@@ -19,7 +19,7 @@
  * contextIsolation 打开，渲染进程拿不到 Node，只能看见这里显式暴露的东西。
  * 暴露面刻意保持窄：只有这些具名方法，没有通用的 invoke/require 通道。
  *
- * ★ 这里**没有**任何读写配置文件的入口，界面也不提供。
+ * 这里没有任何读写配置文件的入口，界面也不提供。
  *   所有条目都在界面上，用户不该为了改一个地址去手编辑 JSON。
  */
 
@@ -35,21 +35,21 @@ contextBridge.exposeInMainWorld('slurmate', {
   deleteConnection: (id) => ipcRenderer.invoke('app:deleteConnection', id),
   setActiveConnection: (id) => ipcRenderer.invoke('app:setActiveConnection', id),
   connect: (payload) => ipcRenderer.invoke('app:connect', payload),
-  // ★★ 【断开】与【临时离开】是两个**方向相反**的动作，名字挨着，别弄混：
-  //    · 断开：每一条会话都发 `goodbye` ⇒ 作业被 `scancel`。**彻底终止**。
-  //    · 临时离开：发一条 `leave` ⇒ 看护者置空，**作业继续在集群上跑**，
+  // 【断开】与【临时离开】是两个方向相反的动作，名字挨着，别弄混：
+  //    · 断开：每一条会话都发 `goodbye` 作业被 `scancel`。彻底终止。
+  //    · 临时离开：发一条 `leave` 看护者置空，作业继续在集群上跑，
   //      但倒计时从那一刻起算（300 秒 suspect → 1800 秒 orphaned → scancel）。
-  //    ★ 别把【断开】读成"作业继续在集群上跑，可以再连回来"—— 那是**错的**，
+  //    别把【断开】读成"作业继续在集群上跑，可以再连回来"—— 那是错的，
   //      而错的方向恰好是最贵的那个：用户点了它，以为作业会留着。
   disconnect: () => ipcRenderer.invoke('app:disconnect'),
   leave: () => ipcRenderer.invoke('app:leave'),
 
   // ── 插件 ──
   //
-  // ★ 插件**只有一条来的路**：站点分发。连上站点之后由 `syncPlugins` 取回来，
+  // 插件只有一条来的路：站点分发。连上站点之后由 `syncPlugins` 取回来，
   //   落在 `~/.slurmate/site-plugins/`。
   //
-  // ★ 带客户端代码的插件要用户点一次同意才加载（`consentPlugin`）。同意闸的落点
+  // 带客户端代码的插件要用户点一次同意才加载（`consentPlugin`）。同意闸的落点
   //   在"下载后、暂存验完、换入之前"，理由见 src/main/site-plugins.js。
   //
   // 站点分发：手动对一次账 / 同意 / 不同意。
@@ -59,19 +59,19 @@ contextBridge.exposeInMainWorld('slurmate', {
   // §5.3：删掉本机那一份 = 撤回同意（下一次对账重新问）。给的是"没被加载的那些"
   // 唯一的出口 —— 见 panel.js 的 renderInert。
   dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
-  // ★ **往站点的反方向**：挑一个 `.splug` 装到**假站点**上。它只在开发者模式里
+  // 往站点的反方向：挑一个 `.splug` 装到假站点上。它只在开发者模式里
   //   存在（主进程按后端种类拒真站点 —— 那边的插件由管理员用
   //   `slurmate plugin install` 装）。见 panel.js 的 siteInstallButton。
   installSitePlugin: () => ipcRenderer.invoke('app:installSitePlugin'),
 
   // ── 工作区 ──
   //
-  // 工作区 = **一张引用表**：这个工作区里，每个插件用哪一份数据。它本身不拥有数据，
+  // 工作区 = 一张引用表：这个工作区里，每个插件用哪一份数据。它本身不拥有数据，
   // 只拥有"指向"。一个工作区被若干条连接共用，没有任何连接在用的工作区会被自动回收。
-  // ★ 数据那一层（一份 = 一个插件的存储 + 它自己的端口）在界面上叫「数据」，
+  // 数据那一层（一份 = 一个插件的存储 + 它自己的端口）在界面上叫「数据」，
   //   它不属于任何工作区 —— 一份数据可以被几个工作区同时引用。
   //
-  // workspaceId 传空 = **新建一个空白工作区并落进去，一次原子完成**。刻意不提供独立的
+  // workspaceId 传空 = 新建一个空白工作区并落进去，一次原子完成。刻意不提供独立的
   // 「新建工作区」通道：单独建出来的工作区引用计数天然是 0，紧接着的回收会把它当场删掉 ——
   // 用户点了会没反应。
   //
@@ -79,19 +79,19 @@ contextBridge.exposeInMainWorld('slurmate', {
   // （切走会把旧工作区删掉，需要带 confirmDiscard 重来）或 'relisten_failed'
   // （换端口失败，配置一个字没动）。
   setConnectionWorkspace: (payload) => ipcRenderer.invoke('app:setConnectionWorkspace', payload),
-  // 改名。名字只是给人看的 —— 进存储分区的是**数据 id**，那个永不复用。
+  // 改名。名字只是给人看的 —— 进存储分区的是数据 id，那个永不复用。
   renameWorkspace: (payload) => ipcRenderer.invoke('app:renameWorkspace', payload),
-  // **新建**一条连接时，它默认落在哪个工作区 —— 表单在用户敲地址的时候问它，
+  // 新建一条连接时，它默认落在哪个工作区 —— 表单在用户敲地址的时候问它，
   // 好把默认值显示出来（规则住在主进程：`config.js` 的 `defaultWorkspaceFor`）。
-  // 返回 { ok, workspaceId }；`null` 是**一个答案**（"会新建一个空白工作区"），
+  // 返回 { ok, workspaceId }；`null` 是一个答案（"会新建一个空白工作区"），
   // 不是"取不到"。纯查询，不改任何东西，所以敲一个字问一次也没关系。
   defaultWorkspace: (conn) => ipcRenderer.invoke('app:defaultWorkspace', conn),
-  // 改**这张引用表里的一格**：这个工作区的这个插件以后用哪一份数据（插件块上那一格）。
-  // 与上面那一格**同一套三态约定**（一份约定、两处不各写一遍）：
+  // 改这张引用表里的一格：这个工作区的这个插件以后用哪一份数据（插件块上那一格）。
+  // 与上面那一格同一套三态约定（一份约定、两处不各写一遍）：
   //
-  //   workspaceId + pluginId + **键缺席** = 界面没表态 ⇒ 什么都不做
-  //   spaceId: null                       = 要一份**新的**（哪怕现在已经有一份）
-  //   spaceId: <数据 id>                   = 就用那一份（必须是**这个插件**的那一份）
+  //   workspaceId + pluginId + 键缺席 = 界面没表态，什么都不做
+  //   spaceId: null                       = 要一份新的（哪怕现在已经有一份）
+  //   spaceId: <数据 id>                   = 就用那一份（必须是这个插件的那一份）
   //
   // 返回 { ok, workspaces, spaces, connections, droppedOld, forked }。
   // `forked` 是新表的名字（没分叉就是 null）—— 它一起把 connections 变掉了，
@@ -99,25 +99,25 @@ contextBridge.exposeInMainWorld('slurmate', {
   //
   // 被拒时 code 有三个：
   //   `session_running`  —— 这个插件在这个工作区里正跑着一条会话。那一条手里攥着的是
-  //                         开局时那一份，改掉之后重启客户端就接不回来了 ⇒ **拒**，不是提示。
+  //                         开局时那一份，改掉之后重启客户端就接不回来了，拒，不是提示。
   //   `shared`           —— 这张表还有别的连接在用（`others` 是那几条的 id，名字由界面取）。
   //                         改一格它们会一起变，所以要带 scope 重来一次：
   //                         `'all'` 就改这张共用的表 / `'fork'` 先给这条连接复制一张
   //                         （要连 connectionId 一起给 —— 分叉是"给哪一条连接分"）。
   //   `would_discard`    —— 换走会把旧那一份删掉（它没有别的工作区在用了），
-  //                         要带 confirmDiscard 重来一次。**不可逆**，所以必须先问。
-  //                         ★ 它排在 `shared` 之后，而重试时 scope 要**一起带上**，
+  //                         要带 confirmDiscard 重来一次。不可逆，所以必须先问。
+  //                         它排在 `shared` 之后，而重试时 scope 要一起带上，
   //                           否则第二次又会被 `shared` 拦下（界面那边用同一个 extra）。
   setWorkspaceRef: (payload) => ipcRenderer.invoke('app:setWorkspaceRef', payload),
 
   // ── 本机的插件数据 ──
   //
-  // 插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按**份**存在浏览器的
+  // 插件在运行中攒下的东西（编辑器布局、打开的标签页、登录状态）按份存在浏览器的
   // 存储分区里，一份 = 一个插件 + 共享组 + 数据空间。这一对方法回答"还剩几份、哪一份
-  // 没人用"，以及**删掉其中一份**。
+  // 没人用"，以及删掉其中一份。
   //
-  // ★ 删除**不可逆**（那个插件下次打开会是一份全新的空白存储），所以界面必须先问过
-  //   用户。被拒绝时只有一个 code：`stale` —— 那**一份已经不在"没人用"的清单里了**
+  // 删除不可逆（那个插件下次打开会是一份全新的空白存储），所以界面必须先问过
+  //   用户。被拒绝时只有一个 code：`stale` —— 那一份已经不在"没人用"的清单里了
   //   （多半是配置或插件刚变过，或者它正被一条活着的会话用着：那种情况下对账根本
   //   不会把它列出来）。删除成功时把重算过的清单一起回来。
   pluginData: () => ipcRenderer.invoke('app:pluginData'),
@@ -125,11 +125,11 @@ contextBridge.exposeInMainWorld('slurmate', {
 
   // ── 主机密钥（TOFU）──
   // 第一次连一台主机时主进程会拒绝并回一个指纹，由界面让用户核对后调 trustHostKey。
-  // 「变了」的情况**不接受**信任 —— 界面只提供「我知道服务器重装了」这条显式出路。
+  // 「变了」的情况不接受信任 —— 界面只提供「我知道服务器重装了」这条显式出路。
   trustHostKey: (fingerprint) => ipcRenderer.invoke('app:trustHostKey', fingerprint),
   forgetHostKey: () => ipcRenderer.invoke('app:forgetHostKey'),
 
-  // ── 密钥（**每条连接一把**）──
+  // ── 密钥（每条连接一把）──
   //
   // 参数统一是 { connectionId }；省略或传 null 表示「新建」表单上那把还没有
   // 归属的密钥。界面里没有「全局密钥」这个概念 —— 每把钥匙属于一条连接，
@@ -143,67 +143,67 @@ contextBridge.exposeInMainWorld('slurmate', {
   newKey: () => ipcRenderer.invoke('app:newKey'),
 
   // ── 会话 ──
-  // resources 是高级选项里的**临时**覆盖：{cpus, mem, gres, partition}。
-  // `gres` 是结构化描述符 `{name, type, count}`，**不是**一个数字 —— 名字与
+  // resources 是高级选项里的临时覆盖：{cpus, mem, gres, partition}。
+  // `gres` 是结构化描述符 `{name, type, count}`，不是一个数字 —— 名字与
   // 型号是管理员在集群上定的（见 main/gres.js）。
   // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
-  // serviceKind 是**本站的短名**（那份配置的文件名、界面上那个 code），**必填** ——
-  // 客户端这一侧没有缺省插件（"缺省"是**站点**配置里 `default_plugin` 的事，
+  // serviceKind 是本站的短名（那份配置的文件名、界面上那个 code），必填 ——
+  // 客户端这一侧没有缺省插件（"缺省"是站点配置里 `default_plugin` 的事，
   // 只作用于不带 service_kind 的 `slurmate submit`）。漏传会当场拿到一句说明。
   // 客户端再按短名找到本机对应的那一份，把它的 `<id>@<版本>` 作为解析键交给服务端。
   // 本机一个插件都没装时，主进程会拒绝并说清该往哪放。
   // portChoice：用户在「端口被占」那一行上答过的 —— `'shift'`（启动，只换这一次）
   // 或 `'remember'`（记住并启动，主进程在绑定成功之后把新端口记进配置）。
-  // 主进程回 `code:'port_conflict'` 时**什么都没提交**，那一行重发时带上它 ——
+  // 主进程回 `code:'port_conflict'` 时什么都没提交，那一行重发时带上它 ——
   // 它对主进程有两个作用：别再问第二遍，以及（`'remember'` 时）记住用户选的那一种。
   start: (resources, serviceKind, portChoice) =>
     ipcRenderer.invoke('app:start', resources, serviceKind, portChoice),
-  // 本机要不要某个插件。**按 id**（不是短名）：池是全局的，两个站点可以各有一个
+  // 本机要不要某个插件。按 id（不是短名）：池是全局的，两个站点可以各有一个
   // 叫 jupyter 的插件而它们是两个不同的东西。不影响服务端。
   setPluginEnabled: (id, enabled) =>
     ipcRenderer.invoke('app:setPluginEnabled', id, enabled),
-  // **全部**会话 + 哪一个是前台。**不要**退回单数的 `app:state` —— 它只会回
+  // 全部会话 + 哪一个是前台。不要退回单数的 `app:state` —— 它只会回
   // 最后动过的那一个，而在多开下"某条会话在界面上根本不存在"是一种静默的丢失。
   states: () => ipcRenderer.invoke('app:states'),
-  // ★★ 「作业列表」那一屏：**这个站点上我还有哪些作业**（服务端的 `op:list`）。
+  // 「作业列表」那一屏：这个站点上我还有哪些作业（服务端的 `op:list`）。
   //
-  //   它与 `states()` 是**两个不同的问题**，别合并：`states()` 回答"这个客户端
+  //   它与 `states()` 是两个不同的问题，别合并：`states()` 回答"这个客户端
   //   在管哪几条会话"，而这一条回答"站点上还有哪些作业" —— 上一台电脑提交的、
   //   本机还没接上的、刚结束还没被回收的那些，只在后者里。
   //   每一行带 `attached`：动作（结束/接管）只给本机接着的那些，理由见 index.js
   //   的 `jobsView()`。
   jobs: () => ipcRenderer.invoke('app:jobs'),
-  // 【接管】：把这条会话的看护者换成**这台电脑**。**一个字都不动会话**。
-  // ★ 只能走常驻通道（身份在 exec 退路上是被删掉的），失败时守护进程回
+  // 【接管】：把这条会话的看护者换成这台电脑。一个字都不动会话。
+  // 只能走常驻通道（身份在 exec 退路上是被删掉的），失败时守护进程回
   //   `no_client_id`，界面要如实说 —— 不能悄悄降级成"什么都没发生"。
   takeover: (sessionId) => ipcRenderer.invoke('app:takeover', { sessionId }),
-  // 把某一条抬到面板上面。**纯界面动作**，不改任何框架状态。
+  // 把某一条抬到面板上面。纯界面动作，不改任何框架状态。
   setFront: (slot) => ipcRenderer.invoke('app:setFront', { slot }),
-  // 反过来：把**面板**抬到会话页面上面（会话那块原生视图从 y=30 往下盖住整块主体，
+  // 反过来：把面板抬到会话页面上面（会话那块原生视图从 y=30 往下盖住整块主体，
   // 面板自己的按钮那时一个都够不着）。它同样是纯界面动作 —— 一个字都不动会话。
-  // ★ 入口只有一处：状态条上那颗「调试」标签（只在开发者模式里出现）。
+  // 入口只有一处：状态条上那颗「调试」标签（只在开发者模式里出现）。
   showPanel: () => ipcRenderer.invoke('app:showPanel'),
-  // 假站点那两处插件目录各读到什么（第四屏那一段**只读**信息）。
-  // ★ 它是排查「站上一个插件都发不出来」的唯一线索：装上去的东西落在沙盒里，
+  // 假站点那两处插件目录各读到什么（第四屏那一段只读信息）。
+  // 它是排查「站上一个插件都发不出来」的唯一线索：装上去的东西落在沙盒里，
   //   用户在别处看不到那个目录。
   sitePlugins: () => ipcRenderer.invoke('app:sitePlugins'),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
   // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。
-  // ★ **必须指名 slot**：省略会被主进程拒绝，而不是"停那唯一的一个"。
+  // 必须指名 slot：省略会被主进程拒绝，而不是"停那唯一的一个"。
   stop: (slot) => ipcRenderer.invoke('app:stop', { slot }),
   doctor: () => ipcRenderer.invoke('app:doctor'),
-  // 最近几天的作业（`sacct`）。**按需拉**：它是最贵的一条查询，而它回答的
+  // 最近几天的作业（`sacct`）。按需拉：它是最贵的一条查询，而它回答的
   // "过去发生了什么"不会自己变新，所以不进任何一层缓存。
   history: () => ipcRenderer.invoke('app:history'),
   // 边栏那两格：停靠（`{side}`）/ 钉住（`{side, pin:true}`）/ 收起（`{side:null}`）。
-  // ★ 收起**主要不靠这个**：浮窗的收起判据是**鼠标几何**，那在主进程那一侧
+  // 收起主要不靠这个：浮窗的收起判据是鼠标几何，那在主进程那一侧
   //   （浮窗是原生视图，鼠标一进去边栏就收不到事件了，见 windows.js）。
   //   这里只表达"我停上去了"与"我点了一下"。
   hover: (payload) => ipcRenderer.invoke('app:hover', payload),
   // 右栏那个「更多」：把行数提到上限再拉一次（用户往上滚要更多历史时按）。
   outMore: () => ipcRenderer.invoke('app:outMore'),
-  // 按需取**某一条会话**的作业日志（作业屏上那份详情用）。它与右栏那个轮询走
+  // 按需取某一条会话的作业日志（作业屏上那份详情用）。它与右栏那个轮询走
   // 同一条 op，但不经过"前台是哪一条"—— 作业结束之后右栏就收了，而"为什么失败"
   // 恰恰在那一刻最该看得见。
   jobLog: (payload) => ipcRenderer.invoke('app:jobLog', payload),
@@ -212,12 +212,12 @@ contextBridge.exposeInMainWorld('slurmate', {
 
   // ── 开发者模式 ──
   //
-  // 客户端不连集群、改用一个本地的模拟站点。它是给**插件作者与改客户端的人**用的，
+  // 客户端不连集群、改用一个本地的模拟站点。它是给插件作者与改客户端的人用的，
   // 所以入口是界面上一个开关，不是命令行参数 —— 那等于说"Windows 用户请去开终端"。
   //
-  // ★ 这个开关**不立即生效**：换后端要重建整个客户端。界面必须说清「重启后生效」，
+  // 这个开关不立即生效：换后端要重建整个客户端。界面必须说清「重启后生效」，
   //   `restart` 是那条路上的那一步。
-  //   ★ 从前这里还有两个动词（选/清「假站点的插件来源」）—— 整条删掉了：假站点上的
+  //   从前这里还有两个动词（选/清「假站点的插件来源」）—— 整条删掉了：假站点上的
   //     插件只有一条来的路，就是装上去（`installSitePlugin`）。
   setDeveloperMode: (on) => ipcRenderer.invoke('app:setDeveloperMode', on),
   // 立即重启（让上面那个开关生效）。会话还在跑的话会先结束它，与关窗口同一套收尾。
@@ -237,7 +237,7 @@ contextBridge.exposeInMainWorld('slurmate', {
     ipcRenderer.on('ui:notice', h);
     return () => ipcRenderer.removeListener('ui:notice', h);
   },
-  // ★ 站点对账是**后台**跑的（连上之后才开始，一次一份，真集群上一份就是一次
+  // 站点对账是后台跑的（连上之后才开始，一次一份，真集群上一份就是一次
   //   `ssh` exec）。不推的话，用户看到的是连接那一刻的旧视图 —— 而"插件明明是
   //   站点说要给的、界面上却什么都没有"正是这个功能最该避免的那句话。
   onPlugins: (fn) => {
@@ -245,7 +245,7 @@ contextBridge.exposeInMainWorld('slurmate', {
     ipcRenderer.on('ui:plugins', h);
     return () => ipcRenderer.removeListener('ui:plugins', h);
   },
-  // ★ 链路状态（**此刻**这条链路活没活），事件驱动。
+  // 链路状态（此刻这条链路活没活），事件驱动。
   //   它与"上一次点连接成没成"是两件事 —— 后者只在用户动作时变，而这条链路
   //   会在他什么都没做的时候断掉（合盖、换网、登录节点重启）。
   onConn: (fn) => {
@@ -253,7 +253,7 @@ contextBridge.exposeInMainWorld('slurmate', {
     ipcRenderer.on('ui:conn', h);
     return () => ipcRenderer.removeListener('ui:conn', h);
   },
-  // 左栏那个圆点的三态（`ok` / `bad` / `na`）。★ 它是**状态**，不是提示。
+  // 左栏那个圆点的三态（`ok` / `bad` / `na`）。它是状态，不是提示。
   onSite: (fn) => {
     const h = (_e, s) => fn(s);
     ipcRenderer.on('ui:site', h);

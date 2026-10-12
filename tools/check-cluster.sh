@@ -96,9 +96,9 @@ if command -v getenforce >/dev/null 2>&1; then
     ENFORCE="$(getenforce 2>/dev/null)"
     r INFO "getenforce = $ENFORCE"
     case "$ENFORCE" in
-        Enforcing) r WARN "Enforcing —— 必须验证下面的 AVC 与域转换行为" ;;
-        Permissive) r INFO "Permissive —— 不阻断，但会记 AVC，仍应查看" ;;
-        Disabled)  r PASS "已禁用 —— SELinux 不构成风险" ;;
+        Enforcing) r WARN "Enforcing，必须验证下面的 AVC 与域转换行为" ;;
+        Permissive) r INFO "Permissive，不阻断，但会记 AVC，仍应查看" ;;
+        Disabled)  r PASS "已禁用，SELinux 不构成风险" ;;
     esac
 else
     r PASS "无 getenforce（SELinux 未安装）"
@@ -138,7 +138,7 @@ N_UNCONFINED="$(ps -eZ 2>/dev/null | awk '$1 ~ /unconfined_service_t/ {c++} END 
 if [[ "$N_UNCONFINED" -gt 0 ]]; then
     echo "    unconfined_service_t 正在使用中（$N_UNCONFINED 个进程）→ 自定义 unit 大概率不被 SELinux 拦"
 else
-    echo "    未见 unconfined_service_t —— 需确认自定义 unit 会落到哪个域"
+    echo "    未见 unconfined_service_t，需确认自定义 unit 会落到哪个域"
 fi
 
 # ==============================================================================
@@ -156,7 +156,7 @@ if systemctl cat nftables.service >/dev/null 2>&1; then
     echo "    --- ExecStart / ExecStop / ExecReload ---"
     systemctl cat nftables.service 2>/dev/null | grep -E '^(ExecStart|ExecStop|ExecReload|Type)' | sed 's/^/    /'
 else
-    r FAIL "nftables.service 不存在 —— port-daemon 的 BindsTo 依赖会失败（但它现在在跑，需查明原因）"
+    r FAIL "nftables.service 不存在，port-daemon 的 BindsTo 依赖会失败（但它现在在跑，需查明原因）"
 fi
 
 echo "  --- /etc/nftables.conf（RHEL9 实际用的是 /etc/sysconfig/nftables.conf）---"
@@ -165,7 +165,7 @@ for f in /etc/nftables.conf /etc/sysconfig/nftables.conf; do
         echo "    [$f]"
         run head -n 25 "$f" | sed 's/^/      /'
         if grep -qE '^[[:space:]]*flush ruleset' "$f" 2>/dev/null; then
-            r WARN "$f 含 flush ruleset —— nftables 重载会清掉动态表，必须做自愈"
+            r WARN "$f 含 flush ruleset，nftables 重载会清掉动态表，必须做自愈"
         else
             r PASS "$f 无 flush ruleset"
         fi
@@ -176,7 +176,7 @@ done
 echo "  --- SELinux 运行时与配置不一致时的重启风险 ---"
 run cat /proc/cmdline | tr ' ' '\n' | grep -iE 'selinux|enforcing' | sed 's/^/    cmdline: /'
 echo "    （若 /etc/selinux/config 写 enforcing 而运行时是 Disabled，说明靠 cmdline 关的；"
-echo "      一旦有人带默认 cmdline 重启，SELinux 会重新生效 —— 届时应能拦住本方案）"
+echo "      一旦有人带默认 cmdline 重启，SELinux 会重新生效，届时应能拦住本方案）"
 
 echo "  --- firewalld 状态与后端 ---"
 if command -v firewall-cmd >/dev/null 2>&1; then
@@ -194,11 +194,11 @@ if command -v nft >/dev/null 2>&1; then
     r INFO "版本: $(nft --version 2>&1 | head -1)"
     # 关键：-j 的用法是把 -j 放在 list 之前。先区分"没权限"与"不支持 -j"
     if ! nft list tables >/dev/null 2>&1; then
-        r WARN "无权读取 nft 规则集（需 root）—— 本次无法判定 -j 支持情况"
+        r WARN "无权读取 nft 规则集（需 root），本次无法判定 -j 支持情况"
     elif nft -j list tables >/dev/null 2>&1; then
         r PASS "nft -j list tables 可用（JSON 对账方案可行）"
     else
-        r FAIL "nft -j 不可用 —— 对账需改用文本解析"
+        r FAIL "nft -j 不可用，对账需改用文本解析"
     fi
     echo "  --- 关键规则语法预检（在独立表中试建后立即删除，不留痕）---"
     if nft add table inet slurmate_probe 2>/dev/null; then
@@ -209,7 +209,7 @@ if command -v nft >/dev/null 2>&1; then
         if [[ -z "$RULE_ERR" ]]; then
             r PASS "目标规则语法（ct state new + meta skuid != + drop）被接受"
         else
-            r FAIL "目标规则语法被拒绝 —— 需要调整规则写法"
+            r FAIL "目标规则语法被拒绝，需要调整规则写法"
             echo "$RULE_ERR" | sed 's/^/      /'
         fi
         nft delete table inet slurmate_probe 2>/dev/null && r INFO "探测表已删除，未留痕"
@@ -296,7 +296,7 @@ for m in ("sqlite3", "json", "subprocess", "selectors", "fcntl", "pwd", "grp", "
         print(f"    模块 {m}: 缺失 ({e})")
 PYEOF
 else
-    r FAIL "/usr/bin/python3 不存在 —— 守护进程需要另选实现语言"
+    r FAIL "/usr/bin/python3 不存在，守护进程需要另选实现语言"
 fi
 
 # ==============================================================================
@@ -337,9 +337,9 @@ VEOF
 # 只保留提到【本单元】的行，否则会把 slurmd.service / munge.service 的陈旧问题当成我们的。
 VERIFY_OUT="$(systemd-analyze verify "$VERIFY_UNIT" 2>&1 | grep -F "$VERIFY_UNIT" || true)"
 if [[ -z "$VERIFY_OUT" ]]; then
-    r PASS "全部加固指令被接受 —— 计划的 systemd 单元可直接用"
+    r PASS "全部加固指令被接受，计划的 systemd 单元可直接用"
 elif echo "$VERIFY_OUT" | grep -qiE 'unknown (key|lvalue)|failed to parse|invalid'; then
-    r FAIL "有指令不被识别 —— 需删掉后重试"
+    r FAIL "有指令不被识别，需删掉后重试"
     echo "$VERIFY_OUT" | sed 's/^/      /' | head -n 15
 else
     r PASS "指令均被接受（有非致命告警，见下）"
@@ -366,11 +366,11 @@ if command -v systemd-run >/dev/null 2>&1; then
         /bin/bash -c 'echo "--- scontrol ping ---"; scontrol ping; echo "rc=$?"; echo "--- munge socket ---"; ls -l /run/munge/ 2>&1; echo "--- nft list ---"; nft list tables >/dev/null && echo "nft OK" || echo "nft FAIL"' \
         > "$SANDBOX_OUT" 2>&1
     if grep -q "is UP" "$SANDBOX_OUT" 2>/dev/null; then
-        r PASS "沙箱内 scontrol ping 成功 —— 加固指令可以直接用"
+        r PASS "沙箱内 scontrol ping 成功，加固指令可以直接用"
     elif grep -qE "Interactive authentication required|Failed to start transient service unit" "$SANDBOX_OUT" 2>/dev/null; then
-        r WARN "无法创建瞬时单元（非 root 或 polkit 拒绝）—— 本项必须由 root 运行才有结论"
+        r WARN "无法创建瞬时单元（非 root 或 polkit 拒绝），本项必须由 root 运行才有结论"
     elif grep -qE "Access denied|not permitted|Permission denied|No such file" "$SANDBOX_OUT" 2>/dev/null; then
-        r FAIL "沙箱内 scontrol/nft 失败 —— 必须放宽加固指令，详见下方与快照"
+        r FAIL "沙箱内 scontrol/nft 失败，必须放宽加固指令，详见下方与快照"
     else
         r WARN "沙箱测试未得到明确结论，详见下方与快照"
     fi
@@ -400,7 +400,7 @@ sec "关联账号（sbatch 必须带 -A）"
 # ==============================================================================
 # 真实人类用户 = 共享存储下有家目录、且能由 uid 反查到的账号。
 #
-# ⚠️ 为什么不直接用 `getent passwd` 全量列表：很多集群的 NSS（SSSD/LDAP）
+# ️ 为什么不直接用 `getent passwd` 全量列表：很多集群的 NSS（SSSD/LDAP）
 #    【没有开启枚举】，全量列表里只有本地账号，通过目录服务登录的用户一个
 #    都不在里面；但 `getent passwd <uid>` 这种按 uid 直查是好的。
 #    直接枚举会得到一份"看起来正常、实则漏掉绝大多数人"的名单 —— 而漏掉
@@ -426,7 +426,7 @@ ENUM_TOTAL="$(getent passwd 2>/dev/null | wc -l)"
 ENUM_NAS="$(getent passwd 2>/dev/null | grep -c '/shared/home' || true)"
 r INFO "getent passwd 全量枚举返回 $ENUM_TOTAL 条，其中家目录在 /shared/home 的 $ENUM_NAS 条"
 if [[ "$ENUM_NAS" -eq 0 ]]; then
-    r WARN "全量枚举不含 IPA 用户 —— 守护进程必须用 getpwnam(uid) 直查，禁止任何枚举式做法"
+    r WARN "全量枚举不含 IPA 用户，守护进程必须用 getpwnam(uid) 直查，禁止任何枚举式做法"
 else
     r PASS "全量枚举可用（但仍建议用 getpwnam 直查）"
 fi
@@ -492,7 +492,7 @@ done < <(real_users)
 if [[ "$MISMATCH" -eq 0 ]]; then
     echo "    （本次抽样未发现，但仍必须用 getpwnam）"
 else
-    r WARN "发现 $MISMATCH 个不一致 —— 证实绝不能用拼用户名的方式构造路径"
+    r WARN "发现 $MISMATCH 个不一致，证实绝不能用拼用户名的方式构造路径"
 fi
 echo "  --- /shared/home 挂载参数（关注 actimeo / acregmin / acdirmax）---"
 if findmnt -no SOURCE,TARGET,FSTYPE /shared/home >/dev/null 2>&1; then
@@ -501,7 +501,7 @@ if findmnt -no SOURCE,TARGET,FSTYPE /shared/home >/dev/null 2>&1; then
     if findmnt -no OPTIONS /shared/home 2>/dev/null | grep -qE 'actimeo|acdirmax|acregmax'; then
         echo "      ↑ 已显式设置缓存参数"
     else
-        r WARN "未显式设置 actimeo —— 默认 acdirmax=60s，会让会话登记最多延迟 60 秒"
+        r WARN "未显式设置 actimeo，默认 acdirmax=60s，会让会话登记最多延迟 60 秒"
     fi
 else
     echo "    /shared/home 未挂载（本机可能不是登录节点）"
@@ -558,39 +558,39 @@ run bash -c "sshd -T 2>/dev/null | grep -iE '^(allowtcpforwarding|permitopen|x11
 sec "插件"
 # ==============================================================================
 #
-# ★ 本脚本**不假设装了哪个插件** —— 插件是独立项目，站点装了什么由它自己决定。
+# 本脚本不假设装了哪个插件 —— 插件是独立项目，站点装了什么由它自己决定。
 #   要查的是两件事：
 #     ① 插件安装目录里有什么（守护进程扫的就是它）
 #     ② 配置里的 default_plugin 指向谁（它决定 bin 去哪个插件的配置里找）
 #
-# 作业里可执行文件的路径**只能在计算节点上确认**：登录节点上有没有这个文件，
+# 作业里可执行文件的路径只能在计算节点上确认：登录节点上有没有这个文件，
 # 对计算节点不是证据。这里能做的只是把配置里解析出来的值如实打出来，让你拿着
 # 它去计算节点核对。
 _plugdir="/usr/local/share/slurmate/plugins"
 _daemon="/usr/local/sbin/slurmate-sessiond"
-# ★★ 站点上的一个插件是**一棵树 + 一份记录表**：
+# 站点上的一个插件是一棵树 + 一份记录表：
 #       <plugins_dir>/<ULID>/        负载原样铺开
 #       <plugins_dir>/<ULID>.json    记录表（这次安装的「提交点」）
-#   容器（`.splug`）**装完就不在盘上了** —— 它只在「作者→站点」与「站点→客户端」
+#   容器（`.splug`）装完就不在盘上了 —— 它只在「作者→站点」与「站点→客户端」
 #   这两段路上活着。所以这里不再找 `*.splug`，也不再自己解析那个格式：
 #   "这一份对不对"要由守护进程那份实现来答（`--check-plugins`），本脚本只列事实。
 if [[ -d "$_plugdir" ]]; then
     n_pl="$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l)"
     if (( n_pl == 0 )); then
-        r INFO "${_plugdir} 里没有插件目录 —— 本站没有安装任何插件"
+        r INFO "${_plugdir} 里没有插件目录，本站没有安装任何插件"
         r INFO "  这是合法状态（会话能查、能停，只是没有可提交的服务）"
     else
         r PASS "${_plugdir} 里有 ${n_pl} 个插件"
-        # ★ 这里同时打 **id（ULID）** 和它在 jobs/ 里那一份作业脚本**在不在**。
+        # 这里同时打 id（ULID）和它在 jobs/ 里那一份作业脚本在不在。
         #
         #   为什么非要打 id：作业脚本一个插件一份，文件名就是 ULID —— 而 ULID 是
         #   一串随机字符，光看 jobs/ 的目录列表认不出谁是谁。这张表就是那份对照，
         #   没有它，"作业脚本到底装齐了没有"在一台真机上无法核对。
         #
-        #   「作业侧 （无）」**不是**故障：那种插件装得上、看得见，但提交不了
+        #   「作业侧 （无）」不是故障：那种插件装得上、看得见，但提交不了
         #   （守护进程报 service_kind_no_job）。它对应的状态是合法的。
         #
-        #   ★ 短名与版本从**那棵树里的 plugin.json** 读（它就是安装时解出来的
+        #   短名与版本从那棵树里的 plugin.json 读（它就是安装时解出来的
         #     那一份），不经过任何解析器 —— `sed` 抠两个字段不需要懂容器格式。
         _jobsdir="/usr/local/share/slurmate/jobs"
         echo "  --- 各插件的身份 / 记录表 / 作业侧 / 对应的作业脚本 ---"
@@ -602,21 +602,21 @@ if [[ -d "$_plugdir" ]]; then
             v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" 2>/dev/null | head -1)
             [ -n \"\$n\" ] || n='（读不出）'
             [ -n \"\$v\" ] || v='（读不出）'
-            if [ -f '$_plugdir/'\$i'.json' ]; then rec='在'; else rec='⚠ 没有'; fi
+            if [ -f '$_plugdir/'\$i'.json' ]; then rec='在'; else rec='没有'; fi
             if [ -f \"\$d/job/start.sh\" ]; then j='有'; else j='（无）'; fi
             s='（没有那份脚本）'
             [ -f '$_jobsdir/'\$i'.sbatch' ] && s='在'
             printf '    %-16s %-9s %-24s 记录表 %-8s 作业侧 %-8s 作业脚本 %s\n' \"\$n\" \"\$v\" \"\$i\" \"\$rec\" \"\$j\" \"\$s\"
         done"
-        # ★★ **记录表不在 = 那次安装没提交**（或者有人手放了一棵树）。这一条
-        #    与守护进程对账时的处置**逐字同源**，所以这里只报、不删。
+        # 记录表不在 = 那次安装没提交（或者有人手放了一棵树）。这一条
+        #    与守护进程对账时的处置逐字同源，所以这里只报、不删。
         _no_rec="\$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -exec sh -c 'test -f "$1.json" || echo "$1"' _ {} \; 2>/dev/null)"
         if [[ -n "$_no_rec" ]]; then
-            r FAIL "下面这几个插件目录**没有记录表**（那一次安装没提交完，或者它是人手放进去的）："
+            r FAIL "下面这几个插件目录没有记录表（那一次安装没提交完，或者它是人手放进去的）："
             printf '%s\n' "$_no_rec" | sed 's/^/      /'
-            r INFO "  它们**不会被分发、也不会被读到**。重装一次那个插件即可；"
-            r INFO "  若那是你手放的源码树 ⇒ 在作者机器上 packer build 打成包再装。"
-            r INFO "  ★ 本脚本**不删**它们 —— 那一格可能有你自己放的东西。"
+            r INFO "  它们不会被分发、也不会被读到。重装一次那个插件即可；"
+            r INFO "  若那是你手放的源码树，在作者机器上 packer build 打成包再装。"
+            r INFO "  本脚本不删它们，那一格可能有你自己放的东西。"
         fi
         _nj="$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
         r INFO "${_jobsdir} 里有 ${_nj} 份作业脚本（应当等于上面「作业侧 有」的个数）"
@@ -626,9 +626,9 @@ if [[ -d "$_plugdir" ]]; then
             [ -f \"\$jf\" ] || continue
             b=\$(basename \"\$jf\" .sbatch)
             [ -d '$_plugdir/'\$b ] \
-              || printf '    ⚠ 无主的作业脚本（没有插件认领）：%s\n' \"\$jf\"
+              || printf '    无主的作业脚本（没有插件认领）：%s\n' \"\$jf\"
         done"
-        # ★ 这一屏**只是事实**。判"这一份对不对"（逐份 sha256 + 摘要 + 验签）是
+        # 这一屏只是事实。判"这一份对不对"（逐份 sha256 + 摘要 + 验签）是
         #   守护进程那份实现的事 —— 判据只能有一份，这里不抄第二遍。
         if [[ -x "$_daemon" ]]; then
             echo "  --- 对账（由守护进程自己的实现判）---"
@@ -637,7 +637,7 @@ if [[ -d "$_plugdir" ]]; then
             r INFO "判不了「这一份对不对」：${_daemon} 不在（还没部署？）"
         fi
     fi
-    # ★ **不该在这儿的东西**：一个散落的 `.splug`（放错的成品包）、一个普通文件。
+    # 不该在这儿的东西：一个散落的 `.splug`（放错的成品包）、一个普通文件。
     #   守护进程只认 `<ULID>/` 与 `<ULID>.json`，所以那些东西既不会
     #   被分发、也不会被扫到 —— 留着它们的后果是"一份 root 拥有的、含客户端代码的
     #   副本永久残留而界面上看不见"。
@@ -645,12 +645,12 @@ if [[ -d "$_plugdir" ]]; then
     if [[ -n "$_stray" ]]; then
         r FAIL "${_plugdir} 里有不是插件的东西（站点只认 `<ULID>/` 目录与 `<ULID>.json`）："
         printf '%s\n' "$_stray" | sed 's/^/      /'
-        r INFO "  如果是 `.splug` ⇒ 用 slurmate plugin install 装一次就变成新形状；"
-        r INFO "  如果是插件的**源码树**里的一份 ⇒ 在作者机器上 packer build 打成包；"
-        r INFO "  别的什么都要人工确认后删掉 —— 没有任何东西会自动清它们。"
+        r INFO "  如果是 `.splug`，用 slurmate plugin install 装一次就变成新形状；"
+        r INFO "  如果是插件的源码树里的一份，在作者机器上 packer build 打成包；"
+        r INFO "  别的什么都要人工确认后删掉，没有任何东西会自动清它们。"
     fi
 else
-    r INFO "${_plugdir} 不存在 —— 还没部署，或本站没有安装任何插件"
+    r INFO "${_plugdir} 不存在，还没部署，或本站没有安装任何插件"
 fi
 
 # ==============================================================================

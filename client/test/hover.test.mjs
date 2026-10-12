@@ -13,18 +13,18 @@
 // limitations under the License.
 
 /**
- * hover.test.mjs —— 浮窗那一层（两条边栏滑出来的那块）**真的跑起来**画一遍。
+ * hover.test.mjs —— 浮窗那一层（两条边栏滑出来的那块）真的跑起来画一遍。
  *
- * ★ 它守的是**站点状态那一块搬过一次家**这件事：从前它在面板里
+ * 它守的是站点状态那一块搬过一次家这件事：从前它在面板里
  *   （`#sec-cluster`），现在它是一个独立的 renderer。搬家最容易丢的不是代码，
- *   是**三态那条规矩** —— 「取不到」与「确实没有」在这一块里长得一样（都是一片空），
+ *   是三态那条规矩 —— 「取不到」与「确实没有」在这一块里长得一样（都是一片空），
  *   而把前者画成后者，用户会去查一个不存在的问题。
  *
- * ★ 所以这一组只判两件事：
- *   1. 数据缺席时，**每一格**都有一行说"取不到"（而不是画成空的）；
- *   2. 而那几行在「确实没有」时**不许出现**。
+ * 所以这一组只判两件事：
+ *   1. 数据缺席时，每一格都有一行说"取不到"（而不是画成空的）；
+ *   2. 而那几行在「确实没有」时不许出现。
  *
- * ★ 它跑的是真的 `hover.js` + `dom.js`（在一个人造 DOM 上），不是文本比对 ——
+ * 它跑的是真的 `hover.js` + `dom.js`（在一个人造 DOM 上），不是文本比对 ——
  *   文本比对拦不住"函数体里引用了一个不存在的变量"，而那个症状是浮窗一片空白。
  */
 import test from 'node:test';
@@ -92,7 +92,7 @@ function boot() {
   const calls = { more: 0 };
   const ctx = vm.createContext({ document: doc, window: win, Date, Promise, JSON,
     Math, Number, String, Object, Array, console });
-  // ★ 顺序是承重的：`cel` / `na` / `agoText` 是**普通脚本之间的全局名字**
+  // 顺序是承重的：`cel` / `na` / `agoText` 是普通脚本之间的全局名字
   //   （见 dom.js 的文件头），先后反了 hover.js 一进来就 ReferenceError。
   vm.runInContext(read('dom.js'), ctx, { filename: 'dom.js' });
   vm.runInContext(read('hover.js'), ctx, { filename: 'hover.js' });
@@ -106,7 +106,7 @@ function boot() {
     walk(byId.get(id));
     return out.join(' | ');
   };
-  /** 与 `text` 同一趟走，但**不加分隔符** —— 右栏那两块是**追加式**画出来的，
+  /** 与 `text` 同一趟走，但不加分隔符 —— 右栏那两块是追加式画出来的，
    *  "接上去的那一段"必须能一个字一个字地看（`text` 会在每段之间插 ` | `）。 */
   const raw = (id) => {
     const out = [];
@@ -121,7 +121,7 @@ function boot() {
   return { byId, text, raw, subs, calls, run: (e) => vm.runInContext(e, ctx) };
 }
 
-/** 一份 `op_cluster` 的答案。`omit` 里列出的格子**整个键都不给**（= 取不到）。 */
+/** 一份 `op_cluster` 的答案。`omit` 里列出的格子整个键都不给（= 取不到）。 */
 function cluster(omit = []) {
   const d = {
     at: Math.floor(Date.now() / 1000),
@@ -134,8 +134,8 @@ function cluster(omit = []) {
     taken: {},
     me: { account: 'lab', allowed_partitions: null,
       fairshare: { account: 'lab', fair_share: 0.42 },
-      // ★ 这两格也要给：它们缺席时那一块会画一行"取不到"（`pending_count ===
-      //   undefined` 就是"这一格没问到"），而那是**对的** —— 所以"数据齐全"
+      // 这两格也要给：它们缺席时那一块会画一行"取不到"（`pending_count ===
+      //   undefined` 就是"这一格没问到"），而那是对的 —— 所以"数据齐全"
       //   这份夹具必须把它们带上，否则下面那条"不该有取不到"判的就是别的东西。
       pending_count: 0, first_in: {} },
   };
@@ -144,9 +144,9 @@ function cluster(omit = []) {
 }
 
 test('★ hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方法都在 preload 里', () => {
-  // ★ 这两条是**跨文件**的，而它们守的是同一类静默失败：`$('cl-bdoy')` 打错一个
+  // 这两条是跨文件的，而它们守的是同一类静默失败：`$('cl-bdoy')` 打错一个
   //   字母，`getElementById` 返回 null，`box.textContent = ''` 当场抛 —— 或者更坏，
-  //   一个 `?.` 兜住之后浮窗**永远空白**，而没有任何地方报错。
+  //   一个 `?.` 兜住之后浮窗永远空白，而没有任何地方报错。
   //   panel.js 那一对在 renderer.test.mjs 里，这一对跟着它。
   const src = read('hover.js');
   const html = read('hover.html');
@@ -166,16 +166,16 @@ test('★ hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方
 });
 
 test('★★ hover.html 里不许有内联样式（CSP 会把它们静默丢掉）', () => {
-  // ★ 面板那一侧的同一条在 renderer.test.mjs 里，理由逐字相同：CSP 没有
-  //   'unsafe-inline'，`style="..."` 会被**静默丢弃**，表现是"布局莫名其妙不对"，
+  // 面板那一侧的同一条在 renderer.test.mjs 里，理由逐字相同：CSP 没有
+  //   'unsafe-inline'，`style="..."` 会被静默丢弃，表现是"布局莫名其妙不对"，
   //   而控制台之外没有任何提示。
   const html = read('hover.html');
-  // ★ 查之前先去掉注释：解释这条规矩的那段注释里**必须**能写出 `style="..."` 这个
+  // 查之前先去掉注释：解释这条规矩的那段注释里必须能写出 `style="..."` 这个
   //   样子，不然没法说清禁的是什么。查的是真标记。
   const markup = html.replace(/<!--[\s\S]*?-->/g, '');
   assert.equal(/\sstyle="/.test(markup), false, '浮窗页面里不许出现内联 style');
   assert.match(markup, /<link rel="stylesheet" href="hover.css">/, '样式要走外链');
-  // ★ 还有一条更细的：样式块也不行。`<style>` 同样要 'unsafe-inline'，
+  // 还有一条更细的：样式块也不行。`<style>` 同样要 'unsafe-inline'，
   //   而它比 `style=` 更容易被顺手写进去。
   assert.equal(/<style[\s>]/.test(markup), false, '也不许用内联 <style> 块');
 });
@@ -192,7 +192,7 @@ test('★★ 数据齐的时候，画得出来而且不抛（浮窗白屏的守�
 });
 
 test('★★ 键缺席 = 「取不到」，而且**每一格**都要说出来', () => {
-  // ★★ 这是搬家最容易丢的那条规矩。全缺的时候，用户必须能一句一句读到
+  // 这是搬家最容易丢的那条规矩。全缺的时候，用户必须能一句一句读到
   //    "哪一格没问到"，而不是面对一片空白去猜"是不是这台集群本来就没有"。
   const h = boot();
   h.subs.data({ cluster: cluster(['health', 'partitions', 'nodes', 'queue', 'gres']),
@@ -211,7 +211,7 @@ test('★★ 而「确实没有」的时候，那几行**一个字都不许出�
   h.subs.data({ cluster: cluster(), link: { connected: true } });
   assert.equal(/取不到：/.test(h.text('cl-body')), false,
     '数据齐全时不该有任何一行"取不到"');
-  // 三态里的第三态：`{}` = **确实没有**（一个分区都没有），与"取不到"不同。
+  // 三态里的第三态：`{}` = 确实没有（一个分区都没有），与"取不到"不同。
   const d = cluster();
   d.partitions = {};
   h.subs.data({ cluster: d, link: { connected: true } });
@@ -238,16 +238,16 @@ test('★ 取不到集群信息时，那一句是**错误**，不是空白', () 
 
 // ── 右栏：作业输出 ──────────────────────────────────────────────────────────
 
-/** 一格日志。`text` 走 `op_job_log` 给的那个形状（**止于换行**，见 paintHalf）。 */
+/** 一格日志。`text` 走 `op_job_log` 给的那个形状（止于换行，见 paintHalf）。 */
 const cellOf = (text, extra = {}) => Object.assign({
   path: '/h/.slurmate/logs/slurm-1.out', bytes: 100, lines: text.split('\n').length,
   truncated: false, mtime: 1, text, why: null,
 }, extra);
 
 /**
- * 推一份右边那一栏的数据。`out` / `err` 是**日志的两格**，而推过去的那个信封里
- * `out` 是 `{out, err}` **整个容器** —— 与 `index.js` 的 `pushOutToHover` 逐字同形。
- * ★ 夹具这里包错一层的话，`renderOut` 拿到的是"一格"，于是每一块都判成 absent，
+ * 推一份右边那一栏的数据。`out` / `err` 是日志的两格，而推过去的那个信封里
+ * `out` 是 `{out, err}` 整个容器 —— 与 `index.js` 的 `pushOutToHover` 逐字同形。
+ * 夹具这里包错一层的话，`renderOut` 拿到的是"一格"，于是每一块都判成 absent，
  *   而症状是"右栏永远说还没有写出任何东西" —— 一个看起来像后端没数据的现象。
  */
 const pushOut = (h, out, err, more = {}) => h.subs.data(
@@ -261,8 +261,8 @@ test('★★ 右栏两块各画各的，而**空的那一块不出现**', () => 
   assert.doesNotMatch(h.text('out-out'), /认证被拒/, '两块不许串');
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), false);
 
-  // ★ 空的那一块不出现（设计律 1）—— 一个空的输出框是在说"这里本该有东西"，
-  //   而 `.err` 在正常情况下**就是**空的。
+  // 空的那一块不出现（设计律 1）—— 一个空的输出框是在说"这里本该有东西"，
+  //   而 `.err` 在正常情况下就是空的。
   pushOut(h, cellOf('宿主的一行\n'), null);
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true,
     '`.err` 是 null ⇒ 那一块不出现');
@@ -276,7 +276,7 @@ test('★★ 「取不到」与「确实没有」在右栏里长得必须不一�
     '★ 文件在、但读不了 —— 要说清是哪一条判据');
   assert.equal(h.byId.get('out-half-out').classList.contains('hidden'), false);
 
-  // 而"确实没有这一份"是**不出现**，不是一行"取不到"
+  // 而"确实没有这一份"是不出现，不是一行"取不到"
   pushOut(h, null, null);
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true);
   assert.doesNotMatch(h.text('out-out'), /取不到/, '确实没有 ≠ 取不到');
@@ -318,8 +318,8 @@ test('★★ 接不上就整块重画（文件被截断过 / 换过一份）', (
 });
 
 test('★★ 末尾那半行不画 —— 它下一次会以完整的样子再出现一遍', () => {
-  // ★ 作业正把一行写了一半（还没有换行符）时，日志文件里就是"半句话"。
-  //   画出去的话：中间那一刻显示的是半句，而下一帧那一行会**完整地再出现一次**
+  // 作业正把一行写了一半（还没有换行符）时，日志文件里就是"半句话"。
+  //   画出去的话：中间那一刻显示的是半句，而下一帧那一行会完整地再出现一次
   //   （两行一模一样的开头），看起来像服务把同一句说了两遍。
   //   服务端那一头"丢掉窗口开头那半行"是同一条规矩的另一半。
   const h = boot();
@@ -331,7 +331,7 @@ test('★★ 末尾那半行不画 —— 它下一次会以完整的样子再�
 
 test('★★ 「只在贴底时自动滚」—— 用户翻上去看历史时不许把他拽回来', () => {
   const h = boot();
-  // ★ 先画一次：元素是 `getElementById` **按需建**的，没画过之前 `byId` 里没有它。
+  // 先画一次：元素是 `getElementById` 按需建的，没画过之前 `byId` 里没有它。
   pushOut(h, cellOf('A\n'), null);
   const box = () => h.byId.get('out-out');
   // 贴底：滚到底之后新的内容要把它带着走
@@ -353,7 +353,7 @@ test('★ 右栏「更多」按下去走桥上的 more()（浮窗自己不去问
 });
 
 test('★★ 浮窗的滚动条也是我们自己画的，而且永远占着那条槽', () => {
-  // ★★ 2026-10-11：浮窗是**另一个文档**（另一个 BrowserWindow），它有自己那份样式表
+  // 2026-10-11：浮窗是另一个文档（另一个 BrowserWindow），它有自己那份样式表
   //   —— 面板那一边（app.css）画的滚动条管不到这里，所以这一套得在这儿再写一遍。
   //   这也是这个文件头那句"与面板同一套配色"的同一个理由。
   const css = read('hover.css');
@@ -361,13 +361,13 @@ test('★★ 浮窗的滚动条也是我们自己画的，而且永远占着那�
     '★ 宽度要自己定死（不写的话露出来的就是系统那一条）');
   assert.match(css, /::-webkit-scrollbar-thumb\s*\{[^}]*border-radius/,
     '★ 滑块要是我们的');
-  // ★ 作业输出是一行一行长出来的：不留那条槽，正文会在每一条新输出到来时缩一下。
+  // 作业输出是一行一行长出来的：不留那条槽，正文会在每一条新输出到来时缩一下。
   const at = css.indexOf('.body {');
   assert.notEqual(at, -1, 'hover.css 里应当有 .body 那一条规则');
   const block = css.slice(at, css.indexOf('}', at));
   assert.match(block, /scrollbar-gutter:\s*stable/,
     '★★ 右栏那一块要永远留着那条槽 —— 输出是一行一行长出来的，不留的话正文会跟着缩');
-  // ★★ 同上：`scrollbar-width` / `scrollbar-color` 一旦出现就会盖掉上面那一套。
+  // 同上：`scrollbar-width` / `scrollbar-color` 一旦出现就会盖掉上面那一套。
   for (const f of ['width', 'color']) {
     assert.equal(new RegExp(`scrollbar-${f}\\s*:`).test(css), false,
       `★★ 不许写 scrollbar-${f} —— 它会盖掉 ::-webkit-scrollbar 那一套`);

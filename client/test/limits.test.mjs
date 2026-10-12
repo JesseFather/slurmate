@@ -15,19 +15,19 @@
 /**
  * limits.test.mjs —— 那几个"同一个数写了两遍"的地方。
  *
- * ★★ 这些数**必须交叉校验**：`tools/checks.yml` 只比对四处版本号与几个
+ * 这些数必须交叉校验：`tools/checks.yml` 只比对四处版本号与几个
  *   COPY_SKIP 集合，而它们的漂法是静默的 —— 服务端钳到 64、界面上写 32，
- *   表现是"我明明填了 32 却拿到了 64"？不，是**反过来**：界面拦住了用户，
+ *   表现是"我明明填了 32 却拿到了 64"？不，是反过来：界面拦住了用户，
  *   而服务端那道闸从此再也没人走到过。两个方向都不会红任何东西。
  *
- * ★ 这一份用例是**跨文件**的，它读的是源码文本 —— 与 19.11d 那条（CLI 与守护
+ * 这一份用例是跨文件的，它读的是源码文本 —— 与 19.11d 那条（CLI 与守护
  *   进程各写一遍的读上限）同一形状。判据是"两处的数必须相等"，而不是"某个数
  *   等于多少"：值本身可以改，改一处漏另一处不行。
  *
- * ★ 而 **GRES 没有上限写在这里**，那是有意的：一个作业能要几个由**集群自己配了
+ * 而 GRES 没有上限写在这里，那是有意的：一个作业能要几个由**集群自己配了
  *   几个**决定（`per_node_max`），代码里写死一个数就是替所有站点做同一个决定
  *   —— 每节点 16 张卡的站点也只能要 8 张。所以这里最后两条断言守的是"那个数
- *   **没有**回来"。
+ *   没有回来"。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,13 +59,13 @@ function constOf(src, name, file) {
 
 test('★★ MAX_CPUS_REQUEST：守护进程、界面、假后端三处一致', () => {
   const d = constOf(daemon, 'MAX_CPUS_REQUEST', 'slurmate-sessiond');
-  // 界面那一格（★ v0.18：高级选项搬进了**每一块**里，于是这一格从 panel.html 的
+  // 界面那一格（v0.18：高级选项搬进了每一块里，于是这一格从 panel.html 的
   // `max="64"` 变成了 panel.js 里的一个常量 —— 判据跟着元素搬了家，强度没减）。
   const u = constOf(js, 'UI_MAX_CPUS', 'panel.js');
   assert.equal(u, d,
     `界面上限 ${u} 与服务端的 MAX_CPUS_REQUEST ${d} 不一致：`
     + '用户照着界面填，而服务端按另一个数钳制');
-  // ★ 而那个常量**真的被设到那一格上**了：只声明不用的常量是一条永远绿的判据 ——
+  // 而那个常量真的被设到那一格上了：只声明不用的常量是一条永远绿的判据 ——
   //   用户照样能填 999，而服务端会把它悄悄钳掉。
   assert.match(js, /st\.cpus\.max = String\(UI_MAX_CPUS\);/,
     'panel.js 里「CPU 核数」那一格要把 UI_MAX_CPUS 设成 max');
@@ -80,59 +80,59 @@ test('★★ MAX_GRES_COUNT：守护进程与假后端一致', () => {
   const d = constOf(daemon, 'MAX_GRES_COUNT', 'slurmate-sessiond');
   const f = constOf(fake, 'MAX_GRES_COUNT', 'backend-fake.js');
   assert.equal(f, d, `假后端 ${f} / 服务端 ${d}`);
-  // 它必须是**量级护栏**、不是策略：`mps:100` 这种按份额计的 GRES 是正常的，
+  // 它必须是量级护栏、不是策略：`mps:100` 这种按份额计的 GRES 是正常的，
   // 所以这个数得比任何真实配置都宽。写小了会在真站点上挡住合法的提交。
   assert.ok(d >= 1024, `MAX_GRES_COUNT = ${d} 太紧，会挡住 mps 这类按份额计的 GRES`);
 });
 
 test('★ 界面上 GRES 的上限是**从服务端来的**，不是写死的', () => {
-  // ★★ v0.18：数量那一格随高级选项搬进了每一块里，从 HTML 变成了 panel.js 里
+  // v0.18：数量那一格随高级选项搬进了每一块里，从 HTML 变成了 panel.js 里
   //   画出来的一个 `<input>` —— 判据跟着元素搬家，而"上限只能来自服务端"这句话
   //   一个字没变。两半都要查，缺一半这条就废了：
-  //     ① 画出来的时候**不许带 max**：带了就是写死一个数（"每台集群都最多 8 张"
+  //     ① 画出来的时候不许带 max：带了就是写死一个数（"每台集群都最多 8 张"
   //        是一个我们无权做的假设）；
-  //     ② 而它确实是被设上去的，并且来源**只有** `per_node_max` 一处。
+  //     ② 而它确实是被设上去的，并且来源只有 `per_node_max` 一处。
   const built = /st\.gresN = document\.createElement\('input'\);([\s\S]*?)row\.append\(field\('数量'/,
     m0 = built.exec(js);
   assert.ok(m0, 'panel.js 里找不到数量那一格的构造那一段 —— 它改了形状？');
   assert.equal(/\bmax\b/.test(m0[1]), false,
     '数量那一格在**画出来的时候**就带上了 max —— 它必须跟着服务端给的 per_node_max 走 '
     + '（同一个集群上不同分区的上限可以不同）');
-  // ② 整份 panel.js 里对 `.max` 的赋值**恰好这两处**，而且各有各的来源：
+  // ② 整份 panel.js 里对 `.max` 的赋值恰好这两处，而且各有各的来源：
   //    CPU 那一格取那个与服务端交叉校验过的常量；数量那一格取 `per_node_max`。
   const sets = [...js.matchAll(/\.max\s*=\s*([^;\n]+);/g)].map((m) => m[1].trim());
   assert.deepEqual(sets.sort(), ['String(UI_MAX_CPUS)', 'String(e.per_node_max)'].sort(),
     'panel.js 里对 `.max` 的赋值应当恰好两处（CPU 那一格取 UI_MAX_CPUS、数量那一格取 '
     + `per_node_max）—— 现在是 ${JSON.stringify(sets)}。多出来的那一处多半就是写死的上限`);
-  // ③ 而**一个数字都不许直接写在 max 上**（`max = 8` / `max = '8'`）：那正是这条
+  // ③ 而一个数字都不许直接写在 max 上（`max = 8` / `max = '8'`）：那正是这条
   //    守的东西 —— 上限只能来自服务端，或者来自那个有人交叉盯着、一漂就红的常量。
-  //    ★ 查的是**赋值**（`.max = 数字`）：注释里那句"没有 `max="8"` 这种数字"是
+  //    查的是赋值（`.max = 数字`）：注释里那句"没有 `max="8"` 这种数字"是
   //      在解释这条规矩，不是违反它。
   assert.equal(/\.max\s*=\s*['"]?\d/.test(js), false,
     'panel.js 里有一个数字直接写在 max 上 —— 上限必须来自服务端给的 per_node_max');
 });
 
 test('★ 旧的 `GPU 数` 那一格整个不存在了（不是一个数字输入框）', () => {
-  // ★ v0.18：这一格从 panel.html 搬进了 panel.js（每一块里画一份），所以两处都查 ——
-  //   只查 HTML 的话，这条会变成一条**永远绿的空断言**（那些 id 已经不在那儿了）。
+  // v0.18：这一格从 panel.html 搬进了 panel.js（每一块里画一份），所以两处都查 ——
+  //   只查 HTML 的话，这条会变成一条永远绿的空断言（那些 id 已经不在那儿了）。
   assert.equal(/f-gpus/.test(html), false,
     'panel.html 里还有 #f-gpus —— GRES 是"名字 + 型号 + 数量"，不是"GPU 数"');
   assert.equal(/f-gpus/.test(js), false,
     'panel.js 里还有 f-gpus —— 同上');
 });
 
-// ── ★★ 插件负载的上限：三侧各持一份常量，书面判据在 tools/ ──────────────────
+// ── 插件负载的上限：三侧各持一份常量，书面判据在 tools/ ──────────────────
 //
 // 客户端（`HARD_LIMITS`）、守护进程（`PLUGIN_*`）、打包器（`MAX_*`）各写一遍，
-// 而**它们共同指向的那句话**在 `tools/plugin-limits.json`。三处分别在 JS 与
-// Python 里、三个都是**分发单元**（装出去的机器上没有 tools/），所以谁也读不到
-// 谁 —— 与 COPY_SKIP 同一个处境，代价也一样：漂开是**静默**的。
+// 而它们共同指向的那句话在 `tools/plugin-limits.json`。三处分别在 JS 与
+// Python 里、三个都是分发单元（装出去的机器上没有 tools/），所以谁也读不到
+// 谁 —— 与 COPY_SKIP 同一个处境，代价也一样：漂开是静默的。
 //
 // 漂开的样子很具体：客户端收下一个站点根本发不出来的负载；或者打包器打出一个
-// **任何站点都拒收**的包（"明明合规却装不上"）。两种都不会红任何东西，直到有人
+// 任何站点都拒收的包（"明明合规却装不上"）。两种都不会红任何东西，直到有人
 // 真的把一个插件发布出去。
 //
-// ★ 判据不是"某个数等于多少"，是"三处说的是同一组数"：值本身可以改（v0.10 就把
+// 判据不是"某个数等于多少"，是"三处说的是同一组数"：值本身可以改（v0.10 就把
 //   `total_bytes` 从 1 MiB 提到了现在这个值），改一处漏另一处不行。
 
 test('★★ 负载上限：客户端与假站点都得与书面判据逐字一致', () => {
@@ -144,14 +144,14 @@ test('★★ 负载上限：客户端与假站点都得与书面判据逐字一�
       `客户端 HARD_LIMITS.${k} = ${H[k]}，而 tools/plugin-limits.json 写的是 `
       + `${rules.load[k]} —— 两处说的是同一条规则，改一处就得改另一处`);
   }
-  // ★ 这一条**不是**相等：客户端那份 `package_bytes` 是**兜底**，判据是站点自述的
-  //   那个（见 HARD_LIMITS 上面那段）。它只能**不小于**站点报得出来的最大值。
+  // 这一条不是相等：客户端那份 `package_bytes` 是兜底，判据是站点自述的
+  //   那个（见 HARD_LIMITS 上面那段）。它只能不小于站点报得出来的最大值。
   assert.ok(H.package_bytes >= rules.package.max_bytes,
     `客户端兜底的 package_bytes ${H.package_bytes} 小于站点报得出来的 `
     + `${rules.package.max_bytes} —— 那就是单方面拒绝一个合规站点发得出来的包`);
 
-  // 假站点报的数：★ 它演的是**真站点**，所以得与真站点报的逐字相同。两个方向都
-  //   是坏事 —— 报得更松 ⇒ 开发时通过、真机上被拒；报得更严 ⇒ 作者会去改一个
+  // 假站点报的数：它演的是真站点，所以得与真站点报的逐字相同。两个方向都
+  //   是坏事 —— 报得更松，开发时通过、真机上被拒；报得更严，作者会去改一个
   //   没问题的插件。（`file_bytes` 不在此列，见 backend-fake.js 里那段。）
   const F = require('../src/main/backend-fake.js');
   const demo = F.DEMO_SITE_LIMITS;
@@ -165,11 +165,11 @@ test('★★ 负载上限：客户端与假站点都得与书面判据逐字一�
 
 test('★★ 深度上限在客户端里是**两份** —— 解析包那一份也得对得上', () => {
   const rules = JSON.parse(fs.readFileSync(LIMITS_JSON, 'utf8'));
-  // ★ 这一份必须有东西盯着：`plugin-package.js` 把它传给共享的
+  // 这一份必须有东西盯着：`plugin-package.js` 把它传给共享的
   //   `sitePlugins.checkRelPath`，所以它就是"读一个包时允许多深"的那个数；而
-  //   `tools/conformance/` 的坏包向量里**没有**一条"路径超过深度"的用例（查过了），
+  //   `tools/conformance/` 的坏包向量里没有一条"路径超过深度"的用例（查过了），
   //   若不盯着，它漂开不会红任何东西。同一个数在客户端有两份，漂开之后"解析包"与
-  //   "执行上限"会用两个深度 —— 而这是一条**拒绝**规则。
+  //   "执行上限"会用两个深度 —— 而这是一条拒绝规则。
   const src = fs.readFileSync(
     path.join(ROOT, 'client', 'src', 'main', 'plugin-package.js'), 'utf8');
   const m = /^const MAX_DEPTH = (\d+);$/m.exec(src);
@@ -184,9 +184,9 @@ test('★★ 负载上限 + 信封最坏情况 ≤ 包上限 —— 这三者是
   const { format: f, load, package: pkg } = rules;
 
   // 附录 A.1：包 = 头 ‖ 记录表 Σ(2 + pathlen + 8 + 32) ‖ 签名 ‖ 负载。
-  // §3.3：路径最长 max_depth 段、每段 max_segment_bytes 字节 ⇒ 最长路径。
+  // §3.3：路径最长 max_depth 段、每段 max_segment_bytes 字节，最长路径。
   const pathBytes = load.max_depth * f.max_segment_bytes + (load.max_depth - 1);
-  // ★ v0.13：签名那一项按**最长**的一块算（`188 + 255`），因为签名块的长度现在随
+  // v0.13：签名那一项按最长的一块算（`188 + 255`），因为签名块的长度现在随
   //   版本号变（A.3）。书面判据那一格因此叫 `signature_max_bytes`。
   const env = f.header_bytes + f.signature_max_bytes
     + load.max_files * (f.record_overhead_bytes + pathBytes);
@@ -198,9 +198,9 @@ test('★★ 负载上限 + 信封最坏情况 ≤ 包上限 —— 这三者是
     `负载上限应当是"包上限 − 信封最坏情况" = ${pkg.max_bytes - env}，而书面判据写的是 `
     + `${load.total_bytes}`);
 
-  // ★ 而且客户端**自己算出来的**那个数也得落在这条关系上 —— 不是抄来的。
+  // 而且客户端自己算出来的那个数也得落在这条关系上 —— 不是抄来的。
   const H = require('../src/main/site-plugins.js').HARD_LIMITS;
-  // ★ 客户端的 HARD_LIMITS 是从 site-plugins.js 自己那两个常量推出来的（那里刻意
+  // 客户端的 HARD_LIMITS 是从 site-plugins.js 自己那两个常量推出来的（那里刻意
   //   又写了一遍 —— `PP()` 惰性 require 不能用来求模块级常量，见那边的注记），
   //   所以这里钉住"那两遍写的是同一对数"。
   assert.equal(pkg.max_bytes - H.total_bytes, env,

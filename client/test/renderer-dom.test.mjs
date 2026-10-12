@@ -13,29 +13,29 @@
 // limitations under the License.
 
 /**
- * renderer-dom.test.mjs —— **真的把 panel.js 跑起来**，在一个人造 DOM 上。
+ * renderer-dom.test.mjs —— 真的把 panel.js 跑起来，在一个人造 DOM 上。
  *
  * ── 为什么还需要这一组（renderer.test.mjs 已经在查了）────────────────────────
  *
- * 那一组是**文本比对**：id 对不对得上、有没有内联 style、四句话重没重。它拦不住
- * 一类错误：**函数体里引用了一个不存在的变量**。
+ * 那一组是文本比对：id 对不对得上、有没有内联 style、四句话重没重。它拦不住
+ * 一类错误：函数体里引用了一个不存在的变量。
  *
  * 这不是假想的。P1 那次改名（`layout` → `workspace`）把连接行那个下拉的变量从
- * `lay` 改成了 `pick`，**漏掉两处引用**。后果是 `renderConnections` 一进循环就抛
- * `ReferenceError: lay is not defined` —— 而它是画**第一屏**的函数：用户打开客户端
- * 看到的是一块白板。全套 560 条用例**一条都没红**：本机起不了 Electron，
- * 而那批文本判据读的是**源码文本**，它不会执行任何一个函数。
+ * `lay` 改成了 `pick`，漏掉两处引用。后果是 `renderConnections` 一进循环就抛
+ * `ReferenceError: lay is not defined` —— 而它是画第一屏的函数：用户打开客户端
+ * 看到的是一块白板。全套 560 条用例一条都没红：本机起不了 Electron，
+ * 而那批文本判据读的是源码文本，它不会执行任何一个函数。
  *
- * 所以这一组的判据只有一句话：**那几个 render 函数跑得起来，而且画出了该画的东西。**
+ * 所以这一组的判据只有一句话：那几个 render 函数跑得起来，而且画出了该画的东西。
  * 它不需要浏览器，只要一个人造 DOM（见下面 `fakeDom`）。
  *
  * ── 纪律 ────────────────────────────────────────────────────────────────────
  *
- *   · 它**不判**界面好不好用（那只能人工跑一遍），只判"不白屏"与"画出来了"。
+ *   · 它不判界面好不好用（那只能人工跑一遍），只判"不白屏"与"画出来了"。
  *   · `init()` 那一行被摘掉再求值：它要的是整个启动序列（桥、后端、状态机），
- *     而这一组要的是那几个 render 函数。摘掉之后**必须**断言真的摘掉了 ——
+ *     而这一组要的是那几个 render 函数。摘掉之后必须断言真的摘掉了 ——
  *     摘不掉的话整份文件会在 `init()` 里炸，而那看起来也像"跑过了"。
- *   · 文件末尾那条自检（拿一个故意的 `ReferenceError` 验架子）是这一组的**前提**：
+ *   · 文件末尾那条自检（拿一个故意的 `ReferenceError` 验架子）是这一组的前提：
  *     一个抓不住 P1 那个缺陷的架子，等于没有架子。
  */
 import test from 'node:test';
@@ -50,9 +50,9 @@ const SRC = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'panel.js')
 /**
  * 两个渲染页面共用的那三个小东西（`cel` / `na` / `agoText`）。
  *
- * ★★ **必须一起载进来**，而且顺序在前：`panel.html` 就是这么排的（见那里那段
+ * 必须一起载进来，而且顺序在前：`panel.html` 就是这么排的（见那里那段
  *    注释），而这位置一旦反了 `panel.js` 一进来就 ReferenceError。
- *    ★ 少了它，"面板上某一块真的画出来了"这类断言会在一个**空壳**上通过 ——
+ * 少了它，"面板上某一块真的画出来了"这类断言会在一个空壳上通过 ——
  *      因为用到它的那几条路径一进去就抛，而 harness 把它们咽在 Promise 里了。
  */
 const DOM_SRC = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'dom.js'), 'utf8');
@@ -69,7 +69,7 @@ function withoutInit(src) {
 // ── 人造 DOM ────────────────────────────────────────────────────────────────
 //
 // 刻意做得很浅：每个元素只记下几个这一组真会读的属性（className / textContent /
-// children / value），其余一律是能收能放的字段。**不做**松散代理 —— 代理会把
+// children / value），其余一律是能收能放的字段。不做松散代理 —— 代理会把
 // `undefined.foo` 变成一次成功的取值，而那正是这一组要抓的东西。
 
 function mkEl(tag) {
@@ -90,9 +90,9 @@ function mkEl(tag) {
       e.children.unshift(k);
     },
     appendChild(k) { e.adopt(k); return k; },
-    // ★ `parentNode` / `insertBefore` / `nextSibling` / `contains` / `focus` 是被
-    //   **两段式确认**（panel.js 的 `armConfirm`）拉进来的：它要把那一行确认插到
-    //   那颗按钮**后面**，并把按钮自己留在 DOM 里（只加一个 class 不显示）。
+    // `parentNode` / `insertBefore` / `nextSibling` / `contains` / `focus` 是被
+    //   两段式确认（panel.js 的 `armConfirm`）拉进来的：它要把那一行确认插到
+    //   那颗按钮后面，并把按钮自己留在 DOM 里（只加一个 class 不显示）。
     //   没有这几样的话，那一段代码一进去就 TypeError —— 而"炸了"与"守住了"
     //   在这一组眼里必须分得开。
     adopt(k) {
@@ -119,18 +119,18 @@ function mkEl(tag) {
       return e.children.some((c) => c && typeof c.contains === 'function' && c.contains(k));
     },
     focus() { e._focused = true; },
-    // ★ 元素级的监听。**两条边栏**（`rail-left` / `rail-right`）的 `mouseenter`
+    // 元素级的监听。两条边栏（`rail-left` / `rail-right`）的 `mouseenter`
     //   走的是这一对 —— `bindEvents()` 一跑就要用它，缺了就是一次 TypeError，
     //   而那看起来像"这一组用例本身坏了"，与"守住了"分不开。
-    //   ★ 与 `doc._ls`（文档级那两条）分开记：它们是两码事，混在一起数不清。
+    //   与 `doc._ls`（文档级那两条）分开记：它们是两码事，混在一起数不清。
     _ls: [],
     addEventListener(t, f) { e._ls.push([t, f]); },
     removeEventListener(t, f) {
       const i = e._ls.findIndex((x) => x[0] === t && x[1] === f);
       if (i >= 0) e._ls.splice(i, 1);
     },
-    // ★ **真的**从父节点摘掉自己。壳里它是空的（`remove() {}`），而两段式确认
-    //   靠"这一行还在不在"判可退 —— 摘不掉的壳会让"收起"这件事**测不出来**。
+    // 真的从父节点摘掉自己。壳里它是空的（`remove() {}`），而两段式确认
+    //   靠"这一行还在不在"判可退 —— 摘不掉的壳会让"收起"这件事测不出来。
     remove() {
       const p = e._parent;
       if (!p) return;
@@ -141,13 +141,13 @@ function mkEl(tag) {
     get lastChild() { return e.children[e.children.length - 1] || null; },
     setAttribute(k, v) { e.attrs[k] = String(v); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
-    // ★ 数量那一格（GRES 的「几个」）在没有选中任何卡的时候会把 `max` **摘掉** ——
+    // 数量那一格（GRES 的「几个」）在没有选中任何卡的时候会把 `max` 摘掉 ——
     //   而那一格现在是每一块画出来的时候就会走一遍（`applyGresMaxFor`），所以这个
     //   法子从"用不到"变成了"一画就调"。缺了它就是一次 TypeError，看起来像"这一组
     //   用例本身坏了"，与"守住了"分不开。
     removeAttribute(k) { delete e.attrs[k]; },
     querySelectorAll() { return []; },
-    // 给一个**非零**的矩形：这样 drawWorkspaceLines 那条路真的会走完
+    // 给一个非零的矩形：这样 drawWorkspaceLines 那条路真的会走完
     // （全零的话它在 `if (!base.width)` 就返回了，而那条路正是"线画不画得出来"）。
     getBoundingClientRect() {
       return { left: 0, top: 0, right: 120, bottom: 20, width: 120, height: 20 };
@@ -168,7 +168,7 @@ function mkEl(tag) {
     get() { return e._text; },
     set(v) {
       e._text = String(v);
-      // ★ 被清掉的那些孩子要**脱离文档**（`parentNode` 归零）—— 两段式确认收
+      // 被清掉的那些孩子要脱离文档（`parentNode` 归零）—— 两段式确认收
       //   第一段时用的就是"这一行还在不在文档里"，而"清空 textContent"是重画
       //   一整块最常用的写法。
       for (const k of e.children) if (k && typeof k === 'object') k._parent = null;
@@ -195,7 +195,7 @@ function boot(src) {
       return byId.get(id);
     },
     querySelectorAll: () => [],
-    // ★ 两段式确认在**捕获阶段**挂一个"点到别处就收起"的监听（见 armConfirm）。
+    // 两段式确认在捕获阶段挂一个"点到别处就收起"的监听（见 armConfirm）。
     //   壳里这两条只记账：本机没有事件循环，而"点别处收起"那件事由那条**真实的
     //   几何判据**在真机上守，这里要守的是"挂上了、也摘掉了"。
     addEventListener(t, f) { doc._ls.push([t, f]); },
@@ -225,7 +225,7 @@ const CONNS = [
   { id: 'c1', user: 'alice', host: '198.51.100.7', port: 10100, workspaceId: 'w000000000001' },
   { id: 'c2', user: 'bob', host: '198.51.100.9', port: 10100, workspaceId: 'w000000000002' },
 ];
-/** 两份数据，**各归一个工作区**。`refs` 是那张引用表（`插件 id → 数据 id`）。 */
+/** 两份数据，各归一个工作区。`refs` 是那张引用表（`插件 id → 数据 id`）。 */
 const SPACES = [
   { id: 's000000000001', pluginId: 'p1', group: 'editor', ports: [18080] },
   { id: 's000000000002', pluginId: 'p1', group: 'editor', ports: [18081] },
@@ -244,7 +244,7 @@ const PV = {
       ports: 1, group: 'editor', runnable: true, hasClientCode: true,
       siteEnabled: true, siteKnown: true, locallyEnabled: true, canSubmit: true,
       defaults: null },
-    // 不要数据空间的那一种：它**没有**「用哪一份数据」这一格。
+    // 不要数据空间的那一种：它没有「用哪一份数据」这一格。
     { id: 'p2', name: 'relay', title: '中转站', version: '1.0.0', description: '',
       ports: 0, group: 'relay', runnable: true, hasClientCode: false,
       siteEnabled: true, siteKnown: true, locallyEnabled: true, canSubmit: true,
@@ -263,12 +263,12 @@ function start(bootObj, extra = '') {
 }
 
 /**
- * 把 `bindEvents()` 在假环境里**真的跑一遍** —— 它就是真机上启动的第一件事。
+ * 把 `bindEvents()` 在假环境里真的跑一遍 —— 它就是真机上启动的第一件事。
  *
- * ★ 这一组从前只测得到"某个 render 函数画出了什么"。而"点下去走的是哪条路"
- *   落在**绑定**上，绑定在 `bindEvents()` 里 ⇒ 不跑它就一个都测不到。
+ * 这一组从前只测得到"某个 render 函数画出了什么"。而"点下去走的是哪条路"
+ *   落在绑定上，绑定在 `bindEvents()` 里，不跑它就一个都测不到。
  *
- * ★★ 它同时是那条缺陷的守卫：绑定从前排在 `init()` 那几个 `await` 的**后面**，
+ * 它同时是那条缺陷的守卫：绑定从前排在 `init()` 那几个 `await` 的后面，
  *   一次 reject 就让整块都不执行。这里从"跑不跑得完"那一侧判 —— 跑得完，
  *   那几格就有动作（见下面那条"bootstrap 挂了"的用例）。
  *
@@ -285,14 +285,14 @@ function bindAll(bootObj, extra = '') {
 
 test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守卫）', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
-  // 从前这里抛 `ReferenceError: lay is not defined`，而它是画**第一屏**的函数：
+  // 从前这里抛 `ReferenceError: lay is not defined`，而它是画第一屏的函数：
   // 用户打开客户端看到的是一块白板，560 条用例一条都不红。
   assert.doesNotThrow(() => h.fn('renderConnections')(CONNS),
     'renderConnections 抛了 —— 第一屏会是一块白板');
 
   const rows = h.byId.get('conn-list').children;
   assert.equal(rows.length, 2, '两条连接就该画两行');
-  // ★ 而**每一行里都不该再有一个下拉**：那个「这条连接用哪个工作区」搬进了
+  // 而每一行里都不该再有一个下拉：那个「这条连接用哪个工作区」搬进了
   //   连接表单（「③ 工作区」）。它留下的是一类缺陷（一个改了名却没改全的变量），
   //   而这一条把它钉在"画出来的东西"上 —— 不是钉在源码文本上。
   for (const r of rows) {
@@ -302,7 +302,7 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
 });
 
 test('★★ 内置那条假连接：排最前、没有「编辑」「删除」，而别的行一个都不少', () => {
-  // ★ 判据是**画出来的东西**，不是源码文本：那一行是不是真的排在最前、它那行里
+  // 判据是画出来的东西，不是源码文本：那一行是不是真的排在最前、它那行里
   //   是不是真的只有三样，只有画完之后才说得清。
   const list = [
     CONNS[0],
@@ -319,7 +319,7 @@ test('★★ 内置那条假连接：排最前、没有「编辑」「删除」�
     ['本机假站点', 'alice@198.51.100.7:10100', 'carol@203.0.113.9:10100'],
     '★ 内置那条排最前（它是这个列表的起点），其余按原来的顺序 —— 不是整表重排');
 
-  // ── ② 它那行里**没有**「编辑」「删除」──
+  // ── ② 它那行里没有「编辑」「删除」──
   assert.equal(rows[0].children.length, 3,
     '★ 内置那条只有「连接」一颗按钮 —— 那两颗是**不画**，不是画成禁用的'
     + '（一颗永远点不亮的按钮正是"系统声称了不成立的事"）');
@@ -333,26 +333,26 @@ test('★★ 内置那条假连接：排最前、没有「编辑」「删除」�
   assert.equal(rows[1].children[0].children.length, 0, '普通的行没有那颗标记');
 
   // ── ④ 状态那一格：内置那条留空，而不是「未探测」──
-  //   ★ 主进程不探它（`app:probeHosts` 把它滤掉了）⇒「未探测」是在说"还没轮到它"，
+  //   主进程不探它（`app:probeHosts` 把它滤掉了），「未探测」是在说"还没轮到它"，
   //     而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
   assert.equal(rows[0].children[1]._text, '', '★ 内置那条的状态格留空');
   assert.equal(rows[1].children[1]._text, '未探测', '而普通那几行照旧');
 });
 
 test('★★ 两段式确认：第一下只是把那一格换成一行确认，第二下才真的做', () => {
-  // ★★ 这一条守的是**设计律 2**：代价大的动作由"必须先经过的那一步"承载。
+  // 这一条守的是设计律 2：代价大的动作由"必须先经过的那一步"承载。
   //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——
-  //   而 `window.confirm` 给不了两段：框弹出来的时候用户**已经按下去**了。
+  //   而 `window.confirm` 给不了两段：框弹出来的时候用户已经按下去了。
   //
-  // ★ 四条判据，缺一条这条规矩就不成立：
-  //   · 第一下**一个请求都不发**（"点了就发"= 没有第二段）；
-  //   · 那一行里要**说出后果**（只说"确定吗"，用户答不了）；
-  //   · 第二下才发，而且**恰好一次**；
-  //   · 原来那颗按钮**还在 DOM 里**（只加一个 class 不显示）—— 删掉它的话，
+  // 四条判据，缺一条这条规矩就不成立：
+  //   · 第一下一个请求都不发（"点了就发"= 没有第二段）；
+  //   · 那一行里要说出后果（只说"确定吗"，用户答不了）；
+  //   · 第二下才发，而且恰好一次；
+  //   · 原来那颗按钮还在 DOM 里（只加一个 class 不显示）—— 删掉它的话，
   //     `renderSnapshot` 下一次按 `running` 去 toggle 它的 `hidden` 就作用在 null 上。
   //
-  // ★★ 载体是状态条上的「结束会话」（`#sb-end`）：留下的五处两段式里，它是唯一
-  //   一颗**固定在 HTML 里**的按钮 —— 另外四处（断开也固定，但切走工作区的第一段
+  // 载体是状态条上的「结束会话」（`#sb-end`）：留下的五处两段式里，它是唯一
+  //   一颗固定在 HTML 里的按钮 —— 另外四处（断开也固定，但切走工作区的第一段
   //   挂在运行期画的那个下拉上，插件数据与「删除一条连接」那两颗按钮也是运行期
   //   画的）驱动起来都要先把一整块画出来。机制是同一份（`armConfirm`），所以拿它
   //   当代表最省事也最直接。
@@ -361,8 +361,8 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
     + 'window.__calls = [];'
     + 'window.slurmate.stop = (slot) => { window.__calls.push(slot);'
     + ' return Promise.resolve({ ok: true }); };');
-  // ★ 那一行确认是 `insertBefore(cluster, anchor.nextSibling)` 插进去的 ⇒ 锚点
-  //   得**真的在文档里**才看得见它。壳里 `$()` 现造的元素没有父节点。
+  // 那一行确认是 `insertBefore(cluster, anchor.nextSibling)` 插进去的，锚点
+  //   得真的在文档里才看得见它。壳里 `$()` 现造的元素没有父节点。
   h.run("document.body.append($('sb-end'));");
   const end = h.byId.get('sb-end');
 
@@ -383,12 +383,12 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   assert.equal(cluster.className, 'armed');
   const why = cluster.children[0]._text;
   assert.match(why, /作业会被取消/, '后果要说出来 —— 只说"确定吗"，用户答不了');
-  // ★ 条数那一格（`liveCount()`）长在「断开」那一行上（它一次结束好几条），
+  // 条数那一格（`liveCount()`）长在「断开」那一行上（它一次结束好几条），
   //   而这条挂的是「结束这一条会话」—— 判据在那一条用例里。
   assert.match(h.run("$('sb-end').onclick.toString()"), /armConfirm/,
     '★ 状态条那颗「结束会话」走的是两段式（不是直接 endFrontSession）');
 
-  // ★ 那一行里两颗按钮**必须长得不一样**：一颗是不可逆的第二段（danger），
+  // 那一行里两颗按钮必须长得不一样：一颗是不可逆的第二段（danger），
   //   一颗是回到原样（ghost）。画成一样的，用户分不清自己按下去的是哪个 ——
   //   而这一整条规矩（不可逆的动作要有"必须先经过的那一步"）要成立，靠的正是
   //   "第二段看得出来是第二段"。
@@ -419,12 +419,12 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
 });
 
 test('★★ 「删除一条连接」走两段式：第一下只摆一行确认，第二下才真的删', () => {
-  // ★ 它是**运行期画出来的**那一颗（在 `renderConnections` 里），没有 id 可找 ——
+  // 它是运行期画出来的那一颗（在 `renderConnections` 里），没有 id 可找 ——
   //   得先把那一屏画出来，再从行里把它取出来。上面那条用的 `#sb-end` 是固定的。
   //
-  // ★★ 为什么它要两段式（判据是**代价**，不是"不可逆"）：删掉一条连接会
-  //   **作废它的私钥**（拿去 IDM 注册过的那把公钥就此失效），而它若是某个工作区
-  //   最后一个主人，**那个工作区的两份数据也一起清**。这两样都不是"再建一条就是"。
+  // 为什么它要两段式（判据是代价，不是"不可逆"）：删掉一条连接会
+  //   作废它的私钥（拿去 IDM 注册过的那把公钥就此失效），而它若是某个工作区
+  //   最后一个主人，那个工作区的两份数据也一起清。这两样都不是"再建一条就是"。
   const named = [{ ...CONNS[0], label: '集群 A' }, CONNS[1]];
   const h = start({ connections: named, workspaces: WSS, activeConnectionId: 'c1' },
     'window.__deleted = [];'
@@ -434,7 +434,7 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
   h.fn('renderConnections')(named);
 
   const row = h.byId.get('conn-list').children[0];
-  // 行里的顺序是 `li.append(t, m, main, edit, del)` ⇒ 最后一颗就是「删除」。
+  // 行里的顺序是 `li.append(t, m, main, edit, del)` 最后一颗就是「删除」。
   const del = row.children[row.children.length - 1];
   assert.equal(del.textContent, '删除', '行里最后一颗按钮应当是「删除」');
   const clusterOf = () => row.children[row.children.indexOf(del) + 1];
@@ -449,7 +449,7 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
     '★ 原来那颗按钮留在 DOM 里、只是不显示');
   const why = cluster.children[0]._text;
   assert.match(why, /私钥一并作废/, '第一段要说清代价 —— 只说"确定吗"，用户答不了');
-  // ★ 而这句里的名字必须是**这一行上印着的那个**（有备注就是备注）：印地址的话，
+  // 而这句里的名字必须是这一行上印着的那个（有备注就是备注）：印地址的话，
   //   它指的就是一条"在这一屏上找不到"的连接。
   assert.equal(row.children[0]._text, '集群 A', '有备注的那一行印的就是备注');
   assert.equal(why.includes('集群 A'), true, '★ 确认那一行要点名这一行上印着的那个名字');
@@ -479,10 +479,10 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
 });
 
 test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（切走工作区靠它）', () => {
-  // ★★ 「切走工作区」的第一段挂在一个**下拉**上，而那个下拉停在用户刚选的
+  // 「切走工作区」的第一段挂在一个下拉上，而那个下拉停在用户刚选的
   //   "待定"的新值上 —— 那不是已发生的事。退回去（取消 / 点别处 / Esc / 被重画
   //   收掉）时如果不把它拨回旧值，界面就在说一件没发生的事。
-  //   ⇒ 这正是 `armConfirm` 那个 `onDisarm` 存在的唯一理由。
+  //   这正是 `armConfirm` 那个 `onDisarm` 存在的唯一理由。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run("document.body.append($('sb-end'));");
   h.run('window.__revert = () => { window.__revN = (window.__revN || 0) + 1; };');
@@ -493,7 +493,7 @@ test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（�
   h.run('armed.disarm()');
   assert.equal(h.run('window.__revN'), 1, '★ 退回去要调 `onDisarm`');
 
-  // ★ 而**第二段执行时不许调** —— 那一格已经被改动了，"拨回旧值"会让界面
+  // 而第二段执行时不许调 —— 那一格已经被改动了，"拨回旧值"会让界面
   //   说一件没发生的事。
   h.fn('armConfirm')(h.byId.get('sb-end'), {
     why: '后果', yes: '切走', run: () => {}, onDisarm: h.run('window.__revert'),
@@ -505,11 +505,11 @@ test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（�
 });
 
 test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆一行确认，第二趟才带 confirmDiscard', async () => {
-  // ★★ 这一条替掉的是从前那句 `window.confirm`。它守三件事：
-  //   · 第一下**不弹框**、也不发第二次请求 —— 只是把那一格摆成一行确认；
-  //   · 下拉**停在新值上**（那是"待定"，不是已发生的事），退回去才拨回来；
-  //   · 第二趟**恰好带 `confirmDiscard: true`** 再发一次。
-  //   ★ 判定权在主进程（`would_discard` 是它算的），界面只负责问 —— 所以这条
+  // 这一条替掉的是从前那句 `window.confirm`。它守三件事：
+  //   · 第一下不弹框、也不发第二次请求 —— 只是把那一格摆成一行确认；
+  //   · 下拉停在新值上（那是"待定"，不是已发生的事），退回去才拨回来；
+  //   · 第二趟恰好带 `confirmDiscard: true` 再发一次。
+  //   判定权在主进程（`would_discard` 是它算的），界面只负责问 —— 所以这条
   //     路的形状是"先发、被拒了再问、答了再发"，不是"先问再发"。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
     'window.__calls = []; window.__asked = 0;'
@@ -517,7 +517,7 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
     + 'window.slurmate.setConnectionWorkspace = (p) => {'
     + '  window.__calls.push(JSON.parse(JSON.stringify(p)));'
     + '  if (p.confirmDiscard) {'
-    // ★ 这两份数据得**内联**进去：`WSS` / `CONNS` 是这一侧的常量，
+    // 这两份数据得内联进去：`WSS` / `CONNS` 是这一侧的常量，
     //   不是 vm 上下文里的名字 —— 直接写名字是一次 `ReferenceError`，
     //   而那看起来像"这条用例坏了"，与"守住了"分不开。
     + `    return Promise.resolve({ ok: true, workspaces: ${JSON.stringify(WSS)},`
@@ -525,8 +525,8 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
     + '  return Promise.resolve({ ok: false, code: "would_discard",'
     + '    workspaceName: "工作区 1" });'
     + '};'
-    // ★ 壳里 `window.confirm` 默认是 `() => true` —— 换成一个会记账的，
-    //   这样"到底有没有弹框"才是**测出来**的，而不是假设的。
+    // 壳里 `window.confirm` 默认是 `() => true` —— 换成一个会记账的，
+    //   这样"到底有没有弹框"才是测出来的，而不是假设的。
     + 'window.confirm = () => { window.__asked += 1; return true; };');
 
   h.fn('renderWorkspaceSelectors')();
@@ -557,7 +557,7 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
     '★★ 退回去要把下拉**拨回真正的当前值** —— 留着待定的新值就是界面在说一件没发生的事');
   assert.equal(h.run('window.__calls.length'), 1, '取消 = 什么都没发生');
 
-  // ── 答"切走"：第二趟照常先发一次，再**恰好**带 confirmDiscard 发一次 ──
+  // ── 答"切走"：第二趟照常先发一次，再恰好带 confirmDiscard 发一次 ──
   const n0 = h.run('window.__calls.length');
   sel.value = 'w000000000002';
   await sel.onchange();
@@ -573,12 +573,12 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
 });
 
 test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许拆掉整块监听）', async () => {
-  // ★★ 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
-  //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的**后面**，于是
+  // 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
+  //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的后面，于是
   //   `bootstrap()` 或 `openNewForm()`（里面有 `await newKey()`，在 Windows 上
   //   走 DPAPI）任何一次 reject，`init()` 就在那一行整体中止，**2950 行往后
   //   一个监听都不挂**，而唯一的症状是提示流里多一行字。
-  //   ⇒ 现在分成 `bindEvents()`（纯同步，先跑）与 `bootUI()`（所有 await）。
+  //   现在分成 `bindEvents()`（纯同步，先跑）与 `bootUI()`（所有 await）。
   const h = bindAll({}, 'window.slurmate.bootstrap ='
     + ' () => Promise.reject(new Error("假装取不到"));'
     + 'window.slurmate.pluginData = () => Promise.resolve({});');
@@ -589,15 +589,15 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
     (e) => h.fn('onInitFailed')(e));
 
   // ── 那几格必须仍然有动作 ──
-  // ★ 一律走 `$()` 取元素：`byId` 是**取过才有**的缓存，而 `sec-about` 只在
+  // 一律走 `$()` 取元素：`byId` 是取过才有的缓存，而 `sec-about` 只在
   //   下面那一下被点到时才第一次被取到。
-  // ★ 入口是**第一屏最末那一行**那颗按钮（`#about-foot`），**不是标题那一行**
+  // 入口是第一屏最末那一行那颗按钮（`#about-foot`），不是标题那一行
   //   （2026-10-11 改：点标题在任何一个界面里都是"回首页"的意思，而这里的返回
   //   方式已经由各处动作约束好了）。
   const foot = h.run("$('about-foot')");
   assert.equal(typeof foot.onclick, 'function',
     '★★ 「关于」那颗按钮仍然要挂着动作 —— 首屏数据拿不到**不该**让入口变成哑的');
-  // ★ 壳里的 `$()` 是**现造**一个空元素，它不会去读 panel.html —— 所以
+  // 壳里的 `$()` 是现造一个空元素，它不会去读 panel.html —— 所以
   //   `hidden` 那一格得自己摆成初始状态（真机上由 panel.html 上的 class 给）。
   h.run("$('sec-about').classList.add('hidden');");
   assert.equal(h.run("$('sec-about').classList.contains('hidden')"), true, '（前提：它本来是收着的）');
@@ -614,12 +614,12 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
 });
 
 test('★★ 重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {
-  // ★ 不收的后果是**静默的**：那一行连同确认一起被丢掉，而 `armed` 还指着它 ——
+  // 不收的后果是静默的：那一行连同确认一起被丢掉，而 `armed` 还指着它 ——
   //   用户接着点"别处"收的是一个已经不在文档里的节点，看起来像没反应；
   //   更糟的是 `armed` 从此不为 null，下一次点另一处时 `disarmArmed()`
-  //   先把**这个幽灵**收掉（白做一次），真正的第二段反而没了。
+  //   先把这个幽灵收掉（白做一次），真正的第二段反而没了。
   //
-  // ★★ 两条路各自都判，因为它们重画的是**不同的**一片：
+  // 两条路各自都判，因为它们重画的是不同的一片：
   //   · `renderConnections` —— 收掉挂在连接列表那一片上的第一段；
   //   · `renderWorkspaceSelectors` —— 它重画的正是切走工作区第一段挂身的那一格
   //     （状态条那个下拉）。不收的话，"待定"的那行确认会与刚被拨回真值的下拉
@@ -647,14 +647,14 @@ test('★★ 重画会把没走完的第一段收掉（重画的就是它挂身�
 });
 
 test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title', () => {
-  // ★★ 这一条守的是"一段 → 一行 title"这个改动**本身**。原来那段话有三个句子
+  // 这一条守的是"一段 → 一行 title"这个改动本身。原来那段话有三个句子
   //   （事实 / 为什么取不回来 / 该怎么办），而它读起来像一段讨论。
   //
-  //   ★ 而它必须**分叉**：两种情形要用户做的事**方向相反**（升级客户端 /
+  //   而它必须分叉：两种情形要用户做的事方向相反（升级客户端 /
   //     升级没用，得找管理员）。指错了方向，用户会去做一件解决不了问题的事 ——
-  //     所以正文那一行必须是**那个方向**，理由放在 title 里。
+  //     所以正文那一行必须是那个方向，理由放在 title 里。
   //
-  //   ★ 判据是"正文短 + title 非空"，不是"某句话在不在"：后者在"整段又长回来"
+  //   判据是"正文短 + title 非空"，不是"某句话在不在"：后者在"整段又长回来"
   //     的时候照样绿。
   const h = start({ connections: [], workspaces: [], activeConnectionId: null });
   const show = (verdict) => {
@@ -684,7 +684,7 @@ test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title'
 });
 
 test('★★ 「安装插件…」只在假站点上画，而点它走的就是那条 IPC', async () => {
-  // ★ 判据是**主进程给的能力位**（`site.canInstall`），不是界面按后端名现判 ——
+  // 判据是主进程给的能力位（`site.canInstall`），不是界面按后端名现判 ——
   //   所以这一条同时钉住了两件事：假站点上它在，真站点上它一颗都没有。
   const h = start({ connections: [], workspaces: [], activeConnectionId: null });
   h.run('window.__install = 0; window.__result = { cancelled: true };'
@@ -692,25 +692,25 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
     + '  return Promise.resolve(window.__result); };');
 
   const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
-  // ★ 按**文字**找，不是"这一块里第一颗按钮"：站点分发那一节本来就有别的按钮
+  // 按文字找，不是"这一块里第一颗按钮"：站点分发那一节本来就有别的按钮
   //   （「重新同步」），而按位置找的话，这一条会在"那颗按钮没画出来"的时候
-  //   拿到另一颗，然后**绿着**。
+  //   拿到另一颗，然后绿着。
   const btnIn = () => childrenOf(h.byId.get('site-plugins'))
     .find((x) => x.tagName === 'BUTTON' && x._text === '安装插件…');
 
-  // ① 假站点（能力位为真）⇒ 画出来，而且说得清它收的是什么文件
+  // ① 假站点（能力位为真），画出来，而且说得清它收的是什么文件
   draw({ label: '本站', canInstall: true, versions: [], strays: [] });
   assert.ok(btnIn(), '假站点上必须画出那颗「安装插件…」');
   assert.equal(btnIn()._text, '安装插件…');
   assert.match(btnIn().title || '', /\.splug/, '要说清它挑的是打包器产出的那个文件');
 
-  // ② 真站点（能力位缺席）⇒ **一颗都不画**
+  // ② 真站点（能力位缺席），一颗都不画
   draw({ label: '本站', versions: [], strays: [] });
   assert.equal(btnIn(), undefined,
     '★★ 真站点上不许有这颗按钮 —— 它是主进程给的能力位说了算的，界面不猜');
 
-  // ③ 点一下（用户按了取消）：走那条 IPC，**一声不吭**
-  //   ★ 提示流那一格要**现取**（`doc.getElementById` 会建它）：`$()` 没碰过的 id
+  // ③ 点一下（用户按了取消）：走那条 IPC，一声不吭
+  //   提示流那一格要现取（`doc.getElementById` 会建它）：`$()` 没碰过的 id
   //     在 `byId` 里根本不存在，而"读一个 undefined 的 children"会以 TypeError
   //     收场 —— 那看起来像这一组用例坏了，与"守住了"分不开。
   const notices = () => childrenOf(h.doc.getElementById('notices'));
@@ -721,7 +721,7 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
   assert.equal(notices().length, before,
     '★ 取消不是失败，不许出一条提示（"我按了取消"不该被当成一次错误报出来）');
 
-  // ④ 装不上：那句错话要**原样**出来（主进程才知道站上有什么，界面不重写判据）
+  // ④ 装不上：那句错话要原样出来（主进程才知道站上有什么，界面不重写判据）
   h.run('window.__result = { ok: false, code: "rejected",'
     + ' error: "站点上已经有一棵「示例盒子」，在 /p/01M2… —— 版本不一样。" };');
   await btnIn().onclick();
@@ -729,7 +729,7 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
   assert.match(said, /站点上已经有一棵「示例盒子」/,
     '★ 装不上要说清为什么 —— 而那句话是主进程给的，界面原样转述');
 
-  // ⑤ 装上了：那一次返回的视图**当场画上去**（不然用户得等下一次推送才看得见）
+  // ⑤ 装上了：那一次返回的视图当场画上去（不然用户得等下一次推送才看得见）
   h.run('window.__result = { ok: true, installed: [{ id: "p9", version: "1.0.0",'
     + ' title: "示例" }], unchanged: [],'
     + ' plugins: { plugins: [], errors: [], problems: [], missing: [], consent: [],'
@@ -755,16 +755,16 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   const notices = () => childrenOf(h.doc.getElementById('notices'));
   const sent = (i) => h.run(`JSON.stringify(window.__starts[${i}])`);
   const btn = h.doc.getElementById('start-btn');
-  // ★★ 那几格高级选项现在是**每一块自己一份**（`startWith` 读的就是它）——
+  // 那几格高级选项现在是每一块自己一份（`startWith` 读的就是它）——
   //   这里现造一份用：它在真机上是 pluginBlock 画出来的那一份。
   const adv = h.fn('pluginAdv')().st;
 
-  // ★ 开局没有待答的一问。**不在这一层判"那一行是收着的"** —— 这个架子不解析
+  // 开局没有待答的一问。不在这一层判"那一行是收着的" —— 这个架子不解析
   //   `panel.html`，`#sb-port` 身上那个 `hidden` 类是 HTML 写的，在这里根本看不见。
   //   那一半由 `renderer.test.mjs` 从源码文本上钉（id 在不在、三颗按钮叫什么）。
   assert.equal(h.run('portAsk'), null, '开局不该有待答的一问');
 
-  // ── ① 被挡下 ⇒ 摆出那一行，理由**照念主进程给的那句** ──
+  // ── ① 被挡下，摆出那一行，理由照念主进程给的那句 ──
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(h.run('window.__starts.length'), 1);
   assert.equal(sent(0), '["cs",null]',
@@ -773,12 +773,12 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.match(h.doc.getElementById('sb-port-why')._text, /18080/, '理由里要念出那个端口');
   assert.match(h.doc.getElementById('sb-port-why')._text, /被别的程序占着/,
     '★ 那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
-  // ★ 三颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
+  // 三颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /布局/,
     '「启动」要说清它的代价（origin 变了，编辑器布局会重置）');
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /回到/,
     '★ 还要说清它是**暂时**的：端口没有被改掉，下次启动会回到原处');
-  // ★★ 中间那一颗是这一行上唯一**会改配置**的一颗，所以它的话必须说清"不可逆"
+  // 中间那一颗是这一行上唯一会改配置的一颗，所以它的话必须说清"不可逆"
   //    （原来那个端口与它上面那份布局都回不来）—— 只写"记住"是不够的。
   assert.match(h.doc.getElementById('sb-port-remember').title || '', /不可逆/,
     '「记住并启动」要说清它不可逆 —— 那是它与「启动」唯一的分界');
@@ -786,17 +786,17 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
     '★ 还要念出**原来那个端口**：用户就是拿它对照着决定要不要改');
   assert.match(h.doc.getElementById('sb-port-abort').title || '', /不会出现作业/,
     '「取消」要说清它真的什么都没做');
-  // ★ 而它**不是**失败：这一支不该去刷新插件清单（那是"提交被拒"才有的事）。
+  // 而它不是失败：这一支不该去刷新插件清单（那是"提交被拒"才有的事）。
   assert.equal(h.run('window.__starts.length'), 1, '只走了一趟 IPC，没有别的东西跟着发');
 
-  // ── ② 答「启动」⇒ 带 `'shift'` 重发**一次**，而且重发的还是同一个插件 ──
+  // ── ② 答「启动」，带 `'shift'` 重发一次，而且重发的还是同一个插件 ──
   await h.doc.getElementById('sb-port-shift').onclick();
   assert.equal(h.run('window.__starts.length'), 2, '★ 答一下正好重发一次');
   assert.equal(sent(1), '["cs","shift"]',
     '★★ 那个作答是**用户的意思**：主进程据此顺移，不再问第二遍');
 
-  // ── ②b 答「记住并启动」⇒ 带 `'remember'` 重发，而它仍然只发一趟 ──
-  //    ★★ 两个作答走的是**同一条重发路**（`startWith`），分别只在那个字符串上：
+  // ── ②b 答「记住并启动」，带 `'remember'` 重发，而它仍然只发一趟 ──
+  //    两个作答走的是同一条重发路（`startWith`），分别只在那个字符串上：
   //      界面这一层不做任何"要不要写配置"的判断 —— 写配置那一步在主进程里，而且
   //      排在绑定成功之后（它才知道隧道真绑上了哪个端口）。
   await h.doc.getElementById('sb-port-remember').onclick();
@@ -804,12 +804,12 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.equal(sent(2), '["cs","remember"]',
     '★★ 那个作答要说清是**哪一种**：主进程据此把新端口记进配置，而这是不可逆的一步');
 
-  // ── ③ 这一趟成了 ⇒ 那一行收掉 ──
+  // ── ③ 这一趟成了，那一行收掉 ──
   h.run('window.__reply = { ok: true, slot: 1, sessions: [], front: null };');
   await h.doc.getElementById('sb-port-shift').onclick();
   assert.equal(row.classList.contains('hidden'), true, '成了就不该再挂着那一行');
 
-  // ── ④ 答「取消」⇒ 就地收掉，**一个字节都不发**，而且说一句实话 ──
+  // ── ④ 答「取消」，就地收掉，一个字节都不发，而且说一句实话 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
     + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
@@ -821,20 +821,20 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.equal(h.run('window.__starts.length'), calls,
     '★★ 「取消」不跟主进程说话 —— 因为此刻**本来就没有东西要撤**');
   assert.equal(row.classList.contains('hidden'), true, '那一行要收掉');
-  // ★ 提示流是 **prepend**（新的在最前），所以"这一下新出来的"是**开头那几条** ——
+  // 提示流是 prepend（新的在最前），所以"这一下新出来的"是开头那几条 ——
   //   取尾巴会把上一次那一句当成这一次说的。
   const said = notices().slice(0, notices().length - before)
     .flatMap((x) => childrenOf(x)).map((x) => x._text || '').join('\n');
   assert.match(said, /没有提交/,
     '★ 用户刚点过「开始会话」而界面静了下来，要说清那是"没起来"而不是"起来了"');
 
-  // ── ⑤ 别的失败**不摆这一行**（它不是"被端口挡住"，三个答案都不成立）──
+  // ── ⑤ 别的失败不摆这一行（它不是"被端口挡住"，三个答案都不成立）──
   h.run('window.__reply = { ok: false, code: "rejected", error: "版本对不上。" };');
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), true,
     '★★ 只有 `port_conflict` 才摆这一行 —— 别的失败摆它等于给两个不成立的答案');
 
-  // ── ⑥ 走开（换屏 / 连上 / 断开都走这条路）⇒ 那一行收掉 ──
+  // ── ⑥ 走开（换屏 / 连上 / 断开都走这条路），那一行收掉 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
     + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
@@ -847,11 +847,11 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
 });
 
 test('★★ 同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
-  // ★ 这是这一版唯一的安全边界（进程隔离还没做），所以它**留着**；但它原来是
+  // 这是这一版唯一的安全边界（进程隔离还没做），所以它留着；但它原来是
   //   三句 —— 第三句讲的是"不同意会怎样"，而那件事那颗按钮自己的措辞已经说了
   //   （「不同意，删掉本机这一份」）。按钮能说清的事不必再写一句在旁边。
   //
-  //   ★ 判据用**句数**而不是字数：字数会随措辞漂，而"两行以内"约束的正是句子数。
+  //   判据用句数而不是字数：字数会随措辞漂，而"两行以内"约束的正是句子数。
   const h = start({ connections: [], workspaces: [], activeConnectionId: null });
   h.fn('renderConsent')({ consent: [{
     id: 'p1', name: 'p1', title: '编辑器', version: '1.0.0', fileCount: 3,
@@ -882,8 +882,8 @@ test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () =>
   assert.match(sp0.children[1].textContent, /1 个工作区/);
 
   // renderWorkspaceMap 结尾是 requestAnimationFrame(drawWorkspaceLines)，而架子里的
-  // rAF 是**立刻执行**的 —— 所以矩形非零时线就该已经画好了。
-  // ★ 两段线各两条：连接→工作区、工作区→数据。少了第二段的话，图上"哪个工作区
+  // rAF 是立刻执行的 —— 所以矩形非零时线就该已经画好了。
+  // 两段线各两条：连接→工作区、工作区→数据。少了第二段的话，图上"哪个工作区
   //   指着哪一份"就只剩一列孤零零的方框，而这张图存在的理由正是那一段。
   const lines = h.byId.get('wmap-lines').children;
   assert.equal(lines.length, 4, '两段关系各两条线');
@@ -894,7 +894,7 @@ test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () =>
 });
 
 test('★★ 同一份数据被两个工作区指着 ⇒ 两条线汇到同一个节点', () => {
-  // ★ 这就是这张图存在的**全部理由**：在下拉框里，"我和 2 号工作区共用同一份登录
+  // 这就是这张图存在的全部理由：在下拉框里，"我和 2 号工作区共用同一份登录
   //   状态"这件事一个字都看不出来。
   const shared = [
     WSS[0],
@@ -906,7 +906,7 @@ test('★★ 同一份数据被两个工作区指着 ⇒ 两条线汇到同一�
   assert.equal(h.byId.get('wmap-spaces').children.length, 1, '只有一份数据');
   assert.match(h.byId.get('wmap-spaces').children[0].children[1].textContent, /2 个工作区/);
   const lines = h.byId.get('wmap-lines').children;
-  // 2 条（连接→工作区）+ 2 条（两个工作区都指向同一份）—— 它们是**同一个终点**：
+  // 2 条（连接→工作区）+ 2 条（两个工作区都指向同一份）—— 它们是同一个终点：
   // 那正是"共用"在图上长的样子。
   assert.equal(lines.length, 4);
   assert.equal(lines[2].attrs.d.split('C')[1], lines[3].attrs.d.split('C')[1],
@@ -928,7 +928,7 @@ test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那
   assert.equal(sel.value, '', '初值选中"跟随默认"');
   assert.match(h.byId.get('ws-hint').textContent, /会新建一个空白工作区/);
 
-  // ★ 默认值一变（用户敲了地址），那一项的**标签**要跟着变 —— 这一格显示的是
+  // 默认值一变（用户敲了地址），那一项的标签要跟着变 —— 这一格显示的是
   //   "按现在这个地址会落到哪儿"，显示错了就是"界面在说一件不成立的事"。
   h.run('wsDefault = "w000000000002";');
   h.fn('renderFormWorkspace')();
@@ -941,9 +941,9 @@ test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那
   assert.equal(h.byId.get('f-workspace').value, 'w000000000001');
   assert.match(h.byId.get('ws-hint').textContent, /会用「工作区 1」/);
 
-  // ── 用户要一个**新的**：那一项要被真的选中，不能被吞回去 ──
-  //   ★ 一个"找不到就空着"的兜底如果写成了 `list.some(id === keep)`，那么
-  //     `__new__` 这个**不在列表里**的值会被悄悄换成空串 —— 界面回到"默认"，
+  // ── 用户要一个新的：那一项要被真的选中，不能被吞回去 ──
+  //   一个"找不到就空着"的兜底如果写成了 `list.some(id === keep)`，那么
+  //     `__new__` 这个不在列表里的值会被悄悄换成空串 —— 界面回到"默认"，
   //     而保存时发上去的就是"没表态"，用户点的那一项从头到尾没生效。
   h.run('wsPicked = "__new__";');
   h.fn('renderFormWorkspace')();
@@ -960,8 +960,8 @@ test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那
   assert.equal(sel2.value, 'w000000000001', '初值是它现在那个');
   assert.equal(h.byId.get('ws-hint').textContent, '不变。');
 
-  // ★ 换一个：那一句话必须说清"原来那个里面的东西不会跟着走" ——
-  //   换工作区 = 换 origin = 浏览器**重新加载**，这是用户按下保存之前唯一的机会。
+  // 换一个：那一句话必须说清"原来那个里面的东西不会跟着走" ——
+  //   换工作区 = 换 origin = 浏览器重新加载，这是用户按下保存之前唯一的机会。
   h.run('wsPicked = "w000000000002";');
   h.fn('renderFormWorkspace')();
   assert.match(h.byId.get('ws-hint').textContent, /切到「工作区 2」/);
@@ -981,9 +981,9 @@ test('★ 状态条那个选择器：共用同一份工作区列表，选中"该
 });
 
 test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {
-  // ★★ 这一条守的是**多开**（`contributes.concurrent: true`：第二份拿到自己的
+  // 这一条守的是多开（`contributes.concurrent: true`：第二份拿到自己的
   //   临时数据 = 自己的槽，于是两条同时在跑）。标签上写的是插件的显示名，
-  //   于是**两个标签一模一样** —— 而它们指着两份不同的数据、两个不同的本地端口。
+  //   于是两个标签一模一样 —— 而它们指着两份不同的数据、两个不同的本地端口。
   //   用户点哪一个都有一半概率点错，而"点错了"的表现是"我的编辑器里东西不对了"。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run('SESS = { sessions: ['
@@ -997,7 +997,7 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
     '★ 同名时必须补区分符 —— 两个一模一样的标签等于没有标签');
   assert.match(tabs[0].textContent, /18080/, '区分符是本地端口');
   assert.match(tabs[1].textContent, /18081/);
-  // 而**不同名时一个字都不加**：给每一条都挂一个端口，等于把"这两条需要分"
+  // 而不同名时一个字都不加：给每一条都挂一个端口，等于把"这两条需要分"
   // 说给所有人听（设计律：非必要不提示）。
   h.run(`SESS = { sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } },
@@ -1014,7 +1014,7 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
 });
 
 test('★★ 那颗「调试」标签：只在假站点里出现，点它是把面板抬回来', async () => {
-  // ★★ 它 2026-10-11 加，理由是**物理**的：会话的页面是原生视图，从 y=30 往下盖住
+  // 它 2026-10-11 加，理由是物理的：会话的页面是原生视图，从 y=30 往下盖住
   //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
   //   所以"回到面板"这件事只能由这 30px 里的一颗标签做。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
@@ -1023,7 +1023,7 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
     + ' return Promise.resolve({ ok: true }); };'
     + 'window.slurmate.setFront = (slot) => { window.__front = slot; };');
   const one = (h) => h.byId.get('session-tabs').children;
-  /** 那条栏里**叫「调试」的那一颗**（会话标签与它同住一条栏，所以不能数总数）。 */
+  /** 那条栏里叫「调试」的那一颗（会话标签与它同住一条栏，所以不能数总数）。 */
   const devTab = (h) => one(h).filter((b) => b.textContent === '调试');
   const ONE_SESSION = `SESS = { sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`;
@@ -1036,14 +1036,14 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'),
     '★ 一条会话 + 没有调试 ⇒ 整条收起来（它不提供任何选择）');
 
-  // ── ② 开发者模式，但**没连上**（站在第一屏）：也不出现 ──
+  // ── ② 开发者模式，但没连上（站在第一屏）：也不出现 ──
   //   还没进去，也就没有"被盖住的面板"这回事。
   h.run('devState = { on: true, saved: true }; connected = false;');
   h.fn('renderTabs')();
   assert.deepEqual(devTab(h), [], '★ 没连上（还在第一屏）时不许出现');
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 
-  // ── ③ 在假站点里：出现，而且**一条会话时也在**（那是唯一回得来的路）──
+  // ── ③ 在假站点里：出现，而且一条会话时也在（那是唯一回得来的路）──
   h.run('connected = true;');
   h.fn('renderTabs')();
   assert.equal(one(h).length, 2, '一条会话 + 一颗「调试」');
@@ -1067,7 +1067,7 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
   assert.equal(h.byId.get('debug-title').textContent, '调试 · alice@198.51.100.7',
     '★ 第四屏的标题同样要带上是哪一个站点');
 
-  // ── ⑤ 抬不起来要**说出来**：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
+  // ── ⑤ 抬不起来要说出来：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
   h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"
     + "$('screen-debug').classList.add('hidden');");
   await devTab(h)[0].onclick();
@@ -1078,7 +1078,7 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
 });
 
 test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
-  // ★★ 2026-10-11 改：上色的对象从那个 6px 的圆点换成了**边栏自己** ——
+  // 2026-10-11 改：上色的对象从那个 6px 的圆点换成了边栏自己 ——
   //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。
   //   于是这个壳里取的元素也跟着换，而判据一个字没变（三档、各是什么）。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
@@ -1091,7 +1091,7 @@ test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它�
   h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true, snap: {} }], front: "a" };');
   h.fn('renderRails')();
   assert.equal(rail(), 'rail rail-r hot', '有作业在跑才亮');
-  // ★ 而"已经结束但记录还在"那一条**不算**：`live` 是主进程给的判据，
+  // 而"已经结束但记录还在"那一条不算：`live` 是主进程给的判据，
   //   拿"这张表非空"当判据的话，一个只剩尸体的槽会让右栏一直亮着。
   h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: false, snap: {} }], front: "a" };');
   h.fn('renderRails')();
@@ -1099,10 +1099,10 @@ test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它�
 });
 
 test('★★ 第二屏那颗「临时离开」只在真有作业在跑时出现', () => {
-  // ★★ 2026-10-11：它从第一屏搬到了第二屏的标题带上，判据也从 `connected`
-  //   （那一屏只有连着才进得来，于是那个条件恒为真）换成了**有没有作业在跑** ——
+  // 2026-10-11：它从第一屏搬到了第二屏的标题带上，判据也从 `connected`
+  //   （那一屏只有连着才进得来，于是那个条件恒为真）换成了有没有作业在跑 ——
   //   没有作业可"离开"的时候摆一颗按下去什么也不发生的按钮，是在说一件不成立的事。
-  //   ★ 而它必须挂在 `renderSessions` 那一路上：作业会在用户**待在这一屏的时候**
+  //   而它必须挂在 `renderSessions` 那一路上：作业会在用户待在这一屏的时候
   //     起停（另一台电脑接管、作业自己跑完、从作业那一屏起了一条新的）。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   const hidden = () => h.byId.get('btn-leave').classList.contains('hidden');
@@ -1111,7 +1111,7 @@ test('★★ 第二屏那颗「临时离开」只在真有作业在跑时出现'
   h.fn('renderSessions')({ sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: {} }], front: 'a' });
   assert.equal(hidden(), false, '有作业在跑才出现');
-  // ★ 而"已经结束但记录还在"那一条**不算** —— 与右栏那一条**同一个判据**
+  // 而"已经结束但记录还在"那一条不算 —— 与右栏那一条同一个判据
   //   （`hasRunningSession()` 就是 `liveCount() > 0`，不是各写一遍）。
   h.fn('renderSessions')({ sessions: [
     { slot: 'a', service: '编辑器', live: false, snap: {} }], front: 'a' });
@@ -1124,7 +1124,7 @@ test('★★ 连上之后才有两条边栏，而且它们是在状态条**下�
   h.fn('renderConnections')(CONNS);
   assert.equal(h.run('document.body.classList.contains("connected")'), false,
     '没连上就不该有边栏');
-  // ★ 走 `setConnected`（2026-10-11 起那一格只有这一个入口）：它顺手把跟着
+  // 走 `setConnected`（2026-10-11 起那一格只有这一个入口）：它顺手把跟着
   //   `connected` 走的两个东西当场重画 —— 两条边栏与状态条上那颗「调试」标签。
   //   裸赋值 + 重画列表那条老路已经删掉了（两处各写一遍迟早漂开）。
   h.run('setConnected(true);');
@@ -1144,35 +1144,35 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   const blocks = h.byId.get('plugin-blocks').children;
   assert.equal(blocks.length, 2);
   const selOf = (b) => childrenOf(b).find((x) => x.className === 'plug-space') || null;
-  // ★ 按 class 找，不按"块里第一个 SELECT"找：块里现在还有一个 GRES 下拉（高级选项
-  //   那一格，v0.18 起长在每一块里）—— 而这条用例问的是**数据**那一格。
-  // ★ 发出去的那个对象是在 vm 另一个 Realm 里造的，`deepStrictEqual` 会拿**原型**
+  // 按 class 找，不按"块里第一个 SELECT"找：块里现在还有一个 GRES 下拉（高级选项
+  //   那一格，v0.18 起长在每一块里）—— 而这条用例问的是数据那一格。
+  // 发出去的那个对象是在 vm 另一个 Realm 里造的，`deepStrictEqual` 会拿原型
   //   去比，于是两个字段完全一样的对象也说"不相等"。所以比字段时走一趟 JSON。
   const raw = (i) => h.run(`window.__calls[${i}]`);
   const sent = (i) => JSON.parse(JSON.stringify(raw(i)));
-  // ★★ 而**"键在不在"必须查在原对象上** —— `JSON.stringify` 会把值为 `undefined`
-  //    的键**整个丢掉**，于是"没有 `spaceId` 这个键"与"有、值是 undefined"在
+  // 而"键在不在"必须查在原对象上 —— `JSON.stringify` 会把值为 `undefined`
+  //    的键整个丢掉，于是"没有 `spaceId` 这个键"与"有、值是 undefined"在
   //    `sent()` 眼里长得一模一样。第一版的判据就戴了这个遮罩：把界面那边改成
-  //    「永远发一个 `spaceId: undefined`」时它**照样绿**。见下面第 ③ 段。
+  //    「永远发一个 `spaceId: undefined`」时它照样绿。见下面第 ③ 段。
 
-  // ★ 不要数据空间的插件**没有这一格**（`ports: 0`）。画一个空下拉等于凭空许诺
+  // 不要数据空间的插件没有这一格（`ports: 0`）。画一个空下拉等于凭空许诺
   //   一个不存在的东西 —— 它没有存储、没有端口，也就没有"用哪一份"。
   assert.equal(selOf(blocks[1]), null, '★ 0 个端口的插件不该有那一格');
 
   const sel = selOf(blocks[0]);
   assert.ok(sel, '要数据的插件必须有那一格');
-  // 选项 = 这个插件的两份 + 「另开一份」。★ **没有"跟随默认"那一项** ——
+  // 选项 = 这个插件的两份 + 「另开一份」。没有"跟随默认"那一项 ——
   // 这个工作区已经指着一份了，再摆一个"默认"只会让下拉停在一个不生效的值上。
   assert.deepEqual(sel.children.map((o) => o.value),
     ['s000000000001', 's000000000002', '__new_space__']);
   assert.equal(sel.value, 's000000000001', '初值是它现在指着的那一份');
-  // ★ 「还有谁在用」：s2 被 2 号工作区指着，s1 没有别人 —— 两句话必须**分开**，
+  // 「还有谁在用」：s2 被 2 号工作区指着，s1 没有别人 —— 两句话必须分开，
   //   因为用户按它决定"改这一格会不会动到别人"。
   assert.match(sel.children[0].textContent, /数据 1 · 端口 18080$/);
   assert.match(sel.children[1].textContent, /数据 2 · 端口 18081（「工作区 2」也在用）/);
 
-  // ── ① 选另一份已存在的 ⇒ 发一个**数据 id** ──
-  //   ★ `connectionId` 也一起发：主进程要拿它回答"这张表是替**哪一条**连接改的"
+  // ── ① 选另一份已存在的，发一个数据 id ──
+  //   `connectionId` 也一起发：主进程要拿它回答"这张表是替哪一条连接改的"
   //     （共用的一张表要分叉时，得指名分给谁）—— 它不拿"谁活跃"去猜。
   sel.value = 's000000000002';
   await sel.onchange();
@@ -1180,14 +1180,14 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
     { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1',
       spaceId: 's000000000002' });
 
-  // ── ② 选「另开一份」⇒ 发 `null`（**不是**空串、也不是某个 id）──
+  // ── ② 选「另开一份」，发 `null`（不是空串、也不是某个 id）──
   sel.value = '__new_space__';
   await sel.onchange();
   assert.deepEqual(sent(1),
     { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1', spaceId: null });
 
-  // ── ③ 这一格还没有值（引用表里没有这个插件）⇒ 发的是**没有 spaceId 这个键** ──
-  //   ★ 这一条是整个协议里最容易写错的一格：「没表态」与「要一个新的」合并成一种
+  // ── ③ 这一格还没有值（引用表里没有这个插件），发的是没有 spaceId 这个键 ──
+  //   这一条是整个协议里最容易写错的一格：「没表态」与「要一个新的」合并成一种
   //     值时，用户点了「另开一份」而系统理解成"什么都不做"（或者反过来，用户什么都
   //     没做而系统又开了一份）—— 两边都不报错。
   const empty = WSS.map((l) => ({ ...l, refs: {}, spaces: [] }));
@@ -1203,7 +1203,7 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   // 选「跟随默认」（什么都没改）
   sel2.value = '';
   await sel2.onchange();
-  // ★ 查在**原对象**上（`sent` 会把这一格抹平，见上面那段）：
+  // 查在原对象上（`sent` 会把这一格抹平，见上面那段）：
   assert.equal('spaceId' in raw(2), false,
     '★ 「没表态」必须是**键缺席** —— 界面不许把一个显式的 `spaceId: undefined` 发出去：'
     + '那是"这一格有值、值是空的"，它与"这一格没有值"是不是同一件事，取决于**传输层**'
@@ -1216,7 +1216,7 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   assert.deepEqual(sent(3),
     { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1', spaceId: null });
 
-  // ── ④ 一条连接都没有（开发者模式）⇒ 整格不画 ──
+  // ── ④ 一条连接都没有（开发者模式），整格不画 ──
   h.run('boot = { connections: [], workspaces: [], activeConnectionId: null, spaces: [] };');
   h.fn('renderPlugins')(PV);
   assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,
@@ -1224,20 +1224,20 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
 });
 
 test('★★ 高级选项：一块一份，两块各填各的，值不串到另一块', async () => {
-  // ★★ 2026-10-11 加（界面第三轮 F4）。那几格从前是**全屏共用的一份**，长在第二屏
-  //   最底下 —— 而它喂的是**某一块**的「开始会话」。三四个插件并排时，"我填的 4 核
+  // 2026-10-11 加（界面第三轮 F4）。那几格从前是全屏共用的一份，长在第二屏
+  //   最底下 —— 而它喂的是某一块的「开始会话」。三四个插件并排时，"我填的 4 核
   //   是给谁的"在界面上根本表达不出来。
   //
-  //   ★ 这条盯的是**串味**：甲填的 4 核出现在乙的提交里，而界面上一切正常、
-  //     两个下拉也各自显示着各自的值。判据只能是"按下去之后**发出去的那一份**"。
+  //   这条盯的是串味：甲填的 4 核出现在乙的提交里，而界面上一切正常、
+  //     两个下拉也各自显示着各自的值。判据只能是"按下去之后发出去的那一份"。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },
   'window.__subs = [];'
   + 'window.slurmate.start = (res, kind, port) => { window.__subs.push({ res, kind, port });'
   + '  return Promise.resolve({ ok: true }); };');
   h.fn('renderPlugins')(PV);
-  // 分区表是**站点级**的（全局一份），它到得比插件块早或晚都可能 —— 这里刻意在
-  // 块画好**之后**才给，验的是"它变了，每一块里那一格都跟着换"。
+  // 分区表是站点级的（全局一份），它到得比插件块早或晚都可能 —— 这里刻意在
+  // 块画好之后才给，验的是"它变了，每一块里那一格都跟着换"。
   h.fn('renderPartitions')([
     { name: 'gpu', allowed: true,
       gres: [{ name: 'gpu', type: 'a100', per_node_max: 4, label: 'a100' }] },
@@ -1282,7 +1282,7 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
   assert.equal(a0[3].max, '4', '★ 上限来自服务端给的 per_node_max，不是写死的数');
   a0[3].value = '2';
 
-  // ── 乙一个字没动：它那几格必须是**它自己**的样子 ──
+  // ── 乙一个字没动：它那几格必须是它自己的样子 ──
   assert.deepEqual([a1[0].value, a1[1].value, a1[4].value], ['', '', '']);
   assert.equal(a1[2].value, '', '★ 乙的 GRES 还停在"用插件的默认"');
   assert.equal(a1[3].disabled, true, '★ 而乙的数量那一格还是灰的（甲挑了卡不影响它）');
@@ -1301,7 +1301,7 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
 });
 
 test('★★ 共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
-  // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面**不许**替用户选一个：
+  // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：
   // 选错的那一个会让另外几条连接跟着一起变，而它们各自的界面上什么都没发生 ——
   // 用户要到下一次开会话时才发现自己动了别人的数据。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
@@ -1323,7 +1323,7 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
 
   const dlg = h.byId.get('fork-dlg');
   assert.equal(dlg.open, true, '★ 共用的一张表必须先问 —— 替用户选一个就是把别人改了');
-  // ★ 名字由**界面**取（同一条 `connLabel` 规则），主进程只回 id ——
+  // 名字由界面取（同一条 `connLabel` 规则），主进程只回 id ——
   //   两处各拼一遍备注/地址的回落规则迟早会漂开。
   assert.match(h.byId.get('fork-body').textContent, /bob@198\.51\.100\.9:10100/,
     '要说得出"还有谁在用" —— 只说"还有 1 条连接"等于没说');
@@ -1331,14 +1331,14 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
   assert.deepEqual(sent(0), { workspaceId: 'w000000000001', pluginId: 'p1',
     connectionId: 'c1', spaceId: 's000000000002' }, '第一发不带 scope');
 
-  // ── 选「只改这条连接」⇒ 带 scope: 'fork' ──
+  // ── 选「只改这条连接」，带 scope: 'fork' ──
   h.run('$("fork-one").onclick()');
   const r = await p;
   assert.equal(r.ok, true);
   assert.equal(dlg.open, false, '选完要把框关掉');
   assert.deepEqual(sent(1), { workspaceId: 'w000000000001', pluginId: 'p1',
     connectionId: 'c1', spaceId: 's000000000002', scope: 'fork' });
-  // ★ 分叉这件事要**说出来**，而且要说清"数据没复制" —— 否则用户会以为
+  // 分叉这件事要说出来，而且要说清"数据没复制" —— 否则用户会以为
   //   自己刚才复制了一份存储（那正是他不会轻易按的一个键）。
   assert.match(body(), /分了一张自己的表/);
   assert.match(body(), /数据还是同一份/);
@@ -1353,8 +1353,8 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
   assert.equal((await q).ok, false);
   assert.equal(h.run('window.__calls.length'), 1, '★ 取消之后不许再发一发');
 
-  // ── 选「全部一起改」⇒ scope: 'all'，而且**第二问（would_discard）要把它带上** ──
-  //   ★ 这一格是最容易漏的：`would_discard` 的重试如果只补 `confirmDiscard`、
+  // ── 选「全部一起改」，scope: 'all'，而且第二问（would_discard）要把它带上 ──
+  //   这一格是最容易漏的：`would_discard` 的重试如果只补 `confirmDiscard`、
   //     丢了 `scope`，请求会被 `shared` 再拦一次 —— 用户看到同一个框弹两遍，
   //     而"再选一次"的结果与上一次未必一样。
   h.run('window.__replies = ['
@@ -1373,7 +1373,7 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
 });
 
 test('★★ 这个架子真的抓得住 P1 那个缺陷（拿一个故意的错来验）', () => {
-  // ★ 一条抓不住真缺陷的守卫等于没有守卫。这里把 P1 那个错误**原样放回去**：
+  // 一条抓不住真缺陷的守卫等于没有守卫。这里把 P1 那个错误原样放回去：
   //   一个从未声明过的变量，出现在画第一屏的那条路上。
   const broken = SRC.replace('    li.append(t, m, main, edit, del);',
     '    li.append(t, m, lay, main, edit, del);');
@@ -1396,9 +1396,9 @@ function childrenOf(e) {
 }
 
 test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在那一刻被藏起来）', () => {
-  // ★★ 这一条守的是一个"最该看见的时候看不见"的缺陷：`#kv`（含「作业状态」那一句，
+  // 这一条守的是一个"最该看见的时候看不见"的缺陷：`#kv`（含「作业状态」那一句，
   //    也就是 `jobstate.js` 译好的失败原因与退出码）从前的可见性判据是
-  //    `st !== 'ended'` —— 而作业一结束会话就进 `ended` ⇒ **原因当场消失**。
+  //    `st !== 'ended'` —— 而作业一结束会话就进 `ended` 原因当场消失。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run("SCREEN = 'jobs';"
     + "SESS = { sessions: [{ slot: 'a', service: '编辑器', live: false, snap: null }],"
@@ -1414,7 +1414,7 @@ test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在
   assert.match(kv._text || childrenOf(kv).map((x) => x._text).join(' '), /作业状态/,
     '而「作业状态」那一行要在里面');
 
-  // ★ 反过来的那一半：`idle`（还没有过任何会话）仍然不露 —— 那时没有任何东西可说。
+  // 反过来的那一半：`idle`（还没有过任何会话）仍然不露 —— 那时没有任何东西可说。
   h.run("SESS = { sessions: [], front: null };");
   h.fn('renderSnapshot')(null);
   assert.equal(h.byId.get('job-detail').classList.contains('hidden'), true,
@@ -1439,7 +1439,7 @@ test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按�
   assert.match(after1[0] || '', /错误/, '★ 非零退出码 ⇒ 那一档是「错误」，不是一句平静的信息');
   assert.equal(after1.length, 1);
 
-  // ★ 同一份快照再来一次（推送会反复来）**不许再报一遍** —— 判据是"上一轮还不是
+  // 同一份快照再来一次（推送会反复来）不许再报一遍 —— 判据是"上一轮还不是
   //   终态"，不是"状态是 ended"；后者会在每一次推送时都重复一遍。
   ended('a', '143:0');
   assert.equal(notices().length, 1, '同一件事只说一次');
@@ -1461,7 +1461,7 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
     return [b._text].concat(childrenOf(b).map((x) => x._text)).join(' | ');
   };
 
-  // ① 两份都有；`.err` 是 `null` ⇒ 那一块**不出现**（设计律 1：空框在说"本该有东西"）
+  // ① 两份都有；`.err` 是 `null` 那一块不出现（设计律 1：空框在说"本该有东西"）
   h.run('window.slurmate.jobLog = async () => ({ ok: true, data: {'
     + " out: { path: '/h/.slurmate/logs/slurm-1.out', bytes: 40000, lines: 200,"
     + " truncated: true, mtime: 1, text: '宿主的一行\\n服务的一行', why: null },"
@@ -1472,7 +1472,7 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   assert.match(shown(), /这是尾部/, '★ 拿不全的时候必须说出来 —— 不说的话用户会以为那就是全部');
   assert.equal(/标准错误/.test(shown()), false, '`.err` 是 null ⇒ 那一块不出现');
 
-  // ② 「取不到」与「确实没有」长得**不一样**（并成一句的话，一个模式不对的日志
+  // ② 「取不到」与「确实没有」长得不一样（并成一句的话，一个模式不对的日志
   //    会被读成"这台站点上没有日志"）
   h.run('window.slurmate.jobLog = async () => ({ ok: true, data: {'
     + " out: { path: '/h/a.out', bytes: null, lines: null, truncated: null,"
@@ -1482,12 +1482,12 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   assert.match(shown(), /取不到：component_group_or_world_writable/);
   assert.match(shown(), /\/h\/a\.out/, '路径要给出来（可复制）');
 
-  // ③ 两份都没有 ⇒ 一句"还没有写出任何东西"，而不是一个空框
+  // ③ 两份都没有，一句"还没有写出任何东西"，而不是一个空框
   h.run("window.slurmate.jobLog = async () => ({ ok: true, data: { out: null, err: null } });");
   await h.run('loadJobLog()');
   assert.match(shown(), /还没有写出任何东西/);
 
-  // ④ 整条 op 失败（老守护进程没有这个能力）⇒ 如实说，不画空框
+  // ④ 整条 op 失败（老守护进程没有这个能力），如实说，不画空框
   h.run("window.slurmate.jobLog = async () => ({ ok: false, unsupported: true,"
     + " error: '这个站点太旧' });");
   await h.run('loadJobLog()');

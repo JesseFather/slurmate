@@ -13,15 +13,15 @@
 // limitations under the License.
 
 /**
- * integration.mjs —— 端到端跑一遍**除 Electron 之外**的全部链路。
+ * integration.mjs —— 端到端跑一遍除 Electron 之外的全部链路。
  *
  * 覆盖：假后端 → SessionController 状态机 → Tunnel（真的本地中继）→
- *       **插件自己的作业侧**（夹具，真的进程、真的 HTTP）→ 登录契约 →
+ *       插件自己的作业侧（夹具，真的进程、真的 HTTP）→ 登录契约 →
  *       goodbye → 释放。
  *
- * ★★ 隧道那头**不再是一个内置的假网页**：假站点现在真的把插件的 `job/start.sh`
+ * 隧道那头不再是一个内置的假网页：假站点现在真的把插件的 `job/start.sh`
  *    跑起来（见 fake-job.js），于是"服务是谁"这件事在开发者模式里也成立 ——
- *    它是**这个插件的作业侧**，口令由它自己生成、写进会话文件。
+ *    它是这个插件的作业侧，口令由它自己生成、写进会话文件。
  *
  * 这台机器上没有 Xvfb，Electron 界面跑不了。但界面之下的每一层都能在这里真跑，
  * 所以这一层出问题一定不是「Electron 的锅」—— 这正是分层验证的意义。
@@ -38,7 +38,7 @@ const { FakeBackend } = require('../src/main/backend-fake.js');
 const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/session.js');
 const { Tunnel, probeLocalPort } = require('../src/main/tunnel.js');
 
-// ★ 假后端扮演的是一个**具体的站点**，"那个站点装了哪些插件"由调用方告诉它 ——
+// 假后端扮演的是一个具体的站点，"那个站点装了哪些插件"由调用方告诉它 ——
 //   它自己不认识任何插件，基座也不认识。这里给它的是仓库里真那个 code-server 插件。
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const REPO = path.join(HERE, '..', '..');
@@ -49,18 +49,18 @@ const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
 
 /**
- * 夹具的**站点树**：仓库里那棵 code-server 树的一份拷贝，只换掉**站点侧那一半**。
+ * 夹具的站点树：仓库里那棵 code-server 树的一份拷贝，只换掉站点侧那一半。
  *
- * ★★ 为什么必须换：假站点现在**真的把 `job/start.sh` 跑起来**，而仓库里那一份
+ * 为什么必须换：假站点现在真的把 `job/start.sh` 跑起来，而仓库里那一份
  *    要这台机器上真的有一个 `code-server`（CI 上没有）。换掉的是 `job/start.sh`
- *    与它旁边的 `job/serve.js` —— **客户端那一半一个字节都不动**，清单还是那份
+ *    与它旁边的 `job/serve.js` —— 客户端那一半一个字节都不动，清单还是那份
  *    清单，登录契约还是那份契约。
  *
- * ★ 那个 serve.js 跑的是客户端里那个假 web 服务（`demo-server.js`），而契约从
- *   **这份插件自己的清单**里读：于是一条会话两端都是真的 —— 隧道那头是这段代码
+ * 那个 serve.js 跑的是客户端里那个假 web 服务（`demo-server.js`），而契约从
+ *   这份插件自己的清单里读：于是一条会话两端都是真的 —— 隧道那头是这段代码
  *   起的进程，登录走的是清单声明的那一套。
  *
- * ★ 它同时是"作业侧那三条硬规矩"的一个真例子：**不重定向输出**（契约 §5.5）、
+ * 它同时是"作业侧那三条硬规矩"的一个真例子：不重定向输出（契约 §5.5）、
  *   等就绪、成功时写 `$SVC_PID`。
  */
 function fixtureSiteTree() {
@@ -103,7 +103,7 @@ function fixtureSiteTree() {
   return root;
 }
 
-// ★ 一棵，全程共用：假站点那棵**样例**树（与 app 在开发者模式下读到的是同一处，
+// 一棵，全程共用：假站点那棵样例树（与 app 在开发者模式下读到的是同一处，
 //   见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
 const SITE_TREE = fixtureSiteTree();
 const SITE_PLUGIN_DIR = () => SITE_TREE;
@@ -140,12 +140,12 @@ function keepAlive() {
 }
 
 /**
- * 起一个假后端，并**把清理注册到 t.after**。
+ * 起一个假后端，并把清理注册到 t.after。
  * 必须在 after 里清理而不是在测试体末尾：断言失败会抛异常，末尾的清理就跑不到，
  * 那个 HTTP 服务会一直挂着，让整个测试进程不退出（我第一版就踩了这个）。
  */
 async function makeBackend(t, opts = {}) {
-  // ★ 假站点**真的起进程**，所以它要一处地方放会话文件、作业日志与那个假用户的家
+  // 假站点真的起进程，所以它要一处地方放会话文件、作业日志与那个假用户的家
   //   目录 —— 与 app 里那一条一样（index.js 传 `siteJobsDir`）。不给它的症状是
   //   "会话起不来"，而报出来的话指的是作业目录，不是这一行。
   const jobsRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-jobs-'));
@@ -161,7 +161,7 @@ test('隧道：目标解析必须是字面 IPv4，否则拒绝', () => {
   assert.deepEqual(Tunnel.parseTarget('192.0.2.11:55017'),
     { host: '192.0.2.11', port: 55017, raw: '192.0.2.11:55017' });
 
-  // ★ 这几条是安全关键。解析节点名会让客户端用的地址与 nft 里的 ip daddr 分叉，
+  // 这几条是安全关键。解析节点名会让客户端用的地址与 nft 里的 ip daddr 分叉，
   //   而 ACL 失效的表现是「一切正常，只是没有保护」。
   for (const bad of ['node01:55017', 'localhost:55017', 'example.com:55017', '']) {
     assert.throws(() => Tunnel.parseTarget(bad), /IPv4|格式|为空/, `应拒绝 ${JSON.stringify(bad)}`);
@@ -175,17 +175,17 @@ test('隧道：目标解析必须是字面 IPv4，否则拒绝', () => {
 
 test('★★ 首选端口必须是 1–65535 的整数：null 会**安静地**绑到一个随机端口', async () => {
   // `preferredPort + i` 对 null 是合法的 JS（`null + 0 === 0`），而 `listen(0)`
-  // 在操作系统那边的意思是"随便挑一个" —— 于是它会**成功地**绑到一个临时端口、
+  // 在操作系统那边的意思是"随便挑一个" —— 于是它会成功地绑到一个临时端口、
   // `start()` 返回 `{port: 0}`，`snapshot().localPort` 从此指向一个并不存在的端口、
   // `origin` 是 null。全程没有一处报错。
   //
-  // ★ 这一条是**潜伏**的（三个调用点今天都挡住了），所以它唯一的证据就是这条用例：
+  // 这一条是潜伏的（三个调用点今天都挡住了），所以它唯一的证据就是这条用例：
   //   把校验拿掉，这里会绿着返回 `{port: 0}` —— 而不是红。
   //
-  // ★★ **每个候选值一个全新的 Tunnel，而且 `stop()` 放在 `finally` 里。**
-  //    这不是洁癖 —— 变异验证抓到过：把校验拿掉之后，`start()` 会**成功**绑到一个
-  //    临时端口，于是 `assert.rejects` 变红**之前**，那个监听器已经起来了，而一条
-  //    没人关的监听器会让 node 的事件循环永远不空 ⇒ **整轮用例挂死**（TAP 停在
+  // 每个候选值一个全新的 Tunnel，而且 `stop()` 放在 `finally` 里。
+  //    这不是洁癖 —— 变异验证抓到过：把校验拿掉之后，`start()` 会成功绑到一个
+  //    临时端口，于是 `assert.rejects` 变红之前，那个监听器已经起来了，而一条
+  //    没人关的监听器会让 node 的事件循环永远不空，整轮用例挂死（TAP 停在
   //    那里不动，0% CPU）。"红"必须是一句判词，不能是一次挂起 —— 在 CI 上它就是
   //    一次超时，而超时指向的从来不是真正的那一行。
   const backend = new FakeBackend();
@@ -195,7 +195,7 @@ test('★★ 首选端口必须是 1–65535 的整数：null 会**安静地**�
       await assert.rejects(
         () => t.start({ preferredPort: bad, target: '203.0.113.9:9999' }),
         /端口/, `应拒绝 ${JSON.stringify(bad)}`);
-      // ★ 一次都不许真的绑上去：判"抛了"还不够，还要判**没有副作用**。
+      // 一次都不许真的绑上去：判"抛了"还不够，还要判没有副作用。
       assert.equal(t.port, null, `失败之后不许留下一个端口号（${JSON.stringify(bad)}）`);
       assert.equal(t.state, 'stopped', '状态也不许变成 listening');
     } finally {
@@ -205,14 +205,14 @@ test('★★ 首选端口必须是 1–65535 的整数：null 会**安静地**�
 });
 
 test('★★ 端口探测：问的必须与真绑的是**同一件事**，而且探完不许占着', async () => {
-  // ★ 它是「端口被占了，要不要临时换」那个问题的**全部依据**（见 index.js 的
+  // 它是「端口被占了，要不要临时换」那个问题的全部依据（见 index.js 的
   //   `startSession`）：探测与真绑不是同一件事的话，用户答的是一个问题、撞上的是
   //   另一个 —— 而两次都"成功"了，只是中间那个端口不对。
   const port = await freePort();
   assert.deepEqual(await probeLocalPort(port), { free: true, code: null },
     '空着的端口要报空着');
 
-  // ★ **探完必须放开。** 忘了 `close()` 的话，探测自己就把端口占住了 ——
+  // 探完必须放开。忘了 `close()` 的话，探测自己就把端口占住了 ——
   //   于是"空着的端口"探测一次之后永远报"被占"，而症状是"每个会话第一次都能起、
   //   第二次起不来"，且每次报的都是同一句关于端口被占的话。
   assert.deepEqual(await probeLocalPort(port), { free: true, code: null },
@@ -224,7 +224,7 @@ test('★★ 端口探测：问的必须与真绑的是**同一件事**，而且
     const got = await probeLocalPort(port);
     assert.equal(got.free, false, '★ 真的被占着就要报被占');
     assert.equal(got.code, 'EADDRINUSE');
-    // ★ 而它必须与隧道**是同一个判据**：探测说"被占"的那个端口，隧道也必须绑不上
+    // 而它必须与隧道是同一个判据：探测说"被占"的那个端口，隧道也必须绑不上
     //   从而顺移。两边分家的话，用户答的是"端口被占了"，而真绑时换的是另一个
     //   判断 —— 探测就成了一个与事实无关的仪式。
     const t = new Tunnel({ backend: new FakeBackend() });
@@ -239,7 +239,7 @@ test('★★ 端口探测：问的必须与真绑的是**同一件事**，而且
     await new Promise((r) => squatter.close(r));
   }
 
-  // ★ 不合法端口**当场抛**，不许变成"这个端口被占着"：后者会让用户去关一个
+  // 不合法端口当场抛，不许变成"这个端口被占着"：后者会让用户去关一个
   //   无关的程序。判据与隧道那一份是同一个（`assertPort`）—— 两份实现会漂开，
   //   而漂开的形态是"探测说占着、真绑抛的是另一回事"。
   for (const bad of [null, 0, 65536, '18080', 18080.5]) {
@@ -289,10 +289,10 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.match(snap.tunnelTarget, /^127\.0\.0\.1:\d+$/);
   assert.equal(snap.dev, true);
 
-  // ★ 服务端补的默认值必须真的落到会话上 —— 客户端不填，不等于没有值。
+  // 服务端补的默认值必须真的落到会话上 —— 客户端不填，不等于没有值。
   assert.equal(snap.resources.cpus, 2, '默认 2 核应由服务端填');
   assert.equal(snap.resources.mem, '8G', '默认 8G 应由服务端填');
-  // ★ 分区是从有权限的列表里随机挑的，所以只能断言「落在合法的那个集合里」，
+  // 分区是从有权限的列表里随机挑的，所以只能断言「落在合法的那个集合里」，
   //   不能断言具体是哪一个 —— 那正是这条设计的意思。
   assert.ok(['2080TI', 'A6000', 'RTX8000'].includes(snap.partition),
     `分区应当来自有权限的集合，实际：${snap.partition}`);
@@ -302,9 +302,9 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   assert.ok(seen.includes('submitting'), '应当经过 submitting');
   assert.ok(seen.includes('queued'), '应当经过 queued');
 
-  // ── 通过**真的隧道**打 HTTP ──
+  // ── 通过真的隧道打 HTTP ──
   //
-  // ★★ 口令是**作业侧自己生成、写进会话文件**的那一个（真站点上正是这么来的：
+  // 口令是作业侧自己生成、写进会话文件的那一个（真站点上正是这么来的：
   //    宿主 `gen_password` → 导出给服务 → 写进会话文件 → 守护进程给客户端）。
   //    从前这里是一个写死的常量，而它与隧道那头是谁无关 —— 那是这个假站点最
   //    不像真站点的一处。
@@ -346,7 +346,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   // ── 释放 ──
   const res = await ctl.stop();
   assert.equal(res.ok, true);
-  // ★ 返回 releasing 而不是「已结束」—— `ok:true` 的含义是"这一次 scancel 发出去了、
+  // 返回 releasing 而不是「已结束」—— `ok:true` 的含义是"这一次 scancel 发出去了、
   //   会话进了 releasing"，而不是"作业已经停了"。真守护进程会一直重试到确认作业
   //   消失（`phase_release` 的闸），客户端等不了那么久，所以只能说「已请求释放」。
   assert.equal(res.state, 'releasing');
@@ -370,7 +370,7 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   assert.equal(ctl.state, State.RUNNING);
 
-  // 就算有人传进来一个 `farewell: false`（「只关窗口，作业继续跑」），也**必须**
+  // 就算有人传进来一个 `farewell: false`（「只关窗口，作业继续跑」），也必须
   // 被当成一次正常的释放 —— 一个能被用户点击触发的「不释放」开关，只会误伤：
   // 它命中的所有场景都是用户明确表达了终止意图的场景。
   const res = await ctl.stop({ farewell: false });
@@ -386,7 +386,7 @@ test('★ 主动终止就是彻底终止：没有「保持作业运行」这条�
 test('★★ 取消失败时，那句「这一次没成功」必须一路走到用户眼前', async (t) => {
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 200 });
-  // ★ 先跑一遍**成功**的那条：一个永远失败的夹具，会让下面那条断言
+  // 先跑一遍成功的那条：一个永远失败的夹具，会让下面那条断言
   //   在"warning 是写死的"这种情况下也照样绿。
   const ctlOk = new SessionController({ backend, workspaceId: 'w1' });
   await ctlOk.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
@@ -404,16 +404,16 @@ test('★★ 取消失败时，那句「这一次没成功」必须一路走到�
   await ctl.start({}, { preferredPort: await freePort(), serviceKind: CS_MANIFEST.name });
   const res = await ctl.stop();
 
-  // ★★ 形状是**承重的**：仍然 `ok:true`、仍然是 `releasing`。
-  //    这条请求**被受理了** —— 会话已经进了释放流程，守护进程会一直重试到确认
+  // 形状是承重的：仍然 `ok:true`、仍然是 `releasing`。
+  //    这条请求被受理了 —— 会话已经进了释放流程，守护进程会一直重试到确认
   //    作业消失。回 `ok:false` 等于说"你的动作没生效"，而它生效了、只是没做完；
   //    客户端还会因此劝用户去重试一件已经在做的事。
   assert.equal(res.ok, true, '取消失败不等于请求被拒绝');
   assert.equal(res.state, 'releasing');
-  // ★ 而那句话必须在这儿 —— 协议里 `warning` 这个字段存在的唯一理由就是被显示。
+  // 而那句话必须在这儿 —— 协议里 `warning` 这个字段存在的唯一理由就是被显示。
   assert.ok(/没有成功/.test(res.detail), '那句话必须回到调用方：' + res.detail);
   assert.ok(/重试/.test(res.detail), '而且要说清接下来会怎样：' + res.detail);
-  // ★ 两条路都要到：`stop()` 的返回值给的是调用点，`snapshot()` 给的是界面。
+  // 两条路都要到：`stop()` 的返回值给的是调用点，`snapshot()` 给的是界面。
   assert.ok(/没有成功/.test(ctl.snapshot().warning || ''),
             '还必须进 snapshot().warning —— 界面读的是它：' + ctl.snapshot().warning);
 });
@@ -456,7 +456,7 @@ test('守护进程不可达时：不判定会话结束，且持续重试', async
   await until(() => /心跳/.test(ctl.snapshot().warning || ''),
     { what: '心跳失败被记录', timeout: 3000 });
 
-  // ★ 核心断言：守护进程不可达【绝不能】让客户端以为会话结束了。
+  // 核心断言：守护进程不可达【绝不能】让客户端以为会话结束了。
   //   作业还在计算节点上跑，只是我们暂时问不到它。
   assert.equal(ctl.state, State.RUNNING,
     '守护进程不可达绝不能判定会话结束');
@@ -483,7 +483,7 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 100 });
 
-  // 让 status 永远报一个**不同的** tunnel_target（作业重排到别的节点就是这样）。
+  // 让 status 永远报一个不同的 tunnel_target（作业重排到别的节点就是这样）。
   // 用常量而不是翻转一次：翻转的话下一次轮询又会变回真值，触发第二次重建，
   // 而那一次会把我们正要断言的 warning 覆盖掉。
   const realRpc = backend.rpc.bind(backend);
@@ -506,15 +506,15 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
   const snap = await ctl.start({}, { preferredPort: spacePort, serviceKind: CS_MANIFEST.name });
   assert.equal(snap.localPort, spacePort);
 
-  // ★ 这个控制器**没有** onTunnelPort —— 顺移后的端口不回报给任何人。写回配置会把
-  //   一次**暂时**的冲突变成永久的 origin 变更：冲突消失之后 origin 也回不去，而
+  // 这个控制器没有 onTunnelPort —— 顺移后的端口不回报给任何人。写回配置会把
+  //   一次暂时的冲突变成永久的 origin 变更：冲突消失之后 origin 也回不去，而
   //   原来那份布局本来是可以回来的（下一会话绑回原端口，那份布局也跟着回来）。
-  //   ★ 这一条断言就是那道闸：那个钩子**在控制器上根本不存在**。
+  //   这一条断言就是那道闸：那个钩子在控制器上根本不存在。
   assert.equal(typeof ctl.onTunnelPort, 'undefined',
     '★ 那一份数据的端口是只读属性，控制器里不该有把它报告出去的钩子');
 
   // 制造确定性的 EADDRINUSE：先停掉隧道（它自己正占着这个端口），
-  // 再由**测试**把端口占住。不这么做的话，重建时端口是空的，永远不会顺移。
+  // 再由测试把端口占住。不这么做的话，重建时端口是空的，永远不会顺移。
   await ctl.tunnel.stop();
   const squatter = net.createServer();
   await new Promise((r, j) => {
@@ -528,7 +528,7 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
     { what: '隧道重建并顺移', timeout: 6000 });
 
   const moved = ctl.snapshot().localPort;
-  // ★ 丢掉 Tunnel.start() 返回值的后果：localPort 停在旧值，界面上「本地地址」
+  // 丢掉 Tunnel.start() 返回值的后果：localPort 停在旧值，界面上「本地地址」
   //   那一栏从此指向一个没人监听的端口 —— 而没有任何报错。
   assert.ok(moved >= spacePort + 1 && moved <= spacePort + 19,
     `顺移应当落在扫描区间内，实际 ${moved}`);
@@ -536,7 +536,7 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
     'origin 必须跟着新端口走');
   assert.match(ctl.snapshot().warning || '', /被占用|已改用/,
     '顺移是丢布局的原因，必须说出来');
-  // ★ 还要说清它是**暂时**的：首选端口没被改掉，冲突消失之后下一会话会绑回原处、
+  // 还要说清它是暂时的：首选端口没被改掉，冲突消失之后下一会话会绑回原处、
   //   原来那份布局也跟着回来。不说这一句，用户会以为自己被永久搬走了。
   assert.match(ctl.snapshot().warning || '', /回到/,
     '★ 顺移不改写首选端口 —— 要告诉用户下一会话会回到原来的端口');
@@ -544,13 +544,13 @@ test('★★ 顺移只影响这一次会话：控制器里没有任何「把端�
 
 test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过的要说清"为什么没问你"', async (t) => {
   t.after(keepAlive());
-  // ★★ 这一条守的是那个**接缝的位置**。「端口被占，要不要临时换」这个问题只能在
-  //    **提交之前**问（见 index.js 的 `startSession`）—— 到了控制器这一层，作业
-  //    已经在集群上了，那时问"要不要启动"是骗人的。所以控制器里**没有**
+  // 这一条守的是那个接缝的位置。「端口被占，要不要临时换」这个问题只能在
+  //    提交之前问（见 index.js 的 `startSession`）—— 到了控制器这一层，作业
+  //    已经在集群上了，那时问"要不要启动"是骗人的。所以控制器里没有
   //    `resolvePortConflict` 之类的回调，只有"这一趟答过没有"这一个事实。
-  //    ⇒ 判据是那句**话**：答过的不多话，没答过的那一趟必须自己说明白，
+  //    判据是那句话：答过的不多话，没答过的那一趟必须自己说明白，
   //      否则用户会把一个"提交之后才发现"的窗口当成一条漏掉的询问。
-  // ★ 每一趟一个**新后端**：假后端按真实守护进程的样子给每个 uid 限一个活跃会话，
+  // 每一趟一个新后端：假后端按真实守护进程的样子给每个 uid 限一个活跃会话，
   //   连着跑两趟会让第二趟撞上配额（拿回一句"已经有 1 个活跃会话"），而那与
   //   端口这件事毫无关系。
   const body = async (portChoice) => {
@@ -574,8 +574,8 @@ test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过
   assert.doesNotMatch(answered, /没有问你/,
     '★ 用户刚答过「启动」，再补一句"没有问你"就是多余的');
 
-  // ★★ 答「记住并启动」的那一趟：**末两句必须消失** —— "首选端口没有被改掉……
-  //    下次启动会回到 X"在这条路上是**假的**（主进程在绑定成功之后会把新端口记进
+  // 答「记住并启动」的那一趟：末两句必须消失 —— "首选端口没有被改掉……
+  //    下次启动会回到 X"在这条路上是假的（主进程在绑定成功之后会把新端口记进
   //    配置，见 `index.js` 的 `startSession`）。说了的话，用户会以为改回去还能把
   //    那份布局拿回来。
   const remembered = await body('remember');
@@ -583,7 +583,7 @@ test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过
   assert.doesNotMatch(remembered, /回到/,
     '★★ 选了「记住新配置」的那一趟不许再说"下次会回到原端口" —— 那是假的');
   assert.doesNotMatch(remembered, /没有问你/, '★ 用户刚答过，那句是多余的');
-  // ★ 而"记成了没有"**不在这里说**：控制器够不着配置，它只说它知道的那一半
+  // 而"记成了没有"不在这里说：控制器够不着配置，它只说它知道的那一半
   //   （写没写成由主进程那条 notice 说）—— 提前报一个还没发生的结果就是编造。
   assert.doesNotMatch(remembered, /记成/,
     '★ 控制器不许替主进程报一个还没发生的结果');
@@ -593,7 +593,7 @@ test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过
     '★★ 没人答过的那一趟必须说明白它为什么没问 —— 那时作业已经提交了，'
     + '「取消」不是字面意思，所以只能顺移');
 
-  // ★ 而**没有任何别的地方**会替它问：那个接缝在控制器上根本不存在。
+  // 而没有任何别的地方会替它问：那个接缝在控制器上根本不存在。
   //   （判据取的是"没有这个钩子"，不是"钩子返回了什么" —— 一个只有一种返回值的
   //   接缝是走不到的码。）
   const ctl = new SessionController({ backend: await makeBackend(t, {}) });
@@ -604,12 +604,12 @@ test('★★ 控制器**不问任何人**：答过的顺移不多话，没答过
 });
 
 test('★ 端口报给谁：要工作区的会话一声不吭，不要工作区的必须报实际端口', () => {
-  // ★ 这一条守的是 `_announcePort` 里那个**取反的判据**。写反的后果不是"报错"：
-  //   一个中转站会话永远不报端口 ⇒ 用户那份 ssh 配置停在基准端口（或者根本没写），
+  // 这一条守的是 `_announcePort` 里那个取反的判据。写反的后果不是"报错"：
+  //   一个中转站会话永远不报端口，用户那份 ssh 配置停在基准端口（或者根本没写），
   //   而面板上会话是绿的、「本地地址」那一栏也对（隧道真的在监听）——
   //   两边的日志里一个字都不提这个回调。
   //
-  //   另一头同样要钉住：**要工作区的会话什么都不做**。端口是那一份数据的只读属性，
+  //   另一头同样要钉住：要工作区的会话什么都不做。端口是那一份数据的只读属性，
   //   实际值就在快照里（`localPort` / `origin`），不需要再回报给谁。
   const seen = [];
   const be = { async rpc() { return { ok: true, code: 0, data: {} }; } };
@@ -641,7 +641,7 @@ test('★ 会话被守护进程回收后，本地监听必须一起收掉', asyn
   assert.equal(await portState(workspacePort), 'connected', '跑起来时隧道应当通');
 
   // 作业被回收（心跳断了 30 分钟后被 scancel 的那种）。
-  // ★ 这条路径**不会**经过 stop() —— 用户什么都没点，是守护进程自己收的。
+  // 这条路径不会经过 stop() —— 用户什么都没点，是守护进程自己收的。
   backend.debugReap();
   await until(() => ctl.state === State.ENDED,
     { what: '轮询发现会话已被回收', timeout: 6000 });
@@ -670,15 +670,15 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
 
   const workspacePort = await freePort();
   const ctl = new SessionController({ backend, workspaceId: 'w1' });
-  // ★ 必须注册清理。隧道是个真的 net.Server，不关掉的话 node --test 的事件循环
-  //   永远不会空 —— 而 node 18 的 --test **不会**强制退出，于是整个套件挂到超时，
+  // 必须注册清理。隧道是个真的 net.Server，不关掉的话 node --test 的事件循环
+  //   永远不会空 —— 而 node 18 的 --test 不会强制退出，于是整个套件挂到超时，
   //   且没有任何测试失败，只有沉默。
   t.after(() => ctl.stop());
   const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
 
   assert.ok(snap, '启动应当成功 —— 有 warning 不代表失败');
   assert.equal(ctl.state, State.RUNNING);
-  // ★ 关键：这句话必须到得了界面。协议里 warning 这个字段存在的唯一理由就是
+  // 关键：这句话必须到得了界面。协议里 warning 这个字段存在的唯一理由就是
   //   被显示出来；客户端不接它，它就只是一段写给读代码的人看的注释 ——
   //   而用户会以为自己真的要到了 30 天。
   assert.match(ctl.snapshot().warning || '', /超过上限/,

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * backend-ssh.test.mjs —— 真实后端里**不需要真连一台服务器**的那部分。
+ * backend-ssh.test.mjs —— 真实后端里不需要真连一台服务器的那部分。
  *
  * 中心断言是主机密钥裁决，因为那是这一层唯一的安全属性：
  *   ssh2 默认【不校验】主机密钥，只走公钥认证却不校验对端，
@@ -51,7 +51,7 @@ test('★ RPC 命令行是编译期常量，不含任何插值', () => {
   assert.ok(!/[$`{}]/.test(sshBackend.RPC_CMD), '不得含任何模板/变量语法');
   assert.ok(!/code-server/.test(sshBackend.RPC_CMD), '不得含 code-server 字面量');
 
-  // ★ 解释器必须是钉死的 bash，不能交给登录 shell 去挑。
+  // 解释器必须是钉死的 bash，不能交给登录 shell 去挑。
   //   sshd 用 `$SHELL -c "<命令串>"` 执行 exec 请求，而 $SHELL 来自 /etc/passwd ——
   //   HPC 登录节点上常是 zsh，与 bash 并非完全互通。少了这一层，同一份客户端
   //   在不同集群上会跑出不同结果，且失败时只看得到「认证失败」。
@@ -113,7 +113,7 @@ test('主机密钥指纹与 ssh-keygen -lf 同款：对 blob 取 SHA256', () => 
   const { blob, raw } = hostKeyBlob();
   const expected = 'SHA256:' + crypto.createHash('sha256').update(blob).digest('base64').replace(/=+$/, '');
   assert.equal(sshBackend.hostKeyFingerprint(blob), expected);
-  // 指纹算的是**整个 blob**（含算法名），不是那 32 字节裸公钥 ——
+  // 指纹算的是整个 blob（含算法名），不是那 32 字节裸公钥 ——
   // 算错了会与管理员公布的指纹对不上，用户核对时会被误导
   assert.notEqual(sshBackend.hostKeyFingerprint(blob), sshBackend.hostKeyFingerprint(raw));
   assert.equal(sshBackend.hostKeyFingerprint(null), null);
@@ -197,7 +197,7 @@ test('连接前缺私钥/缺字段时明确失败，不去尝试握手', async (
 });
 
 test('★ 私钥解析不了时返回明确的错误，而不是抛异常穿出去', async () => {
-  // 缺陷形态：ssh2 的 Client.connect() 对无法解析的私钥**同步抛异常**，而它在
+  // 缺陷形态：ssh2 的 Client.connect() 对无法解析的私钥同步抛异常，而它在
   // Promise 执行器里 —— 于是变成 rejection 穿出「不抛异常」的契约，在真机上表现为
   // 主进程一个没人处理的 rejection，界面什么都不显示。
   const bogus = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n';
@@ -207,7 +207,7 @@ test('★ 私钥解析不了时返回明确的错误，而不是抛异常穿出�
   assert.equal(r.code, 'bad_private_key');
   assert.match(r.error, /私钥无法解析/);
 
-  // 连一把**真的**密钥都不能让这条路径去碰网络：本用例里 host 是无效的，
+  // 连一把真的密钥都不能让这条路径去碰网络：本用例里 host 是无效的，
   // 若真去握手会超时。用一把正常密钥验证它会走到握手那一步（返回的不是 bad_private_key）。
   const good = keys.generate().privateKeyPem;
   const b2 = new sshBackend.SshBackend({ privateKey: good });
@@ -219,16 +219,16 @@ test('★ 私钥解析不了时返回明确的错误，而不是抛异常穿出�
 });
 
 test('已实现（isImplemented 为真）—— 后端选择没有"退回假后端"这一支', () => {
-  // ★ 这一条守的是 `createBackend` 的**形状**：假后端只由开发者模式开关进入，
+  // 这一条守的是 `createBackend` 的形状：假后端只由开发者模式开关进入，
   //   而"真后端没实现"不再是一条静默的退路（那句兜底与它旁边的注释正好相反：
   //   真发生的时候，用户会以为连上了集群、其实在跟一个本地假服务打交道）。
   //   今天 `isImplemented()` 恒为真，所以那一支是死的 —— 但死的那一支也要
   //   说得出它为什么死，而这一条就是它被翻出来时会红的地方。
   assert.equal(sshBackend.isImplemented(), true);
 
-  // ★ 同时钉住**选择器的形状**（本机跑不起真集群，所以这一条只能读源码文本）：
-  //   一个没有 SSH 后端的构建必须**响亮地坏**，而不是悄悄给一个假后端。
-  //   `isImplemented()` 恒为真 ⇒ 那条兜底今天走不到 ⇒ 没有任何行为用例抓得到它，
+  // 同时钉住选择器的形状（本机跑不起真集群，所以这一条只能读源码文本）：
+  //   一个没有 SSH 后端的构建必须响亮地坏，而不是悄悄给一个假后端。
+  //   `isImplemented()` 恒为真，那条兜底今天走不到，没有任何行为用例抓得到它，
   //   而它一旦回来，症状是"用户以为连上了集群、其实在跟一个本地假服务打交道"。
   const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'backend.js'), 'utf8');
   assert.equal((src.match(/new FakeBackend/g) || []).length, 1,
@@ -257,7 +257,7 @@ test('★ kind=transport 的信封被 classify 归为传输层，而不是「守
 // ── 认证失败：把 ssh2 的原话翻译成能指向根因的话 ─────────────────────────────
 //
 // 这一节存在的理由很具体：真机上「All configured authentication methods failed」
-// 是用户唯一看得到的东西，而它**完全不提用的是哪把钥匙**——于是唯一能做出的反应
+// 是用户唯一看得到的东西，而它完全不提用的是哪把钥匙——于是唯一能做出的反应
 // 是反复重试。这句话的真实含义很窄：服务器不认这把公钥。
 
 test('★ ssh2 的认证失败原话被认出来', () => {
@@ -294,10 +294,10 @@ test('缺字段时不抛异常，而是如实说「未知」', () => {
 });
 
 test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVersion', async () => {
-  // ★ 这一格是握手落地时才浮出来的真缺陷：`_open()` 在"已经连着"时**短路返回**，
+  // 这一格是握手落地时才浮出来的真缺陷：`_open()` 在"已经连着"时短路返回，
   //   而那一支没有 `daemonVersion` —— 于是调用方（index.js 的版本闸）拿到
-  //   `undefined`，而 `undefined` 在那条判定的三态里是"答了却没有版本号" ⇒
-  //   **每一次重连都误报一句"对面不是我们的守护进程"**。它连的明明就是上一次
+  //   `undefined`，而 `undefined` 在那条判定的三态里是"答了却没有版本号"，
+  //   每一次重连都误报一句"对面不是我们的守护进程"。它连的明明就是上一次
   //   那一台，而这个误报还会顺带把用户的注意力引到链路上（那句话不谈版本）。
   const b = new sshBackend.SshBackend({});
   b._conn = {};                       // 假装连着（这一支不碰网络）
@@ -310,13 +310,13 @@ test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVe
 });
 
 test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上一台的身份冒充', async () => {
-  // ★★ 这一格是「系统报告成功，而事情没成」里最坏的一种，因为连"没成"都看不出来：
-  //    `_open()` 在"已经连着"时是**短路返回**上一条连接的 whoami / daemonVersion 的
-  //    （那是给同一台的第二次 connect 准备的），可它**不看要连的是哪一台**。
+  // 这一格是「系统报告成功，而事情没成」里最坏的一种，因为连"没成"都看不出来：
+  //    `_open()` 在"已经连着"时是短路返回上一条连接的 whoami / daemonVersion 的
+  //    （那是给同一台的第二次 connect 准备的），可它不看要连的是哪一台。
   //    于是"换一条连接"的真实后果是：拨号 0 次、`_conn` 还是旧的那条、`_profile`
-  //    已经写成新的 —— 三种事实互相矛盾，而返回的是**上一台**的身份。
+  //    已经写成新的 —— 三种事实互相矛盾，而返回的是上一台的身份。
   //    调用方（index.js 的 doConnect）据此认定"连上了新站点"：窗口标题写新站点、
-  //    界面上新站点显示「已连接」，而**每一次 RPC 都发给旧站点**。
+  //    界面上新站点显示「已连接」，而每一次 RPC 都发给旧站点。
   const b = connectedBackend();               // _conn 在，_profile = u@h:1
   b._whoami = { user: 'u' };
   b._daemonVersion = '0.8';
@@ -336,7 +336,7 @@ test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上�
   assert.notEqual(b._conn, oldConn, '`_conn` 要换成新那条，旧的必须已经拆掉');
   assert.deepEqual(b._profile, { user: 'bob', host: '192.0.2.9', port: 22 });
 
-  // ★ 判据是**三元组**，不是"主机名变了没有"：同一个登录节点上的**另一个端口**
+  // 判据是三元组，不是"主机名变了没有"：同一个登录节点上的另一个端口
   //   是另一台守护进程（端口是配置里那条连接的一部分），它同样必须真拨号。
   let dialed2 = 0;
   b._openOnce = () => {
@@ -349,7 +349,7 @@ test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上�
   assert.equal(dialed2, 1, '★ 只有端口不同也是**另一台** —— 一样要真拨号');
   assert.deepEqual(b._profile, { user: 'bob', host: '192.0.2.9', port: 2222 });
 
-  // ★ 反侧：**同一台**再 connect 一次仍然短路（不重复拨号）—— 这条语义不能被上面
+  // 反侧：同一台再 connect 一次仍然短路（不重复拨号）—— 这条语义不能被上面
   //   那一改顺手去掉，每一次重连都真拨一次号是白花的。
   let again = 0;
   b._openOnce = () => { again += 1; return Promise.resolve({ ok: true }); };
@@ -359,7 +359,7 @@ test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上�
 });
 
 test('★ 断开之后 daemonVersion 跟着清掉（下一条连接不许报上一条的号）', async () => {
-  // 它是**这一条连接**的事实，所以要与 `_conn` 同生共死：留着的话，下一条连接
+  // 它是这一条连接的事实，所以要与 `_conn` 同生共死：留着的话，下一条连接
   // 会拿着上一条的版本号去做判定 —— 而"上一条是哪一台"在两条连接之间没有任何保证。
   const b = new sshBackend.SshBackend({});
   b._conn = {};
@@ -371,7 +371,7 @@ test('★ 断开之后 daemonVersion 跟着清掉（下一条连接不许报上�
 
 // ── 两条链路：什么时候走常驻通道，什么时候退回 exec ────────────────────────
 //
-// ★ 这一层验的是**选择**，不是字节层 —— 字节层在 resident-channel.test.mjs 里
+// 这一层验的是选择，不是字节层 —— 字节层在 resident-channel.test.mjs 里
 //   （那边不需要 SSH）。真握手仍然只能在真集群上验，这里不假装测过。
 
 const { EventEmitter } = require('node:events');
@@ -416,9 +416,9 @@ class FakeDuplex extends EventEmitter {
   feed(s) { this.emit('data', Buffer.from(s, 'utf8')); }
 
   /**
-   * 回一条应答，**rid 回填成最后那条请求的** —— 守护进程就是这么做的
+   * 回一条应答，rid 回填成最后那条请求的 —— 守护进程就是这么做的
    * （`handle_line` 里 `resp["rid"] = rid`）。
-   * ★ 夹具这里省掉 rid 的话，应答会被当成噪声丢掉，而症状是"探针超时"——
+   * 夹具这里省掉 rid 的话，应答会被当成噪声丢掉，而症状是"探针超时"——
    *   一句指向通道的话，而问题在夹具。
    */
   answer(payload) {
@@ -454,9 +454,9 @@ function fakeConn() {
 /**
  * `prepare()` 用的假 channel：按给定退出码关掉。
  *
- * ★ 与 `FakeExecStream` 分开写，是因为它那条 `close` **不带退出码**（RPC 那条路
+ * 与 `FakeExecStream` 分开写，是因为它那条 `close` 不带退出码（RPC 那条路
  *   不看退出码，只看有没有解析出信封）。而 `prepare()` 的判据恰恰是退出码 ——
- *   复用那一份的话，"rc≠0 要报失败"这条永远走不到，而它会**静默地**通过。
+ *   复用那一份的话，"rc≠0 要报失败"这条永远走不到，而它会静默地通过。
  */
 function prepareConn(code, stderrText = '') {
   return {
@@ -485,7 +485,7 @@ function connectedBackend() {
 }
 
 test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"）', async (t) => {
-  // ★★ 上面那条只证明 `prepare()` 本身对。**没人调它**的话目录照样不存在，
+  // 上面那条只证明 `prepare()` 本身对。没人调它的话目录照样不存在，
   //    而失败要到用户提交作业时才出现（作业起来了又立刻没了，隔着一层作业日志）。
   //    所以这一条把 `connect()` 整条路真的跑一遍 —— 用一个假的 ssh2 Client 顶掉
   //    真握手（本机连不了集群），其余一步都不跳。
@@ -516,7 +516,7 @@ test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"�
   assert.ok(made[0].execs.includes(sshBackend.PREPARE_CMD),
     '★★ 连上之后必须**真的**发这条命令 —— 少了它，"目录一定存在"这条前提没了，'
     + '而症状是提交的作业起不来（`sbatch -o` 的父目录不存在）');
-  // ★ 而它排在**握手那两条之前**：ping/whoami 是"这条链路通不通"的判据，
+  // 而它排在握手那两条之前：ping/whoami 是"这条链路通不通"的判据，
   //   它们失败会让整次连接失败；而建目录失败不影响"连上了"。次序反了的话，
   //   一个建不出目录的家目录会报成"无法执行 slurmate rpc"—— 一句指错方向的话。
   assert.ok(made[0].execs.indexOf(sshBackend.PREPARE_CMD)
@@ -525,13 +525,13 @@ test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"�
 });
 
 test('★★ 连上之后先把作业日志目录建出来（提交之前它必须存在）', async () => {
-  // ★★ 这一条挡的是一个**只能由真集群回答**的失败：`sbatch -o <日志目录>/slurm-%j.out`
-  //    的父目录是 Slurm 在**跑作业脚本之前**打开的，而作业脚本自己那一次
-  //    `mkdir -p` 排在它后面。目录不存在 ⇒ 那一次提交连启动都启动不了。
+  // 这一条挡的是一个只能由真集群回答的失败：`sbatch -o <日志目录>/slurm-%j.out`
+  //    的父目录是 Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次
+  //    `mkdir -p` 排在它后面。目录不存在，那一次提交连启动都启动不了。
   //    守护进程建不了它（共享家目录对它只读，那是"root 不写用户文件"那层保护），
   //    所以这一步只能落在客户端。
   //
-  // ★ 判据是"连接那条路上真的发了这条命令"，不是"常量长得对"—— 后者由下一条判。
+  // 判据是"连接那条路上真的发了这条命令"，不是"常量长得对"—— 后者由下一条判。
   const b = new sshBackend.SshBackend({});
   b._conn = prepareConn(0);
   b._closed = false;
@@ -543,8 +543,8 @@ test('★★ 连上之后先把作业日志目录建出来（提交之前它必�
 });
 
 test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就是连上了）', async () => {
-  // 与常驻通道同一条纪律：这一步失败**不算连接失败**。算的话，一个建不出目录的
-  // 家目录会让用户**连都连不上** —— 而他真正失去的是提交，不是连接。
+  // 与常驻通道同一条纪律：这一步失败不算连接失败。算的话，一个建不出目录的
+  // 家目录会让用户连都连不上 —— 而他真正失去的是提交，不是连接。
   const b = new sshBackend.SshBackend({});
   b._conn = prepareConn(1, 'mkdir: cannot create directory: Permission denied\n');
   b._closed = false;
@@ -553,16 +553,16 @@ test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就
   assert.equal(r.ok, false);
   assert.match(b.prepareError, /rc=1/);
   assert.match(b.prepareError, /Permission denied/, '把远端那句原话带上 —— 那才是根因');
-  // ★ 而它说的是**后果**，不是一句"失败了"：提交会起不来。界面直接把这一句转给用户。
+  // 而它说的是后果，不是一句"失败了"：提交会起不来。界面直接把这一句转给用户。
   assert.match(b.prepareError, /家目录可写吗/);
 });
 
 test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同一个目录', () => {
   const cmd = sshBackend.PREPARE_CMD;
   assert.equal(typeof cmd, 'string');
-  // ★ 与另外两条不同：这一条**故意**带一个 shell 变量。客户端从来不知道远端的
-  //   家目录是什么（那是 NSS 的事），所以命令串里写 `$HOME`、由**远端**的 bash
-  //   展开 —— 客户端一个路径都不拼。禁止的是**客户端这一侧**的插值。
+  // 与另外两条不同：这一条故意带一个 shell 变量。客户端从来不知道远端的
+  //   家目录是什么（那是 NSS 的事），所以命令串里写 `$HOME`、由远端的 bash
+  //   展开 —— 客户端一个路径都不拼。禁止的是客户端这一侧的插值。
   assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
   assert.deepEqual(
     [...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]), ['HOME'],
@@ -571,7 +571,7 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.match(cmd, /umask 077/, '与作业脚本里那个 umask 一致 —— 目录要是 0700');
   assert.match(cmd, /mkdir -p/);
-  // ★★ 目录名是**跨文件契约**：作业脚本按 `$HOME/.slurmate/logs` 算 `-o/-e` 的落点
+  // 目录名是跨文件契约：作业脚本按 `$HOME/.slurmate/logs` 算 `-o/-e` 的落点
   //    （守护进程的 `job_log_dir_for()` 也是同一个），而这里建的是同一个。
   //    两处漂开的表现是"客户端建了一个没人用的目录，作业写去另一个不存在的地方" ——
   //    提交照样失败，而错误信息一个字都不提这里的目录。
@@ -600,9 +600,9 @@ test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）
   keepLoop(t);
   // rid 在守护进程那边是"这条连接从此收推送"的判据，而这条连接是一次性的：
   // 发了它，守护进程会把推送写进一条马上要被关掉的连接，而推送与响应
-  // **共用同一个输出队列** —— 一次恰好落在 tick 上的推送会被读成这条请求的应答。
+  // 共用同一个输出队列 —— 一次恰好落在 tick 上的推送会被读成这条请求的应答。
   const b = connectedBackend();
-  // ★ 先 await 再看：`rpc()` 的第一个 `await`（`_ensure()`）之前什么都没发生，
+  // 先 await 再看：`rpc()` 的第一个 `await`（`_ensure()`）之前什么都没发生，
   //   同步读 `sentBody` 读到的是 null。
   const r = await b.rpc({ op: 'ping', rid: 99 });
   const sent = JSON.parse(b._conn.execStream.sentBody);
@@ -613,10 +613,10 @@ test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）
 
 test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async (t) => {
   keepLoop(t);
-  // ★★ 两件事同一个理由：守护进程认身份（register_client）与订阅推送（handle_line）
+  // 两件事同一个理由：守护进程认身份（register_client）与订阅推送（handle_line）
   //    的判据都是"这条连接发过带 rid 的请求"。
   //
-  //    带上 `client` 的后果是具体的：看护者那一格会跟着一条**一次性的**连接走 ——
+  //    带上 `client` 的后果是具体的：看护者那一格会跟着一条一次性的连接走 ——
   //    它刚认领的会话下一秒就变成"没人看"，倒计时开始跑。而症状是
   //    「作业莫名其妙开始倒计时」，两边各自都自洽。
   const CLIENT = { id: 'm-aaaa', name: '甲机' };
@@ -626,7 +626,7 @@ test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async
   b._closed = false;
 
   // ① 常驻通道：每一条请求都带着身份
-  //    ★ 必须**回一条应答**：常驻通道上的请求会一直等（默认 180 秒），
+  //    必须回一条应答：常驻通道上的请求会一直等（默认 180 秒），
   //      不回的话这条用例挂在那里，而症状是"整个文件跑了三分钟"。
   const opened = b._openStream();
   b._conn.streamChannel.answer(PONG);
@@ -641,9 +641,9 @@ test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async
 
   // ② exec 退路：一个都不带
   //
-  //    ★★ **调用方必须显式把这两个都传进去。** 写成 `{op:'ping'}` 的话，
-  //       `rpc()` 里那两行 `delete` 删的是**本来就不存在的东西** —— 于是删掉它们
-  //       不会有任何断言变红（一条**等价变异**，也就是没人守着的代码）。
+  //    调用方必须显式把这两个都传进去。写成 `{op:'ping'}` 的话，
+  //       `rpc()` 里那两行 `delete` 删的是本来就不存在的东西 —— 于是删掉它们
+  //       不会有任何断言变红（一条等价变异，也就是没人守着的代码）。
   b._resident = null;
   b._teardownStream();
   b._conn.execStream = null;
@@ -678,7 +678,7 @@ test('★ 常驻通道在的时候，rpc 一次 exec 都不发', async (t) => {
 
 test('★★ 探针失败 ⇒ 不建通道、记下原因、并排一次重开', async (t) => {
   keepLoop(t);
-  // ★ "通道起来了"与"通道能用"是两件事：旧 CLI 上 `slurmate stream` 会立刻以
+  // "通道起来了"与"通道能用"是两件事：旧 CLI 上 `slurmate stream` 会立刻以
   //   argparse 的退出码 2 结束，而那条通道在客户端看来与正常的别无二致。
   const b = connectedBackend();
   const opened = b._openStream();
@@ -692,7 +692,7 @@ test('★★ 探针失败 ⇒ 不建通道、记下原因、并排一次重开',
 
 test('★ 重开是有上限的：连着失败够多次就不再试', async (t) => {
   keepLoop(t);
-  // 上限挡的是"登录节点上的 CLI 是旧的"那种**永久**失败 —— 它和暂时的失败
+  // 上限挡的是"登录节点上的 CLI 是旧的"那种永久失败 —— 它和暂时的失败
   // 现场一模一样（一行 usage + 退出码 2），区分不了，只能靠次数。
   // 每一次失败的重开都是一次注定失败的 exec，也就是每分钟白 fork 一个 python。
   const b = connectedBackend();
@@ -725,7 +725,7 @@ test('★ 通道断了会排重开；拆掉之后不再排', async (t) => {
 
   b._teardownStream();
   assert.equal(b._streamTimer, null);
-  // ★ 拆掉通道之后 `resident` 是 **false** 而不是 null：SSH 还连着，
+  // 拆掉通道之后 `resident` 是 false 而不是 null：SSH 还连着，
   //   "连上了、但没有通道"与"还没连上"是两件事（见 resident 的三态）。
   assert.equal(b.resident, false);
   assert.equal(b._resident, null);
@@ -740,13 +740,13 @@ test('★ 后端自己 close() 之后不重开（也不许报"还连着"）', as
   await b.close();
   assert.equal(b._resident, null);
   assert.equal(b._streamTimer, null, '拆了就不该再排重开');
-  // resident 的三态：连接没了 ⇒ null（"还没试过/没有连接"），不是 false。
+  // resident 的三态：连接没了，null（"还没试过/没有连接"），不是 false。
   assert.equal(b.resident, null);
 });
 
 test('★ resident 的三态分得开：还没连 / 连了但没有通道 / 通道在', async (t) => {
   keepLoop(t);
-  // ★ 合成两态的话，启动阶段的日志会说出一句当时并不成立的话
+  // 合成两态的话，启动阶段的日志会说出一句当时并不成立的话
   //   （"常驻通道不可用" vs "还没试过"）。
   const fresh = new sshBackend.SshBackend({});
   assert.equal(fresh.resident, null, '还没连上登录节点');

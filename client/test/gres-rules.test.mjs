@@ -13,20 +13,20 @@
 // limitations under the License.
 
 /**
- * gres-rules.test.mjs —— 假后端的 GRES 规则**必须与守护进程同一条**。
+ * gres-rules.test.mjs —— 假后端的 GRES 规则必须与守护进程同一条。
  *
- * ★ 假后端（`backend-fake.js`）的全部价值是"它演的是生产那条路"。
- *   而它的规则是**照抄**守护进程的（`clean_gres()` + `fit_gres()`）——
+ * 假后端（`backend-fake.js`）的全部价值是"它演的是生产那条路"。
+ *   而它的规则是照抄守护进程的（`clean_gres()` + `fit_gres()`）——
  *   两个文件、两种语言，没有共享代码，所以它们会漂。
- *   漂的方向有两个，**都很坏**：
- *     · 假后端更宽 ⇒ 开发者模式里提交得通、真站点被拒，而报错要到真机上才出现；
- *     · 假后端更严 ⇒ 开发时以为某件事不能做，其实能。
+ *   漂的方向有两个，都很坏：
+ *     · 假后端更宽，开发者模式里提交得通、真站点被拒，而报错要到真机上才出现；
+ *     · 假后端更严，开发时以为某件事不能做，其实能。
  *
- * ★ 这一组是**行为**用例（真调 `_submit`），不是文本比对 ——
+ * 这一组是行为用例（真调 `_submit`），不是文本比对 ——
  *   `backend-fake.test.mjs` 管的是"字段名对不对"，管不了"规则一样不一样"。
  *
- * ★ 而它同样是"夹具要比真集群脏"的落点：假集群里有一条**带型号**的 GRES
- *   （`gpu:a6000`）和一条**名字不是 gpu** 的（`mps`）。本机那台真集群只有不带
+ * 而它同样是"夹具要比真集群脏"的落点：假集群里有一条带型号的 GRES
+ *   （`gpu:a6000`）和一条名字不是 gpu 的（`mps`）。本机那台真集群只有不带
  *   型号的 `gpu`，所以这两条路在真集群上走不到 —— 不在这里造，就没有覆盖。
  */
 import test from 'node:test';
@@ -42,10 +42,10 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 // 假站点不认识任何插件 —— "那个站点装了哪些"由调用方告诉它（见 integration.mjs）。
 // 这里给它仓库里真那一个，好让 `service_kind` 有得填。
 const SITE = () => path.join(HERE, '..', '..', 'plugins');
-// ★ 用 **sshd** 而不是 code-server：code-server 声明了 `contributes.surface`，
-//   那意味着 `_submit` 会**真的把它的作业侧跑起来**（见 backend-fake.js 的
+// 用 sshd 而不是 code-server：code-server 声明了 `contributes.surface`，
+//   那意味着 `_submit` 会真的把它的作业侧跑起来（见 backend-fake.js 的
 //   `_startJob`）—— 这一组要验的是 GRES 的规则，为它去起一个进程、挑端口、
-//   等登记，只会让用例更难读、更容易碎。两个插件走的是**同一段** GRES 代码
+//   等登记，只会让用例更难读、更容易碎。两个插件走的是同一段 GRES 代码
 //   （在服务种类那一段之后），所以换了不影响。
 const KIND = 'sshd';
 /** 形状正确的一行公钥（sshd 声明了 submitPubkey，提交时必须带）。 */
@@ -56,12 +56,12 @@ function make() {
 }
 
 /**
- * 直接调 `_submit`，**不走 `rpc()`**：这一组用例要验的**全是 GRES 的规则**，
+ * 直接调 `_submit`，不走 `rpc()`：这一组用例要验的全是 GRES 的规则，
  * 而它们在"提交收下了没有"那一段里就判完了 —— 在起作业侧之前。
  * 为了验一条规则去起一个进程与一条隧道，只会让这条用例更难读、更容易碎。
  *
- * ★ 而它**不 await** 也就意味着：那一条会话的作业侧（sshd 那一类没有界面，
- *   所以这里压根不会起）与定时器都不参与。**用例结束时不留下任何东西**。
+ * 而它不 await 也就意味着：那一条会话的作业侧（sshd 那一类没有界面，
+ *   所以这里压根不会起）与定时器都不参与。用例结束时不留下任何东西。
  */
 async function submit(req) {
   const b = make();
@@ -111,7 +111,7 @@ test('★ 名字不是 gpu 的照样提交（`mps:100`）', async () => {
 
 test('★★ 上限来自**这个分区**的清单，不是写死的一个数', async () => {
   // A6000 每节点 4 张（带型号 a6000），RTX8000 的 mps 每节点 100 个。
-  // ★ 判据直接取**假集群自己那份清单**里的数 —— 写一个 8 进去就又是两份真相。
+  // 判据直接取假集群自己那份清单里的数 —— 写一个 8 进去就又是两份真相。
   const cat = make()._partitions();
   const capOf = (part, name) => cat.find((p) => p.name === part)
     .gres.find((e) => e.name === name).per_node_max;
@@ -145,8 +145,8 @@ test('★ 分区上没有那种 GRES → 拒绝并说出这个分区有什么', 
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'bad_gres');
   assert.match(r.error.detail, /gpu/, '要说得出这个分区有什么');
-  // ★★ 判据是**那句话本身**，不只是"拒了"。变异验证里"把存在性检查整条短路"
-  //   这一条**没红**：短路之后 `Math.max()` 是 `-Infinity`，于是它照样拒 ——
+  // 判据是那句话本身，不只是"拒了"。变异验证里"把存在性检查整条短路"
+  //   这一条没红：短路之后 `Math.max()` 是 `-Infinity`，于是它照样拒 ——
   //   只是报出来的是「每个节点最多 -Infinity 个」，一句谁也读不懂的话。
   //   "拒了"与"拒得对"是两件事，用例要钉后面那件。
   assert.match(r.error.detail, /它有/, '要说得出"这个分区有哪几种"，不是一句数值垃圾');
@@ -160,7 +160,7 @@ test('★★ 形状不合法一律在提交之前拒掉（与守护进程同一�
     'gpu:2',
     { name: 'gpu', type: 'a:100', count: 2 },
     { name: 'gp u', count: 2 },
-    // ★ Python 的 `$` 会匹配"结尾换行之前"，JS 的不会 —— 这一条守的是**两边
+    // Python 的 `$` 会匹配"结尾换行之前"，JS 的不会 —— 这一条守的是**两边
     //   都不许**：假后端放过去了，开发者模式里就能造出一个真站点会拒的形状。
     { name: 'gpu\n', count: 2 },
     { name: 'gpu', count: 0 },

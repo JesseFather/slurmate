@@ -15,14 +15,14 @@
 /**
  * atomic-write.test.mjs —— 框架里唯一那份原子写。
  *
- * ★ `plugins/sshd/client/sshconfig.js` 跑在池里，require 不到客户端的源码
+ * `plugins/sshd/client/sshconfig.js` 跑在池里，require 不到客户端的源码
  * （`packer/docs/README.md` 那条纪律），所以同一份原子写逻辑在客户端与那个插件里各
- * 有一份。本文件后半段是那件事实的**唯一防腐剂** —— 同一张场景表喂两份实现，
+ * 有一份。本文件后半段是那件事实的唯一防腐剂 —— 同一张场景表喂两份实现，
  * 只改一边就红。
  *
- * ★ 每条用例都要能回答"改坏了会红，而且报出来的是真正的原因"：
- *   · "不留临时文件"红 ⇒ 报告里会列出那个残留的名字；
- *   · "已存在的父目录权限没被动过"红 ⇒ 报告里会报出被改成了什么。
+ * 每条用例都要能回答"改坏了会红，而且报出来的是真正的原因"：
+ *   · "不留临时文件"红，报告里会列出那个残留的名字；
+ *   · "已存在的父目录权限没被动过"红，报告里会报出被改成了什么。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,10 +64,10 @@ test('父目录不存在时自建（递归），权限 0700', () => {
 });
 
 test('★ 已存在的父目录，权限一个 bit 都不许动', () => {
-  // ★ 这一条守的是一个**真实存在过的行为**：被取代的那份 `config.js` 实现里有一句
-  //   `try { fs.chmodSync(dir, mode); }` —— 于是每一次写配置都会把一个**已经存在**的
+  // 这一条守的是一个真实存在过的行为：被取代的那份 `config.js` 实现里有一句
+  //   `try { fs.chmodSync(dir, mode); }` —— 于是每一次写配置都会把一个已经存在的
   //   目录 chmod 成 0700，而那个目录可能是 Electron 的 `userData`、可能是用户自己的
-  //   目录。这不是它被要求做的事，而且**没有任何地方会报错**。
+  //   目录。这不是它被要求做的事，而且没有任何地方会报错。
   const d = tmpdir();
   const sub = path.join(d, 'mine');
   fs.mkdirSync(sub, { mode: 0o755 });
@@ -78,7 +78,7 @@ test('★ 已存在的父目录，权限一个 bit 都不许动', () => {
     '写一个文件不该顺手改它所在目录的权限');
 });
 
-// ── 失败那条路：返回结构化结果，**不抛**，也不留残骸 ────────────────────────
+// ── 失败那条路：返回结构化结果，不抛，也不留残骸 ────────────────────────
 
 test('★ 写失败：返回 {ok:false} 而不是抛，且不留临时文件', () => {
   const d = tmpdir();
@@ -92,7 +92,7 @@ test('★ 写失败：返回 {ok:false} 而不是抛，且不留临时文件', (
 });
 
 test('★ rename 失败：同样返回 {ok:false}，且临时文件被清掉', () => {
-  // 让 rename 失败的最省事的办法：目标是**一个已经存在的目录**（POSIX 上 rename
+  // 让 rename 失败的最省事的办法：目标是一个已经存在的目录（POSIX 上 rename
   // 文件到目录会 EISDIR）。
   const d = tmpdir();
   const target = path.join(d, 'iam-a-dir');
@@ -108,7 +108,7 @@ test('writeAtomicOrThrow：同一条失败路径变成长出异常（给"写不�
   const target = path.join(d, 'iam-a-dir');
   fs.mkdirSync(target);
   assert.throws(() => A.writeAtomicOrThrow(target, 'x', { mode: 0o600 }), /失败/);
-  // ★ 成功时它返回 undefined（没有第二个返回值要维护）—— 钉住这一点，免得有人
+  // 成功时它返回 undefined（没有第二个返回值要维护）—— 钉住这一点，免得有人
   //   以为它像 writeAtomic 那样返回结果，然后在调用点写 `if (!r.ok)` 而 r 是 undefined。
   assert.equal(A.writeAtomicOrThrow(path.join(d, 'ok.conf'), 'x', { mode: 0o600 }),
     undefined);
@@ -121,10 +121,10 @@ test('writeJsonAtomic：两格缩进（这些文件是给人看的）', () => {
   assert.equal(fs.readFileSync(f, 'utf8'), '{\n  "a": 1\n}');
 });
 
-// ── 符号链接：默认**不跟随**，显式才跟随 ────────────────────────────────────
+// ── 符号链接：默认不跟随，显式才跟随 ────────────────────────────────────
 
 test('★ 默认 refuse：目标是符号链接时，链接本身被换成普通文件', () => {
-  // ★ 把"默认不跟随"**显式钉住**，理由只有一个：只有钉住了，"有人把默认改成
+  // 把"默认不跟随"显式钉住，理由只有一个：只有钉住了，"有人把默认改成
   //   follow"才会红。默认跟随会让框架自己那七个状态文件（config.json、.sites.json…）
   //   全都开始跟着链接跑到别处去 —— 那是"用一个只对一处成立的规则去改另外七处"。
   const d = tmpdir();
@@ -142,7 +142,7 @@ test('★ 默认 refuse：目标是符号链接时，链接本身被换成普通
 test('★ link:follow：链接留着，内容写进它指向的那个文件（dotfiles 工作流）', () => {
   // 用 dotfiles 管理 ssh 配置的人：`~/.ssh/config -> ~/dotfiles/config`。rename(2)
   // 不跟随目标上的符号链接，直接 rename 上去会把链接换成普通文件 —— 于是他改
-  // `~/dotfiles/config` 不再影响 ssh，两边从此各说各话，而**没有任何地方会报错**。
+  // `~/dotfiles/config` 不再影响 ssh，两边从此各说各话，而没有任何地方会报错。
   const d = tmpdir();
   const real = path.join(d, 'dotfiles-config');
   const link = path.join(d, 'config');

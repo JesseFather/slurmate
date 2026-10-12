@@ -19,8 +19,8 @@
  * ── 它不是什么 ─────────────────────────────────────────────────────────────
  * 它不是「随便返回点数据让界面能画出来」的空壳。它的 RPC 响应逐字段照着
  * `cluster/slurmate-sessiond` 的 `session_view` 和 `op_*` 构造，
- * 状态迁移照着真的状态机，并且**真的起一个 HTTP 服务**复刻 code-server
- * 的登录契约、**真的走一遍 tunnel.js**。
+ * 状态迁移照着真的状态机，并且真的起一个 HTTP 服务复刻 code-server
+ * 的登录契约、真的走一遍 tunnel.js。
  *
  * 唯一被假掉的是 SSH 那一跳。
  *
@@ -30,16 +30,16 @@
  * 有了它，这些路径在开发界面的当天就能反复走。
  *
  * ── 必须遵守 ───────────────────────────────────────────────────────────────
- * 开发者模式下界面要**醒目**标注「开发者模式 · 未连接集群」，用真实模式绝不会出现的
+ * 开发者模式下界面要醒目标注「开发者模式 · 未连接集群」，用真实模式绝不会出现的
  * 颜色。做了假后端却不标注，正是这个项目一路在清的那类问题：系统声称了不成立的事。
  *
  * ── 关于分区与资源 ─────────────────────────────────────────────────────────
- * 分区不再来自「用途」配置，而是**直接从 Slurm 查**（守护进程侧走
+ * 分区不再来自「用途」配置，而是直接从 Slurm 查（守护进程侧走
  * `scontrol show partition` 并与该用户的 association 求交）。所以这里的假数据
  * 就是一份分区表 —— 字段名必须与守护进程逐字一致，否则界面会针对错误的字段名
  * 开发，接上真集群才发现对不上。
  *
- * 默认资源（2 CPU / 8G）由**服务端**填，客户端不填。假后端照做：
+ * 默认资源（2 CPU / 8G）由服务端填，客户端不填。假后端照做：
  * 请求里没给的键，就用 DEFAULTS。
  */
 
@@ -55,10 +55,10 @@ const fakeJob = require('./fake-job.js');
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
 const DEMO_EXTRA_ID = '01M2JKM1M1M1M1M1M1M1M1M1M1';
 /**
- * 上面那一条的**短名与显示名**。
+ * 上面那一条的短名与显示名。
  *
- * ★ 它们是**这个假站点自己编的**，与 DEMO_EXTRA_ID 同一类东西（谁也不认识这个名字，
- *   那正是这一格要造的状态）。而基座里**不许出现任何一个真插件的短名** ——
+ * 它们是这个假站点自己编的，与 DEMO_EXTRA_ID 同一类东西（谁也不认识这个名字，
+ *   那正是这一格要造的状态）。而基座里不许出现任何一个真插件的短名 ——
  *   一个长在框架代码里的插件名，是"基座不认识任何插件"这句话的反例，
  *   也正是这一路上一直在清的那种。
  */
@@ -68,7 +68,7 @@ const DEMO_EXTRA_TITLE = '本机没有的一个示例插件';
 /**
  * 假站点里那次"变化的判据"，多久扫一遍。
  *
- * ★ 取守护进程那个 tick 的周期（2 秒），**不是**因为性能，是因为要**照着它演**：
+ * 取守护进程那个 tick 的周期（2 秒），不是因为性能，是因为要照着它演：
  *   真守护进程的推送挂在 tick 上，所以"2 秒内的多次变化只会推出一条"是它的一条
  *   真实性质（用例 26.4 钉着"每个 tick 每条连接至多一条消息"）。假站点扫得快，
  *   这条性质就演不出来，而客户端对着它调的东西（合并、升级判定）会显得比真集群
@@ -77,66 +77,66 @@ const DEMO_EXTRA_TITLE = '本机没有的一个示例插件';
 const PUSH_SWEEP_MS = 2000;
 
 /**
- * 与守护进程的 `SNAPSHOT_INTERVAL` **同值**：哪怕什么都没变，也这么久推一条。
+ * 与守护进程的 `SNAPSHOT_INTERVAL` 同值：哪怕什么都没变，也这么久推一条。
  *
- * ★ 它不是"心跳"。它是让客户端那条看门狗（session.js 的 `PUSH_STALE_MS`）能
- *   把**安静**与**通道坏了**分开的那条保证 —— 少了它，一个空闲的会话会被判成
+ * 它不是"心跳"。它是让客户端那条看门狗（session.js 的 `PUSH_STALE_MS`）能
+ *   把安静与通道坏了分开的那条保证 —— 少了它，一个空闲的会话会被判成
  *   "通道不通"从而退回轮询，功能不受影响，但开发者模式里那条路就再也走不到了。
  */
 const PUSH_INTERVAL_MS = 30000;
 
 /**
- * ── 假站点的**整包**投递 ──────────────────────────────────────────────────
+ * ── 假站点的整包投递 ──────────────────────────────────────────────────
  *
- * 真实的守护进程发的是**一个包**（`package` + `plugin_package`），假站点照着
- * 它来。★ 假站点**没有** `debugPackages` / `debugHideFiles` 这类开关：
+ * 真实的守护进程发的是一个包（`package` + `plugin_package`），假站点照着
+ * 它来。假站点没有 `debugPackages` / `debugHideFiles` 这类开关：
  * 一个只能打开唯一那条路的开关，比没有它更糟。
  *
- * ★ 包是拿**仓库里那个打包器**（`packer/slurmate-packer.js`）现打的，不是手搓的
+ * 包是拿仓库里那个打包器（`packer/slurmate-packer.js`）现打的，不是手搓的
  *   字节：手搓一份就等于在假站点里又实现了一遍容器格式，而它与真格式分家的那天，
  *   假站点反而会说"一切正常"。打包器导出 `buildPackage`/`contentDigest`，够用了。
  *
- * ★ **签名钥匙由一个写死的种子推出来**，不是随机生成的。理由不是"简单"：
- *   客户端在用户第一次同意时会**钉住这把公钥**（§5.4），此后同一个 id 的每一份
+ * 签名钥匙由一个写死的种子推出来，不是随机生成的。理由不是"简单"：
+ *   客户端在用户第一次同意时会钉住这把公钥（§5.4），此后同一个 id 的每一份
  *   都必须由同一把钥匙签。每次进程启动换一把钥匙的话，第二次启动时那把钉子就会
  *   把假站点自己的插件拒掉 —— 这个假站点会坏在一个看起来像 bug 的地方。
- *   它是**模拟数据**，不是密钥。
+ *   它是模拟数据，不是密钥。
  */
 const DEMO_PKG_SEED = Buffer.from('slurmate-demo-package-key-v1!!!!', 'utf8');
 /** PKCS#8 里 Ed25519 私钥的头部（RFC 8410），后面接 32 字节种子。 */
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
 
-// ★ **假站点报的插件 = 那两处目录加起来**（`_siteDirs()`），两处两个角色：
+// 假站点报的插件 = 那两处目录加起来（`_siteDirs()`），两处两个角色：
 //
-//   · **装上去的**（`siteInstalledDir`，沙盒里程序自己的一处）—— 这才是"站点上
+//   · 装上去的（`siteInstalledDir`，沙盒里程序自己的一处）—— 这才是"站点上
 //     有什么"的答案，而它只有一条来的路：`installPlugins`（与真站点上管理员
 //     `plugin install` 同形）。
-//   · **开发样例**（`samplePluginsDir`，仓库里的 `plugins/`）—— **基座两端都不带
+//   · 开发样例（`samplePluginsDir`，仓库里的 `plugins/`）—— **基座两端都不带
 //     任何插件**（`plugins/README.md` 第一行），那两棵是开发基座时用来对齐插件两侧
-//     能力的样例。**打包版没有它们 —— 那是对的，不是降级。**
+//     能力的样例。打包版没有它们 —— 那是对的，不是降级。
 //
 //   两条走不通的路值得写明，它们各自会造出一个假现场：
 //
-//   · **写死几个插件**（名字与 id 抄那两个样例）是一句谎话 —— 基座不带插件，于是
-//     满屏"本站有而本机没有"，一个**故意不带插件的基座**看起来像坏了。
-//   · **报"本机池里装了什么"** 留下一个更隐蔽的死角：站点报的就是本机有的那些，
-//     于是「站点有而本机没有」这条**最重要的**路径在假站点里永远走不到 —— 而
+//   · 写死几个插件（名字与 id 抄那两个样例）是一句谎话 —— 基座不带插件，于是
+//     满屏"本站有而本机没有"，一个故意不带插件的基座看起来像坏了。
+//   · 报"本机池里装了什么" 留下一个更隐蔽的死角：站点报的就是本机有的那些，
+//     于是「站点有而本机没有」这条最重要的路径在假站点里永远走不到 —— 而
 //     开发者模式恰恰是这个项目里唯一能造出那些状态的地方。
 //
-//   所以站点从盘上读**真文件**（真的 sha256、真的字节），客户端真的走一遍
+//   所以站点从盘上读真文件（真的 sha256、真的字节），客户端真的走一遍
 //   下载 → 暂存校验 → 同意闸 → 换入。这才是"它演的是生产那条路"该有的样子。
 //
-//   ★ 池只剩一个（站点池），于是"报本机池"读的就是站点自己刚发下去的东西 ——
-//     那条路**没有**，也不该有。
+//   池只剩一个（站点池），于是"报本机池"读的就是站点自己刚发下去的东西 ——
+//     那条路没有，也不该有。
 //
-//   ★ 两处都空 ⇒ **站点一个插件都不报，这是合法状态**（一个插件都不装是合法状态）。
+//   两处都空，站点一个插件都不报，这是合法状态（一个插件都不装是合法状态）。
 
 // 模拟用的分区表。取的是通用 GPU 型号名，不是任何特定集群的配置。
 // 故意留一个 allowed:false 的，好让「没权限的分区要禁用并说明原因」这条路径
 // 在开发者模式下也走得到。
 //
-// ★ GRES 那一格是**故意的假**，而且比真集群"脏"：本机那台真集群只有不带型号的
+// GRES 那一格是故意的假，而且比真集群"脏"：本机那台真集群只有不带型号的
 //   `gpu`，所以"带型号"（`gpu:a6000`）与"名字不是 gpu"（`mps`）这两条路**只在
 //   这里走得到**。夹具比现实干净，缺陷就会在用例里隐形 —— 见账本 F26。
 //   形状与字段名照抄 `scontrol show node -o` 的 `Gres=` 与守护进程的
@@ -144,7 +144,7 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 const GRES = {
   '2080TI': [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }],
   'A6000': [{ name: 'gpu', type: 'a6000', per_node_max: 4, total: 8 }],
-  // ★ 同一台集群上两种 GRES 并存，其中一种的数量是**按份额**算的（100 个）——
+  // 同一台集群上两种 GRES 并存，其中一种的数量是按份额算的（100 个）——
   //   一个写死的上限 8 会在这里立刻露馅。
   'RTX8000': [{ name: 'gpu', type: 'rtx8000', per_node_max: 4, total: 4 },
               { name: 'mps', type: null, per_node_max: 100, total: 100 }],
@@ -158,17 +158,17 @@ const PARTITIONS = [
 ];
 
 /**
- * 假站点的节点忙闲。★ **故意比真集群脏。**
+ * 假站点的节点忙闲。故意比真集群脏。
  *
- * 本机那台真集群此刻四个节点全是 `idle`/`mix`，**一个带后缀的都没有** —— 于是
+ * 本机那台真集群此刻四个节点全是 `idle`/`mix`，一个带后缀的都没有 —— 于是
  * "剥掉后缀、只按 base state 计数，后缀原样留着只做展示"这条路径在真机上根本
  * 走不到，而它正是这一格唯一要验的那件事。夹具比现实干净，缺陷就会在用例里
  * 隐形（见账本 F26）。所以这里给两个带后缀的：
  *
  *   `drain*` —— 不响应（`*`）；`down~` —— 已关电（`~`）。
  *
- * ★ 形状与守护进程 `Slurm.node_table()` 的返回**逐字一致**：counts 只装 base
- *   state，flags 单独一列。两者的键**不相交**，那是"从右往左剥"能成立的前提。
+ * 形状与守护进程 `Slurm.node_table()` 的返回逐字一致：counts 只装 base
+ *   state，flags 单独一列。两者的键不相交，那是"从右往左剥"能成立的前提。
  */
 const NODES = {
   '2080TI': { counts: { idle: 1, drain: 1 }, flags: { '*': 1 } },
@@ -178,7 +178,7 @@ const NODES = {
 };
 
 /**
- * 假站点的队列。★ 同样故意脏：真集群此刻**全是 `PD`**，`R` 与"其余那一档"
+ * 假站点的队列。同样故意脏：真集群此刻全是 `PD`，`R` 与"其余那一档"
  * （`CG` 收尾中）都走不到，而"其余那一档不并进 running"是这里唯一的判断。
  */
 const QUEUE = {
@@ -188,7 +188,7 @@ const QUEUE = {
   'DEBUG': { pending: 0, running: 0, other: 0 },
 };
 
-/** 假的 `sacct` 输出。★ 混进两条**作业步**（`.0` / `.extern`）不可能 —— 那个
+/** 假的 `sacct` 输出。混进两条作业步（`.0` / `.extern`）不可能 —— 那个
  *  过滤发生在守护进程里，这里已经是过滤后的形状。 */
 const HISTORY = [
   { job_id: '901002', name: 'code-server', state: 'COMPLETED', exit_code: '0:0',
@@ -203,11 +203,11 @@ function sumCounts(counts) {
   return Object.values(counts).reduce((a, b) => a + b, 0);
 }
 
-/** 服务端默认资源。客户端**不填**这些值 —— 缺省由服务端决定。
+/** 服务端默认资源。客户端不填这些值 —— 缺省由服务端决定。
  *
- *  ★ `gpus: null` = **本站没给这个插件配默认卡**（`null` 是"确定的事实"，
+ * `gpus: null` = 本站没给这个插件配默认卡（`null` 是"确定的事实"，
  *    与那一格整个不在是两回事 —— 后者是老守护进程）。不给它一个具体的卡是
- *    有意的：假站点里分区是**随机挑**的，而三个分区的 GRES 型号互不相同 ——
+ *    有意的：假站点里分区是随机挑的，而三个分区的 GRES 型号互不相同 ——
  *    挑任何一个都会让另外两个分区在提交时以 `bad_gres` 被拒，于是"提交成功"
  *    这条主路会在开发者模式下时灵时不灵。要验"配了默认卡"那条路，
  *    用 `debugDefaultGpus()`。 */
@@ -215,37 +215,37 @@ const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00', gpus: null };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
 
-/** 假站点里「作业内 sshd」听在哪个端口。**没有真的 sshd** —— 见 _submit 的说明。 */
+/** 假站点里「作业内 sshd」听在哪个端口。没有真的 sshd —— 见 _submit 的说明。 */
 const DEMO_SSHD_PORT = 55901;
 /**
- * 模拟用的主机公钥。**这不是一把真钥匙** —— 只是一串形状正确的 base64。
+ * 模拟用的主机公钥。这不是一把真钥匙 —— 只是一串形状正确的 base64。
  * 客户端会把它写进 known_hosts（形状校验是真的），但假站点里那个端口后面没有
  * 任何东西在监听，所以 `ssh slurmate` 会在连接阶段就失败。这是诚实的：
  * 开发者模式假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的 sshd 也是假的。
  */
 const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
 
-/** 假站点自称的单文件上限。**故意与守护进程那个默认值一样** —— 免得假站点里
- *  一个 200 KiB 的文件在真机上通不过。故意报得**比客户端硬上限宽松**，好让
+/** 假站点自称的单文件上限。故意与守护进程那个默认值一样 —— 免得假站点里
+ *  一个 200 KiB 的文件在真机上通不过。故意报得比客户端硬上限宽松，好让
  *  "服务端只能收紧、客户端取更严的那个"这条在假站点里也走得到。 */
 const DEMO_FILE_BYTES = 512 * 1024;
 
 /**
- * 假站点自称的另外三个上限。★ **它们要与守护进程真正报的那几个数逐字相同** ——
- * 假站点的全部价值就是它演的是**同一件事**，而偏差是两个方向的坏事：
+ * 假站点自称的另外三个上限。它们要与守护进程真正报的那几个数逐字相同 ——
+ * 假站点的全部价值就是它演的是同一件事，而偏差是两个方向的坏事：
  *
- *   · 报得**更松** ⇒ 开发时通过、真机上被拒；
- *   · 报得**更严** ⇒ 开发时被拒、真机上反而能过（作者会去改一个没问题的插件）。
+ *   · 报得更松，开发时通过、真机上被拒；
+ *   · 报得更严，开发时被拒、真机上反而能过（作者会去改一个没问题的插件）。
  *
- * ★ `file_bytes` **不在此列**（它是上面那个数）：那是**刻意**报得更松的，好让
+ * `file_bytes` 不在此列（它是上面那个数）：那是刻意报得更松的，好让
  *   "服务端只能收紧、客户端取更严的那个"这条在假站点里也走得到。
- * ★ 这几个数由 `client/test/limits.test.mjs` 与守护进程那几份**跨文件**钉着。
+ * 这几个数由 `client/test/limits.test.mjs` 与守护进程那几份跨文件钉着。
  */
 const DEMO_TOTAL_BYTES = 1561905;    // = PLUGIN_TOTAL_MAX_BYTES（包上限 − 信封最坏情况）
 const DEMO_MAX_FILES = 256;
 const DEMO_PACKAGE_BYTES = 2 << 20;  // = PLUGIN_PACKAGE_MAX_BYTES
 
-/** 假站点在 `plugins` 那一条里自报的那一组。**导出去只给用例**（limits.test.mjs
+/** 假站点在 `plugins` 那一条里自报的那一组。导出去只给用例（limits.test.mjs
  *  拿它与 tools/plugin-limits.json 比对 —— 它是"假站点演得像不像"的唯一判据）。 */
 const DEMO_SITE_LIMITS = {
   file_bytes: DEMO_FILE_BYTES,
@@ -262,7 +262,7 @@ class FakeBackend extends Backend {
    *   rpcLatencyMs   {number}  每次 RPC 的人为延迟，默认 40（贴近真实的 exec channel 开销）
    *   user           {string}  假站点里的用户名
    *   pickPartition  {function} 覆盖随机挑分区的行为，仅供测试固定结果用
-   *   jobsDir        {function} 作业目录的根（一条会话一个子目录）。**传函数**：
+   *   jobsDir        {function} 作业目录的根（一条会话一个子目录）。传函数：
    *                             它在不在、在哪，都是每次现算的事实。
    */
   constructor(opts = {}) {
@@ -278,23 +278,23 @@ class FakeBackend extends Backend {
     this._noBash = false;
 
     /**
-     * 正在跑的**作业侧**：`session_id → FakeJob`。
+     * 正在跑的作业侧：`session_id → FakeJob`。
      *
-     * ★★ 从前这里是一个 `_server`（一个内置的假网页服务），而**每一条会话的隧道都
+     * 从前这里是一个 `_server`（一个内置的假网页服务），而**每一条会话的隧道都
      *   指向它** —— 于是"点启动打开的那个页面"与是哪个插件无关。现在那条路没有了：
-     *   有界面的插件**真的把自己的作业侧跑起来**，隧道指向它，日志是它自己说的。
+     *   有界面的插件真的把自己的作业侧跑起来，隧道指向它，日志是它自己说的。
      */
     this._jobs = new Map();
     /**
      * 假站点上的全部会话。
      *
-     * ★ 为什么是**一张表**而不是**一个** `_session`：客户端那一半
-     *   能不能同时挂两条会话，**只有在假后端上才验得了**（真集群上要造出"两个
+     * 为什么是一张表而不是一个 `_session`：客户端那一半
+     *   能不能同时挂两条会话，只有在假后端上才验得了（真集群上要造出"两个
      *   会话同时活着"极难）。留一个单值的话，多开那几条最要紧的用例
-     *   **根本没有办法跑起来** —— 而"用例跑不起来"与"功能是对的"在输出上长得一样。
+     *   根本没有办法跑起来 —— 而"用例跑不起来"与"功能是对的"在输出上长得一样。
      *
-     * ★ 每条会话自己带定时器（`_enrollTimer` / `_releaseTimer`）：把这两个字段
-     *   挂在后端上，一个会话结束时 `_clearTimers()` 会把**另一条**会话的登记定时器
+     * 每条会话自己带定时器（`_enrollTimer` / `_releaseTimer`）：把这两个字段
+     *   挂在后端上，一个会话结束时 `_clearTimers()` 会把另一条会话的登记定时器
      *   一起清掉 —— 那条会话就永远停在 `submitted`，而界面上一切正常。
      */
     this._sessions = [];
@@ -304,11 +304,11 @@ class FakeBackend extends Backend {
      */
     this.maxActive = 1;
     /**
-     * `scancel` 这一次会不会失败。**默认不失败**（正常的站点上它多半成功）。
+     * `scancel` 这一次会不会失败。默认不失败（正常的站点上它多半成功）。
      *
-     * ★ 这个开关存在的理由与 `maxActive` 一样：真守护进程**会**在取消失败时
+     * 这个开关存在的理由与 `maxActive` 一样：真守护进程会在取消失败时
      *   回一个 `warning`（协议里那个字段，见 `op_goodbye`），而一个永远不会失败
-     *   的假后端让客户端那一半**根本没有办法验**。假后端演的是同一件事 ——
+     *   的假后端让客户端那一半根本没有办法验。假后端演的是同一件事 ——
      *   包括它失败的那一面。
      */
     this.cancelFails = false;
@@ -316,41 +316,41 @@ class FakeBackend extends Backend {
     /**
      * 这台电脑的客户端身份（见 backend.js 的接口注释）。
      *
-     * ★★ 假站点**真的用它**：提交时写进会话行的 `keeper`（与真守护
+     * 假站点真的用它：提交时写进会话行的 `keeper`（与真守护
      *   进程的 `op_submit(client_id)` 同一个位置），心跳按它判"这是不是看护者"，
-     *   接管按它换人。身份**不用来排席位**，用来**认看护者**。
+     *   接管按它换人。身份不用来排席位，用来认看护者。
      *
-     * ★ 一个不看这个字段的假后端，会让"客户端身份根本没送到后端"这件事在
+     * 一个不看这个字段的假后端，会让"客户端身份根本没送到后端"这件事在
      *   开发者模式里完全看不出来 —— 而那正是这一版最重的一条失败形态
-     *   （身份没到 ⇒ 看护者永远为空 ⇒ 谁也不认得自己的会话）。
+     *   （身份没到，看护者永远为空，谁也不认得自己的会话）。
      */
     this._client = (opts && opts.client) || null;
     /**
-     * 假站点上**别人**的看护者（模拟另一台电脑）。`null` = 没有别人。
+     * 假站点上别人的看护者（模拟另一台电脑）。`null` = 没有别人。
      *
-     * ★ 存在的理由与 `cancelFails` 一样：真集群上"这条作业被另一台电脑看着"
-     *   要两台机器才造得出来，而**接管**这个按钮的全部意义就是那一刻。
+     * 存在的理由与 `cancelFails` 一样：真集群上"这条作业被另一台电脑看着"
+     *   要两台机器才造得出来，而接管这个按钮的全部意义就是那一刻。
      *   `_sessions` 里那些会话的 keeper 会被它覆盖（见 `_effKeeper`）。
      */
     this._foreignKeeper = null;
     /**
-     * 集群信息里**哪些格缺席**（`{health:true, nodes:true, …}`）。
+     * 集群信息里哪些格缺席（`{health:true, nodes:true, …}`）。
      *
-     * ★ 存在的理由是那一条三态规矩：「取不到」与「确实没有」在界面上是两句
+     * 存在的理由是那一条三态规矩：「取不到」与「确实没有」在界面上是两句
      *   不同的话。真集群上"取不到"要么要等一次故障、要么要把 sinfo 改名 ——
      *   而它恰恰是这一整块最容易画错的那一格。见 _cluster()。
      */
     this._clusterMissing = {};
-    /** `sacct` 取不到。同上 —— 它回的是**错误**不是空列表，两者不能混。 */
+    /** `sacct` 取不到。同上 —— 它回的是错误不是空列表，两者不能混。 */
     this._historyDown = false;
 
     /**
      * 推送那一半的账。
      *
-     * ★ 机制与守护进程的 `phase_push` **一样**：变化的判据是**渲染结果本身**
+     * 机制与守护进程的 `phase_push` 一样：变化的判据是渲染结果本身
      *   （一份指纹），不是"谁改过状态"。差别只有载体（那边是 tick()，这里是
      *   一个定时器）。这样写不只是省事 —— 它让"忘了在某个改动点标脏"这件事
-     *   从构造上不存在，而那个漏法的症状是**某个状态在界面上永远不更新**。
+     *   从构造上不存在，而那个漏法的症状是某个状态在界面上永远不更新。
      */
     this._pushSeq = 0;
     this._pushDigest = null;
@@ -364,42 +364,42 @@ class FakeBackend extends Backend {
     /** 调试用：站点多出来的插件（模拟"站点升级了、客户端没跟上"）。 */
     this._extraSitePlugins = [];
     /**
-     * 假站点上那两处目录（见文件头）。**两处，两个角色**：
+     * 假站点上那两处目录（见文件头）。两处，两个角色：
      *   · `siteInstalledDir` —— 装上去的东西落的地方（也是 `installPlugins` 的落点）
      *   · `samplePluginsDir` —— 开发样例住的地方（打包版没有它，那是对的）
      *
      * 传函数而不是路径 —— 打包之后样例那棵树不存在、沙盒那处要等 userData 定下来，
-     * 而"这个目录现在在哪／在不在"必须是**每次现算**的结果。
+     * 而"这个目录现在在哪／在不在"必须是每次现算的结果。
      */
     this._siteInstalledDir = typeof opts.siteInstalledDir === 'function'
       ? opts.siteInstalledDir : () => null;
     this._siteSampleDir = typeof opts.samplePluginsDir === 'function'
       ? opts.samplePluginsDir : () => null;
-    /** 调试用：让某一份的**包**里多一个超过单文件上限的文件。见 debugBloatPlugin。 */
+    /** 调试用：让某一份的包里多一个超过单文件上限的文件。见 debugBloatPlugin。 */
     this._bloatPlugin = null;
     /** 调试用：让站点在 `plugin_package` 上回 rate_limited 若干次。 */
     this._rateLimitBurst = 0;
     /** 假站点里被"关掉"的插件（按短名）。 */
     this._siteDisabled = new Set();
     /**
-     * 假站点里**装了但没有作业侧实现**的插件（按短名）。
+     * 假站点里装了但没有作业侧实现的插件（按短名）。
      *
-     * ★ 默认是空的：一个正常部署的站点，装了的插件就有作业脚本。这个集合是**故意
+     * 默认是空的：一个正常部署的站点，装了的插件就有作业脚本。这个集合是**故意
      *   造**那第四格状态的开关。真机上那件事来自 `install-base.sh` 有没有为这个插件生成
-     *   `<ULID>.sbatch`，**客户端看不见** —— 所以它只可能由站点侧合成后报下来
+     *   `<ULID>.sbatch`，客户端看不见 —— 所以它只可能由站点侧合成后报下来
      *   （`op_plugins` 的 `can_submit`）。
      */
     this._siteNoJob = new Set();
     /**
-     * 假站点**报出去的基座版本**（`ping` 的 `version`）。
+     * 假站点报出去的基座版本（`ping` 的 `version`）。
      *
-     * ★ `null` = 跟着本客户端的版本走（也就是"版本一致、判定通过"）。
+     * `null` = 跟着本客户端的版本走（也就是"版本一致、判定通过"）。
      *   要造"站点比客户端新"或"跨大版本"那两态，就用 `app:debug daemon-version`。
      *
-     * ★ **默认不写死假版本号** —— 一个不合 `x.y` 形状的写死值是一个睡着的错：
+     * 默认不写死假版本号 —— 一个不合 `x.y` 形状的写死值是一个睡着的错：
      *   没人读 `ping` 的 `version` 时它不响，版本握手一做就当场醒。要"报一个
      *   明显假的值"用调试开关（`app:debug daemon-version`）—— 报假版本号有用，
-     *   只是不该是**默认**行为。
+     *   只是不该是默认行为。
      */
     this._daemonVersion = null;
     /** 造出「守护进程太旧，根本没有 plugins 这个 op」。见 _dispatch。 */
@@ -407,21 +407,21 @@ class FakeBackend extends Backend {
     /** 造出「有 plugins 这个 op，但不会分发」（v0.5 的守护进程）。 */
     this._noDistribute = false;
     /**
-     * 假站点报出来的**站点级插件问题**（`op_plugins` 顶层那个 `problems`）。
+     * 假站点报出来的站点级插件问题（`op_plugins` 顶层那个 `problems`）。
      *
-     * ★ 默认空的，而且**在 `_noDistribute` 那一档里一律不发**：那个字段是 v0.11
+     * 默认空的，而且在 `_noDistribute` 那一档里一律不发：那个字段是 v0.11
      *   才有的，v0.5 的守护进程报不出来 —— 让它照发就等于演了一个不存在的版本。
      *   见 `debugPluginProblems` 与 `_dispatch` 的 `case 'plugins'`。
      */
     this._pluginProblems = [];
     /**
-     * 站点给插件配的**默认 GRES**（`defaults.gpus`）。`null` = 没配（见 DEFAULTS）。
+     * 站点给插件配的默认 GRES（`defaults.gpus`）。`null` = 没配（见 DEFAULTS）。
      *
-     * ★ 真站点是**每个插件一份**，而假站点只有一份全局的 —— 与它给 cpus / mem /
+     * 真站点是每个插件一份，而假站点只有一份全局的 —— 与它给 cpus / mem /
      *   time 的待遇一样（DEFAULTS 那一份）。要验界面在"配了默认卡"时那句话怎么写，
      *   用 `debugDefaultGpus()`。
      *
-     * ★ 它**不进 `_noDistribute` 那一档**：`defaults.gpus` 是 v0.11 才有的格，
+     * 它不进 `_noDistribute` 那一档：`defaults.gpus` 是 v0.11 才有的格，
      *   与 `time` / `problems` 同一条 —— 那一档照发就等于演了一个不存在的版本。
      */
     this._defaultGpus = null;
@@ -432,8 +432,8 @@ class FakeBackend extends Backend {
   /**
    * 这一份的包（现打、缓存）。返回 `{buf, meta, fingerprint}` 或 `null`。
    *
-   * ★ 缓存**不失效**，与 `_siteIndex` 同一个语义：那一份索引是启动快照，而包的
-   *   摘要与字节必须描述**同一棵树**。真守护进程那边正是这么做的
+   * 缓存不失效，与 `_siteIndex` 同一个语义：那一份索引是启动快照，而包的
+   *   摘要与字节必须描述同一棵树。真守护进程那边正是这么做的
    *   （`Sessiond._plugin_cache`），"管理员就地换了文件"在两边都变成同一件事：
    *   清单、文件、包三者说的还是同一份东西，而客户端会拿到 `..._changed`。
    */
@@ -448,11 +448,11 @@ class FakeBackend extends Backend {
         const data = fs.readFileSync(path.join(entry.dir, ...f.path.split('/')));
         return { path: f.path, data, sha256: f.sha256 };
       });
-      // ★ `debugBloatPlugin` 造的那一份：往**包里**塞一个装不下的文件。
+      // `debugBloatPlugin` 造的那一份：往包里塞一个装不下的文件。
       //   客户端读包时执行那几条负载上限（`checkDeclared`），所以它会在那里被拒
       //   —— 造的正是"站点支持分发，但这一份装不上"。
-      //   ★ 它必须落在**客户端侧**（`client/…`）：站点发出去的包里
-      //     只有客户端侧，塞在顶层的话它根本不在包里，这个调试开关就**静默失效**了。
+      //   它必须落在客户端侧（`client/…`）：站点发出去的包里
+      //     只有客户端侧，塞在顶层的话它根本不在包里，这个调试开关就静默失效了。
       if (this._bloatPlugin === key) {
         const big = Buffer.alloc(DEMO_FILE_BYTES + 1, 0x78);
         files.push({ path: 'client/bloat.bin', data: big,
@@ -464,11 +464,11 @@ class FakeBackend extends Backend {
       });
       const pub = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' })
         .subarray(-32);
-      // ★★ 签的是**四元组**（A.3）—— 与真守护进程、与打包器走的是同一个
+      // 签的是四元组（A.3）—— 与真守护进程、与打包器走的是同一个
       //    实现（`sideDigests` / `signedMessage` / `buildSigBlock` 都从打包器来）。
-      //    假站点在这里**再手搓一遍**就等于又实现了一次容器格式，而它与真格式分家
+      //    假站点在这里再手搓一遍就等于又实现了一次容器格式，而它与真格式分家
       //    的那天，假站点反而会说"一切正常"。
-      //    ★ 四元组算**整棵树**（身份），而**发出去的只含客户端侧** —— 与真守护
+      //    四元组算整棵树（身份），而发出去的只含客户端侧 —— 与真守护
       //      进程逐字同构（`plugin_rebuild`）。假站点要是继续发整包，它就不再是
       //      真站点的一个像样的替身了。
       const sd = packer.sideDigests(files);
@@ -480,12 +480,12 @@ class FakeBackend extends Backend {
         packer.buildSigBlock(Object.assign({ alg: 1, pubkey: pub, sig }, quad)));
       out = {
         buf,
-        // ★ `digest` 是 `op_plugins` 报的那个 —— 发出去那一份（客户端侧）的摘要。
+        // `digest` 是 `op_plugins` 报的那个 —— 发出去那一份（客户端侧）的摘要。
         meta: { format: 2, bytes: buf.length, digest: sd.client },
         fingerprint: crypto.createHash('sha256').update(pub).digest('hex'),
       };
     } catch {
-      // 打包器不在（打包之后的安装包里没有 `packer/`）⇒ 这个站点**不发包**。
+      // 打包器不在（打包之后的安装包里没有 `packer/`），这个站点不发包。
       // 与"那两处目录一个都不存在"是同一种降级：不是错误，是"这里没有它"。
       out = null;
     }
@@ -494,9 +494,9 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 假站点上那两处目录（装上去的 + 开发样例），**装上去的排在前面**。
+   * 假站点上那两处目录（装上去的 + 开发样例），装上去的排在前面。
    *
-   * ★ 顺序是承重的：同一个 id 在两处都有时，先扫到的那个进索引（下面 `has` 那一句
+   * 顺序是承重的：同一个 id 在两处都有时，先扫到的那个进索引（下面 `has` 那一句
    *   决定谁赢）—— 而"站上已经有一棵"这条判据也因此看得见两处。
    */
   _siteDirs() {
@@ -509,29 +509,29 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 假站点的**分发索引**：`(id@版本) → {dir, files}`，来自那两处目录。
+   * 假站点的分发索引：`(id@版本) → {dir, files}`，来自那两处目录。
    *
-   * ★ 这里那个 `files` 是**包里的记录表**（打包时要喂给打包器的负载清单），
-   *   **不是**协议字段 —— 协议里没有 `files` 这个字段，两件事同名，所以写清楚。
+   * 这里那个 `files` 是包里的记录表（打包时要喂给打包器的负载清单），
+   *   不是协议字段 —— 协议里没有 `files` 这个字段，两件事同名，所以写清楚。
    *
-   * ★ 建一次就**不再失效** —— 与守护进程侧的启动快照逐字同一个语义。这样开发者模式
-   *   也能演"管理员就地换了文件"那件事：清单与包永远描述**同一棵树**。
+   * 建一次就不再失效 —— 与守护进程侧的启动快照逐字同一个语义。这样开发者模式
+   *   也能演"管理员就地换了文件"那件事：清单与包永远描述同一棵树。
    */
   _siteIndex() {
     if (this._indexCache) return this._indexCache;
     const cache = new Map();
     for (const base of this._siteDirs()) {
-      // ★ 扫树的规矩**只有一份**（`plugins/index.js` 的 scanPluginCollection）——
+      // 扫树的规矩只有一份（`plugins/index.js` 的 scanPluginCollection）——
       //   调试那一屏也是用它报"这个目录里读到几个插件"的。两处各写一遍的话，
       //   界面说"读到 3 个"而站点只报 2 个，谁也不知道差在哪。
-      //   `skipped` 这里**不用**：坏清单就是发不出来的一份东西，站点不报它
+      //   `skipped` 这里不用：坏清单就是发不出来的一份东西，站点不报它
       //   （与守护进程一致）；那是界面上那句"只有 N 个能用"的事。
       const { plugins: found } = pluginFiles.scanPluginCollection(base);
       for (const { dir, manifest: mf } of found) {
         let files;
         try {
-          // 只取**普通文件**：符号链接与空目录进不了负载（格式里表达不出来），
-          // 而打包器的负载只描述文件。这与守护进程读**包**时同一个口径 ——
+          // 只取普通文件：符号链接与空目录进不了负载（格式里表达不出来），
+          // 而打包器的负载只描述文件。这与守护进程读包时同一个口径 ——
           // 那边是 `package_read_file()` 读出来的记录表说了算，链接与目录在
           // 格式里根本表达不出来，不是"被跳过"。
           files = pluginFiles.readPluginFiles(dir)
@@ -540,7 +540,7 @@ class FakeBackend extends Backend {
         } catch { continue; }
         const c = (mf.contributes && typeof mf.contributes === 'object') ? mf.contributes : {};
         const key = `${mf.id}@${mf.version}`;
-        // ★ 两处都有同一个 `id@版本` ⇒ **先扫到的那个算数**（装上去的排在前）。
+        // 两处都有同一个 `id@版本` 先扫到的那个算数（装上去的排在前）。
         //   同一棵树在两处各有一份不是错误（从源码跑时把样例也装了一遍就会这样），
         //   而"站点上有哪几棵树"必须只有一个答案 —— 让后扫到的覆盖掉，
         //   会让 `installPlugins` 里那条"同 id 拒装"的判据看到一个和它刚看过的
@@ -548,18 +548,18 @@ class FakeBackend extends Backend {
         if (cache.has(key)) continue;
         cache.set(key, {
           dir, files, name: mf.name, title: mf.displayName || mf.name,
-          // ★ 「这个插件有没有作业侧」的判据是**记录表里有没有那一份**
+          // 「这个插件有没有作业侧」的判据是记录表里有没有那一份
           //   （`job/start.sh`）—— 与守护进程 `plugin_scan` 那一句逐字同形。
-          //   ★ 从前假站点不判这一格（它也不跑作业侧，判了没用）；现在它真的起
-          //     那个片段，于是这一格从"演得像"变成了**它自己要知道的事实**：
-          //     没有作业侧的插件**提交不了**（`can_submit: false`），
+          //   从前假站点不判这一格（它也不跑作业侧，判了没用）；现在它真的起
+          //     那个片段，于是这一格从"演得像"变成了它自己要知道的事实：
+          //     没有作业侧的插件提交不了（`can_submit: false`），
           //     而不是"提交得出去、起来的时候说找不到那个文件"。
           hasJob: files.some((f) => f.path === pluginFiles.JOB_ENTRY),
-          // ★ 内部用（不在 `plugins` 响应里）：**现打一个包要签四元组**（A.3），
+          // 内部用（不在 `plugins` 响应里）：现打一个包要签四元组（A.3），
           //   而四元组的头两段就是这两个。从 `key` 那个串里切是不行的 —— 版本号
           //   里可能出现 `@`，而身份不该由一个给人看的字符串反推出来。
           id: mf.id, version: mf.version,
-          // 内部用，**不进 `plugins` 响应**（见下面 case 'plugins' 的逐字段挑）。
+          // 内部用，不进 `plugins` 响应（见下面 case 'plugins' 的逐字段挑）。
           surface: c.surface || null,
           submitPubkey: c.submitPubkey === true,
           login: c.login || null,
@@ -571,16 +571,16 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 把那张**启动快照**丢掉，下一次现扫。
+   * 把那张启动快照丢掉，下一次现扫。
    *
-   * ★ 只有两个调用方，各有一条理由：
+   * 只有两个调用方，各有一条理由：
    *
    *   · `installPlugins` 装着插件 —— 站点"装完当场就报它"靠的就是这一下
    *     （真守护进程那边是 `plugin install` 之后的重载）。
-   *   · 用例要换掉假站点那棵**样例**树（`_test.setDevSampleDir`）—— 那在真机上
+   *   · 用例要换掉假站点那棵样例树（`_test.setDevSampleDir`）—— 那在真机上
    *     等于重启，而一个进程里 index.js 只加载一次。
    *
-   *   ★ 除这两处**没有别人该调它**：这张快照是**启动**快照，随手丢它就等于把
+   * 除这两处没有别人该调它：这张快照是启动快照，随手丢它就等于把
    *     "清单、文件、包三者说的是同一棵树"那条保证松掉（`_pkgOf` 依赖它）。
    */
   forgetSiteIndex() {
@@ -591,7 +591,7 @@ class FakeBackend extends Backend {
   /**
    * 假站点当前报出去的插件清单。
    *
-   * ★ 每次现算，不缓存：用户可以在开发者模式里装/卸插件，而站点"看到"的东西
+   * 每次现算，不缓存：用户可以在开发者模式里装/卸插件，而站点"看到"的东西
    *   应该跟着变 —— 这正是真实的 `op_plugins` 的行为。
    */
   _sitePlugins() {
@@ -602,7 +602,7 @@ class FakeBackend extends Backend {
       name: v.name,
       title: v.title,
       enabled: !this._siteDisabled.has(v.name),
-      // ★ 没有作业侧的插件**提交不了** —— 与守护进程同一条判据（它数的是记录表里
+      // 没有作业侧的插件提交不了 —— 与守护进程同一条判据（它数的是记录表里
       //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份**真站点上根本
       //   提交不出去**的东西，而失败出现在起会话那一步（"读不到那个片段"），
       //   指不回"这个插件没有作业侧"。
@@ -610,15 +610,15 @@ class FakeBackend extends Backend {
         && v.hasJob !== false,
       surface: v.surface, submitPubkey: v.submitPubkey, login: v.login,
     }));
-    // ★ **别把"客户端池里装了什么"补进站点要报的插件**（那两处都空的时候，
+    // 别把"客户端池里装了什么"补进站点要报的插件（那两处都空的时候，
     //   有人会觉得本机池是唯一的来源）。理由不只是"池只剩一个"：那一段让假站点的
-    //   清单**由客户端自己的池决定** —— 而"站点有、本机没有"这条最重要的路径
+    //   清单由客户端自己的池决定 —— 而"站点有、本机没有"这条最重要的路径
     //   正是被它盖住的（站点报的就是本机有的那些，于是 `missing` 永远是空的）。
-    //   开发者模式的全部价值是它演的是**同一件事**，而兜底演的是一件自证成立的
+    //   开发者模式的全部价值是它演的是同一件事，而兜底演的是一件自证成立的
     //   事。
     //
-    //   ★ 打包版没有样例那棵树（**基座两端都不带任何插件**，那是对的），于是新装的
-    //     客户端上假站点是空的 —— **一个插件都不装是合法状态**，出路是去装一个。
+    //   打包版没有样例那棵树（基座两端都不带任何插件，那是对的），于是新装的
+    //     客户端上假站点是空的 —— 一个插件都不装是合法状态，出路是去装一个。
     //     别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
     return [...distributed, ...this._extraSitePlugins];
   }
@@ -626,18 +626,18 @@ class FakeBackend extends Backend {
   /**
    * 把一个 `.splug` 装到假站点上 —— 与真站点 `slurmate plugin install <文件.splug>` 同形。
    *
-   * ★ **落点是"装上去的东西"那一处**（`_siteInstalledDir()`，沙盒里、程序自己的），
-   *   与**样例**那一棵分家 —— 用户装什么，都不该动到开发样例。一棵树一个 id，与真
-   *   站点一样 —— 所以"同一个 id 已经有另一棵树"是**拒**，不是覆盖（那棵树可能在
+   * 落点是"装上去的东西"那一处（`_siteInstalledDir()`，沙盒里、程序自己的），
+   *   与样例那一棵分家 —— 用户装什么，都不该动到开发样例。一棵树一个 id，与真
+   *   站点一样 —— 所以"同一个 id 已经有另一棵树"是拒，不是覆盖（那棵树可能在
    *   两处中的任何一处，那句错话里印的就是它的 `dir`）。真站点上那条路是
-   *   `uninstall` 之后再装，而这句话要说清**删掉哪个目录**。
+   *   `uninstall` 之后再装，而这句话要说清删掉哪个目录。
    *
-   * ★ **两遍式**（与守护进程的 `install_plugins` 逐字同形）：第一遍只把每份包铺到
-   *   一个**暂存目录**里并逐份校验，一条不过就**一个字节都不落地**。于是"装了一半"
+   * 两遍式（与守护进程的 `install_plugins` 逐字同形）：第一遍只把每份包铺到
+   *   一个暂存目录里并逐份校验，一条不过就一个字节都不落地。于是"装了一半"
    *   这件事不会发生在一个能被读到的中间态上（`rename` 才是那一下开关）。
    *
-   * ★ **清单校验用客户端那一份**（`pluginFiles.inspectDir`）。假站点没有站点侧那套
-   *   （它在守护进程的 Python 里），而这是**更严**的那一侧：一棵客户端注定加载不了
+   * 清单校验用客户端那一份（`pluginFiles.inspectDir`）。假站点没有站点侧那套
+   *   （它在守护进程的 Python 里），而这是更严的那一侧：一棵客户端注定加载不了
    *   的树，让它装上去只会把失败推迟到"用户已经点过同意之后" —— 那时用户已经为
    *   一个装不上的东西负过责任了。代价如实记着：真站点上装得上、而本客户端加载
    *   不了的（比如 `engines` 不满足），这里会在装的那一刻就拒。
@@ -658,14 +658,14 @@ class FakeBackend extends Backend {
       return { ok: false, code: 'no_dir',
                error: '拿不到"装上去的东西"放哪儿：客户端的数据目录还没定下来。' };
     }
-    // ★ 目录**由这里建**：它是程序自己的一处，第一次装东西之前它不存在，
+    // 目录由这里建：它是程序自己的一处，第一次装东西之前它不存在，
     //   而"还没有这个目录"不是错误（"站点上还没装过东西"就是这个样子）。
     //
-    // ★★ 这一行的价值**只在出错那一条路上**，写清楚免得下一个人以为它多余：
+    // 这一行的价值只在出错那一条路上，写清楚免得下一个人以为它多余：
     //   正常路径上，下面铺暂存那一步（`unpackTo` 往 `dir/.slurmate-stage-…` 写）
-    //   本来就会顺手把父目录造出来。所以"把它删掉"是一个**等价变异** —— 用例一条
+    //   本来就会顺手把父目录造出来。所以"把它删掉"是一个等价变异 —— 用例一条
     //   都不会红（这一轮真撞上过）。留着它是因为它把"这一处建不出来"（权限、
-    //   或者那个路径上躺着一个**文件**）变成一句说得清的错，而不是让后面某一步
+    //   或者那个路径上躺着一个文件）变成一句说得清的错，而不是让后面某一步
     //   以一句看不出所以然的话收场。
     try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); }
     catch (e) {
@@ -673,7 +673,7 @@ class FakeBackend extends Backend {
                error: `装插件的地方「${dir}」建不出来：${e.message}` };
     }
 
-    // ── 站上现在有哪几棵树（**那两处一起扫**，装上去的排在前）。**一次扫完**：
+    // ── 站上现在有哪几棵树（那两处一起扫，装上去的排在前）。一次扫完：
     //    逐份现扫的话，自己刚铺下的暂存目录会进到"站上已有的"里（它在同一个目录下）。 ──
     const onSite = this._siteDirs()
       .flatMap((d) => pluginFiles.scanPluginCollection(d).plugins);
@@ -708,7 +708,7 @@ class FakeBackend extends Backend {
       const hit = onSite.find((x) => x.manifest.id === id) || null;
       if (hit) {
         const hitTitle = hit.manifest.displayName || hit.name;
-        // 是同一棵吗？比的是 **§3.4 那个内容摘要** —— 站点报给客户端、签名盖着、
+        // 是同一棵吗？比的是 §3.4 那个内容摘要 —— 站点报给客户端、签名盖着、
         // 用户同意时看的都是它。拿别的判据（比如"文件数一样"）就是第二个说法。
         let same = false;
         try {
@@ -731,7 +731,7 @@ class FakeBackend extends Backend {
         continue;
       }
 
-      // ── 铺到暂存并校验。**还没有落地。** ──
+      // ── 铺到暂存并校验。还没有落地。──
       const stage = path.join(dir,
         `.slurmate-stage-${crypto.randomBytes(6).toString('hex')}`);
       const w = PP.unpackTo(r, buf, stage, { onto: 'site' });
@@ -740,7 +740,7 @@ class FakeBackend extends Backend {
       const ins = pluginFiles.inspectDir(stage);
       if (ins.error) {
         fs.rmSync(stage, { recursive: true, force: true });
-        // 那句错话里带着暂存目录的路径，而那个目录**此刻已经没了** —— 把它换成
+        // 那句错话里带着暂存目录的路径，而那个目录此刻已经没了 —— 把它换成
         // "这一份里"，否则读的人会去找一个不存在的地方。
         problems.push(`${base}：这个包装上去本客户端也加载不了：`
           + ins.error.split(stage).join('这一份里'));
@@ -752,7 +752,7 @@ class FakeBackend extends Backend {
                     name: r.manifest.name, title });
     }
 
-    // ── 第一遍没过 ⇒ 收掉暂存，一个字节都不落地（与守护进程同一句话）。 ──
+    // ── 第一遍没过，收掉暂存，一个字节都不落地（与守护进程同一句话）。 ──
     if (problems.length) {
       for (const s of staged) fs.rmSync(s.stage, { recursive: true, force: true });
       return { ok: false, code: 'rejected', error: problems.join('\n') };
@@ -766,7 +766,7 @@ class FakeBackend extends Backend {
         fs.renameSync(s.stage, s.dest);
       } catch (e) {
         fs.rmSync(s.stage, { recursive: true, force: true });
-        // ★ 已经就位的那几棵**不回滚**：每一棵都是完整的（`rename` 是原子的），
+        // 已经就位的那几棵不回滚：每一棵都是完整的（`rename` 是原子的），
         //   而回滚会把"装上了两棵、第三棵没成"说成"一棵都没装" —— 后者更假。
         return { ok: false, code: 'partial', error:
           `「${s.title}」挪到 ${s.dest} 失败：${e.message}\n`
@@ -777,7 +777,7 @@ class FakeBackend extends Backend {
       installed.push({ id: s.id, version: s.version, name: s.name, title: s.title, dir: s.dest });
     }
 
-    // ★ 装完**当场重扫** —— 站点"立刻报它"靠的就是这一下。少了它，用户看到的是
+    // 装完当场重扫 —— 站点"立刻报它"靠的就是这一下。少了它，用户看到的是
     //   "装上了、而站点还是没报它"，那个症状指不回这里。
     if (installed.length) this.forgetSiteIndex();
 
@@ -788,10 +788,10 @@ class FakeBackend extends Backend {
   get connected() { return this._connected; }
 
   /**
-   * 假后端**永远"常驻"**：对面就是这个进程自己起的东西，一次 RPC 是一个本进程内的
+   * 假后端永远"常驻"：对面就是这个进程自己起的东西，一次 RPC 是一个本进程内的
    * 函数调用 —— 没有 exec 那回事，也就没有"退化"这一档。
    *
-   * ★ 不能省掉这一格而落到基类那个 `null`：那会让开发者模式按**最保守**的节奏
+   * 不能省掉这一格而落到基类那个 `null`：那会让开发者模式按最保守的节奏
    *   跑（1.5 秒一次的轮询变成 10 秒一次），于是你在假站点上验的那套节奏
    *   与真集群上的根本不是同一套 —— 而"开发模式能跑、真集群跑不了"正是这个
    *   接缝最怕的一类。
@@ -820,23 +820,23 @@ class FakeBackend extends Backend {
   }
 
   async close() {
-    // ★★ 只取消**等待登记**那一拍，**释放那一拍留着**。
+    // 只取消等待登记那一拍，释放那一拍留着。
     //
     //   两者的区别是"这件事还属不属于这次连接"：
     //     · `submitted` 还等着登记 —— 连接都断了，登记已经没有意义，取消它是对的；
-    //     · `releasing` 是**站点自己**在收尾（`scancel` 已经发出去了），它一定会
+    //     · `releasing` 是站点自己在收尾（`scancel` 已经发出去了），它一定会
     //       在那之后变成 `released`，与客户端在不在无关。
     //
-    //   一起取消的后果是假站点把一个会话留在了一个**它永远不会离开**的状态里，
+    //   一起取消的后果是假站点把一个会话留在了一个它永远不会离开的状态里，
     //   而 `_occupying()` 会把下一条用例的提交挡在「已经有 1 个会话占着位置」上
     //   —— 那个症状排查的是它自己，指不回这里。
-    //   ★ 定时器是 unref 的，所以留着它不会拖住进程退出。
+    //   定时器是 unref 的，所以留着它不会拖住进程退出。
     for (const s of this._sessions) {
       if (s._enrollTimer) { clearTimeout(s._enrollTimer); s._enrollTimer = null; }
     }
     this._stopPushSweep();
     this._connected = false;
-    // ★ **每一个作业侧都要收掉**。不关的话留下的是**真的进程**：端口还听着、
+    // 每一个作业侧都要收掉。不关的话留下的是真的进程：端口还听着、
     //   用例跑完了而整个套件不退出 —— 而那个症状指不回这里。
     const jobs = [...this._jobs.values()];
     this._jobs.clear();
@@ -850,7 +850,7 @@ class FakeBackend extends Backend {
     const op = String((req && req.op) || '');
     if (this.rpcLatencyMs > 0) await sleep(this.rpcLatencyMs);
 
-    // 调试：模拟守护进程不可达。**注意这返回的是 ok:false 的 JSON**，
+    // 调试：模拟守护进程不可达。注意这返回的是 ok:false 的 JSON，
     // 而不是抛异常 —— 真实情况下也是守护进程/CLI 构造出这个 JSON 的
     // （cluster/slurmate:226-232），传输层异常是另一条路径。两条都要能测。
     if (Date.now() < this._daemonDownUntil) {
@@ -859,17 +859,17 @@ class FakeBackend extends Backend {
     }
 
     switch (op) {
-      // ★ 版本号今天**是被读的**（连接期的那次握手），所以默认报本客户端的版本
+      // 版本号今天是被读的（连接期的那次握手），所以默认报本客户端的版本
       //   —— 开发者模式的默认状态是"版本一致"，而不是"版本不明"。
       //   要造"站点更新"或"跨大版本"就用 `app:debug daemon-version <x.y>`；
       //   要造"对面答的不像我们的守护进程"，就把它设成一个不合 x.y 的值。
       case 'ping':
         return ok({
           pong: true,
-          // ★★ 这里是 `pluginFiles.hostVersion()`，**不是裸的 `hostVersion()`**。
+          // 这里是 `pluginFiles.hostVersion()`，不是裸的 `hostVersion()`。
           //    裸的那个名字在本文件里根本不存在 —— 于是这一支一被调用就抛
           //    `ReferenceError`。
-          //    ★ 而这个假后端**全部的价值**就是"它演的是同一件事" ——
+          //    而这个假后端全部的价值就是"它演的是同一件事" ——
           //      一句只在它身上不成立的协议，比没有它更坏。
           version: this._daemonVersion === null
             ? pluginFiles.hostVersion() : this._daemonVersion,
@@ -877,34 +877,34 @@ class FakeBackend extends Backend {
         });
       case 'whoami':     return this._whoami();
       case 'partitions': return ok({ partitions: this._partitions() });
-      // 默认资源是**按插件**的，所以它跟 `plugins` 走（与守护进程逐字一致 ——
+      // 默认资源是按插件的，所以它跟 `plugins` 走（与守护进程逐字一致 ——
       // `partitions` 的应答里没有这个字段，见 op_partitions）。
-      // 默认资源是**站点设定的策略**，客户端不推导 —— 假站点一律报 DEFAULTS，
+      // 默认资源是站点设定的策略，客户端不推导 —— 假站点一律报 DEFAULTS，
       // 真实站点报它自己那份（每个插件可以不同，见 slurmate.conf.d/ 里它那一份）。
       //
-      // ★ 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
+      // 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
       //   清单里自己读**的东西，服务端多报一份就是两份真相，而两份迟早会分叉。
       //   （真实守护进程的 op_plugins 也是这么收口的。）
       //
-      //   `can_submit` 不违反上面那条：它说的是**站点这一侧**的事实（本站提交得出去
+      //   `can_submit` 不违反上面那条：它说的是站点这一侧的事实（本站提交得出去
       //   吗），客户端无从推导 —— 见 pluginsView 里那段三态说明。
       //
-      // 老守护进程**根本没有这个 op**，客户端拿到的是 unknown_op。这一态必须能造：
-      // 那条路上**每一个**字段都是缺的，而"缺"必须与"否"分得开。
+      // 老守护进程根本没有这个 op，客户端拿到的是 unknown_op。这一态必须能造：
+      // 那条路上每一个字段都是缺的，而"缺"必须与"否"分得开。
       case 'plugins': {
         if (this._noPluginsOp) return err(2, 'unknown_op', op);
-        // ── 假站点的**分发能力** ──
+        // ── 假站点的分发能力 ──
         //
-        // ★ 与守护进程逐字同一条纪律：`limits` 在 = 这个站点会分发；不在 = 老
-        //   守护进程。客户端**只看这个**，不看"这次下没下下来"。
+        // 与守护进程逐字同一条纪律：`limits` 在 = 这个站点会分发；不在 = 老
+        //   守护进程。客户端只看这个，不看"这次下没下下来"。
         //   `debugOldDaemon` 走的是上面那条 `unknown_op`，而这一条是更细的一档：
         //   有 `plugins` 却没有 `limits`（v0.5 的守护进程）。
         if (this._noDistribute) {
-          // ★ 这一档**连 `problems` 也不发** —— 它是 v0.11 才有的字段，v0.5 的
+          // 这一档连 `problems` 也不发 —— 它是 v0.11 才有的字段，v0.5 的
           //   守护进程报不出来。少发它是这一档的全部意义（"字段缺席"这条路
           //   必须有人走），照发就等于演了一个不存在的版本。
           //
-          // ★ `defaults.time` 同理，而且这里**逐字段挑**（不用 `...DEFAULTS`）：
+          // `defaults.time` 同理，而且这里逐字段挑（不用 `...DEFAULTS`）：
           //   那一格是 v0.11 才加进 `defaults` 的，v0.5 只报 cpus / mem。展开
           //   会把新字段顺手带上，于是"这一格缺席"这条路上一个用例都走不到 ——
           //   而界面恰恰必须能在它缺席时照常画出那句话。
@@ -921,42 +921,42 @@ class FakeBackend extends Backend {
           plugins: this._sitePlugins().map((p) => ({
             id: p.id, name: p.name, version: p.version, title: p.title,
             enabled: p.enabled, can_submit: p.can_submit,
-            // ★ `gpus` 盖成**这一站当下那一份**（`debugDefaultGpus` 改的就是它）：
+            // `gpus` 盖成这一站当下那一份（`debugDefaultGpus` 改的就是它）：
             //   直接 `...DEFAULTS` 的话，那个开关改了也传不下去，于是"配了默认卡"
             //   这条路上一个用例都走不到。
             defaults: { ...DEFAULTS, gpus: this._defaultGpus },
-            // ★ `noPackage` 的那几条**不带 `package` 这个键**（见 _sitePlugins）。
-            //   用 `delete` 之外的办法（展开）是因为这里在造一个**新对象**：
+            // `noPackage` 的那几条不带 `package` 这个键（见 _sitePlugins）。
+            //   用 `delete` 之外的办法（展开）是因为这里在造一个新对象：
             //   挑字段而不是 `...p` 是有意的，见上面那段"逐字段挑"。
             ...(p.noPackage ? {} : (() => {
               const k = this._pkgOf(`${p.id}@${p.version}`);
-              // ★ 包在（打得出来）就是那个自述；打不出来（打包器不在、或包没了）
-              //   就是 `null` —— 那是**这一份此刻生产不出来**，不是"本站没这个
+              // 包在（打得出来）就是那个自述；打不出来（打包器不在、或包没了）
+              //   就是 `null` —— 那是这一份此刻生产不出来，不是"本站没这个
               //   能力"。两者必须分得开，见 deliveryOf。
               return { package: k ? k.meta : null };
             })()),
           })),
           enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
-          // ── ★★ 站点级的插件问题（账本 **F22**）───────────────────────────
+          // ── 站点级的插件问题（账本 F22）───────────────────────────
           //
-          // 那些**没能加载**的站点侧包与原因。真守护进程那边它是
+          // 那些没能加载的站点侧包与原因。真守护进程那边它是
           // `cfg.plugin_problems` 原样倒出来的一组字符串（`scan_plugins` 造），
-          // 而它的形状是给**终端**的：多行、带站点上的路径。
+          // 而它的形状是给终端的：多行、带站点上的路径。
           //
-          // ★ 假站点默认一个都报不出来 —— 它的分发源是仓库里那两个真插件，
-          //   都装得好好的。要演这一格只能由用例**造**（`debugPluginProblems`），
+          // 假站点默认一个都报不出来 —— 它的分发源是仓库里那两个真插件，
+          //   都装得好好的。要演这一格只能由用例造（`debugPluginProblems`），
           //   而造出来的字符串必须与真守护进程那几个分支的措辞同形，否则界面
           //   那一格被演的就不是真会发生的样子（〈夹具要比真集群脏〉）。
           problems: [...this._pluginProblems],
-          // 假站点自报的那一组。★ 用展开而不是逐字段写：这个对象与 DEMO_SITE_LIMITS
-          //   必须是**同一组数**，写两遍就是两个会漂的东西。
+          // 假站点自报的那一组。用展开而不是逐字段写：这个对象与 DEMO_SITE_LIMITS
+          //   必须是同一组数，写两遍就是两个会漂的东西。
           limits: { ...DEMO_SITE_LIMITS },
         });
       }
       /**
        * 整包一次发 —— 与守护进程的 `op_plugin_package` 同一个形状。
        *
-       * ★ 站点自述的那三个数（format/bytes/digest）**不是判据**，客户端会自己
+       * 站点自述的那三个数（format/bytes/digest）不是判据，客户端会自己
        *   数、自己解析、自己重算。"站点自报的摘要与它实际发的字节对不上"那一条
        *   由 `site-plugins.test.mjs` 的假 rpc 覆盖（那里造一个谎报只要一行）。
        */
@@ -973,7 +973,7 @@ class FakeBackend extends Backend {
         return ok({ format: pkg.meta.format, bytes: pkg.meta.bytes, digest: pkg.meta.digest,
                     data: pkg.buf.toString('base64') });
       }
-      // ★ **假后端不许有真站点没有的 op**：一个"只在这个假后端里存在"的 op，
+      // 假后端不许有真站点没有的 op：一个"只在这个假后端里存在"的 op，
       //   比没有更糟 —— 它会让人以为真站点上还有那条路。
       case 'submit':     return this._submit(req);
       case 'status':     return this._status(req);
@@ -1007,9 +1007,9 @@ class FakeBackend extends Backend {
   debugDaemonDown(ms = 20000) { this._daemonDownUntil = Date.now() + ms; }
 
   /**
-   * 让集群信息的某一格**取不到**（`kind` 省略 = 全部）。
+   * 让集群信息的某一格取不到（`kind` 省略 = 全部）。
    *
-   * ★ 这一态必须能造出来：真集群上"取不到"要么要等一次故障、要么要把 sinfo
+   * 这一态必须能造出来：真集群上"取不到"要么要等一次故障、要么要把 sinfo
    *   改名，而"把取不到画成没有"正是这一整块最容易犯的错 —— 用户会去查一个
    *   不存在的问题（"为什么这台集群没有分区"）。
    */
@@ -1021,18 +1021,18 @@ class FakeBackend extends Backend {
     return Object.keys(this._clusterMissing);
   }
 
-  /** 让 `sacct` 取不到。它回的是**错误**，不是空列表 —— 两者不能混。 */
+  /** 让 `sacct` 取不到。它回的是错误，不是空列表 —— 两者不能混。 */
   debugHistoryDown(on = true) { this._historyDown = Boolean(on); }
 
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
 
   /**
-   * 让假站点**假装这台机器上没有 bash**。
+   * 让假站点假装这台机器上没有 bash。
    *
-   * ★ 作业侧是一段 shell 片段，而 Windows 上（以及 macOS 自带那个 bash 3.2 上）
+   * 作业侧是一段 shell 片段，而 Windows 上（以及 macOS 自带那个 bash 3.2 上）
    *   它跑不起来 —— 那句提示必须说得清"为什么"，而不是让作者去查自己的插件。
-   *   ★ 而这个现场在开发/CI 机器上**造不出来**（那里一定有能用的 bash），
-   *   于是那条失败路会变成一个**没人跑过的分支**（那句话对不对，谁也不知道）。
+   * 而这个现场在开发/CI 机器上造不出来（那里一定有能用的 bash），
+   *   于是那条失败路会变成一个没人跑过的分支（那句话对不对，谁也不知道）。
    *   这个开关就是让它跑得到。
    */
   debugNoBash(on = true) { this._noBash = Boolean(on); }
@@ -1040,11 +1040,11 @@ class FakeBackend extends Backend {
   debugReap() {
     const live = this._occupying();
     if (!live.length) return false;
-    // ★ **全部**收掉（不是"那一个"）。用例拿它
+    // 全部收掉（不是"那一个"）。用例拿它
     //   制造"上一个会话已经走完了"的现场。
     for (const s of live) {
       this._clearTimers(s);
-      // ★ 回收 = 作业被 scancel 了，作业侧也要跟着停。漏了这一句的症状是
+      // 回收 = 作业被 scancel 了，作业侧也要跟着停。漏了这一句的症状是
       //   "会话结束之后端口上还有人听着"，而下一条用例起同名会话时会撞端口。
       this._stopJob(s);
       s.state = 'released';
@@ -1066,19 +1066,19 @@ class FakeBackend extends Backend {
   /**
    * 让假站点"开了某个插件但本客户端不认识它"。
    *
-   * 这是**必须能演**的一种情况：站点升级了、装了新插件，而用户的客户端还没升级。
+   * 这是必须能演的一种情况：站点升级了、装了新插件，而用户的客户端还没升级。
    * 没有它，"未知服务"那条路在开发者模式下永远走不到，而那正是最需要用户看懂的一条
    * 提示（他该升级客户端，不是该找管理员）。
    *
-   * ★ **短名与显示名都可以不给**（不给就用 DEMO_EXTRA_NAME）：那个调试按钮只关心
+   * 短名与显示名都可以不给（不给就用 DEMO_EXTRA_NAME）：那个调试按钮只关心
    *   "站点上多了一个本机不认识的插件"，不关心它叫什么 —— 而缺省值写在这里而不是
-   *   写在调用点，是因为**基座里不许出现任何真插件的名字**，一个长在框架代码里的
+   *   写在调用点，是因为基座里不许出现任何真插件的名字，一个长在框架代码里的
    *   插件名正是"基座不认识任何插件"这句话的反例。
    */
   debugAddSitePlugin(name = null, title = null) {
     const short = name || DEMO_EXTRA_NAME;
     if (!this._extraSitePlugins.some((p) => p.name === short)) {
-      // ★ `noPackage`：**这个站点不分发它**。三态里那个 `undefined` 与 `null`
+      // `noPackage`：这个站点不分发它。三态里那个 `undefined` 与 `null`
       //   （"此刻生产不出来"）是两件事，而这个假插件属于前者 —— 它压根没有包。
       //   两者今天的行为碰巧一样（都跳过），但把它们写成同一个形状，等于让这个
       //   假站点再也造不出那个区别。
@@ -1087,7 +1087,7 @@ class FakeBackend extends Backend {
                                     can_submit: true, noPackage: true });
     }
   }
-  /** 让假站点把某个插件**关掉**（站点装了但不允许用）。 */
+  /** 让假站点把某个插件关掉（站点装了但不允许用）。 */
   debugDisableSitePlugin(name) {
     this._siteDisabled.add(name);
     const e = this._extraSitePlugins.find((x) => x.name === name);
@@ -1096,7 +1096,7 @@ class FakeBackend extends Backend {
   /**
    * 让假站点报告「这个插件装了，但没有作业侧实现」。
    *
-   * ★ 与 `debugDisableSitePlugin` 是**两件事**，界面上的两句话也不同：那个说
+   * 与 `debugDisableSitePlugin` 是两件事，界面上的两句话也不同：那个说
    *   "本站没开放它，去找管理员"；这个说"本站装了它，但它没有作业侧实现"。
    *   合成一个开关的话，第四条分支永远走不到，而那句话是这次新加的。
    */
@@ -1105,20 +1105,20 @@ class FakeBackend extends Backend {
     const e = this._extraSitePlugins.find((x) => x.name === name);
     if (e) e.can_submit = false;
   }
-  /** 让假站点装扮成**不认识 `plugins` 这个 op** 的老守护进程。 */
+  /** 让假站点装扮成不认识 `plugins` 这个 op 的老守护进程。 */
   debugOldDaemon(on = true) { this._noPluginsOp = on; }
 
   /**
-   * 让假站点上每一条会话都显示成**另一台电脑在看**。
+   * 让假站点上每一条会话都显示成另一台电脑在看。
    *
-   * ★ 真集群上这一幕要两台机器才造得出来（在一台上开着，去另一台上打开），
-   *   而「接管」这个按钮的全部意义就是那一刻 —— 它的**判据**（`keeper` 不是本机）
+   * 真集群上这一幕要两台机器才造得出来（在一台上开着，去另一台上打开），
+   *   而「接管」这个按钮的全部意义就是那一刻 —— 它的判据（`keeper` 不是本机）
    *   与它成功之后那句「已接管」在开发者模式里必须能先看一遍。
    *
-   * ★ 关掉（`false`）时把会话行上那一格**还原成它自己的值**，而不是留一个刚造的
+   * 关掉（`false`）时把会话行上那一格还原成它自己的值，而不是留一个刚造的
    *   假值 —— 否则"撤销"只是把别人的名字换成另一个别人的名字，而界面上看不出来。
    *
-   * ★ 传**空串**造的是第三种现场：**没人在看**（`keeper` 为空）。真集群上那一格
+   * 传空串造的是第三种现场：没人在看（`keeper` 为空）。真集群上那一格
    *   出现在"会话是 CLI 提交的"（提交那条连接没有身份）—— 而它也是界面上
    *   「本机在看 / 另一台电脑在看 / 没人在看」三句话里最后一句的唯一来源。
    *   少了它，那一句在开发者模式里永远看不到（这正是"夹具要比真集群脏"那条）。
@@ -1134,14 +1134,14 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 让假站点报一个**指定的基座版本**（`ping` 的 `version`）。传 `null` 恢复成
+   * 让假站点报一个指定的基座版本（`ping` 的 `version`）。传 `null` 恢复成
    * "跟着本客户端走"。
    *
-   * ★ 版本握手那几态里，有两态**只有这里能造**：
+   * 版本握手那几态里，有两态只有这里能造：
    *   · `client_behind`（站点比客户端新，比如 0.9 对 0.7）—— 它是唯一会拦人的
    *     那一态，而真机上要造它得先让管理员升一次服务端；
    *   · `cross_major`（1.28 对 2.5）—— 用户举的就是这个例子。
-   *   值原样透传（包括**不合 x.y 形状**的值）："答话的不像我们的守护进程"
+   *   值原样透传（包括不合 x.y 形状的值）："答话的不像我们的守护进程"
    *   同样是必须能复现的一态。
    */
   debugDaemonVersion(v) {
@@ -1152,41 +1152,41 @@ class FakeBackend extends Backend {
    * 让假站点装扮成「有 `plugins`、但没有 `limits`」的那一档（老守护进程
    * 没有分发能力）。
    *
-   * ★ 与 `debugOldDaemon` 是**两件事**，而客户端对它们的处理**必须一样**
+   * 与 `debugOldDaemon` 是两件事，而客户端对它们的处理必须一样
    *   （都走回退），却又是两条不同的代码路径（一个 `unknown_op`，一个字段缺席）。
    *   只造其中一条的话，另一条上的退化没人看得见。
    */
   debugOldDistribute(on = true) { this._noDistribute = on; }
 
   /**
-   * 让假站点报出**站点级的插件问题**（`op_plugins` 顶层的 `problems`，账本 F22）。
+   * 让假站点报出站点级的插件问题（`op_plugins` 顶层的 `problems`，账本 F22）。
    *
-   * ★★ **必须传参**，这里没有默认值 —— 与 `debugForeignKeeper` 那种"不传就造一个
-   *   演示值"的开关**故意不同**。理由是这一格说的是**站点上的一个事实**
-   *   （"本站有个包坏了、坏在哪"），而假站点**没有**这个事实：它的分发源是仓库里
+   * 必须传参，这里没有默认值 —— 与 `debugForeignKeeper` 那种"不传就造一个
+   *   演示值"的开关故意不同。理由是这一格说的是站点上的一个事实
+   *   （"本站有个包坏了、坏在哪"），而假站点没有这个事实：它的分发源是仓库里
    *   那两个真插件，都装得好好的。给它编一条默认值，就是在界面上说一句关于一个
-   *   不存在的站点的假话 —— 而这一格的全部价值恰恰是"让运维看到**真的**诊断"。
+   *   不存在的站点的假话 —— 而这一格的全部价值恰恰是"让运维看到真的诊断"。
    *
    *   要演它，就从 DevTools 里 `window.slurmate.debug('plugin-problems', '…')`，
    *   串照 `cluster/slurmate-sessiond` 的 `scan_plugins()` 那几条分支的措辞写
    *   （多行、带站点上的路径 —— 界面那边是 `white-space: pre-wrap`，原样显示）。
    *
-   * ★ 传空数组 = 清掉。
+   * 传空数组 = 清掉。
    */
   debugPluginProblems(list) {
     this._pluginProblems = (list || []).map((s) => String(s));
   }
 
   /**
-   * 让假站点报出**这一站的默认 GRES**（`op_plugins` 每项的 `defaults.gpus`）。
+   * 让假站点报出这一站的默认 GRES（`op_plugins` 每项的 `defaults.gpus`）。
    *
-   * ★ 与 `debugPluginProblems` 同一条纪律：**必须传参**（`null` / 不传 = 清掉，
-   *   也就是"本站没配"）。假站点**没有**"某个插件默认占几张卡"这个事实 ——
-   *   真站点上它是**每个插件一份**的管理员声明，而这里只有一份全局的（见 DEFAULTS）。
+   * 与 `debugPluginProblems` 同一条纪律：必须传参（`null` / 不传 = 清掉，
+   *   也就是"本站没配"）。假站点没有"某个插件默认占几张卡"这个事实 ——
+   *   真站点上它是每个插件一份的管理员声明，而这里只有一份全局的（见 DEFAULTS）。
    *   编一个默认值就等于演一个不存在的站点，而这一格的价值恰恰是让界面那句
    *   "默认 … / gpu:a6000 × 1"真的被画出来一次。
    *
-   * ★ 传进来的形状与协议一致：`{name, type, count}` 或 `null`。
+   * 传进来的形状与协议一致：`{name, type, count}` 或 `null`。
    *   从 DevTools 里 `window.slurmate.debug('default-gpus', {name:'gpu', type:'a6000', count:1})`。
    */
   debugDefaultGpus(g) {
@@ -1194,10 +1194,10 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 让某一份的**包里**多一个**超过单文件上限**的文件（造"这一份装不上"）。
+   * 让某一份的包里多一个超过单文件上限的文件（造"这一份装不上"）。
    *
-   * ★ 它往**包**里加一个装不下的文件，而不是往某份清单里加一条 —— 客户端只在
-   *   **读包**的时候执行那几条负载上限（`checkDeclared`），所以"站点报了一个
+   * 它往包里加一个装不下的文件，而不是往某份清单里加一条 —— 客户端只在
+   *   读包的时候执行那几条负载上限（`checkDeclared`），所以"站点报了一个
    *   装不下的东西"这件事本来就该发生在包里。
    */
   debugBloatPlugin(key = null) {
@@ -1209,8 +1209,8 @@ class FakeBackend extends Backend {
   /** 让接下来的 N 次 `plugin_package` 回 `rate_limited` —— 造限流。 */
   debugRateLimit(n = 3) { this._rateLimitBurst = n; }
 
-  // ★ 这里**没有**"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
-  //   原因很具体：假站点的分发源是**仓库里的 `plugins/`** —— 真文件。往那里
+  // 这里没有"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
+  //   原因很具体：假站点的分发源是仓库里的 `plugins/` —— 真文件。往那里
   //   写一个字节等于改用户的仓库，而那是一个调试开关绝不该有的副作用。
   //   那条路径（`9 plugin_file_changed`）由集群侧自己的用例覆盖，见
   //   `cluster/test-sessiond-logic.py` 的 19.11。
@@ -1230,8 +1230,8 @@ class FakeBackend extends Backend {
     this._bloatPlugin = null;
     this._pkgCache.clear();
     this._rateLimitBurst = 0;
-    // ★ 「另一台电脑在看」那几个单向开关里唯一需要显式撤掉的一个：
-    //   它改的是**已有会话行**上那一格（不是"以后新建的"），所以不撤掉的话
+    // 「另一台电脑在看」那几个单向开关里唯一需要显式撤掉的一个：
+    //   它改的是已有会话行上那一格（不是"以后新建的"），所以不撤掉的话
     //   下一条用例会看见上一个用例留下的"别人"。
     this._foreignKeeper = null;
     this.cancelFails = false;
@@ -1250,18 +1250,18 @@ class FakeBackend extends Backend {
   /**
    * 假站点的集群现状（`op_cluster`）。
    *
-   * ★★ **形状与守护进程逐字一致，包括"哪一格缺席"。** 这个假后端全部的价值就是
+   * 形状与守护进程逐字一致，包括"哪一格缺席"。这个假后端全部的价值就是
    *   它演的是同一件事 —— 一份只在它身上成立的协议比没有它更坏。
    *
-   * ★★ 这里**故意比真集群脏**（同 GRES 那条注释的道理）：
-   *   · 真集群上四个节点全是 `idle`/`mix`，**没有一个带后缀** —— 于是
+   * 这里故意比真集群脏（同 GRES 那条注释的道理）：
+   *   · 真集群上四个节点全是 `idle`/`mix`，没有一个带后缀 —— 于是
    *     "剥后缀、只按 base state 计数"这条路径在真机上根本走不到。
    *     这里给一个 `drain*`（不响应）、一个 `down~`（已关电）。
-   *   · 队列里既有排队也有在跑，还有一个**不是这两个**的（`CG` 收尾中）——
+   *   · 队列里既有排队也有在跑，还有一个不是这两个的（`CG` 收尾中）——
    *     真集群上此刻全是 `PD`，那一支也走不到。
    *   · `me` 里有排队作业，于是"我排第几"算得出来。
    *
-   * ★ `debugClusterMissing` 能让**任意一格缺席**，因为"取不到"与"确实没有"
+   * `debugClusterMissing` 能让任意一格缺席，因为"取不到"与"确实没有"
    *   必须分得开，而这两种状态在界面上是两句不同的话。
    */
   _cluster() {
@@ -1330,21 +1330,21 @@ class FakeBackend extends Backend {
     return ok(data);
   }
 
-  /** 最近几天的作业（`sacct`）。★ 按需拉，不进任何缓存。 */
+  /** 最近几天的作业（`sacct`）。按需拉，不进任何缓存。 */
   _history() {
     if (this._historyDown) return err(6, 'history_unknown', '开发者模式：模拟取不到历史');
     return ok({ history: HISTORY.map((h) => ({ ...h })), days: 7, limit: 30 });
   }
 
   /**
-   * 作业日志的尾部。**演的是同一件事** —— 与守护进程的 `op_job_log` 同一个形状：
+   * 作业日志的尾部。演的是同一件事 —— 与守护进程的 `op_job_log` 同一个形状：
    * 两份（`out` / `err`）、每一格是 `null`（没有这一份）或一个对象。
    *
-   * ★★ 内容是**作业侧真的写到那两个文件里的东西**（宿主那一句 `exec 1>>…` 之后，
+   * 内容是作业侧真的写到那两个文件里的东西（宿主那一句 `exec 1>>…` 之后，
    *    服务进程继承的正是它们）。这让"边跑边刷"、"起不来为什么"、以及"服务说的
    *    原话"三件事同时成立 —— 而它们是这个假站点唯一值得存在的那条性质。
    *
-   * ★ 归属照 `_status`：找不到就 `3 not_found`。不带 `session_id` 同样是
+   * 归属照 `_status`：找不到就 `3 not_found`。不带 `session_id` 同样是
    *   `not_found` —— 真守护进程那边没有"默认最新那条"这种缺省（日志是逐会话的），
    *   假站点要是给它一个，开发者模式里就会演出一件真集群上不会发生的事。
    */
@@ -1358,11 +1358,11 @@ class FakeBackend extends Backend {
     if (!home) return ok({ out: null, err: null });
     const dir = path.join(home, '.slurmate', 'logs');
 
-    // ★★ 这两个文件**就是作业的日志** —— 宿主自己写的每一行、以及服务进程写的
+    // 这两个文件就是作业的日志 —— 宿主自己写的每一行、以及服务进程写的
     //    每一行，从产生那一刻起就落在它们上面（替身宿主开头那一句 `exec 1>>…`）。
-    //    假站点不另记一份、也不编一行：右栏看到的**就是那个服务说的话**。
+    //    假站点不另记一份、也不编一行：右栏看到的就是那个服务说的话。
     //
-    //    ⇒ 于是"边跑边刷"是真的（文件在长），"作业起不来了为什么"在**跑着的时候**
+    //    于是"边跑边刷"是真的（文件在长），"作业起不来了为什么"在跑着的时候
     //      就看得见，而作者看到的是自己进程的原话 —— 这三条从前一条都不成立
     //      （那时这里是每 2 秒编一行）。
     const cell = (p, all, at) => {
@@ -1384,7 +1384,7 @@ class FakeBackend extends Backend {
         st = fs.statSync(p);
         text = fs.readFileSync(p, 'utf8');
       } catch {
-        // ★ `null` = **确实没有这一份**（这个插件还没有作业侧，或者它一个字都还
+        // `null` = 确实没有这一份（这个插件还没有作业侧，或者它一个字都还
         //   没说），不是"取不到" —— 两者在界面上是两句不同的话（见 dom.js 的三态）。
         return null;
       }
@@ -1399,18 +1399,18 @@ class FakeBackend extends Backend {
   }
 
   _partitions() {
-    // 每一项都**真的拷一份**（含 GRES 那一格）：真实后端回的是刚解析出来的 JSON，
+    // 每一项都真的拷一份（含 GRES 那一格）：真实后端回的是刚解析出来的 JSON，
     // 谁都不与别人共享一个对象。这里共享的话，界面上一处手误的原地修改会**同时
     // 改掉所有会话看到的那一份** —— 而那种 bug 在真集群上不会出现。
     return PARTITIONS.map((p) => ({ ...p, gres: p.gres.map((e) => ({ ...e })) }));
   }
 
   /**
-   * 缺省分区：**从该用户有权限的分区里随机挑一个**。
+   * 缺省分区：从该用户有权限的分区里随机挑一个。
    *
    * 为什么不是「不带 -p 交给 Slurm」：那样所有默认会话都会落在同一个默认分区，
    * 而用户明确要的是分散。随机挑的代价是用户事先不知道会落到哪种卡上 ——
-   * 所以 `session_view` 里必须把**实际落到的分区**返回给界面显示出来。
+   * 所以 `session_view` 里必须把实际落到的分区返回给界面显示出来。
    */
   _randPickPartition() {
     if (this._pickPartition) return this._pickPartition(PARTITIONS);
@@ -1423,7 +1423,7 @@ class FakeBackend extends Backend {
     // 服务种类。照抄守护进程的判据：认不出的一律拒绝，绝不悄悄退回某一个插件 ——
     // 那会让「我要的是中转站，得到的是一个网页 IDE」变成一个不报错的错误。
     //
-    // ★ **不写死缺省值**。真实守护进程的缺省来自站点配置（`default_plugin`），
+    // 不写死缺省值。真实守护进程的缺省来自站点配置（`default_plugin`），
     //   没配就要求显式给；假后端没有配置可读，所以它照做同一件事：要求显式给。
     //   客户端在能解析出缺省插件时本来就会把它显式传上来。
     const kind = req && req.service_kind;
@@ -1431,10 +1431,10 @@ class FakeBackend extends Backend {
       return err(2, 'bad_service_kind',
         '这个站点没有设缺省插件，提交时必须显式指定 service_kind');
     }
-    // ★ 按**短名**在假站点自己的清单里查 —— 假后端扮演的正是"一个站点"，而
-    //   它演的那些插件都是它自己装的，短名不会撞（真站点**允许**撞，短名不再
+    // 按短名在假站点自己的清单里查 —— 假后端扮演的正是"一个站点"，而
+    //   它演的那些插件都是它自己装的，短名不会撞（真站点允许撞，短名不再
     //   唯一了；见 `packer/docs/PLUGIN-SPEC.md` §2.2）。查不到就拒绝。
-    //   ★ 这里刻意**不**实现真站点那套歧义规则：假后端的目的不是把站点的每一条
+    //   这里刻意不实现真站点那套歧义规则：假后端的目的不是把站点的每一条
     //     纪律演一遍，而是让"没有集群时界面还能走通"。哪天它要演两个同名插件，
     //     那就在这里照 `resolve_plugin()` 补一次 —— 而不是现在给一个用不上的分支。
     const sitePlugin = this._sitePlugins().find((p) => p.name === kind);
@@ -1444,14 +1444,14 @@ class FakeBackend extends Backend {
     if (!sitePlugin.enabled) {
       return err(4, 'service_kind_disabled', `本站没有开放「${sitePlugin.title}」`);
     }
-    // 中转站必须带公钥，且形状要对 —— 规则与守护进程的 parse_ssh_pubkey **逐字一致**。
+    // 中转站必须带公钥，且形状要对 —— 规则与守护进程的 parse_ssh_pubkey 逐字一致。
     //
-    // ★ 注释要允许并**丢掉**。客户端发上来的就是 OpenSSH 的一整行，而它天然带注释
+    // 注释要允许并丢掉。客户端发上来的就是 OpenSSH 的一整行，而它天然带注释
     //   （`ssh-ed25519 AAAA… slurmate-20260915-1030`）。照着「68 个字符后必须结束」
-    //   去写，会把客户端的公钥**全部**拒掉；而如果反过来原样收下，那个注释里的
+    //   去写，会把客户端的公钥全部拒掉；而如果反过来原样收下，那个注释里的
     //   逗号会把 `--export=ALL,k=v,…` 劈成两个变量（守护进程那边这一步是真的，
     //   不是理论问题 —— 见 test-sessiond-logic.py 19.9）。
-    // ★ 判据是插件**声明了什么**，不是它叫什么名字 —— 与客户端框架同一条规矩。
+    // 判据是插件声明了什么，不是它叫什么名字 —— 与客户端框架同一条规矩。
     //   `submitPubkey` 是"提交时要带公钥"，`surface` 是"有一个网页界面"。
     if (sitePlugin.submitPubkey) {
       const pk = req && req.ssh_pubkey;
@@ -1462,7 +1462,7 @@ class FakeBackend extends Backend {
       }
       this._relayPubkey = 'ssh-ed25519 ' + m[1];      // 规范化：注释在这里被丢掉
     }
-    // 与真实守护进程一致：**占着位置的**（含排队中的）都算一个名额，
+    // 与真实守护进程一致：占着位置的（含排队中的）都算一个名额，
     // 上限来自配置键 `max_sessions_per_user`（`this.maxActive`）。
     const occ = this._occupying();
     if (occ.length >= this.maxActive) {
@@ -1486,7 +1486,7 @@ class FakeBackend extends Backend {
     // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
     const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 64);
     const mem = typeof (req && req.mem) === 'string' && req.mem ? req.mem : DEFAULTS.mem;
-    // GRES：与守护进程同一条规矩 —— **分区定下来之后**再对账，因为上限是分区
+    // GRES：与守护进程同一条规矩 —— 分区定下来之后再对账，因为上限是分区
     // 自己的（同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
     const gresp = gresFor(req && req.gres, part);
     if (gresp.err) return err(2, 'bad_gres', gresp.err);
@@ -1513,19 +1513,19 @@ class FakeBackend extends Backend {
       renew_count: 0,
       requested_time: '12:00:00',
       note: null,
-      // 站点分配下去的候选端口（真守护进程那一格也是这么来的：它在**登录节点**
-      // 上挑，够不着计算节点那一刻的端口占用）。★ 真正交给作业的是其中**实测过
+      // 站点分配下去的候选端口（真守护进程那一格也是这么来的：它在登录节点
+      // 上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是其中**实测过
       // 能绑上**的那些（见 `_startJob`）。
       _candidates: fakeJob.nominalCandidates(),
-      // ★★ **谁在看这条会话** —— 与真守护进程的 `op_submit(client_id)`
+      // 谁在看这条会话 —— 与真守护进程的 `op_submit(client_id)`
       //   同一个位置、同一个含义。提交这条连接的客户端就是它的第一个看护者；
-      //   没有身份（CLI、老客户端）⇒ `null`，而 `null` 是**合法状态**：
+      //   没有身份（CLI、老客户端），`null`，而 `null` 是合法状态：
       //   指的是"确实没人在看"，不是"不知道"。
       keeper: this._client ? this._client.id : null,
       service_kind: kind,
-      // ★ 会话的**解析键**：`<id>@<版本>`。守护进程在提交时从它自己那份插件
+      // 会话的解析键：`<id>@<版本>`。守护进程在提交时从它自己那份插件
       //   清单里抄下来 —— 而"抄下来"是关键：站点之后升级了插件，这个字段
-      //   仍然是**提交那一刻**那一版。作业侧跑的是那一版的代码，客户端这一半
+      //   仍然是提交那一刻那一版。作业侧跑的是那一版的代码，客户端这一半
       //   必须配同一版。
       service_plugin: `${sitePlugin.id}@${sitePlugin.version}`,
       // 与守护进程一致：要公钥的插件走公钥，永远没有口令（有口令才是错的 ——
@@ -1538,7 +1538,7 @@ class FakeBackend extends Backend {
       ssh_host_key: null,
       job_state: 'PENDING',
       // 判定随状态一起来（守护进程那边是 `job_is_terminal()`）。
-      // ★ 假站点**必须**有这个字段：没有的话客户端会走"老守护进程"那条退路，
+      // 假站点必须有这个字段：没有的话客户端会走"老守护进程"那条退路，
       //   于是开发模式里看到的是状态原文，而真集群上看到的是译文 ——
       //   "开发模式验不了的那条路"正是这一版反复在清的东西。
       job_terminal: false,
@@ -1553,22 +1553,22 @@ class FakeBackend extends Backend {
 
     this._sessions.push(sess);
 
-    // ── ★★ 站点这一侧：把这个插件的**作业侧真的跑起来** ────────────────────
+    // ── 站点这一侧：把这个插件的作业侧真的跑起来 ────────────────────
     //
     // 真站点上这一步是 sbatch：作业在计算节点上挑端口、调 `start_<短名>`，服务的
-    // 输出落在作业日志上，然后守护进程读**会话文件**把它登记进来。这里补的就是
-    // 那一段（见 `fake-job.js`）—— 于是"点启动打开的那个页面"是**这个插件自己**
-    // 的服务，右栏那些行是**它自己**说的话。
+    // 输出落在作业日志上，然后守护进程读会话文件把它登记进来。这里补的就是
+    // 那一段（见 `fake-job.js`）—— 于是"点启动打开的那个页面"是这个插件自己
+    // 的服务，右栏那些行是它自己说的话。
     //
-    // ★ 判据是 `surface`（"这个插件有一个网页界面"）：有界面的那一类真跑作业侧；
-    //   中转站那一类今天仍指向一个**没有东西在监听**的端口 —— 那边真正的 sshd
+    // 判据是 `surface`（"这个插件有一个网页界面"）：有界面的那一类真跑作业侧；
+    //   中转站那一类今天仍指向一个没有东西在监听的端口 —— 那边真正的 sshd
     //   需要一个站点侧装好的 sshd 与主机密钥，假站点演不出来（记在 KNOWN-ISSUES）。
     if (sitePlugin.surface) {
       this._startJob(sess, sitePlugin)
         .catch((e) => this._jobFailed(sess, `作业侧起不来：${e.message}`));
     }
 
-    // 登记那一步。**它不再是无条件的**：作业还没起来就再等一等（真守护进程每个
+    // 登记那一步。它不再是无条件的：作业还没起来就再等一等（真守护进程每个
     // tick 都试一次，直到 `enroll_ttl` 到期）。
     sess._enrollTimer = setTimeout(() => this._enroll(sess), this.enrollDelayMs).unref?.();
 
@@ -1576,7 +1576,7 @@ class FakeBackend extends Backend {
       session_id: sid, job_id: sess.job_id, state: 'submitted',
       partition: part.name,
       resources: { cpus, mem, gres },
-      // ★ 这一格是**守护进程分配的候选表**（真守护进程也是这么来的：它在登录
+      // 这一格是守护进程分配的候选表（真守护进程也是这么来的：它在登录
       //   节点上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是**实测过
       //   能绑上**的那几个（见 `_jobEnv`）—— 与真宿主逐条同形：分配是一件事，
       //   计算节点上那一趟 `port_free` 是另一件。
@@ -1588,7 +1588,7 @@ class FakeBackend extends Backend {
   // ── 作业侧（假站点真的跑它）─────────────────────────────────────────────
 
   /**
-   * 起这一条会话的作业侧。**调用方不 await** —— 提交那条 RPC 立刻回 `submitted`
+   * 起这一条会话的作业侧。调用方不 await —— 提交那条 RPC 立刻回 `submitted`
    * （真站点上 sbatch 回的正是"已提交"），作业那边跑它的。
    */
   async _startJob(sess, sitePlugin) {
@@ -1607,7 +1607,7 @@ class FakeBackend extends Backend {
     const logDir = path.join(home, '.slurmate', 'logs');
     fakeJob.pruneLogs(logDir);
     const job = new fakeJob.FakeJob({
-      // ★ 作业侧从**站点那一侧**那棵树里读。客户端从来不读它 —— "两半"就是这个意思。
+      // 作业侧从站点那一侧那棵树里读。客户端从来不读它 —— "两半"就是这个意思。
       entry: path.join(entry.dir, ...pluginFiles.JOB_ENTRY.split('/')),
       env: this._jobEnv(sess, entry, cands, home),
       cwd: home,
@@ -1629,11 +1629,11 @@ class FakeBackend extends Backend {
   /**
    * 宿主给插件的环境（`docs/CONTRACT.md` §5.2）。
    *
-   * ★ 真站点上这一份是**守护进程**造的（它读站点配置、按插件的清单解析 bin），
+   * 真站点上这一份是守护进程造的（它读站点配置、按插件的清单解析 bin），
    *   假站点在这一处把它们合起来 —— 分两个文件会让"起一个作业侧"散在两处，
    *   而这条路上只有一个读者（开发者模式）。
    *
-   * ★ 缺 `SLURMATE_GRES`：它在契约里是"带缺省"的那一档，作业侧只把它记进日志与
+   * 缺 `SLURMATE_GRES`：它在契约里是"带缺省"的那一档，作业侧只把它记进日志与
    *   会话文件、不做任何判断，而客户端没有那份串的拼法。见替身宿主的开头那一段。
    */
   _jobEnv(sess, entry, cands, home) {
@@ -1655,8 +1655,8 @@ class FakeBackend extends Backend {
       // 作业号与节点名：真站点上由 Slurm 给。
       JOB_ID: String(sess.job_id),
       NODE: sess.node || 'localhost',
-      // ★ 家目录指到沙盒里那一处（见 `_siteHome`）：插件的 `start_*` 会往里写
-      //   东西，而 `/home/demo` 在这台机器上不存在 —— 那会让一个**没写错的**插件
+      // 家目录指到沙盒里那一处（见 `_siteHome`）：插件的 `start_*` 会往里写
+      //   东西，而 `/home/demo` 在这台机器上不存在 —— 那会让一个没写错的插件
       //   在一个与它无关的原因上失败。uid/用户名跟着这个假站点自称的那一份
       //   （与 `whoami` 同源），否则会话文件里的 uid 与界面上的对不上。
       HOME: home,
@@ -1672,9 +1672,9 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 登记这一步。判据是**这个插件的作业侧起来了没有**。
+   * 登记这一步。判据是这个插件的作业侧起来了没有。
    *
-   * ★ 真守护进程每 2 秒的 tick 上做一次，判据是**会话文件写着 running**；
+   * 真守护进程每 2 秒的 tick 上做一次，判据是会话文件写着 running；
    *   还没起来就再等一个 tick（直到 `enroll_ttl` 到期才回收）。这里同形：
    *   作业还在起就留个记号，它起来时（`_startJob` 那个 then）补一次。
    */
@@ -1692,7 +1692,7 @@ class FakeBackend extends Backend {
     sess.node_ip = '127.0.0.1';
     if (job && job.running) {
       sess.service_port = job.port;
-      // ★ 口令是**作业侧自己生成、写进会话文件**的那一个（真站点上正是这么来的：
+      // 口令是作业侧自己生成、写进会话文件的那一个（真站点上正是这么来的：
       //   宿主 `gen_password` 生成 → 导出给服务 → 写进会话文件 → 守护进程再给
       //   客户端）。从前这里是一个写死的假口令，而那个口令与隧道那头是谁无关。
       sess.auth_password = (job.info && job.info.auth_password) || null;
@@ -1703,7 +1703,7 @@ class FakeBackend extends Backend {
     }
     sess.tunnel_target = `127.0.0.1:${sess.service_port}`;
     sess.job_state = 'RUNNING';
-    // ★ 排队原因**必须跟着清掉**。真集群上跑起来的作业报的是 `Reason=None`
+    // 排队原因必须跟着清掉。真集群上跑起来的作业报的是 `Reason=None`
     //   （守护进程把它滤掉），不清的话开发模式里会显示
     //   「运行中 · 在等空闲资源」—— 一句自相矛盾的话，而它在真集群上不出现。
     sess.job_reason = null;
@@ -1711,9 +1711,9 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 服务自己没了 ⇒ 作业结束。
+   * 服务自己没了，作业结束。
    *
-   * ★ 判据与真守护进程逐字同形（`phase_running`）：作业进了**终态**就释放会话，
+   * 判据与真守护进程逐字同形（`phase_running`）：作业进了终态就释放会话，
    *   不管它是正常结束还是炸了。而"为什么"在日志里 —— 那正是作者要看的东西。
    */
   _jobEnded(sess, job) {
@@ -1723,7 +1723,7 @@ class FakeBackend extends Backend {
       job && job.exitCode ? 'FAILED' : 'COMPLETED', job ? job.exitCode : null);
   }
 
-  /** 作业侧**没起来**（起不来、或者起来的路上炸了）。会话不许判成功。 */
+  /** 作业侧没起来（起不来、或者起来的路上炸了）。会话不许判成功。 */
   _jobFailed(sess, why, code = null) {
     if (['released', 'rejected', 'expired', 'releasing'].includes(sess.state)) return;
     this._stopJob(sess);
@@ -1733,9 +1733,9 @@ class FakeBackend extends Backend {
   /**
    * 收尾一个会话：`releasing` → `released`。
    *
-   * ★ 分两步、而且中间隔一下 —— 真守护进程释放一条会话就是这个样子（`begin_release`
+   * 分两步、而且中间隔一下 —— 真守护进程释放一条会话就是这个样子（`begin_release`
    *   之后作业要先被确认停掉）。一步跳到 `released` 的话，界面上的「正在释放」
-   *   那一格在开发者模式里**一次都走不到**，而那是用户真的会看到的一格。
+   *   那一格在开发者模式里一次都走不到，而那是用户真的会看到的一格。
    */
   _endSession(sess, note, jobState, exitCode) {
     this._clearTimers(sess);
@@ -1753,12 +1753,12 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 假站点上那个用户的**家目录**：沙盒里一处。
+   * 假站点上那个用户的家目录：沙盒里一处。
    *
-   * ★ 为什么不写死 `/home/demo`（`whoami` 报的那个）：插件的 `start_*` 会往家里
-   *   写东西，而那台机器上**没有** `/home/demo` —— 那会让一个没写错的插件在一个
+   * 为什么不写死 `/home/demo`（`whoami` 报的那个）：插件的 `start_*` 会往家里
+   *   写东西，而那台机器上没有 `/home/demo` —— 那会让一个没写错的插件在一个
    *   与它无关的原因上失败（"权限不够/目录不存在"），而作者会去改自己的代码。
-   *   指到沙盒里，作业日志与**会话文件**就落在与真站点同形的相对位置上
+   *   指到沙盒里，作业日志与会话文件就落在与真站点同形的相对位置上
    *   （`~/.slurmate/logs/slurm-<作业号>.out`），`op_job_log` 报的路径也就是真的。
    */
   _siteHome() {
@@ -1766,7 +1766,7 @@ class FakeBackend extends Backend {
     return root ? path.join(root, 'home') : null;
   }
 
-  /** 把这一条会话的作业侧收掉（杀进程组）。**幂等**。 */
+  /** 把这一条会话的作业侧收掉（杀进程组）。幂等。 */
   _stopJob(sess) {
     const job = sess._job;
     if (!job) return;
@@ -1777,7 +1777,7 @@ class FakeBackend extends Backend {
 
   _status(req) {
     const sid = req && req.session_id;
-    // ★ 不带 session_id 时回**最新**那条占着位置的 —— 与守护进程逐字一致。
+    // 不带 session_id 时回最新那条占着位置的 —— 与守护进程逐字一致。
     //   客户端要多会话走 `_list`（`tryReattach` 就是那样接回全部会话的）。
     const s = sid ? this._find(sid) : (this._occupying().slice(-1)[0] || null);
     if (sid && !s) return err(3, 'not_found');
@@ -1789,20 +1789,20 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 心跳。**判据与真守护进程的 `op_heartbeat` 逐档同构**（见那一段的四档表）：
+   * 心跳。判据与真守护进程的 `op_heartbeat` 逐档同构（见那一段的四档表）：
    *
    *   | 发心跳的连接 | keeper | 结果 |
-   *   | 报了身份 | 空 | 接受，**并认领** |
+   *   | 报了身份 | 空 | 接受，并认领 |
    *   | 报了身份 | 是我 | 接受 |
-   *   | 报了身份 | 是别人 | 回 `ok` + `ignored`，**什么都不动** |
-   *   | **没报身份** | 任意 | 一律接受，keeper 不动 |
+   *   | 报了身份 | 是别人 | 回 `ok` + `ignored`，什么都不动 |
+   *   | 没报身份 | 任意 | 一律接受，keeper 不动 |
    *
-   * ★★ 最后一行是承重的，别"收严"：没报身份的是 CLI 与更老的客户端，以及
-   *   **我们自己在常驻通道断掉之后的 exec 退路**。假站点要是把它也挡掉，
+   * 最后一行是承重的，别"收严"：没报身份的是 CLI 与更老的客户端，以及
+   *   我们自己在常驻通道断掉之后的 exec 退路。假站点要是把它也挡掉，
    *   开发者模式里就会演出一件真集群上不会发生的事 —— 而假站点全部的价值
    *   就是它演的是同一件事。
    *
-   * ★ 也**不认领**没报身份的连接：`keeper` 写谁？没有名字就没人可写。
+   * 也不认领没报身份的连接：`keeper` 写谁？没有名字就没人可写。
    */
   _heartbeat(req) {
     const sid = req && req.session_id;
@@ -1822,13 +1822,13 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 【接管】：把这条会话的看护者换成我。★★ **一个字都不动会话。**
+   * 【接管】：把这条会话的看护者换成我。一个字都不动会话。
    *
    * 与真守护进程的 `op_takeover` 同一条纪律（见那一段 docstring）：作业、ACL、
    * 端口、`last_hb_at`、`state` 一个都不动 —— 用户只是**换了一台电脑看同一个
    * 作业**。动了别的任何一个字，接管的语义就变成"结束并重开"。
    *
-   * ★ 没有身份**不能**接管（要把看护者写成谁？）—— 与心跳那条**正好相反**，
+   * 没有身份不能接管（要把看护者写成谁？）—— 与心跳那条正好相反，
    *   而且不是矛盾：心跳是"我在续命"（缺身份时宽进，排除错了会杀作业），
    * 接管是"我来当家"（缺身份时严出，它要往那一格里写一个名字）。
    */
@@ -1844,27 +1844,27 @@ class FakeBackend extends Backend {
       return err(4, 'session_gone', `这条会话已经结束（${s.state}）。`);
     }
     const was = this._effKeeper(s);
-    // 别人那个"在看"要**真的撤掉**，否则下一次心跳还会被回 `ignored`。
+    // 别人那个"在看"要真的撤掉，否则下一次心跳还会被回 `ignored`。
     this._foreignKeeper = null;
     s.keeper = me;
     return ok({ session_id: s.session_id, keeper: me, was });
   }
 
   /**
-   * 【临时离开】：把这几条会话的看护者置空。**倒计时从这一刻起算。**
+   * 【临时离开】：把这几条会话的看护者置空。倒计时从这一刻起算。
    *
    * 与真守护进程的 `op_leave` 同一条纪律（见那一段 docstring）：
    *
-   *   · **不校验身份** —— 它是一次放手，不是一次取得。要防的是"谁的作业被别人的
+   *   · 不校验身份 —— 它是一次放手，不是一次取得。要防的是"谁的作业被别人的
    *     心跳续了命"（那由 `_heartbeat` 管），而"我以为我不看了"这句话没有假冒的
-   *     价值：它只能让作业**更早**被回收，且随时可以被下一个开始看它的客户端
+   *     价值：它只能让作业更早被回收，且随时可以被下一个开始看它的客户端
    *     认领回去（认领那一支在 `_heartbeat` 里）。
-   *   · **看护者本来就是空的，安静跳过** —— 那会被记成一次"放手"，而实际上
+   *   · 看护者本来就是空的，安静跳过 —— 那会被记成一次"放手"，而实际上
    *     什么都没发生。
-   *   · **不加第二个超时窗口**：这里只是置空，之后仍然走 suspect → orphaned →
+   *   · 不加第二个超时窗口：这里只是置空，之后仍然走 suspect → orphaned →
    *     scancel 那一条（假站点里由 `debugReap` 演）。
    *
-   * ★ 覆盖层（`debugForeignKeeper`）**跟着一起撤掉**：它模拟的就是"服务端此刻
+   * 覆盖层（`debugForeignKeeper`）跟着一起撤掉：它模拟的就是"服务端此刻
    *   认为谁在看"这一格，而这一格刚刚被清空了。不清的话，界面上会停在
    *   「另一台电脑在看」，而那条会话已经没人在看了 —— 假的比真的还假。
    */
@@ -1886,9 +1886,9 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 这条会话**现在**的看护者：那一层覆盖（如果开着）优先，其次才是它自己那一格。
+   * 这条会话现在的看护者：那一层覆盖（如果开着）优先，其次才是它自己那一格。
    *
-   * ★ 判空用的是 `!== null` 而不是真值 —— 覆盖值**可以是空串**，而那是一个
+   * 判空用的是 `!== null` 而不是真值 —— 覆盖值可以是空串，而那是一个
    *   有意义的取值（"没人在看"），不是"没有覆盖"。
    */
   _effKeeper(s) {
@@ -1903,11 +1903,11 @@ class FakeBackend extends Backend {
     if (['released', 'rejected', 'expired'].includes(s.state)) {
       return ok({ state: s.state });
     }
-    // ★ 只清**这一条**的定时器。清全部的话，另一条会话的登记定时器被清掉，
+    // 只清这一条的定时器。清全部的话，另一条会话的登记定时器被清掉，
     //   它就永远停在 submitted —— 而界面上一切正常。
     this._clearTimers(s);
-    // ★ 真站点上这一步是 scancel：作业被杀，插件的服务跟着没了（那是同一件事的
-    //   两端）。**收在这里而不是等 released**：那一刻作业侧就该停了。
+    // 真站点上这一步是 scancel：作业被杀，插件的服务跟着没了（那是同一件事的
+    //   两端）。收在这里而不是等 released：那一刻作业侧就该停了。
     this._stopJob(s);
     s.state = 'releasing';
     s.note = 'goodbye';
@@ -1919,7 +1919,7 @@ class FakeBackend extends Backend {
       this._emitState(false, '会话已释放');
     }, 1600).unref?.();
     if (this.cancelFails) {
-      // ★ 真守护进程在这里说两件事，而且**故意不说**"作业还在跑"（它没有核对过
+      // 真守护进程在这里说两件事，而且故意不说"作业还在跑"（它没有核对过
       //   那一点：作业可能刚刚正常结束，scancel 报的只是"没有这个作业"）。
       //   它说的是"这一次没成功 + 我接下来会怎么做"。假后端照这个形状演。
       return ok({ state: 'releasing',
@@ -1931,8 +1931,8 @@ class FakeBackend extends Backend {
   }
 
   _doctor() {
-    // ★ `active_sessions` 只数 `enrolled`（有 nft 规则的那些）—— 与守护进程一致，
-    //   排队中的**不算**，否则体检会报"规则数与会话数不一致"。
+    // `active_sessions` 只数 `enrolled`（有 nft 规则的那些）—— 与守护进程一致，
+    //   排队中的不算，否则体检会报"规则数与会话数不一致"。
     const enrolled = this._sessions.filter((s) => s.state === 'enrolled').length;
     return ok({
       socket: true, table: true, rules_readable: true,
@@ -1947,7 +1947,7 @@ class FakeBackend extends Backend {
   // ── 内部 ────────────────────────────────────────────────────────────────
   /**
    * 构造客户端可见的会话视图。
-   * **逐字段对齐守护进程的 session_view**，包括「expires_at / job_state / time_limit
+   * 逐字段对齐守护进程的 session_view，包括「expires_at / job_state / time_limit
    * 只在 show_job 成功时才存在」这条 —— 所以界面必须能处理它们缺失，
    * 假站点里也照样可能缺。
    */
@@ -1960,17 +1960,17 @@ class FakeBackend extends Backend {
       last_hb_at: s.last_hb_at, renew_count: s.renew_count,
       requested_time: s.requested_time, note: s.note,
       auth_mode: s.auth_mode, account: s.account,
-      // ★ **谁在看** —— 一个 client_id，或者 null。取值只有这两种
+      // 谁在看 —— 一个 client_id，或者 null。取值只有这两种
       // （不是空串、不是 "unknown"），与守护进程那一格逐字同形。
-      // ★ 它是「接管」这个按钮的**唯一判据**，也是界面上「本机在看 / 另一台电脑
+      // 它是「接管」这个按钮的唯一判据，也是界面上「本机在看 / 另一台电脑
       //   在看 / 没人在看」那三句话的来源。
       keeper: this._effKeeper(s),
       tunnel_target: s.tunnel_target,
-      // 与守护进程逐字一致：这个字段**总是**存在（可能是 null）。
-      // null 的含义是「服务端也不知道」，客户端据此**拒绝猜测**该走哪条路 ——
+      // 与守护进程逐字一致：这个字段总是存在（可能是 null）。
+      // null 的含义是「服务端也不知道」，客户端据此拒绝猜测该走哪条路 ——
       // 而"字段不存在"（更旧的守护进程）在客户端那边落到同一个答案：也不猜。
       service_kind: s.service_kind === undefined ? null : s.service_kind,
-      // 与守护进程一致：也是**总是存在**（可能是 null）。null = 服务端不知道
+      // 与守护进程一致：也是总是存在（可能是 null）。null = 服务端不知道
       // 这个会话是哪一版的插件，客户端据此拒绝猜测（只解释、不动作）。
       service_plugin: s.service_plugin === undefined ? null : s.service_plugin,
     };
@@ -1983,7 +1983,7 @@ class FakeBackend extends Backend {
       d.job_state = s.job_state;
       d.time_limit = s.time_limit;
       d.expires_at = s.expires_at;
-      // 与守护进程一致：**判定**与状态一起来，客户端不做判定（见 jobstate.js）。
+      // 与守护进程一致：判定与状态一起来，客户端不做判定（见 jobstate.js）。
       d.job_terminal = Boolean(s.job_terminal);
       // `Reason=None` 在守护进程那边被过滤掉；这里同样只在有值时出现。
       if (s.job_reason) d.job_reason = s.job_reason;
@@ -2000,12 +2000,12 @@ class FakeBackend extends Backend {
 
   // ── 推送（常驻通道的服务端那一半）─────────────────────────────────────────
   /**
-   * 推送那份视图：**逐字等于 `_list` 给出的那一种**。
+   * 推送那份视图：逐字等于 `_list` 给出的那一种。
    *
-   * ★ 守护进程的 `snapshot_for` 用的是 `session_view(s, with_secret=False)`，
+   * 守护进程的 `snapshot_for` 用的是 `session_view(s, with_secret=False)`，
    *   与 `op_list` 同构 —— 所以这里就是"先按 list 渲染，再把秘密摘掉"，
    *   而不是另写一份。另写一份的那天，推送的字段集与 list 的字段集就会分家，
-   *   而症状是**界面上某一格在有推送时是空的、没有推送时是满的**。
+   *   而症状是界面上某一格在有推送时是空的、没有推送时是满的。
    */
   _pushView(s) {
     const d = this._view(s);
@@ -2027,7 +2027,7 @@ class FakeBackend extends Backend {
   /**
    * 扫一遍：变了就推，没变也每 `PUSH_INTERVAL_MS` 推一条。
    *
-   * ★ 调试开关"守护进程不可达"期间**一条都不推** —— 否则那个开关只挡得住
+   * 调试开关"守护进程不可达"期间一条都不推 —— 否则那个开关只挡得住
    *   一问一答，挡不住推送，而开发者模式里就会出现"守护进程挂了、界面却还在
    *   自己更新"这种真集群上不存在的景象。
    */
@@ -2075,9 +2075,9 @@ function clampInt(v, fallback, lo, hi) {
 }
 
 /**
- * 框架对 GRES 数量的量级护栏。★ **必须与守护进程的 `MAX_GRES_COUNT` 相等**
+ * 框架对 GRES 数量的量级护栏。必须与守护进程的 `MAX_GRES_COUNT` 相等
  * （用例 `client/test/limits.test.mjs` 逐字比对两个文件里的这个数）——
- * 它**不是**站点策略：真实上限来自集群自己配了几个，由分区的 `per_node_max`
+ * 它不是站点策略：真实上限来自集群自己配了几个，由分区的 `per_node_max`
  * 给出。这一条只挡"一个天文数字"。
  */
 const MAX_GRES_COUNT = 4096;
@@ -2089,12 +2089,12 @@ const MAX_GRES_COUNT = 4096;
 const GRES_FIELD_RE = /^[A-Za-z0-9_]{1,32}$/;
 
 /**
- * 把请求里的 GRES 与**这个分区实际有的**对一对。返回 `{gres}` 或 `{err}`。
+ * 把请求里的 GRES 与这个分区实际有的对一对。返回 `{gres}` 或 `{err}`。
  *
- * ★ 逐条照着守护进程的 `clean_gres()` + `fit_gres()` 来。这个假后端的全部价值
- *   就是**它演的是生产那条路**：两处规则漂开的话，开发者模式里说得通的事在真机上
+ * 逐条照着守护进程的 `clean_gres()` + `fit_gres()` 来。这个假后端的全部价值
+ *   就是它演的是生产那条路：两处规则漂开的话，开发者模式里说得通的事在真机上
  *   会被拒（或反过来），而 `backend-fake.test.mjs` 只守得住字段名，守不住规则。
- * ★ 上限**从分区的清单来**（`per_node_max`），不是写死一个 8 —— 与守护进程一样。
+ * 上限从分区的清单来（`per_node_max`），不是写死一个 8 —— 与守护进程一样。
  */
 function gresFor(raw, part) {
   if (raw === undefined || raw === null || raw === '') return { gres: null };
@@ -2133,7 +2133,7 @@ function gresFor(raw, part) {
   return { gres: { name, type, count } };
 }
 
-// ★ 只导出真有人读的：`PARTITIONS` 不在这里，它只在**本文件内**被用
+// 只导出真有人读的：`PARTITIONS` 不在这里，它只在本文件内被用
 //   （测试要看分区表时走的是 `app:partitions` 那条真路，不是这个常量）。
 module.exports = { FakeBackend, DEFAULTS,
   PUSH_INTERVAL_MS, PUSH_SWEEP_MS, DEMO_SITE_LIMITS };
