@@ -147,13 +147,7 @@ def judged(rel):
 #    ★ 建表数字是 0.18 时实测的：423 条，其中 `⇒` 183 条、长段 240 条。
 #      F 与 G 两条当时已经是 0，所以这 423 条全是 H 与 I 的。
 LEGACY = {
-    "CONTRIBUTING.md": 7,
-    "SECURITY.md": 21,
     "client/README.md": 35,
-    "cluster/docs/CONFIGURATION.md": 30,
-    "cluster/docs/DEPLOYMENT.md": 10,
-    "cluster/docs/PLUGIN-TROUBLESHOOTING.md": 11,
-    "cluster/docs/TROUBLESHOOTING.md": 15,
     "docs/ARCHITECTURE.md": 75,
     "docs/CONTRACT.md": 22,
     "docs/PROTOCOL.md": 76,
