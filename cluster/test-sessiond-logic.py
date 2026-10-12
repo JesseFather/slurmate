@@ -5023,8 +5023,8 @@ exit 0
             "login": {"path": "/login", "field": "password", "cookie": "cs"},
             "ports": 1, "submitPubkey": False, "concurrent": True,
             # 两个键都列上（值不冲突）—— 站点这一侧要收得下 `perVersion`。
-            #   少了它，"守护进程拒了一个任何客户端都认的键"这件事只有 19.14 那条
-            #   常量比对守着；这一条把清单那条路也接上（19.14 证明表是对应的，
+            #   少了它，"守护进程拒了一个任何客户端都认的键"这件事只有 19.16 那条
+            #   常量比对守着；这一条把清单那条路也接上（19.16 证明表是对应的，
             #   这一条证明表真的用在路上）。
             "data": {"inherit": "editor", "perVersion": False},
         },

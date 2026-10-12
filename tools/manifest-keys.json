@@ -10,7 +10,7 @@
     "",
     "谁读它：**两侧的用例**与 **CI 的 lint**。",
     "  · client/test/manifest-keys.test.mjs   —— 客户端那五张表与这里逐字相同（真跑 JS）",
-    "  · cluster/test-sessiond-logic.py 的 19.14 —— 守护进程那五张表与这里逐字相同",
+    "  · cluster/test-sessiond-logic.py 的 19.16 —— 守护进程那五张表与这里逐字相同",
     "  · .github/workflows/checks.yml 的 lint —— 最外层那道网：把两侧的**字面量**抠出来",
     "    互相比、再与这里比（抠字面量而不是跑 JS：本机不一定有 node，而这条契约要的",
     "    是「两份声明写的是同一组名字」）",

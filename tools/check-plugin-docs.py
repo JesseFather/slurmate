@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""插件文档里的〈配置条目〉表，必须与插件**认得**的键逐字一致。
+"""手写的键表必须与**权威键集**逐字一致 —— 两处，同一个形状。
 
-判据（一条，机械的）：
+判据一：插件文档里的〈配置条目〉表
 
     一个插件认得的全部键 ＝ 守护进程的 `PLUGIN_COMMON_KEYS` ＋ `"bin"`
                             ＋ 它 `plugin.json` 的 `site.enumKeys` 里的键
@@ -30,6 +30,14 @@
   README 可以放心当那份表**唯一给人读的家**（`docs/README.md` 的 P1）。
 
 ★ 判据只有一处：键集合从守护进程那个常量与清单算出来，**这里不再抄一份**。
+
+判据二：`packer/docs/PLUGIN-SPEC.md` §2 的清单键表
+
+    那一张表的键集，必须恰好是 `tools/manifest-keys.json` 里那五张表展开成路径
+    的结果（展开规则见下面 `SPEC_PARENTS` 那一段的注释）。
+
+★ 为什么要有这一条：那张表是**插件作者查「这一格写什么」的地方**，而它与权威键集
+  之间本来没有任何东西挡着 —— 与判据一同一个理由。
 
 用法：
     python3 tools/check-plugin-docs.py                # 扫仓库里的 plugins/
@@ -56,6 +64,27 @@ SECTION = "### 配置条目"
 
 # 表格行：第一格是一个反引号包起来的键名。
 ROW = re.compile(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|")
+
+# ── 判据二：`packer/docs/PLUGIN-SPEC.md` 的清单键表 ─────────────────────────
+#
+# 那一张表的键集必须恰好是 `tools/manifest-keys.json` 里那五张表**展开成路径**的
+# 结果。展开的规则是死的：清单顶层键原样；`contributes` 下的加 `contributes.`
+# 前缀；`surface` / `login` / `data` 三张再各加一层。另外补一个 `engines.slurmate`
+# —— 它是 `keysProblem(engines, ['slurmate'], …)` 认的唯一子键，而 `engines`
+# 本身在 JSON 里没有子表。
+#
+# ★ 为什么这条判据值得存在：那张表是**插件作者查「这一格写什么」的地方**，而它
+#   与权威键集之间本来没有任何东西挡着 —— 键改名、加一个键，表不会跟着动，而
+#   漂了不会红任何东西。与判据一同一个理由，也就是本文件的文件头。
+SPEC = os.path.join(ROOT, "packer", "docs", "PLUGIN-SPEC.md")
+MANIFEST_KEYS = os.path.join(ROOT, "tools", "manifest-keys.json")
+
+# 表头要逐字对上 —— 含糊的开头会让抽取悄悄抓到别处的表格。
+SPEC_TABLE_HEAD = "| 键 | 类型 | 必填 | 取值域 | 违反的后果 | 详见 |"
+SPEC_ROW = re.compile(r"^\|\s*`([A-Za-z][A-Za-z0-9_.]*)`\s*\|")
+
+# 展开成路径时要多走一层的那三张子表。
+SPEC_PARENTS = ("surface", "login", "data")
 
 
 def conf_keys_of_daemon():
@@ -97,6 +126,58 @@ def documented_keys(readme_path):
     return keys if inside else None
 
 
+def spec_table_keys(spec_path):
+    """`PLUGIN-SPEC.md` 清单键表的第一列 —— `contributes.data.inherit` 这种路径。
+
+    `None` 表示**连那张表都没有**（与"表是空的"是两件事）。
+    """
+    if not os.path.exists(spec_path):
+        return None
+    keys, inside = set(), False
+    with open(spec_path, encoding="utf-8") as f:
+        for line in f:
+            if line.rstrip("\n") == SPEC_TABLE_HEAD:
+                inside = True
+                continue
+            if not inside:
+                continue
+            if not line.startswith("|"):     # 表格到底了
+                break
+            m = SPEC_ROW.match(line)
+            if m:
+                keys.add(m.group(1))
+    return keys if inside else None
+
+
+def manifest_key_paths(keys_path):
+    """`manifest-keys.json` 那五张表展开成一张路径集 —— 规则见文件头。"""
+    with open(keys_path, encoding="utf-8") as f:
+        written = json.load(f)
+    out = set(written["manifest"])
+    out |= {"contributes." + k for k in written["contributes"]}
+    for parent in SPEC_PARENTS:
+        out |= {"contributes.%s.%s" % (parent, k) for k in written[parent]}
+    out.add("engines.slurmate")
+    return out
+
+
+def check_manifest_table(spec_path, keys_path):
+    """PLUGIN-SPEC 的键表 vs 权威键集。返回问题清单（空 = 全过）。"""
+    want = manifest_key_paths(keys_path)
+    got = spec_table_keys(spec_path)
+    if got is None:
+        return ["%s：找不到清单键表（表头要逐字是 %s）" % (spec_path, SPEC_TABLE_HEAD)]
+    problems = []
+    missing = sorted(want - got)
+    extra = sorted(got - want)
+    if missing:
+        problems.append("%s：键表缺 %s" % (spec_path, "、".join(missing)))
+    if extra:
+        problems.append("%s：键表多了 %s（manifest-keys.json 里没有）"
+                        % (spec_path, "、".join(extra)))
+    return problems
+
+
 def check(plugins_dir, base):
     """返回一张问题清单（空 = 全过）。"""
     if not os.path.isdir(plugins_dir):
@@ -125,15 +206,18 @@ def check(plugins_dir, base):
 def run(plugins_dir):
     base = conf_keys_of_daemon()
     problems = check(plugins_dir, base)
+    problems += check_manifest_table(SPEC, MANIFEST_KEYS)
     for p in problems:
         print("✗ %s" % p)
     if problems:
-        print("\n✗ 插件文档与清单对不上（%d 处）。这份表的权威是 plugin.json 与"
-              " PLUGIN_COMMON_KEYS —— 改清单就要改表。" % len(problems))
+        print("\n✗ 手写的键表与权威键集对不上（%d 处）。前者的权威是 plugin.json 与"
+              " PLUGIN_COMMON_KEYS，后者的权威是 tools/manifest-keys.json —— 改键"
+              " 就要改表。" % len(problems))
         return 1
     n = sum(1 for d in sorted(os.listdir(plugins_dir))
             if os.path.isfile(os.path.join(plugins_dir, d, "plugin.json")))
-    print("✓ %d 个插件的〈配置条目〉表与各自清单逐字一致" % n)
+    print("✓ %d 个插件的〈配置条目〉表与各自清单逐字一致；PLUGIN-SPEC.md 的清单键表"
+          "与 tools/manifest-keys.json 逐字一致" % n)
     return 0
 
 
@@ -167,6 +251,24 @@ def self_test():
             f.write("## 站点侧\n\n没有配置条目那一节。\n")
 
 
+        # ── 判据二的样本：临时写几份 PLUGIN-SPEC，权威那一份仍读真的 ──────
+        def plant_spec(name, rows):
+            p = os.path.join(tmp, name + ".md")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("## 2. 插件必须做什么\n\n%s\n|---|---|---|---|---|\n"
+                        % SPEC_TABLE_HEAD)
+                for r in rows:
+                    f.write("| `%s` | 字符串 | 否 | 任意 | 拒 | §1 |\n" % r)
+            return p
+
+        paths = sorted(manifest_key_paths(MANIFEST_KEYS))
+        spec_ok = plant_spec("spec_ok", paths)
+        spec_short = plant_spec("spec_short", paths[:-1])
+        spec_long = plant_spec("spec_long", paths + ["contributes.zzz"])
+        spec_none = os.path.join(tmp, "spec_none.md")
+        with open(spec_none, "w", encoding="utf-8") as f:
+            f.write("## 2. 这里没有那张表。\n")
+
         got = "\n".join(check(tmp, base))
         bad = []
         for frag, why in (
@@ -179,11 +281,23 @@ def self_test():
                 bad.append("种入的坏样本没被抓到：%s（%s）" % (frag, why))
         if os.path.join(tmp, "ok") in got:
             bad.append("把一份**对的** README 判成了错的（误报）")
+
+        for frag, why, path in (
+            ("spec_short.md：键表缺", "键表少一个键", spec_short),
+            ("spec_long.md：键表多了", "键表多一个键", spec_long),
+            ("spec_none.md：找不到清单键表", "连那张表都没有", spec_none),
+        ):
+            g = "\n".join(check_manifest_table(path, MANIFEST_KEYS))
+            if frag not in g:
+                bad.append("种入的坏样本没被抓到：%s（%s）" % (frag, why))
+        if check_manifest_table(spec_ok, MANIFEST_KEYS):
+            bad.append("把一份**对的**键表判成了错的（误报）")
+
         if bad:
             for b in bad:
                 print("✗ %s" % b)
             return 1
-        print("✓ 反向自测通过：四种坏样本都被抓到，一份对的没有被误判")
+        print("✓ 反向自测通过：七种坏样本都被抓到，两份对的没有被误判")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
