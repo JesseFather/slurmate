@@ -103,7 +103,7 @@ function classify(resp, ctx) {
   if (code === 5) {
     if (kind === 'daemon_unreachable') {
       return mk(Action.DAEMON_DOWN, code, kind,
-        '控制节点上的 Slurmate 守护进程没有响应。你的作业仍在运行。', ctx);
+        '控制节点上的 Slurmate 守护进程没有响应。作业仍在运行。', ctx);
     }
     if (kind === 'no_port') {
       return mk(Action.RETRY_SOON, code, kind, message, ctx);

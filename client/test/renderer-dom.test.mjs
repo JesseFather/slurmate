@@ -456,7 +456,7 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
   assert.equal(why.includes('alice@'), false, '★ 而不是回落成地址');
   // 独占工作区那一条（`soleOwnerId` 与主进程数的是同一件事）
   assert.equal(why.includes('工作区 1'), true, '独占的工作区会跟着删 —— 这一句要说出来');
-  assert.equal(why.includes('写在磁盘上的那些文件'), true, '磁盘上那一份也要说到');
+  assert.equal(why.includes('写在磁盘上的文件'), true, '磁盘上那一份也要说到');
 
   // ── 退回去：一个字节都没发 ──
   cluster.children[2].onclick();
@@ -674,7 +674,7 @@ test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title'
     '★ 理由要挂在 `title` 上 —— 没有它的话，这一行就是一个没有出处的断言');
 
   const other = show('same_major');
-  assert.match(other._text, /升级客户端解决不了它/,
+  assert.match(other._text, /升级客户端解决不了/,
     '★ 另一支必须**明确否掉**"升级客户端" —— 那是用户看了这句话唯一会去做的事，'
     + '而它对"站点自己不一致"这种情况没有用');
   assert.equal(other._text.length <= 60, true, '正文同样只留一行');
@@ -781,7 +781,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   // ★★ 中间那一颗是这一行上唯一**会改配置**的一颗，所以它的话必须说清"不可逆"
   //    （原来那个端口与它上面那份布局都回不来）—— 只写"记住"是不够的。
   assert.match(h.doc.getElementById('sb-port-remember').title || '', /不可逆/,
-    '「记住新配置并启动」要说清它不可逆 —— 那是它与「启动」唯一的分界');
+    '「记住并启动」要说清它不可逆 —— 那是它与「启动」唯一的分界');
   assert.match(h.doc.getElementById('sb-port-remember').title || '', /18080/,
     '★ 还要念出**原来那个端口**：用户就是拿它对照着决定要不要改');
   assert.match(h.doc.getElementById('sb-port-abort').title || '', /不会出现作业/,
@@ -795,7 +795,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.equal(sent(1), '["cs","shift"]',
     '★★ 那个作答是**用户的意思**：主进程据此顺移，不再问第二遍');
 
-  // ── ②b 答「记住新配置并启动」⇒ 带 `'remember'` 重发，而它仍然只发一趟 ──
+  // ── ②b 答「记住并启动」⇒ 带 `'remember'` 重发，而它仍然只发一趟 ──
   //    ★★ 两个作答走的是**同一条重发路**（`startWith`），分别只在那个字符串上：
   //      界面这一层不做任何"要不要写配置"的判断 —— 写配置那一步在主进程里，而且
   //      排在绑定成功之后（它才知道隧道真绑上了哪个端口）。
@@ -862,7 +862,7 @@ test('★★ 同意那一段的安全警告压到两行以内（它曾经是三�
     .find((x) => /^同意之后/.test(x._text || ''));
   assert.ok(warn, '同意那一块里找不到那句警告了 —— 它是用户做决定时缺不得的一条信息');
   assert.match(warn._text, /没有进程隔离/, '★ 必须说清"目前没有进程隔离"');
-  assert.match(warn._text, /在你这台机器上运行/, '★ 必须说清客户端代码会在本机运行');
+  assert.match(warn._text, /在这台机器上运行/, '★ 必须说清客户端代码会在本机运行');
   assert.equal((warn._text.match(/。/g) || []).length, 2,
     `★ 这一句应当是**两句**：现在 ${JSON.stringify(warn._text)}　——`
     + '第三句讲"不同意会怎样"，而那件事按钮自己会说了');
@@ -1452,7 +1452,7 @@ test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按�
   assert.equal(/错误/.test(n0), false, '★ `0:0` 是干净收尾 —— 报成错误会让用户去查一个不存在的问题');
 });
 
-test('★★ 「看作业日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
+test('★★ 「查看日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run("SCREEN = 'jobs';"
     + "SESS = { sessions: [{ slot: 'a', live: false, snap: { sessionId: 's1' } }], front: 'a' };");

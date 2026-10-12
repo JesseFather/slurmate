@@ -286,15 +286,17 @@ function authFailureDetail(info) {
   const who = `${info.user}@${info.host}:${info.port}`;
   const line = info.publicKeyLine || '（没能取到公钥）';
   return `登录节点拒绝了这把公钥（${who}）。\n`
-    + `客户端出示的是 ${info.keyType || '未知类型'}，指纹 ${info.keyFingerprint || '未知'}：\n`
+    + `出示：${info.keyType || '未知类型'}，指纹 ${info.keyFingerprint || '未知'}\n`
     + `${line}\n`
-    + '请依次核对这三件事 —— 它们的修法完全不同：\n'
-    + '① 上面这个指纹就是你注册进 IDM 的那一把吗？把公钥粘进这条命令即可核对：\n'
+    + '\n'
+    + '逐条核对，三种原因的修法不同：\n'
+    + '\n'
+    + '1. 指纹是否与注册进 IDM 的那把一致。用这条命令核对：\n'
     + `   ssh-keygen -lf <(echo '${line}')\n`
-    + '② 注册确实生效了吗（有的 IDM 要重新登录一次才开始下发公钥）；\n'
-    + '③ 这个端口上的 sshd 允许纯公钥认证吗 —— 有的集群在这个端口上还要求额外一步\n'
-    + '   验证，那种情况下只配公钥是不够的。\n'
-    + '这条连接的公钥可以在它的「编辑」里看到并复制。';
+    + '2. 注册是否生效。有的 IDM 要重新登录一次才开始下发公钥。\n'
+    + '3. 这个端口上的 sshd 是否允许纯公钥认证。有的集群在这里还要额外一步验证。\n'
+    + '\n'
+    + '公钥可以在这条连接的「编辑」里复制。';
 }
 
 /**
@@ -791,7 +793,7 @@ class SshBackend extends Backend {
       return {
         code: 'host_key_changed',
         error: `登录节点的主机密钥已改变（原为 ${this._opts.expectedHostKey || '未知'}）。`
-             + `这可能是服务器重装，也可能是中间人攻击 —— 在确认原因之前不会建立连接。`,
+             + `这可能是服务器重装，也可能是中间人攻击。在确认原因之前不会建立连接。`,
         hostKey: { fingerprint, algorithm },
       };
     }
@@ -861,7 +863,7 @@ class SshBackend extends Backend {
           if (code === 0) { this.prepareError = null; return done({ ok: true }); }
           this.prepareError = '建作业日志目录失败（rc=' + code + '）'
             + (stderr.trim() ? '：' + stderr.trim().split('\n')[0] : '')
-            + ' —— 家目录可写吗？';
+            + '，家目录可写吗？';
           done({ ok: false, error: this.prepareError });
         });
       });

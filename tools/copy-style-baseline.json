@@ -15,13 +15,13 @@
   "btn": 0,
   "long": 0,
   "star": 174,
-  "strm": 6
+  "strm": 0
  },
  "client/src/main/backend-ssh.js": {
   "btn": 0,
   "long": 0,
   "star": 74,
-  "strm": 4
+  "strm": 0
  },
  "client/src/main/backend.js": {
   "btn": 0,
@@ -39,7 +39,7 @@
   "btn": 0,
   "long": 0,
   "star": 126,
-  "strm": 3
+  "strm": 0
  },
  "client/src/main/demo-server.js": {
   "btn": 0,
@@ -57,7 +57,7 @@
   "btn": 0,
   "long": 0,
   "star": 17,
-  "strm": 2
+  "strm": 0
  },
  "client/src/main/gres.js": {
   "btn": 0,
@@ -75,7 +75,7 @@
   "btn": 0,
   "long": 0,
   "star": 697,
-  "strm": 36
+  "strm": 0
  },
  "client/src/main/jobstate.js": {
   "btn": 0,
@@ -99,19 +99,19 @@
   "btn": 0,
   "long": 0,
   "star": 67,
-  "strm": 3
+  "strm": 0
  },
  "client/src/main/plugin-data.js": {
   "btn": 0,
   "long": 0,
   "star": 96,
-  "strm": 1
+  "strm": 0
  },
  "client/src/main/plugin-package.js": {
   "btn": 0,
   "long": 0,
   "star": 39,
-  "strm": 7
+  "strm": 0
  },
  "client/src/main/plugin-slot.js": {
   "btn": 0,
@@ -123,7 +123,7 @@
   "btn": 0,
   "long": 0,
   "star": 154,
-  "strm": 9
+  "strm": 0
  },
  "client/src/main/plugins/ulid.js": {
   "btn": 0,
@@ -135,7 +135,7 @@
   "btn": 0,
   "long": 0,
   "star": 106,
-  "strm": 1
+  "strm": 0
  },
  "client/src/main/sessionstate.js": {
   "btn": 0,
@@ -153,7 +153,7 @@
   "btn": 0,
   "long": 0,
   "star": 215,
-  "strm": 20
+  "strm": 0
  },
  "client/src/main/tunnel.js": {
   "btn": 0,
@@ -171,7 +171,7 @@
   "btn": 0,
   "long": 0,
   "star": 68,
-  "strm": 1
+  "strm": 0
  },
  "client/src/preload/api.js": {
   "btn": 0,
@@ -209,29 +209,23 @@
   "star": 3,
   "strm": 0
  },
- "client/src/renderer/hover.html": {
-  "btn": 1,
-  "long": 0,
-  "star": 0,
-  "strm": 0
- },
  "client/src/renderer/hover.js": {
   "btn": 0,
   "long": 0,
   "star": 23,
-  "strm": 1
+  "strm": 0
  },
  "client/src/renderer/panel.html": {
-  "btn": 23,
-  "long": 3,
+  "btn": 0,
+  "long": 0,
   "star": 27,
-  "strm": 9
+  "strm": 0
  },
  "client/src/renderer/panel.js": {
   "btn": 0,
   "long": 0,
   "star": 401,
-  "strm": 53
+  "strm": 0
  },
  "client/test/atomic-write.test.mjs": {
   "btn": 0,

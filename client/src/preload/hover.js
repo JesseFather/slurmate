@@ -22,7 +22,7 @@
  * ★ 桥很窄，只有三样：
  *   · 开 / 关（主进程说，因为收起判据是**鼠标几何**，那在窗口那一层）
  *   · 数据（也是主进程推 —— 它是唯一向后端问话的地方，浮窗不去自己拉）
- *   · 「测一次延迟」（一个用户按下去的按钮，那是一次明确的动作，不是查询）
+ *   · 「测试延迟」（一个用户按下去的按钮，那是一次明确的动作，不是查询）
  *
  * ★ **不让浮窗自己去问 `op_cluster`**：那样同一份答案会有一个第二个取数点，
  *   而它与主进程那个"什么时候该问"的判据必然漂开（见 hover.js 的文件头）。
@@ -43,7 +43,7 @@ contextBridge.exposeInMainWorld('hover', {
     ipcRenderer.on('hover:data', h);
     return () => ipcRenderer.removeListener('hover:data', h);
   },
-  /** 对**当前活跃连接**测一次延迟（TCP + 读 SSH banner）。用户按的那一下才有。 */
+  /** 对**当前活跃连接**测试延迟（TCP + 读 SSH banner）。用户按的那一下才有。 */
   probe: () => ipcRenderer.invoke('app:probeActive'),
   /**
    * 右栏那个「更多」：把行数提到上限（2000）再拉一次。

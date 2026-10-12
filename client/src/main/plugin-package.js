@@ -230,7 +230,7 @@ function keyVerdict(pinned, pkg) {
       pinned,
       got,
       why: '这个 id 的钉子读不出来（`pinned-keys.json` 里那一条的指纹不是全长十六进制）。'
-        + '一条读不动的钉子只能往拒绝那一侧倒 —— 把它当成"没钉过"就等于静默地'
+        + '一条读不动的钉子只能往拒绝那一侧倒：把它当成"没钉过"就等于静默地'
         + '重新"首次即信任"一次，而那正是 §2.5 的分身判定要挡的事。',
     };
   }
@@ -451,9 +451,9 @@ function parsePackage(buf) {
     if (seen.has(k)) {
       const prev = seen.get(k);
       return bad(R.DUPLICATE, prev === f.path
-        ? `${JSON.stringify(f.path)} 出现了两次 —— 解出来的树是歧义的`
-        : `${JSON.stringify(prev)} 与 ${JSON.stringify(f.path)} 只差大小写 —— 落盘时会互相覆盖，`
-          + '而摘要按落盘之后算，于是"你同意的"与"实际装上的"可以不是同一棵树');
+        ? `${JSON.stringify(f.path)} 出现了两次，解出来的树是歧义的`
+        : `${JSON.stringify(prev)} 与 ${JSON.stringify(f.path)} 只差大小写，落盘时会互相覆盖，`
+          + '而摘要按落盘之后算，于是"同意的"与"实际装上的"可以不是同一棵树');
     }
     seen.set(k, f.path);
   }
@@ -506,7 +506,7 @@ function parsePackage(buf) {
       return bad(R.MANIFEST,
         `签名块说这一份是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}，`
         + `而负载里那份 ${MANIFEST} 说是 ${JSON.stringify(manifest.id)}@${JSON.stringify(manifest.version)}`
-        + ' —— 同一个包里两处说了两个身份');
+        + '，同一个包里两处说了两个身份');
     }
     // ③ 内容：**这个包里在的那几侧**，从它们的字节重算 §3.4 摘要，与块里那两个比。
     //    ★ 客户端侧**永远在**（`plugin.json` 是它的一员，第 9 步保证它在）⇒ 那一边
@@ -518,17 +518,17 @@ function parsePackage(buf) {
     if (sd.client !== parsed.digestClient) {
       return bad(R.SIGNATURE,
         `这一份的客户端侧算出来的内容摘要是 ${sd.client}，而签名块里写的是 `
-        + `${parsed.digestClient} —— 签名盖的不是这些字节`);
+        + `${parsed.digestClient}，签名盖的不是这些字节`);
     }
     if (sitePresent && sd.site !== parsed.digestSite) {
       return bad(R.SIGNATURE,
         `这一份的站点侧算出来的内容摘要是 ${sd.site}，而签名块里写的是 `
-        + `${parsed.digestSite} —— 签名盖的不是这些字节`);
+        + `${parsed.digestSite}，签名盖的不是这些字节`);
     }
     // ④ 验签：盖的是**四元组**那串字节，不是某一个摘要。
     if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
       return bad(R.SIGNATURE,
-        `签名验不过 —— 它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
+        `签名验不过：它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
         + ' 这四个东西（A.3），而这一块盖的不是它。'
         + `签的人是 ${fingerprint(parsed.pubkey)}`);
     }
@@ -618,7 +618,7 @@ function unpackTo(parsed, buf, dir, opts = {}) {
   if (strays.length) {
     return { ok: false, why:
       `这一份包里带着站点侧的路径（${strays.map((f) => f.path).slice(0, 3).join('、')}`
-      + `${strays.length > 3 ? ` 等 ${strays.length} 份` : ''}）—— `
+      + `${strays.length > 3 ? ` 等 ${strays.length} 份` : ''}）。`
       + '客户端只该收到客户端侧（`client/**` + `plugin.json` + `lineage.json`）。'
       + '整份拒收：站点侧代码不该到这台机器上，而"少装几份"会让本机这一份'
       + '与签名说的不是同一份构件。' };

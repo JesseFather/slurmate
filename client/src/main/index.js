@@ -194,7 +194,7 @@ let partitions = [];
  *    300s 三层）。两个取数点必然漂成两句话，而两句都标着"现在"。
  *
  * ★ `data` 与 `error` **分开存**，不合成一个。`data: null` 有两种意思 ——
- *   "还没问到"与"问失败了" —— 而它们在界面上是不同的话（"正在取…" vs "取不到"）。
+ *   "还没问到"与"问失败了" —— 而它们在界面上是不同的话（"读取中…" vs "取不到"）。
  */
 let site = { data: null, error: null, at: 0 };
 let siteTimer = null;
@@ -437,7 +437,7 @@ function bootstrap() {
     //   被我们**吞掉**的键（F12 之类）仍然照报：那是在解释「为什么按了没反应」，
     //   是用户自己触发的、想问的问题。
     attachKeyGuard(win.win.webContents, {
-      // 「重新加载页面」这个键打的是**前台**那一块 —— 屏幕只有一块，而用户按
+      // 「重新加载」这个键打的是**前台**那一块 —— 屏幕只有一块，而用户按
       // 快捷键时看的正是它。
       onOwned: (action) => {
         if (action !== 'reload') return;
@@ -498,7 +498,7 @@ function bootstrap() {
 
 /** 「读不出来」的四种原因，各自该怎么跟用户说 —— 它们修法完全不同。 */
 function keyErrorDetail(reason) {
-  const tail = '重新生成会作废你已经注册到 IDM 的那把公钥 —— 请确认后再来。';
+  const tail = '重新生成会作废已经注册到 IDM 的那把公钥，请确认后再来。';
   if (reason === 'no_secure_storage') {
     return '本机保存过一把私钥，但这台机器现在没有可用的凭据库，解不开它。' + tail;
   }
@@ -650,8 +650,8 @@ async function announceBackend() {
   if (!conn) {
     // 一条连接都没配 —— 这是**真实状态**，不是错误。如实说出来，
     // 而不是显示一句笼统的「连接失败」让用户去猜。
-    win.pushNotice('info', '还没有配置登录节点。点「新建连接」填一个 —— '
-      + '只需要用户名、主机和端口。');
+    win.pushNotice('info', '还没有配置登录节点。点「新建连接」填一个，'
+      + '只要用户名、主机和端口。');
     win.setTitle('Slurmate — 未配置连接');
     return;
   }
@@ -693,7 +693,7 @@ async function applyVersionGate(res) {
     return {
       ok: false,
       code: 'client_behind',
-      error: `集群上的服务端是 ${res.daemonVersion}，而这个客户端是 ${mine} —— `
+      error: `集群上的服务端是 ${res.daemonVersion}，而这个客户端是 ${mine}。`
         + '同一个大版本内，服务端要求客户端不低于它自己（两端是一起升的，'
         + '而这个客户端不保证读得懂更新的一版）。请升级客户端之后重连。',
     };
@@ -713,7 +713,7 @@ async function applyVersionGate(res) {
       + '守护进程不可能比本客户端新。');
   } else if (g.verdict === 'not_our_daemon') {
     win.pushNotice('warn',
-      `站点答的版本号 ${theirs} 不合 x.y 的形状 —— 这条链路上答话的恐怕不是 `
+      `站点答的版本号 ${theirs} 不合 x.y 的形状，这条链路上答话的恐怕不是 `
       + 'Slurmate 的守护进程。这一次没有做版本判定：那不是"通过了"，是"没判"。');
   } else if (g.verdict === 'unknown_host') {
     win.pushNotice('warn',
@@ -751,8 +751,8 @@ async function doConnect(conn, extra = {}) {
       `这条连接此前没有密钥，已生成一把新的（指纹 ${key.fingerprint}）。`
       + (key.persisted
         ? ''
-        : '这台机器没有可用的系统凭据库，私钥存不下来 —— 关闭客户端后它会消失。')
-      + '请先在「编辑」里复制它的公钥、注册到你的 IDM 账户，否则连不上。');
+        : '这台机器没有可用的系统凭据库，私钥存不下来，关闭客户端后它会消失。')
+      + '请先在「编辑」里复制它的公钥、注册到 IDM 账户，否则连不上。');
   }
 
   const res = await backend.connect(
@@ -1012,7 +1012,7 @@ function reconcileSitePlugins() {
           for (const e of landed) {
             const p = registry.get(e.id, e.version);
             if (!p) {
-              failed.push({ ...e, why: '文件都下来了，但注册表没有收下它 —— '
+              failed.push({ ...e, why: '文件都下来了，但注册表没有收下它：'
                 + '多半是清单或客户端代码不合法，看下面「插件没有加载」那几条。' });
             } else if (p.active === false) {
               failed.push({ ...e, why: '文件都下来了，但它的代码还没有经过你的同意。' });
@@ -1096,7 +1096,7 @@ function pickPlugin(name) {
   return {
     error: list.length
       ? `本机没有装短名为「${name}」的插件。`
-      : '本机一个插件都没有 —— 先装一个，这个开关才有对象。',
+      : '本机一个插件都没有，先装一个，这个开关才有对象。',
   };
 }
 
@@ -1635,7 +1635,7 @@ function spacePortOf(spaceId) {
   if (s) return s.ports[0];
   throw new Error(`取不到数据 ${spaceId} 的端口：它既不在配置里，也不是一份`
     + '本进程还在用的临时数据。（临时那份只活在内存里，进程一重启它就不存在了'
-    + '—— 那时应当重新认领，而不是去问一份已经没有的数据。）');
+    + '，那时应当重新认领，而不是去问一份已经没有的数据。）');
 }
 
 /**
@@ -1832,7 +1832,7 @@ function reportReclaimed(workspaces, spaces) {
   for (const ws of workspaces) parts.push(`工作区「${ws.name}」`);
   for (const s of spaces) parts.push(`「${spaceLabelOf(s)}」`);
   if (!parts.length) return;
-  win.pushNotice('info', `${parts.join('、')}没有谁在用了，已经收掉 —— `
+  win.pushNotice('info', `${parts.join('、')}没有谁在用了，已经收掉，`
     + '它们的浏览器存储（登录状态、窗口布局）与插件写在磁盘上的文件一起没了。');
 }
 
@@ -2042,7 +2042,7 @@ function auditPluginData() {
   //   那一半的行为在本机是真跑得到的。
   if (dev.developerMode) {
     why = '开发者模式不查这一根：它与真实那一份是同一棵树（分区目录不由沙箱分岔），'
-      + '而这里用的是一份沙箱配置 —— 照它去认，真实那一份数据会整片看起来像孤儿，'
+      + '而这里用的是一份沙箱配置。照它去认，真实那一份数据会整片看起来像孤儿，'
       + '而删掉它们就是毁掉真实的那一份。';
   } else if (pr.root) {
     const r = dataAudit.listDirs(pr.root);
@@ -2459,7 +2459,7 @@ async function startSession(resources, serviceKind, portChoice) {
   //     让它落到下面那条"不认识这种服务"上，报出来的是一句关于"服务种类"的话，
   //     而根因是少了一个实参。
   if (typeof serviceKind !== 'string' || !serviceKind) {
-    win.pushNotice('error', '开会话必须写明用哪一个插件（服务种类）—— '
+    win.pushNotice('error', '开会话必须写明用哪一个插件（服务种类），'
       + '这一条请求没有写。这是调用方漏传了参数，与站点无关。');
     return null;
   }
@@ -2514,8 +2514,8 @@ async function startSession(resources, serviceKind, portChoice) {
       win.pushNotice('error',
         '本机还没有装上任何插件，所以没有可以提交的服务。'
         + (canSync
-          ? '本站会分发插件 —— 用插件那一栏的「重新同步」取一次，'
-            + '带客户端代码的要你点一下同意。'
+          ? '本站会分发插件。用插件那一栏的「重新同步」取一次，'
+            + '带客户端代码的要先点一下同意。'
           : '而这个站点不分发插件。插件只能由站点发下来，所以客户端这一侧'
             + '没有别的办法。请联系这个站点的管理员。'));
     } else {
@@ -2565,10 +2565,10 @@ async function startSession(resources, serviceKind, portChoice) {
     win.pushNotice('error', space
       ? `${who}正用着「${workspaceNameOf(space.id) || '那个工作区'}」里`
         + `「${plugin.displayName || plugin.name}」那一份数据。一份数据就是一个本地端口、`
-        + '一份浏览器存储，所以同一时刻只能有一个会话用它 —— 先结束那一个，'
+        + '一份浏览器存储，所以同一时刻只能有一个会话用它。先结束那一个，'
         + '或者到「工作区」那一栏给这条连接换一个工作区。'
       : `${who}正占着中转站的位置。不要工作区的会话共用同一份对外身份`
-        + '（同一个 ssh 别名、同一个基准端口），所以同一时刻只能有一个 —— '
+        + '（同一个 ssh 别名、同一个基准端口），所以同一时刻只能有一个，'
         + '先结束那一个。');
     return null;
   }
@@ -2736,7 +2736,7 @@ async function startSession(resources, serviceKind, portChoice) {
   });
   if (!snap) onSessionChange(slot);
 
-  // ── ★★ 「记住新配置并启动」：把这份数据的首选端口**改成隧道真正绑上的那一个** ──
+  // ── ★★ 「记住并启动」：把这份数据的首选端口**改成隧道真正绑上的那一个** ──
   //
   // ★ 写的是 `snap.localPort`（真绑上的那个），**不是**自己按顺移规则重算一遍 ——
   //   同一条规则不许有两份实现，而两份漂开的形态是"记下来的端口没人在用"。
@@ -2753,7 +2753,7 @@ async function startSession(resources, serviceKind, portChoice) {
     } else {
       commitConfig();
       win.pushNotice('info', `这份数据的端口已记成 ${snap.localPort}`
-        + `（原来是 ${preferredPort}）—— 下次启动直接用它，不会再问。`);
+        + `（原来是 ${preferredPort}），下次启动直接用它，不会再问。`);
     }
   }
 
@@ -2836,7 +2836,7 @@ function warnVersionDrift(plugin) {
   win.pushNotice('warn',
     `站点那边的「${plugin.displayName}」是 ${siteVersion} 版，本机这一份是 `
     + `${plugin.version} 版。会话仍然会起，但作业侧和客户端侧是配套的两半，`
-    + '对不上的话界面可能连不上 —— 升级客户端通常就好了。');
+    + '对不上的话界面可能连不上，升级客户端通常就好了。');
 }
 
 /**
@@ -3066,7 +3066,7 @@ function warnLegacyPool() {
     return;                                        // 不存在 ⇒ 更没什么好说的
   }
   win && win.pushNotice('info',
-    `${dir} 里的东西不再被加载了 —— 客户端现在只认站点分发的插件。`
+    `${dir} 里的东西不再被加载了，客户端现在只认站点分发的插件。`
     + '那个目录没有被动过，里面的文件还在原处。');
 }
 
@@ -3180,7 +3180,7 @@ function warnEmptyFakeSite() {
     ? `读到的 ${bad.length} 个目录里没有一个读得出清单：${bad[0].name}：${bad[0].why}`
     : '那两处都还没有插件。';
   win && win.pushNotice('info',
-    `开发者模式：假站点上一个插件都没有 —— ${why}`
+    `开发者模式：假站点上一个插件都没有。${why}`
     + '站点上的插件只有一条来的路：在插件页点「安装插件…」把一个包装上去。');
 }
 
@@ -3402,7 +3402,7 @@ async function warnUnknownService(slot, snap) {
   if (!registry.once('__unknown__', key)) return;
 
   win.pushNotice('warn',
-    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）—— ${unknownWhy(slot, snap)}\n`
+    `这个会话的服务类型未知（作业 ${snap.jobId || '?'}）：${unknownWhy(slot, snap)}\n`
     + '作业本身是正常的：你可以结束它，或者直接连 127.0.0.1 上看它到底是什么。'
     + '（能结束、能看，是因为状态、心跳和结束这三件事从不查插件，只认会话号。）');
 }
@@ -3428,14 +3428,14 @@ function unknownWhy(slot, snap) {
   if (id) {
     const hit = missing.find((p) => p.id === id);
     if (hit) {
-      return `本站的「${hit.title}」是 ${hit.version} 版，而本机没有这一版`
-        + ' —— 升级客户端之后就能用它。';
+      return `本站的「${hit.title}」是 ${hit.version} 版，而本机没有这一版，`
+        + '升级客户端之后就能用它。';
     }
     const known = registry.list().filter((p) => p.id === id);
     if (known.length) {
       const versions = known.map((p) => p.version).join('、');
       return `这个会话要在 ${ref.slice(at + 1)} 版上跑，而本机只有 ${versions} 版。`
-        + '作业侧与客户端侧是配套的两半，对不上就用不了 —— 升级客户端通常就好了。';
+        + '作业侧与客户端侧是配套的两半，对不上就用不了，升级客户端通常就好了。';
     }
     return `这个会话来自一个本机没有的插件（${id}）。`;
   }
@@ -3856,7 +3856,7 @@ function handleWindowAction(action, payload) {
     //   会话是哪个插件 —— 对着一个 Jupyter 会话说"code-server 页面崩溃了"，
     //   用户会去查一个跟这件事无关的东西。
     win.pushNotice('error',
-      `会话页面崩溃了（${payload && payload.reason}）。可以点「重新加载页面」恢复。`);
+      `会话页面崩溃了（${payload && payload.reason}）。可以点「重新加载」恢复。`);
   }
 }
 
@@ -4044,7 +4044,7 @@ async function reattachOne(s) {
     win.pushNotice('warn',
       `控制节点上还有一个会话（作业 ${s.job_id}）与已经接上的`
       + `「${(held.plugin && (held.plugin.displayName || held.plugin.name)) || '某一条'}」`
-      + '占着同一份数据，没法同时接上。它仍然在跑，会在超时后被控制节点回收 —— '
+      + '占着同一份数据，没法同时接上。它仍然在跑，会在超时后被控制节点回收。'
       + '想留住它就先用 `slurm` 把它的作业停掉。');
     return;
   }
@@ -4162,7 +4162,7 @@ function registerIpc() {
       if (c.builtin) {
         return {
           ok: false, code: 'builtin',
-          error: `「${c.label}」是开发者模式内置的那条假连接，改不了 —— `
+          error: `「${c.label}」是开发者模式内置的那条假连接，改不了。`
                + '要连别的站点，请新建一条。',
         };
       }
@@ -4171,7 +4171,7 @@ function registerIpc() {
       return {
         ok: false, code: 'duplicate',
         error: `已经有一条 ${c.user}@${c.host}:${c.port} 了（备注「${c.label}」）。`
-             + '同一个人在同一台机器上只保留一条 —— 请改掉这里的地址，'
+             + '同一个人在同一台机器上只保留一条，请改掉这里的地址，'
              + '或者先把那一条删掉。',
       };
     }
@@ -4233,7 +4233,7 @@ function registerIpc() {
     if (conn && conn.builtin) {
       return {
         ok: false, code: 'builtin',
-        error: '这是开发者模式内置的那条假连接，删不掉 —— 关掉开发者模式它就不在了。',
+        error: '这是开发者模式内置的那条假连接，删不掉。关掉开发者模式它就不在了。',
       };
     }
     const held = conn && conn.workspaceId
@@ -4432,7 +4432,7 @@ function registerIpc() {
     // 不要数据空间的插件**没有这一格**。界面不会画那一格，但这一句要留着：
     // 少它的后果是凭空造出一份这个插件永远不会去读的数据。
     if (!pluginData.needsSpace(plugin)) {
-      return { ok: false, error: '这个插件不要数据空间 —— 它没有"用哪一份数据"这回事。' };
+      return { ok: false, error: '这个插件不要数据空间，它没有"用哪一份数据"这回事。' };
     }
 
     const oldId = (ws.refs || {})[pluginId] || null;
@@ -4442,7 +4442,7 @@ function registerIpc() {
       return {
         ok: false, code: 'session_running',
         error: `「${plugin.displayName || plugin.name}」在「${ws.name}」里正跑着一条会话。`
-          + '换一份数据要让那条会话先结束 —— 它手里攥着的是开局时那一份，'
+          + '换一份数据要让那条会话先结束：它手里攥着的是开局时那一份，'
           + '现在改掉，客户端重启之后那条作业就接不回来了。',
       };
     }
@@ -4500,7 +4500,7 @@ function registerIpc() {
       if (!conn || conn.workspaceId !== workspaceId) {
         return {
           ok: false,
-          error: '这个工作区有几条连接在用 —— 要改它，得指名是替哪一条连接改的。',
+          error: '这个工作区有几条连接在用，要改它，得指名是替哪一条连接改的。',
         };
       }
       if (!scope) {
@@ -4540,7 +4540,7 @@ function registerIpc() {
       return {
         ok: false, code: 'would_discard', spaceId: oldId,
         error: `「${plugin.displayName || plugin.name}」现在用的那一份数据没有别的工作区在用，`
-          + '换掉之后它会被删掉 —— 它的浏览器存储（登录状态、窗口布局）和这个插件写在'
+          + '换掉之后它会被删掉：它的浏览器存储（登录状态、窗口布局）和这个插件写在'
           + '磁盘上的文件会一起没掉，找不回来。',
       };
     }
@@ -4910,7 +4910,7 @@ function registerIpc() {
    *        这一侧没有"缺省插件"，缺省是**站点**的事（配置里的 `default_plugin`，
    *        它只作用于不带 `service_kind` 的 `slurmate submit`）。
    * @param {string} [portChoice] 用户在「端口被占」那一行上答过的：`'shift'`
-   *        （启动 —— 只把这一次会话换到别的端口）或 `'remember'`（记住新配置并启动
+   *        （启动 —— 只把这一次会话换到别的端口）或 `'remember'`（记住并启动
    *        —— 绑定成功之后把这份数据的首选端口记成新的那个）。界面上那一行重发时
    *        带上它。
    *
@@ -4969,7 +4969,7 @@ function registerIpc() {
   /** 手动重新对一次账（界面上那个「重新同步」）。 */
   send('app:syncPlugins', async () => {
     if (!backend || !backend.connected) {
-      return { ok: false, error: '还没连上站点 —— 插件是从站点取回来的。' };
+      return { ok: false, error: '还没连上站点，插件是从站点取回来的。' };
     }
     const r = await reconcileSitePlugins();
     if (!r) return { ok: false, error: '这次对账已经作废了（连接换了一条）。' };
@@ -4993,7 +4993,7 @@ function registerIpc() {
   send('app:installSitePlugin', async () => {
     if (!backend || backend.kind !== KIND.FAKE) {
       return { ok: false, code: 'not_fake',
-               error: '只有开发者模式那个假站点上才装得了插件 —— 真站点的插件由'
+               error: '只有开发者模式那个假站点上才装得了插件。真站点的插件由'
                  + '管理员在集群上用 `slurmate plugin install` 装。' };
     }
     const r = await dialog.showOpenDialog(win.win, {
@@ -5010,7 +5010,7 @@ function registerIpc() {
     if (!out.ok) return { ok: false, code: out.code, error: out.error };
 
     for (const c of out.unchanged) {
-      win.pushNotice('info', `「${c.title}」已经在假站点上了（${c.dir}）—— 它与`
+      win.pushNotice('info', `「${c.title}」已经在假站点上了（${c.dir}），它与`
         + '这一份是同一棵树，所以一个字节都没有写。');
     }
     if (out.installed.length) {
@@ -5019,7 +5019,7 @@ function registerIpc() {
       win.pushNotice('info', `已把 ${names} 装到假站点上（${where}）。`
         + (backend.connected
           ? '站点这就报它了，接下来与真站点一样：取回来、过同意闸，然后才可用。'
-          : '连上假站点之后它才会下来 —— 插件是从站点取回来的。'));
+          : '连上假站点之后它才会下来：插件是从站点取回来的。'));
       // ★ `await`（与连接那一次"不 await"不同）：用户按了按钮，而这一次的结果
       //   就是"装上了没有、接下来该看哪儿"。连接那一次是后台的事，这一次不是。
       await reconcileSitePlugins();
@@ -5093,7 +5093,7 @@ function registerIpc() {
     registry.reload();
     const p = registry.get(id, version);
     if (!p || p.active === false) {
-      const why = `同意之后它仍然没有被加载 —— 看「插件没有加载」那几条。`;
+      const why = `同意之后它仍然没有被加载，看「插件没有加载」那几条。`;
       win.pushNotice('error', why);
       return { ok: false, error: why, plugins: pluginsView() };
     }
@@ -5128,7 +5128,7 @@ function registerIpc() {
       config.forgetPlugin(cfgDir, cfg, id, version);
       registry.reload();
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，本机这一份已经删掉了。`
-        + '站点上那份不受影响 —— 它还在的话，下次同步会再问你一次。');
+        + '站点上那份不受影响：它还在的话，下次同步会再问一次。');
     } else {
       sitePluginSync.discardStaged(hit.stagedDir);
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
@@ -5256,7 +5256,7 @@ function registerIpc() {
   send('app:history', async () => backend.rpc({ op: 'history' }));
 
   /**
-   * 对**当前活跃连接**测一次延迟（TCP + 读 SSH banner）。
+   * 对**当前活跃连接**测试延迟（TCP + 读 SSH banner）。
    *
    * ★ 与 `app:probeHosts`（探全部）分开：那个是"这一屏上哪几台通"的一次性体检，
    *   而这一条是浮窗上那个按钮 —— 用户问的是"我现在这一台，此刻，延迟多少"。
@@ -5335,7 +5335,7 @@ function registerIpc() {
     const err = (resp && resp.error) || {};
     if (err.kind === 'unknown_op') {
       return { ok: false, unsupported: true,
-               error: '这个站点的守护进程还没有"看作业日志"这个能力（升级之后才有）。' };
+               error: '这个站点的守护进程还没有"查看日志"这个能力（升级之后才有）。' };
     }
     return { ok: false, error: err.detail || err.kind || '控制节点没有说明原因' };
   });
@@ -5431,7 +5431,7 @@ function registerIpc() {
       return { ok: true, developerMode: devView() };
     }
     win.pushNotice('warn', (want ? '已打开开发者模式' : '已关闭开发者模式')
-      + ' —— 重启客户端之后生效。'
+      + '。重启客户端之后生效。'
       + (want ? '沙盒里的一切（连接、密钥、插件）留在本机，下次打开还在。' : ''));
     return { ok: true, developerMode: devView() };
   });
@@ -5456,7 +5456,7 @@ function registerIpc() {
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
     else if (what === 'reap') backend.debugReap();
-    // ★★ 「集群信息取不到」——真集群上要么得等一次故障、要么得把 sinfo 改名，
+    // ★★ 「集群信息缺失」——真集群上要么得等一次故障、要么得把 sinfo 改名，
     //   而"把取不到画成没有"正是这一整块最容易犯的错。它必须能立刻造出来。
     //   `arg` 指名哪一格（省略 = 全部）；`history` 那一格走的是**错误**不是缺席。
     else if (what === 'cluster-missing') {

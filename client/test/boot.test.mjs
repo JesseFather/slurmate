@@ -772,7 +772,7 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     'app:publicKey', 'app:copyPublicKey', 'app:regenerateKey', 'app:newKey',
                     'app:trustHostKey', 'app:forgetHostKey',
                     // 两条边栏的两格：停靠 / 钉住（`app:hover`），以及对当前那条
-                    // 连接测一次延迟（`app:probeActive`）。少了它们，那两条栏停上去
+                    // 连接测试延迟（`app:probeActive`）。少了它们，那两条栏停上去
                     // 什么都不发生 —— 而"点了没反应"在界面上是查不出原因的。
                     'app:hover', 'app:probeActive',
                     // 右栏那两条：那个「更多」按钮，以及作业屏上按需取一次日志。
@@ -887,7 +887,7 @@ test('★★ 内置那条假连接：改不动、删不掉、探不了 —— �
   assert.deepEqual(await invoke('app:probeHosts'), [],
     '★ 内置那条不许进探测结果 —— 探出来那句话两边都是假的');
 
-  // ④ ★★ 而**其余操作完全相同**：能设为活跃、能连上，连上之后那个「测一次延迟」
+  // ④ ★★ 而**其余操作完全相同**：能设为活跃、能连上，连上之后那个「测试延迟」
   //    如实说探不了（而不是编一个毫秒数）。
   await invoke('app:setActiveConnection', seed.id);
   assert.equal((await invoke('app:bootstrap')).activeConnectionId, seed.id,
@@ -3863,7 +3863,7 @@ test('★ 那个调试开关**不带名字**也造得出来 —— 界面上那�
     assert.equal(extra.length, 1, '不带名字也要真的造出那一格');
     assert.equal(typeof extra[0].name, 'string');
     assert.ok(extra[0].name.length > 0, '它得有个短名（界面要按它显示）');
-    // ★ 而它必须是**本机池里没有的**：这一格造的是"站点有个本机没有的插件"，
+    // ★ 而它必须是**本机池里没有的**：这一格造的是"本站缺少插件"，
     //   取一个池里已有的短名就等于什么都没造。
     const pool = idx._test.getRegistry().list().map((p) => p.name);
     assert.equal(pool.includes(extra[0].name), false,
@@ -5112,13 +5112,13 @@ test('★★ 同一个工作区里，**两个不同的要数据空间的插件**
  * 提交一条会话 —— **首选端口被占着时，按用户会按的那一下答**。
  *
  * ★★ 为什么夹具要替用户答一下：这一版起，首选端口被别的程序占着时**不再静默顺移**，
- *    而是先问一句「启动 / 记住新配置并启动 / 取消」（见 `index.js` 的 `startSession`）。而
+ *    而是先问一句「启动 / 记住并启动 / 取消」（见 `index.js` 的 `startSession`）。而
  *    **这台开发机上 18080 就是被占着的** —— 那是这台机器的别的东西（不是我们的
  *    会话、也不在任何配置里，探测只能看见"占着"）。于是那个端口上的每一条"起会话"
  *    用例都会撞上那一问，而它与那条用例要验的事情毫无关系。
  *    ⇒ 这一层把那一问答掉，用的就是界面上那颗「启动」发出去的
  *    `portChoice:'shift'`，与用户在真机上会做的事逐字相同。
- *    ★ 而「记住新配置并启动」那一条**不走这一层**：它要验的正是"配置真的被改了"，
+ *    ★ 而「记住并启动」那一条**不走这一层**：它要验的正是"配置真的被改了"，
  *      所以那几条用例直接调 IPC（见下面那一条）。
  *
  * ★ 判据是**主进程回的那一格**（`code === 'port_conflict'`），不是"这台机器是不是
@@ -5806,7 +5806,7 @@ test('★ 收尾要停**全部**会话（关窗 / 退出 / 断开走的是同一
 //  阶段 5：端口只读 / ctx.connection() / 删连接删数据
 // ════════════════════════════════════════════════════════════════════════════
 
-test('★★ 首选端口被占住：**先问**「启动 / 记住新配置并启动 / 取消」，答了才动，而顺移仍然不写回', async (t) => {
+test('★★ 首选端口被占住：**先问**「启动 / 记住并启动 / 取消」，答了才动，而顺移仍然不写回', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const config = require('../src/main/config.js');
@@ -5896,7 +5896,7 @@ test('★★ 首选端口被占住：**先问**「启动 / 记住新配置并启
   cleanupSiteState(idx);
 });
 
-test('★★ 答「记住新配置并启动」⇒ 那份数据的端口真的改了，而下次不再问', async (t) => {
+test('★★ 答「记住并启动」⇒ 那份数据的端口真的改了，而下次不再问', async (t) => {
   // ★★ 2026-10-11：那一行从二选一变成三选一。中间那一颗是**全界面唯一**会改配置的
   //    按钮（"这份数据的端口以后就用这个"），而它写的是**隧道真正绑上的那一个**
   //    （`snap.localPort`）—— 不是自己按顺移规则重算一遍：同一条规则两份实现迟早
@@ -5928,7 +5928,7 @@ test('★★ 答「记住新配置并启动」⇒ 那份数据的端口真的改
   const ask = await invoke('app:start', null, 'code-server');
   assert.equal(ask.code, 'port_conflict', '被占住仍然要先问，不许自己决定');
 
-  // ── ② 用户选「记住新配置并启动」⇒ 带 `'remember'` 重发 ──
+  // ── ② 用户选「记住并启动」⇒ 带 `'remember'` 重发 ──
   const a = await invoke('app:start', null, 'code-server', 'remember');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
@@ -5941,7 +5941,7 @@ test('★★ 答「记住新配置并启动」⇒ 那份数据的端口真的改
   const after = config.loadConfig(DEV_CFG).spaces.find((x) => x.id === snap.spaceId);
   assert.ok(after, '那一份数据不该被顺手回收');
   assert.equal(after.ports[0], snap.localPort,
-    '★★ 用户选的是「记住新配置并启动」，配置里就该是那个**实际**端口'
+    '★★ 用户选的是「记住并启动」，配置里就该是那个**实际**端口'
     + `（期望 ${snap.localPort}，实际 ${after.ports[0]}）`);
   assert.match(snap.warning || '', /被占用/, '顺移这件事照旧要说出来');
   assert.doesNotMatch(snap.warning || '', /回到/,
@@ -6035,7 +6035,7 @@ test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它
 
   // ★ **只对持久的那份数据问**（见 index.js 的 `startSession`）。临时副本是**框架
   //   事实**（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
-  //   为它摆一行"启动 / 记住新配置并启动 / 取消"是问一个没有代价的问题。
+  //   为它摆一行"启动 / 记住并启动 / 取消"是问一个没有代价的问题。
   //
   // ★★ 怎么把"它没问"变成可判的：临时那份的端口是**确定性**算出来的
   //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下**两次**拿到的是
@@ -7353,7 +7353,7 @@ test('★★ 右栏：停靠就起轮询，而它**自己会停**（收起之后
   await invoke('app:hover', { side: null });
 });
 
-test('★ 作业屏「看作业日志」：没连站点时如实说，而不是画一个空框', async (t) => {
+test('★ 作业屏「查看日志」：没连站点时如实说，而不是画一个空框', async (t) => {
   const idx = require('../src/main/index.js');
   t.after(async () => { Module._load = origLoad; cleanupSiteState(idx); });
   await invoke('app:debug', 'reset');

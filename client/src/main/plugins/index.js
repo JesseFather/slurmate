@@ -670,7 +670,7 @@ function inspectDir(dir) {
       + `只含小写字母/数字/连字符），现在是 ${JSON.stringify(mf.name)}` };
   }
   if (mf.name === UNKNOWN) {
-    return { error: `${mfPath}：name 不能是 ${UNKNOWN} —— 那是"认不出来"的保留值` };
+    return { error: `${mfPath}：name 不能是 ${UNKNOWN}，那是"认不出来"的保留值` };
   }
 
   if (typeof mf.displayName !== 'string' || !mf.displayName.trim()) {
@@ -765,7 +765,7 @@ function inspectDir(dir) {
     // 没有界面就没有"登录"可言 —— 这一条多半是清单写错了，而不是刻意为之。
     if (!surface) {
       return { error: `${mfPath}：contributes.login 需要同时有 contributes.surface `
-        + '—— 没有界面就无所谓自动登录' };
+        + '，没有界面就无所谓自动登录' };
     }
     if (typeof l.path !== 'string' || !l.path.startsWith('/')) {
       return { error: `${mfPath}：contributes.login.path 必须以 / 开头，`
@@ -806,7 +806,7 @@ function inspectDir(dir) {
       return { error: `${mfPath}：contributes.ports 必须是 0 到 ${MAX_PLUGIN_PORTS} `
         + `之间的整数（0 = 不要数据空间），现在是 ${JSON.stringify(mfc.ports)}`
         + (Number.isInteger(mfc.ports) && mfc.ports > MAX_PLUGIN_PORTS
-          ? ` —— 一个插件的数据最多占 ${MAX_PLUGIN_PORTS} 个本地端口`
+          ? `：一个插件的数据最多占 ${MAX_PLUGIN_PORTS} 个本地端口`
             + '（一条会话只有一条隧道，作业侧只报得到一个候选端口）'
           : '') };
     }
@@ -872,7 +872,7 @@ function inspectDir(dir) {
     //   还同时搬了家（`data` → `contributes` 底下），所以更要说出来。
     if (d.perInstance !== undefined) {
       return { error: `${mfPath}：contributes.data.perInstance 已经改名成 `
-        + 'contributes.concurrent，而且从 data 里搬到了 contributes 底下 —— '
+        + 'contributes.concurrent，而且从 data 里搬到了 contributes 底下。'
         + '值不变、意思不变：能同时开两份写 true，只能开一份写 false' };
     }
     why = keysProblem(d, DATA_KEYS, 'contributes.data');
@@ -891,9 +891,9 @@ function inspectDir(dir) {
     // ★ 两个键都写 ⇒ 拒。见上面那段：它们答的是同一格，谁赢不该由代码次序决定。
     if (d.perVersion === true && d.inherit) {
       return { error: `${mfPath}：contributes.data.perVersion: true 与 `
-        + `contributes.data.inherit: ${JSON.stringify(d.inherit)} 互相矛盾 —— `
+        + `contributes.data.inherit: ${JSON.stringify(d.inherit)} 互相矛盾：`
         + `前一个说「每个版本各一份」，后一个说「这几个版本共用`
-        + `「${d.inherit}」这一份」—— 而两者问的是同一件事（身份的第二段写什么）。`
+        + `「${d.inherit}」这一份」，而两者问的是同一件事（身份的第二段写什么）。`
         + `只能留一个：要每个版本各一份就写 perVersion，要共用一份就写 inherit` };
     }
     data = { inherit: d.inherit || null, perVersion: d.perVersion === true };
@@ -1191,7 +1191,7 @@ function scanRoot(root, allows) {
     //   停下来，而不是等到某个会话解析到一份错的东西。
     if (r.entry.plugin.id !== id || r.entry.plugin.version !== version) {
       out.push({ error: `${label}：目录名说的是 ${id}@${version}，而里面的清单自报的是 `
-        + `${r.entry.plugin.id}@${r.entry.plugin.version} —— 两者必须逐字相同` });
+        + `${r.entry.plugin.id}@${r.entry.plugin.version}，两者必须逐字相同` });
       continue;
     }
     // ★ 同意闸的落点。**没被允许 ⇒ 停在第一趟**：插件照样出现在 list() 里
@@ -1282,7 +1282,7 @@ class Registry {
       if (digests.length > 1) {
         const where = group.map((p) => `${p.dir}（摘要 ${shortDigest(p.digest)}）`).join('、');
         errors.push(`${key}：有 ${group.length} 份内容不同的副本在抢同一个 id 和版本`
-          + ` —— 都没有加载。${where}。`
+          + `，都没有加载。${where}。`
           + '这多半是有人抄了别人的 id，或者改了插件却没升版本号。'
           + '删掉多余的那一份，或者给改过的那份换一个新 id 再试。');
         continue;
@@ -1386,7 +1386,7 @@ class Registry {
     // 定位一个会话用的是哪一份 —— 所以不猜，把话说出来。
     return { plugin: null,
              why: `控制节点只报了一个短名 ${JSON.stringify(serviceKind)}，`
-                  + '没有报它是哪个插件、哪一版 —— 无法确定这个会话用的是哪一份代码' };
+                  + '没有报它是哪个插件、哪一版，无法确定这个会话用的是哪一份代码' };
   }
 
   /**

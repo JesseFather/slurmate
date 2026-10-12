@@ -408,7 +408,7 @@ function identityOf(plugin, space) {
       `${(plugin && (plugin.name || plugin.id)) || '这个插件'} 声明了 `
       + `contributes.ports: ${portCountOf(plugin)}，但这次调用没有给出那一份数据。`
       + '第三段缺失时这个插件的每一份都会共用同一份数据，'
-      + '而两边都以为自己写进去了 —— 那是一种看不出来的损坏，所以这里宁可停下来。'
+      + '而两边都以为自己写进去了。那是一种看不出来的损坏，所以这里宁可停下来。'
       + '（那一份数据来自工作区里那张引用表：这就是要端口与要有第三段是同一件事的原因。）');
   }
   return [plugin.id, groupOf(plugin)];

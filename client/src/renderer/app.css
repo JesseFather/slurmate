@@ -228,7 +228,7 @@ button.ghost:hover { background: #45494e; }
 button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
-/* ★★ 「记住新配置并启动」—— 那一行三颗里唯一**会改配置**的一颗。
+/* ★★ 「记住并启动」—— 那一行三颗里唯一**会改配置**的一颗。
    用琥珀（`--warn`）：那个颜色在这个仓库里等于「注意」，而它要提示的正是"这一步会
    把这份数据的端口改掉"。★ 它与两段式那颗 `danger`（红）**不是**同一件事：这里
    不可逆，但它是用户自己选的；`danger` 说的是"你要失去什么"。
@@ -254,7 +254,7 @@ button.remember:hover { background: #5c4e22; }
 .armed { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .armed-why { color: var(--warn); font-size: 12px; }
 /* ★★ 「端口被占」那一行在窗口窄的时候**先裁理由，不裁按钮**（2026-10-11 加）：
-   从二选一变成三选一之后它长了一截（「记住新配置并启动」比「临时换一个」长得多），
+   从二选一变成三选一之后它长了一截（「记住并启动」比「临时换一个」长得多），
    而它是这一屏上**唯一**能做决定的地方 —— 裁掉一颗按钮，用户就答不了这一问。
    ★ 两处都要写：这一格得**允许被压缩**（`flex: none` 是 `.armed` 的默认，不覆盖的话
    它按内容宽度撑着，谁都挤不动它）；而理由那一格要给出省略号的行为

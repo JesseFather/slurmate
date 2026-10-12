@@ -26,8 +26,14 @@
         `textContent` 或终端，会被原样画出来，看见的是字面的星号。
         这一条不豁免任何东西。
 
-    K   单条中文字符串不超过 60 字；HTML 里按钮一类控件的文字不超过 4 字。
+    K   单条中文字符串不超过 60 字；HTML 里动作控件的文字不超过 6 字。
         界面文字要短，读者才会去看。
+
+        `<label>` 是字段名不是动作，不受那 6 字管，只归上面那 60 字。
+        一开始定的是 4 字，拿仓库里真实的 24 条控件去撞才发现它太紧：
+        「记住新配置并启动」这类压到 4 字只能靠丢掉「记住」，而丢掉它两颗
+        按钮就分不出差别了。6 字是中文动作按钮的常见上限，也远在 KDE HIG
+        那条「不要超过 `Configure Keyboard Shortcuts`」（25 字符）之内。
 
 加粗与破折号的密度只报告、不判红（`--report`）。密度会随删字而上升，
 拿它当棘轮会逼人删得越多越难过 —— 棘轮一律按**绝对条数**。
@@ -103,12 +109,12 @@ HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 HTML_SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
 HTML_TEXT = re.compile(r">([^<>]+)<")
 HTML_CONTROL = re.compile(
-    r"<(?:button|summary|a|label)\b[^>]*>(.*?)</(?:button|summary|a|label)>",
+    r"<(?:button|summary|a)\b[^>]*>(.*?)</(?:button|summary|a)>",
     re.S | re.I)
 HTML_ATTR = re.compile(r'\b(?:title|placeholder|aria-label)\s*=\s*"([^"]*)"', re.I)
 
 STRING_MAX_HAN = 60
-BUTTON_MAX_HAN = 4
+BUTTON_MAX_HAN = 6
 
 
 def is_test_file(rel):
@@ -392,17 +398,20 @@ def self_test():
         # ── K：长度 ────────────────────────────────────────────────────
         ("超过 60 汉字的字符串", {"client/src/a.js": "const s = '%s';\n" % ("中" * 61)},
          "long"),
-        ("HTML 控件文字超过 4 字",
-         {"client/src/a.html": "<button>测一次延迟</button>\n"}, "btn"),
+        ("HTML 控件文字超过 6 字",
+         {"client/src/a.html": "<button>记住新配置并启动</button>\n"}, "btn"),
         ("HTML 控件文字**跨行**也算 —— 旧写法按行扫，会从缝里漏掉这一颗",
          {"client/src/a.html":
           '<button id="cl-probe" class="ghost tiny"\n'
-          '        type="button">测一次延迟</button>\n'}, "btn"),
+          '        type="button">记住新配置并启动</button>\n'}, "btn"),
         # ── K 的假红防线 ───────────────────────────────────────────────
         ("60 个汉字正好在上限上",
          {"client/src/a.js": "const s = '%s';\n" % ("中" * 60)}, None),
-        ("HTML 控件文字 4 个字正好",
-         {"client/src/a.html": "<button>复制公钥</button>\n"}, None),
+        ("HTML 控件文字 6 个字正好",
+         {"client/src/a.html": "<button>重新生成密钥</button>\n"}, None),
+        ("`<label>` 是字段名，不受 6 字管",
+         {"client/src/a.html": '<label for="f-host">主机（IP 或域名）</label>\n'},
+         None),
         # ── 不判的三类 ─────────────────────────────────────────────────
         ("测试文件的字符串不判（用例名本轮不动）",
          {"client/test/a.test.mjs": "test('★ 写失败：返回 {ok:false}', () => {});\n"}, None),

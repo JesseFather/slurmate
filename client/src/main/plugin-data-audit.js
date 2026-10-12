@@ -144,7 +144,7 @@ function partitionRoot({ session, probe, fallbackRoot }) {
         }
         return {
           root: null, verified: false,
-          why: `Electron 把这个分区的目录放在 ${base}，而按名字算它应该是 ${want} —— `
+          why: `Electron 把这个分区的目录放在 ${base}，而按名字算它应该是 ${want}。`
             + '分区目录的命名约定与我们知道的不一样，所以这一次没有去认磁盘上的东西。',
         };
       }
@@ -428,7 +428,7 @@ function audit({ plugins, spaces, workspaces, connections, names, why, dataNames
       rows.push({
         name, places, kind: 'legacy',
         label: '0.7 之前的旧分区',
-        why: `它的名字是 ${name.split('-')[0]}-… 那种形状 —— 这份数据的身份被改成`
+        why: `它的名字是 ${name.split('-')[0]}-… 那种形状：这份数据的身份被改成`
           + '「插件 id / 共享组 / 实例」三段之前留下的。它不会再被任何东西读到，'
           + '而里面躺着当年的登录 cookie。',
         deletable: true,
@@ -519,7 +519,7 @@ function deletionVerdict({ rows, name }) {
   if (!row) {
     return {
       ok: false, code: 'stale',
-      error: '这一份数据现在不在「没人用」的清单里了 —— 多半是配置或插件刚变过，'
+      error: '这一份数据现在不在「没人用」的清单里了：多半是配置或插件刚变过，'
         + '或者它正被一条活着的会话用着。重新看一下再决定。',
     };
   }

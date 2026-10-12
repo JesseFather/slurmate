@@ -823,7 +823,7 @@ class ShellWindow {
       const detail = (live.length === 1
         ? warn(live[0]).detail
         : live.map((s) => `· ${s.service || '（未知服务）'}：${warn(s).detail}`).join('\n'))
-        + '（若只是想暂时离开，直接放着窗口不管就行 —— 合盖或断网不会结束作业，'
+        + '（若只是想暂时离开，直接放着窗口不管就行：合盖或断网不会结束作业，'
         + '下次打开会自动接上。）';
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',

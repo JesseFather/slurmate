@@ -73,7 +73,7 @@ const CANDIDATES = 6;
 
 /** 「这台机器上没有 bash」那一句 —— **只此一处**：真的是没找到、和用例造出来的
  *  那个现场，说的是同一句话（`NO_BASH`）。 */
-const NO_BASH = { why: '这台机器上没有 bash —— 插件的作业侧是一段 shell 片段'
+const NO_BASH = { why: '这台机器上没有 bash，插件的作业侧是一段 shell 片段'
   + '（`job/start.sh`），它要一个 bash 才跑得起来。Windows 上今天起不了会话，'
   + '其余一切照常。' };
 
@@ -118,7 +118,7 @@ function findBash(search = defaultBashSearch()) {
     const major = bashMajor(p);
     if (major === null) continue;               // 有这个名字，但跑不起来
     if (major < 4) {
-      return { why: `这台机器上的 bash 太老（${p} 是 ${major}.x）—— 插件的作业侧`
+      return { why: `这台机器上的 bash 太老（${p} 是 ${major}.x）：插件的作业侧`
         + '用到了关联数组（`PLUGIN_SESSION_FIELDS`），bash 3 没有它。'
         + 'macOS 自带的那个 `/bin/bash` 就是 3.2；`brew install bash` 之后把'
         + '它放进 PATH 前面即可。' };

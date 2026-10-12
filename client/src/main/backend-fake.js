@@ -656,7 +656,7 @@ class FakeBackend extends Backend {
     const dir = this._siteInstalledDir();
     if (!dir) {
       return { ok: false, code: 'no_dir',
-               error: '拿不到"装上去的东西"放哪儿 —— 客户端的数据目录还没定下来。' };
+               error: '拿不到"装上去的东西"放哪儿：客户端的数据目录还没定下来。' };
     }
     // ★ 目录**由这里建**：它是程序自己的一处，第一次装东西之前它不存在，
     //   而"还没有这个目录"不是错误（"站点上还没装过东西"就是这个样子）。
@@ -693,14 +693,14 @@ class FakeBackend extends Backend {
 
       const r = PP.parsePackage(buf);
       if (!r.ok) {
-        problems.push(`${base}：不是一个合法的插件包（${r.code}）—— ${r.why}`);
+        problems.push(`${base}：不是一个合法的插件包（${r.code}）：${r.why}`);
         continue;
       }
       const { id, version } = r.manifest;
       const title = r.manifest.displayName || r.manifest.name;
 
       if (seenId.has(id)) {
-        problems.push(`${base}：id ${id} 与 ${seenId.get(id)} 是同一个插件 —— 两个都不装`
+        problems.push(`${base}：id ${id} 与 ${seenId.get(id)} 是同一个插件，两个都不装`
           + '（站点按 id 给那棵树命名，两个会互相覆盖，而覆盖是静默的）。');
         continue;
       }
@@ -721,7 +721,7 @@ class FakeBackend extends Backend {
           seenId.set(id, base);
           continue;
         }
-        problems.push(`${base}：站点上已经有一棵「${hitTitle}」，在 ${hit.dir} —— `
+        problems.push(`${base}：站点上已经有一棵「${hitTitle}」，在 ${hit.dir}。`
           + (hit.manifest.version === version
             ? `版本一样（都是 ${version}）而内容不是同一份`
             : `站上那棵是 ${hit.manifest.version}，这一份是 ${version}`)
@@ -742,7 +742,7 @@ class FakeBackend extends Backend {
         fs.rmSync(stage, { recursive: true, force: true });
         // 那句错话里带着暂存目录的路径，而那个目录**此刻已经没了** —— 把它换成
         // "这一份里"，否则读的人会去找一个不存在的地方。
-        problems.push(`${base}：这个包装上去本客户端也加载不了 —— `
+        problems.push(`${base}：这个包装上去本客户端也加载不了：`
           + ins.error.split(stage).join('这一份里'));
         continue;
       }
@@ -1467,7 +1467,7 @@ class FakeBackend extends Backend {
     const occ = this._occupying();
     if (occ.length >= this.maxActive) {
       return err(4, 'quota_active',
-        `已经有 ${occ.length} 个会话占着位置（本站上限 ${this.maxActive}）—— `
+        `已经有 ${occ.length} 个会话占着位置（本站上限 ${this.maxActive}），`
         + '排队中的也算。结束一个再开下一个。');
     }
 

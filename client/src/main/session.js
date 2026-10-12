@@ -490,7 +490,7 @@ class SessionController extends EventEmitter {
     if (!this._heartbeatAt || typeof s.last_hb_at !== 'number') return;
     const daemonAge = Date.now() - s.last_hb_at * 1000;
     if (daemonAge > HB_STALE_SLACK_MS) {
-      this.warning = `控制节点记录的心跳已过期 ${Math.round(daemonAge / 1000)} 秒 —— `
+      this.warning = `控制节点记录的心跳已过期 ${Math.round(daemonAge / 1000)} 秒，`
                    + '心跳可能没有真正送达，会话可能被判定为断开。';
     }
   }
@@ -514,7 +514,7 @@ class SessionController extends EventEmitter {
    *   只传用户**真的填了**的键，不要用 undefined 覆盖服务端的默认值。
    * @param {object} opts { preferredPort, serviceKind, sshPubkey, portChoice }
    *   `portChoice` 是用户在「端口被占」那一行上答过的（`'shift'` = 启动，只换这一次；
-   *   `'remember'` = 记住新配置并启动）；没问过就不传。见 `this._portChoice`。
+   *   `'remember'` = 记住并启动）；没问过就不传。见 `this._portChoice`。
    */
   async start(resources, opts = {}) {
     if (this.state !== State.IDLE && this.state !== State.ENDED && this.state !== State.ERROR) {
@@ -713,20 +713,20 @@ class SessionController extends EventEmitter {
         //    · 顺移本身**不写回**配置，所以首选端口确实没被改掉 —— 占用它的是
         //      **这一次**的冲突，冲突一消失，下次启动就绑回原处、原来那份布局也跟着
         //      回来。不说这一句，用户会以为自己被永久搬走了；
-        //    · 而用户选的是**「记住新配置并启动」**时它**是假的**（`index.js` 的
+        //    · 而用户选的是**「记住并启动」**时它**是假的**（`index.js` 的
         //      `startSession` 会把新端口记进配置）⇒ 那两句一个字都不许说。
         //      "记成了没有"由**主进程**说（它才知道写没写成）—— 控制器这里只说它
         //      自己知道的那一半，不去替它报一个还没发生的结果。
         //
         // ★★ 中间那一句只在**没人问过**的时候出现，而它解释的是"为什么没问我"：
         //    正常的冲突在提交**之前**就探测到了（`startSession` 里那一次试绑），
-        //    那时用户答的是「启动」或「记住新配置并启动」。走到这里还带着一句
+        //    那时用户答的是「启动」或「记住并启动」。走到这里还带着一句
         //    没答过的冲突，只可能是探测与绑定之间那个窗口 —— 那时作业已经在集群上
         //    了，「取消」不是字面意思，所以只能顺移。不说这一句，用户会把一个**窗口**
         //    当成一条漏掉的询问。反过来，用户刚答过的那一趟说这句就是多余的。
         const answered = this._portChoice === 'shift' || this._portChoice === 'remember';
         this.warning = `首选端口 ${want} 被占用，已改用 ${port}。`
-                     + (answered ? '' : '（这一处在作业提交之后才发现，所以没有问你。）')
+                     + (answered ? '' : '（这一处在作业提交之后才发现，所以没有问。）')
                      + '由于浏览器按端口隔离本地存储，编辑器的布局与最近打开的文件会重置一次。'
                      + (this._portChoice === 'remember'
                        ? ''
@@ -1031,7 +1031,7 @@ class SessionController extends EventEmitter {
     const err = (resp && resp.error) || {};
     if (err.kind === 'unknown_op') {
       return { ok: false, unsupported: true,
-               error: '这个站点的守护进程还没有"看作业日志"这个能力（升级之后才有）。' };
+               error: '这个站点的守护进程还没有"查看日志"这个能力（升级之后才有）。' };
     }
     return { ok: false, error: err.detail || err.kind || '控制节点没有说明原因' };
   }

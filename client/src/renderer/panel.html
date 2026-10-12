@@ -36,7 +36,7 @@
   <span class="spacer"></span>
   <!-- ★★ 「首选端口被占着」—— **三选一**（2026-10-11 从二选一改成三个）：
          「启动」= 只把这一次会话换到别的端口（配置里那个端口一个字不改）；
-         「记住新配置并启动」= 把这份数据的端口**真的改成**新的那个（此后不再问）；
+         「记住并启动」= 把这份数据的端口**真的改成**新的那个（此后不再问）；
          「取消」= 就地回退，而此刻本来什么都没提交。
        ★ 它是**三选一，不是确认**：三个答案都是用户主动要的，按哪一颗都当场生效，
          没有"第一下只是摆出来"那一段。观感照 `armConfirm`（同一套 `.armed` 类），
@@ -56,7 +56,7 @@
     <!-- ★★ 这个类（`remember`）是**承重的**：三颗按钮里只有它**会改配置**
          （把这数据的首选端口记成新的那个），而它旁边那颗只是这一次换个端口。
          两颗长得一样的话，用户分不清自己选的是哪一种 —— 见 app.css 那一段。 -->
-    <button id="sb-port-remember" class="tiny remember">记住新配置并启动</button>
+    <button id="sb-port-remember" class="tiny remember">记住并启动</button>
     <button id="sb-port-abort" class="ghost tiny">取消</button>
   </span>
   <!-- 工作区选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
@@ -80,7 +80,7 @@
        而那正是用户最需要看见这句话的时候（见 panel.js 的 renderSnapshot）。
        ★ 颜色**另起一个**（--temp）：洋红在这个仓库里等于「假后端」，复用会把
          两件毫不相干的事说成一件。 -->
-  <span id="sb-temp" class="temp-tag hidden">临时副本 · 改动不会被记录</span>
+  <span id="sb-temp" class="temp-tag hidden">临时副本：改动不保存</span>
   <span id="sb-dev" class="dev-tag hidden">开发者模式 · 未连接集群</span>
 </div>
 
@@ -117,22 +117,22 @@
            提示流是会滚过去、也会被后面来的提示顶下去的一条流水。
          ★ 颜色用 `--err`，**不用洋红** —— 洋红在这个仓库里等于「假后端」。 -->
     <div id="fatal-banner" class="banner-fatal hidden">
-      界面没能初始化完 —— <strong>下面的按钮点了可能没反应</strong>。
+      界面没能初始化完。<strong>下面的按钮点了可能没反应</strong>。
       原因：<span id="fatal-why" class="mono"></span>
     </div>
 
     <!-- ★ 三重互锁的第二重：真实模式里绝不会出现的一种颜色（洋红）。做了假后端却
          不标注，正是这个项目一路在清的那类问题 —— 系统声称了不成立的事。 -->
     <div id="dev-banner" class="banner-dev hidden">
-      开发者模式 · 未连接集群 —— 下面的会话是一个本地的模拟服务，不是真实的计算节点。
+      开发者模式 · 未连接集群。下面的会话跑在本地模拟服务上，不是真实的计算节点。
     </div>
 
     <!-- 「这一份是临时副本」。与状态条里那一条是**同一句话的两个位置**：
          状态条那一份在会话跑起来之后仍然看得见，这一份在面板还露着的时候看得见。
          两处都要，缺一个就会有一段时间里用户看不到它。 -->
     <div id="temp-banner" class="banner-temp hidden">
-      这一份是临时副本 —— 同一个插件已经有一份在跑了，这一份是从它那儿拷来的起点。
-      这里改的东西不会被记录，关掉它就没了。
+      这一份是临时副本。同一个插件已经有一份在跑，这一份从它拷来当起点。
+      改动不会保存，关掉就没了。
     </div>
 
     <!-- ══ 三屏 ══════════════════════════════════════════════════════════════
@@ -185,14 +185,13 @@
       <div class="sec-head">
         <h2>登录节点</h2>
         <button id="btn-new">新建连接…</button>
-        <button id="btn-probe" class="ghost">探测全部</button>
+        <button id="btn-probe" class="ghost">测试全部</button>
       </div>
       <ul id="conn-list" class="conns"></ul>
       <!-- 文案由 renderConnEmpty 按「表单开着没有」改写：表单开着时那个按钮是收起来的，
            再叫用户去点它就成了一条指向不存在的东西的指令。 -->
       <p class="sub" id="conn-empty">
-        还没有保存任何登录节点。点右上角的「新建连接」填一个 ——
-        只需要用户名、主机和端口。
+        还没有保存任何登录节点。点右上角「新建连接」填一个，只要用户名、主机和端口。
       </p>
       <!-- ★ 这一屏底下的那两段解释删掉了（「不会自动连上」「两个出口正好相反」）。
            三条理由，各自都不是"这句可以省"：
@@ -221,7 +220,7 @@
            而且讲得不如图准（图的连线是现算的，文字是写死的）。
            第二段是**后果**，不是解释，所以留着 —— 压成一行 title。 -->
       <div id="sec-workspaces" class="hidden">
-        <h3 title="没有连接在用、也没有会话在跑的工作区会被自动删掉 —— 它的编辑器窗口布局、打开的标签页和登录状态会一起没掉。">连接、工作区与数据</h3>
+        <h3 title="没有连接在用、也没有会话在跑的工作区会被自动删掉，编辑器布局、标签页和登录状态一起没掉。">连接、工作区与数据</h3>
         <div id="workspace-map" class="wmap">
           <svg id="wmap-lines" class="wmap-lines"></svg>
           <div class="wmap-col" id="wmap-conns"></div>
@@ -259,7 +258,7 @@
     <section id="sec-form" class="hidden">
       <h2 id="form-title">新建连接</h2>
       <p class="sub" id="form-hint">
-        三步：把下面的公钥注册到你的 IDM 账户，填登录节点的地址，再挑一个工作区。
+        三步：把下面的公钥注册到 IDM 账户，填登录节点的地址，再挑一个工作区。
       </p>
 
       <h3>① 这条连接的密钥</h3>
@@ -305,7 +304,7 @@
       <h3>③ 工作区</h3>
       <div class="row">
         <div class="grow">
-          <label for="f-workspace">这条连接用哪个工作区</label>
+          <label for="f-workspace">工作区</label>
           <select id="f-workspace" class="full"></select>
         </div>
       </div>
@@ -325,7 +324,7 @@
            **屏的显隐那一句**自动成立，不需要第二处判据（`showScreen` 里再 toggle
            一次就是第二个"我在哪一屏"）。 -->
     <div class="foot">
-      <button id="about-foot" class="ghost tiny">关于这个客户端</button>
+      <button id="about-foot" class="ghost tiny">关于</button>
     </div>
 
     <!-- ── 关于 ──
@@ -337,29 +336,31 @@
     <section id="sec-about" class="hidden">
       <h2>关于</h2>
       <p class="sub">
-        Slurmate 把集群上的一个作业变成一个你能在里面干活的远程开发会话。
-        连接、密钥与插件数据都在本机；站点那一侧是 <code>slurmate-sessiond</code>。
+        Slurmate 把集群上的一个作业变成可以干活的远程开发会话。
+        连接、密钥与插件数据都在本机，站点那一侧是 <code>slurmate-sessiond</code>。
       </p>
 
       <h3>开发者模式</h3>
       <!-- ★ 从前这里是**两段**（它是干什么的 / 它是给谁用的）。合成一句 ——
            一行的位置够说清"换掉整个后端、配置完全独立"，而"给谁用"由名字自己说。 -->
       <p class="sub">
-        打开之后客户端<strong>不连集群</strong>，改用本地一个模拟的站点（真的 HTTP、
-        真的分发、真的走同意闸，只有 SSH 那一跳是假的），配置完全独立、绝不会碰真配置。
-        重启之后连着这个假站点时，状态条上会多一颗「调试」—— 那些开关住在它里面。
+        打开之后客户端<strong>不连集群</strong>，改用本地的模拟站点：
+        HTTP、分发、同意闸都是真的，只有 SSH 那一跳是假的。
+      </p>
+      <p class="sub">
+        配置独立，不碰真配置。重启后状态条上会多一颗「调试」。
       </p>
 
       <div class="row">
         <label class="check">
-          <input type="checkbox" id="dev-on"> 打开开发者模式
+          <input type="checkbox" id="dev-on"> 开发者模式
         </label>
       </div>
       <!-- ★ 「重启后生效」必须说出来。静默的半生效（界面变了、后端没换）正是这个
            项目一路上在清的那类问题。 -->
       <p id="dev-pending" class="sub hidden"></p>
       <div class="row">
-        <button id="dev-restart" class="ghost hidden">立即重启，让它生效</button>
+        <button id="dev-restart" class="ghost hidden">立即重启</button>
       </div>
       <!-- ★★ 那一块调试开关（10 颗按钮）**搬去第四屏了**（`#screen-debug`）。
            它住在这里的时候，连着站点之后根本够不着它 —— 「关于」只在第一屏上，
@@ -393,13 +394,13 @@
       <div class="sec-head">
         <h2 id="plugins-title">插件</h2>
         <button id="btn-leave" class="ghost hidden"
-                title="回到登录节点列表，作业继续在集群上跑。★ 但没人看着它 35 分钟之后，它会被自动回收。">临时离开</button>
+                title="回到登录节点列表，作业继续在集群上跑。但没人看着它 35 分钟之后会被自动回收。">临时离开</button>
         <!-- ★ 最后那一句是从 `doDisconnect` 里搬过来的：那句话从前长在
              `window.confirm` 里，而断开现在走两段式（第一段已经把后果说出来了）。
              它不是后果，是**另一个选择** —— 所以它挂在这颗按钮的悬停上，
              贴着「临时离开」那颗一起看。 -->
         <button id="btn-disconnect" class="ghost danger-ghost"
-                title="停掉这些作业并断开连接，回到登录节点列表。只是想回到列表、让作业继续跑的话，点「临时离开」。">断开</button>
+                title="停掉这些作业并断开连接，回到登录节点列表。只想回列表、让作业继续跑，就点「临时离开」。">断开</button>
         <button id="btn-to-jobs" class="ghost">作业</button>
       </div>
     <section id="sec-purpose">
@@ -456,7 +457,7 @@
       -->
 
       <div class="row row-spaced">
-        <button id="btn-doctor" class="ghost">体检集群</button>
+        <button id="btn-doctor" class="ghost">检查集群</button>
       </div>
     </section>
     </section><!-- /screen-plugins -->
@@ -487,8 +488,8 @@
              底部搬到了这颗按钮的 title 里 —— 它是**这一颗按钮的后果**，摆在一屏的
              末尾等于让人先读完再回头看是哪一颗。格式与 `#btn-leave` 那个 title 同形。 -->
         <button id="btn-jobs-end" class="danger"
-                title="结束这一条会话，集群上的作业会被取消。★ 关掉窗口同样会结束会话；但合盖、断网、断电不会 —— 那些情况客户端说不上话，作业会被保留，下次连上时自动接回。">结束</button>
-        <button id="btn-jobs-reload" class="ghost">重新加载页面</button>
+                title="结束这一条会话，集群上的作业会被取消。关掉窗口同样会结束；合盖、断网、断电不会，作业会保留，下次连上自动接回。">结束</button>
+        <button id="btn-jobs-reload" class="ghost">重新加载</button>
         <button id="btn-jobs-refresh" class="ghost">刷新</button>
       </div>
       <p class="sub" id="jobs-when"></p>
@@ -505,7 +506,7 @@
         <h3>选中的那一条</h3>
         <dl class="kv" id="kv"></dl>
         <p class="sub">
-          <button id="btn-joblog" class="ghost tiny">看作业日志</button>
+          <button id="btn-joblog" class="ghost tiny">查看日志</button>
           <span id="joblog-meta" class="dim"></span>
         </p>
         <div id="joblog-body" class="joblog hidden"></div>
@@ -517,7 +518,7 @@
       <h2>最近作业</h2>
       <p class="sub">
         最近 7 天，最多 30 条。
-        <button id="btn-history" class="ghost tiny">取最近作业</button>
+        <button id="btn-history" class="ghost tiny">加载作业</button>
       </p>
       <div id="history-body"></div>
     </section>
@@ -545,31 +546,31 @@
       <div id="dev-debug" class="debug">
         <h3>调试开关</h3>
         <p class="sub">
-          下面这些状态在真集群上极难复现（要等 30 分钟、要故意打错口令、要杀作业）。
-          这里可以立刻造出来，好把界面在这些路径上的表现验一遍。
+          这些状态在真集群上极难复现：要等 30 分钟、要故意打错口令、要杀作业。
+          这里可以立刻造出来，用来验界面在这些路径上的表现。
         </p>
         <div class="row">
-          <button class="ghost" data-debug="daemon-down">模拟守护进程挂掉</button>
-          <button class="ghost" data-debug="tunnel-down">模拟隧道断开</button>
-          <button class="ghost" data-debug="reap">模拟会话被回收</button>
+          <button class="ghost" data-debug="daemon-down">守护进程挂掉</button>
+          <button class="ghost" data-debug="tunnel-down">隧道断开</button>
+          <button class="ghost" data-debug="reap">会话被回收</button>
           <!-- ★ 真机上要两台电脑才看得到这一幕，而它的界面表现是这个功能唯一
                要传达的东西（会话还在跑、本机不再管它、要手动点「连接」）。 -->
           <!-- ★ 真集群上"取不到"要等一次故障、或者把 sinfo 改名才造得出来，
                而"把取不到画成没有"正是集群那一节最容易犯的错。 -->
-          <button class="ghost" data-debug="cluster-missing">集群信息取不到</button>
+          <button class="ghost" data-debug="cluster-missing">集群信息缺失</button>
           <!-- ★ 真集群上这一幕要两台电脑才看得到（在一台上开着、去另一台上打开），
                而【接管】这个按钮的全部意义就是那一刻。 -->
-          <button class="ghost" data-debug="foreign-keeper">另一台电脑在看</button>
+          <button class="ghost" data-debug="foreign-keeper">已被他机接管</button>
           <button class="ghost" data-debug="reset">复位</button>
         </div>
         <!-- ★ 站点分发那几条路，在真集群上同样造不出来：老守护进程要装一台旧的、
              限流要靠手速、插件过大要改一个真的插件。而它们的**回退方式互不相同** ——
              混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
         <div class="row">
-          <button class="ghost" data-debug="old-distribute">站点不支持分发</button>
+          <button class="ghost" data-debug="old-distribute">不支持分发</button>
           <button class="ghost" data-debug="plugin-too-big">插件太大</button>
-          <button class="ghost" data-debug="rate-limited">站点在限流</button>
-          <button class="ghost" data-debug="extra-plugin">站点有个本机没有的插件</button>
+          <button class="ghost" data-debug="rate-limited">站点限流</button>
+          <button class="ghost" data-debug="extra-plugin">本站缺少插件</button>
         </div>
       </div>
 
@@ -583,8 +584,11 @@
              装完一个插件再进来，看到的必须是刚刚那一次的结果。 -->
       <h3>站点上的插件从哪来</h3>
       <p class="sub">
-        假站点报出去的清单是下面两处合起来的，两处都空 = 站点上确实一个插件都没有
-        （那是合法状态）。这里说的是**站点那一侧读到了什么**，与客户端装了哪些无关。
+        假站点报出去的清单是下面两处合起来的，两处都空就表示站点上一个插件都没有
+        （那是合法状态）。
+      </p>
+      <p class="sub">
+        这里说的是站点那一侧读到了什么，与客户端装了哪些无关。
       </p>
       <div id="site-dirs"></div>
     </section>
@@ -619,7 +623,7 @@
   <pre id="hk-fp" class="mono fp"></pre>
   <div class="row">
     <button id="hk-cancel" class="ghost">取消</button>
-    <button id="hk-trust" class="danger">我核对过了，信任它</button>
+    <button id="hk-trust" class="danger">信任此密钥</button>
   </div>
 </dialog>
 

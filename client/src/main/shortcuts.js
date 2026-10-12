@@ -62,7 +62,7 @@ const BLACKLIST = [
 
 /** 我们自己处理、并且要从页面手里拿走的键。 */
 const OWNED = [
-  { key: 'R', ctrl: true, shift: true, action: 'reload', desc: '重新加载页面' },
+  { key: 'R', ctrl: true, shift: true, action: 'reload', desc: '重新加载' },
 ];
 
 function normalizeKey(input) {

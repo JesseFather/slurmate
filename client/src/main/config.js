@@ -204,7 +204,7 @@ function isTrusted(cfg, id, version, digest) {
 /** 记下一次同意。**由调用方保证写台账发生在激活之前**（见 index.js 的同意动作）。 */
 function trustPlugin(dir, cfg, id, version, digest, site) {
   if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
-    return { ok: false, error: '摘要必须是全长的 64 位十六进制 —— 台账不接受自报的短摘要。' };
+    return { ok: false, error: '摘要必须是全长的 64 位十六进制，台账不接受自报的短摘要。' };
   }
   if (!cfg.trustedPlugins || typeof cfg.trustedPlugins !== 'object') cfg.trustedPlugins = {};
   cfg.trustedPlugins[trustKey(id, version)] = {
@@ -320,7 +320,7 @@ function pinPluginKey(dir, pins, id, fingerprint) {
     // 这一条**不是**"再钉一次"：§5.4 的判据就是"与上一次是同一把钥匙"，而换钥匙
     // 意味着作者丢了私钥、只能铸新 id（§4.1）—— 所以这里没有正当的换法。
     return { ok: false, error: `这个 id 已经钉在 ${cur || '（一条读不动的记录）'} 上了，`
-      + `不接受换成 ${fingerprint} —— §5.4：首次即信任，此后只能相符。` };
+      + `不接受换成 ${fingerprint}。§5.4：首次即信任，此后只能相符。` };
   }
   pins[id] = { fingerprint, at: Date.now() };
   writeAtomic(pinnedKeysPath(dir),
@@ -676,7 +676,7 @@ function usedSpacePorts(cfg, exceptId) {
  *
  * ★ **分配只发生在一个时机：一份数据被创建的时候**（此后**没有**什么"按需重算"）。
  *   而**改**它的入口只有一个：`recordSpacePort` —— 那是用户在界面上明确选了
- *   「记住新配置并启动」时才走的一步（"这份数据的端口以后就用这个"）。
+ *   「记住并启动」时才走的一步（"这份数据的端口以后就用这个"）。
  *   ★ 隧道顺移**仍然不写回**：写回来等于把一次**暂时**的冲突变成永久的 origin
  *   变更 —— 冲突消失之后 origin 也回不去，而原来那份布局本来是可以回来的。
  *   EADDRINUSE 由 `tunnel.js` 的顺移处理，**顺移只影响这一次会话**。
@@ -712,7 +712,7 @@ function assignSpacePorts(cfg, count, extraPorts) {
 /**
  * **用户明确要求**把这份数据的首选端口改成另一个。
  *
- * 界面上只有一个调用点：那一行三选一里的「记住新配置并启动」（见 `index.js` 的
+ * 界面上只有一个调用点：那一行三选一里的「记住并启动」（见 `index.js` 的
  * `startSession`）。它是唯一一个改得动一份**已存在**数据的端口的入口。
  *
  * ★★ 它与"隧道顺移之后写回"不是同一件事，分别只有一个字：**谁说**。顺移是这台
@@ -1029,7 +1029,7 @@ function setWorkspaceRef(cfg, workspaceId, pluginId, spaceId) {
   const space = findSpace(cfg, spaceId);
   if (!space) return { ok: false, error: '这一份数据不存在。' };
   if (space.pluginId !== pluginId) {
-    return { ok: false, error: '这一份数据不是这个插件的 —— 不能指过去。' };
+    return { ok: false, error: '这一份数据不是这个插件的，不能指过去。' };
   }
   if (!ws.refs || typeof ws.refs !== 'object') ws.refs = {};
   ws.refs[pluginId] = space.id;

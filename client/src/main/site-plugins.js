@@ -372,9 +372,9 @@ function checkDeclared(files, limits) {
   const dup = caseCollisions(out.map((f) => f.path));
   if (dup.length) {
     return { ok: false,
-      why: `两份文件的名字只差大小写（${dup.map(([a, b]) => `${a} / ${b}`).join('、')}）——`
+      why: `两份文件的名字只差大小写（${dup.map(([a, b]) => `${a} / ${b}`).join('、')}）。`
         + '在 macOS 与 Windows 的磁盘上它们会互相覆盖，而摘要按磁盘算，'
-        + '于是"你同意的"与"实际装上的"可以不是同一棵树' };
+        + '于是"同意的"与"实际装上的"可以不是同一棵树' };
   }
   return { ok: true, files: out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) };
 }
@@ -415,7 +415,7 @@ function packageMetaProblem(pkg, limits) {
   //   比认识的新 ⇒ 格式演进了，客户端落后 —— 这是**可以回退**的那一种（见文件头）；
   //   比认识的旧/不认识 ⇒ 站点发了一个本实现根本没有过的说法，说不清它是什么。
   if (pkg.format > FORMAT) {
-    return bad(`这一份包用的是格式 ${pkg.format}，而本客户端只认识 ${FORMAT} ——`
+    return bad(`这一份包用的是格式 ${pkg.format}，而本客户端只认识 ${FORMAT}：`
       + '站点的守护进程比这个客户端新', true);
   }
   if (pkg.format < FORMAT) {
@@ -731,13 +731,13 @@ function recordSig(record) {
       digestSite: e.digestSite, digestClient: e.digestClient,
     });
   } catch (err) {
-    return { ok: false, why: `记录表里那个信封拼不回一个签名块（${err.message}）—— 它被改过` };
+    return { ok: false, why: `记录表里那个信封拼不回一个签名块（${err.message}），它被改过` };
   }
   const parsed = PP().parseSigBlock(blk);
   if (!parsed) {
     return { ok: false,
       why: '记录表里那个信封不是一个合法的 Ed25519 签名块'
-        + `（本格式是 ${ENVELOPE_SIG_MIN} + 版本号 字节、alg=1）—— 它被改过` };
+        + `（本格式是 ${ENVELOPE_SIG_MIN} + 版本号 字节、alg=1），它被改过` };
   }
   return { ok: true,
            // ★ 形状对齐 `parsePackage()` 交出来的那个签名对象（`pubkey` /
@@ -798,7 +798,7 @@ function treeSignature(treeDir, record) {
   //    也**不依赖树对不对**。①不过 ⇒ 这张记录表里的信封被改过。
   if (!PP().verifyEd25519(got.sig.pubkey, PP().signedMessage(got.sig), got.sig.signature)) {
     return { ok: false, signed: true,
-      why: `记录表里那个签名块验不过 —— 它盖的必须是 `
+      why: `记录表里那个签名块验不过：它盖的必须是 `
         + `${JSON.stringify(got.sig.id)}@${JSON.stringify(got.sig.version)} 这四个东西（A.3），`
         + `而这一块盖的不是它（签的人是 ${got.sig.fingerprint}）` };
   }
@@ -976,7 +976,7 @@ async function fetchPackage(rpc, p, meta, dir, limits, ctx) {
   //   那正是"摘要不变 ⇒ 还是同一份构件"这条规则的样子。
   if (parsed.digest !== meta.digest) {
     return { ok: false, why: `整包的内容摘要是 ${parsed.digest}，而站点报的是 `
-      + `${meta.digest} —— 这两次说的不是同一份东西` };
+      + `${meta.digest}，这两次说的不是同一份东西` };
   }
   // ★ 响应**自己报的那两个数**也要核 —— 它是关于同一份东西的**第三个说法**
   //   （`op_plugins` 里一次、这次响应里一次、以及我们自己算出来的）。三次说法
@@ -1225,7 +1225,7 @@ async function sync(o) {
     const swept = sweepPool(siteRoot);
     if (swept.removed.length) {
       out.notices.push(`池里有 ${swept.removed.length} 项是上一次没写完的安装`
-        + `（${swept.removed.join('、')}）—— 已经清掉了，这一轮会重新取。`);
+        + `（${swept.removed.join('、')}），已经清掉了，这一轮会重新取。`);
     }
     out.poolStrays = swept.strays;
 
@@ -1256,7 +1256,7 @@ async function sync(o) {
       const tree = SLOT.treeDirOf(siteRoot, p.id, p.version);
       if (!tree) {
         fail(`站点报的这一份的标识 ${JSON.stringify(p.id)}@${JSON.stringify(p.version)}`
-          + ' 不能用作插件标识（id 必须是 ULID）—— 这一份不取。');
+          + ' 不能用作插件标识（id 必须是 ULID），这一份不取。');
         continue;
       }
 
@@ -1291,8 +1291,8 @@ async function sync(o) {
         const w = forgetTrust(p.id, p.version);
         if (w && w.had) {
           out.withdrawn.push({ id: p.id, version: p.version, name: p.name, title: p.title });
-          out.notices.push(`本机那一份 ${label} 不在了，它上一次的同意已经作废 ——`
-            + '下面会重新问你一次。');
+          out.notices.push(`本机那一份 ${label} 不在了，它上一次的同意已经作废，`
+            + '下面会重新问一次。');
         }
       }
 
@@ -1342,8 +1342,8 @@ async function sync(o) {
               //   第一个问题。`wants` 只在"真的把那一版拿下来了"时才写，所以它记的
               //   正是"谁把它放进了池子"，而不是"这一轮有谁报了它"。
               + (owners.length
-                ? `这个槽位是 ${owners.join('、')} 要来的 —— ` : '')
-              + '同一个版本号只能对应一份内容 —— 请管理员升版本号之后重新部署。');
+                ? `这个槽位是 ${owners.join('、')} 要来的。` : '')
+              + '同一个版本号只能对应一份内容，请管理员升版本号之后重新部署。');
             continue;
           }
           out.kept.push({ id: p.id, version: p.version, name: p.name, title: p.title, dir: tree });
@@ -1403,7 +1403,7 @@ async function sync(o) {
         }
         const gone = removeSlot(siteRoot, p.id, p.version);
         if (!gone.ok) { fail(gone.error); continue; }
-        out.notices.push(`本机那一份 ${label} 不可用（${sv.why}）——`
+        out.notices.push(`本机那一份 ${label} 不可用（${sv.why}），`
           + '已经清掉，正在重新取一份。');
         // ★ 从这里**往下走**（不是 continue）：下面那条路要么取回来一份核过的，
         //   要么明确失败。这样"不可用"这个状态不会在池里多留一瞬。
@@ -1643,7 +1643,7 @@ function acceptStaged(o) {
   if (o.existing) {
     let st;
     try { st = fs.statSync(o.stagedDir); } catch {
-      return { ok: false, error: '本机那一份已经不在了 —— 请重新同步一次。' };
+      return { ok: false, error: '本机那一份已经不在了，请重新同步一次。' };
     }
     if (!st.isDirectory()) return { ok: false, error: '本机那一份不是一个目录。' };
     const r = plugins.inspectDir(o.stagedDir);
@@ -1653,13 +1653,13 @@ function acceptStaged(o) {
         + `与要同意的 ${o.id}@${o.version} 不一致。` };
     }
     if (o.digest && r.entry.digest !== o.digest) {
-      return { ok: false, error: '本机那一份在你点同意之后变过了 —— 请重新同步一次再决定。' };
+      return { ok: false, error: '本机那一份在你点同意之后变过了，请重新同步一次再决定。' };
     }
     return { ok: true, dir: o.stagedDir, digest: r.entry.digest };
   }
 
   let st;
-  try { st = fs.statSync(o.stagedDir); } catch { return { ok: false, error: '暂存的那一份已经不在了 —— 请重新同步一次。' }; }
+  try { st = fs.statSync(o.stagedDir); } catch { return { ok: false, error: '暂存的那一份已经不在了，请重新同步一次。' }; }
   if (!st.isDirectory()) return { ok: false, error: '暂存的那一份不是一个目录。' };
 
   const r = plugins.inspectDir(o.stagedDir);
@@ -1669,7 +1669,7 @@ function acceptStaged(o) {
       + `与要装的 ${o.id}@${o.version} 不一致。` };
   }
   if (o.digest && r.entry.digest !== o.digest) {
-    return { ok: false, error: '暂存的那一份在你点同意之后变过了 —— 请重新同步一次再决定。' };
+    return { ok: false, error: '暂存的那一份在你点同意之后变过了，请重新同步一次再决定。' };
   }
   // ★ 提交之前**最后一次**逐份核对：记录表草稿说的那几份，与**此刻磁盘上**这棵树
   //   是不是同一批。它不是多余的 —— 上面的 `inspectDir` 只算了一个总摘要，而一个
@@ -1681,9 +1681,9 @@ function acceptStaged(o) {
     if (fault) return { ok: false, error: `暂存的那一份与它的记录表对不上：${fault}` };
   }
   const dest = SLOT.treeDirOf(o.siteRoot, o.id, o.version);
-  if (!dest) return { ok: false, error: '这个 (id, 版本) 拼不出池里的路径 —— 不装。' };
+  if (!dest) return { ok: false, error: '这个 (id, 版本) 拼不出池里的路径，不装。' };
   if (fs.existsSync(dest)) {
-    return { ok: false, error: `${dest} 已经存在 —— 同一个版本只装一份，`
+    return { ok: false, error: `${dest} 已经存在：同一个版本只装一份，`
       + '要么它已经装好了，要么站点该升版本号。' };
   }
   try {
@@ -1706,11 +1706,11 @@ function acceptStaged(o) {
       return { ok: false,
         error: `装到一半停下了：树已经放好，但记录表写不下去（${w.error}${w.detail ? `：${w.detail}` : ''}）。`
           + (g.ok
-            ? '已经把它撤掉了 —— 请重新同步一次。'
+            ? '已经把它撤掉了，请重新同步一次。'
             // ★ 撤不掉也要说清**它会怎样**：那一份是"没提交"，所以不可见、也不会
             //   被加载，而下一次同步的清扫会把它收掉。留一句含糊的"失败了"，用户
             //   会去那个目录里找一个已经不生效的东西。
-            : `而且没能撤掉（${g.error}）—— 那棵树是"没提交"的，所以不会被加载；`
+            : `而且没能撤掉（${g.error}）：那棵树是"没提交"的，所以不会被加载，`
               + '下一次同步会把它清掉。') };
     }
   } else {
@@ -1719,7 +1719,7 @@ function acceptStaged(o) {
     //   失败，而不是留一棵谁也看不见的树。
     const g = removeSlot(o.siteRoot, o.id, o.version);
     return { ok: false,
-      error: '收下一份构件时没有带记录表 —— 那一份不算装上'
+      error: '收下一份构件时没有带记录表，那一份不算装上'
         + `${g.ok ? '（已经撤掉了）' : `（而且撤不掉：${g.error}）`}。` };
   }
   return { ok: true, dir: dest, digest: r.entry.digest };

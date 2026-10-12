@@ -237,7 +237,7 @@ function renderOut() {
     return;
   }
   if (!d) {
-    when.textContent = '正在取…';
+    when.textContent = '读取中…';
     $('out-half-err').classList.add('hidden');
     $('out-half-out').classList.remove('hidden');
     return;
@@ -333,7 +333,7 @@ function renderCluster() {
   }
   const d = SITE.data;
   if (!d) {
-    $('cl-health').textContent = '正在取…';
+    $('cl-health').textContent = '读取中…';
     $('cl-health').className = 'st';
     return;
   }
@@ -347,7 +347,7 @@ function renderCluster() {
 
   // 控制器与版本：两个**互相独立**的格子，所以各说各的。
   if (!h) box.append(na('控制器状态（scontrol ping）'));
-  else if (!h.up) box.append(cel('p', 'bad', '控制器连不上 —— 提交、心跳、查询都会失败。'));
+  else if (!h.up) box.append(cel('p', 'bad', '控制器连不上，提交、心跳、查询都会失败。'));
 
   const ver = cel('div', 'ctable');
   ver.append(cel('div', 'k', 'Slurm'));
