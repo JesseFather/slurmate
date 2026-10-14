@@ -274,6 +274,17 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 同一个东西，装完站点当场重扫。之后的每一步都与真站点逐字相同：站点报它、
 客户端取回来、过同意闸，然后才可用。
 
+安装包里额外带了两样给开发者模式用的东西，它们的家不在 `src/` 下：
+
+| 带什么 | 怎么带 | 少了它会怎样 |
+|---|---|---|
+| 打包器（`packer/slurmate-packer.js`） | `extraResources` | 假站点报得出插件，却一个都发不出去 —— 客户端无从取回 |
+| 替身宿主（`src/main/fake-job-host.sh`） | `asarUnpack` | 一提交就「作业侧起不来」：外部 bash 读不了 asar 里的文件 |
+
+两条声明在 `electron-builder.yml` 里，与 `src/main/app-assets.js` 里那两条路径
+算法是一对，`test/packaging.test.mjs` 钉着这一对。两样都只在打包版上才可能缺，
+而源码树里跑测试是全绿的 —— 所以那一条判据不能省。
+
 样例那棵树与真的守护进程一样是启动时的快照（在仓库里手改它要重启），
 而「安装插件…」装进去的那一份当场生效。
 
@@ -470,6 +481,9 @@ src/main/
   fake-job.js      假站点上**一条会话的作业侧**：挑端口、起进程、读会话文件、杀进程组
   fake-job-host.sh 它的**替身宿主**（复刻 run.sbatch 里"起那个服务进程"那一小截，
                    到契约为止 —— 界线写在它自己的文件头）
+  app-assets.js    「跑出 `src/` 的那两样在安装包里在哪」：打包器与替身宿主。
+                   它与 `electron-builder.yml` 的 `extraResources` / `asarUnpack`
+                   是一对，`test/packaging.test.mjs` 钉着这一对
   demo-server.js   **夹具**用的那个假 web 服务（**通用**：契约来自调用方给的清单；
                    纯 Node，可脱离 Electron 测。它**不再**是隧道目标）
   session.js       会话状态机 + 心跳
@@ -493,7 +507,8 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
                    jobstate（作业状态那句话 + 与守护进程状态表的跨文件不变量）/
                    gres（GRES 那一行怎么念）/ gres-rules（假后端的 GRES 规则与守护进程
                    同一条，行为用例）/ limits（那三个"同一个数写了两遍"的地方逐字比对）/
-                   backend-fake（假后端不许比真守护进程多知道任何东西）
+                   backend-fake（假后端不许比真守护进程多知道任何东西）/
+                   packaging（打包版里那几样跑出 `src/` 的东西还在不在）
 ```
 
 ### 四条不要改坏的约束

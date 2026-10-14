@@ -4,7 +4,8 @@
 
 这个仓库有四个分发单元，而今天一个都不带文档。
 
-客户端的 `files:` 白名单只有 `src/**` + `package.json`，站点端从仓库跑部署脚本，
+客户端的 `files:` 白名单是 `src/**` 与 `package.json`，另外两样靠 `extraResources`
+与 `asarUnpack` 带进包（见 `client/electron-builder.yml`）。站点端从仓库跑部署脚本，
 打包器是仓库里的一个目录。
 
 所以「带」这件事，将来每一格都要在构建那一步真的把文档装进去。

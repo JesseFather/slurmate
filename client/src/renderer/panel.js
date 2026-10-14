@@ -3391,6 +3391,16 @@ async function refreshSiteDirs() {
       box.appendChild(cel('p', 'sub bad', `${s.name}：${s.why}`));
     }
   }
+
+  // 打包器。假站点"发得出去"全靠它，所以它与那两处目录同属"假站点自己的事"。
+  //   它是「站点报得出插件、客户端却一个都取不回来」的另一条线索：那两处目录
+  //   报的是"站点上有什么"，这一行报的是"发不发得出去"。
+  const pk = rep.packer;
+  if (pk) {
+    box.appendChild(cel('p', 'sub',
+      `打包器（假站点发一个插件要用它）：${pk.path || '找不到'}`));
+    if (pk.why) box.appendChild(cel('p', 'sub bad', pk.why));
+  }
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────

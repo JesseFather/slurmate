@@ -693,3 +693,35 @@ test('submit 不可重试：守门在 classify，不在调用点', async () => {
   assert.equal(r.action, Action.FATAL);
   assert.equal(shouldRetry(r), false, 'submit 非幂等，超时重试会产生第二个作业');
 });
+
+test('★★ 打包器不在时：站点照常报得出插件，而这一份发不出来（而且说得出为什么）', async (t) => {
+  const backend = await makeBackend(t);
+  const find = async () => {
+    const r = await backend.rpc({ op: 'plugins' });
+    assert.equal(r.ok, true, '站点照常答得出清单');
+    const p = r.data.plugins.find((x) => x.name === CS_MANIFEST.name);
+    assert.ok(p, '插件照常出现在清单里 —— 清单与包是两件事');
+    return p;
+  };
+
+  // 正对照排在最前面：没有它，下面那两条会被"什么都发不出来"一并满足，
+  //   而那与"打包器不在时才是这样"在输出里长得一模一样。
+  const ok = await find();
+  assert.ok(ok.package && typeof ok.package === 'object',
+    '打包器在的时候，这一份必须带包（否则下面那条断言证明不了任何事）');
+  assert.ok(backend.packerReport().path, '而且说得出打包器在哪');
+
+  // 打包版上漏带了打包器就是这个现场。它是这台机器上造不出来的：
+  //   打包器就躺在仓库里，而"跑的是哪一份代码"不是运行期能改的。
+  backend.debugNoPacker();
+  const p = await find();
+  // 三态里的 `null`：站点此刻生产不出来。它不是"这个键根本不出现"（本站不分发
+  //   它）—— 两者在协议上是不同的话，而用户能做的事也不同。
+  assert.equal(p.package, null,
+    '打不出包 ⇒ `package: null`（此刻生产不出来），不是把那个键抹掉');
+
+  const rep = backend.packerReport();
+  assert.equal(rep.path, null, '调试那一屏要能看出"这一份客户端里没有它"');
+  assert.match(rep.why, /没有带打包器/,
+    `那句提示必须说得出缺的是什么：${rep.why}`);
+});

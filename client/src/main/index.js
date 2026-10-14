@@ -426,6 +426,8 @@ function bootstrap() {
     //   而两种情况的症状都是"假站点一个插件都不报"，界面上一句话说不清为什么。
     //   那句话必须说出路（去点「安装插件…」），因为站点上的插件只有那一条来的路。
     warnEmptyFakeSite();
+    // 与上一条并排，但它是另一个现场：站点上有插件、而这个客户端发不出它们。
+    warnNoPacker();
 
     // 快捷键拦截：黑名单 + 诊断。
     //
@@ -3148,7 +3150,14 @@ function sitePluginReport() {
       skipped: r.skipped.map((s) => ({ name: s.name, why: s.why })),
     };
   };
-  return { samples: each(samplePluginsDir()), installed: each(siteInstalledDir()) };
+  return {
+    samples: each(samplePluginsDir()),
+    installed: each(siteInstalledDir()),
+    // 假站点打不打得出发给客户端的包。它属于"假站点自己的事"（与那两处目录
+    //   同一类），而且它是"站点上明明有插件、客户端却一个都取不回来"的另一条线索。
+    packer: backend && typeof backend.packerReport === 'function'
+      ? backend.packerReport() : null,
+  };
 }
 
 /**
@@ -3170,6 +3179,22 @@ function devView() {
  * 坏清单（读得到目录、读不出 `plugin.json`）也要说：那句症状是"装了它就是不生效"，
  *   而用户没有任何线索。
  */
+/**
+ * 这一份客户端里没有打包器时说一句。
+ *
+ * 与上一条是两个现场，所以两句话：那一条是"站点上还没有插件"，这一条是"站点上
+ *   有插件、而这个客户端发不出它"。后者只有一种来路 —— 安装包里没带打包器 ——
+ *   而症状是"站点报得出插件、却一个都取不回来"，用户能做的事只有换一份完整的包。
+ */
+function warnNoPacker() {
+  if (!dev.developerMode) return;
+  const p = backend && typeof backend.packerReport === 'function'
+    ? backend.packerReport() : null;
+  if (!p || p.path) return;
+  win && win.pushNotice('error',
+    '开发者模式：这个客户端里没有带打包器，站点发不出插件。请换一份完整的安装包。');
+}
+
 function warnEmptyFakeSite() {
   if (!dev.developerMode) return;
   const rep = sitePluginReport();
@@ -5471,6 +5496,10 @@ function registerIpc() {
     //     任何真插件的名字，所以这里连缺省值都不写。
     //   带 `arg` = 指名一个短名（DevTools 那条路，以及"要它和池里某个同名插件
     //     对上"的用例）。界面上那颗按钮不带。
+    // 「这个客户端里没有带打包器」—— 安装包里漏带它时就是这副样子：站点报得出
+    //   插件、却一个都发不出来。它在这台开发机上造不出来（打包器就在仓库里），
+    //   而那条路上有两句话要验。
+    else if (what === 'no-packer') backend.debugNoPacker(arg !== false);
     else if (what === 'extra-plugin') backend.debugAddSitePlugin(arg || null);
     // 站点侧那三个开关作用在哪一个插件上由调用方指定（不指定就取列表里
     //   第一个）—— 基座里没有插件名可写。一个都没装时这些开关无事可做，如实

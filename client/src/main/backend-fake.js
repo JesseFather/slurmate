@@ -50,6 +50,7 @@ const crypto = require('crypto');
 const { Backend, KIND } = require('./backend.js');
 const pluginFiles = require('./plugins/index.js');
 const fakeJob = require('./fake-job.js');
+const appAssets = require('./app-assets.js');
 
 // 假站点里"站点装了新插件"用的假 id。形状必须是合法 ULID（守护进程与客户端都会
 // 校验），但没有任何东西会去核对它是不是真铸出来的 —— 也核对不了。
@@ -427,6 +428,16 @@ class FakeBackend extends Backend {
     this._defaultGpus = null;
     /** 打好的包，按 `(id@版本)` 缓存 —— 见 _pkgOf。 */
     this._pkgCache = new Map();
+    /**
+     * 打不出包的原因（`null` = 打得出来）。
+     *
+     * 它只有一种来源：这一份客户端里没有打包器。那种情况下站点照协议回
+     *   `package: null`（"此刻生产不出来"），而客户端能说的只有"现在发不出来"
+     *   —— 真正的原因在这一格，由调试那一屏与一条开机提示说出去。
+     */
+    this._pkgWhy = null;
+    /** 造出「这个客户端里没有带打包器」——见 debugNoPacker。 */
+    this._noPacker = false;
   }
 
   /**
@@ -442,8 +453,19 @@ class FakeBackend extends Backend {
     const entry = this._siteIndex().get(key);
     if (!entry) return null;
     let out = null;
+    // 打包器是这一份包的全部来源，所以先找它，而且找的过程不许静默失败：
+    //   没有它的症状是"站点报得出插件、却一个都发不出来"，指不回这里。
+    //   它在安装包里的位置见 `app-assets.js` 与 `electron-builder.yml` 的
+    //   `extraResources`（那一对由 `client/test/packaging.test.mjs` 钉着）。
+    const found = this._noPacker
+      ? { why: appAssets.NO_PACKER } : appAssets.findPacker();
+    if (!found.path) {
+      this._pkgWhy = found.why;
+      this._pkgCache.set(key, null);
+      return null;
+    }
     try {
-      const packer = require('../../../packer/slurmate-packer.js');
+      const packer = require(found.path);
       const files = entry.files.map((f) => {
         const data = fs.readFileSync(path.join(entry.dir, ...f.path.split('/')));
         return { path: f.path, data, sha256: f.sha256 };
@@ -484,13 +506,44 @@ class FakeBackend extends Backend {
         meta: { format: 2, bytes: buf.length, digest: sd.client },
         fingerprint: crypto.createHash('sha256').update(pub).digest('hex'),
       };
-    } catch {
-      // 打包器不在（打包之后的安装包里没有 `packer/`），这个站点不发包。
-      // 与"那两处目录一个都不存在"是同一种降级：不是错误，是"这里没有它"。
+    } catch (e) {
+      // 打包器在、而这一份打不出来：照协议这只是"此刻生产不出来"
+      //   （`package: null`），但原因留在这里，别吞掉 —— 下一句要能说清是
+      //   "没有打包器"还是"这一棵树打不出来"。
+      this._pkgWhy = `打 ${key} 的包时出错：${e.message}`;
       out = null;
     }
     this._pkgCache.set(key, out);
     return out;
+  }
+
+  /**
+   * 这个冒牌站点的打包能力自述。调试那一屏与开机那条提示读它。
+   *
+   * `path` 为空 = 这一份客户端里没有打包器（`why` 说清是为什么）；`path` 在而
+   *   `why` 非空 = 上一次打包出过错。
+   */
+  packerReport() {
+    if (this._noPacker) return { path: null, why: appAssets.NO_PACKER };
+    const f = appAssets.findPacker();
+    return { path: f.path || null, why: f.path ? this._pkgWhy : f.why };
+  }
+
+  /**
+   * 让假站点假装"这个客户端里没有带打包器"。
+   *
+   * 造的是一个真实现场（安装包里漏带了打包器），而它的症状是"站点报得出插件、
+   *   客户端却一个都取不回来" —— 那条路必须能走到，否则那几句提示谁也没验过。
+   *   与 `debugNoBash` 同一条理由：这台开发机上是造不出这个现场的（打包器就在
+   *   仓库里躺着，而"运行的是哪一份代码"不是运行时能改的）。
+   *
+   * 打过的包要一起作废：`_pkgCache` 里存的正是"打不打得出来"这件事的结果，
+   *   不失效的话这个开关对已经报过一轮的那些静默无效 —— 而它恰恰是用来
+   *   验那条路的。
+   */
+  debugNoPacker(on = true) {
+    this._noPacker = on;
+    this._pkgCache.clear();
   }
 
   /**
@@ -1228,6 +1281,7 @@ class FakeBackend extends Backend {
     this._pluginProblems.length = 0;
     this._defaultGpus = null;
     this._bloatPlugin = null;
+    this._noPacker = false;
     this._pkgCache.clear();
     this._rateLimitBurst = 0;
     // 「另一台电脑在看」那几个单向开关里唯一需要显式撤掉的一个：

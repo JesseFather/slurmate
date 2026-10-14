@@ -44,9 +44,16 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
+const appAssets = require('./app-assets.js');
 
-/** 替身宿主。它与 `cluster/run.sbatch` 的界线写在那个文件自己的头里。 */
-const HOST_SH = path.join(__dirname, 'fake-job-host.sh');
+/**
+ * 替身宿主。它与 `cluster/run.sbatch` 的界线写在那个文件自己的头里。
+ *
+ * 这个路径要交给一个外部的 bash，而外部进程读不了 asar —— 所以安装包里
+ *   必须取它解包之后的那一份（`appAssets.unpacked`，而 `asarUnpack` 那一句在
+ *   `client/electron-builder.yml` 里）。源码跑时这个函数什么都不做。
+ */
+const HOST_SH = appAssets.unpacked(path.join(__dirname, 'fake-job-host.sh'));
 
 /**
  * 登记要等多久看一次会话文件。
