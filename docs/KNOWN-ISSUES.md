@@ -524,6 +524,29 @@ plugins（一个含 package{format,bytes,digest} 的清单）
 节点忙闲、队列与 GRES 四段，再打开客户端那一屏。逐格确认「取不到」与「确实没有」
 显示成了两句不同的话。
 
+### U10 — Windows 上那条起假站点的路，一行都没在真机上跑过
+
+**位置**：`client/src/main/fake-job.js` 的 `defaultBashSearch()` 与 `findBash()`。
+
+**是什么**：假站点的作业侧是一份 bash 脚本。POSIX 上按 PATH 找到 `bash` 就完了，
+Windows 上不是：PATH 用 `;` 分、可执行文件带 `.exe`、Git for Windows 装在几处惯例
+位置，而系统自带的那个 `bash.exe` 是 WSL 的入口（它跑的是另一个文件系统里的东西，
+路径要翻译）。
+
+2026-10-14 把这几条写了进去：按 `;` 切 PATH、候选名带 `.exe`、补上 Git for Windows
+的三处惯例位置、WSL 认但排在最后（走它要 `bash -s -- <入口>` 从 stdin 喂，路径用
+`wslpath` 那一套翻）。找到的那一个仍要问一句 `BASH_VERSINFO`。
+
+**验过的是哪一半**：只有纯函数那几条 —— Windows 形状的 PATH 怎么切、候选顺序
+（Git Bash 在 WSL 之前）、`C:\…` 怎么翻成 `/mnt/c/…`、翻不动时返回 `null`、
+一个 bash 都没有时说的是哪一句。判据在 `client/test/fake-job.test.mjs`。
+
+**没验过的是哪一半**：这台开发机是 Linux。Git Bash 与 WSL 两条路各只有一件事是
+推出来的 —— 它们真的跑得动那份宿主脚本、真的收得到 stdin 那一份、真的读得到翻译过
+的路径。用户在 Windows 上跑的那一次用的是**没有这一段**的那一份客户端（见 S14）。
+
+**它不会红，所以**：Windows 上这条路到今天只有纯函数那一半的保证。
+
 ## 三、结构性的欠账
 
 设计上还没做的东西。它们不是缺陷：缺的东西不会假装自己在。
@@ -707,6 +730,15 @@ v0.6 那一套（按相对路径排序 / 类别入哈希 / 权限位入哈希 / 
 > **bash 4**。这一条不新增欠账（`client/README.md` 里写明了那两条限制，起不来时日志
 > 里是作业侧的原话），但它让"打包版上跑一次"这件事更值得做了。
 
+> **2026-10-14：第二笔跑了一次，撞出三件事。** 用户在一台 Windows 上装了一份真的
+> `.splug`，逐条报回来：装上了而界面说"本站报了这一版，但没有说它发得出来"；
+> 点「重新同步」界面不变、断开重连才出提示；以及开发者模式里假站点报得出插件却
+> 一个都发不出去。三件的根因都是"两个不同时刻、两种不同状态的东西被当成了一个"，
+> 见 `CHANGELOG.md` 的 0.20 那一节。
+>
+> **修过的那一份还没有再看过。** 这一笔因此降级但不消失：真实安装包里的开发者模式
+> 走通过一次，走的是坏的那一份。
+
 ---
 
 ### S40 — 假站点不跑**中转站**那一类插件的作业侧
@@ -726,6 +758,15 @@ v0.6 那一套（按相对路径排序 / 类别入哈希 / 权限位入哈希 / 
 
 在那之前，它在开发者模式里的失败形态是"隧道连不上"，而那与真站点上一个起不来的 sshd
 是同一个现象。所以它不骗人，只是验不到。
+
+> **2026-10-14：按上面那条出路试过一次，退回了。** 把 `if (sitePlugin.surface)`
+> 换成"这棵树里有没有作业侧"，12 条用例当场红。**这一道闸比中转站宽**：
+> `debugAddSitePlugin` 造的那些"站点上有、本机不认识"的条目也没有 `surface`，
+> 而好几条用例（未知服务、数据空间、崩溃重连）靠的正是 `_enroll` 里那个编出来的
+> 端口与主机公钥。它们测的是别的正经事，只是"会话得先跑起来"这一点踩在那儿。
+>
+> 要真的改，得先让那个调试开关造得出一棵**真有作业侧**的树 —— 那样"未知服务"
+> 这条路仍然是"站点真的有它、只是本机不认识"，比现在更 faithful。在那之前别动它。
 
 **它不会红，所以**：中转站那一半的作业侧（`start_sshd` 那一整套、主机密钥怎么进
 `known_hosts`）到今天只在假数据上走过。
@@ -1116,12 +1157,40 @@ if FAIL == 0:
 
 **它不会红，所以**：家目录被日志吃掉之前，没有任何东西会说话。
 
+### S41 — 假站点演不出来的那几样，逐条留着
+
+**位置**：`client/src/main/backend-fake.js`。
+
+**是什么**：开发者模式的要求是"完全模拟真实站点的行为"，例外只有"软件依赖装不上
+所以起不来"那一档。逐 op 对过一遍之后，剩下这些它演不出来：
+
+| 演不出来的 | 为什么 |
+|---|---|
+| Slurm 排队、`sacct`、作业真的被调度起来 | 这台机器上没有 Slurm。假站点的作业侧是一个本机进程，"提交"就是把它 fork 出来 |
+| 心跳老化（300 秒 `suspect` → 1800 秒 `orphaned` → `scancel`） | 要等真的时间过去，用例等不起 |
+| `doctor` 报出问题 | 没有 nft 表可查，`port_range` 是写死的。界面那一屏因此只在"正常"那一态上走过 |
+| `partitions` 取不到、`cluster` 取不到 | 没有真集群可问 |
+| 审计、限流、SQLite | 那三样都在守护进程的 Python 里，假站点是一份 JS |
+| `submit` 的 `req.time` 被用上 | 假站点不排队，请求的时限没有落点，`requested_time` 是写死的 `12:00:00` |
+| `whoami` 的「账户查不到」 | `account` 恒有值、`account_error` 恒为 `null`，所以那一态在开发者模式里看不到 |
+
+**为什么这不是缺陷**：这些不是"报成功而事情没成"，是"这件事在假站点上根本不存在"。
+界面上逐条看过一遍，没有一处会被指去查一条不存在的原因。
+
+**它不会红，所以**：上面每一格真实的失败形态，只有真站点的日志里才有。
+
 ## 四、已经不再是问题的
 
 留着，免得再被翻出来当成待办。
 
 | 曾经的问题 | 现状 |
 |---|---|
+| **打包版里站点发不出插件**：`electron-builder.yml` 的白名单只有 `src/**` 与 `package.json`，而假站点现打客户端侧容器要 `packer/slurmate-packer.js`；找不到时抛的错被 `catch` 吞掉，于是假站点报得出插件、一个都发不出去。同一个原因还让替身宿主脚本（`fake-job-host.sh`）在打包版上读不到：外部 bash 读不了 asar 里的文件，源码跑没事 | **v0.20 修掉。** 这个仓库第一次用 `extraResources`（打包器进 `<resources>/packer/`）与 `asarUnpack`（宿主脚本解出 asar）。新增 `client/src/main/app-assets.js` 收这两条路径，并给出一条判据：扫 `client/src/**` 里所有会跑出 `src/` 的路径，每一个都必须在 `electron-builder.yml` 里有对应的 `extraResources` / `asarUnpack` 条目。**用例**：`client/test/packaging.test.mjs`。**变异**：7 条逐条打红。 |
+| **Windows 上找不到 bash**：`findBash()` 只认 POSIX 的路径写法，于是假站点在 Windows 上一个会话都起不来 | **v0.20 修掉。** 按 `;` 切 PATH、候选名带 `.exe`、补上 Git for Windows 的三处惯例位置；WSL 的 `bash.exe` 认但排在最后（走它要把路径翻成 `/mnt/…`，宿主脚本改从 stdin 喂）。真机上那一半仍然欠着，见 U10。**用例**：`client/test/fake-job.test.mjs`。**变异**：5 条逐条打红。 |
+| **假站点说了几件真站点不会说的事**：`op_list` 带着秘密、也不截断（真站点 `with_secret=False` 且只回最后 50 条）；`job_log` 把"文件不在"与"读不出来"合成一态；`submit` 忽略 `time`、`mem` 不做清洗、永不回 `warning`；`whoami` 少 `can_submit`；`defaults` 是一份全局的（真站点每个插件一份） | **v0.20 修掉。** 逐条对齐到守护进程那一份的形状。这些都是开发者模式里看得见的，而用户对开发者模式的要求是"完全模拟真实站点的行为"，例外只有"软件依赖装不上所以起不来"那一档。**用例**：`client/test/backend-fake.test.mjs` 与 `boot.test.mjs`。**变异**：9 条逐条打红。 |
+| **两个不同时刻的站点清单被当成了一个**：对账自己取了一份 `op_plugins` 的应答，却只用了一半 —— 界面手里那份「本站有哪些插件」仍然只在连接时取。于是装完插件点「重新同步」界面不变，要断开重连才对 | **v0.20 修掉。** `sync()` 把这一轮取到的 `plugins` / `problems` 带出去，两半来自同一刻。**用例**：`client/test/renderer-dom.test.mjs`。 |
+| **`deliveryOf()` 把三种"取不回来"合成一个 `null`**：键不出现（本站不分发它）与 `package: null`（此刻生产不出来）在界面上是同一句话，而那句话对后者是错的 —— 照着它去问管理员，问的是一件管理员改不了的事 | **v0.20 修掉。** 判据从两态变成四态（`package` / `absent` / `not_ready` / `unusable`），界面上是三句不同的话，各有各的出路。**用例**：`client/test/renderer-dom.test.mjs` 里那条「取不回来的三种情况是三句不同的话」。**变异**：第一次写错了（`const absent = byHand` 没有消费 `byHand`），改对之后 9 条逐条打红。 |
+| **判据看不见未跟踪的文件**：`tools/check-copy-style.py` 那三条只扫 `git ls-files`，于是新写的文件在 `git add` 之前对它们隐形 | **v0.20 修掉。** 改成 `git ls-files --cached --others --exclude-standard`；改完当场抓出三个新文件里藏着的几处记号。**变异**：两份探针文件 —— 未跟踪时当场红，删掉恢复绿。 |
 | **同一个键的规矩散在三处，其中两处已经写错**：插件清单的键同时在 `packer/docs/PLUGIN-SPEC.md` §2、`docs/CONTRACT.md` §2、`packer/docs/README.md` 里各写一份，而它们与权威（`tools/manifest-keys.json`）之间没有任何东西比对。漂出来的三处：① `packer/docs/README.md` 说身份的第三段由 `contributes.concurrent` 决定，实际是 `contributes.ports` 大于 0（`client/src/main/plugin-data.js` 的 `portCountOf`），而 `PLUGIN-SPEC.md` §2.7 与 `CONTRACT.md` §2.3.1 都写对了 —— `ports: 1, concurrent: false` 是合法组合，照 README 读会以为这个插件没有第三段；② `CONTRACT.md` §2.3.1 的表把 `data.inherit` 缺席时的取值写成该插件的版本号，实际是常量 `default`（`plugin-data.js` 里 `perVersion` 为真才回版本号，否则回 `inherit`、再否则回那个常量），所有版本共用一份 —— 而**同一节下面那段散文本来就写着正确的那一句**，这一节跟自己矛盾；③ `tools/manifest-keys.json` 的 `_` 段把守护进程那条守卫记在 19.14，实际在 19.16 | **v0.19 修掉。** 修法是把权威收成一份：`PLUGIN-SPEC.md` §2 开头新增一张 23 行的完整键表（键 / 类型 / 必填 / 取值域 / 违反的后果 / 详见），键集与 `tools/manifest-keys.json` 逐字相同，由 `tools/check-plugin-docs.py` 新加的第二条判据钉住 —— 那条判据原来只管 `plugins/*/README.md` 的〈配置条目〉表。`CONTRACT.md` §2 补上缺的行（`login.path` / `.field` / `.cookie`、`data.inherit`、`data.perVersion`、`site.defaultTime`），形状与取值指路 PLUGIN-SPEC，等级与保证两栏留在本页；`README.md` 的顶层与 `contributes` 两张表削掉「必有」栏与形状片段，只留说明。**用例**：`tools/check-plugin-docs.py --self-test` 新加的三组（键表少一个键 / 多一个键 / 连那张表都没有）。**变异**：从 PLUGIN-SPEC 的键表里删掉一行，那条判据当场红。 |
 | **S37 — 两项界面工作，用户明确推迟到单独一轮**：界面里那批解释性的长句（应当收进 `title=`，正文只留必要提示），以及开发者模式占着主界面的一整节 | **v0.16 做掉。** 两件都在这一版完成（见 `CHANGELOG.md` 的〈界面清理〉与〈界面骨架〉两节）：长解释**逐处定去向**（删 / 搬成一行 `title`，一张表定死，不留"回头再看"），开发者模式的入口改成最上面那一行标题、搬进去的东西一个不少（开关、假站点来源、10 颗调试按钮）。顺带回头清了**存量**，19 处混在界面字面量里的 markdown 记号（那些字符串走 `textContent`，会**按字面**显示给用户看），并加了一条判据守着它不再长回来。这一条当时留着的那句话仍然成立：它欠的是**存量**，不是增量。 |
 | **F45 — 热重载的拒绝判据比启动的少一半**：`reload_config()` 只跑 `new.validate()`，而 `start()` 在它**之外**还跑 `crosscheck_cidr()`。`cluster_cidr` 在 `RELOAD_CLASS` 里是可热那一档，于是把它改错一个数字（`192.0.2.0/24` → `192.0.2.128/25`，漏掉半个集群）之后 `systemctl reload` **成功**，而 `_adopt_config()` 里 `Nft.ensure()` **按值比对**，把内核里那条基础规则换成**错的网段**。“被漏掉的节点，流量走到链尾那条 `policy accept`，没有报错、没有日志、没有任何迹象”，而它正是文档里“即使前面所有校验都被绕过”的**最后一道几何约束**。那句 docstring 从前**就写着**“cidr 与节点的交叉核对”，而它在 `validate()` 里**并不存在** | **v0.13 修掉（阶段 5）。** 修法不是给 reload 补一句，而是**把判据收敛到一处**：新函数 `config_deploy_problems(cfg)` = `validate()` + `crosscheck_cidr()`，`start()` / `--check` / 热重载**三条路共用**（账本给的两个方向里，这是“更根本地”那个）。理由是“任意两个调用点之间都可能漏；**不会再漏的形状是只有一处**”。连带：`start()` **也开始跑 `validate()`**（它从前不跑，靠 `ExecStartPre` 的 `--check` 兜着）。**用例**：第 32 节 32.14，**两半都写**，改错了，于是被拒 + 一个字不改 + 内核里那条基础规则**没被换掉** + 日志**点名 `cluster_cidr`**；**对照**：改成一个仍然覆盖全部节点的网段，于是照常生效（少了后一半，“把热重载整个禁掉”也能绿）。**变异**：把 crosscheck 从 reload 里拿掉，4 条红；从 `config_deploy_problems` 里拿掉，于是**5 条红**（多出来的那一条正说明收敛点真的只有一处，`--check` 那条路也跟着失去它）。 |
