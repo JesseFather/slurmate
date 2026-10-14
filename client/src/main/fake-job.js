@@ -33,8 +33,10 @@
  * ── 两条如实的限制（界面会在起不来时把它们说出来）──────────────────────────
  *
  *   1. 需要 bash：`job/start.sh` 是一段被 `source` 进来的 shell 片段，两个
- *      样例都用到了 `[[ ]]`、`local`、关联数组。Windows 的客户端上没有它 ——
- *      那时这里返回一句说得清的错，而不是一次静默失败。
+ *      样例都用到了 `[[ ]]`、`local`、关联数组。Windows 上先找 Git for Windows
+ *      自带的那个（原生进程，路径原样可用），再找 WSL 里的（另一个文件系统，
+ *      路径要逐条翻译）。两个都没有时返回一句说得清的错，而不是一次静默失败。
+ *      非 Windows 上这一段没有分岔。
  *   2. 插件的依赖得装在这台机器上：code-server 那棵树要真的有一个 code-server，
  *      sshd 那棵要起得起一个 sshd。起不来不许静默、也不许拿别的东西顶替 ——
  *      它的 stdout/stderr 就是答案（`why` 里那一句给界面，全文在两个日志文件里）。
@@ -81,24 +83,69 @@ const CANDIDATES = 6;
 /** 「这台机器上没有 bash」那一句 —— 只此一处：真的是没找到、和用例造出来的
  *  那个现场，说的是同一句话（`NO_BASH`）。 */
 const NO_BASH = { why: '这台机器上没有 bash，插件的作业侧是一段 shell 片段'
-  + '（`job/start.sh`），它要一个 bash 才跑得起来。Windows 上今天起不了会话，'
-  + '其余一切照常。' };
+  + '（`job/start.sh`），它要一个 bash 才跑得起来。Windows 上装一个 Git for '
+  + 'Windows 就有了，WSL 里那个也认。没有它时其余一切照常：装插件、看清单、'
+  + '看会话都还是好的。' };
 
-/** 按 PATH 找，再补上这三个惯例位置（GUI 启动的程序 PATH 常常很短）。 */
-function defaultBashSearch() {
+/** WSL 那个 bash 的惯例位置。它是 `bash.exe`，而那是 Windows 的命令，不是盘的。 */
+function wslBashPath(env = process.env) {
+  const root = env.SystemRoot || env.windir || 'C:\\Windows';
+  return path.win32.join(root, 'System32', 'bash.exe');
+}
+
+/**
+ * 按 PATH 找，再补上几个惯例位置（GUI 启动的程序 PATH 常常很短）。
+ *
+ * `env` 与 `platform` 可注入：Windows 那条路在这台机器上跑不到，而它是一整条
+ *   分支（分隔符不同、候选名带 `.exe`、WSL 排最后）—— 只有注入才验得了它。
+ *
+ * 顺序是承重的：Git for Windows 那个 bash 排在 WSL 前面。前者是原生进程，
+ *   插件树、家目录、日志目录都是 Windows 路径，原样交给它就行；后者会把作业侧
+ *   丢进另一个文件系统，路径要逐条翻译（见 `toWslPath`）。两个都在时挑前者。
+ *
+ * 返回值里的 `{path, wsl}` 是给 `findBash` 认的：只有 WSL 那一个要翻译路径。
+ */
+function defaultBashSearch(env = process.env, platform = process.platform) {
   const out = [];
-  for (const d of String(process.env.PATH || '').split(':').filter(Boolean)) {
-    out.push(path.join(d, 'bash'));
+  if (platform === 'win32') {
+    const J = path.win32;
+    for (const d of String(env.PATH || '').split(';').filter(Boolean)) {
+      out.push(J.join(d, 'bash.exe'));
+    }
+    // Git for Windows 的三个惯例落点（按安装方式不同）。
+    for (const base of [env.ProgramFiles, env['ProgramFiles(x86)'], env.LOCALAPPDATA]) {
+      if (!base) continue;
+      out.push(J.join(base, 'Git', 'bin', 'bash.exe'));
+      out.push(J.join(base, 'Programs', 'Git', 'bin', 'bash.exe'));
+    }
+    out.push({ path: wslBashPath(env), wsl: true });
+    return out;
+  }
+  for (const d of String(env.PATH || '').split(':').filter(Boolean)) {
+    out.push(path.posix.join(d, 'bash'));
   }
   out.push('/bin/bash', '/usr/bin/bash', '/usr/local/bin/bash');
   return out;
 }
 
+/**
+ * 把 Windows 路径翻成 WSL 里的那一个（`C:\a\b` → `/mnt/c/a/b`）。
+ *
+ * 只认盘符开头的本地路径，那是 WSL 默认挂载的形态（`/mnt/<盘符>`）。翻不动就返回
+ *   `null`：UNC 路径与网络盘在 WSL 里没有对应的挂载点，而"猜一个"的后果是作业往
+ *   一个不存在的地方写会话文件，然后失败在一句与真相无关的话上。
+ */
+function toWslPath(p) {
+  const m = /^([A-Za-z]):[\\/](.*)$/.exec(String(p));
+  if (!m) return null;
+  return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`;
+}
+
 /** 这个 bash 是第几版（取不到 = 它跑不起来，不算数）。 */
-function bashMajor(p) {
+function bashMajor(p, timeoutMs = 1000) {
   try {
     const out = execFileSync(p, ['-c', 'printf %s "${BASH_VERSINFO[0]:-0}"'],
-      { timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      { timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const n = Number(String(out).trim());
     return Number.isFinite(n) ? n : null;
   } catch {
@@ -118,11 +165,16 @@ function bashMajor(p) {
  *   作者会去查自己的插件（他没写错）。macOS 自带的 `/bin/bash` 正是 3.2。
  */
 function findBash(search = defaultBashSearch()) {
-  for (const p of search) {
+  for (const item of search) {
+    // 候选可以是裸路径，也可以是 `defaultBashSearch` 给的那个 `{path, wsl}`。
+    const p = typeof item === 'string' ? item : item.path;
+    const wsl = typeof item === 'string' ? false : Boolean(item.wsl);
     try {
       fs.accessSync(p, fs.constants.X_OK);
     } catch { continue; }
-    const major = bashMajor(p);
+    // WSL 那个要先把整个 Linux 起起来，头一次能到几秒 —— 一秒的探针会把一个
+    //   能用的 bash 判成"跑不起来"，而症状是"这台机器上没有 bash"。
+    const major = bashMajor(p, wsl ? 8000 : 1000);
     if (major === null) continue;               // 有这个名字，但跑不起来
     if (major < 4) {
       return { why: `这台机器上的 bash 太老（${p} 是 ${major}.x）：插件的作业侧`
@@ -130,7 +182,7 @@ function findBash(search = defaultBashSearch()) {
         + 'macOS 自带的那个 `/bin/bash` 就是 3.2；`brew install bash` 之后把'
         + '它放进 PATH 前面即可。' };
     }
-    return { path: p };
+    return { path: p, wsl };
   }
   return NO_BASH;
 }
@@ -320,19 +372,12 @@ class FakeJob {
     }
     let child;
     try {
-      child = spawn(found.path, [HOST_SH, this.entry], {
-        cwd: this.cwd,
-        env: { ...process.env, ...this.env },
-        // 自成进程组（pgid = 这个 pid）：收尾时那一刀要能落在整组上 ——
-        //   插件的服务多半是 `&` 起来的，只杀宿主会留下它，而那个症状是
-        //   "会话结束了，端口上还有人听着"。
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      child = found.wsl ? this._spawnWsl(found.path) : this._spawnNative(found.path);
     } catch (e) {
       this._fail(`作业侧起不来：${e.message}`);
       return;
     }
+    if (!child) return;              // WSL 那一路自己把原因说过了
     this.child = child;
     this.pid = child.pid;
 
@@ -349,6 +394,64 @@ class FakeJob {
 
     this._poll = setInterval(() => this._look(), POLL_MS);
     this._poll.unref?.();
+  }
+
+  /** `spawn` 那几个两处共用的选项。 */
+  _spawnOpts(cwd, env, stdin) {
+    return {
+      cwd,
+      env,
+      // 自成进程组（pgid = 这个 pid）：收尾时那一刀要能落在整组上 ——
+      //   插件的服务多半是 `&` 起来的，只杀宿主会留下它，而那个症状是
+      //   "会话结束了，端口上还有人听着"。
+      detached: true,
+      stdio: [stdin, 'pipe', 'pipe'],
+    };
+  }
+
+  /** 原生 bash（Linux / macOS / Git for Windows）：路径原样交给它。 */
+  _spawnNative(bin) {
+    return spawn(bin, [HOST_SH, this.entry],
+      this._spawnOpts(this.cwd, { ...process.env, ...this.env }, 'ignore'));
+  }
+
+  /**
+   * WSL 里那个 bash：作业侧跑在另一个文件系统里，所以每一条路径都要翻译。
+   *
+   * 那段宿主脚本也走 stdin（`-s`）：它在 Windows 盘上，而 WSL 里要 `/mnt/...`
+   *   才看得见。从 stdin 喂省掉一层翻译，也省掉"脚本自己是谁"这个问题。
+   *
+   * `PATH` 不给它：这一条是 Linux，命令要找 Linux 那些。把 Windows 的 PATH 递进去，
+   *   `curl` / `seq` 这些会一个都找不到，而症状是作业侧起不来。
+   */
+  _spawnWsl(bin) {
+    const missing = [];
+    const tr = (what, p) => {
+      const v = toWslPath(p);
+      if (!v) missing.push(what);
+      return v;
+    };
+    const entry = tr('插件目录', this.entry);
+    const cwd = tr('工作目录', this.cwd);
+    const env = {};
+    for (const [k, v] of Object.entries({ ...process.env, ...this.env })) {
+      if (k === 'PATH') continue;
+      // 值里那些 Windows 路径（家目录、会话文件目录、日志目录、插件的可执行
+      //   文件）逐条翻；翻不动的原样留着 —— 它不是路径，只是长得像。
+      env[k] = typeof v === 'string' && /^[A-Za-z]:[\\/]/.test(v)
+        ? (toWslPath(v) || v) : v;
+    }
+    if (missing.length) {
+      this._fail(`WSL 里跑不了：${missing.join('、')}不在 WSL 能看见的盘上`
+        + '（只有 `C:\\` 这类本地盘会挂到 `/mnt` 下）。');
+      return null;
+    }
+    const child = spawn(bin, ['-s', '--', entry], this._spawnOpts(cwd, env, 'pipe'));
+    // 脚本从这边喂进去。写不进去（对端已经退出）不是错误：那时失败原因在
+    //   stdout / stderr 那两句上，而这里再抛一次只会把它盖掉。
+    child.stdin.on('error', () => {});
+    child.stdin.end(fs.readFileSync(HOST_SH));
+    return child;
   }
 
   /** 看一眼宿主的会话文件。这是登记的唯一依据 —— 与真守护进程同一个来源。 */
@@ -462,4 +565,5 @@ class FakeJob {
 }
 
 module.exports = { FakeJob, nominalCandidates, pickCandidates, resolvePluginBin,
-  pruneLogs, findBash, defaultBashSearch, NO_BASH, PORT_MIN, PORT_MAX, CANDIDATES };
+  pruneLogs, findBash, defaultBashSearch, toWslPath, NO_BASH,
+  PORT_MIN, PORT_MAX, CANDIDATES };

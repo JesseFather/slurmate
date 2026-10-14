@@ -312,7 +312,7 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 
 | 限制 | 为什么 |
 |---|---|
-| 需要 **bash 4 或更新** | `job/start.sh` 是一段被 `source` 进来的 shell 片段，用到了关联数组（`PLUGIN_SESSION_FIELDS`）。Windows 上没有 bash；macOS 自带的 `/bin/bash` 是 3.2 |
+| 需要 **bash 4 或更新** | `job/start.sh` 是一段被 `source` 进来的 shell 片段，用到了关联数组（`PLUGIN_SESSION_FIELDS`）。Windows 上先找 Git for Windows 自带的那个，再找 WSL 里的；macOS 自带的 `/bin/bash` 是 3.2 |
 | 插件的依赖得装在**这台机器**上 | 真站点上那两个样例要计算节点上有 code-server / sshd。起不来**既不静默、也不拿别的东西顶替** —— 它的 stdout/stderr 就是答案 |
 
 中转站那一类（要公钥的）今天仍然指向一个没有东西在监听的端口 —— 那边真正的
