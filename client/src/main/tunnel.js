@@ -49,8 +49,8 @@ const PORT_SCAN_LIMIT = 20;
 /**
  * 端口必须是 1–65535 的整数。监听与探测共用这一个判据。
  *
- * 先校验，再动手。 `preferredPort + i` 对 `null` / `undefined` 是**合法的
- *    JS：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是随便挑一个**
+ * 先校验，再动手。 `preferredPort + i` 对 `null` / `undefined` 是合法的
+ *    JS：`null + 0 === 0`，而 `listen(0)` 在操作系统那边的意思是随便挑一个
  *    —— 于是它会成功地绑到一个临时端口，`start()` 返回 `{port: 0}`，
  *    `snapshot().localPort` 从此指向一个并不存在的端口、`origin` 是 null。
  *    全程没有一处报错：这是"安静地做错事"，而不是"响亮地坏"。

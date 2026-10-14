@@ -113,8 +113,8 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 //   · 装上去的（`siteInstalledDir`，沙盒里程序自己的一处）—— 这才是"站点上
 //     有什么"的答案，而它只有一条来的路：`installPlugins`（与真站点上管理员
 //     `plugin install` 同形）。
-//   · 开发样例（`samplePluginsDir`，仓库里的 `plugins/`）—— **基座两端都不带
-//     任何插件**（`plugins/README.md` 第一行），那两棵是开发基座时用来对齐插件两侧
+//   · 开发样例（`samplePluginsDir`，仓库里的 `plugins/`）—— 基座两端都不带
+//     任何插件（`plugins/README.md` 第一行），那两棵是开发基座时用来对齐插件两侧
 //     能力的样例。打包版没有它们 —— 那是对的，不是降级。
 //
 //   两条走不通的路值得写明，它们各自会造出一个假现场：
@@ -138,8 +138,8 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 // 在开发者模式下也走得到。
 //
 // GRES 那一格是故意的假，而且比真集群"脏"：本机那台真集群只有不带型号的
-//   `gpu`，所以"带型号"（`gpu:a6000`）与"名字不是 gpu"（`mps`）这两条路**只在
-//   这里走得到**。夹具比现实干净，缺陷就会在用例里隐形 —— 见账本 F26。
+//   `gpu`，所以"带型号"（`gpu:a6000`）与"名字不是 gpu"（`mps`）这两条路只在
+//   这里走得到。夹具比现实干净，缺陷就会在用例里隐形 —— 见账本 F26。
 //   形状与字段名照抄 `scontrol show node -o` 的 `Gres=` 与守护进程的
 //   `gres_catalog()`（`scontrol show config` 的 GresTypes 只列名字，不带数量）。
 const GRES = {
@@ -300,8 +300,8 @@ class FakeBackend extends Backend {
     /**
      * 正在跑的作业侧：`session_id → FakeJob`。
      *
-     * 从前这里是一个 `_server`（一个内置的假网页服务），而**每一条会话的隧道都
-     *   指向它** —— 于是"点启动打开的那个页面"与是哪个插件无关。现在那条路没有了：
+     * 从前这里是一个 `_server`（一个内置的假网页服务），而每一条会话的隧道都
+     *   指向它 —— 于是"点启动打开的那个页面"与是哪个插件无关。现在那条路没有了：
      *   有界面的插件真的把自己的作业侧跑起来，隧道指向它，日志是它自己说的。
      */
     this._jobs = new Map();
@@ -404,8 +404,8 @@ class FakeBackend extends Backend {
     /**
      * 假站点里装了但没有作业侧实现的插件（按短名）。
      *
-     * 默认是空的：一个正常部署的站点，装了的插件就有作业脚本。这个集合是**故意
-     *   造**那第四格状态的开关。真机上那件事来自 `install-base.sh` 有没有为这个插件生成
+     * 默认是空的：一个正常部署的站点，装了的插件就有作业脚本。这个集合是故意
+     *   造那第四格状态的开关。真机上那件事来自 `install-base.sh` 有没有为这个插件生成
      *   `<ULID>.sbatch`，客户端看不见 —— 所以它只可能由站点侧合成后报下来
      *   （`op_plugins` 的 `can_submit`）。
      */
@@ -690,8 +690,8 @@ class FakeBackend extends Backend {
       defaults: v.defaults || SITE_DEFAULTS,
       enabled: !this._siteDisabled.has(v.name),
       // 没有作业侧的插件提交不了 —— 与守护进程同一条判据（它数的是记录表里
-      //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份**真站点上根本
-      //   提交不出去**的东西，而失败出现在起会话那一步（"读不到那个片段"），
+      //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份真站点上根本
+      //   提交不出去的东西，而失败出现在起会话那一步（"读不到那个片段"），
       //   指不回"这个插件没有作业侧"。
       can_submit: !this._siteDisabled.has(v.name) && !this._siteNoJob.has(v.name)
         && v.hasJob !== false,
@@ -768,7 +768,7 @@ class FakeBackend extends Backend {
     const seenId = new Map();
 
     const problems = [];
-    const staged = [];          // 已经铺好、验过，**还没就位**的
+    const staged = [];          // 已经铺好、验过，还没就位的
     const unchanged = [];       // 站上本来就是这一份
 
     for (const p of list) {
@@ -969,8 +969,8 @@ class FakeBackend extends Backend {
       // 默认资源是站点设定的策略，客户端不推导 —— 假站点一律报 DEFAULTS，
       // 真实站点报它自己那份（每个插件可以不同，见 slurmate.conf.d/ 里它那一份）。
       //
-      // 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是**客户端从
-      //   清单里自己读**的东西，服务端多报一份就是两份真相，而两份迟早会分叉。
+      // 逐字段挑，不 `...p`：`surface` / `submitPubkey` / `login` 是客户端从
+      //   清单里自己读的东西，服务端多报一份就是两份真相，而两份迟早会分叉。
       //   （真实守护进程的 op_plugins 也是这么收口的。）
       //
       //   `can_submit` 不违反上面那条：它说的是站点这一侧的事实（本站提交得出去
@@ -1501,8 +1501,8 @@ class FakeBackend extends Backend {
 
   _partitions() {
     // 每一项都真的拷一份（含 GRES 那一格）：真实后端回的是刚解析出来的 JSON，
-    // 谁都不与别人共享一个对象。这里共享的话，界面上一处手误的原地修改会**同时
-    // 改掉所有会话看到的那一份** —— 而那种 bug 在真集群上不会出现。
+    // 谁都不与别人共享一个对象。这里共享的话，界面上一处手误的原地修改会同时
+    // 改掉所有会话看到的那一份 —— 而那种 bug 在真集群上不会出现。
     return PARTITIONS.map((p) => ({ ...p, gres: p.gres.map((e) => ({ ...e })) }));
   }
 
@@ -1624,8 +1624,8 @@ class FakeBackend extends Backend {
       requested_time: '12:00:00',
       note: null,
       // 站点分配下去的候选端口（真守护进程那一格也是这么来的：它在登录节点
-      // 上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是其中**实测过
-      // 能绑上**的那些（见 `_startJob`）。
+      // 上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是其中实测过
+      // 能绑上的那些（见 `_startJob`）。
       _candidates: fakeJob.nominalCandidates(),
       // 谁在看这条会话 —— 与真守护进程的 `op_submit(client_id)`
       //   同一个位置、同一个含义。提交这条连接的客户端就是它的第一个看护者；
@@ -1693,8 +1693,8 @@ class FakeBackend extends Backend {
       partition: part.name,
       resources: { cpus, mem, gres },
       // 这一格是守护进程分配的候选表（真守护进程也是这么来的：它在登录
-      //   节点上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是**实测过
-      //   能绑上**的那几个（见 `_jobEnv`）—— 与真宿主逐条同形：分配是一件事，
+      //   节点上挑，够不着计算节点那一刻的端口占用）。真正交给作业的是实测过
+      //   能绑上的那几个（见 `_jobEnv`）—— 与真宿主逐条同形：分配是一件事，
       //   计算节点上那一趟 `port_free` 是另一件。
       candidates: sess._candidates,
       requested_time: '12:00:00',
@@ -1950,8 +1950,8 @@ class FakeBackend extends Backend {
    * 【接管】：把这条会话的看护者换成我。一个字都不动会话。
    *
    * 与真守护进程的 `op_takeover` 同一条纪律（见那一段 docstring）：作业、ACL、
-   * 端口、`last_hb_at`、`state` 一个都不动 —— 用户只是**换了一台电脑看同一个
-   * 作业**。动了别的任何一个字，接管的语义就变成"结束并重开"。
+   * 端口、`last_hb_at`、`state` 一个都不动 —— 用户只是换了一台电脑看同一个
+   * 作业。动了别的任何一个字，接管的语义就变成"结束并重开"。
    *
    * 没有身份不能接管（要把看护者写成谁？）—— 与心跳那条正好相反，
    *   而且不是矛盾：心跳是"我在续命"（缺身份时宽进，排除错了会杀作业），

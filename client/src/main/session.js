@@ -116,8 +116,8 @@ const HB_STALE_SLACK_MS = 90000;
 /**
  * 守护进程那边还算数的全部状态，以及完事了的全部状态。
  *
- * 这两个集合是 `cluster/slurmate-sessiond` 那个状态机的镜像，而它们是**第二份
- *   实现** —— 这一点没法避免：客户端与服务端是两个进程，"这个会话还算不算数"
+ * 这两个集合是 `cluster/slurmate-sessiond` 那个状态机的镜像，而它们是第二份
+ *   实现 —— 这一点没法避免：客户端与服务端是两个进程，"这个会话还算不算数"
  *   必须两边各自能判。能做的只有收成一处并写明它的来源 —— 同一件事散成几处、
  *   写法还各不相同的话，"某个状态算哪一边"每次都要现推一遍。
  *
@@ -380,8 +380,8 @@ class SessionController extends EventEmitter {
       // 「这一次会话不是在真集群上跑的」。界面据此挂那条横幅与状态条标记。
       //
       //   判据是后端身份，不是"用户开着那个开关"—— `fake` 只可能由开发者模式
-      //   进来（见 backend.js 的 createBackend），两者今天恒等；但开关是**要重启
-      //   才生效**的，而界面手里那份开关状态可能是"刚改过、还没重启"。拿它去判的话，
+      //   进来（见 backend.js 的 createBackend），两者今天恒等；但开关是要重启
+      //   才生效的，而界面手里那份开关状态可能是"刚改过、还没重启"。拿它去判的话，
       //   改了开关还没重启的那段时间里，界面会对着一个真集群说"这是假的"。
       dev: this.backend.kind === 'fake',
     };
@@ -523,8 +523,8 @@ class SessionController extends EventEmitter {
     this._stopped = false;
     this.error = null;
     this.warning = null;
-    // 上一个会话的推送水位不能带进这一个：留着的话，一条新会话可能在**还没有
-    // 收到过任何推送**的时候就被判成"推送健康"，于是它的第一次对账要等满 60 秒。
+    // 上一个会话的推送水位不能带进这一个：留着的话，一条新会话可能在还没有
+    // 收到过任何推送的时候就被判成"推送健康"，于是它的第一次对账要等满 60 秒。
     this._lastPushAt = 0;
     this._pushSeq = 0;
     this._requestedKind = opts.serviceKind || null;
@@ -1066,8 +1066,8 @@ class SessionController extends EventEmitter {
    *    收尾 —— 关窗、点断开、或者只是退出 —— 用户的作业就没了，而用户以为
    *    自己只是换了个地方看。
    *
-   *    守护进程那一侧堵不住：它按 `session_id` 记账，**分辨不了那个 `goodbye`
-   *    是接管者发的还是被接管的那台发的**。所以只能在客户端这一半堵，
+   *    守护进程那一侧堵不住：它按 `session_id` 记账，分辨不了那个 `goodbye`
+   *    是接管者发的还是被接管的那台发的。所以只能在客户端这一半堵，
    *    而堵法就是"根本不进收尾流程"（另见 `stop()` 顶部的那道闸）。
    *
    * 与 `abandon()` 只差一处，而那一处是承重的：`abandon` 拆隧道，这里
@@ -1147,9 +1147,9 @@ class SessionController extends EventEmitter {
                detail: this._suspended + '本机没有发送释放请求，作业仍在运行。' };
     }
     this._stopped = true;
-    this._stopHeartbeat();          // ★ 必须在 goodbye 之前停。
+    this._stopHeartbeat();          // 必须在 goodbye 之前停。
     this._stopStatusPoll();         //    否则残留心跳收到 code:3 会被误判成出错。
-    this._watchBackend(false);      // ★ 同上：释放期的推送会写一个没人再看的状态。
+    this._watchBackend(false);      // 同上：释放期的推送会写一个没人再看的状态。
 
     await this.tunnel.stop();
 

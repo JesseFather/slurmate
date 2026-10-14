@@ -29,8 +29,8 @@
  * ── 它与 `packer/slurmate-packer.js` 是同一条规则的两份实现 ──────────
  *
  * 这是没办法的事：打包器要"下载这个文件夹就能用"，所以它不 import 客户端里的
- * 任何东西。两份解析器漂开的后果很具体 —— **同一个包，打包器说它合规、客户端
- * 说它不合规**，而用户看到的是"作者说打好了、我就是装不上"。
+ * 任何东西。两份解析器漂开的后果很具体 —— 同一个包，打包器说它合规、客户端
+ * 说它不合规，而用户看到的是"作者说打好了、我就是装不上"。
  *
  * 钉住它们的是 `tools/conformance/`：一份固定的输入树、一份期望的包字节、
  * 一批坏包，每一条都带一个期望的理由词，两端各跑一遍。所以下面这个 `R`
@@ -109,8 +109,8 @@ const MAX_DEPTH = 8;
 //   取更严）。两件事混在一起，`parsePackage` 就会需要一个它不该知道的参数。
 //
 // 而这一层不吃它们不是一个敞口：`file_count` 被长度方程夹住了（每条记录至少
-//   42 字节，整张记录表必须放得进这个文件），真正需要"份数上限"的是**收下来的包
-//   文件**有多大 —— 那是链路约束，跟着 `package_bytes` 一起判。
+//   42 字节，整张记录表必须放得进这个文件），真正需要"份数上限"的是收下来的包
+//   文件有多大 —— 那是链路约束，跟着 `package_bytes` 一起判。
 
 /**
  * 拒绝的理由词表。三份实现字面相同（见文件头）。
@@ -196,7 +196,7 @@ function verifyEd25519(raw32, msg, sig) {
  * 混在一起会让"这个包坏了"与"这个包换人了"看起来是同一件事。
  */
 const PIN = {
-  UNSIGNED: 'unsigned',   // 钉过密钥，而这一份**没有签名**
+  UNSIGNED: 'unsigned',   // 钉过密钥，而这一份没有签名
   CHANGED: 'changed',     // 签名者换了人
   BROKEN: 'broken',       // 钉子表里那一条读不出来 —— 一律拒绝（见 config.js 那段）
 };
@@ -299,7 +299,7 @@ function buildSigBlock(o) {
  */
 function parseSigBlock(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < SIG_MIN_BYTES) return null;
-  if (buf[0] !== SIG_ALG_ED25519) return null;   // 认不得的算法**拒绝**，不忽略
+  if (buf[0] !== SIG_ALG_ED25519) return null;   // 认不得的算法拒绝，不忽略
   const verlen = buf[97 + SIG_ID_BYTES];
   if (buf.length !== SIG_MIN_BYTES + verlen) return null;
   const idRaw = buf.subarray(97, 97 + SIG_ID_BYTES);
@@ -373,8 +373,8 @@ function sideDigests(files) {
  * 严格解析一个包。按附录 A.4 的次序判。
  *
  * 返回 `{ok:true, format, files, sig, manifest, digest}` 或 `{ok:false, code, why}`。
- * `files` 里每一项是 `{path, size, sha256, offset}`，`offset` 是它在**原始
- * buffer** 里的起点 —— 取字节用 `dataOf(buf, f)`，这个模块不替你复制一遍。
+ * `files` 里每一项是 `{path, size, sha256, offset}`，`offset` 是它在原始
+ * buffer 里的起点 —— 取字节用 `dataOf(buf, f)`，这个模块不替你复制一遍。
  */
 function parsePackage(buf) {
   const bad = (code, why) => ({ ok: false, code, why });

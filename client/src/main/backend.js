@@ -53,8 +53,8 @@
  *   于是它是逐会话的、也是这条连接自己问出来的 —— 不需要一条推送，
  *   也不需要后端替会话记一个状态。
  *
- * 它带来的那条保证仍然在，而它现在住在 `session.js`：**被接管的会话不许发
- *   `goodbye`**（`goodbye` 会让 `phase_release` 删掉 ACL 并 scancel 作业，
+ * 它带来的那条保证仍然在，而它现在住在 `session.js`：被接管的会话不许发
+ *   `goodbye`（`goodbye` 会让 `phase_release` 删掉 ACL 并 scancel 作业，
  *   而用户以为自己只是换了个地方看）。守护进程分辨不了那个 `goodbye` 是谁发的，
  *   所以这一半只能在客户端堵。
  *

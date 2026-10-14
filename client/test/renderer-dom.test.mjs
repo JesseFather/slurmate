@@ -196,8 +196,8 @@ function boot(src) {
     },
     querySelectorAll: () => [],
     // 两段式确认在捕获阶段挂一个"点到别处就收起"的监听（见 armConfirm）。
-    //   壳里这两条只记账：本机没有事件循环，而"点别处收起"那件事由那条**真实的
-    //   几何判据**在真机上守，这里要守的是"挂上了、也摘掉了"。
+    //   壳里这两条只记账：本机没有事件循环，而"点别处收起"那件事由那条真实的
+    //   几何判据在真机上守，这里要守的是"挂上了、也摘掉了"。
     addEventListener(t, f) { doc._ls.push([t, f]); },
     removeEventListener(t, f) {
       const i = doc._ls.findIndex((x) => x[0] === t && x[1] === f);
@@ -576,8 +576,8 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
   // 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
   //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的后面，于是
   //   `bootstrap()` 或 `openNewForm()`（里面有 `await newKey()`，在 Windows 上
-  //   走 DPAPI）任何一次 reject，`init()` 就在那一行整体中止，**2950 行往后
-  //   一个监听都不挂**，而唯一的症状是提示流里多一行字。
+  //   走 DPAPI）任何一次 reject，`init()` 就在那一行整体中止，2950 行往后
+  //   一个监听都不挂，而唯一的症状是提示流里多一行字。
   //   现在分成 `bindEvents()`（纯同步，先跑）与 `bootUI()`（所有 await）。
   const h = bindAll({}, 'window.slurmate.bootstrap ='
     + ' () => Promise.reject(new Error("假装取不到"));'
@@ -1272,7 +1272,7 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
   // ── 甲填满 ──
   a0[0].value = '4';        // CPU 核数
   a0[1].value = '16G';      // 内存
-  a0[4].value = 'gpu';      // 分区 ⇒ 它自己那一格的 GRES 跟着换
+  a0[4].value = 'gpu';      // 分区换了，它自己那一格的 GRES 跟着换
   a0[4].onchange();
   assert.deepEqual(a0[2].children.map((o) => o.value), ['', 'none', '0'],
     '这个分区的 GRES：默认 / 不占 / a100（下标就是选项的 value）');

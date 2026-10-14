@@ -252,8 +252,8 @@ function resetFixture() {
 /**
  * 收尾：把夹具恢复成缺省，并复位假后端。
  *
- * 这个函数是唯一允许动站点池收尾的地方。**不许裸着写
- *   `fs.rmSync(idx._test.getSitePoolDir(), …)`** —— 删完不恢复的话，从那条用例起
+ * 这个函数是唯一允许动站点池收尾的地方。不许裸着写
+ *   `fs.rmSync(idx._test.getSitePoolDir(), …)` —— 删完不恢复的话，从那条用例起
  *   后面所有会话用例都会红在"没有可以提交的服务"上，而失败点离夹具十万八千里。
  */
 function cleanupSiteState(idx) {
@@ -1508,8 +1508,8 @@ test('★★ 活会话护着它那个工作区 —— 连接全挪走了也一�
   idx._test.getBackend().debugAddSitePlugin('dev-ws');
 
   // 这一条从前的前提是「用户把连接全删了」。开发者模式里现在总有内置的那一条
-  //   （它删不掉），那个状态不再存在 —— 而要验的东西一个字没变：**一个没有连接指着、
-  //   却有活会话跑着的工作区，不许被回收**。
+  //   （它删不掉），那个状态不再存在 —— 而要验的东西一个字没变：一个没有连接指着、
+  //   却有活会话跑着的工作区，不许被回收。
   //   造法因此换成"把连接从那个工作区挪走"：挪走之后它的引用计数同样是 0，
   //   而那条会话照样跑在它上面。
   const cfgOf = () => idx._test.getCfg();
@@ -2363,7 +2363,7 @@ test('★★ 身份是铸造出来的：**池里的名字必须与清单逐字�
   const underName = writePlugin(root, { id, name: 'jup', displayName: 'J' }, src);
   const withWrongName = writePlugin(root, { id, name: 'jup', displayName: 'J' },
     'module.exports = { attach() {} };\n',
-    { nameId: mintId() });                           // 名字另铸一个 ⇒ 与清单不符
+    { nameId: mintId() });                           // 名字另铸一个，与清单不符
 
   const reg = new Registry([{ dir: root, source: 'site' }]);
   // 名字对得上的那一份照常装上（旁边有一个错的，不该把好的也带走 —— F22）。
@@ -2434,8 +2434,8 @@ test('★ 引擎范围对不上就不装 —— 而不是装上之后在某个�
  * 这个仓库里有两套版本号，它们长得像、纪律共用，但不是一回事：
  *   · 框架版本 `x.y` —— 客户端 / 守护进程 / 协议三合一的那个号
  *     （`client/package.json` 的 version）。`x` 是"可以不兼容"那一档，`y` 是
- *     "加东西但不破坏兼容"那一档 —— 所以**同 x 且客户端不低于服务端，保证
- *     兼容。运行期有一条版本握手**（客户端连上时问一次 `ping`），判定在
+ *     "加东西但不破坏兼容"那一档 —— 所以同 x 且客户端不低于服务端，保证
+ *     兼容。运行期有一条版本握手（客户端连上时问一次 `ping`），判定在
  *     `plugins.versionCheck` 里，闸在 index.js 的 `applyVersionGate`。
  *   · 插件版本 `x.y.z` —— 清单里的 `version`，`(id, 版本)` 那个槽位的键。
  *
@@ -2531,8 +2531,8 @@ test('★ 版本号：两套方案 —— 形状 / 大小 / 范围，逐条对�
   assert.ok(M.FRAMEWORK_VERSION_RE.test(M.hostVersion()),
     `client/package.json 的版本 ${JSON.stringify(M.hostVersion())} 必须是 x.y`);
 
-  // 6) 上面那张表测的是正则，而"清单里的版本号按原串匹配"是**另一条
-  //    规则** —— 它住在 parseVer / inspectDir 里，而夹具表抓不到它：只要有人先
+  // 6) 上面那张表测的是正则，而"清单里的版本号按原串匹配"是另一条
+  //    规则 —— 它住在 parseVer / inspectDir 里，而夹具表抓不到它：只要有人先
   //    trim 一下，`" 1.0.0 "` 当然就过正则了（变异验证里这一条真的没红）。
   //    所以这里走一遍真的清单加载。Python 侧同一件事在 19.0b2 的 need_str
   //    那一条上 —— 若先 strip 再匹配，两头带空白的版本号就会被收下。
@@ -2614,8 +2614,8 @@ test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪
 /**
  * 版本闸：同 x 内客户端落后，拦住，一次会话都不建。
  *
- * 为什么要把 `package.json` 桩掉：今天客户端是 `0.y`，而 **`0.y` 是内测期、
- *   不受版本约束**（`versionCheck` 里那条带到期条件的例外）。所以"拦住"那一格
+ * 为什么要把 `package.json` 桩掉：今天客户端是 `0.y`，而 `0.y` 是内测期、
+ *   不受版本约束（`versionCheck` 里那条带到期条件的例外）。所以"拦住"那一格
  *   用真版本号走不到 —— 而它恰恰是这条规则唯一会拦人的一格。
  *   规则本身（含那条例外）在上一条用例里按夹具逐条钉着；这一条钉的是接线：
  *   index.js 真的调了它、真的在 `blocked` 时停了下来。
@@ -3600,8 +3600,8 @@ test('★★ §5.1：往池目录里**手工**放一份合法的树（一层布�
 
 test('★★ §5.2：客户端只挂一个根，而那个根上的每一份都必须过同意闸', async (t) => {
   // 这里钉的是 §5.2 最后那句：「禁止给任何一类插件开免同意的口子」。
-  //   按来源开免同意口子（`entry.source !== 'site' || …`）会把一条**没有分支的
-  //   规则变成一条有例外的规则** —— 豁免的理由（"用户自己刚放进去的，让他
+  //   按来源开免同意口子（`entry.source !== 'site' || …`）会把一条没有分支的
+  //   规则变成一条有例外的规则 —— 豁免的理由（"用户自己刚放进去的，让他
   //   同意自己是空话"）看着成立，而 §5.2 紧跟那句禁令写着理由：
   //   「规则一有分支，绕过它的路就会长出来」。
   const idx = require('../src/main/index.js');
@@ -4090,8 +4090,8 @@ test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', 
   // 自愈之二：标记行下面那一条 Include，不管它指向哪儿。这一条是搬家带来的：
   //   新路径不含 `.slurmate/`，所以上面那条按路径形状认的判据认不出它 —— 靠的是
   //   "紧跟在标记行后面"这件事本身。少了它，旧行会幸存，留下一条悬空的 Include，
-  //   而悬空不致命（ssh 会忽略它继续读后面的内容）—— 也就是说改错了**没有任何
-  //   症状**，这正是它必须有用例钉着的原因。
+  //   而悬空不致命（ssh 会忽略它继续读后面的内容）—— 也就是说改错了没有任何
+  //   症状，这正是它必须有用例钉着的原因。
   const elsewhere = path.join(path.dirname(dataDir), 'plugin-data', 'X@relay', 'config');
   fs.writeFileSync(userCfg, after1.replace(sshc.pathsFor(dataDir).config, elsewhere));
   const r5 = sshc.ensureInclude({ dataDir, home });
@@ -4176,8 +4176,8 @@ test('★ 用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被弄�
   t.after(() => { Module._load = origLoad; });
   const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
-  // `~/.ssh/config -> ~/dotfiles/config` 是常见做法。而 rename(2) **不跟随目标上的
-  // 符号链接** —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
+  // `~/.ssh/config -> ~/dotfiles/config` 是常见做法。而 rename(2) 不跟随目标上的
+  // 符号链接 —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
   // ~/dotfiles/config 不再影响 ssh，两边从此各说各话，且没有任何地方会报错。
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-'));
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-data-'));
@@ -4907,8 +4907,8 @@ test('★★ 多开：一个开发会话与一个中转站会话同时活着，�
 });
 
 test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回来', async (t) => {
-  // 这一条守的是那颗「调试」标签的意义（2026-10-11 加）：会话那块页面是**原生
-  //   视图**，从 y=30 往下盖住整个窗口主体 —— 面板上任何属于自己的按钮（包括那些
+  // 这一条守的是那颗「调试」标签的意义（2026-10-11 加）：会话那块页面是原生
+  //   视图，从 y=30 往下盖住整个窗口主体 —— 面板上任何属于自己的按钮（包括那些
   //   调试开关）那时一个都够不着。而"抬回来"有三条路，一条都不许少。
   //
   //   ②③ 两条各自堵的是一格不同的缝，而它们常常被当成同一件事：
@@ -4974,7 +4974,7 @@ test('★★ 面板被插件页面盖住之后，三条路都要能把它抬回�
   assert.equal(w.panelFront, true);
   await invoke('app:stop', { slot: a3.slot });
   await waitUntil(() => !occupiedOf(idx, a3.slot), '甲′那个槽松开', 20000);
-  const b = await appStart(null, 'sshd');          // 另一个插件 ⇒ 另一个槽
+  const b = await appStart(null, 'sshd');          // 另一个插件，另一个槽
   assert.equal(b.ok, true, `乙提交失败：${JSON.stringify(b)}`);
   assert.notEqual(b.slot, a.slot, '前置：它落在**另一个槽**上');
   await waitUntil(() => w.front === b.slot, '前台换到乙那个槽上', 20000);
@@ -5715,8 +5715,8 @@ test('★★ prepare 失败的会话：不留记录，也不留临时实例', as
     [], '★ 这一次认领的临时实例要一起撤掉');
   assert.equal(a.ctl.state, 'running', '★ 持有者一动不动');
 
-  // 失败原因（= 那个数据目录的路径）原样说出来，而且它的**第三段就是这一次的
-  //   那一份** —— 一份临时数据（不在配置里、与持有者那一份不同）。这一条就是
+  // 失败原因（= 那个数据目录的路径）原样说出来，而且它的第三段就是这一次的
+  //   那一份 —— 一份临时数据（不在配置里、与持有者那一份不同）。这一条就是
   //   "prepare 看得到第三段"的可自动化证明。
   const said = noticesOf().filter((n) => n.text.startsWith(idx._test.getPluginDataRoot()));
   assert.equal(said.length, 1, `★ prepare 失败的原因要原样说出来：${JSON.stringify(noticesOf())}`);
@@ -6075,8 +6075,8 @@ test('★★ 临时副本那一份：端口被占**不问**，照旧避让（它
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // 只对持久的那份数据问（见 index.js 的 `startSession`）。临时副本是**框架
-  //   事实**（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
+  // 只对持久的那份数据问（见 index.js 的 `startSession`）。临时副本是框架
+  //   事实（多开的第二份），它的端口是当场从空位里挑的、只活在这一次会话里 ——
   //   为它摆一行"启动 / 记住并启动 / 取消"是问一个没有代价的问题。
   //
   // 怎么把"它没问"变成可判的：临时那份的端口是确定性算出来的
@@ -6816,8 +6816,8 @@ test('★★ 连着的时候再点一次「连接」：已经在手上的那几�
     .map((r) => r.controller && r.controller.sessionId).sort();
 
   // 再连一次 —— 用户在连接列表上又点了一下「连接」，或者换了一条连接又换回来。
-  //   服务端那条会话从头到尾都在跑，所以 `op:list` 一定会列出它；而**本机已经在
-  //   管它了**。这正是 v0.9 新加的那道守卫要拦的现场。
+  //   服务端那条会话从头到尾都在跑，所以 `op:list` 一定会列出它；而本机已经在
+  //   管它了。这正是 v0.9 新加的那道守卫要拦的现场。
   const r = await invoke('app:connect', {});
   assert.equal(r.ok, true, `再连一次失败：${JSON.stringify(r)}`);
 

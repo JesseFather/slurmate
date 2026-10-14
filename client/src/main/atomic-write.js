@@ -133,8 +133,8 @@ function writeAtomic(file, text, o) {
   }
 
   // 临时名带前导点与随机后缀。随机是必需的：`pid + Date.now()` 那种写法在同一
-  //   毫秒内的两次写会撞上同一个名字，而撞上的后果是**另一份内容的半截文件被 rename
-  //   上去**（两份写各自都以为自己成功了）。
+  //   毫秒内的两次写会撞上同一个名字，而撞上的后果是另一份内容的半截文件被 rename
+  //   上去（两份写各自都以为自己成功了）。
   const tmp = path.join(path.dirname(target),
     '.' + path.basename(target) + '.tmp.' + process.pid + '.'
     + Math.random().toString(16).slice(2));

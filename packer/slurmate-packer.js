@@ -466,7 +466,7 @@ function signedMessage(o) {
  */
 function parseSigBlock(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < SIG_MIN_BYTES) return null;
-  if (buf[0] !== SIG_ALG_ED25519) return null;    // 认不得的算法**拒绝**，不忽略
+  if (buf[0] !== SIG_ALG_ED25519) return null;    // 认不得的算法拒绝，不忽略
   const verlen = buf[97 + SIG_ID_BYTES];
   if (buf.length !== SIG_MIN_BYTES + verlen) return null;
   const idRaw = buf.subarray(97, 97 + SIG_ID_BYTES);
@@ -987,7 +987,7 @@ function insertId(text, id) {
   }
   const m = /\n([ \t]*)\S/.exec(rest);
   const indent = (m && m[1]) || '  ';
-  const at = brace + 1 + m.index + 1 + indent.length;    // 第一行的**行首**
+  const at = brace + 1 + m.index + 1 + indent.length;    // 第一行的行首
   const head = text.slice(0, at);
   const tail = text.slice(at);
   // 逗号总是要加：`id` 插在第一个键之前，所以它永远不是最后一个键
@@ -1845,19 +1845,19 @@ function usage(code) {
   ~/.config/slurmate/packer，里面是 keys/<id>.pem（私钥）与 releases.json（发布表）。
   这两样不进源码树：进了就把树弄脏，而 §3.5 拒绝脏树。
 
-  init     铸一个 id（只在树里没有的时候）并**插入**写回 plugin.json，同时给血统表
+  init     铸一个 id（只在树里没有的时候）并插入写回 plugin.json，同时给血统表
            记一条。它会弄脏树，所以之后要你自己提交，与 build 分成两个动词是故意的。
-           树里**已经有** id 而血统表不认识它时，它会停下来问（§2.5），而两个答案是：
-           --fork   承认这是**另一个插件**：把 id 换掉（代价：所有已同意的用户要
+           树里已经有 id 而血统表不认识它时，它会停下来问（§2.5），而两个答案是：
+           --fork   承认这是另一个插件：把 id 换掉（代价：所有已同意的用户要
                     重新同意一次）。
-           --adopt  承认这是**同一个插件**、只是这条记录不在了（比如 id 是在血统表
+           --adopt  承认这是同一个插件、只是这条记录不在了（比如 id 是在血统表
                     存在之前铸的）：给它补一条记录。
   keygen   给这个 id 定一把 Ed25519 钥匙：公钥写进血统表，私钥进钥匙库（0600）。
-           钥匙库里已经有一把（§4.1 的〈换机器 = 复制 .pem〉）就**认它**，不铸新的。
+           钥匙库里已经有一把（§4.1 的〈换机器 = 复制 .pem〉）就认它，不铸新的。
            一个 id 只有一把，丢了私钥就只能 --fork（§4.1）。
-  build    从一个**提交**打出 .splug。工作树脏时拒绝（§3.5）。它**不看钥匙库**：
+  build    从一个提交打出 .splug。工作树脏时拒绝（§3.5）。它不看钥匙库：
            输出只是 (提交, 选项) 的函数。
-  sign     给一个已经打好的包盖签名。它**不改内容摘要**（§4.2），所以不必重新打包。
+  sign     给一个已经打好的包盖签名。它不改内容摘要（§4.2），所以不必重新打包。
   verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者对不对得上。
            --against 顺带判 §3.6。
   inspect  打出包里到底有什么，作者拿它对着规范逐行核对。

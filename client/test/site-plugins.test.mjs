@@ -71,14 +71,14 @@ function makeSite() {
     pkgFormat: 2,              // `op_plugins` 里报出去的格式
     pkgByteDelta: 0,           // 报出去的字节数偏离真实值多少
     pkgDigestLie: false,       // `op_plugins` 报出去的内容摘要是假的
-    pkgRespDigestLie: false,   // ★ `plugin_package` **响应里**报的那个是假的（只改这一处）
+    pkgRespDigestLie: false,   // `plugin_package` 响应里报的那个是假的（只改这一处）
     pkgCorrupt: false,         // `plugin_package` 发出来的字节被改了一位
     pkgTruncate: 0,            // 发出去之前把包截短几个字节（链表与负载对不上）
-    pkgExtra: null,            // 往包里**追加**这几条负载 —— 造坏包用（见 pkgOf）
+    pkgExtra: null,            // 往包里追加这几条负载 —— 造坏包用（见 pkgOf）
     pkgSign: true,             // 这一份包签不签名
     pkgKey: null,              // 签名钥匙（每造一个站点一把，所以两个站点不同）
     pkgCalls: 0,               // 被打了几次（用来验"一条 RPC 取完"）
-    fileCalls: 0,              // ★ 恒为 0：`plugin_file` 已经删了，见下面那个出口
+    fileCalls: 0,              // 恒为 0：`plugin_file` 已经删了，见下面那个出口
   };
   const byKey = new Map();
 
@@ -762,8 +762,8 @@ test('★★ 路径穿越：六种坏 path 全部**整份拒绝**', async () => 
 });
 
 test('★ 两份只差大小写的声明 ⇒ 拒绝整个插件', async () => {
-  // macOS / Windows 的磁盘不区分大小写：两份会互相覆盖，而摘要是**写入之后的磁盘
-  // 上**算的 —— 于是用户"同意"的是一棵与站点那棵不同的树。
+  // macOS / Windows 的磁盘不区分大小写：两份会互相覆盖，而摘要是写入之后的磁盘
+  // 上算的 —— 于是用户"同意"的是一棵与站点那棵不同的树。
   const site = makeSite();
   const env = makeEnv();
   const pl = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
@@ -901,8 +901,8 @@ test('★ 引用计数：A 要 1.0.0、B 要 1.1.0 ⇒ 两份并存，各升各�
 
 test('★★ 连接没了的站点条目要跟着删 —— 否则它的 `wants` 会把那一版永久钉住', async () => {
   // 站点键是 `sha256(user@host:port)`：改一次主机名/端口/用户名就是另一个键。
-  // 旧条目留着的后果很具体：它的 `wants` 继续为那些版本计引用，那一版**永远不会
-  // 被回收**，而界面上永远显示「被 <旧标签> 要」。
+  // 旧条目留着的后果很具体：它的 `wants` 继续为那些版本计引用，那一版永远不会
+  // 被回收，而界面上永远显示「被 <旧标签> 要」。
   const site = makeSite();
   const env = makeEnv();
   const a = site.add('v1', { name: 'a', version: '1.0.0' },
@@ -968,8 +968,8 @@ test('★★ 站点**关掉**或**不再报**一个插件 ⇒ 留着不删（决
  * 造一个真的会回收的现场：站点升到 1.1.0，1.0.0 的引用归零。
  *
  * 这两条必须造"引用真的归零"的现场：若用"站点不再报它"（`disabled`），走的是
- *    「决定 3：不再报，留着不删」：`wants` 根本没变，所以**什么都不保护
- *    也会绿**。一条永远绿的用例比没有更糟，它会让下一个人以为这一格被守住了。
+ *    「决定 3：不再报，留着不删」：`wants` 根本没变，所以什么都不保护
+ *    也会绿。一条永远绿的用例比没有更糟，它会让下一个人以为这一格被守住了。
  *    所以要造的是"引用真的归零"那一种，判据才有承重。
  *
  * @param {string} sessionState 那一条会话的 `state`（`undefined` = 老守护进程没报这一格）
@@ -1431,8 +1431,8 @@ test('★ 站点自报的字节数与实际的包对不上 ⇒ 拒绝', async ()
 });
 
 test('★ 包里的内容超过**站点自报**的上限 ⇒ 拒绝（自述只能收紧）', async () => {
-  // 站点自报一个比客户端硬上限更严的 `file_bytes` —— 客户端必须采纳**更严的
-  //   那个**，所以一个 300 KB 的文件在"这个站点说 1024 字节"之下必须被拒。
+  // 站点自报一个比客户端硬上限更严的 `file_bytes` —— 客户端必须采纳更严的
+  //   那个，所以一个 300 KB 的文件在"这个站点说 1024 字节"之下必须被拒。
   //
   const site = makeSite();
   const env = makeEnv();
@@ -1566,11 +1566,11 @@ test('★ 池里已有那一份、台账对不上，而钉子对不上 ⇒ 拒�
   const env = makeEnv();
   const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
   const r1 = await callSync(site, env);
-  consentAll(env, r1);            // 同意过 ⇒ 池里有那一份，而且钉过一把钥匙
+  consentAll(env, r1);            // 同意过，池里有那一份，而且钉过一把钥匙
 
   env.trusted.clear();            // 台账对不上（换机器、换公式、手删配置）
   const bogus = 'c'.repeat(64);
-  env.pinned.set(p.id, bogus);    // 而钉子上是**另一把**
+  env.pinned.set(p.id, bogus);    // 而钉子上是另一把
   const r2 = await callSync(site, env);
   assert.equal(r2.pendingConsent.length, 0, '★ 签名者对不上时连同意按钮都不该出现');
   assert.equal(r2.failed.length, 1, JSON.stringify(r2.failed));
@@ -1926,7 +1926,7 @@ test('★★ 改记录表里那个签名一个字节 ⇒ 拒（而不是"这一�
   sig[0] ^= 0xff;
   rec.envelope.signature = sig.toString('base64');
   SLOT.writeRecordFile(poolRecord(env, p, '1.0.0'), rec);
-  env.pinned.clear();                    // ★ 连钉子都不留：判据不能靠钉子兜底
+  env.pinned.clear();                    // 连钉子都不留：判据不能靠钉子兜底
 
   const r2 = await callSync(site, env);
   assert.equal(r2.kept.length, 0, '★ 签名对不上的那一份不算"已经有一份"');

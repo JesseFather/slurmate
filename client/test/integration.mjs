@@ -658,8 +658,8 @@ test('服务端替用户做的决定必须显示出来（submit 响应里的 war
 
   // 真实守护进程会在这些情况下回 warning：时间被分区 MaxTime 截断、
   // 填的内存认不出来而回退成默认值、分区权限查不到因而交给了 Slurm 的默认分区。
-  // 假后端不产生 warning，所以这里把它包一层 —— 测的是**客户端有没有接这个
-  // 字段**，而不是服务端什么时候产生它。
+  // 假后端不产生 warning，所以这里把它包一层 —— 测的是客户端有没有接这个
+  // 字段，而不是服务端什么时候产生它。
   const realRpc = backend.rpc.bind(backend);
   backend.rpc = (req) => realRpc(req).then((resp) => {
     if (req.op === 'submit' && resp.ok) {

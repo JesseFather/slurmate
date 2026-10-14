@@ -221,8 +221,8 @@ function renderOut() {
   when.textContent = '';
 
   if (OUT.unsupported || OUT.error) {
-    // 整块取不到：两块都收起来，只留一句。**能力缺席与一次失败在这一层是同一种
-    // 画法**（都看不到东西），而区别由那句话本身说清。
+    // 整块取不到：两块都收起来，只留一句。能力缺席与一次失败在这一层是同一种
+    // 画法（都看不到东西），而区别由那句话本身说清。
     $('out-half-out').classList.add('hidden');
     $('out-half-err').classList.add('hidden');
     when.className = 'dim';

@@ -1007,9 +1007,9 @@ test('★ 引用表里指向**不存在**的那一格收掉，而不是留一条
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 7,
     workspaces: [{ id: gid(1), name: 'A', refs: {
-      [LAYOUT_PLUGIN.id]: sid(1),                            // 指着存在的那一份 ⇒ 留
-      [LAYOUT_PLUGIN.id.replace('2V', '3W')]: sid(9),         // 指着不存在的那一份 ⇒ 丢
-      deadbeef: sid(1),                                      // 键不像插件 id ⇒ 丢
+      [LAYOUT_PLUGIN.id]: sid(1),                            // 指着存在的那一份，留
+      [LAYOUT_PLUGIN.id.replace('2V', '3W')]: sid(9),         // 指着不存在的那一份，丢
+      deadbeef: sid(1),                                      // 键不像插件 id，丢
     } }],
     spaces: [space(1)],
     connections: [{ id: 'c1', user: 'a', host: '198.51.100.10', port: 10100, workspaceId: gid(1) }],

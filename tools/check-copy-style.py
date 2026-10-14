@@ -22,13 +22,23 @@
     J   注释里不许出现 `★` `⚠` `⇒`，也不许有成对的加粗。强调靠位置和措辞，
         不靠记号。反引号跨度豁免：那是在引用这个字符本身，不是在喊话。
 
-        按行扫看不见藏在多行跨度里的行：Python 的三引号（docstring）与
-        JS/CSS 的块注释，正文都在标记里面，行首既不是 `#` 也不是 `//`。
-        一份 400 行的 docstring 能整份从视野里过去，所以这一条把它们一并算。
+        行尾注释也算：`const x = 1;  // ★ 必须在 goodbye 之前停。` 是一句
+        注释。`#` 只在行首或空白之后才算（shell 的 `${f#start_}` 不是）。
+
+        多行跨度整片算：Python 的三引号（docstring）、JS/CSS 的块注释、
+        HTML 的 `<!-- -->`。这几处的正文行首既不是 `#` 也不是 `//`，
+        按行扫会整片漏掉。
+
+        成对加粗按**连续的一段注释**配，不按行配：一句话折成两行时，
+        那对星号照样成对（`**滚动升级期间还在跑的\n旧作业**`）。按行配的话
+        这一整类看不见 —— 曾经就是这样，全仓库漏了近三百处。
 
     J2  字符串里的 `**` `★` `⚠` `⇒` `——` 一个都不许有。这些字符串走
         `textContent` 或终端，会被原样画出来，看见的是字面的星号。
         这一条不豁免任何东西。
+
+        跨行的也算：JS 的模板串、shell 的 here-doc 与跨行双引号串。
+        `packer/slurmate-packer.js --help` 那一段就是模板串，里面有六处加粗。
 
     K   单条中文字符串不超过 60 字；HTML 里动作控件的文字不超过 6 字。
         界面文字要短，读者才会去看。
@@ -63,9 +73,12 @@
 
 已知的粗处：不解析语法树，字符串靠正则认。
 
-  · 注释按行判：行首的 `#` 与 `//`，块注释的续行 `* 这一行`，再加上多行跨度
-    里的行（三引号、块注释）。开记号不在行首的写法认不出来。
-  · 跨行的模板字符串只看得到第一行。
+  · 注释按行判：行首的 `#` 与 `//`，块注释的续行 `* 这一行`，代码后面的
+    行尾注释，再加上多行跨度里的行（三引号、块注释、HTML 注释）。
+  · 引号靠逐字扫配，不解析语法：`X="$(cmd "$Y")"` 这类嵌套要一层层跟着走
+    （见 `sh_spans`）。收敛不了的整段不算 —— 宁可欠判，不误判。
+  · `.py` 里赋值形式的三引号（`SCHEMA_SQL = \"\"\"…\"\"\"`）只挖不判：那是喂给
+    别的程序的数据，不是画给人看的文字。行首那种（docstring）按文档判。
   · `.html` 的文字整份看，不按行 —— 一个标签可以跨两行。`<script>` 与 `<style>`
     的内容先剥掉，那不算界面文字。
 
@@ -99,6 +112,13 @@ SKIP_NAME = re.compile(r"^(check-.*\.py|self-test-.*\.sh)$")
 
 MARK = re.compile(r"[★⚠⇒]")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
+# 一段注释里的成对加粗。**认内容，不按位置两两配**：注释里本来就有落单的 `**`
+#   （`client/**`、`**kwargs`、`2 ** 8`），按位置配的话它们会把后面每一对都错开
+#   一位，于是删掉的是「这一对的闭」加「下一对的开」，剩下的半截又自己配上。
+#   第一条剥离脚本就是这么栽的。
+#   内容不以空白开头、不以空白结尾、中间没有星号 —— 这是加粗的形状，也是
+#   那几个落单写法都不满足的形状。
+BOLD_SPAN = re.compile(r"\*\*[^\s*](?:[^*]*[^\s*])?\*\*")
 DASH = "——"
 HAN = re.compile(r"[一-鿿]")
 
@@ -112,15 +132,21 @@ LINE_COMMENT = {
 STAR_CONT = (".js", ".mjs", ".cjs", ".css", ".html")
 
 # 多行跨度：开记号与闭记号。落在这里面的行，行首没有任何注释标记，
-# 按行扫会整片漏掉。`.py` 有两种三引号，`.js` 与 `.css` 的块注释是一种。
+# 按行扫会整片漏掉。`.py` 有两种三引号，`.js`/`.css` 的块注释是一种，
+# `.html` 的注释也是一种 —— 少了 `.html` 这一项，整份 `panel.html` 的文件头
+# 会从视野里过去（那份文件里的注释全部写在这个形状上）。
 BLOCK = {
     ".py": (('"""', '"""'), ("'''", "'''")),
     ".js": (("/*", "*/"),), ".mjs": (("/*", "*/"),),
     ".cjs": (("/*", "*/"),), ".css": (("/*", "*/"),),
+    ".html": (("<!--", "-->"),),
 }
 
-# 代码行上的字符串。跨行的那一种配不到，见文件头。
+# 代码行上的字符串。跨行的那几种由 `string_spans` 收，见下。
 QUOTED = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"|`[^`\n]*`")
+# shell 的 here-doc 开头：`<<EOF`、`<<-EOF`、`<<'EOF'`、`<<"EOF"`。
+# 要求它一直占到行尾（后面只许有空白），免得把 `<<<` 这类认进来。
+HERE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[ \t]*$", re.M)
 # 反引号跨度（注释里的字面量）。
 BACKTICK = re.compile(r"`[^`]*`")
 
@@ -161,7 +187,15 @@ def is_test_file(rel):
 
 
 def split_line(line, ext):
-    """这一行是注释还是代码。返回 `(kind, 去掉注释标记之后的正文)`。"""
+    """这一行是注释还是代码。返回 `(kind, 去掉注释标记之后的正文)`。
+
+    行尾注释也算：`const x = 1;  // ★ 必须在 goodbye 之前停。` 是一句注释
+    （`client/src/main/session.js` 里就是这么写的），只认行首会把整类漏掉。
+
+    找标记之前先把这一行里的单行字符串挖空，于是 `'http://x'` 里的 `//` 不算
+    注释。`#` 还要在前一个字符是空白或行首时才算 —— shell 的 `${f#start_}`、
+    `${#arr[@]}` 里那个 `#` 前面是名字或 `{`，它不是注释。
+    """
     s = line.lstrip()
     if not s:
         return "blank", ""
@@ -170,6 +204,13 @@ def split_line(line, ext):
             return "comment", s[len(m):]
     if ext in STAR_CONT and s.startswith("*"):
         return "comment", s[1:]
+    bare = QUOTED.sub(lambda x: " " * len(x.group(0)), line)
+    for m in LINE_COMMENT.get(ext, ()):
+        k = bare.find(m)
+        while k >= 0 and m == "#" and k and not bare[k - 1].isspace():
+            k = bare.find(m, k + 1)
+        if k >= 0:
+            return "comment", line[k + len(m):]
     return "code", line
 
 
@@ -204,6 +245,202 @@ def block_lines(text, ext):
     return out
 
 
+# ── 跨行的字符串 ─────────────────────────────────────────────────────────────
+#
+# 按行扫看不见它们，而它们照样会被 `textContent` 或终端原样画出来：
+# JS 的模板串、shell 的 here-doc 与跨行双引号串、Python 里赋值形式的三引号。
+# `packer/slurmate-packer.js` 的 `--help` 就是这么写的，里面有六处加粗。
+
+
+def js_spans(text):
+    """JS 家族里的字符串跨度。注释与字符串同一个扫描 —— 分成两遍的话，
+    JSDoc 里那对 ``` 围栏会被当成模板串，字符串里写的反引号也会。"""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "/" and text[i + 1:i + 2] == "/":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and text[i + 1:i + 2] == "*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c in "'\"`":
+            j, closed = i + 1, False
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == c:
+                    j, closed = j + 1, True
+                    break
+                if text[j] == "\n" and c != "`":
+                    break
+                j += 1
+            if closed:
+                out.append((i, j))
+            i = max(j, i + 1)
+            continue
+        i += 1
+    return out
+
+
+def sh_spans(text):
+    """shell 里会被原样打出来的跨行串：here-doc 的体，与跨行的双引号串。
+
+    引号要一层一层跟着走。`READONLY_PATHS="$(sed -nE '…' "$SRC_CONF" …)"` 里
+    那对引号属于 `$( )` 里面那一层，朴素的「找一个 `"` 再找一个 `"`」会把它们
+    当成本层的开合，于是从那以后整份文件的引号奇偶都反了 —— 后果不是漏判一处，
+    是**把后面真正的串当成代码**，判据从那一段起整片闭嘴。所以这里有栈。
+
+    单引号串按 shell 的规矩整段照字面。收敛不了的一律不算 —— 宁可欠判，不误判。
+    """
+    out, i, n, stack = [], 0, len(text), []      # 每层 (种类, 起点)
+
+    def eol(k):
+        j = text.find("\n", k)
+        return n if j < 0 else j
+
+    while i < n:
+        c = text[i]
+        top = stack[-1][0] if stack else None
+        if c == "\\":
+            i += 2
+            continue
+        if top == "dq":
+            if c == '"':
+                _, a = stack.pop()
+                if "\n" in text[a:i + 1]:
+                    out.append((a, i + 1))
+                i += 1
+                continue
+            if text[i:i + 2] == "$(":
+                stack.append(("cmd", i))
+                i += 2
+                continue
+            if c == "`":
+                stack.append(("sub", i))
+            i += 1
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            stack.append(("dq", i))
+            i += 1
+            continue
+        if text[i:i + 2] == "$(":
+            stack.append(("cmd", i))
+            i += 2
+            continue
+        if text[i:i + 2] == "${":
+            stack.append(("brace", i))
+            i += 2
+            continue
+        if c == "`":
+            stack.append(("sub", i))
+            i += 1
+            continue
+        if c == ")" and top == "cmd":
+            stack.pop()
+            i += 1
+            continue
+        if c == "}" and top == "brace":
+            stack.pop()
+            i += 1
+            continue
+        if not stack and c == "(":
+            stack.append(("cmd", i))
+            i += 1
+            continue
+        if not stack and c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            i = eol(i)
+            continue
+        if not stack and text[i:i + 2] == "<<":
+            m = HERE.match(text, i)
+            # 只收**没被重定向进文件**的 here-doc：`cat <<EOF` 打在终端上，
+            #   `cat > "$cfg" <<EOF` 写进的是配置文件。判据管的是会被画出来的
+            #   文字，配置文件不是（`plugins/sshd/job/start.sh` 那份就是后者）。
+            if m and ">" not in text[text.rfind("\n", 0, i) + 1:eol(m.end())]:
+                word, start = m.group(2), eol(m.end()) + 1
+                j = start
+                while j <= n:
+                    e = eol(j)
+                    if text[j:e].strip() == word:
+                        out.append((start, j))
+                        i = e
+                        break
+                    j = e + 1
+                else:
+                    i = m.end()
+                continue
+        i += 1
+    return sorted(set(out))
+
+
+def py_spans(text):
+    """`x = \"\"\"…\"\"\"` 这种赋值形式的三引号串（行首之外的）。
+
+    它不是画给人看的文字，所以不进 `take_string`；但它必须被挖掉。
+    它的闭记号落在行首，而 `block_lines` 会把行首的三引号读成**开**记号 ——
+    于是从那个闭记号到下一个三引号之间的正文整片从判据里消失。
+    `cluster/test-sessiond-logic.py` 栽的就是这个：一行 `\"\"\")` 把 300 行之后
+    的一段 docstring 遮住了，而那一段里有五处记号。
+    """
+    out = []
+    for m in re.finditer(r"'{3}(?:[^'\\]|\\.|'(?!'{2}))*'{3}"
+                         r'|"{3}(?:[^"\\]|\\.|"(?!"{2}))*"{3}', text, re.S):
+        line = text.rfind("\n", 0, m.start()) + 1
+        if text[line:m.start()].strip():
+            out.append((m.start(), m.end()))
+    return out
+
+
+def mask_spans(text, ext):
+    """按行扫之前要先挖空的跨度：跨行字符串，加上 `.py` 的赋值形式三引号。
+
+    只挖跨行的。单行的那些 `QUOTED` 本来就收得到，挖掉反而会把它们从
+    `take_string` 手里抢走（自测里那三条 `strm`/`long` 的坏样本就是这么发现的）。
+    """
+    if ext in (".js", ".mjs", ".cjs"):
+        spans = js_spans(text)
+    elif ext in (".sh", ".sbatch"):
+        spans = sh_spans(text)
+    elif ext == ".py":
+        spans = py_spans(text)
+    else:
+        return []
+    return [s for s in spans if "\n" in text[s[0]:s[1]]]
+
+
+def string_spans(text, ext):
+    """会被画出来的**跨行**字符串跨度，只收含中文的那些。
+
+    与 `mask_spans` 的差别只在 `.py`：那边多收赋值形式的三引号（要挖，但不判）。
+
+    单行的那些由 `QUOTED` 按行收，不必在这里重复。含中文这一条与
+    `take_string` 同一条：判据判的是中文措辞，不含中文的串本来就跳过。
+    它顺带挡掉了引号误配 —— shell 里 `X="$(cmd "$Y")"` 这种嵌套会被朴素
+    扫描配错，而配错出来的那一段多半没有中文，于是自然掉出去。
+    """
+    if ext == ".py":
+        return []
+    return [s for s in mask_spans(text, ext)
+            if "\n" in text[s[0]:s[1]] and HAN.search(text[s[0]:s[1]])]
+
+
+def blank_spans(text, spans):
+    """把跨度挖成空格（保留换行），于是按行的扫描看不见它们。"""
+    out = list(text)
+    for a, b in spans:
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
 def html_strings(text):
     """HTML 里会被画出来的文字，与其中的控件文字。
 
@@ -217,17 +454,23 @@ def html_strings(text):
     return texts, controls
 
 
-def take_string(c, s):
-    """一条会被画出来的字符串，记进 `c`。没有中文的不算。"""
+def take_string(c, s, limit=True):
+    """一条会被画出来的字符串，记进 `c`。没有中文的不算。
+
+    `limit` 只对单行串开。跨行的那些是整段文字（`--help` 的用法表、安装器的
+    整条报错），它们本来就该长 —— 「界面文字要短，读者才会去看」那条理由
+    在那里不成立。跨行串仍旧受 J2 管（记号与破折号一个都不许有）。
+    """
     n = len(HAN.findall(s))
     if not n:
         return
     c["han"] += n
     c["dash"] += s.count(DASH)
-    # 加粗要成对才算：`client/**` 这种 glob 里的两个星号不是记号。
-    if MARK.search(s) or BOLD.search(s) or DASH in s:
+    # 加粗要成对才算，而且按内容认：`client/**` 这种 glob 里的星号不是记号，
+    #   一行里写两个 glob 也不该凑成一对。
+    if MARK.search(s) or BOLD_SPAN.search(s) or DASH in s:
         c["strm"] += 1
-    if n > STRING_MAX_HAN:
+    if limit and n > STRING_MAX_HAN:
         c["long"] += 1
 
 
@@ -246,22 +489,66 @@ def counts_of(rel, text):
     if not ext:
         return c
 
-    # ── 注释：按行。`#` 与 `//` 只看行首，免得把 URL 里的 `//` 当成注释。
+    # 跨行的字符串先挖空：它们里面的行按行看与代码无异，会被整片漏掉。
+    spans = string_spans(text, ext)
+    masked = blank_spans(text, mask_spans(text, ext))
+
+    # ── 注释：按行，行尾注释也算（见 split_line）。
     # 多行跨度里的行优先 —— docstring 与块注释的正文，split_line 认不出来。 ──
-    block = block_lines(text, ext)
-    for i, line in enumerate(text.splitlines()):
+    block = block_lines(masked, ext)
+    runs, cur = [], []
+    for i, line in enumerate(masked.splitlines()):
         if i in block:
             body = block[i]
+            # 块注释的续行以 `*` 开头（`* 这一行`）。那个星号是标记不是正文：
+            #   留着的话，一句话折成两行时中间会多出一个星号，成对的加粗就配不上
+            #   了（`plugins/sshd/client/sshconfig.js` 那四对就是这么漏的）。
+            if ext in STAR_CONT and body.lstrip().startswith("*"):
+                k = len(body) - len(body.lstrip())
+                body = body[:k] + " " + body[k + 1:]
         else:
             kind, body = split_line(line, ext)
             if kind != "comment":
+                if cur:
+                    runs.append(cur)
+                    cur = []
                 continue
-        # 反引号跨度是字面量，不算喊话。
-        prose = BACKTICK.sub("", body)
-        c["star"] += len(MARK.findall(prose)) + len(BOLD.findall(prose))
-        c["bold"] += len(BOLD.findall(prose))
+        # 反引号跨度是字面量，不算喊话。正文原样留着给加粗那一步 ——
+        #   挖成空格的话，内容里带代码跨度的加粗会以空格收尾，就配不上了。
+        prose = BACKTICK.sub(lambda x: " " * len(x.group(0)), body)
+        c["star"] += len(MARK.findall(prose))
         c["dash"] += prose.count(DASH)
         c["han"] += len(HAN.findall(prose))
+        if cur and (i != cur[-1][0] + 1 or not body.strip()):
+            runs.append(cur)
+            cur = []
+        if not body.strip():
+            continue
+        cur.append((i, body))
+    if cur:
+        runs.append(cur)
+
+    # 成对加粗按**连续的一段注释**找，不按行找：注释里一句话可以折成两行，
+    #   而那对星号照样成对（`fake-job.js` 的 `**站点自己的\n账**`、
+    #   `app.css` 的 `**同一个\n数**`）。按行找的话它们一个都看不见。
+    #   落单的 `**`（glob、`**kwargs`）不算加粗，也不单独报 —— 那个写法在注释里
+    #   是正常的，报出来是假红。
+    for run in runs:
+        joined = "\n".join(b for _, b in run)
+        # 反引号跨度里的星号是字面量（`client/**`）。判的是**位置**，不挖空格：
+        #   挖了的话，`**必须 `goodbye` 之前停**` 这种会以空格收尾，配不上。
+        code = [(x.start(), x.end()) for x in BACKTICK.finditer(joined)]
+
+        def quoted(k):
+            return any(s <= k < e for s, e in code)
+
+        for mm in BOLD_SPAN.finditer(joined):
+            a, b = mm.start(), mm.end() - 2
+            if quoted(a) or quoted(a + 1) or quoted(b) or quoted(b + 1):
+                continue
+            c["bold"] += 1
+    # 加粗与记号同属 J：棘轮按 `star` 一条计（`bold` 另留给 `--report` 的密度）。
+    c["star"] += c["bold"]
 
     # ── 文字：测试文件的字符串不判（用例名与断言消息本轮不动）。 ──────
     if test:
@@ -276,11 +563,13 @@ def counts_of(rel, text):
                 c["btn"] += 1
         return c
 
-    for line in text.splitlines():
+    for line in masked.splitlines():
         if split_line(line, ext)[0] != "code":
             continue
         for m in QUOTED.finditer(line):
             take_string(c, m.group(0)[1:-1])
+    for a, b in spans:
+        take_string(c, text[a:b], limit=False)
     return c
 
 
@@ -471,6 +760,49 @@ def self_test():
          {"client/src/a.js": "/** ★ 踩过 */\n"}, "star"),
         ("JS 块注释里不带 `*` 的续行",
          {"client/src/a.js": "/*\n★ 踩过\n*/\n"}, "star"),
+        # ── J：行尾注释（`//` 与 `#` 在代码后面） ──────────────────────
+        ("代码后面的 `//` 注释",
+         {"client/src/a.js": "const x = 1;  // ★ 必须在 goodbye 之前停。\n"}, "star"),
+        ("代码后面的 `#` 注释",
+         {"cluster/a.py": "x = 1  # ★ 踩过\n"}, "star"),
+        ("行尾注释里的成对加粗",
+         {"client/src/a.js": "const s = [];  // 已经验过，**还没就位**的\n"}, "star"),
+        # ── J：跨行的成对加粗（一句话折成两行） ────────────────────────
+        ("跨行的加粗（按行配不上对）",
+         {"client/src/a.js": "// 给**滚动升级期间还在跑的\n// 旧作业**用的\n"}, "star"),
+        ("docstring 里跨行的加粗",
+         {"cluster/a.py": '"""给**滚动升级期间还在跑的\n旧作业**用的，\n"""\n'}, "star"),
+        ("JSDoc 续行那个 `*` 不挡跨行的加粗",
+         {"client/src/a.js":
+          "/**\n * 实测确认**悬空的 Include 不是\n * 致命错误**，ssh 会忽略它。\n */\n"},
+         "star"),
+        ("加粗的内容里带代码跨度也认（`**必须在 `x` 之前**`）",
+         {"client/src/a.js": "// 而且**必须在 `goodbye` 之前停**。\n"}, "star"),
+        ("落单的 `**` 不是加粗（注释里写 glob）",
+         {"client/src/a.js": "// 只该收到 client/** 那一侧\n"}, None),
+        ("`**kwargs` 也不是（注释里写着 Python 写法）",
+         {"cluster/a.py": "# 参数原样走 **kwargs 传下去\n"}, None),
+        # ── J2：会被画出来的跨行字符串 ─────────────────────────────────
+        ("跨行的模板串",
+         {"client/src/a.js": "const t = `\n★ 踩过\n`;\n"}, "strm"),
+        ("打在终端上的 here-doc",
+         {"cluster/a.sh": "cat <<EOF\n★ 踩过\nEOF\n"}, "strm"),
+        ("跨行的双引号串",
+         {"cluster/a.sh": 'die "第一行**机器**\n第二行"\n'}, "strm"),
+        # ── J2 的假红防线（第五、六类漏法各自的边） ────────────────────
+        ("写进文件的 here-doc 不是画给人看的",
+         {"cluster/a.sh": 'cat > f <<EOF\n★ 踩过\nEOF\n'}, None),
+        ("JSDoc 里那对 ``` 围栏不是模板串",
+         {"client/src/a.js": "/**\n * ```\n * 中文样例\n * ```\n */\n"}, None),
+        ("字符串里写的反引号不开模板串",
+         {"client/src/a.js": "const s = '看 `init <目录>';\n"}, None),
+        ("shell 的 `${f#start_}` 不是注释（`#` 前面是名字）",
+         {"cluster/a.sh": 'v="${f#start_}"\n'}, None),
+        ("赋值形式的三引号是数据，不是画出来的文字",
+         {"cluster/a.py": 'X = """\n中文很长的数据\n"""\n'}, None),
+        ("而它后面那段 docstring 照样判 —— 赋值那行的闭记号会被读成开记号",
+         {"cluster/a.py": 'X = """\n数据\n"""\n\n\ndef f():\n    """\n    ★ 踩过\n    """\n'},
+         "star"),
         # ── J 的假红防线 ───────────────────────────────────────────────
         ("行首之外的三引号不开一段（那是赋值，不是文档）",
          {"cluster/a.py": 'x = """\n这不是文档\n"""\n'}, None),
