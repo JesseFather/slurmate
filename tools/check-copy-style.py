@@ -297,7 +297,11 @@ def judged(rel):
 
 def read_repo(root):
     """`{仓库相对路径: 文本}` —— 候选文件的全部。判不判由 `judged()` 定。"""
-    listing = subprocess.run(["git", "ls-files"], cwd=root,
+    # `--others --exclude-standard`：**未跟踪的也要扫**。少了它，一份新写的
+    #   文件在 `git add` 之前是隐形的 —— 而那正是"新写的代码"最该被看住的时候。
+    #   （判据在这个盲区里放过三个文件，藏在两个提交里，见账本。）
+    listing = subprocess.run(["git", "ls-files", "--cached", "--others",
+                              "--exclude-standard"], cwd=root,
                              capture_output=True, text=True, check=True).stdout
     files = {}
     for rel in listing.splitlines():

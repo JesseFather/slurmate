@@ -160,7 +160,9 @@ def exempt_count(files):
 
 def read_repo(root):
     files = {}
-    listing = subprocess.run(["git", "ls-files", "*.md"], cwd=root,
+    # 未跟踪的也要扫（与 prose 那条同一个理由）。
+    listing = subprocess.run(["git", "ls-files", "--cached", "--others",
+                              "--exclude-standard", "*.md"], cwd=root,
                              capture_output=True, text=True, check=True).stdout
     for rel in listing.splitlines():
         full = os.path.join(root, rel)

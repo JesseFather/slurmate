@@ -18,10 +18,10 @@
  *
  * 客户端的运行期只读 `client/` 里的东西，例外只有两处，而两处都只在开发者模式里：
  *
- *   · **打包器**（`packer/slurmate-packer.js`）。假站点要现打一个客户端侧容器
+ *   · 打包器（`packer/slurmate-packer.js`）。假站点要现打一个客户端侧容器
  *     才能把插件发给客户端，而容器格式只有那一份实现。打包器不属客户端，所以
  *     安装包靠 `electron-builder.yml` 的 `extraResources` 把它带进来。
- *   · **替身宿主**（`src/main/fake-job-host.sh`）。它要交给一个**外部** bash
+ *   · 替身宿主（`src/main/fake-job-host.sh`）。它要交给一个外部的 bash
  *     去读，而外部进程读不了 asar，所以靠 `asarUnpack` 解到
  *     `app.asar.unpacked/` 那一份。
  *
@@ -36,7 +36,7 @@ const path = require('path');
 /**
  * 打包器在哪。`from` 是这份代码所在的那个目录，缺省 `__dirname`（测试要造现场）。
  *
- * 源码跑与安装包跑算出来的是**同一个位置**，所以只有一条算法：
+ * 源码跑与安装包跑算出来的是同一个位置，所以只有一条算法：
  *   源码树里 `client/src/main` 往上三层是仓库根，安装包里
  *   `<resources>/app.asar/src/main` 往上三层是 `<resources>` —— 而
  *   `extraResources` 正是要把它放在 `<resources>/packer/`。
@@ -46,7 +46,7 @@ function packerPath(from = __dirname) {
 }
 
 /**
- * asar 里那个路径的**解包孪生**。
+ * asar 里那个路径的解包孪生。
  *
  * 外部进程（bash）读不了 asar 里的文件，所以交给它的那一个必须落在
  *   `app.asar.unpacked/`。源码跑时这个函数什么都不做。
@@ -66,7 +66,7 @@ const NO_PACKER = '这个客户端里没有带打包器。假站点要现打一�
 /**
  * 找打包器。返回 `{path}` 或 `{why}` —— 与 `fake-job.js` 的 `findBash()` 同形。
  *
- * 找不到时**必须说得出原因**：那意味着这一份安装包不完整，而症状是"站点报得出
+ * 找不到时必须说得出原因：那意味着这一份安装包不完整，而症状是"站点报得出
  *   插件却一个都发不出来"，指不回这里。
  */
 function findPacker(from = __dirname) {

@@ -578,7 +578,10 @@ def problems_from(files):
 
 def read_repo(root):
     files = {}
-    listing = subprocess.run(["git", "ls-files", "*.md"], cwd=root,
+    # 未跟踪的也要扫（`--exclude-standard` 仍然尊重 .gitignore）：一份新写的
+    #   文档在 `git add` 之前不该是隐形的。
+    listing = subprocess.run(["git", "ls-files", "--cached", "--others",
+                              "--exclude-standard", "*.md"], cwd=root,
                              capture_output=True, text=True, check=True).stdout
     for rel in listing.splitlines():
         full = os.path.join(root, rel)

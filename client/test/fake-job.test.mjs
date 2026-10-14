@@ -15,7 +15,7 @@
 /**
  * fake-job.test.mjs —— 替身宿主那一段「在哪找 bash、找到了怎么起」。
  *
- * 这一段只在 Windows 上分岔，而**这台开发机不是 Windows**。所以这里验的全是
+ * 这一段只在 Windows 上分岔，而这台开发机不是 Windows。所以这里验的全是
  *   `defaultBashSearch(env, platform)` 与 `toWslPath()` 这两条纯函数：喂一个
  *   Windows 形状的环境进去，看它算出来的候选表对不对。
  *
