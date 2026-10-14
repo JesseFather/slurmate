@@ -1035,6 +1035,11 @@ function reconcileSitePlugins() {
     if (gen !== connectGeneration) return null;
 
     pendingConsent = r.pendingConsent || [];
+    // 界面手里那份「本站有哪些插件」也换成这一轮取回来的那一份。
+    //   它从前只在连接时取（`refreshPartitions`），于是装完一个插件、点「重新同步」
+    //   之后界面还是旧的，要断开重连才更新 —— 而"同步"这个词承诺的正是立刻对齐。
+    //   `null` = 这一轮没问到，那就留着上一次的：一次问不到不该把界面擦成空的。
+    if (r.plugins) sitePlugins = { plugins: r.plugins, problems: r.problems || [] };
     siteSync = {
       supported: r.supported,
       reason: r.reason,
@@ -1226,7 +1231,9 @@ function pluginsView() {
       //
       // ❗ 判据必须问 `deliveryOf`，不能在这里现写一个。「能不能分发」这个问题
       //   只有一处答案，而它在那里。
-      distributed: Boolean(sitePluginSync.deliveryOf(p, sitePluginSync.HARD_LIMITS).mode),
+      //   带出来的是四态里的哪一态，不是一个布尔：三条"取不回来"的出路不同
+      //   （不分发 / 此刻发不出来 / 读不懂），合成一个布尔就等于把出路指错了。
+      delivery: sitePluginSync.deliveryOf(p, sitePluginSync.HARD_LIMITS).state,
     }));
 
   // ── 池里那些没被加载的（`active: false`）───────────────────────────────

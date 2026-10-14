@@ -1493,3 +1493,35 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   await h.run('loadJobLog()');
   assert.match(shown(), /这个站点太旧/);
 });
+
+test('★★ 「取不回来」的三种情况是三句不同的话，各有各的出路', () => {
+  // 2026-10-14 加。那三态从前被合成一个布尔（`missing[].distributed`），于是
+  //   界面只有一句话可说，而它对其中两种是错的：`package: null`（站点此刻生产
+  //   不出来）不是「站点的清单里没有它的包」。用户照着那句话去做，会去问管理员
+  //   一件管理员改不了的事 —— 而他要做的其实是再同步一次。
+  // 正文是文本节点（`createTextNode`），不是元素 —— 人造 DOM 里它只有
+  //   `textContent` 而没有 `_text`，所以两样都要读。
+  const textOf = (el) => (el ? (el._text || el.textContent || '')
+    + (el.children || []).map(textOf).join('') : '');
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES });
+  const one = (delivery, title) => ({ name: title, title, id: 'x' + delivery,
+    version: '1.0.0', enabled: true, delivery });
+
+  h.fn('renderPlugins')({ ...PV, missing: [
+    one('absent', '甲'), one('not_ready', '乙'), one('unusable', '丙'),
+  ] });
+  const text = textOf(h.byId.get('plugin-issues'));
+
+  assert.match(text, /本站没有分发它/, '键根本不出现 ⇒ 出路是问管理员');
+  assert.match(text, /现在发不出来/, '`null` ⇒ 出路是再同步一次');
+  assert.match(text, /读不懂/, '读不懂 ⇒ 出路是升级客户端');
+  assert.equal(/清单里没有它的包/.test(text), false,
+    '那句是"缺席"那一态的话，用来说 `null` 就是说了一件不成立的事');
+
+  // 而"站点愿意发、本机还没取回来"那一种仍然走上面那条（`package`）。
+  h.fn('renderPlugins')({ ...PV, missing: [one('package', '丁')] });
+  const text2 = textOf(h.byId.get('plugin-issues'));
+  assert.match(text2, /丁/, '愿意发的那一条仍然要说出来（本机还没有它）');
+  assert.equal(/本站没有分发它/.test(text2), false, '它不属于"取不回来"那一类');
+});

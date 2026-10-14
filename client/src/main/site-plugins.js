@@ -435,30 +435,32 @@ function packageMetaProblem(pkg, limits) {
 }
 
 /**
- * 这一份能不能取。界面也用这个判据（`missing[].distributed`），所以它导出。
+ * 这一份能不能取。界面也用这个判据（`missing[].delivery`），所以它导出。
  *
- * 判据全是协议事实，与"这次下载失败了"毫无关系（见文件头第三个「不」）：
+ * 判据全是协议事实，与"这次下载失败了"毫无关系（见文件头第三个「不」）。
+ *   四态，而三条"取不回来"的出路各不相同：
  *
- *   · `p.package` 是一个形状说得通的对象，这一份分发得出来
- *   · `p.package === null` 站点此刻生产不出这一份（比如包在它启动之后被换掉
- *     了）—— 这不是"这个站点没有这个能力"，后者由顶层有没有 `limits` 回答。
- *     三态纪律：缺席（`undefined`）≠ 否（`null`），别把两者读成同一件事。
- *   · 这个键根本不出现，这一份不分发（跳过它，不是记一条失败）
+ *   · `package` 是一个形状说得通的对象 —— 这一份分发得出来
+ *   · 这个键根本不出现 —— 本站不分发它（跳过它，不是记一条失败）。
+ *     出路是问管理员：站点上那一份装完整了没有。
+ *   · `package === null` —— 站点此刻生产不出这一份（比如包在它启动之后被换掉
+ *     了），出路是再同步一次。这不是"这个站点没有这个能力"，后者由顶层有没有
+ *     `limits` 回答。
+ *   · 有包但读不懂 —— 格式比客户端新，或者自述的三个数不自洽。没有退路可退，
+ *     所以它是一条真失败：用户能做的事只有升级客户端（或者看 `why`）。
  *
- * 返回值里那个 `mode` 只剩一个可能的值，而它留着是因为调用方判的是
- *   `del.mode` 真不真。名字改成 `mode` 之外的东西会动到三处调用方与界面那个判据，
- *   而它没有换来任何东西 —— 那两态的形状仍然需要一个字段来表达。
+ * 三态纪律在这里是承重的：缺席（`undefined`）≠ 否（`null`）。从前这个函数把两者
+ *   合并成一个 `mode: null`，于是界面只有一句话可说，而它对 `null` 那种情况说的是
+ *   缺席那句 —— 那句"站点的清单里没有它的包"在那个现场是错的。
  *
- * @returns {{mode:'package'|null, why?:string}}
+ * @returns {{state:'package'|'absent'|'not_ready'|'unusable', why?:string, tooNew?:boolean}}
  */
 function deliveryOf(p, limits) {
-  const hasPkg = p.package !== undefined && p.package !== null;
-  if (!hasPkg) return { mode: null };
+  if (p.package === undefined) return { state: 'absent' };
+  if (p.package === null) return { state: 'not_ready' };
   const bad = packageMetaProblem(p.package, limits);
-  if (!bad) return { mode: 'package' };
-  // 没有退路可退：所以"站点比客户端新"是一条
-  //   明确的失败，不是一条提示 —— 用户能做的事只有升级客户端，而界面必须这么说。
-  return { mode: null, why: bad.why, tooNew: bad.tooNew === true };
+  if (!bad) return { state: 'package' };
+  return { state: 'unusable', why: bad.why, tooNew: bad.tooNew === true };
 }
 
 /**
@@ -1101,6 +1103,11 @@ async function sync(o) {
     supported: false, reason: null, error: null,
     added: [], kept: [], pendingConsent: [], reclaimed: [], failed: [], withdrawn: [],
     forgotSites: [], notices: [], snapshot: null, poolStrays: [], limits: { ...HARD_LIMITS },
+    // 这一轮站点报回来的那份清单，原样带出去。调用方（界面）手里另有一份，
+    //   而它只在连接时取 —— 不对齐的话，装完一个插件之后界面上还是旧的那一份，
+    //   要断开重连才更新。两半来自同一刻才对得上。
+    // `null` = 这一轮没问到（问不到 / 答得不对），那时调用方该留着上一次的。
+    plugins: null, problems: null,
   };
 
   // ── 1. 站点清单 ──
@@ -1120,6 +1127,11 @@ async function sync(o) {
   }
   const data = resp.data || {};
   const reported = Array.isArray(data.plugins) ? data.plugins : [];
+  // 取到了就带出去（下面几个分支都会带着它返回）。
+  //   `problems` 是 v0.11 才有的字段，老守护进程不报 —— 那是不说话，不是空。
+  //   这里照 `loadPlugins()` 的老口径给空数组（界面那一段本来就这么读）。
+  out.plugins = reported;
+  out.problems = Array.isArray(data.problems) ? data.problems : [];
 
   // 判据是协议事实：顶层有没有 `limits`。老守护进程整个字段都没有。
   //   这与"这次下载失败了"是两件完全不同的事（见文件头第三个"不"）。
@@ -1262,18 +1274,18 @@ async function sync(o) {
 
       // ── 1. 这一份分发得出来吗 ──
       const del = deliveryOf(p, out.limits);
-      if (!del.mode) {
+      if (del.state !== 'package') {
         // 站点报了这个插件、却没给它任何可分发的东西，这一份不分发，跳过它。
         //   这不是失败：`op_plugins` 报的是"本站装了哪些插件"，而分发是另一件事
         //   （老守护进程、或者调试里造的那种条目就长这样）。记成失败的话，用户会
         //   看到一条"没能装上 X"，而其实站点从来没有说要发它。
-        //   界面用 `missing[].distributed` 把这两种情况分开说。
+        //   界面用 `missing[].delivery` 把那几种情况分开说 —— 「不分发」与
+        //   「此刻发不出来」的出路不同（找管理员 / 再同步一次）。
         //
-        // 而 `del.why` 非空时它是一条真失败：说的是"站点报了这一份，而我们
-        //   读不懂它"（格式比客户端新、自述的三个数不自洽……）。没有退路可退，
-        //   所以它们一样是失败 —— 但要分开说，因为用户能做的事
-        //   完全不同（升级客户端 vs 找管理员）。
-        if (del.why) {
+        // 而 `unusable` 是一条真失败：说的是"站点报了这一份，而我们读不懂它"
+        //   （格式比客户端新、自述的三个数不自洽……）。没有退路可退，所以要记一条
+        //   —— 但两者分开说，因为用户能做的事完全不同。
+        if (del.state === 'unusable') {
           if (del.tooNew && !out.reason) out.reason = 'site_too_new';
           fail(`站点报的这一份不能用：${del.why}`);
         }

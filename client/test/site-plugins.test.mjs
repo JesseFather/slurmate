@@ -1478,23 +1478,27 @@ test('★ 整包超过**链路**上限 ⇒ 拒绝，而且一次都不去取', a
   assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false);
 });
 
-test('★ 「站点愿不愿意发这一份」的判据，与"这一份此刻生产不生产得出来"是两件事', () => {
-  // 界面拿它分"本站有而本机没有，等同步/点同意"与"本站根本没打算发这一版"。
+test('★★ 「取不回来」有三条不同的路，判据必须把它们分得开', () => {
+  // 界面拿它分四件事，而出路各不相同：等同步/点同意、问管理员、再同步一次、
+  //   升级客户端。合成一个布尔的话，界面只有一句话可说，而它对其中两种是错的。
   //
-  //   这个判据换过两次，而三次都是同一个理由：它必须是协议事实，不能是
+  //   这个判据换过两次，两次都是同一个理由：它必须是协议事实，不能是
   //   "这次下没下下来"。最早是`Array.isArray(p.files)`；v0.6 两条路并存时是
   //   "有没有一条能走"；v0.7 只剩一条，于是就是"`package` 在不在"。
   const fp = 'a'.repeat(64);
   const meta = { format: 2, bytes: 100, digest: fp };
-  assert.equal(S.deliveryOf({ package: meta }, S.HARD_LIMITS).mode, 'package', '有包 = 愿意发');
-  assert.equal(S.deliveryOf({ package: null }, S.HARD_LIMITS).mode, null,
-    '★ `package: null` 是"此刻生产不出来"（包在守护进程启动之后不见了）——'
-    + '它不是"没有这个能力"，能力由顶层有没有 `limits` 回答');
-  assert.equal(S.deliveryOf({}, S.HARD_LIMITS).mode, null, '★ 缺席（`undefined`）≠ 否（`null`）');
+  assert.equal(S.deliveryOf({ package: meta }, S.HARD_LIMITS).state, 'package',
+    '有包 = 愿意发');
+  assert.equal(S.deliveryOf({ package: null }, S.HARD_LIMITS).state, 'not_ready',
+    '`package: null` 是"此刻生产不出来"（包在守护进程启动之后不见了）——'
+    + '它不是"没有这个能力"，能力由顶层有没有 `limits` 回答。'
+    + '它的出路是再同步一次，所以不许与"本站不分发它"合成一态');
+  assert.equal(S.deliveryOf({}, S.HARD_LIMITS).state, 'absent',
+    '缺席（`undefined`）≠ 否（`null`）：键根本不出现是"本站不分发它"，出路是问管理员');
   // 而"读不懂的格式"是一条失败，不是"不分发" —— 两者在界面上说的话完全不同。
   const tooNew = S.deliveryOf({ package: { ...meta, format: 99 } }, S.HARD_LIMITS);
-  assert.equal(tooNew.mode, null);
-  assert.equal(tooNew.tooNew, true, '★ 它要带着"站点比客户端新"这一态出去');
+  assert.equal(tooNew.state, 'unusable');
+  assert.equal(tooNew.tooNew, true, '它要带着"站点比客户端新"这一态出去');
   assert.match(tooNew.why, /只认识/, tooNew.why);
 });
 

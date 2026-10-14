@@ -1909,6 +1909,14 @@ test('★ 服务端通报的默认资源要真的送到界面上，不能又在�
   assert.deepEqual(cs2.defaults,
     { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     'bootstrap 也要带 —— 界面首次渲染时还没有别的机会拿到它');
+
+  // 而这一份是每个插件一份，来自它自己的清单：另一个样例的清单里写的是
+  //   1 核 / 2G，站点就必须报那一份。全局一份的话，界面上每个插件都显示同一个
+  //   数 —— 而"这个站点给这个插件配了多少"在开发者模式里就永远看不到。
+  const relay = r.plugins.plugins.find((p) => p.name === 'sshd');
+  assert.deepEqual(relay.defaults,
+    { cpus: 1, mem: '2G', time: '12:00:00', gpus: null },
+    '默认资源每个插件一份（来自清单的 site.defaultCpus / defaultMem）');
 });
 
 test('★★ 站点配了默认卡 ⇒ 那句「默认 …」里出现它，且走唯一那处拼法', async (t) => {
@@ -1956,6 +1964,39 @@ test('★ 老守护进程的 `defaults` 里没有 time：缺了就是缺了，�
     assert.equal(cs.defaultsGresText, null,
       '同上：`gpus` 那一格整个不在是不说话，而不是"不占"' +
       ' —— 两者在界面上碰巧长得一样，但来源不同，不该被合并成一件事');
+  } finally {
+    await invoke('app:debug', 'reset');
+  }
+});
+
+test('★★ 站点上多了一个插件：对账之后界面立刻知道，不用断开重连', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+
+  // 界面手里那份「本站有哪些插件」从前只在连接时取。于是装完一个插件、
+  //   点「重新同步」之后，插件那一栏什么都不会变 —— 用户看到的是"同步没用"，
+  //   而真相是那一栏问的还是上一次取回来的东西。要断开重连才对。
+  //   这一条钉的就是那一格：对账自己取回来的那一份必须喂给界面。
+  //
+  //   前置要自己立：这条用例在全套里的位置是固定的，而前面那些用例会动连接与
+  //   调试开关。少了下面那三句，它单独跑绿、在全套里红（第一版就是这样）。
+  await invoke('app:debug', 'reset');
+  const conn = await builtinConn();
+  assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
+    '前置：得连着站点 —— 没有连接就没有"对账"这回事');
+
+  const count = (r) => ((r.plugins.missing || []).length
+    + (r.plugins.plugins || []).length);
+  // 先把界面手里那份对齐到这一轮，`n0` 才是"还没有那个新插件"时的数。
+  await invoke('app:syncPlugins');
+  const n0 = count(await invoke('app:partitions'));
+
+  await invoke('app:debug', 'extra-plugin');
+  try {
+    const r = await invoke('app:syncPlugins');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const n1 = count(await invoke('app:partitions'));
+    assert.equal(n1, n0 + 1,
+      `站点上新多出来的那一个必须当场出现在界面那份清单里（${n0} → ${n1}）`);
   } finally {
     await invoke('app:debug', 'reset');
   }
@@ -2717,11 +2758,11 @@ test('★ 零插件：界面拿到的是一份说得通的空态，不是"安装
     // 假站点报的是仓库里那两个真插件（见 backend-fake 的 _siteIndex），
     //   不是"本机池里有什么"（那样「站点有而本机没有」在这里永远走不到）。
     //   于是池空 + 本机没有它们，`missing`
-    //   里就是它们，而且每一份都带着文件清单（`distributed: true`）——
+    //   里就是它们，而且每一份都标着 `delivery: 'package'`——
     //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
     assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['code-server', 'sshd'],
       '站点照实报了它要分发的两个插件，而本机一个都没有');
-    assert.ok(pv.missing.every((m) => m.distributed === true),
+    assert.ok(pv.missing.every((m) => m.delivery === 'package'),
       `每一份都要标出"站点会发它"：${JSON.stringify(pv.missing)}`);
 
     // 一个插件都没有时，提交必须被明确拦住并给出路，而不是起一个
@@ -3745,7 +3786,8 @@ test('★ 「站点愿不愿意发这一份」：有 `package` 就算，而且**
     assert.equal(idx._test.getPendingConsent().length, 2,
       `只发包也要能取回来：${JSON.stringify(r.plugins.site && r.plugins.site.failed)}`);
     for (const m of (r.plugins.missing || [])) {
-      assert.equal(m.distributed, true, `★ 站点愿意发它（只是本机还没同意）：${JSON.stringify(m)}`);
+      assert.equal(m.delivery, 'package',
+        `★ 站点愿意发它（只是本机还没同意）：${JSON.stringify(m)}`);
     }
     assert.ok((r.plugins.missing || []).length > 0, '前置：本机一个都还没同意，所以它们都在 missing 里');
   });

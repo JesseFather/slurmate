@@ -168,7 +168,7 @@ test('★★ 推送那份视图 = list 那份**摘掉秘密**（不是另写一�
   // 界面上某一格在有推送时是空的、没有推送时是满的。
   const b = fakeWith([aSession()]);
   const listView = b._view(b._sessions[0]);
-  const pushView = b._pushView(b._sessions[0]);
+  const pushView = b._viewNoSecret(b._sessions[0]);
 
   assert.equal(listView.auth_password, 'pw', '前提：list 那份是带口令的');
   assert.equal(listView.ssh_host_key, 'ssh-ed25519 AAAA');
@@ -178,6 +178,13 @@ test('★★ 推送那份视图 = list 那份**摘掉秘密**（不是另写一�
   // 除了那两个键，逐字相同 —— 多一个少一个都要红。
   assert.deepEqual(Object.keys(pushView).sort(),
     Object.keys(listView).filter((k) => k !== 'auth_password' && k !== 'ssh_host_key').sort());
+
+  // 而两条路今天走的是同一份：`op_list` 也渲染成这一种（与守护进程两边都用
+  //   `with_secret=False` 同形）。从前只有推送走它，`op_list` 是另一种带秘密的
+  //   形状 —— 同一个 op 在两条路上字段集不同，而这个假站点自己是不该有"多知道"
+  //   的那一份的。
+  assert.deepEqual(b._list().data.sessions[0], pushView,
+    '`op_list` 与推送渲染出来的必须是同一份东西');
 });
 
 test('★ 推送的形状逐字照守护进程的 enqueue_push', () => {
@@ -290,4 +297,71 @@ test('★★ 假后端的 `ping` 真的答得出来（那一行曾经是睡着�
   } finally {
     await b.close();
   }
+});
+
+test('★ `whoami` 的字段与守护进程逐字同形（少一格就是客户端少一格依据）', () => {
+  // 界面用 `can_submit` 判"这个账号能不能提交"，用 `allowed_partitions` 判分区
+  //   权限。少报一格不会报错 —— 客户端只是少知道一件事，而症状是某个按钮
+  //   该灰的时候是亮的。
+  const b = new FakeBackend({ rpcLatencyMs: 0 });
+  const r = b._whoami();
+  assert.deepEqual(Object.keys(r.data).sort(),
+    ['account', 'account_error', 'allowed_partitions', 'can_submit',
+      'gid', 'home', 'uid', 'user']);
+  assert.equal(r.data.can_submit, true, '假站点这个账户是写死的常量，查得到');
+});
+
+test('★★ 作业日志：「文件不在」是"没有"，"读不出来"是"取不到"（两句不同的话）', () => {
+  // 合成一态的后果与这一版一路在清的那类一模一样：右栏对着一份读不出来的
+  //   日志说"还没有输出"，而用户会去查一个不存在的输出。真守护进程那边这两种
+  //   只差一个 `why`（`None` = 没有；带 `why` 的格子 = 取不到），这里照它。
+  const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-log-'));
+  const b = new FakeBackend({ rpcLatencyMs: 0, jobsDir: () => root });
+  b._connected = true;
+  const s = aSession({ job_id: '7' });
+  b._sessions = [s];
+  const logs = path.join(root, 'home', '.slurmate', 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+
+  // ① 两份都不在就是 `null`：那是"它一个字都还没说"。
+  let r = b._jobLog({ session_id: s.session_id });
+  assert.equal(r.data.out, null, '不在就是 null，不是一句"取不到"');
+  assert.equal(r.data.err, null);
+
+  // ② 同名位置放一个目录：文件在、而读不出来就是一个带 `why` 的格子。
+  //    用目录而不是 chmod：chmod 挡不住 root，而 CI 上常常就是 root。
+  fs.mkdirSync(path.join(logs, 'slurm-7.out'));
+  r = b._jobLog({ session_id: s.session_id });
+  assert.equal(r.data.out.text, null, '取不到时没有正文');
+  assert.match(r.data.out.why || '', /读不到/, '取不到要把原因说出来');
+  assert.equal(r.data.err, null, '另一份仍然不在 —— 两句话必须各说各的');
+});
+
+test('★★ 内存那一格填了 0 ⇒ 回退到默认值，而且这件事必须说出来', async () => {
+  // `--mem=0` 在 Slurm 里是「该节点的全部内存」，不是零：一个笔误能让一个开发
+  //   会话吃掉整台机器。所以拒绝并回退 —— 而回退必须报给用户（协议里那个
+  //   `warning`）：他填了 0，以为生效了，实际拿到的是默认值。静默地替他决定
+  //   正是这个项目一路在清的那类问题。
+  //
+  //   这一条不起真作业（`_startJob` 换成空的）：它验的是 `submit` 那一侧的决定，
+  //   与作业起没起来无关。放在 integration 里会起两条真作业，而**断言失败时
+  //   那两条还活着**，runner 于是挂住不返回 —— 探方向时踩过一次。
+  const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-mem-'));
+  // 上限放宽到 2：这一条要连着提交两次（一次合法、一次 `0`），而缺省上限是 1，
+  //   第二次会撞上 `quota_active` —— 那与这一条要验的事毫无关系。
+  const b = new FakeBackend({ rpcLatencyMs: 0, jobsDir: () => root });
+  b.maxActive = 2;                      // 见下：这一条要连着提交两次
+  b._connected = true;
+  b._startJob = async () => {};
+  b.debugAddSitePlugin();               // 站点上得先有这么个插件（短名见 DEMO_EXTRA_NAME）
+
+  const plain = await b.rpc({ op: 'submit', service_kind: 'demo-service', mem: '16G' });
+  assert.equal(plain.ok, true, JSON.stringify(plain));
+  assert.equal(plain.data.resources.mem, '16G', '合法的值原样生效');
+  assert.equal(plain.data.warning, undefined, '没替他做决定就不说话');
+
+  const r = await b.rpc({ op: 'submit', service_kind: 'demo-service', mem: '0' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.data.resources.mem, '8G', '回退到默认值');
+  assert.match(r.data.warning || '', /内存/, `替用户做的决定要说出来：${JSON.stringify(r.data)}`);
 });

@@ -1650,8 +1650,10 @@ function renderPlugins(pv) {
   if (miss.length) {
     // 三条出路必须分开说，因为它们要做的事不同。合并成一句"本站有而本机
     //   没有 —— 升级客户端"的话，其中两条会被指错方向。
-    const bySync = miss.filter((m) => m.distributed);
-    const byHand = miss.filter((m) => !m.distributed);
+    // 四态里"取不回来"的那三种出路不同，所以不合成一句：
+    //   不分发（问管理员）/ 此刻发不出来（再同步一次）/ 读不懂（升级客户端）。
+    const bySync = miss.filter((m) => m.delivery === 'package');
+    const byHand = miss.filter((m) => m.delivery !== 'package');
     const names = (list) => list.map((m) => (m.version ? `${m.title} ${m.version} 版` : m.title)).join('、');
 
     if (bySync.length) {
@@ -1673,10 +1675,21 @@ function renderPlugins(pv) {
           + '用上面的「重新同步」取一次。'));
       }
     }
-    if (byHand.length) {
-      issues.append(issueBox('warn', '本站报了这一版，但没有说它发得出来',
-        `${names(byHand)}。\n这一份装不上：站点的清单里没有它的包，所以客户端无从取回。`
-        + '请管理员确认这个插件是不是部署完整了。'));
+    const absent = byHand.filter((m) => m.delivery === 'absent');
+    if (absent.length) {
+      issues.append(issueBox('warn', '本站有这一版，而它不分发',
+        `${names(absent)}。\n本站没有分发它。请管理员确认站点上那一份装完整了。`));
+    }
+    const notReady = byHand.filter((m) => m.delivery === 'not_ready');
+    if (notReady.length) {
+      issues.append(issueBox('warn', '本站有这一版，此刻发不出来',
+        `${names(notReady)}。\n站点说这一份现在发不出来。稍后再同步一次。`));
+    }
+    const unusable = byHand.filter((m) => m.delivery === 'unusable');
+    if (unusable.length) {
+      issues.append(issueBox('warn', '本站有这一版，而它用不了',
+        `${names(unusable)}。\n站点报的这一份读不懂，多半是包格式比本客户端新。`
+        + '升级客户端。'));
     }
   }
 }

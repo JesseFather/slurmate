@@ -213,8 +213,13 @@ function sumCounts(counts) {
  *    这条主路会在开发者模式下时灵时不灵。要验"配了默认卡"那条路，
  *    用 `debugDefaultGpus()`。 */
 const DEFAULTS = { cpus: 2, mem: '8G', time: '12:00:00', gpus: null };
+/** 清单里没写 `site.defaultCpus` 之类时的那一组（真站点是内建的那一份）。 */
+const SITE_DEFAULTS = { cpus: DEFAULTS.cpus, mem: DEFAULTS.mem, time: DEFAULTS.time };
 
 const DEFAULT_TIME_SECONDS = 12 * 3600;
+
+/** `op_list` 回几条。与守护进程那个 `rows[-50:]` 同一个数。 */
+const LIST_MAX = 50;
 
 /** 假站点里「作业内 sshd」听在哪个端口。没有真的 sshd —— 见 _submit 的说明。 */
 const DEMO_SSHD_PORT = 55901;
@@ -225,6 +230,20 @@ const DEMO_SSHD_PORT = 55901;
  * 开发者模式假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的 sshd 也是假的。
  */
 const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
+
+/**
+ * 内存那一格：校验 + 回退。与守护进程的 `sanitize_mem` 逐字同形。
+ *
+ * `0`、`0G`、`8g`、`abc` 一律回退到默认值（`0` 在 Slurm 里是「整机内存」，
+ *   不是零）。返回 `{mem, fell}`：`fell` 为真时调用方必须说出去 ——
+ *   静默地替他决定，他就会以为自己要到了。
+ */
+function sanitizeMem(v, fallback) {
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  const m = /^([0-9]+)([KMGTP]?)$/.exec(s);
+  if (m && Number(m[1]) > 0) return { mem: m[1] + m[2], fell: false };
+  return { mem: fallback, fell: Boolean(s) };
+}
 
 /** 假站点自称的单文件上限。故意与守护进程那个默认值一样 —— 免得假站点里
  *  一个 200 KiB 的文件在真机上通不过。故意报得比客户端硬上限宽松，好让
@@ -608,6 +627,17 @@ class FakeBackend extends Backend {
           //     没有作业侧的插件提交不了（`can_submit: false`），
           //     而不是"提交得出去、起来的时候说找不到那个文件"。
           hasJob: files.some((f) => f.path === pluginFiles.JOB_ENTRY),
+          // 这个插件自己的默认资源，从它的清单里读（读不到就用内建那一组）。
+          //   真守护进程那一侧是 `pcfg.default_*`：插件配置 ＞ 清单 ＞ 内建。
+          //   假站点没有"插件配置"那一层（没有管理员），所以就是清单 ＞ 内建。
+          defaults: {
+            cpus: Number.isInteger(mf.site && mf.site.defaultCpus)
+              ? mf.site.defaultCpus : SITE_DEFAULTS.cpus,
+            mem: (mf.site && typeof mf.site.defaultMem === 'string' && mf.site.defaultMem)
+              || SITE_DEFAULTS.mem,
+            time: (mf.site && typeof mf.site.defaultTime === 'string' && mf.site.defaultTime)
+              || SITE_DEFAULTS.time,
+          },
           // 内部用（不在 `plugins` 响应里）：现打一个包要签四元组（A.3），
           //   而四元组的头两段就是这两个。从 `key` 那个串里切是不行的 —— 版本号
           //   里可能出现 `@`，而身份不该由一个给人看的字符串反推出来。
@@ -654,6 +684,10 @@ class FakeBackend extends Backend {
       version: key.slice(key.lastIndexOf('@') + 1),
       name: v.name,
       title: v.title,
+      // 每个插件一份默认资源，来自它自己的清单（`site.defaultCpus` / `defaultMem`
+      //   / `defaultTime`）。真站点就是每个插件一份，而假站点从前是一份全局的 ——
+      //   于是"这个站点给这个插件配了 4 核"在开发者模式里永远看不到。
+      defaults: v.defaults || SITE_DEFAULTS,
       enabled: !this._siteDisabled.has(v.name),
       // 没有作业侧的插件提交不了 —— 与守护进程同一条判据（它数的是记录表里
       //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份**真站点上根本
@@ -977,7 +1011,10 @@ class FakeBackend extends Backend {
             // `gpus` 盖成这一站当下那一份（`debugDefaultGpus` 改的就是它）：
             //   直接 `...DEFAULTS` 的话，那个开关改了也传不下去，于是"配了默认卡"
             //   这条路上一个用例都走不到。
-            defaults: { ...DEFAULTS, gpus: this._defaultGpus },
+            // 每个插件一份（来自它自己的清单），`gpus` 盖成这一站当下那一份
+            //   （`debugDefaultGpus` 改的就是它）。少了"每个插件一份"，那个
+            //   开关改了也传不下去 —— 而真站点上它本来就是逐插件的。
+            defaults: { ...p.defaults, gpus: this._defaultGpus },
             // `noPackage` 的那几条不带 `package` 这个键（见 _sitePlugins）。
             //   用 `delete` 之外的办法（展开）是因为这里在造一个新对象：
             //   挑字段而不是 `...p` 是有意的，见上面那段"逐字段挑"。
@@ -1298,6 +1335,10 @@ class FakeBackend extends Backend {
       home: '/home/demo',
       account: 'myaccount', account_error: null,
       allowed_partitions: null,
+      // 与守护进程同形：判据是「这个账户查得到吗」。假站点这个账户是写死的
+      //   常量，所以它恒为 true —— 真站点查不到时会报 false，界面据此拦住提交。
+      //   假站点造不出那个现场，记在账本里。
+      can_submit: true,
     });
   }
 
@@ -1437,10 +1478,16 @@ class FakeBackend extends Backend {
       try {
         st = fs.statSync(p);
         text = fs.readFileSync(p, 'utf8');
-      } catch {
-        // `null` = 确实没有这一份（这个插件还没有作业侧，或者它一个字都还
-        //   没说），不是"取不到" —— 两者在界面上是两句不同的话（见 dom.js 的三态）。
-        return null;
+      } catch (e) {
+        // 两种"读不到"必须分开，而它们在这一格上只差一个 `why`：
+        //   · 文件不在就是 `null`。那是"确实没有这一份"（这个插件还没有作业侧，
+        //     或者它一个字都还没说）—— 界面照实说"还没有输出"。
+        //   · 文件在、读不出来（权限、被占着）就是一个带 `why` 的格子。那时说
+        //     "没有输出"是在说一件不成立的事，而用户会去查那个不存在的输出。
+        // 合成一个的后果正是这一版一直在清的那类：把"取不到"说成"没有"。
+        if (e && e.code === 'ENOENT') return null;
+        return { path: p, bytes: 0, lines: 0, truncated: false,
+                 mtime: null, text: null, why: `读不到 ${p}：${e.message}` };
       }
       const all = text.split('\n');
       if (all.length && all[all.length - 1] === '') all.pop();
@@ -1539,7 +1586,16 @@ class FakeBackend extends Backend {
 
     // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
     const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 64);
-    const mem = typeof (req && req.mem) === 'string' && req.mem ? req.mem : DEFAULTS.mem;
+    // 内存那一格：与守护进程的 `sanitize_mem` 逐字同形。
+    //   `--mem=0` 在 Slurm 里的含义是「该节点的全部内存」，不是零 —— 一个笔误
+    //   会让开发会话吃掉整台机器。所以显式拒绝并回退，而回退必须报给用户
+    //   （下面那条 `warning`）：他填了 0，以为生效了，实际拿到的是默认值。
+    const memFix = sanitizeMem(req && req.mem, DEFAULTS.mem);
+    const mem = memFix.mem;
+    /** 服务端替用户做的那些决定。有的话要带出去 —— 静默地替他决定正是
+     *  这个项目一路在清的那类问题。 */
+    const warnings = [];
+    if (memFix.fell) warnings.push(`内存参数无法识别，已改用 ${mem}。`);
     // GRES：与守护进程同一条规矩 —— 分区定下来之后再对账，因为上限是分区
     // 自己的（同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
     const gresp = gresFor(req && req.gres, part);
@@ -1615,8 +1671,14 @@ class FakeBackend extends Backend {
     // 的服务，右栏那些行是它自己说的话。
     //
     // 判据是 `surface`（"这个插件有一个网页界面"）：有界面的那一类真跑作业侧；
-    //   中转站那一类今天仍指向一个没有东西在监听的端口 —— 那边真正的 sshd
-    //   需要一个站点侧装好的 sshd 与主机密钥，假站点演不出来（记在 KNOWN-ISSUES）。
+    //   没有界面的（中转站，以及调试开关造出来的那种"站点上有、本机不认识"的
+    //   条目）不跑 —— 它们的隧道指向一个没有东西在监听的端口，主机公钥是一个
+    //   编出来的值（记在账本 S40）。
+    //
+    //   这一道闸比"中转站"宽：`debugAddSitePlugin` 造的那些条目没有 `surface`，
+    //     走的也是这条路（隧道接得上、会话登记得上），好几条用例靠的正是它。
+    //     换成"这棵树里有没有作业侧"这条更准的判据之前，得先让那条调试开关
+    //     造得出一棵真有作业侧的树 —— 见账本 S40。
     if (sitePlugin.surface) {
       this._startJob(sess, sitePlugin)
         .catch((e) => this._jobFailed(sess, `作业侧起不来：${e.message}`));
@@ -1636,6 +1698,8 @@ class FakeBackend extends Backend {
       //   计算节点上那一趟 `port_free` 是另一件。
       candidates: sess._candidates,
       requested_time: '12:00:00',
+      // 与服务端同形：有替用户做的决定就带一句出去（没有就不带这个键）。
+      ...(warnings.length ? { warning: warnings.join(' ') } : {}),
     });
   }
 
@@ -1751,7 +1815,7 @@ class FakeBackend extends Backend {
       //   客户端）。从前这里是一个写死的假口令，而那个口令与隧道那头是谁无关。
       sess.auth_password = (job.info && job.info.auth_password) || null;
     } else {
-      // 中转站：那边真正的 sshd 假不出来，见 DEMO_HOST_KEY。
+      // 中转站那一类今天不跑作业侧，见 `_submit` 那一段与账本 S40。
       sess.service_port = DEMO_SSHD_PORT;
       sess.ssh_host_key = DEMO_HOST_KEY;
     }
@@ -1839,7 +1903,14 @@ class FakeBackend extends Backend {
   }
 
   _list() {
-    return ok({ sessions: this._sessions.map((s) => this._view(s)) });
+    // 与守护进程的 `op_list` 逐字同形：`with_secret=False`，而且只回最后 50 条。
+    //   秘密（口令、主机公钥）只走 `status` —— 那条路认的是会话号，而 list 回答
+    //   的是「这台机器上都有什么」，两者不是一回事。多给一份秘密的后果是客户端
+    //   养成「list 里就有口令」的假设，而真站点上那一格永远是空的。
+    //   截断那 50 条也不是省事：少一个上界，客户端会拿着一个没有边的列表去画。
+    return ok({
+      sessions: this._sessions.slice(-LIST_MAX).map((s) => this._viewNoSecret(s)),
+    });
   }
 
   /**
@@ -2061,7 +2132,7 @@ class FakeBackend extends Backend {
    *   而不是另写一份。另写一份的那天，推送的字段集与 list 的字段集就会分家，
    *   而症状是界面上某一格在有推送时是空的、没有推送时是满的。
    */
-  _pushView(s) {
+  _viewNoSecret(s) {
     const d = this._view(s);
     delete d.auth_password;
     delete d.ssh_host_key;
@@ -2088,7 +2159,7 @@ class FakeBackend extends Backend {
   _sweepPush() {
     if (!this._connected) return;
     if (Date.now() < this._daemonDownUntil) return;
-    const sessions = this._sessions.map((s) => this._pushView(s));
+    const sessions = this._sessions.map((s) => this._viewNoSecret(s));
     const digest = crypto.createHash('sha256')
       .update(JSON.stringify(sessions)).digest('hex');
     const now = Date.now();
