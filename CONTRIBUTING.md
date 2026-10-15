@@ -80,6 +80,27 @@ node --test
 
 > 要改这一行，先想清楚 CI 跑的是哪个 Node。
 
+界面排布另有一条，它要一个真的排版引擎，所以不在 `node --test` 里：
+
+```bash
+node tools/ui-probe/check.mjs
+```
+
+它跑真的 `panel.html` + `app.css` + `panel.js`，只把 `window.slurmate` 换成桩，
+判的是"有没有东西伸出它所在的区域"。`client/test/renderer.test.mjs` 那一类拿正则
+读源码，判得了"这句话写着什么"，判不了"这句话画出来多宽"，而用户报的
+「文字和按钮都超出了范围」正是后者。
+
+本机没有浏览器时它退出码 2，并在输出里说清去哪儿取：
+
+```bash
+bash tools/ui-probe/get-browser.sh     # 取一个无头 Chromium（约 118MB，落在 ~/.cache）
+CHROME_BIN=/path/to/chrome node tools/ui-probe/check.mjs
+```
+
+不把"没跑成"混进"通过"，与 `tools/check-sanitized.sh` 同一个约定。明确要跳过时
+写 `SLURMATE_SKIP_UI_PROBE=1`，它会在输出里说一声这一遍没有量。
+
 ### 集群侧
 
 ```bash

@@ -167,6 +167,15 @@ body.connected .rail { display: block; }
      看起来像浮着的一张卡片。那 22px 现在由各屏自己的第一块出（见 `#about-head`
      与下面那三条 `.banner-*`）。 */
   padding: 0 26px 40px;
+  /* 面板里任何一段文字都可能来自主进程：一条路径、一个 id、一句 errno 原话。
+     中文自己会折行，带空格的 ASCII 串会在空格处折，Windows 路径还会在反斜杠处
+     折（用户 2026-10-15 截图里那条长路径就是那样折成两行的，它没有把卡片顶出去）。
+     这一条管的是剩下那一种：一个断点都没有的长串（摘要、base64、拼出来的一长串
+     id）。实测过：220 个这种字符能把面板撑到 1787px（可见 850），而这一条在，
+     它就落在容器里。
+     覆盖它的用例在 tools/ui-probe 那份夹具里（那里有一个造出来的长串，理由写在
+     夹具那一段）—— 少了那一格，这一条删掉都没人发现。 */
+  overflow-wrap: anywhere;
 }
 /* 连上之后两条栏占住两边，面板的内容跟着让开 —— 不让的话最左边那一列文字会被
    边栏压住，而那是"看起来只是有点挤"的那类问题。
@@ -250,19 +259,35 @@ button.remember:hover { background: #5c4e22; }
    `.armed` 与 `.armed-off` 是一对：那一行出现的同时，原来那颗按钮留在 DOM 里
      但不显示 —— 删掉它的话，`renderSnapshot` 下一次按 `running` 去 toggle 它的
      `hidden` 就作用在一个已经不存在的元素上（`$()` 拿到 null），而那是一次
-     静默的 TypeError。 */
-.armed { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-.armed-why { color: var(--warn); font-size: 12px; }
-/* 「端口被占」那一行在窗口窄的时候先裁理由，不裁按钮（2026-10-11 加）：
-   从二选一变成三选一之后它长了一截（「记住并启动」比「临时换一个」长得多），
-   而它是这一屏上唯一能做决定的地方 —— 裁掉一颗按钮，用户就答不了这一问。
-   两处都要写：这一格得允许被压缩（`flex: none` 是 `.armed` 的默认，不覆盖的话
-   它按内容宽度撑着，谁都挤不动它）；而理由那一格要给出省略号的行为
-   （`white-space: nowrap` 从 `#statusbar` 继承下来，所以省略号在三颗旁边生效）。
-   被裁短的那段话由主进程给（见 panel.js 的 `renderPortAsk`），长度不由我们定 ——
+     静默的 TypeError。
+
+   这一行不许横向溢出去，而它与容器无关。用户 2026-10-15 报的那一版里，
+   `flex: none` 让整簇按内容宽度撑着（那句后果在插件数据那一行超过一百字），
+   谁也不动它，于是整簇冲出卡片、右边那颗按钮被窗口边切掉。当时只有 `.conn`
+   那一处补过一条 `flex: 1 0 100%`，而同一形状还有三处，它们全靠运气。
+   现在这一条自己成立：
+     · `1 0 100%` 让它自己占一整行（面板里那几个容器都允许换行），
+       于是那句后果拿到的是整行宽度，而不是被挤成一条窄柱；
+     · `min-width: 0` 与 `.armed-why` 的同一格，是让它真的能被压下去的那一步
+       （flex 项目的默认最小尺寸是内容宽度，不写这一句，上面那条 `1 0 100%`
+       在窄窗口里仍然撑破容器）；
+     · 两颗按钮 `flex: none`，被压缩的只能是那句理由。
+   状态条是唯一的一行上下文（它自己 `white-space: nowrap`，30px 高），
+   那里单独覆盖成"裁理由、留按钮"，见下面 `#statusbar .armed`。 */
+.armed { display: inline-flex; align-items: center; gap: 6px; flex: 1 0 100%;
+         flex-wrap: wrap; min-width: 0; }
+.armed-why { color: var(--warn); font-size: 12px; min-width: 0;
+             overflow-wrap: anywhere; }
+.armed > button { flex: none; }
+/* 状态条上那几处（端口三选一、工作区、结束会话）在窗口窄的时候先裁理由，
+   不裁按钮：那是这一屏唯一能做决定的地方，裁掉一颗按钮，用户就答不了这一问。
+   覆盖两格就够：这一格得允许被压缩（上面那条 `1 0 100%` 在这里会撑破 30px 的
+   状态条），而理由那一格要给省略号的行为（`white-space: nowrap` 是状态条自己
+   的规矩，这里写出来是因为它现在是这一条的承重部分，不再是继承来的巧合）。
+   被裁短的那段话由主进程给（见 panel.js 的 `renderPortAsk`），长度不由我们定，
    所以这里不能指望它自己短。 */
-#sb-port { flex: 0 1 auto; min-width: 0; }
-#sb-port-why { overflow: hidden; text-overflow: ellipsis; }
+#statusbar .armed { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
+#statusbar .armed-why { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .armed-off { display: none; }
 
 /* ── 密钥指纹 ──
@@ -294,8 +319,12 @@ button.remember:hover { background: #5c4e22; }
 
 /* ── 区块标题行 ──
    操作按钮在右上角：它们是入口，列表才是内容。摆在列表下面时，列表一长就得先
-   滚过全部条目才够得着。 */
-.sec-head { display: flex; align-items: center; gap: 8px; margin: 26px 0 10px; }
+   滚过全部条目才够得着。
+   `flex-wrap` 是给两段式那一行留的（`#btn-disconnect` 就长在这一行里）：
+   那一簇自己要占一整行（见 `.armed`），这一行不换行的话它只能挤着别人一起
+   冲出去。 */
+.sec-head { display: flex; align-items: center; gap: 8px; margin: 26px 0 10px;
+            flex-wrap: wrap; }
 .sec-head h2 { margin: 0; flex: 1; }
 
 /* ── 已保存的连接列表 ──
@@ -334,13 +363,10 @@ button.remember:hover { background: #5c4e22; }
   font-size: 10px; letter-spacing: .5px;
 }
 
-/* 「删除」那一段两段式的确认行。它是唯一一处长在 `.conn` 这一行 flex 里的
-   两段式，而 `.armed` 在别处（状态条）是 `flex: none`、里面那句后果只有十几个字。
-   这里那句有上百个字，照旧不换行的话，它会把这四颗按钮挤着一起横向溢出去
-   （`.conns` 会因此多一条横向滚动条）。，让它 `1 0 100%` 自己占一整行，
-   里面的两颗按钮 `flex: none`，免得被那句话压扁。 */
-.conn .armed { flex: 1 0 100%; }
-.conn .armed > button { flex: none; }
+/* 「删除」那一段两段式的确认行从前在这里单写两条（`flex: 1 0 100%` 加一句
+   `> button { flex: none }`），理由是当时只有 `.conn` 这一处会长出上百字的后果。
+   那两条现在搬到 `.armed` 自己身上了：同一形状另有四处，而"补了一处、漏了四处"
+   正是 2026-10-15 那一版的毛病。这里不再留一份。 */
 
 /* ── 工作区 ──
    一条连接只用一个工作区，一个工作区可以被多条连接共用。

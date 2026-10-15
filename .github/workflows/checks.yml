@@ -46,6 +46,11 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm test
+      # 排布那一条要一个真的排版引擎，所以它不在 `npm test` 里（那一套是纯 node，
+      # 谁都能跑）。runner 自带 google-chrome，`check.mjs` 自己找得到；本机没有
+      # 浏览器的取法见 tools/ui-probe/get-browser.sh。
+      - name: 界面排布：有没有东西伸出它所在的区域
+        run: node ../tools/ui-probe/check.mjs
 
   # ── 集群侧自测 ──────────────────────────────────────────────────────────────
   # 注意：有人可能会以为这个测试需要真集群才能跑。不需要 ——

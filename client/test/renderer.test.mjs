@@ -587,10 +587,15 @@ test('该两段式的五处走两段式 —— 而重新生成密钥不是（判
   // 而窗口窄的时候：先裁理由，不裁按钮（2026-10-11 加）。三选一之后
   //    它长了一截，而它是这一屏上唯一能做决定的地方 —— 裁掉一颗按钮，用户就答不了。
   //    那一格要允许被压缩，而理由那一格要被省略号截。
-  assert.match(css, /#sb-port\s*\{[^}]*min-width:\s*0/,
-    '那一行要允许被压缩（`.armed` 的缺省是 `flex: none`，若不覆盖它按内容'
-    + '宽度撑着，窄窗口里被裁掉的是最右那颗按钮）');
-  assert.match(css, /#sb-port-why\s*\{[^}]*text-overflow:\s*ellipsis/,
+  //    这两条规则 2026-10-15 搬到 `#statusbar .armed` / `#statusbar .armed-why`
+  //    上了：同一形状另有四处（结束会话、切工作区那两处也在状态条里），而只给
+  //    `#sb-port` 写一份的话，那两处没有这一条 —— 补了一处、漏了四处，正是
+  //    那一版溢出的来源。
+  assert.match(css, /#statusbar \.armed\s*\{[^}]*min-width:\s*0/,
+    '状态条上那一行要允许被压缩（`.armed` 自己那条是 `flex: 1 0 100%`，那是给'
+    + '面板里几个能换行的容器用的；30px 的状态条里必须覆盖成能压的，'
+    + '否则窄窗口里被裁掉的是最右那颗按钮）');
+  assert.match(css, /#statusbar \.armed-why\s*\{[^}]*text-overflow:\s*ellipsis/,
     '而先被裁短的是理由那一段 —— 被裁掉的是一句解释，不是一颗按钮');
   assert.match(js, /\$\('sb-port-why'\)\.title\s*=/,
     '被裁掉的那半句要挂在 `title` 上（停下时还读得全）');
