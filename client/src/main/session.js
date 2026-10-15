@@ -858,7 +858,7 @@ class SessionController extends EventEmitter {
     } else if (c.action === Action.SESSION_GONE) {
       // 会话没了，心跳没有意义了。但不能因此判定作业已停 —— 只报告事实。
       this._stopHeartbeat();
-      this.warning = '控制节点上已找不到该会话，心跳停止。';
+      this.warning = '控制节点上该会话已不存在，心跳停止。';
     } else {
       // 传输层失败 / 守护进程不可达：继续重试，绝不放弃。
       // 这一段正是 300 秒闪断窗口要覆盖的情况。

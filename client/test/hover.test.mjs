@@ -198,10 +198,10 @@ test('★★ 键缺席 = 「取不到」，而且**每一格**都要说出来', 
   h.subs.data({ cluster: cluster(['health', 'partitions', 'nodes', 'queue', 'gres']),
     link: { connected: true } });
   const t = h.text('cl-body');
-  assert.match(t, /取不到：控制器状态/, '控制器那一格');
-  assert.match(t, /取不到：分区列表/, '分区那一格');
+  assert.match(t, /获取失败：控制器状态/, '控制器那一格');
+  assert.match(t, /获取失败：分区列表/, '分区那一格');
   assert.match(t, /不是「没有」/, '★ 而且要说清这是"没问到"，不是"没有"');
-  assert.match(h.text('cl-health'), /取不到/);
+  assert.match(h.text('cl-health'), /获取失败/);
 });
 
 test('★★ 而「确实没有」的时候，那几行**一个字都不许出现**', () => {
@@ -209,14 +209,14 @@ test('★★ 而「确实没有」的时候，那几行**一个字都不许出�
   // 它会在数据齐全的时候也说"没问到"，而那同样是替集群说了一句不成立的话。
   const h = boot();
   h.subs.data({ cluster: cluster(), link: { connected: true } });
-  assert.equal(/取不到：/.test(h.text('cl-body')), false,
+  assert.equal(/获取失败：/.test(h.text('cl-body')), false,
     '数据齐全时不该有任何一行"取不到"');
   // 三态里的第三态：`{}` = 确实没有（一个分区都没有），与"取不到"不同。
   const d = cluster();
   d.partitions = {};
   h.subs.data({ cluster: d, link: { connected: true } });
   assert.match(h.text('cl-body'), /确实一个分区都没有/);
-  assert.equal(/取不到：分区/.test(h.text('cl-body')), false);
+  assert.equal(/获取失败：分区/.test(h.text('cl-body')), false);
 });
 
 test('★★ 链路断了就说断了 —— 它与集群那一份**不是一个时间尺度**', () => {
@@ -233,7 +233,7 @@ test('★★ 链路断了就说断了 —— 它与集群那一份**不是一个
 test('★ 取不到集群信息时，那一句是**错误**，不是空白', () => {
   const h = boot();
   h.subs.data({ cluster: null, clusterError: '守护进程没有响应', link: { connected: true } });
-  assert.match(h.text('cl-body'), /取不到集群信息：守护进程没有响应/);
+  assert.match(h.text('cl-body'), /获取集群信息失败：守护进程没有响应/);
 });
 
 // ── 右栏：作业输出 ──────────────────────────────────────────────────────────
@@ -272,14 +272,14 @@ test('★★ 「取不到」与「确实没有」在右栏里长得必须不一�
   const h = boot();
   pushOut(h, cellOf('', { text: null, why: 'component_group_or_world_writable',
                           bytes: null, lines: null }), null);
-  assert.match(h.text('out-out'), /取不到：component_group_or_world_writable/,
+  assert.match(h.text('out-out'), /获取失败：component_group_or_world_writable/,
     '★ 文件在、但读不了 —— 要说清是哪一条判据');
   assert.equal(h.byId.get('out-half-out').classList.contains('hidden'), false);
 
   // 而"确实没有这一份"是不出现，不是一行"取不到"
   pushOut(h, null, null);
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true);
-  assert.doesNotMatch(h.text('out-out'), /取不到/, '确实没有 ≠ 取不到');
+  assert.doesNotMatch(h.text('out-out'), /获取失败/, '确实没有 ≠ 取不到');
 });
 
 test('★★ 追加式绘制：第二帧只接新行，不重画（重画会毁掉用户正在拖的选区）', () => {

@@ -2600,7 +2600,7 @@ test('★ 读不到自己的版本号 ⇒ 插件**装不得**，且说的是"哪
     '★ 判不了就必须拒 —— `>=0.0` 对任何真实 host 都成立，所以它失败的原因是'
     + '"判不了"，而"判不了"绝不许长得像"通过"');
   assert.equal(r.kind, 'unknown_host', JSON.stringify(r));
-  assert.match(r.why, /读不到自己的版本号/);
+  assert.match(r.why, /读取自己的版本号失败/);
   assert.ok(!/这个插件用不了/.test(r.why),
     '★ 这是客户端这一侧的安装问题，说成"插件用不了"会把用户指去找作者');
 
@@ -3276,7 +3276,7 @@ test('★★ 作业侧起不来 ⇒ 会话**不许判成功**，而原因要说�
   // 判据二：站点那一侧也没有登记过（`ctl.session` 是服务端那一份视图）。
   assert.notEqual(ctl.session.state, 'enrolled', '★★ "登记"这一步在站点上必须没有发生');
   assert.equal(ctl.session.tunnel_target, null, '★ 更不许留下一个隧道目标');
-  assert.match(String(ctl.snapshot().error || ''), /起不来|没有起来|已结束/,
+  assert.match(String(ctl.snapshot().error || ''), /无法启动|没有起来|已结束/,
     '★ 而界面上那句话要指得出"是作业侧起不来"，不是一句"未知错误"');
 
   // 判据二：为什么起不来，在作业日志里，而且是它自己说的。
@@ -3390,7 +3390,7 @@ test('★ 这台机器上没有 bash ⇒ 那句提示说得清是哪一种起不
   assert.match(fakeJob.findBash([path.join(noBash, 'bash')]).why, /没有 bash/);
   const oldBash = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-oldbash-'));
   fs.writeFileSync(path.join(oldBash, 'bash'), '#!/bin/sh\nprintf 3\n', { mode: 0o755 });
-  assert.match(fakeJob.findBash([path.join(oldBash, 'bash')]).why, /太老/,
+  assert.match(fakeJob.findBash([path.join(oldBash, 'bash')]).why, /版本过低/,
     '★ bash 3 上那句 `declare -A: invalid option` 必须换来一句人话');
 
   // ── 而它接得上：整条路上真的走到那句，而且会话不许判成功 ──
@@ -6559,7 +6559,7 @@ test('★ 磁盘删不动时只报、不抛（配置已经删了，就不能报"
   assert.equal(r.ok, true, `清理失败不该把删除本身变成失败：${JSON.stringify(r)}`);
   assert.equal(idx._test.getCfg().connections.some((c) => c.id === conn.id), false,
     '配置那一侧必须真的删掉了');
-  await waitUntil(() => noticesOf().some((n) => /没能清干净/.test(n.text || '')),
+  await waitUntil(() => noticesOf().some((n) => /未能清干净/.test(n.text || '')),
     '要有一条说清磁盘没清干净的提示', 5000);
   assert.equal(fs.existsSync(dir), true, '前提：它真的没被删掉（父层不可写）');
 
@@ -7302,7 +7302,7 @@ test('★★ 连上之后先建作业日志目录：成了不吭声，没成要�
     true, '★ 建不出目录**不算连接失败** —— 连上了就是连上了');
   const said = noticesOf().slice(before2).map((n) => n.text).join('\n');
   assert.match(said, /作业日志目录/, `实际说了：${said}`);
-  assert.match(said, /提交的作业会起不来/, '要说清后果，不是一句"没成"');
+  assert.match(said, /提交的作业会无法启动/, '要说清后果，不是一句"没成"');
   assert.match(said, /Permission denied/, '根因（远端那句原话）也要带上');
 });
 

@@ -437,7 +437,7 @@ def parse_config_gres(raw, where):
     if "," in t:
         raise ValueError(
             "%s 只能写一项（一个插件一份默认 GRES），得到 %r。"
-            "要多种卡就整个不写，让用户在高级选项里自己挑"
+            "要多种卡就整个不写，让用户在高级选项里自己选择"
             % (where, t))
     parts = t.split(":")
     if len(parts) == 2:
@@ -524,7 +524,7 @@ def crosscheck_cidr(cfg, run=None):
         #   「跳过核对」的实质是「cluster_cidr 对不对，这一次没人验」。
         #   照抄文档示例网段 + 恰好这一次问不到 Slurm，两个条件同时成立时，
         #   守护进程会带着一份无效的 ACL 起来，而它的表现是"一切正常"。
-        log.warning("取不到 Slurm 节点列表（rc=%s）：本次【没有】核对 cluster_cidr "
+        log.warning("获取 Slurm 节点列表失败（rc=%s）：本次【没有】核对 cluster_cidr "
                     "（%s）是否覆盖了全部计算节点。若这个网段是照抄文档示例填的，"
                     "现在正是它会被漏过去的时候。", rc, cfg.cluster_cidr)
         return []
@@ -1138,7 +1138,7 @@ def engines_problem(manifest, host_version):
     if parts is None:
         return ("malformed", shape_why)
     if host_version is None:
-        return ("unknown_host", "本站读不到自己的版本号，所以判不了 "
+        return ("unknown_host", "本站读取自己的版本号失败，所以判不了 "
                 "engines.slurmate = %r 满不满足它" % rng)
     ok, why = version_satisfies(host_version, rng)
     if ok:
@@ -1718,14 +1718,14 @@ def scan_plugins(plugins_dir):
                     "        它既不会被分发、也不会被读到。两种常见的成因：\n"
                     "        ① 它是某个插件的源码树里的一份，源码树在作者"
                     "机器上 `packer build` 打成包再装；\n"
-                    "        ② 别的什么，人工确认后删掉。" % full)
+                    "        ② 其他情况，人工确认后删掉。" % full)
         elif not PLUGIN_ID_RE.match(entry):
             problems.append(
                 "%s：这是一个目录，而它的名字不是一个 id（26 位 ULID）。"
                 "站点上的插件由安装器按 id 命名目录，所以这个名字不是它起的。\n"
                 "        它既不会被分发、也不会被读到。若是某个插件的源码树，"
                 "在作者机器上 `packer build` 打成包再装；\n"
-                "        若是别的什么，人工确认后删掉。" % full)
+                "        若是其他情况，人工确认后删掉。" % full)
         else:
             rr = plugin_reconcile(plugins_dir, entry)
             if not rr["ok"]:
@@ -1733,7 +1733,7 @@ def scan_plugins(plugins_dir):
                     "%s：%s\n"
                     "        这个插件不可用：不会被分发、它的作业侧不会被织进"
                     "任何作业脚本，但其余插件照常工作，守护进程照常启动。\n"
-                    "        若你不是刚改过它，有人绕过安装器动了这一棵树或它"
+                    "        若你不是刚改过它，有人绕过安装器动了这份目录树或它"
                     "的记录表，用 `slurmate plugin install` 重装一次；\n"
                     "        若上面那句说的是「没有记录表」，那次安装没提交完，"
                     "重装一次即可。"
@@ -1756,7 +1756,7 @@ def scan_plugins(plugins_dir):
             if not os.path.isdir(plugin_tree_dir(
                 plugins_dir, e[:-len(PLUGIN_RECORD_SUFFIX)]))):
         problems.append(
-            "%s：这里有一份记录表，却没有它对应的那棵树 %s。\n"
+            "%s：这里有一份记录表，却没有它对应的那份目录树 %s。\n"
             "        记录表是那次安装的提交点，它说「这一份装好了」，"
             "而内容不在。\n"
             "        它既不会被分发、也不会被读到。用 `slurmate plugin install` "
@@ -1994,7 +1994,7 @@ def parse_config(path):
     except FileNotFoundError:
         names = []                      # 一个插件都没装：合法状态
     except OSError as e:
-        raise ValueError("插件配置目录 %s 读不出来：%s" % (d, e))
+        raise ValueError("插件配置目录 %s 读取失败：%s" % (d, e))
 
     for fn in names:
         p = os.path.join(d, fn)
@@ -2008,7 +2008,7 @@ def parse_config(path):
             with open(p, "r", encoding="utf-8") as f:
                 text = f.read()
         except OSError as e:
-            raise ValueError("插件配置 %s 读不出来：%s" % (p, e))
+            raise ValueError("插件配置 %s 读取失败：%s" % (p, e))
         sections[name] = parse_plugin_file_text(text, p)
         meta[name] = {"file": p}
     return global_out, sections, meta
@@ -2037,7 +2037,7 @@ _MAIN_NO_SECTION = (
     "          `slurmate plugin sync` 会把缺的那几份补上（用的是插件自己声明的"
     "缺省），\n"
     "          再按需要在补出来的那一份里改。\n"
-    "        这个工具不替你搬：那几行里可能有你调过的默认资源，自动搬一趟"
+    "        这个工具不代为搬运：那几行里可能有你调过的默认资源，自动搬一趟"
     "而搬错了\n"
     "          是静默的（值被合进哪一份、谁盖了谁，配置里看不出来）。")
 
@@ -2632,7 +2632,7 @@ def package_read_file(path):
         with open(path, "rb") as f:
             data = f.read()
     except OSError as e:
-        return {"ok": False, "code": PACKAGE_LENGTH, "why": "读不到 %s：%s" % (path, e)}
+        return {"ok": False, "code": PACKAGE_LENGTH, "why": "读取 %s 失败：%s" % (path, e)}
     return package_parse(data)
 
 
@@ -2712,9 +2712,9 @@ def read_plugin_keys(plugins_dir, strict=False):
     except (OSError, ValueError) as e:
         if strict:
             raise ValueError(
-                "站点的钥匙记录 %s 读不出来（%s）。\n"
-                "  它记着「每个 id 上一次是哪把钥匙签的」，而**读不出来与没有它"
-                "是两回事**，当成空的会让'换了签名者'被静默放行。\n"
+                "站点的钥匙记录 %s 读取失败（%s）。\n"
+                "  它记着「每个 id 上一次是哪把钥匙签的」，而读取失败与没有它"
+                "是两回事，当成空的会让'换了签名者'被静默放行。\n"
                 "  · 能修就修（它是一份 JSON）；\n"
                 "  · 修不了就删掉它（那等于放弃站点侧的钥匙记忆，此后第一次"
                 "装进来的那个包会被当作基准）。" % (path, e))
@@ -2773,7 +2773,7 @@ def openssl_verify_ed25519(pubkey, message, signature):
                  "-keyform", "DER", "-rawin", "-in", mp, "-sigfile", sp],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
-            return "unavailable", "%s 跑不起来：%s" % (PLUGIN_OPENSSL, e)
+            return "unavailable", "%s 无法运行：%s" % (PLUGIN_OPENSSL, e)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     if r.returncode == 0:
@@ -2982,7 +2982,7 @@ def read_plugin_record(plugins_dir, plugin_id):
         return bad(PACKAGE_RECORD, "%s 的最外层不是一个 JSON 对象" % path)
     if rec.get("schema") != PLUGIN_RECORD_SCHEMA:
         return bad(PACKAGE_RECORD,
-                   "%s 的 schema = %r，本实现只认识 %d（站点太新？）"
+                   "%s 的 schema = %r，本实现只认识 %d（站点版本过高？）"
                    % (path, rec.get("schema"), PLUGIN_RECORD_SCHEMA))
     if rec.get("format") != PACKAGE_FORMAT:
         return bad(PACKAGE_FORMAT_BAD, "%s 的 format = %r，本实现只认识 %d"
@@ -3205,7 +3205,7 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
     # ③④⑤ 与盘上那棵树对账
     root = plugin_tree_dir(plugins_dir, plugin_id)
     if not os.path.isdir(root):
-        return bad(PACKAGE_RECORD, "没有那棵树 %s" % root)
+        return bad(PACKAGE_RECORD, "没有那份目录树 %s" % root)
     entries = _tree_entries(root)
     needed_dirs = set()
     for f in files:
@@ -3217,7 +3217,7 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
         kind, full = entries[rel]
         if kind == "other":
             return bad(PACKAGE_CONTENT,
-                       "%s 不是一份普通文件（符号链接、目录链接或者别的东西），"
+                       "%s 不是一份普通文件（符号链接、目录链接或者其他对象），"
                        "负载里表达不出链接，所以这一份不在这次安装里" % full)
         if kind == "dir":
             if rel not in needed_dirs:
@@ -3227,7 +3227,7 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
             continue
         if package_fold_ascii(rel) not in want:
             return bad(PACKAGE_CONTENT,
-                       "%s 在盘上，但记录表里没有它，有人往这棵树里放了东西"
+                       "%s 在盘上，但记录表里没有它，有人往这份目录树里放了内容"
                        % full)
         seen.add(package_fold_ascii(rel))
     for k, f in want.items():
@@ -3325,7 +3325,7 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
                        % (why, PLUGIN_OPENSSL))
         if verdict == "bad":
             return bad(PACKAGE_SIGNATURE,
-                       "签名验不过（%s）。它盖的必须是 %r@%r 这四个东西（A.3），"
+                       "签名验不过（%s）。它盖的必须是 %r@%r 这四个字段（A.3），"
                        "而这一块盖的不是它，\n"
                        "        有人改了记录表里的那个信封。"
                        % (why, sig["id"], sig["version"]))
@@ -3334,16 +3334,16 @@ def plugin_reconcile(plugins_dir, plugin_id, verify=True):
         #    （客户端有，见 site-plugins.js 的 treeSignature）。
         if sd["client"] != sig["digestClient"]:
             return bad(PACKAGE_SIGNATURE,
-                       "从树重算的客户端侧摘要与签名对不上：树是 %s，"
+                       "从树重算的客户端侧摘要与签名不一致：树是 %s，"
                        "签名块里写的是 %s。\n"
                        "        记录表里那几份的 sha256 自洽，所以有人同时改了树"
                        "与记录表里那一行，而签名是作者盖的，改不动。"
                        % (sd["client"], sig["digestClient"]))
         if sd["site"] != sig["digestSite"]:
             return bad(PACKAGE_SIGNATURE,
-                       "从树重算的站点侧摘要与签名对不上：树是 %s，"
+                       "从树重算的站点侧摘要与签名不一致：树是 %s，"
                        "签名块里写的是 %s。\n"
-                       "        这与上一条同源：改树的人顺手把记录表里那一行的 "
+                       "        这与上一条同源：改树的人一并把记录表里那一行的 "
                        "sha256 也改了。签名盖的是作者发的那一份。"
                        % (sd["site"], sig["digestSite"]))
 
@@ -3449,9 +3449,9 @@ def package_input_problem(path, want_uid=None, st=None):
         try:
             st = os.lstat(path)
         except OSError as e:
-            return "读不到这个文件（%s）" % e
+            return "读取这个文件失败（%s）" % e
     if stat.S_ISLNK(st.st_mode):
-        return ("这是一个符号链接。安装器只收普通文件，链接指向的东西可以在"
+        return ("这是一个符号链接。安装器只收普通文件，链接指向的内容可以在"
                 "校验之后被换掉，于是「我读到的那一份」与「校验过的那一份」"
                 "就不是同一份了")
     if not stat.S_ISREG(st.st_mode):
@@ -3461,11 +3461,11 @@ def package_input_problem(path, want_uid=None, st=None):
             owner = pwd.getpwuid(st.st_uid).pw_name
         except KeyError:
             owner = str(st.st_uid)
-        return ("这个文件属于 %s，而安装器以 uid %d 运行。**属主能随时改写自己拥有"
-                "的文件**，所以它必须与安装器同属一个用户（root 装就是 root 拥有）"
+        return ("这个文件属于 %s，而安装器以 uid %d 运行。属主能随时改写自己拥有"
+                "的文件，所以它必须与安装器同属一个用户（root 装就是 root 拥有）"
                 % (owner, want_uid))
     if st.st_mode & 0o022:
-        return ("组或其他用户对这个文件可写（mode %o）。别的用户可以在这中间把它"
+        return ("组或其他用户对这个文件可写（mode %o）。其他用户可以在这中间把它"
                 "换掉，而安装器会照着换过的那一份去读清单与签名" % (st.st_mode & 0o777))
     return None
 
@@ -3541,7 +3541,7 @@ def plugin_src_problems(src_dir):
                     % (path, len(inner), "、".join(inner[:3]), path))
                 continue
         if name.endswith(PLUGIN_PACKAGE_SUFFIX):
-            why = ("它是一个符号链接（链接指向的东西可以换，于是校验过的"
+            why = ("它是一个符号链接（链接指向的内容可以更换，于是校验过的"
                    "与读到的不一定是同一份）" if os.path.islink(path)
                    else "它不是一个普通文件")
             out.append("%s：名字看着像一个包，但%s，不会被安装。" % (path, why))
@@ -3831,7 +3831,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
     if src_dir is not None:
         problems = plugin_src_problems(src_dir)
         if problems:
-            say("✗ 包来源目录 %s 里有东西不是一个插件包，一个字节都没有写："
+            say("✗ 包来源目录 %s 里有不是插件包的内容，一个字节都没有写："
                 % src_dir)
             for p in problems:
                 say("  · %s" % p)
@@ -3946,7 +3946,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
                     # 坏掉的安装，而"重装一遍"正是修它的动作，在这里拦住会把
                     # 唯一的出路也堵上。说一句是必须的：不说的话，"比不了"与
                     # "比过了、一样"在输出上长得一样，而那正是这一节要防的形状。
-                    say("  %s：盘上已经有一棵 %s，但它读不出来（%s），没法比"
+                    say("  %s：盘上已经有一棵 %s，但它读取失败（%s），没法比"
                         "内容，这一份会覆盖它。"
                         % (os.path.basename(path), dst,
                            old["code"] if not old["ok"] else "清单里没有 version"))
@@ -3963,7 +3963,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
                         "        永远不会发现换过（它们重新对账时核的是本机那一份，"
                         "本站新报的摘要\n"
                         "        不参与那次比较），于是同一个版本号在两个人那里是两个"
-                        "不同的东西。\n"
+                        "不同的内容。\n"
                         "        两条路，看你确认了哪一条：\n"
                         "          · 让作者升版本号再发，内容变了，版本就该变，这是对的；\n"
                         "          · 你确认就是要就地换掉它，先 `slurmate plugin "
@@ -4015,7 +4015,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
             if verdict == "bad":
                 problems.append(
                     "%s：签名验不过（%s）。\n"
-                    "        签名盖的是 %r@%r 这四个东西（A.3），而这一块盖的不是它。\n"
+                    "        签名盖的是 %r@%r 这四个字段（A.3），而这一块盖的不是它。\n"
                     "        包在下载或存放的过程中被改过（或作者发出来的就是坏的）"
                     "，重新下载一次；还是这样就让作者查。"
                     % (path, why, sig["id"], sig["version"]))
@@ -4042,7 +4042,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
                     "除非他们自己重新钉。\n"
                     "          · 这是另一个插件（分身），让作者 `packer init "
                     "--fork` 铸一个新 id，两边各自按新 id 发。\n"
-                    "        在你确认之前，本安装器不替你选，两个方向的后果"
+                    "        在你确认之前，本安装器不代为选择，两个方向的后果"
                     "相反，而它判不了是哪一个。"
                     % (path, spec.id,
                        was or "（当时没有签名）", now or "（这一份没有签名）",
@@ -4115,7 +4115,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
                 plugins_dir, set(spec.id for _p, _r, spec, _n in verified))
         except OSError as e:
             say("✗ %s" % e)
-            say("  一个字节都没有写，读不出记录就不知道哪些该卸，"
+            say("  一个字节都没有写，读取记录失败就不知道哪些该卸，"
                 "而当成空集等于放行一次全清。")
             return 1
         for _n in stale_ids:
@@ -4271,7 +4271,7 @@ def uninstall_plugins(ids, plugins_dir, conf_path, jobs_dir, say=print,
         keys = read_plugin_keys(plugins_dir, strict=True)
     except ValueError as e:
         keys = None
-        say("  站点的钥匙记录读不出来（%s），本次不动它："
+        say("  站点的钥匙记录读取失败（%s），本次不动它："
             % str(e).split("\n")[0])
         say("    卸掉的插件会在记录里留一条，下次装同一个 id 可能撞上"
             "「签名者变了」。")
@@ -4412,7 +4412,7 @@ def plugin_jobsh_problems(pname, text):
     if not re.search(r"(?m)^[ \t]*start_%s[ \t]*\(\)" % re.escape(suffix), text):
         out.append(
             "文件里没有定义 start_%s（插件 %s 的作业侧入口）。\n"
-            "        宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字对不上"
+            "        宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字不一致"
             "等于没有实现。\n"
             "        短名里的 `-` 在这一侧写成 `_`。" % (suffix, pname))
 
@@ -4489,9 +4489,9 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
     except OSError:
         existing = []
     if existing and INSTALLED_MARKER not in existing:
-        say("✗ 作业脚本目录 %s 里已经有东西，但它不是本工具装的（没有 %s）。"
+        say("✗ 作业脚本目录 %s 里已经有内容，但它不是本工具装的（没有 %s）。"
             % (jobs_dir, INSTALLED_MARKER))
-        say("  为避免删掉别人的文件，中止。确认里面没有你要保留的东西之后，"
+        say("  为避免删掉别人的文件，中止。确认里面没有你要保留的内容之后，"
             "人工执行：")
         say("      rm -rf '%s'" % jobs_dir)
         return 1
@@ -4761,7 +4761,7 @@ def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
         say("  一个字节都没有写。 先把它修好（`slurmate-sessiond --check` 会列全）。")
         return 1
     except OSError as e:
-        say("✗ 配置文件 %s 读不出来：%s（要以 root 跑吗？）" % (path, e))
+        say("✗ 配置文件 %s 读取失败：%s（要以 root 跑吗？）" % (path, e))
         return 1
 
     for p in dir_problems:
@@ -4793,7 +4793,7 @@ def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
     for name, why in stray_manual:
         say("  %s 指的是一个本站没有装的插件，而它不是安装器起的名字"
             "（不是一个 ULID），" % _conf_file_of(meta, name))
-        say("    这个工具不替你删手写的文件。%s" % why)
+        say("    这个工具不代为删除手写的文件。%s" % why)
     for _id, names in sorted(files_of.items()):
         if len(names) > 1:
             say("  %s 与 %s 指的是同一个插件（id %s），"
@@ -5092,7 +5092,7 @@ def resolve_plugin_spec(by_id, by_name, key, plugins_dir):
                               for s in sorted(same, key=lambda s: s.id))))
     if not by_id:
         return None, (
-            "本站一个插件都没装，所以任何名字都配不上。插件安装目录 %s "
+            "本站一个插件都没装，所以任何名字都不匹配。插件安装目录 %s "
             "是空的。（装插件是放一个 .splug 包进去："
             "`sudo slurmate plugin install --from <那个目录>`，"
             "见 packer/docs/README.md。）" % plugins_dir)
@@ -5141,8 +5141,8 @@ def duplicate_plugin_conf_problem(sections, meta, resolve):
             errors.append(
                 "%s 与 %s 指的是同一个插件（id %s），同一个插件配了两遍。"
                 "删掉其中一个文件。\n"
-                "        不许挑一个用：两份里可能有一份是管理员改过的，"
-                "挑错哪一份都是静默的（改的东西一个字都没生效，而配置里看不出"
+                "        不许选择一个用：两份里可能有一份是管理员改过的，"
+                "选错哪一份都是静默的（改的内容一个字都未生效，而配置里看不出"
                 "任何迹象）。"
                 % (_conf_file_of(meta, first), _conf_file_of(meta, name), spec.id))
             continue
@@ -5280,8 +5280,8 @@ def plugin_gres_problems(plugins, catalog):
                  if e["name"] == g["name"]
                  and (not g["type"] or e["type"] == g["type"])]
         if not match:
-            out.append("插件 %s 的配置里 default_gpus 写的是 %s，而**本站没有这种"
-                       "资源**（本站有的是：%s）"
+            out.append("插件 %s 的配置里 default_gpus 写的是 %s，而本站没有这种"
+                       "资源（本站有的是：%s）"
                        % (p.name, gres_spec(g),
                           "、".join(names) or "什么 GRES 都没配"))
         elif g["count"] > max(e["per_node_max"] for e in match):
@@ -5319,7 +5319,7 @@ def machine_selfcheck(cfg, nft=None):
     out = []
     missing = [n for n in SLURM_COMMANDS if not getattr(cfg, n)]
     if missing:
-        out.append("这台机器上找不到这些 Slurm 命令：%s。\n"
+        out.append("这台机器上未找到这些 Slurm 命令：%s。\n"
                    "        （配置里留空表示自动查找，已在 PATH 与 %s 里找过。）\n"
                    "        这通常意味着这一台不是 Slurm 登录节点，守护进程"
                    "在它上面提交不了任何作业。"
@@ -5327,7 +5327,7 @@ def machine_selfcheck(cfg, nft=None):
     if nft is None:
         nft = shutil.which("nft") or "/sbin/nft"
     if not (os.path.exists(nft) and os.access(nft, os.X_OK)):
-        out.append("这台机器上找不到 nft（%s），守护进程没法维护 ACL，"
+        out.append("这台机器上未找到 nft（%s），守护进程没法维护 ACL，"
                    "会话的隧道端口谁也拦不住。" % nft)
     return out
 
@@ -5360,7 +5360,7 @@ def reserved_ports_warning(cfg, raw=None):
                     "重叠（%s = %s）。\n"
                     "        这不会让 nft 规则失效（它匹配 dport），只会让作业"
                     "偶尔多试几个候选端口。\n"
-                    "        要消掉它：把本区间从 %s 里去掉，或者把端口池挪走。"
+                    "        要消掉它：把本区间从 %s 里去掉，或者把端口池移走。"
                     % (cfg.port_start, cfg.port_end, a, b,
                        IP_LOCAL_RESERVED_PORTS, raw.strip(),
                        IP_LOCAL_RESERVED_PORTS))
@@ -5388,7 +5388,7 @@ def plugin_keys_problem(sections, meta, resolve):
             if key in GLOBAL_KEYS:
                 errors.append(
                     "%s 里有 %r，它是站点通用键，那种键写在主配置里"
-                    "（`slurmate.conf`），不在插件这一份里。把它挪到那边即可。"
+                    "（`slurmate.conf`），不在插件这一份里。把它移到那边即可。"
                     % (where, key))
             else:
                 errors.append(
@@ -5763,7 +5763,7 @@ class Config(object):
             diff.append("少 %s" % "、".join(missing))
         if extra:
             diff.append("多 %s" % "、".join(extra))
-        return ["数据库 %s 的 sessions 表与本版对不上（%s）。SQLite 不会改已存在的"
+        return ["数据库 %s 的 sessions 表与本版不一致（%s）。SQLite 不会改已存在的"
                 "表，而两种方向的错都只会在第一次用到时才炸成一个不提数据库的"
                 "「内部错误」。删掉它再启动即可，会话归属能从 nft 规则重建："
                 "rm -f %s" % (self.db_path, "；".join(diff), self.db_path)]
@@ -5789,7 +5789,7 @@ class Config(object):
         _dft_spec, _dft_why = (self.resolve_plugin(self.default_plugin)
                                if self.default_plugin else (None, None))
         if self.default_plugin and _dft_spec is None:
-            errors.append("配置里的 default_plugin = %r 配不上：%s"
+            errors.append("配置里的 default_plugin = %r 不匹配：%s"
                           % (self.default_plugin, _dft_why))
         elif self.default_plugin and not self.plugins[_dft_spec.id].enabled:
             # 装了、但关着，这是配置里两处互相打架，不是合法状态。
@@ -5867,7 +5867,7 @@ class Config(object):
         for name in SLURM_COMMANDS:
             path = getattr(self, name)
             if not path:
-                errors.append("找不到 %s：配置里留空表示自动查找，已在 PATH 与 %s "
+                errors.append("未找到 %s：配置里留空表示自动查找，已在 PATH 与 %s "
                               "里找过，都没有。请在配置里写明它的绝对路径。"
                               % (name, "、".join(SLURM_BIN_DIRS)))
             elif not os.path.exists(path):
@@ -6828,7 +6828,7 @@ class Slurm(object):
         if rc != 0:
             return None
         if len(out) > CLUSTER_QUERY_MAX_BYTES:
-            log.warning("sinfo -N 输出 %d 字节，超过上限 %d，本次按取不到处理",
+            log.warning("sinfo -N 输出 %d 字节，超过上限 %d，本次按获取失败处理",
                         len(out), CLUSTER_QUERY_MAX_BYTES)
             return None
         table = {}
@@ -6876,7 +6876,7 @@ class Slurm(object):
             # 这个常量管的是解析与保留，不是读取：`run_cmd` 已经把输出整个
             #   读进来了（本文件里每一条查询都是如此，`scontrol show node -o`
             #   同样）。写成"上限"而不说清管哪一段，下一个人会以为读也被截住了。
-            log.warning("squeue 输出 %d 字节，超过上限 %d，本次按取不到处理",
+            log.warning("squeue 输出 %d 字节，超过上限 %d，本次按获取失败处理",
                         len(out), CLUSTER_QUERY_MAX_BYTES)
             return None
         depth, pending, by_user = {}, {}, {}
@@ -6988,7 +6988,7 @@ class Slurm(object):
         """
         logdir = job_log_dir(home)
         if not logdir:
-            return None, "查不到这个 uid 的家目录（NSS），无法确定作业日志的落点"
+            return None, "无法查询这个 uid 的家目录（NSS），无法确定作业日志的落点"
         argv = build_sbatch_argv(self.cfg, sess, env, logdir,
                                  job_script, service_kind)
         pw = pwd.getpwnam(user)
@@ -7850,7 +7850,7 @@ class Sessiond(object):
             # 点名是哪个键（用户要的措辞）：这一档的读者要去改的是
             #   `cluster_cidr`。照着改完热重载是能生效的，所以这里不必说
             #   "去重启"，与上面那两档（COLD、自检不过）的出路不同。
-            log.error("热重载拒绝：cluster_cidr 与 Slurm 的节点地址对不上，"
+            log.error("热重载拒绝：cluster_cidr 与 Slurm 的节点地址不一致，"
                       "新配置一个字都没被采用（旧配置继续服务）。改对之后"
                       "再发一次 reload 即可，不必重启。")
             for e in cidr_errs:
@@ -8146,7 +8146,7 @@ class Sessiond(object):
                 n = self.job_missing.get(s["session_id"], 0) + 1
                 self.job_missing[s["session_id"]] = n
                 if n < self.cfg.job_missing_confirm_ticks:
-                    log.warning("会话 %s（job=%s）连续 %d 次查不到，"
+                    log.warning("会话 %s（job=%s）连续 %d 次查询失败，"
                                 "未达确认阈值 %d，暂不释放",
                                 s["session_id"], s["job_id"], n,
                                 self.cfg.job_missing_confirm_ticks)
@@ -8296,7 +8296,7 @@ class Sessiond(object):
         if why == "unknown":
             how = "联系不上控制节点，问不到它还在不在"
         else:
-            how = "作业还在（%s）" % (jstate or "拿不到状态")
+            how = "作业还在（%s）" % (jstate or "获取状态失败")
         log.warning("会话 %s（job=%s）释放不了：%s。防护与 ACL 一律保留，"
                     "在作业被确认消失之前不会标成已释放",
                     sid, s["job_id"], how)
@@ -8411,7 +8411,7 @@ class Sessiond(object):
             # 首报不节流：这条 warning 是"文件不见了而作业还在"，它是运维唯一
             # 会看见的信号。晚 30 分钟才说第一句等于没说。
             self.enroll_file_missing[sid] = (now, now)
-            log.warning("会话 %s 的会话文件暂时读不到（%s），保留 ACL", sid, why)
+            log.warning("会话 %s 的会话文件暂时读取失败（%s），保留 ACL", sid, why)
             self.audit("enroll_file_unreadable", session=sid, job=s["job_id"],
                        why=why, seconds=0)
             return
@@ -8421,7 +8421,7 @@ class Sessiond(object):
         # 到点说一次，并把"上一次说"拨到此刻，频率因此是"每
         # enroll_file_warn_seconds 一次"，而不是每个 tick 一次。
         self.enroll_file_missing[sid] = (first_seen, now)
-        log.warning("会话 %s 的会话文件仍然读不到（%s），已持续 %d 秒，保留 ACL",
+        log.warning("会话 %s 的会话文件仍然读取失败（%s），已持续 %d 秒，保留 ACL",
                     sid, why, now - first_seen)
         self.audit("enroll_file_unreadable", session=sid, job=s["job_id"],
                    why=why, seconds=now - first_seen)
@@ -8436,7 +8436,7 @@ class Sessiond(object):
         seen = self.enroll_file_missing.pop(s["session_id"], None)
         if seen is None:
             return
-        log.info("会话 %s 的会话文件又能读到了（读不到持续了 %d 秒），刷新恢复正常",
+        log.info("会话 %s 的会话文件读取恢复正常（此前连续读取失败 %d 秒）",
                  s["session_id"], max(0, now_ts() - seen[0]))
 
     def maybe_renew(self, s, job):
@@ -9557,7 +9557,7 @@ class Sessiond(object):
         info = self.plugin_package(p.spec)
         if info is None:
             return self._err(9, "plugin_package_changed",
-                             "%s@%s 装出来的那棵树与它的记录表对不上账了，"
+                             "%s@%s 装出来的那份目录树与它的记录表不一致，"
                              "本站的插件与启动时扫到的那一份不是同一份，"
                              "重装一次那个插件再试" % (plugin_id, version))
 
@@ -9581,7 +9581,7 @@ class Sessiond(object):
         blob, r = plugin_rebuild(os.path.dirname(p.spec.install_dir), p.spec.id)
         if not r["ok"]:
             return self._err(9, "plugin_package_changed",
-                             "%s@%s 装出来的那棵树与它的记录表对不上账了：%s\n"
+                             "%s@%s 装出来的那份目录树与它的记录表不一致：%s\n"
                              "        本站的插件与启动时扫到的那一份不是同一份，"
                              "重装一次那个插件再试。\n"
                              "        在修好之前本站不会把这一份发出去，"
@@ -10349,7 +10349,7 @@ class Sessiond(object):
             #   兜住。这不是漏判，别把它"修"成拒绝：拒绝会让一次 sacctmgr
             #   抖动变成所有用户都开不了会话，而这里没有任何安全损失。
             partition = ""
-            warning.append("暂时查不到你的分区权限，本次交给 Slurm 的默认分区。")
+            warning.append("暂时无法查询你的分区权限，本次交给 Slurm 的默认分区。")
         else:
             usable = [n for n in table if allowed is None or n.lower() in allowed]
             if not usable:
@@ -10651,7 +10651,7 @@ def main():
         if args.plugins_dir:
             sys.stderr.write(
                 "--plugins-dir 指向 %s 而不是本站的插件目录，没有对齐任何"
-                "东西。\n  那是一条排查路径，拿它去对齐会把本站的插件配置与作业"
+                "内容。\n  那是一条排查路径，拿它去对齐会把本站的插件配置与作业"
                 "脚本全删掉。\n" % args.plugins_dir)
             return 0
         try:
@@ -10684,7 +10684,7 @@ def main():
             _all_keys = read_plugin_keys(where, strict=True)
         except ValueError as e:
             _all_keys = {}
-            print("  站点侧的钥匙记录读不出来，「换了签名者」这件事现在判不了：")
+            print("  站点侧的钥匙记录读取失败，「换了签名者」这件事现在判不了：")
             print("    %s" % str(e).split("\n")[0])
         print("插件目录 %s 里有 %d 个插件：" % (where, len(specs)))
         # 这一屏不读站点配置（它要能在一台配置读不出来的机器上跑，也
@@ -10725,7 +10725,7 @@ def main():
             if not _now["ok"]:
                 # `scan_plugins()` 刚刚才把这一份对上过账（对不上的根本进不了
                 # specs），所以走到这里只有一种成因：这两步之间它被换掉了。
-                print("                  对不上账了（%s），刚才还是好的，"
+                print("                  不一致（%s），刚才还是好的，"
                       "是这两步之间被换掉的吗？" % _now["code"])
                 continue
             # 这里有两个不同的量：
@@ -10864,7 +10864,7 @@ def main():
         print("  外部命令      :")
         for _n in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr"):
             _p = getattr(cfg, _n)
-            print("    %-9s %s" % (_n, _p or "【找不到】配置留空且 PATH 与候选目录里都没有"))
+            print("    %-9s %s" % (_n, _p or "【未找到】配置留空且 PATH 与候选目录里都没有"))
         # 插件逐个打印：开没开、默认资源、可执行文件解析到了哪里。
         # 同样打印【解析结果】：`bin` 留空是推荐值，而留空之后落在了哪个路径上，
         #   以及那个路径是"配置指定的"还是"猜的"，只有这里说得清。
@@ -10935,7 +10935,7 @@ def main():
                     if _d else {})
             _total = sum(v[0] for v in _idx.values())
             print("      %-11s %s / %d 份文件（负载 %s）%s"
-                  % ("分发", human_bytes(_d["bytes"]) if _d else "【对不上账】",
+                  % ("分发", human_bytes(_d["bytes"]) if _d else "【不一致】",
                      len(_idx), human_bytes(_total),
                      "" if _p.enabled else "（本站没启用它，客户端不会来取）"))
             print("      %-11s %s（+ %s）"
@@ -10966,14 +10966,14 @@ def main():
               "                  并保持现状，也就是不会误释放会话，"
               "但仍建议先修好 Slurm。"))
         _v = slurm.slurm_version()
-        print("  Slurm 版本    : %s" % (_v if _v else "【读不到】sinfo -V 失败"))
+        print("  Slurm 版本    : %s" % (_v if _v else "【读取失败】sinfo -V"))
         table = slurm.partition_table()
         # 节点忙闲（sinfo）。在这里也打一遍，因为它是新增的三个外部命令
         # 里最容易被漏配的那个，而它失败时界面上长得像"这个集群没有节点"。
         _node_counts = slurm.node_table()
         _q = slurm.queue_table()
         if table is None:
-            print("  分区          : 【读不到】scontrol show partition 失败")
+            print("  分区          : 【读取失败】scontrol show partition")
         elif not table:
             print("  分区          : 【一个都没有】")
         else:
@@ -10994,7 +10994,7 @@ def main():
         # 没有任何一份副本可以拿来对照。
         _cat = slurm.gres_catalog()
         if _cat is None:
-            print("  GRES          : 【读不到】scontrol show node 失败"
+            print("  GRES          : 【读取失败】scontrol show node"
                   "（这不影响提交，但界面上不会有可选项，服务端也不校验上限）")
         else:
             print("  GRES          :")
@@ -11011,10 +11011,10 @@ def main():
         for _w in plugin_gres_problems(cfg.plugins.values(), _cat):
             print("  %s" % _w)
         if _node_counts is None:
-            print("  节点忙闲      : 【读不到】sinfo -N 失败（界面上会显示为"
-                  "「取不到」，不是「没有节点」）")
+            print("  节点忙闲      : 【读取失败】sinfo -N（界面上会显示为"
+                  "「获取失败」，不是「没有节点」）")
         if _q is None:
-            print("  队列          : 【读不到】squeue 失败")
+            print("  队列          : 【读取失败】squeue")
         else:
             print("  队列          : %d 个排队、%d 个在跑" % (
                 sum(d["pending"] for d in _q["depth"].values()),
@@ -11046,7 +11046,7 @@ def main():
         if errors:
             return 1
         if cidr_errors:
-            print("配置检查未通过：cluster_cidr 与 Slurm 的节点地址对不上（见上）")
+            print("配置检查未通过：cluster_cidr 与 Slurm 的节点地址不一致（见上）")
             return 1
         return 0
 

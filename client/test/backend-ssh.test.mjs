@@ -290,7 +290,7 @@ test('缺字段时不抛异常，而是如实说「未知」', () => {
   const msg = sshBackend.authFailureDetail({ user: 'u', host: 'h', port: 22 });
   assert.match(msg, /u@h:22/);
   assert.match(msg, /指纹 未知/);
-  assert.match(msg, /没能取到公钥/);
+  assert.match(msg, /未能获取公钥/);
 });
 
 test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVersion', async () => {

@@ -746,7 +746,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   'window.__starts = [];'
   + 'window.__reply = { ok: false, code: "port_conflict",'
   + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
-  + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };'
+  + '  error: "首选端口 18080 被其他程序占用（它是这份数据在浏览器里的地址）。" };'
   + 'window.slurmate.start = (res, kind, choice) => {'
   + '  window.__starts.push([kind, choice]); return Promise.resolve(window.__reply); };'
   + 'window.slurmate.partitions = () => Promise.resolve({ ok: true, plugins: null });');
@@ -771,7 +771,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
     '★ 第一趟**不带作答** —— 要不要问是主进程按后端与那一份数据判的，界面不猜');
   assert.equal(row.classList.contains('hidden'), false, '★ 被挡下时那一行要摆出来');
   assert.match(h.doc.getElementById('sb-port-why')._text, /18080/, '理由里要念出那个端口');
-  assert.match(h.doc.getElementById('sb-port-why')._text, /被别的程序占着/,
+  assert.match(h.doc.getElementById('sb-port-why')._text, /被其他程序占用/,
     '★ 那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
   // 三颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /布局/,
@@ -812,7 +812,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   // ── ④ 答「取消」，就地收掉，一个字节都不发，而且说一句实话 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
-    + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
+    + '  error: "首选端口 18080 被其他程序占用（它是这份数据在浏览器里的地址）。" };');
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
   const calls = h.run('window.__starts.length');
@@ -837,7 +837,7 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   // ── ⑥ 走开（换屏 / 连上 / 断开都走这条路），那一行收掉 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
     + '  port: { want: 18080, spaceId: "s000000000001" }, sessions: [], front: null,'
-    + '  error: "首选端口 18080 被别的程序占着（它是这份数据在浏览器里的地址）。" };');
+    + '  error: "首选端口 18080 被其他程序占用（它是这份数据在浏览器里的地址）。" };');
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
   h.fn('showScreen')('conns');
@@ -1479,19 +1479,19 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
     + " mtime: null, text: null, why: 'component_group_or_world_writable' },"
     + ' err: null } });');
   await h.run('loadJobLog()');
-  assert.match(shown(), /取不到：component_group_or_world_writable/);
+  assert.match(shown(), /获取失败：component_group_or_world_writable/);
   assert.match(shown(), /\/h\/a\.out/, '路径要给出来（可复制）');
 
   // ③ 两份都没有，一句"还没有写出任何东西"，而不是一个空框
   h.run("window.slurmate.jobLog = async () => ({ ok: true, data: { out: null, err: null } });");
   await h.run('loadJobLog()');
-  assert.match(shown(), /还没有写出任何东西/);
+  assert.match(shown(), /还没有输出任何内容/);
 
   // ④ 整条 op 失败（老守护进程没有这个能力），如实说，不画空框
   h.run("window.slurmate.jobLog = async () => ({ ok: false, unsupported: true,"
-    + " error: '这个站点太旧' });");
+    + " error: '这个站点的守护进程版本过低，不支持插件分发。' });");
   await h.run('loadJobLog()');
-  assert.match(shown(), /这个站点太旧/);
+  assert.match(shown(), /这个站点的守护进程版本过低/);
 });
 
 test('★★ 「取不回来」的三种情况是三句不同的话，各有各的出路', () => {

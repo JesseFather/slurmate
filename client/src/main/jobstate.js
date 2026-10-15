@@ -77,7 +77,7 @@ const ENDED = {
   BOOT_FAIL: '已结束（节点启动失败）',
   DEADLINE: '已结束（到截止时间）',
   OUT_OF_MEMORY: '已结束（内存不足）',
-  LAUNCH_FAILED: '已结束（没能启动）',
+  LAUNCH_FAILED: '已结束（未能启动）',
   REVOKED: '已结束（被撤销）',
   PREEMPTED: '已结束（被抢占）',
 };
@@ -97,7 +97,7 @@ const REASON = {
   Reservation: '在等预约时段开始',
   Licenses: '在等许可证',
   ReqNodeNotAvail: '指定要求的节点当前不可用',
-  NodeDown: '节点故障，正在等别的节点',
+  NodeDown: '节点故障，正在等其他节点',
   BeginTime: '还没到它的开始时间',
   // 等下去没用
   JobHeldUser: '被挂起了（hold），不 release 就不会开始',

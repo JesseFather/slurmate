@@ -28,7 +28,7 @@
  *   （见 windows.js 的 `_startCursorWatch`）。这一页只负责画。
  *
  * 三态是承重的，与服务端逐字同一条规矩：
- *     键不在 / `undefined`   = 【取不到】→ `na(...)` 那一行
+ *     键不在 / `undefined`   = 【获取失败】→ `na(...)` 那一行
  *     `null` / `[]` / `{}`    = 【确实没有】
  *   把前者画成后者，用户会去查一个不存在的问题。
  */
@@ -204,11 +204,11 @@ function paintPane(halfId, boxId, metaId, cell) {
   }
   half.classList.remove('hidden');
   if (it.kind === 'na') {
-    // 取不到：文件在，但过不了安全检查或者打不开。与"确实没有"必须长得
+    // 获取失败：文件在，但过不了安全检查或者打不开。与"确实没有"必须长得
     // 不一样 —— 并成一句的话，一个模式不对的日志会被读成"这台站点上没有日志"。
     box.textContent = '';
     box._lines = [];
-    box.append(cel('p', 'na', `取不到：${it.why}`));
+    box.append(cel('p', 'na', `获取失败：${it.why}`));
     meta.textContent = it.path;
     return;
   }
@@ -221,7 +221,7 @@ function renderOut() {
   when.textContent = '';
 
   if (OUT.unsupported || OUT.error) {
-    // 整块取不到：两块都收起来，只留一句。能力缺席与一次失败在这一层是同一种
+    // 整块获取失败：两块都收起来，只留一句。能力缺席与一次失败在这一层是同一种
     // 画法（都看不到东西），而区别由那句话本身说清。
     $('out-half-out').classList.add('hidden');
     $('out-half-err').classList.add('hidden');
@@ -232,7 +232,7 @@ function renderOut() {
     half.classList.remove('hidden');
     box.textContent = '';
     box._lines = [];
-    box.append(cel('p', 'na', OUT.error || '取不到'));
+    box.append(cel('p', 'na', OUT.error || '获取失败'));
     $('out-out-meta').textContent = '';
     return;
   }
@@ -252,7 +252,7 @@ function renderOut() {
     const box = $('out-out');
     box.textContent = '';
     box._lines = [];
-    box.append(cel('p', 'sub', '这个作业还没有写出任何东西。'));
+    box.append(cel('p', 'sub', '这个作业还没有输出任何内容。'));
   }
 }
 
@@ -311,8 +311,8 @@ function partitionBlock(name, info, nodes, queue, gres) {
   row.append(cel('div', 'dim', `队列　${qs}`));
 
   const g = gres && gres[name];
-  // 三态：`gres` 整个键缺席 = 取不到；`[]` = 这个分区确实一张卡都没有。
-  const gs = !gres ? '取不到'
+  // 三态：`gres` 整个键缺席 = 获取失败；`[]` = 这个分区确实一张卡都没有。
+  const gs = !gres ? '获取失败'
     : (g === undefined ? '（不在 GRES 清单里）'
       : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`).join('，')
         : '确实一张都没有'));
@@ -326,9 +326,9 @@ function renderCluster() {
   box.textContent = '';
 
   if (SITE.error) {
-    $('cl-health').textContent = '取不到';
+    $('cl-health').textContent = '获取失败';
     $('cl-health').className = 'st bad';
-    box.append(cel('p', 'bad', `取不到集群信息：${SITE.error}`));
+    box.append(cel('p', 'bad', `获取集群信息失败：${SITE.error}`));
     return;
   }
   const d = SITE.data;
@@ -341,7 +341,7 @@ function renderCluster() {
   const h = d.health;
   $('cl-health').textContent = h
     ? `控制器${h.up ? '在线' : '连不上'}`
-    : '控制器状态取不到';
+    : '控制器状态获取失败';
   $('cl-health').className = 'st' + (h && !h.up ? ' bad' : '');
   if (h) box.append(cel('p', 'sub', `取数于 ${agoText(h.at) || '刚刚'}`));
 
@@ -351,11 +351,11 @@ function renderCluster() {
 
   const ver = cel('div', 'ctable');
   ver.append(cel('div', 'k', 'Slurm'));
-  ver.append(cel('div', null, d.version || '取不到'));
+  ver.append(cel('div', null, d.version || '获取失败'));
   ver.append(cel('div', 'k', '分区表'), cel('div', null,
     d.partitions ? `${Object.keys(d.partitions).length} 个` +
       (agoText(d.taken && d.taken.partitions) ? `（${agoText(d.taken.partitions)}）` : '')
-      : '取不到'));
+      : '获取失败'));
   box.append(ver);
 
   // ── 分区 ──
@@ -381,17 +381,17 @@ function renderCluster() {
   const me = d.me || {};
   const mine = cel('div', 'ctable');
   mine.append(cel('div', 'k', '账户'), cel('div', null,
-    me.account || (me.account_error ? '无' : '取不到')));
+    me.account || (me.account_error ? '无' : '获取失败')));
   if (me.account_error) mine.append(cel('div', 'k', ''), cel('div', 'bad', me.account_error));
   // 三态：`null` = 不限（这是答案，不是没问到）。
   mine.append(cel('div', 'k', '可提交分区'), cel('div', null,
-    me.allowed_partitions === undefined ? '取不到'
+    me.allowed_partitions === undefined ? '获取失败'
       : (me.allowed_partitions === null ? '不限制'
         : me.allowed_partitions.join('，') || '一个都没有')));
   mine.append(cel('div', 'k', '公平份额'), cel('div', null,
     me.fairshare ? `${me.fairshare.fair_share || '—'}`
       + `（账户 ${me.fairshare.account || '—'}，`
-      + `已用 ${me.fairshare.effectv_usage || '—'}）` : '取不到'));
+      + `已用 ${me.fairshare.effectv_usage || '—'}）` : '获取失败'));
   if (typeof me.pending_count === 'number') {
     const fi = Object.entries(me.first_in || {})
       .map(([p, i]) => `${p} 第 ${i} 位`).join('，');

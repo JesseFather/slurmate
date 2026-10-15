@@ -230,7 +230,7 @@ const CASES = [
     name: 'format 是 3（比本实现新）',
     code: 'format',
     change: '头里偏移 8 的 format 从 00000002 改成 00000003',
-    why: '这一条就是客户端「站点太新」那一态的来源：认不得的 format 要拒绝，'
+    why: '这一条就是客户端「站点版本过高」那一态的来源：认不得的 format 要拒绝，'
       + '不是"按 2 理解"。按 2 理解的后果是拿一个未知布局的字节当已知布局读。',
     apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(3, 8); return o; },
   },
@@ -308,7 +308,7 @@ const CASES = [
     name: '记录里的 sha256 被改',
     code: 'content',
     change: '第 0 条记录的 sha256 那 32 字节清零',
-    why: '记录与字节对不上。',
+    why: '记录与字节不一致。',
     apply: (b) => {
       const s = split(b);
       s.recs[0].sha256 = Buffer.alloc(32);
@@ -349,7 +349,7 @@ const CASES = [
     code: 'path',
     change: '第 0 条记录的路径改成 `CON`',
     why: '§3.3：`CON`/`PRN`/`NUL` 那一类名字在 Windows 上指的是设备，不是文件，'
-      + '解出来的树在那台机器上是另一种东西。',
+      + '解出来的目录树在那台机器上是另一种对象。',
     apply: (b) => patchPath(b, 0, Buffer.from('CON', 'utf8')),
   },
   {
@@ -357,7 +357,7 @@ const CASES = [
     code: 'path',
     change: '第 0 条记录的路径字节改成 `\\xff\\xfe`',
     why: '不合法的 UTF-8 会被 `toString("utf8")` 悄悄换成 U+FFFD，摘要把那个'
-      + '替换字符算进去，于是两端算的不是同一份东西。所以要在解码之前判。',
+      + '替换字符算进去，于是两端算的不是同一份内容。所以要在解码之前判。',
     apply: (b) => patchPath(b, 0, Buffer.from([0xff, 0xfe])),
   },
   {
@@ -379,7 +379,7 @@ const CASES = [
     //   用例从此什么都不验，而输出里看不出来（它仍然"通过"，只是不再是一条坏包）。
     change: '头里偏移 12 的 file_count 加一',
     why: '多出来的那一条会从负载里读表，于是路径是几 KB 的二进制乱码。'
-      + '这一条钉住"记录表读不读得完"必须先于别的一切判。',
+      + '这一条钉住"记录表读不读得完"必须先于其他一切判。',
     apply: (b) => { const o = Buffer.from(b); o.writeUInt32BE(o.readUInt32BE(12) + 1, 12); return o; },
   },
   {
@@ -506,7 +506,7 @@ const CASES = [
     base: 'signed',
     code: 'signature',
     change: '签名块里那个 verlen 字节从 5（`1.0.0`）改成 4',
-    why: '签名块的长度必须等于 `188 + verlen`。改这一个字节会让长度等式对不上，'
+    why: '签名块的长度必须等于 `188 + verlen`。改这一个字节会让长度等式不成立，'
       + '而那时不许"按最长的读"或者"截掉多余的那一段"，长度是这一块的形状。',
     apply: (b, ctx) => {
       const o = Buffer.from(b);
@@ -535,7 +535,7 @@ const CASES = [
       if (i < 0) throw new Error('夹具树里没有 plugin.json，这一条造不出来');
       const mf = Buffer.from(s.recs[i].data);
       const at = mf.indexOf(Buffer.from(ctx.sigId, 'ascii'));
-      if (at < 0) throw new Error('plugin.json 里找不到那个 id，这一条造不出来');
+      if (at < 0) throw new Error('plugin.json 里未找到那个 id，这一条造不出来');
       Buffer.from(NEWID, 'ascii').copy(mf, at);
       s.recs[i].data = mf;
       // ② 摘要跟着走：`join()` 会把 `recs[i].sha256` 原样写进记录表那一行
@@ -670,8 +670,8 @@ function main() {
     .map((r) => ({ path: r.pathBytes.toString('utf8'), data: r.data,
                    sha256: r.sha256.toString('hex') }));
   if (!clientOnlyFiles.length || clientOnlyFiles.length === parts.recs.length) {
-    throw new Error('夹具树必须两侧都有，只有一侧的话，"只发客户端侧"这件事'
-      + '在这里就没有可测的东西了');
+    throw new Error('夹具树必须两侧都有，只有一侧时，"只发客户端侧"这件事'
+      + '在这里就没有可测的内容了');
   }
   const clientOnly = PACKER.buildPackage(clientOnlyFiles, sigBlock);
   {
@@ -695,7 +695,7 @@ function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
     if (!ok) {
       throw new Error('只含客户端侧的那一份包，打包器自己读不过，"哪一侧在手里"'
-        + `那条判据与实现的其余部分对不上：\n${out}`);
+        + `那条判据与实现的其余部分不一致：\n${out}`);
     }
   }
 
@@ -725,13 +725,13 @@ function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
     if (!ok) {
       throw new Error('夹具里那份带签名的包，打包器自己读不过，手拼的签名块与实现'
-        + `对不上（见 generate.mjs 的 sigBlockBytes）：\n${out}`);
+        + `不一致（见 generate.mjs 的 sigBlockBytes）：\n${out}`);
     }
   }
 
   const expected = {
     _: '由 tools/conformance/generate.mjs 生成，不要手改。'
-      + '它钉住"三份实现对同一批字节得出同一个答案"，手改等于把夹具挪到实现那边去。',
+      + '它钉住"三份实现对同一批字节得出同一个答案"，手改等于把夹具移到实现那边去。',
     tree: 'tools/conformance/tree',
     builtBy: 'packer build（见 generate.mjs，它调的是真的那个工具，不是一份抄本）',
     digest,
@@ -757,7 +757,7 @@ function main() {
     signed: {
       _: '同一棵树、同一个内容摘要，只是多了一块签名。v1 盖的是"整棵树一个摘要"，'
         + 'v2 盖的是 {id, 版本, 站点侧摘要, 客户端侧摘要} 四元组（A.3），'
-        + '下面那四个字段就是被签的那串字节里的东西。'
+        + '下面那四个字段就是被签的那串字节里的内容。'
         + '被签的那把私钥当场丢掉了，夹具只需要公钥与签名，而验签不需要私钥。',
       alg: 'Ed25519',
       id: SIG_ID,
@@ -818,7 +818,7 @@ function main() {
   if (!roundTrip(buf).equals(buf)) throw new Error('split/join 不能逐字节还原，变异的基础是错的');
   for (const c of bad.cases) {
     if (Buffer.from(c.hex.join(''), 'hex').length !== c.bytes) {
-      throw new Error(`${c.name} 的十六进制长度与 bytes 对不上`);
+      throw new Error(`${c.name} 的十六进制长度与 bytes 不一致`);
     }
   }
 

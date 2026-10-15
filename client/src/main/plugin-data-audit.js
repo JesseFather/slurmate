@@ -145,7 +145,7 @@ function partitionRoot({ session, probe, fallbackRoot }) {
         return {
           root: null, verified: false,
           why: `Electron 把这个分区的目录放在 ${base}，而按名字算它应该是 ${want}。`
-            + '分区目录的命名约定与我们知道的不一样，所以这一次没有去认磁盘上的东西。',
+            + '分区目录的命名约定与本程序预期不同，所以这一次没有去认磁盘上的内容。',
         };
       }
     } catch {
@@ -170,7 +170,7 @@ function partitionRoot({ session, probe, fallbackRoot }) {
  * @returns {{names: string[]|null, why: string|null}} `names` 为 null，查不了
  */
 function listDirs(root) {
-  if (!root) return { names: null, why: '找不到本机的分区目录，所以这一次没有去认它。' };
+  if (!root) return { names: null, why: '未找到本机的分区目录，所以这一次没有去认它。' };
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -178,7 +178,7 @@ function listDirs(root) {
     // 目录不存在 = 本机一份插件数据都没有（全新安装就是这个样子）。这是一个
     // 肯定的答案，不是"查不了" —— 两者在界面上是完全不同的话。
     if (e && e.code === 'ENOENT') return { names: [], why: null };
-    return { names: null, why: `读不到插件数据目录 ${root}：${e.message}` };
+    return { names: null, why: `读取插件数据目录 ${root} 失败：${e.message}` };
   }
   return {
     names: entries.filter((d) => d.isDirectory()).map((d) => d.name).sort(),
@@ -343,10 +343,10 @@ function audit({ plugins, spaces, workspaces, connections, names, why, dataNames
         why: places.includes('data')
           ? '它在插件数据目录里，而这个名字不像一份插件数据（三段身份）。那个'
             + '目录里不可能有更早版本留下的形状（它从诞生起只有这个客户端写过），'
-            + '所以这多半意味着数据目录那一根取错了。一份不认识的东西，'
+            + '所以这多半意味着数据目录那一根取错了。一份不认识的内容，'
             + '删掉它不是"收拾"而是"猜"。'
           : '它在这个目录里，而它的名字既不像一份插件数据（三段身份），也不像更早'
-            + '版本留下的那几种形状。所以这里不提供删除：一份不认识的东西，'
+            + '版本留下的那几种形状。所以这里不提供删除：一份不认识的内容，'
             + '删掉它就不是"收拾"而是"猜"。',
         deletable: false,
       });
@@ -429,7 +429,7 @@ function audit({ plugins, spaces, workspaces, connections, names, why, dataNames
         name, places, kind: 'legacy',
         label: '0.7 之前的旧分区',
         why: `它的名字是 ${name.split('-')[0]}-… 那种形状：这份数据的身份被改成`
-          + '「插件 id / 共享组 / 实例」三段之前留下的。它不会再被任何东西读到，'
+          + '「插件 id / 共享组 / 实例」三段之前留下的。它不会再被任何程序读到，'
           + '而里面躺着当年的登录 cookie。',
         deletable: true,
       });
@@ -520,7 +520,7 @@ function deletionVerdict({ rows, name }) {
     return {
       ok: false, code: 'stale',
       error: '这一份数据现在不在「没人用」的清单里了：多半是配置或插件刚变过，'
-        + '或者它正被一条活着的会话用着。重新看一下再决定。',
+        + '或者它正被一条活着的会话用着。重新查看再决定。',
     };
   }
   return { ok: true, row };

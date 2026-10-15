@@ -2282,7 +2282,7 @@ exit 0
     _prob_data["problems"] = ["/x/one.splug：id 01M2… 与 /x/two.splug 是同一个插件"]
     _rc19, _out19 = _cli_plugins_screen(_prob_data)
     check("★★ 站点报的那些问题**出现在这一屏上**（F22 的另一半：到得了用户眼前）",
-          _rc19 == 0 and "one.splug" in _out19 and "没能加载" in _out19,
+          _rc19 == 0 and "one.splug" in _out19 and "未能加载" in _out19,
           _out19[:260])
 
     # 19.0b2 版本号：两套方案，一条比较规则 —— 夹具与客户端读的是同一份
@@ -7527,9 +7527,9 @@ exit 0
         finally:
             d.load_session_file = _real_load
             mod.now_ts = _real_now
-        _miss = [m for lv, m in _logcat.lines if "读不到" in m]
+        _miss = [m for lv, m in _logcat.lines if "读取失败" in m]
         check("★ 首报**不节流**：一件事第一次发生必须立刻说出来",
-              len(_miss) >= 1 and _miss[0].startswith("会话 sess-f28 的会话文件暂时读不到"),
+              len(_miss) >= 1 and _miss[0].startswith("会话 sess-f28 的会话文件暂时读取失败"),
               "报了 %d 行：%s" % (len(_miss), _miss[:3]))
         check("★★ %d 秒里**恰好 %d 行**（首报 + 每 %d 秒一次），而不是 %d 行"
               % (_ticks, _ticks // _warn_secs, _warn_secs, _ticks),
@@ -7552,7 +7552,7 @@ exit 0
         finally:
             d.load_session_file = _real_load
             d.validate_session = _real_validate
-        _back = [m for lv, m in _logcat.lines[_before:] if "又能读到" in m]
+        _back = [m for lv, m in _logcat.lines[_before:] if "读取恢复正常" in m]
         check("★ 文件恢复可读时**报一次恢复**（「没有新行」在日志里长得像「一切正常」）",
               len(_back) == 1, "报了 %d 行：%s" % (len(_back), _back))
     finally:
@@ -9734,7 +9734,7 @@ exit 0
     check("★★★ 「取不到」那一行必须**画得出那句人话**：`na()` 的函数体里要有"
           "「取不到」这三个字，而且它要落在**看得见的**元素上（返回一个空元素"
           "等于把「取不到」画成一片空白，而那与「确实没有」长得一样）",
-          _na_at >= 0 and "取不到" in _na_body and "'na'" in _na_body
+          _na_at >= 0 and "获取失败" in _na_body and "'na'" in _na_body
           and _hv_src.count("na('") >= 4,
           "na() 函数体：%r（调用点 %d 处）" % (_na_body[:90], _hv_src.count("na('")))
 

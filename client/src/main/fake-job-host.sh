@@ -51,7 +51,7 @@ set -uo pipefail
 
 ENTRY="${1:-}"
 if [[ -z "$ENTRY" || ! -r "$ENTRY" ]]; then
-    printf '替身宿主：读不到这个插件的作业侧片段（%s）\n' "${ENTRY:-（空）}" >&2
+    printf '替身宿主：读取这个插件的作业侧片段失败（%s）\n' "${ENTRY:-（空）}" >&2
     exit 30
 fi
 
@@ -237,7 +237,7 @@ pick_port_and_start() {
                 log_err "  而作业自己的 fd ${_bad} 指向 $(readlink "/proc/$$/fd/$_bad" 2>/dev/null || echo '?')。"
                 log_err "  契约要求 start_<短名> 起的服务继承宿主的 stdout/stderr，那两条流"
                 log_err "  就是作业日志（.out / .err）。这个插件把服务的输出重定向到别处去了，"
-                log_err "  于是作业日志里永远看不到那个服务说的话。拒绝启动。"
+                log_err "  于是作业日志里永远不会出现那个服务的输出。拒绝启动。"
                 kill -TERM "$SVC_PID" 2>/dev/null || true
                 sleep 1
                 kill -0 "$SVC_PID" 2>/dev/null && kill -KILL "$SVC_PID" 2>/dev/null || true

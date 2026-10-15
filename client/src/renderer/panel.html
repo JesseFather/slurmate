@@ -117,7 +117,7 @@
            提示流是会滚过去、也会被后面来的提示顶下去的一条流水。
          颜色用 `--err`，不用洋红 —— 洋红在这个仓库里等于「假后端」。 -->
     <div id="fatal-banner" class="banner-fatal hidden">
-      界面没能初始化完。<strong>下面的按钮点了可能没反应</strong>。
+      界面未能初始化完。<strong>下面的按钮点了可能没反应</strong>。
       原因：<span id="fatal-why" class="mono"></span>
     </div>
 
@@ -258,7 +258,7 @@
     <section id="sec-form" class="hidden">
       <h2 id="form-title">新建连接</h2>
       <p class="sub" id="form-hint">
-        三步：把下面的公钥注册到 IDM 账户，填登录节点的地址，再挑一个工作区。
+        三步：把下面的公钥注册到 IDM 账户，填登录节点的地址，再选择一个工作区。
       </p>
 
       <h3>① 这条连接的密钥</h3>
@@ -497,7 +497,7 @@
            把"问不到"画成"没有"，用户会以为自己的作业丢了。 -->
       <p class="sub bad hidden" id="jobs-error"></p>
       <ul id="job-list" class="jobs"></ul>
-      <p class="sub" id="jobs-empty">这个站点上还没有你的作业。点「新建…」挑一个插件起一条。</p>
+      <p class="sub" id="jobs-empty">这个站点上还没有你的作业。点「新建…」选择一个插件起一条。</p>
       <!-- 这一块在作业结束之后仍然留着：失败原因（「作业状态」那一句，
            含退出码）从前恰好在结束那一刻从界面上消失 —— 而那正是唯一想看它的时候。
            底下那个按钮按需取一次日志（走的是右栏同一条 op）。作业结束之后右栏
@@ -568,7 +568,7 @@
              混了就等于把"站点太旧"和"这一份太大"说成同一件事。 -->
         <div class="row">
           <button class="ghost" data-debug="old-distribute">不支持分发</button>
-          <button class="ghost" data-debug="plugin-too-big">插件太大</button>
+          <button class="ghost" data-debug="plugin-too-big">插件过大</button>
           <button class="ghost" data-debug="rate-limited">站点限流</button>
           <button class="ghost" data-debug="extra-plugin">本站缺少插件</button>
         </div>
@@ -606,7 +606,7 @@
        话里可以指任意一个，用户点下去分不清自己选的是哪个。
        （主机密钥那一处用 confirm 是因为它真的只有两个答案。） -->
 <dialog id="fork-dlg">
-  <h2 id="fork-title">这张表还有别的连接在用</h2>
+  <h2 id="fork-title">这张表还有其他连接在用</h2>
   <p id="fork-body"></p>
   <div class="row">
     <button id="fork-cancel" class="ghost">取消</button>

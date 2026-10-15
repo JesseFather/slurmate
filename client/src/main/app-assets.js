@@ -74,7 +74,7 @@ function findPacker(from = __dirname) {
   try {
     if (fs.statSync(p).isFile()) return { path: p };
   } catch { /* 不在，下面给原因 */ }
-  return { why: `${NO_PACKER}（找不到 ${p}）` };
+  return { why: `${NO_PACKER}（未找到 ${p}）` };
 }
 
 module.exports = { packerPath, unpacked, findPacker, NO_PACKER };

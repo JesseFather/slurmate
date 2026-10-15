@@ -508,7 +508,7 @@ function readSnapshot(file) {
       //   那一次会被淹掉。判定见 sync 里那一段。
       return { ok: false, missing: true, why: '记录文件还不存在' };
     }
-    return { ok: false, missing: false, why: `读不到记录：${e.message}` };
+    return { ok: false, missing: false, why: `读取记录失败：${e.message}` };
   }
   let rec;
   try {
@@ -788,7 +788,7 @@ function treeSignature(treeDir, record) {
   try {
     files = plugins.readPluginFiles(treeDir);
   } catch (e) {
-    return { ok: false, why: `读不到 ${treeDir} 里的文件：${e.message}` };
+    return { ok: false, why: `读取 ${treeDir} 里的文件失败：${e.message}` };
   }
   // 非普通文件在逐份比对那一关就该被拒了（`verifyStaged` 的 `odd`），所以
   //   走到这里的一定只有普通文件与目录。只喂普通文件 —— 内容摘要的定义在负载上，
@@ -801,7 +801,7 @@ function treeSignature(treeDir, record) {
   if (!PP().verifyEd25519(got.sig.pubkey, PP().signedMessage(got.sig), got.sig.signature)) {
     return { ok: false, signed: true,
       why: `记录表里那个签名块验不过：它盖的必须是 `
-        + `${JSON.stringify(got.sig.id)}@${JSON.stringify(got.sig.version)} 这四个东西（A.3），`
+        + `${JSON.stringify(got.sig.id)}@${JSON.stringify(got.sig.version)} 这四个字段（A.3），`
         + `而这一块盖的不是它（签的人是 ${got.sig.fingerprint}）` };
   }
 
@@ -894,7 +894,7 @@ function compareTree(treeFiles, want) {
   const bits = [];
   if (missing.length) bits.push(`少 ${missing.join('、')}`);
   if (extra.length) bits.push(`多 ${extra.join('、')}`);
-  if (differs.length) bits.push(`对不上 ${differs.join('、')}`);
+  if (differs.length) bits.push(`不一致 ${differs.join('、')}`);
   if (odd.length) bits.push(`非普通文件 ${odd.join('、')}`);
   return bits.join('；');
 }
@@ -907,7 +907,7 @@ function treeFault(treeDir, want) {
     //   "校验我写下的"，而 `writeFileSync` 在磁盘满时会留下部分文件然后抛错。
     files = plugins.readPluginFiles(treeDir);
   } catch (e) {
-    return `写下去的东西读不回来：${e.message}`;
+    return `写入的内容读取失败：${e.message}`;
   }
   return compareTree(files, want);
 }
@@ -978,7 +978,7 @@ async function fetchPackage(rpc, p, meta, dir, limits, ctx) {
   //   那正是"摘要不变，还是同一份构件"这条规则的样子。
   if (parsed.digest !== meta.digest) {
     return { ok: false, why: `整包的内容摘要是 ${parsed.digest}，而站点报的是 `
-      + `${meta.digest}，这两次说的不是同一份东西` };
+      + `${meta.digest}，这两次说的不是同一份内容` };
   }
   // 响应自己报的那两个数也要核 —— 它是关于同一份东西的第三个说法
   //   （`op_plugins` 里一次、这次响应里一次、以及我们自己算出来的）。三次说法
@@ -1021,7 +1021,7 @@ async function fetchPackage(rpc, p, meta, dir, limits, ctx) {
   //     一遍"那条路）—— 它比的是"我写下的那棵树是不是这一份构件"，不依赖任何包文件
   //     还在不在。
   const fault = treeFault(dir, record.files);
-  if (fault) return { ok: false, why: `写下去的树与这一份对不上：${fault}` };
+  if (fault) return { ok: false, why: `写下去的目录树与这一份不一致：${fault}` };
   return { ok: true, record };
 }
 
@@ -1137,7 +1137,7 @@ async function sync(o) {
   //   这与"这次下载失败了"是两件完全不同的事（见文件头第三个"不"）。
   if (!data.limits || typeof data.limits !== 'object') {
     out.reason = 'old_daemon';
-    out.error = '这个站点的守护进程太旧，不支持插件分发（它的插件清单里没有文件清单）。';
+    out.error = '这个站点的守护进程版本过低，不支持插件分发（它的插件清单里没有文件清单）。';
     return out;
   }
   out.supported = true;
@@ -1179,7 +1179,7 @@ async function sync(o) {
     protectedKnown = false;
   }
   if (!protectedKnown) {
-    out.notices.push('没能从站点问到本机还管着哪些会话，所以这一次不会回收任何版本。');
+    out.notices.push('未能从站点获取本机还管着哪些会话，所以这一次不会回收任何版本。');
   }
 
   // ── 3. 读记录 + 拿锁 ──
@@ -1209,7 +1209,7 @@ async function sync(o) {
       snapshot = emptySnapshot();
     } else {
       snapshotOk = false;
-      out.notices.push(`读不到站点的插件快照表（${rr.why}）。这一次不会回收任何版本。`);
+      out.notices.push(`读取站点的插件快照表失败（${rr.why}）。这一次不会回收任何版本。`);
     }
     out.snapshot = { ok: snapshotOk, why: rr.ok ? null : rr.why };
     return await run();
@@ -1346,7 +1346,7 @@ async function sync(o) {
           const localDigest = PP().contentDigest(rec);
           if (p.package.digest !== localDigest) {
             const owners = sitesWanting(snapshot, p.id, p.version);
-            fail(`本机已有 ${label}，但它的内容与站点现在报的不一样`
+            fail(`本机已有 ${label}，但它的内容与站点现在报的不同`
               + `（站点报 ${plugins.shortDigest(p.package.digest)}，本机这一份是 `
               + `${plugins.shortDigest(localDigest)}）。`
               // F20：那个槽位是谁先放进来的 —— 快照表里一直有这份信息
@@ -1544,7 +1544,7 @@ async function sync(o) {
         //   把另一个站点还要的版本删掉 —— 这是本设计里唯一会真丢数据的地方。
         snapshotOk = false;
         out.snapshot = { ok: false, why: `写快照表失败：${e.message}` };
-        out.notices.push(`记录写不下去（${e.message}）。这一次不会回收任何版本。`);
+        out.notices.push(`记录表写入失败（${e.message}）。这一次不会回收任何版本。`);
       }
     }
 
@@ -1690,7 +1690,7 @@ function acceptStaged(o) {
   //   句话，不可能漂开。
   if (o.record) {
     const fault = treeFault(o.stagedDir, o.record.files);
-    if (fault) return { ok: false, error: `暂存的那一份与它的记录表对不上：${fault}` };
+    if (fault) return { ok: false, error: `暂存的那一份与它的记录表不一致：${fault}` };
   }
   const dest = SLOT.treeDirOf(o.siteRoot, o.id, o.version);
   if (!dest) return { ok: false, error: '这个 (id, 版本) 拼不出池里的路径，不装。' };
@@ -1716,13 +1716,13 @@ function acceptStaged(o) {
       //   话。这里当场收掉，用户看到的是一句准确的失败。
       const g = removeSlot(o.siteRoot, o.id, o.version);
       return { ok: false,
-        error: `装到一半停下了：树已经放好，但记录表写不下去（${w.error}${w.detail ? `：${w.detail}` : ''}）。`
+        error: `装到一半中止：目录树已经放好，但记录表写入失败（${w.error}${w.detail ? `：${w.detail}` : ''}）。`
           + (g.ok
             ? '已经把它撤掉了，请重新同步一次。'
             // 撤不掉也要说清它会怎样：那一份是"没提交"，所以不可见、也不会
             //   被加载，而下一次同步的清扫会把它收掉。留一句含糊的"失败了"，用户
             //   会去那个目录里找一个已经不生效的东西。
-            : `而且没能撤掉（${g.error}）：那棵树是"没提交"的，所以不会被加载，`
+            : `而且未能撤掉（${g.error}）：该目录树是"没提交"的，所以不会被加载，`
               + '下一次同步会把它清掉。') };
     }
   } else {

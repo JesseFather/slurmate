@@ -108,7 +108,7 @@ async function attach(ctx, snap) {
   try {
     dataDir = ctx.dataDir();
   } catch (e) {
-    ctx.notice('error', `中转站已就绪，但没能确定它该把配置写在哪儿：${e.message}`);
+    ctx.notice('error', `中转站已就绪，但未能确定它该把配置写在哪儿：${e.message}`);
     return;
   }
   const home = ctx.home();
@@ -117,7 +117,7 @@ async function attach(ctx, snap) {
 
   if (!w.ok) {
     ctx.notice('error',
-      `中转站已就绪，但没能写出 ssh 配置（${w.detail || w.error}）。`
+      `中转站已就绪，但未能写出 ssh 配置（${w.detail || w.error}）。`
       + `你仍然可以直接连 127.0.0.1:${port} 使用它。`);
     return;
   }
@@ -136,7 +136,7 @@ async function attach(ctx, snap) {
     // 只提示一次：读不到的家目录是永久失败，每次心跳都报一遍等于没有提示。
     if (ctx.once(`legacy-cleanup|${dir}`)) {
       ctx.notice('warn',
-        `${dir} 里那三个旧文件没能删掉（${clean.failed[0].reason}）。`
+        `${dir} 里那三个旧文件未能删掉（${clean.failed[0].reason}）。`
         + '它们已经不再被用到了，删不掉不影响使用，你也可以自己删掉它们。');
     }
   }
@@ -146,7 +146,7 @@ async function attach(ctx, snap) {
   // 「Could not resolve hostname」，而根因是我们没能改他的文件。
   if (!inc.ok) {
     ctx.notice('warn',
-      `没能把 Include 加进 ${inc.path}（${inc.detail}）。`
+      `未能把 Include 加进 ${inc.path}（${inc.detail}）。`
       + '请手工在那个文件的最上面加一行：\n'
       + `Include ${sshconfig.pathsFor(dataDir).config}`);
   } else if (inc.changed) {
@@ -157,7 +157,7 @@ async function attach(ctx, snap) {
 
   if (!w.strict) {
     ctx.notice('warn',
-      '这次没能拿到作业内 sshd 的主机公钥（控制节点没返回它，守护进程可能还是'
+      '这次未能获取作业内 sshd 的主机公钥（控制节点没返回它，守护进程可能还是'
       + '旧版本），本次连接按「首次信任」处理。它只影响第一次连接，之后会一直核对。');
   }
 
@@ -165,5 +165,5 @@ async function attach(ctx, snap) {
     `SSH 中转站已就绪。在终端里执行 ssh ${sshconfig.SSH_ALIAS}，或用 VS Code 的`
     + `远程连接填 ${sshconfig.SSH_ALIAS}（主机名就是这一个词，端口和用户名都已经`
     + '配好了）。\n'
-    + '会话结束前它一直有效；作业里的东西跑在作业的 cgroup 里，作业一停全部回收。');
+    + '会话结束前它一直有效；作业里的进程跑在作业的 cgroup 里，作业一停全部回收。');
 }

@@ -249,7 +249,7 @@ test('0.7 之前的旧分区：三种旧形状都认得，可删', () => {
   const r = run({ names });
   assert.deepEqual(r.rows.map((x) => x.kind), ['legacy', 'legacy', 'legacy']);
   assert.ok(r.rows.every((x) => x.deletable), '那里面是没人再读的登录 cookie，删得掉才对');
-  assert.match(r.rows[0].why, /不会再被任何东西读到/);
+  assert.match(r.rows[0].why, /不会再被任何程序读到/);
 });
 
 test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
@@ -409,7 +409,7 @@ test('listDirs：目录不存在 = 一份都没有（肯定的答案）；读不
     'ENOENT 是"本机没有"，不是"我查不了"');
   const bad = audit.listDirs('/dev/null/xxx');
   assert.equal(bad.names, null);
-  assert.match(bad.why, /读不到/);
+  assert.match(bad.why, /读取.+失败/);
   assert.equal(audit.listDirs(null).names, null);
 });
 
@@ -456,7 +456,7 @@ test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）',
     const v = audit.deletionVerdict({ rows, name: p });
     assert.equal(v.ok, false, `${p} 不该删得掉`);
     assert.equal(v.code, 'stale');
-    assert.match(v.error, /重新看一下/, '拒绝也要说清下一步');
+    assert.match(v.error, /重新查看/, '拒绝也要说清下一步');
   }
   // 没在用的放行，而且回的是这次算出来的那一行（拼路径要用它）。
   const ok = audit.deletionVerdict({ rows, name: 'aa@bb@cc' });

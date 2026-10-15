@@ -741,7 +741,7 @@ function assignSpacePorts(cfg, count, extraPorts) {
 function recordSpacePort(cfg, spaceId, port) {
   const space = ((cfg && cfg.spaces) || []).find((s) => s && s.id === spaceId);
   if (!space) {
-    return { ok: false, error: `取不到数据 ${spaceId}：它不在配置里（临时那一份是当场挑的端口，没有"记住"可言）。` };
+    return { ok: false, error: `获取数据 ${spaceId} 失败：它不在配置里（临时那一份是当场选择的端口，没有"记住"可言）。` };
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { ok: false, error: `端口不合法：${JSON.stringify(port)}（要求 1–65535 的整数）` };

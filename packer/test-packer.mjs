@@ -689,7 +689,7 @@ section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来�
   check('★★ 血统表不认识这个 id ⇒ **拒绝打包**（不是静默沿用）',
     r.code !== 0 && /§2\.5/.test(r.err), r.err.slice(0, 200));
   check('★ 而且把两条路都说了：真分身（--fork）与记录不在了',
-    /--fork/.test(r.err) && /另一个东西/.test(r.err) && /同一个插件/.test(r.err), r.err);
+    /--fork/.test(r.err) && /另一个插件/.test(r.err) && /同一个插件/.test(r.err), r.err);
   check('★ 两条路的后果也说了（重新同意一次）', /重新同意/.test(r.err), r.err);
   check('★ 包一个字节都没写出来', !fs.existsSync(path.join(base, 'o.splug')));
 

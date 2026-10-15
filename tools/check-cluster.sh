@@ -136,7 +136,7 @@ fi
 echo "  --- systemd 服务的默认域（自定义 unit 通常是 unconfined_service_t）---"
 N_UNCONFINED="$(ps -eZ 2>/dev/null | awk '$1 ~ /unconfined_service_t/ {c++} END {print c+0}')"
 if [[ "$N_UNCONFINED" -gt 0 ]]; then
-    echo "    unconfined_service_t 正在使用中（$N_UNCONFINED 个进程）→ 自定义 unit 大概率不被 SELinux 拦"
+    echo "    unconfined_service_t 正在使用中（$N_UNCONFINED 个进程）→ 自定义 unit 很可能不被 SELinux 拦截"
 else
     echo "    未见 unconfined_service_t，需确认自定义 unit 会落到哪个域"
 fi
@@ -600,8 +600,8 @@ if [[ -d "$_plugdir" ]]; then
             mf=\"\$d/plugin.json\"
             n=\$(sed -n 's/.*\"name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" 2>/dev/null | head -1)
             v=\$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' \"\$mf\" 2>/dev/null | head -1)
-            [ -n \"\$n\" ] || n='（读不出）'
-            [ -n \"\$v\" ] || v='（读不出）'
+            [ -n \"\$n\" ] || n='（读取失败）'
+            [ -n \"\$v\" ] || v='（读取失败）'
             if [ -f '$_plugdir/'\$i'.json' ]; then rec='在'; else rec='没有'; fi
             if [ -f \"\$d/job/start.sh\" ]; then j='有'; else j='（无）'; fi
             s='（没有那份脚本）'
@@ -616,7 +616,7 @@ if [[ -d "$_plugdir" ]]; then
             printf '%s\n' "$_no_rec" | sed 's/^/      /'
             r INFO "  它们不会被分发、也不会被读到。重装一次那个插件即可；"
             r INFO "  若那是你手放的源码树，在作者机器上 packer build 打成包再装。"
-            r INFO "  本脚本不删它们，那一格可能有你自己放的东西。"
+            r INFO "  本脚本不删它们，那一格可能有你自己放的内容。"
         fi
         _nj="$(ls -1 '$_jobsdir'/*.sbatch 2>/dev/null | grep -c . || true)"
         r INFO "${_jobsdir} 里有 ${_nj} 份作业脚本（应当等于上面「作业侧 有」的个数）"

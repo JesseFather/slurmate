@@ -177,7 +177,7 @@ function findBash(search = defaultBashSearch()) {
     const major = bashMajor(p, wsl ? 8000 : 1000);
     if (major === null) continue;               // 有这个名字，但跑不起来
     if (major < 4) {
-      return { why: `这台机器上的 bash 太老（${p} 是 ${major}.x）：插件的作业侧`
+      return { why: `这台机器上的 bash 版本过低（${p} 是 ${major}.x）：插件的作业侧`
         + '用到了关联数组（`PLUGIN_SESSION_FIELDS`），bash 3 没有它。'
         + 'macOS 自带的那个 `/bin/bash` 就是 3.2；`brew install bash` 之后把'
         + '它放进 PATH 前面即可。' };
@@ -374,7 +374,7 @@ class FakeJob {
     try {
       child = found.wsl ? this._spawnWsl(found.path) : this._spawnNative(found.path);
     } catch (e) {
-      this._fail(`作业侧起不来：${e.message}`);
+      this._fail(`作业侧无法启动：${e.message}`);
       return;
     }
     if (!child) return;              // WSL 那一路自己把原因说过了
@@ -389,7 +389,7 @@ class FakeJob {
     child.stderr.on('data', keep);
     this._pre = () => pre.trim().split('\n').filter(Boolean).slice(-2).join(' / ');
 
-    child.on('error', (e) => this._fail(`作业侧起不来：${e.message}`));
+    child.on('error', (e) => this._fail(`作业侧无法启动：${e.message}`));
     child.on('exit', (code, signal) => this._onChildExit(code, signal));
 
     this._poll = setInterval(() => this._look(), POLL_MS);

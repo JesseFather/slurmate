@@ -719,9 +719,9 @@ async function applyVersionGate(res) {
       + 'Slurmate 的守护进程。这一次没有做版本判定：那不是"通过了"，是"没判"。');
   } else if (g.verdict === 'unknown_host') {
     win.pushNotice('warn',
-      '本客户端读不到自己的版本号（client/package.json），所以这一次没有做版本判定。'
-      + '插件仍然可以同步，但一个都装不上：装之前要拿本客户端的版本去比'
-      + '插件声明的引擎范围，而那个版本现在读不到。');
+      '本客户端读取自己的版本号失败（client/package.json），所以这一次没有做版本判定。'
+      + '插件仍然可以同步，但一个都无法安装：装之前要拿本客户端的版本去比'
+      + '插件声明的引擎范围，而那个版本现在读取失败。');
   }
   return res;
 }
@@ -784,8 +784,8 @@ async function doConnect(conn, extra = {}) {
     //     一个隔着一层作业日志的现场便宜得多。
     if (backend.prepareError) {
       win.pushNotice('warn',
-        '连上了，但没能在站点上建出作业日志目录：' + backend.prepareError
-        + '　提交的作业会起不来。');
+        '连上了，但未能在站点上建出作业日志目录：' + backend.prepareError
+        + '　提交的作业会无法启动。');
     }
     // 站点现状从"连上"这一刻开始问。它不 await：那是一个每 30 秒重来一次
     // 的轮询，而连接这条路上等着的是一个用户。第一次问的结果到了就推给界面。
@@ -1062,7 +1062,7 @@ function reconcileSitePlugins() {
     if (r.error) win && win.pushNotice('warn', r.error);
     for (const n of (r.notices || [])) win && win.pushNotice('warn', n);
     for (const f of (r.failed || [])) {
-      win && win.pushNotice('error', `没能装上「${f.title || f.name || f.id}」：${f.why}`);
+      win && win.pushNotice('error', `未能装上「${f.title || f.name || f.id}」：${f.why}`);
     }
     if (r.reclaimed && r.reclaimed.length) {
       win && win.pushNotice('info',
@@ -1070,7 +1070,7 @@ function reconcileSitePlugins() {
     }
     if (pendingConsent.length) {
       win && win.pushNotice('warn',
-        `本站要给你 ${pendingConsent.length} 个插件，每一个都要你先点一下同意`
+        `本站要给你 ${pendingConsent.length} 个插件，每一个都要你先确认同意`
         + '（它们的客户端代码会在你这台机器上运行）。见插件那一栏。');
     }
     win && win.pushPlugins(pluginsView());
@@ -1642,7 +1642,7 @@ function liveSessionOnWorkspace(workspaceId) {
 function spacePortOf(spaceId) {
   const s = findSpaceAll(spaceId);
   if (s) return s.ports[0];
-  throw new Error(`取不到数据 ${spaceId} 的端口：它既不在配置里，也不是一份`
+  throw new Error(`获取数据 ${spaceId} 的端口失败：它既不在配置里，也不是一份`
     + '本进程还在用的临时数据。（临时那份只活在内存里，进程一重启它就不存在了'
     + '，那时应当重新认领，而不是去问一份已经没有的数据。）');
 }
@@ -1767,7 +1767,7 @@ function snapshotTempData(plugin, baseSpace, tempSpace) {
   } catch (e) {
     if (e && e.code === 'ENOENT') return;      // 没有起点：这一份本来就是空的
     win.pushNotice('warn',
-      `「${plugin.displayName || plugin.name}」这份临时副本没能拿到起点数据`
+      `「${plugin.displayName || plugin.name}」这份临时副本未能获取起点数据`
       + `（${e.message}），它会从空白开始。`);
   }
 }
@@ -1798,7 +1798,7 @@ function commitConfig() {
   } catch (e) {
     // 界面显示「已保存」而磁盘上没写，正是这个项目一路在清的那类问题。
     win.pushNotice('error',
-      '配置没能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
+      '配置未能写入磁盘：' + e.message + '（本次改动重启后会丢失）');
   }
   for (const s of goneSpaces) clearSpaceStorage(s);
   reportReclaimed(removed, goneSpaces);
@@ -1929,7 +1929,7 @@ function clearSpaceStorage(space) {
       clearPartitionStorage(partition, pluginData.diskNameOf(identity), partitionsRoot().root)
         .then((r) => {
           if (!r.ok) {
-            win.pushNotice('error', `${label}已经回收，但它那份浏览器存储没能清干净：${r.error}`);
+            win.pushNotice('error', `${label}已经回收，但它那份浏览器存储未能清干净：${r.error}`);
           }
         });
     }
@@ -1960,12 +1960,12 @@ function clearSpaceStorage(space) {
       if (!liveDataDirs().has(name)) {
         const r = removeDirChecked(path.join(root, name));
         if (!r.ok) {
-          win.pushNotice('error', `${label}已经回收，但那份磁盘数据没能清干净：${r.error}`);
+          win.pushNotice('error', `${label}已经回收，但那份磁盘数据未能清干净：${r.error}`);
         }
       }
     }
   } catch (e) {
-    win.pushNotice('error', `${label}已经回收，但磁盘上那份数据没能清干净：${e.message}`);
+    win.pushNotice('error', `${label}已经回收，但磁盘上那份数据未能清干净：${e.message}`);
   }
 }
 
@@ -2140,10 +2140,10 @@ function removeDirChecked(dir) {
   try {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   } catch (e) {
-    return { ok: false, error: `目录没能删掉：${e.message}` };
+    return { ok: false, error: `目录未能删掉：${e.message}` };
   }
   return fs.existsSync(dir)
-    ? { ok: false, error: '目录删了又还在（多半有别的进程正拿着它）' }
+    ? { ok: false, error: '目录删了又还在（多半有其他进程正占用它）' }
     : { ok: true, error: null };
 }
 
@@ -2511,7 +2511,7 @@ async function startSession(resources, serviceKind, portChoice) {
     if (held) {
       win.pushNotice('error',
         `「${held.displayName}」${held.version} 已经取回本机了，但它的客户端代码`
-        + '还没有经过你的同意，所以没有加载。到插件那一栏点一下同意再试。');
+        + '还没有经过你的同意，所以没有加载。到插件那一栏确认同意再试。');
       return null;
     }
     // `active !== false` 的那些才算"装上了"：只剩待同意的插件时，用户面对的
@@ -2524,9 +2524,9 @@ async function startSession(resources, serviceKind, portChoice) {
         '本机还没有装上任何插件，所以没有可以提交的服务。'
         + (canSync
           ? '本站会分发插件。用插件那一栏的「重新同步」取一次，'
-            + '带客户端代码的要先点一下同意。'
+            + '带客户端代码的要先确认同意。'
           : '而这个站点不分发插件。插件只能由站点发下来，所以客户端这一侧'
-            + '没有别的办法。请联系这个站点的管理员。'));
+            + '没有其他办法。请联系这个站点的管理员。'));
     } else {
       win.pushNotice('error',
         `这个客户端不认识「${serviceKind}」这种服务，已阻止提交。`
@@ -2757,7 +2757,7 @@ async function startSession(resources, serviceKind, portChoice) {
       && snap.localPort && snap.localPort !== preferredPort) {
     const wrote = config.recordSpacePort(cfg, space.id, snap.localPort);
     if (!wrote.ok) {
-      win.pushNotice('error', `端口没能记进配置：${wrote.error}`
+      win.pushNotice('error', `端口未能记进配置：${wrote.error}`
         + `　这一次会话照常跑着（用的是 ${snap.localPort}），但下次启动还会问你一次。`);
     } else {
       commitConfig();
@@ -2845,7 +2845,7 @@ function warnVersionDrift(plugin) {
   win.pushNotice('warn',
     `站点那边的「${plugin.displayName}」是 ${siteVersion} 版，本机这一份是 `
     + `${plugin.version} 版。会话仍然会起，但作业侧和客户端侧是配套的两半，`
-    + '对不上的话界面可能连不上，升级客户端通常就好了。');
+    + '不一致时界面可能连不上，升级客户端通常就好了。');
 }
 
 /**
@@ -3075,7 +3075,7 @@ function warnLegacyPool() {
     return;                                        // 不存在，更没什么好说的
   }
   win && win.pushNotice('info',
-    `${dir} 里的东西不再被加载了，客户端现在只认站点分发的插件。`
+    `${dir} 里的插件不再被加载了，客户端现在只认站点分发的插件。`
     + '那个目录没有被动过，里面的文件还在原处。');
 }
 
@@ -3467,7 +3467,7 @@ function unknownWhy(slot, snap) {
     if (known.length) {
       const versions = known.map((p) => p.version).join('、');
       return `这个会话要在 ${ref.slice(at + 1)} 版上跑，而本机只有 ${versions} 版。`
-        + '作业侧与客户端侧是配套的两半，对不上就用不了，升级客户端通常就好了。';
+        + '作业侧与客户端侧是配套的两半，不一致就用不了，升级客户端通常就好了。';
     }
     return `这个会话来自一个本机没有的插件（${id}）。`;
   }
@@ -3480,7 +3480,7 @@ function unknownWhy(slot, snap) {
   // 取的是这一条会话的说法：多开时读那个全局的会把根因说成别人的。
   const rec = sessions.get(slot);
   if (rec && rec.pluginWhy) return `${rec.pluginWhy}。`;
-  return '它多半是别的进程提交的，控制节点没有关于它的记录。';
+  return '它多半是其他进程提交的，控制节点没有关于它的记录。';
 }
 
 
@@ -4195,7 +4195,7 @@ function registerIpc() {
         return {
           ok: false, code: 'builtin',
           error: `「${c.label}」是开发者模式内置的那条假连接，改不了。`
-               + '要连别的站点，请新建一条。',
+               + '要连其他站点，请新建一条。',
         };
       }
       // 编辑时把地址改成了另一条已有的连接。两条同身份、各带一把密钥，
@@ -4495,7 +4495,7 @@ function registerIpc() {
       // 的那一份数据，这个插件按现在的身份读不到（路径中间那一段变了）。
       // 指过去只会得到一份"看起来换好了、开会话时又变回新的"的假动作。
       if (space.group !== group) {
-        return { ok: false, error: '这一份数据与这个插件现在的版本对不上（共享组变了），不能复用。' };
+        return { ok: false, error: '这一份数据与这个插件现在的版本不一致（共享组变了），不能复用。' };
       }
       targetId = space.id;
     }
@@ -4571,7 +4571,7 @@ function registerIpc() {
     if (oldId && !stillUses.length && !held && !confirmDiscard) {
       return {
         ok: false, code: 'would_discard', spaceId: oldId,
-        error: `「${plugin.displayName || plugin.name}」现在用的那一份数据没有别的工作区在用，`
+        error: `「${plugin.displayName || plugin.name}」现在用的那一份数据没有其他工作区在用，`
           + '换掉之后它会被删掉：它的浏览器存储（登录状态、窗口布局）和这个插件写在'
           + '磁盘上的文件会一起没掉，找不回来。',
       };
@@ -4664,7 +4664,7 @@ function registerIpc() {
     // 那一半是一起删的，只删一半的话下一次对账会把同一行再带回来。
     const r = await clearOneRow(verdict.row, fresh.roots);
     if (!r.ok) {
-      return { ok: false, code: 'failed', error: `没能清干净：${r.error}` };
+      return { ok: false, code: 'failed', error: `未能清干净：${r.error}` };
     }
     const row = verdict.row;
     const after = auditPluginData();
@@ -4965,7 +4965,7 @@ function registerIpc() {
         // 规矩）。它只说为什么：两个答案各自的代价是那两颗按钮自己的事。
         // 排在状态条上那一行的正文里，所以它得短：两个答案各自的代价在那两颗
         //   按钮的 `title` 上（那是界面自己的事）。
-        error: `首选端口 ${r.conflict.want} 被别的程序占着（它是这份数据在浏览器里的地址）。`,
+        error: `首选端口 ${r.conflict.want} 被其他程序占用（它是这份数据在浏览器里的地址）。`,
       };
     }
     return {
@@ -5029,7 +5029,7 @@ function registerIpc() {
                  + '管理员在集群上用 `slurmate plugin install` 装。' };
     }
     const r = await dialog.showOpenDialog(win.win, {
-      title: '挑一个 .splug 装到假站点上',
+      title: '选择一个 .splug 装到假站点上',
       message: '真站点上装的就是这个文件（`slurmate plugin install <文件.splug>`）',
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: '插件包', extensions: ['splug'] }],
@@ -5050,7 +5050,7 @@ function registerIpc() {
       const where = out.installed.map((x) => x.dir).join('、');
       win.pushNotice('info', `已把 ${names} 装到假站点上（${where}）。`
         + (backend.connected
-          ? '站点这就报它了，接下来与真站点一样：取回来、过同意闸，然后才可用。'
+          ? '站点这就报它了，接下来与真站点相同：取回来、过同意闸，然后才可用。'
           : '连上假站点之后它才会下来：插件是从站点取回来的。'));
       // `await`（与连接那一次"不 await"不同）：用户按了按钮，而这一次的结果
       //   就是"装上了没有、接下来该看哪儿"。连接那一次是后台的事，这一次不是。
@@ -5120,7 +5120,7 @@ function registerIpc() {
       siteRoot: sitePoolDir(), siteKey: hit.siteKey, siteLabel: hit.siteLabel,
       id, version,
     });
-    if (!nc.ok) win.pushNotice('warn', `插件装上了，但引用表没能更新（${nc.why}）。`);
+    if (!nc.ok) win.pushNotice('warn', `插件装上了，但引用表未能更新（${nc.why}）。`);
     pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));
     registry.reload();
     const p = registry.get(id, version);
@@ -5160,7 +5160,7 @@ function registerIpc() {
       config.forgetPlugin(cfgDir, cfg, id, version);
       registry.reload();
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，本机这一份已经删掉了。`
-        + '站点上那份不受影响：它还在的话，下次同步会再问一次。');
+        + '站点上那份不受影响：它还在时，下次同步会再问一次。');
     } else {
       sitePluginSync.discardStaged(hit.stagedDir);
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，它在暂存里那一份已经删掉了。`);
@@ -5190,7 +5190,7 @@ function registerIpc() {
     config.forgetPlugin(cfgDir, cfg, id, version);
     registry.reload();
     win.pushNotice('info', `本机那一份 ${version} 已经删掉了。`
-      + '站点还在分发它的话，下一次同步会重新问你一次。');
+      + '站点还在分发它时，下一次同步会重新问你一次。');
     return { ok: true, plugins: pluginsView() };
   });
 

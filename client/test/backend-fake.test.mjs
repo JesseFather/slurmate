@@ -333,7 +333,7 @@ test('★★ 作业日志：「文件不在」是"没有"，"读不出来"是"�
   fs.mkdirSync(path.join(logs, 'slurm-7.out'));
   r = b._jobLog({ session_id: s.session_id });
   assert.equal(r.data.out.text, null, '取不到时没有正文');
-  assert.match(r.data.out.why || '', /读不到/, '取不到要把原因说出来');
+  assert.match(r.data.out.why || '', /读取 .+ 失败/, '取不到要把原因说出来');
   assert.equal(r.data.err, null, '另一份仍然不在 —— 两句话必须各说各的');
 });
 

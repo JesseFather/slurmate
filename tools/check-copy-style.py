@@ -17,7 +17,7 @@
 
 体例见 `CONTRIBUTING.md`〈写得短〉与〈界面与命令行文案〉。
 
-判据三条，都是机械的：
+判据五条，都是机械的：
 
     J   注释里不许出现 `★` `⚠` `⇒`，也不许有成对的加粗。强调靠位置和措辞，
         不靠记号。反引号跨度豁免：那是在引用这个字符本身，不是在喊话。
@@ -49,6 +49,29 @@
         按钮就分不出差别了。6 字是中文动作按钮的常见上限，也远在 KDE HIG
         那条「不要超过 `Configure Keyboard Shortcuts`」（25 字符）之内。
 
+    L   用户看得见的字符串里，不许出现 `tools/ui-terms.json` 左列的那些词。
+
+        「记录写不下去」「读不到 X」「没能保存」「与签名对不上」—— 这些说的是
+        手感，读者要的是结果：写入失败、读取 X 失败、未能保存、与签名不一致。
+        主语是那件事，不是拟人：一张表不会"写得下去"。
+
+        表是**封闭**的，判据逐字比对，「别用」那一列以外的词一个字都不判。
+        要加词就往表里加 —— 同一条规矩两份实现会漂开。
+
+        反引号跨度豁免，与 J 同一条：`不许写成 `读不到`` 是在**引用**这个词，
+        不是在用它做提示文字。
+
+    M   一处文档里引用的提示文字，必须逐字出现在源码里。
+
+        `cluster/docs/PLUGIN-TROUBLESHOOTING.md` 里那几张「报错里出现」的表，
+        教管理员照着屏幕上的字样去对原因。字样与代码对不上，那张表就是一句
+        没人守的承诺 —— 而改一批提示文字正是会让它悄悄失准的动作。
+
+        口径：表行**第一列**里每个 `「…」`，必须逐字出现在某个源码文件里。
+        带变量的地方，要么把变量写在「」**外面**，要么在「」里用 `…` 标出来；
+        带 `…` 的那一段不判 —— 那个省略号是明写的"这里有变量"。
+        第二列与第三列里的 `「」` 是行文，不是字样，不判。
+
 加粗与破折号的密度只报告、不判红（`--report`）。密度会随删字而上升，
 拿它当棘轮会逼人删得越多越难过 —— 棘轮一律按绝对条数。
 
@@ -77,6 +100,11 @@
     行尾注释，再加上多行跨度里的行（三引号、块注释、HTML 注释）。
   · 引号靠逐字扫配，不解析语法：`X="$(cmd "$Y")"` 这类嵌套要一层层跟着走
     （见 `sh_spans`）。收敛不了的整段不算 —— 宁可欠判，不误判。
+  · 串那一遍原先只看「行首有没有注释标记」，于是块注释与 docstring 的**正文**
+    也被当成了字符串（全仓 3899 个汉字，`cluster/slurmate-sessiond` 一份占
+    3236）。那是**多看**，是假红的来源，不是漏看 —— 而 L 一立，docstring 里
+    一个「读不到」就会红一条本来没错的代码。现在先把块注释挖空再扫串那一遍
+    （见 `comment_masked`），闭记号**之后**那一行剩下的部分留着。
   · `.py` 里赋值形式的三引号（`SCHEMA_SQL = \"\"\"…\"\"\"`）只挖不判：那是喂给
     别的程序的数据，不是画给人看的文字。行首那种（docstring）按文档判。
   · `.html` 的文字整份看，不按行 —— 一个标签可以跨两行。`<script>` 与 `<style>`
@@ -87,6 +115,7 @@
 用法：
     python3 tools/check-copy-style.py                # 扫整个仓库
     python3 tools/check-copy-style.py --report       # 另打印密度
+    python3 tools/check-copy-style.py --ui           # 逐条列出 L 命中的位置
     python3 tools/check-copy-style.py --baseline     # 重新生成基线（要人看 diff）
     python3 tools/check-copy-style.py --self-test    # 种坏样本，断言它真的会红
 """
@@ -101,8 +130,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BASELINE_PATH = os.path.join(HERE, "copy-style-baseline.json")
+UI_TERMS_PATH = os.path.join(HERE, "ui-terms.json")
 
-EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css")
+EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css", ".in")
 # 没有扩展名的按 shebang 认。`LICENSE` 与 `NOTICE` 首行不是 shebang，于是不判。
 SHEBANG_PY = re.compile(r"^#!.*\bpython[0-9.]*\b")
 
@@ -127,6 +157,10 @@ LINE_COMMENT = {
     ".js": ("//",), ".mjs": ("//",), ".cjs": ("//",),
     ".py": ("#",), ".sh": ("#",), ".sbatch": ("#",),
     ".html": ("<!--",), ".css": ("/*",),
+    # `.in` 是模板（`cluster/slurmate-sessiond.service.in` 会被渲染成 systemd
+    #   单元）。管理员会打开渲染出来的那一份读注释，所以它里面的记号他看得见。
+    #   少了这一项，整份文件从视野里过去 —— 而那正是 `.html` 栽过的形状。
+    ".in": ("#",),
 }
 # 块注释的续行（`* 这一行`）。Python 与 shell 没有这种写法。
 STAR_CONT = (".js", ".mjs", ".cjs", ".css", ".html")
@@ -162,6 +196,31 @@ HTML_ATTR = re.compile(r'\b(?:title|placeholder|aria-label)\s*=\s*"([^"]*)"', re
 
 STRING_MAX_HAN = 60
 BUTTON_MAX_HAN = 6
+
+
+def _load_ui_terms():
+    """`tools/ui-terms.json` 摊平成 `[(别用, 改用, 前面不许是这些字), …]`。
+
+    长的在前是为了报得准：`没成功` 与 `没成` 都在表里，而 `没成功` 先命中，
+    报出来读者才知道该往哪儿改。加载失败就**抛**，不留一份空表 ——
+    空表会让 L 静默变成"没有在看"。
+
+    `not_after` 是不得不加的：中文没有词边界，`别的` 会撞上「识别的」、
+    `的话` 会撞上「说的话」。假红会让一条检查被绕过，所以宁可在表里多写
+    一个字，也不让判据去猜。
+    """
+    with open(UI_TERMS_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    out = [(b, t["good"], t.get("not_after", ""))
+           for g in data["groups"] for t in g["terms"] for b in t["bad"]]
+    return sorted(out, key=lambda r: -len(r[0]))
+
+
+UI_TERMS = _load_ui_terms()
+
+# M：引用提示文字原文的那一处文档。全仓只有它一张表在教人"照着报错里的字样对"。
+QUOTE_DOC = "cluster/docs/PLUGIN-TROUBLESHOOTING.md"
+QUOTE_SPAN = re.compile(r"「([^」]*)」")
 
 
 def ext_of(rel, text):
@@ -441,6 +500,55 @@ def blank_spans(text, spans):
     return "".join(out)
 
 
+def blank(text):
+    """一段文本挖成空格，换行留着。"""
+    return "".join("\n" if ch == "\n" else " " for ch in text)
+
+
+def comment_masked(text, ext):
+    """把多行注释体挖空，但**留着闭记号之后那一行剩下的部分**。
+
+    串那一遍只看「行首有没有注释标记」，而块注释与 docstring 的正文行首
+    两样都没有 —— 它们于是被当成了字符串。这是**多看**，是假红的来源：
+    L 一立，docstring 里一个「读不到」就会红一条本来没错的代码。
+
+    整行跳过不行：`*/ const s = '读不到';` 那种收尾行上有一个真的字符串，
+    跳过它就把一处该报的漏掉了。所以按字符挖，只挖注释占的那一段。
+
+    开记号与 `block_lines` 同一条规矩：必须出现在行首（前导空白之后）。
+    于是字符串里写的 `"/*"` 不开一段注释。
+    """
+    pairs = BLOCK.get(ext, ())
+    if not pairs:
+        return text
+    lines = text.splitlines(True)
+    closing = None
+    for i, line in enumerate(lines):
+        s = line.lstrip()
+        lead = len(line) - len(s)
+        if closing is None:
+            for op, cl in pairs:
+                if not s.startswith(op):
+                    continue
+                k = s.find(cl, len(op))
+                if k < 0:                      # 闭记号在后面的行上
+                    closing = cl
+                    lines[i] = line[:lead] + blank(line[lead:])
+                else:                          # 同一行就闭合了
+                    end = lead + k + len(cl)
+                    lines[i] = line[:lead] + blank(line[lead:end]) + line[end:]
+                break
+            continue
+        k = line.find(closing)
+        if k < 0:
+            lines[i] = blank(line)
+        else:
+            end = k + len(closing)
+            lines[i] = blank(line[:end]) + line[end:]
+            closing = None
+    return "".join(lines)
+
+
 def html_strings(text):
     """HTML 里会被画出来的文字，与其中的控件文字。
 
@@ -454,12 +562,46 @@ def html_strings(text):
     return texts, controls
 
 
-def take_string(c, s, limit=True):
+def string_runs(cmasked, ext):
+    """连续的、每一行都带字符串字面量的代码行，认成一条逻辑串。
+
+    一条串拆到两行上是常规写法：Python 的隐式拼接（`"a" "b"`）、JS 的
+    `'a' + 'b'`。J2 的成对加粗按**一条串**配，拆开之后两边各自不成一对，
+    于是那一对记号从缝里漏过去 —— 它是会被原样画给用户看的
+    （`cluster/slurmate-sessiond` 里真有三处，`**属主能随时改写自己拥有` 与
+    `的文件**` 分在两个字面量里）。
+
+    拼接的是**字面量的内容**，不是源码：这样两行之间夹着的代码不会把不相干的
+    两段配成一对。而 `**` 的孤立写法（`client/**`、`**kwargs`、`2 ** 8`）本来
+    就不满足 `BOLD_SPAN` 的形状，跨行拼起来也仍然不满足 —— 宁可欠判，不误判。
+    """
+    runs, cur = [], []
+    for line in cmasked.splitlines():
+        if split_line(line, ext)[0] != "code":
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        lits = [m.group(0)[1:-1] for m in QUOTED.finditer(line)]
+        if not lits:
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        cur.extend(lits)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def take_string(c, s, limit=True, where=None):
     """一条会被画出来的字符串，记进 `c`。没有中文的不算。
 
     `limit` 只对单行串开。跨行的那些是整段文字（`--help` 的用法表、安装器的
     整条报错），它们本来就该长 —— 「界面文字要短，读者才会去看」那条理由
     在那里不成立。跨行串仍旧受 J2 管（记号与破折号一个都不许有）。
+
+    `where` 是给 `--ui` 用的位置（`文件:行`）。不传就是 `?`。
     """
     n = len(HAN.findall(s))
     if not n:
@@ -472,6 +614,23 @@ def take_string(c, s, limit=True):
         c["strm"] += 1
     if limit and n > STRING_MAX_HAN:
         c["long"] += 1
+    # L：提示文字的用词。反引号跨度里的是**引用**这个词本身（「不许写成
+    #   `读不到`」），不是在用它做提示文字 —— 与 J 同一条豁免。
+    prose = BACKTICK.sub(lambda x: " " * len(x.group(0)), s)
+    hit = False
+    for bad, good, not_after in UI_TERMS:
+        k = prose.find(bad)
+        while k >= 0:
+            # 前面紧挨着的那个字在 `not_after` 里就不算这一条：`的话` 撞上
+            #   「说的话」、`别的` 撞上「识别的」。整串只看第一个真命中。
+            if not (k and prose[k - 1] in not_after):
+                c["word"] += 1
+                c["word_at"].append((where, bad, good, s.replace("\n", "⏎")))
+                hit = True
+                break
+            k = prose.find(bad, k + 1)
+        if hit:
+            break
 
 
 def counts_of(rel, text):
@@ -481,17 +640,24 @@ def counts_of(rel, text):
     `strm`  J2：字符串里的记号。
     `long`  K：超过 60 汉字的字符串。
     `btn`   K：超过 6 汉字的控件文字（只有 `.html` 数得出来）。
+    `word`  L：字符串里出现了 `tools/ui-terms.json` 左列的词。
+
+    `word_at` 与 `bold`/`dash`/`han` 一样不在 `KEYS` 里：前三个是给 `--report`
+    的密度，`word_at` 是给 `--ui` 的逐条位置。
     """
     ext = ext_of(rel, text)
     test = is_test_file(rel)
-    c = {"star": 0, "strm": 0, "long": 0, "btn": 0,
-         "han": 0, "bold": 0, "dash": 0}
+    c = {"star": 0, "strm": 0, "long": 0, "btn": 0, "word": 0,
+         "han": 0, "bold": 0, "dash": 0, "word_at": []}
     if not ext:
         return c
 
     # 跨行的字符串先挖空：它们里面的行按行看与代码无异，会被整片漏掉。
     spans = string_spans(text, ext)
     masked = blank_spans(text, mask_spans(text, ext))
+    # 串那一遍还要再挖一层：多行注释的正文不是画给用户看的字（见
+    #   `comment_masked`）。注释那一遍仍旧用上面那一份 —— 它要的正是那些正文。
+    cmasked = comment_masked(masked, ext)
 
     # ── 注释：按行，行尾注释也算（见 split_line）。
     # 多行跨度里的行优先 —— docstring 与块注释的正文，split_line 认不出来。 ──
@@ -557,19 +723,35 @@ def counts_of(rel, text):
     if ext == ".html":
         texts, controls = html_strings(text)
         for s in texts:
-            take_string(c, s)
+            take_string(c, s, where="%s:?" % rel)
         for s in controls:
             if len(HAN.findall(s)) > BUTTON_MAX_HAN:
                 c["btn"] += 1
         return c
 
-    for line in masked.splitlines():
+    for i, line in enumerate(cmasked.splitlines()):
         if split_line(line, ext)[0] != "code":
             continue
         for m in QUOTED.finditer(line):
-            take_string(c, m.group(0)[1:-1])
+            take_string(c, m.group(0)[1:-1], where="%s:%d" % (rel, i + 1))
+    # 拆到两行上的成对加粗：单看每一个字面量都不是一对，拼起来才是（见
+    #   `string_runs`）。只补**跨字面量**那一部分，单个字面量里配上的
+    #   `take_string` 已经数过了。
+    for lits in string_runs(cmasked, ext):
+        joined = "".join(lits)      # 拼接不带分隔符：两行之间本来就没有字符
+        cross = (len(BOLD_SPAN.findall(joined))
+                 - sum(len(BOLD_SPAN.findall(x)) for x in lits))
+        c["strm"] += max(0, cross)
     for a, b in spans:
-        take_string(c, text[a:b], limit=False)
+        body = text[a:b]
+        # 跨度的两端是定界符（引号或反引号），不是内容 —— 单行串那边早就剥掉了
+        #   （`m.group(0)[1:-1]`）。不剥的话 L 的反引号豁免会把整个模板串吃掉：
+        #   `` `\n读不到 ${p}\n` `` 一个字都在反引号里，于是永远不报。
+        #   here-doc 的体不带定界符（`sh_spans` 就是这么切的），所以那一头不受影响。
+        if len(body) >= 2 and body[0] == body[-1] and body[0] in "'\"`":
+            body = body[1:-1]
+        take_string(c, body, limit=False,
+                    where="%s:%d" % (rel, text.count("\n", 0, a) + 1))
     return c
 
 
@@ -610,6 +792,19 @@ def read_repo(root):
     return files
 
 
+def _read_doc(root):
+    """那份文档的正文；读不到返回 `None`。
+
+    读不到**不能**当成"没有要判的东西" —— 那份文档被改名或搬走之后，M 会
+    静默变成"没有在看"，而绿与"没在看"同形正是这个仓库一路在躲的形状。
+    """
+    try:
+        with open(os.path.join(root, QUOTE_DOC), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def load_baseline():
     try:
         with open(BASELINE_PATH, encoding="utf-8") as f:
@@ -618,7 +813,17 @@ def load_baseline():
         return {}
 
 
-KEYS = ("star", "strm", "long", "btn")
+KEYS = ("star", "strm", "long", "btn", "word")
+
+# 每一条判据红了之后该往哪儿看。第一次写的时候五条共用一句「见〈写得短〉」，
+#   而 L 的权威在 `tools/ui-terms.json` 里那张表 —— 指错地方等于没指。
+HINT = {
+    "star": "记号不是强调，位置才是 —— 见 `CONTRIBUTING.md`〈写得短〉",
+    "strm": "记号会被原样画出来 —— 见 `CONTRIBUTING.md`〈界面与命令行文案〉",
+    "long": "界面文字要短，读者才会去看 —— 见 `CONTRIBUTING.md`〈界面与命令行文案〉",
+    "btn": "动作控件的文字上限 6 字 —— 见 `CONTRIBUTING.md`〈界面与命令行文案〉",
+    "word": "用词按 `tools/ui-terms.json` 那张封闭表 —— 见 `CONTRIBUTING.md`〈界面与命令行文案〉",
+}
 
 
 def compare(files, base):
@@ -634,8 +839,7 @@ def compare(files, base):
             for k in KEYS:
                 if c[k]:
                     problems.append("%s：%s %d 条，而它不在基线里 —— 新写的代码"
-                                    "没有旧账可还，见 `CONTRIBUTING.md`〈写得短〉"
-                                    % (rel, k, c[k]))
+                                    "没有旧账可还，%s" % (rel, k, c[k], HINT[k]))
             continue
         for k in KEYS:
             if c[k] > allow.get(k, 0):
@@ -654,18 +858,34 @@ def run(root):
     skipped = sorted(r for r in files if not judged(r))
     base = load_baseline()
     problems, seen = compare(files, base)
+    doc = _read_doc(root)
+    if doc is None:
+        problems.append("%s：读不到这份文档 —— M 判据失去目标，先把它找回来"
+                        % QUOTE_DOC)
+    else:
+        # 语料是**被判的那些**源码。检查器自己与用例不算 —— 检查器的样本里
+        #   写着故意违规的字面量（第一版把样本也当语料，于是 M 自己把自己
+        #   要抓的两条遮住了）。
+        corpus = "\n".join(t for rel, t in files.items()
+                           if judged(rel) and not is_test_file(rel))
+        problems += prompt_quote_problems(doc, corpus)
 
     if problems:
         for p in problems:
             print("✗ %s" % p)
-        print("\n✗ %d 条。记号不是强调，位置才是 —— 见 `CONTRIBUTING.md`〈写得短〉。"
+        words = sum(c["word"] for c in seen.values())
+        print("\n✗ %d 条。体例见 `CONTRIBUTING.md`〈写得短〉与〈界面与命令行文案〉。"
               % len(problems))
+        if words:
+            print("  口语用词占 %d 处，逐条清单跑 `--ui`；用词表在 "
+                  "`tools/ui-terms.json`。" % words)
         return 1
 
     total = {k: sum(c[k] for c in seen.values()) for k in KEYS}
-    print("✓ %d 份源码：%d 处注释记号、%d 处字符串记号、%d 条超长文字、%d 条超长控件"
-          " —— 都在棘轮允许的额度内"
-          % (len(files), total["star"], total["strm"], total["long"], total["btn"]))
+    print("✓ %d 份源码：%d 处注释记号、%d 处字符串记号、%d 条超长文字、%d 条超长控件、"
+          "%d 处口语用词 —— 都在棘轮允许的额度内"
+          % (len(files), total["star"], total["strm"], total["long"],
+             total["btn"], total["word"]))
 
     left = {r: c for r, c in seen.items() if r in base and any(c[k] for k in KEYS)}
     print("\n· 棘轮还没清空：%d 份挂着额度。清干净一份就把基线里那个键删掉。"
@@ -709,6 +929,53 @@ def report(root):
     print("\n  合计 %d 汉字：加粗 %.1f/千字、破折号 %.1f/千字" %
           (tot_h, 1000.0 * tot_b / tot_h, 1000.0 * tot_d / tot_h))
     print("  `CONTRIBUTING.md`〈写得短〉的目标：加粗 ≤ 5/千字、破折号 ≤ 2/千字。")
+    return 0
+
+
+def prompt_quote_problems(doc, corpus):
+    """M：`doc` 的表行第一列里，每个 `「…」` 都要在 `corpus`（全部源码）里找得到。
+
+    判据与读盘分开，于是自测能喂手写的小样本进来 —— M 的样本不是"一份文件里
+    有什么"，是"两段文本之间的关系"，往 `counts_of` 那套形状里塞不进去。
+    """
+    out = []
+    for n, line in enumerate(doc.splitlines(), 1):
+        if not line.startswith("| 「"):
+            continue
+        # 只判表行第一列（〈报错里出现〉）。**标题不判**：这一篇的标题是标题，
+        #   好几处本来就写着 `xxx` / `X` / `N` 这类占位（"报「default_plugin
+        #   = xxx 在本站没有装」"），逼它们逐字就得把 `%r` 写进标题里。那是一处
+        #   明写的欠判，不是漏看。
+        cell = line.split("|")[1]
+        for m in QUOTE_SPAN.finditer(cell):
+            q = m.group(1)
+            if "…" in q:
+                continue
+            if q not in corpus:
+                out.append("%s:%d：引用的「%s」在源码里找不到原话" % (QUOTE_DOC, n, q))
+    return out
+
+
+def ui(root):
+    """L 命中的每一处：位置、别用、改用、原文。只报告，不判红。
+
+    报一句「一共 313 处」没法动手，这张清单才是干活用的。制表符分隔，
+    外面随便 `cut` / `sort`。
+    """
+    files = read_repo(root)
+    rows, per_word = [], {}
+    for rel in sorted(files):
+        if not judged(rel):
+            continue
+        for where, bad, good, s in counts_of(rel, files[rel])["word_at"]:
+            rows.append((where or "?", bad, good, s))
+            per_word[bad] = per_word.get(bad, 0) + 1
+    for where, bad, good, s in rows:
+        print("%s\t%s\t%s\t%s" % (where, bad, good, s[:90]))
+    print("\n共 %d 处，%d 份文件。" % (len(rows),
+                                     len({w.split(":")[0] for w, _, _, _ in rows})))
+    for bad, n in sorted(per_word.items(), key=lambda kv: (-kv[1], kv[0])):
+        print("  %5d  %s" % (n, bad))
     return 0
 
 
@@ -852,6 +1119,57 @@ def self_test():
         ("`<label>` 是字段名，不受 6 字管",
          {"client/src/a.html": '<label for="f-host">主机（IP 或域名）</label>\n'},
          None),
+        # ── L：提示文字的用词 ──────────────────────────────────────────
+        ("字符串里的「读不到」",
+         {"client/src/main/a.js": "const s = '读不到 X：原因';\n"}, "word"),
+        ("字符串里的「没能」",
+         {"client/src/main/a.js": "const s = '没能保存到本机。';\n"}, "word"),
+        ("字符串里的「东西」",
+         {"client/src/main/a.js": "throw new Error('包里没有这个东西');\n"}, "word"),
+        ("PHP 之外各语言同判：Python 字符串里的「对不上」",
+         {"cluster/a.py": "print('与签名对不上')\n"}, "word"),
+        ("shell 里打在终端上的「挑不到」",
+         {"cluster/a.sh": 'die "挑不到空闲端口"\n'}, "word"),
+        ("HTML 控件文字里的「一下」",
+         {"client/src/a.html": "<button>弄一下</button>\n"}, "word"),
+        ("跨行模板串里的口语词也算",
+         {"client/src/main/a.js": "const t = `\n读不到 ${p}\n`;\n"}, "word"),
+        # ── L 的假红防线 ───────────────────────────────────────────────
+        ("反引号里的是**引用**这个词，不是用它做提示文字",
+         {"client/src/main/a.js": "const s = '不许写成 `读不到`';\n"}, None),
+        # ── J2：拆到两个字符串字面量里的成对加粗 ──────────────────────
+        ("Python 隐式拼接拆开的成对加粗（单看每个字面量都不成对）",
+         {"cluster/a.py": 'raise ValueError("属主**能随时改写自己拥有"\n'
+                          '                 "的文件**，所以……")\n'}, "strm"),
+        ("JS 用 `+` 拼起来的两行也一样",
+         {"client/src/a.js": "throw new Error('本站没有这种**'\n"
+                             "  + '资源**。');\n"}, "strm"),
+        ("拆开的假红防线：两个 glob 分在两行上不配对",
+         {"client/src/a.js": "const a = '见 client/**'\n"
+                             "  + ' 与 docs/** 两份。';\n"}, None),
+        ("没有中文的串本来就不判",
+         {"client/src/main/a.js": "const s = 'ENOENT reading file';\n"}, None),
+        ("注释里的口语词不归 L 管（那是写给维护者的）",
+         {"client/src/main/a.js": "// 从前这里是「读不到」\nconst a = 1;\n"}, None),
+        ("`的话` 不当条件句用的地方不算（「服务说的话」）",
+         {"client/src/main/a.js": "const s = '那个服务说的话';\n"}, None),
+        ("而条件句的 `的话` 照报",
+         {"client/src/main/a.js": "const s = '不升的话，两边各说各话';\n"}, "word"),
+        ("`别的` 撞上「识别的」不算",
+         {"client/src/main/a.js": "const s = '配置里有无法识别的键';\n"}, None),
+        ("而「别的进程」照报",
+         {"client/src/main/a.js": "const s = '被别的进程占着';\n"}, "word"),
+        ("测试文件的字符串仍不判",
+         {"client/test/a.test.mjs": "test('读不到时返回 null', () => {});\n"}, None),
+        # ── 块注释与 docstring 的正文不是字符串（L 立之前它是假红的来源） ──
+        ("JS 块注释正文里的引号不是字符串",
+         {"client/src/main/a.js": '/* 说明 "读不到" 这一句 */\nconst a = 1;\n'}, None),
+        ("Python docstring 正文里的引号不是字符串",
+         {"cluster/a.py": 'def f():\n    """读不到就是空集。"""\n    return 1\n'}, None),
+        ("HTML 注释正文里的引号不是字符串（`html_strings` 先剥注释）",
+         {"client/src/a.html": '<!-- 说明 "读不到" -->\n<button>好</button>\n'}, None),
+        ("而闭记号之后那一行剩下的部分照判 —— 整行跳过会漏掉真的字符串",
+         {"client/src/main/a.js": "/* 说明 */ const s = '读不到 X';\n"}, "word"),
         # ── 不判的三类 ─────────────────────────────────────────────────
         ("测试文件的字符串不判（用例名本轮不动）",
          {"client/test/a.test.mjs": "test('★ 写失败：返回 {ok:false}', () => {});\n"}, None),
@@ -868,6 +1186,34 @@ def self_test():
                 bad.append("假红：%s —— 报了 %r" % (why, got))
         elif not any(expect in g for g in got):
             bad.append("没抓到：%s（期望 %r，实际 %r）" % (why, expect, got))
+    # ── M：文档里引用的提示文字要能在源码里找到 ─────────────────────────
+    #
+    # M 判的不是"一份文件里有什么"，是**两段文本之间的关系**（文档里写的字样
+    #   在不在源码里），所以它进不了上面那套 `(样本文件, 期望)` 的形状。
+    corpus = "const s = '读取站点的插件快照表失败';\n"
+    m_cases = [
+        ("表里那个字样在源码里找得到",
+         "| 「读取站点的插件快照表失败」 | 原因 | 做法 |", None),
+        ("给变量留了 `…` 的那一段不判",
+         "| 「读取…失败」 | 原因 | 做法 |", None),
+        ("正文里的「」不判 —— 那是行文，不是字样",
+         "这一节讲的是「随便写的一句」，它不在表里。", None),
+        ("标题不判（标题里有 `xxx` / `X` 这类占位）",
+         "## 启动时报「default_plugin = xxx 在本站没有装」", None),
+        ("第二列里的「」不判 —— 那不是〈报错里出现〉那一列",
+         "| 「读取站点的插件快照表失败」 | 见「随便写的一句」 | 做法 |", None),
+        ("字样与源码对不上就报",
+         "| 「读不到站点的插件记录」 | 原因 | 做法 |", "找不到原话"),
+    ]
+    for why, doc, expect in m_cases:
+        got = prompt_quote_problems(doc, corpus)
+        if expect is None:
+            if got:
+                bad.append("假红：%s —— 报了 %r" % (why, got))
+        elif not any(expect in g for g in got):
+            bad.append("没抓到：%s（实际 %r）" % (why, got))
+        cases.append((why, None, expect))
+
     if bad:
         for b in bad:
             print("✗ %s" % b)
@@ -882,6 +1228,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--ui", action="store_true")
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
@@ -891,6 +1238,8 @@ def main():
         return write_baseline(args.root)
     if args.report:
         return report(args.root)
+    if args.ui:
+        return ui(args.root)
     return run(args.root)
 
 

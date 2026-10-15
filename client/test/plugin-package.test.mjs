@@ -344,7 +344,7 @@ test('不是 Buffer / 空 Buffer 一律是"不长这样"，不是异常', () => 
 test('readPackageFile：读不到文件时也返回理由，不抛', () => {
   const r = PP.readPackageFile('/nonexistent/nope.splug');
   assert.equal(r.ok, false);
-  assert.match(r.why, /读不到/);
+  assert.match(r.why, /读取 .+ 失败/);
 });
 
 // ── 与 §3.3 的关系 ──────────────────────────────────────────────────────────

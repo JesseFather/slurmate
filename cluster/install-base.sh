@@ -205,7 +205,7 @@ if command -v flock >/dev/null 2>&1; then
         warn "无法创建部署锁 ${LOCK_FILE}，跳过并发保护"
     fi
 else
-    warn "找不到 flock，无法防止并发部署；请自行确认没有另一个实例在运行"
+    warn "未找到 flock，无法防止并发部署；请自行确认没有另一个实例在运行"
 fi
 
 # ==============================================================================
@@ -255,7 +255,7 @@ if [[ "$MODE" == "uninstall" ]]; then
         if "$PY" "$DAEMON" --uninstall-plugins --all-plugins --config="$CONF" >/dev/null 2>&1; then
             ok "已卸掉本站的全部插件（包 / 它们的配置 / 它们的作业脚本 / 钥匙记录）"
         else
-            warn "插件卸载器没能跑完，站点上可能还剩着插件包或它们的配置。"
+            warn "插件卸载器未能跑完，站点上可能还剩着插件包或它们的配置。"
             warn "  人工看一眼（这一步在做任何删除之前，所以安全）："
             warn "      ${DAEMON} --uninstall-plugins --all-plugins --config=${CONF}"
             warn "  看完再重跑本脚本；直接继续也行，那几份会留在盘上。"
@@ -472,7 +472,7 @@ else
 fi
 
 # ── Python ──
-[[ -x "$PY" ]] || die "找不到 ${PY}"
+[[ -x "$PY" ]] || die "未找到 ${PY}"
 PYV="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo "?")"
 "$PY" - <<'PYEOF' >/dev/null 2>&1 || die "Python 缺少必需能力（socket.SO_PEERCRED / sqlite3）"
 import socket, sqlite3, json, configparser
@@ -481,7 +481,7 @@ PYEOF
 ok "Python ${PYV} 且具备 SO_PEERCRED / sqlite3"
 
 # ── nft ──
-[[ -x "$NFT" ]] || die "找不到 nft"
+[[ -x "$NFT" ]] || die "未找到 nft"
 "$NFT" list tables >/dev/null 2>&1 || die "nft 不可用（无法列出规则表）"
 ok "nft 可用：$("$NFT" --version 2>&1 | head -1)"
 
@@ -500,7 +500,7 @@ fi
 ok "nft -j 可用且输出结构正常（非干扰比对有效）"
 
 # ── sha256sum（文件哈希校验要用）──
-command -v sha256sum >/dev/null 2>&1 || die "找不到 sha256sum，无法校验现有文件是否被改动"
+command -v sha256sum >/dev/null 2>&1 || die "未找到 sha256sum，无法校验现有文件是否被改动"
 ok "sha256sum 可用"
 
 # ── 目标位置是否已被非本系统的文件占用 ──
@@ -555,7 +555,7 @@ case "$_check_rc" in
         ok "自检通过（用的是 ${SRC_CONF}）" ;;
     2)
         _check_dump
-        die "这一台机器缺东西（见上，标着 ✗ 的那几条）。
+        die "这一台机器缺少必需组件（见上，标着 ✗ 的那几条）。
      装文件之前必须先解决它。本脚本的承诺是「不满足即中止，不做任何改动」。
      它问的是「这台机器上有没有 nft、有没有那八个 Slurm 命令」，
      与你要装什么版本的 Slurmate 无关。" ;;
@@ -570,7 +570,7 @@ case "$_check_rc" in
         warn "  〈阶段 3〉：那一次读的是刚落盘的站点配置，它才是门。）" ;;
     *)
         _check_dump
-        die "自检没跑起来（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
+        die "自检无法运行（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
      本身有问题，而此时正是最该停下来的时候。" ;;
 esac
 
@@ -697,7 +697,7 @@ NEIGHBOR_SERVICES=(port-daemon port-query codeserver-port-cleanup)
 ok "已保存服务状态"
 
 if [[ "$MODE" == "check" ]]; then
-    step "只体检模式（--check）：不安装任何东西"
+    step "只体检模式（--check）：不做任何安装"
     info "源文件与目标位置检查通过。"
 
     # 插件不在这里体检：本脚本不装插件，也就无从知道
@@ -891,7 +891,7 @@ if [[ "$DRYRUN" -eq 0 ]]; then
             ok "服务已在运行 → 已给它发了重载信号（正在跑的会话一条都没断）"
             info "  它有没有接受这次改动，看它自己的日志：journalctl -u ${SERVICE} -n 20"
         else
-            warn "systemctl reload 没成功，守护进程很可能拒绝了这次改动"
+            warn "systemctl reload 未成功，守护进程很可能拒绝了这次改动"
             warn "  （比如改了必须重启才生效的键，它自己的日志里点了名）。"
             warn "  它仍然在用旧配置照常服务。想让改动生效："
             warn "      systemctl restart $SERVICE"
@@ -1011,7 +1011,7 @@ fi
 
 # ── 5.4 sshd 配置语法 ──
 if ! command -v sshd >/dev/null 2>&1; then
-    warn "找不到 sshd 命令，跳过语法检查（本系统确实未修改 sshd 配置）"
+    warn "未找到 sshd 命令，跳过语法检查（本系统确实未修改 sshd 配置）"
 elif sshd -t 2>/dev/null; then
     ok "sshd 配置语法正常"
 else

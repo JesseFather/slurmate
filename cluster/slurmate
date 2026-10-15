@@ -146,7 +146,7 @@ def reload_daemon():
     try:
         rc = subprocess.run(["systemctl", "reload", SERVICE]).returncode
     except OSError as e:
-        print("配置写好了，但没能让守护进程重读（%s）。" % e, file=sys.stderr)
+        print("配置写好了，但未能让守护进程重读（%s）。" % e, file=sys.stderr)
         return
     if rc == 0:
         # 说准：`systemctl reload` 回 0 只表示信号送到了，systemd 不知道服务内部
@@ -157,7 +157,7 @@ def reload_daemon():
         print("  它有没有接受这次改动，看它自己的日志："
               "journalctl -u %s -n 20" % SERVICE)
     else:
-        print("配置写好了，但 `systemctl reload` 没成功。它会在下次重启时生效；"
+        print("配置写好了，但 `systemctl reload` 未成功。它会在下次重启时生效；"
               "想立刻生效：sudo systemctl restart %s" % SERVICE, file=sys.stderr)
 
 
@@ -180,10 +180,10 @@ def cmd_plugin_install(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s，安装器在它里面。\n"
-              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+        print("未找到守护进程脚本 %s，安装器在它里面。\n"
+              "  · 部署过时，检查它是不是在其他 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
+              "  · 还没部署时，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     if not args.files and not args.from_dir:
@@ -232,8 +232,8 @@ def cmd_plugin_install(args):
     if src != 0:
         # 包装好了，而站点那两份派生物没对上。分开说：把这两件事混成一句"装插件
         # 失败"，管理员会去重装那个已经装好了的包。
-        print("插件包已经装好了，但站点的配置/作业脚本没能对齐（原因见上）。"
-              "在它们对上之前，这个插件可能起不来或提交不了。", file=sys.stderr)
+        print("插件包已经装好了，但站点的配置/作业脚本未能对齐（原因见上）。"
+              "在它们对齐之前，这个插件可能无法启动或提交不了。", file=sys.stderr)
         return src
     # 装好了、配置也对齐了，就让守护进程重读一遍（热重载），而不是重跑一次基座
     # 安装脚本（stop + start）：那样所有人的会话要断一次，就为了加一个插件。
@@ -261,10 +261,10 @@ def cmd_plugin_uninstall(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s，卸载的判据在它里面。\n"
-              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+        print("未找到守护进程脚本 %s，卸载的判据在它里面。\n"
+              "  · 部署过时，检查它是不是在其他 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
+              "  · 还没部署时，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     argv = [sys.executable, exe, "--uninstall-plugins"] + list(args.ids)
@@ -306,10 +306,10 @@ def cmd_plugin_sync(args):
 
     exe = sessiond_path()
     if not os.path.isfile(exe):
-        print("找不到守护进程脚本 %s，对账的判据在它里面。\n"
-              "  · 部署过的话，检查它是不是在别的 prefix 下，用 SLURMATE_SESSIOND "
+        print("未找到守护进程脚本 %s，对账的判据在它里面。\n"
+              "  · 部署过时，检查它是不是在其他 prefix 下，用 SLURMATE_SESSIOND "
               "指过去；\n"
-              "  · 还没部署的话，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
+              "  · 还没部署时，先跑 cluster/install-base.sh。" % exe, file=sys.stderr)
         return EXIT_NOTFOUND
 
     argv = [sys.executable, exe, "--sync-plugins"]
@@ -375,13 +375,13 @@ def rpc(req, timeout=40.0):
     if b"\n" not in buf and len(buf) >= RPC_MAX_RESPONSE_BYTES:
         raise RpcError(EXIT_SLURM,
                        "守护进程的响应超过了 %d 字节，这一条读不完整。\n"
-                       "多半是插件的整包太大（`plugin_package` 一次发一整个包，"
+                       "多半是插件的整包过大（`plugin_package` 一次发一整个包，"
                        "base64 之后还要大三分之一）。\n"
                        "这不是守护进程没响应，是这一条应答本身超出了 CLI 的读取"
                        "上限。\n"
                        "要真的放宽，得同时抬这里的 RPC_MAX_RESPONSE_BYTES 与守护"
                        "进程的 PLUGIN_PACKAGE_MAX_BYTES。只抬一边等于把这句话往后"
-                       "挪一格。" % RPC_MAX_RESPONSE_BYTES)
+                       "移动一格。" % RPC_MAX_RESPONSE_BYTES)
     line = buf.split(b"\n", 1)[0].strip()
     if not line:
         raise RpcError(EXIT_NODAEMON, "守护进程返回了空响应")
@@ -748,7 +748,7 @@ def cmd_partitions(args):
         # GRES 那一列三态，与协议同一条规矩：`gres` 这个键不存在 = 服务端查不到
         # （它没有说"这个分区没有卡"的资格），`[]` = 确实一个都没配。
         if "gres" not in p:
-            gres = "（查不到）"
+            gres = "（获取失败）"
         else:
             gres = "、".join("%s×%d" % (gres_label(e), e.get("per_node_max") or 0)
                              for e in p["gres"]) or "无"
@@ -757,7 +757,7 @@ def cmd_partitions(args):
                  p.get("max_time") or "无上限", gres, p.get("reason", ""), mark))
     print()
     print("GRES 那一列是每个节点最多几个（`--gres` 就是按节点算的）。")
-    print("不指定 --partition 时，会从有权限的分区里随机挑一个。")
+    print("不指定 --partition 时，会从有权限的分区里随机选择一个。")
     print("缺省资源是按插件的，见 `slurmate plugins`。")
     return 0
 
@@ -810,7 +810,7 @@ def cmd_plugins(args):
     _probs = d.get("problems") or []
     if _probs:
         print()
-        print("本站有 %d 个插件没能加载（它们不在上面的表里）：" % len(_probs))
+        print("本站有 %d 个插件未能加载（它们不在上面的表里）：" % len(_probs))
         for _x in _probs:
             print("  · %s" % _x)
     if not d["plugins"]:
@@ -838,7 +838,7 @@ def cmd_plugins(args):
     if _has_delivery:
         # 只有一条投递方式：整包一次取走。
         print("「分发」= 客户端连上之后要把整个包取走一次（只取已启用的；")
-        print("  而这个包是站点从盘上那棵树现打的，盘上没有现成的容器）。")
+        print("  而这个包是站点从盘上那份目录树现打的，盘上没有现成的容器）。")
         print("  单份上限 %s，另有份数与总量上限；客户端取两边的更严者。"
               % _human_bytes(d["limits"].get("file_bytes")))
         _pb = d["limits"].get("package_bytes")
@@ -1154,7 +1154,7 @@ def build_parser():
     p.add_argument("--json", action="store_true")
 
     p = add("submit", cmd_submit, "提交一个开发会话（所有参数都可省略）")
-    p.add_argument("--partition", help="分区（省略则从有权限的分区里随机挑一个）")
+    p.add_argument("--partition", help="分区（省略则从有权限的分区里随机选择一个）")
     p.add_argument("--cpus", type=int,
                    help="CPU 核心数（省略 = 该插件的服务端默认）")
     p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")

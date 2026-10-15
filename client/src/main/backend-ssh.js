@@ -284,7 +284,7 @@ const AUTH_FAILED_RE = /all configured authentication methods failed/i;
  */
 function authFailureDetail(info) {
   const who = `${info.user}@${info.host}:${info.port}`;
-  const line = info.publicKeyLine || '（没能取到公钥）';
+  const line = info.publicKeyLine || '（未能获取公钥）';
   return `登录节点拒绝了这把公钥（${who}）。\n`
     + `出示：${info.keyType || '未知类型'}，指纹 ${info.keyFingerprint || '未知'}\n`
     + `${line}\n`

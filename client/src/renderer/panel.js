@@ -275,13 +275,13 @@ function renderPortAsk(r, pending) {
     `只换这一次会话的端口，配置里那个（${want}）不动。`
     + '浏览器按端口隔离本地存储，编辑器布局与最近打开的文件会重置一次。'
     + '占用它的程序退出后，下次启动回到原端口，布局也还在。'
-    + '程序一直占着的话，每次开局都要问一遍。';
+    + '程序一直占着时，每次开局都要问一遍。';
   $('sb-port-remember').title =
     `把这份数据的端口改成新的那个（原本是 ${want}），此后启动不再问。`
     + '不可逆：原端口与挂在它上面的编辑器布局都回不来。';
   $('sb-port-abort').title =
     '什么都不做：集群上不会出现作业，也不会占住那份数据。'
-    + '想跑起来的话，先腾出那个端口，再点一次「开始会话」。';
+    + '想运行它，先腾出那个端口，再点一次「开始会话」。';
   $('sb-port').classList.remove('hidden');
 }
 
@@ -775,7 +775,7 @@ function wsHintText(v, cur) {
   if (v === NEW_WORKSPACE) return '保存后会新建一个空白工作区。';
   if (cur !== undefined) {                 // 编辑
     if (v === cur || v === '') return '不变。';
-    return `保存后切到「${name(v)}」，原来那个里面的东西不会跟着走。`;
+    return `保存后切到「${name(v)}」，原来那个里面的内容不会跟着走。`;
   }
   if (v === '') {                          // 新建，跟随默认
     return wsDefault
@@ -881,12 +881,12 @@ async function loadJobLog() {
     any = true;
     const blk = cel('div', 'block');
     blk.append(cel('div', 'hd2', `${title}　${it.kind === 'text' ? it.meta : ''}`));
-    if (it.kind === 'na') blk.append(cel('p', 'na', `取不到：${it.why}`));
+    if (it.kind === 'na') blk.append(cel('p', 'na', `获取失败：${it.why}`));
     else blk.append(cel('div', null, it.text || '（这一份还是空的）'));
     if (it.path) blk.append(cel('div', 'hd2', it.path));
     box.append(blk);
   }
-  if (!any) box.append(cel('p', 'sub', '这个作业还没有写出任何东西。'));
+  if (!any) box.append(cel('p', 'sub', '这个作业还没有输出任何内容。'));
 }
 
 // ── 公钥 ────────────────────────────────────────────────────────────────────
@@ -948,7 +948,7 @@ function renderKey(k) {
     const tail = '下次启动会重新生成一把新密钥，注册到 IDM 的那把公钥随之作废，'
       + '到时候只会看到「认证失败」。';
     np.textContent = boot.secureStorageAvailable
-      ? '注意：私钥这次没能保存到本机。' + tail
+      ? '注意：私钥这次未能保存到本机。' + tail
       : '注意：这台机器上没有可用的系统凭据库，私钥只能留在内存里。' + tail;
     np.classList.add('alarm');
     np.classList.remove('hidden');
@@ -1282,7 +1282,7 @@ function discardWhy(name) {
     && lastSnap.state !== 'idle' && lastSnap.state !== 'ended';
   return `「${name}」现在只有这一条连接在用，切走之后会被删除。`
     + '它的编辑器布局、标签页和登录状态会一起没掉，'
-    + '插件写在磁盘上的文件也一样，找不回来。'
+    + '插件写在磁盘上的文件同样找不回来。'
     + (live ? '当前页面会重新加载到新工作区，未保存的编辑内容会丢失。' : '');
 }
 
@@ -1660,17 +1660,17 @@ function renderPlugins(pv) {
       const site = pv.site || {};
       if (site.supported === false && site.reason === 'old_daemon') {
         issues.append(issueBox('warn', '本站提供的插件，本机没有',
-          `${names(bySync)}。\n这个站点的守护进程太旧，不支持插件分发。`
+          `${names(bySync)}。\n这个站点的守护进程版本过低，不支持插件分发。`
           + '要让客户端自动取回它们，得请管理员升级站点上的守护进程。'));
       } else if (site.supported === false) {
         issues.append(issueBox('warn', '本站提供的插件，本机没有',
-          `${names(bySync)}。\n${site.error || '这次没能从站点问到插件。'}`));
+          `${names(bySync)}。\n${site.error || '这次未能从站点获取插件。'}`));
       } else if (pv.installedCount === 0) {
         issues.append(issueBox('warn', '本站提供的插件，本机一个都没有',
           `${names(bySync)}。\n本机还没有装上任何插件，所以上面一个按钮都没有。`
-          + '点「重新同步」把它们取回来（带客户端代码的要先点一下同意），就会变成可以开始会话的块。'));
+          + '点「重新同步」把它们取回来（带客户端代码的要先确认同意），就会变成可以开始会话的块。'));
       } else {
-        issues.append(issueBox('warn', '本站报的这几个版本，本机对不上',
+        issues.append(issueBox('warn', '本站报的这几个版本，与本机不一致',
           `${names(bySync)}。\n可能本机装的是另一个版本，也可能同步还没跑到。`
           + '用上面的「重新同步」取一次。'));
       }
@@ -1715,7 +1715,7 @@ function emptyPool(pv) {
   const site = pv.site || {};
   if (site.supported === false && site.reason === 'old_daemon') {
     d.append(el('p', 'plug-desc',
-      '基座不带插件，作业里跑什么由插件决定。这个站点的守护进程太旧，'
+      '基座不带插件，作业里跑什么由插件决定。这个站点的守护进程版本过低，'
       + '不支持插件分发，客户端没地方去取。请管理员升级站点上的守护进程。'));
   } else if (site.supported === false) {
     d.append(el('p', 'plug-desc',
@@ -1724,7 +1724,7 @@ function emptyPool(pv) {
   } else {
     d.append(el('p', 'plug-desc',
       '基座不带插件，作业里跑什么由插件决定。本站会分发插件，'
-      + '连上之后它们会出现在这里。带客户端代码的每个都要先点一下同意。'));
+      + '连上之后它们会出现在这里。带客户端代码的每个都要先确认同意。'));
   }
 
   const row = document.createElement('div');
@@ -1774,11 +1774,11 @@ function siteInstallButton() {
     if (r && r.plugins) renderPlugins(r.plugins);
     // 装上去了那一条由主进程推进提示流（它顺带说了装到哪儿、接下来会怎样）——
     //   这里再说一遍就是同一件事说两次。失败要说：那时主进程只回了一个返回值。
-    if (!r || !r.ok) notice('error', (r && r.error) || '没能把这个包装到假站点上。');
+    if (!r || !r.ok) notice('error', (r && r.error) || '未能把这个包装到假站点上。');
   }, 'ghost tiny');
-  btn.title = '挑一个 .splug（打包器产出的文件）装到这台假站点上，与真站点上'
-    + ' `slurmate plugin install` 装的是同一份东西。装上去站点当场就报它，'
-    + '接下来与真站点一样：取回来、过同意闸，然后才可用。';
+  btn.title = '选择一个 .splug（打包器产出的文件）装到这台假站点上，与真站点上'
+    + ' `slurmate plugin install` 装的是同一份内容。装上去站点当场就报它，'
+    + '接下来与真站点相同：取回来、过同意闸，然后才可用。';
   return btn;
 }
 
@@ -1811,7 +1811,7 @@ function renderSitePlugins(pv) {
     d.append(el('p', 'plug-desc', bits.join(' · ')));
 
     if (site.reason === 'old_daemon') {
-      d.append(el('p', 'why', '这个站点的守护进程太旧，不支持插件分发。'));
+      d.append(el('p', 'why', '这个站点的守护进程版本过低，不支持插件分发。'));
     } else if (site.reason === 'site_too_new') {
       // 与「守护进程太旧」不是同一件事，方向正好相反：那一个是站点落后于
       //   客户端，这一个是客户端落后于站点 —— 该做的是升级这个客户端。
@@ -1835,7 +1835,7 @@ function renderSitePlugins(pv) {
       if (site.daemonVersionVerdict === 'cross_major') {
         versionWhy(d, '这个站点发的插件包格式比本客户端新，这一版取不回来。请升级这个客户端。',
           '这个集群的服务端与本客户端大版本不同，所以那些插件包用的是更新的格式，'
-          + '而这一版的客户端没有别的办法把它取回来。请升级这个客户端。');
+          + '而这一版的客户端没有其他办法把它取回来。请升级这个客户端。');
       } else {
         versionWhy(d, '这个站点发的插件包格式比本客户端新，而它报的基座版本并不更新。升级客户端解决不了。',
           '升级客户端解决不了：这个站点报的基座版本并不比本客户端新。'
@@ -1856,7 +1856,7 @@ function renderSitePlugins(pv) {
     // 他可能发现池子越来越大，而原因在这里。
     if (site.snapshotOk === false) {
       d.append(el('p', 'why',
-        '站点的插件快照表读不出来（或者写不下去），所以这一轮没有回收任何旧版本。'
+        '站点的插件快照表读取失败（或者写入失败），所以这一轮没有回收任何旧版本。'
         + '不知道谁在引用的时候，唯一安全的动作是什么都不删。'));
     }
 
@@ -1865,7 +1865,7 @@ function renderSitePlugins(pv) {
     if (site.withdrawn) {
       d.append(el('p', 'why',
         `有 ${site.withdrawn} 个插件本机那一份已经不在了，上一次的同意因此作废。`
-        + '本轮会重新问一次。删掉本机一份就等于撤回同意：不这么算的话，下一次对账会'
+        + '本轮会重新问一次。删掉本机一份就等于撤回同意：不这么算，下一次对账会'
         + '按"摘要与上次一致"把它静默装回来。'));
     }
 
@@ -1934,7 +1934,7 @@ function renderConsent(pv) {
   const anyNew = list.some((c) => !c.existing);
   const anyHere = list.some((c) => c.existing);
   d.append(el('p', 'plug-desc',
-    (anyNew ? '它们已经取回到本机，包里每一份都核过了，但还没有装上去，要你先点一下同意。' : '')
+    (anyNew ? '它们已经取回到本机，包里每一份都核过了，但还没有装上去，要你先确认同意。' : '')
     + (anyNew && anyHere ? '\n' : '')
     + (anyHere ? '另外有几个本机已经有一份，而它没有在同意台账里（换过机器、'
       + '删过配置、或者上一次的同意已经作废）。它们的客户端代码没有在跑。'
@@ -2094,7 +2094,7 @@ function renderPluginData(d) {
   const rows = (d && d.rows) || [];
   if (d && d.ok === false) {
     sec.classList.remove('hidden');
-    box.append(el('p', 'plug-desc', d.error || '本机的插件数据没能列出来。'));
+    box.append(el('p', 'plug-desc', d.error || '本机的插件数据未能列出来。'));
     return;
   }
   // 收掉过东西的时候，这一屏不许藏。
@@ -2136,30 +2136,30 @@ function renderPluginData(d) {
     wrap.append(el('p', 'plug-desc',
       `本次运行清掉了 ${reclaimed.count} 份没人管的数据`
       + (who.length ? `（${who.join('；')}）` : '')
-      + '。它们按现在装着的插件再也读不到了：插件卸载了、工作区删了、'
+      + '。它们按现在装着的插件再也无法读取：插件卸载了、工作区删了、'
       + '或者插件换了共享组。留着只会越攒越多，所以对账时自动收掉了。'));
   }
   if (Array.isArray(reclaimed.failed) && reclaimed.failed.length) {
     wrap.append(el('p', 'plug-desc',
-      `还有 ${reclaimed.failed.length} 份没能清掉`
+      `还有 ${reclaimed.failed.length} 份未能清掉`
       + `（${reclaimed.failed.map((f) => `${f.name}：${f.error}`).join('；')}）。`
       + '它们还在盘上，下一次对账会再试一次。'));
   }
 
   if (!d || !d.diskChecked) {
     wrap.append(el('p', 'plug-desc', (d && d.why)
-      || '这一次没能去看磁盘上还剩哪些，所以这里没有东西可列。'));
+      || '这一次未能查看磁盘上还剩哪些，所以这里没有内容可列。'));
   } else {
     if (allUnknown) {
       // 这一句是插件数据目录那一根唯一的防线（它是我们自己拼出来的，
       //   没有任何探针能当场核对它 —— 见 plugin-data-audit.js 里 `allUnknown`）。
       //   所以话要说满：说出"多半是根取错了"，也说出"下面为什么一个按钮都没有"。
       wrap.append(issueBox('warn', '这一屏的目录一个都认不出',
-        '本机有两处放插件数据：Electron 那棵存储分区目录（那一根是问 Electron'
+        '本机有两处放插件数据：Electron 那个存储分区目录（那一根是问 Electron'
         + '要来的，还当场核对过名字），以及本程序自己拼出来的插件数据目录。'
-        + '整屏都认不出，更像"其中某一根指到了别的地方"，而不是"攒了一堆垃圾"。'
-        + '下面一个删除按钮都没有，这是故意的：一份不认识的东西，'
-        + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在，还在的话值得报出来。'));
+        + '整屏都认不出，更像"其中某一根指到了其他地方"，而不是"攒了一堆垃圾"。'
+        + '下面一个删除按钮都没有，这是故意的：一份不认识的内容，'
+        + '删掉它不是"收拾"而是"猜"。重启一次看看还在不在，还在就值得报出来。'));
     }
     // 这里从前有一段解释"一份数据是什么、它的两个落点在哪"。删掉了：每一行
     //   自己就在说这件事（`placesText(r.places)` 逐行说清它在浏览器里、在磁盘上
@@ -2215,7 +2215,7 @@ function placesText(places) {
   if (p && d) return '它有两部分：浏览器里的存储（布局、标签页、登录状态），'
     + '以及那个插件写在磁盘上的文件。';
   if (d) return '它是那个插件写在磁盘上的文件。';
-  return '它在浏览器里（那个插件没有另外往磁盘上写东西）。';
+  return '它在浏览器里（那个插件没有另外往磁盘上写文件）。';
 }
 
 /**
@@ -2231,7 +2231,7 @@ async function dropPluginData(r) {
   const res = await window.slurmate.deletePluginData({ name: r.name });
   if (!res || !res.ok) {
     // `stale` 由主进程给一句能直接读的话（判定权在它那儿）。
-    return notice('error', (res && res.error) || '没能删掉。');
+    return notice('error', (res && res.error) || '未能删掉。');
   }
   notice('info', `已删掉「${res.label || r.label}」。`);
   renderPluginData(res);
@@ -2254,20 +2254,20 @@ async function syncPlugins() {
 async function consentPlugin(id, version) {
   const r = await window.slurmate.consentPlugin(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
-  if (!r || !r.ok) notice('error', (r && r.error) || '没能同意这个插件');
+  if (!r || !r.ok) notice('error', (r && r.error) || '未能同意这个插件');
 }
 
 async function rejectPlugin(id, version) {
   const r = await window.slurmate.rejectPlugin(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
-  if (!r || !r.ok) notice('error', (r && r.error) || '没能处理这个插件');
+  if (!r || !r.ok) notice('error', (r && r.error) || '未能处理这个插件');
 }
 
 /** §5.3：删掉本机那一份 = 撤回同意。下一次对账会重新问一次。 */
 async function dropPluginVersion(id, version) {
   const r = await window.slurmate.dropPluginVersion(id, version);
   if (r && r.plugins) renderPlugins(r.plugins);
-  if (!r || !r.ok) notice('error', (r && r.error) || '没能删掉本机那一份');
+  if (!r || !r.ok) notice('error', (r && r.error) || '未能删掉本机那一份');
 }
 
 /** 建一个按钮。CSP 里没有 unsafe-inline，所以一律走 class，一个 style 都不能有。 */
@@ -2292,7 +2292,7 @@ function button(text, onclick, cls) {
  */
 const WHY_NOT_RUNNABLE = {
   siteUnknown: '这个守护进程不通报插件清单，所以客户端不知道站点开没开它。',
-  siteOff: '本站没有开放这个插件，要开的话得找管理员。',
+  siteOff: '本站没有开放这个插件，要开得找管理员。',
   localOff: '本机把它关掉了，勾上左边那个开关就能用。',
   noJob: '本站装了「%s」，但它没有作业侧实现，提交不了。得找管理员重新部署。',
 };
@@ -2458,7 +2458,7 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
     r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra, confirmDiscard: true });
   }
   if (!r.ok) {
-    notice('error', r.error || '没能换这一份数据。');
+    notice('error', r.error || '未能换这一份数据。');
     return { ok: false };
   }
 
@@ -2476,11 +2476,11 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
   const said = [];
   if (r.forked) {
     said.push(`已经给这条连接分了一张自己的表（「${r.forked}」）。`
-      + '从现在起它和别的连接各改各的，里面的数据还是同一份，一个字节都没复制。');
+      + '从现在起它和其他连接各改各的，里面的数据还是同一份，一个字节都没复制。');
   }
   said.push('换好了。下一次开会话时，这个插件就用新的那一份数据。');
   if (r.droppedOld) {
-    said.push('旧的那一份数据没有别的工作区在用，已经删掉，找不回来。');
+    said.push('旧的那一份数据没有其他工作区在用，已经删掉，找不回来。');
   }
   notice('info', said.join(' '));
   return { ok: true };
@@ -2508,7 +2508,7 @@ function askFork(wsName, others) {
       .join('、')}。\n\n`
     + '「全部一起改」：它们跟着一起变。\n'
     + '「只改这条连接」：先给这条连接分一张自己的表，分出来的表一开始与现在这张'
-    + '一模一样，之后各改各的。数据还是同一份，不会复制。';
+    + '完全相同，之后各改各的。数据还是同一份，不会复制。';
   return new Promise((resolve) => {
     const done = (v) => { dlg.close(); resolve(v); };
     $('fork-cancel').onclick = () => done(null);
@@ -2581,7 +2581,7 @@ function pluginBlock(p) {
       //   `jupyter` 的插件而它们是两个不同的东西。
       const r = await window.slurmate.setPluginEnabled(p.id, cb.checked);
       if (r && r.ok) renderPlugins(r.plugins);
-      else notice('error', (r && r.error) || '没能保存这个开关。');
+      else notice('error', (r && r.error) || '未能保存这个开关。');
     } finally {
       cb.disabled = false;
     }
@@ -2749,7 +2749,7 @@ async function loadHistory() {
     const detail = (r && r.error && r.error.detail) || '控制节点没有说明原因';
     // 这里是错误，不是空列表 —— 空列表的意思是"你这几天没有作业"，
     //   而那是完全不同的两句话。
-    box.append(cel('p', 'bad', `取不到作业历史：${detail}`));
+    box.append(cel('p', 'bad', `获取作业历史失败：${detail}`));
     return;
   }
   const rows = (r.data && r.data.history) || [];
@@ -2864,7 +2864,7 @@ function renderJobs() {
   //   长得不一样。把"问不到"画成"没有作业"，用户会以为自己的作业丢了 ——
   //   而真正的原因在连接那一侧。
   err.classList.toggle('hidden', !JOBS.error);
-  if (JOBS.error) err.textContent = `取不到作业列表：${JOBS.error}`;
+  if (JOBS.error) err.textContent = `获取作业列表失败：${JOBS.error}`;
   $('jobs-when').textContent = JOBS.at
     ? `这个站点上的作业（${fmtAge(Date.now() - JOBS.at)}前取的）。`
     : '';
@@ -3091,7 +3091,7 @@ function fillPartSelect(st) {
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = '（随机挑一个有权限的）';
+  none.textContent = '（随机选择一个有权限的）';
   sel.append(none);
 
   for (const p of partList) {
@@ -3193,7 +3193,7 @@ function renderGresFor(st) {
     sel.append(o);
   }
   sel.title = absent
-    ? '服务端暂时查不到这台集群的 GRES 清单（scontrol 没答上来）' : '';
+    ? '服务端暂时无法查询这台集群的 GRES 清单（scontrol 没答上来）' : '';
   sel.value = '';
   sel.onchange = () => applyGresMaxFor(st);
   applyGresMaxFor(st);
@@ -3231,7 +3231,7 @@ function askHostKey(res) {
     $('hk-title').textContent = changed ? '登录节点的主机密钥已改变' : '确认登录节点身份';
     $('hk-body').textContent = changed
       ? '这与上次连接时记录的不一致。可能是服务器重装过，也可能有人在中间拦截。'
-        + '在弄清原因之前不要继续：继续就等于把这把私钥的认证交给一个不确定的对端。'
+        + '在查明原因之前不要继续：继续就等于把这把私钥的认证交给一个不确定的对端。'
       : '这是第一次连接到这台登录节点。请核对下面的指纹（应与集群管理员公布的一致），'
         + '确认后本机才会记住它。';
     $('hk-fp').textContent = (res.hostKey && res.hostKey.fingerprint) || '（没拿到指纹）';
@@ -3392,7 +3392,7 @@ async function refreshSiteDirs() {
     // 前者是打包版的样子（那一处根本不该有），后者是"还没装过"。
     p.textContent = `${title}：${d ? `${n} 个插件` : '这一处不在场'}`
       + (d ? `　${d}` : '')
-      + (bad.length ? `　（另有 ${bad.length} 个目录读不出清单）` : '');
+      + (bad.length ? `　（另有 ${bad.length} 个目录读取清单失败）` : '');
     box.appendChild(p);
     if (n) {
       const names = cel('p', 'sub dim', one.plugins.join('、'));
@@ -3411,7 +3411,7 @@ async function refreshSiteDirs() {
   const pk = rep.packer;
   if (pk) {
     box.appendChild(cel('p', 'sub',
-      `打包器（假站点发一个插件要用它）：${pk.path || '找不到'}`));
+      `打包器（假站点发一个插件要用它）：${pk.path || '未找到'}`));
     if (pk.why) box.appendChild(cel('p', 'sub bad', pk.why));
   }
 }
@@ -3493,7 +3493,7 @@ function bindEvents() {
     } else {
       // 存不下去也要说清楚 —— 用户此刻正拿着这把新公钥去注册，
       // 而它下次启动就会消失，这个后果必须当场讲。
-      notice('error', '已生成新密钥，但它没能保存到本机（没有可用的系统凭据库）。'
+      notice('error', '已生成新密钥，但它未能保存到本机（没有可用的系统凭据库）。'
         + '关闭客户端后这把密钥就没了，请先把上面的公钥注册到 IDM。');
     }
   };
@@ -3831,7 +3831,7 @@ async function bootUI() {
   // 哪儿）。不 await 在首屏里：让它挡住首屏就是把"面板画出来"与"磁盘快不快"
   // 绑在一起。回来之后再画那一块（它与 `bootstrap` 的关系见 index.js 的注释）。
   window.slurmate.pluginData().then(renderPluginData, (e) => {
-    notice('error', '本机的插件数据没能列出来：'
+    notice('error', '本机的插件数据未能列出来：'
       + ((e && e.message) ? e.message : e));
   });
   // 一条连接都没有 —— 第一眼就是「新建」，不然用户对着空列表找不到入口
@@ -3909,7 +3909,7 @@ async function doLeave() {
   if (left && !left.ok) {
     // 没能告诉控制节点，而用户确实已经离开了 —— 两句都要说。
     //   只报错的话，用户会以为"离开没成功、还连着呢"，而去重按一次。
-    notice('warn', '已经回到列表，但没能告诉控制节点你离开了：' + left.error
+    notice('warn', '已经回到列表，但未能通知控制节点你离开了：' + left.error
       + '　作业仍在运行：那 35 分钟要从「没人看着它」被判定出来才开始算。'
       + '想立刻确认它没事，重新连上这个站点即可。');
   } else {
@@ -3983,7 +3983,7 @@ async function doProbe() {
       //   `app:probeHosts`），于是探测结果是空的，而列表上明明有一条连接 ——
       //   写成"还没有保存任何连接"是在说一件用户一眼就能看见不成立的事。
       notice('info', (boot.connections || []).length
-        ? '内置的那条是本机的假站点，没有可探测的地址。没有别的连接可探。'
+        ? '内置的那条是本机的假站点，没有可探测的地址。没有其他连接可探。'
         : '还没有保存任何连接。填好上面的用户名、主机、端口，点「保存并连接」。');
       return;
     }

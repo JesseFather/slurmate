@@ -199,7 +199,7 @@ function envelopeOfPackage(sig) {
 function recordProblem(rec) {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return '最外层不是一个 JSON 对象';
   if (rec.schema !== RECORD_SCHEMA) {
-    return `schema = ${JSON.stringify(rec.schema)}，本实现只认识 ${RECORD_SCHEMA}（写它的东西比这个客户端新？）`;
+    return `schema = ${JSON.stringify(rec.schema)}，本实现只认识 ${RECORD_SCHEMA}（写它的程序比这个客户端新？）`;
   }
   if (!Number.isInteger(rec.format) || rec.format < 1) {
     return `format = ${JSON.stringify(rec.format)}，不是正整数`;
@@ -252,7 +252,7 @@ function readRecordFile(file) {
   try {
     st = fs.statSync(file);
   } catch (e) {
-    return bad(`读不到 ${file}：${e.message}`);
+    return bad(`读取 ${file} 失败：${e.message}`);
   }
   if (st.size > MAX_RECORD_BYTES) {
     return bad(`记录表 ${file} 有 ${st.size} 字节，超过上限 ${MAX_RECORD_BYTES}（见 MAX_RECORD_BYTES）`);
@@ -261,7 +261,7 @@ function readRecordFile(file) {
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (e) {
-    return bad(`读不到 ${file}：${e.message}`);
+    return bad(`读取 ${file} 失败：${e.message}`);
   }
   let rec;
   try {

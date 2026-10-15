@@ -360,7 +360,7 @@ function ensureRelayKey(dataDir, keys) {
   } catch (e) {
     if (e.code !== 'ENOENT') {
       return { ok: false, error: 'relay_key_unreadable',
-               detail: `${p.identity} 读不出来：${e.message}` };
+               detail: `${p.identity} 读取失败：${e.message}` };
     }
   }
 

@@ -508,7 +508,7 @@ test('★ 本机那一份被改过一个字节 ⇒ 检出、点名，并且**重
   assert.equal(r.added.length, 1, '★ 重取回来的是一个新提交的槽位');
   assert.ok(r.notices.some((n) => /client\/index\.js/.test(n)),
     `要点名是哪一份文件对不上：${JSON.stringify(r.notices)}`);
-  assert.ok(!r.notices.some((n) => /站点现在报的不一样/.test(n)),
+  assert.ok(!r.notices.some((n) => /站点现在报的不同/.test(n)),
     `★ 不是"站点报了别的" —— 那件事走另一条判据：${JSON.stringify(r.notices)}`);
   assert.deepEqual(fs.readFileSync(path.join(dest, 'client', 'index.js')), good,
     '★ 池里那一份必须回到**站点上的那一份**，而不是留着改过的那一份');
@@ -614,7 +614,7 @@ test('★★ 两个站点报同一个 (id, 版本) 而内容不同 ⇒ 明确失
   r = await callSync(B, env, { siteKey: 'bbbb', siteLabel: 'B 站' });
   assert.deepEqual(r.kept, [], '★ 绝不能当成"已经在池里、跳过"收下');
   assert.equal(r.failed.length, 1, `B 这一份必须失败：${JSON.stringify(r)}`);
-  assert.match(r.failed[0].why, /站点现在报的不一样/, r.failed[0].why);
+  assert.match(r.failed[0].why, /站点现在报的不同/, r.failed[0].why);
   assert.match(r.failed[0].why, /A 站/,
     `★★ 要点名**先来的那个站点** —— 那是管理员接着要问的第一个问题：${r.failed[0].why}`);
   assert.deepEqual(fs.readFileSync(dest), before, '池里那一份**一个字节都不能变**');
@@ -817,7 +817,7 @@ test('★★ 回退的判据是"能力缺席"，不是"这次失败了"', async 
   const old = await callSync(site, env);
   assert.equal(old.supported, false);
   assert.equal(old.reason, 'old_daemon');
-  assert.match(old.error, /太旧|不支持/, `要说得出来：${old.error}`);
+  assert.match(old.error, /版本过低|不支持/, `要说得出来：${old.error}`);
 
   site.state.limits = true;             // 新守护进程，但这一次取不到
   site.state.rateBurst = 99;
@@ -1346,7 +1346,7 @@ test('★ 站点自报的内容摘要与它实际发的字节对不上 ⇒ 拒�
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 0, '对不上的东西不许走进同意闸');
   assert.equal(r.failed.length, 1, JSON.stringify(r.failed));
-  assert.match(r.failed[0].why, /说的不是同一份东西/, r.failed[0].why);
+  assert.match(r.failed[0].why, /说的不是同一份内容/, r.failed[0].why);
   assert.equal(fs.existsSync(poolTree(env, p, '1.0.0')), false,
     '★ 一个字节都不许进池');
 });
@@ -1555,7 +1555,7 @@ test('★ 一条读不动的钉子 ⇒ 拒绝（绝不静默重新"首次即信�
   env.pinned.set(p.id, '');            // config.pinnedKeyOf 对读不动的记录给的就是这个
   const r = await callSync(site, env);
   assert.equal(r.pendingConsent.length, 0);
-  assert.match(r.failed[0].why, /钉子读不出来/, r.failed[0].why);
+  assert.match(r.failed[0].why, /钉子读取失败/, r.failed[0].why);
 });
 
 test('★ 池里已有那一份、台账对不上，而钉子对不上 ⇒ 拒绝（不是"再问一次"）', async () => {
@@ -2031,7 +2031,7 @@ test('★★ 同意那一刻的次序是"先树后表"：记录表写不下去 �
     id: p.id, version: p.version, digest: item.digest,
   });
   assert.equal(mv.ok, false, '写不下去就是失败');
-  assert.match(mv.error, /记录表写不下去/, mv.error);
+  assert.match(mv.error, /记录表写入失败/, mv.error);
   assert.match(mv.error, /已经把它撤掉了/, mv.error);
   assert.equal(fs.existsSync(tree), false, '★ 那棵树要被当场撤掉，不留一个半成品');
 
@@ -2046,7 +2046,7 @@ test('★★ 同意那一刻的次序是"先树后表"：记录表写不下去 �
     id: p.id, version: p.version, digest: item2.digest,
   });
   assert.equal(mv2.ok, false);
-  assert.match(mv2.error, /没能撤掉/, mv2.error);
+  assert.match(mv2.error, /未能撤掉/, mv2.error);
   assert.deepEqual(S.listPooled(env.siteRoot), [], '★ 撤不掉也不可见');
   assert.deepEqual(new P.Registry([{ dir: env.siteRoot, source: 'site' }],
     { allows: () => true }).list(), [], '★ 注册表也不加载它');

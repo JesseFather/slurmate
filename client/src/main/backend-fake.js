@@ -738,12 +738,12 @@ class FakeBackend extends Backend {
     // 有来回，而它只在这一条路上用得到。
     const PP = require('./plugin-package.js');
     const list = Array.isArray(paths) ? paths : [];
-    if (!list.length) return { ok: false, code: 'nothing', error: '没有挑到任何 .splug。' };
+    if (!list.length) return { ok: false, code: 'nothing', error: '没有选中任何 .splug。' };
 
     const dir = this._siteInstalledDir();
     if (!dir) {
       return { ok: false, code: 'no_dir',
-               error: '拿不到"装上去的东西"放哪儿：客户端的数据目录还没定下来。' };
+               error: '无法确定插件数据的存放位置：客户端的数据目录还没定下来。' };
     }
     // 目录由这里建：它是程序自己的一处，第一次装东西之前它不存在，
     //   而"还没有这个目录"不是错误（"站点上还没装过东西"就是这个样子）。
@@ -776,7 +776,7 @@ class FakeBackend extends Backend {
 
       let buf;
       try { buf = fs.readFileSync(p); }
-      catch (e) { problems.push(`${base}：读不到：${e.message}`); continue; }
+      catch (e) { problems.push(`${base}：读取失败：${e.message}`); continue; }
 
       const r = PP.parsePackage(buf);
       if (!r.ok) {
@@ -788,7 +788,7 @@ class FakeBackend extends Backend {
 
       if (seenId.has(id)) {
         problems.push(`${base}：id ${id} 与 ${seenId.get(id)} 是同一个插件，两个都不装`
-          + '（站点按 id 给那棵树命名，两个会互相覆盖，而覆盖是静默的）。');
+          + '（站点按 id 给该目录树命名，两个会互相覆盖，而覆盖是静默的）。');
         continue;
       }
 
@@ -808,11 +808,11 @@ class FakeBackend extends Backend {
           seenId.set(id, base);
           continue;
         }
-        problems.push(`${base}：站点上已经有一棵「${hitTitle}」，在 ${hit.dir}。`
+        problems.push(`${base}：站点上已经有一份「${hitTitle}」，在 ${hit.dir}。`
           + (hit.manifest.version === version
-            ? `版本一样（都是 ${version}）而内容不是同一份`
-            : `站上那棵是 ${hit.manifest.version}，这一份是 ${version}`)
-          + '。\n        一个 id 在站点上只留一棵树。要装这一份，先把那一棵从站点上'
+            ? `版本相同（都是 ${version}）而内容不是同一份`
+            : `站点那一份是 ${hit.manifest.version}，这一份是 ${version}`)
+          + '。\n        一个 id 在站点上只留一份。要装这一份，先把站点上那一份'
           + `撤掉（真站点上是 \`slurmate plugin uninstall ${id}\`；这个假站点上就是`
           + '删掉那个目录），再来装。');
         continue;
@@ -856,9 +856,9 @@ class FakeBackend extends Backend {
         // 已经就位的那几棵不回滚：每一棵都是完整的（`rename` 是原子的），
         //   而回滚会把"装上了两棵、第三棵没成"说成"一棵都没装" —— 后者更假。
         return { ok: false, code: 'partial', error:
-          `「${s.title}」挪到 ${s.dest} 失败：${e.message}\n`
+          `「${s.title}」移动到 ${s.dest} 失败：${e.message}\n`
           + (installed.length
-            ? `已经装上的（这几棵是完整的）：${installed.map((x) => x.title).join('、')}`
+            ? `已经装上的（这几份是完整的）：${installed.map((x) => x.title).join('、')}`
             : '（还没有一棵装上去。）') };
       }
       installed.push({ id: s.id, version: s.version, name: s.name, title: s.title, dir: s.dest });
@@ -1427,7 +1427,7 @@ class FakeBackend extends Backend {
 
   /** 最近几天的作业（`sacct`）。按需拉，不进任何缓存。 */
   _history() {
-    if (this._historyDown) return err(6, 'history_unknown', '开发者模式：模拟取不到历史');
+    if (this._historyDown) return err(6, 'history_unknown', '开发者模式：模拟获取历史失败');
     return ok({ history: HISTORY.map((h) => ({ ...h })), days: 7, limit: 30 });
   }
 
@@ -1487,7 +1487,7 @@ class FakeBackend extends Backend {
         // 合成一个的后果正是这一版一直在清的那类：把"取不到"说成"没有"。
         if (e && e.code === 'ENOENT') return null;
         return { path: p, bytes: 0, lines: 0, truncated: false,
-                 mtime: null, text: null, why: `读不到 ${p}：${e.message}` };
+                 mtime: null, text: null, why: `读取 ${p} 失败：${e.message}` };
       }
       const all = text.split('\n');
       if (all.length && all[all.length - 1] === '') all.pop();
@@ -1581,7 +1581,7 @@ class FakeBackend extends Backend {
       if (!part.allowed) return err(4, 'no_partition', part.reason || '没有该分区的权限');
     } else {
       part = this._randPickPartition();
-      if (!part) return err(6, 'partitions_unknown', '查不到可用的分区');
+      if (!part) return err(6, 'partitions_unknown', '查询可用分区失败');
     }
 
     // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
@@ -1681,7 +1681,7 @@ class FakeBackend extends Backend {
     //     造得出一棵真有作业侧的树 —— 见账本 S40。
     if (sitePlugin.surface) {
       this._startJob(sess, sitePlugin)
-        .catch((e) => this._jobFailed(sess, `作业侧起不来：${e.message}`));
+        .catch((e) => this._jobFailed(sess, `作业侧无法启动：${e.message}`));
     }
 
     // 登记那一步。它不再是无条件的：作业还没起来就再等一等（真守护进程每个
@@ -1713,12 +1713,12 @@ class FakeBackend extends Backend {
     const home = this._siteHome();
     const entry = this._siteIndex().get(sess.service_plugin);
     if (!home || !entry) {
-      this._jobFailed(sess, '假站点拿不到这个插件的作业目录（沙盒还没定下来？）');
+      this._jobFailed(sess, '假站点无法获取这个插件的作业目录（沙盒还没定下来？）');
       return;
     }
     const cands = await fakeJob.pickCandidates(sess._candidates);
     if (!cands.length) {
-      this._jobFailed(sess, '挑不到空闲端口了（候选区间 '
+      this._jobFailed(sess, '无可用空闲端口（候选区间 '
         + `${fakeJob.PORT_MIN}–${fakeJob.PORT_MAX} 都被占着）`);
       return;
     }

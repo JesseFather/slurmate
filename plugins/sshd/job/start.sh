@@ -104,7 +104,7 @@ _sshd_ensure_host_key() {
     fi
 
     command -v ssh-keygen >/dev/null 2>&1 || {
-        log "错误：计算节点上找不到 ssh-keygen（openssh-client 没装？）"
+        log "错误：计算节点上未找到 ssh-keygen（openssh-client 没装？）"
         return 1
     }
     mkdir -p "$_sshd_dir" 2>/dev/null || {

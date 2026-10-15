@@ -206,7 +206,7 @@ const MAX_TOTAL_BYTES = MAX_PACKAGE_BYTES - MAX_ENVELOPE_BYTES;
  */
 function payloadSizeProblem(files) {
   if (files.length > MAX_FILES) {
-    return `这一棵树有 ${files.length} 份文件，超过上限 ${MAX_FILES} 份（§3.7）`;
+    return `该目录树有 ${files.length} 份文件，超过上限 ${MAX_FILES} 份（§3.7）`;
   }
   // 单份那一关先判：一棵树同时犯两条时，"这一份太大了"比"加起来太大了"更可操作。
   let big = files[0];
@@ -683,7 +683,7 @@ function parsePackage(buf) {
     if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
       return bad(R.SIGNATURE,
         `签名验不过，它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
-        + ' 这四个东西（A.3），而这一块盖的不是它。'
+        + ' 这四个字段（A.3），而这一块盖的不是它。'
         + `签的人是 ${fingerprint(parsed.pubkey)}`);
     }
     sig = {
@@ -835,7 +835,7 @@ function readTree(repo, commit, subdir) {
     if (e.mode === '120000') {
       throw new Error(`${JSON.stringify(e.path)} 是一个符号链接（mode 120000），`
         + ' 包里的负载只允许普通文件（§3.2），而"它是指向 x 的链接"与"它的内容恰好是 x"'
-        + '是两份行为完全不同的东西。请把它换成一份普通文件。');
+        + '是两种行为完全不同的情况。请把它换成一份普通文件。');
     }
     if (e.mode === '160000') {
       throw new Error(`${JSON.stringify(e.path)} 是一个 gitlink（mode 160000），子模块进不了负载，`
@@ -884,7 +884,7 @@ function readTree(repo, commit, subdir) {
   const blobs = catBlobs(repo, keep.map((e) => e.oid));
   const files = keep.map((e) => {
     const data = blobs.get(e.oid);
-    if (!data) throw new Error(`取不到 ${JSON.stringify(e.path)} 的内容（${e.oid}）`);
+    if (!data) throw new Error(`获取 ${JSON.stringify(e.path)} 的内容失败（${e.oid}）`);
     return { path: e.path, data, sha256: sha256(data) };
   });
   return { files: sortByPathBytes(files), skipped, notes };
@@ -968,7 +968,7 @@ function mintUlid(now) {
  */
 function insertId(text, id) {
   const brace = text.indexOf('{');
-  if (brace < 0) throw new Error('plugin.json 的最外层不是一个对象（找不到 `{`）');
+  if (brace < 0) throw new Error('plugin.json 的最外层不是一个对象（未找到 `{`）');
   const rest = text.slice(brace + 1);
   const nl = text.indexOf('\n', brace);
   const lf = nl < 0 ? '\n' : (text[nl - 1] === '\r' ? '\r\n' : '\n');
@@ -1004,7 +1004,7 @@ function readManifest(file) {
   try {
     text = fs.readFileSync(file, 'utf8');
   } catch (e) {
-    throw new Error(`读不到 ${file}：${e.message}`);
+    throw new Error(`读取 ${file} 失败：${e.message}`);
   }
   let obj;
   try {
@@ -1092,7 +1092,7 @@ function readLineage(dir) {
   try { obj = JSON.parse(text); }
   catch (e) {
     throw new Error(`${file} 不是合法的 JSON：${e.message}\n`
-      + '  这份表是打包器写的，别手改。真弄坏了就删掉它，下一次 init 会停下来问。');
+      + '  这份表是打包器写的，别手改。确实损坏了就删除它，下一次 init 会停下来问。');
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)
       || !obj.lineage || typeof obj.lineage !== 'object' || Array.isArray(obj.lineage)) {
@@ -1128,10 +1128,10 @@ function lineageStopAndAsk(detail) {
   throw new Error(
     `${detail}\n`
     + '\n§2.5：这一条不许静默处理，因为两种可能的后果相反：\n'
-    + '\n  ① 这是另一个东西（复制来的 plugin.json，或者一次真分身）\n'
+    + '\n  ① 这是另一个插件（复制来的 plugin.json，或者一次真分身）\n'
     + '     铸一个新的 id：`init <插件目录> --fork`。\n'
-    + '        两个不同的东西抢同一个 (id, 版本)，会让一个站点把另一个站点正在用的\n'
-    + '        插件弄坏（§2.4、§2.6），这一条要拦的就是它。\n'
+    + '        两个不同的插件抢同一个 (id, 版本)，会让一个站点把另一个站点正在用的\n'
+    + '        插件损坏（§2.4、§2.6），这一条要拦的就是它。\n'
     + '\n  ② 这是同一个插件，只是这条记录不在了（换了机器 / 表被删过 / 你正在用\n'
     + '     另一把钥匙签）\n'
     + '     先把记录找回来：血统表应当提交在版本控制里（§2.5），私钥应当\n'
@@ -1196,13 +1196,13 @@ function oneContentPerVersion(home, id, version, digest, out, opts) {
   const prev = rel.map.get(key);
   if (prev && prev.digest !== digest && !opts.reuseVersion) {
     throw new Error(
-      `这个 (id, 版本) 在这台机器上已经打过，而内容和这一次不一样：\n`
+      `这个 (id, 版本) 在这台机器上已经打过，而内容和这一次不同：\n`
       + `    ${key}\n`
       + `    记过的   ${prev.digest}`
       + (prev.at ? `（${new Date(prev.at).toISOString().slice(0, 10)}，落在 ${prev.out || '?'}）` : '')
       + `\n    这一次   ${digest}\n`
       + '\n§2.4：一个 (id, 版本) 只有一份内容，改了内容的任何字节就必须升版本号。\n'
-      + '  不升的话，拿过旧那一份的人和拿到新那一份的人会各说各话，而按 §2.4 客户端\n'
+      + '  不升版本号，拿过旧那一份的人和拿到新那一份的人会各说各话，而按 §2.4 客户端\n'
       + '  两个都不加载。\n'
       + '  最容易被忘掉的一种"改了内容"：往树里加了一个文件（比如给老插件补一条血统记录）。\n'
       + '\n如果这一版从来没发出去过（没有站点分过、没有人装过），加\n'
@@ -1302,7 +1302,7 @@ function cmdInit(dir, opts) {
   } else {
     console.log(`分身：把 id 换掉了，并写回 ${mfRel}：`);
     console.log(`    ${oldId}  →  ${id}`);
-    console.log('旧的 id 留在血统表里，那是它的祖先，不是要被抹掉的东西。');
+    console.log('旧的 id 留在血统表里，那是它的祖先，不是要被抹掉的内容。');
     console.log('§2.5 的代价，说在明处：所有已同意过那个 id 的用户要重新同意一次，');
     console.log('  正在跑的会话会变成"未知服务"。');
   }
@@ -1386,7 +1386,7 @@ function cmdKeygen(dir, opts) {
   console.log(`    指纹    ${fingerprint(raw)}`);
   console.log(`    私钥    ${kf}（0600）`);
   console.log('');
-  console.log('私钥要备份。 丢了它就是血统断了：老用户会拒绝你签的任何东西，');
+  console.log('私钥要备份。 丢了它就是血统断了：老用户会拒绝你签的任何包，');
   console.log('  你只能给这个插件铸一个新 id，让所有人重新同意一遍（§4.1）。');
   console.log('  换机器的方式是把这个 .pem 整份复制过去，不是在新机器上再铸一把。');
   console.log('树现在是脏的：先提交，再 `build` / `sign`。');
@@ -1489,7 +1489,7 @@ function cmdBuild(dir, opts) {
     try {
       writeReleases(home, rec.rel.map);
     } catch (e) {
-      console.log(`  发布表写不下去（${e.message}），下一次打这个版本时 §2.4 那条检查不会生效`);
+      console.log(`  发布表写入失败（${e.message}），下一次打这个版本时 §2.4 那条检查不会生效`);
     }
   }
 
@@ -1559,7 +1559,7 @@ function cmdSign(file, opts) {
   try {
     buf = fs.readFileSync(file);
   } catch (e) {
-    console.error(`读不到 ${file}：${e.message}`);
+    console.error(`读取 ${file} 失败：${e.message}`);
     return 2;
   }
   const r = parsePackage(buf);
@@ -1601,7 +1601,7 @@ function cmdSign(file, opts) {
       + `    血统表说  ${fingerprint(entryRaw)}\n`
       + '\n§4.1：私钥属于这个插件，换机器的方式是把它整份复制过去。\n'
       + '  · 有备份，复制到上面那个路径，再跑一次 sign。\n'
-      + '  · 找不回来，血统断了：老用户会拒绝你签的任何东西（§5.4），只能\n'
+      + '  · 找不回来，血统断了：老用户会拒绝你签的任何包（§5.4），只能\n'
       + '    `init <插件目录> --fork` 铸新 id，代价是所有用户重新同意一次（§2.5）。\n'
       + '  在这里另铸一把新钥匙没有用，客户端钉住的是旧那一把。');
   }
@@ -1610,7 +1610,7 @@ function cmdSign(file, opts) {
     throw new Error(`本机那把私钥与血统表里的不是同一把：\n`
       + `    血统表    ${fingerprint(entryRaw)}\n`
       + `    本机钥匙  ${fingerprint(raw)}   （${k.file}）\n`
-      + '\n两份记录分家了，先弄清哪一份是对的（血统表在版本控制里，看得见历史），\n'
+      + '\n两份记录分家了，先查明哪一份是对的（血统表在版本控制里，看得见历史），\n'
       + '再决定是找回对的私钥，还是走 §2.5 的 --fork。不要在这里覆盖任何一份。');
   }
 
@@ -1655,7 +1655,7 @@ function cmdSign(file, opts) {
   fs.writeFileSync(outFile, out);
 
   console.log(`签好了：${outFile}`);
-  console.log(`  签的是   ${id}@${version} 这四个东西（A.3）：`);
+  console.log(`  签的是   ${id}@${version} 这四个字段（A.3）：`);
   console.log(`             站点侧摘要   ${sd.site}`);
   console.log(`             客户端侧摘要 ${sd.client}`);
   console.log(`  签名者   ${fingerprint(raw)}`);
@@ -1675,7 +1675,7 @@ function cmdVerify(file, opts) {
   try {
     buf = fs.readFileSync(file);
   } catch (e) {
-    console.error(`读不到 ${file}：${e.message}`);
+    console.error(`读取 ${file} 失败：${e.message}`);
     return 2;
   }
   const r = parsePackage(buf);
@@ -1695,7 +1695,7 @@ function cmdVerify(file, opts) {
     console.log(`           盖的是 ${r.sig.id}@${r.sig.version}（A.3 的四元组）`);
   } else {
     console.log('  签名     （没有），§4.1 允许，但客户端第一次见它会"首次即信任"');
-    console.log('           没有签名，两侧的配套关系没有任何东西保证（§3.1）。');
+    console.log('           没有签名，两侧的配套关系没有任何保证（§3.1）。');
   }
   if (opts.expectDigest && opts.expectDigest !== r.digest) {
     console.error(`✗ 内容摘要不是期望的那个：期望 ${opts.expectDigest}`);
@@ -1811,7 +1811,7 @@ function cmdInspect(file, opts) {
     console.log(`    ${k.padEnd(14)} ${typeof v === 'string' ? v : JSON.stringify(v)}`);
   }
   console.log('');
-  console.log(`  负载 ${r.fileCount} 份，就是这些，没有别的（§3.6）`);
+  console.log(`  负载 ${r.fileCount} 份，就是这些，没有其他（§3.6）`);
   for (const f of r.files) {
     console.log(`    ${String(f.size).padStart(8)}  ${f.sha256.slice(0, 12)}…  ${f.path}`);
   }
@@ -1843,10 +1843,10 @@ function usage(code) {
 
   --home <目录> 可以跟在任何动词后面（等价于 $SLURMATE_PACKER_HOME）。默认
   ~/.config/slurmate/packer，里面是 keys/<id>.pem（私钥）与 releases.json（发布表）。
-  这两样不进源码树：进了就把树弄脏，而 §3.5 拒绝脏树。
+  这两样不进源码树：进了就污染工作树，而 §3.5 拒绝脏树。
 
   init     铸一个 id（只在树里没有的时候）并插入写回 plugin.json，同时给血统表
-           记一条。它会弄脏树，所以之后要你自己提交，与 build 分成两个动词是故意的。
+           记一条。它会污染工作树，所以之后要你自己提交，与 build 分成两个动词是故意的。
            树里已经有 id 而血统表不认识它时，它会停下来问（§2.5），而两个答案是：
            --fork   承认这是另一个插件：把 id 换掉（代价：所有已同意的用户要
                     重新同意一次）。
@@ -1858,7 +1858,7 @@ function usage(code) {
   build    从一个提交打出 .splug。工作树脏时拒绝（§3.5）。它不看钥匙库：
            输出只是 (提交, 选项) 的函数。
   sign     给一个已经打好的包盖签名。它不改内容摘要（§4.2），所以不必重新打包。
-  verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者对不对得上。
+  verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者是否一致。
            --against 顺带判 §3.6。
   inspect  打出包里到底有什么，作者拿它对着规范逐行核对。
 

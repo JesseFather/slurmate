@@ -437,7 +437,7 @@ function enginesProblem(manifest, host) {
   if (host === null || host === undefined) {
     return {
       kind: 'unknown_host',
-      why: '本客户端读不到自己的版本号（client/package.json），所以判不了 '
+      why: '本客户端读取自己的版本号失败（client/package.json），所以判不了 '
         + `engines.slurmate = ${JSON.stringify(rng)} 满不满足它`,
     };
   }
@@ -642,7 +642,7 @@ function inspectDir(dir) {
   try {
     raw = fs.readFileSync(mfPath, 'utf8');
   } catch (e) {
-    return { error: `读不到 ${mfPath}：${e.message}` };
+    return { error: `读取 ${mfPath} 失败：${e.message}` };
   }
 
   let mf;
@@ -885,7 +885,7 @@ function inspectDir(dir) {
     }
     if (d.perVersion !== undefined && typeof d.perVersion !== 'boolean') {
       return { error: `${mfPath}：contributes.data.perVersion 必须是 true / false `
-        + `（true = 每个版本各一份，false = 与不写它一样），`
+        + `（true = 每个版本各一份，false = 与不写它相同），`
         + `现在是 ${JSON.stringify(d.perVersion)}` };
     }
     // 两个键都写，拒。见上面那段：它们答的是同一格，谁赢不该由代码次序决定。
@@ -911,7 +911,7 @@ function inspectDir(dir) {
     hasClientCode = true;
   } catch (e) {
     if (e.code !== 'ENOENT') {
-      return { error: `读不到 ${clientPath}：${e.message}` };
+      return { error: `读取 ${clientPath} 失败：${e.message}` };
     }
   }
   if (hasClientCode) {
@@ -929,7 +929,7 @@ function inspectDir(dir) {
   try {
     files = readPluginFiles(dir);
   } catch (e) {
-    return { error: `读不到 ${dir} 里的文件：${e.message}` };
+    return { error: `读取 ${dir} 里的文件失败：${e.message}` };
   }
   const digest = digestOf(files);
 
@@ -1125,7 +1125,7 @@ function scanPluginCollection(base) {
     try {
       mf = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST), 'utf8'));
     } catch (e) {
-      skipped.push({ dir, name: n, why: `读不到 ${MANIFEST}：${e.message}` });
+      skipped.push({ dir, name: n, why: `读取 ${MANIFEST} 失败：${e.message}` });
       continue;
     }
     if (!mf || typeof mf.id !== 'string' || typeof mf.version !== 'string') {
@@ -1173,7 +1173,7 @@ function scanRoot(root, allows) {
     dirs = findPluginDirs(base);
   } catch (e) {
     if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return out;
-    out.push({ error: `读不到插件目录 ${base}：${e.message}` });
+    out.push({ error: `读取插件目录 ${base} 失败：${e.message}` });
     return out;
   }
   for (const { dir, label, id, version } of dirs) {
@@ -1420,7 +1420,7 @@ class Registry {
  */
 function inertWhy(p) {
   return `本机有 ${p.displayName} ${p.version}（${p.name}），但它的客户端代码`
-    + '还没有经过你的同意，所以没有加载。在插件那一栏点一下同意就能用它。';
+    + '还没有经过你的同意，所以没有加载。在插件那一栏确认同意就能用它。';
 }
 
 /**

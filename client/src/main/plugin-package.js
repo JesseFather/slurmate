@@ -229,7 +229,7 @@ function keyVerdict(pinned, pkg) {
       code: PIN.BROKEN,
       pinned,
       got,
-      why: '这个 id 的钉子读不出来（`pinned-keys.json` 里那一条的指纹不是全长十六进制）。'
+      why: '这个 id 的钉子读取失败（`pinned-keys.json` 里那一条的指纹不是全长十六进制）。'
         + '一条读不动的钉子只能往拒绝那一侧倒：把它当成"没钉过"就等于静默地'
         + '重新"首次即信任"一次，而那正是 §2.5 的分身判定要挡的事。',
     };
@@ -252,7 +252,7 @@ function keyVerdict(pinned, pkg) {
     pinned,
     got,
     why: `这个 id 以前同意的是 ${pinned} 签的，这一份是 ${got} 签的。`
-      + '内容可能与上次一模一样，但签名的人换了。§5.4 要求这必须是同一个人。'
+      + '内容可能与上次完全相同，但签名者换了。§5.4 要求这必须是同一个人。'
       + '（丢了私钥的作者只能给插件铸一个新 id，所以这不是一次正常的升级。）',
   };
 }
@@ -529,7 +529,7 @@ function parsePackage(buf) {
     if (!verifyEd25519(parsed.pubkey, signedMessage(parsed), parsed.sig)) {
       return bad(R.SIGNATURE,
         `签名验不过：它盖的必须是 ${JSON.stringify(parsed.id)}@${JSON.stringify(parsed.version)}`
-        + ' 这四个东西（A.3），而这一块盖的不是它。'
+        + ' 这四个字段（A.3），而这一块盖的不是它。'
         + `签的人是 ${fingerprint(parsed.pubkey)}`);
     }
     sig = {
@@ -646,7 +646,7 @@ function readPackageFile(file) {
   try {
     buf = fs.readFileSync(file);
   } catch (e) {
-    return { ok: false, code: R.LENGTH, why: `读不到 ${file}：${e.message}` };
+    return { ok: false, code: R.LENGTH, why: `读取 ${file} 失败：${e.message}` };
   }
   return parsePackage(buf);
 }

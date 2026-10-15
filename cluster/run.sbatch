@@ -492,7 +492,7 @@ pick_port_and_start() {
                 log_err "  而作业自己的 fd ${_bad} 指向 $(readlink "/proc/$$/fd/$_bad" 2>/dev/null || echo '?')。"
                 log_err "  契约要求 start_<短名> 起的服务继承宿主的 stdout/stderr，那两条流"
                 log_err "  就是作业日志（.out / .err）。这个插件把服务的输出重定向到别处去了，"
-                log_err "  于是作业日志里永远看不到那个服务说的话。拒绝启动。"
+                log_err "  于是作业日志里永远不会出现那个服务的输出。拒绝启动。"
                 kill -TERM "$SVC_PID" 2>/dev/null || true
                 sleep 1
                 kill -0 "$SVC_PID" 2>/dev/null && kill -KILL "$SVC_PID" 2>/dev/null || true
@@ -594,7 +594,7 @@ log "节点 IPv4 = $NODE_IP"
 if ! declare -F "start_${SLURMATE_SERVICE_KIND//-/_}" >/dev/null 2>&1; then
     log_err "这份作业脚本里没有服务 '$SLURMATE_SERVICE_KIND' 的作业侧实现"
     log "      这份脚本里有的是：$(plugin_names)（短名里的 - 在函数名里写作 _）"
-    log "      一个插件一份作业脚本，文件名是它的 ULID。两者对不上说明"
+    log "      一个插件一份作业脚本，文件名是它的 ULID。两者不一致说明"
     log "      提交时选错了脚本，或者这份脚本是旧版本留下的。"
     log "      跑一次 slurmate plugin sync 会按当前插件表重新生成它们。"
     write_session "failed" 24 || true
