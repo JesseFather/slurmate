@@ -6143,7 +6143,8 @@ class Store(object):
           跑的是哪个插件，见 `recover_from_rules`）。它们仍然占着【全局】那一个
           名额，所以这不是一条绕过全局上限的路；但某个插件的上限在恢复之后确实
           可能被多占。这是写在文档里的洞，不是漏写 —— 见
-          cluster/docs/CONFIGURATION.md 的〈max_sessions〉。
+          cluster/docs/CONFIGURATION.md 的〈max_sessions〉与账本 S43
+          （同一处 NULL 在客户端那一侧的第二个后果也在那一条里）。
         """
         q = ",".join("?" * len(OCCUPYING_STATES))
         if plugin_id is None:

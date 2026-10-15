@@ -1204,6 +1204,46 @@ if FAIL == 0:
 
 **它不会红，所以**：界面说得出上限，而"现在还能不能开"只有服务端那一句话说了算。
 
+### S43 — 恢复出来的会话认不出是哪个插件的，于是插件那一格在恢复之后可以被多占
+
+**位置**：`cluster/slurmate-sessiond` 的 `recover_from_rules()`（写 `service_plugin`
+的那一行）与 `Store.count_occupying()`（按插件数的那一支）；规则 comment 的格式在
+同一个文件的 `Nft.comment_for()` 与 `Nft.add_session_rule()`。
+
+**是什么**：`service_plugin` 记的是 `<id>@<版本>`，而 nft 规则的 comment 只编码
+`(uid, job_id, port)`（`slurmate-sess-<uid>-<job>-<port>`）。库丢了之后从规则重建的
+会话，那一列只能是 NULL，于是它**数不到任何一个插件头上**：它仍然占着全局那一个名额
+（`max_sessions_per_user` 拦得住），但某一个插件的上限可以被多占一份，直到那条会话
+结束。
+
+**为什么这一版不猜**：猜错的方向更坏。一条在跑的会话被算到另一个插件头上时，用户看到
+的是一句点名「A」的拒绝，而那条会话在 B 上 —— 一句点错名的拒绝比放宽一格难查得多。
+这一列现在是 NULL 而不是缺省值，是有意的，`registry.resolve()` 的 docstring 与
+`recover_from_rules()` 里那段注释都写着同一个理由。
+
+**同一处 NULL 在客户端那一侧的第二个后果**：客户端按非终态会话收集"受保护的版本"
+（S21），而这一列是 NULL 的行贡献不出任何版本号（`client/src/main/site-plugins.js`
+那一步 `continue` 掉了）。于是那条会话正在用的版本在客户端这一侧不受保护：站点不再
+分发它时它会被回收，回收之后那条会话在客户端接不回来（`registry.resolve()` 认不出
+`id@版本` 这个形状，那是设计如此）。在跑的那一条不会被杀：作业跑在集群上，用的是集群
+那一份。
+
+**修它的价钱**：让规则带上 `id@版本`。这一动是四处一起动：写入
+（`add_session_rule`）、解析（`recover_from_rules()` 里那条正则）、`comment_for()`、
+以及 `recover_from_rules()` 开头那个 `known` 集合（它拿 `comment_for()` 现算出来对账）。
+只动一半的症状都不好看：解析改了、写入没改 → 正则不匹配，**一条都恢复不出来**，接着
+`reconcile()` 把在跑的作业的规则当孤儿删掉 —— 正是 F26 记的那个后果；写入改了、解析
+没改 → 同一条路，而且那一列仍然是 NULL。现在那条正则是 `$` 收尾的，所以往 comment
+尾巴上追加一段而忘了改它不会报错，只会静默地少恢复。
+
+**这一版钉住的是"它现在确实是这样"**：`count_occupying()` 的 docstring、
+`cluster/docs/CONFIGURATION.md` 的〈max_sessions〉、以及第 19.7 节与第 23.1 节那两条
+用例（恢复态的 `service_kind` 与 `service_plugin` 都是 NULL；那样一条会话按插件数时
+不在任何一边、按全局数时在）。往那一列填任何东西，那两条当场红。
+
+**它不会红，所以**：第二处后果（客户端不再护着那一版）一条用例都没有 —— 假站点不产生
+`trust='recovered'` 的行，那条路只有真集群上库丢过一次才走得到。
+
 ## 四、已经不再是问题的
 
 留着，免得再被翻出来当成待办。
