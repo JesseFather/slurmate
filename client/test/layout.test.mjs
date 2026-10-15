@@ -42,24 +42,24 @@ const {
 const W = 1280;
 const H = 860;
 
-test('★★ 主体那块：上面让开状态条，左右各让开一条边栏', () => {
+test('主体那块：上面让开状态条，左右各让开一条边栏', () => {
   const r = stageRect(W, H);
   assert.equal(r.y, STATUS_BAR_HEIGHT, '顶边要让开状态条');
   assert.equal(r.x, RAIL_W, '左边要让开左栏');
-  assert.equal(r.width, W - 2 * RAIL_W, '宽度要扣掉**两条**栏');
+  assert.equal(r.width, W - 2 * RAIL_W, '宽度要扣掉两条栏');
   assert.equal(r.height, H - STATUS_BAR_HEIGHT);
   // 右边那条栏的内侧 = 主体块的右边界。差一个像素的话，右边会露出一线背景色。
   assert.equal(r.x + r.width, W - RAIL_W);
 });
 
-test('★ 过小的窗口不产生负宽度（缩到极小也不许抛）', () => {
+test('过小的窗口不产生负宽度（缩到极小也不许抛）', () => {
   for (const [w, h] of [[0, 0], [8, 5], [RAIL_W, STATUS_BAR_HEIGHT]]) {
     const r = stageRect(w, h);
     assert.ok(r.width >= 0 && r.height >= 0, `${w}×${h} 的宽度/高度不能是负的`);
   }
 });
 
-test('★★ 浮窗贴着**那一条栏的内侧**，高度与主体齐平', () => {
+test('浮窗贴着那一条栏的内侧，高度与主体齐平', () => {
   const l = hoverRect(W, H, 'left');
   assert.equal(l.x, RAIL_W, '左栏的浮窗紧挨着左栏的右边');
   assert.equal(l.y, STATUS_BAR_HEIGHT);
@@ -73,16 +73,16 @@ test('★★ 浮窗贴着**那一条栏的内侧**，高度与主体齐平', () 
   assert.equal(r.x, W - RAIL_W - HOVER_W);
 });
 
-test('★ 窗口窄到放不下时，浮窗让步 —— 但不能盖住两条栏', () => {
+test('窗口窄到放不下时，浮窗让步 —— 但不能盖住两条栏', () => {
   const w = 2 * RAIL_W + 100;
   const r = hoverRect(w, H, 'left');
   assert.ok(r.width <= 100, '让它缩到可用宽度');
-  assert.ok(r.x + r.width <= w - RAIL_W, '★ 不许盖到右栏上（那会让收起它的地方够不着）');
+  assert.ok(r.x + r.width <= w - RAIL_W, '不许盖到右栏上（那会让收起它的地方够不着）');
   // 宽窗口下才用满 HOVER_W
   assert.equal(hoverRect(W, H, 'left').width, HOVER_W);
 });
 
-test('★★ 收起判据：栏里算在里面，浮窗里也算，两者之间不算', () => {
+test('收起判据：栏里算在里面，浮窗里也算，两者之间不算', () => {
   const y = STATUS_BAR_HEIGHT + 5;
   assert.ok(inHoverZone(W, H, 'left', 1, y), '鼠标在栏上');
   assert.ok(inHoverZone(W, H, 'left', RAIL_W + 5, y), '鼠标在浮窗里');
@@ -95,7 +95,7 @@ test('★★ 收起判据：栏里算在里面，浮窗里也算，两者之间�
   assert.ok(inHoverZone(W, H, 'right', W - 2, y));
 });
 
-test('★ 边界取闭区间 —— 压在浮窗最外那一列像素上仍算在里面', () => {
+test('边界取闭区间 —— 压在浮窗最外那一列像素上仍算在里面', () => {
   const y = STATUS_BAR_HEIGHT + 5;
   const r = hoverRect(W, H, 'left');
   assert.ok(inHoverZone(W, H, 'left', r.x + r.width, y), '右边界');
@@ -103,7 +103,7 @@ test('★ 边界取闭区间 —— 压在浮窗最外那一列像素上仍算�
   assert.ok(!inHoverZone(W, H, 'left', r.x + r.width + 1, y), '再往外一格就不算了');
 });
 
-test('★ 一条栏就是窗口边缘那一条，且不越过状态条', () => {
+test('一条栏就是窗口边缘那一条，且不越过状态条', () => {
   const l = railRect(W, H, 'left');
   assert.equal(l.x, 0);
   assert.equal(l.width, RAIL_W);
@@ -113,20 +113,20 @@ test('★ 一条栏就是窗口边缘那一条，且不越过状态条', () => {
   assert.equal(r.x + r.width, W);
 });
 
-test('★★ 同一组数字在三个文件里必须一致（对不上的症状是"页面被压住一角"）', () => {
+test('同一组数字在三个文件里必须一致（不一致的症状是"页面被压住一角"）', () => {
   const css = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'app.css'), 'utf8');
   const railPx = /--rail-w:\s*(\d+)px/.exec(css);
   const barPx = /--bar-h:\s*(\d+)px/.exec(css);
   assert.ok(railPx, 'app.css 里要有 --rail-w');
   assert.ok(barPx, 'app.css 里要有 --bar-h');
   assert.equal(Number(railPx[1]), RAIL_W,
-    '★ app.css 的 --rail-w 与 layout.js 的 RAIL_W 是一个数：'
-    + '前者画那两条栏，后者决定原生视图让开多少 —— 不等的话，插件页面被边栏压住一角');
+    'app.css 的 --rail-w 与 layout.js 的 RAIL_W 是一个数：'
+    + '前者画那两条栏，后者决定原生视图让开多少 —— 若不等，插件页面被边栏压住一角');
   assert.equal(Number(barPx[1]), STATUS_BAR_HEIGHT,
     'app.css 的 --bar-h 与 layout.js 的 STATUS_BAR_HEIGHT 是一个数');
 });
 
-test('★★ 窗口最小宽度装得下面板（这是第四个数，前三个上面已经钉住）', () => {
+test('窗口最小宽度装得下面板（这是第四个数，前三个上面已经钉住）', () => {
   // 从前这条根本不存在：`windows.js` 一 require 就要 Electron，本机进不去，
   //   而那三个数（状态条高、边栏宽、浮窗宽）都由 `layout.js` 那一份管着 ——
   //   窗口自己的最小尺寸落在没有判据的那一边。症状是"窗口能缩到面板被压窄"，

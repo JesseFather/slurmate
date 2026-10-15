@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""手写的键表必须与**权威键集**逐字一致 —— 两处，同一个形状。
+"""手写的键表必须与权威键集逐字一致 —— 两处，同一个形状。
 
 判据一：插件文档里的〈配置条目〉表
 
@@ -22,21 +22,21 @@
                             （正是 `PluginSpec.conf_keys()` 那一句）
 
     而 `plugins/<目录>/README.md` 的〈配置条目〉一节里列出来的键，
-    必须**恰好**是这一集 —— 少一个、多一个都算漂。
+    必须恰好是这一集 —— 少一个、多一个都算漂。
 
-★ 为什么要有这一条：那张表是**手写给人读的**（不是 schema 的另一个副本），而手抄
+ 为什么要有这一条：那张表是手写给人读的（不是 schema 的另一个副本），而手抄
   的表会漂 —— 一个键改了名、一个插件多加一个 `enumKeys`，表里不会跟着动，而
-  **漂了不会红任何东西**。这条 lint 把「表的权威是清单」变成机器判据，于是
-  README 可以放心当那份表**唯一给人读的家**（`docs/README.md` 的 P1）。
+  漂了不会红任何东西。这条 lint 把「表的权威是清单」变成机器判据，于是
+  README 可以放心当那份表唯一给人读的家（`docs/README.md` 的 P1）。
 
-★ 判据只有一处：键集合从守护进程那个常量与清单算出来，**这里不再抄一份**。
+ 判据只有一处：键集合从守护进程那个常量与清单算出来，这里不再抄一份。
 
 判据二：`packer/docs/PLUGIN-SPEC.md` §2 的清单键表
 
     那一张表的键集，必须恰好是 `tools/manifest-keys.json` 里那五张表展开成路径
     的结果（展开规则见下面 `SPEC_PARENTS` 那一段的注释）。
 
-★ 为什么要有这一条：那张表是**插件作者查「这一格写什么」的地方**，而它与权威键集
+ 为什么要有这一条：那张表是插件作者查「这一格写什么」的地方，而它与权威键集
   之间本来没有任何东西挡着 —— 与判据一同一个理由。
 
 用法：
@@ -58,7 +58,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DAEMON = os.path.join(ROOT, "cluster", "slurmate-sessiond")
 
-# 一节的开头。**逐字**匹配：它同时是"这张表在哪"的判据，而含糊的开头会让
+# 一节的开头。逐字匹配：它同时是"这张表在哪"的判据，而含糊的开头会让
 # 抽取悄悄抓到别处的表格。
 SECTION = "### 配置条目"
 
@@ -67,13 +67,13 @@ ROW = re.compile(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|")
 
 # ── 判据二：`packer/docs/PLUGIN-SPEC.md` 的清单键表 ─────────────────────────
 #
-# 那一张表的键集必须恰好是 `tools/manifest-keys.json` 里那五张表**展开成路径**的
+# 那一张表的键集必须恰好是 `tools/manifest-keys.json` 里那五张表展开成路径的
 # 结果。展开的规则是死的：清单顶层键原样；`contributes` 下的加 `contributes.`
 # 前缀；`surface` / `login` / `data` 三张再各加一层。另外补一个 `engines.slurmate`
 # —— 它是 `keysProblem(engines, ['slurmate'], …)` 认的唯一子键，而 `engines`
 # 本身在 JSON 里没有子表。
 #
-# ★ 为什么这条判据值得存在：那张表是**插件作者查「这一格写什么」的地方**，而它
+# 为什么这条判据值得存在：那张表是插件作者查「这一格写什么」的地方，而它
 #   与权威键集之间本来没有任何东西挡着 —— 键改名、加一个键，表不会跟着动，而
 #   漂了不会红任何东西。与判据一同一个理由，也就是本文件的文件头。
 SPEC = os.path.join(ROOT, "packer", "docs", "PLUGIN-SPEC.md")
@@ -88,7 +88,7 @@ SPEC_PARENTS = ("surface", "login", "data")
 
 
 def conf_keys_of_daemon():
-    """守护进程那份 `PLUGIN_COMMON_KEYS` —— **import**，不重写一遍。"""
+    """守护进程那份 `PLUGIN_COMMON_KEYS` —— import，不重写一遍。"""
     ldr = importlib.machinery.SourceFileLoader("d", DAEMON)
     mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("d", ldr))
     ldr.exec_module(mod)
@@ -96,7 +96,7 @@ def conf_keys_of_daemon():
 
 
 def expected_keys(plugin_dir, base):
-    """这个插件**应该**在表里出现的全部键。"""
+    """这个插件应该在表里出现的全部键。"""
     with open(os.path.join(plugin_dir, "plugin.json"), encoding="utf-8") as f:
         manifest = json.load(f)
     enum = (manifest.get("site") or {}).get("enumKeys") or {}
@@ -106,7 +106,7 @@ def expected_keys(plugin_dir, base):
 def documented_keys(readme_path):
     """README 的〈配置条目〉一节里，表格第一列那些键名。
 
-    返回 `None` 表示**连那一节都没有**（与"表是空的"是两件事）。
+    返回 `None` 表示连那一节都没有（与"表是空的"是两件事）。
     """
     if not os.path.exists(readme_path):
         return None
@@ -118,7 +118,7 @@ def documented_keys(readme_path):
                 continue
             if not inside:
                 continue
-            if line.startswith("#"):        # 下一个标题 ⇒ 这一节到底了
+            if line.startswith("#"):        # 下一个标题，这一节到底了
                 break
             m = ROW.match(line)
             if m:
@@ -129,7 +129,7 @@ def documented_keys(readme_path):
 def spec_table_keys(spec_path):
     """`PLUGIN-SPEC.md` 清单键表的第一列 —— `contributes.data.inherit` 这种路径。
 
-    `None` 表示**连那张表都没有**（与"表是空的"是两件事）。
+    `None` 表示连那张表都没有（与"表是空的"是两件事）。
     """
     if not os.path.exists(spec_path):
         return None
@@ -222,9 +222,9 @@ def run(plugins_dir):
 
 
 def self_test():
-    """种坏样本，断言这条检查**真的会红**。
+    """种坏样本，断言这条检查真的会红。
 
-    ★ 没有这一步，"检查通过"与"检查根本没在看"分不开 —— 那条纪律在本仓库有一条
+     没有这一步，"检查通过"与"检查根本没在看"分不开 —— 那条纪律在本仓库有一条
       现成的先例（`tools/self-test-sanitized.sh`）。
     """
     base = conf_keys_of_daemon()

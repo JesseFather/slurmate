@@ -1,7 +1,7 @@
 appId: io.github.jessefather.slurmate
 productName: Slurmate
 # 安装包属性里的版权行（Windows 的 LegalCopyright、Linux 的 deb control 都从这里取）。
-# ★ 与根目录 NOTICE 说的是同一件事 —— 署名只有一处定义，这里跟着它。
+# 与根目录 NOTICE 说的是同一件事 —— 署名只有一处定义，这里跟着它。
 copyright: Copyright 2026 JesseFather
 
 directories:
@@ -23,7 +23,7 @@ asar: true
 # 算法与下面是同一件事的两半 —— 改一处就要改另一处，`client/test/packaging.test.mjs`
 # 钉着这一对。
 #
-# 从前这两条一条都没有，于是打包版上：假站点打不出包（客户端取不回任何插件），
+# 从前这两条一条都没有，于是打包版上：假站点打不出包（客户端一份插件都收不到），
 # 就算打出来了，外部 bash 也读不了 asar 里的那段宿主脚本。
 extraResources:
   # 打包器。假站点要现打一个客户端侧容器才能把插件发给客户端，而容器格式只有
@@ -31,7 +31,7 @@ extraResources:
   - from: ../packer/slurmate-packer.js
     to: packer/slurmate-packer.js
 
-# 替身宿主。它要交给一个**外部** bash 去读，而外部进程读不了 asar 里的文件，
+# 替身宿主。它要交给一个外部 bash 去读，而外部进程读不了 asar 里的文件，
 # 所以这一份必须解出来。
 asarUnpack:
   - src/main/fake-job-host.sh
@@ -59,7 +59,7 @@ mac:
     - target: dmg
       arch: [x64, arm64]
   category: public.app-category.developer-tools
-  # 不签名、不公证。**后果**：Gatekeeper 会拦，用户首次需右键 →「打开」，
+  # 不签名、不公证。后果：Gatekeeper 会拦，用户首次需右键 →「打开」，
   # 或执行 xattr -dr com.apple.quarantine /Applications/Slurmate.app
   # （README 里写了）。要消除这一步需要 Apple 开发者账号。
   identity: null

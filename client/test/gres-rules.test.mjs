@@ -23,7 +23,7 @@
  *     · 假后端更严，开发时以为某件事不能做，其实能。
  *
  * 这一组是行为用例（真调 `_submit`），不是文本比对 ——
- *   `backend-fake.test.mjs` 管的是"字段名对不对"，管不了"规则一样不一样"。
+ *   `backend-fake.test.mjs` 管的是"字段名对不对"，管不了"规则是否相同"。
  *
  * 而它同样是"夹具要比真集群脏"的落点：假集群里有一条带型号的 GRES
  *   （`gpu:a6000`）和一条名字不是 gpu 的（`mps`）。本机那台真集群只有不带
@@ -70,7 +70,7 @@ async function submit(req) {
   return { b, r };
 }
 
-test('★ 假集群确实带一条**带型号**的 GRES（否则那条路一次都走不到）', async () => {
+test('假集群确实带一条带型号的 GRES（否则那条路一次都走不到）', async () => {
   const b = make();
   const r = await b.rpc({ op: 'partitions' });
   const all = r.data.partitions.flatMap((p) => (p.gres || []));
@@ -87,11 +87,11 @@ test('每个分区都带自己的清单（三态里的第三态：有，而且�
     assert.ok(Array.isArray(p.gres), `${p.name} 上没有 gres 这个键`);
   }
   assert.deepEqual(r.data.partitions.find((p) => p.name === 'DEBUG').gres, [],
-    'DEBUG 分区应该是「有清单但是空的」——与「查不到」不是一回事');
+    'DEBUG 分区应该是「有清单但是空的」——与「查询不到」不是一回事');
   b._clearTimers();
 });
 
-test('★ 带型号的提交进得去，而且**描述符原样回来**（不是数字）', async () => {
+test('带型号的提交进得去，而且描述符原样回来（不是数字）', async () => {
   const { b, r } = await submit({ partition: 'A6000',
     gres: { name: 'gpu', type: 'a6000', count: 2 } });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -101,7 +101,7 @@ test('★ 带型号的提交进得去，而且**描述符原样回来**（不是
   b._clearTimers();
 });
 
-test('★ 名字不是 gpu 的照样提交（`mps:100`）', async () => {
+test('名字不是 gpu 的照样提交（`mps:100`）', async () => {
   const { b, r } = await submit({ partition: 'RTX8000',
     gres: { name: 'mps', count: 100 } });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -109,7 +109,7 @@ test('★ 名字不是 gpu 的照样提交（`mps:100`）', async () => {
   b._clearTimers();
 });
 
-test('★★ 上限来自**这个分区**的清单，不是写死的一个数', async () => {
+test('上限来自这个分区的清单，不是写死的一个数', async () => {
   // A6000 每节点 4 张（带型号 a6000），RTX8000 的 mps 每节点 100 个。
   // 判据直接取假集群自己那份清单里的数 —— 写一个 8 进去就又是两份真相。
   const cat = make()._partitions();
@@ -139,7 +139,7 @@ test('★★ 上限来自**这个分区**的清单，不是写死的一个数', 
   ok100.b._clearTimers();
 });
 
-test('★ 分区上没有那种 GRES → 拒绝并说出这个分区有什么', async () => {
+test('分区上没有那种 GRES → 拒绝并说出这个分区有什么', async () => {
   const { b, r } = await submit({ partition: '2080TI',
     gres: { name: 'gpu', type: 'a6000', count: 1 } });
   assert.equal(r.ok, false);
@@ -155,7 +155,7 @@ test('★ 分区上没有那种 GRES → 拒绝并说出这个分区有什么', 
   b._clearTimers();
 });
 
-test('★★ 形状不合法一律在提交之前拒掉（与守护进程同一张脸）', async () => {
+test('形状不合法一律在提交之前拒掉（与守护进程同一张脸）', async () => {
   const bad = [
     'gpu:2',
     { name: 'gpu', type: 'a:100', count: 2 },
@@ -178,7 +178,7 @@ test('★★ 形状不合法一律在提交之前拒掉（与守护进程同一�
   }
 });
 
-test('★ 不传 gres ⇒ null（不是 0、不是空对象）', async () => {
+test('不传 gres，null（不是 0、不是空对象）', async () => {
   const { b, r } = await submit({ partition: '2080TI' });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.data.resources.gres, null);

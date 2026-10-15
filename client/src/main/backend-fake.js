@@ -356,12 +356,12 @@ class FakeBackend extends Backend {
     /**
      * 集群信息里哪些格缺席（`{health:true, nodes:true, …}`）。
      *
-     * 存在的理由是那一条三态规矩：「取不到」与「确实没有」在界面上是两句
-     *   不同的话。真集群上"取不到"要么要等一次故障、要么要把 sinfo 改名 ——
+     * 存在的理由是那一条三态规矩：「获取失败」与「确实没有」在界面上是两句
+     *   不同的话。真集群上"获取失败"要么要等一次故障、要么要把 sinfo 改名 ——
      *   而它恰恰是这一整块最容易画错的那一格。见 _cluster()。
      */
     this._clusterMissing = {};
-    /** `sacct` 取不到。同上 —— 它回的是错误不是空列表，两者不能混。 */
+    /** `sacct` 获取失败。同上 —— 它回的是错误不是空列表，两者不能混。 */
     this._historyDown = false;
 
     /**
@@ -552,7 +552,7 @@ class FakeBackend extends Backend {
    * 让假站点假装"这个客户端里没有带打包器"。
    *
    * 造的是一个真实现场（安装包里漏带了打包器），而它的症状是"站点报得出插件、
-   *   客户端却一个都取不回来" —— 那条路必须能走到，否则那几句提示谁也没验过。
+   *   客户端却一份都没收到" —— 那条路必须能走到，否则那几句提示谁也没验过。
    *   与 `debugNoBash` 同一条理由：这台开发机上是造不出这个现场的（打包器就在
    *   仓库里躺着，而"运行的是哪一份代码"不是运行时能改的）。
    *
@@ -1097,10 +1097,10 @@ class FakeBackend extends Backend {
   debugDaemonDown(ms = 20000) { this._daemonDownUntil = Date.now() + ms; }
 
   /**
-   * 让集群信息的某一格取不到（`kind` 省略 = 全部）。
+   * 让集群信息的某一格获取失败（`kind` 省略 = 全部）。
    *
-   * 这一态必须能造出来：真集群上"取不到"要么要等一次故障、要么要把 sinfo
-   *   改名，而"把取不到画成没有"正是这一整块最容易犯的错 —— 用户会去查一个
+   * 这一态必须能造出来：真集群上"获取失败"要么要等一次故障、要么要把 sinfo
+   *   改名，而"把获取失败画成没有"正是这一整块最容易犯的错 —— 用户会去查一个
    *   不存在的问题（"为什么这台集群没有分区"）。
    */
   debugClusterMissing(kind) {
@@ -1111,7 +1111,7 @@ class FakeBackend extends Backend {
     return Object.keys(this._clusterMissing);
   }
 
-  /** 让 `sacct` 取不到。它回的是错误，不是空列表 —— 两者不能混。 */
+  /** 让 `sacct` 获取失败。它回的是错误，不是空列表 —— 两者不能混。 */
   debugHistoryDown(on = true) { this._historyDown = Boolean(on); }
 
   debugTunnelDown(ms = 15000) { this._tunnelDownUntil = Date.now() + ms; }
@@ -1356,7 +1356,7 @@ class FakeBackend extends Backend {
    *     真集群上此刻全是 `PD`，那一支也走不到。
    *   · `me` 里有排队作业，于是"我排第几"算得出来。
    *
-   * `debugClusterMissing` 能让任意一格缺席，因为"取不到"与"确实没有"
+   * `debugClusterMissing` 能让任意一格缺席，因为"获取失败"与"确实没有"
    *   必须分得开，而这两种状态在界面上是两句不同的话。
    */
   _cluster() {
@@ -1484,7 +1484,7 @@ class FakeBackend extends Backend {
         //     或者它一个字都还没说）—— 界面照实说"还没有输出"。
         //   · 文件在、读不出来（权限、被占着）就是一个带 `why` 的格子。那时说
         //     "没有输出"是在说一件不成立的事，而用户会去查那个不存在的输出。
-        // 合成一个的后果正是这一版一直在清的那类：把"取不到"说成"没有"。
+        // 合成一个的后果正是这一版一直在清的那类：把"获取失败"说成"没有"。
         if (e && e.code === 'ENOENT') return null;
         return { path: p, bytes: 0, lines: 0, truncated: false,
                  mtime: null, text: null, why: `读取 ${p} 失败：${e.message}` };

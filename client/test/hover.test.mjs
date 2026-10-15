@@ -17,11 +17,11 @@
  *
  * 它守的是站点状态那一块搬过一次家这件事：从前它在面板里
  *   （`#sec-cluster`），现在它是一个独立的 renderer。搬家最容易丢的不是代码，
- *   是三态那条规矩 —— 「取不到」与「确实没有」在这一块里长得一样（都是一片空），
+ *   是三态那条规矩 —— 「获取失败」与「确实没有」在这一块里长得一样（都是一片空），
  *   而把前者画成后者，用户会去查一个不存在的问题。
  *
  * 所以这一组只判两件事：
- *   1. 数据缺席时，每一格都有一行说"取不到"（而不是画成空的）；
+ *   1. 数据缺席时，每一格都有一行说"获取失败"（而不是画成空的）；
  *   2. 而那几行在「确实没有」时不许出现。
  *
  * 它跑的是真的 `hover.js` + `dom.js`（在一个人造 DOM 上），不是文本比对 ——
@@ -121,7 +121,7 @@ function boot() {
   return { byId, text, raw, subs, calls, run: (e) => vm.runInContext(e, ctx) };
 }
 
-/** 一份 `op_cluster` 的答案。`omit` 里列出的格子整个键都不给（= 取不到）。 */
+/** 一份 `op_cluster` 的答案。`omit` 里列出的格子整个键都不给（= 获取失败）。 */
 function cluster(omit = []) {
   const d = {
     at: Math.floor(Date.now() / 1000),
@@ -134,16 +134,16 @@ function cluster(omit = []) {
     taken: {},
     me: { account: 'lab', allowed_partitions: null,
       fairshare: { account: 'lab', fair_share: 0.42 },
-      // 这两格也要给：它们缺席时那一块会画一行"取不到"（`pending_count ===
+      // 这两格也要给：它们缺席时那一块会画一行"获取失败"（`pending_count ===
       //   undefined` 就是"这一格没问到"），而那是对的 —— 所以"数据齐全"
-      //   这份夹具必须把它们带上，否则下面那条"不该有取不到"判的就是别的东西。
+      //   这份夹具必须把它们带上，否则下面那条"不该有获取失败"判的就是别的东西。
       pending_count: 0, first_in: {} },
   };
   for (const k of omit) delete d[k];
   return d;
 }
 
-test('★ hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方法都在 preload 里', () => {
+test('hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方法都在 preload 里', () => {
   // 这两条是跨文件的，而它们守的是同一类静默失败：`$('cl-bdoy')` 打错一个
   //   字母，`getElementById` 返回 null，`box.textContent = ''` 当场抛 —— 或者更坏，
   //   一个 `?.` 兜住之后浮窗永远空白，而没有任何地方报错。
@@ -151,7 +151,7 @@ test('★ hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方
   const src = read('hover.js');
   const html = read('hover.html');
   const used = new Set([...src.matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1]));
-  assert.ok(used.size >= 5, `抽到的 id 太少（${used.size}），正则多半没匹配上`);
+  assert.ok(used.size >= 5, `抽到的 id 不足（${used.size}），正则多半没匹配上`);
   const defined = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
   const missing = [...used].filter((id) => !defined.has(id)).sort();
   assert.deepEqual(missing, [], `hover.js 引用了 hover.html 里不存在的 id：${missing.join('、')}`);
@@ -165,7 +165,7 @@ test('★ hover.js 用到的每个 id 都在 hover.html 里，桥上的每个方
     `hover.js 调了 preload 没暴露的方法：${undeclared.join('、')}`);
 });
 
-test('★★ hover.html 里不许有内联样式（CSP 会把它们静默丢掉）', () => {
+test('hover.html 里不许有内联样式（CSP 会把它们静默丢掉）', () => {
   // 面板那一侧的同一条在 renderer.test.mjs 里，理由逐字相同：CSP 没有
   //   'unsafe-inline'，`style="..."` 会被静默丢弃，表现是"布局莫名其妙不对"，
   //   而控制台之外没有任何提示。
@@ -180,7 +180,7 @@ test('★★ hover.html 里不许有内联样式（CSP 会把它们静默丢掉�
   assert.equal(/<style[\s>]/.test(markup), false, '也不许用内联 <style> 块');
 });
 
-test('★★ 数据齐的时候，画得出来而且不抛（浮窗白屏的守卫）', () => {
+test('数据齐的时候，画得出来而且不抛（浮窗白屏的守卫）', () => {
   const h = boot();
   assert.doesNotThrow(() => h.subs.data({ cluster: cluster(), link: { connected: true } }));
   const t = h.text('cl-body');
@@ -191,7 +191,7 @@ test('★★ 数据齐的时候，画得出来而且不抛（浮窗白屏的守�
   assert.match(h.text('cl-body'), /取数于/);
 });
 
-test('★★ 键缺席 = 「取不到」，而且**每一格**都要说出来', () => {
+test('键缺席 = 「获取失败」，而且每一格都要说出来', () => {
   // 这是搬家最容易丢的那条规矩。全缺的时候，用户必须能一句一句读到
   //    "哪一格没问到"，而不是面对一片空白去猜"是不是这台集群本来就没有"。
   const h = boot();
@@ -200,18 +200,18 @@ test('★★ 键缺席 = 「取不到」，而且**每一格**都要说出来', 
   const t = h.text('cl-body');
   assert.match(t, /获取失败：控制器状态/, '控制器那一格');
   assert.match(t, /获取失败：分区列表/, '分区那一格');
-  assert.match(t, /不是「没有」/, '★ 而且要说清这是"没问到"，不是"没有"');
+  assert.match(t, /不是「没有」/, '而且要说清这是"没问到"，不是"没有"');
   assert.match(h.text('cl-health'), /获取失败/);
 });
 
-test('★★ 而「确实没有」的时候，那几行**一个字都不许出现**', () => {
-  // 反过来的一半，缺了它上面那条就是一句空话：「取不到」那几行如果无论如何都画，
+test('而「确实没有」的时候，那几行一个字都不许出现', () => {
+  // 反过来的一半，缺了它上面那条就是一句空话：「获取失败」那几行如果无论如何都画，
   // 它会在数据齐全的时候也说"没问到"，而那同样是替集群说了一句不成立的话。
   const h = boot();
   h.subs.data({ cluster: cluster(), link: { connected: true } });
   assert.equal(/获取失败：/.test(h.text('cl-body')), false,
-    '数据齐全时不该有任何一行"取不到"');
-  // 三态里的第三态：`{}` = 确实没有（一个分区都没有），与"取不到"不同。
+    '数据齐全时不该有任何一行"获取失败"');
+  // 三态里的第三态：`{}` = 确实没有（一个分区都没有），与"获取失败"不同。
   const d = cluster();
   d.partitions = {};
   h.subs.data({ cluster: d, link: { connected: true } });
@@ -219,7 +219,7 @@ test('★★ 而「确实没有」的时候，那几行**一个字都不许出�
   assert.equal(/获取失败：分区/.test(h.text('cl-body')), false);
 });
 
-test('★★ 链路断了就说断了 —— 它与集群那一份**不是一个时间尺度**', () => {
+test('链路断了就说断了 —— 它与集群那一份不是一个时间尺度', () => {
   const h = boot();
   h.subs.data({ cluster: cluster(), link: { connected: false, detail: '连接已断开' } });
   assert.match(h.text('cl-link'), /已断开/);
@@ -230,7 +230,7 @@ test('★★ 链路断了就说断了 —— 它与集群那一份**不是一个
   assert.match(h.text('cl-link'), /延迟 33ms/);
 });
 
-test('★ 取不到集群信息时，那一句是**错误**，不是空白', () => {
+test('获取失败集群信息时，那一句是错误，不是空白', () => {
   const h = boot();
   h.subs.data({ cluster: null, clusterError: '守护进程没有响应', link: { connected: true } });
   assert.match(h.text('cl-body'), /获取集群信息失败：守护进程没有响应/);
@@ -248,12 +248,12 @@ const cellOf = (text, extra = {}) => Object.assign({
  * 推一份右边那一栏的数据。`out` / `err` 是日志的两格，而推过去的那个信封里
  * `out` 是 `{out, err}` 整个容器 —— 与 `index.js` 的 `pushOutToHover` 逐字同形。
  * 夹具这里包错一层的话，`renderOut` 拿到的是"一格"，于是每一块都判成 absent，
- *   而症状是"右栏永远说还没有写出任何东西" —— 一个看起来像后端没数据的现象。
+ *   而症状是"右栏永远说还没有写出任何内容" —— 一个看起来像后端没数据的现象。
  */
 const pushOut = (h, out, err, more = {}) => h.subs.data(
   Object.assign({ side: 'right', out: { out, err }, outLines: 200 }, more));
 
-test('★★ 右栏两块各画各的，而**空的那一块不出现**', () => {
+test('右栏两块各画各的，而空的那一块不出现', () => {
   const h = boot();
   pushOut(h, cellOf('宿主的一行\n服务的一行\n'), cellOf('认证被拒\n'));
   assert.match(h.text('out-out'), /服务的一行/);
@@ -265,24 +265,24 @@ test('★★ 右栏两块各画各的，而**空的那一块不出现**', () => 
   //   而 `.err` 在正常情况下就是空的。
   pushOut(h, cellOf('宿主的一行\n'), null);
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true,
-    '`.err` 是 null ⇒ 那一块不出现');
+    '`.err` 是 null，那一块不出现');
 });
 
-test('★★ 「取不到」与「确实没有」在右栏里长得必须不一样', () => {
+test('「获取失败」与「确实没有」在右栏里长得必须不同', () => {
   const h = boot();
   pushOut(h, cellOf('', { text: null, why: 'component_group_or_world_writable',
                           bytes: null, lines: null }), null);
   assert.match(h.text('out-out'), /获取失败：component_group_or_world_writable/,
-    '★ 文件在、但读不了 —— 要说清是哪一条判据');
+    '文件在、但读不了 —— 要说清是哪一条判据');
   assert.equal(h.byId.get('out-half-out').classList.contains('hidden'), false);
 
-  // 而"确实没有这一份"是不出现，不是一行"取不到"
+  // 而"确实没有这一份"是不出现，不是一行"获取失败"
   pushOut(h, null, null);
   assert.equal(h.byId.get('out-half-err').classList.contains('hidden'), true);
-  assert.doesNotMatch(h.text('out-out'), /获取失败/, '确实没有 ≠ 取不到');
+  assert.doesNotMatch(h.text('out-out'), /获取失败/, '确实没有 ≠ 获取失败');
 });
 
-test('★★ 追加式绘制：第二帧只接新行，不重画（重画会毁掉用户正在拖的选区）', () => {
+test('追加式绘制：第二帧只接新行，不重画（重画会毁掉用户正在拖的选区）', () => {
   const h = boot();
   const box = () => h.byId.get('out-out');
   pushOut(h, cellOf('A\nB\nC\n'), null);
@@ -292,32 +292,32 @@ test('★★ 追加式绘制：第二帧只接新行，不重画（重画会毁�
   pushOut(h, cellOf('A\nB\nC\nD\nE\n'), null);
   const t = h.raw('out-out');
   assert.equal(t, 'A\nB\nC\nD\nE', '新的两行要接上去，而且接在旧的那一段之后');
-  assert.equal((t.match(/C/g) || []).length, 1, '★ 不许把已经画过的重画一遍（重复）');
+  assert.equal((t.match(/C/g) || []).length, 1, '不许把已经画过的重画一遍（重复）');
   assert.equal(box().children.length, nodes1 + 1,
-    '★ 只追加了一个节点 —— 整块重画的话节点数会变（而那正是毁掉选区的那种做法）');
+    '只追加了一个节点 —— 若整块重画节点数会变（而那正是毁掉选区的那种做法）');
 });
 
-test('★★ 窗口滑动之后仍然接得上（尾部视图最常见的那一帧）', () => {
+test('窗口滑动之后仍然接得上（尾部视图最常见的那一帧）', () => {
   const h = boot();
   // 第一帧给 1..5，第二帧服务端只回 3..8（`lines` 是窗口，窗口会滑）
   pushOut(h, cellOf('1\n2\n3\n4\n5\n'), null);
   pushOut(h, cellOf('3\n4\n5\n6\n7\n8\n'), null);
   assert.equal(h.raw('out-out'), '1\n2\n3\n4\n5\n6\n7\n8',
-    '★ 滑掉的那两行留在 DOM 里（用户翻上去还看得到），新接上的是 6/7/8');
+    '滑掉的那两行留在 DOM 里（用户翻上去还看得到），新接上的是 6/7/8');
   assert.equal((h.raw('out-out').match(/5/g) || []).length, 1,
-    '★ 重叠的那一段不许画第二遍（拿"上一次的末尾"与"这一次的开头"对一遍正是为此）');
+    '重叠的那一段不许画第二遍（拿"上一次的末尾"与"这一次的开头"对一遍正是为此）');
 });
 
-test('★★ 接不上就整块重画（文件被截断过 / 换过一份）', () => {
+test('不衔接就整块重画（文件被截断过 / 换过一份）', () => {
   const h = boot();
   pushOut(h, cellOf('甲\n乙\n丙\n'), null);
   pushOut(h, cellOf('戊\n己\n庚\n'), null);
   assert.equal(h.raw('out-out'), '戊\n己\n庚',
-    '★ 不相干的两段粘在一起比重新画一遍更坏');
+    '不相干的两段粘在一起比重新画一遍更坏');
   assert.equal(/[甲乙丙]/.test(h.raw('out-out')), false, '旧的整段要被换掉，不是接在后面');
 });
 
-test('★★ 末尾那半行不画 —— 它下一次会以完整的样子再出现一遍', () => {
+test('末尾那半行不画 —— 它下一次会以完整的样子再出现一遍', () => {
   // 作业正把一行写了一半（还没有换行符）时，日志文件里就是"半句话"。
   //   画出去的话：中间那一刻显示的是半句，而下一帧那一行会完整地再出现一次
   //   （两行一模一样的开头），看起来像服务把同一句说了两遍。
@@ -329,7 +329,7 @@ test('★★ 末尾那半行不画 —— 它下一次会以完整的样子再�
   assert.equal(h.raw('out-out'), 'A\nB\n半行写完了', '写完了才出现，而且只出现一次');
 });
 
-test('★★ 「只在贴底时自动滚」—— 用户翻上去看历史时不许把他拽回来', () => {
+test('「只在贴底时自动滚」—— 用户翻上去看历史时不许把他拽回来', () => {
   const h = boot();
   // 先画一次：元素是 `getElementById` 按需建的，没画过之前 `byId` 里没有它。
   pushOut(h, cellOf('A\n'), null);
@@ -343,33 +343,33 @@ test('★★ 「只在贴底时自动滚」—— 用户翻上去看历史时不
   // 翻上去了：不许动他的滚动位置
   box().scrollHeight = 1000; box().clientHeight = 100; box().scrollTop = 10;
   pushOut(h, cellOf('A\nB\nC\n'), null);
-  assert.equal(box().scrollTop, 10, '★ 用户在看历史 —— 拽回去就是把他正在读的那一段抽走');
+  assert.equal(box().scrollTop, 10, '用户在看历史 —— 拽回去就是把他正在读的那一段抽走');
 });
 
-test('★ 右栏「更多」按下去走桥上的 more()（浮窗自己不去问后端）', async () => {
+test('右栏「更多」按下去走桥上的 more()（浮窗自己不去问后端）', async () => {
   const h = boot();
   assert.equal(await h.byId.get('out-more').onclick(), undefined);
   assert.equal(h.calls.more, 1);
 });
 
-test('★★ 浮窗的滚动条也是我们自己画的，而且永远占着那条槽', () => {
+test('浮窗的滚动条也是我们自己画的，而且永远占着那条槽', () => {
   // 2026-10-11：浮窗是另一个文档（另一个 BrowserWindow），它有自己那份样式表
   //   —— 面板那一边（app.css）画的滚动条管不到这里，所以这一套得在这儿再写一遍。
   //   这也是这个文件头那句"与面板同一套配色"的同一个理由。
   const css = read('hover.css');
   assert.match(css, /::-webkit-scrollbar\s*\{\s*width:\s*\d+px/,
-    '★ 宽度要自己定死（不写的话露出来的就是系统那一条）');
+    '宽度要自己定死（若不写露出来的就是系统那一条）');
   assert.match(css, /::-webkit-scrollbar-thumb\s*\{[^}]*border-radius/,
-    '★ 滑块要是我们的');
+    '滑块要是我们的');
   // 作业输出是一行一行长出来的：不留那条槽，正文会在每一条新输出到来时缩一下。
   const at = css.indexOf('.body {');
   assert.notEqual(at, -1, 'hover.css 里应当有 .body 那一条规则');
   const block = css.slice(at, css.indexOf('}', at));
   assert.match(block, /scrollbar-gutter:\s*stable/,
-    '★★ 右栏那一块要永远留着那条槽 —— 输出是一行一行长出来的，不留的话正文会跟着缩');
+    '右栏那一块要永远留着那条槽 —— 输出是一行一行长出来的，若不留正文会跟着缩');
   // 同上：`scrollbar-width` / `scrollbar-color` 一旦出现就会盖掉上面那一套。
   for (const f of ['width', 'color']) {
     assert.equal(new RegExp(`scrollbar-${f}\\s*:`).test(css), false,
-      `★★ 不许写 scrollbar-${f} —— 它会盖掉 ::-webkit-scrollbar 那一套`);
+      `不许写 scrollbar-${f} —— 它会盖掉 ::-webkit-scrollbar 那一套`);
   }
 });

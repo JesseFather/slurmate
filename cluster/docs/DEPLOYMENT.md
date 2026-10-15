@@ -205,7 +205,7 @@ sshd -T | grep -iE '^(allowtcpforwarding|permitopen|pubkeyauthentication|passwor
 - systemd：服务单元与 `StateDirectory` / `LogsDirectory` / `RuntimeDirectory`
   都依赖它。
 - nftables：`install-base.sh` 要求 `nft list tables` 成功（`cluster/install-base.sh`）。
-- `nft -j list ruleset` 必须可用：这是硬性要求，取不到就拒绝部署
+- `nft -j list ruleset` 必须可用：这是硬性要求，获取失败就拒绝部署
   （`cluster/install-base.sh`）。理由是没有这道校验就无法证明部署没有破坏现有
   规则集 —— 宁可现在拒绝，也不要事后给一个证明不了任何东西的绿灯。
 

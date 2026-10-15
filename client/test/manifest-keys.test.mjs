@@ -62,7 +62,7 @@ const TABLES = [
   ['data', P.DATA_KEYS],
 ];
 
-test('★★ 客户端那五张键表与 tools/manifest-keys.json 逐字相同（有序列出）', () => {
+test('客户端那五张键表与 tools/manifest-keys.json 逐字相同（有序列出）', () => {
   for (const [name, mine] of TABLES) {
     const written = KEYS[name];
     // 先验"那份 JSON 里真的有一张非空的表" —— 否则 `deepEqual([], [])` 会绿，
@@ -74,7 +74,7 @@ test('★★ 客户端那五张键表与 tools/manifest-keys.json 逐字相同�
     // 有序比对：顺序也是判据的一部分 —— 报错里"认识的只有 …"那一串用的是它，
     // 而两侧那份文案读起来一样，排查时才有用。
     assert.deepEqual(mine, written,
-      `客户端的 ${name} 与书面判据对不上 —— 改规则要同时改 `
+      `客户端的 ${name} 与书面判据不一致 —— 改规则要同时改 `
       + `tools/manifest-keys.json 与两侧的实现`);
   }
 });
@@ -110,7 +110,7 @@ function inspect(mf) {
   }
 }
 
-test('★★ 五个位置各拼错一个键 ⇒ 装不上，报错点名那个键', () => {
+test('五个位置各拼错一个键，无法安装，报错点名那个键', () => {
   // 正对照必须排在最前面：没有它，下面五条会被"什么都拒"一并满足，而
   //   那与"这一格判对了"在测试输出里长得一模一样。
   const ok = inspect(validManifest());
@@ -128,15 +128,15 @@ test('★★ 五个位置各拼错一个键 ⇒ 装不上，报错点名那个�
     const mf = validManifest();
     edit(mf);
     const r = inspect(mf);
-    assert.ok(r.error, `${where}：拼错成 ${key} 必须装不上`);
+    assert.ok(r.error, `${where}：拼错成 ${key} 必须无法安装`);
     assert.match(r.error, /认不得的键/,
-      `${where}：要说清是"这个键我不认识"，而不是别的毛病：${r.error}`);
+      `${where}：要说清是"这个键我不认识"，而不是其他毛病：${r.error}`);
     assert.match(r.error, new RegExp(key),
-      `${where}：报错必须**点名**那个键 —— 只说"清单有问题"等于没说：${r.error}`);
+      `${where}：报错必须点名那个键 —— 只说"清单有问题"等于没说：${r.error}`);
   }
 });
 
-test('★ 边界：`site` 段内部的拼错**两侧都不报**（这一段只有一侧读）', () => {
+test('边界：`site` 段内部的拼错两侧都不报（这一段只有一侧读）', () => {
   // 这一条钉的是一条刻意留着的不对称，不是一条保证。
   //
   //   `site` 段是站点侧读的（客户端只把它当不透明数据、只查"是不是对象"），而
@@ -151,6 +151,6 @@ test('★ 边界：`site` 段内部的拼错**两侧都不报**（这一段只�
   mf.site.defaultCpuss = 4;
   const r = inspect(mf);
   assert.equal(r.error, undefined,
-    '客户端今天不查 site 段内部的未知键 —— 这一条红了的话，说明有人收紧了它，'
+    '客户端今天不查 site 段内部的未知键 —— 若这一条红了，说明有人收紧了它，'
     + `请把那件事记进账本并改掉这一条：${r.error}`);
 });

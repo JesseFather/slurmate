@@ -617,7 +617,7 @@ def slurm_stub(argv, timeout=10, check=False):
     if "sacct" in cmd and "sacctmgr" not in cmd:
         # 时间写法照真机校验。 `sacct` 只认 `now-7days` / `now-7day`，
         #    写 `now-7d` 会回 `Invalid time specification`（真集群实测）。
-        #    桩不校验的话，那一格写错的形态是"历史永远取不到" —— 而它长得
+        #    桩不校验的话，那一格写错的形态是"历史永远获取失败" —— 而它长得
         #    像集群没有账本，与真正的原因隔了好几层。这一条是补的。
         _since = args[args.index("-S") + 1] if "-S" in args else ""
         if _since and not _since.endswith(("day", "days")):
@@ -790,7 +790,7 @@ def main():
                                     ("= 5\n", "缺键名"),
                                     ("[plugin:sshd]\nenabled = yes\n", "主文件里写块头"),
                                     ("[plugin:sshd\n", "没闭合的块头"),
-                                    ("[cluster]\nx = 1\n", "别的块头也一样"))):
+                                    ("[cluster]\nx = 1\n", "其他块头同理"))):
         try:
             parse(bad, "bad-%d.conf" % i)
             check("%s → 报错" % why, False, "竟然通过了")
@@ -803,11 +803,11 @@ def main():
         f.write("range_end = 5\n")
     write_plugin_conf(_pc, "sshd", "# 说明\nenabled = yes\ndefault_cpus = 3\n")
     _g, _s, _m = mod.parse_config(_pc)
-    check("★★ 插件配置住在 `<配置路径>.d/<名字>.conf`，主文件只有通用键",
+    check("插件配置住在 `<配置路径>.d/<名字>.conf`，主文件只有通用键",
           _g == {"range_end": "5"}
           and _s == {"sshd": {"enabled": "yes", "default_cpus": "3"}},
           "%s / %s" % (_g, _s))
-    check("★ 第三个返回值给出**是哪一个文件**（报错要说得出这句，不然管理员"
+    check("第三个返回值给出是哪一个文件（报错要说得出这句，不然管理员"
           "得去猜）",
           _m["sshd"]["file"].endswith(
               os.path.join("treeparse.conf.d", "sshd.conf")), str(_m))
@@ -819,7 +819,7 @@ def main():
         _hint = ""
     except ValueError as e:
         _hint = str(e)
-    check("★★ 主文件里写块头的报错要**指路**（`.d/` 目录 + 一个插件一个文件）",
+    check("主文件里写块头的报错要指路（`.d/` 目录 + 一个插件一个文件）",
           ".d/" in _hint and "一个插件一个文件" in _hint, _hint)
 
     # drop-in 文件里同样不写块头 —— 文件名已经说了这一份是谁的。
@@ -830,7 +830,7 @@ def main():
     except ValueError as e:
         _hint2 = str(e)
     os.unlink(_weird)
-    check("★ drop-in 文件里也不写块头（文件名就是身份）", "文件名" in _hint2, _hint2)
+    check("drop-in 文件里也不写块头（文件名就是身份）", "文件名" in _hint2, _hint2)
 
     # 认不出的键必须是【错误】而不是被忽略：拼错的键被静默忽略，后果是
     #   "文件里写着，而实际什么也没发生" —— 这正是本项目一路在清的那类问题。
@@ -1139,9 +1139,9 @@ def main():
         ip_c = sl.node_ip("node04")
         check("node04 的 NodeAddr 是 IPv4", ip_c == "192.0.2.20", str(ip_c))
         check("不存在的节点返回 None", sl.node_ip("nosuchnode") is None)
-        check("不存在的作业返回 None（rc 非 0 或输出为空都算查不到）",
+        check("不存在的作业返回 None（rc 非 0 或输出为空都算查询不到）",
               sl.show_job(999999999) is None)
-        check("控制器可达 + 作业查不到 → JOB_MISSING（不是 UNKNOWN）",
+        check("控制器可达 + 作业查询不到 → JOB_MISSING（不是 UNKNOWN）",
               sl.job_state(999999999) == (mod.Slurm.JOB_MISSING, None),
               str(sl.job_state(999999999)))
 
@@ -1181,7 +1181,7 @@ def main():
     finally:
         mod.run_cmd = real_run_cmd
 
-    # ── 10. job_state：区分"查不到"与"查不了"（H1 回归）────────────────────
+    # ── 10. job_state：区分"查询不到"与"查不了"（H1 回归）────────────────────
     # 这一节防的是最危险的一类误判：把"命令失败"当成"作业已结束"，
     # 进而在一个 tick 内拆掉所有活跃会话的 ACL 并删掉它们的会话文件。
     print("\n── 10. job_state 三态（H1 回归）──")
@@ -1226,7 +1226,7 @@ exit 0
     real_squeue = cfg.squeue
     cfg.squeue = write_stub(os.path.join(tmpdir, "squeue-ok"), "echo 999999999\n")
     st, _info = sl2.job_state(999999999)
-    check("scontrol 查不到但 squeue 还在队列 → JOB_OK（绝不判成已结束）",
+    check("scontrol 查询不到但 squeue 还在队列 → JOB_OK（绝不判成已结束）",
           st == mod.Slurm.JOB_OK, st)
     cfg.squeue = real_squeue
     cfg.scontrol = real_scontrol
@@ -1355,7 +1355,7 @@ exit 0
           str(errs))
     # 查不到节点列表时【不阻塞启动】：那是控制器抖动，不是配置错了。
     # 因为一次查询失败而拒绝服务，会把一次瞬时抖动放大成一次停机。
-    check("Slurm 查不到节点时放行（不能让抖动变成停机）",
+    check("Slurm 查询不到节点时放行（不能让抖动变成停机）",
           with_stub(mod, lambda a, timeout=10, check=False: (1, "", "down"),
                     lambda: mod.crosscheck_cidr(
                         mod.Config(os.path.join(tmpdir, "slurmate.conf")))) == [])
@@ -1381,7 +1381,7 @@ exit 0
     errs = old_cfg._db_schema_errors()
     check("旧库（有 purpose 列）被拒绝并给出可照做的修法",
           len(errs) == 1 and "rm -f" in errs[0], str(errs))
-    # 两个方向都要点名：只说"对不上"等于让运维自己去 diff 一张二十多列的
+    # 两个方向都要点名：只说"不一致"等于让运维自己去 diff 一张二十多列的
     #   表，而这是他半夜在机房唯一能拿到的东西。
     check(" 多出来的那一列被点名（v0.1 的 purpose）",
           bool(errs) and "多 purpose" in errs[0], str(errs))
@@ -1412,7 +1412,7 @@ exit 0
     check("指定了分区 → 带 -p", "-p" in a and "2080TI" in a, str(a))
     check("没 GPU → 完全省略 --gres（不是 gpu:0）",
           not any(x.startswith("--gres") for x in a), str(a))
-    check("默认不写 -w（节点由 Slurm 在分区内挑）", "-w" not in a, str(a))
+    check("默认不写 -w（节点由 Slurm 在分区内选择）", "-w" not in a, str(a))
     check(" 作业名是 sj-<插件短名>（不再是会话 id）",
           "--job-name=sj-code-server" in a, str(a))
     check(" 作业脚本路径是 argv 的末项（操作数在选项之后）",
@@ -1474,7 +1474,7 @@ exit 0
         return a[a.index(flag) + 1] if flag in a else None
     _o, _e = _pat("-o"), _pat("-e")
     check(" `-o` 与 `-e` 是两个不同的文件，而且就是 `slurm-%j.out` / "
-          "`slurm-%j.err`（合成一个的话，「这个服务往 stderr 上抱怨了什么」就没法"
+          "`slurm-%j.err`（若合成一个，「这个服务往 stderr 上抱怨了什么」就没法"
           "单独看 —— 而出故障时那恰恰是唯一有用的那半）",
           _o is not None and _e is not None and _o != _e
           and _o.endswith("slurm-%j.out") and _e.endswith("slurm-%j.err"),
@@ -1512,7 +1512,7 @@ exit 0
     _tpl_txt = io.open(os.path.join(HERE, "run.sbatch"), encoding="utf-8").read()
     _tpl_exp = [ln.strip() for ln in _tpl_txt.splitlines()
                 if re.match(r"^\s*#SBATCH\b", ln) and "export" in ln]
-    check(" 模板里没有任何一条 #SBATCH 指令提到 export（那一行从来没生效过）",
+    check(" 模板里没有任何一条 #SBATCH 指令提到 export（那一行从来未生效过）",
           _tpl_exp == [], "模板里还有：%s" % _tpl_exp)
 
     # ── 18. op_submit：缺省值由服务端填，权限查不到时退化而不是拒绝 ─────────
@@ -1592,11 +1592,11 @@ exit 0
     check("缺省提交成功", r.get("ok"), str(r))
     check("缺省 cpus=2、mem=8G（服务端填，客户端没给）",
           sess["cpus"] == 2 and sess["mem"] == "8G", "%s / %s" % (sess["cpus"], sess["mem"]))
-    check("缺省分区是从有权限的列表里挑的（不是空）",
+    check("缺省分区是从有权限的列表里选择的（不是空）",
           sess["partition"] in ("A6000", "RTX8000", "2080TI"), sess["partition"])
     check("响应里带回实际选中的分区（用户事先不知道）",
           (r.get("data") or {}).get("partition") == sess.get("partition"), str(r.get("data")))
-    check("缺省无 warning（服务端没替用户改任何东西）",
+    check("缺省无 warning（服务端没替用户改任何内容）",
           "warning" not in (r.get("data") or {}),
           str((r.get("data") or {}).get("warning")))
     check("环境变量带上了分区与资源",
@@ -1635,7 +1635,7 @@ exit 0
     check("提交带 GRES → 库里存的是描述符的 JSON",
           _stored_json(sess["gres"]) == {"name": "gpu", "type": None, "count": 2},
           repr(sess["gres"]))
-    check("★ 而它不是那个交给 Slurm 的串（两件事不许混成一个）",
+    check("而它不是那个交给 Slurm 的串（两件事不许混成一个）",
           sess["gres"] != "gpu:2", repr(sess["gres"]))
     check("响应的 resources 里是同一个描述符",
           (r.get("data") or {}).get("resources", {}).get("gres")
@@ -1643,7 +1643,7 @@ exit 0
           str((r.get("data") or {}).get("resources")))
     r, sess, env = run_submit({"op": "submit", "partition": "RTX8000",
                                "gres": {"name": "mps", "count": 100}})
-    check("★ 跨语言契约：环境变量是 SLURMATE_GRES（已无 SLURMATE_GPUS）",
+    check("跨语言契约：环境变量是 SLURMATE_GRES（已无 SLURMATE_GPUS）",
           env.get("SLURMATE_GRES") == "mps:100" and "SLURMATE_GPUS" not in env,
           "GRES=%r / 有没有 GPUS=%s" % (env.get("SLURMATE_GRES"),
                                        "SLURMATE_GPUS" in env))
@@ -1658,32 +1658,32 @@ exit 0
     #   来钉：RTX8000 那一台每节点 4 张 + mps:100。看 mps 那一条。
     r, _s, _e = run_submit({"op": "submit", "partition": "RTX8000",
                             "gres": {"name": "mps", "count": 100}})
-    check("★ 每节点 100 个的那种 GRES 也能要到 100（硬编码 8 会在这里红）",
+    check("每节点 100 个的那种 GRES 也能要到 100（硬编码 8 会在这里红）",
           r.get("ok"), str(r))
     r, _s, _e = run_submit({"op": "submit", "partition": "RTX8000",
                             "gres": {"name": "mps", "count": 101}})
-    check("★ 超过**这个分区**的上限 → bad_gres，且那句话里有数",
+    check("超过这个分区的上限 → bad_gres，且那句话里有数",
           not r.get("ok") and r["error"]["kind"] == "bad_gres"
           and "100" in r["error"]["detail"] and "101" in r["error"]["detail"],
           str(r))
     r, _s, _e = run_submit({"op": "submit", "partition": "A6000",
                             "gres": {"name": "gpu", "type": "a100", "count": 8}})
-    check("★ 分区自己的上限：A6000 每节点 2 张 → 要 8 张被拒",
+    check("分区自己的上限：A6000 每节点 2 张 → 要 8 张被拒",
           not r.get("ok") and r["error"]["kind"] == "bad_gres"
           and "2" in r["error"]["detail"], str(r))
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                             "gres": {"name": "gpu", "type": "a100", "count": 1}})
-    check("★ 型号对不上 → 拒绝（这个分区没有 a100）",
+    check("型号不一致 → 拒绝（这个分区没有 a100）",
           not r.get("ok") and r["error"]["kind"] == "bad_gres"
           and "a100" in r["error"]["detail"], str(r))
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                             "gres": {"name": "nvidia", "count": 1}})
-    check("★ 名字对不上 → 拒绝，且把**这个分区有什么**说出来",
+    check("名字不一致 → 拒绝，且把这个分区有什么说出来",
           not r.get("ok") and r["error"]["kind"] == "bad_gres"
           and "gpu" in r["error"]["detail"], str(r))
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                             "gres": {"name": "gpu", "count": 16}})
-    check("★ 2080TI 每节点 8 张、要 16 张 → 拒绝（不是悄悄截成 8）",
+    check("2080TI 每节点 8 张、要 16 张 → 拒绝（不是悄悄截成 8）",
           not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
     # 没点名分区（会随机挑一个）→ 必须从装得下它的分区里挑。mps 只有
     # RTX8000 有 —— 若从全部有权限的分区里随机挑，就会落到装不下它的 2080TI
@@ -1693,29 +1693,29 @@ exit 0
     for _ in range(12):
         r, sess, _ = run_submit({"op": "submit", "gres": {"name": "mps", "count": 100}})
         if not r.get("ok"):
-            check("★ 没点名分区时只从装得下它的分区里挑",
+            check("没点名分区时只从装得下它的分区里选择",
                   False, "%s / %s" % (r.get("error"), sess["partition"]))
             break
         _picked.add(sess["partition"])
     else:
-        check("★ 没点名分区时只从装得下它的分区里挑（mps 只有 RTX8000 有）",
+        check("没点名分区时只从装得下它的分区里选择（mps 只有 RTX8000 有）",
               _picked == {"RTX8000"}, str(sorted(_picked)))
-    # 而过滤不能把"随机挑"变成"永远挑同一个"：不带型号的 gpu 要 2 个，
+    # 而过滤不能把"随机选择"变成"永远选择同一个"：不带型号的 gpu 要 2 个，
     #   三个分区都装得下，落点必须分散（12 次全落同一个的概率约 3^-11）。
     _picked2 = set()
     for _ in range(12):
         _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
         if _r2.get("ok"):
             _picked2.add(_s2["partition"])
-    check("★ 过滤之后**仍然是随机挑**（不是永远挑第一个装得下的）",
+    check("过滤之后仍然是随机选择（不是永远选择第一个装得下的）",
           len(_picked2) >= 2, str(sorted(_picked2)))
     r, _s, _e = run_submit({"op": "submit",
                             "gres": {"name": "gpu", "type": "nosuch", "count": 1}})
-    check("★ 有权限的分区一个都装不下 → bad_gres，且那句话里有原因",
+    check("有权限的分区一个都装不下 → bad_gres，且那句话里有原因",
           not r.get("ok") and r["error"]["kind"] == "bad_gres"
           and "nosuch" in r["error"]["detail"], str(r))
 
-    # 后面几条要临时让"目录查不到"，这里先留一份真身。
+    # 后面几条要临时让"目录查询不到"，这里先留一份真身。
     _real_cat = mod.Slurm.gres_catalog
 
     # 形状判据自己要能挡住 —— 不能靠下游"目录里没有这个名字"顺手挡住。
@@ -1724,10 +1724,10 @@ exit 0
     #   与用户写下来的东西根本不是一回事，而且没有任何地方会报错。
     #   （变异验证里"名字里放行 `:` 与 `,`"一开始没红，红的原因就是这层缺了。）
     for _bad in ("a:b", "a,b", "gp u", "gpu;rm", "gpu\n"):
-        check("★★ clean_gres 自己挡住名字里的 %r（不靠目录）" % _bad,
+        check("clean_gres 自己挡住名字里的 %r（不靠目录）" % _bad,
               mod.clean_gres({"name": _bad, "count": 2})[1] is not None,
               str(mod.clean_gres({"name": _bad, "count": 2})))
-    check("★ type 那一格同理",
+    check("type 那一格同理",
           mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})[1] is not None
           and mod.clean_gres({"name": "gpu", "type": "a,b", "count": 2})[1] is not None,
           str(mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})))
@@ -1735,7 +1735,7 @@ exit 0
     mod.Slurm.gres_catalog = lambda self: None
     try:
         r, _s, _e = run_submit({"op": "submit", "gres": {"name": "a:b", "count": 1}})
-        check("★★ 目录查不到时，带 `:` 的名字仍然被拒（下游这时是放行的）",
+        check("目录查询不到时，带 `:` 的名字仍然被拒（下游这时是放行的）",
               not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
     finally:
         mod.Slurm.gres_catalog = _real_cat
@@ -1763,7 +1763,7 @@ exit 0
     try:
         r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                                 "gres": {"name": "gpu", "count": 8}})
-        check("★ 查不到集群的 GRES 时放行（权威在 Slurm，不在我们）",
+        check("查询不到集群的 GRES 时放行（权威在 Slurm，不在我们）",
               r.get("ok"), str(r))
     finally:
         mod.Slurm.gres_catalog = _real_cat
@@ -1797,7 +1797,7 @@ exit 0
         """响应里实际生效的那个 GRES（`data.resources.gres`）。
 
         键与值分开返回：`"gres" in …` 是"服务端说了这件事"，`…["gres"] is None`
-          是"它说不占"。两者都取不到时（响应整个失败）返回 `("缺", None)`，让上面
+          是"它说不占"。两者都获取失败时（响应整个失败）返回 `("缺", None)`，让上面
           那条断言红掉，而不是在 `check(...)` 的参数里抛 KeyError 把脚本带崩。
         """
         res = ((resp.get("data") or {}).get("resources") or {})
@@ -1809,17 +1809,17 @@ exit 0
     try:
         r, _sess, _env = run_submit({"op": "submit"})
         _has, _g = _gres_of(r)
-        check("★★ 提交时省略 gres ⇒ 用**这个插件那份配置里**的 default_gpus",
+        check("提交时省略 gres，用这个插件那份配置里的 default_gpus",
               _has and _g == {"name": "gpu", "type": None, "count": 1},
               str(r)[:200])
         r, _sess, _env = run_submit({"op": "submit", "gres": None})
         _has, _g = _gres_of(r)
-        check("★★ 但**显式 `null` ⇒ 不占**，盖过插件的默认 —— 用户拒绝得了它",
+        check("但显式 `null`，不占，盖过插件的默认 —— 用户拒绝得了它",
               _has and _g is None, str(r)[:200])
         r, _sess, _env = run_submit({"op": "submit",
                                      "gres": {"name": "gpu", "count": 2}})
         _has, _g = _gres_of(r)
-        check("★ 显式给了 ⇒ 就用它（默认只在**省略**时生效）",
+        check("显式给了，就用它（默认只在省略时生效）",
               _has and _g == {"name": "gpu", "type": None, "count": 2},
               str(r)[:200])
     finally:
@@ -1831,12 +1831,12 @@ exit 0
     #   这里没有任何安全损失：我们没有对权限做任何声明。别把它"修"成拒绝 ——
     #   那会让一次 sacctmgr 抖动变成所有用户都开不了会话。
     r, sess, env = run_submit({"op": "submit"}, allowed="dead")
-    check("权限查不到 + 没点名分区 → 仍然成功（退化）", r.get("ok"), str(r))
+    check("权限查询不到 + 没点名分区 → 仍然成功（退化）", r.get("ok"), str(r))
     check("退化时 partition 为空串", sess["partition"] == "", repr(sess["partition"]))
     check("退化会告知用户实际交给了 Slurm",
           "默认分区" in (r.get("data") or {}).get("warning", ""), str((r.get("data") or {}).get("warning")))
     # 包一层 try：这一条要断言的是"那份 argv 里没有 -p"，而上一句失败时
-    #   `sess` 是空的（变异验证里"提交根本没成功"正是被测的那件事）——
+    #   `sess` 是空的（变异验证里"提交根本未成功"正是被测的那件事）——
     #   让它抛出去会把整个脚本带崩，而崩了与"一条都不红"在输出上分不开。
     #   拿不到 argv 就当成一条红的，那才是它该有的结果。
     try:
@@ -1848,7 +1848,7 @@ exit 0
     check("退化时 sbatch 不带 -p", "-p" not in _argv_dead, str(_argv_dead))
 
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"}, allowed="dead")
-    check("权限查不到 + 点名了分区 → 拒绝（fail-closed）",
+    check("权限查询不到 + 点名了分区 → 拒绝（fail-closed）",
           not r.get("ok") and r["error"]["kind"] == "partitions_unknown", str(r))
 
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"})
@@ -1892,22 +1892,22 @@ exit 0
         return _restore
 
     print("\n  -- 19.0 扫出来的插件表 --")
-    check("★ 扫出了两个插件（表来自磁盘，不是代码常量）",
+    check("扫出了两个插件（表来自磁盘，不是代码常量）",
           sorted(cfg.plugins_by_name) == [CS, SSHD], str(sorted(cfg.plugins_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
     # 一个插件在站点上是一棵树 + 一份记录表：树按 id 命名，记录表就在它
     #   旁边。两条都要在 —— 只有树没有记录表 = 那次安装没提交。
-    check("每个 spec 都记得自己的**树**在哪，而它旁边有记录表（分发与报错都用它）",
+    check("每个 spec 都记得自己的树在哪，而它旁边有记录表（分发与报错都用它）",
           all(s.install_dir
               and os.path.isdir(s.install_dir)
               and os.path.basename(s.install_dir) == s.id
               and os.path.isfile(mod.plugin_record_path(cfg.plugins_dir, s.id))
               for s in cfg.plugin_specs),
           str([s.install_dir for s in cfg.plugin_specs]))
-    check("★ 而站点盘上**没有** `.splug`（容器只是运输形状，不是存储形状）",
+    check("而站点盘上没有 `.splug`（容器只是运输形状，不是存储形状）",
           not [n for n in os.listdir(cfg.plugins_dir) if n.endswith(".splug")],
           str(sorted(os.listdir(cfg.plugins_dir))))
-    check("★ job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
+    check("job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
           cfg.resolve_plugin(CS)[0].job_entry == "start_code_server"
           and cfg.resolve_plugin(SSHD)[0].job_entry == "start_sshd",
           "%s / %s" % (cfg.resolve_plugin(CS)[0].job_entry,
@@ -1915,14 +1915,14 @@ exit 0
     # 「有没有作业侧」现在是一个事实，不是一条合法性判据：两个真插件都有，
     #   而没有的那种是合法的（见 19.0e）。所以这里断言的是"这两个有"，
     #   不是"所有插件都必须有"。
-    check("★ 两个真插件都有作业侧实现，且守护进程认得这件事",
+    check("两个真插件都有作业侧实现，且守护进程认得这件事",
           all(s.needs_job for s in cfg.plugin_specs),
           str([(s.name, s.needs_job) for s in cfg.plugin_specs]))
-    check("★ 每个插件的作业脚本都在（<jobs_dir>/<ULID>.sbatch）",
+    check("每个插件的作业脚本都在（<jobs_dir>/<ULID>.sbatch）",
           cfg.plugin_job_missing == [],
           str([s.name for s in cfg.plugin_job_missing]))
     for _s in cfg.plugin_specs:
-        check("★ %s 的作业脚本文件确实存在，且里面只有它自己"
+        check("%s 的作业脚本文件确实存在，且里面只有它自己"
               % _s.name,
               os.path.isfile(os.path.join(cfg.jobs_dir, _s.id + ".sbatch")),
               os.path.join(cfg.jobs_dir, _s.id + ".sbatch"))
@@ -1981,38 +1981,38 @@ exit 0
     mod.write_plugin_record(_baddir, _BAD3, mod.plugin_record_of(
         mod.package_parse(build_package([("plugin.json", _cs_manifest)]))))
     _specs2, _probs2 = mod.scan_plugins(_baddir)
-    check("★ 坏掉的东西不会让守护进程起不来（跳过它们，其余照常）",
+    check("损坏的条目不会让守护进程无法启动（跳过它们，其余照常）",
           [s.name for s in _specs2] == [CS], str([s.name for s in _specs2]))
-    check("★ 但它们必须被**逐条报出来**，而且点名是哪一个",
+    check("但它们必须被逐条报出来，而且点名是哪一个",
           len(_probs2) == 5 and any("job/start.sh" in p for p in _probs2)
           and any(_BAD2 in p for p in _probs2)
           and any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p for p in _probs2)
           and any("old-layout" in p for p in _probs2)
           and any(_BAD3 in p for p in _probs2),
           str(_probs2)[:900])
-    check("★★ 孤儿记录表那条说的是「有记录表、没有那棵树」（不是一句笼统的「坏了」）",
+    check("孤儿记录表那条说的是「有记录表、没有该目录树」（不是一句笼统的「坏了」）",
           any(_BAD3 in p and "记录表" in p and "提交点" in p for p in _probs2),
           str([p for p in _probs2 if _BAD3 in p])[:400])
     # 这一条是本版的主题：逐份比对，不是"整棵树一个摘要"。只有前者说得
     #    出"是哪一份被动过"，而那一句话决定了运维是去查一个文件还是去查一整棵树。
-    check("★★ 被改过的那一棵树：报出来的话**点名是哪一份文件**",
+    check("被改过的那一棵树：若报出来点名是哪一份文件",
           any(_BAD1 in p and "job/start.sh" in p for p in _probs2),
           str([p for p in _probs2 if _BAD1 in p])[:400])
-    check("★★ 而那句话说的是「与记录表不符」，不是一句含糊的「坏了」",
+    check("而那句话说的是「与记录表不符」，不是一句含糊的「坏了」",
           any(_BAD1 in p and "记录表" in p and "sa256" not in p for p in _probs2),
           str([p for p in _probs2 if _BAD1 in p])[:400])
     # 报出来必须给出下一步 —— 只诊断不指出路，等于把"这怎么办"留给运维猜。
-    check("★★ 目录那条错误给出下一步（打包或删掉），不是只诊断",
+    check("目录那条错误给出下一步（打包或删掉），不是只诊断",
           any("old-layout" in p and "packer build" in p and "删掉" in p
               for p in _probs2),
           str([p[:80] for p in _probs2]))
-    check("★ 旧形状的 `.splug` 那条也给出下一步（用安装器装一次就变成新形状）",
+    check("旧形状的 `.splug` 那条也给出下一步（用安装器装一次就变成新形状）",
           any("01M2JKHTZGQ7X8V4T5R6N7B8C9" in p and "plugin install" in p
               for p in _probs2),
           str([p[:120] for p in _probs2 if "01M2JKHTZGQ7X8V4T5R6N7B8C9" in p]))
     # 一条都没被删。这是本文件里最要紧的一条纪律的两个方向之一（另一个
     #    在客户端池：那边"没记录表的目录"是要清掉的）。
-    check("★★ 那些坏东西**一个都没被删**（那一格可能有管理员手放的东西）",
+    check("那些损坏的条目一个都没被删（那一格可能有管理员手放的条目）",
           os.path.isdir(mod.plugin_tree_dir(_baddir, _BAD1))
           and os.path.isdir(_t2)
           and os.path.isfile(os.path.join(
@@ -2025,16 +2025,16 @@ exit 0
     _stray = os.path.join(tmpdir, "plugins-stray")
     os.makedirs(_stray, exist_ok=True)
     with open(os.path.join(_stray, "notes.txt"), "w", encoding="utf-8") as _f:
-        _f.write("随手放在这儿的东西\n")
+        _f.write("随手放在这儿的一个普通文件\n")
     _sx, _px = mod.scan_plugins(_stray)
-    check("★ 目录里一个普通的文件也被点名（不是悄悄忽略）",
+    check("目录里一个普通的文件也被点名（不是悄悄忽略）",
           _sx == () and len(_px) == 1 and "notes.txt" in _px[0], str(_px))
 
     # 零插件：合法状态，不是"安装包坏了"。
     _emptydir = os.path.join(tmpdir, "plugins-empty")
     os.makedirs(_emptydir, exist_ok=True)
     _specs3, _probs3 = mod.scan_plugins(_emptydir)
-    check("★ 一个插件都没装是合法状态（空表、且不是错误）",
+    check("一个插件都没装是合法状态（空表、且不是错误）",
           _specs3 == () and _probs3 == (), "%s / %s" % (_specs3, _probs3))
     check("目录根本不存在时同样返回空表、不报错（全新安装就是这个样子）",
           mod.scan_plugins(os.path.join(tmpdir, "no-such-dir")) == ((), ()))
@@ -2080,7 +2080,7 @@ exit 0
         #   有一个说不通的后果（"这个插件用几个核"没有安全的猜测），而时限缺了
         #   有一个明确的、今天就在用的答案。为一个"已经有答案"的键要求所有清单
         #   作者补一行，只会让新键变成一个升级障碍。
-        check("★ 清单没写 `site.defaultTime` ⇒ 取内建缺省（这一个键是可选的）",
+        check("清单没写 `site.defaultTime`，取内建缺省（这一个键是可选的）",
               _s[0].default_time == mod.DEFAULT_TIME, str(_s[0].default_time))
 
     for _txt, _why, _kw in (
@@ -2159,10 +2159,10 @@ exit 0
             {"id": _uid, "name": "jup", "version": _ver,
              "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
     _s3, _p3 = mod.scan_plugins(_nupdir)
-    check("★★ 两个包共用同一个**短名** → 两个都加载（短名不是身份，id 才是）",
+    check("两个包共用同一个短名 → 两个都加载（短名不是身份，id 才是）",
           len(_s3) == 2 and _p3 == () and [s.name for s in _s3] == ["jup", "jup"],
           "%s / %s" % ([(s.name, s.id) for s in _s3], _p3))
-    check("★ 而且次序是确定的（按 (短名, id) 排）—— 两次扫出来必须一模一样",
+    check("而且次序是确定的（按 (短名, id) 排）—— 两次扫出来必须完全相同",
           [s.id for s in _s3] == sorted(s.id for s in _s3),
           str([s.id for s in _s3]))
 
@@ -2194,10 +2194,10 @@ exit 0
          "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))],
         plugin_id=_ID_D)
     _s4, _p4 = mod.scan_plugins(_iddir)
-    check("★★ 一棵树顶着**别人的 id** → 它不加载（否则同一个 id 会有两份作业侧代码）",
+    check("一棵树顶着别人的 id → 它不加载（否则同一个 id 会有两份作业侧代码）",
           [x.id for x in _s4] == [_ID_C] and len(_p4) == 1,
           "%s / %s" % ([(x.name, x.id) for x in _s4], _p4))
-    check("★ 而且点名是哪个目录、清单里写的是哪个 id、以及为什么这会是问题",
+    check("而且点名是哪个目录、清单里写的是哪个 id、以及为什么这会是问题",
           _ID_D in " ".join(_p4) and _ID_C in " ".join(_p4)
           and "id" in " ".join(_p4), " ".join(_p4)[:300])
 
@@ -2219,13 +2219,13 @@ exit 0
                                       "iddup.conf"))
         _pm = d.dispatch(UID, os.getgid(), {"op": "plugins"})
         _pmd = _pm.get("data") or {}
-        check("★★ 站点级的问题**进了 op_plugins 的回包**（顶层 problems，F22）",
+        check("站点级的问题进了 op_plugins 的回包（顶层 problems，F22）",
               isinstance(_pmd.get("problems"), list) and len(_pmd["problems"]) == 1,
               str(_pmd.get("problems"))[:240])
-        check("★ 而且客户端看得到是哪个目录 —— 不再是「本站没有这个插件」",
+        check("而且客户端看得到是哪个目录 —— 不再是「本站没有这个插件」",
               _ID_D in " ".join(_pmd.get("problems") or []),
               str(_pmd.get("problems"))[:240])
-        check("★ 它**不影响能用的那些**：能用的那一个照样报出来（一个坏的不带走另一个）",
+        check("它不影响能用的那些：能用的那一个照样报出来（一个坏的不带走另一个）",
               [x["id"] for x in _pmd.get("plugins") or []] == [_ID_C],
               str(_pmd.get("plugins"))[:200])
     finally:
@@ -2268,20 +2268,20 @@ exit 0
                    "package_bytes": 4000},
     }
     _rc19, _out19 = _cli_plugins_screen(_good_data)
-    check("★★ 一个支持分发的站点 ⇒ 「分发」那一列**说得出话**（不是永远 `—`）",
+    check("一个支持分发的站点，「分发」那一列说得出话（不是永远 `—`）",
           _rc19 == 0 and "1 个包" in _out19, _out19[:260])
-    check("★ 而且印的是**今天**那条路（整包一次取走），不是 v0.6 那两条",
+    check("而且印的是今天那条路（整包一次取走），不是 v0.6 那两条",
           "整包上限" in _out19 and "份数" in _out19, _out19[:260])
 
     _old_daemon_data = {"plugins": _good_data["plugins"], "enabled": ["jup"]}
     _rc19, _out19 = _cli_plugins_screen(_old_daemon_data)
-    check("★ 老守护进程（响应里**没有 `limits`**）⇒ `—`，并说清是它不支持分发",
+    check("老守护进程（响应里没有 `limits`）， `—`，并说清是它不支持分发",
           _rc19 == 0 and "—" in _out19 and "不支持插件分发" in _out19, _out19[:260])
 
     _prob_data = dict(_good_data)
     _prob_data["problems"] = ["/x/one.splug：id 01M2… 与 /x/two.splug 是同一个插件"]
     _rc19, _out19 = _cli_plugins_screen(_prob_data)
-    check("★★ 站点报的那些问题**出现在这一屏上**（F22 的另一半：到得了用户眼前）",
+    check("站点报的那些问题出现在这一屏上（F22 的另一半：到得了用户眼前）",
           _rc19 == 0 and "one.splug" in _out19 and "未能加载" in _out19,
           _out19[:260])
 
@@ -2304,7 +2304,7 @@ exit 0
                            "version-fixtures.json"), encoding="utf-8") as _fv:
         _fx = json.load(_fv)
 
-    check("★ 守护进程自己的 VERSION 合框架版本的形状（忘改成 x.y 时红在本地）",
+    check("守护进程自己的 VERSION 合框架版本的形状（忘改成 x.y 时红在本地）",
           mod.FRAMEWORK_VERSION_RE.match(mod.VERSION) is not None, repr(mod.VERSION))
 
     for _scheme, _re_ in (("framework", mod.FRAMEWORK_VERSION_RE),
@@ -2312,7 +2312,7 @@ exit 0
         _good, _bad = _fx[_scheme]["valid"], _fx[_scheme]["invalid"]
         _wrong = [repr(x) for x in _good if not _re_.match(x)]
         _wrong += [repr(x) for x in _bad if _re_.match(x)]
-        check("★ %s 版本：%d 条合法 + %d 条不合法，逐条对上夹具"
+        check("%s 版本：%d 条合法 + %d 条不合法，逐条对上夹具"
               % (_scheme, len(_good), len(_bad)), not _wrong, ", ".join(_wrong[:6]))
 
     # 大小。走真的比较器，不是拿 `_cmp_ver` 现拼一个：用 `version_satisfies`
@@ -2327,7 +2327,7 @@ exit 0
             _got = _cmp(_a, _b)
             if _got != {"lt": -1, "eq": 0, "gt": 1}[_want]:
                 _wrong.append("%s ? %s = %s（夹具说 %s）" % (_a, _b, _got, _want))
-        check("★ %s 版本的大小：%d 组逐组对上（含 1.9<1.10 与 2^53 那两组）"
+        check("%s 版本的大小：%d 组逐组对上（含 1.9<1.10 与 2^53 那两组）"
               % (_scheme, len(_cases)), not _wrong, "; ".join(_wrong[:4]))
 
     _wrong = []
@@ -2336,7 +2336,7 @@ exit 0
         if _ok != _c["ok"]:
             _wrong.append("host=%r range=%r → %s（夹具说 %s：%s）"
                           % (_c["host"], _c["range"], _ok, _c["ok"], _why))
-    check("★ engines.slurmate 的范围：%d 条逐条对上夹具（含 `>=0.5.0` 这类被拒的形状）"
+    check("engines.slurmate 的范围：%d 条逐条对上夹具（含 `>=0.5.0` 这类被拒的形状）"
           % len(_fx["ranges"]["cases"]), not _wrong, "; ".join(_wrong[:3]))
 
     # engines 这个键的字段级规则 —— 与客户端 `enginesProblem` 逐条一致。
@@ -2358,8 +2358,8 @@ exit 0
         elif not _c["ok"] and _ret[0] != _c["kind"]:
             _wrong.append("#%d %s → kind=%s（夹具说 %s）"
                           % (_i, json.dumps(_c, ensure_ascii=False), _ret[0], _c["kind"]))
-    check("★★ engines 的字段级规则：%d 条逐条对上夹具（含 kind —— 读不懂的范围串"
-          "是**形状**问题，不是「本站版本低」）" % len(_fx["engines"]["cases"]),
+    check("engines 的字段级规则：%d 条逐条对上夹具（含 kind —— 读不懂的范围串"
+          "是形状问题，不是「本站版本低」）" % len(_fx["engines"]["cases"]),
           not _wrong, "; ".join(_wrong[:3]))
 
     # 上面那条钉的是纯函数。这一条钉它真的接在清单那条路上 —— 函数写了
@@ -2376,9 +2376,9 @@ exit 0
                       "bin": {"env": "SLURMATE_X_BIN", "discovery": "which",
                               "name": "x", "fallback": "/usr/bin/x"}}}))
         _got_ok = _s5 != ()
-        check("★ 走清单那一路：engines=%s ⇒ %s"
+        check("走清单那一路：engines=%s，%s"
               % (json.dumps(_mf_eng, ensure_ascii=False),
-                 "收下" if _want_ok else "**拒**"),
+                 "收下" if _want_ok else "拒"),
               _got_ok == _want_ok, str(_p5)[:160])
 
     # 一个 engines 不满足的包装不上（不是"装上了、只是不出现"）。
@@ -2408,10 +2408,10 @@ exit 0
     # 两条断言合成一条，是故意的：`rc != 0` 单独看会被"输入那一关"假绿
     #   （不是 root、组可写……任何一条都会让它非零），而"理由里有 >=99.0"只有在
     #   真的走到 engines 那条判据时才成立。分开写，前一条就是一句空话。
-    check("★★ engines 不满足 ⇒ 安装器**拒绝**，且理由是 engines（不是输入那一关）",
+    check("engines 不满足，安装器拒绝，且理由是 engines（不是输入那一关）",
           _rc != 0 and not os.path.exists(_dest) and ">=99.0" in _out,
           "rc=%s dest存在=%s\n%s" % (_rc, os.path.exists(_dest), _out[:400]))
-    check("★ 拒绝时**两个版本号都说了出来**（管理员据此做决定：升本站，还是让作者放宽）",
+    check("拒绝时两个版本号都说了出来（管理员据此做决定：升本站，还是让作者放宽）",
           ">=99.0" in _out and mod.VERSION in _out, _out[:400])
 
     # 手放进目录（绕过安装器）的那一份：`scan_plugins` 跳过并报一条，
@@ -2421,7 +2421,7 @@ exit 0
     #   正是这里要验的那一步。
     install_package(_engdir, _eng_files, plugin_id=_dest_id)
     _specs6, _probs6 = mod.scan_plugins(_engdir)
-    check("★ 手放进目录的同一个包：扫的时候**跳过并报一条 problem**（不带走整个站点）",
+    check("手放进目录的同一个包：扫的时候跳过并报一条 problem（不带走整个站点）",
           _specs6 == () and any(">=99.0" in p for p in _probs6), str(_probs6)[:300])
 
     # 清单里的版本号用原串匹配：`" 1.0.0 "` 不是合法版本号。若先 strip 再
@@ -2460,7 +2460,7 @@ exit 0
         }).encode("utf-8")),
     ])
     _specs4, _probs4 = mod.scan_plugins(_thirddir)
-    check("★ 一个守护进程从没听说过的插件被扫进来，一行代码都没改",
+    check("一个守护进程从没听说过的插件被扫进来，一行代码都没改",
           _probs4 == () and [x.name for x in _specs4] == ["jup"], str(_probs4))
     _jup = _specs4[0]
     check("它的元数据全部来自清单（默认资源 / bin / 取值受限的键）",
@@ -2468,7 +2468,7 @@ exit 0
           and _jup.bin_env == "SLURMATE_JUP_BIN"
           and _jup.enum_default("token_mode") == "auto",
           "%s/%s/%s" % (_jup.default_cpus, _jup.default_mem, _jup.bin_env))
-    check("★ 它那份配置允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
+    check("它那份配置允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
           _jup.conf_keys() == ("enabled", "default_cpus", "default_mem",
                                 "default_time", "default_gpus",
@@ -2477,7 +2477,7 @@ exit 0
     # 清单声明的时限是规范化之后存下来的（`3:30:00` → `03:30:00`）。
     #   规范化只在解析这一处做，下游（协议、界面、自检）就不必各自处理"同一段
     #   时间的两种写法" —— 而那种"两处各写各的"正是这个项目一路在清的东西。
-    check("★ 清单声明 `site.defaultTime` ⇒ 规范化后存下来（3:30:00 → 03:30:00）",
+    check("清单声明 `site.defaultTime`，规范化后存下来（3:30:00 → 03:30:00）",
           _jup.default_time == "03:30:00", str(_jup.default_time))
     check("它的作业侧入口是按短名推出来的（与 run.sbatch 的 plugin_call 同一条规则）",
           _jup.job_entry == "start_jup", _jup.job_entry)
@@ -2485,21 +2485,21 @@ exit 0
     _restore_jup = add_plugin_to_cfg(cfg, _jup, {"enabled": "yes"})
     try:
         _r5, _sess5, _env5 = run_submit({"op": "submit", "service_kind": "jup"})
-        check("★ 新插件能被提交，资源缺省来自**它自己的清单**（不是全局常量）",
+        check("新插件能被提交，资源缺省来自它自己的清单（不是全局常量）",
               _r5.get("ok") and _sess5["cpus"] == 3 and _sess5["mem"] == "6G",
               str(_r5)[:160])
         # 时限那一格走的是同一条：清单 → spec → 提交。这一句不是在重复
         #   上面那句 —— 时限若仍读一个全局常量（`Config.default_time`），提交期
         #   读的就是它，于是"算出来了"与"送出去了"是两件事，所以这一句要打在
         #   提交那一步上（F35 的教训：算出来了没送出去，任何变异都打不红）。
-        check("★★ 提交时省略 time ⇒ 用**这个插件声明的**时限（清单 → spec → 提交）",
+        check("提交时省略 time，用这个插件声明的时限（清单 → spec → 提交）",
               _sess5["requested_time"] == "03:30:00",
               repr(_sess5.get("requested_time")))
         # 三层里的首层（那份配置 ＞ 清单）：纯解析那条路各占一条，与上面那条
         #   "清单走到了提交"合起来才是完整的三层。少了它，把 `PluginConfig` 里
         #   "那份配置没写才回落到 spec" 写成"永远用 spec"不会被任何一条打红 ——
         #   而症状是管理员在那份配置里改时限完全不生效，配置文件里却看不出问题。
-        check("★ 那份配置里写了 default_time ⇒ **盖过**清单声明的那个（配置 ＞ 清单）",
+        check("那份配置里写了 default_time，盖过清单声明的那个（配置 ＞ 清单）",
               mod.PluginConfig(_jup, {"enabled": "yes",
                                       "default_time": "1:00:00"}, True)
               .default_time == "01:00:00")
@@ -2521,7 +2521,7 @@ exit 0
         #   客户端据此画灰按钮。两个事实客户端只看得到前一个。
         _jup_row = next((x for x in (_pj.get("data") or {}).get("plugins", [])
                          if x["name"] == "jup"), {})
-        check("★ op_plugins 报出 can_submit=true（开了 + 有作业侧）",
+        check("op_plugins 报出 can_submit=true（开了 + 有作业侧）",
               _jup_row.get("can_submit") is True, str(_jup_row))
     finally:
         _restore_jup()
@@ -2541,12 +2541,12 @@ exit 0
         "engines": {"slurmate": ">=0.5"},
         "site": {"defaultCpus": 1, "defaultMem": "2G"}}).encode("utf-8"))])
     _specs5, _probs5 = mod.scan_plugins(_nojdir)
-    check("★ 包里没有 job/start.sh 的插件能被扫进来（合法，不是坏包）",
+    check("包里没有 job/start.sh 的插件能被扫进来（合法，不是坏包）",
           _probs5 == () and [x.name for x in _specs5] == ["decl"], str(_probs5))
     _decl = _specs5[0]
-    check("★ 它被记为「没有作业侧」，而不是「坏掉的插件」",
+    check("它被记为「没有作业侧」，而不是「坏掉的插件」",
           _decl.needs_job is False, str(_decl.needs_job))
-    check("★ 判据来自**记录表**（服务器上没有源码树可以查，树就是真相）",
+    check("判据来自记录表（服务器上没有源码树可以查，树就是真相）",
           "job/start.sh" not in [f["path"] for f in
                                  mod.read_plugin_record(_nojdir, _decl.id)["record"]["files"]],
           _decl.install_dir)
@@ -2556,30 +2556,30 @@ exit 0
     _restore_decl = add_plugin_to_cfg(cfg, _decl, {"enabled": "yes"})
     try:
         # 它没有作业脚本，所以不该出现在 plugin_job_missing 里 —— 那个列表
-        # 说的是"有作业侧却找不到脚本"（部署不完整），与"本来就没有作业侧"是
+        # 说的是"有作业侧却未找到脚本"（部署不完整），与"本来就没有作业侧"是
         # 两件完全不同的事。合并它们会让这条合法的状态被报成故障。
         cfg.plugin_job_missing = [s for s in cfg.plugin_specs
                                   if s.needs_job and not os.path.isfile(
                                       os.path.join(cfg.jobs_dir, s.id + ".sbatch"))]
-        check("★ 没有作业侧的插件不进 plugin_job_missing（那是「部署不完整」，"
+        check("没有作业侧的插件不进 plugin_job_missing（那是「部署不完整」，"
               "与它无关）",
               [s.name for s in cfg.plugin_job_missing] == [],
               str([s.name for s in cfg.plugin_job_missing]))
-        check("★ 而且它不让配置自检失败（一个插件不该带走整个站点）",
+        check("而且它不让配置自检失败（一个插件不该带走整个站点）",
               cfg.validate() == [], str(cfg.validate())[:160])
 
         d.store = mod.Store(os.path.join(tmpdir, "nojob.db"))
         _r8 = d.dispatch(UID, os.getgid(), {"op": "submit", "service_kind": "decl"})
-        check("★ 提交它被明确拒绝：code 4 / service_kind_no_job",
+        check("提交它被明确拒绝：code 4 / service_kind_no_job",
               not _r8.get("ok") and _r8["code"] == 4
               and _r8["error"]["kind"] == "service_kind_no_job",
               str(_r8.get("error"))[:200])
-        check("★ 而且错误信息说清是「没有作业侧」，不是「没开」"
+        check("而且错误信息说清是「没有作业侧」，不是「没开」"
               "（两句话对应两个完全不同的行动）",
               "没有作业侧实现" in (_r8["error"].get("detail") or "")
               and "没有开启" not in (_r8["error"].get("detail") or ""),
               str(_r8["error"].get("detail"))[:200])
-        check("★ 错误信息里给出了出路：装了作业侧实现的插件是哪些",
+        check("错误信息里给出了出路：装了作业侧实现的插件是哪些",
               CS in (_r8["error"].get("detail") or ""),
               str(_r8["error"].get("detail"))[:200])
         # 而它必须说包，不能说"插件目录里没有 job/start.sh"。
@@ -2588,17 +2588,17 @@ exit 0
         #   去找的人会在插件安装目录里翻一个根本不存在的文件，而正确的动作是回去
         #   让作者补一份、重新打包。
         _d8 = _r8["error"].get("detail") or ""
-        check("★★ 而且它说的对象是**包**，不是插件安装目录里的一个文件"
+        check("而且它说的对象是包，不是插件安装目录里的一个文件"
               "（服务器上没有源码树）",
               "包" in _d8 and "插件目录" not in _d8, _d8[:200])
 
         _pj3 = d.dispatch(UID, os.getgid(), {"op": "plugins"})
         _decl_row = next((x for x in (_pj3.get("data") or {}).get("plugins", [])
                           if x["name"] == "decl"), {})
-        check("★ op_plugins 报出 can_submit=false —— 界面据此画灰按钮，"
+        check("op_plugins 报出 can_submit=false —— 界面据此画灰按钮，"
               "用户不必点下去才知道",
               _decl_row.get("can_submit") is False, str(_decl_row))
-        check("★ 但它同时 enabled=true（「本站关了它」与「它没有作业侧」"
+        check("但它同时 enabled=true（「本站关了它」与「它没有作业侧」"
               "是两句话，客户端要能分辨）",
               _decl_row.get("enabled") is True, str(_decl_row))
     finally:
@@ -2621,16 +2621,16 @@ exit 0
         cfg.enabled_kinds, cfg.default_plugin = (), ""
         # 上面的 run_submit 用完就把库关掉了（每个用例一个临时库），重开一个。
         d.store = mod.Store(os.path.join(tmpdir, "zero-plugin.db"))
-        check("★ 零插件时配置自检**通过**（以前这里是一条让守护进程 100% 起不来的错误）",
+        check("零插件时配置自检通过（以前这里是一条让守护进程 100% 无法启动的错误）",
               cfg.validate() == [], str(cfg.validate())[:160])
         _r6 = d.dispatch(UID, os.getgid(), {"op": "submit"})
-        check("★ 不带 service_kind 的提交被明确拦住，并说清本站没配 default_plugin",
+        check("不带 service_kind 的提交被明确拦住，并说清本站没配 default_plugin",
               not _r6.get("ok") and _r6["code"] == 2
               and _r6["error"]["kind"] == "missing_service_kind",
               str(_r6.get("error"))[:160])
         _r7 = d.dispatch(UID, os.getgid(), {"op": "submit",
                                             "service_kind": CS})
-        check("★ 点了名的也被拦住（bad_service_kind，不是静默失败）",
+        check("点了名的也被拦住（bad_service_kind，不是静默失败）",
               not _r7.get("ok") and _r7["code"] == 2
               and _r7["error"]["kind"] == "bad_service_kind",
               str(_r7.get("error"))[:160])
@@ -2694,7 +2694,7 @@ exit 0
                                           name))
 
     _c = pcfg("")
-    check("★ 一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
+    check("一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
           _c.plugin_config(SSHD).present is False
@@ -2712,13 +2712,13 @@ exit 0
         pcfg("[plugin:sshd]\ndefault_cpus = 很多\n")
     except ValueError as _e:
         _bad_where = str(_e)
-    check("★★ 配置项写错时的报错点名那一份配置的**文件**，不再写 `[plugin:…]`",
+    check("配置项写错时的报错点名那一份配置的文件，不再写 `[plugin:…]`",
           _bad_where is not None and "sshd.conf" in _bad_where
           and "[plugin:" not in _bad_where,
           repr(_bad_where))
 
     _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
-    check("★ 写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
+    check("写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("那份配置里写的默认资源生效；没写的用插件自己的内建值",
           _c.plugin_config(SSHD).default_cpus == 4
@@ -2729,7 +2729,7 @@ exit 0
     #   各自有它自己的那一条（`_jup` 那一节：清单声明的 3:30:00 走到了提交，
     #   并有一条纯解析的断言验它盖过清单）。
     _c = pcfg("[plugin:sshd]\ndefault_time = 2:00:00\n")
-    check("★ 那份配置里写的 default_time 生效，且与清单那条一样规范化",
+    check("那份配置里写的 default_time 生效，且与清单那条相同规范化",
           _c.plugin_config(SSHD).default_time == "02:00:00",
           str(_c.plugin_config(SSHD).default_time))
 
@@ -2740,21 +2740,21 @@ exit 0
     #   那是本站在 `gres.conf` 里定的事实。所以"作者声明缺省卡数"这一格不该有，
     #   不是"还没做"（见账本 F15 的去向）。
     _c = pcfg("[plugin:sshd]\ndefault_gpus = gpu:a100:2\n")
-    check("★ 那份配置里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
+    check("那份配置里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
           _c.plugin_config(SSHD).default_gpus == {"name": "gpu", "type": "a100",
                                                   "count": 2},
           repr(_c.plugin_config(SSHD).default_gpus))
-    check("★ 不带型号的那一段形状也认（与 sbatch 同一条语法）",
+    check("不带型号的那一段形状也认（与 sbatch 同一条语法）",
           pcfg("[plugin:sshd]\ndefault_gpus = gpu:4\n")
           .plugin_config(SSHD).default_gpus == {"name": "gpu", "type": None,
                                                 "count": 4})
-    check("★★ 没写 ⇒ **不占**（None，而不是一个「安全的数量」）—— 默认占住稀缺"
-          "算力是**站点政策**，框架不替所有站点挑一个数",
+    check("没写，不占（None，而不是一个「安全的数量」）—— 默认占住稀缺"
+          "算力是站点政策，框架不替所有站点选择一个数",
           _c.plugin_config(CS).default_gpus is None,
           repr(_c.plugin_config(CS).default_gpus))
 
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
-    check("★ 开 sshd 不会顺手关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
+    check("开 sshd 不会一并关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
           _c.enabled_kinds == (CS, SSHD),
           str(_c.enabled_kinds))
 
@@ -2763,12 +2763,12 @@ exit 0
           _c.enabled_kinds == (SSHD,), str(_c.enabled_kinds))
 
     _c = pcfg("[plugin:code-server]\nenabled = no\n")
-    check("★ 一个插件都不开是**合法**的（「外壳」的定义：基座不因插件的有无而缺一块）",
+    check("一个插件都不开是合法的（「外壳」的定义：基座不因插件的有无而缺一块）",
           _c.enabled_kinds == () and _c.validate() == [], str(_c.validate())[:140])
     # 但 default_plugin 指向一个没装的插件仍然是硬错误：那不是"本站没开
     #   某个服务"，而是"配置指向一个不存在的东西"—— 两者该做什么完全不同。
     _c = pcfg("default_plugin = nosuchplugin\n")
-    check("★ default_plugin 指向没装的插件 → 启动就拒绝（不是等到用户提交才报错）",
+    check("default_plugin 指向没装的插件 → 启动就拒绝（不是等到用户提交才报错）",
           any("nosuchplugin" in e for e in _c.validate()),
           str(_c.validate())[:160])
 
@@ -2780,17 +2780,17 @@ exit 0
     #    接下来的排查方向从第一步就是错的。
     _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = no\n")
     _errs = " ".join(_c.validate())
-    check("★★ default_plugin 指向**装了、但关着**的插件 → 启动就拒绝",
+    check("default_plugin 指向装了、但关着的插件 → 启动就拒绝",
           _errs != "", str(_c.validate())[:160])
     # "被拒了"不够：那句话必须点名 default_plugin。不点名的话，管理员唯一
     #   能想到的方向是"查这个插件"，而根因在配置的另一处。
-    check("★ 而且要点名 default_plugin（排查方向不能被指到插件本身上）",
+    check("而且要点名 default_plugin（排查方向不能被指到插件本身上）",
           "default_plugin" in _errs and "enabled = no" in _errs, _errs[:220])
     # 对照组：同一个 default_plugin，把它打开就一切正常。少了这一条，一个
     #    "default_plugin 非空就报错"的实现也能让上面两条绿 —— 而它会拒绝一份
     #    完全合法的配置。
     _ok = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
-    check("★ 对照：同一个 default_plugin，插件开着 ⇒ 一个错误都没有",
+    check("对照：同一个 default_plugin，插件开着，一个错误都没有",
           _ok.validate() == [], str(_ok.validate())[:160])
 
     # ── 19.1b 短名不再唯一：块按 id 寻址（v0.11 阶段 2+3）─────
@@ -2800,7 +2800,7 @@ exit 0
     # 用，id 才是身份。
     #
     # 判据是用户 2026-10-06 拍的那条：短名为主，撞名时必须带 id。
-    #   它不是建议，是校验 —— 歧义时"挑一个"的后果取决于遍历次序。
+    #   它不是建议，是校验 —— 歧义时"选择一个"的后果取决于遍历次序。
     def pcfg_namedup(text, name):
         _saved = mod.default_plugins_dir
         try:
@@ -2813,8 +2813,8 @@ exit 0
 
     _c = pcfg_namedup("[plugin:jup]\nenabled = yes\n", "namedup1.conf")
     _errs = " ".join(_c.stale_conf_problems)
-    check("★★ 短名有歧义、而文件名写的是短名 ⇒ **一条 ⚠**，而且**一个都不挑**"
-          "（挑一个的后果取决于遍历次序）",
+    check("短名有歧义、而文件名写的是短名，一条警告，而且一个都不选择"
+          "（选择一个的后果取决于遍历次序）",
           _errs != "" and not any(q.enabled for q in _c.plugins.values()),
           "%s / %s" % (_errs[:200],
                        sorted((q.name, q.enabled) for q in _c.plugins.values())))
@@ -2822,26 +2822,26 @@ exit 0
     #   是同一句：后果只是这一份不生效（那两个插件按清单缺省跑），而一个站点
     #   不该因此拒绝为所有人服务（那样连"停掉正在跑的会话"都做不到）。
     #   这两条合起来才是那条例律：说了、且不拦启动、且没挑一个。
-    check("★★ 而它**不拦启动**（降成 ⚠ 是 v0.12 阶段 2 做的）",
+    check("而它不拦启动（降成警告是 v0.12 阶段 2 做的）",
           _c.validate() == [], str(_c.validate())[:200])
-    check("★★ 而且报错**列出那几个 id** —— 那是唯一指得清的写法",
+    check("而且报错列出那几个 id —— 那是唯一指得清的写法",
           _IDS[0] in _errs and _IDS[1] in _errs, _errs[:260])
-    check("★ 那句话要说清「改用插件的 id」，不是一句泛泛的「认不出」",
+    check("那句话要说清「改用插件的 id」，不是一句泛泛的「认不出」",
           "id" in _errs and "短名" in _errs, _errs[:260])
 
     _c = pcfg_namedup("[plugin:%s]\nenabled = yes\n[plugin:%s]\nenabled = yes\n"
                       % (_IDS[0], _IDS[1]), "namedup2.conf")
-    check("★★ 两个块都用 **id** 写 ⇒ 两个都配上了（同名不构成障碍）",
+    check("两个块都用 id 写，两个都配上了（同名不构成障碍）",
           _c.validate() == [] and len(_c.plugins) == 2
           and all(q.enabled for q in _c.plugins.values()),
           "%s / %s" % (str(_c.validate())[:160], sorted(_c.plugins)))
-    check("★ 而且是**各自那一份**（不是同一份配置被读了两遍）",
+    check("而且是各自那一份（不是同一份配置被读了两遍）",
           {q.spec.id for q in _c.plugins.values()} == set(_IDS),
           str(sorted(_c.plugins)))
 
     _c = pcfg_namedup("default_plugin = %s\n[plugin:%s]\nenabled = yes\n"
                       % (_IDS[0], _IDS[0]), "namedup3.conf")
-    check("★ default_plugin 也能写 id（短名有歧义时那是唯一的写法）",
+    check("default_plugin 也能写 id（短名有歧义时那是唯一的写法）",
           _c.validate() == [], str(_c.validate())[:200])
 
     # 提交那一侧同一条规则：`service_kind` 也是短名，所以歧义在那里也一样
@@ -2854,10 +2854,10 @@ exit 0
                                       "namedup-kind.conf"))
         _r9 = d.dispatch(UID, os.getgid(), {"op": "submit", "service_kind": "jup"})
         _d9 = (_r9.get("error") or {}).get("detail") or ""
-        check("★★ 提交时短名有歧义 ⇒ 明确拒绝（不是静默失败，也不是挑一个）",
+        check("提交时短名有歧义，明确拒绝（不是静默失败，也不是选择一个）",
               not _r9.get("ok") and _r9["error"]["kind"] == "bad_service_kind",
               str(_r9.get("error"))[:200])
-        check("★★ 而且把那几个 id 给出来 —— 用户照它改就能提交",
+        check("而且把那几个 id 给出来 —— 用户照它改就能提交",
               _IDS[0] in _d9 and _IDS[1] in _d9, _d9[:260])
     finally:
         mod.default_plugins_dir = _saved_dir_for_kind
@@ -2905,14 +2905,14 @@ exit 0
             _errs = " ".join(_c.validate() + _c.stale_conf_problems)
         except ValueError as _ex:
             _errs, _in_err = str(_ex), True
-        check("%s → 被说出来（%s）" % (_why, "硬错误" if _where == "err" else "⚠"),
+        check("%s → 被说出来（%s）" % (_why, "硬错误" if _where == "err" else "警告"),
               _kw in _errs and _in_err == (_where == "err"),
               "%s / 在 validate() 里=%s" % (_errs[:110], _in_err))
 
     # 上面三条都会被"提到了 default_time"满足 —— 而把粒度那条校验整个删掉，
     #   它们照样绿（另外两条还在以同一个键名报错）。所以粒度这一条必须自己
     #   红一次：报错里要有「1 分钟」，而且那三个不同的错法要说三句不同的话。
-    #   这是"三条反例共用一个关键词"时唯一能分清"守住了"与"没生效"的办法。
+    #   这是"三条反例共用一个关键词"时唯一能分清"守住了"与"未生效"的办法。
     _dt_msgs = {}
     for _v in ("0:30", "unlimited", "两小时"):
         try:
@@ -2920,10 +2920,10 @@ exit 0
                                     .validate())
         except ValueError as _ex:
             _dt_msgs[_v] = str(_ex)
-    check("★★ 「比 1 分钟还短」与「认不出」是**两句不同的话**（删掉粒度校验，这一条会红）",
+    check("「比 1 分钟还短」与「认不出」说法不同（删掉粒度校验，这一条会红）",
           "1 分钟" in _dt_msgs["0:30"] and "无法识别" in _dt_msgs["两小时"],
           str(_dt_msgs)[:220])
-    check("★ 三种错法各有各的说法（同一个键名不是同一个理由）",
+    check("三种错法各有各的说法（同一个键名不是同一个理由）",
           len({_dt_msgs[_v] for _v in _dt_msgs}) == 3,
           str(_dt_msgs)[:260])
 
@@ -2936,7 +2936,7 @@ exit 0
     #     （`slurmate.conf`），插件那一份里写不下它。
     _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n")
                     .validate())
-    check("★ 而且要说清是「它住在主配置里」，不是一句泛泛的「认不出这个键」",
+    check("而且要说清是「它住在主配置里」，不是一句泛泛的「认不出这个键」",
           "通用键" in _msg and "主配置" in _msg, _msg[:160])
 
     # 同一个形状再来一条：未知文件名那句话必须说清"装插件"是放一个包，
@@ -2946,7 +2946,7 @@ exit 0
     #   这句话住在那一档里（悬空不拦启动），所以要从
     #     `stale_conf_problems` 取，不是 `validate()`。
     _um = " ".join(pcfg("[plugin:ssh]\nenabled = yes\n").stale_conf_problems)
-    check("★★ 未知文件名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
+    check("未知文件名那句说清是「放一个 .splug 包」进安装目录，不是「放一个目录」",
           ".splug" in _um and "目录放" not in _um and "放一个目录" not in _um,
           _um[:220])
 
@@ -2971,7 +2971,7 @@ exit 0
         cfg.plugin_config(SSHD).enabled = True
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
         _r8, _s8, _ = run_submit({"op": "submit", "ssh_pubkey": _pub8})
-        check("★ 不带 service_kind 时**真的**落到配置里那个插件上（不是写死的名字）",
+        check("不带 service_kind 时真的落到配置里那个插件上（不是写死的名字）",
               _r8.get("ok") and _s8.get("service_kind") == SSHD,
               "%s / %s" % (str(_r8.get("error"))[:90], _s8.get("service_kind")))
     finally:
@@ -2982,10 +2982,10 @@ exit 0
     _pub = ("ssh-ed25519 "
             "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
     check("裸公钥通过", mod.parse_ssh_pubkey(_pub) == _pub)
-    check("★ 客户端实际发的形态（带注释）通过，且注释被丢掉",
+    check("客户端实际发的形态（带注释）通过，且注释被丢掉",
           mod.parse_ssh_pubkey(_pub + " slurmate-20260915-1145") == _pub,
           repr(mod.parse_ssh_pubkey(_pub + " slurmate-20260915-1145")))
-    check("★ 注释里的逗号被丢掉 —— 它会把 --export 的一个变量劈成两个",
+    check("注释里的逗号被丢掉 —— 它会把 --export 的一个变量劈成两个",
           mod.parse_ssh_pubkey(_pub + " a,b@example.com") == _pub,
           repr(mod.parse_ssh_pubkey(_pub + " a,b@example.com")))
     check("追加第二条公钥（多行）被拒",
@@ -2995,7 +2995,7 @@ exit 0
     check("选项前缀 cert-authority 被拒",
           mod.parse_ssh_pubkey("cert-authority " + _pub) is None)
     check("非 ed25519 被拒", mod.parse_ssh_pubkey("ssh-rsa AAAAB3NzaC1yc2E") is None)
-    check("★ 68 个合法 base64 字符但不是密钥 → 被拒（形状对、内容不对）",
+    check("68 个合法 base64 字符但不是密钥 → 被拒（形状对、内容不对）",
           mod.parse_ssh_pubkey(
               "ssh-ed25519 " + base64.b64encode(b"\x00" * 51).decode()) is None)
     check("空串被拒", mod.parse_ssh_pubkey("") is None)
@@ -3010,7 +3010,7 @@ exit 0
     # 19.4 站点没开 sshd 时必须明确拒绝 —— 而不是起一个"看起来起来了但连不上"的作业
     r, _s, _e = run_submit({"op": "submit", "service_kind": "sshd",
                             "ssh_pubkey": _pub})
-    check("★ 站点没开 sshd → code 4 service_kind_disabled",
+    check("站点没开 sshd → code 4 service_kind_disabled",
           not r.get("ok") and r["code"] == 4
           and r["error"]["kind"] == "service_kind_disabled", str(r.get("error")))
     r, _s, _e = run_submit({"op": "submit", "service_kind": "telnet"})
@@ -3049,7 +3049,7 @@ exit 0
         # 公钥的注释被丢掉了，所以它不可能把逗号带进 --export。
         #   注意这里只查我们自己新加的三个变量 —— `SLURMATE_CANDIDATES`
         #   本来就是逗号分隔的端口表，那是既有设计，不在这条断言的范围内。
-        check("★ 新加的三个变量都不含逗号（--export 的分隔符）",
+        check("新加的三个变量都不含逗号（--export 的分隔符）",
               all("," not in str(env.get(k, "")) for k in
                   ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
                    "SLURMATE_SSHD_BIN")),
@@ -3076,7 +3076,7 @@ exit 0
 
         _r, _sess, _env = run_submit({"op": "submit", "service_kind": "sshd",
                                       "ssh_pubkey": _pub})
-        check("★ 省略 cpus/mem 时用【这个插件那份配置里】的默认值，不是全局那两个常量",
+        check("省略 cpus/mem 时用【这个插件那份配置里】的默认值，不是全局那两个常量",
               _sess["cpus"] == 7 and _sess["mem"] == "5G",
               "%s / %s" % (_sess.get("cpus"), _sess.get("mem")))
         check("同一组默认值也传给了作业",
@@ -3110,7 +3110,7 @@ exit 0
     #   先抛 KeyError，整份脚本崩在那一行 —— 那时"变异被发现了"与"用例自己坏了"
     #   在输出上分不开（崩了没有统计行、也没有那一条 FAIL）。`.get` 让它变成
     #   一条清清楚楚的红。
-    check("★ defaults 里也有 time（少了它，界面说不出「能跑多久」）",
+    check("defaults 里也有 time（少了它，界面说不出「能跑多久」）",
           _by[CS]["defaults"].get("time") == mod.DEFAULT_TIME
           and _by[SSHD]["defaults"].get("time") == mod.DEFAULT_TIME,
           str({k: v.get("defaults") for k, v in _by.items()}))
@@ -3120,7 +3120,7 @@ exit 0
     #   用 `.get` 取值：把这一格拿掉时，直接下标会让 `check(...)` 的参数先抛
     #     KeyError，整份脚本崩在那一行 —— 那时"变异被发现了"与"用例自己坏了"
     #     在输出上分不开。
-    check("★ defaults 里也有 gpus，且没配时是 `null`（不是缺键、不是 0）",
+    check("defaults 里也有 gpus，且没配时是 `null`（不是缺键、不是 0）",
           _by[CS]["defaults"].get("gpus", "缺") is None
           and _by[SSHD]["defaults"].get("gpus", "缺") is None,
           str({k: v.get("defaults") for k, v in _by.items()}))
@@ -3128,9 +3128,9 @@ exit 0
           _by[CS]["enabled"] is True
           and _by[SSHD]["enabled"] is False,
           str({k: v.get("enabled") for k, v in _by.items()}))
-    check("★ 也报出没启用的插件 —— 「装了但停用」与「本站没有」是两回事",
+    check("也报出没启用的插件 —— 「装了但停用」与「本站没有」是两回事",
           SSHD in _by)
-    check("★ 不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
+    check("不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
           all("name" in p and "title" in p for p in _by.values()))
 
     # ── 19.5g `default_gpus` 与「本站实际有的」对账（账本 F15 的去向）──────
@@ -3159,24 +3159,24 @@ exit 0
 
     _bad = mod.plugin_gres_problems(
         [_P("ide", {"name": "gpu", "type": "h100", "count": 1})], _cat)
-    check("★ 本站没有这种资源 ⇒ 一条 ⚠，而且**点名本站有什么**"
+    check("本站没有这种资源，一条警告，而且点名本站有什么"
           "（管理员据此改那一行，而不是去猜）",
           len(_bad) == 1 and "gpu:h100" in _bad[0]
           and "gpu:a100" in _bad[0] and "mps" in _bad[0], str(_bad))
     _big = mod.plugin_gres_problems(
         [_P("ide", {"name": "gpu", "type": "a100", "count": 3})], _cat)
-    check("★ 名字对得上、数量超过每节点上限 ⇒ 也是一条（现在就说，不等提交时）",
+    check("名字对得上、数量超过每节点上限，也是一条（现在就说，不等提交时）",
           len(_big) == 1 and "3" in _big[0] and "2" in _big[0], str(_big))
-    check("★ 对得上 ⇒ **一条都没有**（这一格不该有噪音）",
+    check("对得上，一条都没有（这一格不该有噪音）",
           mod.plugin_gres_problems(
               [_P("ide", {"name": "gpu", "type": "a100", "count": 2})], _cat) == [])
-    check("★ 没配 ⇒ 一条都没有（不写 = 不占，没什么可对）",
+    check("没配，一条都没有（不写 = 不占，没什么可对）",
           mod.plugin_gres_problems([_P("ide", None)], _cat) == [])
     # 目录查不到（`scontrol` 挂了），一个字都不说：与 `fit_gres()` 同一条
     #    fail-open。一次控制器抖动不该让自检说一句它并不确定的话 —— 而"报了但其实
     #    没事"正是这个项目一路在清的那种噪音。
-    check("★★ 目录查不到 ⇒ 不报（fail-open，与 fit_gres 同一条；"
-          "反过来的话一次控制器抖动会让自检满屏假警报）",
+    check("目录查询不到，不报（fail-open，与 fit_gres 同一条；"
+          "若反过来一次控制器抖动会让自检满屏假警报）",
           mod.plugin_gres_problems(
               [_P("ide", {"name": "gpu", "type": "h100", "count": 1})], None) == [])
 
@@ -3228,15 +3228,15 @@ exit 0
         capture_output=True, text=True,
         env=dict(os.environ,
                  PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
-    check("★★ `--check` 真的把那条 ⚠ 打出来了（算出来了**也**送出去了）",
+    check("`--check` 真的把那条警告打出来了（算出来了也送出去了）",
           "gpu:h100" in _er.stdout and "sshd" in _er.stdout,
           "rc=%s\n%s\n--- stderr ---\n%s"
           % (_er.returncode, _er.stdout[-700:], _er.stderr[-300:]))
-    check("★★ 而且**点名本站有什么** —— 管理员照这一行改，不用去猜",
+    check("而且点名本站有什么 —— 管理员照这一行改，不用去猜",
           "gpu:a100" in _er.stdout,
           _er.stdout[-700:])
-    check("★ 它是 ⚠ 而**不是**启动错误：`--check` 照常以 0 退出"
-          "（一个插件的这一行不该让整个站点起不来）",
+    check("它是警告而不是启动错误：`--check` 照常以 0 退出"
+          "（一个插件的这一行不该让整个站点无法启动）",
           _er.returncode == 0,
           "rc=%s\n%s" % (_er.returncode, _er.stderr[-400:]))
 
@@ -3266,11 +3266,11 @@ exit 0
         capture_output=True, text=True,
         env=dict(os.environ,
                  PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
-    check("★★ 悬空的 drop-in（安装器起的那份）⇒ `--check` 把它打出来，点名**文件路径**",
+    check("悬空的 drop-in（安装器起的那份）， `--check` 把它打出来，点名文件路径",
           _p_ghost in _sr.stdout and (_ghost + ".conf") in _sr.stdout,
           "rc=%s\n%s\n--- stderr ---\n%s"
           % (_sr.returncode, _sr.stdout[-700:], _sr.stderr[-300:]))
-    check("★★ 而且指出「跑一次 plugin sync」—— 那是唯一修得了它的动作",
+    check("而且指出「跑一次 plugin sync」—— 那是唯一修得了它的动作",
           "plugin sync" in _sr.stdout, _sr.stdout[-700:])
     _sln = [ln for ln in _sr.stdout.splitlines() if _p_hand in ln]
     # 判"它这一段不说那句话"的取法：它按文件名排在最后（`typo.conf` 排在
@@ -3279,16 +3279,16 @@ exit 0
     #   变异验证查出来的：把 hint 改成无条件加，只判一行的写法照样绿。而这条
     #   用例的全部价值就在"两种成因的报法不同"上。
     _idx = _sr.stdout.find(_p_hand)
-    check("★★ 手写的（短名）那份也在，但**不说**那句话"
+    check("手写的（短名）那份也在，但不说那句话"
           "（sync 不会替他删手写的文件，说了就是骗人）",
           len(_sln) == 1 and _idx >= 0 and "plugin sync" not in _sr.stdout[_idx:],
           ("（那一份一个字都没出现）" if _idx < 0 else _sr.stdout[_idx:][:300]))
-    check("★★ 而 `--check` **照常以 0 退出**：悬空是 ⚠，不是启动错误"
-          "（一个指不到人的文件不该让整个站点起不来）",
+    check("而 `--check` 照常以 0 退出：悬空是警告，不是启动错误"
+          "（一个指不到人的文件不该让整个站点无法启动）",
           _sr.returncode == 0,
           "rc=%s\n%s" % (_sr.returncode, _sr.stderr[-400:]))
 
-    # 19.5d 插件目录的形状（跨语言契约，重定义为"两边读的是同一份东西"）
+    # 19.5d 插件目录的形状（跨语言契约，重定义为"两边读的是同一份内容"）
     #
     # 这一节钉的是「守护进程读到的表」与「客户端清单」逐字一致。守护进程一个
     # 插件名都不写：表是扫出来的，而它扫的正是仓库里那两个真插件。于是这条钉子的
@@ -3309,7 +3309,7 @@ exit 0
             if os.path.isfile(_mf):
                 with open(_mf, encoding="utf-8") as _f:
                     _manifests[_name] = json.load(_f)
-    check("找得到仓库里的插件清单（找不到的话下面几条是空断言）",
+    check("找得到仓库里的插件清单（若未找到下面几条是空断言）",
           len(_manifests) >= 2, str(sorted(_manifests)))
 
     for _spec in cfg.plugin_specs:
@@ -3318,32 +3318,32 @@ exit 0
               str(sorted(_manifests)))
         if _mf is None:
             continue
-        check("★ %s 的 id 与清单逐字一致" % _spec.name,
+        check("%s 的 id 与清单逐字一致" % _spec.name,
               _mf.get("id") == _spec.id,
               "扫出来的 %s / 清单里的 %s" % (_spec.id, _mf.get("id")))
-        check("★ %s 的版本与清单一致" % _spec.name,
+        check("%s 的版本与清单一致" % _spec.name,
               _mf.get("version") == _spec.version,
               "扫出来的 %s / 清单里的 %s" % (_spec.version, _mf.get("version")))
         check("%s 的短名与清单一致" % _spec.name,
               _mf.get("name") == _spec.name,
               "扫出来的 %s / 清单里的 %s" % (_spec.name, _mf.get("name")))
-        check("★ %s 的 id 是 26 字符的 ULID（不是随手编的名字）" % _spec.name,
+        check("%s 的 id 是 26 字符的 ULID（不是随手编的名字）" % _spec.name,
               isinstance(_spec.id, str) and len(_spec.id) == 26
               and all(c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ" for c in _spec.id),
               repr(_spec.id))
         # 三个半边都要在。客户端那一半（client/index.js）可以由插件自己决定有
         #   没有（没有就是纯声明式插件），但作业侧那一半必须有 —— 一个有界面
         #   却没有任何作业侧代码的插件，用户点下去只会拿到一个起不来的会话。
-        check("★ %s 有作业侧 job/start.sh" % _spec.name,
+        check("%s 有作业侧 job/start.sh" % _spec.name,
               os.path.isfile(os.path.join(_plugdir, _spec.name, "job", "start.sh")),
               os.path.join(_plugdir, _spec.name, "job", "start.sh"))
-        check("★ %s 的目录里没有多余的东西（清单、客户端、作业侧 —— 就这三样）"
+        check("%s 的目录里没有多余的条目（清单、客户端、作业侧 —— 就这三样）"
               % _spec.name,
               not (set(os.listdir(os.path.join(_plugdir, _spec.name)))
                    - {"plugin.json", "client", "job", "README.md"}),
               str(sorted(os.listdir(os.path.join(_plugdir, _spec.name)))))
 
-    check("★ 两个插件的 id 互不相同（两个插件抢一个 id 会让客户端静默取错）",
+    check("两个插件的 id 互不相同（两个插件抢一个 id 会让客户端静默取错）",
           len({q.id for q in cfg.plugin_specs}) == len(cfg.plugin_specs))
 
     check("op_plugins 报出 id 与版本（客户端的解析键）",
@@ -3374,12 +3374,12 @@ exit 0
         _cs_spec.version = "9.9.9"
         # 提交失败时 `_sid` 是 None（`_Captured` 给的是 None），而
         #   `session_view(None)` 会在守护进程里抛 —— 那会把脚本带崩，于是
-        #   "崩了"与"一条都不红"分不开。取不到那一行就当成一条红的。
+        #   "崩了"与"一条都不红"分不开。获取失败的那一行就当成一条红的。
         _row = _st2.get(_sid) if _sid else None
         _now = d.session_view(_row, with_secret=False) if _row else {}
-        check("★★ 站点升级插件之后，已跑的会话仍然报**它起时那一版**",
+        check("站点升级插件之后，已跑的会话仍然报它起时那一版",
               _now.get("service_plugin") == _before,
-              "起时 %r，升级后报 %r（现算的话这一条会红）"
+              "起时 %r，升级后报 %r（若现算这一条会红）"
               % (_before, _now.get("service_plugin")))
         check("短名不变（它只是站点内的名字，与版本无关）",
               _now.get("service_kind") == CS,
@@ -3390,7 +3390,7 @@ exit 0
 
     # op_partitions 不再带全局 defaults —— 留一个在那里就是两份真相
     _presp = d.dispatch(os.getuid(), os.getgid(), {"op": "partitions"})
-    check("★ op_partitions 不再返回全局 defaults（默认资源已经按插件走）",
+    check("op_partitions 不再返回全局 defaults（默认资源已经按插件走）",
           "defaults" not in ((_presp.get("data") or {})),
           str((_presp.get("data") or {}).keys()))
 
@@ -3410,7 +3410,7 @@ exit 0
     check("session_view 报出 service_kind",
           d.session_view(d.store.get("s-known"), with_secret=False)["service_kind"]
           == SSHD)
-    check("★ 数据库里没有时报 None，不许猜一个默认值 —— 猜错会让界面拿口令去打 SSH 端口",
+    check("数据库里没有时报 None，不许猜一个默认值 —— 猜错会让界面拿口令去打 SSH 端口",
           d.session_view(d.store.get("s-unknown"), with_secret=False)["service_kind"]
           is None)
 
@@ -3448,11 +3448,11 @@ exit 0
     check("恢复用例本身要真的恢复出一行（否则下面那条是空断言）",
           n == 1 and len(rows) == 1, "n=%s rows=%s" % (n, len(rows)))
     if rows:
-        check("★ 恢复态的服务种类是 NULL，不是 'code-server'",
+        check("恢复态的服务种类是 NULL，不是 'code-server'",
               rows[0]["service_kind"] is None, repr(rows[0]["service_kind"]))
         # 解析键同理。而且这里尤其不能拿短名去反查一个出来 —— 短名是 NULL，
-        #   反查只会得到"随便挑一个同名的"，而那个作业可能根本不是它起的。
-        check("★ 恢复态的解析键也是 NULL（不知道是哪一版的代码在跑）",
+        #   反查只会得到"随便选择一个同名的"，而那个作业可能根本不是它起的。
+        check("恢复态的解析键也是 NULL（不知道是哪一版的代码在跑）",
               rows[0]["service_plugin"] is None, repr(rows[0]["service_plugin"]))
         check("恢复态的会话视图把解析键原样报成 None",
               d.session_view(rows[0], with_secret=False)["service_plugin"] is None)
@@ -3462,13 +3462,13 @@ exit 0
     #
     # `Store._migrate()`（给旧库自动 ALTER TABLE ADD COLUMN 的那条路）不在了 ——
     # 它只在旧库上跑，而旧库不存在（见 0.y 的判据）。于是
-    # `Config._db_schema_errors` 就是唯一接住"表结构对不上"的地方，所以它
+    # `Config._db_schema_errors` 就是唯一接住"表结构不一致"的地方，所以它
     # 必须两头都查：少一列和多一列今天都只会在第一次用到时炸成一个不提数据库的
     # code 9。
     #
     # 断言打的是 `validate()`，不是那个私有函数自己 —— 少一行
     #   `errors.extend(self._db_schema_errors())` 的话，私有函数照样报，
-    #   而守护进程照样起得来。这里要钉的正是"起不来"。
+    #   而守护进程照样起得来。这里要钉的正是"无法启动"。
     #
     # 夹具从真的建表语句里删掉一行 —— 于是它"只少一列"，而不是随手编一张
     #   缺一堆列的表；缺的是哪一列由断言点名，人肉维护的列清单会漂。
@@ -3483,7 +3483,7 @@ exit 0
     _lines_all = _create_sql.splitlines()
     _lines_less = [ln for ln in _lines_all
                    if not ln.strip().startswith("service_kind")]
-    check("夹具真的从建表语句里删掉了一行（否则下面测的是别的东西）",
+    check("夹具真的从建表语句里删掉了一行（否则下面测的是其他内容）",
           len(_lines_less) == len(_lines_all) - 1,
           "%d -> %d 行" % (len(_lines_all), len(_lines_less)))
 
@@ -3496,13 +3496,13 @@ exit 0
     _cfg3 = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
     _cfg3.__dict__["db_path"] = _old_db3
     _e3 = _cfg3.validate()
-    check("★ 少一列的库让守护进程**起不来**（validate 就报错，不是运行时才炸）",
+    check("少一列的库让守护进程无法启动（validate 就报错，不是运行时才炸）",
           len(_e3) == 1 and "rm -f" in _e3[0], str(_e3))
-    check("★ 而且报出**缺的是哪一列**（只说「对不上」等于让人去猜）",
+    check("而且报出缺的是哪一列（只说「不一致」等于让人去猜）",
           bool(_e3) and "少 service_kind" in _e3[0], str(_e3))
 
     _cfg3.__dict__["db_path"] = _fresh
-    check("★ 本版刚建出来的库**不**被拒绝 —— 判据漂了就会误杀合法库",
+    check("本版刚建出来的库不被拒绝 —— 判据漂了就会误杀合法库",
           _cfg3.validate() == [], str(_cfg3.validate()))
 
     # 19.9 候选端口表的分隔符
@@ -3512,12 +3512,12 @@ exit 0
     # 那个仅剩的端口恰好被占时作业就以"候选端口全部失败"退出。
     _r, _s, _e = run_submit({"op": "submit"})
     _cands_env = _e.get("SLURMATE_CANDIDATES", "")
-    check("★ 候选端口表用分号分隔（逗号会被 sbatch 的 --export 切碎，只剩第一个）",
+    check("候选端口表用分号分隔（逗号会被 sbatch 的 --export 切碎，只剩第一个）",
           ";" in _cands_env and "," not in _cands_env, repr(_cands_env))
     # 全部走 `.get`：提交失败时 `_s` 是那个"缺键给 None"的容器，裸下标会抛
     #   AttributeError 把脚本带崩（见第 18 节 `_Captured` 那段说明）。
     _db_cands = (_s.get("candidates") or "")
-    check("★ 候选个数没被截断成一个",
+    check("候选个数没被截断成一个",
           bool(_cands_env) and len(_cands_env.split(";")) == len(_db_cands.split(",")),
           "%d 个 vs 数据库里 %d 个"
           % (len(_cands_env.split(";")), len(_db_cands.split(","))))
@@ -3531,7 +3531,7 @@ exit 0
     # 这一条单独存在是有理由的：SESSION_FILE_FIELDS 是白名单，它会静默丢弃
     #   未登记的字段。漏了 ssh_host_key，作业照常写、这边照常启动，只是主机公钥
     #   凭空消失 —— 而症状是"客户端连不上，说主机密钥未知"，指不回这一行。
-    check("★ 会话文件白名单里有 ssh_host_key（漏了会静默丢弃）",
+    check("会话文件白名单里有 ssh_host_key（漏了会静默丢弃）",
           "ssh_host_key" in mod.SESSION_FILE_FIELDS)
 
     class _FakeSlurmNoJob(object):
@@ -3561,7 +3561,7 @@ exit 0
           repr(_v.get("ssh_host_key")))
     # 「没有这个字段」和「有这个字段但是空」对客户端是两件事：后者会被读成
     # "主机公钥是空的"，而空公钥没有任何合法处理方式。
-    check("★ 空白的主机公钥不出现在响应里",
+    check("空白的主机公钥不出现在响应里",
           "ssh_host_key" not in _v_blank, repr(_v_blank.get("ssh_host_key")))
     check("没有这一项时也不出现（code-server 的作业就是这样）",
           "ssh_host_key" not in _v_none, repr(_v_none.get("ssh_host_key")))
@@ -3615,15 +3615,15 @@ exit 0
     # 全部走 `.get(...)`：变异验证时"这一项不见了 / 那个字段整个不报"正是被测的
     #   那件事，而裸下标会抛 KeyError 把脚本带崩 —— 崩了与"一条都不红"在输出上
     #   分不开（见 CHANGELOG 里那条反复回来的说明）。
-    check("★★ op_plugins 每一项**都不再有** files（v0.7 删掉了那条投递方式）",
+    check("op_plugins 每一项都不再有 files（v0.7 删掉了那条投递方式）",
           bool(_p2) and all("files" not in x for x in _p2.values()),
           str({k: sorted(v.keys()) for k, v in _p2.items()}))
-    check("★ 而每一项仍然有 package（清单的另一半，v0.6 加的）",
+    check("而每一项仍然有 package（清单的另一半，v0.6 加的）",
           all(isinstance(x.get("package"), dict)
               and x["package"].get("format") == mod.PACKAGE_FORMAT
               for x in _p2.values()),
           str({k: (v or {}).get("package") for k, v in _p2.items()})[:200])
-    check("★★ op_plugins 顶层带 limits —— 这**现在**是「本站支不支持分发」唯一的"
+    check("op_plugins 顶层带 limits —— 这现在是「本站支不支持分发」唯一的"
           "判据（从前那个判据 files 已经不在了）",
           isinstance(_pdata.get("limits"), dict)
           and _pdata["limits"].get("file_bytes") == mod.PLUGIN_FILE_MAX_BYTES,
@@ -3633,7 +3633,7 @@ exit 0
     #    "客户端不去调它" —— 协议里留着一条没人调的路，下一个人会以为它能用。
     _gc1, _gk1, _gd1 = _kindof(_pf({"op": "plugin_file", "id": "0" * 26,
                                     "version": "1.0.0", "path": "plugin.json"}))
-    check("★★ plugin_file 这个 op 已经不在了（2 unknown_op，不是 3/9）",
+    check("plugin_file 这个 op 已经不在了（2 unknown_op，不是 3/9）",
           _gc1 == 2 and _gk1 == "unknown_op",
           "code=%s kind=%s detail=%s" % (_gc1, _gk1, _gd1[:60]))
     _gp1, _gp2, _gp3 = _kindof(_pf({"op": "plugin_package", "id": _cs_spec.id,
@@ -3664,9 +3664,9 @@ exit 0
         _p: mod.package_parse(build_package([(nm, blob) for nm, blob in _fx_files]
                                             + [(_p, b"x\n")]))["ok"]
         for _p in (".gitignore", "node_modules/x.js", "client/.git/config")}
-    check("★★ 跳过集里的路径**编不成一个合法的包**（它在解析器那里就被拒）",
+    check("跳过集里的路径编不成一个合法的包（它在解析器那里就被拒）",
           not any(_pfx_is_pkg.values()), str(_pfx_is_pkg))
-    check("★ 而且对照：同样这些内容、不加那一条，就是一个能解析的包",
+    check("而且对照：同样这些内容、不加那一条，就是一个能解析的包",
           mod.package_parse(build_package(_fx_files))["ok"])
 
     # ── 19.11b 限流：桶本身 ────────────────────────────────────────────────
@@ -3688,10 +3688,10 @@ exit 0
         if not _rr.get("ok"):
             _hit = (_i + 1, _rr.get("code"), _rr["error"]["kind"])
             break
-    check("★ 连发超过阈值之后确实回 code 7 / rate_limited（客户端会看到它）",
+    check("连发超过阈值之后确实回 code 7 / rate_limited（客户端会看到它）",
           _hit is not None and _hit[1] == 7 and _hit[2] == "rate_limited",
           repr(_hit))
-    check("★ 而在阈值之内照常应答（上面那条不是「一律拒绝」）",
+    check("而在阈值之内照常应答（上面那条不是「一律拒绝」）",
           _hit is None or _hit[0] == mod.MAX_RPC_PER_SECOND + 1,
           repr(_hit))
     _d3.store.close()
@@ -3718,14 +3718,14 @@ exit 0
         return _d4.dispatch(UID, os.getgid(), req)
 
     def _plug_of(name):
-        """`plugins` 里那一个插件，找不到返回 None（变异下不许崩）。"""
+        """`plugins` 里那一个插件，未找到返回 None（变异下不许崩）。"""
         return next((x for x in
                      ((_pp({"op": "plugins"}).get("data") or {}).get("plugins") or [])
                      if x.get("name") == name), None)
 
     _cs4 = cfg.resolve_plugin(CS)[0]
     _pk4 = {n: _plug_of(n) for n in (CS, SSHD)}
-    check("★★ 加法过渡**结束了**：每条只剩 package，`files` 那个键不在 "
+    check("加法过渡结束了：每条只剩 package，`files` 那个键不在 "
           "（v0.6 两条同时在，v0.7 只留这一条）",
           bool(_pk4) and all("files" not in (x or {})
                              and (x or {}).get("package") is not None
@@ -3741,7 +3741,7 @@ exit 0
         #   比的摘要是 `dist["digest"]`（= 四元组里的 `digestClient`），不是
         #   `digest`（整棵树那个 —— 它是插件的身份，走另一条路报）。
         _blob, _disk = mod.plugin_rebuild(cfg.plugins_dir, _spec.id)
-        check("★★ op_plugins 报的 package 三样事实与**现打出来的那一份**相符（「%s」）" % _n,
+        check("op_plugins 报的 package 三样事实与现打出来的那一份相符（「%s」）" % _n,
               _disk["ok"] and _blob is not None
               and _info.get("format") == mod.PACKAGE_FORMAT
               and _info.get("bytes") == len(_blob)
@@ -3752,10 +3752,10 @@ exit 0
                  _disk.get("dist", {}).get("digest")))
 
     _lim4 = ((_pp({"op": "plugins"}).get("data") or {}).get("limits") or {})
-    check("★ limits 里多报了 package_bytes（那是**链路**约束，与负载那三个不同口径）",
+    check("limits 里多报了 package_bytes（那是链路约束，与负载那三个不同口径）",
           _lim4.get("package_bytes") == mod.PLUGIN_PACKAGE_MAX_BYTES,
           str(_lim4))
-    check("★ 而它是一个**独立**的数字：整包上限比总字节上限大（两笔账，不是一个）",
+    check("而它是一个独立的数字：整包上限比总字节上限大（两笔账，不是一个）",
           _lim4.get("package_bytes") != _lim4.get("total_bytes"),
           str(_lim4))
 
@@ -3774,7 +3774,7 @@ exit 0
     #   的签名块根本装不进去、也扫不出来。用假签名测，测到的是"验签把这一份拒了"，
     #   与这一节要验的"摘要不看信封"是两回事。
     if not openssl_bin():
-        check("★★ 本机没有 openssl —— 这一节要的「补一个真签名块」测不了"
+        check("本机没有 openssl —— 这一节要的「补一个真签名块」测不了"
               "（不是「跳过」，是这条判据的核心没被验到）", False, "装一个 openssl 再跑")
     _k4 = openssl_make_key(tmpdir, "k4")
     _sigblock = None
@@ -3788,14 +3788,14 @@ exit 0
     _signed_bytes = build_package(_dg_files, _sigblock or b"")
     _plain = mod.package_parse(_plain_bytes)
     _signed = mod.package_parse(_signed_bytes)
-    check("这条用例自己的前提：两份都能解析，而**容器字节**确实不同",
+    check("这条用例自己的前提：两份都能解析，而容器字节确实不同",
           _plain.get("ok") and _signed.get("ok") and _plain_bytes != _signed_bytes,
           "ok=%s/%s 相同=%s" % (_plain.get("ok"), _signed.get("ok"),
                               _plain_bytes == _signed_bytes))
-    check("★★ 内容摘要**不看信封**：同一个负载补一个签名块 ⇒ 摘要不变（§4.2）",
+    check("内容摘要不看信封：同一个负载补一个签名块，摘要不变（§4.2）",
           _plain.get("digest") == _signed.get("digest") and _plain.get("digest"),
           "%s vs %s" % (_plain.get("digest"), _signed.get("digest")))
-    check("★ 而容器字节的 sha256 是变的（上面那条不是「两边都是常量」）",
+    check("而容器字节的 sha256 是变的（上面那条不是「两边都是常量」）",
           hashlib.sha256(_plain_bytes).hexdigest()
           != hashlib.sha256(_signed_bytes).hexdigest())
 
@@ -3816,8 +3816,8 @@ exit 0
         _d4._plugin_cache.clear()
         _b_plug = _plug_of(CS) or {}
         _b_pkg = _b_plug.get("package") or {}
-        check("★★ op_plugins 报出去的也是**内容摘要**：补上签名块之后整包字节数变了、"
-              "摘要**一个字都没变**",
+        check("op_plugins 报出去的也是内容摘要：补上签名块之后整包字节数变了、"
+              "摘要一个字都没变",
               _a_pkg.get("bytes") != _b_pkg.get("bytes")
               and _a_pkg.get("digest") == _b_pkg.get("digest") and _a_pkg.get("digest"),
               "%s vs %s" % (_a_pkg, _b_pkg))
@@ -3827,7 +3827,7 @@ exit 0
         _pd = _pr.get("data") or {}
         _got = base64.b64decode(_pd.get("data") or "")
         _want4, _wr = mod.plugin_rebuild(_fx4, _cs4.id)
-        check("★★ op_plugin_package 发回来的字节与你照记录表现打的那一份**逐字节全等**",
+        check("op_plugin_package 发回来的字节与你照记录表现打的那一份逐字节全等",
               _wr["ok"] and _got == _want4 and len(_got) > 0,
               "%d vs %d 字节" % (len(_got), len(_want4 or b"")))
 
@@ -3840,26 +3840,26 @@ exit 0
         #     真的在往用户机器上发 `job/start.sh`。
         #   参照物必须是与实现无关的东西：这里解析的是 RPC 响应里那一串 base64。
         _gp = mod.package_parse(_got)
-        check("★★ 发出去的那一份里**没有一条站点侧路径**"
+        check("发出去的那一份里没有一条站点侧路径"
               "（判据①：用户机器上没有 job/）",
               _gp["ok"] and all(mod.package_is_client_side(f["path"])
                                 for f in _gp["files"]),
               repr([f["path"] for f in (_gp["files"] if _gp["ok"] else [])]))
-        check("★ 对照：站点**自己的树**上确实有站点侧那一份（不是「本来就没有」）",
+        check("对照：站点自己的树上确实有站点侧那一份（不是「本来就没有」）",
               any(not mod.package_is_client_side(f["path"])
                   for f in mod.plugin_reconcile(_fx4, _cs4.id)["files"]),
               repr([f["path"] for f in mod.plugin_reconcile(_fx4, _cs4.id)["files"]]))
-        check("★ 而它**比整包小** —— 差的就是站点侧那几份的负载与记录"
-              "（发整包的话这两个数会相等）",
+        check("而它比整包小 —— 差的就是站点侧那几份的负载与记录"
+              "（若发整包这两个数会相等）",
               len(_got) < mod.record_container_bytes(
                   mod.plugin_reconcile(_fx4, _cs4.id)["record"]),
               "%d vs 整包 %d" % (len(_got), mod.record_container_bytes(
                   mod.plugin_reconcile(_fx4, _cs4.id)["record"])))
-        check("★ 报回的 format/bytes/digest 与 op_plugins 那一轮报的**同一个值**",
+        check("报回的 format/bytes/digest 与 op_plugins 那一轮报的同一个值",
               (_pd.get("format"), _pd.get("bytes"), _pd.get("digest"))
               == (_b_pkg.get("format"), _b_pkg.get("bytes"), _b_pkg.get("digest")),
               "%s vs %s" % (_pd, _b_pkg))
-        check("★★ 而客户端拿这份**下载到的字节**自己重算一遍，得到的就是本站报的那个 "
+        check("而客户端拿这份下载到的字节自己重算一遍，得到的就是本站报的那个 "
               "—— 这是 digest 唯一正确的用法（本站自述，不是判据）",
               mod.package_parse(_got).get("digest") == _pd.get("digest"),
               "%s vs %s" % (mod.package_parse(_got).get("digest"),
@@ -3868,7 +3868,7 @@ exit 0
         # ── 认不出的 (id, 版本)：还是那个出口（`3 plugin_unknown`）──
         _uc4, _uk4, _ud4 = _kindof(_pp({"op": "plugin_package", "id": "0" * 26,
                                         "version": "1.0.0"}))
-        check("★ 认不出的 (id, 版本) 是 3 plugin_unknown（两条路一个出口）",
+        check("认不出的 (id, 版本) 是 3 plugin_unknown（两条路一个出口）",
               _uc4 == 3 and _uk4 == "plugin_unknown",
               "code=%s kind=%s detail=%s" % (_uc4, _uk4, _ud4[:60]))
 
@@ -3883,16 +3883,16 @@ exit 0
             _f.write(b"module.exports = { tampered: true };\n")
         _cc4, _ck4, _cd4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★★ 那一棵树在本次启动之后被改过一个字节 ⇒ 9 plugin_package_changed",
+        check("那一棵树在本次启动之后被改过一个字节，9 plugin_package_changed",
               _cc4 == 9 and _ck4 == "plugin_package_changed",
               "code=%s kind=%s detail=%s" % (_cc4, _ck4, _cd4[:120]))
-        check("★★ 而且那句话**点名是哪一份文件**（只说「对不上」等于让运维去猜）",
+        check("而且那句话点名是哪一份文件（只说「不一致」等于让运维去猜）",
               "client/index.js" in _cd4, repr(_cd4[:200]))
-        check("★★ 而不是把这一份发出去让客户端报「校验不过」—— 那句话里指向"
-              "**重装一次那个插件**",
+        check("而不是把这一份发出去让客户端报「校验不过」—— 那句话里指向"
+              "重装一次那个插件",
               "重装" in _cd4 and "客户端" not in _cd4, repr(_cd4[:200]))
         _after = (_plug_of(CS) or {}).get("package") or {}
-        check("★★ 快照是**启动那一刻**：换完之后 op_plugins 报的还是当初那一个"
+        check("快照是启动那一刻：换完之后 op_plugins 报的还是当初那一个"
               "（快照与这一条回答的是同一份内容）",
               _after.get("digest") == _b_pkg.get("digest")
               and _after.get("bytes") == _b_pkg.get("bytes"),
@@ -3910,14 +3910,14 @@ exit 0
         _d4._plugin_cache.clear()
         _lc4, _lk4, _ld4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★★ 超过整包上限 ⇒ 4 plugin_package_too_large（不是截断了发出来）",
+        check("超过整包上限，4 plugin_package_too_large（不是截断了发出来）",
               _lc4 == 4 and _lk4 == "plugin_package_too_large",
               "code=%s kind=%s detail=%s" % (_lc4, _lk4, _ld4[:80]))
-        check("★ 而且一个字节都没发（错误应答里没有 data）",
+        check("而且一个字节都没发（错误应答里没有 data）",
               "data" not in (_pp({"op": "plugin_package", "id": _cs4.id,
                                   "version": _cs4.version}).get("data") or {}))
-        # 这个上限报得出来才有意义：客户端要先知道它才谈得上"取不回来"。
-        check("★ 上限那个数在错误信息里（运维要照着调）",
+        # 这个上限报得出来才有意义：客户端要先知道它才谈得上"获取失败"。
+        check("上限那个数在错误信息里（运维要照着调）",
               str(mod.PLUGIN_PACKAGE_MAX_BYTES) in _ld4, repr(_ld4[:140]))
 
         # ── 那一份不见了：`package` 是 null，而能力仍然在 ──
@@ -3931,15 +3931,15 @@ exit 0
         os.unlink(mod.plugin_record_path(_fx4, _cs4.id))
         _d4._plugin_cache.clear()
         _gone = _plug_of(CS) or {}
-        check("★★ 那一份不见了 ⇒ package 是 **null**（不是把这个键省掉）",
+        check("那一份不见了，package 是 null（不是把这个键省掉）",
               "package" in _gone and _gone.get("package") is None,
               "键在=%s 值=%r" % ("package" in _gone, _gone.get("package")))
-        check("对照：顶层 limits 照旧报（缺席的不是**能力**，是这一份的内容）",
+        check("对照：顶层 limits 照旧报（缺席的不是能力，是这一份的内容）",
               isinstance(((_pp({"op": "plugins"}).get("data") or {})
                           .get("limits")), dict))
         _gc4, _gk4, _gd4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★ 整包取那条路回 9 plugin_package_changed（不是 3/4 —— 它刚才还在，"
+        check("整包取那条路回 9 plugin_package_changed（不是 3/4 —— 它刚才还在，"
               "而「刚才还在」正是这句话要说的事）",
               _gc4 == 9 and _gk4 == "plugin_package_changed",
               "code=%s kind=%s detail=%s" % (_gc4, _gk4, _gd4[:120]))
@@ -3958,17 +3958,17 @@ exit 0
         _cs4.install_dir = mod.plugin_tree_dir(_fx4, _cs4.id)
         _d4._plugin_cache.clear()
         _live = _plug_of(CS) or {}
-        check("这条用例自己的前提：快照里那一份**是在的**",
+        check("这条用例自己的前提：快照里那一份是在的",
               isinstance(_live.get("package"), dict), repr(_live.get("package")))
         # 删的是记录表：树还在，而没有记录表 = 这次安装没提交。
         os.remove(mod.plugin_record_path(_fx4, _cs4.id))
         _rc4, _rk4, _rd4 = _kindof(_pp({"op": "plugin_package",
                                         "id": _cs4.id, "version": _cs4.version}))
-        check("★★ 记录表在两次读之间消失 ⇒ 9 plugin_package_changed（说的是「没提交」）",
+        check("记录表在两次读之间消失，9 plugin_package_changed（说的是「没提交」）",
               _rc4 == 9 and _rk4 == "plugin_package_changed"
               and "没有记录表" in _rd4,
               "code=%s kind=%s detail=%s" % (_rc4, _rk4, _rd4[:120]))
-        check("★ 而它没有被兜成 9 internal（那句话指不回插件，运维会去查别的地方）",
+        check("而它没有被兜成 9 internal（那句话指不回插件，运维会去查其他地方）",
               _rk4 != "internal", repr(_rk4))
     finally:
         _cs4.install_dir = _saved_src4
@@ -3979,8 +3979,8 @@ exit 0
     #
     # 这是那两个数字唯一的守方。它们是从两侧各写一遍的（守护进程的
     # `PLUGIN_PACKAGE_MAX_BYTES` 与 CLI 的 `RPC_MAX_RESPONSE_BYTES`），而漂开的
-    # 症状会是最容易被认错的那一种：CLI 报"响应太大"，客户端把它归成
-    # `daemon_unreachable`（code 5）并退避重试 —— 一次"文件太大"被报成"控制节点上
+    # 症状会是最容易被认错的那一种：CLI 报"响应过大"，客户端把它归成
+    # `daemon_unreachable`（code 5）并退避重试 —— 一次"文件过大"被报成"控制节点上
     # 的守护进程没有响应"，排查方向整整错一层。
     #
     # CLI 上限与站点通报的总量上限必须拉开：两者同为 1 MiB 的话，
@@ -3988,11 +3988,11 @@ exit 0
     #   这条用例存在的意义就是让那种状态不可能悄悄回来。
     _cli = load_cli()
     _wire = len(base64.b64encode(b"\x00" * mod.PLUGIN_PACKAGE_MAX_BYTES))
-    check("★★ CLI 的读上限装得下本站能发出去的那条最大的应答（base64 之后还要"
+    check("CLI 的读上限装得下本站能发出去的那条最大的应答（base64 之后还要"
           "加一层 JSON 信封）",
           _wire + 1024 < _cli.RPC_MAX_RESPONSE_BYTES,
           "包的 base64 是 %d 字节，CLI 上限 %d" % (_wire, _cli.RPC_MAX_RESPONSE_BYTES))
-    check("★ 而反过来也留了余量、没有把上限抬成一句空话（不超过包上限的 4 倍）",
+    check("而反过来也留了余量、没有把上限抬成一句空话（不超过包上限的 4 倍）",
           _cli.RPC_MAX_RESPONSE_BYTES <= mod.PLUGIN_PACKAGE_MAX_BYTES * 4,
           "CLI 上限 %d，包上限 %d" % (_cli.RPC_MAX_RESPONSE_BYTES,
                                     mod.PLUGIN_PACKAGE_MAX_BYTES))
@@ -4017,11 +4017,11 @@ exit 0
     with open(os.path.abspath(_copy_skip_js), encoding="utf-8") as _f:
         _js = _f.read()
     _m = re.search(r"const COPY_SKIP = new Set\(\[([^\]]*)\]\)", _js)
-    check("客户端 plugins/index.js 里那份 COPY_SKIP 找得到（找不到说明它改了形状）",
+    check("客户端 plugins/index.js 里那份 COPY_SKIP 找得到（未找到说明它改了形状）",
           _m is not None)
     if _m:
         _js_set = sorted(re.findall(r"'([^']*)'", _m.group(1)))
-        check("★★ 两端的跳过表逐字一致（漂开了就是「同步一直失败」且说不清原因）",
+        check("两端的跳过表逐字一致（漂开了就是「同步一直失败」且说不清原因）",
               _js_set == sorted(mod.PLUGIN_COPY_SKIP),
               "客户端 %s vs 守护进程 %s" % (_js_set, sorted(mod.PLUGIN_COPY_SKIP)))
 
@@ -4034,7 +4034,7 @@ exit 0
     #
     # 它挡的是一件很具体的事：管理员把插件的源码树复制进了包目录，以为
     #   装上了 —— 而安装器只列 `*.splug`，那几棵树会被静默忽略。所以
-    #   "哪些算包"与"别的东西在这儿"是两条判据，都要有。
+    #   "哪些算包"与"其他条目在这儿"是两条判据，都要有。
     #
     # 符号链接那一条是承重的：一个叫 `x.splug` 的链接能指向任何地方、还能随时
     #   换目标，于是"我读到的那一份"与"校验过的那一份"不是同一份 —— 那正是整节
@@ -4057,13 +4057,13 @@ exit 0
         os.symlink(_real_pkg, os.path.join(_gate, "linked.splug"))
         os.symlink("/etc/passwd", os.path.join(_gate, "passwd.splug"))
         _got = set(mod.plugin_src_files(_gate))
-        check("★★ 恰好列出那一个真正的包文件",
+        check("恰好列出那一个真正的包文件",
               _got == {_real_pkg}, repr(sorted(_got))[:200])
-        check("★★ 符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
+        check("符号链接冒充 `.splug` 进不了名单（它随时可以换目标）",
               not any("linked.splug" in p or "passwd.splug" in p for p in _got),
               repr(sorted(_got))[:200])
-        check("★ 目录、散落的文件、子目录里的包都不进名单"
-              "（它们**不该在这儿**，由下面那条逐条点名）",
+        check("目录、散落的文件、子目录里的包都不进名单"
+              "（它们不该在这儿，由下面那条逐条点名）",
               not any("old/" in p or "notes.txt" in p or "README" in p
                       or "nested" in p for p in _got),
               repr(sorted(_got))[:200])
@@ -4072,15 +4072,15 @@ exit 0
         #    四种成因各点名一条（三种"看着像包但不是"、一种"根本不是包"）。
         _probs = mod.plugin_src_problems(_gate)
         _ptxt = "\n".join(_probs)
-        check("★★ 目录里除 .splug 之外的东西**逐条点名**（不说就是静默忽略）",
+        check("目录里除 .splug 之外的条目逐条点名（不说就是静默忽略）",
               len(_probs) == 6, "\n".join(x.split("\n")[0] for x in _probs))
-        check("★★ 源码树那一种要说清成因（最常见的那个）",
+        check("源码树那一种要说清成因（最常见的那个）",
               "README" in _ptxt and "源码树" in _ptxt, _ptxt[:300])
         # 两种成因的修法完全不同（"把链接换成一个真的包" vs "把文件搬走"），
         #   所以措辞必须分得开 —— 一句"这里有不合法的东西"两种都盖不住。
-        check("★ 名字像包、却是符号链接的 ⇒ 说「符号链接」",
+        check("名字像包、却是符号链接的，说「符号链接」",
               "linked.splug" in _ptxt and "符号链接" in _ptxt, _ptxt[:400])
-        check("★ 压根不是包的（目录、散落的文件）⇒ 说「不是一个插件包」",
+        check("压根不是包的（目录、散落的文件）， 说「不是一个插件包」",
               "notes.txt" in _ptxt and "不是一个插件包" in _ptxt
               and "符号链接" not in _ptxt.split("notes.txt")[1].split("\n")[0],
               _ptxt[:400])
@@ -4090,10 +4090,10 @@ exit 0
         #    那几份包一个都装不上。
         #    只说"不会被安装"是不够的：管理员接着要问的正是"那我该怎么装"，
         #      而答案（`--from` 各自来一次）只有这里能说。
-        check("★★ 子目录里有包 ⇒ 那条话要**指路**（一次只认一个目录、不递归）",
+        check("子目录里有包，那条话要指路（一次只认一个目录、不递归）",
               "nested" in _ptxt and "不递归" in _ptxt and "--from" in _ptxt,
               _ptxt[:600])
-        check("★ 而「里面没有包的目录」走的是原来那条（两种成因的修法不一样："
+        check("而「里面没有包的目录」走的是原来那条（两种成因的修法不同："
               "一种是把里面的包搬出来，一种是它压根不该在这儿）",
               os.path.join(_gate, "old") in _ptxt
               and "不是一个插件包" in _ptxt.split(os.path.join(_gate, "old"))[1][:200],
@@ -4105,7 +4105,7 @@ exit 0
             _touch2 = os.path.join(_clean, "a.splug")
             with open(_touch2, "wb") as _f:
                 _f.write(b"splug\x1a\r\n" + b"\0" * 12)
-            check("★★ 对照：一个只有包的目录 ⇒ 一条问题都没有"
+            check("对照：一个只有包的目录，一条问题都没有"
                   "（否则上一条会被「什么都报」一并满足）",
                   mod.plugin_src_problems(_clean) == [],
                   repr(mod.plugin_src_problems(_clean)))
@@ -4141,13 +4141,13 @@ exit 0
         # 判据要认出标识符，不能是子串：`CONF_D` 是 `CONF_DIR` 的前缀，
         #   子串匹配会让"drop-in 目录还在脚本里"这条永远红（假红）。
         _pat = r"(?<![\w-])%s(?![\w-])" % re.escape(_bad)
-        check("★★ 基座安装脚本的**代码**里没有 %s（插件那一半真的搬走了）" % _bad,
+        check("基座安装脚本的代码里没有 %s（插件那一半真的搬走了）" % _bad,
               re.search(_pat, _ib_code) is None,
               repr([l.strip() for l in _ib_code.split("\n")
                     if re.search(_pat, l)][:2]))
-    check("★ 而它**调用**卸载器来收掉插件（判据仍然只有一份，不在脚本里抄一遍）",
+    check("而它调用卸载器来收掉插件（判据仍然只有一份，不在脚本里抄一遍）",
           "--uninstall-plugins" in _ib_src and "--all-plugins" in _ib_src)
-    check("★ 作业模板装到了 <SHARE_DIR>/run.sbatch.template"
+    check("作业模板装到了 <SHARE_DIR>/run.sbatch.template"
           "（装完基座之后集群上可能根本没有仓库）",
           "run.sbatch.template" in _ib_src)
     # 而"插件搬到哪儿去了"必须读得到：`--help` 的范围表达式若写成
@@ -4156,7 +4156,7 @@ exit 0
     #    不到插件入口时，第一件事就是跑 `--help`。
     #    它不需要 root（`-h` 在参数解析那一轮就 `exit 0` 了），所以这条能真跑。
     _h = subprocess.run(["bash", _ib, "--help"], capture_output=True, text=True)
-    check("★★ `--help` 真的把用法印出来（不是只印标题那一行）",
+    check("`--help` 真的把用法印出来（不是只印标题那一行）",
           _h.returncode == 0 and "--uninstall" in _h.stdout
           and "slurmate plugin install" in _h.stdout
           and len(_h.stdout.splitlines()) > 20,
@@ -4171,19 +4171,19 @@ exit 0
     for _argv, _want in ((["--plugins-src", "/tmp/pkgs"], "/tmp/pkgs"),
                          (["--plugins-src=/tmp/pkgs"], "/tmp/pkgs")):
         _p = subprocess.run(["bash", _ib] + _argv, capture_output=True, text=True)
-        check("★★ `%s` 的指路给出的是**能跑的命令**（`--from` 后面跟着那个目录）"
+        check("`%s` 的指路给出的是能跑的命令（`--from` 后面跟着那个目录）"
               % " ".join(_argv),
               _p.returncode == 2
               and ("slurmate plugin install --from %s" % _want) in _p.stderr,
               "rc=%d %r" % (_p.returncode, _p.stderr[-160:]))
-    check("★ 基座安装脚本**调用**守护进程的 --check，而不是自己再判一遍"
+    check("基座安装脚本调用守护进程的 --check，而不是自己再判一遍"
           "（端口区间 / Slurm 命令那些判据从前在这里各有一份孪生实现）",
           '"$DAEMON_SRC" --check --config=' in _ib_src)
     # 而"不再自己判一遍"这句话要真的红得起来：那几条孪生实现各自有一
     #    个特征串（端口区间重叠的判定、Slurm 命令清单、cidr 交叉核对）。它们
     #    一个都不该留在基座脚本里 —— 留在那里就是"同一件事两份判据"。
     for _dup in ("ip_local_reserved_ports", "reserved_ranges", "scontrol"):
-        check("★★ 基座安装脚本里不再有 %r 那份孪生判据" % _dup,
+        check("基座安装脚本里不再有 %r 那份孪生判据" % _dup,
               _dup not in _ib_code,
               repr([l.strip() for l in _ib_code.split("\n") if _dup in l][:2]))
 
@@ -4211,26 +4211,26 @@ exit 0
     _signed = _unhex(_exp["signed"]["hex"])
 
     _r = mod.package_parse(_good)
-    check("★ 符合性向量：好包能解析（%s）" % (_r.get("why", "") if not _r["ok"] else "ok"),
+    check("符合性向量：好包能解析（%s）" % (_r.get("why", "") if not _r["ok"] else "ok"),
           _r["ok"])
     if _r["ok"]:
-        check("★★ 内容摘要是夹具里那个（它也是客户端会算出来的那个）",
+        check("内容摘要是夹具里那个（它也是客户端会算出来的那个）",
               _r["digest"] == _exp["digest"], _r["digest"])
-        check("★ 记录表读出来的逐份 path/size/sha256 与夹具**逐条、按序**相同",
+        check("记录表读出来的逐份 path/size/sha256 与夹具逐条、按序相同",
               [{"path": f["path"], "size": f["size"], "sha256": f["sha256"]}
                for f in _r["files"]] == _exp["files"],
               repr([f["path"] for f in _r["files"]])[:200])
-        check("★ 没有签名时 sig 是 None（不是 {} —— 缺席与空要分得开）",
+        check("没有签名时 sig 是 None（不是 {} —— 缺席与空要分得开）",
               _r["sig"] is None)
-        check("★ 清单从负载里读出来了（id 与夹具一致）",
+        check("清单从负载里读出来了（id 与夹具一致）",
               _r["manifest"].get("id") == "01M2JKHTZGQ7X8V4T5R6N7B8C9",
               repr(_r["manifest"].get("id")))
-        check("★ 包字节数就是夹具里那个（没有多出来的字节）",
+        check("包字节数就是夹具里那个（没有多出来的字节）",
               len(_r.get("data") or b"") == _exp["package"]["bytes"])
 
         # 摘要与"喂进去的次序"无关 —— 排序是摘要的一部分（§3.4）
         _rev = mod.package_content_digest(list(reversed(_r["files"])))
-        check("★ 倒着喂进去算出同一个摘要（排序按路径字节，不是按进去的先后）",
+        check("倒着喂进去算出同一个摘要（排序按路径字节，不是按进去的先后）",
               _rev == _exp["digest"], _rev)
 
         # v0.13：两侧的摘要（A.3 的四元组要这两个数）。这一条同时是
@@ -4238,7 +4238,7 @@ exit 0
         #    夹具里那两个数是打包器那一侧算的（`generate.mjs` 自己那份实现），
         #    而这里用守护进程的实现重算一遍。
         _sd = mod.package_side_digests(_r["files"])
-        check("★★ 两侧的内容摘要与夹具逐字相同（打包器 / 守护进程两份实现）",
+        check("两侧的内容摘要与夹具逐字相同（打包器 / 守护进程两份实现）",
               _sd["site"] == _exp["sides"]["site"]["digest"]
               and _sd["client"] == _exp["sides"]["client"]["digest"],
               "%r vs %r" % (_sd, _exp["sides"]))
@@ -4246,24 +4246,24 @@ exit 0
         #   的话，站点侧的摘要会少算两份文件，而那个数只在签名里出现一次 ——
         #   症状是"签名验不过"，排查的人会去查钥匙。（`generate.mjs` 自己就错过一次。）
         _site_paths = [f["path"] for f in mod.package_sides(_r["files"])["site"]]
-        check("★ 两个顶层元数据文件在**站点侧**里（站点侧不是客户端侧的补集）",
+        check("两个顶层元数据文件在站点侧里（站点侧不是客户端侧的补集）",
               "plugin.json" in _site_paths and "lineage.json" in _site_paths
               and "client/index.js" not in _site_paths,
               repr(_site_paths))
-        check("★ 而两侧的那份 `client/**` 与 `job/**` 各自归位",
+        check("而两侧的那份 `client/` 与 `job/` 各自归位",
               "client/extra.js" in _exp["sides"]["client"]["files"]
               and "job/start.sh" in _exp["sides"]["site"]["files"],
               repr(_exp["sides"]))
 
     _s = mod.package_parse(_signed)
-    check("★ 带签名的包也解析得动，而且**摘要与不带签名的那份逐字相同**", _s["ok"] and
+    check("带签名的包也解析得动，而且摘要与不带签名的那份逐字相同", _s["ok"] and
           _s["digest"] == _exp["digest"],
           "%s %s" % (_s.get("code"), _s.get("why")))
     if _s["ok"] and _s["sig"]:
-        check("★ 公钥指纹与夹具一致（给人核对的那一串，§4.1）",
+        check("公钥指纹与夹具一致（给人核对的那一串，§4.1）",
               _s["sig"]["fingerprint"] == _exp["signed"]["fingerprint"],
               _s["sig"]["fingerprint"])
-        check("★ 公钥字节就是夹具里那 32 个字节",
+        check("公钥字节就是夹具里那 32 个字节",
               _s["sig"]["pubkey"].hex() == _exp["signed"]["publicKeyHex"])
 
     # 包解析器不验签，这是一条有断言的事实，不是一件被忘掉的事。
@@ -4281,11 +4281,11 @@ exit 0
     #      实现的密码学，是这条路上最不该省的那一步的反面 —— 要验就调系统
     #      openssl（见 `openssl_verify_ed25519`）。
     _needs_verify = [c for c in _bad["cases"] if c.get("needs") == "verify"]
-    check("★ 夹具里至少有两条是「只有会验签的一端才拒得了」的",
+    check("夹具里至少有两条是「只有会验签的一端才拒得了」的",
           len(_needs_verify) >= 2, repr([c["name"] for c in _needs_verify]))
     for _c in _needs_verify:
         _g = mod.package_parse(_unhex(_c["hex"]))
-        check("★★ 包解析器**收下**它（%s）—— 解析器不验签，这是分工不是漏洞"
+        check("包解析器收下它（%s）—— 解析器不验签，这是分工不是漏洞"
               % _c["name"],
               _g["ok"], "却被拒了：%s %s" % (_g.get("code"), _g.get("why")))
 
@@ -4297,7 +4297,7 @@ exit 0
         _got = "ok" if _g["ok"] else _g["code"]
         if _got != _c["code"]:
             _wrong.append("%s：%s→%s" % (_c["name"], _c["code"], _got))
-    check("★★ %d 条坏包逐条对上夹具里的理由词（词表与判的次序是三端共用的契约）"
+    check("%d 条坏包逐条对上夹具里的理由词（词表与判的次序是三端共用的契约）"
           % (len(_bad["cases"]) - len(_needs_verify)), not _wrong,
           "；".join(_wrong))
 
@@ -4309,14 +4309,14 @@ exit 0
     #    症状是"站点发出去的包客户端解析得了、而摘要对不
     #    上" —— 排查方向会先落到钥匙上。
     #
-    #    判据是逐字节全等，不是"摘要一样"：摘要不吃信封（§3.4），所以记录表
+    #    判据是逐字节全等，不是"摘要相同"：摘要不吃信封（§3.4），所以记录表
     #      次序变了、长度字段写错了，摘要都会照样相同，而客户端会解析出一个与你
     #      报的不一样的东西。
     _again = mod.package_build(
         [{"path": f["path"], "sha256": f["sha256"],
           "data": _good[f["offset"]:f["offset"] + f["size"]]}
          for f in _r["files"]], b"")
-    check("★★ 第四份实现：照着记录表重打一个包 ⇒ 与打包器产出的字节**逐字节全等**",
+    check("第四份实现：照着记录表重打一个包，与打包器产出的字节逐字节全等",
           _again == _good,
           "%d vs %d 字节；首个不同在 %s"
           % (len(_again), len(_good),
@@ -4328,7 +4328,7 @@ exit 0
             [{"path": f["path"], "sha256": f["sha256"],
               "data": _signed[f["offset"]:f["offset"] + f["size"]]}
              for f in _s["files"]], _sigblk)
-        check("★★ 带签名的那一份同样逐字节全等（签名块也被原样重建）",
+        check("带签名的那一份同样逐字节全等（签名块也被原样重建）",
               _again_s == _signed,
               "%d vs %d 字节" % (len(_again_s), len(_signed)))
     # 而"记录表次序"确实是这个等式的一部分：把次序倒过来重打，内容摘要不变、
@@ -4337,7 +4337,7 @@ exit 0
         [{"path": f["path"], "sha256": f["sha256"],
           "data": _good[f["offset"]:f["offset"] + f["size"]]}
          for f in reversed(_r["files"])], b"")
-    check("★ 对照：倒着打出来的字节**不一样**，而摘要一样"
+    check("对照：倒着打出来的字节不同，而摘要相同"
           "（次序是字节等式的一部分，不是摘要的一部分）",
           _revb != _good
           and mod.package_parse(_revb)["digest"] == _exp["digest"],
@@ -4354,18 +4354,18 @@ exit 0
     #   不是本文件手拼的 —— 手拼的话，这一条就退化成"我跟我自己比"。
     _cli = _unhex(_exp["clientSide"]["hex"])
     _c = mod.package_parse(_cli)
-    check("★★ 只含客户端侧的那一份是一个**合法包**"
-          "（A.4 第 10 步③只核**包里在的那几侧**）",
+    check("只含客户端侧的那一份是一个合法包"
+          "（A.4 第 10 步③只核包里在的那几侧）",
           _c["ok"], "%s %s" % (_c.get("code"), _c.get("why")))
     if _c["ok"] and _s["ok"] and _s.get("sig"):
-        check("★ 它里面**没有一条站点侧路径** —— 判据①（用户机器上没有 job/）"
+        check("它里面没有一条站点侧路径 —— 判据①（用户机器上没有 job/）"
               "在这一层的可执行形式",
               all(mod.package_is_client_side(f["path"]) for f in _c["files"]),
               repr([f["path"] for f in _c["files"]]))
-        check("★ 它的份数与夹具里那几条**逐条、按序**相同（筛子只有一个方向）",
+        check("它的份数与夹具里那几条逐条、按序相同（筛子只有一个方向）",
               [f["path"] for f in _c["files"]] == _exp["clientSide"]["files"],
               repr([f["path"] for f in _c["files"]]))
-        check("★ 从它算出来的摘要 == 四元组里的 digestClient"
+        check("从它算出来的摘要 == 四元组里的 digestClient"
               "（客户端拿到手会自己算这一个）",
               mod.package_content_digest(_c["files"]) == _exp["clientSide"]["digest"]
               and _exp["clientSide"]["digest"] == _exp["signed"]["digestClient"],
@@ -4380,8 +4380,8 @@ exit 0
                      "data": _cli[f["offset"]:f["offset"] + f["size"]]}
                     for f in _c["files"]]
         _c_again = mod.package_build(_c_files, _sigblk_c, side="client")
-        check("★★ 第四份实现重打**只含客户端侧**的那一份 ⇒ 与打包器的字节"
-              "**逐字节全等**（本版最值钱的那条跨实现判据）",
+        check("第四份实现重打只含客户端侧的那一份，与打包器的字节"
+              "逐字节全等（本版最值钱的那条跨实现判据）",
               _c_again == _cli,
               "%d vs %d 字节" % (len(_c_again), len(_cli)))
         # 而把整棵树的记录喂进去、让实现自己筛，结果必须是同一串字节 ——
@@ -4391,18 +4391,18 @@ exit 0
                      "data": _signed[f["offset"]:f["offset"] + f["size"]]}
                     for f in _s["files"]]
         _c_from_all = mod.package_build(_s_files, _sigblk_c, side="client")
-        check("★ 把**整棵树**喂进去让实现自己筛 ⇒ 打出来的是同一串字节"
+        check("把整棵树喂进去让实现自己筛，打出来的是同一串字节"
               "（筛子只有 `package_build` 那一处）",
               _c_from_all == _cli,
               "%d vs %d 字节" % (len(_c_from_all), len(_cli)))
         # 对照：同一批整棵树的记录，不带 `side` 打出来的是整包（与它不一样）
         #   —— 否则上面那两条测的就是"两边都算了同一个常量"，而不是"按侧筛对了"。
         _c_none = mod.package_build(_s_files, _sigblk_c)
-        check("★ 对照：同一批记录不带 `side` ⇒ 打出来是**整包**，与只发的那一份"
-              "**不一样**（不然 `side` 根本没起作用）",
+        check("对照：同一批记录不带 `side`，打出来是整包，与只发的那一份"
+              "不同（不然 `side` 根本没起作用）",
               _c_none == _signed and _c_none != _cli,
               "不打 side 的那一串与整包%s" % ("相同" if _c_none == _signed else "不同"))
-        check("★ 而它比整包**小**，小的正好是站点侧那几份的负载与记录",
+        check("而它比整包小，小的正好是站点侧那几份的负载与记录",
               len(_cli) < len(_signed),
               "%d vs %d" % (len(_cli), len(_signed)))
 
@@ -4410,7 +4410,7 @@ exit 0
     _vocab = [mod.PACKAGE_LENGTH, mod.PACKAGE_MAGIC_BAD, mod.PACKAGE_FORMAT_BAD,
               mod.PACKAGE_RECORD, mod.PACKAGE_PATH, mod.PACKAGE_DUPLICATE,
               mod.PACKAGE_CONTENT, mod.PACKAGE_MANIFEST, mod.PACKAGE_SIGNATURE]
-    check("★ 词表里每一个词都有坏包钉住（有一个没人守就是一条没人守的判据）",
+    check("词表里每一个词都有坏包钉住（有一个没人守就是一条没人守的判据）",
           not [v for v in _vocab if v not in _covered],
           repr([v for v in _vocab if v not in _covered]))
 
@@ -4428,15 +4428,15 @@ exit 0
             _threw = "%d 字节时居然通过了" % _n
             break
         _codes.add(_g["code"])
-    check("★★ 截断到任何一个长度都不抛、不通过（%d 种理由）" % len(_codes),
+    check("截断到任何一个长度都不抛、不通过（%d 种理由）" % len(_codes),
           _threw is None, _threw or "")
-    check("★ 而且截断确实产生了不止一种理由（只有一种说明检查太粗）",
+    check("而且截断确实产生了不止一种理由（只有一种说明检查太粗）",
           len(_codes) >= 2, repr(sorted(_codes)))
 
     # 大小写折叠是 ASCII-only：`İ`（U+0130）与 `K`（U+212A）是全 Unicode 折叠
     #   会折到 ASCII、而 ASCII-only 不折的两个。这是一条拒绝规则，
     #   折叠口径不一致就会出现"一边收、一边拒"。
-    check("★ 大小写折叠是 ASCII-only（全 Unicode 的 lower() 会在这两个字符上分家）",
+    check("大小写折叠是 ASCII-only（全 Unicode 的 lower() 会在这两个字符上分家）",
           mod.package_fold_ascii("ABC") == "abc"
           and mod.package_fold_ascii("İ") != "i"
           and mod.package_fold_ascii("K") != "k"
@@ -4444,12 +4444,12 @@ exit 0
           "%r %r %r" % (mod.package_fold_ascii("İ"),
                         mod.package_fold_ascii("K"),
                         mod.package_fold_ascii("A中B")))
-    check("★ 而且 `str.lower()` 真的会分家 —— 这一条说明上一条不是在防一个假想",
+    check("而且 `str.lower()` 真的会分家 —— 这一条说明上一条不是在防一个假想",
           "K".lower() == "k" and len("İ".lower()) == 2)
 
     # `--extract-package`：集群侧读包的唯一入口，也是部署脚本织作业脚本要用
     #   的那个。它的输出必须是逐字节那一份文件 —— 标准输出上多一行日志，取回来
-    #   的 job/start.sh 里就混进了一行日志，而那是"部署成功了但作业起不来"。
+    #   的 job/start.sh 里就混进了一行日志，而那是"部署成功了但作业无法启动"。
     _pkgfile = os.path.join(tempfile.mkdtemp(prefix="slurmate-pkg-"), "x.splug")
     try:
         with open(_pkgfile, "wb") as _f:
@@ -4461,21 +4461,21 @@ exit 0
         _run = subprocess.run([sys.executable, DAEMON, "--extract-package",
                                _pkgfile, "job/start.sh"],
                               capture_output=True)
-        check("★★ --extract-package 的输出**逐字节**等于包里那一份（多一行日志就废了）",
+        check("--extract-package 的输出逐字节等于包里那一份（多一行日志就废了）",
               _run.returncode == 0 and _run.stdout == _want,
               "rc=%d，stdout %d 字节（期望 %d），stderr=%r"
               % (_run.returncode, len(_run.stdout), len(_want or b""),
                  _run.stderr[:200]))
         _miss = subprocess.run([sys.executable, DAEMON, "--extract-package",
                                 _pkgfile, "job/nope.sh"], capture_output=True)
-        check("★ 包里没有那一份时明确失败（不是安静地输出空）",
+        check("包里没有那一份时明确失败（不是安静地输出空）",
               _miss.returncode != 0 and _miss.stdout == b"", repr(_miss.stdout[:80]))
         _badpkg = os.path.join(os.path.dirname(_pkgfile), "bad.splug")
         with open(_badpkg, "wb") as _f:
             _f.write(_unhex([c for c in _bad["cases"] if c["code"] == "magic"][0]["hex"]))
         _badrun = subprocess.run([sys.executable, DAEMON, "--extract-package",
                                   _badpkg, "job/start.sh"], capture_output=True)
-        check("★ 包本身不成立时，错误走 stderr、stdout 一个字节都不出",
+        check("包本身不成立时，错误走 stderr、stdout 一个字节都不出",
               _badrun.returncode != 0 and _badrun.stdout == b""
               and b"magic" in _badrun.stderr, repr(_badrun.stderr[:200]))
     finally:
@@ -4540,9 +4540,9 @@ exit 0
             return os.stat_result((0o100644, 1, 1, 1, u, u, 10, 0, 0, 0))
 
         _alien = mod.package_input_problem(_probe, want_uid=UID, st=_st_with_uid(0))
-        check("★★ 属主不是安装器自己 ⇒ 拒绝（属主能随时改写自己拥有的文件）",
+        check("属主不是安装器自己，拒绝（属主能随时改写自己拥有的文件）",
               _alien is not None and "属于" in _alien, repr(_alien))
-        check("★ 对照：同一个文件、属主是自己 ⇒ 放行（上一条不是恒真）",
+        check("对照：同一个文件、属主是自己，放行（上一条不是恒真）",
               mod.package_input_problem(_probe, want_uid=UID,
                                         st=_st_with_uid(UID)) is None,
               repr(mod.package_input_problem(_probe, want_uid=UID,
@@ -4551,21 +4551,21 @@ exit 0
         _link = os.path.join(_ins_home, "link.splug")
         os.symlink(_probe, _link)
         _rc, _out = _install([_link], _INSDIR)
-        check("★★ 符号链接冒充 `.splug` ⇒ 拒绝（目标随时可以换）",
+        check("符号链接冒充 `.splug`，拒绝（目标随时可以换）",
               _rc == 1 and "符号链接" in _out and os.listdir(_INSDIR) == [],
               "rc=%d %r" % (_rc, _out[:160]))
 
         _loose = _pkg_of(_UID_A, "loose")
         os.chmod(_loose, 0o666)
         _rc, _out = _install([_loose], _INSDIR)
-        check("★★ 组/其他人可写的包 ⇒ 拒绝（022 位）",
+        check("组/其他人可写的包，拒绝（022 位）",
               _rc == 1 and "可写" in _out and os.listdir(_INSDIR) == [],
               "rc=%d %r" % (_rc, _out[:160]))
         os.chmod(_loose, 0o644)
 
         # ── ② 验签 ──
         if not openssl_bin():
-            check("★★ 本机没有 openssl —— 安装器的验签这一路**测不了**"
+            check("本机没有 openssl —— 安装器的验签这一路测不了"
                   "（不是「跳过」，是这一节的核心没被验到）", False,
                   "装一个 openssl 再跑")
         else:
@@ -4573,21 +4573,21 @@ exit 0
             check("测试用的第一把 Ed25519 钥匙造出来了", _k1 is not None)
             _signed = _pkg_of(_UID_A, "alpha", sig=_k1)
             _rc, _out = _install([_signed], _INSDIR)
-            check("★★ 签名验过了 ⇒ 装上，而且**说出来了**",
+            check("签名验过了，装上，而且说出来了",
                   _rc == 0 and "签名验过了" in _out
                   and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A)),
                   "rc=%d %r" % (_rc, _out[:300]))
-            check("★ 落地用的名字是**包里的 id**（不是下载时那个文件名）",
+            check("落地用的名字是包里的 id（不是下载时那个文件名）",
                   os.path.isdir(mod.plugin_tree_dir(_INSDIR, _UID_A))
                   and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A))
                   and not [x for x in os.listdir(_INSDIR) if x.endswith(".splug")],
                   str(sorted(os.listdir(_INSDIR))))
-            check("★★ 而盘上**没有**那个容器 —— 装完之后它就不再存在了"
+            check("而盘上没有那个容器 —— 装完之后它就不再存在了"
                   "（容器是运输形状，不是存储形状）",
                   not [x for x in os.listdir(_INSDIR) if x.endswith(".splug")]
                   and os.path.isdir(mod.plugin_tree_dir(_INSDIR, _UID_A)),
                   str(sorted(os.listdir(_INSDIR))))
-            check("★★ 装出来的那棵树过得了启动时的对账（装得上就得认得出）",
+            check("装出来的该目录树过得了启动时的对账（装得上就得认得出）",
                   mod.plugin_reconcile(_INSDIR, _UID_A)["ok"] is True,
                   str(mod.plugin_reconcile(_INSDIR, _UID_A))[:200])
             # 装完之后现打出来的包与作者发的原件逐字节相同。
@@ -4596,7 +4596,7 @@ exit 0
             with open(_signed, "rb") as _sf:
                 _orig_bytes = _sf.read()
             _back, _br = mod.plugin_rebuild(_INSDIR, _UID_A)
-            check("★★ 从盘上那棵树现打一个包 ⇒ 与作者发的原件**逐字节全等**",
+            check("从盘上该目录树现打一个包，与作者发的原件逐字节全等",
                   _br["ok"] and _back == _orig_bytes,
                   "%d vs %d 字节（%s）"
                   % (len(_back or b""), len(_orig_bytes),
@@ -4624,7 +4624,7 @@ exit 0
             if _ts:
                 _tsig = sig_block_of(_tquad, _k1[1], _ts)
             install_package(_tamdir, _tfiles, sig_block=_tsig or b"")
-            check("（夹具）被改的那一份是**签过名**的（否则这条测的是别的闸）",
+            check("（夹具）被改的那一份是签过名的（否则这条测的是其他闸）",
                   _tsig is not None and mod.plugin_reconcile(
                       _tamdir, _UID_B)["ok"] is True,
                   str(mod.plugin_reconcile(_tamdir, _UID_B))[:200])
@@ -4642,11 +4642,11 @@ exit 0
                     _e["size"] = len(_tblob)
                     _e["sha256"] = hashlib.sha256(_tblob).hexdigest()
             mod.write_plugin_record(_tamdir, _UID_B, _trec)
-            check("★★★ 改树 + 同步改表 ⇒ **逐份对账会通过**（只有签名拦得住它）",
+            check("改树 + 同步改表，逐份对账会通过（只有签名拦得住它）",
                   mod.plugin_reconcile(_tamdir, _UID_B, verify=False)["ok"] is True,
                   str(mod.plugin_reconcile(_tamdir, _UID_B, verify=False))[:200])
             _tr = mod.plugin_reconcile(_tamdir, _UID_B)
-            check("★★★ 而它**真的被拒了**，理由是 signature（重建的摘要与签名对不上）",
+            check("而它真的被拒了，理由是 signature（重建的摘要与签名不一致）",
                   _tr["ok"] is False and _tr["code"] == mod.PACKAGE_SIGNATURE,
                   "ok=%s code=%s why=%s" % (_tr["ok"], _tr.get("code"),
                                             str(_tr.get("why"))[:160]))
@@ -4661,14 +4661,14 @@ exit 0
             _tr2 = mod.plugin_reconcile(_tamdir, _UID_B)
             # 改了 pubkey 也可能恰好解不出曲线点，仍然必须是 signature
             #   （`_envelope_sig` 返回 None 时走的是同一条理由词）。
-            check("★★★ 只改记录表里那个公钥一位 ⇒ 同样拒，理由仍是 signature",
+            check("只改记录表里那个公钥一位，同样拒，理由仍是 signature",
                   _tr2["ok"] is False and _tr2["code"] == mod.PACKAGE_SIGNATURE,
                   "ok=%s code=%s" % (_tr2["ok"], _tr2.get("code")))
             # 而站点的自检也报它（不是只有函数级那一层看得见）
             _tcrun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                      "--plugins-dir", _tamdir],
                                     capture_output=True, text=True)
-            check("★★ 自检那一屏也报出来，而且**不退 0 成功**",
+            check("自检那一屏也报出来，而且不退 0 成功",
                   _tcrun.returncode == 1 and "不可用" in _tcrun.stdout,
                   "rc=%d %r" % (_tcrun.returncode, _tcrun.stdout[-300:]))
 
@@ -4695,10 +4695,10 @@ exit 0
             _twrc = mod.weave_plugin_jobs(
                 _tamdir, _twjobs, os.path.join(HERE, "run.sbatch"),
                 say=lambda *x: _twbuf.write(" ".join(str(y) for y in x) + "\n"))
-            check("★★ 对不过账的那个插件 ⇒ 织那一步**不会把它织进去**",
+            check("对不过账的那个插件，织那一步不会把它织进去",
                   not os.path.isfile(os.path.join(_twjobs, _UID_B + ".sbatch")),
                   _jobs_diag(_twrc, _twjobs, _twbuf.getvalue()))
-            check("★ 而它说了**为什么没织**（不织与织不了在输出上要分得开）",
+            check("而它说了为什么没织（不织与织不了在输出上要分得开）",
                   "不织它们" in _twbuf.getvalue(), repr(_twbuf.getvalue()[:300]))
             # 对照：同一批里能用的那些照常织得出来（一个坏了不带走一整批）
             install_package(_tamdir, [
@@ -4710,12 +4710,12 @@ exit 0
             _twrc2 = mod.weave_plugin_jobs(
                 _tamdir, _twjobs, os.path.join(HERE, "run.sbatch"),
                 say=lambda *x: _twbuf2.write(" ".join(str(y) for y in x) + "\n"))
-            check("★★ 对照：同一批里能用的那个**照常织出来**（一个坏了不带走一整批）",
+            check("对照：同一批里能用的那个照常织出来（一个坏了不带走一整批）",
                   _twrc2 == 0
                   and os.path.isfile(os.path.join(_twjobs, _UID_A + ".sbatch"))
                   and not os.path.isfile(os.path.join(_twjobs, _UID_B + ".sbatch")),
                   _jobs_diag(_twrc2, _twjobs, _twbuf2.getvalue()))
-            check("★ 站点侧记下了「这个 id 是哪把钥匙签的」",
+            check("站点侧记下了「这个 id 是哪把钥匙签的」",
                   mod.read_plugin_keys(_INSDIR, strict=True).get(
                       _UID_A, {}).get("fingerprint")
                   == hashlib.sha256(_k1[1]).hexdigest(),
@@ -4723,7 +4723,7 @@ exit 0
 
             # 装完之后守护进程真的认它 —— 装得上、扫不出，是最坏的那种失败。
             _ispecs, _iprobs = mod.scan_plugins(_INSDIR)
-            check("★★ 装进去的那个包，守护进程扫得出来（装得上就得认得出）",
+            check("装进去的那个包，守护进程扫得出来（装得上就得认得出）",
                   _iprobs == () and [s.name for s in _ispecs] == ["alpha"],
                   "%s / %s" % ([s.name for s in _ispecs], _iprobs))
 
@@ -4744,7 +4744,7 @@ exit 0
                                        sig_block_of(_bare_quad, _k1[1], _flipped)))
             _before = sorted(os.listdir(_INSDIR))
             _rc, _out = _install([_tp], _INSDIR)
-            check("★★ 签名对不上（内容被改过）⇒ 拒绝，且一个字节都不写",
+            check("签名不一致（内容被改过）， 拒绝，且一个字节都不写",
                   _rc == 1 and "签名验不过" in _out
                   and sorted(os.listdir(_INSDIR)) == _before,
                   "rc=%d %r" % (_rc, _out[:200]))
@@ -4771,7 +4771,7 @@ exit 0
             _irec["envelope"]["version"] = "1.0.1"     # 与清单不符（等长，所以形状仍合法）
             mod.write_plugin_record(_iddir, _UID_B, _irec)
             _ir = mod.plugin_reconcile(_iddir, _UID_B)
-            check("★★ 信封说的版本与清单不符 ⇒ 拒，理由是 manifest（身份先于密码学）",
+            check("信封说的版本与清单不符，拒，理由是 manifest（身份先于密码学）",
                   _ir["ok"] is False and _ir["code"] == mod.PACKAGE_MANIFEST
                   and "1.0.1" in _ir["why"] and "1.0.0" in _ir["why"],
                   "%s %s" % (_ir.get("code"), _ir.get("why")))
@@ -4782,9 +4782,9 @@ exit 0
             mod.PLUGIN_OPENSSL = "slurmate-no-such-openssl"
             try:
                 _rc, _out = _install([_signed], _INSDIR)
-                check("★★ 本机验不了签名 ⇒ **拒绝**（不装一个没验过的包）",
+                check("本机验不了签名，拒绝（不装一个没验过的包）",
                       _rc == 1 and "验不了" in _out, "rc=%d %r" % (_rc, _out[:240]))
-                check("★ 而且那句话指路（装上 openssl 再试），不是一句「失败了」",
+                check("而且那句话指路（装上 openssl 再试），不是一句「失败了」",
                       "openssl" in _out and "pkeyutl" in _out, repr(_out[:240]))
             finally:
                 mod.PLUGIN_OPENSSL = _saved_ossl
@@ -4794,24 +4794,24 @@ exit 0
             _fk1 = hashlib.sha256(_k1[1]).hexdigest()
             _other = _pkg_of(_UID_A, "alpha", ver="2.0.0", sig=_k2)
             _rc, _out = _install([_other], _INSDIR)
-            check("★★ 同一个 id 换了签名者 ⇒ **拒绝**（§2.5 的机械判据）",
+            check("同一个 id 换了签名者，拒绝（§2.5 的机械判据）",
                   _rc == 1 and "上一次不是这么签的" in _out,
                   "rc=%d %r" % (_rc, _out[:240]))
-            check("★★ 而且把**两把指纹**都报出来（运维要拿它去核对）",
+            check("而且把两把指纹都报出来（运维要拿它去核对）",
                   _fk1[:16] in _out
                   and hashlib.sha256(_k2[1]).hexdigest()[:16] in _out, repr(_out[:400]))
-            check("★★ 并且给出两条有后果的出路（换签名者 / 分身），不替你选",
+            check("并且给出两条有后果的出路（换签名者 / 分身），不代为选",
                   "replace-key" in _out and "--fork" in _out, repr(_out[:400]))
-            check("★ 拒绝之后站点上还是原来那一份（没被换掉）",
+            check("拒绝之后站点上还是原来那一份（没被换掉）",
                   mod.read_plugin_keys(_INSDIR)["%s" % _UID_A]["version"] == "1.0.0",
                   str(mod.read_plugin_keys(_INSDIR)))
 
             # 显式确认：值必须是记录里那把旧指纹 —— 随手加个开关不算确认
             _rc, _out = _install([_other], _INSDIR, replace_key="0" * 64)
-            check("★★ --replace-key 给的值与记录不符 ⇒ 仍然拒绝（确认要有依据）",
+            check("--replace-key 给的值与记录不符，仍然拒绝（确认要有依据）",
                   _rc == 1 and "上一次不是这么签的" in _out, "rc=%d" % _rc)
             _rc, _out = _install([_other], _INSDIR, replace_key=_fk1)
-            check("★★ --replace-key 给对了 ⇒ 装上，并且**说出来**这是显式确认",
+            check("--replace-key 给对了，装上，并且说出来这是显式确认",
                   _rc == 0 and "换成了" in _out
                   and mod.read_plugin_keys(_INSDIR)[_UID_A]["fingerprint"]
                   == hashlib.sha256(_k2[1]).hexdigest(),
@@ -4821,15 +4821,15 @@ exit 0
             #   摘掉签名正是"降级到不用验"的那一步，而它的后果与换钥匙一样。
             _bare = _pkg_of(_UID_A, "alpha", ver="3.0.0")
             _rc, _out = _install([_bare], _INSDIR)
-            check("★★ 记着有签名、这次来了个没签名的 ⇒ 拒绝（摘签名 = 降级）",
+            check("记着有签名、这次来了个没签名的，拒绝（摘签名 = 降级）",
                   _rc == 1 and "（这一份没有签名）" in _out,
                   "rc=%d %r" % (_rc, _out[:240]))
 
             # 首次安装一个没签名的包是允许的（§4.1 签名可选），但必须大声说
             _rc, _out = _install([_pkg_of(_UID_B, "beta")], _INSDIR)
-            check("★ 首次装一个没签名的包 ⇒ 允许，但必须**说出来**",
+            check("首次装一个没签名的包，允许，但必须说出来",
                   _rc == 0 and "没有签名" in _out, "rc=%d %r" % (_rc, _out[:240]))
-            check("★ 而且落地时最后再提醒一次（这一屏是管理员唯一的依据）",
+            check("而且落地时最后再提醒一次（这一屏是管理员唯一的依据）",
                   "没有源码可对照" in _out or "没签名的包" in _out, repr(_out[-300:]))
 
             # ── ④ §6.4：两个包同一个 id ──
@@ -4840,9 +4840,9 @@ exit 0
                     {"id": _UID_B, "name": "beta2", "version": "9.1.0",
                      "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))]))
             _rc, _out = _install([_dup1, _dup2], _INSDIR)
-            check("★★ 两个包同一个 id ⇒ 两个都不装（§6.4；按 id 命名会互相覆盖）",
+            check("两个包同一个 id，两个都不装（§6.4；按 id 命名会互相覆盖）",
                   _rc == 1 and "同一个插件" in _out, "rc=%d %r" % (_rc, _out[:240]))
-            check("★ 而且原来那一份没有被改动（两遍式的第一遍只读）",
+            check("而且原来那一份没有被改动（两遍式的第一遍只读）",
                   mod.read_plugin_keys(_INSDIR)[_UID_B]["version"] == "1.0.0",
                   str(mod.read_plugin_keys(_INSDIR)[_UID_B]))
 
@@ -4853,7 +4853,7 @@ exit 0
             with open(_broken, "wb") as _f:
                 _f.write(b"splug\x1a\r\n" + b"\0" * 40)
             _rc, _out = _install([_good_batch, _broken], _INSDIR)
-            check("★★ 一批里有一个坏的 ⇒ **一个字节都不写**（两遍式）",
+            check("一批里有一个坏的，一个字节都不写（两遍式）",
                   _rc == 1 and "一个字节都没有写" in _out
                   and mod.read_plugin_keys(_INSDIR)[_UID_B]["version"] == "1.0.0",
                   "rc=%d %r" % (_rc, _out[:300]))
@@ -4863,7 +4863,7 @@ exit 0
                 ("big.bin", b"z" * (mod.PLUGIN_PACKAGE_MAX_BYTES + 16))],
                 out=os.path.join(_ins_home, "batch"))
             _rc, _out = _install([_fat], _INSDIR)
-            check("★★ 超过整包上限 ⇒ 拒绝（它装上去客户端也取不回来）",
+            check("超过整包上限，拒绝（装上去也送不到客户端）",
                   _rc == 1 and "超过本站的整包上限" in _out, "rc=%d %r" % (_rc, _out[:200]))
 
             # ── ⑦ 站点侧那把钥匙的记录坏了，不收（不能当成"没记住"）──
@@ -4871,7 +4871,7 @@ exit 0
                       encoding="utf-8") as _f:
                 _f.write("{ 这不是 JSON")
             _rc, _out = _install([_signed], _INSDIR)
-            check("★★ 钥匙记录读不出来 ⇒ 拒绝（当成空的会让换钥匙静默放行）",
+            check("钥匙记录读取失败，拒绝（当成空的会让换钥匙静默放行）",
                   _rc == 1 and "钥匙记录" in _out, "rc=%d %r" % (_rc, _out[:240]))
             os.unlink(os.path.join(_INSDIR, ".keys.json"))
 
@@ -4895,9 +4895,9 @@ exit 0
         _crun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _bypass],
                                capture_output=True, text=True)
-        check("★★ 包上的签名者与安装记录不符 ⇒ 自检点名（绕过安装器放包的形状）",
+        check("包上的签名者与安装记录不符，自检点名（绕过安装器放包的形状）",
               "签名者与安装记录不符" in _crun.stdout, repr(_crun.stdout[-400:]))
-        check("★ 但它**不中止**（守护进程仍然照常起来 —— 一条记录不符不该带走整个站点）",
+        check("但它不中止（守护进程仍然照常起来 —— 一条记录不符不该带走整个站点）",
               _crun.returncode == 0, "rc=%d %r" % (_crun.returncode,
                                                    _crun.stderr[-200:]))
 
@@ -4914,10 +4914,10 @@ exit 0
         #   这一版分发出去的那一份，两者不是一回事。
         _blob_b, _rb_b = mod.plugin_rebuild(_bypass, _UID_A, side=None)
         _container_sha = hashlib.sha256(_blob_b or b"").hexdigest()
-        check("★★ 自检报出**完整的内容摘要**（拿它去与作者报的那个逐个字符比）",
+        check("自检报出完整的内容摘要（拿它去与作者报的那个逐个字符比）",
               ("内容摘要  %s（整棵树）" % _want_digest) in _crun.stdout,
               repr(_crun.stdout[-400:]))
-        check("★ 而它**不是**容器字节的 sha256（补一个签名块不该动这个数）",
+        check("而它不是容器字节的 sha256（补一个签名块不该动这个数）",
               _want_digest != _container_sha
               and ("内容摘要  %s" % _container_sha) not in _crun.stdout,
               "%s vs %s" % (_want_digest[:16], _container_sha[:16]))
@@ -4949,7 +4949,7 @@ exit 0
         #   阶段 4 的主题判据（客户端池里没有 `job/`）。
         #   而「树」那一行报的仍然是整棵树的份数（2 / 1），它来自记录表 ——
         #     自检要能同时回答"装了什么"与"发什么"，两个数都得在。
-        check("★★ 「分发出去」只数客户端侧：带 job 的与不带的，份数一样（各 1 份）",
+        check("「分发出去」只数客户端侧：带 job 的与不带的，份数相同（各 1 份）",
               _trun.stdout.count("只含客户端侧 1 份") == 2
               and "（2 份 / 负载" in _trun.stdout
               and "（1 份 / 负载" in _trun.stdout,
@@ -4957,7 +4957,7 @@ exit 0
 
         # ── ⑩ 用法错误：一个包都没给 ──
         _rc, _out = _install([], _INSDIR)
-        check("★ 一个包都没给 ⇒ 用法错误（code 2），不是静默成功",
+        check("一个包都没给，用法错误（code 2），不是静默成功",
               _rc == 2 and "用法" in _out, "rc=%d %r" % (_rc, _out[:120]))
     finally:
         shutil.rmtree(_ins_home, ignore_errors=True)
@@ -4999,12 +4999,12 @@ exit 0
         _m = re.search(r"const %s = \[([^\]]*)\]" % _const, _mk_js, re.S)
         _mk_client[_name] = re.findall(r"'([^']*)'", _m.group(1)) if _m else None
         _mk_daemon[_name] = list(getattr(mod, _const, ()))
-    check("★ 十处都真的抠到了键（抠出 None 或空表的话，下面五条是**假通过**）",
+    check("十处都真的抠到了键（抠出 None 或空表，下面五条是假通过）",
           all(_mk_client[n] for n, _ in _mk_tables)
           and all(_mk_daemon[n] for n, _ in _mk_tables),
           "客户端 %r / 守护进程 %r" % (_mk_client, _mk_daemon))
     for _name, _const in _mk_tables:
-        check("★★ %s：书面判据 = 客户端字面量 = 守护进程元组（逐字、有序）"
+        check("%s：书面判据 = 客户端字面量 = 守护进程元组（逐字、有序）"
               % _name,
               _mk_written.get(_name) == _mk_client[_name] == _mk_daemon[_name],
               "书面 %r / 客户端 %r / 守护进程 %r"
@@ -5055,7 +5055,7 @@ exit 0
         _mf = json.loads(json.dumps(_mk_valid))
         _edit(_mf)
         _s2, _p2 = _mk_parse(_mf)
-        check("★★ %s 里拼错成 %s ⇒ **拒**，且报错点名那个键"
+        check("%s 里拼错成 %s，拒，且报错点名那个键"
               % (_where, _key),
               _s2 is None and any("认不得的键" in x and _key in x for x in _p2),
               "%s / %s" % (_s2, _p2))
@@ -5142,14 +5142,14 @@ exit 0
                 _pl_hv = None
                 break
 
-    check("★ 三侧的字面量都真的抠出来了（抠出 None 的话，下面几条是**假通过**）",
+    check("三侧的字面量都真的抠出来了（抠出 None，下面几条是假通过）",
           _pl_cv is not None and _pl_pv is not None and _pl_hv is not None
           and set(_pl_hv) == {"file_bytes", "total_bytes", "max_files", "max_depth",
                               "package_bytes"},
           "客户端 %r / 打包器 %r / HARD_LIMITS %r" % (_pl_cv, _pl_pv, _pl_hv))
 
     _pl_written = _pl["load"]
-    check("★★ 客户端 HARD_LIMITS 的四个负载上限 = 书面判据（逐字）",
+    check("客户端 HARD_LIMITS 的四个负载上限 = 书面判据（逐字）",
           _pl_hv is not None and all(
               _pl_hv[k] == _pl_written[k]
               for k in ("file_bytes", "total_bytes", "max_files", "max_depth")),
@@ -5159,18 +5159,18 @@ exit 0
     #   "读一个包时允许多深"的那个数；而 tools/conformance/ 的坏包向量里没有
     #   一条"路径超过深度"的用例，所以它漂开不会红任何东西。
     _pl_pk = re.search(r"^const MAX_DEPTH = (\d+);$", _pl_pksrc, re.M)
-    check("★★ 客户端第二份深度上限（plugin-package.js）也对得上书面判据",
+    check("客户端第二份深度上限（plugin-package.js）也对得上书面判据",
           _pl_pk is not None and int(_pl_pk.group(1)) == _pl_written["max_depth"],
           "抠到 %r / 判据 %s" % (_pl_pk and _pl_pk.group(1), _pl_written["max_depth"]))
 
-    check("★★ 守护进程那三个 = 书面判据（逐字）",
+    check("守护进程那三个 = 书面判据（逐字）",
           mod.PLUGIN_FILE_MAX_BYTES == _pl_written["file_bytes"]
           and mod.PLUGIN_TOTAL_MAX_BYTES == _pl_written["total_bytes"]
           and mod.PLUGIN_MAX_FILES == _pl_written["max_files"],
           "%s / %s / %s vs %r"
           % (mod.PLUGIN_FILE_MAX_BYTES, mod.PLUGIN_TOTAL_MAX_BYTES,
              mod.PLUGIN_MAX_FILES, _pl_written))
-    check("★★ 打包器那四个 = 书面判据（逐字）",
+    check("打包器那四个 = 书面判据（逐字）",
           _pl_pv is not None
           and _pl_pv["MAX_FILE_BYTES"] == _pl_written["file_bytes"]
           and _pl_pv["MAX_TOTAL_BYTES"] == _pl_written["total_bytes"]
@@ -5189,25 +5189,25 @@ exit 0
     #   随版本号变（A.3）。书面判据那一格因此叫 `signature_max_bytes`。
     _pl_env = (_pl_fmt["header_bytes"] + _pl_fmt["signature_max_bytes"]
                + _pl_written["max_files"] * (_pl_fmt["record_overhead_bytes"] + _pl_path))
-    check("★★ 书面判据里的信封最坏情况 = 按附录 A.1 与 §3.3 现算一遍（%d 字节）"
+    check("书面判据里的信封最坏情况 = 按附录 A.1 与 §3.3 现算一遍（%d 字节）"
           % _pl_env,
           _pl_env == _pl["package"]["envelope_max_bytes"],
           "现算 %d / 判据 %d（改 §3.3 的深度、段长，或改份数上限，这个数会跟着动）"
           % (_pl_env, _pl["package"]["envelope_max_bytes"]))
-    check("★★ 负载上限 = 包上限 − 信封最坏情况（这条关系**刚好顶满**）",
+    check("负载上限 = 包上限 − 信封最坏情况（这条关系刚好顶满）",
           _pl_written["total_bytes"]
           == _pl["package"]["max_bytes"] - _pl["package"]["envelope_max_bytes"],
           "%d vs %d − %d" % (_pl_written["total_bytes"], _pl["package"]["max_bytes"],
                              _pl["package"]["envelope_max_bytes"]))
-    check("★★ 于是「按上限做出来的包一定装得进包上限」是一条**算出来的**结论"
-          "（从前那个 1 MiB 与 2 MiB 之间没有任何东西钉住）",
+    check("于是「按上限做出来的包一定装得进包上限」是一条算出来的结论"
+          "（从前那个 1 MiB 与 2 MiB 之间没有任何内容钉住）",
           _pl_written["total_bytes"] + _pl_env <= _pl["package"]["max_bytes"],
           "%d + %d > %d" % (_pl_written["total_bytes"], _pl_env,
                             _pl["package"]["max_bytes"]))
     # 三侧各自算出来的"签名块最长"必须与书面判据那一格逐字相同。
     #   少这一条的话，某一侧把 443 写成别的数时，"信封最坏情况"那条对它就成了
     #   一次自洽的错算 —— 自己跟自己永远对得上。
-    check("★★ 客户端与打包器各自算出来的签名块最长 = 书面判据那一格（443）",
+    check("客户端与打包器各自算出来的签名块最长 = 书面判据那一格（443）",
           _pl_cv is not None and _pl_pv is not None
           and _pl_cv["ENVELOPE_SIG_MAX"] == _pl_fmt["signature_max_bytes"]
           and _pl_pv["SIG_MAX_BYTES"] == _pl_fmt["signature_max_bytes"]
@@ -5215,7 +5215,7 @@ exit 0
           "客户端 %r / 打包器 %r / 守护进程 %r / 判据 %r"
           % (_pl_cv and _pl_cv["ENVELOPE_SIG_MAX"], _pl_pv and _pl_pv["SIG_MAX_BYTES"],
              mod.PACKAGE_SIG_MAX_BYTES, _pl_fmt["signature_max_bytes"]))
-    check("★★ 而签名块最短 = 最短那一块的长度（188 = alg+公钥+签名+id+verlen+两摘要）",
+    check("而签名块最短 = 最短那一块的长度（188 = alg+公钥+签名+id+verlen+两摘要）",
           _pl_pv is not None and mod.PACKAGE_SIG_MIN_BYTES == 188
           and _pl_pv["SIG_MIN_BYTES"] == 188
           and _pl_pv["SIG_MAX_BYTES"] == _pl_pv["SIG_MIN_BYTES"] + _pl_pv["MAX_VERSION_BYTES"]
@@ -5224,12 +5224,12 @@ exit 0
                             _pl_cv and _pl_cv["ENVELOPE_SIG_MIN"],
                             mod.PACKAGE_SIG_MIN_BYTES))
 
-    check("★ 守护进程那份兜底也得装得下站点报得出来的最大负载",
+    check("守护进程那份兜底也得装得下站点报得出来的最大负载",
           _pl_hv is not None
           and _pl_hv["package_bytes"] >= _pl["package"]["max_bytes"],
           "客户端 package_bytes %r / 站点最大 %d"
           % (_pl_hv and _pl_hv["package_bytes"], _pl["package"]["max_bytes"]))
-    check("★ 守护进程自己那三个数之间的关系也算得出来（不是各写各的）",
+    check("守护进程自己那三个数之间的关系也算得出来（不是各写各的）",
           mod.PACKAGE_ENVELOPE_MAX_BYTES == _pl_env
           and mod.PLUGIN_TOTAL_MAX_BYTES + mod.PACKAGE_ENVELOPE_MAX_BYTES
           <= mod.PLUGIN_PACKAGE_MAX_BYTES,
@@ -5338,7 +5338,7 @@ exit 0
 
         # ── ① 短名撞：两个都装 ──────────────────────────────────
         _rc, _out = _sy_install([_sy_mk(_U1, "jup"), _sy_mk(_U2, "jup")], _SY)
-        check("★★ 一批里两个包共用同一个**短名** ⇒ **两个都装**"
+        check("一批里两个包共用同一个短名，两个都装"
               "（短名不是身份，id 才是；作业脚本一插件一份，函数名不会撞）",
               _rc == 0 and _sy_pkgs(_SY) == [_U1 + ".json", _U2 + ".json"],
               "rc=%d %r" % (_rc, _out[:300]))
@@ -5349,25 +5349,25 @@ exit 0
         _before = tree_digest(mod.plugin_tree_dir(_SY, _U1)) + file_digest(_p1)
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup", body=b"DIFFERENT")], _SY)
-        check("★★ 同一个 id、**同一个版本**、内容不同 ⇒ 拒绝（F36）",
+        check("同一个 id、同一个版本、内容不同，拒绝（F36）",
               _rc == 1 and "同一个版本" in _out and "内容摘要" in _out,
               "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而且报错说清**为什么**（已经取过旧内容的客户端永远发现不了）",
+        check("而且报错说清为什么（已经取过旧内容的客户端永远发现不了）",
               "永远不会发现" in _out and "升版本号" in _out, _out[:400])
-        check("★ 盘上那一份**一个字节都没被动**（树与记录表都算）",
+        check("盘上那一份一个字节都没被动（树与记录表都算）",
               tree_digest(mod.plugin_tree_dir(_SY, _U1)) + file_digest(_p1)
               == _before)
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup")], _SY)
-        check("★ 对照：同一个 id@版本、内容**逐字节相同** ⇒ 放行（重装是幂等的）",
+        check("对照：同一个 id@版本、内容逐字节相同，放行（重装是幂等的）",
               _rc == 0, "rc=%d %r" % (_rc, _out[:240]))
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup", ver="1.1.0", body=b"b")], _SY)
-        check("★ 对照：同一个 id **换了版本** ⇒ 放行（那正是升级，不是这一条要拦的）",
+        check("对照：同一个 id 换了版本，放行（那正是升级，不是这一条要拦的）",
               _rc == 0 and "升级" in _out, "rc=%d %r" % (_rc, _out[:240]))
 
         _rc, _out = _sy_install([_sy_mk(_U1, "jup", ver="1.1.0", body=b"c")], _SY)
-        check("★ 同一个版本、升级之后又换内容 ⇒ 照样拒（判据是内容，不是文件时间）",
+        check("同一个版本、升级之后又换内容，照样拒（判据是内容，不是文件时间）",
               _rc == 1 and "同一个版本" in _out, "rc=%d %r" % (_rc, _out[:240]))
 
         # ── ③ 两个文件指着同一个插件，硬错误（账本 F38）────────────────────
@@ -5388,9 +5388,9 @@ exit 0
                            "[plugin:solo]\nenabled = yes\n"
                            "[plugin:%s]\nenabled = no\n" % _U3, "dupblock.conf")
         _errs = " ".join(_c.validate())
-        check("★★ 两个文件指的是**同一个插件**（一个用短名命名、一个用 id）⇒ 硬错误",
+        check("两个文件指的是同一个插件（一个用短名命名、一个用 id）， 硬错误",
               _errs != "", str(_c.validate())[:200])
-        check("★ 而且**两个文件路径都点出来** —— 只说「重复了」的话，用 id 命名的"
+        check("而且两个文件路径都点出来 —— 只说「重复了」，用 id 命名的"
               "那个认不出自己是哪一个",
               "solo.conf" in _errs and (_U3 + ".conf") in _errs, _errs[:300])
 
@@ -5419,35 +5419,35 @@ exit 0
 
         _rc, _out = _sy_sync(_SY3, _CONF_S)
         _p_solo = mod.plugin_conf_path(_CONF_S, _U3)
-        check("★★ 装了而没有配置的插件 ⇒ 写一份 `<id>.conf`",
+        check("装了而没有配置的插件，写一份 `<id>.conf`",
               _rc == 0 and os.path.isfile(_p_solo), "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而**主文件一个字节都没变**（插件配置不住在那儿了）",
+        check("而主文件一个字节都没变（插件配置不住在那儿了）",
               _sy_read(_CONF_S) == _orig_conf, repr(_sy_read(_CONF_S)[-300:]))
-        check("★ 文件名用**插件的 id**，不是短名 —— 这样「该删哪一个」是算得出来的",
+        check("文件名用插件的 id，不是短名 —— 这样「该删哪一个」是算得出来的",
               os.path.basename(_p_solo) == _U3 + ".conf", _p_solo)
-        check("★ 那一份里第一行写上**短名**（文件名是 ULID，人不认识）",
+        check("那一份里第一行写上短名（文件名是 ULID，人不认识）",
               "solo" in _sy_read(_p_solo), _sy_read(_p_solo)[:200])
         _solo1 = _sy_read(_p_solo)
         _g, _s, _m = mod.parse_config(_CONF_S)
         # 名字是 id（安装器按 id 命名），不是短名 —— 这一格正是"该删哪一个
         #   是算得出来的"那句话的另一面。
-        check("★★ 解析回来：通用键来自主文件、插件配置来自 `.d/`，来源记在 meta 里",
+        check("解析回来：通用键来自主文件、插件配置来自 `.d/`，来源记在 meta 里",
               _g == {"cluster_cidr": "192.0.2.0/24",
                      "readonly_paths": "/shared/home"}
               and set(_s) == {_U3} and _m[_U3]["file"] == _p_solo,
               "%s / %s / %s" % (_g, _s, _m))
-        check("★★ 生成的那一份让配置**自洽**了（`--check` 不再报错）",
+        check("生成的那一份让配置自洽了（`--check` 不再报错）",
               _sy_cfg_now(_SY3, _CONF_S).validate() == [],
               str(_sy_cfg_now(_SY3, _CONF_S).validate())[:240])
-        check("★★★ 而且**没有改动任何行为** —— 每个插件的 (开关, cpus, mem) 逐项相同",
+        check("而且没有改动任何行为 —— 每个插件的 (开关, cpus, mem) 逐项相同",
               _sy_effective(_sy_cfg_now(_SY3, _CONF_S)) == _eff_before,
               "%s → %s" % (_eff_before,
                            _sy_effective(_sy_cfg_now(_SY3, _CONF_S))))
 
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 幂等：再跑一遍，那一份**逐字节相同**（不是「又写了一份」）",
+        check("幂等：再跑一遍，那一份逐字节相同（不是「又写了一份」）",
               _rc == 0 and _sy_read(_p_solo) == _solo1, "rc=%d %r" % (_rc, _out[:300]))
-        check("★ 而且它说的是「已经一致」，不是一句含糊的「没做什么」",
+        check("而且它说的是「已经一致」，不是一句含糊的「没做什么」",
               "已经一致" in _out, _out[:200])
 
         # 管理员改过那一份，安装器此后一个字都不动（「升级不能乱变」）
@@ -5455,9 +5455,9 @@ exit 0
         with open(_p_solo, "w", encoding="utf-8") as _f:
             _f.write(_edited)
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 已有的那一份**逐字节不动**（管理员调过的开关与默认资源必须原样留着）",
+        check("已有的那一份逐字节不动（管理员调过的开关与默认资源必须原样留着）",
               _rc == 0 and _sy_read(_p_solo) == _edited, "rc=%d %r" % (_rc, _out[:300]))
-        check("★ 而且改过的那一份**真的生效**了（不是被静默忽略）",
+        check("而且改过的那一份真的生效了（不是被静默忽略）",
               _sy_cfg_now(_SY3, _CONF_S).plugin_config("solo").enabled is True,
               "还关着")
 
@@ -5466,10 +5466,10 @@ exit 0
         #     而不是"整个目录重写了一遍"。
         _p_typo = write_plugin_conf(_CONF_S, "typo", "enabled = yes\n")
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 手写的（不是 ULID 命名）那份指向一个没装的插件 ⇒ **不删**，只报",
+        check("手写的（不是 ULID 命名）那份指向一个没装的插件，不删，只报",
               _rc == 0 and os.path.isfile(_p_typo) and _p_typo in _out,
               "rc=%d %r" % (_rc, _out[:400]))
-        check("★ 而且那句话说出**凭什么不删**（那是他写的，不是安装器那份）",
+        check("而且那句话说出凭什么不删（那是他写的，不是安装器那份）",
               "手写" in _out, _out[:400])
 
         # 把插件从目录里拿走（最自然的卸载动作），它那一份被删掉，手写那份留着
@@ -5477,11 +5477,11 @@ exit 0
         #   没有记录表的树，而那是一条明确的错误，不是"没装"）。
         mod.remove_plugin_tree(_SY3, _U3)
         _rc, _out = _sy_sync(_SY3, _CONF_S)
-        check("★★ 插件从目录里拿走了 ⇒ **它那一份配置消失**（留着它守护进程会拒绝启动）",
+        check("插件从目录里拿走了，它那一份配置消失（留着它守护进程会拒绝启动）",
               _rc == 0 and not os.path.exists(_p_solo), "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而**手写的那一份还在**（判据是位置与名字，不是「整个目录重写一遍」）",
+        check("而手写的那一份还在（判据是位置与名字，不是「整个目录重写一遍」）",
               _rc == 0 and os.path.isfile(_p_typo), repr(_out[:300]))
-        check("★★ 主文件的通用键一个字没动",
+        check("主文件的通用键一个字没动",
               mod.parse_config(_CONF_S)[0] == {"cluster_cidr": "192.0.2.0/24",
                                                "readonly_paths": "/shared/home"},
               repr(_sy_read(_CONF_S)[-300:]))
@@ -5490,7 +5490,7 @@ exit 0
         # ── ④b 为什么这里没有「删块吃到 EOF」那条用例 ─────────────────
         #
         # 删的是整个文件：没有任何行的范围要算，也就没有算错的可能。
-        # 而"别的东西不许被顺手删掉"那条例律本身还在，由上面那条
+        # 而"其他条目不许被一并删掉"那条例律本身还在，由上面那条
         #   「手写的那一份还在」承担 —— 判据是"动的是不是只有它自己那一个文件"。
 
         # ── ④c 新写的那一份照主文件的模式与属主 ───────────────────────
@@ -5510,10 +5510,10 @@ exit 0
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _rc, _out = _sy_sync(_SY3, _CONF_M)
         _p_m = mod.plugin_conf_path(_CONF_M, _U3)
-        check("★★ 新写的那一份模式照**主文件**（0640，不是 mkstemp 的 0600）",
+        check("新写的那一份模式照主文件（0640，不是 mkstemp 的 0600）",
               _rc == 0 and (os.stat(_p_m).st_mode & 0o777) == 0o640,
               "%o" % (os.stat(_p_m).st_mode & 0o777))
-        check("★ 而且它**真的写了**（不是因为什么都没做才「没变」）",
+        check("而且它真的写了（不是因为什么都没做才「没变」）",
               os.path.isfile(_p_m) and "enabled =" in _sy_read(_p_m),
               _sy_read(_p_m)[-200:] if os.path.isfile(_p_m) else "（没有那个文件）")
 
@@ -5534,14 +5534,14 @@ exit 0
         mod.remove_plugin_tree(_SY3, _U3)              # 再把这个插件拿走
         _c_d = _sy_cfg_now(_SY3, _CONF_D)
         _errs = " ".join(_c_d.stale_conf_problems)
-        check("★★ 指向没装插件的**安装器那份** ⇒ 报 ⚠ 并指出「跑一次 plugin sync」"
+        check("指向没装插件的安装器那份，报警告并指出「跑一次 plugin sync」"
               "（那正是能修它的那个动作）",
               "plugin sync" in _errs and (_U3 + ".conf") in _errs, _errs[:300])
         # 悬空不拦启动。这两条合起来才是这个形状 —— 只断言
         #    "报了"的话，一个把悬空同时塞进 `validate()` 的实现照样绿，而
         #    那样守护进程会拒绝起来，症状与"插件坏了"毫无关系（改了配置之后连
         #    "停掉正在跑的会话"都做不到）。
-        check("★★ 而它**不拦启动** —— `validate()` 里一条都没有（悬空是 ⚠，不是错误）",
+        check("而它不拦启动 —— `validate()` 里一条都没有（悬空是警告，不是错误）",
               _c_d.validate() == [], str(_c_d.validate())[:300])
         # 先让 sync 把安装器那份收掉，再放一份手写的进去 —— 否则两条同时在，
         #   `_errs2` 里那句指路（来自安装器那份）会把"手写那种不说这句话"测成假的。
@@ -5549,12 +5549,12 @@ exit 0
         _p_hand = write_plugin_conf(_CONF_D, "typo2", "enabled = yes\n")
         _c_d2 = _sy_cfg_now(_SY3, _CONF_D)
         _errs2 = " ".join(_c_d2.stale_conf_problems)
-        check("★ 对照：**手写的**那种不说这句话（sync 不会替他删，说了就是骗人）",
+        check("对照：手写的那种不说这句话（sync 不会替他删，说了就是骗人）",
               _errs2 != "" and "plugin sync" not in _errs2, _errs2[:300])
-        check("★ 而报错里带**文件路径** —— 插件配置不在主文件里了，只说名字等于"
-              "让管理员去翻一个他找不到的地方",
+        check("而报错里带文件路径 —— 插件配置不在主文件里了，只说名字等于"
+              "让管理员去翻一个他未找到的地方",
               _p_hand in _errs2, _errs2[:300])
-        check("★ 手写的悬空同样**不拦启动**（两种成因的后果逐字相同，档位就该相同）",
+        check("手写的悬空同样不拦启动（两种成因的后果逐字相同，档位就该相同）",
               _c_d2.validate() == [], str(_c_d2.validate())[:300])
 
         # ── ④e 有人手写了它的配置，安装器不另写一份 ─────────────────
@@ -5569,15 +5569,15 @@ exit 0
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _p_by_hand = write_plugin_conf(_CONF_H, "solo", "enabled = yes\n")
         _rc, _out = _sy_sync(_SY3, _CONF_H)
-        check("★★ 已经有手写的一份 ⇒ 安装器**不另写** `<id>.conf`"
+        check("已经有手写的一份，安装器不另写 `<id>.conf`"
               "（两份指同一个插件是硬错误）",
               _rc == 0 and not os.path.exists(mod.plugin_conf_path(_CONF_H, _U3)),
               "rc=%d %r" % (_rc, _out[:300]))
-        check("★★ 而且配置照旧**自洽**：那份手写的按短名解析得到，开关也真的生效",
+        check("而且配置照旧自洽：那份手写的按短名解析得到，开关也真的生效",
               _sy_cfg_now(_SY3, _CONF_H).validate() == []
               and _sy_cfg_now(_SY3, _CONF_H).plugin_config("solo").enabled is True,
               str(_sy_cfg_now(_SY3, _CONF_H).validate())[:200])
-        check("★ 手写的那一份**逐字节没被动**",
+        check("手写的那一份逐字节没被动",
               _sy_read(_p_by_hand) == "enabled = yes\n", repr(_sy_read(_p_by_hand)))
 
         # ── ⑤ 清单声明 defaultEnabled=true 的插件，生成的那一份照实写 yes ────
@@ -5597,18 +5597,18 @@ exit 0
 
         _t_p = mod.plugin_conf_path(_CONF_T, _U3)
         _rc, _out = _sy_sync(_SY4, _CONF_T, dry_run=True)
-        check("★ 演练模式：报出**要做什么**（还没做），而且**一个字节都不写**",
+        check("演练模式：报出要做什么（还没做），而且一个字节都不写",
               _rc == 0 and _sy_read(_CONF_T) == _T_BASE and "演练" in _out
               and _t_p in _out and not os.path.exists(_t_p),
               "rc=%d %r" % (_rc, _out[:300]))
 
         _rc, _out = _sy_sync(_SY4, _CONF_T)
-        check("★★ 清单标了 defaultEnabled=true ⇒ 生成的那一份写 **enabled = yes**"
+        check("清单标了 defaultEnabled=true，生成的那一份写 enabled = yes"
               "（照实说出生效值，不许把它关掉）",
               _rc == 0 and os.path.isfile(_t_p)
               and "\nenabled = yes" in _sy_read(_t_p),
               _sy_read(_t_p)[-320:] if os.path.isfile(_t_p) else "（没有那个文件）")
-        check("★★★ 而且生效值装前装后**逐项相同** —— 生成物不改行为",
+        check("而且生效值装前装后逐项相同 —— 生成物不改行为",
               _sy_effective(_sy_cfg_now(_SY4, _CONF_T)) == _eff_b,
               "%s → %s" % (_eff_b, _sy_effective(_sy_cfg_now(_SY4, _CONF_T))))
 
@@ -5659,17 +5659,17 @@ exit 0
             _cli.sessiond_path = _saved_exe
             _cli.os.geteuid = _saved_euid
             sys.stdout = _saved_stdout
-        check("★ `slurmate plugin sync` 转发到 `--sync-plugins`（判据只有一处）",
+        check("`slurmate plugin sync` 转发到 `--sync-plugins`（判据只有一处）",
               _rc == 0 and _seen and _seen[0][1].endswith("slurmate-sessiond")
               and "--sync-plugins" in _seen[0],
               repr(_seen))
         # 而对齐成功之后真的去让守护进程重读了配置。
         #   没有这一步的话，配置改完就要管理员自己记得重跑一次基座安装脚本，而那是
         #   stop + start —— 所有人的会话断一次，就为了改一行插件配置。
-        check("★★ 对齐成功 ⇒ 真的调了 `systemctl reload`（配置改动不再需要重启）",
+        check("对齐成功，真的调了 `systemctl reload`（配置改动不再需要重启）",
               any(a[:2] == ["systemctl", "reload"] for a in _seen), repr(_seen))
-        check("★★ 而它**说准了**这一步做成了什么：只是「发了重载信号」，"
-              "**不是**「配置已生效」—— `systemctl reload` 回 0 只表示信号送到了，"
+        check("而它说准了这一步做成了什么：只是「发了重载信号」，"
+              "不是「配置已生效」—— `systemctl reload` 回 0 只表示信号送到了，"
               "守护进程可能整个拒绝 —— 并指路去看日志",
               "reload" in _sync_out and "没断" in _sync_out
               and "journalctl" in _sync_out, repr(_sync_out[:400]))
@@ -5697,7 +5697,7 @@ exit 0
             _cli.sessiond_path = _saved_exe
             _cli.os.geteuid = _saved_euid
             sys.stdout = _saved_stdout
-        check("★★ 服务没在跑 ⇒ 说的是「下次启动就会用上」，**不是**「已生效」"
+        check("服务没在跑，说的是「下次启动就会用上」，不是「已生效」"
               "（也不去调 reload）",
               _rc == 0 and "下次启动" in _down_out and "没断" not in _down_out
               and not any(a[:2] == ["systemctl", "reload"] for a in _seen[_n0:]),
@@ -5718,12 +5718,12 @@ exit 0
         _crun = subprocess.run([sys.executable, DAEMON, "--check-plugins",
                                 "--plugins-dir", _SY5],
                                capture_output=True, text=True)
-        check("★★ 那一列说的是「缺省开/缺省关」（它只知道清单里声明的缺省）",
+        check("那一列说的是「缺省开/缺省关」（它只知道清单里声明的缺省）",
               _crun.returncode == 0 and "缺省开" in _crun.stdout
               and "缺省关" in _crun.stdout
               and "启用" not in _crun.stdout and "停用" not in _crun.stdout,
               repr(_crun.stdout[-400:]))
-        check("★★ 而且它说清这一屏**不读站点配置** —— 不然「缺省开」会被读成"
+        check("而且它说清这一屏不读站点配置 —— 不然「缺省开」会被读成"
               "「本站已经开了」",
               "不读站点配置" in _crun.stdout, repr(_crun.stdout[-400:]))
         # 对照组：本站把那个插件关掉了，这一屏仍然说「缺省开」。
@@ -5731,7 +5731,7 @@ exit 0
         #   站点状态那一屏（`--check`）才是另一个答案。
         _c_off = _sy_cfg(_SY5, "cluster_cidr = 192.0.2.0/24\n"
                                "[plugin:onplug]\nenabled = no\n", "f39-off.conf")
-        check("★ 而本站的开关是**另一屏**的事（这一格说的是清单缺省，不是本站状态）",
+        check("而本站的开关是另一屏的事（这一格说的是清单缺省，不是本站状态）",
               _c_off.validate() == [] and not _c_off.plugin_config("onplug").enabled,
               str(_c_off.validate())[:200])
     finally:
@@ -5815,13 +5815,13 @@ exit 0
         _mk4(_U1, "alpha", out=_SRC)
         _mk4(_U2, "beta", out=_SRC)
         _rc, _out = _from_src()
-        check("★★ --from DIR：目录里的包全装上，并按 id 落地成一棵树 + 一份记录表",
+        check("--from DIR：目录里的包全装上，并按 id 落地成一棵树 + 一份记录表",
               _rc == 0 and _pkgs(_PD) == [_U1 + ".json", _U2 + ".json"]
               and all(os.path.isdir(mod.plugin_tree_dir(_PD, u))
                       for u in (_U1, _U2)),
               "%d %r %r" % (_rc, sorted(os.listdir(_PD)), _out[:200]))
-        check("★ 而它记下了「这一次是目录模式装的哪几个」（下一轮对账要靠它）"
-              "—— 每行是**裸 id**（一个插件两个条目，共同的名字就是 id）",
+        check("而它记下了「这一次是目录模式装的哪几个」（下一轮对账要靠它）"
+              "—— 每行是裸 id（一个插件两个条目，共同的名字就是 id）",
               _read_installed(_PD) == [_U1, _U2],
               repr(_read_installed(_PD)))
 
@@ -5830,7 +5830,7 @@ exit 0
         #      不是"目录里现在有什么"。
         os.unlink(os.path.join(_SRC, _U2 + ".splug"))
         _rc, _out = _from_src()
-        check("★★ 源里拿走一个包再同步 ⇒ 站点上那个插件也没了"
+        check("源里拿走一个包再同步，站点上那个插件也没了"
               "（树与记录表一起走）",
               _rc == 0 and _pkgs(_PD) == [_U1 + ".json"]
               and not os.path.isdir(mod.plugin_tree_dir(_PD, _U2)),
@@ -5842,7 +5842,7 @@ exit 0
         _mk4(_U3, "gamma", out=_d4)
         _quiet(mod.install_plugins, [os.path.join(_d4, _U3 + ".splug")], _PD)
         _rc, _out = _from_src()
-        check("★★ 手动装的插件不会被一次目录同步撤销（它不在记录里）",
+        check("手动装的插件不会被一次目录同步撤销（它不在记录里）",
               _rc == 0 and _pkgs(_PD) == [_U1 + ".json", _U3 + ".json"],
               "%d %r" % (_rc, _pkgs(_PD)))
 
@@ -5850,9 +5850,9 @@ exit 0
         _empty = os.path.join(_d4, "empty")
         os.makedirs(_empty, exist_ok=True)
         _rc, _out = _quiet(mod.install_plugins, [], _PD, src_dir=_empty)
-        check("★ 空目录合法，且它表示「这一次要装的是空集」",
+        check("空目录合法，且它表示「这一次要装的是空集」",
               _rc == 0 and "空集" in _out, "%d %r" % (_rc, _out[:300]))
-        check("★★ 于是上次由目录模式装的那个没了，**手动装的那个还在**",
+        check("于是上次由目录模式装的那个没了，手动装的那个还在",
               _pkgs(_PD) == [_U3 + ".json"], repr(_pkgs(_PD)))
 
         # ── ①d 源目录里混进一棵源码树，一个字节都不写 ────────────────
@@ -5864,7 +5864,7 @@ exit 0
         _mk4(_U1, "alpha", out=_bad_src)
         _before = _pkgs(_PD)
         _rc, _out = _quiet(mod.install_plugins, [], _PD, src_dir=_bad_src)
-        check("★★ 源目录里混着源码树 ⇒ 拒绝，且**一个字节都没写**",
+        check("源目录里混着源码树，拒绝，且一个字节都没写",
               _rc == 1 and "源码树" in _out and _pkgs(_PD) == _before,
               "%d %r" % (_rc, _out[:300]))
 
@@ -5873,17 +5873,17 @@ exit 0
         check("（夹具）现在站点上装着 alpha 与 gamma",
               _pkgs(_PD) == sorted([_U1 + ".json", _U3 + ".json"]), repr(_pkgs(_PD)))
         _rc, _out = _sync()
-        check("★★ 对账顺手织出了作业脚本（一个插件一份，按 id 命名）",
+        check("对账一并织出了作业脚本（一个插件一份，按 id 命名）",
               _rc == 0 and _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U3 + ".sbatch"]),
               "%d %r %r" % (_rc, _jobs_of(_JD), _out[-300:]))
         _woven = _read_of(os.path.join(_JD, _U1 + ".sbatch"))
-        check("★ 织出来的那一份真的含这个插件的作业侧（拼接标记一处不剩）",
+        check("织出来的那一份真的含这个插件的作业侧（拼接标记一处不剩）",
               "start_alpha()" in _woven
               and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _woven))
-        check("★ 而它**语法上**是合法 shell（两遍式的第一遍就是 bash -n）",
+        check("而它语法上是合法 shell（两遍式的第一遍就是 bash -n）",
               subprocess.run(["bash", "-n", os.path.join(_JD, _U1 + ".sbatch")],
                              capture_output=True).returncode == 0)
-        check("★★ 幂等：再对账一次，一份都不多、一份都不少",
+        check("幂等：再对账一次，一份都不多、一份都不少",
               _sync()[0] == 0 and _jobs_of(_JD) == sorted(
                   [_U1 + ".sbatch", _U3 + ".sbatch"]), repr(_jobs_of(_JD)))
 
@@ -5906,17 +5906,17 @@ exit 0
               _quiet(mod.install_plugins, [_broken], _PD)[0] == 0, repr(_pkgs(_PD)))
         _jobs_before = _jobs_of(_JD)
         _rc, _out = _sync()
-        check("★★ 插件脚本语法错 ⇒ 对账返回 1（不是静默装下去）",
+        check("插件脚本语法错，对账返回 1（不是静默装下去）",
               _rc == 1 and "语法检查失败" in _out, "%d %r" % (_rc, _out[-300:]))
-        check("★★ 而且作业脚本目录**一份都没动**（两遍式：全过了才开始装）",
+        check("而且作业脚本目录一份都没动（两遍式：全过了才开始装）",
               _jobs_of(_JD) == _jobs_before,
               "%r → %r" % (_jobs_before, _jobs_of(_JD)))
-        check("★ 而它说清了「配置那一半已经对齐、只有作业脚本没织成」"
+        check("而它说清了「配置那一半已经对齐、只有作业脚本没织成」"
               "（两件事分开说，免得让人去重装那个已经装好的包）",
               "作业脚本没织成" in _out, repr(_out[-200:]))
         _quiet(mod.uninstall_plugins, [_U4], _PD, _SITE, _JD)
         _sync()
-        check("★ （收拾干净）语法错的那个卸掉之后，对账又回到 0",
+        check("（收拾干净）语法错的那个卸掉之后，对账又回到 0",
               _jobs_of(_JD) == _jobs_before, repr(_jobs_of(_JD)))
 
         # ── ③d 「不可用」不等于「替你把它删了」─────────────────────────
@@ -5927,7 +5927,7 @@ exit 0
         #    判据要是写错成"不在 `specs` 里就删"，一次篡改就会静默删掉管理员
         #    改过的 `enabled` / 默认资源，而症状要到他修好篡改、重跑一次 sync 之后
         #    才出现（配置回到了安装缺省值，看起来像"我明明改过啊"）。
-        #    判据是"盘上还有没有那棵树"（`plugin_ids_present`），不是"能不能用"。
+        #    判据是"盘上还有没有该目录树"（`plugin_ids_present`），不是"能不能用"。
         _rc, _out = _from_src()                # alpha 与 gamma 都在
         _sync()
         _conf_u1 = mod.plugin_conf_path(_SITE, _U1)
@@ -5942,24 +5942,24 @@ exit 0
             _f.seek(0)
             _f.write(bytes([_b0[0] ^ 0x01]))       # 原地改一个字节，长度不动
         _rc, _out = _sync()
-        check("★★ 对不过账的那个插件：对账**照常返回 0**，其余照常工作"
+        check("对不过账的那个插件：对账照常返回 0，其余照常工作"
               "（一个插件坏了不带走整个站点）",
               _rc == 0 and "不织它们" in _out, "%d %r" % (_rc, _out[-400:]))
-        check("★★ 而它那份**配置**原地不动（不是「不在 specs 里就删」）",
+        check("而它那份配置原地不动（不是「不在 specs 里就删」）",
               os.path.isfile(_conf_u1), repr(sorted(os.listdir(
                   mod.plugin_conf_dir(_SITE)))))
-        check("★★ 它那份**作业脚本**也原地不动，而且**一个字节都没重织**"
+        check("它那份作业脚本也原地不动，而且一个字节都没重织"
               "（被改过的字节进不了作业脚本）",
               os.path.isfile(_job_u1) and _read_of(_job_u1) == _j_one,
               "%r" % (_jobs_of(_JD),))
-        check("★ 而它**真的不可用**了：扫描器不再收它（提交不到它）",
+        check("而它真的不可用了：扫描器不再收它（提交不到它）",
               _U1 not in [s.id for s in mod.scan_plugins(_PD)[0]],
               str([s.id for s in mod.scan_plugins(_PD)[0]]))
         # 修好（卸掉再装一次），一切照旧，而且配置没有被中途删过
         _quiet(mod.uninstall_plugins, [_U1], _PD, _SITE, _JD)
         _from_src()
         _sync()
-        check("★ 修好之后那两份派生物又回来了（上面那次没有把谁删掉）",
+        check("修好之后那两份派生物又回来了（上面那次没有把谁删掉）",
               os.path.isfile(_conf_u1) and os.path.isfile(_job_u1)
               and _read_of(_job_u1) == _j_one, repr(_jobs_of(_JD)))
 
@@ -5973,10 +5973,10 @@ exit 0
         os.unlink(os.path.join(_SRC, _U2 + ".splug"))
         _from_src()
         _sync()
-        check("★★ 包被拿走后，它那份作业脚本也清了（不留无主的、仍可提交的脚本）",
+        check("包被拿走后，它那份作业脚本也清了（不留无主的、仍可提交的脚本）",
               _jobs_of(_JD) == sorted([_U1 + ".sbatch", _U3 + ".sbatch"]),
               repr(_jobs_of(_JD)))
-        check("★★ 而它那份配置也清了（两份派生物同一个判据）",
+        check("而它那份配置也清了（两份派生物同一个判据）",
               not os.path.isfile(mod.plugin_conf_path(_SITE, _U2))
               and os.path.isfile(mod.plugin_conf_path(_SITE, _U1)),
               repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
@@ -5992,7 +5992,7 @@ exit 0
               "%r %r %r" % (os.path.isfile(_conf_of), _jobs_of(_JD),
                             sorted(mod.read_plugin_keys(_PD))))
         _rc, _out = _quiet(mod.uninstall_plugins, [_U1], _PD, _SITE, _JD)
-        check("★★ 卸掉之后那五处**一处都不剩**",
+        check("卸掉之后那五处一处都不剩",
               _rc == 0
               and not os.path.isdir(mod.plugin_tree_dir(_PD, _U1))
               and not os.path.isfile(mod.plugin_record_path(_PD, _U1))
@@ -6000,12 +6000,12 @@ exit 0
               and not os.path.isfile(os.path.join(_JD, _U1 + ".sbatch"))
               and _U1 not in mod.read_plugin_keys(_PD),
               "%d %r" % (_rc, _out[:300]))
-        check("★★ 而**别的插件**一处都没被碰（gamma 还在，记录里也还有它）",
+        check("而其他插件一处都没被碰（gamma 还在，记录里也还有它）",
               _pkgs(_PD) == [_U3 + ".json"]
               and os.path.isdir(mod.plugin_tree_dir(_PD, _U3))
               and _U3 in mod.read_plugin_keys(_PD),
               "%r %r" % (_pkgs(_PD), sorted(mod.read_plugin_keys(_PD))))
-        check("★★ 手写的那一份配置一个字不动（判据是文件名，不是内容）",
+        check("手写的那一份配置一个字不动（判据是文件名，不是内容）",
               _write_manual_conf(_SITE, "handwritten"),
               repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
         # 插件目录里旁人手写的东西：卸载一个插件时一个字节都不许动它。
@@ -6015,7 +6015,7 @@ exit 0
         with open(_bystander, "w", encoding="utf-8") as _f:
             _f.write("这是我自己放在这儿的\n")
         _quiet(mod.uninstall_plugins, [_U3], _PD, _SITE, _JD)
-        check("★★ 卸载只删自己那五处 —— 旁人放在插件目录里的文件一个字不动",
+        check("卸载只删自己那五处 —— 旁人放在插件目录里的文件一个字不动",
               os.path.isfile(_bystander)
               and not os.path.isdir(mod.plugin_tree_dir(_PD, _U3)),
               repr(sorted(os.listdir(_PD)) if os.path.isdir(_PD) else None))
@@ -6025,33 +6025,33 @@ exit 0
         # ── ②b --all：三处痕迹取并集；手写的不在并集里 ────────────────────
         _rc, _out = _quiet(mod.uninstall_plugins, [], _PD, _SITE, _JD,
                            uninstall_all=True)
-        check("★★ --all 把本站的插件都卸了（一棵树都不剩）",
+        check("--all 把本站的插件都卸了（一棵树都不剩）",
               _rc == 0 and _pkgs(_PD) == []
               and not os.path.isdir(mod.plugin_tree_dir(_PD, _U3)),
               "%d %r %r" % (_rc, _pkgs(_PD),
                             sorted(os.listdir(_PD))
                             if os.path.isdir(_PD) else None))
-        check("★★ 手写的那一份**不在并集里**（它不是 ULID 命名的）⇒ 一个字没动",
+        check("手写的那一份不在并集里（它不是 ULID 命名的）， 一个字没动",
               os.path.isfile(os.path.join(mod.plugin_conf_dir(_SITE),
                                           "handwritten.conf")),
               repr(sorted(os.listdir(mod.plugin_conf_dir(_SITE)))))
-        check("★ 而空掉的那几个目录被收掉了（`rmdir` 只在**空掉**时成功）",
+        check("而空掉的那几个目录被收掉了（`rmdir` 只在空掉时成功）",
               not os.path.isdir(_JD) and not os.path.isdir(_PD),
               "jd=%r pd=%r 里面还有 %r" % (
                   os.path.isdir(_JD), os.path.isdir(_PD),
                   sorted(os.listdir(_PD)) if os.path.isdir(_PD) else None))
-        check("★ 而它**没有**伸手去删上一层（那是基座的地方）",
+        check("而它没有伸手去删上一层（那是基座的地方）",
               os.path.isdir(_d4), repr(os.path.isdir(_d4)))
 
         # ── ②c 认不出的 id，用法错误，不是静默什么都不做 ─────────────────
         _rc, _out = _quiet(mod.uninstall_plugins, ["not-a-ulid"], _PD, _SITE, _JD)
-        check("★★ 给一个不是 ULID 的 id ⇒ 用法错误（2），并说清 id 与短名的区别",
+        check("给一个不是 ULID 的 id，用法错误（2），并说清 id 与短名的区别",
               _rc == 2 and "ULID" in _out and "短名" in _out,
               "%d %r" % (_rc, _out[:300]))
 
         # ── ④ `--check` 的两个退出码 ──────────────────────────────────────
         #
-        # 这是"部署脚本要能把「这台机器缺东西」与「这份配置写错了」分开"
+        # 这是"部署脚本要能把「这台机器上缺少组件」与「这份配置写错了」分开"
         #    那条约定的落点（见 machine_selfcheck 的说明）。判据是真的跑，
         #    不是读源码里有没有那个数 —— 一个没人读的退出码与没有它是一样的。
         #
@@ -6072,15 +6072,15 @@ exit 0
                 self._nft_ok = nft_ok
 
         _m_none = mod.machine_selfcheck(_FakeCfg())
-        check("（夹具）八个命令都解析得到、nft 也在 ⇒ 机器级一条问题都没有",
+        check("（夹具）八个命令都解析得到、nft 也在，机器级一条问题都没有",
               _m_none == [], repr(_m_none))
         _m_one = mod.machine_selfcheck(_FakeCfg(missing=("squeue",)))
-        check("★★ 少一个 Slurm 命令 ⇒ 机器级一条问题，并**点名**是哪一个、"
+        check("少一个 Slurm 命令，机器级一条问题，并点名是哪一个、"
               "以及「这台机器不像是登录节点」",
               len(_m_one) == 1 and "squeue" in _m_one[0]
               and "登录节点" in _m_one[0], repr(_m_one))
         _m_nft = mod.machine_selfcheck(_FakeCfg(), nft="/nonexistent/nft")
-        check("★ 找不到 nft ⇒ 也是机器级（它同样与配置好坏无关）",
+        check("未找到 nft，也是机器级（它同样与配置好坏无关）",
               len(_m_nft) == 1 and "nft" in _m_nft[0], repr(_m_nft))
 
         # 接线：main() 把三档翻成三个退出码。
@@ -6104,20 +6104,20 @@ exit 0
                 sys.argv, sys.stdout = _s_argv, _s_out
 
         _rc2, _out2 = _run_check(["假的：这台机器缺 sbatch"])
-        check("★★ 机器级有问题 ⇒ main() 返回 **2**（部署脚本据此在装任何文件之前"
-              "停下），而且**整屏照样打完**",
+        check("机器级有问题，main() 返回 2（部署脚本据此在装任何文件之前"
+              "停下），而且整屏照样打完",
               _rc2 == 2 and "假的：这台机器缺 sbatch" in _out2
               and "端口池" in _out2 and "作业脚本目录" in _out2,
               "%d %r" % (_rc2, _out2[:300]))
-        _rc1, _out1 = _run_check([], ["假的：网段对不上"])
-        check("★★ 只有配置级的问题 ⇒ **1**（不是 2）—— 部署脚本据此决定"
+        _rc1, _out1 = _run_check([], ["假的：网段不一致"])
+        check("只有配置级的问题，1（不是 2）—— 部署脚本据此决定"
               "「继续装、装完再判」",
-              _rc1 == 1 and "对不上" in _out1, "%d %r" % (_rc1, _out1[-300:]))
+              _rc1 == 1 and "不一致" in _out1, "%d %r" % (_rc1, _out1[-300:]))
         _rc0, _out0 = _run_check([])
-        check("★★ 两样都没问题 ⇒ **0**（少了这一条，上面两条会被「永远非零」"
+        check("两样都没问题，0（少了这一条，上面两条会被「永远非零」"
               "一并满足）", _rc0 == 0, "%d %r" % (_rc0, _out0[:200]))
-        _rcm, _outm = _run_check(["机器缺东西"], ["网段也对不上"])
-        check("★★ 两样都有 ⇒ **2 优先**（一台不是登录节点的机器上，"
+        _rcm, _outm = _run_check(["机器上缺少组件"], ["网段也不一致"])
+        check("两样都有，2 优先（一台不是登录节点的机器上，"
               "「配置写错了」这句话没什么用）",
               _rcm == 2, "%d %r" % (_rcm, _outm[:200]))
 
@@ -6127,7 +6127,7 @@ exit 0
             _f.write("range_start = 55001\nrange_end = 55999\n")
         _r_c = subprocess.run([sys.executable, DAEMON, "--check", "--config", _badconf],
                               capture_output=True, text=True)
-        check("★★ 真进程也一样：配置级失败（cluster_cidr 空着）⇒ **1**，"
+        check("真进程同理：配置级失败（cluster_cidr 空着）， 1，"
               "而不是 2",
               _r_c.returncode == 1 and "配置错误" in _r_c.stdout
               and "集群网段" in _r_c.stdout,
@@ -6137,16 +6137,16 @@ exit 0
         _cfg4 = make_config(mod, _ck)
         _w = mod.reserved_ports_warning(
             _cfg4, "%d-%d" % (_cfg4.port_start + 1, _cfg4.port_start + 2))
-        check("★★ 重叠 ⇒ 说一条 ⚠，点名那两个区间与那个文件",
+        check("重叠，说一条警告，点名那两个区间与那个文件",
               _w is not None and str(_cfg4.port_start) in _w
               and "ip_local_reserved_ports" in _w, repr(_w))
-        check("★ 不重叠 ⇒ 一个字都不说（「没报」与「没事」必须分得开）",
+        check("不重叠，一个字都不说（「没报」与「没事」必须分得开）",
               mod.reserved_ports_warning(_cfg4, "1-100") is None)
-        check("★★ 内核那个格式**单项与区间都收**（与 reserved_ranges 的解析器"
+        check("内核那个格式单项与区间都收（与 reserved_ranges 的解析器"
               "刻意是两份：两份输入的语法本来就不同）",
               mod.parse_port_set("5000,6000-7000") == [(5000, 5000), (6000, 7000)],
               repr(mod.parse_port_set("5000,6000-7000")))
-        check("★ 而 reserved_ranges 那边**只收区间**（一个裸数字多半是写错了，"
+        check("而 reserved_ranges 那边只收区间（一个裸数字多半是写错了，"
               "拒掉比猜好）—— 两份解析器刻意不合并",
               _raises(lambda: mod.parse_reserved_ranges("5000")),
               "parse_reserved_ranges('5000') 应当抛 ValueError")
@@ -6175,7 +6175,7 @@ exit 0
         with open(_rb, encoding="utf-8") as f:
             _rblines = f.read().split("\n")
     except OSError as e:
-        _rblines, _skip = None, "读不到 run.sbatch：%s" % e
+        _rblines, _skip = None, "无法读取 run.sbatch：%s" % e
 
     def _grab(name):
         """按花括号配平抽出一个 shell 函数的原文。"""
@@ -6199,7 +6199,7 @@ exit 0
             _decl = next(l for l in _rblines
                          if l.startswith("declare -A PLUGIN_SESSION_FIELDS"))
         except StopIteration:
-            _skip = ("run.sbatch 里找不到 write_atomic/json_escape/write_session"
+            _skip = ("run.sbatch 里未找到 write_atomic/json_escape/write_session"
                      " 或 declare -A PLUGIN_SESSION_FIELDS")
     if _skip is None:
         # 抽出来的东西自己得先是合法 shell，否则下面那次运行失败的原因与被测逻辑无关
@@ -6244,10 +6244,10 @@ exit 0
               (_run.stderr or _run.stdout or "").strip()[:300])
         if _parsed is not None:
             _unknown = sorted(set(_parsed.keys()) - mod.SESSION_FILE_FIELDS)
-            check("★ 它写出来的每个键都在守护进程的白名单里"
+            check("它写出来的每个键都在守护进程的白名单里"
                   "（漏登记 = 那个字段被静默丢弃，谁都不会报错）",
                   _unknown == [], "没登记的键：%s" % _unknown)
-            check("★ 插件加的字段被写进去了，而且宿主统一做了转义（键名跨语言契约）",
+            check("插件加的字段被写进去了，而且宿主统一做了转义（键名跨语言契约）",
                   _parsed.get("ssh_host_key") == _hk
                   and _parsed.get("service_pid") == 4242
                   and _parsed.get("service_kind") == "sshd"
@@ -6283,7 +6283,7 @@ exit 0
     _woven = _woven_of[CS]        # 22a 用它，见下
     # 数的是整行的标记：模板的文件头注释里也提到了它，子串匹配会把它也算上，
     #   于是"替换成功"这件事看起来永远不成立 —— install-base.sh 里那条同理。
-    check("★ 模板里的拼接标记恰好一处，编织后一处不剩（照安装器的做法）",
+    check("模板里的拼接标记恰好一处，编织后一处不剩（照安装器的做法）",
           _awk is not None and _awk.returncode == 0
           and len(re.findall(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _tpl)) == 1
           and not re.search(r"(?m)^# @@SLURMATE_PLUGIN_BLOCKS@@$", _awk.stdout),
@@ -6294,15 +6294,15 @@ exit 0
         _wtxt = open(_w, encoding="utf-8").read()
         _suffix = _sp.name.replace("-", "_")
         _wsyn = subprocess.run(["bash", "-n", _w], capture_output=True, text=True)
-        check("★ 插件 %s 那一份编织出来是合法 shell（挡的是语法错的插件脚本）"
+        check("插件 %s 那一份编织出来是合法 shell（挡的是语法错的插件脚本）"
               % _sp.name, _wsyn.returncode == 0, _wsyn.stderr[:300])
-        check("★ 插件 %s 的 job/start.sh 里定义了 %s（宿主就是按这个分派）"
+        check("插件 %s 的 job/start.sh 里定义了 %s（宿主就是按这个分派）"
               % (_sp.name, _sp.job_entry),
               re.search(r"(?m)^start_%s\s*\(\)" % _suffix, _wtxt) is not None)
         with open(os.path.join(_sp.install_dir, "job", "start.sh"),
                   encoding="utf-8") as _jf:
             _jsrc = _jf.read()
-        check("★ 它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）",
+        check("它里面没有 shebang / #SBATCH（拼接点之后它们不会生效）",
               re.search(r"(?m)^#!|^[ \t]*#SBATCH", _jsrc) is None)
         # 这一节的核心：那份脚本里只有它自己。
         #
@@ -6311,7 +6311,7 @@ exit 0
         # 那个危害的来源已经不在：别的插件连"被解析到"的机会都没有。
         _others = [o.name.replace("-", "_") for o in cfg.plugin_specs
                    if o.name != _sp.name]
-        check("★★ 插件 %s 那份脚本里有且只有它自己的服务（别的插件一个都不在）"
+        check("插件 %s 那份脚本里有且只有它自己的服务（其他插件一个都不在）"
               % _sp.name,
               len(re.findall(r"(?m)^start_[A-Za-z0-9_]+\s*\(\)", _wtxt)) == 1
               and not any(re.search(r"(?m)^(start|precheck|cleanup)_%s\s*\(\)"
@@ -6322,7 +6322,7 @@ exit 0
     # 宿主里不许出现任何插件的名字。这是"外壳"的定义，而且是可机检的 ——
     #   注释里也不行：注释里的插件名会让下一个读的人以为宿主认识它。
     for _sp in cfg.plugin_specs:
-        check("★ 宿主（run.sbatch 模板）里没有出现插件名 %r —— 一个字都没有"
+        check("宿主（run.sbatch 模板）里没有出现插件名 %r —— 一个字都没有"
               % _sp.name, _sp.name not in _tpl)
 
     # 真的调一次分派：三种结果必须分得开（有 / 没有 / 失败了）
@@ -6343,13 +6343,13 @@ exit 0
     ])
     _dr = subprocess.run(["bash", "-c", _dharness], capture_output=True, text=True)
     _out = _dr.stdout
-    check("★ plugin_call start 分派到 start_code_server（短名里的 - 写成 _）",
+    check("plugin_call start 分派到 start_code_server（短名里的 - 写成 _）",
           "START 55001" in _out and "rc_start=0" in _out, _out[:200])
-    check("★ 插件自己的钩子失败时**返回码原样透出**（7，不是被吞成 0/1）",
+    check("插件自己的钩子失败时返回码原样透出（7，不是被吞成 0/1）",
           "PRECHECK" in _out and "rc_pre=7" in _out, _out[:200])
-    check("★ 没定义的钩子返回 3 —— 「没有这个钩子」与「钩子失败了」必须分得开",
+    check("没定义的钩子返回 3 —— 「没有这个钩子」与「钩子失败了」必须分得开",
           "rc_cleanup=3" in _out, _out[:200])
-    check("★ 这份脚本里没有请求的那个服务时也返回 3（宿主据此以 24 结束会话）",
+    check("这份脚本里没有请求的那个服务时也返回 3（宿主据此以 24 结束会话）",
           "rc_unknown=3" in _out, _out[:200])
     check("plugin_names 能列出作业侧有实现的插件（错误信息靠它说清楚）",
           "names=code_server" in _out, _out[:200])
@@ -6410,9 +6410,9 @@ exit 0
     _h1 = os.path.join(tmpdir, "jobsh-unknown")
     os.makedirs(_h1, exist_ok=True)
     _rc, _log = run_jobsh(_woven, "nosuchplugin", _h1)
-    check("★ 请求的服务不在脚本里 → 以 24 结束（不是跑完候选端口才失败）",
+    check("请求的服务不在脚本里 → 以 24 结束（不是跑完候选端口才失败）",
           _rc == 24, "rc=%s 日志=%s" % (_rc, _log[-300:]))
-    check("★ 而且它说清**这份脚本里到底有些什么**（错误信息要能照着做）",
+    check("而且它说清这份脚本里到底有些什么（错误信息要能照着做）",
           "这份作业脚本里没有服务" in _log and "code_server" in _log,
           _log[-400:])
 
@@ -6440,9 +6440,9 @@ exit 0
     _h2 = os.path.join(tmpdir, "jobsh-zero")
     os.makedirs(_h2, exist_ok=True)
     _rc0, _log0 = run_jobsh(_woven0, "code-server", _h2)
-    check("★ 它同样以 24 明确结束（不是跑完候选端口才失败）",
+    check("它同样以 24 明确结束（不是跑完候选端口才失败）",
           _rc0 == 24, "rc=%s 日志=%s" % (_rc0, _log0[-300:]))
-    check("★ 它的日志里「这份脚本里有的是」那一项是空的（括号里什么都没有）",
+    check("它的日志里「这份脚本里有的是」那一项是空的（括号里什么都没有）",
           "这份脚本里有的是：（" in _log0, _log0[-500:])
 
     # ── 22c 插件自己的 precheck 没过 → 24，且开始挑端口之前就结束 ──
@@ -6462,10 +6462,10 @@ exit 0
     _h3 = os.path.join(tmpdir, "jobsh-pre")
     os.makedirs(_h3, exist_ok=True)
     _rc3, _log3 = run_jobsh(_woven_pre, "thing", _h3)
-    check("★ 插件的 precheck 没过 → 作业以 24 结束，且那道检查真的被调了",
+    check("插件的 precheck 没过 → 作业以 24 结束，且那道检查真的被调了",
           _rc3 == 24 and "PRECHECK-拒绝了" in _log3,
           "rc=%s 日志=%s" % (_rc3, _log3[-300:]))
-    check("★ 预检没过时**不会**开始挑端口（服务一次都没被启动）",
+    check("预检没过时不会开始选择端口（服务一次都没被启动）",
           "不该走到这里" not in _log3, _log3[-300:])
 
     # ── 22d 作业日志：一份实时、按流分开、而且插件藏不走 ────────────────
@@ -6551,30 +6551,30 @@ exit 0
     _lerr = _read_logs_part(_hr, ".err")
     _rlines = [x for x in _rlog.split("\n") if x.strip()]
     _dupes = sorted({x for x in _rlines if _rlines.count(x) > 1})
-    check("★ 会话确实跑到了 running（下面几条不是在一个早退的作业上验的）",
+    check("会话确实跑到了 running（下面几条不是在一个早退的作业上验的）",
           any("会话就绪" in x for x in _rlines), _rlog[-400:])
-    check("★★ 两份日志都在，而且名字就是 `slurm-<作业号>.{out,err}`"
-          "（合成一份的话，「这个服务往 stderr 上抱怨了什么」就没法单独看 —— "
+    check("两份日志都在，而且名字就是 `slurm-<作业号>.{out,err}`"
+          "（若合成一份，「这个服务往 stderr 上抱怨了什么」就没法单独看 —— "
           "而出故障时那恰恰是唯一有用的那半）",
           os.path.isfile(os.path.join(_ldir, "slurm-777001.out"))
           and os.path.isfile(os.path.join(_ldir, "slurm-777001.err")),
           str(sorted(os.listdir(_ldir))))
-    check("★★ 服务进程写到 **stdout** 的行实时落在 `.out` 上"
+    check("服务进程写到 stdout 的行实时落在 `.out` 上"
           "（从前它落在计算节点一个登录节点看不见的临时文件里，作业结束才并回来 —— "
-          "于是「作业跑着的时候为什么起不来」在站点上无话可说）",
+          "于是「作业跑着的时候为什么无法启动」在站点上无话可说）",
           "服务写到 stdout 的一行" in _lout, _lout[-300:])
-    check("★★ 服务进程写到 **stderr** 的行落在 `.err` 上，**不在** `.out` 里"
-          "（分开是按流分，不是按内容猜 —— 两边都留一份的话，"
+    check("服务进程写到 stderr 的行落在 `.err` 上，不在 `.out` 里"
+          "（分开是按流分，不是按内容猜 —— 若两边都留一份，"
           "「打开 .err 就能看到全部问题」这条性质就没了）",
           "服务写到 stderr 的一行" in _lerr
           and "服务写到 stderr 的一行" not in _lout,
           "out=%r err=%r" % (_lout[-200:], _lerr[-200:]))
-    check("★ 宿主自己的日志行**恰好出现一次**（从前这里守的是「水位不许错位」；"
+    check("宿主自己的日志行恰好出现一次（从前这里守的是「水位不许错位」；"
           "现在是另一个理由：只有一处写，任何一处重复写都会让它在两份文件里各出现一次）",
           _dupes == [], "重复了：%s" % [x[-70:] for x in _dupes])
-    check("★ 插件用 log() 写的行也在（宿主与插件共用同一条流）",
+    check("插件用 log() 写的行也在（宿主与插件共用同一条流）",
           "插件用 log() 写的一行" in _rlog, _rlog[-300:])
-    check("★ 而作业结束时**没有**任何「补写」动作 —— 收尾那几行本来就是实时的",
+    check("而作业结束时没有任何「补写」动作 —— 收尾那几行本来就是实时的",
           "清理完成" in _rlog, _rlog[-300:])
 
     # ── 22d-1b 插件把服务的输出藏起来，拒绝启动 ────────────────────────
@@ -6617,12 +6617,12 @@ exit 0
     _rb2 = subprocess.run(["bash", _woven_bad], capture_output=True, text=True,
                           env=_env_b, timeout=120)
     _rblog = _read_logs(_hb)
-    check("★★ 插件把服务进程的输出重定向走了 ⇒ 作业以 **25** 结束，"
-          "而且**当场**（不是跑完所有候选端口才失败）",
+    check("插件把服务进程的输出重定向走了，作业以 25 结束，"
+          "而且当场（不是跑完所有候选端口才失败）",
           _rb2.returncode == 25, "rc=%s 日志=%s" % (_rb2.returncode, _rblog[-300:]))
-    check("★★ 而它说清了是哪一条流、指到了哪里 —— 报错要能照着改",
+    check("而它说清了是哪一条流、指到了哪里 —— 报错要能照着改",
           "重定向" in _rblog and "fd 1" in _rblog, _rblog[-500:])
-    check("★ 而且那句抱怨落在 **.err** 上（它是抱怨，不是进展）",
+    check("而且那句抱怨落在 .err 上（它是抱怨，不是进展）",
           "拒绝启动" in _read_logs_part(_hb, ".err"),
           _read_logs_part(_hb, ".err")[-400:])
 
@@ -6678,8 +6678,8 @@ exit 0
         ("slurm-200001.out", 1, 100),
     ])
     _names1 = sorted(os.listdir(_hk1d))
-    check("★★ 7 天前的日志整份删掉、昨天的留着（不删的话，用户的家目录会被日志吃满 —— "
-          "而那赔上的是**整个家目录配额**）",
+    check("7 天前的日志整份删掉、昨天的留着（若不删，用户的家目录会被日志吃满 —— "
+          "而那赔上的是整个家目录配额）",
           "slurm-200000.out" not in _names1 and "slurm-200001.out" in _names1,
           str(_names1))
 
@@ -6697,7 +6697,7 @@ exit 0
     _names2 = sorted(os.listdir(_hk2d))
     _all3 = ["slurm-200010.out", "slurm-200011.out", "slurm-200012.out"]
     _kept = [n for n in _all3 if n in _names2]
-    check("★★ 目录总量超上限 ⇒ 从**最老的**开始淘汰，删到不超为止 —— "
+    check("目录总量超上限，从最老的开始淘汰，删到不超为止 —— "
           "留在这里的必须是最新的那两份（「删了新的、留着老的」就该红）",
           _kept == ["slurm-200011.out", "slurm-200012.out"],
           "留下 %s（全部 %s）" % (_kept, _names2))
@@ -6708,13 +6708,13 @@ exit 0
         ("slurm-200020.out", 3, 500),
     ])
     _names3 = sorted(os.listdir(_hk3d))
-    check("★★ 目录总量超上限时，**当前这个作业自己的两份无论如何都不动** "
+    check("目录总量超上限时，当前这个作业自己的两份无论如何都不动 "
           "（它们是正在写的 —— 删掉就等于「作业还在跑，日志凭空没了」）；"
           "别人的照删",
           "slurm-200020.out" not in _names3
           and "slurm-777003.out" in _names3 and "slurm-777003.err" in _names3,
           str(_names3))
-    check("★ 淘汰是**说出来**的，不是悄悄删（日志里能读到删了哪一份）",
+    check("淘汰是说出来的，不是悄悄删（日志里能读到删了哪一份）",
           "删掉了最老的一份" in _read_logs(_hk3),
           _read_logs(_hk3)[-300:])
 
@@ -6729,7 +6729,7 @@ exit 0
     #   试完 `SLURMATE_CANDIDATES` 里的两个端口，然后落进那一格。
     _woven_fail = os.path.join(tmpdir, "woven-allfail.sbatch")
     with open(os.path.join(tmpdir, "blocks_f.sh"), "w", encoding="utf-8") as _f:
-        _f.write("start_thing() { log '端口 $1 起不来'; return 1; }\n")
+        _f.write("start_thing() { log '端口 $1 无法启动'; return 1; }\n")
     _awkf = subprocess.run(
         ["awk", "-v", "blocks=" + os.path.join(tmpdir, "blocks_f.sh"),
          '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
@@ -6742,12 +6742,12 @@ exit 0
     _hf = os.path.join(tmpdir, "jobsh-allfail")
     os.makedirs(_hf, exist_ok=True)
     _rcf, _logf = run_jobsh(_woven_fail, "thing", _hf)
-    check("★ 每一个候选端口都失败 ⇒ 以 22 结束（不是 0、不是 24）",
+    check("每一个候选端口都失败，以 22 结束（不是 0、不是 24）",
           _rcf == 22, "rc=%s 日志=%s" % (_rcf, _logf[-400:]))
-    check("★ 而且两个候选端口**都真的试过**（一个都不许跳过）",
+    check("而且两个候选端口都真的试过（一个都不许跳过）",
           _logf.count("端口") >= 2 and "55001" in _logf and "55002" in _logf,
           _logf[-400:])
-    check("★ 失败原因分类要说出来（「全部失败」一句话指不回根因）",
+    check("失败原因分类要说出来（「全部失败」一句话指不回根因）",
           "候选端口全部失败" in _logf and "启动失败 2" in _logf, _logf[-400:])
     # 墓碑：守护进程据此立刻释放，而不是等一个 orphan 周期。它必须存在的
     #   理由与"这条路有没有人测"是同一件事 —— 没写墓碑时没有人会看见任何异常。
@@ -6757,7 +6757,7 @@ exit 0
         with open(_sessf, encoding="utf-8") as _f:
             _bodyf = json.load(_f)
         _okf = (_bodyf.get("state") == "failed" and _bodyf.get("exit_code") == 22)
-    check("★ 而且写下了 failed 墓碑、退出码 22（守护进程据此立刻释放）",
+    check("而且写下了 failed 墓碑、退出码 22（守护进程据此立刻释放）",
           _okf, repr(_bodyf))
 
     # ── 22e 一个插件的顶层语句不会在别的插件的作业里执行 ──────────────
@@ -6796,11 +6796,11 @@ exit 0
         _tl_home[_n] = os.path.join(tmpdir, "jobsh-tl-%s" % _n)
         os.makedirs(_tl_home[_n], exist_ok=True)
         run_jobsh(_o, _n, _tl_home[_n])
-    check("★ 「loud」自己的作业里，它那行顶层语句确实执行了"
+    check("「loud」自己的作业里，它那行顶层语句确实执行了"
           "（这条保证下一条不是假绿 —— 标记本身是能被写出来的）",
           os.path.exists(os.path.join(_tl_home["loud"], "toplevel-ran")),
           os.listdir(_tl_home["loud"]))
-    check("★★ 而「loud」的顶层语句在「quiet」的作业里**没有**执行"
+    check("而「loud」的顶层语句在「quiet」的作业里没有执行"
           " —— 拆成一份一份的全部理由就在这里",
           not os.path.exists(os.path.join(_tl_home["quiet"], "toplevel-ran")),
           os.listdir(_tl_home["quiet"]))
@@ -6843,26 +6843,26 @@ exit 0
         finally:
             mod.run_cmd = real
 
-    check("★ 「占着位置」的两个集合不是一回事（一个是另一个的真超集）",
+    check("「占着位置」的两个集合不是一回事（一个是另一个的真超集）",
           mod.OCCUPYING_STATES == (mod.ST_RESERVED, mod.ST_SUBMITTED) + mod.ACL_STATES
           and set(mod.ACL_STATES) < set(mod.OCCUPYING_STATES),
           "%r / %r" % (mod.OCCUPYING_STATES, mod.ACL_STATES))
 
     r1 = quota_submit(1)
     check("上限 1 时第一个提交成功", r1.get("ok"), str(r1))
-    check("★ 它此刻处在 submitted —— 这就是 F14 那个窗口",
+    check("它此刻处在 submitted —— 这就是 F14 那个窗口",
           any(s["state"] == mod.ST_SUBMITTED for s in d.store.by_state((mod.ST_SUBMITTED,))),
           str([s["state"] for s in d.store.by_uid(UID)]))
 
     # F14 的回归断言。改回「只数 ACL_STATES」的话，此刻计数是 0，
     #    第二个提交会长驱直入 —— 这一条立刻红，而红的原因正是账本里那句话。
     r2 = quota_submit(1)
-    check("★ F14：上限 1 时第二个提交被拒（排队中的也算占着位置）",
+    check("F14：上限 1 时第二个提交被拒（排队中的也算占着位置）",
           (not r2.get("ok")) and (r2.get("error") or {}).get("kind") == "quota_active",
           str(r2))
-    check("★ 而它报的不是 quota_pending —— 那个 kind 已经不存在了",
+    check("而它报的不是 quota_pending —— 那个 kind 已经不存在了",
           (r2.get("error") or {}).get("kind") != "quota_pending", str(r2))
-    check("★ 拒绝的话里说得出「几个」与「上限几」",
+    check("若拒绝里说得出「几个」与「上限几」",
           "1" in ((r2.get("error") or {}).get("detail") or "")
           and "占着位置" in ((r2.get("error") or {}).get("detail") or ""),
           str((r2.get("error") or {}).get("detail")))
@@ -6890,7 +6890,7 @@ exit 0
         _q_doc = {"_error": repr(_qe)}
     _q_acl = len(d.store.by_state(mod.ACL_STATES))
     _q_occ = d.store.count_occupying(UID)
-    check("★ op_doctor 的 active_sessions 不把排队中的算进去（否则体检会假报警）",
+    check("op_doctor 的 active_sessions 不把排队中的算进去（否则体检会假报警）",
           _q_doc.get("active_sessions") == _q_acl and _q_acl < _q_occ,
           "doctor=%r acl=%d occupying=%d" % (_q_doc.get("active_sessions"),
                                              _q_acl, _q_occ))
@@ -6910,7 +6910,7 @@ exit 0
     _q_bad = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
                                    "max_sessions_per_user = 0\n",
                                    "quota-zero.conf")).validate()
-    check("★ 写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
+    check("写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
           any("max_sessions_per_user" in e for e in _q_bad), str(_q_bad))
 
     # 「整个删掉」的可执行形式：那三个名字在守护进程源码里必须零命中。
@@ -6919,7 +6919,7 @@ exit 0
         _q_src = _f.read()
     for _dead in ("count_pending", "MAX_PENDING_PER_USER", "quota_pending",
                   "max_pending_per_user"):
-        check("★ 守护进程里不再有 %s" % _dead,
+        check("守护进程里不再有 %s" % _dead,
               _q_src.count(_dead) == 0, "出现 %d 次" % _q_src.count(_dead))
 
     # ── 24. 作业状态：只有真终态才释放 ───────────────────────────────────────
@@ -6962,28 +6962,28 @@ exit 0
     _CONDITIONAL = ["PREEMPTED", "TIMEOUT"]
 
     for _st in _NONTERMINAL:
-        check("非终态 %s ⇒ 不释放" % _st,
+        check("非终态 %s，不释放" % _st,
               mod.job_is_terminal({"JobState": _st, "Requeue": "0"}) is False)
     for _st in _TERMINAL:
-        check("真终态 %s ⇒ 释放" % _st,
+        check("真终态 %s，释放" % _st,
               mod.job_is_terminal({"JobState": _st, "Requeue": "1"}) is True)
     for _st in _CONDITIONAL:
-        check("★ %s 且 Requeue=1 ⇒ **不**释放（作业会自己回来）" % _st,
+        check("%s 且 Requeue=1，不释放（作业会自己回来）" % _st,
               mod.job_is_terminal({"JobState": _st, "Requeue": "1"}) is False)
-        check("★ %s 且 Requeue=0 ⇒ 释放" % _st,
+        check("%s 且 Requeue=0，释放" % _st,
               mod.job_is_terminal({"JobState": _st, "Requeue": "0"}) is True)
         # 字段缺失时缺省落在保留侧 —— 与整个函数的缺省一致。
-        check("★ %s 但拿不到 Requeue ⇒ 不释放（缺省在安全侧）" % _st,
+        check("%s 但无法获取 Requeue，不释放（缺省在安全侧）" % _st,
               mod.job_is_terminal({"JobState": _st}) is False)
     # 守护进程不认识的 Slurm 状态。Slurm 加一个新状态时，这里必须是"保留" ——
     #   判成释放就等于"集群升级一次，所有人的防护被拆一遍"。
-    check("★ 没见过的 Slurm 状态 ⇒ 保留（默认在安全侧，不是释放）",
+    check("没见过的 Slurm 状态，保留（默认在安全侧，不是释放）",
           mod.job_is_terminal({"JobState": "SOME_FUTURE_STATE"}) is False)
-    check("拿不到状态（空 / None / 没有这个键）⇒ 保留",
+    check("无法获取状态（空 / None / 没有这个键）， 保留",
           mod.job_is_terminal({}) is False
           and mod.job_is_terminal({"JobState": ""}) is False
           and mod.job_is_terminal(None) is False)
-    check("★ 状态名大小写不敏感（Slurm 给的是大写，但判据不该靠它）",
+    check("状态名大小写不敏感（Slurm 给的是大写，但判据不该靠它）",
           mod.job_is_terminal({"JobState": "completed"}) is True
           and mod.job_is_terminal({"JobState": " pending "}) is False)
 
@@ -6992,15 +6992,15 @@ exit 0
     # 这条缺陷是在真集群上实测出来的：桩若只喂纯数字，用例就会一直绿 ——
     #   所以这里照真形状喂 `name(uid)`。
     check("UserId 的纯数字形态", mod.parse_slurm_uid("2002") == 2002)
-    check("★★ UserId 的 name(uid) 形态 —— 本机 `scontrol show job -o` 给的就是这样",
+    check("UserId 的 name(uid) 形态 —— 本机 `scontrol show job -o` 给的就是这样",
           mod.parse_slurm_uid("litao(1019)") == 1019)
-    check("★ 认不出来时返回 None，**不是** -1（-1 是合法整数，会被读成"
+    check("认不出来时返回 None，不是 -1（-1 是合法整数，会被读成"
           "「确认过不是这个人」）",
           mod.parse_slurm_uid("(null)") is None
           and mod.parse_slurm_uid("") is None
           and mod.parse_slurm_uid(None) is None
           and mod.parse_slurm_uid("litao") is None)
-    check("★ 认不出来的那些**都不等于**任何一个真 uid",
+    check("认不出来的那些都不等于任何一个真 uid",
           all(mod.parse_slurm_uid(_v) != -1
               for _v in ("(null)", "", None, "litao")))
 
@@ -7162,12 +7162,12 @@ exit 0
         _js_left = {s["session_id"] for s in d.store.by_state((mod.ST_RELEASED,))}
         for _st in _NONTERMINAL:
             _sid = "js-%s" % _st.lower()
-            check("★ tick 之后 %s 的会话**还在**，且没被标成释放" % _st,
+            check("tick 之后 %s 的会话还在，且没被标成释放" % _st,
                   _js_alive.get(_sid) == mod.ST_ENROLLED and _sid not in _js_left,
                   "state=%r released=%s" % (_js_alive.get(_sid), _sid in _js_left))
         for _st in _TERMINAL:
             _sid = "js-%s" % _st.lower()
-            check("%s ⇒ 释放，且原因是 job_%s" % (_st, _st.lower()),
+            check("%s，释放，且原因是 job_%s" % (_st, _st.lower()),
                   _sid in _js_left, "state=%r" % _js_alive.get(_sid))
             _n = [e for e in _js_events if e.get("event") == "releasing"
                   and e.get("session") == _sid]
@@ -7186,7 +7186,7 @@ exit 0
                 _c = mod.Nft.comment_for(_js_uid, _row["job_id"], _row["service_port"])
                 if _c not in _js_rules:
                     _missing_rules.append(_st)
-        check("★★ 非终态的 nft 规则**一条都没少**（防护是规则，不是数据库那一行）",
+        check("非终态的 nft 规则一条都没少（防护是规则，不是数据库那一行）",
               _missing_rules == [], str(_missing_rules))
         _js_removed_terminal = all(
             mod.Nft.comment_for(_js_uid, d.store.get("js-%s" % _st.lower())["job_id"],
@@ -7216,15 +7216,15 @@ exit 0
                        enrolled_at=_js_clock[0], last_hb_socket=_js_clock[0],
                        trust="owned")
         d.phase_running()
-        check("RUNNING 且未登记 ⇒ 走 try_enroll（与从前一样）",
+        check("RUNNING 且未登记，走 try_enroll（与从前相同）",
               ("enroll", "js-run-sub") in _js_calls, str(_js_calls))
-        check("RUNNING 且已登记 ⇒ 走 refresh_enrollment + maybe_renew（与从前一样）",
+        check("RUNNING 且已登记，走 refresh_enrollment + maybe_renew（与从前相同）",
               ("refresh", "js-run-enr") in _js_calls
               and ("renew", "js-run-enr") in _js_calls, str(_js_calls))
         # 判据用 `job_stuck`：只有"非终态但不在 RUNNING"那条路会往里记。
         #   RUNNING 掉进去的话，它就会保留但永远不推进（不登记、不续期）——
         #   而那是个静默故障：作业在跑，ACL 没装上，续期也没了。
-        check("★★ RUNNING 不会掉进「保留但不推进」那条路（进去就不登记也不续期了）",
+        check("RUNNING 不会掉进「保留但不推进」那条路（进去就不登记也不续期了）",
               "js-run-sub" not in d.job_stuck and "js-run-enr" not in d.job_stuck,
               str(sorted(d.job_stuck)))
 
@@ -7249,16 +7249,16 @@ exit 0
                        trust="recovered")
         for _i in range(1, cfg.job_missing_confirm_ticks):
             d.phase_running()
-            check("★ 查不到第 %d 次（阈值 %d）⇒ 一个字都不许动"
+            check("查询不到第 %d 次（阈值 %d）， 一个字都不许动"
                   % (_i, cfg.job_missing_confirm_ticks),
                   d.store.get("js-missing")["state"] == mod.ST_ENROLLED
                   and d.store.get("js-unknown")["state"] == mod.ST_ENROLLED,
                   str(d.store.get("js-missing")["state"]))
         d.phase_running()
-        check("★ 查不到达到阈值 ⇒ 释放（这一条挡住「干脆永不释放」那种假保守）",
+        check("查询不到达到阈值，释放（这一条挡住「永不释放」那种假保守）",
               d.store.get("js-missing")["state"] == mod.ST_RELEASING,
               str(d.store.get("js-missing")["state"]))
-        check("★★ 同一次里「查不了」的那个**仍然没被动** —— 一次命令失败绝不能"
+        check("同一次里「查不了」的那个仍然没被动 —— 一次命令失败绝不能"
               "拆在跑的作业（这条路径上最贵的那个误判）",
               d.store.get("js-unknown")["state"] == mod.ST_ENROLLED,
               str(d.store.get("js-unknown")["state"]))
@@ -7271,16 +7271,16 @@ exit 0
             d.store.update("js-%s" % _st.lower(), state=mod.ST_ENROLLED)
         d.tick()
         _js_stuck_ev = [e for e in _js_events if e.get("event") == "job_stuck"]
-        check("★ 非终态停太久 ⇒ 有 job_stuck 审计（会说话，不是静默等待）",
+        check("非终态停太久，有 job_stuck 审计（会说话，不是静默等待）",
               len(_js_stuck_ev) >= 1, str(len(_js_stuck_ev)))
-        check("★★ 而它**一个会话都没有释放**（释放是不可逆的那一步，要由人来点）",
+        check("而它一个会话都没有释放（释放是不可逆的那一步，要由人来点）",
               all(d.store.get("js-%s" % _st.lower())["state"] == mod.ST_ENROLLED
                   for _st in _NONTERMINAL
                   if d.store.get("js-%s" % _st.lower())),
               str([(_st, d.store.get("js-%s" % _st.lower())["state"])
                    for _st in _NONTERMINAL
                    if d.store.get("js-%s" % _st.lower())][:4]))
-        check("★ 提醒不写进 note 列（那一列有主人：释放原因 / renew_exhausted）",
+        check("提醒不写进 note 列（那一列有主人：释放原因 / renew_exhausted）",
               all(d.store.get("js-%s" % _st.lower())["note"] is None
                   for _st in _NONTERMINAL
                   if d.store.get("js-%s" % _st.lower())),
@@ -7306,7 +7306,7 @@ exit 0
         _rv_n = d.recover_from_rules()
         _rv_rows = [s for s in d.store.by_state(mod.ACL_STATES)
                     if s["job_id"] == _rv_job]
-        check("★★ UserId 是 `name(uid)` 形式时 recover_from_rules **真的恢复出一行**"
+        check("UserId 是 `name(uid)` 形式时 recover_from_rules 真的恢复出一行"
               "（改回 int() 这条立刻红）",
               _rv_n == 1 and len(_rv_rows) == 1,
               "n=%s rows=%s" % (_rv_n, len(_rv_rows)))
@@ -7316,7 +7316,7 @@ exit 0
                                  "NodeList": "node01", "Partition": "A6000",
                                  "Account": "acct", "TimeLimit": "1:00:00"}
         _rv_nft.rules[mod.Nft.comment_for(_rv_uid, 97002, 55778)] = ("192.0.2.11", 55778)
-        check("★ 作业属主不是这个 uid ⇒ 不恢复",
+        check("作业属主不是这个 uid，不恢复",
               d.recover_from_rules() == 0,
               str([s["job_id"] for s in d.store.by_state(mod.ST_ENROLLED)]))
         # 反向：UserId 认不出来，不恢复（也不能认领）
@@ -7325,7 +7325,7 @@ exit 0
                                  "NodeList": "node01", "Partition": "A6000",
                                  "Account": "acct", "TimeLimit": "1:00:00"}
         _rv_nft.rules[mod.Nft.comment_for(_rv_uid, 97003, 55779)] = ("192.0.2.11", 55779)
-        check("★ UserId 认不出来 ⇒ 不恢复（认不出来 ≠ 是我的）",
+        check("UserId 认不出来，不恢复（认不出来 ≠ 是我的）",
               d.recover_from_rules() == 0,
               str([s["job_id"] for s in d.store.by_state(mod.ST_ENROLLED)]))
 
@@ -7373,7 +7373,7 @@ exit 0
         "Deadline=N/A Partition=A6000 NodeList=node01 NumNodes=1-1 NumCPUs=2 "
         "Command=/opt/slurmate/jobs/run.sbatch WorkDir=/home/alice "
     )
-    check("夹具用的是**真形状**的 scontrol 输出（真机那两行，去掉站点私有值）",
+    check("夹具用的是真形状的 scontrol 输出（真机那两行，去掉站点私有值）",
           "UserId=alice(1234)" in _JS_LINE_PENDING
           and "Requeue=0 Restarts=2" in _JS_LINE_RUNNING)
 
@@ -7385,7 +7385,7 @@ exit 0
             return slurm_stub(argv, timeout, check)
 
         # 结果必须在 with_stub 里面取出来：桩只在那个上下文里生效，在外面
-        #   再调一次拿到的是宿主机的真命令（这里是"查不到"，于是判 JOB_UNKNOWN）。
+        #   再调一次拿到的是宿主机的真命令（这里是"查询不到"，于是判 JOB_UNKNOWN）。
         _st, _d = with_stub(mod, _raw, lambda: mod.Slurm(cfg).job_state(5746))
         return _st, _d
 
@@ -7393,36 +7393,36 @@ exit 0
     check("真形状那一行解析成功",
           _js_status == mod.Slurm.JOB_OK and bool(_js_run),
           "%r / %r" % (_js_status, _js_run))
-    check("★ 解析出来的恰好是这 11 个键 —— 多一个就是又冒出一个没人读的字段，"
-          "少一个就是判定拿不到输入",
+    check("解析出来的恰好是这 11 个键 —— 多一个就是又冒出一个没人读的字段，"
+          "少一个就是判定无法获取输入",
           set(_js_run) == {"JobState", "NodeList", "UserId", "TimeLimit", "EndTime",
                            "Partition", "Account", "Reason", "ExitCode", "Requeue",
                            "Restarts"},
           str(sorted(_js_run)))
-    check("★★ 死键 RestartCnt 与零消费者的 StartTime / JobName 都不在结果里",
+    check("死键 RestartCnt 与零消费者的 StartTime / JobName 都不在结果里",
           not ({"RestartCnt", "StartTime", "JobName"} & set(_js_run)),
           str(sorted(set(_js_run) & {"RestartCnt", "StartTime", "JobName"})))
-    check("★ 真名 Restarts 解析出来了，值是 2（重启过 —— 界面要能说出这件事）",
+    check("真名 Restarts 解析出来了，值是 2（重启过 —— 界面要能说出这件事）",
           _js_run.get("Restarts") == "2", repr(_js_run.get("Restarts")))
-    check("★ ExitCode 拿到了", _js_run.get("ExitCode") == "0:0",
+    check("ExitCode 拿到了", _js_run.get("ExitCode") == "0:0",
           repr(_js_run.get("ExitCode")))
-    check("★ Requeue 拿到了 —— 上面那两条条件终态的判定全靠它",
+    check("Requeue 拿到了 —— 上面那两条条件终态的判定全靠它",
           _js_run.get("Requeue") == "0", repr(_js_run.get("Requeue")))
-    check("RUNNING 且 Requeue=0 ⇒ 终态判定为假（RUNNING 永远不是终态）",
+    check("RUNNING 且 Requeue=0，终态判定为假（RUNNING 永远不是终态）",
           mod.job_is_terminal(_js_run) is False, str(_js_run))
 
     _js_status2, _js_pend = _js_parse(_JS_LINE_PENDING)
     check("排队那一行也解析成功",
           _js_status2 == mod.Slurm.JOB_OK and bool(_js_pend), str(_js_status2))
-    check("★ Reason 拿到了 —— 界面上「为什么还没跑」就是这一句",
+    check("Reason 拿到了 —— 界面上「为什么还没跑」就是这一句",
           _js_pend.get("Reason") == "JobHeldUser", repr(_js_pend.get("Reason")))
-    check("★★ 排队中 `NodeList=` 是空的 ⇒ 结果里**没有** NodeList 这个键"
+    check("排队中 `NodeList=` 是空的，结果里没有 NodeList 这个键"
           "（那条正则要求至少一个非空白字符）",
           "NodeList" not in _js_pend, str(sorted(_js_pend)))
     check("而它只少这一个键，其余照常解析",
           set(_js_run) - set(_js_pend) == {"NodeList"}, str(sorted(_js_pend)))
-    check("★★ 这一行被判成「非终态」—— Reason=JobHeldUser 的作业**永远不会开始**，"
-          "但它还在队列里 ⇒ 保留（这正是从前被当成「结束」的那一类）",
+    check("这一行被判成「非终态」—— Reason=JobHeldUser 的作业永远不会开始，"
+          "但它还在队列里，保留（这正是从前被当成「结束」的那一类）",
           mod.job_is_terminal(_js_pend) is False, str(_js_pend))
 
     # ── 24.8 会话视图：把这三样交给客户端 ───────────────────────────────────
@@ -7451,23 +7451,23 @@ exit 0
 
     _v_pend = _view_with(_JS_LINE_PENDING)
     _v_run = _view_with(_JS_LINE_RUNNING)
-    check("★ 排队原因传给了客户端 —— 那是用户最想知道的那一句话",
+    check("排队原因传给了客户端 —— 那是用户最想知道的那一句话",
           _v_pend.get("job_reason") == "JobHeldUser", repr(_v_pend.get("job_reason")))
-    check("★ 而 `Reason=None`（没有原因）**不出现在**视图里",
+    check("而 `Reason=None`（没有原因）不出现在视图里",
           "job_reason" not in _v_run, repr(_v_run.get("job_reason")))
-    check("★ 退出码与重启次数**原样**传出去（该不该显示是客户端的判断）",
+    check("退出码与重启次数原样传出去（该不该显示是客户端的判断）",
           _v_run.get("job_exit_code") == "0:0" and _v_run.get("job_restarts") == "2",
           "%r / %r" % (_v_run.get("job_exit_code"), _v_run.get("job_restarts")))
     # 发出去的是判定，不是 `Requeue=` 那个原始字段：判"终不终态"的规则
     #    （含 PREEMPTED / TIMEOUT 的附加条件）只有守护进程这一份。
     #    把 `Requeue` 发过去等于让客户端再实现一遍 —— 而"一个判据两处实现会漂"，
     #    漂的方向是界面说"已结束（被抢占）"而作业几分钟后又回来了。
-    check("★★ 会话视图带出的是判定 job_terminal，**不是**原始字段 Requeue",
+    check("会话视图带出的是判定 job_terminal，不是原始字段 Requeue",
           _v_run.get("job_terminal") is False and "Requeue" not in repr(_v_run)
           and "requeue" not in repr(_v_run),
           "job_terminal=%r / 视图里那些键=%s"
           % (_v_run.get("job_terminal"), sorted(_v_run)))
-    check("★ 排队中那一行同样带判定（false = 还没结束）",
+    check("排队中那一行同样带判定（false = 还没结束）",
           _v_pend.get("job_terminal") is False, repr(_v_pend.get("job_terminal")))
 
     # ── 24b. 会话文件读不到：那句话有节流，而且恢复时说一句（F28）─────────────
@@ -7484,7 +7484,7 @@ exit 0
     #
     # 时间靠喂进去（`now=`），不靠真等：真跑半小时的 tick 是不现实的，
     #   而"等不起"正是时间必须喂进去的原因之一。
-    print("\n── 24b. 会话文件读不到的说话频率（F28）──")
+    print("\n── 24b. 会话文件无法读取的说话频率（F28）──")
 
     class _LogCatcher(logging.Handler):
         """把守护进程那一个 logger 的记录收下来 —— 判"行数"要看的是真的发了什么。"""
@@ -7509,7 +7509,7 @@ exit 0
                        candidates="55001", created_at=mod.now_ts(), job_id=88001)
         _s = d.store.get("sess-f28")
 
-        # `load_session_file` 报"读不到"，别的一概不动 —— 这一条只问"说了几句"。
+        # `load_session_file` 报"无法读取"，别的一概不动 —— 这一条只问"说了几句"。
         # 钟要拨：5400 个 tick 在真实时间里只过去几十毫秒，而这一条的判据
         #   正是"过了多久才再说一次"。不拨钟的话它只会有一行，而那一行看起来
         #   就像节流生效了 —— 一条判不出节流的用例。
@@ -7528,14 +7528,14 @@ exit 0
             d.load_session_file = _real_load
             mod.now_ts = _real_now
         _miss = [m for lv, m in _logcat.lines if "读取失败" in m]
-        check("★ 首报**不节流**：一件事第一次发生必须立刻说出来",
+        check("首报不节流：一件事第一次发生必须立刻说出来",
               len(_miss) >= 1 and _miss[0].startswith("会话 sess-f28 的会话文件暂时读取失败"),
               "报了 %d 行：%s" % (len(_miss), _miss[:3]))
-        check("★★ %d 秒里**恰好 %d 行**（首报 + 每 %d 秒一次），而不是 %d 行"
+        check("%d 秒里恰好 %d 行（首报 + 每 %d 秒一次），而不是 %d 行"
               % (_ticks, _ticks // _warn_secs, _warn_secs, _ticks),
               len(_miss) == _ticks // _warn_secs,
               "报了 %d 行（%d 个 tick）：%s" % (len(_miss), _ticks, _miss[:5]))
-        check("★ 而且后续那几行说得清**已经持续多久**（不是把第一句重复一遍）",
+        check("而且后续那几行说得清已经持续多久（不是把第一句重复一遍）",
               any("已持续" in m for m in _miss[1:]), str(_miss[:3]))
 
         # 恢复：文件又读得到了，报一次，而且只说一次（下一次不再说）。
@@ -7544,7 +7544,7 @@ exit 0
         _real_validate = d.validate_session
         d.load_session_file = lambda uid, job: ({"node_ip": "192.0.2.20",
                                                  "service_port": 55001}, "ok")
-        d.validate_session = lambda *a, **k: (False, "这一条不验别的")
+        d.validate_session = lambda *a, **k: (False, "这一条不验其他")
         try:
             _before = len(_logcat.lines)
             d.refresh_enrollment(_s, {})
@@ -7553,7 +7553,7 @@ exit 0
             d.load_session_file = _real_load
             d.validate_session = _real_validate
         _back = [m for lv, m in _logcat.lines[_before:] if "读取恢复正常" in m]
-        check("★ 文件恢复可读时**报一次恢复**（「没有新行」在日志里长得像「一切正常」）",
+        check("文件恢复可读时报一次恢复（「没有新行」在日志里长得像「一切正常」）",
               len(_back) == 1, "报了 %d 行：%s" % (len(_back), _back))
     finally:
         _lg.removeHandler(_logcat)
@@ -7574,10 +7574,10 @@ exit 0
     check("没型号 → 两段（`gpu:2`）",
           mod.gres_spec({"name": "gpu", "type": None, "count": 2}) == "gpu:2",
           mod.gres_spec({"name": "gpu", "type": None, "count": 2}))
-    check("★ 带型号 → 三段（`gpu:a100:2`）",
+    check("带型号 → 三段（`gpu:a100:2`）",
           mod.gres_spec({"name": "gpu", "type": "a100", "count": 2}) == "gpu:a100:2",
           mod.gres_spec({"name": "gpu", "type": "a100", "count": 2}))
-    check("★ 名字不是 gpu 照样拼得出来（GRES 是管理员自定义的）",
+    check("名字不是 gpu 照样拼得出来（GRES 是管理员自定义的）",
           mod.gres_spec({"name": "mps", "type": None, "count": 100}) == "mps:100",
           mod.gres_spec({"name": "mps", "type": None, "count": 100}))
     check("没要 GRES → None（既不是空串，也不是 gpu:0）",
@@ -7587,7 +7587,7 @@ exit 0
     check("`gpu:4` → 没型号",
           mod.parse_gres_field("gpu:4") == [{"name": "gpu", "type": None, "count": 4}],
           str(mod.parse_gres_field("gpu:4")))
-    check("★ `gpu:a100:2` → 带型号",
+    check("`gpu:a100:2` → 带型号",
           mod.parse_gres_field("gpu:a100:2")
           == [{"name": "gpu", "type": "a100", "count": 2}],
           str(mod.parse_gres_field("gpu:a100:2")))
@@ -7596,14 +7596,14 @@ exit 0
           == [{"name": "gpu", "type": None, "count": 4},
               {"name": "mps", "type": None, "count": 100}],
           str(mod.parse_gres_field("gpu:4,mps:100")))
-    check("★ 空 / `(null)` → 空列表（**不是**猜成 1 个）",
+    check("空 / `(null)` → 空列表（不是猜成 1 个）",
           mod.parse_gres_field("") == [] and mod.parse_gres_field("(null)") == []
           and mod.parse_gres_field("N/A") == [],
           "%r / %r" % (mod.parse_gres_field(""), mod.parse_gres_field("(null)")))
-    check("★ 认不出的**那一项**跳过，不让整条作废（同一行里别的还认得）",
+    check("认不出的那一项跳过，不让整条作废（同一行里其他还认得）",
           mod.parse_gres_field("gpu:4,x:") == [{"name": "gpu", "type": None, "count": 4}],
           str(mod.parse_gres_field("gpu:4,x:")))
-    check("★ 段数不对的也跳过（`gpu` 这种没数量的）",
+    check("段数不对的也跳过（`gpu` 这种没数量的）",
           mod.parse_gres_field("gpu") == [], str(mod.parse_gres_field("gpu")))
     check("末尾那种 `(S:0-1)` 索引说明被剥掉",
           mod.parse_gres_field("gpu:2(S:0-1)")
@@ -7617,18 +7617,18 @@ exit 0
         _cat = mod.Slurm(cfg).gres_catalog()
     finally:
         mod.run_cmd = _real_run
-    check("★ 目录按分区聚合（A6000 两台各 2 张 → per_node_max 2、总 4）",
+    check("目录按分区聚合（A6000 两台各 2 张 → per_node_max 2、总 4）",
           _cat and _cat.get("A6000") == [{"name": "gpu", "type": "a100",
                                           "per_node_max": 2, "total": 4}],
           str(_cat and _cat.get("A6000")))
-    check("★ 同一台节点上两种 GRES 都进目录",
+    check("同一台节点上两种 GRES 都进目录",
           _cat and [e["name"] for e in _cat.get("RTX8000", [])] == ["gpu", "mps"],
           str(_cat and _cat.get("RTX8000")))
-    check("★ 没配 GRES 的节点**不产生条目**（那一格在真机上整个不出现）",
+    check("没配 GRES 的节点不产生条目（那一格在真机上整个不出现）",
           _cat and _cat.get("2080TI") == [{"name": "gpu", "type": None,
                                            "per_node_max": 8, "total": 8}],
           str(_cat and _cat.get("2080TI")))
-    check("★ 目录里**没有**『已用』这一格（本版本的 Slurm 给不出来，就不编）",
+    check("目录里没有『已用』这一格（本版本的 Slurm 给不出来，就不编）",
           _cat and all("used" not in k for e in _cat.values() for k in e),
           str(_cat))
     # 缓存：一个钟周期之内不重复 fork（这是每个 partitions / cluster 请求
@@ -7650,7 +7650,7 @@ exit 0
             _cl.gres()
     finally:
         mod.run_cmd = _real_run
-    check("★ 目录有缓存（三次调用只 fork 一次）", _calls[0] == 1, "fork 了 %d 次" % _calls[0])
+    check("目录有缓存（三次调用只 fork 一次）", _calls[0] == 1, "fork 了 %d 次" % _calls[0])
 
     # ── 25.4 op_partitions：每分区一份清单，而且三态 ─────────────────────
     _part_ran = [0]
@@ -7667,11 +7667,11 @@ exit 0
     _pv = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
     _by_name = {p["name"]: p for p in (_pv.get("data") or {}).get("partitions", [])}
     check("分区列表仍然照常返回", _pv.get("ok") and len(_by_name) == 3, str(_pv))
-    check("★ 每个分区带上它自己的 GRES 清单",
+    check("每个分区带上它自己的 GRES 清单",
           _by_name["A6000"].get("gres")
           == [{"name": "gpu", "type": "a100", "per_node_max": 2, "total": 4}],
           str(_by_name["A6000"].get("gres")))
-    check("★ 清单里带型号（`gpu:a100`）—— 不是只有一个数字",
+    check("清单里带型号（`gpu:a100`）—— 不是只有一个数字",
           _by_name["A6000"]["gres"][0]["type"] == "a100",
           str(_by_name["A6000"]["gres"]))
     # 三态：查不到时那个键整个不存在（不是 `[]`）。
@@ -7685,7 +7685,7 @@ exit 0
     finally:
         mod.Slurm.gres_catalog = _real_cat2
     _p0 = ((_pv2.get("data") or {}).get("partitions") or [{}])[0]
-    check("★★ 目录查不到 ⇒ `gres` 这个键**不存在**（不是空列表）",
+    check("目录查询不到，`gres` 这个键不存在（不是空列表）",
           _pv2.get("ok") and "gres" not in _p0, str(sorted(_p0)))
 
     # ── 25.5 读回：带型号的会话在视图里是带型号的（今天红的那一条）──────
@@ -7709,15 +7709,15 @@ exit 0
     #   变异验证时那正是被测的东西（把 `gres` 改回 `gpus`），而抛出去的异常会把
     #   整个脚本带崩 —— 崩了与"一条都不红"在输出上长得一模一样。
     _vv = d.session_view(dict(_v_sess))
-    check("★★ 读回带型号的 GRES：视图里是描述符，不是 None",
+    check("读回带型号的 GRES：视图里是描述符，不是 None",
           _vv.get("resources", {}).get("gres")
           == {"name": "gpu", "type": "a100", "count": 2},
           str(_vv.get("resources")))
-    check("★★ 而它**不再是** `resources.gpus` 那个数字（那个字段没有了）",
+    check("而它不再是 `resources.gpus` 那个数字（那个字段没有了）",
           "gpus" not in (_vv.get("resources") or {}),
           str(sorted(_vv.get("resources") or {})))
     _vv2 = d.session_view(dict(_v_sess, gres=json.dumps({"name": "mps", "count": 64})))
-    check("★ 名字不是 gpu 的会话照样读得回来",
+    check("名字不是 gpu 的会话照样读得回来",
           _vv2.get("resources", {}).get("gres")
           == {"name": "mps", "type": None, "count": 64},
           str(_vv2.get("resources")))
@@ -7725,7 +7725,7 @@ exit 0
     check("没要 GRES → null（界面那一行就不说 GRES）",
           _vv3.get("resources", {}).get("gres") is None, str(_vv3.get("resources")))
     _vv4 = d.session_view(dict(_v_sess, gres="gpu:2"))
-    check("库里那一格读不动 → null，**不让整个 list 变成错误**",
+    check("库里那一格读不动 → null，不让整个 list 变成错误",
           _vv4.get("resources", {}).get("gres") is None
           and _vv4.get("session_id") == "s1",
           str(_vv4.get("resources")))
@@ -7739,19 +7739,19 @@ exit 0
     _cli = load_cli()
     for _spec in ("gpu:2", "gpu:a100:2", "mps:100", "shard:fast:1"):
         _g, _e = _cli.parse_gres_spec(_spec)
-        check("★ 往返：CLI 拆 %r 再拼回去还是它" % _spec,
+        check("往返：CLI 拆 %r 再拼回去还是它" % _spec,
               _e is None and mod.gres_spec(_g) == _spec,
               "%r / %s" % (_g, _e))
-    check("★ CLI 拆出来的东西守护进程认（形状一致，不是各写一套）",
+    check("CLI 拆出来的形状守护进程认（形状一致，不是各写一套）",
           all(mod.clean_gres(_cli.parse_gres_spec(s)[0])[1] is None
               for s in ("gpu:2", "gpu:a100:2", "mps:100")),
           "三种写法")
     for _bad in ("gpu", "a:b:c:d", "gpu:x"):
         _g, _e = _cli.parse_gres_spec(_bad)
-        check("★ CLI 对 %r 说得出它不对（不是静默当成没要）" % _bad,
+        check("CLI 对 %r 说得出它不对（不是静默当成没要）" % _bad,
               _g is None and bool(_e), "%r / %s" % (_g, _e))
     _g, _e = _cli.parse_gres_spec("")
-    check("★ 空串 = 没要（与「写错了」是两回事）",
+    check("空串 = 没要（与「写错了」是两回事）",
           _g is None and _e is None, "%r / %s" % (_g, _e))
 
     # ── 25.7 跨语言契约：run.sbatch 读的那个变量名 ────────────────────────
@@ -7762,19 +7762,19 @@ exit 0
     _refs = [n.id for n in ast.walk(_tree) if isinstance(n, ast.Name)]
     _assigned = [t.id for n in ast.walk(_tree) if isinstance(n, ast.Assign)
                  for t in n.targets if isinstance(t, ast.Name)]
-    check("★★ MAX_GPUS_REQUEST 既没被赋值、也没被引用（写死的上限不许回来）",
+    check("MAX_GPUS_REQUEST 既没被赋值、也没被引用（写死的上限不许回来）",
           "MAX_GPUS_REQUEST" not in _refs and "MAX_GPUS_REQUEST" not in _assigned,
           "引用 %d 次 / 赋值 %d 次" % (_refs.count("MAX_GPUS_REQUEST"),
                                     _assigned.count("MAX_GPUS_REQUEST")))
     _sb = io.open(os.path.join(HERE, "run.sbatch"), encoding="utf-8").read()
     _daemon_src = io.open(DAEMON, encoding="utf-8").read()
-    check("★ run.sbatch 读的是 SLURMATE_GRES（作业侧那一半）",
+    check("run.sbatch 读的是 SLURMATE_GRES（作业侧那一半）",
           "SLURMATE_GRES" in _sb, "run.sbatch 里没有这个名字")
-    check("★★ 而旧名字 SLURMATE_GPUS 两边都不剩（改名改一半是最坏的一种）",
+    check("而旧名字 SLURMATE_GPUS 两边都不剩（改名改一半是最坏的一种）",
           "SLURMATE_GPUS" not in _sb and "SLURMATE_GPUS" not in _daemon_src,
           "run.sbatch=%s / 守护进程=%s"
           % ("SLURMATE_GPUS" in _sb, "SLURMATE_GPUS" in _daemon_src))
-    check("★ 守护进程往环境里放的就是那个名字",
+    check("守护进程往环境里放的就是那个名字",
           '"SLURMATE_GRES"' in _daemon_src, "op_submit 的 env 里没有它")
 
     # ══ 26. 常驻通道 ═══════════════════════════════════════════════════════
@@ -7985,12 +7985,12 @@ exit 0
     _c1.send({"op": "ping"})
     _drive(_d)
     _r1 = _c1.lines()
-    check("★★ 老客户端（不带 rid）仍然一问一答",
+    check("老客户端（不带 rid）仍然一问一答",
           len(_r1) == 1 and _r1[0].get("ok") is True
           and (_r1[0].get("data") or {}).get("pong") is True, str(_r1)[:200])
-    check("★★ 而它的应答里**没有 rid** —— 线上的字节与从前逐字相同",
+    check("而它的应答里没有 rid —— 线上的字节与从前逐字相同",
           bool(_r1) and "rid" not in _r1[0], str(sorted((_r1 or [{}])[0].keys())))
-    check("★ 不带 rid 的请求**不会**让它变成订阅者（推送会打乱一问一答）",
+    check("不带 rid 的请求不会让它变成订阅者（推送会打乱一问一答）",
           _k1.subscribed is False, "subscribed=%s" % _k1.subscribed)
 
     # ── 26.2 一条连接上多请求 + rid 回填（§八 第 3 步）───────────────────
@@ -7999,12 +7999,12 @@ exit 0
         _c2.send({"op": "ping", "rid": i})
     _drive(_d)
     _r2 = _c2.lines()
-    check("★ 一条连接上 3 条 ping 得到 3 条响应",
+    check("一条连接上 3 条 ping 得到 3 条响应",
           len(_r2) == 3, "收到 %d 条：%s" % (len(_r2), str(_r2)[:200]))
-    check("★★ 每一条都回填了**同一个** rid，而且按顺序",
+    check("每一条都回填了同一个 rid，而且按顺序",
           [r.get("rid") for r in _r2] == [1, 2, 3],
           str([r.get("rid") for r in _r2]))
-    check("★ 带了 rid 的请求让这条连接成为订阅者",
+    check("带了 rid 的请求让这条连接成为订阅者",
           _k2.subscribed is True, "subscribed=%s" % _k2.subscribed)
 
     # ── 26.3 推送：只推全量、带 seq（§八 第 5 步）───────────────────────
@@ -8015,21 +8015,21 @@ exit 0
     _d.tick()
     _drive(_d)
     _p1 = _c2.lines()
-    check("★ 会话变了 ⇒ 那条订阅连接收到一条推送",
+    check("会话变了，那条订阅连接收到一条推送",
           len(_p1) == 1 and _p1[0].get("push") == "sessions",
           str(_p1)[:250])
-    check("★★ 推送带单调 seq，且**没有** rid（rid 是响应的判据）",
+    check("推送带单调 seq，且没有 rid（rid 是响应的判据）",
           bool(_p1) and isinstance(_p1[0].get("seq"), int)
           and "rid" not in _p1[0], str(sorted((_p1 or [{}])[0].keys())))
-    check("★ 推送里的会话列表与 op_list **逐字同构**（推送就是自动化的 list）",
+    check("推送里的会话列表与 op_list 逐字同构（推送就是自动化的 list）",
           bool(_p1) and _p1[0].get("sessions")
           == _d.dispatch(UID, os.getgid(), {"op": "list"})["data"]["sessions"],
           "推送里 %d 条" % len((_p1 or [{}])[0].get("sessions") or []))
-    check("★★ 推送里**不含任何口令**（它走的是 list 的 with_secret=False）",
+    check("推送里不含任何口令（它走的是 list 的 with_secret=False）",
           all("auth_password" not in s
               for s in ((_p1 or [{}])[0].get("sessions") or [])),
           str((_p1 or [{}])[0].get("sessions"))[:200])
-    check("★★ 没订阅的那条连接**一个字节都没多**（老客户端不受影响）",
+    check("没订阅的那条连接一个字节都没多（老客户端不受影响）",
           _c1.lines() == [], "它收到了推送")
 
     # ── 26.4 全量：一个 tick 里多个会话变了，每个连接至多一条（用例⑪）──
@@ -8040,10 +8040,10 @@ exit 0
     _d.tick()
     _drive(_d)
     _p2 = _c2.lines()
-    check("★★ 一个 tick 里三个会话变了 ⇒ 每个连接仍然**至多一条**"
+    check("一个 tick 里三个会话变了，每个连接仍然至多一条"
           "（钉住「只推全量、不推增量」）",
           len(_p2) == 1, "收到 %d 条" % len(_p2))
-    check("★ 而这一条里三个会话都在（全量自足，丢掉上一条无害）",
+    check("而这一条里三个会话都在（全量自足，丢掉上一条无害）",
           bool(_p2) and len(_p2[0].get("sessions") or []) == 3,
           str([len(x.get("sessions") or []) for x in _p2]))
 
@@ -8065,11 +8065,11 @@ exit 0
         for _s in (_m.get("sessions") or []):
             if _s.get("session_id") == "s-done":
                 _done = _s
-    check("★★ 终态会话在推送里也报得出 job_state"
-          "（phase_running 不为它查询 ⇒ 快照必须自己补一次，否则它时有时无）",
+    check("终态会话在推送里也报得出 job_state"
+          "（phase_running 不为它查询，快照必须自己补一次，否则它时有时无）",
           _done is not None and _done.get("job_state") == "COMPLETED",
           str(_done)[:220])
-    check("★ 而与 list 仍然逐字同构（两边说的必须是同一件事）",
+    check("而与 list 仍然逐字同构（两边说的必须是同一件事）",
           bool(_p3) and _p3[-1].get("sessions")
           == _d.dispatch(UID, os.getgid(), {"op": "list"})["data"]["sessions"],
           str(_p3)[-1:][:200])
@@ -8084,9 +8084,9 @@ exit 0
         _d2.tick()
         _drive(_d2)
     _r3 = [x for x in _c3.lines() if x.get("push")]
-    check("★★ 全程**无变化**的连接也按期收到快照（三条 tick ≥ 2 条）",
+    check("全程无变化的连接也按期收到快照（三条 tick ≥ 2 条）",
           len(_r3) >= 2, "只收到 %d 条" % len(_r3))
-    check("★ 而无变化时推的还是全量（不是空消息）",
+    check("而无变化时推的还是全量（不是空消息）",
           all("sessions" in x for x in _r3), str(_r3)[:200])
 
     # ── 26.6 seq 的缺口与 stale 对得上（用例③）─────────────────────────
@@ -8099,7 +8099,7 @@ exit 0
     _sess = [{"session_id": "s-x"}]
     for _ in range(6):
         _d3.enqueue_push(_k4, _sess)
-    check("★ 水位之上的那几条被丢掉了（stale 记着）",
+    check("水位之上的那几条被丢掉了（stale 记着）",
           _k4.stale > 0 and _k4.seq == 6,
           "stale=%s seq=%s" % (_k4.stale, _k4.seq))
     _k4.pump()                      # 排空，让后面那条发得出去
@@ -8108,12 +8108,12 @@ exit 0
     _got = _c4.lines()
     _seqs = [m.get("seq") for m in _got]
     _drop = sum((m.get("stale") or {}).get("dropped", 0) for m in _got)
-    check("★★ seq 的缺口代数对得上：(末−首+1) == 条数 + Σ stale.dropped",
+    check("seq 的缺口代数对得上：(末−首+1) == 条数 + Σ stale.dropped",
           bool(_seqs) and (_seqs[-1] - _seqs[0] + 1) == len(_got) + _drop,
           "seqs=%s 条数=%d dropped=%d" % (_seqs, len(_got), _drop))
-    check("★★ 每个缺口都**紧邻**一条带 stale 的消息（不然客户端不知道丢过）",
+    check("每个缺口都紧邻一条带 stale 的消息（不然客户端不知道丢过）",
           _drop == 0 or any("stale" in m for m in _got), str(_got)[:250])
-    check("★ stale 里说得清缺口从哪开始",
+    check("stale 里说得清缺口从哪开始",
           all(m["stale"]["from"] == m["seq"] - m["stale"]["dropped"]
               for m in _got if "stale" in m), str(_got)[:250])
 
@@ -8132,7 +8132,7 @@ exit 0
     _k5.pump()
     _hb = _d4.dispatch(UID, os.getgid(), {"op": "heartbeat",
                                           "session_id": "s-nope"})
-    check("★★★ 推送连发 2×桶上限之后，同一 uid 的 heartbeat **仍然进得去**",
+    check("推送连发 2×桶上限之后，同一 uid 的 heartbeat 仍然进得去",
           _hb.get("error") is None or _hb["error"].get("kind") != "rate_limited",
           str(_hb.get("error"))[:160])
     # 对照组：走 dispatch 的那条路确实会被限流 —— 否则上一条是空断言
@@ -8143,7 +8143,7 @@ exit 0
         _r = _d5.dispatch(UID, os.getgid(), {"op": "ping"})
         if (_r.get("error") or {}).get("kind") == "rate_limited":
             _limited = True
-    check("★★ 对照组：走 dispatch 连发同样次数**确实**回 rate_limited"
+    check("对照组：走 dispatch 连发同样次数确实回 rate_limited"
           "（证明上一条不是空断言）", _limited, "一次都没限流")
 
     # ── 26.8 一个不读的客户端不卡 tick（用例②）─────────────────────────
@@ -8159,8 +8159,8 @@ exit 0
     # 不调小的话 send 永远成功，这一条就永远是绿的假用例。
     _c7, _k7 = _pair(_d6, sock=4096)
     _k7.subscribed = True
-    check("★★ 出站队列空的时候**不挂 EVENT_WRITE**"
-          "（挂着而队列空 ⇒ 水平触发 ⇒ 100% CPU 空转，实测 300 ms 内 214167 次）",
+    check("出站队列空的时候不挂 EVENT_WRITE"
+          "（挂着而队列空，水平触发，100% CPU 空转，实测 300 ms 内 214167 次）",
           not (_k7.want_events() & selectors.EVENT_WRITE)
           and bool(_k7.want_events() & selectors.EVENT_READ),
           "want=%s" % _k7.want_events())
@@ -8168,7 +8168,7 @@ exit 0
     _d6.tick()
     # 判据是"字节在队列里、而对端一个字节都没收到" —— 等价于
     #   "tick 里一次 send 都没有"，而且不需要给 socket 挂代理。
-    check("★★ tick() 只把推送**入队**，绝不在这里写（写会阻塞整个事件循环）",
+    check("tick() 只把推送入队，绝不在这里写（写会阻塞整个事件循环）",
           _k7.pending() > 0 and _c7.lines(0.0) == [],
           "待发 %d 字节" % _k7.pending())
     _t0 = time.time()
@@ -8178,12 +8178,12 @@ exit 0
         _d6.tick()
         _k7.pump()
     _elapsed = time.time() - _t0
-    check("★★ 对端一个字都不读时，60 轮 tick 跑得完（阻塞写会让它永远不返回）",
+    check("对端一个字都不读时，60 轮 tick 跑得完（阻塞写会让它永远不返回）",
           _elapsed < 20.0, "耗时 %.1f 秒" % _elapsed)
-    check("★★ 出站队列**有上界**（超出即丢推送，绝不无界增长）",
+    check("出站队列有上界（超出即丢推送，绝不无界增长）",
           _k7.pending() < 2 * _d6.cfg.conn_out_hard,
           "pending=%d 硬线=%d" % (_k7.pending(), _d6.cfg.conn_out_hard))
-    check("★ 而丢的是**推送**（stale 有计数），不是响应",
+    check("而丢的是推送（stale 有计数），不是响应",
           _k7.stale > 0, "stale=%s" % _k7.stale)
 
     # ── 26.9 半关 ≠ 断线：响应不能丢（用例⑦）───────────────────────────
@@ -8195,13 +8195,13 @@ exit 0
     _c8.sock.shutdown(socket.SHUT_WR)      # 老客户端每次发完就半关
     _drive(_d7, rounds=6)
     _r8 = _c8.lines()
-    check("★★ 发完立刻半关，**仍然读得到完整响应**"
-          "（丢了它 ⇒ 提交拿不到 job_id ⇒ 重试 ⇒ 被配额拒 ⇒"
+    check("发完立刻半关，仍然读得到完整响应"
+          "（丢了它，提交无法获取 job_id，重试，被配额拒 ，"
           "用户看到「提交失败」而作业在跑）",
           len(_r8) == 1 and _r8[0].get("rid") == 7, str(_r8)[:200])
     _d7.tick()                             # sweep_conns() 在这里收
     _c8.lines(0.2)
-    check("★ 排空之后连接**最终**被关掉（不会永远留着，"
+    check("排空之后连接最终被关掉（不会永远留着，"
           "否则 64 个名额会被走掉的客户端占满）", _c8.eof, "还没关")
 
     # ── 26.10 半关之后推送还在（用例⑨）─────────────────────────────────
@@ -8216,7 +8216,7 @@ exit 0
     _d8.tick()
     _drive(_d8, rounds=2)
     _r9 = [x for x in _c9.lines() if x.get("push")]
-    check("★ 半关之后**仍然收到推送**（EOF 只停读，不取消订阅）",
+    check("半关之后仍然收到推送（EOF 只停读，不取消订阅）",
           len(_r9) >= 1, "收到 %d 条推送" % len(_r9))
 
     # ── 26.11 连接数上限：accept-then-reject（用例⑩）───────────────────
@@ -8248,11 +8248,11 @@ exit 0
     except (socket.timeout, OSError):
         pass
     _rej = json.loads(_buf.split(b"\n")[0]) if b"\n" in _buf else {}
-    check("★★ 超限的那条**读到** too_many_connections（不是静默等待后报"
+    check("超限的那条读到 too_many_connections（不是静默等待后报"
           "一个方向反了的 daemon_unreachable）",
           (_rej.get("error") or {}).get("kind") == "too_many_connections",
           str(_rej)[:200])
-    check("★★ 而它**不在**事件循环里（否则它会占着一个名额、还得有人记得管它）",
+    check("而它不在事件循环里（否则它会占着一个名额、还得有人记得管它）",
           len(_d9.conns()) == 2, "循环里有 %d 条" % len(_d9.conns()))
     _d9.selector.unregister(_lsn)
     _lsn.close()
@@ -8275,10 +8275,10 @@ exit 0
     _ra, _rb = _cA.lines(), _cB.lines()
     _aid = {s["session_id"] for m in _ra for s in (m.get("sessions") or [])}
     _bid = {s["session_id"] for m in _rb for s in (m.get("sessions") or [])}
-    check("★★ A 收到的推送里**一个 B 的会话都没有**",
+    check("A 收到的推送里一个 B 的会话都没有",
           _aid and not (_aid & _bid) and "s-B" not in _aid and "s-A" not in _bid,
           "A=%s B=%s" % (sorted(_aid), sorted(_bid)))
-    check("★ 两边各自都收到了自己那一条（否则上一条是空断言）",
+    check("两边各自都收到了自己那一条（否则上一条是空断言）",
           _aid == {"s-A"} and _bid == {"s-B"},
           "A=%s B=%s" % (sorted(_aid), sorted(_bid)))
 
@@ -8299,9 +8299,9 @@ exit 0
     _drive(_d11)
     _rz = _cZ.lines()
     _zid = {s["session_id"] for m in _rz for s in (m.get("sessions") or [])}
-    check("★ 关掉一条再开一条之后，fd 号确实被复用了（否则这条用例是空的）",
+    check("关掉一条再开一条之后，fd 号确实被复用了（否则这条用例是空的）",
           _fd_z == _fd_x, "关的是 fd=%s，新开的是 fd=%s" % (_fd_x, _fd_z))
-    check("★★★ fd 复用之后，Y 的推送**不会**跑到 Z 的连接上（跨用户泄漏）",
+    check("fd 复用之后，Y 的推送不会跑到 Z 的连接上（跨用户泄漏）",
           _zid == {"s-Z"}, "Z 收到了 %s" % sorted(_zid))
 
     # ── 26.14 推送渲染不放大 fork（用例⑫）──────────────────────────────
@@ -8322,7 +8322,7 @@ exit 0
 
     _one = _calls_per_tick(1)
     _four = _calls_per_tick(4)
-    check("★★★ 推送渲染的 fork 次数**与连接数无关**（这才是「不放大」）",
+    check("推送渲染的 fork 次数与连接数无关（这才是「不放大」）",
           _one == _four and _one > 0,
           "1 条连接 %d 次 / 4 条连接 %d 次" % (_one, _four))
     # 上界是 N 本身，不是 2N。这两件事是分开的、各有各的守卫：
@@ -8331,8 +8331,8 @@ exit 0
     #     —— 快照复用 `phase_running` 本 tick 已经取过的那一份，不再查第二遍。
     #   只钉前者的话，把 `job_live=False` 去掉会让每个作业每 tick 查两次，
     #   而"与连接数无关"照样成立 —— 那是一个不红任何东西的浪费。
-    check("★★ 而且每个作业每 tick **至多一次** Slurm 查询"
-          "（3 个会话 ⇒ 至多 3 次；快照复用它，不查第二遍）",
+    check("而且每个作业每 tick 至多一次 Slurm 查询"
+          "（3 个会话，至多 3 次；快照复用它，不查第二遍）",
           _one <= 3, "%d 次（3 个会话）" % _one)
 
     # ── 26.15 逐字节读也不丢帧（用例⑥）─────────────────────────────────
@@ -8353,9 +8353,9 @@ exit 0
     except (socket.timeout, OSError):
         pass
     _msgs = [json.loads(x) for x in _all.split(b"\n") if x.strip()]
-    check("★★ 客户端**每次只读 1 个字节**也解出恰好 4 条（半写断点不错位）",
+    check("客户端每次只读 1 个字节也解出恰好 4 条（半写断点不错位）",
           len(_msgs) == 4, "解出 %d 条" % len(_msgs))
-    check("★ 而 seq 严格递增且连续",
+    check("而 seq 严格递增且连续",
           [m.get("seq") for m in _msgs] == [1, 2, 3, 4],
           str([m.get("seq") for m in _msgs]))
 
@@ -8365,7 +8365,7 @@ exit 0
     _cF.raw(b"x" * (mod.CONN_IN_MAX + 100))
     _drive(_d13)
     _rF = _cF.lines()
-    check("★ 超长请求行回一句 bad_request（不是静默丢弃）",
+    check("超长请求行回一句 bad_request（不是静默丢弃）",
           len(_rF) == 1 and (_rF[0].get("error") or {}).get("kind") == "bad_request",
           str(_rF)[:200])
 
@@ -8375,7 +8375,7 @@ exit 0
         _cG.send({"op": "ping", "rid": _i})
     _drive(_d14, rounds=12)
     _rG = [x.get("rid") for x in _cG.lines() if "rid" in x]
-    check("★★ 一次发 %d 条请求，**一条都不丢**（批次上限只限速不限量）"
+    check("一次发 %d 条请求，一条都不丢（批次上限只限速不限量）"
           % (mod.MAX_DISPATCH_PER_WAKEUP * 3),
           _rG == list(range(mod.MAX_DISPATCH_PER_WAKEUP * 3)),
           "收到 %d 条" % len(_rG))
@@ -8395,18 +8395,18 @@ exit 0
     for _i in range(200):                  # 200 次客户端唤醒
         _cH.send({"op": "ping", "rid": _i})
     _drive(_d15, rounds=200)
-    check("★★ 200 次客户端唤醒**一次 tick 都没触发**"
+    check("200 次客户端唤醒一次 tick 都没触发"
           "（tick 的钟是截止时刻，不是「有人说话就转一圈」）",
           _ticks[0] == 0, "触发了 %d 次" % _ticks[0])
-    check("★ 还没到点 ⇒ 不 tick", _d15.tick_due(_t0) is False)
-    check("★ 到点了才 tick", _d15.tick_due(_t0 + 5.0) is True)
-    check("★ 而推进是「此刻 + 周期」，**落在未来**"
+    check("还没到点，不 tick", _d15.tick_due(_t0) is False)
+    check("到点了才 tick", _d15.tick_due(_t0 + 5.0) is True)
+    check("而推进是「此刻 + 周期」，落在未来"
           "（写成 `+=` 会在慢 tick 上自持死循环）",
           _d15.next_tick_at == _t0 + 5.0 + _d15.cfg.tick_seconds,
           "next=%.2f 期望 %.2f" % (_d15.next_tick_at,
                                    _t0 + 5.0 + _d15.cfg.tick_seconds))
     _d15.tick_done(_t0 + 8.2)              # 假装这个 tick 跑了 3.2 秒
-    check("★★ 一个超时的 tick **不触发补跑**（补跑是往慢集群上雪上加霜）",
+    check("一个超时的 tick 不触发补跑（补跑是往慢集群上雪上加霜）",
           _d15.tick_due(_t0 + 8.3) is False
           and _d15.next_tick_at > _t0 + 8.2,
           "next=%.2f" % _d15.next_tick_at)
@@ -8419,18 +8419,18 @@ exit 0
                                     "index.js"), encoding="utf-8").read()
     _m_cli = re.search(r"(?m)^RPC_MAX_RESPONSE_BYTES\s*=\s*(.+)$", _cli_src)
     _m_be = re.search(r"const MAX_RESPONSE_BYTES\s*=\s*(.+?);", _be_src)
-    check("★★★ 守护进程的 CONN_OUT_HARD 与 CLI 的 RPC_MAX_RESPONSE_BYTES"
-          "**逐字相等**（比它小的话，一条合法的 plugin_package 响应会进不去）",
+    check("守护进程的 CONN_OUT_HARD 与 CLI 的 RPC_MAX_RESPONSE_BYTES"
+          "逐字相等（若比它小，一条合法的 plugin_package 响应会进不去）",
           bool(_m_cli) and eval(_m_cli.group(1)) == mod.CONN_OUT_HARD,
           "CLI 那份是 %s，守护进程是 %d"
           % ((_m_cli.group(1).strip() if _m_cli else "没找到"), mod.CONN_OUT_HARD))
-    check("★★ 客户端的 MAX_RESPONSE_BYTES 也是同一个数（三处一致）",
+    check("客户端的 MAX_RESPONSE_BYTES 也是同一个数（三处一致）",
           bool(_m_be) and eval(_m_be.group(1)) == mod.CONN_OUT_HARD,
           "客户端那份是 %s" % (_m_be.group(1).strip() if _m_be else "没找到"))
-    check("★ 软水位小于硬线（反过来的话读侧的门永远关着）",
+    check("软水位小于硬线（若反过来读侧的门永远关着）",
           0 < mod.CONN_OUT_SOFT < mod.CONN_OUT_HARD,
           "%d / %d" % (mod.CONN_OUT_SOFT, mod.CONN_OUT_HARD))
-    check("★★ 快照周期**严格小于**客户端的 STATUS_MS（否则这一版在数据新鲜度上"
+    check("快照周期严格小于客户端的 STATUS_MS（否则这一版在数据新鲜度上"
           "是净退化）",
           mod.SNAPSHOT_INTERVAL * 1000 < 60000,
           "快照 %s 秒 vs STATUS_MS 60 秒" % mod.SNAPSHOT_INTERVAL)
@@ -8443,9 +8443,9 @@ exit 0
     _ses_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
                                     "session.js"), encoding="utf-8").read()
     _m_wd = re.search(r"(?m)^const PUSH_STALE_MS\s*=\s*(\d+)", _ses_src)
-    check("★★★ 客户端的推送看门狗**严格大于**守护进程的快照周期"
-          "（取小了会把**正常的空闲**读成通道坏了，于是每一轮都去问一次 —— "
-          "把常驻通道省下来的东西原样还回去）",
+    check("客户端的推送看门狗严格大于守护进程的快照周期"
+          "（取小了会把正常的空闲读成通道坏了，于是每一轮都去问一次 —— "
+          "把常驻通道省下来的那部分原样还回去）",
           bool(_m_wd) and int(_m_wd.group(1)) > mod.SNAPSHOT_INTERVAL * 1000,
           "看门狗 %s ms vs 快照 %s 秒"
           % ((_m_wd.group(1) if _m_wd else "没找到"), mod.SNAPSHOT_INTERVAL))
@@ -8459,18 +8459,18 @@ exit 0
                            _be_src)
     for _label, _m in (("STREAM_CMD", _m_stream_cmd), ("RPC_CMD", _m_rpc_cmd)):
         _sub = _m.group(1) if _m else None
-        check("★★ 客户端 %s 要的子命令 `%s` 是 CLI 真的有的"
+        check("客户端 %s 要的子命令 `%s` 是 CLI 真的有的"
               "（打错一个词 = 安静地退回 exec，谁都看不出来）"
               % (_label, _sub or "?"),
               bool(_sub) and bool(re.search(r'add\("%s"' % re.escape(_sub), _cli_src)),
-              "在 cluster/slurmate 的子命令表里找不到 `%s`" % (_sub or "?"))
+              "在 cluster/slurmate 的子命令表里未找到 `%s`" % (_sub or "?"))
 
     # 通知的键名：客户端认的那两个，必须与守护进程发的逐字相同。
     #    改一处漏另一处 = 通知永远认不出来 —— 而它同样只是"退回轮询"，不报错。
     _msg_src = io.open(DAEMON, encoding="utf-8").read()
     _m_msg_key = re.search(r'msg = \{"push": "([a-z_]+)", "seq": seq', _msg_src)
     #    那两条判据在客户端的 `parseEnvelopeLine` 里（`obj.push` / `obj.seq`）。
-    check("★★ 客户端认的通知键（`obj.push` / `obj.seq`）与守护进程发的"
+    check("客户端认的通知键（`obj.push` / `obj.seq`）与守护进程发的"
           "（`\"push\": \"sessions\"` + `\"seq\"`）逐字相同",
           bool(_m_msg_key) and _m_msg_key.group(1) == "sessions"
           and bool(re.search(r"typeof obj\.push === 'string'", _be_src))
@@ -8482,7 +8482,7 @@ exit 0
     #    收到的是 unknown_op（客户端那一半在阶段 6 落地）。
     _doc_src = io.open(os.path.join(HERE, os.pardir, "docs", "PROTOCOL.md"),
                        encoding="utf-8").read()
-    check("★★ `takeover` / `leave` 在 dispatch 表里，而文档里写的也是同两个名字",
+    check("`takeover` / `leave` 在 dispatch 表里，而文档里写的也是同两个名字",
           all(('"%s"' % _op) in _msg_src and ("`%s`" % _op) in _doc_src
               for _op in ("takeover", "leave")),
           "takeover=%s leave=%s"
@@ -8492,7 +8492,7 @@ exit 0
     #    而 `SessionController` 当时只有 `_suspended` 与快照里的 `suspended` ——
     #    那两处读到的都是 `undefined` 恒为假，而没有一个字会报错。
     #    症状是"用户点了「连接」，会话一条都接不回来"。
-    check("★★ index.js 读的 `c.suspended` 真的是 SessionController 的属性"
+    check("index.js 读的 `c.suspended` 真的是 SessionController 的属性"
           "（不是那个私有的 `_suspended`、也不是快照里那一个）",
           bool(re.search(r"(?m)^\s*get suspended\(\)", _ses_src))
           and bool(re.search(r"\bc\.suspended\b", _idx_src)),
@@ -8520,13 +8520,13 @@ exit 0
     })
     _add(_d18, "s-pw", job_id=str(_pwjid))
     _pw_view = _d18.session_view(_d18.store.get("s-pw"))     # with_secret=True
-    check("★ 前提：这条会话**确实**有口令可发（否则下面那条是空断言）",
+    check("前提：这条会话确实有口令可发（否则下面那条是空断言）",
           _pw_view.get("auth_password") == "pw-push-secret",
           "status 那条路拿到的口令是 %r" % _pw_view.get("auth_password"))
     _d18.tick()
     _drive(_d18)
     _rpw = [m for m in _cI.lines() if m.get("push")]
-    check("★★ 推送里**一个 auth_password 都没有**（它走的是 list 的 "
+    check("推送里一个 auth_password 都没有（它走的是 list 的 "
           "with_secret=False —— 于是「推送不含秘密」是结构性质，不靠任何判断）",
           bool(_rpw) and all("auth_password" not in s
                              for m in _rpw for s in (m.get("sessions") or [])),
@@ -8567,10 +8567,10 @@ exit 0
 
     _th = threading.Thread(target=_boot, daemon=True)
     _th.start()
-    check("★ 守护进程线程起来了", _ready.wait(10.0), "5 秒内没起来")
+    check("守护进程线程起来了", _ready.wait(10.0), "5 秒内没起来")
     _dd = _box.get("d")
     if _dd is None:
-        check("★★★ 端到端（守护进程没起来，其余免谈）", False, "见上")
+        check("端到端（守护进程没起来，其余免谈）", False, "见上")
     else:
         _s1 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         _s1.settimeout(10.0)
@@ -8585,13 +8585,13 @@ exit 0
             #   响应带 rid、通知不带，两者在同一条流上不会混。
             while not _wresp and time.time() - _t0 < 8.0:
                 _wresp = [m for m in _w.lines(0.3) if m.get("rid") == "e2e-1"]
-            check("★★★ 端到端：真循环 + 真 listener，带 rid 的请求拿到带 rid 的响应",
+            check("端到端：真循环 + 真 listener，带 rid 的请求拿到带 rid 的响应",
                   len(_wresp) == 1 and _wresp[0].get("ok") is True,
                   str(_wresp)[:200])
             # 放在拿到响应之后：accept 是守护进程线程做的，刚 connect
             #   完就去问 conns() 会问到一个空列表（那是竞态，不是缺陷）。
             _accepted = _dd.conns()
-            check("★★ 被接受的连接是**非阻塞**的"
+            check("被接受的连接是非阻塞的"
                   "（实测 accept() 在非阻塞 listener 上返回的是阻塞 socket ——"
                   "不显式关掉，第一次 send 就会卡死整个事件循环）",
                   bool(_accepted)
@@ -8602,7 +8602,7 @@ exit 0
             _wpush = []
             while not _wpush and time.time() - _t0 < 8.0:
                 _wpush = [m for m in _w.lines(0.3) if m.get("push")]
-            check("★★★ 端到端：订阅连接收到了推送，而且推的是那条会话",
+            check("端到端：订阅连接收到了推送，而且推的是那条会话",
                   len(_wpush) >= 1 and any(
                       s.get("session_id") == "s-e2e"
                       for s in (_wpush[-1].get("sessions") or [])),
@@ -8618,13 +8618,13 @@ exit 0
             _vresp = []
             while not _vresp and time.time() - _t0 < 8.0:
                 _vresp = _v.lines(0.3)
-            check("★★ 端到端：老客户端（不带 rid）一问一答，且**没有 rid**",
+            check("端到端：老客户端（不带 rid）一问一答，且没有 rid",
                   len(_vresp) == 1 and "rid" not in _vresp[0], str(_vresp)[:200])
             _extra = []
             _t0 = time.time()
             while time.time() - _t0 < 0.6:          # 跨过好几个 tick
                 _extra += [m for m in _v.lines(0.1) if m.get("push")]
-            check("★★★ 端到端：而它在好几个 tick 里**一条推送都没收到** —— "
+            check("端到端：而它在好几个 tick 里一条推送都没收到 —— "
                   "老客户端不受常驻通道影响的保证是结构性的",
                   _extra == [], "它收到了 %d 条推送" % len(_extra))
             # ── 27.8 端到端：真循环里，两条都活着 ─────────────────
@@ -8642,7 +8642,7 @@ exit 0
             _xa = []
             while not _xa and time.time() - _t0 < 8.0:
                 _xa = [m for m in _x.lines(0.3) if m.get("rid") == "e2e-A"]
-            check("★ 前提：甲机在真循环里认下了身份并拿到应答",
+            check("前提：甲机在真循环里认下了身份并拿到应答",
                   len(_xa) == 1 and _xa[0].get("ok") is True, str(_xa)[:200])
 
             def _ask_state(what):
@@ -8662,7 +8662,7 @@ exit 0
                 return (_row or {}).get("state")
 
             _before_state = _ask_state({"op": "list"})
-            check("★ 前提：那条会话问得到、而且是活的",
+            check("前提：那条会话问得到、而且是活的",
                   _before_state in ("reserved", "submitted", "enrolled",
                                     "suspect", "orphaned"),
                   str(_before_state))
@@ -8677,7 +8677,7 @@ exit 0
             _ya = []
             while not _ya and time.time() - _t0 < 8.0:
                 _ya = [m for m in _y.lines(0.3) if m.get("rid") == "e2e-B"]
-            check("★ 前提：乙机也拿到应答（后到的那个本身要能干活）",
+            check("前提：乙机也拿到应答（后到的那个本身要能干活）",
                   len(_ya) == 1 and _ya[0].get("ok") is True, str(_ya)[:200])
 
             # 判据取"两条都还在事件循环里，而且谁都没在关"：顶替那条路
@@ -8685,8 +8685,8 @@ exit 0
             #    找出来，逐个确认它还活着、也没被标记关闭。
             _kA_e2e = next((c for c in _dd.conns() if c.client_id == "e2e-A"), None)
             _kB_e2e = next((c for c in _dd.conns() if c.client_id == "e2e-B"), None)
-            check("★★★ 端到端（真循环 + 真 listener）：两个不同的 client_id ⇒"
-                  " **两条都还在**，谁都没被踢"
+            check("端到端（真循环 + 真 listener）：两个不同的 client_id ，"
+                  " 两条都还在，谁都没被踢"
                   "（v0.8 那条「后到者赢」在这个仓库里已经不存在了）",
                   _kA_e2e is not None and _kB_e2e is not None
                   and not _kA_e2e.closing and not _kB_e2e.closing
@@ -8699,7 +8699,7 @@ exit 0
             while time.time() - _t0 < 2.0:
                 _xpush += [m for m in _x.lines(0.2) if m.get("push")]
                 _ypush += [m for m in _y.lines(0.2) if m.get("push")]
-            check("★★★ 而两条**都收得到推送**（不是「留着但它已经是个哑巴」）——"
+            check("而两条都收得到推送（不是「留着但它已经是个哑巴」）——"
                   "推送是连接还活着唯一可观察的证据",
                   len(_xpush) >= 1 and len(_ypush) >= 1,
                   "甲 %d 条 / 乙 %d 条" % (len(_xpush), len(_ypush)))
@@ -8709,8 +8709,8 @@ exit 0
             #    建的，跨线程摸它会抛（`check_same_thread`）。那条限制本身是对的，
             #    不该为了测试拆掉它。于是：前后各问一次，比对。
             #    这比读库更硬 —— 它问的就是用户能问的那条路。
-            check("★★★ 端到端：这些连接的动作**一个字都没动那条会话** ——"
-                  "从**另一条连接**问，它还在、状态一模一样",
+            check("端到端：这些连接的动作一个字都没动那条会话 ——"
+                  "从另一条连接问，它还在、状态完全相同",
                   _before_state is not None and _after_state == _before_state,
                   "前=%s 后=%s" % (_before_state, _after_state))
             _x.close(); _y.close()
@@ -8757,19 +8757,19 @@ exit 0
                             and len([m for m in _msgs if m.get("push")]) >= 2):
                         break
                 _strids = [m.get("rid") for m in _msgs if "rid" in m]
-                check("★★★ 一条 `slurmate stream` 进程承载 3 条 RPC，各回各的 rid",
+                check("一条 `slurmate stream` 进程承载 3 条 RPC，各回各的 rid",
                       _strids == ["st-0", "st-1", "st-2"], str(_strids))
                 _stpush = [m for m in _msgs if m.get("push")]
-                check("★★★ 而同一条 stream 上还收到 ≥ 2 条推送（服务端主动说的）",
+                check("而同一条 stream 上还收到 ≥ 2 条推送（服务端主动说的）",
                       len(_stpush) >= 2, "收到 %d 条" % len(_stpush))
                 _stseq = [m.get("seq") for m in _stpush]
-                check("★ 推送的 seq 严格递增（缺口由 stale 报，不靠猜）",
+                check("推送的 seq 严格递增（缺口由 stale 报，不靠猜）",
                       _stseq == sorted(set(_stseq)) and len(_stseq) >= 2,
                       str(_stseq))
                 # 半关，守护进程把出站排空后关掉它，那是正常终点，退出码 0
                 _proc.stdin.close()
                 _rc = _proc.wait(timeout=20)
-                check("★★ stdin 半关之后 `stream` 以 0 退出"
+                check("stdin 半关之后 `stream` 以 0 退出"
                       "（半关 ≠ 断线，是正常收摊；报 5 会让客户端白白重连）",
                       _rc == 0,
                       "退出码 %s，stderr=%s"
@@ -8783,11 +8783,11 @@ exit 0
             _v.close()
             _w.close()
         except OSError as _e:
-            check("★★★ 端到端：连得上守护进程", False, str(_e))
+            check("端到端：连得上守护进程", False, str(_e))
         finally:
             _dd.running = False
             _th.join(timeout=8.0)
-        check("★ 收到停止信号之后循环退出来了（不是卡在 select 里）",
+        check("收到停止信号之后循环退出来了（不是卡在 select 里）",
               not _th.is_alive(), "线程还活着")
     _fh.cancel_dump_traceback_later()
 
@@ -8810,8 +8810,8 @@ exit 0
     #   ① 身份在服务端只有一个来源、只有一个用途；② 连接上限是拒绝，不是顶掉。
 
     # ── 27.0 认领的收敛（纯函数）───────────────────────────────────────
-    check("★ client 认领：非 dict / 没有 id / 空的 id ⇒ 认不出来"
-          "（而**不是**拒绝这条请求 —— 报不好身份不该让人连不上集群）",
+    check("client 认领：非 dict / 没有 id / 空的 id，认不出来"
+          "（而不是拒绝这条请求 —— 报不好身份不该让人连不上集群）",
           mod.parse_client_claim(None) == (None, None)
           and mod.parse_client_claim({}) == (None, None)
           and mod.parse_client_claim({"id": ""}) == (None, None)
@@ -8819,57 +8819,57 @@ exit 0
           and mod.parse_client_claim({"id": 42}) == (None, None),
           str(mod.parse_client_claim(None)))
     _dirty = mod.parse_client_claim({"id": "a\x1bb\nc&d"})[0]
-    check("★ client 认领：不可打印的字符被抹掉"
+    check("client 认领：不可打印的字符被抹掉"
           "（它要落进一行审计日志 —— 一个 \\n 会把那行劈成两半）",
           _dirty == "abc&d", repr(_dirty))
-    check("★ client 认领：id 截到 %d 位 —— 否则一个 10 MB 的 id 就是一次内存放大"
+    check("client 认领：id 截到 %d 位 —— 否则一个 10 MB 的 id 就是一次内存放大"
           % mod.CLIENT_ID_MAX,
           len(mod.parse_client_claim({"id": "x" * 9000})[0]) == mod.CLIENT_ID_MAX,
           str(len(mod.parse_client_claim({"id": "x" * 9000})[0])))
-    check("★ client 认领：name 不填就回落成 id（判等**从不看 name** ——"
+    check("client 认领：name 不填就回落成 id（判等从不看 name ——"
           "一台机器改个名不该被当成换了一台电脑）",
           mod.parse_client_claim({"id": "m1"}) == ("m1", "m1"),
           str(mod.parse_client_claim({"id": "m1"})))
     _cleanname = mod.parse_client_claim({"id": "m1", "name": "\x07" * 400 + "箱"})[1]
-    check("★ client 认领：name 同样被收敛（不可打印的抹掉），并有它自己的上限",
+    check("client 认领：name 同样被收敛（不可打印的抹掉），并有它自己的上限",
           _cleanname == "箱"
           and len(mod.parse_client_claim({"id": "m1", "name": "名" * 999})[1])
           == mod.CLIENT_NAME_MAX,
           repr(_cleanname))
-    check("★★ 这一格**在配置白名单里**（不在的话，写进 conf 会让守护进程拒绝启动）",
+    check("这一格在配置白名单里（若不在，写进 conf 会让守护进程拒绝启动）",
           "max_connections_per_user" in mod.GLOBAL_KEYS,
           str(sorted(mod.GLOBAL_KEYS)))
-    check("★★ 而旧名字**不在**白名单里 —— 一个拼错/过时的键必须被明确拒绝，"
+    check("而旧名字不在白名单里 —— 一个拼错/过时的键必须被明确拒绝，"
           "而不是被静默忽略（「文件里写着，而实际什么也没发生」）",
           "max_clients_per_user" not in mod.GLOBAL_KEYS,
           str(sorted(mod.GLOBAL_KEYS)))
-    check("★★ 缺省值远高于「一个客户端一条连接」，而它的作用是"
+    check("缺省值远高于「一个客户端一条连接」，而它的作用是"
           "「一个人占不满全部连接名额」（全局上限是 CONN_MAX）",
           mod.CONN_MAX % mod.DEFAULT_MAX_CONNECTIONS_PER_USER == 0
           and mod.DEFAULT_MAX_CONNECTIONS_PER_USER >= 4,
           "每用户 %d，全局 %d"
           % (mod.DEFAULT_MAX_CONNECTIONS_PER_USER, mod.CONN_MAX))
-    check("★ 它与 max_sessions_per_user 仍然是**两个旋钮**"
+    check("它与 max_sessions_per_user 仍然是两个旋钮"
           "（一个管连接，一个管作业）",
           "max_sessions_per_user" in mod.GLOBAL_KEYS
           and mod.DEFAULT_MAX_CONNECTIONS_PER_USER
           != mod.DEFAULT_MAX_SESSIONS_PER_USER,
           "")
     # 0 必须被自检拦下：0 条连接 = 谁都连不上（每一条都被拒），
-    #    而报错会是一句"本站同时只服务 0 条连接" —— 那句话把根因指向"人太多"。
+    #    而报错会是一句"本站同时只服务 0 条连接" —— 那句话把根因指向"人过多"。
     _c_ok = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
                                   "max_connections_per_user = 2\n",
                                   "clients-ok.conf")).validate()
-    check("★ 写 2 是合法的（自检无错误）", _c_ok == [], str(_c_ok))
+    check("写 2 是合法的（自检无错误）", _c_ok == [], str(_c_ok))
     _c_zero = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
                                     "max_connections_per_user = 0\n",
                                     "clients-zero.conf")).validate()
-    check("★★ 写 0 会被自检拦下（0 条连接 = 任何人都连不上）",
+    check("写 0 会被自检拦下（0 条连接 = 任何人都连不上）",
           any("max_connections_per_user" in e for e in _c_zero), str(_c_zero))
     _c_old = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
                                    "max_clients_per_user = 2\n",
                                    "clients-old.conf")).validate()
-    check("★★ 而旧名字会被**明确拒绝**（不是静默忽略）",
+    check("而旧名字会被明确拒绝（不是静默忽略）",
           any("max_clients_per_user" in e for e in _c_old), str(_c_old))
 
     # ── 27.1 身份只在常驻通道上认（rid 那道门槛）────────────────────────
@@ -8877,22 +8877,22 @@ exit 0
     _cR, _kR = _pair(_d17)
     _cR.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
     _drive(_d17)
-    check("★ 前提：常驻通道（带 rid）认下了身份",
+    check("前提：常驻通道（带 rid）认下了身份",
           _kR.client_id == "mA" and _kR.client_name == "甲机",
           "%s/%s" % (_kR.client_id, _kR.client_name))
-    check("★ 而认身份不影响这条请求本身：它照样拿到应答",
+    check("而认身份不影响这条请求本身：它照样拿到应答",
           len(_cR.lines()) == 1, "")
     # 这一条是本节最要紧的结构性质：exec 退路带的 client 必须被无视。
     _cE, _kE = _pair(_d17)
     _cE.send({"op": "ping", "client": {"id": "mA", "name": "甲机"}})
     _drive(_d17)
-    check("★★★ exec 退路（**不带 rid**）即使带着同一个 client，也**不认领身份**"
+    check("exec 退路（不带 rid）即使带着同一个 client，也不认领身份"
           " —— 少了这道门槛，客户端每降级一次 exec 就多一条「临时身份」，"
-          "而看护者那一格会跟着一条**下一秒就没了**的连接走（它刚认领的会话"
+          "而看护者那一格会跟着一条下一秒就没了的连接走（它刚认领的会话"
           "立刻变成「没人看」，倒计时开始跑）",
           _kE.client_id is None and not _kR.closing,
           "kE.client_id=%s kR.closing=%s" % (_kE.client_id, _kR.closing))
-    check("★ 一条连接只认一次身份（连接的身份是连接的属性，不许中途改）",
+    check("一条连接只认一次身份（连接的身份是连接的属性，不许中途改）",
           (_d17.handle_line(_kR, json.dumps(
               {"op": "ping", "rid": 2, "client": {"id": "mZ"}}).encode()),
            _kR.client_id)[1] == "mA",
@@ -8916,10 +8916,10 @@ exit 0
     _cB, _kB = _pair(_d24)
     _cB.send({"op": "ping", "rid": 1, "client": {"id": "mB", "name": "乙机"}})
     _drive(_d24)
-    check("★ 前提：两条连接各自都认了身份（否则下面那条是空断言）",
+    check("前提：两条连接各自都认了身份（否则下面那条是空断言）",
           _kA.client_id == "mA" and _kB.client_id == "mB",
           "%s / %s" % (_kA.client_id, _kB.client_id))
-    check("★★★ 两个不同的 client_id 同时订阅 ⇒ **两条都在**"
+    check("两个不同的 client_id 同时订阅，两条都在"
           "（后到者赢那条路已经不存在了 —— 没有顶替，就没有拉锯）",
           not _kA.closing and not _kB.closing
           and _kA in _d24.conns() and _kB in _d24.conns(),
@@ -8931,10 +8931,10 @@ exit 0
     _drive(_d24)
     _pushA = [m for m in _cA.lines() if m.get("push")]
     _pushB = [m for m in _cB.lines() if m.get("push")]
-    check("★★ 而两条**各自都收得到推送**（不是「留着但它已经是个哑巴」）",
+    check("而两条各自都收得到推送（不是「留着但它已经是个哑巴」）",
           len(_pushA) >= 1 and len(_pushB) >= 1,
           "甲 %d 条 / 乙 %d 条" % (len(_pushA), len(_pushB)))
-    check("★ 两条收到的快照里都有那条会话（推的是同一份视图，不是各推各的）",
+    check("两条收到的快照里都有那条会话（推的是同一份视图，不是各推各的）",
           all(any(s.get("session_id") == "s-two" for s in (m.get("sessions") or []))
               for m in (_pushA[:1] + _pushB[:1]))
           and len(_pushA) >= 1 and len(_pushB) >= 1,
@@ -8954,7 +8954,7 @@ exit 0
     _d25 = _mkd(max_connections_per_user=2)
     _e1, _ke1 = _pair(_d25)
     _e2, _ke2 = _pair(_d25)
-    check("★ 前提：这个 uid 已经有 2 条连接，正好到顶",
+    check("前提：这个 uid 已经有 2 条连接，正好到顶",
           _d25.uid_conn_count(UID) == 2, str(_d25.uid_conn_count(UID)))
     _lsn2_path = os.path.join(tmpdir, "peruser.sock")
     if os.path.exists(_lsn2_path):
@@ -8979,27 +8979,27 @@ exit 0
     except (socket.timeout, OSError):
         pass
     _rej2 = json.loads(_buf2.split(b"\n")[0]) if b"\n" in _buf2 else {}
-    check("★★ 超限的那条**读到** too_many_connections（而不是被静默丢弃、"
+    check("超限的那条读到 too_many_connections（而不是被静默丢弃、"
           "等一个方向反了的 daemon_unreachable）",
           (_rej2.get("error") or {}).get("kind") == "too_many_connections",
           str(_rej2)[:220])
-    check("★★ 而它**说得出是谁满了** —— 每用户那道上限与全局那道"
+    check("而它说得出是谁满了 —— 每用户那道上限与全局那道"
           "（「本站满了」）不是同一句话，否则根因在别人身上时用户看不出来",
           "账号" in str((_rej2.get("error") or {}).get("detail") or ""),
           str((_rej2.get("error") or {}).get("detail"))[:160])
-    check("★★★ 而**已经在的那两条一条都没被断**（「拒绝」不是「顶掉」）",
+    check("而已经在的那两条一条都没被断（「拒绝」不是「顶掉」）",
           not _ke1.closing and not _ke2.closing
           and _ke1 in _d25.conns() and _ke2 in _d25.conns(),
           "甲 closing=%s 在=%s；乙 closing=%s 在=%s"
           % (_ke1.closing, _ke1 in _d25.conns(),
              _ke2.closing, _ke2 in _d25.conns()))
-    check("★ 超限那条**不在**事件循环里（它没有占着一个名额）",
+    check("超限那条不在事件循环里（它没有占着一个名额）",
           len(_d25.conns()) == 2, "循环里有 %d 条" % len(_d25.conns()))
     # 上限是按 uid 算的：判据就是那一句 `c.uid == uid`，所以另一个用户
     #   数不到这些连接。断言写在这里是因为"数错了人"的症状同样安静 ——
     #   它会让别人的连接被当成我的，于是我被拒。
     _e3, _ke3 = _pair(_d25, uid=UID + 1)
-    check("★★ 而另一个 uid 的连接**根本不进这个计数**（上限是按 uid 分的）",
+    check("而另一个 uid 的连接根本不进这个计数（上限是按 uid 分的）",
           _d25.uid_conn_count(UID + 1) == 1
           and _d25.uid_conn_count(UID) == 2,
           "我 %d / 他 %d" % (_d25.uid_conn_count(UID),
@@ -9015,9 +9015,9 @@ exit 0
         _c, _k = _pair(_d16)
         _d16.drop_conn(_k, "测试")
         _c.close()
-    check("★★ 开关 30 条之后 selector 里仍然只有那一份（没有 fd 泄漏）",
+    check("开关 30 条之后 selector 里仍然只有那一份（没有 fd 泄漏）",
           len(_d16.selector.get_map()) == 0, str(len(_d16.selector.get_map())))
-    check("★ 关闭的连接不再出现在花名册里", _d16.conns() == [],
+    check("关闭的连接不再出现在花名册里", _d16.conns() == [],
           "%d 条" % len(_d16.conns()))
 
     # ══════════════════════════════════════════════════════════════════════
@@ -9040,7 +9040,7 @@ exit 0
           具体怎么实现无关。
         `__getattr__` 只认 `Cluster` 点过名的那些方法，别的一律
           `AttributeError` —— 一个万能的 catch-all 会把"名字写错了"也一起吞掉，
-          而名字写错的形态正是"那一格永远取不到"（见 28.0 那条）。
+          而名字写错的形态正是"那一格永远获取失败"（见 28.0 那条）。
         """
 
         NAMES = (tuple(m for _k, _p, m in mod.Cluster.SHARED)
@@ -9076,22 +9076,22 @@ exit 0
     # ── 28.0 名字与常量 ─────────────────────────────────────────────────
     _cs_names = [m for _k, _p, m in mod.Cluster.SHARED]
     _cu_names = [m for _k, m in mod.Cluster.PER_USER]
-    check("★★ `Cluster` 里点名的每一个查询都**真的在 `Slurm` 上**"
-          "（名字写错的形态是那一格**永远取不到** —— 一个字都不报）",
+    check("`Cluster` 里点名的每一个查询都真的在 `Slurm` 上"
+          "（名字写错的形态是那一格永远获取失败 —— 一个字都不报）",
           all(hasattr(mod.Slurm, m) for m in _cs_names + _cu_names),
           str([m for m in _cs_names + _cu_names if not hasattr(mod.Slurm, m)]))
-    check("★ 共享的那几类与「按用户」的那几类没有重名"
-          "（重了的话 tick 的预热会覆盖掉请求侧读的那一格）",
+    check("共享的那几类与「按用户」的那几类没有重名"
+          "（若重了 tick 的预热会覆盖掉请求侧读的那一格）",
           not (set(_cs_names) & set(_cu_names)), str(sorted(set(_cs_names) & set(_cu_names))))
-    check("★ 三层钟的顺序：快 < 中 < 慢（反过来的话，最贵的那些会被最急的拖着跑）",
+    check("三层钟的顺序：快 < 中 < 慢（若反过来，最贵的那些会被最急的拖着跑）",
           mod.INFO_FAST_SECONDS < mod.INFO_MEDIUM_SECONDS < mod.INFO_SLOW_SECONDS,
           "%s / %s / %s" % (mod.INFO_FAST_SECONDS, mod.INFO_MEDIUM_SECONDS,
                             mod.INFO_SLOW_SECONDS))
-    check("★ 最快的那一层就是 tick 的周期（控制器健康跟着每一轮对账走，不额外加钟）",
+    check("最快的那一层就是 tick 的周期（控制器健康跟着每一轮对账走，不额外加钟）",
           mod.INFO_FAST_SECONDS == mod.TICK_SECONDS,
           "%s vs %s" % (mod.INFO_FAST_SECONDS, mod.TICK_SECONDS))
-    check("★★ 失败之后按 INFO_RETRY_SECONDS 重试，**不是**等满自己那一层"
-          "（慢钟上的东西失败一次就 5 分钟不再看，而「分区表读不到」是要立刻"
+    check("失败之后按 INFO_RETRY_SECONDS 重试，不是等满自己那一层"
+          "（慢钟上的那一格失败一次就 5 分钟不再看，而「分区表无法读取」是要立刻"
           "自愈的瞬时故障：slurmctld 重启、munge 抖动）",
           mod.INFO_RETRY_SECONDS < mod.INFO_MEDIUM_SECONDS,
           "%s vs %s" % (mod.INFO_RETRY_SECONDS, mod.INFO_MEDIUM_SECONDS))
@@ -9101,7 +9101,7 @@ exit 0
                        "fail", "future", "idle", "inval", "maint", "mix",
                        "perfctrs", "plnd", "pow_dn", "pow_up", "reboot_issued",
                        "reboot_req", "resv", "unk")
-    check("★★ 节点后缀字符集与紧凑状态名**不相交**（剥法成立的前提）",
+    check("节点后缀字符集与紧凑状态名不相交（剥法成立的前提）",
           not any(st[-1] in mod.NODE_FLAG_CHARS for st in _COMPACT_STATES),
           str([st for st in _COMPACT_STATES if st[-1] in mod.NODE_FLAG_CHARS]))
 
@@ -9114,12 +9114,12 @@ exit 0
     _T0 = time.time()
     _cl.refresh(_T0, users=())
     _after = dict(_cs.n)
-    check("★ 前提：刷新本身确实查了（否则下面那条是空断言）",
+    check("前提：刷新本身确实查了（否则下面那条是空断言）",
           set(_after) == set(_cs_names), str(sorted(_after)))
     for _ in range(20):
         _cl.health(); _cl.slurm_version(); _cl.partitions()
         _cl.gres(); _cl.nodes(); _cl.queue()
-    check("★★★ 刷新之后，**20 组读一次 fork 都不发**"
+    check("刷新之后，20 组读一次 fork 都不发"
           "（这就是「一次查询服务所有连接」）",
           _cs.n == _after, "多出来的：%s" % {k: v - _after.get(k, 0)
                                             for k, v in _cs.n.items()
@@ -9130,7 +9130,7 @@ exit 0
     for _ in range(20):
         _cl.account_for("alice"); _cl.allowed_partitions("alice")
         _cl.fairshare("alice")
-    check("★★ 同一个用户的 20 组读同样零 fork（M 条连接读的是同一份）",
+    check("同一个用户的 20 组读同样零 fork（M 条连接读的是同一份）",
           {k: v for k, v in _cs.n.items() if k in _cu_names} == _n_user,
           str({k: v for k, v in _cs.n.items() if k in _cu_names}))
 
@@ -9138,20 +9138,20 @@ exit 0
     _cs2 = _CountSlurm()
     _cl2 = mod.Cluster(cfg, _cs2)
     _cl2.refresh(_T0, users=())
-    check("★ 前提：health 与分区表各刷了一次",
+    check("前提：health 与分区表各刷了一次",
           _cs2.n.get("controller_health") == 1
           and _cs2.n.get("partition_table") == 1, str(_cs2.n))
     _cl2.refresh(_T0 + mod.INFO_FAST_SECONDS - 0.1, users=())
-    check("★ 不到一个快钟周期，health **不重查**",
+    check("不到一个快钟周期，health 不重查",
           _cs2.n.get("controller_health") == 1, str(_cs2.n))
     _cl2.refresh(_T0 + mod.INFO_FAST_SECONDS, users=())
-    check("★ 到了一个快钟周期，health 重查一次",
+    check("到了一个快钟周期，health 重查一次",
           _cs2.n.get("controller_health") == 2, str(_cs2.n))
-    check("★★ 而分区表**一次都没跟着重查** —— 分开的钟，不是一个 tick 干所有事"
+    check("而分区表一次都没跟着重查 —— 分开的钟，不是一个 tick 干所有事"
           "（一个 tick 干所有事等于每种数据都被最急的那种拖着跑）",
           _cs2.n.get("partition_table") == 1, str(_cs2.n))
     _cl2.refresh(_T0 + mod.INFO_MEDIUM_SECONDS, users=())
-    check("★ 到了中钟，节点忙闲与队列刷第二次，而分区表仍然只刷过一次",
+    check("到了中钟，节点忙闲与队列刷第二次，而分区表仍然只刷过一次",
           _cs2.n.get("node_table") == 2 and _cs2.n.get("queue_table") == 2
           and _cs2.n.get("partition_table") == 1, str(_cs2.n))
 
@@ -9165,61 +9165,61 @@ exit 0
     _cl3.refresh(_T0 + mod.INFO_FAST_SECONDS, users=())          # 到期
     _n_at = _cs3.n.get("controller_health")
     _cl3.refresh(_T0 + mod.INFO_FAST_SECONDS + 0.5, users=())    # 刚查完
-    check("★★ 钟的推进写在查询**之前**：刚查完的那 0.5 秒内不会又查一次"
-          "（写成 `+=` 的话截止时刻会落在过去，于是每一轮都重跑）",
+    check("钟的推进写在查询之前：刚查完的那 0.5 秒内不会又查一次"
+          "（写成 `+=` 截止时刻会落在过去，于是每一轮都重跑）",
           _cs3.n.get("controller_health") == _n_at,
           "%s → %s" % (_n_at, _cs3.n.get("controller_health")))
 
-    # ── 28.3 失败：按最急的那层重试，而且那几秒里仍然读得到"取不到" ────
+    # ── 28.3 失败：按最急的那层重试，而且那几秒里仍然读得到"获取失败" ────
     _cs4 = _CountSlurm()
     _cs4.answer["partition_table"] = None
     _cl4 = mod.Cluster(cfg, _cs4)
     _cl4.refresh(_T0, users=())
     _cl4.refresh(_T0 + mod.INFO_RETRY_SECONDS, users=())
-    check("★★ 失败之后按 INFO_RETRY_SECONDS 重试（不是等满慢钟的 5 分钟）",
+    check("失败之后按 INFO_RETRY_SECONDS 重试（不是等满慢钟的 5 分钟）",
           _cs4.n.get("partition_table") == 2, str(_cs4.n))
-    check("★ 而这两次之间读到的仍然是 None ——「取不到」是一个**答案**，"
+    check("而这两次之间读到的仍然是 None ——「获取失败」是一个答案，"
           "它必须留在缓存里让调用方看得见（`{}` 才是「确实没有」）",
           _cl4.partitions() is None, str(_cl4.partitions()))
-    check("★ 失败只影响它自己那一类，别的不受影响",
+    check("失败只影响它自己那一类，其他不受影响",
           _cs4.n.get("node_table") == 1, str(_cs4.n))
 
     # ── 28.4 节点忙闲：只按 base state 计数，后缀只做展示 ──────────────
     _nt = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).node_table())
-    check("★★ `-h` 不能省：`sinfo` 与 `scontrol show … -o` 不一样，它会打一行表头"
-          "（`PARTITION|NODELIST|STATE`），而少了 `-h` 的话那一行会变成一个名叫 "
-          "`PARTITION`、状态叫 `STATE` 的**假分区**，原样画进界面。"
-          "★ 真集群实测抓到的 —— 手写的桩本来没有表头，所以它一直是绿的",
+    check("`-h` 不能省：`sinfo` 与 `scontrol show … -o` 不同，它会打一行表头"
+          "（`PARTITION|NODELIST|STATE`），而少了 `-h` 那一行会变成一个名叫 "
+          "`PARTITION`、状态叫 `STATE` 的假分区，原样画进界面。"
+          "真集群实测抓到的 —— 手写的桩本来没有表头，所以它一直是绿的",
           _nt is not None and set(_nt) == {"A6000", "RTX8000", "2080TI"},
           str(sorted(_nt or ())))
-    check("★ 带后缀的状态被剥成 base state（`idle*` → `idle`，`down~` → `down`）",
+    check("带后缀的状态被剥成 base state（`idle*` → `idle`，`down~` → `down`）",
           _nt and _nt["2080TI"]["counts"] == {"idle": 1, "down": 1},
           str(_nt and _nt.get("2080TI")))
-    check("★★ 而后缀**原样留着**、单独一列（只做展示，一个都不参与判定 ——"
+    check("而后缀原样留着、单独一列（只做展示，一个都不参与判定 ——"
           "它们跨 Slurm 版本含义不一致，拿它们判定等于把「我记得的那个版本」当协议）",
           _nt and _nt["2080TI"]["flags"] == {"*": 1, "~": 1},
           str(_nt and _nt.get("2080TI")))
-    check("★ 默认分区的记号（`2080TI*`）被剥掉",
+    check("默认分区的记号（`2080TI*`）被剥掉",
           _nt and "2080TI*" not in _nt and "2080TI" in _nt,
           str(sorted(_nt or ())))
-    check("★ 没有后缀的分区，flags 是空的（不是缺失）",
+    check("没有后缀的分区，flags 是空的（不是缺失）",
           _nt and _nt["A6000"]["flags"] == {} and _nt["A6000"]["counts"] == {"mix": 1, "idle": 1},
           str(_nt and _nt.get("A6000")))
 
     # ── 28.5 队列：深度、顺序、以及"我在第几位" ────────────────────────
     _q = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).queue_table())
-    check("★ 数组作业算**一条**（`7006_[3-9,13-19%2]` 是 1，不是 9）——"
+    check("数组作业算一条（`7006_[3-9,13-19%2]` 是 1，不是 9）——"
           "数成 9 会让「队列深度」在用了数组的集群上直接虚高一个量级",
           _q and _q["depth"]["2080TI"]["pending"] == 1,
           str(_q and _q["depth"].get("2080TI")))
-    check("★★★ 「其余那一档」（`CG` 收尾中）**不并进 running** ——"
+    check("「其余那一档」（`CG` 收尾中）不并进 running ——"
           "并了之后「这个分区忙不忙」就开始说谎，而那是这一格唯一的用途",
           _q and _q["depth"]["RTX8000"] == {"pending": 0, "running": 1, "other": 1},
           str(_q and _q["depth"].get("RTX8000")))
-    check("★ 排队顺序留着（`pending` 就是 squeue 给的顺序）",
+    check("排队顺序留着（`pending` 就是 squeue 给的顺序）",
           _q and _q["pending"]["A6000"] == ["7001", "7002", "7003"],
           str(_q and _q["pending"].get("A6000")))
-    check("★ 按用户也分了一份（「我排第几」靠它算，**不额外 fork**）",
+    check("按用户也分了一份（「我排第几」靠它算，不额外 fork）",
           _q and _q["by_user"]["alice"] == ["7001", "7003", "7004",
                                             "7006_[3-9,13-19%2]"],
           str(_q and _q["by_user"].get("alice")))
@@ -9231,15 +9231,15 @@ exit 0
     _cl5.refresh(_T0, users=["alice"])
     _n_q = _cs5.n.get("queue_table")
     _pos = _cl5.for_user("alice")
-    check("★★ 「我排第几位」是从**共享的队列快照现推**的，不额外 fork",
+    check("「我排第几位」是从共享的队列快照现推的，不额外 fork",
           _cs5.n.get("queue_table") == _n_q, str(_cs5.n))
-    check("★ alice 在自己排队的**每个分区**里都是第 1 位"
+    check("alice 在自己排队的每个分区里都是第 1 位"
           "（A6000 里最靠前的是 7001；2080TI 里只有那条数组作业）",
           _pos.get("first_in") == {"A6000": 1, "2080TI": 1}
           and _pos.get("pending_count") == 3,
           str({k: _pos.get(k) for k in ("first_in", "pending_count")}))
     _pos2 = _cl5.for_user("carol")
-    check("★ 没有排队作业的人**不报**排队名次（而不是报 0）",
+    check("没有排队作业的人不报排队名次（而不是报 0）",
           "first_in" not in _pos2 and "pending_count" not in _pos2, str(_pos2))
 
     # ── 28.6 fairshare：`-u` 而不是 `-U`（一个看起来正常的错答案）──────
@@ -9251,21 +9251,21 @@ exit 0
 
     _fs = with_stub(mod, _cap, lambda: mod.Slurm(cfg).fairshare("alice"))
     _fsa = _seen[-1] if _seen else []
-    check("★★★ fairshare 必须传 `-u <用户>`，**绝不能**是 `-U`"
-          "（守护进程以 root 跑，而 `-U` 是「当前用户」= root —— 那会把 **root 自己的**"
+    check("fairshare 必须传 `-u <用户>`，绝不能是 `-U`"
+          "（守护进程以 root 跑，而 `-U` 是「当前用户」= root —— 那会把 root 自己的"
           "公平份额显示成用户的，一个看起来完全正常的错误答案）",
           "-u" in _fsa and "alice" in _fsa and "-U" not in _fsa, str(_fsa))
-    check("★ 认得出用户那一行（账户行是**缩进**的，而 User 列必须逐字等于目标用户）",
+    check("认得出用户那一行（账户行是缩进的，而 User 列必须逐字等于目标用户）",
           _fs == {"account": "chbstudents", "fair_share": "0.125000",
                   "raw_usage": "3072302", "effectv_usage": "0.108641"},
           str(_fs))
     _fs2 = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).fairshare("carol"))
-    check("★★ 看不到用户那一行时返回 **None**，而不是拿账户级的汇总行当「你的份额」"
+    check("无法看到用户那一行时返回 None，而不是拿账户级的汇总行当「你的份额」"
           "（那正是上面那个错的另一个形状）",
           _fs2 is None, str(_fs2))
     _fs3 = with_stub(mod, lambda *a, **k: (1, "", "slurmdbd is down"),
                      lambda: mod.Slurm(cfg).fairshare("alice"))
-    check("★ 查询失败也是 None（「取不到」与「没有」在这一格上是两件事，"
+    check("查询失败也是 None（「获取失败」与「没有」在这一格上是两件事，"
           "但都不是一个数字）", _fs3 is None, str(_fs3))
 
     # ── 28.7 history：按需拉、只要作业级、倒序 ─────────────────────────
@@ -9277,27 +9277,27 @@ exit 0
 
     _hist = with_stub(mod, _cap2, lambda: mod.Slurm(cfg).history("alice"))
     _ha = _seen2[-1] if _seen2 else []
-    check("★★ 作业步（`8101.extern` / `8101.0`）被滤掉 —— 混进来会让"
+    check("作业步（`8101.extern` / `8101.0`）被滤掉 —— 混进来会让"
           "「最近 30 条」变成「最近 10 个作业的每一步」",
           [r["job_id"] for r in (_hist or [])] == ["8101", "8100"],
           str([r["job_id"] for r in (_hist or [])]))
-    check("★ 倒序：最新的在最前（sacct 默认按作业号升序，而人要看的是最后那件事）",
+    check("倒序：最新的在最前（sacct 默认按作业号升序，而人要看的是最后那件事）",
           _hist and _hist[0]["job_id"] == "8101", str(_hist and _hist[0]))
-    check("★★ 时间窗**下推给 Slurm**（`-S now-Ndays`），不是把全部拉回来自己截。"
-          "★ 而且写法必须是 `days` —— `now-7d` 是非法的，`sacct` 直接回"
+    check("时间窗下推给 Slurm（`-S now-Ndays`），不是把全部拉回来自己截。"
+          "而且写法必须是 `days` —— `now-7d` 是非法的，`sacct` 直接回"
           "「Invalid time specification」（真集群实测）。"
-          "写错的形态是「历史**永远**取不到」，而它长得像集群没有账本",
+          "写错的形态是「历史永远获取失败」，而它长得像集群没有账本",
           any(str(a).startswith("now-") and str(a).endswith(("day", "days"))
               for a in _ha), str(_ha))
-    check("★ 条数上限在代码里，且有上界（它是这一组里最贵的一条查询）",
+    check("条数上限在代码里，且有上界（它是这一组里最贵的一条查询）",
           0 < mod.HISTORY_MAX_ROWS <= 100 and mod.HISTORY_DAYS >= 1,
           "%s / %s" % (mod.HISTORY_DAYS, mod.HISTORY_MAX_ROWS))
 
-    # ── 28.8 三态：取不到 vs 确实没有 ──────────────────────────────────
+    # ── 28.8 三态：获取失败 vs 确实没有 ──────────────────────────────────
     def _dead(argv, timeout=10, check=False):
         return 1, "", "slurmdbd is down"
 
-    check("★★ 「取不到」是 None，而「确实没有」是 `{}` / `[]` —— 两者不能混"
+    check("「获取失败」是 None，而「确实没有」是 `{}` / `[]` —— 两者不能混"
           "（把问不到画成「没有」，用户会去查一个不存在的问题）",
           with_stub(mod, _dead, lambda: mod.Slurm(cfg).node_table()) is None
           and with_stub(mod, _dead, lambda: mod.Slurm(cfg).queue_table()) is None
@@ -9305,8 +9305,8 @@ exit 0
           and with_stub(mod, _dead, lambda: mod.Slurm(cfg).history("alice")) is None
           and with_stub(mod, lambda *a, **k: (0, "", ""),
                         lambda: mod.Slurm(cfg).partition_table()) == {},
-          "控制器可达但一个分区都没有 ⇒ `{}`，不是 None")
-    check("★ 输出超过上限 ⇒ 按**取不到**处理（不是解析半个，也不是抛）",
+          "控制器可达但一个分区都没有，`{}`，不是 None")
+    check("输出超过上限，按获取失败处理（不是解析半个，也不是抛）",
           with_stub(mod, lambda *a, **k: (0, "x" * (mod.CLUSTER_QUERY_MAX_BYTES + 1),
                                           ""),
                     lambda: mod.Slurm(cfg).queue_table()) is None
@@ -9314,7 +9314,7 @@ exit 0
                                               ""),
                         lambda: mod.Slurm(cfg).node_table()) is None,
           "上限 %d" % mod.CLUSTER_QUERY_MAX_BYTES)
-    check("★ 而这个上限**管的是解析与保留**，不是读取 —— 注释里说清楚了"
+    check("而这个上限管的是解析与保留，不是读取 —— 注释里说清楚了"
           "（写成「上限」而不说清管哪一段，下一个人会以为读也被截住了）",
           "解析与保留" in io.open(
               os.path.join(HERE, "slurmate-sessiond"), encoding="utf-8").read(),
@@ -9332,22 +9332,22 @@ exit 0
     _cv1 = with_stub(mod, _run28, lambda: _d28.op_cluster(UID))
     _first28 = _calls28[0]
     _cv2 = with_stub(mod, _run28, lambda: _d28.op_cluster(UID))
-    check("★★★ 第二次 op_cluster **零 fork** —— 这就是「一次查询服务所有连接」"
+    check("第二次 op_cluster 零 fork —— 这就是「一次查询服务所有连接」"
           "（第一次是冷启动，每个 uid 每个慢钟周期至多一次）",
           _cv1.get("ok") and _cv2.get("ok") and _calls28[0] == _first28,
           "第一次 %d 次，第二次又 %d 次" % (_first28, _calls28[0] - _first28))
     _cd = _cv1.get("data") or {}
-    check("★ 共享的那几格都在（缺哪个都是客户端画不出来的一格）",
+    check("共享的那几格都在（缺哪个都是客户端画不出来的一格）",
           set(_cd) >= {"at", "health", "version", "partitions", "gres",
                        "nodes", "queue", "taken", "me"},
           str(sorted(_cd)))
-    check("★ 而「自己那一份」在 `me` 里 —— 共享的与按 uid 的**分开**"
+    check("而「自己那一份」在 `me` 里 —— 共享的与按 uid 的分开"
           "（分开的不只是缓存：客户端据此知道「这一格变了不是我的事」）",
           set(_cd.get("me") or {}) >= {"account", "allowed_partitions",
                                        "fairshare"},
           str(sorted(_cd.get("me") or {})))
-    check("★ `partitions` 取不到时 op_cluster **不报错**（对比 op_partitions）——"
-          "只看现状的那一屏不该因为一格取不到而整屏打不开",
+    check("`partitions` 获取失败时 op_cluster 不报错（对比 op_partitions）——"
+          "只看现状的那一屏不该因为一格获取失败而整屏打不开",
           with_stub(mod, lambda *a, **k: (1, "", "down"),
                     lambda: mod.Cluster(cfg, mod.Slurm(cfg)).shared())
           .get("partitions") is None,
@@ -9362,16 +9362,16 @@ exit 0
     _hv = with_stub(mod, _cap3, lambda: _d28.op_history(UID))
     _me_name = mod.pwd.getpwuid(UID).pw_name
     _hargv = _seen3[-1] if _seen3 else []
-    check("★★ 历史的用户**从 uid 推出来**，不接受请求里给的用户名"
+    check("历史的用户从 uid 推出来，不接受请求里给的用户名"
           "（否则这个 op 就是读别人账本的入口）",
           _me_name in _hargv and "bob" not in _hargv, str(_hargv))
-    check("★ 它**不进任何一层钟**：两次调用就是两次查询（按需拉）",
+    check("它不进任何一层钟：两次调用就是两次查询（按需拉）",
           (lambda: (_seen3.clear(),
                     with_stub(mod, _cap3, lambda: _d28.op_history(UID)),
                     with_stub(mod, _cap3, lambda: _d28.op_history(UID)),
                     len(_seen3))[-1])() == 2,
           "查了 %d 次" % len(_seen3))
-    check("★ 取不到时报**错误**而不是空列表（空列表的意思是「你这几天没有作业」）",
+    check("获取失败时报错误而不是空列表（空列表的意思是「你这几天没有作业」）",
           not with_stub(mod, _dead, lambda: _d28.op_history(UID)).get("ok"),
           str(with_stub(mod, _dead, lambda: _d28.op_history(UID))))
 
@@ -9406,24 +9406,24 @@ exit 0
     # 取键一律用 `.get()`：变异把 `code` 改名时，`d["code"]` 会抛 KeyError，
     #   整个脚本当场崩掉、后面几十条一条都不跑 —— 而"崩掉"与"守住"在
     #   "有没有红"这个判据上完全一样。
-    check("★★ 别人的会话与不存在的会话回**同一个** `3 not_found`"
-          "（分开的话，这个 op 就成了一个「探别人作业是否存在」的神谕）",
+    check("别人的会话与不存在的会话回同一个 `3 not_found`"
+          "（若分开，这个 op 就成了一个「探别人作业是否存在」的神谕）",
           not _n1.get("ok") and _n1.get("code") == 3
           and (_n1.get("error") or {}).get("kind") == (_n2.get("error") or {}).get("kind")
           and _n2.get("code") == 3,
           "%r / %r" % (_n1, _n2))
-    check("★ 不给 session_id 也是同一个答案（没有「默认最新那条」这种缺省 ——"
-          "日志是逐会话的东西，猜一个等于给另一个会话的日志）",
+    check("不给 session_id 也是同一个答案（没有「默认最新那条」这种缺省 ——"
+          "日志是逐会话的内容，猜一个等于给另一个会话的日志）",
           not _n3.get("ok") and _n3.get("code") == 3, str(_n3))
     # 路径根本不来自请求：把 `..` 塞进 session_id 也只会得到 not_found
     #   （它先去 store 里找那条会话），而不是去读一个文件。
-    check("★★ 路径**一个字节都不来自客户端**（塞 `../` 进去只会得到 not_found）",
+    check("路径一个字节都不来自客户端（塞 `../` 进去只会得到 not_found）",
           not _jlog(session_id="../../etc/passwd").get("ok"),
           str(_jlog(session_id="../../etc/passwd")))
 
     # ② 「确实没有」：文件不在，`null`，不是错误
     _e = _jlog()
-    check("★★ 作业还没写出日志 ⇒ 每一格是 `null`，而**不是错误**"
+    check("作业还没写出日志，每一格是 `null`，而不是错误"
           "（把「还没有」画成一屏报错，用户会以为出了事）",
           _e.get("ok") and (_e.get("data") or {}).get("out") is None
           and (_e.get("data") or {}).get("err") is None,
@@ -9437,24 +9437,24 @@ exit 0
     _r = _jlog()
     _ro = (_r.get("data") or {}).get("out") or {}
     _re = (_r.get("data") or {}).get("err") or {}
-    check("★★ 两份日志分别来自 `.out` 与 `.err`（合成一份读的话，"
+    check("两份日志分别来自 `.out` 与 `.err`（若合成一份读，"
           "「这个服务往 stderr 上抱怨了什么」就没法单独看）",
           "服务写到 stdout 的一行" in (_ro.get("text") or "")
           and "认证被拒" in (_re.get("text") or "")
           and "认证被拒" not in (_ro.get("text") or ""),
           "%r / %r" % (_ro.get("text"), _re.get("text")))
-    check("★ 每一格带着**路径**（界面要能把它显示出来让人复制）与**字节数**",
+    check("每一格带着路径（界面要能把它显示出来让人复制）与字节数",
           str(_ro.get("path", "")).endswith("slurm-4242.out") and _ro.get("bytes") == len(
               "宿主的一行\n服务写到 stdout 的一行\n".encode("utf-8")),
           "%r bytes=%r" % (_ro.get("path"), _ro.get("bytes")))
-    check("★ 而那个路径在**服务端自己算出来的**日志目录里（不是客户端给的）",
+    check("而那个路径在服务端自己算出来的日志目录里（不是客户端给的）",
           _ro.get("path") == os.path.join(_djlog, "slurm-4242.out"), _ro.get("path"))
 
     # ④ 空文件不是「没有文件」—— 三态里的第三格
     with io.open(os.path.join(_djlog, "slurm-4242.err"), "w", encoding="utf-8") as f:
         f.write("")
     _re2 = (_jlog().get("data") or {}).get("err")
-    check("★★ 空文件**不是** `null`：`null` 是「确实没有这一份」，空文件是"
+    check("空文件不是 `null`：`null` 是「确实没有这一份」，空文件是"
           "「它确实还没有说任何话」—— 两句话",
           _re2 is not None and _re2.get("text") == "" and _re2.get("bytes") == 0
           and _re2.get("lines") == 0,
@@ -9465,7 +9465,7 @@ exit 0
     with io.open(_big, "w", encoding="utf-8") as f:
         f.write("".join("第 %d 行\n" % i for i in range(20000)))
     _rb = ((_jlog(lines=5).get("data") or {}).get("out")) or {}
-    check("★★ 给的是**尾部**，而且 `truncated` 说了「这不是整份」"
+    check("给的是尾部，而且 `truncated` 说了「这不是整份」"
           "（日志不轮转，一个跑了一整天的会话可以几十 MB —— 从不读整份是硬要求）",
           str(_rb.get("text", "")).endswith("第 19999 行")
           and "第 0 行" not in str(_rb.get("text", ""))
@@ -9474,14 +9474,14 @@ exit 0
                                            str(_rb.get("text", ""))[-40:]))
     with io.open(_big, "w", encoding="utf-8") as f:
         f.write("a\nb\n")            # 两行，远不到上限
-    check("★★ 而**没被截过的小文件**要说 `truncated` 为假"
-          "（恒为真的话，那一格什么都不说明）",
+    check("而没被截过的小文件要说 `truncated` 为假"
+          "（若恒为真，那一格什么都不说明）",
           ((_jlog().get("data") or {}).get("out") or {}).get("truncated") is False,
           str(_jlog()))
 
     # ⑥ `lines` 被钳住
-    check("★★ `lines` 钳到 `[1, 2000]`（上界不设的话，一次请求就能把响应撑到几 MB）；"
-          "**非整数取缺省**而不是报错 —— 这是只读展示，手抖一个参数不该让人看不到日志",
+    check("`lines` 钳到 `[1, 2000]`（若上界不设，一次请求就能把响应撑到几 MB）；"
+          "非整数取缺省而不是报错 —— 这是只读展示，手抖一个参数不该让人无法看到日志",
           mod.clamp_tail_lines(999999) == mod.LOG_TAIL_MAX_LINES
           and mod.clamp_tail_lines(0) == 1
           and mod.clamp_tail_lines(-5) == 1
@@ -9504,31 +9504,31 @@ exit 0
     _cell = mod.read_log_tail((_djhome, os.path.join(_djhome, ".slurmate"), _djlog),
                               UID, _long, 2000)
     _cell_lines = ((_cell or {}).get("text") or "").split("\n")
-    check("★ 从文件中间切进来时，**第一行半截的要丢掉**"
-          "（印出去的话，人会以为那一行本来就长那样）",
+    check("从文件中间切进来时，第一行半截的要丢掉"
+          "（若印出去，人会以为那一行本来就长那样）",
           bool(_cell_lines) and re.match(r"^第 \d+ 行 x+$", _cell_lines[0]) is not None
           and _cell_lines[-1].startswith("第 2999 行 "),
           repr(_cell_lines[0][:30] if _cell_lines else None))
-    check("★ 而那条判据不是空断言：窗口确实从中间切进来了（`truncated` 为真）",
+    check("而那条判据不是空断言：窗口确实从中间切进来了（`truncated` 为真）",
           (_cell or {}).get("truncated") is True, str(_cell)[:120])
     _why = mod.read_log_tail((os.path.join(tmpdir, "nosuch-a"),
                               os.path.join(tmpdir, "nosuch-a", ".slurmate")),
                              UID, "/x", 3)
-    check("★★ 目录链**根本不存在** ⇒ `null`（「这个作业还没有日志」），"
-          "而目录链**存在但不可信** ⇒ 一格带 `why` 的「取不到」—— 两者不能并成一句",
+    check("目录链根本不存在，`null`（「这个作业还没有日志」），"
+          "而目录链存在但不可信，一格带 `why` 的「获取失败」—— 两者不能并成一句",
           _why is None, str(_why))
     _bad_dir = os.path.join(tmpdir, "wl-logdir")
     os.makedirs(_bad_dir, exist_ok=True)
     os.chmod(_bad_dir, 0o777)
     _badcell = mod.read_log_tail((_bad_dir,), UID, os.path.join(_bad_dir, "x"), 3)
-    check("★★ 而目录链上有**组/其他可写**的一级 ⇒ 不读，并如实说清是哪一条判据"
-          "（并进 `null` 的话，一个模式不对的目录会让你看到「这台站点上没有日志」，"
+    check("而目录链上有组/其他可写的一级，不读，并如实说清是哪一条判据"
+          "（并进 `null`，一个模式不对的目录会让你看到「这台站点上没有日志」，"
           "而它明明在那里）",
           _badcell is not None and _badcell.get("text") is None
           and _badcell.get("why") == "component_group_or_world_writable",
           str(_badcell))
-    check("★★ 而**文件**那一侧**不查 mode** —— 会话文件那条 `mode & 0o077` 的规矩"
-          "照抄过来的话，`slurm-*.err` 会**永远**判「取不到」，而症状看起来像"
+    check("而文件那一侧不查 mode —— 会话文件那条 `mode & 0o077` 的规矩"
+          "若照抄过来，`slurm-*.err` 会永远判「获取失败」，而症状看起来像"
           "「站点上没有日志」",
           (lambda: (os.chmod(_bad_dir, 0o700),
                     os.chmod(_big, 0o644),
@@ -9541,30 +9541,30 @@ exit 0
     _d29 = _mkd()
     _d29.slurm = _CountSlurm()
     _d29.tick()
-    check("★★ tick 里会把集群信息刷一遍（刷新跑在 tick 里，请求才可能零 fork）",
+    check("tick 里会把集群信息刷一遍（刷新跑在 tick 里，请求才可能零 fork）",
           _d29.slurm.n.get("partition_table") == 1
           and _d29.slurm.n.get("controller_health") == 1,
           str(_d29.slurm.n))
-    check("★ 没有连接时，**没有**任何按用户的查询被发出去"
-          "（tick 不该替不在场的人问东西）",
+    check("没有连接时，没有任何按用户的查询被发出去"
+          "（tick 不该替不在场的人去问）",
           not any(k in _d29.slurm.n for k in _cu_names), str(_d29.slurm.n))
     _d29.slurm.n.clear()
     _c29, _k29 = _pair(_d29)
     _d29.tick()
-    check("★★ tick 只给**连着**的用户预热自己那一份（判据是连着，不是有会话 ——"
-          "一个刚连上、还没提交任何东西的用户打开集群面板时也要立刻有东西看）",
+    check("tick 只给连着的用户预热自己那一份（判据是连着，不是有会话 ——"
+          "一个刚连上、还没提交任何内容的用户打开集群面板时也要立刻有内容看）",
           all(_d29.slurm.n.get(k) == 1 for k in _cu_names), str(_d29.slurm.n))
-    check("★ 前提：那条连接认得出来是谁（否则上面那条是空断言）",
+    check("前提：那条连接认得出来是谁（否则上面那条是空断言）",
           _d29.user_name(_k29.uid) == mod.pwd.getpwuid(UID).pw_name,
           str(_d29.user_name(_k29.uid)))
     _c29.close()
     _d29.slurm.n.clear()
     _d29.tick()
-    check("★★ 断开之后**不再替它问** —— 而这正是 prune() 存在的理由："
+    check("断开之后不再替它问 —— 而这正是 prune() 存在的理由："
           "一个只增的字典与一个泄漏的字典，从「会不会撑爆」的角度看没有区别",
           not any(k in _d29.slurm.n for k in _cu_names), str(_d29.slurm.n))
-    check("★★ 而**刚被 tick 预热过**的条目不会被 prune 掉 —— `_seen` 记的是"
-          "「最后一次有人碰过」，包括 tick 那一次。只在请求侧记的话，一个连着"
+    check("而刚被 tick 预热过的条目不会被 prune 掉 —— `_seen` 记的是"
+          "「最后一次有人碰过」，包括 tick 那一次。若只在请求侧记，一个连着"
           "但没发过请求的用户会被每个快钟周期 prune 掉、再重查一遍",
           (lambda: (_d29.slurm.n.clear(), _d29.tick(),
                     _d29.cluster.prune(time.time()),
@@ -9574,14 +9574,14 @@ exit 0
     _c29b, _k29b = _pair(_d29)
     _d29.tick()
     _d29.cluster.prune(time.time() + 3 * mod.INFO_SLOW_SECONDS)
-    check("★ 而真的很久没人问过之后，prune 把按用户的那几项丢掉"
+    check("而真的很久没人问过之后，prune 把按用户的那几项丢掉"
           "（_v / _due / _taken 一起 —— 一个只增的字典与一个泄漏的字典，"
           "从「会不会撑爆」的角度看没有区别）",
           not [k for k in _d29.cluster._v if ":" in k]
           and not [k for k in _d29.cluster._due if ":" in k]
           and not [k for k in _d29.cluster._taken if ":" in k],
           str(sorted(_d29.cluster._v)))
-    check("★ 而**共享**的那几类不受影响（它们与用户无关）",
+    check("而共享的那几类不受影响（它们与用户无关）",
           "partitions" in _d29.cluster._v, str(sorted(_d29.cluster._v)))
     _c29b.close()
 
@@ -9599,7 +9599,7 @@ exit 0
     _cn_num = int(_cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0]) \
         if _cn_at >= 0 and _cfgdoc_src[_cn_at + len("站点通用键。一共 "):].split(" ")[0].isdigit() \
         else -1
-    check("★★ cluster/docs/CONFIGURATION.md 说「一共 N 个」的 N **等于** GLOBAL_KEYS 的个数",
+    check("cluster/docs/CONFIGURATION.md 说「一共 N 个」的 N 等于 GLOBAL_KEYS 的个数",
           _cn_num == len(mod.GLOBAL_KEYS),
           "文档说 %s 个，实际 %d 个" % (_cn_num, len(mod.GLOBAL_KEYS)))
     # 而那个数对不对只是一半：个数对了而键名不对的表，读起来一样顺，
@@ -9616,13 +9616,13 @@ exit 0
         if _in_sec and _ln.startswith("| `"):
             _doc_keys |= set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`",
                                         _ln.split("|")[1]))
-    check("★★ 而那张表里列的键**正好就是** GLOBAL_KEYS（不是「个数相同」就够 ——"
-          "凭空多一行、或把一行换成别的键名，从前一条都不红）",
+    check("而那张表里列的键正好就是 GLOBAL_KEYS（不是「个数相同」就够 ——"
+          "凭空多一行、或把一行换成其他键名，从前一条都不红）",
           _doc_keys == set(mod.GLOBAL_KEYS),
           "文档多出 %s；文档少了 %s" % (
               sorted(_doc_keys - set(mod.GLOBAL_KEYS)),
               sorted(set(mod.GLOBAL_KEYS) - _doc_keys)))
-    check("★★ 三个新命令在配置白名单里（不在的话，写进 conf 会让守护进程拒绝启动）",
+    check("三个新命令在配置白名单里（若不在，写进 conf 会让守护进程拒绝启动）",
           all(k in mod.GLOBAL_KEYS for k in ("sinfo", "sshare", "sacct")),
           str(sorted(mod.GLOBAL_KEYS)))
     _bin_bad = []
@@ -9632,7 +9632,7 @@ exit 0
                                       % (_nm, _nm), "bin-%s.conf" % _nm)).validate()
         if not any(_nm in e for e in _errs):
             _bin_bad.append(_nm)
-    check("★★ 八个 Slurm 命令**逐个**都在启动自检里（少一个 ⇒ 那一格的失败形态是"
+    check("八个 Slurm 命令逐个都在启动自检里（少一个，那一格的失败形态是"
           "「这个集群就是这样」，而根因在配置里）",
           _bin_bad == [], "没被检查的：%s" % _bin_bad)
 
@@ -9647,18 +9647,18 @@ exit 0
     #   从前客户端那一半查的是 IPC 通道名（`app:cluster`）—— 界面上那一屏自己去拉。
     #   现在那一屏没有了：站点状态由主进程定时问（`refreshSite`），再推给边栏
     #   浮窗。所以判据跟着挪到请求本身 —— 那才是漂了会变成 `unknown_op` 的东西。
-    check("★★ 两个新 op 的名字两边逐字相同（漂了不是「少一格」，是"
-          "**unknown_op** —— 而界面会把它画成一次失败）",
+    check("两个新 op 的名字两边逐字相同（漂了不是「少一格」，是"
+          "unknown_op —— 而界面会把它画成一次失败）",
           'op == "cluster"' in _sess_src and "op: 'cluster'" in _idx_src
           and "case 'cluster':" in _be_src and "case 'history':" in _be_src,
           "")
-    check("★★ 假后端也认这两个 op —— 它的全部价值就是「演的是同一件事」"
+    check("假后端也认这两个 op —— 它的全部价值就是「演的是同一件事」"
           "（一份只在它身上成立的协议比没有它更坏）",
           "case 'cluster':" in _be_src and "case 'history':" in _be_src,
           "")
     # 假后端的 op 集合必须 ⊆ 真守护进程的 op 集合。
     #
-    # 这一条是"假后端不许比真守护进程多知道任何东西"那条纪律在 op 一级的落点。
+    # 这一条是"假后端不许比真守护进程多知道任何内容"那条纪律在 op 一级的落点。
     # 一条只在假后端上存在的 op 比没有更坏：开发者模式里它会成功地返回一份
     # 编出来的数据，于是"这条路是通的"变成一个在真站点上不成立的结论 ——
     # 而那正是假站点存在的全部意义所在。
@@ -9667,19 +9667,19 @@ exit 0
     # 这里一格，那一条就永远不会被检查（而它看起来与"检查过了"一样）。
     #
     # 反过来不要求相等：真守护进程有假后端还没演出来的 op（比如 `doctor`），
-    #   那是"开发者模式里看不到这一格"，不是缺陷。要求相等会逼着假后端去编一个
+    #   那是"开发者模式里无法看到这一格"，不是缺陷。要求相等会逼着假后端去编一个
     #   它并不知道的东西。
     # 两条都要锚在行首（`^\s*`，配 `re.M`）：不锚的话，把那一行注释掉
     #    （`// case 'job_log': …`）时它照样能被抽出来 —— 而那一行确实没接上。
     #    变异 Q8 第一轮就是这么逃过去的。
     _be_ops = set(re.findall(r"^\s*case '([a-z_]+)':", _be_src, re.M))
     _sd_ops = set(re.findall(r'^\s*if op == "([a-z_]+)":', _sess_src, re.M))
-    check("★★★ 假后端的每一个 op 在真守护进程里都存在（一条只在假后端上成立的 op，"
+    check("假后端的每一个 op 在真守护进程里都存在（一条只在假后端上成立的 op，"
           "比没有更坏 —— 它会让「这条路是通的」变成一个在真站点上不成立的结论）",
           bool(_be_ops) and bool(_sd_ops) and _be_ops <= _sd_ops,
           "假后端多出：%s（假后端 %d 个 / 守护进程 %d 个）"
           % (sorted(_be_ops - _sd_ops), len(_be_ops), len(_sd_ops)))
-    check("★ 而这一条不是空断言：两个集合都抽到了东西",
+    check("而这一条不是空断言：两个集合都抽到了条目",
           len(_be_ops) >= 8 and len(_sd_ops) >= 8,
           "假后端 %d 个 / 守护进程 %d 个" % (len(_be_ops), len(_sd_ops)))
     # 而上面那一条盖不住这一种：`op_job_log()` 这个函数写好了、dispatch 里
@@ -9689,7 +9689,7 @@ exit 0
     # 判据必须是抽出来的集合，不能是"源码里有这一串"：把那一行注释掉
     #    （`// case 'job_log': ...`）时，子串判据照样为真 —— 而那一行确实没接上。
     #    变异 Q8 第一轮就是这么逃过去的。
-    check("★★ `job_log` 在**两边都真的接上了**：守护进程的 dispatch 里有一行、"
+    check("`job_log` 在两边都真的接上了：守护进程的 dispatch 里有一行、"
           "假后端的 dispatch 里有一个 case",
           "job_log" in _be_ops and "job_log" in _sd_ops,
           "假后端 %s / 守护进程 %s" % (sorted(_be_ops), sorted(_sd_ops)))
@@ -9702,14 +9702,14 @@ exit 0
     #      `renderer.test.mjs`。不在这里再写第三遍 —— 同一件事写三处，漂的是两处。
     #
     # 判据要落在 `na()` 的函数体上，不是只数调用点：调用点还在、
-    #    而函数体被改成返回一个空元素的话，界面上"取不到"就是一格空白 ——
+    #    而函数体被改成返回一个空元素的话，界面上"获取失败"就是一格空白 ——
     #    而那正是这一条要防的那件事（"忘了写数据"与"确实没有"长得一样）。
     #    实测：只数调用点的版本，对上面那种改动一条都不红。
     #
     # `na()` 从 `panel.js` 搬到了 `dom.js`（面板与浮窗两个渲染页面共用的那三个
     #   小东西）—— 判据跟着它走。读的是它现在住的那个文件，否则这条会变成
     #   查一个不存在的函数（`_na_at = -1` 空串，判据变红，而那看起来像
-    #   "有人把「取不到」删了"）。
+    #   "有人把「获取失败」删了"）。
     _dom_src = io.open(os.path.join(HERE, os.pardir, "client", "src", "renderer",
                                     "dom.js"), encoding="utf-8").read()
     _na_at = _dom_src.find("function na(")
@@ -9724,16 +9724,16 @@ exit 0
     #    一句谁也说不清哪个对的话。
     _idx_src28 = io.open(os.path.join(HERE, os.pardir, "client", "src", "main",
                                       "index.js"), encoding="utf-8").read()
-    check("★★ 集群状态里的 GRES 也过客户端那处**唯一的拼法**"
-          "（不过的话，同一个分区在表单里是 `gpu:a6000`、在这一屏是 `gpu`）",
+    check("集群状态里的 GRES 也过客户端那处唯一的拼法"
+          "（若不过，同一个分区在表单里是 `gpu:a6000`、在这一屏是 `gpu`）",
           "withGresCatalogLabels(resp.data.gres)" in _idx_src28
           and "withGresLabels((resp.data && resp.data.partitions)" in io.open(
               os.path.join(HERE, os.pardir, "client", "src", "main", "index.js"),
               encoding="utf-8").read(),
           "")
-    check("★★★ 「取不到」那一行必须**画得出那句人话**：`na()` 的函数体里要有"
-          "「取不到」这三个字，而且它要落在**看得见的**元素上（返回一个空元素"
-          "等于把「取不到」画成一片空白，而那与「确实没有」长得一样）",
+    check("「获取失败」那一行必须画得出那句人话：`na()` 的函数体里要有"
+          "「获取失败」这三个字，而且它要落在看得见的元素上（返回一个空元素"
+          "等于把「获取失败」画成一片空白，而那与「确实没有」长得相同）",
           _na_at >= 0 and "获取失败" in _na_body and "'na'" in _na_body
           and _hv_src.count("na('") >= 4,
           "na() 函数体：%r（调用点 %d 处）" % (_na_body[:90], _hv_src.count("na('")))
@@ -9755,8 +9755,8 @@ exit 0
                  and len(ln.split("|")) == 6]
     _cap_doc = (_cap_rows[0].split("|")[3].strip().strip("`")
                 if len(_cap_rows) == 1 else None)
-    check("★★ cluster/docs/CONFIGURATION.md 里 `max_sessions_per_user` 的缺省值"
-          "**等于**守护进程的常量（不等的话，这一节「缺省 1 压住了能力」"
+    check("cluster/docs/CONFIGURATION.md 里 `max_sessions_per_user` 的缺省值"
+          "等于守护进程的常量（若不等，这一节「缺省 1 压住了能力」"
           "整段就是一句错话）",
           _cap_doc is not None
           and _cap_doc == str(mod.DEFAULT_MAX_SESSIONS_PER_USER),
@@ -9774,8 +9774,8 @@ exit 0
         os.path.join(HERE, os.pardir, "plugins", "code-server", "plugin.json"),
         encoding="utf-8"))
     _cs_conc = (_cs_manifest.get("contributes") or {}).get("concurrent")
-    check("★ plugins/code-server/README.md 说这个插件声明了 `concurrent: true`，"
-          "而插件清单里**真的**是",
+    check("plugins/code-server/README.md 说这个插件声明了 `concurrent: true`，"
+          "而插件清单里真的是",
           '"concurrent": true' in _cs_readme and _cs_conc is True,
           "README 里有那句话=%s；清单里是 %r"
           % ('"concurrent": true' in _cs_readme, _cs_conc))
@@ -9795,10 +9795,10 @@ exit 0
 
     # ── 29.1 提交那一刻的第一任看护者 ────────────────────────────────────
     _r29a, _s29a, _ = run_submit({"op": "submit"}, client_id="mX")
-    check("★★ 报了身份的提交 ⇒ keeper 就是那个 client_id（谁提交谁在看）",
+    check("报了身份的提交，keeper 就是那个 client_id（谁提交谁在看）",
           _r29a.get("ok") and _s29a["keeper"] == "mX", repr(_s29a.get("keeper")))
     _r29b, _s29b, _ = run_submit({"op": "submit"})
-    check("★★ 不报身份的提交（CLI / exec 退路）⇒ keeper 是 **NULL** —— 而 NULL 是"
+    check("不报身份的提交（CLI / exec 退路）， keeper 是 NULL —— 而 NULL 是"
           "「确实没人在看」（合法的空），不是「不知道」",
           _r29b.get("ok") and _s29b["keeper"] is None, repr(_s29b.get("keeper")))
 
@@ -9808,7 +9808,7 @@ exit 0
     _t30 = _d30.store.get("s-own")["last_hb_socket"]
     _rb30 = _d30.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-own"}, "mB")
-    check("★★★ 不是看护者的心跳：回 **ok**（不是错）+ `ignored`，"
+    check("不是看护者的心跳：回 ok（不是错）+ `ignored`，"
           "而 `last_hb_socket` 一个字都没动",
           _rb30.get("ok")
           and (_rb30.get("data") or {}).get("ignored") == "not_keeper"
@@ -9819,13 +9819,13 @@ exit 0
          hb=mod.now_ts() - 10)
     _d30.dispatch(UID, os.getgid(),
                   {"op": "heartbeat", "session_id": "s-susp"}, "mB")
-    check("★★ 而别人的心跳也**救不回**一个 suspect 的会话"
+    check("而别人的心跳也救不回一个 suspect 的会话"
           "（那台电脑并没有在看它；能救回它的是「另一个人的心跳」）",
           _d30.store.get("s-susp")["state"] == mod.ST_SUSPECT,
           _d30.store.get("s-susp")["state"])
     _ra30 = _d30.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-own"}, "mA")
-    check("★ 看护者自己的心跳照常推进，而且**不认领**（keeper 本来就是它）",
+    check("看护者自己的心跳照常推进，而且不认领（keeper 本来就是它）",
           _ra30.get("ok") and "ignored" not in (_ra30.get("data") or {})
           and _d30.store.get("s-own")["last_hb_socket"] > _t30
           and _d30.store.get("s-own")["keeper"] == "mA",
@@ -9837,12 +9837,12 @@ exit 0
     _t31 = _d31.store.get("s-free")["last_hb_socket"]
     _ra31 = _d31.dispatch(UID, os.getgid(), {"op": "heartbeat",
                                              "session_id": "s-free"})
-    check("★★★ keeper 为空 ⇒ **不带身份**的心跳照常推进 —— 这正是 `slurmate rpc` /"
+    check("keeper 为空，不带身份的心跳照常推进 —— 这正是 `slurmate rpc` /"
           " `slurmate wait` / 更老的客户端走的那条路",
           _ra31.get("ok") and "ignored" not in (_ra31.get("data") or {})
           and _d31.store.get("s-free")["last_hb_socket"] > _t31,
           str(_ra31.get("data")))
-    check("★★ 而它**不认领**：匿名没有名字可写，keeper 仍然是 NULL"
+    check("而它不认领：匿名没有名字可写，keeper 仍然是 NULL"
           "（「有个人在刷」与「这台电脑在看」是两件事）",
           _d31.store.get("s-free")["keeper"] is None,
           repr(_d31.store.get("s-free")["keeper"]))
@@ -9850,14 +9850,14 @@ exit 0
     # ── 29.4 报了身份的空 keeper，认领，而认领之后别人就进不来了 ─────────
     _rc31 = _d31.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-free"}, "mC")
-    check("★★ 报了身份、而 keeper 为空 ⇒ **认领**（keeper 变成它）—— "
+    check("报了身份、而 keeper 为空，认领（keeper 变成它）—— "
           "没有这一条，CLI 提交的会话永远无主：界面画不出「这台电脑在看它」，"
           "换一台电脑之后两台都以为自己在看、谁也踢不掉谁",
           _d31.store.get("s-free")["keeper"] == "mC",
           repr(_d31.store.get("s-free")["keeper"]))
     _rd31 = _d31.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-free"}, "mD")
-    check("★ 认领之后，第三台电脑的心跳就被挡在外面了（回 ignored）",
+    check("认领之后，第三台电脑的心跳就被挡在外面了（回 ignored）",
           (_rd31.get("data") or {}).get("ignored") == "not_keeper",
           str(_rd31.get("data")))
 
@@ -9872,12 +9872,12 @@ exit 0
     _t32 = _d32.store.get("s-anon")["last_hb_socket"]
     _re32 = _d32.dispatch(UID, os.getgid(), {"op": "heartbeat",
                                              "session_id": "s-anon"})
-    check("★★★ 看护者是别人、而这条连接**没报身份** ⇒ 心跳照常推进"
+    check("看护者是别人、而这条连接没报身份，心跳照常推进"
           "（exec 退路与 CLI 走的正是这条路）",
           _re32.get("ok") and "ignored" not in (_re32.get("data") or {})
           and _d32.store.get("s-anon")["last_hb_socket"] > _t32,
           str(_re32.get("data")))
-    check("★★ 但它**抢不走** keeper —— 没有身份就没有名字可写"
+    check("但它抢不走 keeper —— 没有身份就没有名字可写"
           "（「没被排除」与「能当看护者」是两件事）",
           _d32.store.get("s-anon")["keeper"] == "mA",
           repr(_d32.store.get("s-anon")["keeper"]))
@@ -9895,7 +9895,7 @@ exit 0
     _w1c.send({"op": "heartbeat", "session_id": "s-e2e", "rid": 2})
     _drive(_d33)
     _w1r = [m for m in _w1c.lines() if m.get("rid") == 2]
-    check("★★ 心跳的身份取自**连接**（`conn.client_id`），不是请求体 ——"
+    check("心跳的身份取自连接（`conn.client_id`），不是请求体 ——"
           "守护进程这一侧没有第二个身份来源",
           bool(_w1r) and "ignored" not in (_w1r[0].get("data") or {}),
           str(_w1r)[:160])
@@ -9905,12 +9905,12 @@ exit 0
     _w2c.send({"op": "heartbeat", "session_id": "s-e2e", "rid": 2})
     _drive(_d33)
     _w2r = [m for m in _w2c.lines() if m.get("rid") == 2]
-    check("★★ 而另一条连接带着**自己的**身份发同一个心跳 ⇒ 被挡在外面"
+    check("而另一条连接带着自己的身份发同一个心跳，被挡在外面"
           "（这一条与上一条合起来才是「身份取自连接」）",
           bool(_w2r)
           and (_w2r[0].get("data") or {}).get("ignored") == "not_keeper",
           str(_w2r)[:160])
-    check("★ 前提：两条连接各自都认了身份（否则上一条是空断言）",
+    check("前提：两条连接各自都认了身份（否则上一条是空断言）",
           _w1k.client_id == "mA" and _w2k.client_id == "mB",
           "%s / %s" % (_w1k.client_id, _w2k.client_id))
     _w1c.close()
@@ -9928,7 +9928,7 @@ exit 0
     _d34.tick()                        # 对账把 ACL 规则建起来
     _row0 = dict(_d34.store.get("s-tk"))
     _rules0 = dict(_d34.nft.rules)
-    check("★ 前提：这条会话确实占着一条 ACL 规则且作业在跑（否则下面全是空断言）",
+    check("前提：这条会话确实占着一条 ACL 规则且作业在跑（否则下面全是空断言）",
           len(_rules0) == 1 and _row0["state"] == mod.ST_ENROLLED,
           "%s / %s" % (sorted(_rules0), _row0["state"]))
     _rtk = _d34.dispatch(UID, os.getgid(),
@@ -9936,18 +9936,18 @@ exit 0
     _row1 = dict(_d34.store.get("s-tk"))
     _diff = sorted(k for k in set(_row0) | set(_row1)
                    if _row0.get(k) != _row1.get(k))
-    check("★★★ 接管 ⇒ 会话行逐字段比对，**差集恰好是 {keeper}**",
+    check("接管，会话行逐字段比对，差集恰好是 {keeper}",
           _rtk.get("ok") and _diff == ["keeper"], str(_diff))
-    check("★★ 而 nft 规则**一条都没动**（既没删也没加）",
+    check("而 nft 规则一条都没动（既没删也没加）",
           dict(_d34.nft.rules) == _rules0 and _d34.nft.deleted == [],
           "%s / 删过 %s" % (sorted(_d34.nft.rules), _d34.nft.deleted))
-    check("★ 响应里说得清是从谁手里接过来的（界面要能写「已从甲机接管」）",
+    check("响应里说得清是从谁手里接过来的（界面要能写「已从甲机接管」）",
           (_rtk.get("data") or {}).get("was") == "mA"
           and (_rtk.get("data") or {}).get("keeper") == "mB",
           str(_rtk.get("data")))
     _rtk2 = _d34.dispatch(UID, os.getgid(),
                           {"op": "takeover", "session_id": "s-tk"}, "mB")
-    check("★ 自己接管自己的（界面点两下）不是错，也不改任何东西",
+    check("自己接管自己的（界面点两下）不是错，也不改任何内容",
           _rtk2.get("ok") and (_rtk2.get("data") or {}).get("was") == "mB"
           and dict(_d34.store.get("s-tk")) == _row1,
           str(_rtk2.get("data")))
@@ -9955,7 +9955,7 @@ exit 0
     # ── 29.8 接管的两条边界 ──────────────────────────────────────────────
     _rtk3 = _d34.dispatch(UID, os.getgid(), {"op": "takeover",
                                              "session_id": "s-tk"})
-    check("★★ 没报身份的连接**不能**接管 —— 要把看护者写成谁？"
+    check("没报身份的连接不能接管 —— 要把看护者写成谁？"
           "（与心跳那条正好相反，而这不是矛盾：心跳是「我在续命」，少一个身份"
           "仍然该宽进；接管是「我来当家」，它要往那一格里写一个名字）",
           (_rtk3.get("error") or {}).get("kind") == "no_client_id",
@@ -9963,7 +9963,7 @@ exit 0
     _add(_d34, "s-over", job_id="607", keeper="mA", state=mod.ST_RELEASED)
     _rtk4 = _d34.dispatch(UID, os.getgid(),
                           {"op": "takeover", "session_id": "s-over"}, "mB")
-    check("★★ 已经结束的会话**接管不了** —— 幂等地「成功」会让用户以为接管了，"
+    check("已经结束的会话接管不了 —— 幂等地「成功」会让用户以为接管了，"
           "而他该看到的是「这条作业已经结束」",
           (_rtk4.get("error") or {}).get("kind") == "session_gone",
           str(_rtk4.get("error")))
@@ -9976,29 +9976,29 @@ exit 0
     _rlv = _d35.dispatch(UID, os.getgid(),
                          {"op": "leave",
                           "session_ids": ["s-l1", "s-l2", "s-l3", "s-nope"]})
-    check("★★ leave 把清单里那些会话的看护者清空 —— **包括是别人的**："
+    check("leave 把清单里那些会话的看护者清空 —— 包括是别人的："
           "它是一次「放手」，与 goodbye 同族，不是一次「取得」",
           _d35.store.get("s-l1")["keeper"] is None
           and _d35.store.get("s-l2")["keeper"] is None,
           "%r / %r" % (_d35.store.get("s-l1")["keeper"],
                        _d35.store.get("s-l2")["keeper"]))
-    check("★★ 而响应里只报**真的清掉了**的那几条：本来就没人在看的（s-l3）与"
+    check("而响应里只报真的清掉了的那几条：本来就没人在看的（s-l3）与"
           "不存在的（s-nope）都不算 —— 报进去就是一句假话（那几条什么都没发生）",
           (_rlv.get("data") or {}).get("cleared") == ["s-l1", "s-l2"],
           str(_rlv.get("data")))
-    check("★★ 清空之后库里是 **NULL**，不是空串"
+    check("清空之后库里是 NULL，不是空串"
           "（空串会让「确实没人在看」与「有人在看、只是名字是空的」分不开）",
           _d35.store.get("s-l1")["keeper"] is None,
           repr(_d35.store.get("s-l1")["keeper"]))
     _rlv2 = _d35.dispatch(UID, os.getgid(), {"op": "leave"})
-    check("★ 不带清单 / 空清单被明确拒绝（不是「沉默地什么都不做」）",
+    check("不带清单 / 空清单被明确拒绝（不是「沉默地什么都不做」）",
           (_rlv2.get("error") or {}).get("kind") == "bad_request",
           str(_rlv2.get("error")))
     _rlv3 = _d35.dispatch(UID, os.getgid(),
                           {"op": "leave",
                            "session_ids": ["x%d" % i
                                            for i in range(mod.LEAVE_MAX_SESSIONS + 1)]})
-    check("★★ 超过 %d 条被**拒绝**而不是悄悄截断"
+    check("超过 %d 条被拒绝而不是悄悄截断"
           "（截断会让客户端以为「都放开了」，而后面那几条还挂着看护者）"
           % mod.LEAVE_MAX_SESSIONS,
           (_rlv3.get("error") or {}).get("kind") == "bad_request",
@@ -10012,13 +10012,13 @@ exit 0
     _d36.dispatch(UID, os.getgid(),
                   {"op": "leave", "session_ids": ["s-win"]})
     _d36.tick()
-    check("★★ 离开之后走的是**同一条**窗口：心跳断了 30 秒 ⇒ suspect"
+    check("离开之后走的是同一条窗口：心跳断了 30 秒，suspect"
           "（既不「立刻结束」，也不「什么都不做」—— 一条窗口两个入口）",
           _d36.store.get("s-win")["state"] == mod.ST_SUSPECT,
           _d36.store.get("s-win")["state"])
     _d36.tick()
     _sw = _d36.store.get("s-win")
-    check("★★ 再一轮 ⇒ orphaned，而且**真的发了 scancel**"
+    check("再一轮，orphaned，而且真的发了 scancel"
           "（「临时离开由超时来控制」这句话落在这里）",
           _sw["note"] == "orphaned" and len(_cancels) == 1,
           "%s / scancel %d 次" % (_sw["note"], len(_cancels)))
@@ -10038,7 +10038,7 @@ exit 0
     # 闪断：只是连接断了，没有任何显式事件发生
     _f1c.close()
     _d37.drop_conn(_f1k, "模拟闪断")
-    check("★★★ 闪断（连接断了、没有任何显式事件）⇒ 看护者**保留** —— "
+    check("闪断（连接断了、没有任何显式事件）， 看护者保留 —— "
           "它是「这台电脑还在看，只是一时联系不上」",
           _d37.store.get("s-flash")["keeper"] == "mA"
           and _d37.store.get("s-flash")["state"] == mod.ST_ENROLLED,
@@ -10050,7 +10050,7 @@ exit 0
     _f2c.send({"op": "heartbeat", "session_id": "s-flash", "rid": 2})
     _drive(_d37)
     _f2r = [m for m in _f2c.lines() if m.get("rid") == 2]
-    check("★★ 重连之后心跳**继续算**（自动恢复）—— 这正是「闪断必须能自动恢复」"
+    check("重连之后心跳继续算（自动恢复）—— 这正是「闪断必须能自动恢复」"
           "那条根本要求的落点",
           bool(_f2r) and "ignored" not in (_f2r[0].get("data") or {})
           # 判据是"这一次心跳落地了"（库里那一格 == 应答里的那个时刻），
@@ -10084,9 +10084,9 @@ exit 0
         for _s in (_m.get("sessions") or []):
             if _s.get("session_id") == "s-alert":
                 _keeper_seen = _s.get("keeper")
-    check("★★★ 看护者变了 ⇒ 旧看护者在下一条**全量**推送里就看得见"
+    check("看护者变了，旧看护者在下一条全量推送里就看得见"
           "「现在不是我」—— 这就是「上一个电脑的界面要被踢掉」的那条通路"
-          "（周期是 30 秒，所以这一条**只**可能是「变了才推」）",
+          "（周期是 30 秒，所以这一条只可能是「变了才推」）",
           _keeper_seen == "mB", repr(_keeper_seen))
     _k1c.close()
 
@@ -10095,12 +10095,12 @@ exit 0
                      encoding="utf-8").read()
     _add(_d35, "s-view", job_id="614", keeper="mZ")
     _vw = _d35.session_view(_d35.store.get("s-view"), with_secret=False)
-    check("★★ 跨文件：`session_view` 真的吐 `keeper` 那一格，而 docs/PROTOCOL.md "
-          "的字段表里也写着它（两半缺一，界面那一侧就没有可读的东西）",
+    check("跨文件：`session_view` 真的吐 `keeper` 那一格，而 docs/PROTOCOL.md "
+          "的字段表里也写着它（两半缺一，界面那一侧就没有可读的内容）",
           _vw.get("keeper") == "mZ" and "`keeper`" in _proto,
           "%r / 文档里%s" % (_vw.get("keeper"),
-                             "有" if "`keeper`" in _proto else "★ 没有"))
-    check("★★ 而取值**只有两种**：一个 client_id 或者 `null`"
+                             "有" if "`keeper`" in _proto else "没有"))
+    check("而取值只有两种：一个 client_id 或者 `null`"
           "（不是空串、不是 \"unknown\" —— 界面据此知道该不该画「接管」）",
           isinstance(_vw.get("keeper"), str)
           and _d35.session_view(_d35.store.get("s-l1"),
@@ -10113,7 +10113,7 @@ exit 0
     #    删会话文件、置 `released`，那"已释放"这句话就可以是假的 —— 作业占着节点
     #    跑到 TimeLimit（GPU 分区上那是 12 小时实打实的算力），而会话文件已经删了、
     #    `released` 又不在 `phase_running` 的扫描集合里，再也找不回来。而
-    #    `op_goodbye` 若丢掉 `cancel()` 的返回值，连"这一次没成功"都不说。
+    #    `op_goodbye` 若丢掉 `cancel()` 的返回值，连"这一次未成功"都不说。
     #
     # 这一节有两半，第二半是承重的：闸（只有确认作业停了才拆）与
     #   那句话（没成功要说出来、必须走到用户眼前）。只判"状态没变"的话，
@@ -10121,13 +10121,13 @@ exit 0
     #   会话文件还在"，那才是"什么都没拆"。
     print("\n── 30. 释放的闸：确认作业真的停了才拆（F12 / F13）──")
 
-    check("★ 重试间隔是一个**常量**而不是配置键（与 job_missing_confirm_ticks "
+    check("重试间隔是一个常量而不是配置键（与 job_missing_confirm_ticks "
           "同族：这些时间刻度从来没有站点改过）",
           mod.RELEASE_RETRY_SECONDS >= 1
           and "release_retry_seconds" not in mod.GLOBAL_KEYS
           and cfg.release_retry_seconds == mod.RELEASE_RETRY_SECONDS,
           "%s / 在 GLOBAL_KEYS 里：%s"
-          % (getattr(mod, "RELEASE_RETRY_SECONDS", "★ 没有这个常量"),
+          % (getattr(mod, "RELEASE_RETRY_SECONDS", "没有这个常量"),
              "release_retry_seconds" in mod.GLOBAL_KEYS))
 
     class _RelSlurm(object):
@@ -10233,16 +10233,16 @@ exit 0
     #     而它们对应的作业可能一个都没停。`Slurm.job_state()` 的三态就是为这个
     #     存在的，它自己的 docstring 写着合并两者的后果。
     _dd, _ev, _sf = _rel_case("unknown")
-    check("★★★ 问不到控制器 ⇒ **不拆**（问不到 ≠ 不存在）",
+    check("问不到控制器，不拆（问不到 ≠ 不存在）",
           _rel_state(_dd) == mod.ST_RELEASING and os.path.exists(_sf),
           "state=%r 会话文件在=%s" % (_rel_state(_dd), os.path.exists(_sf)))
-    check("★★ 而 ACL 规则也一条都没少 —— 「没拆」的第二半是承重的那个",
+    check("而 ACL 规则也一条都没少 —— 「没拆」的第二半是承重的那个",
           len(_dd.nft.rules) == 1, str(_dd.nft.rules))
     _rw = [e for e in _ev if e["event"] == "release_waiting"]
-    check("★★ 它**说得出来**（否则用户看见的就是一条永远停着的会话）",
+    check("它说得出来（否则用户看见的就是一条永远停着的会话）",
           len(_rw) == 1 and _rw[0].get("why") == "unknown"
           and _rw[0].get("job_state") is None, str(_rw))
-    check("★ 而联系不上控制器时**不重试 scancel** —— scancel 会以同样的方式失败，"
+    check("而联系不上控制器时不重试 scancel —— scancel 会以同样的方式失败，"
           "而那条日志会把真正的原因（联系不上）埋在一句「取消失败」下面",
           _dd.slurm.cancels == [], str(_dd.slurm.cancels))
 
@@ -10254,13 +10254,13 @@ exit 0
     for _st in ("RUNNING", "PENDING", "CANCELLING", "COMPLETING", "SUSPENDED",
                 "REQUEUED", "STAGE_OUT"):
         _dd, _ev, _sf = _rel_case(_st)
-        check("★★★ 作业是 %s ⇒ 不拆、不置 released、规则与会话文件都在" % _st,
+        check("作业是 %s，不拆、不置 released、规则与会话文件都在" % _st,
               _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1
               and os.path.exists(_sf)
               and not [e for e in _ev if e["event"] == "released"],
               "state=%r 规则=%d 文件在=%s"
               % (_rel_state(_dd), len(_dd.nft.rules), os.path.exists(_sf)))
-        check("   ★ 而它**再试了一次** scancel（第一次不节流）",
+        check("而它再试了一次 scancel（第一次不节流）",
               _dd.slurm.cancels == [("7001", "release_waiting")],
               str(_dd.slurm.cancels))
 
@@ -10270,18 +10270,18 @@ exit 0
     # 队列里，回 `(JOB_OK, {})`。它是"还在"，不是"没了" —— 把空 dict 当成
     # "没有作业状态，结束了"，形态与"非终态被当成终态"一模一样。
     _dd, _ev, _sf = _rel_case("{}")
-    check("★★ `JOB_OK` 但拿不到详情（在队列里）⇒ 不拆",
+    check("`JOB_OK` 但无法获取详情（在队列里）， 不拆",
           _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1,
           "state=%r" % _rel_state(_dd))
 
     # ── 30.4 真停了才拆 ────────────────────────────────────────────────
     _dd, _ev, _sf = _rel_case("missing")
-    check("★★★ `JOB_MISSING`（确认不存在）⇒ 才拆",
+    check("`JOB_MISSING`（确认不存在）， 才拆",
           _rel_state(_dd) == mod.ST_RELEASED and not os.path.exists(_sf)
           and len(_dd.nft.rules) == 0,
           "state=%r 规则=%d 文件在=%s"
           % (_rel_state(_dd), len(_dd.nft.rules), os.path.exists(_sf)))
-    check("   ★ 而确认不存在时**不必**再 scancel（省掉一次无意义的 fork）",
+    check("而确认不存在时不必再 scancel（省掉一次无意义的 fork）",
           _dd.slurm.cancels == [], str(_dd.slurm.cancels))
     check("   拆完仍然记 `released` 与那条规则被删的审计",
           [e["event"] for e in _ev].count("released") == 1
@@ -10290,7 +10290,7 @@ exit 0
 
     for _st in ("COMPLETED", "CANCELLED", "FAILED", "OUT_OF_MEMORY"):
         _dd, _ev, _sf = _rel_case(_st)
-        check("★★ 真终态 %s ⇒ 拆" % _st,
+        check("真终态 %s，拆" % _st,
               _rel_state(_dd) == mod.ST_RELEASED and not os.path.exists(_sf),
               "state=%r" % _rel_state(_dd))
 
@@ -10306,7 +10306,7 @@ exit 0
         getattr(_dd, _n)["s-rel"] = 1
     del _dd.slurm.jobs["7001"]              # 作业现在真的没了
     _dd.tick()
-    check("★★ 拆完之后 %d 个按 session_id 记账的表**全都**清空了"
+    check("拆完之后 %d 个按 session_id 记账的表全都清空了"
           "（漏一个 = 内存无上限地涨，而它指不回任何一行）" % len(_FIVE),
           _rel_state(_dd) == mod.ST_RELEASED
           and not [n for n in _FIVE if "s-rel" in getattr(_dd, n)],
@@ -10321,12 +10321,12 @@ exit 0
     #   · 把"看一眼"也节流，作业真的停了也要多等一个间隔才放行，于是每一次
     #     正常的释放都慢一拍。
     _dd, _ev, _sf = _rel_case("RUNNING")
-    check("★★ 第一个 tick 就试过了一次（这一条钉住「第一次不节流」）",
+    check("第一个 tick 就试过了一次（这一条钉住「第一次不节流」）",
           len(_dd.slurm.cancels) == 1, str(_dd.slurm.cancels))
     for _i in range(3):
         _rel_clock[0] += 1                      # 还没到 RELEASE_RETRY_SECONDS
         _dd.tick()
-    check("★★ 间隔之内：**不再** scancel，也不再重复说话",
+    check("间隔之内：不再 scancel，也不再重复说话",
           len(_dd.slurm.cancels) == 1
           and len([e for e in _ev if e["event"] == "release_waiting"]) == 1,
           "scancel %d 次 / release_waiting %d 条"
@@ -10334,7 +10334,7 @@ exit 0
              len([e for e in _ev if e["event"] == "release_waiting"])))
     _rel_clock[0] += mod.RELEASE_RETRY_SECONDS
     _dd.tick()
-    check("★ 过了间隔 ⇒ 再试一次、再说一次",
+    check("过了间隔，再试一次、再说一次",
           len(_dd.slurm.cancels) == 2
           and len([e for e in _ev if e["event"] == "release_waiting"]) == 2,
           "scancel %d 次" % len(_dd.slurm.cancels))
@@ -10343,7 +10343,7 @@ exit 0
     _rel_clock[0] += 1
     _dd.slurm.jobs["7001"] = {"JobState": "CANCELLED", "Requeue": "0"}
     _dd.tick()
-    check("★★★ 作业一真的停了就**立刻**放行 —— 「看一眼」不在节流窗口里"
+    check("作业一真的停了就立刻放行 —— 「看一眼」不在节流窗口里"
           "（节流它等于让每一次正常释放都慢一个间隔）",
           _rel_state(_dd) == mod.ST_RELEASED, _rel_state(_dd))
 
@@ -10368,10 +10368,10 @@ exit 0
     except Exception as _e:                                  # noqa: BLE001
         _boom = _e
     _rel_daemons.append(_dd)
-    check("★★ 没有作业可查的 releasing 会话 ⇒ 直接拆（闸判的是作业，不是状态）",
+    check("没有作业可查的 releasing 会话，直接拆（闸判的是作业，不是状态）",
           _boom is None and _dd.store.get("s-nojob")["state"] == mod.ST_RELEASED,
           "异常=%r state=%s" % (_boom, _dd.store.get("s-nojob")["state"]))
-    check("★★ 而且这个 tick **没有抛异常** —— 它一抛，同一个 tick 里排在"
+    check("而且这个 tick 没有抛异常 —— 它一抛，同一个 tick 里排在"
           " `phase_release` 后面的 gc 与推送就全都不跑了（所有用户的推送停摆）",
           _boom is None, repr(_boom))
 
@@ -10382,7 +10382,7 @@ exit 0
     # 那么 `phase_running` 判错一次 —— 或者作业在那一瞬间又被重新排队 ——
     # 就会拆掉一个还在跑的作业，而这一版新加的那道闸形同虚设。
     _dd, _ev, _sf = _rel_case("RUNNING", note="job_gone")
-    check("★★ 就算 `note` 写着 `job_gone`，也要**自己查一遍**才能拆",
+    check("就算 `note` 写着 `job_gone`，也要自己查一遍才能拆",
           _rel_state(_dd) == mod.ST_RELEASING and len(_dd.nft.rules) == 1,
           "state=%r" % _rel_state(_dd))
 
@@ -10401,21 +10401,21 @@ exit 0
     _r8 = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb"})
     _rel_daemons.append(_dd)
     _w8 = (_r8.get("data") or {}).get("warning")
-    check("★★★ scancel 失败 ⇒ `ok:true` **且**带一句 `warning`"
+    check("scancel 失败，`ok:true` 且带一句 `warning`"
           "（从前它照样回一个干净的 ok —— 用户与客户端都会把它读成"
           "「作业停了」）",
           _r8.get("ok") is True and isinstance(_w8, str) and _w8,
           "ok=%r warning=%r" % (_r8.get("ok"), _w8))
-    check("★★ 形状是「已受理」：状态仍然是 releasing，不是错误、也不是终态",
+    check("形状是「已受理」：状态仍然是 releasing，不是错误、也不是终态",
           (_r8.get("data") or {}).get("state") == mod.ST_RELEASING
           and _dd.store.get("s-gb")["state"] == mod.ST_RELEASING,
           str(_r8.get("data")))
-    check("★★ 那句话说的是**接下来会怎样**，而不是一个没核对过的诊断 —— "
-          "「作业可能还在跑」是**猜**的（作业也可能刚刚正常结束，scancel 报的"
+    check("那句话说的是接下来会怎样，而不是一个没核对过的诊断 —— "
+          "「作业可能还在跑」是猜的（作业也可能刚刚正常结束，scancel 报的"
           "只是「没有这个作业」）",
           "重试" in _w8 and "还在跑" not in _w8 and "仍在运行" not in _w8,
           _w8)
-    check("★ 失败单独记一条审计（`goodbye` 那条只说明「用户要结束」，"
+    check("失败单独记一条审计（`goodbye` 那条只说明「用户要结束」，"
           "这一条说明「这一次没做成」—— 两件事）",
           [e["event"] for e in _ev8].count("cancel_failed") == 1
           and [e["event"] for e in _ev8].count("goodbye") == 1,
@@ -10428,7 +10428,7 @@ exit 0
     _add(_dd, "s-gb2", job_id="7003")
     _r8b = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb2"})
     _rel_daemons.append(_dd)
-    check("★ scancel 成功 ⇒ 响应里**没有** `warning` 那一格",
+    check("scancel 成功，响应里没有 `warning` 那一格",
           _r8b.get("ok") is True
           and "warning" not in (_r8b.get("data") or {})
           and _dd.slurm.cancels == [("7003", "goodbye")],
@@ -10437,7 +10437,7 @@ exit 0
     _dd.store.update("s-gb2", state=mod.ST_RELEASED)
     _dd.slurm.cancels = []
     _r8c = _dd.dispatch(UID, os.getgid(), {"op": "goodbye", "session_id": "s-gb2"})
-    check("★ 已经是终态 ⇒ 原样返回那个终态，**不碰作业**（幂等）",
+    check("已经是终态，原样返回那个终态，不碰作业（幂等）",
           (_r8c.get("data") or {}).get("state") == mod.ST_RELEASED
           and _dd.slurm.cancels == [] and "warning" not in (_r8c.get("data") or {}),
           str(_r8c.get("data")))
@@ -10461,7 +10461,7 @@ exit 0
              #    （实测：把 `stop()` 里那一行改成 `const w = null;`，那种判据不红。）
              ("客户端读", "resp.data && resp.data.warning" in _sess_src),
              ("文档写明", "`data.warning`" in _proto_src)]
-    check("★★ 三端都在：守护进程发 `warning`、客户端读 `data.warning`、"
+    check("三端都在：守护进程发 `warning`、客户端读 `data.warning`、"
           "文档列了它",
           all(_ok for _n, _ok in _ends),
           "、".join("%s=%s" % (_n, _ok) for _n, _ok in _ends))
@@ -10484,7 +10484,7 @@ exit 0
         _rc30 = _cli30._simple({"op": "goodbye"}, _Args(), "已请求释放会话")
     finally:
         sys.stdout, sys.stderr = _old_std
-    check("★★ `slurmate`（命令行也是客户端）真的把那句话打出来了 —— "
+    check("`slurmate`（命令行也是客户端）真的把那句话打出来了 —— "
           "协议里这个字段存在的唯一理由就是被显示出来",
           _rc30 == 0 and "这一句必须被显示出来" in _se.getvalue(),
           "退出码=%r stderr=%r" % (_rc30, _se.getvalue()))
@@ -10503,7 +10503,7 @@ exit 0
     #   ① 过闸：作业还在，会话停在 `releasing`、什么都不拆、一直重试；
     #   ② 落回各自的终态：确认停了之后，`rejected` 与 `expired` 不许被压成
     #      `released`（"校验没过" / "提交超时" / "正常结束"是三件不同的事）。
-    #   只判①的话，"自己跳终态 + 顺手 scancel"也能写出①看起来通过的样子；
+    #   只判①的话，"自己跳终态 + 一并 scancel"也能写出①看起来通过的样子；
     #   只判②的话，一条把拆除提到闸前面的实现照样绿。
     #
     # F27 的形状是一个矩阵，不是一条：两条 TTL 的判据是
@@ -10512,15 +10512,15 @@ exit 0
     #    少了它，"拿 1800 秒一刀切"那个错的修法会全绿。
     print("\n── 31. 终态都过同一道闸（F32）/ 排队那一档的 TTL（F27）──")
 
-    check("★ 两个 TTL 都是**常量**而不是配置键（与 RELEASE_RETRY_SECONDS 同族），"
-          "而且排队那个**明显更长** —— 这一条挡的是「合成一个数」那种修法",
+    check("两个 TTL 都是常量而不是配置键（与 RELEASE_RETRY_SECONDS 同族），"
+          "而且排队那个明显更长 —— 这一条挡的是「合成一个数」那种修法",
           mod.ENROLL_TTL == 1800 and mod.QUEUED_TTL > mod.ENROLL_TTL * 10
           and "enroll_ttl_seconds" not in mod.GLOBAL_KEYS
           and "queued_ttl_seconds" not in mod.GLOBAL_KEYS
           and cfg.enroll_ttl == mod.ENROLL_TTL
           and cfg.queued_ttl == mod.QUEUED_TTL,
-          "enroll=%s queued=%s" % (getattr(mod, "ENROLL_TTL", "★没有"),
-                                   getattr(mod, "QUEUED_TTL", "★没有")))
+          "enroll=%s queued=%s" % (getattr(mod, "ENROLL_TTL", "没有"),
+                                   getattr(mod, "QUEUED_TTL", "没有")))
 
     def _final_case(sid, job_id, *, state=None, waited=0, job_state="PENDING",
                     cancel_ok=True, with_file=False, with_rule=False):
@@ -10579,16 +10579,16 @@ exit 0
     _rj, _rev = _final_case("s-rj", 8101, job_state="RUNNING",
                             cancel_ok=False, with_file=True, with_rule=True)
     _rj.phase_running()
-    check("★★★ 校验失败 ⇒ 会话进 `releasing`，**不是**直接跳 `rejected`"
+    check("校验失败，会话进 `releasing`，不是直接跳 `rejected`"
           "（跳过去就再也没人回收它 —— 那正是 F32）",
           _st_of(_rj, "s-rj") == mod.ST_RELEASING,
           "state=%r" % _st_of(_rj, "s-rj"))
-    check("★★ 而这一刻**一个字都还没拆**：规则在、会话文件在",
+    check("而这一刻一个字都还没拆：规则在、会话文件在",
           len(_rj.nft.rules) == 1
           and os.path.exists(os.path.join(sess_dir, "job-8101.json")),
           "规则=%s 文件在=%s" % (sorted(_rj.nft.rules),
                                 os.path.exists(os.path.join(sess_dir, "job-8101.json"))))
-    check("★ 拒绝那一刻的两条审计分开记：「判定拒绝了」与「交给释放流程了」"
+    check("拒绝那一刻的两条审计分开记：「判定拒绝了」与「交给释放流程了」"
           "是两件事",
           [e["event"] for e in _rev].count("rejected") == 1
           and [e["event"] for e in _rev].count("releasing") == 1,
@@ -10598,22 +10598,22 @@ exit 0
     # 闸不许放行。
     _rj.slurm.cancel_ok = False
     _rj.tick()
-    check("★★★ `scancel` 失败 + 作业仍在跑 ⇒ **留在 `releasing`**，"
+    check("`scancel` 失败 + 作业仍在跑，留在 `releasing`，"
           "不许进终态（从前这里已经是 `rejected` 了，而作业还在烧）",
           _st_of(_rj, "s-rj") == mod.ST_RELEASING, _st_of(_rj, "s-rj"))
-    check("★★ 而规则一条都没少 —— 会话现在是 `releasing`（在 `ACL_STATES` 里），"
-          "`reconcile()` **不再**把它当孤儿（从前 `rejected` 不在那一族里，"
+    check("而规则一条都没少 —— 会话现在是 `releasing`（在 `ACL_STATES` 里），"
+          "`reconcile()` 不再把它当孤儿（从前 `rejected` 不在那一族里，"
           "于是用户连「它还在烧」都看不见）",
           len(_rj.nft.rules) == 1, str(sorted(_rj.nft.rules)))
-    check("★★ 会话文件也还在（作业还活着，用户仍然连得进去、看得见它）",
+    check("会话文件也还在（作业还活着，用户仍然连得进去、看得见它）",
           os.path.exists(os.path.join(sess_dir, "job-8101.json")),
           str(sorted(os.listdir(sess_dir))[:6]))
-    check("★★ 而它**说得出来**：这条释放卡在「作业还在」上",
+    check("而它说得出来：这条释放卡在「作业还在」上",
           any(e["event"] == "release_waiting" and e.get("why") == "alive"
               for e in _rev),
           str([e["event"] for e in _rev]))
-    check("★ `scancel` 是**那道闸**发的（reason=`release_waiting`），"
-          "不再是 `reject()` 自己顺手发一次 —— 一个判据一处实现",
+    check("`scancel` 是那道闸发的（reason=`release_waiting`），"
+          "不再是 `reject()` 自己连带发一次 —— 一个判据一处实现",
           _rj.slurm.cancels and all(r == "release_waiting"
                                     for _j, r in _rj.slurm.cancels),
           str(_rj.slurm.cancels))
@@ -10621,17 +10621,17 @@ exit 0
     # 作业确认没了，才拆，而且落回 `rejected`
     _rj.slurm.jobs.pop("8101")
     _rj.tick()
-    check("★★★ 作业确认消失 ⇒ 拆完**落回 `rejected`**，不是 `released`"
+    check("作业确认消失，拆完落回 `rejected`，不是 `released`"
           "（「校验没过」与「正常结束」是两件不同的事）",
           _st_of(_rj, "s-rj") == mod.ST_REJECTED, _st_of(_rj, "s-rj"))
-    check("★★ 而拆是真拆：规则没了、会话文件也没了"
-          "（从前那份文件**永远**留在用户家目录里 —— 没有任何人删它）",
+    check("而拆是真拆：规则没了、会话文件也没了"
+          "（从前那份文件永远留在用户家目录里 —— 没有任何人删它）",
           len(_rj.nft.rules) == 0
           and not os.path.exists(os.path.join(sess_dir, "job-8101.json")),
           "规则=%s 文件在=%s" % (sorted(_rj.nft.rules),
                                 os.path.exists(os.path.join(sess_dir, "job-8101.json"))))
     _rel_ev = [e for e in _rev if e["event"] == "released"]
-    check("★★ 审计那条 `released` 带着 `state`：事件名说的是「拆除做完了」，"
+    check("审计那条 `released` 带着 `state`：事件名说的是「拆除做完了」，"
           "而它落进哪一个终态要看得见（否则 `rejected` 与 `released` 在审计里"
           "分不开）",
           len(_rel_ev) == 1 and _rel_ev[0].get("state") == mod.ST_REJECTED
@@ -10648,25 +10648,25 @@ exit 0
     _en, _eev = _final_case("s-en", 8201, waited=mod.ENROLL_TTL + 1,
                             job_state="RUNNING", cancel_ok=False, with_rule=True)
     _en.phase_running()
-    check("★★★ 作业**在跑**、而会话文件迟迟不来、已等 %d 秒 ⇒ 进 `releasing`"
+    check("作业在跑、而会话文件迟迟不来、已等 %d 秒，进 `releasing`"
           "（用的是 `enroll_ttl`，不是排队那个）" % (mod.ENROLL_TTL + 1),
           _st_of(_en, "s-en") == mod.ST_RELEASING, _st_of(_en, "s-en"))
-    check("   而它的理由说的是**登记超时**，不是排队超时",
+    check(" 而它的理由说的是登记超时，不是排队超时",
           any(e["event"] == "expired" and e.get("reason") == "enroll_timeout"
               for e in _eev)
           and not any(e.get("reason") == "queued_timeout" for e in _eev),
           str([(e["event"], e.get("reason")) for e in _eev]))
-    check("★★ 而这一刻**一个字都还没拆**：规则还在",
+    check("而这一刻一个字都还没拆：规则还在",
           len(_en.nft.rules) == 1, str(sorted(_en.nft.rules)))
     _en.tick()
-    check("★★★ `scancel` 失败 + 作业仍在跑 ⇒ 留在 `releasing`、规则一条都没少"
+    check("`scancel` 失败 + 作业仍在跑，留在 `releasing`、规则一条都没少"
           "（与 31.1 那一条对称 —— 两条路各证一遍）",
           _st_of(_en, "s-en") == mod.ST_RELEASING and len(_en.nft.rules) == 1,
           "state=%r 规则=%s" % (_st_of(_en, "s-en"), sorted(_en.nft.rules)))
     _en.slurm.jobs.pop("8201")
     _en.tick()
-    check("★★ 作业确认消失 ⇒ 落回 `expired`（与 `rejected` 一样过闸，"
-          "但**名字各留各的**）",
+    check("作业确认消失，落回 `expired`（与 `rejected` 相同过闸，"
+          "但名字各留各的）",
           _st_of(_en, "s-en") == mod.ST_EXPIRED, _st_of(_en, "s-en"))
 
     # ── 31.3 F27 · 两个 TTL 的矩阵 ──────────────────────────────────
@@ -10678,8 +10678,8 @@ exit 0
     _q1, _q1ev = _final_case("s-q1", 8301, waited=mod.ENROLL_TTL + 600,
                              job_state="PENDING")
     _q1.tick()
-    check("★★★ 排队中、等了 %d 秒（超过 `enroll_ttl`、远不到 `queued_ttl`）"
-          "⇒ **一个字都不许动** —— 排队是集群的正常状态，拿 1800 秒去收它"
+    check("排队中、等了 %d 秒（超过 `enroll_ttl`、远不到 `queued_ttl`）"
+          "， 一个字都不许动 —— 排队是集群的正常状态，拿 1800 秒去收它"
           "等于自动取消用户在排队的作业"
           % (mod.ENROLL_TTL + 600),
           _st_of(_q1, "s-q1") == mod.ST_SUBMITTED
@@ -10687,7 +10687,7 @@ exit 0
                    if e["event"] in ("expired", "releasing", "released")],
           "state=%r 事件=%s" % (_st_of(_q1, "s-q1"),
                                str([e["event"] for e in _q1ev])))
-    check("   而它**确实占着**一个名额 —— 这正是它必须有 TTL 的理由"
+    check(" 而它确实占着一个名额 —— 这正是它必须有 TTL 的理由"
           "（`OCCUPYING_STATES` 含 `submitted`）",
           _q1.store.count_occupying(UID) == 1,
           str(_q1.store.count_occupying(UID)))
@@ -10695,23 +10695,23 @@ exit 0
     _q2, _q2ev = _final_case("s-q2", 8302, waited=mod.QUEUED_TTL + 1,
                              job_state="PENDING")
     _q2.tick()
-    check("★★★ 排队中、等了 %d 秒（超过 `queued_ttl`）⇒ 才回收"
+    check("排队中、等了 %d 秒（超过 `queued_ttl`）， 才回收"
           % (mod.QUEUED_TTL + 1),
           _st_of(_q2, "s-q2") == mod.ST_RELEASING, _st_of(_q2, "s-q2"))
-    check("   理由说的是**排队超时**，而且带着等了多久与作业当时的状态"
+    check(" 理由说的是排队超时，而且带着等了多久与作业当时的状态"
           "（否则运维只知道它没了，不知道为什么）",
           any(e["event"] == "expired" and e.get("reason") == "queued_timeout"
               and e.get("job_state") == "PENDING"
               and e.get("seconds") == mod.QUEUED_TTL + 1 for e in _q2ev),
           str([(e["event"], e.get("reason"), e.get("seconds")) for e in _q2ev]))
-    check("   而 `scancel` 走的是**那道闸**（这条会话的作业还在排队，"
-          "闸不许放行 ⇒ 先取消再等它真的消失）",
+    check(" 而 `scancel` 走的是那道闸（这条会话的作业还在排队，"
+          "闸不许放行，先取消再等它真的消失）",
           _q2.slurm.cancels == [("8302", "release_waiting")]
           and _st_of(_q2, "s-q2") == mod.ST_RELEASING,
           "%s / %s" % (_q2.slurm.cancels, _st_of(_q2, "s-q2")))
     _q2.slurm.jobs.pop("8302")
     _q2.tick()
-    check("   作业确认消失 ⇒ 落回 `expired`",
+    check(" 作业确认消失，落回 `expired`",
           _st_of(_q2, "s-q2") == mod.ST_EXPIRED, _st_of(_q2, "s-q2"))
 
     # 矩阵的第四格：已经登记过的会话，作业被挂起/重排，永远不回收。
@@ -10720,7 +10720,7 @@ exit 0
     _q3, _q3ev = _final_case("s-q3", 8303, state=mod.ST_ENROLLED,
                              waited=mod.QUEUED_TTL * 3, job_state="SUSPENDED")
     _q3.tick()
-    check("★★★ 已登记的会话、作业被挂起、等了三天 ⇒ **不回收**"
+    check("已登记的会话、作业被挂起、等了三天，不回收"
           "（它登记过 —— 用户在用它，只是作业被挂起了）",
           _st_of(_q3, "s-q3") == mod.ST_ENROLLED
           and not [e for e in _q3ev
@@ -10738,7 +10738,7 @@ exit 0
     _fb.begin_release(_fb.store.get("s-fb"), "goodbye")      # 缺省 final_state
     _fb.slurm.jobs.pop("8401")
     _fb.tick()
-    check("★ `begin_release` 的缺省仍然是 `released`（goodbye / orphaned / "
+    check("`begin_release` 的缺省仍然是 `released`（goodbye / orphaned / "
           "job_gone / job_<状态> 四条路一个字都不用改）",
           _st_of(_fb, "s-fb") == mod.ST_RELEASED, _st_of(_fb, "s-fb"))
 
@@ -10759,12 +10759,12 @@ exit 0
     #   的缺省档（COLD，见那里的说明）—— 行为是保守的，但「哪一个键属于哪一档」
     #   不该由「有没有人记得」决定。多一个不存在的键同样是错：那说明表在描述一个
     #   已经删掉的键，而读表的人会以为它还在。
-    check("★★ 可热重载表覆盖**每一个**配置键（多一个、少一个都红）",
+    check("可热重载表覆盖每一个配置键（多一个、少一个都红）",
           set(mod.RELOAD_CLASS) == set(mod.GLOBAL_KEYS),
           "表里多了 %s / 少了 %s"
           % (sorted(set(mod.RELOAD_CLASS) - set(mod.GLOBAL_KEYS)),
              sorted(set(mod.GLOBAL_KEYS) - set(mod.RELOAD_CLASS))))
-    check("★ 而三档**都真的用到了**（空着一档说明分档没做）",
+    check("而三档都真的用到了（空着一档说明分档没做）",
           set(mod.RELOAD_CLASS.values()) == {mod.RELOAD_HOT, mod.RELOAD_NOTICE,
                                              mod.RELOAD_COLD},
           str(sorted(set(mod.RELOAD_CLASS.values()))))
@@ -10900,27 +10900,27 @@ exit 0
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 2\n", "rl-b.conf")
         _cfg_a, _cfg_b = mod.Config(_cf_a), mod.Config(_cf_b)
-        check("★★ 只改了 cluster_cidr ⇒ 它落在 NOTICE 档，而 COLD 档是空的",
+        check("只改了 cluster_cidr，它落在 NOTICE 档，而 COLD 档是空的",
               mod.changed_notice_keys(_cfg_a, _cfg_b) == ["cluster_cidr"]
               and mod.changed_cold_keys(_cfg_a, _cfg_b) == [],
               "%s / %s" % (mod.changed_notice_keys(_cfg_a, _cfg_b),
                            mod.changed_cold_keys(_cfg_a, _cfg_b)))
-        check("★ 而「随时可热」那一档不报它（它确实会动到已经建立的东西）",
+        check("而「随时可热」那一档不报它（它确实会动到已经建立的连接）",
               "cluster_cidr" not in mod._changed_keys_by_class(
                   _cfg_a, _cfg_b, mod.RELOAD_HOT))
-        check("★ 什么都没改 ⇒ 两档都是空的（不然每次 reload 都要说一堆废话）",
+        check("什么都没改，两档都是空的（不然每次 reload 都要说一堆废话）",
               mod.changed_notice_keys(_cfg_a, mod.Config(_cf_a)) == []
               and mod.changed_cold_keys(_cfg_a, mod.Config(_cf_a)) == [])
         _cf_c = write_conf("cluster_cidr = 192.0.2.0/24\n"
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 5\n", "rl-c.conf")
-        check("★ 改了 max_sessions_per_user ⇒ **一个字都不说**（HOT 档只影响新发生的事）",
+        check("改了 max_sessions_per_user，一个字都不说（HOT 档只影响新发生的事）",
               mod.changed_notice_keys(_cfg_a, mod.Config(_cf_c)) == [])
         _cf_d = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/home\n"
                            "range_start = 55001\nrange_end = 55099\n", "rl-d.conf")
         _cf_e = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/other\n"
                            "range_start = 55001\nrange_end = 55099\n", "rl-e.conf")
-        check("★★ 改了 readonly_paths ⇒ 落进 **COLD** 档（它只有重启才生效）",
+        check("改了 readonly_paths，落进 COLD 档（它只有重启才生效）",
               mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))
               == ["readonly_paths"],
               str(mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))))
@@ -10945,18 +10945,18 @@ exit 0
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 5\n")
         _rl_ok, _rl_notes = _d_hot.reload_config()
-        check("★★ 改一个 HOT 键 + 热重载 ⇒ 新值生效了",
+        check("改一个 HOT 键 + 热重载，新值生效了",
               _rl_ok is True and _d_hot.cfg.max_sessions_per_user == 5,
               "ok=%s / 现值=%s" % (_rl_ok, _d_hot.cfg.max_sessions_per_user))
-        check("★★ 而**进程还是同一个** —— 同一个 store 句柄、同一条连接还在",
+        check("而进程还是同一个 —— 同一个 store 句柄、同一条连接还在",
               _d_hot.store is _store0 and _conn_live in _d_hot.conns(),
               "store 换了" if _d_hot.store is not _store0 else "连接没了")
-        check("★ HOT 档**什么都不说**（notes 是空的）", _rl_notes == [], str(_rl_notes))
-        check("★★ 而那条连接拿到的**也是新配置**（它按引用存着 cfg —— 只换"
-              "`Sessiond` 自己那一份的话，症状是一半新一半旧，且没有东西会报错）",
+        check("HOT 档什么都不说（notes 是空的）", _rl_notes == [], str(_rl_notes))
+        check("而那条连接拿到的也是新配置（它按引用存着 cfg —— 只换"
+              "`Sessiond` 若自己那一份，症状是一半新一半旧，且没有任何一处会报错）",
               _conn_live.cfg is _d_hot.cfg,
               "%s / %s" % (id(_conn_live.cfg), id(_d_hot.cfg)))
-        check("★★ 而且**每一个**按引用拿着配置的部件都换成了同一份"
+        check("而且每一个按引用拿着配置的部件都换成了同一份"
               "（判据是「有没有 cfg 属性」，不是一张手抄的类名清单）",
               all(o.cfg is _d_hot.cfg for o in _d_hot._config_holders()),
               str([(type(o).__name__, o.cfg is _d_hot.cfg)
@@ -10974,12 +10974,12 @@ exit 0
                      "readonly_paths = /shared/other\n"
                      "max_sessions_per_user = 7\n")
         _rl_ok, _rl_notes = _dc.reload_config()
-        check("★★ 改了 readonly_paths ⇒ 热重载**整个拒绝**"
+        check("改了 readonly_paths，热重载整个拒绝"
               "（用户拍的那条：校验不全过就一个字都不改）",
               _rl_ok is False and _rl_notes == [],
               "ok=%s notes=%s" % (_rl_ok, _rl_notes))
-        check("★★ 而**连那个本来可以热的键也没被改** —— 这就是「整个拒绝」的意思"
-              "（只拒绝那一个键的话，max_sessions_per_user 会悄悄变成 7）",
+        check("而连那个本来可以热的键也没被改 —— 这就是「整个拒绝」的意思"
+              "（若只拒绝那一个键，max_sessions_per_user 会悄悄变成 7）",
               _dc.cfg.max_sessions_per_user == 2
               and _dc.cfg.raw.get("readonly_paths") == "/shared/home",
               "%s / %s" % (_dc.cfg.max_sessions_per_user,
@@ -11000,7 +11000,7 @@ exit 0
                      "max_sessions_per_user = 4\n"
                      "[plugin:alpha]\nenabled = yes\n")     # 主文件里不许有块头
         _rl_ok, _rl_notes = _dbad.reload_config()
-        check("★★ 新配置**语法就不对** ⇒ 拒绝，旧配置继续服务",
+        check("新配置语法就不对，拒绝，旧配置继续服务",
               _rl_ok is False and _dbad.cfg.max_sessions_per_user == 3,
               "ok=%s / %s" % (_rl_ok, _dbad.cfg.max_sessions_per_user))
 
@@ -11015,7 +11015,7 @@ exit 0
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 0\n")
         _rl_ok, _rl_notes = _di.reload_config()
-        check("★★ 新配置过不了自检（max_sessions_per_user = 0）⇒ 拒绝，旧值仍是旧值",
+        check("新配置过不了自检（max_sessions_per_user = 0）， 拒绝，旧值仍是旧值",
               _rl_ok is False and _di.cfg.max_sessions_per_user == 3,
               "ok=%s / %s" % (_rl_ok, _di.cfg.max_sessions_per_user))
 
@@ -11030,16 +11030,16 @@ exit 0
               str(sorted(s.name for s in _dp.cfg.plugin_specs)))
         _rl_pkg(_RU2, "beta")                       # 往目录里丢一个新包
         _rl_ok, _rl_notes = _dp.reload_config()
-        check("★★ 往插件目录里丢一个包 + 热重载 ⇒ **不用重启**新插件就可用了",
+        check("往插件目录里丢一个包 + 热重载，不用重启新插件就可用了",
               _rl_ok is True
               and sorted(s.name for s in _dp.cfg.plugin_specs) == ["alpha", "beta"],
               "ok=%s / %s" % (_rl_ok, sorted(s.name for s in _dp.cfg.plugin_specs)))
-        check("★ 而 `plugins_by_id` / `plugins_by_name` 两张表也跟着重建了"
+        check("而 `plugins_by_id` / `plugins_by_name` 两张表也跟着重建了"
               "（只换 Config 而漏掉它们，症状是「装上了但认不出」）",
               _RU2 in _dp.cfg.plugins_by_id
               and [s.id for s in _dp.cfg.plugins_by_name.get("beta", [])] == [_RU2],
               "%s / %s" % (sorted(_dp.cfg.plugins_by_id), _dp.cfg.plugins_by_name))
-        check("★ 而插件包的**快照缓存**被清空了（它本来标注的是「刻意不失效」——"
+        check("而插件包的快照缓存被清空了（它本来标注的是「刻意不失效」——"
               "那说的是从前那个进程一辈子只有启动那一刻的认知）",
               _dp._plugin_cache == {}, str(_dp._plugin_cache))
 
@@ -11063,15 +11063,15 @@ exit 0
             _f.write("cluster_cidr = 192.0.0.0/16\n"
                      "range_start = 55001\nrange_end = 55099\n")
         _rl_ok, _rl_notes = _d_cidr.reload_config()
-        check("★★ 改了 cluster_cidr + 热重载 ⇒ **内核里那条基础规则的网段真的变了**"
+        check("改了 cluster_cidr + 热重载，内核里那条基础规则的网段真的变了"
               "（今天连 restart 都不变：实现只看 comment 在不在）",
               _rl_ok is True and _nftsim.cidr() == "192.0.0.0/16",
               "ok=%s / nft 里现在是 %s" % (_rl_ok, _nftsim.cidr()))
-        check("★★ 而那条规则**只剩一条**（是删旧插新，不是两条并存）",
+        check("而那条规则只剩一条（是删旧插新，不是两条并存）",
               sum(1 for r in _nftsim.rules
                   if mod.Nft.BASE_OFFCLUSTER in r["text"]) == 1,
               str([r["text"] for r in _nftsim.rules]))
-        check("★ 而且它说了 NOTICE 那一档的那句话（「哪些流量被放行」这一刻真的变了）",
+        check("而且它说了 NOTICE 那一档的那句话（「哪些流量被放行」这一刻真的变了）",
               _rl_notes == ["cluster_cidr"], str(_rl_notes))
 
         # 32.9 `base_offcluster_cidr` 的三态，以及删基础规则真的删得掉
@@ -11080,12 +11080,12 @@ exit 0
         #    `slurmate-sess-…`）去找句柄，拿它去删基础规则会一条都匹配不到，
         #    而函数照样返回 True（它报的是"规则集读得到"）。症状是"删过了，但规则
         #    还在"，而没有任何地方会报错。
-        check("★ 那条规则在 ⇒ 读出它的网段",
+        check("那条规则在，读出它的网段",
               mod.Nft.base_offcluster_cidr(
                   '        ip daddr != 203.0.113.0/24 accept'
                   ' comment "slurmate-base-offcluster" # handle 7')
               == "203.0.113.0/24")
-        check("★★ 那条规则**不在** ⇒ None（与「在、但读不出网段」必须分得开）",
+        check("那条规则不在，None（与「在、但无法读取网段」必须分得开）",
               mod.Nft.base_offcluster_cidr("") is None
               and mod.Nft.base_offcluster_cidr(
                   '        oif "lo" accept comment "slurmate-base-lo" # handle 1')
@@ -11099,8 +11099,8 @@ exit 0
         _d_del = _mk_reload_d(_PLUG)
         _d_del.nft._nft = _sim2._nft
         _ok_del = _d_del.nft.del_by_comment(mod.Nft.BASE_OFFCLUSTER)
-        check("★★ `del_by_comment` 删得掉**基础规则**（它从前用的正则只认会话规则 "
-              "⇒ 一条都匹配不到，而函数照样返回 True）",
+        check("`del_by_comment` 删得掉基础规则（它从前用的正则只认会话规则 "
+              "， 一条都匹配不到，而函数照样返回 True）",
               _ok_del is True and len(_sim2.rules) == 1
               and mod.Nft.BASE_LO in _sim2.rules[0]["text"],
               str([r["text"] for r in _sim2.rules]))
@@ -11114,11 +11114,11 @@ exit 0
             _f.write("cluster_cidr = 192.0.2.0/24\n"
                      "range_start = 56001\nrange_end = 56099\n")
         _rl_ok, _rl_notes = _d_rg.reload_config()
-        check("★★ 端口区间换了 ⇒ 游标回到**新的**起点（不重置的话它会落在 "
+        check("端口区间换了，游标回到新的起点（若不重置它会落在 "
               "56001–56099 之外，而按游标算出来的端口会跟着跑出去）",
               _rl_ok is True and _d_rg.port_cursor == 56001,
               "游标=%s" % _d_rg.port_cursor)
-        check("★ 而区间变了要说一句（已经在跑的会话，端口可能落在新区间外）",
+        check("而区间变了要说一句（已经在跑的会话，端口可能落在新区间外）",
               _rl_notes == sorted(["range_start", "range_end"]), str(_rl_notes))
 
         # 32.11 SIGHUP 不是退出，而是"置一个待重载标志"
@@ -11128,11 +11128,11 @@ exit 0
         #   声明的相反。
         _SIGD = _mk_reload_d(_PLUG)
         _SIGD._on_signal(mod.signal.SIGHUP, None)
-        check("★★ SIGHUP ⇒ 只**置标志**，进程不退出",
+        check("SIGHUP，只置标志，进程不退出",
               _SIGD._reload_pending is True and _SIGD.running is True,
               "pending=%s running=%s" % (_SIGD._reload_pending, _SIGD.running))
         _SIGD._on_signal(mod.signal.SIGTERM, None)
-        check("★ SIGTERM 仍然是退出（而且**不**触发重载）",
+        check("SIGTERM 仍然是退出（而且不触发重载）",
               _SIGD.running is False and _SIGD._reload_pending is True,
               "pending=%s running=%s" % (_SIGD._reload_pending, _SIGD.running))
 
@@ -11157,7 +11157,7 @@ exit 0
 
         _dloop._run_tick = _fake_tick
         _dloop.run()
-        check("★★ 主循环**真的消费**了那个标志：进去之后新配置已经生效"
+        check("主循环真的消费了那个标志：进去之后新配置已经生效"
               "（信号只置标志、重活在循环顶部做）",
               _dloop.cfg.max_sessions_per_user == 9 and _loop_seen["ticked"] == 1,
               "值=%s tick=%s" % (_dloop.cfg.max_sessions_per_user,
@@ -11194,7 +11194,7 @@ exit 0
             mod.log.removeHandler(_acap)
             mod.log.setLevel(_saved_lvl)
         _ja = [m for m in _acap.lines if "AUDIT" in m]
-        check("★★ 成功的重载留 `config_reload`、被拒的留 `config_reload_rejected`"
+        check("成功的重载留 `config_reload`、被拒的留 `config_reload_rejected`"
               "（不是一个笼统的「配置变了」）",
               any("config_reload" in m and "config_reload_rejected" not in m
                   for m in _ja)
@@ -11238,7 +11238,7 @@ exit 0
         # 漏掉半个网段：桩里那个节点是 192.0.2.11，而 /25 的后半段是
         #   .128–.255 —— 它落在外面。（账本 F45 举的就是这个例子。）
         # 顺带还改了一个本来可热的键（`max_sessions_per_user`）：一次证明
-        #   "拒绝"是整份拒绝，不是"跳过那一个、别的照旧"。
+        #   "拒绝"是整份拒绝，不是"跳过那一个、其他照旧"。
         with open(_F45, "w", encoding="utf-8") as _f:
             _f.write("cluster_cidr = 192.0.2.128/25\n"
                      "range_start = 55001\nrange_end = 55099\n"
@@ -11252,20 +11252,20 @@ exit 0
         finally:
             mod.log.removeHandler(_lc45)
             mod.log.setLevel(_saved_lvl45)
-        check("★★ 改错一个数字（`/24` → `/25` 的后半段）⇒ 重载**被拒**"
-              "（桩里那个节点落在新网段外面 ⇒ 交叉核对逮住它）",
+        check("改错一个数字（`/24` → `/25` 的后半段）， 重载被拒"
+              "（桩里那个节点落在新网段外面，交叉核对逮住它）",
               _rl_ok45 is False and _rl_notes45 == [],
               "ok=%s / notes=%s" % (_rl_ok45, _rl_notes45))
-        check("★★ 而且**一个字都没改**：`cluster_cidr` 还是旧的，连那个本来可热的"
+        check("而且一个字都没改：`cluster_cidr` 还是旧的，连那个本来可热的"
               "`max_sessions_per_user` 也没跟过去（全有或全无）",
               _d_f45.cfg.cluster_cidr == "192.0.2.0/24"
               and _d_f45.cfg.max_sessions_per_user == 2,
               "%s / %s" % (_d_f45.cfg.cluster_cidr,
                            _d_f45.cfg.max_sessions_per_user))
-        check("★★ 内核里那条基础规则**还是旧网段** —— 它没被换掉"
+        check("内核里那条基础规则还是旧网段 —— 它没被换掉"
               "（`_adopt_config()` 里那一步根本没跑到：这是最直接的那一条判据）",
               _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
-        check("★★ 而日志**点名**了是哪个键（只说「配置有问题」的话，管理员不知道"
+        check("而日志点名了是哪个键（只说「配置有问题」，管理员不知道"
               "该去改哪一个）",
               any(lv == "ERROR" and "cluster_cidr" in m for lv, m in _lc45.lines),
               str(_lc45.lines)[:400])
@@ -11276,8 +11276,8 @@ exit 0
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 5\n")
         _rl_ok45b, _rl_notes45b = _d_f45.reload_config()
-        check("★★ 对照：改成一个**仍然覆盖全部节点**的网段 ⇒ 照常生效"
-              "（这一条是上面那几条的**反面**：新判据拦的是「改错了」，"
+        check("对照：改成一个仍然覆盖全部节点的网段，照常生效"
+              "（这一条是上面那几条的反面：新判据拦的是「改错了」，"
               "不是「改了 cluster_cidr」）",
               _rl_ok45b is True
               and _d_f45.cfg.cluster_cidr == "192.0.0.0/16"
@@ -11299,7 +11299,7 @@ exit 0
         write_plugin_conf(_F46, _RU1, "enabled = yes\n")
         _d_f46 = _mk_reload_d(_F46)
         _conf_f46 = os.path.join(mod.plugin_conf_dir(_F46), _RU1 + ".conf")
-        check("（夹具）此刻那份配置指得到 alpha ⇒ 一条 ⚠ 都没有",
+        check("（夹具）此刻那份配置指得到 alpha，一条警告都没有",
               _d_f46.cfg.stale_conf_problems == []
               and any(s.id == _RU1 for s in _d_f46.cfg.plugin_specs),
               "%s / %s" % (_d_f46.cfg.stale_conf_problems,
@@ -11322,13 +11322,13 @@ exit 0
             mod.log.removeHandler(_lc46)
             mod.log.setLevel(_saved_lvl46)
         _n46_after = [m for _, m in _lc46.lines if _RU1 in m]
-        check("★★ ① 没变化的那一轮重载**不说**这条 ⚠（不然每次 reload 都是一堆"
+        check("① 没变化的那一轮重载不说这条警告（不然每次 reload 都是一堆"
               "噪音，而噪音里的真话没人看得见）",
               _n46_before == [], str(_n46_before)[:300])
-        check("★★ ② 插件被拿走之后、**同一份配置**再重载 ⇒ 那条 ⚠ 就出现在日志里"
-              "（判据是**那份配置的路径**，不是笼统的「有没有 warning」）",
+        check("② 插件被拿走之后、同一份配置再重载，那条警告就出现在日志里"
+              "（判据是那份配置的路径，不是笼统的「有没有 warning」）",
               len(_n46_after) >= 1, str(_n46_after)[:300])
-        check("★★ ③ 而且它是**在重载这一轮**说的，不是等下次重启 —— 这正是 F46 "
+        check("③ 而且它是在重载这一轮说的，不是等下次重启 —— 这正是 F46 "
               "要的那件事",
               any(_conf_f46 in w or _RU1 in w
                   for w in _d_f46.cfg.stale_conf_problems),

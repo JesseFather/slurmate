@@ -24,33 +24,33 @@
         Miscellaneous Symbols and Arrows（U+2B00–U+2BFF）、Emoji（U+1F000–U+1FAFF）、
         以及变体选择符（U+FE0F）。
 
-    B2  任何 `.md` 里不许出现一个**真的 ULID** —— 只许用 ULID 规范自己的示例值
-        （见下面的 `ULID_OK`）。★ 一个真的 ULID 指向一个真实站点：`op_plugins`
+    B2  任何 `.md` 里不许出现一个真的 ULID —— 只许用 ULID 规范自己的示例值
+        （见下面的 `ULID_OK`）。 一个真的 ULID 指向一个真实站点：`op_plugins`
         那种示例里只要放上插件 id，就把它连同短名与标题一起写进了公开文档。
 
-★ **两条的豁免不一样，这是故意的。** B1 豁免反引号跨度（那是程序真的会打印的
-  字面量）与两份记录类（它们要 ★ 做强调）；**B2 两条都不豁免** —— ULID 恰恰通常
+ 两条的豁免不一样，这是故意的。 B1 豁免反引号跨度（那是程序真的会打印的
+  字面量）与两份记录类（它们要  做强调）；B2 两条都不豁免 —— ULID 恰恰通常
   写在反引号里，而记录类里一样不该出现真实值。
 
-★ **"公开文档"按文件判，不按"公开"这个形容词判**：`git ls-files '*.md'` 减去
-  `CHANGELOG.md` 与 `docs/KNOWN-ISSUES.md`。那两份是**记录** —— 按时间累积、按编号
+ "公开文档"按文件判，不按"公开"这个形容词判：`git ls-files '*.md'` 减去
+  `CHANGELOG.md` 与 `docs/KNOWN-ISSUES.md`。那两份是记录 —— 按时间累积、按编号
   引用，读者要的是"当时发生了什么"，符号在那里是有用的。
 
-★★ **一类豁免：反引号跨度（`` `…` ``）里的字符。** 那是**字面量**，不是排版：
+ 一类豁免：反引号跨度（`` `…` ``）里的字符。 那是字面量，不是排版：
   程序真的会打印 `★` 与 `⚠`（`cluster/slurmate`、`cluster/slurmate-sessiond` 的
   `--check`），符合性夹具里也真的有 `cases/😀.txt` 这个文件。不豁免的话，文档就没法
   如实描述程序行为，而"如实"是这个项目里比"好看"更硬的一条。
 
-★ **`→` `←` `↔` 是允许的**（Unicode Arrows 区，U+2190–U+21FF）。它们表意
+ `→` `←` `↔` 是允许的（Unicode Arrows 区，U+2190–U+21FF）。它们表意
   （"变成"、"来自"、"互指"），与 `+`、`=` 同类。判定线划在这里，是因为"图形符号"
-  与"排版符号"是两件事：前者靠颜色与形状抢注意力，是**喊话**；后者是句子成分。
+  与"排版符号"是两件事：前者靠颜色与形状抢注意力，是喊话；后者是句子成分。
 
-★ **`⇒` 从这一条里挪走了**，现在归 `tools/check-doc-prose.py` 的 H 判据管。理由是
+ `⇒` 从这一条里挪走了，现在归 `tools/check-doc-prose.py` 的 H 判据管。理由是
   实测：它表"推出"，实际当连词与强调用，全仓公开文档正文里有 183 处。它仍然不算
   "图形符号"，只是不再适合出现在正文里。改与不改的理由都写在那边。
 
-★ 围栏代码块**不豁免**：文档里那些围栏装的是目录树与伪代码，是**给人读的正文**，
-  不是可执行的真代码。真到了"文档要展示程序输出的字符"那一天，那是一条**具名**的
+ 围栏代码块不豁免：文档里那些围栏装的是目录树与伪代码，是给人读的正文，
+  不是可执行的真代码。真到了"文档要展示程序输出的字符"那一天，那是一条具名的
   例外，不是一整类。
 
 用法：
@@ -69,15 +69,15 @@ ROOT = os.path.dirname(HERE)
 
 EXEMPT = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
 
-# 反引号跨度。奇数索引那几段是**代码**，它们豁免。
+# 反引号跨度。奇数索引那几段是代码，它们豁免。
 CODE = re.compile(r"(`[^`]*`)")
 
 # ── B2 的白名单：ULID 规范自己的示例值 ────────────────────────────────────
 #
-# ★★ 判据为什么是**白名单**、而不是"看起来像不像"：规范里那两个示例值有
-#    **合理的时间戳**（`01ARZ3NDEKTSV4RRFFQ69G5FAV` 解出来是 2016-07-30），
+# 判据为什么是白名单、而不是"看起来像不像"：规范里那两个示例值有
+#    合理的时间戳（`01ARZ3NDEKTSV4RRFFQ69G5FAV` 解出来是 2016-07-30），
 #    所以"把前 10 个字符解成时间、看它像不像真的"这条路走不通。
-# ★ 误报的把握：白名单外的任何 ULID 形状串，在文档里都没有理由出现。
+# 误报的把握：白名单外的任何 ULID 形状串，在文档里都没有理由出现。
 ULID_OK = {
     "01ARZ3NDEKTSV4RRFFQ69G5FAV",     # ULID 规范里的示例
     "01BX5ZZKBKACTAV9WEVGEMMVRZ",     # 同上
@@ -86,7 +86,7 @@ ULID_OK = {
 # 26 个 Crockford base32 字符（字母表里没有 I / L / O / U）。
 ULID = re.compile(r"(?<![0-9A-Za-z])[0-9A-HJKMNP-TV-Z]{26}(?![0-9A-Za-z])")
 
-# 禁的区间（含端点）。Arrows（U+2190–U+21FF）**不在**这里 —— 见文件头。
+# 禁的区间（含端点）。Arrows（U+2190–U+21FF）不在这里 —— 见文件头。
 # `⇒` 也不在这里：它归 `check-doc-prose.py` 的 H。
 BANNED = (
     (0x2600, 0x27BF, "Miscellaneous Symbols / Dingbats"),
@@ -105,12 +105,12 @@ def is_banned(ch):
 
 
 def code_spans(line):
-    """这一行里**是代码**的那几段（反引号跨度，含反引号本身）。"""
+    """这一行里是代码的那几段（反引号跨度，含反引号本身）。"""
     return CODE.split(line)[1::2]
 
 
 def prose(text):
-    """这一行里**不是代码**的部分。"""
+    """这一行里不是代码的部分。"""
     return CODE.split(text)[::2]
 
 
@@ -122,7 +122,7 @@ def problems_from(files):
     """
     out = []
     for rel, text in sorted(files.items()):
-        # ── B2：真的 ULID —— **所有** `.md`，含那两份记录类，含反引号跨度 ────
+        # ── B2：真的 ULID —— 所有 `.md`，含那两份记录类，含反引号跨度 ────
         for i, line in enumerate(text.splitlines(), 1):
             for m in ULID.finditer(line):
                 if m.group(0) not in ULID_OK:
@@ -131,7 +131,7 @@ def problems_from(files):
 
         if rel in EXEMPT:
             continue
-        # ── B1：图形符号（只扫**正文**，反引号跨度豁免）────────────────────
+        # ── B1：图形符号（只扫正文，反引号跨度豁免）────────────────────
         for i, line in enumerate(text.splitlines(), 1):
             bad = []
             for part in prose(line):
@@ -147,7 +147,7 @@ def problems_from(files):
 
 
 def exempt_count(files):
-    """反引号跨度里的图形符号有几处 —— 那是**合法**的字面量，让这个区分看得见。"""
+    """反引号跨度里的图形符号有几处 —— 那是合法的字面量，让这个区分看得见。"""
     n = 0
     for rel, text in files.items():
         if rel in EXEMPT:
@@ -196,9 +196,9 @@ def run(root):
 
 
 def self_test():
-    """种坏样本，断言这条检查**真的会红**。
+    """种坏样本，断言这条检查真的会红。
 
-    ★ 没有这一步，"检查通过"与"检查根本没在看"分不开（先例：
+     没有这一步，"检查通过"与"检查根本没在看"分不开（先例：
       `tools/self-test-sanitized.sh`）。
     """
     cases = [

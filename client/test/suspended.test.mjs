@@ -101,7 +101,7 @@ function running(backend) {
 
 const REASON = '这条作业已经被「乙机」上的客户端接管了。';
 
-test('★★ suspend() 停下心跳、对账与订阅，并把原因写给界面', async () => {
+test('suspend() 停下心跳、对账与订阅，并把原因写给界面', async () => {
   const b = new StubBackend();
   const c = running(b);
   c._startHeartbeat();
@@ -121,17 +121,17 @@ test('★★ suspend() 停下心跳、对账与订阅，并把原因写给界面
   //    而没有一个字会报错。它们必须是同一个东西，不是两份各写一遍的状态。
   assert.equal(c.suspended, c.snapshot().suspended);
   assert.match(c.snapshot().warning, /乙机/, '界面要看得到原因');
-  assert.equal(c.tunnelStops.length, 0, '★ 隧道**不拆** —— 用户可能还开着那个页面在看');
+  assert.equal(c.tunnelStops.length, 0, '隧道不拆 —— 用户可能还开着那个页面在看');
 });
 
-test('★ suspend() 幂等：只记第一条原因', () => {
+test('suspend() 幂等：只记第一条原因', () => {
   const c = running(new StubBackend());
   c.suspend('第一条');
   c.suspend('第二条');
   assert.equal(c.snapshot().suspended, '第一条');
 });
 
-test('★★★ 被接管的会话，stop() **一个 goodbye 都不发**', async () => {
+test('被接管的会话，stop() 一个 goodbye 都不发', async () => {
   // 这是这一份里最要紧的一条。`goodbye` 会让守护进程的 phase_release
   //      删掉 ACL 并 scancel 作业 —— 而用户以为自己只是换了个地方看。
   //      守护进程分辨不了那个 goodbye 是谁发的（它按 session_id 记账），
@@ -161,7 +161,7 @@ test('★★★ 被接管的会话，stop() **一个 goodbye 都不发**', async
 //    "不是看护者"演成"网络不好"）。，客户端必须看那一格，否则界面会显示
 //    「上次心跳 3 秒前」，而真相是这条会话已经不归本机管了。
 
-test('★★ `ignored: not_keeper` ⇒ 这条会话进入「被接管」，而且这一拍不算数', async () => {
+test('`ignored: not_keeper`，这条会话进入「被接管」，而且这一拍不算数', async () => {
   const b = new StubBackend();
   b.reply = ok({ state: 'enrolled', at: 1000, ignored: 'not_keeper' });
   const c = running(b);
@@ -174,16 +174,16 @@ test('★★ `ignored: not_keeper` ⇒ 这条会话进入「被接管」，而�
   //    那个人问得出来）。
   assert.match(c.suspended, /接管/, `这一刻必须转成"被接管"：${c.suspended}`);
   assert.match(c.suspended, /作业仍在运行/,
-    '★ 而那句话必须带上"作业还在跑" —— 少了它，用户会去重新提交一个作业');
+    '而那句话必须带上"作业还在跑" —— 少了它，用户会去重新提交一个作业');
   assert.equal(c._heartbeatAt, 0,
-    '★★ 这一拍**没有续上命**：推进 `_heartbeatAt` 等于本机自己宣称"我在看着"，'
+    '这一拍没有续上命：推进 `_heartbeatAt` 等于本机自己宣称"我在看着"，'
     + '而服务端刚刚说了不是 —— 那句假话会一路传到界面上（"上次心跳 3 秒前"）');
   assert.equal(c._hbTimer, null, '心跳必须停 —— 那边已经接手了');
   assert.equal(b.listenerCount('notify'), 0, '退订：不然监听器只增不减');
-  assert.equal(c.tunnelStops.length, 0, '★ 隧道**不拆** —— 用户可能还开着那个页面在看');
+  assert.equal(c.tunnelStops.length, 0, '隧道不拆 —— 用户可能还开着那个页面在看');
 });
 
-test('★ 认不出来的 `ignored` 取值：不算数，但**不**放弃这条会话', async () => {
+test('认不出来的 `ignored` 取值：不算数，但不放弃这条会话', async () => {
   // 三态那条纪律在这里的落点：认不出来就别猜。猜成"被接管了"会让本机
   //   白白放手一条其实还归自己的会话（心跳停了，300 秒后它真的会被判 suspect）；
   //   猜成"没事"则把一句服务端明说了的话咽掉。所以：不算数 + 原样印出来。
@@ -194,11 +194,11 @@ test('★ 认不出来的 `ignored` 取值：不算数，但**不**放弃这条�
   await c._beat();
 
   assert.equal(c._heartbeatAt, 0, '不算数就是不算数（与 `not_keeper` 同一格）');
-  assert.equal(c.suspended, null, '★ 认不出来**不猜**成"被接管了"');
-  assert.match(c.snapshot().warning, /某个我们还不认识的理由/, '★ 原样印出来，不吞掉');
+  assert.equal(c.suspended, null, '认不出来不猜成"被接管了"');
+  assert.match(c.snapshot().warning, /某个我们还不认识的理由/, '原样印出来，不吞掉');
 });
 
-test('★ 对照组：平常那一拍照旧续命（`ignored` 那一支不是把心跳关掉了）', async () => {
+test('对照组：平常那一拍照旧续命（`ignored` 那一支不是把心跳关掉了）', async () => {
   const b = new StubBackend();
   const c = running(b);
 
@@ -206,10 +206,10 @@ test('★ 对照组：平常那一拍照旧续命（`ignored` 那一支不是把
 
   assert.ok(c._heartbeatAt > 0, '没有 `ignored` 就是一次正常的心跳');
   assert.equal(c.suspended, null);
-  assert.equal(c._hbTimer, null, '★ 而它**不**会去停那个定时器（只有 suspend 才停）');
+  assert.equal(c._hbTimer, null, '而它不会去停那个定时器（只有 suspend 才停）');
 });
 
-test('★★★ 闪断（传输失败）**不是**接管 —— 这正是那 300 秒窗口要覆盖的事', async () => {
+test('闪断（传输失败）不是接管 —— 这正是那 300 秒窗口要覆盖的事', async () => {
   // 这一条与上面第一条的对照是这一版的承重结构：
   //    · 服务端明确说"这一拍不算数"，被接管，本机放手；
   //    · 连接断了（什么都没说），什么都不变，继续重试。
@@ -222,13 +222,13 @@ test('★★★ 闪断（传输失败）**不是**接管 —— 这正是那 300
 
   await c._beat();
 
-  assert.equal(c.suspended, null, '★★ 闪断**绝不能**变成"被接管"');
-  assert.notEqual(c._hbTimer, null, '★ 心跳要继续重试（别等 45 秒的定时器被停掉）');
+  assert.equal(c.suspended, null, '闪断绝不能变成"被接管"');
+  assert.notEqual(c._hbTimer, null, '心跳要继续重试（别等 45 秒的定时器被停掉）');
   assert.match(c.snapshot().warning, /重试/);
   assert.equal(c.tunnelStops.length, 0);
 });
 
-test('★★ 被接管之后，心跳不再发给服务端（那个定时器真的停了）', async () => {
+test('被接管之后，心跳不再发给服务端（那个定时器真的停了）', async () => {
   // 上面那条断言的是 `_hbTimer === null`，而这一条走行为：接管之后再打
   //   一拍，`rpc` 一次都不该发生 —— 定时器停了但 `_beat()` 还能被别处调到的话，
   //   症状是"一个已经放手的会话还在每 45 秒问一次"，而那条连接上的身份不是它。
@@ -241,10 +241,10 @@ test('★★ 被接管之后，心跳不再发给服务端（那个定时器真�
   b.calls.length = 0;
   await c._beat();
 
-  assert.equal(b.calls.length, 0, '★ 已经放手了，一拍都不该再打（`_stopped` 那类闸）');
+  assert.equal(b.calls.length, 0, '已经放手了，一拍都不该再打（`_stopped` 那类闸）');
 });
 
-test('★★ resume()：接管成功之后，停掉的四样一起开回来', async () => {
+test('resume()：接管成功之后，停掉的四样一起开回来', async () => {
   // 少了 `resume()`，「接管」会变成一句假话：`suspend()` 是一个终态，
   //    而接管成功意味着服务端那一格已经换成本机了。不撤销它的话，界面会一直说
   //    "已被另一台电脑接管"、心跳一直不发 —— 而用户刚刚看到一句「已接管」。
@@ -265,7 +265,7 @@ test('★★ resume()：接管成功之后，停掉的四样一起开回来', as
   // 检查的四样与 `suspend()` 停掉的四样一一对应，少开任何一样都是静默的退化。
   assert.equal(c.snapshot().warning, null, '那句原因要跟着撤掉（不然界面一直说"被接管"）');
   assert.notEqual(c._hbTimer, null,
-    '★ 心跳要回来 —— 少了它，1800 秒之后作业被 scancel，而界面写着"已接管"');
+    '心跳要回来 —— 少了它，1800 秒之后作业被 scancel，而界面写着"已接管"');
   assert.notEqual(c._statusTimer, null,
     '对账也要回来（少了它，剩余时间永远停在接管那一刻，而那个数看起来完全正常）');
   assert.equal(b.listenerCount('notify'), 1, '推送订阅也要回来');
@@ -274,21 +274,21 @@ test('★★ resume()：接管成功之后，停掉的四样一起开回来', as
   c._stopStatusPoll();
 });
 
-test('★ resume() 幂等，而且**不**动一个没被接管的会话', () => {
+test('resume() 幂等，而且不动一个没被接管的会话', () => {
   const c = running(new StubBackend());
   c.resume();
   assert.equal(c.suspended, null);
-  assert.equal(c._hbTimer, null, '★ 没被接管过的会话不该因为一次 resume 就长出心跳来');
+  assert.equal(c._hbTimer, null, '没被接管过的会话不该因为一次 resume 就长出心跳来');
 
   c.suspend(REASON);
   c.resume();
   const t = c._hbTimer;
   c.resume();
-  assert.equal(c._hbTimer, t, '★ 第二次 resume 不许多出一个定时器（两个心跳=两条路）');
+  assert.equal(c._hbTimer, t, '第二次 resume 不许多出一个定时器（两个心跳=两条路）');
   c._stopHeartbeat();
 });
 
-test('★ 对照：没被接管的会话照常发 goodbye（那道闸不是把 stop 关掉了）', async () => {
+test('对照：没被接管的会话照常发 goodbye（那道闸不是把 stop 关掉了）', async () => {
   const b = new StubBackend();
   const c = running(b);
   b.calls.length = 0;
@@ -298,7 +298,7 @@ test('★ 对照：没被接管的会话照常发 goodbye（那道闸不是把 s
   assert.equal(b.count('goodbye'), 1);
 });
 
-test('★★ 两条会话里只被接管一条 ⇒ 另一条照常收尾（那道闸是按会话拦的）', async () => {
+test('两条会话里只被接管一条，另一条照常收尾（那道闸是按会话拦的）', async () => {
   const b = new StubBackend();
   const live = running(b);
   const gone = running(b);

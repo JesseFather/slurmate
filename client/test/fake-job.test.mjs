@@ -40,7 +40,7 @@ const WIN_ENV = {
   LOCALAPPDATA: 'C:\\Users\\alice\\AppData\\Local',
 };
 
-test('★★ Windows 上：PATH 按 `;` 切、候选带 `.exe`，而 WSL 排在最后', () => {
+test('Windows 上：PATH 按 `;` 切、候选带 `.exe`，而 WSL 排在最后', () => {
   const list = defaultBashSearch(WIN_ENV, 'win32');
 
   // PATH 的三段各出一个候选 —— 按 `:` 切的话这里会是一堆半个盘符的怪物。
@@ -61,10 +61,10 @@ test('★★ Windows 上：PATH 按 `;` 切、候选带 `.exe`，而 WSL 排在�
   assert.deepEqual(last, { path: 'C:\\Windows\\System32\\bash.exe', wsl: true },
     'WSL 那个必须排在最后，并且标着 wsl —— 它要翻译路径');
   assert.equal(list.slice(0, -1).some((x) => x && x.wsl), false,
-    '除了它，别的候选都不是 WSL 那个');
+    '除了它，其他候选都不是 WSL 那个');
 });
 
-test('★★ WSL 的路径：本地盘翻得出来，翻不动的返回 null（不猜）', () => {
+test('WSL 的路径：本地盘翻得出来，翻不动的返回 null（不猜）', () => {
   assert.equal(toWslPath('C:\\Users\\alice\\AppData\\Roaming\\Slurmate\\x'),
     '/mnt/c/Users/alice/AppData/Roaming/Slurmate/x');
   assert.equal(toWslPath('d:/tmp/x'), '/mnt/d/tmp/x', '小写盘符与正斜杠也要认');
@@ -76,7 +76,7 @@ test('★★ WSL 的路径：本地盘翻得出来，翻不动的返回 null（�
   }
 });
 
-test('★ 找到了就带 `wsl` 标记，找不到仍然是那句 `NO_BASH`', () => {
+test('找到了就带 `wsl` 标记，未找到仍然是那句 `NO_BASH`', () => {
   // 本机有 `/bin/bash`：注入它，验的是"找到了之后返回什么"。
   assert.deepEqual(findBash(['/bin/bash']), { path: '/bin/bash', wsl: false });
   assert.deepEqual(findBash([{ path: '/bin/bash', wsl: true }]),
@@ -87,7 +87,7 @@ test('★ 找到了就带 `wsl` 标记，找不到仍然是那句 `NO_BASH`', ()
     'Windows 上没有 bash 时，那句话要说出下一步是什么');
 });
 
-test('★ 非 Windows 上仍然按 `:` 切，而且仍补上那三个惯例位置', () => {
+test('非 Windows 上仍然按 `:` 切，而且仍补上那三个惯例位置', () => {
   const list = defaultBashSearch({ PATH: '/usr/bin:/bin' }, 'linux');
   assert.deepEqual(list.slice(0, 2), ['/usr/bin/bash', '/bin/bash'],
     'PATH 那两段在前，按 `:` 切');

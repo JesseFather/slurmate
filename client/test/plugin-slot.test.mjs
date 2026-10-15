@@ -69,7 +69,7 @@ const okEnvelope = (over = {}) => ({
 
 // ── 名字 ────────────────────────────────────────────────────────────────────
 
-test('★ 槽位名：`<id>_<版本>` 切得出两段，而切不对的一律 `null`（**不猜**）', () => {
+test('槽位名：`<id>_<版本>` 切得出两段，而切不对的一律 `null`（不猜）', () => {
   const id = ulid.mint();
   assert.equal(SLOT.slotNameOf(id, '1.0.0'), `${id}_1.0.0`);
   assert.deepEqual(SLOT.parseSlotName(`${id}_1.0.0`), { id, version: '1.0.0' });
@@ -92,7 +92,7 @@ test('★ 槽位名：`<id>_<版本>` 切得出两段，而切不对的一律 `n
   assert.equal(SLOT.treeDirOf('/pool', id, '1.0.0'), path.join('/pool', `${id}_1.0.0`));
 });
 
-test('★★ 记录表那个后缀是**保留的**：一个树目录不许长成记录表的样子', () => {
+test('记录表那个后缀是保留的：一个树目录不许长成记录表的样子', () => {
   // 不挡它的后果很具体：`<id>_1.0.0.json` 会被读成"id=<id>，版本=`1.0.0.json`"——
   //   一个永远不成立的槽位，而旁边那张记录表会被当成一个来历不明的文件报出去。
   //   池里只有两种名字，所以这个后缀归哪一种必须是排他的。
@@ -106,7 +106,7 @@ test('★★ 记录表那个后缀是**保留的**：一个树目录不许长成
 
 // ── 记录表 ──────────────────────────────────────────────────────────────────
 
-test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', () => {
+test('记录表读不动的每一种，都要说得出是哪一种', () => {
   const root = tmp('slurmate-slot-');
   const p = path.join(root, 'r.json');
 
@@ -118,7 +118,7 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
 
   fs.writeFileSync(p, JSON.stringify(okRecord({ schema: 99 })));
   assert.match(SLOT.readRecordFile(p).why, /schema/,
-    '★ 不认识的 schema 要**拒绝** —— "写它的东西比这个客户端新"');
+    '不认识的 schema 要拒绝 —— "写它的程序比这个客户端新"');
 
   fs.writeFileSync(p, JSON.stringify(okRecord({ format: 0 })));
   assert.match(SLOT.readRecordFile(p).why, /format/);
@@ -130,14 +130,14 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
     files: [{ path: 'a', size: 1, sha256: 'A'.repeat(64) }],
   })));
   assert.match(SLOT.readRecordFile(p).why, /sha256/,
-    '★ 大写十六进制**不算** —— 两端要的是一模一样的串');
+    '大写十六进制不算 —— 两端要的是完全相同的串');
 
   fs.writeFileSync(p, JSON.stringify(okRecord({ files: [{ path: 'a', size: -1 }] })));
   assert.match(SLOT.readRecordFile(p).why, /size|sha256/);
 
   fs.writeFileSync(p, JSON.stringify(okRecord({ envelope: { alg: 1 } })));
   assert.match(SLOT.readRecordFile(p).why, /pubkey/,
-    '★ 信封少一半也算读不动 —— 它只可能是被改过');
+    '信封少一半也算读不动 —— 它只可能是被改过');
 
   // v0.13 那四个新字段，少一个、或者两个摘要不是一个摘要，都算读不动。
   for (const k of ['id', 'version', 'digestSite', 'digestClient']) {
@@ -152,7 +152,7 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
   fs.writeFileSync(p, JSON.stringify(okRecord({
     envelope: okEnvelope({ 多出来的键: 1 }) })));
   assert.match(SLOT.readRecordFile(p).why, /认不得的键/,
-    '★ 认不得的键也要拒 —— 多一个键就是"写它的东西不是这一个"');
+    '认不得的键也要拒 —— 多一个键就是"写它的程序不是这一个"');
 
   assert.equal(SLOT.readRecordFile(path.join(root, '不存在.json')).ok, false);
 
@@ -161,7 +161,7 @@ test('★★ 记录表读不动的每一种，都要说得出**是哪一种**', 
   fs.unlinkSync(p);
 });
 
-test('★ 一张读得动的记录表：写下去、读回来、逐字节相同（它是提交点）', () => {
+test('一张读得动的记录表：写下去、读回来、逐字节相同（它是提交点）', () => {
   const root = tmp('slurmate-slot-');
   const p = path.join(root, 'r.json');
   const rec = okRecord({ envelope: okEnvelope() });
@@ -177,7 +177,7 @@ test('★ 一张读得动的记录表：写下去、读回来、逐字节相同�
   assert.equal(SLOT.removeRecordFile(path.join(root, '没有.json')).ok, true);
 });
 
-test('★ 序列化不了的记录表**返回失败、不抛** —— 那一写就是提交，它必须能被判成败', () => {
+test('序列化不了的记录表返回失败、不抛 —— 那一写就是提交，它必须能被判成败', () => {
   // 抛出去的话调用方按契约不写 try/catch（"不抛"是这个模块的承诺），异常会一路
   //   穿到最外面，而池里那棵树已经 `rename` 进去了。
   const root = tmp('slurmate-slot-');
@@ -189,7 +189,7 @@ test('★ 序列化不了的记录表**返回失败、不抛** —— 那一写�
   assert.deepEqual(fs.readdirSync(root), [], '失败时一个文件都不留');
 });
 
-test('★ 从解析出来的包建记录表：`files` 保序、`envelope` 逐字保留、**不存摘要**', () => {
+test('从解析出来的包建记录表：`files` 保序、`envelope` 逐字保留、不存摘要', () => {
   const files = [
     { path: 'z.txt', size: 3, sha256: sha('zzz') },
     { path: 'a.txt', size: 1, sha256: sha('a') },
@@ -200,7 +200,7 @@ test('★ 从解析出来的包建记录表：`files` 保序、`envelope` 逐字
            digestSite: 'c'.repeat(64), digestClient: 'd'.repeat(64) } };
   const rec = SLOT.recordFromPackage(parsed);
   assert.deepEqual(rec.files.map((f) => f.path), ['z.txt', 'a.txt'],
-    '★ **保留容器里的次序**，不重排 —— 照它重打包才是逐字节重现原件');
+    '保留容器里的次序，不重排 —— 照它重打包才是逐字节重现原件');
   assert.equal(rec.envelope.pubkey, Buffer.alloc(32, 5).toString('base64'));
   assert.equal(rec.envelope.signature, Buffer.alloc(64, 6).toString('base64'));
   // v0.13：四元组那四个字段也逐字保留（它们是被签的内容，不能重算着存）。
@@ -209,17 +209,17 @@ test('★ 从解析出来的包建记录表：`files` 保序、`envelope` 逐字
   assert.equal(rec.envelope.digestSite, parsed.sig.digestSite);
   assert.equal(rec.envelope.digestClient, parsed.sig.digestClient);
   assert.deepEqual(Object.keys(rec).sort(), ['envelope', 'files', 'format', 'schema']);
-  assert.equal(rec.digest, undefined, '★ 摘要是派生值，**不存** —— 存了就会各说各话');
+  assert.equal(rec.digest, undefined, '摘要是派生值，不存 —— 存了就会各说各话');
 
   // 没有签名，`envelope` 是 `null`（不是 `{}`、也不是少一个键）。
   assert.equal(SLOT.recordFromPackage({ format: 2, files, sig: null }).envelope, null);
 });
 
-test('★ 一个记录表最多多少字节：**推出来的**，不是挑出来的', () => {
+test('一个记录表最多多少字节：推出来的，不是选择出来的', () => {
   // 记录表里每一份只带 path+size+sha256，而这三样在它来源的那个包的信封里逐字
   //   都有、还外加了内容本身，一张记录表永远比它来源的那个包小。
   const HARD = require('../src/main/site-plugins.js').HARD_LIMITS;
   assert.ok(SLOT.MAX_RECORD_BYTES >= HARD.package_bytes,
-    '★ 一个合规的包能造出来的记录表，不许被这个闸拦下（那会变成"明明合规却装不上"）');
-  assert.ok(SLOT.MAX_RECORD_BYTES <= 64 << 20, '★ 而它仍然要有意义 —— 别拿它当摆设');
+    '一个合规的包能造出来的记录表，不许被这个闸拦下（那会变成"明明合规却无法安装"）');
+  assert.ok(SLOT.MAX_RECORD_BYTES <= 64 << 20, '而它仍然要有意义 —— 别拿它当摆设');
 });

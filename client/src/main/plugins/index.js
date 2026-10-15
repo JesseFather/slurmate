@@ -1324,7 +1324,7 @@ class Registry {
       && this.plugins.get(`${id}@${version}`)) || null;
   }
 
-  /** 按 `(id, 版本)` 取，取不到时返回一条能直接说给用户听的解释。 */
+  /** 按 `(id, 版本)` 取，获取失败时返回一条能直接说给用户听的解释。 */
   missing(id, version) {
     const sameId = this.list().filter((p) => p.id === id);
     if (!sameId.length) {

@@ -115,13 +115,13 @@ const run = (o) => audit.audit({
 
 // ── 活着的分区绝不能被报出来 ──────────────────────────────────────────────
 
-test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测函数自己算期望）', () => {
+test('活着的分区不在名单里（手写磁盘名：不能拿被测函数自己算期望）', () => {
   // 这份名字是手写的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab` 就是
   // Electron 会把 code-server 那个身份落成的目录名（id 段折叠过）。
   const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab';
   const r = run({ names: [live] });
   assert.deepEqual(r.rows, [],
-    '有一份数据、也有一条连接正指着它那个工作区 —— 它**不是**孤儿');
+    '有一份数据、也有一条连接正指着它那个工作区 —— 它不是孤儿');
   assert.equal(r.diskChecked, true);
 
   // 反例钉住"折叠"这件事：磁盘名写成大写时也必须认得出它（折叠是幂等的）。
@@ -135,15 +135,15 @@ test('★★ 活着的分区不在名单里（手写磁盘名：不能拿被测�
     workspaces: [wsOne(), ws(OTHER_WORKSPACE, '工作区2', {})] });
   assert.equal(r3.rows.length, 1);
   assert.equal(r3.rows[0].kind, 'unused');
-  assert.equal(r3.rows[0].name, live, '回给界面的必须是**磁盘上的那个名字**');
+  assert.equal(r3.rows[0].name, live, '回给界面的必须是磁盘上的那个名字');
 });
 
-test('★ 没声明分实例的插件那一份存储**永远不报**（它不属于任何工作区）', () => {
+test('没声明分实例的插件那一份存储永远不报（它不属于任何工作区）', () => {
   // 这种插件只有一份存储，它不挂在任何工作区上 —— 拿引用计数去判它，会在"一条连接
   // 都没有"时把这份唯一的数据报成"没人用"，而那正是最不能删的一份。
   const store = disk(pluginData.identityOf(oneStore()));
   const r = run({ plugins: [oneStore()], names: [store], connections: [] });
-  assert.deepEqual(r.rows, [], '它不属于任何工作区 ⇒ 引用计数这件事对它没有意义');
+  assert.deepEqual(r.rows, [], '它不属于任何工作区，引用计数这件事对它没有意义');
 
   // 而一份算不出来的目录名照样是孤儿 —— 第二段不是一个认得出的共享组名时就是
   // 这一档（`perVersion: true` 的插件升版留下的名字也是这个形状）。
@@ -159,7 +159,7 @@ test('★ 没声明分实例的插件那一份存储**永远不报**（它不属
 // 这几条守的是第二根带回来的那类事故：照搬分区那一侧的入口条件，会把一份正在
 // 被用的数据摆上删除按钮。
 
-test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）—— 那一份**永远不报**', () => {
+test('没有界面、却会写数据的插件（sshd 实际的样子）—— 那一份永远不报', () => {
   // 这一条守的是本阶段最贵的一处。若对账"该有的"入口按"有没有界面"算
   //   （`hasSurface`），sshd 那份数据目录就一诞生就是孤儿：sshd 没有
   //   `contributes.surface`（它的东西跑在用户自己的机器上，框架连一块界面都不建），
@@ -169,7 +169,7 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
   const live = disk(pluginData.identityOf(relay()));
   assert.equal(live, '01m2jkhtzgf12n0t9cb3xvk36h@relay', '手写形状：折叠过的 id + 声明的共享组名');
   const r = run({ plugins: [relay()], names: [], dataNames: [live], connections: [] });
-  assert.deepEqual(r.rows, [], '它没有实例段 ⇒ 不属于任何工作区 ⇒ 永远不列');
+  assert.deepEqual(r.rows, [], '它没有实例段，不属于任何工作区，永远不列');
   assert.equal(r.diskChecked, true);
 
   // 反向：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
@@ -180,10 +180,10 @@ test('★★ 没有界面、却会写数据的插件（sshd 实际的样子）�
   assert.equal(r2.rows[0].deletable, true);
 });
 
-test('★ 两个根下的同一份身份 ⇒ **一行**，`places` 说清它在哪几处', () => {
+test('两个根下的同一份身份，一行，`places` 说清它在哪几处', () => {
   const live = disk(csIn(SPACE));
   const r = run({ names: [live], dataNames: [live] });
-  assert.deepEqual(r.rows, [], '有连接指着那个工作区 ⇒ 不是孤儿');
+  assert.deepEqual(r.rows, [], '有连接指着那个工作区，不是孤儿');
 
   // 工作区没了，一行，两处都标出来 —— 用户不该为了同一份数据删两次，而"只列一处"
   // 会让删完的那一刻另一处把同一行带回来（"我明明删过了"）。
@@ -197,15 +197,15 @@ test('★ 两个根下的同一份身份 ⇒ **一行**，`places` 说清它在�
   assert.deepEqual(onlyD.rows[0].places, ['data'], '只在数据根下有的那一份也要列出来');
 });
 
-test('★ 一处认得出、另一处认不出 ⇒ 整行**不给删除按钮**', () => {
+test('一处认得出、另一处认不出，整行不给删除按钮', () => {
   // 分区根里有历史形状（`slot-…`）是正常的；而数据根里不可能有 —— 那个目录从
   // 诞生起只有这个客户端写过。所以一条 `slot-1` 在两处都出现，说明数据根取错了，
   // 而那正是"把 secrets.json、dev-sandbox 摆上删除按钮"那条路的入口。
   const r = run({ names: ['slot-1'], dataNames: ['slot-1'] });
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'unknown');
-  assert.equal(r.rows[0].deletable, false, '有一处认不出 ⇒ 整行都不许删');
-  assert.match(r.rows[0].why, /数据目录/, '要说清是**哪一处**认不出');
+  assert.equal(r.rows[0].deletable, false, '有一处认不出，整行都不许删');
+  assert.match(r.rows[0].why, /数据目录/, '要说清是哪一处认不出');
 
   // 反向：同一条 `slot-1` 只在分区根里，照旧是认得出来的旧分区，可以删。
   const r2 = run({ names: ['slot-1'], dataNames: [] });
@@ -213,7 +213,7 @@ test('★ 一处认得出、另一处认不出 ⇒ 整行**不给删除按钮**'
   assert.equal(r2.rows[0].deletable, true);
 });
 
-test('★ 一根没查成 ⇒ `diskChecked:false`，且 `why` 点名是**哪一根**', () => {
+test('一根没查成，`diskChecked:false`，且 `why` 点名是哪一根', () => {
   const live = disk(csIn(OTHER_SPACE));
   const r = run({ names: [live], dataNames: null, dataWhy: '读不动', connections: [] });
   assert.equal(r.diskChecked, false);
@@ -224,17 +224,17 @@ test('★ 一根没查成 ⇒ `diskChecked:false`，且 `why` 点名是**哪一�
 
 // ── 四类"不是活着的" ────────────────────────────────────────────────────────
 
-test('那一份没了：第三段那个数据 id 已经不在配置里 ⇒ 一行，可删，说得出是哪个插件', () => {
+test('那一份没了：第三段那个数据 id 已经不在配置里，一行，可删，说得出是哪个插件', () => {
   const gone = disk(csIn(OTHER_SPACE));
   const r = run({ names: [gone] });
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'orphan');
   assert.equal(r.rows[0].deletable, true);
   assert.match(r.rows[0].label, /开发环境/, '标签要带插件的显示名，不是一串 ULID');
-  assert.match(r.rows[0].why, new RegExp(OTHER_SPACE), '得说清是哪一段对不上');
+  assert.match(r.rows[0].why, new RegExp(OTHER_SPACE), '得说清是哪一段不一致');
 });
 
-test('插件没了：id 认得出、注册表里没有它 ⇒ 一行，可删', () => {
+test('插件没了：id 认得出、注册表里没有它，一行，可删', () => {
   // 末尾是 w（code-server 那个是 v）—— 一个本机没有的 id。
   const gone = '01m2jkhtzgkjbfqqtwyxmqmf2w';
   const r = run({ names: [`${gone}@editor@${SPACE}`] });
@@ -252,7 +252,7 @@ test('0.7 之前的旧分区：三种旧形状都认得，可删', () => {
   assert.match(r.rows[0].why, /不会再被任何程序读到/);
 });
 
-test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
+test('认不出的目录：列出来，但不给删除按钮', () => {
   // 这一条防的是"分区目录的根取错了"：那时这个列表会读出 `secrets.json`、
   // `dev-sandbox` 之类的东西，而它们绝不能有删除按钮。
   const r = run({ names: ['secrets.json', 'dev-sandbox', 'Partitions', '..', '01m2abc'] });
@@ -262,13 +262,13 @@ test('★ 认不出的目录：列出来，但**不给删除按钮**', () => {
   assert.match(r.rows.find((x) => x.name === 'secrets.json').label, /认不出/);
 });
 
-test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', () => {
+test('整屏都认不出，`allUnknown`：这一根多半取错了', () => {
   // 上面那一条说的是"认不出就不给删除按钮"（逐行的防线）。这一条说的是全局：
   // 一整屏都认不出时，读的人会以为"我攒了一堆垃圾"，而真相多半是这一根指到了
   // 别的地方 —— 插件数据目录那一根是本程序自己拼的，没有任何探针能当场核对它。
   // 它是那一根唯一的防线，所以得有话可说。
   const r = run({ names: ['secrets.json', 'dev-sandbox', 'Partitions'] });
-  assert.equal(r.allUnknown, true, '一个都认不出来 ⇒ 这一根多半取错了');
+  assert.equal(r.allUnknown, true, '一个都认不出来，这一根多半取错了');
 
   // 反例一：有一行认得出就不成立 —— 那时屏幕上是"我认识的东西 + 不认识的
   //   东西"，而那正是"用户自己往那个目录里放了点别的"，不是根取错了。
@@ -283,26 +283,26 @@ test('★★ 整屏都认不出 ⇒ `allUnknown`：这一根多半取错了', ()
     connections: [conn(OTHER_WORKSPACE)],
   });
   assert.ok(mixed.rows.some((x) => x.kind === 'unused'),
-    '前提：那一行真的产生了（否则这一条测的是别的东西）');
+    '前提：那一行真的产生了（否则这一条测的是其他内容）');
   assert.equal(mixed.allUnknown, false,
-    '有一行认得出 ⇒ 不是"整屏认不出"，不能报"根取错了"');
+    '有一行认得出，不是"整屏认不出"，不能报"根取错了"');
 
   // 反例二：一根没查成就不成立。那是"查不了"，`why` 已经如实说了，
   //   不该被这一句盖过去（"问不到"与"认不出"是两件事）。
   assert.equal(run({ names: null, dataNames: ['secrets.json'] }).allUnknown, false,
-    '分区那一根没查成 ⇒ 这是"查不了"，不是"认不出"');
+    '分区那一根没查成，这是"查不了"，不是"认不出"');
   assert.equal(run({ names: ['secrets.json'], dataNames: null }).allUnknown, false,
-    '数据那一根没查成 ⇒ 同上');
+    '数据那一根没查成，同上');
 
   // 反例三：空清单不成立。那是"本机一份插件数据都没有"—— 一个肯定的
   //   答案。（`every` 对空数组恒真，所以少了 `rows.length > 0` 这一条，
   //   一个全新安装会被告知"你的数据目录取错了"。）
-  assert.equal(run({}).allUnknown, false, '一份都没有 ⇒ 不能报"根取错了"');
+  assert.equal(run({}).allUnknown, false, '一份都没有，不能报"根取错了"');
 });
 
 // ── 没人用的工作区（内存侧那一类）──────────────────────────────────────────────
 
-test('★ 没人用的工作区：数据在、而没有任何连接指着它 ⇒ 一行，标签里带**工作区的名字**', () => {
+test('没人用的工作区：数据在、而没有任何连接指着它，一行，标签里带工作区的名字', () => {
   // 这一格说的是配置里有一张没人用的引用表（数据在、而没有任何连接指着它）。
   // 从前它由 `pruneWorkspaces` 那条"一条连接都没有时不回收"的豁免制造出来；
   //   豁免删掉之后（活会话现在是它的守卫），这个状态仍然够得着，只是变得短暂：
@@ -314,10 +314,10 @@ test('★ 没人用的工作区：数据在、而没有任何连接指着它 ⇒
   assert.equal(r.rows[0].kind, 'unused');
   assert.equal(r.rows[0].deletable, true);
   assert.match(r.rows[0].label, /开发环境/);
-  assert.match(r.rows[0].why, /工作区1/, '要说清是哪个工作区 —— 名字才是用户认得的那个东西');
+  assert.match(r.rows[0].why, /工作区1/, '要说清是哪个工作区 —— 名字才是用户认得的那一项');
 });
 
-test('★ 一个工作区里两个插件 = 各一份数据各一行（一份数据 = 一个分区）', () => {
+test('一个工作区里两个插件 = 各一份数据各一行（一份数据 = 一个分区）', () => {
   const otherId = '01M2JKHTZGKJBFQQTWYXMQMF2W';
   const two = [cs(), { ...oneStore(), id: otherId,
     contributes: { ...oneStore().contributes, ports: 1, concurrent: true,
@@ -333,7 +333,7 @@ test('★ 一个工作区里两个插件 = 各一份数据各一行（一份数�
 
 // ── 查不了：缺席 ≠ 否 ──────────────────────────────────────────────────────
 
-test('★ 没查磁盘 ⇒ 空清单 + `diskChecked:false` + 点名是**哪一根**没查', () => {
+test('没查磁盘，空清单 + `diskChecked:false` + 点名是哪一根没查', () => {
   const why = '开发者模式不查磁盘：这里用的是一份沙箱配置……';
   const live = disk(csIn(SPACE));
   const r = run({ names: null, why, connections: [] });
@@ -345,7 +345,7 @@ test('★ 没查磁盘 ⇒ 空清单 + `diskChecked:false` + 点名是**哪一�
   assert.match(r.why, /开发者模式不查磁盘/, '原因本身要原样带给界面');
 
   // 反例：查过了、真的没有，也是空清单，但 `diskChecked` 是 true。
-  //   两件事在界面上是两句不同的话（一句"没有"，一句"我没能去看"）。
+  //   两件事在界面上是两句不同的话（一句"没有"，一句"我未能去看"）。
   const r2 = run({ names: [] });
   assert.deepEqual(r2.rows, []);
   assert.equal(r2.diskChecked, true);
@@ -360,14 +360,14 @@ test('顺序稳定：可删的在前面，认不出的那堆在最后', () => {
     disk(csIn(OTHER_SPACE)), 'aaa-unknown'];
   const first = run({ names }).rows.map((x) => `${x.kind}:${x.name}`);
   const second = run({ names: [...names].reverse() }).rows.map((x) => `${x.kind}:${x.name}`);
-  assert.deepEqual(first, second, '同一个输入换个顺序进来，出去必须一模一样');
+  assert.deepEqual(first, second, '同一个输入换个顺序进来，出去必须完全相同');
   assert.equal(first[first.length - 1].startsWith('unknown'), true);
   assert.equal(first[first.length - 2].startsWith('unknown'), true);
 });
 
 // ── partitionRoot / listDirs ───────────────────────────────────────────
 
-test('partitionRoot：探针的目录对得上就用它，对不上就说"查不了"（不说"没有"）', () => {
+test('partitionRoot：探针的目录对得上就用它，不一致就说"查不了"（不说"没有"）', () => {
   const session = (p) => ({ fromPartition: (name) => ({ getStoragePath: () => p(name) }) });
   const probe = `persist:${CS}@editor@${SPACE}`;
 
@@ -413,7 +413,7 @@ test('listDirs：目录不存在 = 一份都没有（肯定的答案）；读不
   assert.equal(audit.listDirs(null).names, null);
 });
 
-test('★★ 正被活会话拿着的那一份**不进名单**（`held`）—— 而没拿着的照旧进', () => {
+test('正被活会话拿着的那一份不进名单（`held`）—— 而没拿着的照旧进', () => {
   // 一份临时实例的身份：它的实例键（工作区 id）只在内存里，配置里根本没有
   // 那个工作区，它永远不在"该有的"里。没有 `held` 的话，它在名单上就是一个
   // 可删的孤儿 —— 而那个删除按钮就落在用户正写着的那份数据上。
@@ -424,35 +424,35 @@ test('★★ 正被活会话拿着的那一份**不进名单**（`held`）——
   assert.equal(noHold.rows[0].deletable, true, '而且给得出删除按钮 —— 这正是要挡的那件事');
 
   const withHold = run({ names: [temp], dataNames: [temp], held: [temp] });
-  assert.deepEqual(withHold.rows, [], '★ 拿着它的人说它活着 ⇒ 不许出现在名单里');
+  assert.deepEqual(withHold.rows, [], '拿着它的人说它活着，不许出现在名单里');
 
   // 折叠是幂等的：调用方折过没折过都对。写大写的那一份照样护得住 ——
   //   两个根的名字在折叠这件事上本来就不同源（分区名里 id 段是大写的）。
   assert.deepEqual(run({ names: [temp], held: [temp.toUpperCase()] }).rows, [],
-    '★ held 里的名字大写也认（折叠在这里再做一遍）');
+    'held 里的名字大写也认（折叠在这里再做一遍）');
 
   // 两个根报上来的写法不一样，而这一条是承重的：窗口那一半
   //    （`livePartitions()`）报的是分区名（`persist:…`），会话那一半
   //    （`liveDataDirs()`）报的是目录名。少了前缀那一步归一，分区那一半
   //    永远匹配不上 —— 而症状是"护了个寂寞"：一份活着的临时实例照样在名单里。
   assert.deepEqual(run({ names: [temp], held: [`persist:${temp}`] }).rows, [],
-    '★ 带 persist: 前缀的那种写法也要认（窗口那一半报的就是它）');
+    '带 persist: 前缀的那种写法也要认（窗口那一半报的就是它）');
 
   // 反例：没人拿着的同类名字照样是孤儿。少了这一条，一个"`held` 恒为真"
   //   的实现也能让上面那两条通过 —— 而那会让所有垃圾都删不掉。
   const other = disk(csIn('s0123456789ef'));
   const stray = run({ names: [other], held: [temp] });
-  assert.equal(stray.rows.length, 1, '★ 护的是**拿着的那一份**，不是"所有临时样子的"');
+  assert.equal(stray.rows.length, 1, '护的是拿着的那一份，不是"所有临时样子的"');
   assert.equal(stray.rows[0].deletable, true);
 });
 
-test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）', () => {
+test('删这一份行不行：判定权在主进程（`stale` 与放行）', () => {
   const rows = [
     { name: 'aa@bb@cc', deletable: true, label: 'x' },
-    { name: '认不出的东西', deletable: false, label: 'y' },
+    { name: '认不出的条目', deletable: false, label: 'y' },
   ];
   // 不在清单里（界面那份已经陈旧），或者那一行本来就不给删。
-  for (const p of ['never-seen', '认不出的东西']) {
+  for (const p of ['never-seen', '认不出的条目']) {
     const v = audit.deletionVerdict({ rows, name: p });
     assert.equal(v.ok, false, `${p} 不该删得掉`);
     assert.equal(v.code, 'stale');
@@ -468,12 +468,12 @@ test('★ 删这一份行不行：判定权在主进程（`stale` 与放行）',
   //    插件、临时实例都没有分区）。这一条钉的就是"它没有回来"。
   assert.equal(audit.deletionVerdict({
     rows, name: 'aa@bb@cc', surfacePartitions: ['persist:aa@bb@cc'],
-  }).ok, true, '★ 传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');
+  }).ok, true, '传了 surfacePartitions 也不再改变判定 —— 那个入参已经不存在了');
 });
 
 // ── 自动回收：哪些该自动收，哪些只是"能删" ──────────────────────────
 
-test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个都不许碰', () => {
+test('自动回收只碰"再也无法读取"的那些 —— `unused` 一个都不许碰', () => {
   // 这是本版唯一会删用户数据的那一步的判据，而它与"界面上能不能删"
   //    不是同一条：界面上可删的有三档，自动收的只有两档。
   //
@@ -490,23 +490,23 @@ test('★★ 自动回收只碰"再也读不到"的那些 —— `unused` 一个
   ];
   const auto = rows.filter(audit.reclaimable).map((r) => r.kind);
   assert.deepEqual(auto, ['orphan', 'legacy'],
-    '★ 自动收的只有"按当前装着的插件再也读不到"的那两档');
+    '自动收的只有"按当前装着的插件再也无法读取"的那两档');
 
   // 反过来钉半边：`deletable` 不是这条判据的输入。一个 `unused` 的行可删
   //   而不该自动删 —— 两件事同时成立，正是这条判据存在的理由。
   const unused = rows[0];
   assert.equal(unused.deletable, true, '前提：它在界面上是可删的');
-  assert.equal(audit.reclaimable(unused), false, '★ 但它不该被自动收掉');
+  assert.equal(audit.reclaimable(unused), false, '但它不该被自动收掉');
 
   // 认不出的那一档本来就没有删除按钮，自动回收也不能碰它。
-  assert.equal(audit.reclaimable(rows[3]), false, '一份不认识的东西，删掉不是"收拾"而是"猜"');
+  assert.equal(audit.reclaimable(rows[3]), false, '一份不认识的条目，删掉不是"收拾"而是"猜"');
   // 空值不炸（`rows` 是从别处传进来的）。
   for (const junk of [null, undefined, {}]) {
     assert.equal(audit.reclaimable(junk), false, `${JSON.stringify(junk)} 不该算作可回收`);
   }
 });
 
-test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原样留着', () => {
+test('一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原样留着', () => {
   // 上一条判的是判据，这一条判它接在真算出来的行上还成立 ——
   //   手搓的 `{kind:'unused'}` 与 `audit()` 真产出的那一行是两回事（前者不会
   //   因为 `expected` 那张表变了而跟着变）。
@@ -526,5 +526,5 @@ test('★★ 一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原�
   assert.equal(kinds.get(unusedName), 'unused', '前提：那一份真的落在 unused 那一档');
   const auto = r.rows.filter(audit.reclaimable).map((x) => x.name).sort();
   assert.deepEqual(auto, [ghost, old, legacy].sort(),
-    '★ 自动收的是孤儿与旧形状；`unused` 那一份只列不删');
+    '自动收的是孤儿与旧形状；`unused` 那一份只列不删');
 });

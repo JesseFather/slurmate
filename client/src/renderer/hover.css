@@ -54,7 +54,7 @@ h3:first-child { margin-top: 0; }
 p { margin: 4px 0; }
 .sub { color: var(--fg-dim); }
 .bad { color: var(--err); }
-/* 「取不到」那一行。与"确实没有"长得不一样是故意的 —— 见 hover.html 那段。 */
+/* 「获取失败」那一行。与"确实没有"长得不一样是故意的 —— 见 hover.html 那段。 */
 .na { color: var(--warn); }
 
 /* 键值两列：左边窄、右边占满。 */

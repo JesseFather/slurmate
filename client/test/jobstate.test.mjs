@@ -51,21 +51,21 @@ test('没有作业状态时给 null —— 界面照旧显示「—」', () => {
   }
 });
 
-test('★ 每个非终态都给一句中文，而不是原文枚举', () => {
+test('每个非终态都给一句中文，而不是原文枚举', () => {
   for (const [st, want] of Object.entries({ ...WAITING, ...RUNNING, ...PAUSED })) {
     const got = jobText(snap({ jobState: st, jobTerminal: false }));
     assert.equal(got, want, st);
-    assert.notEqual(got, st, `${st} 被原样印出去了 —— 那就是这一版要修的东西`);
+    assert.notEqual(got, st, `${st} 被原样印出去了 —— 那就是这一版要修的缺陷`);
     assert.match(got, /[一-鿿]/, `${st} 要给人看的中文`);
   }
 });
 
-test('★ 每个终态都给一句中文，且说得出**为什么结束**', () => {
+test('每个终态都给一句中文，且说得出为什么结束', () => {
   for (const [st, want] of Object.entries(ENDED)) {
     const got = jobText(snap({ jobState: st, jobTerminal: true }));
     assert.equal(got, want, st);
     assert.match(got, /[一-鿿]/, st);
-    assert.notEqual(got, st, `${st} 被原样印出去了 —— 那就是这一版要修的东西`);
+    assert.notEqual(got, st, `${st} 被原样印出去了 —— 那就是这一版要修的缺陷`);
   }
   // 具体原因要说出来：`已结束` 三个字对一个失败的人来说什么也没说。
   for (const st of ['TIMEOUT', 'OUT_OF_MEMORY', 'NODE_FAIL', 'FAILED', 'PREEMPTED']) {
@@ -74,7 +74,7 @@ test('★ 每个终态都给一句中文，且说得出**为什么结束**', () 
   }
 });
 
-test('★★ 同一个状态名，job_terminal 不同就说两件完全不同的事', () => {
+test('同一个状态名，job_terminal 不同就说两件完全不同的事', () => {
   // 这条钉的正是"客户端不做判定"这件事：PREEMPTED 与 TIMEOUT 到底算不算结束
   //   取决于 `Requeue`，而客户端手上没有那个字段 —— 所以它只能照着念。
   //   两条都印"已结束（被抢占）"的话，作业几分钟后回来了（正是这一版要修的
@@ -93,7 +93,7 @@ test('★★ 同一个状态名，job_terminal 不同就说两件完全不同的
   }
 });
 
-test('★ 老守护进程不发 job_terminal 时印原文 —— 不猜', () => {
+test('老守护进程不发 job_terminal 时印原文 —— 不猜', () => {
   // 客户端与守护进程总是一起升的，这条退路只在"新客户端对着没升的站点"时走到。
   // 那时我们手上只有一个状态名，而判据不在客户端 —— 猜一个的代价是说错话。
   assert.equal(jobText(snap({ jobState: 'PENDING' })), 'PENDING');
@@ -110,7 +110,7 @@ test('不认识的 Slurm 状态：原样印出去，不猜', () => {
   assert.equal(jobText(snap({ jobState: 'pending', jobTerminal: false })), WAITING.PENDING);
 });
 
-test('★ 排队原因要说出来，尤其是「等下去没有用」的那些', () => {
+test('排队原因要说出来，尤其是「等下去没有用」的那些', () => {
   const got = jobText(snap({ jobState: 'PENDING', jobTerminal: false,
     jobReason: 'Resources' }));
   assert.equal(got, `${WAITING.PENDING} · ${REASON.Resources}`);
@@ -123,7 +123,7 @@ test('★ 排队原因要说出来，尤其是「等下去没有用」的那些'
   }
 });
 
-test('★ 认不出来的 Reason 原样带上 —— 宁可给原文也别什么都不说', () => {
+test('认不出来的 Reason 原样带上 —— 宁可给原文也别什么都不说', () => {
   // Slurm 的原因有好几十种，各站点版本不同。不带它的话，用户面对的就只剩
   // "排队中"三个字，而那正是最让人无从下手的地方。
   const s = jobText(snap({ jobState: 'PENDING', jobTerminal: false,
@@ -131,7 +131,7 @@ test('★ 认不出来的 Reason 原样带上 —— 宁可给原文也别什么
   assert.match(s, /SomeNewSlurmReason/, s);
 });
 
-test('★ 结束时才说退出码，且 0:0 不说（那是正常退出）', () => {
+test('结束时才说退出码，且 0:0 不说（那是正常退出）', () => {
   assert.equal(jobText(snap({ jobState: 'FAILED', jobTerminal: true,
     jobExitCode: '1:0' })), '已结束（失败）（退出码 1:0）');
   assert.equal(jobText(snap({ jobState: 'COMPLETED', jobTerminal: true,
@@ -141,7 +141,7 @@ test('★ 结束时才说退出码，且 0:0 不说（那是正常退出）', ()
     jobExitCode: '0:0' })), RUNNING.RUNNING);
 });
 
-test('★ 重启过就要说 —— 跑着的东西已经不是原来那个了', () => {
+test('重启过就要说 —— 跑着的会话已经不是原来那个了', () => {
   const s = jobText(snap({ jobState: 'RUNNING', jobTerminal: false, jobRestarts: '2' }));
   assert.match(s, /已重启 2 次/, s);
   // 0 次不说（那是常态，说了只是噪音）。
@@ -155,7 +155,7 @@ test('★ 重启过就要说 —— 跑着的东西已经不是原来那个了',
   }
 });
 
-test('★★ 客户端那张措辞表与守护进程的状态表对得上', () => {
+test('客户端那张措辞表与守护进程的状态表对得上', () => {
   // 跨文件不变量（与「跳过表两边必须逐字一致」同一个做法）。三件事：
   //
   //   ① 守护进程会释放的每一个状态，客户端都得说得出话（不然用户在
@@ -168,13 +168,13 @@ test('★★ 客户端那张措辞表与守护进程的状态表对得上', () =
   const src = fs.readFileSync(DAEMON, 'utf8');
   const grab = (name) => {
     const m = new RegExp(`^${name} = frozenset\\(\\(([^)]*)\\)\\)`, 'm').exec(src);
-    assert.ok(m, `守护进程里找不到 ${name} —— 名字变了就更新这条检查`);
+    assert.ok(m, `守护进程里未找到 ${name} —— 名字变了就更新这条检查`);
     return [...m[1].matchAll(/"([A-Z_]+)"/g)].map((x) => x[1]);
   };
   const term = grab('TERMINAL_JOB_STATES');
   const cond = grab('CONDITIONAL_TERMINAL_JOB_STATES');
-  assert.ok(term.length >= 9, `解析到的终态太少（${term.length}），正则多半没匹配上`);
-  assert.ok(cond.length >= 2, `解析到的条件终态太少（${cond.length}）`);
+  assert.ok(term.length >= 9, `解析到的终态不足（${term.length}），正则多半没匹配上`);
+  assert.ok(cond.length >= 2, `解析到的条件终态不足（${cond.length}）`);
 
   for (const st of [...term, ...cond]) {
     assert.ok(ENDED[st], `守护进程会为 ${st} 释放会话，而客户端说不出这句话`);
@@ -192,7 +192,7 @@ test('★★ 客户端那张措辞表与守护进程的状态表对得上', () =
   }
 });
 
-test('★ 界面印的是 jobText，不是 jobState 原文', async () => {
+test('界面印的是 jobText，不是 jobState 原文', async () => {
   // 本机起不了 Electron（panel.js 跑不起来），所以这一条只能做文本检查。
   // 它拦的是退回去印原文这个退化 —— 那正是这一版要修的东西。
   const js = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'panel.js'),
@@ -200,5 +200,5 @@ test('★ 界面印的是 jobText，不是 jobState 原文', async () => {
   assert.match(js, /\['作业状态',\s*s\.jobText\s*\|\|\s*'—'\]/,
     '作业状态那一行要印 jobText');
   assert.equal(/\['作业状态',\s*s\.jobState/.test(js), false,
-    'panel.js 又在印 jobState 原文了 —— 那是 Slurm 说给管理员听的话');
+    'panel.js 又在印 jobState 原文了 —— 那是 Slurm 说给管理员听的');
 });

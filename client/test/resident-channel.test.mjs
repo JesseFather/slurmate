@@ -89,7 +89,7 @@ const pushEnv = (seq, sessions = []) =>
   JSON.stringify({ push: 'sessions', seq, at: 1, sessions });
 
 // ── 一行的判据：两种形状，缺一不可 ────────────────────────────────────────
-t2('★ 一行的判据认得两种形状：响应（带布尔 ok）与通知（push + seq）', () => {
+t2('一行的判据认得两种形状：响应（带布尔 ok）与通知（push + seq）', () => {
   assert.ok(parseEnvelopeLine('{"ok":true,"code":0}'), '响应要认得');
   assert.ok(parseEnvelopeLine('{"push":"sessions","seq":3,"sessions":[]}'), '通知要认得');
   // 下面这些都不是我们的消息，必须返回 null —— 返回一个对象就等于把它送进
@@ -114,7 +114,7 @@ t2('每条请求一个自增 rid，写出去的行里有它', async () => {
   assert.equal((await p2).data.which, 'second');
 });
 
-t2('★★ 响应乱序回来也各归各的（并发发出去的请求不许按序假设）', async () => {
+t2('响应乱序回来也各归各的（并发发出去的请求不许按序假设）', async () => {
   const { stream, ch } = makeChannel();
   const ps = [ch.request({ op: 'a' }), ch.request({ op: 'b' }), ch.request({ op: 'c' })];
   for (const rid of [3, 1, 2]) stream.feed(okEnv(rid, { rid }) + '\n');
@@ -133,7 +133,7 @@ t2('通知不进任何 pending，走 onNotify', async () => {
   assert.deepEqual(notes[0].sessions, [{ session_id: 's1' }]);
 });
 
-t2('★ 迟到的响应被丢掉，**不会**被当成一条通知', async () => {
+t2('迟到的响应被丢掉，不会被当成一条通知', async () => {
   // 超时之后调用方早就拿到 transport 错误了。这条响应回来时 Map 里已经没有它 ——
   // 此时"没有 rid"和"rid 认不出来"是两件完全不同的事，混起来就会凭空冒出一条通知。
   const { stream, ch, notes } = makeChannel();
@@ -153,7 +153,7 @@ t2('一个 chunk 里多条消息、一条消息跨多个 chunk，都拼得出来
   assert.deepEqual(notes.map((m) => m.seq), [2, 3]);
 });
 
-t2('★★ 一个多字节字符被 chunk 从中间切开，**不许**变成 U+FFFD', async () => {
+t2('一个多字节字符被 chunk 从中间切开，不许变成 U+FFFD', async () => {
   // 这是真会发生的：分片边界由传输层决定，落在哪个字节上完全随机 ——
   // 所以坏法是间歇性的，而症状是插件标题/分区名里偶尔多一个 ""。
   const { stream, ch } = makeChannel();
@@ -173,7 +173,7 @@ t2('★★ 一个多字节字符被 chunk 从中间切开，**不许**变成 U+F
   assert.equal((await p).data.title, '代码服务器 · A6000 分区');
 });
 
-t2('噪声行（登录 shell 的 rc 文件打印的东西）被忽略', async () => {
+t2('噪声行（登录 shell 的 rc 文件打印的内容）被忽略', async () => {
   const { stream, ch, notes } = makeChannel();
   const p = ch.request({ op: 'ping' });
   stream.feed('/etc/zshenv 说了句话\n{"hello":"world"}\n');
@@ -183,7 +183,7 @@ t2('噪声行（登录 shell 的 rc 文件打印的东西）被忽略', async ()
 });
 
 // ── 断开与上限 ────────────────────────────────────────────────────────────
-t2('★★ 通道断了 ⇒ 在途请求**全部**拿到答复，不是永远挂着', async () => {
+t2('通道断了，在途请求全部拿到答复，不是永远挂着', async () => {
   // 这条是承重的：漏掉它的症状是 `await` 永远不回，而调用方（心跳那一类
   //   定时器）会一轮轮往上叠新的请求 —— 每 45 秒一条，永远不清理。
   const { stream, ch } = makeChannel();
@@ -207,7 +207,7 @@ t2('断开之后新发的请求立刻拿到错误，不再往一条死通道上�
   assert.equal(stream.written, before, '死了就不该再写');
 });
 
-t2('★ 一行超过上限 ⇒ 判死（而不是让缓冲区无限涨）', async () => {
+t2('一行超过上限，判死（而不是让缓冲区无限涨）', async () => {
   const { stream, ch } = makeChannel();
   const p = ch.request({ op: 'big' });
   stream.feed('x'.repeat(5 * 1024 * 1024));
@@ -216,7 +216,7 @@ t2('★ 一行超过上限 ⇒ 判死（而不是让缓冲区无限涨）', asyn
   assert.match(r.error.detail, /一行过大/);
 });
 
-t2('★ 自己 close() 记成 deliberate —— 调用方据此**不重开**', async () => {
+t2('自己 close() 记成 deliberate —— 调用方据此不重开', async () => {
   // 混起来的后果具体：探针失败时客户端会去重开，而重开又失败又一秒一条 ——
   // 登录节点上每两秒一个 `slurmate stream` 进程，日志里什么都没有。
   const { ch, closes } = makeChannel();
@@ -224,7 +224,7 @@ t2('★ 自己 close() 记成 deliberate —— 调用方据此**不重开**', a
   assert.deepEqual(closes, [{ why: '常驻通道已被客户端关闭', deliberate: true }]);
 });
 
-t2('对端关掉是 **non**-deliberate（这条才该重开）', async () => {
+t2('对端关掉是 non-deliberate（这条才该重开）', async () => {
   const { stream, closes } = makeChannel();
   stream.emit('close');
   assert.equal(closes.length, 1);
@@ -247,5 +247,5 @@ t2('兜底的请求超时比任何一个调用点的语义超时都长', () => {
   // 语义超时在调用点（submit 45s / goodbye 10s / claim 20s）。兜底比它们短的
   // 后果是它抢先切断一条合法请求，而用户看到的是"提交超时"——
   // 一句把根因指向集群的话。
-  assert.ok(RPC_TIMEOUT_MS > 60000, `兜底超时太小了：${RPC_TIMEOUT_MS}`);
+  assert.ok(RPC_TIMEOUT_MS > 60000, `兜底超时过小了：${RPC_TIMEOUT_MS}`);
 });

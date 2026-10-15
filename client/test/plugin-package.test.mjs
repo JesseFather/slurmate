@@ -135,19 +135,19 @@ function buildContainer(recs, sig) {
 
 // ── 好包 ────────────────────────────────────────────────────────────────────
 
-test('★ 符合性向量：好包能解析，摘要、份数、逐份 sha256 与夹具逐条对上', () => {
+test('符合性向量：好包能解析，摘要、份数、逐份 sha256 与夹具逐条对上', () => {
   const r = PP.parsePackage(GOOD);
   assert.equal(r.ok, true, r.ok ? '' : `${r.code} ${r.why}`);
   assert.equal(r.digest, EXPECTED.digest, '内容摘要必须与夹具一致 —— 它是判"同一份构件"的唯一判据');
   assert.equal(r.fileCount, EXPECTED.files.length);
   assert.deepEqual(
     r.files.map((f) => ({ path: f.path, size: Number(f.size), sha256: f.sha256 })),
-    EXPECTED.files, '记录表读出来的东西必须与夹具逐条一样（含**次序**）');
+    EXPECTED.files, '记录表读出来的条目必须与夹具逐条相同（含次序）');
   assert.equal(r.sig, null, '这一份没签名');
   assert.equal(r.manifest.id, '01M2JKHTZGQ7X8V4T5R6N7B8C9');
 });
 
-test('★ 摘要按 UTF-8 字节排序，不是 JS 的 `<`', () => {
+test('摘要按 UTF-8 字节排序，不是 JS 的 `<`', () => {
   // 输入树里那两份：字节序 `EF BF BD…` < `F0 9F 98 80…`，而 UTF-16 码元
   // `U+D83D` < `U+FFFD` —— 次序正好相反。用 `<` 排的实现在这里算出另一个摘要。
   const a = { path: 'cases/�.txt', sha256: '00'.repeat(32) };
@@ -158,7 +158,7 @@ test('★ 摘要按 UTF-8 字节排序，不是 JS 的 `<`', () => {
 
   assert.equal(PP.contentDigest([a, b]), cat(a, b), '字节序：￿ 在前');
   assert.equal(PP.contentDigest([b, a]), cat(a, b), '喂进去的次序不许影响结果 —— 排序是摘要的一部分');
-  assert.notEqual(cat(a, b), cat(b, a), '这一对名字的两种次序必须**不同**，否则这条测的是空气');
+  assert.notEqual(cat(a, b), cat(b, a), '这一对名字的两种次序必须不同，否则这条测的是空气');
 
   // 而 JS 的 `<` 给的次序与字节序相反 —— 这才是「用 < 排会算出另一个摘要」的实证
   const byLt = [a, b].sort((x, y) => (x.path < y.path ? -1 : 1));
@@ -167,7 +167,7 @@ test('★ 摘要按 UTF-8 字节排序，不是 JS 的 `<`', () => {
 
 // ── 签名 ────────────────────────────────────────────────────────────────────
 
-test('★ 签名：验得过、指纹对得上，而且**摘要与没签名的那一份相同**', () => {
+test('签名：验得过、指纹对得上，而且摘要与没签名的那一份相同', () => {
   const r = PP.parsePackage(SIGNED);
   assert.equal(r.ok, true, r.ok ? '' : `${r.code} ${r.why}`);
   assert.ok(r.sig, '这一份带签名');
@@ -180,7 +180,7 @@ test('★ 签名：验得过、指纹对得上，而且**摘要与没签名的�
   assert.equal(r.digest, PP.parsePackage(GOOD).digest);
 });
 
-test('★ 签名验的是"这一段内容"，不是"格式对了就行"', () => {
+test('签名验的是"这一段内容"，不是"格式对了就行"', () => {
   const pub = Buffer.from(EXPECTED.signed.publicKeyHex, 'hex');
   const sig = Buffer.from(EXPECTED.signed.signatureHex, 'hex');
   // v0.13：被签的是四元组那串字节（A.3），不是某一个摘要。
@@ -201,24 +201,24 @@ test('★ 签名验的是"这一段内容"，不是"格式对了就行"', () => 
     tampered[k] = k === 'version' ? '1.0.1' : (k === 'id' ? '01M2JKHTZGQ7X8V4T5R6N7B8CA'
       : 'f'.repeat(64));
     assert.equal(PP.verifyEd25519(pub, PP.signedMessage(tampered), sig), false,
-      `改掉被签消息里的 ${k} 之后签名仍然成立 ⇒ 它没有真的进那条消息`);
+      `改掉被签消息里的 ${k} 之后签名仍然成立，它没有真的进那条消息`);
   }
   // 形状不对的公钥不抛，只返回 false
   assert.equal(PP.verifyEd25519(pub, msg, sig) && false, false);
   assert.equal(PP.verifyEd25519(Buffer.alloc(32), msg, sig), false);
 });
 
-test('★★ 两侧的摘要：与夹具里那两个逐字相同，而且**两侧会重叠**', () => {
+test('两侧的摘要：与夹具里那两个逐字相同，而且两侧会重叠', () => {
   const r = PP.parsePackage(GOOD);
   assert.equal(r.ok, true, r.ok ? '' : r.why);
   const sd = PP.sideDigests(r.files);
   assert.equal(sd.site, EXPECTED.sides.site.digest,
-    '站点侧的 §3.4 摘要与夹具对不上 —— 分侧的规则或摘要公式漂了');
+    '站点侧的 §3.4 摘要与夹具不一致 —— 分侧的规则或摘要公式漂了');
   assert.equal(sd.client, EXPECTED.sides.client.digest);
   // 两侧不是互补的：`plugin.json` 与 `lineage.json` 两侧都在。
   const parts = PP.sidesOf(r.files).site.map((f) => f.path);
   assert.ok(parts.includes('plugin.json') && parts.includes('lineage.json'),
-    '两个顶层元数据文件要在**站点侧**里 —— 站点侧不是"客户端侧的补集"');
+    '两个顶层元数据文件要在站点侧里 —— 站点侧不是"客户端侧的补集"');
   assert.ok(!parts.includes('client/index.js'), '而 client/** 不在站点侧');
   // 空的那一侧有定义（§3.1 允许某一侧为空）：它是 sha256("")，不是 null ——
   //   给它一个 null 的话，"这一侧是空的"与"这一侧不知道"就分不开了。
@@ -229,7 +229,7 @@ test('★★ 两侧的摘要：与夹具里那两个逐字相同，而且**两�
 
 // ── 坏包 ────────────────────────────────────────────────────────────────────
 
-test('★★ 「同一个内容、两个包」：只发客户端侧那一半，**作者的签名照样成立**', () => {
+test('「同一个内容、两个包」：只发客户端侧那一半，作者的签名照样成立', () => {
   // 这是 v0.13 走到今天这一步的全部理由（§3.1 第 4 条 + §4.2）。
   //
   //   站点要给客户端发一个只含 `client/**` 的包（阶段 4），而它没有私钥 ——
@@ -247,10 +247,10 @@ test('★★ 「同一个内容、两个包」：只发客户端侧那一半，*
   const r = PP.parsePackage(buf);
   assert.equal(r.ok, true, r.ok ? '' : `${r.code} ${r.why}`);
   assert.equal(r.sig.digestClient, EXPECTED.sides.client.digest,
-    '★ 客户端侧那一半的摘要与作者原件里那一半**逐字相同**（作者签名认它）');
+    '客户端侧那一半的摘要与作者原件里那一半逐字相同（作者签名认它）');
   assert.equal(r.sig.digestSite, EXPECTED.sides.site.digest,
-    '★ 而 `digestSite` 只是**跟着走**，客户端手里没有那一半的字节、核不了它');
-  assert.ok(buf.length < SIGNED.length, '★ 真的更小（这一半确实没发出去）');
+    '而 `digestSite` 只是跟着走，客户端手里没有那一半的字节、核不了它');
+  assert.ok(buf.length < SIGNED.length, '真的更小（这一半确实没发出去）');
 
   // 判据②的后一半：把 `digestSite` 改一位，这一个包（只含客户端侧）也必须拒。
   //    它靠的不是"重算站点侧摘要"（手里没有那半字节），而是验签 ——
@@ -258,11 +258,11 @@ test('★★ 「同一个内容、两个包」：只发客户端侧那一半，*
   const tampered = Buffer.from(buf);
   tampered[digestSiteAt(clientOnly, EXPECTED.signed.version)] ^= 0xff;
   const bad = PP.parsePackage(tampered);
-  assert.equal(bad.ok, false, '★ 改 digestSite 而只发客户端侧 —— 也必须拒得了');
+  assert.equal(bad.ok, false, '改 digestSite 而只发客户端侧 —— 也必须拒得了');
   assert.equal(bad.code, 'signature', bad.why);
 });
 
-test('★★ 改只含客户端侧那个包的 `digestClient` ⇒ 也拒（③ 先响：重算的摘要对不上）', () => {
+test('改只含客户端侧那个包的 `digestClient`，也拒（③ 先响：重算的摘要不一致）', () => {
   const parts = splitSignedFixture();
   const clientOnly = parts.recs.filter((r) => PP.isClientSidePath(r.path));
   const buf = Buffer.from(buildContainer(clientOnly, parts.sig));
@@ -270,10 +270,10 @@ test('★★ 改只含客户端侧那个包的 `digestClient` ⇒ 也拒（③ �
   const bad = PP.parsePackage(buf);
   assert.equal(bad.ok, false);
   assert.equal(bad.code, 'signature', bad.why);
-  assert.match(bad.why, /客户端侧/, '★ 要说出**是哪一侧**对不上');
+  assert.match(bad.why, /客户端侧/, '要说出是哪一侧不一致');
 });
 
-test('★ 只有站点侧的包也合法（§3.1：某一侧为空是允许的）', () => {
+test('只有站点侧的包也合法（§3.1：某一侧为空是允许的）', () => {
   // 一条插件可以只有 `job/**`、一个字节的客户端代码都没有 —— 那样的包必须
   //   读得动，而且它客户端侧那份摘要不是 null、也不是空：`plugin.json` 是客户端侧的
   //   一员，它永远在。三个阶段之后（分发只发客户端侧）这一格会变成"某一侧真的
@@ -300,11 +300,11 @@ test('★ 只有站点侧的包也合法（§3.1：某一侧为空是允许的�
   assert.deepEqual(PP.sidesOf(r.files).site.map((f) => f.path),
     ['plugin.json', 'job/start.sh'], '站点侧 = 不以 client/ 开头的那些');
   assert.deepEqual(PP.sidesOf(r.files).client.map((f) => f.path), ['plugin.json'],
-    '★ 客户端侧**不是空的** —— `plugin.json` 永远在（三端的分侧规则都靠这一条）');
+    '客户端侧不是空的 —— `plugin.json` 永远在（三端的分侧规则都靠这一条）');
   assert.equal(PP.sideDigests(r.files).site, sd.site);
 });
 
-test('★ 符合性向量：每一份坏包都必须被拒，且理由是**夹具里那个词**', () => {
+test('符合性向量：每一份坏包都必须被拒，且理由是夹具里那个词', () => {
   const wrong = [];
   for (const c of BAD.cases) {
     const r = PP.parsePackage(unhex(c.hex));
@@ -314,13 +314,13 @@ test('★ 符合性向量：每一份坏包都必须被拒，且理由是**夹�
   assert.deepEqual(wrong, [], '理由词表与判的次序是三份实现共用的契约（附录 A.4）');
 });
 
-test('★ 坏包覆盖了附录 A.4 词表里的每一个词', () => {
+test('坏包覆盖了附录 A.4 词表里的每一个词', () => {
   const covered = new Set(BAD.cases.map((c) => c.code));
   const missing = Object.values(PP.R).filter((c) => !covered.has(c));
-  assert.deepEqual(missing, [], '词表里有一个词没有任何坏包钉住 ⇒ 那一条判据没人守');
+  assert.deepEqual(missing, [], '词表里有一个词没有任何坏包钉住，那一条判据没人守');
 });
 
-test('★ 截断到任何一个长度都不许崩，只许说"不长这样"', () => {
+test('截断到任何一个长度都不许崩，只许说"不长这样"', () => {
   // 从 0 到整个包减一，逐字节砍。任何一次抛出都是"远端的字节能让客户端崩" ——
   // 而这是一个只读解析器，它唯一的合法反应是返回一个不合规的理由。
   const codes = new Set();
@@ -341,7 +341,7 @@ test('不是 Buffer / 空 Buffer 一律是"不长这样"，不是异常', () => 
   }
 });
 
-test('readPackageFile：读不到文件时也返回理由，不抛', () => {
+test('readPackageFile：无法读取文件时也返回理由，不抛', () => {
   const r = PP.readPackageFile('/nonexistent/nope.splug');
   assert.equal(r.ok, false);
   assert.match(r.why, /读取 .+ 失败/);
@@ -349,7 +349,7 @@ test('readPackageFile：读不到文件时也返回理由，不抛', () => {
 
 // ── 与 §3.3 的关系 ──────────────────────────────────────────────────────────
 
-test('★ 大小写折叠是 ASCII-only —— 全 Unicode 折叠会让两端一边收一边拒', () => {
+test('大小写折叠是 ASCII-only —— 全 Unicode 折叠会让两端一边收一边拒', () => {
   // 这是拒绝规则：折叠口径不一致，同一个包在一台机器上装得上、另一台装不上。
   assert.equal(P.foldAscii('ABC'), 'abc');
   assert.equal(P.foldAscii('Case/aB.txt'), 'case/ab.txt');
@@ -378,10 +378,10 @@ test('首次即信任：没钉过的时候不拦，并把要钉的那一把交�
   const v2 = PP.keyVerdict(undefined, PP.parsePackage(GOOD));
   assert.equal(v2.ok, true);
   assert.equal(v2.first, true);
-  assert.equal(v2.fingerprint, null, '没签名 ⇒ 没有公钥可钉，调用方不该写台账');
+  assert.equal(v2.fingerprint, null, '没签名，没有公钥可钉，调用方不该写台账');
 });
 
-test('★ 同一把钥匙 ⇒ 过；换了一把 ⇒ 拒绝，而且**两把指纹都说得出来**', () => {
+test('同一把钥匙，过；换了一把，拒绝，而且两把指纹都说得出来', () => {
   const signed = PP.parsePackage(SIGNED);
   const fp = EXPECTED.signed.fingerprint;
   const same = PP.keyVerdict(fp, signed);
@@ -398,20 +398,20 @@ test('★ 同一把钥匙 ⇒ 过；换了一把 ⇒ 拒绝，而且**两把指�
   assert.ok(v.why.includes(other) && v.why.includes(fp), v.why);
 });
 
-test('★★ 内容**没变**而签名者变了 ⇒ 也必须拒绝（摘要挡不住这一件事）', () => {
+test('内容没变而签名者变了，也必须拒绝（摘要挡不住这一件事）', () => {
   // 这一条是 §5.4 里那句"一致性判据与认证判据不是一回事、禁止合并"的实证：
   // 两份包的内容摘要一字不差（签名盖的是摘要，不覆盖信封），
   // 而它们是两个不同的人做的 —— 摘要看得见的东西里没有任何一处不同。
   const a = PP.parsePackage(GOOD);
   const b = PP.parsePackage(SIGNED);
-  assert.equal(a.digest, b.digest, '前提：这两份的内容摘要必须相同，否则这条测的是别的东西');
+  assert.equal(a.digest, b.digest, '前提：这两份的内容摘要必须相同，否则这条测的是其他内容');
 
   const v = PP.keyVerdict('f'.repeat(64), b);
   assert.equal(v.ok, false);
   assert.equal(v.code, PP.PIN.CHANGED);
 });
 
-test('★ 钉过之后收到一份**不带签名**的 ⇒ 拒绝（"此后每一份都必须同一把钥匙签"）', () => {
+test('钉过之后收到一份不带签名的，拒绝（"此后每一份都必须同一把钥匙签"）', () => {
   const v = PP.keyVerdict(EXPECTED.signed.fingerprint, PP.parsePackage(GOOD));
   assert.equal(v.ok, false);
   assert.equal(v.code, PP.PIN.UNSIGNED);
@@ -419,7 +419,7 @@ test('★ 钉过之后收到一份**不带签名**的 ⇒ 拒绝（"此后每一
   assert.ok(v.why.includes(EXPECTED.signed.fingerprint), '要说清钉的是哪一把');
 });
 
-test('★★ 钉子本身读不动 ⇒ 一律拒绝，绝不退化成"首次即信任"', () => {
+test('钉子本身读不动，一律拒绝，绝不退化成"首次即信任"', () => {
   // `''`（表里那一条缺字段）与任何不合形状的值走同一条路。把它们当成"没钉过"
   // 就是静默地重新 TOFU 一次 —— 而那正是 §2.5 的分身判定要挡的事。
   const signed = PP.parsePackage(SIGNED);
@@ -434,10 +434,10 @@ test('★★ 钉子本身读不动 ⇒ 一律拒绝，绝不退化成"首次即�
 
 // ── 把负载铺到磁盘上（`unpackTo`）────────────────────────────────────────────
 
-test('★ unpackTo 铺出来的树与包里的记录**逐字节相同**，权限位是 0644', () => {
+test('unpackTo 铺出来的树与包里的记录逐字节相同，权限位是 0644', () => {
   // 权限位进摘要（plugins.digestOf 里有 mode），所以"铺出来的文件是 0644"
   //   不是一件风格问题：两份实现（或者一次 umask 差异）漂开的那天，同一份内容会
-  //   在机器上算出两个摘要，而症状是"明明装好了却一直说内容不一样"。
+  //   在机器上算出两个摘要，而症状是"明明装好了却一直说内容不同"。
   //   这里铺的是站点真的会发的那一份（`CLIENT_SIDE`，只含客户端侧）——
   //     整包那个形状根本到不了客户端。
   const os = require('node:os');
@@ -458,13 +458,13 @@ test('★ unpackTo 铺出来的树与包里的记录**逐字节相同**，权限
   assert.deepEqual(norm(got), norm(r.files),
     '铺出来的树必须与包里的记录逐条对得上');
   assert.equal(got.filter((f) => f.kind !== 'f').length, 0,
-    '★ 只有普通文件 —— 格式里没有链接、没有空目录，铺出来也不许有');
+    '只有普通文件 —— 格式里没有链接、没有空目录，铺出来也不许有');
   for (const f of got) {
-    assert.equal(f.mode, 0o644, `★ 权限位由格式定死：${f.path} 是 ${f.mode.toString(8)}`);
+    assert.equal(f.mode, 0o644, `权限位由格式定死：${f.path} 是 ${f.mode.toString(8)}`);
   }
 });
 
-test('★★ 含站点侧的包 ⇒ unpackTo **整份拒收**（判据①：用户机器上没有 job/）', () => {
+test('含站点侧的包，unpackTo 整份拒收（判据①：用户机器上没有 job/）', () => {
   // 站点发给客户端的只含客户端侧，而这一条是那句话的
   //    可执行形式，也是它的回归测试 —— 少了它，"多发的站点侧字节"只会在下一次
   //    有人真去翻池子目录时才发现，而那时它已经躺了很久。
@@ -476,9 +476,9 @@ test('★★ 含站点侧的包 ⇒ unpackTo **整份拒收**（判据①：用�
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-unpack-side-'));
   const r = PP.parsePackage(SIGNED);        // 整包：两侧都在（作者发的那一份）
   assert.equal(r.ok, true,
-    '★ 整包本身是**合法**的 —— 拒它的是落盘这一步，不是解析器（三端的解析器都要读得动它）');
+    '整包本身是合法的 —— 拒它的是落盘这一步，不是解析器（三端的解析器都要读得动它）');
   const u = PP.unpackTo(r, SIGNED, dir);
-  assert.equal(u.ok, false, '★ 站点侧的路径到了客户端 ⇒ 拒');
+  assert.equal(u.ok, false, '站点侧的路径到了客户端，拒');
   // 要点名是哪几份（与"改了一棵树要报出哪一份"同源：只说"拒了"等于让人去猜）。
   const stray = EXPECTED.sides.site.files
     .filter((p) => !EXPECTED.clientSide.files.includes(p));
@@ -486,10 +486,10 @@ test('★★ 含站点侧的包 ⇒ unpackTo **整份拒收**（判据①：用�
   assert.ok(u.why.includes(`等 ${stray.length} 份`),
     `要说清一共几份（${stray.length}）：${u.why}`);
   assert.ok(u.why.includes(stray[0]), `要点名第一份（${stray[0]}）：${u.why}`);
-  assert.equal(fs.readdirSync(dir).length, 0, '★ 一个字节都不许落盘（判在写盘之前）');
+  assert.equal(fs.readdirSync(dir).length, 0, '一个字节都不许落盘（判在写盘之前）');
 });
 
-test('★★ `{onto:"site"}` 才铺站点侧 —— 方向是判据，不是一个"允许不允许"的开关', () => {
+test('`{onto:"site"}` 才铺站点侧 —— 方向是判据，不是一个"允许不允许"的开关', () => {
   // 这是唯一一条把站点侧写进文件的合法路径：假站点那个「安装插件…」。
   //    它收到的正是作者发的那一份整包（`slurmate plugin install` 收的同一个文件），
   //    而那个方向要落到磁盘上的就是整棵树 —— 站点侧正是那台机器要拿去跑作业的
@@ -510,15 +510,15 @@ test('★★ `{onto:"site"}` 才铺站点侧 —— 方向是判据，不是一�
     .map((f) => f.path).sort();
   const want = r.files.map((f) => f.path).sort();
   assert.deepEqual(got, want,
-    '★ 整棵树都要落地 —— 少一份站点侧的，这个假站点演的就是一个真站点不可能有的形状');
+    '整棵树都要落地 —— 少一份站点侧的，这个假站点演的就是一个真站点不可能有的形状');
   assert.equal(got.some((p) => p === 'job/start.sh'), true,
     '夹具里那份站点侧的脚本必须真的铺出来（它是这条判据的物证）');
   for (const f of P.readPluginFiles(dir).filter((x) => x.kind === 'f')) {
-    assert.equal(f.mode, 0o644, `★ 权限位仍然由格式定死：${f.path}`);
+    assert.equal(f.mode, 0o644, `权限位仍然由格式定死：${f.path}`);
   }
 });
 
-test('★ 客户端收得下的包，必须装得下它**自己允许的最大负载**', () => {
+test('客户端收得下的包，必须装得下它自己允许的最大负载', () => {
   // 跨语言那一条（客户端这份上限 vs 守护进程的 PLUGIN_PACKAGE_MAX_BYTES）由
   //   集群侧的用例 19.11d 钉着；这里钉的是客户端自己的那笔账：一个合法到
   //   极点的包（负载刚好顶到 total_bytes）base64 之后 + 记录表与签名块，

@@ -251,7 +251,7 @@ def selftest():
          pd_ruleset(["job-5712-0"]),
          pd_ruleset(["job-5712-0", "job-5713-0"]), "DYNAMIC")
     # job-* 跑到别的表里就不是"正常流动"了
-    case("★ job-* 出现在错误的表里",
+    case("job-* 出现在错误的表里",
          ruleset(),
          ruleset(include_ours=True,
                  mutate=lambda it: it.append({"rule": {
@@ -260,22 +260,22 @@ def selftest():
          "ALIEN")
 
     # ── 必须抓住的：对生产表的规则级改动（它们最容易被误判为 DYNAMIC）──
-    case("★ 往 codeserver 表塞规则",
+    case("往 codeserver 表塞规则",
          ruleset(),
          ruleset(include_ours=True,
                  mutate=lambda it: it.append({"rule": {
                      "family": "inet", "table": "codeserver", "chain": "output",
                      "handle": 50, "expr": [2], "comment": "cs-base-ssh"}})),
          "ALIEN")
-    case("★ 改 codeserver 表已有规则",
+    case("改 codeserver 表已有规则",
          ruleset(extra=[["cs-base-lo"]]),
          ruleset(extra=[["cs-base-lo"]], include_ours=True,
                  mutate=lambda it: it[3]["rule"].update(expr=[777])),
          "ALIEN")
-    case("★ 删 codeserver 表已有规则",
+    case("删 codeserver 表已有规则",
          ruleset(extra=[["cs-base-lo"], ["cs-base-established"]]),
          ruleset(extra=[["cs-base-lo"]], include_ours=True), "ALIEN")
-    case("★ 往 port-daemon 表塞规则",
+    case("往 port-daemon 表塞规则",
          ruleset(),
          ruleset(include_ours=True,
                  mutate=lambda it: it.append({"rule": {
@@ -293,7 +293,7 @@ def selftest():
                  mutate=lambda it: it.append(
                      {"table": {"family": "ip", "name": "evil", "handle": 42}})),
          "ALIEN")
-    case("★ 本系统的规则跑到别人表里",
+    case("本系统的规则跑到别人表里",
          ruleset(),
          ruleset(include_ours=True,
                  mutate=lambda it: it.append({"rule": {
@@ -303,8 +303,8 @@ def selftest():
          "ALIEN")
 
     # ── 无法证明的情形：绝不能判 SAME ──
-    case("★ 两份空快照（快照失败）", "", "", "NOSNAPSHOT")
-    case("★ 一份为空", ruleset(), "", "NOSNAPSHOT")
+    case("两份空快照（快照失败）", "", "", "NOSNAPSHOT")
+    case("一份为空", ruleset(), "", "NOSNAPSHOT")
     case("非 JSON 输入", "table inet codeserver { }", ruleset(), "NOSNAPSHOT")
     case("缺 nftables 键", '{"foo":1}', ruleset(), "NOSNAPSHOT")
 
@@ -320,26 +320,26 @@ def selftest():
         # 把前两条规则对调（内容不变，只改顺序）
         items[2], items[3] = items[3], items[2]
 
-    case("★ 纯重排规则（多重集相同、顺序不同）",
+    case("纯重排规则（多重集相同、顺序不同）",
          ruleset(extra=[["cs-1001-aaaa1111"], ["cs-1001-bbbb2222"]]),
          ruleset(extra=[["cs-1001-aaaa1111"], ["cs-1001-bbbb2222"]],
                  include_ours=True, mutate=reorder),
          "REORDER")
-    case("★ 重排基础规则",
+    case("重排基础规则",
          ruleset(extra=[["cs-base-lo"], ["cs-base-established"]]),
          ruleset(extra=[["cs-base-established"], ["cs-base-lo"]],
                  include_ours=True),
          "REORDER")
-    case("★ 删除一条重复规则（多重集变化）",
+    case("删除一条重复规则（多重集变化）",
          ruleset(extra=[["cs-1001-aaaa1111"], ["cs-1001-aaaa1111"]]),
          ruleset(extra=[["cs-1001-aaaa1111"]], include_ours=True),
          "DYNAMIC")
-    case("★ 新增一条重复规则",
+    case("新增一条重复规则",
          ruleset(extra=[["cs-1001-aaaa1111"]]),
          ruleset(extra=[["cs-1001-aaaa1111"], ["cs-1001-aaaa1111"]],
                  include_ours=True),
          "DYNAMIC")
-    case("★ 把非本系统的规则伪装成动态 comment",
+    case("把非本系统的规则伪装成动态 comment",
          ruleset(),
          ruleset(include_ours=True,
                  mutate=lambda it: it.append({"rule": {

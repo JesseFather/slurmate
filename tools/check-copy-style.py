@@ -29,16 +29,21 @@
         HTML 的 `<!-- -->`。这几处的正文行首既不是 `#` 也不是 `//`，
         按行扫会整片漏掉。
 
-        成对加粗按**连续的一段注释**配，不按行配：一句话折成两行时，
-        那对星号照样成对（`**滚动升级期间还在跑的\n旧作业**`）。按行配的话
+        成对加粗按连续的一段注释配，不按行配：一句话折成两行时，
+        那对星号照样成对（`滚动升级期间还在跑的\n旧作业`）。按行配的话
         这一整类看不见 —— 曾经就是这样，全仓库漏了近三百处。
 
-    J2  字符串里的 `**` `★` `⚠` `⇒` `——` 一个都不许有。这些字符串走
+    J2  字符串里的 `` `★` `⚠` `⇒` `——` 一个都不许有。这些字符串走
         `textContent` 或终端，会被原样画出来，看见的是字面的星号。
         这一条不豁免任何东西。
 
         跨行的也算：JS 的模板串、shell 的 here-doc 与跨行双引号串。
         `packer/slurmate-packer.js --help` 那一段就是模板串，里面有六处加粗。
+
+        测试文件的字符串只收前三样，`——` 一条不收（见 L 那一段）。破折号不是
+        记号，它禁的是「一句话套一句话」那种长句，理由与 K 那条一样，是界面
+        文字的短。用例名与断言消息是描述，不是画给用户看的一句话 —— 同一份
+        文件的注释里本来就到处在用破折号。
 
     K   单条中文字符串不超过 60 字；HTML 里动作控件的文字不超过 6 字。
         界面文字要短，读者才会去看。
@@ -49,17 +54,25 @@
         按钮就分不出差别了。6 字是中文动作按钮的常见上限，也远在 KDE HIG
         那条「不要超过 `Configure Keyboard Shortcuts`」（25 字符）之内。
 
-    L   用户看得见的字符串里，不许出现 `tools/ui-terms.json` 左列的那些词。
+    L   用户看得见、以及钉着它的字符串里，不许出现 `tools/ui-terms.json`
+        左列的那些词。
 
         「记录写不下去」「读不到 X」「没能保存」「与签名对不上」—— 这些说的是
         手感，读者要的是结果：写入失败、读取 X 失败、未能保存、与签名不一致。
         主语是那件事，不是拟人：一张表不会"写得下去"。
 
-        表是**封闭**的，判据逐字比对，「别用」那一列以外的词一个字都不判。
+        表是封闭的，判据逐字比对，「别用」那一列以外的词一个字都不判。
         要加词就往表里加 —— 同一条规矩两份实现会漂开。
 
-        反引号跨度豁免，与 J 同一条：`不许写成 `读不到`` 是在**引用**这个词，
-        不是在用它做提示文字。
+        反引号跨度豁免，与 J 同一条：`不许写成 `读不到`` 是在引用这个词，不是
+        在用它做提示文字。
+
+        测试文件的字符串也归这一条，而且整套体例都归：用例名与断言消息跟生产
+        文案是同一套话。`★` 排位与成对加粗曾经在那里合法，于是那 33 份成了全仓
+        唯一还能继续生产新记号的地方 —— 清一批、它长一批。
+
+        只有 K 与 J2 里的 `——` 不管它们：那两条要的都是「一句话短」，
+        用例名的长短由内容定、它的句子也由内容定，压短会把话说残。
 
     M   一处文档里引用的提示文字，必须逐字出现在源码里。
 
@@ -67,8 +80,8 @@
         教管理员照着屏幕上的字样去对原因。字样与代码对不上，那张表就是一句
         没人守的承诺 —— 而改一批提示文字正是会让它悄悄失准的动作。
 
-        口径：表行**第一列**里每个 `「…」`，必须逐字出现在某个源码文件里。
-        带变量的地方，要么把变量写在「」**外面**，要么在「」里用 `…` 标出来；
+        口径：表行第一列里每个 `「…」`，必须逐字出现在某个源码文件里。
+        带变量的地方，要么把变量写在「」外面，要么在「」里用 `…` 标出来；
         带 `…` 的那一段不判 —— 那个省略号是明写的"这里有变量"。
         第二列与第三列里的 `「」` 是行文，不是字样，不判。
 
@@ -84,9 +97,16 @@
   · 基线里留着一份已经不存在的文件，同样是红。留着它就是留一层遮罩。
   · 不在基线里的文件 = 零容忍。新写的代码没有旧账可还。
 
-不判的三类，每一类都打印出来。不打印的话，"不判"与"没在看"分不开：
+`.yml` / `.yaml` / `.json` 整份按注释判，只判记号与成对加粗（见 `star_only`）。
+这两类里的中文是 YAML 的注释与数据字段的值，没有「会被画出来的一句话」，所以
+K 与 L 在那里不判。判记号是因为那几个字符在这两类文件里从来没有正当用法 ——
+这一条原先没人守，`.github/workflows/checks.yml` 一份就攒了 97 处。
 
-  · 测试文件的字符串（用例名与断言消息本轮不动）。注释照判。
+不判的四类，每一类都打印出来。不打印的话，"不判"与"没在看"分不开：
+
+  · 测试文件字符串的 K（单条不超过 60 字）与破折号。用例名长短由内容定，
+    压到 60 字会把话说残；句子也一样。其余三样（记号、成对加粗、用词）照判。
+  · `.yml` / `.yaml` / `.json` 的 K 与 L（见上）。
   · `tools/check-*.py` 与 `tools/self-test-*`（样本里写着故意违规的字面量）。
   · `tools/conformance/tree/**`（字节被 `expected.json` 钉住，改一个字节三端一起红）。
 
@@ -100,11 +120,11 @@
     行尾注释，再加上多行跨度里的行（三引号、块注释、HTML 注释）。
   · 引号靠逐字扫配，不解析语法：`X="$(cmd "$Y")"` 这类嵌套要一层层跟着走
     （见 `sh_spans`）。收敛不了的整段不算 —— 宁可欠判，不误判。
-  · 串那一遍原先只看「行首有没有注释标记」，于是块注释与 docstring 的**正文**
+  · 串那一遍原先只看「行首有没有注释标记」，于是块注释与 docstring 的正文
     也被当成了字符串（全仓 3899 个汉字，`cluster/slurmate-sessiond` 一份占
-    3236）。那是**多看**，是假红的来源，不是漏看 —— 而 L 一立，docstring 里
+    3236）。那是多看，是假红的来源，不是漏看 —— 而 L 一立，docstring 里
     一个「读不到」就会红一条本来没错的代码。现在先把块注释挖空再扫串那一遍
-    （见 `comment_masked`），闭记号**之后**那一行剩下的部分留着。
+    （见 `comment_masked`），闭记号之后那一行剩下的部分留着。
   · `.py` 里赋值形式的三引号（`SCHEMA_SQL = \"\"\"…\"\"\"`）只挖不判：那是喂给
     别的程序的数据，不是画给人看的文字。行首那种（docstring）按文档判。
   · `.html` 的文字整份看，不按行 —— 一个标签可以跨两行。`<script>` 与 `<style>`
@@ -132,24 +152,49 @@ ROOT = os.path.dirname(HERE)
 BASELINE_PATH = os.path.join(HERE, "copy-style-baseline.json")
 UI_TERMS_PATH = os.path.join(HERE, "ui-terms.json")
 
-EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css", ".in")
+EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css", ".in",
+       ".yml", ".yaml", ".json")
+# 整份按注释判的三类（见 `star_only`）：YAML 的注释、以及这一类文件里成篇的
+#   说明字段。K 与 L 在那里不判。
+DOC_LIKE = (".yml", ".yaml", ".json")
 # 没有扩展名的按 shebang 认。`LICENSE` 与 `NOTICE` 首行不是 shebang，于是不判。
 SHEBANG_PY = re.compile(r"^#!.*\bpython[0-9.]*\b")
 
 # 不判的：夹具（字节被钉住）与检查器自己（样本里是故意违规的字面量）。
 SKIP_PREFIX = ("tools/conformance/tree/",)
-SKIP_NAME = re.compile(r"^(check-.*\.py|self-test-.*\.sh)$")
+# 检查器自己与自测脚本里写着故意违规的样本。豁免只给那些样本 —— 字符串不判。
+#   注释照判，而且必须判：要求「全仓注释里不许有记号」的就是这五份，它们自己的
+#   注释一条都不判的话，那句要求就是一句没人守的话。
+SAMPLE_NAME = re.compile(r"^(check-.*\.py|self-test-.*\.sh)$")
 
 MARK = re.compile(r"[★⚠⇒]")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
-# 一段注释里的成对加粗。**认内容，不按位置两两配**：注释里本来就有落单的 `**`
-#   （`client/**`、`**kwargs`、`2 ** 8`），按位置配的话它们会把后面每一对都错开
+# 一段注释里的成对加粗。认内容，不按位置两两配：注释里本来就有落单的 ``
+#   （`client/`、`**kwargs`、`2 ** 8`），按位置配的话它们会把后面每一对都错开
 #   一位，于是删掉的是「这一对的闭」加「下一对的开」，剩下的半截又自己配上。
 #   第一条剥离脚本就是这么栽的。
 #   内容不以空白开头、不以空白结尾、中间没有星号 —— 这是加粗的形状，也是
 #   那几个落单写法都不满足的形状。
 BOLD_SPAN = re.compile(r"\*\*[^\s*](?:[^*]*[^\s*])?\*\*")
 DASH = "——"
+
+
+def bold_spans(s):
+    """`s` 里成对加粗的位置。glob 里那两个星号不算。
+
+    `client/**` 与几行之下的 `plugins/**` 会凑成一对 —— 中间隔着几十个字，
+    内容也不以空白收尾，`BOLD_SPAN` 认不出它不是加粗。`.github/workflows/
+    build.yml` 的 `paths` 列表里就是这样：两条 glob 之间只隔着几行注释。
+    判成加粗是假红，而假红会让一条检查被绕过（改的人学会忽略它）。
+    """
+    for m in BOLD_SPAN.finditer(s):
+        a, b = m.start(), m.end() - 1
+        if a and s[a - 1] == "/":              # `client/**`
+            continue
+        if b + 1 < len(s) and s[b + 1] == "/":   # `src/**/*.js`
+            continue
+        yield m
+
 HAN = re.compile(r"[一-鿿]")
 
 # 注释：整行都算。按行首判，不认代码里的 `//`（那可能是 URL）。
@@ -161,6 +206,7 @@ LINE_COMMENT = {
     #   单元）。管理员会打开渲染出来的那一份读注释，所以它里面的记号他看得见。
     #   少了这一项，整份文件从视野里过去 —— 而那正是 `.html` 栽过的形状。
     ".in": ("#",),
+    ".yml": ("#",), ".yaml": ("#",),
 }
 # 块注释的续行（`* 这一行`）。Python 与 shell 没有这种写法。
 STAR_CONT = (".js", ".mjs", ".cjs", ".css", ".html")
@@ -202,7 +248,7 @@ def _load_ui_terms():
     """`tools/ui-terms.json` 摊平成 `[(别用, 改用, 前面不许是这些字), …]`。
 
     长的在前是为了报得准：`没成功` 与 `没成` 都在表里，而 `没成功` 先命中，
-    报出来读者才知道该往哪儿改。加载失败就**抛**，不留一份空表 ——
+    报出来读者才知道该往哪儿改。加载失败就抛，不留一份空表 ——
     空表会让 L 静默变成"没有在看"。
 
     `not_after` 是不得不加的：中文没有词边界，`别的` 会撞上「识别的」、
@@ -239,7 +285,7 @@ TEST_LIKE = ("cluster/nft-compare.py",)
 
 
 def is_test_file(rel):
-    """用例名与断言消息本轮不动，所以测试文件的字符串不判。"""
+    """用例名与断言消息住在哪几份里。它们的字符串跟生产文案同上一条判据。"""
     base = os.path.basename(rel)
     return (rel in TEST_LIKE or "/test/" in rel or base.startswith("test-")
             or ".test." in base or base.endswith(".test.mjs"))
@@ -351,7 +397,7 @@ def sh_spans(text):
     引号要一层一层跟着走。`READONLY_PATHS="$(sed -nE '…' "$SRC_CONF" …)"` 里
     那对引号属于 `$( )` 里面那一层，朴素的「找一个 `"` 再找一个 `"`」会把它们
     当成本层的开合，于是从那以后整份文件的引号奇偶都反了 —— 后果不是漏判一处，
-    是**把后面真正的串当成代码**，判据从那一段起整片闭嘴。所以这里有栈。
+    是把后面真正的串当成代码，判据从那一段起整片闭嘴。所以这里有栈。
 
     单引号串按 shell 的规矩整段照字面。收敛不了的一律不算 —— 宁可欠判，不误判。
     """
@@ -419,7 +465,7 @@ def sh_spans(text):
             continue
         if not stack and text[i:i + 2] == "<<":
             m = HERE.match(text, i)
-            # 只收**没被重定向进文件**的 here-doc：`cat <<EOF` 打在终端上，
+            # 只收没被重定向进文件的 here-doc：`cat <<EOF` 打在终端上，
             #   `cat > "$cfg" <<EOF` 写进的是配置文件。判据管的是会被画出来的
             #   文字，配置文件不是（`plugins/sshd/job/start.sh` 那份就是后者）。
             if m and ">" not in text[text.rfind("\n", 0, i) + 1:eol(m.end())]:
@@ -443,7 +489,7 @@ def py_spans(text):
     """`x = \"\"\"…\"\"\"` 这种赋值形式的三引号串（行首之外的）。
 
     它不是画给人看的文字，所以不进 `take_string`；但它必须被挖掉。
-    它的闭记号落在行首，而 `block_lines` 会把行首的三引号读成**开**记号 ——
+    它的闭记号落在行首，而 `block_lines` 会把行首的三引号读成开记号 ——
     于是从那个闭记号到下一个三引号之间的正文整片从判据里消失。
     `cluster/test-sessiond-logic.py` 栽的就是这个：一行 `\"\"\")` 把 300 行之后
     的一段 docstring 遮住了，而那一段里有五处记号。
@@ -475,7 +521,7 @@ def mask_spans(text, ext):
 
 
 def string_spans(text, ext):
-    """会被画出来的**跨行**字符串跨度，只收含中文的那些。
+    """会被画出来的跨行字符串跨度，只收含中文的那些。
 
     与 `mask_spans` 的差别只在 `.py`：那边多收赋值形式的三引号（要挖，但不判）。
 
@@ -506,10 +552,10 @@ def blank(text):
 
 
 def comment_masked(text, ext):
-    """把多行注释体挖空，但**留着闭记号之后那一行剩下的部分**。
+    """把多行注释体挖空，但留着闭记号之后那一行剩下的部分。
 
     串那一遍只看「行首有没有注释标记」，而块注释与 docstring 的正文行首
-    两样都没有 —— 它们于是被当成了字符串。这是**多看**，是假红的来源：
+    两样都没有 —— 它们于是被当成了字符串。这是多看，是假红的来源：
     L 一立，docstring 里一个「读不到」就会红一条本来没错的代码。
 
     整行跳过不行：`*/ const s = '读不到';` 那种收尾行上有一个真的字符串，
@@ -566,13 +612,13 @@ def string_runs(cmasked, ext):
     """连续的、每一行都带字符串字面量的代码行，认成一条逻辑串。
 
     一条串拆到两行上是常规写法：Python 的隐式拼接（`"a" "b"`）、JS 的
-    `'a' + 'b'`。J2 的成对加粗按**一条串**配，拆开之后两边各自不成一对，
+    `'a' + 'b'`。J2 的成对加粗按一条串配，拆开之后两边各自不成一对，
     于是那一对记号从缝里漏过去 —— 它是会被原样画给用户看的
-    （`cluster/slurmate-sessiond` 里真有三处，`**属主能随时改写自己拥有` 与
-    `的文件**` 分在两个字面量里）。
+    （`cluster/slurmate-sessiond` 里真有三处，`属主能随时改写自己拥有` 与
+    `的文件` 分在两个字面量里）。
 
-    拼接的是**字面量的内容**，不是源码：这样两行之间夹着的代码不会把不相干的
-    两段配成一对。而 `**` 的孤立写法（`client/**`、`**kwargs`、`2 ** 8`）本来
+    拼接的是字面量的内容，不是源码：这样两行之间夹着的代码不会把不相干的
+    两段配成一对。而 `` 的孤立写法（`client/`、`**kwargs`、`2 ** 8`）本来
     就不满足 `BOLD_SPAN` 的形状，跨行拼起来也仍然不满足 —— 宁可欠判，不误判。
     """
     runs, cur = [], []
@@ -594,12 +640,57 @@ def string_runs(cmasked, ext):
     return runs
 
 
-def take_string(c, s, limit=True, where=None):
+def word_hits(s):
+    """`s` 里第一处口语用词，返回 `(别用, 改用)`；没有就是 `None`。
+
+    抽出来是给两条路共用的：生产代码那一条（`take_string`）与测试文件那一条
+    （`counts_of` 里 `test` 那个分支）。两份实现会漂开 —— 而这两条判的本来
+    就是同一张表。
+
+    反引号跨度里的是引用这个词本身（「不许写成 `读不到`」），不是在用它做提示
+    文字 —— 与 J 同一条豁免。前面紧挨着的那个字在 `not_after` 里就不算这一条：
+    中文没有词边界，`的话` 会撞上「说的话」，`别的` 会撞上「识别的」。
+    """
+    prose = BACKTICK.sub(lambda x: " " * len(x.group(0)), s)
+    for bad, good, not_after in UI_TERMS:
+        k = prose.find(bad)
+        while k >= 0:
+            if not (k and prose[k - 1] in not_after):
+                return (bad, good)
+            k = prose.find(bad, k + 1)
+    return None
+
+
+def test_strings(rel, text, ext, cmasked):
+    """测试文件里会被写出来的那些字：用例名、断言消息、期望值。
+
+    只收单行字面量。用例名与断言消息本来就写单行 —— 跨行的那种用 `+` 或
+    Python 的隐式拼接，每一段仍旧是单行，照样收得到。跨行串不收，是因为测试
+    文件里它们多半是夹具（`renderer-dom` 那些喂给渲染器的源码片段），改了等于
+    把被测对象也改了；而且 JS 测试里正则字面量遍地是引号（`/'[^']+'$/`），
+    跨行配对会被引错，把注释当成字符串 —— 那是假红，假红会让检查被绕过。
+
+    注释不在这里 —— 它们走另一条路（`block_lines`/`split_line`），照判。
+    """
+    out = []
+    for i, line in enumerate(cmasked.splitlines()):
+        if split_line(line, ext)[0] != "code":
+            continue
+        for m in QUOTED.finditer(line):
+            out.append((m.group(0)[1:-1], "%s:%d" % (rel, i + 1)))
+    return out
+
+
+def take_string(c, s, limit=True, where=None, dash=True):
     """一条会被画出来的字符串，记进 `c`。没有中文的不算。
 
     `limit` 只对单行串开。跨行的那些是整段文字（`--help` 的用法表、安装器的
     整条报错），它们本来就该长 —— 「界面文字要短，读者才会去看」那条理由
     在那里不成立。跨行串仍旧受 J2 管（记号与破折号一个都不许有）。
+
+    `dash` 关掉的是 J2 里的破折号那一项，只给测试文件的字符串关（见 L 那一段）。
+    「短」那两条（K 与这一项）要的都是同一样东西：一句话别套一句话。界面文字
+    受它管，用例名与断言消息不受。
 
     `where` 是给 `--ui` 用的位置（`文件:行`）。不传就是 `?`。
     """
@@ -610,27 +701,57 @@ def take_string(c, s, limit=True, where=None):
     c["dash"] += s.count(DASH)
     # 加粗要成对才算，而且按内容认：`client/**` 这种 glob 里的星号不是记号，
     #   一行里写两个 glob 也不该凑成一对。
-    if MARK.search(s) or BOLD_SPAN.search(s) or DASH in s:
+    if MARK.search(s) or any(bold_spans(s)) or (dash and DASH in s):
         c["strm"] += 1
     if limit and n > STRING_MAX_HAN:
         c["long"] += 1
-    # L：提示文字的用词。反引号跨度里的是**引用**这个词本身（「不许写成
-    #   `读不到`」），不是在用它做提示文字 —— 与 J 同一条豁免。
-    prose = BACKTICK.sub(lambda x: " " * len(x.group(0)), s)
-    hit = False
-    for bad, good, not_after in UI_TERMS:
-        k = prose.find(bad)
-        while k >= 0:
-            # 前面紧挨着的那个字在 `not_after` 里就不算这一条：`的话` 撞上
-            #   「说的话」、`别的` 撞上「识别的」。整串只看第一个真命中。
-            if not (k and prose[k - 1] in not_after):
-                c["word"] += 1
-                c["word_at"].append((where, bad, good, s.replace("\n", "⏎")))
-                hit = True
-                break
-            k = prose.find(bad, k + 1)
-        if hit:
-            break
+    # L：提示文字的用词（见 `word_hits`）。
+    hit = word_hits(s)
+    if hit:
+        c["word"] += 1
+        c["word_at"].append((where, hit[0], hit[1], s.replace("\n", "⏎")))
+
+
+def star_only(c, text):
+    """`.yml` / `.yaml` / `.json`：整份按注释判，只数记号与成对加粗。
+
+    这三类里的中文只有两个来源：YAML 的 `#` 注释，与数据字段的值。两类都不是
+    「会被画出来的一句话」，所以 K 与 L 在这里不判 —— 判了的话，写着那张词表的
+    `tools/ui-terms.json` 自己就红七十几条（它的左列逐字列着那批词）。
+
+    判的是记号与成对加粗：那几个字符在任何文件里都不是排版手段。这一条原先
+    没人守 —— `.github/workflows/checks.yml` 一份就有 50 处，`★` 在那里是
+    「这一步要紧」的记号，而 CI 的注释也是有读者的文字。
+
+    行集是「所有非空行」，与注释那一遍同一个形状：JSON 里一段说明折成几行是
+    常事，按行配加粗会整类漏掉（注释那一遍栽过同一个坑，见 J）。
+    """
+    runs, cur = [], []
+    for i, line in enumerate(text.splitlines()):
+        prose = BACKTICK.sub(lambda x: " " * len(x.group(0)), line)
+        c["han"] += len(HAN.findall(prose))
+        c["dash"] += prose.count(DASH)
+        c["star"] += len(MARK.findall(prose))
+        if cur and (i != cur[-1][0] + 1 or not line.strip()):
+            runs.append(cur)
+            cur = []
+        if line.strip():
+            cur.append((i, line))
+    if cur:
+        runs.append(cur)
+    for run in runs:
+        joined = "\n".join(b for _, b in run)
+        code = [(x.start(), x.end()) for x in BACKTICK.finditer(joined)]
+
+        def quoted(k):
+            return any(s <= k < e for s, e in code)
+
+        for mm in bold_spans(joined):
+            a, b = mm.start(), mm.end() - 2
+            if quoted(a) or quoted(a + 1) or quoted(b) or quoted(b + 1):
+                continue
+            c["bold"] += 1
+    c["star"] += c["bold"]
 
 
 def counts_of(rel, text):
@@ -650,6 +771,11 @@ def counts_of(rel, text):
     c = {"star": 0, "strm": 0, "long": 0, "btn": 0, "word": 0,
          "han": 0, "bold": 0, "dash": 0, "word_at": []}
     if not ext:
+        return c
+
+    # `.yml` / `.yaml` / `.json` 整份按注释判，判完就回去（见 `star_only`）。
+    if ext in DOC_LIKE:
+        star_only(c, text)
         return c
 
     # 跨行的字符串先挖空：它们里面的行按行看与代码无异，会被整片漏掉。
@@ -694,21 +820,21 @@ def counts_of(rel, text):
     if cur:
         runs.append(cur)
 
-    # 成对加粗按**连续的一段注释**找，不按行找：注释里一句话可以折成两行，
-    #   而那对星号照样成对（`fake-job.js` 的 `**站点自己的\n账**`、
-    #   `app.css` 的 `**同一个\n数**`）。按行找的话它们一个都看不见。
-    #   落单的 `**`（glob、`**kwargs`）不算加粗，也不单独报 —— 那个写法在注释里
+    # 成对加粗按连续的一段注释找，不按行找：注释里一句话可以折成两行，
+    #   而那对星号照样成对（`fake-job.js` 的 `站点自己的\n账`、
+    #   `app.css` 的 `同一个\n数`）。按行找的话它们一个都看不见。
+    #   落单的 ``（glob、`kwargs`）不算加粗，也不单独报 —— 那个写法在注释里
     #   是正常的，报出来是假红。
     for run in runs:
         joined = "\n".join(b for _, b in run)
-        # 反引号跨度里的星号是字面量（`client/**`）。判的是**位置**，不挖空格：
-        #   挖了的话，`**必须 `goodbye` 之前停**` 这种会以空格收尾，配不上。
+        # 反引号跨度里的星号是字面量（`client/`）。判的是位置，不挖空格：
+        #   挖了的话，`必须 `goodbye` 之前停` 这种会以空格收尾，配不上。
         code = [(x.start(), x.end()) for x in BACKTICK.finditer(joined)]
 
         def quoted(k):
             return any(s <= k < e for s, e in code)
 
-        for mm in BOLD_SPAN.finditer(joined):
+        for mm in bold_spans(joined):
             a, b = mm.start(), mm.end() - 2
             if quoted(a) or quoted(a + 1) or quoted(b) or quoted(b + 1):
                 continue
@@ -716,8 +842,17 @@ def counts_of(rel, text):
     # 加粗与记号同属 J：棘轮按 `star` 一条计（`bold` 另留给 `--report` 的密度）。
     c["star"] += c["bold"]
 
-    # ── 文字：测试文件的字符串不判（用例名与断言消息本轮不动）。 ──────
+    # ── 文字：检查器自己的样本不判（见 SAMPLE_NAME）。注释上面已经判过了。 ──
+    if SAMPLE_NAME.match(os.path.basename(rel)):
+        return c
+
+    # ── 文字：测试文件不判 K（用例名可以长），其余同生产代码。 ──────────
+    #   用例名与断言消息跟生产文案是同一套话，也是同一套体例：`★` 排位与成对
+    #   加粗曾经在这里合法，于是那 33 份是全仓唯一能继续生产新记号的地方 ——
+    #   改一批、它长一批，清的速度赶不上写的速度。
     if test:
+        for s, where in test_strings(rel, text, ext, cmasked):
+            take_string(c, s, limit=False, where=where, dash=False)
         return c
 
     if ext == ".html":
@@ -735,12 +870,12 @@ def counts_of(rel, text):
         for m in QUOTED.finditer(line):
             take_string(c, m.group(0)[1:-1], where="%s:%d" % (rel, i + 1))
     # 拆到两行上的成对加粗：单看每一个字面量都不是一对，拼起来才是（见
-    #   `string_runs`）。只补**跨字面量**那一部分，单个字面量里配上的
+    #   `string_runs`）。只补跨字面量那一部分，单个字面量里配上的
     #   `take_string` 已经数过了。
     for lits in string_runs(cmasked, ext):
         joined = "".join(lits)      # 拼接不带分隔符：两行之间本来就没有字符
-        cross = (len(BOLD_SPAN.findall(joined))
-                 - sum(len(BOLD_SPAN.findall(x)) for x in lits))
+        cross = (len(list(bold_spans(joined)))
+                 - sum(len(list(bold_spans(x))) for x in lits))
         c["strm"] += max(0, cross)
     for a, b in spans:
         body = text[a:b]
@@ -762,13 +897,12 @@ def judged(rel):
     不经过 `read_repo()`。第一版把这一条写在 `read_repo()` 里，自测当场发现
     「不判的两类」在自测里根本没生效。
     """
-    return (not rel.startswith(SKIP_PREFIX)
-            and not SKIP_NAME.match(os.path.basename(rel)))
+    return not rel.startswith(SKIP_PREFIX)
 
 
 def read_repo(root):
     """`{仓库相对路径: 文本}` —— 候选文件的全部。判不判由 `judged()` 定。"""
-    # `--others --exclude-standard`：**未跟踪的也要扫**。少了它，一份新写的
+    # `--others --exclude-standard`：未跟踪的也要扫。少了它，一份新写的
     #   文件在 `git add` 之前是隐形的 —— 而那正是"新写的代码"最该被看住的时候。
     #   （判据在这个盲区里放过三个文件，藏在两个提交里，见账本。）
     listing = subprocess.run(["git", "ls-files", "--cached", "--others",
@@ -795,7 +929,7 @@ def read_repo(root):
 def _read_doc(root):
     """那份文档的正文；读不到返回 `None`。
 
-    读不到**不能**当成"没有要判的东西" —— 那份文档被改名或搬走之后，M 会
+    读不到不能当成"没有要判的东西" —— 那份文档被改名或搬走之后，M 会
     静默变成"没有在看"，而绿与"没在看"同形正是这个仓库一路在躲的形状。
     """
     try:
@@ -855,7 +989,6 @@ def compare(files, base):
 
 def run(root):
     files = read_repo(root)
-    skipped = sorted(r for r in files if not judged(r))
     base = load_baseline()
     problems, seen = compare(files, base)
     doc = _read_doc(root)
@@ -863,11 +996,12 @@ def run(root):
         problems.append("%s：读不到这份文档 —— M 判据失去目标，先把它找回来"
                         % QUOTE_DOC)
     else:
-        # 语料是**被判的那些**源码。检查器自己与用例不算 —— 检查器的样本里
+        # 语料是被判的那些源码。检查器自己与用例不算 —— 检查器的样本里
         #   写着故意违规的字面量（第一版把样本也当语料，于是 M 自己把自己
         #   要抓的两条遮住了）。
         corpus = "\n".join(t for rel, t in files.items()
-                           if judged(rel) and not is_test_file(rel))
+                           if judged(rel) and not is_test_file(rel)
+                           and not SAMPLE_NAME.match(os.path.basename(rel)))
         problems += prompt_quote_problems(doc, corpus)
 
     if problems:
@@ -898,10 +1032,15 @@ def run(root):
         print("    …另有 %d 份" % (len(left) - 8))
 
     # 不判的必须看得见 —— 悄悄跳过一份，绿就与「没在看」同形。
-    if skipped:
-        print("\n· 不判的：%d 份检查器脚本（样本里写着故意违规的字面量）：%s"
-              % (len(skipped), " / ".join(skipped)))
-    print("· 不判的：测试文件的字符串（用例名与断言消息本轮不动；注释照判）")
+    samples = sorted(r for r in files
+                     if SAMPLE_NAME.match(os.path.basename(r)))
+    if samples:
+        print("\n· 不判的：%d 份检查器脚本的字符串（样本里写着故意违规的字面量；"
+              "注释照判）：%s" % (len(samples), " / ".join(samples)))
+    print("· 不判的：测试文件字符串的 K 与破折号（句子的长短由内容定；"
+          "记号、成对加粗、用词照判）")
+    print("· 不判的：%s 里的 K 与 L（那几类里没有画给用户看的一句话；"
+          "记号与成对加粗照判）" % " / ".join(DOC_LIKE))
     print("· 不判的：`%s` 那一棵（字节被 `expected.json` 钉住）" % SKIP_PREFIX[0])
     return 0
 
@@ -942,7 +1081,7 @@ def prompt_quote_problems(doc, corpus):
     for n, line in enumerate(doc.splitlines(), 1):
         if not line.startswith("| 「"):
             continue
-        # 只判表行第一列（〈报错里出现〉）。**标题不判**：这一篇的标题是标题，
+        # 只判表行第一列（〈报错里出现〉）。标题不判：这一篇的标题是标题，
         #   好几处本来就写着 `xxx` / `X` / `N` 这类占位（"报「default_plugin
         #   = xxx 在本站没有装」"），逼它们逐字就得把 `%r` 写进标题里。那是一处
         #   明写的欠判，不是漏看。
@@ -1159,8 +1298,11 @@ def self_test():
          {"client/src/main/a.js": "const s = '配置里有无法识别的键';\n"}, None),
         ("而「别的进程」照报",
          {"client/src/main/a.js": "const s = '被别的进程占着';\n"}, "word"),
-        ("测试文件的字符串仍不判",
-         {"client/test/a.test.mjs": "test('读不到时返回 null', () => {});\n"}, None),
+        ("测试文件里的用例名照判（它是这套文案的第二份说明）",
+         {"client/test/a.test.mjs": "test('读不到时返回 null', () => {});\n"}, "word"),
+        ("测试文件里的断言消息照判",
+         {"client/test/a.test.mjs":
+          "assert.equal(x, 1, '拿不到那一格时要如实说');\n"}, "word"),
         # ── 块注释与 docstring 的正文不是字符串（L 立之前它是假红的来源） ──
         ("JS 块注释正文里的引号不是字符串",
          {"client/src/main/a.js": '/* 说明 "读不到" 这一句 */\nconst a = 1;\n'}, None),
@@ -1171,12 +1313,46 @@ def self_test():
         ("而闭记号之后那一行剩下的部分照判 —— 整行跳过会漏掉真的字符串",
          {"client/src/main/a.js": "/* 说明 */ const s = '读不到 X';\n"}, "word"),
         # ── 不判的三类 ─────────────────────────────────────────────────
-        ("测试文件的字符串不判（用例名本轮不动）",
-         {"client/test/a.test.mjs": "test('★ 写失败：返回 {ok:false}', () => {});\n"}, None),
+        ("测试文件的用例名里带 `★` 也照判（排位不用记号）",
+         {"client/test/a.test.mjs": "test('★ 写失败：返回 {ok:false}', () => {});\n"},
+         "strm"),
+        ("测试文件的断言消息里的成对加粗也照判",
+         {"client/test/a.test.mjs":
+          "assert.equal(x, 1, '这条**必须**留住');\n"}, "strm"),
+        ("而用例名长过 60 汉字不判（K 只管生产文案）",
+         {"client/test/a.test.mjs":
+          "test('%s', () => {});\n" % ("很长的用例名" * 12)}, None),
+        ("用例名里的破折号也不判（它禁的是长句，不是记号）",
+         {"client/test/a.test.mjs":
+          "test('让位要靠 margin —— 用 padding 时滚动条会钻到底下', () => {});\n"},
+         None),
+        ("而生产字符串里的破折号照判",
+         {"client/src/a.js": "throw new Error('写失败 —— 目录不存在');\n"}, "strm"),
         ("而测试文件的注释照判",
          {"client/test/a.test.mjs": "// ★ 这条注释要改\n"}, "star"),
-        ("`tools/check-*.py` 整份不判", {"tools/check-a.py": "# ★ 样本\n"}, None),
-        ("`tools/self-test-*.sh` 整份不判", {"tools/self-test-a.sh": "# ★ 样本\n"}, None),
+        ("检查器自己的注释照判 —— 豁免只给样本字符串",
+         {"tools/check-a.py": "# ★ 样本\n"}, "star"),
+        ("自测脚本的注释照判",
+         {"tools/self-test-a.sh": "# ★ 样本\n"}, "star"),
+        ("而检查器脚本里的样本字符串不判（它写着故意违规的字面量）",
+         {"tools/check-a.py": "case('★ 假样本', 'x', None)\n"}, None),
+        # ── `.yml` / `.yaml` / `.json`：整份按注释判 ─────────────────────
+        ("YAML 注释里的 `★` 照判",
+         {".github/workflows/a.yml": "jobs:\n  # ★ 这一步要紧\n  build: 1\n"}, "star"),
+        ("YAML 值里的成对加粗也照判",
+         {"client/a.yml": "name: Slurmate\n# **故意**分开\n"}, "star"),
+        ("JSON 的说明字段里的 `★` 照判",
+         {"tools/a.json": '{\n  "_": ["★ 这一段是给维护者看的"]\n}\n'}, "star"),
+        ("而两条 glob 隔着几行凑成的「加粗」是假红（`client/**` 与 `plugins/**`）",
+         {".github/workflows/a.yml":
+          "on:\n  push:\n    paths:\n      - 'client/**'\n"
+          "      # 两行注释夹在中间\n      - 'plugins/**'\n"}, None),
+        ("`**kwargs` 与 `2 ** 8` 不算加粗（它们本来就不是成对的）",
+         {"client/a.yml": "a: 1\n# 见 **kwargs 与 2 ** 8\n"}, None),
+        ("`.json` 里超长的中文不判 K（那几类里没有画给用户看的一句话）",
+         {"tools/a.json": '{"_": ["%s"]}\n' % ("很长的说明" * 12)}, None),
+        ("`.json` 里的口语用词也不判 L（词表自己就列着那批词）",
+         {"tools/a.json": '{"_": ["读不到就说读不到"]}\n'}, None),
     ]
     bad = []
     for why, files, expect in cases:
@@ -1188,7 +1364,7 @@ def self_test():
             bad.append("没抓到：%s（期望 %r，实际 %r）" % (why, expect, got))
     # ── M：文档里引用的提示文字要能在源码里找到 ─────────────────────────
     #
-    # M 判的不是"一份文件里有什么"，是**两段文本之间的关系**（文档里写的字样
+    # M 判的不是"一份文件里有什么"，是两段文本之间的关系（文档里写的字样
     #   在不在源码里），所以它进不了上面那套 `(样本文件, 期望)` 的形状。
     corpus = "const s = '读取站点的插件快照表失败';\n"
     m_cases = [

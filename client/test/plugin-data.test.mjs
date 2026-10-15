@@ -82,7 +82,7 @@ const partitionOf = (p, s) => pluginData.partitionOf(pluginData.identityOf(p, s)
 
 // ── 共享组那一格（有缺省）：两个键都不写 / inherit / perVersion ──────────────
 
-test('★★ 缺省：两个键都不写 ⇒ 第二段是一个**常量**（不是版本号）', () => {
+test('缺省：两个键都不写，第二段是一个常量（不是版本号）', () => {
   const a = plugin({ version: '1.0.0' });
   const b = plugin({ version: '1.0.1' });
 
@@ -93,7 +93,7 @@ test('★★ 缺省：两个键都不写 ⇒ 第二段是一个**常量**（不�
   //   （一个改过数据格式的新版本会读到旧格式的东西）写在 plugin-data.js 的文件头，
   //   出口是 `perVersion: true`（见下一条）。
   assert.equal(partitionOf(a, space()), partitionOf(b, space()),
-    '缺省是**继承**：同一个插件的两个版本必须落在同一份存储上');
+    '缺省是继承：同一个插件的两个版本必须落在同一份存储上');
 
   // `data` 写了、但两个键都不写，与完全没写、与写成 null 都是同一件事 ——
   // "缺省"不是第三档，它就是这个取值（所以没有"半个声明"这种状态）。
@@ -104,29 +104,29 @@ test('★★ 缺省：两个键都不写 ⇒ 第二段是一个**常量**（不�
   }
 });
 
-test('★ 缺省那个常量本身必须是个**合法的共享组名**（它进磁盘目录名）', () => {
+test('缺省那个常量本身必须是个合法的共享组名（它进磁盘目录名）', () => {
   assert.match(pluginData.DEFAULT_GROUP, pluginData.GROUP_RE,
-    '改名改出格 ⇒ 磁盘上会出现一个 identityOfDiskName 认不出的段');
+    '改名改出格，磁盘上会出现一个 identityOfDiskName 认不出的段');
   // 它与"作者显式写了这个名字"同义 —— 缺省不是一种特殊状态，只是这个取值。
   const explicit = plugin({ contributes: { ports: 1, concurrent: false,
     data: { inherit: pluginData.DEFAULT_GROUP } } });
   assert.equal(groupOf(explicit), groupOf(plugin()));
 });
 
-test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺省**，现在要明写）', () => {
+test('perVersion: true，每个版本各一份（这是从前那个缺省，现在要明写）', () => {
   const decl = (v) => plugin({ version: v,
     contributes: { ports: 1, concurrent: false, data: { perVersion: true } } });
 
   assert.equal(groupOf(decl('1.0.0')), '1.0.0',
-    '★ 第二段是**版本号** —— 所以它未必匹配 GROUP_RE，这正是 identityOfDiskName 不猜的原因');
+    '第二段是版本号 —— 所以它未必匹配 GROUP_RE，这正是 identityOfDiskName 不猜的原因');
   // 第二段变了，存储就变了。而落盘的那一份 group 由 `spaceFor` 记下来
   //   （它读的正是 `groupOf`），所以这里把两者都摆出来：清单说了什么，盘上就存什么。
   assert.notEqual(groupOf(decl('1.0.0')), groupOf(decl('1.0.1')),
-    '声明的就是"升级换一份"：新版本读不到旧数据');
+    '声明的就是"升级换一份"：新版本无法读取旧数据');
   assert.notEqual(
     partitionOf(decl('1.0.0'), space({ group: groupOf(decl('1.0.0')) })),
     partitionOf(decl('1.0.1'), space({ group: groupOf(decl('1.0.1')) })),
-    '第二段不同 ⇒ 两份存储');
+    '第二段不同，两份存储');
   // 与缺省必须不同 —— 否则这个键是个摆设，而上面那两句照样绿。
   assert.notEqual(groupOf(decl('1.0.0')), groupOf(plugin()),
     'perVersion 与缺省必须落在两份不同的存储上');
@@ -139,7 +139,7 @@ test('★ perVersion: true ⇒ 每个版本各一份（这是**从前那个缺�
 
 // ── 身份那三段：第二段从清单来（或从那一份数据来），第三段是那一份数据 ──
 
-test('★★ 要工作区的插件：身份是**三段**，而后两段全由那一份数据说了算', () => {
+test('要工作区的插件：身份是三段，而后两段全由那一份数据说了算', () => {
   const s = space({ id: 's0000000000ab', group: 'editor' });
   assert.deepEqual(pluginData.identityOf(concurrent(), s), [ID, 'editor', 's0000000000ab']);
   assert.equal(pluginData.partitionOf(pluginData.identityOf(concurrent(), s)),
@@ -149,7 +149,7 @@ test('★★ 要工作区的插件：身份是**三段**，而后两段全由那
     partitionOf(concurrent(), space({ id: 's0000000000ff', group: 'editor' })));
 });
 
-test('★★ `concurrent` **不再**决定有没有第三段 —— 那是这次重做的中心', () => {
+test('`concurrent` 不再决定有没有第三段 —— 那是这次重做的中心', () => {
   // 从前第三段由 `contributes.concurrent` 说了算，于是一个要端口、却声明
   //   不能同时开两份的插件整台机器上只有一份数据（所有工作区共用一份），
   //   而它本来每个工作区里都该有自己的那一份。现在第三段由 `ports` 决定
@@ -158,7 +158,7 @@ test('★★ `concurrent` **不再**决定有没有第三段 —— 那是这次
   const notConcurrent = plugin({
     contributes: { ports: 1, concurrent: false, data: { inherit: 'editor' } } });
   assert.deepEqual(pluginData.identityOf(notConcurrent, s), [ID, 'editor', s.id],
-    '★ 不能多开的插件**照样有第三段**');
+    '不能多开的插件照样有第三段');
   // 两份数据就是两份存储 —— 它只是不许两份同时活着（那是运行期槽闸的事）。
   assert.notEqual(partitionOf(notConcurrent, s),
     partitionOf(notConcurrent, space({ id: 's0000000000ff', group: 'editor' })));
@@ -167,17 +167,17 @@ test('★★ `concurrent` **不再**决定有没有第三段 —— 那是这次
   assert.equal(pluginData.canOpenSecond(concurrent()), true);
 });
 
-test('★★ 不要数据空间的插件：两段，第二段只能从**清单**来', () => {
+test('不要数据空间的插件：两段，第二段只能从清单来', () => {
   const p = relay();
   assert.deepEqual(pluginData.identityOf(p), [p.id, 'relay'],
-    '★ 它根本没有数据对象可问 —— 那一份 `<id>@relay` 不属于任何工作区');
+    '它根本没有数据对象可问 —— 那一份 `<id>@relay` 不属于任何工作区');
   assert.equal(partitionOf(p), `persist:${p.id}@relay`);
   assert.equal(pluginData.needsSpace(p), false);
   // 拿一份数据去问它也是两段（它不按数据分），但那不是一条会走到的路 ——
   //   所以这里不钉它，免得把"不该发生的事"写成一条保证。
 });
 
-test('★★ 要数据空间却拿不到那一份 ⇒ 抛，不回落成两段', () => {
+test('要数据空间却无法获取那一份，抛，不回落成两段', () => {
   const p = concurrent();
   for (const bad of [undefined, null]) {
     assert.throws(() => pluginData.identityOf(p, bad), /contributes\.ports: 1/,
@@ -191,7 +191,7 @@ test('★★ 要数据空间却拿不到那一份 ⇒ 抛，不回落成两段',
   assert.doesNotThrow(() => pluginData.identityOf(relay(), null));
 });
 
-test('★★ 第二段取自**那一份数据自己**，不是现从清单算', () => {
+test('第二段取自那一份数据自己，不是现从清单算', () => {
   // `inherit` 声明的是"哪些版本可以共用一份"，而实际用哪一份由引用表说了算。
   // 取清单那一侧会有一种静默的失败：作者改了共享组而引用表还没跟上的那段时间里，
   //   同一个插件会去读一个新路径，而数据在旧路径上（症状是"布局又重置了"，没有报错）。
@@ -200,10 +200,10 @@ test('★★ 第二段取自**那一份数据自己**，不是现从清单算', 
   const p = concurrent();                       // 清单算出来是 'editor'
   const stale = space({ group: 'editor2' });    // 那一份记着的是别的
   assert.deepEqual(pluginData.identityOf(p, stale), [ID, 'editor2', stale.id],
-    '★ 以那一份数据记着的为准 —— 数据就在那个路径上');
+    '以那一份数据记着的为准 —— 数据就在那个路径上');
 });
 
-test('★ 别的插件共用同一个共享组名，也不会共用同一份存储', () => {
+test('其他插件共用同一个共享组名，也不会共用同一份存储', () => {
   // 共享组名是作者自己起的，两个插件正好都叫 editor 是完全正常的。分区名的头一段
   // 是插件 id，所以它们不会撞 —— 少了这一段（只有末段），
   // 两个声明了 ports 的插件共用一个工作区时会读写同一份存储。
@@ -215,9 +215,9 @@ test('★ 别的插件共用同一个共享组名，也不会共用同一份存�
 
 // ── 磁盘上的那个名字（对账要读它）────────────────────────────────────────────
 
-test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 那一段是小写）', () => {
+test('磁盘上的目录名 = 分区名去掉前缀、ASCII 折叠（id 那一段是小写）', () => {
   // Electron 44 的 `MakePartitionName` = `EscapePath(ToLowerASCII(分区名))`。
-  assert.equal(pluginData.foldAscii('01M2ABC'), '01m2abc', 'A-Z 各减 32，别的原样');
+  assert.equal(pluginData.foldAscii('01M2ABC'), '01m2abc', 'A-Z 各减 32，其他原样');
   assert.equal(pluginData.diskNameOf(['01M2ABC', 'editor', 's0000000000ab']),
     '01m2abc@editor@s0000000000ab');
   // 折叠是对整个字符串做的（`MakePartitionName` 就是这样），而合法的那三段里
@@ -229,7 +229,7 @@ test('★ 磁盘上的目录名 = 分区名去掉前缀、**ASCII 折叠**（id 
 
 // ── 插件数据目录的那个名字（对账的第二个根要读它）────────────────────────────
 
-test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份身份因此永远是兄弟', () => {
+test('数据目录名是一个名字（不含分隔符）—— 两份身份因此永远是兄弟', () => {
   const two = pluginData.dataDirNameOf(['01M2ABC', 'editor']);
   const three = pluginData.dataDirNameOf(['01M2ABC', 'editor', 's0000000000ab']);
   assert.equal(two, '01m2abc@editor');
@@ -244,7 +244,7 @@ test('★ 数据目录名是**一个名字**（不含分隔符）—— 两份�
   assert.ok(!three.includes('/') && !three.includes('\\'), '名字里不能有路径分隔符');
 });
 
-test('★ 两个根下的同一个身份必须同名（对账只有一张"该有的"表）', () => {
+test('两个根下的同一个身份必须同名（对账只有一张"该有的"表）', () => {
   for (const id of [['01M2ABC'], ['01M2ABC', 'editor'],
     ['01M2ABC', 'editor', 's0000000000ab']]) {
     assert.equal(pluginData.dataDirNameOf(id), pluginData.diskNameOf(id),
@@ -253,7 +253,7 @@ test('★ 两个根下的同一个身份必须同名（对账只有一张"该有
   }
 });
 
-test('★ 折叠是单射：两个不同的 ULID 折不出同一个名字', () => {
+test('折叠是单射：两个不同的 ULID 折不出同一个名字', () => {
   // 不区分大小写的文件系统（macOS / Windows）上，两个身份折成同一个名字就会
   // 共用一个目录。`ulid.ENCODING` 只有大写，而折叠对"大写字母+数字"是单射，
   // 所以两个不同的 ULID 折不出同一个串 —— 后两段的字符集本来就只允许小写，折不动。
@@ -265,10 +265,10 @@ test('★ 折叠是单射：两个不同的 ULID 折不出同一个名字', () =
   assert.equal(pluginData.foldAscii(n), n);
 });
 
-test('★ foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-export）', () => {
+test('foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-export）', () => {
   assert.equal(P.foldAscii, pluginData.foldAscii);
   // 只折 `A..Z`。`İ`（U+0130）与 `K`（U+212A KELVIN）必须原样 —— 用
-  //   `toLowerCase()` 会把它们折成别的字符，于是"同一个包在另一台机器上装不上"。
+  //   `toLowerCase()` 会把它们折成别的字符，于是"同一个包在另一台机器上无法安装"。
   assert.equal(P.foldAscii('AİK'), 'aİK');
 });
 
@@ -297,7 +297,7 @@ test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段�
   }
 });
 
-test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', () => {
+test('往返：身份 → 磁盘名 → 解回来，三段一个都不丢', () => {
   const a = pluginData.identityOf(concurrent(), space({ group: 'editor' }));
   const back = pluginData.identityOfDiskName(pluginData.diskNameOf(a));
   assert.deepEqual([back.id, back.group, back.instance],
@@ -322,7 +322,7 @@ test('★ 往返：身份 → 磁盘名 → 解回来，三段一个都不丢', 
   assert.deepEqual([back3.id, back3.group, back3.instance], [DISK_ID, '2.3.4', null]);
 });
 
-test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会**恒为假**', () => {
+test('samePartition：分区名与磁盘名只差折叠 —— 直接比会恒为假', () => {
   const id = pluginData.identityOf(concurrent(), space({ group: 'editor' }));
   const partition = pluginData.partitionOf(id);
   assert.equal(pluginData.samePartition(partition, pluginData.diskNameOf(id)), true);
@@ -336,7 +336,7 @@ test('★ samePartition：分区名与磁盘名只差折叠 —— 直接比会*
   assert.equal(pluginData.samePartition(partition, null), false);
 });
 
-test('★ 四条判据各管一件事：hasSurface / needsSpace / canOpenSecond / portCountOf', () => {
+test('四条判据各管一件事：hasSurface / needsSpace / canOpenSecond / portCountOf', () => {
   const surface = { kind: 'web', path: '/' };
   const cases = [
     // [contributes, 有界面, 要数据空间（，有第三段）, 能同时开两份, 端口个数]
@@ -396,13 +396,13 @@ const reject = (data) => {
   return r.error;
 };
 
-test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不上（不是"当成不能"）', () => {
+test('contributes.concurrent： 必填 —— 不写这一格，无法安装（不是"当成不能"）', () => {
   // 这一条钉的是"没有缺省"，而它与同一个清单里另外两格（ports / submitPubkey）
   //   刻意相反：那两个缺省都在安全侧，基座答得了。
   //   而"你的代码能不能同时处理两份"基座答不了 —— 缺省无论取哪边都是替作者表态。
   const 没写 = inspect(manifest({ contributes: { ports: 1 } }));
   assert.match(没写.error || '', /contributes\.concurrent 是必填的/,
-    '缺了这一格必须**拒绝安装**，而不是静默当成 false');
+    '缺了这一格必须拒绝安装，而不是静默当成 false');
   assert.equal(没写.entry, undefined);
 
   // 反例：写了的照常收下，而且两种取值都收 —— 否则上面那一条会因为"什么都拒"而全绿。
@@ -417,7 +417,7 @@ test('contributes.concurrent：★★ 必填 —— 不写这一格 ⇒ 装不�
   assert.match(bad.error, /contributes\.concurrent 必须是 true 或 false/);
 });
 
-test('contributes.concurrent：★ 能多开要求一个端口 —— 没有第一份就没有第二份可指', () => {
+test('contributes.concurrent： 能多开要求一个端口 —— 没有第一份就没有第二份可指', () => {
   // 这一条是组合判定：两半各自都没错，错在放一起。第二份 = 第二份数据
   //   （一份临时的副本），而一份数据存在的理由就是它那个端口 —— 所以
   //   `ports: 0` 的插件没有"第二份"可指。判在装之前（与 engines 同一条纪律）。
@@ -439,14 +439,14 @@ test('contributes.concurrent：★ 能多开要求一个端口 —— 没有第�
   assert.match(badPorts.error, /contributes\.ports 必须是 0 到 1 之间的整数/);
 });
 
-test('★★ contributes.ports：是个数、有缺省、有一个说得出理由的上界', () => {
+test('contributes.ports：是个数、有缺省、有一个说得出理由的上界', () => {
   // ── 缺省 0 ──
   const 没写 = inspect(manifest({ contributes: { concurrent: false } }));
   assert.ok(!没写.error, `不写这一格是合法的：${没写.error}`);
   assert.equal(没写.entry.plugin.contributes.ports, 0,
-    '缺省落成**具体的数** 0 —— 下游拿起来就能用，不必自己再判一次');
+    '缺省落成具体的数 0 —— 下游拿起来就能用，不必自己再判一次');
   assert.equal(pluginData.needsSpace(没写.entry.plugin), false,
-    '缺省 0 ⇒ 不要数据空间（与从前的 `layout: false` 同义）');
+    '缺省 0，不要数据空间（与从前的 `layout: false` 同义）');
 
   // ── 1 是今天唯一"要一份"的取值 ──
   const one = inspect(manifest({ contributes: { ports: 1, concurrent: false } }));
@@ -473,7 +473,7 @@ test('★★ contributes.ports：是个数、有缺省、有一个说得出理�
   assert.equal(nul.entry.plugin.contributes.ports, 0);
 });
 
-test('★ contributes.layout 已经没了 —— 老写法要**指得到新名字**', () => {
+test('contributes.layout 已经没了 —— 老写法要指得到新名字', () => {
   // 与 `data.perInstance` 那条改名提示同一个理由：只说"认不得的键：layout"
   //   的话，作者知道错了却不知道该改成什么，而这一格还换了形（开关 → 个数）。
   const r = inspect(manifest({ contributes: { layout: true, concurrent: false } }));
@@ -484,7 +484,7 @@ test('★ contributes.layout 已经没了 —— 老写法要**指得到新名�
   assert.equal(r.entry, undefined);
 });
 
-test('contributes.data：合法的收下，并且**规整成固定形状**', () => {
+test('contributes.data：合法的收下，并且规整成固定形状', () => {
   const r = accept({ inherit: 'editor' });
   assert.ok(!r.error, `这份是合法的：${r.error}`);
   assert.deepEqual(r.entry.plugin.contributes.data,
@@ -514,7 +514,7 @@ test('contributes.data：形状不对的一份都收不下，且报错说得清�
   }
 });
 
-test('★★ contributes.data：perVersion 与 inherit 同时写 ⇒ 拒，且点名两个键', () => {
+test('contributes.data：perVersion 与 inherit 同时写，拒，且点名两个键', () => {
   // 这是"两半各自都没错、错在放一起"的那一类（与 concurrent 要求 ports 同形）。
   //   不判的话症状是两个都"成功"：清单里明明写着共用一份，实际落在哪一份却
   //   取决于 `groupOf` 里两行的先后次序 —— 一个改代码顺序就会变的结论，而没有任何
@@ -531,14 +531,14 @@ test('★★ contributes.data：perVersion 与 inherit 同时写 ⇒ 拒，且�
     'perVersion: false 与 inherit 不冲突 —— 它说的正是"不要每个版本一份"');
 });
 
-test('contributes.data：perVersion 的类型不对 ⇒ 拒，且报错说得出该写什么', () => {
+test('contributes.data：perVersion 的类型不对，拒，且报错说得出该写什么', () => {
   for (const bad of ['true', 1, null, {}]) {
     assert.match(reject({ perVersion: bad }), /perVersion 必须是 true \/ false/,
       `${JSON.stringify(bad)} 不是一个布尔值`);
   }
 });
 
-test('contributes.data：★ 老的 perInstance 得到一句**指路**的报错，不是"认不得的键"', () => {
+test('contributes.data： 老的 perInstance 得到一句指路的报错，不是"认不得的键"', () => {
   // 加一个键名、把另一个键改名，最容易留下的症状是"照着报错改，改完还是错"：
   //   `认不得的键：perInstance` 只说"我不认识它"，不说它现在叫什么、搬到哪儿了。
   const old = reject({ inherit: 'editor', perInstance: true });
@@ -549,7 +549,7 @@ test('contributes.data：★ 老的 perInstance 得到一句**指路**的报错�
   assert.match(only, /已经改名成[\s\S]*contributes\.concurrent/);
 });
 
-test('contributes.data：一个声明都不写的插件是**正常**的（那一格有缺省）', () => {
+test('contributes.data：一个声明都不写的插件是正常的（那一格有缺省）', () => {
   // sshd 就是这样：它落盘那几个文件是可丢弃的缓存，共享组那一格它不用表态。
   // 注意它与 `concurrent` 的差别：那一格没有缺省、必须写（见上面第一条），
   //   而这一格不写只是一个保守的选择。
@@ -561,7 +561,7 @@ test('contributes.data：一个声明都不写的插件是**正常**的（那一
   assert.equal(r.entry.plugin.contributes.data, null);
 });
 
-test('★★ slotOf：一个活跃会话占的那个槽（多开的判据就是它）', () => {
+test('slotOf：一个活跃会话占的那个槽（多开的判据就是它）', () => {
   // 这一条是整个并发层存在与否的判据：改回"每次都不同"或者"两个不要工作区的插件
   //   各一个槽"都会让它红，而红的方式正是它要防的那件事。
   assert.equal(pluginData.slotOf('s0000000000ab'), 'space:s0000000000ab');

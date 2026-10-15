@@ -163,7 +163,7 @@ const baseFiles = (over = {}) => ({
 //  1. 打出来的字节 == 符合性向量里那份
 // ==============================================================================
 
-section('1. 一个提交 ⇒ 一份确定的字节');
+section('1. 一个提交，一份确定的字节');
 
 {
   // 用符合性向量那棵真的输入树（不是这里另造一棵）—— 于是"打包器的输出"
@@ -183,29 +183,29 @@ section('1. 一个提交 ⇒ 一份确定的字节');
   check('打包成功', r1.code === 0, r1.err);
   const b1 = fs.readFileSync(out1);
   const b2 = fs.readFileSync(out2);
-  check('★★ 打出来的字节**逐字节**等于符合性向量里那份（三端共用的期望值）',
+  check('打出来的字节逐字节等于符合性向量里那份（三端共用的期望值）',
     b1.equals(unhex(EXPECTED.package.hex)),
     `得到 ${b1.length} 字节 / ${crypto.createHash('sha256').update(b1).digest('hex').slice(0, 16)}，`
     + `期望 ${EXPECTED.package.bytes} 字节 / ${EXPECTED.package.sha256.slice(0, 16)}`);
-  check('★ 同一个提交打两次，逐字节相同（§3.5）', b1.equals(b2));
+  check('同一个提交打两次，逐字节相同（§3.5）', b1.equals(b2));
   const parsed = P.parsePackage(b1);
-  check('★ 内容摘要与夹具一致', parsed.ok && parsed.digest === EXPECTED.digest,
+  check('内容摘要与夹具一致', parsed.ok && parsed.digest === EXPECTED.digest,
     parsed.ok ? parsed.digest : `${parsed.code} ${parsed.why}`);
-  check('★★ 记录次序是 **UTF-8 字节序**（不是 JS 的 `<`）',
+  check('记录次序是 UTF-8 字节序（不是 JS 的 `<`）',
     parsed.ok && parsed.files.map((f) => f.path).join('\n')
       === EXPECTED.files.map((f) => f.path).join('\n'),
     parsed.ok ? parsed.files.map((f) => f.path).join('、') : '');
-  check('★ 而 JS 的 `<` 会给一个**不同**的次序（这一条说明上一条不是在防假想）',
+  check('而 JS 的 `<` 会给一个不同的次序（这一条说明上一条不是在防假想）',
     [...EXPECTED.files.map((f) => f.path)].sort((a, b) => (a < b ? -1 : 1)).join('\n')
       !== EXPECTED.files.map((f) => f.path).join('\n'));
 
   // 0755 归一成 0644 时必须说一声 —— 它确实丢了信息
-  check('★ 树里那份 100755 被归一掉时，输出里说了这件事（不许静默）',
+  check('树里那份 100755 被归一掉时，输出里说了这件事（不许静默）',
     /100755/.test(r1.out) && /0644/.test(r1.out), JSON.stringify(r1.out.slice(-200)));
 
   // verify --against：§3.6 的用例住在这里（部署期没有源码树可对照）
   const v = packer('verify', out1, '--against', plug);
-  check('★ verify --against：负载与源码树逐字节相同（§3.6）',
+  check('verify --against：负载与源码树逐字节相同（§3.6）',
     v.code === 0 && /§3\.6/.test(v.out), v.out + v.err);
   // `--against` 比的是提交（§3.5）：所以要先提交，再比。
   //   只改工作树是不够的 —— 那正是"输入是一个提交、不是工作树"那句话的意思。
@@ -213,7 +213,7 @@ section('1. 一个提交 ⇒ 一份确定的字节');
   git('add', '-A');
   git('commit', '-qm', '改了');
   const v2 = packer('verify', out1, '--against', plug);
-  check('★ 改了一份源码并提交之后再 --against ⇒ 明确指出是哪一份，且非零退出',
+  check('改了一份源码并提交之后再 --against，明确指出是哪一份，且非零退出',
     v2.code !== 0 && /只(在包里|在源码树里)/.test(v2.err),
     JSON.stringify(v2.err.slice(-260)));
 }
@@ -222,7 +222,7 @@ section('1. 一个提交 ⇒ 一份确定的字节');
 //  1b. 默认输出名 = 纯 `<id>.splug`
 // ==============================================================================
 
-section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
+section('1b. 不带 --out 时，包名是纯 id（v0.13 起）');
 
 {
   // 目录名故意与 id 没有任何关系：若包名里带上目录名，"包叫什么"就取决于你
@@ -232,9 +232,9 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
   const want = path.join(base, `${MF_ID}.splug`);
 
   const r = packer('build', plug, '--commit', 'HEAD');
-  check('★★ 不带 `--out` ⇒ 落在源码树的**上一层**，名字是纯 id',
+  check('不带 `--out`，落在源码树的上一层，名字是纯 id',
     r.code === 0 && fs.existsSync(want), r.out + r.err + JSON.stringify(fs.readdirSync(base)));
-  check('★★ 而那个名字里**没有版本、也没有目录名**'
+  check('而那个名字里没有版本、也没有目录名'
         + '（`plug-1.0.0.splug` 是 v0.12 的形状，不该再出现）',
     !fs.existsSync(path.join(base, `plug-${MF_VER}.splug`))
     && !fs.existsSync(path.join(base, 'plug.splug')), JSON.stringify(fs.readdirSync(base)));
@@ -242,7 +242,7 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
   const ins = packer('inspect', want, '--json');
   let ij = null;
   try { ij = JSON.parse(ins.out); } catch { ij = null; }
-  check('★ 版本**没有消失**，它在包里（`packer inspect --json` 读得到）——'
+  check('版本没有消失，它在包里（`packer inspect --json` 读得到）——'
         + '名字里没有它，只是「从名字搬到了一个读得到的地方」',
     ij && ij.ok && ij.manifest && ij.manifest.version === MF_VER,
     ins.out.slice(0, 200) + ins.err.slice(0, 120));
@@ -256,14 +256,14 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
   git('commit', '-qm', '1.0.1');
   const r2 = packer('build', plug, '--commit', 'HEAD');
   const pkgs = fs.readdirSync(base).filter((n) => n.endsWith('.splug'));
-  check('★★ 打第二个版本 ⇒ 落在**同一个**默认路径上（不是并排两份）——'
+  check('打第二个版本，落在同一个默认路径上（不是并排两份）——'
         + '所以多版本要自己分目录，这一条是那个要求的依据',
     r2.code === 0 && pkgs.length === 1 && pkgs[0] === `${MF_ID}.splug`,
     JSON.stringify(pkgs));
   const ins2 = packer('inspect', want, '--json');
   let ij2 = null;
   try { ij2 = JSON.parse(ins2.out); } catch { ij2 = null; }
-  check('★ 而留在那个名字下的是**后打的那一版**（覆盖是真的发生了）',
+  check('而留在那个名字下的是后打的那一版（覆盖是真的发生了）',
     ij2 && ij2.ok && ij2.manifest && ij2.manifest.version === '1.0.1',
     ins2.out.slice(0, 200));
 }
@@ -272,7 +272,7 @@ section('1b. 不带 --out 时，包名是**纯 id**（v0.13 起）');
 //  2. 不该进包的东西
 // ==============================================================================
 
-section('2. 不该进包的东西：排除并说出来，或者干脆拒绝');
+section('2. 不该进包的条目：排除并说出来，或者拒绝');
 
 {
   const { plug, base } = mkRepo({
@@ -287,16 +287,16 @@ section('2. 不该进包的东西：排除并说出来，或者干脆拒绝');
   check('打好了', r.code === 0, r.err);
   const parsed = P.parsePackage(fs.readFileSync(out));
   const names = parsed.ok ? parsed.files.map((f) => f.path) : [];
-  check('★ 跳过表里的东西一个都没进负载',
+  check('跳过表里的条目一个都没进负载',
     !names.some((p) => /\.gitignore|\.github|node_modules/.test(p)), names.join('、'));
-  check('★★ 上一次打出来的 .splug 没进负载（进了的话摘要每次都变）',
+  check('上一次打出来的 .splug 没进负载（若进了摘要每次都变）',
     !names.includes('old.splug'), names.join('、'));
-  check('★ 而且输出里**说了**跳过了几项（静默少东西是这个仓库最忌讳的一类）',
+  check('而且输出里说了跳过了几项（静默少条目是这个仓库最忌讳的一类）',
     /跳过/.test(r.out) && /splug|gitignore/.test(r.out), JSON.stringify(r.out.slice(-260)));
 
   // 包落在自己的源码树里，拒绝（在写之前）
   const inTree = packer('build', plug, '--out', path.join(plug, 'self.splug'));
-  check('★★ 输出落在插件自己的源码树里 ⇒ 拒绝，而且一个字节都没写',
+  check('输出落在插件自己的源码树里，拒绝，而且一个字节都没写',
     inTree.code !== 0 && /源码树/.test(inTree.err)
     && !fs.existsSync(path.join(plug, 'self.splug')), inTree.err);
 }
@@ -304,14 +304,14 @@ section('2. 不该进包的东西：排除并说出来，或者干脆拒绝');
 {
   const { plug, base } = mkRepo(baseFiles(), { links: { 'client/link.js': '../x.js' } });
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
-  check('★★ 符号链接 ⇒ 拒绝整个包（它进了负载就是"内容恰好是那个目标串的普通文件"）',
+  check('符号链接，拒绝整个包（它进了负载就是"内容恰好是那个目标串的普通文件"）',
     r.code !== 0 && /符号链接/.test(r.err), r.err);
 }
 
 {
   const { plug, base } = mkRepo({ ...baseFiles(), 'Client/x.js': 'a\n', 'client/x.js': 'b\n' });
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
-  check('★★ 只差大小写的两条路径 ⇒ 拒绝（磁盘上会互相覆盖，而摘要按磁盘算）',
+  check('只差大小写的两条路径，拒绝（磁盘上会互相覆盖，而摘要按磁盘算）',
     r.code !== 0 && /大小写/.test(r.err), r.err);
 }
 
@@ -321,21 +321,21 @@ section('2. 不该进包的东西：排除并说出来，或者干脆拒绝');
   const { plug, base } = mkRepo({ ...baseFiles(), 'İ.js': 'a\n', 'i.js': 'b\n' });
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
   const withIdot = path.join(base, 'o.splug');
-  check('★ `İ` 与 `i` 不是"只差大小写"（ASCII-only 折叠 —— 全 Unicode 的会判成冲突）',
+  check('`İ` 与 `i` 不是"只差大小写"（ASCII-only 折叠 —— 全 Unicode 的会判成冲突）',
     r.code === 0
     && P.parsePackage(fs.readFileSync(withIdot)).files.map((f) => f.path).includes('İ.js'),
     `${r.err} ${r.code === 0 ? P.parsePackage(fs.readFileSync(withIdot)).files.map((f) => f.path).join('、') : ''}`);
-  check('★ 而 `İ`.toLowerCase() 确实会折成 `i`（说明上一条不是在防一个假想）',
+  check('而 `İ`.toLowerCase() 确实会折成 `i`（说明上一条不是在防一个假想）',
     'İ'.toLowerCase().normalize('NFC') !== 'İ');
 }
 
 {
   const { plug, base } = mkRepo(baseFiles());
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'), '--commit', 'HEAD');
-  check('★ 树不脏时能打（对照组）', r.code === 0, r.err);
+  check('树不脏时能打（对照组）', r.code === 0, r.err);
   fs.appendFileSync(path.join(plug, 'client', 'index.js'), '// 未提交\n');
   const r2 = packer('build', plug, '--out', path.join(base, 'o2.splug'));
-  check('★★ 工作树脏了 ⇒ 拒绝打包（§3.5：输入是一个**提交**，不是工作树）',
+  check('工作树脏了，拒绝打包（§3.5：输入是一个提交，不是工作树）',
     r2.code !== 0 && /不干净/.test(r2.err), r2.err);
 }
 
@@ -366,27 +366,27 @@ section('3. init —— 铸一个 id，只动一个键');
   try {
     obj = JSON.parse(after);
   } catch (e) {
-    check('★ init 写回的是一份**合法的 JSON**', false, e.message);
+    check('init 写回的是一份合法的 JSON', false, e.message);
   }
-  check('★ 铸出来的 id 是一个 26 字符的 ULID',
+  check('铸出来的 id 是一个 26 字符的 ULID',
     !!obj && P.ULID_RE.test(obj.id), obj ? obj.id : '(JSON 不合法，上面那条已经报了)');
   if (!obj) obj = {};
-  check('★ 其余键**一个都没动**（值逐字相同）',
+  check('其余键一个都没动（值逐字相同）',
     obj.name === 'x' && obj.displayName === '中文' && obj.version === '1.0.0'
     && obj.n === 1000 && Array.isArray(obj.z));
-  check('★★ `\\u4e2d\\u6587` 还是转义写法（JSON.parse + stringify 会把它还原成汉字）',
+  check('`\\u4e2d\\u6587` 还是转义写法（JSON.parse + stringify 会把它还原成汉字）',
     after.includes('\\u4e2d\\u6587'), JSON.stringify(after));
-  check('★★ `1e3` 还是 `1e3`（JSON.parse + stringify 会写成 1000）', after.includes('1e3'));
-  check('★ 键的**次序**没变：id 在第一个，其余按原序跟在后面',
+  check('`1e3` 还是 `1e3`（JSON.parse + stringify 会写成 1000）', after.includes('1e3'));
+  check('键的次序没变：id 在第一个，其余按原序跟在后面',
     Object.keys(obj).join(',') === 'id,name,displayName,version,n,z', Object.keys(obj).join(','));
-  check('★ 只多了一行（逐行比，除了插入那一行之外一模一样）',
+  check('只多了一行（逐行比，除了插入那一行之外完全相同）',
     after.split('\n').filter((l) => !/^\s*"id":/.test(l)).join('\n') === original,
     JSON.stringify(after));
 
   // 已经铸过，什么都不做（id 铸一次、永不改变）
   const before = fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8');
   const again = packer('init', plug);
-  check('★ 树里已经有 id 时什么都不做（§2.1：id 铸一次、此后永不改变）',
+  check('树里已经有 id 时什么都不做（§2.1：id 铸一次、此后永不改变）',
     again.code === 0 && fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8') === before,
     again.err);
 }
@@ -396,9 +396,9 @@ section('3. init —— 铸一个 id，只动一个键');
   fs.appendFileSync(path.join(plug, 'client', 'index.js'), '// 脏\n');
   const before = fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8');
   const r = packer('init', plug);
-  check('★ 树不干净时拒绝铸 id（§2.1「应当拒绝」）—— 否则"提交里那棵树"与"你看到的"不是一回事',
+  check('树不干净时拒绝铸 id（§2.1「应当拒绝」）—— 否则"提交里该目录树"与"你看到的"不是一回事',
     r.code !== 0 && /不干净/.test(r.err), `${r.code} ${r.err}`);
-  check('★ 而它确实一个字节都没写',
+  check('而它确实一个字节都没写',
     fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8') === before);
 }
 
@@ -406,7 +406,7 @@ section('3. init —— 铸一个 id，只动一个键');
   // 没有 id 的树、工作树干净，build 必须说"先跑 init"，而不是偷偷替你铸一个
   const { plug } = mkRepo({ ...baseFiles(), 'plugin.json': mf({ id: undefined }) });
   const r = packer('build', plug, '--out', path.join(os.tmpdir(), 'nope.splug'));
-  check('★★ 树里没有 id ⇒ build 拒绝并指向 init（它**不**偷偷替你铸一个）',
+  check('树里没有 id，build 拒绝并指向 init（它不偷偷代为铸一个）',
     r.code !== 0 && /init/.test(r.err), r.err);
 }
 
@@ -421,7 +421,7 @@ section('4. 跨文件的常量');
   const fx = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'version-fixtures.json'), 'utf8'));
   const badValid = fx.plugin.valid.filter((v) => !P.PLUGIN_VERSION_RE.test(v));
   const badInvalid = fx.plugin.invalid.filter((v) => P.PLUGIN_VERSION_RE.test(v));
-  check(`★ 打包器的插件版本号正则对上夹具（合法 ${fx.plugin.valid.length} 条、`
+  check(`打包器的插件版本号正则对上夹具（合法 ${fx.plugin.valid.length} 条、`
     + `不合法 ${fx.plugin.invalid.length} 条）`,
   !badValid.length && !badInvalid.length,
   `该收没收 ${JSON.stringify(badValid)}；该拒没拒 ${JSON.stringify(badInvalid)}`);
@@ -434,7 +434,7 @@ section('4. 跨文件的常量');
   const shapeCases = fx.engines.cases
     .filter((c) => c.kind !== 'unsatisfied' && c.kind !== 'unknown_host');
   const wrongShape = shapeCases.filter((c) => (P.enginesShapeProblem(c) === null) !== c.ok);
-  check(`★ 打包器的 engines 形状规则对上夹具（判得了的 ${shapeCases.length} 条；`
+  check(`打包器的 engines 形状规则对上夹具（判得了的 ${shapeCases.length} 条；`
     + `不满足与判不了的那 ${fx.engines.cases.length - shapeCases.length} 条它判不了）`,
   !wrongShape.length,
   wrongShape.map((c) => `${JSON.stringify(c)} → ${JSON.stringify(P.enginesShapeProblem(c))}`).join('；'));
@@ -442,9 +442,9 @@ section('4. 跨文件的常量');
   // 上面那条钉的是纯函数。这一条钉它真的接在 build 的校验里 ——
   //   函数写了却没人调，上一条是绿的，而 `packer build` 照样能产出一个两端都拒的包。
   const wrongKey = P.enginesShapeProblem({ engines: { node: '>=18' } });
-  check('★ 认不得的键要报出来（照抄规范的措辞，不另起一句）',
+  check('认不得的键要报出来（照抄规范的措辞，不另起一句）',
     typeof wrongKey === 'string' && /node/.test(wrongKey), String(wrongKey));
-  check('★ 没有 engines 的清单不报错（可选字段）',
+  check('没有 engines 的清单不报错（可选字段）',
     P.enginesShapeProblem({}) === null && P.enginesShapeProblem({ engines: {} }) === null);
 }
 
@@ -453,14 +453,14 @@ section('4. 跨文件的常量');
   //   删掉 build 里那道检查，第一条会成功产包，它红。
   const a = mkRepo(baseFiles({ engines: { node: '>=18' } }));
   const ra = packer('build', a.plug, '--out', path.join(a.base, 'a.splug'));
-  check('★★ engines 里有认不得的键 ⇒ build **拒绝**（不是产出一个两端都会拒的包）',
+  check('engines 里有认不得的键，build 拒绝（不是产出一个两端都会拒的包）',
     ra.code !== 0 && /engines/.test(ra.err) && /node/.test(ra.err), ra.err.slice(0, 300));
 
   // 反侧必须放行：同一个包装到 0.6 的站点上是好的、装到 0.4 上就装不上，
   //   而打包时那个站点还不存在。拦住它等于把一个部署期的问题说成作者的错。
   const b = mkRepo(baseFiles({ engines: { slurmate: '>=99.0' } }));
   const rb = packer('build', b.plug, '--out', path.join(b.base, 'b.splug'));
-  check('★ 而"要求一个很高的版本"照常打得出来（满足与否取决于目标站点，打包器判不了）',
+  check('而"要求一个很高的版本"照常打得出来（满足与否取决于目标站点，打包器判不了）',
     rb.code === 0, rb.err.slice(0, 300));
 }
 
@@ -477,11 +477,11 @@ section('4. 跨文件的常量');
   const client = grab(js, /const COPY_SKIP = new Set\(\[([^\]]*)\]\)/);
   const daemon = grab(py, /^PLUGIN_COPY_SKIP = \((.*)\)$/m);
   const packerSet = [...P.COPY_SKIP].sort();
-  check('★★ 三端的跳过表逐字一致（漂开了就是「同步一直失败」且说不清原因）',
+  check('三端的跳过表逐字一致（漂开了就是「同步一直失败」且说不清原因）',
     JSON.stringify(client) === JSON.stringify(daemon)
     && JSON.stringify(daemon) === JSON.stringify(packerSet),
     `客户端 ${JSON.stringify(client)} / 守护进程 ${JSON.stringify(daemon)} / 打包器 ${JSON.stringify(packerSet)}`);
-  check('★ 三份都真的抠出来了（有一个是 null 的话上面那条是假通过）',
+  check('三份都真的抠出来了（有一个是 null 上面那条是假通过）',
     !!client && !!daemon && packerSet.length > 0);
 }
 
@@ -493,7 +493,7 @@ section('4. 跨文件的常量');
   //    漂开的样子：打包器放行一个任何站点都拒收的包，或者反过来拦下一个
   //    合规的。两种都是静默的，直到有人真的把插件发布出去。
   const rules = readJsonOrNull(path.join(ROOT, 'tools', 'plugin-limits.json'));
-  check('★ tools/plugin-limits.json 读得动（读不动的话下面几条都是假通过）',
+  check('tools/plugin-limits.json 读得动（若读不动下面几条都是假通过）',
     rules !== null && typeof rules === 'object', String(rules));
 
   if (rules) {
@@ -516,13 +516,13 @@ section('4. 跨文件的常量');
       const m = new RegExp(`^const ${n} = (.+);$`, 'm').exec(src);
       if (!m) missing.push(n); else decls.push(`const ${n} = ${m[1]};`);
     }
-    check('★ 打包器源码里那 16 行常量都抠到了（抠不到说明改了形状，不是它对了）',
+    check('打包器源码里那 16 行常量都抠到了（抠不到说明改了形状，不是它对了）',
       !missing.length, `缺 ${JSON.stringify(missing)}`);
 
     if (!missing.length) {
       // eslint-disable-next-line no-new-func
       const V = new Function(`${decls.join('\n')}\nreturn {${names.join(',')}};`)();
-      check('★★ 打包器那几个数与书面判据逐字一致',
+      check('打包器那几个数与书面判据逐字一致',
         V.MAX_DEPTH === rules.load.max_depth
         && V.MAX_SEGMENT_BYTES === rules.format.max_segment_bytes
         && V.MAX_FILES === rules.load.max_files
@@ -531,18 +531,18 @@ section('4. 跨文件的常量');
         && V.MAX_ENVELOPE_BYTES === rules.package.envelope_max_bytes
         && V.MAX_TOTAL_BYTES === rules.load.total_bytes,
         `打包器 ${JSON.stringify(V)} / 判据 ${JSON.stringify(rules)}`);
-      check('★ 信封最坏情况那个数确实是"头 + **最长**的签名块 + 记录表"推出来的',
+      check('信封最坏情况那个数确实是"头 + 最长的签名块 + 记录表"推出来的',
         V.MAX_ENVELOPE_BYTES === V.HEADER_BYTES + V.SIG_MAX_BYTES
           + V.MAX_FILES * (2 + V.MAX_PATH_BYTES + 8 + 32),
         `${V.MAX_ENVELOPE_BYTES} vs ${V.HEADER_BYTES + V.SIG_MAX_BYTES
           + V.MAX_FILES * (2 + V.MAX_PATH_BYTES + 8 + 32)}`);
-      check('★ 签名块最长 = 最短 + 255（版本号那一段的长度是一个 u8）',
+      check('签名块最长 = 最短 + 255（版本号那一段的长度是一个 u8）',
         V.SIG_MIN_BYTES === 188 && V.SIG_MAX_BYTES === V.SIG_MIN_BYTES + V.MAX_VERSION_BYTES,
         `${V.SIG_MIN_BYTES} / ${V.SIG_MAX_BYTES} / ${V.MAX_VERSION_BYTES}`);
-      check('★ 书面判据里那个 signature_max_bytes 就是打包器算出来的那个',
+      check('书面判据里那个 signature_max_bytes 就是打包器算出来的那个',
         rules.format.signature_max_bytes === V.SIG_MAX_BYTES,
         `${rules.format.signature_max_bytes} vs ${V.SIG_MAX_BYTES}`);
-      check('★★ 负载上限 + 信封最坏情况 ≤ 包上限（打包器自己那三个数之间也得成立）',
+      check('负载上限 + 信封最坏情况 ≤ 包上限（打包器自己那三个数之间也得成立）',
         V.MAX_TOTAL_BYTES + V.MAX_ENVELOPE_BYTES <= V.MAX_PACKAGE_BYTES,
         `${V.MAX_TOTAL_BYTES} + ${V.MAX_ENVELOPE_BYTES} > ${V.MAX_PACKAGE_BYTES}`);
     }
@@ -558,12 +558,12 @@ section('4. 跨文件的常量');
 
   const a = mkRepo({ ...baseFiles(), ...many });
   const ra = packer('build', a.plug, '--out', path.join(a.base, 'a.splug'));
-  check('★★ 负载超过整体上限 ⇒ build **拒绝**，且报错里给得出数字',
+  check('负载超过整体上限，build 拒绝，且报错里给得出数字',
     ra.code !== 0 && /1561905/.test(ra.err) && /1\.5 MiB/.test(ra.err),
     ra.err.slice(0, 400));
-  check('★ 而且它把"站点那道闸是 2 MiB"说出来（作者要知道该往哪儿改）',
+  check('而且它把"站点那道闸是 2 MiB"说出来（作者要知道该往哪儿改）',
     /2\.0 MiB/.test(ra.err), ra.err.slice(0, 400));
-  check('★ 拒绝时**不产出**包（先判后写）',
+  check('拒绝时不产出包（先判后写）',
     !fs.existsSync(path.join(a.base, 'a.splug')));
 
   // 反侧必须放行：上限之下的树照常打得出来。少了这一条，把上限写成 0
@@ -572,13 +572,13 @@ section('4. 跨文件的常量');
   for (let i = 0; i < 7; i++) few[`data/part${i}.bin`] = big;    // 7 × 200 KiB ≈ 1.37 MiB
   const b = mkRepo({ ...baseFiles(), ...few });
   const rb = packer('build', b.plug, '--out', path.join(b.base, 'b.splug'));
-  check('★ 上限之下的树照常打得出来（不然"拒绝"那条拦的是"什么都拒"）',
+  check('上限之下的树照常打得出来（不然"拒绝"那条拦的是"什么都拒"）',
     rb.code === 0, rb.err.slice(0, 400));
 
   // 单份那一关单独验：一个 300 KiB 的文件本身就该拦，报的是它。
   const c = mkRepo({ ...baseFiles(), 'data/one.bin': 'y'.repeat(300 * 1024) });
   const rc = packer('build', c.plug, '--out', path.join(c.base, 'c.splug'));
-  check('★★ 单份超过 file_bytes ⇒ build 拒绝，并**点名那一份**',
+  check('单份超过 file_bytes，build 拒绝，并点名那一份',
     rc.code !== 0 && /data\/one\.bin/.test(rc.err) && /262144/.test(rc.err),
     rc.err.slice(0, 400));
 
@@ -587,7 +587,7 @@ section('4. 跨文件的常量');
   for (let i = 0; i < 260; i++) tiny[`many/f${String(i).padStart(3, '0')}.txt`] = 'z';
   const d = mkRepo({ ...baseFiles(), ...tiny });
   const rd = packer('build', d.plug, '--out', path.join(d.base, 'd.splug'));
-  check('★★ 份数超过 max_files ⇒ build 拒绝',
+  check('份数超过 max_files，build 拒绝',
     rd.code !== 0 && /256/.test(rd.err) && /份/.test(rd.err), rd.err.slice(0, 400));
 }
 
@@ -608,9 +608,9 @@ section('5. 坏包 —— 与客户端那一份读方逐条对答案');
     if (ga !== c.code) diff.push(`打包器 ${c.name}：期望 ${c.code}，得到 ${ga}`);
     if (gb !== c.code) diff.push(`客户端 ${c.name}：期望 ${c.code}，得到 ${gb}`);
   }
-  check(`★★ ${BAD.cases.length} 条坏包，打包器与客户端给出同一个期望的理由词`,
+  check(`${BAD.cases.length} 条坏包，打包器与客户端给出同一个期望的理由词`,
     diff.length === 0, diff.join('；'));
-  check('★ 两份实现读**好包**的结论也一致（否则上面那条可能是"两边都错得一样"）',
+  check('两份实现读好包的结论也一致（否则上面那条可能是"两边都错得相同"）',
     (() => {
       const bytes = unhex(EXPECTED.package.hex);
       const a = P.parsePackage(bytes);
@@ -626,12 +626,12 @@ section('5. 坏包 —— 与客户端那一份读方逐条对答案');
   //   其实没进哈希（比如 sha256 那一列被忘了拼）。
   const r = P.parsePackage(unhex(EXPECTED.package.hex));
   const tweaked = r.files.map((f, i) => (i === 0 ? { ...f, sha256: '00'.repeat(32) } : f));
-  check('★ 改掉一份的 sha256 ⇒ 摘要必变（证明那一列真的进了哈希）',
+  check('改掉一份的 sha256，摘要必变（证明那一列真的进了哈希）',
     P.contentDigest(tweaked) !== r.digest);
   const reordered = [r.files[1], r.files[0], ...r.files.slice(2)];
-  check('★ 换掉两条的次序 ⇒ 摘要**不变**（排序是摘要的一部分）',
+  check('换掉两条的次序，摘要不变（排序是摘要的一部分）',
     P.contentDigest(reordered) === r.digest);
-  check('★ 而路径拼进摘要时用的是 UTF-8 字节而不是 UTF-16',
+  check('而路径拼进摘要时用的是 UTF-8 字节而不是 UTF-16',
     P.contentDigest([{ path: '\u{1F600}', sha256: '00'.repeat(32) }])
     !== P.contentDigest([{ path: '�', sha256: '00'.repeat(32) }]));
 }
@@ -647,32 +647,32 @@ section('6. 命令行出口码');
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-ins-')), 'x.splug');
   fs.writeFileSync(f, bytes);
   const ok = packer('verify', f);
-  check('verify：好包 ⇒ 0', ok.code === 0, ok.err);
+  check('verify：好包，0', ok.code === 0, ok.err);
   const wrong = packer('verify', f, '--expect-digest', '00'.repeat(32));
-  check('★ verify --expect-digest：摘要不对 ⇒ 非零（作者可以钉住"我发出去的是这一份"）',
+  check('verify --expect-digest：摘要不对，非零（作者可以钉住"我发出去的是这一份"）',
     wrong.code !== 0 && /期望/.test(wrong.err), wrong.err);
   const signer = packer('verify', f, '--expect-signer', EXPECTED.signed.fingerprint);
-  check('★ verify --expect-signer：没签名而期望某个签名者 ⇒ 非零',
+  check('verify --expect-signer：没签名而期望某个签名者，非零',
     signer.code !== 0 && /没签名/.test(signer.err), signer.err);
   const signed = packer('verify', path.join(f, '..', 'y.splug'));
-  check('★ 读不到文件 ⇒ 2（不是 1 —— "这个包不对"与"我没读到"要分得开）',
+  check('无法读取文件，2（不是 1 —— "这个包不对"与"我没读到"要分得开）',
     signed.code === 2, String(signed.code));
 
   const sf = path.join(path.dirname(f), 's.splug');
   fs.writeFileSync(sf, unhex(EXPECTED.signed.hex));
   const sv = packer('verify', sf, '--expect-signer', EXPECTED.signed.fingerprint);
-  check('★ verify：带签名的包验得过，签名者就是夹具里那一把', sv.code === 0, sv.err + sv.out);
+  check('verify：带签名的包验得过，签名者就是夹具里那一把', sv.code === 0, sv.err + sv.out);
 
   const ins = packer('inspect', f, '--json');
   const j = JSON.parse(ins.out);
-  check('★ inspect --json 的输出与夹具一致（作者拿它对着规范逐行核对）',
+  check('inspect --json 的输出与夹具一致（作者拿它对着规范逐行核对）',
     j.ok && j.digest === EXPECTED.digest && j.files.length === EXPECTED.files.length
     && j.manifest.id === '01M2JKHTZGQ7X8V4T5R6N7B8C9', ins.out.slice(0, 200));
 
   const badf = path.join(path.dirname(f), 'bad.splug');
   fs.writeFileSync(badf, unhex(BAD.cases.find((c) => c.code === 'format').hex));
   const bi = packer('inspect', badf);
-  check('★ inspect 一个「太新」的包 ⇒ 非零，并说出 format',
+  check('inspect 一个「版本过高」的包，非零，并说出 format',
     bi.code !== 0 && /format/.test(bi.err), bi.err);
 }
 
@@ -680,21 +680,21 @@ section('6. 命令行出口码');
 //  7. 血统表与 §2.5 的"停下来问"
 // ==============================================================================
 
-section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来问');
+section('7. §2.5：一棵树带着 id，而血统表不认识它，停下来问');
 
 {
   // 手滑的现场：把 plugin.json 从一个插件复制到另一棵树（那棵树有它自己的表）。
   const { plug, base } = mkRepo({ ...baseFiles(), 'lineage.json': lin('01AAAAAAAAAAAAAAAAAAAAAAAA') });
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
-  check('★★ 血统表不认识这个 id ⇒ **拒绝打包**（不是静默沿用）',
+  check('血统表不认识这个 id，拒绝打包（不是静默沿用）',
     r.code !== 0 && /§2\.5/.test(r.err), r.err.slice(0, 200));
-  check('★ 而且把两条路都说了：真分身（--fork）与记录不在了',
+  check('而且把两条路都说了：真分身（--fork）与记录不在了',
     /--fork/.test(r.err) && /另一个插件/.test(r.err) && /同一个插件/.test(r.err), r.err);
-  check('★ 两条路的后果也说了（重新同意一次）', /重新同意/.test(r.err), r.err);
-  check('★ 包一个字节都没写出来', !fs.existsSync(path.join(base, 'o.splug')));
+  check('两条路的后果也说了（重新同意一次）', /重新同意/.test(r.err), r.err);
+  check('包一个字节都没写出来', !fs.existsSync(path.join(base, 'o.splug')));
 
   const i = packer('init', plug);
-  check('★★ init 也停下来问（§2.5 说的是"打包器"，而 init 就是它铸 id 的那个动词）',
+  check('init 也停下来问（§2.5 说的是"打包器"，而 init 就是它铸 id 的那个动词）',
     i.code !== 0 && /§2\.5/.test(i.err), i.err.slice(0, 200));
 }
 
@@ -704,7 +704,7 @@ section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来�
   delete files['lineage.json'];
   const { plug, base } = mkRepo(files);
   const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
-  check('★★ 血统表整个不在 ⇒ 同样拒绝，并在消息里说清是哪种不在',
+  check('血统表整个不在，同样拒绝，并在消息里说清是哪种不在',
     r.code !== 0 && /§2\.5/.test(r.err) && /没有这份文件/.test(r.err), r.err.slice(0, 240));
 }
 
@@ -715,16 +715,16 @@ section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来�
   check('init：铸了 id 并写回', r.code === 0 && /铸了一个 id/.test(r.out), r.err);
   const after = fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8');
   const mfObj = readJsonOrNull(path.join(plug, 'plugin.json'));
-  check('★ init 写回的是一份合法的 JSON（写回是文本插入，最容易在这里手滑）',
+  check('init 写回的是一份合法的 JSON（写回是文本插入，最容易在这里手滑）',
     Boolean(mfObj), JSON.stringify(after.slice(0, 200)));
   const id = (mfObj || {}).id;
   const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
-  check('★ 血统表里出现了这个 id，而且是 `key: null`（还没定钥匙）',
+  check('血统表里出现了这个 id，而且是 `key: null`（还没定钥匙）',
     l.schema === 1 && l.lineage && l.lineage[id] && l.lineage[id].key === null, JSON.stringify(l));
-  check('★ 写回只多了一行：`\\u` 转义与数字写法一个都没动',
+  check('写回只多了一行：`\\u` 转义与数字写法一个都没动',
     /"displayName": "插件"/.test(after) && !after.includes('\\u'), '');
-  check('★ 提示里说清了"先提交再打包"', /提交/.test(r.out), '');
-  check('★ 而且要往哪儿提交也说了（血统表也要进那一次提交）',
+  check('提示里说清了"先提交再打包"', /提交/.test(r.out), '');
+  check('而且要往哪儿提交也说了（血统表也要进那一次提交）',
     /lineage\.json/.test(r.out), r.out.slice(-200));
 }
 
@@ -735,17 +735,17 @@ section('7. §2.5：一棵树带着 id，而血统表不认识它 ⇒ 停下来�
   check('--fork：换了 id 并写回', r.code === 0 && /分身/.test(r.out), r.err);
   const obj = readJsonOrNull(path.join(plug, 'plugin.json')) || {};
   const l = readJsonOrNull(path.join(plug, 'lineage.json')) || { lineage: {} };
-  check('★★ 差异只有 id 那一处（清单里其余字节一个没动）',
+  check('差异只有 id 那一处（清单里其余字节一个没动）',
     obj.name === 'plug' && obj.displayName === '插件' && JSON.stringify(obj.engines) === '{"slurmate":">=0.5"}',
     JSON.stringify(obj));
-  check('★ 旧 id **留在表里**（那是它的祖先），新 id 也在', l.lineage['01AAAAAAAAAAAAAAAAAAAAAAAA']
+  check('旧 id 留在表里（那是它的祖先），新 id 也在', l.lineage['01AAAAAAAAAAAAAAAAAAAAAAAA']
     && l.lineage[obj.id] && l.lineage[obj.id].key === null, JSON.stringify(l));
-  check('★ 代价说在明处：所有用户重新同意一次', /重新同意/.test(r.out), '');
+  check('代价说在明处：所有用户重新同意一次', /重新同意/.test(r.out), '');
   // 提交之后这次 build 不再停下来问：表里现在认识这个 id 了（§2.5 满足了）。
   gitOf(base)('add', '-A');
   gitOf(base)('commit', '-qm', 'fork');
   const b = packer('build', plug, '--out', path.join(base, 'o.splug'));
-  check('★★ --fork 之后 build 不再停下来问（表里现在认识这个 id 了）',
+  check('--fork 之后 build 不再停下来问（表里现在认识这个 id 了）',
     b.code === 0, b.err);
 }
 
@@ -761,16 +761,16 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const kg = packer('keygen', plug);
   check('keygen：铸了钥匙', kg.code === 0, kg.err);
   const fp = (kg.out.match(/\b[0-9a-f]{64}\b/) || [])[0];
-  check('★ 打出了指纹（公钥必须以可复制的形式暴露给用户，§4.1）', Boolean(fp), kg.out);
+  check('打出了指纹（公钥必须以可复制的形式暴露给用户，§4.1）', Boolean(fp), kg.out);
   const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
-  check('★ 公钥写进了血统表', l.lineage[id].key && l.lineage[id].key.length === 64, JSON.stringify(l));
+  check('公钥写进了血统表', l.lineage[id].key && l.lineage[id].key.length === 64, JSON.stringify(l));
   const pem = path.join(home, 'keys', `${id}.pem`);
-  check('★ 私钥落在**树外**的钥匙库里，0600',
+  check('私钥落在树外的钥匙库里，0600',
     fs.existsSync(pem) && (fs.statSync(pem).mode & 0o777) === 0o600, pem);
-  check('★ 私钥没进树（进了就会被提交，而提交一次就等于泄露一次）',
+  check('私钥没进树（进了就会被提交，而提交一次就等于泄露一次）',
     !fs.readFileSync(path.join(plug, 'plugin.json'), 'utf8').includes('PRIVATE'), '');
 
-  check('★ keygen 第二次 ⇒ 拒绝（一个 id 一次机会，§4.1）',
+  check('keygen 第二次，拒绝（一个 id 一次机会，§4.1）',
     packer('keygen', plug).code !== 0, '');
 
   // "换机器"那条路（§4.1）：新机器上没有血统表那一行、有复制过来的 .pem。
@@ -783,18 +783,18 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
     fs.writeFileSync(path.join(h2, 'keys', `${MF_ID}.pem`),
       key2.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
     const k2 = packer('keygen', p2);
-    check('★★ 库里已经有一把（复制过来的）⇒ **认它**，不铸新的',
+    check('库里已经有一把（复制过来的）， 认它，不铸新的',
       k2.code === 0 && /没有铸新的/.test(k2.out), k2.err + k2.out.slice(0, 200));
     const l2 = readJsonOrNull(path.join(p2, 'lineage.json')) || {};
-    check('★ 记进血统表的是**库里那把**的公钥（指纹对得上）',
+    check('记进血统表的是库里那把的公钥（指纹对得上）',
       l2.lineage && l2.lineage[MF_ID] && l2.lineage[MF_ID].key === raw2.toString('hex'),
       JSON.stringify(l2));
     void b2;
   }
-  check('★★ 而且拒绝时说的两条路是"找回备份"与"--fork"，不是"再铸一把"',
+  check('而且拒绝时说的两条路是"找回备份"与"--fork"，不是"再铸一把"',
     /--fork/.test(packer('keygen', plug).err), packer('keygen', plug).err);
   // keygen 把血统表改脏了 —— 那正是下一个块里要 `git commit` 的原因（§3.5）。
-  check('★ keygen 弄脏了树，并且说了要提交（与 init 同一条纪律）',
+  check('keygen 让树变脏了，并且说了要提交（与 init 同一条纪律）',
     /提交/.test(kg.out) && /lineage\.json/.test(kg.out), kg.out.slice(-200));
 }
 
@@ -808,7 +808,7 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const out = path.join(base, 'o.splug');
   const b = packer('build', plug, '--out', out);
   check('build 成功', b.code === 0, b.err);
-  check('★ build 的输出说"还没签"，并给出下一步（它是两个动词，别让人以为少了一步）',
+  check('build 的输出说"还没签"，并给出下一步（它是两个动词，别让人以为少了一步）',
     /还没签/.test(b.out) && /sign/.test(b.out), b.out.slice(-200));
   const digestBefore = P.parsePackage(fs.readFileSync(out)).digest;
   const sizeBefore = fs.statSync(out).size;
@@ -817,30 +817,30 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   check('sign：签好了', s.code === 0, s.err);
   const signed = fs.readFileSync(out);
   const r = P.parsePackage(signed);
-  check('★★ 签名**不改内容摘要**（§4.2：签名盖的是摘要，不覆盖信封）',
+  check('签名不改内容摘要（§4.2：签名盖的是摘要，不覆盖信封）',
     r.ok && r.digest === digestBefore, r.ok ? `${r.digest} vs ${digestBefore}` : r.why);
   // 签名块的长度是 188 + 版本号的字节数（A.3），不再是定长 97。
   const verlen = Buffer.byteLength(MF_VER, 'utf8');
-  check('★ 信封只长了 188+版本号 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
+  check('信封只长了 188+版本号 字节：20 + 记录表 + 签名块 + 负载（一个字节都不多）',
     signed.length === sizeBefore + 188 + verlen,
     `${signed.length} vs ${sizeBefore + 188 + verlen}`);
-  check('★ 签名块里那两段摘要是**从这一棵树算的**（站点侧 + 客户端侧，A.3）',
+  check('签名块里那两段摘要是从该目录树算的（站点侧 + 客户端侧，A.3）',
     r.ok && r.sig.digestSite === P.sideDigests(r.files).site
       && r.sig.digestClient === P.sideDigests(r.files).client
       && r.sig.id === MF_ID && r.sig.version === MF_VER,
     r.ok ? JSON.stringify({ ds: r.sig.digestSite, dc: r.sig.digestClient,
       id: r.sig.id, v: r.sig.version }) : r.why);
-  check('★ 说清了"原地"这件事（未签名的那份被换掉了）', /原地/.test(s.out), s.out);
-  check('★ 也说了它为什么合法：摘要没变 ⇒ 还是同一份构件（§2.4）', /§2\.4/.test(s.out), s.out);
+  check('说清了"原地"这件事（未签名的那份被换掉了）', /原地/.test(s.out), s.out);
+  check('也说了它为什么合法：摘要没变，还是同一份构件（§2.4）', /§2\.4/.test(s.out), s.out);
 
   // Ed25519 是确定性签名，同一个包同一把钥匙签两次，逐字节相同。
   const first = Buffer.from(signed);
   const s2 = packer('sign', out);
-  check('★★ 签两次 ⇒ 逐字节相同（Ed25519 是确定性的，sign 不需要随机源）',
+  check('签两次，逐字节相同（Ed25519 是确定性的，sign 不需要随机源）',
     s2.code === 0 && fs.readFileSync(out).equals(first), s2.err);
 
   const v = packer('verify', out, '--expect-signer', fpOf(base, home));
-  check('★ 签出来的包 verify 得动，签名者就是 keygen 报的那一把', v.code === 0, v.out + v.err);
+  check('签出来的包 verify 得动，签名者就是 keygen 报的那一把', v.code === 0, v.out + v.err);
 }
 
 {
@@ -849,9 +849,9 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   const out = path.join(base, 'o.splug');
   packer('build', plug, '--out', out);
   const s = packer('sign', out);
-  check('★★ 血统表说这个 id 不签名 ⇒ 拒绝，并说清"本来就不签"与"现在想开始签"两条路',
+  check('血统表说这个 id 不签名，拒绝，并说清"本来就不签"与"现在想开始签"两条路',
     s.code !== 0 && /不签名/.test(s.err) && /keygen/.test(s.err), s.err.slice(0, 300));
-  check('★ 而且指出"已经发出去的版本不能这样补"（血统表在负载里 ⇒ 会换摘要 ⇒ §2.4）',
+  check('而且指出"已经发出去的版本不能这样补"（血统表在负载里，会换摘要，§2.4）',
     /§2\.4/.test(s.err), s.err);
 }
 
@@ -866,9 +866,9 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   fs.rmSync(path.join(home, 'keys'), { recursive: true, force: true });
 
   const s = packer('sign', out);
-  check('★★ 本机没有这把私钥 ⇒ 拒绝，并说清两条路：找回备份 / --fork',
+  check('本机没有这把私钥，拒绝，并说清两条路：找回备份 / --fork',
     s.code !== 0 && /没有这个 id 的私钥/.test(s.err) && /--fork/.test(s.err), s.err.slice(0, 300));
-  check('★ 而且点破了那个想当然的错法：在这里另铸一把没有用（客户端钉的是旧那一把）',
+  check('而且点破了那个想当然的错法：在这里另铸一把没有用（客户端钉的是旧那一把）',
     /另铸一把新钥匙没有用/.test(s.err), s.err);
 
   // 把另一把钥匙冒充进去，也要拦（两份记录分家了）。
@@ -877,7 +877,7 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   fs.writeFileSync(path.join(home, 'keys', `${MF_ID}.pem`),
     other.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
   const s2 = packer('sign', out);
-  check('★★ 钥匙库里那把与血统表里的不是同一把 ⇒ 拒绝，并**不覆盖任何一份**',
+  check('钥匙库里那把与血统表里的不是同一把，拒绝，并不覆盖任何一份',
     s2.code !== 0 && /不是同一把/.test(s2.err) && /不要.*覆盖/.test(s2.err), s2.err.slice(0, 300));
 }
 
@@ -907,10 +907,10 @@ section('8. keygen / sign：钥匙、血统表、以及"签名不改摘要"');
   fs.writeFileSync(f, pkg);
   const fp = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
   const v = packer('verify', f);
-  check('★★ verify：包里那份血统表说归 K1、而签名者是 K2 ⇒ 非零退出，并说出**两把**指纹（§2.5）',
+  check('verify：包里那份血统表说归 K1、而签名者是 K2，非零退出，并说出两把指纹（§2.5）',
     v.code !== 0 && /§2\.5/.test(v.err) && v.err.includes(fp(otherRaw))
       && v.err.includes(fp(myRaw)) && /断了血统/.test(v.err), v.err.slice(0, 300));
-  check('★ 而同一个包 inspect 得动（它合规，只是"人不对"——两件事必须分得开）',
+  check('而同一个包 inspect 得动（它合规，只是"人不对"——两件事必须分得开）',
     packer('inspect', f).code === 0, '');
 }
 
@@ -925,24 +925,24 @@ section('8b. --adopt：承认这个 id 归这棵树（记录丢了的那种情�
   const files = baseFiles();
   delete files['lineage.json'];
   const { plug, base } = mkRepo(files);
-  check('★★ 没有血统表时 init 停下来问（前提）', packer('init', plug).code !== 0, '');
-  check('★ 而那两条答案里给了 --adopt（否则"这是同一个插件"这个答案没有可执行的形式）',
+  check('没有血统表时 init 停下来问（前提）', packer('init', plug).code !== 0, '');
+  check('而那两条答案里给了 --adopt（否则"这是同一个插件"这个答案没有可执行的形式）',
     /--adopt/.test(packer('init', plug).err), '');
 
   const r = packer('init', plug, '--adopt');
   check('--adopt：补上了那一条', r.code === 0 && /--adopt/.test(r.out), r.err);
   const l = readJsonOrNull(path.join(plug, 'lineage.json')) || {};
-  check('★ 血统表里有了这个 id，`key: null`', l.lineage && l.lineage[MF_ID]
+  check('血统表里有了这个 id，`key: null`', l.lineage && l.lineage[MF_ID]
     && l.lineage[MF_ID].key === null, JSON.stringify(l));
-  check('★ 它把"这记下的是你的一次声明"说在明处（不许读成"证明"）',
+  check('它把"这记下的是你的一次声明"说在明处（不许读成"证明"）',
     /你的一次声明/.test(r.out) && /不证明/.test(r.out), r.out.slice(-320));
-  check('★ 也指出了真正守这件事的是客户端那张钉表（§5.4）', /§5\.4/.test(r.out), '');
+  check('也指出了真正守这件事的是客户端那张钉表（§5.4）', /§5\.4/.test(r.out), '');
 
-  check('★ 再 --adopt 一次是"什么都不做"（不重复写、不报错）',
+  check('再 --adopt 一次是"什么都不做"（不重复写、不报错）',
     packer('init', plug, '--adopt').code === 0, '');
   gitOf(base)('add', '-A');
   gitOf(base)('commit', '-qm', 'adopt');
-  check('★ --adopt 之后 build 不再停下来问',
+  check('--adopt 之后 build 不再停下来问',
     packer('build', plug, '--out', path.join(base, 'o.splug')).code === 0, '');
 }
 
@@ -957,9 +957,9 @@ section('9. §2.4 的手滑闸：发布表');
   const g = gitOf(base);
   const out = path.join(base, 'o.splug');
   check('第一次打包成功', packer('build', plug, '--out', out).code === 0, '');
-  check('★ 同一棵树、同一个版本再打一次 ⇒ 照样成功（摘要相同，不是"第二份内容"）',
+  check('同一棵树、同一个版本再打一次，照样成功（摘要相同，不是"第二份内容"）',
     packer('build', plug, '--out', out).code === 0, '');
-  check('★ 发布表落在了家目录里（不进树 —— 进树就把树弄脏，与 §3.5 打架）',
+  check('发布表落在了家目录里（不进树 —— 进树就会让树变脏，与 §3.5 打架）',
     fs.existsSync(path.join(home, 'releases.json')), home);
 
   // 往树里加一份文件 —— 这是最容易被忘掉的一种"改了内容"。
@@ -968,19 +968,19 @@ section('9. §2.4 的手滑闸：发布表');
   g('commit', '-qm', '加了一份文件');
 
   const r = packer('build', plug, '--out', out);
-  check('★★ 同一个版本号而摘要变了 ⇒ 拒绝，并说清"必须升版本号"（§2.4）',
+  check('同一个版本号而摘要变了，拒绝，并说清"必须升版本号"（§2.4）',
     r.code !== 0 && /§2\.4/.test(r.err) && /升版本号/.test(r.err), r.err.slice(0, 300));
-  check('★ 提示里给了那条唯一的例外（从来没发出去过 ⇒ --reuse-version）',
+  check('提示里给了那条唯一的例外（从来没发出去过，--reuse-version）',
     /--reuse-version/.test(r.err), '');
-  check('★ 拒绝时**不产出**包（先判后写）', !fs.existsSync(out) === false, '');
-  check('★ 而 --reuse-version 之后照常打',
+  check('拒绝时不产出包（先判后写）', !fs.existsSync(out) === false, '');
+  check('而 --reuse-version 之后照常打',
     packer('build', plug, '--out', out, '--reuse-version').code === 0, '');
 
   // 升了版本号就没人拦你 —— 那才是修法。
   fs.writeFileSync(path.join(plug, 'plugin.json'), mf({ version: '1.0.1' }));
   g('add', '-A');
   g('commit', '-qm', '1.0.1');
-  check('★ 升了版本号 ⇒ 过（这道闸拦的是"同一版本两份内容"，不是"不许改"）',
+  check('升了版本号，过（这道闸拦的是"同一版本两份内容"，不是"不许改"）',
     packer('build', plug, '--out', out).code === 0, '');
 }
 

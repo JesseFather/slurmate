@@ -2,7 +2,7 @@ name: build
 
 # 只负责一件事：把 client/ 打包成三个平台的安装包。
 #
-# 发布（打 tag → 挂 Release）在 release.yml 里，**故意分开**。
+# 发布（打 tag → 挂 Release）在 release.yml 里，故意分开。
 # 原因见 release.yml 顶部的说明：GitHub 对 push 事件是把 branches + tags + paths
 # 三者取【与】的，而给一个已推送的提交打 tag 时变更文件集为空 —— 只要这个
 # workflow 带 paths 过滤器，release 就永远不会触发，且失败时没有任何报错。
@@ -18,7 +18,7 @@ on:
     branches: [main]
     paths:
       - 'client/**'
-      # ★ 插件是独立项目，但它们与客户端的接口正是最容易悄悄漂掉的东西
+      # 插件是独立项目，但它们与客户端的接口正是最容易悄悄漂掉的东西
       #   （插件清单里的 id / 版本 / 贡献点，客户端注册表逐字用它们）。漏掉这一条，
       #   改插件就不会触发客户端构建 —— CI 在最需要的时候不跑。
       - 'plugins/**'
@@ -41,7 +41,7 @@ jobs:
   # 测试挂了就不必再花 100 分钟去打三个平台的包。
   #
   # 注意 `defaults.run.working-directory` 只对 `run:` 步骤生效，
-  # **对 `uses:` 步骤无效** —— 所以下面 upload-artifact 的 path 要写全 `client/dist/...`。
+  # 对 `uses:` 步骤无效 —— 所以下面 upload-artifact 的 path 要写全 `client/dist/...`。
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15

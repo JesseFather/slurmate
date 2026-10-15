@@ -21,7 +21,7 @@
  *   （`node --test` 默认就是每个文件一个子进程。）
  *
  * 这一条是用户提的要求里最要紧的那句：未配置时不许自动进开发者模式。
- *   "没配过任何东西"时必须做不到落进假后端 —— 否则用户看到一整套界面，以为
+ *   "没配过任何内容"时必须做不到落进假后端 —— 否则用户看到一整套界面，以为
  *   客户端在正常工作，其实它在跟一个本地假服务打交道。
  */
 import test, { after } from 'node:test';
@@ -190,7 +190,7 @@ const electronStub = {
     decryptString: () => { throw new Error('不该被调用'); },
   },
   shell: { openExternal: async () => {} },
-  // 目录选择器：默认「用户什么都没选」。要造"挑了一个文件"的用例自己换掉这个
+  // 目录选择器：默认「用户什么都没选」。要造"选择了一个文件"的用例自己换掉这个
   //   方法（见 boot.test.mjs 里「安装插件…」那一组）—— 对话框本身没有可测的东西。
   dialog: {
     showMessageBox: async () => ({ response: 2 }),
@@ -224,14 +224,14 @@ const invoke = (ch, ...args) => {
   return h(null, ...args);
 };
 
-test('★ 一台没配过任何东西的机器**不会**自己进开发者模式', async (t) => {
+test('一台没配过任何内容的机器不会自己进开发者模式', async (t) => {
   t.after(() => { Module._load = origLoad; });
   require('../src/main/index.js');
   await new Promise((r) => setTimeout(r, 400));
 
   const idx = require('../src/main/index.js');
   assert.equal(idx._test.getBackend().kind, 'ssh',
-    '没配过东西 ⇒ 真后端。假后端只由开发者模式开关进来，没有第二条路');
+    '没配过任何内容，真后端。假后端只由开发者模式开关进来，没有第二条路');
 
   const b = await invoke('app:bootstrap');
   assert.equal(b.dev, false, '这次进程不在开发者模式');
@@ -251,7 +251,7 @@ test('★ 一台没配过任何东西的机器**不会**自己进开发者模式
   // 插件数据目录那一根同样一个都不该建：框架不建目录，它只在插件真的要写
   //   东西的时候才出现（见 `ctx.dataDir()` 的注释）。
   assert.equal(fs.existsSync(path.join(userData, 'plugin-data')), false,
-    '没人写过东西就不该有插件数据目录 —— 建了的话，一个有洁癖的用户什么都'
+    '没人写过内容就不该有插件数据目录 —— 若建了，一个有洁癖的用户什么都'
     + '没干就在自己的配置目录里多出一个他不知道干什么用的目录');
 
   // 标题里也不该出现开发者模式的标注（三重互锁的第二重：它只对假后端成立）
@@ -259,7 +259,7 @@ test('★ 一台没配过任何东西的机器**不会**自己进开发者模式
     '真后端上不许标注"开发者模式"');
 });
 
-test('★ 开关那条路就是产品那条路：写的是同一个文件', async (t) => {
+test('开关那条路就是产品那条路：写的是同一个文件', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
   // 「用户在界面上勾了一下」= 这个 IPC。它必须写 `<userData>/dev-mode.json` ——
@@ -284,7 +284,7 @@ test('★ 开关那条路就是产品那条路：写的是同一个文件', asyn
   assert.deepEqual(readDevFile(), { developerMode: false });
 });
 
-test('★★ 「假站点的插件来源」这条路**整个不存在了** —— 站上的插件只有装上去这一条路',
+test('「假站点的插件来源」这条路整个不存在了 —— 站上的插件只有装上去这一条路',
   async (t) => {
     t.after(() => { Module._load = origLoad; });
 
@@ -309,7 +309,7 @@ test('★★ 「假站点的插件来源」这条路**整个不存在了** —�
     await invoke('app:setDeveloperMode', false);
   });
 
-test('★★ 「安装插件…」在真站点上是一条**不存在**的路 —— 而闸门在主进程，不在按钮上',
+test('「安装插件…」在真站点上是一条不存在的路 —— 而闸门在主进程，不在按钮上',
   async (t) => {
     t.after(() => { Module._load = origLoad; });
     const idx = require('../src/main/index.js');
@@ -330,12 +330,12 @@ test('★★ 「安装插件…」在真站点上是一条**不存在**的路 �
     assert.equal(r.ok, false);
     assert.equal(r.code, 'not_fake');
     assert.match(r.error, /管理员/, `要说清这条路归谁：${r.error}`);
-    assert.equal(opened, 0, '★ 拒了就不该弹文件选择器 —— 让用户挑完再说"不行"是最坏的那种');
+    assert.equal(opened, 0, '拒了就不该弹文件选择器 —— 让用户选择完再说"不行"是最坏的那种');
   });
 
-test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不到"的自己收掉，认不出的不给删',
+test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"的自己收掉，认不出的不给删',
   async (t) => {
-      // 这一条钉的是"认得出再也读不到的自己收掉"。界面上那个
+      // 这一条钉的是"认得出再也无法读取的自己收掉"。界面上那个
       //   「删掉这一份」只服务剩下的那一档（`unused`：工作区还在配置里、只是此刻
       //   没有连接用它），而"手动删一份真的存在的东西"这条路与自动回收走的是
       //   同一个 `clearOneRow`（下面那几条断言钉的正是它把两个根都删干净、并且
@@ -360,7 +360,7 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
     fs.mkdirSync(path.join(dataRoot, orphan), { recursive: true });
     fs.writeFileSync(path.join(dataRoot, orphan, 'config'), 'x');
 
-    // 0.12 起这两种"再也读不到"的目录由对账自己收掉（`reclaimOrphans`）——
+    // 0.12 起这两种"再也无法读取"的目录由对账自己收掉（`reclaimOrphans`）——
     //    它们不再进清单，因为清单是给用户看的，而这两类不需要他做任何决定
     //    （判据见 `plugin-data-audit.js` 的 `reclaimable`：能进这一档的只有"按当前
     //    注册表算不出来"的那些；`unused` 那一档——工作区还在配置里——一份都不碰）。
@@ -377,7 +377,7 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
       assert.equal(fs.existsSync(path.join(parts, name)), false, `${name} 的分区目录要没了`);
     }
     assert.equal(fs.existsSync(path.join(dataRoot, orphan)), false,
-      '★ 磁盘上那一半也要删 —— 只删一半的话，下一轮对账会把同一行再带回来');
+      '磁盘上那一半也要删 —— 若只删一半，下一轮对账会把同一行再带回来');
     // 让 Chromium 松手的那一步（`clearStorageData`）也要走到 —— 少了它，目录删了
     //   而 context 还在，下一次对账会看到同一个分区又冒出来。
     assert.equal(calls.cleared.includes(`persist:${orphan}`), true,
@@ -393,13 +393,13 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
     // 认不出的那一份留在清单里，而且不给删除按钮 —— 这是这一屏唯一该让用户
     //    看见的那一档（它是"这一根多半取错了"的信号，见 `allUnknown`）。
     assert.deepEqual(d.rows.map((r) => r.name), ['dev-sandbox']);
-    assert.equal(by.get('dev-sandbox').deletable, false, '★ 认不出的不给删除按钮');
+    assert.equal(by.get('dev-sandbox').deletable, false, '认不出的不给删除按钮');
 
     // 界面给的字符串永远进不了路径：这个形状就是一次任意目录递归删除。
     for (const name of ['../../../tmp', orphan]) {
       const bad = await invoke('app:deletePluginData', { name });
       assert.equal(bad.ok, false, `「${name}」不该删得掉`);
-      assert.equal(bad.code, 'stale', '匹配不上任何一行 ⇒ 拒绝，而不是照它去拼路径');
+      assert.equal(bad.code, 'stale', '与任何一行都不匹配就拒绝，而不是照它去拼路径');
     }
     assert.equal(fs.existsSync(path.join(userData, 'Partitions')), true);
 
@@ -417,7 +417,7 @@ test('★★ 本机的插件数据：真的去认磁盘，认得出"再也读不
     assert.equal(okShape.rows.length, 1, '而清单里仍然只有认不出的那一份');
     });
 
-test('★ 「立即重启」走的是与关窗口同一套收尾', async (t) => {
+test('「立即重启」走的是与关窗口同一套收尾', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
   // 这一条放在文件最末：它会把那个假 app 置成"已经退出"。

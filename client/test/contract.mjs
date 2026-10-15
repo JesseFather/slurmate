@@ -171,7 +171,7 @@ test('作废会话后旧 cookie 失效 —— 客户端必须重登而不是以�
   });
 });
 
-test('★ 换一份契约，假服务就扮另一个服务 —— 基座里没有"哪个服务"这个概念', async () => {
+test('换一份契约，假服务就扮另一个服务 —— 基座里没有"哪个服务"这个概念', async () => {
   // 一个假想的 Jupyter 式契约：路径、字段名、cookie 名全都不一样。
   const other = { path: '/auth/token', field: 'token', cookie: 'jupyter-session' };
   await withServer(async (srv) => {
@@ -191,13 +191,13 @@ test('★ 换一份契约，假服务就扮另一个服务 —— 基座里没�
   }, other);
 });
 
-test('★ 基座的登录判定只认契约里的 cookie', async () => {
+test('基座的登录判定只认契约里的 cookie', async () => {
   const jar = (names) => ({
     fetch: async () => ({ status: 200 }),
     cookies: { get: async ({ name }) => (names.includes(name) ? [{ name, value: 'x' }] : []) },
   });
   // 名字对不上就是没登录 —— 哪怕 jar 里有一个 cookie
-  assert.equal((await webLogin(jar(['别的']), 'http://x', 'pw', CONTRACT)).ok, false);
+  assert.equal((await webLogin(jar(['其他']), 'http://x', 'pw', CONTRACT)).ok, false);
   assert.equal((await webLogin(jar([CONTRACT.cookie]), 'http://x', 'pw', CONTRACT)).ok, true);
 
   // 没有契约 / 没有口令时明确失败，而不是猜一个默认端点

@@ -24,7 +24,7 @@
  *     而外部进程读不了 asar。靠 `asarUnpack` 解出来。
  *
  * 这两条在打包版上断掉的样子一模一样：客户端一切正常，只有一件功能不出声地
- *   不工作 —— 站点报得出插件却一个都发不出来；或者一提交就"作业侧起不来"。
+ *   不工作 —— 站点报得出插件却一个都发不出来；或者一提交就"作业侧无法启动"。
  *   而这台机器上跑 `node --test` 是全绿的，因为源码树里两样都在。
  *
  * 所以这一份钉三件事：
@@ -49,7 +49,7 @@ const SRC = path.join(CLIENT, 'src');
 const YML = path.join(CLIENT, 'electron-builder.yml');
 const yml = fs.readFileSync(YML, 'utf8');
 
-/** 顶格那一段配置的正文。取不到就返回空串 —— 调用方一律断言它非空。 */
+/** 顶格那一段配置的正文。获取失败就返回空串 —— 调用方一律断言它非空。 */
 function blockOf(key) {
   const at = yml.indexOf(`\n${key}:`);
   if (at === -1) return '';
@@ -58,7 +58,7 @@ function blockOf(key) {
   return end === -1 ? rest : rest.slice(0, end + key.length + 1);
 }
 
-test('★★ 打包器在源码树与安装包里算到同一个地方，而那个地方由 extraResources 定', () => {
+test('打包器在源码树与安装包里算到同一个地方，而那个地方由 extraResources 定', () => {
   // 源码树：`client/src/main` 往上三层是仓库根。
   assert.equal(appAssets.packerPath(path.join('repo', 'client', 'src', 'main')),
     path.join('repo', 'packer', 'slurmate-packer.js'));
@@ -69,17 +69,17 @@ test('★★ 打包器在源码树与安装包里算到同一个地方，而那�
   // 上面那个路径不是随便定的：它就写在 `extraResources` 的 `to:` 里。两条一起
   //   改才对，只改一条的后果是打包版上找不到打包器，而源码树里全绿。
   const block = blockOf('extraResources');
-  assert.ok(block, 'electron-builder.yml 里找不到 extraResources 段 —— 这条判据失去目标');
+  assert.ok(block, 'electron-builder.yml 里未找到 extraResources 段 —— 这条判据失去目标');
   const m = /to:\s*(\S+)/.exec(block);
-  assert.ok(m, 'extraResources 里找不到 `to:` —— 判据失去目标');
+  assert.ok(m, 'extraResources 里未找到 `to:` —— 判据失去目标');
   assert.equal(inPkg, path.join('/r', ...m[1].split('/')),
-    'app-assets.js 算出来的位置与 electron-builder.yml 的 `to:` 对不上：'
+    'app-assets.js 算出来的位置与 electron-builder.yml 的 `to:` 不一致：'
     + '改一处就要改另一处');
 });
 
-test('★★ 替身宿主被解出 asar，而 fake-job.js 交出去的正是那一份', () => {
+test('替身宿主被解出 asar，而 fake-job.js 交出去的正是那一份', () => {
   const block = blockOf('asarUnpack');
-  assert.ok(block, 'electron-builder.yml 里找不到 asarUnpack 段 —— 这条判据失去目标');
+  assert.ok(block, 'electron-builder.yml 里未找到 asarUnpack 段 —— 这条判据失去目标');
   assert.match(block, /^\s*-\s*src\/main\/fake-job-host\.sh\s*$/m,
     'asarUnpack 必须解出 src/main/fake-job-host.sh：外部 bash 读不了 asar 里的文件');
 
@@ -89,7 +89,7 @@ test('★★ 替身宿主被解出 asar，而 fake-job.js 交出去的正是那�
     /appAssets\.unpacked\(\s*path\.join\(__dirname,\s*'fake-job-host\.sh'\)\s*\)/,
     'fake-job.js 交给 bash 的那个路径必须过 `appAssets.unpacked()`：'
     + '少了它，打包版上那次 spawn 拿到的是 asar 里的路径，而症状只是'
-    + '「作业侧起不来」');
+    + '「作业侧无法启动」');
 });
 
 // ── ③ 跑出 `src/` 的路径：全都在这里有一句交代 ───────────────────────────────
@@ -119,7 +119,7 @@ function walk(dir, out = []) {
   return out;
 }
 
-test('★★ 跑出 client/src 的路径只有那几处，而且各自都交代过', () => {
+test('跑出 client/src 的路径只有那几处，而且各自都交代过', () => {
   const found = [];
   for (const file of walk(SRC)) {
     const src = fs.readFileSync(file, 'utf8');
@@ -157,6 +157,6 @@ test('★★ 跑出 client/src 的路径只有那几处，而且各自都交代�
     assert.ok(hit,
       `${path.relative(CLIENT, f.file)} 的 ${f.how} 指到 ${f.target}，跑出了 client/src。`
       + '打包版里那个位置不存在 —— 要么在 electron-builder.yml 里声明它，'
-      + '要么把它挪进 src/，要么在上面那张表里写清它怎么活下来');
+      + '要么把它移动进 src/，要么在上面那张表里写清它怎么活下来');
   }
 });

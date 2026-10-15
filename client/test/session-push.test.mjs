@@ -118,7 +118,7 @@ function init0(ctrl) {
 const tick = () => new Promise((r) => setImmediate(r));
 
 // ── 刷新视图 ──────────────────────────────────────────────────────────────
-test('★★ 推送让作业状态立刻更新，而且**一次 status 都不问**', async (t) => {
+test('推送让作业状态立刻更新，而且一次 status 都不问', async (t) => {
   // 这就是常驻通道省下来的那个 exec：没有推送的话，job_state 要等下一轮 60 秒的
   //   status 才会变；现在它随推送（有变化 2 秒内）就到。
   t.after(keepAlive());
@@ -132,7 +132,7 @@ test('★★ 推送让作业状态立刻更新，而且**一次 status 都不问
   assert.equal(ctrl.session.job_state, 'COMPLETED');
 });
 
-test('★★ 推送里**没有口令**（结构性质）⇒ 旧口令必须留着', async (t) => {
+test('推送里没有口令（结构性质）， 旧口令必须留着', async (t) => {
   // 守护进程渲染推送用的是 `with_secret=False`，所以口令永远不会出现在
   //   推送里。合并时把它当成"这次没有"用 undefined 覆盖掉，后果不是少显示一格：
   //   自动重登失败，页面打不开，而界面上一切正常。
@@ -146,7 +146,7 @@ test('★★ 推送里**没有口令**（结构性质）⇒ 旧口令必须留�
   assert.equal(ctrl.session.ssh_host_key, 'ssh-ed25519 AAAA', '作业内主机公钥同理');
 });
 
-test('★ 换了会话就**不**保留旧口令（拿旧口令打新作业是另一回事）', async (t) => {
+test('换了会话就不保留旧口令（拿旧口令打新作业是另一回事）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = running(b);
@@ -156,7 +156,7 @@ test('★ 换了会话就**不**保留旧口令（拿旧口令打新作业是另
   assert.equal(ctrl.session.auth_password, undefined);
 });
 
-test('★★ 推送里找不到本会话 ⇒ 什么都不做（**绝不能**读成"会话没了"）', async (t) => {
+test('推送里未找到本会话，什么都不做（绝不能读成"会话没了"）', async (t) => {
   // 快照和 `list` 一样截断到最近 50 条，而那是同一个 uid 的全部会话 ——
   //   一个多开的用户完全可能排到 50 名之外。读成"会话没了"的后果是客户端自己
   //   拆掉隧道、界面上写"会话已不存在"，而作业还在跑。
@@ -164,14 +164,14 @@ test('★★ 推送里找不到本会话 ⇒ 什么都不做（**绝不能**读�
   const b = new StubBackend();
   const ctrl = running(b);
   const before = { state: ctrl.state, session: ctrl.session };
-  push(ctrl, [view({ session_id: '别的会话' }), view({ session_id: '还有一个' })]);
+  push(ctrl, [view({ session_id: '其他会话' }), view({ session_id: '还有一个' })]);
   await tick();
   assert.equal(ctrl.state, State.RUNNING, '状态不许动');
   assert.equal(ctrl.session, before.session, '视图不许动');
   assert.equal(b.count('status'), 0, '不确认就不该去问 —— 没有"可疑"这回事');
 });
 
-test('★ 空列表同理：那是"这一批里没有"，不是"你没有会话"', async (t) => {
+test('空列表同理：那是"这一批里没有"，不是"你没有会话"', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = running(b);
@@ -182,7 +182,7 @@ test('★ 空列表同理：那是"这一批里没有"，不是"你没有会话"
 });
 
 // ── 实质变化，去要一份权威视图 ───────────────────────────────────────────
-test('★ 推送里 state 变了 ⇒ 去要一份权威视图（那一条才带口令）', async (t) => {
+test('推送里 state 变了，去要一份权威视图（那一条才带口令）', async (t) => {
   // 越过 ACL 边界意味着口令可能刚出现（排队 → 已登记），而推送结构上
   // 不带口令 —— 所以这一刻必须去问 status。
   t.after(keepAlive());
@@ -194,7 +194,7 @@ test('★ 推送里 state 变了 ⇒ 去要一份权威视图（那一条才带�
   assert.equal(b.count('status'), 1, 'state 变了必须升级成一次权威查询');
 });
 
-test('★ 推送里 tunnel_target 变了 ⇒ 同样升级，而且**真的会去重建隧道**', async (t) => {
+test('推送里 tunnel_target 变了，同样升级，而且真的会去重建隧道', async (t) => {
   t.after(keepAlive());
   // 这条断言的不只是"多问了一次 status"，而是"那条既有的重建路真的被走到了"
   //   ——升级如果只更新视图不触发 `_statusOnce()`，隧道就留在一个已经没有作业的
@@ -224,11 +224,11 @@ test('★ 推送里 tunnel_target 变了 ⇒ 同样升级，而且**真的会去
   }
   assert.equal(b.count('status'), 1, '必须先升级成一次权威查询');
   assert.equal(stops.length, 1, '重建之前要先停掉旧的监听');
-  assert.deepEqual(starts[0].target, '192.0.2.99:55001', '要指向**新**的目标');
+  assert.deepEqual(starts[0].target, '192.0.2.99:55001', '要指向新的目标');
   assert.equal(ctrl.session.tunnel_target, '192.0.2.99:55001');
 });
 
-test('★ job_state 变了**不**升级（推送那份比 status 更新，不是更旧）', async (t) => {
+test('job_state 变了不升级（推送那份比 status 更新，不是更旧）', async (t) => {
   // 快照里的作业信息来自本 tick 已经取过的那一份（至多旧 2 秒），而 status
   // 会现查一次 —— 为一个再常见不过的状态迁移去 fork 一个 scontrol，是把
   // 常驻通道省下来的东西又还回去。
@@ -241,7 +241,7 @@ test('★ job_state 变了**不**升级（推送那份比 status 更新，不是
   assert.equal(ctrl.session.job_state, 'PENDING');
 });
 
-test('★ 同时只允许一次 status 在飞（两条在飞的会各自覆盖视图，顺序无保证）', async (t) => {
+test('同时只允许一次 status 在飞（两条在飞的会各自覆盖视图，顺序无保证）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   let resolveFirst = null;
@@ -257,7 +257,7 @@ test('★ 同时只允许一次 status 在飞（两条在飞的会各自覆盖�
 });
 
 // ── 与轮询的关系：这是这一版最要紧的一条 ─────────────────────────────────
-test('★★ 推送不来的时候，status 轮询与这一版之前**逐字相同**', async (t) => {
+test('推送不来的时候，status 轮询与这一版之前逐字相同', async (t) => {
   // 旧 CLI 上没有 `stream` 子命令、老守护进程、常驻通道起不来 —— 那些情况下
   //    一条推送都不会来。这条就是"降级之后客户端照常能用"的凭据。
   t.after(keepAlive());
@@ -275,7 +275,7 @@ test('★★ 推送不来的时候，status 轮询与这一版之前**逐字相�
   assert.ok(b.count('status') >= 3, `轮询必须照常跑，实际 ${b.count('status')} 次`);
 });
 
-test('★ 推送健康时，到点的轮询**不问**（这就是省下来的那个 exec）', async (t) => {
+test('推送健康时，到点的轮询不问（这就是省下来的那个 exec）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   b.reply = () => ok({ session: view() });
@@ -294,7 +294,7 @@ test('★ 推送健康时，到点的轮询**不问**（这就是省下来的那
   assert.equal(b.count('status'), 0, '推送在喂的时候一次都不该问');
 });
 
-test('★★ 推送停了超过看门狗 ⇒ 轮询自己接上（不是静默地不更新了）', async (t) => {
+test('推送停了超过看门狗，轮询自己接上（不是静默地不更新了）', async (t) => {
   // 通道断了、守护进程重启 —— 这些都会让推送停掉。不接上的后果是界面从此
   //   冻在最后一帧上，而它看起来只像是"作业一直没变"。
   t.after(keepAlive());
@@ -316,7 +316,7 @@ test('★★ 推送停了超过看门狗 ⇒ 轮询自己接上（不是静默�
   assert.ok(b.count('status') >= 1, '看门狗过了之后必须自己接上');
 });
 
-test('★ 看门狗必须**严格大于**守护进程的快照周期', () => {
+test('看门狗必须严格大于守护进程的快照周期', () => {
   // 守护进程保证"哪怕什么都没变也每 30 秒推一条"。取小了会把正常的空闲
   // 读成"通道坏了"，于是每一轮都去问一次 —— 把这一版省下来的东西原样还回去。
   // （跨文件那一半在 cluster 用例 26.18 里。）
@@ -324,7 +324,7 @@ test('★ 看门狗必须**严格大于**守护进程的快照周期', () => {
 });
 
 // ── 别的 ──────────────────────────────────────────────────────────────────
-test('★ `stale` 要说出来（不说的话，画面比服务端旧而用户无从知道）', async (t) => {
+test('`stale` 要说出来（若不说，画面比服务端旧而用户无从知道）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = running(b);
@@ -333,7 +333,7 @@ test('★ `stale` 要说出来（不说的话，画面比服务端旧而用户�
   assert.match(ctrl.warning, /4 条/);
 });
 
-test('★ 排队那一段不消费推送（那一段由 _waitForEnroll 的轮询负责）', async (t) => {
+test('排队那一段不消费推送（那一段由 _waitForEnroll 的轮询负责）', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = new SessionController({ backend: b, workspaceId: 'L1' });
@@ -346,7 +346,7 @@ test('★ 排队那一段不消费推送（那一段由 _waitForEnroll 的轮询
   assert.equal(b.count('status'), 0);
 });
 
-test('★ stop() 之后退订：释放期的推送不许再写一个没人看的状态', async (t) => {
+test('stop() 之后退订：释放期的推送不许再写一个没人看的状态', async (t) => {
   t.after(keepAlive());
   const b = new StubBackend();
   const ctrl = running(b);
@@ -356,10 +356,10 @@ test('★ stop() 之后退订：释放期的推送不许再写一个没人看的
   const seen = ctrl.session;
   push(ctrl, [view({ job_state: 'COMPLETED', job_terminal: true })]);
   await tick();
-  assert.equal(ctrl.session, seen, '退订之后推送不该再改任何东西');
+  assert.equal(ctrl.session, seen, '退订之后推送不该再改任何内容');
 });
 
-test('★★ 心跳有没有落地那条校验，推送那条路上也要生效', async (t) => {
+test('心跳有没有落地那条校验，推送那条路上也要生效', async (t) => {
   // 它守的是最危险的那件事：心跳不落地，300 秒 suspect，1800 秒自动 scancel。
   //   如果这条校验只留在轮询里，那么"推送健康"（也就是这一版最正常的状态）
   //   恰恰是它静默失效的那种状态。
@@ -373,7 +373,7 @@ test('★★ 心跳有没有落地那条校验，推送那条路上也要生效'
   assert.match(ctrl.warning, /心跳已过期/);
 });
 
-test('★ 等登记那段轮询也走同一个合并入口（口令不许被一次抖动抹掉）', async (t) => {
+test('等登记那段轮询也走同一个合并入口（口令不许被一次抖动抹掉）', async (t) => {
   // 判据不是"能不能连上"：那一轮轮询每 3 秒一次，而口令要等状态越过 ACL
   //   边界才出现。直接赋值的话，一次读会话文件失败（NFS 抖动）就会把它抹掉，
   //   而登记完成之后轮询就停了 —— 此后没有任何一条路会把它拿回来。

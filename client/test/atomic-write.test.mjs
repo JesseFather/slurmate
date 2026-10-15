@@ -63,7 +63,7 @@ test('父目录不存在时自建（递归），权限 0700', () => {
   assert.equal(fs.statSync(path.join(d, 'x', 'y')).mode & 0o777, 0o700);
 });
 
-test('★ 已存在的父目录，权限一个 bit 都不许动', () => {
+test('已存在的父目录，权限一个 bit 都不许动', () => {
   // 这一条守的是一个真实存在过的行为：被取代的那份 `config.js` 实现里有一句
   //   `try { fs.chmodSync(dir, mode); }` —— 于是每一次写配置都会把一个已经存在的
   //   目录 chmod 成 0700，而那个目录可能是 Electron 的 `userData`、可能是用户自己的
@@ -75,12 +75,12 @@ test('★ 已存在的父目录，权限一个 bit 都不许动', () => {
   const before = fs.statSync(sub).mode & 0o777;
   A.writeAtomic(path.join(sub, 'a.conf'), 'x', { mode: 0o600 });
   assert.equal(fs.statSync(sub).mode & 0o777, before,
-    '写一个文件不该顺手改它所在目录的权限');
+    '写一个文件不该连带改它所在目录的权限');
 });
 
 // ── 失败那条路：返回结构化结果，不抛，也不留残骸 ────────────────────────
 
-test('★ 写失败：返回 {ok:false} 而不是抛，且不留临时文件', () => {
+test('写失败：返回 {ok:false} 而不是抛，且不留临时文件', () => {
   const d = tmpdir();
   // `mkdir:false` 明确表示"父目录由我保证在" —— 而它不在。
   const f = path.join(d, 'nope', 'a.conf');
@@ -91,19 +91,19 @@ test('★ 写失败：返回 {ok:false} 而不是抛，且不留临时文件', (
   assert.equal(fs.existsSync(f), false);
 });
 
-test('★ rename 失败：同样返回 {ok:false}，且临时文件被清掉', () => {
+test('rename 失败：同样返回 {ok:false}，且临时文件被清掉', () => {
   // 让 rename 失败的最省事的办法：目标是一个已经存在的目录（POSIX 上 rename
   // 文件到目录会 EISDIR）。
   const d = tmpdir();
   const target = path.join(d, 'iam-a-dir');
   fs.mkdirSync(target);
   const r = A.writeAtomic(target, 'x', { mode: 0o600 });
-  assert.equal(r.ok, false, '写不进去必须如实说');
+  assert.equal(r.ok, false, '写入失败必须如实说');
   assert.deepEqual(leftovers(d), [],
     '失败路径上留下的那个临时文件，会在用户的目录里一直躺到天荒地老');
 });
 
-test('writeAtomicOrThrow：同一条失败路径变成长出异常（给"写不下去就该炸"的调用方）', () => {
+test('writeAtomicOrThrow：同一条失败路径变成长出异常（给"写入失败就该炸"的调用方）', () => {
   const d = tmpdir();
   const target = path.join(d, 'iam-a-dir');
   fs.mkdirSync(target);
@@ -123,7 +123,7 @@ test('writeJsonAtomic：两格缩进（这些文件是给人看的）', () => {
 
 // ── 符号链接：默认不跟随，显式才跟随 ────────────────────────────────────
 
-test('★ 默认 refuse：目标是符号链接时，链接本身被换成普通文件', () => {
+test('默认 refuse：目标是符号链接时，链接本身被换成普通文件', () => {
   // 把"默认不跟随"显式钉住，理由只有一个：只有钉住了，"有人把默认改成
   //   follow"才会红。默认跟随会让框架自己那七个状态文件（config.json、.sites.json…）
   //   全都开始跟着链接跑到别处去 —— 那是"用一个只对一处成立的规则去改另外七处"。
@@ -139,7 +139,7 @@ test('★ 默认 refuse：目标是符号链接时，链接本身被换成普通
   assert.equal(fs.readFileSync(link, 'utf8'), 'new');
 });
 
-test('★ link:follow：链接留着，内容写进它指向的那个文件（dotfiles 工作流）', () => {
+test('link:follow：链接留着，内容写进它指向的那个文件（dotfiles 工作流）', () => {
   // 用 dotfiles 管理 ssh 配置的人：`~/.ssh/config -> ~/dotfiles/config`。rename(2)
   // 不跟随目标上的符号链接，直接 rename 上去会把链接换成普通文件 —— 于是他改
   // `~/dotfiles/config` 不再影响 ssh，两边从此各说各话，而没有任何地方会报错。
@@ -152,5 +152,5 @@ test('★ link:follow：链接留着，内容写进它指向的那个文件（do
   assert.deepEqual(A.writeAtomic(link, 'new', { mode: 0o600, link: 'follow' }), { ok: true });
   assert.equal(fs.lstatSync(link).isSymbolicLink(), true, '链接必须还在（dotfiles 工作流）');
   assert.equal(fs.readFileSync(real, 'utf8'), 'new', '内容要进它指向的那个文件');
-  assert.deepEqual(leftovers(d), [], '★ 临时文件必须建在**解析后**的目录里，否则跨文件系统');
+  assert.deepEqual(leftovers(d), [], '临时文件必须建在解析后的目录里，否则跨文件系统');
 });

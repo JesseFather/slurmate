@@ -143,7 +143,7 @@ test('不合法的连接条目被剔除，而不是补默认值', () => {
   assert.equal(back.connections[0].id, 'c1');
 });
 
-test('★ 备注留空就是「没起名」，不是回落成 host', () => {
+test('备注留空就是「没起名」，不是回落成 host', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   cfg.connections = [conn({ label: '   ' })];
@@ -185,7 +185,7 @@ test('没有任何连接时 activeConnection 返回 null（真实状态，不编
 // 症状：界面上不修改任何字段、连点「保存并连接」，列表里就多出一条一模一样的。
 // 根因是身份被当成了 id（每存一次新生成一个），而真正的身份是 user@host:port。
 
-test('★ 同一个地址反复保存，只应有一条', () => {
+test('同一个地址反复保存，只应有一条', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   const input = { user: 'alice', host: '198.51.100.10', port: 10100 };
@@ -202,7 +202,7 @@ test('★ 同一个地址反复保存，只应有一条', () => {
   assert.equal(c.connection.id, a.connection.id);
 });
 
-test('★ 端口不同就是两条连接（同一台主机的不同入口）', () => {
+test('端口不同就是两条连接（同一台主机的不同入口）', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   config.upsertConnection(cfg, { user: 'alice', host: '198.51.100.10', port: 10100 });
@@ -215,7 +215,7 @@ test('★ 端口不同就是两条连接（同一台主机的不同入口）', (
   assert.equal(cfg.connections.length, 3);
 });
 
-test('★ 按地址判重时，空备注不得把已有备注冲掉', () => {
+test('按地址判重时，空备注不得把已有备注冲掉', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   cfg.connections = [conn({ label: '内网' })];
@@ -234,7 +234,7 @@ test('★ 按地址判重时，空备注不得把已有备注冲掉', () => {
   assert.equal(named.connection.label, '公网入口');
 });
 
-test('★ 编辑时备注可以清空 —— 那一栏就是当前值', () => {
+test('编辑时备注可以清空 —— 那一栏就是当前值', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   const a = config.upsertConnection(cfg, {
@@ -255,7 +255,7 @@ test('不合法的输入让 upsert 返回 null，而不是补个默认值存下�
   assert.equal(cfg.connections.length, 0);
 });
 
-test('★ 编辑时把地址改成另一条已有的，必须拒绝而不是留下两条同身份的', () => {
+test('编辑时把地址改成另一条已有的，必须拒绝而不是留下两条同身份的', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   const a = config.upsertConnection(cfg, { user: 'alice', host: '198.51.100.10', port: 10100 });
@@ -275,7 +275,7 @@ test('★ 编辑时把地址改成另一条已有的，必须拒绝而不是留�
     '冲突时不该把 a 改掉');
 });
 
-test('★ 编辑时不改地址（只改别处）不该被自己的身份判成冲突', () => {
+test('编辑时不改地址（只改别处）不该被自己的身份判成冲突', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   const a = config.upsertConnection(cfg, { user: 'alice', host: '198.51.100.10', port: 10100 });
@@ -287,7 +287,7 @@ test('★ 编辑时不改地址（只改别处）不该被自己的身份判成�
   assert.equal(cfg.connections.length, 1);
 });
 
-test('★ 升级时顺手清掉旧版本攒下的一串相同条目', () => {
+test('升级时一并清掉旧版本攒下的一串相同条目', () => {
   const dir = tmpdir();
   // 同一个地址点了三次「保存并连接」，配置里攒了三条一样的
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
@@ -304,7 +304,7 @@ test('★ 升级时顺手清掉旧版本攒下的一串相同条目', () => {
   assert.equal(cfg.connections.length, 1, '读的时候就要合并，否则用户升级完看到的还是那一堆');
   assert.equal(cfg.connections[0].id, 'c1', '保留先出现的那条');
   assert.equal(cfg.activeConnectionId, 'c1',
-    '活动连接指向被合并掉的那条时，必须跟着挪到留下的那条，不能悬空');
+    '活动连接指向被合并掉的那条时，必须跟着移动到留下的那条，不能悬空');
 });
 
 test('duplicate id 被去掉，保留先出现的', () => {
@@ -317,7 +317,7 @@ test('duplicate id 被去掉，保留先出现的', () => {
   assert.equal(back.connections[0].label, '甲');
 });
 
-test('★ 旧格式不再被读：schema 1 的 profile + extraHosts 读作"没有配过"', () => {
+test('旧格式不再被读：schema 1 的 profile + extraHosts 读作"没有配过"', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 1,
@@ -350,7 +350,7 @@ test('主机密钥：首次为 new，记住后为 known', () => {
   assert.equal(mode(path.join(dir, 'config.json')), 0o600);
 });
 
-test('★ 主机密钥变了必须是 changed 并带上原指纹，不是当成新主机', () => {
+test('主机密钥变了必须是 changed 并带上原指纹，不是当成新主机', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   config.rememberHostKey(dir, cfg, 'h', 22, 'SHA256:old');
@@ -387,7 +387,7 @@ test('忘记主机密钥后回到 new', () => {
 //   数据空间 = 一个插件的一份存储 + 它自己的端口，它不属于任何工作区
 //              （一份数据可以被几个工作区同时引用）。
 
-test('★★ 数据**创建时定一次**、此后只读 —— 没有任何函数改得动它的端口', () => {
+test('数据创建时定一次、此后只读 —— 没有任何函数改得动它的端口', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   assert.deepEqual(cfg.workspaces, [], '一条连接都没有时不该有工作区');
@@ -411,10 +411,10 @@ test('★★ 数据**创建时定一次**、此后只读 —— 没有任何函�
   //    模块里仍然没有一个通用的 `setSpacePort`：改端口的入口只有一个
   //      （`recordSpacePort`），而它只被"用户明确选了记住"那一下调到（见下面那条）。
   assert.equal(typeof config.setSpacePort, 'undefined',
-    '★ 不许有通用的端口 setter —— 改端口只有一个入口，就是下面那条钉的那个');
+    '不许有通用的端口 setter —— 改端口只有一个入口，就是下面那条钉的那个');
 });
 
-test('★★ 改端口只有一个入口：`recordSpacePort`，而且它只改 ports[0]', () => {
+test('改端口只有一个入口：`recordSpacePort`，而且它只改 ports[0]', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.spaces = [space(1), space(2),
                 { id: sid(3), pluginId: LAYOUT_PLUGIN.id, group: 'g',
@@ -423,22 +423,22 @@ test('★★ 改端口只有一个入口：`recordSpacePort`，而且它只改 p
   // ① 正常一次
   const r = config.recordSpacePort(cfg, sid(1), 18100);
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.from, 18081, '要把**原来那个**带回来 —— 界面与日志都要拿它说"从 X 改成 Y"');
+  assert.equal(r.from, 18081, '要把原来那个带回来 —— 界面与日志都要拿它说"从 X 改成 Y"');
   assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '改的就是它');
-  assert.deepEqual(config.findSpace(cfg, sid(2)).ports, [18082], '★ 别的那一份一个字都没动');
+  assert.deepEqual(config.findSpace(cfg, sid(2)).ports, [18082], '其他那一份一个字都没动');
 
   // ② 只改 `ports[0]`：多端口插件另外那几个端口是别的东西在用（插件自己声明的），
   //    与"这一份数据在浏览器里的地址"不是一回事 —— 一起改会把它们静默地挪到别处。
   assert.equal(config.recordSpacePort(cfg, sid(3), 19000).ok, true);
   assert.deepEqual(config.findSpace(cfg, sid(3)).ports, [19000, 18084, 18085],
-    '★ 只改第一个');
+    '只改第一个');
 
   // ③ 这个端口归别人，拒。两份数据同时声称一个端口的话，每次启动谁先绑谁赢，
   //    会话会在两个 origin 之间反复横跳（见隧道那一段注释）。
   const clash = config.recordSpacePort(cfg, sid(1), 18082);
-  assert.equal(clash.ok, false, '★ 已经被另一份数据声称着的端口不能记给它');
+  assert.equal(clash.ok, false, '已经被另一份数据声称着的端口不能记给它');
   assert.match(clash.error, /18082/, '而那句话要念出是哪个端口');
-  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '★ 拒了就不许改半个字');
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '拒了就不许改半个字');
 
   // ④ 不在配置里的那一份，拒。临时那一份就是这种：它不在 `cfg.spaces` 里，而它的
   //    端口是这次会话当场挑的 —— 没有"记住"可言。
@@ -447,9 +447,9 @@ test('★★ 改端口只有一个入口：`recordSpacePort`，而且它只改 p
   // ⑤ 端口不合法，拒（与 `tunnel.js` 的 `assertPort` 同一条规矩）。
   for (const bad of [0, -1, 65536, 1.5, '18080', null, undefined]) {
     assert.equal(config.recordSpacePort(cfg, sid(1), bad).ok, false,
-      `★ ${JSON.stringify(bad)} 不是合法端口，不该被记下来`);
+      `${JSON.stringify(bad)} 不是合法端口，不该被记下来`);
   }
-  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '★ 上面那几次一次都没改成');
+  assert.deepEqual(config.findSpace(cfg, sid(1)).ports, [18100], '上面那几次一次都没改成');
 });
 
 test('数据：端口越界就整条不合法，不补默认值', () => {
@@ -462,12 +462,12 @@ test('数据：端口越界就整条不合法，不补默认值', () => {
   assert.equal(config.normalizeSpace({ id: sid(3), pluginId: LAYOUT_PLUGIN.id,
     group: 'editor', ports: ['x'] }), null, '非数字');
   assert.equal(config.normalizeSpace({ id: sid(4), pluginId: LAYOUT_PLUGIN.id,
-    group: 'editor', ports: [] }), null, '★ 空列表也不行 —— 端口是它非有不可的东西');
+    group: 'editor', ports: [] }), null, '空列表也不行 —— 端口是它非有不可的一项');
   assert.equal(config.normalizeSpace(null), null);
   assert.deepEqual(config.normalizeSpace(space(5)).ports, [18085]);
 });
 
-test('★ 数据 id 的形状也要查 —— 它进磁盘路径', () => {
+test('数据 id 的形状也要查 —— 它进磁盘路径', () => {
   // 这一格必须查：`normalizeSpace` 若只问"是不是非空字符串"，而这个 id 会被拼成
   //   分区名 = Electron 的存储目录名 —— 于是 `config.json` 里手写一个
   //   `"id": "../x"` 就会一路走到路径里。（`persist:plugin-<ULID>` 那条
@@ -486,26 +486,26 @@ test('★ 数据 id 的形状也要查 —— 它进磁盘路径', () => {
   // 合法的那两个（`newSpaceId` 铸出来的形状、与那条正则）必须是同一条规则。
   assert.equal(config.normalizeSpace(space(7)).id, sid(7));
   assert.match(config.newSpaceId(), /^s[0-9a-f]{12}$/,
-    '★ 铸出来的 id 与查的形状必须是同一条规则（两边分家的话，用户每次新建一份数据都会'
+    '铸出来的 id 与查的形状必须是同一条规则（若两边分家，用户每次新建一份数据都会'
     + '在下次启动时丢掉它）');
 });
 
-test('★ 数据那两格也进路径：插件 id 与共享组的形状都要查', () => {
+test('数据那两格也进路径：插件 id 与共享组的形状都要查', () => {
   // 插件 id 是 ULID（大写）；共享组名是清单里那一格，而第二段还可能是版本号
   //   （`data.perVersion: true`），所以这里查的是进路径的安全性，不是清单那条规则。
   const ok = (over) => config.normalizeSpace({ ...space(1), ...over });
   assert.equal(ok({ pluginId: '../x' }), null, '插件 id 里一个斜杠就够走到路径外面');
   assert.equal(ok({ pluginId: LAYOUT_PLUGIN.id.toLowerCase() }), null,
-    '★ 大小写也要一致：磁盘上那一段是折叠过的，而配置里那一份是原样的 ULID');
+    '大小写也要一致：磁盘上那一段是折叠过的，而配置里那一份是原样的 ULID');
   assert.equal(ok({ pluginId: LAYOUT_PLUGIN.id.slice(0, 25) }), null, '25 个字符不是 ULID');
   assert.equal(ok({ group: '../x' }), null);
   assert.equal(ok({ group: '' }), null);
   assert.equal(ok({ group: 'e'.repeat(33) }), null, '比 GROUP_RE 的上限还长');
   assert.equal(ok({ group: '1.0.0' }).group, '1.0.0',
-    '★ 第二段**可以是一个版本号**（perVersion），那是一条合法的取值');
+    '第二段可以是一个版本号（perVersion），那是一条合法的取值');
 });
 
-test('★ 新建出来的名字是「工作区 N」，而 N 是**当前没被占用**的最小正整数', () => {
+test('新建出来的名字是「工作区 N」，而 N 是当前没被占用的最小正整数', () => {
   // 那两个字符串是用户看得见的东西（下拉框、映射图、改名框里的初值），
   //   而它们没有任何别的地方看着 —— 改了措辞不会有别的用例变红。
   assert.equal(config.nextWorkspaceName({ workspaces: [] }), '工作区 1');
@@ -521,7 +521,7 @@ test('★ 新建出来的名字是「工作区 N」，而 N 是**当前没被占
     { id: gid(1), name: '我自己起的名字' }] }), '工作区 1');
 });
 
-test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"，就地补一个空白工作区', () => {
+test('旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"，就地补一个空白工作区', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 4,
@@ -536,7 +536,7 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"
   // 这条钉的是实际发生的事：一个全新的空白工作区（引用表空着），一条数据都没有。
   const cfg = config.loadConfig(dir);
   assert.equal(cfg.workspaces.length, 1);
-  assert.deepEqual(cfg.workspaces[0].refs, {}, '★ 工作区只带一张**空的**引用表 —— 数据是开会话时才建的');
+  assert.deepEqual(cfg.workspaces[0].refs, {}, '工作区只带一张空的引用表 —— 数据是开会话时才建的');
   assert.deepEqual(cfg.spaces, [], '不再继承 slots["1"].port（那条路整个删了）');
   // 旧字段自然消失（只认已知键，不写回）。留着它，将来读这份配置的人
   // 会以为它还有用，去代码里找一个早就不存在的行为。
@@ -549,7 +549,7 @@ test('★ 旧格式不再被读：schema ≤ 4 的 slots 读作"没有工作区"
   }
 });
 
-test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次配置就丢掉一份布局', () => {
+test('兜底那个工作区的 id 是确定的 —— 不然读一次配置就丢掉一份布局', () => {
   // 场景就是用户真的会走的那条：手改过配置（或者第一次配连接就写下了连接），
   // `workspaces[]` 是空的，`loadWorkspaces` 就地补一个「默认工作区」。
   //
@@ -571,14 +571,14 @@ test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次
 
   write();
   const a = config.loadConfig(dir);
-  assert.equal(a.workspaces.length, 1, '有连接、一个工作区都没有 ⇒ 就地补一个');
+  assert.equal(a.workspaces.length, 1, '有连接、一个工作区都没有，就地补一个');
   const id = a.workspaces[0].id;
 
   // 判据一（承重的那条）：再读一次必须还是同一个 id。随机 id 在这里必然红。
   write();
   const b = config.loadConfig(dir);
   assert.equal(b.workspaces[0].id, id,
-    '★★ 同一份配置读两次必须得到同一个工作区 id —— 换一个 id 就是换一批数据，'
+    '同一份配置读两次必须得到同一个工作区 id —— 换一个 id 就是换一批数据，'
     + '而用户刚攒下的那份布局正在那些数据里');
 
   // 判据二：它的形状必须过 `WORKSPACE_ID_RE`。兜底那一支是直接 push 的，
@@ -588,7 +588,7 @@ test('★★ 兜底那个工作区的 id 是**确定的** —— 不然读一次
     '兜底 id 的形状必须与 WORKSPACE_ID_RE 是同一条规则');
 });
 
-test('★ 每一个数据 id 一份独立的存储，且 id 不复用', () => {
+test('每一个数据 id 一份独立的存储，且 id 不复用', () => {
   // 数据 id 是 partition 的末段，而整个 partition 名就是 Electron 的存储目录名 ——
   // 「新建一份数据真的空白」靠的是 id 永不复用：若按端口命名，A 回收后端口
   // 被新数据 B 复用，B 就会继承 A 的 localStorage 和登录 cookie。
@@ -608,7 +608,7 @@ test('★ 每一个数据 id 一份独立的存储，且 id 不复用', () => {
 
 // ── spaceFor：一个工作区里，一个插件用哪一份数据 ─────────────────────────────
 
-test('★★ spaceFor：没有就建一份并落进引用表；有就复用**同一份**', () => {
+test('spaceFor：没有就建一份并落进引用表；有就复用同一份', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [{ id: gid(1), name: 'A', refs: {} }];
 
@@ -642,7 +642,7 @@ test('★★ spaceFor：没有就建一份并落进引用表；有就复用**同
   assert.notEqual(two.space.ports[0], a.space.ports[0], '两份数据不能抢同一个 origin');
 });
 
-test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', () => {
+test('作者换了共享组，新开一份，不是就地改名', () => {
   // `inherit` 的语义是"这几个版本共用一份"。作者把 `editor` 改成 `editor2`，
   // 就是在说"我这份数据的格式变了，别继承" —— 于是第三段必须跟着变。
   // 就地改 `space.group` 是错的：那份存储还在旧名字的目录里，改名之后它就成了
@@ -652,18 +652,18 @@ test('★★ 作者换了共享组 ⇒ **新开一份**，不是就地改名', (
 
   const a = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
   const b = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor2', 1);
-  assert.equal(b.created, true, '共享组变了 ⇒ 必须新开一份');
+  assert.equal(b.created, true, '共享组变了，必须新开一份');
   assert.notEqual(b.space.id, a.space.id);
   assert.equal(b.space.group, 'editor2');
   assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], b.space.id, '引用表要指向新的那一份');
   assert.equal(config.findSpace(cfg, a.space.id).group, 'editor',
-    '★ 旧那一份**一个字都不改** —— 它下面那份存储的名字就是按它算的');
+    '旧那一份一个字都不改 —— 它下面那份存储的名字就是按它算的');
 
   // 而旧那一份现在没有任何工作区指着它了，下一层回收会收掉它（`pruneSpaces`）。
   assert.deepEqual(config.pruneSpaces(cfg).removed.map((s) => s.id), [a.space.id]);
 });
 
-test('★ spaceFor 对不存在的工作区返回 null，不凭空造一个', () => {
+test('spaceFor 对不存在的工作区返回 null，不凭空造一个', () => {
   const cfg = config.loadConfig(tmpdir());
   assert.equal(config.spaceFor(cfg, gid(9), LAYOUT_PLUGIN.id, 'editor', 1), null);
   assert.deepEqual(cfg.spaces, []);
@@ -671,7 +671,7 @@ test('★ spaceFor 对不存在的工作区返回 null，不凭空造一个', ()
 
 // ── 新建连接时默认落在哪个工作区 ─────────────────────────────────────────────
 
-test('★★ defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', () => {
+test('defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', () => {
   const cfg = config.loadConfig(tmpdir());
   // ③ 一条连接都没有，null（调用方据此新建一个空白工作区）
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), null);
@@ -707,12 +707,12 @@ test('★★ defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', (
   //   不排除自己的话它会命中自己（workspaceId 还是空的，那一条 anyway 会被跳过），
   //   而一旦调用方给了它一个 workspaceId，就会变成"默认 = 我要落的那个"这种循环。
   assert.equal(config.defaultWorkspaceFor(cfg,
-    { id: 'c1', host: '198.51.100.7', port: 10100 }), gid(2), '★ 不能命中自己');
+    { id: 'c1', host: '198.51.100.7', port: 10100 }), gid(2), '不能命中自己');
 
   // ④ 同址那条指着的工作区已经没了，跳过它，不要返回一个悬空的 id
   cfg.workspaces = [{ id: gid(2), name: 'B', refs: {} }];
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), gid(2),
-    'c1 那个工作区已经不在配置里了 ⇒ 退回活跃那条，而不是返回一个不存在的东西');
+    'c1 那个工作区已经不在配置里了，退回活跃那条，而不是返回一个不存在的条目');
   // 而活跃那条也没了，null
   cfg.workspaces = [];
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), null);
@@ -738,7 +738,7 @@ test('回收：只删引用计数为 0 的工作区，并报出删了哪些', ()
   assert.deepEqual(cfg.workspaces.map((l) => l.id), [gid(1), gid(2)], '顺序必须保持');
 });
 
-test('★★ 回收：**活会话拿着的那一个**不许收 —— 演示模式那个工作区靠的是这一条', () => {
+test('回收：活会话拿着的那一个不许收 —— 演示模式那个工作区靠的是这一条', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [
     { id: gid(8), name: '演示工作区', refs: {} },
@@ -762,7 +762,7 @@ test('★★ 回收：**活会话拿着的那一个**不许收 —— 演示模�
   assert.deepEqual(cfg.workspaces, []);
 });
 
-test('回收：报出的是**带名字的**工作区，不是一串 id', () => {
+test('回收：报出的是带名字的工作区，不是一串 id', () => {
   // 调用方要拿它给用户一句话（"工作区「X」没有谁在用了，已经收掉"）。
   // 只回 id 的话那句话里只能出现一串十六进制 —— 而用户认不出那是什么。
   const cfg = config.loadConfig(tmpdir());
@@ -772,7 +772,7 @@ test('回收：报出的是**带名字的**工作区，不是一串 id', () => {
   assert.deepEqual(r.removed.map((l) => l.name), ['临时的']);
 });
 
-test('★★ 数据那一层：没人引用的收掉 —— 但**被两个工作区引用时，删一个不动它**', () => {
+test('数据那一层：没人引用的收掉 —— 但被两个工作区引用时，删一个不动它', () => {
   // 这条是这次重做的中心性质，也是"数据不属于任何工作区"那句话的全部意思。
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [
@@ -784,7 +784,7 @@ test('★★ 数据那一层：没人引用的收掉 —— 但**被两个工作
 
   // 删掉 A，那一份还被 B 引用着，一份都不该收。
   cfg.workspaces = cfg.workspaces.filter((l) => l.id !== gid(1));
-  assert.deepEqual(config.pruneSpaces(cfg).removed, [], '★ 还有 B 指着它，收它就是删活数据');
+  assert.deepEqual(config.pruneSpaces(cfg).removed, [], '还有 B 指着它，收它就是删活数据');
 
   // 删掉 B，现在没人指着了；但没有工作区引用才是判据，与"有没有连接"无关。
   cfg.workspaces = cfg.workspaces.filter((l) => l.id !== gid(2));
@@ -792,7 +792,7 @@ test('★★ 数据那一层：没人引用的收掉 —— 但**被两个工作
   assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(3)], 'C 那一份一个字都不该动');
 });
 
-test('★★ 数据那一层：**活会话拿着的**不许收 —— 那是"切工作区"那条路的护栏', () => {
+test('数据那一层：活会话拿着的不许收 —— 那是"切工作区"那条路的护栏', () => {
   // 场景：会话跑在 A 的某一份数据上 → 用户把这条连接切到工作区 B
   // A 的引用计数归零、被回收，它那张引用表跟着消失，那一份数据变得
   // 没有任何工作区指着它 —— 而那一条会话还跑在它上面。
@@ -804,7 +804,7 @@ test('★★ 数据那一层：**活会话拿着的**不许收 —— 那是"切
 
   cfg.workspaces = [];
   const kept = config.pruneSpaces(cfg, new Set([sid(1)]));
-  assert.deepEqual(kept.removed, [], '★ 有一条活会话拿着它 ⇒ 不回收');
+  assert.deepEqual(kept.removed, [], '有一条活会话拿着它，不回收');
   assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(1)]);
 
   // 那条会话结束之后（下一轮 commitConfig 不再传它）才真的收掉。
@@ -822,7 +822,7 @@ test('spaceConsumers：谁在引用这一份数据', () => {
   assert.deepEqual(config.spaceConsumers(cfg, sid(9)), []);
 });
 
-test('★★ cloneWorkspace：复制的是**引用**，不是数据 —— 改副本不动原件', () => {
+test('cloneWorkspace：复制的是引用，不是数据 —— 改副本不动原件', () => {
   // 这是"分叉"的底座：一张表被几条连接共用时，其中一条要改一格而又不想动别人，
   // 就得先有一张自己的表。复制引用而不是复制存储，正是"数据不属于工作区"那句话
   // 的用处 —— 新表里那些格子指着同一批数据。
@@ -838,7 +838,7 @@ test('★★ cloneWorkspace：复制的是**引用**，不是数据 —— 改�
   ];
 
   const copy = config.cloneWorkspace(cfg, gid(1));
-  assert.ok(copy, '源在 ⇒ 必须复制得出来');
+  assert.ok(copy, '源在，必须复制得出来');
   assert.notEqual(copy.id, gid(1), '新表要有自己的 id');
   assert.notEqual(copy.name, '共用的', '名字走 nextWorkspaceName，不叫「…的副本」');
   assert.equal(copy.name, '工作区 1', '取当前没被占用的最小正整数 —— 原件叫「共用的」，不占号');
@@ -846,10 +846,10 @@ test('★★ cloneWorkspace：复制的是**引用**，不是数据 —— 改�
 
   // 不是同一张表：改副本一格，原件一个字都不许动。
   const w = config.setWorkspaceRef(cfg, copy.id, P, sid(2));
-  assert.equal(w.ok, true, '改写副本会被拒的话，分叉这条路根本走不通');
+  assert.equal(w.ok, true, '若改写副本会被拒，分叉这条路根本走不通');
   assert.equal(config.findWorkspace(cfg, copy.id).refs[P], sid(2));
   assert.equal(config.findWorkspace(cfg, gid(1)).refs[P], sid(1),
-    '★ 改了副本而原件跟着变的话，这个函数就没有意义了');
+    '若改了副本而原件跟着变，这个函数就没有意义了');
 
   // 而数据那一边：sid(1) 仍然被原件指着，两层回收都不该收它。
   assert.deepEqual(config.spaceConsumers(cfg, sid(1)), [gid(1)]);
@@ -892,10 +892,10 @@ test('workspacePlan：把「这个工作区只被谁用」推导出来，rendere
   //   一堆数据 id，猜不出哪个是哪一份。而它必须是拷贝：计划对象是递给界面
   //   的一份快照，界面照着它把下拉拨来拨去，不应该能改到 `cfg` 里的那一张。
   plan[0].refs[LAYOUT_PLUGIN.id] = sid(9);
-  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(1), '★ 计划的 refs 是拷贝');
+  assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(1), '计划的 refs 是拷贝');
 });
 
-test('★ setWorkspaceRef：改一格引用，且只认**这个插件自己的**那一份', () => {
+test('setWorkspaceRef：改一格引用，且只认这个插件自己的那一份', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.workspaces = [{ id: gid(1), name: 'A', refs: { [LAYOUT_PLUGIN.id]: sid(1) } }];
   cfg.spaces = [space(1), space(2)];
@@ -908,7 +908,7 @@ test('★ setWorkspaceRef：改一格引用，且只认**这个插件自己的**
   assert.equal(noWs.ok, false);
   assert.match(noWs.error, /工作区/);
   // 那一份数据不存在，拒。少了这一句，引用表会指着一个不存在的 id，
-  //   而它要到下一次开会话（`spacePortOf` 取不到端口、抛）才发作 —— 一个隔了一层
+  //   而它要到下一次开会话（`spacePortOf` 端口获取失败、抛）才发作 —— 一个隔了一层
   //   启动周期的静默损坏。
   const noSp = config.setWorkspaceRef(cfg, gid(1), LAYOUT_PLUGIN.id, sid(9));
   assert.equal(noSp.ok, false);
@@ -924,12 +924,12 @@ test('★ setWorkspaceRef：改一格引用，且只认**这个插件自己的**
   assert.equal(cfg.workspaces[0].refs[LAYOUT_PLUGIN.id], sid(2));
 });
 
-test('★ newSpace：无条件造一份新的（`spaceFor` 是"取现成的"，那是两回事）', () => {
+test('newSpace：无条件造一份新的（`spaceFor` 是"取现成的"，那是两回事）', () => {
   const cfg = config.loadConfig(tmpdir());
   cfg.spaces = [space(1)];
 
   const a = config.newSpace(cfg, LAYOUT_PLUGIN.id, 'editor', 1);
-  assert.equal(cfg.spaces.length, 2, '★ 已经有一份也要再给一份 —— 这就是"另开一份"');
+  assert.equal(cfg.spaces.length, 2, '已经有一份也要再给一份 —— 这就是"另开一份"');
   assert.notEqual(a.id, sid(1));
   assert.equal(a.group, 'editor');
   assert.equal(a.ports.length, 1);
@@ -942,9 +942,9 @@ test('★ newSpace：无条件造一份新的（`spaceFor` 是"取现成的"，�
   cfg.workspaces = [ws];
   const got = config.spaceFor(cfg, gid(1), LAYOUT_PLUGIN.id, 'editor', 1);
   assert.equal(got.created, false);
-  assert.equal(got.space.id, cfg.spaces[0].id, '★ 取的是**现成的**那一份');
+  assert.equal(got.space.id, cfg.spaces[0].id, '取的是现成的那一份');
   assert.equal(config.newSpace(cfg, LAYOUT_PLUGIN.id, 'editor', 1).id === cfg.spaces[0].id,
-    false, '★ 而 `newSpace` 给的永远是一个**新的**');
+    false, '而 `newSpace` 给的永远是一个新的');
 
   // 一份 `ports` 为空的列表会被 `normalizeSpace` 整份丢掉，引用表指着不存在的数据。
   // 地板是 1（不是缺省），走到这里只是让"万一"有一个说得清的下场。
@@ -952,7 +952,7 @@ test('★ newSpace：无条件造一份新的（`spaceFor` 是"取现成的"，�
   assert.equal(floor.ports.length, 1);
 });
 
-test('★ 端口分配：从 18080 起，跳过已被占用的，**一次取够要的个数**', () => {
+test('端口分配：从 18080 起，跳过已被占用的，一次取够要的个数', () => {
   const cfg = config.loadConfig(tmpdir());
   assert.deepEqual(config.assignSpacePorts(cfg, 1), [18080], '空配置从基址开始');
 
@@ -978,7 +978,7 @@ test('★ 端口分配：从 18080 起，跳过已被占用的，**一次取够�
   assert.deepEqual([...config.usedSpacePorts(cfg, sid(1))].sort(), [18080, 18083]);
 });
 
-test('★ 往返：保存再读，引用表与连接指向都不能丢', () => {
+test('往返：保存再读，引用表与连接指向都不能丢', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   cfg.workspaces = [{ id: gid(11), name: '生产集群',
@@ -1000,7 +1000,7 @@ test('★ 往返：保存再读，引用表与连接指向都不能丢', () => {
   assert.equal(back.connections[0].workspaceId, gid(11));
 });
 
-test('★ 引用表里指向**不存在**的那一格收掉，而不是留一条指向空气的引用', () => {
+test('引用表里指向不存在的那一格收掉，而不是留一条指向空气的引用', () => {
   // 悬空引用的症状是"这个插件忽然读回一份旧数据"，或者一份数据被算成"该有的"
   // 而它根本不在配置里。收掉它是安全的那一侧：`spaceFor` 下次开会话会新开一份。
   const dir = tmpdir();
@@ -1017,13 +1017,13 @@ test('★ 引用表里指向**不存在**的那一格收掉，而不是留一条
   }));
   const cfg = config.loadConfig(dir);
   assert.deepEqual(cfg.workspaces[0].refs, { [LAYOUT_PLUGIN.id]: sid(1) },
-    '★ 只留下**形状对、而且指着存在的那一份**的那一格');
+    '只留下形状对、而且指着存在的那一份的那一格');
   // 而不存在的那一份是另一回事：它是这一格指着的东西，不是这一格本身。
   //   留着它并不会让谁来读它 —— `spaceFor` 会按引用表新开一份。
   assert.deepEqual(cfg.spaces.map((s) => s.id), [sid(1)]);
 });
 
-test('★ 引用表里形状不对的键值丢掉那一格，不丢掉整个工作区', () => {
+test('引用表里形状不对的键值丢掉那一格，不丢掉整个工作区', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 7,
@@ -1063,7 +1063,7 @@ test('指向不存在的工作区时收束到第一个工作区，而不是留�
 
 const secretsOf = (dir) => path.join(dir, 'secrets.json');
 
-test('★ 机器没有安全存储 → 明确失败，且绝不写明文', () => {
+test('机器没有安全存储 → 明确失败，且绝不写明文', () => {
   const dir = tmpdir();
   const res = config.setKey(dir, null, 'c1', 'PRIVATE-KEY-PEM');
   assert.equal(res.ok, false);
@@ -1091,7 +1091,7 @@ test('加密保存：有安全存储时正常往返', () => {
   assert.equal(got.mode, 'encrypted');
 });
 
-test('★ 密钥按连接隔离：各是各的，删一条不动另一条', () => {
+test('密钥按连接隔离：各是各的，删一条不动另一条', () => {
   const dir = tmpdir();
   const c = fakeCrypto();
   config.setKey(dir, c, 'c1', 'PEM-C1');
@@ -1131,9 +1131,9 @@ test('换过机器 / keyring 被重置：解密失败要明确报错，不能当
   assert.equal(config.getKey(dir, null, 'c1').reason, 'no_secure_storage');
 });
 
-test('★ 旧版本留下的明文私钥**不再被读出来** —— 报 bad_mode，而不是继续用它', () => {
+test('旧版本留下的明文私钥不再被读出来 —— 报 bad_mode，而不是继续用它', () => {
   const dir = tmpdir();
-  // 一份能被继续沿用的明文私钥，最该做的是被发现，而"顺手加密重存"等于让它
+  // 一份能被继续沿用的明文私钥，最该做的是被发现，而"一并加密重存"等于让它
   // 再活一轮（见 config.js 里 SECRET_ENCRYPTED 那段）。所以它与其他认不出的 mode
   // 走同一条路。
   fs.writeFileSync(secretsOf(dir), JSON.stringify({
@@ -1203,7 +1203,7 @@ test('原子写：写入过程中不会留下半截文件', () => {
 
 // ── 站点分发的配置：台账 + 开发者模式（schema 6）─────────────────────────────
 
-test('★ 同意台账只收**形状完整**的条目 —— 残缺的丢掉比留着安全', () => {
+test('同意台账只收形状完整的条目 —— 残缺的丢掉比留着安全', () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 6,
@@ -1222,34 +1222,34 @@ test('★ 同意台账只收**形状完整**的条目 —— 残缺的丢掉比�
   }));
   const cfg = config.loadConfig(dir);
   assert.deepEqual(Object.keys(cfg.trustedPlugins), ['good@1.0.0'],
-    '★ 只留形状完整的那一条 —— 丢掉 = 回到"要重新点一次同意"，那是安全的那一侧');
+    '只留形状完整的那一条 —— 丢掉 = 回到"要重新点一次同意"，那是安全的那一侧');
   assert.equal(config.isTrusted(cfg, 'good', '1.0.0', 'a'.repeat(64)), true);
   assert.equal(config.isTrusted(cfg, 'good', '1.0.0', 'b'.repeat(64)), false,
-    '摘要对不上就是不认识');
+    '摘要不一致就是不认识');
   assert.equal(config.isTrusted(cfg, 'good', '2.0.0', 'a'.repeat(64)), false,
-    '★ 键里带**版本**：新版本是另一份构件，要重新同意');
+    '键里带版本：新版本是另一份构件，要重新同意');
 });
 
-test('★ 写台账：摘要必须是全长的，短的要被拒', () => {
+test('写台账：摘要必须是全长的，短的要被拒', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   assert.deepEqual(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'short', 's').ok, false,
-    '★ 台账不接受自报的短摘要 —— 拿 16 位当键就是一个 64 位的碰撞面');
+    '台账不接受自报的短摘要 —— 拿 16 位当键就是一个 64 位的碰撞面');
   assert.deepEqual(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'A'.repeat(64), 's').ok, false,
-    '大写十六进制也不收（判据要逐字符一样）');
+    '大写十六进制也不收（判据要逐字符相同）');
   assert.equal(config.trustPlugin(dir, cfg, 'x', '1.0.0', 'c'.repeat(64), 's').ok, true);
   // 落盘了才算数 —— 不落盘的话下次启动会再问一遍
   const again = config.loadConfig(dir);
   assert.equal(config.isTrusted(again, 'x', '1.0.0', 'c'.repeat(64)), true);
 });
 
-test('★ 老配置里的 `devPlugins` 不再有任何效果（那条路已经删了）', () => {
+test('老配置里的 `devPlugins` 不再有任何效果（那条路已经删了）', () => {
   const dir = tmpdir();
   // 要钉住的是"读到 `devPlugins` 等于没读到" —— 既不生效，也不报错，也不让
   //   `loadConfig` 多出一个字段来。手改的配置里可能留着这一条，它对客户端没有
   //   任何含义（§5.2 禁止给任何一类插件开免同意的口子）。
   assert.equal(Object.prototype.hasOwnProperty.call(config.DEFAULTS, 'devPlugins'), false,
-    '★ 缺省表里不该再有这个键 —— 它没有读者了');
+    '缺省表里不该再有这个键 —— 它没有读者了');
   assert.equal(config.loadConfig(dir).devPlugins, undefined, '缺省下它不该出现');
 
   // 用户手改的配置里留着一条 `"devPlugins": true`（升级上来的人就是这样）。
@@ -1257,17 +1257,17 @@ test('★ 老配置里的 `devPlugins` 不再有任何效果（那条路已经�
     JSON.stringify({ schema: 6, devPlugins: true }));
   const cfg = config.loadConfig(dir);
   assert.equal(cfg.devPlugins, undefined,
-    '★ 读进来就该是 undefined —— 留着它会让下一个人以为这个开关还有用，然后把它接回某条路上');
+    '读进来就该是 undefined —— 留着它会让下一个人以为这个开关还有用，然后把它接回某条路上');
   // 而它不是错误：老配置不该让客户端起不来，也不该报一条用户看不懂的错。
   assert.equal(cfg.schema, 7, 'schema 照常读出来，配置本身是好的');
 });
 
 // ── 钉子：按 id 记的签名公钥（§5.4）─────────────────────────────────────────
 
-test('★ 钉子表是**单独一个文件** —— 旧版本不认识它，也就抹不掉它', () => {
+test('钉子表是单独一个文件 —— 旧版本不认识它，也就抹不掉它', () => {
   const dir = tmpdir();
   const FP = 'a'.repeat(64);
-  assert.deepEqual(config.loadPinnedKeys(dir), {}, '还没钉过 ⇒ 空表');
+  assert.deepEqual(config.loadPinnedKeys(dir), {}, '还没钉过，空表');
 
   const pins = config.loadPinnedKeys(dir);
   assert.equal(config.pinPluginKey(dir, pins, 'PLUG', FP).ok, true);
@@ -1275,33 +1275,33 @@ test('★ 钉子表是**单独一个文件** —— 旧版本不认识它，也�
   // 关键的一条：它不在 config.json 里。放进那里的话，一个只认已知键的客户端
   //   读一遍再存一遍就会把它抹掉 —— 而丢掉钉子 = 静默回到"首次即信任"。
   assert.equal(fs.existsSync(path.join(dir, 'config.json')), false,
-    '钉一件事不该顺手写出一份 config.json');
+    '钉一件事不该一并写出一份 config.json');
 
   const again = config.loadPinnedKeys(dir);
   assert.equal(config.pinnedKeyOf(again, 'PLUG'), FP);
   assert.equal(mode(path.join(dir, 'pinned-keys.json')), 0o600, '钉子表是 0600');
 });
 
-test('★★ 钉子只能钉一次：换一把 ⇒ 拒绝（§5.4，这里没有"重新钉"这条路）', () => {
+test('钉子只能钉一次：换一把，拒绝（§5.4，这里没有"重新钉"这条路）', () => {
   const dir = tmpdir();
   const A = 'a'.repeat(64);
   const B = 'b'.repeat(64);
   const pins = config.loadPinnedKeys(dir);
   config.pinPluginKey(dir, pins, 'PLUG', A);
 
-  assert.equal(config.pinPluginKey(dir, pins, 'PLUG', A).unchanged, true, '同一个值 ⇒ 无操作');
+  assert.equal(config.pinPluginKey(dir, pins, 'PLUG', A).unchanged, true, '同一个值，无操作');
   const r = config.pinPluginKey(dir, pins, 'PLUG', B);
   assert.equal(r.ok, false);
-  assert.match(r.error, new RegExp(A), '错误里必须**说出**原来那一把');
+  assert.match(r.error, new RegExp(A), '错误里必须说出原来那一把');
   assert.match(r.error, new RegExp(B), '也要说出想换成的这一把');
   assert.equal(config.pinnedKeyOf(config.loadPinnedKeys(dir), 'PLUG'), A, '钉还是原来那一把');
 
   const bad = config.pinPluginKey(dir, pins, 'OTHER', 'not-a-fingerprint');
-  assert.equal(bad.ok, false, '指纹不合形状 ⇒ 拒绝，不写一条用不了的记录');
+  assert.equal(bad.ok, false, '指纹不合形状，拒绝，不写一条用不了的记录');
   assert.equal(config.pinnedKeyOf(config.loadPinnedKeys(dir), 'OTHER'), undefined);
 });
 
-test('★★ 一条读不动的钉子**留在表里**，返回 `\'\'` 而不是 `undefined`', () => {
+test('一条读不动的钉子留在表里，返回 `\'\'` 而不是 `undefined`', () => {
   // 这一条与同意台账相反：台账里一条残缺条目丢掉 = 重新问一次（安全的那侧）；
   // 钉子丢掉 = 下次"首次即信任"（不安全的那侧）。所以两者必须分得开：
   //   undefined = 从来没钉过（首次即信任）
@@ -1320,9 +1320,9 @@ test('★★ 一条读不动的钉子**留在表里**，返回 `\'\'` 而不是 
   const pins = config.loadPinnedKeys(dir);
   assert.equal(config.pinnedKeyOf(pins, 'GOOD'), 'c'.repeat(64));
   assert.equal(config.pinnedKeyOf(pins, 'SHORT'), 'abc',
-    '读不动的那一份**原样留着** —— 它既不是 undefined（那会变成"没钉过"），也不是它自己');
-  assert.equal(config.pinnedKeyOf(pins, 'MISSING'), '', '连指纹字段都没有的那一条 ⇒ 空串');
-  assert.equal(config.pinnedKeyOf(pins, 'JUNK'), '', '那一条根本不是对象 ⇒ 空串');
+    '读不动的那一份原样留着 —— 它既不是 undefined（那会变成"没钉过"），也不是它自己');
+  assert.equal(config.pinnedKeyOf(pins, 'MISSING'), '', '连指纹字段都没有的那一条，空串');
+  assert.equal(config.pinnedKeyOf(pins, 'JUNK'), '', '那一条根本不是对象，空串');
   assert.equal(config.pinnedKeyOf(pins, 'NEVER'), undefined, '这个 id 是真没钉过');
   // 判它读不读得动的地方只有一处：`keyVerdict` 那个全长十六进制的正则。
   //   所以这里能说的就是"它留在表里、而且不是 undefined"；「一律拒绝」由
@@ -1351,7 +1351,7 @@ test('钉子在同意台账旁边活得很好：两张表互不影响', () => {
 
 // ── 台账的算法版本（`alg`）──────────────────────────────────────────────────
 
-test('★ 台账记下**是哪一个公式**算的那个摘要，而不同公式的值不许互相作证', () => {
+test('台账记下是哪一个公式算的那个摘要，而不同公式的值不许互相作证', () => {
   // 摘要是一个函数的结果。函数换了公式之后，把新值与旧值放在一起比就是
   //   一句假话 —— 界面上那句"内容摘要从 X 变成了 Y"会说"内容变了"，而真相是
   //   "我们换了一把尺子"。
@@ -1359,7 +1359,7 @@ test('★ 台账记下**是哪一个公式**算的那个摘要，而不同公式
   const cfg = config.loadConfig(dir);
   config.trustPlugin(dir, cfg, 'P', '1.0.0', 'a'.repeat(64), 'site');
   assert.equal(cfg.trustedPlugins['P@1.0.0'].alg, config.TRUST_ALG,
-    '★ 写下去的时候必须带上当前公式的版本');
+    '写下去的时候必须带上当前公式的版本');
 
   // 落盘之后再读回来，`alg` 要活着（否则它只在内存里有效，那等于没有）。
   const back = config.loadConfig(dir);
@@ -1371,10 +1371,10 @@ test('★ 台账记下**是哪一个公式**算的那个摘要，而不同公式
   const cfg2 = config.loadConfig(dir);
   cfg2.trustedPlugins['P@1.0.0'].alg = config.TRUST_ALG + 1;
   assert.equal(config.isTrusted(cfg2, 'P', '1.0.0', 'a'.repeat(64)), false,
-    '★ 换过公式的记录不能给新公式算出来的值作证 —— 那会变成"静默地沿用一次旧同意"');
+    '换过公式的记录不能给新公式算出来的值作证 —— 那会变成"静默地沿用一次旧同意"');
 });
 
-test('★ 老的台账条目（没有 alg）按**当时那个公式**解释，不是"当前公式"', () => {
+test('老的台账条目（没有 alg）按当时那个公式解释，不是"当前公式"', () => {
   // 这个字段是在公式没变的那一版里加进来的，所以"没有 alg"只能解释成
   //   "当时那个公式"。默认成"当前公式"的话，换公式那天所有老条目都会被读成新
   //   公式 —— 而那正是这套字段要防的事（一次静默的沿用）。
@@ -1390,13 +1390,13 @@ test('★ 老的台账条目（没有 alg）按**当时那个公式**解释，�
   const cfg = config.loadConfig(dir);
   assert.equal(cfg.trustedPlugins['OLD@1.0.0'].alg, config.TRUST_ALG_LEGACY);
   assert.equal(cfg.trustedPlugins['WEIRD@1.0.0'].alg, config.TRUST_ALG_LEGACY,
-    'alg 认不出的**保留条目**（丢掉会让界面只会说"没同意过"），但按老公式解释');
+    'alg 认不出的保留条目（丢掉会让界面只会说"没同意过"），但按老公式解释');
   // 而只要当前公式还是 1，它们就照旧有效 —— 加这个字段不让任何一条旧同意失效。
   assert.equal(config.isTrusted(cfg, 'OLD', '1.0.0', 'b'.repeat(64)), true,
-    '★ 加一个字段不该让用户重新同意一遍');
+    '加一个字段不该让用户重新同意一遍');
 });
 
-test('★★ §5.3 撤回同意：删掉台账那一条，且**如实报告**删没删到', () => {
+test('§5.3 撤回同意：删掉台账那一条，且如实报告删没删到', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);
   config.trustPlugin(dir, cfg, 'P', '1.0.0', 'a'.repeat(64), 'site');
@@ -1405,9 +1405,9 @@ test('★★ §5.3 撤回同意：删掉台账那一条，且**如实报告**删
   const r = config.forgetPlugin(dir, cfg, 'P', '1.0.0');
   assert.deepEqual(r, { ok: true, had: true });
   assert.equal(config.isTrusted(cfg, 'P', '1.0.0', 'a'.repeat(64)), false,
-    '★ 撤回之后它必须重新走一遍同意闸');
+    '撤回之后它必须重新走一遍同意闸');
   assert.equal(config.isTrusted(cfg, 'P', '1.0.1', 'b'.repeat(64)), true,
-    '只动那一条，别的版本不受影响');
+    '只动那一条，其他版本不受影响');
 
   // 落盘了才算数（不落盘的话，重启之后"它自己回来了"）。
   assert.equal(config.isTrusted(config.loadConfig(dir), 'P', '1.0.0', 'a'.repeat(64)), false);
@@ -1423,5 +1423,5 @@ test('★★ §5.3 撤回同意：删掉台账那一条，且**如实报告**删
   const before = fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8');
   config.forgetPlugin(dir, cfg, 'P', '1.0.1');
   assert.equal(fs.readFileSync(path.join(dir, 'pinned-keys.json'), 'utf8'), before,
-    '★ 撤回同意一个字节都不许动钉子');
+    '撤回同意一个字节都不许动钉子');
 });

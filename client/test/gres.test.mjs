@@ -38,7 +38,7 @@ const { gresLabel, gresText } = require('../src/main/gres.js');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-test('没要 GRES / 拿不到 → null（界面显示「—」，不编一个）', () => {
+test('没要 GRES / 无法获取 → null（界面显示「—」，不编一个）', () => {
   for (const bad of [null, undefined, {}, '', 0, 'gpu:2', { type: 'a100' },
                      { name: '', count: 2 }, { name: 2, count: 2 }]) {
     assert.equal(gresText(bad), null, JSON.stringify(bad));
@@ -46,19 +46,19 @@ test('没要 GRES / 拿不到 → null（界面显示「—」，不编一个）
   }
 });
 
-test('★ 没型号的：`gpu × 2`', () => {
+test('没型号的：`gpu × 2`', () => {
   assert.equal(gresText({ name: 'gpu', type: null, count: 2 }), 'gpu × 2');
   assert.equal(gresLabel({ name: 'gpu', type: null, count: 2 }), 'gpu');
 });
 
-test('★★ 带型号的：型号必须念出来', () => {
+test('带型号的：型号必须念出来', () => {
   // 这一条就是今天红的那一格：型号丢掉之后，`gpu:a100 × 2` 与 `gpu × 2`
   // 在界面上长得一样，而它们是两种完全不同的卡。
   assert.equal(gresText({ name: 'gpu', type: 'a100', count: 2 }), 'gpu:a100 × 2');
   assert.equal(gresLabel({ name: 'gpu', type: 'a100', count: 2 }), 'gpu:a100');
 });
 
-test('★ 名字不是 gpu 的照样念（GRES 是管理员自定义的，代码里没有白名单）', () => {
+test('名字不是 gpu 的照样念（GRES 是管理员自定义的，代码里没有白名单）', () => {
   for (const [g, want] of [
     [{ name: 'mps', type: null, count: 100 }, 'mps × 100'],
     [{ name: 'shard', type: 'fast', count: 1 }, 'shard:fast × 1'],
@@ -80,7 +80,7 @@ test('count 缺失或不是整数时只念名字（不印 `× null`）', () => {
   }
 });
 
-test('★ 界面那一行印的是 gresText，不是 typeof r.gpus === number', async () => {
+test('界面那一行印的是 gresText，不是 typeof r.gpus === number', async () => {
   // 本机起不了 Electron（panel.js 跑不起来），所以这一条只能做文本检查。
   // 它拦的是退回按数字判这个退化 —— 那正是这一版要修的东西。
   const js = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'panel.js'),
@@ -92,7 +92,7 @@ test('★ 界面那一行印的是 gresText，不是 typeof r.gpus === number', 
     'panel.js 还在读 resources.gpus —— 那个字段已经不存在了（现在是 gres 描述符）');
 });
 
-test('★ 主进程确实把 gresText 放进了快照', async () => {
+test('主进程确实把 gresText 放进了快照', async () => {
   const js = fs.readFileSync(path.join(here, '..', 'src', 'main', 'session.js'),
     'utf8');
   assert.match(js, /const \{ gresText \} = require\('\.\/gres\.js'\)/,

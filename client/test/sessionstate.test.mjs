@@ -62,7 +62,7 @@ test('认得的状态译成人话，认不得的原样印出去（不猜）', ()
   assert.equal(sessionStateText(null), '');
 });
 
-test('★ 这张表只译**会话**状态，不译作业状态（两张表别混）', () => {
+test('这张表只译会话状态，不译作业状态（两张表别混）', () => {
   // 会话状态是小写单词，Slurm 作业状态是大写枚举。混进来的症状是"作业状态那一行
   // 永远显示原文"（查表查不到），而两边看起来都对。
   for (const k of Object.keys(SESSION_STATE_TEXT)) {
@@ -87,7 +87,7 @@ function daemonStates() {
 function cliStates() {
   const src = fs.readFileSync(path.join(REPO, 'cluster', 'slurmate'), 'utf8');
   const fn = /def human_state\(state\):[\s\S]*?\.get\(state, state\)/.exec(src);
-  assert.ok(fn, 'cluster/slurmate 里找不到 human_state() —— 结构变了就更新这条检查');
+  assert.ok(fn, 'cluster/slurmate 里未找到 human_state() —— 结构变了就更新这条检查');
   const body = /\{([\s\S]*?)\}/.exec(fn[0]);
   const dict = body[1];
   const out = {};
@@ -97,7 +97,7 @@ function cliStates() {
   return out;
 }
 
-test('★★ 同一张会话状态表：守护进程、命令行、客户端三处逐字相同', () => {
+test('同一张会话状态表：守护进程、命令行、客户端三处逐字相同', () => {
   const daemon = daemonStates();
   const cli = cliStates();
   const client = SESSION_STATE_TEXT;
@@ -114,7 +114,7 @@ test('★★ 同一张会话状态表：守护进程、命令行、客户端三�
     `守护进程定义了而客户端没译的状态：${missClient.join('、')}（会原样印出去）`);
 
   // ② 反过来：多译了一个守护进程根本没有的状态 —— 那多半是打字打错了一个字母，
-  //    而它的表现是"某个状态永远查不到"（静默）。
+  //    而它的表现是"某个状态永远查询不到"（静默）。
   const extraCli = Object.keys(cli).filter((s) => !(s in daemon));
   const extraClient = Object.keys(client).filter((s) => !(s in daemon));
   assert.deepEqual(extraCli, [], `命令行译了一个守护进程没有的状态：${extraCli.join('、')}`);

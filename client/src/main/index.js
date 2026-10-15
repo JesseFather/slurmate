@@ -194,7 +194,7 @@ let partitions = [];
  *    300s 三层）。两个取数点必然漂成两句话，而两句都标着"现在"。
  *
  * `data` 与 `error` 分开存，不合成一个。`data: null` 有两种意思 ——
- *   "还没问到"与"问失败了" —— 而它们在界面上是不同的话（"读取中…" vs "取不到"）。
+ *   "还没问到"与"问失败了" —— 而它们在界面上是不同的话（"读取中…" vs "获取失败"）。
  */
 let site = { data: null, error: null, at: 0 };
 let siteTimer = null;
@@ -349,7 +349,7 @@ function bootstrap() {
     //   重连很多次）。
     clientIdentity = {
       id: config.loadClientId(cfgDir),
-      // 主机名是给人看的（界面上"正在被 X 看"那一句）。取不到不是错误 ——
+      // 主机名是给人看的（界面上"正在被 X 看"那一句）。获取失败不是错误 ——
       // 那么多半是容器/异常环境，回一句"另一台电脑"仍然说得清。
       name: os.hostname() || '另一台电脑',
     };
@@ -874,7 +874,7 @@ function withGresLabels(list) {
 /**
  * 同上，但用在 `op_cluster` 那一份上（它是 `{分区: [描述项]}`，不是一张分区表）。
  *
- * 原地改，而且缺席就什么都不做：`gres` 这个键不存在 = 取不到，而我们的
+ * 原地改，而且缺席就什么都不做：`gres` 这个键不存在 = 获取失败，而我们的
  *   判据是 `undefined` / `null` —— 补一个 `{}` 进去会把它变成"确实一个都没有"，
  *   那正是三态里最不该犯的那一次混淆。
  */
@@ -1231,7 +1231,7 @@ function pluginsView() {
       //
       // ❗ 判据必须问 `deliveryOf`，不能在这里现写一个。「能不能分发」这个问题
       //   只有一处答案，而它在那里。
-      //   带出来的是四态里的哪一态，不是一个布尔：三条"取不回来"的出路不同
+      //   带出来的是四态里的哪一态，不是一个布尔：三条"获取失败"的出路不同
       //   （不分发 / 此刻发不出来 / 读不懂），合成一个布尔就等于把出路指错了。
       delivery: sitePluginSync.deliveryOf(p, sitePluginSync.HARD_LIMITS).state,
     }));
@@ -1242,7 +1242,7 @@ function pluginsView() {
   //   在，后果是一个真的洞 ——
   //
   //     `plugins` 那一列把 `active === false` 的滤掉了；`missing` 又要求
-  //     `registry.get` 取不到它 —— 而它恰恰在注册表里（`active: false` 的那
+  //     `registry.get` 那儿没有它 —— 而它恰恰在注册表里（`active: false` 的那
   //     一条）。于是界面上彻底看不见，连"点同意"的入口都没有，重新同步也救不回来。
   //
   //   摘要换一次公式，这条路会一次性对每个用户的每个插件成立 ——
@@ -3161,7 +3161,7 @@ function sitePluginReport() {
     samples: each(samplePluginsDir()),
     installed: each(siteInstalledDir()),
     // 假站点打不打得出发给客户端的包。它属于"假站点自己的事"（与那两处目录
-    //   同一类），而且它是"站点上明明有插件、客户端却一个都取不回来"的另一条线索。
+    //   同一类），而且它是"站点上明明有插件、客户端却一份都没收到"的另一条线索。
     packer: backend && typeof backend.packerReport === 'function'
       ? backend.packerReport() : null,
   };
@@ -3191,7 +3191,7 @@ function devView() {
  *
  * 与上一条是两个现场，所以两句话：那一条是"站点上还没有插件"，这一条是"站点上
  *   有插件、而这个客户端发不出它"。后者只有一种来路 —— 安装包里没带打包器 ——
- *   而症状是"站点报得出插件、却一个都取不回来"，用户能做的事只有换一份完整的包。
+ *   而症状是"站点报得出插件、客户端却一份都没收到"，用户能做的事只有换一份完整的包。
  */
 function warnNoPacker() {
   if (!dev.developerMode) return;
@@ -3541,7 +3541,7 @@ async function stopAllSessions() {
  *
  * 成功也覆盖，失败也覆盖：失败时把 `data` 清成 `null` 并留下 `error`
  *   —— 留着上一次那份"一切正常"是最坏的一种：圆点继续绿着，而它基于的是一次
- *   五分钟前的成功查询。三态里"取不到"是一个要显示出来的状态，不是"保留旧值"。
+ *   五分钟前的成功查询。三态里"获取失败"是一个要显示出来的状态，不是"保留旧值"。
  */
 /**
  * 用户正要去看那块面板的时候，补一次。
@@ -3746,13 +3746,13 @@ async function outMore() {
  *
  *   `bad`  链路断了 —— 此刻的事实，而且是用户唯一能自己动手查的一件事
  *   `bad`  链路活着，而控制器明确连不上 —— 也是"确实有事"
- *   `na`   取不到（整份失败，或控制器那一格缺席）—— 我们没问到
+ *   `na`   获取失败（整份失败，或控制器那一格缺席）—— 我们没问到
  *   `ok`   其余
  *
  * 控制器那一格缺席要判 `na`，不能判 `ok`。这是这一格最容易犯的错，
  *   也是用例抓出来的：守护进程答了话（`ok:true`）、其余格子都在、只有 `health`
  *   不在的时候，一个只看"有没有 data"的判据会亮绿灯 —— 而用户看到的是一颗
- *   安稳的绿点加一屏"取不到：控制器状态"。那颗点说的是"站点现在怎么样"，
+ *   安稳的绿点加一屏"获取失败：控制器状态"。那颗点说的是"站点现在怎么样"，
  *   而"我们不知道控制器在不在"不是"好"。
  *
  * 判据的次序是刻意的：链路先说话（它是此刻的事实），链路活着才轮到
@@ -4333,7 +4333,7 @@ function registerIpc() {
    *   两处会漂开，而漂开的症状是「表单里显示 A、存进去的是 B」，两边都不报错。
    * 它是一句纯查询（不落盘、不改任何东西），所以在用户敲地址的时候可以反复问。
    * 返回 `workspaceId: null` 表示"会新建一个空白工作区" —— 那是一个答案，
-   *   不是"取不到"。
+   *   不是"获取失败"。
    */
   send('app:defaultWorkspace', async (payload = {}) => ({
     ok: true,
@@ -4928,7 +4928,7 @@ function registerIpc() {
 
   // ── 会话 ──
   // ok 如实反映查询本身成不成功（失败不被吞成空分区列表）。
-  // partitions 仍然是数组，空数组表示「取不到」而不是「没有分区」—— 区别在 error 里。
+  // partitions 仍然是数组，空数组表示「获取失败」而不是「没有分区」—— 区别在 error 里。
   send('app:partitions', async () => {
     const r = await refreshPartitions();
     return { ok: r.ok, partitions: r.partitions, plugins: pluginsView(), error: r.error };
@@ -5281,7 +5281,7 @@ function registerIpc() {
   // `app:cluster` 这个通道没有了。它原先服务的是「集群状态」那一屏，而那一屏
   //   整个搬进了左边栏的浮窗 —— 浮窗的数据由主进程推（见 `refreshSite`），不自己拉。
   //   留着它等于给同一份答案留第二个取数点，而两个取数点必然漂成两句都标着"现在"
-  //   的话。三态怎么递的没有变：`refreshSite` 原样保留"取不到"与"确实没有"的
+  //   的话。三态怎么递的没有变：`refreshSite` 原样保留"获取失败"与"确实没有"的
   //   区别（见那里的注释）。
 
   /** 最近几天的作业（`sacct`）。按需拉 —— 不进任何一层缓存，见 op_history。 */
@@ -5489,7 +5489,7 @@ function registerIpc() {
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
     else if (what === 'reap') backend.debugReap();
     // 「集群信息缺失」——真集群上要么得等一次故障、要么得把 sinfo 改名，
-    //   而"把取不到画成没有"正是这一整块最容易犯的错。它必须能立刻造出来。
+    //   而"把获取失败画成没有"正是这一整块最容易犯的错。它必须能立刻造出来。
     //   `arg` 指名哪一格（省略 = 全部）；`history` 那一格走的是错误不是缺席。
     else if (what === 'cluster-missing') {
       if (arg === 'history') backend.debugHistoryDown(true);

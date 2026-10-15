@@ -61,7 +61,7 @@ const DOM_SRC = fs.readFileSync(path.join(here, '..', 'src', 'renderer', 'dom.js
 function withoutInit(src) {
   const out = src.replace(/^init\(\)\.catch\([\s\S]*$/m, '');
   assert.notEqual(out, src, '没摘到 init() —— panel.js 末尾那一行的形状变了，'
-    + '这一组会在启动序列里炸，而"炸了"与"跑过了"在这里长得一样');
+    + '这一组会在启动序列里炸，而"炸了"与"跑过了"在这里长得相同');
   assert.equal(/\ninit\(\)/.test(out), false, '还有第二处 init() 调用');
   return out;
 }
@@ -283,7 +283,7 @@ function bindAll(bootObj, extra = '') {
   return h;
 }
 
-test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守卫）', () => {
+test('第一屏画得出来（这一条就是 P1 那个白屏缺陷的守卫）', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   // 从前这里抛 `ReferenceError: lay is not defined`，而它是画第一屏的函数：
   // 用户打开客户端看到的是一块白板，560 条用例一条都不红。
@@ -301,7 +301,7 @@ test('★★ 第一屏画得出来（这一条就是 P1 那个白屏缺陷的守
   }
 });
 
-test('★★ 内置那条假连接：排最前、没有「编辑」「删除」，而别的行一个都不少', () => {
+test('内置那条假连接：排最前、没有「编辑」「删除」，而其他行一个都不少', () => {
   // 判据是画出来的东西，不是源码文本：那一行是不是真的排在最前、它那行里
   //   是不是真的只有三样，只有画完之后才说得清。
   const list = [
@@ -317,15 +317,15 @@ test('★★ 内置那条假连接：排最前、没有「编辑」「删除」�
   // ── ① 排最前，而其余保持用户的顺序 ──
   assert.deepEqual(rows.map((r) => r.children[0]._text),
     ['本机假站点', 'alice@198.51.100.7:10100', 'carol@203.0.113.9:10100'],
-    '★ 内置那条排最前（它是这个列表的起点），其余按原来的顺序 —— 不是整表重排');
+    '内置那条排最前（它是这个列表的起点），其余按原来的顺序 —— 不是整表重排');
 
   // ── ② 它那行里没有「编辑」「删除」──
   assert.equal(rows[0].children.length, 3,
-    '★ 内置那条只有「连接」一颗按钮 —— 那两颗是**不画**，不是画成禁用的'
+    '内置那条只有「连接」一颗按钮 —— 那两颗是不画，不是画成禁用的'
     + '（一颗永远点不亮的按钮正是"系统声称了不成立的事"）');
   assert.deepEqual(rows[0].children.slice(2).map((x) => x._text), ['连接']);
   assert.equal(rows[0].children[0].children[0]._text, '内置',
-    '★ 名字后面要有一颗看得见的标记 —— 这一行为什么与上面那些不一样，得它自己说得出来');
+    '名字后面要有一颗看得见的标记 —— 这一行为什么与上面那些不同，得它自己说得出来');
 
   // ── ③ 而普通那几行一个都不少 ──
   assert.deepEqual(rows[1].children.slice(2).map((x) => x._text), ['连接', '编辑', '删除']);
@@ -335,11 +335,11 @@ test('★★ 内置那条假连接：排最前、没有「编辑」「删除」�
   // ── ④ 状态那一格：内置那条留空，而不是「未探测」──
   //   主进程不探它（`app:probeHosts` 把它滤掉了），「未探测」是在说"还没轮到它"，
   //     而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
-  assert.equal(rows[0].children[1]._text, '', '★ 内置那条的状态格留空');
+  assert.equal(rows[0].children[1]._text, '', '内置那条的状态格留空');
   assert.equal(rows[1].children[1]._text, '未探测', '而普通那几行照旧');
 });
 
-test('★★ 两段式确认：第一下只是把那一格换成一行确认，第二下才真的做', () => {
+test('两段式确认：第一次只是把那一格换成一行确认，第二次才真的做', () => {
   // 这一条守的是设计律 2：代价大的动作由"必须先经过的那一步"承载。
   //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——
   //   而 `window.confirm` 给不了两段：框弹出来的时候用户已经按下去了。
@@ -374,10 +374,10 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   // ── 第一段 ──
   end.onclick();
   assert.equal(h.run('window.__calls.length'), 0,
-    '★★ 第一下**不许**发 —— 它是第一段，只把那一格换成一行确认');
-  assert.notEqual(h.run('armed'), null, '第一段要挂在 armed 上（否则没有任何东西收得掉它）');
+    '第一次不许发 —— 它是第一段，只把那一格换成一行确认');
+  assert.notEqual(h.run('armed'), null, '第一段要挂在 armed 上（否则没有任何内容收得掉它）');
   assert.equal(end.classList.contains('armed-off'), true,
-    '★ 原来那颗按钮留在 DOM 里、只是不显示');
+    '原来那颗按钮留在 DOM 里、只是不显示');
   const cluster = clusterOf();
   assert.ok(cluster, '那一行确认要插在锚点后面');
   assert.equal(cluster.className, 'armed');
@@ -386,14 +386,14 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   // 条数那一格（`liveCount()`）长在「断开」那一行上（它一次结束好几条），
   //   而这条挂的是「结束这一条会话」—— 判据在那一条用例里。
   assert.match(h.run("$('sb-end').onclick.toString()"), /armConfirm/,
-    '★ 状态条那颗「结束会话」走的是两段式（不是直接 endFrontSession）');
+    '状态条那颗「结束会话」走的是两段式（不是直接 endFrontSession）');
 
   // 那一行里两颗按钮必须长得不一样：一颗是不可逆的第二段（danger），
   //   一颗是回到原样（ghost）。画成一样的，用户分不清自己按下去的是哪个 ——
   //   而这一整条规矩（不可逆的动作要有"必须先经过的那一步"）要成立，靠的正是
   //   "第二段看得出来是第二段"。
   assert.match(cluster.children[1].className, /danger/,
-    '★ 第二段那颗按钮要是 danger —— 它才是不可逆的那一下');
+    '第二段那颗按钮要是 danger —— 它才是不可逆的那一步');
   assert.match(cluster.children[2].className, /ghost/,
     '而「取消」是 ghost：它与第二段不是同一类动作');
 
@@ -404,21 +404,21 @@ test('★★ 两段式确认：第一下只是把那一格换成一行确认，�
   assert.equal(end.parentNode.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
   assert.equal(h.run('window.__calls.length'), 0, '取消 = 什么都没发生');
   assert.equal(h.run('document._ls.length'), 0,
-    '★ 那两个"点别处 / 按 Esc"的监听也要一起摘掉 —— 每点一次多挂一个，它们会越攒越多');
+    '那两个"点别处 / 按 Esc"的监听也要一起摘掉 —— 每点一次多挂一个，它们会越攒越多');
 
   // ── 第二段 ──
   end.onclick();
   const p = clusterOf().children[1].onclick();
-  assert.equal(h.run('armed'), null, '执行的那一下要先把这一行收掉');
+  assert.equal(h.run('armed'), null, '执行的那一刻要先把这一行收掉');
   assert.equal(h.run('document._ls.length'), 0);
   return p.then(() => {
     assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__calls))'), ['s1'],
-      '★ 第二下才发，而且恰好一次（发的正是**前台那一条**的槽）');
+      '第二次才发，而且恰好一次（发的正是前台那一条的槽）');
     assert.equal(h.run('document._ls.length'), 0);
   });
 });
 
-test('★★ 「删除一条连接」走两段式：第一下只摆一行确认，第二下才真的删', () => {
+test('「删除一条连接」走两段式：第一次只摆一行确认，第二次才真的删', () => {
   // 它是运行期画出来的那一颗（在 `renderConnections` 里），没有 id 可找 ——
   //   得先把那一屏画出来，再从行里把它取出来。上面那条用的 `#sb-end` 是固定的。
   //
@@ -442,18 +442,18 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
   // ── 第一段 ──
   del.onclick();
   assert.equal(h.run('window.__deleted.length'), 0,
-    '★★ 第一下**不许**发 —— 它是第一段，只把那一格换成一行确认');
+    '第一次不许发 —— 它是第一段，只把那一格换成一行确认');
   const cluster = clusterOf();
   assert.ok(cluster && cluster.className === 'armed', '那一行确认要插在锚点后面');
   assert.equal(del.classList.contains('armed-off'), true,
-    '★ 原来那颗按钮留在 DOM 里、只是不显示');
+    '原来那颗按钮留在 DOM 里、只是不显示');
   const why = cluster.children[0]._text;
   assert.match(why, /私钥一并作废/, '第一段要说清代价 —— 只说"确定吗"，用户答不了');
   // 而这句里的名字必须是这一行上印着的那个（有备注就是备注）：印地址的话，
-  //   它指的就是一条"在这一屏上找不到"的连接。
+  //   它指的就是一条"在这一屏上未找到"的连接。
   assert.equal(row.children[0]._text, '集群 A', '有备注的那一行印的就是备注');
-  assert.equal(why.includes('集群 A'), true, '★ 确认那一行要点名这一行上印着的那个名字');
-  assert.equal(why.includes('alice@'), false, '★ 而不是回落成地址');
+  assert.equal(why.includes('集群 A'), true, '确认那一行要点名这一行上印着的那个名字');
+  assert.equal(why.includes('alice@'), false, '而不是回落成地址');
   // 独占工作区那一条（`soleOwnerId` 与主进程数的是同一件事）
   assert.equal(why.includes('工作区 1'), true, '独占的工作区会跟着删 —— 这一句要说出来');
   assert.equal(why.includes('写在磁盘上的文件'), true, '磁盘上那一份也要说到');
@@ -464,21 +464,21 @@ test('★★ 「删除一条连接」走两段式：第一下只摆一行确认�
   assert.equal(del.classList.contains('armed-off'), false, '取消之后那颗按钮要回来');
   assert.equal(row.children.includes(cluster), false, '那一行要从 DOM 里摘掉');
   assert.equal(h.run('window.__deleted.length'), 0, '取消 = 什么都没发生');
-  assert.equal(h.run('document._ls.length'), 0, '★ 那两个"点别处 / 按 Esc"的监听也要摘干净');
+  assert.equal(h.run('document._ls.length'), 0, '那两个"点别处 / 按 Esc"的监听也要摘干净');
 
   // ── 第二段：这才真的删 ──
   del.onclick();
   const p = clusterOf().children[1].onclick();
-  assert.equal(h.run('armed'), null, '执行的那一下要先把这一行收掉');
+  assert.equal(h.run('armed'), null, '执行的那一刻要先把这一行收掉');
   return p.then(() => {
     assert.deepEqual(h.run('JSON.parse(JSON.stringify(window.__deleted))'), ['c1'],
-      '★ 第二下才发，而且恰好一次、发的正是这一条');
+      '第二次才发，而且恰好一次、发的正是这一条');
     assert.equal(h.byId.get('conn-list').children.length, 0,
       '删完那一行就没了 —— 列表按主进程回的那份重画');
   });
 });
 
-test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（切走工作区靠它）', () => {
+test('第一段退回去时，`onDisarm` 要把那一格拨回原样（切走工作区靠它）', () => {
   // 「切走工作区」的第一段挂在一个下拉上，而那个下拉停在用户刚选的
   //   "待定"的新值上 —— 那不是已发生的事。退回去（取消 / 点别处 / Esc / 被重画
   //   收掉）时如果不把它拨回旧值，界面就在说一件没发生的事。
@@ -491,7 +491,7 @@ test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（�
   });
   h.run('window.__revN = 0;');
   h.run('armed.disarm()');
-  assert.equal(h.run('window.__revN'), 1, '★ 退回去要调 `onDisarm`');
+  assert.equal(h.run('window.__revN'), 1, '退回去要调 `onDisarm`');
 
   // 而第二段执行时不许调 —— 那一格已经被改动了，"拨回旧值"会让界面
   //   说一件没发生的事。
@@ -501,10 +501,10 @@ test('★★ 第一段退回去时，`onDisarm` 要把那一格拨回原样（�
   h.run('window.__revN = 0;');
   h.run('armed.disarm(true)');
   assert.equal(h.run('window.__revN'), 0,
-    '★★ 第二段（`disarm(true)`）不许跑 `onDisarm` —— 动作已经发生了');
+    '第二段（`disarm(true)`）不许跑 `onDisarm` —— 动作已经发生了');
 });
 
-test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆一行确认，第二趟才带 confirmDiscard', async () => {
+test('切走工作区：主进程回 would_discard 时不弹框，摆一行确认，第二趟才带 confirmDiscard', async () => {
   // 这一条替掉的是从前那句 `window.confirm`。它守三件事：
   //   · 第一下不弹框、也不发第二次请求 —— 只是把那一格摆成一行确认；
   //   · 下拉停在新值上（那是"待定"，不是已发生的事），退回去才拨回来；
@@ -539,22 +539,22 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
   await sel.onchange();
 
   assert.equal(h.run('window.__asked'), 0,
-    '★★ 不许弹 `window.confirm` —— 它给不了两段，而这正是这条路从前最别扭的地方');
-  assert.equal(h.run('window.__calls.length'), 1, '第一下只发那一次（照常提交，判定权在主进程）');
+    '不许弹 `window.confirm` —— 它给不了两段，而这正是这条路从前最别扭的地方');
+  assert.equal(h.run('window.__calls.length'), 1, '第一次只发那一次（照常提交，判定权在主进程）');
   assert.equal(h.run('window.__calls[0].confirmDiscard'), undefined,
-    '第一趟**不许**带 confirmDiscard —— 它是"照常试一次"');
+    '第一趟不许带 confirmDiscard —— 它是"照常试一次"');
   assert.notEqual(h.run('armed'), null, '被拒之后要摆出第一段');
   assert.equal(h.byId.get('sb-workspace').value, 'w000000000002',
-    '★ 下拉**停在待定的新值上** —— 它不是已发生的事，是"你要是确定就是这个"');
+    '下拉停在待定的新值上 —— 它不是已发生的事，是"你要是确定就是这个"');
   const p = sel.parentNode;
   const cluster = p.children[p.children.indexOf(sel) + 1];
-  assert.match(cluster.children[0]._text, /工作区 1/, '第一段要说出**哪一个**工作区会没');
+  assert.match(cluster.children[0]._text, /工作区 1/, '第一段要说出哪一个工作区会没');
 
   // ── 退回去：下拉拨回真值，一个请求都不多发 ──
   cluster.children[2].onclick();
   assert.equal(h.run('armed'), null, '取消之后不该还挂着第一段');
   assert.equal(h.byId.get('sb-workspace').value, 'w000000000001',
-    '★★ 退回去要把下拉**拨回真正的当前值** —— 留着待定的新值就是界面在说一件没发生的事');
+    '退回去要把下拉拨回真正的当前值 —— 留着待定的新值就是界面在说一件没发生的事');
   assert.equal(h.run('window.__calls.length'), 1, '取消 = 什么都没发生');
 
   // ── 答"切走"：第二趟照常先发一次，再恰好带 confirmDiscard 发一次 ──
@@ -566,13 +566,13 @@ test('★★ 切走工作区：主进程回 would_discard 时**不弹框**，摆
   const p2 = sel.parentNode;
   const again = p2.children[p2.children.indexOf(sel) + 1];
   await again.children[1].onclick();
-  assert.equal(h.run('window.__calls.length'), n0 + 2, '答「切走」之后**恰好**再发一次');
+  assert.equal(h.run('window.__calls.length'), n0 + 2, '答「切走」之后恰好再发一次');
   assert.equal(h.run(`window.__calls[${n0 + 1}].confirmDiscard`), true,
-    '★★ 第二趟必须**明确**带上 confirmDiscard —— 少这一格就是同一个框弹两遍');
+    '第二趟必须明确带上 confirmDiscard —— 少这一格就是同一个框弹两遍');
   assert.equal(h.run('window.__asked'), 0, '全程没有弹过框');
 });
 
-test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许拆掉整块监听）', async () => {
+test('bootstrap 挂了，界面照样点得动（一次 reject 不许拆掉整块监听）', async () => {
   // 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
   //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的后面，于是
   //   `bootstrap()` 或 `openNewForm()`（里面有 `await newKey()`，在 Windows 上
@@ -580,7 +580,7 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
   //   一个监听都不挂，而唯一的症状是提示流里多一行字。
   //   现在分成 `bindEvents()`（纯同步，先跑）与 `bootUI()`（所有 await）。
   const h = bindAll({}, 'window.slurmate.bootstrap ='
-    + ' () => Promise.reject(new Error("假装取不到"));'
+    + ' () => Promise.reject(new Error("假装获取失败"));'
     + 'window.slurmate.pluginData = () => Promise.resolve({});');
 
   // ── 让 bootUI 照真机那条路失败 ──
@@ -596,24 +596,24 @@ test('★★ bootstrap 挂了，界面**照样点得动**（一次 reject 不许
   //   方式已经由各处动作约束好了）。
   const foot = h.run("$('about-foot')");
   assert.equal(typeof foot.onclick, 'function',
-    '★★ 「关于」那颗按钮仍然要挂着动作 —— 首屏数据拿不到**不该**让入口变成哑的');
+    '「关于」那颗按钮仍然要挂着动作 —— 首屏数据无法获取不该让入口变成哑的');
   // 壳里的 `$()` 是现造一个空元素，它不会去读 panel.html —— 所以
   //   `hidden` 那一格得自己摆成初始状态（真机上由 panel.html 上的 class 给）。
   h.run("$('sec-about').classList.add('hidden');");
   assert.equal(h.run("$('sec-about').classList.contains('hidden')"), true, '（前提：它本来是收着的）');
   foot.onclick();
   assert.equal(h.run("$('sec-about').classList.contains('hidden')"), false,
-    '★★ 点下去要开 —— 用户报的就是"点了没反应"');
+    '点下去要开 —— 用户报的就是"点了没反应"');
 
   // ── 而失败本身第一眼看得见（不再只滚进提示流）──
   const banner = h.byId.get('fatal-banner');
   assert.equal(banner.classList.contains('hidden'), false,
-    '★ 初始化失败要有一块**常驻**的地方说出来 —— 提示流会滚过去、也会被顶下去');
-  assert.match(h.byId.get('fatal-why').textContent, /假装取不到/,
+    '初始化失败要有一块常驻的地方说出来 —— 提示流会滚过去、也会被顶下去');
+  assert.match(h.byId.get('fatal-why').textContent, /假装获取失败/,
     '而原因要照原话说出来');
 });
 
-test('★★ 重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {
+test('重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {
   // 不收的后果是静默的：那一行连同确认一起被丢掉，而 `armed` 还指着它 ——
   //   用户接着点"别处"收的是一个已经不在文档里的节点，看起来像没反应；
   //   更糟的是 `armed` 从此不为 null，下一次点另一处时 `disarmArmed()`
@@ -636,19 +636,19 @@ test('★★ 重画会把没走完的第一段收掉（重画的就是它挂身�
   assert.equal(h.run('armed'), null, '重画连接列表之前必须先把它收掉');
   assert.equal(h.run('document._ls.length'), 0);
   assert.equal(end.classList.contains('armed-off'), false,
-    '★ 那颗按钮的 class 也要拨回来 —— 残留的 `armed-off` 属于'
+    '那颗按钮的 class 也要拨回来 —— 残留的 `armed-off` 属于'
     + '"那颗按钮永远不显示"这一类看不见的坏法');
 
   end.onclick();
   assert.notEqual(h.run('armed'), null, '（前提）再摆一个');
   h.fn('renderWorkspaceSelectors')();
   assert.equal(h.run('armed'), null,
-    '★★ 重画工作区那个下拉之前也必须先收掉 —— 它重画的正是那一段挂身的一格');
+    '重画工作区那个下拉之前也必须先收掉 —— 它重画的正是那一段挂身的一格');
 });
 
-test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title', () => {
+test('「站点版本过高」那一句：正文只剩一行，理由挂 title', () => {
   // 这一条守的是"一段 → 一行 title"这个改动本身。原来那段话有三个句子
-  //   （事实 / 为什么取不回来 / 该怎么办），而它读起来像一段讨论。
+  //   （事实 / 为什么获取失败 / 该怎么办），而它读起来像一段讨论。
   //
   //   而它必须分叉：两种情形要用户做的事方向相反（升级客户端 /
   //     升级没用，得找管理员）。指错了方向，用户会去做一件解决不了问题的事 ——
@@ -668,22 +668,22 @@ test('★★ 「站点太新」那一句：正文只剩一行，理由挂 title'
   assert.ok(cross, '跨大版本那一支要画出一句话');
   assert.match(cross._text, /请升级这个客户端/, '这一支的动作是"升级客户端"');
   assert.equal(cross._text.length <= 60, true,
-    `★ 正文只剩**一行**：${cross._text.length} 个字 —— 又长回去了。`
+    `正文只剩一行：${cross._text.length} 个字 —— 又长回去了。`
     + '理由进 title（下面那一句判它）');
   assert.match(cross.title || '', /大版本/,
-    '★ 理由要挂在 `title` 上 —— 没有它的话，这一行就是一个没有出处的断言');
+    '理由要挂在 `title` 上 —— 若没有它，这一行就是一个没有出处的断言');
 
   const other = show('same_major');
   assert.match(other._text, /升级客户端解决不了/,
-    '★ 另一支必须**明确否掉**"升级客户端" —— 那是用户看了这句话唯一会去做的事，'
+    '另一支必须明确否掉"升级客户端" —— 那是用户看了这句话唯一会去做的事，'
     + '而它对"站点自己不一致"这种情况没有用');
   assert.equal(other._text.length <= 60, true, '正文同样只留一行');
   assert.match(other.title || '', /站点自己不一致/,
-    '★ 而"凭什么这么判"要说得出来 —— 判定归握手（`daemonVersionVerdict`），'
+    '而"凭什么这么判"要说得出来 —— 判定归握手（`daemonVersionVerdict`），'
     + '界面只负责按它选一句话');
 });
 
-test('★★ 「安装插件…」只在假站点上画，而点它走的就是那条 IPC', async () => {
+test('「安装插件…」只在假站点上画，而点它走的就是那条 IPC', async () => {
   // 判据是主进程给的能力位（`site.canInstall`），不是界面按后端名现判 ——
   //   所以这一条同时钉住了两件事：假站点上它在，真站点上它一颗都没有。
   const h = start({ connections: [], workspaces: [], activeConnectionId: null });
@@ -702,12 +702,12 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
   draw({ label: '本站', canInstall: true, versions: [], strays: [] });
   assert.ok(btnIn(), '假站点上必须画出那颗「安装插件…」');
   assert.equal(btnIn()._text, '安装插件…');
-  assert.match(btnIn().title || '', /\.splug/, '要说清它挑的是打包器产出的那个文件');
+  assert.match(btnIn().title || '', /\.splug/, '要说清它选择的是打包器产出的那个文件');
 
   // ② 真站点（能力位缺席），一颗都不画
   draw({ label: '本站', versions: [], strays: [] });
   assert.equal(btnIn(), undefined,
-    '★★ 真站点上不许有这颗按钮 —— 它是主进程给的能力位说了算的，界面不猜');
+    '真站点上不许有这颗按钮 —— 它是主进程给的能力位说了算的，界面不猜');
 
   // ③ 点一下（用户按了取消）：走那条 IPC，一声不吭
   //   提示流那一格要现取（`doc.getElementById` 会建它）：`$()` 没碰过的 id
@@ -717,17 +717,17 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
   draw({ label: '本站', canInstall: true, versions: [], strays: [] });
   const before = notices().length;
   await btnIn().onclick();
-  assert.equal(h.run('window.__install'), 1, '点一下就走那条 IPC');
+  assert.equal(h.run('window.__install'), 1, '点一次就走那条 IPC');
   assert.equal(notices().length, before,
-    '★ 取消不是失败，不许出一条提示（"我按了取消"不该被当成一次错误报出来）');
+    '取消不是失败，不许出一条提示（"我按了取消"不该被当成一次错误报出来）');
 
   // ④ 装不上：那句错话要原样出来（主进程才知道站上有什么，界面不重写判据）
   h.run('window.__result = { ok: false, code: "rejected",'
-    + ' error: "站点上已经有一棵「示例盒子」，在 /p/01M2… —— 版本不一样。" };');
+    + ' error: "站点上已经有一棵「示例盒子」，在 /p/01M2… —— 版本不同。" };');
   await btnIn().onclick();
   const said = notices().map((x) => x._text || '').join('\n');
   assert.match(said, /站点上已经有一棵「示例盒子」/,
-    '★ 装不上要说清为什么 —— 而那句话是主进程给的，界面原样转述');
+    '无法安装要说清为什么 —— 而那句话是主进程给的，界面原样转述');
 
   // ⑤ 装上了：那一次返回的视图当场画上去（不然用户得等下一次推送才看得见）
   h.run('window.__result = { ok: true, installed: [{ id: "p9", version: "1.0.0",'
@@ -737,10 +737,10 @@ test('★★ 「安装插件…」只在假站点上画，而点它走的就是�
     + '   site: { label: "装完的站点", canInstall: true, versions: [], strays: [] } } };');
   await btnIn().onclick();
   assert.match(childrenOf(h.byId.get('site-plugins')).map((x) => x._text || '').join('|'),
-    /装完的站点/, '★ 装完返回的那份视图要当场画上去');
+    /装完的站点/, '装完返回的那份视图要当场画上去');
 });
 
-test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效，而且它不是失败', async () => {
+test('「端口被占」那一行是三选一：三颗都当场生效，而且它不是失败', async () => {
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },
   'window.__starts = [];'
@@ -768,41 +768,41 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(h.run('window.__starts.length'), 1);
   assert.equal(sent(0), '["cs",null]',
-    '★ 第一趟**不带作答** —— 要不要问是主进程按后端与那一份数据判的，界面不猜');
-  assert.equal(row.classList.contains('hidden'), false, '★ 被挡下时那一行要摆出来');
+    '第一趟不带作答 —— 要不要问是主进程按后端与那一份数据判的，界面不猜');
+  assert.equal(row.classList.contains('hidden'), false, '被挡下时那一行要摆出来');
   assert.match(h.doc.getElementById('sb-port-why')._text, /18080/, '理由里要念出那个端口');
   assert.match(h.doc.getElementById('sb-port-why')._text, /被其他程序占用/,
-    '★ 那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
+    '那句话由主进程给（端口是主进程的事实），界面照念，不自己编一句');
   // 三颗按钮各自说清代价 —— 这是"把警告变成动作的前置状态"，不是装饰。
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /布局/,
     '「启动」要说清它的代价（origin 变了，编辑器布局会重置）');
   assert.match(h.doc.getElementById('sb-port-shift').title || '', /回到/,
-    '★ 还要说清它是**暂时**的：端口没有被改掉，下次启动会回到原处');
+    '还要说清它是暂时的：端口没有被改掉，下次启动会回到原处');
   // 中间那一颗是这一行上唯一会改配置的一颗，所以它的话必须说清"不可逆"
   //    （原来那个端口与它上面那份布局都回不来）—— 只写"记住"是不够的。
   assert.match(h.doc.getElementById('sb-port-remember').title || '', /不可逆/,
     '「记住并启动」要说清它不可逆 —— 那是它与「启动」唯一的分界');
   assert.match(h.doc.getElementById('sb-port-remember').title || '', /18080/,
-    '★ 还要念出**原来那个端口**：用户就是拿它对照着决定要不要改');
+    '还要念出原来那个端口：用户就是拿它对照着决定要不要改');
   assert.match(h.doc.getElementById('sb-port-abort').title || '', /不会出现作业/,
     '「取消」要说清它真的什么都没做');
   // 而它不是失败：这一支不该去刷新插件清单（那是"提交被拒"才有的事）。
-  assert.equal(h.run('window.__starts.length'), 1, '只走了一趟 IPC，没有别的东西跟着发');
+  assert.equal(h.run('window.__starts.length'), 1, '只走了一趟 IPC，没有其他条目跟着发');
 
   // ── ② 答「启动」，带 `'shift'` 重发一次，而且重发的还是同一个插件 ──
   await h.doc.getElementById('sb-port-shift').onclick();
-  assert.equal(h.run('window.__starts.length'), 2, '★ 答一下正好重发一次');
+  assert.equal(h.run('window.__starts.length'), 2, '应答一次正好重发一次');
   assert.equal(sent(1), '["cs","shift"]',
-    '★★ 那个作答是**用户的意思**：主进程据此顺移，不再问第二遍');
+    '那个作答是用户的意思：主进程据此顺移，不再问第二遍');
 
   // ── ②b 答「记住并启动」，带 `'remember'` 重发，而它仍然只发一趟 ──
   //    两个作答走的是同一条重发路（`startWith`），分别只在那个字符串上：
   //      界面这一层不做任何"要不要写配置"的判断 —— 写配置那一步在主进程里，而且
   //      排在绑定成功之后（它才知道隧道真绑上了哪个端口）。
   await h.doc.getElementById('sb-port-remember').onclick();
-  assert.equal(h.run('window.__starts.length'), 3, '答「记住…」也是一下重发一次');
+  assert.equal(h.run('window.__starts.length'), 3, '答「记住…」同样只重发一次');
   assert.equal(sent(2), '["cs","remember"]',
-    '★★ 那个作答要说清是**哪一种**：主进程据此把新端口记进配置，而这是不可逆的一步');
+    '那个作答要说清是哪一种：主进程据此把新端口记进配置，而这是不可逆的一步');
 
   // ── ③ 这一趟成了，那一行收掉 ──
   h.run('window.__reply = { ok: true, slot: 1, sessions: [], front: null };');
@@ -819,20 +819,20 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   const before = notices().length;
   await h.doc.getElementById('sb-port-abort').onclick();
   assert.equal(h.run('window.__starts.length'), calls,
-    '★★ 「取消」不跟主进程说话 —— 因为此刻**本来就没有东西要撤**');
+    '「取消」不跟主进程说话 —— 因为此刻本来就没有要撤的动作');
   assert.equal(row.classList.contains('hidden'), true, '那一行要收掉');
   // 提示流是 prepend（新的在最前），所以"这一下新出来的"是开头那几条 ——
   //   取尾巴会把上一次那一句当成这一次说的。
   const said = notices().slice(0, notices().length - before)
     .flatMap((x) => childrenOf(x)).map((x) => x._text || '').join('\n');
   assert.match(said, /没有提交/,
-    '★ 用户刚点过「开始会话」而界面静了下来，要说清那是"没起来"而不是"起来了"');
+    '用户刚点过「开始会话」而界面静了下来，要说清那是"没起来"而不是"起来了"');
 
   // ── ⑤ 别的失败不摆这一行（它不是"被端口挡住"，三个答案都不成立）──
-  h.run('window.__reply = { ok: false, code: "rejected", error: "版本对不上。" };');
+  h.run('window.__reply = { ok: false, code: "rejected", error: "版本不一致。" };');
   await h.fn('startWith')('cs', adv, btn);
   assert.equal(row.classList.contains('hidden'), true,
-    '★★ 只有 `port_conflict` 才摆这一行 —— 别的失败摆它等于给两个不成立的答案');
+    '只有 `port_conflict` 才摆这一行 —— 其他失败摆它等于给两个不成立的答案');
 
   // ── ⑥ 走开（换屏 / 连上 / 断开都走这条路），那一行收掉 ──
   h.run('window.__reply = { ok: false, code: "port_conflict",'
@@ -842,11 +842,11 @@ test('★★ 「端口被占」那一行是**三选一**：三颗都当场生效
   assert.equal(row.classList.contains('hidden'), false, '前提：这一趟又被挡下了');
   h.fn('showScreen')('conns');
   assert.equal(row.classList.contains('hidden'), true,
-    '★ 走到别的屏去了，那一问就该收掉 —— 它问的是**当前这条连接**的那些数据的端口，'
-    + '把一个问题留着等答，而它描述的东西可能已经不是他现在看的这一条了');
+    '走到其他屏去了，那一问就该收掉 —— 它问的是当前这条连接的那些数据的端口，'
+    + '把一个问题留着等答，而它描述的那一条可能已经不是他现在看的这一条了');
 });
 
-test('★★ 同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
+test('同意那一段的安全警告压到两行以内（它曾经是三句）', () => {
   // 这是这一版唯一的安全边界（进程隔离还没做），所以它留着；但它原来是
   //   三句 —— 第三句讲的是"不同意会怎样"，而那件事那颗按钮自己的措辞已经说了
   //   （「不同意，删掉本机这一份」）。按钮能说清的事不必再写一句在旁边。
@@ -860,15 +860,15 @@ test('★★ 同意那一段的安全警告压到两行以内（它曾经是三�
   }] });
   const warn = childrenOf(h.byId.get('plugin-consent'))
     .find((x) => /^同意之后/.test(x._text || ''));
-  assert.ok(warn, '同意那一块里找不到那句警告了 —— 它是用户做决定时缺不得的一条信息');
-  assert.match(warn._text, /没有进程隔离/, '★ 必须说清"目前没有进程隔离"');
-  assert.match(warn._text, /在这台机器上运行/, '★ 必须说清客户端代码会在本机运行');
+  assert.ok(warn, '同意那一块里未找到那句警告了 —— 它是用户做决定时缺不得的一条信息');
+  assert.match(warn._text, /没有进程隔离/, '必须说清"目前没有进程隔离"');
+  assert.match(warn._text, /在这台机器上运行/, '必须说清客户端代码会在本机运行');
   assert.equal((warn._text.match(/。/g) || []).length, 2,
-    `★ 这一句应当是**两句**：现在 ${JSON.stringify(warn._text)}　——`
+    `这一句应当是两句：现在 ${JSON.stringify(warn._text)}　——`
     + '第三句讲"不同意会怎样"，而那件事按钮自己会说了');
 });
 
-test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () => {
+test('映射图：三列两段线 —— 连接 / 工作区 / 数据', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES });
   h.fn('renderConnections')(CONNS);
@@ -893,7 +893,7 @@ test('★ 映射图：三列两段线 —— 连接 / 工作区 / 数据', () =>
   for (const l of lines.slice(2)) assert.equal(l.attrs.class, 'edge', '数据那一段不高亮');
 });
 
-test('★★ 同一份数据被两个工作区指着 ⇒ 两条线汇到同一个节点', () => {
+test('同一份数据被两个工作区指着，两条线汇到同一个节点', () => {
   // 这就是这张图存在的全部理由：在下拉框里，"我和 2 号工作区共用同一份登录
   //   状态"这件事一个字都看不出来。
   const shared = [
@@ -910,10 +910,10 @@ test('★★ 同一份数据被两个工作区指着 ⇒ 两条线汇到同一�
   // 那正是"共用"在图上长的样子。
   assert.equal(lines.length, 4);
   assert.equal(lines[2].attrs.d.split('C')[1], lines[3].attrs.d.split('C')[1],
-    '★ 两条线的终点必须重合（同一份数据）');
+    '两条线的终点必须重合（同一份数据）');
 });
 
-test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那一句后果', () => {
+test('连接表单里的「③ 工作区」：三种取值各有各的那一句后果', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
 
   // ── 新建：初值跟随默认 ──
@@ -942,13 +942,13 @@ test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那
   assert.match(h.byId.get('ws-hint').textContent, /会用「工作区 1」/);
 
   // ── 用户要一个新的：那一项要被真的选中，不能被吞回去 ──
-  //   一个"找不到就空着"的兜底如果写成了 `list.some(id === keep)`，那么
+  //   一个"未找到就空着"的兜底如果写成了 `list.some(id === keep)`，那么
   //     `__new__` 这个不在列表里的值会被悄悄换成空串 —— 界面回到"默认"，
   //     而保存时发上去的就是"没表态"，用户点的那一项从头到尾没生效。
   h.run('wsPicked = "__new__";');
   h.fn('renderFormWorkspace')();
   assert.equal(h.byId.get('f-workspace').value, '__new__',
-    '★ 选了「＋ 新建空白工作区…」就该停在那一项上');
+    '选了「＋ 新建空白工作区…」就该停在那一项上');
   assert.match(h.byId.get('ws-hint').textContent, /保存后会新建一个空白工作区/);
 
   // ── 编辑：没有"跟随默认"那一项，初值是这条连接自己的工作区 ──
@@ -968,7 +968,7 @@ test('★★ 连接表单里的「③ 工作区」：三种取值各有各的那
   assert.match(h.byId.get('ws-hint').textContent, /不会跟着走/);
 });
 
-test('★ 状态条那个选择器：共用同一份工作区列表，选中"该选的那个"', () => {
+test('状态条那个选择器：共用同一份工作区列表，选中"该选的那个"', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c2' });
   h.fn('renderWorkspaceSelectors')();
   const sel = h.byId.get('sb-workspace');
@@ -980,7 +980,7 @@ test('★ 状态条那个选择器：共用同一份工作区列表，选中"该
   assert.equal(h.byId.get('sb-workspace').value, '');
 });
 
-test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {
+test('顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {
   // 这一条守的是多开（`contributes.concurrent: true`：第二份拿到自己的
   //   临时数据 = 自己的槽，于是两条同时在跑）。标签上写的是插件的显示名，
   //   于是两个标签一模一样 —— 而它们指着两份不同的数据、两个不同的本地端口。
@@ -994,7 +994,7 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
   const tabs = h.byId.get('session-tabs').children;
   assert.equal(tabs.length, 2, '两条会话两个标签');
   assert.notEqual(tabs[0].textContent, tabs[1].textContent,
-    '★ 同名时必须补区分符 —— 两个一模一样的标签等于没有标签');
+    '同名时必须补区分符 —— 两个完全相同的标签等于没有标签');
   assert.match(tabs[0].textContent, /18080/, '区分符是本地端口');
   assert.match(tabs[1].textContent, /18081/);
   // 而不同名时一个字都不加：给每一条都挂一个端口，等于把"这两条需要分"
@@ -1013,7 +1013,7 @@ test('★★ 顶栏标签：同一个插件开两份时，两个标签必须分�
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 });
 
-test('★★ 那颗「调试」标签：只在假站点里出现，点它是把面板抬回来', async () => {
+test('那颗「调试」标签：只在假站点里出现，点它是把面板抬回来', async () => {
   // 它 2026-10-11 加，理由是物理的：会话的页面是原生视图，从 y=30 往下盖住
   //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
   //   所以"回到面板"这件事只能由这 30px 里的一颗标签做。
@@ -1031,16 +1031,16 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
   // ── ① 真实模式（`devState.on === false`）：一颗都不出现，一条会话时整条收起来 ──
   h.run(`devState = { on: false, saved: false }; connected = true; ${ONE_SESSION}`);
   h.fn('renderTabs')();
-  assert.deepEqual(devTab(h), [], '★ 真实模式里不许出现那颗「调试」');
+  assert.deepEqual(devTab(h), [], '真实模式里不许出现那颗「调试」');
   assert.equal(one(h).length, 1, '（那一条会话自己的标签照旧在，只是整条栏收着）');
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'),
-    '★ 一条会话 + 没有调试 ⇒ 整条收起来（它不提供任何选择）');
+    '一条会话 + 没有调试，整条收起来（它不提供任何选择）');
 
   // ── ② 开发者模式，但没连上（站在第一屏）：也不出现 ──
   //   还没进去，也就没有"被盖住的面板"这回事。
   h.run('devState = { on: true, saved: true }; connected = false;');
   h.fn('renderTabs')();
-  assert.deepEqual(devTab(h), [], '★ 没连上（还在第一屏）时不许出现');
+  assert.deepEqual(devTab(h), [], '没连上（还在第一屏）时不许出现');
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 
   // ── ③ 在假站点里：出现，而且一条会话时也在（那是唯一回得来的路）──
@@ -1050,34 +1050,34 @@ test('★★ 那颗「调试」标签：只在假站点里出现，点它是把�
   assert.equal(one(h)[0].textContent, '编辑器');
   assert.equal(devTab(h).length, 1);
   assert.match(devTab(h)[0].className, /\bdev\b/,
-    '★ 它自己的类要挂上 —— 它与会话标签**做的是相反的事**，长相必须分得开');
+    '它自己的类要挂上 —— 它与会话标签做的是相反的事，长相必须分得开');
   assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
-    '★★ 一条会话时这一条也要露出来 —— 少了它那颗标签整个消失，面板就再也抬不回来');
+    '一条会话时这一条也要露出来 —— 少了它那颗标签整个消失，面板就再也抬不回来');
 
   // ── ④ 点它：调 showPanel（抬面板）+ 切到第四屏 ──
   h.run("$('screen-plugins').classList.remove('hidden'); $('screen-debug').classList.add('hidden');");
   await devTab(h)[0].onclick();
-  assert.equal(h.run('window.__shown'), 1, '★ 点它要调 `showPanel`（把面板抬到页面上）');
+  assert.equal(h.run('window.__shown'), 1, '点它要调 `showPanel`（把面板抬到页面上）');
   assert.equal(h.run('window.__front'), null,
-    '★ 而它**不是**会话标签：不许顺手调 setFront（那会把面板再盖回去）');
+    '而它不是会话标签：不许一并调 setFront（那会把面板再盖回去）');
   assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), false,
-    '★ 抬回来之后要切到第四屏');
+    '抬回来之后要切到第四屏');
   assert.equal(h.byId.get('screen-plugins').classList.contains('hidden'), true,
-    '★ 同时只露一个（路由那一句管着所有屏）');
+    '同时只露一个（路由那一句管着所有屏）');
   assert.equal(h.byId.get('debug-title').textContent, '调试 · alice@198.51.100.7',
-    '★ 第四屏的标题同样要带上是哪一个站点');
+    '第四屏的标题同样要带上是哪一个站点');
 
   // ── ⑤ 抬不起来要说出来：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
   h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"
     + "$('screen-debug').classList.add('hidden');");
   await devTab(h)[0].onclick();
   assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), true,
-    '★ 失败时不许切屏（切了就是"面板被盖着、而界面上写着调试那一屏"）');
+    '失败时不许切屏（切了就是"面板被盖着、而界面上写着调试那一屏"）');
   const last = () => h.byId.get('notices').children[0].children[1].textContent;
-  assert.match(last(), /假装抬不起来/, '★ 而原因要照原话说出来');
+  assert.match(last(), /假装抬不起来/, '而原因要照原话说出来');
 });
 
-test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它才有内容可说）', () => {
+test('右栏整条只在有作业在跑的时候亮（那时它才有内容可说）', () => {
   // 2026-10-11 改：上色的对象从那个 6px 的圆点换成了边栏自己 ——
   //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。
   //   于是这个壳里取的元素也跟着换，而判据一个字没变（三档、各是什么）。
@@ -1098,7 +1098,7 @@ test('★★ 右栏**整条**只在**有作业在跑**的时候亮（那时它�
   assert.equal(rail(), 'rail rail-r', '结束了的会话不算"有作业在跑"');
 });
 
-test('★★ 第二屏那颗「临时离开」只在真有作业在跑时出现', () => {
+test('第二屏那颗「临时离开」只在真有作业在跑时出现', () => {
   // 2026-10-11：它从第一屏搬到了第二屏的标题带上，判据也从 `connected`
   //   （那一屏只有连着才进得来，于是那个条件恒为真）换成了有没有作业在跑 ——
   //   没有作业可"离开"的时候摆一颗按下去什么也不发生的按钮，是在说一件不成立的事。
@@ -1118,7 +1118,7 @@ test('★★ 第二屏那颗「临时离开」只在真有作业在跑时出现'
   assert.equal(hidden(), true, '结束了的会话不算"有作业在跑"');
 });
 
-test('★★ 连上之后才有两条边栏，而且它们是在状态条**下面**那一段', () => {
+test('连上之后才有两条边栏，而且它们是在状态条下面那一段', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   // 没连上：`body` 上没有那个 class，两条栏由 CSS 收起来。
   h.fn('renderConnections')(CONNS);
@@ -1132,7 +1132,7 @@ test('★★ 连上之后才有两条边栏，而且它们是在状态条**下�
     '连上之后两条栏才出现');
 });
 
-test('★★ 插件块上的「用哪一份数据」：三种取值各发各的，一个都不许合并', async () => {
+test('插件块上的「用哪一份数据」：三种取值各发各的，一个都不许合并', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },
   'lastPlugins = { plugins: [{ id: "p1", title: "编辑器" }, { id: "p2", title: "中转站" }] };'
@@ -1157,7 +1157,7 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
 
   // 不要数据空间的插件没有这一格（`ports: 0`）。画一个空下拉等于凭空许诺
   //   一个不存在的东西 —— 它没有存储、没有端口，也就没有"用哪一份"。
-  assert.equal(selOf(blocks[1]), null, '★ 0 个端口的插件不该有那一格');
+  assert.equal(selOf(blocks[1]), null, '0 个端口的插件不该有那一格');
 
   const sel = selOf(blocks[0]);
   assert.ok(sel, '要数据的插件必须有那一格');
@@ -1195,7 +1195,7 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
     + ` activeConnectionId: 'c1', spaces: ${JSON.stringify(SPACES)} };`);
   h.fn('renderPlugins')(PV);
   const sel2 = selOf(h.byId.get('plugin-blocks').children[0]);
-  assert.equal(sel2.children[0].value, '', '还没有值 ⇒ 第一项是"跟随默认"');
+  assert.equal(sel2.children[0].value, '', '还没有值，第一项是"跟随默认"');
   assert.match(sel2.children[0].textContent, /第一次开会话时新建一份/);
   assert.equal(sel2.value, '', '初值选中"跟随默认"');
   assert.equal(sel2.children.length, 4, '默认 + 两份数据 + 另开一份');
@@ -1205,8 +1205,8 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   await sel2.onchange();
   // 查在原对象上（`sent` 会把这一格抹平，见上面那段）：
   assert.equal('spaceId' in raw(2), false,
-    '★ 「没表态」必须是**键缺席** —— 界面不许把一个显式的 `spaceId: undefined` 发出去：'
-    + '那是"这一格有值、值是空的"，它与"这一格没有值"是不是同一件事，取决于**传输层**'
+    '「没表态」必须是键缺席 —— 界面不许把一个显式的 `spaceId: undefined` 发出去：'
+    + '那是"这一格有值、值是空的"，它与"这一格没有值"是不是同一件事，取决于传输层'
     + '怎么看待 undefined（跨 IPC 一路序列化下来，两种形状能不能分开不由我们说了算）。'
     + '而这一格一旦被读成"要一个新的"，用户什么都没做、每开一次会话就多一份数据。');
 
@@ -1220,10 +1220,10 @@ test('★★ 插件块上的「用哪一份数据」：三种取值各发各的�
   h.run('boot = { connections: [], workspaces: [], activeConnectionId: null, spaces: [] };');
   h.fn('renderPlugins')(PV);
   assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,
-    '★ 没有活跃连接时那一格没有对象 —— 画一个空的等于凭空许诺');
+    '没有活跃连接时那一格没有对象 —— 画一个空的等于凭空许诺');
 });
 
-test('★★ 高级选项：一块一份，两块各填各的，值不串到另一块', async () => {
+test('高级选项：一块一份，两块各填各的，值不串到另一块', async () => {
   // 2026-10-11 加（界面第三轮 F4）。那几格从前是全屏共用的一份，长在第二屏
   //   最底下 —— 而它喂的是某一块的「开始会话」。三四个插件并排时，"我填的 4 核
   //   是给谁的"在界面上根本表达不出来。
@@ -1258,7 +1258,7 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
   const a0 = cellsOf(b0);
   const a1 = cellsOf(b1);
   assert.equal(a0.length, 5, '一块里那几格：CPU / 内存 / GRES / 数量 / 分区');
-  assert.notEqual(advOf(b0), advOf(b1), '★ 两块各有一份，不是同一个元素被塞两次');
+  assert.notEqual(advOf(b0), advOf(b1), '两块各有一份，不是同一个元素被塞两次');
 
   // ── 两块里那一格都要跟着站点给的分区表走 ──
   for (const a of [a0, a1]) {
@@ -1266,7 +1266,7 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
     assert.match(a[4].children[2].textContent, /cpu（无权限）/);
     assert.equal(a[4].children[2].disabled, true, '没权限的那个选项要灰着');
     assert.equal(a[4].children[2].title, '这个分区要另外申请',
-      '★ 而灰着必须给出理由 —— 让用户猜为什么点不动是不行的');
+      '而灰着必须给出理由 —— 让用户猜为什么点不动是不行的');
   }
 
   // ── 甲填满 ──
@@ -1278,14 +1278,14 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
     '这个分区的 GRES：默认 / 不占 / a100（下标就是选项的 value）');
   a0[2].value = '0';
   a0[2].onchange();
-  assert.equal(a0[3].disabled, false, '挑了卡，数量那一格才填得动');
-  assert.equal(a0[3].max, '4', '★ 上限来自服务端给的 per_node_max，不是写死的数');
+  assert.equal(a0[3].disabled, false, '选择了卡，数量那一格才填得动');
+  assert.equal(a0[3].max, '4', '上限来自服务端给的 per_node_max，不是写死的数');
   a0[3].value = '2';
 
   // ── 乙一个字没动：它那几格必须是它自己的样子 ──
   assert.deepEqual([a1[0].value, a1[1].value, a1[4].value], ['', '', '']);
-  assert.equal(a1[2].value, '', '★ 乙的 GRES 还停在"用插件的默认"');
-  assert.equal(a1[3].disabled, true, '★ 而乙的数量那一格还是灰的（甲挑了卡不影响它）');
+  assert.equal(a1[2].value, '', '乙的 GRES 还停在"用插件的默认"');
+  assert.equal(a1[3].disabled, true, '而乙的数量那一格还是灰的（甲选择了卡不影响它）');
 
   const sent = (i) => JSON.parse(JSON.stringify(h.run(`window.__subs[${i}]`)));
   await btnOf(b0).onclick();
@@ -1294,13 +1294,13 @@ test('★★ 高级选项：一块一份，两块各填各的，值不串到另�
     res: { cpus: 4, mem: '16G', partition: 'gpu',
       gres: { name: 'gpu', type: 'a100', count: 2 } },
     kind: 'cs', port: null,
-  }, '★ 甲交出去的是**甲**填的那一份');
+  }, '甲交出去的是甲填的那一份');
   assert.deepEqual(sent(1), { res: {}, kind: 'relay', port: null },
-    '★★ 乙那一块什么都没填 ⇒ 发的是**空对象**：留空不是"0 核"，是"让服务端用它自己'
-    + '的默认值"。串味的话这里会看到甲的那 4 核');
+    '乙那一块什么都没填，发的是空对象：留空不是"0 核"，是"让服务端用它自己'
+    + '的默认值"。若串味这里会看到甲的那 4 核');
 });
 
-test('★★ 共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
+test('共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
   // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：
   // 选错的那一个会让另外几条连接跟着一起变，而它们各自的界面上什么都没发生 ——
   // 用户要到下一次开会话时才发现自己动了别人的数据。
@@ -1322,12 +1322,12 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
   await new Promise((r) => setImmediate(r));       // 让第一发走完，框弹出来
 
   const dlg = h.byId.get('fork-dlg');
-  assert.equal(dlg.open, true, '★ 共用的一张表必须先问 —— 替用户选一个就是把别人改了');
+  assert.equal(dlg.open, true, '共用的一张表必须先问 —— 替用户选一个就是把别人改了');
   // 名字由界面取（同一条 `connLabel` 规则），主进程只回 id ——
   //   两处各拼一遍备注/地址的回落规则迟早会漂开。
   assert.match(h.byId.get('fork-body').textContent, /bob@198\.51\.100\.9:10100/,
     '要说得出"还有谁在用" —— 只说"还有 1 条连接"等于没说');
-  assert.equal(raw(1), undefined, '★ 还没选之前不许发第二发');
+  assert.equal(raw(1), undefined, '还没选之前不许发第二发');
   assert.deepEqual(sent(0), { workspaceId: 'w000000000001', pluginId: 'p1',
     connectionId: 'c1', spaceId: 's000000000002' }, '第一发不带 scope');
 
@@ -1351,7 +1351,7 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
   assert.equal(h.byId.get('fork-dlg').open, true);
   h.run('$("fork-dlg").oncancel()');               // Esc 走的是 cancel 事件
   assert.equal((await q).ok, false);
-  assert.equal(h.run('window.__calls.length'), 1, '★ 取消之后不许再发一发');
+  assert.equal(h.run('window.__calls.length'), 1, '取消之后不许再发一发');
 
   // ── 选「全部一起改」，scope: 'all'，而且第二问（would_discard）要把它带上 ──
   //   这一格是最容易漏的：`would_discard` 的重试如果只补 `confirmDiscard`、
@@ -1367,12 +1367,12 @@ test('★★ 共用的那张表：先弹框问「一起改还是分一张自己�
   h.run('$("fork-all").onclick()');
   assert.equal((await s).ok, true);
   assert.equal(raw(1).scope, 'all');
-  assert.equal(raw(2).scope, 'all', '★ 第二问的重试必须把 scope 一起带上');
+  assert.equal(raw(2).scope, 'all', '第二问的重试必须把 scope 一起带上');
   assert.equal(raw(2).confirmDiscard, true);
   assert.match(body(), /已经删掉/);
 });
 
-test('★★ 这个架子真的抓得住 P1 那个缺陷（拿一个故意的错来验）', () => {
+test('这个架子真的抓得住 P1 那个缺陷（拿一个故意的错来验）', () => {
   // 一条抓不住真缺陷的守卫等于没有守卫。这里把 P1 那个错误原样放回去：
   //   一个从未声明过的变量，出现在画第一屏的那条路上。
   const broken = SRC.replace('    li.append(t, m, main, edit, del);',
@@ -1395,7 +1395,7 @@ function childrenOf(e) {
   return out;
 }
 
-test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在那一刻被藏起来）', () => {
+test('作业结束之后失败原因不再消失（从前它恰好在那一刻被藏起来）', () => {
   // 这一条守的是一个"最该看见的时候看不见"的缺陷：`#kv`（含「作业状态」那一句，
   //    也就是 `jobstate.js` 译好的失败原因与退出码）从前的可见性判据是
   //    `st !== 'ended'` —— 而作业一结束会话就进 `ended` 原因当场消失。
@@ -1409,7 +1409,7 @@ test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在
     hbAgeMs: 1000, tunnelState: 'stopped', resources: {}, gresText: null,
   });
   assert.equal(h.byId.get('job-detail').classList.contains('hidden'), false,
-    '★ 结束之后那一格仍然要露 —— 失败原因正是在那一刻才要看');
+    '结束之后那一格仍然要露 —— 失败原因正是在那一刻才要看');
   const kv = h.byId.get('kv');
   assert.match(kv._text || childrenOf(kv).map((x) => x._text).join(' '), /作业状态/,
     '而「作业状态」那一行要在里面');
@@ -1421,7 +1421,7 @@ test('★★ 作业**结束之后**失败原因不再消失（从前它恰好在
     '一会儿都没跑过的时候不该摆一个空的详情块');
 });
 
-test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按退出码分**', () => {
+test('作业结束的那一刻那一句进提示流，而且好坏按退出码分', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   const notices = () => h.byId.get('notices').children.map(
     (n) => (n.children || []).map((c) => c._text).join(' '));
@@ -1436,7 +1436,7 @@ test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按�
   ended('a', '143:0');
   const after1 = notices();
   assert.match(after1[0] || '', /结束了/);
-  assert.match(after1[0] || '', /错误/, '★ 非零退出码 ⇒ 那一档是「错误」，不是一句平静的信息');
+  assert.match(after1[0] || '', /错误/, '非零退出码，那一档是「错误」，不是一句平静的信息');
   assert.equal(after1.length, 1);
 
   // 同一份快照再来一次（推送会反复来）不许再报一遍 —— 判据是"上一轮还不是
@@ -1449,10 +1449,10 @@ test('★★ 作业结束的那一刻那一句进提示流，而且**好坏按�
   ended('b', '0:0');
   const n0 = notices()[0] || '';
   assert.match(n0, /0:0/);
-  assert.equal(/错误/.test(n0), false, '★ `0:0` 是干净收尾 —— 报成错误会让用户去查一个不存在的问题');
+  assert.equal(/错误/.test(n0), false, '`0:0` 是干净收尾 —— 报成错误会让用户去查一个不存在的问题');
 });
 
-test('★★ 「查看日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
+test('「查看日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run("SCREEN = 'jobs';"
     + "SESS = { sessions: [{ slot: 'a', live: false, snap: { sessionId: 's1' } }], front: 'a' };");
@@ -1469,10 +1469,10 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   await h.run('loadJobLog()');
   assert.match(shown(), /标准输出/);
   assert.match(shown(), /服务的一行/);
-  assert.match(shown(), /这是尾部/, '★ 拿不全的时候必须说出来 —— 不说的话用户会以为那就是全部');
-  assert.equal(/标准错误/.test(shown()), false, '`.err` 是 null ⇒ 那一块不出现');
+  assert.match(shown(), /这是尾部/, '拿不全的时候必须说出来 —— 若不说用户会以为那就是全部');
+  assert.equal(/标准错误/.test(shown()), false, '`.err` 是 null，那一块不出现');
 
-  // ② 「取不到」与「确实没有」长得不一样（并成一句的话，一个模式不对的日志
+  // ② 「获取失败」与「确实没有」长得不一样（并成一句的话，一个模式不对的日志
   //    会被读成"这台站点上没有日志"）
   h.run('window.slurmate.jobLog = async () => ({ ok: true, data: {'
     + " out: { path: '/h/a.out', bytes: null, lines: null, truncated: null,"
@@ -1482,7 +1482,7 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   assert.match(shown(), /获取失败：component_group_or_world_writable/);
   assert.match(shown(), /\/h\/a\.out/, '路径要给出来（可复制）');
 
-  // ③ 两份都没有，一句"还没有写出任何东西"，而不是一个空框
+  // ③ 两份都没有，一句"还没有写出任何内容"，而不是一个空框
   h.run("window.slurmate.jobLog = async () => ({ ok: true, data: { out: null, err: null } });");
   await h.run('loadJobLog()');
   assert.match(shown(), /还没有输出任何内容/);
@@ -1494,7 +1494,7 @@ test('★★ 「查看日志」按需取一次：三态各不相同，空的那�
   assert.match(shown(), /这个站点的守护进程版本过低/);
 });
 
-test('★★ 「取不回来」的三种情况是三句不同的话，各有各的出路', () => {
+test('「获取失败」的三种情况，三句不同，各有各的出路', () => {
   // 2026-10-14 加。那三态从前被合成一个布尔（`missing[].distributed`），于是
   //   界面只有一句话可说，而它对其中两种是错的：`package: null`（站点此刻生产
   //   不出来）不是「站点的清单里没有它的包」。用户照着那句话去做，会去问管理员
@@ -1513,15 +1513,15 @@ test('★★ 「取不回来」的三种情况是三句不同的话，各有各�
   ] });
   const text = textOf(h.byId.get('plugin-issues'));
 
-  assert.match(text, /本站没有分发它/, '键根本不出现 ⇒ 出路是问管理员');
-  assert.match(text, /现在发不出来/, '`null` ⇒ 出路是再同步一次');
-  assert.match(text, /读不懂/, '读不懂 ⇒ 出路是升级客户端');
+  assert.match(text, /本站没有分发它/, '键根本不出现，出路是问管理员');
+  assert.match(text, /现在发不出来/, '`null`，出路是再同步一次');
+  assert.match(text, /读不懂/, '读不懂，出路是升级客户端');
   assert.equal(/清单里没有它的包/.test(text), false,
-    '那句是"缺席"那一态的话，用来说 `null` 就是说了一件不成立的事');
+    '那句是"缺席"那一态，拿它来说 `null` 就是说了一件不成立的事');
 
   // 而"站点愿意发、本机还没取回来"那一种仍然走上面那条（`package`）。
   h.fn('renderPlugins')({ ...PV, missing: [one('package', '丁')] });
   const text2 = textOf(h.byId.get('plugin-issues'));
   assert.match(text2, /丁/, '愿意发的那一条仍然要说出来（本机还没有它）');
-  assert.equal(/本站没有分发它/.test(text2), false, '它不属于"取不回来"那一类');
+  assert.equal(/本站没有分发它/.test(text2), false, '它不属于"获取失败"那一类');
 });

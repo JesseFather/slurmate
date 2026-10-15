@@ -84,7 +84,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 新建一条连接时，它默认落在哪个工作区 —— 表单在用户敲地址的时候问它，
   // 好把默认值显示出来（规则住在主进程：`config.js` 的 `defaultWorkspaceFor`）。
   // 返回 { ok, workspaceId }；`null` 是一个答案（"会新建一个空白工作区"），
-  // 不是"取不到"。纯查询，不改任何东西，所以敲一个字问一次也没关系。
+  // 不是"获取失败"。纯查询，不改任何东西，所以敲一个字问一次也没关系。
   defaultWorkspace: (conn) => ipcRenderer.invoke('app:defaultWorkspace', conn),
   // 改这张引用表里的一格：这个工作区的这个插件以后用哪一份数据（插件块上那一格）。
   // 与上面那一格同一套三态约定（一份约定、两处不各写一遍）：

@@ -867,7 +867,7 @@ async function loadJobLog() {
   const r = await window.slurmate.jobLog({ session_id: s.sessionId, lines: 500 });
   box.textContent = '';
   if (!r || !r.ok) {
-    // 取不到（或者这个站点太旧没有这个能力）—— 如实说，不画一个空框。
+    // 获取失败（或者这个站点太旧没有这个能力）—— 如实说，不画一个空框。
     meta.textContent = '';
     box.append(cel('p', 'na', (r && r.error) || '控制节点没有说明原因'));
     return;
@@ -1650,7 +1650,7 @@ function renderPlugins(pv) {
   if (miss.length) {
     // 三条出路必须分开说，因为它们要做的事不同。合并成一句"本站有而本机
     //   没有 —— 升级客户端"的话，其中两条会被指错方向。
-    // 四态里"取不回来"的那三种出路不同，所以不合成一句：
+    // 四态里"获取失败"的那三种出路不同，所以不合成一句：
     //   不分发（问管理员）/ 此刻发不出来（再同步一次）/ 读不懂（升级客户端）。
     const bySync = miss.filter((m) => m.delivery === 'package');
     const byHand = miss.filter((m) => m.delivery !== 'package');
@@ -1833,9 +1833,9 @@ function renderSitePlugins(pv) {
       //    而用户此刻的动作只有两个方向，一行就够把他指对。这也正是它必须分叉的
       //    理由：指错了方向，用户会去做一件解决不了问题的事。
       if (site.daemonVersionVerdict === 'cross_major') {
-        versionWhy(d, '这个站点发的插件包格式比本客户端新，这一版取不回来。请升级这个客户端。',
+        versionWhy(d, '这个站点发的插件包格式比本客户端新。请升级这个客户端。',
           '这个集群的服务端与本客户端大版本不同，所以那些插件包用的是更新的格式，'
-          + '而这一版的客户端没有其他办法把它取回来。请升级这个客户端。');
+          + '而这一版的客户端没有其他办法把它取下来。请升级这个客户端。');
       } else {
         versionWhy(d, '这个站点发的插件包格式比本客户端新，而它报的基座版本并不更新。升级客户端解决不了。',
           '升级客户端解决不了：这个站点报的基座版本并不比本客户端新。'
@@ -2860,7 +2860,7 @@ function renderJobs() {
   const rows = JOBS.list || [];
   const err = $('jobs-error');
 
-  // 三态：取不到（`list === null`）与确实没有（`list === []`）必须
+  // 三态：获取失败（`list === null`）与确实没有（`list === []`）必须
   //   长得不一样。把"问不到"画成"没有作业"，用户会以为自己的作业丢了 ——
   //   而真正的原因在连接那一侧。
   err.classList.toggle('hidden', !JOBS.error);
@@ -3373,7 +3373,7 @@ async function refreshSiteDirs() {
     r = { ok: false, error: (e && e.message) || String(e) };
   }
   if (!r || !r.ok) {
-    // 取不到就说取不到（三态里的"缺席"那一态）—— 画成"那两处都是空的"是在说
+    // 获取失败就说获取失败（三态里的"缺席"那一态）—— 画成"那两处都是空的"是在说
     //   一件不成立的事，而作者会照着那句话去查一个不存在的问题。
     box.appendChild(na('假站点那两处目录'));
     return;
@@ -3406,7 +3406,7 @@ async function refreshSiteDirs() {
   }
 
   // 打包器。假站点"发得出去"全靠它，所以它与那两处目录同属"假站点自己的事"。
-  //   它是「站点报得出插件、客户端却一个都取不回来」的另一条线索：那两处目录
+  //   它是「站点报得出插件、客户端却一份都没收到」的另一条线索：那两处目录
   //   报的是"站点上有什么"，这一行报的是"发不发得出去"。
   const pk = rep.packer;
   if (pk) {

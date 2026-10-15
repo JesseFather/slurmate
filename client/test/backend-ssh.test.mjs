@@ -42,7 +42,7 @@ function hostKeyBlob(algorithm = 'ssh-ed25519', raw = crypto.randomBytes(32)) {
   return { blob: Buffer.concat([sshString(Buffer.from(algorithm)), sshString(raw)]), raw };
 }
 
-test('★ RPC 命令行是编译期常量，不含任何插值', () => {
+test('RPC 命令行是编译期常量，不含任何插值', () => {
   // 这条既是防注入，也是穿过 sshd 那个 ForceCommand 守卫的必要条件
   // （命令串里不能出现 code-server 字面量）。它一旦变成拼出来的字符串，
   // 两条性质同时失效。
@@ -229,7 +229,7 @@ test('已实现（isImplemented 为真）—— 后端选择没有"退回假后�
   // 同时钉住选择器的形状（本机跑不起真集群，所以这一条只能读源码文本）：
   //   一个没有 SSH 后端的构建必须响亮地坏，而不是悄悄给一个假后端。
   //   `isImplemented()` 恒为真，那条兜底今天走不到，没有任何行为用例抓得到它，
-  //   而它一旦回来，症状是"用户以为连上了集群、其实在跟一个本地假服务打交道"。
+  //   而它一旦回来，症状是"用户以为连上了集群、在跟一个本地假服务打交道"。
   const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'backend.js'), 'utf8');
   assert.equal((src.match(/new FakeBackend/g) || []).length, 1,
     '假后端只许在一个地方被构造');
@@ -248,10 +248,10 @@ test('★ kind=transport 的信封被 classify 归为传输层，而不是「守
   // 少了这条规则，它会掉进 FATAL —— 而 FATAL 不重试。
   // 那意味着一次网络抖动就会被当成终局错误，心跳也会停。
   const env = { ok: false, code: null, data: null,
-                error: { kind: 'transport', detail: '命令没跑起来' } };
+                error: { kind: 'transport', detail: '命令无法运行' } };
   const c = classify(env, { op: 'heartbeat' });
   assert.equal(c.action, Action.TRANSPORT);
-  assert.match(c.message, /命令没跑起来/, '要带上具体原因，而不是笼统的「没有返回应答」');
+  assert.match(c.message, /命令无法运行/, '要带上具体原因，而不是笼统的「没有返回应答」');
 });
 
 // ── 认证失败：把 ssh2 的原话翻译成能指向根因的话 ─────────────────────────────
@@ -310,7 +310,7 @@ test('★ 已经连着时再连一次：返回值里**仍然**要带着 daemonVe
 });
 
 test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上一台的身份冒充', async () => {
-  // 这一格是「系统报告成功，而事情没成」里最坏的一种，因为连"没成"都看不出来：
+  // 这一格是「系统报告成功，而事情没成」里最坏的一种，因为连"未成功"都看不出来：
   //    `_open()` 在"已经连着"时是短路返回上一条连接的 whoami / daemonVersion 的
   //    （那是给同一台的第二次 connect 准备的），可它不看要连的是哪一台。
   //    于是"换一条连接"的真实后果是：拨号 0 次、`_conn` 还是旧的那条、`_profile`
@@ -330,7 +330,7 @@ test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上�
   const r = await b.connect({ user: 'bob', host: '192.0.2.9', port: 22 },
     { privateKey: keys.generate().privateKeyPem });
 
-  assert.equal(dialed, 1, '换一台必须真的去拨号 —— 短路返回上一条就是"报告成功而事情没成"');
+  assert.equal(dialed, 1, '换一台必须真的去拨号 —— 短路返回上一条就是"报告成功而事情未成功"');
   assert.equal(r.whoami.user, 'bob', '回来的必须是**新那一台**的身份');
   assert.equal(r.daemonVersion, '0.9', '版本号也必须是新那一台的 —— 拿它去过版本闸');
   assert.notEqual(b._conn, oldConn, '`_conn` 要换成新那条，旧的必须已经拆掉');
@@ -346,7 +346,7 @@ test('★★ 换一台机器再 connect：**必须真的拨号**，不许拿上�
   };
   const r2 = await b.connect({ user: 'bob', host: '192.0.2.9', port: 2222 },
     { privateKey: keys.generate().privateKeyPem });
-  assert.equal(dialed2, 1, '★ 只有端口不同也是**另一台** —— 一样要真拨号');
+  assert.equal(dialed2, 1, '★ 只有端口不同也是**另一台** —— 照样要真拨号');
   assert.deepEqual(b._profile, { user: 'bob', host: '192.0.2.9', port: 2222 });
 
   // 反侧：同一台再 connect 一次仍然短路（不重复拨号）—— 这条语义不能被上面
@@ -515,7 +515,7 @@ test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"�
   assert.ok(made.length === 1, '夹具该只造一个 Client');
   assert.ok(made[0].execs.includes(sshBackend.PREPARE_CMD),
     '★★ 连上之后必须**真的**发这条命令 —— 少了它，"目录一定存在"这条前提没了，'
-    + '而症状是提交的作业起不来（`sbatch -o` 的父目录不存在）');
+    + '而症状是提交的作业无法启动（`sbatch -o` 的父目录不存在）');
   // 而它排在握手那两条之前：ping/whoami 是"这条链路通不通"的判据，
   //   它们失败会让整次连接失败；而建目录失败不影响"连上了"。次序反了的话，
   //   一个建不出目录的家目录会报成"无法执行 slurmate rpc"—— 一句指错方向的话。
@@ -579,12 +579,12 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
   const daemon = fs.readFileSync(
     path.join(ROOT, '..', 'cluster', 'slurmate-sessiond'), 'utf8');
   const m = daemon.match(/^JOB_LOG_SUBDIR = "([^"]+)"/m);
-  assert.ok(m, '守护进程里找不到 JOB_LOG_SUBDIR');
+  assert.ok(m, '守护进程里未找到 JOB_LOG_SUBDIR');
   assert.ok(cmd.includes(m[1]),
-    `命令串里的目录（${cmd}）与守护进程的 JOB_LOG_SUBDIR（${m[1]}）对不上`);
+    `命令串里的目录（${cmd}）与守护进程的 JOB_LOG_SUBDIR（${m[1]}）不一致`);
 });
 
-test('★ 两条命令只差最后一个词：同一个解释器、同一个二进制路径', () => {
+test('两条命令只差最后一个词：同一个解释器、同一个二进制路径', () => {
   // 分头写死是有意的（上面那条用例要求它是常量），代价就是路径写了两遍 ——
   // 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程的问题。
   const rpc = sshBackend.RPC_CMD;
@@ -731,7 +731,7 @@ test('★ 通道断了会排重开；拆掉之后不再排', async (t) => {
   assert.equal(b._resident, null);
 });
 
-test('★ 后端自己 close() 之后不重开（也不许报"还连着"）', async (t) => {
+test('后端自己 close() 之后不重开（也不许报"还连着"）', async (t) => {
   keepLoop(t);
   const b = connectedBackend();
   const opened = b._openStream();
@@ -744,7 +744,7 @@ test('★ 后端自己 close() 之后不重开（也不许报"还连着"）', as
   assert.equal(b.resident, null);
 });
 
-test('★ resident 的三态分得开：还没连 / 连了但没有通道 / 通道在', async (t) => {
+test('resident 的三态分得开：还没连 / 连了但没有通道 / 通道在', async (t) => {
   keepLoop(t);
   // 合成两态的话，启动阶段的日志会说出一句当时并不成立的话
   //   （"常驻通道不可用" vs "还没试过"）。

@@ -115,7 +115,7 @@ test('菜单里绝不能出现 reload / close / devtools / zoom 这些 role', ()
 });
 
 // ── 拦截 ────────────────────────────────────────────────────────────────────
-test('★ Ctrl+W / Ctrl+N / F5 / Ctrl+R 必须到达页面 —— 这正是要解决的问题', () => {
+test('Ctrl+W / Ctrl+N / F5 / Ctrl+R 必须到达页面 —— 这正是要解决的问题', () => {
   for (const input of [
     { key: 'w', control: true },
     { key: 'W', control: true, shift: true },
@@ -168,7 +168,7 @@ test('修饰键必须精确匹配 —— Ctrl+W 吞掉，但没按 Ctrl 的 W �
   assert.equal(guard({ key: 'F11', alt: true }).prevented, false);
 });
 
-test('★ 输入法组合期间一律放行 —— 否则中文输入法会被吃掉', () => {
+test('输入法组合期间一律放行 —— 否则中文输入法会被吃掉', () => {
   const wc = fakeWc();
   const got = { blocked: 0 };
   attachKeyGuard(wc, { onBlocked: () => { got.blocked++; } });
@@ -241,7 +241,7 @@ test('describe 渲染成人能读的形态', () => {
 // ② 那时 input.key 就是 'Control'，于是每一次都被当成一条独立的消息记下来。
 // 而修饰键单独按下不携带任何信息 —— 它既没有被吞掉的可能，也不是一个动作。
 
-test('★ 按住 Ctrl 不刷屏：修饰键本身 + 自动重复都不进日志', () => {
+test('按住 Ctrl 不刷屏：修饰键本身 + 自动重复都不进日志', () => {
   // 裸修饰键：不是「值不值得报」，而是它根本不是一条消息
   for (const key of ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']) {
     assert.equal(isBareModifier({ key }), true, `${key} 单独按下不该进日志`);
@@ -262,7 +262,7 @@ test('★ 按住 Ctrl 不刷屏：修饰键本身 + 自动重复都不进日志'
   assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: false, type: 'keyUp' }), false);
 });
 
-test('★ 端到端：按住 Ctrl 一次也不上报，正常组合键照报', () => {
+test('端到端：按住 Ctrl 一次也不上报，正常组合键照报', () => {
   const wc = fakeWc();
   const seen = [];
   attachKeyGuard(wc, { onSeen: (d) => seen.push(d) });

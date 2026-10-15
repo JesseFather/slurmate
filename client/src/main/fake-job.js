@@ -141,7 +141,7 @@ function toWslPath(p) {
   return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`;
 }
 
-/** 这个 bash 是第几版（取不到 = 它跑不起来，不算数）。 */
+/** 这个 bash 是第几版（获取失败就不算数 —— 那说明它跑不起来）。 */
 function bashMajor(p, timeoutMs = 1000) {
   try {
     const out = execFileSync(p, ['-c', 'printf %s "${BASH_VERSINFO[0]:-0}"'],

@@ -141,8 +141,8 @@ body.connected .rail { display: block; }
      红还是红，只是亮一档。 */
 .rail:hover, .rail:focus-visible { filter: brightness(1.35); outline: none; }
 
-/* 左栏三态（与站点状态那一块同源）：正常 / 断开 / 取不到。
-   取不到不画成"没有" —— 它与"断开"是两句话（一个是我们没问到，一个是
+/* 左栏三态（与站点状态那一块同源）：正常 / 断开 / 获取失败。
+   获取失败不画成"没有" —— 它与"断开"是两句话（一个是我们没问到，一个是
      对面真的没了），所以颜色也不同（灰 vs 红）。
    那三态由主进程算好推过来（`ui:site`，见 panel.js 的 `onSite`）：链路活没活
      只有主进程知道，界面这里自己判就是第二个"什么时候算断线"的判据，而它会漂。 */
@@ -587,7 +587,7 @@ dialog p#fork-body { white-space: pre-line; }
    `.ctable` 与 `.na` 两条跟着「集群状态」那一节一起删掉了：那一节整个搬进了
      边栏浮窗（另一个 renderer，样式在 `hover.css` 里）。留在这里的规则没有任何
      元素会命中 —— 而"没有人命中的 CSS"在下一次改动里会被当成"某处在用"。
-     这两条规矩（grid 两列表、`取不到` 那一行）现在住在 `hover.css`。 */
+     这两条规矩（grid 两列表、`获取失败` 那一行）现在住在 `hover.css`。 */
 .crow { margin: 0 0 6px; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
 .crow .nm { color: #9cdcfe; }
 .crow .dim { color: var(--fg-dim); }

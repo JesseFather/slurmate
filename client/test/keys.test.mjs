@@ -62,7 +62,7 @@ function publicKeyObjectFromLine(line) {
   });
 }
 
-test('★ 生成的私钥签出的名，能被对应的公开钥验过（语义正确，不只是语法合法）', () => {
+test('生成的私钥签出的名，能被对应的公开钥验过（语义正确，不只是语法合法）', () => {
   const { privateKeyPem, publicKeyLine } = keys.generate();
 
   const parsed = sshUtils.parseKey(privateKeyPem);
@@ -81,7 +81,7 @@ test('★ 生成的私钥签出的名，能被对应的公开钥验过（语义�
     '篡改的消息必须验签失败 —— 否则签名与公开钥根本不是一对');
 });
 
-test('★ 公钥行与私钥同源（推导出来的，不是另外存的一份）', () => {
+test('公钥行与私钥同源（推导出来的，不是另外存的一份）', () => {
   const { privateKeyPem, publicKeyLine } = keys.generate();
   assert.equal(keys.publicKeyLineFromPrivatePem(privateKeyPem), publicKeyLine);
 
@@ -111,7 +111,7 @@ test('私钥是 PEM 包裹的 openssh-key-v1，且我们能认它', () => {
   assert.ok(body.every((l) => l.length <= 70));
 });
 
-test('★ 每次生成都是新的密钥（不重复使用随机数）', () => {
+test('每次生成都是新的密钥（不重复使用随机数）', () => {
   const a = keys.generate();
   const b = keys.generate();
   assert.notEqual(a.privateKeyPem, b.privateKeyPem);
@@ -155,7 +155,7 @@ test('decodePrivate 对垃圾输入返回 null，不抛异常', () => {
   }
 });
 
-test('★ 带口令（加密）的私钥被认出来并拒绝使用，而不是当成明文硬解', () => {
+test('带口令（加密）的私钥被认出来并拒绝使用，而不是当成明文硬解', () => {
   // 造一个 ciphername 不为 none 的 openssh-key-v1：把明文体里的 "none" 换成 "aes256-ctr"。
   // 字段编码是 uint32 长度 + 内容，所以长度也要跟着改。
   const { privateKeyPem } = keys.generate();
