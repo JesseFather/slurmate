@@ -1211,6 +1211,13 @@ function pluginsView() {
       // 【省略】cpus/mem 让服务端填当下那份默认值 —— 不是把这两个数字发回去。
       // 回发旧值的客户端会把管理员的改动永远钉死。拿不到就是 null，不编一个。
       defaults: (s && s.defaults) || null,
+      // 站点给这个插件设的并发上限（协议里的 `max_sessions`）。与 `defaults`
+      //   同一类：管理员设的政策，不是用户偏好，界面只读地显示。
+      // 它已经是一个数：守护进程把"插件那一份没写就跟随主配置"解析掉了，
+      //   客户端不自己算 —— 主配置那个值不在任何应答里，这里拿不到用来推的东西。
+      // 缺席（老守护进程报不出这一格）就是 null。不许补一个 1：那会是一句编出来的
+      //   政策，而用户会拿它当本站的规定。
+      maxSessions: (s && typeof s.max_sessions === 'number') ? s.max_sessions : null,
       // GRES 那一格要过客户端唯一的那处拼法（`gres.js` 的 `gresText`）——
       //   与 `session.js` 给会话快照加 `gresText` 走同一条路（见 `renderKv` 那句
       //   注释）。少了这一步，界面要么自己拼一个 `name:type × n`（那是第二个拼法），

@@ -842,6 +842,25 @@ def main():
           any("max_active_per_user" in e for e in unknown_cfg.validate()),
           str(unknown_cfg.validate()))
 
+    # 而【插件自己的键】写在这里是另一种错，它有另一条出路：移到那个插件的
+    #   那一份配置里去。最像的是新加的那一对 —— `max_sessions_per_user` 是本站
+    #   通用的、`max_sessions` 是某一个插件的，只差一个后缀。只说"认不出这个键"
+    #   的话，管理员会去拼写里找问题，而这一格一个字都没写错，是放错了文件。
+    _ms_main = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                     "max_sessions = 2\n",
+                                     "plugin-key-in-main.conf")).validate()
+    check("插件自己的键写在主配置里 → 报错指路到那个插件的配置，"
+          "而不是只说「认不出这个键」",
+          any("max_sessions" in e and ".d/" in e for e in _ms_main), str(_ms_main))
+    # 真正的拼错仍旧走原来那一句。这一条同时守着文档：CONFIGURATION.md 逐字
+    #   引用的是「配置里有无法识别的键」这句话（M 那条判据），而上面新加的那条
+    #   分支换掉的是措辞，不是这句话本身。
+    _typo = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+                                  "cluster_cdir = 192.0.2.0/24\n",
+                                  "typo-in-main.conf")).validate()
+    check("真正的拼错走的还是「无法识别的键」那一句",
+          any("无法识别的键" in e for e in _typo), str(_typo))
+
     # ── 2. 端口区间是跨表安全的前提 ─────────────────────────────────────────
     print("\n── 2. 端口区间避让（reserved_ranges）──")
     # 示例配置里没有声明要避让的区间，所以端口池本身只需自洽
@@ -2471,7 +2490,7 @@ exit 0
     check("它那份配置允许的键 = 通用键 + bin + 清单里声明的那几个枚举键"
           "（没有第二份清单可以跟它矛盾）",
           _jup.conf_keys() == ("enabled", "default_cpus", "default_mem",
-                                "default_time", "default_gpus",
+                                "default_time", "default_gpus", "max_sessions",
                                 "bin", "token_mode"),
           str(_jup.conf_keys()))
     # 清单声明的时限是规范化之后存下来的（`3:30:00` → `03:30:00`）。
@@ -2503,6 +2522,40 @@ exit 0
               mod.PluginConfig(_jup, {"enabled": "yes",
                                       "default_time": "1:00:00"}, True)
               .default_time == "01:00:00")
+
+        # 并发上限（`max_sessions`）只有站点这一侧有，理由与 `default_gpus`
+        #   同一条：清单里那一格（`contributes.concurrent`）答的是"插件的代码
+        #   能不能同时处理两份"，那是一个关于代码的事实；"本站允许一个人同时
+        #   开几份"是一个关于这台集群的事实。三条路各占一条断言：
+        #   · 不写 → 跟随（存成 None，取值只有一处）；
+        #   · 写了 → 用它；
+        #   · 写错 → 当场拒绝，【不回退】。
+        # 最后那一条要的正是"不回退"：回退的话，配置里写着 0、而每个人实际
+        #   拿到的是缺省值，这件事会一直没人发现 —— 与 default_mem 同一条理由。
+        check("max_sessions 不写就是「跟随主配置」，不是一个写死的数",
+              mod.PluginConfig(_jup, {"enabled": "yes"}, True).max_sessions is None,
+              repr(mod.PluginConfig(_jup, {"enabled": "yes"}, True).max_sessions))
+        check("而写了就用它（这一格与清单里那个布尔是两件事）",
+              mod.PluginConfig(_jup, {"enabled": "yes", "max_sessions": "3"},
+                               True).max_sessions == 3)
+        for _bad in ("很多", "0", "-1"):
+            try:
+                mod.PluginConfig(_jup, {"enabled": "yes", "max_sessions": _bad},
+                                 True)
+                _ms_why = ""
+            except ValueError as _e:
+                _ms_why = str(_e)
+            check("max_sessions = %r 被拒（配置里写错必须当场拒绝，不回退）"
+                  % _bad,
+                  "max_sessions" in _ms_why, _ms_why)
+        # 0 那一句话要说出该怎么做（"想让人用不了这个插件"有它自己的写法）。
+        try:
+            mod.PluginConfig(_jup, {"enabled": "yes", "max_sessions": "0"}, True)
+            _zero_why = ""
+        except ValueError as _e:
+            _zero_why = str(_e)
+        check("max_sessions = 0 的报错指路到 enabled = no（那不是这一格的活）",
+              "enabled = no" in _zero_why, _zero_why)
         check("它声明的那个变量名与解析出来的路径传给了作业",
               _env5.get("SLURMATE_JUP_BIN") == "/usr/local/bin/jupyter",
               repr(_env5.get("SLURMATE_JUP_BIN")))
@@ -3124,6 +3177,33 @@ exit 0
           _by[CS]["defaults"].get("gpus", "缺") is None
           and _by[SSHD]["defaults"].get("gpus", "缺") is None,
           str({k: v.get("defaults") for k, v in _by.items()}))
+
+    # 并发上限（`max_sessions`）。与上面那几格同一类：管理员设的【政策】，
+    #   客户端只读地显示它（"本站允许你同时开几个这个插件"）。
+    #
+    # 它必须已经解析成一个数：插件那一份没写时跟随主配置的
+    #   `max_sessions_per_user`，而那个值不在任何应答里 —— 客户端拿不到用来推
+    #   的东西，所以"报一个它推不出来的数"与"让它自己算"之间没有第三条路
+    #   （同 `can_submit`）。取值走 `.get`，理由与上面那两条相同。
+    check("op_plugins 报出 max_sessions，插件没写时跟随主配置（已经解析成数）",
+          _by[CS].get("max_sessions") == cfg.max_sessions_per_user
+          and _by[SSHD].get("max_sessions") == cfg.max_sessions_per_user,
+          str({k: v.get("max_sessions") for k, v in _by.items()}))
+    # 而它是【每个插件一份】的：一个插件写了不牵连别的。这一条挡的是"报一个
+    #   全局值"那种实现 —— 那种实现在所有插件都没写时与真值逐字相同。
+    _ms_ids = {n: cfg.resolve_plugin(n)[0].id for n in (CS, SSHD)}
+    _ms_before = cfg.plugins[_ms_ids[SSHD]].max_sessions
+    try:
+        cfg.plugins[_ms_ids[SSHD]].max_sessions = 4
+        _by_ms = {p["name"]: p for p in
+                  (d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
+                   .get("data") or {}).get("plugins", [])}
+        check("而它是每个插件一份的：sshd 写 4 不牵连 code-server",
+              _by_ms[SSHD].get("max_sessions") == 4
+              and _by_ms[CS].get("max_sessions") == cfg.max_sessions_per_user,
+              str({k: v.get("max_sessions") for k, v in _by_ms.items()}))
+    finally:
+        cfg.plugins[_ms_ids[SSHD]].max_sessions = _ms_before
     check("enabled 如实反映站点决定（sshd 默认关着）",
           _by[CS]["enabled"] is True
           and _by[SSHD]["enabled"] is False,
@@ -6830,8 +6910,15 @@ exit 0
             return 0, "myaccount\n", ""
         return slurm_stub(argv, timeout, check)
 
-    def quota_submit(limit):
-        """把配额设成 `limit`，提交一次。store 跨调用保留。"""
+    def quota_submit(limit, kind=None, pubkey=None):
+        """把配额设成 `limit`，提交一次。store 跨调用保留。
+
+        `kind` 给了就按那个插件提交（不带就落到主配置的 `default_plugin`）——
+          每个插件自己那一格（`max_sessions`）要"换一个插件仍然开得起来"这种
+          对照，而那种对照只有在两个插件之间才做得出来；`pubkey` 是那个插件
+          自己要带的东西（要公钥的那一个没有它会在配额之前就被拒，
+          那样这一节测的就不是配额了）。
+        """
         cfg.max_sessions_per_user = limit
         _q_seq[0] += 1
         d.slurm = mod.Slurm(cfg)
@@ -6839,7 +6926,12 @@ exit 0
         real = mod.run_cmd
         mod.run_cmd = _q_run
         try:
-            return d.op_submit(UID, {"op": "submit"})
+            req = {"op": "submit"}
+            if kind:
+                req["service_kind"] = kind
+            if pubkey:
+                req["ssh_pubkey"] = pubkey
+            return d.op_submit(UID, req)
         finally:
             mod.run_cmd = real
 
@@ -6912,6 +7004,122 @@ exit 0
                                    "quota-zero.conf")).validate()
     check("写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
           any("max_sessions_per_user" in e for e in _q_bad), str(_q_bad))
+
+    # ── 23.1 每个插件自己那一格（`max_sessions`）─────────────────────────────
+    #
+    # 与上面那道全局的闸是两笔账，两个都要过。这一节要的是一个"全局放开、
+    #   唯独不让某一个插件多开"的现场 —— 少了它，"按 service_plugin 数"这条
+    #   判据可以被写成"还是数全局那个数"，而在全局 = 1 的缺省配置上，
+    #   两种写法的结果逐字相同。
+    _ms_cs = cfg.resolve_plugin(CS)[0]
+    _ms_ss = cfg.resolve_plugin(SSHD)[0]
+    _ms_saved = (cfg.plugins[_ms_cs.id].max_sessions,
+                 cfg.plugins[_ms_ss.id].max_sessions,
+                 cfg.plugins[_ms_ss.id].enabled,
+                 cfg.max_sessions_per_user, d.store)
+    # 要公钥的那一个（中转站那一类）在配额之前还有一道自己的闸，缺了它
+    #   会被 `bad_ssh_pubkey` 拒 —— 那样这一节测的就不是配额了。
+    #   这一行与 19.2 里那一把是同一把（随手造 68 个 base64 字符过不了那一关：
+    #   守护进程会真的解一次，确认它是一个 ed25519 的 blob）。
+    _ms_pubkey = ("ssh-ed25519 "
+                  "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
+    try:
+        d.store = mod.Store(os.path.join(tmpdir, "quota-plugin.db"))
+        # 两个上限分别取 2 与 1，而全局放开到 5。这三个数不是随便挑的：
+        #   下面每一条判据都要能分开"数这个插件"与"数全局那一堆"，所以
+        #   必须出现"总数已经越过这个插件的上限、而这个插件自己还有余量"的那一刻
+        #   （见第四条）。两个上限都取同一个数的话，那种时刻构造不出来。
+        cfg.plugins[_ms_cs.id].max_sessions = 2
+        cfg.plugins[_ms_ss.id].max_sessions = 1
+        # 站点样例里中转站那一类是关着的（19.5c 那条断言说的就是它）。这里要的是
+        #   两个插件都在用的现场，所以临时打开它，用完还原。
+        cfg.plugins[_ms_ss.id].enabled = True
+
+        _ms1 = quota_submit(5, CS)
+        check("插件上限 2、全局 5：第一个提交成功", _ms1.get("ok"), str(_ms1))
+        _ms2 = quota_submit(5, CS)
+        check("第二个也成功 —— 上限是 2，不是 1（这一条挡住「上限恒为 1」那种实现）",
+              _ms2.get("ok"), str(_ms2))
+        _ms3 = quota_submit(5, CS)
+        _ms3d = ((_ms3.get("error") or {}).get("detail") or "")
+        check("第三个被拒（全局还余 3 个，拦它的是插件那一格）",
+              (not _ms3.get("ok"))
+              and (_ms3.get("error") or {}).get("kind") == "quota_active",
+              str(_ms3))
+        # 拒绝里必须点名【是哪个插件】。只说"已达本站上限"的话，一个全局写着 5、
+        #   插件写着 2 的站点上，用户会去结束别的插件的会话 —— 整个方向是错的。
+        check("拒绝里点的是这个插件的名字（否则用户的排查方向是错的）",
+              cfg.plugins[_ms_cs.id].title in _ms3d, _ms3d)
+
+        # 这一条是"数的是插件"真正的判据。 此刻总数是 2，已经越过 sshd 自己那个
+        #   上限（1），而 sshd 自己一条都没有 —— 所以只要计数写成了数全局那一堆，
+        #   这一个提交就会被拒。上面那几条分不开这两种写法（变异验证实测：把
+        #   `count_occupying(uid, spec.id)` 换成 `count_occupying(uid)`，那几条全绿）。
+        _ms4 = quota_submit(5, SSHD, _ms_pubkey)
+        check("总数 2 已越过 sshd 的上限 1，而它自己一条都没有 → 开得起来",
+              _ms4.get("ok"), str(_ms4))
+        _ms5 = quota_submit(5, SSHD, _ms_pubkey)
+        _ms5d = ((_ms5.get("error") or {}).get("detail") or "")
+        check("而它自己那条到了上限之后，拒的是它自己那一格",
+              (_ms5.get("error") or {}).get("kind") == "quota_active"
+              and "上限是 1" in _ms5d, str(_ms5))
+
+        # 按 id 数，不按 `id@版本`。站点升级插件之后，旧版本那条会话仍然占着
+        #   这个名额；按版本数的话，一次升级会把所有人的上限当场放开一倍。
+        # 这里直接把库里那一行的版本改成另一个，模拟的正是那件事的后半段。
+        _ms_row = next(s for s in d.store.by_state(mod.OCCUPYING_STATES)
+                       if (s.get("service_plugin") or "").startswith(
+                           _ms_cs.id + "@"))
+        d.store.update(_ms_row["session_id"],
+                       service_plugin="%s@9.9.9" % _ms_cs.id)
+        check("会话记的版本换成另一个之后，插件上限照样数得到它（两条都在）",
+              d.store.count_occupying(UID, _ms_cs.id) == 2,
+              str(d.store.count_occupying(UID, _ms_cs.id)))
+        _ms6 = quota_submit(5, CS)
+        check("于是站点升级插件之后这一格仍然拦得住（按版本数就放行了）",
+              (_ms6.get("error") or {}).get("kind") == "quota_active", str(_ms6))
+
+        # 反方向：插件那一格写得再小也放不开全局那一格。
+        # 此刻占着 3 条（2 个 cs + 1 个 sshd），把全局压到 2，再提交一条 sshd：
+        #   sshd 自己那一格（上限 1）也已经满了，所以这一条要挑一个还有余量的
+        #   插件才分得开 —— 把 cs 的上限临时抬到 5。
+        cfg.plugins[_ms_cs.id].max_sessions = 5
+        _ms7 = quota_submit(2, CS)
+        _ms7d = ((_ms7.get("error") or {}).get("detail") or "")
+        check("插件那一格还有余量，而全局那一格到了 → 全局那一格拦下它",
+              (_ms7.get("error") or {}).get("kind") == "quota_active"
+              and "本站上限" in _ms7d, str(_ms7))
+
+        # 从 nft 规则恢复出来的会话没有 `service_plugin`（规则里没有任何东西
+        #   能说明那个端口上跑的是哪个插件），所以它数不到任何一个插件头上。
+        #   这是 cluster/docs/CONFIGURATION.md〈max_sessions〉里写明的洞，不是
+        #   漏写：这一条钉住的是"它现在确实是这样"。改 recover_from_rules 那一列
+        #   （比如给它猜一个缺省）会让它红，而那正是要人先读文档再动的地方。
+        d.store.insert(
+            session_id=os.urandom(8).hex(), uid=UID, user="tester",
+            partition="debug", account="myaccount", cpus=0, mem="",
+            requested_time="?", job_id=9999, state=mod.ST_ENROLLED,
+            node="n1", node_ip="192.0.2.11", service_port=55888,
+            candidates="55888", auth_mode="password",
+            created_at=mod.now_ts(), enrolled_at=mod.now_ts(),
+            submitted_at=mod.now_ts(), trust="recovered",
+            note="recovered_from_rule")
+        check("恢复出来的那条（service_plugin 是 NULL）不计入任何插件，"
+              "但占着全局那一个名额",
+              d.store.count_occupying(UID, _ms_cs.id) == 2
+              and d.store.count_occupying(UID, _ms_ss.id) == 1
+              and d.store.count_occupying(UID) == 4,
+              "cs=%d sshd=%d 全部=%d"
+              % (d.store.count_occupying(UID, _ms_cs.id),
+                 d.store.count_occupying(UID, _ms_ss.id),
+                 d.store.count_occupying(UID)))
+    finally:
+        (cfg.plugins[_ms_cs.id].max_sessions,
+         cfg.plugins[_ms_ss.id].max_sessions,
+         cfg.plugins[_ms_ss.id].enabled,
+         cfg.max_sessions_per_user, _ms_store_old) = _ms_saved
+        d.store.close()
+        d.store = _ms_store_old
 
     # 「整个删掉」的可执行形式：那三个名字在守护进程源码里必须零命中。
     #   留着任何一处，下一个人就会以为那条路还在。

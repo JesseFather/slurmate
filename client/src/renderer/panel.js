@@ -2596,6 +2596,18 @@ function pluginBlock(p, pv) {
       + (p.defaultsGresText ? ` / ${p.defaultsGresText}` : '')
     : '默认资源由服务端定'));
 
+  // 站点给这个插件设的并发上限。与上面那句同一类事实（管理员设的政策，
+  //   用户改不了），所以并排只读地摆着，不进按钮的文案。
+  //
+  // 它不预告"你还能不能再开一个"：那要看用户此刻有几个会话，而那个数会变
+  //   （这一块只在站点对账、提交、连接那些时候重画）。报一个会过期的数比只说
+  //   上限更坏 —— 用户会照着它决定按不按。真按下去被拒时，服务端那句话里带着
+  //   当下的个数，那才是准的。
+  // 缺席（老守护进程报不出这一格）就不说：`null` 与"上限是 1"必须分得开。
+  if (typeof p.maxSessions === 'number') {
+    meta.append(el('span', null, `最多同时 ${p.maxSessions} 个会话`));
+  }
+
   // 本机开关。它能点，是因为"本机要不要"是用户自己的决定，与站点无关。
   const lab = document.createElement('label');
   lab.className = 'plug-toggle';

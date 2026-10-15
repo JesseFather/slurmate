@@ -365,3 +365,42 @@ test('内存那一格填了 0，回退到默认值，而且这件事必须说出
   assert.equal(r.data.resources.mem, '8G', '回退到默认值');
   assert.match(r.data.warning || '', /内存/, `替用户做的决定要说出来：${JSON.stringify(r.data)}`);
 });
+
+test('假站点也有「每个插件自己的上限」，它是与全局那一道分开的第二个闸', async () => {
+  // 真站点那一格是插件配置里的 `max_sessions`：把全局放开到 5、唯独把某一个
+  //   插件压在 1 上，是管理员做得到的组合（也正是这一格存在的理由）。
+  //   假站点不演它的话，界面上那一格数字永远只有一个值 ——
+  //   "每个插件一份"这件事在开发者模式里看不到，而开发者模式的全部价值就是
+  //   "演的是同一件事"。
+  const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-cap-'));
+  const b = new FakeBackend({ rpcLatencyMs: 0, jobsDir: () => root });
+  b._connected = true;
+  b._startJob = async () => {};
+  b.debugAddSitePlugin();                    // 站点上得先有这么个插件
+  b.maxActive = 5;                           // 全局放开，只有插件那一格拦得住
+  b.pluginMaxSessions.set('demo-service', 1);
+
+  const first = await b.rpc({ op: 'submit', service_kind: 'demo-service' });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const second = await b.rpc({ op: 'submit', service_kind: 'demo-service' });
+  assert.equal(second.ok, false, JSON.stringify(second));
+  assert.equal((second.error || {}).kind, 'quota_active', JSON.stringify(second.error));
+  // 拒绝里要点名【是哪个插件】。只说"已达本站上限"的话，一个全局写着 5、
+  //   插件写着 1 的站点上，用户会去结束别的插件的会话 —— 整个方向是错的。
+  assert.match((second.error || {}).detail || '', /上限是 1/,
+    `要说得出是哪一格拦的：${JSON.stringify(second.error)}`);
+
+  // 报出去的那个数与拦的那个数必须是同一个。分成两处解析就会漂，而漂了的
+  //   表现是"界面上写着 5、实际按 1 拦"。
+  const list = await b.rpc({ op: 'plugins' });
+  const rows = (list.data || {}).plugins || [];
+  const capped = rows.find((p) => p.name === 'demo-service');
+  assert.equal(capped.max_sessions, 1, JSON.stringify(capped));
+  // 而没写进那张表的跟随全局 —— 这一句与上面对起来才是完整的一格。
+  for (const p of rows) {
+    if (p.name !== 'demo-service') {
+      assert.equal(p.max_sessions, 5,
+        `${p.name} 没写进那张表，应当跟随全局：${JSON.stringify(p)}`);
+    }
+  }
+});

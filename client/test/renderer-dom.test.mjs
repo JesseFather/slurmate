@@ -1206,6 +1206,31 @@ test('连上之后才有两条边栏，而且它们是在状态条下面那一�
     '连上之后两条栏才出现');
 });
 
+test('插件块上的并发上限：站点报了就说，没说就一个字都不说', () => {
+  // 站点给这个插件设的会话上限（`maxSessions`，真站点那一格是插件配置里的
+  //   `max_sessions`）。它是管理员设的政策，与上面那句「默认 2 核 / 8G」同一类
+  //   —— 所以并排只读地摆着，不进按钮的文案。
+  //
+  // 而"站点没说"那一档是这一条的重点：补一个 1 的话，那会是一句编出来的政策，
+  //   而用户会拿它当本站的规定（老守护进程根本报不出这一格）。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  // 那一块里有两条 `.plug-meta`：上面那条是几格事实，最后那条是两颗删除。
+  //   这一条问的是前者。
+  const factsOf = (i) => childrenOf(h.byId.get('plugin-blocks').children[i])
+    .filter((x) => x.className === 'plug-meta')[0];
+  const wordsOf = (e) => childrenOf(e).map((x) => x.textContent).join(' ｜ ');
+
+  h.fn('renderPlugins')({ ...PV,
+    plugins: PV.plugins.map((p) => ({ ...p, maxSessions: 2 })) });
+  assert.match(wordsOf(factsOf(0)), /最多同时 2 个会话/,
+    `站点报了就要画出来：${wordsOf(factsOf(0))}`);
+
+  h.fn('renderPlugins')({ ...PV,
+    plugins: PV.plugins.map((p) => ({ ...p, maxSessions: null })) });
+  assert.doesNotMatch(wordsOf(factsOf(0)), /最多同时/,
+    `站点没说就一个字都不说：${wordsOf(factsOf(0))}`);
+});
+
 test('插件块上的「用哪一份数据」：三种取值各发各的，一个都不许合并', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },

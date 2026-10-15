@@ -4234,6 +4234,61 @@ test('三态纪律：老守护进程不报 can_submit，缺席，不是"否"', a
   }
 });
 
+test('并发上限那一格：站点报几就是几，而缺席不是「1」', async (t) => {
+  // 站点给每个插件设的会话上限（`max_sessions`）—— 与 `can_submit` 同一类：
+  //   它说的是站点这一侧的事实，客户端无从推导。主配置里那个全局值不在任何
+  //   应答里，所以"插件没写时是多少"客户端算不出来，只能由站点解析好报下来。
+  //
+  // 而它同样是三态：老守护进程不报这一格时，客户端【一个字都不说】。
+  //   补一个 1 的话，那会是一句编出来的政策，而用户会拿它当本站的规定。
+  t.after(async () => {
+    Module._load = origLoad;
+    await invoke('app:debug', 'reset');
+    await invoke('app:partitions');
+  });
+  await invoke('app:debug', 'reset');
+  await invoke('app:partitions');
+
+  const idx = require('../src/main/index.js');
+  const backend = idx._test.getBackend();
+
+  // 站点报了：假站点按 `maxActive` 报（真站点的缺省与它同值）。
+  backend.maxActive = 3;
+  try {
+    const r = await invoke('app:partitions');
+    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    assert.equal(cs.maxSessions, 3, '站点报几就是几');
+  } finally {
+    backend.maxActive = 1;
+  }
+
+  // 而某一个插件自己写了一个数：报出去的是它，别的插件不受影响。
+  backend.pluginMaxSessions.set('sshd', 2);
+  try {
+    const r = await invoke('app:partitions');
+    const by = Object.fromEntries(r.plugins.plugins.map((p) => [p.name, p]));
+    assert.equal(by.sshd.maxSessions, 2, '插件那一份写了就用它');
+    assert.equal(by['code-server'].maxSessions, 1, '没写的跟随全局');
+  } finally {
+    backend.pluginMaxSessions.delete('sshd');
+  }
+
+  // 老守护进程不报这一格：缺席 ≠ 1（三态，与上面那条 `can_submit` 同一条纪律）。
+  const origSite = backend._sitePlugins.bind(backend);
+  backend._sitePlugins = () => origSite().map((p) => {
+    const { max_sessions: _drop, ...rest } = p;
+    return rest;
+  });
+  try {
+    const r = await invoke('app:partitions');
+    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    assert.equal(cs.maxSessions, null,
+      '站点没说就是 null —— 界面据此什么都不画，而不是补一个 1');
+  } finally {
+    backend._sitePlugins = origSite;
+  }
+});
+
 test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
   t.after(() => { Module._load = origLoad; });
   const sshc = require('../../plugins/sshd/client/sshconfig.js');

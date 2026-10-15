@@ -1146,8 +1146,15 @@ def engines_problem(manifest, host_version):
     return ("unsatisfied", "%s（engines.slurmate 是插件自己声明的）" % why)
 
 
+# 每个插件那一份配置里认得的键。它与 `PluginSpec.conf_keys()` 一起构成白名单
+#   （插件自己声明的枚举键跟在后面，见那里）。
+#
+# `max_sessions` 与 `default_gpus` 一样只有站点这一侧有：清单里那一格
+#   （`contributes.concurrent`）答的是"插件的代码能不能同时处理两份"，那是一个
+#   关于代码的事实；"本站允许一个人同时开几份"是一个关于这台集群的事实
+#   （算力、端口、许可证），作者写不出来。
 PLUGIN_COMMON_KEYS = ("enabled", "default_cpus", "default_mem", "default_time",
-                      "default_gpus")
+                      "default_gpus", "max_sessions")
 
 MANIFEST_NAME = "plugin.json"
 # 血统表。与 MANIFEST_NAME 一样两侧都在（见 package_is_client_side）。
@@ -1401,6 +1408,20 @@ class PluginSpec(object):
           表现是"校验规则写了，但用户永远写不进去"。
         """
         return PLUGIN_COMMON_KEYS + ("bin",) + tuple(k for k, _c, _d in self.enum_keys)
+
+
+def plugin_max_sessions(pcfg, cfg):
+    """这个插件上每个用户最多几个会话（生效值）。
+
+    插件那一份没写这一格就跟随主配置的 `max_sessions_per_user`。解析只有
+      这一处：`op_plugins` 报出去的那个数与 `op_submit` 拦的那个数必须是同一
+      个，分成两处写就会漂，而漂了的表现是"界面上写着 2、实际按 1 拦"。
+
+    两个上限都要过，这一个不会放宽全局那一道（见 `op_submit`）。
+    """
+    if pcfg.max_sessions is not None:
+        return pcfg.max_sessions
+    return cfg.max_sessions_per_user
 
 
 def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
@@ -4917,6 +4938,38 @@ class PluginConfig(object):
             raw.get("enabled"), spec.default_enabled,
             "%s 的 enabled" % self.where)
 
+        # ── 并发上限：这个插件上每个用户最多几个会话 ──
+        #
+        # 不写就【跟随】主配置的 `max_sessions_per_user`（存成 None，取值只有
+        #   一处，见 `plugin_max_sessions()`）。跟随而不是写死一个数：管理员把
+        #   全局调到 2，是想让所有插件都能开到 2，而不是只让那些恰好没写过这一格
+        #   的插件开到 2。
+        #
+        # 它只是多出来的一道更窄的闸，不会放宽全局那一道：两个上限都要过。
+        #   所以这一格写得比全局大是允许的（它等于没说什么），而写得比全局小
+        #   正是它存在的理由（全局放开、唯独不让某一个插件多开）。
+        #
+        # 0 与负数在这里就拒绝，理由与 `validate()` 里那条
+        #   `max_sessions_per_user < 1` 是同一条：放过去的话，报错会是
+        #   "已经有 0 个会话占着位置（本站给这个插件的上限是 0）"，从那一句里
+        #   看不出根因在配置里。而"不想让人用这个插件"有自己的写法
+        #   （`enabled = no`），那不是这一格的事。
+        v = (raw.get("max_sessions") or "").strip()
+        if v:
+            try:
+                self.max_sessions = int(v)
+            except ValueError:
+                raise ValueError("%s 的 max_sessions 必须是整数，得到: %r"
+                                 % (self.where, v))
+            if self.max_sessions < 1:
+                raise ValueError(
+                    "%s 的 max_sessions = %d 不成立：0 会让这个插件一个人都"
+                    "开不了。想要「一个人只能开一个」就写 1；想让人用不了这个"
+                    "插件，写 enabled = no。"
+                    % (self.where, self.max_sessions))
+        else:
+            self.max_sessions = None
+
         # ── 默认资源（缺省 = 该插件代码里的内建值）──
         v = (raw.get("default_cpus") or "").strip()
         if v:
@@ -5772,8 +5825,19 @@ class Config(object):
         """启动时自检。任何一条不满足都拒绝启动，宁可不起，也不要带病运行。"""
         errors = []
         for k in self.unknown_keys:
-            errors.append("配置里有无法识别的键 %r（拼错了？本版只认：%s）"
-                          % (k, ", ".join(sorted(GLOBAL_KEYS))))
+            # 插件自己的键写在这里是很容易犯的一个错，而它有一个具体得多的出路
+            #   （`plugin_keys_problem` 那一头是同一件事的反方向）。最像的是新的
+            #   那一对：`max_sessions_per_user` 与 `max_sessions` 只差一个后缀，
+            #   一个是本站通用的、一个是某个插件的。只说"认不出这个键"的话，
+            #   管理员会去拼写里找问题，而真相是这一格没有写错，是放错了文件。
+            if k in PLUGIN_COMMON_KEYS or k == "bin":
+                errors.append(
+                    "配置里有 %r，它是插件自己的键，写在那个插件那一份配置里"
+                    "（`<配置路径>.d/<名字>.conf`）。主配置只放站点通用键。"
+                    % k)
+            else:
+                errors.append("配置里有无法识别的键 %r（拼错了？本版只认：%s）"
+                              % (k, ", ".join(sorted(GLOBAL_KEYS))))
         errors.extend(self.bad_sections)
         errors.extend(self.bad_plugin_keys)
         # 一个插件都没装、或一个都没开，都是合法的，那正是"外壳"的定义：
@@ -6056,17 +6120,42 @@ class Store(object):
                 used.add(int(s["service_port"]))
         return used
 
-    def count_occupying(self, uid):
+    def count_occupying(self, uid, plugin_id=None):
         """这个用户占着几个位置。
 
         它数的是"没走完的"（含「已提交、尚未登记」那一段），不只是"活跃的"，
           只数活跃的会在那个窗口里恒为 0，配额拦不住并发的第二个提交
           （账本 F14）。
+
+        `plugin_id` 给了就只数那一个插件的。判据是 `service_plugin` 那一列的
+          前缀（它记的是 `"<id>@<版本>"`）。
+
+        按 id 数，不按 `id@版本`：这一格管的是"这个插件上你同时能开几个"，
+          站点升级插件之后，旧版本那条会话仍然占着这个名额。按版本数的话，
+          一次升级会把所有人的上限当场放开一倍。
+
+        前缀用 `substr(…)=?` 而不是 `LIKE`：id 是 ULID（字符集里没有 `%` 与
+          `_`），但"它能匹配上什么"这件事不该靠一个关于字符集的推论来保证 ——
+          一个多出来的 `%` 就是一个静默失效的上限，而配置文件里明明写着它。
+
+        从 nft 规则恢复出来的那些会话（`trust='recovered'`）数不到任何一个
+          插件头上：`service_plugin` 是 NULL（规则里没有任何东西能说明那个端口上
+          跑的是哪个插件，见 `recover_from_rules`）。它们仍然占着【全局】那一个
+          名额，所以这不是一条绕过全局上限的路；但某个插件的上限在恢复之后确实
+          可能被多占。这是写在文档里的洞，不是漏写 —— 见
+          cluster/docs/CONFIGURATION.md 的〈max_sessions〉。
         """
         q = ",".join("?" * len(OCCUPYING_STATES))
-        cur = self.conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (%s)" % q,
-            (uid,) + OCCUPYING_STATES)
+        if plugin_id is None:
+            cur = self.conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (%s)" % q,
+                (uid,) + OCCUPYING_STATES)
+        else:
+            pre = plugin_id + "@"
+            cur = self.conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE uid=? AND state IN (%s)"
+                " AND substr(service_plugin, 1, ?) = ?" % q,
+                (uid,) + OCCUPYING_STATES + (len(pre), pre))
         return cur.fetchone()[0]
 
     # ── 写入 ────────────────────────────────────────────────────────────────
@@ -9335,6 +9424,11 @@ class Sessiond(object):
         `title` 的用途是兜底标签：客户端认得这个插件时用它自己的名字（那才
         对应它实际会做的事）；不认得时至少能显示"站点提供了一个叫 X 的东西"。
 
+        `max_sessions` 与 `can_submit` 同一类：它说的是本站这一侧的事实，客户端
+          无从推导（主配置那个全局值不在任何应答里），所以由本站解析成一个数发
+          下去。它是一条政策，不是"你还剩几个" —— 后者会变，由 `op_submit` 的
+          拒绝说，那时它带着当下的个数。
+
         顶层还有一个 `problems`（账本 F22）：那些没能加载的包与为什么。
           它与 `plugins` 是两件事，这里列的是能用的，那里说的是"另外还有些
           用不了的"。少了它，客户端看到的就是「本站没有这个插件」，而真相可能是
@@ -9374,6 +9468,21 @@ class Sessiond(object):
                 #   而"这个键整个不在"= 老守护进程（三态，与 `can_submit` 同一条）。
                 "defaults": {"cpus": p.default_cpus, "mem": p.default_mem,
                              "time": p.default_time, "gpus": p.default_gpus},
+                # ── 这个插件上每人最多几个会话（站点的政策）──
+                #
+                # 已经解析成一个数：插件那一份写了就用它，没写就是主配置的
+                #   `max_sessions_per_user`。客户端不自己算那一格，主配置那个值
+                #   不在任何应答里，它拿不到用来推的东西，而"报一个它推不出来的
+                #   数"与"让它推"之间没有第三条路（同 `can_submit`）。
+                #   解析只有一处：`plugin_max_sessions()`。
+                #
+                # 它是一个【政策】，与 `defaults` 同一类：管理员设的，客户端只读地
+                #   显示。用户能不能再开一个，还取决于他此刻有几个 —— 而那是会变的
+                #   东西，不进这个应答（这一格说的是"上限是几"，不是"你还剩几个"）。
+                #
+                # 老守护进程没有这一格（它是后加的）。缺席 = 站点没说，
+                #   不是 1（三态那条纪律）。
+                "max_sessions": plugin_max_sessions(p, self.cfg),
                 # ── 站点分发：这个插件作为一个包 ──
                 #
                 # 投递方式是一整份一次取走（`op_plugin_package`）；「本站
@@ -10270,6 +10379,30 @@ class Sessiond(object):
                              % (pcfg.title,
                                 "、".join(sorted(s.name for s in cfg.plugin_specs
                                                  if s.needs_job)) or "（无）"))
+
+        # ── 这个插件自己的上限 ──────────────────────────────────────────────
+        #
+        # 与上面那道全局的闸是两笔账，两个都要过。全局那个管"这个人总共占几个
+        #   位置"（本站在共享集群上的一道防线），这一个管"他在这个插件上占几个"
+        #   （管理员可以全局放开、唯独不让某一个插件多开）。合成一个数的话，
+        #   "不许一个人开两个 IDE"会被迫写成"谁也不许开第二个会话"。
+        #
+        # 放在这里而不是与全局那道并排：这一格要等到插件解析出来才知道是几，
+        #   而那要等 `enabled` / 有没有作业侧这几道先过（"本站没开放它"比
+        #   "你开得太多"更该先说 —— 前者用户改不了，后者他能自己解决）。
+        #
+        # 报的 code 与全局那道一样是 `4 quota_active`（两句话说的都是"你占的
+        #   位置到了上限，结束一个再开"），但说的是哪一档必须写在句子里：只说
+        #   "已达本站上限"的话，一个全局写着 5、插件写着 1 的站点上，用户会去
+        #   结束别的插件的会话，而那一整个方向是错的。
+        _limit = plugin_max_sessions(pcfg, cfg)
+        _held = self.store.count_occupying(uid, spec.id)
+        if _held >= _limit:
+            return self._err(4, "quota_active",
+                             "「%s」上已经有 %d 个会话占着位置"
+                             "（本站给这个插件的上限是 %d），排队中的也算。"
+                             "结束一个再开下一个。"
+                             % (pcfg.title, _held, _limit))
 
         # sshd 用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
         # 为什么必须丢掉注释：OpenSSH 公钥的注释里可以有逗号，而守护进程是用

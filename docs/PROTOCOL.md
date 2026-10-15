@@ -699,12 +699,14 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
               "can_submit": true,
               "defaults": {"cpus": 2, "mem": "8G", "time": "12:00:00",
                            "gpus": null},
+              "max_sessions": 2,
               "package": {"format": 2, "bytes": 19416, "digest": "…"}},
              {"id": "01BX5ZZKBKACTAV9WEVGEMMVRZ", "version": "1.0.0",
               "name": "relay", "title": "中转站", "enabled": false,
               "can_submit": false,
               "defaults": {"cpus": 1, "mem": "2G", "time": "12:00:00",
                            "gpus": {"name": "gpu", "type": null, "count": 1}},
+              "max_sessions": 1,
               "package": {"format": 2, "bytes": 40000, "digest": "…"}}],
  "enabled": ["ide"],
  "limits": {"file_bytes": 262144, "total_bytes": 1561905, "max_files": 256,
@@ -766,6 +768,19 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > （[PLUGIN-CONTAINER.md](../packer/docs/PLUGIN-CONTAINER.md) 的 A.3）。客户端收到
 > 字节之后会自己重算一遍再与它比，所以本站改客户端侧任何一个字节都拦得住。
 > 而"本站报的数"与"本站转发的字节"是分开的两件事。
+
+> `max_sessions` 是本站给这个插件设的并发上限：每个用户最多同时几个会话（排队中的
+> 也算）。它是一个已经解析好的数：插件那一份配置里写了就用它，没写就是主配置的
+> `max_sessions_per_user`。客户端不自己算那一格，主配置那个值不在任何应答里，它
+> 拿不到用来推的东西（同 `can_submit`）。
+
+> 它与 `defaults` 同一类：管理员设的政策，客户端只读地显示。它不预告"你还能不能再
+> 开一个"，因为那要看用户此刻有几个会话，而那是会变的东西。真超了的时候，拒绝里
+> （`4 quota_active`）带着当下的个数。
+
+> 老守护进程不报这一格。缺席 = 站点没说，不是 `1`（三态，与 `can_submit` 同一条
+> 规矩）。客户端不许给缺席的那一格补一个值：那会是一句编出来的政策，而用户会拿它当
+> 本站的规定。
 
 > `can_submit` = 「现在提交得出去吗」= `enabled` 且本站有它的作业侧实现。
 
@@ -1045,7 +1060,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
 | `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**（部署不完整，`plugins/` 里有而 `jobs/` 里没有对应那一份） |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
-| `4` | `quota_active` | **占着位置**的会话数已达 `max_sessions_per_user`（站点可配，见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)）。**排队中的也算** |
+| `4` | `quota_active` | **占着位置**的会话数已达上限。上限有两格，都在站点那一侧：全局的 `max_sessions_per_user`，以及**这个插件自己的** `max_sessions`（见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)）。**排队中的也算**。是哪一格拦的写在 `detail` 里 |
 | `4` | `no_account` | 该用户没有 Slurm association |
 | `4` | `no_partition` | association 不允许这个分区 |
 | `5` | `no_port` | 端口池暂时没有可用端口 |

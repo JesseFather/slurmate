@@ -106,6 +106,10 @@ export function buildPluginsView() {
     canSubmit: true,
     defaults: { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     defaultsGresText: null, runnable: true,
+    // 站点给这个插件设的会话上限。它画在那一行事实里（与「默认 2 核 / 8G」
+    //   并排），所以它也是那一行会不会被顶出去的一部分 —— 第一块给一个两位数，
+    //   那是这一格最宽的形状。
+    maxSessions: 2,
   }, o);
 
   return {
@@ -114,6 +118,7 @@ export function buildPluginsView() {
         title: '浏览器里的编辑器（一整个名字都很长的插件标题，用来撑宽那一行）',
         description: '这个插件的说明也可以很长，长到它在窄窗口里必须自己折行，'
           + '而不是把旁边那几格顶出去。',
+        maxSessions: 12,
       }),
       one({
         id: '01m4x3bpny0363sf5qmfw89zgt2', version: '2.0.0', name: 'sshd',

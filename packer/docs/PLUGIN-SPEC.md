@@ -447,12 +447,12 @@ origin）；`contributes.concurrent` 管的是另一件事（能不能同时开�
 > 同一个词两个意思，两边都会碰到这个词，所以各自限定。
 
 > 不设数量。`true` 就是"能"，开多少份都是同一个逻辑；上限由站点那一侧管
-> （`max_sessions_per_user`）。
+> （`max_sessions_per_user`，以及每个插件那一份配置里的 `max_sessions`）。
 
 > 范围要说清，否则这一格会被读大。它是本机的声明：基座在这台客户端上不会给出第二
-> 份。它不是"一个用户只有一份"这条规则 —— 全局那一层在站点
-> （`max_sessions_per_user`，见 [CONFIGURATION.md](../../cluster/docs/CONFIGURATION.md)），而那一格的
-> 缺省压在安全侧。
+> 份。它不是"一个用户只有一份"这条规则 —— 那一层在站点，两格都在那里
+> （全局的 `max_sessions_per_user` 与这个插件自己的 `max_sessions`，见
+> [CONFIGURATION.md](../../cluster/docs/CONFIGURATION.md)），而它们的缺省压在安全侧。
 
 > 两条合起来：一个没改配置的站点上，写了 `true` 也只能开一份。别把"我声明了能多开"
 > 读成"用户一定能多开"。反过来，想全局只允许一份也不靠这一格，站点配额自己就够。

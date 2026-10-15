@@ -324,6 +324,19 @@ class FakeBackend extends Backend {
      */
     this.maxActive = 1;
     /**
+     * 某个插件自己的会话上限（短名 → 数字），对应真站点上插件那一份配置里的
+     * `max_sessions`。没写进这张表的插件跟随 `maxActive`。
+     *
+     * 它是一张表而不是一个数：真站点上这一格是【每个插件一份】的，而
+     *   "全局放开、唯独不让某一个插件多开"正是这一格存在的理由 ——
+     *   一个数的话，开发者模式里那一档永远看不到。
+     *
+     * 与 `maxActive` 一样没有 `app:debug` 命令，由用例直接摆
+     *   （`getBackend().pluginMaxSessions.set(…)`）：它造的是"管理员在某一份
+     *   配置里写了个数"那个现场。
+     */
+    this.pluginMaxSessions = new Map();
+    /**
      * `scancel` 这一次会不会失败。默认不失败（正常的站点上它多半成功）。
      *
      * 这个开关存在的理由与 `maxActive` 一样：真守护进程会在取消失败时
@@ -689,6 +702,8 @@ class FakeBackend extends Backend {
       //   于是"这个站点给这个插件配了 4 核"在开发者模式里永远看不到。
       defaults: v.defaults || SITE_DEFAULTS,
       enabled: !this._siteDisabled.has(v.name),
+      // 这个插件上每人最多几个会话（见 `_maxSessionsOf`）。
+      max_sessions: this._maxSessionsOf(v.name),
       // 没有作业侧的插件提交不了 —— 与守护进程同一条判据（它数的是记录表里
       //   有没有 `job/start.sh`）。少这一格的话，假站点会放行一份真站点上根本
       //   提交不出去的东西，而失败出现在起会话那一步（"读不到那个片段"），
@@ -707,7 +722,13 @@ class FakeBackend extends Backend {
     //   打包版没有样例那棵树（基座两端都不带任何插件，那是对的），于是新装的
     //     客户端上假站点是空的 —— 一个插件都不装是合法状态，出路是去装一个。
     //     别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
-    return [...distributed, ...this._extraSitePlugins];
+    //
+    //   那几条调试用的假插件也过一遍 `_maxSessionsOf`：它们是在这张表还空着的
+    //     时候建的，记着的那个数是当时的值。不过这一遍的话，用例摆上去的上限只在
+    //     提交那一侧生效、而报出去的是另一个数 —— 那正是这一格会漂的样子。
+    return [...distributed, ...this._extraSitePlugins.map((p) => ({
+      ...p, max_sessions: this._maxSessionsOf(p.name),
+    }))];
   }
 
   /**
@@ -1062,6 +1083,9 @@ class FakeBackend extends Backend {
               id: p.id, name: p.name, version: p.version, title: p.title,
               enabled: p.enabled, can_submit: p.can_submit,
               defaults: { cpus: DEFAULTS.cpus, mem: DEFAULTS.mem },
+              // 这一档同样不发 `max_sessions`：v0.5 的守护进程没有这一格。
+              //   理由与上面 `defaults.time` 那一条逐字相同 —— 缺席这条路必须
+              //   有人走，照发就等于演了一个不存在的版本。
             })),
             enabled: this._sitePlugins().filter((p) => p.enabled).map((p) => p.name),
           });
@@ -1077,6 +1101,9 @@ class FakeBackend extends Backend {
             //   （`debugDefaultGpus` 改的就是它）。少了"每个插件一份"，那个
             //   开关改了也传不下去 —— 而真站点上它本来就是逐插件的。
             defaults: { ...p.defaults, gpus: this._defaultGpus },
+            // 这个插件上每人最多几个会话（真站点那一格写在插件那一份配置里，
+            //   见 `_sitePlugins`）。它是站点设的政策，客户端只读地显示。
+            max_sessions: p.max_sessions,
             // `noPackage` 的那几条不带 `package` 这个键（见 _sitePlugins）。
             //   用 `delete` 之外的办法（展开）是因为这里在造一个新对象：
             //   挑字段而不是 `...p` 是有意的，见上面那段"逐字段挑"。
@@ -1209,6 +1236,21 @@ class FakeBackend extends Backend {
   /** 还占着位置的会话（与守护进程的 `OCCUPYING_STATES` 同一个集合）。 */
   _occupying() {
     return this._sessions.filter((s) => !['released', 'rejected', 'expired'].includes(s.state));
+  }
+
+  /**
+   * 这个插件上每人最多几个会话（真站点那一格是插件配置里的 `max_sessions`）。
+   *
+   * 没写进 `pluginMaxSessions` 的跟随 `maxActive`（真站点那一侧同样：
+   *   插件那一份没写就跟随主配置的 `max_sessions_per_user`）。
+   *
+   * 解析只有这一处：`plugins` 应答里报出去的那个数与 `_submit` 拦的那个数
+   *   必须是同一个 —— 分成两处写就会漂，而漂了的表现是"界面上写着 2、
+   *   实际按 1 拦"（真守护进程那一侧是 `plugin_max_sessions()`，同一条纪律）。
+   */
+  _maxSessionsOf(name) {
+    return this.pluginMaxSessions.has(name)
+      ? this.pluginMaxSessions.get(name) : this.maxActive;
   }
 
   /** 按 session_id 找。找不到返回 null（调用方一律回 `not_found`）。 */
@@ -1632,6 +1674,26 @@ class FakeBackend extends Backend {
       return err(4, 'quota_active',
         `已经有 ${occ.length} 个会话占着位置（本站上限 ${this.maxActive}），`
         + '排队中的也算。结束一个再开下一个。');
+    }
+    // 这个插件自己的上限（真站点那一格是插件配置里的 `max_sessions`：没写就
+    //   跟随全局，见 `_sitePlugins`）。两个上限都要过，与真站点同一条纪律。
+    //
+    // 放在全局那一道之后：真站点也是这个先后（全局那道在解析出插件之前就判了），
+    //   而"两处都到了"时报全局那一句是对的 —— 它更宽，也更该先说。
+    //
+    // 按 `service_plugin` 的 id 前缀数（不是整个 `id@版本`）：站点升级插件之后，
+    //   旧版本那条会话仍然占着这个名额。与真守护进程的 `count_occupying` 同一口径，
+    //   包括它的那一处空白：恢复出来的会话没有 `service_plugin`，数不到任何插件头上。
+    const cap = this._maxSessionsOf(sitePlugin.name);
+    const held = occ.filter((s) => {
+      const ref = typeof s.service_plugin === 'string' ? s.service_plugin : '';
+      const at = ref.lastIndexOf('@');
+      return at > 0 && ref.slice(0, at) === sitePlugin.id;
+    }).length;
+    if (held >= cap) {
+      return err(4, 'quota_active',
+        `「${sitePlugin.title}」上已经有 ${held} 个会话占着位置`
+        + `（本站给这个插件的上限是 ${cap}），排队中的也算。结束一个再开下一个。`);
     }
 
     // 显式指定了分区 → 必须校验权限（fail-closed）；
