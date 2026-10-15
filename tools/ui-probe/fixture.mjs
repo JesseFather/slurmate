@@ -133,6 +133,11 @@ export function buildPluginsView() {
     ],
     sitePlugins: { plugins: [], problems: [] },
     siteKnown: true,
+    // 站点那一块：两个能力位都开着，于是每一块插件上都会多画一颗「从站点撤掉」、
+    //   站点那一栏里会多画一颗「安装插件…」—— 两颗都是要量的东西（按钮与它
+    //   上面那一行文字会不会伸出容器）。
+    site: { label: '本站', canInstall: true, canUninstall: true,
+      supported: true, reason: null, error: null, versions: [], strays: [], failed: [] },
     partitions: [],
     dev: true,
   };

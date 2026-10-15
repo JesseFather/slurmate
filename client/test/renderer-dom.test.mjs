@@ -740,6 +740,80 @@ test('「安装插件…」只在假站点上画，而点它走的就是那条 I
     /装完的站点/, '装完返回的那份视图要当场画上去');
 });
 
+test('插件那一块上两颗删除：删本机那份两端都有，撤站点那颗只在假站点上',
+  async () => {
+    // 用户 2026-10-15 报的：「插件界面没有删除某个插件的选项，我现在无法删掉在
+    //   开发者模式中安装的插件」。而它们是两件事，各有各的入口：
+    //     · 删掉本机那一份（§5.3，撤回同意）—— 两端都有，站点那一侧不受影响；
+    //     · 从站点撤掉（管理员在真站点上做的事）—— 只在假站点上，
+    //       而它不动本机那一份。
+    //   这一条把"两颗都在、各自绑对了路"钉在画出来的东西上。
+    const h = bindAll({ connections: [], workspaces: [], activeConnectionId: null });
+    h.run('window.__drop = []; window.__uninstall = []; window.__result = { ok: true };'
+      + 'window.slurmate.dropPluginVersion = (id, version) => {'
+      + '  window.__drop.push([id, version]); return Promise.resolve(window.__result); };'
+      + 'window.slurmate.uninstallSitePlugin = (id, version) => {'
+      + '  window.__uninstall.push([id, version]); return Promise.resolve(window.__result); };');
+
+    // 一块最简的插件（字段照 `pluginsView()` 给的那一份，一个不少）——
+    //   `ports: 0` 不画"用哪一份数据"那一格，`runnable: false` 不画高级选项。
+    const P = { id: '01M2JKM1M1M1M1M1M1M1M1M1M7', version: '1.0.0', name: 'demo-box',
+      title: '示例盒子', description: '', hasClientCode: true,
+      surface: { kind: 'web', path: '/' }, ports: 0, group: null,
+      siteVersion: '1.0.0', siteEnabled: true, siteKnown: true, locallyEnabled: true,
+      canSubmit: true, defaults: { cpus: 2, mem: '8G', time: '12:00:00' },
+      defaultsGresText: null, runnable: false };
+
+    // 那两颗按钮长在最后一块 `.plug-meta` 里（这一块自己的，不是上面那几格）。
+    const lastRow = (root) => childrenOf(root).filter((x) => x.className === 'plug-meta').pop();
+    const btn = (root, text) => childrenOf(lastRow(root))
+      .find((x) => x.tagName === 'BUTTON' && x._text === text);
+    const armedIn = (root) => childrenOf(lastRow(root)).find((x) => x.className === 'armed');
+    const draw = (site) => h.fn('pluginBlock')(P, { site });
+
+    // ① 假站点：两颗都在
+    const d1 = draw({ label: '本站', canUninstall: true, versions: [], strays: [] });
+    assert.ok(btn(d1, '删掉本机这一份'), '客户端那一侧的删除在假站点上要有');
+    assert.ok(btn(d1, '从站点撤掉'), '站点那一侧的撤在假站点上要有');
+
+    // ② 真站点（能力位缺席）：只剩「删掉本机这一份」——
+    //    客户端那一侧的删除两端都有（那是用户说的"删掉某个插件"），
+    //    而站点那一侧的撤是管理员的事，界面上不该有。
+    const d2 = draw({ label: '本站', versions: [], strays: [] });
+    assert.ok(btn(d2, '删掉本机这一份'), '真站点上也必须能删掉本机那一份');
+    assert.equal(btn(d2, '从站点撤掉'), undefined,
+      '真站点上不许有「从站点撤掉」—— 它是主进程给的能力位说了算的，界面不猜');
+
+    // ③ 各自走各自那条 IPC，而且都走两段式：第一次点只摆出确认，一个请求都不发
+    await btn(d1, '删掉本机这一份').onclick();
+    assert.equal(h.run('window.__drop.length'), 0, '第一次点不许发请求');
+    assert.ok(armedIn(d1), '第一次点要摆出那一行确认');
+    assert.match(childrenOf(armedIn(d1)).map((x) => x._text || '').join(''),
+      /站点上那一份不受影响/, '确认那一行要说清站点那一边不受影响');
+    await childrenOf(armedIn(d1))
+      .find((x) => x.tagName === 'BUTTON' && x._text === '删掉').onclick();
+    assert.equal(h.run('JSON.stringify(window.__drop)'),
+      JSON.stringify([[P.id, P.version]]), '第二点要带着 id 与版本走 `dropPluginVersion`');
+    assert.equal(h.run('window.__uninstall.length'), 0, '……而它不该走到站点那条路上');
+
+    await btn(d1, '从站点撤掉').onclick();
+    assert.equal(h.run('window.__uninstall.length'), 0, '第一次点不许发请求');
+    assert.match(childrenOf(armedIn(d1)).map((x) => x._text || '').join(''),
+      /本机装着的那一份不受影响/, '确认那一行要说清本机那一边不受影响');
+    await childrenOf(armedIn(d1))
+      .find((x) => x.tagName === 'BUTTON' && x._text === '撤掉').onclick();
+    assert.equal(h.run('JSON.stringify(window.__uninstall)'),
+      JSON.stringify([[P.id, P.version]]), '第二点要带着 id 与版本走 `uninstallSitePlugin`');
+    assert.equal(h.run('window.__drop.length'), 1, '……而它不该多删一次本机那一份');
+
+    // ④ 「取消」回到原样，什么都不发
+    await btn(d2, '删掉本机这一份').onclick();
+    childrenOf(armedIn(d2)).find((x) => x.tagName === 'BUTTON' && x._text === '取消').onclick();
+    assert.equal(h.run('window.__drop.length'), 1, '取消不发请求');
+    assert.equal(armedIn(d2), undefined, '取消之后那一行要收掉');
+    assert.ok(btn(d2, '删掉本机这一份'), '原来那颗按钮要回来');
+  });
+
 test('「端口被占」那一行是三选一：三颗都当场生效，而且它不是失败', async () => {
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES },

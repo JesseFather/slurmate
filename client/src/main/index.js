@@ -1348,6 +1348,16 @@ function pluginsView() {
        *   是管理员的事（`slurmate plugin install`），客户端这一侧没有那条路。
        */
       canInstall: Boolean(backend && backend.kind === KIND.FAKE),
+      /**
+       * 这个站点能不能撤掉插件（站点那一侧的撤，与「删掉本机这一份」不是一件事）
+       *   —— 与上面那一格同一条界线、同一份理由。
+       *
+       * 它只决定界面画不画那颗按钮（`app:uninstallSitePlugin` 那道闸门才是判据）。
+       *   而"撤得掉哪一个"不在这里判：开发样例那一棵在仓库里，撤它是改仓库 ——
+       *   那件事只有假后端知道（它扫那两处目录），所以判据在它那边，
+       *   界面照它回来的话说话。
+       */
+      canUninstall: Boolean(backend && backend.kind === KIND.FAKE),
       // 连接期那次版本判定（见 applyVersionGate）。界面用它把 `site_too_new`
       // 那一句说准 —— 那是唯一一处界面的说法取决于握手结论的地方，理由见
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
@@ -2482,6 +2492,30 @@ function livePartitions() {
  * 它够不着的那一格：会话记录已经收了（`occupied` 为假）而它的插件进程还
  *   活着 —— 今天不存在（`stopAllSessions` 之后紧接着就是 `app.exit(0)`）。
  */
+/**
+ * 此刻有活会话落在上面的那些插件：`插件 id → [槽位, …]`。
+ *
+ * 它是 `livePartitions()` / `liveDataDirs()` 那一族的第三个成员，判据同样与它们
+ *   不同：那两个护的是数据（分区目录、数据目录），这一个护的是代码 ——
+ *   插件那一份客户端代码被删掉之后，`registry.reload()` 会让一条正在跑的会话
+ *   脚下的插件从注册表里消失。
+ *
+ * 只认"还活着"的那些（判据与 `liveSpaceIds()` 同一个 `occupied`）：已经走到终态的
+ *   会话记录还留在表里（界面要显示"已结束"），而它不再占着那个插件。
+ *
+ * 认不出的服务（`rec.plugin` 为空）跳过：它没有插件，也就无所谓"哪一个插件在跑"。
+ */
+function livePlugins() {
+  const out = new Map();
+  for (const [slot, rec] of sessions) {
+    if (!occupied(slot) || !rec.plugin) continue;
+    const id = rec.plugin.id;
+    if (!out.has(id)) out.set(id, []);
+    out.get(id).push(slot);
+  }
+  return out;
+}
+
 function liveDataDirs() {
   const out = new Set();
   for (const rec of sessions.values()) {
@@ -5166,6 +5200,53 @@ function registerIpc() {
   });
 
   /**
+   * 从假站点上撤掉一个插件（开发者模式专有）—— 与上面那颗「安装插件…」对称，
+   * 而它做的是站点那一侧的事：管理员在真站点上敲的那条
+   * `slurmate plugin uninstall <id>`，在开发者模式里就是这一颗。
+   *
+   * 它一个字都不动本机池里那一份，这不是遗漏，是这条路的定义：站点上有没有那一棵
+   *   树，与本机装没装它，是两件事（`site-plugins.js` 的决定 3 —— 站点不报一个
+   *   插件，不构成删掉本机那一份的理由，它随时可能再打开）。真站点上管理员撤掉
+   *   之后，本机那一份照样留着、照样能用；这里必须一模一样，否则这个假站点演的
+   *   就是另一件事。
+   *
+   * 界面上那颗「删掉本机这一份」是另一颗按钮，走 `app:dropPluginVersion`
+   *   （两端都有），两件事各有各的入口。
+   *
+   * 权威闸门在这一侧，判据是后端种类（与装那一侧逐字同一条理由）：真站点上撤
+   *   插件是管理员的事，客户端这一侧不是"藏起来了"，是真做不到 —— 那是集群上的
+   *   一个目录，而客户端连的是 SSH 上的一个守护进程。
+   *
+   * 不判"有没有会话在跑"：它删的是站点上那一棵，而会话用的是本机那一份。
+   *   那道守卫在 `app:dropPluginVersion` 上，因为那一条才真的会抽掉脚下的代码。
+   */
+  send('app:uninstallSitePlugin', async (id, version) => {
+    if (!backend || backend.kind !== KIND.FAKE) {
+      return { ok: false, code: 'not_fake',
+               error: '只有开发者模式那个假站点上才撤得掉插件。真站点的插件由'
+                 + '管理员在集群上用 `slurmate plugin uninstall` 撤。' };
+    }
+    if (typeof id !== 'string' || typeof version !== 'string' || !id || !version) {
+      return { ok: false, error: 'id 与版本都必须是字符串。' };
+    }
+    const out = backend.uninstallPlugins([`${id}@${version}`]);
+    if (!out.ok) {
+      win.pushNotice('error', out.error);
+      return { ok: false, code: out.code, error: out.error };
+    }
+
+    const title = (out.removed[0] && out.removed[0].title) || id;
+    // 那句话必须说清"本机那一份还在"：不说的话，用户看到那一块还在界面上，
+    //   会以为撤掉没生效。而它确实还在 —— 撤的是站点上那一棵。
+    win.pushNotice('info', `已经从假站点上撤掉「${title}」。`
+      + '本机装着的那一份还在，仍然可用。');
+    // 撤掉之后不对账：站点不报它不构成删除理由（决定 3），本机那一份本来就该
+    //   留着。下一次对账时站点那一格会如实变成"未启用"。
+    return { ok: true, removed: out.removed, problems: out.problems || [],
+             plugins: pluginsView() };
+  });
+
+  /**
    * 同意一个待分发的插件。
    *
    * 落点是有讲究的：下载后、暂存里验完、`rename` 之前。见 site-plugins.js。
@@ -5277,10 +5358,14 @@ function registerIpc() {
   /**
    * 删掉本机池里的一个版本 —— §5.3「删掉本机那一份 = 撤回同意」。
    *
-   * 界面上这个按钮挂在没被加载的那些上面（见 pluginsView 的 `inert`）。
-   *   那些是"池里有一份、而台账对不上"的站点插件，它们没有"同意"的入口 ——
-   *   因为站点此刻没有在报它们。所以对它们来说，"不要了"是唯一可做的动作，而
-   *   在此之前连这个动作都没有：界面上一片空白。
+   * 它是客户端这一侧唯一那条删除，两端都有（真站点、假站点一样）：删掉之后本机
+   *   就没有它了，而站点那一边不受影响 —— 下一次对账（连上，或者点「重新同步」）
+   *   站点还在分发它，于是重新下来、重新过一遍同意闸。那正是设计里那条路：
+   *   删除是一个没说出口的决定，而对账不认识它。
+   *
+   * 两个入口画它：插件那一列里的每一块，以及「本机有 N 个插件没有被加载」
+   *   那一块（见 panel.js）。后者是它从前唯一的入口 —— 那一档里的插件没有别的
+   *   地方可去，而在那之前"池里有一份、台账对不上"在界面上是一片空白。
    *
    * 删完还要 `forgetPlugin`：台账里那条（如果有）一并消失。不删的话，下次对账
    *   会按"摘要与台账相符"静默装回来、一个字都不问 —— 而那正是 §5.3 要防的
@@ -5289,6 +5374,17 @@ function registerIpc() {
   send('app:dropPluginVersion', async (id, version) => {
     if (typeof id !== 'string' || typeof version !== 'string') {
       return { ok: false, error: 'id 与版本都必须是字符串。' };
+    }
+    // 有会话在跑就先拦住：它删的是本机那一份代码，而 `registry.reload()` 之后
+    //   那个插件就从注册表里消失了 —— 一条跑着的会话脚下会空掉。
+    //   这道守卫从前不必需（那颗按钮只画在"没有被加载"的那一档上，而有会话跑着的
+    //   插件一定是加载着的）；现在每一块插件上都有它，于是这一格成了必经之路。
+    //   与 `app:deletePluginData` 那条守卫同一条理由：那种动作要先问过用户，
+    //   而这里问不出一个有意义的"要不要"，所以给的是出路 —— 先把会话结束掉。
+    const busy = livePlugins().get(id);
+    if (busy && busy.length) {
+      return { ok: false, code: 'in_use',
+               error: '这个插件还有会话在跑，先把它结束掉再来删。' };
     }
     const d = sitePluginSync.dropPooledVersion(sitePoolDir(), id, version);
     if (!d.ok) { win.pushNotice('error', d.error); return { ok: false, error: d.error }; }

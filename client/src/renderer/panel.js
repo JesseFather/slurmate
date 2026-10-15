@@ -1606,7 +1606,9 @@ function renderPlugins(pv) {
   if (!list.length) box.append(emptyPool(pv));
 
   for (const p of list) {
-    box.append(pluginBlock(p));
+    // 把整个视图传下去（不是只传 `p.site`）：那一块要的东西是"这个站点上能不能
+    //   撤插件"（`pv.site.canUninstall`，主进程给的能力位），而 `p` 里没有它。
+    box.append(pluginBlock(p, pv));
   }
 
   // ── 池里的问题：被跳过的东西必须说出来 ──
@@ -2035,6 +2037,10 @@ function renderConsent(pv) {
  * 为什么不给"同意"按钮：这一块里的那些站点此刻没有在报它们，所以没有一个
  *   说得出口的"要不要装这一份"可问。能做而且该做的是一个出口 —— 删掉本机
  *   这一份（§5.3：删掉 = 撤回同意，于是下次对账重新问）。在此之前连那个都没有。
+ *
+ * 那一颗现在也画在插件那一列的每一块上（`pluginBlock`）—— 从前它只有这一个
+ *   入口，于是"我装的插件删不掉"在界面上没有出路。两个入口走的是同一个动词
+ *   （`dropPluginVersion`），措辞也逐字相同。
  */
 function renderInert(pv) {
   const box = $('plugin-inert');
@@ -2201,7 +2207,7 @@ function renderPluginData(d) {
       row.className = 'plug-meta';
       // 两段式（`armConfirm`）：这一份删了就没了 —— 浏览器里的布局/标签页/
       //   登录状态，以及插件自己写在磁盘上的东西（那个插件最可能放"重建不出来"
-      //   的文件的地方）。这是五处两段式之一，判据是代价，不是"不可逆"
+      //   的文件的地方）。这是六处两段式之一，判据是代价，不是"不可逆"
       //   （同一条规矩下，「重新生成密钥」是一下就走 —— 它要作废的是一把还没
       //   派上用场的公钥，而它旁边就写着"新公钥必须重新注册"）。
       const del = button('删掉这一份', null, 'ghost');
@@ -2542,7 +2548,7 @@ function askFork(wsName, others) {
   });
 }
 
-function pluginBlock(p) {
+function pluginBlock(p, pv) {
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
 
@@ -2656,7 +2662,60 @@ function pluginBlock(p) {
   // 交出去的是这一块那一份（`adv`），不是"界面上当前那份" —— 见 pluginAdv。
   btn.onclick = () => startWith(p.name, adv, btn);
   d.append(btn);
+
+  // ── 两颗删除：本机那一份，以及站点上那一棵 ──
+  //
+  // 它们是两件事，各有各的入口，而这不是实现细节，是设计：
+  //
+  //   · 「删掉本机这一份」删的是池里那一份，等于撤回同意（§5.3）。下一次对账
+  //     （连上、或者点「重新同步」）站点还在分发它，于是重新下来、重新问一遍。
+  //     这一颗两端都有 —— 真站点、假站点一模一样。
+  //   · 「从站点撤掉」是管理员在真站点上敲的那条 `slurmate plugin uninstall`，
+  //     只在假站点上存在（判据是主进程给的能力位，与「安装插件…」同一格）。
+  //     它不动本机那一份：站点上有没有那一棵树，与本机装没装它，是两件事。
+  //
+  // 两颗都走两段式：删本机那份等于撤回同意（下一次要重新问），而撤站点那份之后
+  //   "我其实只是想关掉它"没有退路 —— 关掉是左边那个「本机启用」开关。
+  //   这是六处两段式里的两处（同一块上并排，各自第一段）。
+  const row = document.createElement('div');
+  row.className = 'plug-meta';
+  const drop = button('删掉本机这一份', null, 'ghost');
+  drop.title = '删掉本机这一份，等于撤回同意：站点还在分发它时，下一次同步会重新'
+    + '下来、重新问你一次。站点上那一份不受影响。';
+  drop.onclick = () => armConfirm(drop, {
+    why: `删掉本机那一份「${p.title}」？站点上那一份不受影响，`
+      + '下一次同步会重新下来、重新问你一次。',
+    yes: '删掉',
+    run: () => dropPluginVersion(p.id, p.version),
+  });
+  row.append(drop);
+  if (pv && pv.site && pv.site.canUninstall) {
+    const off = button('从站点撤掉', null, 'ghost');
+    off.title = '从这台假站点上删掉这个插件。真站点上这一步是管理员在集群上做的'
+      + '（`slurmate plugin uninstall`）。本机已经装着的那一份不受影响。';
+    off.onclick = () => armConfirm(off, {
+      why: `从假站点上删掉「${p.title}」？本机装着的那一份不受影响。`,
+      yes: '撤掉',
+      run: () => dropSitePlugin(p),
+    });
+    row.append(off);
+  }
+  d.append(row);
   return d;
+}
+
+/**
+ * 从假站点上撤掉一个插件（开发者模式专有，站点那一侧的事）。
+ *
+ * 那个"问一句"在调用点（`pluginBlock` 里那颗按钮上的 `armConfirm`），不在这里
+ *   —— 与 `dropPluginData` 同一条形状：这个函数可以被任何调用点直接用而不会弹框。
+ *
+ * 成功那条不出提示：主进程已经推了一条。失败要说 —— 那时它只回了一个返回值。
+ */
+async function dropSitePlugin(p) {
+  const r = await window.slurmate.uninstallSitePlugin(p.id, p.version);
+  if (r && r.plugins) renderPlugins(r.plugins);
+  if (!r || !r.ok) notice('error', (r && r.error) || '未能把它从假站点上撤掉。');
 }
 
 function issueBox(kind, head, body) {

@@ -333,6 +333,27 @@ test('「安装插件…」在真站点上是一条不存在的路 —— 而闸
     assert.equal(opened, 0, '拒了就不该弹文件选择器 —— 让用户选择完再说"不行"是最坏的那种');
   });
 
+test('「从站点撤掉」在真站点上同样是一条不存在的路', async (t) => {
+  // 与上面那一条逐字对称：假站点上装的上、也撤得掉，真站点上两件事都是管理员
+  //   在集群上做的（`slurmate plugin install` / `uninstall`）。界面按能力位
+  //   （`site.canUninstall`）决定画不画，而闸门在主进程 —— 判据是后端种类。
+  t.after(() => { Module._load = origLoad; });
+  require('../src/main/index.js');
+  await new Promise((r) => setTimeout(r, 400));
+
+  const idx = require('../src/main/index.js');
+  assert.equal(idx._test.getBackend().kind, 'ssh', '前提：这个文件跑在真后端上');
+  // 能力位那一格在这里是 `null`（没连上就没有站点那一块），而界面画那一块的条件
+  //   正是 `pv.site && pv.site.canUninstall` —— 真站点上它进来时是 `false`
+  //   （判据在后端种类上），`null` 与它同归"不画"。假站点上它是 `true`，
+  //   由 `boot.test.mjs` 那条〈从假站点上撤掉一个插件…〉钉着。
+
+  const r = await invoke('app:uninstallSitePlugin', '01M2JKM1M1M1M1M1M1M1M1M1M7', '1.0.0');
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'not_fake');
+  assert.match(r.error, /管理员/, `要说清这条路归谁：${r.error}`);
+});
+
 test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"的自己收掉，认不出的不给删',
   async (t) => {
       // 这一条钉的是"认得出再也无法读取的自己收掉"。界面上那个

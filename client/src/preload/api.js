@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   //   存在（主进程按后端种类拒真站点 —— 那边的插件由管理员用
   //   `slurmate plugin install` 装）。见 panel.js 的 siteInstallButton。
   installSitePlugin: () => ipcRenderer.invoke('app:installSitePlugin'),
+  // 反方向：把装上去的那一个从假站点上撤掉（本机这一份跟着走）。同样只在开发者
+  //   模式里存在，拒真站点的那一句与上面逐字对称。见 panel.js 的 dropSitePlugin。
+  uninstallSitePlugin: (id, version) => ipcRenderer.invoke('app:uninstallSitePlugin', id, version),
 
   // ── 工作区 ──
   //

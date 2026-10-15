@@ -871,6 +871,68 @@ class FakeBackend extends Backend {
     return { ok: true, installed, unchanged };
   }
 
+  /**
+   * 从假站点上撤掉一棵插件树 —— 与真站点 `slurmate plugin uninstall <id>` 同形。
+   *
+   * 只能撤"装上去的"那一处（`_siteInstalledDir()`）。开发样例那一棵在仓库里，
+   *   它不是装上去的 —— 撤它等于删开发者的源码树，而那与这个假站点要演的那件事
+   *   （管理员在站点上装、卸）毫无关系。判据是那棵树住在哪个根下，不是它叫什么：
+   *   `_siteIndex()` 里每一格都带着自己的 `dir`，而两处目录是分开的。
+   *
+   * 删完当场重扫，与 `installPlugins` 收尾那一句对称：站点"立刻不报它"靠的就是
+   *   这一下。少了它，用户看到的是"撤掉了、而站点还在报它"，而那个症状指不回这里。
+   *
+   * 一次可以给多个键（与装那一侧同形），但要撤的是一棵树，不是一份包：
+   *   键是 `id@版本`，而树按 id 命名（一个 id 在站点上只留一份，见 installPlugins
+   *   里那条"同 id 拒装"）。版本只用来核对是同一棵。
+   *
+   * @param {string[]} keys `id@版本`
+   * @returns {{ok:true, removed:object[], problems:string[]}
+   *          |{ok:false, code:string, error:string}}
+   */
+  uninstallPlugins(keys) {
+    const list = Array.isArray(keys) ? keys : [];
+    if (!list.length) {
+      return { ok: false, code: 'nothing', error: '没有指定要撤掉哪一个插件。' };
+    }
+    const root = this._siteInstalledDir();
+    if (!root) {
+      return { ok: false, code: 'no_dir',
+               error: '无法确定插件数据的存放位置：客户端的数据目录还没定下来。' };
+    }
+    const index = this._siteIndex();
+    const removed = [];
+    const problems = [];
+    for (const key of list) {
+      const hit = index.get(key);
+      if (!hit) { problems.push(`${key}：假站点上没有这一份。`); continue; }
+      // 它住在哪一处：装上去的，还是开发样例。比的是父目录，不是名字前缀 ——
+      //   目录名两处用的是同一个（插件 id），拿名字判分不开。
+      if (path.resolve(path.dirname(hit.dir)) !== path.resolve(root)) {
+        problems.push(`${hit.title}：它是开发样例，不是装上去的（在 ${hit.dir}）。`
+          + '样例那一棵树在仓库里，撤它要改仓库。');
+        continue;
+      }
+      try {
+        fs.rmSync(hit.dir, { recursive: true, force: true });
+      } catch (e) {
+        problems.push(`${hit.title}：目录删除失败（${e.code || '未给出原因'}）。`);
+        continue;
+      }
+      // 与撤销一份插件数据同一个动作、同一句复核（`index.js` 的 `removeDirChecked`）：
+      //   Windows 上有句柄时 `rm` 会删一半然后抛，报成功而它还在的话，
+      //   站点下一轮照旧报它，而用户会以为自己撤过了。
+      if (fs.existsSync(hit.dir)) {
+        problems.push(`${hit.title}：目录删除失败（删掉之后又出现）。`);
+        continue;
+      }
+      removed.push({ id: hit.id, version: hit.version, title: hit.title, dir: hit.dir });
+    }
+    if (removed.length) this.forgetSiteIndex();
+    if (!removed.length) return { ok: false, code: 'rejected', error: problems.join('\n') };
+    return { ok: true, removed, problems };
+  }
+
   /** 见 backend.js 的接口注释：调用方问「有没有连上」，不该去猜后端内部的字段名。 */
   get connected() { return this._connected; }
 

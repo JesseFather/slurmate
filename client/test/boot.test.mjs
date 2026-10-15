@@ -3043,6 +3043,190 @@ test('往假站点上装一个 .splug：站点当场报它，而客户端走的�
     });
   });
 
+test('从假站点上撤掉一个插件：站点当场不报它了，而本机这一份留着',
+  async (t) => {
+    // 用户 2026-10-15 报的：「插件界面没有删除某个插件的选项，我现在无法删掉在
+    //   开发者模式中安装的插件」。这一条判的是站点那一侧的撤 ——
+    //   管理员在真站点上敲的那条 `slurmate plugin uninstall`，在开发者模式里就是
+    //   这一颗。它与客户端那一侧的删除是两件事（见下一条）。
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-uninst-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setDevSampleDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+      fs.rmSync(src, { recursive: true, force: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      assert.equal(idx._test.getPluginsView().site.canUninstall, true,
+        '假站点上那个能力位要是 true —— 界面按它画「从站点撤掉」');
+
+      // ── 现场：装一个上去、过同意闸，于是它真的可用（与上一条同一套动作）──
+      const tree = writePluginTree(path.join(tmp, 'tree'), {
+        id: '01M2JKM1M1M1M1M1M1M1M1M1M8', name: 'demo-box', title: '示例盒子' });
+      const pkg = path.join(tmp, 'demo-box.splug');
+      const want = buildSplug(tree, pkg);
+      assert.equal((await installSplug(t, [pkg])).ok, true, '夹具前提：装得上');
+      assert.equal((await invoke('app:consentPlugin', want.id, want.version)).ok, true,
+        '夹具前提：同意得了');
+      const pool = idx._test.getSitePoolDir();
+      const slot = poolTreeOf(pool, want.id, want.version);
+      const dest = path.join(idx._test.getSiteInstalledDir(), want.id);
+      assert.ok(idx._test.getRegistry().get(want.id, want.version) && fs.existsSync(dest),
+        '夹具前提：站点上与本机各有一份');
+
+      // ── 撤掉（站点那一侧）──
+      const r = await invoke('app:uninstallSitePlugin', want.id, want.version);
+      assert.equal(r.ok, true, `撤不掉：${JSON.stringify(r)}`);
+      assert.equal(fs.existsSync(dest), false, '站点上那一棵树要没了');
+      assert.equal(idx._test.getBackend()._sitePlugins().some((p) => p.id === want.id), false,
+        '而且站点当场就不报它了（这一条不重启才对）');
+
+      // 本机那一份一个字都不该动 —— 这是设计，不是遗漏：站点上有没有那一棵树，
+      //   与本机装没装它，是两件事（`site-plugins.js` 的决定 3）。真站点上管理员
+      //   撤掉之后，客户端这边也正是这个样子。
+      assert.equal(fs.existsSync(slot), true, '本机池里那一份要留着');
+      assert.ok(idx._test.getRegistry().get(want.id, want.version),
+        '它仍然加载着，也仍然能用');
+      assert.equal(idx._test.getPluginsView().plugins.some((p) => p.id === want.id), true,
+        '界面那一列里也还在（站点那一格会如实变成"未启用"）');
+      const config = require('../src/main/config.js');
+      const cfgNow = idx._test.getCfg();
+      assert.notEqual((cfgNow.trustedPlugins || {})[config.trustKey(want.id, want.version)],
+        undefined, '台账那条也不该动 —— 本机仍然认同这一份');
+
+      // ── 再对一次账：站点不报它，而"站点不报"不构成删除本机那一份的理由 ──
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      assert.equal(fs.existsSync(slot), true,
+        '对过账之后本机那一份仍然在（决定 3：站点不报一个插件，不构成删掉它的理由）');
+    });
+  });
+
+test('删掉本机那一份：本机没有它了，而站点还在分发它时下一次对账会重新问一次',
+  async (t) => {
+    // 这是客户端那一侧的删除（§5.3「删掉本机那一份 = 撤回同意」），两端都有
+    //   —— 真站点、假站点一模一样。删掉之后它不是"永久消失"：站点还在分发它，
+    //   于是下一次对账重新下来、重新过一遍同意闸。那正是最初设计的那条路。
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-uninst-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setDevSampleDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+      fs.rmSync(src, { recursive: true, force: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      const tree = writePluginTree(path.join(tmp, 'tree'), {
+        id: '01M2JKM1M1M1M1M1M1M1M1M1M8', name: 'demo-box', title: '示例盒子' });
+      const pkg = path.join(tmp, 'demo-box.splug');
+      const want = buildSplug(tree, pkg);
+      assert.equal((await installSplug(t, [pkg])).ok, true, '夹具前提：装得上');
+      assert.equal((await invoke('app:consentPlugin', want.id, want.version)).ok, true,
+        '夹具前提：同意得了');
+      const pool = idx._test.getSitePoolDir();
+      const slot = poolTreeOf(pool, want.id, want.version);
+      const dest = path.join(idx._test.getSiteInstalledDir(), want.id);
+      const landed = idx._test.getRegistry().get(want.id, want.version);
+
+      // ── 有会话在跑时先拦住 ──
+      //   它删的是本机那一份代码，而一条跑着的会话正用着它（`registry.reload()`
+      //   之后那个插件就从注册表里消失了）。这一条不起真会话：它判的是那道守卫
+      //   读的是哪张表，而"作业侧真的跑起来"由〈假站点真的把插件的作业侧跑起来〉
+      //   那条盖着。
+      const sessMod = require('../src/main/session.js');
+      const sessions = idx._test.getSessions();
+      sessions.set('slot-occupied',
+        { plugin: landed, controller: { state: sessMod.State.RUNNING } });
+      const busy = await invoke('app:dropPluginVersion', want.id, want.version);
+      sessions.delete('slot-occupied');
+      assert.equal(busy.ok, false, '有会话在跑就先拦住');
+      assert.equal(busy.code, 'in_use');
+      assert.equal(fs.existsSync(slot), true, '被拦住时本机那一份一个字都不许动');
+
+      // ── 删掉（客户端那一侧）──
+      const r = await invoke('app:dropPluginVersion', want.id, want.version);
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(fs.existsSync(slot), false, '本机池里那一份要没了');
+      // `registry.get()` 查不到时回 `null`（不是 `undefined`）。
+      assert.equal(idx._test.getRegistry().get(want.id, want.version), null, '注册表里也没了');
+      assert.equal(idx._test.getPluginsView().plugins.some((p) => p.id === want.id), false,
+        '界面那一列里也没了 —— 用户说的"无法删掉"就是这一格');
+      const config = require('../src/main/config.js');
+      const cfgNow = idx._test.getCfg();
+      assert.equal((cfgNow.trustedPlugins || {})[config.trustKey(want.id, want.version)],
+        undefined, '台账那条要清（§5.3：删掉本机那一份 = 撤回同意）');
+
+      // 而站点上那一棵一个字都不该动。
+      assert.equal(fs.existsSync(dest), true, '站点上那一棵不受影响 —— 删本机那份不是撤站点');
+      assert.equal(idx._test.getBackend()._sitePlugins().some((p) => p.id === want.id), true,
+        '站点照旧报它');
+
+      // ── 下一次对账：它重新取回来、重新进待同意 ──
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      const again = idx._test.getPendingConsent().find((p) => p.id === want.id);
+      assert.ok(again, '站点还在分发它，所以它重新回来了、重新进待同意 —— '
+        + '删除是撤回同意，不是"永远不要了"');
+      assert.equal(again.existing, false,
+        '而这一次是一份新取回来的草稿，不是"池里那份原地认领" —— 池里那份真的没了');
+      assert.equal(fs.existsSync(slot), false,
+        '同意之前它不进池子（同意闸的位置就在 rename 之前）');
+      assert.equal(idx._test.getPluginsView().plugins.some((p) => p.id === want.id), false,
+        '没同意之前它不进那一列（同意闸是必经之路）');
+    });
+  });
+
+test('撤不掉的那几种，每一种都说得出是哪一种', async (t) => {
+  const idx = require('../src/main/index.js');
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-uninst-'));
+  t.after(async () => {
+    Module._load = origLoad;
+    idx._test.setDevSampleDir(null);
+    cleanupSiteState(idx);
+    fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  await withSitePlugins([], async () => {
+    // 站点上从"什么都没有"开始，再放一棵开发样例进去。
+    //   顺序不能反（`emptyFakeSite` 自己断言站点报的是零个），而放进去之后要
+    //   重扫一次 —— 真机上那一步是重启。
+    await emptyFakeSite(idx, src);
+    const sampleId = '01M2JKM1M1M1M1M1M1M1M1M1M9';
+    writePluginTree(src, { id: sampleId, name: 'demo-sample', title: '样例盒子' });
+    idx._test.setDevSampleDir(src);
+    assert.equal(idx._test.getBackend()._sitePlugins().some((p) => p.id === sampleId), true,
+      '夹具前提：站点现在报的就是那一份开发样例');
+
+    // ① 开发样例撤不掉 —— 它在仓库里，撤它是改仓库。
+    const a = await invoke('app:uninstallSitePlugin', sampleId, '1.0.0');
+    assert.equal(a.ok, false);
+    assert.match(a.error, /开发样例/, `要说清它是哪一种：${a.error}`);
+    assert.equal(fs.existsSync(path.join(src, 'demo-sample')), true,
+      '被拒之后样例那一棵一个字都不许动 —— 那是开发者的源码树');
+
+    // ② 站点上没有这一份。
+    const b = await invoke('app:uninstallSitePlugin', '01M2JKM1M1M1M1M1M1M1M1M1MA', '1.0.0');
+    assert.equal(b.ok, false);
+    assert.match(b.error, /没有这一份/, `要说清是哪一种：${b.error}`);
+
+    // ③ 参数不是一个字符串。
+    const c = await invoke('app:uninstallSitePlugin', null, '1.0.0');
+    assert.equal(c.ok, false, 'id 不是一个字符串时要拒，而不是去拼一个路径');
+  });
+});
+
 test('无法安装的那几种，每一种都说得出是哪一种', async (t) => {
   const idx = require('../src/main/index.js');
   const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
