@@ -54,13 +54,31 @@
 #     绝不覆盖别人的文件。卸载路径同样逐项校验归属。
 #  5. 幂等：可反复运行。卸载只删自己的东西。
 #
-#  用法：
-#    sudo bash install-base.sh                     # 装基座
-#    sudo bash install-base.sh --check             # 只体检，不做任何改动
-#    sudo bash install-base.sh --dry-run           # 演练，不做任何改动
+#  用法（五个动词。单文件自解压包 `slurmate-site-<版本>.run` 把这五个原样
+#  转发到本脚本 —— 实现只有这一份）：
+#    sudo bash install-base.sh                     # 安装；装过基座时自动走修复（升级）
+#    sudo bash install-base.sh --check             # 体检：装之前，不做任何改动
+#    sudo bash install-base.sh --doctor            # 诊断：装之后，不做任何改动
+#    sudo bash install-base.sh --repair            # 修复：把该在的摆回去
 #    sudo bash install-base.sh --uninstall         # 卸载（保留状态数据）
+#    sudo bash install-base.sh --dry-run           # 演练，不做任何改动
 #    sudo bash install-base.sh --uninstall --purge-state
 #    sudo bash install-base.sh --require-baseline  # 前置基线缺失即中止（见下）
+#
+#  一次安装按顺序做三件事，不需要谁去记顺序：
+#    1. 检查：〈阶段 0〉的预检与〈阶段 1〉的快照（要装之前先证明这台机器可以装）；
+#    2. 安装：〈阶段 2〉到〈阶段 5〉（摆文件、启用并启动、非干扰验证）；
+#    3. 诊断：〈装完对账〉用与 `--doctor` 逐字同一份判据再问一遍"该在的都在不在"。
+#
+#  体检与诊断的分工：体检在一台【什么都没装】的机器上回答"能不能装"，它查的是
+#    环境与前置条件；诊断在一台【装过】的机器上回答"现在哪里不对"，它查的是
+#    文件、目录、单元、服务与守护进程自己的判断。两者都会跑守护进程的 `--check`
+#    —— 那是同一个程序问自己，不是第二份判据。
+#
+#  装与升级是同一条路，走哪一条由"这台机器上装过没有"决定：
+#    没装过 → 装；装过 → 按修复走（先对账、装完再对账，说清哪几样换掉了）。
+#    于是 `--repair` 剩下的职责只有一条：只对装过的机器动手。没装过的机器
+#    上它拒绝执行 —— 免得敲错一个动词变成一次静默的首次部署。
 #
 #  装完基座之后装插件（那是唯一的插件入口，本脚本不认识插件）：
 #    sudo slurmate plugin install --from /srv/slurmate-pkgs
@@ -120,6 +138,8 @@ while [[ $# -gt 0 ]]; do
     arg="$1"; shift
     case "$arg" in
         --check)             MODE="check" ;;
+        --doctor)            MODE="doctor" ;;
+        --repair)            MODE="repair" ;;
         --uninstall)         MODE="uninstall" ;;
         --dry-run)           DRYRUN=1 ;;
         --require-baseline)  REQUIRE_BASELINE=1 ;;
@@ -167,9 +187,10 @@ die()   { echo; echo "  [中止] $*" >&2; echo >&2; exit 1; }
 run()   { if [[ "$DRYRUN" -eq 1 ]]; then echo "  [演练] $*"; else "$@"; fi; }
 
 TS="$(date +%Y%m%d-%H%M%S)"
-# --check 是"零改动"模式，快照放临时目录即可，不要在 /root 下攒一堆目录
-if [[ "$MODE" == "check" ]]; then
-    BACKUP_DIR="/tmp/slurmate-check-${TS}"
+# --check 与 --doctor 都是"零改动"模式，快照放临时目录即可，不要在 /root 下攒一堆
+#   目录。--repair 要放 /root：它可能真的装东西，那一次备份是要留着的。
+if [[ "$MODE" == "check" || "$MODE" == "doctor" ]]; then
+    BACKUP_DIR="/tmp/slurmate-${MODE}-${TS}"
 else
     BACKUP_DIR="/root/slurmate-backup-${TS}"
 fi
@@ -550,27 +571,37 @@ ok "目标路径未被他人文件占用"
 _check_out="$("$PY" "$DAEMON_SRC" --check --config="$SRC_CONF" 2>&1)"
 _check_rc=$?
 _check_dump() { printf '%s\n' "$_check_out" | sed 's/^/        /' >&2; }
+# 下面那几处"必须先解决它"的东西，在诊断模式里是【诊断的对象】，不是中止的
+#   理由 —— 一台配置坏掉的机器正是最该把整份对账打完的地方。体检、安装、修复
+#   照旧中止：前一条路什么都不改（它的结论就是"能不能装"），后两条马上要改。
+_check_stop() {
+    _check_dump
+    if [[ "$MODE" == "doctor" ]]; then
+        warn "$1"
+        warn "  （诊断继续：下面会把这些逐条查完）"
+        return 0
+    fi
+    die "$1"
+}
 case "$_check_rc" in
     0)
         ok "自检通过（用的是 ${SRC_CONF}）" ;;
     2)
-        _check_dump
-        die "这一台机器缺少必需组件（见上，标着 ✗ 的那几条）。
+        _check_stop "这一台机器缺少必需组件（见上，标着 ✗ 的那几条）。
      装文件之前必须先解决它。本脚本的承诺是「不满足即中止，不做任何改动」。
      它问的是「这台机器上有没有 nft、有没有那八个 Slurm 命令」，
      与你要装什么版本的 Slurmate 无关。" ;;
     1)
         if [[ "$SRC_CONF" == "$CONF" ]]; then
-            _check_dump
-            die "已装的站点配置 ${CONF} 自检没通过（见上）。重复部署时它必须是
+            _check_stop "已装的站点配置 ${CONF} 自检没通过（见上）。重复部署时它必须是
      对的，部署中止，一个字节都没有改。改完重跑本脚本。"
-        fi
-        warn "示例配置 ${SRC_CONF} 的自检没通过，第一次部署时这是正常的："
-        warn "  它里面的 cluster_cidr 还是空的，而没有安全的默认值。（详细那一屏在"
-        warn "  〈阶段 3〉：那一次读的是刚落盘的站点配置，它才是门。）" ;;
+        else
+            warn "示例配置 ${SRC_CONF} 的自检没通过，第一次部署时这是正常的："
+            warn "  它里面的 cluster_cidr 还是空的，而没有安全的默认值。（详细那一屏在"
+            warn "  〈阶段 3〉：那一次读的是刚落盘的站点配置，它才是门。）"
+        fi ;;
     *)
-        _check_dump
-        die "自检无法运行（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
+        _check_stop "自检无法运行（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
      本身有问题，而此时正是最该停下来的时候。" ;;
 esac
 
@@ -610,6 +641,316 @@ else
 fi
 
 info "备份目录：${BACKUP_DIR}"
+
+# ==============================================================================
+#  对账：诊断与修复共用的一份判据
+# ==============================================================================
+#
+#  "该在的都在不在、内容与包内那一份是否相同"只写这一份：诊断拿它只读地报告，
+#    修复拿它选活干、装完再拿它验一遍。写成两份的话，迟早出现"诊断说这一件
+#    不同、修复去修另一件"这种两半互相矛盾的状态。
+#
+#  它只认识本脚本自己会装的那几个路径（上面〈路径〉那一节）—— 另起一份路径
+#    清单就是第二个写方，而两个写方可以各自漂开。
+#
+#  每一格失败后面跟一句"下一步"。只说不对、不说去哪儿看和敲哪条命令的诊断，
+#    等于把活儿原样丢回去。
+A_PASS=0; A_WARN=0; A_FAIL=0
+A_BAD=()
+_A_PRE_BAD=()
+a_ok()   { A_PASS=$((A_PASS+1)); echo "  [ OK ] $*"; }
+a_warn() { A_WARN=$((A_WARN+1)); A_BAD+=("$1"); echo "  [WARN] $1：$2"; }
+a_bad()  { A_FAIL=$((A_FAIL+1)); A_BAD+=("$1"); echo "  [FAIL] $1：$2"; }
+a_hint() { echo "         → $*"; }
+audit_reset() { A_PASS=0; A_WARN=0; A_FAIL=0; A_BAD=(); }
+
+# 文档与这一份包一起分发（`--extract` 解压看）。两种跑法（自解压包、仓库里
+#   直接跑）指的路径不同，所以基准目录只算这一次。
+DOC_DIR="${SRC_DIR}/docs"
+
+# 一件该在的文件：路径、模式、内容（`src` 传空 = 不比内容）。
+#
+#   内容比不了的两件都有理由：站点配置是管理员按本站改过的（比字节只会每次都
+#   报不同），systemd 单元是按本站的 readonly_paths 渲染出来的（与模板本来就
+#   不同）。它们只比存在与权限。
+audit_file() {
+    local name="$1" path="$2" mode="$3" src="$4" st perm h_here h_src
+    if [[ ! -e "$path" ]]; then
+        a_bad "$name" "未找到 ${path}"
+        a_hint "装回去：sudo bash ${SCRIPT_PATH} --repair"
+        return
+    fi
+    st="$(stat -c '%U:%G %a' "$path" 2>/dev/null || echo '?')"
+    perm="${st##* }"
+    if [[ "${st%% *}" != "root:root" || "$perm" != "$mode" ]]; then
+        a_bad "$name" "${path} 现在是 ${st}，该是 root:root ${mode}"
+        a_hint "改回去：sudo bash ${SCRIPT_PATH} --repair"
+        return
+    fi
+    if [[ -n "$src" ]]; then
+        h_here="$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+        h_src="$(sha256sum "$src" 2>/dev/null | awk '{print $1}')"
+        if [[ -z "$h_here" || "$h_here" != "$h_src" ]]; then
+            a_bad "$name" "${path} 的内容与包内那一份不同"
+            a_hint "改回包内那一份：sudo bash ${SCRIPT_PATH} --repair"
+            a_hint "（站点配置与状态数据不在被改的范围内）"
+            return
+        fi
+    fi
+    a_ok "$name  ${path}  root:root ${mode}"
+}
+
+# 一个该在的目录：路径与模式。
+audit_dir() {
+    local name="$1" path="$2" mode="$3" st perm
+    if [[ ! -d "$path" ]]; then
+        a_bad "$name" "未找到目录 ${path}"
+        a_hint "建回去：sudo bash ${SCRIPT_PATH} --repair"
+        return
+    fi
+    st="$(stat -c '%U:%G %a' "$path" 2>/dev/null || echo '?')"
+    perm="${st##* }"
+    if [[ "${st%% *}" != "root:root" || "$perm" != "$mode" ]]; then
+        a_bad "$name" "${path} 现在是 ${st}，该是 root:root ${mode}"
+        a_hint "改回去：sudo bash ${SCRIPT_PATH} --repair"
+        return
+    fi
+    a_ok "$name  ${path}  root:root ${mode}"
+}
+
+# 该看哪一份文档。都对得上时一个字都不说（说人话：没事就别占读者的眼睛）。
+audit_pointers() {
+    if [[ "$A_FAIL" -eq 0 && "$A_WARN" -eq 0 ]]; then
+        info "对账干净：没有发现需要处理的地方。"
+        return
+    fi
+    echo
+    echo "  该看哪一份（都在这份包里：sudo bash ${SCRIPT_PATH} --extract /tmp/slurmate-docs）"
+    echo "    文件、目录、权限        ${DOC_DIR}/DEPLOYMENT.md"
+    echo "    服务、会话、nft 规则    ${DOC_DIR}/TROUBLESHOOTING.md"
+    echo "    插件安装失败、无法分发  ${DOC_DIR}/PLUGIN-TROUBLESHOOTING.md"
+    echo "    配置键与取值            ${DOC_DIR}/CONFIGURATION.md"
+}
+
+# 装出问题的那几样，在两轮对账之间对一次名字 —— 修复的那句"修好了"只能这么
+#   说：不是"我装了所以应该好了"，是"同一份判据现在说它对上了"。
+audit_diff() {
+    local n fixed=() still=()
+    for n in "${_A_PRE_BAD[@]}"; do
+        if printf '%s\n' "${A_BAD[@]}" | grep -qxF -- "$n"; then
+            still+=("$n")
+        else
+            fixed+=("$n")
+        fi
+    done
+    local i
+    if [[ ${#fixed[@]} -gt 0 ]]; then
+        i="$(printf '%s、' "${fixed[@]}")"
+        ok "已修好：${i%?}"
+    fi
+    if [[ ${#still[@]} -gt 0 ]]; then
+        i="$(printf '%s、' "${still[@]}")"
+        bad "仍未修好：${i%?}"
+    fi
+    if [[ "$DRYRUN" -eq 1 && ${#fixed[@]} -gt 0 ]]; then
+        info "（本次是演练：上面报的不对，是因为什么都没有真的改。）"
+    fi
+}
+
+# 一遍完整的对账。`full` 连运行期那一半一起查，`static` 只查盘上的东西 ——
+#   修复后那一遍用 static：服务与 socket 刚在〈阶段 5〉查过，再查一遍只是把
+#   同一件事说两次。
+audit_installed() {
+    local how="${1:-full}" v_pkg="" v_inst="" out="" i=""
+
+    audit_reset
+    echo
+    echo "  一、装的是哪一份"
+    v_pkg="$("$PY" "$DAEMON_SRC" --version 2>/dev/null | head -1)"
+    if [[ -x "$DAEMON" ]]; then
+        v_inst="$("$DAEMON" --version 2>/dev/null | head -1)"
+    fi
+    if [[ -z "$v_inst" ]]; then
+        a_bad "版本" "已装的守护进程没有报出版本（${DAEMON} --version）"
+        a_hint "装这一份进去：sudo bash ${SCRIPT_PATH}"
+    elif [[ -n "$v_pkg" && "$v_inst" != "$v_pkg" ]]; then
+        a_warn "版本" "装着的是 ${v_inst}，这一份包里是 ${v_pkg}"
+        a_hint "对齐到这一份：sudo bash ${SCRIPT_PATH} --repair"
+    else
+        a_ok "版本 ${v_inst}（包内那一份也是它）"
+    fi
+
+    echo
+    echo "  二、该在的文件"
+    audit_file "守护进程"   "$DAEMON" 755 "${SRC_DIR}/slurmate-sessiond"
+    audit_file "命令行"     "$CLI"    755 "${SRC_DIR}/slurmate"
+    audit_file "比对器"     "${SHARE_DIR}/nft-compare.py" 644 "${SRC_DIR}/nft-compare.py"
+    audit_file "作业模板"   "${SHARE_DIR}/run.sbatch.template" 644 "${SRC_DIR}/run.sbatch"
+    audit_file "systemd 单元" "$UNIT" 644 ""
+    audit_file "站点配置"   "$CONF"   644 ""
+
+    echo
+    echo "  三、该在的目录"
+    audit_dir "共享目录"     "$SHARE_DIR" 755
+    audit_dir "配置目录"     "$CONF_DIR"  755
+    audit_dir "状态目录"     "$STATE_DIR" 700
+
+    echo
+    echo "  四、读得到的文件"
+    if [[ -r "$CONF" ]]; then
+        a_ok "站点配置可读（${CONF}）"
+    else
+        a_bad "站点配置" "读取失败（${CONF}）"
+        a_hint "看 ${DOC_DIR}/CONFIGURATION.md"
+    fi
+    if [[ -r "${SHARE_DIR}/run.sbatch.template" ]]; then
+        a_ok "作业模板可读（织作业脚本时要读它）"
+    else
+        a_bad "作业模板" "读取失败（${SHARE_DIR}/run.sbatch.template）"
+        a_hint "提交会话会失败在这里：sudo bash ${SCRIPT_PATH} --repair"
+    fi
+
+    if [[ "$how" != "full" ]]; then
+        echo
+        info "服务、socket 与 nft 那几项刚在〈阶段 5〉查过，这一遍不重复。"
+        echo
+        echo "  对账：通过 ${A_PASS}，警告 ${A_WARN}，失败 ${A_FAIL}"
+        return
+    fi
+
+    echo
+    echo "  五、运行期"
+    if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+        a_ok "开机自启：已启用"
+    else
+        a_warn "开机自启" "未启用（重启之后不会自己起来）"
+        a_hint "启用：systemctl enable ${SERVICE}（--repair 也会做这一件事）"
+    fi
+    if systemctl is-active --quiet "$SERVICE"; then
+        a_ok "服务运行中：${SERVICE}"
+    else
+        a_bad "服务" "未在运行"
+        a_hint "状态与最近日志：systemctl status ${SERVICE}；journalctl -u ${SERVICE} -n 30"
+        a_hint "看 ${DOC_DIR}/TROUBLESHOOTING.md 的〈第 0 步：先看这四个地方〉"
+    fi
+    if [[ -S "$SOCKET" ]]; then
+        a_ok "RPC socket 已就绪：${SOCKET}"
+    else
+        a_bad "RPC socket" "未创建（${SOCKET}）"
+        a_hint "守护进程没起来时不会有它：先按上面「服务」那一条查"
+    fi
+
+    # 守护进程自己那句话。判据都在它自己里面，这里只把答案转述出来 ——
+    #   在部署脚本里另写一份"规则数该等于会话数"，就是同一件事的第二个判据。
+    #
+    #   插件那一半也在这一屏里：守护进程的 `--check` 现读一遍插件目录、把问题
+    #     打出来（`cfg.plugin_problems`）。基座这一侧不去调插件专有的那个开关
+    #     —— 插件是独立项目，装、卸、对齐、体检各有自己的入口，那一条拆分
+    #     有用例钉着（见 cluster/test-sessiond-logic.py 的 19.13b）。
+    if [[ -x "$DAEMON" ]]; then
+        if out="$("$DAEMON" --check --config="$CONF" 2>&1)"; then
+            a_ok "配置自检：通过（${DAEMON} --check，插件那一半也在这一屏里）"
+        else
+            a_bad "配置自检" "未通过（${DAEMON} --check，退出码 $?）"
+            printf '%s\n' "$out" | sed 's/^/        /'
+            a_hint "看 ${DOC_DIR}/CONFIGURATION.md；与插件有关的那几条看"
+            a_hint "    ${DOC_DIR}/PLUGIN-TROUBLESHOOTING.md"
+        fi
+    fi
+    if [[ -S "$SOCKET" && -x "$CLI" ]]; then
+        # 规则数与会话数是否一致只有守护进程答得了（`doctor` 那个 op）。
+        #   这里读它的 JSON 结论，不读它画给人看的那一屏 —— 读文字是猜。
+        local _dj _consistent
+        _dj="$("$CLI" doctor --json 2>/dev/null)"
+        _consistent="$(printf '%s' "$_dj" | "$PY" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("?")
+else:
+    print(d.get("data", {}).get("consistent"))
+' 2>/dev/null)"
+        case "$_consistent" in
+            True)
+                a_ok "nft 规则与库一致（${CLI} doctor）" ;;
+            False)
+                a_bad "nft 规则与库" "不一致（${CLI} doctor 报 consistent = false）"
+                "$CLI" doctor 2>&1 | sed 's/^/        /'
+                a_hint "看 ${DOC_DIR}/TROUBLESHOOTING.md 的〈三、nft 规则消失〉" ;;
+            *)
+                a_warn "运行期诊断" "没有拿到结论（${CLI} doctor --json）"
+                a_hint "多半是守护进程没在跑；先按上面「服务」那一条查" ;;
+        esac
+    fi
+
+    echo
+    echo "  对账：通过 ${A_PASS}，警告 ${A_WARN}，失败 ${A_FAIL}"
+}
+
+# ── 这台机器上装过没有 ──────────────────────────────────────────────────────
+# 判据是"本系统的东西在不在这台机器上"，取四处任一：守护进程、命令行、站点配置、
+#   systemd 单元、状态目录。用它做两件事 —— 安装时决定走哪条路，修复时决定
+#   要不要拒绝。
+_ever=0
+for _p in "$DAEMON" "$CLI" "$CONF" "$UNIT" "$STATE_DIR"; do
+    [[ -e "$_p" ]] && _ever=1
+done
+
+# ── 装过就按修复走（升级也是修复）────────────────────────────────────────────
+#
+# 为什么把升级并进修复而不是另开一个动词：装与升级对这台机器做的动作是同一套
+#   —— 摆文件、渲染单元、重启服务、逐项验一遍。分两个动词就得回答"这次算哪一
+#   种"，而答案取决于装过没有，那正是这里已经知道的事。
+#
+# 并进来之后还多一件事：修复那条路会先对账、装完再对一次，于是"升级到底把哪
+#   几样换掉了"有一份看得见的账，而不是一句"已安装"。
+if [[ "$MODE" == "install" && "$_ever" -eq 1 ]]; then
+    _v_have="$("$DAEMON" --version 2>/dev/null | head -1)"
+    _v_this="$("$PY" "$DAEMON_SRC" --version 2>/dev/null | head -1)"
+    MODE="repair"
+    step "这一台机器上装过基座：按修复走（升级与修复是同一条路）"
+    info "装着的是 ${_v_have:-未知版本}，这一份是 ${_v_this:-这一版}。"
+    info "只增不改：${CONF} 与 ${STATE_DIR} 里的数据不动，正在跑的会话不断。"
+fi
+
+# ── 诊断（--doctor）：只读，一个字都不改 ────────────────────────────────────
+if [[ "$MODE" == "doctor" ]]; then
+    step "诊断（--doctor）：这台机器现在是什么状态"
+    info "只读模式：不装文件、不改配置、不动服务、不碰 nftables。"
+    audit_installed full
+    audit_pointers
+    echo
+    if [[ "$A_FAIL" -gt 0 ]]; then
+        echo "  有 ${A_FAIL} 项不对。修回去：sudo bash ${SCRIPT_PATH} --repair"
+        exit 1
+    fi
+    echo "  没有需要处理的问题。"
+    exit 0
+fi
+
+# ── 修复（--repair）：先对账，对不上才动手，动完再对一次 ────────────────────
+if [[ "$MODE" == "repair" ]]; then
+    # 没装过的机器上"修复"没有对象。拒绝而不是顺手装上去：那会把一次敲错的
+    #   动词变成一次静默的首次部署。
+    if [[ "$_ever" -eq 0 ]]; then
+        die "这台机器上没装过基座（${DAEMON} / ${CLI} / ${CONF} / ${UNIT} / ${STATE_DIR}
+     一个都不在），修复没有对象。要装就用不带参数的安装：
+         sudo bash ${SCRIPT_PATH}"
+    fi
+    step "修复前对账（--repair）：先看清哪几样不对"
+    audit_installed full
+    if [[ "$A_FAIL" -eq 0 && "$A_WARN" -eq 0 ]]; then
+        echo
+        ok "对账干净：文件、目录、单元、服务都对得上，一个字节都不改。"
+        info "（这一份包里的版本与装着的是同一个版本。要重装一遍：去掉 --repair。）"
+        exit 0
+    fi
+    _A_PRE_BAD=( "${A_BAD[@]}" )
+    echo
+    info "下面走一次安装（幂等、只增不改）：${CONF} 与 ${STATE_DIR} 里的数据都不动。"
+    info "要重装的是上面报的那几样，其余照旧。"
+fi
 
 # ==============================================================================
 step "阶段 1／6  快照（用于部署后的非干扰比对）"
@@ -1054,6 +1395,28 @@ else
 fi
 
 fi  # DRYRUN
+
+# ── 装完／修完，用同一份判据再问一遍 ────────────────────────────────────────
+# 这一遍只查盘上的东西（static）：服务、socket、nft 那几项刚在〈阶段 5〉查过，
+#   而"装好了"这句结论靠的是"同一份对账现在对得上了"，不是"我装过了"。
+if [[ "$MODE" == "repair" ]]; then
+    echo
+    step "修复后对账（--repair）：现在哪几样对上了"
+    audit_installed static
+    audit_diff
+    audit_pointers
+elif [[ "$MODE" == "install" ]]; then
+    echo
+    step "装完对账（--install）：该在的都在不在"
+    audit_installed static
+    audit_pointers
+    # 对账的失败要进总的退出码：装完仍不对时，这一条命令不能报成功。
+    #   （`a_bad` 记的是对账自己的计数，与安装那一路的 FAIL_N 分开 ——
+    #   这一行是把两份账接起来的那一处，只有这一处。）
+    if [[ "$A_FAIL" -gt 0 ]]; then
+        bad "装完之后对账仍有 ${A_FAIL} 项不对（见上）"
+    fi
+fi
 
 # ==============================================================================
 step "阶段 6／6  完成"

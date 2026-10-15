@@ -15,6 +15,14 @@
 
 ## 第 0 步：先看这四个地方
 
+站点那一侧的文件、目录、单元与服务不对时，先用诊断那条命令看一眼（只读）：
+
+```bash
+sudo bash slurmate-site-<版本>.run --doctor
+```
+
+它逐项对账并给出下一步；修回去用 `--repair`。下面是会话与客户端这一侧的四个地方。
+
 ```bash
 # 1. 守护进程日志与审计
 sudo journalctl -u slurmate-sessiond -n 200 --no-pager

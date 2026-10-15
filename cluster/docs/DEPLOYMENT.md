@@ -3,8 +3,9 @@
 本文分两部分：前置条件（每一条都注明「不满足会怎样失败」）和部署流程。
 前置条件全部从代码核实，不是经验之谈。
 
-部署脚本是 `cluster/install-base.sh`，在登录节点（控制节点）上以 root 运行。
-源码树里还有一份只读的自检脚本 `tools/check-cluster.sh`，建议在部署前先跑它。
+站点端交付的是一个文件 —— `slurmate-site-<版本>.run`。拷到登录节点（控制节点）
+上，用 root 跑它即可：它自带守护进程、命令行、作业模板、systemd 单元、只读自检
+脚本与这几份文档。
 
 ---
 
@@ -13,12 +14,13 @@
 ### 0. 建议先跑一次自检
 
 ```bash
-sudo bash tools/check-cluster.sh
+sudo bash slurmate-site-<版本>.run --check
 ```
 
-它把下面这些环境事实逐条查出来并打印，唯一的写操作是在 `/root` 下留一份 nft 规则
-快照和一份报告。它检查的正是那些「不满足也不会报错，只会在几小时后以奇怪的方式
-失败」的东西（`tools/check-cluster.sh`）。
+体检有两屏：第一屏跑包内的 `tools/check-cluster.sh`（下面这些环境事实），第二屏
+跑部署预检。两屏都只读，唯一的写操作是在 `/root` 下留一份 nft 规则快照和一份报告。
+第一屏查的正是那些「不满足也不会报错，只会在几小时后以奇怪的方式失败」的东西
+（`tools/check-cluster.sh`）。
 
 ### 1. 单一登录节点，且 nft 规则挂在它的 output 链上
 
@@ -285,17 +287,21 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 
 ## 第二部分：部署流程
 
-### 步骤 0：把源码放到 root 拥有的目录
+下面每条命令都写成自解压包的样子。它与仓库里的 `cluster/install-base.sh` 是同一份
+实现 —— 从源码树跑就把 `bash slurmate-site-<版本>.run` 换成
+`bash cluster/install-base.sh`，动词与开关逐字相同。
 
-部署脚本会以 root 身份安装并执行 `cluster/` 下的文件。若它们能被普通用户改写，
-等于把 root 权限交出去（`cluster/install-base.sh`）。判据是：每个源文件必须 root
-拥有，且组/其他不可写；目录同理。
+### 步骤 0：把这一份包拷到控制节点上
 
-源码不可信时脚本会自拷贝到 `/root/slurmate-src.XXXXXX`（源码位于 `/` 或 `/root`
-时改用 `/var/tmp`，避免把目录拷进自己里面）再重新执行
-（`cluster/install-base.sh`）。
+这一份包会以 root 身份安装并执行里面的文件。它自己先把包体解压到一个 root 专属的
+临时目录，再从那一个目录里跑安装器，所以源文件的拥有者与可写位天然是对的
+（`cluster/run-header.sh`、`cluster/install-base.sh`）。
 
-这条路是通的，但部署完记得清理 `/root/slurmate-src.*` —— 每次从非 root
+从源码树部署时另有一条自拷贝路径：源目录不属于 root、或者组/其他可写时，脚本先拷到
+`/root/slurmate-src.XXXXXX`（源码位于 `/` 或 `/root` 时改用 `/var/tmp`，避免把目录
+拷进自己里面）再重新执行（`cluster/install-base.sh`）。
+
+那一条路是通的，但部署完记得清理 `/root/slurmate-src.*` —— 每次从非 root
 拥有的目录部署都会留下一份拷贝。
 
 > 若把 `cluster/` 挪到别的位置（例如把仓库结构改成 `src/cluster/`），
@@ -352,7 +358,7 @@ sudo slurmate plugin install ~/下载的插件/<id>.splug
 ### 步骤 1：先 `--check`
 
 ```bash
-sudo bash cluster/install-base.sh --check
+sudo bash slurmate-site-<版本>.run --check
 ```
 
 `--check` 承诺零改动：不安装文件、不启动服务、不改动 nftables，快照也只写到
@@ -406,7 +412,7 @@ enabled = yes          # ← 这一行同时也意味着"把它发到用户的�
 ### 步骤 3：演练（可选但推荐）
 
 ```bash
-sudo bash cluster/install-base.sh --dry-run
+sudo bash slurmate-site-<版本>.run --dry-run
 ```
 
 演练模式不会写任何文件、不会启动服务、不会改动 nftables，报告里会明确标注
@@ -415,11 +421,17 @@ sudo bash cluster/install-base.sh --dry-run
 ### 步骤 4：部署
 
 ```bash
-sudo bash cluster/install-base.sh
+sudo bash slurmate-site-<版本>.run
 ```
 
-六个阶段：预检 → 快照 → 安装文件 → 配置自检 → 启用并启动 → 非干扰验证
+不带动词就是安装，它按顺序走三步：检查（环境那一屏，然后是安装器自己的预检）、
+安装、诊断（装完用与 `--doctor` 同一份判据对一次账）。
+
+安装本身是六个阶段：预检 → 快照 → 安装文件 → 配置自检 → 启用并启动 → 非干扰验证
 （`cluster/install-base.sh`）。
+
+装过基座的机器上，这一步自动按修复走 —— 升级与修复是同一条路。站点配置与状态
+数据不动，正在跑的会话一条都不受影响（`cluster/install-base.sh`）。
 
 看起来最啰嗦的第五阶段其实是最重要的一步（`cluster/install-base.sh`）：
 部署前后各取一次 `nft -j list ruleset` 结构化快照，剥掉本系统新增的
@@ -515,8 +527,8 @@ ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>
 ### 步骤 6：卸载
 
 ```bash
-sudo bash cluster/install-base.sh --uninstall              # 保留状态与日志
-sudo bash cluster/install-base.sh --uninstall --purge-state
+sudo bash slurmate-site-<版本>.run --uninstall              # 保留状态与日志
+sudo bash slurmate-site-<版本>.run --uninstall --purge-state
 ```
 
 卸载路径永远可用 —— 它不做任何多余的预检，出故障时管理员最需要的就是能干净地
@@ -539,6 +551,18 @@ sudo bash cluster/install-base.sh --uninstall --purge-state
 
 ## 部署后仍会长期存在的运维事项
 
+出问题时的第一个动作是诊断，它只读、不改任何东西：
+
+```bash
+sudo bash slurmate-site-<版本>.run --doctor
+```
+
+它逐项对账：文件与权限、目录、systemd 单元、服务与 socket、守护进程自己的配置自检
+与运行期自检。每一格不对的下面都写着下一步与该看哪份文档。修回去用 `--repair` ——
+它只增不改，站点配置与状态数据不动。
+
+其余长期事项：
+
 - `nftables.service` 重载会 flush 整个 ruleset。这是单元里
   `PartOf=nftables.service` 存在的原因；重载后表会被重建，规则由对账补齐。
   详见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
@@ -557,9 +581,9 @@ sudo bash cluster/install-base.sh --uninstall --purge-state
 
 与部署直接相关的两条按编号引用（编号是稳定的，复述会漂）：
 
-- U2 —— `install-base.sh` 整条从来没在真机上跑过。那一条里列着"第一次真机部署要
-  重点看的几件事"（`plugins/` 与 `jobs/` 里那几个 ULID 对不对得上、属主与权限、
-  卸载清干净没有）。
-- U6 —— 线上那份守护进程比仓库旧，带着一个让 `submit` 必然失败的缺陷。
-  重新部署之后，提交会第一次真正创建 Slurm 作业 —— 那是行为变化，不是回归。
+- U2 —— 基座安装这条整条从来没在真机上跑过，单文件包与它那两个新动词（`--doctor`
+  / `--repair`）也一样。那一条里列着"第一次真机部署要重点看的几件事"
+  （`plugins/` 与 `jobs/` 里那几个 ULID 对不对得上、属主与权限、卸载清干净没有）。
+- U6 —— `submit` 这条链路从没在真集群上成功跑过。这里没有任何已部署的实例，所以
+  第一次真正部署之后，提交会第一次真正创建 Slurm 作业 —— 那是行为变化，不是回归。
   在把客户端接上去之前，先用普通用户身份把整条路走一遍（U6 里给了那串命令）。

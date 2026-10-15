@@ -70,6 +70,10 @@ jobs:
       - name: 比对器自测
         # nft-compare.py 自带用例，验证"非干扰比对"这个安全保证本身是有效的
         run: python3 cluster/nft-compare.py --selftest
+      - name: 单文件包（.run）自测
+        # 打包、解压出口、五个动词的转发与拦住、打包器自己的失败路径。
+        # 不需要 root，也不碰系统里任何位置（桩安装器 + 桩 id，见文件头）。
+        run: python3 cluster/test-run-package.py
 
   # ── 符合性向量：三份实现对同一批字节必须得出同一个答案 ──────────────────────
   # 三份实现分别在 JS（打包器）、Python（守护进程）、JS（客户端）里。它们漂开的
