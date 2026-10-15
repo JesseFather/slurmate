@@ -1330,6 +1330,81 @@ test('一条读不动的钉子留在表里，返回 `\'\'` 而不是 `undefined`
   assert.notEqual(config.pinnedKeyOf(pins, 'SHORT'), undefined);
 });
 
+// ── 待删的目录：现在删不掉，下一次启动时删 ──────────────────────────────
+
+test('待删清单是单独一个文件，而且名字必须是单段', () => {
+  const dir = tmpdir();
+  assert.deepEqual(config.loadPendingRemovals(dir), [], '还没记过，空单子');
+
+  const list = config.loadPendingRemovals(dir);
+  assert.equal(config.recordPendingRemoval(dir, list, 'partition', 'abc@editor@s1', '某一份').ok,
+    true);
+  assert.equal(fs.existsSync(path.join(dir, 'pending-removals.json')), true);
+  // 与钉子同一条理由：进了 `config.json` 就会被一个只认已知键的旧版本抹掉。
+  assert.equal(fs.existsSync(path.join(dir, 'config.json')), false,
+    '记一条待删不该一并写出一份 config.json');
+  assert.equal(mode(path.join(dir, 'pending-removals.json')), 0o600, '待删清单是 0600');
+
+  const again = config.loadPendingRemovals(dir);
+  assert.deepEqual(again, [{ place: 'partition', name: 'abc@editor@s1', label: '某一份' }]);
+  // 同一个落点同一个名字记两次是无操作，不是两条。
+  assert.equal(config.recordPendingRemoval(dir, again, 'partition', 'abc@editor@s1', '某一份')
+    .already, true);
+  assert.equal(config.loadPendingRemovals(dir).length, 1);
+  // 两个根可以各有一条同名的 —— 它们是两个目录。
+  config.recordPendingRemoval(dir, again, 'data', 'abc@editor@s1', '某一份');
+  assert.equal(config.loadPendingRemovals(dir).length, 2);
+
+  // 名字要拼进路径，所以"多一段"的一律不收（那份文件是磁盘上的文本，谁都改得动）。
+  for (const bad of ['../evil', 'a/b', 'a\\b', '..', '.', '']) {
+    const l = [];
+    assert.equal(config.recordPendingRemoval(dir, l, 'partition', bad, '').ok, false,
+      `不许收下 ${JSON.stringify(bad)}`);
+    assert.equal(l.length, 0, '拒掉的那一条不许留在内存里');
+  }
+  assert.equal(config.recordPendingRemoval(dir, [], 'other', 'abc', '').ok, false,
+    '落点只有两个，多一个字母都是往盘上删另一个地方的目录');
+});
+
+test('读不动的待删条目丢掉（它答的是"要不要删一个目录"，认不出就不删）', () => {
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'pending-removals.json'), JSON.stringify({
+    schema: 1,
+    removals: [
+      { place: 'partition', name: 'good' },
+      { place: 'data', name: 'also-good', label: '带标签的' },
+      { place: 'nowhere', name: 'bad-place' },
+      { place: 'partition', name: '../../etc' },
+      { place: 'partition' },
+      { place: 'partition', name: 'good' },
+      'not-an-object',
+    ],
+  }));
+
+  assert.deepEqual(config.loadPendingRemovals(dir), [
+    { place: 'partition', name: 'good', label: '' },
+    { place: 'data', name: 'also-good', label: '带标签的' },
+  ]);
+});
+
+test('划掉一条：删成功了才划，最后一条划掉时文件本身也没了', () => {
+  const dir = tmpdir();
+  const list = config.loadPendingRemovals(dir);
+  config.recordPendingRemoval(dir, list, 'partition', 'one', 'x');
+  config.recordPendingRemoval(dir, list, 'data', 'two', 'y');
+  const file = path.join(dir, 'pending-removals.json');
+
+  config.forgetPendingRemoval(dir, list, 'partition', 'one');
+  assert.equal(fs.existsSync(file), true, '还剩一条，文件要留着');
+  assert.deepEqual(config.loadPendingRemovals(dir).map((x) => x.name), ['two']);
+
+  // 划一个不在单子上的名字不是错误（两条路可能同时到，先到的那条划掉了）。
+  assert.equal(config.forgetPendingRemoval(dir, list, 'data', 'never').missing, true);
+
+  config.forgetPendingRemoval(dir, list, 'data', 'two');
+  assert.equal(fs.existsSync(file), false, '一条都不剩了，文件也就不该留着');
+});
+
 test('钉子在同意台账旁边活得很好：两张表互不影响', () => {
   const dir = tmpdir();
   const cfg = config.loadConfig(dir);

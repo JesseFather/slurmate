@@ -338,8 +338,8 @@ test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"
       // 这一条钉的是"认得出再也无法读取的自己收掉"。界面上那个
       //   「删掉这一份」只服务剩下的那一档（`unused`：工作区还在配置里、只是此刻
       //   没有连接用它），而"手动删一份真的存在的东西"这条路与自动回收走的是
-      //   同一个 `clearOneRow`（下面那几条断言钉的正是它把两个根都删干净、并且
-      //   让 Chromium 松手）。
+      //   同一个 `clearOneRow`（下面那几条断言钉的正是它把两个根都删干净、
+      //   而且删除那一条路不去唤醒分区）。
       t.after(() => { Module._load = origLoad; });
       require('../src/main/index.js');
       await new Promise((r) => setTimeout(r, 400));
@@ -368,8 +368,8 @@ test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"
     assert.equal(d.ok, true);
     assert.equal(d.diskChecked, true, '真实模式要看磁盘');
 
-    // 收掉的两份：两个根都要真的没了。只清存储不删目录的话，下一次对账会
-    //   把同一行再带回来；只删目录不清存储的话，Chromium 手里那个 context 还攥着它。
+    // 收掉的两份：两个根都要真的没了。只删一个根的话，下一次对账会把同一行
+    //   再带回来（那一行的 `places` 里还剩没删的那一个），而用户会以为他删过了。
     const collected = new Set((d.reclaimed.items || []).map((i) => i.name));
     for (const name of [orphan, 'slot-1']) {
       assert.equal(collected.has(name), true, `「${name}」应当被自动收掉：`
@@ -378,10 +378,12 @@ test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"
     }
     assert.equal(fs.existsSync(path.join(dataRoot, orphan)), false,
       '磁盘上那一半也要删 —— 若只删一半，下一轮对账会把同一行再带回来');
-    // 让 Chromium 松手的那一步（`clearStorageData`）也要走到 —— 少了它，目录删了
-    //   而 context 还在，下一次对账会看到同一个分区又冒出来。
-    assert.equal(calls.cleared.includes(`persist:${orphan}`), true,
-      'clearStorageData 也要走到');
+    // 而清一份数据走到的那条路，不许去唤醒那个分区：`fromPartition` 正是让
+    //   Chromium 打开目录、攥住里面句柄的动作，Windows 上紧接着的删除必然失败
+    //   （用户 2026-10-15 报的 EPERM）。目录真的没了是上面那两条断言的活，
+    //   这一条钉的是"用的是哪条路"。
+    assert.equal(calls.cleared.includes(`persist:${orphan}`), false,
+      `清一份数据不该去唤醒那个分区（唤醒过的：${JSON.stringify(calls.cleared)}）`);
     assert.equal(d.reclaimed.count, 2, `应当恰好收掉两份：${JSON.stringify(d.reclaimed)}`);
 
     // 收掉的那些不再出现在清单里（它们已经没了，列出来只会让用户点一下

@@ -2103,8 +2103,13 @@ function renderPluginData(d) {
   //   永远画不出来（删除就成了用户看不见的），而它画的正是"删的是自动化，
   //   不是可见性"这句唯一的兑现处。与账本 F35 同一个形状：算出来了、没送到。
   const reclaimed = (d && d.reclaimed) || { count: 0, items: [], failed: [] };
+  // 还欠着的那几份（此刻删不掉、已经登记成"下一次启动时清"）。
+  //   它也要把这一屏撑开：一份待删的数据在下面那份清单里是看不到的
+  //   （`index.js` 的 `withoutPending` 把它剔掉了），所以这一句是它唯一的露面处。
+  const deferred = (d && d.deferred) || { count: 0, items: [] };
   const didReclaim = reclaimed.count > 0
-    || (Array.isArray(reclaimed.failed) && reclaimed.failed.length > 0);
+    || (Array.isArray(reclaimed.failed) && reclaimed.failed.length > 0)
+    || deferred.count > 0;
   if (!rows.length && !didReclaim && d && d.diskChecked) {
     sec.classList.add('hidden');
     return;
@@ -2142,8 +2147,19 @@ function renderPluginData(d) {
   if (Array.isArray(reclaimed.failed) && reclaimed.failed.length) {
     wrap.append(el('p', 'plug-desc',
       `还有 ${reclaimed.failed.length} 份未能清掉`
-      + `（${reclaimed.failed.map((f) => `${f.name}：${f.error}`).join('；')}）。`
+      + `（${reclaimed.failed.map((f) => `${f.label || f.name}：${f.error}`).join('；')}）。`
       + '它们还在盘上，下一次对账会再试一次。'));
+  }
+  // 推到最后一次启动时清的那几份。它排在上面那一段后面，因为它是"还欠着"，
+  //   而上面那一段是"已经发生"。
+  if (deferred.count > 0) {
+    const who = (deferred.items || []).map((x) => x.label).filter(Boolean);
+    wrap.append(el('p', 'plug-desc',
+      `另有 ${deferred.count} 份要等下一次启动时清掉`
+      + (who.length ? `（${who.join('；')}）` : '')
+      // 「可能」不是含糊：具体是谁占着它，本程序判不出来（`EPERM` 有一串来源）。
+      //   说死一句"被本程序占用"就是替系统说一句它不知道的话。
+      + '：它们此刻可能被其他进程占用。关掉再打开时会再清一次。'));
   }
 
   if (!d || !d.diskChecked) {
@@ -2233,7 +2249,13 @@ async function dropPluginData(r) {
     // `stale` 由主进程给一句能直接读的话（判定权在它那儿）。
     return notice('error', (res && res.error) || '未能删掉。');
   }
-  notice('info', `已删掉「${res.label || r.label}」。`);
+  // 两句话，两个结果。`pending` 那一格由主进程给（判定权在它那儿）——
+  //   让界面从 `deferred` 里自己翻一遍，等于把"删掉了没有"这个判定搬到这里。
+  if (res.pending) {
+    notice('info', `「${res.label || r.label}」未能清掉，下一次启动时会自动清掉。`);
+  } else {
+    notice('info', `已删掉「${res.label || r.label}」。`);
+  }
   renderPluginData(res);
 }
 

@@ -1675,3 +1675,36 @@ test('★★ 自动回收的留痕：清掉过东西时那一屏不许藏，而�
   assert.match(js, /reclaimed\.failed/,
     '未能清掉的那些也要如实说（不然它们会在下一次对账里原地复活）');
 });
+
+test('推迟到下一次启动的那几份：界面要说得出，那一屏也不许被藏起来', () => {
+  // 用户 2026-10-15 报的那一条（`未能清干净：目录未能删掉：EPERM…`）修完之后，
+  //   "没删掉"不再是一句死胡同，而是一句"下一次启动时会再清一次"。这一条守的是
+  //   那句话到得了界面 —— 与上面那一条同一个形状（F35）：算出来的那一半有用例，
+  //   送不到的那一半没有。
+  assert.ok(/d\.deferred/.test(js), 'panel.js 必须读回包里那一格');
+
+  // 那一屏的短路也要把它算进去。这一格比 `reclaimed` 那一格更险：一份待删的数据
+  //   在下面那份清单里是看不到的（`index.js` 的 `withoutPending` 把它剔掉了，
+  //   否则用户会点第二次、拿到同一句话），所以这一句是它唯一的露面处。
+  const did = /const didReclaim = [\s\S]*?;\n/.exec(js);
+  assert.ok(did, '未找到 renderPluginData 里那个"这一屏要不要展开"的判据');
+  assert.match(did[0], /deferred\.count > 0/,
+    '「清单是空的就把这一屏收起来」那条短路必须把待删的那几份算进去 —— '
+    + '不算它，正等着下一次启动清掉的那几份在界面上一个字都不出现');
+
+  // 那一行得挂在"真有东西待删"这个条件上，而且那个条件得是真的。
+  //   判"它写了"与判"它会画"是两件事（上面那条变异验证判出来的教训）。
+  assert.match(js, /if \(deferred\.count > 0\) \{/,
+    '那一行前面的条件必须是 `deferred.count > 0`');
+  assert.match(js, /下一次启动时清掉/,
+    '要说出什么时候会清掉 —— 只说"没删掉"，用户不知道下一步该做什么');
+  assert.match(js, /deferred\.items/,
+    '也要说得出是哪几份（`items` 里的 label）—— 只给个数字等于让用户干瞪眼');
+
+  // 删除那一刻的两句话也是分开的：「已删掉」与「推迟了」是两件事。
+  //   让界面从 `deferred` 里自己翻一遍，等于把"删掉了没有"这个判定搬到界面上。
+  const dpFn = /async function dropPluginData\([\s\S]*?\n\}/.exec(js);
+  assert.ok(dpFn, 'panel.js 里应当有 dropPluginData()');
+  assert.match(dpFn[0], /res\.pending/,
+    '主进程给了 `pending` 那一格，界面要按它分两句说');
+});

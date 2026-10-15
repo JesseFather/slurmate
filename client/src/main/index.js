@@ -170,6 +170,14 @@ let cfg = null;
  *   而在能拿到真表之前一个插件都加载不了，两者同归一处。
  */
 let pins = {};
+/**
+ * 上一次运行登记下来的、还没删掉的目录（`[{place, name, label}]`）。
+ *
+ * 单独一个文件，与钉子同一个形状（见 `config.js` 那一段）。这里持有一份，
+ *   与 `pins` 同一条理由：`cfgDir` 在模块加载期还没定下来，那时它是空的。
+ * 空表与"没有东西待删"同归一处 —— 两者要做的事都是"什么都不做"。
+ */
+let pendingRemovals = [];
 let whoami = null;
 /**
  * 后端正连着的那条连接的 id（没连着时 `null`）。
@@ -337,12 +345,17 @@ function bootstrap() {
     //   读一遍 `config.json` 再存一遍就会把不认识的那张表抹掉，而"钉子全没了"
     //   = §2.5 的分身判据有了一个重置按钮。所以它自己一个文件、自己一次读。
     pins = config.loadPinnedKeys(cfgDir);
+    pendingRemovals = config.loadPendingRemovals(cfgDir);
 
     // 池目录依赖 cfgDir，而注册表是在模块加载期建的，那时 cfgDir 还是 null。
     //   所以拿到真路径之后重新扫一遍 —— 否则开发者模式会去读进程当前目录下的
     //   `./site-plugins`，而那是谁的地方说不清。
     ensureSitePoolDir();
     registry.reload();
+
+    // 上一次没删掉的那些目录，趁现在删 —— 这一句的位置就是它的全部理由，
+    //   必须在任何一块界面被建出来之前。见 `sweepPendingRemovals`。
+    sweepPendingRemovals();
 
     // 身份在建后端之前取好：它要作为构造参数交给后端（见 backend.js 的
     //   接口注释 —— 身份是"这台电脑"的属性，不是"这次连接"的，而一个后端会被
@@ -1926,12 +1939,21 @@ function clearSpaceStorage(space) {
     //     那个确认框）。用户主动发起的删除是另一条路（`app:deletePluginData`），
     //     那一条碰到同样的情形会明确拒绝并说清原因 —— 静默只在这一条路上关掉。
     if (!livePartitions().has(pluginData.foldAscii(partition))) {
-      clearPartitionStorage(partition, pluginData.diskNameOf(identity), partitionsRoot().root)
-        .then((r) => {
-          if (!r.ok) {
-            win.pushNotice('error', `${label}已经回收，但它那份浏览器存储未能清干净：${r.error}`);
-          }
-        });
+      const name = pluginData.diskNameOf(identity);
+      const root = partitionsRoot().root;
+      const r = root
+        ? removePlaceAt('partition', root, name, label)
+        : { ok: false, pending: false,
+            error: '本机的分区目录未找到，所以这一份未能删掉。' };
+      // 两条路分开说：删掉了不说话（这一段本来就不是用户发起的，它只是
+      //   "回收之后顺手把地面扫了"）；没删掉但登记上了，说清它被推迟了 ——
+      //   "推迟"与"失败"在用户那里是两句不同的话。
+      if (!r.ok) {
+        win.pushNotice('error', `${label}已经回收，但那份浏览器存储未能清干净：${r.error}`);
+      } else if (r.pending) {
+        win.pushNotice('info',
+          `${label}已经回收。那份浏览器存储安排在下一次启动时清掉。`);
+      }
     }
   }
 
@@ -1958,9 +1980,11 @@ function clearSpaceStorage(space) {
     if (root) {
       const name = pluginData.dataDirNameOf(identity);
       if (!liveDataDirs().has(name)) {
-        const r = removeDirChecked(path.join(root, name));
+        const r = removePlaceAt('data', root, name, label);
         if (!r.ok) {
           win.pushNotice('error', `${label}已经回收，但那份磁盘数据未能清干净：${r.error}`);
+        } else if (r.pending) {
+          win.pushNotice('info', `${label}已经回收。那份磁盘数据安排在下一次启动时清掉。`);
         }
       }
     }
@@ -2028,6 +2052,22 @@ function pluginDataRoot() {
  *   还包含一次可能失败的探测 —— 挂上去会让"面板打不开"与"磁盘慢"变成同一件事。
  *   界面进来之后单独拉一次（`app:pluginData`）。
  */
+/**
+ * 从磁盘名清单里剔掉那些已经登记"下一次启动时删"的。
+ *
+ * 少了这一步，界面会死循环：用户点「删除」→ 目录删不掉、但登记上了 →
+ *   下一轮对账照旧把那一行列出来（那一行还在盘上）→ 用户再点一次。
+ *   而"登记上了"这件事本来就要说出来（见 `deferred`），所以剔掉它不损失可见性：
+ *   那一行从"没人用的数据"挪到"安排在下一次启动时清掉"，两处都在这一屏上。
+ *
+ * 比的是磁盘上的目录名（折叠过的那一份）—— 登记时存的就是它。
+ */
+function withoutPending(list, place) {
+  if (!Array.isArray(list)) return list;
+  const gone = new Set(pendingRemovals.filter((x) => x.place === place).map((x) => x.name));
+  return gone.size ? list.filter((n) => !gone.has(n)) : list;
+}
+
 function auditPluginData() {
   const spaces = (cfg && cfg.spaces) || [];
   const pr = partitionsRoot();
@@ -2055,12 +2095,12 @@ function auditPluginData() {
       + '而删掉它们就是毁掉真实的那一份。';
   } else if (pr.root) {
     const r = dataAudit.listDirs(pr.root);
-    names = r.names;
+    names = withoutPending(r.names, 'partition');
     why = r.why || why;
   }
   if (dataRoot) {
     const r = dataAudit.listDirs(dataRoot);
-    dataNames = r.names;
+    dataNames = withoutPending(r.names, 'data');
     dataWhy = r.why;
   }
   return {
@@ -2140,49 +2180,87 @@ function removeDirChecked(dir) {
   try {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   } catch (e) {
-    return { ok: false, error: `目录未能删掉：${e.message}` };
+    // 报的是结果，不是那一坨原话：`e.message` 里带着整条路径、而且这条路径
+    //   Windows 上出现两遍（`fs.rmSync` 构造 message 的方式），界面上那一行
+    //   会长到没法读。路径用户已经在清单里看见了，这里只需要"为什么"。
+    return { ok: false, error: `目录删除失败（${e.code || '未给出原因'}）。` };
   }
   return fs.existsSync(dir)
-    ? { ok: false, error: '目录删了又还在（多半有其他进程正占用它）' }
+    ? { ok: false, error: '目录删除失败（删掉之后又出现）。' }
     : { ok: true, error: null };
 }
 
 /**
- * 清掉一个分区（Electron 那一侧）：先让它松手，再把目录删掉。
+ * 删一个落点，删不动就登记成"下一次启动时删"。
  *
- * 两件事都要做，而它们分工不同。`clearStorageData()` 的作用不是"清干净"
- *   （它连 HTTP 缓存都不碰 —— `storages` 里没有 `cache`），而是让 Chromium 手里
- *   那个仍被缓存的 context 先松手：本进程用过的分区，它的 context 会一直留着
- *   —— 那是常态，不是例外。目录的消失是 `rmSync` 干的：只清不删的话，那一行会
- *   永远留在对账的清单里，而用户会以为自己点了没反应。
+ * 传进来的根由调用方算好（`auditPluginData` 已经算过一遍，别在这里再算一次 ——
+ *   分区那个根要问 Electron，而"问"这个动作本身会唤醒一个分区）。
  *
- * 两条路都调它：对账里用户主动删那一行（`clearOneRow`），以及一份数据被回收
- *   （`clearSpaceStorage`）。但它只管分区这一侧 —— 插件写在磁盘上的那份
- *   （`plugin-data/` 下）是另一个根，由 `clearSpaceStorage` 并列处理的另一段
- *   负责。两半的判据也不同：分区要有界面，数据目录不要那一条。
- *
- * @param {string} partition 完整的 `persist:…`（给 Electron 的那个名字）
- * @param {string|null} diskName 磁盘上的目录名（折叠过的那一份）。给不出来就只清存储、不删目录。
- * @param {string|null} root 分区目录的根
- * @returns {Promise<{ok: boolean, error: string|null}>}
+ * @param {'partition'|'data'} place
+ * @param {string} root
+ * @param {string} name 磁盘上的目录名
+ * @param {string} label 给人看的那一句（登记时要存下来，见 `config.js` 那一段）
+ * @returns {{ok: boolean, pending: boolean, error: string|null}}
+ *          `ok` 且 `pending` = 这一次没删掉，但已经安排在下一次启动时删。
+ *          `ok` 且非 `pending` = 真的删掉了。
  */
-function clearPartitionStorage(partition, diskName, root) {
-  return new Promise((resolve) => {
-    let p;
-    try {
-      p = electronSession.fromPartition(partition).clearStorageData();
-    } catch (e) {
-      resolve({ ok: false, error: e.message });
-      return;
-    }
-    Promise.resolve(p).then(() => {
-      // 路径只由根 + 磁盘上的那个名字拼 —— 界面给的字符串永远进不了路径
-      //   （它们只用来匹配清单里的某一行，见 `app:deletePluginData`）。
-      const dir = root && diskName ? path.join(root, diskName) : null;
-      if (!dir) return resolve({ ok: true, error: null });
-      return resolve(removeDirChecked(dir));
-    }, (e) => resolve({ ok: false, error: e.message }));
-  });
+function removePlaceAt(place, root, name, label) {
+  const r = removeDirChecked(path.join(root, name));
+  if (r.ok) return { ok: true, pending: false, error: null };
+  config.recordPendingRemoval(cfgDir, pendingRemovals, place, name, label);
+  return { ok: true, pending: true, error: r.error };
+}
+
+/**
+ * 上一次运行登记下来的那些目录，这一次开机补删。
+ *
+ * 时机就是它的全部理由：必须在任何一块界面被建出来之前跑。Chromium 只要醒着
+ *   （某块插件界面被显示过，或者问过一次分区根），它就攥着那个分区目录里的
+ *   句柄到进程结束 —— Windows 上被打开的文件删不掉（EPERM），而 Electron 没有
+ *   销毁 session 的 API。启动这一路上还没有任何会话、任何界面，所以此刻它们是
+ *   自由的。这一句排在 `registry.reload()` 之后（分区根要问注册表里的一个身份）、
+ *   排在 `new ShellWindow` 之前。
+ *
+ * 删掉的从清单里划掉，删不掉的留着 —— 下一轮再试。一份永远删不掉的目录于是
+ *   会在每一次启动时说一句，而不是静静地留在盘上（那与"我没删过它"同形）。
+ *
+ * 它报的份数累加进 `lastReclaim`：那正是"本次运行清掉了什么"，而这一批
+ *   上一次就已经被判成没人管了。
+ */
+function sweepPendingRemovals() {
+  if (!pendingRemovals.length) return { count: 0, items: [] };
+  const done = [];
+  for (const it of pendingRemovals.slice()) {
+    const root = it.place === 'partition' ? partitionsRoot().root : pluginDataRoot();
+    if (!root) continue;
+    if (!removeDirChecked(path.join(root, it.name)).ok) continue;
+    config.forgetPendingRemoval(cfgDir, pendingRemovals, it.place, it.name);
+    done.push({ name: it.name, label: it.label || it.name });
+  }
+  if (done.length) {
+    lastReclaim = {
+      count: lastReclaim.count + done.length,
+      items: [...lastReclaim.items, ...done],
+      failed: lastReclaim.failed,
+    };
+  }
+  return { count: done.length, items: done };
+}
+
+/**
+ * 现在有几份在等着下一次启动时清掉（给界面的那一份）。
+ *
+ * 它与 `lastReclaim` 答的是两个问题：那一格是"已经发生了什么"，这一格是
+ *   "还欠着什么"。分开说，是因为它们要用户做的事不同 —— 前者什么都不用做，
+ *   后者要他知道"这一份今天还留在盘上"。
+ */
+function deferredRemovals() {
+  return {
+    count: pendingRemovals.length,
+    items: pendingRemovals.map((x) => ({
+      name: x.name, label: x.label || x.name, place: x.place,
+    })),
+  };
 }
 
 /**
@@ -2191,21 +2269,41 @@ function clearPartitionStorage(partition, diskName, root) {
  * 一份数据的两个落点是一起删的：只删浏览器那一半的话，下一次对账会把同一行
  *   再带回来（`places` 里还剩 `data`），而用户会以为"我明明删过了"。
  *
+ * 这里从前有一支 `clearPartitionStorage`，它先 `fromPartition(...).clearStorageData()`
+ *   再删目录。那一支整个删掉了，理由是次序错了：`fromPartition` 正是让 Chromium
+ *   打开那个目录、攥住里面句柄的动作，于是紧接着的 `rmSync` 在 Windows 上必然
+ *   EPERM（用户 2026-10-15 报的那一条）。而它想解决的那件事（"让 Chromium 松手"）
+ *   在删目录这条路上本来就不成立 —— Electron 没有销毁 session 的 API，一个被
+ *   唤醒过的 context 会活到进程结束。所以现在只有一条路：直接删目录，删不动就
+ *   登记，下一次启动时删（见 `removePlaceAt` 与 `sweepPendingRemovals`）。
+ *
+ * 根由调用方给（`auditPluginData` 已经算过一遍）：分区那个根要问 Electron 一个
+ *   该有的身份，而"问"这个动作本身会把那个分区建出来 —— 删除这一条路上，
+ *   少唤醒一个是一个。
+ *
  * @param {object} row   `audit` 算出来的那一行（用它里面的 `name` 与 `places`）
  * @param {{partition: string|null, data: string|null}} roots 两个根
- * @returns {Promise<{ok: boolean, error: string|null}>}
+ * @returns {{ok: boolean, pending: boolean, error: string|null}}
+ *          `ok` 为假 = 这一次没删成、也没能登记（根取不到）。`ok` 且 `pending`
+ *          = 已经登记在下一次启动时删。两者都假 = 真的删掉了。
  */
-async function clearOneRow(row, roots) {
+function clearOneRow(row, roots) {
   const places = Array.isArray(row.places) ? row.places : [];
-  if (places.includes('partition') && roots && roots.partition) {
-    const r = await clearPartitionStorage(`persist:${row.name}`, row.name, roots.partition);
-    if (!r.ok) return r;
+  let pending = false;
+  for (const place of ['partition', 'data']) {
+    if (!places.includes(place)) continue;
+    const root = roots && roots[place];
+    if (!root) {
+      return { ok: false, pending,
+        error: place === 'partition'
+          ? '本机的分区目录未找到，所以这一份未能删掉。'
+          : '本机的插件数据目录未找到，所以这一份未能删掉。' };
+    }
+    const r = removePlaceAt(place, root, row.name, row.label);
+    if (!r.ok) return { ok: false, pending, error: r.error };
+    if (r.pending) pending = true;
   }
-  if (places.includes('data') && roots && roots.data) {
-    const r = removeDirChecked(path.join(roots.data, row.name));
-    if (!r.ok) return r;
-  }
-  return { ok: true, error: null };
+  return { ok: true, pending, error: null };
 }
 
 // ── 会话表 ──────────────────────────────────────────────────────────────────
@@ -4641,6 +4739,8 @@ function registerIpc() {
       // 这一次收掉了什么。界面读它、画一行（`panel.js` 的 `renderPluginData`）——
       //   少了它，删除就是用户看不见的，而那是这条律里唯一不能松的一半。
       reclaimed: lastReclaim,
+      // 还欠着什么（此刻删不掉、已经安排在下一次启动时清的那些）。
+      deferred: deferredRemovals(),
     };
   });
 
@@ -4662,7 +4762,7 @@ function registerIpc() {
     if (!verdict.ok) return verdict;
     // 删哪几个落点由这一行说了算（`places`）—— 一份数据的浏览器那一半与磁盘
     // 那一半是一起删的，只删一半的话下一次对账会把同一行再带回来。
-    const r = await clearOneRow(verdict.row, fresh.roots);
+    const r = clearOneRow(verdict.row, fresh.roots);
     if (!r.ok) {
       return { ok: false, code: 'failed', error: `未能清干净：${r.error}` };
     }
@@ -4678,6 +4778,11 @@ function registerIpc() {
       //   字段逐个核）。给的是这一次运行累计的结果，不是这一次删除的 ——
       //   用户接着删一份，不该把"对账收掉了什么"那句话擦掉。
       reclaimed: lastReclaim,
+      // 这一次有没有被推迟。界面要说的两句话不同（"已删掉"与"已安排下一次启动
+      //   时清掉"），所以这一个布尔要有 —— 让界面自己从 `deferred` 里翻一遍
+      //   是把判定挪到界面，而"删掉了没有"的判定权在主进程。
+      pending: r.pending,
+      deferred: deferredRemovals(),
     };
   });
 
@@ -5628,6 +5733,22 @@ module.exports = {
     getPluginDataRoot: () => pluginDataRoot(),
     /** 钉子表（按 id 记的公钥指纹，§5.4）。它在另一个文件里，不是 cfg 的一部分。 */
     getPinnedKeys: () => pins,
+    /**
+     * 待删清单（此刻删不掉、安排在下一次启动时清的那些）。
+     *
+     * 它是那个文件的在内存里那一份，用例直接改它 —— 改完记得还原（它跨用例
+     *   活着），否则后面每一条用例都会在一个凭空多出来的待删目录上跑。
+     */
+    getPendingRemovals: () => pendingRemovals,
+    /**
+     * 重跑「开机补删」那一步（`sweepPendingRemovals`）。
+     *
+     * 启动那一趟只发生一次（index.js 只 require 一次），所以不重新触发就没法
+     *   验证它。它与启动时跑的是同一个函数、看的是同一份清单 —— 而"启动时
+     *   真的调它"那一条由 `client/test/boot.test.mjs` 的源码判据守着（次序是
+     *   它成立的全部理由，见那个函数的注释）。
+     */
+    sweepPendingRemovals: () => sweepPendingRemovals(),
     /**
      * 重跑「启动时接上已有会话」那条路（`tryReattach`）。
      *

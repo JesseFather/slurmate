@@ -328,6 +328,99 @@ function pinPluginKey(dir, pins, id, fingerprint) {
   return { ok: true };
 }
 
+// ── 待删的目录：现在删不掉，下一次启动时删 ──────────────────────────────
+//
+// 为什么需要这个文件：Windows 上被打开着的目录删不掉（EPERM），而 Electron
+//   一旦唤醒某个分区，Chromium 就攥着那个目录里的句柄到进程结束（它没有销毁
+//   session 的 API）。于是"用户点了删除、而这一份此刻删不掉"是常态，不是故障。
+//   出路只有一条：下一次启动时删 —— 那时本进程还没有唤醒过任何一个分区。
+//
+// 为什么不进 `config.json`：与钉子、开发者模式那两个文件同一条理由
+//   （`loadConfig` 只认已知键，旧版本读一遍再存一遍会把不认识的那张表抹掉）。
+//
+// 与钉子有一处相反：这一份丢了没有代价。盘上那份目录还在，下一次对账会把它
+//   再列出来，用户再点一次就是。所以读不动的条目直接丢掉，不像钉子那样留在表里。
+//
+// 存的是"根 + 目录名"两边都能算出来的东西：`place` 指哪个根（`partition` =
+//   Electron 的存储分区目录，`data` = 基座给插件的数据目录），`name` 是磁盘上的
+//   目录名。路径现拼，文件里一个绝对路径都不存 —— 换了 `userData` 位置之后，
+//   存下来的老路径会指向一个不存在的地方，而删不动的那一句会指不回原因。
+// `label` 是给人看的那一句（"插件 X 的数据"），存下来是因为下一次启动那一刻
+//   手上只有名字，没有配置可以回查（那一份数据的主人可能早就不在了）。
+const PENDING_REMOVE_FILE = 'pending-removals.json';
+const PENDING_REMOVE_SCHEMA = 1;
+/** 两个根。多一个字母都是往盘上删一个别的地方的目录，所以这里是封闭的。 */
+const REMOVE_PLACES = ['partition', 'data'];
+
+function pendingRemovalsPath(dir) { return path.join(dir, PENDING_REMOVE_FILE); }
+
+/**
+ * 一个目录名能不能作为待删条目。
+ *
+ * 判两遍，但只有一份实现：写的那一遍是"别记下一条删不动的名字"，读的那一遍是
+ *   "这份文件是磁盘上的文本，谁都改得动"。名字要拼进路径，所以只收单段 ——
+ *   多一段就是删到树外的目录，而 `.` 与 `..` 在 `path.basename` 面前是合法的。
+ */
+function removableName(name) {
+  return typeof name === 'string' && Boolean(name)
+    && name !== '.' && name !== '..'
+    && !name.includes('/') && !name.includes('\\');
+}
+
+/**
+ * 读待删清单。返回 `[{place, name, label}]`。
+ *
+ * 形状认不出的条目丢掉（不是留着）：它答的是"要不要删一个目录"，而一条读不动的
+ *   记录按它去删，方向只可能是删错。丢掉之后那一份数据照旧留在盘上、照旧出现在
+ *   对账的清单里 —— 那正是它没有登记时的样子。
+ */
+function loadPendingRemovals(dir) {
+  const raw = readJson(pendingRemovalsPath(dir));
+  const out = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const it of (Array.isArray(raw.removals) ? raw.removals : [])) {
+    if (!it || typeof it !== 'object') continue;
+    const place = String(it.place || '');
+    const name = String(it.name || '');
+    if (!REMOVE_PLACES.includes(place) || !removableName(name)) continue;
+    if (out.some((x) => x.place === place && x.name === name)) continue;
+    out.push({ place, name, label: typeof it.label === 'string' ? it.label : '' });
+  }
+  return out;
+}
+
+function savePendingRemovals(dir, list) {
+  writeAtomic(pendingRemovalsPath(dir),
+    JSON.stringify({ schema: PENDING_REMOVE_SCHEMA, removals: list }, null, 2), 0o600);
+}
+
+/**
+ * 登记一份"下一次启动时删"。已经在单子上的话是无操作。
+ *
+ * @returns {{ok:true, already?:boolean} | {ok:false, error:string}}
+ */
+function recordPendingRemoval(dir, list, place, name, label) {
+  if (!REMOVE_PLACES.includes(place) || !removableName(name)) {
+    return { ok: false, error: '待删条目必须有合法的落点与单段目录名。' };
+  }
+  if (list.some((x) => x.place === place && x.name === name)) return { ok: true, already: true };
+  list.push({ place, name, label: String(label || '') });
+  savePendingRemovals(dir, list);
+  return { ok: true };
+}
+
+/** 划掉一条（删成功了）。单子上不再有条目时，文件本身也删掉。 */
+function forgetPendingRemoval(dir, list, place, name) {
+  const i = list.findIndex((x) => x.place === place && x.name === name);
+  if (i < 0) return { ok: true, missing: true };
+  list.splice(i, 1);
+  if (list.length) savePendingRemovals(dir, list);
+  else {
+    try { fs.unlinkSync(pendingRemovalsPath(dir)); } catch { /* 已不存在 */ }
+  }
+  return { ok: true };
+}
+
 // ── 开发者模式：不在 config.json 里 ──────────────────────────────────────
 //
 // 为什么单独一个文件：`developerMode` 这个键要回答的是"这次启动读哪一份
@@ -1483,6 +1576,8 @@ module.exports = {
   trustKey, isTrusted, trustPlugin, forgetPlugin, trustAlgOf, TRUST_ALG, TRUST_ALG_LEGACY,
   // 钉子（按 id 记的公钥指纹）—— 单独一个文件，见那一段的注释
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
+  // 待删的目录（此刻删不掉，下一次启动时删）—— 同样单独一个文件
+  loadPendingRemovals, recordPendingRemoval, forgetPendingRemoval,
   // 开发者模式的两个设置 —— 也单独一个文件，理由见那一段（次序）
   loadDevSettings, saveDevSettings,
   // 这台电脑的客户端身份 —— 同样单独一个文件，理由见那一段

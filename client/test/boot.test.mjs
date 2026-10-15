@@ -1762,9 +1762,17 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
   const oldGroupId = ctl.snapshot().spaceId;
   const oldPartition = view1._opts.webPreferences.partition;
   const oldWc = view1.webContents;
-  // 清单件是一条累积的记录（前面几条用例回收工作区时也清过），所以这里只看这一
-  // 步新产生的那几条。
-  const clearedBefore = calls.cleared.length;
+  /**
+   * 一个分区在磁盘上的目录。判据走它，不走"调过哪个方法"：这一版删的就是目录，
+   *   而"调过 `clearStorageData`"与"盘上干净了"在 Windows 上根本不是同一件事
+   *   （那一步正是让删除失败的原因）。
+   */
+  const partDirOf = (part) => path.join(userData, 'Partitions',
+    P.foldAscii(String(part).replace(/^persist:/, '')));
+  // 先把它摆出来。下面判的是"它真的没了"，而一个从来没建过的路径上那一条
+  //   永远成立 —— 少了这一句，那条断言什么也没守。
+  fs.mkdirSync(partDirOf(oldPartition), { recursive: true });
+  fs.writeFileSync(path.join(partDirOf(oldPartition), 'Cookies'), 'x');
 
   // ① 切走一个「独占」的工作区（它只被这一条连接用）→ 主进程必须先回 would_discard，
   //    并且配置一个字都不动。判定权在主进程：界面手里那份 refCount 随时可能
@@ -1809,22 +1817,17 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
   //      与"什么都不清"各能骗过一条。
   //    这一条钉不是那条"别清正在被界面用着的分区"的守卫 —— 那条守卫今天
   //      够不着（见 clearWorkspaceStorage 的注释），删掉它这里照样是绿的。
-  //   `calls.cleared` 是整个文件共用的一条累积记录（前面几条用例回收时也清过，
-  //     而清分区是异步的，上一条用例尾部的清理可能刚刚才落地）。所以这里判的是
-  //     成员关系加一条更强的不变量，不是"这一片恰好只有一条"。
-  const cleared = calls.cleared.slice(clearedBefore);
-  assert.ok(cleared.includes(oldPartition),
-    `被回收那一份的存储要清掉，实际清了 ${JSON.stringify(cleared)}`);
-  assert.ok(!cleared.includes(view2._opts.webPreferences.partition),
-    '正在显示的那个分区绝不能被清');
-  // 「只清该清的」那半边，换成一条更强的判据：清掉的每一份都必须是
-  //    已经不在配置里的数据。少了它，一个"把配置里的数据也一并清了"的实现
-  //    也能让上面两条通过 —— 而那正好是会删活数据的那一类。
-  const liveSpaces = new Set(idx._test.getCfg().spaces.map((x) => x.id));
-  for (const part of cleared) {
-    assert.equal(liveSpaces.has(part.split('@')[2]), false,
-      `清掉的每一份都必须是已经不在配置里的，而 ${part} 还在`);
-  }
+  //   两条路都各建一份目录再判（旧的上面建了，新的这里建），于是"没删"与
+  //     "删了别人的"各能红一条。换过去的那个分区此刻正被那块视图用着
+  //     （`livePartitions()` 护着它），它的目录必须原样在。
+  const livePart = view2._opts.webPreferences.partition;
+  fs.mkdirSync(partDirOf(livePart), { recursive: true });
+  fs.writeFileSync(path.join(partDirOf(livePart), 'Cookies'), 'y');
+  assert.equal(fs.existsSync(partDirOf(oldPartition)), false,
+    '被回收那一份的分区目录要清掉');
+  assert.equal(fs.existsSync(path.join(partDirOf(livePart), 'Cookies')), true,
+    '正在显示的那个分区绝不能被删');
+  t.after(() => { fs.rmSync(partDirOf(livePart), { recursive: true, force: true }); });
 
   await invoke('app:disconnect');
 });
@@ -5431,6 +5434,11 @@ test('临时实例结束，它的两份数据一起没，而持久那一份一�
   const partB = w.surfacePartition(b.slot);
   const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', idB));
   assert.equal(fs.existsSync(tempDir), true, '夹具前提：临时那一份真的建出来了');
+  // 分区那一半也要先摆出来（判据是"盘上那个目录没了"，见下面）。
+  const partDirB = path.join(userData, 'Partitions',
+    P.foldAscii(String(partB).replace(/^persist:/, '')));
+  fs.mkdirSync(partDirB, { recursive: true });
+  fs.writeFileSync(path.join(partDirB, 'Cookies'), 'x');
 
   // 结束临时那一份（持有者继续跑）。
   await invoke('app:stop', { slot: b.slot });
@@ -5441,8 +5449,11 @@ test('临时实例结束，它的两份数据一起没，而持久那一份一�
   //    `livePartitions()` 还看得见那块视图，分区那一半被静默跳过，而症状是
   //    "每次回收都在盘上留一份垃圾"。
   assert.equal(fs.existsSync(tempDir), false, '临时那份数据目录要跟着会话一起走');
-  await waitUntil(() => calls.cleared.includes(partB),
-    `临时那份浏览器存储也要清（清过的：${JSON.stringify(calls.cleared)}）`, 5000);
+  // 判据在盘上，而且它比"调过清除"更强：被清的那一份里躺着登录 cookie，
+  //   而"调过一个方法"从来不代表盘上干净了（Windows 上它连删除都没走到）。
+  assert.equal(fs.existsSync(partDirB), false, '临时那份的分区目录也要跟着走');
+  assert.equal(calls.cleared.includes(partB), false,
+    `清一份数据不该去唤醒那个分区（唤醒过的：${JSON.stringify(calls.cleared)}）`);
 
   // 反过来：持久那一份一个字节都不许动（这是这条用例的另一半，不是顺带）。
   assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true,
@@ -6374,6 +6385,12 @@ test('删掉最后一条用某个工作区的连接，那个工作区的两份�
   fs.mkdirSync(realDir, { recursive: true });
   fs.writeFileSync(path.join(realDir, 'marker'), 'x');
   t.after(() => { fs.rmSync(realRoot, { recursive: true, force: true }); });
+  // 分区那一半也要先摆出来。判据（下面）是"盘上那个目录没了"，而一个从来没
+  //   建过的路径上，"没了"是永远成立的 —— 少了这一句，那条断言什么也没守。
+  const partDir = path.join(userData, 'Partitions',
+    P.foldAscii(String(partition).replace(/^persist:/, '')));
+  fs.mkdirSync(partDir, { recursive: true });
+  fs.writeFileSync(path.join(partDir, 'Cookies'), 'x');
 
   const r = await invoke('app:deleteConnection', conn.id);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -6382,10 +6399,12 @@ test('删掉最后一条用某个工作区的连接，那个工作区的两份�
   assert.equal(fs.existsSync(dir), false, '沙盒里那份数据目录要跟着工作区一起走');
   assert.equal(fs.existsSync(path.join(realDir, 'marker')), true,
     '真实的那一份一个字节都不能动 —— 两个根绝不能混');
-  // 分区那一半是异步清的（`clearPartitionStorage` 走 Electron 的 clearStorageData），
-  // 所以这里要等一等，不能当场断言。
-  await waitUntil(() => calls.cleared.includes(partition),
-    `浏览器存储那一半也要清（清过的：${JSON.stringify(calls.cleared)}）`, 5000);
+  // 分区那一半：判据是盘上那个目录没了。从前这里判的是"调过 `clearStorageData`"，
+  //   而清一份数据本来就不该去唤醒那个分区 —— 唤醒它正是让 Chromium 攥住目录、
+  //   让 Windows 上紧接着的删除必然失败的那一步（用户 2026-10-15 报的那一条）。
+  assert.equal(fs.existsSync(partDir), false, '浏览器存储那一半也要清');
+  assert.equal(calls.cleared.includes(partition), false,
+    `清一份数据不该去唤醒那个分区（唤醒过的：${JSON.stringify(calls.cleared)}）`);
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
@@ -6540,7 +6559,7 @@ test('没声明分实例的那一份不跟着任何工作区走', async (t) => {
   cleanupSiteState(idx);
 });
 
-test('磁盘删不动时只报、不抛（配置已经删了，就不能报"失败"）', async (t) => {
+test('磁盘删不动时不把删除本身判成失败，并把它排到下一次启动时清', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   await openUpTo(idx, 1);
@@ -6551,7 +6570,10 @@ test('磁盘删不动时只报、不抛（配置已经删了，就不能报"失�
   const dataRoot = idx._test.getPluginDataRoot();
   // 让那个目录删不动：把它的父层设成不可写。
   fs.chmodSync(dataRoot, 0o500);
-  t.after(() => { try { fs.chmodSync(dataRoot, 0o700); } catch { /* 尽力而为 */ } });
+  const restore = () => { try { fs.chmodSync(dataRoot, 0o700); } catch { /* 尽力而为 */ } };
+  // 待删清单跨用例活着（index.js 只 require 一次），所以收尾要把它清干净 ——
+  //   留着的话，后面每一条用例都会在一个凭空多出来的待删目录上跑。
+  t.after(() => { restore(); idx._test.getPendingRemovals().length = 0; });
 
   const r = await invoke('app:deleteConnection', conn.id);
   // 抛出去的后果：`commitConfig` 抛穿 IPC，用户看到"删除失败"，而配置其实
@@ -6559,12 +6581,81 @@ test('磁盘删不动时只报、不抛（配置已经删了，就不能报"失�
   assert.equal(r.ok, true, `清理失败不该把删除本身变成失败：${JSON.stringify(r)}`);
   assert.equal(idx._test.getCfg().connections.some((c) => c.id === conn.id), false,
     '配置那一侧必须真的删掉了');
-  await waitUntil(() => noticesOf().some((n) => /未能清干净/.test(n.text || '')),
-    '要有一条说清磁盘没清干净的提示', 5000);
   assert.equal(fs.existsSync(dir), true, '前提：它真的没被删掉（父层不可写）');
+
+  // 没删掉的那一份要有一条出路 —— 这是这一条用例真正守的东西。
+  //   从前它只报一句"未能清干净"就完了：那份数据从此没有任何人去清（下一次对账
+  //   会把它再列出来，而用户再点一次拿到的还是同一句）。
+  await waitUntil(() => idx._test.getPendingRemovals().some((x) => x.name === path.basename(dir)),
+    '要把它登记成"下一次启动时清"', 5000);
+  const scheduled = idx._test.getPendingRemovals().find((x) => x.name === path.basename(dir));
+  assert.equal(scheduled.place, 'data', '登记的是插件数据那一根');
+  assert.ok(scheduled.label, '要带上给人看的那一句（下一次启动那一刻，配置里已经没有它了）');
+  await waitUntil(() => noticesOf().some((n) => /下一次启动时清掉/.test(n.text || '')),
+    '要有一条说清它被推迟了的提示', 5000);
+
+  // 而它不再出现在下面那份清单里 —— 登记过的东西挪到"还欠着什么"那一格里去了。
+  //   少了这一条，界面会死循环：用户点删除、目录没删掉但登记上了、下一轮对账
+  //   照旧把它列出来、用户再点一次，而每一次拿到的都是同一句"下一次启动时清掉"。
+  const listing = await invoke('app:pluginData');
+  assert.equal(listing.rows.some((row) => row.name === path.basename(dir)), false,
+    `已登记的目录不再列出来（清单：${JSON.stringify(listing.rows.map((r) => r.name))}）`);
+  assert.equal((listing.deferred.items || []).some((x) => x.name === path.basename(dir)), true,
+    '而它必须出现在"还欠着什么"那一格里 —— 否则它就成了用户看不见的');
+
+  // 下一次启动那一刻：它不再被占着（这一头由 chmod 演），于是真的删掉。
+  //   这一半是"推迟"这个答复的全部兑现处 —— 少了它，登记的只是一张永远不兑现的单子。
+  restore();
+  const swept = idx._test.sweepPendingRemovals();
+  assert.ok(swept.count >= 1, `补删要真的把它删掉：${JSON.stringify(swept)}`);
+  assert.equal(fs.existsSync(dir), false, '补删之后那份数据真的没了');
+  assert.equal(idx._test.getPendingRemovals().some((x) => x.name === path.basename(dir)), false,
+    '删掉了就要从单子上划掉 —— 留着它，每一次启动都会去删一个不存在的目录');
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
+});
+
+test('补删排在启动那一刻，而且排在任何一块界面之前', () => {
+  // 这一条判的是次序，而次序是那一手成立的唯一理由：Chromium 只要醒着
+  //   （某块插件界面被显示过，或者问过一次分区根），它就攥着那个分区目录里的
+  //   句柄到进程结束（Electron 没有销毁 session 的 API），Windows 上被打开的文件
+  //   删不掉（EPERM）。启动这一路上还没有任何会话、任何界面，所以那一刻它们是
+  //   自由的 —— 挪到窗口之后，这一手就什么也删不掉了。
+  //
+  // 行为上够不到它：`index.js` 只 require 一次，启动那一趟在测试进程里只发生
+  //   一次，而现场要在那之前就摆好。所以这一条读源码，理由写在这里。
+  const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+  const ready = src.indexOf('app.whenReady()');
+  assert.ok(ready > 0, '前提：index.js 里还有 whenReady');
+  const sweep = src.indexOf('sweepPendingRemovals();', ready);
+  const window_ = src.indexOf('new ShellWindow(', ready);
+  assert.ok(sweep > ready, '启动那一刻要跑一次补删');
+  assert.ok(window_ > ready, '前提：窗口也是那一刻建的');
+  assert.ok(sweep < window_,
+    '补删必须排在任何一块界面之前 —— 排在后面，被唤醒的分区一个都删不掉');
+});
+
+test('删除那条路上不许去唤醒分区（唤醒它正是 Windows 上删不掉的原因）', () => {
+  // 用户 2026-10-15 报的现场：点「删除」，拿回的是
+  //   `未能清干净：目录未能删掉：EPERM, Permission denied: …\Partitions\…`。
+  //   根因是次序 —— 那时删除先 `session.fromPartition(p).clearStorageData()`
+  //   再 `rmSync`，而 `fromPartition` 正是让 Chromium 打开那个目录、攥住里面句柄
+  //   的动作，于是紧接着的那次删除在 Windows 上必然失败。
+  //
+  // 这一条守的是"那个动作不许回来"：删除那一簇里不该出现 `fromPartition` 或者
+  //   `clearStorageData`。行为上的对照在「删掉最后一条用某个工作区的连接」与
+  //   「临时实例结束」两条里（它们断言删除之后 `clearStorageData` 一次都没被调过，
+  //   而盘上那个目录真的没了）。
+  const src = fs.readFileSync(path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+  for (const fn of ['removePlaceAt', 'clearOneRow', 'sweepPendingRemovals', 'removeDirChecked']) {
+    const at = src.indexOf(`function ${fn}(`);
+    assert.ok(at > 0, `前提：index.js 里还有 ${fn}`);
+    const end = src.indexOf('\n}\n', at);
+    assert.ok(end > at, `前提：找得到 ${fn} 的结尾`);
+    assert.ok(!/fromPartition|clearStorageData/.test(src.slice(at, end)),
+      `${fn} 里出现了唤醒分区的动作 —— 那正是 Windows 上删不掉的原因`);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════
