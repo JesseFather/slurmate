@@ -1,15 +1,16 @@
 # ==============================================================================
-#  slurmate-sessiond.service.in — Slurmate 会话守护进程（systemd 单元模板）
+#  slurmate-sessiond.service — Slurmate 会话守护进程（systemd 单元）
 # ==============================================================================
-#  这是【模板】，不是可直接安装的单元文件。install-base.sh 会在安装时把
-#  @READONLY_PATHS@ 替换成该站点的共享家目录挂载点，生成
+#  这一份是逐字安装的，没有需要按站点替换的东西：沙箱那一条走
+#  ProtectSystem=strict，用户家目录挂在哪、有几个，都由内核那一侧盖住，不用
+#  站点报任何一个路径。install-base.sh 把它装到
 #  /etc/systemd/system/slurmate-sessiond.service。
 #
-#  手工修改生成后的单元没有意义 —— 下次部署会被覆盖。要改就改这里，
-#  或改 slurmate.conf 里的 readonly_paths。
+#  手工改装上那一份没有意义 —— 下次部署会被覆盖。要改就改这里。
 #
-#  加固指令的可行性在 RHEL 9 系上实测过：沙箱内 scontrol ping 成功、
-#  munge 的 /run/munge/munge.socket.2 可读、nft list 可用。
+#  加固指令的可行性由 tools/check-cluster.sh 第 8 节在目标机器上实测：它带着
+#  与这里同一套指令起一个瞬时单元，跑 scontrol ping、把 munge 走一遍、nft list，
+#  并验一次「该只读的地方真的只读、该可写的地方真的可写」。
 # ==============================================================================
 
 [Unit]
@@ -47,15 +48,28 @@ Group=root
 UMask=0027
 
 # ── 加固 ────────────────────────────────────────────────────────────────────
-# 注意：必须是 full 而不是 strict。strict 会把整个文件系统挂成只读，
-# 包括 /run —— 那会切断 munge 的 /run/munge/munge.socket.2，
-# 导致 scontrol/scancel 全部失败。
-ProtectSystem=full
-# 守护进程【从不写】用户家目录（口令由作业自己生成写进会话文件），
-# 所以共享存储可以只读挂载。这是本设计相对"root 写用户文件"的实质安全增量。
-# 挂载点由 install-base.sh 按 slurmate.conf 的 readonly_paths 生成；该项留空时
-# 本行会被整行删除（此时上面的保护就不存在了，请确认这是你要的）。
-ReadOnlyPaths=@READONLY_PATHS@
+# 整个文件系统树挂成只读，只有 ReadWritePaths= 点名的几处除外。
+# 这就是本设计相对"root 写用户文件"的实质安全增量：本进程是 root，能力集里
+#   又带着 CAP_DAC_OVERRIDE，不挂只读的话它能改任何人的任何文件。
+# 必须是 strict 而不是 full：full 只盖 /usr 与 /etc，用户的家目录一个都不管，
+#   而家目录正是这里要保护的东西。strict 会跳过 /dev、/proc、/sys 这三个 API
+#   文件系统（它们由 PrivateDevices=、ProtectKernelTunables=、
+#   ProtectControlGroups= 那几条管），所以它卷不到自己。
+ProtectSystem=strict
+# strict 唯一的例外。munge 的 socket 在 /run/munge 下，而连接一个 unix socket
+#   需要对该文件有写权限 —— /run 整棵被挂只读之后，scontrol / scancel / sbatch
+#   会全部失败（那正是这一档以前不敢开的原因）。
+# 状态、日志、运行时那三处不用在这里列：StateDirectory= / LogsDirectory= /
+#   RuntimeDirectory= 自己带 BindPaths=，那几个目录始终可写。
+ReadWritePaths=/run/munge
+
+# 只读带来的一个代价，要一并知道：释放会话时那一次删会话文件
+#   （remove_session_file()）在本单元下必然失败（只读挂载上 unlink 回 EROFS），
+#   而那次失败是静默的。残留由下一次作业开头那一次清扫兜住（run.sbatch 的
+#   sweep_stale_sessions()），窗口是"从会话结束到这个人下一次交作业"。
+# 不能改成"由作业在退出时删"：会话文件里写着墓碑（state 与 exit_code），本进程
+#   正是读它才知道那个会话结束了 —— 作业跑起来就失败、一次都没登记上的那些
+#   全靠它立刻释放，删早了那个信号就没了，会话要干等一个 enroll 周期。
 # 状态、日志、运行时目录由 systemd 管理（自动创建并设置属主/权限）
 StateDirectory=slurmate-session
 StateDirectoryMode=0700

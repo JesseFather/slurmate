@@ -412,7 +412,7 @@ def make_config(mod, tmpdir):
     # 另一份配置测"没配就该被明确拒绝"。
     #
     # 这两行是替换，不是"插在 cluster_cidr 后面"。
-    #   理由：示例配置现在把 17 个键一个不少地列出来（注释整批搬进了文档），
+    #   理由：示例配置现在把 16 个键一个不少地列出来（注释整批搬进了文档），
     #   所以 `default_plugin` 是一个空值的真行 —— 再插一行就会撞上那条
     #   "同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把"这两行
     #   必须在示例里"变成一条当场说得出话的前置条件。
@@ -784,8 +784,8 @@ def main():
     check("整行注释与空行被跳过",
           parse("# 说明\n\n   \nrange_end = 5\n")[0] == {"range_end": "5"})
     check("值两端空白被去掉",
-          parse("readonly_paths =   /shared/home  \n")[0]
-          == {"readonly_paths": "/shared/home"})
+          parse("cluster_cidr =   192.0.2.0/24  \n")[0]
+          == {"cluster_cidr": "192.0.2.0/24"})
 
     # 插件配置不住在主文件里：一个插件一个文件。所以主文件里
     #   `[plugin:...]` 这件事不存在了，写了就是错误。
@@ -5494,8 +5494,7 @@ exit 0
         #    不参与 —— 这是"一个插件一份配置、一个来源"的直接推论。
         _CONF_S = os.path.join(_sy_home, "site.conf")
         with open(_CONF_S, "w", encoding="utf-8") as _f:
-            _f.write("# 站点配置\ncluster_cidr = 192.0.2.0/24\n"
-                     "readonly_paths = /shared/home\n")
+            _f.write("# 站点配置\ncluster_cidr = 192.0.2.0/24\n")
         _orig_conf = _sy_read(_CONF_S)
 
         # 生成物不许改动行为：装前装后每个插件的生效值逐项相同。
@@ -5516,8 +5515,7 @@ exit 0
         # 名字是 id（安装器按 id 命名），不是短名 —— 这一格正是"该删哪一个
         #   是算得出来的"那句话的另一面。
         check("解析回来：通用键来自主文件、插件配置来自 `.d/`，来源记在 meta 里",
-              _g == {"cluster_cidr": "192.0.2.0/24",
-                     "readonly_paths": "/shared/home"}
+              _g == {"cluster_cidr": "192.0.2.0/24"}
               and set(_s) == {_U3} and _m[_U3]["file"] == _p_solo,
               "%s / %s / %s" % (_g, _s, _m))
         check("生成的那一份让配置自洽了（`--check` 不再报错）",
@@ -5566,8 +5564,7 @@ exit 0
         check("而手写的那一份还在（判据是位置与名字，不是「整个目录重写一遍」）",
               _rc == 0 and os.path.isfile(_p_typo), repr(_out[:300]))
         check("主文件的通用键一个字没动",
-              mod.parse_config(_CONF_S)[0] == {"cluster_cidr": "192.0.2.0/24",
-                                               "readonly_paths": "/shared/home"},
+              mod.parse_config(_CONF_S)[0] == {"cluster_cidr": "192.0.2.0/24"},
               repr(_sy_read(_CONF_S)[-300:]))
         os.unlink(_p_typo)
 
@@ -6146,8 +6143,7 @@ exit 0
         _ckconf = os.path.join(_ck, "c.conf")
         with open(_ckconf, "w", encoding="utf-8") as _f:
             _f.write("cluster_cidr = 192.0.2.0/24\n"
-                     "range_start = 55001\nrange_end = 55999\n"
-                     "readonly_paths = /shared/home\n")
+                     "range_start = 55001\nrange_end = 55999\n")
 
         class _FakeCfg(object):
             def __init__(self, missing=(), nft_ok=True):
@@ -6293,6 +6289,32 @@ exit 0
 
     check("run.sbatch 的会话文件可以被自动检查（抽取失败就是这一条红）",
           _skip is None, _skip or "")
+
+    # 两件关于"这两个文件什么时候消失"的事，形状相反，得一起钉住。
+    #
+    # ① 收尾时【不许】删。会话文件里写着墓碑（state / exit_code），守护进程正是
+    #    读它才知道会话结束了 —— 作业跑起来就失败、一次都没登记上的那些全靠它
+    #    立刻释放，删早了要干等一个 enroll 周期。这条很容易被"顺手清一下"改坏。
+    # ② 开头那一次清扫必须在。单元里的 ProtectSystem=strict 让共享存储在守护进程
+    #    那一侧只读，它释放时那一次删除必然失败（unlink 回 EROFS），而失败是静默的
+    #    （remove_session_file() 把 OSError 吞掉）。少了这一条，那份文件
+    #    —— 里面有口令 —— 就会永远留在每个用户的家目录里，没有任何地方会报。
+    if _skip is None:
+        try:
+            _cleanup = _grab("cleanup")
+        except StopIteration:
+            _cleanup = None
+        _sweeptxt = "\n".join(_rblines)
+        check("run.sbatch 的收尾不删会话文件（墓碑要留给守护进程读）",
+              _cleanup is not None
+              and re.search(r'rm -f[^\n]*"\$SESS_FILE"', _cleanup) is None
+              and re.search(r'rm -f[^\n]*"\$JOBHB_FILE"', _cleanup) is None,
+              "" if _cleanup is not None else "run.sbatch 里未找到 cleanup()")
+        check("run.sbatch 开头有一次清扫，删掉自己那些已经不在队列里的会话文件"
+              "（守护进程那一侧只读，删不动）",
+              re.search(r"^sweep_stale_sessions\(\)", _sweeptxt, re.M) is not None
+              and re.search(r"^sweep_stale_sessions$", _sweeptxt, re.M) is not None,
+              "run.sbatch 里没有 sweep_stale_sessions 的定义或调用")
 
     if _skip is None:
         _hk = "ssh-ed25519 " + "K" * 68
@@ -11027,9 +11049,12 @@ exit 0
           "表里多了 %s / 少了 %s"
           % (sorted(set(mod.RELOAD_CLASS) - set(mod.GLOBAL_KEYS)),
              sorted(set(mod.GLOBAL_KEYS) - set(mod.RELOAD_CLASS))))
-    check("而三档都真的用到了（空着一档说明分档没做）",
-          set(mod.RELOAD_CLASS.values()) == {mod.RELOAD_HOT, mod.RELOAD_NOTICE,
-                                             mod.RELOAD_COLD},
+    # 从前这里还要求"三档都非空"。COLD 那一档现在【合法地】是空的 —— 它唯一
+    #   那个成员 `readonly_paths` 随只读挂载改由单元的 `ProtectSystem=strict`
+    #   承担而退休了。所以改成判两件更要紧的：HOT 与 NOTICE 两档确实都在用，
+    #   而 COLD 这一档【可以】为空、但它的兜底方向必须在（见下面那一条）。
+    check("可热的那两档都真的在用（HOT 与 NOTICE 各自都有键）",
+          {mod.RELOAD_HOT, mod.RELOAD_NOTICE} <= set(mod.RELOAD_CLASS.values()),
           str(sorted(set(mod.RELOAD_CLASS.values()))))
 
     # ── 这一节的两件基础设施 ────────────────────────────────────────────────
@@ -11179,14 +11204,23 @@ exit 0
                            "max_sessions_per_user = 5\n", "rl-c.conf")
         check("改了 max_sessions_per_user，一个字都不说（HOT 档只影响新发生的事）",
               mod.changed_notice_keys(_cfg_a, mod.Config(_cf_c)) == [])
-        _cf_d = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/home\n"
-                           "range_start = 55001\nrange_end = 55099\n", "rl-d.conf")
-        _cf_e = write_conf("cluster_cidr = 192.0.2.0/24\nreadonly_paths = /shared/other\n"
-                           "range_start = 55001\nrange_end = 55099\n", "rl-e.conf")
-        check("改了 readonly_paths，落进 COLD 档（它只有重启才生效）",
-              mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))
-              == ["readonly_paths"],
-              str(mod.changed_cold_keys(mod.Config(_cf_d), mod.Config(_cf_e))))
+        # COLD 那一档现在没有天然的成员（它唯一那个 `readonly_paths` 随只读挂载
+        #   改由单元的 `ProtectSystem=strict` 承担而退休了）。而这一档不能没有
+        #   出口：`_changed_keys_by_class()` 遍历 GLOBAL_KEYS、用
+        #   `.get(key, RELOAD_COLD)` 取档，所以【没登记在 RELOAD_CLASS 里】的键
+        #   默认落进 COLD —— 那正是"加了一个键、忘了分类"时的兜底方向。
+        #   验它要临时往 GLOBAL_KEYS 里加一个键，而且【故意不加】进 RELOAD_CLASS。
+        _saved_g = mod.GLOBAL_KEYS
+        mod.GLOBAL_KEYS = frozenset(set(_saved_g) | {"probe_unclassified"})
+        try:
+            _cf_d, _cf_e = mod.Config(_cf_a), mod.Config(_cf_a)
+            _cf_d.raw["probe_unclassified"] = "1"
+            _cf_e.raw["probe_unclassified"] = "2"
+            check("没分类的键默认落进 COLD 档（加键忘了分类时倒向「必须重启」那一侧）",
+                  mod.changed_cold_keys(_cf_d, _cf_e) == ["probe_unclassified"],
+                  str(mod.changed_cold_keys(_cf_d, _cf_e)))
+        finally:
+            mod.GLOBAL_KEYS = _saved_g
 
         # 32.3 改一个「随时可热」的键，生效，而进程还是同一个
         #
@@ -11226,27 +11260,43 @@ exit 0
                    for o in _d_hot._config_holders()]))
 
         # 32.4 改一个必须重启的键，整个 reload 拒绝，一个字都不改
-        _COLD = write_conf("cluster_cidr = 192.0.2.0/24\n"
-                           "range_start = 55001\nrange_end = 55099\n"
-                           "readonly_paths = /shared/home\n"
-                           "max_sessions_per_user = 2\n", "rl-cold.conf")
-        _dc = _mk_reload_d(_COLD)
-        with open(_COLD, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
-                     "range_start = 55001\nrange_end = 55099\n"
-                     "readonly_paths = /shared/other\n"
-                     "max_sessions_per_user = 7\n")
-        _rl_ok, _rl_notes = _dc.reload_config()
-        check("改了 readonly_paths，热重载整个拒绝"
-              "（用户拍的那条：校验不全过就一个字都不改）",
-              _rl_ok is False and _rl_notes == [],
-              "ok=%s notes=%s" % (_rl_ok, _rl_notes))
-        check("而连那个本来可以热的键也没被改 —— 这就是「整个拒绝」的意思"
-              "（若只拒绝那一个键，max_sessions_per_user 会悄悄变成 7）",
-              _dc.cfg.max_sessions_per_user == 2
-              and _dc.cfg.raw.get("readonly_paths") == "/shared/home",
-              "%s / %s" % (_dc.cfg.max_sessions_per_user,
-                           _dc.cfg.raw.get("readonly_paths")))
+        #
+        # COLD 档现在没有天然的成员（见 32.2 那一段：它唯一那个键退休了），所以
+        #   这里临时给 `GLOBAL_KEYS` 与 `RELOAD_CLASS` 各加一个键，用完整的那条路
+        #   （写文件 → `Config()` → `reload_config()`）走一遍。用完立刻还原 ——
+        #   不还原的话，后面那条 `set(RELOAD_CLASS) == set(GLOBAL_KEYS)` 会红，
+        #   而那正是它该红的样子。
+        _COLDKEY = "probe_must_restart"
+        _saved_globals = mod.GLOBAL_KEYS
+        _saved_class = dict(mod.RELOAD_CLASS)
+        mod.GLOBAL_KEYS = frozenset(set(_saved_globals) | {_COLDKEY})
+        mod.RELOAD_CLASS[_COLDKEY] = mod.RELOAD_COLD
+        try:
+            _COLD = write_conf("cluster_cidr = 192.0.2.0/24\n"
+                               "range_start = 55001\nrange_end = 55099\n"
+                               "%s = /shared/home\n" % _COLDKEY +
+                               "max_sessions_per_user = 2\n", "rl-cold.conf")
+            _dc = _mk_reload_d(_COLD)
+            with open(_COLD, "w", encoding="utf-8") as _f:
+                _f.write("cluster_cidr = 192.0.2.0/24\n"
+                         "range_start = 55001\nrange_end = 55099\n"
+                         "%s = /shared/other\n" % _COLDKEY +
+                         "max_sessions_per_user = 7\n")
+            _rl_ok, _rl_notes = _dc.reload_config()
+            check("改了一个必须重启的键，热重载整个拒绝"
+                  "（用户拍的那条：校验不全过就一个字都不改）",
+                  _rl_ok is False and _rl_notes == [],
+                  "ok=%s notes=%s" % (_rl_ok, _rl_notes))
+            check("而连那个本来可以热的键也没被改 —— 这就是「整个拒绝」的意思"
+                  "（若只拒绝那一个键，max_sessions_per_user 会悄悄变成 7）",
+                  _dc.cfg.max_sessions_per_user == 2
+                  and _dc.cfg.raw.get(_COLDKEY) == "/shared/home",
+                  "%s / %s" % (_dc.cfg.max_sessions_per_user,
+                               _dc.cfg.raw.get(_COLDKEY)))
+        finally:
+            mod.GLOBAL_KEYS = _saved_globals
+            mod.RELOAD_CLASS.clear()
+            mod.RELOAD_CLASS.update(_saved_class)
 
         # 32.5 新配置读不动，旧配置继续服务
         #

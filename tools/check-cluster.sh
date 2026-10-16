@@ -303,36 +303,56 @@ fi
 sec "systemd 版本与加固指令支持（决定单元怎么写）"
 # ==============================================================================
 r INFO "systemd: $(systemctl --version 2>&1 | head -n1)"
+
+# 加固指令只有一个来源：真要装上去的那份单元。下面两节都从它里面抽，而不是在这里
+#   再抄一份 —— 抄一份的后果是探针测的是"某一天写的那一套"，而单元改了它不知道，
+#   于是这一节永远绿（`readonly_paths` 那一版就是这么过来的）。
+UNIT_SRC="$(dirname "$0")/../cluster/slurmate-sessiond.service"
+
+# 抽出 [Service] 段里【除少数几条之外】的全部指令。
+#
+# 方向是刻意选的：反过来（列一串前缀去认"像沙箱的那些"）的话，将来往单元里加一条
+#   不匹配那串前缀的指令，探针会少测一条而仍然全绿 —— 测的比发的少，正是这一节
+#   要防的那件事。这里只有一张很短的排除表，多出来的东西自动进沙箱。
+# 排除的是与沙箱无关的那几类：怎么起进程（Type/Exec*/Restart*/User/UMask/…）与
+#   systemd 自己托管的那几个目录（*Directory / *DirectoryMode）—— 后面那几个由
+#   下面单独按探针自己的名字加，免得动到真服务在用的目录。
+_hm_extract() {
+    awk '
+        /^\[/ { in_service = ($0 == "[Service]"); next }
+        !in_service { next }
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { next }
+        {
+            key = $0; sub(/=.*$/, "", key)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key ~ /^(Type|Exec[A-Za-z]*|User|Group|UMask|Restart|RestartSec|StartLimit[A-Za-z]*|PartOf|Environment|WorkingDirectory|Standard[A-Za-z]*)$/) next
+            if (key ~ /Directory$|DirectoryMode$/) next
+            print
+        }
+    ' "$1"
+}
+# 顺带判一件事：抽出来的条数不该是"某一个固定数字"，但它必须覆盖住沙箱那几件
+#   要紧的事。少了一条要紧的（比如 ProtectSystem 被谁删了），下面那次实测里的
+#   "该只读的地方真的只读吗"会红 —— 所以这里不另立一条判据，只留这句话。
+
 echo "  --- 关键加固指令是否被这个 systemd 接受（用 systemd-analyze verify 真校验）---"
 VERIFY_UNIT="$SNAP_DIR/slurmate-verify.service"
-cat > "$VERIFY_UNIT" <<'VEOF'
-[Unit]
-Description=slurmate directive verification
-[Service]
-Type=oneshot
-ExecStart=/bin/true
-ProtectSystem=full
-ReadOnlyPaths=/shared/home
-ReadWritePaths=/var/lib/slurmate-session /var/log/slurmate
-PrivateTmp=yes
-NoNewPrivileges=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN
-AmbientCapabilities=CAP_NET_ADMIN
-MemoryDenyWriteExecute=yes
-SystemCallFilter=@system-service
-SystemCallArchitectures=native
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-PrivateDevices=yes
-RuntimeDirectory=slurmate-session
-StateDirectory=slurmate-session
-LogsDirectory=slurmate
-VEOF
+if [[ ! -r "$UNIT_SRC" ]]; then
+    r FAIL "读取失败：单元文件 ${UNIT_SRC}，这一节与下一节都没有结论"
+else
+{
+    echo '[Unit]'
+    echo 'Description=slurmate directive verification'
+    echo '[Service]'
+    echo 'Type=oneshot'
+    echo 'ExecStart=/bin/true'
+    _hm_extract "$UNIT_SRC"
+    echo 'RuntimeDirectory=slurmate-session'
+    echo 'StateDirectory=slurmate-session'
+    echo 'LogsDirectory=slurmate'
+} > "$VERIFY_UNIT"
+echo "      指令取自 $(basename "$UNIT_SRC")，共 $(wc -l < "$VERIFY_UNIT") 行"
 # 注意：systemd-analyze verify 会连带检查它引用的所有单元，输出里混着全系统的既有告警。
 # 只保留提到【本单元】的行，否则会把 slurmd.service / munge.service 的陈旧问题当成我们的。
 VERIFY_OUT="$(systemd-analyze verify "$VERIFY_UNIT" 2>&1 | grep -F "$VERIFY_UNIT" || true)"
@@ -345,39 +365,96 @@ else
     r PASS "指令均被接受（有非致命告警，见下）"
     echo "$VERIFY_OUT" | sed 's/^/      /' | head -n 10
 fi
+fi
 
 # ==============================================================================
-sec "沙箱可行性实测（最关键：加固后 scontrol/scancel 还能否连通 slurmctld + munge）"
+sec "沙箱可行性实测（加固后 scontrol/munge/nft 还能不能跑，只读是不是真的生效）"
 # ==============================================================================
-r INFO "用一个带完整加固指令的瞬时单元跑 scontrol ping（只读，跑完自动销毁）"
+# 这一节要同时回答两件相反的事：
+#   · 加固没有把守护进程弄瞎：它照样要能问 slurmctld、走 munge、管 nft；
+#   · 加固真的生效了：该只读的地方写不进去。
+# 少问第二件的话，一套什么都没拦住的指令也会得到 PASS。
+#
+# 指令照单元文件抽（见上一节），所以这里测的就是将要装上去的那一套。
+r INFO "用一个带同一套加固指令的瞬时单元跑一遍（跑完销毁，系统里不留痕迹）"
 SANDBOX_OUT="$SNAP_DIR/sandbox-test.txt"
-if command -v systemd-run >/dev/null 2>&1; then
-    timeout 30 systemd-run --wait --pipe --collect \
-        --property=Type=oneshot \
-        --property=ProtectSystem=full \
-        --property=ReadOnlyPaths=/shared/home \
-        --property=PrivateTmp=yes \
-        --property=NoNewPrivileges=yes \
-        --property=RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6 AF_NETLINK" \
-        --property=CapabilityBoundingSet="CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN" \
-        --property=AmbientCapabilities=CAP_NET_ADMIN \
-        --property=MemoryDenyWriteExecute=yes \
-        --property=SystemCallFilter=@system-service \
-        /bin/bash -c 'echo "--- scontrol ping ---"; scontrol ping; echo "rc=$?"; echo "--- munge socket ---"; ls -l /run/munge/ 2>&1; echo "--- nft list ---"; nft list tables >/dev/null && echo "nft OK" || echo "nft FAIL"' \
-        > "$SANDBOX_OUT" 2>&1
-    if grep -q "is UP" "$SANDBOX_OUT" 2>/dev/null; then
-        r PASS "沙箱内 scontrol ping 成功，加固指令可以直接用"
-    elif grep -qE "Interactive authentication required|Failed to start transient service unit" "$SANDBOX_OUT" 2>/dev/null; then
-        r WARN "无法创建瞬时单元（非 root 或 polkit 拒绝），本项必须由 root 运行才有结论"
-    elif grep -qE "Access denied|not permitted|Permission denied|No such file" "$SANDBOX_OUT" 2>/dev/null; then
-        r FAIL "沙箱内 scontrol/nft 失败，必须放宽加固指令，详见下方与快照"
-    else
-        r WARN "沙箱测试未得到明确结论，详见下方与快照"
-    fi
-    sed 's/^/    /' "$SANDBOX_OUT" 2>/dev/null | head -n 25
-    echo "    （完整输出: $SANDBOX_OUT）"
+SANDBOX_PROBE="$SNAP_DIR/sandbox-probe.sh"
+cat > "$SANDBOX_PROBE" <<'PEOF'
+echo "--- scontrol ping ---"
+scontrol ping; echo "rc=$?"
+
+echo "--- munge 走一遍（socket 连不连得上，比 ls 有说服力）---"
+if ! command -v munge >/dev/null 2>&1; then
+    echo "MUNGE-SKIP（这台机器上没有 munge 命令）"
 else
+    printf 'slurmate-probe' | munge 2>/dev/null | unmunge >/dev/null 2>&1
+    if [[ "${PIPESTATUS[1]}" == "0" ]]; then echo "MUNGE-OK"; else echo "MUNGE-BAD"; fi
+fi
+
+echo "--- nft list ---"
+if nft list tables >/dev/null 2>&1; then echo "NFT-OK"; else echo "NFT-BAD"; fi
+
+echo "--- 该只读的地方真的只读吗（拿 /root 试，不碰任何人的家目录）---"
+if touch /root/.slurmate-sandbox-probe 2>/dev/null; then
+    rm -f /root/.slurmate-sandbox-probe
+    echo "READONLY-BAD"
+else
+    echo "READONLY-OK"
+fi
+
+echo "--- 托管目录还写得进去吗（StateDirectory=/RuntimeDirectory= 那一族）---"
+if touch "${RUNTIME_DIRECTORY:-/nonexistent}/probe" 2>/dev/null; then
+    echo "WRITABLE-OK"
+else
+    echo "WRITABLE-BAD"
+fi
+PEOF
+if [[ ! -r "$UNIT_SRC" ]]; then
+    r FAIL "读取失败：单元文件 ${UNIT_SRC}，本项没有结论"
+elif ! command -v systemd-run >/dev/null 2>&1; then
     r FAIL "systemd-run 不存在，无法实测"
+else
+    _props=()
+    while IFS= read -r _l; do
+        [[ -n "$_l" ]] && _props+=("--property=$_l")
+    done < <(_hm_extract "$UNIT_SRC")
+    echo "      带上了 ${#_props[@]} 条指令，取自 $(basename "$UNIT_SRC")"
+    # 一条都抽不到 = 抽取规则与单元不一致了（指令改了写法）。那会让下面那个
+    #   数组在 `set -u` 下展开报错，更要紧的是：测一个空沙箱得到的是假绿。
+    if (( ${#_props[@]} == 0 )); then
+        r FAIL "从 $(basename "$UNIT_SRC") 里一条沙箱指令都没抽到：抽取规则与单元不一致了，本项没有结论"
+        _props=("--property=Type=oneshot")
+    fi
+    # 不用 `--collect`：失败时那个单元要留着，`journalctl` 里才有 systemd 自己
+    #   那句"哪一步没做成"。跑完由下面那条 reset-failed 收干净。
+    timeout 60 systemd-run --wait --pipe --unit=slurmate-sandbox-probe \
+        --property=Type=oneshot \
+        --property=RuntimeDirectory=slurmate-probe \
+        "${_props[@]}" \
+        /bin/bash "$SANDBOX_PROBE" > "$SANDBOX_OUT" 2>&1
+
+    _why=""
+    grep -q "is UP" "$SANDBOX_OUT" || _why="scontrol ping 没通"
+    grep -q "MUNGE-BAD" "$SANDBOX_OUT" && _why="${_why:+${_why}；}munge 走不通（socket 连不上）"
+    grep -q "NFT-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}nft list 不可用"
+    grep -q "READONLY-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}该只读的地方写得进去"
+    grep -q "WRITABLE-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}托管目录写入失败"
+
+    if grep -qE "Interactive authentication required|Failed to start transient service unit|Failed to connect to bus" "$SANDBOX_OUT" 2>/dev/null; then
+        r WARN "无法创建瞬时单元（非 root 或 polkit 拒绝），本项必须由 root 运行才有结论"
+    elif grep -qE "status=226" "$SANDBOX_OUT" 2>/dev/null; then
+        r FAIL "沙箱根本没搭起来：单元在应用加固指令时就失败了（226 = EXIT_NAMESPACE，命名空间没建成）"
+        r INFO "是这一套指令里的某一条在这台机器上无法应用，逐条筛，见下面那条 journalctl"
+    elif [[ -n "$_why" ]]; then
+        r FAIL "沙箱内跑不通：${_why}（详见下方与快照）"
+    else
+        r PASS "scontrol / munge / nft 全通，而且该只读的确实只读、托管目录确实可写"
+    fi
+    sed 's/^/    /' "$SANDBOX_OUT" 2>/dev/null | head -n 30
+    echo "    --- systemd 自己说了什么（失败时这一节是根因所在）---"
+    journalctl -u slurmate-sandbox-probe --no-pager -n 15 2>/dev/null | sed 's/^/    /'
+    systemctl reset-failed slurmate-sandbox-probe 2>/dev/null
+    echo "    （完整输出: $SANDBOX_OUT 与 $SANDBOX_PROBE）"
 fi
 
 # ==============================================================================
@@ -463,6 +540,11 @@ sacctmgr -n -P show assoc format=Account,Partition 2>/dev/null \
     else
         printf '    [MISMATCH] association 写了 %s，但该分区不存在（多为大小写不一致）\n' "$ap"
         printf '               注意：Slurm 分区名大小写敏感，这会影响 -p 参数与权限校验\n'
+        printf '               改它要在控制节点上按账户逐个来（分区名是 association 的键，改不了只能增删）：\n'
+        printf '                 sacctmgr -nP show assoc format=Account,User,Partition | grep -i "|%s$"\n' "$ap"
+        printf '                 sacctmgr -i add association account=<上面那个账户> partition=<正确大小写>\n'
+        printf '                 sacctmgr -i delete association where account=<上面那个账户> partition=%s\n' "$ap"
+        printf '               改之前先确认这件事只影响 Slurm 的记账：这台机器上其他读 association 的组件也会看到它\n'
     fi
 done
 
@@ -661,6 +743,7 @@ echo "════════════════════════�
 echo " 快照目录: $SNAP_DIR"
 echo "   - nft-ruleset.before  （部署后非干扰比对基线）"
 echo "   - sandbox-test.txt    （沙箱加固可行性实测输出）"
+echo "   - sandbox-probe.sh    （上面那一节在沙箱里跑的那个脚本，原样留着）"
 echo
 echo " 请把以上全部输出复制回传。"
 echo "═══════════════════════════════════════════════════════════════"

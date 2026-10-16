@@ -1819,7 +1819,7 @@ SLURM_COMMANDS = ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
 #   这些东西是插件的策略（code-server 的认证方式、sshd 的可执行文件路径），
 #   不是站点的事实，所以它们各自住在那个插件的配置里，而不是在顶层排成一排。
 GLOBAL_KEYS = frozenset([
-    "cluster_cidr", "readonly_paths",
+    "cluster_cidr",
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
     # 每人最多几个会话。名字不是 v0.2 那个 `max_active_per_user`，
     # 合并之后它数的是「占着位置的」（排队中的也算），沿用旧名字会让这个名字说谎；
@@ -1921,9 +1921,12 @@ RELOAD_CLASS = {
     "sacct": RELOAD_NOTICE,
 
     # ── 必须重启 ──────────────────────────────────────────────────────────
-    # 部署期配置：`install-base.sh` 读它（只读挂载的路径），守护进程里零读者
-    #   它在运行期改了本来就没有意义，而"改了就热重载"会让管理员以为生效了。
-    "readonly_paths": RELOAD_COLD,
+    # 这一档现在【没有成员】。它唯一那个成员是 `readonly_paths`（部署期配置，
+    #   `install-base.sh` 拿去渲染单元的只读挂载，守护进程里零读者）—— 那一层
+    #   保护已经改由单元的 `ProtectSystem=strict` 承担，键跟着退休了。
+    # 这一档留着，因为它同时是 [`_changed_keys_by_class()`] 的兜底：表外的键
+    #   【默认】归进 COLD。将来加一个键而忘了分类时，默认落在"必须重启"这一侧，
+    #   而不是"改了就当没事发生"那一侧 —— 这个方向是安全的那一个。
 }
 
 
@@ -5507,7 +5510,8 @@ class Config(object):
         #       几格命令路径：`sbatch = /usr/bin/sbatch` 与留空，属性值是同一个，
         #       而配置真的变了。
         #   判别"变了"时宁可多报：多报的代价是一句话，漏报的代价是 reload
-        #     悄悄把某个键换掉而没人知道（`readonly_paths` 那一档尤其如此）。
+        #     悄悄把某个键换掉而没人知道（COLD 那一档尤其如此：落在那里的是
+        #     "改了也热不起来"的键，漏报等于让管理员以为它生效了）。
         self.raw = dict(raw)
 
         # ── 插件：表是扫出来的，不是代码里写死的 ────────────────────────
@@ -5565,7 +5569,6 @@ class Config(object):
 
         # ── 网络 ──
         self.cluster_cidr = get("cluster_cidr").strip()
-        self.readonly_paths = get("readonly_paths").strip()
 
         # ── 端口池 ──
         self.port_start = getint("range_start", 55001)
@@ -8685,7 +8688,7 @@ class Sessiond(object):
         self.audit("releasing", session=s["session_id"], job=s["job_id"], reason=reason)
 
     def phase_release(self):
-        """拆除：先确认作业真的停了，再删 ACL → 删口令文件 → 尽力删会话文件 → 置终态。
+        """拆除：先确认作业真的停了，再删 ACL → 删口令文件 → 兜底删会话文件 → 置终态。
 
         终态之前规则一定在，之后规则一定不在。
 
@@ -9025,6 +9028,15 @@ class Sessiond(object):
 
     # ── 文件清理（安全关键）─────────────────────────────────────────────────
     def remove_session_file(self, s):
+        # 常规清理就在这里。而它删不动的时候（共享存储在本进程这一侧是只读
+        #   挂载的，见单元里的 `ProtectSystem=strict`），
+        #   失败是静默的：下面那个 `except OSError` 连 `EROFS` 一起吞。
+        # 所以作业侧另有一次清扫兜着（`run.sbatch` 的 `sweep_stale_sessions()`，
+        #   在下一次作业开头跑）。
+        # 不能改由作业在退出时删：会话文件里写着墓碑（`state` 与 `exit_code`），
+        #   本进程正是读它才知道那个会话已经结束了（作业跑起来就失败、一次都没
+        #   登记上的那些全靠它立刻释放，否则要干等一个 enroll 周期）。删早了
+        #   那个信号就没了。
         # `job_id` 可能是 NULL，而这一条不是防御性编程：`op_goodbye` 只挡
         #   终态，不挡 `job_id` 为空，所以一条 `reserved`（提交中途被打断留下来的）
         #   会话被 goodbye 之后会走到这里，而 `"job-%d.json" % None` 是
@@ -10614,8 +10626,8 @@ class Sessiond(object):
         # 注意：这里【不】创建用户目录、也【不】写口令文件。
         # 口令由作业自己生成、写进 0600 的会话文件；用户目录由作业自己
         # mkdir（它以本人身份运行，权限天然正确）。守护进程在 systemd 下
-        # 把共享家目录挂成只读（见 systemd 单元的 ReadOnlyPaths，由部署脚本
-        # 按站点实际挂载点生成），从不写用户家目录，这样 root 身上
+        # 把整个文件系统挂成只读（见 systemd 单元的 ProtectSystem=strict），
+        # 从不写用户家目录，这样 root 身上
         # 就没有"写用户文件"这条攻击面。
         sid = os.urandom(8).hex()
 

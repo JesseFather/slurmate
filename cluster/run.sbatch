@@ -199,8 +199,8 @@ TOMBSTONE_WRITTEN=0
 #     的 fd 带着自己的偏移量，它收尾时的那一次写会盖掉文件开头。
 #
 # 目录必须在脚本开始之前就存在（`-o` 是 Slurm 在跑脚本之前打开的）。守护
-#   进程建不了它 —— systemd 单元把共享家目录挂成只读（ReadOnlyPaths），那是
-#   "root 身上没有『写用户文件』这条攻击面"那层保护，不该为了这个破掉。所以那一
+#   进程建不了它 —— systemd 单元把整个文件系统挂成只读（ProtectSystem=strict），
+#   那是"root 身上没有『写用户文件』这条攻击面"那层保护，不该为了这个破掉。所以那一
 #   步由客户端在连上站点时做（`backend-ssh.js` 的 `PREPARE_CMD`，一次连接一次）。
 #   这里再 `mkdir -p` 一次是兜底 —— 目录被谁删掉之后，下一个作业会把它补回来，
 #   而不是让此后每一次提交都起不来。
@@ -338,6 +338,43 @@ write_jobhb() {
     kill -0 "$SVC_PID" 2>/dev/null || return 0
     write_atomic "$JOBHB_FILE" \
         "$(printf '{"job_id":%s,"at":%s,"service_pid":%s}\n' "$JOB_ID" "$(date +%s)" "$SVC_PID")"
+}
+
+# ─── 2a-2. 清扫自己那些已经不在队列里的会话文件 ─────────────────────────────
+#
+# 常规清理是守护进程在释放会话时做的（`remove_session_file()`），而共享存储在
+#   它那一侧是只读挂载的（systemd 单元里的 `ProtectSystem=strict`）—— 它删不动，而那次
+#   失败是静默的（那个方法把 `OSError` 吞掉）。作业被硬杀时也没有人删。于是这
+#   两份会一直留在用户家目录里，而会话文件里可能有口令，插件还可能往里塞它自己的字段。
+#
+# 判据用 Slurm 自己的队列，不用时间：只删【本人】的、且那份作业已经不在
+#   `squeue` 里的。时间判据会删掉一个跑得久的会话正在用的文件，而这个集群的
+#   TimeLimit 是 183 天，那不是假想的场景。
+# 再留一段最小年龄：作业刚退出那一刻，墓碑正等着守护进程来读（它据此立刻释放，
+#   而不是干等一个 enroll 周期）。十分钟够它读几百遍。
+# 只扫自己那一份清单：家目录是同一个用户自己的，别人的文件名不该出现在这里，
+#   出现了也不动它。
+SESS_SWEEP_MIN_AGE_MIN=10
+sweep_stale_sessions() {
+    local live p base jid n=0
+    live="$(squeue -h -u "$MY_USER" -o '%i' 2>/dev/null)" || return 0
+    # 问不到就当没这回事。列表为空只可能是那条命令失败 —— 我们自己此刻就在
+    #   队列里。把"问不到"当成"都不在跑"，下一个条件就会删掉正在用的会话文件。
+    [[ -n "$live" ]] || return 0
+    for p in "$SLURMATE_SESS_DIR"/job-*.json "$SLURMATE_SESS_DIR"/job-*.jobhb; do
+        [[ -e "$p" ]] || continue
+        base="${p##*/}"
+        jid="${base#job-}"
+        jid="${jid%%.*}"
+        [[ "$jid" =~ ^[0-9]+$ ]] || continue
+        [[ "$jid" == "$JOB_ID" ]] && continue
+        grep -qx -- "$jid" <<<"$live" && continue
+        [[ -n "$(find "$p" -maxdepth 0 -mmin "+$SESS_SWEEP_MIN_AGE_MIN" 2>/dev/null)" ]] \
+            || continue
+        rm -f -- "$p" 2>/dev/null && n=$(( n + 1 ))
+    done
+    (( n > 0 )) && log "清扫：删掉了 $n 份已经不在队列里的会话文件"
+    return 0
 }
 
 # ─── 2b. 服务进程的输出必须还在作业自己的那条流上 ───────────────────────────
@@ -559,6 +596,11 @@ cleanup() {
     # 删掉私有的临时目录。这里的东西登录节点看不见（那是它被选作临时落点的
     # 原因），所以删它不会动到作业日志一个字。
     [[ -n "$LOCAL_LOG_DIR" && -d "$LOCAL_LOG_DIR" ]] && rm -rf "$LOCAL_LOG_DIR" 2>/dev/null
+
+    # 这里【不删】会话文件。墓碑就写在它里面，守护进程要读它才知道这个会话
+    #   已经结束了（读的是 `state` 与 `exit_code`），删早了那个信号就没了。
+    #   常规清理由守护进程在释放会话时做，收拾不了的由下一次作业开头那一次
+    #   清扫兜住，见 sweep_stale_sessions()。
     exit "$rc"
 }
 
@@ -575,6 +617,10 @@ log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
     "partition=${SLURMATE_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gres=${SLURMATE_GRES:-（不占）}" \
     "service=$SLURMATE_SERVICE_KIND"
 log "候选端口: $SLURMATE_CANDIDATES"
+
+# 开头先扫一遍自己那些已经不在队列里的会话文件（理由见 2a-2）。放在这里而不是
+#   收尾时：收尾那一段要在 KillWait 里跑完，不该再往里加活。
+sweep_stale_sessions
 
 NODE_IP="$(detect_node_ip)" || {
     log_err "无法确定节点 IPv4，退出（ACL 依赖字面 IP，宁可不启动）"

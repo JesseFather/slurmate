@@ -76,11 +76,11 @@ UID 区分，而本机进程访问本机 IP 走的是 `lo`，通常被放行。
   （这是宿主的职责，与哪个插件无关；插件往会话文件加字段走
   `PLUGIN_SESSION_FIELDS`，转义由宿主统一做）
 - 守护进程只读这些文件，从不代写
-- 用户家目录在 systemd 单元里以只读方式挂载（`ReadOnlyPaths`，由 `install-base.sh` 按
-  `readonly_paths` 渲染）
+- 整个文件系统（用户家目录在其中）在 systemd 单元里挂成只读，只有守护进程自己
+  那几个状态、日志、运行时目录与 `/run/munge` 除外（`ProtectSystem=strict` +
+  `ReadWritePaths=`，见 `cluster/slurmate-sessiond.service`）
 
-`readonly_paths` 留空会让生成的单元不含该行，这层保护就随之消失 —— 部署后请确认
-它真的进了单元文件，而不是相信它默认生效。
+这一层不依赖任何站点配置：家目录挂在哪、有几个，都由内核那一侧盖住。
 
 ### 会话文件的读取做了一整套硬校验
 

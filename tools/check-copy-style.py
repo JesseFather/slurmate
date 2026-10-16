@@ -152,7 +152,7 @@ ROOT = os.path.dirname(HERE)
 BASELINE_PATH = os.path.join(HERE, "copy-style-baseline.json")
 UI_TERMS_PATH = os.path.join(HERE, "ui-terms.json")
 
-EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css", ".in",
+EXT = (".js", ".mjs", ".cjs", ".py", ".sh", ".sbatch", ".html", ".css", ".service",
        ".yml", ".yaml", ".json")
 # 整份按注释判的三类（见 `star_only`）：YAML 的注释、以及这一类文件里成篇的
 #   说明字段。K 与 L 在那里不判。
@@ -202,10 +202,10 @@ LINE_COMMENT = {
     ".js": ("//",), ".mjs": ("//",), ".cjs": ("//",),
     ".py": ("#",), ".sh": ("#",), ".sbatch": ("#",),
     ".html": ("<!--",), ".css": ("/*",),
-    # `.in` 是模板（`cluster/slurmate-sessiond.service.in` 会被渲染成 systemd
-    #   单元）。管理员会打开渲染出来的那一份读注释，所以它里面的记号他看得见。
-    #   少了这一项，整份文件从视野里过去 —— 而那正是 `.html` 栽过的形状。
-    ".in": ("#",),
+    # `.service` 是 systemd 单元（`cluster/slurmate-sessiond.service`）。管理员
+    #   会打开它读注释 —— 那份文件里成篇的中文说明就是写给他看的。少了这一项，
+    #   整份文件从视野里过去 —— 而那正是 `.html` 栽过的形状。
+    ".service": ("#",),
     ".yml": ("#",), ".yaml": ("#",),
 }
 # 块注释的续行（`* 这一行`）。Python 与 shell 没有这种写法。

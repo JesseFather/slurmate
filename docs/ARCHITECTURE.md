@@ -1041,8 +1041,8 @@ socket 权限是 `0666`，但安全性不建立在这个权限位上
 ### root 不写用户家目录
 
 口令由作业自己生成并写进 `0600` 的会话文件；守护进程全程只读用户家目录，
-并且 systemd 单元把共享存储挂成只读（`ReadOnlyPaths=`，由 `install-base.sh` 按
-`readonly_paths` 渲染，`cluster/slurmate-sessiond.service.in`）。
+并且 systemd 单元把整个文件系统挂成只读（`ProtectSystem=strict` +
+`ReadWritePaths=`，见 `cluster/slurmate-sessiond.service`）。
 
 这样 root 身上没有「写用户文件」这条攻击面，也避免了 root 被符号链接诱骗
 （`cluster/run.sbatch`）。代价是守护进程不能替用户创建目录 —— 它也不创建：
@@ -1541,20 +1541,18 @@ RUNNING 会话、每一个 tick 都成立，不节流就是每分钟 30 行，�
 ## 八、部署拓扑与进程加固
 
 `slurmate-sessiond` 以 root 跑在登录节点上，systemd 单元给出了一组最小权限
-（`cluster/slurmate-sessiond.service.in`）：
+（`cluster/slurmate-sessiond.service`）：
 
 | 指令 | 为什么 |
 |---|---|
-| `ProtectSystem=full` | 必须是 `full` 而不是 `strict`：`strict` 会把 `/run` 也挂成只读，切断 munge 的 socket，`scontrol`/`scancel` 全部失败 |
-| `ReadOnlyPaths=@READONLY_PATHS@` | 共享存储只读挂载 |
+| `ProtectSystem=strict` | 整个文件系统树只读，用户家目录因此盖在里面 —— 站点不需要报任何一个路径。`full` 不够：它只盖 `/usr` 与 `/etc` |
+| `ReadWritePaths=/run/munge` | 上面那条唯一的例外。munge 的 socket 连接需要对它有写权限，不开这个口子 `scontrol`/`scancel`/`sbatch` 全部失败。状态、日志、运行时目录不用列，那几个由 `StateDirectory=`/`LogsDirectory=`/`RuntimeDirectory=` 自己带 `BindPaths=` |
 | `PartOf=nftables.service` | `nftables.service` 的 `ExecReload` 是 `nft 'flush ruleset; include ...'`，会连本服务的表一起清掉；`PartOf` 让本服务跟着重启，保证表被重建。**不能用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来 |
 | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | nft 走 netlink；`scontrol`/`scancel` 走 AF_UNIX（munge）+ AF_INET（slurmctld） |
 | `CapabilityBoundingSet` | `CAP_NET_ADMIN`（nft）、`CAP_SETUID/SETGID`（setuid 提交）、`CAP_DAC_READ_SEARCH`/`CAP_DAC_OVERRIDE`（读 0600 会话文件）、`CAP_KILL`（回收子进程） |
 | `StartLimitIntervalSec=0` + `Restart=always` | 永不放弃重启 |
 
-单元是模板（`.service.in`），`install-base.sh` 安装时把 `@READONLY_PATHS@` 替换成站点
-的真实挂载点；`readonly_paths` 为空时整行被删除，同时打印警告
-（`cluster/install-base.sh`）。
+单元逐字安装，里面没有需要按站点替换的东西（`cluster/install-base.sh`）。
 
 ## 九、已知边界
 

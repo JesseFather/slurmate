@@ -103,9 +103,13 @@ nft list chain inet slurmate output
 
 3e. 家目录在 systemd 下被挂成只读
 
-`install-base.sh` 按 `readonly_paths` 渲染 `ReadOnlyPaths=`（`cluster/install-base.sh`）。
-填错的后果是守护进程在一个不存在的路径上做只读挂载，systemd 直接拒绝启动
-（`cluster/install-base.sh`）。留空则整行被删除，保护随之消失（会打印警告）。
+这一条不需要站点报任何路径：单元里的 `ProtectSystem=strict` 把整个文件系统树挂成
+只读，用户家目录自然盖在里面，只有 `/run/munge` 与守护进程自己那几个目录除外
+（`cluster/slurmate-sessiond.service`）。
+
+它在目标机器上行不行，由 `tools/check-cluster.sh` 第 8 节实测：那一节带着与单元
+同一套指令起一个瞬时单元，跑 `scontrol ping`、把 munge 走一遍、`nft list`，并验
+一次「该只读的写不进去、托管目录写得进去」。
 
 ### 4. root 需要 Slurm operator 权限
 
@@ -389,12 +393,11 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
   `systemctl reload slurmate-sessiond`（改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-至少要把这两项改成站点的真实值：
+至少要把这一项改成站点的真实值：
 
-- `cluster_cidr` —— 见前置条件 2。它没有默认值，不填服务起不来；
-- `readonly_paths` —— 见前置条件 3e。
+- `cluster_cidr` —— 见前置条件 2。它没有默认值，不填服务起不来。
 
-站点通用键一共 17 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
+站点通用键一共 16 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 插件要不要开、开哪几个，也在这一步决定。`enabled = yes` 的插件会被
 分发到每一台连上来的客户端 —— 不只是"用户可以提交它"。所以

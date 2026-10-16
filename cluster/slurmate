@@ -53,7 +53,7 @@ import time
 VERSION = "0.22"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
-# systemd 单元的名字。与 `cluster/slurmate-sessiond.service.in` 的 `[Unit]` 与
+# systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
 # 部署脚本里那个变量是同一个事实，三处各写一遍（有 lint 的机会再说：目前单元
 # 名字只在部署期用一次，改错的话 `systemctl` 会当场说"没有这个单元"）。
 SERVICE = "slurmate-sessiond"

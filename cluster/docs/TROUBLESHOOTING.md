@@ -237,7 +237,7 @@ tick 就放行。
 
 1. `nftables.service` 被 reload。它的 `ExecReload` 是
    `nft 'flush ruleset; include ...'` —— 会清掉整台机器上所有表的规则集，
-   包括本服务的（`cluster/slurmate-sessiond.service.in`）。这也可能是
+   包括本服务的（`cluster/slurmate-sessiond.service`）。这也可能是
    `systemctl restart nftables`、或有人手工 `nft flush ruleset` 造成的。
 2. 有人只删了链（`nft delete chain inet slurmate output`）而表还在。早期实现
    在这种情况下会直接返回「表在，不用管」，之后所有 `add rule` 都失败、对账每 tick
@@ -451,8 +451,8 @@ nft list chain inet slurmate output
 ```
 
 处置：调大 `[ports] range_start/range_end`，或调小 `candidates_per_session`，
-或先收掉一些陈旧会话。注意改了端口区间必须重新跑 `install-base.sh`（预检与单元渲染都
-读配置）。
+或先收掉一些陈旧会话。注意改了端口区间要重新跑 `install-base.sh`，再
+`systemctl daemon-reload`。
 
 ### 作业起来了但立刻失败，会话变 `expired` / `rejected`
 

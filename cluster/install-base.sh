@@ -323,7 +323,7 @@ if [[ "$MODE" == "uninstall" ]]; then
 fi
 
 
-SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service.in nft-compare.py)
+SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py)
 for f in "${SRC_FILES[@]}"; do
     [[ -f "${SRC_DIR}/${f}" ]] || die "源文件缺失：${SRC_DIR}/${f}（cluster/ 目录是否完整？）"
 done
@@ -478,7 +478,7 @@ DAEMON_SRC="${SRC_DIR}/slurmate-sessiond"
 #
 # 它在自拷贝之后才算，这一点是承重的：若这一行放在文件开头，从
 #   非 root 目录部署、走进自拷贝分支时，它就会仍然指着原来那个（别人能改写的）
-#   示例文件 —— 而那个文件后面会被读出来渲染 systemd 单元（readonly_paths）。
+#   示例文件 —— 而那份配置后面会被读出来给守护进程自检。
 #   判据是"我读的这一份必须来自我已经固定下来的目录"。
 SRC_CONF="${SRC_DIR}/slurmate.conf.example"
 if [[ -r "$CONF" ]]; then
@@ -670,9 +670,8 @@ DOC_DIR="${SRC_DIR}/docs"
 
 # 一件该在的文件：路径、模式、内容（`src` 传空 = 不比内容）。
 #
-#   内容比不了的两件都有理由：站点配置是管理员按本站改过的（比字节只会每次都
-#   报不同），systemd 单元是按本站的 readonly_paths 渲染出来的（与模板本来就
-#   不同）。它们只比存在与权限。
+#   内容比不了的那一件有理由：站点配置是管理员按本站改过的（比字节只会每次都
+#   报不同）。它只比存在与权限。
 audit_file() {
     local name="$1" path="$2" mode="$3" src="$4" st perm h_here h_src
     if [[ ! -e "$path" ]]; then
@@ -1126,21 +1125,11 @@ else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
 fi
 
-# ── systemd 单元：从模板渲染 ──
-# ReadOnlyPaths 必须是本站点真实的共享家目录挂载点，不能写死 ——
-# 写死的后果是守护进程在一个不存在的路径上做只读挂载，systemd 直接拒绝启动。
-READONLY_PATHS="$(sed -nE 's/^[[:space:]]*readonly_paths[[:space:]]*=[[:space:]]*(.*)/\1/p' "$SRC_CONF" 2>/dev/null \
-    | head -1 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-UNIT_RENDERED="${BACKUP_DIR}/slurmate-sessiond.service.rendered"
-if [[ -n "$READONLY_PATHS" ]]; then
-    sed "s|@READONLY_PATHS@|${READONLY_PATHS}|" "${SRC_DIR}/slurmate-sessiond.service.in" > "$UNIT_RENDERED"
-    info "systemd 单元：ReadOnlyPaths=${READONLY_PATHS}"
-else
-    sed "/@READONLY_PATHS@/d" "${SRC_DIR}/slurmate-sessiond.service.in" > "$UNIT_RENDERED"
-    warn "配置里 readonly_paths 为空，生成的服务单元【不含】共享存储只读挂载。"
-    warn "  这会去掉「root 不写用户家目录」那层保护，请确认这是你要的。"
-fi
-install_one "$UNIT_RENDERED" "$UNIT" 644
+# ── systemd 单元：逐字安装 ──
+# 它里面没有任何按站点替换的东西：沙箱那一条走 ProtectSystem=strict，家目录
+#   挂在哪由内核那一侧盖住，不需要站点报路径。（从前这里是从模板渲染的，
+#   要填一个共享家目录挂载点 —— 那个键退休之后就没有可变的部分了。）
+install_one "${SRC_DIR}/slurmate-sessiond.service" "$UNIT" 644
 
 # 目录权限必须是 0755，不能是 0700：
 #   - /usr/local/share/slurmate 里的 run.sbatch 由【用户身份】的 sbatch 读取
@@ -1221,8 +1210,8 @@ if [[ "$DRYRUN" -eq 0 ]]; then
     #   所有人的会话断一次，就为了改一行配置或装一个插件 —— 而现在改配置本身
     #   热得起来（守护进程的 `reload_config()`）。
     #
-    #   热不起来的那些键（`readonly_paths`）由守护进程自己拒绝整个 reload
-    #     并说清是哪一个键 —— 那时它仍然用旧配置照常服务，所以这里不能报
+    #   热不起来的那些键（COLD 那一档，现在是空的）由守护进程自己拒绝整个
+    #     reload 并说清是哪一个键 —— 那时它仍然用旧配置照常服务，所以这里不能报
     #     "已生效"。这一条分支说的是实话：改了没生效，要重启。
     if systemctl is-active --quiet "$SERVICE"; then
         # 说准：`systemctl reload` 回 0 只表示信号送到了 —— systemd 不知道

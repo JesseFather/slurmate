@@ -128,7 +128,7 @@ const STREAM_CMD = "/bin/bash -c '/usr/local/bin/slurmate stream'";
  * 为什么客户端要干这一件事：`sbatch -o <日志目录>/slurm-%j.out` 的父目录是
  *    Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次 `mkdir -p` 排在它后面
  *    —— 目录不存在，那一次提交的作业连启动都启动不了。而守护进程建不了它：
- *    systemd 单元把共享家目录挂成只读（`ReadOnlyPaths`），那是"root 身上没有
+ *    systemd 单元把整个文件系统挂成只读（`ProtectSystem=strict`），那是"root 身上没有
  *    『写用户文件』这条攻击面"那层保护。
  *
  *    于是三层里只剩客户端这一层。一次连接一个 exec，而它把"第一条作业会不会因为

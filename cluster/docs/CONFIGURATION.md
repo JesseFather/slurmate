@@ -13,8 +13,6 @@
 | 读者 | 怎么读 | 读到之后 |
 |---|---|---|
 | `slurmate-sessiond` | `parse_config()`：读主文件 **+ 扫 `slurmate.conf.d/`** | 全部键（外加它自己扫 `<prefix>/share/slurmate/plugins/` 得到的插件表） |
-| `cluster/install-base.sh` | `sed` 抽取主文件里的 **`readonly_paths` 一个键** | 用于渲染 systemd 单元的 `ReadOnlyPaths=` |
-
 `slurmate`（用户 CLI）不读这个文件（见下方「不再是配置项的东西」）。
 
 这份文件由 root 拥有，权限 `0644` —— 部署脚本用 `install -m 644 -o root -g root`
@@ -59,13 +57,13 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 认不得的键一律拒绝。一份旧配置里的 `max_active_per_user` 之类不会静静地失效，而是
 会被当场报出来 —— 这正是本项目一路在清的那类问题。
 
-（主文件按行首匹配键名；而 `install-base.sh` 只从主文件里 `sed` 抓
-`readonly_paths` 一个 —— 它要拿去渲染 systemd 单元的 `ReadOnlyPaths=`。所以站点
-通用键一律待在主文件里，这一条与"drop-in 文件里只有插件配置"是同一件事的两面。）
+（主文件按行首匹配键名；`install-base.sh` 不看主文件里的任何一个键，它只把那份
+配置原样装到 `/etc/slurmate/slurmate.conf`。站点通用键待在主文件里，这一条与
+"drop-in 文件里只有插件配置"是同一件事的两面。）
 
 ---
 
-## 一、站点通用键。一共 17 个。
+## 一、站点通用键。一共 16 个。
 
 这是 v0.2 的收缩，v0.3 又把它推进了一步：能从 Slurm 查到的，一律不再写一份；
 只属于某个插件的，搬进那个插件的块。
@@ -90,7 +88,6 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | 键 | 类型 | 默认值 | 说明与后果 |
 |---|---|---|---|
 | `cluster_cidr` | 单个 CIDR | **空**（无默认值） | 见下方专节。**留空即拒绝启动** |
-| `readonly_paths` | 空格分隔的路径 | 空 | 共享家目录挂载点。守护进程不读它，只有 `install-base.sh` 用 |
 | `range_start` / `range_end` | 整数 | `55001` / `55999` | 服务端口池 |
 | `reserved_ranges` | `起-止,起-止` | 空（无） | 要避让的其他区间。见下方专节 |
 | `candidates_per_session` | 整数 | `6` | 每次提交分配的候选端口数。作业逐个试，被同节点其他作业占用就试下一个 |
@@ -459,18 +456,36 @@ cluster_cidr 是否覆盖全部计算节点，若这个网段是照抄文档示�
 多网段集群目前无法表达 —— 这是本架构的已知边界，见
 [DEPLOYMENT.md](DEPLOYMENT.md) 前置条件。
 
-## `readonly_paths`
+## 只读挂载
 
-守护进程本身不读这一项。它只被 `install-base.sh` 用 `sed` 抽出来渲染 systemd 单元：
+这一条【不是配置项】。它住在 systemd 单元里：`ProtectSystem=strict` 把整个文件
+系统树挂成只读，`ReadWritePaths=/run/munge` 开出唯一的例外
+（`cluster/slurmate-sessiond.service`）。
 
-- 非空 → 生成 `ReadOnlyPaths=<值>`；
-- 留空 → 整行被删掉，并打印警告「这会去掉『root 不写用户家目录』那层保护」。
+为什么要有它：守护进程是 root 跑的，能力集里又带着 `CAP_DAC_OVERRIDE` 与
+`CAP_DAC_READ_SEARCH`（读用户家目录里 `0600` 的会话文件要靠它们）。不挂只读的话，
+它能改任何人的任何文件。挂上之后内核挡着，这是本设计相对「root 写用户文件」的
+实质安全增量。
 
-写错的后果很直接：守护进程会在一个不存在的路径上做只读挂载，systemd 直接拒绝
-启动。
+为什么不用 `ProtectSystem=full`：`full` 只盖 `/usr` 与 `/etc`，用户家目录一个都
+不管 —— 而那正是要保护的东西。`strict` 会跳过 `/dev`、`/proc`、`/sys`（那三个由
+`PrivateDevices=`、`ProtectKernelTunables=`、`ProtectControlGroups=` 管），所以它
+卷不到自己。
 
-为什么可以只读：守护进程从不写用户家目录 —— 口令由作业自己生成并写进 `0600` 的
-会话文件，会话文件也由作业自己创建。root 身上因此没有「写用户文件」这条攻击面。
+为什么需要有 `ReadWritePaths=/run/munge` 这一条：munge 的 socket 在 `/run/munge`
+下，而连接一个 unix socket 需要对该文件有写权限 —— 不开这个口子，`scontrol`、
+`scancel`、`sbatch` 会全部失败。状态、日志、运行时那三个目录不用列：
+`StateDirectory=`、`LogsDirectory=`、`RuntimeDirectory=` 自己带 `BindPaths=`。
+
+代价：释放会话时那一次删会话文件（`remove_session_file()`）在只读挂载上必然
+失败（`unlink` 回 `EROFS`），而那次失败是静默的。所以残留不靠它兜：
+`run.sbatch` 的 `sweep_stale_sessions()` 在下一次作业开头清扫一遍（判据是 Slurm
+的队列，不是时间），窗口是「从会话结束到这个人下一次交作业」。作业被硬杀时留下
+的那一份同样落在这一次清扫里。
+
+不能反过来改成「由作业在退出时删」：会话文件里写着墓碑（`state` 与 `exit_code`），
+守护进程正是读它才知道那个会话已经结束了 —— 作业跑起来就失败、一次都没登记上的
+那些全靠它立刻释放，删早了那个信号就没了，会话要干等一个 enroll 周期。
 
 改了这一项之后必须重新跑 `install-base.sh`，否则守护进程读的是新配置、systemd 用的
 还是旧单元。
@@ -899,7 +914,7 @@ sudo systemctl reload slurmate-sessiond
 |---|---|---|
 | **随时可热** | 只影响"从这一刻之后新发生的事" | `default_plugin`、`candidates_per_session`、`max_sessions_per_user`、`max_connections_per_user` |
 | **可热，但会说一句** | 会动到**已经建立**的东西 | `cluster_cidr`（内核里那条基础规则跟着换）、`range_start` / `range_end` / `reserved_ranges`（已经在跑的会话，端口可能落在**新区间之外** —— **不拦**，让它跑完）、8 个 Slurm 命令路径（**下一次** fork 用的就是新的那一个） |
-| **必须重启** | 不是"运行期的事实" | `readonly_paths` —— **部署期**配置，守护进程里零读者（见下面那条） |
+| **必须重启** | 不是"运行期的事实" | （这一档现在是空的。它同时是表外键的兜底：`_changed_keys_by_class()` 把没分类的键**默认**归到这里） |
 
 第二档那几种改完会被接受，但日志里会各说一句、并记进审计的 `notes` —— 否则
 "改完之后某个已经在跑的会话出了怪事"与这次改动之间的关系，没有任何地方连得上。
@@ -934,9 +949,8 @@ sudo systemctl reload slurmate-sessiond
 装插件、`slurmate plugin sync` 这两条动线做完会自己发一次重载信号 —— 所以
 "装一个插件"今天不需要任何人记得去重启。
 
-若改的是 `readonly_paths`，重载不够：它是唯一一个要重新渲染 systemd 单元的
-键（单元里的 `ReadOnlyPaths=` 由 `install-base.sh` 按它生成）—— 重载会直接拒绝这个
-改动并要求重启，而真正的做法是跑一次 `sudo bash cluster/install-base.sh`。
+改单元（加固指令那一块）之后要重新跑一次 `sudo bash cluster/install-base.sh`，
+再 `systemctl daemon-reload` —— 那不是配置，重载管不到它。
 
 `install-base.sh` 不会覆盖已存在的 `/etc/slurmate/slurmate.conf` —— 重复部署时覆盖等于把
 站点的调优悄悄抹掉，而且故障要等下次重启守护进程才出现。要重置就手动删掉它再跑。
