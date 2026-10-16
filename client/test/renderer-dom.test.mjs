@@ -572,6 +572,20 @@ test('切走工作区：主进程回 would_discard 时不弹框，摆一行确�
   assert.equal(h.run('window.__asked'), 0, '全程没有弹过框');
 });
 
+test('新建连接时端口预填 22 —— 通用默认，不是某个集群的端口', async () => {
+  // 这一格的占位符从前写着某个开发集群的端口（10100），而占位符只在格子空着时
+  //   看得见 —— 于是"默认"看起来像"我们推荐这个数"，而用户从那里拿到的是一个
+  //   只在那一个集群上成立的答案。现在它是填好的 22（SSH 自己的默认端口）。
+  const h = bindAll({}, 'window.slurmate.newKey = () => Promise.resolve({ ok: true,'
+    + ' key: { fingerprint: "SHA256:aaa", publicKey: "ssh-ed25519 AAAA x" } });'
+    + 'window.slurmate.defaultWorkspace = () => Promise.resolve({ ok: true, workspaceId: null });');
+  await h.fn('openNewForm')();
+  assert.equal(h.run("$('f-port').value"), '22');
+  // 其余几格照旧清空 —— 预填地址会让「新建」悄悄变成「又存一遍」。
+  assert.equal(h.run("$('f-host').value"), '');
+  assert.equal(h.run("$('f-user').value"), '');
+});
+
 test('bootstrap 挂了，界面照样点得动（一次 reject 不许拆掉整块监听）', async () => {
   // 这条就是用户报的那个缺陷：主界面（连接列表）上点标题那一行没有反应。
   //   根因形状 —— 绑定从前排在 `init()` 那几个 `await` 的后面，于是

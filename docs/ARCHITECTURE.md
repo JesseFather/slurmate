@@ -86,7 +86,7 @@ Slurmate 让用户在 Slurm 集群上用远程开发环境。它的核心动作�
 JSON（`cluster/slurmate`）。客户端必须用固定 argv 调用：
 
 ```
-ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
+ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
     -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 ```
 

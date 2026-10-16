@@ -7476,10 +7476,27 @@ class Cluster(object):
 
     # ── 给界面看的两样派生值 ────────────────────────────────────────────────
     def shared(self):
-        """共享的那一份（对所有 uid 逐字相同）。每个键都是三态的。"""
+        """共享的那一份（对所有 uid 逐字相同）。每个键都是三态的。
+
+        `partitions` 那一格在这里投影一次：`max_time` 从 `partition_table()` 的
+          整数秒换成 Slurm 自己的 `[D-]HH:MM:SS` 串。
+          同一个字段在 `op_partitions` 里就是这个形状（两处用的是同一个
+          `fmt_slurm_time()`），而界面是把这一格原样印出来的 —— 不投影的话
+          同一段时间在两个 op 里长得不一样，而 `183-00:00:00` 与 `15811200`
+          只有前一个能看懂。
+          投影放在这里而不是 `op_cluster` 里：本函数的身份就是"给界面看的那一份"，
+          于是 `op_cluster` 保持纯转发。
+          `None` 表示无限，照旧是 `None`（三态里 `null` = 确实没有上限）。
+        """
+        parts = self.partitions()
+        if parts:
+            parts = {name: dict(info, max_time=(
+                None if info.get("max_time") is None
+                else fmt_slurm_time(info["max_time"])))
+                for name, info in parts.items()}
         return {"health": self.health(),
                 "version": self.slurm_version(),
-                "partitions": self.partitions(),
+                "partitions": parts,
                 "gres": self.gres(),
                 "nodes": self.nodes(),
                 "queue": self.queue(),

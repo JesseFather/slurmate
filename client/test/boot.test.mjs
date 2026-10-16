@@ -1608,6 +1608,48 @@ test('地址探测：一条连接都没有时返回空，不回退到任何内�
   assert.deepEqual(await hosts.probeAll([{ host: 'x' }]), []);
 });
 
+test('对当前那条连接探一次延迟：探到给毫秒数，探不到给原因', async (t) => {
+  const hostsMod = await import('../src/main/hosts.js');
+  const hosts = hostsMod.default || hostsMod;
+
+  // 真的起一个会说 SSH banner 的 TCP 服务。这一条路从前没有任何用例 ——
+  //   唯一碰到 `app:probeActive` 的那条走的是"内置假站点"那个提前 return 的
+  //   分支，于是 `index.js` 调了一个 hosts.js 根本没导出的函数，整套还是绿的，
+  //   而真机上点「测试延迟」收到的是 `hosts.probeHost is not a function`
+  //   （真机 2026-10-16）。
+  const srv = net.createServer((s) => s.write('SSH-2.0-probe-test\r\n'));
+  await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+  const port = srv.address().port;
+  t.after(() => { try { srv.close(); } catch { /* 已经关了 */ } });
+
+  const ok = await hosts.probeHost({ host: '127.0.0.1', port });
+  assert.equal(ok.reachable, true, JSON.stringify(ok));
+  assert.equal(typeof ok.rttMs, 'number', '探到了就要给一个毫秒数');
+
+  await new Promise((res) => srv.close(res));
+  const bad = await hosts.probeHost({ host: '127.0.0.1', port });
+  assert.equal(bad.reachable, false, JSON.stringify(bad));
+  assert.equal(bad.rttMs, null,
+    '探不到时不许给一个 0 —— 界面上那一位是"延迟 N ms"，0 读起来像"非常快"');
+  assert.ok(bad.error, '要说清是超时、被拒、还是端口开着但不是 SSH');
+});
+
+test('index.js 在 hosts 上叫得出来的每个名字，hosts.js 都真的导出了', async () => {
+  // 跨文件的判据，守的是一类静默的崩：调用点写 `hosts.foo(...)` 而 hosts.js
+  //   不再导出 foo 时，只有真跑到那一行才发现 —— 而它跑在一条没有被任何用例
+  //   覆盖的分支上。`app:probeActive` 就是这样崩着上线的。
+  //   "每条分支都要有用例"做不到，但"叫得出来的名字都存在"做得到。
+  const src = fs.readFileSync(new URL('../src/main/index.js', import.meta.url), 'utf8');
+  const hostsMod = await import('../src/main/hosts.js');
+  const hosts = hostsMod.default || hostsMod;
+  const used = new Set([...src.matchAll(/\bhosts\.([A-Za-z_$][\w$]*)\s*\(/g)]
+    .map((m) => m[1]));
+  assert.ok(used.size > 0, '这条判据要有分母：index.js 里一个 hosts.* 都没找到');
+  const missing = [...used].filter((n) => typeof hosts[n] !== 'function');
+  assert.deepEqual(missing, [],
+    `index.js 里叫了这些名字，而 hosts.js 没导出：${missing.join('、')}`);
+});
+
 test('app:debug 在开发者模式下可用（真机上造不出来的状态）', async (t) => {
   t.after(() => { Module._load = origLoad; });
   for (const what of ['daemon-down', 'tunnel-down', 'reap', 'reset']) {

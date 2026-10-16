@@ -119,7 +119,7 @@
 ### `slurmate stream`
 
 ```
-ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
+ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
     -- "/bin/bash -c '/usr/local/bin/slurmate stream'"
 ```
 
@@ -152,7 +152,7 @@ ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
 对客户端而言只有 `slurmate rpc` 这一个稳定入口（`cluster/slurmate`）：
 
 ```
-ssh -T -o BatchMode=yes -p 10100 alice@node01.example.com \
+ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
     -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 ```
 
@@ -1428,7 +1428,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 {"at": 1790301794,
  "health": {"up": true, "at": 1790301794},
  "version": "slurm-wlm 23.11.4",
- "partitions": {"A6000": {"max_time": 15811200, "is_default": false,
+ "partitions": {"A6000": {"max_time": "183-00:00:00", "is_default": false,
                           "state": "UP", "nodes": 2, "cpus": 160}},
  "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {}}},
  "queue":    {"depth": {"A6000": {"pending": 48, "running": 4}},

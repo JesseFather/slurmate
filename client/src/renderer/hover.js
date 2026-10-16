@@ -358,6 +358,29 @@ function renderCluster() {
       : '获取失败'));
   box.append(ver);
 
+  // ── 队列（全集群）──
+  //
+  // 与下面每个分区里那一行不是同一个数：那一行是这个分区的，这一行是全部
+  //   分区加起来。两处都是全部用户的（`squeue -h` 不带 `-u`），而"排队 55"
+  //   很容易被读成"我自己排了 55 个" —— 所以这一行把"全部用户"写在脸上，
+  //   你自己那一份在下面的「我的」里。
+  // 一格都取不到时不画（`d.queue` 缺席 = 获取失败），那一句由分区那一段里的
+  //   `na('队列（squeue）')` 说 —— 同一件事不说两遍。
+  if (d.queue && d.queue.depth) {
+    let pend = 0; let running = 0; let other = 0;
+    for (const k of Object.keys(d.queue.depth)) {
+      const x = d.queue.depth[k] || {};
+      pend += x.pending || 0;
+      running += x.running || 0;
+      other += x.other || 0;
+    }
+    const q = cel('div', 'ctable');
+    q.append(cel('div', 'k', '队列'));
+    q.append(cel('div', null, `排队 ${pend}　在跑 ${running}`
+      + (other ? `　其它 ${other}` : '') + '　（全部用户）'));
+    box.append(q);
+  }
+
   // ── 分区 ──
   box.append(cel('h3', null, '分区'));
   if (!d.partitions) {

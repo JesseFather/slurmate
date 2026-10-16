@@ -100,6 +100,7 @@ async function pickHost(entries, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return results.find((r) => r.reachable) || null;
 }
 
-// 只留 `probeAll` —— 用例踩的是它。`DEFAULT_TIMEOUT_MS` / `probeHost` /
-//   `pickHost` 只在本文件内被用（`probeAll` 与 `pickHost` 各自调 `probeHost`）。
-module.exports = { probeAll };
+// `probeHost` 是外头要的第二个入口：`index.js` 的 `app:probeActive` 只探
+//   当前连着的那一台（那一条通道路的注释里写了为什么不复用 `probeAll`）。
+//   `DEFAULT_TIMEOUT_MS` / `pickHost` 仍只在本文件内被用。
+module.exports = { probeAll, probeHost };

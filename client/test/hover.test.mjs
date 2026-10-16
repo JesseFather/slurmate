@@ -127,9 +127,14 @@ function cluster(omit = []) {
     at: Math.floor(Date.now() / 1000),
     health: { up: true, at: Math.floor(Date.now() / 1000) },
     version: 'slurm-wlm 23.11.4',
-    partitions: { gpu: { state: 'UP', is_default: true, max_time: '1-00:00:00', nodes: 12 } },
-    nodes: { gpu: { counts: { idle: 10, mix: 2 }, flags: {} } },
-    queue: { depth: { gpu: { pending: 0, running: 3, other: 0 } } },
+    partitions: { gpu: { state: 'UP', is_default: true, max_time: '1-00:00:00', nodes: 12 },
+      cpu: { state: 'UP', is_default: false, max_time: '7-00:00:00', nodes: 40 } },
+    nodes: { gpu: { counts: { idle: 10, mix: 2 }, flags: {} },
+      cpu: { counts: { idle: 38, alloc: 2 }, flags: {} } },
+    // 两个分区，数字故意不一样：下面那条"合计"的判据要能分出"加起来了"与
+    //   "只画了其中一个"（一个分区的话，两种写法印出来一模一样）。
+    queue: { depth: { gpu: { pending: 0, running: 3, other: 0 },
+      cpu: { pending: 5, running: 1 } } },
     gres: { gpu: [{ name: 'gpu', label: 'gpu:a6000', per_node_max: 4 }] },
     taken: {},
     me: { account: 'lab', allowed_partitions: null,
@@ -189,6 +194,20 @@ test('数据齐的时候，画得出来而且不抛（浮窗白屏的守卫）',
   assert.match(t, /lab/, '账户');
   // URL 那一行说"这一份有多旧" —— 服务端的慢钟是 5 分钟，所以它是用户要看的一格。
   assert.match(h.text('cl-body'), /取数于/);
+});
+
+test('队列那一行是全集群合计，而且写明是全部用户的', () => {
+  // 那一格从前只能一个一个分区去看（每个分区一行），而用户问的是"这台集群
+  //   现在排了多少"。合计必须是加起来的：一个分区的话，"加起来"与"只画了一个"
+  //   印出来一模一样，所以夹具里放了两个、数字不同。
+  const h = boot();
+  h.subs.data({ cluster: cluster(), link: { connected: true } });
+  const t = h.text('cl-body');
+  const Q = '　';
+  assert.ok(t.includes(`排队 5${Q}在跑 4${Q}（全部用户）`),
+    `合计那一行要在（排队 0+5、在跑 3+1）：${t}`);
+  // 分区自己那一行照旧只说它自己 —— 两个数必须是不同的两个数。
+  assert.ok(t.includes(`排队 5${Q}在跑 1`), `cpu 那一行是它自己的数：${t}`);
 });
 
 test('键缺席 = 「获取失败」，而且每一格都要说出来', () => {

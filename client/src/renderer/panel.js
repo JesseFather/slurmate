@@ -44,6 +44,12 @@
 
 const $ = (id) => document.getElementById(id);
 
+// 新建连接时端口那一格的初值。22 是 SSH 自己的默认端口，不是任何一个集群的
+//   值 —— 这一格从前写着一个具体集群的端口当占位符，那让"默认"看起来像
+//   "我们推荐这个数"。它只有这一处定义：主进程不设默认值（端口是必填的，
+//   `config.js` 的 `normalizeConnection` 只判它合不合法）。
+const DEFAULT_SSH_PORT = 22;
+
 const STATE_TEXT = {
   idle: '未开始',
   submitting: '正在提交…',
@@ -651,7 +657,11 @@ async function openNewForm() {
   $('f-label').value = '';
   $('f-user').value = '';
   $('f-host').value = '';
-  $('f-port').value = '';
+  // 端口是唯一例外：它的通用默认值是 22，而绝大多数站点的 SSH 就在那儿。
+  //   留空的话用户得自己想一个数填（或者更坏，以为不用填），而这一格是必填的。
+  // ★ 这个 22 是 SSH 协议的默认，不是任何一个集群的值：占位符从前写着某个
+  //   开发集群的端口，那让"默认"看起来像"我们推荐这个数"。
+  $('f-port').value = String(DEFAULT_SSH_PORT);
   $('key-hint').textContent = '正在生成密钥…';
   // 「③ 工作区」：初值跟随默认，而默认值要问主进程 —— 地址还空着，问出来的就是
   // 「活跃连接那个」或「新建一个」。用户敲了地址之后 `refreshFormWsDefault` 再问一次。
@@ -2935,11 +2945,33 @@ async function loadHistory() {
   for (const j of rows) {
     const row = cel('div', 'crow');
     row.append(cel('span', 'nm', j.job_id));
-    row.append(cel('span', 'dim',
-      `  ${j.state}　退出码 ${j.exit_code}　跑了 ${j.elapsed}`
-      + `　${j.partition || '?'}　${j.end}`));
+    // 作业名：一排作业号里认不出哪个是哪个，而这是 `sacct` 已有的那一格
+    //   （提交时那个 `-J`，没给就是脚本名）。
+    row.append(cel('span', 'dim', `  ${j.name || '（没有名字）'}`));
+    row.append(cel('span', 'dim', historyLine(j)));
     box.append(row);
   }
+}
+
+/**
+ * 最近作业那一行里，「还没结束」与「已经结束」要分开印。
+ *
+ * `sacct` 对没结束的作业给的是 `ExitCode=0:0` 与 `End=Unknown` —— 两个都是
+ *   "还没有这个数"，不是"这个数是 0"、也不是"结束在一个叫 Unknown 的时刻"。
+ *   照原样印出来，一条正在跑的作业会写着「退出码 0:0 … Unknown」（真机
+ *   2026-10-16 那一屏就是这样），而那是这个界面在替 Slurm 说一句不成立的话。
+ * 判据是 `End` 是不是一个真时间戳，不是猜状态名：状态名各集群不同
+ *   （`RUNNING` / `PENDING` / `COMPLETING`…），而"有没有结束时刻"是同一个
+ *   问题的直接答案，且 `sacct -P` 给的就是它。
+ * `跑了` 那一格两边都印：对没结束的作业它的意思是"到此刻跑了多久"，而那是
+ *   用户真正在问的那个数。
+ */
+function historyLine(j) {
+  const ended = Boolean(j.end) && j.end !== 'Unknown' && j.end !== 'N/A';
+  const bits = [j.state || '?', ended ? `退出码 ${j.exit_code}` : '还没结束'];
+  bits.push(`跑了 ${j.elapsed}`, j.partition || '?');
+  if (ended) bits.push(j.end);
+  return '  ' + bits.join('　');
 }
 
 // ── 第三屏：作业列表 ────────────────────────────────────────────────────────

@@ -290,8 +290,10 @@
         <div class="grow"><label for="f-host">主机（IP 或域名）</label>
              <input type="text" id="f-host" class="full" spellcheck="false"
                     placeholder="login.example.com"></div>
+        <!-- 端口那一格没有占位符：它的初值由 `openNewForm()` 填上（22），
+             而占位符只在格子空着时看得见 —— 两者同时写会让人以为有两个默认值。 -->
         <div><label for="f-port">端口</label>
-             <input type="number" id="f-port" min="1" max="65535" placeholder="10100"></div>
+             <input type="number" id="f-port" min="1" max="65535"></div>
       </div>
       <!-- ── ③ 工作区 ──
            它从连接行搬到了这里（见 panel.js 里那一段的注释）：改工作区的代价

@@ -556,7 +556,7 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
 `slurmate rpc`：从 stdin 读一行 JSON，向 stdout 写一行 JSON，然后退出。一次一请求。
 
 ```
-ssh -T -p 10100 user@<登录节点> -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
+ssh -T -p 22 user@<登录节点> -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 ```
 
 外层双引号是必须的：本地 shell 会先把单引号吃掉，去掉它就变成另一个命令串，

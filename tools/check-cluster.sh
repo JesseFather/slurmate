@@ -710,7 +710,9 @@ run bash -c "ip -4 -o addr show scope global | awk '{print \"    \"\$2\" \"\$4}'
 echo "  --- 默认路由 / 网关 ---"
 run bash -c "ip route show default | sed 's/^/    /'"
 echo "  --- sshd 监听地址与端口 ---"
-run bash -c "ss -Htlnp 2>/dev/null | grep -E 'sshd|:10100' | sed 's/^/    /'"
+# 这一行是人要在客户端「端口」那一格里照填的那个数：客户端新建连接时预填 22
+#   （SSH 自己的默认），而本站的 SSH 如果不在 22 上，用户得知道填几。
+run bash -c "ss -Htlnp 2>/dev/null | grep -E 'sshd' | sed 's/^/    /'"
 echo "  --- sshd 相关配置（AllowTcpForwarding / ForceCommand / PubkeyAuthentication）---"
 run bash -c "sshd -T 2>/dev/null | grep -iE '^(allowtcpforwarding|permitopen|x11forwarding|pubkeyauthentication|passwordauthentication|gatewayports|permitlisten|forcecommand|allowagentforwarding)' | sed 's/^/    /'"
 

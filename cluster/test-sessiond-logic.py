@@ -9705,6 +9705,27 @@ exit 0
           .get("partitions") is None,
           "")
 
+    # 时限必须与 op_partitions 同一种写法：两处读的是同一份 `partition_table()`，
+    #   而 op_partitions 走 `fmt_slurm_time()`。今天 op_cluster 把整数秒直接发给
+    #   界面，于是同一段时间在两个 op 里长得不一样，而界面上印出来的那一行是
+    #   `时限 15811200`（真机 2026-10-16 的那一屏）。
+    _p28 = ((_cv1.get("data") or {}).get("partitions") or {})
+    check("时限在 op_cluster 里也是 Slurm 那种写法（与 op_partitions 同一个"
+          "`fmt_slurm_time()`）",
+          bool(_p28) and all(v.get("max_time") == "183-00:00:00"
+                             for v in _p28.values()),
+          repr({k: v.get("max_time") for k, v in _p28.items()}))
+
+    class _SlurmUnlimited(object):
+        def partition_table(self):
+            return {"A6000": {"max_time": None, "is_default": True,
+                              "state": "UP", "nodes": 2, "cpus": 160}}
+
+    _u28 = mod.Cluster(cfg, _SlurmUnlimited()).shared()["partitions"]["A6000"]
+    check("而「无限」照旧是 None —— 三态里 null = 确实没有上限，不是取不到"
+          "（那一种是整个键缺席，见上面那条）",
+          "max_time" in _u28 and _u28["max_time"] is None, repr(_u28))
+
     _seen3 = []
 
     def _cap3(argv, timeout=10, check=False):

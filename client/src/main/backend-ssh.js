@@ -27,7 +27,7 @@
  *      # 假设 A：sshd 的 ForceCommand（若你的集群装了）放行固定 argv 的 slurmate rpc
  *      # 必须原样用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
  *      #     引号吃掉，ssh 发过去的是另一个命令串，验的就不是客户端真正发的那个了。
- *      ssh -T -p 10100 user@<登录节点> \
+ *      ssh -T -p 22 user@<登录节点> \
  *          -- "/bin/bash -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
  *      #   期望：恰好一行 JSON，ok:true，退出码 0。有额外输出就是没直通。
  *      #
@@ -37,7 +37,7 @@
  *      #   但这是【依赖】，必须实测证明，不能假设。
  *
  *      # 假设 B：ForceCommand 不影响 direct-tcpip 转发
- *      ssh -N -L 18080:<tunnel_target> user@<登录节点> -p 10100 &
+ *      ssh -N -L 18080:<tunnel_target> user@<登录节点> -p 22 &
  *      curl -i http://127.0.0.1:18080/healthz     # 期望 200
  *
  *      # 假设 C：登录节点允许公钥认证
