@@ -6376,7 +6376,7 @@ class Nft(object):
         known = self._known_addrs() if self._known_addrs else None
         if known is None:
             log.warning("这一次没有核对 %s 是不是本集群的节点"
-                        "（节点地址集合拿不到：Slurm 问不到，或者节点报的是主机名），"
+                        "（节点地址集合获取失败：Slurm 问不到，或者节点报的是主机名），"
                         "规则照装", node_ip)
         elif node_ip not in known:
             log.error("拒绝为 %s 装 ACL：它不是 Slurm 报的任何一台节点"

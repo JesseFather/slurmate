@@ -797,7 +797,7 @@ test('「站点分发」那一块：一切正常时只在开发者模式里画�
     assert.match(words(), /快照表读取失败/);
     assert.equal(/上次同步/.test(words()), false, '「一切正常」那几行不跟着回来');
     assert.equal(all().some((x) => x._text === '1.0.0'), false,
-      '版本清单是开发者模式的东西');
+      '版本清单是开发者模式才有的内容');
     assert.equal(all().some((x) => x.tagName === 'BUTTON'), false,
       '那颗「重新同步」也不跟着回来：站点清单本来每 30 秒自己对一次账');
 

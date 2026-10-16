@@ -133,7 +133,7 @@ test('提交之前真的等了「作业日志目录」那一步（没等到就�
   await tick();
   assert.equal(typeof release, 'function', '那一步要被真的调到（不是"有这个函数"）');
   assert.equal(b.count('submit'), 0,
-    '还没等出结果就不许发 submit —— 先提交再建目录，那一次作业照样起不来');
+    '还没等出结果就不许发 submit —— 先提交再建目录，那一次作业照样无法启动');
   release();
   await tick();
   assert.equal(b.count('submit'), 1, '等到了才发');

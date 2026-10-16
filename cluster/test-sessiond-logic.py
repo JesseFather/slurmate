@@ -1181,7 +1181,7 @@ def main():
 
     _n3, _c3 = _mk_nft(None)
     _ok3, _d3 = _n3.add_session_rule("203.0.113.9", 55001, UID, 42)
-    check("集合拿不到（Slurm 问不到、或节点报的是主机名）→ 不判，规则照装",
+    check("集合获取失败（Slurm 问不到、或节点报的是主机名）→ 不判，规则照装",
           _ok3 and len(_added(_c3)) == 1, "%s / %s" % (_ok3, _d3))
 
     # 那一份集合是从 `scontrol show node -o` 里收的，与 GRES / 内存同一趟。
@@ -1189,7 +1189,7 @@ def main():
     _cat_line = ("NodeName=n1 NodeAddr=192.0.2.11 Partitions=p0 RealMemory=1000\n"
                  "NodeName=n2 NodeAddr=192.0.2.12 Partitions=p0 RealMemory=2000\n")
     _cat = mod.NodeCatalog()
-    check("（夹具）空壳 NodeCatalog 的 addrs 是 None（= 拿不到，不是「没有节点」）",
+    check("（夹具）空壳 NodeCatalog 的 addrs 是 None（= 获取失败，不是「没有节点」）",
           _cat.addrs is None, repr(_cat.addrs))
     _got = with_stub(mod, lambda argv, timeout=10, check=False:
                      (0, _cat_line, "") if "show node" in " ".join(map(str, argv))
@@ -1208,7 +1208,7 @@ def main():
           _got2 is not None and _got2.addrs is None, repr(_got2 and _got2.addrs))
     _down = with_stub(mod, lambda argv, timeout=10, check=False: (1, "", "down"),
                       lambda: mod.Slurm(cfg).node_catalog())
-    check("而 scontrol 失败时整个目录是 None（三半一起拿不到）", _down is None, repr(_down))
+    check("而 scontrol 失败时整个目录是 None（三半一起获取失败）", _down is None, repr(_down))
 
     # ── 7. 会话文件校验（安全关键）────────────────────────────────────────
     print("\n── 7. 会话文件校验（安全关键）──")
@@ -9896,7 +9896,7 @@ exit 0
                               "state": "UP", "nodes": 2, "cpus": 160}}
 
     _u28 = mod.Cluster(cfg, _SlurmUnlimited()).shared()["partitions"]["A6000"]
-    check("而「无限」照旧是 None —— 三态里 null = 确实没有上限，不是取不到"
+    check("而「无限」照旧是 None —— 三态里 null = 确实没有上限，不是获取失败"
           "（那一种是整个键缺席，见上面那条）",
           "max_time" in _u28 and _u28["max_time"] is None, repr(_u28))
 
