@@ -1386,6 +1386,45 @@ exit 0
     check("NodeAddr 是主机名时跳过（无从判断）",
           crosscheck("192.0.2.0/24", ["node01.example.com"]) == [])
 
+    # ── 15b. 空着的 cluster_cidr：安装时按节点地址算一个 ─────────────────────
+    #
+    # 部署时那一格是空的，而它是第一遍唯一挡路的东西。`derive_cluster_cidr()`
+    #   把它算出来 —— 判据与上一节那条交叉核对是同一个输入（`NodeAddr` 全集），
+    #   所以算出来的值必定过得了那条核对。这里钉的是两条：
+    #     ① 算得出来的那几种，结果对不对（尤其是"本站这一种"：同一 /24 里取 /24）；
+    #     ② 算不出来的那几种，必须说清是哪一种，而不是给一个猜的值。
+    print("\n── 15b. 空着的 cluster_cidr 怎么算出来 ──")
+    def derive(nodes, rc=0):
+        return mod.derive_cluster_cidr(run=node_list_stub(nodes) if rc == 0 else
+                                       (lambda a, timeout=10, check=False: (rc, "", "")),
+                                       scontrol="scontrol")
+    _v, _w = derive(["192.0.2.11", "192.0.2.12", "192.0.2.15", "192.0.2.20"])
+    check("同一 /24 里的四个节点 → 取那个 /24（常见的形状，也给以后加节点留余量）",
+          _v == "192.0.2.0/24", "%s / %s" % (_v, _w))
+    _v, _w = derive(["198.51.100.5"])
+    check("单个节点也取它那个 /24，不取 /32（往同一个网段里加一台时 /32 就漏了）",
+          _v == "198.51.100.0/24", "%s / %s" % (_v, _w))
+    _v, _w = derive(["192.0.2.11", "192.0.3.12"])
+    check("跨 /24 → 取能盖住它们的最小前缀（这两个地址的最小覆盖是 /23）",
+          _v == "192.0.2.0/23", "%s / %s" % (_v, _w))
+    _v, _w = derive(["192.0.2.3", "203.0.113.4"])
+    check("节点根本不在一个网段里 → 不给值，并说清是哪一种",
+          _v is None and "/16" in (_w or ""), "%s / %s" % (_v, _w))
+    _v, _w = derive(["192.0.2.11"], rc=7)
+    check("问不到 Slurm → 不给值（猜一个比不猜更坏）",
+          _v is None and "rc=7" in (_w or ""), "%s / %s" % (_v, _w))
+    _v, _w = derive(["nodea1", "nodea2"])
+    check("NodeAddr 是主机名 → 不给值",
+          _v is None and "主机名" in (_w or ""), "%s / %s" % (_v, _w))
+    # 算出来的值必须过得了那条交叉核对 —— 两边是同一个判据，这是它们的接缝。
+    _cidr_ok = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
+    _v2, _ = derive(["192.0.2.11", "192.0.2.12"])
+    _cidr_ok.__dict__["cluster_cidr"] = _v2
+    check("而算出来的那个值，上一节那条交叉核对一定放行（两边读的是同一个输入）",
+          with_stub(mod, node_list_stub(["192.0.2.11", "192.0.2.12"]),
+                    lambda: mod.crosscheck_cidr(_cidr_ok)) == [],
+          str(_v2))
+
     # ── 16. 旧版数据库必须被明确拒绝 ────────────────────────────────────────
     # 旧库里还留着 sessions.purpose 这种本版没有的列，而 SQLite 的
     # CREATE TABLE IF NOT EXISTS 不会改已存在的表。不拦的话，旧库上的每一次

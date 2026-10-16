@@ -407,6 +407,22 @@ sudo /usr/local/sbin/slurmate-sessiond --check-plugins
 它被写进基础规则 `ip daddr != <cluster_cidr> accept`（`Nft.ensure()`），这是最后一道
 几何约束：即使前面所有校验都被绕过，也影响不到本网段之外的流量。
 
+### 空着的时候，安装会替站点算出来
+
+第一遍部署跑 `install-base.sh` 时，若这一格是空的，安装器会问一次守护进程
+（`slurmate-sessiond --suggest-cidr`），按 Slurm 此刻报的 `NodeAddr` 全集算一个
+网段填进去，并把算的结果与依据一起印出来（`derive_cluster_cidr()`）。
+
+这不是给它配了个默认值：判据与下面那条交叉核对是同一个（都读 `scontrol show node
+-o`），所以算出来的值必定过得了那条核对；而默认值是猜的，过不了任何东西。
+
+推不出来时它不填：问不到 Slurm、一个 IPv4 的 `NodeAddr` 都没有、或者算出来的网段
+比 `/16` 还宽（那些节点不在一个网段里，见 [KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md)）。
+那三种都要手工填，阶段 3 的自检会照旧拦住并指回这里。
+
+写法上偏宽是安全的那一侧：网段越宽，落到会话规则上的流量越多、保护越紧；
+偏窄才会漏。
+
 ### 为什么它没有默认值，以及为什么留空会拒绝启动
 
 这一项的失效方向是 fail-open，而且是本项目里最安静的一种失效。

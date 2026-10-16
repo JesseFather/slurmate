@@ -1125,6 +1125,37 @@ else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
 fi
 
+# ── cluster_cidr：空着就按 Slurm 报的节点地址填上 ──
+#
+# 它是第一遍部署唯一挡路的那一格：没有安全的默认值，而填错的方向是静默的
+#   （漏一个节点 = 去往它的流量被链首放行、会话规则永远匹配不到）。
+# 但"该填什么"不是要人记的东西：这条判据核对的就是"盖住全部节点"，而节点清单
+#   在 Slurm 手上。所以这里问一次守护进程（`--suggest-cidr`，判据与
+#   `crosscheck_cidr()` 同一个函数出来的），填进去并说一声。
+# 推不出来（问不到 Slurm、节点分散在不止一个网段里）就不填 —— 阶段 3 会照旧
+#   拦住，并指回这里。宁可停在那儿，也不要糊一个猜出来的网段。
+if [[ "$DRYRUN" -eq 0 ]]; then
+    _cur_cidr="$(sed -nE 's/^[[:space:]]*cluster_cidr[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$CONF" 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+    if [[ -z "$_cur_cidr" ]]; then
+        _cidr_note="${BACKUP_DIR}/suggest-cidr.txt"
+        _sug="$("$PY" "$DAEMON_SRC" --suggest-cidr --config="$CONF" 2>"$_cidr_note")" || _sug=""
+        _sug="$(printf '%s' "$_sug" | head -n 1 | tr -d '[:space:]')"
+        if [[ -n "$_sug" ]]; then
+            # 走 install_one 而不是 sed -i：模式与属主由那一处统一给（root:root
+            #   0644），而且它覆盖前会留一份备份 —— 这一格是站点配置，改它要留痕。
+            _filled="${BACKUP_DIR}/slurmate.conf.cidr-filled"
+            sed "s|^[[:space:]]*cluster_cidr[[:space:]]*=.*$|cluster_cidr = ${_sug}|" \
+                "$CONF" > "$_filled"
+            install_one "$_filled" "$CONF" 644
+            ok "cluster_cidr 空着，已按 Slurm 的节点地址推出：${_sug}"
+            info "  它怎么推的：$(head -n 1 "$_cidr_note" 2>/dev/null)"
+        else
+            warn "cluster_cidr 空着，而这一次推不出来：$(head -n 1 "$_cidr_note" 2>/dev/null)"
+            warn "  手工填成 <网络地址>/<前缀长度>（例如 192.0.2.0/24）再重跑本脚本。"
+        fi
+    fi
+fi
+
 # ── systemd 单元：逐字安装 ──
 # 它里面没有任何按站点替换的东西：沙箱那一条走 ProtectSystem=strict，家目录
 #   挂在哪由内核那一侧盖住，不需要站点报路径。（从前这里是从模板渲染的，

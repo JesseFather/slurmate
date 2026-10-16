@@ -546,6 +546,64 @@ def crosscheck_cidr(cfg, run=None):
             % (cfg.cluster_cidr, len(outside), shown)]
 
 
+# 推出来的网段最宽到这个前缀就停手：再宽说明那些节点根本不在一个网段里，
+#   而本架构今天只能表达一个网段（见 docs/KNOWN-ISSUES.md）。那种情形要人来定，
+#   不该由这里糊过去 —— 猜一个 /8 出来比不猜更坏。
+MIN_DERIVED_PREFIX = 16
+
+
+def derive_cluster_cidr(run=None, scontrol="scontrol"):
+    """按 Slurm 报的节点地址算出该填的 `cluster_cidr`。返回 `(值, 说明)`。
+
+    推不出来时值是 `None`，说明里写清是哪一种。
+
+    它与 `crosscheck_cidr()` 是同一件事的两面：那条判据问"这个网段盖住全部节点了
+    吗"，这里问"盖住全部节点的网段是哪一个"。两边读的是同一个输入（`scontrol
+    show node -o` 里的 `NodeAddr=` 全集），所以推出来的值必定过得了那条判据。
+    这不是"给这一格配了个默认值"，是把那件事算出来 —— 而算出来的东西是能被
+    验的，默认值不能。
+
+    为什么值得算：手填错的方向是静默的。漏掉一个节点时，去往它的流量被链首的
+    `ip daddr != <CIDR> accept` 放行，会话的 drop 规则永远匹配不到，而链的 policy
+    就是 accept —— 没有报错、没有日志，表现是"IDE 连得上，而那层保护从没生效"。
+    管理员手上那份节点清单不一定是最新的，Slurm 手上这份是。
+
+    选法：节点都落在同一个 /24 里就用那个 /24（绝大多数集群的形状，也给以后往
+    同一个网段里加节点留了余量）；跨 /24 就取能盖住它们的最小前缀。
+    偏宽是安全的那一侧：基础规则是 `ip daddr != <CIDR> accept`，网段越宽，
+    落到会话规则上的流量越多、保护越紧；偏窄才是漏。
+    """
+    run = run or run_cmd
+    rc, out, _ = run([scontrol or "scontrol", "show", "node", "-o"], timeout=15)
+    if rc != 0 or not out.strip():
+        return None, "问不到 Slurm 的节点列表（rc=%s）" % rc
+    addrs = sorted({int(ipaddress.IPv4Address(m.group(1)))
+                    for m in re.finditer(r"\bNodeAddr=(\S+)", out)
+                    if is_ipv4(m.group(1))})
+    if not addrs:
+        return None, "节点列表里一个 IPv4 的 NodeAddr 都没有（写的是主机名吗）"
+    # 从最长前缀往下找，第一个装得下全部地址的就是最小覆盖网段。倒过来的话
+    #   第一个命中的是 /0 —— 它装得下任何东西。（这一版第一遍就是这么写的，
+    #   于是每一次都推出 0.0.0.0/0。）
+    net = None
+    for plen in range(32, -1, -1):
+        cand = ipaddress.IPv4Network((addrs[0], plen), strict=False)
+        if all(ipaddress.IPv4Address(a) in cand for a in addrs):
+            net = cand
+            break
+    if net is None:                                  # 构造上到不了
+        return None, "算不出一个能盖住全部节点地址的网段"
+    if net.prefixlen < MIN_DERIVED_PREFIX:
+        return None, ("算出来的是 %s，比 /%d 还宽：这些节点不在同一个网段里，"
+                      "本架构今天只能表达一个网段" % (net, MIN_DERIVED_PREFIX))
+    # 同一个 /24 里能装下就取那个 /24。
+    if net.prefixlen > 24:
+        wide = ipaddress.IPv4Network((addrs[0], 24), strict=False)
+        if all(ipaddress.IPv4Address(a) in wide for a in addrs):
+            net = wide
+    return str(net), "%d 个节点地址，取 %s" % (len(addrs), net)
+
+
 def config_deploy_problems(cfg):
     """「这份配置能不能上线」的全部判据，返回 `(errors, cidr_errors)`。
 
@@ -10746,6 +10804,11 @@ def main():
                     help="前台运行（systemd 下用，日志直接进 journal）")
     ap.add_argument("--check", action="store_true",
                     help="只做配置校验与连通性自检，不启动")
+    ap.add_argument("--suggest-cidr", action="store_true",
+                    help="按 Slurm 报的节点地址算一个 cluster_cidr，打到标准输出"
+                         "然后退出。install-base.sh 用它把空着的那一格填上。"
+                         "推不出来时标准输出是空的、非零退出，原因在标准错误。"
+                         "判据与 crosscheck_cidr() 同一个（见 derive_cluster_cidr）")
     ap.add_argument("--check-plugins", action="store_true",
                     help="只扫插件目录并对账每个插件（读记录表 + 逐份比 + 验签），"
                          "不读配置、不启动。判据与守护进程启动时逐字相同"
@@ -10812,6 +10875,24 @@ def main():
             return 1
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
+        return 0
+
+    # ── 算一个 cluster_cidr（`install-base.sh` 用）──────────────────────────
+    # 输出是给脚本读的一行，所以排在 log_setup() 之前，与 --extract-package 同一个
+    #   位置的理由。它要读配置（拿 `scontrol` 的路径），但不要求这份配置是好用的
+    #   —— 调用它的那一刻，配置里那一格正是空的。
+    if args.suggest_cidr:
+        try:
+            cfg = Config(args.config)
+        except Exception as e:                           # noqa: BLE001
+            sys.stderr.write("错误: 配置读取失败（%s）\n" % e)
+            return 1
+        value, why = derive_cluster_cidr(scontrol=cfg.scontrol)
+        if value is None:
+            sys.stderr.write("推不出来：%s\n" % why)
+            return 1
+        sys.stderr.write("%s\n" % why)
+        sys.stdout.write("%s\n" % value)
         return 0
 
     # ── 装插件（`slurmate plugin install` 用）────────────────────────────────

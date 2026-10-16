@@ -41,9 +41,13 @@ nft list chain inet slurmate output
 
 ### 2. 登录节点与全部计算节点在同一 IPv4 网段内，且能用一个 CIDR 表达
 
-依据：`cluster_cidr` 只接受一个 CIDR，且没有默认值 —— 留空、写成文档占位
-网段、前缀长度非法、主机位不为 0，都会被自检拒绝启动。这个值被写进基础规则
+依据：`cluster_cidr` 只接受一个 CIDR —— 留空、写成文档占位网段、前缀长度非法、
+主机位不为 0，都会被自检拒绝启动。这个值被写进基础规则
 `ip daddr != <cluster_cidr> accept`（`Nft.ensure()`）。
+
+这一格不用手工填：部署时它是空的，安装器会按 Slurm 报的 `NodeAddr` 全集算一个
+填进去并说一声（`derive_cluster_cidr()`）。算不出来（问不到 Slurm、节点分散在不止
+一个网段里）才落到手工那一档。
 
 不满足会怎样失败：如果计算节点落在 `cluster_cidr` 之外，去往它们的流量会先被
 这条基础规则放行，所有会话规则永远匹配不到。链的 policy 是 `accept`，
@@ -394,9 +398,8 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
   `systemctl reload slurmate-sessiond`（改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-至少要把这一项改成站点的真实值：
-
-- `cluster_cidr` —— 见前置条件 2。它没有默认值，不填服务起不来。
+`cluster_cidr` 不用管理员填。部署时它空着，安装器按 Slurm 的节点地址算一个填上
+（见前置条件 2）。算不出来时它会明确说出来，那时才需要手工填。
 
 站点通用键一共 16 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
 
