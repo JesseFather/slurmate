@@ -4273,6 +4273,34 @@ exit 0
     check("作业模板装到了 <SHARE_DIR>/run.sbatch.template"
           "（装完基座之后集群上可能根本没有仓库）",
           "run.sbatch.template" in _ib_src)
+
+    # 未引用的 heredoc（`cat <<EOF`）里，反引号是命令替换 —— 想印一个命令给
+    #   管理员看，必须写成 \`。这一条是用户 2026-10-16 贴回来的那一屏里发现的：
+    #   "端口池与集群网段：跑一次 \`${DAEMON} --check\` 看" 那一行真的把 --check
+    #   跑了一遍，几十行输出插进安装结尾的说明里，把那句话劈成两半。
+    # 判据是"这个形状"，不是那一行：同一种写法在这个文件里别处也可能有。
+    def _unquoted_heredoc_backticks(src):
+        lines = src.split("\n")
+        out, i = [], 0
+        while i < len(lines):
+            m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$", lines[i])
+            if not m:
+                i += 1
+                continue
+            quoted, tag, start = bool(m.group(1)), m.group(2), i
+            j = i + 1
+            while j < len(lines) and lines[j] != tag:
+                j += 1
+            if not quoted:
+                # 转义过的（\`）是正确写法，剔掉之后再看还有没有裸的。
+                out += [(start + 1 + k, l) for k, l in enumerate(lines[start + 1:j])
+                        if "`" in l.replace("\\`", "")]
+            i = j + 1
+        return out
+    _bt = _unquoted_heredoc_backticks(_ib_src)
+    check("未引用的 heredoc 里没有裸反引号"
+          "（那会变成命令替换：把命令跑一遍、输出插进说明里）",
+          _bt == [], repr([(n, l.strip()[:60]) for n, l in _bt][:3]))
     # 而"插件搬到哪儿去了"必须读得到：`--help` 的范围表达式若写成
     #    `sed -n '2,/^# =====/p'`，它会在第 2 行自己就闭合 —— 于是只印横幅
     #    那一行，整个用法块一次都打不出来。那不是"一个没人用的开关"：管理员找
