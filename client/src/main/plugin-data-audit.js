@@ -120,9 +120,11 @@ const LEGACY_RE = /^(?:slot|layout|plugin)-/;
  *          路径，没能当场核对 —— 那一格由"认得出的才给删"兜着。
  *
  * 为什么根是 `sessionData` 而不是 `userData`：Electron 源码里那一步是
- *   `PathService::Get(DIR_SESSION_DATA)` + `"Partitions"`。两者今天相同（没人调过
- *   `app.setPath`），所以这是一处恰好对 —— 正因为恰好对，它特别容易被下一个人
- *   顺手改成 `userData`，所以理由写在这里。
+ *   `PathService::Get(DIR_SESSION_DATA)` + `"Partitions"`。两者在普通模式下
+ *   今天相同，而开发者模式下落点不同：`bootstrap` 会把 `sessionData` 指到
+ *   沙箱里（`<userData>/dev-sandbox/session-data`），因为浏览器存储那一半也必须
+ *   跟着分岔。所以这不是"恰好对"，是唯一对的那个写法 —— 顺手改成 `userData`
+ *   会让开发者模式去认真实那一棵树，而那正是普通模式删掉沙箱数据的那条路。
  *
  * 为什么探针必须是该有的身份：`fromPartition` 可能把目录建出来。用一个编造的
  *   名字去问，就等于凭空造一个不在"该有的"清单里的目录，用户下一次打开客户端

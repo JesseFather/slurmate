@@ -438,14 +438,23 @@ class FakeBrowserWindow {
 /** 下面那个 `getStoragePath` 桩要用它折叠分区名（磁盘上的目录名是折叠过的）。 */
 const P = require('../src/main/plugins/index.js');
 
+/**
+ * `app.getPath` 认得的那几个键。`setPath` 就地改它 —— 与 Electron 同形。
+ *
+ * `sessionData` 的默认值就是 `userData`；这个文件整个跑在开发者模式里，所以
+ *   启动链会把它指到沙箱里（见 index.js 的 `bootstrap`）。桩照实模拟之后，
+ *   "分区到底落在哪棵树里"才是一个可断言的事实 —— 而这个文件里有好几条用例
+ *   要断言的正是它。
+ */
+const appPaths = { userData, sessionData: userData };
+
 const electronStub = {
   app: {
-    // `sessionData` 必须显式支持：Electron 里"分区目录住在哪儿"问的就是它
-    //   （`DIR_SESSION_DATA` + `Partitions`），而它的默认值就是 `userData`
-    //   ——没人调过 `app.setPath`。这个桩若对认不得的键静默返回 `fakeHome`：
-    //   于是 `app.getPath('sessionData')` 拿到一个和分区毫无关系的目录，而症状是
-    //   "本机的插件数据"那一块永远列不出东西（不报错，只是空）。
-    getPath: (k) => ((k === 'userData' || k === 'sessionData') ? userData : fakeHome),
+    // 认不得的键若静默返回 `fakeHome`：于是 `app.getPath('sessionData')` 拿到一个
+    //   和分区毫无关系的目录，而症状是"本机的插件数据"那一块永远列不出东西
+    //   （不报错，只是空）。
+    getPath: (k) => (k in appPaths ? appPaths[k] : fakeHome),
+    setPath: (k, v) => { appPaths[k] = v; },
     getVersion: () => '0.1.0-test',
     on: () => {},
     // 立刻 resolve：index.js 的启动链挂在 whenReady().then(...) 上，
@@ -485,7 +494,11 @@ const electronStub = {
         // 分区在磁盘上的目录。名字是折叠过的（`MakePartitionName`，见
         // plugin-data.js 的文件头）—— 桩要如实模拟这一步，否则"拿分区名直接拼路径"
         // 这种错在测试里永远是绿的。
-        getStoragePath: () => path.join(userData, 'Partitions',
+        // 根跟 `app.getPath('sessionData')` 走，不写死 `userData`：写死的话，
+        //   开发者模式那一手（把 `sessionData` 指到沙箱里）在测试里永远看不见，
+        //   而"普通模式不该碰沙箱那一份、开发者模式不该碰真实那一份"这两条
+        //   都会变成在一个假前提上通过。
+        getStoragePath: () => path.join(appPaths.sessionData, 'Partitions',
           P.foldAscii(String(partition).replace(/^persist:/, ''))),
         fetch: async (url, opts) => {
           const res = await fetch(url, opts);
@@ -1767,7 +1780,7 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
    *   而"调过 `clearStorageData`"与"盘上干净了"在 Windows 上根本不是同一件事
    *   （那一步正是让删除失败的原因）。
    */
-  const partDirOf = (part) => path.join(userData, 'Partitions',
+  const partDirOf = (part) => path.join(appPaths.sessionData, 'Partitions',
     P.foldAscii(String(part).replace(/^persist:/, '')));
   // 先把它摆出来。下面判的是"它真的没了"，而一个从来没建过的路径上那一条
   //   永远成立 —— 少了这一句，那条断言什么也没守。
@@ -4900,32 +4913,66 @@ test('未知服务的会话：接上隧道、不建视图，并说清该升级�
   await waitUntil(dead, '会话释放', 20000);
 });
 
-test('本机的插件数据：开发者模式不碰磁盘，并如实说清为什么', async (t) => {
+test('开发者模式把浏览器存储也移到沙箱里：sessionData 不再与真实那一份共用一棵树', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  require('../src/main/index.js');
+  await new Promise((r) => setTimeout(r, 400));
+
+  // 这个文件整个跑在开发者模式里（见文件头）。分岔的证据是桩里那张 `appPaths`
+  //   表 —— 它与 Electron 里那一步同形（`app.setPath('sessionData', …)`）。
+  //
+  // 为什么这一条非有不可：配置目录（`cfgDir`）从 0.7 起就分岔了，而浏览器存储
+  //   那一半住在 `sessionData` 里，两个模式共用一棵树。后果不是"互相看得见"，
+  //   而是普通模式会删掉开发者模式的数据：对账照真实注册表去认那棵树，沙箱里
+  //   那份分区算不出主人，于是被当成孤儿自动收掉（用户 2026-10-16 报的，
+  //   界面上那句是「本次运行清掉了 1 份没人管的数据」）。
+  assert.equal(appPaths.sessionData, path.join(userData, 'dev-sandbox', 'session-data'),
+    '开发者模式下 sessionData 必须在沙箱里');
+  assert.equal(appPaths.userData, userData, 'userData 一个字节都不动');
+  // 目录要真的建出来：`setPath` 对不存在的目录会抛错（Electron 的语义），
+  //   而在真机上那一步抛出去就是"客户端起不来"。
+  assert.equal(fs.existsSync(appPaths.sessionData), true,
+    '沙箱那个目录要先建出来 —— setPath 对不存在的目录抛错');
+});
+
+test('本机的插件数据：开发者模式只看沙箱那一棵树，真实那一份一个字都不动', async (t) => {
   t.after(() => { Module._load = origLoad; });
   require('../src/main/index.js');
   await new Promise((r) => setTimeout(r, 400));
 
   // 在真实的分区目录里放两份东西（一份三段身份、一份任意的名字）。
   // 开发者模式那份配置与它们不可比（沙箱里的工作区 id 与真实那一份对不上），
-  // 所以一个都不该被列出来 —— 而这是这条用例唯一有意义的形状：不是"清单恰好
-  // 是空的"，是"我们没去认它"。认了的话，用户会照着这份清单把自己的真实数据删掉。
-  const parts = path.join(userData, 'Partitions');
+  // 所以一个都不该被列出来、更不该被删掉 —— 而这是这条用例唯一有意义的形状：
+  // 不是"清单恰好是空的"，是"我们没去认它"。认了的话，用户会照着这份清单把
+  // 自己的真实数据删掉（用户 2026-10-16 报的正是反过来的那一半：普通模式照着
+  // 真实那棵树去认，把沙箱那份收掉了）。
+  const realParts = path.join(userData, 'Partitions');
   const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@w0123456789ab';
-  fs.mkdirSync(path.join(parts, live), { recursive: true });
-  fs.mkdirSync(path.join(parts, 'slot-1'), { recursive: true });
+  fs.mkdirSync(path.join(realParts, live), { recursive: true });
+  fs.mkdirSync(path.join(realParts, 'slot-1'), { recursive: true });
+
+  // 沙箱那一棵树里放一份孤儿。它该被收掉 —— 这一手同时钉住"分区那一根真的
+  //   是沙箱里那一棵"（不是"我们没查"），因为一个没查的根收不掉任何东西。
+  const boxParts = path.join(appPaths.sessionData, 'Partitions');
+  const orphan = '01m2jkhtzgkjbfqqtwyxmqmf2w@editor@w0123456789ab';
+  fs.mkdirSync(path.join(boxParts, orphan), { recursive: true });
 
   const d = await invoke('app:pluginData');
   assert.equal(d.ok, true);
-  assert.deepEqual(d.rows, [], '开发者模式下不许拿沙箱那份配置去认真实的分区');
-  // 这一格是"我没去看"，不是"没有" —— 界面按它换一句话（缺席 ≠ 否）。
-  assert.equal(d.diskChecked, false);
-  assert.match(d.why, /开发者模式/, '要如实说清为什么没看');
+  assert.equal(d.diskChecked, true, '两根都查了：沙箱那一份就是分区根');
+  assert.equal(d.why, null, '没有"查不了"那一句话要说');
+  assert.equal(d.rows.some((r) => r.name === live || r.name === 'slot-1'), false,
+    `真实那两份一份都不许进清单：${JSON.stringify(d.rows)}`);
+  assert.equal(fs.existsSync(path.join(realParts, live)), true, '真实那一份一个字都不许动');
+  assert.equal(fs.existsSync(path.join(realParts, 'slot-1')), true, '真实那一份一个字都不许动');
+  assert.equal(fs.existsSync(path.join(boxParts, orphan)), false,
+    '沙箱里这份孤儿该被收掉 —— 收得掉才说明这一根真的指向沙箱');
 
   // 没被列出来的东西也删不掉：判定要重新对一遍账，而这一次它没看到它。
   const r = await invoke('app:deletePluginData', { partition: 'slot-1' });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'stale');
-  assert.equal(fs.existsSync(path.join(parts, 'slot-1')), true, '一个字都不许动');
+  assert.equal(fs.existsSync(path.join(realParts, 'slot-1')), true, '一个字都不许动');
 });
 
 /**
@@ -4976,13 +5023,11 @@ test('`app:pluginData` 的回包里带着界面要读的那几个字段', async 
   assert.equal(typeof d.allUnknown, 'boolean',
     '`allUnknown` 必须是一个算出来的布尔，不是"缺了这个键"');
 
-  // 另一半（值对不对）在 `plugin-data-audit.test.mjs` 里；这里够不到它：
-  //   `diskChecked` 要求两根都查成了，而开发者模式下分区那一根不查
-  //   （它与真实那一份是同一棵树，照沙箱配置去认会毁掉真实的数据），`names` 恒
-  //   `null`、`diskChecked` 恒 `false`。所以这一条只保证"送到"，不保证"送对了"。
-  //   插件数据那一根是查的（它在沙箱里，与沙箱配置配套）—— 判据拆成两根
-  //     各判的理由见 `auditPluginData` 里那段。
-  assert.equal(d.diskChecked, false, '前提：分区那一根在开发者模式下不查');
+  // 另一半（值对不对）在 `plugin-data-audit.test.mjs` 里：那一条拿一棵摆好的
+  //   假目录树去问 `audit()`，而这里问的是真磁盘。这一条只保证"送到"，不保证"送对了"。
+  // 两种模式今天都是"两根都查"，所以 `diskChecked` 恒真 —— 它曾经在开发者模式下
+  //   恒假（那时分区那一根不查，见 `auditPluginData` 里那段）。
+  assert.equal(d.diskChecked, true, '前提：两根都查');
 });
 
 test('删除之后的回包与 `app:pluginData` 同一个形状', async () => {
@@ -5674,7 +5719,7 @@ test('临时实例结束，它的两份数据一起没，而持久那一份一�
   const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', idB));
   assert.equal(fs.existsSync(tempDir), true, '夹具前提：临时那一份真的建出来了');
   // 分区那一半也要先摆出来（判据是"盘上那个目录没了"，见下面）。
-  const partDirB = path.join(userData, 'Partitions',
+  const partDirB = path.join(appPaths.sessionData, 'Partitions',
     P.foldAscii(String(partB).replace(/^persist:/, '')));
   fs.mkdirSync(partDirB, { recursive: true });
   fs.writeFileSync(path.join(partDirB, 'Cookies'), 'x');
@@ -6626,7 +6671,10 @@ test('删掉最后一条用某个工作区的连接，那个工作区的两份�
   t.after(() => { fs.rmSync(realRoot, { recursive: true, force: true }); });
   // 分区那一半也要先摆出来。判据（下面）是"盘上那个目录没了"，而一个从来没
   //   建过的路径上，"没了"是永远成立的 —— 少了这一句，那条断言什么也没守。
-  const partDir = path.join(userData, 'Partitions',
+  // 根跟 `app.getPath('sessionData')` 走：开发者模式下它在沙箱里，而"摆在哪一棵
+  //   树里"正是下面那条断言要守住的东西 —— 写死 `userData` 的话，这一条会在一个
+  //   开发者模式永远不会去碰的目录上通过。
+  const partDir = path.join(appPaths.sessionData, 'Partitions',
     P.foldAscii(String(partition).replace(/^persist:/, '')));
   fs.mkdirSync(partDir, { recursive: true });
   fs.writeFileSync(path.join(partDir, 'Cookies'), 'x');

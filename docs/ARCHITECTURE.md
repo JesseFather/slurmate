@@ -334,6 +334,11 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 | 浏览器的存储分区 | `persist:<三段用 @ 连>` | `ensureSurface` / `clearSpaceStorage` |
 | 磁盘上的目录 | `<sessionData>/Partitions/<同一串，ASCII 折叠过>` | `plugin-data-audit.js` 的对账 |
 
+`sessionData` 在普通模式下就是 `userData`；开发者模式下它被指到沙箱里
+（`<userData>/dev-sandbox/session-data`，见 `client/src/main/index.js` 的 `bootstrap`）。
+两个模式各有一棵树，所以对账（它按当前那份注册表去认磁盘）不会把另一个模式的
+分区当成孤儿收掉。
+
 ### 工作区与数据空间：两个对象
 
 ```
@@ -480,8 +485,13 @@ ssh 配好。它们拿到的是框架显式递过去的一组能力（客户端�
 
 | 落点 | 谁建 | 谁管 |
 |---|---|---|
-| 浏览器的存储分区（`partitionOf`） | 框架（`ensureSurface`） | Electron；对账在 `Partitions/` 里认它 |
-| **插件的数据目录**（`dataDirNameOf`） | **插件自己**（`ctx.dataDir()`） | 插件；对账在 `<userData>/plugin-data/` 里认它 |
+| 浏览器的存储分区（`partitionOf`） | 框架（`ensureSurface`） | Electron；对账在 `<sessionData>/Partitions/` 里认它 |
+| **插件的数据目录**（`dataDirNameOf`） | **插件自己**（`ctx.dataDir()`） | 插件；对账在数据目录那一根里认它 |
+
+两个根都按模式分开：普通模式下是 `<userData>/Partitions/` 与
+`<userData>/plugin-data/`，开发者模式下整份都在沙箱里
+（`<userData>/dev-sandbox/`）。于是两个模式的对账用的是同一套判据，
+而各自只看得到自己的那一棵树。
 
 两个落点同名（段之间用 `@` 拼成一个目录名），所以对账把两个根放在一起做差
 时只有一张"该有的"表。用路径分隔符分层会让 `<id>/<共享组>` 既是两段身份的数据目录、

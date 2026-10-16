@@ -131,8 +131,9 @@
  *   这样"Electron 折不折叠"两种情况下都对。
  *
  * 另注：根是 `sessionData`（`app.getPath('sessionData')`），不是 `userData`。
- *   两者今天相同（没人调过 `app.setPath`），所以这是一处恰好对 —— 见
- *   plugin-data-audit.js 里那段注释，别顺手改成 `userData`。
+ *   两者只在普通模式下相同：开发者模式下 `bootstrap` 把 `sessionData` 指到沙箱里，
+ *   而 `userData` 不动。所以这是一处唯一对 —— 见 plugin-data-audit.js 里那段
+ *   注释，别顺手改成 `userData`。
  *
  * ── 分隔符为什么是 `@` ────────────────────────────────────────────────────
  *

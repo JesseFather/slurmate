@@ -55,7 +55,9 @@
  *
  * 三重互锁（做了假后端却不标注，正是这个项目一路在清的那类问题：
  *   系统声称了不成立的事）：
- *     ① 独立的数据命名空间（`<userData>/dev-sandbox/`，绝不碰用户自己那份配置）
+ *     ① 独立的数据命名空间（`<userData>/dev-sandbox/`：配置、插件数据、以及网页的
+ *        cookie 与 localStorage 全在里面，绝不碰用户自己那份 —— 见 `bootstrap`
+ *        里那两步，`sessionData` 必须赶在 app ready 之前改）
  *     ② 窗口标题、状态条标记、面板横幅，用真实模式绝不会出现的颜色（洋红）
  *     ③ 启动时那一次选择：`dev` 为真才走假后端，没有第二条路，也不会在真后端
  *        出错时静默退回来（见 backend.js 的 createBackend）。
@@ -193,6 +195,16 @@ let whoami = null;
  */
 let connectedConnId = null;
 let partitions = [];
+/**
+ * 这台机器的 `userData`（app ready 之前就读到的那一份）。
+ *
+ * 只取一次，之后所有地方都用它 —— 读 `dev-mode.json`、算 `cfgDir`、写
+ *   `dev-mode.json`。取两次的漂法是静默的：`app.setPath('sessionData', …)` 那一步
+ *   非在 ready 之前做不可，而那一步要的正是 `userData`；等到 ready 之后再
+ *   `getPath('userData')` 一次，两份字符串理论上可以是两个目录，于是设置读的是
+ *   一处、写的是另一处，症状是"开关点了没反应"。
+ */
+let userDataDir = null;
 
 /**
  * 站点现状（`op_cluster` 那一份）与链路现状。两者一起喂给边栏浮窗与左栏那个圆点。
@@ -323,23 +335,49 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 function bootstrap() {
+  // ── 沙箱的分岔要在 app ready 之前做完 ────────────────────────────────────
+  //
+  // 先读开发者模式那两个设置，再决定这次读哪一份配置。次序不能反 —— 这个开关
+  //   回答的正是"这次启动读哪一份"，所以它自己不在任何一份配置里（见
+  //   config.js 的 devSettingsPath）。而它必须发生在这里、不在下面的
+  //   `whenReady` 里，因为下一段要按它去改一个只能在 ready 之前改的路径。
+  userDataDir = app.getPath('userData');
+  devSaved = config.loadDevSettings(userDataDir);
+
+  // 浏览器存储那一半也要跟着分岔，不能只有配置目录分。
+  //
+  // 从前只有 `cfgDir` 分岔，而网页的 cookie / localStorage / 缓存住在
+  //   Electron 的 `sessionData` 里，那个路径两个模式共用一棵树。症状不是"两个
+  //   模式互相看得见"，而是普通模式会删掉开发者模式的数据：对账按真实注册表
+  //   去认那棵树，沙箱里那份分区算不出主人，于是被当成孤儿自动收掉
+  //   （用户 2026-10-16 报的，界面上是「本次运行清掉了 1 份没人管的数据」）。
+  //
+  // 为什么非在这里做：Electron 明文写着 `sessionData` 的覆盖必须在 ready 之前
+  //   （`app.setPath` 的文档：要改网页 cookie 与缓存的落点就得赶在 ready 前），
+  //   而 `setPath` 对一个不存在的目录会抛错 —— 所以目录要自己先建出来。
+  //
+  // 普通模式一个字节都不动：不调 `setPath`，一切照默认。
+  if (devSaved.developerMode) {
+    const sessionData = path.join(userDataDir, 'dev-sandbox', 'session-data');
+    fs.mkdirSync(sessionData, { recursive: true });
+    app.setPath('sessionData', sessionData);
+  }
+
   app.on('window-all-closed', () => app.quit());
 
   app.whenReady().then(async () => {
     installMenu();
 
-    // 先读开发者模式那两个设置，再决定读哪一份配置。次序不能反 —— 这个开关
-    //   回答的正是"这次启动读哪一份"，所以它自己不在任何一份配置里（见
-    //   config.js 的 devSettingsPath）。
-    const userData = app.getPath('userData');
-    devSaved = config.loadDevSettings(userData);
+    // `dev`（这次进程怎么跑）到这一刻才赋，不与上面那次读合并：`registry` 是在
+    //   模块加载期构造的，那一刻看到一个"关着"的世界是对的（见文件头那段注释）。
+    //   而"这次读哪一份配置"上面已经答了 —— `sessionData` 那一手非等它不可。
     dev = { ...devSaved };
 
     // 开发者模式用独立目录 —— 否则沙盒里配的用户名/端口会污染真连接。
     // 它是个沙盒（持久），不是一次性的演示 —— 也不是用户真正在用的那一份数据。
     cfgDir = dev.developerMode
-      ? path.join(userData, 'dev-sandbox')
-      : userData;
+      ? path.join(userDataDir, 'dev-sandbox')
+      : userDataDir;
     cfg = config.loadConfig(cfgDir);
     // 钉子在另一个文件里（见 config.js 那一段）：`loadConfig` 只认已知键，
     //   读一遍 `config.json` 再存一遍就会把不认识的那张表抹掉，而"钉子全没了"
@@ -2093,24 +2131,16 @@ function auditPluginData() {
   let why = pr.why || null;
   let dataNames = null;
   let dataWhy = null;
-  // ── 两根分别判，因为它们的性质不同 ──────────────────────────────────
+  // ── 两根都查，两种模式都查 ────────────────────────────────────────────
   //
-  //   · 分区根（`Electron 的 sessionData/Partitions`）在开发者模式下与真实那一份
-  //     是同一棵树（它不由沙箱分岔），而配置是沙箱的，照沙箱的工作区去认，
-  //     真实的数据会整片看起来像孤儿，而删掉它们就是毁掉真实的那一份。
-  //     这一根在开发者模式下不查。
-  //   · 插件数据根由 `cfgDir` 算出来（见 `pluginDataRoot`），开发者模式下
-  //     就是沙箱里那一份，它与沙箱配置是配套的，照它认是对的。
-  //
-  // 两根不能合并成一句"开发者模式下一根都不查"：那个说法只对分区根成立，
-  //   而代价落在数据根上：沙箱里攒的孤儿永远没人收，更要紧的是自动回收那条路在
-  //   本机一次都跑不到（`rows` 恒空，判据①没有能红的用例）。两根各判之后，
-  //   那一半的行为在本机是真跑得到的。
-  if (dev.developerMode) {
-    why = '开发者模式不查这一根：它与真实那一份是同一棵树（分区目录不由沙箱分岔），'
-      + '而这里用的是一份沙箱配置。照它去认，真实那一份数据会整片看起来像孤儿，'
-      + '而删掉它们就是毁掉真实的那一份。';
-  } else if (pr.root) {
+  // 这里从前有一条例外：开发者模式下不查分区那一根，理由是"它不由沙箱分岔，
+  //   与真实那一份是同一棵树 —— 照沙箱配置去认，真实的数据会整片看起来像孤儿"。
+  //   那个理由当时是对的，而它只挡住了一个方向：反过来的那一次（普通模式
+  //   照真实配置去认，沙箱那份看起来像孤儿）没有挡，于是普通模式真的把开发者
+  //   模式的数据收掉了（用户 2026-10-16 报的）。
+  // 例外连同它的成因一起搬走了：现在两个模式连 `sessionData` 都各有一棵树
+  //   （见 `bootstrap` 里那一步），所以两根、两种模式，判据逐字相同。
+  if (pr.root) {
     const r = dataAudit.listDirs(pr.root);
     names = withoutPending(r.names, 'partition');
     why = r.why || why;
@@ -5664,7 +5694,9 @@ function registerIpc() {
    */
   send('app:setDeveloperMode', async (on) => {
     const want = Boolean(on);
-    devSaved = config.saveDevSettings(app.getPath('userData'), { developerMode: want });
+    // 落点用启动那一刻取到的 `userDataDir`，不在这里再问一次 `app.getPath` ——
+    //   读它的是 `bootstrap`，写它的必须是同一个目录（见 `userDataDir` 那段）。
+    devSaved = config.saveDevSettings(userDataDir, { developerMode: want });
     if (want === dev.developerMode) {
       // 改回了生效值（或者本来就想要这个）—— 没有悬着的改动，就不提"重启"那件事。
       win.pushNotice('info', want ? '开发者模式是开着的。' : '开发者模式是关着的。');

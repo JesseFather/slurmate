@@ -131,12 +131,21 @@ class FakeBrowserWindow {
   destroy() { this._destroyed = true; }
 }
 
+/**
+ * `app.getPath` 认得的那几个键。`setPath` 就地改它 —— 与 Electron 同形。
+ *
+ * `sessionData` 的默认值就是 `userData`，但开发者模式下它会被指到沙箱里
+ *   （`bootstrap` 里那一步）。桩照实模拟之后，"这一手真的做了没有"就成了一个
+ *   可断言的事实；写死成 `userData` 的话，两处注释里说的隔离在测试里根本看不见。
+ */
+const appPaths = { userData, sessionData: userData };
+
 const electronStub = {
   app: {
-    // `sessionData` 必须显式支持：分区目录住在哪儿问的就是它，而它的默认值
-    //   就是 `userData`。认不得的键若静默返回 `fakeHome` —— 于是那一块永远
+    // 认不得的键若静默返回 `fakeHome` —— 于是"本机的插件数据"那一块永远
     //   列不出东西，还不报错。
-    getPath: (k) => ((k === 'userData' || k === 'sessionData') ? userData : fakeHome),
+    getPath: (k) => (k in appPaths ? appPaths[k] : fakeHome),
+    setPath: (k, v) => { appPaths[k] = v; },
     getVersion: () => '0.1.0-test',
     on: () => {},
     // 立刻 resolve：index.js 的启动链挂在 whenReady().then(...) 上，
@@ -170,7 +179,9 @@ const electronStub = {
         // 分区在磁盘上的目录名是折叠过的；顺手把 jar 也清掉 —— 不清的话
         //   「删掉之后那份数据还在」这个真机症状在桩里根本不存在。
         clearStorageData: async () => { calls.cleared.push(partition); jar.clear(); },
-        getStoragePath: () => path.join(userData, 'Partitions',
+        // 落点跟 `app.getPath('sessionData')` 走，不写死 `userData` ——
+        //   写死的话，"开发者模式把分区挪进沙箱"这件事在桩里永远看不见。
+        getStoragePath: () => path.join(appPaths.sessionData, 'Partitions',
           P.foldAscii(String(partition).replace(/^persist:/, ''))),
         fetch: async (url, opts) => {
           const res = await fetch(url, opts);
@@ -388,6 +399,11 @@ test('本机的插件数据：真的去认磁盘，认得出"再也无法读取"
     const d = await invoke('app:pluginData');
     assert.equal(d.ok, true);
     assert.equal(d.diskChecked, true, '真实模式要看磁盘');
+    // 普通模式一个字节都不动：`sessionData` 的分岔只有开发者模式那一侧才做
+    //   （见 `index.js` 的 `bootstrap`）。这一条钉的是反方向 —— 少说一句的话，
+    //   "把用户的浏览器存储搬进沙箱"也会是绿的。
+    assert.equal(appPaths.sessionData, userData,
+      '普通模式不许改 sessionData —— 改了就是把用户真实的浏览器存储搬走');
 
     // 收掉的两份：两个根都要真的没了。只删一个根的话，下一次对账会把同一行
     //   再带回来（那一行的 `places` 里还剩没删的那一个），而用户会以为他删过了。
