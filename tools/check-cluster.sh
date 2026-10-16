@@ -501,6 +501,7 @@ else
     fi
     # 不用 `--collect`：失败时那个单元要留着，`journalctl` 里才有 systemd 自己
     #   那句"哪一步没做成"。跑完由下面那条 reset-failed 收干净。
+    _sb_t0="$(date '+%Y-%m-%d %H:%M:%S')"
     _env=()
     [[ -n "$_share_root" ]] && _env+=("--setenv=SLURMATE_PROBE_SHARE_ROOT=$_share_root")
     timeout 60 systemd-run --wait --pipe --unit=slurmate-sandbox-probe \
@@ -534,9 +535,20 @@ else
         r WARN "共享存储那一棵树没测到：这台机器上未找到一个真实用户的家目录。"
         r INFO "  守护进程读会话文件靠的就是它。这台要是登录节点，先把它挂上再谈其他。"
     fi
-    sed 's/^/    /' "$SANDBOX_OUT" 2>/dev/null | head -n 30
+    # 先印判定那几行。它们才是这一节的结论，而它们排在挂载表【后面】——
+    #   从前这里从头截 30 行，挂载表一长就把结论整段吃掉，屏上看着像"跑到一半
+    #   断了"（用户 2026-10-16 那一屏就是这样）。判据没丢，丢的是给人看的那一份。
+    echo "    --- 判定（这一节就看这几行）---"
+    grep -E "^(MUNGE|NFT|ROOT-|SHARE-|WRITABLE-)" "$SANDBOX_OUT" 2>/dev/null | sed 's/^/      /'
+    echo "    --- 沙箱里那几棵树是什么状态（/run 下面那一堆噪音滤掉了）---"
+    sed -n '/--- 挂载表/,/--- \/root/p' "$SANDBOX_OUT" 2>/dev/null \
+        | grep -vE '^--- ' \
+        | grep -vE '^/run/(user|credentials|systemd)|^/run/[a-z-]+ +tmpfs|^/dev |^/proc|^/sys' \
+        | head -n 14 | sed 's/^/      /'
+    echo "    --- scontrol / munge 那几行 ---"
+    sed -n '1,12p' "$SANDBOX_OUT" 2>/dev/null | sed 's/^/      /'
     echo "    --- systemd 自己说了什么（失败时这一节是根因所在）---"
-    journalctl -u slurmate-sandbox-probe --no-pager -n 15 2>/dev/null | sed 's/^/    /'
+    journalctl -u slurmate-sandbox-probe --no-pager --since "$_sb_t0" 2>/dev/null | sed 's/^/      /'
     systemctl reset-failed slurmate-sandbox-probe 2>/dev/null
     echo "    （完整输出: $SANDBOX_OUT 与 $SANDBOX_PROBE）"
 fi
