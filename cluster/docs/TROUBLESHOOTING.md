@@ -118,7 +118,7 @@ for s in json.load(sys.stdin)["sessions"]: print(s["sid"], s.get("job_id"), s.ge
 怎么区分：在登录节点上看文件到底在不在：
 
 ```bash
-ls -l /shared/home/alice/.slurmate/sessions/
+ls -l ~alice/.slurmate/sessions/          # `~alice` 由 NSS 展开，不用拼路径
 ```
 
 - 文件已经在，只是守护进程还没登记 → 就是属性缓存，等一下即可，不是故障。

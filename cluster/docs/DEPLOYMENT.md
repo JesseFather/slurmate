@@ -81,8 +81,9 @@ nft list chain inet slurmate output
 3c. NFS 属性缓存会影响登记延迟
 
 默认 `acdirmax=60s`，目录属性最长缓存 60 秒 —— 会话登记最多延迟 60 秒。
-`tools/check-cluster.sh` 专门检查 `/shared/home`（或站点实际的那个挂载点）有没有
-显式设置 `actimeo` / `acdirmax` / `acregmax`，没有就给出 WARN。
+`tools/check-cluster.sh` 从真实用户的家目录反推出共享存储的挂载根（它不写死任何
+路径），检查那几个根有没有显式设置 `actimeo` / `acdirmax` / `acregmax`，没有就
+给出 WARN。
 
 这不是故障，但会让人误判：客户端在「等待登记」期间每 3 秒轮询一次
 （`client/src/main/session.js`），用户很容易以为卡住了。想缩短首连体验就往挂载

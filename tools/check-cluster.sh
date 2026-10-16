@@ -299,6 +299,54 @@ else
     r FAIL "/usr/bin/python3 不存在，守护进程需要另选实现语言"
 fi
 
+# ── 谁是这个站点上的用户，以及他们的家目录根在哪 ────────────────────────────
+#
+# 这两件都【不写死路径】。家目录前缀是站点定的（`/shared/home`、`/mnt/nas`、
+#   `/home` 都见过），写死一个的后果不是"少列几行"，而是：本站一个人都找不出
+#   来，于是下面每一节都空着 —— 而那与"这个站点真的没有用户"长得一模一样。
+#   第一版就是写死 `/shared/home`，用户 2026-10-16 在真机上指出来了。
+#
+# 推法：用户名从 Slurm 的 association 里取（那是"能提交作业的人"，而且读的是
+#   Slurm 的库、不经过 NSS），再 `getpwnam` 直查拿家目录，取它的父目录。
+# 为什么不枚举 `getent passwd` 全量列表：很多集群的 NSS（SSSD/LDAP）没有开启
+#   枚举，全量列表里只有本地账号，通过目录服务登录的用户一个都不在里面 ——
+#   而漏掉这件事本身没有任何报错。
+home_roots() {
+    sacctmgr -n -P show assoc format=User 2>/dev/null | sort -u \
+        | while read -r _u; do
+            [[ -n "$_u" && "$_u" != "root" ]] || continue
+            _h="$(getent passwd "$_u" 2>/dev/null | cut -d: -f6)"
+            [[ -n "$_h" ]] || continue
+            dirname "$_h"
+        done | sort -u | grep -v '^/$'
+}
+HOME_ROOTS="$(home_roots)"
+
+# 有家目录、且能由 uid 反查到的账号。输出完整 passwd 行：
+#   uname:pw:uid:gid:gecos:home:shell（按用户名去重）
+#
+# 判据是"这一格【就是】他的家"（`getpwnam(uid).pw_dir` 与目录逐字相同），不是
+#   "这一格的属主是个用户"。共享存储的根下面常常还摞着别的东西（项目目录、
+#   镜像、别人的东西），只看属主会把它们全算成人。
+# 顺带一条：这条路天然暴露"目录名 ≠ 用户名"的大小写问题。
+real_users() {
+    local r d u entry h
+    for r in $HOME_ROOTS; do
+        for d in "$r"/*/; do
+            d="${d%/}"
+            [[ -d "$d" ]] || continue
+            u="$(stat -c %u "$d" 2>/dev/null)" || continue
+            [[ "$u" =~ ^[0-9]+$ ]] || continue
+            (( u >= 1000 )) || continue
+            entry="$(getent passwd "$u" 2>/dev/null)" || continue
+            [[ -n "$entry" ]] || continue
+            h="$(printf '%s' "$entry" | cut -d: -f6)"
+            [[ "$h" == "$d" ]] || continue
+            printf '%s\n' "$entry"
+        done
+    done | sort -t: -k3 -n | awk -F: '!seen[$1]++'
+}
+
 # ==============================================================================
 sec "systemd 版本与加固指令支持（决定单元怎么写）"
 # ==============================================================================
@@ -436,21 +484,9 @@ if [[ ! -r "$UNIT_SRC" ]]; then
 elif ! command -v systemd-run >/dev/null 2>&1; then
     r FAIL "systemd-run 不存在，无法实测"
 else
-    # 用户家目录那一棵树的根：拿一个真有 Slurm 记录的用户 getpwnam 直查
-    #   （不枚举 —— 这台机器上枚举看不到 IPA 用户），取它的父目录。查不到就
-    #   退回 /shared/home（存在才算）。两者都没有时下面会响亮地说"跳过"，
-    #   而不是静默地绿 —— 那正是这一节最要紧的一条判据，没测到就别说通过。
-    _share_root=""
-    _probe_u="$(sacctmgr -n -P show assoc format=User 2>/dev/null \
-        | grep -vE '^$|^root$' | head -n 1)"
-    if [[ -n "$_probe_u" ]]; then
-        _probe_h="$(getent passwd "$_probe_u" 2>/dev/null | cut -d: -f6)"
-        [[ -n "$_probe_h" && -d "$_probe_h" ]] && _share_root="$(dirname "$_probe_h")"
-    fi
-    [[ -z "$_share_root" && -d /shared/home ]] && _share_root=/shared/home
-    # 推出个 `/` 来不算答案：往根目录里试写是个坏主意，而且那种家目录
-    #   （挂在 / 下一层）本身就不该出现在一个正经站点上。
-    [[ "$_share_root" == "/" ]] && _share_root=""
+    # 共享存储的根：从真实用户 getpwnam 推（见开头 home_roots()）。推不出来
+    #   时下面会响亮地说"没测到"，而不是静默地绿 —— 那是这一节最要紧的一条判据。
+    _share_root="$(printf '%s\n' $HOME_ROOTS | head -n 1)"
 
     _props=()
     while IFS= read -r _l; do
@@ -523,38 +559,18 @@ run scontrol show nodes -o | grep -oE 'NodeName=[^ ]+|NodeAddr=[^ ]+' | paste - 
 # ==============================================================================
 sec "关联账号（sbatch 必须带 -A）"
 # ==============================================================================
-# 真实人类用户 = 共享存储下有家目录、且能由 uid 反查到的账号。
-#
-# ️ 为什么不直接用 `getent passwd` 全量列表：很多集群的 NSS（SSSD/LDAP）
-#    【没有开启枚举】，全量列表里只有本地账号，通过目录服务登录的用户一个
-#    都不在里面；但 `getent passwd <uid>` 这种按 uid 直查是好的。
-#    直接枚举会得到一份"看起来正常、实则漏掉绝大多数人"的名单 —— 而漏掉
-#    这件事本身没有任何报错。
-#    所以这里走"枚举家目录 → 取属主 uid → 按 uid 反查"。
-#    这条路同时天然暴露了"目录名 ≠ 用户名"的大小写问题。
-#    输出完整 passwd 行：uname:pw:uid:gid:gecos:home:shell（按用户名去重）
-real_users() {
-    local d u entry
-    for d in /shared/home/*/; do
-        [[ -d "$d" ]] || continue
-        u="$(stat -c %u "$d" 2>/dev/null)" || continue
-        [[ "$u" =~ ^[0-9]+$ ]] || continue
-        (( u >= 1000 )) || continue
-        entry="$(getent passwd "$u" 2>/dev/null)" || continue
-        [[ -n "$entry" ]] || continue
-        printf '%s\n' "$entry"
-    done | sort -t: -k3 -n | awk -F: '!seen[$1]++'
-}
 
 echo "  --- SSSD 枚举能力自检（决定守护进程能怎么查用户）---"
 ENUM_TOTAL="$(getent passwd 2>/dev/null | wc -l)"
-ENUM_NAS="$(getent passwd 2>/dev/null | grep -c '/shared/home' || true)"
-r INFO "getent passwd 全量枚举返回 $ENUM_TOTAL 条，其中家目录在 /shared/home 的 $ENUM_NAS 条"
-if [[ "$ENUM_NAS" -eq 0 ]]; then
-    r WARN "全量枚举不含 IPA 用户，守护进程必须用 getpwnam(uid) 直查，禁止任何枚举式做法"
+r INFO "getent passwd 全量枚举返回 $ENUM_TOTAL 条"
+# 判据不写死任何路径：拿一个真有 Slurm 记录的用户，看它出不出现在全量枚举里。
+_ENUM_PROBE="$(sacctmgr -n -P show assoc format=User 2>/dev/null | sort -u | grep -vE '^$|^root$' | head -n 1)"
+if [[ -n "$_ENUM_PROBE" ]] && getent passwd 2>/dev/null | cut -d: -f1 | grep -qx -- "$_ENUM_PROBE"; then
+    r PASS "全量枚举里有 Slurm 用户（${_ENUM_PROBE}）；仍建议按 uid 直查"
 else
-    r PASS "全量枚举可用（但仍建议用 getpwnam 直查）"
+    r WARN "全量枚举里没有 Slurm 用户（取的是 ${_ENUM_PROBE:-连一个用户名都没取到}）：守护进程必须 getpwnam(uid) 直查，禁止任何枚举式做法"
 fi
+r INFO "用户家目录的根（推出来的）: ${HOME_ROOTS:-（一个都没推出来）}"
 r INFO "真实用户数（按家目录反查）: $(real_users | wc -l)"
 
 echo "  --- 抽样 5 个真实用户的 association（sbatch 必须带 -A）---"
@@ -624,17 +640,19 @@ if [[ "$MISMATCH" -eq 0 ]]; then
 else
     r WARN "发现 $MISMATCH 个不一致，证实绝不能用拼用户名的方式构造路径"
 fi
-echo "  --- /shared/home 挂载参数（关注 actimeo / acregmin / acdirmax）---"
-if findmnt -no SOURCE,TARGET,FSTYPE /shared/home >/dev/null 2>&1; then
-    echo "    $(findmnt -no SOURCE,TARGET,FSTYPE /shared/home)"
-    findmnt -no OPTIONS /shared/home 2>/dev/null | tr ',' '\n' | sed 's/^/      /'
-    if findmnt -no OPTIONS /shared/home 2>/dev/null | grep -qE 'actimeo|acdirmax|acregmax'; then
-        echo "      ↑ 已显式设置缓存参数"
-    else
-        r WARN "未显式设置 actimeo，默认 acdirmax=60s，会让会话登记最多延迟 60 秒"
-    fi
+echo "  --- 共享家目录的挂载参数（关注 actimeo / acregmin / acdirmax）---"
+if [[ -z "$HOME_ROOTS" ]]; then
+    echo "    （一个根都没推出来，这一节没有结论）"
 else
-    echo "    /shared/home 未挂载（本机可能不是登录节点）"
+    for _r in $HOME_ROOTS; do
+        echo "    ${_r}：$(findmnt -no SOURCE,TARGET,FSTYPE "$_r" 2>/dev/null || echo '不是一个独立挂载点')"
+        findmnt -no OPTIONS "$_r" 2>/dev/null | tr ',' '\n' | sed 's/^/      /'
+        if findmnt -no OPTIONS "$_r" 2>/dev/null | grep -qE 'actimeo|acdirmax|acregmax'; then
+            echo "      ↑ 已显式设置缓存参数"
+        elif findmnt -no SOURCE "$_r" >/dev/null 2>&1; then
+            r WARN "${_r} 未显式设置 actimeo，默认 acdirmax=60s，会让会话登记最多延迟 60 秒"
+        fi
+    done
 fi
 echo "  --- 家目录权限（决定跨用户隔离强度）---"
 real_users | head -n 3 | while IFS=: read -r _ _ _ _ _ uhome _; do
