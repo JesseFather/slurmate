@@ -1,8 +1,5 @@
 # 每个键的含义、取值与改错的后果：见《配置参考》（仓库里是 cluster/docs/CONFIGURATION.md）
 
-# 空着即可：部署时按 Slurm 报的节点地址算一个填上（问不到 Slurm 才要你手工填）。
-cluster_cidr =
-
 range_start = 55001
 range_end = 55999
 reserved_ranges =

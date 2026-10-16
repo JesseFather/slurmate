@@ -502,126 +502,6 @@ def now_ts():
     return int(time.time())
 
 
-def crosscheck_cidr(cfg, run=None):
-    """把 cluster_cidr 与 Slurm 的 NodeAddr 全集交叉核对，返回错误列表。
-
-    为什么必须有这一步：cluster_cidr 漏掉一个节点时，去往那个节点的流量会被
-    链首的基础规则 `ip daddr != CIDR accept` 放行，所有会话规则永远匹配不到，
-    而链的 policy 就是 accept，所以既没有报错也没有日志。表现是"IDE 能连上，
-    但那条 drop 规则其实从没生效过"，比连不上危险得多。
-
-    查询失败时【不返回错误】：那多半是控制器抖动（slurmctld 重启、munge 抖动），
-    而不是配置错了。宁可留着（可能不完整的）保护继续服务，也不要因为一次查询
-    失败就拒绝启动，后者会把一次瞬时抖动放大成一次停机。
-    """
-    problem = cfg.cluster_cidr_problem()
-    if problem:
-        return []                     # 配置本身就不合法，交给 validate() 报
-    run = run or run_cmd
-    rc, out, _ = run([cfg.scontrol, "show", "node", "-o"], timeout=15)
-    if rc != 0 or not out.strip():
-        # 这是整个校验里唯一的缺口，所以说得重一点、说清楚缺的是什么：
-        #   「跳过核对」的实质是「cluster_cidr 对不对，这一次没人验」。
-        #   照抄文档示例网段 + 恰好这一次问不到 Slurm，两个条件同时成立时，
-        #   守护进程会带着一份无效的 ACL 起来，而它的表现是"一切正常"。
-        log.warning("获取 Slurm 节点列表失败（rc=%s）：本次【没有】核对 cluster_cidr "
-                    "（%s）是否覆盖了全部计算节点。若这个网段是照抄文档示例填的，"
-                    "现在正是它会被漏过去的时候。", rc, cfg.cluster_cidr)
-        return []
-    net = ipaddress.IPv4Network(cfg.cluster_cidr, strict=False)
-    outside = []
-    for m in re.finditer(r"\bNodeAddr=(\S+)", out):
-        ip = m.group(1)
-        # NodeAddr 在有些集群里写的是主机名（由 Slurm 解析），那种情况这里
-        # 无从判断，跳过而不是报错。
-        if is_ipv4(ip) and ipaddress.IPv4Address(ip) not in net:
-            outside.append(ip)
-    if not outside:
-        return []
-    shown = "、".join(outside[:8]) + ("…（共 %d 个）" % len(outside)
-                                      if len(outside) > 8 else "")
-    return ["cluster_cidr = %s 漏掉了 %d 个节点：%s。去往这些节点的流量会被"
-            "基础规则放行，会话的 drop 规则永远匹配不到，而链的 policy 是 "
-            "accept，不会有任何报错。请把网段放大到覆盖全部计算节点。"
-            % (cfg.cluster_cidr, len(outside), shown)]
-
-
-# 推出来的网段最宽到这个前缀就停手：再宽说明那些节点根本不在一个网段里，
-#   而本架构今天只能表达一个网段（见 docs/KNOWN-ISSUES.md）。那种情形要人来定，
-#   不该由这里糊过去 —— 猜一个 /8 出来比不猜更坏。
-MIN_DERIVED_PREFIX = 16
-
-
-def derive_cluster_cidr(run=None, scontrol="scontrol"):
-    """按 Slurm 报的节点地址算出该填的 `cluster_cidr`。返回 `(值, 说明)`。
-
-    推不出来时值是 `None`，说明里写清是哪一种。
-
-    它与 `crosscheck_cidr()` 是同一件事的两面：那条判据问"这个网段盖住全部节点了
-    吗"，这里问"盖住全部节点的网段是哪一个"。两边读的是同一个输入（`scontrol
-    show node -o` 里的 `NodeAddr=` 全集），所以推出来的值必定过得了那条判据。
-    这不是"给这一格配了个默认值"，是把那件事算出来 —— 而算出来的东西是能被
-    验的，默认值不能。
-
-    为什么值得算：手填错的方向是静默的。漏掉一个节点时，去往它的流量被链首的
-    `ip daddr != <CIDR> accept` 放行，会话的 drop 规则永远匹配不到，而链的 policy
-    就是 accept —— 没有报错、没有日志，表现是"IDE 连得上，而那层保护从没生效"。
-    管理员手上那份节点清单不一定是最新的，Slurm 手上这份是。
-
-    选法：节点都落在同一个 /24 里就用那个 /24（绝大多数集群的形状，也给以后往
-    同一个网段里加节点留了余量）；跨 /24 就取能盖住它们的最小前缀。
-    偏宽是安全的那一侧：基础规则是 `ip daddr != <CIDR> accept`，网段越宽，
-    落到会话规则上的流量越多、保护越紧；偏窄才是漏。
-    """
-    run = run or run_cmd
-    rc, out, _ = run([scontrol or "scontrol", "show", "node", "-o"], timeout=15)
-    if rc != 0 or not out.strip():
-        return None, "问不到 Slurm 的节点列表（rc=%s）" % rc
-    addrs = sorted({int(ipaddress.IPv4Address(m.group(1)))
-                    for m in re.finditer(r"\bNodeAddr=(\S+)", out)
-                    if is_ipv4(m.group(1))})
-    if not addrs:
-        return None, "节点列表里一个 IPv4 的 NodeAddr 都没有（写的是主机名吗）"
-    # 从最长前缀往下找，第一个装得下全部地址的就是最小覆盖网段。倒过来的话
-    #   第一个命中的是 /0 —— 它装得下任何东西。（这一版第一遍就是这么写的，
-    #   于是每一次都推出 0.0.0.0/0。）
-    net = None
-    for plen in range(32, -1, -1):
-        cand = ipaddress.IPv4Network((addrs[0], plen), strict=False)
-        if all(ipaddress.IPv4Address(a) in cand for a in addrs):
-            net = cand
-            break
-    if net is None:                                  # 构造上到不了
-        return None, "算不出一个能盖住全部节点地址的网段"
-    if net.prefixlen < MIN_DERIVED_PREFIX:
-        return None, ("算出来的是 %s，比 /%d 还宽：这些节点不在同一个网段里，"
-                      "本架构今天只能表达一个网段" % (net, MIN_DERIVED_PREFIX))
-    # 同一个 /24 里能装下就取那个 /24。
-    if net.prefixlen > 24:
-        wide = ipaddress.IPv4Network((addrs[0], 24), strict=False)
-        if all(ipaddress.IPv4Address(a) in wide for a in addrs):
-            net = wide
-    return str(net), "%d 个节点地址，取 %s" % (len(addrs), net)
-
-
-def config_deploy_problems(cfg):
-    """「这份配置能不能上线」的全部判据，返回 `(errors, cidr_errors)`。
-
-    三个调用点（`Sessiond.start()` / `--check` / 热重载）共用这一处。
-      两个调用点各抄一份子集就会漏，而漏了未必有症状：热重载那条路上少一个
-      `crosscheck_cidr()`，一个 `cluster_cidr` 写错的站点就能 `systemctl reload`
-      成功，而 `Nft.ensure()` 按值比对把内核里那条基础规则换成错的网段。
-      任意两个调用点之间都可能漏；不会再漏的形状是只有一处。
-
-    两类不合并成一个列表，因为它们的出口不同：
-        `errors`      这一行字本身就不成立（`Config.validate()`），问谁都是这个答案；
-        `cidr_errors` 要问 Slurm 才知道（`crosscheck_cidr()`），而它查询失败
-                      时返回空（fail-open，理由见那个函数）。
-      `--check` 靠这个区分打出两档退出码（2 = 这台机器缺东西 / 1 = 这份配置写错
-      了），而部署脚本要靠那个区分决定"现在就停"还是"装完再判"。顺序也照旧：
-      配置级在前、交叉核对在后（`--check` 的次序注释里写了为什么）。
-    """
-    return list(cfg.validate()), crosscheck_cidr(cfg)
 
 
 # ==============================================================================
@@ -1877,7 +1757,6 @@ SLURM_COMMANDS = ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
 #   这些东西是插件的策略（code-server 的认证方式、sshd 的可执行文件路径），
 #   不是站点的事实，所以它们各自住在那个插件的配置里，而不是在顶层排成一排。
 GLOBAL_KEYS = frozenset([
-    "cluster_cidr",
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
     # 每人最多几个会话。名字不是 v0.2 那个 `max_active_per_user`，
     # 合并之后它数的是「占着位置的」（排队中的也算），沿用旧名字会让这个名字说谎；
@@ -1922,10 +1801,9 @@ GLOBAL_KEYS = frozenset([
 #   它改错了会不会被拦住。影响哪段时间决定它进哪一档；而它能不能进
 #   HOT/NOTICE（而不是被踢进 COLD）还要看它改错之后有没有人逮得住。
 #   对改错了会静默失效的键（不报错、只是那层保护从此不再生效），这一条是
-#      硬要求。全表只有 `cluster_cidr` 是这一种，拦住它的是
-#      `crosscheck_cidr()`，它现在在 `config_deploy_problems()` 里，所以
-#      `start()` / `--check` / 热重载三条路都会跑（为什么必须是三条，见下面
-#      `cluster_cidr` 那一格）。
+#      硬要求。全表今天没有这种键 —— 唯一那一格（`cluster_cidr`）随 0.23
+#      删掉了，它那条几何约束改判在装规则那一处（`Nft.add_session_rule()`），
+#      而那一处不在配置里，热重载管不着它。
 #   而改错了会当场叫出来的键（`sbatch` 路径写错，下一次 fork 就是 127）
 #      不需要额外的东西：那种错本来就会自己报。
 #
@@ -1949,18 +1827,6 @@ RELOAD_CLASS = {
     "max_connections_per_user": RELOAD_HOT,
 
     # ── 可热，但要说一句 ──────────────────────────────────────────────────
-    # 集群网段：换了之后内核里那一条基础规则要跟着换（`Nft.ensure()` 按值
-    # 比对，见那一节）。说一句是因为"哪些流量被放行"在这一刻真的变了。
-    # 而它之所以可热（不是 COLD），靠的是改错了会被拦住：重载的判据里
-    #   有 `crosscheck_cidr()`，它拿新网段与 Slurm 的 NodeAddr 全集对一遍，
-    #   漏掉任何一个节点，整个重载被拒、一个字都不改（账本 F45）。
-    #   少了这一道，改错一个数字就能重载成功，而 `Nft.ensure()` 会把内核里
-    #     那条基础规则换成错的网段，被漏掉的节点流量走到链尾的 `policy accept`，
-    #     没有报错、没有日志、没有任何迹象。
-    #   这一格单独看会以为"网段只影响新发生的事"，而它其实是几何约束：
-    #     它错了，此后每一条会话规则都匹配不到。所以它的"可热"是有条件的，
-    #     条件写在上面那段"能不能可热"里。
-    "cluster_cidr": RELOAD_NOTICE,
     # 端口区间与避让区间：已经在跑的会话，它的端口可能落在新区间之外。
     # 不拦：那些会话该跑完就跑完（拆的时候按会话记录里的端口拆，与区间无关），
     #   而拦下来会让"改一个数"变成"必须重启、断掉所有人的会话"。
@@ -5419,8 +5285,8 @@ def plugin_gres_problems(plugins, catalog):
 #，那正是"任何一项不满足即中止，不做任何改动"这条承诺的落点。而它
 #          必须分得清两件事：
 #            这台机器缺东西（缺 sbatch、缺 nft），现在就停，一个字节都别装；
-#            这份配置写错了（第一次部署时 `cluster_cidr` 还空着，那本来就是
-#            预期状态），继续装，装完在配置落盘之后再判它。
+#            这份配置写错了（`sbatch` 那条路径指的是别处之类），继续装，
+#            装完在配置落盘之后再判它。
 #          混成一个退出码的话，部署脚本只有两条路：要么在第一次部署时必然中止，
 #          要么把"装到了一台根本不是登录节点的机器上"也放过去。
 #
@@ -5485,7 +5351,7 @@ def plugin_keys_problem(sections, meta, resolve):
     """这一份插件配置里的键有没有认不出的。返回错误串列表（空 = 没问题）。
 
     站点通用键住在主配置里，所以它出现在插件那一份里是一个很容易犯、
-      而症状完全指错方向的错（"我明明写了 cluster_cidr"），报错要指路，
+      而症状完全指错方向的错（"我明明写了那个键"），报错要指路，
       而不是只说一句"认不出"。
     """
     errors = []
@@ -5624,9 +5490,6 @@ class Config(object):
                 return int(v)
             except ValueError:
                 raise ValueError("%s 必须是整数，得到: %r" % (key, v))
-
-        # ── 网络 ──
-        self.cluster_cidr = get("cluster_cidr").strip()
 
         # ── 端口池 ──
         self.port_start = getint("range_start", 55001)
@@ -5787,48 +5650,6 @@ class Config(object):
             raise KeyError("配置 %s：%s" % (key, why))
         return self.plugins[spec.id]
 
-    def cluster_cidr_problem(self):
-        """cluster_cidr 的形式问题描述；没问题返回 None。
-
-        这一项只校验「地址部分是合法 IPv4」不够，另外两件事若不校验，它们的
-        失效方向都是 fail-open（不报错，只是 ACL 不再生效）：
-          ① 前缀长度不校验，`192.0.2.0/99` 能通过自检，在 nft 里却是语法错误；
-          ② 主机位不为 0 的写法（`192.0.2.5/24`）在 nft 里语义含糊。
-
-        至于「这个网段是不是真的覆盖了全部计算节点」，那是内容问题，不是形式
-        问题，只有问 Slurm 才知道，见 crosscheck_cidr()。
-
-        这里刻意【没有】「拒绝 RFC 5737 文档网段」那一条，虽然它看起来能一眼抓住
-          「照抄示例忘了改」。理由：那会拒绝一个完全合法的配置，用 192.0.2.0/24
-          的测试集群是存在的，而软件没有任何依据判定它不是真的。一个不许人填真实值的
-          校验，是软件的错，不是配置的错。而它想防的那件事由 crosscheck_cidr() 覆盖，
-          且报错更精确（它会点名到底是哪几个节点落在外面）。
-        """
-        s = self.cluster_cidr
-        if not s:
-            return ("未配置 cluster_cidr。它是 nft 基础规则 `ip daddr != <CIDR> accept` "
-                    "的几何约束，而它没有安全的默认值，填错的后果不是报错，而是"
-                    "全部 ACL 静默失效。写法：cluster_cidr = <网络地址>/<前缀长度>"
-                    "（例如 192.0.2.0/24，把地址换成你的集群网段）")
-        if "/" not in s:
-            return ("cluster_cidr 必须是 CIDR（<网络地址>/<前缀长度>），当前为 %r" % s)
-        addr, _, plen = s.partition("/")
-        if not is_ipv4(addr):
-            return "cluster_cidr 的地址部分不是合法 IPv4: %r" % s
-        if not plen.isdigit():
-            return "cluster_cidr 的前缀长度不是数字: %r" % s
-        n = int(plen)
-        if not (0 <= n <= 32):
-            return "cluster_cidr 的前缀长度越界: %r（应为 0-32）" % s
-        if n == 0:
-            return ("cluster_cidr 的前缀长度是 0：`ip daddr != 0.0.0.0/0` 恒为假，"
-                    "基础规则等于不存在，实际保护范围远超预期")
-        net = ipaddress.IPv4Network(s, strict=False)
-        if str(net) != s:
-            return ("cluster_cidr 的主机位不为 0（%s）。在 nft 里语义含糊，"
-                    "请改写成网络地址：%s" % (s, net))
-        return None
-
     def _db_schema_errors(self):
         """数据库表结构是否还是本版认得的样子，两头都查。
 
@@ -5979,9 +5800,6 @@ class Config(object):
         #   都做不到）。所以它走 `plugin_job_missing` + `--check` 的与
         #   `start()` 的 log.error，与 `plugin_problems` 同一条路。
         #   不要再把它加回这里，`validate()` 没有 warnings 通道。
-        cidr_err = self.cluster_cidr_problem()
-        if cidr_err:
-            errors.append(cidr_err)
         # 八个命令全查。漏查 squeue（job_state
         #   的兜底查询）或 sacctmgr（账户与分区权限）的话，它们可以是错路径而启动通过，
         #   运行时才失败，那时报出来的是"查不到作业"或"没有账户"，与真正的
@@ -6265,6 +6083,11 @@ class Nft(object):
       - 单次 nft 调用即原子，消灭"插了 DROP 没插 ACCEPT"的中间态；
       - ct state new 只拦新连接，已建立的转发不会因规则抖动被掐断（这是"隧道重连
         不中断"的物理保证）。
+
+    而"这条规则能落到哪些地址上"由 `add_session_rule()` 那一处判：目标必须是
+      Slurm 报的一台真节点。0.23 之前那是链首一条
+      `ip daddr != <cluster_cidr> accept` 的活，而那一格要管理员手填、只表达得了
+      一个网段、填窄了还是静默失效。
     """
 
     TABLE = "inet slurmate"
@@ -6276,11 +6099,22 @@ class Nft(object):
     #   `del_by_comment()` 照样返回 True（它报的是"规则集读得到"）。症状是
     #   "删过了，但规则还在"，且没有任何地方会报错。
     RE_ANY_RULE = re.compile(r'comment "([^"]+)"\s*#\s*handle (\d+)')
-    BASE_OFFCLUSTER = "slurmate-base-offcluster"
     BASE_LO = "slurmate-base-lo"
+    # 0.23 起不再插那条"本网段之外一律放行"的基础规则（见 `ensure()` 与
+    #   `add_session_rule()`）。这个名字只为一个用途留着：把别人集群里那条
+    #   遗留的规则删掉一次。
+    LEGACY_BASE_OFFCLUSTER = "slurmate-base-offcluster"
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, known_addrs=None):
+        """
+        `known_addrs` 是一个零参可调用，返回"Slurm 报的节点地址全集"（一个
+          set）或 `None`（这一趟拿不到一份完整的集合）。它由 `Sessiond` 传进来
+          （`lambda: self.cluster.node_addrs()`），因为这一层不认识 `Cluster`，
+          而它读的是那一层已经缓存好的那一格 —— 一次 fork 都不多发。
+        取不到（没传）时 `add_session_rule()` 不判那一条，见那里的注释。
+        """
         self.cfg = cfg
+        self._known_addrs = known_addrs
         self.bin = "/sbin/nft" if os.path.exists("/sbin/nft") else (
             "/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else "nft")
 
@@ -6315,11 +6149,9 @@ class Nft(object):
                       check=True)
             log.warning("nft 链 inet slurmate output 缺失，已重建")
 
-        # 基础规则：按 comment + 值 对齐（幂等）。
-        # 用 insert 而不是 add，add 会追加到链尾，也就是跑到已有会话规则【后面】。
-        # 虽然两者的匹配集基本不相交（会话规则只匹配集群网段内的具体 IP:端口），
-        # 但 `oif "lo" accept` 与"目标是本机 IP"的会话规则理论上会重叠，
-        # 保持"基础规则在前"能让语义始终确定。
+        # 基础规则 `oif "lo" accept`：用 insert 而不是 add，add 会追加到链尾，
+        #   也就是跑到已有会话规则【后面】。`oif "lo" accept` 与"目标是本机 IP"
+        #   的会话规则理论上会重叠，保持"基础规则在前"能让语义始终确定。
         rc, out, _ = self._nft(["list", "chain", "inet", "slurmate", "output"])
         if rc == 0:
             if self.BASE_LO not in out:
@@ -6327,44 +6159,19 @@ class Nft(object):
                            "oif", "lo", "accept", "comment", self.BASE_LO],
                           check=True)
                 log.warning("补齐基础规则 %s", self.BASE_LO)
-            # 判据是值，不是"comment 在不在"。只看
-            #   comment 的话，改掉 `cluster_cidr` 之后那条规则永远走"已存在"
-            #   这条路，于是连 restart 都不生效，内核里那条旧网段的基础规则
-            #   一直在。而文档说它是"即使前面所有校验都被绕过"的最后一道几何
-            #   约束：它悄悄指着一个旧网段，是这条线上最不该有的一种失效。
-            cur = self.base_offcluster_cidr(out)
-            if cur is None:
-                self._insert_base_offcluster()
-                log.warning("补齐基础规则 %s", self.BASE_OFFCLUSTER)
-            elif cur != self.cfg.cluster_cidr:
-                self.del_by_comment(self.BASE_OFFCLUSTER)
-                self._insert_base_offcluster()
-                log.warning("基础规则 %s 的网段从 %s 换成 %s（cluster_cidr 改了）",
-                            self.BASE_OFFCLUSTER, cur, self.cfg.cluster_cidr)
+            # 清掉 0.23 之前那条 `ip daddr != <cluster_cidr> accept`。
+            #   这里【要】删一条本版根本不插的规则，理由只有一个，而它是硬理由：
+            #   `ensure()` 只补不删，所以已经装过的集群里那条规则会一直躺在内核里，
+            #   指着升级之前那份配置的网段。而它是一条短路的 accept —— 本来该落到
+            #   会话规则上的流量会被它提前放行，那正是这一版要废掉的那个行为，
+            #   留着它就等于升级之后保护反而更松。
+            #   删过之后这个分支永远不再命中（幂等），但它不能省。
+            if self.LEGACY_BASE_OFFCLUSTER in out:
+                self.del_by_comment(self.LEGACY_BASE_OFFCLUSTER)
+                log.warning("已删除旧版遗留的基础规则 %s（它的几何约束改判在"
+                            "装规则那一处，见 add_session_rule()）",
+                            self.LEGACY_BASE_OFFCLUSTER)
         return True
-
-    def _insert_base_offcluster(self):
-        """插那条"本网段之外一律放行"的基础规则。
-
-        最后一道几何约束：即使前面所有校验都被绕过，也影响不到集群之外。
-        """
-        self._nft(["insert", "rule", "inet", "slurmate", "output",
-                   "ip", "daddr", "!=", self.cfg.cluster_cidr, "accept",
-                   "comment", self.BASE_OFFCLUSTER], check=True)
-
-    @staticmethod
-    def base_offcluster_cidr(out):
-        """从 `list chain` 的输出里读出基础规则里那个网段。
-
-        没有那条规则，`None`（与"有，但网段是空串"必须分得开，三态纪律）。
-        """
-        for line in out.splitlines():
-            if Nft.BASE_OFFCLUSTER not in line:
-                continue
-            m = re.search(r"ip\s+daddr\s+!=\s+(\S+)\s+accept", line)
-            if m:
-                return m.group(1)
-        return None
 
     def session_rules(self):
         """返回 {comment: handle}"""
@@ -6385,6 +6192,27 @@ class Nft(object):
     def add_session_rule(self, node_ip, port, uid, job_id):
         if not is_ipv4(node_ip):
             return False, "节点地址不是 IPv4: %r" % node_ip
+        # 这一条 drop 的目标必须是【本集群的一台真节点】。
+        #   它是本类唯一能兜住那个上界的地方：三个调用点（reconcile / enroll /
+        #   reenroll）都从这里过，而规则的目标地址是这一整条链上唯一能伤到别人的
+        #   那一格（会话文件由用户自己写，写一个别的 IP 进来就能让守护进程替他去
+        #   丢别人的包）。
+        #   判据取 Slurm 报的节点地址全集：比任何网段都紧（只会落在真节点上），
+        #   不用配置，跨子网的集群也照样成立。
+        #   集合拿不到时不判，只记一条 —— 与从前那条交叉核对同一条规矩（宁可留着
+        #   可能不完整的保护继续服务，也不要因为一次查询失败而拒绝登记）。
+        #   "拿不到"有两种，都归 `None`：问不到 Slurm、以及节点报的是主机名
+        #   （那份集合不完整，拿去判会误拒合法会话）。
+        known = self._known_addrs() if self._known_addrs else None
+        if known is None:
+            log.warning("这一次没有核对 %s 是不是本集群的节点"
+                        "（节点地址集合拿不到：Slurm 问不到，或者节点报的是主机名），"
+                        "规则照装", node_ip)
+        elif node_ip not in known:
+            log.error("拒绝为 %s 装 ACL：它不是 Slurm 报的任何一台节点"
+                      "（本集群 %d 台）。这条规则的目标只能是本集群的节点。",
+                      node_ip, len(known))
+            return False, "节点地址不在集群的节点列表里: %s" % node_ip
         comment = self.comment_for(uid, job_id, port)
         # 幂等：先删同名（防重复）
         self.del_by_comment(comment)
@@ -6649,28 +6477,36 @@ def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
 
 
 class NodeCatalog(object):
-    """`scontrol show node -o` 那一趟的两半产出。
+    """`scontrol show node -o` 那一趟的三半产出。
 
-    两半来自同一条命令，所以只有一个返回对象：分两次查就是把本仓库里最贵的
+    三半来自同一条命令，所以只有一个返回对象：分两次查就是把本仓库里最贵的
     那一次 fork（大集群上这条命令的输出很大）跑两遍，而它们问的是同一批节点。
 
-      · `gres`：{分区名: [{"name","type","per_node_max","total"}]}
-      · `mem` ：{分区名: 这个分区里内存最大的那种节点的内存，单位 MB}
+      · `gres` ：{分区名: [{"name","type","per_node_max","total"}]}
+      · `mem`  ：{分区名: 这个分区里内存最大的那种节点的内存，单位 MB}
+      · `addrs`：Slurm 报的节点地址全集（一个 set），或 `None`
 
-    两半各自都是三态的：`None` = 这一趟没问出来（`scontrol` 失败），
+    前两半各自都是三态的：`None` = 这一趟没问出来（`scontrol` 失败），
     `{}` = 问到了，集群上确实一个都没有。把它们合并会让界面替集群说一句
     它不知道的话（"这个分区没有卡" / "这个分区没有内存上限"）。
+
+    `addrs` 服务的是"这条 ACL 规则的目标可不可以是那个地址"
+    （`Nft.add_session_rule()`）—— 0.23 之前那是 `cluster_cidr` 的活。
+    `None` 有两种成因，它们在这一处是同一件事（"这份集合不完整，别拿它判"）：
+    问不到 Slurm，以及有节点的 `NodeAddr` 报的是主机名（那种节点的地址要
+    `scontrol show hostname` 才解析得出来，不在字面量集合里）。
 
     `mem` 里那个数用的是 Slurm 自己的单位（`RealMemory=`，MB），原样带出去，
     不在这里换成 GB：换算是界面的事（它要贴整数格），而"这个节点有多少内存"
     是集群的事实。
     """
 
-    __slots__ = ("gres", "mem")
+    __slots__ = ("gres", "mem", "addrs")
 
-    def __init__(self, gres=None, mem=None):
+    def __init__(self, gres=None, mem=None, addrs=None):
         self.gres = gres
         self.mem = mem
+        self.addrs = addrs
 
 
 class Slurm(object):
@@ -6880,10 +6716,24 @@ class Slurm(object):
             return None
         by_part = {}
         mem = {}
+        addrs = set()
+        addrs_partial = False
         for line in out.splitlines():
+            # 地址那一半先收：它与分区无关（不在任何分区里的节点也是一台节点），
+            #   所以它排在下面那个 `continue` 之前。
+            am = re.search(r"\bNodeAddr=(\S+)", line)
+            if am:
+                if is_ipv4(am.group(1)):
+                    addrs.add(am.group(1))
+                else:
+                    # 这一台报的是主机名。集合因此是【不完整】的：
+                    #   `Slurm.node_ip()` 对那种节点走 `scontrol show hostname`
+                    #   去解析，而解析出来的地址不在这份字面量集合里 —— 拿一份
+                    #   不完整的集合去判"属不属于"会拒掉合法会话。
+                    addrs_partial = True
             pm = re.search(r"\bPartitions=(\S+)", line)
             if not pm:
-                continue                      # 不在任何分区里的节点，两半都用不上
+                continue                      # 不在任何分区里的节点，另两半都用不上
             mm = re.search(r"\bRealMemory=(\d+)", line)
             node_mem = int(mm.group(1)) if mm else None
             gm = re.search(r"\bGres=(\S+)", line)
@@ -6916,7 +6766,12 @@ class Slurm(object):
                         cur["per_node_max"] = max(cur["per_node_max"], e["count"])
         gres = {p: sorted(v.values(), key=lambda e: (e["name"], e["type"] or ""))
                 for p, v in by_part.items()}
-        return NodeCatalog(gres=gres, mem=mem)
+        # 一个都没收到时也归"拿不到"：那分不清"这台集群没有节点"与"我们没解析出
+        #   任何地址"，而后者拿去当判据会拒掉每一条会话。真没有节点的集群上
+        #   也没有作业，这一格怎么判都没有后果。
+        if addrs_partial or not addrs:
+            addrs = None
+        return NodeCatalog(gres=gres, mem=mem, addrs=addrs)
 
     def is_accounting_enforced(self):
         """AccountingStorageEnforce 里是否含 associations，决定 sbatch 必须带 -A。"""
@@ -7456,6 +7311,17 @@ class Cluster(object):
         """
         return self._nodes_catalog().mem
 
+    def node_addrs(self):
+        """Slurm 报的节点地址全集；`None` = 这一趟拿不到一份完整的集合。
+
+        它与 `gres()` / `node_mem()` 共用同一格缓存（同一个 `node_catalog` 的
+        返回值），所以它一次 fork 都不多发。
+
+        唯一的读者是 `Nft.add_session_rule()`：那条 ACL 规则的目标必须是这份
+        集合里的一员。`None` 时那一处不判（理由写在那里）。
+        """
+        return self._nodes_catalog().addrs
+
     def nodes(self):
         return self._read_meth("nodes", INFO_MEDIUM_SECONDS, "node_table")
 
@@ -7724,7 +7590,11 @@ class Sessiond(object):
     def __init__(self, cfg):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
-        self.nft = Nft(cfg)
+        # 装规则那一处要判"这个地址是不是本集群的节点"，而那份集合由 `Cluster`
+        #   的慢钟持有。传的是可调用（不是 `self.cluster` 这个对象）：它在下面
+        #   才构造，而且与 `Cluster` 收 `self.slurm` 那条同理 —— 构造时抓住的
+        #   东西会在它被换掉之后继续给旧答案（自检与用例都换 `cluster`/`slurm`）。
+        self.nft = Nft(cfg, known_addrs=lambda: self.cluster.node_addrs())
         self.slurm = Slurm(cfg)
         # 集群信息的三层钟。查询留在 `self.slurm` 上，多久问一次在这里。
         #   见 Cluster 的 docstring：请求路径上一次 fork 都不发是它的全部目的。
@@ -7850,19 +7720,16 @@ class Sessiond(object):
 
     def start(self):
         """启动。返回 False 表示"拒绝启动"（原因已写进日志，且必须是可照做的）。"""
-        # 判据只有一处（`config_deploy_problems`），与 `--check`、热重载
-        #   是同一个函数。三条路各抄一份子集就会漏，
-        #   而 F45 正是那么来的（热重载那一份少了交叉核对那一半）。
-        # 交叉核对那一条尤其要放在【最前面】：网段漏掉一个节点的后果是去往它的
-        #   流量被链首的基础规则放行，而链的 policy 是 accept，没有报错、没有
-        #   日志、没有任何迹象。这是唯一能在装上规则【之前】发现它的地方，等到
-        #   会话跑起来就晚了。
-        errs, cidr_errors = config_deploy_problems(self.cfg)
+        # 判据只有一处（`Config.validate()`），与 `--check`、热重载是同一个
+        #   函数。三条路各抄一份子集就会漏，而 F45 正是那么来的。
+        # `config_deploy_problems()` 不在了：它比 `validate()` 多出来的那一半，
+        #   是 `cluster_cidr` 与节点地址的交叉核对，而那个键随 0.23 一起删了
+        #   —— 上界改判在装规则那一处（`Nft.add_session_rule()`）。下一个
+        #   "只有问 Slurm 才知道"的判据出现时，这里要重新长出那个函数来。
+        errs = self.cfg.validate()
         for e in errs:
             log.error("拒绝启动：%s", e)
-        for e in cidr_errors:
-            log.error("拒绝启动：%s", e)
-        if errs or cidr_errors:
+        if errs:
             return False
 
         for d in (self.cfg.state_dir, self.cfg.rejected_dir, self.cfg.log_dir):
@@ -8046,9 +7913,8 @@ class Sessiond(object):
         四步，任何一步不过就停在那里：
           1. 重新解析（主文件 + `drop-in` 目录）并重扫插件目录，两件事都在
              `Config()` 里，所以新装的插件在这一步就进来了；
-          2. `config_deploy_problems()` 为空，它是「这份配置能不能上线」的
-             全部判据（`validate()` + `crosscheck_cidr()`），与 `start()` /
-             `--check` 共用一处（见那个函数的 docstring）；
+          2. `Config.validate()` 全过，它是「这份配置能不能上线」的全部判据，
+             与 `start()` / `--check` 共用一处；
           3. 可热重载性：变了的键里只要有一个在 COLD 档，拒绝（见 RELOAD_CLASS）；
           4. 全过，`_adopt_config()`。
 
@@ -8063,28 +7929,16 @@ class Sessiond(object):
             #   旧配置继续服务，正在跑的会话一条都不会断。
             log.error("热重载失败：新配置读不动（旧配置继续服务）：%s", e)
             return False, []
-        # 判据是 `config_deploy_problems`，不是 `validate()`。
-        #   "cidr 与节点的交叉核对"只在 `config_deploy_problems` 里，
-        #   若只指望 `validate()`，那正是"三条路各抄一份子集"的典型症状，
-        #   也没有一条用例能发现（F45）。
-        errs, cidr_errs = config_deploy_problems(new)
+        # 判据是 `Config.validate()`：F45 的教训是"三条路各抄一份子集就会漏"，
+        #   而今天只有这一份判据可抄（`config_deploy_problems()` 随
+        #   `cluster_cidr` 一起删了，见 `start()` 里那段）。
+        errs = list(new.validate())
         if errs:
             log.error("热重载失败：新配置有 %d 处过不了自检（旧配置继续服务）："
                       "%s", len(errs), errs[0])
             for e in errs[1:]:
                 log.error("  %s", e)
             return False, []
-        if cidr_errs:
-            # 点名是哪个键（用户要的措辞）：这一档的读者要去改的是
-            #   `cluster_cidr`。照着改完热重载是能生效的，所以这里不必说
-            #   "去重启"，与上面那两档（COLD、自检不过）的出路不同。
-            log.error("热重载拒绝：cluster_cidr 与 Slurm 的节点地址不一致，"
-                      "新配置一个字都没被采用（旧配置继续服务）。改对之后"
-                      "再发一次 reload 即可，不必重启。")
-            for e in cidr_errs:
-                log.error("  %s", e)
-            return False, []
-
         cold = changed_cold_keys(self.cfg, new)
         if cold:
             log.error("热重载拒绝：这几个键改了之后必须重启才生效：%s。"
@@ -10754,7 +10608,6 @@ class Sessiond(object):
             "SLURMATE_GRES": gres_spec(gres) or "",
             "SLURMATE_AUTH_MODE": pcfg.session_auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
-            "SLURMATE_CLUSTER_CIDR": cfg.cluster_cidr,
             # 可执行文件走插件自己声明的那个变量名（code-server 是
             # SLURMATE_CS_BIN，sshd 是 SLURMATE_SSHD_BIN）。加第三个插件不用动这里。
             **({spec.bin_env: pcfg.bin} if spec.bin_env else {}),
@@ -10821,11 +10674,6 @@ def main():
                     help="前台运行（systemd 下用，日志直接进 journal）")
     ap.add_argument("--check", action="store_true",
                     help="只做配置校验与连通性自检，不启动")
-    ap.add_argument("--suggest-cidr", action="store_true",
-                    help="按 Slurm 报的节点地址算一个 cluster_cidr，打到标准输出"
-                         "然后退出。install-base.sh 用它把空着的那一格填上。"
-                         "推不出来时标准输出是空的、非零退出，原因在标准错误。"
-                         "判据与 crosscheck_cidr() 同一个（见 derive_cluster_cidr）")
     ap.add_argument("--check-plugins", action="store_true",
                     help="只扫插件目录并对账每个插件（读记录表 + 逐份比 + 验签），"
                          "不读配置、不启动。判据与守护进程启动时逐字相同"
@@ -10892,24 +10740,6 @@ def main():
             return 1
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
-        return 0
-
-    # ── 算一个 cluster_cidr（`install-base.sh` 用）──────────────────────────
-    # 输出是给脚本读的一行，所以排在 log_setup() 之前，与 --extract-package 同一个
-    #   位置的理由。它要读配置（拿 `scontrol` 的路径），但不要求这份配置是好用的
-    #   —— 调用它的那一刻，配置里那一格正是空的。
-    if args.suggest_cidr:
-        try:
-            cfg = Config(args.config)
-        except Exception as e:                           # noqa: BLE001
-            sys.stderr.write("错误: 配置读取失败（%s）\n" % e)
-            return 1
-        value, why = derive_cluster_cidr(scontrol=cfg.scontrol)
-        if value is None:
-            sys.stderr.write("推不出来：%s\n" % why)
-            return 1
-        sys.stderr.write("%s\n" % why)
-        sys.stdout.write("%s\n" % value)
         return 0
 
     # ── 装插件（`slurmate plugin install` 用）────────────────────────────────
@@ -11122,11 +10952,8 @@ def main():
         log.error("读取配置失败 %s: %s", args.config, e)
         return 1
 
-    # 判据只有一处（`config_deploy_problems`），与 `start()`、热重载是
-    #   同一个函数。`cidr_errors` 在这一行就算出来了，而打它、用它算退出码
-    #   都在下面"集群那一屏"附近，那两处相隔两百行是因为打印的位置要在
-    #   集群信息那一段（读者在那儿找它），不是因为判据分两次跑。
-    errors, cidr_errors = config_deploy_problems(cfg)
+    # 判据只有一处（`Config.validate()`），与 `start()`、热重载是同一个函数。
+    errors = list(cfg.validate())
 
     # `--check` 的退出码分两档：2 = 这台机器缺东西，
     #   1 = 这份配置写错了。判据与整段理由写在 `machine_selfcheck()` 上面，
@@ -11142,7 +10969,7 @@ def main():
     if args.check:
         is_root = os.geteuid() == 0
         # 机器级与配置级都打出来，而不是碰到第一条就退出：它们是独立的
-        #   两组事实（"这台机器缺 sbatch" 与 "cluster_cidr 是空的" 可以同时成立），
+        #   两组事实（"这台机器缺 sbatch" 与 "作业脚本目录写错了" 可以同时成立），
         #   而分两次跑才能看全，正是自检最不该有的体验。
         for _m in machine:
             print("  ✗ %s" % _m)
@@ -11150,8 +10977,8 @@ def main():
             print("  配置错误: %s" % _e)
         if machine or errors:
             # 有错也把这一屏打完，而不是碰到第一条就退出：机器级与配置级是
-            #   互相独立的两组事实（"这台机器缺 sbatch" 与 "cluster_cidr 还
-            #   空着" 可以同时成立），分两次跑才能看全正是自检最不该有的体验。
+            #   互相独立的两组事实（"这台机器缺 sbatch" 与 "这份配置里某一条
+            #   写错了" 可以同时成立），分两次跑才能看全正是自检最不该有的体验。
             print("配置 %s（上面那两条互相独立，一起修更快）：" % args.config)
         else:
             print("配置 OK: %s" % args.config)
@@ -11167,7 +10994,6 @@ def main():
         print("  插件目录      : %s" % cfg.plugins_dir)
         print("  缺省插件      : %s" % (cfg.default_plugin or
               "（未设置，提交时必须显式给 service_kind）"))
-        print("  集群网段      : %s" % cfg.cluster_cidr)
         print("  闪断/孤儿阈值 : %ds / %ds" % (cfg.suspect_after, cfg.orphan_after))
         print("  续期          : %s  阈值 %ds 增量 %s"
               % ("开" if cfg.renew_enabled else "关", cfg.renew_threshold,
@@ -11343,12 +11169,6 @@ def main():
             print("  队列          : %d 个排队、%d 个在跑" % (
                 sum(d["pending"] for d in _q["depth"].values()),
                 sum(d["running"] for d in _q["depth"].values())))
-        # cluster_cidr 与 Slurm 的 NodeAddr 交叉核对，这是唯一能发现
-        # 「网段漏掉了某个节点」的地方，而漏掉的后果是静默失效。
-        # 结果在上面就算好了（`config_deploy_problems` 一次算完两样），
-        #   这里只负责打在读者会去找它的位置。
-        for _e in cidr_errors:
-            print("  %s" % _e)
         nft = Nft(cfg)
         print("  nft 表存在    : %s" % nft.table_exists())
         rules = nft.session_rules()
@@ -11357,20 +11177,16 @@ def main():
         if not is_root:
             print("  [提示] 非 root 运行，nft 相关项仅供参考；完整自检请用 sudo")
         # 上面那些不能只是一行字：systemd 的 ExecStartPre 就是跑这个命令，
-        # 退出码非零才会真的拦住服务。交叉核对失败时拒绝启动，与
-        # Sessiond.start() 里的判断是同一条，两处都要有，因为 --check
-        # 才是 systemd 看到的那一道。
-        # 次序是承重的，别把它当成随手排的：机器级在最前（2 比 1
-        #   更根本，一台不是登录节点的机器上，"配置写错了"这句话没什么用，
-        #   而部署脚本要靠这个数决定"现在就停"还是"装完再判"）。
-        #   然后才是配置级（`validate()` 那一串），最后才是 cidr 交叉核对
-        #，它其实也是配置级，只是判它要问 Slurm，所以排在后面。
+        # 退出码非零才会真的拦住服务。配置级那一条与 Sessiond.start() 里的
+        # 判断是同一条，两处都要有，因为 --check 才是 systemd 看到的那一道。
+        # 次序是承重的，别把它当成随手排的：机器级在前（2 比 1 更根本，
+        #   一台不是登录节点的机器上，"配置写错了"这句话没什么用，而部署脚本
+        #   要靠这个数决定"现在就停"还是"装完再判"），配置级在后。
+        # （从前配置级还分两档，cidr 交叉核对排在最后 —— 它随
+        #   `cluster_cidr` 一起删了，见 `start()` 里那段。）
         if machine:
             return 2
         if errors:
-            return 1
-        if cidr_errors:
-            print("配置检查未通过：cluster_cidr 与 Slurm 的节点地址不一致（见上）")
             return 1
         return 0
 

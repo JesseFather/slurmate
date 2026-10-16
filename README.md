@@ -210,9 +210,8 @@ sudo bash cluster/install-base.sh              # 部署
 - ACL 的固有边界：nft 规则的 hook 点是登录节点的 output 链，所以它拦得住「登录节点上
   的其他用户连你的端口」，但拦不住同节点共租户直接 curl。这就是认证方式由插件自己声明、
   而缺省不是免登录的原因，详见 [SECURITY.md](SECURITY.md)。
-- 只支持单一 CIDR：`cluster_cidr` 只能写一个网段，登录节点与计算节点必须在其中。
-  写错的失效方向是静默的（ACL 全部失效而不报错），所以它没有默认值，且启动时会与
-  Slurm 的 `NodeAddr` 交叉核对，对不上就拒绝启动。
+- ACL 规则的目标必须是一条真实的节点地址：判据取 Slurm 报的 `NodeAddr` 全集
+  （`Nft.add_session_rule()`），拿不到那份集合时不判、只记一条。
 - 产物未签名：Windows 首次运行会被 SmartScreen 拦，macOS 需要右键 →「打开」。
 - 基座不带任何插件，两端都是。作业里能跑什么由插件决定，而插件是独立项目
   （[`plugins/`](plugins)），基座里没有任何一个插件的名字。

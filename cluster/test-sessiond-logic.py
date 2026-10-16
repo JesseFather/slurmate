@@ -404,20 +404,16 @@ def make_config(mod, tmpdir):
 
     with open(CONF, "r", encoding="utf-8") as f:
         text = f.read()
-    # 示例配置里 cluster_cidr 故意留空（它没有安全的默认值），测试里填一个
-    # 合法网段 —— 同时后面还有专门一节验证"留空会被拒绝"。
-    #
-    # 顺便补上 default_plugin：这一份测试配置要的是「一个升级前的老站点」的样子
+    # 补上 default_plugin：这一份测试配置要的是「一个升级前的老站点」的样子
     # —— 那时不带 service_kind 的提交落到 code-server。第 19 节用不带这一项的
     # 另一份配置测"没配就该被明确拒绝"。
     #
-    # 这两行是替换，不是"插在 cluster_cidr 后面"。
-    #   理由：示例配置现在把 16 个键一个不少地列出来（注释整批搬进了文档），
+    # 这一行是替换，不是"插一行进去"。
+    #   理由：示例配置把每一个键一个不少地列出来（注释整批搬进了文档），
     #   所以 `default_plugin` 是一个空值的真行 —— 再插一行就会撞上那条
     #   "同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把"这两行
     #   必须在示例里"变成一条当场说得出话的前置条件。
-    for _k, _v in (("cluster_cidr", "192.0.2.0/24"),
-                   ("default_plugin", "code-server")):
+    for _k, _v in (("default_plugin", "code-server"),):
         text, _n = re.subn(r"(?m)^%s\s*=.*$" % _k, "%s = %s" % (_k, _v), text)
         if _n != 1:
             raise ValueError("示例配置 %s 里应当恰好有一行 `%s =`（实际 %d 行）"
@@ -754,7 +750,6 @@ def main():
     check("端口池解析", cfg.port_start == 55001 and cfg.port_end == 55999,
           "%d-%d" % (cfg.port_start, cfg.port_end))
     check("示例配置里没有认不出的键", cfg.unknown_keys == [], str(cfg.unknown_keys))
-    check("cluster_cidr 解析", cfg.cluster_cidr == "192.0.2.0/24", cfg.cluster_cidr)
     check("闪断/孤儿阈值 300/1800",
           cfg.suspect_after == 300 and cfg.orphan_after == 1800)
     check("配置自检无错误", cfg.validate() == [], str(cfg.validate()))
@@ -784,8 +779,8 @@ def main():
     check("整行注释与空行被跳过",
           parse("# 说明\n\n   \nrange_end = 5\n")[0] == {"range_end": "5"})
     check("值两端空白被去掉",
-          parse("cluster_cidr =   192.0.2.0/24  \n")[0]
-          == {"cluster_cidr": "192.0.2.0/24"})
+          parse("default_plugin =   code-server  \n")[0]
+          == {"default_plugin": "code-server"})
 
     # 插件配置不住在主文件里：一个插件一个文件。所以主文件里
     #   `[plugin:...]` 这件事不存在了，写了就是错误。
@@ -841,7 +836,7 @@ def main():
     #   这一条同时守住 v0.2 删掉的那些键：老配置里的 max_active_per_user
     #   之类不会静静地失效，而是会被明确拒绝。
     unknown_cfg = mod.Config(write_conf(
-        "cluster_cidr = 192.0.2.0/24\nmax_active_per_user = 3\n", "unknown.conf"))
+        "range_start = 55001\nmax_active_per_user = 3\n", "unknown.conf"))
     check("认不出的键被自检拦下",
           any("max_active_per_user" in e for e in unknown_cfg.validate()),
           str(unknown_cfg.validate()))
@@ -850,7 +845,7 @@ def main():
     #   那一份配置里去。最像的是新加的那一对 —— `max_sessions_per_user` 是本站
     #   通用的、`max_sessions` 是某一个插件的，只差一个后缀。只说"认不出这个键"
     #   的话，管理员会去拼写里找问题，而这一格一个字都没写错，是放错了文件。
-    _ms_main = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _ms_main = mod.Config(write_conf("range_start = 55001\n"
                                      "max_sessions = 2\n",
                                      "plugin-key-in-main.conf")).validate()
     check("插件自己的键写在主配置里 → 报错指路到那个插件的配置，"
@@ -859,7 +854,7 @@ def main():
     # 真正的拼错仍旧走原来那一句。这一条同时守着文档：CONFIGURATION.md 逐字
     #   引用的是「配置里有无法识别的键」这句话（M 那条判据），而上面新加的那条
     #   分支换掉的是措辞，不是这句话本身。
-    _typo = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _typo = mod.Config(write_conf("range_start = 55001\n"
                                   "cluster_cdir = 192.0.2.0/24\n",
                                   "typo-in-main.conf")).validate()
     check("真正的拼错走的还是「无法识别的键」那一句",
@@ -996,6 +991,74 @@ def main():
     check("能从 nft -a 输出解析出 comment 与 handle",
           bool(m) and m.group(1) == c and int(m.group(2)) == 7,
           str(m.groups() if m else None))
+
+    # ── 6b. ACL 规则的目标必须是本集群的一台节点 ────────────────────────────
+    #
+    # 这一条是"爆炸半径"的判据，而它是这条链上唯一能伤到别人的那一格：会话文件
+    #   由用户自己写，写一个别的 IP 进来就是让守护进程替他去丢别人的包（虽被限制在
+    #   他自己的候选端口内，但足以对其他用户造成定向丢包）。
+    # 0.23 之前兜住它的是链首那条 `ip daddr != <cluster_cidr> accept`（网段之外的
+    #   流量在链首就被放行，规则落不到外面去）。现在判在装规则那一处，取的是
+    #   Slurm 报的节点地址全集。
+    print("\n── 6b. ACL 规则的目标地址 ──")
+    _NET = {"192.0.2.11", "192.0.2.12"}
+
+    def _mk_nft(known):
+        """一个不发真 nft 的 Nft：`_nft` 记账，读规则集一律回空。"""
+        calls = []
+        n = mod.Nft(mod.Config(os.path.join(tmpdir, "slurmate.conf")),
+                    known_addrs=(lambda: known))
+        n._nft = lambda args, check=False, timeout=10: (calls.append(list(args)),
+                                                        (0, "", ""))[1]
+        return n, calls
+
+    _added = lambda calls: [c for c in calls if c[:2] == ["add", "rule"]]
+
+    _n1, _c1 = _mk_nft(set(_NET))
+    _ok1, _d1 = _n1.add_session_rule("192.0.2.11", 55001, UID, 42)
+    check("目标是本集群的一台节点 → 装上去，并回那条 comment",
+          _ok1 and _d1 == mod.Nft.comment_for(UID, 42, 55001), "%s / %s" % (_ok1, _d1))
+    check("而它真的发了一条 add rule，目标就是那个地址",
+          len(_added(_c1)) == 1 and "192.0.2.11" in _added(_c1)[0],
+          str(_added(_c1)))
+
+    _n2, _c2 = _mk_nft(set(_NET))
+    _bad, _why = _n2.add_session_rule("203.0.113.9", 55001, UID, 42)
+    check("目标不是任何一台节点 → 拒绝，而且点名是哪个地址",
+          (not _bad) and "203.0.113.9" in _why, "%s / %s" % (_bad, _why))
+    check("拒绝就是拒绝：内核里一条规则都没动（不是「装了再删」）",
+          _added(_c2) == [], str(_added(_c2)))
+
+    _n3, _c3 = _mk_nft(None)
+    _ok3, _d3 = _n3.add_session_rule("203.0.113.9", 55001, UID, 42)
+    check("集合拿不到（Slurm 问不到、或节点报的是主机名）→ 不判，规则照装",
+          _ok3 and len(_added(_c3)) == 1, "%s / %s" % (_ok3, _d3))
+
+    # 那一份集合是从 `scontrol show node -o` 里收的，与 GRES / 内存同一趟。
+    #   它有一格自己的三态：`None` = 拿不到一份完整的集合。
+    _cat_line = ("NodeName=n1 NodeAddr=192.0.2.11 Partitions=p0 RealMemory=1000\n"
+                 "NodeName=n2 NodeAddr=192.0.2.12 Partitions=p0 RealMemory=2000\n")
+    _cat = mod.NodeCatalog()
+    check("（夹具）空壳 NodeCatalog 的 addrs 是 None（= 拿不到，不是「没有节点」）",
+          _cat.addrs is None, repr(_cat.addrs))
+    _got = with_stub(mod, lambda argv, timeout=10, check=False:
+                     (0, _cat_line, "") if "show node" in " ".join(map(str, argv))
+                     else (1, "", "unexpected"),
+                     lambda: mod.Slurm(cfg).node_catalog())
+    check("三半来自同一趟 `scontrol show node -o`：地址、GRES、内存",
+          _got is not None and _got.addrs == _NET
+          and _got.mem == {"p0": 2000} and _got.gres == {},
+          repr((_got and _got.addrs, _got and _got.mem, _got and _got.gres)))
+    _host_line = "NodeName=n1 NodeAddr=node01 Partitions=p0 RealMemory=1000\n"
+    _got2 = with_stub(mod, lambda argv, timeout=10, check=False:
+                      (0, _host_line, "") if "show node" in " ".join(map(str, argv))
+                      else (1, "", "unexpected"),
+                      lambda: mod.Slurm(cfg).node_catalog())
+    check("有一台报的是主机名 → 整份集合作废（不完整，拿去判会误拒合法会话）",
+          _got2 is not None and _got2.addrs is None, repr(_got2 and _got2.addrs))
+    _down = with_stub(mod, lambda argv, timeout=10, check=False: (1, "", "down"),
+                      lambda: mod.Slurm(cfg).node_catalog())
+    check("而 scontrol 失败时整个目录是 None（三半一起拿不到）", _down is None, repr(_down))
 
     # ── 7. 会话文件校验（安全关键）────────────────────────────────────────
     print("\n── 7. 会话文件校验（安全关键）──")
@@ -1326,104 +1389,6 @@ exit 0
     check("cpus 超上限被钳制", mod.clamp_int(999, 2, 1, 64) == 64)
     check("cpus 负值被钳到下限", mod.clamp_int(-5, 2, 1, 64) == 1)
     check("cpus 非数字 → 默认值", mod.clamp_int("abc", 2, 1, 64) == 2)
-
-    # ── 14. cluster_cidr：三种写错的方式都必须被拦 ─────────────────────────
-    # 这一项的失效方向全是 fail-open：不报错，只是 ACL 不再生效。
-    print("\n── 14. cluster_cidr 校验 ──")
-    def cidr_problem(v):
-        t = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
-        t.__dict__["cluster_cidr"] = v
-        return t.cluster_cidr_problem()
-
-    check("合法网段通过", cidr_problem("192.0.2.0/24") is None)
-    check("留空被拒（它没有安全的默认值）", cidr_problem("") is not None)
-    check("不带前缀长度被拒", cidr_problem("192.0.2.0") is not None)
-    check("前缀长度越界被拒（此前【不校验】，nft 里是语法错误）",
-          cidr_problem("192.0.2.0/99") is not None)
-    check("前缀长度 0 被拒（基础规则会恒为假）",
-          cidr_problem("192.0.2.0/0") is not None)
-    check("前缀非数字被拒", cidr_problem("192.0.2.0/abc") is not None)
-    check("地址部分非法被拒", cidr_problem("abc/24") is not None)
-    check("主机位不为 0 被拒并给出规范写法",
-          "192.0.2.0/24" in (cidr_problem("192.0.2.5/24") or ""))
-    # 反过来的一条：文档网段【必须放行】。有人会想加一条"拒绝 RFC 5737 示例网段"
-    #   来抓"照抄示例忘了改"，但那会拒绝一个完全合法的配置 —— 用 192.0.2.0/24 的
-    #   测试集群是存在的，软件没有依据判定它不是真的。那个错误由下面的交叉核对抓，
-    #   而且报得更准（点名是哪几个节点落在外面）。
-    for ok_cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"):
-        check("文档网段 %s 是合法配置，必须放行" % ok_cidr,
-              cidr_problem(ok_cidr) is None, str(cidr_problem(ok_cidr)))
-
-    # ── 15. cluster_cidr × Slurm 的 NodeAddr 交叉核对 ───────────────────────
-    # 这是唯一能发现"网段漏掉了某个节点"的地方，而漏掉的后果是静默失效。
-    print("\n── 15. cluster_cidr 与节点地址交叉核对 ──")
-    def node_list_stub(nodes):
-        def _run(argv, timeout=10, check=False):
-            if "show node" in " ".join(str(a) for a in argv):
-                return 0, "".join(
-                    "NodeName=n%d NodeAddr=%s State=IDLE\n" % (i, ip)
-                    for i, ip in enumerate(nodes)), ""
-            return 1, "", "unexpected"
-        return _run
-
-    def crosscheck(cidr, nodes):
-        t = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
-        t.__dict__["cluster_cidr"] = cidr
-        return with_stub(mod, node_list_stub(nodes), lambda: mod.crosscheck_cidr(t))
-
-    check("全部节点都在网段内 → 无错",
-          crosscheck("192.0.2.0/24", ["192.0.2.11", "192.0.2.20"]) == [])
-    errs = crosscheck("192.0.2.0/24", ["192.0.2.11", "198.51.100.20"])
-    check("有节点落在网段外 → 报错并点名", len(errs) == 1 and "198.51.100.20" in errs[0],
-          str(errs))
-    # 查不到节点列表时【不阻塞启动】：那是控制器抖动，不是配置错了。
-    # 因为一次查询失败而拒绝服务，会把一次瞬时抖动放大成一次停机。
-    check("Slurm 查询不到节点时放行（不能让抖动变成停机）",
-          with_stub(mod, lambda a, timeout=10, check=False: (1, "", "down"),
-                    lambda: mod.crosscheck_cidr(
-                        mod.Config(os.path.join(tmpdir, "slurmate.conf")))) == [])
-    # NodeAddr 写主机名（由 Slurm 解析）时无从判断 —— 跳过而不是误报
-    check("NodeAddr 是主机名时跳过（无从判断）",
-          crosscheck("192.0.2.0/24", ["node01.example.com"]) == [])
-
-    # ── 15b. 空着的 cluster_cidr：安装时按节点地址算一个 ─────────────────────
-    #
-    # 部署时那一格是空的，而它是第一遍唯一挡路的东西。`derive_cluster_cidr()`
-    #   把它算出来 —— 判据与上一节那条交叉核对是同一个输入（`NodeAddr` 全集），
-    #   所以算出来的值必定过得了那条核对。这里钉的是两条：
-    #     ① 算得出来的那几种，结果对不对（尤其是"本站这一种"：同一 /24 里取 /24）；
-    #     ② 算不出来的那几种，必须说清是哪一种，而不是给一个猜的值。
-    print("\n── 15b. 空着的 cluster_cidr 怎么算出来 ──")
-    def derive(nodes, rc=0):
-        return mod.derive_cluster_cidr(run=node_list_stub(nodes) if rc == 0 else
-                                       (lambda a, timeout=10, check=False: (rc, "", "")),
-                                       scontrol="scontrol")
-    _v, _w = derive(["192.0.2.11", "192.0.2.12", "192.0.2.15", "192.0.2.20"])
-    check("同一 /24 里的四个节点 → 取那个 /24（常见的形状，也给以后加节点留余量）",
-          _v == "192.0.2.0/24", "%s / %s" % (_v, _w))
-    _v, _w = derive(["198.51.100.5"])
-    check("单个节点也取它那个 /24，不取 /32（往同一个网段里加一台时 /32 就漏了）",
-          _v == "198.51.100.0/24", "%s / %s" % (_v, _w))
-    _v, _w = derive(["192.0.2.11", "192.0.3.12"])
-    check("跨 /24 → 取能盖住它们的最小前缀（这两个地址的最小覆盖是 /23）",
-          _v == "192.0.2.0/23", "%s / %s" % (_v, _w))
-    _v, _w = derive(["192.0.2.3", "203.0.113.4"])
-    check("节点根本不在一个网段里 → 不给值，并说清是哪一种",
-          _v is None and "/16" in (_w or ""), "%s / %s" % (_v, _w))
-    _v, _w = derive(["192.0.2.11"], rc=7)
-    check("问不到 Slurm → 不给值（猜一个比不猜更坏）",
-          _v is None and "rc=7" in (_w or ""), "%s / %s" % (_v, _w))
-    _v, _w = derive(["nodea1", "nodea2"])
-    check("NodeAddr 是主机名 → 不给值",
-          _v is None and "主机名" in (_w or ""), "%s / %s" % (_v, _w))
-    # 算出来的值必须过得了那条交叉核对 —— 两边是同一个判据，这是它们的接缝。
-    _cidr_ok = mod.Config(os.path.join(tmpdir, "slurmate.conf"))
-    _v2, _ = derive(["192.0.2.11", "192.0.2.12"])
-    _cidr_ok.__dict__["cluster_cidr"] = _v2
-    check("而算出来的那个值，上一节那条交叉核对一定放行（两边读的是同一个输入）",
-          with_stub(mod, node_list_stub(["192.0.2.11", "192.0.2.12"]),
-                    lambda: mod.crosscheck_cidr(_cidr_ok)) == [],
-          str(_v2))
 
     # ── 16. 旧版数据库必须被明确拒绝 ────────────────────────────────────────
     # 旧库里还留着 sessions.purpose 这种本版没有的列，而 SQLite 的
@@ -2277,7 +2242,7 @@ exit 0
     _saved_cfg_for_problems = d.cfg
     try:
         mod.default_plugins_dir = lambda: _iddir
-        d.cfg = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n",
+        d.cfg = mod.Config(write_conf("",
                                       "iddup.conf"))
         _pm = d.dispatch(UID, os.getgid(), {"op": "plugins"})
         _pmd = _pm.get("data") or {}
@@ -2786,7 +2751,7 @@ exit 0
 
     def pcfg(text, name="plug.conf"):
         """一份站点配置。见 `write_conf_tree` —— 它把老形状拆成 v0.12 的两半。"""
-        return mod.Config(write_conf_tree("cluster_cidr = 192.0.2.0/24\n" + text,
+        return mod.Config(write_conf_tree("" + text,
                                           name))
 
     _c = pcfg("")
@@ -2946,7 +2911,7 @@ exit 0
     _saved_cfg_for_kind = d.cfg
     try:
         mod.default_plugins_dir = lambda: _nupdir
-        d.cfg = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n",
+        d.cfg = mod.Config(write_conf("",
                                       "namedup-kind.conf"))
         _r9 = d.dispatch(UID, os.getgid(), {"op": "submit", "service_kind": "jup"})
         _d9 = (_r9.get("error") or {}).get("detail") or ""
@@ -2975,8 +2940,8 @@ exit 0
             ("[plugin:ssh]\nenabled = yes\n", "未知的插件名", "ssh", "warn"),
             ("[plugin:sshd]\ndefualt_cpus = 1\n", "插件配置里拼错的键",
              "defualt_cpus", "err"),
-            ("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n",
-             "通用键写进了插件那一份里（它住在主配置）", "cluster_cidr", "err"),
+            ("[plugin:sshd]\nenabled = yes\nrange_start = 55001\n",
+             "通用键写进了插件那一份里（它住在主配置）", "range_start", "err"),
             ("[plugin:code-server]\nauth_mode = passwd\n", "auth_mode 取值非法",
              "auth_mode", "err"),
             ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
@@ -3030,7 +2995,7 @@ exit 0
     #   绿。这一条就是补那个洞的。
     #   v0.12：根因从"顺序"变成了"它住在另一份文件里"—— 通用键在主配置
     #     （`slurmate.conf`），插件那一份里写不下它。
-    _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\ncluster_cidr = 198.51.100.0/24\n")
+    _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\nrange_start = 55001\n")
                     .validate())
     check("而且要说清是「它住在主配置里」，不是一句泛泛的「认不出这个键」",
           "通用键" in _msg and "主配置" in _msg, _msg[:160])
@@ -3339,7 +3304,7 @@ exit 0
         "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "sshd",
         "version": "1.0.0",
         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
-    _econf = write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _econf = write_conf(""
                         "range_start = 55001\nrange_end = 55099\n",
                         "check-gres.conf")
     # 插件配置是它自己的一份文件（`<主配置>.d/<名字>.conf`）。
@@ -3377,7 +3342,7 @@ exit 0
     #    任何东西之前就以 1 退出了，两三行断言一起红。
     #
     # 复用上面那一节的假安装前缀与桩：`_eplug` 里只有 MF2V（sshd）。
-    _stale_conf = write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _stale_conf = write_conf(""
                              "range_start = 55001\nrange_end = 55099\n",
                              "check-stale.conf")
     _ghost = "01M2JKHTZGKJBFQQTWYXMQMF63"    # 本站没装它
@@ -5535,7 +5500,7 @@ exit 0
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         check("（夹具）一个短名不撞的插件装好了", _rc == 0, _out[:200])
 
-        _c = _sy_cfg(_SY3, "cluster_cidr = 192.0.2.0/24\n"
+        _c = _sy_cfg(_SY3, ""
                            "[plugin:solo]\nenabled = yes\n"
                            "[plugin:%s]\nenabled = no\n" % _U3, "dupblock.conf")
         _errs = " ".join(_c.validate())
@@ -5561,7 +5526,7 @@ exit 0
         #    不参与 —— 这是"一个插件一份配置、一个来源"的直接推论。
         _CONF_S = os.path.join(_sy_home, "site.conf")
         with open(_CONF_S, "w", encoding="utf-8") as _f:
-            _f.write("# 站点配置\ncluster_cidr = 192.0.2.0/24\n")
+            _f.write("# 站点配置\ndefault_plugin = \n")
         _orig_conf = _sy_read(_CONF_S)
 
         # 生成物不许改动行为：装前装后每个插件的生效值逐项相同。
@@ -5582,7 +5547,7 @@ exit 0
         # 名字是 id（安装器按 id 命名），不是短名 —— 这一格正是"该删哪一个
         #   是算得出来的"那句话的另一面。
         check("解析回来：通用键来自主文件、插件配置来自 `.d/`，来源记在 meta 里",
-              _g == {"cluster_cidr": "192.0.2.0/24"}
+              _g == {"default_plugin": ""}
               and set(_s) == {_U3} and _m[_U3]["file"] == _p_solo,
               "%s / %s / %s" % (_g, _s, _m))
         check("生成的那一份让配置自洽了（`--check` 不再报错）",
@@ -5631,7 +5596,7 @@ exit 0
         check("而手写的那一份还在（判据是位置与名字，不是「整个目录重写一遍」）",
               _rc == 0 and os.path.isfile(_p_typo), repr(_out[:300]))
         check("主文件的通用键一个字没动",
-              mod.parse_config(_CONF_S)[0] == {"cluster_cidr": "192.0.2.0/24"},
+              mod.parse_config(_CONF_S)[0] == {"default_plugin": ""},
               repr(_sy_read(_CONF_S)[-300:]))
         os.unlink(_p_typo)
 
@@ -5653,7 +5618,7 @@ exit 0
         #    都不同，删掉那一步当场露馅。
         _CONF_M = os.path.join(_sy_home, "site5.conf")
         with open(_CONF_M, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n")
+            _f.write("")
         os.chmod(_CONF_M, 0o640)
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _rc, _out = _sy_sync(_SY3, _CONF_M)
@@ -5676,7 +5641,7 @@ exit 0
         #   只算出来不送出去，就是又一个 F35。
         _CONF_D = os.path.join(_sy_home, "site4.conf")
         with open(_CONF_D, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n")
+            _f.write("")
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _rc, _out = _sy_sync(_SY3, _CONF_D)            # 于是多出 <id>.conf 那一份
         mod.remove_plugin_tree(_SY3, _U3)              # 再把这个插件拿走
@@ -5713,7 +5678,7 @@ exit 0
         #    守护进程当场拒绝启动，症状与"插件坏了"毫无关系。
         _CONF_H = os.path.join(_sy_home, "site6.conf")
         with open(_CONF_H, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n")
+            _f.write("")
         _rc, _out = _sy_install([_sy_mk(_U3, "solo")], _SY3)
         _p_by_hand = write_plugin_conf(_CONF_H, "solo", "enabled = yes\n")
         _rc, _out = _sy_sync(_SY3, _CONF_H)
@@ -5738,7 +5703,7 @@ exit 0
         os.makedirs(_SY4, exist_ok=True)
         _rc, _out = _sy_install([_sy_mk(_U3, "solo", default_enabled=True)], _SY4)
         _CONF_T = os.path.join(_sy_home, "site2.conf")
-        _T_BASE = "cluster_cidr = 192.0.2.0/24\n"
+        _T_BASE = ""
         with open(_CONF_T, "w", encoding="utf-8") as _f:
             _f.write(_T_BASE)
         _eff_b = _sy_effective(_sy_cfg(_SY4, _T_BASE, "eff-t-before.conf"))
@@ -5877,7 +5842,7 @@ exit 0
         # 对照组：本站把那个插件关掉了，这一屏仍然说「缺省开」。
         #   这不是 bug，是这一条要钉住的口径 —— 它报的是清单缺省。
         #   站点状态那一屏（`--check`）才是另一个答案。
-        _c_off = _sy_cfg(_SY5, "cluster_cidr = 192.0.2.0/24\n"
+        _c_off = _sy_cfg(_SY5, ""
                                "[plugin:onplug]\nenabled = no\n", "f39-off.conf")
         check("而本站的开关是另一屏的事（这一格说的是清单缺省，不是本站状态）",
               _c_off.validate() == [] and not _c_off.plugin_config("onplug").enabled,
@@ -5950,7 +5915,7 @@ exit 0
         _SITE = os.path.join(_d4, "site.conf")
         os.makedirs(_SRC, exist_ok=True)
         with open(_SITE, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n")
+            _f.write("")
 
         def _sync():
             return _quiet(mod.sync_plugins, _SITE, _PD, jobs_dir=_JD,
@@ -6209,7 +6174,7 @@ exit 0
         #   machine_selfcheck）+ 接线级（替换掉它，看 main 返回几）。
         _ckconf = os.path.join(_ck, "c.conf")
         with open(_ckconf, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 55001\nrange_end = 55999\n")
 
         class _FakeCfg(object):
@@ -6231,23 +6196,23 @@ exit 0
               len(_m_nft) == 1 and "nft" in _m_nft[0], repr(_m_nft))
 
         # 接线：main() 把三档翻成三个退出码。
-        # 这一段必须把两个会去问真集群的东西替换掉（`machine_selfcheck`
-        #    与 `crosscheck_cidr`）—— 否则这条用例的结论取决于"跑它的那台机器
-        #    长什么样"，而它要考的恰恰是判据本身。
-        #    真进程那一半（配置级，1）不用替换：`validate()` 在碰任何集群事实
-        #      之前就返回了，所以它在哪台机器上都是同一个答案。
-        def _run_check(machine, cidr_errors=()):
-            _s_msc, _s_cc = mod.machine_selfcheck, mod.crosscheck_cidr
+        # 这一段必须把两处会依赖"跑它的那台机器"的判据替换掉
+        #    （`machine_selfcheck` 与 `Config.validate`）—— 否则这条用例的结论
+        #    取决于这台机器长什么样，而它要考的恰恰是接线本身。
+        #    真进程那一半（配置级，1）不用替换：下面那份配置在哪台机器上都是
+        #      同一个答案。
+        def _run_check(machine, cfg_errors=()):
+            _s_msc, _s_val = mod.machine_selfcheck, mod.Config.validate
             _s_argv, _s_out = sys.argv, sys.stdout
             try:
                 mod.machine_selfcheck = lambda cfg, nft=None: list(machine)
-                mod.crosscheck_cidr = lambda cfg: list(cidr_errors)
+                mod.Config.validate = lambda self: list(cfg_errors)
                 sys.argv = ["slurmate-sessiond", "--check", "--config", _ckconf]
                 sys.stdout = io.StringIO()
                 rc = mod.main()
                 return rc, sys.stdout.getvalue()
             finally:
-                mod.machine_selfcheck, mod.crosscheck_cidr = _s_msc, _s_cc
+                mod.machine_selfcheck, mod.Config.validate = _s_msc, _s_val
                 sys.argv, sys.stdout = _s_argv, _s_out
 
         _rc2, _out2 = _run_check(["假的：这台机器缺 sbatch"])
@@ -6256,28 +6221,33 @@ exit 0
               _rc2 == 2 and "假的：这台机器缺 sbatch" in _out2
               and "端口池" in _out2 and "作业脚本目录" in _out2,
               "%d %r" % (_rc2, _out2[:300]))
-        _rc1, _out1 = _run_check([], ["假的：网段不一致"])
+        _rc1, _out1 = _run_check([], ["假的：这份配置写错了"])
         check("只有配置级的问题，1（不是 2）—— 部署脚本据此决定"
               "「继续装、装完再判」",
-              _rc1 == 1 and "不一致" in _out1, "%d %r" % (_rc1, _out1[-300:]))
+              _rc1 == 1 and "假的：这份配置写错了" in _out1,
+              "%d %r" % (_rc1, _out1[-300:]))
         _rc0, _out0 = _run_check([])
         check("两样都没问题，0（少了这一条，上面两条会被「永远非零」"
               "一并满足）", _rc0 == 0, "%d %r" % (_rc0, _out0[:200]))
-        _rcm, _outm = _run_check(["机器上缺少组件"], ["网段也不一致"])
+        _rcm, _outm = _run_check(["机器上缺少组件"], ["假的：这份配置写错了"])
         check("两样都有，2 优先（一台不是登录节点的机器上，"
               "「配置写错了」这句话没什么用）",
               _rcm == 2, "%d %r" % (_rcm, _outm[:200]))
 
-        # 配置级那一条跑真进程：cluster_cidr 空着，1。
+        # 配置级那一条跑真进程：一份自己跟自己打架的配置，1。
+        #   0.23 之前这一条用的是"cluster_cidr 空着"，而那个键删掉之后那份配置
+        #   是合法的（示例配置现在本来就能过自检），所以换一个真的配置级错误：
+        #   `max_sessions_per_user = 0`。
         _badconf = os.path.join(_ck, "bad.conf")
         with open(_badconf, "w", encoding="utf-8") as _f:
-            _f.write("range_start = 55001\nrange_end = 55999\n")
+            _f.write("range_start = 55001\nrange_end = 55999\n"
+                     "max_sessions_per_user = 0\n")
         _r_c = subprocess.run([sys.executable, DAEMON, "--check", "--config", _badconf],
                               capture_output=True, text=True)
-        check("真进程同理：配置级失败（cluster_cidr 空着）， 1，"
+        check("真进程同理：配置级失败（max_sessions_per_user = 0）， 1，"
               "而不是 2",
               _r_c.returncode == 1 and "配置错误" in _r_c.stdout
-              and "集群网段" in _r_c.stdout,
+              and "max_sessions_per_user" in _r_c.stdout,
               "%d %r" % (_r_c.returncode, _r_c.stdout[-300:]))
 
         # ── ④b 端口池与本机保留端口的重叠：一条，动不了退出码 ────────────
@@ -6556,7 +6526,6 @@ exit 0
             "SLURMATE_CANDIDATES": "55001;55002",
             "SLURMATE_SERVICE_KIND": kind,
             "SLURMATE_AUTH_MODE": "publickey",
-            "SLURMATE_CLUSTER_CIDR": "192.0.2.0/24",
             "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
             "SLURMATE_LOG_DIR": os.path.join(home, ".slurmate", "logs"),
             "SLURMATE_PORT_MIN": "55001",
@@ -6695,7 +6664,6 @@ exit 0
         "HOME": _hr, "SLURM_JOB_ID": "777001", "SLURMD_NODENAME": "node01",
         "SLURMATE_SESSION_ID": "sess-raw-1", "SLURMATE_CANDIDATES": "55001",
         "SLURMATE_SERVICE_KIND": "thing", "SLURMATE_AUTH_MODE": "none",
-        "SLURMATE_CLUSTER_CIDR": "192.0.2.0/24",
         "SLURMATE_SESS_DIR": os.path.join(_hr, ".slurmate", "sessions"),
         "SLURMATE_LOG_DIR": os.path.join(_hr, ".slurmate", "logs"),
         "SLURMATE_PORT_MIN": "55001", "SLURMATE_PORT_MAX": "55999",
@@ -7085,14 +7053,14 @@ exit 0
           _q_limit0 == mod.DEFAULT_MAX_SESSIONS_PER_USER == 1,
           str(_q_limit0))
     check("写 3 是合法的（自检无错误）",
-          mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+          mod.Config(write_conf(""
                                 "max_sessions_per_user = 3\n",
                                 "quota-ok.conf")).validate() == [])
     check("而旧名字不在白名单里 —— 那条「老配置被拒」的用例仍然守着",
           "max_active_per_user" not in mod.GLOBAL_KEYS
           and "max_sessions_per_user" in mod.GLOBAL_KEYS,
           str(sorted(mod.GLOBAL_KEYS)))
-    _q_bad = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _q_bad = mod.Config(write_conf(""
                                    "max_sessions_per_user = 0\n",
                                    "quota-zero.conf")).validate()
     check("写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
@@ -9207,16 +9175,16 @@ exit 0
           "")
     # 0 必须被自检拦下：0 条连接 = 谁都连不上（每一条都被拒），
     #    而报错会是一句"本站同时只服务 0 条连接" —— 那句话把根因指向"人过多"。
-    _c_ok = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _c_ok = mod.Config(write_conf(""
                                   "max_connections_per_user = 2\n",
                                   "clients-ok.conf")).validate()
     check("写 2 是合法的（自检无错误）", _c_ok == [], str(_c_ok))
-    _c_zero = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _c_zero = mod.Config(write_conf(""
                                     "max_connections_per_user = 0\n",
                                     "clients-zero.conf")).validate()
     check("写 0 会被自检拦下（0 条连接 = 任何人都连不上）",
           any("max_connections_per_user" in e for e in _c_zero), str(_c_zero))
-    _c_old = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n"
+    _c_old = mod.Config(write_conf(""
                                    "max_clients_per_user = 2\n",
                                    "clients-old.conf")).validate()
     check("而旧名字会被明确拒绝（不是静默忽略）",
@@ -10001,7 +9969,7 @@ exit 0
     _bin_bad = []
     for _nm in ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
                 "sinfo", "sshare", "sacct"):
-        _errs = mod.Config(write_conf("cluster_cidr = 192.0.2.0/24\n%s = /nonexistent/%s\n"
+        _errs = mod.Config(write_conf("%s = /nonexistent/%s\n"
                                       % (_nm, _nm), "bin-%s.conf" % _nm)).validate()
         if not any(_nm in e for e in _errs):
             _bin_bad.append(_nm)
@@ -11189,10 +11157,6 @@ exit 0
                 return 0, "", ""
             return 0, "", ""
 
-        def cidr(self):
-            """现在那条基础规则里的网段（没有那条规则，None）。"""
-            return mod.Nft.base_offcluster_cidr(self._render(True))
-
     _nftsim = _NftSim()
 
     # ② 这一节自己的插件目录：`default_plugins_dir()` 是模块级的，而
@@ -11214,9 +11178,8 @@ exit 0
     _rl_ds = []
 
     # 这一节问 Slurm 用的桩（整节替换 `mod.run_cmd`，见下面那一段）。
-    # 喂一个节点，于是这一节里所有配置的 `cluster_cidr` 都必须是
-    #   `192.0.2.0/24` —— 那正是它们本来就写的值（32.8 改成了 `192.0.0.0/16`，
-    #   仍然覆盖它；32.14 故意改成不覆盖它的那个，用来测「改错了会被拦住」）。
+    # 喂一台节点，于是这一节里那几条要问集群的判据（GRES 对账、节点地址集合）
+    #   都拿到一份稳定的事实，而不取决于"跑它的那台机器连的是哪个集群"。
     def _rl_nodes_stub(argv, timeout=10, check=False):
         if "show node" in " ".join(str(a) for a in argv):
             return 0, "NodeName=nA NodeAddr=192.0.2.11 State=IDLE\n", ""
@@ -11250,15 +11213,15 @@ exit 0
     _saved_rl_run = mod.run_cmd
     mod.default_plugins_dir = lambda: _RL
     # 这一节里问 Slurm 的命令一律走桩（这一节真的会问）：
-    #    热重载现在会跑 `crosscheck_cidr()`，而 `_do_reload()` 还会跑
-    #    `announce_config_state()` —— 后者里那条 GRES 对账要 `scontrol show node -o`。
+    #    `_do_reload()` 会跑 `announce_config_state()` —— 那里那条 GRES 对账
+    #    要 `scontrol show node -o`。
     #    不换的话，用例的结论取决于"跑它的那台机器上有没有真的 `scontrol`、
     #      以及那个集群的节点地址长什么样"：开发会话恰好跑在一个真集群的计算
     #      节点上，于是同一条用例在开发机上红、在 CI 上绿（或者反过来）——
     #      17 节里那条注释记的正是同一条教训。而这一节要考的从来不是集群事实。
-    #    一个注入点就够：`run_cmd` 正是 `Slurm` / `crosscheck_cidr()` /
-    #      `node_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
-    #      就会悄悄漏掉一个 —— 而"漏一个"正是 F45 的形状。
+    #    一个注入点就够：`run_cmd` 正是 `Slurm` 与 `Cluster` 底下每一层查询
+    #      共用的那一处。各留一个注入点的话，哪天新加一个读者就会悄悄漏掉一个
+    #      —— 而"漏一个"正是 F45 的形状。
     mod.run_cmd = _rl_nodes_stub
     # 这一节里 `Config` 也要 `resolve_bin()` 解析得到那八个 Slurm 命令 ——
     #   那是 `main()` 开头那个 PATH 桩给的（`_stub_slurm_bins`），
@@ -11269,25 +11232,28 @@ exit 0
         #
         # 比的是 `Config.raw`，不是解析出来的属性 —— 留空表示「去 PATH 上找」
         #   的那几格命令路径，属性值可能一模一样而配置真的变了。
-        _cf_a = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        # 样本从前是 `cluster_cidr`（那一档唯一的天然成员），它随 0.23 删了，
+        #   换成端口区间上界 —— 它今天同样是"可热，但要说一句"：已经在跑的会话，
+        #   端口可能落在新区间之外。
+        _cf_a = write_conf(""
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 2\n", "rl-a.conf")
-        _cf_b = write_conf("cluster_cidr = 198.51.100.0/24\n"
-                           "range_start = 55001\nrange_end = 55099\n"
+        _cf_b = write_conf(""
+                           "range_start = 55001\nrange_end = 55199\n"
                            "max_sessions_per_user = 2\n", "rl-b.conf")
         _cfg_a, _cfg_b = mod.Config(_cf_a), mod.Config(_cf_b)
-        check("只改了 cluster_cidr，它落在 NOTICE 档，而 COLD 档是空的",
-              mod.changed_notice_keys(_cfg_a, _cfg_b) == ["cluster_cidr"]
+        check("只改了 range_end，它落在 NOTICE 档，而 COLD 档是空的",
+              mod.changed_notice_keys(_cfg_a, _cfg_b) == ["range_end"]
               and mod.changed_cold_keys(_cfg_a, _cfg_b) == [],
               "%s / %s" % (mod.changed_notice_keys(_cfg_a, _cfg_b),
                            mod.changed_cold_keys(_cfg_a, _cfg_b)))
-        check("而「随时可热」那一档不报它（它确实会动到已经建立的连接）",
-              "cluster_cidr" not in mod._changed_keys_by_class(
+        check("而「随时可热」那一档不报它（它确实会动到已经建立的会话）",
+              "range_end" not in mod._changed_keys_by_class(
                   _cfg_a, _cfg_b, mod.RELOAD_HOT))
         check("什么都没改，两档都是空的（不然每次 reload 都要说一堆废话）",
               mod.changed_notice_keys(_cfg_a, mod.Config(_cf_a)) == []
               and mod.changed_cold_keys(_cfg_a, mod.Config(_cf_a)) == [])
-        _cf_c = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _cf_c = write_conf(""
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 5\n", "rl-c.conf")
         check("改了 max_sessions_per_user，一个字都不说（HOT 档只影响新发生的事）",
@@ -11314,7 +11280,7 @@ exit 0
         #
         # 三条一起才是「没有重启」的证明：同一个 `Sessiond`、同一个 store 句柄、
         #   同一条连接 —— 而那条连接拿到的也是新配置（见下面那一条）。
-        _LIVE = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _LIVE = write_conf(""
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 2\n", "rl-live.conf")
         _d_hot = _mk_reload_d(_LIVE)
@@ -11326,7 +11292,7 @@ exit 0
               str(_d_hot.conns()))
 
         with open(_LIVE, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 5\n")
         _rl_ok, _rl_notes = _d_hot.reload_config()
@@ -11360,13 +11326,13 @@ exit 0
         mod.GLOBAL_KEYS = frozenset(set(_saved_globals) | {_COLDKEY})
         mod.RELOAD_CLASS[_COLDKEY] = mod.RELOAD_COLD
         try:
-            _COLD = write_conf("cluster_cidr = 192.0.2.0/24\n"
+            _COLD = write_conf(""
                                "range_start = 55001\nrange_end = 55099\n"
                                "%s = /shared/home\n" % _COLDKEY +
                                "max_sessions_per_user = 2\n", "rl-cold.conf")
             _dc = _mk_reload_d(_COLD)
             with open(_COLD, "w", encoding="utf-8") as _f:
-                _f.write("cluster_cidr = 192.0.2.0/24\n"
+                _f.write(""
                          "range_start = 55001\nrange_end = 55099\n"
                          "%s = /shared/other\n" % _COLDKEY +
                          "max_sessions_per_user = 7\n")
@@ -11391,12 +11357,12 @@ exit 0
         # 坏配置里那个配额特意写成 4（旧值是 3）：两个数不同，这条断言
         #   才真的在判"有没有被换掉"。写成同一个数的话，一个"部分采用"的实现
         #   照样绿，而这条用例会以"守住了"收场。
-        _BAD = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _BAD = write_conf(""
                           "range_start = 55001\nrange_end = 55099\n"
                           "max_sessions_per_user = 3\n", "rl-bad.conf")
         _dbad = _mk_reload_d(_BAD)
         with open(_BAD, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 4\n"
                      "[plugin:alpha]\nenabled = yes\n")     # 主文件里不许有块头
@@ -11407,12 +11373,12 @@ exit 0
 
         # 32.6 新配置过不了自检，同样拒绝（走的是另一条路：解析成功、
         #   而 validate() 有话说）
-        _INV = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _INV = write_conf(""
                           "range_start = 55001\nrange_end = 55099\n"
                           "max_sessions_per_user = 3\n", "rl-inv.conf")
         _di = _mk_reload_d(_INV)
         with open(_INV, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 0\n")
         _rl_ok, _rl_notes = _di.reload_config()
@@ -11423,7 +11389,7 @@ exit 0
         # 32.7 插件目录变了，不用重启就能用
         #
         # 这是用户那条诉求的正面：装一个插件之后不该断任何人的会话。
-        _PLUG = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _PLUG = write_conf(""
                            "range_start = 55001\nrange_end = 55099\n", "rl-plug.conf")
         _dp = _mk_reload_d(_PLUG)
         check("（夹具）重载之前本站只有 alpha 一个插件",
@@ -11444,75 +11410,13 @@ exit 0
               "那说的是从前那个进程一辈子只有启动那一刻的认知）",
               _dp._plugin_cache == {}, str(_dp._plugin_cache))
 
-        # 32.8 `cluster_cidr` 改了，内核里那条基础规则的网段真的变了
-        #
-        # 这一条守的是：改了 `cluster_cidr` 之后，内核里那条基础规则的网段
-        #    真的变了。若只判"comment 在不在"，comment 还在那儿，就永远走"已存在"
-        #    那条路，连 restart 都不生效，而那条基础规则一直指着旧网段。文档说
-        #    它是"即使前面所有校验都被绕过"的最后一道几何约束。
-        _CIDR = write_conf("cluster_cidr = 192.0.2.0/24\n"
-                           "range_start = 55001\nrange_end = 55099\n", "rl-cidr.conf")
-        _d_cidr = _mk_reload_d(_CIDR)
-        _nftsim.rules = []                    # 从干净的规则集开始
-        _d_cidr.nft.ensure()
-        check("（夹具）基础规则建好了，网段是配置里那个",
-              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
-        # 新网段仍然覆盖桩里那个节点（192.0.2.11）—— 换成一个不含它的网段
-        #   会让这一条被交叉核对正确地拦下（那正是 32.12
-        #   要测的那件事），而这里要测的是"换网段这件事本身生效了"。
-        with open(_CIDR, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.0.0/16\n"
-                     "range_start = 55001\nrange_end = 55099\n")
-        _rl_ok, _rl_notes = _d_cidr.reload_config()
-        check("改了 cluster_cidr + 热重载，内核里那条基础规则的网段真的变了"
-              "（今天连 restart 都不变：实现只看 comment 在不在）",
-              _rl_ok is True and _nftsim.cidr() == "192.0.0.0/16",
-              "ok=%s / nft 里现在是 %s" % (_rl_ok, _nftsim.cidr()))
-        check("而那条规则只剩一条（是删旧插新，不是两条并存）",
-              sum(1 for r in _nftsim.rules
-                  if mod.Nft.BASE_OFFCLUSTER in r["text"]) == 1,
-              str([r["text"] for r in _nftsim.rules]))
-        check("而且它说了 NOTICE 那一档的那句话（「哪些流量被放行」这一刻真的变了）",
-              _rl_notes == ["cluster_cidr"], str(_rl_notes))
-
-        # 32.9 `base_offcluster_cidr` 的三态，以及删基础规则真的删得掉
-        #
-        # 后面那一条承重：`del_by_comment()` 若用 `RE_SESS`（只认
-        #    `slurmate-sess-…`）去找句柄，拿它去删基础规则会一条都匹配不到，
-        #    而函数照样返回 True（它报的是"规则集读得到"）。症状是"删过了，但规则
-        #    还在"，而没有任何地方会报错。
-        check("那条规则在，读出它的网段",
-              mod.Nft.base_offcluster_cidr(
-                  '        ip daddr != 203.0.113.0/24 accept'
-                  ' comment "slurmate-base-offcluster" # handle 7')
-              == "203.0.113.0/24")
-        check("那条规则不在，None（与「在、但无法读取网段」必须分得开）",
-              mod.Nft.base_offcluster_cidr("") is None
-              and mod.Nft.base_offcluster_cidr(
-                  '        oif "lo" accept comment "slurmate-base-lo" # handle 1')
-              is None)
-        _sim2 = _NftSim()
-        _sim2._nft(["insert", "rule", "inet", "slurmate", "output",
-                    "ip", "daddr", "!=", "192.0.2.0/24", "accept",
-                    "comment", mod.Nft.BASE_OFFCLUSTER])
-        _sim2._nft(["insert", "rule", "inet", "slurmate", "output",
-                    "oif", "lo", "accept", "comment", mod.Nft.BASE_LO])
-        _d_del = _mk_reload_d(_PLUG)
-        _d_del.nft._nft = _sim2._nft
-        _ok_del = _d_del.nft.del_by_comment(mod.Nft.BASE_OFFCLUSTER)
-        check("`del_by_comment` 删得掉基础规则（它从前用的正则只认会话规则 "
-              "， 一条都匹配不到，而函数照样返回 True）",
-              _ok_del is True and len(_sim2.rules) == 1
-              and mod.Nft.BASE_LO in _sim2.rules[0]["text"],
-              str([r["text"] for r in _sim2.rules]))
-
         # 32.10 端口区间换了，游标重置（不重置的话它会落在新区间之外）
-        _RANGE = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _RANGE = write_conf(""
                             "range_start = 55001\nrange_end = 55099\n", "rl-range.conf")
         _d_rg = _mk_reload_d(_RANGE)
         _d_rg.port_cursor = 55090                   # 已经跑到区间尾部
         with open(_RANGE, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 56001\nrange_end = 56099\n")
         _rl_ok, _rl_notes = _d_rg.reload_config()
         check("端口区间换了，游标回到新的起点（若不重置它会落在 "
@@ -11541,13 +11445,13 @@ exit 0
         #
         # 少了这一条，`_on_signal` 置的那个标志就是一个永远不发生的重载 ——
         #   而 32.11 那两条照样绿（它们只判标志被置上了）。
-        _LOOP = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _LOOP = write_conf(""
                            "range_start = 55001\nrange_end = 55099\n"
                            "max_sessions_per_user = 4\n", "rl-loop.conf")
         _dloop = _mk_reload_d(_LOOP)
         _dloop._on_signal(mod.signal.SIGHUP, None)
         with open(_LOOP, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.0/24\n"
+            _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 9\n")
         _loop_seen = {"ticked": 0}
@@ -11588,7 +11492,7 @@ exit 0
             _d_aud = _mk_reload_d(_PLUG)
             _d_aud._do_reload()
             with open(_PLUG, "w", encoding="utf-8") as _f:
-                _f.write("cluster_cidr = 192.0.2.0/24\nrange_start = 55001\n"
+                _f.write("range_start = 55001\n"
                          "range_end = 55099\nmax_sessions_per_user = 0\n")
             _d_aud._do_reload()
         finally:
@@ -11617,75 +11521,6 @@ exit 0
             def emit(self, rec):
                 self.lines.append((rec.levelname, rec.getMessage()))
 
-        # 32.14 改错一个数字的 `cluster_cidr` 整个重载被拒、一个字都不改
-        #        （F45）
-        #
-        # 重载的拒绝判据若比启动的少一半 —— 它只跑 `validate()`、
-        #    没有 `crosscheck_cidr()` —— 而 `cluster_cidr` 在 `RELOAD_CLASS` 里是
-        #    NOTICE 档（可热），改错一个数字之后 `systemctl reload` 成功，
-        #    而 `_adopt_config()` 里 `Nft.ensure()` 按值比对，把内核里那条基础规则
-        #    换成错的网段。
-        #    后果：被漏掉的节点，流量走到链尾那条 `policy accept` —— 没有报错、
-        #    没有日志、没有任何迹象。而文档说它是"即使前面所有校验都被绕过"的
-        #    最后一道几何约束。
-        _F45 = write_conf("cluster_cidr = 192.0.2.0/24\n"
-                          "range_start = 55001\nrange_end = 55099\n"
-                          "max_sessions_per_user = 2\n", "rl-f45.conf")
-        _d_f45 = _mk_reload_d(_F45)
-        _nftsim.rules = []                    # 从干净的规则集开始
-        _d_f45.nft.ensure()
-        check("（夹具）改之前：基础规则的网段覆盖桩里那个节点",
-              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
-        # 漏掉半个网段：桩里那个节点是 192.0.2.11，而 /25 的后半段是
-        #   .128–.255 —— 它落在外面。（账本 F45 举的就是这个例子。）
-        # 顺带还改了一个本来可热的键（`max_sessions_per_user`）：一次证明
-        #   "拒绝"是整份拒绝，不是"跳过那一个、其他照旧"。
-        with open(_F45, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.2.128/25\n"
-                     "range_start = 55001\nrange_end = 55099\n"
-                     "max_sessions_per_user = 5\n")
-        _lc45 = _LogCap()
-        _saved_lvl45 = mod.log.level
-        mod.log.addHandler(_lc45)
-        mod.log.setLevel(logging.DEBUG)
-        try:
-            _rl_ok45, _rl_notes45 = _d_f45.reload_config()
-        finally:
-            mod.log.removeHandler(_lc45)
-            mod.log.setLevel(_saved_lvl45)
-        check("改错一个数字（`/24` → `/25` 的后半段）， 重载被拒"
-              "（桩里那个节点落在新网段外面，交叉核对逮住它）",
-              _rl_ok45 is False and _rl_notes45 == [],
-              "ok=%s / notes=%s" % (_rl_ok45, _rl_notes45))
-        check("而且一个字都没改：`cluster_cidr` 还是旧的，连那个本来可热的"
-              "`max_sessions_per_user` 也没跟过去（全有或全无）",
-              _d_f45.cfg.cluster_cidr == "192.0.2.0/24"
-              and _d_f45.cfg.max_sessions_per_user == 2,
-              "%s / %s" % (_d_f45.cfg.cluster_cidr,
-                           _d_f45.cfg.max_sessions_per_user))
-        check("内核里那条基础规则还是旧网段 —— 它没被换掉"
-              "（`_adopt_config()` 里那一步根本没跑到：这是最直接的那一条判据）",
-              _nftsim.cidr() == "192.0.2.0/24", str(_nftsim.cidr()))
-        check("而日志点名了是哪个键（只说「配置有问题」，管理员不知道"
-              "该去改哪一个）",
-              any(lv == "ERROR" and "cluster_cidr" in m for lv, m in _lc45.lines),
-              str(_lc45.lines)[:400])
-
-        # 反过来的一半 —— 少了它，"把热重载整个禁掉"也能让上面几条绿。
-        with open(_F45, "w", encoding="utf-8") as _f:
-            _f.write("cluster_cidr = 192.0.0.0/16\n"
-                     "range_start = 55001\nrange_end = 55099\n"
-                     "max_sessions_per_user = 5\n")
-        _rl_ok45b, _rl_notes45b = _d_f45.reload_config()
-        check("对照：改成一个仍然覆盖全部节点的网段，照常生效"
-              "（这一条是上面那几条的反面：新判据拦的是「改错了」，"
-              "不是「改了 cluster_cidr」）",
-              _rl_ok45b is True
-              and _d_f45.cfg.cluster_cidr == "192.0.0.0/16"
-              and _d_f45.cfg.max_sessions_per_user == 5,
-              "ok=%s / %s / %s" % (_rl_ok45b, _d_f45.cfg.cluster_cidr,
-                                   _d_f45.cfg.max_sessions_per_user))
-
         # 32.15 热重载之后，站点级那几条重打一遍（F46）
         #
         # 与 F45 同源：reload 抄了启动判据的一个子集。`reload_config()`
@@ -11693,7 +11528,7 @@ exit 0
         #    值；若出口只有 `start()` 与 `--check` 两个，卸掉一个插件再 reload，
         #    那条就只在下次重启时才说。症状正是 `stale_plugin_conf_problems`
         #    自己的注释要防的那句话：「我明明配了啊」，而日志里一个字都没有。
-        _F46 = write_conf("cluster_cidr = 192.0.2.0/24\n"
+        _F46 = write_conf(""
                           "range_start = 55001\nrange_end = 55099\n", "rl-f46.conf")
         # 一份安装器起名的配置（ULID 文件名，判据落在位置上，不是文件里
         #   写了什么）。此刻它指得到 alpha。

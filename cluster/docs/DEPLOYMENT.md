@@ -39,24 +39,20 @@ sudo bash slurmate-site-<版本>.run --check
 nft list chain inet slurmate output
 ```
 
-### 2. 登录节点与全部计算节点在同一 IPv4 网段内，且能用一个 CIDR 表达
+### 2. Slurm 报的节点地址是 IPv4
 
-依据：`cluster_cidr` 只接受一个 CIDR —— 留空、写成文档占位网段、前缀长度非法、
-主机位不为 0，都会被自检拒绝启动。这个值被写进基础规则
-`ip daddr != <cluster_cidr> accept`（`Nft.ensure()`）。
+依据：会话的 ACL 规则（`ip daddr <节点IP> tcp dport <端口> … drop`）要一个**字面
+IPv4**，而它的权威来源是 `scontrol show node` 的 `NodeAddr=`。`NodeAddr` 报主机名
+（由 Slurm 解析）的集群今天用不了：`Slurm.node_ip()` 会退回 `scontrol show hostname`
+去解析，解析不出 IPv4 就是 `None`，那台节点上的会话一条都登记不上。
 
-这一格不用手工填：部署时它是空的，安装器会按 Slurm 报的 `NodeAddr` 全集算一个
-填进去并说一声（`derive_cluster_cidr()`）。算不出来（问不到 Slurm、节点分散在不止
-一个网段里）才落到手工那一档。
+怎么确认：`tools/check-cluster.sh` 的〈登录节点地址〉那一节会打印
+`NodeName=/NodeAddr=` 对照表，一眼看得出。
 
-不满足会怎样失败：如果计算节点落在 `cluster_cidr` 之外，去往它们的流量会先被
-这条基础规则放行，所有会话规则永远匹配不到。链的 policy 是 `accept`，
-所以不会有任何报错 —— 表现为「一切正常，只是没有保护」。
-
-怎么确认：不用手工确认 —— 守护进程启动时与 `--check` 时都会拿
-`scontrol show node -o` 的 `NodeAddr` 全集与 CIDR 求交，发现节点在网段外就拒绝启动
-并逐个点名。`tools/check-cluster.sh` 也会打印
-`NodeName=/NodeAddr=` 对照表。
+> 0.23 之前这里还有一条前置条件：「登录节点与全部计算节点在同一 IPv4 网段内，且能
+> 用一个 CIDR 表达」。那个 `cluster_cidr` 参数删掉了（见
+> [CONFIGURATION.md](CONFIGURATION.md) 的〈ACL 的目标地址〉），所以跨子网的集群现在
+> 也能用 —— 判据从"一个网段盖住全部节点"换成了"每条规则的目标是一台真节点"。
 
 ### 3. 共享家目录（NFS 或同类），并且支持服务端原子 rename
 
@@ -240,8 +236,8 @@ code 6 `submit_failed`。每一次提交都失败，用户看到的是中文的�
 ### 9. 其余预检项
 
 「位置」那一列只有两个值，因为同一件事只允许有一个判据：凡是
-守护进程自己判得了的（Slurm 命令齐备、`nft`、端口区间、`cluster_cidr` 与节点地址
-对账、`scontrol ping`、`ip_local_reserved_ports`），都由 `install-base.sh`
+守护进程自己判得了的（Slurm 命令齐备、`nft`、端口区间、`scontrol ping`、
+`ip_local_reserved_ports`），都由 `install-base.sh`
 调用 `slurmate-sessiond --check` 来判 —— 脚本里没有第二份实现。
 只有基座安装自己的事（部署锁、哈希工具、目标路径占用）留在脚本里。
 
@@ -258,11 +254,11 @@ code 6 `submit_failed`。每一次提交都失败，用户看到的是中文的�
 退出码两档分工如下，部署脚本靠它决定"现在就停"还是"装完再判"。
 
 - `2`：这台机器缺东西。一个字节都不装。
-- `1`：这份配置写错了。读的是已装的那份就停；读的是示例、属第一次部署就继续装，
-  装完再判。
+- `1`：这份配置写错了，停。读的是已装的那份、还是包里那份示例，都是这一档 ——
+  示例配置过不了自检就是打包的问题。（0.23 之前这里有例外：示例里 `cluster_cidr`
+  空着，而那一格非填不可，所以第一次部署允许它不通过。那个键删掉之后没有例外了。）
 
-`cluster_cidr` 与节点地址的交叉核对排在最后，也走 `1`。前面两档先判：一台"机器缺
-东西"的机器上，一句"网段对不上"不该把它盖成别的意思。
+机器级（`2`）先判：一台"机器缺东西"的机器上，一句"配置写错了"不该把它盖成别的意思。
 
 ### 10. `KillWait` 要够写墓碑
 
@@ -398,10 +394,8 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
   `systemctl reload slurmate-sessiond`（改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-`cluster_cidr` 不用管理员填。部署时它空着，安装器按 Slurm 的节点地址算一个填上
-（见前置条件 2）。算不出来时它会明确说出来，那时才需要手工填。
-
-站点通用键一共 16 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)。
+站点通用键一共 15 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
+没有哪一格是非填不可的（端口池与几个配额都有安全的默认值）。
 
 插件要不要开、开哪几个，也在这一步决定。`enabled = yes` 的插件会被
 分发到每一台连上来的客户端 —— 不只是"用户可以提交它"。所以

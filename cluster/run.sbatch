@@ -114,9 +114,6 @@ SLURMATE_MEM="${SLURMATE_MEM:-}"
 # 变量名与守护进程 `op_submit` 里那一行是一份契约，改一处就要改两处。
 SLURMATE_GRES="${SLURMATE_GRES:-}"
 SLURMATE_PASSWORD_BYTES="${SLURMATE_PASSWORD_BYTES:-12}"
-# 兜底值只是"这个变量不该为空"的防御，不是默认网段 —— 真正的值由守护进程
-# 从配置里传下来，而配置里留空时守护进程根本不会启动。
-SLURMATE_CLUSTER_CIDR="${SLURMATE_CLUSTER_CIDR:-192.0.2.0/24}"
 SLURMATE_SESS_DIR="${SLURMATE_SESS_DIR:-$HOME/.slurmate/sessions}"
 SLURMATE_LOG_DIR="${SLURMATE_LOG_DIR:-$HOME/.slurmate/logs}"
 SLURMATE_PORT_MIN="${SLURMATE_PORT_MIN:-55001}"
@@ -420,10 +417,20 @@ detect_node_ip() {
               | sed -n 's/.*NodeAddr=\([^ ]*\).*/\1/p' | head -n1)"
     fi
     if ! is_ipv4 "$ip"; then
-        # 兜底：本机接口里挑属于集群网段的 IPv4
-        ip="$(ip -4 -o addr show scope global 2>/dev/null \
-              | awk '{print $4}' | cut -d/ -f1 \
-              | grep -E "^${SLURMATE_CLUSTER_CIDR%.*}\." | head -n1)"
+        # 兜底：本机全局地址里【只有一个】IPv4 时就用它。
+        #   从前这一条是按集群网段的前缀去筛（挑落在网段里的那一个），而那个配置
+        #   键随 0.23 删掉了 —— 客户端与守护进程都不再有"集群网段"这个概念。
+        #   没有网段可筛之后，"只有一个"是唯一站得住的判据：两个以上时挑哪一个
+        #   都是猜，而这里猜错的后果是 ACL 落在一个错的地址上（链的策略是
+        #   accept，没有报错、没有日志、没有任何人会发现问题）。
+        #   多于一个就照旧失败 —— 上面那两句已经把是哪一种说清了。
+        local cand n
+        cand="$(ip -4 -o addr show scope global 2>/dev/null \
+                | awk '{print $4}' | cut -d/ -f1 | sort -u)"
+        n="$(printf '%s\n' "$cand" | grep -c '[0-9]')"
+        if [[ "$n" == "1" ]]; then
+            ip="$cand"
+        fi
     fi
     is_ipv4 "$ip" || return 1
     printf '%s' "$ip"

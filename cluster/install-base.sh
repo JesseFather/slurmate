@@ -37,7 +37,7 @@
 #       决定，见 KNOWN-ISSUES）。它整个消失的那一天 = 基座软件包做出来的那一天。
 #
 #  部署预检不在本脚本里：凡守护进程自己判得了的（端口区间自洽、与
-#    reserved_ranges 相交、Slurm 命令齐备、cluster_cidr 与节点对账…）都进
+#    reserved_ranges 相交、Slurm 命令齐备、四个目录写不写得进去…）都进
 #    `slurmate-sessiond --check` —— 同一件事只允许有一个判据。本脚本现在
 #    只是调用它，并把它的两个退出码分开对待（见〈阶段 0〉那一段）。
 #
@@ -557,9 +557,10 @@ ok "目标路径未被他人文件占用"
 #            现在就停。装文件之前就停 —— 那正是本脚本开头那句
 #              「任何一项不满足即中止，不做任何改动」。
 #        1 = 这份配置写错了
-#            第一次部署时 `cluster_cidr` 还空着，那本来就是预期状态，
-#              继续装；装完、配置落盘之后〈阶段 3〉还会再跑一次，那一次才是门。
-#              而若读的是已装的那份配置（重复部署），它就必须是对的，停。
+#            停。第一次部署读的是随包发出来的示例配置，它必须过得了自检 ——
+#              过不了就是打包的问题，不是这一台机器的问题。（0.23 之前这里有
+#              一条例外：示例里 `cluster_cidr` 空着，而那一格非填不可，所以第一次
+#              部署那一次允许它不通过。那个键删掉之后，这条例外没有了。）
 #
 #   退出码 2 这个约定写在守护进程那一侧（见 `machine_selfcheck()`），
 #     这里是唯一的读者。
@@ -596,9 +597,9 @@ case "$_check_rc" in
             _check_stop "已装的站点配置 ${CONF} 自检没通过（见上）。重复部署时它必须是
      对的，部署中止，一个字节都没有改。改完重跑本脚本。"
         else
-            warn "示例配置 ${SRC_CONF} 的自检没通过，第一次部署时这是正常的："
-            warn "  它里面的 cluster_cidr 还是空的，而没有安全的默认值。（详细那一屏在"
-            warn "  〈阶段 3〉：那一次读的是刚落盘的站点配置，它才是门。）"
+            _check_stop "包里的示例配置 ${SRC_CONF} 自检没通过（见上）。这不该发生 ——
+     它是跟着守护进程一起发出来的那一份，示例配置过不了自检就是打包的问题，
+     与这一台机器无关。部署中止，一个字节都没有改。"
         fi ;;
     *)
         _check_stop "自检无法运行（退出码 ${_check_rc}，见上）。多半是 ${DAEMON_SRC}
@@ -1115,7 +1116,7 @@ install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
 install_one "${SRC_DIR}/run.sbatch" "${SHARE_DIR}/run.sbatch.template" 644
 
 # ── slurmate.conf：只在【不存在】时安装 ──
-# 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、集群网段。
+# 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、缺省插件。
 # 重复部署时覆盖它等于把站点的调优悄悄抹掉（而且下次重启守护进程才生效，
 # 故障会出现在很久之后）。要重置就手动删掉它再跑。
 if [[ -e "$CONF" ]]; then
@@ -1123,37 +1124,6 @@ if [[ -e "$CONF" ]]; then
     info "  随仓库分发的版本在 ${SRC_DIR}/slurmate.conf.example，可对比新增了哪些项"
 else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
-fi
-
-# ── cluster_cidr：空着就按 Slurm 报的节点地址填上 ──
-#
-# 它是第一遍部署唯一挡路的那一格：没有安全的默认值，而填错的方向是静默的
-#   （漏一个节点 = 去往它的流量被链首放行、会话规则永远匹配不到）。
-# 但"该填什么"不是要人记的东西：这条判据核对的就是"盖住全部节点"，而节点清单
-#   在 Slurm 手上。所以这里问一次守护进程（`--suggest-cidr`，判据与
-#   `crosscheck_cidr()` 同一个函数出来的），填进去并说一声。
-# 推不出来（问不到 Slurm、节点分散在不止一个网段里）就不填 —— 阶段 3 会照旧
-#   拦住，并指回这里。宁可停在那儿，也不要糊一个猜出来的网段。
-if [[ "$DRYRUN" -eq 0 ]]; then
-    _cur_cidr="$(sed -nE 's/^[[:space:]]*cluster_cidr[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$CONF" 2>/dev/null | head -n 1 | tr -d '[:space:]')"
-    if [[ -z "$_cur_cidr" ]]; then
-        _cidr_note="${BACKUP_DIR}/suggest-cidr.txt"
-        _sug="$("$PY" "$DAEMON_SRC" --suggest-cidr --config="$CONF" 2>"$_cidr_note")" || _sug=""
-        _sug="$(printf '%s' "$_sug" | head -n 1 | tr -d '[:space:]')"
-        if [[ -n "$_sug" ]]; then
-            # 走 install_one 而不是 sed -i：模式与属主由那一处统一给（root:root
-            #   0644），而且它覆盖前会留一份备份 —— 这一格是站点配置，改它要留痕。
-            _filled="${BACKUP_DIR}/slurmate.conf.cidr-filled"
-            sed "s|^[[:space:]]*cluster_cidr[[:space:]]*=.*$|cluster_cidr = ${_sug}|" \
-                "$CONF" > "$_filled"
-            install_one "$_filled" "$CONF" 644
-            ok "cluster_cidr 空着，已按 Slurm 的节点地址推出：${_sug}"
-            info "  它怎么推的：$(head -n 1 "$_cidr_note" 2>/dev/null)"
-        else
-            warn "cluster_cidr 空着，而这一次推不出来：$(head -n 1 "$_cidr_note" 2>/dev/null)"
-            warn "  手工填成 <网络地址>/<前缀长度>（例如 192.0.2.0/24）再重跑本脚本。"
-        fi
-    fi
 fi
 
 # ── systemd 单元：逐字安装 ──
@@ -1197,9 +1167,8 @@ if [[ "$DRYRUN" -eq 1 ]]; then
     info "[演练] 跳过"
 else
     # 这一条跑的是守护进程【自己的】自检 —— 这是第二次：〈阶段 0〉那一次
-    # 用的是还没装上/还没配好的那份配置（首次部署时它是随仓库分发的示例，
-    # cluster_cidr 还空着，所以那一次允许它不通过）。这一次读的是刚落盘的那份
-    # 站点配置，它必须是对的。
+    # 用的是还没装上/还没配好的那份配置（首次部署时它是随包分发的示例）。这一次
+    # 读的是刚落盘的那份站点配置，它必须是对的。
     #
     # 退出码 2（机器缺东西）在〈阶段 0〉已经拦过了；走到这里还拿到 2 只可能
     #   是这两步之间机器被改过 —— 那时也该停。
@@ -1207,8 +1176,7 @@ else
         ok "配置自检通过"
     else
         die "配置自检失败（原因见上）。未启动服务，未创建任何 nft 规则。
-     多半是 ${CONF} 里的 cluster_cidr 还没改成本集群的网段，它没有安全的默认值，
-     留空或仍是文档占位网段都会被拒绝。改完重跑本脚本。"
+     上一条「配置错误: …」点名了是哪一格，照着改 ${CONF}，改完重跑本脚本。"
     fi
 fi
 
