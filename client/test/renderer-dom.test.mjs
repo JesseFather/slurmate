@@ -1400,12 +1400,14 @@ test('高级选项：一块一份，两块各填各的，值不串到另一块',
     + '的默认值"。若串味这里会看到甲的那 4 核');
 });
 
-test('三格滑块：停在站点那份默认上，拖动它就把值写进那一格', () => {
+test('三格滑块：停在站点那份默认上，拖动它就把值写进那一格，框让位给读数', () => {
   // 2026-10-16 用户要的（"CPU 数量、GPU 数量、内存大小都采用拖进度条的方式"）。
-  // 三条判据是两条决定加一条老语义：
+  // 四条判据是三条决定加一条老语义：
   //   · 滑块停在站点按插件定的那份默认上，而且那份默认变了它跟着走
   //     （所以它不是一个写死的起点）；
   //   · 拖动就是把值写进那一格（提交那一侧读的仍然是那一格，见 `startWith`）；
+  //   · 装了滑块的格子不再摆那个输入框，位置由标签右端那个读数说
+  //     （用户同一天要的："托条旁边不要再留输入框，但要显示出来现在在什么位置"）；
   //   · 而"留空即默认"一个字没变 —— 停在默认位置不等于那一格里有字。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
     spaces: SPACES });
@@ -1414,15 +1416,26 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
   const st = a.st;
   const cells = childrenOf(a.box).find((x) => x.className === 'row').children;
   const rangeOf = (i) => childrenOf(cells[i]).find((x) => x.type === 'range');
+  // 那一格本来的输入框，以及标签右端那个读数。
+  const boxOf = (i) => childrenOf(cells[i])
+    .find((x) => x.tagName === 'INPUT' && x.type !== 'range');
+  const valOf = (i) => childrenOf(cells[i]).find((x) => x.className === 'adv-val');
 
   // ── CPU：档位表是 1 2 4 8 12 …，2 那一档是下标 1 ──
   assert.equal(rangeOf(0).value, '1', 'CPU 那条停在站点的默认（2 核）上，不是起点上');
   assert.equal(st.cpus.value, '', '而那一格里仍然一个字都没有 —— 留空即默认');
   assert.equal(rangeOf(0).max, '17',
     '档位表：1 2 4 8 12 16 20 24（8 档）+ 28 32 … 64（10 档）共 18 档');
+  // 装了滑块的格子不再摆那个输入框，位置改由滑块旁边那个读数说。
+  //   输入框还在 DOM 里（提交那一侧读的就是它），所以判的是"画不画得出来"。
+  assert.equal(boxOf(0).classList.contains('hidden'), true,
+    '装了滑块就不再摆那个输入框（用户 2026-10-16：托条旁边不要再留输入框）');
+  assert.equal(valOf(0).textContent, '2',
+    '读数写着滑块停在哪儿，也就是将要发出去的那个数');
   rangeOf(0).value = '3';                    // 下标 3 = 8 核
   rangeOf(0).oninput();
   assert.equal(st.cpus.value, '8', '拖动它就是把值写进那一格');
+  assert.equal(valOf(0).textContent, '8', '读数跟着滑块走');
   // 反过来：用户直接打字，滑块跟着挪（只挪位置，不改他打的字）。
   //   那一格上的监听是 `addEventListener('input', …)` 挂的（不是 `oninput`），
   //   这个架子把它记在 `_ls` 里。
@@ -1437,6 +1450,9 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
 
   // ── 内存：顶是分区里最大的那种节点，默认是站点那份 `defaults.mem` ──
   assert.equal(rangeOf(1), undefined, '还没选分区时没有顶 —— 那条滑块不画');
+  assert.equal(boxOf(1).classList.contains('hidden'), false,
+    '而没有滑块的时候，那一格留着的仍是那个输入框：`512M` 这种写法要写得进去');
+  assert.equal(valOf(1).textContent, '', '那时也没有读数，标签那一行与从前相同');
   h.fn('renderPartitions')([
     { name: 'normal', allowed: true, mem_per_node_mb: 128000,
       gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] },
@@ -1446,21 +1462,27 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
   st.part.onchange();
   assert.equal(rangeOf(1).max, '124', '128000 MB → 125 个整 GB，下标 0…124');
   assert.equal(rangeOf(1).value, '7', '停在默认的 8G 上');
+  assert.equal(valOf(1).textContent, '8G', '读数写的是将要发出去的那个写法');
   rangeOf(1).value = '15';
   rangeOf(1).oninput();
   assert.equal(st.mem.value, '16G',
     '写回那一格的必须是 Slurm 认的写法（`--mem=16` 是 16 MB，不能只写数字）');
+  assert.equal(valOf(1).textContent, '16G', '读数跟着走');
 
   // ── 数量：只在点名了那张卡、而且正是插件默认的那张卡时才有得停 ──
   assert.equal(rangeOf(3), undefined, '没点名卡就没有"几个"可言，滑块与那一格一起灰着');
+  assert.equal(boxOf(3).classList.contains('hidden'), false,
+    '它露出来的是那个数字框（灰着），不是滑块');
   st.gres.value = '0';                       // 第一项，正好是默认那张 `gpu`
   st.gres.onchange();
   assert.ok(rangeOf(3), '点了名、而且就是插件默认的那张卡 → 有滑块');
   assert.equal(rangeOf(3).value, '0', '停在默认的 1 张上');
   assert.equal(rangeOf(3).max, '7', '顶是服务端给的 per_node_max（8 张），与数字框同一处');
+  assert.equal(boxOf(3).classList.contains('hidden'), true, '数字框跟着让位给滑块');
   rangeOf(3).value = '3';
   rangeOf(3).oninput();
   assert.equal(st.gresN.value, '4');
+  assert.equal(valOf(3).textContent, '4', '读数就是将要发出去的那个数');
 
   // ── 换一个分区：顶跟着换，而这一格里的字与滑块的位置都留在原处 ──
   st.part.value = 'big';
@@ -1469,6 +1491,9 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
   assert.equal(rangeOf(1).value, '15', '而滑块还停在刚才拖到的 16G 上，没有弹回默认');
   assert.equal(st.mem.value, '16G');
   assert.equal(rangeOf(3), undefined, '换分区会把 GRES 那一格清掉，数量那条跟着消失');
+  assert.equal(boxOf(3).classList.contains('hidden'), false, '框露回来了');
+  assert.equal(valOf(3).textContent, '',
+    '读数也清掉：留着上一个分区算出来的 4，它会读成这一格现在的取值');
 });
 
 test('滑块画不出来就不画：站点没给默认、默认不在档位上、或者不是默认的那张卡', () => {
@@ -1478,10 +1503,14 @@ test('滑块画不出来就不画：站点没给默认、默认不在档位上�
     spaces: SPACES });
   const cellsOf = (box) => childrenOf(box).find((x) => x.className === 'row').children;
   const rangeOf = (cells, i) => childrenOf(cells[i]).find((x) => x.type === 'range');
+  const boxOf = (cells, i) => childrenOf(cells[i])
+    .find((x) => x.tagName === 'INPUT' && x.type !== 'range');
 
   // ① 站点那份默认整个拿不到（老守护进程的 `defaults` 是 null）
   const a1 = h.fn('pluginAdv')(null);
   assert.equal(rangeOf(cellsOf(a1.box), 0), undefined, '没有默认值就没有滑块，一格都没有');
+  assert.equal(boxOf(cellsOf(a1.box), 0).classList.contains('hidden'), false,
+    '没装滑块的格子照旧只有那个输入框 —— 那是它唯一能填的地方');
 
   // ② 默认不在档位上 → 插进去，滑块停得在它上面（6 核不是 1/2/4/8 那张表上的数）
   const a2 = h.fn('pluginAdv')({ cpus: 6, mem: '512M', gpus: null });

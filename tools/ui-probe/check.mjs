@@ -256,6 +256,14 @@ function judge(r) {
     bad.push(`${o.sel} 越过右边界 ${o.over}px：${o.text}`);
   }
   if ((r.offenders || []).length > 6) bad.push(`另外还有 ${r.offenders.length - 6} 处越界`);
+  // 滑块旁边不该再留一个输入框，而它停在哪儿要看得见（用户 2026-10-16 点名）。
+  //   只在真的画了滑块的格子上判：没装滑块的格子本来就该留着那个框
+  //   （站点没给默认、默认不在档位上时，它是唯一能填的地方）。
+  const cnt = r.counts || {};
+  if (cnt.advRanges) {
+    if (cnt.advBoxes) bad.push(`有 ${cnt.advBoxes} 条滑块旁边还留着输入框`);
+    if (cnt.advNoval) bad.push(`有 ${cnt.advNoval} 条滑块没有读数`);
+  }
   return bad;
 }
 

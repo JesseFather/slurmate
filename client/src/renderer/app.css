@@ -439,19 +439,29 @@ details[open].plug-adv > summary { color: #9cdcfe; font-weight: 600; }
 details[open] summary { margin-bottom: 12px; }
 .adv-note { margin: 10px 0 0; }
 
-/* 高级选项里那五格是一张网格，不是一行会折的弹性盒子。
-   弹性盒子的列宽由内容撑，于是窗口窄一点「分区」就自己掉到第二行，而掉不掉取决于
-   那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
-   网格的列数只随容器宽度整档变（五格 → 四格 → 三格…），与格里写着什么无关；
-   下面那个 150px 是"一格再窄就放不下一个下拉"的位置。
-   对齐走 `start` 不走 `end`：装了滑块的那一格比别的高，`end` 会把别格的标签一起
-   往下推（实测：CPU 那一格有滑块时，「内存」那三个标签比它低了二十来个像素）。
+/* 高级选项里那五格是一张网格，列数写死四列，不随窗口宽窄改。
+   从前它是一行会折的弹性盒子：列宽由内容撑，「分区」掉不掉到第二行取决于那一刻
+   每格里写着多长的字 —— 同一份内容在不同时候长得不一样。后来换成 `auto-fit`，
+   列数仍会随容器宽度整档变（四格 → 三格 → 两格），挪一下窗口整块就换个摆法。
+   现在没有这一档了：窗口最小 1024，而这一屏的内容宽度封在 `.wrap` 的 760 上，
+   所以这四列实际上只有一种宽度，没得可调。
+   对齐走 `start` 不走 `end`：一格比别的高的时候（装着滑块），`end` 会把别格的
+   标签一起往下推（实测：CPU 那一格有滑块时，「内存」那几个标签低了二十来个像素）。
    控件一律占满自己那一列，所以 `.narrow` / `.full` 在这几格里都用不上。 */
+/* 列间距比行间距大：一格右端那个读数与右边那格的标签之间只隔着这一条。
+   实测 12px 时「CPU 核数 2」的 2 与「内存」贴在一起，读成一句话。 */
 .plug-adv .row {
-  display: grid; gap: 10px 12px; align-items: start;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  display: grid; gap: 10px 20px; align-items: start;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .plug-adv .row input, .plug-adv .row select { width: 100%; min-width: 0; }
+/* 一格上面那一行：标签在左，读数在右。
+   读数只有装了滑块才写东西（见 panel.js 的 `attachRange`），空着的时候宽度是 0，
+   所以没装滑块的格子里这一行与从前那个标签一样。 */
+.adv-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+}
+.adv-val { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 /* 那三条滑块（每一格的第二种输入法，见 panel.js 的 `attachRange`）。
    它们不是"一格"，是长在控件下面的一条：所以去掉 `input` 那条规则给的底色与边框
    —— 一条带白框的灰条看起来像另一个输入框。 */
@@ -460,8 +470,9 @@ details[open] summary { margin-bottom: 12px; }
   height: 14px; margin: 6px 0 0;
 }
 .plug-adv .row input[type=range]:focus { outline: 1px solid var(--accent); }
-/* 「分区」自己占一整行。它的选项文字最长（分区名，没权限的那些还要接一句
-   「（无权限）」），四分之一宽那一格装不下 —— 切掉的是那句占位话。
+/* 「分区」自己占一整行：它那个下拉里装的是分区名（没权限的那些还要接一句
+   「（无权限）」），而名字是管理员在集群上起的、长度我们无权假设 —— 下拉的宽度
+   是定的，文字长了就被切在自己盒子里。
    它同时把"第二行只有一个孤零零的格子"这件事去掉了：占一整行是一个说得出的
    安排，而挤在四列里的最后一个位置不是。 */
 .plug-adv .row .wide { grid-column: 1 / -1; }
@@ -505,8 +516,14 @@ p.alarm {
    本机开关一起调暗，而那个开关恰恰是用户此刻唯一能动的东西（"站点没开"那种情况
    除外，但那时它也是"下一个动作"的入口）。 */
 .plug-off { border-style: dashed; }
-.plug-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.plug-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+/* 标题在左、id 与版本钉在右端。
+   从前这一行是会折的，而那几样东西紧跟在标题后面：标题长一点，id 就往右挪一点，
+   同一个插件在不同的站点上长得不一样 —— 而这几行正是拿来一眼比对的，位置定了
+   才比得出来。现在标题占满余下的宽度（`flex: 1`）、自己内部折行，id 与版本
+   始终贴右。 */
+.plug-head { display: flex; align-items: baseline; gap: 8px; }
+.plug-head h3 { margin: 0; font-size: 14px; font-weight: 600; flex: 1 1 auto;
+                min-width: 0; }
 .plug-id, .plug-ver {
   font-family: ui-monospace, Consolas, monospace; font-size: 11px;
   color: var(--fg-dim);

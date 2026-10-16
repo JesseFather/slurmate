@@ -102,8 +102,8 @@
    *   所以"收着"与"展开着"在 `visible()` 眼里长得一模一样 —— 少了这一条，
    *   一个把 `<details>` 删掉、只留 DOM 的改动会让这一格照样全绿。
    */
-  function drawnAdvCount(sel) {
-    var n = 0;
+  /** 每一块真的画出来的那一行上跑一遍 `fn`（收着的那几块不跑）。 */
+  function eachDrawnAdvRow(fn) {
     Array.prototype.forEach.call(
       document.querySelectorAll('#plugin-blocks details.plug-adv'),
       function (d) {
@@ -115,9 +115,48 @@
         var db = d.getBoundingClientRect();
         var rb = row.getBoundingClientRect();
         if (rb.top < db.top || rb.bottom > db.bottom + 1) return;
-        n += row.querySelectorAll(sel).length;
+        fn(row);
       });
+  }
+
+  /**
+   * 展开着的高级选项里，`sel` 选中的东西真的画出来了几个。
+   *
+   * 数的是画出来的，不是 DOM 里有的：装上了滑块的那一格把输入框留在 DOM 里
+   *   （提交那一侧读的就是它），只是不画 —— 那一个在 `visible()` 眼里不算数。
+   */
+  function drawnAdvCount(sel) {
+    var n = 0;
+    eachDrawnAdvRow(function (row) {
+      Array.prototype.forEach.call(row.querySelectorAll(sel), function (el) {
+        if (visible(el)) n++;
+      });
+    });
     return n;
+  }
+
+  /**
+   * 装了滑块的格子：旁边还摆着输入框的有几个、读数是空的有几个。
+   *
+   * 用户 2026-10-16 点的两条：滑块旁边不要再留一个输入框；而滑块停在哪儿要看得
+   *   出来。两条都判"同一格里"，不是判"整行里有没有" —— 没装滑块的格子本来就该
+   *   留着一个框（站点没给默认、默认不在档位上时，那个框是唯一能填的地方），
+   *   那时也谈不上读数。
+   */
+  function drawnAdvSliders() {
+    var out = { ranges: 0, boxes: 0, noval: 0 };
+    eachDrawnAdvRow(function (row) {
+      Array.prototype.forEach.call(row.querySelectorAll('.adv-cell'), function (cell) {
+        var r = cell.querySelector('input[type=range]');
+        if (!r || !visible(r)) return;
+        out.ranges++;
+        var b = cell.querySelector('input:not([type=range])');
+        if (b && visible(b)) out.boxes++;
+        var v = cell.querySelector('.adv-val');
+        if (!v || !v.textContent.trim()) out.noval++;
+      });
+    });
+    return out;
   }
 
   function measure() {
@@ -162,6 +201,7 @@
     // 数出来几个，写进报告。少了这一格，"这一格什么都没画"与"这一格画了但没有
     //   溢出"在报告里长得一样，而前者是本文件最该抓住的一种假绿
     //   （哨兵抓的是"整格是空的"，这一格抓的是"某一类元素一个都没有"）。
+    var slid = drawnAdvSliders();
     out.counts = {
       armed: document.querySelectorAll('.armed').length,
       pluginRows: document.querySelectorAll('#plugin-data .plug-consent-item').length,
@@ -170,6 +210,9 @@
       //   收起态必然是 0，那一格的 0 是应该的。
       advFields: drawnAdvCount(':scope > div'),
       advRanges: drawnAdvCount('input[type=range]'),
+      // 滑块旁边还留着输入框的有几条、没有读数的有几条（判据见 `judge`）。
+      advBoxes: slid.boxes,
+      advNoval: slid.noval,
       jobRows: document.querySelectorAll('#job-list .job').length,
       portAsk: $('sb-port').classList.contains('hidden') ? 0 : 1,
     };

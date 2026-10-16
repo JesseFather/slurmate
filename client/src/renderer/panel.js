@@ -2602,6 +2602,9 @@ function pluginBlock(p, pv) {
   // ── 第一行：这是哪个插件 ──
   //   id 与版本都要露出来：池里可以并存同一个插件的多个版本（站点更新频繁、
   //   也可能拒绝更新），只显示名字的话用户分不清自己看到的是哪一版。
+  // 标题占满左半边、id 与版本钉在右端（见 app.css 的 `.plug-head`）：它们跟着标题
+  //   长短左右滑动的话，同一个插件在不同站点上就长得不一样，而这几行是拿来比对
+  //   一眼的 —— 位置定了才比得出来。
   const head = document.createElement('div');
   head.className = 'plug-head';
   head.append(el('h3', null, p.title));
@@ -3205,14 +3208,20 @@ function memCeilingGb(partName) {
 /**
  * 给一格装一条滑块。
  *
- * 它只是那一格的第二种输入法：拖动它就是把这个值写进那个控件，别的什么都不改。
- *   提交那一侧读的仍然是那个控件（`startWith`），所以"留空即默认"这条语义一个字
- *   都没变 —— 滑块停在默认位置不等于用户填了默认值，那要看控件里有没有字。
+ * 装了滑块的格子就不再摆那个输入框（控件留在 DOM 里、只是看不见）：一格里的
+ *   位置是一定的，而它已经由滑块和滑块旁边那个读数说完了。框还在的写法是"你可以
+ *   填一个别的数"，而档位与上限已经把能选的数限死了 —— 留一个框在那儿，等于让
+ *   用户去撞一个由服务端钳制的边界。装不上滑块时才把框露出来（见下面那段）。
+ *
+ * 控件本身是唯一的事实来源，这一点没变：拖动就是把值写进它，提交那一侧读的仍然
+ *   是它（`startWith`）。所以"留空即默认"一个字没变 —— 滑块停在默认位置不等于
+ *   用户填了默认值，那要看控件里有没有字。
  *
  * 装不上就返回 `null`，调用方不画：没有档位、或者站点那份默认不在档位上（装了它
  *   也只能停在别的数上）。画一个停在错位置上的滑块比不画更坏 —— 用户会照着它
  *   按下去，而那个数不是站点说的默认。
  *
+ * @param {HTMLElement} cell 这一格（读数与滑块都挂在它上面）
  * @param {HTMLElement} ctrl 这一格本来的控件（滑块把值写进它）
  * @param {number[]} values 档位（下标 → 值）
  * @param {number} dflt 站点给这一格的默认值，控件空着的时候滑块停在这
@@ -3220,7 +3229,7 @@ function memCeilingGb(partName) {
  * @param {(s:string)=>number|null} parse 反过来读（用户手打之后滑块跟着挪位置）
  * @returns {HTMLInputElement|null}
  */
-function attachRange(ctrl, values, dflt, fmt, parse) {
+function attachRange(cell, ctrl, values, dflt, fmt, parse) {
   const at = (v) => (v === null || v === undefined ? -1 : values.indexOf(v));
   const i0 = at(dflt);
   if (i0 < 0) return null;
@@ -3229,24 +3238,52 @@ function attachRange(ctrl, values, dflt, fmt, parse) {
   r.min = '0';
   r.max = String(values.length - 1);
   r.step = '1';
+  // 读数写的就是将要发出去的那个写法（内存是 `8G`），不是另一个拼法。`startWith`
+  //   读的就是这个控件的 `value`。
+  const val = cell.val;
+  const show = (i) => { val.textContent = fmt(values[i]); };
   // 初始位置：这一格里已经有字（用户填过、或者上一个分区留下的）就跟着它，
   //   一个字都没有才停在站点那份默认上。
   const cur = at(parse(ctrl.value));
   r.value = String(cur >= 0 ? cur : i0);
-  r.oninput = () => { ctrl.value = fmt(values[Number(r.value)]); };
+  show(Number(r.value));
+  r.oninput = () => {
+    const i = Number(r.value);
+    ctrl.value = fmt(values[i]);
+    show(i);
+  };
   // 用户直接改那一格时滑块跟着挪。只挪位置，不回写 —— 手打的值优先；而打了一个
   //   不在档位上的数（CPU 写了 7）时滑块不动，它表示的仍是最近的那一档。
   ctrl.addEventListener('input', () => {
     const i = at(parse(ctrl.value));
-    if (i >= 0) r.value = String(i);
+    if (i >= 0) { r.value = String(i); show(i); }
   });
+  ctrl.classList.add('hidden');
+  cell.append(r);
   return r;
 }
 
-/** 把一格里的滑块摘掉（上限变了、或者这一格变得用不上滑块了）。 */
-function dropRange(st, key) {
+/**
+ * 把一格还原成"只有一个输入框"的样子：框露回来，读数清空。
+ *
+ * "这一格装着滑块"与"没装"的分别是控件上那个 `hidden` 类 —— 只此一处，不再另记
+ *   一个位：两处记同一件事迟早会对不上。
+ */
+function restoreCell(cell, ctrl) {
+  ctrl.classList.remove('hidden');
+  cell.val.textContent = '';
+}
+
+/**
+ * 把一格里的滑块摘掉（上限变了、或者这一格变得用不上滑块了）。
+ *
+ * 摘掉就是把这一格还原成"只有一个输入框"的样子：框露出来，读数清空 —— 留着上一
+ *   个分区算出来的那个数，它会读成"这一格现在的取值"，而那些档位已经不成立了。
+ */
+function dropRange(st, key, cell, ctrl) {
   if (st[key]) st[key].remove();
   st[key] = null;
+  restoreCell(cell, ctrl);
 }
 
 /**
@@ -3261,14 +3298,13 @@ function applyMemRange(st) {
   const ceil = memCeilingGb(st.part.value);
   const def = st.memDefGb;
   const ok = ceil !== null && def !== null && def >= 1 && def <= ceil;
-  if (!ok) { dropRange(st, 'memRange'); return; }
+  if (!ok) { dropRange(st, 'memRange', st.memCell, st.mem); return; }
   if (st.memRange && st.memRangeCeil === ceil) return;
-  dropRange(st, 'memRange');
+  dropRange(st, 'memRange', st.memCell, st.mem);
   const values = [];
   for (let gb = 1; gb <= ceil; gb++) values.push(gb);
-  st.memRange = attachRange(st.mem, values, def, (v) => `${v}G`, memGbOf);
+  st.memRange = attachRange(st.memCell, st.mem, values, def, (v) => `${v}G`, memGbOf);
   st.memRangeCeil = ceil;
-  if (st.memRange) st.memCell.append(st.memRange);
 }
 
 /**
@@ -3279,7 +3315,7 @@ function applyMemRange(st) {
  *   定政策）。上限跟着 `applyGresMaxFor` 算出来的那一格走。
  */
 function applyCountRange(st) {
-  dropRange(st, 'gresNRange');
+  dropRange(st, 'gresNRange', st.gresNCell, st.gresN);
   const v = st.gres.value;
   const e = (v === '' || v === 'none') ? null : st.curGres[Number(v)];
   const d = st.gresNDef;
@@ -3290,11 +3326,11 @@ function applyCountRange(st) {
   if (!Number.isInteger(max) || max < 1 || d.count < 1 || d.count > max) return;
   const values = [];
   for (let n = 1; n <= max; n++) values.push(n);
-  st.gresNRange = attachRange(st.gresN, values, d.count, (n) => String(n), (s) => {
-    const n = Number(String(s).trim());
-    return Number.isInteger(n) ? n : null;
-  });
-  if (st.gresNRange) st.gresNCell.append(st.gresNRange);
+  st.gresNRange = attachRange(st.gresNCell, st.gresN, values, d.count,
+    (n) => String(n), (s) => {
+      const n = Number(String(s).trim());
+      return Number.isInteger(n) ? n : null;
+    });
 }
 
 /**
@@ -3317,11 +3353,23 @@ function pluginAdv(defaults) {
   box.className = 'plug-adv';
   box.append(el('summary', null, '高级选项'));
 
-  /** 一格 = 一个标签 + 那个控件（CSP 里没有内联 style，布局一律走 class）。 */
+  /**
+   * 一格 = 一行标签 + 那个控件（CSP 里没有内联 style，布局一律走 class）。
+   *
+   * 标签那一行的右端留着一个读数（`.adv-val`）：装了滑块才写东西，写的是这一格
+   *   此刻的取值（见 `attachRange`）。它空着的时候不占位置，所以没装滑块的格子里
+   *   那一行与从前一样。
+   * 那个读数挂在格子上（`box.val`）而不是让调用方各存一份：装滑块、摘滑块都要用它，
+   *   而两处拿到的都是同一个盒子。
+   */
   const field = (labelText, cell, cls) => {
     const d = document.createElement('div');
-    if (cls) d.className = cls;
-    d.append(el('label', null, labelText));
+    d.className = cls ? `adv-cell ${cls}` : 'adv-cell';
+    const head = el('div', 'adv-head');
+    head.append(el('label', null, labelText));
+    d.val = el('span', 'adv-val', '');
+    head.append(d.val);
+    d.append(head);
     d.append(cell);
     return d;
   };
@@ -3368,8 +3416,9 @@ function pluginAdv(defaults) {
 
   // 这一格不再需要 `full` / `grow`：网格里每一格本来就占满自己那一列，
   //   而那两个类正是把「分区」整格甩到第二行的原因（见 app.css 那一段）。
-  // 它自己占一整行（`wide`）：选项文字最长的是这一格（分区名，没权限的还要接一句
-  //   「（无权限）」），挤到四分之一宽时连"随机选一个"那句占位话都会被切掉。
+  // 它自己占一整行（`wide`）：这一格的下拉里装的是分区名（没权限的那些还要接一句
+  //   「（无权限）」），而它是管理员在集群上起的名字、长度我们无权假设 —— 下拉的
+  //   宽度是定的，文字长了只会被切掉（切在自己盒子里，连溢出判据都看不见）。
   st.part = document.createElement('select');
   row.append(field('分区', st.part, 'wide'));
 
@@ -3388,8 +3437,7 @@ function pluginAdv(defaults) {
     const n = Number(String(s).trim());
     return Number.isInteger(n) ? n : null;
   };
-  const rCpus = attachRange(st.cpus, ladder, dCpus, (v) => String(v), intOf);
-  if (rCpus) { st.cpusRange = rCpus; cellCpus.append(rCpus); }
+  st.cpusRange = attachRange(cellCpus, st.cpus, ladder, dCpus, (v) => String(v), intOf);
 
   // 内存那一格：默认那一半在这里定（是不是整 GB），上限那一半随分区变，
   //   所以整条由 `applyMemRange` 判、这里只把格子和默认值记下来。
@@ -3404,9 +3452,11 @@ function pluginAdv(defaults) {
   applyCountRange(st);
 
   box.append(row);
+  // 只留"看不出来"的那一句：默认值本身在读数里、"不填就取默认"也已经在操作里
+  //   （没装滑块的格子上那个框的占位话写着），不必再用一句话说一遍。
+  // 剩下这条是用户从这里看不出来的：它到下一次连接才生效。
   box.append(el('p', 'sub adv-note',
-    '留空就用服务端的默认值（每个插件各有一份，见这一块上面那行）。'
-    + '这些设置不会被记住，关掉窗口或下次连接后即恢复默认。'
+    '这些设置不会被记住，关掉窗口或下次连接后即恢复默认。'
     + '唯一的例外是作业没结束时的闪断重连，那时会沿用它。'));
 
   // 换分区，可选的 GRES 跟着换（上限是分区自己的：同一个集群上一种卡每节点
@@ -3526,9 +3576,11 @@ function renderGresFor(st) {
     const o = document.createElement('option');
     // 选项的 `value` 是它的下标，不是拼出来的字符串 —— 见 startWith 里那段。
     o.value = String(i);
-    // 问的是 `per_node_max`（`--gres=gpu:N` 是每节点 N 个），不是 total：
-    //   "本分区一共 8 张"与"一个作业最多能要 4 张"是两个不同的问题。
-    o.textContent = `${e.label || e.name}（每节点最多 ${e.per_node_max}）`;
+    // 选项里只有卡名。上限不写在这一行：数量那一格的滑块拖到头就是上限
+    //   （`per_node_max`），而"每节点最多 4 张"这句话写在宽度定死的下拉里，
+    //   卡名一长就会被切掉（下拉是切在自己盒子里的，连溢出判据都看不见）。
+    //   一个数由控件自己划出边界，比再写一句更准 —— 边界就在手上。
+    o.textContent = e.label || e.name;
     sel.append(o);
   }
   sel.title = absent
