@@ -120,7 +120,11 @@ grep -qx '#===SLURMATE-PAYLOAD===' "${WORK}/header/run" \
 
 mkdir -p "$(dirname "$OUT")"
 cat "${WORK}/header/run" > "$OUT"
-tar czf - -C "${WORK}/payload" "${PAYLOAD[@]}" >> "$OUT"
+# 逐字节可重现：清单顺序固定、时间戳压平、属主写成 0。少了这几项，同一份源码
+#   打两次得到两个 sha256（tar 记的是拷进暂存目录那一刻的 mtime，每次都不一样），
+#   而"按 sha256 认这个包"就成了一句空话 —— 用户 2026-10-16 就是拿它去认包的。
+tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    -czf - -C "${WORK}/payload" "${PAYLOAD[@]}" >> "$OUT"
 chmod 755 "$OUT"
 
 # ── 当场读回来 ──────────────────────────────────────────────────────────────
