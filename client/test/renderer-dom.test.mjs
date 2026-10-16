@@ -988,6 +988,70 @@ test('同一份数据被两个工作区指着，两条线汇到同一个节点',
     '两条线的终点必须重合（同一份数据）');
 });
 
+test('连接进行中要说一声：按钮灰着写「连接中…」，出结果才还原', async () => {
+  // 2026-10-16 用户报的第 7 条："点「连接」之后没有任何提示，于是会重复点"。
+  // 一次连接可能要几十秒（主进程那边 `READY_TIMEOUT_MS` 是 20 秒），而从前那一段
+  //   时间里界面一个字都不说。这里用一个由用例控制的 promise 把它卡在中间 ——
+  //   只有卡住了才看得到那个状态。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    // 每次要一个"闸"，用例握着它的把手。两条入口各要一个：同一个 promise 只能
+    //   resolve 一次，共用一个的话第二次就卡不住了。
+    'window.__gate = () => { let release;'
+    + ' const p = new Promise((r) => { release = r; });'
+    + ' window.__release = release; return p; };'
+    + 'window.slurmate.setActiveConnection = () => Promise.resolve({ ok: true });'
+    + 'window.slurmate.connect = () => window.__gate().then(() => ({'
+    + " ok: false, error: '假装连不上' }));"
+    // 存这一趟不卡：它是本地的一次 IPC，而这一条判据管的是"连的那几秒"。
+    + 'window.slurmate.saveConnection = () => Promise.resolve({'
+    + ' ok: true, created: true, connections: boot.connections,'
+    + ' workspaces: boot.workspaces, connection:'
+    + " { id: 'c9', user: 'carol', host: '198.51.100.11', port: 10100 } });");
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  // 最新的那条在最前（`notice` 是 `prepend`），正文是第二个孩子。
+  const said = () => h.byId.get('notices').children
+    .map((x) => (x.children[1] || {}).textContent || '').join('\n');
+  // 列表整块会被重画，所以每一问都要重新取一次那一行上的按钮，不能攥着旧的 ——
+  //   攥着旧的话，下面那两条"还原了没有"判的是一颗已经不在屏幕上的按钮。
+  const rowBtn = () => childrenOf(h.byId.get('conn-list').children[0])
+    .find((x) => x.tagName === 'BUTTON');
+
+  // ── 入口一：列表行上那颗「连接」 ──
+  h.fn('renderConnections')(CONNS);
+  assert.equal(rowBtn().textContent, '连接', '平时它写着「连接」');
+  const pending = rowBtn().onclick();
+  await flush();
+  assert.equal(rowBtn().disabled, true,
+    '连的这几秒里那颗按钮要灰着 —— 不灰，用户会再点一次');
+  assert.equal(rowBtn().textContent, '连接中…', '而它要写着「连接中…」');
+  assert.ok(said().includes('正在连接 alice@198.51.100.7…'),
+    '日志里要说清正在连哪一台，实际写着：' + said());
+  h.run('window.__release()');
+  await pending;
+  assert.equal(rowBtn().disabled, false, '出结果之后要还原');
+  assert.equal(rowBtn().textContent, '连接', '连同那句话一起还原');
+
+  // ── 入口二：表单里那颗「保存并连接」 ──
+  // 表单里的几格是手写的：真机上它们由 openNewForm 填，而那一趟会顺手生成一把
+  //   密钥 —— 那与这条判据无关，在这里补桩只是把这条用例弄脆。
+  h.run('form = { open: true, mode: "new", id: null };'
+    + '$("btn-save").textContent = "保存并连接";'
+    + '$("f-user").value = "carol"; $("f-host").value = "198.51.100.11";'
+    + '$("f-port").value = "10100"; $("f-workspace").value = "";');
+  const save = h.byId.get('btn-save');
+  const pending2 = save.onclick();
+  await flush();
+  assert.equal(save.disabled, true, '表单那一颗也要灰着');
+  assert.equal(save.textContent, '连接中…');
+  assert.ok(said().includes('正在连接 carol@198.51.100.11…'),
+    '日志里说的是这一条，实际写着：' + said());
+  h.run('window.__release()');
+  await pending2;
+  assert.equal(save.disabled, false);
+  assert.equal(save.textContent, '保存并连接',
+    '还原成它原来那句话 —— 写成「连接」，用户会以为这颗按钮换了意思');
+});
+
 test('连接表单里的「③ 工作区」：三种取值各有各的那一句后果', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
 

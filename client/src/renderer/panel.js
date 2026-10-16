@@ -1054,7 +1054,8 @@ function renderConnections(list) {
     const main = document.createElement('button');
     main.className = 'tiny';
     main.textContent = '连接';
-    main.onclick = () => doConnectTo(c);
+    // 把自己的元素传下去：连的那几秒里它要变成「连接中…」并灰着（见 `connectTo`）。
+    main.onclick = () => doConnectTo(c, main);
 
     // 编辑：地址 / 这条连接自己的密钥。
     const edit = document.createElement('button');
@@ -3645,6 +3646,34 @@ function askHostKey(res) {
   });
 }
 
+/**
+ * 连一个站点，用的那段时间里把发起它的那颗按钮标出来。
+ *
+ * 两个入口（列表行上那颗「连接」、表单里那颗「保存并连接」）走的是同一条：
+ *   从点下去到出结果之间可能几秒到几十秒（主进程那边 `READY_TIMEOUT_MS` 是 20 秒），
+ *   而这期间界面从前一个字都不说。用户读成"没点上"，于是再点一次。
+ *   同一个站点被连两趟的后果由主进程兜着，但用户没有理由知道自己按重了。
+ * 这是屋里既有的形状：探测那颗按钮写「探测中…」、密钥那把写「正在生成密钥…」。
+ * 假后端的 `connect()` 不发任何 RPC，这里一闪而过；真机上这一步是 SSH 握手加一次
+ *   远程查询。
+ *
+ * 按钮和它的原话都由调用方给：那颗按钮在两条路上不是同一个元素，而"连接中…"要
+ *   画在屏幕上那一颗上。
+ */
+async function connectTo(c, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '连接中…';
+  notice('info', `正在连接 ${c.user}@${c.host}…`);
+  try {
+    return await handleConnectResult(
+      await window.slurmate.connect({ connectionId: c.id }));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
 /** 统一的连接结果处理：主机密钥要用户拍板时弹框，其余按结果报错。 */
 async function handleConnectResult(res) {
   if (res.ok) {
@@ -3977,8 +4006,8 @@ function bindEvents() {
     boot.activeConnectionId = saved.connection.id;
     renderConnections(boot.connections);
     notice('info', saved.created ? '已保存这条连接。' : '这条连接之前就保存过了，直接用它。');
-    await handleConnectResult(
-      await window.slurmate.connect({ connectionId: saved.connection.id }));
+    // 表单里那颗按钮不是重画的（它是 `panel.html` 里写死的），所以直接标它。
+    await connectTo(saved.connection, $('btn-save'));
     // 无论连上没连上，表单都收起来 —— 再摆回来的话，用户看到的是「刚保存完又
     //   弹出一个新建连接」，像是什么都没存进去。这条连接已经在右上角下面的列表里了，它有「连接」「编辑」
     //   两个按钮；连不上时日志里那条错误会说清楚下一步该做什么。
@@ -4269,7 +4298,7 @@ async function init() {
 }
 
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
-async function doConnectTo(c) {
+async function doConnectTo(c, btn) {
   // 这里从前有一道闸（`allowSwitchTo`）：连着 A 的时候点 B 会被拦下，并把
   //   "还连着哪一条、上面有几条会话在跑"说出来。它整个删掉了（2026-10-11）——
   //   它守的那件事现在由界面的形状承担：站在第一屏上就一定不在任何站点里，
@@ -4279,8 +4308,11 @@ async function doConnectTo(c) {
   const r = await window.slurmate.setActiveConnection(c.id);
   if (!r.ok) return notice('error', r.error);
   boot.activeConnectionId = c.id;
+  // 这一趟不先重画列表：重画会把手里这颗按钮换掉，而「连接中…」要画在屏幕上
+  //   那一颗上。地图上那一格（哪条连接是当前的）等这一趟有结果之后再画 ——
+  //   连上时 `handleConnectResult` 自己会画一遍，没连上时它在这儿补上。
+  await connectTo(c, btn);
   renderConnections(boot.connections);
-  await handleConnectResult(await window.slurmate.connect({ connectionId: c.id }));
 }
 
 /**
