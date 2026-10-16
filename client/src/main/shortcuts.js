@@ -73,27 +73,16 @@ function normalizeKey(input) {
 }
 
 /**
- * 光秃秃的修饰键本身（Ctrl / Shift / Alt / Meta）。
- *
- * 这个判断存在，是因为按住 Ctrl 会连续产生 keyDown（操作系统的自动重复），
- *   每一次的 `input.key` 都是 'Control' —— 于是诊断日志里刷满
- *   「已放行：Ctrl+Control」。用户按住 Ctrl 是为了配一个组合键，不是为了看这个。
- *   修饰键单独按下不携带任何信息：它既没有被吞掉的可能，也不是一个动作。
- */
-const BARE_MODIFIERS = new Set(['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']);
-
-function isBareModifier(input) {
-  return BARE_MODIFIERS.has(input.key);
-}
-
-/**
  * 这次按键值不值得进诊断日志。
  *
- * 第二条是 `isAutoRepeat` —— 按住不放的重复事件不该重复上报（同一条信息说 N 遍
- * 和说一遍是同一个信息量，只是淹掉了别的东西）。
+ * 一是 `isAutoRepeat`：按住不放的重复事件不该重复上报（同一条信息说 N 遍和说一遍
+ *   是同一个信息量，只是淹掉了别的东西）。今天进日志的只剩"被我们吞掉的键"，
+ *   而按住不放的吞掉与吞掉一次也是同一件事。
+ * 二是 `type`：两个调用点都在 `keyDown` 那一支里，这里是第二道 —— 它不是多余的，
+ *   它是这条规则本身的说法（"按键"说的是按下那一刻，不是抬起那一刻）。
  */
 function worthReporting(input) {
-  return input.type === 'keyDown' && !input.isAutoRepeat && !isBareModifier(input);
+  return input.type === 'keyDown' && !input.isAutoRepeat;
 }
 
 function match(table, input) {
@@ -154,7 +143,6 @@ function installMenu() {
  * @param {object} opts
  *   onOwned  {(action:string) => void}  用户按了我们自己的键（比如 Ctrl+Shift+R）
  *   onBlocked{(desc:string) => void}    我们吞掉了一个键（诊断面板用）
- *   onSeen   {(desc:string) => void}    我们看到的所有带修饰键/F 键（诊断面板用）
  * @returns {() => void} 卸载函数
  */
 function attachKeyGuard(wc, opts = {}) {
@@ -181,12 +169,11 @@ function attachKeyGuard(wc, opts = {}) {
 
     // 其余一律放行 —— 包括 Ctrl+W / Ctrl+N / Ctrl+T / F5 / Ctrl+P。
     // 它们没有菜单加速键，会直达页面由 code-server 处理。
-    if (worthReporting(input) && opts.onSeen) {
-      // 只报「用户可能关心是否被吞」的那一类，避免刷屏
-      if (input.control || input.alt || input.meta || /^F\d+$/.test(input.key)) {
-        opts.onSeen(describe(input));
-      }
-    }
+    //
+    // 放行的键不上报。从前开发者模式下每按一次带修饰键的键都往日志里写一行
+    //   （「已放行：Ctrl+w」），用来核对"按键到底有没有到页面"—— 那件事已经核完了，
+    //   而它今天的代价是把真正要紧的消息顶掉（用户 2026-10-16 报的那一条）。
+    //   被我们吞掉的键照旧报：那是在解释"按了为什么没反应"，是用户自己问的问题。
   };
 
   wc.on('before-input-event', handler);
@@ -195,5 +182,5 @@ function attachKeyGuard(wc, opts = {}) {
 
 module.exports = {
   BLACKLIST, OWNED, installMenu, attachKeyGuard, describe,
-  isBareModifier, worthReporting,   // 导出给测试：它们是纯函数，规则值得钉住
+  worthReporting,   // 导出给测试：它是纯函数，规则值得钉住
 };

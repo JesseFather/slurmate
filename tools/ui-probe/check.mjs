@@ -261,7 +261,7 @@ function judge(r) {
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
-const CASES = ['conns', 'conns-armed', 'plugins', 'jobs', 'statusbar-port'];
+const CASES = ['conns', 'conns-armed', 'plugins', 'plugins-adv', 'jobs', 'statusbar-port'];
 
 async function main() {
   const argv = process.argv.slice(2);

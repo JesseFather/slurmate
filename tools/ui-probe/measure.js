@@ -90,6 +90,36 @@
 
   var SCROLLERS = ['#panel', '.conns', '.jobs', '.notices', '.joblog', '#statusbar'];
 
+  /**
+   * 展开着的高级选项里那五格，数一遍。
+   *
+   * 判据是"那一行真的落在它那个 `<details>` 画出来的盒子里"，既不是"DOM 里有几个"，
+   *   也不是上面那个 `visible()`。这个无头壳里，收着的 `<details>` 里那几个孩子
+   *   照样有一个非零的矩形 —— `content-visibility: hidden` 把上一次的布局留着，
+   *   而那个矩形从 details 自己的盒子（只有摘要那一行高）底下伸出去。
+   *   实测（`plugins` 那一格，收着）：details 的盒子是 19px 高，而那一行的矩形
+   *   挂在它下面 126px 处。
+   *   所以"收着"与"展开着"在 `visible()` 眼里长得一模一样 —— 少了这一条，
+   *   一个把 `<details>` 删掉、只留 DOM 的改动会让这一格照样全绿。
+   */
+  function drawnAdvFields() {
+    var n = 0;
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#plugin-blocks details.plug-adv'),
+      function (d) {
+        var row = d.querySelector('.row');
+        // `visible()` 挡的是"这一屏根本不在前台"那一档（那时两个盒子的坐标都是 0，
+        //   下面那条包含判断会把 0 当成"在里面"）；它挡不住收着的 details，
+        //   那一档由包含判断挡。
+        if (!row || !visible(row)) return;
+        var db = d.getBoundingClientRect();
+        var rb = row.getBoundingClientRect();
+        if (rb.top < db.top || rb.bottom > db.bottom + 1) return;
+        n += row.querySelectorAll(':scope > div').length;
+      });
+    return n;
+  }
+
   function measure() {
     var out = { case: CASE, viewport: { w: innerWidth, h: innerHeight },
       scroll: [], offenders: [], exempted: 0, scanned: 0, fonts: null };
@@ -136,6 +166,9 @@
       armed: document.querySelectorAll('.armed').length,
       pluginRows: document.querySelectorAll('#plugin-data .plug-consent-item').length,
       pluginBlocks: document.querySelectorAll('#plugin-blocks .plug').length,
+      // 展开着的高级选项里那五格。它数的是"真的画出来了几格"（见上面那个
+      //   `drawnAdvFields`）—— 收起态必然是 0，那一格的 0 是应该的。
+      advFields: drawnAdvFields(),
       jobRows: document.querySelectorAll('#job-list .job').length,
       portAsk: $('sb-port').classList.contains('hidden') ? 0 : 1,
     };
@@ -180,6 +213,34 @@
       },
       sentinel: function () { return document.querySelectorAll('#plugin-blocks .plug').length >= 3; },
       what: '第二屏（插件块）',
+    },
+
+    // 同一屏，把每一块的高级选项展开、并把站点那份分区表喂进去。
+    //
+    // 这一格是"五格那一行会不会换行、换行之后会不会顶出去"唯一量得到的地方：
+    //   上一格里那个 `<details>` 是收着的，那五格根本没被画出来过，
+    //   所以那一行从来没被量过 —— 这正是"它红了才怪"的原因。
+    //   喂分区表也是必须的：不喂的话那两个下拉各自只有一个选项，而这一格要量的
+    //   恰恰是"选项文字很长的时候那一格会不会把卡片顶出去"。
+    'plugins-adv': {
+      setup: function () {
+        setConnected(true);
+        renderPlugins(F.pluginsView || {});
+        // 分区表是站点级的（全局一份），到得比插件块早或晚都可能 —— 这里刻意
+        //   在块画好之后再喂，走的就是"它变了，每一块里那一格都跟着换"那条路。
+        renderPartitions(F.partitions || []);
+        showScreen('plugins');
+        Array.prototype.forEach.call(
+          document.querySelectorAll('#plugin-blocks details.plug-adv'),
+          function (d) { d.open = true; });
+        return Promise.resolve();
+      },
+      // 展开之后那五格必须真的画出来了（判据见上面那个 `drawnAdvFields`：
+      //   "DOM 里有"是不够的，这个无头壳里收着的 details 也留着那几个孩子的矩形）。
+      //   少了这一步，一格空白会以"一处溢出都没有"的样子通过 —— 而"没画"与
+      //   "画了但不溢出"在这一格眼里必须分得开。
+      sentinel: function () { return drawnAdvFields() >= 5; },
+      what: '第二屏（每一块的高级选项都展开、分区表已喂）',
     },
 
     // 作业屏：三行。它画的不是 `renderSessions` 那一份，而是 `JOBS` 那一格

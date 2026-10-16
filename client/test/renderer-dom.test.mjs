@@ -764,8 +764,9 @@ test('插件那一块上两颗删除：删本机那份两端都有，撤站点�
       canSubmit: true, defaults: { cpus: 2, mem: '8G', time: '12:00:00' },
       defaultsGresText: null, runnable: false };
 
-    // 那两颗按钮长在最后一块 `.plug-meta` 里（这一块自己的，不是上面那几格）。
-    const lastRow = (root) => childrenOf(root).filter((x) => x.className === 'plug-meta').pop();
+    // 三颗按钮住在同一行里（`.plug-actions`）：它是这一块自己的一行，
+    //   不再借用上面那条事实行（`.plug-meta`）。
+    const lastRow = (root) => childrenOf(root).filter((x) => x.className === 'plug-actions').pop();
     const btn = (root, text) => childrenOf(lastRow(root))
       .find((x) => x.tagName === 'BUTTON' && x._text === text);
     const armedIn = (root) => childrenOf(lastRow(root)).find((x) => x.className === 'armed');
@@ -1214,8 +1215,7 @@ test('插件块上的并发上限：站点报了就说，没说就一个字都�
   // 而"站点没说"那一档是这一条的重点：补一个 1 的话，那会是一句编出来的政策，
   //   而用户会拿它当本站的规定（老守护进程根本报不出这一格）。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
-  // 那一块里有两条 `.plug-meta`：上面那条是几格事实，最后那条是两颗删除。
-  //   这一条问的是前者。
+  // 那一块里只有一条 `.plug-meta`（几格事实）—— 三颗按钮搬去 `.plug-actions` 了。
   const factsOf = (i) => childrenOf(h.byId.get('plugin-blocks').children[i])
     .filter((x) => x.className === 'plug-meta')[0];
   const wordsOf = (e) => childrenOf(e).map((x) => x.textContent).join(' ｜ ');
@@ -1351,7 +1351,8 @@ test('高级选项：一块一份，两块各填各的，值不串到另一块',
     const row = kidsOf(advOf(b)).find((x) => x.className === 'row');
     return kidsOf(row).map((w) => kidsOf(w)[1]);
   };
-  const btnOf = (b) => kidsOf(b).find((x) => x.tagName === 'BUTTON');
+  const btnOf = (b) => kidsOf(
+    kidsOf(b).find((x) => x.className === 'plug-actions')).find((x) => x.tagName === 'BUTTON');
 
   const [b0, b1] = [blockOf(0), blockOf(1)];
   const a0 = cellsOf(b0);
@@ -1398,6 +1399,47 @@ test('高级选项：一块一份，两块各填各的，值不串到另一块',
     '乙那一块什么都没填，发的是空对象：留空不是"0 核"，是"让服务端用它自己'
     + '的默认值"。若串味这里会看到甲的那 4 核');
 });
+
+test('同一份插件清单不重画：展开着的高级选项不许自己合上，填了一半的值不许被清掉',
+  () => {
+    // 2026-10-16 用户报的三条（"展开着的「高级选项」自己合上"、"滚动位置与列表跳动"、
+    //   "填了一半的值回到空白"）是同一个根因：站点每 30 秒对一次账，对完把整个视图
+    //   推过来，而视图一个字都没变的时候从前也照样把这一屏拆了重画一遍。
+    // 判据落在"那一块还是不是同一个元素"上 —— 重建一次就是换一个元素，而展开状态
+    //   与填进去的值都挂在那一个元素上，于是它们一起没了。查"值还在不在"是不够的：
+    //   把值搬进一份缓存、元素照旧重建，那样写也会绿。
+    const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+      spaces: SPACES });
+    h.fn('renderPlugins')(PV);
+    const blockOf = (i) => h.byId.get('plugin-blocks').children[i];
+    const advOf = (b) => childrenOf(b).find((x) => x.tagName === 'DETAILS');
+
+    const first = blockOf(0);
+    const adv = advOf(first);
+    adv.open = true;
+    const cells = childrenOf(adv).find((x) => x.className === 'row').children;
+    cells[0].children[1].value = '7';        // CPU 那一格填到一半
+
+    // 站点推下一份 —— 内容与上一份逐字相同，但是另一个对象（真机上那就是另一次
+    //   IPC 反序列化出来的那一份）。
+    h.fn('renderPlugins')(JSON.parse(JSON.stringify(PV)));
+
+    assert.equal(blockOf(0), first, '同一份内容不该换掉那一块');
+    assert.equal(advOf(first).open, true, '展开着的还在展开着');
+    assert.equal(cells[0].children[1].value, '7', '填了一半的值还在原处');
+
+    // 反过来：内容真的变了就必须重画。少了这一半，上面那三条可以拿"永远不画"换来。
+    h.fn('renderPlugins')({ ...PV,
+      plugins: PV.plugins.map((p) => ({ ...p, version: '2.0.0' })) });
+    assert.notEqual(blockOf(0), first, '换了内容就要重画');
+
+    // 清空那一支也一样：`renderPlugins(null)` 之后再来一份与清空前逐字相同的视图，
+    //   必须真的画出来 —— 跳过的话屏幕上是一块空列表，没有一句话解释它为什么空着。
+    h.fn('renderPlugins')(null);
+    assert.equal(h.byId.get('plugin-blocks').children.length, 0, 'null 就是清空');
+    h.fn('renderPlugins')(PV);
+    assert.equal(h.byId.get('plugin-blocks').children.length, 2, '清空之后同一份要重画');
+  });
 
 test('共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
   // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：

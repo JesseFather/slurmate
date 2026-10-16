@@ -50,7 +50,7 @@ Module._load = function (request, ...rest) {
 
 const require = createRequire(import.meta.url);
 const { installMenu, attachKeyGuard, describe, BLACKLIST, OWNED,
-        isBareModifier, worthReporting } = require('../src/main/shortcuts.js');
+        worthReporting } = require('../src/main/shortcuts.js');
 
 /** 造一个假的 webContents，只实现 on / removeListener。 */
 function fakeWc() {
@@ -77,10 +77,9 @@ function fakeWc() {
 
 function guard(input) {
   const wc = fakeWc();
-  const got = { blocked: [], seen: [], owned: [] };
+  const got = { blocked: [], owned: [] };
   attachKeyGuard(wc, {
     onBlocked: (d) => got.blocked.push(d),
-    onSeen: (d) => got.seen.push(d),
     onOwned: (a) => got.owned.push(a),
   });
   return { wc, got, ...wc.press(input) };
@@ -184,17 +183,20 @@ test('输入法组合期间一律放行 —— 否则中文输入法会被吃掉
   assert.equal(got.blocked, 0);
 });
 
-test('诊断：放行的键被上报，且只报用户可能关心的那一类', () => {
+test('诊断：只报被吞掉的键，放行的一个字都不报', () => {
+  // 2026-10-16 用户报的那一条：插件界面的日志里刷满「已放行：Ctrl+C」。
+  //   那道诊断（"按键到底有没有直达页面"）核完之后就是噪音 —— 每按一次带修饰键
+  //   的键、每按一次 F 键都写一行，把真正要紧的消息顶掉。
+  //   留下的是"被我们吞掉的键"：那是在解释"按了为什么没反应"。
   const r1 = guard({ key: 'w', control: true });
-  assert.equal(r1.got.seen.length, 1);
-  assert.match(r1.got.seen[0], /Ctrl\+w/);
+  assert.deepEqual(r1.got.blocked, [], '放行的键一条都不该报');
 
-  // 裸字母不该刷屏
-  const r2 = guard({ key: 'a' });
-  assert.equal(r2.got.seen.length, 0);
-  // F 键要报（用户可能关心它是否被吞）
-  const r3 = guard({ key: 'F5' });
-  assert.equal(r3.got.seen.length, 1);
+  const r2 = guard({ key: 'F5' });
+  assert.deepEqual(r2.got.blocked, [], 'F5 是放行的（页面自己处理），也不报');
+
+  const r3 = guard({ key: 'F12' });
+  assert.equal(r3.got.blocked.length, 1, '吞掉的键要报，否则用户不知道按了为什么没反应');
+  assert.match(r3.got.blocked[0], /F12/);
 });
 
 test('keyUp 不重复触发诊断与动作（只处理 keyDown）', () => {
@@ -236,36 +238,22 @@ test('describe 渲染成人能读的形态', () => {
 
 // ── 诊断日志的噪声 ───────────────────────────────────────────────────────────
 //
-// 症状：按住 Ctrl，日志里就刷满「已放行：Ctrl+Control」。
-// 根因有两层：① 操作系统对按住的修饰键会连续产生 keyDown；
-// ② 那时 input.key 就是 'Control'，于是每一次都被当成一条独立的消息记下来。
-// 而修饰键单独按下不携带任何信息 —— 它既没有被吞掉的可能，也不是一个动作。
+// 症状：按住 Ctrl，日志里就刷满「已放行：Ctrl+Control」（用户 2026-10-16 报的）。
+// 做法：放行的键一个字都不报（见 `attachKeyGuard` 末段那段注释）。剩下那一半
+//   ——"被我们吞掉的键"—— 要报，但不能因为它按住不放就报三十遍。
 
-test('按住 Ctrl 不刷屏：修饰键本身 + 自动重复都不进日志', () => {
-  // 裸修饰键：不是「值不值得报」，而是它根本不是一条消息
-  for (const key of ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph']) {
-    assert.equal(isBareModifier({ key }), true, `${key} 单独按下不该进日志`);
-  }
-  assert.equal(isBareModifier({ key: 'c' }), false, '普通字母不是修饰键');
-  assert.equal(isBareModifier({ key: 'F5' }), false);
-
-  // 真实的刷屏现场：按住 Ctrl，操作系统连发 keyDown
-  const held = { type: 'keyDown', key: 'Control', control: true, isComposing: false,
-                 shift: false, alt: false, meta: false, isAutoRepeat: true };
-  assert.equal(worthReporting(held), false);
-
-  // 自动重复的普通键同理（按住 w 不该写 30 行日志）
-  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: true }), false);
-  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: false }), true,
-    '按一次还是要报的');
-  // keyUp 不报（只处理 keyDown），组合期间不报
-  assert.equal(worthReporting({ ...held, key: 'w', isAutoRepeat: false, type: 'keyUp' }), false);
+test('按住一个键不刷屏：自动重复与抬起都不进日志', () => {
+  const down = { type: 'keyDown', key: 'F12', isAutoRepeat: false };
+  assert.equal(worthReporting(down), true, '按一次还是要报的');
+  assert.equal(worthReporting({ ...down, isAutoRepeat: true }), false,
+    '按住不放不该写 30 行日志');
+  assert.equal(worthReporting({ ...down, type: 'keyUp' }), false, '抬起不报');
 });
 
-test('端到端：按住 Ctrl 一次也不上报，正常组合键照报', () => {
+test('端到端：放行的键一条都不报，吞掉的按住不放也只报一条', () => {
   const wc = fakeWc();
-  const seen = [];
-  attachKeyGuard(wc, { onSeen: (d) => seen.push(d) });
+  const blocked = [];
+  attachKeyGuard(wc, { onBlocked: (d) => blocked.push(d) });
 
   const press = (input) => {
     const event = { preventDefault: () => {} };
@@ -279,9 +267,11 @@ test('端到端：按住 Ctrl 一次也不上报，正常组合键照报', () =>
   for (let i = 0; i < 30; i += 1) {                              // 按住不放
     press({ key: 'Control', control: true, isAutoRepeat: true });
   }
-  assert.deepEqual(seen, [], '按住 Ctrl 不该产生任何一条日志');
+  press({ key: 'w', control: true });                             // 真的组合键
+  assert.deepEqual(blocked, [], '放行的键一条日志都不该有');
 
-  press({ key: 'w', control: true });
-  assert.equal(seen.length, 1, '真正的组合键仍然要报，否则诊断就废了');
-  assert.match(seen[0], /Ctrl\+w/);
+  press({ key: 'F12' });
+  for (let i = 0; i < 30; i += 1) press({ key: 'F12', isAutoRepeat: true });
+  assert.equal(blocked.length, 1, '吞掉一次报一条；按住不放还是那一条');
+  assert.match(blocked[0], /F12/);
 });

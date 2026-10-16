@@ -421,18 +421,49 @@ button.remember:hover { background: #5c4e22; }
 
 /* ── 高级选项（每一块插件自己一份）──
    它从前是全屏共用的一份（`#adv`），长在第二屏最底下 —— 而它喂的是某一块的
-   「开始会话」。现在它长在那一块里（panel.js 的 `pluginAdv`），所以这里只有
-   "怎么摆"的样式：那几个格子本身复用 `.row` / `label` / `.narrow` / `.full`。
+   「开始会话」。现在它长在那一块里（panel.js 的 `pluginAdv`）。
+   收起来的时候它只有一个小三角加一行小字，没有框、没有内边距：它默认就是收着的，
+   而一块带边框的空盒子摆在那里，看起来像这一块还有东西没填完。展开之后才给它框
+   —— 那时它才是一个区块，框在说这几格属于一起。
    这是全界面唯一一个 `<details>`（从前那条通用的 `details` 规则并入这里，
    不留一条谁也匹配不到的规矩）。 */
-.plug-adv {
+.plug-adv { margin: 12px 0 0; }
+details[open].plug-adv {
   border: 1px solid var(--border); border-radius: 4px;
-  padding: 10px 14px; margin: 10px 0 0;
+  padding: 10px 14px; margin-bottom: 10px;
 }
-details[open].plug-adv { margin-bottom: 10px; }
 summary { cursor: pointer; color: #9cdcfe; font-weight: 600; font-size: 12px; }
+/* 收着的那一行比标题轻：它说的是"还有几格可以调"，不是这一块的标题。 */
+.plug-adv > summary { color: var(--fg-dim); font-weight: 400; }
+details[open].plug-adv > summary { color: #9cdcfe; font-weight: 600; }
 details[open] summary { margin-bottom: 12px; }
 .adv-note { margin: 10px 0 0; }
+
+/* 高级选项里那五格是一张网格，不是一行会折的弹性盒子。
+   弹性盒子的列宽由内容撑，于是窗口窄一点「分区」就自己掉到第二行，而掉不掉取决于
+   那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
+   网格的列数只随容器宽度整档变（五格 → 四格 → 三格…），与格里写着什么无关；
+   下面那个 150px 是"一格再窄就放不下一个下拉"的位置。
+   控件一律占满自己那一列，所以 `.narrow` / `.full` 在这几格里都用不上。 */
+.plug-adv .row {
+  display: grid; gap: 10px 12px; align-items: end;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.plug-adv .row input, .plug-adv .row select { width: 100%; min-width: 0; }
+/* 「分区」自己占一整行。它的选项文字最长（分区名，没权限的那些还要接一句
+   「（无权限）」），四分之一宽那一格装不下 —— 切掉的是那句占位话。
+   它同时把"第二行只有一个孤零零的格子"这件事去掉了：占一整行是一个说得出的
+   安排，而挤在四列里的最后一个位置不是。 */
+.plug-adv .row .wide { grid-column: 1 / -1; }
+
+/* ── 动作区：这一块上要按的那几颗都在这一行里 ──
+   从前「开始会话」直接挂在块上，两颗删除复用了事实行的 `.plug-meta` ——
+   三颗上下紧贴，用户报的那句"挤在一起"就是这个。
+   间距由容器给（`gap`），那一条上外边距把它与上面那几格分开。 */
+.plug-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 12px;
+}
 
 /* ── 布局工具类 ──
    内联 style 会被上面那条 CSP 静默丢弃（style-src 无 unsafe-inline），

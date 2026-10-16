@@ -84,6 +84,13 @@ let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台
  * 按 `serviceKind`（站点短名）去查。
  */
 let lastPlugins = null;
+/**
+ * 上一次画插件块时那两份输入的指纹（见 `pluginsSignature`）。
+ *
+ * 它只在 `renderPlugins` 里读写，别处一个字都不许碰：它是"屏幕上现在画的是什么"
+ *   的记录，任何人绕过去改它，下一份真正不同的视图就会被跳过。
+ */
+let pluginsSig = null;
 
 /** 工作区下拉里「新建一个空白工作区」那一项的值。不是工作区 id，别混。 */
 const NEW_WORKSPACE = '__new__';
@@ -1572,6 +1579,19 @@ function startRename(l, nm) {
 
 // ── 插件 ────────────────────────────────────────────────────────────────────
 /**
+ * 那一屏画出来的东西由哪两份输入决定 —— 算成一个字符串，用来判"内容变了没有"。
+ *
+ * 站点推来的那份视图只是其中一份。另一份是本机那几张表：「用哪一份数据」那一格
+ *   读的是它们的引用表，而引用表不在视图里。只看前一份的话，工作区换过之后
+ *   那一格会继续说着上一个，而界面上一切正常。
+ */
+function pluginsSignature(pv) {
+  return JSON.stringify([pv,
+    boot && boot.connections, boot && boot.workspaces,
+    boot && boot.spaces, boot && boot.activeConnectionId]);
+}
+
+/**
  * 画插件块。
  *
  * 这个函数里一个插件名都没有 —— 画什么完全由服务端通报的清单与本机注册表
@@ -1583,13 +1603,33 @@ function startRename(l, nm) {
  *     站点没装作业侧 → 找管理员重新部署（开那个开关没用）
  *     本机没有 → 升级客户端        池里撞车 → 删掉多余的那一份
  *   糊成一句"不可用"，用户就只能去猜。那四句话在 WHY_NOT_RUNNABLE 里。
+ *
+ * ── 同一份内容不许重画 ──────────────────────────────────────────────────────
+ *
+ * 站点清单每 30 秒对一次账，对完把整个视图推过来。视图一个字都没变的时候，从前
+ *   也照样把这一屏拆了重画一遍 —— 于是展开着的「高级选项」自己合上、滚动位置跳回
+ *   顶上、填了一半的值被清成空白。三件事同一个根因，而用户看到的是"界面自己在乱跑"。
+ * 所以进来先算一次指纹（`pluginsSignature`），与上次逐字相同就整块跳过。
+ *   指纹的失败方向是安全的：算不出相等（键序变了、多了一格）就退化成今天的样子，
+ *   照旧重画。
+ * 真要重画的地方显式传 `force` —— 今天有两处，都写清了为什么。
  */
-function renderPlugins(pv) {
+function renderPlugins(pv, force) {
   const box = $('plugin-blocks');
   const issues = $('plugin-issues');
+  if (!pv) {
+    box.textContent = '';
+    issues.textContent = '';
+    // 清空的同时要把指纹一起清掉：留着的话，下一条与清空之前逐字相同的视图会被
+    //   当成"同一份内容"跳过，于是屏幕上是一块空列表，没有任何东西解释它为什么空着。
+    pluginsSig = null;
+    return;
+  }
+  const sig = pluginsSignature(pv);
+  if (!force && sig === pluginsSig) return;
+  pluginsSig = sig;
   box.textContent = '';
   issues.textContent = '';
-  if (!pv) return;
   lastPlugins = pv;
 
   // 站点分发那一栏、待同意那一段、没加载的那些 —— 与插件块一起重画。
@@ -1600,6 +1640,8 @@ function renderPlugins(pv) {
   const list = pv.plugins || [];
   // 这一屏上那些块连同它们各自的高级选项一起重建（下面那几格住在闭包上）：
   //   名单跟着换一批，否则 `renderPartitions` 会去改一批已经不在文档里的格子。
+  // 走到这里就是"内容真的变了"（上面那道指纹已经把没变的挡回去了），所以丢掉
+  //   旧的格子是对的 —— 留在表里的是已经不在文档里的元素。
   advCells = [];
   // 空池是正常状态，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
   //   道歉，是给出路：池在哪、怎么装、装完怎么让它出现。
@@ -2435,7 +2477,9 @@ function pluginSpaceRow(p) {
     // 没成功就把下拉拨回真实的那一格（重建整块 → 下拉按 `refs` 重新选中）。
     // `lastPlugins` 为空时什么都不做：`renderPlugins(null)` 会把整块插件列表
     //   清空 —— 那比"下拉停在错的值上"严重得多。
-    if (!r.ok && lastPlugins) renderPlugins(lastPlugins);
+    // 这里必须 `force`：重建的理由不是"视图变了"（它在手上，一个字都没变），
+    //   而是"下拉被拨到了错的位置，要按同一份视图重画一遍把它拉回来"。
+    if (!r.ok && lastPlugins) renderPlugins(lastPlugins, true);
   };
 
   row.append(lab, sel);
@@ -2498,7 +2542,10 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
   // 分叉会把活跃连接挪到另一张表上，而状态条那个下拉显示的正是"活跃连接的
   //   工作区" —— 不重填的话它会继续说着上一个，直到下一次快照推送。
   renderWorkspaceSelectors();
-  if (lastPlugins) renderPlugins(lastPlugins);
+  // 这里显式重画：`r` 带回来的那几张表通常与手上这份不同（指纹自己就判得出来），
+  //   但"通常"不是判据 —— 换成功之后这一格显示的东西必须与引用表一致，
+  //   而那个一致性不该指望两份 JSON 碰巧不相等。
+  if (lastPlugins) renderPlugins(lastPlugins, true);
   // 改动了什么要说出来：分叉（表分了、数据没复制）与删除（那一份真的没了）
   //   都是别的屏幕上才看得见的变化，不说的话界面上一切正常。
   const said = [];
@@ -2668,12 +2715,20 @@ function pluginBlock(p, pv) {
     d.append(a.box);
   }
 
+  // ── 动作区：这一块要按的东西都在这一行里 ──
+  //
+  // 从前没有这一行：「开始会话」直接挂在块上，两颗删除复用了事实行的 `.plug-meta`
+  //   —— 于是三颗按钮上下紧贴，而"挤在一起"正是用户报的那一句。自成一个 class 之后
+  //   间距由容器给，往后再加一颗也不会挤到谁（事实行那一行也不再多一份职责）。
+  const actions = document.createElement('div');
+  actions.className = 'plug-actions';
+
   const btn = document.createElement('button');
   btn.textContent = '开始会话';
   btn.disabled = !p.runnable;
   // 交出去的是这一块那一份（`adv`），不是"界面上当前那份" —— 见 pluginAdv。
   btn.onclick = () => startWith(p.name, adv, btn);
-  d.append(btn);
+  actions.append(btn);
 
   // ── 两颗删除：本机那一份，以及站点上那一棵 ──
   //
@@ -2689,8 +2744,6 @@ function pluginBlock(p, pv) {
   // 两颗都走两段式：删本机那份等于撤回同意（下一次要重新问），而撤站点那份之后
   //   "我其实只是想关掉它"没有退路 —— 关掉是左边那个「本机启用」开关。
   //   这是六处两段式里的两处（同一块上并排，各自第一段）。
-  const row = document.createElement('div');
-  row.className = 'plug-meta';
   const drop = button('删掉本机这一份', null, 'ghost');
   drop.title = '删掉本机这一份，等于撤回同意：站点还在分发它时，下一次同步会重新'
     + '下来、重新问你一次。站点上那一份不受影响。';
@@ -2700,7 +2753,7 @@ function pluginBlock(p, pv) {
     yes: '删掉',
     run: () => dropPluginVersion(p.id, p.version),
   });
-  row.append(drop);
+  actions.append(drop);
   if (pv && pv.site && pv.site.canUninstall) {
     const off = button('从站点撤掉', null, 'ghost');
     off.title = '从这台假站点上删掉这个插件。真站点上这一步是管理员在集群上做的'
@@ -2710,9 +2763,9 @@ function pluginBlock(p, pv) {
       yes: '撤掉',
       run: () => dropSitePlugin(p),
     });
-    row.append(off);
+    actions.append(off);
   }
-  d.append(row);
+  d.append(actions);
   return d;
 }
 
@@ -3101,9 +3154,15 @@ const UI_MAX_CPUS = 64;
  *
  * 它返回 `{ box, st }`：`box` 挂进那一块里，`st` 是那几格本身 —— `startWith` 读它、
  *   分区表变了的时候改它。状态挂在闭包上，不挂在 id 上。
- * 这几格跟着块一起重画（`renderPlugins` 每次都重建所有块）：填了一半的值会在
+ * 这几格跟着块一起重画（`renderPlugins` 重建所有块）：填了一半的值会在
  *   站点推一份新清单过来的时候回到空白。它与"不记住"是同一条语义的两个面，而代价
  *   如实说在 CHANGELOG 里 —— 别为了留住它去造一份"临时状态"的缓存。
+ *   （`renderPlugins` 那道指纹把"清单其实没变"的那些重画挡掉了，所以今天只剩
+ *   "清单真的变了"这一种情况会清掉填了一半的值。）
+ *
+ * 那五格是一张网格，不是一行会折的弹性盒子（见 app.css 的 `.plug-adv .row`）：
+ *   弹性盒子的列宽由内容撑，于是窗口窄一点「分区」就自己掉到第二行，而掉不掉
+ *   取决于那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
  */
 function pluginAdv() {
   const box = document.createElement('details');
@@ -3134,7 +3193,6 @@ function pluginAdv() {
 
   st.mem = document.createElement('input');
   st.mem.type = 'text';
-  st.mem.className = 'narrow';
   st.mem.placeholder = '留空即默认';
   st.mem.spellcheck = false;
   row.append(field('内存', st.mem));
@@ -3153,9 +3211,12 @@ function pluginAdv() {
   st.gresN.disabled = true;
   row.append(field('数量', st.gresN));
 
+  // 这一格不再需要 `full` / `grow`：网格里每一格本来就占满自己那一列，
+  //   而那两个类正是把「分区」整格甩到第二行的原因（见 app.css 那一段）。
+  // 它自己占一整行（`wide`）：选项文字最长的是这一格（分区名，没权限的还要接一句
+  //   「（无权限）」），挤到四分之一宽时连"随机选一个"那句占位话都会被切掉。
   st.part = document.createElement('select');
-  st.part.className = 'full';
-  row.append(field('分区', st.part, 'grow'));
+  row.append(field('分区', st.part, 'wide'));
 
   box.append(row);
   box.append(el('p', 'sub adv-note',
@@ -3885,9 +3946,10 @@ function bindEvents() {
   window.slurmate.onStates(renderSessions);
   window.slurmate.onNotice((n) => {
     if (n.kind === 'dev') { $('dev-banner').classList.remove('hidden'); return; }
-    if (n.kind === 'key-seen' || n.kind === 'key-blocked') {
-      // 快捷键诊断：刻意记进日志，便于在真机上核对「哪些键到了页面、哪些被吞了」
-      notice('info', (n.kind === 'key-blocked' ? '已拦截：' : '已放行：') + n.text);
+    if (n.kind === 'key-blocked') {
+      // 快捷键诊断：我们吞掉了一个键，而用户正想问"按了为什么没反应" ——
+      //   所以这一条要进日志。放行的那些不再报（见 shortcuts.js 的注释）。
+      notice('info', '已拦截：' + n.text);
       return;
     }
     // `warn` 要留住：把它折成 `info` 的话，主进程发来的每一条警告（例如"工作区已删除，但它那份

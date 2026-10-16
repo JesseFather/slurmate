@@ -132,9 +132,14 @@ export function buildPluginsView() {
         title: '笔记本服务', description: '', canSubmit: false, runnable: false,
       }),
     ],
+    // 站点侧"包装不上"的那些。它们是字符串，不是对象 —— 守护进程那边
+    //   `problems.append("%s：%s" % (where, msg))`，界面把它整句原样画出来
+    //   （`issueBox` 的第三个参数直接进 `createTextNode`）。这里从前写成
+    //   `{kind, title, detail}`，于是探针那一屏上画出来的是 `[object Object]` ——
+    //   一张不对着真形状的夹具，量的是一句谁也不会说的话。
     problems: [
-      { kind: 'engine', title: '引擎不满足', detail: '这个插件要的客户端版本比本机的新，'
-        + '所以它没有被加载。升级客户端之后再同步一次。' },
+      '本站有两个包未能加载：一个与池里那份撞了 id，另一个的清单里 `name` 是空的。'
+      + '它们被跳过，其余插件照常工作。',
     ],
     sitePlugins: { plugins: [], problems: [] },
     siteKnown: true,
@@ -199,11 +204,35 @@ export function buildPortAsk() {
   };
 }
 
+/**
+ * 站点那份分区表（第二屏高级选项里那两个下拉的内容）。
+ *
+ * 形状照 `op_partitions` 给：`name` / `allowed` / `reason` / `gres[]`。
+ * 刻意往长了造：一个分区名很长的、一个没权限的（它的名字后面还要接一句
+ *   「（无权限）」，而理由整句进 `title`），以及一个卡名与型号都很长的 ——
+ *   「五格会不会换行」和"换行之后某一格里的下拉会不会把卡片顶出去"是这一格
+ *   要量的东西，短夹具两条都量不到。
+ */
+export function buildPartitions() {
+  return [
+    { name: 'gpu-long-queue', allowed: true,
+      gres: [
+        { name: 'gpu', type: 'a100-80g', per_node_max: 4, total: 32, label: 'a100-80g' },
+        { name: 'gpu', type: 'h100', per_node_max: 8, total: 16, label: 'h100' },
+      ] },
+    { name: 'cpu-with-a-long-name', allowed: true,
+      gres: [{ name: 'gpu', type: null, per_node_max: 1, total: 2, label: '任意卡' }] },
+    { name: 'restricted', allowed: false,
+      reason: '这个分区要另外申请，申请单在集群的门户上填，批下来之前这里提交不出去。' },
+  ];
+}
+
 /** 交给页面的那一份。 */
 export function buildPageFixture() {
   return {
     pluginData: buildPluginData(),
     pluginsView: buildPluginsView(),
+    partitions: buildPartitions(),
     jobs: buildJobs(),
     portAsk: buildPortAsk(),
   };
