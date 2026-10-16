@@ -704,6 +704,9 @@ test('「安装插件…」只在假站点上画，而点它走的就是那条 I
   h.run('window.__install = 0; window.__result = { cancelled: true };'
     + 'window.slurmate.installSitePlugin = () => { window.__install += 1;'
     + '  return Promise.resolve(window.__result); };');
+  // 那一块只在开发者模式里画「一切正常」的那一半（见下面那条用例），而假站点
+  //   本来就是开发者模式里才有的东西。
+  h.fn('renderDevMode')({ on: true, saved: true });
 
   const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
   // 按文字找，不是"这一块里第一颗按钮"：站点分发那一节本来就有别的按钮
@@ -753,6 +756,56 @@ test('「安装插件…」只在假站点上画，而点它走的就是那条 I
   assert.match(childrenOf(h.byId.get('site-plugins')).map((x) => x._text || '').join('|'),
     /装完的站点/, '装完返回的那份视图要当场画上去');
 });
+
+test('「站点分发」那一块：一切正常时只在开发者模式里画，出问题时两个模式都画',
+  () => {
+    // 用户 2026-10-16 报的原话：「真实客户端（就是不在开发者模式）这个站点分发的
+    //   框应该整个不存在，但这里还是画出来了」。那一屏上它说的是
+    //   「站点 hfu@…:10100 · 上次同步 23:41:37 / 本站支持分发插件。」——
+    //   站点侧自检的口吻，而"本站会分发插件"这句话上面那一块已经说过了。
+    //
+    // 而它承载的【问题】不跟着消失：站点太旧/太新、这一轮有包装不上、快照表
+    //   读不到、本机那一份不见了 —— 那些两个模式里都要说。
+    const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+    const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
+    const all = () => childrenOf(h.byId.get('site-plugins'));
+    const words = () => all().map((x) => x._text || '').join('|');
+    const allGood = { label: 'hfu@h.example.com:22', syncedAt: Date.now(),
+      supported: true, versions: [{ version: '1.0.0', wantedBy: ['本站'] }],
+      strays: [] };
+
+    // ① 真实客户端、一切正常：整块不存在（这一条就是用户要的那件事）。
+    h.fn('renderDevMode')({ on: false, saved: false });
+    draw(allGood);
+    assert.deepEqual(all(), [], `非开发者模式、一切正常时一个格子都不许画：${words()}`);
+
+    // ② 同一个站点在开发者模式里：框、站点那一行、版本清单都在。
+    h.fn('renderDevMode')({ on: true, saved: true });
+    draw(allGood);
+    assert.match(words(), /站点分发/, '开发者模式里那一块照旧');
+    assert.match(words(), /上次同步/);
+    // 池里每个版本那一栏 —— 它是这一块的理由（"为什么这台机器上会有两个版本"）。
+    //   按版本号那一格判，不按"被 本站 要"那句话：那是 `createTextNode`，
+    //   而这个壳只收集有 `tagName` 的元素（读它会读到一片空，然后绿着）。
+    assert.ok(all().some((x) => x._text === '1.0.0'), `版本清单要在：${words()}`);
+
+    // ③ 出问题（快照表读不到）时，非开发者模式里照样说 —— 但只说不好的那一半：
+    //    没有站点那一行，也没有那颗重复的「重新同步」。
+    h.fn('renderDevMode')({ on: false, saved: false });
+    draw({ ...allGood, snapshotOk: false, versions: [] });
+    assert.match(words(), /站点分发/, '要有标题 —— 否则读者不知道这句话说的是哪一块');
+    assert.match(words(), /快照表读取失败/);
+    assert.equal(/上次同步/.test(words()), false, '「一切正常」那几行不跟着回来');
+    assert.equal(all().some((x) => x._text === '1.0.0'), false,
+      '版本清单是开发者模式的东西');
+    assert.equal(all().some((x) => x.tagName === 'BUTTON'), false,
+      '那颗「重新同步」也不跟着回来：站点清单本来每 30 秒自己对一次账');
+
+    // ④ 反过来的那一半：站点太新时那句"升级客户端"两个模式里都在 ——
+    //    它是用户唯一能做的动作，藏在开发者模式里等于让他去做一件做不到的事。
+    draw({ ...allGood, reason: 'site_too_new', daemonVersionVerdict: 'cross_major' });
+    assert.match(words(), /请升级这个客户端/);
+  });
 
 test('插件那一块上两颗删除：删本机那份两端都有，撤站点那颗只在假站点上',
   async () => {

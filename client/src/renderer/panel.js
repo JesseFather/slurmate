@@ -1848,6 +1848,25 @@ function renderSitePlugins(pv) {
   // 唯一值得显示的东西。池的路径在主进程给（`pv.sitePoolDir`）。
   if (!site && !pv.sitePoolDir) return;
 
+  // ── 这一块只在开发者模式里画「一切正常」的那一半 ──────────────────────────
+  //
+  // 站点 label、上次同步、池里每个版本被谁要 —— 它们回答的是"这台机器上为什么
+  //   会有两个版本"，而那是开发基座时的问题（真实客户端只有一个站点）。
+  //   用户 2026-10-16 的原话：这个框应该整个不存在。
+  //
+  // 而它承载的【问题】不跟着一起消失：站点太旧/太新、这一轮有包装不上、快照表
+  //   读不到、本机那一份不见了 —— 那些照旧画（连着标题，否则读者不知道说的是
+  //   哪一块），只是不再附带"一切正常"的那几行，也不再挂那颗重复的「重新同步」
+  //   （站点清单本来每 30 秒自己对一次账）。
+  // 一句问题都没有、又不在开发者模式时，整块不出现。
+  const dev = Boolean(devState && devState.on);
+  const why = (site && site.reason) || null;
+  const hasProblem = Boolean(
+    why === 'old_daemon' || why === 'site_too_new'
+    || (site && (site.error || site.snapshotOk === false || site.withdrawn
+      || (site.failed && site.failed.length))));
+  if (!dev && !hasProblem) return;
+
   const d = document.createElement('div');
   d.className = 'plug plug-off';
   const head = document.createElement('div');
@@ -1863,10 +1882,12 @@ function renderSitePlugins(pv) {
   if (!site) {
     d.append(el('p', 'plug-desc', '还没连上站点。插件是从站点取回来的，连上之后这里会显示详情。'));
   } else {
-    const bits = [];
-    bits.push(site.label ? `站点 ${site.label}` : '本站');
-    if (site.syncedAt) bits.push(`上次同步 ${new Date(site.syncedAt).toLocaleTimeString()}`);
-    d.append(el('p', 'plug-desc', bits.join(' · ')));
+    if (dev) {
+      const bits = [];
+      bits.push(site.label ? `站点 ${site.label}` : '本站');
+      if (site.syncedAt) bits.push(`上次同步 ${new Date(site.syncedAt).toLocaleTimeString()}`);
+      d.append(el('p', 'plug-desc', bits.join(' · ')));
+    }
 
     if (site.reason === 'old_daemon') {
       d.append(el('p', 'why', '这个站点的守护进程版本过低，不支持插件分发。'));
@@ -1902,13 +1923,18 @@ function renderSitePlugins(pv) {
       }
     } else if (site.error) {
       d.append(el('p', 'why', site.error));
-    } else {
-      const st = site.supported
+    } else if (dev) {
+      // 「本站支持分发插件。」是"一切正常"那一半 —— 非开发者模式里不说它，
+      //   因为 `emptyPool` 已经把同一件事说过了（"本站会分发插件，连上之后
+      //   它们会出现在这里"），两处都说是同一句话的第二份实现。
+      d.append(el('p', 'plug-desc', site.supported
         ? '本站支持分发插件。'
-        : '本站没有说它支不支持分发插件。';
-      d.append(el('p', 'plug-desc',
-        st + (site.failed && site.failed.length
-          ? `这一轮有 ${site.failed.length} 个没装上，见下面的报错。` : '')));
+        : '本站没有说它支不支持分发插件。'));
+    }
+    // 而「这一轮有包装不上」是问题那一半，两个模式里都要说。
+    if (site.failed && site.failed.length) {
+      d.append(el('p', 'why',
+        `这一轮有 ${site.failed.length} 个没装上，见下面的报错。`));
     }
     // 记录读不出来，一个版本都不会被回收。这是用户该知道的一件事：
     // 他可能发现池子越来越大，而原因在这里。
@@ -1927,7 +1953,8 @@ function renderSitePlugins(pv) {
         + '按"摘要与上次一致"把它静默装回来。'));
     }
 
-    const vs = site.versions || [];
+    // 池里每个版本被哪个站点要 —— 开发者模式才画（见本函数开头那一段）。
+    const vs = dev ? (site.versions || []) : [];
     if (vs.length) {
       const ul = document.createElement('ul');
       ul.className = 'plug-vers';
@@ -1947,7 +1974,7 @@ function renderSitePlugins(pv) {
     //   效果，而删掉它是一种效果）。报出来只是为了让"池里到底有什么"有一个诚实的
     //   答案：旧版本留下的目录会静静地躺在那儿，而它们不生效这件事本身没有任何
     //   地方会说出来。措辞只说事实，不说"可以删掉"——那是用户自己的目录。
-    const strays = site.strays || [];
+    const strays = dev ? (site.strays || []) : [];
     if (strays.length) {
       d.append(el('p', 'plug-desc',
         `池里还有 ${strays.length} 项不是插件（${strays.slice(0, 5).join('、')}`
@@ -1955,10 +1982,15 @@ function renderSitePlugins(pv) {
     }
   }
 
-  const row = document.createElement('div');
-  row.className = 'plug-meta';
-  row.append(button('重新同步', () => syncPlugins()));
-  d.append(row);
+  // 那颗「重新同步」是开发者模式的便利：站点清单每 30 秒自己对一次账，
+  //   而用户手上没有"我怀疑它没对上"这件事要做。非开发者模式里它在
+  //   `emptyPool` 那一块还有一颗（池空着的时候），那里才是用户真会去点的地方。
+  if (dev) {
+    const row = document.createElement('div');
+    row.className = 'plug-meta';
+    row.append(button('重新同步', () => syncPlugins()));
+    d.append(row);
+  }
   box.append(d);
 }
 
