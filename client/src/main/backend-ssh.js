@@ -147,17 +147,30 @@ const KEEPALIVE_COUNT_MAX = 6;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const RECONNECT_MIN_MS = 1000;
 /**
- * 建日志目录那一步的上限。
+ * 建日志目录那一条命令自己的兜底上限。
  *
- * 一条 `mkdir` 本该眨眼就完，但这一条落在**用户的家目录**里，而家目录常常在
- *   共享盘上：冷挂载的第一次访问要几十秒（真机实测：家目录在 NAS 上，
- *   连接时那一次 15 秒没回来，用户看到的是「连上了，但未能在站点上建出作业
- *   日志目录：超时」）。90 秒是给它留的余量，比任何一次冷挂载都宽。
+ * 一条 `mkdir` 本该眨眼就完（本机在同一个共享盘上实测 3 毫秒），但这一条落在
+ *   用户的家目录里、而且要开一条新的 exec —— 登录节点上 fork 一个 shell，
+ *   而那个 shell 的第一次访问可能落在冷挂载上：真机 2026-10-16 就是这样，
+ *   那一次 15 秒没回来。90 秒是给冷挂载留的余量。
  *
- * 这个数不再卡住任何一个界面动作：连接不等它（见 `_openOnce`），等它的只有
- *   `ensurePrepared()`，而那一条只在"要提交了"的时候才有人等。
+ * 没有人等满它：连接不等它（见 `_openOnce`），提交之前那一次另有预算
+ *   （`PREPARE_SUBMIT_BUDGET_MS`）。没有它的话，一条断在半路的 exec 会让那个
+ *   promise 永远挂着，而等它的人也就永远等下去。
  */
 const PREPARE_TIMEOUT_MS = 90000;
+/**
+ * 提交之前等那一次建目录的上限。
+ *
+ * 与上一个数分开，因为等它的不是同一个人：连接那一次是后台热身，没人等；
+ *   提交那一次是用户按完「开始会话」在等，等满 90 秒是不可接受的。取 15 秒 ——
+ *   它正是 0.22 里连接时用的那个数，也就是真机上量出来「不该那么长时间」的那个。
+ *
+ * 到点【放行提交】，不算失败：一条没回来的 `mkdir` 不能证明目录不在
+ *   （真机 2026-10-16 就是这样，客户端报超时，而目录真的建出来了）。
+ *   只有那条命令真的跑了、并明确失败（非零退出）才算数，见 `ensurePrepared()`。
+ */
+const PREPARE_SUBMIT_BUDGET_MS = 15000;
 const RECONNECT_MAX_MS = 30000;
 
 /**
@@ -200,6 +213,30 @@ const STREAM_REOPEN_MAX_MS = 60000;
  *   于是重开一条曾经好用的通道永远有配额（见 `_openStream` 成功那一支）。
  */
 const STREAM_ATTEMPT_MAX = 3;
+
+/**
+ * 等一个结果，但最多等 `budgetMs` 毫秒；到点就回一个「没等到」。
+ *
+ * 它与 `session.js` 的 `withTimeout` 不是同一件事：那一个超时就抛，因为调用方
+ *   要的是"这一次请求没成"；这一个只是不再等 —— 那件事可能还在路上，而调用方
+ *   要的是"别为它把用户挡在这儿"。
+ *
+ * 返回的形状与 `prepare()` 失败时那份一致（`definite: false`），于是调用方
+ *   不必区分"没等到"与"还没连上"：两种都是"没拿到结论，照常往下走"。
+ * 底层那个 promise 不去动它 —— 它自己有兜底超时，回来了也没人接而已。
+ */
+function withinBudget(p, budgetMs) {
+  const noConclusion = { ok: false, error: null, definite: false };
+  if (!(budgetMs > 0)) return p;
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const timer = setTimeout(() => done(noConclusion), budgetMs);
+    timer.unref?.();      // 别为一条等不到的 promise 把事件循环撑住
+    p.then((v) => { clearTimeout(timer); done(v); },
+           () => { clearTimeout(timer); done(noConclusion); });
+  });
+}
 
 /**
  * 一行是不是协议消息。这条判据只有一份 —— exec 那条路（从一坨噪声里挑信封）
@@ -518,12 +555,6 @@ class SshBackend extends Backend {
     this._resident = null;
     /** 常驻通道没能建起来的原因。给诊断用 —— 它不是错误，只是一种降级。 */
     this.residentError = null;
-    /**
-     * 最近一次建作业日志目录没成的原因（见 `prepare()`）。同样是"连上了，
-     *   但有一件事没成"。它只是诊断用的一格 —— 判"成没成"的是
-     *   `ensurePrepared()` 返回的那个结果，不是这里。
-     */
-    this.prepareError = null;
     /** 建目录那一次的 promise（`beginPrepare()` 发起，`ensurePrepared()` 等它）。 */
     this._prepareP = null;
     /** 这条连接上重试过没有（`ensurePrepared()` 只重试一次）。 */
@@ -622,7 +653,6 @@ class SshBackend extends Backend {
     //   结论 —— 而那个结论是"成"还是"没成"都同样没有意义。
     this._prepareP = null;
     this._prepareRetried = false;
-    this.prepareError = null;
     return this._open();
   }
 
@@ -685,7 +715,11 @@ class SshBackend extends Backend {
         //   冷挂载的第一次访问要几十秒 —— 真机 2026-10-16 就是这样，它把
         //   「已连接」整整卡住 15 秒，然后报了一条超时。
         //   "连上了"与"目录建出来了"是两件事，前者不该等后者。
-        // 结果由 `ensurePrepared()` 收，调用方挂在它上面报那一句"连上了，但…"。
+        // 这一次是【热身】：它的结果没有人收，一个字的告警也不报 —— 真出事时
+        //   该说话的地方是提交那一步（`session.js`），因为那一步才是"目录必须
+        //   在"的那一步。在这里说话，症状是用户看到一条"失败"，而目录其实是
+        //   有的（真机 2026-10-16 就是这样：报超时，而目录真的建出来了）。
+        this.beginPrepare();
         this.beginPrepare();
 
         // 版本握手 —— 在 whoami 之前问一次 ping。
@@ -849,51 +883,57 @@ class SshBackend extends Backend {
 
   // ── 作业日志目录 ────────────────────────────────────────────────────────
   /**
-   * 在站点上把这个用户的作业日志目录建出来。每次连接一次，幂等（`mkdir -p`）。
+   * 在站点上把这个用户的作业日志目录建出来。幂等（`mkdir -p`）。
    *
-   * 尽力而为：失败只把原因记进 `prepareError`，不抛异常、也不让 connect() 失败。
-   * 理由与常驻通道那条一样 —— 连上是连上，而"以后提交的作业会起不来"是另一件事，
-   * 该由调用方决定怎么告诉用户（`index.js` 的 `doConnect` 把它转成一条告警）。
+   * 一条连接上它可能被调两次：连接那一刻发起一次（`beginPrepare()`，后台热身），
+   *   提交之前还没成的话再试一次（`ensurePrepared()`）。两次都是尽力而为 ——
+   *   不抛异常、也不让 connect() 失败：连上是连上，而"以后提交的作业会起不来"
+   *   是另一件事，该由调用方决定怎么告诉用户（`session.js` 的提交那一步）。
    *
    * 它与 `$HOME` 有关，而客户端从来不知道远端的家目录是什么（那是 NSS 的事）。
    *   所以命令串里是 `$HOME`，由远端的 bash 展开 —— 客户端一个路径都不拼。
    *
-   * 不做成"每次提交之前建一次"：那是给每一条提交加一个来回，而目录建出来之后
-   *   就一直在了（作业脚本每次也会 `mkdir -p` 一次，删掉也会被补回来）。
+   * 结果里 `definite` 那一格是这一条的要害：`true` 说的是"站点那条命令真的跑了、
+   *   并明确失败"（非零退出），`false` 说的是"没拿到结论"（超时、通道错、还没
+   *   连上）。提交那一步只认前者，理由见 `ensurePrepared()`。
    */
   prepare() {
-    if (!this._conn || this._closed) return Promise.resolve({ ok: false });
+    if (!this._conn || this._closed) {
+      return Promise.resolve({ ok: false, error: null, definite: false });
+    }
     const conn = this._conn;
     return new Promise((resolve) => {
       let settled = false;
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
       // 兜底：`conn.exec` 的回调不保证会来（连接正好在那一瞬间断掉时它
-      //   永远不触发）。没有它，`_openOnce` 的 ready 会停在这里，而
-      //   `readyTimeout` 只管握手那一段 —— 用户看到的是"点了没反应"。
+      //   永远不触发）。没有它，这一条 promise 会永远挂着 —— 而等它的人
+      //   （`ensurePrepared()`）也就跟着永远等下去。
       const timer = setTimeout(() => {
-        this.prepareError = '建作业日志目录超时（命令通道没有回应）';
-        done({ ok: false, error: this.prepareError });
+        done({ ok: false, definite: false,
+               error: '建作业日志目录超时（等了 '
+                 + Math.round(PREPARE_TIMEOUT_MS / 1000) + ' 秒没有回应）' });
       }, PREPARE_TIMEOUT_MS);
       conn.exec(PREPARE_CMD, (err, stream) => {
         if (err) {
           clearTimeout(timer);
-          this.prepareError = '无法在登录节点上执行命令：' + err.message;
-          return done({ ok: false, error: this.prepareError });
+          return done({ ok: false, definite: false,
+                        error: '无法在登录节点上执行命令：' + err.message });
         }
         let stderr = '';
         stream.stderr.on('data', (d) => { stderr += d; });
         stream.on('error', (e) => {
           clearTimeout(timer);
-          this.prepareError = '建作业日志目录时通道出错：' + e.message;
-          done({ ok: false, error: this.prepareError });
+          done({ ok: false, definite: false,
+                 error: '建作业日志目录时通道出错：' + e.message });
         });
         stream.on('close', (code) => {
           clearTimeout(timer);
-          if (code === 0) { this.prepareError = null; return done({ ok: true }); }
-          this.prepareError = '建作业日志目录失败（rc=' + code + '）'
-            + (stderr.trim() ? '：' + stderr.trim().split('\n')[0] : '')
-            + '，家目录可写吗？';
-          done({ ok: false, error: this.prepareError });
+          if (code === 0) return done({ ok: true, error: null, definite: false });
+          // 走到这里才是"站点明确说了建不出来"：命令真的跑了，退出码不是 0。
+          done({ ok: false, definite: true,
+                 error: '建作业日志目录失败（rc=' + code + '）'
+                   + (stderr.trim() ? '：' + stderr.trim().split('\n')[0] : '')
+                   + '，家目录可写吗？' });
         });
       });
     });
@@ -903,38 +943,51 @@ class SshBackend extends Backend {
    * 发起一次建目录，不等结果。已经在跑（或者已经跑完）的那一次直接复用它。
    *
    * 没连上、或者已经关掉时返回一个 `ok:false` 但不带 error 的结果 ——
-   *   那不是"建目录失败"，是"还没有可以建的地方"，所以不许报出一条告警。
-   *   `index.js` 那一句挂在它上面，判据就是有没有 error。
+   *   那不是"建目录失败"，是"还没有可以建的地方"：`definite` 也是 `false`，
+   *   于是提交那一步照常往下走。
    */
   beginPrepare() {
     if (this._prepareP) return this._prepareP;
-    if (!this._conn || this._closed) return Promise.resolve({ ok: false, error: null });
+    if (!this._conn || this._closed) {
+      return Promise.resolve({ ok: false, error: null, definite: false });
+    }
     this._prepareP = this.prepare();
     return this._prepareP;
   }
 
   /**
-   * 保证作业日志目录已经在站点上了。**提交之前**调一次。
+   * 保证作业日志目录已经在站点上了。**提交之前**调一次，而且是有预算地等。
    *
    * 为什么要有它：目录不存在时 `sbatch -o <目录>/slurm-%j.out` 的父目录打不开，
-   *   那一次提交的作业连启动都启动不了。而谁建得出来这件事只有一层：
-   *   守护进程被 systemd 挂成只读（它写不了用户的家目录），作业脚本自己那一次
-   *   `mkdir -p` 排在 Slurm 打开日志文件之后 —— 只剩客户端这一层。
+   *   那一次提交的作业连启动都启动不了 —— 那道错只出现在作业日志里，隔着一层
+   *   看不见的日志才查得到。而谁建得出来这件事只有一层：守护进程被 systemd 挂成
+   *   只读（它写不了用户的家目录），作业脚本自己那一次 `mkdir -p` 排在 Slurm
+   *   打开日志文件之后 —— 只剩客户端这一层。
    *
    * 两次机会：连接时发起的那一次（`beginPrepare()`）→ 它没成就再试一次。
    *   再试一次是有用的：冷挂载的第一次访问超时之后，目录的元数据已经在缓存里了，
-   *   第二次通常几百毫秒就回来。而这条路上多花的几秒是值得的 —— 换成不试，
-   *   用户会得到一个"起来了又立刻没了"的作业，隔着一条作业日志才查得到原因。
-   * 它只在提交之前被等（`session.js`），不在连接上等 —— 冷挂载要几十秒，而
-   *   "连上了"这件事与它没有关系。
+   *   第二次通常几百毫秒就回来。一条连接上只重试一次：不设这个位的话，一个真的
+   *   建不出来的家目录会在每一次提交之前都白等满一个预算。
+   *
+   * 等它【有预算】（`opts.budgetMs`，缺省 `PREPARE_SUBMIT_BUDGET_MS`）：到点返回
+   *   一个没结论的结果，让调用方照常提交。判据是"没回来"不等于"没有" ——
+   *   真机 2026-10-16 就是这样：客户端报超时，而目录真的建出来了。只有
+   *   `definite` 那一种（站点明确说建不出来）才该拦住提交。
+   *
+   * 它只在提交之前被等（`session.js`），不在连接上等 —— 冷挂载要几十秒，
+   *   而"连上了"这件事与它没有关系。
    */
-  async ensurePrepared() {
+  ensurePrepared(opts = {}) {
+    const budget = Number.isFinite(opts.budgetMs)
+      ? opts.budgetMs : PREPARE_SUBMIT_BUDGET_MS;
+    return withinBudget(this._ensurePrepared(), budget);
+  }
+
+  async _ensurePrepared() {
     const first = await this.beginPrepare();
     if (first.ok) return first;
     if (!first.error) return first;          // 还没连上，没什么可重试的
     if (!this._conn || this._closed) return first;
-    // 一条连接上只重试一次。不设这个位的话，"每次提交都重试"会让一个真的
-    //   建不出来的家目录在每一次提交之前都白等满一个 PREPARE_TIMEOUT_MS。
     if (this._prepareRetried) return first;
     this._prepareRetried = true;
     this._prepareP = this.prepare();

@@ -7678,25 +7678,24 @@ test('左栏那个圆点的三态：正常 / 获取失败 / 断开 —— 而且
   assert.equal(dot(), 'bad', '断开之后那个点必须是红的');
 });
 
-test('连上之后先建作业日志目录：成了不吭声，未成功要说一句话', async (t) => {
+test('建作业日志目录：连接时不说，提交那一步才说 —— 而且只有站点明确说建不出来才拦', async (t) => {
   // 这一步挡的是一个只能由真集群回答的失败：`sbatch -o <日志目录>/slurm-%j.out`
   //    的父目录是 Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次
   //    `mkdir -p` 排在它后面。目录不存在，那一次提交连启动都启动不了。
   //    守护进程建不了它（共享家目录对它只读），所以这一步落在客户端：
   //    `backend-ssh.js` 的 `prepare()`，在 `_openOnce` 的 ready 里。
   //
-  // 这一条只验转发那一半（后端报不报、界面说不说）。"真的发了那条命令"
+  // 这一条只验"谁在说、拦不拦"那一半。而"真的发了那条命令"、"发起但不等它"
   //   在 `backend-ssh.test.mjs` 里 —— 那里有 SSH 那一层的桩，这里没有。
   const idx = require('../src/main/index.js');
   const ssh = require('../src/main/backend-ssh.js');
   const back = idx._test.getBackend();
   t.after(async () => {
     Module._load = origLoad;
-    // 下面是"这一次答没成"的替身 —— 删掉这个自有属性，原型上那个默认实现就回来了。
+    // 下面是"这一次答什么"的替身 —— 删掉这个自有属性，原型上那个默认实现就回来了。
     delete back.ensurePrepared;
     cleanupSiteState(idx);
   });
-  await invoke('app:debug', 'reset');
 
   // 两个后端都必须有这个方法。写成"调用方去 typeof 一下"的话，
   //   下一个忘了实现它的后端会静默地跳过这一步 —— 而症状要到用户提交
@@ -7711,39 +7710,54 @@ test('连上之后先建作业日志目录：成了不吭声，未成功要说�
   assert.equal(typeof ssh.SshBackend.prototype.prepare, 'function');
   assert.equal(typeof ssh.SshBackend.prototype.beginPrepare, 'function');
 
-  const before = noticesOf().length;
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
   const c = await builtinConn();
-  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true);
-  assert.equal(
-    noticesOf().slice(before).some((n) => /作业日志目录/.test(n.text)), false,
-    '建成功时一个字都不说 —— 它不是提示，是背景动作');
 
-  // 而没成的时候：连上仍然是连上，但要说清后果（提交会起不来），
-  // 而不是一句"失败了" —— 用户拿那句没法做任何事。
+  // ── 一、连接那一刻：一个字都不说 ──
   //
-  // 判据挂在**后端交回来的结果**上，不是挂在某个字段上：假后端这一格本来就
-  //   什么都不做（本地没有远端目录可建），所以这里替它答一次"没成"。
-  //   这一条同时钉住"它落在连接【之后】"：那句话是异步收的，连接这一刻
-  //   一个字都还没有（真机 2026-10-16：它从前把「已连接」整整卡住 15 秒）。
-  // 先证"连接不等它"：让这一步永远不回来。连接的握手与本用例关心的别的东西
-  //   一样都不依赖它，所以 `app:connect` 照旧得回 ok —— 回不来就说明它在等
-  //   （真机 2026-10-16：共享盘上冷挂载的家目录让连接整整等了 15 秒）。
-  back.ensurePrepared = () => new Promise(() => { /* 永远不回来 */ });
+  // 连接时那一次是【热身】（`backend-ssh.js` 的 `_openOnce` 里那个
+  //   `beginPrepare()`），它的结果没有人收。在那一刻报的症状是：用户看到一条
+  //   "失败"，而目录其实是有的 —— 真机 2026-10-16 就是这样（客户端报超时，
+  //   而目录真的建出来了）。所以这里用最坏的那种替身来证：连"站点明确说了建不
+  //   出来"这一种都不在连接时说，别的更不必说。
+  back.ensurePrepared = async () => ({ ok: false, definite: true,
+    error: '建作业日志目录失败（rc=1）：mkdir: Permission denied，家目录可写吗？' });
+  const before = noticesOf().length;
   await invoke('app:disconnect');
   assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true,
-    '连接不许等这一步 —— "连上了"与"目录建出来了"是两件事');
+    '建不出目录不算连接失败 —— 连上了就是连上了');
+  await new Promise((r) => setTimeout(r, 10));   // 真要说，它是异步冒出来的，等它一拍
+  assert.equal(noticesOf().slice(before).some((n) => /作业日志目录/.test(n.text)), false,
+    '连接那一刻一个字都不说 —— 该说话的地方是提交那一步，因为那一步才是"目录必须在"的那一步');
 
-  back.ensurePrepared = async () => ({ ok: false, error:
-    '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？' });
-  const before2 = noticesOf().length;
-  await invoke('app:disconnect');
-  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok,
-    true, '建不出目录不算连接失败 —— 连上了就是连上了');
-  await new Promise((r) => setTimeout(r, 10));    // 结果是异步收的，等它一拍
-  const said = noticesOf().slice(before2).map((n) => n.text).join('\n');
-  assert.match(said, /作业日志目录/, `实际说了：${said}`);
-  assert.match(said, /提交的作业会无法启动/, '要说清后果，不是一句"未成功"');
-  assert.match(said, /Permission denied/, '根因（远端那句原话）也要带上');
+  // ── 二、提交那一刻：站点明确说了建不出来 → 拦住 ──
+  //
+  // 判据挂在**后端交回来的结果**上（`definite`），不是挂在某个字段上：假后端
+  //   这一格本来就什么都不做（本地没有远端目录可建），所以这里替它答。
+  // 而"拦住"的判据是【一个作业都没提交出去】—— 那才是用户真正得失的东西。
+  //   回包那一格不是判据：提交被拦时它照旧回一个真值对象（会话记录在
+  //   `sessions` 里、错误在 `snap.error` 上），与"提交超时且未能认领会话"
+  //   那一条同一个落点。
+  const before2 = back._sessions.length;
+  const r1 = await appStart(null, 'code-server');
+  assert.equal(back._sessions.length, before2, '建不出目录时不许提交 —— 一个作业都不该出去');
+  const sn1 = ((r1.sessions || []).map((x) => x.snap).find((x) => x && x.state === 'error')) || {};
+  assert.equal(sn1.state, 'error', `这一条会话要停在 error：${JSON.stringify(r1.sessions)}`);
+  assert.match(String(sn1.error), /作业日志目录/, `要说清拦住的原因：${JSON.stringify(sn1)}`);
+  assert.match(String(sn1.error), /Permission denied/, '根因（远端那句原话）也要带上');
+
+  // ── 三、提交那一刻：没等到 → 照常提交 ──
+  //
+  // 「没回来」不等于「没有」：一条没响应的 `mkdir` 不能证明目录不在（真机
+  //   2026-10-16 就是这样）。为一句没拿到的结论把一条本来跑得起来的提交拦下来，
+  //   代价比放过一条会起不来的作业更大 —— 所以这一种只放行、不说话。
+  await openUpTo(idx, 2);        // 把上一条失败的记录收掉，槽要腾出来
+  const before3 = back._sessions.length;
+  back.ensurePrepared = async () => ({ ok: false, error: null, definite: false });
+  const r2 = await appStart(null, 'code-server');
+  assert.equal(r2.ok, true, `没等到就不许拦：${JSON.stringify(r2)}`);
+  assert.equal(back._sessions.length, before3 + 1, '它照常提交出去了');
 });
 
 test('右栏：停靠就起轮询，而它自己会停（收起之后不再白花 RPC）', async (t) => {

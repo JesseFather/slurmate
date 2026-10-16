@@ -546,10 +546,11 @@ test('★★ 连上之后先把作业日志目录建出来（提交之前它必�
   assert.equal(r.ok, true);
   assert.deepEqual(b._conn.execs, [sshBackend.PREPARE_CMD],
     'prepare() 要发的正是那一条常量命令');
-  assert.equal(b.prepareError, null, '成了就不该留着一句原因');
+  assert.equal(r.error, null, '成了就没有原因可说');
+  assert.equal(r.definite, false, '成了也没有"站点明确说建不出来"这回事');
 });
 
-test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就是连上了）', async () => {
+test('★★ 建不出来时不抛异常，只回一句原因（连上了就是连上了）', async () => {
   // 与常驻通道同一条纪律：这一步失败不算连接失败。算的话，一个建不出目录的
   // 家目录会让用户连都连不上 —— 而他真正失去的是提交，不是连接。
   const b = new sshBackend.SshBackend({});
@@ -558,10 +559,14 @@ test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就
   let r = null;
   await assert.doesNotReject(async () => { r = await b.prepare(); });
   assert.equal(r.ok, false);
-  assert.match(b.prepareError, /rc=1/);
-  assert.match(b.prepareError, /Permission denied/, '把远端那句原话带上 —— 那才是根因');
-  // 而它说的是后果，不是一句"失败了"：提交会起不来。界面直接把这一句转给用户。
-  assert.match(b.prepareError, /家目录可写吗/);
+  // `definite` 是与"没拿到结论"的分界，也是提交那一步唯一看的判据
+  //   （`session.js` 只拦这一种）：退出码不是 0，就是站点真的跑了那条命令、
+  //   并明确失败了。
+  assert.equal(r.definite, true, '退出码不是 0 = 站点明确说了建不出来');
+  assert.match(r.error, /rc=1/);
+  assert.match(r.error, /Permission denied/, '把远端那句原话带上 —— 那才是根因');
+  // 而它说的是后果与出路，不是一句"失败了"：界面直接把这一句转给用户。
+  assert.match(r.error, /家目录可写吗/);
 });
 
 test('★★ 提交之前那一次：第一次没成会再试一次，第二次成了就算成了', async () => {
@@ -620,15 +625,38 @@ test('★ 而同一条连接上只重试一次：第三次提交不许再等一�
   assert.equal(b._conn.execs.length, 1, '新连接上发一条、成了就不再试');
 });
 
-test('★ 还没连上时 `ensurePrepared()` 不报错也不报「失败」', async () => {
-  // 三态：`ok:false` **带 error** = 建不出来（要说一句话）；`ok:false` **不带
-  //   error** = 还没有可以建的地方（一个字都不说）。合并成一档的话，用户在
-  //   断开之后会收到一句"连上了，但未能在站点上建出作业日志目录"。
+test('★ 还没连上时 `ensurePrepared()` 不给原因，也不给「建不出来」', async () => {
+  // 两格都要分得开：`error` 有值 = 建不出来（提交那一步要拦住、并把这一句转给
+  //   用户）；`error` 是 null 而且 `definite` 是 false = 没拿到结论（还没连上，
+  //   或者没等到），一个字都不该编。
   const b = new sshBackend.SshBackend({});
   b._conn = null;
   const r = await b.ensurePrepared();
   assert.equal(r.ok, false);
   assert.equal(Boolean(r.error), false, `没连上不该给一句原因：${JSON.stringify(r)}`);
+  assert.equal(r.definite, false, '没连上更不是"站点明确说了建不出来"');
+});
+
+test('★ 预算到点就放行：没等到不等于「建不出来」', async () => {
+  // 提交那一次是有预算的（`PREPARE_SUBMIT_BUDGET_MS`）：用户按完「开始会话」在
+  //   等，而等满那条命令自己的 90 秒是不可接受的。
+  // 到点给的结论必须是"没拿到结论"，不是"建不出来" —— 真机 2026-10-16 就是
+  //   这样：客户端报超时，而目录真的建出来了。判据是 `definite`：调用方
+  //   （`session.js`）只拦 true 那一种，这一种必须是 false，否则一条本来跑得
+  //   起来的提交会被一句没拿到的结论拦住。
+  const b = new sshBackend.SshBackend({});
+  b._conn = {
+    execs: [],
+    exec(cmd) { this.execs.push(cmd); /* 那条命令永远不回来 */ },
+  };
+  b._closed = false;
+  const t0 = Date.now();
+  const r = await b.ensurePrepared({ budgetMs: 40 });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, null, '没等到不该编一句原因出来');
+  assert.equal(r.definite, false, '没等到不等于站点说了建不出来');
+  assert.ok(Date.now() - t0 < 2000, '它按预算回来，不是等那条命令自己超时');
+  assert.equal(b._conn.execs.length, 1, '而那条命令确实发出去了 —— 放行不是没做');
 });
 
 test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同一个目录', () => {
