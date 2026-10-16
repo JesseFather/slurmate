@@ -7692,7 +7692,8 @@ test('连上之后先建作业日志目录：成了不吭声，未成功要说�
   const back = idx._test.getBackend();
   t.after(async () => {
     Module._load = origLoad;
-    delete back.prepareError;
+    // 下面是"这一次答没成"的替身 —— 删掉这个自有属性，原型上那个默认实现就回来了。
+    delete back.ensurePrepared;
     cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
@@ -7701,10 +7702,14 @@ test('连上之后先建作业日志目录：成了不吭声，未成功要说�
   //   下一个忘了实现它的后端会静默地跳过这一步 —— 而症状要到用户提交
   //   作业时才出现，隔着一个失败作业。
   const { Backend } = require('../src/main/backend.js');
-  assert.equal(typeof Backend.prototype.prepare, 'function',
+  assert.equal(typeof Backend.prototype.ensurePrepared, 'function',
     '接口上要有它，子类才有内容可覆盖');
-  assert.equal(typeof back.prepare, 'function', '假后端也要有（继承的默认实现即可）');
+  assert.equal(typeof back.ensurePrepared, 'function', '假后端也要有（继承的默认实现即可）');
+  assert.equal(typeof ssh.SshBackend.prototype.ensurePrepared, 'function');
+  // 而"真的把那条命令发出去"是 SSH 后端自己的事：连接那一刻发起
+  //   （`beginPrepare()`），提交之前等它（`ensurePrepared()`）。
   assert.equal(typeof ssh.SshBackend.prototype.prepare, 'function');
+  assert.equal(typeof ssh.SshBackend.prototype.beginPrepare, 'function');
 
   const before = noticesOf().length;
   const c = await builtinConn();
@@ -7715,11 +7720,26 @@ test('连上之后先建作业日志目录：成了不吭声，未成功要说�
 
   // 而没成的时候：连上仍然是连上，但要说清后果（提交会起不来），
   // 而不是一句"失败了" —— 用户拿那句没法做任何事。
-  back.prepareError = '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？';
+  //
+  // 判据挂在**后端交回来的结果**上，不是挂在某个字段上：假后端这一格本来就
+  //   什么都不做（本地没有远端目录可建），所以这里替它答一次"没成"。
+  //   这一条同时钉住"它落在连接【之后】"：那句话是异步收的，连接这一刻
+  //   一个字都还没有（真机 2026-10-16：它从前把「已连接」整整卡住 15 秒）。
+  // 先证"连接不等它"：让这一步永远不回来。连接的握手与本用例关心的别的东西
+  //   一样都不依赖它，所以 `app:connect` 照旧得回 ok —— 回不来就说明它在等
+  //   （真机 2026-10-16：共享盘上冷挂载的家目录让连接整整等了 15 秒）。
+  back.ensurePrepared = () => new Promise(() => { /* 永远不回来 */ });
+  await invoke('app:disconnect');
+  assert.equal((await invoke('app:connect', { connectionId: c.id })).ok, true,
+    '连接不许等这一步 —— "连上了"与"目录建出来了"是两件事');
+
+  back.ensurePrepared = async () => ({ ok: false, error:
+    '建作业日志目录失败（rc=1）：mkdir: Permission denied —— 家目录可写吗？' });
   const before2 = noticesOf().length;
   await invoke('app:disconnect');
   assert.equal((await invoke('app:connect', { connectionId: c.id })).ok,
     true, '建不出目录不算连接失败 —— 连上了就是连上了');
+  await new Promise((r) => setTimeout(r, 10));    // 结果是异步收的，等它一拍
   const said = noticesOf().slice(before2).map((n) => n.text).join('\n');
   assert.match(said, /作业日志目录/, `实际说了：${said}`);
   assert.match(said, /提交的作业会无法启动/, '要说清后果，不是一句"未成功"');

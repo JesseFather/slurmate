@@ -522,6 +522,13 @@ test('★★★ 连接这条路**真的**会去建它（不是"有这个函数"�
   assert.ok(made[0].execs.indexOf(sshBackend.PREPARE_CMD)
     < made[0].execs.indexOf(sshBackend.RPC_CMD),
     `次序不对：${JSON.stringify(made[0].execs)}`);
+  // 而它是【发起】不是【等】—— 判据就是这一条用例本身跑到了这里：那个假
+  //   channel 的 `close` 永远不会来（`FakeExecStream` 只在 `end()` 里发它，
+  //   而建目录这一步不发），所以 `connect()` 能返回就说明它没有等这一步。
+  //   真机 2026-10-16 正是这一步把「已连接」整整卡住 15 秒，然后报了一条超时。
+  assert.ok(b._prepareP,
+    '而它必须真的发起过 —— "不等"不等于"不做"（不做的话目录就不存在了）');
+  assert.equal(b._prepareRetried, false, '新连接上还没重试过');
 });
 
 test('★★ 连上之后先把作业日志目录建出来（提交之前它必须存在）', async () => {
@@ -555,6 +562,73 @@ test('★★ 建不出来时**不抛异常**，只留一句原因（连上了就
   assert.match(b.prepareError, /Permission denied/, '把远端那句原话带上 —— 那才是根因');
   // 而它说的是后果，不是一句"失败了"：提交会起不来。界面直接把这一句转给用户。
   assert.match(b.prepareError, /家目录可写吗/);
+});
+
+test('★★ 提交之前那一次：第一次没成会再试一次，第二次成了就算成了', async () => {
+  // 真机 2026-10-16：家目录在共享盘上，冷挂载的第一次访问要几十秒，连接时那一次
+  //   `mkdir` 超时了。而超时之后目录的元数据已经在缓存里 —— 再来一次通常几百
+  //   毫秒就回来。所以"提交之前再确认一遍"这件事里，"再试一次"是它有用的一半。
+  const b = new sshBackend.SshBackend({});
+  let n = 0;
+  b._conn = {
+    execs: [],
+    exec(cmd, cb) {
+      this.execs.push(cmd);
+      const s = new EventEmitter();
+      s.stderr = new EventEmitter();
+      s.close = () => {};
+      const code = (n++ === 0) ? 1 : 0;          // 第一次失败，第二次成
+      setImmediate(() => {
+        if (code) s.stderr.emit('data', Buffer.from('mkdir: Permission denied\n', 'utf8'));
+        s.emit('close', code);
+      });
+      cb(null, s);
+    },
+  };
+  b._closed = false;
+
+  const r = await b.ensurePrepared();
+  assert.equal(r.ok, true, `第二次成了就该算成：${JSON.stringify(r)}`);
+  assert.equal(b._conn.execs.length, 2, '两次尝试各发一条命令');
+  assert.equal(b._conn.execs[0], sshBackend.PREPARE_CMD, '发的是那条常量命令');
+});
+
+test('★ 而同一条连接上只重试一次：第三次提交不许再等一遍', async () => {
+  // 不设这个位的话，一个真的建不出来的家目录会在【每一次提交之前】都白等满
+  //   一个 PREPARE_TIMEOUT_MS —— 那是一个恒定的、每次提交都要交的税，
+  //   而它换不来任何东西（前两次都不成，第三次不会不一样）。
+  const b = new sshBackend.SshBackend({});
+  b._conn = prepareConn(1, 'mkdir: cannot create directory\n');
+  b._closed = false;
+
+  const r1 = await b.ensurePrepared();
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /rc=1/, '要把远端那句话带上');
+  assert.equal(b._conn.execs.length, 2, '第一次调用 = 发起的那一次 + 重试那一次');
+
+  const r2 = await b.ensurePrepared();
+  assert.equal(r2.ok, false);
+  assert.equal(b._conn.execs.length, 2, '第二次调用不再发命令 —— 复用上一次的结论');
+
+  // 换一条连接就重新开始（`connect()` 清的就是下面这两格，那一步由
+  //   "连接这条路真的会去建它"那一条钉着）：新连接上必须重新发起。
+  b._conn = prepareConn(0);
+  b._prepareP = null;
+  b._prepareRetried = false;
+  const r3 = await b.ensurePrepared();
+  assert.equal(r3.ok, true);
+  assert.equal(b._conn.execs.length, 1, '新连接上发一条、成了就不再试');
+});
+
+test('★ 还没连上时 `ensurePrepared()` 不报错也不报「失败」', async () => {
+  // 三态：`ok:false` **带 error** = 建不出来（要说一句话）；`ok:false` **不带
+  //   error** = 还没有可以建的地方（一个字都不说）。合并成一档的话，用户在
+  //   断开之后会收到一句"连上了，但未能在站点上建出作业日志目录"。
+  const b = new sshBackend.SshBackend({});
+  b._conn = null;
+  const r = await b.ensurePrepared();
+  assert.equal(r.ok, false);
+  assert.equal(Boolean(r.error), false, `没连上不该给一句原因：${JSON.stringify(r)}`);
 });
 
 test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同一个目录', () => {

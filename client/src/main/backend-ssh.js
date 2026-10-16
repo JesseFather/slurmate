@@ -146,8 +146,18 @@ const KEEPALIVE_COUNT_MAX = 6;
 /** 单次应答的上限。正常响应是几百字节；超过这个数说明对面回的不是我们的协议。 */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const RECONNECT_MIN_MS = 1000;
-/** 建日志目录那一步的上限。它只是一条 `mkdir`，比 RPC 该快得多。 */
-const PREPARE_TIMEOUT_MS = 15000;
+/**
+ * 建日志目录那一步的上限。
+ *
+ * 一条 `mkdir` 本该眨眼就完，但这一条落在**用户的家目录**里，而家目录常常在
+ *   共享盘上：冷挂载的第一次访问要几十秒（真机实测：家目录在 NAS 上，
+ *   连接时那一次 15 秒没回来，用户看到的是「连上了，但未能在站点上建出作业
+ *   日志目录：超时」）。90 秒是给它留的余量，比任何一次冷挂载都宽。
+ *
+ * 这个数不再卡住任何一个界面动作：连接不等它（见 `_openOnce`），等它的只有
+ *   `ensurePrepared()`，而那一条只在"要提交了"的时候才有人等。
+ */
+const PREPARE_TIMEOUT_MS = 90000;
 const RECONNECT_MAX_MS = 30000;
 
 /**
@@ -508,8 +518,16 @@ class SshBackend extends Backend {
     this._resident = null;
     /** 常驻通道没能建起来的原因。给诊断用 —— 它不是错误，只是一种降级。 */
     this.residentError = null;
-    /** 建作业日志目录没成的原因（见 `prepare()`）。同样是"连上了，但有一件事没成"。 */
+    /**
+     * 最近一次建作业日志目录没成的原因（见 `prepare()`）。同样是"连上了，
+     *   但有一件事没成"。它只是诊断用的一格 —— 判"成没成"的是
+     *   `ensurePrepared()` 返回的那个结果，不是这里。
+     */
     this.prepareError = null;
+    /** 建目录那一次的 promise（`beginPrepare()` 发起，`ensurePrepared()` 等它）。 */
+    this._prepareP = null;
+    /** 这条连接上重试过没有（`ensurePrepared()` 只重试一次）。 */
+    this._prepareRetried = false;
     this._streamTimer = null;
     this._streamAttempt = 0;
   }
@@ -599,6 +617,12 @@ class SshBackend extends Backend {
     this._profile = { user: profile.user, host: profile.host, port: profile.port };
     this._closed = false;
     this._attempt = 0;
+    // 建目录那一次是跟着连接走的（它挂在 `_conn` 上）：换一条连接就必须重新
+    //   发起。留着上一次那个 promise 的话，新连接的第一次提交会拿到旧连接的
+    //   结论 —— 而那个结论是"成"还是"没成"都同样没有意义。
+    this._prepareP = null;
+    this._prepareRetried = false;
+    this.prepareError = null;
     return this._open();
   }
 
@@ -655,9 +679,14 @@ class SshBackend extends Backend {
         //     建不起来"记在 `residentError` 里。理由见文件头那一段。
         await this._openStream();
 
-        // 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放在这儿而不是
+        // 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放这儿而不是
         //   `connect()` 的开头：它要一条真的通了的 SSH 连接。
-        await this.prepare();
+        // 而它【不等】：这条命令落在用户的家目录里，而家目录常常在共享盘上，
+        //   冷挂载的第一次访问要几十秒 —— 真机 2026-10-16 就是这样，它把
+        //   「已连接」整整卡住 15 秒，然后报了一条超时。
+        //   "连上了"与"目录建出来了"是两件事，前者不该等后者。
+        // 结果由 `ensurePrepared()` 收，调用方挂在它上面报那一句"连上了，但…"。
+        this.beginPrepare();
 
         // 版本握手 —— 在 whoami 之前问一次 ping。
         //
@@ -868,6 +897,48 @@ class SshBackend extends Backend {
         });
       });
     });
+  }
+
+  /**
+   * 发起一次建目录，不等结果。已经在跑（或者已经跑完）的那一次直接复用它。
+   *
+   * 没连上、或者已经关掉时返回一个 `ok:false` 但不带 error 的结果 ——
+   *   那不是"建目录失败"，是"还没有可以建的地方"，所以不许报出一条告警。
+   *   `index.js` 那一句挂在它上面，判据就是有没有 error。
+   */
+  beginPrepare() {
+    if (this._prepareP) return this._prepareP;
+    if (!this._conn || this._closed) return Promise.resolve({ ok: false, error: null });
+    this._prepareP = this.prepare();
+    return this._prepareP;
+  }
+
+  /**
+   * 保证作业日志目录已经在站点上了。**提交之前**调一次。
+   *
+   * 为什么要有它：目录不存在时 `sbatch -o <目录>/slurm-%j.out` 的父目录打不开，
+   *   那一次提交的作业连启动都启动不了。而谁建得出来这件事只有一层：
+   *   守护进程被 systemd 挂成只读（它写不了用户的家目录），作业脚本自己那一次
+   *   `mkdir -p` 排在 Slurm 打开日志文件之后 —— 只剩客户端这一层。
+   *
+   * 两次机会：连接时发起的那一次（`beginPrepare()`）→ 它没成就再试一次。
+   *   再试一次是有用的：冷挂载的第一次访问超时之后，目录的元数据已经在缓存里了，
+   *   第二次通常几百毫秒就回来。而这条路上多花的几秒是值得的 —— 换成不试，
+   *   用户会得到一个"起来了又立刻没了"的作业，隔着一条作业日志才查得到原因。
+   * 它只在提交之前被等（`session.js`），不在连接上等 —— 冷挂载要几十秒，而
+   *   "连上了"这件事与它没有关系。
+   */
+  async ensurePrepared() {
+    const first = await this.beginPrepare();
+    if (first.ok) return first;
+    if (!first.error) return first;          // 还没连上，没什么可重试的
+    if (!this._conn || this._closed) return first;
+    // 一条连接上只重试一次。不设这个位的话，"每次提交都重试"会让一个真的
+    //   建不出来的家目录在每一次提交之前都白等满一个 PREPARE_TIMEOUT_MS。
+    if (this._prepareRetried) return first;
+    this._prepareRetried = true;
+    this._prepareP = this.prepare();
+    return this._prepareP;
   }
 
   // ── 常驻通道 ────────────────────────────────────────────────────────────

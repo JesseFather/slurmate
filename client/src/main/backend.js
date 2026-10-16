@@ -113,22 +113,28 @@ class Backend extends EventEmitter {
   get resident() { return null; }
 
   /**
-   * 连上之后把站点上这次连接迟早要用的东西备好。今天是作业日志目录
+   * 提交之前调一次：把站点上"这一跳迟早要用"的东西备好。今天是作业日志目录
    * （`sbatch -o` 的父目录是 Slurm 在跑作业脚本之前打开的，而作业脚本那一次
    * `mkdir -p` 排在它后面 —— 见 `backend-ssh.js` 的 `PREPARE_CMD`）。
+   *
+   * 它是"要用了，等一等"，不是"连上了，顺手做"。两件事分开的理由是**谁等它**：
+   *   连接不等（真机 2026-10-16：那一次 `mkdir` 落在共享盘的家目录上，冷挂载
+   *   要几十秒，把「已连接」整整卡住 15 秒然后报了一条超时），而提交必须等
+   *   —— 目录不在，那一次作业连启动都启动不了。
+   * 连接那一刻会发起一次（后端的实现细节，见 `backend-ssh.js` 的
+   *   `beginPrepare()`），而这一条是"等它、没成就再试一次"。
    *
    * 它不是连接的一部分：返回值只用来告诉调用方"有没有成"，
    *   失败与否都不影响"连上了"这个事实。写成"失败就让 connect() 失败"的话，
    *   一个建不出目录的家目录会让用户连都连不上 —— 而他真正失去的是提交，
    *   不是连接。
    *
-   * 默认实现是空操作：假后端在本地跑，没有远端目录可建。它必须存在
-   *   （而不是让调用方去 `typeof backend.prepare === 'function'`）—— 那种写法
-   *   会让"下一个忘了实现它的后端"静默地跳过这一步，而症状要到用户提交作业时
-   *   才出现，隔着一个失败作业。
+   * 默认实现是空操作，而且**必须当场返回**：假后端在本地跑，没有远端目录可建，
+   *   让它变成一个"每次提交多一次往返"是白花的。它必须存在（而不是让调用方去
+   *   `typeof backend.ensurePrepared === 'function'`）—— 那种写法会让"下一个
+   *   忘了实现它的后端"静默地跳过这一步，而症状要到用户提交作业时才出现。
    */
-  // eslint-disable-next-line no-unused-vars
-  async prepare() { return { ok: true }; }
+  async ensurePrepared() { return { ok: true }; }
 
   // eslint-disable-next-line no-unused-vars
   async connect(profile) { throw new Error('未实现 connect'); }

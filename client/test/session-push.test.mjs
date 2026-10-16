@@ -117,6 +117,29 @@ function init0(ctrl) {
 
 const tick = () => new Promise((r) => setImmediate(r));
 
+test('提交之前真的等了「作业日志目录」那一步（没等到就不许发 submit）', async (t) => {
+  // 目录不在时 `sbatch -o <目录>/slurm-%j.out` 的父目录打不开，那一次作业连
+  //   启动都启动不了 —— 而那道错只出现在作业日志里。所以这条保证落在真正需要
+  //   它的那一步上（提交），而不是赌连接时那一次来得及（真机 2026-10-16：
+  //   共享盘上冷挂载的家目录让连接时那一次 15 秒没回来）。
+  t.after(keepAlive());
+  const b = new StubBackend();
+  let release = null;
+  b.ensurePrepared = () => new Promise((res) => {
+    release = () => res({ ok: true });
+  });
+  const ctrl = new SessionController({ backend: b, workspaceId: 'w1' });
+  const p = ctrl.start({}, { serviceKind: 'demo' });
+  await tick();
+  assert.equal(typeof release, 'function', '那一步要被真的调到（不是"有这个函数"）');
+  assert.equal(b.count('submit'), 0,
+    '还没等出结果就不许发 submit —— 先提交再建目录，那一次作业照样起不来');
+  release();
+  await tick();
+  assert.equal(b.count('submit'), 1, '等到了才发');
+  await p;
+});
+
 // ── 刷新视图 ──────────────────────────────────────────────────────────────
 test('推送让作业状态立刻更新，而且一次 status 都不问', async (t) => {
   // 这就是常驻通道省下来的那个 exec：没有推送的话，job_state 要等下一轮 60 秒的
