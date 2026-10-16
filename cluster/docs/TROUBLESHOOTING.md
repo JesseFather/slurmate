@@ -619,9 +619,9 @@ sudo tail -200 /var/log/slurmate/audit.log | grep renew_failed
 增加 `TimeLimit` 只有 root/Slurm 管理员能做，这正是续期必须由守护进程承担的
 原因（`cluster/slurmate-sessiond`）。
 
-注意续期有 300 秒冷却，失败时不会每 tick 重试刷屏，
+注意续期有一条冷却（阈值的五分之一，缺省 120 秒），失败时不会每 tick 重试刷屏，
 所以日志里不会很密集。另外 `TimeLimit=UNLIMITED` 的作业不会被续期，
-超过 `renew_max_total_seconds` 之后会记一条 `renew_exhausted` 并停止。
+超过 `renew_max_total` 之后会记一条 `renew_exhausted` 并停止。
 
 ### 「控制节点记录的心跳已过期 N 秒」
 

@@ -409,10 +409,10 @@ def make_config(mod, tmpdir):
     # 另一份配置测"没配就该被明确拒绝"。
     #
     # 这一行是替换，不是"插一行进去"。
-    #   理由：示例配置把每一个键一个不少地列出来（注释整批搬进了文档），
-    #   所以 `default_plugin` 是一个空值的真行 —— 再插一行就会撞上那条
-    #   "同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把"这两行
-    #   必须在示例里"变成一条当场说得出话的前置条件。
+    #   理由：示例配置把每一个键都列出来了（有缺省值的那些写成注释掉的一行，
+    #   值与缺省相同），所以 `default_plugin` 是一个空值的真行 —— 再插一行就会
+    #   撞上那条"同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把
+    #   "这一行必须在示例里"变成一条当场说得出话的前置条件。
     for _k, _v in (("default_plugin", "code-server"),):
         text, _n = re.subn(r"(?m)^%s\s*=.*$" % _k, "%s = %s" % (_k, _v), text)
         if _n != 1:
@@ -773,6 +773,156 @@ def main():
         """只要前两个返回值（键表）。第三个是"这一份住在哪个文件里"，见 19.18。"""
         g, s, _m = mod.parse_config(write_conf(text, name))
         return g, s
+
+    # ── 1b. 站点通用键里那五个运维旋钮 ──────────────────────────────────
+    #
+    # 它们原来是常量（两个 12 小时、一个写死 300 秒的冷却），现在住在主配置里。
+    #   这一节钉三件事：缺省值就是那几个（改短了的）、类型对（增量是串、另外两个
+    #   是秒 —— 类型错了要到第一次真要续期时才炸）、写错的当场拒。
+    _bare = "range_start = 55001\nrange_end = 55999\n"
+
+    def conf(extra, name):
+        return mod.Config(write_conf(_bare + extra, name))
+
+    _d = conf("", "renew-defaults.conf")
+    check("续期三个数的缺省：1 小时 / 剩 10 分钟 / 累计 7 天",
+          _d.renew_increment == "01:00:00" and _d.renew_threshold == 600
+          and _d.renew_max_total == 604800,
+          "%r %r %r" % (_d.renew_increment, _d.renew_threshold,
+                        _d.renew_max_total))
+    check("增量是【串】（scontrol 要的就是它），另外两个是【秒】"
+          "（maybe_renew 拿它们与现在比）—— 类型反了要到第一次续期才炸",
+          isinstance(_d.renew_increment, str)
+          and isinstance(_d.renew_threshold, int)
+          and isinstance(_d.renew_max_total, int))
+    check("作业日志两个数的缺省：7 天 / 10 GiB",
+          _d.log_keep_days == 7 and _d.log_dir_max_bytes == 10737418240,
+          "%r %r" % (_d.log_keep_days, _d.log_dir_max_bytes))
+    check("内建缺省时限也跟着改短了（有了续期，一上来不该要 12 小时）",
+          mod.DEFAULT_TIME == "01:00:00", mod.DEFAULT_TIME)
+    check("冷却跟着阈值算：缺省阈值 10 分钟 → 120 秒（最后那一段能试 5 次）",
+          mod.renew_cooldown(_d) == 120, str(mod.renew_cooldown(_d)))
+    check("冷却的两头：阈值很大时封顶 300 秒，很小时保底 30 秒",
+          mod.renew_cooldown(type("C", (), {"renew_threshold": 86400})()) == 300
+          and mod.renew_cooldown(type("C", (), {"renew_threshold": 60})()) == 30)
+
+    check("时间串的三种写法都收，且规范到同一处",
+          conf("renew_increment = 60\n", "r1.conf").renew_increment == "01:00:00"
+          and conf("renew_threshold = 0:30:00\n",
+                   "r2.conf").renew_threshold == 1800
+          and conf("renew_max_total = 3-00:00:00\n",
+                   "r3.conf").renew_max_total == 259200)
+    check("字节数两种写法是同一个值（10G 与 10737418240）",
+          conf("log_dir_max_bytes = 10G\n",
+               "b1.conf").log_dir_max_bytes == 10737418240
+          and conf("log_dir_max_bytes = 10737418240\n",
+                   "b2.conf").log_dir_max_bytes == 10737418240)
+    check("字节数按 1024 进制（512M 不是 5.12 亿）",
+          conf("log_dir_max_bytes = 512M\n",
+               "b3.conf").log_dir_max_bytes == 536870912)
+
+    for _i, (_k, _v, _why) in enumerate(
+            (("renew_threshold", "unlimited", "「无限」在配置里被拒"),
+             ("renew_threshold", "0:30", "短于 1 分钟的时间被拒"),
+             ("renew_threshold", "两小时", "认不出的写法被拒"),
+             ("renew_increment", "0:30", "三个时间键走同一套校验"),
+             ("log_dir_max_bytes", "10g", "小写后缀被拒（不静默回退缺省）"),
+             ("log_dir_max_bytes", "10GB", "带 B 的后缀同理"),
+             ("log_dir_max_bytes", "0", "0 不是「只留当前这一份」的写法"),
+             ("log_dir_max_bytes", "99999999999999999999T",
+              "越过 bash 算术范围的值被拒"))):
+        try:
+            conf("%s = %s\n" % (_k, _v), "badkey-%d.conf" % _i)
+            check("%s → 报错" % _why, False, "竟然通过了")
+        except ValueError:
+            check("%s → 报错" % _why, True)
+
+    # 示例配置里出现的键正好是 `GLOBAL_KEYS`：一个不少、一个不多。
+    #   那三格新键在示例里是【注释掉的】（值与缺省一样，去掉 `#` 才生效），
+    #   所以这里连注释掉的行一起数 —— 它要答的是"配一个站点时看得见哪些键"。
+    with open(CONF, encoding="utf-8") as _f:
+        _ex = _f.read()
+    _exkeys = set()
+    for _line in _ex.splitlines():
+        _m2 = re.match(r"^\s*#?\s*([a-z_]+)\s*=", _line)
+        if _m2:
+            _exkeys.add(_m2.group(1))
+    check("示例配置把每一个站点通用键都列出来了（活的或注释掉的）",
+          set(mod.GLOBAL_KEYS) == _exkeys,
+          "少：%s；多：%s" % (sorted(set(mod.GLOBAL_KEYS) - _exkeys),
+                             sorted(_exkeys - set(mod.GLOBAL_KEYS))))
+
+    # ── 冷却 → 次数：这是"一次没续上"那条重试机制的全部 ──────────────────
+    #
+    # 冷却原来是写死的 300 秒。阈值从 2 小时改成 10 分钟之后，写死的 300 秒会让
+    #   最后那一段只剩 2 次机会（T-10、T-5）—— 而"一次没续上"正需要在那儿多试
+    #   几次：一次都续不上，这条会话到点就被 Slurm 杀掉。
+    class _RenewSlurm:
+        def __init__(self):
+            self.calls = []
+
+        def renew(self, job_id, increment):
+            self.calls.append((job_id, increment))
+            return True, ""
+
+    class _RenewStore:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, sid, **kw):
+            self.updates.append((sid, kw))
+
+    class _RenewProbe:
+        """只要 `maybe_renew` 用到的那四样：cfg / slurm / store / audit。"""
+
+        def __init__(self, cfg):
+            self.cfg = cfg
+            self.slurm = _RenewSlurm()
+            self.store = _RenewStore()
+            self.audits = []
+
+        def audit(self, kind, **kw):
+            self.audits.append(kind)
+
+    _clock = [1700000000]
+    _real_now_rn = mod.now_ts
+    mod.now_ts = lambda: _clock[0]
+    try:
+        _pr = _RenewProbe(_d)
+
+        def _end(left):
+            """把"还剩 left 秒"写成一个 `scontrol` 会给的 EndTime 串。"""
+            return time.strftime("%Y-%m-%dT%H:%M:%S",
+                                 time.localtime(_clock[0] + left))
+
+        _s = {"session_id": "s1", "job_id": 7, "trust": "owned",
+              "state": mod.ST_ENROLLED, "renew_last_at": None, "renew_count": 0,
+              "created_at": _clock[0], "note": None}
+        _job = {"TimeLimit": "01:00:00", "EndTime": _end(300)}   # 还剩 5 分钟
+        mod.Sessiond.maybe_renew(_pr, dict(_s), dict(_job))
+        check("剩 5 分钟（少于阈值 10 分钟）→ 续一次，加的是那一格增量",
+              len(_pr.slurm.calls) == 1
+              and _pr.slurm.calls[0][1] == _d.renew_increment,
+              str(_pr.slurm.calls))
+        mod.Sessiond.maybe_renew(_pr, dict(_s, renew_last_at=_clock[0]),
+                                 dict(_job))
+        check("冷却之内不再试（同一句话不会每 tick 重复一遍）",
+              len(_pr.slurm.calls) == 1, str(_pr.slurm.calls))
+        mod.Sessiond.maybe_renew(_pr,
+                                 dict(_s, renew_last_at=_clock[0] - 120),
+                                 dict(_job))
+        check("过了冷却（120 秒）→ 再试一次", len(_pr.slurm.calls) == 2,
+              str(_pr.slurm.calls))
+        mod.Sessiond.maybe_renew(_pr, dict(_s, created_at=_clock[0] - 604801),
+                                 dict(_job))
+        check("而累计到顶之后就停（记一条 renew_exhausted）",
+              len(_pr.slurm.calls) == 2 and "renew_exhausted" in _pr.audits,
+              str(_pr.audits))
+        check("阈值 ÷ 冷却 = 5：最后那一段里至少能试 5 次，是算出来的不是碰运气",
+              _d.renew_threshold // mod.renew_cooldown(_d) == 5,
+              "%d / %d" % (_d.renew_threshold, mod.renew_cooldown(_d)))
+    finally:
+        mod.now_ts = _real_now_rn
 
     check("行尾 # 注释被切掉",
           parse("range_start = 55001  # 端口池下界\n")[0] == {"range_start": "55001"})
@@ -3143,6 +3293,35 @@ exit 0
         check("同一组默认值也传给了作业",
               _env.get("SLURMATE_CPUS") == "7" and _env.get("SLURMATE_MEM") == "5G",
               "%s / %s" % (_env.get("SLURMATE_CPUS"), _env.get("SLURMATE_MEM")))
+
+        # 作业日志的保留期与总量上限今天也是配置键，随提交下发。值必须是
+        #   【纯十进制】：那条比较是 bash 的 `(( total > … ))`，写成 `10G` 就是一次
+        #   非法算术、`(( ))` 返回非零 → 静默不删（日志一直涨，而什么都不报）。
+        _r, _sess_j, _env_j = run_submit({"op": "submit", "service_kind": "sshd",
+                                          "ssh_pubkey": _pub})
+        check("作业日志的两个数随提交下发（缺省 7 天 / 10 GiB）",
+              _env_j.get("SLURMATE_LOG_KEEP_DAYS") == "7"
+              and _env_j.get("SLURMATE_LOG_DIR_MAX_BYTES") == "10737418240",
+              "%s / %s" % (_env_j.get("SLURMATE_LOG_KEEP_DAYS"),
+                           _env_j.get("SLURMATE_LOG_DIR_MAX_BYTES")))
+        check("而它们与天数都是纯十进制（不含后缀、不含逗号）—— "
+              "`(( ))` 吃不下 `10G`",
+              (_env_j.get("SLURMATE_LOG_DIR_MAX_BYTES") or "").isdigit()
+              and (_env_j.get("SLURMATE_LOG_KEEP_DAYS") or "").isdigit(),
+              "%r / %r" % (_env_j.get("SLURMATE_LOG_DIR_MAX_BYTES"),
+                           _env_j.get("SLURMATE_LOG_KEEP_DAYS")))
+        _save_lk, _save_lb = cfg.log_keep_days, cfg.log_dir_max_bytes
+        try:
+            cfg.log_keep_days, cfg.log_dir_max_bytes = 3, 512 * 1024 * 1024
+            _r, _, _env_j2 = run_submit({"op": "submit", "service_kind": "sshd",
+                                         "ssh_pubkey": _pub})
+            check("改配置之后下发的是新的那两个值",
+                  _env_j2.get("SLURMATE_LOG_KEEP_DAYS") == "3"
+                  and _env_j2.get("SLURMATE_LOG_DIR_MAX_BYTES") == "536870912",
+                  "%s / %s" % (_env_j2.get("SLURMATE_LOG_KEEP_DAYS"),
+                               _env_j2.get("SLURMATE_LOG_DIR_MAX_BYTES")))
+        finally:
+            cfg.log_keep_days, cfg.log_dir_max_bytes = _save_lk, _save_lb
 
         _r, _sess2, _ = run_submit({"op": "submit", "service_kind": "sshd",
                                     "ssh_pubkey": _pub, "cpus": 3})
@@ -6229,6 +6408,15 @@ exit 0
         _rc0, _out0 = _run_check([])
         check("两样都没问题，0（少了这一条，上面两条会被「永远非零」"
               "一并满足）", _rc0 == 0, "%d %r" % (_rc0, _out0[:200]))
+        # 续期与作业日志那两行要真的打出来：配置里可以省那五个键，所以
+        #   "现在实际是多少"只有这一屏说得清（续期那一行连冷却一起打，它决定
+        #   最后那一段里能试几次）。
+        check("--check 打出了续期那三个数（含算出来的冷却）与作业日志那两个数",
+              "续期" in _out0 and "00:10:00" in _out0 and "01:00:00" in _out0
+              and "7-00:00:00" in _out0 and "冷却 120s" in _out0
+              and "作业日志" in _out0 and "10.0 GB" in _out0,
+              repr([ln for ln in _out0.splitlines()
+                    if "续期" in ln or "作业日志" in ln]))
         _rcm, _outm = _run_check(["机器上缺少组件"], ["假的：这份配置写错了"])
         check("两样都有，2 优先（一台不是登录节点的机器上，"
               "「配置写错了」这句话没什么用）",
@@ -7065,6 +7253,24 @@ exit 0
                                    "quota-zero.conf")).validate()
     check("写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
           any("max_sessions_per_user" in e for e in _q_bad), str(_q_bad))
+
+    # 作业日志的保留期。它是【静默失效】的那一类，所以必须在这里拦住：那一格
+    #   原样进作业脚本里的 `find … -mtime "+N"`，而那条命令的报错被丢掉、后面还
+    #   缀着 `|| true` —— 负数是一条非法表达式，0 会把"约一天以前"的全部删掉。
+    _lg_zero = mod.Config(write_conf("log_keep_days = 0\n",
+                                     "logkeep-zero.conf")).validate()
+    check("log_keep_days = 0 会被自检拦下（否则保留期静默失效，而日志一直涨）",
+          any("log_keep_days" in e for e in _lg_zero), str(_lg_zero))
+    check("负数同理",
+          any("log_keep_days" in e for e in mod.Config(write_conf(
+              "log_keep_days = -1\n", "logkeep-neg.conf")).validate()))
+    # 而总量上限【不进】自检：小的正数是合法策略（"只留最近这几份"），作业脚本能
+    #   确定地执行它。这一条把那个决定钉住 —— 免得下一个人顺手把它挪进 validate()，
+    #   而那意味着一个按用户的日志策略让整个站点起不来。
+    check("log_dir_max_bytes = 1 是合法的（激进的策略，不是配置错误）",
+          [e for e in mod.Config(write_conf("log_dir_max_bytes = 1\n",
+                                            "logbytes-one.conf")).validate()
+           if "log_dir" in e] == [])
 
     # ── 23.1 每个插件自己那一格（`max_sessions`）─────────────────────────────
     #
@@ -11112,6 +11318,18 @@ exit 0
     check("可热的那两档都真的在用（HOT 与 NOTICE 各自都有键）",
           {mod.RELOAD_HOT, mod.RELOAD_NOTICE} <= set(mod.RELOAD_CLASS.values()),
           str(sorted(set(mod.RELOAD_CLASS.values()))))
+    # 集合相等只说明"登记过"，不说明"归对了档"。续期那三个数作用在已经建立的
+    #   会话上（把累计上限改小，会立刻把一条跑了很久的会话标成 renew_exhausted）；
+    #   两个日志数虽然只在提交时读，但改小之后【此后提交的作业】会把共享目录里
+    #   别人的日志删掉 —— 五格都是"动到已经建立的东西"，也就是 NOTICE。
+    _rn_keys = ("renew_increment", "renew_threshold", "renew_max_total")
+    check("续期那三格归 NOTICE（它们动到已经建立的会话）",
+          all(mod.RELOAD_CLASS.get(k) == mod.RELOAD_NOTICE for k in _rn_keys),
+          str({k: mod.RELOAD_CLASS.get(k) for k in _rn_keys}))
+    _lg_keys = ("log_keep_days", "log_dir_max_bytes")
+    check("两个日志数也归 NOTICE（改小之后，此后提交的作业会删别人的日志）",
+          all(mod.RELOAD_CLASS.get(k) == mod.RELOAD_NOTICE for k in _lg_keys),
+          str({k: mod.RELOAD_CLASS.get(k) for k in _lg_keys}))
 
     # ── 这一节的两件基础设施 ────────────────────────────────────────────────
     #

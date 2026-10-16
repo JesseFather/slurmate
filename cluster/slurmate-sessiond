@@ -205,6 +205,40 @@ def parse_config_time(raw, where):
     return fmt_slurm_time(secs)
 
 
+def parse_config_seconds(raw, where):
+    """配置里的一格时间 → 秒。
+
+    校验与规范化全走 `parse_config_time`（「无限被拒」「不短于 1 分钟」「格式当场
+    发现」三条都在那一处），这里只把规范串再变成秒。转换只在这一处做：配置里写的
+    一律是时间串，而"这一格在代码里是秒"由读它的那一行决定。
+    """
+    return parse_slurm_time(parse_config_time(raw, where))
+
+
+def parse_byte_size(raw, where):
+    """配置里的一格字节数 → int。`10G` 与 `10737418240` 是同一个值。
+
+    1024 进制（`10G` = 10 GiB），裸数字是字节。后缀只认大写，写错当场拒 ——
+    站点配置里写错不能回退一个默认值，否则症状是"文件里写着，而实际没生效"。
+
+    与 `sanitize_mem()` 分开写，两条理由：那一个返回的是字符串，而且同一个 helper
+    在别处（`default_mem`）表示 MiB —— 复用等于让"裸数字"这一个写法在两个调用点
+    表示两种单位。上界是 `MAX_LOG_DIR_BYTES`，理由见那个常量。
+    """
+    s = str(raw or "").strip()
+    m = re.fullmatch(r"([0-9]+)([KMGT]?)", s)
+    if not m:
+        raise ValueError("%s 必须是一个字节数（形如 10G / 512M / 10737418240；"
+                         "裸数字是字节，后缀只认大写 K/M/G/T）: %r" % (where, s))
+    n = int(m.group(1)) * {"": 1, "K": 1024, "M": 1024 ** 2,
+                           "G": 1024 ** 3, "T": 1024 ** 4}[m.group(2)]
+    if n < 1 or n > MAX_LOG_DIR_BYTES:
+        raise ValueError("%s 要在 1 到 %d 字节之间: %r（0 不是「只留当前这一份」"
+                         "的写法，它会让每一次清理都判「超了」）"
+                         % (where, MAX_LOG_DIR_BYTES, s))
+    return n
+
+
 def clamp_int(v, default, lo, hi):
     """请求里的整数 → 钳制到 [lo, hi]。缺失/非数字用 default。
 
@@ -529,7 +563,11 @@ STARTUP_GRACE_SECONDS = 120
 # 插件清单没声明 `site.defaultTime` 时用的缺省时限。作者可以在清单里给自己的
 # 插件定一个，站点可以在那个插件的配置里再覆盖，理由是默认资源那条的
 # 同一条：在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事，那是插件的策略。
-DEFAULT_TIME = "12:00:00"
+#
+# 取 1 小时而不是一天里的某个整数：会话由守护进程自动续期（见下面的续期那一节），
+#   一上来要一个长时限没有意义，而它是要付代价的 —— 申请得越长越难排上队
+#   （回填照着这个数算），也越容易撞上分区自己的 MaxTime。
+DEFAULT_TIME = "01:00:00"
 # 配置里能写的时限的下限（秒）。作业运行时间的粒度是分钟，比它短的值只可能来自
 # 笔误（`0:30` 想写的多半是 30 分钟），见 parse_config_time()。
 MIN_CONFIG_TIME = 60
@@ -622,9 +660,47 @@ STUCK_JOB_SECONDS = 1800
 #   异常"，这一个是"同一句话多久重复一次"。两条都可以各自改。
 ENROLL_FILE_WARN_SECONDS = 1800
 
-RENEW_INCREMENT = "12:00:00"
-RENEW_THRESHOLD = 7200
-RENEW_MAX_TOTAL = 604800
+# ── 续期（站点可配：`renew_increment` / `renew_threshold` / `renew_max_total`）──
+#
+# 每个数各自是什么、以及"增量"为什么同时是界面上那个「剩余时间」的上限和
+#   "守护进程出事之后作业还能活多久"，写在 cluster/docs/CONFIGURATION.md 那一节。
+#
+# 缺省是 1 小时 / 剩 10 分钟时动手。有了自动续期，一上来就向 Slurm 要 12 小时
+#   没有意义，而它是付代价的：申请得越长越难排上队（回填照着这个数算），
+#   也越容易撞上分区自己的 MaxTime。
+DEFAULT_RENEW_INCREMENT = "1:00:00"
+DEFAULT_RENEW_THRESHOLD = "0:10:00"
+DEFAULT_RENEW_MAX_TOTAL = "7-00:00:00"
+# 两次续期之间至少隔多久（秒），从阈值推出来：阈值的五分之一，落在 30 到 300 秒
+#   之间。这样"最后那一段时间里至少能试 5 次"是一个算得出来的结论，而不是碰运气
+#   —— 写死 300 秒的话，阈值取 10 分钟时只剩 2 次。
+# 它不是配置项：它只有一种正确取值，而那个取值由阈值决定。
+RENEW_COOLDOWN_DIVISOR = 5
+RENEW_COOLDOWN_MIN = 30
+RENEW_COOLDOWN_MAX = 300
+
+
+def renew_cooldown(cfg):
+    """两次续期之间至少隔多久（秒）。从阈值推出来，见上面那三个常量的说明。
+
+    这里就是"最后那一段时间里至少能试几次"那件事的唯一出处：读它的人（`maybe_renew`）
+    与算它的人（这一行）只隔一次调用，所以"改了阈值，重试次数跟着变"是结构性的，
+    不是靠记得同步两处。
+    """
+    return max(RENEW_COOLDOWN_MIN,
+               min(RENEW_COOLDOWN_MAX,
+                   cfg.renew_threshold // RENEW_COOLDOWN_DIVISOR))
+
+# ── 作业日志的保留期与总量上限（站点可配）──────────────────────────────────
+#
+# 两个数都由作业脚本执行（`cluster/run.sbatch` 第 1b 节，每 60 秒看一眼）：保留期
+#   删掉 N 天前的整份，总量超了就从最老的开始删。守护进程在提交时把它们发下去，
+#   而作业侧那两个环境变量的兜底一个字都不动（测试里那几节不经过 op_submit）。
+DEFAULT_LOG_KEEP_DAYS = 7
+DEFAULT_LOG_DIR_MAX_BYTES = 10 * 1024 ** 3
+# `log_dir_max_bytes` 的上界。作业脚本那边做的是 bash 的 `(( ))` 算术，越过它就
+#   不可信了（要么全删、要么永不触发），而两边的报错都被吞掉，症状是"日志一直涨"。
+MAX_LOG_DIR_BYTES = 2 ** 63 - 1
 
 PASSWORD_BYTES = 12
 
@@ -1773,6 +1849,10 @@ GLOBAL_KEYS = frozenset([
     # 提交时不带 service_kind 时用哪个插件。没有内建缺省值，见 Config 里
     # 那段说明：隐式缺省会让"装/卸一个插件"这种配置之外的动作悄悄改变行为。
     "default_plugin",
+    # 续期的三个数。各是什么见 cluster/docs/CONFIGURATION.md 那一节。
+    "renew_increment", "renew_threshold", "renew_max_total",
+    # 作业日志的保留期与总量上限（作业脚本每 60 秒照它看一眼）。
+    "log_keep_days", "log_dir_max_bytes",
 ])
 
 # ── 每个配置键的可热重载性（v0.12 阶段 3）────────────────────────────────
@@ -1843,6 +1923,18 @@ RELOAD_CLASS = {
     "sinfo": RELOAD_NOTICE,
     "sshare": RELOAD_NOTICE,
     "sacct": RELOAD_NOTICE,
+    # 三个续期数：它们都作用在【已经建立的会话】上。改小 `renew_max_total` 会
+    #   立刻把一条跑了很久的会话标成 `renew_exhausted`（从此不再续期，到期就被
+    #   Slurm 杀掉），改大 `renew_threshold` 会让一条快跑完的会话重新被续上 ——
+    #   两种都是"动到已经建立的东西"，所以要说一句。
+    "renew_increment": RELOAD_NOTICE,
+    "renew_threshold": RELOAD_NOTICE,
+    "renew_max_total": RELOAD_NOTICE,
+    # 两个日志数：它们在提交时被读进作业的环境，所以本身只影响此后提交的作业。
+    #   仍然归 NOTICE，因为改小之后【此后提交的作业】会把共享目录里别人的日志
+    #   删掉 —— 那是动到已经建立的东西（别人正在跑的那个会话的日志）。
+    "log_keep_days": RELOAD_NOTICE,
+    "log_dir_max_bytes": RELOAD_NOTICE,
 
     # ── 必须重启 ──────────────────────────────────────────────────────────
     # 这一档现在【没有成员】。它唯一那个成员是 `readonly_paths`（部署期配置，
@@ -5347,6 +5439,34 @@ def reserved_ports_warning(cfg, raw=None):
     return None
 
 
+def renew_threshold_warning(cfg):
+    """续期的提前量比会话本身拿到的时限还长吗。是的话返回一句，否则 None。
+
+    续期在"剩余时间少于阈值"时发生。阈值不短于会话的时限时，作业一跑起来剩余时间
+      就落在阈值以下 —— 于是从第一刻起、每隔一个冷却就续一次，`scontrol` 与审计
+      日志都白花，而每一次续期只是把它再加一遍。
+
+    比的是这套插件里【最短】的那个缺省时限（那就是最短的会话，也是最先撞上的
+      那一个）。真正的时限还可能被分区的 `MaxTime` 再截一次，那一头这里看不到，
+      所以这一条只是"至少这套配置自己说得通"。
+
+    它进不了 `validate()`：这一条只是调度得不经济，而那里每一条都让守护进程
+      拒绝服务。与端口池那条同一个形状：调用方打一行，退出码不动。
+    """
+    shortest = None
+    for p in cfg.plugins.values():
+        secs = parse_slurm_time(p.default_time)
+        if secs is not None and (shortest is None or secs < shortest):
+            shortest = secs
+    if shortest is None or cfg.renew_threshold < shortest:
+        return None
+    return ("续期的提前量 %s 不短于最短的会话时限 %s：作业一跑起来就在阈值以下，"
+            "于是从一个 tick 之后开始每次都续。\n"
+            "        要消掉它：把 renew_threshold 调到明显小于会话时限"
+            "（缺省是 10 分钟），或者把那个插件的 default_time 调长。"
+            % (fmt_slurm_time(cfg.renew_threshold), fmt_slurm_time(shortest)))
+
+
 def plugin_keys_problem(sections, meta, resolve):
     """这一份插件配置里的键有没有认不出的。返回错误串列表（空 = 没问题）。
 
@@ -5491,6 +5611,25 @@ class Config(object):
             except ValueError:
                 raise ValueError("%s 必须是整数，得到: %r" % (key, v))
 
+        def gettime(key, default):
+            """时间串那一类：空 = 用缺省。
+
+            缺省自身也过一次解析，于是"配置里写的"与"代码里的缺省"走同一条路：
+            一个写错的缺省会在启动时当场炸，而不是在某一条会话上悄悄生效。
+            """
+            v = raw.get(key, "").strip()
+            return parse_config_time(v or default, key)
+
+        def getsecs(key, default):
+            """同一类时间，但代码里要的是秒（见 `parse_config_seconds()`）。"""
+            v = raw.get(key, "").strip()
+            return parse_config_seconds(v or default, key)
+
+        def getbytes(key, default):
+            """字节数那一类：空 = 用缺省（缺省是代码里的整数，不必再过一遍解析）。"""
+            v = raw.get(key, "").strip()
+            return parse_byte_size(v, key) if v else default
+
         # ── 端口池 ──
         self.port_start = getint("range_start", 55001)
         self.port_end = getint("range_end", 55999)
@@ -5554,10 +5693,20 @@ class Config(object):
         self.stuck_job_seconds = STUCK_JOB_SECONDS
         self.enroll_file_warn_seconds = ENROLL_FILE_WARN_SECONDS
         self.release_retry_seconds = RELEASE_RETRY_SECONDS
+        # ── 续期 ──
+        # 增量是规范化串（`scontrol update TimeLimit=+…` 要的就是它），另外两格
+        #   是【秒】（`maybe_renew()` 拿它们与现在比）。两者的分界只在上面的读法里。
+        # `renew_enabled` 仍然是常量：关掉它等于"会话到点就没了"，而没有人要这个
+        #   开关 —— 一个没人改的开关就是多一个能配错的地方。
         self.renew_enabled = True
-        self.renew_threshold = RENEW_THRESHOLD
-        self.renew_increment = RENEW_INCREMENT
-        self.renew_max_total = RENEW_MAX_TOTAL
+        self.renew_increment = gettime("renew_increment", DEFAULT_RENEW_INCREMENT)
+        self.renew_threshold = getsecs("renew_threshold", DEFAULT_RENEW_THRESHOLD)
+        self.renew_max_total = getsecs("renew_max_total", DEFAULT_RENEW_MAX_TOTAL)
+        # ── 作业日志的保留期与总量上限 ──
+        # 两个数只在提交时被读（发进作业的环境），而作业脚本每 60 秒照它看一眼。
+        self.log_keep_days = getint("log_keep_days", DEFAULT_LOG_KEEP_DAYS)
+        self.log_dir_max_bytes = getbytes("log_dir_max_bytes",
+                                         DEFAULT_LOG_DIR_MAX_BYTES)
         self.password_bytes = PASSWORD_BYTES
         # ── 配额 ──
         # 这一格是变回配置键的，理由与逐条症状见 cluster/docs/CONFIGURATION.md
@@ -5583,8 +5732,10 @@ class Config(object):
         self.snapshot_interval = SNAPSHOT_INTERVAL
         self.jobs_dir = default_jobs_dir()
         # 作业日志的落点不是一个配置项，见 `job_log_dir()`：它是本系统
-        #   自己管的东西（那两份文件的保留期与总量上限都由作业脚本维护），
+        #   自己管的东西（那两份文件放在哪儿由这里与 `run.sbatch` 约定），
         #   站点把它挪走只会让"客户端读哪一个目录"跟着变成一个可漂的约定。
+        #   而保留期与总量上限【是】配置键（`log_keep_days` /
+        #   `log_dir_max_bytes`）：它们是站点的政策，不是约定。
         self.job_log_subdir = JOB_LOG_SUBDIR
 
         # ── 「有作业侧、却找不到那份脚本」的插件 ──────────────────────────
@@ -5818,6 +5969,25 @@ class Config(object):
         if not (4 <= self.password_bytes <= 64):
             errors.append("password_bytes 应在 4-64 之间，当前为 %d"
                           % self.password_bytes)
+        # 作业日志的保留期。这一格的失败是【静默的】，所以它必须在这里拦住：
+        #   它原样进作业脚本里的 `find … -mtime "+N"`，而那条命令的 stderr 被丢掉、
+        #   后面还缀着 `|| true` —— 负数是一条非法的表达式、0 会把「约一天以前」
+        #   的全部删掉，两种都不报错。症状是"保留期这一条没生效"或者"历史日志
+        #   凭空少了一大截"，而配置文件里那一行读起来毫无问题。
+        if self.log_keep_days < 1:
+            errors.append(
+                "log_keep_days = %d 不成立：它不是正数，作业里那条「删掉 N 天前"
+                "那一份」会变成一条执行不了的命令，而它的报错被丢掉了，于是保留期"
+                "静默失效、日志一直堆到家目录配额吃满。照旧写 7。"
+                % self.log_keep_days)
+        # 而 `log_dir_max_bytes`【不进这张表】，两个理由：
+        #   · 一个小的正数是合法策略（"只留最近这几份"），作业脚本能确定地执行它
+        #     （删到不超为止）。validate() 拦的是"能起，但每一条走这条路的请求都
+        #     注定失败"，这里不成立。
+        #   · 它的代价是【整个站点起不来】，而这一格是"按用户的日志策略" ——
+        #     不成比例，与"少一份作业脚本不该带走整个站点"是同一个论证方向。
+        #   真正执行不了的只有"超出 bash 算术范围"那一种，而那是单值的形状问题，
+        #   按这份文件的分法在解析期抛（见 `parse_byte_size()`）。
         errors.extend(self._db_schema_errors())
         return errors
 
@@ -8528,8 +8698,13 @@ class Sessiond(object):
         if s["state"] != ST_ENROLLED:
             return                     # 只给心跳新鲜的会话续命
         now = now_ts()
-        # 冷却：失败时不要每 tick 重试刷屏
-        if s["renew_last_at"] and now - s["renew_last_at"] < 300:
+        # 冷却：失败时不要每 tick 重试刷屏（tick 是 2 秒）。
+        #
+        # 它从阈值推出来，不是写死的：阈值的五分之一，落在 30 到 300 秒之间。
+        #   写死 300 秒的话，阈值取缺省的 10 分钟时，最后那一段里只剩 2 次机会
+        #   （T-10、T-5），而"续期失败"正需要在这里多试几次 —— 一次没续上就
+        #   等于这条会话到点被 Slurm 杀掉。跟着阈值走，缺省就有 5 次。
+        if s["renew_last_at"] and now - s["renew_last_at"] < renew_cooldown(cfg):
             return
         tl = job.get("TimeLimit")
         if tl and tl.strip().lower() in _INF_TOKENS:
@@ -10616,6 +10791,13 @@ class Sessiond(object):
             # 目录，作业脚本据此 `exec >>` 到那两个文件上、并在同一个目录里做
             # 保留期与总量上限。两处各算一次的话，症状是"日志写在 A，脚本去删 B"。
             "SLURMATE_LOG_DIR": job_log_dir(home) or "",
+            # 日志的保留期与总量上限。作业侧那两个变量本来就有兜底
+            #   （`run.sbatch` 的 `:-`），今天由这里给值。
+            # 值必须是【纯十进制】：作业脚本那条比较是 bash 的 `(( total > … ))`，
+            #   写成 `10G` 就是一次非法算术、`(( ))` 返回非零 → 静默不删
+            #   （`parse_byte_size()` 解析出来的是 int，这里只是把它变成文本）。
+            "SLURMATE_LOG_KEEP_DAYS": str(cfg.log_keep_days),
+            "SLURMATE_LOG_DIR_MAX_BYTES": str(cfg.log_dir_max_bytes),
             "SLURMATE_PORT_MIN": str(cfg.port_start),
             "SLURMATE_PORT_MAX": str(cfg.port_end),
             # ── 服务种类与它需要的东西 ──
@@ -10995,9 +11177,22 @@ def main():
         print("  缺省插件      : %s" % (cfg.default_plugin or
               "（未设置，提交时必须显式给 service_kind）"))
         print("  闪断/孤儿阈值 : %ds / %ds" % (cfg.suspect_after, cfg.orphan_after))
-        print("  续期          : %s  阈值 %ds 增量 %s"
-              % ("开" if cfg.renew_enabled else "关", cfg.renew_threshold,
-                 cfg.renew_increment))
+        # 续期三个数逐条打印【解析结果】而不是配置里写了什么：配置里可以省，
+        #   省了就是这几个缺省，而"现在实际是多少"只有这里说得清。
+        # 冷却跟着阈值算出来，一并打出来 —— 它决定最后那一段里能试几次。
+        print("  续期          : %s  剩 %s 时续，每次加 %s（累计上限 %s，冷却 %ds）"
+              % ("开" if cfg.renew_enabled else "关",
+                 fmt_slurm_time(cfg.renew_threshold), cfg.renew_increment,
+                 fmt_slurm_time(cfg.renew_max_total), renew_cooldown(cfg)))
+        # 提前量与会话时限的关系：不短于时限就会一上来就续。它【不进】validate()：
+        #   那一条只是调度得不经济，而 validate() 的代价是整个站点起不来 ——
+        #   参数配得不合适不该让站点拒绝服务。所以走提示档，与端口池那条同一个
+        #   形状：打一行，不动退出码。
+        _rw = renew_threshold_warning(cfg)
+        if _rw:
+            print("  %s" % _rw)
+        print("  作业日志      : 保留 %d 天 / 目录上限 %s"
+              % (cfg.log_keep_days, human_bytes(cfg.log_dir_max_bytes)))
         # 命令路径逐条打印【解析结果】而不是配置里写了什么：配置留空是推荐值，
         # 而留空之后究竟找没找到、找到的是哪一个，只有这里说得清。
         print("  外部命令      :")
