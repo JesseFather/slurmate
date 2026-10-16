@@ -329,7 +329,7 @@ def job_is_terminal(info):
 GRES_FIELD_RE = re.compile(r"[A-Za-z0-9_]{1,32}")
 
 # 量级护栏，不是站点策略。真实上限来自集群自己配了什么、每个节点配了几个
-# （见 Slurm.gres_catalog() 与 Sessiond.fit_gres()）。这一条挡的只是"一个改过的
+# （见 Slurm.node_catalog() 与 Sessiond.fit_gres()）。这一条挡的只是"一个改过的
 # 客户端往数据库和日志里灌一个天文数字"，所以它必须宽到不误伤任何真实配置
 # （`mps:100` 这种按核数计的 GRES 是正常的）。
 MAX_GRES_COUNT = 4096
@@ -910,7 +910,7 @@ MAX_CPUS_REQUEST = 64
 # 框架不为 GRES 设上限，因为GRES 的上限不是框架的
 #   策略，而是集群的事实，每节点配了几张卡由管理员在 `gres.conf` 里定，写死在
 #   代码里等于替所有站点做了同一个决定（每节点 16 张卡的站点也只能要 8 张）。
-#   今天那个数来自 `Slurm.gres_catalog()`（`scontrol show node -o` 的 `Gres=`），
+#   今天那个数来自 `Slurm.node_catalog()`（`scontrol show node -o` 的 `Gres=`），
 #   在 `Sessiond.fit_gres()` 里与请求对账。框架只剩一条量级护栏
 #   （`MAX_GRES_COUNT`），它挡的是"改过的客户端灌一个天文数字"，不是策略。
 
@@ -6587,6 +6587,31 @@ def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
     return argv
 
 
+class NodeCatalog(object):
+    """`scontrol show node -o` 那一趟的两半产出。
+
+    两半来自同一条命令，所以只有一个返回对象：分两次查就是把本仓库里最贵的
+    那一次 fork（大集群上这条命令的输出很大）跑两遍，而它们问的是同一批节点。
+
+      · `gres`：{分区名: [{"name","type","per_node_max","total"}]}
+      · `mem` ：{分区名: 这个分区里内存最大的那种节点的内存，单位 MB}
+
+    两半各自都是三态的：`None` = 这一趟没问出来（`scontrol` 失败），
+    `{}` = 问到了，集群上确实一个都没有。把它们合并会让界面替集群说一句
+    它不知道的话（"这个分区没有卡" / "这个分区没有内存上限"）。
+
+    `mem` 里那个数用的是 Slurm 自己的单位（`RealMemory=`，MB），原样带出去，
+    不在这里换成 GB：换算是界面的事（它要贴整数格），而"这个节点有多少内存"
+    是集群的事实。
+    """
+
+    __slots__ = ("gres", "mem")
+
+    def __init__(self, gres=None, mem=None):
+        self.gres = gres
+        self.mem = mem
+
+
 class Slurm(object):
     """Slurm 的查询层：每个方法都是一次 fork，自己什么都不缓存。
 
@@ -6762,11 +6787,12 @@ class Slurm(object):
             }
         return table
 
-    def gres_catalog(self):
-        """`{分区名: [{"name","type","per_node_max","total"}]}`；None = 查不到。
+    def node_catalog(self):
+        """`NodeCatalog`（每个分区的 GRES 与每节点内存）；None = 查不到。
 
-        来源是 `scontrol show node -o` 的两格：`Gres=`（这台节点配了什么）与
-        `Partitions=`（它在哪些分区里），两个都是 Slurm 已经知道的事实。
+        来源是 `scontrol show node -o` 的三格：`Gres=`（这台节点配了什么）、
+        `RealMemory=`（它是多少 MB）、`Partitions=`（它在哪些分区里），三个都是
+        Slurm 已经知道的事实。
 
         本机实测（slurm-wlm 23.11.4，本集群 `GresTypes = gpu`）：
           · `Gres=gpu:4`，节点的配置。没有 GRES 的节点上这个键整个不
@@ -6777,29 +6803,44 @@ class Slurm(object):
             "已用"这一格报不出来，就不报。拿 `squeue` 的作业去减是另一件
             事，而且那个数刚算完就过期了，报一个错的数量比不报更糟。
             这一条记在 `docs/KNOWN-ISSUES.md` 的〈未实测/取不到〉里。
+          · `RealMemory=` 的单位是 MB（Slurm 自己的说法），每条节点行都有。
+
+        内存那一半与 GRES 那一半必须分开累加：这一趟里"没配 GRES 的节点"
+        占绝大多数，而它们照样有内存。从前那条"没有 `Gres=` 就整行跳过"对
+        GRES 是对的，拿它去管内存会让一个分区里绝大多数节点的内存都不算数。
 
         这个查询很贵（大集群上 `scontrol show node -o` 的输出很大），所以它归
-          `Cluster` 的慢钟，钟只能有一处（见本类的 docstring）。
+          `Cluster` 的慢钟，钟只能有一处（见本类的 docstring）。两半都在这一趟
+          里取完，不为了多一格再跑一遍。
         """
         rc, out, err = run_cmd([self.cfg.scontrol, "show", "node", "-o"], timeout=10)
         if rc != 0:
             log.warning("查节点 GRES 失败: %s", (err or "").strip()[:200])
             return None
-        table = {}
+        by_part = {}
+        mem = {}
         for line in out.splitlines():
             pm = re.search(r"\bPartitions=(\S+)", line)
+            if not pm:
+                continue                      # 不在任何分区里的节点，两半都用不上
+            mm = re.search(r"\bRealMemory=(\d+)", line)
+            node_mem = int(mm.group(1)) if mm else None
             gm = re.search(r"\bGres=(\S+)", line)
-            if not pm or not gm:
-                continue                      # 没配 GRES 的节点，跳过
-            entries = parse_gres_field(gm.group(1))
-            if not entries:
-                continue
+            entries = parse_gres_field(gm.group(1)) if gm else []
             for pname in pm.group(1).split(","):
                 # 分区名后面的 `*`（默认分区）是别的输出形态里的记号，这里剥掉。
                 pname = pname.strip().rstrip("*")
                 if not pname:
                     continue
-                acc = table.setdefault(pname, {})
+                # 内存取这一趟里最大的一台：作业要得比它还大就永远排不上，
+                # 而那正是界面那个滑块的天花板。认不出这一格的节点不记
+                #   （不编一个数）—— 一个分区里一台都没认出来时，这个分区
+                #   整个不进 `mem`，界面据此不画滑块。
+                if node_mem is not None and (pname not in mem or node_mem > mem[pname]):
+                    mem[pname] = node_mem
+                if not entries:
+                    continue
+                acc = by_part.setdefault(pname, {})
                 for e in entries:
                     key = (e["name"], e["type"])
                     cur = acc.get(key)
@@ -6812,9 +6853,9 @@ class Slurm(object):
                         # 两个都给，但界面上要问的是后者。
                         cur["total"] += e["count"]
                         cur["per_node_max"] = max(cur["per_node_max"], e["count"])
-        result = {p: sorted(v.values(), key=lambda e: (e["name"], e["type"] or ""))
-                  for p, v in table.items()}
-        return result
+        gres = {p: sorted(v.values(), key=lambda e: (e["name"], e["type"] or ""))
+                for p, v in by_part.items()}
+        return NodeCatalog(gres=gres, mem=mem)
 
     def is_accounting_enforced(self):
         """AccountingStorageEnforce 里是否含 associations，决定 sbatch 必须带 -A。"""
@@ -6926,7 +6967,7 @@ class Slurm(object):
             parts = line.split("|")
             if len(parts) < 3:
                 continue
-            # 分区名后面的 `*` 是"默认分区"的记号，剥掉（同 gres_catalog）。
+            # 分区名后面的 `*` 是"默认分区"的记号，剥掉（同 node_catalog）。
             pname = parts[0].strip().rstrip("*")
             if not pname:
                 continue
@@ -7162,7 +7203,7 @@ class Cluster(object):
         ("health", INFO_FAST_SECONDS, "controller_health"),
         ("version", INFO_SLOW_SECONDS, "slurm_version"),
         ("partitions", INFO_SLOW_SECONDS, "partition_table"),
-        ("gres", INFO_SLOW_SECONDS, "gres_catalog"),
+        ("gres", INFO_SLOW_SECONDS, "node_catalog"),
         ("nodes", INFO_MEDIUM_SECONDS, "node_table"),
         ("queue", INFO_MEDIUM_SECONDS, "queue_table"),
     )
@@ -7332,8 +7373,27 @@ class Cluster(object):
     def partitions(self):
         return self._read_meth("partitions", INFO_SLOW_SECONDS, "partition_table")
 
+    def _nodes_catalog(self):
+        """那一趟 `scontrol show node -o` 的结果（`NodeCatalog` 或 None）。
+
+        取不到时给一个空壳 `NodeCatalog` 而不是 None：两个读者（`gres()` /
+        `node_mem()`）各自要的是自己那一半，而"问不到"在两半上的表现都是
+        `None` —— 让每个读者各自判一次"整个目录是不是 None"是把同一件事
+        写两遍。空壳里两半都是 `None`，正是它们各自要的那种"问不到"。
+        """
+        cat = self._read_meth("gres", INFO_SLOW_SECONDS, "node_catalog")
+        return cat if cat is not None else NodeCatalog()
+
     def gres(self):
-        return self._read_meth("gres", INFO_SLOW_SECONDS, "gres_catalog")
+        return self._nodes_catalog().gres
+
+    def node_mem(self):
+        """每个分区里内存最大的那种节点有多少 MB；None = 没问到。
+
+        与 `gres()` 共用同一格缓存（同一个 `node_catalog` 的返回值），所以它
+        一次 fork 都不多发 —— 两半来自同一条 `scontrol show node -o`。
+        """
+        return self._nodes_catalog().mem
 
     def nodes(self):
         return self._read_meth("nodes", INFO_MEDIUM_SECONDS, "node_table")
@@ -9736,6 +9796,7 @@ class Sessiond(object):
         allowed = self.cluster.allowed_partitions(user)
         unknown = (allowed is PARTITIONS_UNKNOWN)
         catalog = self.cluster.gres()
+        mem = self.cluster.node_mem()
         out = []
         # 默认分区排在最前（界面按顺序渲染），其余按名字排，顺序稳定，
         # 用户才不会觉得"上次那个分区这次找不到了"。
@@ -9759,6 +9820,14 @@ class Sessiond(object):
             # N 个），不是 `total`，界面上要问的是前者。
             if catalog is not None:
                 d["gres"] = catalog.get(name, [])
+            # 这个分区里内存最大的那种节点有多少 MB。与上面 `gres` 同一条三态
+            #   规矩，而且它比 `gres` 多一档：`mem` 是整份目录问到了、而这个
+            #   分区里的节点一台都没报出 `RealMemory=` 时，这一格同样缺席。
+            #   两种缺席在界面上做同一件事（不画那个滑块），但原因是两句
+            #   不同的话：一句是"我们没问到集群"，一句是"这个分区没报"。
+            #   界面不解释原因，它只是不画 —— 而这一格缺席时那个输入框照旧在。
+            if mem is not None and name in mem:
+                d["mem_per_node_mb"] = mem[name]
             if not ok:
                 d["reason"] = "你的账号没有 %s 分区的权限" % name
             if unknown:
@@ -11126,7 +11195,10 @@ def main():
         # 每个分区上能申请的 GRES。这是"界面上为什么没有我要的那种卡"唯一
         # 能回答的地方，名字与型号都是管理员在 gres.conf 里定的，代码里
         # 没有任何一份副本可以拿来对照。
-        _cat = slurm.gres_catalog()
+        #   内存那一半（`mem_per_node_mb`，界面上那个滑块的天花板）与它同源，
+        #   顺手打出来：管理员看得见界面会报的那个数。
+        _ncat = slurm.node_catalog()
+        _cat = _ncat.gres if _ncat is not None else None
         if _cat is None:
             print("  GRES          : 【读取失败】scontrol show node"
                   "（这不影响提交，但界面上不会有可选项，服务端也不校验上限）")
@@ -11139,6 +11211,14 @@ def main():
                     "、".join("%s × %d/节点（本分区共 %d）"
                               % (gres_label(e), e["per_node_max"], e["total"])
                               for e in _g) or "（没有配任何 GRES）"))
+        if _ncat is not None:
+            print("  每节点内存    :")
+            for _n in sorted(_ncat.mem):
+                print("    %-12s %d MB（界面上那个滑块的天花板）"
+                      % (_n, _ncat.mem[_n]))
+            if not _ncat.mem:
+                print("    （一条都没有：节点没有报 RealMemory，"
+                      "界面上那几格不画滑块）")
         # 每个插件那份配置里声明的 `default_gpus` 与本站实际有的对账（F15）。
         #   判据、fail-open 与"哪些分区算数"都写在 `plugin_gres_problems()` 里，
         #   这里只负责把它打出来，而它返回空列表时这一行什么都不说。

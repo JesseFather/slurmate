@@ -2710,7 +2710,9 @@ function pluginBlock(p, pv) {
   //   而填了也用不上 —— 摆在那里等于说"这一块能起"。
   let adv = null;
   if (p.runnable) {
-    const a = pluginAdv();
+    // 站点那份默认要传下去：那三格滑块停在它上面，而它是站点按插件定的
+    //   （`plugins` 那一 op 的 `defaults`），不是客户端写死的数。
+    const a = pluginAdv(p.defaults);
     adv = a.st;
     d.append(a.box);
   }
@@ -3150,6 +3152,152 @@ let advCells = [];
 const UI_MAX_CPUS = 64;
 
 /**
+ * CPU 那一格的档位。
+ *
+ * 用户点名的形状：1、2、4、8、12、16、20、24，之后每 4 一档，顶到 `UI_MAX_CPUS`。
+ *   它不是一条连续的尺子 —— 核数是按"能开几个进程"要的，中间那些数没有人要。
+ * 站点那份默认值不在表上时由调用方插进去（见 `pluginAdv` 里那一段）：滑块停不到
+ *   那个数上的话，问题就不是"档位合不合理"，而是"站点说的默认它指不出来"。
+ */
+function cpuLadder() {
+  const out = [1, 2, 4, 8, 12, 16, 20, 24];
+  for (let n = 28; n <= UI_MAX_CPUS; n += 4) out.push(n);
+  return out;
+}
+
+/**
+ * 内存那种写法（`8G` / `512M` / `8192M`）→ MB；认不出给 `null`。
+ *
+ * 与守护进程的 `sanitize_mem` 同一套写法（裸数字的单位是 MB，那是 Slurm 的规矩：
+ *   `--mem=8` 是 8 MB），所以这里必须先认单位再换算。
+ */
+function memMbOf(s) {
+  const m = /^([0-9]+)([KMGTP]?)$/.exec(String(s == null ? '' : s).trim().toUpperCase());
+  if (!m) return null;
+  const per = { K: 1 / 1024, M: 1, G: 1024, T: 1024 * 1024, P: 1024 * 1024 * 1024 }[m[2] || 'M'];
+  const mb = Number(m[1]) * per;
+  return Number.isInteger(mb) ? mb : null;
+}
+
+/** 内存那种写法 → 整 GB；不是整 GB（`512M`）给 `null`。滑块只走整 GB。 */
+function memGbOf(s) {
+  const mb = memMbOf(s);
+  return (mb !== null && mb % 1024 === 0) ? mb / 1024 : null;
+}
+
+/**
+ * 那个分区里内存最大的节点有多少整 GB；`null` = 这一格没有可用的上限。
+ *
+ * 向下取整：节点报 191000 MB（186.5 GB）时顶就是 186 —— 一个整数滑块要不到那半
+ *   个 GB，而报 187 是一个这台机器上不存在的数。
+ * 没挑分区时给 `null`：上限是分区自己的事实。取所有分区里最大的那个数会让滑块停在
+ *   一个这一趟作业永远要不到的数上（服务端对内存只校验写法，不拦），而取最小的
+ *   又与"随便挑一个分区"这句话对不上。挑了一个分区，这两个问题都不存在。
+ */
+function memCeilingGb(partName) {
+  if (!partName) return null;
+  const p = partList.find((x) => x.name === partName);
+  const mb = p && p.mem_per_node_mb;
+  if (!Number.isInteger(mb) || mb < 1024) return null;
+  return Math.floor(mb / 1024);
+}
+
+/**
+ * 给一格装一条滑块。
+ *
+ * 它只是那一格的第二种输入法：拖动它就是把这个值写进那个控件，别的什么都不改。
+ *   提交那一侧读的仍然是那个控件（`startWith`），所以"留空即默认"这条语义一个字
+ *   都没变 —— 滑块停在默认位置不等于用户填了默认值，那要看控件里有没有字。
+ *
+ * 装不上就返回 `null`，调用方不画：没有档位、或者站点那份默认不在档位上（装了它
+ *   也只能停在别的数上）。画一个停在错位置上的滑块比不画更坏 —— 用户会照着它
+ *   按下去，而那个数不是站点说的默认。
+ *
+ * @param {HTMLElement} ctrl 这一格本来的控件（滑块把值写进它）
+ * @param {number[]} values 档位（下标 → 值）
+ * @param {number} dflt 站点给这一格的默认值，控件空着的时候滑块停在这
+ * @param {(v:number)=>string} fmt 写回控件时的写法（内存要写成 `8G`）
+ * @param {(s:string)=>number|null} parse 反过来读（用户手打之后滑块跟着挪位置）
+ * @returns {HTMLInputElement|null}
+ */
+function attachRange(ctrl, values, dflt, fmt, parse) {
+  const at = (v) => (v === null || v === undefined ? -1 : values.indexOf(v));
+  const i0 = at(dflt);
+  if (i0 < 0) return null;
+  const r = document.createElement('input');
+  r.type = 'range';
+  r.min = '0';
+  r.max = String(values.length - 1);
+  r.step = '1';
+  // 初始位置：这一格里已经有字（用户填过、或者上一个分区留下的）就跟着它，
+  //   一个字都没有才停在站点那份默认上。
+  const cur = at(parse(ctrl.value));
+  r.value = String(cur >= 0 ? cur : i0);
+  r.oninput = () => { ctrl.value = fmt(values[Number(r.value)]); };
+  // 用户直接改那一格时滑块跟着挪。只挪位置，不回写 —— 手打的值优先；而打了一个
+  //   不在档位上的数（CPU 写了 7）时滑块不动，它表示的仍是最近的那一档。
+  ctrl.addEventListener('input', () => {
+    const i = at(parse(ctrl.value));
+    if (i >= 0) r.value = String(i);
+  });
+  return r;
+}
+
+/** 把一格里的滑块摘掉（上限变了、或者这一格变得用不上滑块了）。 */
+function dropRange(st, key) {
+  if (st[key]) st[key].remove();
+  st[key] = null;
+}
+
+/**
+ * 内存那一格的滑块：顶 = 当前分区里内存最大的节点，默认 = 站点那份 `defaults.mem`。
+ *
+ * 它每次重判一遍，因为上限那一半会随分区变。两条判据都在这里：
+ *   · 没挑分区、或者那个分区没报 `mem_per_node_mb` → 没有顶，不画；
+ *   · 站点那份默认不是整 GB，或者比顶还大（换分区时会遇到）→ 不画。
+ * 两种情况下那个输入框照旧在，`512M` 这种写法照旧写得进去。
+ */
+function applyMemRange(st) {
+  const ceil = memCeilingGb(st.part.value);
+  const def = st.memDefGb;
+  const ok = ceil !== null && def !== null && def >= 1 && def <= ceil;
+  if (!ok) { dropRange(st, 'memRange'); return; }
+  if (st.memRange && st.memRangeCeil === ceil) return;
+  dropRange(st, 'memRange');
+  const values = [];
+  for (let gb = 1; gb <= ceil; gb++) values.push(gb);
+  st.memRange = attachRange(st.mem, values, def, (v) => `${v}G`, memGbOf);
+  st.memRangeCeil = ceil;
+  if (st.memRange) st.memCell.append(st.memRange);
+}
+
+/**
+ * 数量那一格的滑块：只在下面那个下拉点名了某一张卡之后才有意义。
+ *
+ * 它停在那个插件配的默认卡上，且只有当下拉选中的正是那张卡时才有得停 ——
+ *   换了另一张卡就没有"默认几个"这回事了，那时不画（替它补一个数就是替站点
+ *   定政策）。上限跟着 `applyGresMaxFor` 算出来的那一格走。
+ */
+function applyCountRange(st) {
+  dropRange(st, 'gresNRange');
+  const v = st.gres.value;
+  const e = (v === '' || v === 'none') ? null : st.curGres[Number(v)];
+  const d = st.gresNDef;
+  if (!e || !d || d.name !== e.name || (d.type || null) !== (e.type || null)) return;
+  // 上限就是那一格数字框的上限（`per_node_max`），不另设一个 —— 两处不一样的
+  //   话，滑块能拖到的数与手能填的数就不是同一件东西。
+  const max = e.per_node_max;
+  if (!Number.isInteger(max) || max < 1 || d.count < 1 || d.count > max) return;
+  const values = [];
+  for (let n = 1; n <= max; n++) values.push(n);
+  st.gresNRange = attachRange(st.gresN, values, d.count, (n) => String(n), (s) => {
+    const n = Number(String(s).trim());
+    return Number.isInteger(n) ? n : null;
+  });
+  if (st.gresNRange) st.gresNCell.append(st.gresNRange);
+}
+
+/**
  * 一块插件自己那几格高级选项。
  *
  * 它返回 `{ box, st }`：`box` 挂进那一块里，`st` 是那几格本身 —— `startWith` 读它、
@@ -3164,7 +3312,7 @@ const UI_MAX_CPUS = 64;
  *   弹性盒子的列宽由内容撑，于是窗口窄一点「分区」就自己掉到第二行，而掉不掉
  *   取决于那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
  */
-function pluginAdv() {
+function pluginAdv(defaults) {
   const box = document.createElement('details');
   box.className = 'plug-adv';
   box.append(el('summary', null, '高级选项'));
@@ -3182,6 +3330,10 @@ function pluginAdv() {
   const row = document.createElement('div');
   row.className = 'row';
 
+  // 站点那份默认（`plugins` 那一 op 的 `defaults`）。三格各取自己那一半，
+  //   取不到的那一半对应的滑块就不装 —— 见 `attachRange` 那一段。
+  const def = defaults || null;
+
   // 占位符不写具体数字：默认资源按插件不同（跑 IDE 和跑中转站不是一回事），
   //   写一个数字就是在替另一个插件说话。真实默认值在这一块上面那行。
   st.cpus = document.createElement('input');
@@ -3189,13 +3341,15 @@ function pluginAdv() {
   st.cpus.min = '1';
   st.cpus.max = String(UI_MAX_CPUS);
   st.cpus.placeholder = '留空即默认';
-  row.append(field('CPU 核数', st.cpus));
+  const cellCpus = field('CPU 核数', st.cpus);
+  row.append(cellCpus);
 
   st.mem = document.createElement('input');
   st.mem.type = 'text';
   st.mem.placeholder = '留空即默认';
   st.mem.spellcheck = false;
-  row.append(field('内存', st.mem));
+  const cellMem = field('内存', st.mem);
+  row.append(cellMem);
 
   // GRES 是两个格子：要哪一种（选项由服务端给，因为名字与型号是管理员在集群上
   // 定的）+ 要几个。这里没有卡名是写死的，也没有 `max="8"` 这种数字 ——
@@ -3209,7 +3363,8 @@ function pluginAdv() {
   st.gresN.min = '1';
   st.gresN.placeholder = '—';
   st.gresN.disabled = true;
-  row.append(field('数量', st.gresN));
+  const cellCount = field('数量', st.gresN);
+  row.append(cellCount);
 
   // 这一格不再需要 `full` / `grow`：网格里每一格本来就占满自己那一列，
   //   而那两个类正是把「分区」整格甩到第二行的原因（见 app.css 那一段）。
@@ -3217,6 +3372,36 @@ function pluginAdv() {
   //   「（无权限）」），挤到四分之一宽时连"随机选一个"那句占位话都会被切掉。
   st.part = document.createElement('select');
   row.append(field('分区', st.part, 'wide'));
+
+  // ── 三条滑块 ──
+  //
+  // 站点那份默认不在档位上时把它插进档位表：不插的话滑块只能停在最近的一档上，
+  //   而那一档不是站点说的默认值（CPU 那一格会走到这里：管理员把默认设成 6 核
+  //   完全合理，而 6 不在 1/2/4/8 那张表上）。
+  const ladder = cpuLadder();
+  const dCpus = (def && Number.isInteger(def.cpus)) ? def.cpus : null;
+  if (dCpus !== null && dCpus >= 1 && dCpus <= UI_MAX_CPUS && ladder.indexOf(dCpus) < 0) {
+    ladder.push(dCpus);
+    ladder.sort((a, b) => a - b);
+  }
+  const intOf = (s) => {
+    const n = Number(String(s).trim());
+    return Number.isInteger(n) ? n : null;
+  };
+  const rCpus = attachRange(st.cpus, ladder, dCpus, (v) => String(v), intOf);
+  if (rCpus) { st.cpusRange = rCpus; cellCpus.append(rCpus); }
+
+  // 内存那一格：默认那一半在这里定（是不是整 GB），上限那一半随分区变，
+  //   所以整条由 `applyMemRange` 判、这里只把格子和默认值记下来。
+  st.memDefGb = memGbOf(def && def.mem);
+  st.memCell = cellMem;
+  applyMemRange(st);
+
+  // 数量那一格：它只在下面那个下拉点名了某一张卡之后才有意义，所以整条由
+  //   `applyGresMaxFor` 那一侧判（换了卡、换了分区都要重判）。
+  st.gresNDef = (def && def.gpus && Number.isInteger(def.gpus.count)) ? def.gpus : null;
+  st.gresNCell = cellCount;
+  applyCountRange(st);
 
   box.append(row);
   box.append(el('p', 'sub adv-note',
@@ -3351,6 +3536,9 @@ function renderGresFor(st) {
   sel.value = '';
   sel.onchange = () => applyGresMaxFor(st);
   applyGresMaxFor(st);
+  // 上限那一半跟着分区走，所以换分区（`fillPartSelect` 那条路）与换 GRES 都要
+  //   重判一次内存那一格的滑块。放在这里，别处不再各调一次。
+  applyMemRange(st);
 }
 
 /** GRES 的数量上限跟着这一块选中的那一项走。客户端不写死任何数字。 */
@@ -3369,11 +3557,13 @@ function applyGresMaxFor(st) {
     cnt.disabled = true;
     cnt.placeholder = '—';
     cnt.removeAttribute('max');
+    applyCountRange(st);
     return;
   }
   cnt.disabled = false;
   cnt.placeholder = '必填';
   cnt.max = String(e.per_node_max);
+  applyCountRange(st);
 }
 
 // ── 主机密钥确认 ────────────────────────────────────────────────────────────

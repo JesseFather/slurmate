@@ -92,24 +92,43 @@ test('界面上 GRES 的上限是从服务端来的，不是写死的', () => {
   //     ① 画出来的时候不许带 max：带了就是写死一个数（"每台集群都最多 8 张"
   //        是一个我们无权做的假设）；
   //     ② 而它确实是被设上去的，并且来源只有 `per_node_max` 一处。
-  const built = /st\.gresN = document\.createElement\('input'\);([\s\S]*?)row\.append\(field\('数量'/,
+  const built = /st\.gresN = document\.createElement\('input'\);([\s\S]*?)const cellCount/,
     m0 = built.exec(js);
   assert.ok(m0, 'panel.js 里未找到数量那一格的构造那一段 —— 它改了形状？');
   assert.equal(/\bmax\b/.test(m0[1]), false,
     '数量那一格在画出来的时候就带上了 max —— 它必须跟着服务端给的 per_node_max 走 '
     + '（同一个集群上不同分区的上限可以不同）');
-  // ② 整份 panel.js 里对 `.max` 的赋值恰好这两处，而且各有各的来源：
-  //    CPU 那一格取那个与服务端交叉校验过的常量；数量那一格取 `per_node_max`。
+});
+
+test('界面上每一个资源上限都指得出出处，没有一个数字是写死的', () => {
+  // v0.22：那三格下面各挂了一条滑块（CPU / 内存 / 数量），于是 `.max` 的赋值
+  //   从两处变成三处。这一条跟着重写，不是放宽 —— 每一处都要指得出它的来源，
+  //   而"来源是服务端"这一条在滑块上比在数字框上更要紧：拖一下就到了，
+  //   用户不会像打字那样先想一想。
   const sets = [...js.matchAll(/\.max\s*=\s*([^;\n]+);/g)].map((m) => m[1].trim());
-  assert.deepEqual(sets.sort(), ['String(UI_MAX_CPUS)', 'String(e.per_node_max)'].sort(),
-    'panel.js 里对 `.max` 的赋值应当恰好两处（CPU 那一格取 UI_MAX_CPUS、数量那一格取 '
-    + `per_node_max）—— 现在是 ${JSON.stringify(sets)}。多出来的那一处多半就是写死的上限`);
-  // ③ 而一个数字都不许直接写在 max 上（`max = 8` / `max = '8'`）：那正是这条
+  assert.deepEqual(sets.sort(), [
+    'String(UI_MAX_CPUS)',        // CPU 那一格：那个与守护进程交叉校验过的常量
+    'String(e.per_node_max)',     // 数量那一格：服务端给的每节点上限
+    'String(values.length - 1)',  // 滑块自己的档位下标 —— 它不是资源上限
+  ].sort(),
+  'panel.js 里对 `.max` 的赋值应当恰好三处（CPU 取 UI_MAX_CPUS、数量取 per_node_max、'
+  + `滑块取下标的顶）—— 现在是 ${JSON.stringify(sets)}。多出来的那一处多半就是写死的上限`);
+
+  // 而一个数字都不许直接写在 max 上（`max = 8` / `max = '8'`）：那正是这条
   //    守的东西 —— 上限只能来自服务端，或者来自那个有人交叉盯着、一漂就红的常量。
   //    查的是赋值（`.max = 数字`）：注释里那句"没有 `max="8"` 这种数字"是
   //      在解释这条规矩，不是违反它。
   assert.equal(/\.max\s*=\s*['"]?\d/.test(js), false,
     'panel.js 里有一个数字直接写在 max 上 —— 上限必须来自服务端给的 per_node_max');
+
+  // 三条滑块的顶各自指得出出处。这两条是上面那三处的一半：`max` 只是那个
+  //   `input[type=range]` 的下标范围，真正决定"能拖到多大的资源"的是那几份档位表。
+  assert.match(js, /for \(let n = 28; n <= UI_MAX_CPUS; n \+= 4\)/,
+    'CPU 那条滑块的档位只到 UI_MAX_CPUS 为止 —— 那个数有人与服务端交叉盯着，'
+    + '换成一个字面量就没人盯了');
+  assert.match(js, /const mb = p && p\.mem_per_node_mb;/,
+    '内存那条滑块的顶必须来自分区报的 `mem_per_node_mb`，'
+    + '不能是客户端自己算的、更不是一个常量');
 });
 
 test('旧的 `GPU 数` 那一格整个不存在了（不是一个数字输入框）', () => {

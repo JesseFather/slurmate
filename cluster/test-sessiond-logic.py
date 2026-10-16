@@ -515,18 +515,22 @@ def slurm_stub(argv, timeout=10, check=False):
     #       所以夹具里也不许出现它们，否则用例守的是一个真机上不存在的形状。
     #   `gpu:a100:2` 那一台是故意的：本集群只有不带型号的 `gpu`，
     #     带型号这条路在真集群上走不到，夹具不造它就等于没有覆盖（账本 F26）。
+    #   `RealMemory=` 每一台都给（真机上每条节点行都有），值是三个不同形状：
+    #     整 GB（`128000` = 125 GB）、不整的（`191000` = 186.5 GB，真机上很常见）、
+    #     以及一台没配 GRES 的（`noded1`）—— 它照样有内存，而"没有 `Gres=` 就
+    #     整行跳过"那条老写法会把它算漏。
     if "show node" in cmd and args[-1] == "-o":
         return 0, (
             "NodeName=nodea1 Arch=x86_64 NodeAddr=192.0.2.11 State=MIXED "
-            "Gres=gpu:a100:2 Partitions=A6000\n"
+            "RealMemory=128000 Gres=gpu:a100:2 Partitions=A6000\n"
             "NodeName=nodea2 Arch=x86_64 NodeAddr=192.0.2.12 State=IDLE "
-            "Gres=gpu:a100:2 Partitions=A6000\n"
+            "RealMemory=191000 Gres=gpu:a100:2 Partitions=A6000\n"
             "NodeName=nodeb1 Arch=x86_64 NodeAddr=192.0.2.20 State=IDLE "
-            "Gres=gpu:4,mps:100 Partitions=RTX8000\n"
+            "RealMemory=262144 Gres=gpu:4,mps:100 Partitions=RTX8000\n"
             "NodeName=nodec1 Arch=x86_64 NodeAddr=192.0.2.30 State=IDLE "
-            "Gres=gpu:8 Partitions=2080TI\n"
+            "RealMemory=128000 Gres=gpu:8 Partitions=2080TI\n"
             "NodeName=noded1 Arch=x86_64 NodeAddr=192.0.2.40 State=IDLE "
-            "Partitions=2080TI\n"), ""
+            "RealMemory=191000 Partitions=2080TI\n"), ""
 
     if "show node" in cmd:
         return {
@@ -1735,7 +1739,7 @@ exit 0
           and "nosuch" in r["error"]["detail"], str(r))
 
     # 后面几条要临时让"目录查询不到"，这里先留一份真身。
-    _real_cat = mod.Slurm.gres_catalog
+    _real_cat = mod.Slurm.node_catalog
 
     # 形状判据自己要能挡住 —— 不能靠下游"目录里没有这个名字"顺手挡住。
     #   两件事是两码事：目录查不到时下游是放行的（权威在 Slurm），那时一个带
@@ -1751,13 +1755,13 @@ exit 0
           and mod.clean_gres({"name": "gpu", "type": "a,b", "count": 2})[1] is not None,
           str(mod.clean_gres({"name": "gpu", "type": "a:b", "count": 2})))
     # 而目录查不到时它照样挡：那正是上面那条的理由。
-    mod.Slurm.gres_catalog = lambda self: None
+    mod.Slurm.node_catalog = lambda self: None
     try:
         r, _s, _e = run_submit({"op": "submit", "gres": {"name": "a:b", "count": 1}})
         check("目录查询不到时，带 `:` 的名字仍然被拒（下游这时是放行的）",
               not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
     finally:
-        mod.Slurm.gres_catalog = _real_cat
+        mod.Slurm.node_catalog = _real_cat
 
     # 形状不合法的几种：都必须在提交之前被拒（不能靠 sbatch 报错）。
     for _bad, _why in (
@@ -1778,14 +1782,14 @@ exit 0
 
     # 目录查不到时放行（由 Slurm 判），而不是拒绝所有带 GRES 的提交 ——
     #   一次控制器抖动不该让所有人提交不了。
-    mod.Slurm.gres_catalog = lambda self: None
+    mod.Slurm.node_catalog = lambda self: None
     try:
         r, _s, _e = run_submit({"op": "submit", "partition": "2080TI",
                                 "gres": {"name": "gpu", "count": 8}})
         check("查询不到集群的 GRES 时放行（权威在 Slurm，不在我们）",
               r.get("ok"), str(r))
     finally:
-        mod.Slurm.gres_catalog = _real_cat
+        mod.Slurm.node_catalog = _real_cat
 
     r, sess, _ = run_submit({"op": "submit", "time": "183-00:00:00"})
     check("超过分区 MaxTime 与硬上限的时间被截断",
@@ -7822,9 +7826,10 @@ exit 0
     _real_run = mod.run_cmd
     mod.run_cmd = slurm_stub
     try:
-        _cat = mod.Slurm(cfg).gres_catalog()
+        _ncat = mod.Slurm(cfg).node_catalog()
     finally:
         mod.run_cmd = _real_run
+    _cat = _ncat.gres if _ncat is not None else None
     check("目录按分区聚合（A6000 两台各 2 张 → per_node_max 2、总 4）",
           _cat and _cat.get("A6000") == [{"name": "gpu", "type": "a100",
                                           "per_node_max": 2, "total": 4}],
@@ -7839,12 +7844,30 @@ exit 0
     check("目录里没有『已用』这一格（本版本的 Slurm 给不出来，就不编）",
           _cat and all("used" not in k for e in _cat.values() for k in e),
           str(_cat))
+    # ── 同一趟里的内存那一半 ────────────────────────────────────────────
+    #   它与 GRES 同源（同一条 `scontrol show node -o`），所以判据也并排摆着。
+    #   夹具里三台的 RealMemory 分别是 128000 / 191000 / 262144，
+    #   而 `noded1` 那台没有 `Gres=` —— 它照样要进内存那一半，那正是
+    #   "两个累加器必须分开"这句话的判据。
+    #   它的内存比同分区那台有卡的大（191000 > 128000），这是故意的：不这么造的话，
+    #   "没有 Gres= 就整行跳过"那条老写法算出来的最大值与正确的那个一模一样，
+    #   这条判据就抓不住它（变异验过）。
+    _mem = _ncat.mem if _ncat is not None else None
+    check("每节点内存按分区取最大的那一台（A6000 两台 128000/191000 → 191000）",
+          _mem and _mem.get("A6000") == 191000, str(_mem))
+    check("没配 GRES 的节点照样算内存（2080TI 那台 8 张卡的与那台没有 "
+          "`Gres=` 的取大的）",
+          _mem and _mem.get("2080TI") == 191000, str(_mem))
+    check("单位原样带出去，不当场换成 GB（换算是界面的事）",
+          _mem and _mem.get("RTX8000") == 262144, str(_mem))
+    check("内存那一半里没有 GRES 那些格子",
+          _mem and all(isinstance(v, int) for v in _mem.values()), str(_mem))
     # 缓存：一个钟周期之内不重复 fork（这是每个 partitions / cluster 请求
     # 都要走的那条路）。
     #
     # 缓存住在 `Cluster` 里，不在 `Slurm` 上 —— 那是"钟只能有一处"
     #   的直接后果，`Slurm` 变成纯粹无状态的查询层。所以这条断言也搬了家：
-    #   直接量 `Slurm.gres_catalog()` 会 fork 三次，而那是对的。
+    #   直接量 `Slurm.node_catalog()` 会 fork 三次，而那是对的。
     _calls = [0]
 
     def _counting_run(argv, timeout=10, check=False):
@@ -7882,19 +7905,49 @@ exit 0
     check("清单里带型号（`gpu:a100`）—— 不是只有一个数字",
           _by_name["A6000"]["gres"][0]["type"] == "a100",
           str(_by_name["A6000"]["gres"]))
+    # 每节点内存：与 `gres` 同一趟查询的另一半，三态也照抄那一条。
+    #   A6000 那两台报的是 128000 与 191000，取大的（作业要得比它还大就永远排不上）。
+    check("每个分区带上每节点内存（MB，取这个分区里最大的那一台）",
+          _by_name["A6000"].get("mem_per_node_mb") == 191000,
+          str(_by_name["A6000"].get("mem_per_node_mb")))
+    check("它跟着分区走，不是一个全局的数",
+          _by_name["RTX8000"].get("mem_per_node_mb") == 262144,
+          str(_by_name["RTX8000"].get("mem_per_node_mb")))
     # 三态：查不到时那个键整个不存在（不是 `[]`）。
     #   `[]` 的意思是"这个分区确实没配"，而"没问到"是另一句话 ——
     #   把两者合并，界面就会替集群说一句它不知道的话。
-    _real_cat2 = mod.Slurm.gres_catalog
-    mod.Slurm.gres_catalog = lambda self: None
+    _real_cat2 = mod.Slurm.node_catalog
+    mod.Slurm.node_catalog = lambda self: None
     fresh_cluster(mod, d, cfg)                 # 让上一段缓存的那一份作废
     try:
         _pv2 = with_stub(mod, _part_run, lambda: d.op_partitions(UID))
     finally:
-        mod.Slurm.gres_catalog = _real_cat2
+        mod.Slurm.node_catalog = _real_cat2
     _p0 = ((_pv2.get("data") or {}).get("partitions") or [{}])[0]
     check("目录查询不到，`gres` 这个键不存在（不是空列表）",
           _pv2.get("ok") and "gres" not in _p0, str(sorted(_p0)))
+    check("同一趟问不到，`mem_per_node_mb` 这个键也不存在",
+          _pv2.get("ok") and "mem_per_node_mb" not in _p0, str(sorted(_p0)))
+
+    # 而它是两档缺席：整个目录没问到（上一段），与"这个分区里的节点一台都没报
+    #   `RealMemory=`"（这一段）。后者在界面上做同一件事（不画那个滑块），
+    #   但 `gres` 那一格照旧在 —— 两条路必须分得开，否则"内存那一格怎么没有滑块"
+    #   会被读成"集群信息整个挂了"。
+    def _no_mem_run(argv, timeout=10, check=False):
+        a = [str(x) for x in argv]
+        if "show node" in " ".join(a) and a[-1] == "-o":
+            return 0, ("NodeName=nodex1 Arch=x86_64 NodeAddr=192.0.2.50 State=IDLE "
+                       "Gres=gpu:2 Partitions=A6000\n"), ""
+        return _part_run(argv, timeout, check)
+
+    fresh_cluster(mod, d, cfg)
+    _pv3 = with_stub(mod, _no_mem_run, lambda: d.op_partitions(UID))
+    _by3 = {p["name"]: p for p in (_pv3.get("data") or {}).get("partitions", [])}
+    check("节点没报 `RealMemory=` 时，只有内存那一格缺席（`gres` 照旧在）",
+          _pv3.get("ok") and "mem_per_node_mb" not in _by3.get("A6000", {})
+          and _by3.get("A6000", {}).get("gres") == [{"name": "gpu", "type": None,
+                                                     "per_node_max": 2, "total": 2}],
+          str(sorted(_by3.get("A6000", {}))))
 
     # ── 25.5 读回：带型号的会话在视图里是带型号的（今天红的那一条）──────
     #
@@ -9261,8 +9314,10 @@ exit 0
                 "slurm_version": "slurm-wlm 9.9.9",
                 "partition_table": {"P1": {"max_time": 3600, "is_default": True,
                                            "state": "UP", "nodes": 1, "cpus": 4}},
-                "gres_catalog": {"P1": [{"name": "gpu", "type": None,
-                                         "per_node_max": 1, "total": 1}]},
+                "node_catalog": mod.NodeCatalog(
+                    gres={"P1": [{"name": "gpu", "type": None,
+                                  "per_node_max": 1, "total": 1}]},
+                    mem={"P1": 128000}),
                 "node_table": {"P1": {"counts": {"idle": 1}, "flags": {}}},
                 "queue_table": {"depth": {"P1": {"pending": 0, "running": 0}},
                                 "pending": {}, "by_user": {}, "at": 0},
@@ -11089,7 +11144,7 @@ exit 0
     #      节点上，于是同一条用例在开发机上红、在 CI 上绿（或者反过来）——
     #      17 节里那条注释记的正是同一条教训。而这一节要考的从来不是集群事实。
     #    一个注入点就够：`run_cmd` 正是 `Slurm` / `crosscheck_cidr()` /
-    #      `gres_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
+    #      `node_catalog()` 共用的那一处。各留一个注入点的话，哪天新加一个读者
     #      就会悄悄漏掉一个 —— 而"漏一个"正是 F45 的形状。
     mod.run_cmd = _rl_nodes_stub
     # 这一节里 `Config` 也要 `resolve_bin()` 解析得到那八个 Slurm 命令 ——

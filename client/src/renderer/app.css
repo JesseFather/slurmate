@@ -444,12 +444,22 @@ details[open] summary { margin-bottom: 12px; }
    那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
    网格的列数只随容器宽度整档变（五格 → 四格 → 三格…），与格里写着什么无关；
    下面那个 150px 是"一格再窄就放不下一个下拉"的位置。
+   对齐走 `start` 不走 `end`：装了滑块的那一格比别的高，`end` 会把别格的标签一起
+   往下推（实测：CPU 那一格有滑块时，「内存」那三个标签比它低了二十来个像素）。
    控件一律占满自己那一列，所以 `.narrow` / `.full` 在这几格里都用不上。 */
 .plug-adv .row {
-  display: grid; gap: 10px 12px; align-items: end;
+  display: grid; gap: 10px 12px; align-items: start;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 .plug-adv .row input, .plug-adv .row select { width: 100%; min-width: 0; }
+/* 那三条滑块（每一格的第二种输入法，见 panel.js 的 `attachRange`）。
+   它们不是"一格"，是长在控件下面的一条：所以去掉 `input` 那条规则给的底色与边框
+   —— 一条带白框的灰条看起来像另一个输入框。 */
+.plug-adv .row input[type=range] {
+  background: transparent; border: 0; padding: 0;
+  height: 14px; margin: 6px 0 0;
+}
+.plug-adv .row input[type=range]:focus { outline: 1px solid var(--accent); }
 /* 「分区」自己占一整行。它的选项文字最长（分区名，没权限的那些还要接一句
    「（无权限）」），四分之一宽那一格装不下 —— 切掉的是那句占位话。
    它同时把"第二行只有一个孤零零的格子"这件事去掉了：占一整行是一个说得出的

@@ -91,9 +91,9 @@
   var SCROLLERS = ['#panel', '.conns', '.jobs', '.notices', '.joblog', '#statusbar'];
 
   /**
-   * 展开着的高级选项里那五格，数一遍。
+   * 展开着的高级选项里，`sel` 选中的东西真的画出来了几个。
    *
-   * 判据是"那一行真的落在它那个 `<details>` 画出来的盒子里"，既不是"DOM 里有几个"，
+   * 判据是"它真的落在那个 `<details>` 画出来的盒子里"，既不是"DOM 里有几个"，
    *   也不是上面那个 `visible()`。这个无头壳里，收着的 `<details>` 里那几个孩子
    *   照样有一个非零的矩形 —— `content-visibility: hidden` 把上一次的布局留着，
    *   而那个矩形从 details 自己的盒子（只有摘要那一行高）底下伸出去。
@@ -102,7 +102,7 @@
    *   所以"收着"与"展开着"在 `visible()` 眼里长得一模一样 —— 少了这一条，
    *   一个把 `<details>` 删掉、只留 DOM 的改动会让这一格照样全绿。
    */
-  function drawnAdvFields() {
+  function drawnAdvCount(sel) {
     var n = 0;
     Array.prototype.forEach.call(
       document.querySelectorAll('#plugin-blocks details.plug-adv'),
@@ -115,7 +115,7 @@
         var db = d.getBoundingClientRect();
         var rb = row.getBoundingClientRect();
         if (rb.top < db.top || rb.bottom > db.bottom + 1) return;
-        n += row.querySelectorAll(':scope > div').length;
+        n += row.querySelectorAll(sel).length;
       });
     return n;
   }
@@ -166,9 +166,10 @@
       armed: document.querySelectorAll('.armed').length,
       pluginRows: document.querySelectorAll('#plugin-data .plug-consent-item').length,
       pluginBlocks: document.querySelectorAll('#plugin-blocks .plug').length,
-      // 展开着的高级选项里那五格。它数的是"真的画出来了几格"（见上面那个
-      //   `drawnAdvFields`）—— 收起态必然是 0，那一格的 0 是应该的。
-      advFields: drawnAdvFields(),
+      // 展开着的高级选项里那五格，以及那三格下面的滑块（真的画出来了几条）。
+      //   收起态必然是 0，那一格的 0 是应该的。
+      advFields: drawnAdvCount(':scope > div'),
+      advRanges: drawnAdvCount('input[type=range]'),
       jobRows: document.querySelectorAll('#job-list .job').length,
       portAsk: $('sb-port').classList.contains('hidden') ? 0 : 1,
     };
@@ -232,15 +233,36 @@
         showScreen('plugins');
         Array.prototype.forEach.call(
           document.querySelectorAll('#plugin-blocks details.plug-adv'),
-          function (d) { d.open = true; });
+          function (d) {
+            d.open = true;
+            // 挑一个分区、再挑一张卡：内存与数量那两条滑块只在有顶的时候才画，
+            //   不挑的话这一格只量得到 CPU 那一条。那个分区里第一张卡正好是这个
+            //   插件默认的那张，所以三条都画得出来。
+            // 结构写死在这里是有意的：真挪了位置，这两个 `querySelector` 会取到
+            //   null 而这一格当场报"量的时候抛了"，不会静默地少量一条。
+            var part = d.querySelector('.row > div:nth-child(5) > select');
+            if (part) {
+              part.value = 'gpu-long-queue';
+              if (part.onchange) part.onchange();
+              var gres = d.querySelector('.row > div:nth-child(3) > select');
+              if (gres) {
+                gres.value = '0';
+                if (gres.onchange) gres.onchange();
+              }
+            }
+          });
         return Promise.resolve();
       },
-      // 展开之后那五格必须真的画出来了（判据见上面那个 `drawnAdvFields`：
+      // 展开之后那五格必须真的画出来了（判据见上面那个 `drawnAdvCount`：
       //   "DOM 里有"是不够的，这个无头壳里收着的 details 也留着那几个孩子的矩形）。
       //   少了这一步，一格空白会以"一处溢出都没有"的样子通过 —— 而"没画"与
       //   "画了但不溢出"在这一格眼里必须分得开。
-      sentinel: function () { return drawnAdvFields() >= 5; },
-      what: '第二屏（每一块的高级选项都展开、分区表已喂）',
+      //   那三条滑块也一起数：它们是这一格新长出来的东西，而"一条都没画"与
+      //   "画了但没顶出去"在这一格眼里同样必须分得开。
+      sentinel: function () {
+        return drawnAdvCount(':scope > div') >= 5 && drawnAdvCount('input[type=range]') >= 3;
+      },
+      what: '第二屏（每一块的高级选项都展开、分区与卡都选了）',
     },
 
     // 作业屏：三行。它画的不是 `renderSessions` 那一份，而是 `JOBS` 那一格

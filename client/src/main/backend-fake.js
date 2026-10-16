@@ -140,8 +140,8 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 // GRES 那一格是故意的假，而且比真集群"脏"：本机那台真集群只有不带型号的
 //   `gpu`，所以"带型号"（`gpu:a6000`）与"名字不是 gpu"（`mps`）这两条路只在
 //   这里走得到。夹具比现实干净，缺陷就会在用例里隐形 —— 见账本 F26。
-//   形状与字段名照抄 `scontrol show node -o` 的 `Gres=` 与守护进程的
-//   `gres_catalog()`（`scontrol show config` 的 GresTypes 只列名字，不带数量）。
+//   形状与字段名照抄 `scontrol show node -o` 的 `Gres=` 以及守护进程的
+//   `node_catalog()`（`scontrol show config` 的 GresTypes 只列名字，不带数量）。
 const GRES = {
   '2080TI': [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }],
   'A6000': [{ name: 'gpu', type: 'a6000', per_node_max: 4, total: 8 }],
@@ -150,6 +150,16 @@ const GRES = {
   'RTX8000': [{ name: 'gpu', type: 'rtx8000', per_node_max: 4, total: 4 },
               { name: 'mps', type: null, per_node_max: 100, total: 100 }],
   'DEBUG': [],
+};
+// 每个分区里内存最大的那种节点有多少 MB（协议里那一格，同 `RealMemory=`）。
+//   三种形状都要有，否则界面上那几种分支在开发者模式里一个都走不到：
+//     · `128000` —— 整 GB（125 GB），滑块画得出来；
+//     · `191000` —— 真机上很常见的那种不整的数（186.5 GB），顶要向下取整；
+//     · 缺席（DEBUG）—— 没问到，界面不画滑块，只留输入框。
+const MEM_MB = {
+  '2080TI': 128000,
+  'A6000': 191000,
+  'RTX8000': 262144,
 };
 const PARTITIONS = [
   { name: '2080TI',  allowed: true,  is_default: true, max_time: '183-00:00:00', gres: GRES['2080TI'] },
@@ -1607,7 +1617,13 @@ class FakeBackend extends Backend {
     // 每一项都真的拷一份（含 GRES 那一格）：真实后端回的是刚解析出来的 JSON，
     // 谁都不与别人共享一个对象。这里共享的话，界面上一处手误的原地修改会同时
     // 改掉所有会话看到的那一份 —— 而那种 bug 在真集群上不会出现。
-    return PARTITIONS.map((p) => ({ ...p, gres: p.gres.map((e) => ({ ...e })) }));
+    // `mem_per_node_mb` 缺席时就真的不写这个键（`DEBUG` 那一项）：接口那一侧
+    //   要看到的正是"这个键不在"，补一个 `undefined` 是两个不同的形状。
+    return PARTITIONS.map((p) => {
+      const d = { ...p, gres: p.gres.map((e) => ({ ...e })) };
+      if (Number.isInteger(MEM_MB[p.name])) d.mem_per_node_mb = MEM_MB[p.name];
+      return d;
+    });
   }
 
   /**

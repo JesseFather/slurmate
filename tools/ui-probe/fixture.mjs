@@ -119,6 +119,10 @@ export function buildPluginsView() {
         description: '这个插件的说明也可以很长，长到它在窄窗口里必须自己折行，'
           + '而不是把旁边那几格顶出去。',
         maxSessions: 12,
+        // 这一块三格滑块都画得出来（CPU / 内存 / 数量），另外两块各差一条 ——
+        //   那几格长出来之后这一行会不会顶出去，只有这一格量得到。
+        defaults: { cpus: 2, mem: '8G', time: '12:00:00',
+                    gpus: { name: 'gpu', type: 'a100-80g', count: 2 } },
       }),
       one({
         id: '01m4x3bpny0363sf5qmfw89zgt2', version: '2.0.0', name: 'sshd',
@@ -215,12 +219,12 @@ export function buildPortAsk() {
  */
 export function buildPartitions() {
   return [
-    { name: 'gpu-long-queue', allowed: true,
+    { name: 'gpu-long-queue', allowed: true, mem_per_node_mb: 191000,
       gres: [
         { name: 'gpu', type: 'a100-80g', per_node_max: 4, total: 32, label: 'a100-80g' },
         { name: 'gpu', type: 'h100', per_node_max: 8, total: 16, label: 'h100' },
       ] },
-    { name: 'cpu-with-a-long-name', allowed: true,
+    { name: 'cpu-with-a-long-name', allowed: true, mem_per_node_mb: 128000,
       gres: [{ name: 'gpu', type: null, per_node_max: 1, total: 2, label: '任意卡' }] },
     { name: 'restricted', allowed: false,
       reason: '这个分区要另外申请，申请单在集群的门户上填，批下来之前这里提交不出去。' },

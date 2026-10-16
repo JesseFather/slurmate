@@ -907,10 +907,15 @@ JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` 当�
 > 作业占着两张 A100，而用户以为自己没要卡，没有任何地方会报错。
 > 把正则写宽一点治不了这个病，病是"同一件事有两个表示"。
 
-上限来自集群，不来自代码：`Slurm.gres_catalog()` 从 `scontrol show node -o`
+上限来自集群，不来自代码：`Slurm.node_catalog()` 从 `scontrol show node -o`
 的 `Gres=` 与 `Partitions=` 算出每个分区上有什么、每节点几个；
 `Sessiond.fit_gres()` 拿它对账。查不到目录时放行（权威在 Slurm 那一侧）。
 一个写死的数字（比如 8）是替所有站点做同一个决定。
+
+同一趟查询的第三格是 `RealMemory=`，算出来的是每个分区里内存最大的那种节点，
+它是界面那个内存滑块的天花板（协议里那一格叫 `mem_per_node_mb`）。它与 GRES
+是两个累加器：没配 GRES 的节点占绝大多数，而它们照样有内存。
+它不是一道闸 —— 服务端对内存只校验写法，要得比节点还大只是排不上。
 
 两处不许混的东西：
 

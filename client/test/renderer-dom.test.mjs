@@ -1400,6 +1400,121 @@ test('高级选项：一块一份，两块各填各的，值不串到另一块',
     + '的默认值"。若串味这里会看到甲的那 4 核');
 });
 
+test('三格滑块：停在站点那份默认上，拖动它就把值写进那一格', () => {
+  // 2026-10-16 用户要的（"CPU 数量、GPU 数量、内存大小都采用拖进度条的方式"）。
+  // 三条判据是两条决定加一条老语义：
+  //   · 滑块停在站点按插件定的那份默认上，而且那份默认变了它跟着走
+  //     （所以它不是一个写死的起点）；
+  //   · 拖动就是把值写进那一格（提交那一侧读的仍然是那一格，见 `startWith`）；
+  //   · 而"留空即默认"一个字没变 —— 停在默认位置不等于那一格里有字。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES });
+  const a = h.fn('pluginAdv')({ cpus: 2, mem: '8G', time: '12:00:00',
+    gpus: { name: 'gpu', type: null, count: 1 } });
+  const st = a.st;
+  const cells = childrenOf(a.box).find((x) => x.className === 'row').children;
+  const rangeOf = (i) => childrenOf(cells[i]).find((x) => x.type === 'range');
+
+  // ── CPU：档位表是 1 2 4 8 12 …，2 那一档是下标 1 ──
+  assert.equal(rangeOf(0).value, '1', 'CPU 那条停在站点的默认（2 核）上，不是起点上');
+  assert.equal(st.cpus.value, '', '而那一格里仍然一个字都没有 —— 留空即默认');
+  assert.equal(rangeOf(0).max, '17',
+    '档位表：1 2 4 8 12 16 20 24（8 档）+ 28 32 … 64（10 档）共 18 档');
+  rangeOf(0).value = '3';                    // 下标 3 = 8 核
+  rangeOf(0).oninput();
+  assert.equal(st.cpus.value, '8', '拖动它就是把值写进那一格');
+  // 反过来：用户直接打字，滑块跟着挪（只挪位置，不改他打的字）。
+  //   那一格上的监听是 `addEventListener('input', …)` 挂的（不是 `oninput`），
+  //   这个架子把它记在 `_ls` 里。
+  const typed = (ctrl) => ctrl._ls.filter((x) => x[0] === 'input').forEach((x) => x[1]());
+  st.cpus.value = '20';
+  typed(st.cpus);
+  assert.equal(rangeOf(0).value, '6', '手打 20 核之后滑块移到 20 那一档（下标 6）');
+  st.cpus.value = '7';                       // 不在档位上
+  typed(st.cpus);
+  assert.equal(rangeOf(0).value, '6', '打了一个不在档位上的数时滑块不动，也不改他打的数');
+  assert.equal(st.cpus.value, '7');
+
+  // ── 内存：顶是分区里最大的那种节点，默认是站点那份 `defaults.mem` ──
+  assert.equal(rangeOf(1), undefined, '还没选分区时没有顶 —— 那条滑块不画');
+  h.fn('renderPartitions')([
+    { name: 'normal', allowed: true, mem_per_node_mb: 128000,
+      gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] },
+    { name: 'big', allowed: true, mem_per_node_mb: 191000, gres: [] },
+  ]);
+  st.part.value = 'normal';
+  st.part.onchange();
+  assert.equal(rangeOf(1).max, '124', '128000 MB → 125 个整 GB，下标 0…124');
+  assert.equal(rangeOf(1).value, '7', '停在默认的 8G 上');
+  rangeOf(1).value = '15';
+  rangeOf(1).oninput();
+  assert.equal(st.mem.value, '16G',
+    '写回那一格的必须是 Slurm 认的写法（`--mem=16` 是 16 MB，不能只写数字）');
+
+  // ── 数量：只在点名了那张卡、而且正是插件默认的那张卡时才有得停 ──
+  assert.equal(rangeOf(3), undefined, '没点名卡就没有"几个"可言，滑块与那一格一起灰着');
+  st.gres.value = '0';                       // 第一项，正好是默认那张 `gpu`
+  st.gres.onchange();
+  assert.ok(rangeOf(3), '点了名、而且就是插件默认的那张卡 → 有滑块');
+  assert.equal(rangeOf(3).value, '0', '停在默认的 1 张上');
+  assert.equal(rangeOf(3).max, '7', '顶是服务端给的 per_node_max（8 张），与数字框同一处');
+  rangeOf(3).value = '3';
+  rangeOf(3).oninput();
+  assert.equal(st.gresN.value, '4');
+
+  // ── 换一个分区：顶跟着换，而这一格里的字与滑块的位置都留在原处 ──
+  st.part.value = 'big';
+  st.part.onchange();
+  assert.equal(rangeOf(1).max, '185', '191000 MB（186.5 GB）向下取整到 186 GB');
+  assert.equal(rangeOf(1).value, '15', '而滑块还停在刚才拖到的 16G 上，没有弹回默认');
+  assert.equal(st.mem.value, '16G');
+  assert.equal(rangeOf(3), undefined, '换分区会把 GRES 那一格清掉，数量那条跟着消失');
+});
+
+test('滑块画不出来就不画：站点没给默认、默认不在档位上、或者不是默认的那张卡', () => {
+  // 画一个停在错位置上的滑块比不画更坏：用户会照着它按下去，而那个数不是
+  //   站点说的默认。所以装不上的四种情况一律不画，只留原来那个输入框。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES });
+  const cellsOf = (box) => childrenOf(box).find((x) => x.className === 'row').children;
+  const rangeOf = (cells, i) => childrenOf(cells[i]).find((x) => x.type === 'range');
+
+  // ① 站点那份默认整个拿不到（老守护进程的 `defaults` 是 null）
+  const a1 = h.fn('pluginAdv')(null);
+  assert.equal(rangeOf(cellsOf(a1.box), 0), undefined, '没有默认值就没有滑块，一格都没有');
+
+  // ② 默认不在档位上 → 插进去，滑块停得在它上面（6 核不是 1/2/4/8 那张表上的数）
+  const a2 = h.fn('pluginAdv')({ cpus: 6, mem: '512M', gpus: null });
+  const c2 = cellsOf(a2.box);
+  assert.equal(rangeOf(c2, 0).value, '3', '6 核插在 4 与 8 之间，滑块停在它上面');
+  assert.equal(rangeOf(c2, 1), undefined, '`512M` 不是整 GB —— 内存那条不画');
+  assert.equal(rangeOf(c2, 3), undefined, '`gpus: null` 是"本站没配默认卡"，不画');
+
+  // ③ 默认超出了上限（CPU 那一格的上限是那个有人交叉盯着的常量）
+  const a3 = h.fn('pluginAdv')({ cpus: 999, mem: '8G' });
+  assert.equal(rangeOf(cellsOf(a3.box), 0), undefined,
+    '默认比上限还大时不画 —— 装了它也只能停在一个服务端会钳掉的数上');
+
+  // ④ 选了另一张卡：没有"默认几个"这回事（替它补一个数就是替站点定政策）
+  const a4 = h.fn('pluginAdv')({ cpus: 2, mem: '8G',
+    gpus: { name: 'gpu', type: null, count: 1 } });
+  h.fn('renderPartitions')([
+    { name: 'mixed', allowed: true, mem_per_node_mb: 262144,
+      gres: [{ name: 'gpu', type: 'rtx8000', per_node_max: 4, total: 4 },
+             { name: 'mps', type: null, per_node_max: 100, total: 100 }] },
+  ]);
+  a4.st.part.value = 'mixed';
+  a4.st.part.onchange();
+  const c4 = cellsOf(a4.box);
+  a4.st.gres.value = '1';                    // `mps`，不是默认那张 `gpu`
+  a4.st.gres.onchange();
+  assert.equal(rangeOf(c4, 3), undefined, '换了另一张卡就没有默认几个，不画');
+  a4.st.gres.value = '0';                    // `gpu:rtx8000`
+  a4.st.gres.onchange();
+  assert.equal(rangeOf(c4, 3), undefined,
+    '型号也不一致（默认是 `gpu`、这一项是 `gpu:rtx8000`）—— 还是同一张卡才作数');
+});
+
 test('同一份插件清单不重画：展开着的高级选项不许自己合上，填了一半的值不许被清掉',
   () => {
     // 2026-10-16 用户报的三条（"展开着的「高级选项」自己合上"、"滚动位置与列表跳动"、

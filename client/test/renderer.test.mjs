@@ -878,10 +878,12 @@ test('高级选项长在每一块里，不是全屏共用的一份', () => {
   // ② 画在那一块里，而且只给起得来的那些画。
   const blockFn = /function pluginBlock\(p, pv\)[\s\S]*?\n\}/.exec(js);
   assert.ok(blockFn, 'panel.js 里应当有 pluginBlock()');
-  assert.match(blockFn[0], /if \(p\.runnable\) \{[\s\S]{0,120}?pluginAdv\(\)/,
+  assert.match(blockFn[0], /if \(p\.runnable\) \{[\s\S]{0,220}?pluginAdv\(p\.defaults\)/,
     '高级选项要画在那一块里，而且只给起得来的那些画 —— 一颗灰着的'
-    + '「开始会话」不需要资源，摆在那里等于说"这一块能起"');
-  assert.match(blockFn[0], /const a = pluginAdv\(\);[\s\S]{0,40}?d\.append\(a\.box\);/,
+    + '「开始会话」不需要资源，摆在那里等于说"这一块能起"。'
+    + '而它必须把这一块那份默认传下去：那三格滑块停在站点按插件定的默认上，'
+    + '不传，它们就只能停在一个客户端写死的数上');
+  assert.match(blockFn[0], /const a = pluginAdv\(p\.defaults\);[\s\S]{0,40}?d\.append\(a\.box\);/,
     '而它要挂进这一块里：挂到屏上那个容器上就是又变回"全屏共用的一份"');
   assert.match(blockFn[0], /startWith\(p\.name, adv, btn\)/,
     '「开始会话」交出去的必须是这一块那一份');
