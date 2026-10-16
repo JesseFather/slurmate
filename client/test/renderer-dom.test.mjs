@@ -1874,3 +1874,30 @@ test('「获取失败」的三种情况，三句不同，各有各的出路', ()
   assert.match(text2, /丁/, '愿意发的那一条仍然要说出来（本机还没有它）');
   assert.equal(/本站没有分发它/.test(text2), false, '它不属于"获取失败"那一类');
 });
+
+test('没加载上的那些收在一个能展开的框里：抬头一直在，点开看是哪几个', () => {
+  // 用户 2026-10-16：未能加载的"应该给个列表或者什么方式显示出来，但可以藏一下，
+  //   不要太明显，但不应该完全不显示"。
+  // 两句都要判：抬头在（少了它就是完全不显示），条文在框里面（少了它还是没收）。
+  const textOf = (el) => (el ? (el._text || el.textContent || '')
+    + (el.children || []).map(textOf).join('') : '');
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES });
+  h.fn('renderPlugins')({ ...PV,
+    errors: ['C:\\pool\\a.splug：这个包的清单不是合法的 JSON'],
+    problems: ['/srv/plugins/b.splug：它与池里那份撞了 id'] });
+
+  const folds = childrenOf(h.byId.get('plugin-issues'))
+    .filter((x) => x.tagName === 'DETAILS');
+  assert.equal(folds.length, 2, '两组各收一个框');
+  const headOf = (d) => childrenOf(d).find((x) => x.tagName === 'SUMMARY').textContent;
+  assert.deepEqual(folds.map(headOf),
+    ['插件没有加载', '插件有问题（已跳过，其余插件照常工作）'],
+    '抬头就是原来那两句，一个字不改（它们与守护进程逐字相同，见 renderer.test.mjs）');
+  const bodyOf = (d) => childrenOf(d).find((x) => x.className === 'issue-body');
+  assert.match(textOf(bodyOf(folds[0])), /a\.splug：这个包的清单不是合法的 JSON/,
+    '原样报下来的那一句进框里，含它自己的路径 —— 界面不改写');
+  assert.match(textOf(bodyOf(folds[1])), /b\.splug：它与池里那份撞了 id/);
+  assert.equal(folds.some((d) => d.open), false,
+    '默认收着：它不阻塞任何操作，而一字排开摆在插件列表头上像"这个客户端坏了"');
+});

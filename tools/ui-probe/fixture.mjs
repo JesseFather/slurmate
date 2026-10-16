@@ -97,7 +97,13 @@ export function buildPluginData() {
  *   字段照 `index.js` 的 `pluginsView()` 抄，一个不多一个不少。
  */
 export function buildPluginsView() {
-  const one = (o) => Object.assign({
+  // `runnable` 是三个条件的求交（站点开没开 / 本机关没关 / 站点有没有作业侧），
+  //   见 `index.js` 的 `pluginsView()`。这里从前把它和另外三个字段并列手写，
+  //   于是第二块写着「站点：未启用」却带着 `runnable: true` —— 一个真站点上
+  //   不存在的形状。而它在探针的截图上长得正好像"这颗按钮该灰没灰"。
+  //   式子搬过来算，这个字段就不会有第二种答案。
+  const one = (o) => {
+    const p = Object.assign({
     id: '01m4x3bpny0363sf5qmfw89zgt', version: '1.0.0', name: 'code-server',
     title: '浏览器里的编辑器', description: '',
     hasClientCode: true, surface: { kind: 'web', path: '/' },
@@ -105,12 +111,15 @@ export function buildPluginsView() {
     siteVersion: '1.0.0', siteEnabled: true, siteKnown: true, locallyEnabled: true,
     canSubmit: true,
     defaults: { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
-    defaultsGresText: null, runnable: true,
+    defaultsGresText: null,
     // 站点给这个插件设的会话上限。它画在那一行事实里（与「默认 2 核 / 8G」
     //   并排），所以它也是那一行会不会被顶出去的一部分 —— 第一块给一个两位数，
     //   那是这一格最宽的形状。
     maxSessions: 2,
-  }, o);
+    }, o);
+    p.runnable = p.siteEnabled && p.locallyEnabled && p.canSubmit;
+    return p;
+  };
 
   return {
     plugins: [
@@ -128,12 +137,13 @@ export function buildPluginsView() {
         id: '01m4x3bpny0363sf5qmfw89zgt2', version: '2.0.0', name: 'sshd',
         title: 'SSH 服务', description: '', ports: 0, group: null,
         surface: { kind: 'none', path: '' },
+        // 站点关着它 —— 按上面那个式子，这一块的按钮就该是灰的。
         siteEnabled: false,
-        why: '站点上这个插件现在是关着的，所以提交不了。开它要找管理员。',
       }),
+      // 「装了、也开着，但包里没有作业侧」那一档：它合法、看得见，而提交不出去。
       one({
-        id: '01m4x3bpny0363sf5qmfw89zgt3', version: '3.0.0', name: 'jupyter',
-        title: '笔记本服务', description: '', canSubmit: false, runnable: false,
+        id: '01m4x3bpny0363sf5qmfw89zgt3', version: '3.0.0', name: 'batch-echo',
+        title: '批量回声', description: '', canSubmit: false,
       }),
     ],
     // 站点侧"包装不上"的那些。它们是字符串，不是对象 —— 守护进程那边
@@ -232,6 +242,21 @@ export function buildPartitions() {
 }
 
 /** 交给页面的那一份。 */
+/**
+ * 首屏那两条连接。
+ *
+ * `bootstrap` 里给的是空的（首屏那一格量的是"一条连接都没有"那种引导语），
+ *   所以想量"行上那颗按钮"的用例得自己喂一份。
+ */
+export function buildConns() {
+  return [
+    { id: 'c000000000001', user: 'alice', host: '198.51.100.7', port: 10100,
+      workspaceId: 'w000000000001' },
+    { id: 'c000000000002', user: 'bob', host: '198.51.100.9', port: 10100,
+      workspaceId: 'w000000000002' },
+  ];
+}
+
 export function buildPageFixture() {
   return {
     pluginData: buildPluginData(),
@@ -239,5 +264,6 @@ export function buildPageFixture() {
     partitions: buildPartitions(),
     jobs: buildJobs(),
     portAsk: buildPortAsk(),
+    conns: buildConns(),
   };
 }

@@ -425,8 +425,8 @@ button.remember:hover { background: #5c4e22; }
    收起来的时候它只有一个小三角加一行小字，没有框、没有内边距：它默认就是收着的，
    而一块带边框的空盒子摆在那里，看起来像这一块还有东西没填完。展开之后才给它框
    —— 那时它才是一个区块，框在说这几格属于一起。
-   这是全界面唯一一个 `<details>`（从前那条通用的 `details` 规则并入这里，
-   不留一条谁也匹配不到的规矩）。 */
+   全界面只有两处 `<details>`：这一处，以及「没加载上的那些」那一组（`issueFold`）。
+   从前那条通用的 `details` 规则并进了这里，`summary` 那条留着给第二处用。 */
 .plug-adv { margin: 12px 0 0; }
 details[open].plug-adv {
   border: 1px solid var(--border); border-radius: 4px;
@@ -578,6 +578,11 @@ p.alarm {
 .issue.err { border-left-color: var(--err); }
 .issue.warn { border-left-color: var(--warn); }
 .issue .h { color: var(--fg); font-weight: 600; }
+/* 收起来的那些（见 `issueFold`）：抬头一行，点开是这一组里的每一条。
+   每一条是站点原样报下来的字，`pre-wrap` 才会让那些换行与缩进照原样显示。 */
+.issue-fold > summary { color: var(--fg); font-weight: 600; cursor: pointer; }
+.issue-fold[open] > summary { margin-bottom: 6px; }
+.issue-body { padding-bottom: 1px; }
 
 /* ── 主机密钥确认框 ── */
 dialog {

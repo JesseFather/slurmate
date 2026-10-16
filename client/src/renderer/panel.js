@@ -1655,9 +1655,11 @@ function renderPlugins(pv, force) {
   }
 
   // ── 池里的问题：被跳过的东西必须说出来 ──
-  for (const e of pv.errors || []) {
-    issues.append(issueBox('err', '插件没有加载', e));
-  }
+  //
+  // 收起来（`issueFold`）：它一字排开能占满整屏，而这一屏的主角是那些插件块。
+  //   抬头一直在，少了哪一个点开就看得到。
+  const errs = pv.errors || [];
+  if (errs.length) issues.append(issueFold('err', '插件没有加载', errs));
 
   // ── 站点侧的问题：本站有包装不上（账本 F22）──────────────────────
   //
@@ -1681,8 +1683,9 @@ function renderPlugins(pv, force) {
   //
   // 与上面 `errors` 必须分开画：主语不同（本机池 vs 站点），出路也不同
   //   （重新同步 vs 找管理员）。合成一列就把"是我这儿坏了还是本站装坏了"糊掉了。
-  for (const p of pv.problems || []) {
-    issues.append(issueBox('warn', '插件有问题（已跳过，其余插件照常工作）', p));
+  const probs = pv.problems || [];
+  if (probs.length) {
+    issues.append(issueFold('warn', '插件有问题（已跳过，其余插件照常工作）', probs));
   }
 
   // ── 站点有而本机没有 ──
@@ -2794,6 +2797,26 @@ function issueBox(kind, head, body) {
   d.className = 'issue ' + kind;
   d.append(el('span', 'h', head + '：'));
   d.append(document.createTextNode(body));
+  return d;
+}
+
+/**
+ * 一组"没加载上"的话，收在一个能展开的框里。
+ *
+ * 它们不阻塞任何操作（守护进程照常跑，其余插件照常工作），而一字排开摆在插件
+ *   列表头上，读起来像"这个客户端坏了"。收起来只留一行抬头，要看是哪几个就点开
+ *   —— 这与不显示是两回事：抬头一直在，而少了哪一个点开就查得到。
+ * 每一条仍然原样是站点报下来的那句话（含它自己的路径），一个字不改写：那些句子
+ *   是守护进程按当下的诊断算出来的，这里重写就是造第二份会漂的真相。
+ */
+function issueFold(kind, head, list) {
+  const d = document.createElement('details');
+  d.className = `issue issue-fold ${kind}`;
+  d.append(el('summary', null, head));
+  const body = document.createElement('div');
+  body.className = 'issue-body';
+  for (const one of list) body.append(document.createTextNode(one + '\n'));
+  d.append(body);
   return d;
 }
 

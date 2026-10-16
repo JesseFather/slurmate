@@ -213,6 +213,12 @@
       // 滑块旁边还留着输入框的有几条、没有读数的有几条（判据见 `judge`）。
       advBoxes: slid.boxes,
       advNoval: slid.noval,
+      // 夹具自己的一致性：`runnable` 是那三个条件的求交（见 `index.js` 的
+      //   `pluginsView()`）。它从前在这里是手写的，于是有一块写着「站点：未启用」
+      //   却按得动 —— 一个真站点上不存在的形状，而它量出来的排布也不作数。
+      fixtureRunnableOff: ((F.pluginsView || {}).plugins || []).filter(function (p) {
+        return p.runnable !== (p.siteEnabled && p.locallyEnabled && p.canSubmit);
+      }).length,
       jobRows: document.querySelectorAll('#job-list .job').length,
       portAsk: $('sb-port').classList.contains('hidden') ? 0 : 1,
     };
@@ -245,6 +251,31 @@
       },
       sentinel: function () { return !!document.querySelector('#plugin-data .armed'); },
       what: '首屏，插件数据那一行的删除确认展开',
+    },
+
+    // 首屏，点了一条连接的「连接」、结果还没回来。
+    //
+    // 这一格量的是"那几秒里按钮长什么样"：真站点上一次连接可能几十秒，而假站点
+    //   的 `connect()` 不发任何 RPC、瞬间返回，所以不把它兜住就永远量不到。
+    //   兜住的办法是给它一个永不落地的 promise（`window.slurmate` 那个 Proxy
+    //   认得这个方法名，写在它身上就盖过了兜底那一档）。
+    'conns-connecting': {
+      setup: function () {
+        window.slurmate.setActiveConnection = function () {
+          return Promise.resolve({ ok: true });
+        };
+        window.slurmate.connect = function () { return new Promise(function () {}); };
+        renderConnections(F.conns || []);
+        showScreen('conns');
+        var btn = document.querySelector('#conn-list .conn button');
+        if (btn) btn.click();
+        return Promise.resolve();
+      },
+      sentinel: function () {
+        var btn = document.querySelector('#conn-list .conn button');
+        return !!btn && btn.disabled && btn.textContent === '连接中…';
+      },
+      what: '首屏：连接进行中（点下去还没出结果）',
     },
 
     // 第二屏：三个插件块，其中一个标题很长、一个站点关着、一个起不来。
