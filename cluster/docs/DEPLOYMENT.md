@@ -41,18 +41,15 @@ nft list chain inet slurmate output
 
 ### 2. Slurm 报的节点地址是 IPv4
 
-依据：会话的 ACL 规则（`ip daddr <节点IP> tcp dport <端口> … drop`）要一个**字面
-IPv4**，而它的权威来源是 `scontrol show node` 的 `NodeAddr=`。`NodeAddr` 报主机名
-（由 Slurm 解析）的集群今天用不了：`Slurm.node_ip()` 会退回 `scontrol show hostname`
-去解析，解析不出 IPv4 就是 `None`，那台节点上的会话一条都登记不上。
+依据：会话的 ACL 规则（`ip daddr <节点IP> tcp dport <端口> … drop`）要一个字面
+IPv4，权威来源是 `scontrol show node` 的 `NodeAddr=`。
+
+`NodeAddr` 报主机名的集群今天用不了：`Slurm.node_ip()` 会退回
+`scontrol show hostname` 去解析，解析不出 IPv4 就是 `None`，那台节点上的会话一条都
+登记不上。
 
 怎么确认：`tools/check-cluster.sh` 的〈登录节点地址〉那一节会打印
 `NodeName=/NodeAddr=` 对照表，一眼看得出。
-
-> 0.23 之前这里还有一条前置条件：「登录节点与全部计算节点在同一 IPv4 网段内，且能
-> 用一个 CIDR 表达」。那个 `cluster_cidr` 参数删掉了（见
-> [CONFIGURATION.md](CONFIGURATION.md) 的〈ACL 的目标地址〉），所以跨子网的集群现在
-> 也能用 —— 判据从"一个网段盖住全部节点"换成了"每条规则的目标是一台真节点"。
 
 ### 3. 共享家目录（NFS 或同类），并且支持服务端原子 rename
 
@@ -254,9 +251,8 @@ code 6 `submit_failed`。每一次提交都失败，用户看到的是中文的�
 退出码两档分工如下，部署脚本靠它决定"现在就停"还是"装完再判"。
 
 - `2`：这台机器缺东西。一个字节都不装。
-- `1`：这份配置写错了，停。读的是已装的那份、还是包里那份示例，都是这一档 ——
-  示例配置过不了自检就是打包的问题。（0.23 之前这里有例外：示例里 `cluster_cidr`
-  空着，而那一格非填不可，所以第一次部署允许它不通过。那个键删掉之后没有例外了。）
+- `1`：这份配置写错了，停。读的是已装的那份、还是包里那份示例，都是这一档：示例
+  配置过不了自检就是打包的问题。
 
 机器级（`2`）先判：一台"机器缺东西"的机器上，一句"配置写错了"不该把它盖成别的意思。
 
