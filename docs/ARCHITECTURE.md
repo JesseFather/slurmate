@@ -178,8 +178,10 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 见 [`client/README.md`](../client/README.md)。
 
 > `client/src/main/backend-ssh.js` 已经实现（专用密钥认证、固定 argv 的 RPC、
-> 主机密钥 TOFU 校验），但从未在真实登录节点上验证过。SSH 握手、exec 通道与
-> `direct-tcpip` 转发都还没有一次真实输出。
+> 主机密钥 TOFU 校验），而 SSH 握手与 exec 通道都在真集群上走通过一次：版本握手与
+> 那几项站点查询取回的是那台集群的真实数据。
+> `direct-tcpip` 转发还没有真实输出 —— 那要提交一个会话、把服务跑起来。
+> 见 [`docs/KNOWN-ISSUES.md`](KNOWN-ISSUES.md) 的 U1。
 
 > 在那之前，界面上的开发者模式仍然可用，假后端不是空壳：它跑真的隧道代码、
 > 真的状态机、真的登录契约，而且真的把插件的作业侧跑起来。

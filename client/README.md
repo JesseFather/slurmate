@@ -204,9 +204,10 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 ## 当前状态
 
 客户端与集群侧协议已经同步（见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md) 的
-〈协议版本〉）。真实的 SSH 握手、exec channel 与端口转发尚未在真集群上
-验证过 —— 那需要先用系统 `ssh` 跑一遍 Phase 0 的三条实测（见
-`src/main/backend-ssh.js` 的文件头）。
+〈协议版本〉）。真实的 SSH 握手与 exec 通道已经走通过：连上一台真集群之后，版本握手与
+那几项站点查询取回的是那台集群的真实数据。还没有真实输出的是提交之后那一段
+（提交会话、服务起来、`direct-tcpip` 转发、释放），见
+[`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的 U1 与 U6。
 
 站点分发这条路径同样一次都没在真集群上跑过。客户端把插件取回来的每一步（清单 → 一次
 `plugin_package` → 自己解析、重算摘要、验签 → 暂存校验 → 同意闸 → 换入）本机都只用
