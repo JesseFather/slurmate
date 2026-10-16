@@ -229,6 +229,12 @@ input.full, select.full { width: 100%; }
 button {
   font: inherit; cursor: pointer; border: 0; border-radius: 3px;
   padding: 7px 14px; background: var(--accent); color: #fff;
+  /* 一颗按钮的文字折行，在任何容器里都是错的：它读起来像两件事，而按下去
+     只有一件事。用户 2026-10-17 报的就是这一处（映射图里那颗「改名」被 flex
+     压窄，文字竖成了两行，而盒子自己的矩形规规矩矩待在界内，所以两条老判据
+     一条都不响）。这里禁掉折行，压窄就变成"文字比盒子宽"——
+     而那一条由探针量（`measure.js` 那一段「按钮的文字」）。 */
+  white-space: nowrap;
 }
 button:hover { background: var(--accent-hover); }
 button:disabled { opacity: .45; cursor: not-allowed; }
@@ -398,7 +404,7 @@ button.remember:hover { background: #5c4e22; }
 .wmap-lines { position: absolute; left: 0; top: 0; pointer-events: none; }
 .wmap-lines .edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
 .wmap-lines .edge.cur { stroke: var(--accent-hover); stroke-width: 2; }
-.wmap-col { display: flex; flex-direction: column; gap: 6px; }
+.wmap-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 /* 末列（数据）不拉伸：它按内容定宽、左边缘对齐，指着它的线才都落在同一个 x 上。
    中间那一列反过来 —— 它要拉伸，见上面 `.wmap` 那一段。 */
 .wmap-col:last-child { align-items: flex-start; }
@@ -407,16 +413,40 @@ button.remember:hover { background: #5c4e22; }
   padding: 4px 10px; min-height: 26px;
   border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg-alt); font-size: 12px;
+  /* 末列那一个不拉伸（它按内容定宽，见 `.wmap-col:last-child`），所以内容长了
+     它会自己变宽、顶出面板 —— 一条长插件标题就够（探针 2026-10-17 量到 183px）。
+     `max-width` 把它按在列宽以内，里面那几格各自出省略号。 */
+  max-width: 100%;
 }
 .wnode .nm {
   font-family: ui-monospace, Consolas, monospace;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 数据那一个节点的身份是一位端口号，内容固定且短，所以它不让位：让位的活儿
+   全归右边那句小字（它是描述，省略了也不丢信息 —— 完整的在 title 里）。
+   连接与工作区那两格的名字由用户取，可能很长，那两格照旧可以缩。 */
+.wnode.sp .nm { flex: none; }
 .wnode.cur { border-color: var(--accent); background: #0e3a5c; }
-.wnode.ws .meta, .wnode.sp .meta { color: var(--fg-dim); font-size: 11px; flex: none; }
+/* 节点里那颗按钮【不需要额外的规则】：`button` 上的 `white-space: nowrap` 已经让
+   它的 min-content 宽度等于整条文字，而 flex 压不动一个不可再分的内容
+   （`min-width: auto` 就是那个下限）。实测：去掉这一层什么都量不出来 ——
+   早先这里写的 `flex: none` 因此删掉了，它守的是同一件事的第二遍。 */
+/* 节点里那两格小字（工作区的「几条连接」、数据那一格的「谁的一份 · 几个工作区在用」）。
+   它们【要能被压缩】，出省略号：`flex: none` 会让一个长插件标题把整个节点撑破，
+   而节点在 grid 的 1fr 列里 —— 结果是 `#panel` 横向滚出来（探针 2026-10-17 量到
+   183px）。同理 `.wmap-col` 要 `min-width: 0`：grid 项的自动最小尺寸是内容宽度，
+   不减到 0 的话 1fr 那一列会被内容顶宽，`min-width: 0` 才让它真的按比例分。 */
+.wnode.ws .meta, .wnode.sp .meta {
+  color: var(--fg-dim); font-size: 11px; flex: 0 3 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* 连接节点上那一行插件名（小字）。它不是一条线的一端 —— 数据那一列才是；
-   它说的是"这个工作区里已经有它的一份数据了"，所以刻意做得比 `nm` 轻。 */
-.wnode .plug-chips { color: var(--fg-dim); font-size: 11px; flex: none; }
+   它说的是"这个工作区里已经有它的一份数据了"，所以刻意做得比 `nm` 轻。
+   压缩与省略号与上面那两格同理：名字可以是好几个，条数不定。 */
+.wnode .plug-chips {
+  color: var(--fg-dim); font-size: 11px; flex: 0 3 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .wnode input.rename { width: 130px; padding: 1px 6px; font-size: 12px; }
 
 /* ── 高级选项（每一块插件自己一份）──

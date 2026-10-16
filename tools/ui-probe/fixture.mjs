@@ -250,10 +250,40 @@ export function buildPartitions() {
  */
 export function buildConns() {
   return [
-    { id: 'c000000000001', user: 'alice', host: '198.51.100.7', port: 10100,
+    { id: 'c000000000001', user: 'alice', host: '198.51.100.7', port: 22,
       workspaceId: 'w000000000001' },
-    { id: 'c000000000002', user: 'bob', host: '198.51.100.9', port: 10100,
+    { id: 'c000000000002', user: 'bob', host: '198.51.100.9', port: 22,
       workspaceId: 'w000000000002' },
+  ];
+}
+
+/**
+ * 首屏那张映射图要的另外两列：工作区与数据。
+ *
+ * 形状照两处真产出抄：工作区是 `config.js` 的 `workspacePlan()`（`id` / `name` /
+ *   `refCount` / `members` / `soleOwnerId` / `refs` / `spaces`），一份数据是
+ *   `parseSpace` 那一行的四个字段（`id` / `pluginId` / `group` / `ports`）。
+ * 名字刻意给长的：这一格要问的正是"工作区那一列窄下来时，那颗「改名」会不会被压"
+ *   （用户 2026-10-17 报的就是它），而一个短名字的夹具量不到。
+ * 第一份数据被两个工作区一起指着 —— 图上会汇成两条线，那正是这张图存在的理由。
+ */
+export function buildWorkspaces() {
+  return [
+    { id: 'w000000000001', name: '一个名字很长很长的工作区', refCount: 1,
+      members: ['c000000000001'], soleOwnerId: 'c000000000001',
+      refs: { '01m4x3bpny0363sf5qmfw89zgt': 's000000000001' },
+      spaces: ['s000000000001'] },
+    { id: 'w000000000002', name: '工作区 2', refCount: 1,
+      members: ['c000000000002'], soleOwnerId: 'c000000000002',
+      refs: { '01m4x3bpny0363sf5qmfw89zgt': 's000000000001' },
+      spaces: ['s000000000001'] },
+  ];
+}
+
+export function buildSpaces() {
+  return [
+    { id: 's000000000001', pluginId: '01m4x3bpny0363sf5qmfw89zgt',
+      group: 'editor', ports: [18080] },
   ];
 }
 
@@ -265,5 +295,7 @@ export function buildPageFixture() {
     jobs: buildJobs(),
     portAsk: buildPortAsk(),
     conns: buildConns(),
+    workspaces: buildWorkspaces(),
+    spaces: buildSpaces(),
   };
 }

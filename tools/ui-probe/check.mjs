@@ -256,6 +256,18 @@ function judge(r) {
     bad.push(`${o.sel} 越过右边界 ${o.over}px：${o.text}`);
   }
   if ((r.offenders || []).length > 6) bad.push(`另外还有 ${r.offenders.length - 6} 处越界`);
+  // 按钮的文字被挤了：折成两行，或者比盒子还宽。
+  //   它与上面两条不是同一件事 —— 折行的按钮【既不滚动也不越界】（盒子规规矩矩
+  //   待在界内），所以两条老判据一条都不响。用户 2026-10-17 报的就是这一处。
+  for (const b of (r.buttons || []).slice(0, 6)) {
+    bad.push(`${b.sel} 的文字被挤了：${b.lines} 行，文字 ${b.textWidth} > 盒子 `
+      + `${b.boxWidth}：${b.text}`);
+  }
+  if ((r.buttons || []).length > 6) bad.push(`另外还有 ${r.buttons.length - 6} 处按钮被挤`);
+  // 数据那一格的身份（端口号）被省略号截了 —— 认不出是哪一份。
+  for (const c of (r.clipped || []).slice(0, 4)) {
+    bad.push(`${c.sel} 的身份被截了：文字 ${c.textWidth} > 可见 ${c.boxWidth}：${c.text}`);
+  }
   // 滑块旁边不该再留一个输入框，而它停在哪儿要看得见（用户 2026-10-16 点名）。
   //   只在真的画了滑块的格子上判：没装滑块的格子本来就该留着那个框
   //   （站点没给默认、默认不在档位上时，它是唯一能填的地方）。
@@ -274,8 +286,8 @@ function judge(r) {
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
-const CASES = ['conns', 'conns-armed', 'conns-connecting', 'plugins', 'plugins-adv',
-  'jobs', 'statusbar-port'];
+const CASES = ['conns', 'conns-armed', 'conns-connecting', 'conns-ws', 'plugins',
+  'plugins-adv', 'jobs', 'statusbar-port'];
 
 async function main() {
   const argv = process.argv.slice(2);

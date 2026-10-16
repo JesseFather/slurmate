@@ -198,6 +198,66 @@
       }
     });
 
+    // ── 按钮的文字：折行了没有、压窄了没有 ────────────────────────────────
+    //
+    // 这一条与上面两条判的不是同一件事。用户 2026-10-17 报的那一处（映射图里
+    //   那颗「改名」）【既不滚动、也不越过右边界】：flex 把一个不许压缩的盒子
+    //   压窄，文字就在盒子内部折成了两行，而盒子自己的矩形规规矩矩待在界内。
+    //   两条老判据一条都不响，所以这一类从来没被量过 —— 那一屏甚至没有被画出来
+    //   过（`conns` 那个用例一条连接都没有，`#sec-workspaces` 一直留在 hidden）。
+    // 两个方向都算，缺一不可：
+    //   · 文字占了不止一行 —— 用 Range 量它自己的矩形，一个行盒一个矩形；
+    //   · 或者文字比盒子还宽 —— 盒子被压窄而文字顶出去。
+    //   第二条【必须】这样量：`scrollWidth` 对 `overflow: visible` 的盒子不包含
+    //   溢出的内容（规范如此），所以拿它比 `clientWidth` 的话这一条永远不会响 ——
+    //   一条永远不会红的判据比没有更坏（变异验证实测：去掉按钮的 `flex: none`
+    //   它照样绿）。Range 给的矩形是文字自己的宽度，与盒子能不能滚无关。
+    out.buttons = [];
+    Array.prototype.forEach.call(document.querySelectorAll('button'), function (el) {
+      if (!visible(el)) return;
+      if (!(el.textContent || '').trim()) return;
+      var rects = null;
+      try {
+        var rng = document.createRange();
+        rng.selectNodeContents(el);
+        rects = rng.getClientRects();
+      } catch (e) {
+        return;         // 量不到就不判它 —— 这一条不该变成"抛了就算红"
+      }
+      if (!rects || !rects.length) return;
+      var textW = 0;
+      for (var i = 0; i < rects.length; i++) {
+        textW = Math.max(textW, rects[i].width);
+      }
+      var cs = getComputedStyle(el);
+      var boxW = el.clientWidth
+        - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+      if (rects.length > 1 || textW > boxW + 1) {
+        out.buttons.push({ sel: describe(el), lines: rects.length,
+          textWidth: Math.round(textW), boxWidth: Math.round(boxW),
+          text: snippet(el) });
+      }
+    });
+
+    // 数据那一格的「端口 N」不许被截：它是那个节点的身份，截了就认不出是哪一份，
+    //   而右边那句小字（插件名 · 几个工作区）截掉不丢信息（完整的在悬停里）。
+    //   所以这一格在 CSS 里是 `flex: none`，而这条判据就是守着它的那一条 ——
+    //   没有它的话，把那条规则删掉什么都不会红（这个仓库栽过这个形状）。
+    //   它刻意只管这一格：连接名与工作区名是用户取的，长到放不下时截掉是对的，
+    //   推广到 `.wnode .nm` 会把正常行为判成缺陷。
+    out.clipped = [];
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.wnode.sp .nm'), function (el) {
+        if (!visible(el)) return;
+        var rng = document.createRange();
+        rng.selectNodeContents(el);
+        var w = rng.getBoundingClientRect().width;
+        if (w > el.clientWidth + 1) {
+          out.clipped.push({ sel: describe(el), textWidth: Math.round(w),
+            boxWidth: el.clientWidth, text: snippet(el) });
+        }
+      });
+
     // 数出来几个，写进报告。少了这一格，"这一格什么都没画"与"这一格画了但没有
     //   溢出"在报告里长得一样，而前者是本文件最该抓住的一种假绿
     //   （哨兵抓的是"整格是空的"，这一格抓的是"某一类元素一个都没有"）。
@@ -276,6 +336,34 @@
         return !!btn && btn.disabled && btn.textContent === '连接中…';
       },
       what: '首屏：连接进行中（点下去还没出结果）',
+    },
+
+    // 同一屏，把那张映射图画出来：两条连接 → 两个工作区 → 一份共用的数据。
+    //
+    // 这一格是"工作区那一列窄下来的时候，节点里那颗「改名」会不会被压成两行"
+    //   唯一量得到的地方。`conns` 那一格的桩给的是 `connections: []`，于是
+    //   `renderConnections` 把 `#sec-workspaces` 留在 hidden —— 那张图【从来没被
+    //   画出来过】，而用户 2026-10-17 报的正是它。
+    // 工作区与数据都喂到 `boot` 上那两格：它们是主进程真产出的形状
+    //   （`config.js` 的 `workspacePlan()` 与 `cfg.spaces`），而这一屏画的就是它们。
+    //   `boot` 是脚本级的 `let`（不在 `window` 上），但同源的另一个脚本读得到它 ——
+    //   与下面 `jobs` 那一格用 `JOBS` 是同一件事。
+    'conns-ws': {
+      setup: function () {
+        boot.connections = F.conns || [];
+        boot.workspaces = F.workspaces || [];
+        boot.spaces = F.spaces || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
+        renderConnections(boot.connections);
+        showScreen('conns');
+        return Promise.resolve();
+      },
+      sentinel: function () {
+        return document.querySelectorAll('#wmap-conns .wnode').length >= 2
+          && document.querySelectorAll('#wmap-workspaces .wnode').length >= 2
+          && document.querySelectorAll('#wmap-spaces .wnode').length >= 1;
+      },
+      what: '首屏：连接 → 工作区 → 数据的映射图',
     },
 
     // 第二屏：三个插件块，其中一个标题很长、一个站点关着、一个起不来。
