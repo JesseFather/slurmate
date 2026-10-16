@@ -459,8 +459,14 @@ cluster_cidr 是否覆盖全部计算节点，若这个网段是照抄文档示�
 ## 只读挂载
 
 这一条【不是配置项】。它住在 systemd 单元里：`ProtectSystem=strict` 把整个文件
-系统树挂成只读，`ReadWritePaths=/run/munge` 开出唯一的例外
-（`cluster/slurmate-sessiond.service`）。
+系统树挂成只读，`ProtectHome=read-only` 管住 `/home`、`/root`、`/run/user`
+（实测：只写前者时 `/root` 仍然写得进去），`ReadWritePaths=/run/munge` 开出唯一
+的例外（`cluster/slurmate-sessiond.service`）。
+
+有一条要实测、不能照文档推断的事：`systemd.exec(5)` 里写着这些按路径设的只读
+不延伸到「后来才出现的子挂载」，而共享存储通常正是一个独立挂载点。所以
+`tools/check-cluster.sh` 第 8 节会在一个真实用户的家目录里试写一次（写完立刻
+删），而不只是验 `/root`。
 
 为什么要有它：守护进程是 root 跑的，能力集里又带着 `CAP_DAC_OVERRIDE` 与
 `CAP_DAC_READ_SEARCH`（读用户家目录里 `0600` 的会话文件要靠它们）。不挂只读的话，

@@ -394,12 +394,34 @@ fi
 echo "--- nft list ---"
 if nft list tables >/dev/null 2>&1; then echo "NFT-OK"; else echo "NFT-BAD"; fi
 
-echo "--- 该只读的地方真的只读吗（拿 /root 试，不碰任何人的家目录）---"
+echo "--- 挂载表（加固之后这些挂载点各是什么状态）---"
+findmnt -rno TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null \
+    | grep -vE '^/(proc|sys|dev)(/| |$)' | head -n 20
+
+# 只读要测【两个】地方，因为它们归两条不同的指令管：
+#   · /root —— ProtectHome=read-only（/home、/root、/run/user 那三个）
+#   · 共享存储的挂载根 —— ProtectSystem=strict。而 man 里有一句要命的
+#     caveat：这些按路径设的只读"不延伸到后来才出现的子挂载"。共享存储通常
+#     正是一个独立挂载点，所以这件事必须实测，不能照文档推断。
+# 两处都是"试着写、立刻删"，不碰任何人的文件。共享存储那一处若写成功，
+#   说明保护没盖到它 —— 那才是这一节最要紧的一条。
+echo "--- /root 只读吗（ProtectHome=read-only 那一档）---"
 if touch /root/.slurmate-sandbox-probe 2>/dev/null; then
     rm -f /root/.slurmate-sandbox-probe
-    echo "READONLY-BAD"
+    echo "ROOT-READONLY-BAD"
 else
-    echo "READONLY-OK"
+    echo "ROOT-READONLY-OK"
+fi
+
+echo "--- 共享存储那一棵树只读吗（ProtectSystem=strict 那一档）---"
+echo "      测的是：${SLURMATE_PROBE_SHARE_ROOT:-（没找到，跳过）}"
+if [[ -z "${SLURMATE_PROBE_SHARE_ROOT:-}" || ! -d "${SLURMATE_PROBE_SHARE_ROOT:-}" ]]; then
+    echo "SHARE-SKIP"
+elif touch "${SLURMATE_PROBE_SHARE_ROOT}/.slurmate-sandbox-probe-$$" 2>/dev/null; then
+    rm -f "${SLURMATE_PROBE_SHARE_ROOT}/.slurmate-sandbox-probe-$$"
+    echo "SHARE-READONLY-BAD"
+else
+    echo "SHARE-READONLY-OK"
 fi
 
 echo "--- 托管目录还写得进去吗（StateDirectory=/RuntimeDirectory= 那一族）---"
@@ -414,6 +436,22 @@ if [[ ! -r "$UNIT_SRC" ]]; then
 elif ! command -v systemd-run >/dev/null 2>&1; then
     r FAIL "systemd-run 不存在，无法实测"
 else
+    # 用户家目录那一棵树的根：拿一个真有 Slurm 记录的用户 getpwnam 直查
+    #   （不枚举 —— 这台机器上枚举看不到 IPA 用户），取它的父目录。查不到就
+    #   退回 /shared/home（存在才算）。两者都没有时下面会响亮地说"跳过"，
+    #   而不是静默地绿 —— 那正是这一节最要紧的一条判据，没测到就别说通过。
+    _share_root=""
+    _probe_u="$(sacctmgr -n -P show assoc format=User 2>/dev/null \
+        | grep -vE '^$|^root$' | head -n 1)"
+    if [[ -n "$_probe_u" ]]; then
+        _probe_h="$(getent passwd "$_probe_u" 2>/dev/null | cut -d: -f6)"
+        [[ -n "$_probe_h" && -d "$_probe_h" ]] && _share_root="$(dirname "$_probe_h")"
+    fi
+    [[ -z "$_share_root" && -d /shared/home ]] && _share_root=/shared/home
+    # 推出个 `/` 来不算答案：往根目录里试写是个坏主意，而且那种家目录
+    #   （挂在 / 下一层）本身就不该出现在一个正经站点上。
+    [[ "$_share_root" == "/" ]] && _share_root=""
+
     _props=()
     while IFS= read -r _l; do
         [[ -n "$_l" ]] && _props+=("--property=$_l")
@@ -427,9 +465,12 @@ else
     fi
     # 不用 `--collect`：失败时那个单元要留着，`journalctl` 里才有 systemd 自己
     #   那句"哪一步没做成"。跑完由下面那条 reset-failed 收干净。
+    _env=()
+    [[ -n "$_share_root" ]] && _env+=("--setenv=SLURMATE_PROBE_SHARE_ROOT=$_share_root")
     timeout 60 systemd-run --wait --pipe --unit=slurmate-sandbox-probe \
         --property=Type=oneshot \
         --property=RuntimeDirectory=slurmate-probe \
+        ${_env[@]+"${_env[@]}"} \
         "${_props[@]}" \
         /bin/bash "$SANDBOX_PROBE" > "$SANDBOX_OUT" 2>&1
 
@@ -437,7 +478,8 @@ else
     grep -q "is UP" "$SANDBOX_OUT" || _why="scontrol ping 没通"
     grep -q "MUNGE-BAD" "$SANDBOX_OUT" && _why="${_why:+${_why}；}munge 走不通（socket 连不上）"
     grep -q "NFT-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}nft list 不可用"
-    grep -q "READONLY-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}该只读的地方写得进去"
+    grep -q "ROOT-READONLY-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}/root 写得进去"
+    grep -q "SHARE-READONLY-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}共享存储那一棵树写得进去"
     grep -q "WRITABLE-OK" "$SANDBOX_OUT" || _why="${_why:+${_why}；}托管目录写入失败"
 
     if grep -qE "Interactive authentication required|Failed to start transient service unit|Failed to connect to bus" "$SANDBOX_OUT" 2>/dev/null; then
@@ -449,6 +491,12 @@ else
         r FAIL "沙箱内跑不通：${_why}（详见下方与快照）"
     else
         r PASS "scontrol / munge / nft 全通，而且该只读的确实只读、托管目录确实可写"
+    fi
+    # 最要紧的那一条没测到就【不许】静默：用户家目录那一棵树盖没盖住，是这一
+    #   整节存在的理由。找不到一个真实家目录时要说出来是哪一步断的。
+    if grep -q "SHARE-SKIP" "$SANDBOX_OUT" 2>/dev/null; then
+        r WARN "共享存储那一棵树没测到：这台机器上未找到一个真实用户的家目录。"
+        r INFO "  守护进程读会话文件靠的就是它。这台要是登录节点，先把它挂上再谈其他。"
     fi
     sed 's/^/    /' "$SANDBOX_OUT" 2>/dev/null | head -n 30
     echo "    --- systemd 自己说了什么（失败时这一节是根因所在）---"

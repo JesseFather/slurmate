@@ -76,11 +76,14 @@ UID 区分，而本机进程访问本机 IP 走的是 `lo`，通常被放行。
   （这是宿主的职责，与哪个插件无关；插件往会话文件加字段走
   `PLUGIN_SESSION_FIELDS`，转义由宿主统一做）
 - 守护进程只读这些文件，从不代写
-- 整个文件系统（用户家目录在其中）在 systemd 单元里挂成只读，只有守护进程自己
-  那几个状态、日志、运行时目录与 `/run/munge` 除外（`ProtectSystem=strict` +
-  `ReadWritePaths=`，见 `cluster/slurmate-sessiond.service`）
+- 整个文件系统在 systemd 单元里挂成只读（`ProtectSystem=strict`，`/home`、
+  `/root`、`/run/user` 三个由 `ProtectHome=read-only` 单独管），只有守护进程
+  自己那几个状态、日志、运行时目录与 `/run/munge` 除外
+  （`cluster/slurmate-sessiond.service`）
 
-这一层不依赖任何站点配置：家目录挂在哪、有几个，都由内核那一侧盖住。
+这一层不依赖任何站点配置。共享存储通常是一个独立挂载点，而按路径设的只读
+盖不盖得住子挂载要实测 —— `tools/check-cluster.sh` 第 8 节会在一个真实用户的
+家目录里试写一次，写完立刻删。
 
 ### 会话文件的读取做了一整套硬校验
 

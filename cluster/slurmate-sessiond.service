@@ -56,6 +56,12 @@ UMask=0027
 #   文件系统（它们由 PrivateDevices=、ProtectKernelTunables=、
 #   ProtectControlGroups= 那几条管），所以它卷不到自己。
 ProtectSystem=strict
+# /home、/root、/run/user 那三个由这一条单独管，不在上一条的覆盖里。
+#   实测（RHEL 9.7 / systemd 252）：只写 ProtectSystem=strict 时 /root 仍然写得
+#   进去 —— 一个 root 进程的家目录因此敞开。这一条把它们挂成只读。
+# 注意它盖的是这三个固定路径，本站的共享存储如果挂在别处（例如 /shared/home），
+#   靠的是上面那条；那条盖不盖得住一个独立挂载点，由探针第 8 节实测。
+ProtectHome=read-only
 # strict 唯一的例外。munge 的 socket 在 /run/munge 下，而连接一个 unix socket
 #   需要对该文件有写权限 —— /run 整棵被挂只读之后，scontrol / scancel / sbatch
 #   会全部失败（那正是这一档以前不敢开的原因）。

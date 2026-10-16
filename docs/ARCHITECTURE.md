@@ -1546,7 +1546,8 @@ RUNNING 会话、每一个 tick 都成立，不节流就是每分钟 30 行，�
 | 指令 | 为什么 |
 |---|---|
 | `ProtectSystem=strict` | 整个文件系统树只读，用户家目录因此盖在里面 —— 站点不需要报任何一个路径。`full` 不够：它只盖 `/usr` 与 `/etc` |
-| `ReadWritePaths=/run/munge` | 上面那条唯一的例外。munge 的 socket 连接需要对它有写权限，不开这个口子 `scontrol`/`scancel`/`sbatch` 全部失败。状态、日志、运行时目录不用列，那几个由 `StateDirectory=`/`LogsDirectory=`/`RuntimeDirectory=` 自己带 `BindPaths=` |
+| `ProtectHome=read-only` | `/home`、`/root`、`/run/user` 那三个不在上一条的覆盖里。实测（RHEL 9.7 / systemd 252）：只写 `ProtectSystem=strict` 时 `/root` 仍然写得进去 |
+| `ReadWritePaths=/run/munge` | 上面那两条唯一的例外。munge 的 socket 连接需要对它有写权限，不开这个口子 `scontrol`/`scancel`/`sbatch` 全部失败。状态、日志、运行时目录不用列，那几个由 `StateDirectory=`/`LogsDirectory=`/`RuntimeDirectory=` 自己带 `BindPaths=` |
 | `PartOf=nftables.service` | `nftables.service` 的 `ExecReload` 是 `nft 'flush ruleset; include ...'`，会连本服务的表一起清掉；`PartOf` 让本服务跟着重启，保证表被重建。**不能用 `BindsTo`** —— 那会让 nftables 启动失败时本服务也起不来 |
 | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` | nft 走 netlink；`scontrol`/`scancel` 走 AF_UNIX（munge）+ AF_INET（slurmctld） |
 | `CapabilityBoundingSet` | `CAP_NET_ADMIN`（nft）、`CAP_SETUID/SETGID`（setuid 提交）、`CAP_DAC_READ_SEARCH`/`CAP_DAC_OVERRIDE`（读 0600 会话文件）、`CAP_KILL`（回收子进程） |
