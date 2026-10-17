@@ -2682,8 +2682,11 @@ test('无法读取自己的版本号，插件装不得，且说的是"哪一项�
  */
 test('版本闸：同 x 内客户端落后，拦住；其余各态放行但出声', async (t) => {
   const realLoad = Module._load;
+  // 这一格可改：① 那几格用 2.x 走"该拦"的方向；⑤ 那一格要的是 0.x 的
+  //   "不拦但要说明"，而真版本号（0.23）服务端得比它更新才走得到。
+  let fakeVersion = '2.4';
   Module._load = function (req, parent, isMain) {
-    if (String(req).endsWith('package.json')) return { version: '2.4' };
+    if (String(req).endsWith('package.json')) return { version: fakeVersion };
     return realLoad.call(this, req, parent, isMain);
   };
   t.after(() => { Module._load = realLoad; });
@@ -2746,6 +2749,22 @@ test('版本闸：同 x 内客户端落后，拦住；其余各态放行但出�
   await invoke('app:debug', 'daemon-version', '');
   const r4 = await invoke('app:connect', { connectionId: target.id });
   assert.equal(r4.ok, true, JSON.stringify(r4));
+
+  // ⑤ 0.x 内测期：客户端落后不拦，但必须说出来。
+  //    文档（docs/PROTOCOL.md〈三方〉与 `versionCheck` 的注释）写的是
+  //    "只说明、不拦"；只有 `blocked` 那一半有人测，`说明` 那一半曾经没人管，
+  //    于是它整支不存在 —— 用户拿 0.22 的客户端连 0.23 的站点，一句提示都没有。
+  fakeVersion = '0.22';
+  await invoke('app:debug', 'daemon-version', '0.23');
+  const before5 = noticesOf().length;
+  const r5 = await invoke('app:connect', { connectionId: target.id });
+  const said5 = noticesOf().slice(before5).map((n) => n.text || '').join('\n');
+  assert.equal(r5.ok, true,
+    `0.x 内测期客户端落后不拦（例外写在 versionCheck 里）：${JSON.stringify(r5)}`);
+  assert.match(said5, /0\.23/, `提示里要有站点版本：${said5}`);
+  assert.match(said5, /0\.22/, `提示里要有本客户端版本：${said5}`);
+  assert.match(said5, /只提示、不拦/, `要说清这是内测期的待遇：${said5}`);
+  fakeVersion = '2.4';
 
   // 还原现场：这个文件里所有用例共用同一个 Electron 实例。
   await invoke('app:debug', 'daemon-version', null);
