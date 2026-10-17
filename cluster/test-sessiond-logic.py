@@ -3604,10 +3604,14 @@ exit 0
         check("%s 有作业侧 job/start.sh" % _spec.name,
               os.path.isfile(os.path.join(_plugdir, _spec.name, "job", "start.sh")),
               os.path.join(_plugdir, _spec.name, "job", "start.sh"))
-        check("%s 的目录里没有多余的条目（清单、客户端、作业侧 —— 就这三样）"
+        # 血统表（`lineage.json`）也是这棵树的一部分：§2.5 要求它跟着源码树
+        #   进版本控制，`packer build` 少它就拒绝出包。它不是第四半边 ——
+        #   它是一份记录，进负载，所以这里与清单、两半、README 并列。
+        check("%s 的目录里没有多余的条目（清单、客户端、作业侧、血统表）"
               % _spec.name,
               not (set(os.listdir(os.path.join(_plugdir, _spec.name)))
-                   - {"plugin.json", "client", "job", "README.md"}),
+                   - {"plugin.json", "client", "job", "README.md",
+                      "lineage.json"}),
               str(sorted(os.listdir(os.path.join(_plugdir, _spec.name)))))
 
     check("两个插件的 id 互不相同（两个插件抢一个 id 会让客户端静默取错）",
