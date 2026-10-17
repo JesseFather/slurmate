@@ -592,8 +592,12 @@ function renderSnapshot(s) {
   //   的第二段没有对象（会话已经结束了）。收起是这一格自己的事，与 `hidden`
   //   无关：那两件事一个是"这一格该不该在"，一个是"它现在是第几段"。
   if (!running) disarmArmed();
-  $('sb-reload').classList.toggle('hidden', !running);
-  $('sb-end').classList.toggle('hidden', !running);
+  // 这两颗只在它们真的有事可做时出现（2026-10-17 真机：释放中的会话页面已经
+  //   收掉了，而「重新加载」还露着，按下去什么都不会发生）：
+  //   · 「重新加载」打的是那一块页面，没有页面（释放中 / 中转站插件）就不该在；
+  //   · 「结束会话」在释放开始之后没有对象可停，守护进程会自己把这一步走完。
+  $('sb-reload').classList.toggle('hidden', !(st === 'running' && hasSurface(s)));
+  $('sb-end').classList.toggle('hidden', !(st === 'running'));
   $('sb-dev').classList.toggle('hidden', !(s && s.dev));
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
@@ -619,14 +623,10 @@ function renderSnapshot(s) {
   //   哪儿"与"会话跑没跑起来"就混成一件：会话一起来就把人弹回当前会话那一屏，
   //   他刚才点开的作业列表就没了。
   //
-  //   这里只留它确实该管的那两格：状态条上的按钮、以及前台那一条的详情。
-  // `ended` 也要留。从前这一格判的是 `st !== 'ended'`，而作业一结束会话就
-  //    进 `ended` 失败原因（「作业状态」那一句，含退出码）恰好在结束那一刻从
-  //    界面上消失 —— 而那正是唯一想看它的时候。
-  //    `idle`（还没有过任何会话）仍然不露：那时没有任何东西可说。
-  const hasDetail = Boolean(s) && st !== 'idle';
-  $('job-detail').classList.toggle('hidden', !(hasDetail && SCREEN === 'jobs'));
-  if (hasDetail) renderKv(s);
+  //   这里只留它确实该管的那一格：状态条上的按钮。详情那一块跟着选中的
+  //   那一条走（见 `renderJobDetail`）—— 它不能只跟着前台走，否则作业列表里
+  //   高亮着 A、下面摆的却是前台 B 的隧道与心跳（2026-10-17 真机）。
+  renderJobDetail(s);
 
   // 作业刚刚结束的那一下，把那一句也送进提示流：切一屏之后再回来，它还在。
   //   判据是"上一轮还不是终态、这一轮是了"，不是"状态是 ended" —— 后者会在每一次
@@ -840,11 +840,27 @@ function wsHintText(v, cur) {
  * 声明了界面的写 URL，没声明的写裸 TCP 地址。认不出这个会话是哪来的（站点装了
  * 本机没有的插件）时也写裸地址 —— 我们确实不知道那头是什么。
  */
+function pluginOfSession(s) {
+  if (!s) return null;
+  return ((lastPlugins && lastPlugins.plugins) || [])
+    .find((x) => x.name === s.serviceKind) || null;
+}
+
+/**
+ * 这条会话有没有"一块页面"。
+ *
+ * 判据与 `localAddressText` 同一份：插件清单里的 `surface`。中转站那类插件
+ *   没有页面，于是「重新加载」对它没有意义 —— 露着也只是一颗按下去无事发生的
+ *   按钮（2026-10-17 真机）。
+ */
+function hasSurface(s) {
+  const p = pluginOfSession(s);
+  return Boolean(p && p.surface);
+}
+
 function localAddressText(s) {
   if (!s.localPort) return '—';
-  const p = ((lastPlugins && lastPlugins.plugins) || [])
-    .find((x) => x.name === s.serviceKind);
-  return (p && p.surface)
+  return hasSurface(s)
     ? `http://127.0.0.1:${s.localPort}`
     : `127.0.0.1:${s.localPort}（TCP，不是网址）`;
 }
@@ -877,7 +893,8 @@ function renderKv(s) {
     //   一句不成立的话，而用户会照着它去把作业停掉。
     ...(s.suspended ? [['本机', s.suspended]] : []),
     ['上次心跳', fmtAge(s.hbAgeMs)],
-    ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState] || s.tunnelState],
+    ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState]
+      || s.tunnelState || '—'],
   ];
   const dl = $('kv');
   dl.textContent = '';
@@ -888,6 +905,46 @@ function renderKv(s) {
     dd.textContent = v;
     dl.append(dt, dd);
   }
+}
+
+/**
+ * 「选中的那一条」那一块。
+ *
+ * 标题这么写，内容就必须是选中的那一条：从前它无条件画前台那一条的快照，
+ *   于是作业列表里点一条本机没接着的记录时，高亮换了、下面的会话 ID 与作业号
+ *   还是原来那一条（2026-10-17 真机）。本机接着的那一条有完整快照（隧道、本地
+ *   地址、心跳都是本机的事实）；没接着的那一条只有站点报的那几格，其余写「—」。
+ */
+function renderJobDetail(front) {
+  const j = selectedJob();
+  let s;
+  if (j) {
+    s = (front && front.sessionId === j.session_id) ? front : jobAsSnap(j);
+  } else {
+    s = front || null;
+  }
+  const show = Boolean(s) && SCREEN === 'jobs';
+  $('job-detail').classList.toggle('hidden', !show);
+  if (show) renderKv(s);
+}
+
+/** 把作业列表那一行摆成 `renderKv` 认的形状。本机没有的那几格是 `null`。 */
+function jobAsSnap(j) {
+  return {
+    sessionId: j.session_id,
+    jobId: j.job_id,
+    partition: j.partition,
+    resources: j.resources || null,
+    gresText: j.gres_text || null,
+    node: j.node,
+    tunnelTarget: null,
+    localPort: null,
+    expiresAt: typeof j.expires_at === 'number' ? j.expires_at : undefined,
+    jobText: j.job_text || null,
+    suspended: null,
+    hbAgeMs: null,
+    tunnelState: null,
+  };
 }
 
 /**
@@ -3067,10 +3124,17 @@ function selectedJob() {
  */
 async function selectJob(j) {
   JOBS.selected = j.session_id;
-  if (j.attached && j.slot) {
-    await window.slurmate.setFront(j.slot);
-  }
+  // 先画：选中是本地事实，不该等一次 IPC（`setFront` 会去加载那一块页面，
+  //   页面慢的时候这一等可以是好几秒，用户看到的就是"点了条目不跟着变"）。
   renderJobs();
+  if (j.attached && j.slot) {
+    try {
+      await window.slurmate.setFront(j.slot);
+    } catch (e) {
+      notice('error', '切到这一条会话失败：' + ((e && e.message) || '没有回应'));
+    }
+    renderJobs();
+  }
 }
 
 function jobRow(j) {
@@ -3140,6 +3204,8 @@ function renderJobs() {
   $('jobs-empty').classList.toggle('hidden', Boolean(JOBS.error) || rows.length > 0);
 
   renderJobsSelection();
+  // 选中变了，下面那一块就要跟着换（否则高亮的是 A、详情里还是 B）。
+  renderJobDetail(frontSnap());
 }
 
 /**

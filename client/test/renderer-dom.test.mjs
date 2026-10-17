@@ -1869,6 +1869,40 @@ test('作业结束之后失败原因不再消失（从前它恰好在那一刻�
     '一会儿都没跑过的时候不该摆一个空的详情块');
 });
 
+test('作业列表里点另一条：高亮与下面的详情都跟着走', () => {
+  // 2026-10-17 真机：多条记录时点一条，选择（与「选中的那一条」那一块）
+  //   不跟着变。这里钉两件事：高亮立刻换（不等那次 IPC），详情换成本行。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'jobs'; SESS = { sessions: [], front: null };"
+    + "JOBS = { error: null, at: Date.now(), selected: 'sess-a', list: ["
+    + "{ session_id: 'sess-a', state: 'released', state_text: '已结束', live: false,"
+    + "  attached: false, job_id: '41', partition: 'A6000', node: 'n1',"
+    + "  expires_at: 100, job_state: 'COMPLETED', job_text: '完成',"
+    + "  resources: { cpus: 2, mem: '8G', gres: null }, gres_text: null },"
+    + "{ session_id: 'sess-b', state: 'rejected', state_text: '已拒绝', live: false,"
+    + "  attached: false, job_id: '42', partition: 'RTX8000', node: 'n2',"
+    + "  expires_at: null, job_state: 'CANCELLED', job_text: '已结束（被取消）',"
+    + "  resources: { cpus: 2, mem: '8G', gres: null }, gres_text: null }"
+    + "] };");
+  // 行的高亮走的是 `className` 字符串（`jobRow` 一次拼好），不是
+  //   `classList` 那一组方法 —— 判据跟着它自己的写法走。
+  const on = (el) => /\bon\b/.test(el.className);
+  h.fn('renderJobs')();
+  assert.equal(h.byId.get('job-list').children.length, 2, '两行都要画出来');
+  assert.equal(on(h.byId.get('job-list').children[0]), true,
+    '前提：一开始是第一行选中');
+
+  h.byId.get('job-list').children[1].onclick();
+  const after = h.byId.get('job-list');
+  assert.equal(on(after.children[1]), true,
+    '点了第二条，高亮要跟过去 —— 本地事实，不该等一次 IPC');
+  assert.equal(on(after.children[0]), false);
+
+  const kvText = childrenOf(h.byId.get('kv')).map((x) => x._text || '').join(' ');
+  assert.match(kvText, /sess-b/, '下面的详情要跟着选中的那一条走');
+  assert.match(kvText, /42/);
+});
+
 test('作业结束的那一刻那一句进提示流，而且好坏按退出码分', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   const notices = () => h.byId.get('notices').children.map(

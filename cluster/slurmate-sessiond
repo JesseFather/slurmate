@@ -8667,6 +8667,13 @@ class Sessiond(object):
         """
         now = now_ts()
         info, why = self.load_session_file(s["uid"], s["job_id"])
+        # `starting` 是作业刚起来、服务还没开始监听时写下的那一份（见 run.sbatch
+        #   的 `write_session "starting"`）。它不是"校验没过"，而是"还没到"：
+        #   把它当成拒绝，这个窗口里的每一次 tick 都会变成一次误杀 —— 用户的
+        #   第一次提交被 scancel，过一会儿重试又好了（2026-10-17 真站点）。
+        #   与"文件还没出现"走同一条路：等，上限仍是 enroll_ttl。
+        if info is not None and str(info.get("state") or "") == "starting":
+            info, why = None, "starting"
         if info is None:
             if now - (s["submitted_at"] or s["created_at"]) > self.cfg.enroll_ttl:
                 log.warning("会话 %s（job=%s）迟迟未登记（%s），回收并取消作业",

@@ -83,6 +83,7 @@ const { createBackend, KIND } = require('./backend.js');
 const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
 const { probeLocalPort } = require('./tunnel.js');
 const { gresLabel, gresText } = require('./gres.js');
+const { jobText } = require('./jobstate.js');
 const { sessionStateText } = require('./sessionstate.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
@@ -2359,9 +2360,9 @@ function clearOneRow(row, roots) {
  *
  * 判据是"上一个会话已经完了"：ENDED / ERROR / IDLE / RELEASING 都算。
  *
- * `RELEASING` 那一档尤其要紧 —— `stop()` 之后它就再也走不出去了（状态轮询已经
- *   停了），把它当成"还占着"会让「结束会话」变成一道单向门：用户结束掉一个，
- *   那个槽就永远开不了新的。
+ * `RELEASING` 那一档尤其要紧 —— 从点「结束会话」到站点确认之间隔着一段真的
+ *   释放流程，把它当成"还占着"会让「结束会话」变成一道单向门：用户结束掉一个，
+ *   那个槽在释放走完之前都开不了新的（而走完要多快取决于站点）。
  */
 function occupied(slot) {
   const rec = sessions.get(slot);
@@ -2440,6 +2441,16 @@ function jobsView(rows) {
       node: r.node || null,
       expires_at: typeof r.expires_at === 'number' ? r.expires_at : null,
       job_state: r.job_state || null,
+      // 作业状态那一句与快照里用同一个译法（`jobstate.js`）。界面在「选中的那
+      //   一条」里要画它 —— 而那一块可能指向一条本机没接着的记录，它没有
+      //   本地快照可用（2026-10-17 真机：点别的记录，详情不跟着变）。
+      job_text: jobText({
+        jobState: r.job_state, jobTerminal: r.job_terminal,
+        jobReason: r.job_reason, jobExitCode: r.job_exit_code,
+        jobRestarts: r.job_restarts, timeLimit: r.time_limit,
+      }),
+      resources: r.resources || null,
+      gres_text: gresText((r.resources || {}).gres),
       // 认得出插件就给名字，认不出给 null —— 界面据此说「本机没有这个插件」，
       // 而不是编一个名字出来。
       service: plugin ? (plugin.displayName || plugin.name) : null,
@@ -2821,9 +2832,9 @@ async function startSession(resources, serviceKind, portChoice) {
   claimDataDir(rec, plugin, space);
 
   // RELEASING 也算「上一个会话已经完了」。不加它的话：断开之后 controller 停在
-  //   releasing（stop() 连状态轮询都停了，它再也走不出去），而这里会复用那个
-  //   controller，接着 controller.start() 抛「会话已在进行中」—— 于是「断开」成了
-  //   一道单向门，用户必须重启客户端才能再开会话。
+  //   releasing（心跳与推送都停了，只剩那个释放期的短轮询在等站点确认），而这里
+  //   会复用那个 controller，接着 controller.start() 抛「会话已在进行中」——
+  //   于是「断开」成了一道单向门，用户必须重启客户端才能再开会话。
   //   让新会话拿一个新 controller 之后，若旧作业还没被守护进程收掉，用户会拿到
   //   服务端那句准确的「已有 1 个活跃会话（上限 1）」，而不是一句指不回根因的话。
   // 在这里捕获插件对象（塞进 `rec`），之后所有状态变化都用它，不再查注册表。
@@ -3490,7 +3501,20 @@ function pluginContext(rec) {
       //   把它改成方法不会报错，只会让 `ses` 变成一个函数而一路传下去（`ctx.login`
       //   拿它当 Electron session 用），失败形态是"自动登录莫名其妙不工作"。
       get surfaceSession() { return win.surfaceSession(rec.slot); },
-      reloadSurface: () => win.reloadSurface(rec.slot),
+      // 重新加载这一条会话的页面。有登录契约的插件（今天就是 code-server）
+      //   只在页面还停在登录表单上时才真的重载 —— 它的用途是"登录之后把页面
+      //   带回应用"，而 `attach` 每次状态变化都会被调（心跳 45 秒、推送 30 秒），
+      //   无条件重载就是页面每半分钟白一次（2026-10-17 真机）。
+      // 没有登录契约的插件没有"登录之后要不要重载"这回事，照旧无条件重载。
+      // 手写那颗「重新加载」走的是 `win.reloadSurface`，不受这一条限制。
+      reloadSurface: async () => {
+        const contract = plugin.contributes && plugin.contributes.login;
+        if (contract
+            && !weblogin.isLoginPath(win.surfaceURL(rec.slot), contract.path)) {
+          return;
+        }
+        await win.reloadSurface(rec.slot);
+      },
     },
     /**
      * 这一条会话属于哪条连接（只读，拿不到就是 `null`）。
@@ -4007,11 +4031,28 @@ async function teardownConnection() {
  *     与 `abandon()` 的另外两处调用（`tryReattach`、模拟重启）同一条取舍。
  */
 async function leaveSite() {
+  await forgetSessions();
+  await teardownConnection();
+}
+
+/**
+ * 把本机手上那些会话记录一条不留地摘掉（一个字都不发给服务端）。
+ *
+ * 【临时离开】与【断开】都要做这一件事，而【断开】从前漏了它：断开之后那些
+ *   记录还带着这个站点的 `session_id`（状态停在 `releasing`，因为 `stop()`
+ *   停掉了一切定时器）。下一次连接时 `tryReattach` 不会接它们（站点那边已经
+ *   终态），但 `jobsView` 仍按 `session_id` 把它们认成「本机接着的」——
+ *   于是作业列表里点一条早就结束的作业，前台会被切成那个死掉的记录，
+ *   状态条显示「正在释放…」（2026-10-17 真机）。
+ *
+ * 跨站点那一半更重：各站点的守护进程各自编号，旧号发给新站点就是一次打在
+ *   别人作业上的 `scancel`（见 `leaveSite` 的那段说明）。
+ */
+async function forgetSessions() {
   for (const [slot, rec] of [...sessions.entries()]) {
     if (rec.controller) await rec.controller.abandon();
     sessions.delete(slot);
   }
-  await teardownConnection();
 }
 
 /**
@@ -4117,8 +4158,13 @@ async function tryReattach() {
   //   用现成的两条路，不为了这件事去改协议。
   const listed = await backend.rpc({ op: 'list' });
   if (!listed || !listed.ok) return;
+  // `releasing` 不算要接回来的那一档：它已经在拆了，接回来既没有可看的页面，
+  //   也没有可做的动作（`reattachOne` 会把它当成 RUNNING 重新起一条隧道）。
+  //   断开之后立刻重连时最常见的正是它 —— 上一轮刚发出去的 `goodbye` 还没走完。
+  //   守护进程会把这一步走完；这期间若再提交，用户拿到的是站点那句准确的配额错误。
   const live = ((listed.data && listed.data.sessions) || [])
-    .filter((r) => r && SERVER_LIVE_STATES.includes(r.state));
+    .filter((r) => r && SERVER_LIVE_STATES.includes(r.state)
+      && r.state !== 'releasing');
   if (!live.length) return;            // 没有活跃会话，正常路径
 
   // 本机已经接着的那些，一条都不再接。
@@ -5032,6 +5078,11 @@ function registerIpc() {
       // （`docs/ARCHITECTURE.md` 的 §3.0），所以不能在这里宣布成功。
       if (!res.ok) win.pushNotice('error', res.detail);
     }
+    // 断开之后本机不再持有任何记录。少了这一句，那些记录会以 `releasing`
+    //   停着（`stop()` 之后没有人再推进它们），并且带着这个站点的 `session_id`
+    //   活到下一次连接 —— 选中一条已经结束的作业，前台就被切成那个死记录
+    //   （见 `forgetSessions` 的说明）。
+    await forgetSessions();
     await teardownConnection();
     return { ok: true, released };
   });

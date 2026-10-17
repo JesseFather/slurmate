@@ -1327,6 +1327,28 @@ def main():
     check("用户自造端口（不在候选集）→ 拒绝", not ok and why == "port_not_in_candidates",
           str(why))
 
+    # 作业刚起来、服务还没监听时写的是 `starting`，此时 `service_port` 还是 0
+    #   （见 run.sbatch 的 write_session）。它不是"校验没过"，是"还没到" ——
+    #   当成拒绝，这个窗口里的每一次 tick 都会误杀（2026-10-17 真站点：第一次
+    #   提交被 scancel，报的正是 port_not_in_candidates，重试一次又好了）。
+    _now = int(time.time())
+    _sess = {"session_id": "start-1", "uid": UID, "job_id": 5712,
+             "submitted_at": _now, "created_at": _now,
+             "candidates": "55017,55018"}
+    _rejected = []
+    _real_reject = d.reject
+    d.reject = lambda s, why, i: _rejected.append(why)
+    write_session("job-5712.json", dict(good, state="starting", service_port=0))
+    d.try_enroll(_sess, job)
+    check("写着 starting（服务还没监听）不判拒绝 —— 它是「还没到」",
+          _rejected == [], str(_rejected))
+    write_session("job-5712.json", dict(good, state="failed", service_port=0))
+    d.try_enroll(_sess, job)
+    check("对照：真的没起来的那一份仍然判拒绝（上一条不是恒真）",
+          _rejected == ["port_not_in_candidates"], str(_rejected))
+    d.reject = _real_reject
+    write_session("job-5712.json", good)
+
     # ── 9. Slurm 交互 ──────────────────────────────────────────────────────
     print("\n── 9. Slurm 交互 ──")
     # 9a. 解析逻辑用【桩】测，不连真集群。

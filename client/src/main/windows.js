@@ -283,10 +283,25 @@ class ShellWindow {
       await view.webContents.loadURL(url);
     } else {
       // 隧道换端口：origin 变了，但不重装监听器（它们读的是 s.origin）。
+      // 判据是 origin，不是整串 URL：页面自己的导航（code-server 打开一个目录
+      //   之后的 `/?folder=…`）不该被当成"换了页面"，否则每一次状态变化都会把
+      //   它拉回根路径 —— 用户看到的是一闪一闪的白屏（2026-10-17 真机）。
+      //   这一块属于哪个 origin 是框架的事实，页面里的路径是插件自己的事。
+      const prevOrigin = s.origin;
       s.origin = originOf(url);
-      if (s.view.webContents.getURL() !== url) await s.view.webContents.loadURL(url);
+      const cur = s.view.webContents.getURL();
+      if (!cur || originOf(cur) !== prevOrigin) {
+        await s.view.webContents.loadURL(url);
+      }
     }
     this._layout();
+  }
+
+  /** 这一块视图现在在哪个地址。没建、已销毁、还没加载出来时是 `null`。 */
+  surfaceURL(slot) {
+    const s = this.surfaces.get(slot);
+    if (!s || s.view.webContents.isDestroyed()) return null;
+    return s.view.webContents.getURL() || null;
   }
 
   _wireSurface(wc, slot) {

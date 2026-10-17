@@ -47,6 +47,7 @@ const { Action, classify, shouldRetry } = require('./classify.js');
 const { Tunnel } = require('./tunnel.js');
 const { jobText } = require('./jobstate.js');
 const { gresText } = require('./gres.js');
+const { sessionStateText } = require('./sessionstate.js');
 
 const State = {
   IDLE: 'idle',
@@ -82,6 +83,15 @@ const SUSPENDED_TAKEN_OVER =
 const STATUS_MS = 60000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
+/**
+ * 释放期的轮询间隔。
+ *
+ * 守护进程那边"释放"是一段真的会走完的流程（scancel → 确认作业消失 → 拆 ACL），
+ *   通常一两秒。停了心跳之后，界面要知道它走完没有，只能问 —— 而 `STATUS_MS`
+ *   的 60 秒会让状态条把「正在释放…」多挂近一分钟，站点那边却早就写成了
+ *   「已结束」（2026-10-17 真机）。
+ */
+const RELEASE_POLL_MS = 3000;
 /**
  * 推送看门狗：这么久没收到推送，就当那条路不通，退回按 `STATUS_MS` 轮询。
  *
@@ -162,7 +172,8 @@ class SessionController extends EventEmitter {
    *   backend, spaceId, onRelayPort
    *   getExcludedPorts {() => Set<number>}  「别的工作区占着的端口」，由 index.js
    *                                        提供 —— 控制器不认识 config，所以注入。
-   *   heartbeatMs / statusMs / queuedPollMs  可注入的节奏，仅供测试缩短用。
+   *   heartbeatMs / statusMs / queuedPollMs / releaseMs
+   *                                          可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
    *
    * spaceId 是这一份数据的 id（见 config.js 的「数据空间」那一节）：它决定本地
@@ -180,7 +191,7 @@ class SessionController extends EventEmitter {
    *   （写进用户那份 ssh 配置的 `Port` 行 —— 那边必须反映当前真值），走 onRelayPort。
    */
   constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
-                heartbeatMs, statusMs, queuedPollMs, pushStaleMs,
+                heartbeatMs, statusMs, queuedPollMs, releaseMs, pushStaleMs,
                 requestedKind, needsPubkey }) {
     super();
     this.backend = backend;
@@ -190,6 +201,7 @@ class SessionController extends EventEmitter {
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
     this.statusMs = statusMs || STATUS_MS;
     this.queuedPollMs = queuedPollMs || QUEUED_POLL_MS;
+    this.releaseMs = releaseMs || RELEASE_POLL_MS;
     /**
      * 推送看门狗的长度。可注入，与上面三个节奏同一个理由：用例要把它压到
      * 几百毫秒才验得了"通道坏了会退回轮询"——而真值见 `PUSH_STALE_MS`。
@@ -227,6 +239,7 @@ class SessionController extends EventEmitter {
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
     this._hbTimer = null;
     this._statusTimer = null;
+    this._releaseTimer = null;
     this._lastTarget = null;
     this._stopped = false;
     /**
@@ -940,7 +953,9 @@ class SessionController extends EventEmitter {
    *   （见 `_handlePush`）。两条路进的是同一个函数，判定只有这一份。
    */
   async _statusOnce() {
-    if (this._stopped || !this.sessionId) return;
+    // 释放期是唯一一个"已经 `_stopped`、却还要继续问"的阶段：`stop()` 停了心跳与
+    //   推送，而"守护进程有没有把作业真的收掉"只剩 `status` 这一条路能回答。
+    if ((this._stopped && this.state !== State.RELEASING) || !this.sessionId) return;
     // 同一时刻只许有一次。两条同时在飞的 status 各写一遍 `this.session`，
     //   而它们回来的顺序没有保证 —— 后回来的那条可能是更旧的一份。
     //   （定时器那条本来就串行；这一条是为推送触发的那条加的。）
@@ -960,7 +975,10 @@ class SessionController extends EventEmitter {
 
           // tunnel_target 变了（作业重启换了节点/端口）→ 重建隧道。
           // 不做这件事的表现是页面卡住、没有任何报错。
-          if (s.tunnel_target && s.tunnel_target !== this._lastTarget) {
+          // 释放期不重建：`stop()` 已经把隧道拆了，而释放期这次轮询只回答
+          //   "走完没有"。
+          if (this.state === State.RUNNING
+              && s.tunnel_target && s.tunnel_target !== this._lastTarget) {
             this.warning = `隧道目标已变更（${this._lastTarget} → ${s.tunnel_target}），正在重建。`;
             this._lastTarget = s.tunnel_target;
             const prevPort = this._tunnelPort;
@@ -991,6 +1009,7 @@ class SessionController extends EventEmitter {
           if (SERVER_FINISHED_STATES.includes(s.state)) {
             this._stopHeartbeat();
             this._stopStatusPoll();
+            this._stopReleaseWatch();
             // 会话结束了，本地监听必须一起收掉。留着它的后果不是「多占一个端口」：
             //   浏览器仍然连得上本地端口，却会被 dial 接到一个已经不存在的目标上 ——
             //   表现是「页面打不开，但也不报错」。端口只在 stop() 里释放是不够的，
@@ -1001,7 +1020,9 @@ class SessionController extends EventEmitter {
           }
           if (s.state === 'releasing') {
             this._stopHeartbeat();          // 已在释放，心跳没有意义了
-            this._setState(State.RELEASING);
+            // 只在第一次进入时改状态：释放期那个 3 秒一次的短轮询会反复走到
+            //   这里，每次都 `_setState` 等于每 3 秒重画一遍整个界面。
+            if (this.state !== State.RELEASING) this._setState(State.RELEASING);
             return;
           }
 
@@ -1010,8 +1031,12 @@ class SessionController extends EventEmitter {
       } else if (c.action === Action.SESSION_GONE) {
         this._stopHeartbeat();
         this._stopStatusPoll();
+        this._stopReleaseWatch();
         await this.tunnel.stop();     // 同上：会话都没了，监听没有理由留着
-        this._setState(State.ERROR, { error: '会话已不存在。' });
+        // 释放期里"会话没了"就是释放做完了：守护进程删掉了那一行。运行期间
+        //   它才是出错（会话在用户背后消失了）。
+        if (this.state === State.RELEASING) this._setState(State.ENDED);
+        else this._setState(State.ERROR, { error: '会话已不存在。' });
         return;
       } else if (![Action.DAEMON_DOWN, Action.TRANSPORT, Action.RATE_LIMITED].includes(c.action)) {
         this.warning = c.message;
@@ -1026,6 +1051,42 @@ class SessionController extends EventEmitter {
 
   _stopStatusPoll() {
     if (this._statusTimer) { clearInterval(this._statusTimer); this._statusTimer = null; }
+  }
+
+  /**
+   * 释放期的短轮询：每 3 秒问一次，直到守护进程说出终态。
+   *
+   * `stop()` 会把心跳、推送、常规对账一起停掉（它们对一条正在释放的会话没有
+   *   意义）。但"释放走完了没有"只剩 `status` 能回答 —— 停掉之后不补这一条，
+   *   状态条会一直停在「正在释放…」，而站点那边早就写着「已结束 / 已拒绝」
+   *   （用户 2026-10-17 报的就是这个）。
+   *
+   * 它走的是同一个 `_statusOnce()`：终态、会话消失、视图合并都只有那一份实现。
+   *   与 `_startStatusPoll()` 的区别只有两点：间隔（释放要快），以及它不看推送
+   *   （订阅已经在 `stop()` 里退掉了，`_pushHealthy()` 必然为假）。
+   */
+  _watchRelease() {
+    if (this._releaseTimer) return;
+    const tick = async () => {
+      if (!this._releaseTimer) return;
+      try {
+        await this._statusOnce();
+      } catch {
+        // 传输层没说话（守护进程重启、链路抖了一下）：下一次再问。释放期的
+        //   短暂断线不该把界面钉死在「正在释放」上，也不该把一次还没确认的
+        //   释放报成失败。
+      }
+    };
+    this._releaseTimer = setInterval(tick, this.releaseMs);
+    this._releaseTimer.unref?.();
+    tick();
+  }
+
+  _stopReleaseWatch() {
+    if (this._releaseTimer) {
+      clearInterval(this._releaseTimer);
+      this._releaseTimer = null;
+    }
   }
 
   /**
@@ -1075,6 +1136,7 @@ class SessionController extends EventEmitter {
     this._stopped = true;
     this._stopHeartbeat();
     this._stopStatusPoll();
+    this._stopReleaseWatch();
     this._watchBackend(false);
     await this.tunnel.stop();
   }
@@ -1196,14 +1258,28 @@ class SessionController extends EventEmitter {
 
     const c = classify(resp, { op: 'goodbye' });
     if (c.action === Action.OK) {
-      // `ok:true` 仍然不等于作业真的被取消了 —— 它等于"这一次 scancel
-      //   发出去了、会话进了 releasing"。守护进程现在会一直重试到确认作业消失
-      //   为止（`phase_release` 的闸），所以这里能说的是"已请求释放"。
+      // `ok:true` 不等于作业真的被取消了 —— 对一条活着的会话，它等于"这一次
+      //   scancel 发出去了、会话进了 releasing"，守护进程会一直重试到确认
+      //   作业消失为止（`phase_release` 的闸）。所以这里能说的是"已请求释放"。
       // 而服务端说得出"这一次没成功"（协议里的 `warning`，账本 F12）
       //   —— 它必须被显示：用户会以为作业停了，而它可能还在烧 GPU。
       const w = resp.data && resp.data.warning;
       if (w) this.warning = w;
+      // 对一条已经结束的会话，守护进程回的是它自己的终态（见 `op_goodbye`），
+      //   不是"这次释放受理了"。照原样改成 RELEASING 会让界面永远停在
+      //   「正在释放」上，而站点那一行早就写着「已拒绝 / 已结束」（2026-10-17
+      //   真机：点了「结束会话」没有任何反应，状态条一直挂着正在释放）。
+      const st = resp.data && resp.data.state;
+      if (SERVER_FINISHED_STATES.includes(st)) {
+        this._setState(State.ENDED);
+        return {
+          ok: true, state: 'ended',
+          detail: '会话已经结束（' + sessionStateText(st) + '），没有新的释放要做。',
+        };
+      }
       this._setState(State.RELEASING);
+      // 从这里起只能靠 `status` 知道它什么时候走完（见 `_watchRelease`）。
+      this._watchRelease();
       return { ok: true, state: 'releasing',
                detail: w ? ('已请求释放。' + w) : '已请求释放，等待控制节点确认。' };
     }

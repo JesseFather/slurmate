@@ -1795,13 +1795,7 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
   // 上一个用例「断开」时假后端被 close()，而它那个 1.6 秒的释放定时器在 close() 里
   // 被清掉了 —— 于是那个会话卡在 releasing，_submit 会以 quota_active 拒绝。
   // 真集群上守护进程的 phase_release 会自己收掉它（最多一个 tick），这里手动收。
-  //
-  // 这一步必须排在 `app:connect` 前面。连接现在会跑
-  //   `tryReattach()`（`doConnect` 的最后一步），而它会把还占着位置的会话
-  //   接回来 —— `releasing` 就在那个集合里。接回来之后：那个槽被它占着，于是
-  //   下面这一条新会话拿的是一个临时实例（另一个工作区、另一个端口），而这条
-  //   用例要验的"换工作区会重建视图"就永远走不到（判据是 `workspaceId` 与连接那个工作区
-  //   相等）。症状是"换 partition 必须重建视图"这一条红，而原因完全不在这里。
+  // （断开之后的重连不会把它接回来：`tryReattach` 跳过 `releasing`。）
   idx._test.getBackend().debugReap();
 
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
