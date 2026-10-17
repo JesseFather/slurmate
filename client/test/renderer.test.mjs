@@ -302,19 +302,15 @@ function screenBlock(id) {
   return m[0];
 }
 
-test('四屏都在，而且路由只认这四个 id', () => {
+test('三屏都在，而且路由只认这三个 id', () => {
   // 这一条守的是「打开客户端落在哪一屏」这件事有唯一一处判据。
   //   若"露哪一屏"是 renderSnapshot() 按会话状态算出来的（空闲露连接列表、
   //   跑起来露当前会话），"用户在哪儿"就没有地方记着 —— 他去作业列表看一眼，
   //   下一次快照回来就被弹回另一屏，而他什么都没做。
-  // 第四屏（调试）2026-10-11 加：它从前是「关于」里最下面那一块，而「关于」只在
-  //   第一屏上 —— 连着站点之后够不着。它与其他三屏不是并列关系：只有开发者
-  //   模式下才进得来（入口是状态条那颗「调试」标签），但"露哪一屏"这件事仍然是
-  //   同一句判据，所以它在同一张表里。
-  const ids = ['screen-conns', 'screen-plugins', 'screen-jobs', 'screen-debug'];
+  const ids = ['screen-conns', 'screen-plugins', 'screen-jobs'];
   for (const id of ids) screenBlock(id);
 
-  // 路由里恰好列着这四个 —— 少一个 = 那一屏永远藏不起来（叠在别的屏上面）；
+  // 路由里恰好列着这三个 —— 少一个 = 那一屏永远藏不起来（叠在别的屏上面）；
   // 多一个（比如某个屏被拆成两半）= 露一个的时候另一个还开着。
   const fn = /function showScreen\(name\)[\s\S]*?\n\}/.exec(js);
   assert.ok(fn, 'panel.js 里应当有 showScreen()');
@@ -351,18 +347,14 @@ test('四屏都在，而且路由只认这四个 id', () => {
   assert.match(fn[0], /plugins-title/, '第二屏的标题要在路由里按当前站点写一次');
   assert.match(fn[0], /activeConnectionId/,
     '而它的判据必须是主进程给的活跃连接，不是界面自己记的"刚才点了谁"');
-  // 第四屏顶着与第二/三屏同一条身份带，地址那一行也照同一条规矩写（活跃连接给的
-  //   user@host）—— 它同样只在一个站点里才进得来。三屏用同一个循环写，不是各算一份。
-  assert.match(fn[0], /for \(const id of \['plugins-site', 'jobs-site', 'debug-site'\]\)/,
-    '三条身份带的地址行要一处写，不是各算一份');
-  assert.match(fn[0], /\$\('plugins-title'\)\.textContent = '插件'[\s\S]*\$\('debug-title'\)\.textContent = '调试'/,
+  // 第二/三屏顶着同一条身份带，地址那一行也照同一条规矩写（活跃连接给的
+  //   user@host）。两条用同一个循环写，不是各算一份。
+  assert.match(fn[0], /for \(const id of \['plugins-site', 'jobs-site'\]\)/,
+    '两条身份带的地址行要一处写，不是各算一份');
+  assert.match(fn[0], /\$\('plugins-title'\)\.textContent = '插件'/,
     '标题只剩这一屏的名字 —— 地址不再拼进标题（2026-10-17 改）');
-  assert.match(html, /id="screen-debug"[\s\S]*id="debug-title"[\s\S]*id="debug-site"/,
+  assert.match(html, /id="screen-jobs"[\s\S]*id="jobs-title"[\s\S]*id="jobs-site"/,
     '而它在那一屏里，并且与地址那一行成对');
-  // 进那一屏时现取一次那两处目录（与 `refreshJobs` 同形）：缓存下来的答案在
-  //   一个刚装完插件的人眼里正好是错的。
-  assert.match(fn[0], /if \(name === 'debug'\) refreshSiteDirs\(\);/,
-    '第四屏要现取一次假站点那两处目录 —— 缓存的那一份可能刚过期');
 });
 
 test('用例 12：作业列表那一屏的三个动作按钮，两侧逐字相同', () => {
@@ -524,12 +516,11 @@ test('该两段式的七处走两段式 —— 而重新生成密钥不是（判
   //
   // 判据是代价，不是"不可逆"（用户 2026-10-09 定的）。于是这一份清单两个
   //   方向都要钉：
-  //     要走两段式的七处 —— 结束会话 / 断开（取消集群上正在跑的作业）、
+  //     要走两段式的六处 —— 结束会话 / 断开（取消集群上正在跑的作业）、
   //       切走工作区（旧工作区的浏览器存储与磁盘文件一起没）、删除插件数据、
   //       删除一条连接（私钥一并作废 + 它在删某个工作区的数据）、
   //       删掉本机那一份插件（§5.3：那是撤回同意，下一次要对同一个东西再点一次
-  //       「同意」）、从假站点撤掉一个插件（站点那一侧，而"我其实只是想关掉它"
-  //       没有退路）；
+  //       「同意」）；
   //     而 重新生成密钥不是（它作废的是一把还没派上用场的公钥，代价已经写在
   //       那颗按钮的 `title` 上）。
   //   只钉"哪几处要走"的话，"一并给重新生成密钥也加一道"照样全绿 —— 而那正是
@@ -558,15 +549,13 @@ test('该两段式的七处走两段式 —— 而重新生成密钥不是（判
   assert.equal(/window\.confirm/.test(awFn[0]), false,
     '这条路里不许再有 window.confirm —— 那正是它从前最别扭的地方');
 
-  // 最后两处也挂在运行期画出来的按钮上（插件那一块上的那两颗）。
-  //   行为那半边在 `renderer-dom.test.mjs`（两颗各画不画、点下去各走哪条路、
-  //   取消回不回原样）；这里只钉它们没有退回 `window.confirm`。
-  const pbFn = /function pluginBlock\(p, pv\)[\s\S]*?\n\}/.exec(js);
-  assert.ok(pbFn, 'panel.js 里应当有 pluginBlock(p, pv)');
+  // 最后一处也挂在运行期画出来的按钮上（插件那一块上的那一颗）。
+  //   行为那半边在 `renderer-dom.test.mjs`（画不画、点下去走哪条路、
+  //   取消回不回原样）；这里只钉它没有退回 `window.confirm`。
+  const pbFn = /function pluginBlock\(p\)[\s\S]*?\n\}/.exec(js);
+  assert.ok(pbFn, 'panel.js 里应当有 pluginBlock(p)');
   assert.match(pbFn[0], /armConfirm\(drop, \{/,
     '删掉本机那一份要走两段式 —— 那是撤回同意，站点还在分发时下次要重新问一遍');
-  assert.match(pbFn[0], /armConfirm\(off, \{/,
-    '从站点撤掉也要走两段式 —— 站点上那一份删了之后，"我只是想关掉它"没有退路');
   assert.equal(/window\.confirm/.test(pbFn[0]), false,
     '这一块里不许有 window.confirm（同一条理由：它给不了两段）');
 
@@ -796,64 +785,20 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   assert.equal(/about-foot/.test(html) || /about-foot/.test(js),
     false, '从前最末那一行那颗「关于」整个删掉了 —— 留着就是第二个入口');
 
-  // 它装的是「关于」+ 开发者模式，而开发者模式从前是常驻的：搬进来之后
-  //   它必须整个在 `#sec-about` 里面。留在外面的话，"收起来"就只收掉了说明，
-  //   开关还挂在主界面上 —— 而这一版的全部目的就是把主界面让出来。
+  // 「关于」里只留这一版的说明。开发者模式整个删掉了（0.27）：开关、沙盒、
+  //   内置假连接、调试那一屏都不在界面与源码里。
   const sec = /<section id="sec-about"[\s\S]*?<\/section>/.exec(html);
   assert.ok(sec, 'panel.html 里应当有 #sec-about');
-  const bare = sec[0].replace(/<!--[\s\S]*?-->/g, '');
-  for (const id of ['dev-on', 'dev-pending', 'dev-restart']) {
-    assert.ok(bare.includes(`id="${id}"`),
-      `#${id} 要搬进 #sec-about 里面 —— 留在外面就是"收起来了但开关还在"`);
+  for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-debug', 'sb-dev']) {
+    assert.equal(html.includes(`id="${id}"`), false, `#${id} 还在 —— 开发者模式应该整个删掉`);
   }
-  // 而「假站点的插件来源」那一块（一个目录选择器 + 一句"读到几个"）整块没有了：
-  //   站上的插件只有一条来的路 —— 装上去（插件页那颗「安装插件…」）。留在这一节里
-  //   就等于说"站点上有什么可以由你选择"，而那件事真站点上只取决于管理员装了什么。
-  for (const id of ['dev-src', 'dev-src-path', 'dev-src-count',
-                    'dev-pick', 'dev-reset-src']) {
-    assert.equal(bare.includes(`id="${id}"`), false,
-      `#${id} 还在 —— 「假站点的插件来源」那条路应该整个删掉`);
+  for (const id of ['screen-debug', 'debug-title', 'debug-site', 'btn-debug-back', 'site-dirs']) {
+    assert.equal(html.includes(`id="${id}"`), false, `#${id} 还在 —— 第四屏应该整个删掉`);
   }
-  // 调试开关那一块搬去第四屏了（2026-10-11）—— 它住在这里的时候，连着站点
-  //   之后根本够不着：会话的页面一起来，窗口主体就被那块原生视图整块盖住，而「关于」
-  //   只在第一屏上。用户的原话是「一个东西该属于哪个层级就不要乱窜」。
-  assert.equal(bare.includes('id="dev-debug"'), false,
-    '调试开关那一块搬去第四屏了 —— 留在「关于」里等于它还是够不着');
-  assert.equal(/data-debug="/.test(bare), false,
-    '那 10 颗按钮一颗都不许留在「关于」里（同一件事摆两处，改一处就漏一处）');
-  const dbg = screenBlock('screen-debug');
-  assert.match(dbg, /id="dev-debug"/, '而那一块自己的容器跟过去（那个洋红虚线框）');
-  // 那 10 颗一个都不许少（它们存在的全部理由就是造出真集群上造不出来的状态，
-  //   少一颗就少验一条路）。数目钉着，多一颗也要看一眼。
-  assert.equal([...dbg.matchAll(/data-debug="/g)].length, 10,
-    '调试开关那 10 颗按钮要一起搬进第四屏');
-  // 第四屏还带一段只读的「站点上的插件从哪来」—— 它是排查「站上一个插件都
-  //   发不出来」的唯一线索（装上去的东西落在沙盒里，用户在别处看不到那个目录）。
-  //   只读：那一块里一颗按钮都没有 —— 装/卸走插件页那条路。
-  assert.match(dbg, /id="site-dirs"/, '第四屏要说得出假站点那两处目录各读到什么');
-  const others = [...dbg.matchAll(/<button[^>]*>/g)].map((m) => m[0])
-    .filter((b) => !b.includes('data-debug='));
-  assert.deepEqual(others, ['<button id="btn-debug-back" class="ghost">'],
-    '第四屏上除了那 10 颗调试开关，只该有一颗「← 插件」—— 它是只读的，'
-    + '装/卸那件事走插件页那条路（与真站点上"只有管理员能装"同形）');
-
-  // 状态条那格留着：会话跑起来之后窗口主体被原生视图盖住，那是唯一还看得见
-  //   开发者模式的地方。
-  assert.match(html, /id="sb-dev"/, '状态条那格不能跟着搬走');
-  assert.match(js, /\$\('sb-dev'\)\.classList\.toggle\('hidden',\s*!\(s && s\.dev\)\)/,
-    '而它仍然由前台那一条的 `dev` 驱动');
-
-  // 「从前那两段」压成了一句 —— 它是干什么的留下，它是给谁用的删掉（名字
-  //   自己说）。只数开发者模式那一段自己（到那个复选框那一行为止 —— 那一行是
-  //   这一节的下一格，而不是另一段说明）。
-  //
-  //   长度与段落个数是两件事：把一句拆成两小段比堆成一大段好读，
-  //   而"又长回去"才是要拦的那件事。
-  const head = sec[0].slice(sec[0].indexOf('<h3>开发者模式</h3>'),
-    sec[0].indexOf('<div class="row">'));
-  const han = (head.replace(/<[^>]+>/g, '').match(/[一-鿿]/g) || []).length;
-  assert.equal(han <= 70, true,
-    `开发者模式那一段不超过 70 字 —— 现在是 ${han} 字，那是"那两段又长回来了"`);
+  assert.equal(/data-debug="/.test(html), false, '调试开关一颗都不该留在界面里');
+  assert.equal(/renderDevMode|devState|refreshSiteDirs/.test(js), false,
+    'panel.js 里不该再有开发者模式的渲染函数或状态');
+  assert.equal(/--dev\b/.test(css), false, '洋红那个记号只属于开发者模式，一起删掉');
 });
 
 test('两条边栏整条吃状态色（那个圆点没有了）', () => {
@@ -915,7 +860,7 @@ test('高级选项长在每一块里，不是全屏共用的一份', () => {
   }
 
   // ② 画在那一块里，而且只给起得来的那些画。
-  const blockFn = /function pluginBlock\(p, pv\)[\s\S]*?\n\}/.exec(js);
+  const blockFn = /function pluginBlock\(p\)[\s\S]*?\n\}/.exec(js);
   assert.ok(blockFn, 'panel.js 里应当有 pluginBlock()');
   assert.match(blockFn[0], /if \(p\.runnable\) \{[\s\S]{0,220}?pluginAdv\(p\.defaults\)/,
     '高级选项要画在那一块里，而且只给起得来的那些画 —— 一颗灰着的'
@@ -956,11 +901,11 @@ test('第二/三屏的标题照第一屏的 masthead 做（2026-10-17 改）', (
   //   还是 14px 的区块标题。这一版照第一屏的 masthead 做 —— 一个名字加一行
   //   小字（用户的原话是"照着主页 slurmate 这个格式做：slurmate 改成插件，
   //   登录节点写成登录条目"）。
-  // 三屏共用同一条规则：若各写一份几处会漂，而漂的方向是"其中一屏看起来
+  // 两屏共用同一条规则：若各写一份几处会漂，而漂的方向是"其中一屏看起来
   //   还是旧的那一版"。
   assert.match(css,
-    /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head,\s*\n#screen-debug > \.sec-head\s*\{/,
-    '进了站点的那几屏（第二/三屏 + 开发者模式下的第四屏）标题行要一起画');
+    /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head\s*\{/,
+    '进了站点的那两屏（第二/三屏）标题行要一起画');
   const head = /#screen-plugins > \.sec-head,[\s\S]*?\n\}/.exec(css);
   assert.ok(head, 'app.css 里应当有那一条');
   assert.equal(/background/.test(head[0]), false,
@@ -1131,8 +1076,8 @@ test('站在第一屏上就一定不在连接里 ——「换站点」那条路�
     const body = new RegExp(`async function ${fn}\\(\\)[\\s\\S]*?\\n\\}`).exec(js);
     assert.ok(body, `panel.js 里应当有 ${fn}()`);
     // 收的方式是 `setConnected(false)`（2026-10-11 改）：那一格只有这一个入口，
-    //   因为它顺手要把跟着它走的两个东西当场重画（两条边栏、状态条上那颗
-    //   「调试」标签）。写成裸赋值的话，那颗标签会等到下一次推送才更新。
+    //   因为它顺手要把跟着它走的东西当场重画（两条边栏）。写成裸赋值的话，
+    //   它们会等到下一次推送才更新。
     assert.match(body[0], /setConnected\(false\)/,
       `${fn} 必须把 connected 收掉 —— 若不收"回到第一屏"就是一句空话`);
     assert.match(body[0], /showScreen\('conns'\)/, `${fn} 是回第一屏的那条路`);
@@ -1305,9 +1250,7 @@ test('本机池那几个入口从 preload / panel.js / panel.html 三处一起�
   }
 
   const code = stripJsComments(js);
-  // 「开发者模式」这四个字出现在 panel.js 里是对的 —— 它指的是换掉整个后端
-  //   （见「开发者模式的三个动词」那一条），不是多加载一个目录。真正的判据是
-  //   "有没有教用户往目录里放东西的入口"，也就是下面这几串。
+  // 真正的判据是"有没有教用户往目录里放东西的入口"，也就是下面这几串。
   for (const s of ['从一个包安装', '打开插件目录', '重新扫描',
                    '本机插件目录', '也加载本机插件目录']) {
     assert.equal(code.includes(s), false,
@@ -1320,26 +1263,20 @@ test('本机池那几个入口从 preload / panel.js / panel.html 三处一起�
     'panel.html 里还留着 #plugin-dev 那个容器');
 });
 
-test('开发者模式那两个入口同时登记在 preload / panel.js / panel.html 三侧', () => {
-  // 与前面那两条同一个道理：少一边就是"点了没反应"（桥没暴露，调不到方法；
-  // 面板没调，没有入口；HTML 里没那个 id，面板一上来就 TypeError 白屏）。
-  //
-  // 这两个动词的"没反应"格外难查：开关点了之后界面本来就不该有变化
-  //   （要重启才生效），所以"点了没反应"与"正常"长得一样。
-  //   从前这里是四个（还有"选/清假站点的插件来源"两个）—— 那两个整条删掉了，
-  //     devmode.test.mjs 有一条断言它们不在桥上。
-  for (const m of ['setDeveloperMode', 'restart']) {
-    assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
-    assert.ok(bridgeCalls().has(m), `panel.js 没有调用 ${m}`);
-  }
-  const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
-  for (const id of ['dev-on', 'dev-restart', 'dev-pending']) {
-    assert.ok(htmlBare.includes(`id="${id}"`), `panel.html 缺少 #${id}`);
-  }
-  // 桥上不许再有那两个动词 —— 留着的话下一个人会以为那条路还在。
-  for (const m of ['pickDevPluginDir', 'clearDevPluginDir']) {
+test('开发者模式那条路在 preload / panel.js / panel.html 三侧都不在了', () => {
+  // 0.27 把开发者模式整个删掉了：开关、重启、调试、往假站点装/撤插件、读那两处
+  //   目录 —— 一条通道都不该留在桥上，一个控件也不该留在界面里。留着的话，
+  //   下一个人会以为那条路还在。
+  for (const m of ['setDeveloperMode', 'restart', 'debug',
+                   'installSitePlugin', 'uninstallSitePlugin', 'sitePlugins',
+                   'pickDevPluginDir', 'clearDevPluginDir']) {
     assert.equal(bridgeMethods().has(m), false, `preload 上还有 ${m}`);
     assert.equal(bridgeCalls().has(m), false, `panel.js 还在调 ${m}`);
+  }
+  const htmlBare = html.replace(/<!--[\s\S]*?-->/g, '');
+  for (const id of ['dev-on', 'dev-restart', 'dev-pending', 'dev-debug', 'sb-dev',
+                    'dev-banner', 'screen-debug', 'site-dirs']) {
+    assert.equal(htmlBare.includes(`id="${id}"`), false, `panel.html 里还有 #${id}`);
   }
 });
 
@@ -1363,29 +1300,6 @@ test('「假站点的插件来源」这个说法在客户端里一处都不剩',
     assert.equal(src.includes('插件来源'), false,
       `${who} 里还写着「插件来源」—— 那条路已经整个删掉了`);
   }
-});
-
-test('开发者模式：「想要的」与「生效的」在界面上必须分得开', () => {
-  // 这一节的全部难点就是两个值不是一回事（见主进程里 `dev` / `devSaved` 那段）：
-  //   复选框画的是用户要的那个（画生效值的话，点完它会自己弹回去，看起来像
-  //   开关坏了），而调试开关那一块画的是生效值（假后端没在跑，那些按钮按下去
-  //   只会回一句"仅开发者模式可用"）。
-  //
-  //   把两处对调，或者全都用一个值：界面上都不会报错，只会"点了没反应"或者
-  //   "有按钮但按下去就报错"。本机跑不起 panel.js，所以这一条只能钉住那两行文本 ——
-  //   断言失败时会指回是哪一个错了。
-  const code = stripJsComments(js);
-  assert.match(code, /\$\('dev-on'\)\.checked = Boolean\(d\.saved\)/,
-    '复选框要画 saved（用户要的那个），不是 on');
-  assert.match(code, /有改动等着重启/,
-    '两侧不一致时必须说出来 —— 若不说，用户勾了开关、界面没变，'
-    + '他会以为功能坏了（更糟的是他以为未生效，重启之后进了沙盒对着假集群干活）');
-  // 而"调试开关那一块画 on"那一条删掉了（2026-10-11）：那一块搬去第四屏
-  //   之后不再自带显隐开关 —— 留一句 `toggle('hidden', !d.on)` 就是第二处说
-  //   "这些按钮什么时候露"的地方，而它比第四屏真正的入口（`devState.on && connected`）
-  //   更宽：漂开的形态是"标签在、里面却是空的"。
-  assert.equal(/\$\('dev-debug'\)\.classList\.toggle/.test(code), false,
-    '第四屏里那一块不再自己管显隐 —— 进不进得来是那颗「调试」标签的事（见 renderTabs）');
 });
 
 test('站点分发那四条桥同时登记在 preload 与 panel.js 两侧', () => {
@@ -1413,22 +1327,6 @@ test('同意界面必须把「你不会得到什么保护」说出来', () => {
     '同意那一块必须说清客户端代码会在本机运行');
   // 第二次之后的同意要显示变了什么，只显示一个新摘要等于什么也没说。
   assert.match(code, /与上次同意的一致|变成了/, '同意的界面要能说出"内容变了"');
-});
-
-test('开发者模式里的每个调试按钮在主进程里都有对应的动作', () => {
-  // 真机上「按钮点了没反应」与「这个动作根本不存在」长得一模一样：控制台安静，
-  // 界面不动。而这些调试开关存在的全部理由就是造出真集群上造不出来的状态 ——
-  // 一个哑按钮直接让那条状态退回"造不出来"，而这一点在本机看不出来（没有图形环境）。
-  //
-  // 站点分发那几个尤其要紧：它们的回退方式互不相同（不支持分发只说一句话、
-  //   插件太大与限流各自走另一条路），少一个就少验一条路。
-  const main = fs.readFileSync(path.join(here, '..', 'src', 'main', 'index.js'), 'utf8');
-  const buttons = new Set([...html.matchAll(/data-debug="([^"]+)"/g)].map((m) => m[1]));
-  assert.ok(buttons.size >= 4, '调试开关的按钮一个都没找到？');
-  const handled = new Set([...main.matchAll(/what === '([^']+)'/g)].map((m) => m[1]));
-  const missing = [...buttons].filter((b) => !handled.has(b));
-  assert.deepEqual(missing, [],
-    `这些按钮在主进程里没有对应的动作：${missing.join('、')}`);
 });
 
 test('「站点版本过高」那一句必须按握手结论分叉（并钉住两种措辞）', () => {
@@ -1552,42 +1450,6 @@ test('★ 标签栏在这 30px 里 —— 它下面是原生视图，放外面�
   assert.match(css, /--bar-h:\s*30px/, '状态条高度还是那个常量');
 });
 
-test('★★ 那颗「调试」标签：只在假站点里出现，而且与会话标签长得不同', () => {
-  // 它 2026-10-11 加，理由是物理的：会话的页面是原生视图，从 y=30 往下盖住
-  //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
-  //   而"把人从那一屏救回来"的东西必须住在这 30px 里。
-  const code = stripJsComments(js);
-  const fn = /function renderTabs\(\)[\s\S]*?\n\}/.exec(code);
-  assert.ok(fn, 'panel.js 里应当有 renderTabs()');
-  // 判据是 `devState.on && connected` —— 在假站点里。真实模式一颗不出现，
-  //   第一屏（没连上）也不出现：还没进去，也就没有"被盖住的面板"这回事。
-  assert.match(fn[0], /const dev = Boolean\(devState && devState\.on && connected\)/,
-    '★ 那一颗的判据是 `devState.on && connected`（两个都要）');
-  // 而"少于两条会话就整条收起来"那条规矩要给它让路：一颗会话 + 开发者模式时，
-  //   这一条仍然要露出来（那颗标签是唯一回得来的路）。2026-10-18 起还有第三条
-  //   要它让路的判据：一条会话带着一块页面（`covered`）—— 真机上正是那一格让
-  //   用户起完 code-server 就回不到插件页与作业页。
-  assert.match(fn[0],
-    /classList\.toggle\('hidden',\s*!dev && !covered && list\.length < 2\)/,
-    '★ 会话少于两条也要留出位置 —— 少了它，一颗会话时那颗标签整个消失');
-  // 点它做的是"把面板抬回来"，不是切到哪一条会话。
-  assert.match(fn[0], /window\.slurmate\.showPanel\(\)/,
-    '★ 点它要调 `showPanel`（把面板抬到会话页面上面）');
-  assert.match(fn[0], /showScreen\('debug'\)/, '★ 抬回来之后要切到第四屏');
-  assert.match(fn[0], /b\.className = 'tab dev'/, '★ 那一颗自己的类（长相要与邻居分开）');
-  // 抬不起来要说出来：静默失败在这一处的表现是"我点了一下，什么都没发生"。
-  assert.match(fn[0], /notice\('error'/,
-    '★ showPanel 失败要报出来 —— 静默失败与"这一颗本来就没事可做"长得相同');
-  // 而它长在那条栏里（不是状态条上另起一格）：那 30px 是唯一还点得到的地方。
-  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
-  assert.match(bar[0], /id="session-tabs"/);
-  // CSS：那一颗的颜色与邻居不同（洋红 = 这个仓库里的「假后端」），而 `:hover`
-  //   要在它后面再写一遍 —— 选择器同权重，靠位置分胜负。
-  assert.match(css, /#session-tabs \.tab\.dev \{ color: var\(--dev\); border-color: var\(--dev\); \}/);
-  assert.match(css, /#session-tabs \.tab\.dev:hover \{ color: var\(--fg\); \}/,
-    '★ 少了这一句，鼠标停上去它反而不变色（比邻居更迟钝）');
-});
-
 test('★ 那颗「面板」：一条会话时也在，点它把面板抬回来', () => {
   // 2026-10-18 加（真机）。一条 code-server 会话起起来之后，窗口主体从 y=30
   //   往下被原生视图整块盖住 —— 而标签栏从前"少于两条就收起来"，于是面板
@@ -1607,12 +1469,12 @@ test('★ 那颗「面板」：一条会话时也在，点它把面板抬回来'
     '★ 点它要调 `showPanel`');
   assert.match(fn[0], /notice\('error'/,
     '★ 抬不起来要说出来 —— 静默失败与"这一颗本来就没事可做"长得相同');
-  const panelBlock = /b\.className = 'tab panel'[\s\S]*?if \(dev\)/.exec(fn[0]);
-  assert.ok(panelBlock, '那一颗整块应当在「调试」那一支之前');
+  const panelBlock = /b\.className = 'tab panel'[\s\S]*?box\.appendChild\(b\)/.exec(fn[0]);
+  assert.ok(panelBlock, '找得到「面板」那一颗');
   assert.doesNotMatch(panelBlock[0], /showScreen\(/,
     '★ 它不换屏 —— 回到用户离开时的那一屏');
   // CSS：虚线把它与实线的会话标签分开。不借颜色 —— 那几档颜色在这个仓库里
-  //   各有各的意思（洋红 = 假后端，--err = 出错，--warn = 进行中）。
+  //   各有各的意思（--err = 出错，--warn = 进行中）。
   assert.match(css, /#session-tabs \.tab\.panel \{ border-style: dashed; \}/);
   assert.match(css, /#session-tabs \.tab\.panel:hover \{ color: var\(--fg\); \}/);
 });
@@ -1658,7 +1520,6 @@ test('★★ 「临时副本」那条提示**两处都有**，而状态条那一
   // 为什么状态条那一份不是锦上添花：会话一跑起来，窗口主体就被原生视图整块
   //   盖住（只有前台那块 setVisible(true)，从状态条下沿铺到底），面板里那一份
   //   跟着被盖住 —— 而那正是最需要看见这句话的时候（用户正要在里面干活）。
-  //   `#sb-dev` 就是为同一件事待在那 30px 里的先例。
   //   这里测不了"看得见"（本机无图形环境），测的是它在不在那个盒子里。
   const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
   assert.ok(bar, '未找到状态条');
@@ -1679,13 +1540,11 @@ test('★★ 「临时副本」那条提示**两处都有**，而状态条那一
       `${id} 的露出条件必须来自 frontTemporary()：${line[0]}`);
   }
 
-  // 颜色另起一个：洋红在这个仓库里等于「假后端」（三重互锁的第二重），
-  //   复用会把两件毫不相干的事说成一件 —— 临时副本是真实的会话、真实的作业。
+  // 颜色另起一个 —— 临时副本是真实的会话、真实的作业，与别的记号各说各的事。
   assert.match(css, /--temp:\s*#/, '要有一个自己的颜色变量');
-  const tempTag = /\.temp-tag\s*\{[^}]*\}/.exec(css);
+  const tempTag = /\.temp-tag\s*\{[^}]*color[^}]*\}/.exec(css);
   assert.ok(tempTag, '未找到 .temp-tag 那条样式');
   assert.match(tempTag[0], /var\(--temp\)/, '它用的是自己那个颜色');
-  assert.equal(/--dev/.test(tempTag[0]), false, '★ 不许复用洋红（那是假后端的记号）');
 });
 
 test('★★ 站点侧的插件问题：同一句话在守护进程与界面里逐字相同', () => {

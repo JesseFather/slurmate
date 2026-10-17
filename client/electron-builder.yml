@@ -9,32 +9,23 @@ directories:
   buildResources: build
 
 # 只打包运行需要的东西。测试、CI 配置、文档都不进安装包。
+#
+# 假站点那几个模块只服务客户端自己的测试（`SLURMATE_TEST_BACKEND=1`，而且只在
+#   非打包版生效），安装包里一个都不带。`backend.js` 那一条 `require` 只在
+#   测试分支里跑，所以拿掉它们不会让打包版少任何运行时依赖。
 files:
   - src/**/*
   - package.json
   - '!**/*.map'
   - '!test/**'
+  - '!src/main/backend-fake.js'
+  - '!src/main/fake-job.js'
+  - '!src/main/fake-job-host.sh'
+  - '!src/main/demo-server.js'
+  - '!src/preload/demo.js'
+  - '!src/demo/**'
 
 asar: true
-
-# ── 不在 `src/` 里的那两样 ──────────────────────────────────────────────────
-# 客户端的运行期只读 `client/` 里的东西，例外只有这两处，而且都只在开发者模式里：
-# 开发者模式要它们，它们的家却不在这儿。`client/src/main/app-assets.js` 里那份
-# 算法与下面是同一件事的两半 —— 改一处就要改另一处，`client/test/packaging.test.mjs`
-# 钉着这一对。
-#
-# 从前这两条一条都没有，于是打包版上：假站点打不出包（客户端一份插件都收不到），
-# 就算打出来了，外部 bash 也读不了 asar 里的那段宿主脚本。
-extraResources:
-  # 打包器。假站点要现打一个客户端侧容器才能把插件发给客户端，而容器格式只有
-  # 那一份实现 —— 手搓第二份就是两个会漂的东西。它是单文件、零依赖，带上很便宜。
-  - from: ../packer/slurmate-packer.js
-    to: packer/slurmate-packer.js
-
-# 替身宿主。它要交给一个外部 bash 去读，而外部进程读不了 asar 里的文件，
-# 所以这一份必须解出来。
-asarUnpack:
-  - src/main/fake-job-host.sh
 
 # ── Windows ────────────────────────────────────────────────────────────────
 win:

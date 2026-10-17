@@ -71,29 +71,11 @@ const SECRET_ENCRYPTED = 'encrypted';
  */
 const PENDING_ID = '__pending__';
 
-/**
- * 开发者模式那条内置假连接的 id 与它长什么样。
- *
- * 它由 `index.js` 的 `ensureBuiltinDevConnection()` 播种（只有开发者模式开着时
- *   才播），而不是 `loadConfig` 造的 —— 那一个只收到一个目录，它必须继续不知道
- *   "开发者模式"这件事（那正是 `dev-mode.json` 单独一个文件的理由）。
- *
- * id 与 `PENDING_ID` 同一个形状，而且同样不取 `c<hex>` ——
- *   `newConnectionId()` 永远铸不出它，所以"保留 id"这件事不需要任何额外的检查
- *   就成立。这一族名字在配置里一眼看得出来是框架的，不是用户的。
- *
- * 地址是留白的：假后端不看它（`backend-fake.js` 的 `connect` 只读 `user`
- *   那一格），但三个格子都得有值 —— 而它必须落在文档用的地址上
- *   （环回 / RFC 5737），绝不能是一个真集群。
- */
-const DEV_CONNECTION_ID = '__dev__';
-const DEV_CONNECTION = { user: 'demo', host: '127.0.0.1', port: 1, label: '本机假站点' };
-
 const DEFAULTS = {
   schema: SCHEMA,
   // 登录节点连接条目。支持多条是因为同一个登录节点常有多个入口
   // （内网、公网域名、跳板机），换网络环境时不该重新填一遍。
-  connections: [],          // [{ id, label, user, host, port, workspaceId, builtin? }]
+  connections: [],          // [{ id, label, user, host, port, workspaceId }]
   activeConnectionId: null,
   // 主机密钥指纹（TOFU）。键是 "host:port"，值是 "SHA256:…"。
   // ssh2 默认【不校验】主机密钥，不自己存一份就等于裸奔（见 backend-ssh.js）。
@@ -335,7 +317,7 @@ function pinPluginKey(dir, pins, id, fingerprint) {
 //   session 的 API）。于是"用户点了删除、而这一份此刻删不掉"是常态，不是故障。
 //   出路只有一条：下一次启动时删 —— 那时本进程还没有唤醒过任何一个分区。
 //
-// 为什么不进 `config.json`：与钉子、开发者模式那两个文件同一条理由
+// 为什么不进 `config.json`：与钉子同一条理由
 //   （`loadConfig` 只认已知键，旧版本读一遍再存一遍会把不认识的那张表抹掉）。
 //
 // 与钉子有一处相反：这一份丢了没有代价。盘上那份目录还在，下一次对账会把它
@@ -421,57 +403,9 @@ function forgetPendingRemoval(dir, list, place, name) {
   return { ok: true };
 }
 
-// ── 开发者模式：不在 config.json 里 ──────────────────────────────────────
-//
-// 为什么单独一个文件：`developerMode` 这个键要回答的是"这次启动读哪一份
-//   配置"（用户自己那份，还是沙盒那一份）。把它放进 `config.json`，就先得知道读
-//   哪一份、才能知道读哪一份 —— 鸡生蛋。放进一个不属于任何一份配置的文件里，
-//   这个问题不存在。
-//
-// 顺带避掉另一个坑：那样一来这个键会在两份配置里都出现（同一个 DEFAULTS），
-//   而只有用户那份里的值有读者。沙盒那一份会是一个没人读的 `false`，下一个人会
-//   拿它去判断"开发者模式开没开"—— 而那正是这个仓库一路上在删的那种东西。
-//
-// 形状认不出时一律按关着算。这是安全的那一侧：用户回到自己那份配置（看得见、
-//   能干活），而不是被扔进一个连不上集群的沙盒里，还不知道为什么。
-//
-// 与 `pinned-keys.json` 同一类东西：一个独立的小状态文件，键少、原子写、0600。
-const DEV_FILE = 'dev-mode.json';
-
-function devSettingsPath(dir) { return path.join(dir, DEV_FILE); }
-
-/**
- * 读开发者模式的设置。只有一个键。
- *
- * 从前这里还有一个 `pluginDir`（"假站点的插件来源"，插件作者可以指向自己那棵树）。
- *   它整个删掉了：假站点上的插件只有一条来的路 —— 装上去（见 index.js 的
- *   `siteInstalledDir` / `samplePluginsDir`），而装上去是那条与真站点同形的路。
- *   一个可以由用户改的来源会让"站点上有什么"取决于一个界面上的选择，
- *   而真站点上那件事只取决于管理员装了什么。
- *
- * @returns {{developerMode:boolean}}
- */
-function loadDevSettings(dir) {
-  const raw = readJson(devSettingsPath(dir));
-  const shaped = Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw);
-  return { developerMode: shaped && raw.developerMode === true };
-}
-
-/**
- * 写开发者模式的设置，返回规整之后的那一份 —— 调用方拿它更新自己手里那份，
- * 免得"我写下去的是什么"与"盘上是什么"有两份算法。
- *
- * 写的是整个文件：旧版本留下的 `pluginDir` 因此不会被写回去（`0.y` 不考虑兼容）。
- */
-function saveDevSettings(dir, s) {
-  const next = { developerMode: Boolean(s && s.developerMode) };
-  writeAtomic(devSettingsPath(dir), JSON.stringify(next, null, 2), 0o600);
-  return next;
-}
-
 // ── 这台电脑的客户端身份 ────────────────────────────────────────────────────
 //
-// 与 `pinned-keys.json`、`dev-mode.json` 同一类：一个独立的小状态文件。
+// 与 `pinned-keys.json` 同一类：一个独立的小状态文件。
 //   它必须是独立的一份，理由和钉子那次一模一样 —— 旧版本读一遍 `config.json`
 //   再存一遍就会把不认识的东西抹掉，而"客户端身份没了"的后果是：这台电脑下次连
 //   上来算新人，于是把另一台正在用的电脑顶掉。用户什么都没做。
@@ -566,11 +500,6 @@ function normalizeConnection(raw, fallbackId) {
     // loadWorkspaces 收束，不留 null 让界面去处理。
     workspaceId: (typeof raw.workspaceId === 'string' && raw.workspaceId) ? raw.workspaceId : null,
   };
-  // 「结构性」那一格只认 `true` 这一个字面值。它在这里被读出来，是为了让播种
-  //   的那一条能从文件里原样读回来（`loadConfig` 走的就是这个函数）。
-  //   而它不是给界面用的入口：`upsertConnection` 进门就把它剥掉（见那里的
-  //     注释）—— 用户提交的字段里有一个能改结构位的开关，正是要被堵死的那类形状。
-  if (raw.builtin === true) out.builtin = true;
   return out;
 }
 
@@ -963,27 +892,18 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
  */
 function defaultWorkspaceFor(cfg, conn) {
   const host = conn && conn.host;
-  // 内置那条假连接不参与这两条规则（开发者模式）。
-  //   工作区的定义是「这几条连接算同一个站点」——它决定的是一份浏览器存储与
-  //   一份插件数据（同一个 origin），而内置那条指向的是本机的假站点，与用户
-  //   真正要连的集群是两个站点。
-  //   让它当"同址那条"或"活跃那条"的候选，后果是用户的第一条连接直接落进沙盒
-  //     那个工作区里，从此那个工作区永远收不掉（引用计数永远 ≥1），而用户在界面上
-  //     看到的是"删了最后一条连接，数据却还在"。
-  //   判据落在连接上（它是结构性的那一格），不是"地址是不是 127.0.0.1"。
-  const usable = (c) => Boolean(c) && c.builtin !== true;
   // 端口一律收成数再比：`conn.port` 存进来时是数（`normalizeConnection`），
   //   而问这条规则的那个调用方是从输入框里读的（可能是个字符串）。
   //   不收的话症状是"同址那条默认静默失效"—— 退回"活跃连接的"，
   //   界面上看不出任何异常，而用户拿到的是另一份空白存储。
   const port = Number(conn && conn.port);
   if (host && Number.isInteger(port) && port > 0) {
-    const same = ((cfg && cfg.connections) || []).find((c) => usable(c) && c.id !== conn.id
+    const same = ((cfg && cfg.connections) || []).find((c) => c && c.id !== conn.id
       && c.host === host && c.port === port && findWorkspace(cfg, c.workspaceId));
     if (same) return same.workspaceId;
   }
   const active = activeConnection(cfg);
-  if (usable(active) && active.id !== (conn && conn.id)
+  if (active && active.id !== (conn && conn.id)
       && findWorkspace(cfg, active.workspaceId)) {
     return active.workspaceId;
   }
@@ -1007,11 +927,11 @@ function spaceConsumers(cfg, spaceId) {
  *   收不掉，要么是一个还跑着的工作区被收掉）：
  *   · 没有任何连接指着它（`connections[].workspaceId` 是唯一的所有权凭据）；
  *   · 此刻没有活会话拿着它（`keepIds`）—— 少了这一条就是删活数据：
- *     开发者模式（一个连接都没有）里那个工作区，连同它指着的那些数据，会在下一次
- *     commitConfig 时被收掉，而那条会话正跑在它们上面。
+ *     一个没有连接指着、却有会话跑着的工作区，连同它指着的那些数据，会在下一次
+ *     commitConfig 时被收掉。
  *
  * 从前这里有一条「一条连接都没有时不回收」的豁免，整条删掉了。它守的是
- *   "演示模式里那个不属于任何连接的工作区"，而那个工作区的真正持有者是那条活会话
+ *   "那个不属于任何连接的工作区"，而那个工作区的真正持有者是那条活会话
  *   —— 把活会话算作消费者，豁免就不需要了。它换来的是一格收不掉的工作区：
  *   用户把连接全删了，盘上还留着一张没人认得的引用表，界面上没有任何地方说得出来。
  *
@@ -1308,11 +1228,10 @@ function loadConfig(dir) {
   return cfg;
 }
 
-/** 撞车时回给界面的那一份。「内置」也带上：那两句话不一样（"改不了内置的"与"和另一条撞了"）。 */
+/** 撞车时回给界面的那一份。 */
 function conflictOf(c) {
   return {
     id: c.id, label: c.label, user: c.user, host: c.host, port: c.port,
-    builtin: c.builtin === true,
   };
 }
 
@@ -1339,12 +1258,6 @@ function upsertConnection(cfg, input, opts = {}) {
   const conn = normalizeConnection(input, input && input.id);
   if (!conn) return null;
 
-  // 「内置」那一格只能由播种产生（`index.js` 的 `ensureBuiltinDevConnection`）。
-  //   输入里带来的 `builtin` 在这里剥掉，于是界面没有任何一条路能造出第二条
-  //   内置的、也没有任何一条路能把一条普通连接变成内置的 —— 而"用户提交的字段里
-  //   有一个能改结构位的开关"正是要被堵死的那类形状。
-  delete conn.builtin;
-
   const key = connectionKey(conn);
   const idx = cfg.connections.findIndex((c) => c.id === conn.id || connectionKey(c) === key);
 
@@ -1354,11 +1267,6 @@ function upsertConnection(cfg, input, opts = {}) {
   }
 
   const prev = cfg.connections[idx];
-
-  // 内置那条改不动。这不是"判一个标志位然后禁掉按钮"，而是它根本不在用户
-  //   那张表里 —— 主进程这一侧把它变成权威（界面上那颗「编辑」压根不画）。
-  //   `builtin` 一起回给界面：那两句话不一样（"改不了内置的"与"和另一条撞了"）。
-  if (prev.builtin) return { conflict: conflictOf(prev) };
 
   // 编辑场景：输入的 id 指向 A，但 user@host:port 撞上了另一条 B。
   //   照直改下去，A 和 B 会变成同一身份的两份副本 —— 之后「相同条目检测」
@@ -1558,7 +1466,7 @@ function removePendingGoodbye(dir, sessionId) {
 //     （`loadConfig` / `saveConfig` / `setKey` / `loadPinnedKeys` …），那才是它
 //     该走的路；真需要某个内部函数时，加回一行就是一次看得出来的动作。
 module.exports = {
-  SCHEMA, DEFAULTS, PENDING_ID, DEV_CONNECTION_ID, DEV_CONNECTION,
+  SCHEMA, DEFAULTS, PENDING_ID,
   loadConfig, saveConfig,
   RELAY_PORT_BASE,
   // 工作区（一张引用表）
@@ -1578,8 +1486,6 @@ module.exports = {
   loadPinnedKeys, pinnedKeyOf, pinPluginKey,
   // 待删的目录（此刻删不掉，下一次启动时删）—— 同样单独一个文件
   loadPendingRemovals, recordPendingRemoval, forgetPendingRemoval,
-  // 开发者模式的两个设置 —— 也单独一个文件，理由见那一段（次序）
-  loadDevSettings, saveDevSettings,
   // 这台电脑的客户端身份 —— 同样单独一个文件，理由见那一段
   loadClientId,
   checkHostKey, rememberHostKey, forgetHostKey,

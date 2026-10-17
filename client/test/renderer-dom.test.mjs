@@ -301,65 +301,19 @@ test('第一屏画得出来（这一条就是 P1 那个白屏缺陷的守卫）'
   }
 });
 
-test('内置那条假连接：排最前、没有「编辑」「删除」，而其他行一个都不少', () => {
-  // 判据是画出来的东西，不是源码文本：那一行是不是真的排在最前、它那行里
-  //   是不是真的只有三样，只有画完之后才说得清。
-  const list = [
-    CONNS[0],
-    { ...CONNS[1], id: 'c9', builtin: true, label: '本机假站点' },
-    { id: 'c3', user: 'carol', host: '203.0.113.9', port: 10100, workspaceId: 'w000000000001' },
-  ];
-  const h = start({ connections: list, workspaces: WSS, activeConnectionId: 'c1' });
-  h.fn('renderConnections')(list);
-  const rows = h.byId.get('conn-list').children;
-  assert.equal(rows.length, 3, '三条连接就该画三行');
-
-  // ── ① 排最前，而其余保持用户的顺序 ──
-  assert.deepEqual(rows.map((r) => r.children[0]._text),
-    ['本机假站点', 'alice@198.51.100.7:10100', 'carol@203.0.113.9:10100'],
-    '内置那条排最前（它是这个列表的起点），其余按原来的顺序 —— 不是整表重排');
-
-  // ── ② 它那行里没有「编辑」「删除」──
-  assert.equal(rows[0].children.length, 3,
-    '内置那条只有「连接」一颗按钮 —— 那两颗是不画，不是画成禁用的'
-    + '（一颗永远点不亮的按钮正是"系统声称了不成立的事"）');
-  assert.deepEqual(rows[0].children.slice(2).map((x) => x._text), ['连接']);
-  assert.equal(rows[0].children[0].children[0]._text, '内置',
-    '名字后面要有一颗看得见的标记 —— 这一行为什么与上面那些不同，得它自己说得出来');
-
-  // ── ③ 而普通那几行一个都不少 ──
-  assert.deepEqual(rows[1].children.slice(2).map((x) => x._text), ['连接', '编辑', '删除']);
-  assert.deepEqual(rows[2].children.slice(2).map((x) => x._text), ['连接', '编辑', '删除']);
-  assert.equal(rows[1].children[0].children.length, 0, '普通的行没有那颗标记');
-
-  // ── ④ 状态那一格：内置那条留空，而不是「未探测」──
-  //   主进程不探它（`app:probeHosts` 把它滤掉了），「未探测」是在说"还没轮到它"，
-  //     而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
-  assert.equal(rows[0].children[1]._text, '', '内置那条的状态格留空');
-  assert.equal(rows[1].children[1]._text, '未探测', '而普通那几行照旧');
-});
-
-test('「新建连接」的显隐只有一处判据：表单开着，或者是开发者模式', () => {
-  // 开发者模式里连接表只有那一条固定的假连接（内置、不可编辑、不可删除），
-  //   「新建」没有第二处可去的地方 —— 用户 2026-10-17 定：那一颗不出现。
-  // 三个地方都会改到它：打开表单、收起表单、以及这一档。三处各写一遍
-  //   `classList.add/remove` 会漂 —— 比如「收起表单」把开发者模式藏起来的那一颗
-  //   又露出来。判据只有 `syncNewButton()` 这一份。
-  const h = start({ dev: false });
+test('「新建连接」的显隐只有一处判据：表单开着', () => {
+  // 两处会改到它：打开表单、收起表单。各写一遍 `classList.add/remove` 会漂，
+  //   判据只有 `syncNewButton()` 这一份。
+  const h = start();
   h.run('form = { open: false };');
   h.fn('syncNewButton')();
   assert.equal(h.byId.get('btn-new').classList.contains('hidden'), false,
-    '普通模式、表单收着 —— 那颗按钮要露着');
+    '表单收着 —— 那颗按钮要露着');
 
   h.run('form = { open: true };');
   h.fn('syncNewButton')();
   assert.equal(h.byId.get('btn-new').classList.contains('hidden'), true,
     '表单开着时它收起来（表单自己就是新建那一件事）');
-
-  h.run('form = { open: false }; boot = { dev: true };');
-  h.fn('syncNewButton')();
-  assert.equal(h.byId.get('btn-new').classList.contains('hidden'), true,
-    '开发者模式里没有它 —— 只有那一条固定的假连接，新建没有第二处可去');
 });
 
 test('两段式确认：第一次只是把那一格换成一行确认，第二次才真的做', () => {
@@ -708,74 +662,15 @@ test('「站点版本过高」那一句：正文只剩一行，理由挂 title',
     + '界面只负责按它选一句话');
 });
 
-test('「安装插件…」只在假站点上画，而点它走的就是那条 IPC', async () => {
-  // 判据是主进程给的能力位（`site.canInstall`），不是界面按后端名现判 ——
-  //   所以这一条同时钉住了两件事：假站点上它在，真站点上它一颗都没有。
-  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
-  h.run('window.__install = 0; window.__result = { cancelled: true };'
-    + 'window.slurmate.installSitePlugin = () => { window.__install += 1;'
-    + '  return Promise.resolve(window.__result); };');
-  // 那一块只在开发者模式里画「一切正常」的那一半（见下面那条用例），而假站点
-  //   本来就是开发者模式里才有的东西。
-  h.fn('renderDevMode')({ on: true, saved: true });
-
-  const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
-  // 按文字找，不是"这一块里第一颗按钮"：这一块里还有别的格子，而按位置找的话，
-  //   这一条会在"那颗按钮没画出来"的时候拿到别的元素，然后绿着。
-  const btnIn = () => childrenOf(h.byId.get('site-plugins'))
-    .find((x) => x.tagName === 'BUTTON' && x._text === '安装插件…');
-
-  // ① 假站点（能力位为真），画出来，而且说得清它收的是什么文件
-  draw({ label: '本站', canInstall: true, versions: [], strays: [] });
-  assert.ok(btnIn(), '假站点上必须画出那颗「安装插件…」');
-  assert.equal(btnIn()._text, '安装插件…');
-  assert.match(btnIn().title || '', /\.splug/, '要说清它选择的是打包器产出的那个文件');
-
-  // ② 真站点（能力位缺席），一颗都不画
-  draw({ label: '本站', versions: [], strays: [] });
-  assert.equal(btnIn(), undefined,
-    '真站点上不许有这颗按钮 —— 它是主进程给的能力位说了算的，界面不猜');
-
-  // ③ 点一下（用户按了取消）：走那条 IPC，一声不吭
-  //   提示流那一格要现取（`doc.getElementById` 会建它）：`$()` 没碰过的 id
-  //     在 `byId` 里根本不存在，而"读一个 undefined 的 children"会以 TypeError
-  //     收场 —— 那看起来像这一组用例坏了，与"守住了"分不开。
-  const notices = () => childrenOf(h.doc.getElementById('notices'));
-  draw({ label: '本站', canInstall: true, versions: [], strays: [] });
-  const before = notices().length;
-  await btnIn().onclick();
-  assert.equal(h.run('window.__install'), 1, '点一次就走那条 IPC');
-  assert.equal(notices().length, before,
-    '取消不是失败，不许出一条提示（"我按了取消"不该被当成一次错误报出来）');
-
-  // ④ 装不上：那句错话要原样出来（主进程才知道站上有什么，界面不重写判据）
-  h.run('window.__result = { ok: false, code: "rejected",'
-    + ' error: "站点上已经有一棵「示例盒子」，在 /p/01M2… —— 版本不同。" };');
-  await btnIn().onclick();
-  const said = notices().map((x) => x._text || '').join('\n');
-  assert.match(said, /站点上已经有一棵「示例盒子」/,
-    '无法安装要说清为什么 —— 而那句话是主进程给的，界面原样转述');
-
-  // ⑤ 装上了：那一次返回的视图当场画上去（不然用户得等下一次推送才看得见）
-  h.run('window.__result = { ok: true, installed: [{ id: "p9", version: "1.0.0",'
-    + ' title: "示例" }], unchanged: [],'
-    + ' plugins: { plugins: [], errors: [], problems: [], missing: [], consent: [],'
-    + '   inert: [], sitePoolDir: "/p",'
-    + '   site: { label: "装完的站点", canInstall: true, versions: [], strays: [] } } };');
-  await btnIn().onclick();
-  assert.match(childrenOf(h.byId.get('site-plugins')).map((x) => x._text || '').join('|'),
-    /装完的站点/, '装完返回的那份视图要当场画上去');
-});
-
-test('「站点分发」那一块：一切正常时只在开发者模式里画，出问题时两个模式都画',
+test('「站点分发」那一块：一切正常时整块不画，出问题时只画问题那几句',
   () => {
-    // 用户 2026-10-16 报的原话：「真实客户端（就是不在开发者模式）这个站点分发的
-    //   框应该整个不存在，但这里还是画出来了」。那一屏上它说的是
-    //   「站点 hfu@…:10100 · 上次同步 23:41:37 / 本站支持分发插件。」——
-    //   站点侧自检的口吻，而"本站会分发插件"这句话上面那一块已经说过了。
+    // 用户 2026-10-16 报的原话：「真实客户端这个站点分发的框应该整个不存在，
+    //   但这里还是画出来了」。那一屏上它说的是「站点 … · 上次同步 … /
+    //   本站支持分发插件。」—— 站点侧自检的口吻，而"本站会分发插件"上面那一块
+    //   已经说过了。
     //
     // 而它承载的【问题】不跟着消失：站点太旧/太新、这一轮有包装不上、快照表
-    //   读不到、本机那一份不见了 —— 那些两个模式里都要说。
+    //   读不到、本机那一份不见了 —— 那些照旧说。
     const h = start({ connections: [], workspaces: [], activeConnectionId: null });
     const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
     const all = () => childrenOf(h.byId.get('site-plugins'));
@@ -784,35 +679,20 @@ test('「站点分发」那一块：一切正常时只在开发者模式里画�
       supported: true, versions: [{ version: '1.0.0', wantedBy: ['本站'] }],
       strays: [] };
 
-    // ① 真实客户端、一切正常：整块不存在（这一条就是用户要的那件事）。
-    h.fn('renderDevMode')({ on: false, saved: false });
+    // ① 一切正常：整块不存在（这一条就是用户要的那件事）。
     draw(allGood);
-    assert.deepEqual(all(), [], `非开发者模式、一切正常时一个格子都不许画：${words()}`);
+    assert.deepEqual(all(), [], `一切正常时一个格子都不许画：${words()}`);
 
-    // ② 同一个站点在开发者模式里：框、站点那一行、版本清单都在。
-    h.fn('renderDevMode')({ on: true, saved: true });
-    draw(allGood);
-    assert.match(words(), /站点分发/, '开发者模式里那一块照旧');
-    assert.match(words(), /上次同步/);
-    // 池里每个版本那一栏 —— 它是这一块的理由（"为什么这台机器上会有两个版本"）。
-    //   按版本号那一格判，不按"被 本站 要"那句话：那是 `createTextNode`，
-    //   而这个壳只收集有 `tagName` 的元素（读它会读到一片空，然后绿着）。
-    assert.ok(all().some((x) => x._text === '1.0.0'), `版本清单要在：${words()}`);
-
-    // ③ 出问题（快照表读不到）时，非开发者模式里照样说 —— 但只说不好的那一半：
-    //    没有站点那一行。「重新同步」不在这块里，它在整屏底部（与「检查集群」并排）。
-    h.fn('renderDevMode')({ on: false, saved: false });
+    // ② 出问题（快照表读不到）：说问题，不附带"一切正常"那几行。
     draw({ ...allGood, snapshotOk: false, versions: [] });
     assert.match(words(), /站点分发/, '要有标题 —— 否则读者不知道这句话说的是哪一块');
     assert.match(words(), /快照表读取失败/);
     assert.equal(/上次同步/.test(words()), false, '「一切正常」那几行不跟着回来');
-    assert.equal(all().some((x) => x._text === '1.0.0'), false,
-      '版本清单是开发者模式才有的内容');
+    assert.equal(all().some((x) => x._text === '1.0.0'), false, '版本清单不画');
     assert.equal(all().some((x) => x.tagName === 'BUTTON'), false,
       '这一块里一颗按钮都没有 —— 「重新同步」在整屏底部，不在这一块里');
 
-    // ④ 反过来的那一半：站点太新时那句"升级客户端"两个模式里都在 ——
-    //    它是用户唯一能做的动作，藏在开发者模式里等于让他去做一件做不到的事。
+    // ③ 站点太新时那句"升级客户端"要说 —— 它是用户唯一能做的动作。
     draw({ ...allGood, reason: 'site_too_new', daemonVersionVerdict: 'cross_major' });
     assert.match(words(), /请升级这个客户端/);
   });
@@ -921,20 +801,15 @@ test('作业那一屏开着时，活会话的集合一变就重取一次列表',
     '新出现一条会话，作业列表要重取 —— 排队中的那一条就是这样出现的');
 });
 
-test('插件那一块上两颗删除：删本机那份两端都有，撤站点那颗只在假站点上',
+test('插件那一块上的删除：删掉本机那一份走两段式，第一次点不发请求',
   async () => {
-    // 用户 2026-10-15 报的：「插件界面没有删除某个插件的选项，我现在无法删掉在
-    //   开发者模式中安装的插件」。而它们是两件事，各有各的入口：
-    //     · 删掉本机那一份（§5.3，撤回同意）—— 两端都有，站点那一侧不受影响；
-    //     · 从站点撤掉（管理员在真站点上做的事）—— 只在假站点上，
-    //       而它不动本机那一份。
-    //   这一条把"两颗都在、各自绑对了路"钉在画出来的东西上。
+    // 删掉本机那一份（§5.3，撤回同意）是这块上唯一的删除动作 —— 站点那一侧的
+    //   撤是管理员的事，客户端这一侧没有那条路（0.27 删掉了假站点之后，
+    //   连测试界面上的入口也不在了）。
     const h = bindAll({ connections: [], workspaces: [], activeConnectionId: null });
-    h.run('window.__drop = []; window.__uninstall = []; window.__result = { ok: true };'
+    h.run('window.__drop = []; window.__result = { ok: true };'
       + 'window.slurmate.dropPluginVersion = (id, version) => {'
-      + '  window.__drop.push([id, version]); return Promise.resolve(window.__result); };'
-      + 'window.slurmate.uninstallSitePlugin = (id, version) => {'
-      + '  window.__uninstall.push([id, version]); return Promise.resolve(window.__result); };');
+      + '  window.__drop.push([id, version]); return Promise.resolve(window.__result); };');
 
     // 一块最简的插件（字段照 `pluginsView()` 给的那一份，一个不少）——
     //   `ports: 0` 不画"用哪一份数据"那一格，`runnable: false` 不画高级选项。
@@ -945,55 +820,33 @@ test('插件那一块上两颗删除：删本机那份两端都有，撤站点�
       canSubmit: true, defaults: { cpus: 2, mem: '8G', time: '12:00:00' },
       defaultsGresText: null, runnable: false };
 
-    // 三颗按钮住在同一行里（`.plug-actions`）：它是这一块自己的一行，
-    //   不再借用上面那条事实行（`.plug-meta`）。
     const lastRow = (root) => childrenOf(root).filter((x) => x.className === 'plug-actions').pop();
     const btn = (root, text) => childrenOf(lastRow(root))
       .find((x) => x.tagName === 'BUTTON' && x._text === text);
     const armedIn = (root) => childrenOf(lastRow(root)).find((x) => x.className === 'armed');
-    const draw = (site) => h.fn('pluginBlock')(P, { site });
+    const d = h.fn('pluginBlock')(P);
 
-    // ① 假站点：两颗都在
-    const d1 = draw({ label: '本站', canUninstall: true, versions: [], strays: [] });
-    assert.ok(btn(d1, '删掉本机这一份'), '客户端那一侧的删除在假站点上要有');
-    assert.ok(btn(d1, '从站点撤掉'), '站点那一侧的撤在假站点上要有');
+    assert.ok(btn(d, '删掉本机这一份'), '这里必须能删掉本机那一份');
+    assert.equal(btn(d, '从站点撤掉'), undefined,
+      '站点那一侧的撤不该出现在界面上 —— 它是管理员的事');
 
-    // ② 真站点（能力位缺席）：只剩「删掉本机这一份」——
-    //    客户端那一侧的删除两端都有（那是用户说的"删掉某个插件"），
-    //    而站点那一侧的撤是管理员的事，界面上不该有。
-    const d2 = draw({ label: '本站', versions: [], strays: [] });
-    assert.ok(btn(d2, '删掉本机这一份'), '真站点上也必须能删掉本机那一份');
-    assert.equal(btn(d2, '从站点撤掉'), undefined,
-      '真站点上不许有「从站点撤掉」—— 它是主进程给的能力位说了算的，界面不猜');
-
-    // ③ 各自走各自那条 IPC，而且都走两段式：第一次点只摆出确认，一个请求都不发
-    await btn(d1, '删掉本机这一份').onclick();
+    // 两段式：第一次点只摆出确认，一个请求都不发。
+    await btn(d, '删掉本机这一份').onclick();
     assert.equal(h.run('window.__drop.length'), 0, '第一次点不许发请求');
-    assert.ok(armedIn(d1), '第一次点要摆出那一行确认');
-    assert.match(childrenOf(armedIn(d1)).map((x) => x._text || '').join(''),
+    assert.ok(armedIn(d), '第一次点要摆出那一行确认');
+    assert.match(childrenOf(armedIn(d)).map((x) => x._text || '').join(''),
       /站点上那一份不受影响/, '确认那一行要说清站点那一边不受影响');
-    await childrenOf(armedIn(d1))
+    await childrenOf(armedIn(d))
       .find((x) => x.tagName === 'BUTTON' && x._text === '删掉').onclick();
     assert.equal(h.run('JSON.stringify(window.__drop)'),
       JSON.stringify([[P.id, P.version]]), '第二点要带着 id 与版本走 `dropPluginVersion`');
-    assert.equal(h.run('window.__uninstall.length'), 0, '……而它不该走到站点那条路上');
 
-    await btn(d1, '从站点撤掉').onclick();
-    assert.equal(h.run('window.__uninstall.length'), 0, '第一次点不许发请求');
-    assert.match(childrenOf(armedIn(d1)).map((x) => x._text || '').join(''),
-      /本机装着的那一份不受影响/, '确认那一行要说清本机那一边不受影响');
-    await childrenOf(armedIn(d1))
-      .find((x) => x.tagName === 'BUTTON' && x._text === '撤掉').onclick();
-    assert.equal(h.run('JSON.stringify(window.__uninstall)'),
-      JSON.stringify([[P.id, P.version]]), '第二点要带着 id 与版本走 `uninstallSitePlugin`');
-    assert.equal(h.run('window.__drop.length'), 1, '……而它不该多删一次本机那一份');
-
-    // ④ 「取消」回到原样，什么都不发
-    await btn(d2, '删掉本机这一份').onclick();
-    childrenOf(armedIn(d2)).find((x) => x.tagName === 'BUTTON' && x._text === '取消').onclick();
+    // 「取消」回到原样，什么都不发。
+    await btn(d, '删掉本机这一份').onclick();
+    childrenOf(armedIn(d)).find((x) => x.tagName === 'BUTTON' && x._text === '取消').onclick();
     assert.equal(h.run('window.__drop.length'), 1, '取消不发请求');
-    assert.equal(armedIn(d2), undefined, '取消之后那一行要收掉');
-    assert.ok(btn(d2, '删掉本机这一份'), '原来那颗按钮要回来');
+    assert.equal(armedIn(d), undefined, '取消之后那一行要收掉');
+    assert.ok(btn(d, '删掉本机这一份'), '原来那颗按钮要回来');
   });
 
 test('「端口被占」那一行是三选一：三颗都当场生效，而且它不是失败', async () => {
@@ -1381,73 +1234,6 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 });
 
-test('那颗「调试」标签：只在假站点里出现，点它是把面板抬回来', async () => {
-  // 它 2026-10-11 加，理由是物理的：会话的页面是原生视图，从 y=30 往下盖住
-  //   整个窗口主体 —— 面板自己身上的按钮（包括那些调试开关）那时一个都够不着。
-  //   所以"回到面板"这件事只能由这 30px 里的一颗标签做。
-  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
-    'window.__shown = 0; window.__front = null;'
-    + 'window.slurmate.showPanel = () => { window.__shown += 1;'
-    + ' return Promise.resolve({ ok: true }); };'
-    + 'window.slurmate.setFront = (slot) => { window.__front = slot; };');
-  const one = (h) => h.byId.get('session-tabs').children;
-  /** 那条栏里叫「调试」的那一颗（会话标签与它同住一条栏，所以不能数总数）。 */
-  const devTab = (h) => one(h).filter((b) => b.textContent === '调试');
-  const ONE_SESSION = `SESS = { sessions: [
-    { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`;
-
-  // ── ① 真实模式（`devState.on === false`）：一颗都不出现，一条会话时整条收起来 ──
-  h.run(`devState = { on: false, saved: false }; connected = true; ${ONE_SESSION}`);
-  h.fn('renderTabs')();
-  assert.deepEqual(devTab(h), [], '真实模式里不许出现那颗「调试」');
-  assert.equal(one(h).length, 1, '（那一条会话自己的标签照旧在，只是整条栏收着）');
-  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'),
-    '一条会话 + 没有调试，整条收起来（它不提供任何选择）');
-
-  // ── ② 开发者模式，但没连上（站在第一屏）：也不出现 ──
-  //   还没进去，也就没有"被盖住的面板"这回事。
-  h.run('devState = { on: true, saved: true }; connected = false;');
-  h.fn('renderTabs')();
-  assert.deepEqual(devTab(h), [], '没连上（还在第一屏）时不许出现');
-  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
-
-  // ── ③ 在假站点里：出现，而且一条会话时也在（那是唯一回得来的路）──
-  h.run('connected = true;');
-  h.fn('renderTabs')();
-  assert.equal(one(h).length, 2, '一条会话 + 一颗「调试」');
-  assert.equal(one(h)[0].textContent, '编辑器');
-  assert.equal(devTab(h).length, 1);
-  assert.match(devTab(h)[0].className, /\bdev\b/,
-    '它自己的类要挂上 —— 它与会话标签做的是相反的事，长相必须分得开');
-  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
-    '一条会话时这一条也要露出来 —— 少了它那颗标签整个消失，面板就再也抬不回来');
-
-  // ── ④ 点它：调 showPanel（抬面板）+ 切到第四屏 ──
-  h.run("$('screen-plugins').classList.remove('hidden'); $('screen-debug').classList.add('hidden');");
-  await devTab(h)[0].onclick();
-  assert.equal(h.run('window.__shown'), 1, '点它要调 `showPanel`（把面板抬到页面上）');
-  assert.equal(h.run('window.__front'), null,
-    '而它不是会话标签：不许一并调 setFront（那会把面板再盖回去）');
-  assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), false,
-    '抬回来之后要切到第四屏');
-  assert.equal(h.byId.get('screen-plugins').classList.contains('hidden'), true,
-    '同时只露一个（路由那一句管着所有屏）');
-  assert.equal(h.byId.get('debug-title').textContent, '调试',
-    '第四屏的标题只剩这一屏的名字');
-  assert.equal(h.byId.get('debug-site').textContent,
-    '登录条目：alice@198.51.100.7:10100',
-    '而"我在哪一台"改由下面那一行小字说 —— 写「登录条目」加地址与端口');
-
-  // ── ⑤ 抬不起来要说出来：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
-  h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"
-    + "$('screen-debug').classList.add('hidden');");
-  await devTab(h)[0].onclick();
-  assert.equal(h.byId.get('screen-debug').classList.contains('hidden'), true,
-    '失败时不许切屏（切了就是"面板被盖着、而界面上写着调试那一屏"）');
-  const last = () => h.byId.get('notices').children[0].children[1].textContent;
-  assert.match(last(), /假装抬不起来/, '而原因要照原话说出来');
-});
-
 test('右栏整条只在有作业在跑的时候亮（那时它才有内容可说）', () => {
   // 2026-10-11 改：上色的对象从那个 6px 的圆点换成了边栏自己 ——
   //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。
@@ -1496,7 +1282,7 @@ test('连上之后才有两条边栏，而且它们是在状态条下面那一�
   assert.equal(h.run('document.body.classList.contains("connected")'), false,
     '没连上就不该有边栏');
   // 走 `setConnected`（2026-10-11 起那一格只有这一个入口）：它顺手把跟着
-  //   `connected` 走的两个东西当场重画 —— 两条边栏与状态条上那颗「调试」标签。
+  //   `connected` 走的东西当场重画 —— 两条边栏。
   //   裸赋值 + 重画列表那条老路已经删掉了（两处各写一遍迟早漂开）。
   h.run('setConnected(true);');
   assert.equal(h.run('document.body.classList.contains("connected")'), true,
@@ -1614,7 +1400,7 @@ test('插件块上的「用哪一份数据」：三种取值各发各的，一�
   assert.deepEqual(sent(3),
     { workspaceId: 'w000000000001', pluginId: 'p1', connectionId: 'c1', spaceId: null });
 
-  // ── ④ 一条连接都没有（开发者模式），整格不画 ──
+  // ── ④ 一条连接都没有，整格不画 ──
   h.run('boot = { connections: [], workspaces: [], activeConnectionId: null, spaces: [] };');
   h.fn('renderPlugins')(PV);
   assert.equal(selOf(h.byId.get('plugin-blocks').children[0]), null,

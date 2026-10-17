@@ -19,7 +19,7 @@
  * `cluster/test-sessiond-logic.py` 第 28 节守着。这一组守的是客户端这一侧的
  * 三个接缝，它们在本机都没有别的东西挡得住：
  *
- *   1. 假后端有没有那两个 op。少了 `case 'cluster':`，开发者模式里点
+ *   1. 假后端有没有那两个 op。少了 `case 'cluster':`，测试后端里点
  *      「集群状态」拿到的是 `unknown_op`，而界面会把它画成一次失败 ——
  *      开发模式于是对真集群上好好的功能报错。反过来"假后端多知道一点"
  *      在 `backend-fake.test.mjs` 里另有一条守着。
@@ -44,7 +44,7 @@ function fresh() {
   return b;
 }
 
-test('假后端认得 cluster 与 history 两个 op（若不认得，开发者模式会对真集群上好好的功能报错）', async () => {
+test('假后端认得 cluster 与 history 两个 op（若不认得，测试后端会对真集群上好好的功能报错）', async () => {
   const b = fresh();
   try {
     const c = await b.rpc({ op: 'cluster' });
@@ -101,7 +101,7 @@ test('一格一格地造：只缺席点名的那一格', async () => {
   }
 });
 
-test('节点表故意比真集群脏：带后缀的那两个只在开发者模式里走得到', async () => {
+test('节点表故意比真集群脏：带后缀的那两个只在测试后端里走得到', async () => {
   // 本机那台真集群四个节点全是 idle/mix，一个带后缀的都没有 —— 于是
   // "剥后缀、只按 base state 计数"在真机上根本走不到。夹具比现实干净，
   // 缺陷就会在用例里隐形（账本 F26）。
@@ -165,7 +165,7 @@ test('history 里只有作业级记录（作业步不算），且倒序', async 
       assert.ok(!r.job_id.includes('.'), `作业步混进来了：${r.job_id}`);
     }
     // 倒序：最新的在最前。守护进程那边负责倒，这一条钉的是"客户端拿到的
-    //   就是那个顺序"—— 假后端要是给正序，开发者模式里看到的就是最后那件事
+    //   就是那个顺序"—— 假后端要是给正序，测试后端里看到的就是最后那件事
     //   排在最后，而真集群上不是。
     const ids = rows.map((r) => Number(r.job_id));
     assert.deepEqual(ids, [...ids].sort((a, b) => b - a), JSON.stringify(ids));

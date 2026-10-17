@@ -42,28 +42,18 @@
  * （存在 PENDING_ID 这个保留位上），因为用户必须先把公钥拿去 IDM 注册、
  * 回来再填地址。否则「保存并连接」的第一次尝试必然认证失败。
  *
- * ── 开发者模式：怎么进、怎么标注、为什么要有 ──────────────────────────────
+ * ── 测试后端 ──────────────────────────────────────────────────────────────
  *
- * 打开它之后客户端不连集群，改用 `backend-fake.js` 那个本地模拟站点。
+ * 测试进程用 `SLURMATE_TEST_BACKEND=1` 启动时，客户端不连集群，改用
+ *   `backend-fake.js` 那个本地假站点。它只服务客户端自己的测试：打包版里
+ *   `app.isPackaged` 为真，这个开关无论怎么设都不生效，假站点那几个模块也不在
+ *   安装包里。
  *
- * 它是给谁的：写插件的人、改这个客户端的人。普通用户不需要它，所以它是一个
- *   摆在界面上的开关，默认关着、未配置时也不会自己打开。
+ * 它不给用户用，界面上没有入口，也没有"这次读哪一份配置"的分叉：测试用临时
+ *   `userData`，与用户自己那份目录不相干。
  *
- * 入口是开关，不是命令行。命令行入口等于说"Windows 用户请去开一个终端"
- *   —— 而这是一个图形应用，而且它给人的感觉是"必须在安装时选好"。它在界面里，
- *   随时可开可关。
- *
- * 三重互锁（做了假后端却不标注，正是这个项目一路在清的那类问题：
- *   系统声称了不成立的事）：
- *     ① 独立的数据命名空间（`<userData>/dev-sandbox/`：配置、插件数据、以及网页的
- *        cookie 与 localStorage 全在里面，绝不碰用户自己那份 —— 见 `bootstrap`
- *        里那两步，`sessionData` 必须赶在 app ready 之前改）
- *     ② 窗口标题、状态条标记、面板横幅，用真实模式绝不会出现的颜色（洋红）
- *     ③ 启动时那一次选择：`dev` 为真才走假后端，没有第二条路，也不会在真后端
- *        出错时静默退回来（见 backend.js 的 createBackend）。
- *
- * 两个设置都是"重启后生效"：换后端要重建整个客户端；插件来源改的是一棵树的
- *   快照。界面上明说，并且给一个「立即重启」的按钮 —— 不做静默的半生效。
+ * 没有真后端时静默退到假站点仍然是错的：用户会以为连上了集群，其实在跟一个
+ *   本地假服务打交道（见 backend.js 的 createBackend）。
  */
 
 const { app, BrowserWindow, ipcMain, session: electronSession, safeStorage, shell, clipboard,
@@ -95,23 +85,13 @@ const sitePluginSync = require('./site-plugins.js');
 const shortDigest = plugins.shortDigest;
 
 /**
- * 开发者模式：生效值与盘上那个值。
+ * 这次进程是不是在跑测试后端。
  *
- * 两者必须分开，它们回答的是两个不同的问题：
- *     `on`    这次进程在不在开发者模式。启动时读一次，之后不再变（换后端要
- *             重建整个客户端，见 createBackend）。
- *     `saved` 用户在界面上要的是哪一个。改开关只动它。
- *   两者不同 = 有改动等着重启 —— 界面据此说「重启后生效」，而不是让人以为点了没反应。
- * 判据只有一个：别拿 `saved` 去决定这次进程怎么跑。
- *
- * 从前这里还有一个 `pluginDir`（假站点的插件来源，用户能改）—— 整条删掉了。
- *   假站点上的插件只有一条来的路：装上去（见 `samplePluginsDir` / `siteInstalledDir`）。
- *
- * 模块加载期是"关着"的：真值要等 app ready 之后读得到 userData 才知道，而
- *   `registry` 是在模块加载期构造的 —— 那一刻看到一个"关着"的世界是对的。
+ * 判据两条同时成立：环境变量是测试设的，而且这不是打包版。第二条是承重的 ——
+ *   安装包里没有假站点那几个模块，任何环境变量都不该把客户端带到那条路上。
+ * 值在 `bootstrap` 里定，之后不再变（换后端要重建整个客户端）。
  */
-let dev = { developerMode: false };
-let devSaved = { developerMode: false };
+let testBackend = false;
 
 let win = null;
 let backend = null;
@@ -122,9 +102,7 @@ let backend = null;
  *   （主机名）。服务端拿 `id` 排席位 —— 所以它不能每次启动重新生成：
  *   那会让这台电脑每次都算"一台新电脑"，把另一台正在用的顶掉，而用户什么都没做。
  *
- * `cfgDir` 一拿到就赋值（见 bootstrap）。开发者模式用的是沙盒目录，于是沙盒里
- *   的身份与真身不同 —— 这一条是有意的：开着开发者模式调试不该把你正在用的
- *   那个客户端顶掉。
+ * `cfgDir` 一拿到就赋值（见 bootstrap 与 `userDataDir`）。
  */
 let clientIdentity = null;
 /**
@@ -199,11 +177,8 @@ let partitions = [];
 /**
  * 这台机器的 `userData`（app ready 之前就读到的那一份）。
  *
- * 只取一次，之后所有地方都用它 —— 读 `dev-mode.json`、算 `cfgDir`、写
- *   `dev-mode.json`。取两次的漂法是静默的：`app.setPath('sessionData', …)` 那一步
- *   非在 ready 之前做不可，而那一步要的正是 `userData`；等到 ready 之后再
- *   `getPath('userData')` 一次，两份字符串理论上可以是两个目录，于是设置读的是
- *   一处、写的是另一处，症状是"开关点了没反应"。
+ * 只取一次，之后所有地方都用它 —— 算 `cfgDir`、放待删清单、读客户端身份。
+ * 取两次的漂法是静默的：两份字符串理论上可以是两个目录，于是一处读、另一处写。
  */
 let userDataDir = null;
 
@@ -316,8 +291,8 @@ let lastReclaim = { count: 0, items: [], failed: [] };
 /**
  * 这台机器没有凭据库时，密钥只能留在内存里 —— 按 id 记着。
  *
- * 少了它，开发者模式（测试桩里 safeStorage 一律不可用）下每连一次就会换一把钥匙，
- * 而用户明明刚从界面上把上一把复制去注册过。症状仍然只是「认证失败」。
+ * 少了它，没有凭据库的机器（测试桩里 safeStorage 一律不可用）上每连一次就会换
+ * 一把钥匙，而用户明明刚从界面上把上一把复制去注册过。症状仍然只是「认证失败」。
  */
 const memKeys = new Map();
 
@@ -336,49 +311,18 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 function bootstrap() {
-  // ── 沙箱的分岔要在 app ready 之前做完 ────────────────────────────────────
-  //
-  // 先读开发者模式那两个设置，再决定这次读哪一份配置。次序不能反 —— 这个开关
-  //   回答的正是"这次启动读哪一份"，所以它自己不在任何一份配置里（见
-  //   config.js 的 devSettingsPath）。而它必须发生在这里、不在下面的
-  //   `whenReady` 里，因为下一段要按它去改一个只能在 ready 之前改的路径。
   userDataDir = app.getPath('userData');
-  devSaved = config.loadDevSettings(userDataDir);
 
-  // 浏览器存储那一半也要跟着分岔，不能只有配置目录分。
-  //
-  // 从前只有 `cfgDir` 分岔，而网页的 cookie / localStorage / 缓存住在
-  //   Electron 的 `sessionData` 里，那个路径两个模式共用一棵树。症状不是"两个
-  //   模式互相看得见"，而是普通模式会删掉开发者模式的数据：对账按真实注册表
-  //   去认那棵树，沙箱里那份分区算不出主人，于是被当成孤儿自动收掉
-  //   （用户 2026-10-16 报的，界面上是「本次运行清掉了 1 份没人管的数据」）。
-  //
-  // 为什么非在这里做：Electron 明文写着 `sessionData` 的覆盖必须在 ready 之前
-  //   （`app.setPath` 的文档：要改网页 cookie 与缓存的落点就得赶在 ready 前），
-  //   而 `setPath` 对一个不存在的目录会抛错 —— 所以目录要自己先建出来。
-  //
-  // 普通模式一个字节都不动：不调 `setPath`，一切照默认。
-  if (devSaved.developerMode) {
-    const sessionData = path.join(userDataDir, 'dev-sandbox', 'session-data');
-    fs.mkdirSync(sessionData, { recursive: true });
-    app.setPath('sessionData', sessionData);
-  }
+  // 测试后端只在源码树里、只由测试进程打开。打包版里 `app.isPackaged` 为真，
+  //   这个开关无论怎么设都不生效；而安装包里本来也没有假站点那几个模块。
+  testBackend = !app.isPackaged && process.env.SLURMATE_TEST_BACKEND === '1';
 
   app.on('window-all-closed', () => app.quit());
 
   app.whenReady().then(async () => {
     installMenu();
 
-    // `dev`（这次进程怎么跑）到这一刻才赋，不与上面那次读合并：`registry` 是在
-    //   模块加载期构造的，那一刻看到一个"关着"的世界是对的（见文件头那段注释）。
-    //   而"这次读哪一份配置"上面已经答了 —— `sessionData` 那一手非等它不可。
-    dev = { ...devSaved };
-
-    // 开发者模式用独立目录 —— 否则沙盒里配的用户名/端口会污染真连接。
-    // 它是个沙盒（持久），不是一次性的演示 —— 也不是用户真正在用的那一份数据。
-    cfgDir = dev.developerMode
-      ? path.join(userDataDir, 'dev-sandbox')
-      : userDataDir;
+    cfgDir = userDataDir;
     cfg = config.loadConfig(cfgDir);
     // 钉子在另一个文件里（见 config.js 那一段）：`loadConfig` 只认已知键，
     //   读一遍 `config.json` 再存一遍就会把不认识的那张表抹掉，而"钉子全没了"
@@ -387,8 +331,7 @@ function bootstrap() {
     pendingRemovals = config.loadPendingRemovals(cfgDir);
 
     // 池目录依赖 cfgDir，而注册表是在模块加载期建的，那时 cfgDir 还是 null。
-    //   所以拿到真路径之后重新扫一遍 —— 否则开发者模式会去读进程当前目录下的
-    //   `./site-plugins`，而那是谁的地方说不清。
+    //   所以拿到真路径之后重新扫一遍。
     ensureSitePoolDir();
     registry.reload();
 
@@ -407,29 +350,29 @@ function bootstrap() {
     };
 
     backend = createBackend({
-      dev: dev.developerMode,
+      test: testBackend,
       ssh: { client: clientIdentity },
       fake: {
         client: clientIdentity,
-        // 只影响假站点「登记」要等多久，好让你（和测试）能看到排队态，
-        // 或者反过来跳过它。真实后端完全不读这个。
-        enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_DEV_ENROLL_MS))
-          ? Number(process.env.SLURMATE_DEV_ENROLL_MS) : undefined,
+        // 只影响假站点「登记」要等多久，好让测试能看到排队态，或者反过来跳过它。
+        //   真实后端完全不读这个。
+        enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_TEST_ENROLL_MS))
+          ? Number(process.env.SLURMATE_TEST_ENROLL_MS) : undefined,
         // 假站点上那两个目录，两个角色是分开的（见下面那一段的注释）：
         //   `samplePluginsDir` 是开发样例住的地方（从源码跑时才有），
-        //   `siteInstalledDir` 是装上去的东西落的地方（沙盒里，程序自己的一处）。
+        //   `siteInstalledDir` 是装上去的东西落的地方（测试用的 userData 里）。
         //   都是一份真实文件（真的 sha256、真的字节），于是「站点有而本机没有」这条
         //   最重要的路径真的走得到：池空的时候站点照样报那些插件，对账真的把它们
         //   取下来、真的要求同意。
         //
-        // 传函数而不是路径：打包版没有样例那棵树，而"这个目录现在在哪／在不在"
+        // 传函数而不是路径：样例那棵树只在源码树里有，而"这个目录现在在哪／在不在"
         //   必须是每次现算的结果。
         samplePluginsDir,
         siteInstalledDir,
         // 假站点真的把插件的作业侧跑起来（见 backend-fake.js 的 `_startJob`），
         //   而作业要有地方待：它会写出会话文件与两条作业日志，还会有一个家目录
-        //   （插件的 `start_*` 会往里写东西）。三样都落在沙盒里一处 ——
-        //   与 `sitePoolDir()` 同一条理由：开发者模式那一整份数据都在沙盒里。
+        //   （插件的 `start_*` 会往里写东西）。三样都落在 cfgDir 下 —— 测试用的是
+        //   临时 userData，不碰用户自己的目录。
         jobsDir: siteJobsDir,
       },
     });
@@ -473,19 +416,12 @@ function bootstrap() {
     //   只在真的有东西时说：空目录、或者从来没用过本机池的人，不该看见一条
     //     关于它的话 —— 那是噪音，而且会让人以为自己做错了什么。
     warnLegacyPool();
-    // 假站点上一个插件都发不出来时说一句。这一步不是美化：可能是"安装包里
-    //   本来就没有那两棵样例"（打包版），也可能是"站上还没装过东西"，
-    //   而两种情况的症状都是"假站点一个插件都不报"，界面上一句话说不清为什么。
-    //   那句话必须说出路（去点「安装插件…」），因为站点上的插件只有那一条来的路。
-    warnEmptyFakeSite();
-    // 与上一条并排，但它是另一个现场：站点上有插件、而这个客户端发不出它们。
-    warnNoPacker();
 
     // 快捷键拦截：黑名单 + 诊断。
     //
     // 诊断只报"被我们吞掉的键"（F12 那类）。那是在解释「为什么按了没反应」——
     //   是用户自己触发的、想问的问题。
-    // 放行的键不上报。从前开发者模式下连"这个键直达了页面"也写一行日志，用来核对
+    // 放行的键不上报。从前测试后端下连"这个键直达了页面"也写一行日志，用来核对
     //   拦截器到底有没有挡住不该挡的键 —— 那件事已经核完了，而它今天的代价很具体：
     //   每按一次带修饰键的键、每按一次 F 键都往日志里写一行，把真正要紧的消息顶掉
     //   （用户 2026-10-16 报的就是这个）。
@@ -505,11 +441,10 @@ function bootstrap() {
 
     registerIpc();
 
-    // 开发者模式那条内置的假连接。播在这里，不是 `loadConfig` 里：那一个只收到
-    //   一个目录，它必须继续不知道"开发者模式"这件事（见那个函数）。放在这个位置有
-    //   两个理由：`win` 已经在了（播种失败要报得出来），而第一屏还没拿到数据
+    // 测试后端那条连接。播在这里，不是 `loadConfig` 里：配置模块不该知道测试
+    //   夹具的存在。放在这个位置有两个理由：`win` 已经在了，而第一屏还没拿到数据
     //   （`app:bootstrap` 由渲染进程发，它在窗口加载完之后）。
-    ensureBuiltinDevConnection();
+    if (testBackend) ensureTestConnection();
 
     // 开局那一屏：零条会话（`_sessions` 空，关窗不会问，正是要的）。
     win.setSessions([]);
@@ -680,22 +615,10 @@ function regenerateKey(id) {
  *   接管必须是用户的一个动作 —— 打开客户端就自动连上、自动接管一次，正是要
  *   拆掉的那个形状。
  *
- * 开发者模式那一路也一起停了。假站点在连接列表里就是一条普通的连接
- *   （`demo@127.0.0.1:1`），由用户点。`backend.connect()` 仍然要有人调（它在那一步
- *   启动本地 HTTP 服务并分配端口），但那一步现在发生在 `doConnect()` 里，与真站点
- *   走同一条路 —— 两半各自连一次的那种写法（假分支在这里直接 connect、真分支
- *   走 doConnect）正是"同一条规矩两份实现"的老形态。
- * 代价要说清：沙盒第一次打开时连接列表是空的，要手填一次 `demo` / `127.0.0.1` / `1`
- *     （见 client/README.md 的「开发者模式」那一节）。
+ * 测试后端走的是同一条路：假站点在连接列表里是一条普通连接，由测试播种，
+ *   连接同样发生在 `doConnect()` 里。启动这一路上没有一次 `backend.connect()`。
  */
 async function announceBackend() {
-  if (backend.kind === KIND.FAKE) {
-    // 通知 kind `'dev'`：界面据它挂那条洋红横幅（三重互锁的第二重）。
-    win.pushNotice('dev', '开发者模式 · 未连接集群');
-    win.setTitle('Slurmate — 开发者模式 · 未连接集群');
-    return;
-  }
-
   const conn = config.activeConnection(cfg);
   if (!conn) {
     // 一条连接都没配 —— 这是真实状态，不是错误。如实说出来，
@@ -712,8 +635,8 @@ async function announceBackend() {
  * 版本闸 —— 唯一一处执行「服务端要求客户端不低于它自己」的地方。
  *
  * 它住在这里（而不是两个后端各自的 `connect` 里），因为这里（index.js）是
- *   假后端与真实后端唯一的交汇点。同一条规则写在两处，下一次就会漂成
- *   "开发者模式里说得通、真机上不生效"，而这个假后端全部的价值就是它演的是同一件事。
+ *   假站点与真实后端唯一的交汇点。同一条规则写在两处，下一次就会漂成
+ *   "测试里说得通、真机上不生效"，而假站点的全部价值就是它演的是同一件事。
  *
  * 判定在 `plugins/index.js` 的 `versionCheck` 里 —— 规则只有那一份书面形式，
  *   判据是 `tools/version-fixtures.json` 的 `check` 段。
@@ -793,11 +716,11 @@ async function doConnect(conn, extra = {}) {
   // 这条连接自己的那把私钥。没有就生成一把 —— 但读不出来时绝不生成
   // （见 ensureKey）：那会作废用户已经注册到 IDM 的公钥，而症状只是「认证失败」。
   //
-  // 内置那条不要密钥：假后端不做认证（`backend-fake.js` 的 `connect` 连
-  //   `privateKey` 都不读）。为一条永远不会认证的连接造一把私钥，等于在沙盒的密钥表
-  //   里留一份永远没人用的凭据，而用户还会多看到一句"请把公钥注册到 IDM"——
-  //   那是在让他去注册一把没有任何用处的公钥。
-  const key = conn.builtin ? { ok: true } : ensureKey(conn.id);
+  // 测试后端那条连接不要密钥：假站点不做认证（`backend-fake.js` 的 `connect`
+  //   连 `privateKey` 都不读）。为一条永远不会认证的连接造一把私钥，等于在密钥表
+  //   里留一份永远没人用的凭据，而测试还会多看到一句"请把公钥注册到 IDM"——
+  //   那是在让人去注册一把没有任何用处的公钥。
+  const key = (testBackend && conn.id === TEST_CONNECTION_ID) ? { ok: true } : ensureKey(conn.id);
   if (!key.ok) {
     return { ok: false, code: 'key_unavailable', error: key.detail || key.error };
   }
@@ -845,12 +768,7 @@ async function doConnect(conn, extra = {}) {
     await refreshPartitions();
     // 站点分发：连上之后才开始，不 await（理由见 reconcileSitePlugins）。
     reconcileSitePlugins();
-    // 假站点这条路上标题不许被写成 `user@host`：那是三重互锁的第二重，
-    //   而"连上假站点的那一刻把整块标注抹掉"正是它唯一要防的事（`user@host` 印在
-    //   标题栏上，看起来与真集群一模一样）。`announceBackend` 那一边同理。
-    win.setTitle(backend.kind === KIND.FAKE
-      ? 'Slurmate — 开发者模式 · 假站点'
-      : `Slurmate — ${conn.user}@${conn.host}`);
+    win.setTitle(`Slurmate — ${conn.user}@${conn.host}`);
     // 「接上上次的会话」这一步的触发点是"用户显式点了这条连接"。
     //
     //   启动不连站点，接回就必然挂在这一次连接上：用户点「连接」＝"我要用
@@ -1017,9 +935,8 @@ let siteSyncPromise = null;
  *   让"连接"这个动作卡在插件下载上，是把一个后台的事变成前台的事。跑完推一份
  *   新的视图给界面（见 `pushPlugins`）。
  *
- * 下载失败绝不回退到本机池（见 site-plugins.js 的文件头）。开发者模式的开关
- *   是用户的设置，不是站点的能力 —— 关着的时候一个插件都没有，那是正确的、
- *   必须如实说出来的结果。
+ * 下载失败绝不回退到本机池（见 site-plugins.js 的文件头）。没有站点的时候
+ *   一个插件都没有，那是正确的、必须如实说出来的结果。
  */
 function reconcileSitePlugins() {
   const gen = ++connectGeneration;
@@ -1382,28 +1299,6 @@ function pluginsView() {
       error: siteSync.error || null,
       label: siteSync.label || null,
       syncedAt: siteSync.syncedAt || null,
-      /**
-       * 这个站点能不能装插件 —— 界面靠它决定画不画那颗「安装插件…」。
-       *
-       * 它是主进程给的能力位，不是界面按后端名现判的：判据在渲染层写一遍，
-       *   那个"哪一条路属于哪一侧"的分界就会随界面那份代码散布开，而这条分界
-       *   正是 `app:installSitePlugin` 那道闸门守的东西（权威闸门在主进程，
-       *   一颗藏起来的按钮从来不算防线）。
-       *
-       * 只有假站点能：它就在本机，写进去就是它自己的插件目录。真站点上装插件
-       *   是管理员的事（`slurmate plugin install`），客户端这一侧没有那条路。
-       */
-      canInstall: Boolean(backend && backend.kind === KIND.FAKE),
-      /**
-       * 这个站点能不能撤掉插件（站点那一侧的撤，与「删掉本机这一份」不是一件事）
-       *   —— 与上面那一格同一条界线、同一份理由。
-       *
-       * 它只决定界面画不画那颗按钮（`app:uninstallSitePlugin` 那道闸门才是判据）。
-       *   而"撤得掉哪一个"不在这里判：开发样例那一棵在仓库里，撤它是改仓库 ——
-       *   那件事只有假后端知道（它扫那两处目录），所以判据在它那边，
-       *   界面照它回来的话说话。
-       */
-      canUninstall: Boolean(backend && backend.kind === KIND.FAKE),
       // 连接期那次版本判定（见 applyVersionGate）。界面用它把 `site_too_new`
       // 那一句说准 —— 那是唯一一处界面的说法取决于握手结论的地方，理由见
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
@@ -1488,8 +1383,8 @@ function siteVersions() {
 /**
  * 这次会话该用哪个工作区。
  *
- * 有连接就用它的工作区（正常路径）。但开发者模式里一个连接都没有，那里也必须能
- * 开会话 —— 所以退回到「已有的第一个工作区，没有就建一个」。
+ * 有连接就用它的工作区（正常路径）。没有连接时（测试后端里的那种现场）也必须
+ * 能开会话 —— 所以退回到「已有的第一个工作区，没有就建一个」。
  * 这样造出来的工作区没有任何连接指着它，能活过下一次 commitConfig 靠的是
  *   `liveWorkspaceIds`（那条活会话）—— 不是"一条连接都没有就不回收"那条例外，
  *   它已经整条删掉了。少了 `liveWorkspaceIds` 那一层，每次改动都会换一张引用表。
@@ -1532,7 +1427,11 @@ function workspaceForSession(conn) {
 function ensureConnectionWorkspace(conn, want) {
   if (conn.workspaceId && config.findWorkspace(cfg, conn.workspaceId)) return conn.workspaceId;
 
-  const pick = want === undefined ? config.defaultWorkspaceFor(cfg, conn) : want;
+  let pick = want === undefined ? config.defaultWorkspaceFor(cfg, conn) : want;
+  // 测试夹具那条连接不参与默认规则（与从前那条内置连接同一条理由）：
+  //   它指向本机的假站点，与用户真正要连的集群是两个站点。让用户的第一条连接
+  //   落进它的工作区，那个工作区就永远收不掉。
+  if (isTestWorkspace(pick)) pick = null;
   if (pick && config.findWorkspace(cfg, pick)) {
     config.setConnectionWorkspace(cfg, conn.id, pick);
     return pick;
@@ -1546,52 +1445,38 @@ function ensureConnectionWorkspace(conn, want) {
   return workspace.id;
 }
 
-/**
- * 开发者模式那条内置的假连接 —— 按保留 id 播种，幂等。
- *
- * 它播在这里而不是 `config.js`：`loadConfig(dir)` 只收到一个目录，它必须继续
- *   不知道"开发者模式"这件事（那正是 `dev-mode.json` 单独一个文件的理由）。
- *
- * 为什么要有这一条：开发者模式是给插件作者调插件用的，而"假站点在连接列表里
- *   就是一条普通的连接"这条设计有一个很贵的代价 —— 沙盒第一次打开时列表是空的，
- *   作者得照文档手填一次 `demo` / `127.0.0.1` / `1`，而填错一个格子的症状是
- *   "连不上"。现在这一条是结构性的：勾上开关、重启，它就在那儿。
- *
- * 它与一条普通连接的差别只有两处，而且都在这里：不可删（删了开发者模式
- *   就没东西可连）、不可编辑（它指向的是本机的假后端，改地址没有意义）。
- *   「连接」「进入」以及进去之后的一切完全相同 —— 那正是它存在的唯一理由。
- *   界面据此不画那两颗按钮，而不是画成禁用的。
- *
- * 它只长在沙盒里：`cfgDir` 只在开发者模式下指向 `<userData>/dev-sandbox`，
- *   而这个函数只在开发者模式里跑，关掉开关重启，它自然不在；再打开，按保留 id
- *   找回来，不重复播（下面是幂等的）。
- */
-function ensureBuiltinDevConnection() {
-  if (!dev.developerMode) return;
-  const id = config.DEV_CONNECTION_ID;
-  const addr = config.connectionKey(config.DEV_CONNECTION);
-  const hit = cfg.connections.find((c) => c.id === id);
-  // 沙盒里可能还留着从前照着文档手填的那一条（同一个人/主机/端口）——
-  //   两条同地址在界面上是两行一模一样的东西，而其中一行不可删。
-  //   `0.y` 不考虑兼容性：那条手填的记录由播种顶掉。
-  const dup = cfg.connections.filter((c) => c.id !== id && config.connectionKey(c) === addr);
-  // 幂等：已经播好、没被顶掉、工作区还在，一个字节都不写。
-  if (hit && hit.builtin === true && !dup.length
-      && hit.workspaceId && config.findWorkspace(cfg, hit.workspaceId)) return;
+/** 测试后端那条连接：测试夹具用的固定 id，`newConnectionId()` 铸不出它。 */
+const TEST_CONNECTION_ID = '__test__';
+const TEST_CONNECTION = { user: 'demo', host: '127.0.0.1', port: 1, label: '本机假站点' };
 
-  const drop = new Set([id, ...dup.map((c) => c.id)]);
-  cfg.connections = cfg.connections.filter((c) => !drop.has(c.id));
-  const conn = { id, ...config.DEV_CONNECTION, builtin: true, workspaceId: null };
+/**
+ * 测试后端那条连接 —— 只在 `testBackend` 里播种，幂等。
+ *
+ * 它是一条普通连接：能改、能删、没有保留位。测试夹具自己保证不会把它删掉；
+ *   删掉了就由 `_test.seedTestConnection()` 再播一次。
+ *
+ * 它播在这里而不是 `config.js`：配置模块不该知道测试夹具的存在。放在这个位置
+ *   有两个理由：`win` 已经在了，而第一屏还没拿到数据。
+ */
+function isTestWorkspace(id) {
+  if (!testBackend || !id) return false;
+  const c = (cfg.connections || []).find((x) => x.id === TEST_CONNECTION_ID);
+  return Boolean(c && c.workspaceId === id);
+}
+
+function ensureTestConnection() {
+  if (!testBackend) return;
+  const id = TEST_CONNECTION_ID;
+  const hit = cfg.connections.find((c) => c.id === id);
+  // 幂等：已经播好、工作区还在，一个字节都不写。
+  if (hit && hit.workspaceId && config.findWorkspace(cfg, hit.workspaceId)) return;
+
+  cfg.connections = cfg.connections.filter((c) => c.id !== id);
+  const conn = { id, ...TEST_CONNECTION, workspaceId: null };
   cfg.connections = [...cfg.connections, conn];
-  // 活跃连接那一格也要收好。`loadConfig` 是在这条连接还不存在的时候跑的
-  //   （那时列表是空的，它把 activeConnectionId 置成 null），所以播种之后
-  //   `cfg` 会停在「有一条连接、却没有活跃连接」这个读出来会被收束掉的状态里
-  //   —— 而那正是 `loadConfig` 每次启动都要修一遍的那种半截状态。
   if (!cfg.activeConnectionId) cfg.activeConnectionId = id;
-  // 走既有的那个 helper，不另手搓一条建工作区的路。传 `null` = "要一个新的
-  //   空白工作区"（那条来路记在 `ensureConnectionWorkspace` 的 ② 上）：内置这条
-  //   必须自己占一个 —— 与一条用户连接共用的话，"删掉那条连接，它独占的工作区
-  //   连同里面的数据一起清"会静默地不成立（内置这条还指着它，引用计数不归零）。
+  // 自己占一个工作区：与一条用户连接共用的话，"删掉那条连接，它独占的工作区
+  //   连同里面的数据一起清"会静默地不成立（这条还指着它，引用计数不归零）。
   ensureConnectionWorkspace(conn, null);
   commitConfig();
 }
@@ -1883,8 +1768,8 @@ function commitConfig() {
  *   按工作区 id 认）。会话手里是一个 `spaceId`，工作区只能由它反查 —— 查不到就
  *   不保留，那一格与 `liveSessionOnWorkspace` 用的是同一个反查。
  *
- * 少了它，开发者模式（一个连接都没有）里那个工作区会在下一次 commitConfig 时
- *   被收掉，连同它指着的那些数据 —— 而那条会话正跑在上面。
+ * 少了它，一个没有连接指着的工作区会在下一次 commitConfig 时被收掉，
+ *   连同它指着的那些数据 —— 而那条会话正跑在上面。
  */
 function liveWorkspaceIds() {
   const keep = new Set();
@@ -2083,9 +1968,8 @@ function partitionsRoot() {
 /**
  * 基座给插件的数据目录的根（`ctx.dataDir()` 与对账必须同源）。
  *
- * 一个表达式覆盖两种模式：真实模式下 `cfgDir` 就是 `userData`，开发者模式下
- *   它是 `<userData>/dev-sandbox` —— 沙盒分岔于是自动跟着走，与 `sitePoolDir()` 同一个
- *   理由（拿假后端跑，绝不去读、更不去写用户真实的那一份）。
+ * 它跟着 `cfgDir` 走，而 `cfgDir` 就是这一次启动的 `userData`；测试用的是
+ *   临时 `userData`，与用户自己那份目录不相干。与 `sitePoolDir()` 同一条理由。
  * 根名 `plugin-data` 只有这一处。给插件的那条路与对账这一条各算一遍，正是这个
  *   仓库最怕的那类漂移：两边会慢慢变成两个目录，而症状是"界面上说没有，插件却在写"。
  *
@@ -2132,15 +2016,11 @@ function auditPluginData() {
   let why = pr.why || null;
   let dataNames = null;
   let dataWhy = null;
-  // ── 两根都查，两种模式都查 ────────────────────────────────────────────
+  // ── 两根都查 ──────────────────────────────────────────────────────────
   //
-  // 这里从前有一条例外：开发者模式下不查分区那一根，理由是"它不由沙箱分岔，
-  //   与真实那一份是同一棵树 —— 照沙箱配置去认，真实的数据会整片看起来像孤儿"。
-  //   那个理由当时是对的，而它只挡住了一个方向：反过来的那一次（普通模式
-  //   照真实配置去认，沙箱那份看起来像孤儿）没有挡，于是普通模式真的把开发者
-  //   模式的数据收掉了（用户 2026-10-16 报的）。
-  // 例外连同它的成因一起搬走了：现在两个模式连 `sessionData` 都各有一棵树
-  //   （见 `bootstrap` 里那一步），所以两根、两种模式，判据逐字相同。
+  // 存储分区那一根与插件自己的数据根，判据相同：认得出主人的留，认不出的
+  //   登记成下一次启动再删。这里不再有"某个模式下不查某一根"的例外 ——
+  //   那种例外曾经让一份数据在两个模式之间被单方面收掉（用户 2026-10-16 报的）。
   if (pr.root) {
     const r = dataAudit.listDirs(pr.root);
     names = withoutPending(r.names, 'partition');
@@ -3194,8 +3074,8 @@ async function _renderSession(slot) {
  *   `src/main/plugins/` 那个目录是框架（注册表 + ulid.js + 安装器），不是插件目录，
  *   所以它压根不作为根传进来。
  *
- * 根的集合固定，能变的只有"这次加不加载"（`dir` 是个函数）。所以切开发者
- *   模式只需要 `registry.reload()`，不重建 Registry —— 重建会清掉 `notices`，
+ * 根的集合固定，能变的只有"这次加不加载"（`dir` 是个函数）。所以一次重新
+ *   扫描只需要 `registry.reload()`，不重建 Registry —— 重建会清掉 `notices`，
  *   用户会把已经看过的通知重看一遍。
  *
  * 放在模块级是因为它跨会话存活：去重槽（`once`）跟着插件走。
@@ -3235,14 +3115,10 @@ const registry = new plugins.Registry([
  *
  * `~/.slurmate/plugins` 那个目录不删 —— 升级上来的用户那里可能真的躺着东西。
  *   删用户的文件是另一回事；处理是"不再读它"，并在启动时说一句（见 bootstrap）。
- *
- * 开发者模式落在独立命名空间里：拿假后端跑绝不去读、更不去写用户真实的那份池。
  */
 function sitePoolDir() {
   try {
-    return dev.developerMode
-      ? path.join(cfgDir || '.', 'site-plugins')
-      : path.join(app.getPath('home'), '.slurmate', 'site-plugins');
+    return path.join(app.getPath('home'), '.slurmate', 'site-plugins');
   } catch {
     // 拿不到就返回 null，而 null 在那条路上意味着"这个根这次不加载"。
     //   把一个次要功能的失败变成整个客户端起不来不值当。
@@ -3279,29 +3155,26 @@ function warnLegacyPool() {
     + '那个目录没有被动过，里面的文件还在原处。');
 }
 
-// ── 开发者模式：假站点上那两个目录 ──────────────────────────────────────────
+// ── 测试后端：假站点上那两个目录 ────────────────────────────────────────────
 //
 // 两处，两个角色，别再合成一个：
 //
 //   · `siteInstalledDir()` —— 装上去的东西。这才是"站点上有什么"的答案，
-//     而它只有一条来的路：「安装插件…」（与真站点上管理员 `plugin install` 同形）。
-//     落在沙盒里，与 `sitePoolDir()` 同一条理由：开发者模式那一整份数据都在
-//     沙盒里，站点装的东西不该例外。
+//     而它只有一条来的路：测试顺手调 `backend.installPlugins`，与真站点上管理员
+//     `slurmate plugin install` 同形。落在临时 userData 里。
 //   · `samplePluginsDir()` —— 开发样例住的地方（仓库里的 `plugins/`）。
 //     基座两端都不带任何插件（`plugins/README.md` 第一行）：那两棵是开发
-//     基座时用来对齐插件两侧能力的样例，打包版没有它们 —— 那是对的，不是降级。
+//     基座时用来对齐插件两侧能力的样例，安装包里没有它们 —— 那是对的，不是降级。
 //     从源码跑时它们在场，只是"开发基座要有东西可对齐"。一个插件都不装是合法状态。
 //
-// 从前这两件事是一个目录，而它还能由用户在界面上改（`pluginDir`）—— 于是
-//   "站点上有什么"取决于一个界面上的选择，而真站点上那件事只取决于管理员装了什么。
-//   那条来源整根删掉了：用户能改的只有"装哪一个包上去"。
+// 这两处只服务测试后端；安装包里既没有假站点，也没有它们。
 
 /**
  * 测试接缝：把样例那一棵换掉（`null` = 恢复默认）。
  *
  * 用例要造"站上一个插件都没有"的现场（那里放一个空目录），而真机上那意味着
  *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次。它只动样例那一处：
- *   装上去的东西在沙盒里，用例自己那份 userData 本来就是空的。
+ *   装上去的东西在临时 userData 里，用例自己那份本来就是空的。
  */
 let sampleDirOverride = null;
 
@@ -3318,7 +3191,7 @@ function samplePluginsDir() {
 }
 
 /**
- * 装上去的东西落在哪 —— 沙盒里的一处，程序自己的。
+ * 装上去的东西落在哪 —— 测试后端自己的一处。
  *
  * 目录由 `installPlugins` 自己建（它落东西之前先确保那处存在）。这里只回答
  *   "在哪"：一个还不存在的目录不是错误，而是"这个站点上还没装过东西"。
@@ -3330,90 +3203,12 @@ function siteInstalledDir() {
 /**
  * 假站点上作业侧那一处的根 —— 会话文件、作业日志、以及那个假用户的家目录。
  *
- * 它落在沙盒里，与上面那两个目录同一条理由。与它们不同的是：这里面是
- *   真的进程写出来的东西（插件的 `job/start.sh` 在这台机器上真的跑起来），
+ * 与上面那个目录同一条理由：只在测试后端的临时 userData 里。这里面是真的
+ *   进程写出来的东西（插件的 `job/start.sh` 在这台机器上真的跑起来），
  *   而不是演出来的账。
  */
 function siteJobsDir() {
   try { return path.join(cfgDir || '.', 'site-jobs'); } catch { return null; }
-}
-
-/**
- * 「假站点那两处各读到几个插件」—— 给调试那一屏（第四屏）报数用。
- *
- * 报的是扫描结果，不是站点最终报出去的清单：坏清单在这里要说出来（作者的
- *   清单里少一个字段，他要看到的是"3 个目录只有 1 个能用"，而不是一句"一个都没有"）。
- *   站点那边照守护进程的样子静默跳过坏清单，那是另一件事。
- *
- * 两处分开报，因为它们的出路不同：样例那一处没有了是"打包版本来就该没有"，
- *   而装上去那一处是"还没装过，去装一个"。
- */
-function sitePluginReport() {
-  const each = (dir) => {
-    const r = plugins.scanPluginCollection(dir || '');
-    return {
-      dir: dir || null,
-      plugins: r.plugins.map((p) => p.name),
-      skipped: r.skipped.map((s) => ({ name: s.name, why: s.why })),
-    };
-  };
-  return {
-    samples: each(samplePluginsDir()),
-    installed: each(siteInstalledDir()),
-    // 假站点打不打得出发给客户端的包。它属于"假站点自己的事"（与那两处目录
-    //   同一类），而且它是"站点上明明有插件、客户端却一份都没收到"的另一条线索。
-    packer: backend && typeof backend.packerReport === 'function'
-      ? backend.packerReport() : null,
-  };
-}
-
-/**
- * 开发者模式那一组字段，给界面用。一处形状：bootstrap 与那个开关共用它 ——
- * 各拼一份的话，`on` 与 `saved` 迟早有一处写错，而那个错的症状是"点了一下没反应"。
- */
-function devView() {
-  return {
-    on: dev.developerMode,
-    saved: devSaved.developerMode,
-  };
-}
-
-/**
- * 开发者模式下假站点上一个插件都发不出来时说一句（说出路）。
- *
- * 判据是"两处都没有插件"：从源码跑时样例那一处有东西，所以它只在打包版上、
- *   或者样例树被动过的时候才说 —— 那正是需要有人告诉用户"下一步在哪"的两种现场。
- * 坏清单（读得到目录、读不出 `plugin.json`）也要说：那句症状是"装了它就是不生效"，
- *   而用户没有任何线索。
- */
-/**
- * 这一份客户端里没有打包器时说一句。
- *
- * 与上一条是两个现场，所以两句话：那一条是"站点上还没有插件"，这一条是"站点上
- *   有插件、而这个客户端发不出它"。后者只有一种来路 —— 安装包里没带打包器 ——
- *   而症状是"站点报得出插件、客户端却一份都没收到"，用户能做的事只有换一份完整的包。
- */
-function warnNoPacker() {
-  if (!dev.developerMode) return;
-  const p = backend && typeof backend.packerReport === 'function'
-    ? backend.packerReport() : null;
-  if (!p || p.path) return;
-  win && win.pushNotice('error',
-    '开发者模式：这个客户端里没有带打包器，站点发不出插件。请换一份完整的安装包。');
-}
-
-function warnEmptyFakeSite() {
-  if (!dev.developerMode) return;
-  const rep = sitePluginReport();
-  const n = rep.samples.plugins.length + rep.installed.plugins.length;
-  if (n) return;                                  // 有东西就什么都不说
-  const bad = [...rep.installed.skipped, ...rep.samples.skipped];
-  const why = bad.length
-    ? `读到的 ${bad.length} 个目录里没有一个读得出清单：${bad[0].name}：${bad[0].why}`
-    : '那两处都还没有插件。';
-  win && win.pushNotice('info',
-    `开发者模式：假站点上一个插件都没有。${why}`
-    + '站点上的插件只有一条来的路：在插件页点「安装插件…」把一个包装上去。');
 }
 
 /** 暂存根：站点池的兄弟目录（换入用的 `rename` 要求同一个文件系统）。 */
@@ -3472,8 +3267,8 @@ async function ensureSurface(rec, snap) {
   const has = win.hasSurface(rec.slot);
   const rebuilt = has && win.surfacePartition(rec.slot) !== partition;
   // `demo` 这个参数是 windows.js 的：true 时给那块视图注入 `preload/demo.js`，
-  // 好把「被外壳吞掉的按键」推回面板（对照用）。只有假后端才要这份诊断 ——
-  // 判据跟着这次会话的后端走（`snap.dev`），不是跟着那个开关走。
+  // 好把「被外壳吞掉的按键」推回面板（对照用）。只有测试后端才要这份诊断 ——
+  // 判据跟着这次会话的后端走（`snap.dev`）。
   await win.showSurface({
     slot: rec.slot, url: snap.origin + surface.path, partition, demo: snap.dev,
   });
@@ -3562,19 +3357,18 @@ function pluginContext(rec) {
     /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
      *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。 */
     keys,
-    dev: dev.developerMode,
     // 这一条会话的视图，不是"当前那一个"。
     session: () => (rec.controller && rec.controller.session) || null,
     whoami: () => whoami,
     /**
-     * 用户自己的家目录。开发者模式必须落在沙盒里 —— 见 sshd 插件。
+     * 用户自己的家目录。测试桩里它指到临时的假家目录（见 test/boot.test.mjs）。
      *
      * 它不是插件写数据的地方（那是 `dataDir()`）：这一条留给"要碰
      *   用户自己的文件"的场合 —— sshd 往 `~/.ssh/config` 加那一行 Include 就是
      *   唯一的例子。别拿它当数据目录用：它是所有插件共用的一个根，两个插件
      *   会在里面撞上。
      */
-    home: () => (dev.developerMode ? cfgDir : app.getPath('home')),
+    home: () => app.getPath('home'),
 
     /**
      * 这个插件自己的数据目录（绝对路径）。目录可能还不存在 —— 由第一次
@@ -4372,11 +4166,6 @@ function registerIpc() {
   //   单独问（app:publicKey / app:newKey）。全局一份公钥的写法会让人以为
   //   「注册一次，所有连接都用它」。
   send('app:bootstrap', async () => ({
-    dev: backend.kind === KIND.FAKE,
-    // 开发者模式那两个设置。`on` 与 `saved` 是两个问题（见模块顶上的注释）：
-    // `on` 是这次进程在不在开发者模式，`saved` 是用户在界面上要的是哪一个，
-    // 两者不同 = 有改动等着重启。界面据此画那个复选框与「重启后生效」那一行。
-    developerMode: devView(),
     connections: cfg.connections,
     activeConnectionId: cfg.activeConnectionId,
     // 这里不再有 connection（活动连接那条本身）：把地址预填进「新建」表单
@@ -4402,9 +4191,9 @@ function registerIpc() {
     version: app.getVersion(),
   }));
 
-  // 内置那条不探：它是本机的假站点，探出来的"可达 / 不可达"两边都是假话
-  //   （`127.0.0.1:1` 后面什么都没有，而"什么都没有"与"这个站点用不了"是两件事）。
-  send('app:probeHosts', async () => hosts.probeAll(cfg.connections.filter((c) => !c.builtin)));
+  // 测试夹具那条不探：它是本机的假站点，探出来的"可达 / 不可达"两边都是假话。
+  send('app:probeHosts', async () => hosts.probeAll(
+    cfg.connections.filter((c) => !(testBackend && c.id === TEST_CONNECTION_ID))));
 
   // ── 连接条目的增删改 ──
   send('app:saveConnection', async (input) => {
@@ -4423,15 +4212,6 @@ function registerIpc() {
     }
     if (up.conflict) {
       const c = up.conflict;
-      // 内置那条改不动。这句与"和另一条撞了"是两件事，不能合成一句：
-      //   这里用户该做的是"别改它、另建一条"，那里该做的是"改地址或删掉重复的"。
-      if (c.builtin) {
-        return {
-          ok: false, code: 'builtin',
-          error: `「${c.label}」是开发者模式内置的那条假连接，改不了。`
-               + '要连其他站点，请新建一条。',
-        };
-      }
       // 编辑时把地址改成了另一条已有的连接。两条同身份、各带一把密钥，
       // 界面完全看不出差别 —— 与其替用户挑一条，不如让他自己决定。
       return {
@@ -4493,15 +4273,6 @@ function registerIpc() {
     //    唯一挡着它的是 `clearSpaceStorage` 里"正被那块界面用着就不清"，而多开
     //    之后那一句只能看到前台那一块 —— 前台不是它的时候形同虚设。
     const conn = (cfg.connections || []).find((c) => c.id === id);
-    // 内置那条删不掉。界面上它根本没有那颗按钮（不是禁用的 —— 一颗永远点不亮
-    //   的按钮正是"系统声称了不成立的事"），所以这一句只是把它变成权威，
-    //   与下面那条 `held` 同一层。
-    if (conn && conn.builtin) {
-      return {
-        ok: false, code: 'builtin',
-        error: '这是开发者模式内置的那条假连接，删不掉。关掉开发者模式它就不在了。',
-      };
-    }
     const held = conn && conn.workspaceId
       && liveSessionOnWorkspace(conn.workspaceId);
     if (held) {
@@ -4569,10 +4340,10 @@ function registerIpc() {
    * 返回 `workspaceId: null` 表示"会新建一个空白工作区" —— 那是一个答案，
    *   不是"获取失败"。
    */
-  send('app:defaultWorkspace', async (payload = {}) => ({
-    ok: true,
-    workspaceId: config.defaultWorkspaceFor(cfg, payload),
-  }));
+  send('app:defaultWorkspace', async (payload = {}) => {
+    const id = config.defaultWorkspaceFor(cfg, payload);
+    return { ok: true, workspaceId: isTestWorkspace(id) ? null : id };
+  });
 
   send('app:setConnectionWorkspace', async (payload = {}) => {
     const { connectionId, workspaceId, confirmDiscard } = payload;
@@ -5241,24 +5012,23 @@ function registerIpc() {
     return { ok: true, plugins: pluginsView() };
   });
 
+  // 下面两条只服务测试后端：把 `.splug` 装到假站点上、从假站点上撤掉。
+  //   界面上没有入口，打包版也没有这两条通道。
+  if (testBackend) {
   /**
-   * 往假站点上装一个 `.splug`（开发者模式专有）。
-   *
-   * 权威闸门在这一侧：判据是后端种类，不是界面上那颗按钮画没画 ——
-   *   一颗藏起来的按钮从来不算防线，而"客户端不许往真站点上写文件"这条分界
-   *   只有主进程判得了。真站点上装插件是管理员的事（`slurmate plugin install`）。
+   * 往假站点上装一个 `.splug`。
    *
    * 装完之后走既有那条对账（`reconcileSitePlugins`），不另写一遍同步：
-   *   站点报了它，与真站点逐字一样地下来、过同意闸、然后才加载。开发者模式的
+   *   站点报了它，与真站点逐字一样地下来、过同意闸、然后才加载。假站点的
    *   全部价值就是它演的是同一件事 —— 在这里抄一条"装完直接放进池子"的捷径，
-   *   等于把下载校验与同意闸那两段在开发者模式里整段跳过，而那两段正是最该被演的。
+   *   等于把下载校验与同意闸那两段整段跳过，而那两段正是最该被演的。
    *
    * 选空了（`cancelled`）不出提示：用户按了取消，那不是一次失败。
    */
   send('app:installSitePlugin', async () => {
     if (!backend || backend.kind !== KIND.FAKE) {
       return { ok: false, code: 'not_fake',
-               error: '只有开发者模式那个假站点上才装得了插件。真站点的插件由'
+               error: '只有测试后端那个假站点上才装得了插件。真站点的插件由'
                  + '管理员在集群上用 `slurmate plugin install` 装。' };
     }
     const r = await dialog.showOpenDialog(win.win, {
@@ -5294,9 +5064,9 @@ function registerIpc() {
   });
 
   /**
-   * 从假站点上撤掉一个插件（开发者模式专有）—— 与上面那颗「安装插件…」对称，
+   * 从假站点上撤掉一个插件 —— 与上面那条安装对称，
    * 而它做的是站点那一侧的事：管理员在真站点上敲的那条
-   * `slurmate plugin uninstall <id>`，在开发者模式里就是这一颗。
+   * `slurmate plugin uninstall <id>`，在测试里就是这一条。
    *
    * 它一个字都不动本机池里那一份，这不是遗漏，是这条路的定义：站点上有没有那一棵
    *   树，与本机装没装它，是两件事（`site-plugins.js` 的决定 3 —— 站点不报一个
@@ -5317,7 +5087,7 @@ function registerIpc() {
   send('app:uninstallSitePlugin', async (id, version) => {
     if (!backend || backend.kind !== KIND.FAKE) {
       return { ok: false, code: 'not_fake',
-               error: '只有开发者模式那个假站点上才撤得掉插件。真站点的插件由'
+               error: '只有测试后端那个假站点上才撤得掉插件。真站点的插件由'
                  + '管理员在集群上用 `slurmate plugin uninstall` 撤。' };
     }
     if (typeof id !== 'string' || typeof version !== 'string' || !id || !version) {
@@ -5339,6 +5109,7 @@ function registerIpc() {
     return { ok: true, removed: out.removed, problems: out.problems || [],
              plugins: pluginsView() };
   });
+  }
 
   /**
    * 同意一个待分发的插件。
@@ -5603,9 +5374,9 @@ function registerIpc() {
   send('app:probeActive', async () => {
     const conn = (cfg.connections || []).find((c) => c.id === connectedConnId);
     if (!conn) return { ok: false, error: '没有连着的站点。' };
-    // 内置那条同样不探（见 `app:probeHosts`）。回的是 `ok:false` + 一句实话，
-    //   不是一个编出来的毫秒数 —— 那一位在界面上是"延迟 N ms"。
-    if (conn.builtin) return { ok: false, error: '这是本机的假站点，没有可探测的地址。' };
+    if (testBackend && conn.id === TEST_CONNECTION_ID) {
+      return { ok: false, error: '这是本机的假站点，没有可探测的地址。' };
+    }
     const r = await hosts.probeHost(conn);
     return r && r.reachable
       ? { ok: true, rttMs: r.rttMs }
@@ -5693,30 +5464,14 @@ function registerIpc() {
    * 都不动（与 `app:setFront` 正好是一对）。
    *
    * 它存在的理由是一处物理事实：会话那块页面是原生视图，从 y=30 往下盖住
-   *   整个窗口主体 —— 面板自己身上的按钮（包括开发者模式那些调试开关）那时一个都
-   *   够不着。所以"回到面板"这件事必须由窗口那一层来做（见 windows.js 的 `showPanel`）。
+   *   整个窗口主体 —— 面板自己身上的按钮那时一个都够不着。所以"回到面板"这件事
+   *   必须由窗口那一层来做（见 windows.js 的 `showPanel`）。
    *
-   * 它不设条件：能不能走到这一步是界面的事（那颗「调试」标签只在开发者模式里
-   *   出现）。在这里再判一遍"是不是开发者模式"，等于给同一件事写第二处判据。
+   * 它不设条件：状态条上那颗「面板」按钮的显隐是界面的事。
    */
   send('app:showPanel', async () => {
     win.showPanel();
     return { ok: true };
-  });
-
-  /**
-   * 假站点那两处插件目录各读到什么 —— 给第四屏那一段只读信息。
-   *
-   * 报的是扫描结果（哪两处、各读到几个、有几个读不出清单），与站点最终报出去
-   *   的清单不是一回事：站点那边照守护进程的样子静默跳过坏清单，而这里要说出来
-   *   —— 作者的清单里少一个字段时，他要看到的是"3 个目录里只有 1 个能用"。
-   *
-   * 只读：这里没有"装/卸"的动词。装上去只有插件页那条路（与真站点上"只有管理员
-   *   能装"同形）。
-   */
-  send('app:sitePlugins', async () => {
-    if (backend.kind !== KIND.FAKE) return { ok: false, error: '仅开发者模式可用' };
-    return { ok: true, report: sitePluginReport() };
   });
 
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」的开关。
@@ -5742,57 +5497,13 @@ function registerIpc() {
 
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
 
-  // ── 开发者模式 ────────────────────────────────────────────────────────────
+  // ── 测试后端的接缝 ────────────────────────────────────────────────────────
   //
-  // 这个开关只写那个小文件（`<userData>/dev-mode.json`，见 config.js），
-  //   不碰 `cfg` —— 它回答的是"这次启动读哪一份配置"，它自己不属于任何一份。
-  //
-  // 它不立即生效。界面必须说清「重启后生效」，并且给一个重启的按钮；
-  //   静默的半生效（后端没换、配置换了）是这个仓库一路上在清的那类问题。
-  //
-  // 从前这里还有两个动词（选/清「假站点的插件来源」）—— 整条删掉了：假站点上的
-  //   插件只有一条来的路，就是装上去（见 `siteInstalledDir`）。
-
-  /**
-   * 打开/关闭开发者模式。
-   *
-   * 关掉时不删沙盒。里面是那个人的连接、密钥、插件与同意台账 —— 下次打开
-   *   还在。它是持久的（这正是它叫开发者模式而不是演示的原因），而删用户的
-   *   数据从来不是这个开关的职责。
-   */
-  send('app:setDeveloperMode', async (on) => {
-    const want = Boolean(on);
-    // 落点用启动那一刻取到的 `userDataDir`，不在这里再问一次 `app.getPath` ——
-    //   读它的是 `bootstrap`，写它的必须是同一个目录（见 `userDataDir` 那段）。
-    devSaved = config.saveDevSettings(userDataDir, { developerMode: want });
-    if (want === dev.developerMode) {
-      // 改回了生效值（或者本来就想要这个）—— 没有悬着的改动，就不提"重启"那件事。
-      win.pushNotice('info', want ? '开发者模式是开着的。' : '开发者模式是关着的。');
-      return { ok: true, developerMode: devView() };
-    }
-    win.pushNotice('warn', (want ? '已打开开发者模式' : '已关闭开发者模式')
-      + '。重启客户端之后生效。'
-      + (want ? '沙盒里的一切（连接、密钥、插件）留在本机，下次打开还在。' : ''));
-    return { ok: true, developerMode: devView() };
-  });
-
-  /**
-   * 立即重启客户端（让上面那几个设置生效）。
-   *
-   * 走的是与关窗口同一套收尾：会话还在跑就先结束它。用户点的是"重启"，
-   *   那是一次明确的终止，不是断电 —— 不该指望守护进程的容错窗口替他保住作业。
-   */
-  send('app:restart', async () => {
-    await shutdown();
-    // relaunch + exit：`exit` 跳过 before-quit（那里面还会再做一遍收尾）。
-    app.relaunch();
-    app.exit(0);
-    return { ok: true };
-  });
-
-  // 开发者模式的调试控制 —— 复现那些在真机上极难复现的状态
+  // 这几条通道只在这个进程是测试后端时注册；打包版没有它们，界面也没有入口。
+  // 它们造的是真机上极难复现的状态（守护进程挂掉、旧版本、另一台电脑在看…）。
+  if (testBackend) {
   send('app:debug', async (what, arg) => {
-    if (backend.kind !== KIND.FAKE) return { ok: false, error: '仅开发者模式可用' };
+    if (!backend || backend.kind !== KIND.FAKE) return { ok: false, error: '只有测试后端能注入这些状态。' };
     if (what === 'daemon-down') backend.debugDaemonDown(20000);
     else if (what === 'tunnel-down') backend.debugTunnelDown(15000);
     else if (what === 'reap') backend.debugReap();
@@ -5805,7 +5516,7 @@ function registerIpc() {
     }
     else if (what === 'reset') backend.debugReset();
     // 让假站点"装了本客户端不认识的插件" —— 这一条路是"插件增减不许崩"的验收
-    //   路径，必须能在开发者模式里走到。
+    //   路径，必须能在测试里走到。
     //   短名由假站点自己取（见 backend-fake 的 DEMO_EXTRA_NAME）：那一格要造的
     //     是"站点上有一个本机不认识的插件"，与它叫什么无关 —— 而基座里不许出现
     //     任何真插件的名字，所以这里连缺省值都不写。
@@ -5836,9 +5547,9 @@ function registerIpc() {
     else if (what === 'old-daemon') backend.debugOldDaemon(true);
     // 把每一条会话显示成「另一台电脑在看」。真集群上这一幕要两台机器
     //   才造得出来（在一台上开着、去另一台上打开），而【接管】这个按钮的全部
-    //   意义就是那一刻 —— 它的判据（keeper 不是本机）在开发者模式里必须能先看
+    //   意义就是那一刻 —— 它的判据（keeper 不是本机）在测试里必须能先看
     //   一遍。也顺便造出「本机在看 / 另一台电脑在看 / 没人在看」三句话里的
-    //   第二句，否则那一句在开发者模式里永远看不到。
+    //   第二句，否则那一句在测试里永远看不到。
     //   不带参数 = 打开（与 `extra-plugin` / `old-daemon` 那几个单向开关同一
     //   形状）：撤销它走「复位」，而不是让同一个按钮在两种意思之间来回翻 ——
     //   一个不知道自己现在是开还是关的按钮，就是一颗会骗人的按钮。
@@ -5870,6 +5581,7 @@ function registerIpc() {
     else return { ok: false, error: '未知的调试动作' };
     return { ok: true };
   });
+  }
 }
 
 /** safeStorage 是否可用。任何异常都当作不可用 —— 宁可让用户手动选，也不要误判为可用。 */
@@ -5980,27 +5692,24 @@ module.exports = {
       return tryReattach();
     },
     /**
-     * 重跑一次内置连接的播种（它只在启动时跑一次）。
+     * 重跑一次测试连接的播种（它只在启动时跑一次）。
      *
-     * 用例要验的是"沙盒里从前照着文档手填的那一条会被顶掉"，而那条路只在
-     *   启动时走 —— 不重跑就没法验。先往 `cfg.connections` 里塞一条同地址的、
-     *   再调它，是还原现场（真机上那一条本来就在启动时躺在文件里），
-     *   不是绕过什么。
+     * 用例把测试连接删掉之后要靠它找回来 —— 那条路只在启动时走，不重跑就没法验。
      */
-    seedBuiltinDevConnection: () => ensureBuiltinDevConnection(),
+    seedTestConnection: () => ensureTestConnection(),
     /**
      * 把假站点的样例那一棵就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
      *
      * 用例要的现场是"站上一个插件都没有"（那里放一个空目录），而真机上那意味着
      *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次，所以只能这么造。
-     * 它只动样例那一处：装上去的东西在沙盒里，用例自己那份 userData 本来就是空的。
+     * 它只动样例那一处：装上去的东西在临时 userData 里，用例自己那份本来就是空的。
      *
      * `backend` 可能还没有（`bootstrap` 之后才建）：那种情况下这一句仍然是
      *   有效的 —— override 是每次现算的（后端建起来读的正是它），而没有后端也
      *   就没有那张快照要丢。少了这一格的话，"在第一条用例之前把树指过去"这件事
      *   根本做不到（那正是它现在的第一个调用者要做的）。
      */
-    setDevSampleDir: (dir) => {
+    setSampleDir: (dir) => {
       sampleDirOverride = dir || null;
       if (backend) backend.forgetSiteIndex();
     },
@@ -6033,10 +5742,9 @@ module.exports = {
     /**
      * 对账的 `held` 里会话那一半（`liveDataDirs()` 现在报的那些目录名）。
      *
-     * 用例要断言的是"一条活会话正用着的那份数据在护着"，而那件事在开发者
-     *   模式下没有别的观测面：`app:pluginData` 那一屏里分区根不查，而
-     *   "护没护住"恰恰是"它有没有出现在那一屏里"的另一面 —— 隔着两层（根没查、
-     *   行又被滤过）判不出来。这一格给的是判据本身。
+     * 用例要断言的是"一条活会话正用着的那份数据在护着"，而那件事没有别的
+     *   观测面：`app:pluginData` 那一屏会把活会话那一份从行里滤掉，隔着两层
+     *   判不出来。这一格给的是判据本身。
      */
     getLiveDataDirs: () => [...liveDataDirs()],
   },

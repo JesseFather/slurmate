@@ -20,7 +20,7 @@
  *       goodbye → 释放。
  *
  * 隧道那头不再是一个内置的假网页：假站点现在真的把插件的 `job/start.sh`
- *    跑起来（见 fake-job.js），于是"服务是谁"这件事在开发者模式里也成立 ——
+ *    跑起来（见 fake-job.js），于是"服务是谁"这件事在测试后端里也成立 ——
  *    它是这个插件的作业侧，口令由它自己生成、写进会话文件。
  *
  * 这台机器上没有 Xvfb，Electron 界面跑不了。但界面之下的每一层都能在这里真跑，
@@ -103,7 +103,7 @@ function fixtureSiteTree() {
   return root;
 }
 
-// 一棵，全程共用：假站点那棵样例树（与 app 在开发者模式下读到的是同一处，
+// 一棵，全程共用：假站点那棵样例树（与 app 在测试后端下读到的是同一处，
 //   见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
 const SITE_TREE = fixtureSiteTree();
 const SITE_PLUGIN_DIR = () => SITE_TREE;
@@ -722,6 +722,6 @@ test('打包器不在时：站点照常报得出插件，而这一份发不出�
 
   const rep = backend.packerReport();
   assert.equal(rep.path, null, '调试那一屏要能看出"这一份客户端里没有它"');
-  assert.match(rep.why, /没有带打包器/,
+  assert.match(rep.why, /未找到打包器/,
     `那句提示必须说得出缺的是什么：${rep.why}`);
 });

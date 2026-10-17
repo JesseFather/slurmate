@@ -13,26 +13,17 @@
 // limitations under the License.
 
 /**
- * packaging.test.mjs —— 「跑出 `client/src` 的东西，安装包里还在不在」。
+ * packaging.test.mjs —— 安装包里带什么、不带什么。
  *
- * 打包版里只有 `files:` 白名单收进去的那些文件（今天是 `src/` 底下的一切与
- *   `package.json`），而运行期还有两样东西的家不在这儿：
+ * 打包版里只有 `files:` 白名单收进去的那些文件。测试后端要用的那几样
+ *   （`backend-fake.js`、`fake-job.js`、`fake-job-host.sh`、`demo-server.js`、
+ *   `preload/demo.js`、`src/demo/`）只服务测试进程，安装包里一个都不带；
+ *   打包器在仓库根，也不带。
  *
- *   · 打包器（`packer/slurmate-packer.js`）：假站点要现打一个客户端侧容器
- *     才能把插件发给客户端。靠 `extraResources` 带进来。
- *   · 替身宿主（`src/main/fake-job-host.sh`）：它要交给一个外部的 bash，
- *     而外部进程读不了 asar。靠 `asarUnpack` 解出来。
- *
- * 这两条在打包版上断掉的样子一模一样：客户端一切正常，只有一件功能不出声地
- *   不工作 —— 站点报得出插件却一个都发不出来；或者一提交就"作业侧无法启动"。
- *   而这台机器上跑 `node --test` 是全绿的，因为源码树里两样都在。
- *
- * 所以这一份钉三件事：
- *   ① `app-assets.js` 那两条路径算法对（纯函数，源码树与安装包各算一遍）；
- *   ② `electron-builder.yml` 里的声明与那两条算法对得上（改了 `to:` 而不改
- *      算法，或者反过来，都要红）；
- *   ③ 整个 `client/src` 里再没有第三条跑出 `src/` 的路径 —— 有的话必须在这里
- *      留下交代，否则它在打包版上就是又一个"只有一件功能不出声地不工作"。
+ * 这一份钉三件事：
+ *   ① 假站点那几个模块都在 `files` 的排除项里；
+ *   ② 不再有 `extraResources` / `asarUnpack`（那两条只为开发者模式存在）；
+ *   ③ 整个 `client/src` 里跑出 `src/` 的路径只有那几处，各自有交代。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -58,38 +49,24 @@ function blockOf(key) {
   return end === -1 ? rest : rest.slice(0, end + key.length + 1);
 }
 
-test('打包器在源码树与安装包里算到同一个地方，而那个地方由 extraResources 定', () => {
-  // 源码树：`client/src/main` 往上三层是仓库根。
+test('假站点那几个模块全部排除在安装包之外', () => {
+  const block = blockOf('files');
+  assert.ok(block, 'electron-builder.yml 里未找到 files 段 —— 这条判据失去目标');
+  for (const rel of ['src/main/backend-fake.js', 'src/main/fake-job.js',
+                     'src/main/fake-job-host.sh', 'src/main/demo-server.js',
+                     'src/preload/demo.js', 'src/demo/**']) {
+    assert.match(block, new RegExp(`^\\s*-\\s*'?!${rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'?\\s*$`, 'm'),
+      `files 里没有排除 ${rel} —— 它只服务测试后端，不该进安装包`);
+  }
+  // 那两条只为开发者模式存在的声明，整段删掉了。
+  assert.equal(blockOf('extraResources'), '', 'extraResources 不该再出现');
+  assert.equal(blockOf('asarUnpack'), '', 'asarUnpack 不该再出现');
+
+  // 打包器在仓库根；源码树里那两条算法仍然要能算到它（测试从源码跑）。
   assert.equal(appAssets.packerPath(path.join('repo', 'client', 'src', 'main')),
     path.join('repo', 'packer', 'slurmate-packer.js'));
-  // 安装包：`<resources>/app.asar/src/main` 往上三层是 `<resources>`。
-  const inPkg = appAssets.packerPath(path.join('/r', 'app.asar', 'src', 'main'));
-  assert.equal(inPkg, path.join('/r', 'packer', 'slurmate-packer.js'));
-
-  // 上面那个路径不是随便定的：它就写在 `extraResources` 的 `to:` 里。两条一起
-  //   改才对，只改一条的后果是打包版上找不到打包器，而源码树里全绿。
-  const block = blockOf('extraResources');
-  assert.ok(block, 'electron-builder.yml 里未找到 extraResources 段 —— 这条判据失去目标');
-  const m = /to:\s*(\S+)/.exec(block);
-  assert.ok(m, 'extraResources 里未找到 `to:` —— 判据失去目标');
-  assert.equal(inPkg, path.join('/r', ...m[1].split('/')),
-    'app-assets.js 算出来的位置与 electron-builder.yml 的 `to:` 不一致：'
-    + '改一处就要改另一处');
-});
-
-test('替身宿主被解出 asar，而 fake-job.js 交出去的正是那一份', () => {
-  const block = blockOf('asarUnpack');
-  assert.ok(block, 'electron-builder.yml 里未找到 asarUnpack 段 —— 这条判据失去目标');
-  assert.match(block, /^\s*-\s*src\/main\/fake-job-host\.sh\s*$/m,
-    'asarUnpack 必须解出 src/main/fake-job-host.sh：外部 bash 读不了 asar 里的文件');
-
-  // 声明在配置里不等于用上了。交路径的那一处必须真的过一遍 `unpacked()`。
-  const src = fs.readFileSync(path.join(SRC, 'main', 'fake-job.js'), 'utf8');
-  assert.match(src,
-    /appAssets\.unpacked\(\s*path\.join\(__dirname,\s*'fake-job-host\.sh'\)\s*\)/,
-    'fake-job.js 交给 bash 的那个路径必须过 `appAssets.unpacked()`：'
-    + '少了它，打包版上那次 spawn 拿到的是 asar 里的路径，而症状只是'
-    + '「作业侧无法启动」');
+  assert.equal(appAssets.packerPath(path.join('/r', 'app.asar', 'src', 'main')),
+    path.join('/r', 'packer', 'slurmate-packer.js'));
 });
 
 // ── ③ 跑出 `src/` 的路径：全都在这里有一句交代 ───────────────────────────────
@@ -102,11 +79,11 @@ test('替身宿主被解出 asar，而 fake-job.js 交出去的正是那一份',
  */
 const ALLOWED_ESCAPES = [
   [/[/\\]packer[/\\]slurmate-packer\.js$/,
-    '打包器：`extraResources` 带进包，落点由上面那条判据钉着'],
+    '打包器：只服务测试后端（从源码跑），安装包里不带它'],
   [/[/\\]package\.json$/,
     '客户端自己的 package.json：`files:` 白名单里有它（版本号那一处读它）'],
   [/[/\\]plugins$/,
-    '开发样例那一棵。打包版里没有它是对的（基座两端都不带插件），'
+    '开发样例那一棵。安装包里没有它是对的（基座两端都不带插件），'
     + '调用方按"不在就 null"处理'],
 ];
 

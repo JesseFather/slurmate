@@ -4,9 +4,9 @@
 
 这个仓库有四个分发单元，而今天一个都不带文档。
 
-客户端的 `files:` 白名单是 `src/**` 与 `package.json`，另外两样靠 `extraResources`
-与 `asarUnpack` 带进包（见 `client/electron-builder.yml`）。站点端从仓库跑部署脚本，
-打包器是仓库里的一个目录。
+客户端的 `files:` 白名单是 `src/**` 与 `package.json`，测试后端那几个模块排除在外
+（见 `client/electron-builder.yml`）。站点端从仓库跑部署脚本，打包器是仓库里的一个
+目录。
 
 所以「带」这件事，将来每一格都要在构建那一步真的把文档装进去。
 
@@ -58,7 +58,7 @@
 | [cluster/README.md](../cluster/README.md) | 站点端的入口与索引 | 管理员 |
 | [packer/README.md](../packer/README.md) | 打包器的每个动词（`init` / `keygen` / `build` / `sign` / `verify` / `inspect`） | 作者 |
 | [packer/docs/README.md](../packer/docs/README.md) | 插件怎么做（目录形状、清单的每个键、作业侧钩子、打包那几条命令） | 作者 |
-| [client/README.md](../client/README.md) | 客户端：认证模型、开发者模式与调试开关、打包、代码结构，以及四条不要改坏的约束 | 维护者 |
+| [client/README.md](../client/README.md) | 客户端：认证模型、测试后端、打包、代码结构，以及四条不要改坏的约束 | 维护者 |
 | [tools/conformance/README.md](../tools/conformance/README.md) | 三份实现在同一批字节上的对账（输入树、期望的包字节、坏包、签名夹具） | 实现者 |
 
 ---

@@ -59,13 +59,6 @@ contextBridge.exposeInMainWorld('slurmate', {
   // §5.3：删掉本机那一份 = 撤回同意（下一次对账重新问）。给的是"没被加载的那些"
   // 唯一的出口 —— 见 panel.js 的 renderInert。
   dropPluginVersion: (id, version) => ipcRenderer.invoke('app:dropPluginVersion', id, version),
-  // 往站点的反方向：挑一个 `.splug` 装到假站点上。它只在开发者模式里
-  //   存在（主进程按后端种类拒真站点 —— 那边的插件由管理员用
-  //   `slurmate plugin install` 装）。见 panel.js 的 siteInstallButton。
-  installSitePlugin: () => ipcRenderer.invoke('app:installSitePlugin'),
-  // 反方向：把装上去的那一个从假站点上撤掉（本机这一份跟着走）。同样只在开发者
-  //   模式里存在，拒真站点的那一句与上面逐字对称。见 panel.js 的 dropSitePlugin。
-  uninstallSitePlugin: (id, version) => ipcRenderer.invoke('app:uninstallSitePlugin', id, version),
 
   // ── 工作区 ──
   //
@@ -183,12 +176,8 @@ contextBridge.exposeInMainWorld('slurmate', {
   setFront: (slot) => ipcRenderer.invoke('app:setFront', { slot }),
   // 反过来：把面板抬到会话页面上面（会话那块原生视图从 y=30 往下盖住整块主体，
   // 面板自己的按钮那时一个都够不着）。它同样是纯界面动作 —— 一个字都不动会话。
-  // 入口只有一处：状态条上那颗「调试」标签（只在开发者模式里出现）。
+  // 入口只有一处：状态条上那颗「面板」标签。
   showPanel: () => ipcRenderer.invoke('app:showPanel'),
-  // 假站点那两处插件目录各读到什么（第四屏那一段只读信息）。
-  // 它是排查「站上一个插件都发不出来」的唯一线索：装上去的东西落在沙盒里，
-  //   用户在别处看不到那个目录。
-  sitePlugins: () => ipcRenderer.invoke('app:sitePlugins'),
   // 只有一个语义：结束会话并释放资源。没有「保持作业运行」这个模式 ——
   // 保住作业靠的是客户端意外消失时守护进程的容错窗口，不是用户的一个开关。
   // 必须指名 slot：省略会被主进程拒绝，而不是"停那唯一的一个"。
@@ -210,22 +199,6 @@ contextBridge.exposeInMainWorld('slurmate', {
   jobLog: (payload) => ipcRenderer.invoke('app:jobLog', payload),
   reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
-
-  // ── 开发者模式 ──
-  //
-  // 客户端不连集群、改用一个本地的模拟站点。它是给插件作者与改客户端的人用的，
-  // 所以入口是界面上一个开关，不是命令行参数 —— 那等于说"Windows 用户请去开终端"。
-  //
-  // 这个开关不立即生效：换后端要重建整个客户端。界面必须说清「重启后生效」，
-  //   `restart` 是那条路上的那一步。
-  //   从前这里还有两个动词（选/清「假站点的插件来源」）—— 整条删掉了：假站点上的
-  //     插件只有一条来的路，就是装上去（`installSitePlugin`）。
-  setDeveloperMode: (on) => ipcRenderer.invoke('app:setDeveloperMode', on),
-  // 立即重启（让上面那个开关生效）。会话还在跑的话会先结束它，与关窗口同一套收尾。
-  restart: () => ipcRenderer.invoke('app:restart'),
-
-  // 开发者模式的调试开关（真机上极难复现的状态）。不在开发者模式时主进程会拒绝。
-  debug: (what, arg) => ipcRenderer.invoke('app:debug', what, arg),
 
   // 主进程 → 渲染进程
   onStates: (fn) => {

@@ -19,10 +19,8 @@
  * 这是整个客户端最重要的一条缝：`session.js` 及以上只知道这个接口，不知道背后
  * 是 SSH 还是一个本地的模拟站点。所以接真实集群时，改动被限制在 `backend-ssh.js` 里。
  *
- * `kind` 与"模式"是两件事，别合并。 `kind` 说的是"这个后端是谁"
- *   （`ssh` / `fake` —— 后者在 `backend-fake.js` 里），而开发者模式说的是
- *   "用户这次选了哪一个"。今天两者一一对应（假后端只由开发者模式开关进来，
- *   见 createBackend），但它们是两个问题：模式是用户的设置，kind 是实现的身份。
+ * `kind` 说的是"这个后端是谁"（`ssh` / `fake` —— 后者在 `backend-fake.js` 里）。
+ *   假站点只由测试进程进入（见 createBackend），不在生产路径上。
  *
  * 接口（两个实现必须完全一致）：
  *
@@ -63,8 +61,8 @@
  *    （`PUSH_STALE_MS`），一条推送都没收到时它的对账逐字回到这一版之前。
  *
  * 两个后端都必须实现它（`fake` 那个照着真守护进程的规则发：变了就发、
- *      没变也每 30 秒发一条），否则开发者模式里那条路一次都走不到 ——
- *      "开发模式能跑、真集群跑不了"正是这个接缝最怕的一类。
+ *      没变也每 30 秒发一条），否则那条路在测试里一次都走不到 ——
+ *      "测试里能跑、真集群跑不了"正是这个接缝最怕的一类。
  *
  * 推送不带秘密（口令、作业内主机公钥）。那不是疏忽：守护进程用
  *   `with_secret=False` 渲染它，与 `list` 逐字同构 —— 于是"推送里没有秘密"
@@ -158,29 +156,29 @@ class Backend extends EventEmitter {
  * 选择后端。
  *
  * @param {object} opts
- *   dev     {boolean}  开发者模式（用户在界面上打开的那个开关，见 index.js）。
- *                      它是进假后端的唯一一条路。
+ *   test    {boolean}  测试后端。只由测试进程设置，打包版为假（见 index.js）。
+ *                      它是进假站点的唯一一条路。
  *   ssh     {object}   SSH 后端的参数（私钥、主机密钥裁决、客户端身份）
- *   fake    {object}   假后端的可调参数
+ *   fake    {object}   假站点的可调参数
  *
  * `ssh.client` / `fake.client` 是这台电脑的客户端身份 `{id, name}`，
  *   由 index.js 从数据目录里读出来（见 config.js 的 `loadClientId`）。
  *   后端自己不生成它 —— 身份是"这台电脑"的属性，不是"这次连接"的属性，
  *   而一个后端会被重连很多次。
  *
- * 这个选择没有第三条路。兜底到假后端是错的：真发生的时候，用户会以为
+ * 这个选择没有第三条路。兜底到假站点是错的：真发生的时候，用户会以为
  *   连上了集群、其实在跟一个本地假服务打交道。所以没有 SSH 后端的构建
  *   响亮地坏 —— 它不该装作能连集群。
  */
 function createBackend(opts = {}) {
-  if (opts.dev) {
+  if (opts.test) {
     const { FakeBackend } = require('./backend-fake.js');
     return new FakeBackend(opts.fake || {});
   }
   const ssh = require('./backend-ssh.js');
   if (!ssh.isImplemented()) {
-    throw new Error('这个构建里没有可用的 SSH 后端。假后端只能由开发者模式开关'
-      + '进入。它不再作为"真后端不可用"时的兜底，因为那样的降级会让用户以为'
+    throw new Error('这个构建里没有可用的 SSH 后端。假站点只能由测试进程进入。'
+      + '它不再作为"真后端不可用"时的兜底，因为那样的降级会让用户以为'
       + '自己连上了集群。');
   }
   // ssh 选项（私钥、主机密钥裁决）由 index.js 提供 —— 它们来自配置与 keys.js，

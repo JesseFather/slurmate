@@ -63,8 +63,7 @@
   }
 
   /** 按设计通栏的那几条：它们的右边缘本来就顶到滚动条槽上。 */
-  var EXEMPT = ['#screen-plugins > .sec-head', '#screen-jobs > .sec-head',
-    '#screen-debug > .sec-head'];
+  var EXEMPT = ['#screen-plugins > .sec-head', '#screen-jobs > .sec-head'];
 
   function describe(el) {
     var s = el.tagName.toLowerCase();

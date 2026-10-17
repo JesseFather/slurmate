@@ -34,6 +34,33 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.27] — 未发布
+
+> 协议版本是 **0.27**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
+> `0.27`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
+> **`0.27.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
+> 随这一版分发的开发样例 `code-server` 插件是 **1.0.1**。
+
+### Removed — 开发者模式整个删掉
+
+插件开发需要真实的站点：假站点假掉的恰好是插件出问题的那两层（调度与 SSH
+那一跳），所以拿它当插件开发环境是假承诺。界面上的开关、重启、调试那一屏、
+往假站点装/撤插件、状态条与窗口标题上的标注、独立的配置与浏览器存储沙盒、
+内置的假连接 —— 全部删掉，`dev-mode.json` 不再被读（不做迁移）。
+
+### Changed — 假站点降为只由测试注入的测试后端
+
+假站点那几个模块（`backend-fake.js`、`fake-job.js`、`fake-job-host.sh`、
+`demo-server.js`、`preload/demo.js`、`src/demo/`）只服务客户端自己的测试：
+入口是 `SLURMATE_TEST_BACKEND=1`，而且只在非打包版生效。安装包里不带它们，
+也不再需要打包器与替身宿主那两条 `extraResources` / `asarUnpack`。
+它与真守护进程的对齐判据（字段名、GRES 规则、op 存在性）照旧保留。
+
+### Changed — 文档：开发者模式不再是插件作者的路
+
+README 的快速开始改成"连一台真站点"；客户端 README、架构文档、契约文档与
+站点侧那几份排错文档不再提供开发者模式的入口或把它当成开发环境。
+
 ## [0.26] — 未发布
 
 > 协议版本是 **0.26**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

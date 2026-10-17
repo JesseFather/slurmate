@@ -34,15 +34,10 @@
   var calls = [];
   window.__PROBE_CALLS = calls;
 
-  /** 开发者模式那一段要的三格。`saved !== on` 会把「有改动等着重启」那一条露出来。 */
-  var DEV = { saved: true, on: true, dir: 'C:\\Users\\user\\AppData\\Roaming\\Slurmate\\dev-sandbox' };
-
   var shaped = {
     bootstrap: function () {
       calls.push('bootstrap');
       return Promise.resolve({
-        dev: true,
-        developerMode: DEV,
         connections: [],
         partitions: [],
         plugins: F.pluginsView || {},

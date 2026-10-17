@@ -395,12 +395,8 @@ class SessionController extends EventEmitter {
       // 而它本身就是给界面看的那句话（`suspend()` 记下的原因）—— 界面
       //   直接印，不再自己编一句（见 panel.js 的 renderSnapshot）。
       suspended: this._suspended,
-      // 「这一次会话不是在真集群上跑的」。界面据此挂那条横幅与状态条标记。
-      //
-      //   判据是后端身份，不是"用户开着那个开关"—— `fake` 只可能由开发者模式
-      //   进来（见 backend.js 的 createBackend），两者今天恒等；但开关是要重启
-      //   才生效的，而界面手里那份开关状态可能是"刚改过、还没重启"。拿它去判的话，
-      //   改了开关还没重启的那段时间里，界面会对着一个真集群说"这是假的"。
+      // 「这一次会话跑在测试后端的假站点上」。`ensureSurface` 据它决定
+      //   要不要注入那份按键对照的 preload；生产路径上恒为假。
       dev: this.backend.kind === 'fake',
     };
     // 作业状态那一行已经译好，界面直接印。译法与理由是 jobstate.js 的事 ——

@@ -1,8 +1,6 @@
 /* Slurmate 面板样式。
    配色刻意贴近 VS Code 深色主题 —— 窗口主体很快会被 code-server 页面盖住，
-   状态条是唯一始终可见的我们自己的像素，不该突兀。
-
-   开发者模式用洋红标注：真实模式绝不会出现的颜色。这是三重互锁的第二重。 */
+   状态条是唯一始终可见的我们自己的像素，不该突兀。 */
 
 :root {
   color-scheme: dark;
@@ -16,10 +14,8 @@
   --ok: #4ec9b0;
   --warn: #dcdcaa;
   --err: #f48771;
-  --dev: #ff5cf4;
-  /* 「临时副本」的记号。不是洋红 —— 那个颜色在这个仓库里等于「假后端」
-     （见文件头那条三重互锁），复用会把两件毫不相干的事说成一件：临时副本是
-     真实的会话、真实的作业，只是它那份数据不会被记录。 */
+  /* 「临时副本」的记号。它说的是一件真实的事：临时副本是真实的会话、真实的
+     作业，只是它那份数据不会被记录。 */
   --temp: #e0a458;
   --bar-h: 30px;
   /* 两条边栏的宽度。必须是同一个数：`layout.js` 的 `RAIL_W` 决定插件那块
@@ -65,8 +61,7 @@ html, body {
 #statusbar > .st,
 #statusbar > .sep,
 #statusbar > button,
-#statusbar > .temp-tag,
-#statusbar > .dev-tag { flex: none; }
+#statusbar > .temp-tag { flex: none; }
 #statusbar > #sb-detail {
   flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis;
@@ -118,24 +113,10 @@ html, body {
 /* 「面板」那一颗（2026-10-18 加，真机：一条会话时没有回到插件页的路）。
    会话标签是实线胶囊，这一颗是虚线 —— 它们做的是相反的事（那几颗把某一块
      页面抬上来，这一颗把面板抬回来），长成一模一样就是最容易点错的一格。
-   不借颜色区分：那几档颜色在这个仓库里各有各的意思（洋红 = 假后端，
-     --err = 出错，--warn = 进行中），借一个过来等于把两件事说成一件。 */
+   不借颜色区分：那几档颜色在这个仓库里各有各的意思（--err = 出错，
+     --warn = 进行中），借一个过来等于把两件事说成一件。 */
 #session-tabs .tab.panel { border-style: dashed; }
 #session-tabs .tab.panel:hover { color: var(--fg); }
-/* 「调试」那一颗（2026-10-11 加，只在开发者模式里出现）。
-   它必须与那几颗会话标签长得不一样：那几颗说的是"点我，切到那一条会话去"，
-     它说的是"点我，把面板抬回来" —— 两个相反的动词长成一模一样的相邻标签，正是
-     用户最容易点错的那一格（与「临时离开 / 断开」那一对同一个道理）。
-   记号沿用洋红：那个颜色在这个仓库里等于「假后端」（见横幅那一套），而这一颗
-     只在假站点里出现。
-
-   ️ `:hover` 那条要跟在后面再写一遍：上面 `.tab:hover` 与这一条的选择器
-     同权重，靠位置分胜负 —— 少了这一句，鼠标停上去它反而不变色（比邻居更迟钝）。 */
-#session-tabs .tab.dev { color: var(--dev); border-color: var(--dev); }
-#session-tabs .tab.dev:hover { color: var(--fg); }
-#statusbar .dev-tag {
-  color: var(--dev); font-weight: 700; letter-spacing: .3px;
-}
 /* 「临时副本」那条常驻提示。它必须在状态条里 —— 会话一跑起来，面板那一块
    就被原生视图整块盖住，而那正是最需要看见这句话的时候（见 panel.html）。 */
 #statusbar .temp-tag {
@@ -702,7 +683,6 @@ dialog p#fork-body { white-space: pre-line; }
 .notice.warn .tag { color: var(--warn); }
 .notice.error .tag { color: var(--err); }
 .notice.info .tag { color: #9cdcfe; }
-.notice.dev .tag { color: var(--dev); }
 .notice .body { flex: 1; white-space: pre-wrap; word-break: break-word; }
 
 /* ── 状态表 ── */
@@ -710,28 +690,10 @@ dialog p#fork-body { white-space: pre-line; }
 .kv dt { color: var(--fg-dim); }
 .kv dd { margin: 0; font-family: ui-monospace, Consolas, monospace; }
 
-/* 调试开关那一块（只在开发者模式下露出来）：洋红虚线框，与横幅同一个记号。 */
-.debug {
-  margin-top: 18px; padding: 14px; border: 1px dashed var(--dev); border-radius: 5px;
-}
-.debug h3 { color: var(--dev); margin-top: 0; }
-.debug .row { gap: 8px; }
-.debug p { color: var(--fg-dim); font-size: 12px; margin: 0 0 10px; }
-
-/* 开发者模式那一段里的一行复选框。 */
-.check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
-.check input { margin: 0; }
-
-.banner-dev {
-  margin: 20px 0 16px; padding: 10px 14px; border-radius: 4px;
-  background: #3a0f36; border: 1px solid var(--dev); color: var(--dev);
-  font-weight: 600;
-}
 /* 初始化失败那条横幅。颜色用 `--err`：它说的就是"出错了"，
-   不另起一个红（同一种意思两个色号，下一个人会以为它们有区别），
-   也不是洋红（那个颜色在这个仓库里等于「假后端」，见文件头那条三重互锁）。
-   它在面板最上面、`.wrap` 的第一个孩子，与 `.banner-dev` 同一个形状。
-   这三条横幅的上外边距是 20px：`#panel` 不再有上内边距（见那一段），
+   不另起一个红（同一种意思两个色号，下一个人会以为它们有区别）。
+   它在面板最上面、`.wrap` 的第一个孩子。
+   这几条横幅的上外边距是 20px：`#panel` 不再有上内边距（见那一段），
      第一个露出来的元素得自己把那段空白带出来。 */
 .banner-fatal {
   margin: 20px 0 16px; padding: 10px 14px; border-radius: 4px;
@@ -739,8 +701,7 @@ dialog p#fork-body { white-space: pre-line; }
 }
 .banner-fatal .mono { color: var(--fg); }
 
-/* 「临时副本」那条横幅。与 `.banner-dev` 同一个形状、另一个颜色（见 --temp
-   那条注释：洋红留给假后端）。 */
+/* 「临时副本」那条横幅。与上面那条同一个形状、另一个颜色（见 --temp 那条注释）。 */
 .banner-temp {
   margin: 20px 0 16px; padding: 10px 14px; border-radius: 4px;
   background: #3a2a10; border: 1px solid var(--temp); color: var(--temp);
@@ -757,15 +718,14 @@ dialog p#fork-body { white-space: pre-line; }
 .crow .dim { color: var(--fg-dim); }
 
 /* ── 三屏的路由 ──────────────────────────────────────────────────────────────
-   ▶ 一个站点的三个层次（连接 → 插件 → 作业）外加开发者模式下的「调试」，
-     同时只露一个。"露哪一个"由 panel.js 的 `showScreen()` 决定，这里一个字
+   ▶ 一个站点的三个层次（连接 → 插件 → 作业），同时只露一个。"露哪一个"由 panel.js 的 `showScreen()` 决定，这里一个字
      都不参与 —— 样式只管长相。
 
    ▶ 各屏里没有任何一屏自带 margin-top：它们的标题行是 `.sec-head`（那个 26px
      的上边距是给"区块"用的），而一屏是页面，上面还有横幅与那行副标题。 */
 .screen > .sec-head:first-child { margin-top: 0; }
 
-/* ── 进了站点之后那几屏的标题（第二/三屏 + 开发者模式下的第四屏）──
+/* ── 进了站点之后那几屏的标题（第二/三屏）──
    它照第一屏的 masthead 做（2026-10-17 改）：一个名字，下面一行小字。
      第一屏那行小字说的是这个客户端是什么，这里说的是脚下的登录条目 ——
      同一个形状，翻过去不用重新学一遍。用户的原话是"照着主页 slurmate 这个
@@ -778,8 +738,7 @@ dialog p#fork-body { white-space: pre-line; }
      的内边距给（与第一屏同一个缩进），右边那一条滚动条的槽由 `#panel` 自己
      留着 —— 标题是普通块，本来就落在内容区里。 */
 #screen-plugins > .sec-head,
-#screen-jobs > .sec-head,
-#screen-debug > .sec-head {
+#screen-jobs > .sec-head {
   margin: 22px 0 18px;
   align-items: flex-start;
 }

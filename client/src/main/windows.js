@@ -183,7 +183,7 @@ class ShellWindow {
      */
     this._front = null;
     /**
-     * 面板自己要不要盖在那块会话页面上面（开发者模式的「调试」标签要它）。
+     * 面板自己要不要盖在那块会话页面上面（状态条那颗「面板」要它）。
      *
      * 这一格存在的理由是一条物理事实：会话那块界面是原生视图，从 y=30 往下
      *   盖住整个窗口主体 —— 面板上任何属于自己的按钮都够不着。所以"我要看面板"这件
@@ -768,7 +768,7 @@ class ShellWindow {
     //   于是两条路必然分叉。
   }
 
-  /** 把被外壳吞掉的按键推给前台那个假页面（仅开发者模式用，用于对照）。 */
+  /** 把被外壳吞掉的按键推给前台那个假页面（仅测试后端用，用于对照）。 */
   pushSwallowed(desc) {
     const s = this._front ? this.surfaces.get(this._front) : null;
     if (!s || s.view.webContents.isDestroyed()) return;

@@ -65,16 +65,12 @@ let connected = false;
 let whoami = null;
 
 /**
- * 在 / 不在这个站点里。这一格只有这一个入口改 —— 因为有两个东西跟着它走，
- * 而它们都当场要重画：
- *
- *   · 两条边栏（`body.connected`）：它们是站点级的两格，不在站点里就没有可问的
- *     也没有可看的（见 renderConnections）；
- *   · 状态条上那颗「调试」标签（见 renderTabs）：它的判据里有 `connected`。
+ * 在 / 不在这个站点里。这一格只有这一个入口改 —— 因为两条边栏跟着它走
+ *   （`body.connected`）：它们是站点级的两格，不在站点里就没有可问的也没有可看的
+ *   （见 renderConnections）。
  *
  * 少画一次的症状是静默的：连上那一刻主进程推来的会话表可能早于这一句
- *   到达（那时标签是按"没连上"画的），而它此后不会自己再画一次 —— 下一次推送要等到
- *   某条会话变动。表现是"我明明在开发者模式里连着，状态条上却没有那颗调试"。
+ *   到达，而它此后不会自己再画一次 —— 下一次推送要等到某条会话变动。
  */
 function setConnected(on) {
   connected = Boolean(on);
@@ -165,7 +161,7 @@ function notice(kind, text) {
   el.className = 'notice ' + kind;
   const tag = document.createElement('span');
   tag.className = 'tag';
-  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息', dev: '开发' }[kind] || kind;
+  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息' }[kind] || kind;
   const body = document.createElement('span');
   body.className = 'body';
   body.textContent = text;              // textContent：绝不把外部文本当 HTML 插进去
@@ -314,10 +310,10 @@ function clearPortAsk() {
 
 // ── 三屏的路由 ──────────────────────────────────────────────────────────────
 /**
- * 把四屏之一露出来。同时只露一个。
+ * 把三屏之一露出来。同时只露一个。
  *
- * 为什么"我在哪一屏"必须是一个显式的状态：这几屏是一个站点的几个层次
- *   （连接 → 插件 → 作业，外加开发者模式下的「调试」），而"在哪一层"取决于用户
+ * 为什么"我在哪一屏"必须是一个显式的状态：这三屏是一个站点的几个层次
+ *   （连接 → 插件 → 作业），而"在哪一层"取决于用户
  *   刚才点了什么，不取决于会话此刻是什么状态。按后者判的话（`idle` 露连接列表、
  *   跑起来露当前会话），用户点进作业列表看一眼，下一次快照回来就被弹回另一屏
  *   ——而他什么都没做。
@@ -334,14 +330,9 @@ function showScreen(name) {
   //   收掉不等于答了「取消」：没提交过就是没提交过，所以不补一句
   //     "你没有启动" —— 那会是一条凭空造出来的对话记录。
   clearPortAsk();
-  // 第四屏（调试）也在这张表里：它的显隐同样只由这一句决定 —— 进了站点才
-  //   到得了它（入口是状态条上那颗「调试」，见 `renderTabs`），而"进不进得来"是
-  //   那颗标签的事，不是这一屏自己的事（`showScreen('debug')` 只在这两处被调到：
-  //   那颗标签，以及下面那条按需刷新）。
   for (const [key, id] of [['conns', 'screen-conns'],
                            ['plugins', 'screen-plugins'],
-                           ['jobs', 'screen-jobs'],
-                           ['debug', 'screen-debug']]) {
+                           ['jobs', 'screen-jobs']]) {
     $(id).classList.toggle('hidden', key !== name);
   }
   // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（判据是
@@ -364,8 +355,7 @@ function showScreen(name) {
   const site = conn ? `登录条目：${conn.user}@${conn.host}:${conn.port}` : '';
   $('plugins-title').textContent = '插件';
   $('jobs-title').textContent = '作业';
-  $('debug-title').textContent = '调试';
-  for (const id of ['plugins-site', 'jobs-site', 'debug-site']) {
+  for (const id of ['plugins-site', 'jobs-site']) {
     const row = $(id);
     if (!row) continue;
     row.textContent = site;
@@ -376,9 +366,6 @@ function showScreen(name) {
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
   renderSnapshot(lastSnap);
   if (name === 'jobs') refreshJobs();
-  // 第四屏那两处目录现取一次（与 `refreshJobs` 同一条理由：它回答的是
-  //   "此刻磁盘上是什么"，而缓存下来的答案在一个刚装完插件的人眼里正好是错的）。
-  if (name === 'debug') refreshSiteDirs();
 }
 
 /**
@@ -444,7 +431,7 @@ function frontTemporary() {
 /**
  * 状态条底下那一排标签。一条会话一个，另有一颗「面板」。
  *
- * 条栏什么时候露出来：两条以上、或开发者模式、或前台那条会话带着一块页面。
+ * 条栏什么时候露出来：两条以上、或前台那条会话带着一块页面。
  * 最后那一条是 2026-10-18 补的（真机）：只有一条会话时整条栏从前是收着的，
  *   而那一块原生视图从 y=30 往下盖住整个窗口主体 —— 于是用户起完 code-server
  *   就再也回不到插件页与作业页，连"现在跑的是哪一条"都看不见。
@@ -467,24 +454,13 @@ function frontTemporary() {
 function renderTabs() {
   const box = $('session-tabs');
   const list = SESS.sessions;
-  // 开发者模式里多一颗「调试」（2026-10-11 加），而它不是会话标签：
-  //   点它做的是"把面板抬到会话页面上面"（`app:showPanel`），不是切到哪一条会话。
-  //   判据是 `devState.on && connected` —— 也就是在假站点里：那些开关说的是
-  //   假站点自己的事，真实模式里一颗都不出现，第一屏（没连上）也不出现（还没进去，
-  //   也就没有"被盖住的面板"这回事）。
-  //   它必须长在这条栏里：会话的页面一起来，窗口主体就被那块原生视图整块盖住，
-  //     面板自己身上的按钮一个都够不着 —— 而这 30px 里的东西还点得到。
-  //   于是"少于两条就整条收起来"要给它让路：一颗会话 + 开发者模式时，这一条
-  //     仍然要露出来。2026-10-18 起「面板」那一颗也住在这里，而"一条会话 +
-  //     一块页面"本身就足以让这一条露出来（见下面的 `covered`）。
-  const dev = Boolean(devState && devState.on && connected);
   // 有没有一块页面正盖着面板。判据与会弄"重新加载 / 结束会话"那两颗同一份
   //   （`hasSurface`）：声明了界面的插件才会起那块原生视图，也只有那时"回不去"
   //   这回事才存在。中转站那类会话不盖任何东西，不需要这一条栏。
   // 判据读的是快照（`s.snap`，插件的站点短名在它里面）—— 会话视图这一层
   //   没有 `serviceKind`，拿它去查插件永远查不到，于是这一条栏会静默地收着。
   const covered = list.some((s) => s.live && s.snap && hasSurface(s.snap));
-  box.classList.toggle('hidden', !dev && !covered && list.length < 2);
+  box.classList.toggle('hidden', !covered && list.length < 2);
   box.textContent = '';
   // 先数一遍名字：同名的那些才需要区分符。
   const seen = new Map();
@@ -520,23 +496,6 @@ function renderTabs() {
     b.onclick = async () => {
       const r = await window.slurmate.showPanel();
       if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
-    };
-    box.appendChild(b);
-  }
-  if (dev) {
-    const b = document.createElement('button');
-    // 那个 `dev` class 是承重的：这一颗与上面那几颗长得必须不一样（见
-    //   app.css）。点它们俩做的是相反的事 —— 一颗把会话页面抬上来，一颗把面板
-    //   抬回来。
-    b.className = 'tab dev';
-    b.textContent = '调试';
-    b.title = '把面板抬到会话页面上面，并切到「调试」那一屏。';
-    // 抬不起来要说出来：静默失败在这一处的表现是"我点了一下，什么都没发生"，
-    //   而那正好与"这一颗本来就没事可做"长得一样。
-    b.onclick = async () => {
-      const r = await window.slurmate.showPanel();
-      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); return; }
-      showScreen('debug');
     };
     box.appendChild(b);
   }
@@ -642,12 +601,10 @@ function renderSnapshot(s) {
   $('sb-reload').classList.toggle('hidden', !(st === 'running' && hasSurface(s)));
   // 「结束会话 / 停止该作业」：标签与对象都跟着当前那一屏走，见 renderStatusEnd。
   renderStatusEnd(s);
-  $('sb-dev').classList.toggle('hidden', !(s && s.dev));
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
   //    `setVisible(true)`，从状态条下沿铺到底），面板里那一条也跟着被盖住 ——
-  //    而那正是最需要看见这句话的时候（用户正要在里面干活）。`#sb-dev` 就是
-  //    为同一件事待在那 30px 里的先例（见 panel.html 的注释）。
+  //    而那正是最需要看见这句话的时候（用户正要在里面干活）。
   //   诚实：这句话说的是"不会被记录"，而它只在前台那一条上成立 ——
   //     切到持久那一条时它会跟着消失（这正是要的：两份的差别就在这一点上）。
   const temp = frontTemporary();
@@ -805,15 +762,11 @@ function closeForm() {
 /**
  * 「新建连接」那颗按钮露着没有。
  *
- * 三处会改到它：打开表单、收起表单、以及开发者模式。三处各写一遍
- *   `classList.add/remove` 就会漂 —— 比如「收起表单」把开发者模式藏起来的那一颗
- *   又露了出来。判据只在这里算一次。
- *
- * 开发者模式那一档（2026-10-17 加）：连接表只有那一条固定的假连接，内置、
- *   不可编辑、不可删除，没有第二处可去的地方，所以不给「新建」。
+ * 两处会改到它：打开表单、收起表单。各写一遍 `classList.add/remove` 就会漂，
+ *   所以判据只在这里算一次。
  */
 function syncNewButton() {
-  $('btn-new').classList.toggle('hidden', form.open || Boolean(boot && boot.dev));
+  $('btn-new').classList.toggle('hidden', form.open);
 }
 
 /** 「一条连接都没有」时的引导语。表单开着的时候它得指向表单，而不是那个已被收起的按钮。 */
@@ -1157,11 +1110,8 @@ function renderConnections(list) {
   //   顺手把这两个跟着它走的东西都重画一遍（见那个函数）。两处各写一遍的话，漂开的
   //   方向是"边栏亮着、而状态条上那颗调试没有"。
 
-  // 内置那条排最前（其余保持用户的顺序）。它在这个列表里是"起点"，
-  //   而不是又一条记录：勾上开发者模式、重启，第一个看见的就是它。
-  //   用两趟 `filter` 拼，不调 `sort` —— `sort` 对全部元素重排，而其余那些
-  //     用户的连接顺序是用户自己攒出来的（新建的排在最后），不该被这一次重排打乱。
-  for (const c of list.filter((x) => x.builtin).concat(list.filter((x) => !x.builtin))) {
+  // 保持用户的顺序（新建的排在最后），不调 `sort` —— `sort` 会对全部元素重排。
+  for (const c of list) {
     const li = document.createElement('li');
     // 这一行没有"已连接"那一种形态（2026-10-11 改）：站在这一屏上就意味着
     //   不在任何站点里（回这一屏的两条路各自把连接收掉了，见 doLeave /
@@ -1178,10 +1128,6 @@ function renderConnections(list) {
     t.textContent = connLabel(c);
     // 地址仍然在，只是不占地方 —— 鼠标停一下就能看到。
     t.title = `${c.user}@${c.host}:${c.port}`;
-    // 内置那条加一颗看得见的标记。它没有「编辑」「删除」两颗按钮，而"这一行为什么
-    //   与上面那些不一样"必须是这一行自己回答得了的 —— 否则那是一处看起来像
-    //   漏画了的地方。
-    if (c.builtin) t.append(el('span', 'b', '内置'));
 
     const probe = lastProbe.find((p) => p.id === c.id);
     const m = document.createElement('span');
@@ -1189,13 +1135,7 @@ function renderConnections(list) {
     // 从前的「已连接 · N 个作业在跑」那一支删掉了（理由见上面 `li.className`
     //   那一段）：这一屏上不存在"正连着"这一格。而"这个站点上还有几个作业"这件事
     //   现在只有进去看才知道（作业列表那一屏）—— 那是它本来该在的地方。
-    if (c.builtin) {
-      // 内置那条这一格留空，而不是写「未探测」。探测那三个状态在这里全是假话：
-      //   主进程不探它（`app:probeHosts` 把它滤掉了），所以「未探测」是在说"还没轮到
-      //   它"—— 而它永远不会轮到；「可达 / 不可达」更是在报告一件没有发生的事。
-      //   这一行说什么，上面那颗「内置」与名字已经说完了。
-      m.textContent = '';
-    } else if (!probe) {
+    if (!probe) {
       m.textContent = '未探测';
     } else if (probe.reachable) {
       m.textContent = `可达 · ${probe.rttMs}ms`;
@@ -1269,17 +1209,7 @@ function renderConnections(list) {
       });
     };
 
-    // 内置那条不画「编辑」「删除」两颗按钮 —— 不是画成禁用的。一颗永远点不亮
-    //   的按钮正是"系统声称了不成立的事"：它在说"这里有一个可以编辑的东西"。
-    //   它与一条普通连接的差别只有这一处（加上主进程那两道权威闸）；
-    //   「连接」「进入」以及进去之后的一切完全相同。
-    if (c.builtin) {
-      li.title = '开发者模式内置的假连接：在本机的假站点上调试插件用的。'
-        + '不可编辑、不可删除。关掉开发者模式它就不在了。';
-      li.append(t, m, main);
-    } else {
-      li.append(t, m, main, edit, del);
-    }
+    li.append(t, m, main, edit, del);
     box.append(li);
   }
 
@@ -1781,9 +1711,7 @@ function renderPlugins(pv, force) {
   if (!list.length) box.append(emptyPool(pv));
 
   for (const p of list) {
-    // 把整个视图传下去（不是只传 `p.site`）：那一块要的东西是"这个站点上能不能
-    //   撤插件"（`pv.site.canUninstall`，主进程给的能力位），而 `p` 里没有它。
-    box.append(pluginBlock(p, pv));
+    box.append(pluginBlock(p));
   }
 
   // ── 池里的问题：被跳过的东西必须说出来 ──
@@ -1933,33 +1861,6 @@ function versionWhy(host, line, why) {
   return p;
 }
 
-/**
- * 「安装插件…」—— 只在假站点上画（判据是主进程给的能力位 `site.canInstall`）。
- *
- * 它装的是真站点上装的同一个东西：一个 `.splug`，放进站点的插件目录里，
- *   站点当场重扫。所以那之后的每一步（站点报它 → 客户端取回来 → 过同意闸 →
- *   加载）没有一处特判 —— 这颗按钮存在的全部意义，就是让那条路在开发者模式
- *   里也真的走一遍。
- *
- * 装不上就说清为什么（同 id 已有一棵树、包装不上、清单不合法……），而那些话
- *   由主进程给：只有它知道站上现在有什么。界面不在这里重写一遍判据。
- */
-function siteInstallButton() {
-  const btn = button('安装插件…', async () => {
-    const r = await window.slurmate.installSitePlugin();
-    // 选空了 = 用户按了取消。那不是一次失败，一声不吭。
-    if (r && r.cancelled) return;
-    if (r && r.plugins) renderPlugins(r.plugins);
-    // 装上去了那一条由主进程推进提示流（它顺带说了装到哪儿、接下来会怎样）——
-    //   这里再说一遍就是同一件事说两次。失败要说：那时主进程只回了一个返回值。
-    if (!r || !r.ok) notice('error', (r && r.error) || '未能把这个包装到假站点上。');
-  }, 'ghost tiny');
-  btn.title = '选择一个 .splug（打包器产出的文件）装到这台假站点上，与真站点上'
-    + ' `slurmate plugin install` 装的是同一份内容。装上去站点当场就报它，'
-    + '接下来与真站点相同：取回来、过同意闸，然后才可用。';
-  return btn;
-}
-
 function renderSitePlugins(pv) {
   const box = $('site-plugins');
   box.textContent = '';
@@ -1968,47 +1869,27 @@ function renderSitePlugins(pv) {
   // 唯一值得显示的东西。池的路径在主进程给（`pv.sitePoolDir`）。
   if (!site && !pv.sitePoolDir) return;
 
-  // ── 这一块只在开发者模式里画「一切正常」的那一半 ──────────────────────────
+  // ── 这一块只画问题，不画"一切正常" ──────────────────────────────────────
   //
-  // 站点 label、上次同步、池里每个版本被谁要 —— 它们回答的是"这台机器上为什么
-  //   会有两个版本"，而那是开发基座时的问题（真实客户端只有一个站点）。
-  //   用户 2026-10-16 的原话：这个框应该整个不存在。
-  //
-  // 而它承载的【问题】不跟着一起消失：站点太旧/太新、这一轮有包装不上、快照表
-  //   读不到、本机那一份不见了 —— 那些照旧画（连着标题，否则读者不知道说的是
-  //   哪一块），只是不再附带"一切正常"的那几行，也不再挂「重新同步」
-  //   （那一颗在这一屏底部，与「检查集群」并排）。
-  // 一句问题都没有、又不在开发者模式时，整块不出现。
-  const dev = Boolean(devState && devState.on);
+  // 用户 2026-10-16 的原话：这个框在真实客户端里应该整个不存在。它承载的
+  //   【问题】不跟着一起消失：站点太旧/太新、这一轮有包装不上、快照表读不到、
+  //   本机那一份不见了 —— 那些照旧画（连着标题，否则读者不知道说的是哪一块）。
+  // 一句问题都没有时，整块不出现。
   const why = (site && site.reason) || null;
   const hasProblem = Boolean(
     why === 'old_daemon' || why === 'site_too_new'
     || (site && (site.error || site.snapshotOk === false || site.withdrawn
       || (site.failed && site.failed.length))));
-  if (!dev && !hasProblem) return;
+  if (!hasProblem) return;
 
   const d = document.createElement('div');
   d.className = 'plug plug-off';
   const head = document.createElement('div');
   head.className = 'plug-head';
   head.append(el('h3', null, '站点分发'));
-  // 「安装插件…」只在假站点上画，判据是主进程给的能力位（`site.canInstall`），
-  //   不是在这里问后端叫什么 —— "哪条路属于哪一侧"那条分界只有主进程判得了，
-  //   而权威闸门也在那边（见 `app:installSitePlugin`）。这里画的是一颗按钮，
-  //   不是一道防线：真站点上它不出现，真出现了主进程也会拒。
-  if (site && site.canInstall) head.append(siteInstallButton());
   d.append(head);
 
-  if (!site) {
-    d.append(el('p', 'plug-desc', '还没连上站点。插件是从站点取回来的，连上之后这里会显示详情。'));
-  } else {
-    if (dev) {
-      const bits = [];
-      bits.push(site.label ? `站点 ${site.label}` : '本站');
-      if (site.syncedAt) bits.push(`上次同步 ${new Date(site.syncedAt).toLocaleTimeString()}`);
-      d.append(el('p', 'plug-desc', bits.join(' · ')));
-    }
-
+  {
     if (site.reason === 'old_daemon') {
       d.append(el('p', 'why', '这个站点的守护进程版本过低，不支持插件分发。'));
     } else if (site.reason === 'site_too_new') {
@@ -2043,15 +1924,8 @@ function renderSitePlugins(pv) {
       }
     } else if (site.error) {
       d.append(el('p', 'why', site.error));
-    } else if (dev) {
-      // 「本站支持分发插件。」是"一切正常"那一半 —— 非开发者模式里不说它，
-      //   因为 `emptyPool` 已经把同一件事说过了（"本站会分发插件，连上之后
-      //   它们会出现在这里"），两处都说是同一句话的第二份实现。
-      d.append(el('p', 'plug-desc', site.supported
-        ? '本站支持分发插件。'
-        : '本站没有说它支不支持分发插件。'));
     }
-    // 而「这一轮有包装不上」是问题那一半，两个模式里都要说。
+    // 「这一轮有包装不上」。
     if (site.failed && site.failed.length) {
       d.append(el('p', 'why',
         `这一轮有 ${site.failed.length} 个没装上，见下面的报错。`));
@@ -2073,37 +1947,10 @@ function renderSitePlugins(pv) {
         + '按"摘要与上次一致"把它静默装回来。'));
     }
 
-    // 池里每个版本被哪个站点要 —— 开发者模式才画（见本函数开头那一段）。
-    const vs = dev ? (site.versions || []) : [];
-    if (vs.length) {
-      const ul = document.createElement('ul');
-      ul.className = 'plug-vers';
-      for (const v of vs) {
-        const li = document.createElement('li');
-        li.append(el('code', 'plug-id', v.version));
-        li.append(document.createTextNode(v.wantedBy.length
-          ? `被 ${v.wantedBy.join('、')} 要`
-          : '没有任何站点要它（下次同步时会被回收）'));
-        ul.append(li);
-      }
-      d.append(el('p', 'plug-desc', '本机站点池里的版本：'));
-      d.append(ul);
-    }
-
-    // 池里"不是槽位"的那几项 —— 只报不删（§5.1：手工放置必须不产生任何
-    //   效果，而删掉它是一种效果）。报出来只是为了让"池里到底有什么"有一个诚实的
-    //   答案：旧版本留下的目录会静静地躺在那儿，而它们不生效这件事本身没有任何
-    //   地方会说出来。措辞只说事实，不说"可以删掉"——那是用户自己的目录。
-    const strays = dev ? (site.strays || []) : [];
-    if (strays.length) {
-      d.append(el('p', 'plug-desc',
-        `池里还有 ${strays.length} 项不是插件（${strays.slice(0, 5).join('、')}`
-        + `${strays.length > 5 ? ' 等' : ''}），它们不生效，也没有被动过。`));
-    }
   }
 
   // 「重新同步」不在这里 —— 它在整屏底部那一行（与「检查集群」并排），
-  //   两种模式里都在，见 `bindEvents` 里那条绑定。
+  //   见 `bindEvents` 里那条绑定。
   box.append(d);
 }
 
@@ -2566,9 +2413,8 @@ function spaceUsersOf(spaceId, workspaceId) {
  * 插件块上那一格：这个插件用哪一份数据。
  *
  * 主体是当前活跃连接的工作区（与旁边那个「开始会话」按钮同一条连接）——
- *   用户在连接列表里选哪条，这一格说的就是哪条。没有活跃连接（开发者模式、或者
- *   一条连接都还没有）时不画：那一格答的问题在那时不存在，画一个空下拉
- *   等于凭空许诺一个不存在的东西。
+ *   用户在连接列表里选哪条，这一格说的就是哪条。没有活跃连接（一条连接都还没有）
+ *   时不画：那一格答的问题在那时不存在，画一个空下拉等于凭空许诺一个不存在的东西。
  *
  * 三种取值与「③ 工作区」同一套约定（键缺席 / `null` / 一个 id），
  *   逐一写在 `applyPluginSpace` 上面。
@@ -2753,7 +2599,7 @@ function askFork(wsName, others) {
   });
 }
 
-function pluginBlock(p, pv) {
+function pluginBlock(p) {
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
 
@@ -2917,33 +2763,8 @@ function pluginBlock(p, pv) {
     run: () => dropPluginVersion(p.id, p.version),
   });
   actions.append(drop);
-  if (pv && pv.site && pv.site.canUninstall) {
-    const off = button('从站点撤掉', null, 'ghost');
-    off.title = '从这台假站点上删掉这个插件。真站点上这一步是管理员在集群上做的'
-      + '（`slurmate plugin uninstall`）。本机已经装着的那一份不受影响。';
-    off.onclick = () => armConfirm(off, {
-      why: `从假站点上删掉「${p.title}」？本机装着的那一份不受影响。`,
-      yes: '撤掉',
-      run: () => dropSitePlugin(p),
-    });
-    actions.append(off);
-  }
   d.append(actions);
   return d;
-}
-
-/**
- * 从假站点上撤掉一个插件（开发者模式专有，站点那一侧的事）。
- *
- * 那个"问一句"在调用点（`pluginBlock` 里那颗按钮上的 `armConfirm`），不在这里
- *   —— 与 `dropPluginData` 同一条形状：这个函数可以被任何调用点直接用而不会弹框。
- *
- * 成功那条不出提示：主进程已经推了一条。失败要说 —— 那时它只回了一个返回值。
- */
-async function dropSitePlugin(p) {
-  const r = await window.slurmate.uninstallSitePlugin(p.id, p.version);
-  if (r && r.plugins) renderPlugins(r.plugins);
-  if (!r || !r.ok) notice('error', (r && r.error) || '未能把它从假站点上撤掉。');
 }
 
 function issueBox(kind, head, body) {
@@ -3926,7 +3747,7 @@ async function handleConnectResult(res) {
   return false;
 }
 
-// ── 开发者模式 ──────────────────────────────────────────────────────────────
+// ── 会话计数 ────────────────────────────────────────────────────────────────
 
 /**
  * 现在有几条会话在跑（提交中/排队/运行/释放中都算）。
@@ -3939,117 +3760,6 @@ function liveCount() {
   // `s &&` 那一截是给 `hasRunningSession()` 用的：它现在是 `liveCount() > 0`，
   //   而这个函数从前按 `s.live` 直接取（表里混进一个 null 就是一次 TypeError）。
   return SESS.sessions.filter((s) => s && s.live).length;
-}
-
-/** 上一次从主进程拿到的开发者模式设置。只由 renderDevMode 更新。 */
-let devState = null;
-
-/**
- * 画开发者模式那一节。传参 = 用主进程刚回的那一份（三个动词都会回）。
- *
- * `on` 与 `saved` 是两件事，这一节全靠它撑起来：
- *
- *   | 画什么 | 跟谁走 | 为什么 |
- *   |---|---|---|
- *   | 复选框 | `saved` | 用户刚点的就是它。跟着 `on` 走的话，点完它会自己弹回去 |
- *   | 「重启后生效」那一行 | 两者是否相等 | 不相等就是有改动悬着 |
- *
- *   全都跟着 `on` 走的话，点了开关界面上什么都不会发生 —— 而那正是"点了没反应"
- *   这一类问题里最难查的一种：其实它生效了，只是要重启。
- *
- * 从前这里还画过一块「假站点的插件来源」（一个目录选择器 + 一句"读到几个插件"）。
- *   整块删掉了：假站点上的插件只有一条来的路 —— 装上去（插件页那颗「安装插件…」）。
- *   站点上现在有什么，由调试那一屏如实说（那是"假站点自己的事"）。
- *
- * 而调试开关那一块从前也挂在这一行上（`$('dev-debug').toggle('hidden', !d.on)`）
- *   —— 它搬去第四屏之后这一句删掉了：那一屏只从状态条那颗「调试」标签进得来，
- *   而那颗标签的判据（`renderTabs` 里的 `devState.on && connected`）比 `on` 更严。
- *   留着它会是第二处说"这些按钮什么时候露"的地方，而两处迟早漂开（漂开的形态
- *   是"标签在、里面却是空的"）。
- */
-function renderDevMode(dm) {
-  if (dm) devState = dm;
-  const d = devState;
-  if (!d) return;
-
-  $('dev-on').checked = Boolean(d.saved);
-
-  // 有改动等着重启：说得出来，并且给一个按得下去的按钮（不然用户只能自己去
-  // 关掉再打开 —— 那正是命令行开关那种"你得知道怎么做"的体验）。
-  const pending = d.saved !== d.on;
-  $('dev-pending').classList.toggle('hidden', !pending);
-  if (pending) {
-    $('dev-pending').textContent = '有改动等着重启：这个客户端现在跑的还是'
-      + (d.on ? '开发者模式' : '真集群那一份配置') + '。';
-  }
-  $('dev-restart').classList.toggle('hidden', !pending);
-}
-
-/**
- * 把假站点那两处插件目录现读一遍，画在第四屏上。只读 —— 这里一颗按钮都没有。
- *
- * 它是排查「站上一个插件都发不出来」的唯一线索：站点报出去的清单是那两处合
- *   起来的，而"装上去的东西"落在沙盒里 —— 那个目录用户在别的地方根本看不到。
- *
- * 两处分开报，因为它们的出路不同：样例那一处没有了是"打包版本来就该没有"
- *   （基座两端都不带任何插件），而装上去那一处是"还没装过，去装一个"。
- *
- * 报的是扫描结果，不是站点最终报出去的清单 —— 坏清单要在这里说出来（作者的
- *   清单里少一个字段，他要看到的是"3 个目录里只有 1 个能用"，而不是"一个都没有"）。
- *   站点那边照守护进程的样子静默跳过坏清单，那是另一件事（见 index.js 的
- *   `sitePluginReport`）。
- */
-async function refreshSiteDirs() {
-  const box = $('site-dirs');
-  box.textContent = '';
-  let r;
-  try {
-    r = await window.slurmate.sitePlugins();
-  } catch (e) {
-    r = { ok: false, error: (e && e.message) || String(e) };
-  }
-  if (!r || !r.ok) {
-    // 获取失败就说获取失败（三态里的"缺席"那一态）—— 画成"那两处都是空的"是在说
-    //   一件不成立的事，而作者会照着那句话去查一个不存在的问题。
-    box.appendChild(na('假站点那两处目录'));
-    return;
-  }
-  const rep = r.report || {};
-  const rows = [
-    ['样例（开发样例那一棵，打包版里没有它）', rep.samples],
-    ['装上去的（只有「安装插件…」写它）', rep.installed],
-  ];
-  for (const [title, one] of rows) {
-    const d = (one && one.dir) || null;
-    const n = (one && one.plugins ? one.plugins.length : 0);
-    const bad = (one && one.skipped) || [];
-    const p = cel('p', 'sub');
-    // 目录不存在（`null`）= 这一处不在场，与"在、但是空的"是两件事 ——
-    // 前者是打包版的样子（那一处根本不该有），后者是"还没装过"。
-    p.textContent = `${title}：${d ? `${n} 个插件` : '这一处不在场'}`
-      + (d ? `　${d}` : '')
-      + (bad.length ? `　（另有 ${bad.length} 个目录读取清单失败）` : '');
-    box.appendChild(p);
-    if (n) {
-      const names = cel('p', 'sub dim', one.plugins.join('、'));
-      box.appendChild(names);
-    }
-    for (const s of bad) {
-      // 坏清单的原话照抄：那一句正是作者要看的（少一个字段 / JSON 坏了 /
-      //   目录名与 id 对不上 —— 各自指回清单里不同的地方）。
-      box.appendChild(cel('p', 'sub bad', `${s.name}：${s.why}`));
-    }
-  }
-
-  // 打包器。假站点"发得出去"全靠它，所以它与那两处目录同属"假站点自己的事"。
-  //   它是「站点报得出插件、客户端却一份都没收到」的另一条线索：那两处目录
-  //   报的是"站点上有什么"，这一行报的是"发不发得出去"。
-  const pk = rep.packer;
-  if (pk) {
-    box.appendChild(cel('p', 'sub',
-      `打包器（假站点发一个插件要用它）：${pk.path || '未找到'}`));
-    if (pk.why) box.appendChild(cel('p', 'sub bad', pk.why));
-  }
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
@@ -4068,8 +3778,8 @@ const keyPayload = () =>
  *    `init()` 里那几个 await 的后面。于是只要 `bootstrap()` 或者
  *    `openNewForm()`（它里面还有 `await newKey()` —— 在 Windows 上那是 DPAPI
  *    那一条路）有一次 reject，`init()` 就在那一行整体中止，
- *    这一整块一个监听都不挂：标题、新建、表单、作业屏、开发者开关、
- *    重新加载、结束会话全在内 —— 而唯一的症状是提示流里多一行字。
+ *    这一整块一个监听都不挂：标题、新建、表单、作业屏、重新加载、
+ *    结束会话全在内 —— 而唯一的症状是提示流里多一行字。
  *    用户看到的是"这个界面上有一半按钮点了没反应"，而它指不回任何一处。
  *
  * 它与 P1 那次白屏（`renderConnections` 里一个 `ReferenceError`，560 条用例
@@ -4080,7 +3790,7 @@ const keyPayload = () =>
 function bindEvents() {
   // ── 事件 ──
   // 「关于」的入口是「Slurmate」那一行右端那颗感叹号（`#btn-about`，见
-  // panel.html 那一段，2026-10-17 改）。它装的是这一版的说明与开发者模式，而那两样都不是
+  // panel.html 那一段，2026-10-17 改）。它装的是这一版的说明，而那不是
   // 每次打开都要看的 —— 所以它是一块可以点开、也可以不点的地方。
   // 它是一颗真 `<button>`：键盘与焦点行为是白拿的（从前那个 `role="button"`
   //   的 div 得手写回车/空格两条路）。看得见的只有 `!`，全名在 title 与
@@ -4235,8 +3945,8 @@ function bindEvents() {
   //   唯一一个会销毁正在跑的计算的按钮，它和"回列表"那颗紧挨着，而误点的代价
   //   是一个可能已经跑了几小时的作业加一份机时 —— 不可逆，也没有第二次机会。
   //   那句话里必须带上有几个作业会没：只说"确定断开吗"，用户答不了。
-  //   条数现算（`liveCount()`，与 `#dev-restart` 同一份定义）：
-  //     写在别处缓存着的话，漂开的方向是"这个框说 2 条、那个框说 1 条"。
+  //   条数现算（`liveCount()`）：写在别处缓存着的话，漂开的方向是
+  //     "这个框说 2 条、那个框说 1 条"。
   $('btn-disconnect').onclick = () => {
     const n = liveCount();
     armConfirm($('btn-disconnect'), {
@@ -4263,7 +3973,6 @@ function bindEvents() {
   // 第四屏（调试）回到插件那一屏 —— 与上面两颗同一类：屏与屏之间的导航，
   //   不动连接、也不动会话。它不把面板收回去（那要等用户点某条会话的标签，
   //   或者起一条新会话）—— 站在调试那一屏上本来就是"我要看着面板"。
-  $('btn-debug-back').onclick = () => showScreen('plugins');
 
   // ── 作业列表那一屏 ──
   // 这三个 id（`btn-jobs-new` / `btn-jobs-takeover` / `btn-jobs-end`）与
@@ -4386,34 +4095,6 @@ function bindEvents() {
   // 窗口大小变了，连线的坐标就全变了。rAF 里重画，等布局定下来。
   window.addEventListener('resize', () => requestAnimationFrame(drawWorkspaceLines));
 
-  for (const b of document.querySelectorAll('[data-debug]')) {
-    b.onclick = async () => {
-      const r = await window.slurmate.debug(b.dataset.debug);
-      notice(r.ok ? 'dev' : 'error', r.ok ? '已触发：' + b.textContent : r.error);
-    };
-  }
-
-  // ── 开发者模式 ──
-  // 开关改的是要重启才生效的东西，所以这里不"假装已经生效"：主进程回一份新的
-  // 设置，照它重画（那一行「重启后生效」就是重画的产物）。
-  $('dev-on').onchange = async () => {
-    const r = await window.slurmate.setDeveloperMode($('dev-on').checked);
-    if (!r.ok) { notice('error', r.error || '改不了开发者模式。'); renderDevMode(); return; }
-    renderDevMode(r.developerMode);
-  };
-
-  $('dev-restart').onclick = async () => {
-    // 重启会先结束会话 —— 与关窗口同一套收尾。那是一次明确的终止（集群上的
-    //   作业会被取消），所以必须先问一句：用户点的是"让设置生效"，不是"取消作业"。
-    const n = liveCount();
-    if (n && !window.confirm(
-      n === 1
-        ? '重启会先结束当前会话，集群上的作业会被取消。确定吗？'
-        : `重启会先结束这 ${n} 个会话，集群上的作业会被取消。确定吗？`)) return;
-    const r = await window.slurmate.restart();
-    if (r && !r.ok) notice('error', r.error || '重启失败。');
-  };
-
   // ── 两条边栏 ──
   //
   // 停靠（鼠标进去）与钉住（点一下）是两段：第一段可退（移开就收），第二段
@@ -4441,7 +4122,6 @@ function bindEvents() {
 
   window.slurmate.onStates(renderSessions);
   window.slurmate.onNotice((n) => {
-    if (n.kind === 'dev') { $('dev-banner').classList.remove('hidden'); return; }
     if (n.kind === 'key-blocked') {
       // 快捷键诊断：我们吞掉了一个键，而用户正想问"按了为什么没反应" ——
       //   所以这一条要进日志。放行的那些不再报（见 shortcuts.js 的注释）。
@@ -4464,11 +4144,7 @@ function bindEvents() {
 async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
-  // 首屏不再有一行小字（2026-10-17 改）：用户的原话是"只要有 slurmate 的地方
-  //   就不要"。开发者模式那件事由下面那条横幅说（它就长在面板最上面）。
-  if (boot.dev) $('dev-banner').classList.remove('hidden');
   syncNewButton();
-  renderDevMode(boot.developerMode);
 
   // bootstrap 里没有公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
   //   单独去问（app:publicKey / app:newKey）。每个字段都是问出来的、当场渲染的。
