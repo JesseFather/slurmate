@@ -1713,7 +1713,8 @@ function pluginsSignature(pv) {
  *
  * ── 同一份内容不许重画 ──────────────────────────────────────────────────────
  *
- * 站点清单每 30 秒对一次账，对完把整个视图推过来。视图一个字都没变的时候，从前
+ * 每次对账之后主进程都会把整个视图推过来（连上站点、按「重新同步」、同意一个
+ *   插件之后都会）。视图一个字都没变的时候，从前
  *   也照样把这一屏拆了重画一遍 —— 于是展开着的「高级选项」自己合上、滚动位置跳回
  *   顶上、填了一半的值被清成空白。三件事同一个根因，而用户看到的是"界面自己在乱跑"。
  * 所以进来先算一次指纹（`pluginsSignature`），与上次逐字相同就整块跳过。
@@ -1830,7 +1831,7 @@ function renderPlugins(pv, force) {
       } else {
         issues.append(issueBox('warn', '本站报的这几个版本，与本机不一致',
           `${names(bySync)}。\n可能本机装的是另一个版本，也可能同步还没跑到。`
-          + '用上面的「重新同步」取一次。'));
+          + '用页面底部的「重新同步」取一次。'));
       }
     }
     const absent = byHand.filter((m) => m.delivery === 'absent');
@@ -1882,14 +1883,12 @@ function emptyPool(pv) {
   } else {
     d.append(el('p', 'plug-desc',
       '基座不带插件，作业里跑什么由插件决定。本站会分发插件，'
-      + '连上之后它们会出现在这里。带客户端代码的每个都要先确认同意。'));
+      + '连上之后它们会出现在这里。带客户端代码的每个都要先确认同意。'
+      + '也可以按这一屏底部的「重新同步」现取一次。'));
   }
 
-  const row = document.createElement('div');
-  row.className = 'plug-meta';
-  row.append(button('重新同步', () => syncPlugins()));
-  d.append(row);
-
+  // 这里从前还有一颗「重新同步」。现在这一屏只有底部那一颗（与「检查集群」
+  //   并排）—— 同一个动作不摆第二个入口，按位置找按钮的代码也不会认错。
   return d;
 }
 
@@ -1956,8 +1955,8 @@ function renderSitePlugins(pv) {
   //
   // 而它承载的【问题】不跟着一起消失：站点太旧/太新、这一轮有包装不上、快照表
   //   读不到、本机那一份不见了 —— 那些照旧画（连着标题，否则读者不知道说的是
-  //   哪一块），只是不再附带"一切正常"的那几行，也不再挂那颗重复的「重新同步」
-  //   （站点清单本来每 30 秒自己对一次账）。
+  //   哪一块），只是不再附带"一切正常"的那几行，也不再挂「重新同步」
+  //   （那一颗在这一屏底部，与「检查集群」并排）。
   // 一句问题都没有、又不在开发者模式时，整块不出现。
   const dev = Boolean(devState && devState.on);
   const why = (site && site.reason) || null;
@@ -2082,15 +2081,8 @@ function renderSitePlugins(pv) {
     }
   }
 
-  // 那颗「重新同步」是开发者模式的便利：站点清单每 30 秒自己对一次账，
-  //   而用户手上没有"我怀疑它没对上"这件事要做。非开发者模式里它在
-  //   `emptyPool` 那一块还有一颗（池空着的时候），那里才是用户真会去点的地方。
-  if (dev) {
-    const row = document.createElement('div');
-    row.className = 'plug-meta';
-    row.append(button('重新同步', () => syncPlugins()));
-    d.append(row);
-  }
+  // 「重新同步」不在这里 —— 它在整屏底部那一行（与「检查集群」并排），
+  //   两种模式里都在，见 `bindEvents` 里那条绑定。
   box.append(d);
 }
 
@@ -4272,6 +4264,11 @@ function bindEvents() {
     if (!pv) return;
     renderPlugins(pv);
   });
+
+  // 「重新同步」与「检查集群」并排（见 panel.html 那一段）。它在这一屏底部，
+  //   两种模式里都在 —— 站点的插件清单不在任何轮询里，装了新版本之后只有
+  //   下一次连上或者按这一颗才会被发现。
+  $('btn-sync-plugins').onclick = () => syncPlugins();
 
   $('btn-doctor').onclick = async () => {
     const r = await window.slurmate.doctor();

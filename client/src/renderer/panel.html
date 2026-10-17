@@ -469,7 +469,17 @@
         同名而不同事，正是最容易把下一个人带偏的那种重名。
       -->
 
+      <!--
+        这一行是这一屏的两颗手动按钮，它们各管一件事：
+
+        「重新同步」：站点的插件清单不是定时轮询的（那 30 秒一拍问的是集群
+          现状，不取插件），所以站点上装了新版本之后，要等下一次连上才会被
+          发现 —— 也可能是永远。按它当场对一次账。
+
+        「检查集群」：问守护进程要一份自检（socket、nft 表、规则与会话数）。
+      -->
       <div class="row row-spaced">
+        <button id="btn-sync-plugins" class="ghost">重新同步</button>
         <button id="btn-doctor" class="ghost">检查集群</button>
       </div>
     </section>

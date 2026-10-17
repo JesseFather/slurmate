@@ -5390,6 +5390,17 @@ function registerIpc() {
       return { ok: false, error: why, plugins: pluginsView() };
     }
     win.pushNotice('ok', `已同意并装上「${p.displayName}」${p.version}。`);
+    // 同意之后，同一个插件的上一版可能已经没有任何站点要了 —— 而"没人要它"
+    //   这个结论只有对账下得了（回收只认快照表里的引用，见 site-plugins.js 第 6 步）。
+    //   不在这里补一次的话，池里会同时躺着两版、界面上两颗同名的块，要等到下一次
+    //   连上站点才收掉（2026-10-18 真机：升级插件之后断开重连才变回一个）。
+    //
+    // 它不改变同意的结果：插件已经装上了。对账失败只补一句，下一次对账会再试。
+    try {
+      await reconcileSitePlugins();
+    } catch (e) {
+      win.pushNotice('warn', `插件装上了，但旧版本这次没收掉：${e.message}`);
+    }
     return { ok: true, plugins: pluginsView() };
   });
 

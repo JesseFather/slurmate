@@ -732,9 +732,8 @@ test('「安装插件…」只在假站点上画，而点它走的就是那条 I
   h.fn('renderDevMode')({ on: true, saved: true });
 
   const draw = (site) => h.fn('renderSitePlugins')({ sitePoolDir: '/p', site });
-  // 按文字找，不是"这一块里第一颗按钮"：站点分发那一节本来就有别的按钮
-  //   （「重新同步」），而按位置找的话，这一条会在"那颗按钮没画出来"的时候
-  //   拿到另一颗，然后绿着。
+  // 按文字找，不是"这一块里第一颗按钮"：这一块里还有别的格子，而按位置找的话，
+  //   这一条会在"那颗按钮没画出来"的时候拿到别的元素，然后绿着。
   const btnIn = () => childrenOf(h.byId.get('site-plugins'))
     .find((x) => x.tagName === 'BUTTON' && x._text === '安装插件…');
 
@@ -813,7 +812,7 @@ test('「站点分发」那一块：一切正常时只在开发者模式里画�
     assert.ok(all().some((x) => x._text === '1.0.0'), `版本清单要在：${words()}`);
 
     // ③ 出问题（快照表读不到）时，非开发者模式里照样说 —— 但只说不好的那一半：
-    //    没有站点那一行，也没有那颗重复的「重新同步」。
+    //    没有站点那一行。「重新同步」不在这块里，它在整屏底部（与「检查集群」并排）。
     h.fn('renderDevMode')({ on: false, saved: false });
     draw({ ...allGood, snapshotOk: false, versions: [] });
     assert.match(words(), /站点分发/, '要有标题 —— 否则读者不知道这句话说的是哪一块');
@@ -822,12 +821,43 @@ test('「站点分发」那一块：一切正常时只在开发者模式里画�
     assert.equal(all().some((x) => x._text === '1.0.0'), false,
       '版本清单是开发者模式才有的内容');
     assert.equal(all().some((x) => x.tagName === 'BUTTON'), false,
-      '那颗「重新同步」也不跟着回来：站点清单本来每 30 秒自己对一次账');
+      '这一块里一颗按钮都没有 —— 「重新同步」在整屏底部，不在这一块里');
 
     // ④ 反过来的那一半：站点太新时那句"升级客户端"两个模式里都在 ——
     //    它是用户唯一能做的动作，藏在开发者模式里等于让他去做一件做不到的事。
     draw({ ...allGood, reason: 'site_too_new', daemonVersionVerdict: 'cross_major' });
     assert.match(words(), /请升级这个客户端/);
+  });
+
+test('「重新同步」在整屏底部挨着「检查集群」：点它走那条对账 IPC，回来的视图当场画上去',
+  async () => {
+    // 用户 2026-10-18：站点上装了插件的新版本之后界面不主动刷新，而「重新同步」
+    //   这颗按钮已经不在界面上了。站点的插件清单不在任何轮询里（30 秒那一拍问的
+    //   是集群现状，不取插件），所以这一颗是"现在就去问"的唯一入口 —— 它要常驻，
+    //   而且与「检查集群」同一行。文案在 panel.html 里，这里判的是绑定与结果。
+    const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+      spaces: SPACES });
+    h.run('window.__sync = 0; window.slurmate.syncPlugins = () => {'
+      + '  window.__sync += 1; return Promise.resolve(window.__result); };');
+    const btn = h.byId.get('btn-sync-plugins');
+    assert.ok(btn && typeof btn.onclick === 'function',
+      '底部那一行要有这颗按钮 —— bindEvents 绑的就是它');
+    assert.ok(h.byId.get('btn-doctor'), '「检查集群」也在那一行里');
+
+    // ① 成功：返回的视图当场画上去（不靠下一次推送）
+    h.run(`window.__result = ${JSON.stringify({ ok: true, plugins: {
+      ...PV, plugins: PV.plugins.map((p) => ({ ...p, version: '2.0.0' })),
+    } })};`);
+    await btn.onclick();
+    assert.equal(h.run('window.__sync'), 1, '点一次就走那条 IPC');
+    assert.match(childrenOf(h.byId.get('plugin-blocks')).map((x) => x._text || '').join('|'),
+      /v2\.0\.0/, '回来的那份视图要当场画上去');
+
+    // ② 没连上站点：主进程那句话原样说出来（界面不自己编一句）
+    h.run('window.__result = { ok: false, error: "还没连上站点，插件是从站点取回来的。" };');
+    await btn.onclick();
+    const said = childrenOf(h.doc.getElementById('notices')).map((x) => x._text || '').join('\n');
+    assert.match(said, /还没连上站点/, '失败要说清为什么');
   });
 
 test('插件那一块上两颗删除：删本机那份两端都有，撤站点那颗只在假站点上',
@@ -1767,7 +1797,7 @@ test('滑块画不出来就不画：站点没给默认、默认不在档位上�
 test('同一份插件清单不重画：展开着的高级选项不许自己合上，填了一半的值不许被清掉',
   () => {
     // 2026-10-16 用户报的三条（"展开着的「高级选项」自己合上"、"滚动位置与列表跳动"、
-    //   "填了一半的值回到空白"）是同一个根因：站点每 30 秒对一次账，对完把整个视图
+    //   "填了一半的值回到空白"）是同一个根因：站点每次对账之后都会把整个视图
     //   推过来，而视图一个字都没变的时候从前也照样把这一屏拆了重画一遍。
     // 判据落在"那一块还是不是同一个元素"上 —— 重建一次就是换一个元素，而展开状态
     //   与填进去的值都挂在那一个元素上，于是它们一起没了。查"值还在不在"是不够的：

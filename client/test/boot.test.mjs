@@ -3115,6 +3115,60 @@ test('往假站点上装一个 .splug：站点当场报它，而客户端走的�
     });
   });
 
+test('站点把插件升了一个版本：同意新版之后旧版当场收掉，不用断开重连',
+  async (t) => {
+    // 2026-10-18 真机：站点分发的新版本装好之后，界面上同时躺着两版，断开再连
+    //   才变回一个。根因是回收只在对账的第 6 步里做（`site-plugins.js`），而同意
+    //   不是一次对账 —— 旧版"已经没有任何站点要"这个结论只有对账下得了。
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setDevSampleDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+      fs.rmSync(src, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      const id = '01M2JKM1M1M1M1M1M1M1M1M1M9';
+
+      // ── 站点上先是 1.0.0 ──
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.0' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      assert.equal((await invoke('app:consentPlugin', id, '1.0.0')).ok, true,
+        '夹具前提：1.0.0 装得上');
+      const pool = idx._test.getSitePoolDir();
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '夹具前提：池里有 1.0.0');
+
+      // ── 站点把它换成 1.0.1。真站点上是先 uninstall 再 install，这里直接换树。 ──
+      fs.rmSync(path.join(src, 'demo-box'), { recursive: true, force: true });
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.1' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      const pend = idx._test.getPendingConsent().find((p) => p.id === id);
+      assert.ok(pend, '新版要先过同意闸');
+      assert.equal(pend.version, '1.0.1');
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '还没同意新版，旧版当然还在');
+
+      // ── 同意新版：这一次动作自己就要把旧版收掉，不靠下一次连上站点 ──
+      const c = await invoke('app:consentPlugin', id, '1.0.1');
+      assert.equal(c.ok, true, JSON.stringify(c));
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), false,
+        '旧版已经没有任何站点要了 —— 同意这一步就该收掉它');
+      assert.equal(idx._test.getRegistry().get(id, '1.0.0'), null,
+        '注册表里也不该再有旧版');
+      assert.ok(idx._test.getRegistry().get(id, '1.0.1'), '新版要在用');
+      const mine = idx._test.getPluginsView().plugins.filter((p) => p.id === id);
+      assert.equal(mine.length, 1, `界面上一颗块：${JSON.stringify(mine)}`);
+      assert.equal(mine[0].version, '1.0.1');
+    });
+  });
+
 test('从假站点上撤掉一个插件：站点当场不报它了，而本机这一份留着',
   async (t) => {
     // 用户 2026-10-15 报的：「插件界面没有删除某个插件的选项，我现在无法删掉在
