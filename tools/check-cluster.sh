@@ -30,30 +30,43 @@
 #    - NSS 是否开启枚举（决定守护进程能不能用枚举查用户 —— 答案是不能）
 #
 #  安全性：
-#    本脚本【只读】。唯一的写操作是在 /root 下留一份 nft 规则快照和一份报告
-#    文件。不修改任何系统配置、不重启服务、不碰机器上任何既有服务。
+#    本脚本【只读】。不修改任何系统配置、不重启服务、不碰机器上任何既有服务。
+#    默认在 /root 下临时建一个快照目录（放 nft 规则快照与沙箱脚本），
+#    退出时删掉 —— 系统里不留中转站。显式给目录时保留，那是调用方要的产物。
 #
 #  用法：
 #    sudo bash check-cluster.sh
-#    # 或指定快照目录
+#    # 或指定快照目录（给了就保留）
 #    sudo bash check-cluster.sh /root/slurmate-probe
 #    # 或指定配置文件（默认自动找 /etc/slurmate/slurmate.conf，退回仓库里的示例）
 #    SLURMATE_CONF=/path/to/slurmate.conf sudo -E bash check-cluster.sh
 #
 #  输出：
 #    报告打到 stdout（可直接全选复制）
-#    nft 快照存到 <快照目录>/nft-ruleset.before
+#    nft 快照存到 <快照目录>/nft-ruleset.before（默认目录退出时删除）
 #
 # ==============================================================================
 
 set -uo pipefail
 
-SNAP_DIR="${1:-/root/slurmate-probe-$(date +%Y%m%d-%H%M%S)}"
-
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "请以 root 运行：sudo bash $0" >&2
     exit 1
 fi
+
+# 默认目录退出时删掉；显式传入的目录保留（要留部署后比对基线的人走这一支）。
+SNAP_GIVEN=0
+if [[ -n "${1:-}" ]]; then
+    SNAP_DIR="$1"
+    SNAP_GIVEN=1
+else
+    SNAP_DIR="/root/slurmate-probe-$(date +%Y%m%d-%H%M%S)"
+fi
+
+_cleanup_snap() {
+    [[ "$SNAP_GIVEN" -eq 0 && -n "${SNAP_DIR:-}" ]] && rm -rf -- "$SNAP_DIR"
+}
+trap '_cleanup_snap' EXIT
 
 mkdir -p "$SNAP_DIR" 2>/dev/null || true
 chmod 700 "$SNAP_DIR" 2>/dev/null || true
@@ -80,7 +93,11 @@ run() {
 echo "Slurmate 登录节点环境探测报告"
 echo "生成时间: $(date -Is)"
 echo "主机名:   $(hostname -f 2>/dev/null || hostname)"
-echo "快照目录: $SNAP_DIR"
+if [[ "$SNAP_GIVEN" -eq 1 ]]; then
+    echo "快照目录: $SNAP_DIR"
+else
+    echo "快照目录: $SNAP_DIR（退出时删掉，系统里不留中转站）"
+fi
 
 # ==============================================================================
 sec "操作系统"
@@ -822,10 +839,15 @@ echo
 echo "═══════════════════════════════════════════════════════════════"
 echo " 探测完成"
 echo "═══════════════════════════════════════════════════════════════"
-echo " 快照目录: $SNAP_DIR"
-echo "   - nft-ruleset.before  （部署后非干扰比对基线）"
-echo "   - sandbox-test.txt    （沙箱加固可行性实测输出）"
-echo "   - sandbox-probe.sh    （上面那一节在沙箱里跑的那个脚本，原样留着）"
+if [[ "$SNAP_GIVEN" -eq 1 ]]; then
+    echo " 快照目录: $SNAP_DIR"
+    echo "   - nft-ruleset.before  （部署后非干扰比对基线）"
+    echo "   - sandbox-test.txt    （沙箱加固可行性实测输出）"
+    echo "   - sandbox-probe.sh    （上面那一节在沙箱里跑的那个脚本，原样留着）"
+else
+    echo " 快照目录已删除（${SNAP_DIR}）：系统里不留中转站。"
+    echo "   要留一份部署后比对基线：bash check-cluster.sh <目录>"
+fi
 echo
 echo " 请把以上全部输出复制回传。"
 echo "═══════════════════════════════════════════════════════════════"

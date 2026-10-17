@@ -89,6 +89,12 @@
 `内存`（每节点上限）、`GRES` 总量。`cluster` op 的 `nodes` 里多了 `cpus` 一格，
 `mem` 是新增的共享字段。取不到时照三态规矩说"没有数据"，不画成 0。
 
+### Changed — 体检不再留快照目录
+
+`--check` 第一屏那个 `/root/slurmate-probe-<时间>` 从前会一直留着；现在默认目录
+在退出时删除，系统里不留中转站。要留一份部署后比对基线，显式给目录：
+`bash check-cluster.sh <目录>`。
+
 ### Fixed — 0.23 卸载漏掉站点配置
 
 `/etc/slurmate/slurmate.conf` 按设计不含产品名，旧卸载判据 `grep slurmate` 永远
