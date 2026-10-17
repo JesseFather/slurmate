@@ -1136,16 +1136,19 @@ test('连接表单里的「③ 工作区」：三种取值各有各的那一句�
 
   // 默认值一变（用户敲了地址），那一项的标签要跟着变 —— 这一格显示的是
   //   "按现在这个地址会落到哪儿"，显示错了就是"界面在说一件不成立的事"。
+  //   工作区在这里显示成用它的那条连接（`w2` 是 `c2`，见上面 `CONNS` 与
+  //   `WSS`）—— 2026-10-17 起工作区不再有「工作区 N」那个显示名。
   h.run('wsDefault = "w000000000002";');
   h.fn('renderFormWorkspace')();
-  assert.equal(h.byId.get('f-workspace').children[0].textContent, '默认：工作区 2');
-  assert.match(h.byId.get('ws-hint').textContent, /会落在「工作区 2」/);
+  assert.equal(h.byId.get('f-workspace').children[0].textContent,
+    '默认：bob@198.51.100.9');
+  assert.match(h.byId.get('ws-hint').textContent, /会落在「bob@198\.51\.100\.9」/);
 
   // ── 用户显式挑一个：不再跟随默认 ──
   h.run('wsPicked = "w000000000001";');
   h.fn('renderFormWorkspace')();
   assert.equal(h.byId.get('f-workspace').value, 'w000000000001');
-  assert.match(h.byId.get('ws-hint').textContent, /会用「工作区 1」/);
+  assert.match(h.byId.get('ws-hint').textContent, /会用「alice@198\.51\.100\.7」/);
 
   // ── 用户要一个新的：那一项要被真的选中，不能被吞回去 ──
   //   一个"未找到就空着"的兜底如果写成了 `list.some(id === keep)`，那么
@@ -1170,7 +1173,7 @@ test('连接表单里的「③ 工作区」：三种取值各有各的那一句�
   //   换工作区 = 换 origin = 浏览器重新加载，这是用户按下保存之前唯一的机会。
   h.run('wsPicked = "w000000000002";');
   h.fn('renderFormWorkspace')();
-  assert.match(h.byId.get('ws-hint').textContent, /切到「工作区 2」/);
+  assert.match(h.byId.get('ws-hint').textContent, /切到「bob@198\.51\.100\.9」/);
   assert.match(h.byId.get('ws-hint').textContent, /不会跟着走/);
 });
 
@@ -1270,8 +1273,10 @@ test('那颗「调试」标签：只在假站点里出现，点它是把面板�
     '抬回来之后要切到第四屏');
   assert.equal(h.byId.get('screen-plugins').classList.contains('hidden'), true,
     '同时只露一个（路由那一句管着所有屏）');
-  assert.equal(h.byId.get('debug-title').textContent, '调试 · alice@198.51.100.7',
-    '第四屏的标题同样要带上是哪一个站点');
+  assert.equal(h.byId.get('debug-title').textContent, '调试',
+    '第四屏的标题只剩这一屏的名字');
+  assert.equal(h.byId.get('debug-site').textContent, 'alice@198.51.100.7',
+    '而"我在哪一台"改由下面那一行小字说');
 
   // ── ⑤ 抬不起来要说出来：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
   h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"
@@ -1396,10 +1401,13 @@ test('插件块上的「用哪一份数据」：三种取值各发各的，一�
   assert.deepEqual(sel.children.map((o) => o.value),
     ['s000000000001', 's000000000002', '__new_space__']);
   assert.equal(sel.value, 's000000000001', '初值是它现在指着的那一份');
-  // 「还有谁在用」：s2 被 2 号工作区指着，s1 没有别人 —— 两句话必须分开，
-  //   因为用户按它决定"改这一格会不会动到别人"。
+  // 「还有谁在用」：s2 被 2 号工作区指着，而那个工作区显示的是用它那条连接的名字
+  //   （2026-10-17 起工作区不再有「工作区 N」那个显示名，见 panel.js 的
+  //   `workspaceLabel`）。s1 没有别人 —— 两句话必须分开，因为用户按它决定
+  //   "改这一格会不会动到别人"。
   assert.match(sel.children[0].textContent, /数据 1 · 端口 18080$/);
-  assert.match(sel.children[1].textContent, /数据 2 · 端口 18081（「工作区 2」也在用）/);
+  assert.match(sel.children[1].textContent,
+    /数据 2 · 端口 18081（「bob@198\.51\.100\.9」也在用）/);
 
   // ── ① 选另一份已存在的，发一个数据 id ──
   //   `connectionId` 也一起发：主进程要拿它回答"这张表是替哪一条连接改的"

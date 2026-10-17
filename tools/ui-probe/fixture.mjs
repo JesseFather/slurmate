@@ -250,8 +250,10 @@ export function buildPartitions() {
  */
 export function buildConns() {
   return [
+    // 备注刻意给长的：工作区那一格显示的就是用它的那条连接的名字（见 panel.js 的
+    //   `workspaceLabel`），所以"名字长了会不会把那一行顶出去"只剩这一处能造。
     { id: 'c000000000001', user: 'alice', host: '198.51.100.7', port: 22,
-      workspaceId: 'w000000000001' },
+      label: '一个名字很长很长的连接', workspaceId: 'w000000000001' },
     { id: 'c000000000002', user: 'bob', host: '198.51.100.9', port: 22,
       workspaceId: 'w000000000002' },
   ];
@@ -263,8 +265,8 @@ export function buildConns() {
  * 形状照两处真产出抄：工作区是 `config.js` 的 `workspacePlan()`（`id` / `name` /
  *   `refCount` / `members` / `soleOwnerId` / `refs` / `spaces`），一份数据是
  *   `parseSpace` 那一行的四个字段（`id` / `pluginId` / `group` / `ports`）。
- * 名字刻意给长的：这一格要问的正是"工作区那一列窄下来时，那颗「改名」会不会被压"
- *   （用户 2026-10-17 报的就是它），而一个短名字的夹具量不到。
+ * `name` 是自动名（「工作区 N」），界面上只在"没有任何连接在用它"的时候才显示 ——
+ *   有连接时显示的是那条连接（`workspaceLabel`）。所以长名字要造在连接上（见上面）。
  * 第一份数据被两个工作区一起指着 —— 图上会汇成两条线，那正是这张图存在的理由。
  */
 export function buildWorkspaces() {

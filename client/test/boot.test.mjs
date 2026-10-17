@@ -793,7 +793,9 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
                     // 工作区：一条连接指到一个工作区（多对一），工作区被引用计数回收。
                     // 切走一个「独占」的工作区会让它被删掉，所以主进程会先回
                     // code:'would_discard' 让界面确认 —— 判定权在主进程，不在界面。
-                    'app:setConnectionWorkspace', 'app:renameWorkspace',
+                    // （`app:renameWorkspace` 0.23 起不在了：工作区显示成用它的那条
+                    //   连接，界面上没有"给它起个名字"这件事。）
+                    'app:setConnectionWorkspace',
                     // 开发者模式那一个设置动词 + 重启。它们的行为在
                     // devmode.test.mjs 里验（那个文件跑的是"关着"那一半：这个文件
                     // 整个跑在"开着"那一半里）；这里只查通道在不在 —— 这台机器上
@@ -1551,14 +1553,14 @@ test('活会话护着它那个工作区 —— 连接全移动走了也同理', 
   assert.equal(cfgOf().connections.some((c) => c.workspaceId === w1), false,
     '前提：已经没有任何连接指着 w1 了（引用计数归零）');
 
-  // 一个与引用计数无关的改动（改个名字）也会把 commitConfig 叫起来，而那一句
+  // 一个与引用计数无关的改动（改这条连接的备注）也会把 commitConfig 叫起来，而那一句
   //    `pruneWorkspaces` 数的是"还有几条连接指着它" —— 此刻是 0。
   //    护住它的是那条活会话（`liveWorkspaceIds`）—— 这正是那条「一条连接都没有
   //    就不回收」的豁免删掉之后，这个场景唯一还站得住的东西。
   //    少了它，开发者模式里每次改动都会把工作区连同它指着的那些数据收掉，而那条
   //    会话正跑在上面 —— 症状是「演示模式里布局老是丢」，且没有任何一处会红。
-  const rn = await invoke('app:renameWorkspace', { workspaceId: w1, name: '演示工作区' });
-  assert.equal(rn.ok, true);
+  const rn = await invoke('app:saveConnection', { ...conn, label: '演示连接' });
+  assert.equal(rn.ok, true, JSON.stringify(rn));
   assert.equal(cfgOf().workspaces.some((l) => l.id === w1), true,
     '会话还跑在它上面 —— 收掉它就是把那条会话脚下的数据抽掉');
   assert.equal(cfgOf().spaces.some((s) => s.id === sid), true,

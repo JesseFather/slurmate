@@ -409,11 +409,14 @@ class FakeDuplex extends EventEmitter {
     super();
     this.written = '';
     this.closed = false;
+    // 通道的 stderr 是命令串里那一段 shell 回话的地方（建目录的回执）。
+    this.stderr = new EventEmitter();
   }
 
   write(s) { this.written += s; return true; }
   close() { this.closed = true; this.emit('close'); }
   feed(s) { this.emit('data', Buffer.from(s, 'utf8')); }
+  feedErr(s) { this.stderr.emit('data', Buffer.from(s, 'utf8')); }
 
   /**
    * 回一条应答，rid 回填成最后那条请求的 —— 守护进程就是这么做的
@@ -659,6 +662,121 @@ test('★ 预算到点就放行：没等到不等于「建不出来」', async (
   assert.equal(b._conn.execs.length, 1, '而那条命令确实发出去了 —— 放行不是没做');
 });
 
+// ── 建目录并进常驻通道之后的两条走法 ────────────────────────────────────────
+//
+// 正常路径下目录由 `STREAM_CMD` 那一条 exec 建（后台跑、回执走 stderr），客户端
+//   不再单开一条 exec。退路（通道建不起来）仍旧是 `PREPARE_CMD` 那一条 ——
+//   上面那几条用例管的就是它。
+
+/** 把一条常驻通道真的建起来的后端（探针已经答过）。 */
+async function residentBackend() {
+  const b = connectedBackend();
+  const opened = b._openStream();
+  b._conn.streamChannel.answer(PONG);
+  assert.equal(await opened, true);
+  return b;
+}
+
+test('常驻通道在时，建目录不开 exec —— 回执从那条通道的 stderr 回来', async (t) => {
+  keepLoop(t);
+  // 用户 2026-10-17 问的就是这一条：那条 mkdir 只有 3 毫秒，贵的是开一条新的
+  //   exec。有常驻通道时它不该再开一条 —— 目录已经在通道那条命令里建了。
+  const b = await residentBackend();
+  const before = b._conn.execs.length;
+  const p = b.beginPrepare();
+  assert.equal(b._conn.execs.length, before, '有通道就不许再开一条 exec');
+  b._conn.streamChannel.feedErr(sshBackend.PREPARE_OK + '\n');
+  const r = await p;
+  assert.equal(r.ok, true);
+  assert.equal(r.definite, false);
+});
+
+test('回执说失败就是「站点明确说建不出来」，退出码带出来', async (t) => {
+  keepLoop(t);
+  const b = await residentBackend();
+  const p = b.beginPrepare();
+  b._conn.streamChannel.feedErr(sshBackend.PREPARE_FAIL + ' 1\n');
+  const r = await p;
+  assert.equal(r.ok, false);
+  assert.equal(r.definite, true, '提交那一步只认这一档');
+  assert.match(r.error, /rc=1/);
+});
+
+test('stderr 上的噪声不被当成结论（mkdir 自己那句、rc 文件里的话）', async (t) => {
+  keepLoop(t);
+  const b = await residentBackend();
+  const p = b.beginPrepare();
+  b._conn.streamChannel.feedErr('mkdir: cannot create directory\n');
+  // 以那句开头但退出码不是数字：它只是长得像，不是回执。
+  b._conn.streamChannel.feedErr(sshBackend.PREPARE_FAIL + ' badly\n');
+  b._conn.streamChannel.feedErr(sshBackend.PREPARE_OK + '\n');
+  const r = await p;
+  assert.equal(r.ok, true, '只有对得上的那一句算数');
+});
+
+test('回执比等待者还早到也算数（后台 mkdir 可能跑在前面）', async (t) => {
+  keepLoop(t);
+  const b = await residentBackend();
+  b._conn.streamChannel.feedErr(sshBackend.PREPARE_OK + '\n');
+  const r = await b.beginPrepare();
+  assert.equal(r.ok, true);
+  assert.equal(b._conn.execs.length, 1, '通道那条 exec 之外一条都不发');
+});
+
+test('通道在回执之前断了：当场收账，不陪它等满 90 秒', async (t) => {
+  keepLoop(t);
+  const b = await residentBackend();
+  const p = b.beginPrepare();
+  b._teardownStream();
+  const r = await p;
+  assert.equal(r.ok, false);
+  assert.equal(r.definite, false, '断了不等于站点说了建不出来');
+  assert.match(r.error, /常驻通道/);
+});
+
+test('常驻通道建得起来时，连接路上只有它那一条 exec', async (t) => {
+  keepLoop(t);
+  // 那一条用例（★★★「连接这条路真的会去建它」）验的是退路：通道建不起来时
+  //   必须真的发 `PREPARE_CMD`。这一条验的是反侧 —— 通道建得起来时，
+  //   用的是同一条 exec，一条连接上不该再有第二条。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); this.execs = []; made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec(cmd, cb) {
+      this.execs.push(cmd);
+      if (cmd !== sshBackend.STREAM_CMD) {
+        const s = new FakeExecStream(JSON.stringify(PONG));
+        return setImmediate(() => cb(null, s));
+      }
+      // 探针、版本 ping、whoami 全都走这条通道 —— 每一条请求都答一声。
+      const s = new FakeDuplex();
+      let seen = 0;
+      const tick = setInterval(() => {
+        const lines = s.written.split('\n').filter(Boolean);
+        for (; seen < lines.length; seen++) {
+          const req = JSON.parse(lines[seen]);
+          s.feed(JSON.stringify({ ...PONG, rid: req.rid }) + '\n');
+        }
+      }, 1);
+      t.after(() => clearInterval(tick));
+      return setImmediate(() => cb(null, s));
+    }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  const r = await b.connect({ user: 'u', host: 'h', port: 22 });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(made[0].execs, [sshBackend.STREAM_CMD],
+    '一条连接只开一条 exec：建目录并进它里面了');
+  assert.ok(b._prepareP, '而那一句回执有人在等（结果由它回来）');
+});
+
 test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同一个目录', () => {
   const cmd = sshBackend.PREPARE_CMD;
   assert.equal(typeof cmd, 'string');
@@ -686,19 +804,53 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
     `命令串里的目录（${cmd}）与守护进程的 JOB_LOG_SUBDIR（${m[1]}）不一致`);
 });
 
-test('两条命令只差最后一个词：同一个解释器、同一个二进制路径', () => {
-  // 分头写死是有意的（上面那条用例要求它是常量），代价就是路径写了两遍 ——
-  // 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程的问题。
-  const rpc = sshBackend.RPC_CMD;
-  const stream = sshBackend.STREAM_CMD;
-  assert.equal(sshBackend.STREAM_CMD, "/bin/bash -c '/usr/local/bin/slurmate stream'");
-  assert.ok(!/[$`{}]/.test(stream), '不得含任何模板/变量语法');
-  assert.ok(!/code-server/.test(stream), '不得含 code-server 字面量');
-  assert.equal(rpc.replace(/ rpc'$/, ''), stream.replace(/ stream'$/, ''),
-    '两条命令除了最后那个子命令名之外必须逐字相同');
+test('STREAM_CMD 是编译期常量，建目录那一段也在它里面', () => {
+  // 一条 SSH 连接上的执行只用这一条 exec（见文件头那一段）：它从连上起活到
+  //   断开为止，作业日志目录也由它建出来。所以这一串里必须两件事都在 ——
+  //   少了建目录那半截，正常路径上目录就不存在了，而失败要到提交时
+  //   才以"作业起不来"的样子出现。
+  const cmd = sshBackend.STREAM_CMD;
+  assert.equal(typeof cmd, 'string');
+  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
+  assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
+  assert.ok(!/code-server/.test(cmd), '不得含 code-server 字面量');
+
+  // 建目录那一句必须与退路那条（`PREPARE_CMD`）逐字相同：一份规矩只有一处实现。
+  const core = 'mkdir -p "$HOME/.slurmate/logs"';
+  assert.ok(sshBackend.PREPARE_CMD.includes(core), '退路那条里是这一句');
+  assert.ok(cmd.includes(core), '常驻通道那条里必须也是同一句');
+
+  // 后台跑是承重的：这条通道是握手要走的路，而 mkdir 的第一次访问可能落在
+  //   冷挂载上（几十秒）。等它就是把「已连接」卡在一条 mkdir 上。
+  assert.match(cmd, />\/dev\/null & /, '建目录必须在后台跑，且不许写 stdout');
+  assert.match(cmd, /exec \/usr\/local\/bin\/slurmate stream'$/,
+    '建完之后必须原地换成 stream —— 不是再开一条 exec、也不是再 fork 一个');
+
+  // 回执走 stderr，两句话与客户端读它们的那一处同源（导出给这里钉住）。
+  assert.ok(cmd.includes(sshBackend.PREPARE_OK), '成功那一句在命令串里');
+  assert.ok(cmd.includes(sshBackend.PREPARE_FAIL), '失败那一句在命令串里');
+  assert.match(cmd, />&2/, '两句都写在 stderr 上 —— stdout 是守护进程的协议');
 });
 
-test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）', async (t) => {
+test('两条命令同一个解释器、同一个二进制路径', () => {
+  // 分头写死是有意的（上面那几条用例要求它们是常量），代价就是路径写了几遍
+  //   —— 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程
+  //   的问题。
+  const { RPC_CMD: rpc, STREAM_CMD: stream, PREPARE_CMD: prep } = sshBackend;
+  assert.equal(rpc, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
+  for (const c of [rpc, stream, prep]) {
+    assert.match(c, /^\/bin\/bash -c '/, '三条都显式指定 bash');
+    assert.ok(c.endsWith("'"), '内层命令都要整体加引号');
+  }
+  assert.ok(rpc.includes('/usr/local/bin/slurmate rpc'));
+  assert.ok(stream.includes('/usr/local/bin/slurmate stream'));
+  // 这一条防的是"顺手把 stream 写成 `slurmate stream; slurmate rpc`"这类拼接：
+  //   路径出现两次就说明这一串里有超过一个命令在跑。
+  assert.equal(stream.split('/usr/local/bin/slurmate').length - 1, 1);
+});
+
+test('exec 那条路上永远不发 rid（调用方传了也删掉）', async (t) => {
   keepLoop(t);
   // rid 在守护进程那边是"这条连接从此收推送"的判据，而这条连接是一次性的：
   // 发了它，守护进程会把推送写进一条马上要被关掉的连接，而推送与响应
@@ -713,7 +865,7 @@ test('★★ exec 那条路上**永远不发 rid**（调用方传了也删掉）
   assert.equal(r.ok, true);
 });
 
-test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async (t) => {
+test('`client` 与 `rid` 只在同一条路径上发出去', async (t) => {
   keepLoop(t);
   // 两件事同一个理由：守护进程认身份（register_client）与订阅推送（handle_line）
   //    的判据都是"这条连接发过带 rid 的请求"。
@@ -755,7 +907,7 @@ test('★★★ `client` 与 `rid` **只在同一条路径上**发出去', async
   assert.equal(body.client, undefined, 'exec 退路上带身份 = 看护者跟着一次性的连接走');
 });
 
-test('★ 调用方传的 req 对象本身不被改写（删的是副本）', async (t) => {
+test('调用方传的 req 对象本身不被改写（删的是副本）', async (t) => {
   keepLoop(t);
   const b = connectedBackend();
   const req = { op: 'ping', rid: 7 };
@@ -763,7 +915,7 @@ test('★ 调用方传的 req 对象本身不被改写（删的是副本）', as
   assert.equal(req.rid, 7, '不许为了发出去而改调用方的对象');
 });
 
-test('★ 常驻通道在的时候，rpc 一次 exec 都不发', async (t) => {
+test('常驻通道在的时候，rpc 一次 exec 都不发', async (t) => {
   keepLoop(t);
   const b = connectedBackend();
   const opened = b._openStream();
@@ -778,7 +930,7 @@ test('★ 常驻通道在的时候，rpc 一次 exec 都不发', async (t) => {
   assert.equal(b._conn.execs.length, before, '走通道就不该再 exec');
 });
 
-test('★★ 探针失败 ⇒ 不建通道、记下原因、并排一次重开', async (t) => {
+test('探针失败：不建通道、记下原因、并排一次重开', async (t) => {
   keepLoop(t);
   // "通道起来了"与"通道能用"是两件事：旧 CLI 上 `slurmate stream` 会立刻以
   //   argparse 的退出码 2 结束，而那条通道在客户端看来与正常的别无二致。
@@ -792,7 +944,7 @@ test('★★ 探针失败 ⇒ 不建通道、记下原因、并排一次重开',
   b._teardownStream();
 });
 
-test('★ 重开是有上限的：连着失败够多次就不再试', async (t) => {
+test('重开是有上限的：连着失败够多次就不再试', async (t) => {
   keepLoop(t);
   // 上限挡的是"登录节点上的 CLI 是旧的"那种永久失败 —— 它和暂时的失败
   // 现场一模一样（一行 usage + 退出码 2），区分不了，只能靠次数。
@@ -803,7 +955,7 @@ test('★ 重开是有上限的：连着失败够多次就不再试', async (t) 
   assert.equal(b._streamTimer, null, '到了上限就不该再排');
 });
 
-test('★ 一次成功会把重开计数清零（曾经好用的通道永远有配额）', async (t) => {
+test('一次成功会把重开计数清零（曾经好用的通道永远有配额）', async (t) => {
   keepLoop(t);
   const b = connectedBackend();
   b._streamAttempt = 2;
@@ -814,7 +966,7 @@ test('★ 一次成功会把重开计数清零（曾经好用的通道永远有�
   assert.equal(b.residentError, null, '建起来了就把上一条失败的原因清掉');
 });
 
-test('★ 通道断了会排重开；拆掉之后不再排', async (t) => {
+test('通道断了会排重开；拆掉之后不再排', async (t) => {
   keepLoop(t);
   const b = connectedBackend();
   const opened = b._openStream();

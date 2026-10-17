@@ -343,11 +343,14 @@ test('四屏都在，而且路由只认这四个 id', () => {
   assert.match(fn[0], /plugins-title/, '第二屏的标题要在路由里按当前站点写一次');
   assert.match(fn[0], /activeConnectionId/,
     '而它的判据必须是主进程给的活跃连接，不是界面自己记的"刚才点了谁"');
-  // 第四屏顶着与第二/三屏同一条身份带，标题也照同一条规矩写（活跃连接给的
-  //   user@host）—— 它同样只在一个站点里才进得来。
-  assert.match(fn[0], /\$\('debug-title'\)\.textContent = '调试' \+ site/,
-    '第四屏的标题要与 `plugins-title` / `jobs-title` 用同一个判据，不是各算一份');
-  assert.match(html, /id="screen-debug"[\s\S]*id="debug-title"/, '而它在那一屏里');
+  // 第四屏顶着与第二/三屏同一条身份带，地址那一行也照同一条规矩写（活跃连接给的
+  //   user@host）—— 它同样只在一个站点里才进得来。三屏用同一个循环写，不是各算一份。
+  assert.match(fn[0], /for \(const id of \['plugins-site', 'jobs-site', 'debug-site'\]\)/,
+    '三条身份带的地址行要一处写，不是各算一份');
+  assert.match(fn[0], /\$\('plugins-title'\)\.textContent = '插件'[\s\S]*\$\('debug-title'\)\.textContent = '调试'/,
+    '标题只剩这一屏的名字 —— 地址不再拼进标题（2026-10-17 改）');
+  assert.match(html, /id="screen-debug"[\s\S]*id="debug-title"[\s\S]*id="debug-site"/,
+    '而它在那一屏里，并且与地址那一行成对');
   // 进那一屏时现取一次那两处目录（与 `refreshJobs` 同形）：缓存下来的答案在
   //   一个刚装完插件的人眼里正好是错的。
   assert.match(fn[0], /if \(name === 'debug'\) refreshSiteDirs\(\);/,
@@ -935,12 +938,13 @@ test('第二/三屏顶上那条身份带（翻页感由结构给，不是换底�
   assert.equal(/\.screen[^{]*\{[^}]*background/.test(css), false,
     '"某一屏换底色"同样不许有');
   // 两屏的标题都写上是哪一个站点 —— 作业那一屏从前是一个死的「作业」。
-  assert.match(html, /id="screen-plugins"[\s\S]*id="plugins-title"/,
-    '第二屏的标题在那一屏里');
-  assert.match(html, /id="screen-jobs"[\s\S]*id="jobs-title"/, '第三屏的标题同理');
-  assert.match(js, /\$\('jobs-title'\)\.textContent = '作业' \+ site/,
-    '而它要和 `plugins-title` 用同一个判据（活跃连接给的 user@host），'
-    + '不是各算一份');
+  //   2026-10-17 起地址不拼在标题里，而是各带一行小字（`#*-site`）。
+  assert.match(html, /id="screen-plugins"[\s\S]*id="plugins-title"[\s\S]*id="plugins-site"/,
+    '第二屏的标题与地址行都在那一屏里');
+  assert.match(html, /id="screen-jobs"[\s\S]*id="jobs-title"[\s\S]*id="jobs-site"/,
+    '第三屏的标题同理');
+  assert.match(js, /\$\('jobs-title'\)\.textContent = '作业'/,
+    '而它要和 `plugins-title` 用同一个判据（活跃连接给的 user@host 进地址那一行）');
 });
 
 test('滚动条自己画，而且永远占着那条槽', () => {
@@ -1128,17 +1132,20 @@ test('站在第一屏上就一定不在连接里 ——「换站点」那条路�
 
 test('panel.js 不用 window.prompt —— 它在 Electron 里直接抛异常', () => {
   // 不是返回 null，是抛 "prompt() is and will not be supported"。
-  // 改名走的是页面内的 <input>（见 startRename）。
+  // 从前工作区改名要在页面里自己摆一个 <input> 绕开它；那个功能 0.23 起没了，
+  // 而这条判据留着 —— 任何一处再想用 prompt 都会被它拦下。
   assert.equal(/window\.prompt\s*\(/.test(js), false);
 });
 
-test('新增的两个工作区通道同时登记在 preload 与 panel.js 两侧', () => {
+test('工作区只剩一个改法：换，不叫改名', () => {
   // 少一边都是「点了没反应」：preload 少了 → 调不到方法；panel.js 少了 → 没有入口。
-  for (const m of ['setConnectionWorkspace', 'renameWorkspace']) {
-    assert.ok(bridgeMethods().has(m), `preload 没暴露 ${m}`);
-  }
+  // `renameWorkspace` 反过来 —— 它必须两边都不在：0.23 起工作区显示成用它的
+  //   那条连接，界面上没有"给它起个名字"这件事。漏掉一边就是一条没有出口、
+  //   或者没有实现的通道。
+  assert.ok(bridgeMethods().has('setConnectionWorkspace'), 'preload 没暴露 setConnectionWorkspace');
   assert.ok(bridgeCalls().has('setConnectionWorkspace'), 'panel.js 没有调用 setConnectionWorkspace');
-  assert.ok(bridgeCalls().has('renameWorkspace'), 'panel.js 没有调用 renameWorkspace');
+  assert.equal(bridgeMethods().has('renameWorkspace'), false, 'preload 还暴露着 renameWorkspace');
+  assert.equal(bridgeCalls().has('renameWorkspace'), false, 'panel.js 还在调 renameWorkspace');
 });
 
 test('分叉弹窗的三个按钮：必须存在、必须绑了动作，而且不能有第四个答案', () => {

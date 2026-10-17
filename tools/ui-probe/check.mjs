@@ -268,6 +268,15 @@ function judge(r) {
   for (const c of (r.clipped || []).slice(0, 4)) {
     bad.push(`${c.sel} 的身份被截了：文字 ${c.textWidth} > 可见 ${c.boxWidth}：${c.text}`);
   }
+  // 映射图里的节点必须等高。连线是从两个盒子的中心画的，而同一行里高矮不齐的
+  //   两个盒子看起来就是"没对齐"（用户 2026-10-17 的截图：30px 对 48px，
+  //   后者的高度来自里面那个输入框）。为什么这条判据在这里成立、量的是哪几个
+  //   元素，见 `measure.js` 的 `out.wnodes` 那一段。
+  const hs = [...new Set((r.wnodes || []).map((n) => Math.round(n.h)))];
+  if ((r.wnodes || []).length > 1 && hs.length > 1) {
+    bad.push(`映射图的节点不等高（${hs.join(' / ')}px）：`
+      + r.wnodes.map((n) => `${n.sel}=${n.h}`).join('，'));
+  }
   // 滑块旁边不该再留一个输入框，而它停在哪儿要看得见（用户 2026-10-16 点名）。
   //   只在真的画了滑块的格子上判：没装滑块的格子本来就该留着那个框
   //   （站点没给默认、默认不在档位上时，它是唯一能填的地方）。

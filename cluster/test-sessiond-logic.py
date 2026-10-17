@@ -8977,12 +8977,21 @@ exit 0
     # 客户端要的那条 `slurmate <子命令>` 必须是 CLI 真的有的。
     #    打错一个词的话，那条命令会以 argparse 的退出码 2 结束，而客户端会
     #    安静地退回 exec —— 一切照常，只是常驻通道永远没起来。
-    _m_stream_cmd = re.search(r'const STREAM_CMD = "/bin/bash -c \'[^\']*slurmate (\w+)\'"',
-                              _be_src)
-    _m_rpc_cmd = re.search(r'const RPC_CMD = "/bin/bash -c \'[^\']*slurmate (\w+)\'"',
-                           _be_src)
-    for _label, _m in (("STREAM_CMD", _m_stream_cmd), ("RPC_CMD", _m_rpc_cmd)):
-        _sub = _m.group(1) if _m else None
+    #
+    #    `STREAM_CMD` 0.23 起不再是"整行一个字符串"：它在 exec 成 stream 之前先
+    #    把日志目录建出来（后台跑、回执走 stderr），于是那一段在源码里折成了几行。
+    #    所以抠法改成"取这个常量那一段，里面最后一个 `/usr/local/bin/slurmate <词>`
+    #    就是真正 exec 的那个" —— 那一段里不会有第二个（有自己的用例钉着）。
+    #    这两条判据红的时候读的是"这一串的形状变了，重新对一遍子命令表"，
+    #    而"未找到"就是形状变了的信号，不该改成宽松地放过。
+    _cmd_blocks = {}
+    for _name in ("STREAM_CMD", "RPC_CMD"):
+        _start = _be_src.find("const %s = " % _name)
+        _end = _be_src.find("\n\n", _start) if _start >= 0 else -1
+        _cmd_blocks[_name] = _be_src[_start:_end] if _start >= 0 and _end > _start else ""
+    for _label, _blk in _cmd_blocks.items():
+        _subs = re.findall(r"/usr/local/bin/slurmate (\w+)", _blk)
+        _sub = _subs[-1] if _subs else None
         check("客户端 %s 要的子命令 `%s` 是 CLI 真的有的"
               "（打错一个词 = 安静地退回 exec，谁都看不出来）"
               % (_label, _sub or "?"),

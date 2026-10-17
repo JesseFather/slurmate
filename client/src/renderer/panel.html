@@ -394,7 +394,13 @@
            断开 = 作业停掉（`goodbye`），临时离开 = 作业继续跑（`leave`，但没人看着它
            35 分钟就会被回收）。名字挨着、后果相反，正是最容易点错的一格。 -->
       <div class="sec-head">
-        <h2 id="plugins-title">插件</h2>
+        <div class="band-id">
+          <h2 id="plugins-title">插件</h2>
+          <!-- 脚下是哪一台。它与标题分开两行（用户 2026-10-17 报的：一行
+               「插件 · user@host」太长，而且贴着状态条看着顶头）—— 标题只剩
+               这一屏的名字，地址退成小字。内容由 `showScreen` 写。 -->
+          <p class="band-site" id="plugins-site"></p>
+        </div>
         <button id="btn-leave" class="ghost hidden"
                 title="回到登录节点列表，作业继续在集群上跑。但没人看着它 35 分钟之后会被自动回收。">临时离开</button>
         <!-- 最后那一句是从 `doDisconnect` 里搬过来的：那句话从前长在
@@ -483,9 +489,13 @@
            跨文件用例钉着（`btn-jobs-new` / `btn-jobs-takeover` / `btn-jobs-end`）。 -->
     <section id="screen-jobs" class="screen hidden">
       <div class="sec-head">
-        <!-- 这一格由 `showScreen` 写成「作业 · user@host」（与 #plugins-title 同一个
-             理由：用户在几个站点之间来回时，最要紧的一件事就是"我在哪一台上面"）。 -->
-        <h2 id="jobs-title">作业</h2>
+        <!-- 这一格由 `showScreen` 写成「作业」（这一屏的名字）与地址那一行
+             （`#jobs-site`）—— 与上面那条身份带同一个理由：用户在几个站点之间
+             来回时，最要紧的一件事就是"我在哪一台上面"。 -->
+        <div class="band-id">
+          <h2 id="jobs-title">作业</h2>
+          <p class="band-site" id="jobs-site"></p>
+        </div>
         <button id="btn-to-plugins" class="ghost">← 插件</button>
         <button id="btn-jobs-new">新建…</button>
         <button id="btn-jobs-takeover" class="ghost">接管</button>
@@ -541,10 +551,13 @@
            不出现，这一屏也就进不来。 -->
     <section id="screen-debug" class="screen hidden">
       <div class="sec-head">
-        <!-- 「调试 · user@host」由 panel.js 的 `showScreen` 写成（与
+        <!-- 「调试」与地址那一行由 panel.js 的 `showScreen` 写成（与
              `#plugins-title` / `#jobs-title` 同一个理由：用户在几台机器之间来回时，
              最要紧的一件事就是"我现在看的是哪一台"）。 -->
-        <h2 id="debug-title">调试</h2>
+        <div class="band-id">
+          <h2 id="debug-title">调试</h2>
+          <p class="band-site" id="debug-site"></p>
+        </div>
         <button id="btn-debug-back" class="ghost">← 插件</button>
       </div>
 

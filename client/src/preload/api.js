@@ -82,8 +82,6 @@ contextBridge.exposeInMainWorld('slurmate', {
   // （切走会把旧工作区删掉，需要带 confirmDiscard 重来）或 'relisten_failed'
   // （换端口失败，配置一个字没动）。
   setConnectionWorkspace: (payload) => ipcRenderer.invoke('app:setConnectionWorkspace', payload),
-  // 改名。名字只是给人看的 —— 进存储分区的是数据 id，那个永不复用。
-  renameWorkspace: (payload) => ipcRenderer.invoke('app:renameWorkspace', payload),
   // 新建一条连接时，它默认落在哪个工作区 —— 表单在用户敲地址的时候问它，
   // 好把默认值显示出来（规则住在主进程：`config.js` 的 `defaultWorkspaceFor`）。
   // 返回 { ok, workspaceId }；`null` 是一个答案（"会新建一个空白工作区"），

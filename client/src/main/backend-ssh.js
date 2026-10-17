@@ -71,6 +71,10 @@
  * 60 秒对账由推送驱动（快照 30 秒一次、有变化 2 秒内到），exec 只在
  * 实质变化时发生。
  *
+ * 一条 SSH 连接上的执行只用这一条 exec：它从连上起活到断开为止，作业日志目录
+ * 也在它里面建（见 `STREAM_CMD`）。于是"开一条新的 exec 很贵"这件事只在退路上
+ * 成立 —— 而退路启用时，那条连接上本来就没有别的路可走。
+ *
  * 而 exec 那条链路没有删，它是退路。"起不来就退回去"不是容错装饰：
  *    常驻通道会因为"登录节点上的 CLI 还是旧的（没有 `stream` 这个子命令）"、
  *    "ForceCommand 拦了"、"守护进程没在跑"而起不来，这几种情况下客户端必须
@@ -113,17 +117,51 @@ const { Backend, KIND } = require('./backend.js');
 const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
 
 /**
- * 常驻通道的命令行。同样是编译期常量，与 `RPC_CMD` 只有子命令那一个词不同。
+ * 作业日志目录那一条 `mkdir`。两条命令共用这一句。
  *
- * 两条命令共用同一个二进制路径，而分头写死是有意的（而不是拼出来的）：
- *   上面那条用例的判据是"这一串是常量、不含任何模板语法"，拼出来的写法会让
- *   "用户输入永远不出现在命令串里"这条性质从看一眼就知道变成要推理。
- *   代价是路径写了两遍 —— 所以有一条用例钉住"两者只差最后那个词"。
+ * 一份规矩只有一处实现：常驻通道那条把它塞在自己前面跑（见 `STREAM_CMD`），
+ *   退路那条整条就是它（见 `PREPARE_CMD`）。两处各写一遍的话，改了一处、另一处
+ *   还是老路径，而症状只出现在「常驻通道建不起来」的那一类站点上。
+ *
+ * `umask 077` 与作业脚本里那个一致 —— 建出来的目录是 0700。
+ *   `$HOME` 由内层 bash 展开（外层那对单引号里的内容是原样传过去的）。
  */
-const STREAM_CMD = "/bin/bash -c '/usr/local/bin/slurmate stream'";
+const LOGS_MKDIR = 'mkdir -p "$HOME/.slurmate/logs"';
 
 /**
- * 连上之后先把作业日志目录建出来。
+ * 常驻通道上那一段建目录的回执，走 stderr。
+ *
+ * 它为什么不是一条协议消息：协议那条 stdout 是守护进程的（CLI 是个字节泵，
+ *   不解析、不重放，见 `cluster/slurmate` 的 `cmd_stream`）。这一句是客户端
+ *   自己塞进命令串里的，回执也就走客户端自己那一条 —— stderr。
+ * 两句话只有这一段 shell 与 `_onStreamStderr` 认识。
+ */
+const PREPARE_OK = 'slurmate prepare: ok';
+const PREPARE_FAIL = 'slurmate prepare: failed';
+
+/**
+ * 常驻通道的命令行。同样是编译期常量。
+ *
+ * 它比 `RPC_CMD` 多一段：先把作业日志目录建出来，然后 `exec` 成
+ *   `slurmate stream`。于是正常路径下一条 SSH 连接只有这一条 exec ——
+ *   从连上到断开为止都是它，建目录那次冷访问也落在它里面。
+ *
+ * 建目录放在后台是承重的：冷挂载的第一次访问要几十秒（见 `PREPARE_TIMEOUT_MS`），
+ *   而这条通道是握手要走的路 —— 等它就等于把「已连接」卡在一条 mkdir 上，
+ *   真机 2026-10-16 正是这样。它的回执是一行 stderr，建不出来也拦不住通道。
+ *   它自己那份兜底由客户端的 `PREPARE_TIMEOUT_MS` 管。
+ *
+ * 二进制路径与 `RPC_CMD` 分头写死是有意的：这一串里一个用户输入都没有，
+ *   看一眼就知道。代价是路径写了两遍 —— 有一条用例钉住两者用的是同一个。
+ */
+const STREAM_CMD = "/bin/bash -c '"
+  + '( umask 077; if ' + LOGS_MKDIR
+  + '; then printf "' + PREPARE_OK + '\\n" >&2'
+  + '; else printf "' + PREPARE_FAIL + ' %s\\n" "$?" >&2; fi ) >/dev/null & '
+  + "exec /usr/local/bin/slurmate stream'";
+
+/**
+ * 建作业日志目录那条退路：常驻通道建不起来时，单独开一条 exec 去建它。
  *
  * 为什么客户端要干这一件事：`sbatch -o <日志目录>/slurm-%j.out` 的父目录是
  *    Slurm 在跑作业脚本之前打开的，而作业脚本自己那一次 `mkdir -p` 排在它后面
@@ -131,14 +169,13 @@ const STREAM_CMD = "/bin/bash -c '/usr/local/bin/slurmate stream'";
  *    systemd 单元把整个文件系统挂成只读（`ProtectSystem=strict`），那是"root 身上没有
  *    『写用户文件』这条攻击面"那层保护。
  *
- *    于是三层里只剩客户端这一层。一次连接一个 exec，而它把"第一条作业会不会因为
- *    目录不存在而起不来"从一个要赌的版本相关行为变成确定的。
+ *    于是三层里只剩客户端这一层。正常路径下这一条不跑（目录由 `STREAM_CMD`
+ *    那一条 exec 建）；它跑的时候，站点上的 CLI 是旧的、或者被 guard 拦了 ——
+ *    那时常驻通道根本没有，而"目录存在"这条前提仍然要成立。
  *
  * 与另外两条一样是编译期常量：不接受任何用户输入拼接。
- * `umask 077` 与作业脚本里那个一致 —— 建出来的目录是 0700。
- *   `$HOME` 由内层 bash 展开（外层那对单引号里的内容是原样传过去的）。
  */
-const PREPARE_CMD = "/bin/bash -c 'umask 077; mkdir -p \"$HOME/.slurmate/logs\"'";
+const PREPARE_CMD = "/bin/bash -c 'umask 077; " + LOGS_MKDIR + "'";
 
 const READY_TIMEOUT_MS = 20000;
 const KEEPALIVE_INTERVAL_MS = 10000;
@@ -150,9 +187,11 @@ const RECONNECT_MIN_MS = 1000;
  * 建日志目录那一条命令自己的兜底上限。
  *
  * 一条 `mkdir` 本该眨眼就完（本机在同一个共享盘上实测 3 毫秒），但这一条落在
- *   用户的家目录里、而且要开一条新的 exec —— 登录节点上 fork 一个 shell，
- *   而那个 shell 的第一次访问可能落在冷挂载上：真机 2026-10-16 就是这样，
+ *   用户的家目录里 —— 那一次访问可能落在冷挂载上：真机 2026-10-16 就是这样，
  *   那一次 15 秒没回来。90 秒是给冷挂载留的余量。
+ *
+ * 它管两处：退路那条 exec 自己的超时，以及常驻通道上那句回执的等待上限
+ *   （`_waitChannelPrepare`）。两处是同一件事的两种走法，所以是同一个数。
  *
  * 没有人等满它：连接不等它（见 `_openOnce`），提交之前那一次另有预算
  *   （`PREPARE_SUBMIT_BUDGET_MS`）。没有它的话，一条断在半路的 exec 会让那个
@@ -236,6 +275,24 @@ function withinBudget(p, budgetMs) {
     p.then((v) => { clearTimeout(timer); done(v); },
            () => { clearTimeout(timer); done(noConclusion); });
   });
+}
+
+/**
+ * 建目录那件事的一个结论。
+ *
+ * 两条走法（exec 的退出码、常驻通道上那一行回执）都从这里长出来：`definite`
+ *   是提交那一步唯一的判据，两条路各写一份的话，它的语义迟早会漂开。
+ *   `detail` 是站点自己吐的那一句（只有 exec 那条路拿得到 stderr）。
+ */
+function prepareResult(ok, rc, detail) {
+  if (ok) return { ok: true, error: null, definite: false };
+  const tail = detail ? '：' + String(detail).trim().split('\n')[0] : '';
+  return {
+    ok: false,
+    definite: true,
+    error: '建作业日志目录失败（rc=' + (rc == null ? '?' : rc) + '）'
+      + tail + '，家目录可写吗？',
+  };
 }
 
 /**
@@ -370,6 +427,9 @@ class ResidentChannel {
    *   onNotify {function}  收到一条通知时调用（`{push, seq, at, sessions, stale?}`）
    *   onClose  {function}  这条通道死了（参数是原因字符串）。无论是谁先动的手
    *                        ——对端关了、写失败了、超长了，都走这一个出口。
+   *   onStderr {function}  通道的 stderr 上一整行（去掉行尾换行）。通道的 stderr
+   *                        不是协议的一部分 —— 它是命令串里那一段 shell 回话的
+   *                        地方（见 `PREPARE_OK`）。非约定行由调用方自己忽略。
    *   client   {object}     这台电脑的客户端身份 `{id, name}`。每一条请求都带上它
    *                         （见 request()）。
    */
@@ -377,12 +437,15 @@ class ResidentChannel {
     this._stream = stream;
     this._onNotify = opts.onNotify || (() => {});
     this._onClose = opts.onClose || (() => {});
+    this._onStderr = opts.onStderr || (() => {});
     this._client = opts.client || null;
     /** rid → {resolve, timer}。只有在途的请求在里面。 */
     this._pending = new Map();
     this._nextRid = 1;
     /** 半个行。只会有半个 —— 完整行当场处理掉。 */
     this._buf = '';
+    /** stderr 的那一份（与 `_buf` 分开：两条流可以交错到达）。 */
+    this._errBuf = '';
     this.dead = null;
     /**
      * 必须用 `StringDecoder`，不能 `chunk.toString('utf8')` 了事。
@@ -396,6 +459,8 @@ class ResidentChannel {
      *     注意。两处一起修 —— "怎么把字节拼成一行"是一条规矩，两份实现会漂。
      */
     this._dec = new StringDecoder('utf8');
+    /** stderr 那一侧的同一件事（`_onStderrData`）。 */
+    this._errDec = new StringDecoder('utf8');
     this._bind();
   }
 
@@ -404,11 +469,42 @@ class ResidentChannel {
     this._stream.on('error', (e) => this._die(
       '常驻通道出错：' + ((e && e.message) || '未知错误')));
     this._stream.on('close', () => this._die('常驻通道已关闭'));
+    // stderr 是命令串里那一段 shell 回话的地方（见 `PREPARE_OK`）。它坏了不影响
+    //   RPC：那一条流上没有协议，最坏的结果是那一行回执等不到（调用方自己有
+    //   兜底超时）。所以这里不 `_die` —— 一条只用来读回执的流，不该有权关掉
+    //   整条通道。
+    const err = this._stream.stderr;
+    if (err && typeof err.on === 'function') {
+      err.on('data', (d) => this._onStderrData(d));
+      err.on('error', () => { /* 见上：回执丢了，通道照旧 */ });
+    }
     // 写侧的错误（对端已经走了）也要走同一个出口，否则它是个没人处理的 'error'
     // —— 在 Electron 主进程里那是一条 uncaught exception。
     if (this._stream.stdin && typeof this._stream.stdin.on === 'function') {
       this._stream.stdin.on('error', (e) => this._die(
         '常驻通道写入失败：' + ((e && e.message) || '未知错误')));
+    }
+  }
+
+  /**
+   * stderr 上一个 chunk。拼成整行再交出去 —— 回执是"一行"，不是"一片"。
+   *
+   * 缓冲有上限：那一头若是某个 rc 文件在刷屏（stderr 没人管得住），内存不该
+   *   跟着涨。超过上限就丢掉已经攒着的那半行，下一行照收 —— 回执很短，
+   *   它永远碰不到这个上限；碰到的只可能是噪声。
+   */
+  _onStderrData(d) {
+    if (this.dead) return;
+    this._errBuf += this._errDec.write(d);
+    if (this._errBuf.length > MAX_RESPONSE_BYTES) {
+      this._errBuf = '';
+      return;
+    }
+    let i;
+    while ((i = this._errBuf.indexOf('\n')) >= 0) {
+      const line = this._errBuf.slice(0, i).trim();
+      this._errBuf = this._errBuf.slice(i + 1);
+      if (line) this._onStderr(line);
     }
   }
 
@@ -557,6 +653,16 @@ class SshBackend extends Backend {
     this.residentError = null;
     /** 建目录那一次的 promise（`beginPrepare()` 发起，`ensurePrepared()` 等它）。 */
     this._prepareP = null;
+    /**
+     * 常驻通道上那句回执的等待者（见 `_waitChannelPrepare`）。
+     *
+     * `_prepareMark` 是它的另一半：回执可能比等待者先到 —— 通道一起来，那段
+     *   shell 已经在后台跑 mkdir 了（见 `STREAM_CMD`），它完全可能赶在
+     *   `beginPrepare()` 之前把那一行写上 stderr。先到的那一句记在这里，
+     *   等有人来等的时候当场交账。
+     */
+    this._prepareDone = null;
+    this._prepareMark = null;
     /** 这条连接上重试过没有（`ensurePrepared()` 只重试一次）。 */
     this._prepareRetried = false;
     this._streamTimer = null;
@@ -653,6 +759,9 @@ class SshBackend extends Backend {
     //   结论 —— 而那个结论是"成"还是"没成"都同样没有意义。
     this._prepareP = null;
     this._prepareRetried = false;
+    // 回执那两个也是跟着连接走的：上一条通道上的那一句对新连接不成立。
+    this._prepareDone = null;
+    this._prepareMark = null;
     return this._open();
   }
 
@@ -719,7 +828,8 @@ class SshBackend extends Backend {
         //   该说话的地方是提交那一步（`session.js`），因为那一步才是"目录必须
         //   在"的那一步。在这里说话，症状是用户看到一条"失败"，而目录其实是
         //   有的（真机 2026-10-16 就是这样：报超时，而目录真的建出来了）。
-        this.beginPrepare();
+        // 常驻通道在时它不开 exec：那条命令自己已经在建了（见 `STREAM_CMD`），
+        //   这里只是挂上回执的等待者（见 `beginPrepare`）。
         this.beginPrepare();
 
         // 版本握手 —— 在 whoami 之前问一次 ping。
@@ -913,6 +1023,9 @@ class SshBackend extends Backend {
                error: '建作业日志目录超时（等了 '
                  + Math.round(PREPARE_TIMEOUT_MS / 1000) + ' 秒没有回应）' });
       }, PREPARE_TIMEOUT_MS);
+      // 兜底超时不替任何人撑住事件循环（与本文件其余几处定时器同一条规矩）：
+      //   它等的那件事没人在等的时候，进程不该因为它多活着。
+      timer.unref?.();
       conn.exec(PREPARE_CMD, (err, stream) => {
         if (err) {
           clearTimeout(timer);
@@ -928,12 +1041,9 @@ class SshBackend extends Backend {
         });
         stream.on('close', (code) => {
           clearTimeout(timer);
-          if (code === 0) return done({ ok: true, error: null, definite: false });
+          if (code === 0) return done(prepareResult(true));
           // 走到这里才是"站点明确说了建不出来"：命令真的跑了，退出码不是 0。
-          done({ ok: false, definite: true,
-                 error: '建作业日志目录失败（rc=' + code + '）'
-                   + (stderr.trim() ? '：' + stderr.trim().split('\n')[0] : '')
-                   + '，家目录可写吗？' });
+          done(prepareResult(false, code, stderr));
         });
       });
     });
@@ -945,14 +1055,90 @@ class SshBackend extends Backend {
    * 没连上、或者已经关掉时返回一个 `ok:false` 但不带 error 的结果 ——
    *   那不是"建目录失败"，是"还没有可以建的地方"：`definite` 也是 `false`，
    *   于是提交那一步照常往下走。
+   *
+   * 两条走法分开：常驻通道在的时候不开 exec —— 那条命令自己已经在建了
+   *   （见 `STREAM_CMD`），这里只等它从 stderr 回来的那一行。通道不在时才走
+   *   `prepare()` 那条退路（旧站点、被 guard 拦了）。
    */
   beginPrepare() {
     if (this._prepareP) return this._prepareP;
     if (!this._conn || this._closed) {
       return Promise.resolve({ ok: false, error: null, definite: false });
     }
-    this._prepareP = this.prepare();
+    this._prepareP = this._resident ? this._waitChannelPrepare() : this.prepare();
     return this._prepareP;
+  }
+
+  /**
+   * 等常驻通道上那一行回执。
+   *
+   * 回执可能已经先到了（后台 mkdir 比 `beginPrepare()` 快），那一份记在
+   *   `_prepareMark` 里 —— 有就当场交账。
+   * 剩下的就是等：上限 `PREPARE_TIMEOUT_MS`（与退路那条 exec 同一个数）。
+   *   到点回一个没结论的结果，与 `prepare()` 超时那份同形 —— 调用方不必区分。
+   *
+   * 通道在回执之前断了也要收账（`_onResidentClose` 会调 `_settlePrepare`）：
+   *   否则这一条 promise 要陪一条已经没了的通道等满 90 秒，而`ensurePrepared`
+   *   那一次重试也白白晚 90 秒才开始。
+   */
+  _waitChannelPrepare() {
+    if (this._prepareMark) {
+      const mark = this._prepareMark;
+      this._prepareMark = null;
+      return Promise.resolve(prepareResult(mark.ok, mark.rc));
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (res) => {
+        if (settled) return;
+        settled = true;
+        if (this._prepareDone === done) this._prepareDone = null;
+        clearTimeout(timer);
+        resolve(res);
+      };
+      const timer = setTimeout(() => done({
+        ok: false, definite: false,
+        error: '建作业日志目录超时（等了 '
+          + Math.round(PREPARE_TIMEOUT_MS / 1000) + ' 秒没有回执）',
+      }), PREPARE_TIMEOUT_MS);
+      timer.unref?.();
+      this._prepareDone = done;
+    });
+  }
+
+  /**
+   * 常驻通道的 stderr 上一整行。
+   *
+   * 只认 `STREAM_CMD` 里那两句回执，其余一律丢掉：那一条流上还会有登录 shell
+   *   的 rc 噪声、CLI 自己的报错（「无法连接守护进程」那几条）—— 它们不是
+   *   给客户端读的结论，也不该被读成结论。
+   */
+  _onStreamStderr(line) {
+    let mark = null;
+    if (line === PREPARE_OK) mark = { ok: true, rc: null };
+    else if (line.startsWith(PREPARE_FAIL + ' ')) {
+      // 退出码必须是数字：stderr 上也会有别人的话（rc 文件的输出、CLI 自己的
+      //   报错），"以那句开头"不足以说明它是回执。
+      const rc = line.slice(PREPARE_FAIL.length + 1).trim();
+      if (/^\d+$/.test(rc)) mark = { ok: false, rc };
+    }
+    if (!mark) return;
+    // 回执先于等待者到：记下来，`_waitChannelPrepare` 会当场交账。
+    if (!this._prepareDone) { this._prepareMark = mark; return; }
+    this._prepareDone(prepareResult(mark.ok, mark.rc));
+  }
+
+  /**
+   * 把等回执的那一个收掉（常驻通道断了）。
+   *
+   * `definite` 是 false：通道断在回执前面，证明不了目录在不在 —— 与超时同一类。
+   *   收账之后 `ensurePrepared` 那一次重试（走 exec）就能开始，而不是陪一条
+   *   已经没了的通道干等。
+   */
+  _settlePrepare(why) {
+    const done = this._prepareDone;
+    if (!done) return;
+    done({ ok: false, definite: false, error: why });
   }
 
   /**
@@ -1046,6 +1232,7 @@ class SshBackend extends Backend {
           const ch = new ResidentChannel(stream, {
             onNotify: (msg) => this._onResidentNotify(msg),
             onClose: (why, deliberate) => this._onResidentClose(ch, why, deliberate),
+            onStderr: (line) => this._onStreamStderr(line),
             // 这台电脑是谁。每一条请求都带上（见 ResidentChannel.request）。
             client: this._opts.client || null,
           });
@@ -1109,6 +1296,10 @@ class SshBackend extends Backend {
 
   _onResidentClose(ch, why, deliberate) {
     if (this._resident === ch) this._resident = null;
+    // 建目录那一句回执也随这条通道走了：收账，别让等它的人陪一条没了的通道
+    //   干等满 90 秒（见 `_settlePrepare`）。自己关的也一样 —— 这一条通道上
+    //   不会再有回执了。
+    this._settlePrepare('常驻通道断开了，建作业日志目录那一句没有等到');
     if (deliberate || this._closed || !this._conn) return;
     this.residentError = why;
     this._scheduleStreamReopen();
@@ -1274,6 +1465,7 @@ function isImplemented() {
 
 module.exports = {
   isImplemented, SshBackend, RPC_CMD, STREAM_CMD, PREPARE_CMD,
+  PREPARE_OK, PREPARE_FAIL,   // 导出给测试：命令串里那两句与读它们的那一处同源
   hostKeyFingerprint, hostKeyAlgorithm,
   pickEnvelope,       // 导出给测试：它是纯函数，规则又值得钉住
   parseEnvelopeLine,  // 同上：exec 与常驻通道共用同一条「什么算一条消息」的判据

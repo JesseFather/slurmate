@@ -350,14 +350,22 @@ function showScreen(name) {
   // 最要紧的一件事就是"我现在看的是哪一台"。
   // 2026-10-11 补上作业那一屏：它从前只写着一个死的「作业」，而它恰恰是最容易
   //   忘了自己在哪一台上的地方（几条会话、几个站点）。
+  // 2026-10-17 起地址单独一行（小字、灰，见 `#screen-plugins > .sec-head` 那一段）：
+  //   混在标题里时「插件 · user@host」太长，窄窗口下那一行会被顶开。
   // 判据是活跃连接（主进程那一格），不是"上次点了哪一行"：删掉一条连接、
   //   或者从别处改了活跃连接之后，界面手上那份"我刚才点的是谁"就已经过期了。
   const conn = ((boot && boot.connections) || [])
     .find((c) => c.id === (boot && boot.activeConnectionId));
-  const site = conn ? ` · ${conn.user}@${conn.host}` : '';
-  $('plugins-title').textContent = '插件' + site;
-  $('jobs-title').textContent = '作业' + site;
-  $('debug-title').textContent = '调试' + site;
+  const site = conn ? `${conn.user}@${conn.host}` : '';
+  $('plugins-title').textContent = '插件';
+  $('jobs-title').textContent = '作业';
+  $('debug-title').textContent = '调试';
+  for (const id of ['plugins-site', 'jobs-site', 'debug-site']) {
+    const row = $(id);
+    if (!row) continue;
+    row.textContent = site;
+    row.classList.toggle('hidden', !site);
+  }
   // 屏一换，那些跟着当前这一屏走的小块都要重算一次：作业详情（只在这一屏里
   // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
@@ -779,7 +787,7 @@ function renderFormWorkspace() {
   //   「要不要换」，而 `''` 在这里的意思是"不变"。
   const head = editing ? null : {
     value: '',
-    text: workspaceById(wsDefault) ? `默认：${workspaceById(wsDefault).name}`
+    text: workspaceById(wsDefault) ? `默认：${workspaceLabel(workspaceById(wsDefault))}`
       : '默认：新建一个空白工作区',
   };
   fillWorkspaceOptions(sel, wsPicked || (editing ? cur : ''), editing ? cur : null, head);
@@ -788,7 +796,9 @@ function renderFormWorkspace() {
 
 /** 当前选择的那一句后果。短 —— 长解释在下拉的 title 里。 */
 function wsHintText(v, cur) {
-  const name = (id) => (workspaceById(id) || {}).name || '那个工作区';
+  // 工作区显示成用它的连接（`workspaceLabel`）—— 这一句里也要同一条规则，
+  //   否则同一个工作区在下拉里叫一个名字、在下面这句后果里又叫「工作区 N」。
+  const name = (id) => workspaceLabel(workspaceById(id)) || '那个工作区';
   if (v === NEW_WORKSPACE) return '保存后会新建一个空白工作区。';
   if (cur !== undefined) {                 // 编辑
     if (v === cur || v === '') return '不变。';
@@ -1177,6 +1187,25 @@ function connName(id) {
   return c ? (c.label || `${c.user}@${c.host}`) : '另一条连接';
 }
 
+/**
+ * 工作区在界面上叫什么。
+ *
+ * 名字不由用户取（2026-10-17 起没有「改名」这件事）：它由用它的连接推出来 ——
+ *   有一条连接在用时，就是那条连接的名字（备注，没有就 `user@host`）。
+ *   几条共用时取第一条，「还有谁在用」由旁边那句「N 条连接」说。
+ *   没有人用时退回配置里那个自动名（「工作区 N」）—— 那只在活会话还攥着它、
+ *   而连接已经切走或删掉的那一小段时间里出现。
+ *
+ * 三处共用这一句（映射图、表单的「③ 工作区」、状态条那个选择器）。各推一遍的话，
+ *   同一个工作区会在两个下拉里叫两个名字。
+ */
+function workspaceLabel(l) {
+  if (!l) return '';
+  const members = ((boot && boot.connections) || [])
+    .filter((c) => c.workspaceId === l.id);
+  return members.length ? connName(members[0].id) : l.name;
+}
+
 /** 一个工作区后面跟的那句说明。 */
 function workspaceNote(l, connId) {
   if (!l) return '';
@@ -1233,7 +1262,7 @@ function frontWorkspaceId() {
 function fillWorkspaceOptions(sel, keep, connId, head) {
   const list = boot.workspaces || [];
   const sig = JSON.stringify([head || null, connId == null ? '' : connId,
-    list.map((l) => [l.id, l.name, l.refCount, l.soleOwnerId])]);
+    list.map((l) => [l.id, workspaceLabel(l), l.refCount, l.soleOwnerId])]);
   if (sel.dataset.sig !== sig) {
     sel.textContent = '';
     if (head) {
@@ -1245,7 +1274,7 @@ function fillWorkspaceOptions(sel, keep, connId, head) {
     for (const l of list) {
       const o = document.createElement('option');
       o.value = l.id;
-      o.textContent = `${l.name}${workspaceNote(l, connId)}`;
+      o.textContent = `${workspaceLabel(l)}${workspaceNote(l, connId)}`;
       sel.append(o);
     }
     const nu = document.createElement('option');
@@ -1344,7 +1373,8 @@ async function applyWorkspace(connectionId, workspaceId, opts = {}) {
       return { ok: false };
     }
     armConfirm(opts.anchor, {
-      why: discardWhy(r.workspaceName),
+      why: discardWhy(workspaceLabel(workspaceById(r.workspaceId))
+        || r.workspaceName || '那个工作区'),
       yes: '切走',
       // 第二趟带上 `confirmed`，其余照原样 —— 包括 `anchor` / `revert`，
       // 万一主进程再拒一次（那时它已经答过一次了，`armConfirm` 会再摆一段）。
@@ -1444,7 +1474,7 @@ function renderWorkspaceMap() {
 
     const nm = document.createElement('span');
     nm.className = 'nm';
-    nm.textContent = l.name;
+    nm.textContent = workspaceLabel(l);
 
     // 引用计数直接摆出来 —— 「这个工作区还有谁在用」正是这张图存在的理由
     const meta = document.createElement('span');
@@ -1452,12 +1482,13 @@ function renderWorkspaceMap() {
     meta.textContent = l.refCount === 0 ? '没人用'
       : l.refCount === 1 ? '1 条连接' : `${l.refCount} 条连接`;
 
-    const rn = document.createElement('button');
-    rn.className = 'ghost tiny';
-    rn.textContent = '改名';
-    rn.onclick = () => startRename(l, nm);
-
-    n.append(nm, meta, rn);
+    n.append(nm, meta);
+    // 悬停给全名与用途：格子里显示的是"用它的那条连接"，窄下来会出省略号，
+    //   而"一格是什么"（工作区，不是又一条连接）全在那一句里。
+    const users = ((boot && boot.connections) || [])
+      .filter((c) => c.workspaceId === l.id).map((c) => connName(c.id));
+    n.title = (users.length ? `由 ${users.join('、')} 在用` : '此刻没有连接在用它')
+      + `（${l.name}）。一个工作区里每个插件各用一份数据；几条连接可以共用同一个。`;
     wsCol.append(n);
     mapNodes.workspace.set(l.id, n);
   }
@@ -1548,44 +1579,6 @@ function drawWorkspaceLines() {
       edge(wnode, mapNodes.space.get(sid), false);
     }
   }
-}
-
-/**
- * 就地改名。
- *
- * 不用 window.prompt —— 它在 Electron 里直接抛异常
- *   （`prompt() is and will not be supported`），而不是返回 null。
- *   所以要自己在页面里摆一个 <input>。
- */
-function startRename(l, nm) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'rename';
-  input.value = l.name;
-  input.maxLength = 40;
-
-  let done = false;
-  const finish = async (save) => {
-    if (done) return;
-    done = true;                 // 先置位：replaceWith 会触发 blur，不挡住会递归
-    input.replaceWith(nm);
-    if (!save) return;
-    const name = input.value.trim();
-    if (!name || name === l.name) return;
-    const r = await window.slurmate.renameWorkspace({ workspaceId: l.id, name });
-    if (!r.ok) return notice('error', r.error || '改名失败。');
-    boot.workspaces = r.workspaces || boot.workspaces;
-    renderConnections(boot.connections);   // 三处入口用的是同一份数据，一起重画
-  };
-
-  input.onkeydown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
-  };
-  input.onblur = () => finish(true);
-  nm.replaceWith(input);
-  input.focus();
-  input.select();
 }
 
 // ── 插件 ────────────────────────────────────────────────────────────────────
@@ -2445,7 +2438,7 @@ function spaceUsersOf(spaceId, workspaceId) {
   const names = (boot.workspaces || [])
     .filter((l) => l.id !== workspaceId
       && Object.values(l.refs || {}).includes(spaceId))
-    .map((l) => `「${l.name}」`);
+    .map((l) => `「${workspaceLabel(l)}」`);
   return names.length ? `${names.join('、')}也在用` : '';
 }
 
@@ -2481,7 +2474,7 @@ function pluginSpaceRow(p) {
   lab.className = 'plug-data-lbl';
   lab.textContent = '数据';
   lab.title = `这条连接（${conn.label || `${conn.user}@${conn.host}`}）的`
-    + `「${ws.name}」里，这个插件用哪一份数据。`
+    + `「${workspaceLabel(ws)}」里，这个插件用哪一份数据。`
     + '一份数据 = 一个本地端口 + 一份浏览器存储（登录状态、窗口布局），'
     + '可以被几个工作区共用，共用就是它们看到同一份。';
 
@@ -2566,7 +2559,9 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
   let extra = {};
   let r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra });
   if (!r.ok && r.code === 'shared') {
-    const pick = await askFork(r.workspaceName, r.others || []);
+    const pick = await askFork(
+      workspaceLabel(workspaceById(r.workspaceId)) || r.workspaceName || '那个工作区',
+      r.others || []);
     if (!pick) return { ok: false };
     extra = { scope: pick };
     r = await window.slurmate.setWorkspaceRef({ ...arg, ...extra });

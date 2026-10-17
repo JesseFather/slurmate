@@ -506,8 +506,9 @@ test('数据那两格也进路径：插件 id 与共享组的形状都要查', (
 });
 
 test('新建出来的名字是「工作区 N」，而 N 是当前没被占用的最小正整数', () => {
-  // 那两个字符串是用户看得见的东西（下拉框、映射图、改名框里的初值），
-  //   而它们没有任何别的地方看着 —— 改了措辞不会有别的用例变红。
+  // 那个字符串是用户看得见的东西（映射图里"没有任何连接在用的"那一格，
+  //   以及下拉框里同样的情形），而它没有别的地方看着 —— 改了措辞不会有别的
+  //   用例变红。有连接在用的工作区不显示这个名字（见 panel.js 的 `workspaceLabel`）。
   assert.equal(config.nextWorkspaceName({ workspaces: [] }), '工作区 1');
   // 连着占了 1、2，往后让到 3；而 2 空着时就用 2（不是"总在最大的后面加一"）。
   assert.equal(config.nextWorkspaceName({ workspaces: [
@@ -516,7 +517,8 @@ test('新建出来的名字是「工作区 N」，而 N 是当前没被占用的
   assert.equal(config.nextWorkspaceName({ workspaces: [
     { id: gid(1), name: '工作区 1' },
     { id: gid(2), name: '工作区 3' }] }), '工作区 2');
-  // 用户自己起的名字不占号 —— 否则「我自己起的名字」会让下一个自动名跳过 1。
+  // 不是「工作区 N」形状的名字不占号 —— 否则一份旧配置里改过名的那个工作区
+  //   会让下一个自动名跳过 1（0.23 起界面上不再有改名，但旧配置里还在）。
   assert.equal(config.nextWorkspaceName({ workspaces: [
     { id: gid(1), name: '我自己起的名字' }] }), '工作区 1');
 });

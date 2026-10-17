@@ -4759,19 +4759,6 @@ function registerIpc() {
              forked: forkedName };
   });
 
-  /** 给工作区改名。名字只是给人看的 —— 它不参与任何身份（进路径的是数据 id，绝不复用）。 */
-  send('app:renameWorkspace', async (payload = {}) => {
-    const { workspaceId, name } = payload;
-    if (!config.findWorkspace(cfg, workspaceId)) {
-      return { ok: false, error: '这个工作区不存在。' };
-    }
-    const clean = String(name || '').trim().slice(0, 40);
-    if (!clean) return { ok: false, error: '名字不能为空。' };
-    cfg.workspaces = cfg.workspaces.map((l) => (l.id === workspaceId ? { ...l, name: clean } : l));
-    commitConfig();
-    return { ok: true, workspaces: config.workspacePlan(cfg) };
-  });
-
   // ── 本机的插件数据 ──
   //
   // 与 `app:bootstrap` 分开的一次单独的对账（理由见 auditPluginData 的注释）。

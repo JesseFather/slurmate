@@ -230,10 +230,10 @@ button {
   font: inherit; cursor: pointer; border: 0; border-radius: 3px;
   padding: 7px 14px; background: var(--accent); color: #fff;
   /* 一颗按钮的文字折行，在任何容器里都是错的：它读起来像两件事，而按下去
-     只有一件事。用户 2026-10-17 报的就是这一处（映射图里那颗「改名」被 flex
-     压窄，文字竖成了两行，而盒子自己的矩形规规矩矩待在界内，所以两条老判据
-     一条都不响）。这里禁掉折行，压窄就变成"文字比盒子宽"——
-     而那一条由探针量（`measure.js` 那一段「按钮的文字」）。 */
+     只有一件事。用户 2026-10-17 报过一次现场（映射图里那颗按钮被 flex 压窄、
+     文字竖成了两行，而盒子自己的矩形规规矩矩待在界内，所以两条老判据一条都
+     不响）。这里禁掉折行，压窄就变成"文字比盒子宽" —— 而那一条由探针量
+     （`measure.js` 那一段「按钮的文字」）。 */
   white-space: nowrap;
 }
 button:hover { background: var(--accent-hover); }
@@ -447,7 +447,6 @@ button.remember:hover { background: #5c4e22; }
   color: var(--fg-dim); font-size: 11px; flex: 0 3 auto; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.wnode input.rename { width: 130px; padding: 1px 6px; font-size: 12px; }
 
 /* ── 高级选项（每一块插件自己一份）──
    它从前是全屏共用的一份（`#adv`），长在第二屏最底下 —— 而它喂的是某一块的
@@ -741,9 +740,23 @@ dialog p#fork-body { white-space: pre-line; }
 #screen-jobs > .sec-head,
 #screen-debug > .sec-head {
   margin: 0 calc(-26px - var(--sb-w)) 14px -26px;
-  padding: 12px 26px;
+  padding: 14px 26px 13px;
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
+}
+
+/* 身份带里的两行：这一屏的名字，以及脚下是哪一台。
+   2026-10-17 从一行改成两行（用户报的三件事：样子不好看、贴着状态条像"顶头"、
+   「插件 · user@host」太长）。分开之后标题只剩两个字，站点地址退成小字 ——
+   两件事各有各的位置，长也长不到标题上去；上下各多留 2px 与一行字高，
+   带子不再是贴着状态条的一条窄边。
+   地址那一行不换行、出省略号：它可能很长（`user@host`），而把它折成第二行
+   会把带子撑高、按钮跟着上下跳。完整值在窗口标题栏里一直有。 */
+.band-id { flex: 1; min-width: 0; }
+.band-id h2 { margin: 0; flex: none; font-size: 14px; line-height: 20px; }
+.band-site {
+  margin: 2px 0 0; font-size: 11px; line-height: 15px; color: var(--fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ── 滚动条：自己画 ──────────────────────────────────────────────────────────
