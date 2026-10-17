@@ -37,6 +37,13 @@
  * 2. 也绝不能解析响应头的 set-cookie：Electron `net` 模块在这件事上不可靠
  *    （electron#20631）。查 jar 既避开了这个坑，又更贴近我们真正关心的问题 ——
  *    cookie 到底进没进去。
+ *
+ * 3. 第 1 条在 fetch 抛异常时同样成立。`redirect: 'manual'` 的 302 会被
+ *    Electron `net` 当成一次被取消的重定向，`fetch` 抛出
+ *    `Redirect was cancelled` —— 而那一刻服务端已经把 Set-Cookie 发出去了。
+ *    （2026-10-18 真机：提示「自动登录出错」，而手动点「重新加载」之后是
+ *    登录之后的界面。）所以出异常也要先查 jar：查到了就是登录成功，那个异常
+ *    只说明重定向被拦下了。反过来，没查到才按异常报错。
  */
 
 /** 表单提交的 content-type。三种主流写法里这是唯一被 HTML 规范定义的那一种。 */
@@ -56,6 +63,7 @@ async function webLogin(ses, origin, password, contract) {
   if (!password) return { ok: false, reason: 'no_password' };
 
   let status = null;
+  let failure = null;
   try {
     const res = await ses.fetch(origin + contract.path, {
       method: 'POST',
@@ -65,14 +73,16 @@ async function webLogin(ses, origin, password, contract) {
     });
     status = res.status;
   } catch (e) {
-    return { ok: false, reason: 'fetch_failed: ' + e.message };
+    // 不在这里返回：见文件头第 3 条。cookie 可能已经进了 jar，先查再报。
+    failure = e;
   }
 
   const cookies = await ses.cookies.get({ name: contract.cookie, url: origin });
   if (Array.isArray(cookies) && cookies.length > 0) return { ok: true, status };
 
-  // 到这儿说明没拿到 cookie。可能是口令错，也可能是服务升级改了端点或字段名。
-  // 两者要分开告诉用户 —— 「密码不对」和「客户端版本不匹配」是完全不同的行动。
+  // 到这儿说明没拿到 cookie。可能是口令错，也可能是服务升级改了端点或字段名；
+  // 而 fetch 本身出错时那个错要说出来 —— 三种的出路不同。
+  if (failure) return { ok: false, reason: 'fetch_failed: ' + failure.message };
   return { ok: false, reason: 'no_cookie', status };
 }
 

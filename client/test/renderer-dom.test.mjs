@@ -860,6 +860,79 @@ test('「重新同步」在整屏底部挨着「检查集群」：点它走那�
     assert.match(said, /还没连上站点/, '失败要说清为什么');
   });
 
+test('作业那一屏：状态条上是「停止该作业」，停的是选中的那一条；其余屏照旧「结束会话」',
+  async () => {
+    // 用户 2026-10-18：在作业选项卡里，上栏不该是「结束会话」—— 它停的是前台
+    //   那条会话，而用户盯着的是选中的那一行。作业屏上它要写「停止该作业」，
+    //   停的就是选中的那一条；结束会话回面板去操作。
+    const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+      'window.__stops = []; window.slurmate.stop = (slot) => {'
+      + '  window.__stops.push(slot); return Promise.resolve({ ok: true }); };'
+      + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
+    h.run("document.body.append($('sb-end'));");
+    const btn = h.byId.get('sb-end');
+    const snap = { state: 'running', slot: 's1', sessionId: 'sess-a', jobId: '11' };
+
+    // ── 其余各屏：前台会话 ──
+    h.run("SCREEN = 'plugins'; SESS = { sessions: [{ slot: 's1', live: true }], front: 's1' };");
+    h.fn('renderSnapshot')(snap);
+    assert.equal(btn._text, '结束会话');
+    assert.equal(btn.classList.contains('hidden'), false);
+
+    // 排队中也露：它已经占着位置、作业已经在队列里 —— 这正是要能取消的那一种。
+    h.fn('renderSnapshot')({ ...snap, state: 'queued' });
+    assert.equal(btn._text, '结束会话');
+    assert.equal(btn.classList.contains('hidden'), false, '排队中的会话也要能结束');
+
+    // ── 作业那一屏：选中的第二条 ──
+    const rows = [
+      { session_id: 'sess-a', slot: 's1', live: true, attached: true, job_id: '11' },
+      { session_id: 'sess-b', slot: 's2', live: true, attached: true, job_id: '22' },
+    ];
+    h.run(`SCREEN = 'jobs'; JOBS = ${JSON.stringify({
+      list: rows, at: 1, error: null, selected: 'sess-b',
+    })};`);
+    h.fn('renderJobsSelection')();
+    assert.equal(btn._text, '停止该作业', '作业屏上不许再写「结束会话」');
+    assert.equal(btn.classList.contains('hidden'), false);
+    assert.match(btn.title || '', /22/, 'title 要说清停的是哪一条');
+
+    // 第二段打的是选中的那一条（s2），不是前台 s1
+    btn.onclick();
+    const cluster = (() => {
+      const p = btn.parentNode;
+      return p.children[p.children.indexOf(btn) + 1];
+    })();
+    assert.match(cluster.children[0]._text, /作业会被取消/);
+    assert.equal(cluster.children[1]._text, '停止');
+    await cluster.children[1].onclick();
+    assert.equal(JSON.stringify(h.run('window.__stops')), '["s2"]',
+      `停的是选中的那一条：${JSON.stringify(h.run('window.__stops'))}`);
+  });
+
+test('作业那一屏开着时，活会话的集合一变就重取一次列表', () => {
+  // 用户 2026-10-18：排队中的作业不在作业那一屏上。提交返回之前那一屏是空的，
+  //   而它不跟着状态推送更新 —— 于是一个刚排队起来的作业要等到手动「刷新」
+  //   才出现。判据是活会话的集合变没变，不是每一份推送都问一次。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__jobsCalls = 0; window.slurmate.jobs = () => {'
+    + '  window.__jobsCalls += 1; return Promise.resolve({ ok: true, jobs: [], at: 1 }); };');
+  h.run("SCREEN = 'jobs';");
+  h.fn('renderSessions')({ sessions: [], front: null });
+  const after = h.run('window.__jobsCalls');
+  assert.ok(after >= 1, '进作业屏第一次要问一次');
+
+  h.fn('renderSessions')({ sessions: [], front: null });
+  assert.equal(h.run('window.__jobsCalls'), after, '集合没变就不许再问');
+
+  // 提交了一条（还在排队、本机接着它）→ 当场重取
+  h.fn('renderSessions')({
+    sessions: [{ slot: 's9', live: true, service: '编辑器', snap: null }], front: 's9',
+  });
+  assert.equal(h.run('window.__jobsCalls'), after + 1,
+    '新出现一条会话，作业列表要重取 —— 排队中的那一条就是这样出现的');
+});
+
 test('插件那一块上两颗删除：删本机那份两端都有，撤站点那颗只在假站点上',
   async () => {
     // 用户 2026-10-15 报的：「插件界面没有删除某个插件的选项，我现在无法删掉在

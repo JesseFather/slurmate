@@ -682,8 +682,10 @@ test('该两段式的七处走两段式 —— 而重新生成密钥不是（判
   //   · 重画那一屏之前必须先收掉 —— 那一行连同确认一起被丢掉，而 `armed` 还指着
   //     一个不在文档里的节点：用户接着点"别处"看起来没反应，而下一次真正的第一段
   //     会被这个幽灵顶掉。
-  assert.match(js, /if \(!running\) disarmArmed\(\);/,
-    '会话停下之后要把那个第一段收掉（它挂在 `running` 那一格的判断里）');
+  // 排队中也要留着那个第一段：那里现在也露「结束会话」（`renderStatusEnd`），
+  //   而它是有对象的（`goodbye` 在 `submitted` 上就是一次 scancel）。
+  assert.match(js, /if \(!\(running \|\| st === 'queued'\)\) disarmArmed\(\);/,
+    '会话停下之后要把那个第一段收掉 —— 而排队中要留着（那里也露「结束会话」）');
   const rcFn2 = /function renderConnections\(list\)[\s\S]*?\n\}/.exec(js);
   assert.ok(rcFn2, 'panel.js 里应当有 renderConnections()');
   assert.match(rcFn2[0], /disarmArmed\(\)/,

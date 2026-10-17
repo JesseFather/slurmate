@@ -237,6 +237,11 @@ class SessionController extends EventEmitter {
     this._portChoice = null;
     this._tunnelPort = null;
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
+    /**
+     * 连续几拍心跳被限流。见 `_beat()` 那一支：限流不是断线，而一次限流
+     *   就把「连接暂时中断」的整屏遮罩挂出来，说的比真实情况坏。
+     */
+    this._rateLimitedBeats = 0;
     this._hbTimer = null;
     this._statusTimer = null;
     this._releaseTimer = null;
@@ -890,11 +895,24 @@ class SessionController extends EventEmitter {
         return;
       }
       this._heartbeatAt = Date.now();
+      this._rateLimitedBeats = 0;
       if (this.warning && /心跳/.test(this.warning)) this.warning = null;
     } else if (c.action === Action.SESSION_GONE) {
       // 会话没了，心跳没有意义了。但不能因此判定作业已停 —— 只报告事实。
       this._stopHeartbeat();
       this.warning = '控制节点上该会话已不存在，心跳停止。';
+    } else if (c.action === Action.RATE_LIMITED) {
+      // 限流不是断线（`classify.js` 的 RATE_LIMITED：退避重试，不弹错给用户）。
+      //   接回站点、对账那一阵的突发会把站点的桶打满，而心跳正好落在里面 ——
+      //   一次被限流就写「心跳发送失败」，界面挂出整屏「连接暂时中断」，
+      //   而那一刻连接是好的；下一拍成功要等四十五秒，遮罩就一直挂着
+      //   （2026-10-18 真机）。
+      //   连着两拍都被限流才说出来：那时已经九十秒没有一次成功心跳，
+      //   而离 1800 秒那条线还很远 —— 不是不说，是等事实成立。
+      this._rateLimitedBeats += 1;
+      if (this._rateLimitedBeats >= 2) {
+        this.warning = '心跳被站点限流（' + c.message + '），仍在重试。';
+      }
     } else {
       // 传输层失败 / 守护进程不可达：继续重试，绝不放弃。
       // 这一段正是 300 秒闪断窗口要覆盖的情况。

@@ -84,6 +84,8 @@ function setConnected(on) {
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
 let lastSnap = null;         // 前台那一条的快照，供状态条与工作区选择器读它
 let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
+/** 上一次推送时活着的槽，逗号连起来。作业那一屏据此判断"要不要重取一次"。 */
+let lastLiveIds = null;
 /**
  * 最近一次的插件清单。界面里有两处需要知道"这个会话的插件声明了界面没有"，
  * 而快照本身是插件无关的（session.js 不认识任何插件）—— 所以在这里留一份，
@@ -404,6 +406,17 @@ function renderSessions(payload) {
   //   判据 `hasRunningSession()` 与右栏那一条同源（同一个函数，不是各算一遍）。
   //   而「断开」不需要这句：第二屏只有连着才进得来，它在那一屏上一直在。
   $('btn-leave').classList.toggle('hidden', !hasRunningSession());
+
+  // 作业那一屏开着的时候，活会话的集合一变就重取一次列表。
+  //
+  //   那一屏问的是服务端（`app:jobs`），它不跟着状态推送更新。而"刚点完启动"
+  //   那几秒提交还没有返回，列表里当然没有这一条 —— 用户立刻切过来看到的是空的，
+  //   而它不会自己长出来（2026-10-18 真机：排队中的作业不在作业那一屏上）。
+  //   判据是集合变没变，不是每一份推送都问一次：状态推送的读者远多于这一屏。
+  const liveIds = SESS.sessions.filter((x) => x.live).map((x) => x.slot).sort().join(',');
+  if (SCREEN === 'jobs' && liveIds !== lastLiveIds) refreshJobs();
+  lastLiveIds = liveIds;
+
   renderSnapshot(frontSnap());
 }
 
@@ -620,13 +633,15 @@ function renderSnapshot(s) {
   // 会话一停，「结束会话」那个第一段就不该再等着第二段了 —— 留着它，用户按下去
   //   的第二段没有对象（会话已经结束了）。收起是这一格自己的事，与 `hidden`
   //   无关：那两件事一个是"这一格该不该在"，一个是"它现在是第几段"。
-  if (!running) disarmArmed();
+  // 排队中也算"有对象"（`renderStatusEnd` 在那一段也露它），所以不在这里收。
+  if (!(running || st === 'queued')) disarmArmed();
   // 这两颗只在它们真的有事可做时出现（2026-10-17 真机：释放中的会话页面已经
   //   收掉了，而「重新加载」还露着，按下去什么都不会发生）：
   //   · 「重新加载」打的是那一块页面，没有页面（释放中 / 中转站插件）就不该在；
   //   · 「结束会话」在释放开始之后没有对象可停，守护进程会自己把这一步走完。
   $('sb-reload').classList.toggle('hidden', !(st === 'running' && hasSurface(s)));
-  $('sb-end').classList.toggle('hidden', !(st === 'running'));
+  // 「结束会话 / 停止该作业」：标签与对象都跟着当前那一屏走，见 renderStatusEnd。
+  renderStatusEnd(s);
   $('sb-dev').classList.toggle('hidden', !(s && s.dev));
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
@@ -670,6 +685,39 @@ function renderSnapshot(s) {
   renderWorkspaceSelectors();
   // 工作区下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
   requestAnimationFrame(drawWorkspaceLines);
+}
+
+/**
+ * 状态条上那颗「结束会话 / 停止该作业」。
+ *
+ * 它标的是"这一下会停掉哪一个"，而那件事跟着当前这一屏走：
+ *   · 作业那一屏：停的是选中的那一条，与那一屏的【结束】同一个动作、同一份
+ *     判据（`live && attached && slot`），标签写「停止该作业」；
+ *   · 其余各屏：停的是前台那条会话，标签写「结束会话」。
+ * 从前它固定是「结束会话」、固定打前台那条 —— 用户在作业那一屏上盯着选中的
+ *   一行，按下去停的却是另一条（2026-10-18 真机）。
+ *
+ * 排队中也露：那时会话已经占着位置、作业已经在 Slurm 队列里，而"结束"正是它
+ *   需要的（`goodbye` 在 `submitted` 上就是一次 scancel）。从前只露 running，
+ *   于是排队中的作业在面板上找不到取消的办法。
+ */
+function renderStatusEnd(s) {
+  const btn = $('sb-end');
+  if (SCREEN === 'jobs') {
+    const j = selectedJob();
+    const can = Boolean(j && j.live && j.attached && j.slot);
+    btn.textContent = '停止该作业';
+    btn.title = can
+      ? `停止选中的这条作业${j.job_id ? `（作业 ${j.job_id}）` : ''}，`
+        + '集群上的作业会被取消。'
+      : '先在列表里点一条本机接着的作业。';
+    btn.classList.toggle('hidden', !can);
+    return;
+  }
+  const st = s ? s.state : 'idle';
+  btn.textContent = '结束会话';
+  btn.title = '结束这一条会话，集群上的作业会被取消。';
+  btn.classList.toggle('hidden', !(st === 'running' || st === 'queued'));
 }
 
 /**
@@ -3247,6 +3295,9 @@ function renderJobsSelection() {
   $('btn-jobs-reload').disabled = !canAct;
   $('btn-jobs-takeover').title = !j ? '先在上面点一条作业'
     : (j.keeper_is_me ? '这台电脑已经在看它了' : '把这条会话的看护者换成这台电脑（作业一个字都不动）');
+  // 状态条上那一颗跟着选中的这一条走（见 renderStatusEnd）。少了这一句，
+  //   点一条作业之后它还说「停止该作业」却停着上一次那一条 —— 或者停着前台那条。
+  renderStatusEnd(lastSnap);
 }
 
 /**
@@ -4304,11 +4355,18 @@ function bindEvents() {
   //   够得着的像素（与 `sb-reload` / `sb-temp` 同一条理由）。
   // 两段式（见 armConfirm）：它会取消集群上正在跑的作业，而它旁边紧挨着
   //   「重新加载」。第一段可退，第二段才真的结束。
-  $('sb-end').onclick = () => armConfirm($('sb-end'), {
-    why: '结束这一条会话，集群上的作业会被取消。',
-    yes: '结束',
-    run: endFrontSession,
-  });
+  // 对象跟着当前那一屏走（与 renderStatusEnd 同一份判据）：作业那一屏停的是
+  //   选中的那一条，其余各屏停的是前台那条。
+  $('sb-end').onclick = () => {
+    const stopJob = SCREEN === 'jobs';
+    return armConfirm($('sb-end'), {
+      why: stopJob
+        ? '停止选中的这条作业，集群上的作业会被取消。'
+        : '结束这一条会话，集群上的作业会被取消。',
+      yes: stopJob ? '停止' : '结束',
+      run: stopJob ? endSelectedJob : endFrontSession,
+    });
+  };
 
   // 「端口被占」那一行的三颗按钮 —— 三选一，三颗都是当场生效的动作。
   //    它们不是两段式（见 `renderPortAsk`）：答「启动」就重发那一趟，答「记住新配置

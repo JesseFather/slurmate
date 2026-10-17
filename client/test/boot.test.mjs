@@ -7128,6 +7128,44 @@ test('作业列表来自服务端（`op:list`），不是本机那张会话表',
   await openUpTo(idx, 1);
 });
 
+test('排队中的作业：作业那一屏看得见它，【结束】取消的就是它', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  // 夹具的登记延迟默认 8 秒（真集群上的样子）—— 正好把会话按在「排队」上。
+  b.enrollDelayMs = 5000;
+
+  // 不 await：`app:start` 要等登记完成才返回（`_waitForEnroll`），而这一条
+  //   要看的正是"还在排队"那一段。
+  const starting = appStart(null, 'code-server');
+  let ctl = null;
+  for (let i = 0; i < 200 && !(ctl && ctl.sessionId); i += 1) {
+    await new Promise((r) => setTimeout(r, 20));
+    ctl = onlyCtl(idx);
+  }
+  assert.ok(ctl && ctl.sessionId, '前置：提交已经返回 session_id');
+  assert.equal(ctl.state, 'queued', '前置：它还在排队');
+
+  const r = await invoke('app:jobs');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const row = r.jobs.find((j) => j.session_id === ctl.sessionId);
+  assert.ok(row, `排队中的作业必须在作业那一屏上：${JSON.stringify(r.jobs)}`);
+  assert.equal(row.state, 'submitted');
+  assert.equal(row.live, true);
+  assert.equal(row.attached, true, '本机提交的这一条，本机接着它');
+  assert.ok(row.slot, '结束那条路要指名停哪一个');
+  assert.match(row.state_text, /等待调度/, `状态要照实译：${row.state_text}`);
+  assert.equal(row.job_state, 'PENDING', '作业那一侧它还没有开始跑');
+
+  // 【结束】走的就是这一个槽 —— 排队中的也一样。
+  const stop = await invoke('app:stop', { slot: row.slot });
+  assert.equal(stop.ok, true, JSON.stringify(stop));
+  assert.equal(['releasing', 'ended'].includes(ctl.state), true,
+    '结束之后它不该还停在排队上：' + ctl.state);
+  b.enrollDelayMs = 8000;
+});
+
 test('【接管】只换看护者那一格，会话其余部分一动都不动', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');

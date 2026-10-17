@@ -88,6 +88,28 @@ function originOf(url) {
 }
 
 /**
+ * 加载一个页面，把「被另一次导航顶掉」当成正常。
+ *
+ * `loadURL` 的 promise 在这一次加载被后来的导航打断时以 `ERR_ABORTED (-3)`
+ *   拒绝。而打断它的几乎总是我们自己：登录成功之后的 `reload()`、隧道换端口的
+ *   `retarget()`、以及页面自己的重定向。从前它一路冒到 `onSessionChange` 的
+ *   catch，变成面板上两条「更新界面时出错：ERR_ABORTED (-3) loading …」
+ *   （2026-10-18 真机）—— 那句话没说错，只是页面并没有坏，它正是我们让去的
+ *   那一页。
+ *
+ * 其余失败照旧抛出去：连不上、白页仍然要说出来。
+ */
+async function loadPage(wc, url) {
+  try {
+    await wc.loadURL(url);
+  } catch (e) {
+    const code = String((e && e.code) || '');
+    if (code === 'ERR_ABORTED' || /ERR_ABORTED/.test(String(e && e.message))) return;
+    throw e;
+  }
+}
+
+/**
  * 没有插件信息时关窗确认的文案。
  *
  * 这不是"兜底文案"，而是未知服务那个情形的正确文案：我们不知道那个会话是
@@ -280,7 +302,7 @@ class ShellWindow {
       //   而它只对前台那一块做：起一条后台会话时把前台那块旧页面顶上来，
       //     是另一个方向的意外（用户会以为"我起的是它吗"）。
       if (slot === this._front) this._panelFront = false;
-      await view.webContents.loadURL(url);
+      await loadPage(view.webContents, url);
     } else {
       // 隧道换端口：origin 变了，但不重装监听器（它们读的是 s.origin）。
       // 判据是 origin，不是整串 URL：页面自己的导航（code-server 打开一个目录
@@ -291,7 +313,7 @@ class ShellWindow {
       s.origin = originOf(url);
       const cur = s.view.webContents.getURL();
       if (!cur || originOf(cur) !== prevOrigin) {
-        await s.view.webContents.loadURL(url);
+        await loadPage(s.view.webContents, url);
       }
     }
     this._layout();
@@ -461,7 +483,7 @@ class ShellWindow {
     if (!s || s.view.webContents.isDestroyed()) return;
     // 只更新 s.origin —— 监听器已经装过了，不重复装（见 _wireSurface 的注释）
     s.origin = originOf(url);
-    await s.view.webContents.loadURL(url);
+    await loadPage(s.view.webContents, url);
   }
 
   // ── 遮罩（断线提示）────────────────────────────────────────────────────

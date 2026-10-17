@@ -205,6 +205,24 @@ test('基座的登录判定只认契约里的 cookie', async () => {
   assert.equal((await webLogin(jar(['x']), 'http://x', '', CONTRACT)).reason, 'no_password');
 });
 
+test('fetch 在重定向上被取消时，先看 cookie：登录已经成功', async () => {
+  // 2026-10-18 真机：`redirect: 'manual'` 的 302 被 Electron net 当成一次被
+  //   取消的重定向，fetch 抛 `Redirect was cancelled` —— 而那一刻 Set-Cookie
+  //   已经发出去了。判定必须先查 jar：否则插件报「自动登录出错」，界面停在
+  //   密码页，手动点「重新加载」反而正常（那两条日志正是这个形状）。
+  const ses = (names) => ({
+    fetch: async () => { throw new Error('Redirect was cancelled'); },
+    cookies: { get: async ({ name }) => (names.includes(name) ? [{ name, value: 'x' }] : []) },
+  });
+  const yes = await webLogin(ses([CONTRACT.cookie]), 'http://x', 'pw', CONTRACT);
+  assert.equal(yes.ok, true, 'cookie 进了 jar 就是登录成功 —— 异常只说明重定向被拦下');
+
+  const no = await webLogin(ses([]), 'http://x', 'pw', CONTRACT);
+  assert.equal(no.ok, false);
+  assert.match(no.reason, /^fetch_failed: Redirect was cancelled$/,
+    '没拿到 cookie 时照旧把那个异常说出来 —— 三种失败的出路不同');
+});
+
 test('isLoginPath 的边界', () => {
   const p = CONTRACT.path;
   assert.equal(isLoginPath(`http://127.0.0.1:18080${p}`, p), true);
