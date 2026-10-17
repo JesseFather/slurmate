@@ -60,17 +60,30 @@ async function attach(ctx, snap) {
     return;
   }
 
+  // 每一句只说一遍（按会话分桶）。
+  //
+  // `attach` 不只在起会话那一刻被调到：每 45 秒一次心跳、每 30 秒一次推送都会
+  //   走到这里。不去重的话，提示流里那条「已自动登录」每半分钟重复一遍，把
+  //   真正要紧的消息顶下去（2026-10-18 真机）。
+  // 键带会话号：换一条会话是新的那一次，该说的照说 —— 按 `id@版本` 分桶只说
+  //   一遍的话，第二次起会话时登录真失败了，界面上反而不敢出声。
+  const once = (key) => ctx.once(`${key}|${snap.sessionId || ''}`);
+
   const res = await ctx.login(ses, snap.origin, s.auth_password);
   if (res.ok) {
-    ctx.notice('ok', '已自动登录 code-server。');
+    if (once('login-ok')) ctx.notice('ok', '已自动登录 code-server。');
     await ctx.win.reloadSurface();
   } else if (res.reason === 'no_cookie') {
-    ctx.notice('error',
-      `自动登录失败（HTTP ${res.status}，未拿到会话 cookie）。`
-      + '可能是会话口令已变化，或 code-server 升级后改动了登录端点。');
+    if (once('login-no-cookie')) {
+      ctx.notice('error',
+        `自动登录失败（HTTP ${res.status}，未拿到会话 cookie）。`
+        + '可能是会话口令已变化，或 code-server 升级后改动了登录端点。');
+    }
   } else if (res.reason === 'no_password') {
-    ctx.notice('error', '控制节点还没返回会话口令。可能需要稍等片刻，或查看「状态」。');
-  } else {
+    if (once('login-no-password')) {
+      ctx.notice('error', '控制节点还没返回会话口令。可能需要稍等片刻，或查看「状态」。');
+    }
+  } else if (once('login-error')) {
     ctx.notice('error', '自动登录出错：' + res.reason);
   }
 }

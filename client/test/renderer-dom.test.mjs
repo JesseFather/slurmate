@@ -1238,9 +1238,66 @@ test('顶栏标签：同一个插件开两份时，两个标签必须分得开',
   const t2 = h.byId.get('session-tabs').children;
   assert.equal(t2[0].textContent, '编辑器', '不重名就不加字');
   assert.equal(t2[1].textContent, '中转站');
-  // 一条会话时整条栏收起来：它不提供任何选择，只占掉 30px 里的一行地方。
+  // 一条会话、而本机还不知道它那个插件（`lastPlugins` 为空 —— 对不上插件
+  //   的时候就是这样）：不知道它有没有页面，也就谈不上"面板被盖着"，整条收起来。
+  //   知道它有页面时这一条栏必须露 —— 那一条在下面单独钉着。
   h.run(`SESS = { sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`);
+  h.fn('renderTabs')();
+  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
+});
+
+test('一条会话也露标签：那颗「面板」是回到插件页与作业页的唯一入口', async () => {
+  // 真机（2026-10-18）：只有一条 code-server 会话时，标签栏从前整条收着 ——
+  //   而那一块原生视图从 y=30 往下盖住整个窗口主体。于是起完会话就回不到
+  //   插件页与作业页，连"现在跑的是哪一条"都看不见。用户报的原话是
+  //   "没有显示这个插件的标签，而且没有返回到插件或者作业页面的按钮或方式"。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__shown = 0; window.__front = null;'
+    + 'window.slurmate.showPanel = () => { window.__shown += 1;'
+    + ' return Promise.resolve({ ok: true }); };'
+    + 'window.slurmate.setFront = (slot) => { window.__front = slot; };'
+    + 'lastPlugins = { plugins: ['
+    + '{ id: "p1", name: "cs", title: "编辑器", surface: { path: "/" } },'
+    + '{ id: "p2", name: "relay", title: "中转站" } ] };'
+    + 'connected = true;');
+  const tabs = () => h.byId.get('session-tabs').children;
+  const panelTab = () => tabs().filter((b) => b.textContent === '面板');
+
+  // ── ① 一条带页面的会话：栏要露，插件名那颗与「面板」那颗都在 ──
+  h.run(`SESS = { sessions: [
+    { slot: 'a', service: '编辑器', live: true,
+      snap: { serviceKind: 'cs', localPort: 18080 } } ], front: 'a' };`);
+  h.fn('renderTabs')();
+  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
+    '有页面盖着面板时这一条栏必须露 —— 它是这个窗口里唯一的出路');
+  assert.equal(tabs()[0].textContent, '编辑器', '那一条会话自己的标签要在（用户要看得出跑的是谁）');
+  assert.equal(panelTab().length, 1);
+  assert.match(panelTab()[0].className, /\bpanel\b/,
+    '它自己的类要挂上 —— 与会话标签做的是相反的事，长相加一个虚线边');
+
+  // ── ② 点「面板」：只抬面板，不切会话、不换屏 ──
+  h.run("$('screen-plugins').classList.remove('hidden'); $('screen-jobs').classList.add('hidden');");
+  await panelTab()[0].onclick();
+  assert.equal(h.run('window.__shown'), 1, '点它要调 `showPanel`');
+  assert.equal(h.run('window.__front'), null, '它不是会话标签：不许调 setFront（那会把面板再盖回去）');
+  assert.equal(h.byId.get('screen-plugins').classList.contains('hidden'), false,
+    '回到用户离开时的那一屏（不换屏）');
+
+  // ── ③ 会话标签照旧把页面抬上来（从面板走回页面的那条路）──
+  tabs()[0].onclick();
+  assert.equal(h.run('window.__front'), 'a');
+
+  // ── ④ 抬不起来要说出来：静默失败与"这一颗本来就没事可做"长得一样 ──
+  h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });");
+  await panelTab()[0].onclick();
+  const last = () => h.byId.get('notices').children[0].children[1].textContent;
+  assert.match(last(), /假装抬不起来/);
+
+  // ── ⑤ 没有页面的会话不盖任何东西：一条时整条栏照旧收着 ──
+  h.run(`SESS = { sessions: [
+    { slot: 'b', service: '中转站', live: true,
+      snap: { serviceKind: 'relay', localPort: 18081 } } ], front: 'b' };`);
   h.fn('renderTabs')();
   assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
 });

@@ -1562,9 +1562,12 @@ test('★★ 那颗「调试」标签：只在假站点里出现，而且与会�
   assert.match(fn[0], /const dev = Boolean\(devState && devState\.on && connected\)/,
     '★ 那一颗的判据是 `devState.on && connected`（两个都要）');
   // 而"少于两条会话就整条收起来"那条规矩要给它让路：一颗会话 + 开发者模式时，
-  //   这一条仍然要露出来（那颗标签是唯一回得来的路）。
-  assert.match(fn[0], /classList\.toggle\('hidden',\s*list\.length < 2 && !dev\)/,
-    '★ 会话少于两条也要留一颗位置给「调试」—— 少了它，一颗会话时那颗标签整个消失');
+  //   这一条仍然要露出来（那颗标签是唯一回得来的路）。2026-10-18 起还有第三条
+  //   要它让路的判据：一条会话带着一块页面（`covered`）—— 真机上正是那一格让
+  //   用户起完 code-server 就回不到插件页与作业页。
+  assert.match(fn[0],
+    /classList\.toggle\('hidden',\s*!dev && !covered && list\.length < 2\)/,
+    '★ 会话少于两条也要留出位置 —— 少了它，一颗会话时那颗标签整个消失');
   // 点它做的是"把面板抬回来"，不是切到哪一条会话。
   assert.match(fn[0], /window\.slurmate\.showPanel\(\)/,
     '★ 点它要调 `showPanel`（把面板抬到会话页面上面）');
@@ -1581,6 +1584,35 @@ test('★★ 那颗「调试」标签：只在假站点里出现，而且与会�
   assert.match(css, /#session-tabs \.tab\.dev \{ color: var\(--dev\); border-color: var\(--dev\); \}/);
   assert.match(css, /#session-tabs \.tab\.dev:hover \{ color: var\(--fg\); \}/,
     '★ 少了这一句，鼠标停上去它反而不变色（比邻居更迟钝）');
+});
+
+test('★ 那颗「面板」：一条会话时也在，点它把面板抬回来', () => {
+  // 2026-10-18 加（真机）。一条 code-server 会话起起来之后，窗口主体从 y=30
+  //   往下被原生视图整块盖住 —— 而标签栏从前"少于两条就收起来"，于是面板
+  //   上的插件页与作业页一个都回不去。用户报的原话是"没有返回到插件或者作业
+  //   页面的按钮或方式"。
+  const code = stripJsComments(js);
+  const fn = /function renderTabs\(\)[\s\S]*?\n\}/.exec(code);
+  assert.ok(fn, 'panel.js 里应当有 renderTabs()');
+  // 判据与「重新加载 / 结束会话」那两颗同源（`hasSurface`）：声明了界面的
+  //   插件才会起那块原生视图，也只有那时才有"回不去"这回事。
+  assert.match(fn[0],
+    /const covered = list\.some\(\(s\) => s\.live && s\.snap && hasSurface\(s\.snap\)\)/,
+    '★ 判据是"有一条活着的会话，且它的插件声明了页面"（读快照，那里才有 serviceKind）');
+  assert.match(fn[0], /b\.className = 'tab panel'/,
+    '★ 它自己的类（与会话标签做的是相反的事，长相加一个虚线边）');
+  assert.match(fn[0], /window\.slurmate\.showPanel\(\)/,
+    '★ 点它要调 `showPanel`');
+  assert.match(fn[0], /notice\('error'/,
+    '★ 抬不起来要说出来 —— 静默失败与"这一颗本来就没事可做"长得相同');
+  const panelBlock = /b\.className = 'tab panel'[\s\S]*?if \(dev\)/.exec(fn[0]);
+  assert.ok(panelBlock, '那一颗整块应当在「调试」那一支之前');
+  assert.doesNotMatch(panelBlock[0], /showScreen\(/,
+    '★ 它不换屏 —— 回到用户离开时的那一屏');
+  // CSS：虚线把它与实线的会话标签分开。不借颜色 —— 那几档颜色在这个仓库里
+  //   各有各的意思（洋红 = 假后端，--err = 出错，--warn = 进行中）。
+  assert.match(css, /#session-tabs \.tab\.panel \{ border-style: dashed; \}/);
+  assert.match(css, /#session-tabs \.tab\.panel:hover \{ color: var\(--fg\); \}/);
 });
 
 test('★ 工作区选择器只在**前台那条会话真的有那一份数据**时露出来', () => {

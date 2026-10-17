@@ -429,9 +429,13 @@ function frontTemporary() {
 }
 
 /**
- * 状态条底下那一排标签。一条会话一个。
+ * 状态条底下那一排标签。一条会话一个，另有一颗「面板」。
  *
- * 只在两条以上时露出来：一条的时候它不提供任何选择，只占掉一行地方。
+ * 条栏什么时候露出来：两条以上、或开发者模式、或前台那条会话带着一块页面。
+ * 最后那一条是 2026-10-18 补的（真机）：只有一条会话时整条栏从前是收着的，
+ *   而那一块原生视图从 y=30 往下盖住整个窗口主体 —— 于是用户起完 code-server
+ *   就再也回不到插件页与作业页，连"现在跑的是哪一条"都看不见。
+ *   一条会话 + 一块页面时，这一条栏必须露：它承载的是这个窗口里唯一的出路。
  * 每一条都要能点 —— 那是"我还能切回去"的唯一入口。前端那条加一个 class。
  *
  * 标签重名时要补一个区分符。标签上写的是插件的显示名，而同一个插件
@@ -458,9 +462,16 @@ function renderTabs() {
   //   它必须长在这条栏里：会话的页面一起来，窗口主体就被那块原生视图整块盖住，
   //     面板自己身上的按钮一个都够不着 —— 而这 30px 里的东西还点得到。
   //   于是"少于两条就整条收起来"要给它让路：一颗会话 + 开发者模式时，这一条
-  //     仍然要露出来（那颗标签是唯一回得来的路）。
+  //     仍然要露出来。2026-10-18 起「面板」那一颗也住在这里，而"一条会话 +
+  //     一块页面"本身就足以让这一条露出来（见下面的 `covered`）。
   const dev = Boolean(devState && devState.on && connected);
-  box.classList.toggle('hidden', list.length < 2 && !dev);
+  // 有没有一块页面正盖着面板。判据与会弄"重新加载 / 结束会话"那两颗同一份
+  //   （`hasSurface`）：声明了界面的插件才会起那块原生视图，也只有那时"回不去"
+  //   这回事才存在。中转站那类会话不盖任何东西，不需要这一条栏。
+  // 判据读的是快照（`s.snap`，插件的站点短名在它里面）—— 会话视图这一层
+  //   没有 `serviceKind`，拿它去查插件永远查不到，于是这一条栏会静默地收着。
+  const covered = list.some((s) => s.live && s.snap && hasSurface(s.snap));
+  box.classList.toggle('hidden', !dev && !covered && list.length < 2);
   box.textContent = '';
   // 先数一遍名字：同名的那些才需要区分符。
   const seen = new Map();
@@ -480,6 +491,25 @@ function renderTabs() {
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }
+  // 「面板」—— 把面板抬回会话页面上面。
+  //
+  // 它与会话标签做的是相反的事（那几颗抬页面、这一颗抬面板），所以长相加一个
+  //   虚线边（见 app.css 的 `.tab.panel`）：两颗相反的动词长成一模一样，正是
+  //   最容易点错的那一格。
+  // 判据是 `covered`，与"这一条栏为什么露出来"同源：没有页面盖着的时候面板
+  //   本来就看得见，摆一颗按下去不变样的按钮是在说一件不成立的事。
+  // 点它不换屏 —— 回到用户离开时的那一屏（`SCREEN` 是用户的选择，见那一格）。
+  if (covered) {
+    const b = document.createElement('button');
+    b.className = 'tab panel';
+    b.textContent = '面板';
+    b.title = '把面板抬到会话页面上面。插件页与作业页都在那里，回到你离开时的那一屏。';
+    b.onclick = async () => {
+      const r = await window.slurmate.showPanel();
+      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
+    };
+    box.appendChild(b);
+  }
   if (dev) {
     const b = document.createElement('button');
     // 那个 `dev` class 是承重的：这一颗与上面那几颗长得必须不一样（见
@@ -487,8 +517,7 @@ function renderTabs() {
     //   抬回来。
     b.className = 'tab dev';
     b.textContent = '调试';
-    b.title = '把面板抬到会话页面上面。会话一跑起来，窗口主体就被它盖住，'
-      + '这里是回到面板的唯一入口。';
+    b.title = '把面板抬到会话页面上面，并切到「调试」那一屏。';
     // 抬不起来要说出来：静默失败在这一处的表现是"我点了一下，什么都没发生"，
     //   而那正好与"这一颗本来就没事可做"长得一样。
     b.onclick = async () => {
@@ -1709,6 +1738,10 @@ function renderPlugins(pv, force) {
   box.textContent = '';
   issues.textContent = '';
   lastPlugins = pv;
+  // 标签栏要不要露、露哪一颗「面板」，判据里有 `hasSurface`，而它读的正是
+  //   这一份清单 —— 所以清单换了就当场重画一次。少了这一句，一次先到的会话表
+  //   会把那一栏按"清单还没到"画成收着的样子，而它此后不会自己再画一次。
+  renderTabs();
 
   // 站点分发那一栏、待同意那一段、没加载的那些 —— 与插件块一起重画。
   renderSitePlugins(pv);
