@@ -3867,7 +3867,7 @@ def _install_plugin_tree(plugins_dir, spec, parsed, say=print):
 
 
 def install_plugins(packages, plugins_dir, replace_key=None, say=print,
-                    src_dir=None):
+                    src_dir=None, hint=True):
     """把一批 `.splug` 装进 `plugins_dir`（解成一棵能对账的树）。返回退出码。
 
     ── 两遍式（与编织作业脚本、与对账同一个形状）────────────────────────────
@@ -4222,7 +4222,7 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
     if verified:
         say("装好了 %d 个插件 → %s" % (len(verified), plugins_dir))
         if any(r.get("sig") is None for _p, r, _s, _n in verified):
-            say("其中有没签名的包。站点这一侧只能照着上面那一屏 trust 它们，")
+            say("其中有没签名的包。站点这一侧只能以刚才那一屏为凭据，")
             say("  服务器上没有源码可对照，这是这一版的已知代价（见 README）。")
     else:
         say("本次没有包要装 → %s" % plugins_dir)
@@ -4243,14 +4243,14 @@ def install_plugins(packages, plugins_dir, replace_key=None, say=print,
             set(spec.id for _p, _r, spec, _n in verified),
             say=say)
 
-    # 编织与配置对齐都在安装器这一侧（`--sync-plugins`），
-    #   `slurmate plugin install` 自己会把它们跑完。所以这里说的是调用方
-    #   该做的下一件事。
-    if src_dir is None:
-        say("下一步：让守护进程重读配置（`systemctl reload slurmate-sessiond`，"
-            "热重载，不会断会话）。\n"
-            "  若你是直接跑这个安装器（而不是 `slurmate plugin install`），"
-            "作业脚本与配置还没对齐，再跑一次 `--sync-plugins`。")
+    # 编织、配置对齐与重载都不在安装器这一侧：
+    #   `slurmate plugin install` 接着就把它们跑完，所以由它调用时（`hint`
+    #   为假）这里一个字都不说 —— 屏幕上写"下一步"而下一步紧接着就被做掉，
+    #   读起来是让人去跑一条已经跑过的命令。手工跑这个入口时才需要这句。
+    if hint and src_dir is None:
+        say("下一步：先再跑一次 `--sync-plugins`（对齐作业脚本与配置），")
+        say("  再让守护进程重读（`systemctl reload slurmate-sessiond`，"
+            "热重载，不会断会话）。")
     return 0
 
 
@@ -4783,7 +4783,7 @@ def _write_text_atomic(path, text, mode=None, uid_gid=None):
 
 
 def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
-                 say=print, dry_run=False):
+                 say=print, dry_run=False, hint=True):
     """把站点的两份派生物（插件配置、作业脚本）与插件目录对齐。返回退出码。
 
     ── 配置那一半 ──────────────────────────────────────────────────────────────
@@ -4962,8 +4962,11 @@ def sync_plugins(path, plugins_dir, jobs_dir=None, template_path=None,
     #   这里只能指路、不能自己动手：这个函数跑在 `--sync-plugins` 那个
     #   一次性进程里，而"要不要让正在跑的那个重读"是调用方的事
     #   （`slurmate` CLI 与 main() 各自在合适的时机调 `systemctl reload`）。
-    say("  正在跑的守护进程要重读一遍才用得上："
-        "systemctl reload slurmate-sessiond（热重载，不会断会话）。")
+    #   所以由 CLI 调用时（`hint` 为假）不说这一句：那次重载紧接着就由
+    #   调用方做掉，并自己报告结果。
+    if hint:
+        say("  正在跑的守护进程要重读一遍才用得上："
+            "systemctl reload slurmate-sessiond（热重载，不会断会话）。")
     return 0
 
 
@@ -11156,6 +11159,10 @@ def main():
     # 与 --extract-package 一样排在 log_setup() 之前，但理由不同：它的输出是
     #   给管理员看的一屏，不是日志。而且它要能在守护进程没配好、Slurm 没装、
     #   甚至配置读不出来的机器上跑，装插件与"这台机器能不能跑作业"无关。
+    # 下面几屏末尾那句"下一步"取决于谁在调这个入口：`slurmate` CLI 会在这一屏
+    #   之后紧接着把对齐与重载做掉，所以它用这个环境变量说明那件事；手工跑入口
+    #   时（没有这个变量）提示仍要打出来。
+    _from_cli = os.environ.get("SLURMATE_PLUGIN_FROM_CLI") == "1"
     if args.install_plugins is not None or args.plugins_src is not None:
         if args.install_plugins is None:
             sys.stderr.write("错误: --plugins-src 要配合 --install-plugins 用\n")
@@ -11164,7 +11171,7 @@ def main():
         try:
             return install_plugins(args.install_plugins, where,
                                    replace_key=args.replace_key,
-                                   src_dir=args.plugins_src)
+                                   src_dir=args.plugins_src, hint=not _from_cli)
         except ValueError as e:
             sys.stderr.write("错误: %s\n" % e)
             return 1
@@ -11208,7 +11215,8 @@ def main():
                 "脚本全删掉。\n" % args.plugins_dir)
             return 0
         try:
-            return sync_plugins(args.config, default_plugins_dir())
+            return sync_plugins(args.config, default_plugins_dir(),
+                                hint=not _from_cli)
         except ValueError as e:
             sys.stderr.write("错误: %s\n" % e)
             return 1

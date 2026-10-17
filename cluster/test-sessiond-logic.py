@@ -4929,6 +4929,12 @@ exit 0
                   _rc == 0 and "签名验过了" in _out
                   and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A)),
                   "rc=%d %r" % (_rc, _out[:300]))
+            # 由 CLI 调用时（`hint=False`）不留"下一步"：对齐与重载紧接着就由
+            #   调用方做掉，屏幕上再叫一遍就是让人去跑一条已经跑过的命令。
+            _rc, _out = _install([_signed], _INSDIR, hint=False)
+            check("由 CLI 调用时（hint=False）不留「下一步」",
+                  _rc == 0 and "下一步" not in _out,
+                  "rc=%d %r" % (_rc, _out[:300]))
             check("落地用的名字是包里的 id（不是下载时那个文件名）",
                   os.path.isdir(mod.plugin_tree_dir(_INSDIR, _UID_A))
                   and os.path.isfile(mod.plugin_record_path(_INSDIR, _UID_A))
@@ -5799,6 +5805,11 @@ exit 0
               _rc == 0 and _sy_read(_p_solo) == _solo1, "rc=%d %r" % (_rc, _out[:300]))
         check("而且它说的是「已经一致」，不是一句含糊的「没做什么」",
               "已经一致" in _out, _out[:200])
+        # 同上：由 CLI 调用时它紧接着自己重载，这一屏不该再叫一遍。
+        _rc, _out = _sy_sync(_SY3, _CONF_S, hint=False)
+        check("由 CLI 调用时（hint=False）不再叫管理员重载",
+              _rc == 0 and "systemctl reload" not in _out,
+              "rc=%d %r" % (_rc, _out[:300]))
 
         # 管理员改过那一份，安装器此后一个字都不动（「升级不能乱变」）
         _edited = _solo1.replace("enabled = no", "enabled = yes\ndefault_cpus = 4")
