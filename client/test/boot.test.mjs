@@ -840,7 +840,6 @@ test('app:bootstrap 报告「没有安全存储」，而不是谎报可用', asy
   const b = await invoke('app:bootstrap');
   assert.equal(b.dev, true);
   assert.equal(b.secureStorageAvailable, false);
-  assert.equal(b.backendLabel, '本地模拟站点');
   // 这里断言的是同一件事，只是写法跟着结构性那一行变了：源码里不许烙进
   //   任何真集群的地址。从前查的是"一条连接都没有"，现在是"恰好只有内置的那一条，
   //   而它的地址是留白的那个"—— 后者更强：它连"顺手多塞一条真地址进来"也一起挡住。

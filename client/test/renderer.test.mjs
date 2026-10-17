@@ -283,6 +283,14 @@ test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
   for (const id of ['wmap-conns', 'wmap-workspaces', 'wmap-spaces']) {
     assert.ok(html.includes(`id="${id}"`), `panel.html 缺少 #${id}`);
   }
+  // 末列（数据）也要拉伸到列宽 —— 用户 2026-10-17 定：三列都在的时候两端
+  //   对齐。按内容定宽（`flex-start`）时第三列的右端参差不齐，整张图比上面
+  //   那几块短一截；而拉伸只动右边，不改变连线的起点（左边缘仍在列首）。
+  //   只有一列或两列时不管对齐，但同样不许探出去。
+  const lastCol = /\.wmap-col:last-child\s*\{([^}]*)\}/.exec(css);
+  assert.ok(lastCol, 'app.css 里应当有 .wmap-col:last-child 那一条');
+  assert.equal(/align-items:\s*flex-start/.test(lastCol[1]), false,
+    '末列不许再按内容定宽 —— 它的右端要与上面那几块对齐');
 });
 
 // ── 三屏（v0.9 阶段 5）────────────────────────────────────────────────────
@@ -682,26 +690,49 @@ test('该两段式的七处走两段式 —— 而重新生成密钥不是（判
     '重画连接列表之前先收掉没走完的第一段');
 });
 
-test('「关于」的入口是第一屏最末那一行 —— 而标题那一行不再是入口', () => {
-  // 2026-10-11 改：入口从"标题那一行"换成第一屏最末那一颗按钮。用户把
+test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行不再是入口', () => {
+  // 2026-10-11 改：入口从"标题那一行"换成第一屏的另一颗按钮。用户把
   //   那件事想通了：「点击标题一般情况是想要返回主页面」—— 而这个界面里的返回
   //   方式已经由各处动作约束好了（回第一屏只有临时离开 / 断开两条路，见
   //   `doLeave` / `doDisconnect`）。一个点下去做着别的事的标题，比一个不能点的
   //   标题坏得多。
+  // 2026-10-17 再改：入口搬到「Slurmate」那一行的右端，写成一颗感叹号
+  //   （用户的原话是"把关于放到这里，做成感叹号"，随即点了位置："叹号放到
+  //   slurmate 同行右端"）。那个「登录节点」标题删掉了。
   //
-  // 新入口必须看得出来能点（一颗 ghost 小按钮，不是一行灰字）：用户
-  //   2026-10-09 报的原话就是"我没有找到「关于」按钮"，而这一版它是唯一的入口。
-  assert.match(html, /id="about-foot"[^>]*>关于</,
-    '第一屏最末要有那颗写着「关于」的按钮 —— 它是「关于」唯一的入口');
-  assert.match(js, /\$\('about-foot'\)\.onclick\s*=/,
+  // 它必须看得出来能点（一颗圆形 ghost 按钮，不是一行灰字）：用户
+  //   2026-10-09 报的原话就是"我没有找到「关于」按钮"，而这一版它仍然是唯一的入口。
+  assert.match(html, /<button id="btn-about" class="icon-btn"[^>]*>!<\/button>/,
+    '第一屏要有一颗感叹号按钮 —— 它是「关于」唯一的入口');
+  // 与标题同一行、在右端：那一行是弹性布局，标题占满余下的宽度。
+  const mast = /<div id="about-head">([\s\S]*?)<\/div>/.exec(html);
+  assert.ok(mast, '未找到 #about-head 那一块');
+  assert.match(mast[1], /id="btn-about"/,
+    '感叹号要在「Slurmate」那一行里面 —— 不是另外起一行');
+  assert.match(css, /#about-head\s*\{[^}]*display:\s*flex/,
+    '那一行要排成一行（弹性布局）');
+  const mastH1 = /#about-head h1\s*\{([^}]*)\}/.exec(css);
+  assert.ok(mastH1, 'app.css 里应当有 #about-head h1 那一条');
+  assert.match(mastH1[1], /flex:\s*1/,
+    '标题要占满余下的宽度 —— 感叹号才会被推到右端');
+  // 看得见的只有 `!`，全名必须在 title 与 aria-label 上：屏幕阅读器读到的
+  //   是「关于」，而不是一个"感叹号按钮"。
+  const aboutBtn = /<button id="btn-about"[^>]*>/.exec(html);
+  assert.ok(aboutBtn, '未找到 #btn-about');
+  assert.match(aboutBtn[0], /title="关于"/, '悬停要说出它是关于');
+  assert.match(aboutBtn[0], /aria-label="关于"/, '读屏时名字也得是关于');
+  assert.match(js, /\$\('btn-about'\)\.onclick\s*=/,
     'panel.js 没给它绑动作 —— 点了没反应。而那正是最难查的一种：界面上一切'
     + '正常，只是这个入口按下去什么都不发生');
-  // 它与它下面那一段都在 `#screen-conns` 里面：于是"只在主页面显示"由
+  // 「登录节点」那个标题删掉了：列表自己就是那一块内容，标题只是再说一遍。
+  assert.equal(/<h2>登录节点<\/h2>/.test(html), false,
+    '「登录节点」那个标题要删掉 —— 感叹号站的就是它原来的位置');
+  // 它与那一段都在 `#screen-conns` 里面：于是"只在主页面显示"由
   //   屏的显隐那一句自动成立，不需要第二处判据（`showScreen` 里再 toggle
   //   一次就是第二个"我在哪一屏"）。
   const c0 = html.indexOf('<section id="screen-conns" class="screen">');
   const c1 = html.indexOf('</section><!-- /screen-conns -->');
-  const fo = html.indexOf('id="about-foot"');
+  const fo = html.indexOf('id="btn-about"');
   const ab = html.indexOf('id="sec-about"');
   assert.ok(c0 !== -1 && c1 !== -1, 'panel.html 里应当有第一屏那一对起止标记');
   assert.ok(c0 < fo && fo < ab && ab < c1,
@@ -757,8 +788,11 @@ test('「关于」的入口是第一屏最末那一行 —— 而标题那一行
   // 新入口是一颗真 `<button>`（不是从前那个 `role="button"` 的 div）：那一行
   //   里没有 h1/p，内容模型没有限制 —— 于是"Tab 得到、回车按得下去"是白拿的，
   //   不必再手写（从前那个 div 的 `onkeydown` 就是为这个存在的）。
-  assert.match(html, /<button id="about-foot"/,
+  //   也正因为它是按钮，那颗「!」不必配一条手写的键盘处理。
+  assert.match(html, /<button id="btn-about"/,
     '它必须是真按钮：键盘与焦点行为白拿，而手写的那两条路会漂');
+  assert.equal(/about-foot/.test(html) || /about-foot/.test(js),
+    false, '从前最末那一行那颗「关于」整个删掉了 —— 留着就是第二个入口');
 
   // 它装的是「关于」+ 开发者模式，而开发者模式从前是常驻的：搬进来之后
   //   它必须整个在 `#sec-about` 里面。留在外面的话，"收起来"就只收掉了说明，
@@ -914,22 +948,37 @@ test('高级选项长在每一块里，不是全屏共用的一份', () => {
     '「开始会话」这颗按钮本身没动');
 });
 
-test('第二/三屏顶上那条身份带（翻页感由结构给，不是换底色）', () => {
-  // 2026-10-11 加：进第二/三屏时顶上顶着的是站点的地址与这一屏的名字，
-  //   而第一屏顶着的是客户端的名字（masthead）。
-  // 用户把这件事定死了：底色不变（原话是"底色不变是（主题统一）的表现，
-  //   而不是证明翻页了"）—— 所以这一条既查那条带子，也查"没有谁在换底色"。
+test('第二/三屏的标题照第一屏的 masthead 做（2026-10-17 改）', () => {
+  // 2026-10-11 起，进了站点的那几屏顶上是"这一屏的名字 + 脚下是哪一台"。
+  // 2026-10-17 用户说那条带子"约等于没改"：它换的是底色与内边距，标题本身
+  //   还是 14px 的区块标题。这一版照第一屏的 masthead 做 —— 一个名字加一行
+  //   小字（用户的原话是"照着主页 slurmate 这个格式做：slurmate 改成插件，
+  //   登录节点写成登录条目"）。
+  // 三屏共用同一条规则：若各写一份几处会漂，而漂的方向是"其中一屏看起来
+  //   还是旧的那一版"。
   assert.match(css,
     /#screen-plugins > \.sec-head,\s*\n#screen-jobs > \.sec-head,\s*\n#screen-debug > \.sec-head\s*\{/,
-    '进了站点的那几屏（第二/三屏 + 开发者模式下的第四屏）标题行要一起画成'
-    + '带子（若各写一份几处会漂，而漂的方向是"其中一屏看起来还是旧的那一版"）');
-  const band = /#screen-plugins > \.sec-head,[\s\S]*?\n\}/.exec(css);
-  assert.ok(band, 'app.css 里应当有那条带子');
-  assert.match(band[0], /background:\s*var\(--bg-alt\)/, '带子自己有底色');
-  assert.match(band[0], /margin:\s*0 calc\(-26px - var\(--sb-w\)\) 14px -26px/,
-    '而它是通栏的：左右各抵消 `#panel` 的 26px 内边距，**右边还要多减一条'
-    + '滚动条的槽**（`--sb-w`）—— 少了那一条，带子会在右边栏前面停住 10px，'
-    + '留出一条左边没有、右边有的异色缝');
+    '进了站点的那几屏（第二/三屏 + 开发者模式下的第四屏）标题行要一起画');
+  const head = /#screen-plugins > \.sec-head,[\s\S]*?\n\}/.exec(css);
+  assert.ok(head, 'app.css 里应当有那一条');
+  assert.equal(/background/.test(head[0]), false,
+    '不许再有那块底色 —— 通栏的带子正是"看起来约等于没改"的来源');
+  assert.equal(/calc\(/.test(head[0]), false,
+    '也不许再用负外边距拉到通栏：标题就落在 `#panel` 的内容区里');
+  // 标题的字号与颜色必须与第一屏的 `h1` 同源（18px、正文色）：它是一屏的
+  //   名字，不是页面里的一个区块。`h2` 那条缺省是 13px、蓝色。
+  const title = /\.band-id h2\s*\{([^}]*)\}/.exec(css);
+  assert.ok(title, 'app.css 里应当有 .band-id h2 那一条');
+  assert.match(title[1], /font-size:\s*18px/, '标题用第一屏 h1 的字号');
+  assert.match(title[1], /color:\s*var\(--fg\)/, '而它的颜色是正文色，不是区块标题的蓝');
+  assert.match(title[1], /flex:\s*none/, '标题按内容定宽 —— 那一行的小字不能把它挤扁');
+  // 下面那一行小字：12px、灰，与第一屏的 `.sub` 同一个形状。
+  const site = /\.band-site\s*\{([^}]*)\}/.exec(css);
+  assert.ok(site, 'app.css 里应当有 .band-site 那一条');
+  assert.match(site[1], /font-size:\s*12px/);
+  assert.match(site[1], /color:\s*var\(--fg-dim\)/);
+  assert.match(site[1], /text-overflow:\s*ellipsis/,
+    '地址那一行可能很长 —— 出省略号，不许折行把标题撑高');
   // 面板与三屏的底色一个字没改。
   const panelRule = /#panel\s*\{([^}]*)\}/.exec(css);
   assert.ok(panelRule, 'app.css 里应当有 #panel');
@@ -938,13 +987,16 @@ test('第二/三屏顶上那条身份带（翻页感由结构给，不是换底�
   assert.equal(/\.screen[^{]*\{[^}]*background/.test(css), false,
     '"某一屏换底色"同样不许有');
   // 两屏的标题都写上是哪一个站点 —— 作业那一屏从前是一个死的「作业」。
-  //   2026-10-17 起地址不拼在标题里，而是各带一行小字（`#*-site`）。
+  //   2026-10-17 起地址不拼在标题里，而是各带一行小字（`#*-site`），
+  //   内容写成「登录条目：user@host:端口」。
   assert.match(html, /id="screen-plugins"[\s\S]*id="plugins-title"[\s\S]*id="plugins-site"/,
-    '第二屏的标题与地址行都在那一屏里');
+    '第二屏的标题与登录条目那一行都在那一屏里');
   assert.match(html, /id="screen-jobs"[\s\S]*id="jobs-title"[\s\S]*id="jobs-site"/,
     '第三屏的标题同理');
   assert.match(js, /\$\('jobs-title'\)\.textContent = '作业'/,
-    '而它要和 `plugins-title` 用同一个判据（活跃连接给的 user@host 进地址那一行）');
+    '而它要和 `plugins-title` 用同一个判据（活跃连接进那一行）');
+  assert.match(js, /`登录条目：\$\{conn\.user\}@\$\{conn\.host\}:\$\{conn\.port\}`/,
+    '那一行要写「登录条目」加地址与端口 —— 端口是这条连接身份的一部分');
 });
 
 test('滚动条自己画，而且永远占着那条槽', () => {
@@ -972,6 +1024,16 @@ test('滚动条自己画，而且永远占着那条槽', () => {
     assert.match(block, /scrollbar-gutter:\s*stable/,
       `${why}（${sel}）要永远留着那条槽 —— 不然"有滚动条/没滚动条"会让它里面`
       + '里的内容跟着缩，而那就是用户报的「页面布局微调」');
+  }
+  // 那条槽只把里面的卡片挤短，不把容器画窄：两个列表各自往右探出同样多，
+  //   卡片才回到上面那行按钮的同一条右端线上（用户 2026-10-17 的截图：连接
+  //   列表比其他的短了一截）。只探出不改内边距 —— 内边距会把卡片与滚动条
+  //   一起推走，右端还是对不齐。
+  for (const [sel, why] of [['.conns', '连接列表'], ['.jobs', '作业列表']]) {
+    const at = css.indexOf(`${sel} {`);
+    const block = css.slice(at, css.indexOf('}', at));
+    assert.match(block, /margin:\s*0 calc\(-1 \* var\(--sb-w\)\) 10px 0/,
+      `${why}（${sel}）要往右探出那条槽的宽度 —— 否则卡片比上面那行按钮短 10px`);
   }
   // 而只写 `::-webkit-scrollbar*`：在 Chromium 里 `scrollbar-width` /
   //   `scrollbar-color` 一旦出现就胜出，滑块会退回系统那种细线，而上面那几条

@@ -339,6 +339,29 @@ test('内置那条假连接：排最前、没有「编辑」「删除」，而�
   assert.equal(rows[1].children[1]._text, '未探测', '而普通那几行照旧');
 });
 
+test('「新建连接」的显隐只有一处判据：表单开着，或者是开发者模式', () => {
+  // 开发者模式里连接表只有那一条固定的假连接（内置、不可编辑、不可删除），
+  //   「新建」没有第二处可去的地方 —— 用户 2026-10-17 定：那一颗不出现。
+  // 三个地方都会改到它：打开表单、收起表单、以及这一档。三处各写一遍
+  //   `classList.add/remove` 会漂 —— 比如「收起表单」把开发者模式藏起来的那一颗
+  //   又露出来。判据只有 `syncNewButton()` 这一份。
+  const h = start({ dev: false });
+  h.run('form = { open: false };');
+  h.fn('syncNewButton')();
+  assert.equal(h.byId.get('btn-new').classList.contains('hidden'), false,
+    '普通模式、表单收着 —— 那颗按钮要露着');
+
+  h.run('form = { open: true };');
+  h.fn('syncNewButton')();
+  assert.equal(h.byId.get('btn-new').classList.contains('hidden'), true,
+    '表单开着时它收起来（表单自己就是新建那一件事）');
+
+  h.run('form = { open: false }; boot = { dev: true };');
+  h.fn('syncNewButton')();
+  assert.equal(h.byId.get('btn-new').classList.contains('hidden'), true,
+    '开发者模式里没有它 —— 只有那一条固定的假连接，新建没有第二处可去');
+});
+
 test('两段式确认：第一次只是把那一格换成一行确认，第二次才真的做', () => {
   // 这一条守的是设计律 2：代价大的动作由"必须先经过的那一步"承载。
   //   第一段可退（点到别处、按 Esc、「取消」都回到原样），第二段才不可逆 ——
@@ -605,10 +628,10 @@ test('bootstrap 挂了，界面照样点得动（一次 reject 不许拆掉整�
   // ── 那几格必须仍然有动作 ──
   // 一律走 `$()` 取元素：`byId` 是取过才有的缓存，而 `sec-about` 只在
   //   下面那一下被点到时才第一次被取到。
-  // 入口是第一屏最末那一行那颗按钮（`#about-foot`），不是标题那一行
-  //   （2026-10-11 改：点标题在任何一个界面里都是"回首页"的意思，而这里的返回
+  // 入口是「Slurmate」那一行右端那颗感叹号（`#btn-about`，2026-10-17 改），
+  //   不是标题那一行（点标题在任何一个界面里都是"回首页"的意思，而这里的返回
   //   方式已经由各处动作约束好了）。
-  const foot = h.run("$('about-foot')");
+  const foot = h.run("$('btn-about')");
   assert.equal(typeof foot.onclick, 'function',
     '「关于」那颗按钮仍然要挂着动作 —— 首屏数据无法获取不该让入口变成哑的');
   // 壳里的 `$()` 是现造一个空元素，它不会去读 panel.html —— 所以
@@ -1275,8 +1298,9 @@ test('那颗「调试」标签：只在假站点里出现，点它是把面板�
     '同时只露一个（路由那一句管着所有屏）');
   assert.equal(h.byId.get('debug-title').textContent, '调试',
     '第四屏的标题只剩这一屏的名字');
-  assert.equal(h.byId.get('debug-site').textContent, 'alice@198.51.100.7',
-    '而"我在哪一台"改由下面那一行小字说');
+  assert.equal(h.byId.get('debug-site').textContent,
+    '登录条目：alice@198.51.100.7:10100',
+    '而"我在哪一台"改由下面那一行小字说 —— 写「登录条目」加地址与端口');
 
   // ── ⑤ 抬不起来要说出来：静默失败在这一处与"这一颗本来就没事可做"长得一样 ──
   h.run("window.slurmate.showPanel = () => Promise.resolve({ ok: false, error: '假装抬不起来' });"

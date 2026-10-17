@@ -42,7 +42,6 @@
       calls.push('bootstrap');
       return Promise.resolve({
         dev: true,
-        backendLabel: '开发者模式',
         developerMode: DEV,
         connections: [],
         partitions: [],

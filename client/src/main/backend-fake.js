@@ -298,7 +298,6 @@ class FakeBackend extends Backend {
   constructor(opts = {}) {
     super();
     this.kind = KIND.FAKE;
-    this.label = '本地模拟站点';
     this.enrollDelayMs = Number.isFinite(opts.enrollDelayMs) ? opts.enrollDelayMs : 8000;
     this.rpcLatencyMs = Number.isFinite(opts.rpcLatencyMs) ? opts.rpcLatencyMs : 40;
     this.user = opts.user || 'demo';

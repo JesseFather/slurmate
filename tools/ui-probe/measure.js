@@ -273,6 +273,29 @@
         h: Math.round(el.getBoundingClientRect().height * 10) / 10 });
     });
 
+    // 右端齐不齐（用户 2026-10-17 的截图）。
+    //   连接列表与作业列表各自留着一条滚动条的槽：槽只把里面的卡片挤短，容器
+    //   本身仍是通栏 —— 所以"越界"与"横向滚动"两条老判据一条都不响，而肉眼
+    //   看到的是卡片比上面那行按钮短了一截。映射图同理：末列按内容定宽时，
+    //   整张图的右端参差不齐。
+    //   每一对是 [说法, 按内容/带槽画的盒子, 通栏的参照物]。
+    out.edges = [];
+    [
+      ['首屏的连接行', '#conn-list .conn', '#sec-connect > .sec-head'],
+      ['作业行', '#job-list .job', '#screen-jobs > .sec-head'],
+      ['映射图右列', '#wmap-spaces .wnode', '#workspace-map'],
+    ].forEach(function (pair) {
+      var b = document.querySelector(pair[2]);
+      if (!b || !visible(b)) return;
+      var ref = Math.round(b.getBoundingClientRect().right * 10) / 10;
+      // 每一条都要看：列里只要有一行短了一截，那一列看起来就是没对齐。
+      Array.prototype.forEach.call(document.querySelectorAll(pair[1]), function (a) {
+        if (!visible(a)) return;
+        out.edges.push({ what: pair[0],
+          a: Math.round(a.getBoundingClientRect().right * 10) / 10, b: ref });
+      });
+    });
+
     // 数出来几个，写进报告。少了这一格，"这一格什么都没画"与"这一格画了但没有
     //   溢出"在报告里长得一样，而前者是本文件最该抓住的一种假绿
     //   （哨兵抓的是"整格是空的"，这一格抓的是"某一类元素一个都没有"）。
@@ -386,11 +409,19 @@
     plugins: {
       setup: function () {
         setConnected(true);
+        // 这一屏只有连着才进得来，所以活跃连接必须有 —— 少给它就不会画
+        //   标题下面「登录条目：user@host:端口」那一行，而那一行正是这一版
+        //   改出来的标题块的一半。
+        boot.connections = F.conns || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
         renderPlugins(F.pluginsView || {});
         showScreen('plugins');
         return Promise.resolve();
       },
-      sentinel: function () { return document.querySelectorAll('#plugin-blocks .plug').length >= 3; },
+      sentinel: function () {
+        return document.querySelectorAll('#plugin-blocks .plug').length >= 3
+          && /^登录条目/.test($('plugins-site').textContent);
+      },
       what: '第二屏（插件块）',
     },
 
@@ -404,6 +435,8 @@
     'plugins-adv': {
       setup: function () {
         setConnected(true);
+        boot.connections = F.conns || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
         renderPlugins(F.pluginsView || {});
         // 分区表是站点级的（全局一份），到得比插件块早或晚都可能 —— 这里刻意
         //   在块画好之后再喂，走的就是"它变了，每一块里那一格都跟着换"那条路。
@@ -450,6 +483,10 @@
     jobs: {
       setup: function () {
         setConnected(true);
+        // 与插件页同一条：这一屏也只有连着才进得来，标题下面那一行
+        //   「登录条目：…」要画出来才量得到。
+        boot.connections = F.conns || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
         // 走真的那一条：`showScreen('jobs')` 自己会问一次站点（`refreshJobs`），
         //   作业由桩答出来。自己塞 `JOBS` 再调 `renderJobs()` 看起来更直接，实测
         //   不行：那一句同步画完之后，`refreshJobs` 的应答才落地，列表被它重置成
@@ -457,7 +494,10 @@
         showScreen('jobs');
         return Promise.resolve();
       },
-      sentinel: function () { return document.querySelectorAll('#job-list .job').length >= 3; },
+      sentinel: function () {
+        return document.querySelectorAll('#job-list .job').length >= 3
+          && /^登录条目/.test($('jobs-site').textContent);
+      },
       what: '作业屏（作业列表）',
     },
 

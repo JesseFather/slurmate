@@ -352,11 +352,14 @@ function showScreen(name) {
   //   忘了自己在哪一台上的地方（几条会话、几个站点）。
   // 2026-10-17 起地址单独一行（小字、灰，见 `#screen-plugins > .sec-head` 那一段）：
   //   混在标题里时「插件 · user@host」太长，窄窗口下那一行会被顶开。
+  // 那一行写「登录条目」加地址与端口（2026-10-17 改）：第一屏那一行只有
+  //   客户端的名字，这几屏说的是脚下的哪一条 —— 用户的原话是"登录节点写成
+  //   登录条目"。端口要带上：同一个主机上的两个端口是两条不同的连接。
   // 判据是活跃连接（主进程那一格），不是"上次点了哪一行"：删掉一条连接、
   //   或者从别处改了活跃连接之后，界面手上那份"我刚才点的是谁"就已经过期了。
   const conn = ((boot && boot.connections) || [])
     .find((c) => c.id === (boot && boot.activeConnectionId));
-  const site = conn ? `${conn.user}@${conn.host}` : '';
+  const site = conn ? `登录条目：${conn.user}@${conn.host}:${conn.port}` : '';
   $('plugins-title').textContent = '插件';
   $('jobs-title').textContent = '作业';
   $('debug-title').textContent = '调试';
@@ -655,7 +658,7 @@ function renderSnapshot(s) {
 async function openNewForm() {
   form = { open: true, mode: 'new', id: null };
   $('sec-form').classList.remove('hidden');
-  $('btn-new').classList.add('hidden');
+  syncNewButton();
 
   $('form-title').textContent = '新建连接';
   $('form-hint').textContent =
@@ -695,7 +698,7 @@ async function openNewForm() {
 async function openEditForm(c) {
   form = { open: true, mode: 'edit', id: c.id };
   $('sec-form').classList.remove('hidden');
-  $('btn-new').classList.add('hidden');
+  syncNewButton();
 
   $('form-title').textContent = '编辑连接';
   $('form-hint').textContent = '改这里的地址只影响这一条连接。';
@@ -727,8 +730,22 @@ function closeForm() {
   form = { open: false, mode: 'new', id: null };
   wsPicked = '';
   $('sec-form').classList.add('hidden');
-  $('btn-new').classList.remove('hidden');
+  syncNewButton();
   renderConnEmpty();
+}
+
+/**
+ * 「新建连接」那颗按钮露着没有。
+ *
+ * 三处会改到它：打开表单、收起表单、以及开发者模式。三处各写一遍
+ *   `classList.add/remove` 就会漂 —— 比如「收起表单」把开发者模式藏起来的那一颗
+ *   又露了出来。判据只在这里算一次。
+ *
+ * 开发者模式那一档（2026-10-17 加）：连接表只有那一条固定的假连接，内置、
+ *   不可编辑、不可删除，没有第二处可去的地方，所以不给「新建」。
+ */
+function syncNewButton() {
+  $('btn-new').classList.toggle('hidden', form.open || Boolean(boot && boot.dev));
 }
 
 /** 「一条连接都没有」时的引导语。表单开着的时候它得指向表单，而不是那个已被收起的按钮。 */
@@ -1010,7 +1027,7 @@ function renderConnections(list) {
   // 而在这条不变量下（站在这第一屏上就一定不在站点里），这个 class 在第一屏
   //   上恒为 false —— 它只在"连上的那一刻"被置真（`handleConnectResult` 会先画一遍
   //   这里，再进第二屏），以及开局那一次。「临时离开 / 断开」两颗不在这儿了：
-  //   它们搬到了第二屏的标题带上（见 panel.html 里 `#screen-plugins` 那一段）。
+  //   它们搬到了第二屏的标题那一块（见 panel.html 里 `#screen-plugins` 那一段）。
   // 而这一句不在这儿算了：`connected` 那一格只有 `setConnected` 改，而它
   //   顺手把这两个跟着它走的东西都重画一遍（见那个函数）。两处各写一遍的话，漂开的
   //   方向是"边栏亮着、而状态条上那颗调试没有"。
@@ -1070,7 +1087,7 @@ function renderConnections(list) {
     //
     //   「断开」也不在每一条行上：它是一个站点级的动作（同时最多连着一个
     //     站点），而不是某一条连接自己的属性 —— 挂在行上，等于在说"你可以同时断开
-    //     好几条"。它现在在第二屏的标题带上（`#btn-disconnect`）。
+    //     好几条"。它现在在第二屏的标题那一块（`#btn-disconnect`）。
     const main = document.createElement('button');
     main.className = 'tiny';
     main.textContent = '连接';
@@ -3950,15 +3967,16 @@ const keyPayload = () =>
  */
 function bindEvents() {
   // ── 事件 ──
-  // 「关于」的入口是第一屏最末那一行（`#about-foot`，见 panel.html 那一段）。
-  // 它装的是这一版的说明与开发者模式，而那两样都不是每次打开都要看的 —— 所以它是
-  // 一块可以点开、也可以不点的地方，而不是常驻的一节。
-  // 它现在是真 `<button>`：那一行里没有 h1/p，内容模型没有限制，于是键盘与
-  //   焦点行为是白拿的（从前那个 `role="button"` 的 div 得手写回车/空格两条路）。
-  // 而标题那一行不再可点（2026-10-11 改）："点标题"在任何一个界面里都是
+  // 「关于」的入口是「Slurmate」那一行右端那颗感叹号（`#btn-about`，见
+  // panel.html 那一段，2026-10-17 改）。它装的是这一版的说明与开发者模式，而那两样都不是
+  // 每次打开都要看的 —— 所以它是一块可以点开、也可以不点的地方。
+  // 它是一颗真 `<button>`：键盘与焦点行为是白拿的（从前那个 `role="button"`
+  //   的 div 得手写回车/空格两条路）。看得见的只有 `!`，全名在 title 与
+  //   aria-label 上 —— 屏幕阅读器读到的仍然是「关于」。
+  // 而标题那一行仍然不可点（2026-10-11 改）："点标题"在任何一个界面里都是
   //   "回首页"的意思，而这里的返回方式已经由各处动作约束好了 —— 见 panel.html
   //   上 `#about-head` 那一段。
-  $('about-foot').onclick = () => $('sec-about').classList.toggle('hidden');
+  $('btn-about').onclick = () => $('sec-about').classList.toggle('hidden');
 
   $('btn-new').onclick = () => openNewForm();
   $('btn-cancel-form').onclick = () => closeForm();
@@ -4321,12 +4339,10 @@ function bindEvents() {
 async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
-  if (boot.dev) {
-    $('dev-banner').classList.remove('hidden');
-    $('app-sub').textContent = '开发者模式 · 未连接集群';
-  } else if (boot.backendLabel) {
-    $('app-sub').textContent = boot.backendLabel;
-  }
+  // 首屏不再有一行小字（2026-10-17 改）：用户的原话是"只要有 slurmate 的地方
+  //   就不要"。开发者模式那件事由下面那条横幅说（它就长在面板最上面）。
+  if (boot.dev) $('dev-banner').classList.remove('hidden');
+  syncNewButton();
   renderDevMode(boot.developerMode);
 
   // bootstrap 里没有公钥 —— 密钥是按连接的，界面在打开某条连接的表单时

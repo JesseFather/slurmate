@@ -264,6 +264,14 @@ function judge(r) {
       + `${b.boxWidth}：${b.text}`);
   }
   if ((r.buttons || []).length > 6) bad.push(`另外还有 ${r.buttons.length - 6} 处按钮被挤`);
+  // 右端要与上面那几块对齐（用户 2026-10-17 的截图：连接列表短了一截）。
+  //   这一条量的不是溢出，是齐不齐 —— 槽只挤短卡片、不画窄容器，所以上面
+  //   两条永远不会响。1px 的余量留给小数坐标的取整。
+  for (const e of (r.edges || [])) {
+    if (Math.abs(e.a - e.b) > 1) {
+      bad.push(`${e.what}的右端没对齐：卡片 ${e.a}，参照 ${e.b}`);
+    }
+  }
   // 数据那一格的身份（端口号）被省略号截了 —— 认不出是哪一份。
   for (const c of (r.clipped || []).slice(0, 4)) {
     bad.push(`${c.sel} 的身份被截了：文字 ${c.textWidth} > 可见 ${c.boxWidth}：${c.text}`);

@@ -286,6 +286,11 @@ export function buildSpaces() {
   return [
     { id: 's000000000001', pluginId: '01m4x3bpny0363sf5qmfw89zgt',
       group: 'editor', ports: [18080] },
+    // 第二份：插件名短，节点按内容只占半列。映射图的末列要拉伸到列宽，
+    //   右端才与上面那几块对齐 —— 只有一份长名字的数据时，它自己就撑满了
+    //   那一列，拉伸与否在画面上分不出来（变异验证时量到过这一点）。
+    { id: 's000000000002', pluginId: 'batch-echo',
+      group: 'editor', ports: [18081] },
   ];
 }
 

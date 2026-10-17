@@ -162,9 +162,8 @@ body.connected .rail { display: block; }
      不留的话，内容长一点/短一点就会让里面整块居中的内容横向挪一下 ——
      而那正是用户报的「有条和没条是页面布局微调」。 */
   scrollbar-gutter: stable;
-  /* 上内边距是 0（2026-10-11 改）：第二/三屏顶上那条身份带要贴到状态条
-     底下才像"翻到了另一页"；面板自己留 22px 的话，带子上面会横着一条异色的缝，
-     看起来像浮着的一张卡片。那 22px 现在由各屏自己的第一块出（见 `#about-head`
+  /* 上内边距是 0（2026-10-11 改）：那 22px 由各屏自己的第一块出，三屏的
+     内容从同一条线上开始（见 `#about-head`、`#screen-plugins > .sec-head`
      与下面那三条 `.banner-*`）。 */
   padding: 0 26px 40px;
   /* 面板里任何一段文字都可能来自主进程：一条路径、一个 id、一句 errno 原话。
@@ -193,19 +192,26 @@ h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
    返回方式已经由各处动作约束好了（临时离开 / 断开，见 panel.js 的 doLeave /
    doDisconnect）。一个点下去做着别的事的标题，比一个不能点的标题坏得多。
    那颗记号连同它的规则一起删了：它指的那个入口已经不存在。
-   那 22px 上边距是它自己带的（`#panel` 的上内边距挪给了各屏的第一块，好让
-   第二/三屏那条身份带能贴到状态条底下，见 `#panel` 那一段）。 */
-#about-head { margin-top: 22px; }
+   那 22px 上边距是它自己带的：`#panel` 的上内边距挪给了各屏的第一块 ——
+   第二/三屏的标题块同样自带 22px（见 `#screen-plugins > .sec-head` 那一段），
+   于是三屏的内容从同一条线上开始，见 `#panel` 那一段。
+   这一行现在也是「关于」那颗感叹号的家（2026-10-17 改）：名字占满余下的宽度，
+   它被推到右端，与第一屏那几块的同一条右端线对齐。 */
+#about-head { margin-top: 22px; display: flex; align-items: center; gap: 10px; }
+#about-head h1 { flex: 1; min-width: 0; margin: 0; }
 
-/* 第一屏最末那一行 = 「关于」唯一的入口（见 panel.html 那一段）。
-   它必须看得出来能点：一颗 ghost 小按钮。用户 2026-10-09 报的原话就是
-     "我没有找到「关于」按钮"，而这一版它没有第二个入口了。
-   上面那条分隔线是承重的：它把"这一屏的内容"与"这个客户端自己的事"分开，
-     而这一屏最末那一块说的正是后者（关于 + 开发者模式）。 */
-.foot {
-  margin-top: 30px; padding-top: 14px;
-  border-top: 1px solid var(--border);
+/* 第一屏标题那一行右端的「关于」（2026-10-17 改）。
+   看得见的只有一个感叹号，全名在 `title` 与 `aria-label` 上（见 panel.html）。
+   圆形、ghost 底色：它是一颗次要动作，不该与右端那两颗主按钮抢注意力；
+     而它看得出是能点的 —— 用户 2026-10-09 报的原话是"我没有找到「关于」按钮"。
+   `line-height` 与高度取同一个数，感叹号才落在圆心；`padding: 0` 盖掉
+     `button` 那条 `7px 14px`。 */
+button.icon-btn {
+  flex: none; width: 22px; height: 22px; padding: 0;
+  border-radius: 50%; background: #3a3d41; color: var(--fg);
+  line-height: 22px; font-weight: 700;
 }
+button.icon-btn:hover { background: #45494e; }
 #sec-about {
   border-left: 3px solid var(--border); padding-left: 14px;
   margin-top: 14px;
@@ -337,11 +343,17 @@ button.remember:hover { background: #5c4e22; }
    自己滚。列表和下面的日志是两块各自独立的内容，让它们分别滚，比整页一起滚
    好找 —— 条目多的时候，日志会把列表顶出视野。 */
 .conns {
-  list-style: none; margin: 0 0 10px; padding: 0;
+  list-style: none; padding: 0;
   max-height: 300px; overflow-y: auto; overscroll-behavior: contain;
   /* 列表由短变长时不许让每一行重排一次（行内的文字会跟着换行）——
      永远留着那条槽，见文件末尾那一段。 */
   scrollbar-gutter: stable;
+  /* 那条永远留着的槽把每一张卡片的右端挤短了 10px（用户 2026-10-17 的截图：
+     连接列表比上面那行按钮短一截）。容器自己往右探出同样多，卡片就回到
+     标题行与下面那几块的同一条右端线上；滚动条画在那 10px 里，正好是
+     `#panel` 这段边距空出来的地方。
+     只探出不改内边距：内边距会把卡片与滚动条一起推走，右端还是对不齐。 */
+  margin: 0 calc(-1 * var(--sb-w)) 10px 0;
 }
 .conn {
   display: flex; align-items: center; gap: 10px;
@@ -405,17 +417,22 @@ button.remember:hover { background: #5c4e22; }
 .wmap-lines .edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
 .wmap-lines .edge.cur { stroke: var(--accent-hover); stroke-width: 2; }
 .wmap-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-/* 末列（数据）不拉伸：它按内容定宽、左边缘对齐，指着它的线才都落在同一个 x 上。
-   中间那一列反过来 —— 它要拉伸，见上面 `.wmap` 那一段。 */
-.wmap-col:last-child { align-items: flex-start; }
+/* 三列都拉伸到各自的列宽（`align-items` 的缺省值），两端才与上面那几块对齐
+   （用户 2026-10-17 定：三列都在的时候两端对齐；只有一列或两列时可以不管，
+   但不许探出去）。
+   末列（数据）从前是 `align-items: flex-start`，按内容定宽 —— 于是第三列
+   的右端参差不齐，整张图比上面那几块短一截。拉伸不改变连线的几何：线是从
+   每个盒子的左边缘画进来的，而左边缘本来就在列首，拉伸只动右边。 */
+.wmap-col:last-child { align-items: stretch; }
 .wnode {
   display: flex; align-items: center; gap: 8px;
   padding: 4px 10px; min-height: 26px;
   border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg-alt); font-size: 12px;
-  /* 末列那一个不拉伸（它按内容定宽，见 `.wmap-col:last-child`），所以内容长了
-     它会自己变宽、顶出面板 —— 一条长插件标题就够（探针 2026-10-17 量到 183px）。
-     `max-width` 把它按在列宽以内，里面那几格各自出省略号。 */
+  /* 列宽是定死的（三列均分，见 `.wmap`），而里面那几格的字可能很长 ——
+     一条长插件标题就够（探针 2026-10-17 量到 183px）。`max-width` 把节点
+     按在列宽以内，里面那几格各自出省略号，不把面板顶出去。
+     末列现在也拉伸到列宽（见 `.wmap-col:last-child`），这一条对它同样是上限。 */
   max-width: 100%;
 }
 .wnode .nm {
@@ -719,43 +736,37 @@ dialog p#fork-body { white-space: pre-line; }
      的上边距是给"区块"用的），而一屏是页面，上面还有横幅与那行副标题。 */
 .screen > .sec-head:first-child { margin-top: 0; }
 
-/* ── 进了站点之后那几屏顶上那条身份带（第二/三屏 + 开发者模式下的第四屏）──
-   它是"我在某个站点里"这件事在结构上的记号（2026-10-11 加），不是装饰：
-     第一屏顶着的是客户端的名字（masthead）与「关于」，这一条带子上顶着的是站点的
-     地址与这一屏的名字 —— 一脚踩进去就知道自己不在家门口了。
-   调试那一屏（第四屏）也在这条带子上：它同样只在一个（假）站点里才进得来，
-     少了它那一屏会看起来像第一屏的兄弟。
-   不新增元素、不重画一遍：带子就是把那两屏已有的 `.sec-head` 换一种画法。
-     各写一份的话两处会漂，而漂的方向是"其中一屏看起来还是旧的那一版"。
-   左右各让出 26px —— 那正好抵消 `#panel` 的内边距，于是带子是通栏的：连上
-     之后它从左边栏的内边线一直拉到右边栏的内边线。
-     右边那一项还要多减一条滚动条的槽（`--sb-w`）：`#panel` 是滚动容器，而它
-     始终留着那条槽（`scrollbar-gutter: stable`）—— 只抵消内边距的话，带子会在
-     右边栏前面停住 10px，留出一条异色的缝（左边没有、右边有，看起来像画歪了）。
-   底色不动（用户 2026-10-11 的原话："底色不变是（主题统一）的表现，而不是
-     证明翻页了"）：面板与三屏共用同一个 `--bg`，全界面只有这一条带子换底色。
-   带子上边挨着状态条（或挨着横幅，如果横幅露着）：`#panel` 的上内边距是 0，
-     见那一段。 */
+/* ── 进了站点之后那几屏的标题（第二/三屏 + 开发者模式下的第四屏）──
+   它照第一屏的 masthead 做（2026-10-17 改）：一个名字，下面一行小字。
+     第一屏那行小字说的是这个客户端是什么，这里说的是脚下的登录条目 ——
+     同一个形状，翻过去不用重新学一遍。用户的原话是"照着主页 slurmate 这个
+     格式做：slurmate 改成插件，登录节点写成登录条目"。
+   从前它是一条通栏的带子（底色与分隔线，2026-10-11 加）。带子整个去掉了：
+     它换的是底色与内边距，标题本身还是 14px 的区块标题，看起来"约等于没改"。
+   不新增元素、不重画一遍：画的仍是那几屏已有的 `.sec-head`。各写一份的话
+     两处会漂，而漂的方向是"其中一屏看起来还是旧的那一版"。
+   左右不再让位：没有底色，就没有"通栏"这件事；左边那 26px 由 `#panel`
+     的内边距给（与第一屏同一个缩进），右边那一条滚动条的槽由 `#panel` 自己
+     留着 —— 标题是普通块，本来就落在内容区里。 */
 #screen-plugins > .sec-head,
 #screen-jobs > .sec-head,
 #screen-debug > .sec-head {
-  margin: 0 calc(-26px - var(--sb-w)) 14px -26px;
-  padding: 14px 26px 13px;
-  background: var(--bg-alt);
-  border-bottom: 1px solid var(--border);
+  margin: 22px 0 18px;
+  align-items: flex-start;
 }
 
-/* 身份带里的两行：这一屏的名字，以及脚下是哪一台。
-   2026-10-17 从一行改成两行（用户报的三件事：样子不好看、贴着状态条像"顶头"、
-   「插件 · user@host」太长）。分开之后标题只剩两个字，站点地址退成小字 ——
-   两件事各有各的位置，长也长不到标题上去；上下各多留 2px 与一行字高，
-   带子不再是贴着状态条的一条窄边。
-   地址那一行不换行、出省略号：它可能很长（`user@host`），而把它折成第二行
-   会把带子撑高、按钮跟着上下跳。完整值在窗口标题栏里一直有。 */
+/* 标题那一块的两行。
+   标题用第一屏 `h1` 的字号与颜色（18px、正文色）：它是一屏的名字，不是页面里
+   的一个区块 —— 14px 的蓝色区块标题是拿来分段的，而这里分的是"翻了一页"。
+   登录条目那一行不换行、出省略号：它可能很长（`user@host:端口`），而把它折成
+   第二行会把标题撑高、右边那几颗按钮跟着上下跳。 */
 .band-id { flex: 1; min-width: 0; }
-.band-id h2 { margin: 0; flex: none; font-size: 14px; line-height: 20px; }
+.band-id h2 {
+  margin: 0 0 4px; flex: none;
+  font-size: 18px; font-weight: 600; color: var(--fg);
+}
 .band-site {
-  margin: 2px 0 0; font-size: 11px; line-height: 15px; color: var(--fg-dim);
+  margin: 0; font-size: 12px; line-height: 1.6; color: var(--fg-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -791,9 +802,12 @@ dialog p#fork-body { white-space: pre-line; }
    `·` 分隔的那些是这条作业的事实（作业号/分区/节点/剩余），
    最后那一格是谁在看 —— 而"谁在看"是三件事，不是两件（见 index.js 的 jobsView）。 */
 .jobs {
-  list-style: none; margin: 0 0 10px; padding: 0;
+  list-style: none; padding: 0;
   max-height: 340px; overflow-y: auto; overscroll-behavior: contain;
-  scrollbar-gutter: stable;      /* 理由同 `.conns` */
+  scrollbar-gutter: stable;
+  /* 右端探出 10px、抵消那条槽 —— 理由与算式同 `.conns`（用户 2026-10-17：
+     作业行也要与上面的标题行两端对齐）。 */
+  margin: 0 calc(-1 * var(--sb-w)) 10px 0;
 }
 .job {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

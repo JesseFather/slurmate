@@ -621,7 +621,6 @@ class SshBackend extends Backend {
   constructor(opts = {}) {
     super();
     this.kind = KIND.SSH;
-    this.label = '登录节点';
     this._opts = opts;
     this._conn = null;
     this._profile = null;

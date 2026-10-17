@@ -4311,7 +4311,6 @@ function registerIpc() {
     // `on` 是这次进程在不在开发者模式，`saved` 是用户在界面上要的是哪一个，
     // 两者不同 = 有改动等着重启。界面据此画那个复选框与「重启后生效」那一行。
     developerMode: devView(),
-    backendLabel: backend.label,
     connections: cfg.connections,
     activeConnectionId: cfg.activeConnectionId,
     // 这里不再有 connection（活动连接那条本身）：把地址预填进「新建」表单
