@@ -26,6 +26,21 @@ systemd 单元、只读自检脚本与这几份文档。仓库里那一份 `clus
 `--extract` 是刻意留的出口：一个要以 root 跑的文件，读的人应当能先看清里面是什么。
 脚本顶部那几条命令也能直接解压，与 `--extract` 做的是同一件事。
 
+装完之后，服务的启停用 `slurmate service`，不必自己记 `systemctl`：
+
+| 命令 | 做什么 |
+|---|---|
+| `slurmate service status` | 看它有没有在跑、版本、配置有没有未生效的改动。不需要 root |
+| `slurmate service check` | 跑守护进程的配置自检，退出码原样透传 |
+| `slurmate service start` | 自检 → 启动 → 等它真的能应答 |
+| `slurmate service stop` | 排空 → 停止。正在跑的作业不会停 |
+| `slurmate service restart` | 自检 → 排空 → 重启 → 等它就绪并核对配置 |
+| `slurmate service reload` | 自检 → 热重载 → 等守护进程报出接受还是拒绝 |
+
+安装、升级、修复结束时默认重启一次（换掉的是基座）；`--no-restart` 可跳过。
+插件的装、卸、对齐走热重载，连接一条都不断。重启与热重载之前都会先排空：
+窗口内的新提交被拒（约 60 秒自动恢复），所以不会切断一次走到一半的提交。
+
 装之前先读 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 的前置条件清单。每一条都注明
 「不满足会怎样失败」，因为那些失败在界面上长得像别的东西。装完之后按
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md) 改配置，出了事看下面那两份排障。

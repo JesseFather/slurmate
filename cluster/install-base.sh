@@ -65,6 +65,7 @@
 #    sudo bash install-base.sh --repair            # 修复：把该在的摆回去
 #    sudo bash install-base.sh --uninstall         # 卸载（保留状态数据）
 #    sudo bash install-base.sh --dry-run           # 演练，不做任何改动
+#    sudo bash install-base.sh --no-restart        # 装完不重启服务（演练/脚本用）
 #    sudo bash install-base.sh --uninstall --purge-state
 #    sudo bash install-base.sh --require-baseline  # 前置基线缺失即中止（见下）
 #
@@ -136,6 +137,7 @@ MODE="install"
 REQUIRE_BASELINE=0
 DRYRUN=0
 PURGE=0
+NORESTART=0
 
 while [[ $# -gt 0 ]]; do
     arg="$1"; shift
@@ -145,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --repair)            MODE="repair" ;;
         --uninstall)         MODE="uninstall" ;;
         --dry-run)           DRYRUN=1 ;;
+        --no-restart)        NORESTART=1 ;;
         --require-baseline)  REQUIRE_BASELINE=1 ;;
         # 兼容旧命令行：--force 是空操作（基线不完整时默认就继续），保留接受，
         # 免得旧脚本/旧笔记里的命令直接报错。
@@ -1004,6 +1007,15 @@ if [[ "$MODE" == "repair" ]]; then
         echo
         ok "对账干净：文件、目录、单元、服务都对得上，一个字节都不改。"
         info "（这一份包里的版本与装着的是同一个版本。要重装一遍：去掉 --repair。）"
+        # 对账干净也重启一次：这是这一版的规矩（修复 = 留一个干净的环境，
+        #   顺手清掉运行期残留），而不是"既然没改文件就什么都不做"。
+        if [[ "$NORESTART" -eq 1 ]]; then
+            info "按 --no-restart 跳过重启。"
+        elif SLURMATE_LOCK_HELD=1 "$CLI" service restart --config="$CONF" --quiet; then
+            ok "服务已重启（--repair 结束时的规矩；--no-restart 可跳过）"
+        else
+            die "服务重启失败（原因见上）。文件没有改动；排查后重跑 --repair。"
+        fi
         exit 0
     fi
     _A_PRE_BAD=( "${A_BAD[@]}" )
@@ -1272,53 +1284,26 @@ else
 fi
 
 if [[ "$DRYRUN" -eq 0 ]]; then
-    # 服务在跑时走 `reload`，不再 stop + start。
+    # 装/升级/修复换掉的是基座（守护进程与单元）。基座变了就重启，而不是
+    #   reload：这一版的规矩是"结束时留一个完整、干净的环境"。
     #
-    #   若走 stop + start（而不是 restart，为的是确保配置改动完全生效），代价是
-    #   所有人的会话断一次，就为了改一行配置或装一个插件 —— 而现在改配置本身
-    #   热得起来（守护进程的 `reload_config()`）。
+    #   重启对正在跑的会话是安全的：状态在 claims.db 与 nft 规则里，作业归
+    #   Slurm 管；客户端把"守护进程不可达"当作"作业仍在运行"，会自动重连。
+    #   重启之前 CLI 先发 `drain`，让新的提交在窗口内被拒 —— 于是重启不会
+    #   切断一次走到一半的提交。
     #
-    #   热不起来的那些键（COLD 那一档，现在是空的）由守护进程自己拒绝整个
-    #     reload 并说清是哪一个键 —— 那时它仍然用旧配置照常服务，所以这里不能报
-    #     "已生效"。这一条分支说的是实话：改了没生效，要重启。
-    if systemctl is-active --quiet "$SERVICE"; then
-        # 说准：`systemctl reload` 回 0 只表示信号送到了 —— systemd 不知道
-        #   服务内部接不接受这次改动（守护进程可能整个拒绝并说清是哪个键）。
-        #   所以这里不能说"配置已生效"。
-        if systemctl reload "$SERVICE"; then
-            ok "服务已在运行 → 已给它发了重载信号（正在跑的会话一条都没断）"
-            info "  它有没有接受这次改动，看它自己的日志：journalctl -u ${SERVICE} -n 20"
-        else
-            warn "systemctl reload 未成功，守护进程很可能拒绝了这次改动"
-            warn "  （比如改了必须重启才生效的键，它自己的日志里点了名）。"
-            warn "  它仍然在用旧配置照常服务。想让改动生效："
-            warn "      systemctl restart $SERVICE"
-        fi
-    elif systemctl start "$SERVICE"; then
-        ok "服务已启动"
+    #   自检、排空、重启、等就绪、核对结果这五步都在 `slurmate service restart`
+    #   一处，本脚本不再自己等 socket/nft —— 同一份判据只留一份。
+    if [[ "$NORESTART" -eq 1 ]]; then
+        info "按 --no-restart 跳过重启。守护进程仍在用启动时那一份配置。"
+    elif ! SLURMATE_LOCK_HELD=1 "$CLI" service restart --config="$CONF" --quiet; then
+        bad "服务重启失败（原因见上）"
+        info "  本次备份（被替换的旧文件在这）：${BACKUP_DIR}"
+        die "安装的文件已经摆好，但服务没有起来。排查上面的日志后重跑本脚本；
+     要回到上一份文件，从 ${BACKUP_DIR} 里取回后放到原路径，
+     再 sudo slurmate service restart。"
     else
-        bad "服务启动失败，打印最近日志："
-        journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | sed 's/^/        /' >&2
-        die "启动失败。nft 表可能未创建；本系统之外的一切未受影响。排查后重跑本脚本即可。"
-    fi
-    # 等待守护进程真正就绪（socket + nft 表都到位），最多 20 秒。
-    # 不用固定 sleep —— 慢机器上会误报，快机器上会白等。
-    READY=0
-    WAITED=0
-    for i in $(seq 1 20); do
-        WAITED=$i
-        if [[ -S "$SOCKET" ]] && "$NFT" list table inet slurmate >/dev/null 2>&1; then
-            READY=1
-            break
-        fi
-        # 服务已经挂了就没必要继续等
-        systemctl is-active --quiet "$SERVICE" || break
-        sleep 1
-    done
-    if [[ "$READY" -eq 1 ]]; then
-        ok "守护进程就绪（socket + nft 表，用时约 ${WAITED}s）"
-    else
-        warn "等待 ${WAITED}s 后守护进程未完全就绪，继续验证（下面的检查会指出缺什么）"
+        ok "服务已重启并就绪（基座变了，这一版默认重启）"
     fi
 else
     info "[演练] 跳过启动"

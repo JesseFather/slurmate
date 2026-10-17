@@ -70,7 +70,7 @@ import time
 #   第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.23"
+VERSION = "0.24"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -560,6 +560,10 @@ LOG_DIR = "/var/log/slurmate"
 TICK_SECONDS = 2
 
 STARTUP_GRACE_SECONDS = 120
+# `drain` op 的窗口（秒）。`service restart` 在重启之前调它：窗口内的新提交
+#   一律回 code 5 / kind draining，正在处理的那一条不受影响（dispatch 是同步的，
+#   应答 drain 时没有在途 op）。窗口不续期，重启失败也不会把站点永久锁住。
+DRAIN_SECONDS = 60
 # 插件清单没声明 `site.defaultTime` 时用的缺省时限。作者可以在清单里给自己的
 # 插件定一个，站点可以在那个插件的配置里再覆盖，理由是默认资源那条的
 # 同一条：在 IDE 里跑语言服务器和在 shell 里跑 codex 不是一回事，那是插件的策略。
@@ -2052,6 +2056,44 @@ def parse_config(path):
         sections[name] = parse_plugin_file_text(text, p)
         meta[name] = {"file": p}
     return global_out, sections, meta
+
+
+def config_digest(path):
+    """配置来源的内容摘要：主文件 + 它的 drop-in 目录。
+
+    守护进程用它回答两件事：这次重载载入的是哪一份（`config.digest`），以及
+      盘上现在的那一份还是不是它（`config.on_disk_digest`）。判据必须覆盖
+      两个来源，只算主文件的话，插件配置改了而摘要不动 —— 而插件配置正是
+      热重载最常动的那一半。
+
+    路径也进摘要：把一份内容换到另一个文件名下，行为会变（归属跟着文件名走），
+      而只比内容的话这次变化看不见。目录不存在与空目录不是一回事，前者连
+      "插件配置目录"这个事实都没有，所以用一条 `\\0missing` 记下来。
+    """
+    h = hashlib.sha256()
+
+    def feed(label, data):
+        h.update(label.encode("utf-8") + b"\0")
+        h.update(data)
+        h.update(b"\n")
+
+    try:
+        with open(path, "rb") as f:
+            feed("main", f.read())
+    except OSError:
+        feed("main", b"\0missing")
+    d = plugin_conf_dir(path)
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".conf"))
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            with open(os.path.join(d, name), "rb") as f:
+                feed(name, f.read())
+        except OSError:
+            feed(name, b"\0missing")
+    return h.hexdigest()
 
 
 # 主文件里出现块头时那句话（`parse_main_text` 用）。写得长一点，因为
@@ -5546,6 +5588,9 @@ def parse_reserved_ranges(spec):
 class Config(object):
     def __init__(self, path):
         self.path = path
+        # 载入时刻那一份来源的摘要。热重载换上的 `Config` 自带新的那份，
+        #   于是"已载入的是哪一份"与"盘上现在的是哪一份"可以分开回答。
+        self.digest = config_digest(path)
         raw, sections, self.plugin_conf_files = parse_config(path)
         # 原始键值原样留着：热重载要判"哪些键变了"，而判据
         #   必须是配置里写了什么，不是"解析出来的属性等不等"。后者会漏掉：
@@ -7798,6 +7843,14 @@ class Sessiond(object):
         # 而两个取内容的出口都必须描述同一份包。见 plugin_snapshot() 的 docstring。
         self._plugin_cache = {}
         self.startup_at = now_ts()
+        self.config_loaded_at = self.startup_at
+        # 每一次重载的结果。`seq` 而不是时刻：CLI 靠"它前进了没有"判断这次
+        #   重载落没落地，而秒级时刻在同一秒内的两次重载分不开。
+        #   启动那次也算一次载入（ok=true），于是第一次 `reload` 有一个基线。
+        self.last_reload = {"seq": 0, "at": self.startup_at, "ok": True,
+                            "error": None, "cold_keys": [], "notice_keys": []}
+        # 排空窗口的截止时刻（epoch 秒）。0 = 没在排空。
+        self.drain_until = 0.0
         # 启动静默期：这段时间内不做任何超时判定，避免重启窗口把在跑的会话误判成孤儿
         self.hb_grace_until = self.startup_at + cfg.startup_grace_seconds
         self.running = True
@@ -8091,6 +8144,10 @@ class Sessiond(object):
         `notes` 是"可以换、但要说一句"的那些键（NOTICE 档）。
         它是返回值而不是日志：调用方要能把它记进审计，用例也要能直接断言
           它，只写日志的话，这件事在任何地方都验不了。
+
+        第三个返回值是给 `daemon` op 的：`{"error": 说不成的那一句,
+          "cold_keys": 必须重启的那几个键}`。CLI 的 `service reload` 靠它
+          把"接受"与"拒绝"说准，而不是只看 `systemctl reload` 的退出码。
         """
         try:
             new = Config(self.cfg.path)
@@ -8098,7 +8155,8 @@ class Sessiond(object):
             # 解析不动就什么都不改。注意这里连 `self.cfg` 都不碰，
             #   旧配置继续服务，正在跑的会话一条都不会断。
             log.error("热重载失败：新配置读不动（旧配置继续服务）：%s", e)
-            return False, []
+            return False, [], {"error": "新配置读不动：%s" % e,
+                               "cold_keys": []}
         # 判据是 `Config.validate()`：F45 的教训是"三条路各抄一份子集就会漏"，
         #   而今天只有这一份判据可抄（`config_deploy_problems()` 随
         #   `cluster_cidr` 一起删了，见 `start()` 里那段）。
@@ -8108,18 +8166,20 @@ class Sessiond(object):
                       "%s", len(errs), errs[0])
             for e in errs[1:]:
                 log.error("  %s", e)
-            return False, []
+            return False, [], {"error": "新配置有 %d 处过不了自检" % len(errs),
+                               "cold_keys": []}
         cold = changed_cold_keys(self.cfg, new)
         if cold:
             log.error("热重载拒绝：这几个键改了之后必须重启才生效：%s。"
                       "新配置一个字都没被采用，跑 "
-                      "`systemctl restart slurmate-sessiond`。",
+                      "`slurmate service restart`。",
                       "、".join(cold))
-            return False, []
+            return False, [], {"error": "这几个键改了之后必须重启才生效",
+                               "cold_keys": list(cold)}
 
         notes = changed_notice_keys(self.cfg, new)
         self._adopt_config(new)
-        return True, notes
+        return True, notes, {"error": None, "cold_keys": []}
 
     def _config_holders(self):
         """所有按引用拿着配置的部件（`Sessiond` 自己除外，它就是持有者）。
@@ -8166,7 +8226,17 @@ class Sessiond(object):
 
     def _do_reload(self):
         """主循环顶部真正做一次重载：跑 `reload_config()`，结果进日志与审计。"""
-        ok, notes = self.reload_config()
+        ok, notes, info = self.reload_config()
+        self.last_reload = {
+            "seq": self.last_reload.get("seq", 0) + 1,
+            "at": now_ts(),
+            "ok": bool(ok),
+            "error": info.get("error"),
+            "cold_keys": list(info.get("cold_keys") or []),
+            "notice_keys": list(notes),
+        }
+        if ok:
+            self.config_loaded_at = self.last_reload["at"]
         for n in notes:
             # NOTICE 档：说一句。不说的话，"改完之后某个已经在跑的会话出了
             # 怪事"与这次改动之间的关系，没有任何地方连得上。
@@ -9526,6 +9596,13 @@ class Sessiond(object):
             if op == "ping":
                 return self._ok({"pong": True, "version": VERSION,
                                  "time": now_ts()})
+            # 服务生命周期用的两个 op。`daemon` 只读，任何用户都能问；
+            #   `drain` 改的是"还收不收提交"，只有 root 能发。
+            #   名字不能是 `status`：那已经是会话状态。
+            if op == "daemon":
+                return self.op_daemon(uid, gid)
+            if op == "drain":
+                return self.op_drain(uid)
             if op == "whoami":
                 return self.op_whoami(uid, gid)
             if op == "partitions":
@@ -9560,6 +9637,67 @@ class Sessiond(object):
         except Exception as e:                               # noqa: BLE001
             log.exception("RPC %s 处理异常", op)
             return self._err(9, "internal", str(e)[:200])
+
+    # ── RPC：服务生命周期（CLI 的 `slurmate service`）──────────────────────
+    def op_daemon(self, uid, gid):
+        """这一个守护进程自己的状态：版本、配置、会话数、插件数、排空窗口。
+
+        `config.digest` 是已载入的那一份，`config.on_disk_digest` 是盘上现在
+        的那一份。两个数分开报而不是替调用方比：CLI 要靠"不相等"说出
+        "有改动尚未生效"，而判断该由看到两个事实的那一方做。
+
+        `last_reload.seq` 是"重载落没落地"的判据。它是序号不是时刻：
+        秒级时刻在同一秒内的两次重载分不开，而 CLI 等的正是"它前进了没有"。
+
+        `nft_table` 在这里现读一次。只读 op 不改变任何东西，`session_rules()`
+          读不到时返回 None，那正是要报出去的事实。
+        """
+        plugins = list(self.cfg.plugins.values())
+        now = time.time()
+        return self._ok({
+            "version": VERSION,
+            "pid": os.getpid(),
+            "started_at": self.startup_at,
+            "config": {
+                "path": self.cfg.path,
+                "digest": self.cfg.digest,
+                "on_disk_digest": config_digest(self.cfg.path),
+                "loaded_at": self.config_loaded_at,
+                "last_reload": dict(self.last_reload),
+            },
+            "sessions": {
+                "active": len(self.store.by_state(OCCUPYING_STATES)),
+            },
+            "plugins": {
+                "total": len(plugins),
+                "enabled": sum(1 for p in plugins if p.enabled),
+            },
+            "port_range": [self.cfg.port_start, self.cfg.port_end],
+            "nft_table": self.nft.session_rules() is not None,
+            "draining": {
+                "until": int(self.drain_until) if now < self.drain_until else 0,
+            },
+        })
+
+    def op_drain(self, uid):
+        """让新的提交在窗口内被拒，给重启留一个没有在途提交的时刻。
+
+        `dispatch` 是同步的：应答这一条时，没有别的 op 停在半路。所以紧接着
+          发来的重启不会切断一次正在进行的 `op_submit`（账本 F40 的那一段
+          非原子窗口由此关掉）。
+
+        窗口不续期，到期自动恢复。重启失败时站点最多在 60 秒里拒新提交，
+          不会被永久锁在排空态。只拒 `submit`：status / heartbeat / goodbye
+          照常，正在跑的会话一条都不受影响。
+        """
+        if uid != 0:
+            return self._err(4, "forbidden",
+                             "只有 root 能让守护进程排空（它会影响别人的提交）。")
+        self.drain_until = time.time() + DRAIN_SECONDS
+        self.audit("daemon_drain", seconds=DRAIN_SECONDS,
+                   until=int(self.drain_until))
+        return self._ok({"draining": {"until": int(self.drain_until)},
+                         "seconds": DRAIN_SECONDS})
 
     # ── RPC：只读操作 ───────────────────────────────────────────────────────
     def op_whoami(self, uid, gid):
@@ -10479,6 +10617,14 @@ class Sessiond(object):
             return self._err(3, "unknown_uid", str(uid))
         if self.is_throttled(uid):
             return self._err(4, "throttled", "请求被拒绝次数过多，请稍后再试")
+        # 排空窗口：`service restart` 在重启之前设上它，让"提交走到一半"不再
+        #   与"进程被换掉"相遇。只拒提交 —— 查询、心跳、结束会话都照常，
+        #   已经在跑的会话一条都不受影响。
+        left = self.drain_until - time.time()
+        if left > 0:
+            return self._err(5, "draining",
+                             "守护进程正在重启，请约 %d 秒后再试。"
+                             % max(1, int(round(left))))
 
         # 一次调用，一个判据。 两道检查、两个集合会差一个
         #   「已提交、尚未登记」的窗口，那个窗口里计数恒为 0，

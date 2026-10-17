@@ -31,11 +31,16 @@ slurmate — Slurmate 用户态 CLI
 从构造上消除注入，而不是靠"记得别用某个词"。
 
 退出码：
-    0 成功 / 2 用法错误 / 3 未找到 / 4 被拒绝（配额、权限、账户）/
+    0 成功 / 1 服务生命周期动作没做成（只在 `service` 组）/
+    2 用法错误 / 3 未找到 / 4 被拒绝（配额、权限、账户）/
     5 守护进程不可达 / 6 Slurm 或提交失败 / 7 触发限流
+
+`service` 那六个动词的判据在文件里〈服务生命周期〉那一节：自检、动作、等就绪、
+核对结果，一条命令走完。
 """
 
 import argparse
+import fcntl
 import json
 import os
 import selectors
@@ -50,7 +55,7 @@ import time
 #
 # 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
 # 它停在旧值也没人会发现。
-VERSION = "0.23"
+VERSION = "0.24"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
@@ -120,45 +125,463 @@ def sessiond_path():
     return os.environ.get("SLURMATE_SESSIOND") or DEFAULT_SESSIOND
 
 
-def reload_daemon():
-    """配置改完之后，让正在跑的守护进程重新读一遍。
+# ── 服务生命周期：`slurmate service <动词>` ────────────────────────────────
+#
+# 这一组的全部目的，是让管理员不必自己记 systemctl 的顺序：自检、动作、
+#   等就绪、核对结果。`systemctl` 只回"信号送到了""单元启动了"，它不知道
+#   守护进程有没有接受配置、有没有真的在应答。这些事实在这里被读完，然后
+#   只说一句话。
+#
+# 锁与安装器是同一把（`/run/slurmate-deploy.lock`）：安装器会在持有它的时候
+#   调本程序，所以那时用 `SLURMATE_LOCK_HELD=1` 跳过，避免自锁。
+DEPLOY_LOCK = "/run/slurmate-deploy.lock"
+READY_TIMEOUT = 20.0
+READY_POLL = 0.5
+RELOAD_TIMEOUT = 10.0
+DRAIN_SECONDS = 60
 
-    这是热重载在运维动线上的落点：装插件、对齐配置都会改配置文件，要让守护进程
-    自己重读一遍，而不是重跑一次基座安装脚本（stop + start，会导致所有会话都断
-    一次）。
+
+class ServiceBusy(Exception):
+    pass
+
+
+def daemon_call(op, timeout=2.0):
+    """向守护进程发一个生命周期 op。单独一层是为了让用例能替掉它。"""
+    return rpc({"op": op}, timeout=timeout)
+
+
+def systemctl(*argv):
+    """跑一个 systemctl 动词。没有 systemctl 的机器上返回 None。"""
+    try:
+        return subprocess.run(["systemctl"] + list(argv),
+                              capture_output=True, text=True)
+    except OSError:
+        return None
+
+
+def service_state():
+    r = systemctl("is-active", SERVICE)
+    if r is None:
+        return "missing"
+    if r.returncode == 0 and (r.stdout or "").strip() == "active":
+        return "active"
+    return "inactive"
+
+
+def nft_table_present():
+    try:
+        return subprocess.run(["nft", "list", "table", "inet", "slurmate"],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def acquire_deploy_lock():
+    """拿部署锁。安装器已经拿着时（环境变量）直接放行。"""
+    if os.environ.get("SLURMATE_LOCK_HELD") == "1":
+        return None
+    try:
+        fd = os.open(DEPLOY_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise ServiceBusy("另一个部署或服务操作正在进行（锁：%s）。" % DEPLOY_LOCK)
+    return fd
+
+
+def print_journal():
+    try:
+        r = subprocess.run(["journalctl", "-u", SERVICE, "-n", "30",
+                            "--no-pager"], capture_output=True, text=True)
+    except OSError:
+        return
+    out = (r.stdout or "").strip()
+    if out:
+        print(out, file=sys.stderr)
+
+
+def wait_ready(timeout=READY_TIMEOUT):
+    """等守护进程真的能应答。返回 `(状态, 最后一次没就绪的原因)`。
+
+    判据是三件事：socket 在、nft 表在、`daemon` op 能答。前两件在 `run()`
+      开始之前就为真，所以它们单独都不够 —— 只有"能答"才说明事件循环在转。
+      老守护进程不认 `daemon` op 时退回 `ping`。
+    """
+    deadline = time.monotonic() + timeout
+    last = "socket 还没出现"
+    while time.monotonic() < deadline:
+        if not os.path.exists(socket_path()):
+            last = "socket 还没出现"
+        elif not nft_table_present():
+            last = "nft 表还没建好"
+        else:
+            try:
+                resp = daemon_call("daemon")
+            except RpcError as e:
+                last = e.message
+            else:
+                if resp.get("ok"):
+                    return resp.get("data") or {}, None
+                kind = (resp.get("error") or {}).get("kind")
+                if kind == "unknown_op":
+                    try:
+                        pong = daemon_call("ping")
+                    except RpcError as e:
+                        last = e.message
+                    else:
+                        if pong.get("ok"):
+                            return pong.get("data") or {}, None
+                        last = ((pong.get("error") or {}).get("detail")
+                                or "ping 被拒绝")
+                else:
+                    last = ((resp.get("error") or {}).get("detail")
+                            or "守护进程不应答")
+        time.sleep(READY_POLL)
+    return None, last
+
+
+def reload_seq():
+    """上一次重载的序号；旧守护进程或不可达时返回 None。"""
+    try:
+        resp = daemon_call("daemon")
+    except RpcError:
+        return None
+    if not resp.get("ok"):
+        return None
+    cfg = (resp.get("data") or {}).get("config") or {}
+    return (cfg.get("last_reload") or {}).get("seq")
+
+
+def wait_reload(base_seq, timeout=RELOAD_TIMEOUT):
+    """等 `last_reload.seq` 前进。返回 `(last_reload, 原因)`。"""
+    deadline = time.monotonic() + timeout
+    last = "守护进程没有应答"
+    # 拿不到基线（旧守护进程刚换、或那一刻正好连不上）时，等半秒再读一次，
+    #   把读到的那次当作这次重载的结果。这不是完美的归因，但比"回 0 就说
+    #   已生效"诚实：下面会说清"旧守护进程不报结果"。
+    if base_seq is None:
+        time.sleep(0.5)
+    while time.monotonic() < deadline:
+        try:
+            resp = daemon_call("daemon")
+        except RpcError as e:
+            last = e.message
+        else:
+            if resp.get("ok"):
+                cfg = (resp.get("data") or {}).get("config") or {}
+                lr = cfg.get("last_reload") or {}
+                seq = lr.get("seq") or 0
+                if base_seq is None or seq > base_seq:
+                    return lr, None
+            elif (resp.get("error") or {}).get("kind") == "unknown_op":
+                # 旧守护进程：它做了这次重载，但不报结果。不许因此把它当成失败。
+                return {"ok": True, "unverifiable": True}, None
+            else:
+                last = ((resp.get("error") or {}).get("detail")
+                        or "守护进程不应答")
+        # 0.2 秒一次：这个 op 也过每 uid 每秒的限流，10 次/秒是那条线。
+        time.sleep(0.2)
+    return None, last
+
+
+def reload_and_report(quiet=False):
+    """让守护进程重读配置，并等到它真的接受/拒绝。返回退出码。
 
     用 `systemctl reload`（单元的 `ExecReload` 是 `kill -HUP`），不是 restart：
-    正在跑的会话一条都不该断。
+      正在跑的会话一条都不该断。`systemctl` 的退出码只说信号送到了，所以
+      这里再读 `daemon` op 的 `last_reload`，把"接受"与"拒绝"说准。
 
-    失败只报一句、绝不致命：配置已经写好了，而"服务没在跑"是最常见的情形（首次
-    部署、或者管理员刚把它停掉），那不是错误。但不许说谎，三条路各说各的话：
-    "重载过了" / "服务没在跑，下次启动用上" / "重载没成功，得重启"。把这三件事
-    混成一句"配置已生效"，就是这一路在清的那种静默。
+    三条路各说各的话：接受了 / 服务没在跑（下次启动用上）/ 拒绝了或没落地。
+      把三件事混成一句"配置已生效"，就是这一路在清的那种静默。
     """
-    try:
-        act = subprocess.run(["systemctl", "is-active", SERVICE],
-                             capture_output=True, text=True)
-    except OSError:
-        return          # 这台机器上没有 systemctl（开发机 / 容器），什么都不说
-    if act.stdout.strip() != "active":
-        print("（守护进程没在跑。配置已经写好，下次启动就会用上。）")
-        return
-    try:
-        rc = subprocess.run(["systemctl", "reload", SERVICE]).returncode
-    except OSError as e:
-        print("配置写好了，但未能让守护进程重读（%s）。" % e, file=sys.stderr)
-        return
-    if rc == 0:
-        # 说准：`systemctl reload` 回 0 只表示信号送到了，systemd 不知道服务内部
-        # 接不接受这次改动（守护进程可能整个拒绝，见它的 `reload_config()`）。
-        # 所以这句话不能是"配置已生效"。
-        print("已让守护进程重读配置（`systemctl reload`），"
-              "正在跑的会话一条都没断。")
-        print("  它有没有接受这次改动，看它自己的日志："
-              "journalctl -u %s -n 20" % SERVICE)
-    else:
+    state = service_state()
+    if state == "missing":
+        return EXIT_OK          # 开发机 / 容器：没有 systemd，没有可通知的
+    if state != "active":
+        if not quiet:
+            print("（守护进程没在跑。配置已经写好，下次启动就会用上。）")
+        return EXIT_OK
+    base = reload_seq()
+    r = systemctl("reload", SERVICE)
+    if r is None:
+        return EXIT_OK
+    if r.returncode != 0:
         print("配置写好了，但 `systemctl reload` 未成功。它会在下次重启时生效；"
-              "想立刻生效：sudo systemctl restart %s" % SERVICE, file=sys.stderr)
+              "想立刻生效：sudo slurmate service restart", file=sys.stderr)
+        return 1
+    lr, why = wait_reload(base)
+    if lr is None:
+        print("配置写好了，但守护进程没有在 %d 秒内完成重载（%s）。"
+              "看它自己的日志：journalctl -u %s -n 20"
+              % (int(RELOAD_TIMEOUT), why, SERVICE), file=sys.stderr)
+        return 1
+    if lr.get("unverifiable"):
+        if not quiet:
+            print("已让守护进程重读配置（`systemctl reload`），"
+                  "正在跑的会话一条都没断。")
+            print("  这个守护进程不报重载结果（版本较旧），"
+                  "有没有接受看它的日志：journalctl -u %s -n 20" % SERVICE)
+        return EXIT_OK
+    if lr.get("ok"):
+        if not quiet:
+            print("守护进程接受了这次重载，正在跑的会话一条都没断。")
+            for k in lr.get("notice_keys") or []:
+                print("  已生效（会影响已建立的会话）：%s" % k)
+        return EXIT_OK
+    err = lr.get("error") or "原因未记录"
+    keys = lr.get("cold_keys") or []
+    print("守护进程拒绝了这次重载：%s%s。新配置一个字都没被采用。"
+          % (err, ("（%s）" % "、".join(keys)) if keys else ""), file=sys.stderr)
+    print("  要让它生效：sudo slurmate service restart", file=sys.stderr)
+    return 1
+
+
+def reload_daemon(quiet=False):
+    """插件命令的落点：配置写完后热重载，并把结果作为退出码传回去。"""
+    return reload_and_report(quiet=quiet)
+
+
+def cmd_service_check(args):
+    argv = [sys.executable, sessiond_path(), "--check"]
+    if args.config:
+        argv += ["--config", args.config]
+    try:
+        return subprocess.run(argv).returncode
+    except OSError as e:
+        print("启动守护进程自检失败（%s）：%s" % (sessiond_path(), e),
+              file=sys.stderr)
+        return EXIT_NOTFOUND
+
+
+def _service_status_data():
+    try:
+        resp = daemon_call("daemon")
+    except RpcError:
+        return None
+    if resp.get("ok"):
+        return resp.get("data") or {}
+    if (resp.get("error") or {}).get("kind") == "unknown_op":
+        # 旧守护进程：它不报详细状态，但 ping 能证明它活着。
+        try:
+            pong = daemon_call("ping")
+        except RpcError:
+            return None
+        if pong.get("ok"):
+            return {"old": True,
+                    "version": (pong.get("data") or {}).get("version")}
+    return None
+
+
+def cmd_service_status(args):
+    """systemd 的状态 + 守护进程自己的状态。只读，不需要 root。"""
+    state = service_state()
+    data = _service_status_data()
+    if data is None:
+        if state == "active":
+            if args.quiet:
+                print("在运行，但不应答")
+            else:
+                print("服务在运行，但守护进程不应答。看日志：")
+                print_journal()
+            return 1
+        if state == "missing":
+            print("这台机器上没有 systemctl，也连不上守护进程。")
+        else:
+            print("未运行。")
+            print("  启动：sudo slurmate service start")
+        return EXIT_NOTFOUND
+
+    if data.get("old"):
+        if args.quiet:
+            print("运行中（版本 %s）" % data.get("version"))
+        else:
+            print("服务：运行中（版本 %s）" % data.get("version"))
+            print("  这个守护进程不报详细状态（版本较旧）。"
+                  "升级到 0.24 之后这里会有配置摘要、会话数与上次重载结果。")
+        return EXIT_OK
+
+    cfg = data.get("config") or {}
+    lr = cfg.get("last_reload") or {}
+    plugins = data.get("plugins") or {}
+    sessions = data.get("sessions") or {}
+    draining = (data.get("draining") or {}).get("until") or 0
+    if args.quiet:
+        print("运行中（版本 %s，pid %s）"
+              % (data.get("version"), data.get("pid")))
+    else:
+        print("服务：运行中（版本 %s，pid %s）"
+              % (data.get("version"), data.get("pid")))
+        print("配置：%s" % cfg.get("path"))
+        print("  已载入于 %s（摘要 %s）"
+              % (time.strftime("%Y-%m-%d %H:%M:%S",
+                               time.localtime(cfg.get("loaded_at") or 0)),
+                 (cfg.get("digest") or "")[:12]))
+        if cfg.get("digest") and cfg.get("on_disk_digest") \
+                and cfg.get("digest") != cfg.get("on_disk_digest"):
+            print("  [注意] 盘上的配置与已载入的不一致，有改动尚未生效："
+                  "sudo slurmate service reload")
+        if lr.get("seq"):
+            if lr.get("ok"):
+                print("  上一次重载：接受（%s）"
+                      % time.strftime("%H:%M:%S",
+                                      time.localtime(lr.get("at") or 0)))
+            else:
+                print("  上一次重载：拒绝（%s）%s"
+                      % (time.strftime("%H:%M:%S",
+                                       time.localtime(lr.get("at") or 0)),
+                         lr.get("error") or ""))
+        print("会话：%s 个占着位置" % sessions.get("active", 0))
+        print("插件：%s 个，%s 个启用"
+              % (plugins.get("total", 0), plugins.get("enabled", 0)))
+        rng = data.get("port_range") or [0, 0]
+        print("端口池：%s-%s；nft 表：%s"
+              % (rng[0], rng[1],
+                 "在位" if data.get("nft_table") else "读取失败"))
+        if draining:
+            print("排空窗口：到 %s"
+                  % time.strftime("%H:%M:%S", time.localtime(draining)))
+    return EXIT_OK
+
+
+def _error(msg):
+    print(msg, file=sys.stderr)
+    return 1
+
+
+def cmd_service_start(args):
+    if os.geteuid() != 0:
+        return _error("这一步要 root：sudo slurmate service start")
+    if args.dry_run:
+        print("会先跑守护进程自检，再 systemctl start，然后等它真的应答。")
+        return EXIT_OK
+    try:
+        acquire_deploy_lock()
+    except ServiceBusy as e:
+        return _error(str(e))
+    if cmd_service_check(args) != 0:
+        return _error("配置自检没过，没有动服务。")
+    state = service_state()
+    if state == "missing":
+        return _error("这台机器上没有 systemctl，启动不了服务。")
+    if state == "active":
+        data, _why = wait_ready(2.0)
+        if data is not None:
+            print("已经在运行。")
+            return EXIT_OK
+    r = systemctl("start", SERVICE)
+    if r is None or r.returncode != 0:
+        print_journal()
+        return _error("服务启动失败。")
+    data, why = wait_ready()
+    if data is None:
+        print("等待 %d 秒后守护进程仍未就绪（%s）。"
+              % (int(READY_TIMEOUT), why), file=sys.stderr)
+        print_journal()
+        return 1
+    print("服务已启动（版本 %s，pid %s）。"
+          % (data.get("version", "?"), data.get("pid", "?")))
+    return EXIT_OK
+
+
+def cmd_service_stop(args):
+    if os.geteuid() != 0:
+        return _error("这一步要 root：sudo slurmate service stop")
+    if args.dry_run:
+        print("会先排空，再 systemctl stop；正在跑的作业不会停。")
+        return EXIT_OK
+    try:
+        acquire_deploy_lock()
+    except ServiceBusy as e:
+        return _error(str(e))
+    active_sessions = None
+    if service_state() == "active":
+        data = _service_status_data()
+        if data is not None:
+            active_sessions = (data.get("sessions") or {}).get("active")
+            try:
+                daemon_call("drain")
+            except RpcError:
+                pass
+    r = systemctl("stop", SERVICE)
+    if r is None or r.returncode != 0:
+        print_journal()
+        return _error("服务停止失败。")
+    deadline = time.monotonic() + READY_TIMEOUT
+    while time.monotonic() < deadline:
+        if service_state() != "active":
+            break
+        time.sleep(READY_POLL)
+    if service_state() == "active":
+        print_journal()
+        return _error("服务还在运行。")
+    print("服务已停止。")
+    if active_sessions:
+        print("  %d 个会话还在占着位置，它们的作业归 Slurm 管，不会停。"
+              "下次启动仍会认领它们。" % active_sessions)
+    return EXIT_OK
+
+
+def cmd_service_restart(args):
+    if os.geteuid() != 0:
+        return _error("这一步要 root：sudo slurmate service restart")
+    if args.dry_run:
+        print("会先自检、排空，再 systemctl restart，然后等它真的应答。")
+        return EXIT_OK
+    try:
+        acquire_deploy_lock()
+    except ServiceBusy as e:
+        return _error(str(e))
+    if cmd_service_check(args) != 0:
+        return _error("配置自检没过，没有动服务。")
+    if service_state() == "missing":
+        return _error("这台机器上没有 systemctl，重启不了服务。")
+    # 排空：让新提交在窗口内被拒，重启就不会切断一次走到一半的提交。
+    #   失败不致命：旧守护进程不认这个 op，而重启本身仍然是安全的。
+    if service_state() == "active":
+        try:
+            daemon_call("drain")
+        except RpcError:
+            pass
+    r = systemctl("restart", SERVICE)
+    if r is None or r.returncode != 0:
+        print_journal()
+        return _error("服务重启失败。")
+    data, why = wait_ready()
+    if data is None:
+        print("等待 %d 秒后守护进程仍未就绪（%s）。"
+              % (int(READY_TIMEOUT), why), file=sys.stderr)
+        print_journal()
+        return 1
+    cfg = data.get("config") or {}
+    print("服务已重启（版本 %s，pid %s）。"
+          % (data.get("version", "?"), data.get("pid", "?")))
+    if cfg.get("digest") and cfg.get("on_disk_digest") \
+            and cfg.get("digest") != cfg.get("on_disk_digest"):
+        print("  [注意] 盘上的配置与已载入的不一致："
+              "sudo slurmate service check", file=sys.stderr)
+        return 1
+    return EXIT_OK
+
+
+def cmd_service_reload(args):
+    if os.geteuid() != 0:
+        return _error("这一步要 root：sudo slurmate service reload")
+    if args.dry_run:
+        print("会先自检，再 systemctl reload，然后等守护进程报出接受/拒绝。")
+        return EXIT_OK
+    try:
+        acquire_deploy_lock()
+    except ServiceBusy as e:
+        return _error(str(e))
+    if cmd_service_check(args) != 0:
+        return _error("配置自检没过，没有动服务。")
+    if service_state() != "active":
+        return _error("服务没在跑，没有可重载的内容。启动一次就会用上这份配置："
+                      "sudo slurmate service start")
+    return reload_and_report(quiet=args.quiet)
 
 
 def cmd_plugin_install(args):
@@ -237,8 +660,9 @@ def cmd_plugin_install(args):
         return src
     # 装好了、配置也对齐了，就让守护进程重读一遍（热重载），而不是重跑一次基座
     # 安装脚本（stop + start）：那样所有人的会话要断一次，就为了加一个插件。
-    reload_daemon()
-    return 0
+    # 重载被拒或没落地时把非零传回去：包已经装好，而站点没有接受这次改动，
+    # 这两件事要分开说。
+    return reload_daemon()
 
 
 def cmd_plugin_uninstall(args):
@@ -280,10 +704,16 @@ def cmd_plugin_uninstall(args):
         print("启动卸载器失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if rc == 0:
+        # `--plugins-dir` 是排查路径：卸的是那个目录，不动真站点的配置。
+        # 那时没有可重载的东西，也不该去拨真守护进程。
+        if args.plugins_dir:
+            print("卸的是 %s 而不是本站的插件目录，所以没有让守护进程重读"
+                  "（真站点一个字节都没动）。" % args.plugins_dir)
+            return 0
         # 卸掉一个插件会删掉它那一份配置，所以要让守护进程重读一遍（见
         # reload_daemon）。不说这一句的话，表现是"卸了但它好像还在"，直到下次
         # 重启才消失。
-        reload_daemon()
+        return reload_daemon()
     return rc
 
 
@@ -323,10 +753,16 @@ def cmd_plugin_sync(args):
         print("启动配置对齐失败（%s）：%s" % (exe, e), file=sys.stderr)
         return EXIT_NODAEMON
     if rc == 0:
+        # 同上：`--plugins-dir` 指到别处时，守护进程那一侧根本没对齐任何
+        # 内容（它会说清为什么并回 0）。此时去重载真服务只会把一句话说成谎。
+        if args.plugins_dir:
+            print("用的是 %s 而不是本站的插件目录，所以没有让守护进程重读"
+                  "（真站点一个字节都没动）。" % args.plugins_dir)
+            return 0
         # 对齐动了配置文件，所以要守护进程重读一遍（见 reload_daemon）。否则
         # 管理员还得记得"改完要重启"，忘了的后果是"配了但它就是不生效"，而这类
         # 症状正是要消灭的。
-        reload_daemon()
+        return reload_daemon()
     return rc
 
 
@@ -1143,6 +1579,42 @@ def build_parser():
                     help="站点配置文件。省略 = 用守护进程的缺省路径"
                          "（/etc/slurmate/slurmate.conf）")
     ps.set_defaults(func=cmd_plugin_sync)
+
+    # `service` 是第二个管理动词组（要 root），与 `plugin` 同一条理由：
+    # 它管的是这台机器上的一个系统服务，不是某一次会话。
+    p = add("service", None, "管理守护进程：启动、停止、重启、热重载、状态")
+    ssub = p.add_subparsers(dest="service_cmd")
+
+    def add_service(name, fn, help_text, config=False, needs_root=False):
+        sp = ssub.add_parser(name, help=help_text)
+        sp.set_defaults(func=fn)
+        if config:
+            sp.add_argument("--config", default="",
+                            help="站点配置文件。省略 = 守护进程的缺省路径")
+        if name == "status":
+            sp.add_argument("--quiet", action="store_true",
+                            help="只打一行结论")
+        if needs_root:
+            sp.add_argument("--quiet", action="store_true",
+                            help="只打结论行与错误")
+            sp.add_argument("--dry-run", action="store_true",
+                            help="说清将要做什么，不动服务")
+        return sp
+
+    add_service("check", cmd_service_check,
+                "跑守护进程的配置自检，原样透传退出码", config=True)
+    add_service("status", cmd_service_status,
+                "看服务与守护进程的状态（不需要 root）")
+    add_service("start", cmd_service_start, "自检 → 启动 → 等它就绪",
+                config=True, needs_root=True)
+    add_service("stop", cmd_service_stop,
+                "排空 → 停止；正在跑的作业不会停", needs_root=True)
+    add_service("restart", cmd_service_restart,
+                "自检 → 排空 → 重启 → 等它就绪并核对配置",
+                config=True, needs_root=True)
+    add_service("reload", cmd_service_reload,
+                "自检 → 热重载 → 等守护进程报出接受还是拒绝",
+                config=True, needs_root=True)
 
     p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
     p.add_argument("--json", action="store_true")

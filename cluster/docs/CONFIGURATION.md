@@ -19,8 +19,9 @@
 装它。而守护进程把读到的所有值当作可信输入：它不分辨「这一行是谁写的」。
 所以「用户进程改不了它」这件事，完全由属主与权限挡着。
 
-改了配置后：`systemctl reload slurmate-sessiond` 就够了（`SIGHUP` 是重载，不是退出），正在跑的会话一条都不断。改的若是必须重启的键，重载会整个拒绝并
-在日志里点名是哪个键，旧配置继续服务 —— 见下方〈配置改了之后〉。
+改了配置后：`sudo slurmate service reload` 就够了（`SIGHUP` 是重载，不是退出），
+正在跑的会话一条都不断，而且它会等守护进程报出接受还是拒绝。改的若是必须重启的
+键，重载会整个拒绝并点名是哪个键，旧配置继续服务 —— 见下方〈配置改了之后〉。
 
 ---
 
@@ -919,8 +920,8 @@ rm -f /var/lib/slurmate-session/claims.db
 # 1. 改配置（主文件，或者 slurmate.conf.d/ 下某一份）
 # 2. 自检（非 root 也能跑）
 sudo /usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.conf
-# 3. 让它重读
-sudo systemctl reload slurmate-sessiond
+# 3. 让它重读，并等它报出接受还是拒绝
+sudo slurmate service reload
 ```
 
 重载是全有或全无的：解析（主文件 + drop-in）、重扫插件目录、校验，全过才原子替换。
@@ -931,7 +932,7 @@ sudo systemctl reload slurmate-sessiond
 |---|---|---|
 | 新配置**读不动** | `新配置读不动` | 改那一份配置（报的是文件路径） |
 | **自检不过**（区间重叠、配额为 0……） | `新配置有 N 处过不了自检` | 改配置 |
-| 改到了**必须重启**的键 | `这几个键改了之后必须重启才生效` | `systemctl restart` |
+| 改到了**必须重启**的键 | `这几个键改了之后必须重启才生效` | `slurmate service restart` |
 
 这三类与启动时（`ExecStartPre` 的 `--check`）拒绝的理由是同一份判据
 （`Config.validate()`）—— 判据只有一份，启动与重载查的是同一组。
@@ -970,11 +971,13 @@ sudo systemctl reload slurmate-sessiond
 不同：它们不是配置项，来自代码常量 —— 配置里根本没有这一格可改，也就谈不上
 "改了会不会被拒绝"。
 
-而 `systemctl reload` 的退出码不表达"生效了没有" —— 它只说信号送到了。
-要看结果得看 `journalctl`（这一条记在 [KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) §三 的 `S30`）。
+`systemctl reload` 的退出码不表达"生效了没有" —— 它只说信号送到了。
+`slurmate service reload` 能读到结果：它等 `daemon` op 的 `last_reload` 前进，
+报出接受还是拒绝（[KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) §三 的 `S30`
+记的是这件事的来龙去脉）。直接 `systemctl reload` 仍然只有信号语义。
 
-装插件、`slurmate plugin sync` 这两条动线做完会自己发一次重载信号 —— 所以
-"装一个插件"今天不需要任何人记得去重启。
+装插件、`slurmate plugin sync` 这两条动线做完会自己重载，并等到守护进程报出
+结果 —— 所以"装一个插件"不需要任何人记得去重启，也不会断任何连接。
 
 改单元（加固指令那一块）之后要重新跑一次 `sudo bash cluster/install-base.sh`，
 再 `systemctl daemon-reload` —— 那不是配置，重载管不到它。

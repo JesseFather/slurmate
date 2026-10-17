@@ -64,8 +64,18 @@ test('code 5 的两种含义必须分开 —— 这是本模块存在的首要�
   const noport = classify(err(5, 'no_port', '端口池暂时没有可用端口'), { op: 'submit' });
   assert.equal(noport.action, Action.RETRY_SOON);
 
-  // 两者 code 相同、kind 不同 —— 断言它们确实走了不同分支
+  // (c) 排空窗口（`slurmate service restart` 设的）：几秒后就好，
+  //     服务端的 detail 直接给用户看；submit 本身不自动重试。
+  const draining = classify(
+    err(5, 'draining', '守护进程正在重启，请约 3 秒后再试。'),
+    { op: 'submit' });
+  assert.equal(draining.action, Action.RETRY_BACKOFF);
+  assert.equal(draining.message, '守护进程正在重启，请约 3 秒后再试。');
+  assert.equal(shouldRetry(draining), false, 'submit 不是幂等操作，不许自动重试');
+
+  // 三者 code 相同、kind 不同 —— 断言它们确实走了不同分支
   assert.notEqual(down.action, noport.action);
+  assert.notEqual(noport.action, draining.action);
 });
 
 test('code 3：会话不存在是终局', () => {

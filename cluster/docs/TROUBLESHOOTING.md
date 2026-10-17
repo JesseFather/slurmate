@@ -252,7 +252,7 @@ tick 就放行。
 ```bash
 slurmate doctor
 nft list chain inet slurmate output                 # 看规则与两条 slurmate-base-* 还在不在
-sudo systemctl restart slurmate-sessiond            # 自愈：先反推恢复，再对账收敛
+sudo slurmate service restart                        # 自愈：先反推恢复，再对账收敛
 ```
 
 自愈机制本身是自动的，正常情况下不需要动手：
@@ -991,7 +991,8 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 
 ```bash
 # 守护进程
-systemctl status slurmate-sessiond
+sudo slurmate service status          # 版本、配置摘要、上次重载、会话与插件
+sudo slurmate service check           # 配置自检
 sudo journalctl -u slurmate-sessiond -f
 sudo /usr/local/sbin/slurmate-sessiond --check --config=/etc/slurmate/slurmate.conf
 

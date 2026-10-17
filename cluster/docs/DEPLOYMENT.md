@@ -389,7 +389,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 所以推荐两种顺序之一：
 
 - 先部署，再编辑 `/etc/slurmate/slurmate.conf`，最后
-  `systemctl reload slurmate-sessiond`（改配置不需要重启）；
+  `sudo slurmate service reload`（改配置不需要重启；它会等守护进程报出接受还是拒绝）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
 站点通用键一共 20 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
@@ -432,6 +432,13 @@ sudo bash slurmate-site-<版本>.run
 装过基座的机器上，这一步自动按修复走 —— 升级与修复是同一条路。站点配置的取值与
 状态数据不动，正在跑的会话一条都不受影响（`cluster/install-base.sh`）。
 
+第四阶段结束时，安装器会调用 `slurmate service restart`：换掉的是基座，这一版
+默认留一个完整、干净的环境。客户端会短暂断线并自动重连，作业与正在跑的会话不受
+影响。
+
+重启之前先排空，所以不会切断一次走到一半的提交。`--no-restart` 可跳过（演练与
+脚本用）。
+
 看起来最啰嗦的第五阶段其实是最重要的一步（`cluster/install-base.sh`）：
 部署前后各取一次 `nft -j list ruleset` 结构化快照，剥掉本系统新增的
 `inet slurmate` 表之后必须逐条一致。判据有五个档位：
@@ -453,7 +460,7 @@ sudo bash slurmate-site-<版本>.run
 ### 步骤 5：验证
 
 ```bash
-systemctl status slurmate-sessiond
+sudo slurmate service status      # 版本、pid、配置摘要、会话与插件数
 journalctl -u slurmate-sessiond -f
 
 # 普通用户身份：
@@ -557,8 +564,18 @@ sudo bash slurmate-site-<版本>.run --doctor
 ```
 
 它逐项对账：文件与权限、目录、systemd 单元、服务与 socket、守护进程自己的配置自检
-与运行期自检。每一格不对的下面都写着下一步与该看哪份文档。修回去用 `--repair` ——
-它只增不改，站点配置的取值与状态数据不动。
+与运行期自检。每一格不对的下面都写着下一步与该看哪份文档。
+
+修回去用 `--repair`：只增不改，站点配置的取值与状态数据不动；结束时默认重启一次
+服务。
+
+日常的启停不必手写 `systemctl`（详见 `cluster/README.md` 那张表）：
+
+```bash
+sudo slurmate service restart     # 自检 → 排空 → 重启 → 等就绪 → 核对配置
+sudo slurmate service reload      # 热重载，并等守护进程报出接受还是拒绝
+sudo slurmate service status      # 看它现在是什么状态；不需要 root
+```
 
 其余长期事项：
 

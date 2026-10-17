@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.23。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.24。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.23`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.24`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.23.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.24.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.23`，不是 `v0.23.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.24`，不是 `v0.24.0`。
 
-顺带一句：`v0.23` 不是 `v0.2`。`minor` 是十进制字符串，`22` 比 `2` 大。
+顺带一句：`v0.24` 不是 `v0.2`。`minor` 是十进制字符串，`24` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -453,8 +453,8 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 | `0` | 成功 | — | `0` |
 | `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
 | `3` | 未找到（会话不存在，uid 查不到，或本站没有这个东西） | `not_found`、`unknown_uid`、`plugin_unknown` | `3` |
-| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`no_account`、`no_partition`、`throttled`、`service_kind_disabled`、`service_kind_no_job`、`plugin_package_too_large` | `4` |
-| `5` | **守护进程暂时给不了**：不可达、端口池空、常驻连接已满 | `daemon_unreachable`、`no_port`、`too_many_connections` | `5` |
+| `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`no_account`、`no_partition`、`throttled`、`forbidden`、`service_kind_disabled`、`service_kind_no_job`、`plugin_package_too_large` | `4` |
+| `5` | **守护进程暂时给不了**：不可达、端口池空、常驻连接已满、正在重启 | `daemon_unreachable`、`no_port`、`too_many_connections`、`draining` | `5` |
 | `6` | Slurm 侧失败 | `partitions_unknown`、`submit_failed` | `6` |
 | `7` | 触发限流 | `rate_limited` | `7` |
 | `9` | 守护进程内部异常 | `internal`、`plugin_package_changed` | `1`（不在映射表内，落到默认值） |
@@ -620,6 +620,51 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 所以这个字段的形状**必须**是 `x.y`（`client/package.json` 里那个号）。报一个别的东西
 （比如 `"0.7-demo"`）会被客户端判成"这条链路上答话的不像我们的守护进程"：
 那个结论不谈版本，它说的是链路。
+
+### `daemon`
+
+请求：`{"op":"daemon"}`
+
+成功 data：
+
+```json
+{"version": "0.24", "pid": 123, "started_at": 1757...,
+ "config": {"path": "/etc/slurmate/slurmate.conf",
+            "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
+            "last_reload": {"seq": 3, "at": 1757..., "ok": true,
+                            "error": null, "cold_keys": [], "notice_keys": []}},
+ "sessions": {"active": 2},
+ "plugins": {"total": 2, "enabled": 1},
+ "port_range": [55001, 55999], "nft_table": true,
+ "draining": {"until": 0}}
+```
+
+只读。任何用户都能问：它报的是守护进程自己的事实，不是某个人的数据。
+
+`config.digest` 是已载入的那一份配置（主文件 + 它的 `.d/` 目录）的摘要，
+`on_disk_digest` 是盘上现在的那一份。两者不同，表示有改动尚未生效；判断由
+调用方做（`slurmate service status` 据此说一句话），守护进程不替它下结论。
+
+`last_reload.seq` 每完成一次重载加一，`ok` 说那次接受还是拒绝，`error`
+是拒绝的原因，`cold_keys` 是"必须重启才生效"的那几个键。CLI 的
+`service reload` 先记下这个序号，发 `SIGHUP`，然后等它前进 —— 于是
+"接受"与"拒绝"有确定答案，而不是只看 `systemctl reload` 的退出码。
+
+`sessions.active` 数的是占着位置的会话（含排队中），与配额用的同一组状态。
+`nft_table` 为假表示读不到自己的表；`draining.until` 是排空窗口的截止时刻，
+0 表示没有排空。
+
+### `drain`
+
+请求：`{"op":"drain"}`
+
+成功：`{"draining": {"until": 1757...}, "seconds": 60}`
+
+只有 root 能发（uid ≠ 0 → `4 forbidden`）。置一个 60 秒的窗口：窗口内
+`submit` 回 `5 draining`，其它 op 照常。`dispatch` 同步执行，应答 drain 时
+没有在途 op，所以紧接着的重启不会切断一次走到一半的提交。
+
+窗口不续期，到期自动恢复；重启失败也不会把站点永久锁在排空态。
 
 ### `whoami`
 

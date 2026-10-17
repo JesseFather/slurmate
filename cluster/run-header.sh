@@ -89,6 +89,7 @@ slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
                  （默认 ./slurmate-site-${VERSION}）
 
   --dry-run      演练：说清将要做什么，一个字都不改（与安装、修复、体检合用）
+  --no-restart   装/升级/修复结束后不重启服务（演练与脚本用）
   --purge-state  卸载时连状态数据一起删（与 --uninstall 合用）
   --version      只打印这一份包的版本
   --help         这一屏

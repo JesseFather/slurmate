@@ -4418,6 +4418,18 @@ exit 0
                     if re.search(_pat, l)][:2]))
     check("而它调用卸载器来收掉插件（判据仍然只有一份，不在脚本里抄一遍）",
           "--uninstall-plugins" in _ib_src and "--all-plugins" in _ib_src)
+    # 0.24：装/升级/修复结束时重启，而"自检 → 排空 → 重启 → 等就绪"这四步
+    #   只在 `slurmate service restart` 一处。脚本里那段自己等 socket/nft 的
+    #   循环必须消失 —— 留着它就是同一份就绪判据的第二个写方。
+    check("阶段 4 把重启交给 `slurmate service restart`（等就绪的判据只有一处）",
+          'SLURMATE_LOCK_HELD=1 "$CLI" service restart' in _ib_src
+          and "socket + nft 表都到位" not in _ib_src,
+          "调用=%s / 旧等待还在=%s"
+          % ('SLURMATE_LOCK_HELD=1 "$CLI" service restart' in _ib_src,
+             "socket + nft 表都到位" in _ib_src))
+    check("而 `--no-restart` 有解析、有出口（演练与脚本用）",
+          "--no-restart)" in _ib_src and "NORESTART" in _ib_src
+          and "按 --no-restart 跳过重启" in _ib_src, "未见 --no-restart 的接线")
     check("作业模板装到了 <SHARE_DIR>/run.sbatch.template"
           "（装完基座之后集群上可能根本没有仓库）",
           "run.sbatch.template" in _ib_src)
@@ -5934,6 +5946,40 @@ exit 0
             plugins_dir = ""
             config = ""
 
+        # 守护进程那一侧：`daemon` op 第一次回 seq=1（基线），
+        #   重载之后再问就回 seq=2 且 ok=true。CLI 靠这个前进判断
+        #   "这次重载真的落地了"，不再是"信号送到就算成功"。
+        class _FakeDaemon(object):
+
+            def __init__(self):
+                self.n = 0
+
+            def __call__(self, op, timeout=2.0):
+                self.n += 1
+                if op != "daemon":
+                    return {"ok": True, "code": 0, "data": {}, "error": None}
+                seq = 1 if self.n == 1 else 2
+                return {
+                    "ok": True, "code": 0, "error": None,
+                    "data": {
+                        "version": "0.24", "pid": 1, "started_at": 0,
+                        "config": {
+                            "path": "/etc/slurmate/slurmate.conf",
+                            "digest": "d" * 64, "on_disk_digest": "d" * 64,
+                            "loaded_at": 0,
+                            "last_reload": {
+                                "seq": seq, "at": 0, "ok": True,
+                                "error": None, "cold_keys": [],
+                                "notice_keys": [],
+                            },
+                        },
+                        "sessions": {"active": 0},
+                        "plugins": {"total": 0, "enabled": 0},
+                        "port_range": [55001, 55999], "nft_table": True,
+                        "draining": {"until": 0},
+                    },
+                }
+
         # `cmd_plugin_sync` 会先 `os.path.isfile(exe)` —— 那是真的去问盘上
         #   有没有这个文件，所以夹具得造一个出来（`subprocess.run` 那一层才是
         #   被替掉的）。用一个真的空脚本当替身，与基座安装脚本那条路同形。
@@ -5942,11 +5988,13 @@ exit 0
         _saved_run = _cli.subprocess.run
         _saved_exe = _cli.sessiond_path
         _saved_euid = _cli.os.geteuid
+        _saved_call = _cli.daemon_call
         _saved_stdout = sys.stdout
         try:
             _cli.subprocess.run = _FakeRun()
             _cli.sessiond_path = lambda: _fake_exe
             _cli.os.geteuid = lambda: 0
+            _cli.daemon_call = _FakeDaemon()
             sys.stdout = io.StringIO()
             _rc = _cli.cmd_plugin_sync(_SyncArgs())
             _sync_out = sys.stdout.getvalue()
@@ -5954,6 +6002,7 @@ exit 0
             _cli.subprocess.run = _saved_run
             _cli.sessiond_path = _saved_exe
             _cli.os.geteuid = _saved_euid
+            _cli.daemon_call = _saved_call
             sys.stdout = _saved_stdout
         check("`slurmate plugin sync` 转发到 `--sync-plugins`（判据只有一处）",
               _rc == 0 and _seen and _seen[0][1].endswith("slurmate-sessiond")
@@ -5964,11 +6013,69 @@ exit 0
         #   stop + start —— 所有人的会话断一次，就为了改一行插件配置。
         check("对齐成功，真的调了 `systemctl reload`（配置改动不再需要重启）",
               any(a[:2] == ["systemctl", "reload"] for a in _seen), repr(_seen))
-        check("而它说准了这一步做成了什么：只是「发了重载信号」，"
-              "不是「配置已生效」—— `systemctl reload` 回 0 只表示信号送到了，"
-              "守护进程可能整个拒绝 —— 并指路去看日志",
-              "reload" in _sync_out and "没断" in _sync_out
-              and "journalctl" in _sync_out, repr(_sync_out[:400]))
+        check("而它等到了守护进程自己的回答（`last_reload` 前进了），"
+              "说的是「接受」而不是「信号送到了」",
+              "接受" in _sync_out and "没断" in _sync_out
+              and "已生效" not in _sync_out, repr(_sync_out[:400]))
+
+        # 重载被守护进程拒绝时，命令必须返回非零：包已经装好（或配置已经
+        #   对齐），而服务没有接受这次改动 —— 两件事要分开，调用方要能
+        #   判出来。只打一句话而回 0，自动化就只能靠读输出。
+        class _FakeDaemonReject(_FakeDaemon):
+
+            def __call__(self, op, timeout=2.0):
+                r = _FakeDaemon.__call__(self, op, timeout)
+                if op == "daemon":
+                    lr = r["data"]["config"]["last_reload"]
+                    if lr["seq"] > 1:
+                        lr.update({"ok": False, "error": "新配置读不动",
+                                   "cold_keys": []})
+                return r
+
+        _saved_err_out = sys.stderr
+        try:
+            _cli.subprocess.run = _FakeRun()
+            _cli.sessiond_path = lambda: _fake_exe
+            _cli.os.geteuid = lambda: 0
+            _cli.daemon_call = _FakeDaemonReject()
+            sys.stderr = io.StringIO()
+            _rc = _cli.cmd_plugin_sync(_SyncArgs())
+            _rej_out = sys.stderr.getvalue()
+        finally:
+            _cli.subprocess.run = _saved_run
+            _cli.sessiond_path = _saved_exe
+            _cli.os.geteuid = _saved_euid
+            _cli.daemon_call = _saved_call
+            sys.stderr = _saved_err_out
+        check("重载被拒时 `plugin sync` 返回非零，并说清「拒绝了这次重载」",
+              _rc != 0 and "拒绝" in _rej_out, "rc=%s / %r" % (_rc, _rej_out[:300]))
+
+        # `--plugins-dir` 是排查路径：守护进程那一侧本来就不对齐任何内容，
+        #   CLI 也就不该去拨真服务。不然它会说一句不成立的话（"已重载"）。
+        class _SyncArgsTmp(_SyncArgs):
+            plugins_dir = "/tmp/not-the-site"
+
+        _saved_out2 = sys.stdout
+        _n_tmp = len(_seen)
+        try:
+            _cli.subprocess.run = _FakeRun()
+            _cli.sessiond_path = lambda: _fake_exe
+            _cli.os.geteuid = lambda: 0
+            _cli.daemon_call = _FakeDaemon()
+            sys.stdout = io.StringIO()
+            _rc = _cli.cmd_plugin_sync(_SyncArgsTmp())
+            _tmp_out = sys.stdout.getvalue()
+        finally:
+            _cli.subprocess.run = _saved_run
+            _cli.sessiond_path = _saved_exe
+            _cli.os.geteuid = _saved_euid
+            _cli.daemon_call = _saved_call
+            sys.stdout = _saved_out2
+        check("`--plugins-dir` 是排查路径：不重载真服务，并说清为什么",
+              _rc == 0 and "没有让守护进程重读" in _tmp_out
+              and not any(a[:2] == ["systemctl", "reload"]
+                          for a in _seen[_n_tmp:]),
+              "rc=%s / %r / %s" % (_rc, _tmp_out[:200], _seen[_n_tmp:]))
 
         # 对照组：服务没在跑时不许说"已生效" —— 那是两件不同的事，混成
         #    一句就是这一版一路在清的那种静默。
@@ -11526,7 +11633,7 @@ exit 0
             _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 5\n")
-        _rl_ok, _rl_notes = _d_hot.reload_config()
+        _rl_ok, _rl_notes, _rl_info = _d_hot.reload_config()
         check("改一个 HOT 键 + 热重载，新值生效了",
               _rl_ok is True and _d_hot.cfg.max_sessions_per_user == 5,
               "ok=%s / 现值=%s" % (_rl_ok, _d_hot.cfg.max_sessions_per_user))
@@ -11567,7 +11674,7 @@ exit 0
                          "range_start = 55001\nrange_end = 55099\n"
                          "%s = /shared/other\n" % _COLDKEY +
                          "max_sessions_per_user = 7\n")
-            _rl_ok, _rl_notes = _dc.reload_config()
+            _rl_ok, _rl_notes, _rl_info = _dc.reload_config()
             check("改了一个必须重启的键，热重载整个拒绝"
                   "（用户拍的那条：校验不全过就一个字都不改）",
                   _rl_ok is False and _rl_notes == [],
@@ -11597,7 +11704,7 @@ exit 0
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 4\n"
                      "[plugin:alpha]\nenabled = yes\n")     # 主文件里不许有块头
-        _rl_ok, _rl_notes = _dbad.reload_config()
+        _rl_ok, _rl_notes, _rl_info = _dbad.reload_config()
         check("新配置语法就不对，拒绝，旧配置继续服务",
               _rl_ok is False and _dbad.cfg.max_sessions_per_user == 3,
               "ok=%s / %s" % (_rl_ok, _dbad.cfg.max_sessions_per_user))
@@ -11612,7 +11719,7 @@ exit 0
             _f.write(""
                      "range_start = 55001\nrange_end = 55099\n"
                      "max_sessions_per_user = 0\n")
-        _rl_ok, _rl_notes = _di.reload_config()
+        _rl_ok, _rl_notes, _rl_info = _di.reload_config()
         check("新配置过不了自检（max_sessions_per_user = 0）， 拒绝，旧值仍是旧值",
               _rl_ok is False and _di.cfg.max_sessions_per_user == 3,
               "ok=%s / %s" % (_rl_ok, _di.cfg.max_sessions_per_user))
@@ -11627,7 +11734,7 @@ exit 0
               sorted(s.name for s in _dp.cfg.plugin_specs) == ["alpha"],
               str(sorted(s.name for s in _dp.cfg.plugin_specs)))
         _rl_pkg(_RU2, "beta")                       # 往目录里丢一个新包
-        _rl_ok, _rl_notes = _dp.reload_config()
+        _rl_ok, _rl_notes, _rl_info = _dp.reload_config()
         check("往插件目录里丢一个包 + 热重载，不用重启新插件就可用了",
               _rl_ok is True
               and sorted(s.name for s in _dp.cfg.plugin_specs) == ["alpha", "beta"],
@@ -11649,7 +11756,7 @@ exit 0
         with open(_RANGE, "w", encoding="utf-8") as _f:
             _f.write(""
                      "range_start = 56001\nrange_end = 56099\n")
-        _rl_ok, _rl_notes = _d_rg.reload_config()
+        _rl_ok, _rl_notes, _rl_info = _d_rg.reload_config()
         check("端口区间换了，游标回到新的起点（若不重置它会落在 "
               "56001–56099 之外，而按游标算出来的端口会跟着跑出去）",
               _rl_ok is True and _d_rg.port_cursor == 56001,
@@ -11813,6 +11920,357 @@ exit 0
 
     mod.log.setLevel(_rel_real_level)
     for _dd in _rel_daemons:
+        try:
+            _dd.store.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    # ── 站点服务生命周期（0.24）：daemon / drain / CLI 的 service 组 ────────
+    print("\n── 站点服务生命周期（daemon / drain / service）──")
+    _SVC_CONF = write_conf("range_start = 55001\nrange_end = 55099\n",
+                           "svc.conf")
+    _d_svc = _mk_reload_d(_SVC_CONF)
+    # 这一节不真的去问 Slurm：排空过期之后那条提交只要证明"不再报
+    #   draining"就够了，账户那一格用一个确定的值。
+    _d_svc.cluster.account_for = lambda user: (None, "用例里不问账户")
+    _svc = _d_svc.op_daemon(UID, os.getgid())["data"]
+    check("daemon op 报的是这个进程自己的事实：版本、pid、端口池、"
+          "nft 表与会话数",
+          _svc["version"] == mod.VERSION and _svc["pid"] == os.getpid()
+          and _svc["port_range"] == [55001, 55099]
+          and _svc["nft_table"] is True
+          and _svc["sessions"]["active"] == 0,
+          str({k: _svc.get(k) for k in
+               ("version", "pid", "port_range", "nft_table", "sessions")}))
+    check("插件数是「装了」与「开了」两个事实，不是一个数",
+          set(_svc["plugins"]) == {"total", "enabled"}, str(_svc["plugins"]))
+    check("已载入的配置摘要与盘上那份一致（此刻没有未生效的改动）",
+          _svc["config"]["digest"] == _svc["config"]["on_disk_digest"],
+          "%s / %s" % (_svc["config"]["digest"],
+                       _svc["config"]["on_disk_digest"]))
+    check("启动那次也算一次载入，last_reload 有基线（seq=0、ok=true）",
+          _svc["config"]["last_reload"]["seq"] == 0
+          and _svc["config"]["last_reload"]["ok"] is True
+          and _svc["config"]["loaded_at"] == _svc["started_at"],
+          str(_svc["config"]["last_reload"]))
+
+    with open(_SVC_CONF, "a", encoding="utf-8") as _f:
+        _f.write("max_sessions_per_user = 3\n")
+    _svc_disk = _d_svc.op_daemon(UID, os.getgid())["data"]
+    check("盘上改了而没重载：两个摘要分开报（CLI 据此说「有改动尚未生效」）",
+          _svc_disk["config"]["digest"] != _svc_disk["config"]["on_disk_digest"],
+          "%s / %s" % (_svc_disk["config"]["digest"],
+                       _svc_disk["config"]["on_disk_digest"]))
+
+    _d_svc._do_reload()
+    _svc_after = _d_svc.op_daemon(UID, os.getgid())["data"]
+    check("重载成功：seq 前进、ok=true，两个摘要重新一致，载入时刻跟着变",
+          _svc_after["config"]["last_reload"]["seq"]
+          == _svc["config"]["last_reload"]["seq"] + 1
+          and _svc_after["config"]["last_reload"]["ok"] is True
+          and _svc_after["config"]["digest"]
+          == _svc_after["config"]["on_disk_digest"],
+          str(_svc_after["config"]))
+
+    # 拒绝那一条：写一份读不动的配置，`_do_reload()` 不改配置，但必须
+    #   把"拒绝"这件事和原因留下来 —— CLI 的 `service reload` 读的就是它。
+    with open(_SVC_CONF, encoding="utf-8") as _f:
+        _svc_text = _f.read()
+    with open(_SVC_CONF, "w", encoding="utf-8") as _f:
+        _f.write(_svc_text + "[plugin:x]\nenabled = yes\n")
+    _seq_before = _d_svc.last_reload["seq"]
+    _d_svc._do_reload()
+    _lr_bad = _d_svc.last_reload
+    check("重载被拒：seq 照样前进（CLI 不会等到超时），ok=false，"
+          "带一句能照做的原因",
+          _lr_bad["seq"] == _seq_before + 1 and _lr_bad["ok"] is False
+          and bool(_lr_bad["error"]), str(_lr_bad))
+    check("而被拒的那一次一个字都没采用：配置摘要与取值都还是旧那一份",
+          _d_svc.cfg.digest == _svc_after["config"]["digest"]
+          and _d_svc.cfg.max_sessions_per_user == 3,
+          "%s / %s" % (_d_svc.cfg.digest,
+                       _d_svc.cfg.max_sessions_per_user))
+    with open(_SVC_CONF, "w", encoding="utf-8") as _f:
+        _f.write(_svc_text)
+    _d_svc._do_reload()
+
+    # drain：root-only，窗口内只拒 submit
+    _not_root = 1 if UID != 1 else 2
+    _dr_denied = _d_svc.op_drain(_not_root)
+    check("非 root 发 drain 被拒（它会影响别人的提交）",
+          _dr_denied.get("ok") is False and _dr_denied.get("code") == 4
+          and (_dr_denied.get("error") or {}).get("kind") == "forbidden",
+          str(_dr_denied))
+    _dr = _d_svc.op_drain(0)
+    check("root 发 drain：回答窗口的截止时刻，窗口是 60 秒",
+          _dr.get("ok") is True and _dr["data"]["seconds"] == 60
+          and _dr["data"]["draining"]["until"] > time.time(),
+          str(_dr))
+    _sub_dr = _d_svc.op_submit(UID, {})
+    check("窗口内提交被拒：code 5 / kind draining（客户端按退避处理，"
+          "而 submit 本身不自动重试）",
+          _sub_dr.get("ok") is False and _sub_dr.get("code") == 5
+          and (_sub_dr.get("error") or {}).get("kind") == "draining",
+          str(_sub_dr))
+    check("而查询与 daemon 状态照常 —— 排空不影响已经在跑的会话",
+          _d_svc.op_list(UID).get("ok") is True
+          and _d_svc.op_daemon(UID, os.getgid()).get("ok") is True)
+    _d_svc.drain_until = time.time() - 1
+    _sub_after = _d_svc.op_submit(UID, {})
+    check("窗口过后自动恢复：提交不再报 draining（走到后面的判据上，"
+          "不会把站点永久锁在排空态）",
+          (_sub_after.get("error") or {}).get("kind") != "draining",
+          str(_sub_after)[:300])
+
+    # ── CLI 的 service 组 ─────────────────────────────────────────────────
+    _cli_svc = load_cli()
+
+    class _SvcArgs(object):
+        config = ""
+        quiet = False
+        dry_run = False
+
+    class _FakeRunSvc(object):
+        """systemctl / nft / journalctl 的替身。"""
+
+        def __init__(self, active=True, reload_rc=0, restart_rc=0):
+            self.active = active
+            self.reload_rc = reload_rc
+            self.restart_rc = restart_rc
+            self.seen = []
+
+        def __call__(self, argv, *a, **kw):
+            self.seen.append(list(argv))
+
+            class _R(object):
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            r = _R()
+            if argv[:1] == ["systemctl"]:
+                if "is-active" in argv:
+                    r.returncode = 0 if self.active else 3
+                    r.stdout = "active\n" if self.active else "inactive\n"
+                elif "reload" in argv:
+                    r.returncode = self.reload_rc
+                elif "restart" in argv:
+                    r.returncode = self.restart_rc
+            return r
+
+    class _DaemonSeq(object):
+        """先回 seq=1（基线），之后回 seq=2 并报出这次的结果。"""
+
+        def __init__(self, ok=True, error=None, cold=()):
+            self.n = 0
+            self.ok = ok
+            self.error = error
+            self.cold = list(cold)
+
+        def __call__(self, op, timeout=2.0):
+            if op == "ping":
+                return {"ok": True, "code": 0, "data": {"pong": True,
+                                                       "version": "0.24"},
+                        "error": None}
+            self.n += 1
+            seq = 1 if self.n == 1 else 2
+            lr = {"seq": seq, "at": 0,
+                  "ok": self.ok if seq > 1 else True,
+                  "error": self.error if seq > 1 else None,
+                  "cold_keys": self.cold if seq > 1 else [],
+                  "notice_keys": []}
+            return {"ok": True, "code": 0, "error": None,
+                    "data": {"version": "0.24", "pid": 7, "started_at": 0,
+                             "config": {"path": "/etc/x", "digest": "a" * 64,
+                                        "on_disk_digest": "a" * 64,
+                                        "loaded_at": 0, "last_reload": lr},
+                             "sessions": {"active": 2},
+                             "plugins": {"total": 1, "enabled": 1},
+                             "port_range": [55001, 55999],
+                             "nft_table": True,
+                             "draining": {"until": 0}}}
+
+    _saved_svc_run = _cli_svc.subprocess.run
+    _saved_svc_call = _cli_svc.daemon_call
+    _saved_svc_euid = _cli_svc.os.geteuid
+    _saved_svc_lock = _cli_svc.acquire_deploy_lock
+    _saved_svc_sock = _cli_svc.socket_path
+    _saved_svc_nft = _cli_svc.nft_table_present
+    _saved_svc_ready_t = _cli_svc.READY_TIMEOUT
+    _saved_svc_ready_p = _cli_svc.READY_POLL
+    _saved_svc_stdout = sys.stdout
+    _saved_svc_stderr = sys.stderr
+    _saved_check = _cli_svc.cmd_service_check
+    _saved_svc_lock_env = os.environ.get("SLURMATE_LOCK_HELD")
+    os.environ["SLURMATE_LOCK_HELD"] = "1"       # 用例里不真抢部署锁
+    try:
+        _cli_svc.READY_TIMEOUT = 0.2
+        _cli_svc.READY_POLL = 0.01
+        # 就绪判据要求 socket 存在且 nft 表在位。用例不造真的那两个，
+        #   只换判据 —— 它要验的是"等到能答才报成功"，不是 socket 本身。
+        _cli_svc.socket_path = lambda: __file__
+        _cli_svc.nft_table_present = lambda: True
+
+        # ① 非 root 不动服务
+        _fr = _FakeRunSvc()
+        _cli_svc.subprocess.run = _fr
+        _cli_svc.daemon_call = _DaemonSeq()
+        _cli_svc.os.geteuid = lambda: 1
+        _errbuf = io.StringIO()
+        sys.stderr = _errbuf
+        _rc = _cli_svc.cmd_service_start(_SvcArgs())
+        sys.stderr = _saved_svc_stderr
+        check("非 root 执行 start：直接拒绝，一次 systemctl 都不调",
+              _rc != 0 and "root" in _errbuf.getvalue() and _fr.seen == [],
+              "rc=%s / %r / %s" % (_rc, _errbuf.getvalue()[:200], _fr.seen))
+
+        # ② 自检没过就不动服务
+        _cli_svc.os.geteuid = lambda: 0
+        _cli_svc.cmd_service_check = lambda a: 1
+        _fr2 = _FakeRunSvc(active=False)
+        _cli_svc.subprocess.run = _fr2
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_restart(_SvcArgs())
+        _err2 = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        _cli_svc.cmd_service_check = _saved_check
+        check("配置自检没过：不重启、也不碰 systemctl",
+              _rc != 0 and "自检" in _err2 and _fr2.seen == [],
+              "rc=%s / %r / %s" % (_rc, _err2[:200], _fr2.seen))
+
+        # ③ 重启成功：等到就绪之后才报
+        _fr3 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr3
+        _cli_svc.daemon_call = _DaemonSeq()
+        _cli_svc.cmd_service_check = lambda a: 0
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_restart(_SvcArgs())
+        _out3 = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        _cli_svc.cmd_service_check = _saved_check
+        check("restart：先自检、再排空、再 restart，最后报出 pid（不是"
+              "「命令返回 0 就算成功」）",
+              _rc == 0 and "服务已重启" in _out3 and "pid 7" in _out3
+              and any(a[:3] == ["systemctl", "restart",
+                                "slurmate-sessiond"] for a in _fr3.seen),
+              "rc=%s / %r / %s" % (_rc, _out3[:300], _fr3.seen))
+
+        # ④ 重启后等不到就绪：非零 + journal，不谎报
+        class _DeadDaemon(object):
+            def __call__(self, op, timeout=2.0):
+                raise _cli_svc.RpcError(_cli_svc.EXIT_NODAEMON, "连不上")
+
+        _fr4 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr4
+        _cli_svc.daemon_call = _DeadDaemon()
+        _cli_svc.cmd_service_check = lambda a: 0
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_restart(_SvcArgs())
+        _err4 = sys.stderr.getvalue()
+        sys.stdout = _saved_svc_stdout
+        sys.stderr = _saved_svc_stderr
+        _cli_svc.cmd_service_check = _saved_check
+        check("重启后等不到就绪：非零退出，并打 journal（不把「命令返回 0」"
+              "当成「服务好了」）",
+              _rc != 0 and any("journalctl" in a for a in _fr4.seen),
+              "rc=%s / %s" % (_rc, _fr4.seen))
+
+        # ⑤ reload 三态：接受 / 拒绝 / 没在跑
+        _fr5 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr5
+        _cli_svc.daemon_call = _DaemonSeq(ok=True)
+        _cli_svc.cmd_service_check = lambda a: 0       # 自检的用例在 ②
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_reload(_SvcArgs())
+        _out5 = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        check("reload：等 last_reload 前进之后才说「接受」",
+              _rc == 0 and "接受" in _out5 and "没断" in _out5,
+              "rc=%s / %r" % (_rc, _out5[:300]))
+
+        _cli_svc.daemon_call = _DaemonSeq(ok=False, error="自检没过",
+                                          cold=("range_start",))
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_reload(_SvcArgs())
+        _err5 = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        check("reload 被守护进程拒绝：非零退出，点名原因与那几个键，"
+              "并指路 restart",
+              _rc != 0 and "拒绝" in _err5 and "range_start" in _err5
+              and "restart" in _err5, "rc=%s / %r" % (_rc, _err5[:300]))
+
+        _fr6 = _FakeRunSvc(active=False)
+        _cli_svc.subprocess.run = _fr6
+        _cli_svc.cmd_service_check = lambda a: 0
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_reload(_SvcArgs())
+        _err6 = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        _cli_svc.cmd_service_check = _saved_check
+        check("reload 而服务没在跑：非零，并说清启动一次就会用上这份配置",
+              _rc != 0 and "没在跑" in _err6 and "start" in _err6,
+              "rc=%s / %r" % (_rc, _err6[:300]))
+
+        # ⑥ status 三态
+        _cli_svc.subprocess.run = _FakeRunSvc(active=True)
+        _cli_svc.daemon_call = _DaemonSeq()
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_status(_SvcArgs())
+        _out7 = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        check("status：运行中报出版本、pid、会话数与配置摘要；退出 0",
+              _rc == 0 and "运行中" in _out7 and "pid 7" in _out7
+              and "2 个占着位置" in _out7,
+              "rc=%s / %r" % (_rc, _out7[:300]))
+
+        _cli_svc.subprocess.run = _FakeRunSvc(active=False)
+        _cli_svc.daemon_call = _DeadDaemon()
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_status(_SvcArgs())
+        _out8 = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        check("status：没在跑时退出 3（与「在跑但不应答」的 1 分开）",
+              _rc == _cli_svc.EXIT_NOTFOUND and "未运行" in _out8,
+              "rc=%s / %r" % (_rc, _out8[:200]))
+
+        class _OldDaemon(object):
+            def __call__(self, op, timeout=2.0):
+                if op == "daemon":
+                    return {"ok": False, "code": 2,
+                            "error": {"kind": "unknown_op", "detail": None},
+                            "data": None}
+                return {"ok": True, "code": 0, "error": None,
+                        "data": {"pong": True, "version": "0.23"}}
+
+        _cli_svc.subprocess.run = _FakeRunSvc(active=True)
+        _cli_svc.daemon_call = _OldDaemon()
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_status(_SvcArgs())
+        _out9 = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        check("status：旧守护进程不认 daemon op，退回 ping 并说清「它不报"
+              "详细状态」；不把「问不到详情」当成「没在跑」",
+              _rc == 0 and "运行中" in _out9 and "较旧" in _out9,
+              "rc=%s / %r" % (_rc, _out9[:300]))
+    finally:
+        _cli_svc.subprocess.run = _saved_svc_run
+        _cli_svc.daemon_call = _saved_svc_call
+        _cli_svc.os.geteuid = _saved_svc_euid
+        _cli_svc.acquire_deploy_lock = _saved_svc_lock
+        _cli_svc.socket_path = _saved_svc_sock
+        _cli_svc.nft_table_present = _saved_svc_nft
+        _cli_svc.cmd_service_check = _saved_check
+        _cli_svc.READY_TIMEOUT = _saved_svc_ready_t
+        _cli_svc.READY_POLL = _saved_svc_ready_p
+        sys.stdout = _saved_svc_stdout
+        sys.stderr = _saved_svc_stderr
+        if _saved_svc_lock_env is None:
+            os.environ.pop("SLURMATE_LOCK_HELD", None)
+        else:
+            os.environ["SLURMATE_LOCK_HELD"] = _saved_svc_lock_env
+
+    for _dd in (_d_svc,):
         try:
             _dd.store.close()
         except Exception:                                    # noqa: BLE001
