@@ -1546,7 +1546,9 @@ def cmd_heartbeat(args):
                    "心跳已发送")
 
 
-def cmd_goodbye(args):
+def cmd_stopjob(args):
+    # 协议里那条 op 仍然叫 `goodbye`（客户端与它逐字同源）；命令行这一个动词
+    #   叫 `stopjob`：它做的就是取消这条会话的作业。
     return _simple({"op": "goodbye", "session_id": args.session}, args,
                    "已请求释放会话")
 
@@ -1784,11 +1786,7 @@ def build_parser():
     p.add_argument("--session", required=True)
     p.add_argument("--json", action="store_true")
 
-    p = add("goodbye", cmd_goodbye, "结束会话并释放资源")
-    p.add_argument("--session", required=True)
-    p.add_argument("--json", action="store_true")
-
-    p = add("stop", cmd_goodbye, "同 goodbye")
+    p = add("stopjob", cmd_stopjob, "结束会话：取消作业并释放资源")
     p.add_argument("--session", required=True)
     p.add_argument("--json", action="store_true")
 

@@ -1464,8 +1464,9 @@ fork 落在 tick 上，请求只读缓存。
 
 ### 节点忙闲：flag 只做展示
 
-`sinfo -N -h -o "%P|%N|%t"` 聚合成"每分区每个 base state 几台"，后缀
-（`*` `~` `#` `!` `%` `$` `@` `^` `-` `+`）原样带出去、单独一列。
+`sinfo -N -h -o "%P|%N|%t|%C"` 聚合成"每分区每个 base state 几台"，
+第四列 `%C`（每节点 `allocated/idle/other/total`）按分区累加成 CPU 余量。
+后缀（`*` `~` `#` `!` `%` `$` `@` `^` `-` `+`）原样带出去、单独一列。
 
 它们跨 Slurm 版本含义不一致：同一份 manpage 上 `~` 是"presently in powered off"，
 别的文档把它说成省电模式，还有版本把它关联到 `COMPLETING`。拿它们判定等于把

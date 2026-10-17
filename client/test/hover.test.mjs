@@ -129,13 +129,17 @@ function cluster(omit = []) {
     version: 'slurm-wlm 23.11.4',
     partitions: { gpu: { state: 'UP', is_default: true, max_time: '1-00:00:00', nodes: 12 },
       cpu: { state: 'UP', is_default: false, max_time: '7-00:00:00', nodes: 40 } },
-    nodes: { gpu: { counts: { idle: 10, mix: 2 }, flags: {} },
-      cpu: { counts: { idle: 38, alloc: 2 }, flags: {} } },
+    nodes: { gpu: { counts: { idle: 10, mix: 2 }, flags: {},
+      // `%C` 累加：空闲 640 / 总 672。cpu 那个分区故意不给 `cpus` ——
+      //   同一份夹具里要能画得出"这一格没有数据"，否则那一支永远走不到。
+      cpus: { allocated: 32, idle: 640, other: 0, total: 672 } },
+    cpu: { counts: { idle: 38, alloc: 2 }, flags: {} } },
+    mem: { gpu: 128000, cpu: 191000 },
     // 两个分区，数字故意不一样：下面那条"合计"的判据要能分出"加起来了"与
     //   "只画了其中一个"（一个分区的话，两种写法印出来一模一样）。
     queue: { depth: { gpu: { pending: 0, running: 3, other: 0 },
       cpu: { pending: 5, running: 1 } } },
-    gres: { gpu: [{ name: 'gpu', label: 'gpu:a6000', per_node_max: 4 }] },
+    gres: { gpu: [{ name: 'gpu', label: 'gpu:a6000', per_node_max: 4, total: 48 }] },
     taken: {},
     me: { account: 'lab', allowed_partitions: null,
       fairshare: { account: 'lab', fair_share: 0.42 },
@@ -194,6 +198,28 @@ test('数据齐的时候，画得出来而且不抛（浮窗白屏的守卫）',
   assert.match(t, /lab/, '账户');
   // URL 那一行说"这一份有多旧" —— 服务端的慢钟是 5 分钟，所以它是用户要看的一格。
   assert.match(h.text('cl-body'), /取数于/);
+});
+
+test('分区要报 CPU 余量与内存容量，GRES 要报总量', () => {
+  const h = boot();
+  h.subs.data({ cluster: cluster(), link: { connected: true } });
+  const t = h.text('cl-body');
+  assert.ok(t.includes('CPU　空闲 640 / 672 核（已分配 32）'), `CPU 余量那一行：${t}`);
+  assert.ok(t.includes('内存　每节点最多 125 GB'), `内存那一行：${t}`);
+  // 191000 MB 不是整 GB，留一位小数（真机上很常见）。
+  assert.ok(t.includes('内存　每节点最多 186.5 GB'), `非整 GB 那一格：${t}`);
+  assert.ok(t.includes('gpu:a6000 ×4/节点，共 48'), `GRES 总量：${t}`);
+  // 没有 `cpus` 的那一格要说"没有数据"，不许画成 0 ——
+  //   0 的意思是"确实一核都不剩"，那是另一句话。
+  assert.ok(t.includes('CPU　（这一格没有数据）'), `缺 %C 的分区：${t}`);
+  assert.equal(/CPU　空闲 0/.test(t), false, '缺席不许画成 0');
+
+  // 整份 `mem` 没问到：分区里那一格说"没有数据"，底部再点名是哪一格失败。
+  const d = cluster();
+  delete d.mem;
+  h.subs.data({ cluster: d, link: { connected: true } });
+  assert.match(h.text('cl-body'), /获取失败：每节点内存/);
+  assert.ok(h.text('cl-body').includes('内存　（这一格没有数据）'));
 });
 
 test('队列那一行是全集群合计，而且写明是全部用户的', () => {

@@ -585,17 +585,20 @@ def slurm_stub(argv, timeout=10, check=False):
         #   后缀的都没有 —— 于是"剥后缀、只按 base state 计数"在真机上走不到。
         #   夹具比现实干净，缺陷就会在用例里隐形（账本 F26）。
         # `2080TI*` 是默认分区的记号，`%P` 会给出来，要剥掉。
+        # 第四列 `%C` 是每节点的 `allocated/idle/other/total`（真机形状）：
+        #   `nodec2` 那台 down 的给 `0/0/0/64`，故意的 —— DOWN 的节点仍然
+        #   占着 total，但没有一核是空闲的。
         # 表头照真机给。 `sinfo` 与 `scontrol show … -o` 不一样，它会打
         #    一行 `PARTITION|NODELIST|STATE`；少了 `-h` 的话那一行会被当成一个
         #    名叫 `PARTITION`、状态叫 `STATE` 的分区，然后原样画进界面。
         #    这一行是真集群实测抓到那个缺陷之后补上的 —— 手写一个不带表头的
         #    输出，等于把那条路径从用例里抹掉。
         _body = (
-            "A6000|nodea1|mix\n"
-            "A6000|nodea2|idle\n"
-            "RTX8000|nodeb1|alloc\n"
-            "2080TI*|nodec1|idle*\n"
-            "2080TI*|nodec2|down~\n")
+            "A6000|nodea1|mix|60/4/0/64\n"
+            "A6000|nodea2|idle|0/64/0/64\n"
+            "RTX8000|nodeb1|alloc|128/0/0/128\n"
+            "2080TI*|nodec1|idle*|0/64/0/64\n"
+            "2080TI*|nodec2|down~|0/0/0/64\n")
         # `-h` 在，没有表头；不在，有（与真机逐字一致）。
         return 0, ("" if "-h" in args else "PARTITION|NODELIST|STATE\n") + _body, ""
 
@@ -9889,6 +9892,24 @@ exit 0
     check("没有后缀的分区，flags 是空的（不是缺失）",
           _nt and _nt["A6000"]["flags"] == {} and _nt["A6000"]["counts"] == {"mix": 1, "idle": 1},
           str(_nt and _nt.get("A6000")))
+    check("`%C` 按分区累加：idle 就是「这个分区还剩多少核」",
+          _nt and _nt["A6000"]["cpus"] == {"allocated": 60, "idle": 68,
+                                           "other": 0, "total": 128},
+          str(_nt and _nt.get("A6000")))
+    check("DOWN 的节点照样占 total、但不贡献 idle（`0/0/0/64`）",
+          _nt and _nt["2080TI"]["cpus"] == {"allocated": 0, "idle": 64,
+                                            "other": 0, "total": 128},
+          str(_nt and _nt.get("2080TI")))
+
+    def _no_cpu(argv, timeout=10, check=False):
+        return 0, "A6000|nodea1|mix\nA6000|nodea2|mix|坏\n", ""
+
+    _nt2 = with_stub(mod, _no_cpu, lambda: mod.Slurm(cfg).node_table())
+    check("`%C` 整个缺席或认不出时 `cpus` 键缺席（= 没问到），不是 0 ——"
+          "0 的意思是「确实一核都不剩」，那是另一句话",
+          _nt2 and set(_nt2["A6000"]) == {"counts", "flags"}
+          and _nt2["A6000"]["counts"] == {"mix": 2},
+          str(_nt2))
 
     # ── 28.5 队列：深度、顺序、以及"我在第几位" ────────────────────────
     _q = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).queue_table())
@@ -10022,9 +10043,16 @@ exit 0
           "第一次 %d 次，第二次又 %d 次" % (_first28, _calls28[0] - _first28))
     _cd = _cv1.get("data") or {}
     check("共享的那几格都在（缺哪个都是客户端画不出来的一格）",
-          set(_cd) >= {"at", "health", "version", "partitions", "gres",
+          set(_cd) >= {"at", "health", "version", "partitions", "gres", "mem",
                        "nodes", "queue", "taken", "me"},
           str(sorted(_cd)))
+    check("`nodes` 里带 CPU 余量（`%C` 累加），`mem` 是单独一格"
+          "（两者都来自不同的查询，不能指望其中一个替另一个说话）",
+          (_cd.get("nodes") or {}).get("A6000", {}).get("cpus")
+          == {"allocated": 60, "idle": 68, "other": 0, "total": 128}
+          and (_cd.get("mem") or {}).get("A6000") == 191000,
+          repr(((_cd.get("nodes") or {}).get("A6000"),
+                (_cd.get("mem") or {}).get("A6000"))))
     check("而「自己那一份」在 `me` 里 —— 共享的与按 uid 的分开"
           "（分开的不只是缓存：客户端据此知道「这一格变了不是我的事」）",
           set(_cd.get("me") or {}) >= {"account", "allowed_partitions",
@@ -12103,6 +12131,23 @@ exit 0
 
     # ── CLI 的 service 组 ─────────────────────────────────────────────────
     _cli_svc = load_cli()
+    _ap = _cli_svc.build_parser()
+    _subs = [a for a in _ap._subparsers._group_actions][0].choices
+    check("结束会话的动词只有 `stopjob`：`goodbye` 与 `stop` 都删了 ——"
+          "`stop` 与 `service stop` 只差一个词，而一个停会话、一个停整站",
+          "stopjob" in _subs and "goodbye" not in _subs and "stop" not in _subs,
+          str(sorted(_subs)))
+    _sent = {}
+    _real_simple = _cli_svc._simple
+    _cli_svc._simple = lambda req, args, msg: _sent.update(req) or 0
+    try:
+        _cli_svc.cmd_stopjob(
+            type("A", (), {"session": "s-1", "json": False})())
+    finally:
+        _cli_svc._simple = _real_simple
+    check("`stopjob` 发的仍然是协议里那条 `goodbye`（改的只是命令行的名字）",
+          _sent.get("op") == "goodbye" and _sent.get("session_id") == "s-1",
+          str(_sent))
 
     class _SvcArgs(object):
         config = ""

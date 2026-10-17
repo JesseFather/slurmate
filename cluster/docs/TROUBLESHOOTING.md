@@ -215,7 +215,7 @@ sudo journalctl -u slurmate-sessiond | grep -i '释放不了\|scancel'
 了"，不是"作业停了"。
 
 而这一次 `scancel` 没成功时，响应里会带一句 `warning`（协议里的 `data.warning`），
-客户端与 `slurmate goodbye` 都会把它显示出来。那句话说的是"守护进程会继续重试，
+客户端与 `slurmate stopjob` 都会把它显示出来。那句话说的是"守护进程会继续重试，
 作业被确认消失之前不会标成已释放"。
 
 它故意不诊断原因：作业也可能刚刚正常结束，`scancel` 报的只是「没有这个作业」——

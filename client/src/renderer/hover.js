@@ -290,8 +290,14 @@ function nodeCountsText(n) {
   return c.join('  ') + (f.length ? `  （后缀 ${f.join(' ')}）` : '');
 }
 
-/** 分区一块：名字一行、节点一行、队列一行、GRES 一行。 */
-function partitionBlock(name, info, nodes, queue, gres) {
+/** 内存（MB）说成 GB：真机上 128000 与 191000 都很常见，整的就别带小数。 */
+function mbText(mb) {
+  const gb = mb / 1024;
+  return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+}
+
+/** 分区一块：名字一行、节点一行、CPU 一行、内存一行、队列一行、GRES 一行。 */
+function partitionBlock(name, info, nodes, queue, gres, mem) {
   const row = cel('div', 'crow');
   row.append(cel('span', 'nm', name));
 
@@ -305,6 +311,23 @@ function partitionBlock(name, info, nodes, queue, gres) {
   const nc = nodeCountsText(nodes && nodes[name]);
   row.append(cel('div', 'dim', `节点　${nc || '（这一格没有数据）'}`));
 
+  // CPU 余量是 `sinfo -N ... %C` 按分区累加出来的：`idle` 就是"还剩多少核"。
+  //   `total` 含 DOWN 那些节点（它们占着名单但没有一核空闲），所以
+  //   "空闲 / 总数"说的是此刻的现状，不是"这些核一定能要到"。
+  //   三态：整份 `nodes` 没问到由下面那条 `na(...)` 说；这里只说这一格。
+  const cpu = nodes && nodes[name] && nodes[name].cpus;
+  const cs = cpu
+    ? `空闲 ${cpu.idle} / ${cpu.total} 核（已分配 ${cpu.allocated}`
+      + (cpu.other ? `　其它 ${cpu.other}` : '') + '）'
+    : '（这一格没有数据）';
+  row.append(cel('div', 'dim', `CPU　${cs}`));
+
+  // 内存是容量不是余量：Slurm 没有一份可靠的"空闲内存"（没写 mem 的作业不
+  //   计入已分配），推一个数出来比不报更糟。所以只报每节点的上限。
+  const mb = mem && mem[name];
+  const ms = typeof mb === 'number' ? `每节点最多 ${mbText(mb)}` : '（这一格没有数据）';
+  row.append(cel('div', 'dim', `内存　${ms}`));
+
   const q = queue && queue.depth && queue.depth[name];
   const qs = q ? `排队 ${q.pending}　在跑 ${q.running}`
     + (q.other ? `　其它 ${q.other}` : '') : '（这一格没有数据）';
@@ -312,9 +335,12 @@ function partitionBlock(name, info, nodes, queue, gres) {
 
   const g = gres && gres[name];
   // 三态：`gres` 整个键缺席 = 获取失败；`[]` = 这个分区确实一张卡都没有。
+  //   `per_node_max` 是一个作业能要到的上限，`total` 是这分区一共几张 ——
+  //   两者都要，前者回答"我能要几张"，后者回答"这个分区有多少"。
   const gs = !gres ? '获取失败'
     : (g === undefined ? '（不在 GRES 清单里）'
-      : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`).join('，')
+      : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`
+        + (typeof e.total === 'number' ? `，共 ${e.total}` : '')).join('，')
         : '确实一张都没有'));
   row.append(cel('div', 'dim', `GRES　${gs}`));
   return row;
@@ -392,9 +418,10 @@ function renderCluster() {
       (a, b) => (Number(Boolean(d.partitions[b].is_default))
         - Number(Boolean(d.partitions[a].is_default))) || a.localeCompare(b));
     for (const n of names) {
-      box.append(partitionBlock(n, d.partitions[n], d.nodes, d.queue, d.gres));
+      box.append(partitionBlock(n, d.partitions[n], d.nodes, d.queue, d.gres, d.mem));
     }
     if (!d.nodes) box.append(na('节点忙闲（sinfo -N）'));
+    if (!d.mem) box.append(na('每节点内存（scontrol show node）'));
     if (!d.queue) box.append(na('队列（squeue）'));
     if (!d.gres) box.append(na('GRES 清单（scontrol show node）'));
   }

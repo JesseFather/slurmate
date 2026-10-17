@@ -186,7 +186,7 @@ ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
 |---|---|---|
 | 守护进程读一个请求 | 5 秒 | `cluster/slurmate-sessiond` |
 | CLI 等守护进程应答 | 40 秒（默认） | `cluster/slurmate` |
-| CLI `heartbeat` / `goodbye` | 20 秒 | `cluster/slurmate` |
+| CLI `heartbeat` / `stopjob` | 20 秒 | `cluster/slurmate` |
 | 客户端等 `submit` | **45 秒**，必须比 CLI 内部的 40 秒长 | `client/src/main/session.js` |
 | 客户端等 `goodbye` | 10 秒 | `client/src/main/session.js` |
 | 客户端认领用的 `status` | 20 秒 | `client/src/main/session.js` |
@@ -1502,7 +1502,10 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
  "version": "slurm-wlm 23.11.4",
  "partitions": {"A6000": {"max_time": "183-00:00:00", "is_default": false,
                           "state": "UP", "nodes": 2, "cpus": 160}},
- "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {}}},
+ "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {},
+                        "cpus": {"allocated": 60, "idle": 68,
+                                 "other": 0, "total": 128}}},
+ "mem":      {"A6000": 128000},
  "queue":    {"depth": {"A6000": {"pending": 48, "running": 4}},
               "pending": {"A6000": ["7001", "…"]},
               "by_user": {"alice": ["7001", "…"]}, "at": 1790301780},
@@ -1529,6 +1532,13 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 `partitions` / `gres` / `nodes` / `queue` 获取失败时本 op 不报错（对比
 `partitions` 那个 op —— 它的失败要挡住整张表单）。这一屏是只读的现状展示，
 一格获取失败不该让另外五格也看不见。
+
+`nodes.<分区>.cpus` 是 `sinfo -N` 的 `%C` 按分区累加：`idle` 是这个分区此刻
+还剩多少核。`total` 含 DOWN 的节点（它们占着名单但没有空闲核）。这一格缺席
+表示没问到，不能写成四个 0 —— 0 的意思是"确实一核都不剩"。
+
+`mem.<分区>` 是这个分区里内存最大那种节点的 MB 数。它是容量不是余量：Slurm
+没有一份可靠的"空闲内存"，本 op 也不去推一个。（键缺席 = 没问到。）
 
 `taken` 是每一格"取到它的时刻"（Unix 秒）。慢钟上的一格可以是 5 分钟前的，
 而"这份有多旧"是用户要看的 —— 所以它必须送出去，不能由客户端拿收到的时刻顶替。

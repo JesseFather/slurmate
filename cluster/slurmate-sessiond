@@ -7061,9 +7061,20 @@ class Slurm(object):
 
     # ── 集群全局的另外三样 ──────────────────────────────────────────────────
     def node_table(self):
-        """`sinfo -N -o "%P|%N|%t"` → {分区: {"counts": {base_state: n}, "flags": {后缀: n}}}
+        """`sinfo -N -h -o "%P|%N|%t|%C"` → 每分区节点计数与 CPU 余量
 
-        返回 None = 取不到（与 partition_table 同一条规矩）。
+        返回 `{分区: {"counts": {base_state: n}, "flags": {后缀: n},
+                     "cpus": {"allocated": n, "idle": n, "other": n,
+                              "total": n}}}`；None = 取不到（与 partition_table
+        同一条规矩）。
+
+        `cpus` 是 `%C` 那一格（每节点 `allocated/idle/other/total`）按分区累加
+          的结果，`idle` 就是"这个分区现在还剩多少核"。它不是
+          `scontrol show partition` 的 `TotalCPUs` 减去什么推出来的 —— 那个
+          `TotalCPUs` 是静态总数，不带"此刻空闲多少"。
+        某一行没给 `%C`（或写得认不出）时，那一行不参与累加；整个分区一行都
+          没给，`cpus` 键缺席 =「没问到」。缺席不写成 0：0 的意思是"确实一核
+          都不剩"，那是另一句话。
 
         只按 base state 计数，后缀一律原样带出去只做展示。
 
@@ -7085,7 +7096,7 @@ class Slurm(object):
         #    `PARTITION`、状态叫 `STATE` 的分区，然后原样画进界面，
         #    而它看起来就像一个真的分区。（真集群实测抓到，假桩因为手写的输出
         #    本来就没有表头而一直是绿的，桩比现实干净，缺陷就在用例里隐形。）
-        rc, out, _ = run_cmd([self.cfg.sinfo, "-N", "-h", "-o", "%P|%N|%t"],
+        rc, out, _ = run_cmd([self.cfg.sinfo, "-N", "-h", "-o", "%P|%N|%t|%C"],
                              timeout=10)
         if rc != 0:
             return None
@@ -7113,6 +7124,23 @@ class Slurm(object):
             d["counts"][state] = d["counts"].get(state, 0) + 1
             if flags:
                 d["flags"][flags] = d["flags"].get(flags, 0) + 1
+            # `%C` 是每节点那一格 `allocated/idle/other/total`。认不出的那一行
+            #   只是不加，不影响节点计数 —— 这两件事各自有各自的来源，一个格子
+            #   坏了不该让另一个也跟着消失。
+            if len(parts) >= 4:
+                c = parts[3].strip().split("/")
+                if len(c) == 4:
+                    try:
+                        a, i, o, t = (int(x) for x in c)
+                    except ValueError:
+                        pass
+                    else:
+                        cc = d.setdefault("cpus", {"allocated": 0, "idle": 0,
+                                                   "other": 0, "total": 0})
+                        cc["allocated"] += a
+                        cc["idle"] += i
+                        cc["other"] += o
+                        cc["total"] += t
         return table
 
     def queue_table(self):
@@ -7579,6 +7607,7 @@ class Cluster(object):
                 "version": self.slurm_version(),
                 "partitions": parts,
                 "gres": self.gres(),
+                "mem": self.node_mem(),
                 "nodes": self.nodes(),
                 "queue": self.queue(),
                 "taken": {k: v for k, v in self._taken.items() if ":" not in k}}

@@ -405,7 +405,7 @@ exec。已经验到的是它这一侧 —— `ResidentChannel` 的字节层（�
 
 ```
 slurmate submit  →  slurmate wait --session <id>  →  nft list chain inet slurmate output
-                 →  slurmate goodbye <id>  →  确认规则在两个 tick 内消失
+                 →  slurmate stopjob --session <id>  →  确认规则在两个 tick 内消失
 ```
 
 不能以 root 跑：身份取自 `SO_PEERCRED`，root 跑验的不是同一条路。

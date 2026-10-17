@@ -77,6 +77,18 @@
 会话没有释放干净就中止，不停服务。`restart` 仍然只换守护进程，作业、会话与规则
 不动。`reload` 现在连作业模板与作业脚本一起对齐，覆盖配置之外的那一层派生物。
 
+### Changed — 结束会话的动词只剩 `stopjob`
+
+`slurmate stopjob --session <id>` 取消这条会话的作业并释放资源。`goodbye` 与
+`stop` 两个名字都删掉了：`stop` 与 `service stop` 只差一个词，而一个停会话、
+一个停整站。协议里的 op 仍然叫 `goodbye`，客户端不受影响。
+
+### Added — 左侧站点状态补上分区的余量与容量
+
+每个分区多了三行：`CPU`（`sinfo` 的 `%C` 累加，空闲 / 总数 / 已分配）、
+`内存`（每节点上限）、`GRES` 总量。`cluster` op 的 `nodes` 里多了 `cpus` 一格，
+`mem` 是新增的共享字段。取不到时照三态规矩说"没有数据"，不画成 0。
+
 ### Fixed — 0.23 卸载漏掉站点配置
 
 `/etc/slurmate/slurmate.conf` 按设计不含产品名，旧卸载判据 `grep slurmate` 永远
