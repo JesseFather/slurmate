@@ -49,13 +49,27 @@ html, body {
 /* ── 顶部状态条：会话运行期间唯一可见的部分 ── */
 #statusbar {
   height: var(--bar-h);
-  display: flex; align-items: center; gap: 14px;
+  display: flex; align-items: center; gap: 10px;
   padding: 0 12px;
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   white-space: nowrap; overflow: hidden;
   user-select: none;
+}
+/* 右边那一排（结束 / 重新加载 / 工作区那几格）永远不许被挤出去 ——
+   这一条是 2026-10-18 真机：标签一多，整行按内容排开，「结束会话」就被推到
+   窗口外面、被 `overflow: hidden` 裁掉了。能压缩的只有两样：会话标签那一格
+   （它自己横向滚）与 `#sb-detail` 那句话（省略号）。 */
+#statusbar > .dot,
+#statusbar > .st,
+#statusbar > .sep,
+#statusbar > button,
+#statusbar > .temp-tag,
+#statusbar > .dev-tag { flex: none; }
+#statusbar > #sb-detail {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
 }
 #statusbar .dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -75,9 +89,19 @@ html, body {
 
 /* ── 会话标签（多开）────────────────────────────────────────────────────── */
 /* 它就在状态条这一行里 —— 窗口主体被原生视图整块盖住，放在下面等于点不到。 */
-#session-tabs { display: flex; gap: 6px; flex: none; }
+/* 标签多了横向滚，不把整条状态条撑出去。滚动条本身不画（30px 里放不下，
+   而且这个条的状态由手指/滚轮表达）—— 面板里 `bindEvents` 把纵向滚轮接到
+   横向滚动上。`flex: 0 1 auto` 与 `min-width: 0` 是让它真的能被压窄的那一步：
+   flex 项目的默认最小宽度是内容宽度，少了它，标签再多也照旧撑破容器。 */
+#session-tabs {
+  display: flex; gap: 6px; flex: 0 1 auto; min-width: 0;
+  overflow-x: auto; overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+#session-tabs::-webkit-scrollbar { display: none; }
 #session-tabs.hidden { display: none; }
 #session-tabs .tab {
+  flex: none;
   font: inherit; font-size: 11px; line-height: 1;
   padding: 4px 8px; border-radius: 10px;
   border: 1px solid var(--border);
@@ -406,16 +430,6 @@ button.remember:hover { background: #5c4e22; }
    那个选择器不在连接行里，它在连接表单的「③ 工作区」（见 panel.js 里那一段的
      注释）与状态条上（会话跑起来之后，那是唯一够得着的像素）。所以这里只剩状态条
      那一份的样式。 */
-
-/* 状态条里那个。状态条只有 30px 高，默认 input/select 的 6px 内边距会把它撑破，
-   所以单独收紧 —— 撑破的表现是状态条被顶高，而下方 code-server 视图是按写死的
-   30px 定位的，于是页面顶部会被切掉一条。 */
-#statusbar .sb-pick { display: flex; align-items: center; gap: 6px; flex: none; }
-#statusbar .sb-lbl { color: var(--fg-dim); }
-#statusbar .sb-sel {
-  font: inherit; font-size: 11px; padding: 1px 4px; height: 20px;
-  max-width: 200px; border-radius: 3px;
-}
 
 /* 连接 ↔ 工作区 ↔ 数据 的映射图：三列，连线是盖在上面的 SVG。
    CSP 里没有 unsafe-inline，所以这里全走 class，一个 style="…" 都不能有。

@@ -530,67 +530,58 @@ test('第一段退回去时，`onDisarm` 要把那一格拨回原样（切走工
 test('切走工作区：主进程回 would_discard 时不弹框，摆一行确认，第二趟才带 confirmDiscard', async () => {
   // 这一条替掉的是从前那句 `window.confirm`。它守三件事：
   //   · 第一下不弹框、也不发第二次请求 —— 只是把那一格摆成一行确认；
-  //   · 下拉停在新值上（那是"待定"，不是已发生的事），退回去才拨回来；
+  //   · 退回去要调 `revert`（把那一格拨回原样）；
   //   · 第二趟恰好带 `confirmDiscard: true` 再发一次。
   //   判定权在主进程（`would_discard` 是它算的），界面只负责问 —— 所以这条
   //     路的形状是"先发、被拒了再问、答了再发"，不是"先问再发"。
+  // 状态条那个下拉 2026-10-18 删掉了，入口只剩连接表单里的「保存」；这一条
+  //   直接驱动 `applyWorkspace`，与表单那条路是同一份实现。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
-    'window.__calls = []; window.__asked = 0;'
+    'window.__calls = []; window.__asked = 0; window.__revN = 0;'
+    + 'window.__revert = () => { window.__revN += 1; };'
     + 'window.slurmate.states = () => Promise.resolve({ sessions: [], front: null });'
     + 'window.slurmate.setConnectionWorkspace = (p) => {'
     + '  window.__calls.push(JSON.parse(JSON.stringify(p)));'
     + '  if (p.confirmDiscard) {'
-    // 这两份数据得内联进去：`WSS` / `CONNS` 是这一侧的常量，
-    //   不是 vm 上下文里的名字 —— 直接写名字是一次 `ReferenceError`，
-    //   而那看起来像"这条用例坏了"，与"守住了"分不开。
     + `    return Promise.resolve({ ok: true, workspaces: ${JSON.stringify(WSS)},`
     + `      connections: ${JSON.stringify(CONNS)} }); }`
     + '  return Promise.resolve({ ok: false, code: "would_discard",'
     + '    workspaceName: "工作区 1" });'
     + '};'
-    // 壳里 `window.confirm` 默认是 `() => true` —— 换成一个会记账的，
-    //   这样"到底有没有弹框"才是测出来的，而不是假设的。
     + 'window.confirm = () => { window.__asked += 1; return true; };');
 
-  h.fn('renderWorkspaceSelectors')();
-  const sel = h.byId.get('sb-workspace');
-  assert.equal(sel.value, 'w000000000001',
-    '（前提）那一格显示的是这条连接当前的工作区');
-  h.run("document.body.append($('sb-workspace'));");
+  h.run("document.body.append($('btn-save'));");
+  const anchor = h.byId.get('btn-save');
+  const run = () => h.fn('applyWorkspace')('c1', 'w000000000002',
+    { anchor, revert: h.run('window.__revert') });
 
-  sel.value = 'w000000000002';
-  await sel.onchange();
-
+  const r1 = await run();
+  assert.equal(r1.armed, true, '被拒之后要摆出第一段');
   assert.equal(h.run('window.__asked'), 0,
     '不许弹 `window.confirm` —— 它给不了两段，而这正是这条路从前最别扭的地方');
   assert.equal(h.run('window.__calls.length'), 1, '第一次只发那一次（照常提交，判定权在主进程）');
   assert.equal(h.run('window.__calls[0].confirmDiscard'), undefined,
     '第一趟不许带 confirmDiscard —— 它是"照常试一次"');
-  assert.notEqual(h.run('armed'), null, '被拒之后要摆出第一段');
-  assert.equal(h.byId.get('sb-workspace').value, 'w000000000002',
-    '下拉停在待定的新值上 —— 它不是已发生的事，是"你要是确定就是这个"');
-  const p = sel.parentNode;
-  const cluster = p.children[p.children.indexOf(sel) + 1];
+  const p = anchor.parentNode;
+  const cluster = p.children[p.children.indexOf(anchor) + 1];
   assert.match(cluster.children[0]._text, /工作区 1/, '第一段要说出哪一个工作区会没');
 
-  // ── 退回去：下拉拨回真值，一个请求都不多发 ──
+  // ── 退回去：调 revert，一个请求都不多发 ──
   cluster.children[2].onclick();
   assert.equal(h.run('armed'), null, '取消之后不该还挂着第一段');
-  assert.equal(h.byId.get('sb-workspace').value, 'w000000000001',
-    '退回去要把下拉拨回真正的当前值 —— 留着待定的新值就是界面在说一件没发生的事');
+  assert.equal(h.run('window.__revN'), 1,
+    '退回去要把那一格拨回原样 —— 留着待定的新值就是界面在说一件没发生的事');
   assert.equal(h.run('window.__calls.length'), 1, '取消 = 什么都没发生');
 
   // ── 答"切走"：第二趟照常先发一次，再恰好带 confirmDiscard 发一次 ──
-  const n0 = h.run('window.__calls.length');
-  sel.value = 'w000000000002';
-  await sel.onchange();
-  assert.equal(h.run('window.__calls.length'), n0 + 1,
+  await run();
+  assert.equal(h.run('window.__calls.length'), 2,
     '第二趟也照常先提交一次（判定权始终在主进程）');
-  const p2 = sel.parentNode;
-  const again = p2.children[p2.children.indexOf(sel) + 1];
+  const p2 = anchor.parentNode;
+  const again = p2.children[p2.children.indexOf(anchor) + 1];
   await again.children[1].onclick();
-  assert.equal(h.run('window.__calls.length'), n0 + 2, '答「切走」之后恰好再发一次');
-  assert.equal(h.run(`window.__calls[${n0 + 1}].confirmDiscard`), true,
+  assert.equal(h.run('window.__calls.length'), 3, '答「切走」之后恰好再发一次');
+  assert.equal(h.run('window.__calls[2].confirmDiscard'), true,
     '第二趟必须明确带上 confirmDiscard —— 少这一格就是同一个框弹两遍');
   assert.equal(h.run('window.__asked'), 0, '全程没有弹过框');
 });
@@ -656,11 +647,9 @@ test('重画会把没走完的第一段收掉（重画的就是它挂身的那�
   //   更糟的是 `armed` 从此不为 null，下一次点另一处时 `disarmArmed()`
   //   先把这个幽灵收掉（白做一次），真正的第二段反而没了。
   //
-  // 两条路各自都判，因为它们重画的是不同的一片：
-  //   · `renderConnections` —— 收掉挂在连接列表那一片上的第一段；
-  //   · `renderWorkspaceSelectors` —— 它重画的正是切走工作区第一段挂身的那一格
-  //     （状态条那个下拉）。不收的话，"待定"的那行确认会与刚被拨回真值的下拉
-  //     同时摆在界面上 —— 界面在说一件没发生的事。
+  // 重画连接列表时必须先收：它重画的正是断开 / 探测那些第一段挂身的那一片。
+  //   （从前还有第二处 —— `renderWorkspaceSelectors`；那一格 2026-10-18 随状态条
+  //   的工作区下拉一起删掉了。）
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
     'SESS = { sessions: [{ slot: "s1", live: true }], front: "s1" };'
     + 'window.slurmate.stop = () => Promise.resolve({ ok: true });');
@@ -678,9 +667,8 @@ test('重画会把没走完的第一段收掉（重画的就是它挂身的那�
 
   end.onclick();
   assert.notEqual(h.run('armed'), null, '（前提）再摆一个');
-  h.fn('renderWorkspaceSelectors')();
-  assert.equal(h.run('armed'), null,
-    '重画工作区那个下拉之前也必须先收掉 —— 它重画的正是那一段挂身的一格');
+  h.fn('renderConnections')(CONNS);
+  assert.equal(h.run('armed'), null, '再收一次也相同 —— 它每次都先收');
 });
 
 test('「站点版本过高」那一句：正文只剩一行，理由挂 title', () => {
@@ -1301,18 +1289,6 @@ test('连接表单里的「③ 工作区」：三种取值各有各的那一句�
   h.fn('renderFormWorkspace')();
   assert.match(h.byId.get('ws-hint').textContent, /切到「bob@198\.51\.100\.9」/);
   assert.match(h.byId.get('ws-hint').textContent, /不会跟着走/);
-});
-
-test('状态条那个选择器：共用同一份工作区列表，选中"该选的那个"', () => {
-  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c2' });
-  h.fn('renderWorkspaceSelectors')();
-  const sel = h.byId.get('sb-workspace');
-  assert.equal(sel.value, 'w000000000002', '没有会话时用活跃连接那个');
-  assert.equal(sel.children.length, WSS.length + 1, '工作区 + 「＋ 新建空白工作区…」');
-  // 找不到就不选（宁可空着）—— 停在一个并不生效的值上，用户会以为自己已经切过去了
-  h.run('boot = { connections: [], workspaces: [], activeConnectionId: null };');
-  h.fn('renderWorkspaceSelectors')();
-  assert.equal(h.byId.get('sb-workspace').value, '');
 });
 
 test('顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {

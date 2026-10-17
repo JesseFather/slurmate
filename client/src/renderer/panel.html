@@ -63,15 +63,11 @@
     <button id="sb-port-remember" class="tiny remember">记住并启动</button>
     <button id="sb-port-abort" class="ghost tiny">取消</button>
   </span>
-  <!-- 工作区选择器：会话跑起来之后窗口主体被 code-server 页面整个盖住，面板里的
-       连接列表和映射图都够不着，这是运行期间唯一还能改工作区的入口。
-       它改的是当前活跃连接的工作区（没有连接时整个藏起来 —— 它改的是
-       「当前连接的」工作区，没有连接就没有对象，摆一个选了也没用的下拉是在骗人）。 -->
-  <span id="sb-workspace-wrap" class="sb-pick hidden">
-    <span class="sep">|</span>
-    <span class="sb-lbl">工作区</span>
-    <select id="sb-workspace" class="sb-sel"></select>
-  </span>
+  <!-- 这里从前有一个「工作区」下拉：运行期间唯一还能改工作区的入口。
+       2026-10-18 删掉（用户：「作业运行的时候应该是不能更换工作区的吧」）；
+       切工作区要换 origin、重新加载页面，未保存的编辑会跟着没 —— 那不是一条
+       该放在 30px 状态条上、手边就点得到的动作。要换就在没跑会话的时候，
+       从连接那一屏换。 -->
   <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 code-server
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
   <button id="sb-reload" class="ghost tiny hidden">重新加载</button>

@@ -2923,6 +2923,26 @@ async function startSession(resources, serviceKind, portChoice) {
     // 用户在那道闸上答过的（没问过就是 null）。见 `SessionController._portChoice`。
     portChoice,
   });
+  if (!snap && !rec.controller.sessionId) {
+    // 这一次在服务端没有留下任何东西（被 quota / 权限 / 校验拒掉，或者压根没提交
+    //   出去）。那条记录与临时那一份都只是这一趟的产物：留着它们，界面上会多出
+    //   一颗「死标签」—— 用户看到第二条会话，以为新的被排着队（2026-10-18 真机：
+    //   站点把插件上限设成 1，再点一次「开始会话」就是这样）；临时那一份还会一直
+    //   占着一个端口，直到进程退出。
+    //
+    // 原因推进提示流：记录一收，它就没有别的地方可以显示了。
+    // 已经有 `sessionId` 的那些不走这一支 —— 服务端确实建了一条会话（提交超时后
+    //   认领到的、或者被拒到终态的），那条记录要留着让人看见它、接上它、结束它。
+    const why = (rec.controller.snapshot() || {}).error || '会话没有起来。';
+    sessions.delete(slot);
+    // 次序与回收那份临时数据的那几处相同：先拆视图，再删数据（见 releaseEphemeral）。
+    //   这一趟本来就没有视图，这一句是给"槽被上一轮留下过一块"那种情况兜底。
+    win.destroySurface(slot);
+    releaseEphemeral(space && space.id);
+    win.pushNotice('error', why);
+    await onSessionChange(slot);          // 把那一颗死标签从界面上撤掉
+    return null;
+  }
   if (!snap) onSessionChange(slot);
 
   // ── 「记住并启动」：把这份数据的首选端口改成隧道真正绑上的那一个 ──

@@ -82,7 +82,7 @@ function setConnected(on) {
   renderTabs();
 }
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
-let lastSnap = null;         // 前台那一条的快照，供状态条与工作区选择器读它
+let lastSnap = null;         // 前台那一条的快照，供状态条、映射图与作业详情读它
 let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
 /** 上一次推送时活着的槽，逗号连起来。作业那一屏据此判断"要不要重取一次"。 */
 let lastLiveIds = null;
@@ -653,15 +653,6 @@ function renderSnapshot(s) {
   const temp = frontTemporary();
   $('sb-temp').classList.toggle('hidden', !temp);
   $('temp-banner').classList.toggle('hidden', !temp);
-  // 工作区选择器只在运行期间露出来：其余时候面板本身可见，用连接行里那个下拉就行。
-  // 没有活跃连接时也藏起来 —— 它改的是「当前连接的」工作区，没有连接就没有对象。
-  // 多一个条件：前台那条会话真的有一份数据（`s.spaceId`）—— 只有要工作区的
-  //   插件才有，不要工作区的（中转站）没有。
-  //   漏了它的症状是：前台是个中转站会话时选择器还露着，用户改了没反应 ——
-  //   那条路（`outsideWorkspace`）两条分支都不走，而界面上一切正常。
-  $('sb-workspace-wrap').classList.toggle(
-    'hidden', !(running && boot && boot.activeConnectionId && s && s.spaceId));
-
   // 这一屏不参与"露哪一屏"的判定 —— 那是路由的事（见 showScreen）。
   //   按会话状态切换 `sec-connect` / `sec-purpose` / `sec-session` 的话，"用户在
   //   哪儿"与"会话跑没跑起来"就混成一件：会话一起来就把人弹回当前会话那一屏，
@@ -682,8 +673,8 @@ function renderSnapshot(s) {
     if (s) notice(jobEndedKind(s), s.jobText || '作业已结束。');
   }
 
-  renderWorkspaceSelectors();
-  // 工作区下拉的可见性刚变过，映射图的几何位置到这一帧结束后才是最终的。
+  // 这一帧里露出来的东西刚变过（状态条、映射图的节点），连线的几何位置要到
+  //   这一帧结束后才是最终的。
   requestAnimationFrame(drawWorkspaceLines);
 }
 
@@ -1302,8 +1293,9 @@ function renderConnections(list) {
  *   它是一条「随时可改」的快捷方式，而改它的代价（切走一个独占的工作区 = 把它连同
  *   里面的东西一起删掉）远大于改一个地址。放进表单里，"改"这个动作就有了它该有的
  *   分量：按「保存」才算数。
- * 运行期间那个入口还在（状态条的 `#sb-workspace`）—— 会话跑起来之后窗口主体被
- *   原生视图盖住，那是唯一够得着的像素。
+ * 2026-10-18 起连状态条那个入口也删了（用户：作业运行的时候不该在那里 ——
+ *   切工作区要换 origin、重新加载页面，未保存的编辑会跟着没）。换工作区只在
+ *   没有会话跑着的时候做。
  */
 
 // ── 工作区 ──────────────────────────────────────────────────────────────────
@@ -1347,7 +1339,7 @@ function connName(id) {
  *   没有人用时退回配置里那个自动名（「工作区 N」）—— 那只在活会话还攥着它、
  *   而连接已经切走或删掉的那一小段时间里出现。
  *
- * 三处共用这一句（映射图、表单的「③ 工作区」、状态条那个选择器）。各推一遍的话，
+ * 两处共用这一句（映射图、表单的「③ 工作区」）。各推一遍的话，
  *   同一个工作区会在两个下拉里叫两个名字。
  */
 function workspaceLabel(l) {
@@ -1384,7 +1376,7 @@ function activeConnWorkspaceId() {
  *   两者不是一回事：一份数据可以被几个工作区同时引用（那正是引用表存在的理由）。
  *   所以这一步只能查，不能推 —— 主进程给的那张表里每一行都带着它指着哪些数据。
  * 查不到就返回 null：临时那一份不在任何工作区里（它只活在内存里），
- *   那时选择器退回活跃连接那个工作区。
+ *   那时映射图上没有哪个工作区被标成"当前的"。
  */
 function frontWorkspaceId() {
   const sid = lastSnap && lastSnap.spaceId;
@@ -1394,21 +1386,21 @@ function frontWorkspaceId() {
 }
 
 /**
- * 把工作区那几项填进一个 <select>。三个下拉共用这一份：状态条那个、表单里的
- * 新建与编辑。各写一份的话，那句说明（「只有这一条连接在用 —— 切走就会被丢弃」）
+ * 把工作区那几项填进一个 <select>。表单里的新建与编辑共用这一份。
+ * 各写一份的话，那句说明（「只有这一条连接在用 —— 切走就会被丢弃」）
  * 迟早会在其中一处走样，而它正是用户按下之前唯一的机会。
  *
  * `keep` 是应当选中的那个值。找不到就不选（宁可空着）—— 让下拉停在一个
  * 并不生效的值上，用户会以为自己已经切过去了。
  *
- * `connId` 只影响那句说明（"谁在用"）：状态条给活跃连接，表单给正在编辑的那条，
+ * `connId` 只影响那句说明（"谁在用"）：表单给正在编辑的那条连接，
  * 新建时给 null（这时问的是"还有谁在用"，这条连接自己还不算）。
  *
  * `head` 是可选的第一项（表单新建时那一项「默认：X」）。它的 `value` 是空串，
  * 而空串恰好落在下面那条"找不到就不选"的兜底上，所以跟随默认天然会被选中。
  *
- * `sig` 是给状态条用的：它在每次快照推送时都会被重填，而重建 <select> 会把用户
- * 正在展开的列表收起来。内容没变就不动 DOM。
+ * `sig` 是给"每次重画都重填"那几处用的：重建 <select> 会把用户正在展开的列表
+ * 收起来。内容没变就不动 DOM。
  */
 function fillWorkspaceOptions(sel, keep, connId, head) {
   const list = boot.workspaces || [];
@@ -1445,26 +1437,6 @@ function fillWorkspaceOptions(sel, keep, connId, head) {
 }
 
 /**
- * 状态条里那个选择器。它改的是当前活跃连接的工作区。
- *
- * 它重画的正是两段式第一段挂身的那一格（`$('sb-workspace')`），先收第一段。
- *   不收的话，"待定"的那一行确认会与刚被拨回真值的下拉同时摆在界面上 ——
- *   界面在说一件没发生的事（同 `renderConnections` 那条规矩）。
- * 递归是安全的：`disarm()` 先把 `armed` 置空再跑 `onDisarm`，而 `onDisarm`
- *   走的正是这个函数 —— 里面那次 `disarmArmed()` 看到的已经是 `null`，
- *   代价只是多重建一次下拉。
- */
-function renderWorkspaceSelectors() {
-  disarmArmed();
-  const sel = $('sb-workspace');
-  if (!sel) return;
-  // 运行期间以快照为准（那才是会话真正跑着的那一份数据所在的工作区）；
-  // 没有会话时用连接自己的标记 —— 它改的是「当前连接的」工作区。
-  const cur = frontWorkspaceId() || activeConnWorkspaceId();
-  fillWorkspaceOptions(sel, cur, boot && boot.activeConnectionId);
-}
-
-/**
  * 切走一个独占工作区的后果 —— 交给两段式的第一段去说。
  *
  * 文案里必须出现「未保存的编辑内容会丢失」—— 这比「工作区变了」严重得多：
@@ -1485,17 +1457,18 @@ function discardWhy(name) {
 }
 
 /**
- * 把一条连接切到另一个工作区。两个入口共用这一条：状态条那个下拉，
- * 以及连接表单里的「③ 工作区」（保存时那一趟，见 `btn-save` 那段）。
+ * 把一条连接切到另一个工作区。今天的入口只有连接表单里的「③ 工作区」
+ * （保存时那一趟，见 `btn-save` 那段）。
  *
- * 从前还有第三个入口 —— 连接行上那个下拉。它删掉了（见 `renderConnections`
+ * 从前还有另外两个入口 —— 连接行上那个下拉、状态条里那个「工作区」下拉。
+ * 它们都删掉了（见 `renderConnections`
  *   后面那一段）：改工作区的代价远大于改一个地址，摆在一行上等于把它降级成一次
  *   "随手一点"。搬进表单之后，这个动作要按「保存」才算数。
  *
  * @param {string} connectionId
  * @param {string|null} workspaceId  null = 新建一个空白工作区并落进去
  * @param {object} [opts]
- *   anchor    {HTMLElement} 第一段挂在哪一格上（状态条那个下拉，或表单里「保存」）
+ *   anchor    {HTMLElement} 第一段挂在哪一格上（表单里的「保存」）
  *   revert    {() => void}  第一段退回去时把界面拨回原样
  *   confirmed {boolean}     内部用：这是答过之后的第二趟，直接带 `confirmDiscard` 发
  * @returns {Promise<{ok:boolean, armed?:boolean}>}
@@ -1548,8 +1521,8 @@ async function applyWorkspace(connectionId, workspaceId, opts = {}) {
   notice('info', wasRunning
     ? '已切换工作区。页面会重新加载一次，计算节点上的作业没有受影响，仍然在跑。'
     : '已切换工作区。');
-  // 拉一次权威状态：会话的 workspaceId 刚变，界面手里那份还是旧的，而状态条正是
-  // 拿它显示当前工作区的 —— 不拉就会继续显示上一个。
+  // 拉一次权威状态：会话的 workspaceId 刚变，界面手里那份还是旧的，而映射图
+  // 正拿它标「当前」那一个 —— 不拉就会继续标着上一个。
   renderSessions(await window.slurmate.states());
   return { ok: true };
 }
@@ -2725,11 +2698,8 @@ async function applyPluginSpace(workspaceId, pluginId, spaceId) {
   boot.workspaces = r.workspaces || boot.workspaces;
   boot.spaces = r.spaces || boot.spaces;
   boot.connections = r.connections || boot.connections;
-  // 三处都跟着变：插件块上那一格、映射图、连接列表（它按工作区算独占与引用数）。
+  // 两处都跟着变：插件块上那一格、映射图与连接列表（它按工作区算独占与引用数）。
   renderConnections(boot.connections);
-  // 分叉会把活跃连接挪到另一张表上，而状态条那个下拉显示的正是"活跃连接的
-  //   工作区" —— 不重填的话它会继续说着上一个，直到下一次快照推送。
-  renderWorkspaceSelectors();
   // 这里显式重画：`r` 带回来的那几张表通常与手上这份不同（指纹自己就判得出来），
   //   但"通常"不是判据 —— 换成功之后这一格显示的东西必须与引用表一致，
   //   而那个一致性不该指望两份 JSON 碰巧不相等。
@@ -4368,6 +4338,19 @@ function bindEvents() {
     });
   };
 
+  // 会话标签太多时横向滚。这一条是 30px 的状态条，纵向滚轮在这里没有别的
+  //   读者；触控板的横向滑动本来就走原生横向滚动，所以只接管纵向那一轴。
+  // 判据是"真的能滚"：不能滚的时候一个字都不拦 —— 拦一个没有效果的事件，
+  //   下一次这里再出问题就分不清是"拦了没滚"还是"本来就滚不动"。
+  const tabBar = $('session-tabs');
+  tabBar.addEventListener('wheel', (e) => {
+    if (tabBar.scrollWidth <= tabBar.clientWidth) return;
+    const d = Number(e.deltaY) || 0;
+    if (!d) return;
+    tabBar.scrollLeft += d;
+    if (typeof e.preventDefault === 'function') e.preventDefault();
+  }, { passive: false });
+
   // 「端口被占」那一行的三颗按钮 —— 三选一，三颗都是当场生效的动作。
   //    它们不是两段式（见 `renderPortAsk`）：答「启动」就重发那一趟，答「记住新配置
   //    并启动」也重发（多带一个"记住"的作答，写配置那一步在主进程、而且排在绑定
@@ -4395,22 +4378,10 @@ function bindEvents() {
     notice('info', '没有提交：集群上不会出现作业，那份数据也没有被占住。');
   };
 
-  // 状态条里的工作区选择器 —— 会话跑起来之后唯一够得着的入口。
-  // 它改的是当前活跃连接的工作区（会话正跑在它上面，所以会立刻换端口重连隧道，
-  // 而集群上的作业一动不动）。
-  $('sb-workspace').onchange = async () => {
-    const sel = $('sb-workspace');
-    const v = sel.value;
-    const r = await applyWorkspace(boot.activeConnectionId,
-      v === NEW_WORKSPACE ? null : v,
-      // 第一段挂在这颗下拉自己身上，而下拉停在"待定"的新值上（用户刚选的那
-      //   一项）—— 它不是已发生的事，是"你要是确定就是这个"。所以退回去时必须
-      //   `revert` 把它拨回真正的当前值，否则界面在说一件没发生的事。
-      //   `armed` 那一支不重画：重画会把那行确认连它的 `armed` 一起丢掉
-      //   （见 `applyWorkspace` 的返回值注释）。
-      { anchor: sel, revert: renderWorkspaceSelectors });
-    if (!r.ok && !r.armed) renderWorkspaceSelectors();   // 拨回真正的当前值
-  };
+  // 状态条上这里从前有一个「工作区」下拉。2026-10-18 删掉（用户：作业运行的时候
+  //   不该在那里）。换工作区要换 origin、重新加载页面，未保存的编辑会跟着没 ——
+  //   那是"没有会话在跑"时从连接那一屏做的动作，不是 30px 里手边的一颗下拉。
+  //   `applyWorkspace` 与那个两段式确认照旧服务表单里的「③ 工作区」。
 
   // 窗口大小变了，连线的坐标就全变了。rAF 里重画，等布局定下来。
   window.addEventListener('resize', () => requestAnimationFrame(drawWorkspaceLines));

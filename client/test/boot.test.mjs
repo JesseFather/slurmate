@@ -7166,6 +7166,31 @@ test('排队中的作业：作业那一屏看得见它，【结束】取消的�
   b.enrollDelayMs = 8000;
 });
 
+test('被站点拒掉的提交：不留下一颗死标签，也不留下一份临时数据', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  b.debugReap();
+  const first = await startRunning(idx, 'code-server');
+  const tempBefore = idx._test.getTempSpaces().size;
+  const said = noticesOf().length;
+
+  // 夹具的并发上限是 1（与真站点缺省相同）：第二次提交会被站点拒掉。
+  const r = await appStart(null, 'code-server');
+  assert.equal(r.ok, false, `第二次提交应当失败：${JSON.stringify(r)}`);
+
+  const st = await invoke('app:states');
+  assert.equal(st.sessions.length, 1,
+    `不许留下第二条记录（那是一颗点开才知道为什么的死标签）：${JSON.stringify(st.sessions)}`);
+  assert.equal(idx._test.getTempSpaces().size, tempBefore,
+    '被拒的那一趟造的临时数据要收掉 —— 留着它一直占着一个端口');
+  const msg = noticesOf().slice(said).map((n) => n.text || '').join('\n');
+  assert.match(msg, /占着位置|上限/, `站点那句原因要进提示流：${msg}`);
+
+  await invoke('app:stop', { slot: first.slot });
+});
+
 test('【接管】只换看护者那一格，会话其余部分一动都不动', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -7845,23 +7870,24 @@ test('建作业日志目录：连接时不说，提交那一步才说 —— 而
   // 判据挂在【后端交回来的结果】上（`definite`），不是挂在某个字段上：假后端
   //   这一格本来就什么都不做（本地没有远端目录可建），所以这里替它答。
   // 而"拦住"的判据是【一个作业都没提交出去】—— 那才是用户真正得失的东西。
-  //   回包那一格不是判据：提交被拦时它照旧回一个真值对象（会话记录在
-  //   `sessions` 里、错误在 `snap.error` 上），与"提交超时且未能认领会话"
-  //   那一条同一个落点。
+  //   原因走提示流：这一趟没有建出任何会话记录（见 startSession 那一支 ——
+  //   服务端什么都没留下时不留"死标签"），所以提示流是它唯一显示的地方。
   const before2 = back._sessions.length;
+  const before2n = noticesOf().length;
   const r1 = await appStart(null, 'code-server');
   assert.equal(back._sessions.length, before2, '建不出目录时不许提交 —— 一个作业都不该出去');
-  const sn1 = ((r1.sessions || []).map((x) => x.snap).find((x) => x && x.state === 'error')) || {};
-  assert.equal(sn1.state, 'error', `这一条会话要停在 error：${JSON.stringify(r1.sessions)}`);
-  assert.match(String(sn1.error), /作业日志目录/, `要说清拦住的原因：${JSON.stringify(sn1)}`);
-  assert.match(String(sn1.error), /Permission denied/, '根因（远端那句原话）也要带上');
+  assert.equal(r1.ok, false, `这一趟要如实报失败：${JSON.stringify(r1)}`);
+  assert.equal((r1.sessions || []).length, 0, '服务端什么都没建，本机也不许留下一条记录');
+  const said1 = noticesOf().slice(before2n).map((n) => n.text || '').join('\n');
+  assert.match(said1, /作业日志目录/, `要说清拦住的原因：${said1}`);
+  assert.match(said1, /Permission denied/, '根因（远端那句原话）也要带上');
 
   // ── 三、提交那一刻：没等到 → 照常提交 ──
   //
   // 「没回来」不等于「没有」：一条没响应的 `mkdir` 不能证明目录不在（真机
   //   2026-10-16 就是这样）。为一句没拿到的结论把一条本来跑得起来的提交拦下来，
   //   代价比放过一条会起不来的作业更大 —— 所以这一种只放行、不说话。
-  await openUpTo(idx, 2);        // 把上一条失败的记录收掉，槽要腾出来
+  await openUpTo(idx, 2);        // 收尾：与其它用例同一个动作（这一趟本来就没有留下记录）
   const before3 = back._sessions.length;
   back.ensurePrepared = async () => ({ ok: false, error: null, definite: false });
   const r2 = await appStart(null, 'code-server');

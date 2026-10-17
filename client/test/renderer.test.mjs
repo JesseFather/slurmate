@@ -262,7 +262,7 @@ test('panel.html 里没有内联 style —— CSP 会静默丢掉它', () => {
 });
 
 test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
-  for (const sel of ['.wmap-lines', '.wnode', '#statusbar .sb-sel']) {
+  for (const sel of ['.wmap-lines', '.wnode']) {
     assert.ok(css.includes(sel), `app.css 缺少 ${sel}`);
   }
   // SVG <path> 的默认填充是黑色，不是透明。少了这一条，每条连线都会糊成一块黑斑。
@@ -1617,14 +1617,39 @@ test('★ 那颗「面板」：一条会话时也在，点它把面板抬回来'
   assert.match(css, /#session-tabs \.tab\.panel:hover \{ color: var\(--fg\); \}/);
 });
 
-test('★ 工作区选择器只在**前台那条会话真的有那一份数据**时露出来', () => {
-  // 前台是中转站时（spaceId 为 null）选择器还露着的话，用户改了没反应 ——
-  // 那条路径（outsideWorkspace）两条分支都不走，而界面上一切正常。
-  assert.match(js, /sb-workspace-wrap[\s\S]{0,260}?s\.spaceId/,
-    'sb-workspace-wrap 的露出条件里必须有 spaceId');
-  // 而会话手里是一份数据、用户认的是工作区 —— 两者由引用表对上，
-  //   所以还要有一条按 id 反查的路径（`frontWorkspaceId`）。少了它，状态条上的
-  //   选择器在会话跑着的时候会停在"活跃连接那个工作区"上，而那可能不是它跑的那个。
+test('状态条：标签多了横向滚，右边那几颗不许被挤出去', () => {
+  // 2026-10-18 真机：标签一多，整行按内容排开，「结束会话」被推到窗口外面、
+  //   被 `overflow: hidden` 裁掉 —— 那 30px 是会话跑起来之后唯一够得着的像素。
+  // 判据落在三处：右边的按钮与状态标签不参与压缩、标签那一格自己横向滚、
+  //   详情那一句用省略号收尾。
+  assert.match(css, /#statusbar > button[^{]*\{[^}]*flex:\s*none/,
+    '状态条上的按钮不许被压 —— 能压的只有标签与那一句详情');
+  const tabs = /#session-tabs \{([^}]*)\}/.exec(css);
+  assert.ok(tabs, 'app.css 里应当有 #session-tabs 那一条');
+  assert.match(tabs[1], /flex:\s*0 1 auto/, '标签那一格要能被压窄');
+  assert.match(tabs[1], /min-width:\s*0/, 'flex 项目默认最小宽度是内容宽度，少了它压不窄');
+  assert.match(tabs[1], /overflow-x:\s*auto/, '压窄之后要能滚');
+  assert.match(css, /#session-tabs::-webkit-scrollbar \{[^}]*display:\s*none/,
+    '滚动条不画 —— 30px 里放不下，而且这一条的状态由标签自己表达');
+  const detail = /#statusbar > #sb-detail \{([^}]*)\}/.exec(css);
+  assert.ok(detail, '详情那一句要有它自己的压缩规则');
+  assert.match(detail[1], /text-overflow:\s*ellipsis/);
+  // 滚轮接管：纵向滚轮在这 30px 里没有别的读者。
+  assert.match(js, /tabBar\.addEventListener\('wheel'/);
+  assert.match(js, /tabBar\.scrollLeft \+= d/);
+});
+
+test('★ 状态条上不再有工作区选择器（2026-10-18 用户掏掉的）', () => {
+  // 作业运行的时候不该在 30px 里换工作区：换工作区要换 origin、重新加载页面，
+  //   未保存的编辑会跟着没。换它只在没有会话跑着的时候、从连接表单里做。
+  // 判据落在两处：HTML 里那一格没了，panel.js 里也没有再填它的代码。
+  assert.equal(/id="sb-workspace/.test(html), false,
+    '状态条里不该再有工作区那一格');
+  assert.equal(/sb-workspace/.test(js), false,
+    'panel.js 里不该再有填它 / 绑它的代码');
+  // 表单那一格照旧（换工作区的入口只剩它）。
+  assert.match(html, /id="f-workspace"/, '连接表单里的「③ 工作区」要还在');
+  // 而"前台会话跑在哪一个工作区里"这条反查还在：映射图拿它标「当前」那一个。
   assert.match(js, /function frontWorkspaceId\(\)[\s\S]{0,500}?lastSnap\.spaceId/,
     'frontWorkspaceId 要按那一份数据的 id 反查工作区');
 });
