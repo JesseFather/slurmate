@@ -52,6 +52,7 @@ PAYLOAD=(
     cluster/slurmate-sessiond
     cluster/slurmate
     cluster/nft-compare.py
+    cluster/conf-merge.py
     cluster/run.sbatch
     cluster/slurmate.conf.example
     cluster/slurmate-sessiond.service

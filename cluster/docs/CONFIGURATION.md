@@ -56,9 +56,10 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 认不得的键一律拒绝。一份旧配置里的 `max_active_per_user` 之类不会静静地失效，而是
 会被当场报出来 —— 这正是本项目一路在清的那类问题。
 
-（主文件按行首匹配键名；`install-base.sh` 不看主文件里的任何一个键，它只把那份
-配置原样装到 `/etc/slurmate/slurmate.conf`。站点通用键待在主文件里，这一条与
-"drop-in 文件里只有插件配置"是同一件事的两面。）
+（主文件按行首匹配键名。`install-base.sh` 在升级时按示例里的键对一次账，
+但不解释任何一个值：取值原样保留，删掉的只有这一版不认的键。见〈配置改了之后〉。）
+
+站点通用键待在主文件里，这一条与"drop-in 文件里只有插件配置"是同一件事的两面。
 
 ---
 
@@ -978,9 +979,20 @@ sudo systemctl reload slurmate-sessiond
 改单元（加固指令那一块）之后要重新跑一次 `sudo bash cluster/install-base.sh`，
 再 `systemctl daemon-reload` —— 那不是配置，重载管不到它。
 
-`install-base.sh` 不会覆盖已存在的 `/etc/slurmate/slurmate.conf` —— 重复部署时覆盖等于把
-站点的调优悄悄抹掉，而且故障要等下次重启守护进程才出现。要重置就手动删掉它再跑。
-随仓库分发的版本在 `cluster/slurmate.conf.example`，可以拿它对比新增了哪些项。
+`install-base.sh` 对已存在的 `/etc/slurmate/slurmate.conf` 只对键、不动取值
+（`cluster/conf-merge.py`）：
+
+1. 这一版不认的活键，删掉那一行。安装输出会把删掉的行原样列出来；改动前的
+   整份配置在 `/root/slurmate-backup-<时间>/` 里。
+2. 这一版新加、而文件里整节都没有提到的，补到文件末尾。补进来的是示例里那几行，
+   新键在示例里本来就是注释掉的缺省，所以补进来不改变任何行为。
+3. 其余原样保留：取值、顺序、注释。
+
+改名（同一个含义换了名字）的键不自动迁移：旧行删掉、原样列在输出里，新键按示例缺省补上。
+遇到这种升级，按输出里那一行把值抄过去。
+
+旧键不删就没有升级：守护进程对认不出的键是拒绝启动，而不是忽略。要整个
+重置就手动删掉它再跑；随仓库分发的版本在 `cluster/slurmate.conf.example`。
 
 `install-base.sh` 在装完之后会跑一次守护进程自己的 `--check` 并据此决定是否启动服务 ——
 所以「部署预检放行、守护进程起不来」这类两套解释器的错配不会发生。

@@ -53,6 +53,9 @@
 #  4. 安装任何文件前先检查目标是否已存在且不属于本系统 —— 是则中止，
 #     绝不覆盖别人的文件。卸载路径同样逐项校验归属。
 #  5. 幂等：可反复运行。卸载只删自己的东西。
+#  6. 站点配置只对键、不动取值：升级时装上去的配置是"管理员的取值 + 这一版的
+#     键集合"。不认的键删掉（否则守护进程拒绝启动），新加的节补到末尾；改之前
+#     的那一份永远在备份目录里。见 `conf-merge.py` 与〈阶段 0〉那一段。
 #
 #  用法（五个动词。单文件自解压包 `slurmate-site-<版本>.run` 把这五个原样
 #  转发到本脚本 —— 实现只有这一份）：
@@ -323,7 +326,7 @@ if [[ "$MODE" == "uninstall" ]]; then
 fi
 
 
-SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py)
+SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py conf-merge.py)
 for f in "${SRC_FILES[@]}"; do
     [[ -f "${SRC_DIR}/${f}" ]] || die "源文件缺失：${SRC_DIR}/${f}（cluster/ 目录是否完整？）"
 done
@@ -481,8 +484,47 @@ DAEMON_SRC="${SRC_DIR}/slurmate-sessiond"
 #   示例文件 —— 而那份配置后面会被读出来给守护进程自检。
 #   判据是"我读的这一份必须来自我已经固定下来的目录"。
 SRC_CONF="${SRC_DIR}/slurmate.conf.example"
+
+# 这一份装上去之后，站点配置会长成什么样。体检、安装、修复都读合并后的那一份
+#   —— 它们要回答的是"装上去能不能起来"。诊断（--doctor）不合并：它报的是这
+#   台机器现在的样子，把配置悄悄换成"将会是什么"就不是诊断了。
+#
+# 为什么要合并：站点配置的取值归管理员，键集合归版本。旧配置里这一版不认的键
+#   会让守护进程拒绝启动（`validate()` 对认不出的键是拒绝，不是忽略），而
+#   0.22 的配置里 `cluster_cidr` 与 `readonly_paths` 正是这种键。整份保留
+#   等于升级必失败；整份覆盖等于把管理员改过的取值抹掉。所以两件事分开：
+#   取值不动，键对齐（`conf-merge.py`）。
+CONF_MERGED=""
+CONF_MERGE_NOTE=""
+# 装上去要动的只有键：取值一个不改。这一格只回答"配置文件会不会被写一次"。
+CONF_DIFF=0
+_cleanup_conf_merged() { [[ -n "$CONF_MERGED" ]] && rm -f "$CONF_MERGED"; }
+trap '_cleanup_conf_merged' EXIT
 if [[ -r "$CONF" ]]; then
     SRC_CONF="$CONF"
+    if [[ "$MODE" != "doctor" ]]; then
+        CONF_MERGED="$(mktemp "${TMPDIR:-/tmp}/slurmate-conf.XXXXXX")" \
+            || die "无法创建临时文件（站点配置对账）"
+        if ! CONF_MERGE_NOTE="$("$PY" "${SRC_DIR}/conf-merge.py" \
+                 --installed "$CONF" \
+                 --example "${SRC_DIR}/slurmate.conf.example" \
+                 --out "$CONF_MERGED" 2>&1)"; then
+            die "站点配置对账失败：${CONF_MERGE_NOTE}"
+        fi
+        SRC_CONF="$CONF_MERGED"
+        if ! cmp -s "$CONF" "$CONF_MERGED"; then
+            CONF_DIFF=1
+        fi
+        if [[ -n "$CONF_MERGE_NOTE" ]]; then
+            # 体检一个字都不改，所以这里说的是"装上时会做什么"，不是"做了什么"。
+            if [[ "$MODE" == "check" ]]; then
+                info "站点配置对账（${CONF}）。（体检不改文件，以下是装上时会做的）"
+            else
+                info "站点配置对账（${CONF}）："
+            fi
+            printf '%s\n' "$CONF_MERGE_NOTE" | sed 's/^/        /'
+        fi
+    fi
 fi
 
 # 非干扰比对器自身先自测 —— 依赖一个判定器之前，先证明它是对的
@@ -529,7 +571,7 @@ ok "sha256sum 可用"
 # 这一条留在本脚本里，它没有第二份实现也不该有：它问的是"我要写的那几个
 #   位置现在是谁的"，只有要写它们的人知道这件事。`--check` 判不了它
 #   （守护进程不知道自己是不是被覆盖着装上的，也不该知道）。
-for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
+for dst in "$DAEMON" "$CLI" "$UNIT"; do
     if [[ -e "$dst" ]]; then
         if ! grep -qi "slurmate" "$dst" 2>/dev/null; then
             die "目标文件已存在且不属于 Slurmate：
@@ -538,6 +580,16 @@ for dst in "$DAEMON" "$CLI" "$CONF" "$UNIT"; do
         fi
     fi
 done
+# 站点配置单独判：它里面只有键与值，从第一版起就一个字节都不提产品名。
+#   拿"内容含 slurmate"套它，第一台装过基座的机器上就会中止，而那个中止
+#   被说成"别人的文件"—— 这正是 0.22 升 0.23 时发生的事。
+if [[ -e "$CONF" ]] \
+   && ! "$PY" "${SRC_DIR}/conf-merge.py" --looks-like-config "$CONF" \
+            --example "${SRC_DIR}/slurmate.conf.example" >/dev/null 2>&1; then
+    die "目标文件已存在且不属于 Slurmate：
+       ${CONF}
+     为避免覆盖他人文件，部署中止。请人工确认后自行删除或改名再重试。"
+fi
 # 作业脚本目录与插件目录不在这张表里：它们不归本脚本管（见文件头），
 # 而各自的守卫长在安装器那一侧（它才是往里面写的人）。
 ok "目标路径未被他人文件占用"
@@ -593,7 +645,11 @@ case "$_check_rc" in
      它问的是「这台机器上有没有 nft、有没有那八个 Slurm 命令」，
      与你要装什么版本的 Slurmate 无关。" ;;
     1)
-        if [[ "$SRC_CONF" == "$CONF" ]]; then
+        if [[ -n "$CONF_MERGED" ]]; then
+            _check_stop "站点配置对账之后仍然过不了自检（见上）。上面那一份是
+     管理员的取值加上这一版的键；把 ${CONF} 就地改对再重跑本脚本，部署中止，
+     一个字节都没有改。"
+        elif [[ "$SRC_CONF" == "$CONF" ]]; then
             _check_stop "已装的站点配置 ${CONF} 自检没通过（见上）。重复部署时它必须是
      对的，部署中止，一个字节都没有改。改完重跑本脚本。"
         else
@@ -693,7 +749,7 @@ audit_file() {
         if [[ -z "$h_here" || "$h_here" != "$h_src" ]]; then
             a_bad "$name" "${path} 的内容与包内那一份不同"
             a_hint "改回包内那一份：sudo bash ${SCRIPT_PATH} --repair"
-            a_hint "（站点配置与状态数据不在被改的范围内）"
+            a_hint "（站点配置的取值与状态数据不在被改的范围内）"
             return
         fi
     fi
@@ -940,7 +996,11 @@ if [[ "$MODE" == "repair" ]]; then
     fi
     step "修复前对账（--repair）：先看清哪几样不对"
     audit_installed full
-    if [[ "$A_FAIL" -eq 0 && "$A_WARN" -eq 0 ]]; then
+    if [[ "$CONF_DIFF" -eq 1 ]]; then
+        echo
+        info "站点配置的键与这一版不一致：下面按上面那次对账对齐（取值不动）。"
+    fi
+    if [[ "$A_FAIL" -eq 0 && "$A_WARN" -eq 0 && "$CONF_DIFF" -eq 0 ]]; then
         echo
         ok "对账干净：文件、目录、单元、服务都对得上，一个字节都不改。"
         info "（这一份包里的版本与装着的是同一个版本。要重装一遍：去掉 --repair。）"
@@ -948,7 +1008,7 @@ if [[ "$MODE" == "repair" ]]; then
     fi
     _A_PRE_BAD=( "${A_BAD[@]}" )
     echo
-    info "下面走一次安装（幂等、只增不改）：${CONF} 与 ${STATE_DIR} 里的数据都不动。"
+    info "下面走一次安装（幂等、只增不改）：站点配置的取值与 ${STATE_DIR} 里的数据都不动。"
     info "要重装的是上面报的那几样，其余照旧。"
 fi
 
@@ -1115,13 +1175,22 @@ install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
 #   这一份不是作业、也不会被提交。
 install_one "${SRC_DIR}/run.sbatch" "${SHARE_DIR}/run.sbatch.template" 644
 
-# ── slurmate.conf：只在【不存在】时安装 ──
+# ── slurmate.conf：不存在时安装，存在时只对键 ──
 # 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、缺省插件。
-# 重复部署时覆盖它等于把站点的调优悄悄抹掉（而且下次重启守护进程才生效，
-# 故障会出现在很久之后）。要重置就手动删掉它再跑。
+# 键跟着版本走（见〈阶段 0〉那次对账），取值只归管理员：有改动时写回去的是
+#   "管理员的取值 + 这一版的键"，整份旧文件由 `install_one` 放进备份目录。
+# 要重置就手动删掉它再跑。
 if [[ -e "$CONF" ]]; then
-    info "保留已有站点配置：${CONF}"
-    info "  随仓库分发的版本在 ${SRC_DIR}/slurmate.conf.example，可对比新增了哪些项"
+    # 有改动才落盘：键与这一版相同的站点，配置文件的修改时间都不该动。
+    #   `install_one` 覆盖前会把旧的那一份放进备份目录，所以"删掉了哪几行"
+    #   永远找得回来。
+    if [[ "$CONF_DIFF" -eq 1 ]]; then
+        install_one "$CONF_MERGED" "$CONF" 644
+        info "站点配置已按这一版对齐：取值一个没改，删掉与补上的键见上面那次对账"
+    else
+        info "保留已有站点配置：${CONF}（键与这一版相同，一个字节没动）"
+        info "  随仓库分发的版本在 ${SRC_DIR}/slurmate.conf.example，可对比新增了哪些项"
+    fi
 else
     install_one "${SRC_DIR}/slurmate.conf.example" "$CONF" 644
 fi

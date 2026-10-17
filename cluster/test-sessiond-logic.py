@@ -11832,6 +11832,140 @@ exit 0
         except Exception:                                    # noqa: BLE001
             pass
 
+    # ── 站点配置对账（升级时键跟着版本走，取值跟着站点走）─────────────────────
+    print("\n── 站点配置对账（conf-merge.py）──")
+    _cm = os.path.join(HERE, "conf-merge.py")
+    _cmd = os.path.join(tempfile.mkdtemp(prefix="slurmate-cm-"), "old.conf")
+    try:
+        # 0.22 的配置长这样：cluster_cidr 与 readonly_paths 还是活的键，
+        #   续期与作业日志那两节还不存在。取值改成站点自己的（56001 而不是
+        #   示例里的 55001），用来钉住"取值不动"。
+        _old_text = (
+            "# 每个键的含义、取值与改错的后果：见《配置参考》\n"
+            "\n"
+            "cluster_cidr =\n"
+            "readonly_paths = /shared/home\n"
+            "\n"
+            "range_start = 56001\n"
+            "range_end = 56999\n"
+            "reserved_ranges =\n"
+            "candidates_per_session = 6\n"
+            "\n"
+            "sbatch =\n"
+            "scancel =\n"
+            "squeue =\n"
+            "scontrol =\n"
+            "sacctmgr =\n"
+            "sinfo =\n"
+            "sshare =\n"
+            "sacct =\n"
+            "\n"
+            "max_sessions_per_user = 1\n"
+            "max_connections_per_user = 8\n"
+            "\n"
+            "default_plugin =\n")
+        with open(_cmd, "w", encoding="utf-8") as f:
+            f.write(_old_text)
+        _merged = os.path.join(os.path.dirname(_cmd), "merged.conf")
+
+        _r = subprocess.run(
+            [sys.executable, _cm, "--installed", _cmd,
+             "--example", CONF, "--out", _merged],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True)
+        check("配置对账跑得通", _r.returncode == 0,
+              (_r.stdout + _r.stderr)[-300:])
+        with open(_merged, encoding="utf-8") as f:
+            _merged_text = f.read()
+
+        # 判"删没删"要看活键，不看整份文本里还有没有这个词：报告里本来就会
+        #   把那两行原样列出来。
+        _active = {}
+        for _ln in _merged_text.splitlines():
+            _m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", _ln)
+            if _m:
+                _active[_m.group(1)] = _m.group(2).strip()
+        check("这一版不认的键被删掉了（cluster_cidr）",
+              "cluster_cidr" not in _active, str(sorted(_active)))
+        check("这一版不认的键被删掉了（readonly_paths）",
+              "readonly_paths" not in _active, str(sorted(_active)))
+        check("站点自己的取值原样留着（range_start = 56001，不是示例里的 55001）",
+              _active.get("range_start") == "56001", repr(_active.get("range_start")))
+        check("报告里原样列出了删掉的那两行",
+              "cluster_cidr =" in _r.stdout
+              and "readonly_paths = /shared/home" in _r.stdout,
+              _r.stdout[:300])
+        check("这一版新加的两节补进来了（续期与作业日志）",
+              "renew_increment" in _merged_text
+              and "log_keep_days" in _merged_text)
+
+        # 补进来的必须是注释：新键在示例里本来就是注释掉的缺省，补进来不该
+        #   让任何一个取值从"缺省"变成"写死"。
+        check("补进来的新键是注释，不是活键（缺省不变）",
+              "renew_increment" not in _active and "log_keep_days" not in _active,
+              str({k: v for k, v in _active.items()
+                   if k.startswith(("renew_", "log_"))}))
+
+        # 与守护进程那一份判据对上：合并结果必须过得了它自己的读取。
+        _g, _s, _m = mod.parse_config(_merged)
+        check("合并结果里没有守护进程认不出的键",
+              set(_g) - set(mod.GLOBAL_KEYS) == set(),
+              str(sorted(set(_g) - set(mod.GLOBAL_KEYS))))
+
+        # 幂等：升级脚本可能被重跑，第二次不该再改一次。
+        _merged2 = os.path.join(os.path.dirname(_cmd), "merged2.conf")
+        _r2 = subprocess.run(
+            [sys.executable, _cm, "--installed", _merged,
+             "--example", CONF, "--out", _merged2],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True)
+        with open(_merged2, encoding="utf-8") as f:
+            _merged2_text = f.read()
+        check("对已经对齐过的配置再对一次，一个字节都不变",
+              _r2.returncode == 0 and _merged2_text == _merged_text)
+        check("而且它一句话都不说（没有改动就没有报告）",
+              _r2.stdout.strip() == "", _r2.stdout[:200])
+
+        # 拼错的键也走同一条路：删掉并在报告里点名。管理员靠那一行把值改回去，
+        #   这正是"原样列出来"的理由。
+        _typo = os.path.join(os.path.dirname(_cmd), "typo.conf")
+        with open(_typo, "w", encoding="utf-8") as f:
+            f.write(_old_text + "\nrannge_start = 1\n")
+        _typo_out = os.path.join(os.path.dirname(_cmd), "typo-out.conf")
+        _r3 = subprocess.run(
+            [sys.executable, _cm, "--installed", _typo,
+             "--example", CONF, "--out", _typo_out],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True)
+        with open(_typo_out, encoding="utf-8") as f:
+            _typo_text = f.read()
+        check("拼错的键被删掉，并且报告里带着它原来那一行",
+              _r3.returncode == 0 and "rannge_start = 1" in _r3.stdout
+              and "rannge_start" not in _typo_text,
+              (_r3.stdout + _typo_text)[:300])
+
+        # 「这份文件是不是本系统的配置」：判据不能是"内容里有没有 slurmate"
+        #   —— 配置文件从第一版起就不提产品名，而 0.22 升 0.23 的中止正是
+        #   这条判据造成的。
+        _r4 = subprocess.run(
+            [sys.executable, _cm, "--looks-like-config", _cmd, "--example", CONF],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True)
+        check("旧配置被认作本系统的配置（它一个字节都不提 slurmate）",
+              "slurmate" not in _old_text.lower() and _r4.returncode == 0,
+              "rc=%s %s" % (_r4.returncode, _r4.stderr[:200]))
+        _alien = os.path.join(os.path.dirname(_cmd), "alien.conf")
+        with open(_alien, "w", encoding="utf-8") as f:
+            f.write("[Unit]\nDescription=someone else\nExecStart=/bin/true\n")
+        _r5 = subprocess.run(
+            [sys.executable, _cm, "--looks-like-config", _alien, "--example", CONF],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True)
+        check("别人的文件不会被认作本系统的配置", _r5.returncode == 1,
+              "rc=%s" % _r5.returncode)
+    finally:
+        shutil.rmtree(os.path.dirname(_cmd), ignore_errors=True)
+
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("  通过 %d  失败 %d" % (PASS, FAIL))

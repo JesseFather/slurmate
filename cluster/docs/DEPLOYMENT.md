@@ -380,9 +380,11 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 
 ### 步骤 2：准备站点配置
 
-`install-base.sh` 只在配置不存在时安装 `slurmate.conf.example`
-（`cluster/install-base.sh`）—— 重复部署时覆盖等于把站点的调优悄悄抹掉，
-而且故障要等下次重启守护进程才出现。
+`install-base.sh` 在配置不存在时安装 `slurmate.conf.example`
+（`cluster/install-base.sh`）。配置已经存在时，它只对键、不动取值：这一版
+不认的键删掉（旧的那一份在 `/root/slurmate-backup-<时间>/` 里，安装输出会
+原样列出删掉了哪几行），这一版新加、而文件里整节都没有的补到末尾（写成注释，
+缺省不变）。整份覆盖会把站点的调优悄悄抹掉，而故障要等下次重启守护进程才出现。
 
 所以推荐两种顺序之一：
 
@@ -390,7 +392,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
   `systemctl reload slurmate-sessiond`（改配置不需要重启）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-站点通用键一共 15 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
+站点通用键一共 20 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
 没有哪一格是非填不可的（端口池与几个配额都有安全的默认值）。
 
 插件要不要开、开哪几个，也在这一步决定。`enabled = yes` 的插件会被
@@ -427,8 +429,8 @@ sudo bash slurmate-site-<版本>.run
 安装本身是六个阶段：预检 → 快照 → 安装文件 → 配置自检 → 启用并启动 → 非干扰验证
 （`cluster/install-base.sh`）。
 
-装过基座的机器上，这一步自动按修复走 —— 升级与修复是同一条路。站点配置与状态
-数据不动，正在跑的会话一条都不受影响（`cluster/install-base.sh`）。
+装过基座的机器上，这一步自动按修复走 —— 升级与修复是同一条路。站点配置的取值与
+状态数据不动，正在跑的会话一条都不受影响（`cluster/install-base.sh`）。
 
 看起来最啰嗦的第五阶段其实是最重要的一步（`cluster/install-base.sh`）：
 部署前后各取一次 `nft -j list ruleset` 结构化快照，剥掉本系统新增的
@@ -556,7 +558,7 @@ sudo bash slurmate-site-<版本>.run --doctor
 
 它逐项对账：文件与权限、目录、systemd 单元、服务与 socket、守护进程自己的配置自检
 与运行期自检。每一格不对的下面都写着下一步与该看哪份文档。修回去用 `--repair` ——
-它只增不改，站点配置与状态数据不动。
+它只增不改，站点配置的取值与状态数据不动。
 
 其余长期事项：
 
