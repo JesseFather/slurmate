@@ -56,11 +56,33 @@
 - 重启之前先排空：窗口内（60 秒，自动恢复）的新提交回 `5 draining`，于是重启不会
   切断一次走到一半的提交（账本 F40）。
 
-新增两个 op：
+新增三个 op：
 
 - `daemon`（只读）：版本、pid、配置摘要（已载入 / 盘上）、上次重载结果、会话数、
   插件数、端口池、nft 表、排空窗口。
 - `drain`（root only）：置一个 60 秒的排空窗口，只拒 `submit`。
+- `stop_all`（root only）：把本站全部会话交给释放流程，供 `service stop` 使用。
+
+### Added — 安装/升级/修复/卸载是一次事务
+
+中途任何一个失败都自动恢复到运行前：文件、站点配置、单元、开机自启、服务运行
+状态、nft 表；首次安装失败还会收掉本次新建的状态与日志目录。成功时不保留旧副本：
+工作目录与被覆盖的旧文件一起删除（从前留在 `/root/slurmate-backup-<时间>/`）。
+被 kill -9 或断电打断的现场，下一次会先自动收尾；也可以
+`--rollback /root/slurmate-deploy-<时间>` 手工收尾。
+
+### Changed — service stop 变成关机式
+
+`stop` 先取消本站提交的 Slurm 作业（用户自己的作业不动），再停服务、删 nft 表；
+会话没有释放干净就中止，不停服务。`restart` 仍然只换守护进程，作业、会话与规则
+不动。`reload` 现在连作业模板与作业脚本一起对齐，覆盖配置之外的那一层派生物。
+
+### Fixed — 0.23 卸载漏掉站点配置
+
+`/etc/slurmate/slurmate.conf` 按设计不含产品名，旧卸载判据 `grep slurmate` 永远
+不匹配，于是文件与 `/etc/slurmate/` 留了下来。现在改用与安装前同一份
+`conf-merge.py --looks-like-config`。另外 `--dry-run` 不再在收尾对账判失败，
+`--repair --dry-run` 也不再真的重启。
 
 ### Fixed — 热重载"成没成"现在读得到
 

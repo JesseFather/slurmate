@@ -34,6 +34,9 @@
 #    --repair       修复：只对装过的机器动手。只增不改，站点配置的取值与状态数据不动。
 #    --uninstall    卸载。加 --purge-state 连状态数据一起。
 #
+#  崩溃收尾（不是部署动词）：
+#    --rollback <目录>   把一次没有走完的部署恢复到运行前。
+#
 #  还有一条只读的路，不需要 root：
 #    --extract [目录]   把包里的东西解压出来看（默认 ./slurmate-site-<版本>）
 #
@@ -70,6 +73,7 @@ esac
 ORIG_ARGS=("$@")
 MODE="install"
 EXTRACT_TO=""
+ROLLBACK_DIR=""
 FORWARD=()
 
 usage() {
@@ -84,6 +88,10 @@ slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
   --uninstall    卸载（保留状态与日志）
   （不给动词）   安装
 
+  --rollback <目录>
+                 收尾一次没有走完的部署：把它恢复到运行前
+                 （目录在 /root/slurmate-deploy-<时间>，安装失败时会打印）
+
   --extract [目录]
                  只解压，不改动系统，也不需要 root
                  （默认 ./slurmate-site-${VERSION}）
@@ -95,8 +103,11 @@ slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
   --help         这一屏
 
 它只做两件事：把包体解压到临时目录，把动词转给包内的
-cluster/install-base.sh。五个动词的实现只有那一份：预检、快照、
+cluster/install-base.sh。五个部署动词的实现只有那一份：预检、快照、
 非干扰比对、卸载的逐项归属校验，都在它里面。
+
+安装、升级、修复、卸载都是一次事务：中途失败自动恢复到运行前，成功后
+不保留旧副本。被 kill -9 或断电打断的现场，下一次会先自动收尾。
 
 不带动词安装时，它按顺序走三步，不需要谁去记顺序：
   第一步 检查：环境与前置条件（tools/check-cluster.sh）
@@ -153,6 +164,13 @@ while [[ $# -gt 0 ]]; do
         --extract)
             MODE="extract"; shift
             if [[ $# -gt 0 && "$1" != -* ]]; then EXTRACT_TO="$1"; shift; fi ;;
+        --rollback)
+            MODE="rollback"; shift
+            if [[ $# -gt 0 && "$1" != -* ]]; then ROLLBACK_DIR="$1"; shift; fi
+            if [[ -z "$ROLLBACK_DIR" ]]; then
+                echo "--rollback 后面要给一个事务目录（/root/slurmate-deploy-…）。" >&2
+                exit 2
+            fi ;;
         -h|--help)   usage; exit 0 ;;
         --version)   echo "${VERSION}"; exit 0 ;;
         # 其余开关原样转给 install-base.sh —— 它那一层认得哪些、不认得哪些，
@@ -236,7 +254,11 @@ fi
 echo
 
 ARGS=()
-[[ "$MODE" == "install" ]] || ARGS+=("--${MODE}")
+if [[ "$MODE" == "rollback" ]]; then
+    ARGS+=("--rollback" "$ROLLBACK_DIR")
+else
+    [[ "$MODE" == "install" ]] || ARGS+=("--${MODE}")
+fi
 [[ ${#FORWARD[@]} -gt 0 ]] && ARGS+=("${FORWARD[@]}")
 
 # SLURMATE_ORIG_SCRIPT 是给 install-base.sh 的：它打印的"卸载/回滚"提示要指向

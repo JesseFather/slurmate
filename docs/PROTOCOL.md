@@ -666,6 +666,33 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 
 窗口不续期，到期自动恢复；重启失败也不会把站点永久锁在排空态。
 
+### `stop_all`
+
+请求：`{"op":"stop_all"}`
+
+成功 data：
+
+```json
+{"stopped": [{"session_id": "…", "job_id": 123}],
+ "expired": ["…"], "cancel_failed": [],
+ "remaining": 0, "draining": {"until": 1757...}}
+```
+
+只有 root 能发（uid ≠ 0 → `4 forbidden`）。这是 `slurmate service stop`
+的第一步：打开排空窗口，把本站处于占用状态的全部会话交给释放流程
+（`scancel` + `releasing`；没有作业的 `reserved` 直接落 `expired`）。
+恢复态行（`trust='recovered'`）也取消：“永不自动 scancel”防的是自动流程，
+不是管理员显式关机。
+
+`stopped` 是已发出取消的，`cancel_failed` 是这一次没发成的；补发的重试由
+`phase_release` 负责。`remaining` 是应答那一刻仍占着位置的条数（含正在释放
+的）。
+
+CLI 在它归零之后才停服务：claims 行若还停在 ACL 状态，下一次启动的
+`reconcile()` 会把规则补回来。
+
+用户自己的 Slurm 作业不在其中：这里只取消 claims.db 里本站的 `job_id`。
+
 ### `whoami`
 
 请求：`{"op":"whoami"}`

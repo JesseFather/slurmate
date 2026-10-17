@@ -240,8 +240,17 @@ def main():
                   "未知参数" not in txt)
 
         h = run(["bash", out, "--help"]).stdout
-        for v in verbs + ["--extract", "--dry-run", "--purge-state"]:
+        for v in verbs + ["--extract", "--dry-run", "--purge-state",
+                          "--rollback"]:
             check("`--help` 里写着 %s" % v, v in h)
+
+        # 崩溃收尾不是部署动词：非 root 时同样拦住，并且 sudo 命令带着目录。
+        r = run(["bash", out, "--rollback",
+                 "/root/slurmate-deploy-20260101-000000"])
+        txt = r.stdout + r.stderr
+        check("`.run --rollback <目录>`：非 root 时拦住，sudo 命令指向这一份包",
+              r.returncode != 0 and ("sudo bash %s" % out) in txt
+              and "未知参数" not in txt, txt.strip()[-200:])
 
         # 转发：桩安装器 + 桩 `id`（于是不需要 root，也不会碰系统）
         print("\n── 3b. 转发（桩安装器 + 桩 id）──")
@@ -287,7 +296,9 @@ def main():
                  (["--uninstall", "--purge-state"],
                   "STUB-ARGS: --uninstall --purge-state"),
                  (["--repair", "--dry-run"], "STUB-ARGS: --repair --dry-run"),
-                 (["--check"], "STUB-ARGS: --check")]
+                 (["--check"], "STUB-ARGS: --check"),
+                 (["--rollback", "/root/slurmate-deploy-20260101-000000"],
+                  "STUB-ARGS: --rollback /root/slurmate-deploy-20260101-000000")]
         for args, want_line in cases:
             r = run(["bash", stub_out] + args, env=env)
             txt = r.stdout + r.stderr

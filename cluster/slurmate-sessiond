@@ -9603,6 +9603,8 @@ class Sessiond(object):
                 return self.op_daemon(uid, gid)
             if op == "drain":
                 return self.op_drain(uid)
+            if op == "stop_all":
+                return self.op_stop_all(uid)
             if op == "whoami":
                 return self.op_whoami(uid, gid)
             if op == "partitions":
@@ -9698,6 +9700,46 @@ class Sessiond(object):
                    until=int(self.drain_until))
         return self._ok({"draining": {"until": int(self.drain_until)},
                          "seconds": DRAIN_SECONDS})
+
+    def op_stop_all(self, uid):
+        """关机式停止：把本站全部会话交给释放流程。
+
+        与 `goodbye` 共用 `_release_quietly`：取消、审计、进入释放流程
+        只有一份实现。这里只发 `scancel` 与 `begin_release`，拆除由
+        `phase_release` 在后续 tick 里确认作业消失后再做；不能跳过那道闸，
+        跳过等于替一条还在跑的作业说"已经释放"。
+
+        恢复态行（`trust='recovered'`）也取消：现有"永不自动 scancel"
+        防的是自动流程，而这是管理员显式要求关机。
+        """
+        if uid != 0:
+            return self._err(4, "forbidden",
+                             "只有 root 能停掉全部会话（它会影响别人）。")
+        self.drain_until = time.time() + DRAIN_SECONDS
+        self.audit("daemon_stop_all", seconds=DRAIN_SECONDS,
+                   until=int(self.drain_until))
+        stopped, expired, failed = [], [], []
+        for s in self.store.by_state(OCCUPYING_STATES):
+            sid = s["session_id"]
+            if s["state"] == ST_RELEASING:
+                # 已经在释放流程里：不再 scancel，等 phase_release 收尾。
+                continue
+            if not s["job_id"]:
+                # reserved：没有作业可取消，走同一个释放入口落到 expired。
+                self.begin_release(s, "service_stop", final_state=ST_EXPIRED)
+                expired.append(sid)
+                continue
+            if self._release_quietly(s, "service_stop"):
+                stopped.append({"session_id": sid, "job_id": s["job_id"]})
+            else:
+                failed.append({"session_id": sid, "job_id": s["job_id"]})
+        return self._ok({
+            "stopped": stopped,
+            "expired": expired,
+            "cancel_failed": failed,
+            "remaining": len(self.store.by_state(OCCUPYING_STATES)),
+            "draining": {"until": int(self.drain_until)},
+        })
 
     # ── RPC：只读操作 ───────────────────────────────────────────────────────
     def op_whoami(self, uid, gid):
@@ -10524,6 +10566,24 @@ class Sessiond(object):
             cleared.append(sid)
         return self._ok({"cleared": cleared})
 
+    def _release_quietly(self, s, reason):
+        """对一条会话发 `scancel` 并交给 `phase_release`。返回 scancel 是否成功。
+
+        `goodbye` 与 `stop_all` 共用这一份：两条路的区别只在"谁发起"，
+        取消、审计、进入释放流程的判据一个字都不该各写一遍。
+        """
+        sid = s["session_id"]
+        ok = True
+        if s["job_id"] and not self.slurm.cancel(s["job_id"], reason):
+            # 单独一条审计：`goodbye` 那条只说明"用户要结束"，
+            #   而这一条说明"这一次没做成"，两件事，分开记。
+            self.audit("cancel_failed", session=sid, uid=s["uid"],
+                       job=s["job_id"], reason=reason)
+            ok = False
+        self.audit("goodbye", session=sid, uid=s["uid"], job=s["job_id"])
+        self.begin_release(s, reason)
+        return ok
+
     def op_goodbye(self, uid, req):
         """显式结束一条会话：发 `scancel`，然后交给 phase_release 去确认。
 
@@ -10548,18 +10608,11 @@ class Sessiond(object):
         if s["state"] in TERMINAL_STATES:
             return self._ok({"state": s["state"]})
         data = {"state": ST_RELEASING}
-        if s["job_id"]:
-            if not self.slurm.cancel(s["job_id"], "goodbye"):
-                # 单独一条审计：`goodbye` 那条只说明"用户要结束"，
-                #   而这一条说明"这一次没做成"，两件事，分开记。
-                self.audit("cancel_failed", session=sid, uid=uid,
-                           job=s["job_id"], reason="goodbye")
-                data["warning"] = (
-                    "scancel 这一次没有成功（控制节点拒绝了它，或者暂时联系不上）。"
-                    "会话已经进入释放流程，守护进程会继续重试；在作业被确认消失"
-                    "之前，它不会被标成已释放。")
-        self.audit("goodbye", session=sid, uid=uid, job=s["job_id"])
-        self.begin_release(s, "goodbye")
+        if not self._release_quietly(s, "goodbye"):
+            data["warning"] = (
+                "scancel 这一次没有成功（控制节点拒绝了它，或者暂时联系不上）。"
+                "会话已经进入释放流程，守护进程会继续重试；在作业被确认消失"
+                "之前，它不会被标成已释放。")
         return self._ok(data)
 
     def fit_gres(self, g, partition):

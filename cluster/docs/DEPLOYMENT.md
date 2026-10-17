@@ -382,9 +382,11 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
 
 `install-base.sh` 在配置不存在时安装 `slurmate.conf.example`
 （`cluster/install-base.sh`）。配置已经存在时，它只对键、不动取值：这一版
-不认的键删掉（旧的那一份在 `/root/slurmate-backup-<时间>/` 里，安装输出会
-原样列出删掉了哪几行），这一版新加、而文件里整节都没有的补到末尾（写成注释，
-缺省不变）。整份覆盖会把站点的调优悄悄抹掉，而故障要等下次重启守护进程才出现。
+不认的键删掉（安装输出会原样列出删掉了哪几行；这次部署一旦失败，整份配置
+自动回到改动前），这一版新加、而文件里整节都没有的补到末尾（写成注释，
+缺省不变）。
+
+整份覆盖会把站点的调优悄悄抹掉，而故障要等下次重启守护进程才出现。
 
 所以推荐两种顺序之一：
 
@@ -455,7 +457,29 @@ sudo bash slurmate-site-<版本>.run
 并要求项数不低于一个下限（`COMPARATOR_MIN_TESTS = 23`）—— 少了就拒绝部署，
 防的是「测试被删减但报告更绿」（`cluster/install-base.sh`）。
 
-任何一项 FAIL 都会让脚本以非零码退出，并提示回滚命令（`cluster/install-base.sh`）。
+任何一项 FAIL 都会让这次部署回滚，然后以非零码退出（`cluster/install-base.sh`）。
+
+### 失败与回滚
+
+装、升级、修复、卸载都是一次事务。任何一步失败（自检、重启、非干扰验证、
+收尾对账），脚本按撤销日志把机器恢复到这次部署之前：
+
+- 放回被覆盖的文件与站点配置，删掉这次新建的文件与目录；
+- 取消这次加上的开机自启；
+- 首次安装失败时删掉 nft 表与这次新建的状态/日志目录；
+- 升级失败时状态数据与日志不回退，只恢复基座并让原来的守护进程重新运行。
+
+成功时不保留旧文件副本：工作目录与被覆盖的旧文件一起删除。要留退路，请在
+升级之前自己留一份包与配置。
+
+脚本被 kill -9 或机器断电时，下一次安装会先自动收尾那份没有走完的现场；
+也可以手工执行：
+
+```bash
+sudo bash slurmate-site-<版本>.run --rollback /root/slurmate-deploy-<时间>
+```
+
+`--check`/`--doctor` 只报告这种现场，不动盘。
 
 ### 步骤 5：验证
 
@@ -572,10 +596,15 @@ sudo bash slurmate-site-<版本>.run --doctor
 日常的启停不必手写 `systemctl`（详见 `cluster/README.md` 那张表）：
 
 ```bash
-sudo slurmate service restart     # 自检 → 排空 → 重启 → 等就绪 → 核对配置
-sudo slurmate service reload      # 热重载，并等守护进程报出接受还是拒绝
+sudo slurmate service stop        # 关机式：取消本站全部会话 → 停服务 → 删表
+sudo slurmate service restart     # 自检 → 排空 → 对齐派生物 → 重启 → 等就绪
+sudo slurmate service reload      # 热重载（含模板与作业脚本），等它报出结果
 sudo slurmate service status      # 看它现在是什么状态；不需要 root
 ```
+
+`stop` 与 `restart` 的区别要记住：`restart` 只换守护进程，作业与会话不动；
+`stop` 会先取消本站提交的 Slurm 作业（用户自己的作业不动），再删 nft 表。
+`start` 之后表会重建，但被停掉的会话不会回来。
 
 其余长期事项：
 

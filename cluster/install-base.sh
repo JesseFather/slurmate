@@ -48,17 +48,18 @@
 #  2. 绝不执行 `nft flush ruleset`，绝不 reload/restart nftables.service
 #     —— 那会清掉整台机器上所有表的规则集，包括别人的。
 #  3. 部署前后各取一次 nftables 规则集【结构化】快照，剥掉本系统新增的
-#     inet slurmate 表之后必须逐条完全一致；否则判定失败并提示回滚。
+#     inet slurmate 表之后必须逐条完全一致；否则判定失败并自动回滚。
 #     比对器（nft-compare.py）有独立自测，防的是"比对了但其实什么都没比"。
 #  4. 安装任何文件前先检查目标是否已存在且不属于本系统 —— 是则中止，
 #     绝不覆盖别人的文件。卸载路径同样逐项校验归属。
 #  5. 幂等：可反复运行。卸载只删自己的东西。
 #  6. 站点配置只对键、不动取值：升级时装上去的配置是"管理员的取值 + 这一版的
 #     键集合"。不认的键删掉（否则守护进程拒绝启动），新加的节补到末尾；改之前
-#     的那一份永远在备份目录里。见 `conf-merge.py` 与〈阶段 0〉那一段。
+#     的那一份失败时自动放回，成功后不保留副本。见 `conf-merge.py` 与
+#     〈阶段 0〉那一段。
 #
-#  用法（五个动词。单文件自解压包 `slurmate-site-<版本>.run` 把这五个原样
-#  转发到本脚本 —— 实现只有这一份）：
+#  用法（五个部署动词。单文件自解压包 `slurmate-site-<版本>.run` 把这五个
+#  原样转发到本脚本 —— 实现只有这一份）：
 #    sudo bash install-base.sh                     # 安装；装过基座时自动走修复（升级）
 #    sudo bash install-base.sh --check             # 体检：装之前，不做任何改动
 #    sudo bash install-base.sh --doctor            # 诊断：装之后，不做任何改动
@@ -68,6 +69,12 @@
 #    sudo bash install-base.sh --no-restart        # 装完不重启服务（演练/脚本用）
 #    sudo bash install-base.sh --uninstall --purge-state
 #    sudo bash install-base.sh --require-baseline  # 前置基线缺失即中止（见下）
+#    sudo bash install-base.sh --rollback <目录>   # 收尾一次没有走完的部署
+#
+#  装、升、修、卸都是一次事务：中途任何一个失败都按撤销日志恢复到运行前
+#  （文件、配置、单元、开机自启、服务状态、nft 表），成功则连日志带旧副本
+#  一起删掉，/root 下不留现场。被 kill -9 或断电打断的现场，下一次会先自动
+#  收尾；也可以手工跑上面那条 --rollback。
 #
 #  一次安装按顺序做三件事，不需要谁去记顺序：
 #    1. 检查：〈阶段 0〉的预检与〈阶段 1〉的快照（要装之前先证明这台机器可以装）；
@@ -138,6 +145,7 @@ REQUIRE_BASELINE=0
 DRYRUN=0
 PURGE=0
 NORESTART=0
+ROLLBACK_FROM=""
 
 while [[ $# -gt 0 ]]; do
     arg="$1"; shift
@@ -153,6 +161,16 @@ while [[ $# -gt 0 ]]; do
         # 免得旧脚本/旧笔记里的命令直接报错。
         --force)             : ;;
         --purge-state)       PURGE=1 ;;
+        --rollback)
+            MODE="rollback"
+            ROLLBACK_FROM="${1:-}"
+            if [[ -z "$ROLLBACK_FROM" ]]; then
+                echo "--rollback 后面要给一个事务目录（/root/slurmate-deploy-…）。" >&2
+                exit 2
+            fi
+            shift ;;
+        # 内部自测：在临时目录里真跑一遍撤销日志引擎。不需要 root。
+        --txn-selftest)      MODE="txn-selftest" ;;
         # 插件不再经过本脚本。说清楚它搬去哪儿，而不是
         #   只说一句"未知参数" —— 那会让人以为是自己打错了。
         #
@@ -189,16 +207,582 @@ info()  { echo "  [INFO] $*"; }
 ok()    { PASS_N=$((PASS_N+1)); echo "  [ OK ] $*"; }
 warn()  { WARN_N=$((WARN_N+1)); echo "  [WARN] $*"; }
 bad()   { FAIL_N=$((FAIL_N+1)); echo "  [FAIL] $*"; }
-die()   { echo; echo "  [中止] $*" >&2; echo >&2; exit 1; }
+die()   {
+    echo; echo "  [中止] $*" >&2
+    if [[ "${TXN_ACTIVE:-0}" -eq 1 && "${TXN_FINISHED:-0}" -eq 0 \
+          && "${TXN_ROLLING:-0}" -eq 0 ]]; then
+        txn_rollback "${TXN_DIR}" "失败中止"
+    fi
+    echo >&2
+    exit 1
+}
 run()   { if [[ "$DRYRUN" -eq 1 ]]; then echo "  [演练] $*"; else "$@"; fi; }
+
+# ─── 事务：撤销日志 ──────────────────────────────────────────────────────────
+# 装、升、修、卸都是一次事务。动目标之前先把"怎么撤回"写进日志；失败就按
+#   日志倒着恢复。成功写 committed，然后连日志带旧副本一起删掉。
+# 日志放在 /root，不放状态目录：卸载 --purge-state 会连状态目录一起移走。
+TXN_DIR=""
+TXN_LOG=""
+TXN_ACTIVE=0
+TXN_FINISHED=0
+TXN_ROLLING=0
+TXN_SELFTEST=0
+TXN_N=0
+TXN_RESID=()
+
+txn_note() {
+    local line="$1" a
+    shift
+    for a in "$@"; do line+=$'\t'"$a"; done
+    printf '%s\n' "$line" >> "$TXN_LOG" || return 1
+    sync 2>/dev/null || true
+}
+
+txn_begin() {
+    local kind="$1" dir="${2:-}" d active enabled nft_here=0
+    [[ -n "$dir" ]] || dir="$WORK_DIR"
+    TXN_DIR="$dir"
+    mkdir -p "$TXN_DIR" || return 1
+    chmod 700 "$TXN_DIR" || return 1
+    TXN_LOG="${TXN_DIR}/undo.log"
+    : >| "$TXN_LOG" || return 1
+    TXN_ACTIVE=1
+    TXN_FINISHED=0
+    TXN_RESID=()
+    txn_note "slurmate-txn" "1" || return 1
+    txn_note "meta" "kind" "$kind"
+    txn_note "meta" "service" "$SERVICE"
+    txn_note "meta" "nft_table" "inet slurmate"
+    active="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
+    txn_note "meta" "service_was_active" "$active"
+    txn_note "meta" "service_was_enabled" "$enabled"
+    if "$NFT" list table inet slurmate >/dev/null 2>&1; then
+        nft_here=1
+        if "$NFT" list table inet slurmate > "${TXN_DIR}/nft-table.before" 2>/dev/null; then
+            txn_note "meta" "nft_snapshot" "${TXN_DIR}/nft-table.before"
+        fi
+    fi
+    txn_note "meta" "nft_existed" "$nft_here"
+    for d in "$LOG_DIR" "$RUN_DIR"; do
+        [[ -e "$d" ]] && txn_note "meta" "dir_existed" "$d"
+    done
+    return 0
+}
+
+txn_backup() {
+    local p="$1" saved
+    if [[ -e "$p" || -L "$p" ]]; then
+        TXN_N=$((TXN_N + 1))
+        saved="${TXN_DIR}/old/${TXN_N}-$(basename "$p")"
+        mkdir -p "${TXN_DIR}/old" || return 1
+        cp -a "$p" "$saved" || return 1
+        txn_note "restore" "$p" "$saved"
+    else
+        txn_note "remove" "$p"
+    fi
+}
+
+txn_save() {
+    local p="$1" saved
+    TXN_N=$((TXN_N + 1))
+    saved="${TXN_DIR}/saved/${TXN_N}-$(basename "$p")"
+    mkdir -p "${TXN_DIR}/saved" || return 1
+    cp -a "$p" "$saved" || return 1
+    txn_note "saved" "$p" "$saved"
+}
+
+txn_save_dir() {
+    local p="$1" saved
+    [[ -d "$p" ]] || return 0
+    TXN_N=$((TXN_N + 1))
+    saved="${TXN_DIR}/trees/${TXN_N}-$(basename "$p")"
+    mkdir -p "${TXN_DIR}/trees" || return 1
+    cp -a "$p" "$saved" || return 1
+    txn_note "saved_dir" "$p" "$saved"
+}
+
+txn_move() {
+    local src="$1" dst="$2"
+    txn_note "moved" "$src" "$dst" || return 1
+    mv "$src" "$dst"
+}
+
+txn_mkdir_p() {
+    local p="$1" own="${2:-0}" d="$1" i
+    local -a missing=()
+    while [[ ! -d "$d" ]]; do
+        missing+=("$d")
+        [[ "$d" == "/" || "$d" == "." ]] && break
+        d="$(dirname "$d")"
+    done
+    for ((i = ${#missing[@]} - 1; i >= 0; i--)); do
+        d="${missing[$i]}"
+        local own_here=0
+        [[ "$d" == "$p" ]] && own_here="$own"
+        txn_note "dir" "$d" "$own_here" || return 1
+        mkdir "$d" || return 1
+    done
+}
+
+txn_mode() {
+    local p="$1" mode
+    [[ -e "$p" ]] || return 0
+    mode="$(stat -c '%a' "$p" 2>/dev/null || true)"
+    [[ -n "$mode" ]] || return 0
+    txn_note "mode" "$p" "$mode"
+}
+
+txn_rmdir() {
+    local p="$1" mode
+    [[ -d "$p" ]] || return 0
+    mode="$(stat -c '%a' "$p" 2>/dev/null || echo 755)"
+    txn_note "rmdir" "$p" "$mode" || return 1
+    rmdir "$p" 2>/dev/null
+}
+
+txn_purge_dir() {
+    local d="$1" dst
+    [[ -d "$d" ]] || return 0
+    dst="$(dirname "$d")/.$(basename "$d").uninstall-${TS}"
+    txn_move "$d" "$dst"
+}
+
+txn_resid() {
+    TXN_RESID+=("$1")
+    echo "  [FAIL] $1"
+}
+
+txn_commit() {
+    local line kind a b d
+    [[ "$TXN_ACTIVE" -eq 1 ]] || return 0
+    txn_note "committed"
+    sync 2>/dev/null || true
+    while IFS=$'\t' read -r kind a b; do
+        if [[ "$kind" == "moved" && -n "$b" ]]; then
+            rm -rf "$b"
+        fi
+    done < "$TXN_LOG"
+    TXN_ACTIVE=0
+    TXN_FINISHED=1
+    if ! rm -rf "$TXN_DIR"; then
+        warn "事务目录没有删掉：${TXN_DIR}（部署成功，请手动删除）"
+        return 0
+    fi
+    for d in /root/slurmate-backup-*; do
+        [[ -d "$d" ]] || continue
+        rm -rf "$d" && info "已删除旧版留下的备份目录：$d"
+    done
+    return 0
+}
+
+txn_rollback() {
+    local dir="${1:-$TXN_DIR}" reason="${2:-}" line kind a b c
+    [[ -n "$dir" && -f "${dir}/undo.log" ]] || return 0
+    TXN_ROLLING=1
+    trap '' INT TERM
+    echo
+    echo "════════════════════════════════════════════════════════════"
+    echo "  回滚：把这次部署撤回"
+    echo "════════════════════════════════════════════════════════════"
+    [[ -n "$reason" ]] && info "原因：${reason}"
+
+    local -a lines=()
+    mapfile -t lines < "${dir}/undo.log" 2>/dev/null || true
+    local n=${#lines[@]}
+    if (( n == 0 )); then
+        rm -rf "$dir"
+        TXN_ACTIVE=0; TXN_FINISHED=1; TXN_ROLLING=0
+        trap '_on_signal INT 130' INT
+        trap '_on_signal TERM 143' TERM
+        return 0
+    fi
+    IFS=$'\t' read -r kind a _ <<< "${lines[0]}"
+    if [[ "$kind" != "slurmate-txn" || "$a" != "1" ]]; then
+        echo "  [FAIL] 撤销日志的格式不认识（第一条不是 slurmate-txn 1）。"
+        echo "  现场保留在 ${dir}，请人工处理。"
+        TXN_ACTIVE=0; TXN_FINISHED=1; TXN_ROLLING=0
+        return 1
+    fi
+
+    local kind_of="" svc="$SERVICE" nft_tbl="inet slurmate"
+    local nft_existed="" nft_snap="" was_active="" was_enabled=""
+    local service_touched=0 enabled_touched=0 bad_middle=0
+    local -a ops=() opa=() opb=() pre_dirs=()
+    local i
+    for ((i = 1; i < n; i++)); do
+        line="${lines[$i]}"
+        IFS=$'\t' read -r kind a b c <<< "$line"
+        case "$kind" in
+            meta)
+                case "$a" in
+                    kind) kind_of="$b" ;;
+                    service) svc="$b" ;;
+                    nft_table) nft_tbl="$b" ;;
+                    nft_existed) nft_existed="$b" ;;
+                    nft_snapshot) nft_snap="$b" ;;
+                    service_was_active) was_active="$b" ;;
+                    service_was_enabled) was_enabled="$b" ;;
+                    service_touched) service_touched="$b" ;;
+                    enabled_touched) enabled_touched="$b" ;;
+                    dir_existed) pre_dirs+=("$b") ;;
+                esac ;;
+            committed) : ;;
+            restore|remove|dir|mode|saved|saved_dir|rmdir|moved)
+                ops+=("$kind"); opa+=("$a"); opb+=("$b") ;;
+            "")
+                : ;;
+            *)
+                if (( i == n - 1 )); then
+                    info "日志末行不完整（多半是断电截断），跳过。"
+                else
+                    bad_middle=1
+                    echo "  [FAIL] 日志第 $((i + 1)) 行读不动：${line}"
+                fi ;;
+        esac
+    done
+    [[ -n "$kind_of" ]] || kind_of="install"
+
+    if [[ "$TXN_SELFTEST" -eq 0 ]]; then
+        # 1. 停服务：旧进程必须先走，否则下一个 tick 会把刚删的规则/目录补回来。
+        if [[ "$service_touched" == "1" ]]; then
+            echo "  [回滚] 停止服务"
+            systemctl stop "$svc" >/dev/null 2>&1 || true
+            local deadline=$((SECONDS + 20))
+            while systemctl is-active --quiet "$svc" 2>/dev/null; do
+                if (( SECONDS >= deadline )); then
+                    txn_resid "服务停不下来（$svc）"
+                    echo "  现场保留在 ${dir}；先手动停掉服务再重跑 --rollback。"
+                    TXN_ACTIVE=0; TXN_FINISHED=1; TXN_ROLLING=0
+                    trap '_on_signal INT 130' INT
+                    trap '_on_signal TERM 143' TERM
+                    return 1
+                fi
+                sleep 0.5
+            done
+            systemctl reset-failed "$svc" >/dev/null 2>&1 || true
+        fi
+        # 2. 取消本次加上的开机自启。
+        if [[ "$enabled_touched" == "1" ]]; then
+            case "$was_enabled" in
+                enabled|enabled-runtime|static|indirect) ;;
+                *) systemctl disable "$svc" >/dev/null 2>&1 || true ;;
+            esac
+        fi
+        # 3. nft：原先有表就回放快照，原先没有就删掉本次新建的。
+        if [[ "$nft_existed" == "1" && -n "$nft_snap" && -f "$nft_snap" ]]; then
+            "$NFT" delete table $nft_tbl >/dev/null 2>&1 || true
+            if "$NFT" -f "$nft_snap" >/dev/null 2>&1; then
+                echo "  [回滚] 恢复 nft 表 ${nft_tbl}"
+            else
+                txn_resid "nft 表 ${nft_tbl} 没有恢复"
+            fi
+        elif [[ "$nft_existed" == "0" ]]; then
+            if "$NFT" list table $nft_tbl >/dev/null 2>&1; then
+                if "$NFT" delete table $nft_tbl >/dev/null 2>&1; then
+                    echo "  [回滚] 删除本次新建的 nft 表 ${nft_tbl}"
+                else
+                    txn_resid "nft 表 ${nft_tbl} 没有删掉"
+                fi
+            fi
+        fi
+        # 4. 首次安装时，状态/日志/运行目录是守护进程刚建的：原先不存在的
+        #    一并收掉（升级时它们本来就在，不动）。
+        if [[ "$kind_of" == "install" ]]; then
+            local _d _p _was
+            for _d in "$LOG_DIR" "$RUN_DIR"; do
+                [[ -e "$_d" ]] || continue
+                _was=0
+                for _p in "${pre_dirs[@]}"; do
+                    [[ "$_p" == "$_d" ]] && _was=1
+                done
+                [[ "$_was" -eq 1 ]] && continue
+                if rm -rf "$_d" 2>/dev/null; then
+                    echo "  [回滚] 删除目录 ${_d}"
+                else
+                    txn_resid "目录没有删掉 ${_d}"
+                fi
+            done
+        fi
+    fi
+
+    if [[ "$kind_of" == "uninstall" ]]; then
+        # 卸载侧：先重建被 rmdir 的目录，再放回文件与整棵子树，最后移回状态。
+        for ((i = 0; i < ${#ops[@]}; i++)); do
+            [[ "${ops[$i]}" == "rmdir" ]] || continue
+            local p="${opa[$i]}"
+            if [[ ! -d "$p" ]]; then
+                if mkdir -p "$p" && chmod "${opb[$i]:-755}" "$p"; then
+                    echo "  [回滚] 重建目录 ${p}"
+                else
+                    txn_resid "目录没有重建 ${p}"
+                fi
+            fi
+        done
+        for ((i = ${#ops[@]} - 1; i >= 0; i--)); do
+            case "${ops[$i]}" in
+                saved)
+                    if [[ ! -e "${opb[$i]}" ]]; then
+                        txn_resid "备份不见了：${opb[$i]}"
+                        continue
+                    fi
+                    mkdir -p "$(dirname "${opa[$i]}")" 2>/dev/null || true
+                    if cp -a "${opb[$i]}" "${opa[$i]}" 2>/dev/null \
+                       && cmp -s "${opb[$i]}" "${opa[$i]}"; then
+                        echo "  [回滚] 放回 ${opa[$i]}"
+                    else
+                        txn_resid "没有放回 ${opa[$i]}"
+                    fi ;;
+                saved_dir)
+                    if [[ ! -d "${opb[$i]}" ]]; then
+                        txn_resid "备份不见了：${opb[$i]}"
+                        continue
+                    fi
+                    rm -rf "${opa[$i]}" 2>/dev/null || true
+                    mkdir -p "$(dirname "${opa[$i]}")" 2>/dev/null || true
+                    if cp -a "${opb[$i]}" "${opa[$i]}" 2>/dev/null; then
+                        echo "  [回滚] 放回目录 ${opa[$i]}"
+                    else
+                        txn_resid "没有放回目录 ${opa[$i]}"
+                    fi ;;
+            esac
+        done
+        for ((i = ${#ops[@]} - 1; i >= 0; i--)); do
+            [[ "${ops[$i]}" == "moved" ]] || continue
+            local src="${opa[$i]}" dst="${opb[$i]}"
+            if [[ -e "$src" && ! -e "$dst" ]]; then
+                # 改名还没发生（或失败在 mv 之前）：原位就是原状。
+                continue
+            fi
+            if [[ ! -e "$dst" ]]; then
+                txn_resid "移走的目录不在了：${dst}"
+            elif [[ -e "$src" ]]; then
+                txn_resid "原位置已被占用，未移回 ${src}"
+            elif mv "$dst" "$src" 2>/dev/null; then
+                echo "  [回滚] 移回 ${src}"
+            else
+                txn_resid "没有移回 ${src}"
+            fi
+        done
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        case "$was_enabled" in
+            enabled|enabled-runtime)
+                systemctl enable "$svc" >/dev/null 2>&1 \
+                    && echo "  [回滚] 恢复开机自启" \
+                    || txn_resid "开机自启没有恢复" ;;
+        esac
+    else
+        # 安装侧：文件按日志逆序恢复/删除；目录与权限随后处理。
+        local -a mode_p=() mode_v=()
+        for ((i = ${#ops[@]} - 1; i >= 0; i--)); do
+            case "${ops[$i]}" in
+                restore)
+                    if [[ ! -e "${opb[$i]}" ]]; then
+                        txn_resid "备份不见了：${opb[$i]}"
+                        continue
+                    fi
+                    mkdir -p "$(dirname "${opa[$i]}")" 2>/dev/null || true
+                    if cp -a "${opb[$i]}" "${opa[$i]}" 2>/dev/null \
+                       && cmp -s "${opb[$i]}" "${opa[$i]}"; then
+                        echo "  [回滚] 放回 ${opa[$i]}"
+                    else
+                        txn_resid "没有放回 ${opa[$i]}"
+                    fi ;;
+                remove)
+                    if rm -f "${opa[$i]}" 2>/dev/null; then
+                        echo "  [回滚] 删除 ${opa[$i]}"
+                    else
+                        txn_resid "没有删除 ${opa[$i]}"
+                    fi ;;
+                mode)
+                    mode_p+=("${opa[$i]}"); mode_v+=("${opb[$i]}") ;;
+            esac
+        done
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        for ((i = 0; i < ${#mode_p[@]}; i++)); do
+            [[ -e "${mode_p[$i]}" ]] || continue
+            chmod "${mode_v[$i]}" "${mode_p[$i]}" 2>/dev/null \
+                && echo "  [回滚] 权限改回 ${mode_p[$i]} ${mode_v[$i]}" \
+                || txn_resid "权限没有改回 ${mode_p[$i]}"
+        done
+        for ((i = ${#ops[@]} - 1; i >= 0; i--)); do
+            [[ "${ops[$i]}" == "dir" ]] || continue
+            local p="${opa[$i]}" own="${opb[$i]:-0}"
+            [[ -e "$p" ]] || continue
+            if [[ "$own" == "1" ]]; then
+                rm -rf "$p" 2>/dev/null && echo "  [回滚] 删除目录 ${p}" \
+                    || txn_resid "目录没有删掉 ${p}"
+            elif rmdir "$p" 2>/dev/null; then
+                echo "  [回滚] 删除目录 ${p}"
+            else
+                txn_resid "目录非空，留着 ${p}"
+            fi
+        done
+        # 作业脚本可能已经被失败那次重启按新模板重织过。让插件入口按恢复后的
+        #   旧模板再对齐一次 —— 基座这一侧只调 `plugin sync`，不认识插件内部。
+        if [[ "$TXN_SELFTEST" -eq 0 && -x "$CLI" && -r "$CONF" ]]; then
+            if "$CLI" plugin sync --config="$CONF" >/dev/null 2>&1; then
+                echo "  [回滚] 作业脚本已按旧模板重织"
+            else
+                txn_resid "作业脚本没有重织"
+            fi
+        fi
+    fi
+
+    if [[ "$TXN_SELFTEST" -eq 0 && "$service_touched" == "1" \
+          && "$was_active" == "active" ]]; then
+        echo "  [回滚] 启动原来的服务"
+        if systemctl start "$svc" >/dev/null 2>&1; then
+            local dl=$((SECONDS + 20))
+            while (( SECONDS < dl )); do
+                [[ -S "$SOCKET" ]] && break
+                sleep 0.5
+            done
+            if [[ -S "$SOCKET" ]]; then
+                echo "  [回滚] 服务已回到运行状态"
+            else
+                txn_resid "服务没有回到运行状态"
+                print_journal
+            fi
+        else
+            txn_resid "服务没有启动"
+            print_journal
+        fi
+    fi
+
+    echo
+    if (( ${#TXN_RESID[@]} == 0 && bad_middle == 0 )); then
+        echo "  [ OK ] 已恢复原状：这次部署的改动全部撤回"
+        txn_note "rolled-back" 2>/dev/null || true
+        TXN_ACTIVE=0; TXN_FINISHED=1; TXN_ROLLING=0
+        rm -rf "$dir"
+        trap '_on_signal INT 130' INT
+        trap '_on_signal TERM 143' TERM
+        return 0
+    fi
+    if (( bad_middle != 0 )); then
+        echo "  [FAIL] 日志中间有读不动的行，不能确认全部撤回了。"
+    fi
+    echo "  现场保留在 ${dir}；副本与日志都在里面，处理完再删除它。" >&2
+    TXN_ACTIVE=0; TXN_FINISHED=1; TXN_ROLLING=0
+    trap '_on_signal INT 130' INT
+    trap '_on_signal TERM 143' TERM
+    return 1
+}
+
+_on_signal() {
+    local n="$1" code="$2"
+    echo
+    echo "  [中止] 收到信号 ${n}，这次部署没有走完。" >&2
+    if [[ "$TXN_ACTIVE" -eq 1 && "$TXN_FINISHED" -eq 0 \
+          && "$TXN_ROLLING" -eq 0 ]]; then
+        txn_rollback "$TXN_DIR" "收到信号 ${n}"
+    fi
+    exit "$code"
+}
+trap '_on_signal INT 130' INT
+trap '_on_signal TERM 143' TERM
+
+_on_exit() {
+    _cleanup_conf_merged
+    if [[ "${TXN_ACTIVE:-0}" -eq 1 && "${TXN_FINISHED:-0}" -eq 0 \
+          && "${TXN_ROLLING:-0}" -eq 0 ]]; then
+        txn_rollback "${TXN_DIR}" "脚本提前退出"
+    fi
+}
+
+# 内部自测：在临时目录里真跑一遍引擎。故意不依赖 root / systemd / nft。
+_TXN_TEST_DIR=""
+_txn_selftest() {
+    TXN_SELFTEST=1
+    local td pass=0 total=0 rc=0
+    td="$(mktemp -d "${TMPDIR:-/tmp}/slurmate-txn-test.XXXXXX")" || return 1
+    _TXN_TEST_DIR="$td"
+    trap 'rm -rf "${_TXN_TEST_DIR:-}"' EXIT
+    _t_ok() { total=$((total + 1)); pass=$((pass + 1)); }
+    _t_no() { total=$((total + 1)); echo "  [FAIL] $1"; }
+
+    mkdir -p "${td}/m/etc"
+    printf 'old\n' > "${td}/m/etc/conf"
+    chmod 640 "${td}/m/etc/conf"
+    txn_begin install "${td}/w1" || _t_no "事务开始"
+    txn_backup "${td}/m/etc/conf"
+    printf 'new\n' > "${td}/m/etc/conf"
+    chmod 600 "${td}/m/etc/conf"
+    txn_backup "${td}/m/etc/new"
+    printf 'x\n' > "${td}/m/etc/new"
+    txn_mkdir_p "${td}/m/fresh/sub" 1
+    printf 'y\n' > "${td}/m/fresh/sub/f"
+    txn_mode "${td}/m/etc"
+    chmod 700 "${td}/m/etc"
+    txn_rollback "${td}/w1" "自测" >/dev/null 2>&1
+    [[ "$(cat "${td}/m/etc/conf")" == "old" ]] && _t_ok || _t_no "覆盖后没有恢复内容"
+    [[ "$(stat -c %a "${td}/m/etc/conf")" == "640" ]] && _t_ok || _t_no "覆盖后没有恢复模式"
+    [[ ! -e "${td}/m/etc/new" ]] && _t_ok || _t_no "新增文件没有删掉"
+    [[ ! -e "${td}/m/fresh" ]] && _t_ok || _t_no "新建目录没有删掉"
+    [[ "$(stat -c %a "${td}/m/etc")" == "755" ]] && _t_ok || _t_no "目录模式没有恢复"
+
+    mkdir -p "${td}/u/d1" "${td}/u/d2" "${td}/u/tree/a"
+    printf 'data\n' > "${td}/u/d1/f"
+    printf 't\n' > "${td}/u/tree/a/x"
+    printf 's\n' > "${td}/u/state"
+    txn_begin uninstall "${td}/w2"
+    txn_save "${td}/u/d1/f"
+    rm -f "${td}/u/d1/f"
+    txn_rmdir "${td}/u/d2"
+    txn_save_dir "${td}/u/tree"
+    rm -rf "${td}/u/tree"
+    txn_move "${td}/u/state" "${td}/u/.state.bak"
+    txn_rollback "${td}/w2" "自测" >/dev/null 2>&1
+    [[ -f "${td}/u/d1/f" ]] && _t_ok || _t_no "删掉的文件没有放回"
+    [[ -d "${td}/u/d2" ]] && _t_ok || _t_no "删掉的目录没有重建"
+    [[ -f "${td}/u/tree/a/x" ]] && _t_ok || _t_no "删掉的子树没有放回"
+    [[ -f "${td}/u/state" && ! -e "${td}/u/.state.bak" ]] \
+        && _t_ok || _t_no "移走的目录没有移回"
+
+    mkdir -p "${td}/c"
+    txn_begin install "${td}/w3"
+    txn_backup "${td}/c/f"
+    txn_commit
+    [[ ! -d "${td}/w3" ]] && _t_ok || _t_no "提交后事务目录还在"
+
+    mkdir -p "${td}/bad"
+    printf 'old\n' > "${td}/bad/f"
+    txn_begin install "${td}/w4"
+    txn_backup "${td}/bad/f"
+    printf 'new\n' > "${td}/bad/f"
+    printf 'garbage\n' >> "${td}/w4/undo.log"
+    printf 'remove\t%s\n' "${td}/bad/never" >> "${td}/w4/undo.log"
+    txn_rollback "${td}/w4" "自测" >/dev/null 2>&1
+    rc=$?
+    [[ $rc -ne 0 && -d "${td}/w4" ]] && _t_ok || _t_no "中间坏行没有报残余"
+    [[ "$(cat "${td}/bad/f")" == "old" ]] && _t_ok || _t_no "坏行之前的恢复没有做"
+
+    txn_begin install "${td}/w5"
+    txn_backup "${td}/bad/f"
+    printf 'new\n' > "${td}/bad/f"
+    printf 'partial' >> "${td}/w5/undo.log"
+    txn_rollback "${td}/w5" "自测" >/dev/null 2>&1
+    [[ $? -eq 0 && ! -d "${td}/w5" ]] && _t_ok || _t_no "末行截断没有按跳过处理"
+
+    printf '事务自测：%d/%d 通过\n' "$pass" "$total"
+    [[ "$pass" -eq "$total" ]]
+}
+
+if [[ "$MODE" == "txn-selftest" ]]; then
+    _txn_selftest
+    exit $?
+fi
 
 TS="$(date +%Y%m%d-%H%M%S)"
 # --check 与 --doctor 都是"零改动"模式，快照放临时目录即可，不要在 /root 下攒一堆
-#   目录。--repair 要放 /root：它可能真的装东西，那一次备份是要留着的。
+#   目录。会改系统的模式放 /root：撤销日志与旧副本都在那里，成功即删。
 if [[ "$MODE" == "check" || "$MODE" == "doctor" ]]; then
-    BACKUP_DIR="/tmp/slurmate-${MODE}-${TS}"
+    WORK_DIR="/tmp/slurmate-${MODE}-${TS}"
 else
-    BACKUP_DIR="/root/slurmate-backup-${TS}"
+    # 事务目录：快照、旧副本、撤销日志都在这里。成功即删，失败回滚后也删。
+    WORK_DIR="/root/slurmate-deploy-${TS}"
 fi
 
 # ==============================================================================
@@ -235,93 +819,196 @@ else
     warn "未找到 flock，无法防止并发部署；请自行确认没有另一个实例在运行"
 fi
 
+# ── 源文件清单与可信性 ──────────────────────────────────────────────────────
+# 安装路径用它决定要不要自拷贝；卸载路径用它决定能不能执行同目录的
+#   `conf-merge.py`（那个文件会以 root 跑）。
+SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py conf-merge.py)
+ALL_SRC_FILES=()
+while IFS= read -r f; do
+    [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
+done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
+
+# 判据：每个源文件必须是 root 拥有，且组/其他不可写。
+source_is_trusted() {
+    local f st owner mode
+    for f in "${ALL_SRC_FILES[@]}"; do
+        st="$(stat -c '%U %a' "$f" 2>/dev/null)" || return 1
+        owner="${st%% *}"; mode="${st##* }"
+        [[ "$owner" == "root" ]] || return 1
+        (( (8#${mode} & 8#022) == 0 )) || return 1
+    done
+    return 0
+}
+
+# ── 上一次没有走完的部署：自动收尾 ──────────────────────────────────────────
+# kill -9 或断电不会留下 committed 标记。下一次任何会改系统的动词先把它回滚掉，
+#   再继续；--check/--doctor 是只读的，只报告不动盘。
+_txn_leftovers() {
+    local d
+    for d in /root/slurmate-deploy-*; do
+        [[ -d "$d" ]] || continue
+        [[ -s "$d/undo.log" ]] || continue
+        grep -qx 'committed' "$d/undo.log" 2>/dev/null && continue
+        printf '%s\n' "$d"
+    done
+}
+
+if [[ "$MODE" == "rollback" ]]; then
+    step "回滚：收尾一次没有走完的部署"
+    [[ -d "$ROLLBACK_FROM" ]] || die "没找到事务目录：${ROLLBACK_FROM}"
+    if [[ ! -f "${ROLLBACK_FROM}/undo.log" ]]; then
+        info "这个目录里没有撤销日志，直接删掉现场。"
+        rm -rf "$ROLLBACK_FROM"
+        exit 0
+    fi
+    if grep -qx 'committed' "${ROLLBACK_FROM}/undo.log" 2>/dev/null; then
+        info "这次部署已经提交过，只清理现场。"
+        rm -rf "$ROLLBACK_FROM"
+        exit 0
+    fi
+    txn_rollback "$ROLLBACK_FROM" "管理员收尾"
+    exit $?
+fi
+
+if [[ "$MODE" == "check" || "$MODE" == "doctor" || "$DRYRUN" -eq 1 ]]; then
+    while IFS= read -r _d; do
+        [[ -n "$_d" ]] || continue
+        warn "上一次部署没有走完：${_d}"
+        warn "      收尾：sudo bash ${SCRIPT_PATH} --rollback ${_d}"
+    done < <(_txn_leftovers)
+else
+    for _d in /root/slurmate-deploy-*; do
+        [[ -d "$_d" ]] || continue
+        if [[ ! -s "$_d/undo.log" ]] \
+           || grep -qx 'committed' "$_d/undo.log" 2>/dev/null; then
+            rm -rf "$_d"
+        fi
+    done
+    while IFS= read -r _d; do
+        [[ -n "$_d" ]] || continue
+        info "发现上一次没有走完的部署：${_d}，先回滚它。"
+        if ! txn_rollback "$_d" "上一次部署没有走完"; then
+            die "上一次部署的现场没有恢复干净（见上）。处理完再重试。"
+        fi
+        info "已恢复上一次部署之前的原状。"
+    done < <(_txn_leftovers)
+fi
+
 # ==============================================================================
 #  卸载：放在最前面，且只要求 root
 # ==============================================================================
 #  卸载必须【永远可用】—— 不能因为基线不完整、源文件缺失、配置损坏而拦不住。
-#  出故障时管理员最需要的就是能干净地把它拿掉，所以这里不做任何多余的预检。
+#  出故障时管理员最需要的就是能干净地把它拿掉。
+#  它也是一次事务：删每一样之前先写撤销记录；中途失败按日志恢复。
 if [[ "$MODE" == "uninstall" ]]; then
     step "卸载"
 
+    if [[ "$DRYRUN" -eq 1 ]]; then
+        info "[演练] 卸载会停服务、删表、删文件；本次没有改动任何文件。"
+        exit 0
+    fi
+
+    _conf_ours() {
+        # 站点配置从第一版起就不含产品名，`grep slurmate` 永远不匹配。
+        #   判据用安装前那一个：它问的是"这看起来像不像本站的配置"。
+        local f="$1"
+        [[ -f "${SELF_DIR}/conf-merge.py" \
+           && -f "${SELF_DIR}/slurmate.conf.example" ]] || return 1
+        # 要执行同目录里的脚本，判据与安装前的自拷贝一致。
+        source_is_trusted || return 1
+        "$PY" "${SELF_DIR}/conf-merge.py" --looks-like-config "$f" \
+            --example "${SELF_DIR}/slurmate.conf.example" >/dev/null 2>&1
+    }
+
+    txn_begin uninstall "$WORK_DIR" \
+        || die "无法建立事务目录 ${WORK_DIR}，没有删除任何文件。"
+
     info "停止并禁用服务"
+    txn_note "meta" "service_touched" "1"
+    txn_note "meta" "enabled_touched" "1"
     systemctl disable --now "$SERVICE" 2>/dev/null || true
 
     # 必须确认服务真的停了再删表和文件。否则：
-    #   - 删表后守护进程下一个 tick 就把表重建回来（会打印"已删除"但实际上还在）
-    #   - 删掉二进制后已加载的进程仍在运行、仍在改 nft，而 Restart=always 再起不来
-    # 留下一个"已经卸载但 root 守护进程还在动防火墙"的机器。
+    #   - 删表后守护进程下一个 tick 就把表重建回来
+    #   - 删掉二进制后已加载的进程仍在运行、仍在改 nft
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
-        warn "服务 ${SERVICE} 仍在运行，卸载中止（先手动停掉再试）："
-        warn "      systemctl stop ${SERVICE}"
-        warn "      # 若停不掉，检查：systemctl status ${SERVICE}"
-        exit 1
+        die "服务 ${SERVICE} 仍在运行，卸载中止（先手动停掉再试）：
+     systemctl stop ${SERVICE}"
     fi
     ok "服务已停止"
 
     # 删 nft 表（只删自己那张；表名是本系统独有的，不存在歧义）
-    if command -v nft >/dev/null 2>&1 && nft list table inet slurmate >/dev/null 2>&1; then
-        nft delete table inet slurmate && ok "已删除 nft 表 inet slurmate"
-    else
-        info "nft 表 inet slurmate 不存在，跳过"
+    if command -v nft >/dev/null 2>&1; then
+        if nft list table inet slurmate >/dev/null 2>&1; then
+            nft delete table inet slurmate \
+                || die "删除 nft 表失败（正在回滚）"
+            ok "已删除 nft 表 inet slurmate"
+        else
+            info "nft 表 inet slurmate 不存在，跳过"
+        fi
     fi
 
-    # ── 插件：交给卸载器，本脚本不认识那几处痕迹 ────────────────────────
-    #
-    # 一个插件在站点上留下哪几处痕迹（包 / 它那份配置 / 它那份作业脚本 /
-    #    站点侧那条签名者记录）只有卸载器知道（守护进程的 `uninstall_plugins()`）
-    #    —— 本脚本不再自己认一遍：同一个不变量两份实现会漂开，而漂开的症状是
-    #    "卸载之后站点上还剩一点什么"，没有任何地方会报错。
-    #
-    # 用已装的那份守护进程（`$DAEMON`），不是源码里那份：卸载要在任何
-    #   状态下都做得到（源码目录可能已经没了、配置可能坏了），而装在盘上的那一份
-    #   正是这个站点上"插件是什么"的判据来源。它必须在下面删二进制之前跑。
-    #
-    # 它失败不中止卸载：卸载的第一属性是永远可用（出故障时管理员最需要
-    #   的就是能干净地把它拿掉）。失败时说清"哪几处还在、怎么人工收尾"。
+    # ── 插件：先整棵备份，再交给卸载器 ────────────────────────────────
+    # 卸载器知道一个插件在站点上留下的每一处痕迹；本脚本只负责在它动手前
+    #   把三棵目录整棵留一份，失败时能整棵放回。
+    txn_save_dir "${SHARE_DIR}/plugins" || die "无法备份插件目录（正在回滚）"
+    txn_save_dir "${SHARE_DIR}/jobs" || die "无法备份作业脚本目录（正在回滚）"
+    txn_save_dir "${CONF_DIR}/slurmate.conf.d" \
+        || die "无法备份插件配置目录（正在回滚）"
     if [[ -x "$DAEMON" ]]; then
-        if "$PY" "$DAEMON" --uninstall-plugins --all-plugins --config="$CONF" >/dev/null 2>&1; then
-            ok "已卸掉本站的全部插件（包 / 它们的配置 / 它们的作业脚本 / 钥匙记录）"
+        if "$PY" "$DAEMON" --uninstall-plugins --all-plugins \
+                 --config="$CONF" >/dev/null 2>&1; then
+            ok "已卸掉本站的全部插件（包 / 它们的配置 / 作业脚本 / 钥匙记录）"
         else
-            warn "插件卸载器未能跑完，站点上可能还剩着插件包或它们的配置。"
-            warn "  人工看一眼（这一步在做任何删除之前，所以安全）："
-            warn "      ${DAEMON} --uninstall-plugins --all-plugins --config=${CONF}"
-            warn "  看完再重跑本脚本；直接继续也行，那几份会留在盘上。"
+            die "插件卸载器没有跑完（正在回滚到卸载前）"
         fi
     else
         info "没找到已装的守护进程，跳过插件卸载（本机可能只装了一半）"
     fi
 
     # 删文件前逐项确认"这确实是本系统装的文件"。
-    # 早期版本在这里无条件 rm -f，而脚本又反复提示用 --uninstall 做回滚 ——
-    # 于是在一台从未部署过 Slurmate 的机器上执行它，会删掉同名的他人文件。
-    # 注意：这是 root 的 rm，不设防的代价是别人的东西。
+    # 站点配置单独判：它按设计就不含产品名。
     for f in "$DAEMON" "$CLI" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py" \
              "${SHARE_DIR}/run.sbatch.template"; do
         if [[ ! -e "$f" ]]; then
             continue
         fi
-        if ! grep -qi "slurmate" "$f" 2>/dev/null; then
-            warn "跳过 $f，它存在但内容不含 \"slurmate\"，不像本系统装的文件，不敢删"
+        if [[ "$f" == "$CONF" ]]; then
+            if ! _conf_ours "$f"; then
+                warn "跳过 ${f}：它不像本站的站点配置，不敢删"
+                warn "      如确认要删请人工执行：rm -f '$f'"
+                continue
+            fi
+        elif ! grep -qi "slurmate" "$f" 2>/dev/null; then
+            warn "跳过 ${f}，它存在但内容不含 \"slurmate\"，不像本系统装的文件，不敢删"
             warn "      如确认要删请人工执行：rm -f '$f'"
             continue
         fi
-        rm -f "$f" && ok "已删除 $f"
+        txn_save "$f" || die "无法备份 ${f}（正在回滚）"
+        rm -f "$f" || die "删除 ${f} 失败（正在回滚）"
+        ok "已删除 ${f}"
     done
 
-    # 只在目录为空时才删 —— 里面若有别人放的东西就留着。
-    # `<SHARE_DIR>` 下面那两个子目录（plugins/ 与 jobs/）由卸载器收掉；
-    #   它只在空掉时才 rmdir，所以"里面还有别人的东西"这一格是安全的。
-    rmdir "$SHARE_DIR" "$CONF_DIR" 2>/dev/null || true
+    # 只在目录为空时才删 —— 里面若有别人放的文件就留着。
+    for d in "$SHARE_DIR" "$CONF_DIR"; do
+        if [[ -d "$d" ]] && ! txn_rmdir "$d"; then
+            warn "${d} 非空，留着（里面不全是本系统的文件）"
+        fi
+    done
     rm -f "$SOCKET" 2>/dev/null || true
 
     if [[ "$PURGE" -eq 1 ]]; then
-        warn "按 --purge-state 删除状态与日志：${STATE_DIR} ${LOG_DIR}"
-        rm -rf "$STATE_DIR" "$LOG_DIR"
+        txn_purge_dir "$STATE_DIR" || die "状态目录未能移进回收区（正在回滚）"
+        txn_purge_dir "$LOG_DIR" || die "日志目录未能移进回收区（正在回滚）"
+        info "按 --purge-state 删除状态与日志：${STATE_DIR} ${LOG_DIR}"
     else
         info "状态与日志已保留：${STATE_DIR} ${LOG_DIR}（如需删除加 --purge-state）"
     fi
 
-    systemctl daemon-reload 2>/dev/null || true
+    if ! systemctl daemon-reload 2>/dev/null; then
+        die "systemctl daemon-reload 失败（正在回滚）"
+    fi
+    txn_commit
     echo
     echo "  卸载完成。本系统之外的一切均未受影响，其他 nft 表、其他服务、"
     echo "  sshd 配置与 sudoers 都没有被本脚本改动过。"
@@ -329,41 +1016,10 @@ if [[ "$MODE" == "uninstall" ]]; then
 fi
 
 
-SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py conf-merge.py)
 for f in "${SRC_FILES[@]}"; do
     [[ -f "${SRC_DIR}/${f}" ]] || die "源文件缺失：${SRC_DIR}/${f}（cluster/ 目录是否完整？）"
 done
 ok "源文件齐备（${SRC_DIR}）"
-
-# ── 插件包 ──
-# 所有源文件的【绝对路径】。两处用它：信任检查、以及"拷贝前后哈希一致"。
-#
-# 插件包不在本脚本的名单里：本脚本不装插件，它也无从知道
-#    "哪个目录里放着包"（那由 `slurmate plugin install --from DIR` 说）。
-#    信任门在安装器那一侧逐包判，判据是同一个不变部分
-#    —— "root 拥有 + 组/其他不可写"（`package_input_problem`）。
-#    包也一样：源目录里任何一个文件都能被普通用户改写，他改一行
-#      client/**.js，那行代码就在每个用户的工作站上跑。
-ALL_SRC_FILES=()
-while IFS= read -r f; do
-    [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
-done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
-
-# ── 源文件可信性 ──
-# 本脚本会以 root 身份【安装并执行】这些文件。若它们能被普通用户改写，
-# 等于把 root 权限交出去 —— 那几套正在服务真实用户的生产系统也会一并失守。
-# 判据：每个源文件必须是 root 拥有，且组/其他不可写；目录同理。
-source_is_trusted() {
-    local f st owner mode
-    for f in "${ALL_SRC_FILES[@]}"; do
-        st="$(stat -c '%U %a' "$f" 2>/dev/null)" || return 1
-        owner="${st%% *}"; mode="${st##* }"
-        [[ "$owner" == "root" ]] || return 1
-        # 组/其他可写位（022）必须为空
-        (( (8#${mode} & 8#022) == 0 )) || return 1
-    done
-    return 0
-}
 
 # 源文件的哈希串（只有内容，不含路径 —— 拷贝到 root 专属目录之后路径会变，
 # 而要比的是内容有没有变）。顺序由同一个列表保证，所以两边可比。
@@ -502,7 +1158,7 @@ CONF_MERGE_NOTE=""
 # 装上去要动的只有键：取值一个不改。这一格只回答"配置文件会不会被写一次"。
 CONF_DIFF=0
 _cleanup_conf_merged() { [[ -n "$CONF_MERGED" ]] && rm -f "$CONF_MERGED"; }
-trap '_cleanup_conf_merged' EXIT
+trap '_on_exit' EXIT
 if [[ -r "$CONF" ]]; then
     SRC_CONF="$CONF"
     if [[ "$MODE" != "doctor" ]]; then
@@ -700,7 +1356,7 @@ else
     ok "可选基线完整"
 fi
 
-info "备份目录：${BACKUP_DIR}"
+info "本次工作目录：${WORK_DIR}"
 
 # ==============================================================================
 #  对账：诊断与修复共用的一份判据
@@ -1009,12 +1665,22 @@ if [[ "$MODE" == "repair" ]]; then
         info "（这一份包里的版本与装着的是同一个版本。要重装一遍：去掉 --repair。）"
         # 对账干净也重启一次：这是这一版的规矩（修复 = 留一个干净的环境，
         #   顺手清掉运行期残留），而不是"既然没改文件就什么都不做"。
-        if [[ "$NORESTART" -eq 1 ]]; then
+        if [[ "$DRYRUN" -eq 1 ]]; then
+            info "[演练] 会重启一次服务；本次没有动它。"
+        elif [[ "$NORESTART" -eq 1 ]]; then
             info "按 --no-restart 跳过重启。"
-        elif SLURMATE_LOCK_HELD=1 "$CLI" service restart --config="$CONF" --quiet; then
-            ok "服务已重启（--repair 结束时的规矩；--no-restart 可跳过）"
         else
-            die "服务重启失败（原因见上）。文件没有改动；排查后重跑 --repair。"
+            # 这次重启也是事务：失败就把服务状态放回去（起来的那一个）。
+            txn_begin install "$WORK_DIR" \
+                || die "无法建立事务目录 ${WORK_DIR}，没有动服务。"
+            txn_note "meta" "service_touched" "1"
+            if SLURMATE_LOCK_HELD=1 "$CLI" service restart \
+                    --config="$CONF" --quiet; then
+                ok "服务已重启（--repair 结束时的规矩；--no-restart 可跳过）"
+                txn_commit
+            else
+                die "服务重启失败（原因见上）。这次修复将回滚，旧守护进程会被重新拉起。"
+            fi
         fi
         exit 0
     fi
@@ -1028,8 +1694,8 @@ fi
 step "阶段 1／6  快照（用于部署后的非干扰比对）"
 # ==============================================================================
 
-mkdir -p "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
+mkdir -p "$WORK_DIR"
+chmod 700 "$WORK_DIR"
 
 # nftables 规则集：结构化快照
 snapshot_ruleset() {
@@ -1039,8 +1705,8 @@ snapshot_ruleset() {
     fi
     "$NFT" list ruleset > "$out" 2>/dev/null || true
 }
-snapshot_ruleset "${BACKUP_DIR}/nft-before.json"
-if [[ -s "${BACKUP_DIR}/nft-before.json" ]]; then
+snapshot_ruleset "${WORK_DIR}/nft-before.json"
+if [[ -s "${WORK_DIR}/nft-before.json" ]]; then
     ok "已保存 nftables 规则集快照"
 else
     warn "无法保存 nftables 规则集快照，非干扰比对将降级"
@@ -1088,12 +1754,12 @@ hash_of() {
 }
 for f in "${FOREIGN_FILES[@]}"; do
     printf '%s  %s\n' "$(hash_of "$f")" "$f"
-done > "${BACKUP_DIR}/hashes-before.txt"
-ok "已保存外部文件哈希（$(wc -l < "${BACKUP_DIR}/hashes-before.txt") 项）"
+done > "${WORK_DIR}/hashes-before.txt"
+ok "已保存外部文件哈希（$(wc -l < "${WORK_DIR}/hashes-before.txt") 项）"
 
 # 锁目录内容
-ls -A /tmp/codeserver-ports 2>/dev/null | sort > "${BACKUP_DIR}/locks-before.txt" || : > "${BACKUP_DIR}/locks-before.txt"
-ok "已保存锁目录清单（$(wc -l < "${BACKUP_DIR}/locks-before.txt") 项）"
+ls -A /tmp/codeserver-ports 2>/dev/null | sort > "${WORK_DIR}/locks-before.txt" || : > "${WORK_DIR}/locks-before.txt"
+ok "已保存锁目录清单（$(wc -l < "${WORK_DIR}/locks-before.txt") 项）"
 
 # 需要确认"部署后仍在运行"的邻居服务名单。
 # 这些是本系统最初部署环境里的其余端口管理服务 —— 在别的集群上它们通常
@@ -1106,7 +1772,7 @@ NEIGHBOR_SERVICES=(port-daemon port-query codeserver-port-cleanup)
     for s in "${NEIGHBOR_SERVICES[@]}" nftables; do
         printf '%s=%s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
     done
-} > "${BACKUP_DIR}/services-before.txt"
+} > "${WORK_DIR}/services-before.txt"
 ok "已保存服务状态"
 
 if [[ "$MODE" == "check" ]]; then
@@ -1126,7 +1792,7 @@ if [[ "$MODE" == "check" ]]; then
         info "    slurmate plugin install --from DIR | uninstall <id> | sync"
     fi
 
-    info "已保存快照到 ${BACKUP_DIR}"
+    info "已保存快照到 ${WORK_DIR}"
     info "如需部署，去掉 --check 重跑。"
     echo
     echo "  预检通过 ${PASS_N} 项，警告 ${WARN_N} 项，失败 ${FAIL_N} 项"
@@ -1138,20 +1804,29 @@ fi
 step "阶段 2／6  安装文件"
 # ==============================================================================
 
+# 事务从这里开始：下面的建目录、覆盖文件都要先记"怎么撤回"。
+if [[ "$DRYRUN" -eq 0 ]]; then
+    txn_begin install "$WORK_DIR" \
+        || die "无法建立事务目录 ${WORK_DIR}，没有改动任何文件。"
+fi
+
 install_one() {
     local src="$1" dst="$2" mode="$3"
     if [[ "$DRYRUN" -eq 1 ]]; then
         echo "  [演练] install -m ${mode} ${src} → ${dst}"
         return 0
     fi
-    # 覆盖旧版本前先备份 —— 否则升到一个坏版本后，唯一的退路是 --uninstall
-    # （连同旧版本一起没了），没有可回退的副本。
+    # 目标必须是普通文件（或还不存在）。符号链接、目录、FIFO 一律拒绝：
+    #   `cp -a` 与 `install` 对它们的语义不同，回滚会恢复成错的对象。
+    if [[ -L "$dst" || ( -e "$dst" && ! -f "$dst" ) ]]; then
+        die "目标不是普通文件：$dst（不覆盖，已中止）"
+    fi
+    # 先备份、先记日志、再同步，最后才覆盖。备份失败就不许动目标 ——
+    #   没有副本就没有"失败时恢复原状"。
+    txn_backup "$dst" \
+        || die "无法保存 $dst 的原件，无法保证失败时恢复原状，已中止。"
     if [[ -e "$dst" ]]; then
-        if cp -a "$dst" "${BACKUP_DIR}/replaced-$(basename "$dst").$(date +%s)" 2>/dev/null; then
-            info "已备份被覆盖的旧文件：$dst"
-        else
-            warn "无法备份 $dst（继续安装，但升级后没有旧版本可回退）"
-        fi
+        info "已保留改动前的文件：$dst"
     fi
     install -m "$mode" -o root -g root "$src" "$dst" || die "安装失败：$dst"
     ok "$dst  (${mode})"
@@ -1161,10 +1836,14 @@ install_one() {
 for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
          "$(dirname "$UNIT")" "$STATE_DIR"; do
     if [[ ! -d "$d" ]]; then
-        run mkdir -p "$d"
         if [[ "$DRYRUN" -eq 1 ]]; then
+            echo "  [演练] mkdir -p $d"
             info "将创建目录 $d（演练，尚未创建）"
         else
+            _own=0
+            [[ "$d" == "$STATE_DIR" ]] && _own=1
+            txn_mkdir_p "$d" "$_own" \
+                || die "无法创建目录 $d（已中止，正在回滚）"
             info "已创建目录 $d"
         fi
     fi
@@ -1173,8 +1852,15 @@ done
 #   编织好的作业脚本（`jobs/<ULID>.sbatch`，由提交作业的用户身份的 sbatch 读）
 #   与作业模板（安装器用它织）。0700 的表现是 sbatch 报「读不到文件」，而那句
 #   话指不回权限，会让人去查脚本是不是生成失败了。
-[[ "$DRYRUN" -eq 1 ]] || chmod 755 "$SHARE_DIR" "$CONF_DIR"
-[[ "$DRYRUN" -eq 1 ]] || chmod 700 "$STATE_DIR"
+if [[ "$DRYRUN" -eq 0 ]]; then
+    txn_mode "$SHARE_DIR"
+    txn_mode "$CONF_DIR"
+    txn_mode "$STATE_DIR"
+    chmod 755 "$SHARE_DIR" "$CONF_DIR" \
+        || die "无法设置共享目录与配置目录的权限（已中止，正在回滚）"
+    chmod 700 "$STATE_DIR" \
+        || die "无法设置状态目录的权限（已中止，正在回滚）"
+fi
 
 install_one "${SRC_DIR}/slurmate-sessiond"  "$DAEMON"  755
 install_one "${SRC_DIR}/slurmate"           "$CLI"     755
@@ -1190,12 +1876,12 @@ install_one "${SRC_DIR}/run.sbatch" "${SHARE_DIR}/run.sbatch.template" 644
 # ── slurmate.conf：不存在时安装，存在时只对键 ──
 # 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、缺省插件。
 # 键跟着版本走（见〈阶段 0〉那次对账），取值只归管理员：有改动时写回去的是
-#   "管理员的取值 + 这一版的键"，整份旧文件由 `install_one` 放进备份目录。
+#   "管理员的取值 + 这一版的键"，整份旧文件由 `install_one` 记进撤销日志。
 # 要重置就手动删掉它再跑。
 if [[ -e "$CONF" ]]; then
     # 有改动才落盘：键与这一版相同的站点，配置文件的修改时间都不该动。
-    #   `install_one` 覆盖前会把旧的那一份放进备份目录，所以"删掉了哪几行"
-    #   永远找得回来。
+    #   `install_one` 覆盖前会把旧的那一份记进撤销日志，所以"删掉了哪几行"
+    #   在部署失败时找得回来。
     if [[ "$CONF_DIFF" -eq 1 ]]; then
         install_one "$CONF_MERGED" "$CONF" 644
         info "站点配置已按这一版对齐：取值一个没改，删掉与补上的键见上面那次对账"
@@ -1276,10 +1962,11 @@ else
         bad "systemctl daemon-reload 失败，单元可能未生效，请检查 /etc/systemd/system 下的单元文件"
     fi
 
+    txn_note "meta" "enabled_touched" "1"
     if systemctl enable "$SERVICE" >/dev/null 2>&1; then
         ok "已设为开机自启"
     else
-        bad "systemctl enable 失败（不影响本次运行，但重启后不会自启）"
+        bad "systemctl enable 失败（重启后不会自启）"
     fi
 fi
 
@@ -1296,13 +1983,15 @@ if [[ "$DRYRUN" -eq 0 ]]; then
     #   一处，本脚本不再自己等 socket/nft —— 同一份判据只留一份。
     if [[ "$NORESTART" -eq 1 ]]; then
         info "按 --no-restart 跳过重启。守护进程仍在用启动时那一份配置。"
-    elif ! SLURMATE_LOCK_HELD=1 "$CLI" service restart --config="$CONF" --quiet; then
-        bad "服务重启失败（原因见上）"
-        info "  本次备份（被替换的旧文件在这）：${BACKUP_DIR}"
-        die "安装的文件已经摆好，但服务没有起来。排查上面的日志后重跑本脚本；
-     要回到上一份文件，从 ${BACKUP_DIR} 里取回后放到原路径，
-     再 sudo slurmate service restart。"
     else
+        # 记在动作之前：即使 restart 把旧进程停掉了却没能拉起新的，
+        #   回滚也必须在这一点上把旧守护进程重新启动。
+        txn_note "meta" "service_touched" "1"
+        if ! SLURMATE_LOCK_HELD=1 "$CLI" service restart --config="$CONF" --quiet; then
+            bad "服务重启失败（原因见上）"
+            die "服务没有起来。这次部署将回滚到运行前：文件、配置、单元与服务状态
+     都会放回去，旧守护进程会被重新拉起。排查上面的日志后重跑本脚本。"
+        fi
         ok "服务已重启并就绪（基座变了，这一版默认重启）"
     fi
 else
@@ -1318,10 +2007,10 @@ if [[ "$DRYRUN" -eq 1 ]]; then
 else
 
 # ── 5.1 nftables 规则集：剥掉 inet slurmate 后必须逐条一致 ──
-snapshot_ruleset "${BACKUP_DIR}/nft-after.json"
+snapshot_ruleset "${WORK_DIR}/nft-after.json"
 RULESET_OUT="$("$PY" "${SRC_DIR}/nft-compare.py" \
-                   "${BACKUP_DIR}/nft-before.json" \
-                   "${BACKUP_DIR}/nft-after.json" 2>&1 || true)"
+                   "${WORK_DIR}/nft-before.json" \
+                   "${WORK_DIR}/nft-after.json" 2>&1 || true)"
 RULESET_VERDICT="$(printf '%s\n' "$RULESET_OUT" | head -n1)"
 
 case "$RULESET_VERDICT" in
@@ -1338,14 +2027,13 @@ case "$RULESET_VERDICT" in
     ALIEN)
         bad "nftables 规则集出现了【本系统不应造成】的差异："
         printf '%s\n' "$RULESET_OUT" | tail -n +2 | sed 's/^/        /' >&2
-        bad "  这可能是本系统改到了别人的表。请立即检查，必要时回滚："
-        bad "      sudo bash ${SCRIPT_PATH} --uninstall"
+        bad "  这可能是本系统改到了别人的表。请立即检查；这次部署会回滚。"
         ;;
     REORDER)
         bad "nftables 规则的【顺序】变了（多重集相同但顺序不同）："
         bad "  链内顺序在 nftables 里是有语义的（drop 在 accept 前后是真实的行为变更），"
         bad "  而且没有任何合法原因会造成纯重排，规则的增删必然改变多重集，只有重排不改变。"
-        bad "  请立即检查！回滚：sudo bash ${SCRIPT_PATH} --uninstall"
+        bad "  请立即检查；这次部署会回滚。"
         ;;
     NOSNAPSHOT)
         bad "规则集快照缺失或为空，【无法】证明部署没有干扰现有规则。"
@@ -1362,16 +2050,16 @@ esac
 # ── 5.2 外部文件哈希未变 ──
 for f in "${FOREIGN_FILES[@]}"; do
     printf '%s  %s\n' "$(hash_of "$f")" "$f"
-done > "${BACKUP_DIR}/hashes-after.txt"
+done > "${WORK_DIR}/hashes-after.txt"
 
-if grep -q 'HASHFAIL' "${BACKUP_DIR}/hashes-after.txt" 2>/dev/null; then
+if grep -q 'HASHFAIL' "${WORK_DIR}/hashes-after.txt" 2>/dev/null; then
     bad "有文件哈希计算失败（见上面的 HASHFAIL），【无法】证明现有文件未被改动"
-    grep 'HASHFAIL' "${BACKUP_DIR}/hashes-after.txt" | sed 's/^/        /' >&2
-elif diff -q "${BACKUP_DIR}/hashes-before.txt" "${BACKUP_DIR}/hashes-after.txt" >/dev/null; then
+    grep 'HASHFAIL' "${WORK_DIR}/hashes-after.txt" | sed 's/^/        /' >&2
+elif diff -q "${WORK_DIR}/hashes-before.txt" "${WORK_DIR}/hashes-after.txt" >/dev/null; then
     # "两份相等"有两种截然不同的含义：真的都没变，或者【本来就不存在】。
     # 后者什么都没证明。分开报告，别让"没有可比的东西"冒充成"一切正常"。
-    n_total="$(wc -l < "${BACKUP_DIR}/hashes-after.txt")"
-    n_absent="$(grep -c '^MISSING' "${BACKUP_DIR}/hashes-after.txt" || true)"
+    n_total="$(wc -l < "${WORK_DIR}/hashes-after.txt")"
+    n_absent="$(grep -c '^MISSING' "${WORK_DIR}/hashes-after.txt" || true)"
     n_compared=$(( n_total - n_absent ))
     if (( n_compared == 0 )); then
         info "外部文件全部不存在（${n_total} 项），本项【未参与校验】，不代表它们未被改动"
@@ -1380,16 +2068,16 @@ elif diff -q "${BACKUP_DIR}/hashes-before.txt" "${BACKUP_DIR}/hashes-after.txt" 
     fi
 else
     bad "现有文件发生变化："
-    diff "${BACKUP_DIR}/hashes-before.txt" "${BACKUP_DIR}/hashes-after.txt" | sed 's/^/        /' >&2
+    diff "${WORK_DIR}/hashes-before.txt" "${WORK_DIR}/hashes-after.txt" | sed 's/^/        /' >&2
 fi
 
 # ── 5.3 锁目录内容未变（并发用户活动会影响它，故只警告） ──
-ls -A /tmp/codeserver-ports 2>/dev/null | sort > "${BACKUP_DIR}/locks-after.txt" || : > "${BACKUP_DIR}/locks-after.txt"
-if diff -q "${BACKUP_DIR}/locks-before.txt" "${BACKUP_DIR}/locks-after.txt" >/dev/null; then
+ls -A /tmp/codeserver-ports 2>/dev/null | sort > "${WORK_DIR}/locks-after.txt" || : > "${WORK_DIR}/locks-after.txt"
+if diff -q "${WORK_DIR}/locks-before.txt" "${WORK_DIR}/locks-after.txt" >/dev/null; then
     ok "codeserver 锁目录内容未变"
 else
     warn "锁目录有变化（通常是并发用户启停了 code-server，非本系统所致）："
-    diff "${BACKUP_DIR}/locks-before.txt" "${BACKUP_DIR}/locks-after.txt" | sed 's/^/        /' >&2
+    diff "${WORK_DIR}/locks-before.txt" "${WORK_DIR}/locks-after.txt" | sed 's/^/        /' >&2
 fi
 
 # ── 5.4 sshd 配置语法 ──
@@ -1406,7 +2094,7 @@ fi
 # （包括根本不存在这个服务的情况）不产生任何结论 —— 也就不会误报。
 n_svc_checked=0
 for s in "${NEIGHBOR_SERVICES[@]}"; do
-    grep -qx "${s}=active" "${BACKUP_DIR}/services-before.txt" 2>/dev/null || continue
+    grep -qx "${s}=active" "${WORK_DIR}/services-before.txt" 2>/dev/null || continue
     n_svc_checked=$(( n_svc_checked + 1 ))
     if systemctl is-active --quiet "$s" 2>/dev/null; then
         ok "部署前在运行的服务 $s 仍在运行"
@@ -1441,7 +2129,9 @@ fi  # DRYRUN
 # ── 装完／修完，用同一份判据再问一遍 ────────────────────────────────────────
 # 这一遍只查盘上的东西（static）：服务、socket、nft 那几项刚在〈阶段 5〉查过，
 #   而"装好了"这句结论靠的是"同一份对账现在对得上了"，不是"我装过了"。
-if [[ "$MODE" == "repair" ]]; then
+if [[ "$DRYRUN" -eq 1 ]]; then
+    info "演练不跑装后对账：没有任何文件被改动。"
+elif [[ "$MODE" == "repair" ]]; then
     echo
     step "修复后对账（--repair）：现在哪几样对上了"
     audit_installed static
@@ -1460,6 +2150,26 @@ elif [[ "$MODE" == "install" ]]; then
     fi
 fi
 
+# 失败先回滚，再谈"装好了"。这一步在打印"已安装"之前，不能让一屏绿色的
+#   标题压过一行回滚报告。
+if [[ "$FAIL_N" -gt 0 ]]; then
+    if [[ "$TXN_ACTIVE" -eq 1 ]]; then
+        if ! txn_rollback "$TXN_DIR" "收尾有失败"; then
+            echo "  有 ${FAIL_N} 项失败，回滚没有恢复干净（见上）。" >&2
+            exit 1
+        fi
+    fi
+    echo "  有 ${FAIL_N} 项失败，这次部署已回滚。" >&2
+    exit 1
+fi
+
+if [[ "$DRYRUN" -eq 1 ]]; then
+    rm -rf "$WORK_DIR"
+fi
+if [[ "$TXN_ACTIVE" -eq 1 ]]; then
+    txn_commit
+fi
+
 # ==============================================================================
 step "阶段 6／6  完成"
 # ==============================================================================
@@ -1469,16 +2179,18 @@ if [[ "$DRYRUN" -eq 1 ]]; then
     DRYRUN_BANNER="
   本次是【演练 --dry-run】：没有安装文件、没有启动服务、没有改动 nftables。
      下面列出的是\"将要安装\"的位置，不是已经装好的结果。"
+    KEEP_LINE="  临时快照已删除：演练不改系统，也不留现场。"
 else
     DONE_TITLE="  已安装："
     DRYRUN_BANNER=""
+    KEEP_LINE="  本次没有保留旧文件：成功即提交，回滚副本已随事务目录删除。"
 fi
 
 cat <<EOF
 ${DRYRUN_BANNER}
 
   通过 ${PASS_N} 项，警告 ${WARN_N} 项，失败 ${FAIL_N} 项
-  备份与快照：${BACKUP_DIR}
+${KEEP_LINE}
 
 ${DONE_TITLE}
     ${DAEMON}
@@ -1516,9 +2228,4 @@ ${DONE_TITLE}
 
 EOF
 
-if [[ "$FAIL_N" -gt 0 ]]; then
-    echo "  有 ${FAIL_N} 项失败，请务必按上面的提示排查。" >&2
-    echo "     如需回滚：sudo bash ${SCRIPT_PATH} --uninstall" >&2
-    exit 1
-fi
 exit 0

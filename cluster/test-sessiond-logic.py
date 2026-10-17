@@ -4434,6 +4434,44 @@ exit 0
           "（装完基座之后集群上可能根本没有仓库）",
           "run.sbatch.template" in _ib_src)
 
+    # 0.24 追加：装、升、修、卸都是一次事务。
+    check("安装器有撤销日志引擎（记录、回滚、提交三件都在）",
+          all(k in _ib_src for k in ("txn_note", "txn_rollback", "txn_commit")))
+    check("覆盖前备份失败就中止（不再「警告后继续」）",
+          "无法保存 $dst 的原件" in _ib_src
+          and "继续安装，但升级后没有旧版本可回退" not in _ib_src)
+    check("成功路径会提交事务（写 committed 并删现场）",
+          'txn_note "committed"' in _ib_src and 'rm -rf "$TXN_DIR"' in _ib_src)
+    check("INT/TERM 有 trap，走回滚",
+          "trap '_on_signal INT 130' INT" in _ib_src)
+    check("启动时自动收尾上一次没有走完的事务（只读模式只报告）",
+          "_txn_leftovers" in _ib_src
+          and "上一次部署没有走完" in _ib_src
+          and "已恢复上一次部署之前的原状" in _ib_src)
+    check("成功提交时清掉旧版留下的备份目录",
+          "/root/slurmate-backup-*" in _ib_src)
+    check("--rollback 与 --txn-selftest 都有解析",
+          "--rollback)" in _ib_src and "--txn-selftest)" in _ib_src)
+    check("演练不建事务、不重启、跳过收尾对账",
+          'if [[ "$DRYRUN" -eq 0 ]]; then\n    txn_begin install' in _ib_src
+          and "演练不跑装后对账" in _ib_src
+          and "会重启一次服务；本次没有动它" in _ib_src)
+    check("卸载用 conf-merge.py 的 --looks-like-config 认站点配置",
+          "--looks-like-config" in _ib_src
+          and "${SELF_DIR}/conf-merge.py" in _ib_src)
+    check("卸载把插件目录整棵备份（saved_dir）",
+          'txn_save_dir "${SHARE_DIR}/plugins"' in _ib_src)
+    check("--purge-state 是改名到兄弟目录，不是直接 rm -rf",
+          "txn_purge_dir" in _ib_src and "uninstall-${TS}" in _ib_src)
+    _ts = subprocess.run(["bash", _ib, "--txn-selftest"],
+                         capture_output=True, text=True)
+    _m = re.search(r"事务自测：(\d+)/(\d+) 通过", _ts.stdout)
+    check("事务引擎自测跑通（覆盖恢复、新增删除、目录、卸载侧、坏行、提交）",
+          _ts.returncode == 0 and _m is not None
+          and _m.group(1) == _m.group(2) and int(_m.group(2)) >= 12,
+          "rc=%d %r" % (_ts.returncode,
+                        (_ts.stdout[-300:] + _ts.stderr[-200:])))
+
     # 未引用的 heredoc（`cat <<EOF`）里，反引号是命令替换 —— 想印一个命令给
     #   管理员看，必须写成 \`。这一条是用户 2026-10-16 贴回来的那一屏里发现的：
     #   "端口池与集群网段：跑一次 \`${DAEMON} --check\` 看" 那一行真的把 --check
@@ -12022,6 +12060,47 @@ exit 0
           (_sub_after.get("error") or {}).get("kind") != "draining",
           str(_sub_after)[:300])
 
+    # stop_all：关机式停止。root only；取消全站；恢复态也取消；
+    #   reserved 没有作业，走同一个释放入口落 expired。
+    _d_sa = _mkd(startup_grace_seconds=0)
+    _d_sa.nft, _d_sa.slurm = _NftRec(), _RelSlurm()
+    _d_sa.audit = lambda *_a, **_k: None
+    _add(_d_sa, "s-sa1", job_id="7101")
+    _add(_d_sa, "s-sa2", job_id="7102")
+    _add(_d_sa, "s-sa3", state=mod.ST_RESERVED)
+    _d_sa.store.update("s-sa2", trust="recovered")
+    _sa_denied = _d_sa.op_stop_all(_not_root)
+    check("非 root 发 stop_all 被拒（它会取消所有人的作业）",
+          _sa_denied.get("ok") is False and _sa_denied.get("code") == 4
+          and (_sa_denied.get("error") or {}).get("kind") == "forbidden",
+          str(_sa_denied))
+    _d_sa.slurm.cancels = []
+    _sa = _d_sa.op_stop_all(0)
+    check("stop_all：两条作业都发了 scancel（命令是 service_stop），"
+          "恢复态那一行也在里面",
+          _d_sa.slurm.cancels == [("7101", "service_stop"),
+                                  ("7102", "service_stop")]
+          and len(_sa["data"]["stopped"]) == 2,
+          "%r / %r" % (_d_sa.slurm.cancels, _sa.get("data")))
+    check("reserved 会话没有作业可取消：进释放流程，终态是 expired",
+          _d_sa.store.get("s-sa3")["state"] == mod.ST_RELEASING
+          and _d_sa.store.get("s-sa3")["final_state"] == mod.ST_EXPIRED,
+          str(_d_sa.store.get("s-sa3")))
+    check("排空窗口同时打开；仍在占用的条数如实返回",
+          _sa["data"]["draining"]["until"] > time.time()
+          and _sa["data"]["remaining"] == 3, str(_sa.get("data")))
+
+    _d_sa2 = _mkd(startup_grace_seconds=0)
+    _d_sa2.nft, _d_sa2.slurm = _NftRec(), _RelSlurm()
+    _d_sa2.audit = lambda *_a, **_k: None
+    _add(_d_sa2, "s-sf1", job_id="7201")
+    _d_sa2.slurm.cancel_ok = False
+    _sf = _d_sa2.op_stop_all(0)
+    check("scancel 失败进 cancel_failed，但会话仍然进释放流程（会重试）",
+          len(_sf["data"]["cancel_failed"]) == 1
+          and _d_sa2.store.get("s-sf1")["state"] == mod.ST_RELEASING,
+          str(_sf.get("data")))
+
     # ── CLI 的 service 组 ─────────────────────────────────────────────────
     _cli_svc = load_cli()
 
@@ -12052,6 +12131,8 @@ exit 0
                 if "is-active" in argv:
                     r.returncode = 0 if self.active else 3
                     r.stdout = "active\n" if self.active else "inactive\n"
+                elif "stop" in argv:
+                    self.active = False
                 elif "reload" in argv:
                     r.returncode = self.reload_rc
                 elif "restart" in argv:
@@ -12101,8 +12182,19 @@ exit 0
     _saved_svc_stdout = sys.stdout
     _saved_svc_stderr = sys.stderr
     _saved_check = _cli_svc.cmd_service_check
+    _saved_svc_sync = _cli_svc.sync_derived
+    _saved_svc_nftdel = _cli_svc.nft_delete_table
     _saved_svc_lock_env = os.environ.get("SLURMATE_LOCK_HELD")
     os.environ["SLURMATE_LOCK_HELD"] = "1"       # 用例里不真抢部署锁
+    _nftdel_calls = []
+    _sync_calls = []
+
+    class _NftDelOk(object):
+        returncode = 0
+
+    _cli_svc.sync_derived = lambda config=None: (
+        _sync_calls.append(config), (True, ""))[1]
+    _cli_svc.nft_delete_table = lambda: (_nftdel_calls.append(1), _NftDelOk())[1]
     try:
         _cli_svc.READY_TIMEOUT = 0.2
         _cli_svc.READY_POLL = 0.01
@@ -12143,17 +12235,20 @@ exit 0
         _cli_svc.subprocess.run = _fr3
         _cli_svc.daemon_call = _DaemonSeq()
         _cli_svc.cmd_service_check = lambda a: 0
+        _sync_calls[:] = []
         sys.stdout = io.StringIO()
         _rc = _cli_svc.cmd_service_restart(_SvcArgs())
         _out3 = sys.stdout.getvalue()
         sys.stdout = _saved_svc_stdout
         _cli_svc.cmd_service_check = _saved_check
-        check("restart：先自检、再排空、再 restart，最后报出 pid（不是"
-              "「命令返回 0 就算成功」）",
+        check("restart：先自检、再排空、对齐派生物、再 restart，最后报出 pid"
+              "（不是「命令返回 0 就算成功」）",
               _rc == 0 and "服务已重启" in _out3 and "pid 7" in _out3
+              and _sync_calls == [""]
               and any(a[:3] == ["systemctl", "restart",
                                 "slurmate-sessiond"] for a in _fr3.seen),
-              "rc=%s / %r / %s" % (_rc, _out3[:300], _fr3.seen))
+              "rc=%s / %r / %s / %r" % (_rc, _out3[:300], _fr3.seen,
+                                        _sync_calls))
 
         # ④ 重启后等不到就绪：非零 + journal，不谎报
         class _DeadDaemon(object):
@@ -12181,13 +12276,15 @@ exit 0
         _cli_svc.subprocess.run = _fr5
         _cli_svc.daemon_call = _DaemonSeq(ok=True)
         _cli_svc.cmd_service_check = lambda a: 0       # 自检的用例在 ②
+        _sync_calls[:] = []
         sys.stdout = io.StringIO()
         _rc = _cli_svc.cmd_service_reload(_SvcArgs())
         _out5 = sys.stdout.getvalue()
         sys.stdout = _saved_svc_stdout
-        check("reload：等 last_reload 前进之后才说「接受」",
-              _rc == 0 and "接受" in _out5 and "没断" in _out5,
-              "rc=%s / %r" % (_rc, _out5[:300]))
+        check("reload：先对齐派生物，再等 last_reload 前进，然后才说「接受」",
+              _rc == 0 and "接受" in _out5 and "没断" in _out5
+              and _sync_calls == [""],
+              "rc=%s / %r / %r" % (_rc, _out5[:300], _sync_calls))
 
         _cli_svc.daemon_call = _DaemonSeq(ok=False, error="自检没过",
                                           cold=("range_start",))
@@ -12253,6 +12350,141 @@ exit 0
               "详细状态」；不把「问不到详情」当成「没在跑」",
               _rc == 0 and "运行中" in _out9 and "较旧" in _out9,
               "rc=%s / %r" % (_rc, _out9[:300]))
+
+        # ⑦ stop：先取消全部会话，再停服务、删表
+        class _StopDaemon(object):
+            def __init__(self, remaining=0, unknown=False):
+                self.remaining = remaining
+                self.unknown = unknown
+                self.ops = []
+
+            def __call__(self, op, timeout=2.0):
+                self.ops.append(op)
+                if op == "stop_all":
+                    if self.unknown:
+                        return {"ok": False, "code": 2,
+                                "error": {"kind": "unknown_op",
+                                          "detail": None},
+                                "data": None}
+                    return {"ok": True, "code": 0, "error": None,
+                            "data": {"stopped": [{"session_id": "s1",
+                                                  "job_id": "7101"}],
+                                     "expired": [], "cancel_failed": [],
+                                     "remaining": self.remaining,
+                                     "draining": {"until": 0}}}
+                if op == "daemon":
+                    return {"ok": True, "code": 0, "error": None,
+                            "data": {"version": "0.24", "pid": 7,
+                                     "started_at": 0,
+                                     "config": {"path": "/etc/x",
+                                                "digest": "",
+                                                "on_disk_digest": "",
+                                                "loaded_at": 0,
+                                                "last_reload": {"seq": 0,
+                                                                "ok": True}},
+                                     "sessions": {"active": self.remaining},
+                                     "plugins": {"total": 0, "enabled": 0},
+                                     "port_range": [1, 2],
+                                     "nft_table": True,
+                                     "draining": {"until": 0}}}
+                return {"ok": True, "code": 0, "error": None, "data": {}}
+
+        _fr7 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr7
+        _sd7 = _StopDaemon()
+        _cli_svc.daemon_call = _sd7
+        _nftdel_calls[:] = []
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_stop(_SvcArgs())
+        _out7b = sys.stdout.getvalue()
+        sys.stdout = _saved_svc_stdout
+        check("stop：先让守护进程取消全部会话，再 systemctl stop，最后删表"
+              "（顺序不能反：守护进程活着时删表会被下一个 tick 重建）",
+              _rc == 0 and _sd7.ops[:2] == ["stop_all", "daemon"]
+              and "已结束 1 条会话" in _out7b
+              and _nftdel_calls == [1]
+              and any(a[:2] == ["systemctl", "stop"] for a in _fr7.seen),
+              "rc=%s / %r / %r / %r" % (_rc, _sd7.ops[:4], _fr7.seen[-3:],
+                                        _nftdel_calls))
+
+        # ⑧ 还有会话没释放：中止，不停止服务
+        _fr8 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr8
+        _cli_svc.daemon_call = _StopDaemon(remaining=2)
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_stop(_SvcArgs())
+        _err8b = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        check("stop：还有会话没释放就中止，服务不停止"
+              "（否则下次启动会按 claims 行把 ACL 补回来）",
+              _rc != 0 and "没有停干净" in _err8b
+              and not any(a[:2] == ["systemctl", "stop"] for a in _fr8.seen),
+              "rc=%s / %r / %r" % (_rc, _err8b[:200], _fr8.seen))
+
+        # ⑨ 旧守护进程不认 stop_all：拒绝，不静默降级
+        _fr9b = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr9b
+        _cli_svc.daemon_call = _StopDaemon(unknown=True)
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_stop(_SvcArgs())
+        _err9b = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        check("stop 对着旧守护进程（不认 stop_all）：拒绝并说明，不静默降级成"
+              "「只停服务」",
+              _rc != 0 and "stop_all" in _err9b
+              and not any(a[:2] == ["systemctl", "stop"] for a in _fr9b.seen),
+              "rc=%s / %r" % (_rc, _err9b[:200]))
+
+        # ⑩ restart 不是 stop/start 的串连
+        _fr10 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr10
+        _sd10 = _StopDaemon()
+        _cli_svc.daemon_call = _sd10
+        _cli_svc.cmd_service_check = lambda a: 0
+        _nftdel_calls[:] = []
+        sys.stdout = io.StringIO()
+        _rc = _cli_svc.cmd_service_restart(_SvcArgs())
+        sys.stdout = _saved_svc_stdout
+        _cli_svc.cmd_service_check = _saved_check
+        check("restart 不是 stop/start 的串连：不调 stop_all、不删 nft 表、"
+              "不取消会话",
+              _rc == 0 and "stop_all" not in _sd10.ops and _nftdel_calls == [],
+              "rc=%s / ops=%r / nft=%r" % (_rc, _sd10.ops, _nftdel_calls))
+
+        # ⑪ 派生物对齐失败：不重启
+        _fr11 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr11
+        _cli_svc.daemon_call = _DaemonSeq()
+        _cli_svc.cmd_service_check = lambda a: 0
+        _cli_svc.sync_derived = lambda config=None: (False, "作业模板读不动")
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_restart(_SvcArgs())
+        _err11 = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        _cli_svc.sync_derived = lambda config=None: (True, "")
+        _cli_svc.cmd_service_check = _saved_check
+        check("派生物对齐失败：不重启，并把原因说出来",
+              _rc != 0 and "作业模板读不动" in _err11
+              and not any(a[:2] == ["systemctl", "restart"]
+                          for a in _fr11.seen),
+              "rc=%s / %r / %r" % (_rc, _err11[:200], _fr11.seen))
+
+        # ⑫ --config 与守护进程读的那一份不同：拒绝
+        _a12 = _SvcArgs()
+        _a12.config = "/etc/other.conf"
+        _fr12 = _FakeRunSvc(active=True)
+        _cli_svc.subprocess.run = _fr12
+        _cli_svc.daemon_call = _DaemonSeq()
+        sys.stderr = io.StringIO()
+        _rc = _cli_svc.cmd_service_reload(_a12)
+        _err12 = sys.stderr.getvalue()
+        sys.stderr = _saved_svc_stderr
+        check("reload 的 --config 与守护进程读的那一份不同：拒绝，"
+              "不去重载另一个文件",
+              _rc != 0 and "/etc/x" in _err12
+              and not any(a[:2] == ["systemctl", "reload"]
+                          for a in _fr12.seen),
+              "rc=%s / %r" % (_rc, _err12[:200]))
     finally:
         _cli_svc.subprocess.run = _saved_svc_run
         _cli_svc.daemon_call = _saved_svc_call
@@ -12261,6 +12493,8 @@ exit 0
         _cli_svc.socket_path = _saved_svc_sock
         _cli_svc.nft_table_present = _saved_svc_nft
         _cli_svc.cmd_service_check = _saved_check
+        _cli_svc.sync_derived = _saved_svc_sync
+        _cli_svc.nft_delete_table = _saved_svc_nftdel
         _cli_svc.READY_TIMEOUT = _saved_svc_ready_t
         _cli_svc.READY_POLL = _saved_svc_ready_p
         sys.stdout = _saved_svc_stdout
@@ -12277,7 +12511,7 @@ exit 0
             pass
 
     for _dd in (_d, _d2, _d3, _d4, _d5, _d6, _d7, _d8, _d10, _d11, _d12,
-                _d13, _d14, _d15, _d16,
+                _d13, _d14, _d15, _d16, _d_sa, _d_sa2,
                 # 第 27 节（客户端身份与每用户连接上限）自己那一批
                 _d17, _d24, _d25,
                 # 第 28 节（集群信息）自己那一批

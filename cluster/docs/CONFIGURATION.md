@@ -914,7 +914,8 @@ rm -f /var/lib/slurmate-session/claims.db
 
 ## 配置改了之后
 
-不需要重启：改完让守护进程重读一遍就行，正在跑的会话一条都不断。
+不需要重启：改完让守护进程重读一遍就行，正在跑的会话一条都不断。它还会先把
+作业模板与已织的作业脚本对齐 —— 那份工作守护进程在沙箱里做不了，由 CLI 做。
 
 ```bash
 # 1. 改配置（主文件，或者 slurmate.conf.d/ 下某一份）
@@ -944,7 +945,7 @@ sudo slurmate service reload
 | 档 | 判据 | 有哪些 |
 |---|---|---|
 | **随时可热** | 只影响"从这一刻之后新发生的事" | `default_plugin`、`candidates_per_session`、`max_sessions_per_user`、`max_connections_per_user` |
-| **可热，但会说一句** | 会动到**已经建立**的东西 | `range_start` / `range_end` / `reserved_ranges`（已经在跑的会话，端口可能落在**新区间之外** —— **不拦**，让它跑完）、8 个 Slurm 命令路径（**下一次** fork 用的就是新的那一个） |
+| **可热，但会说一句** | 会动到**已经建立**的东西 | `range_start` / `range_end` / `reserved_ranges`（已经在跑的会话，端口可能落在**新区间之外** —— **不拦**，让它跑完）、8 个 Slurm 命令路径（**下一次** fork 用的就是新的那一个）、`renew_increment` / `renew_threshold` / `renew_max_total`（作用在已建立的会话上）、`log_keep_days` / `log_dir_max_bytes`（改小之后此后提交的作业会删别人的日志） |
 | **必须重启** | 不是"运行期的事实" | （这一档现在是空的。它同时是表外键的兜底：`_changed_keys_by_class()` 把没分类的键**默认**归到这里） |
 
 第二档那几种改完会被接受，但日志里会各说一句、并记进审计的 `notes` —— 否则
@@ -982,11 +983,18 @@ sudo slurmate service reload
 改单元（加固指令那一块）之后要重新跑一次 `sudo bash cluster/install-base.sh`，
 再 `systemctl daemon-reload` —— 那不是配置，重载管不到它。
 
+`service reload` 覆盖主配置、`.d/*.conf`、插件树、作业模板与作业脚本。二进制、
+systemd 单元、socket/状态/数据库路径、代码常量不在其中，只能 `service restart`。
+
+`service start|restart|reload` 都会先对齐派生物，对齐失败就停在那里。
+`--config` 与守护进程启动时读的那一份不同时，`reload`/`restart` 会拒绝：
+自检与真正重载的必须是同一个文件。
+
 `install-base.sh` 对已存在的 `/etc/slurmate/slurmate.conf` 只对键、不动取值
 （`cluster/conf-merge.py`）：
 
-1. 这一版不认的活键，删掉那一行。安装输出会把删掉的行原样列出来；改动前的
-   整份配置在 `/root/slurmate-backup-<时间>/` 里。
+1. 这一版不认的活键，删掉那一行。安装输出会把删掉的行原样列出来；不需要
+   自己备份配置：这次部署失败会把它自动放回，成功则不保留副本。
 2. 这一版新加、而文件里整节都没有提到的，补到文件末尾。补进来的是示例里那几行，
    新键在示例里本来就是注释掉的缺省，所以补进来不改变任何行为。
 3. 其余原样保留：取值、顺序、注释。

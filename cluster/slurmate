@@ -344,6 +344,38 @@ def reload_daemon(quiet=False):
     return reload_and_report(quiet=quiet)
 
 
+def sync_derived(config=None):
+    """把作业模板与作业脚本对齐。返回 `(成功, 失败输出)`。
+
+    守护进程在 `ProtectSystem=strict` 下写不了 jobs 目录，这件事只能由 root
+    的 CLI 做。跑的是 `plugin sync` 的同一份实现（`--sync-plugins`），幂等，
+    作业脚本逐份原子替换。成功时不打印：它只是启动/重载/重启前的一步。
+    """
+    exe = sessiond_path()
+    if not os.path.isfile(exe):
+        return False, "未找到守护进程脚本 %s" % exe
+    argv = [sys.executable, exe, "--sync-plugins"]
+    if config:
+        argv += ["--config", config]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True)
+    except OSError as e:
+        return False, "启动派生物对齐失败（%s）：%s" % (exe, e)
+    if r.returncode == 0:
+        return True, ""
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    return False, out or "派生物对齐失败（退出码 %d）" % r.returncode
+
+
+def nft_delete_table():
+    """删掉本系统那张 nft 表。只有 `service stop` 与卸载会走到这里。"""
+    try:
+        return subprocess.run(["nft", "delete", "table", "inet", "slurmate"],
+                              capture_output=True, text=True)
+    except OSError:
+        return None
+
+
 def cmd_service_check(args):
     argv = [sys.executable, sessiond_path(), "--check"]
     if args.config:
@@ -463,6 +495,10 @@ def cmd_service_start(args):
         return _error(str(e))
     if cmd_service_check(args) != 0:
         return _error("配置自检没过，没有动服务。")
+    ok, why = sync_derived(args.config)
+    if not ok:
+        print(why, file=sys.stderr)
+        return _error("派生物对齐失败，没有动服务。")
     state = service_state()
     if state == "missing":
         return _error("这台机器上没有 systemctl，启动不了服务。")
@@ -486,25 +522,64 @@ def cmd_service_start(args):
     return EXIT_OK
 
 
+def _stop_all_sessions(timeout=30.0):
+    """让守护进程取消全部会话，并等它们离开占用状态。
+
+    返回 `(数据, 没停干净的原因)`。数据为 None 表示 op 本身没做成。
+    `daemon` op 的 `sessions.active` 把 `releasing` 也算在内：只有等
+    `phase_release` 确认作业消失并落终态，它才会归零。等不到就说明还有作业
+    没停掉，这时不能停服务（否则下次启动会按 claims 行把 ACL 补回来）。
+    """
+    try:
+        resp = daemon_call("stop_all", timeout=timeout + 10)
+    except RpcError as e:
+        return None, e.message
+    if not resp.get("ok"):
+        err = resp.get("error") or {}
+        if err.get("kind") == "unknown_op":
+            return None, ("这个守护进程不认 stop_all（版本较旧）；"
+                          "装好这一版并重启后再试。")
+        return None, err.get("detail") or "守护进程拒绝了 stop_all"
+    data = resp.get("data") or {}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            d = daemon_call("daemon")
+        except RpcError as e:
+            return data, e.message
+        if not d.get("ok"):
+            return data, ((d.get("error") or {}).get("detail")
+                          or "守护进程不应答")
+        active = ((d.get("data") or {}).get("sessions") or {}).get("active") or 0
+        if active == 0:
+            return data, None
+        time.sleep(READY_POLL)
+    return data, "还有会话没有释放"
+
+
 def cmd_service_stop(args):
     if os.geteuid() != 0:
         return _error("这一步要 root：sudo slurmate service stop")
     if args.dry_run:
-        print("会先排空，再 systemctl stop；正在跑的作业不会停。")
+        print("会先取消本站全部会话（用户自己的作业不动），再停服务并删 nft 表。")
         return EXIT_OK
     try:
         acquire_deploy_lock()
     except ServiceBusy as e:
         return _error(str(e))
-    active_sessions = None
     if service_state() == "active":
-        data = _service_status_data()
-        if data is not None:
-            active_sessions = (data.get("sessions") or {}).get("active")
-            try:
-                daemon_call("drain")
-            except RpcError:
-                pass
+        data, why = _stop_all_sessions()
+        if data is None:
+            return _error(why or "守护进程没有应答复停全部会话。")
+        if why:
+            return _error("有会话没有停干净（%s）；服务没有停，稍后再试。"
+                          % why)
+        print("已结束 %d 条会话（另有 %d 条占位记录作废）。"
+              % (len(data.get("stopped") or []),
+                 len(data.get("expired") or [])))
+        if data.get("cancel_failed"):
+            print("  另有 %d 条 scancel 没有发成功，作业自行结束后已释放。"
+                  % len(data["cancel_failed"]))
     r = systemctl("stop", SERVICE)
     if r is None or r.returncode != 0:
         print_journal()
@@ -517,23 +592,47 @@ def cmd_service_stop(args):
     if service_state() == "active":
         print_journal()
         return _error("服务还在运行。")
+    if nft_table_present():
+        rr = nft_delete_table()
+        if rr is None or rr.returncode != 0:
+            return _error("服务已停止，但 nft 表没有删掉："
+                          "nft delete table inet slurmate")
+        print("已删除 nft 表 inet slurmate。")
+    # 运行目录若空就收掉；systemd 的 RuntimeDirectory 可能已经删了。
+    try:
+        os.rmdir(os.path.dirname(DEFAULT_SOCKET))
+    except OSError:
+        pass
     print("服务已停止。")
-    if active_sessions:
-        print("  %d 个会话还在占着位置，它们的作业归 Slurm 管，不会停。"
-              "下次启动仍会认领它们。" % active_sessions)
     return EXIT_OK
+
+
+def _config_mismatch(args):
+    """`--config` 与守护进程读的那一份不同时返回一句错误，否则 None。"""
+    if not args.config:
+        return None
+    data = _service_status_data() or {}
+    running = (data.get("config") or {}).get("path")
+    if running and os.path.abspath(args.config) != os.path.abspath(running):
+        return ("--config 指向 %s，而守护进程读的是 %s。"
+                "这类动词只能作用于它启动时那一份；要换路径请改单元再重启。"
+                % (args.config, running))
+    return None
 
 
 def cmd_service_restart(args):
     if os.geteuid() != 0:
         return _error("这一步要 root：sudo slurmate service restart")
     if args.dry_run:
-        print("会先自检、排空，再 systemctl restart，然后等它真的应答。")
+        print("会先自检、排空、对齐派生物，再 systemctl restart，然后等它应答。")
         return EXIT_OK
     try:
         acquire_deploy_lock()
     except ServiceBusy as e:
         return _error(str(e))
+    bad = _config_mismatch(args)
+    if bad:
+        return _error(bad)
     if cmd_service_check(args) != 0:
         return _error("配置自检没过，没有动服务。")
     if service_state() == "missing":
@@ -545,6 +644,12 @@ def cmd_service_restart(args):
             daemon_call("drain")
         except RpcError:
             pass
+    # 模板与作业脚本不在守护进程能写的地方（ProtectSystem=strict），
+    #   所以由 CLI 在重启前对齐一次；失败就不重启。
+    ok, why = sync_derived(args.config)
+    if not ok:
+        print(why, file=sys.stderr)
+        return _error("派生物对齐失败，没有重启服务。")
     r = systemctl("restart", SERVICE)
     if r is None or r.returncode != 0:
         print_journal()
@@ -570,17 +675,27 @@ def cmd_service_reload(args):
     if os.geteuid() != 0:
         return _error("这一步要 root：sudo slurmate service reload")
     if args.dry_run:
-        print("会先自检，再 systemctl reload，然后等守护进程报出接受/拒绝。")
+        print("会先自检、对齐派生物，再 systemctl reload，然后等它报出接受/拒绝。")
         return EXIT_OK
     try:
         acquire_deploy_lock()
     except ServiceBusy as e:
         return _error(str(e))
+    bad = _config_mismatch(args)
+    if bad:
+        return _error(bad)
     if cmd_service_check(args) != 0:
         return _error("配置自检没过，没有动服务。")
     if service_state() != "active":
         return _error("服务没在跑，没有可重载的内容。启动一次就会用上这份配置："
                       "sudo slurmate service start")
+    # 主配置与插件树会被 SIGHUP 重读；模板与作业脚本不在其中，所以先把
+    #   派生物对齐，再让守护进程重读。两件事合成一条命令，管理员不必记得
+    #   "改完模板还要 plugin sync"。
+    ok, why = sync_derived(args.config)
+    if not ok:
+        print(why, file=sys.stderr)
+        return _error("派生物对齐失败，没有重载。")
     return reload_and_report(quiet=args.quiet)
 
 
@@ -1608,12 +1723,13 @@ def build_parser():
     add_service("start", cmd_service_start, "自检 → 启动 → 等它就绪",
                 config=True, needs_root=True)
     add_service("stop", cmd_service_stop,
-                "排空 → 停止；正在跑的作业不会停", needs_root=True)
+                "排空 → 取消本站全部会话 → 停服务 → 删 nft 表",
+                needs_root=True)
     add_service("restart", cmd_service_restart,
-                "自检 → 排空 → 重启 → 等它就绪并核对配置",
+                "自检 → 排空 → 对齐派生物 → 重启 → 等它就绪",
                 config=True, needs_root=True)
     add_service("reload", cmd_service_reload,
-                "自检 → 热重载 → 等守护进程报出接受还是拒绝",
+                "自检 → 对齐派生物 → 热重载 → 等它报出接受还是拒绝",
                 config=True, needs_root=True)
 
     p = add("whoami", cmd_whoami, "显示当前用户、计算账户与可用分区")
