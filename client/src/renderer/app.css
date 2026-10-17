@@ -302,6 +302,14 @@ button.remember:hover { background: #5c4e22; }
 #statusbar .armed-why { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .armed-off { display: none; }
 
+/* 插件页标题行里那一次「断开」确认：它和旁边的按钮同处一行。
+   基础规则那条 `1 0 100%` 是给卡片留的（结果要拿整行宽度说清）。
+   这一行本来就有标题与按钮，整行占下去会把后面的「作业」挤到第三行 ——
+   用户 2026-10-17 的截图报的就是这个错位。
+   其余两格照旧从 `.armed` 继承：`min-width: 0` 让它能被压，
+   `flex-wrap: wrap` 让理由在窄窗口里自己换行，不会横向溢出。 */
+#screen-plugins > .sec-head .armed { flex: 0 1 auto; }
+
 /* ── 密钥指纹 ──
    这里故意不显示公钥本身：所有 ed25519 公钥的前 40 个字符逐字相同，看不出
    变化，而「钥匙换了」正是最要命的一种变化。指纹每一位都随机，短，能一眼比对。 */
