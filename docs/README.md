@@ -46,7 +46,7 @@
 | [PROTOCOL.md](PROTOCOL.md) | 契约：传输、信封、错误码、三态区分、每个 op |
 | [IMPLEMENTING.md](IMPLEMENTING.md) | 写一个新后端 / 换一门语言的清单，每一条对应一个具体的静默失败 |
 | [CONTRACT.md](CONTRACT.md) | 每一格接口的承诺等级（稳定 / 试验 / 内部）× 保证方式（机器 / 一句话 / 无） |
-| [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 账本：已核实的缺陷、从未实测过的、结构性欠账 |
+| [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 账本：已核实的缺陷、没有完整实测过的、结构性欠账 |
 
 ## 别处还有
 
@@ -65,7 +65,7 @@
 
 ## 想知道「有什么是坏的」：只有一处
 
-已核实的缺陷、从未实测过的假设、以及结构性欠账，全在
+已核实的缺陷、还没有完整实测过的假设、以及结构性欠账，全在
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 里。那是这个仓库唯一的账本，一条离开它的唯一方式
 是修掉它，并附上一条能真的红的用例。
 

@@ -55,7 +55,7 @@ import time
 #
 # 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
 # 它停在旧值也没人会发现。
-VERSION = "0.25"
+VERSION = "0.26"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与

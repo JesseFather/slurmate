@@ -205,20 +205,22 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 
 客户端与集群侧协议已经同步（见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md) 的
 〈协议版本〉）。真实的 SSH 握手与 exec 通道已经走通过：连上一台真集群之后，版本握手与
-那几项站点查询取回的是那台集群的真实数据。还没有真实输出的是提交之后那一段
-（提交会话、服务起来、`direct-tcpip` 转发、释放），见
-[`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的 U1 与 U6。
+那几项站点查询取回的是那台集群的真实数据。
 
-站点分发这条路径同样一次都没在真集群上跑过。客户端把插件取回来的每一步（清单 → 一次
-`plugin_package` → 自己解析、重算摘要、验签 → 暂存校验 → 同意闸 → 换入）本机都只用
-假后端验过（`test/site-plugins.test.mjs`）。
+提交之后那一段也在 2026-10-17/18 走过了：会话提交、`direct-tcpip` 转发、
+code-server 界面打开、临时离开之后接回来、释放，以及排队（Slurm `PENDING`）那一段。
+仍然只有推断的是常驻通道在真机上有没有建起来，见 U1；`slurmate submit` 那条 CLI
+链路见 U6。
 
-真机上那个 4 MiB 的响应上限够不够、单线程守护进程扛不扛得住一次 2 MiB 级的响应，没有
-一次真实输出。见 [`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的 U7 —— 那一条已经
-按用户的判断刻意押后（形状还会大动，现在验的结论留不住）。
+站点分发这条路径也在同一台站点上跑完过：清单 → 一次 `plugin_package` → 自己解析、
+重算摘要、验签 → 暂存校验 → 同意闸 → 换入 → 会话用起来；版本升级（旧版回收）也走过。
+本机那份用例（`test/site-plugins.test.mjs`）仍然管着各条分支。
 
-本仓库所有从未实测过的东西（不止这两条）都记在
-[`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的〈从未实测过的〉一节。
+没有验到的是签名那一支（真机上装的那份包未签名）、2 MiB / 4 MiB 的余量，以及 NFS
+上的 `rename`，见 [`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的 U7。
+
+本仓库所有还没有完整实测过的东西（不止这两条）都记在
+[`docs/KNOWN-ISSUES.md`](../docs/KNOWN-ISSUES.md) 的〈没有完整实测过的〉一节。
 
 ---
 
