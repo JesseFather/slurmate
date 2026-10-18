@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci --no-audit --no-fund
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: 用例
         run: node packer/test-packer.mjs
       - name: 夹具与生成器一致
@@ -139,6 +139,35 @@ jobs:
             if python3 -m py_compile "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
           done
           exit $fail
+
+      - name: Node 版本：三份工作流只允许一个值
+        # 同一套用例在 CI 上跑在两个大版本下时，一个只在其中一个版本上失败的
+        #   用例会在另一条工作流上绿（账本 F47）。三处的值是手写的，没有任何
+        #   机制保证同步 —— 这条 lint 就是那道网。
+        run: |
+          python3 - <<'PY'
+          import glob, re, sys
+          seen = {}
+          for p in sorted(glob.glob(".github/workflows/*.yml")):
+              for i, line in enumerate(open(p, encoding="utf-8"), 1):
+                  if line.lstrip().startswith("#"):
+                      continue
+                  m = re.search(r"node-version:\s*['\"]?([0-9]+(?:\.[0-9]+)*)", line)
+                  if m:
+                      seen.setdefault(m.group(1), []).append("%s:%d" % (p, i))
+          if not seen:
+              print("✗ 一份工作流里都没有 node-version —— 这条判据失去目标了")
+              sys.exit(1)
+          if len(seen) != 1:
+              print("✗ node-version 出现了 %d 个值：" % len(seen))
+              for v, at in sorted(seen.items()):
+                  print("    %s  %s" % (v, "、".join(at)))
+              print("  三份工作流必须钉在同一个版本上。")
+              sys.exit(1)
+          v = next(iter(seen))
+          total = sum(len(x) for x in seen.values())
+          print("✓ 三份工作流都钉在 Node %s（%d 处）" % (v, total))
+          PY
 
       - name: 版本号：协议版本四处一致、客户端那两处是三段、文档里的「当前版本」也跟着走
         # 协议版本、客户端版本、服务端版本是同一个号 —— 它落在四个文件里
@@ -608,7 +637,7 @@ jobs:
         # 长出了 5247 处。界面字符串漏得更直接 —— `**` 会按字面画到用户眼前。
         #
         # 三条：注释里不许有 `★ ⚠ ⇒`；字符串里不许有 `** ★ ⚠ ⇒ ——`；
-        # 单条中文字符串不超过 60 字，HTML 控件文字不超过 4 字。
+        # 单条中文字符串不超过 60 字，HTML 动作控件文字不超过 6 字。
         #
         # 迁移期棘轮在 `tools/copy-style-baseline.json`。与 doc-prose 那张表同一个
         # 道理，只是数字放在 JSON 里（80 份文件，写进代码太长）。清干净一份就把

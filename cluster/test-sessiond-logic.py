@@ -88,6 +88,41 @@ def check(desc, cond, detail=""):
         print("  [FAIL] %s  %s" % (desc, detail))
 
 
+# 顶层节标题。打印与记账是同一个动作，末尾据此核对「每一节都跑到了」。
+#
+# 期望清单从本文件的源码里读（`section("...")` 的调用），所以加一节只需要
+#   写这一行，不用再同步维护第二份计数表 —— 一张靠人维护的清单正是
+#   `docs/KNOWN-ISSUES.md` 的 S36 记着的那个坑。
+SECTIONS_SEEN = []
+
+
+def section(label, first=False):
+    SECTIONS_SEEN.append(label)
+    print(("" if first else "\n") + "── %s ──" % label)
+
+
+def expected_sections():
+    # 任意缩进都算：一节若被挪进 `with` / `if` 里，运行时没跑到，而源码里
+    #   那一行还在 —— 这正是要抓的情形。只认行首（允许缩进）的调用，
+    #   注释与字符串里的示例不会误入。
+    with open(os.path.abspath(__file__), encoding="utf-8") as f:
+        src = f.read()
+    return re.findall(r'^[ \t]*section\("([^"]+)"', src, re.M)
+
+
+def sections_problem(expected):
+    """`SECTIONS_SEEN` 与源码里的清单对不上时，指出第一处差别。"""
+    if SECTIONS_SEEN == expected:
+        return ""
+    for i, (got, want) in enumerate(zip(SECTIONS_SEEN, expected)):
+        if got != want:
+            return "第 %d 节不一致：跑了「%s」，源码是「%s」" % (i + 1, got, want)
+    if len(SECTIONS_SEEN) < len(expected):
+        return "少了 %d 节，从「%s」开始" % (
+            len(expected) - len(SECTIONS_SEEN), expected[len(SECTIONS_SEEN)])
+    return "多跑了 %d 节" % (len(SECTIONS_SEEN) - len(expected))
+
+
 # 被测模块的句柄。`main()` 里装配一次，之后全文件用它。
 #
 # 为什么不留成"每个函数自己收一个参数"：夹具辅助函数（build_package /
@@ -749,7 +784,7 @@ def main():
     os.makedirs(os.path.join(tmpdir, "log"), exist_ok=True)
 
     # ── 1. 配置解析（通用键 + [plugin:*] 块）───────────────────────────────
-    print("── 1. 配置解析 ──")
+    section("1. 配置解析", first=True)
     check("端口池解析", cfg.port_start == 55001 and cfg.port_end == 55999,
           "%d-%d" % (cfg.port_start, cfg.port_end))
     check("示例配置里没有认不出的键", cfg.unknown_keys == [], str(cfg.unknown_keys))
@@ -1014,7 +1049,7 @@ def main():
           any("无法识别的键" in e for e in _typo), str(_typo))
 
     # ── 2. 端口区间是跨表安全的前提 ─────────────────────────────────────────
-    print("\n── 2. 端口区间避让（reserved_ranges）──")
+    section("2. 端口区间避让（reserved_ranges）")
     # 示例配置里没有声明要避让的区间，所以端口池本身只需自洽
     check("端口池起止有序", cfg.port_start <= cfg.port_end,
           "%d-%d" % (cfg.port_start, cfg.port_end))
@@ -1045,7 +1080,7 @@ def main():
               hit == want_hit, str(overlap_of(spec)))
 
     # ── 3. Slurm 时间解析 ───────────────────────────────────────────────────
-    print("\n── 3. Slurm 时间解析 ──")
+    section("3. Slurm 时间解析")
     cases = [("183-00:00:00", 183 * 86400), ("12:00:00", 12 * 3600),
              ("01:30:00", 5400), ("30", 1800), ("05:30", 330),
              ("UNLIMITED", None), ("infinite", None), ("", None)]
@@ -1064,7 +1099,7 @@ def main():
         check("非法时间应抛异常", True)
 
     # ── 4. 数据库 ───────────────────────────────────────────────────────────
-    print("\n── 4. 数据库 ──")
+    section("4. 数据库")
     st = mod.Store(cfg.db_path)
     now = mod.now_ts()
     st.insert(session_id="s1", uid=UID, user="alice",
@@ -1106,7 +1141,7 @@ def main():
     st.close()
 
     # ── 5. 端口分配 ─────────────────────────────────────────────────────────
-    print("\n── 5. 端口分配 ──")
+    section("5. 端口分配")
     d = mod.Sessiond(cfg)
     st2 = mod.Store(cfg.db_path)
     d.store = st2
@@ -1130,7 +1165,7 @@ def main():
     st2.close()
 
     # ── 6. nft comment 格式 ─────────────────────────────────────────────────
-    print("\n── 6. nft comment ──")
+    section("6. nft comment")
     c = mod.Nft.comment_for(UID, 5712, 55017)
     check("comment 格式", c == "slurmate-sess-%d-5712-55017" % UID, c)
     check("comment 不含空格", " " not in c)
@@ -1153,7 +1188,7 @@ def main():
     # 0.23 之前兜住它的是链首那条 `ip daddr != <cluster_cidr> accept`（网段之外的
     #   流量在链首就被放行，规则落不到外面去）。现在判在装规则那一处，取的是
     #   Slurm 报的节点地址全集。
-    print("\n── 6b. ACL 规则的目标地址 ──")
+    section("6b. ACL 规则的目标地址")
     _NET = {"192.0.2.11", "192.0.2.12"}
 
     def _mk_nft(known):
@@ -1214,7 +1249,7 @@ def main():
     check("而 scontrol 失败时整个目录是 None（三半一起获取失败）", _down is None, repr(_down))
 
     # ── 7. 会话文件校验（安全关键）────────────────────────────────────────
-    print("\n── 7. 会话文件校验（安全关键）──")
+    section("7. 会话文件校验（安全关键）")
     home = os.path.join(tmpdir, "home")
     sess_dir = os.path.join(home, ".slurmate", "sessions")
     os.makedirs(sess_dir, mode=0o700)
@@ -1290,7 +1325,7 @@ def main():
     os.chmod(sess_dir, 0o700)
 
     # ── 8. validate_session：防伪造 ────────────────────────────────────────
-    print("\n── 8. validate_session（防伪造）──")
+    section("8. validate_session（防伪造）")
     sess = {"uid": UID, "job_id": 5712, "candidates": "55017,55018"}
     job = {"JobState": "RUNNING", "NodeList": "node01"}
 
@@ -1350,7 +1385,7 @@ def main():
     write_session("job-5712.json", good)
 
     # ── 9. Slurm 交互 ──────────────────────────────────────────────────────
-    print("\n── 9. Slurm 交互 ──")
+    section("9. Slurm 交互")
     # 9a. 解析逻辑用【桩】测，不连真集群。
     #
     # ️ `expand_node` 看起来像"纯字符串解析"，其实它要调 scontrol show hostname
@@ -1445,7 +1480,7 @@ def main():
     # ── 10. job_state：区分"查询不到"与"查不了"（H1 回归）────────────────────
     # 这一节防的是最危险的一类误判：把"命令失败"当成"作业已结束"，
     # 进而在一个 tick 内拆掉所有活跃会话的 ACL 并删掉它们的会话文件。
-    print("\n── 10. job_state 三态（H1 回归）──")
+    section("10. job_state 三态（H1 回归）")
     sl2 = mod.Slurm(cfg)
     real_scontrol = cfg.scontrol
 
@@ -1497,7 +1532,7 @@ exit 0
                mod.Slurm.JOB_UNKNOWN}) == 3)
 
     # ── 11. IPv4 规范化（M2 回归）──────────────────────────────────────────
-    print("\n── 11. IPv4 规范化 ──")
+    section("11. IPv4 规范化")
     for good in ("192.0.2.11", "203.0.113.5", "255.255.255.255"):
         check("接受 %s" % good, mod.normalize_ipv4(good) == good,
               str(mod.normalize_ipv4(good)))
@@ -1507,7 +1542,7 @@ exit 0
               repr(mod.normalize_ipv4(bad)))
 
     # ── 12. node_ip 必须与 Slurm 交叉核对（M2 回归）──────────────────────
-    print("\n── 12. node_ip 与 Slurm 交叉核对 ──")
+    section("12. node_ip 与 Slurm 交叉核对")
     sess2 = {"uid": UID, "job_id": 5712, "candidates": "55017,55018"}
     job_real = {"JobState": "RUNNING", "NodeList": "node01"}
     good_info = {"schema": 1, "job_id": 5712, "uid": UID,
@@ -1542,7 +1577,7 @@ exit 0
     # ── 13. 内存与数值参数（L6 回归）────────────────────────────────────────
     # 测的必须是被测代码本身：若测的是【把正则抄了一遍】的本地函数
     #   mem_ok()，那样的用例在 sanitize_mem() 被改成什么都照样绿。这里直接调它。
-    print("\n── 13. 内存与数值参数 ──")
+    section("13. 内存与数值参数")
     check("4G 合法", mod.sanitize_mem("4G", "8G") == ("4G", False))
     check("512M 合法", mod.sanitize_mem("512M", "8G") == ("512M", False))
     check("8 归一成 8（无单位）", mod.sanitize_mem("8", "8G") == ("8", False))
@@ -1569,7 +1604,7 @@ exit 0
     # 旧库里还留着 sessions.purpose 这种本版没有的列，而 SQLite 的
     # CREATE TABLE IF NOT EXISTS 不会改已存在的表。不拦的话，旧库上的每一次
     # 提交都会以内部错误失败。
-    print("\n── 16. 数据库表结构 ──")
+    section("16. 数据库表结构")
     import sqlite3 as _sq
     import signal as _sig
     old_db = os.path.join(tmpdir, "old-claims.db")
@@ -1594,7 +1629,7 @@ exit 0
 
     # ── 17. sbatch 命令行（纯函数）─────────────────────────────────────────
     # 这些分支的错只会在真集群上、且只在某些分支上暴露，所以必须在本机断言。
-    print("\n── 17. sbatch 命令行 ──")
+    section("17. sbatch 命令行")
     base_sess = {"session_id": "9f2c4a1bdeadbeef", "account": "myaccount",
                  "cpus": 2, "mem": "8G", "requested_time": "12:00:00",
                  "partition": "2080TI", "gres": None}
@@ -1718,7 +1753,7 @@ exit 0
           _tpl_exp == [], "模板里还有：%s" % _tpl_exp)
 
     # ── 18. op_submit：缺省值由服务端填，权限查不到时退化而不是拒绝 ─────────
-    print("\n── 18. op_submit（服务端填默认值）──")
+    section("18. op_submit（服务端填默认值）")
     d.user_home = lambda uid: home
     captured = {}
     seq = [0]
@@ -2061,7 +2096,7 @@ exit 0
     # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的分派结构性地
     # 保证。这里测的是守护进程这一侧：缺省、开关、公钥、以及"从 nft 规则恢复出来
     # 的会话不许猜自己是什么服务"。
-    print("\n── 19. 插件（服务种类）──")
+    section("19. 插件（服务种类）")
 
     # 19.0 插件表是扫出来的，不是代码里写死的
     #
@@ -4335,7 +4370,7 @@ exit 0
     # 符号链接那一条是承重的：一个叫 `x.splug` 的链接能指向任何地方、还能随时
     #   换目标，于是"我读到的那一份"与"校验过的那一份"不是同一份 —— 那正是整节
     #   要防的事。
-    print("\n── 19.13. 包来源目录：哪些文件算包（判据只有一份）──")
+    section("19.13. 包来源目录：哪些文件算包（判据只有一份）")
     _gate = tempfile.mkdtemp(prefix="slurmate-gate-")
     try:
         def _touch(rel, blob=b"x\n"):
@@ -4419,7 +4454,7 @@ exit 0
     #
     # 判据是标识符而不是"提没提 plugin 这个词"：文件头里必须说清楚
     #   插件搬到哪儿去了（那是给管理员看的），那是文字；而变量名与路径是判据。
-    print("\n── 19.13b. 拆开之后：基座安装脚本不认识插件 ──")
+    section("19.13b. 拆开之后：基座安装脚本不认识插件")
     _ib = os.path.join(HERE, "install-base.sh")
     with open(_ib, encoding="utf-8") as _f:
         _ib_src = _f.read()
@@ -4574,7 +4609,7 @@ exit 0
     #
     # 判的次序也在这条契约里（附录 A.4）：一个包同时犯两条时，先判哪条决定
     #   了拿到哪个理由词。所以下面断言的是逐条相等的词，不只是"拒了"。
-    print("\n── 19.14. 读一个 .splug（三端共用一份符合性向量）──")
+    section("19.14. 读一个 .splug（三端共用一份符合性向量）")
     _conf = os.path.abspath(os.path.join(HERE, os.pardir, "tools", "conformance"))
     with open(os.path.join(_conf, "expected.json"), encoding="utf-8") as _f:
         _exp = json.load(_f)
@@ -4864,7 +4899,7 @@ exit 0
     #   ② 包的验证：能解析 + 签名自洽 + 整包大小在发得出去的范围内；
     #   ③ 与站点自己的记忆比（§2.5 在站点这一侧的落点）：同一个 id 换了
     #      签名者（或者从"有签名"变成"没签名"），停下来问，不替你选。
-    print("\n── 19.15. 安装器（装一个 .splug 进站点）──")
+    section("19.15. 安装器（装一个 .splug 进站点）")
 
     _ins_home = tempfile.mkdtemp(prefix="slurmate-install-")
     try:
@@ -5360,7 +5395,7 @@ exit 0
     # 若只有客户端那一侧有这几张表：守护进程逐键取值、多出来的键一律不管，
     #   于是「一份把 `contributes` 拼错的清单：客户端拒、守护进程收」—— 站点能把
     #   一个任何客户端都装不上的插件正常分发出去，而没有任何东西会红（S12）。
-    print("\n── 19.16. 清单里认得的键（两侧逐字一致）──")
+    section("19.16. 清单里认得的键（两侧逐字一致）")
 
     _mk_tables = (("manifest", "MANIFEST_KEYS"),
                   ("contributes", "CONTRIBUTES_KEYS"),
@@ -5457,7 +5492,7 @@ exit 0
     # 这一组数里只有 `total_bytes` 是推出来的（包上限 − 信封最坏情况），
     #   所以下面除了"三处逐字相同"，还要验那条推导本身 —— 否则一份自己就不
     #   自洽的书面判据会让三条比对一起绿。
-    print("\n── 19.17. 负载的大小上限（三侧逐字一致）──")
+    section("19.17. 负载的大小上限（三侧逐字一致）")
 
     def _pl_lit(src, names):
         """把一串 `const NAME = <纯算术>;` 求值出来（按声明次序，后面的可引用前面的）。
@@ -5628,7 +5663,7 @@ exit 0
     # 这一节是第二次那句「装得上、守护进程不认」的落点：`install-base.sh` 在本机跑
     #   不了（要 root 加一台控制节点，见 KNOWN-ISSUES 的 U2），所以"装完之后配置
     #   里该多出一块、拿走包之后该少一块"这件事只有这里看得见。
-    print("\n── 19.18. 安装器、插件配置与对账（插件身份那一层）──")
+    section("19.18. 安装器、插件配置与对账（插件身份那一层）")
 
     _sy_home = tempfile.mkdtemp(prefix="slurmate-sync-")
     try:
@@ -6224,7 +6259,7 @@ exit 0
     #   ② 卸插件：一个插件在站点上留下恰好四处痕迹，全删，不多删
     #   ③ 对账顺手织作业脚本，并清掉不再属于任何插件的那几份
     #   ④ `--check` 的两个退出码：机器级(2) vs 配置级(1)
-    print("\n── 19.19. 拆开 install-base.sh 之后的四件事 ──")
+    section("19.19. 拆开 install-base.sh 之后的四件事")
     _d4 = tempfile.mkdtemp(prefix="slurmate-split-")
     _ck = tempfile.mkdtemp(prefix="slurmate-ck-")
     try:
@@ -6658,7 +6693,7 @@ exit 0
     #   ③ 逐字段对上（参数错位会让 ssh_host_key 里躺着别的值）
     # 这一节是 run.sbatch 在本文件里唯一的自动化防线 —— 它没有 .sh 后缀，
     # checks.yml 的语法扫描清单里不含它，改动后只有 `bash -n` 和这里在看着。
-    print("\n── 20. run.sbatch 写出来的会话文件 ──")
+    section("20. run.sbatch 写出来的会话文件")
     _rb = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sbatch")
     _skip = None
     try:
@@ -6786,7 +6821,7 @@ exit 0
     #
     # 所以这里真的编织一遍（照安装器的做法，同一个标记、同一段 awk），
     # 再真的调一次分派。
-    print("\n── 21. 作业侧契约（宿主 ↔ 插件的唯一接口：函数名）──")
+    section("21. 作业侧契约（宿主 ↔ 插件的唯一接口：函数名）")
     _tpl = open(_rb, encoding="utf-8").read()
     # 一个插件一份：逐插件织，而不是把所有插件织进一份。
     #   这一节的分叉后果是"用例绿了、真机上炸" —— 所以织法必须与实现同形。
@@ -6880,7 +6915,7 @@ exit 0
     #   任何东西在看它的控制流。变异验证发现过这个洞：把作业脚本开头那道
     #   `declare -F start_<kind>` 守卫改成 `if false`，当时全绿 —— 因为没有任何
     #   用例执行到那一行。
-    print("\n── 22. run.sbatch 的主流程（真的跑一遍）──")
+    section("22. run.sbatch 的主流程（真的跑一遍）")
 
     def run_jobsh(script, kind, home, extra_env=None):
         """在一个假的计算节点环境里跑作业脚本。返回 (退出码, 日志文本)。"""
@@ -7320,7 +7355,7 @@ exit 0
           os.listdir(_tl_home["quiet"]))
 
     # ── 23. 配额：一个会话占着一个位置 ─────────────────────────────────────
-    print("\n── 23. 配额（每人最多几个会话）──")
+    section("23. 配额（每人最多几个会话）")
 
     # 这一节与第 18 节的唯一区别，正是它存在的理由：store 不重建。
     #   配额是跨请求累积的，而第 18 节的 `run_submit` 每次都新建一个 Store ——
@@ -7591,7 +7626,7 @@ exit 0
     #   （job_gone / job_<状态> / orphaned / goodbye）、确认阈值、PENDING 保留、
     #   "非 RUNNING 就释放" —— 逐条有用例。少了它们，"REQUEUED 被当成作业结束"
     #   这件事就没有任何东西挡着。
-    print("\n── 24. 作业状态（非终态一律保留）──")
+    section("24. 作业状态（非终态一律保留）")
 
     # 两张表在这里独立列一遍，不从被测模块里抄。抄过来的话，
     # "把某个真终态从集合里删掉"这种变异会让表与集合一起变，用例永远是绿的。
@@ -8144,7 +8179,7 @@ exit 0
     #
     # 时间靠喂进去（`now=`），不靠真等：真跑半小时的 tick 是不现实的，
     #   而"等不起"正是时间必须喂进去的原因之一。
-    print("\n── 24b. 会话文件无法读取的说话频率（F28）──")
+    section("24b. 会话文件无法读取的说话频率（F28）")
 
     class _LogCatcher(logging.Handler):
         """把守护进程那一个 logger 的记录收下来 —— 判"行数"要看的是真的发了什么。"""
@@ -8228,7 +8263,7 @@ exit 0
     #
     # 修法不是把正则写宽一点，而是取消第二份表示：描述符 `{name,type,count}`
     # 是唯一的内部表示，交给 Slurm 的那个串由 `gres_spec()` 当场拼。
-    print("\n── 25. GRES（结构化描述符 + 唯一的拼法）──")
+    section("25. GRES（结构化描述符 + 唯一的拼法）")
 
     # ── 25.1 一个拼法 ───────────────────────────────────────────────────────
     check("没型号 → 两段（`gpu:2`）",
@@ -8495,7 +8530,7 @@ exit 0
     # 这一节里几乎每一条都在守一个静默的失败：卡死、丢响应、跨用户泄漏、
     #   心跳被挤出桶导致批量 scancel。它们的共同点是不会红任何东西 ——
     #   所以每条断言都要指出"改坏了会看到什么"。
-    print("\n── 26. 常驻通道 ──")
+    section("26. 常驻通道")
 
     class _Nft(object):
         def ensure(self):
@@ -10885,7 +10920,7 @@ exit 0
     #   那句话（没成功要说出来、必须走到用户眼前）。只判"状态没变"的话，
     #   把拆除提到闸前面的写法照样绿 —— 所以每条判据里都带着"规则一条都没少、
     #   会话文件还在"，那才是"什么都没拆"。
-    print("\n── 30. 释放的闸：确认作业真的停了才拆（F12 / F13）──")
+    section("30. 释放的闸：确认作业真的停了才拆（F12 / F13）")
 
     check("重试间隔是一个常量而不是配置键（与 job_missing_confirm_ticks "
           "同族：这些时间刻度从来没有站点改过）",
@@ -11276,7 +11311,7 @@ exit 0
     #    「会话还在 `submitted`」并且「作业在做什么」，四个格子缺一不可 ——
     #    尤其 `submitted` + 排队 + 等了 2400 秒，一个字都不许动 那一格：
     #    少了它，"拿 1800 秒一刀切"那个错的修法会全绿。
-    print("\n── 31. 终态都过同一道闸（F32）/ 排队那一档的 TTL（F27）──")
+    section("31. 终态都过同一道闸（F32）/ 排队那一档的 TTL（F27）")
 
     check("两个 TTL 都是常量而不是配置键（与 RELEASE_RETRY_SECONDS 同族），"
           "而且排队那个明显更长 —— 这一条挡的是「合成一个数」那种修法",
@@ -11517,7 +11552,7 @@ exit 0
     #       重启的话这些全都会换掉）；
     #     · 校验或可热性不过，一个字都不改（旧值仍是旧值）；
     #     · 插件目录变了，重载之后不用重启就能用。
-    print("\n── 32. 热重载（v0.12 阶段 3）──")
+    section("32. 热重载（v0.12 阶段 3）")
 
     # 32.1 那张表必须覆盖每一个配置键
     #
@@ -12025,7 +12060,7 @@ exit 0
             pass
 
     # ── 站点服务生命周期（0.24）：daemon / drain / CLI 的 service 组 ────────
-    print("\n── 站点服务生命周期（daemon / drain / service）──")
+    section("站点服务生命周期（daemon / drain / service）")
     _SVC_CONF = write_conf("range_start = 55001\nrange_end = 55099\n",
                            "svc.conf")
     _d_svc = _mk_reload_d(_SVC_CONF)
@@ -12607,7 +12642,7 @@ exit 0
             pass
 
     # ── 站点配置对账（升级时键跟着版本走，取值跟着站点走）─────────────────────
-    print("\n── 站点配置对账（conf-merge.py）──")
+    section("站点配置对账（conf-merge.py）")
     _cm = os.path.join(HERE, "conf-merge.py")
     _cmd = os.path.join(tempfile.mkdtemp(prefix="slurmate-cm-"), "old.conf")
     try:
@@ -12739,6 +12774,17 @@ exit 0
               "rc=%s" % _r5.returncode)
     finally:
         shutil.rmtree(os.path.dirname(_cmd), ignore_errors=True)
+
+    # ── 汇总前的核账：源码里有几节，就真的跑了几节 ──────────────────────
+    #
+    # 没有这一条时，汇总只判 `FAIL == 0`：中间有整节没跑（异常被某个 `with`
+    #   吞掉、或者谁手滑加了一个 `return`）而跑过的那些没失败，它照样打印
+    #   「全部用例都已实际执行」。2026-10-08 就真的出现过一次：735 条而不是
+    #   1229 条，26 节之后五节整段没跑，汇总与退出码都是绿的。
+    _expected = expected_sections()
+    _why = sections_problem(_expected)
+    check("每一节都跑到了，而且次序与源码一致", not _why,
+          _why or "跑了 %d 节" % len(SECTIONS_SEEN))
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

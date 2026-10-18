@@ -706,6 +706,11 @@ _txn_selftest() {
     mkdir -p "${td}/m/etc"
     printf 'old\n' > "${td}/m/etc/conf"
     chmod 640 "${td}/m/etc/conf"
+    # 原模式当场量，不写死 755：`mkdir` 的结果跟着 umask 走，而运行自测的
+    #   人可能把 umask 设成 077（这台开发机就是）。写死会把"恢复原模式"
+    #   这条不变量测成"恰好是某个环境的缺省值"。
+    local _etc_mode
+    _etc_mode="$(stat -c %a "${td}/m/etc")"
     txn_begin install "${td}/w1" || _t_no "事务开始"
     txn_backup "${td}/m/etc/conf"
     printf 'new\n' > "${td}/m/etc/conf"
@@ -721,7 +726,7 @@ _txn_selftest() {
     [[ "$(stat -c %a "${td}/m/etc/conf")" == "640" ]] && _t_ok || _t_no "覆盖后没有恢复模式"
     [[ ! -e "${td}/m/etc/new" ]] && _t_ok || _t_no "新增文件没有删掉"
     [[ ! -e "${td}/m/fresh" ]] && _t_ok || _t_no "新建目录没有删掉"
-    [[ "$(stat -c %a "${td}/m/etc")" == "755" ]] && _t_ok || _t_no "目录模式没有恢复"
+    [[ "$(stat -c %a "${td}/m/etc")" == "$_etc_mode" ]] && _t_ok || _t_no "目录模式没有恢复"
 
     mkdir -p "${td}/u/d1" "${td}/u/d2" "${td}/u/tree/a"
     printf 'data\n' > "${td}/u/d1/f"
