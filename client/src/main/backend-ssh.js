@@ -129,6 +129,23 @@ const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
 const LOGS_MKDIR = 'mkdir -p "$HOME/.slurmate/logs"';
 
 /**
+ * 会话文件目录。客户端不写它，但会把它建出来并钉成私有 ——
+ *   守护进程读会话文件时只检查 `.slurmate` 及其子目录（家目录归用户处置，
+ *   见 `slurmate-sessiond` 的 `load_session_file()`）。
+ */
+const SESS_MKDIR = 'mkdir -p "$HOME/.slurmate/sessions"';
+
+/**
+ * 把本系统自己的那三格钉成 0700。
+ *
+ * `mkdir -p` 只对新建目录生效；一个从前用宽松 umask 建出来的 `.slurmate`
+ *   会一直保持原模式，而守护进程的检查照样会拒。客户端能保证的是自己这一格：
+ *   这三级的属主是用户，客户端以他的身份执行，改得动。
+ */
+const HOME_PRIVATE = 'chmod 700 "$HOME/.slurmate" "$HOME/.slurmate/logs"'
+  + ' "$HOME/.slurmate/sessions"';
+
+/**
  * 常驻通道上那一段建目录的回执，走 stderr。
  *
  * 它为什么不是一条协议消息：协议那条 stdout 是守护进程的（CLI 是个字节泵，
@@ -155,7 +172,7 @@ const PREPARE_FAIL = 'slurmate prepare: failed';
  *   看一眼就知道。代价是路径写了两遍 —— 有一条用例钉住两者用的是同一个。
  */
 const STREAM_CMD = "/bin/bash -c '"
-  + '( umask 077; if ' + LOGS_MKDIR
+  + '( umask 077; if ' + LOGS_MKDIR + ' && ' + SESS_MKDIR + ' && ' + HOME_PRIVATE
   + '; then printf "' + PREPARE_OK + '\\n" >&2'
   + '; else printf "' + PREPARE_FAIL + ' %s\\n" "$?" >&2; fi ) >/dev/null & '
   + "exec /usr/local/bin/slurmate stream'";
@@ -175,7 +192,8 @@ const STREAM_CMD = "/bin/bash -c '"
  *
  * 与另外两条一样是编译期常量：不接受任何用户输入拼接。
  */
-const PREPARE_CMD = "/bin/bash -c 'umask 077; " + LOGS_MKDIR + "'";
+const PREPARE_CMD = "/bin/bash -c 'umask 077; " + LOGS_MKDIR + " && " + SESS_MKDIR
+  + " && " + HOME_PRIVATE + "'";
 
 const READY_TIMEOUT_MS = 20000;
 const KEEPALIVE_INTERVAL_MS = 10000;

@@ -54,7 +54,7 @@ IPv4，权威来源是 `scontrol show node` 的 `NodeAddr=`。
 ### 3. 共享家目录（NFS 或同类），并且支持服务端原子 rename
 
 作业把会话文件写在 `~/.slurmate/sessions/job-<id>.json`，守护进程在登录节点上把它读出来
-（`cluster/run.sbatch`，`cluster/slurmate-sessiond`）。这条链路有四层
+（`cluster/run.sbatch`，`cluster/slurmate-sessiond`）。这条链路有六层
 要求，每一层的失败模式都不同。
 
 3a. 家目录必须在登录节点与计算节点上都能看到
@@ -108,6 +108,19 @@ IPv4，权威来源是 `scontrol show node` 的 `NodeAddr=`。
 它在目标机器上行不行，由 `tools/check-cluster.sh` 第 8 节实测：那一节带着与单元
 同一套指令起一个瞬时单元，跑 `scontrol ping`、把 munge 走一遍、`nft list`，并验
 一次「该只读的写不进去、托管目录写得进去」。
+
+3f. `.slurmate` 及其子目录必须私有
+
+守护进程读会话文件与作业日志时，检查从 `.slurmate` 开始：`.slurmate`、
+`.slurmate/sessions`、`.slurmate/logs` 的属主必须是本人或 root，且
+`mode & 0o022 == 0`。家目录不查：它归用户处置，站点缺省可能是 `0775`。
+
+- 客户端连上站点时会建出这三格并 `chmod 700`；作业脚本的兜底同样做一次。
+  `mkdir -p` 只对新建生效，所以 `chmod` 是必须的那一半。
+- 不满足：`load_session_file()` / `read_log_tail()` 返回
+  `component_group_or_world_writable`，会话停在 `submitted`（界面显示
+  「排队中 · 等待调度与登记」），到 `ENROLL_TTL` 超时后释放并取消作业。
+- 手工修复：`chmod 700 ~/.slurmate ~/.slurmate/sessions ~/.slurmate/logs`。
 
 ### 4. root 需要 Slurm operator 权限
 

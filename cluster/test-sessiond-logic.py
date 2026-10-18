@@ -1324,6 +1324,14 @@ def main():
           info is None and why == "component_group_or_world_writable", str(why))
     os.chmod(sess_dir, 0o700)
 
+    # 家目录不查（用户 2026-10-18 拍板）：它归用户处置，站点的缺省可能是
+    #   0775。`.slurmate` 自己组可写仍然被拒，见上一条。
+    os.chmod(home, 0o775)
+    info, why = d.load_session_file(UID, 5712)
+    check("家目录组可写不影响登记（只查 .slurmate 及其子目录）",
+          info is not None and why is None, str(why))
+    os.chmod(home, 0o700)
+
     # ── 8. validate_session：防伪造 ────────────────────────────────────────
     section("8. validate_session（防伪造）")
     sess = {"uid": UID, "job_id": 5712, "candidates": "55017,55018"}
@@ -10302,7 +10310,7 @@ exit 0
     _long = os.path.join(_djlog, "slurm-4242.out")
     with io.open(_long, "w", encoding="utf-8") as f:
         f.write("".join("第 %d 行 " % i + "x" * 180 + "\n" for i in range(3000)))
-    _cell = mod.read_log_tail((_djhome, os.path.join(_djhome, ".slurmate"), _djlog),
+    _cell = mod.read_log_tail((os.path.join(_djhome, ".slurmate"), _djlog),
                               UID, _long, 2000)
     _cell_lines = ((_cell or {}).get("text") or "").split("\n")
     check("从文件中间切进来时，第一行半截的要丢掉"
@@ -10334,7 +10342,7 @@ exit 0
           (lambda: (os.chmod(_bad_dir, 0o700),
                     os.chmod(_big, 0o644),
                     mod.read_log_tail(
-                        (_djhome, os.path.join(_djhome, ".slurmate"), _djlog),
+                        (os.path.join(_djhome, ".slurmate"), _djlog),
                         UID, _big, 3).get("text") is not None))(),
           "0644 的日志必须读得到")
 

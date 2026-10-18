@@ -6486,6 +6486,11 @@ def check_private_dir_chain(dirs, uid):
     （`load_session_file`）与读作业日志（`read_log_tail`），它们守的是同一件事
     （"这条路径上没有别人插得进手"），而两份实现迟早会漂开，漂的那一份不会报错。
 
+    调用方决定从哪一级开始。两个调用方都从 `.slurmate` 开始，不含家目录：
+    家目录归用户处置（站点缺省可能是 0775），本系统只保证自己那一棵子树。
+    残留风险如实记：家目录可写时，同组的人能改名 `.slurmate`（拒绝服务），
+    但替换不了里面的内容 —— 目录与文件各自的属主、模式、硬链接数仍然逐项校验。
+
     它只管目录。文件那一侧另有一套检查，而且两个调用方故意不一样：
       会话文件是我们要解析的输入（要求 `mode & 0o077 == 0`），而作业日志是
       Slurm 建的、模式不由我们定，照抄那一条会让 `slurm-*.err` 永远读不到，
@@ -9109,7 +9114,13 @@ class Sessiond(object):
         base = os.path.join(home, ".slurmate", "sessions")
         path = os.path.join(base, "job-%d.json" % job_id)
 
-        why = check_private_dir_chain((home, os.path.join(home, ".slurmate"), base), uid)
+        # 只查 `.slurmate` 及其子目录，不查家目录本身（用户 2026-10-18 拍板）：
+        #   家目录是用户的，他有自己的处置权（站点的缺省可能是 0775，组是用户
+        #   自己的私有组）。`.slurmate` 归本系统管，它和下面每一级必须是私有的。
+        #   代价如实记：家目录可写时，同组的另一个人可以改名 `.slurmate`
+        #   （拒绝服务）；但替换不了里面的内容 —— 目录的属主与模式、文件自己的
+        #   属主 / 0600 / 硬链接数仍然逐项校验。
+        why = check_private_dir_chain((os.path.join(home, ".slurmate"), base), uid)
         if why:
             return None, why
 
@@ -10349,7 +10360,9 @@ class Sessiond(object):
             return self._err(3, "unknown_uid", str(uid))
 
         lines = clamp_tail_lines(req.get("lines"))
-        dirs = (home, os.path.join(home, ".slurmate"), logdir)
+        # 与 `load_session_file()` 同一条边界：家目录不查，只查 `.slurmate`
+        #   和它下面的日志目录（用户 2026-10-18 拍板，理由见那一处）。
+        dirs = (os.path.join(home, ".slurmate"), logdir)
         return self._ok({
             "out": read_log_tail(dirs, uid,
                                  os.path.join(logdir, "slurm-%d.out" % job_id), lines),

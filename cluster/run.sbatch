@@ -204,6 +204,9 @@ TOMBSTONE_WRITTEN=0
 #   这里再 `mkdir -p` 一次是兜底 —— 目录被谁删掉之后，下一个作业会把它补回来，
 #   而不是让此后每一次提交都起不来。
 mkdir -p "$SLURMATE_SESS_DIR" "$SLURMATE_LOG_DIR" 2>/dev/null || true
+# `mkdir -p` 只对新建生效：一个从前用宽松 umask 建出来的目录会一直保持原模式。
+#   本系统只保证 `.slurmate` 及其子目录，家目录不碰（用户 2026-10-18 拍板）。
+chmod 700 "$HOME/.slurmate" "$SLURMATE_SESS_DIR" "$SLURMATE_LOG_DIR" 2>/dev/null || true
 OUT_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.out"
 ERR_LOG="${SLURMATE_LOG_DIR}/slurm-${JOB_ID}.err"
 

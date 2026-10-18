@@ -783,7 +783,8 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
   //   展开 —— 客户端一个路径都不拼。禁止的是客户端这一侧的插值。
   assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
   assert.deepEqual(
-    [...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]), ['HOME'],
+    [...new Set([...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))],
+    ['HOME'],
     '命令串里唯一的变量必须是 $HOME —— 客户端拼不出远端家目录');
   assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
@@ -794,6 +795,13 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
   //    两处漂开的表现是"客户端建了一个没人用的目录，作业写去另一个不存在的地方" ——
   //    提交照样失败，而错误信息一个字都不提这里的目录。
   assert.match(cmd, /\.slurmate\/logs/, '必须与守护进程的 JOB_LOG_SUBDIR 是同一个');
+  // 家目录归用户处置，本系统只能保证自己那三格（用户 2026-10-18 拍板）。
+  //   `mkdir -p` 不改已存在的目录，所以除了建，还要把模式钉回 0700。
+  assert.match(cmd, /mkdir -p "\$HOME\/\.slurmate\/sessions"/,
+    '会话文件目录也要建出来（客户端不写它，但要保证它存在且私有）');
+  assert.match(
+    cmd, /chmod 700 "\$HOME\/\.slurmate" "\$HOME\/\.slurmate\/logs" "\$HOME\/\.slurmate\/sessions"/,
+    '自己那三格必须钉成 0700 —— 守护进程只保证这一段的私有性');
   const daemon = fs.readFileSync(
     path.join(ROOT, '..', 'cluster', 'slurmate-sessiond'), 'utf8');
   const m = daemon.match(/^JOB_LOG_SUBDIR = "([^"]+)"/m);

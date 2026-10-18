@@ -149,6 +149,7 @@ ls -l ~alice/.slurmate/sessions/          # `~alice` 由 NSS 展开，不用拼�
 | `not_yet` | 文件还不存在（正常的启动窗口） |
 | `bad_json` | 写了一半或文件损坏 |
 | `mode_too_open` | 会话文件权限不是 `0600` |
+| `component_group_or_world_writable` | `.slurmate` 或它下面某一级对组/其他可写（家目录不查）。`chmod 700 ~/.slurmate ~/.slurmate/sessions ~/.slurmate/logs` |
 | `hardlinked` | 硬链接数不为 1 |
 | `uid_mismatch` | 文件属主不是本人 |
 | `port_not_in_candidates` | 端口不在守护进程分配的候选集里 —— 伪造的核心判据 |

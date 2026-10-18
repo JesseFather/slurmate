@@ -1282,6 +1282,10 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 `component_bad_owner` / `component_group_or_world_writable` / `not_regular` /
 `uid_mismatch` / `hardlinked` / `open_failed:<errno>`。
 
+目录链从 `.slurmate` 开始，不含家目录：家目录归用户处置，站点缺省可能是
+`0775`；本系统保证的只有 `.slurmate` 及其子目录（属主本人或 root、
+`mode & 0o022 == 0`）。会话文件那一条链同理。
+
 归属：照 [`status`](#status) —— 不属于调用者的会话与不存在的会话回同一个
 `3 not_found`。不给 `session_id` 也是这一个答案：日志是逐会话的东西，没有"默认最新
 那条"这种缺省。
