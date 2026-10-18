@@ -728,55 +728,68 @@ test('「重新同步」在整屏底部挨着「检查集群」：点它走那�
     assert.match(said, /还没连上站点/, '失败要说清为什么');
   });
 
-test('作业那一屏：状态条上是「停止该作业」，停的是选中的那一条；其余屏照旧「结束会话」',
-  async () => {
-    // 用户 2026-10-18：在作业选项卡里，上栏不该是「结束会话」—— 它停的是前台
-    //   那条会话，而用户盯着的是选中的那一行。作业屏上它要写「停止该作业」，
-    //   停的就是选中的那一条；结束会话回面板去操作。
-    const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
-      'window.__stops = []; window.slurmate.stop = (slot) => {'
-      + '  window.__stops.push(slot); return Promise.resolve({ ok: true }); };'
-      + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
-    h.run("document.body.append($('sb-end'));");
-    const btn = h.byId.get('sb-end');
-    const snap = { state: 'running', slot: 's1', sessionId: 'sess-a', jobId: '11' };
+test('状态条右侧那两颗：只在会话页面盖着时露，写的是「停止该作业」', async () => {
+  // 用户 2026-10-18 定的形状：code-server 那类作业页面上给一颗「停止该作业」——
+  //   快速结束眼前这一条的机会；插件页与作业页都不给（前者没有页面可重载、
+  //   也没有作业可停，后者自己那一屏上就有大按钮）。「结束会话」这个名字不再出现。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__stops = []; window.slurmate.stop = (slot) => {'
+    + '  window.__stops.push(slot); return Promise.resolve({ ok: true }); };'
+    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
+  h.run("document.body.append($('sb-end')); document.body.append($('sb-reload'));");
+  const btn = h.byId.get('sb-end');
+  const reload = h.byId.get('sb-reload');
+  // `hasSurface` 认的是插件清单里的 `surface`（与「重新加载」同一份判据）。
+  h.run("lastPlugins = { plugins: [{ name: 'code-server', surface: { kind: 'web', path: '/' } }] };");
+  const snap = { state: 'running', slot: 's1', sessionId: 'sess-a', jobId: '11',
+                 serviceKind: 'code-server' };
 
-    // ── 其余各屏：前台会话 ──
-    h.run("SCREEN = 'plugins'; SESS = { sessions: [{ slot: 's1', live: true }], front: 's1' };");
-    h.fn('renderSnapshot')(snap);
-    assert.equal(btn._text, '结束会话');
-    assert.equal(btn.classList.contains('hidden'), false);
+  // ── 会话页面盖着：两颗都在，「停止该作业」 ──
+  h.run("SCREEN = 'plugins'; SESS = { sessions: [{ slot: 's1', live: true }],"
+    + " front: 's1', panelFront: false };");
+  h.fn('renderSnapshot')(snap);
+  assert.equal(btn._text, '停止该作业');
+  assert.equal(btn.classList.contains('hidden'), false);
+  assert.equal(reload.classList.contains('hidden'), false, '页面盖着时「重新加载」要在');
 
-    // 排队中也露：它已经占着位置、作业已经在队列里 —— 这正是要能取消的那一种。
-    h.fn('renderSnapshot')({ ...snap, state: 'queued' });
-    assert.equal(btn._text, '结束会话');
-    assert.equal(btn.classList.contains('hidden'), false, '排队中的会话也要能结束');
+  // 第二段停的是眼前这一条（前台 s1）
+  btn.onclick();
+  const cluster = (() => {
+    const p = btn.parentNode;
+    return p.children[p.children.indexOf(btn) + 1];
+  })();
+  assert.match(cluster.children[0]._text, /作业会被取消/);
+  assert.equal(cluster.children[1]._text, '停止');
+  await cluster.children[1].onclick();
+  assert.equal(JSON.stringify(h.run('window.__stops')), '["s1"]',
+    `停的是眼前的这一条：${JSON.stringify(h.run('window.__stops'))}`);
 
-    // ── 作业那一屏：选中的第二条 ──
-    const rows = [
-      { session_id: 'sess-a', slot: 's1', live: true, attached: true, job_id: '11' },
-      { session_id: 'sess-b', slot: 's2', live: true, attached: true, job_id: '22' },
-    ];
-    h.run(`SCREEN = 'jobs'; JOBS = ${JSON.stringify({
-      list: rows, at: 1, error: null, selected: 'sess-b',
-    })};`);
-    h.fn('renderJobsSelection')();
-    assert.equal(btn._text, '停止该作业', '作业屏上不许再写「结束会话」');
-    assert.equal(btn.classList.contains('hidden'), false);
-    assert.match(btn.title || '', /22/, 'title 要说清停的是哪一条');
+  // ── 面板抬起来：两颗都不在 ──
+  h.run('SESS.panelFront = true;');
+  h.fn('renderSnapshot')(snap);
+  assert.equal(btn.classList.contains('hidden'), true, '插件页上不该有会话动作');
+  assert.equal(reload.classList.contains('hidden'), true, '插件页上不该有「重新加载」');
 
-    // 第二段打的是选中的那一条（s2），不是前台 s1
-    btn.onclick();
-    const cluster = (() => {
-      const p = btn.parentNode;
-      return p.children[p.children.indexOf(btn) + 1];
-    })();
-    assert.match(cluster.children[0]._text, /作业会被取消/);
-    assert.equal(cluster.children[1]._text, '停止');
-    await cluster.children[1].onclick();
-    assert.equal(JSON.stringify(h.run('window.__stops')), '["s2"]',
-      `停的是选中的那一条：${JSON.stringify(h.run('window.__stops'))}`);
-  });
+  // ── 排队中：还没有页面，面板就是眼前的这一块 —— 同样不在 ──
+  h.run('SESS.panelFront = false;');
+  h.fn('renderSnapshot')({ ...snap, state: 'queued' });
+  assert.equal(btn.classList.contains('hidden'), true,
+    '排队中还没有页面，用户看着的是面板');
+  assert.equal(reload.classList.contains('hidden'), true);
+
+  // ── 作业那一屏：它自己那一屏上就有大按钮，状态条这一颗不露 ──
+  const rows = [
+    { session_id: 'sess-a', slot: 's1', live: true, attached: true, job_id: '11' },
+    { session_id: 'sess-b', slot: 's2', live: true, attached: true, job_id: '22' },
+  ];
+  h.run(`SCREEN = 'jobs'; SESS.panelFront = true; JOBS = ${JSON.stringify({
+    list: rows, at: 1, error: null, selected: 'sess-b',
+  })};`);
+  h.fn('renderJobsSelection')();
+  assert.equal(btn.classList.contains('hidden'), true,
+    '作业页有自己的大按钮，状态条这一颗不再露');
+  assert.equal(reload.classList.contains('hidden'), true);
+});
 
 test('作业那一屏开着时，活会话的集合一变就重取一次列表', () => {
   // 用户 2026-10-18：排队中的作业不在作业那一屏上。提交返回之前那一屏是空的，
@@ -1171,12 +1184,15 @@ test('顶栏标签：同一个插件开两份时，两个标签必须分得开',
   assert.equal(t2[0].textContent, '编辑器', '不重名就不加字');
   assert.equal(t2[1].textContent, '中转站');
   // 一条会话、而本机还不知道它那个插件（`lastPlugins` 为空 —— 对不上插件
-  //   的时候就是这样）：不知道它有没有页面，也就谈不上"面板被盖着"，整条收起来。
-  //   知道它有页面时这一条栏必须露 —— 那一条在下面单独钉着。
+  //   的时候就是这样）：不知道它有没有页面，所以不会有「面板」那一颗；
+  //   但它跑着，标签要露 —— 用户 2026-10-18：在运行的作业要一直挂在上栏。
   h.run(`SESS = { sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`);
   h.fn('renderTabs')();
-  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
+  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
+    '跑着的会话就要在栏上，哪怕本机认不出它的插件');
+  assert.equal([...h.byId.get('session-tabs').children]
+    .some((b) => b.textContent === '面板'), false, '认不出有没有页面时不给「面板」');
 });
 
 test('一条会话也露标签：那颗「面板」是回到插件页与作业页的唯一入口', async () => {
@@ -1203,7 +1219,8 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
   h.fn('renderTabs')();
   assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
     '有页面盖着面板时这一条栏必须露 —— 它是这个窗口里唯一的出路');
-  assert.equal(tabs()[0].textContent, '编辑器', '那一条会话自己的标签要在（用户要看得出跑的是谁）');
+  assert.equal(tabs()[0].textContent, '面板', '「面板」排第一：它是一个固定的回程（用户 2026-10-18）');
+  assert.equal(tabs()[1].textContent, '编辑器', '会话标签跟在它后面（新开的往后加）');
   assert.equal(panelTab().length, 1);
   assert.match(panelTab()[0].className, /\bpanel\b/,
     '它自己的类要挂上 —— 与会话标签做的是相反的事，长相加一个虚线边');
@@ -1217,7 +1234,7 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
     '回到用户离开时的那一屏（不换屏）');
 
   // ── ③ 会话标签照旧把页面抬上来（从面板走回页面的那条路）──
-  tabs()[0].onclick();
+  tabs()[1].onclick();
   assert.equal(h.run('window.__front'), 'a');
 
   // ── ④ 抬不起来要说出来：静默失败与"这一颗本来就没事可做"长得一样 ──
@@ -1226,12 +1243,14 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
   const last = () => h.byId.get('notices').children[0].children[1].textContent;
   assert.match(last(), /假装抬不起来/);
 
-  // ── ⑤ 没有页面的会话不盖任何东西：一条时整条栏照旧收着 ──
+  // ── ⑤ 没有页面的会话不盖任何东西：它没有「面板」那一颗，但标签仍在 ──
   h.run(`SESS = { sessions: [
     { slot: 'b', service: '中转站', live: true,
       snap: { serviceKind: 'relay', localPort: 18081 } } ], front: 'b' };`);
   h.fn('renderTabs')();
-  assert.ok(h.byId.get('session-tabs').classList.contains('hidden'));
+  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
+    '跑着的会话要一直挂在上栏 —— 没有页面也是');
+  assert.equal(panelTab().length, 0, '没有页面可抬时不给「面板」');
 });
 
 test('右栏整条只在有作业在跑的时候亮（那时它才有内容可说）', () => {
@@ -1994,4 +2013,79 @@ test('【接管】只在另一台电脑正看着它时可用 —— 没人看时
   draw(row({ keeper: 'other' }));
   assert.equal(btn.disabled, false, '另一台电脑正看着它时，接管才是要做的事');
   assert.match(btn.title, /看护者换成这台电脑/);
+});
+
+test('切标签：推送里的 panelFront 当场决定状态条右侧那两颗在不在', () => {
+  // 用户 2026-10-18：从会话页面点「面板」回来，上栏那两颗不跟着变；
+  //   再从插件页点回会话标签，也不变。它们的显隐跟着"页面在不在眼前"走，
+  //   而那个事实随每一份会话状态推送（`panelFront`）一起到。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("lastPlugins = { plugins: [{ name: 'code-server', surface: { kind: 'web', path: '/' } }] };"
+    + "SCREEN = 'plugins';");
+  const push = (panelFront) => h.fn('renderSessions')({
+    sessions: [{ slot: 's1', live: true, snap: { state: 'running', slot: 's1',
+      serviceKind: 'code-server', sessionId: 'sess-a' } }],
+    front: 's1', panelFront,
+  });
+  const btn = () => h.byId.get('sb-end');
+  const reload = () => h.byId.get('sb-reload');
+
+  push(false);
+  assert.equal(btn().classList.contains('hidden'), false, '会话页面在眼前：结束会话在');
+  assert.equal(reload().classList.contains('hidden'), false, '会话页面在眼前：重新加载在');
+
+  push(true);
+  assert.equal(btn().classList.contains('hidden'), true, '面板抬起来：结束会话收掉');
+  assert.equal(reload().classList.contains('hidden'), true, '面板抬起来：重新加载收掉');
+
+  push(false);
+  assert.equal(btn().classList.contains('hidden'), false, '切回会话标签：两颗回来');
+  assert.equal(reload().classList.contains('hidden'), false);
+});
+
+test('作业那一页点一条正在跑的作业：只换选中，不把页面切过去', () => {
+  // 用户 2026-10-18：在作业页点一条正在跑的作业会直接跳进它的页面 ——
+  //   那一跳之后上栏的按钮就没机会点了。这一页的选中只该让高亮与下面的详情
+  //   跟过去；切页面只在上栏的标签上做。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__front = null; window.slurmate.setFront = (s) => { window.__front = s; };');
+  h.run("SCREEN = 'jobs'; SESS = { sessions: [{ slot: 's1', live: true,"
+    + " snap: { state: 'running', sessionId: 'sess-a', slot: 's1', jobId: '11' } }],"
+    + " front: 's1', panelFront: true };");
+  h.run(`JOBS = ${JSON.stringify({
+    list: [{ session_id: 'sess-a', slot: 's1', live: true, attached: true, job_id: '11',
+             state: 'enrolled', state_text: '运行中', partition: 'A6000',
+             resources: { cpus: 2, mem: '8G' }, keeper_text: '本机在看', keeper_is_me: true }],
+    at: 1, error: null, selected: null,
+  })};`);
+  h.fn('renderJobs')();
+
+  h.byId.get('job-list').children[0].onclick();
+  assert.equal(h.run('JOBS.selected'), 'sess-a', '选中要换过去');
+  assert.equal(h.run('window.__front'), null,
+    '选中不许调 setFront —— 页面只从上栏的标签切');
+  const kv = childrenOf(h.byId.get('kv')).map((x) => x._text || '').join(' ');
+  assert.match(kv, /11/, '下面的详情要跟着选中的那一条');
+});
+
+test('重连之后：会话表从主进程取一次，标签栏不会空着', async () => {
+  // 真机（2026-10-18）：临时离开再连上，界面直接进了 code-server 的页面，
+  //   而上栏没有标签、也没有「面板」—— 过一会又出现。那是界面在 `connect`
+  //   返回之后把会话表清空了：主进程接回来的那几条被这一清从界面上删掉，
+  //   下一次推送（心跳）才补回来。现在连上之后直接拉一次权威的会话表。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.slurmate.states = () => Promise.resolve({'
+    + ' sessions: [{ slot: "a", service: "编辑器", live: true,'
+    + '   snap: { serviceKind: "cs", state: "running", localPort: 18080 } }],'
+    + ' front: "a", panelFront: false });'
+    + 'lastPlugins = { plugins: [{ id: "p1", name: "cs", title: "编辑器",'
+    + ' surface: { path: "/" } }] };'
+    + 'connected = false;');
+  await h.fn('handleConnectResult')({
+    ok: true, whoami: { user: 'alice', account: 'acct' }, partitions: [],
+  });
+  assert.equal(h.run('SESS.sessions.length'), 1,
+    '接回来的会话要在界面上 —— 若清空，标签栏与「面板」会一起没');
+  assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
+    '标签栏要露出来，那颗「面板」才有地方点');
 });

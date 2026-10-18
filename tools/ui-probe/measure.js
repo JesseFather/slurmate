@@ -500,6 +500,52 @@
       what: '作业屏（作业列表）',
     },
 
+    // 状态条：会话页面盖着窗口。标签栏里有「面板」与会话标签，右侧两颗都在。
+    //   这一格是 2026-10-18 改出来的形状唯一能量到排布的地方。
+    'statusbar-session': {
+      setup: function () {
+        setConnected(true);
+        // 底下铺的是插件页：会话页面盖着窗口时，面板 DOM 里留下的是用户离开时
+        //   那一屏。铺首屏（连接列表）的话这一格画出来的是一个不可能的组合。
+        boot.connections = F.conns || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
+        renderPlugins(F.pluginsView || {});
+        showScreen('plugins');
+        renderSessions({ sessions: [{ slot: 'a', service: '编辑器', live: true,
+          snap: { state: 'running', serviceKind: 'code-server', sessionId: 'sess-a',
+                  jobId: '7783', localPort: 18080 } }],
+          front: 'a', panelFront: false });
+        return Promise.resolve();
+      },
+      sentinel: function () {
+        return !$('session-tabs').classList.contains('hidden')
+          && !$('sb-end').classList.contains('hidden');
+      },
+      what: '状态条：会话页面盖着（面板 / 会话标签 / 停止该作业）',
+    },
+
+    // 同一格，但面板抬回来了：标签栏还在（那是回页面的路），右侧两颗收掉。
+    'statusbar-panel': {
+      setup: function () {
+        setConnected(true);
+        boot.connections = F.conns || [];
+        boot.activeConnectionId = (F.conns && F.conns[0] && F.conns[0].id) || null;
+        renderPlugins(F.pluginsView || {});
+        showScreen('plugins');
+        renderSessions({ sessions: [{ slot: 'a', service: '编辑器', live: true,
+          snap: { state: 'running', serviceKind: 'code-server', sessionId: 'sess-a',
+                  jobId: '7783', localPort: 18080 } }],
+          front: 'a', panelFront: true });
+        return Promise.resolve();
+      },
+      sentinel: function () {
+        return !$('session-tabs').classList.contains('hidden')
+          && $('sb-end').classList.contains('hidden')
+          && $('sb-reload').classList.contains('hidden');
+      },
+      what: '状态条：面板抬着（右侧两颗收掉）',
+    },
+
     // 状态条上那条三选一。30px 高，理由太长就会把按钮挤掉。
     'statusbar-port': {
       setup: function () { renderPortAsk(F.portAsk || {}, null); return Promise.resolve(); },

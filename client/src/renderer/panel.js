@@ -35,7 +35,7 @@
  *   就变成了"点了报错"，而不是"那一块不见了"。
  *
  * 会话跑起来之后窗口主体会被插件声明的那块界面整个盖住，
- * 所以「重新加载 / 结束会话」这两个必需的操作也放在状态条里 ——
+ * 所以「重新加载 / 停止该作业」这两个必需的操作也放在状态条里 ——
  * 那是唯一始终可见的、属于我们自己的区域。
  *
  * 这个界面里没有任何「打开配置文件」的入口，这是有意的：
@@ -79,7 +79,9 @@ function setConnected(on) {
 }
 let lastProbe = [];          // 最近一次探测结果，供连接列表显示
 let lastSnap = null;         // 前台那一条的快照，供状态条、映射图与作业详情读它
-let SESS = { sessions: [], front: null };   // 全部会话 + 哪一个是前台（见 renderSessions）
+let SESS = { sessions: [], front: null, panelFront: false };
+// 上面那一格：全部会话、哪一个是前台、以及面板此刻有没有盖在会话页面上
+//   （`panelFront` 由主进程给，见 renderSessions 与 renderStatusEnd）。
 /** 上一次推送时活着的槽，逗号连起来。作业那一屏据此判断"要不要重取一次"。 */
 let lastLiveIds = null;
 /**
@@ -380,6 +382,7 @@ function renderSessions(payload) {
   SESS = {
     sessions: Array.isArray(p.sessions) ? p.sessions : [],
     front: p.front || null,
+    panelFront: p.panelFront === true,
   };
   renderTabs();
   // 右栏那个点跟着"有没有作业在跑"走，而那个判据刚刚才更新 —— 所以它必须在
@@ -454,19 +457,44 @@ function frontTemporary() {
 function renderTabs() {
   const box = $('session-tabs');
   const list = SESS.sessions;
-  // 有没有一块页面正盖着面板。判据与会弄"重新加载 / 结束会话"那两颗同一份
+  // 有没有一块页面正盖着面板。判据与"重新加载 / 停止该作业"那两颗同一份
   //   （`hasSurface`）：声明了界面的插件才会起那块原生视图，也只有那时"回不去"
   //   这回事才存在。中转站那类会话不盖任何东西，不需要这一条栏。
   // 判据读的是快照（`s.snap`，插件的站点短名在它里面）—— 会话视图这一层
   //   没有 `serviceKind`，拿它去查插件永远查不到，于是这一条栏会静默地收着。
   const covered = list.some((s) => s.live && s.snap && hasSurface(s.snap));
-  box.classList.toggle('hidden', !covered && list.length < 2);
+  // 只要还有一条会话在跑，这一条栏就露着 —— 它是切回那块页面的唯一入口。
+  //   用户 2026-10-18：在运行的那些插件作业要一直挂在上栏，随时能切过去。
+  //   与 `covered`（有页面盖着）分开：中转站那类没有页面的会话也占着资源，
+  //   它的标签同样要有地方看得见。
+  const anyLive = list.some((s) => s.live);
+  box.classList.toggle('hidden', !covered && !anyLive && list.length < 2);
   box.textContent = '';
   // 先数一遍名字：同名的那些才需要区分符。
   const seen = new Map();
   for (const s of list) {
     const n = s.service || '（未知服务）';
     seen.set(n, (seen.get(n) || 0) + 1);
+  }
+  // 「面板」排第一（用户 2026-10-18）：它是一个固定的回程，而会话标签是
+  //   一路往后加的 —— 排最后的话，新开的会话一多，它就被推到看不到的地方。
+  //
+  // 它与会话标签做的是相反的事（那几颗抬页面、这一颗抬面板），所以长相加一个
+  //   虚线边（见 app.css 的 `.tab.panel`）：两颗相反的动词长成一模一样，正是
+  //   最容易点错的那一格。
+  // 判据是 `covered`：没有页面盖着的时候面板本来就看得见，摆一颗按下去不变样的
+  //   按钮是在说一件不成立的事。
+  // 点它不换屏 —— 回到用户离开时的那一屏（`SCREEN` 是用户的选择，见那一格）。
+  if (covered) {
+    const b = document.createElement('button');
+    b.className = 'tab panel';
+    b.textContent = '面板';
+    b.title = '把面板抬到会话页面上面。插件页与作业页都在那里，回到你离开时的那一屏。';
+    b.onclick = async () => {
+      const r = await window.slurmate.showPanel();
+      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
+    };
+    box.appendChild(b);
   }
   for (const s of list) {
     const b = document.createElement('button');
@@ -478,25 +506,6 @@ function renderTabs() {
     const st = s.snap && s.snap.state;
     b.title = STATE_TEXT[st] || st || '';
     b.onclick = () => window.slurmate.setFront(s.slot);
-    box.appendChild(b);
-  }
-  // 「面板」—— 把面板抬回会话页面上面。
-  //
-  // 它与会话标签做的是相反的事（那几颗抬页面、这一颗抬面板），所以长相加一个
-  //   虚线边（见 app.css 的 `.tab.panel`）：两颗相反的动词长成一模一样，正是
-  //   最容易点错的那一格。
-  // 判据是 `covered`，与"这一条栏为什么露出来"同源：没有页面盖着的时候面板
-  //   本来就看得见，摆一颗按下去不变样的按钮是在说一件不成立的事。
-  // 点它不换屏 —— 回到用户离开时的那一屏（`SCREEN` 是用户的选择，见那一格）。
-  if (covered) {
-    const b = document.createElement('button');
-    b.className = 'tab panel';
-    b.textContent = '面板';
-    b.title = '把面板抬到会话页面上面。插件页与作业页都在那里，回到你离开时的那一屏。';
-    b.onclick = async () => {
-      const r = await window.slurmate.showPanel();
-      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
-    };
     box.appendChild(b);
   }
 }
@@ -589,17 +598,13 @@ function renderSnapshot(s) {
   $('sb-detail').textContent = detail;
 
   const running = (st === 'running' || st === 'releasing');
-  // 会话一停，「结束会话」那个第一段就不该再等着第二段了 —— 留着它，用户按下去
-  //   的第二段没有对象（会话已经结束了）。收起是这一格自己的事，与 `hidden`
-  //   无关：那两件事一个是"这一格该不该在"，一个是"它现在是第几段"。
-  // 排队中也算"有对象"（`renderStatusEnd` 在那一段也露它），所以不在这里收。
+  // 会话一停，那个第一段就不该再等着第二段了 —— 留着它，用户按下去的第二段
+  //   没有对象（会话已经结束了）。收起是这一格自己的事，与 `hidden` 无关：
+  //   那两件事一个是"这一格该不该在"，一个是"它现在是第几段"。
   if (!(running || st === 'queued')) disarmArmed();
-  // 这两颗只在它们真的有事可做时出现（2026-10-17 真机：释放中的会话页面已经
-  //   收掉了，而「重新加载」还露着，按下去什么都不会发生）：
-  //   · 「重新加载」打的是那一块页面，没有页面（释放中 / 中转站插件）就不该在；
-  //   · 「结束会话」在释放开始之后没有对象可停，守护进程会自己把这一步走完。
-  $('sb-reload').classList.toggle('hidden', !(st === 'running' && hasSurface(s)));
-  // 「结束会话 / 停止该作业」：标签与对象都跟着当前那一屏走，见 renderStatusEnd。
+  // 那颗「重新加载」与「停止该作业」的显隐、标签都在
+  //   `renderStatusEnd` 里（它同时看屏名与"面板有没有抬上来"）。这里不各判一遍：
+  //   两处各写一份的话，切标签时会有一处不跟着变（2026-10-18 真机）。
   renderStatusEnd(s);
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
@@ -636,36 +641,29 @@ function renderSnapshot(s) {
 }
 
 /**
- * 状态条上那颗「结束会话 / 停止该作业」。
+ * 状态条右侧那两颗：只在会话页面真的盖着窗口时存在。
  *
- * 它标的是"这一下会停掉哪一个"，而那件事跟着当前这一屏走：
- *   · 作业那一屏：停的是选中的那一条，与那一屏的【结束】同一个动作、同一份
- *     判据（`live && attached && slot`），标签写「停止该作业」；
- *   · 其余各屏：停的是前台那条会话，标签写「结束会话」。
- * 从前它固定是「结束会话」、固定打前台那条 —— 用户在作业那一屏上盯着选中的
- *   一行，按下去停的却是另一条（2026-10-18 真机）。
+ * 用户 2026-10-18 定的形状：
+ *   · code-server 那类作业页面上给一颗「停止该作业」—— 快速结束眼前这一条；
+ *   · 插件页与作业页都不给。插件页没有页面可重载、也没有作业可停；作业页自己
+ *     那一屏上就有大按钮，不需要这一颗。
+ * 所以「结束会话」这个名字没有了 —— 它停的一直是一条作业。
  *
- * 排队中也露：那时会话已经占着位置、作业已经在 Slurm 队列里，而"结束"正是它
- *   需要的（`goodbye` 在 `submitted` 上就是一次 scancel）。从前只露 running，
- *   于是排队中的作业在面板上找不到取消的办法。
+ * 「页面盖着」的判据：前台那条跑着、它的插件有页面、而面板没被抬上来
+ *   （`SESS.panelFront`，由主进程随会话状态一起推）。
  */
 function renderStatusEnd(s) {
   const btn = $('sb-end');
-  if (SCREEN === 'jobs') {
-    const j = selectedJob();
-    const can = Boolean(j && j.live && j.attached && j.slot);
-    btn.textContent = '停止该作业';
-    btn.title = can
-      ? `停止选中的这条作业${j.job_id ? `（作业 ${j.job_id}）` : ''}，`
-        + '集群上的作业会被取消。'
-      : '先在列表里点一条本机接着的作业。';
-    btn.classList.toggle('hidden', !can);
-    return;
-  }
+  const reload = $('sb-reload');
   const st = s ? s.state : 'idle';
-  btn.textContent = '结束会话';
-  btn.title = '结束这一条会话，集群上的作业会被取消。';
-  btn.classList.toggle('hidden', !(st === 'running' || st === 'queued'));
+  const pageOnScreen = Boolean(s) && st === 'running'
+    && hasSurface(s) && !SESS.panelFront;
+  reload.classList.toggle('hidden', !pageOnScreen);
+  btn.textContent = '停止该作业';
+  btn.title = pageOnScreen && s.jobId
+    ? `停止这一条作业（作业 ${s.jobId}），集群上的作业会被取消。`
+    : '停止这一条作业，集群上的作业会被取消。';
+  btn.classList.toggle('hidden', !pageOnScreen);
 }
 
 /**
@@ -940,7 +938,10 @@ function renderJobDetail(front) {
   const j = selectedJob();
   let s;
   if (j) {
-    s = (front && front.sessionId === j.session_id) ? front : jobAsSnap(j);
+    // 这一条自己的本地快照（隧道、心跳那几格只有本机有）。它不是前台也照样取 ——
+    //   选中不改前台（见 `selectJob`）。
+    const rec = (SESS.sessions || []).find((x) => x.slot && x.slot === j.slot);
+    s = (rec && rec.snap) || jobAsSnap(j);
   } else {
     s = front || null;
   }
@@ -2980,25 +2981,17 @@ function selectedJob() {
 }
 
 /**
- * 点某一行。
+ * 点某一行：只换选中的那一条（高亮与下面的详情跟着走），不换页面。
  *
- * 本机接着的那些顺手 `setFront` —— "点一条作业"与"我要看这一条"是同一件事，
- *   而前台的详情（`#kv`）跟的就是它。分成两个动作的话，用户点了 A 却在详情里
- *   看到 B，而两边看起来都对。
+ * 切页面只在上栏的标签上做（用户 2026-10-18：在作业那一页点一条正在跑的作业
+ *   会直接跳进它的页面 —— 那一跳之后上栏的按钮就没机会点了；这一页的选中
+ *   本来只是"看它的信息"）。
+ * 详情从这一条自己的快照取（`renderJobDetail`），不是"前台的" —— 选中不再
+ *   改前台，而"选中 A、详情里却是 B"正是要避免的那一格。
  */
-async function selectJob(j) {
+function selectJob(j) {
   JOBS.selected = j.session_id;
-  // 先画：选中是本地事实，不该等一次 IPC（`setFront` 会去加载那一块页面，
-  //   页面慢的时候这一等可以是好几秒，用户看到的就是"点了条目不跟着变"）。
   renderJobs();
-  if (j.attached && j.slot) {
-    try {
-      await window.slurmate.setFront(j.slot);
-    } catch (e) {
-      notice('error', '切到这一条会话失败：' + ((e && e.message) || '没有回应'));
-    }
-    renderJobs();
-  }
 }
 
 function jobRow(j) {
@@ -3096,9 +3089,9 @@ function renderJobsSelection() {
     : (j.keeper_is_me ? '这台电脑已经在看它了'
     : (!j.keeper ? '没人在看它：接上之后心跳会自己把它认领过来，不需要接管'
     : '把这条会话的看护者换成这台电脑（作业一个字都不动）'))));
-  // 状态条上那一颗跟着选中的这一条走（见 renderStatusEnd）。少了这一句，
-  //   点一条作业之后它还说「停止该作业」却停着上一次那一条 —— 或者停着前台那条。
-  renderStatusEnd(lastSnap);
+  // 状态条上那一颗不跟着选中的这一条走：它只在会话页面盖着时露，停的是前台
+  //   那一条（见 renderStatusEnd）。这一屏停选中的那一条，用的是它自己那颗
+  //   `btn-jobs-end`。
 }
 
 /**
@@ -3133,7 +3126,7 @@ async function endSelectedJob() {
   refreshJobs();
 }
 
-/** 状态条上那个「结束会话」—— 结束前台那一条（跑起来之后那 30px 是唯一够得着的）。 */
+/** 状态条上那颗「停止该作业」—— 停掉前台那一条（跑起来之后那 30px 是唯一够得着的）。 */
 async function endFrontSession() {
   await stopSlot(frontSlot());
 }
@@ -3731,7 +3724,13 @@ async function handleConnectResult(res) {
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
     if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
-    renderSessions({ sessions: [], front: null });
+    // 会话表从主进程取一次权威的：`doConnect` 的最后一步是 `tryReattach`，
+    //   接回来的那几条已经在它手里了。
+    //   这里从前写死一份空表 —— 重连时它会把刚接回来的那几条从界面上删掉：
+    //   标签栏与那颗「面板」一起没了，而会话页面照样盖在窗口主体上，于是用户
+    //   直接掉进 code-server 的网页里、没有任何路回到面板（2026-10-18 真机）。
+    const st = await window.slurmate.states();
+    renderSessions(st && Array.isArray(st.sessions) ? st : { sessions: [], front: null });
     // 连上之后进第二屏。这一屏之所以能进，正是"连上"这件事本身：
     //   插件是站点分发的，没有连接就不知道有哪些插件。
     //   而"接回上次那些会话"是主进程在 connect 里做完才返回的（`doConnect`
@@ -4044,18 +4043,13 @@ function bindEvents() {
   //   够得着的像素（与 `sb-reload` / `sb-temp` 同一条理由）。
   // 两段式（见 armConfirm）：它会取消集群上正在跑的作业，而它旁边紧挨着
   //   「重新加载」。第一段可退，第二段才真的结束。
-  // 对象跟着当前那一屏走（与 renderStatusEnd 同一份判据）：作业那一屏停的是
-  //   选中的那一条，其余各屏停的是前台那条。
-  $('sb-end').onclick = () => {
-    const stopJob = SCREEN === 'jobs';
-    return armConfirm($('sb-end'), {
-      why: stopJob
-        ? '停止选中的这条作业，集群上的作业会被取消。'
-        : '结束这一条会话，集群上的作业会被取消。',
-      yes: stopJob ? '停止' : '结束',
-      run: stopJob ? endSelectedJob : endFrontSession,
-    });
-  };
+  // 停的是前台那一条 —— 这颗按钮只在它的页面盖着时才露（见 renderStatusEnd），
+  //   所以"眼前这一条"与"前台那一条"是同一件事。
+  $('sb-end').onclick = () => armConfirm($('sb-end'), {
+    why: '停止这一条作业，集群上的作业会被取消。',
+    yes: '停止',
+    run: endFrontSession,
+  });
 
   // 会话标签太多时横向滚。这一条是 30px 的状态条，纵向滚轮在这里没有别的
   //   读者；触控板的横向滑动本来就走原生横向滚动，所以只接管纵向那一轴。

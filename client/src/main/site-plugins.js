@@ -1050,6 +1050,10 @@ function pinVerdict(o, p, sig) {
 
 /**
  * 一次 RPC，撞上限流就退避重试。限流不是失败。
+ *
+ * 两个读者：这一份对账（按份数伸缩的那条路），以及 `index.js` 的 `tryReattach`
+ *   （连上站点那一刻的突发）。等待的挡位只有这一处 —— 两边各写一份的话，
+ *   下次调这个数就会漂开，而漂的那一边的症状正是"偶发地接不回来"。
  */
 async function rpcWithBackoff(rpc, req) {
   let last = null;
@@ -1823,6 +1827,6 @@ module.exports = {
   // ── 给用例与目录模式用的纯函数 ──
   checkRelPath, checkDeclared, caseCollisions, effectiveLimits,
   deliveryOf, packageMetaProblem, fileListOf, pinVerdict, verifyStaged,
-  compareTree, treeFault, recordSig, treeSignature,
+  compareTree, treeFault, recordSig, treeSignature, rpcWithBackoff,
   HARD_LIMITS, SNAPSHOT_NAME, LOCK_NAME,
 };

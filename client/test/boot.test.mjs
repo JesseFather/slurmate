@@ -7989,3 +7989,34 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });
+
+test('面板抬起来 / 会话标签切回来：每一份会话状态都带上 panelFront', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  const last = () => {
+    const all = calls.windows[0].webContents.handlers['send:session:states'] || [];
+    return all[all.length - 1] || null;
+  };
+
+  // 点「面板」只改"屏幕上看得见谁"，会话数据一个字都不变 —— 从前它一条推送
+  //   都不发，界面于是停着会话页面时的样子（2026-10-18 真机）。
+  const r1 = await invoke('app:showPanel');
+  assert.equal(r1.ok, true);
+  assert.equal(last() && last().panelFront, true,
+    '点「面板」之后要推一次：界面靠这一格收起「重新加载 / 停止该作业」');
+
+  const r2 = await invoke('app:setFront', { slot: a.slot });
+  assert.equal(r2.ok, true);
+  assert.equal(last() && last().panelFront, false,
+    '切回会话标签之后要推一次：那两颗跟着回来');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});

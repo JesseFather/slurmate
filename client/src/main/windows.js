@@ -760,7 +760,13 @@ class ShellWindow {
     if (next !== this._front) this._panelFront = false;
     this._front = next;
     const wc = this.win.webContents;
-    if (!wc.isDestroyed()) wc.send('session:states', { sessions: list, front: this._front });
+    if (!wc.isDestroyed()) {
+      // `panelFront` 一起带上：界面靠它决定状态条右侧那几颗按钮露不露 ——
+      //   会话页面盖着时才有「重新加载 / 停止该作业」，面板抬回来时一颗都不该有。
+      //   不带的话，切标签（`setFront` / `showPanel`）之后那几颗会停在上一次的样子。
+      wc.send('session:states', { sessions: list, front: this._front,
+                                  panelFront: this._panelFront });
+    }
     this._layout();
     // 改 URL 只有一条通路：index.js 的 `ensureSurface`（它同时看 url 和
     //   partition）。别再加一条「origin 变了就 loadURL」的自动 retarget —— 它只会

@@ -529,7 +529,7 @@ test('该两段式的七处走两段式 —— 而重新生成密钥不是（判
   // 为什么不用 `window.confirm`：它给不了两段（框弹出来的时候用户已经按下去
   //   了），样式也不受控（Electron 里那是一块系统窗口，尺寸、语言、焦点行为都不
   //   归我们管）—— 于是同一个客户端里几处不可逆动作会长得都不一样。
-  for (const [id, what] of [['sb-end', '状态条上的「结束会话」'],
+  for (const [id, what] of [['sb-end', '状态条上的「停止该作业」'],
                             ['btn-disconnect', '「断开」']]) {
     const at = js.indexOf(`$('${id}').onclick =`);
     assert.notEqual(at, -1, `panel.js 没给${what}（#${id}）绑动作`);

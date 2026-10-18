@@ -3939,19 +3939,10 @@ function whyOf(resp) {
  *
  * 桶只按 1 秒计数，等一拍就够。三次都不行才把那条错误带出去（由调用方说话）。
  */
-async function rpcAfterRateLimit(req, attempts = 3) {
-  let last = null;
-  for (let i = 0; i < attempts; i += 1) {
-    last = await backend.rpc(req);
-    const limited = Boolean(last && !last.ok
-      && last.error && last.error.kind === 'rate_limited');
-    if (!limited) return last;
-    // 退避一拍。400、800 毫秒两挡足够跨过那个 1 秒滑窗；用的是普通定时器，
-    //   而这条路径的调用方（`doConnect`）本来就 awaits 它 —— 不该 unref，
-    //   那会让进程在没有别的活时提前退出。
-    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1)));
-  }
-  return last;
+async function rpcAfterRateLimit(req) {
+  // 等待的挡位只有一处（`site-plugins.js` 的 `RATE_BACKOFF_MS` 与那段说明）。
+  //   两个调用点各写一份，下次调这个数就会漂开。
+  return sitePluginSync.rpcWithBackoff((r) => backend.rpc(r), req);
 }
 
 /**
@@ -5367,6 +5358,10 @@ function registerIpc() {
   send('app:states', async () => ({
     sessions: sessionViews(),
     front: frontSlot(),
+    // 面板有没有抬在会话页面之上。界面靠它决定状态条右侧那两颗露不露 ——
+    //   连着之后拉一次状态的那条路（`handleConnectResult`）也要拿得到它，
+    //   少了这一格，重连之后那两颗会停在上一次的样子。
+    panelFront: win ? win.panelFront : false,
     workspaces: config.workspacePlan(cfg),
   }));
 
@@ -5557,6 +5552,10 @@ function registerIpc() {
    */
   send('app:showPanel', async () => {
     win.showPanel();
+    // 推一份新的会话状态：`front` 一个字没变，但 `panelFront` 变了 ——
+    //   状态条右侧那几颗按钮（重新加载 / 结束会话）的显隐跟着它走。
+    //   少了这一句，用户点「面板」回来之后那几颗还停在会话页面时的样子。
+    win.pushSessions(sessionViews(), frontSlot());
     return { ok: true };
   });
 
