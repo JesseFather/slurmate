@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.27。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.28。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.27`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.28`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.27.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.28.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.27`，不是 `v0.27.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.28`，不是 `v0.28.0`。
 
-顺带一句：`v0.27` 不是 `v0.2`。`minor` 是十进制字符串，`25` 比 `2` 大。
+顺带一句：`v0.28` 不是 `v0.2`。`minor` 是十进制字符串，`25` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -628,7 +628,7 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 成功 data：
 
 ```json
-{"version": "0.27", "pid": 123, "started_at": 1757...,
+{"version": "0.28", "pid": 123, "started_at": 1757...,
  "config": {"path": "/etc/slurmate/slurmate.conf",
             "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
             "last_reload": {"seq": 3, "at": 1757..., "ok": true,
