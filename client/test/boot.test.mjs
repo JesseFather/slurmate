@@ -7840,3 +7840,152 @@ test('作业一结束，右栏自己收起来（那时它没有内容可说）',
   assert.equal(shell.hoverOpenSide(), null,
     '作业停了右栏就该收 —— 挂在那儿显示旧内容，看起来像它还在跑');
 });
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  临时离开之后的重连
+//
+//  2026-10-18 真机：点【临时离开】、关掉客户端、再打开连上同一个站点之后，
+//    作业列表里那一行仍然写着「本机没接着它」，接管与结束都点不动，日志只有一句
+//    「发现一个还没结束的会话，正在重新接上」。那条会话接不回来，而站点上它的作业
+//    还在跑 —— 1800 秒之后会被当作孤儿 scancel 掉。
+//
+//  当时没有一条用例从"离开"走到"再连上"：上面对【临时离开】的用例到"看护者交回去"
+//    就结束了。这两条把它补上，并且钉住两条出路：接得回来；接不回来时必须说话。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('【临时离开】之后重连：那条会话要接回来，看护者回到本机', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await ctl.heartbeatNow();
+  const sid = onlyFake(b).session_id;
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+  assert.equal(idx._test.getSessions().size, 0, '前提：离开之后本机一条记录都不留');
+  assert.equal(onlyFake(b).keeper, null, '前提：看护者交回去了');
+
+  const conn = await testConn();
+  const rc = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+
+  const rec = onlyRec(idx);
+  assert.ok(rec, '重连之后那条会话要回到本机手上 —— 若接不回来，它的作业会在 '
+    + '1800 秒后被当作孤儿 scancel，而用户既接不回来、也开不了新的');
+  assert.equal(rec.controller.sessionId, sid, '接回来的必须是同一条会话');
+  await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
+  await waitUntil(() => onlyFake(b).keeper === b._client.id, '心跳把看护者认领回来', 20000);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('重连时引用表里那一格不在了：照样接得回来，而且要说清楚', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await ctl.heartbeatNow();
+  const sid = onlyFake(b).session_id;
+
+  // 把工作区里 code-server 那一格删掉。真机上它可能来自"工作区换过"、
+  //   "那份数据被删过"、或者手改过的配置 —— 而会话在服务端活得好好的。
+  const cfg = idx._test.getCfg();
+  const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId);
+  const ws = cfg.workspaces.find((w) => w.id === conn.workspaceId);
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  assert.ok(ws && plugin, '夹具前提：工作区与插件都得在');
+  const oldSpace = ws.refs[plugin.id];
+  delete ws.refs[plugin.id];
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+
+  const before = noticesOf().length;
+  const rc = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+  const said = noticesOf().slice(before).map((n) => n.text).join('\n');
+
+  const rec = onlyRec(idx);
+  assert.ok(rec, '那一格不在了也要接得回来 —— 从前这里是一句静默的 return，'
+    + `作业只能等死。实际收到的通知：${said}`);
+  assert.equal(rec.controller.sessionId, sid);
+  await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
+
+  assert.match(said, /引用表里不在了/, '要说出那一份数据是本机补出来的，不能装作没有这回事');
+  assert.match(said, /作业一个字都没动/, '同时要说清作业没受影响');
+  const nowSpace = ws.refs[plugin.id];
+  assert.ok(nowSpace && nowSpace !== oldSpace, '引用表里要补上一份新的数据');
+  assert.ok(cfg.spaces.some((s) => s.id === nowSpace), '补出来的那一份必须是配置里真的存在的一格');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('重连时撞上限流：等一拍再取，而不是安静地跳过那条会话', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await ctl.heartbeatNow();
+  const sid = onlyFake(b).session_id;
+
+  // 连上站点那一刻是一串突发请求，守护进程的限流桶是按 uid 的 1 秒滑窗。
+  //   真机上"`list` 过了、紧跟着的 `status` 被回 rate_limited"正是边界上最
+  //   典型的样子（2026-10-18，0.25）。这里把那一次拒绝造出来。
+  const realRpc = b.rpc.bind(b);
+  let denied = 0;
+  let alwaysDeny = false;
+  b.rpc = async (req) => {
+    if (req.op === 'status' && (alwaysDeny || denied === 0)) {
+      denied += 1;
+      return { ok: false, code: 7, data: null,
+               error: { kind: 'rate_limited', detail: null } };
+    }
+    return realRpc(req);
+  };
+  t.after(() => { b.rpc = realRpc; });
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+  const conn = await testConn();
+  const rc = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+  assert.equal(denied, 1, '前提：`status` 被拒过一次');
+
+  const rec = onlyRec(idx);
+  assert.ok(rec, '若被限流一次就放弃，那条作业会在 1800 秒后被当作孤儿 scancel');
+  assert.equal(rec.controller.sessionId, sid);
+  await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
+
+  // 一直拒绝：接不上就必须说出来，别再让用户对着"正在重新接上"猜。
+  const lv2 = await invoke('app:leave');
+  assert.equal(lv2.ok, true);
+  alwaysDeny = true;
+  const before = noticesOf().length;
+  const rc2 = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc2.ok, true);
+  const said = noticesOf().slice(before).map((n) => n.text).join('\n');
+  assert.match(said, /没读到它的完整信息/, `没接回来时要说清是哪一步卡住了：${said}`);
+  assert.match(said, /rate_limited|限流|没有说明原因/, '要带上站点那句错误，或者如实说它没给');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});

@@ -1956,3 +1956,42 @@ test('没加载上的那些收在一个能展开的框里：抬头一直在，�
   assert.equal(folds.some((d) => d.open), false,
     '默认收着：它不阻塞任何操作，而一字排开摆在插件列表头上像"这个客户端坏了"');
 });
+
+test('【接管】只在另一台电脑正看着它时可用 —— 没人看时心跳会自己接过来', () => {
+  // 用户 2026-10-18：接管是两个客户端互相争抢时才有的动作。一颗"没人看"时
+  //   也亮着的接管按钮，会让用户把它当成"接不上"的出路 —— 而它只改看护者那一格，
+  //   接不上的会话照样接不上。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const row = (over) => ({
+    session_id: 'sess-a', slot: 's1', live: true, attached: true,
+    job_id: '11', keeper: null, keeper_is_me: false, ...over,
+  });
+  const draw = (r) => {
+    h.run(`SCREEN = 'jobs'; JOBS = ${JSON.stringify({
+      list: [r], at: 1, error: null, selected: 'sess-a',
+    })};`);
+    h.fn('renderJobsSelection')();
+  };
+
+  // ① 本机还没接着它 —— 出路是重连，不是接管。
+  draw(row({ attached: false }));
+  // 按钮是 `renderJobsSelection` 第一次 `$()` 时才被建出来的（人造 DOM 按需建）。
+  const btn = h.byId.get('btn-jobs-takeover');
+  assert.equal(btn.disabled, true, '没接着的会话不该给一颗接管按钮');
+  assert.match(btn.title, /重新连一次这个站点会把它接上/);
+
+  // ② 没人看它 —— 接上之后心跳会把它认领过来，接管是一次空动作。
+  draw(row());
+  assert.equal(btn.disabled, true, '没人在看时接管也是空动作：心跳自己会认领');
+  assert.match(btn.title, /不需要接管/);
+
+  // ③ 本机在看它 —— 空动作。
+  draw(row({ keeper: 'me', keeper_is_me: true }));
+  assert.equal(btn.disabled, true);
+  assert.match(btn.title, /已经在看它了/);
+
+  // ④ 另一台电脑在看它 —— 只有这一种才该亮。
+  draw(row({ keeper: 'other' }));
+  assert.equal(btn.disabled, false, '另一台电脑正看着它时，接管才是要做的事');
+  assert.match(btn.title, /看护者换成这台电脑/);
+});

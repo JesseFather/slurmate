@@ -3917,9 +3917,49 @@ function handleWindowAction(action, payload) {
 }
 
 // ── 重新接管上次的会话 ──────────────────────────────────────────────────────
+
+/** 一句话说清一条失败的应答。`rate_limited` 单独译，因为它的 `detail` 是空的。 */
+function whyOf(resp) {
+  const e = resp && resp.error;
+  if (!e) return '控制节点没有说明原因';
+  if (e.detail) return e.detail;
+  if (e.kind === 'rate_limited') return '站点的限流拒绝了这一次请求（连上这一刻的请求过多）';
+  return e.kind ? `控制节点回了 ${e.kind}` : '控制节点没有说明原因';
+}
+
 /**
- * 启动时查一次 status（不带 session_id，守护进程会返回该 uid 最新的活跃会话）。
- * 有活着的会话就自动接上 —— 这正是「仅关闭窗口，保持作业运行」那条路的意义所在。
+ * 发一条 RPC，撞上站点限流时等一拍再试。
+ *
+ * 连上站点那一刻是一次突发：握手、分区、插件清单、站点插件对账、站点现状、
+ *   会话列表 —— 而守护进程的限流桶是"按 uid、1 秒滑窗"（`max_rpc_per_second`）。
+ *   桶被打满时，`list` 过了、紧跟着的 `status` 被回 `rate_limited`，正是边界上
+ *   最典型的样子。2026-10-18 真机：客户端安静地跳过那条会话，界面上只剩
+ *   「发现一个还没结束的会话，正在重新接上」与一行「本机没接着它」——
+ *   用户再连一次，还是看不到任何原因。
+ *
+ * 桶只按 1 秒计数，等一拍就够。三次都不行才把那条错误带出去（由调用方说话）。
+ */
+async function rpcAfterRateLimit(req, attempts = 3) {
+  let last = null;
+  for (let i = 0; i < attempts; i += 1) {
+    last = await backend.rpc(req);
+    const limited = Boolean(last && !last.ok
+      && last.error && last.error.kind === 'rate_limited');
+    if (!limited) return last;
+    // 退避一拍。400、800 毫秒两挡足够跨过那个 1 秒滑窗；用的是普通定时器，
+    //   而这条路径的调用方（`doConnect`）本来就 awaits 它 —— 不该 unref，
+    //   那会让进程在没有别的活时提前退出。
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+  }
+  return last;
+}
+
+/**
+ * 用户点了一次连接之后，把这个站点上还没结束的会话接回本机。
+ *
+ * 先 `list` 筛出还占着位置的那些，再逐个用 `status` 取完整视图 —— 两次都走
+ * `rpcAfterRateLimit`，因为连上那一刻正是一次突发（见那个函数的说明）。
+ * 这正是「仅关闭窗口，保持作业运行」那条路的意义所在。
  */
 async function tryReattach() {
   // 「有没有连上」问后端，不去猜它的私有字段叫什么 —— 去猜（`backend._conn` 之类）
@@ -3970,8 +4010,15 @@ async function tryReattach() {
   //   "还占着位置"的那几条；它们的完整视图（含自动登录要的口令）再逐个用带
   //   `session_id` 的 `status` 取，而那一个默认 `with_secret=True`。
   //   用现成的两条路，不为了这件事去改协议。
-  const listed = await backend.rpc({ op: 'list' });
-  if (!listed || !listed.ok) return;
+  const listed = await rpcAfterRateLimit({ op: 'list' });
+  if (!listed || !listed.ok) {
+    // 读不到列表时同样不许安静地返回：这条路径跑在"用户刚点完连接"那一刻，
+    //   而它的失败形态与"这个站点上没有我的会话"逐字相同 —— 用户看到的是一个
+    //   空荡荡的作业列表，而他的作业还在集群上跑着。
+    win.pushNotice('error', '未能读到这个站点上的会话列表：'
+      + whyOf(listed) + '。作业不受影响；再连一次这个站点会重试。');
+    return;
+  }
   // `releasing` 不算要接回来的那一档：它已经在拆了，接回来既没有可看的页面，
   //   也没有可做的动作（`reattachOne` 会把它当成 RUNNING 重新起一条隧道）。
   //   断开之后立刻重连时最常见的正是它 —— 上一轮刚发出去的 `goodbye` 还没走完。
@@ -4005,10 +4052,27 @@ async function tryReattach() {
     : '发现一个还没结束的会话，正在重新接上。');
 
   for (const row of fresh) {
-    const one = await backend.rpc({ op: 'status', session_id: row.session_id });
-    if (!one || !one.ok) continue;
+    const one = await rpcAfterRateLimit({ op: 'status', session_id: row.session_id });
+    // 读不到完整视图时不许安静地跳过去。
+    //
+    //   `list` 那一行只够筛出"还占着位置"的那些，接回一条会话要用的是 `status`
+    //   带口令的那一份。静默跳过之后，界面上就只剩一句"发现一个还没结束的会话，
+    //   正在重新接上"和一行"本机没接着它"—— 用户会以为再连一次就会好，
+    //   而真正的原因一个字都不会出现（2026-10-18 真机）。
+    //
+    //   不把这次连接判成失败：连接是好的，那条会话也还在集群上跑着。
+    if (!one || !one.ok) {
+      win.pushNotice('error', `接上会话 ${row.session_id} 之前没读到它的完整信息：`
+        + whyOf(one) + '。作业仍在集群上运行；再连一次这个站点会重试。');
+      continue;
+    }
     const view = one.data && one.data.session;
-    if (view) await reattachOne(view);
+    if (!view) {
+      win.pushNotice('error', `接上会话 ${row.session_id} 之前，控制节点没有给出它的视图。`
+        + '作业仍在集群上运行；再连一次这个站点会重试。');
+      continue;
+    }
+    await reattachOne(view);
   }
 }
 
@@ -4048,14 +4112,36 @@ async function reattachOne(s) {
   //     只读的一步，不该顺手造出一个工作区来（那条路只在开会话时走）。
   //     而认领（下面那一行）会造一份临时数据 —— 那不是"顺手造一份持久的"，
   //       它是这一次接管必须要有的第三段，见那段说明。
-  //   而不建数据空间：`spaceForSession` 会落盘，而重连是一条只读的路。
-  //     引用表里没有那一格时这一条接不上（下面 `return`）—— 那是对的：一份数据
-  //     都没建过，说明这台机器上从来没起过这个插件的会话。
+  //   引用表里没有那一格时，先在这里补一份（下面那一支）。
+  //
+  //   从前这里是一句 `return`，理由是"一份数据都没建过，说明这台机器上从来没起过
+  //     这个插件的会话"。那句话在一种现实里是假的：工作区换过、那份数据被删过、
+  //     或者配置是手改过的 —— 会话在服务端活得好好的，引用表里却没有它的那一格。
+  //     而静默返回的后果不是"少一条列表"，是这条作业在 1800 秒后被当作孤儿
+  //     `scancel`，用户既接不回来、也开不了新的（站点的并发上限被它占着）。
   const conn = config.activeConnection(cfg);
-  const baseSpace = (plugin && pluginData.needsSpace(plugin) && conn)
+  let baseSpace = (plugin && pluginData.needsSpace(plugin) && conn)
     ? config.findSpace(cfg, ((config.findWorkspace(cfg, conn.workspaceId) || {}).refs || {})[plugin.id])
     : null;
-  if (plugin && pluginData.needsSpace(plugin) && !baseSpace) return;   // 没配置连接，接不上
+  if (plugin && pluginData.needsSpace(plugin) && !baseSpace) {
+    const workspaceId = conn && config.findWorkspace(cfg, conn.workspaceId)
+      ? conn.workspaceId : null;
+    if (!workspaceId) {
+      win.pushNotice('error', `这条会话要用「${plugin.displayName || plugin.name}」的一份数据，`
+        + '而本机当前没有连接指着任何一个工作区，这条会话无法接回。作业仍在集群上运行；'
+        + '回到连接列表连上一条连接之后会再试一次。');
+      return;
+    }
+    baseSpace = spaceForSession(workspaceId, plugin);
+    if (!baseSpace) {
+      win.pushNotice('error', `接上这条会话之前，未能给「${plugin.displayName || plugin.name}」`
+        + '建出一份数据。作业仍在集群上运行。');
+      return;
+    }
+    win.pushNotice('warn', `这条会话用的那一份「${plugin.displayName || plugin.name}」数据`
+      + '在本机的引用表里不在了，已经为它新建一份并接上。作业一个字都没动；'
+      + '编辑器里的布局与打开的标签页会是新的。');
+  }
 
   // 重连必须走同一个 `claimSpace`（不是"照抄 startSession 那两行"）。
   //

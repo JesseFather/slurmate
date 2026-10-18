@@ -3075,17 +3075,27 @@ function renderJobs() {
 /**
  * 三个动作按钮的可用性与提示。
  *
- * 「接管」在本机已经是看护者时禁用：那是一次空动作，而它成功之后会回一句
- *   "已接管" —— 用户会以为刚才发生了什么。按钮该说的是"这台电脑已经在看它了"。
+ * 「接管」只在【另一台电脑正在看着它】时可用。另外两种"不需要接管"要各自说出来，
+ *   而不是留一颗按下去什么都不做的按钮：
+ *   · 本机已经在看它 —— 那是一次空动作，而它成功之后会回一句"已接管"，
+ *     用户会以为刚才发生了什么。
+ *   · 没人在看它 —— 心跳会自己把它认领过来（服务端的 `op_heartbeat` 对
+ *     `keeper IS NULL` 就是认领）。接管在这里同样是一次空动作。
+ *   用户 2026-10-18：接管是两个客户端互相争抢时才有的动作，不是"没人看"的出路。
  */
 function renderJobsSelection() {
   const j = selectedJob();
   const canAct = Boolean(j && j.live && j.attached);
+  const elsewhere = Boolean(j && j.keeper) && !j.keeper_is_me;
   $('btn-jobs-end').disabled = !canAct;
-  $('btn-jobs-takeover').disabled = !canAct || j.keeper_is_me;
+  $('btn-jobs-takeover').disabled = !canAct || !elsewhere;
   $('btn-jobs-reload').disabled = !canAct;
   $('btn-jobs-takeover').title = !j ? '先在上面点一条作业'
-    : (j.keeper_is_me ? '这台电脑已经在看它了' : '把这条会话的看护者换成这台电脑（作业一个字都不动）');
+    : (!j.live ? '这一条已经结束了'
+    : (!j.attached ? '本机还没接着它：重新连一次这个站点会把它接上'
+    : (j.keeper_is_me ? '这台电脑已经在看它了'
+    : (!j.keeper ? '没人在看它：接上之后心跳会自己把它认领过来，不需要接管'
+    : '把这条会话的看护者换成这台电脑（作业一个字都不动）'))));
   // 状态条上那一颗跟着选中的这一条走（见 renderStatusEnd）。少了这一句，
   //   点一条作业之后它还说「停止该作业」却停着上一次那一条 —— 或者停着前台那条。
   renderStatusEnd(lastSnap);
