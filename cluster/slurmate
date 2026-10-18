@@ -295,7 +295,7 @@ def wait_reload(base_seq, timeout=RELOAD_TIMEOUT):
             else:
                 last = ((resp.get("error") or {}).get("detail")
                         or "守护进程不应答")
-        # 0.2 秒一次：这个 op 也过每 uid 每秒的限流，10 次/秒是那条线。
+        # 0.2 秒一次：这个 op 也过每 uid 每秒的限流，100 次/秒是那条线。
         time.sleep(0.2)
     return None, last
 

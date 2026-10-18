@@ -568,7 +568,7 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 - 未知 code 一律当作不可重试。「宁可停下来让人看见，也不要盲目重试掩盖问题」
   （`client/src/main/classify.js`）。
 - `code 2` 绝不重试。重试只会重复同一个错误，白白消耗 RPC 配额
-  （`max_rpc_per_second = 10`，`client/src/main/classify.js`）。
+  （`max_rpc_per_second = 100`，`client/src/main/classify.js`）。
 
 ### 幂等性：只有 `submit` 不是幂等的
 

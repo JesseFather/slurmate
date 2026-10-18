@@ -117,7 +117,7 @@ function classify(resp, ctx) {
   }
 
   // ── 5. 客户端 bug ────────────────────────────────────────────────────────
-  // 重试只会重复同一个错误，白白消耗 RPC 配额（max_rpc_per_second = 10）。
+  // 重试只会重复同一个错误，白白消耗 RPC 配额（max_rpc_per_second = 100）。
   if (code === 2) {
     return mk(Action.FATAL, code, kind, message, ctx);
   }
