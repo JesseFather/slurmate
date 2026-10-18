@@ -338,12 +338,12 @@ function showScreen(name) {
                            ['jobs', 'screen-jobs']]) {
     $(id).classList.toggle('hidden', key !== name);
   }
-  // 离开插件那一屏，就把各块的高级选项退回默认（2026-10-18 用户点的："连切换
-  //   页面再回来都没有恢复默认"）。判据是"离开"，不是"重画"：这一屏的 DOM 一直
-  //   留在文档里，切回来只是去掉 `hidden`，控件里的值跟着留着 —— 而它们会在下一次
-  //   「开始会话」时被发出去。
+  // 离开插件那一屏，把各块的高级选项收起来。判据是"收起"，不是"离开"：
+  //   收起 = 退回默认，展开着才可能填着值（用户 2026-10-18 定的）。这一屏的 DOM
+  //   一直留在文档里，切走只是加一个 `hidden` —— 不在这里收，切回来时面板还开着、
+  //   值也还在，而用户已经离开过一次了。
   if (prev === 'plugins' && name !== 'plugins') {
-    for (const st of advCells) resetAdv(st);
+    for (const st of advCells) st.collapse();
   }
   // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（判据是
   // "用户走开了"，不是"会话跑起来了"）。不收的话，用户从第二屏退回来会看见一个半填的表单，
@@ -3537,25 +3537,27 @@ function pluginAdv(defaults) {
   advCells.push(st);
 
   // 收起 = 退回默认（2026-10-18 用户点的那一条：填过、收起、再打开要恢复默认）。
-  //   判据是"收起"，不是"展开"：展开时屏幕上那几格必须与下一次会交出去的那一份
-  //   逐字相同 —— 先清空再画与"打开一个空面板"是同一件事，但收起时清空能保证
-  //   用户看到的那一屏从来不是旧值。
-  toggle.onclick = () => {
-    const open = body.classList.contains('hidden');
+  //   状态只有两档：收着 = 全是默认；展开着 = 可能填着值。离开插件那一屏也走
+  //   这一条路（`showScreen` 调 `st.collapse`）—— 不重画、不另清一遍，两处清值
+  //   迟早会漂开。
+  const setOpen = (open) => {
     if (!open) resetAdv(st);
     body.classList.toggle('hidden', !open);
     toggle.textContent = open ? '▾ 高级选项' : '▸ 高级选项';
     toggle.setAttribute('aria-expanded', String(open));
   };
+  toggle.onclick = () => setOpen(body.classList.contains('hidden'));
+  st.collapse = () => { if (!body.classList.contains('hidden')) setOpen(false); };
   return { box, st };
 }
 
 /**
  * 把一块的高级选项退回默认：一个字都不填，滑块停回站点那份默认。
  *
- * 两个入口：收起这一块（`pluginAdv` 里那一颗），以及离开插件那一屏
- *   （`showScreen`）。两处都是"用户走开了"，而留在控件里的值不会跟着走开 ——
- *   下一次「开始会话」照样会把它发出去，界面上却只剩一行收着的「高级选项」。
+ * 只有一条入口：把这一块收起来（`pluginAdv` 里那条 `setOpen(false)`）。
+ *   点那颗开关与离开插件那一屏（`showScreen` 调 `st.collapse`）都走它 ——
+ *   两处各清一遍迟早会漂开。收起之后控件里的值不再留着：留着的话，它们会在
+ *   下一次「开始会话」时被发出去，而界面上只剩一行收着的「高级选项」。
  *
  * 顺序是承重的：先清控件，再重画分区那一格。`fillPartSelect` 会顺着
  *   `renderGresFor` 把 GRES 打回「用插件的默认」、把数量那一格打回灰的、

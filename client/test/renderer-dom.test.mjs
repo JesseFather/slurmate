@@ -1710,10 +1710,11 @@ test('同一份插件清单不重画：展开着的高级选项不许自己合�
     assert.equal(h.byId.get('plugin-blocks').children.length, 2, '清空之后同一份要重画');
   });
 
-test('高级选项收起就退回默认；离开插件屏再回来同样如此', () => {
+test('高级选项收起就退回默认；离开插件屏时也收起来', () => {
   // 2026-10-18 用户报的两条：「调整完，收起，再打开应该恢复默认，可是并没有」，
-  //   以及「连切换页面再回来都没有恢复默认」。判据是那一格真的被清空、滑块真的
-  //   回到站点那份默认 —— 不是"重画了一遍"。
+  //   以及「连切换页面再回来都没有恢复默认」。定下的状态只有两档：收着 = 全是
+  //   默认，展开着 = 可能填着值；离开插件那一屏也就是把它收起来。
+  //   判据是那一格真的被清空、滑块真的回到站点那份默认 —— 不是"重画了一遍"。
   const view = JSON.parse(JSON.stringify(PV));
   view.plugins[0].defaults = { cpus: 2, mem: '8G', time: '12:00:00',
     gpus: { name: 'gpu', type: null, count: 1 } };
@@ -1773,12 +1774,16 @@ test('高级选项收起就退回默认；离开插件屏再回来同样如此',
   assertDefault('收起之后');
 
   // ② 切换页面再回来（用户点的那一条）。这一屏的 DOM 一直留在文档里，
-  //   切走只是加一个 `hidden` —— 不在切走那一刻清，值就跟着留下。
+  //   切走只是加一个 `hidden` —— 不在切走那一刻把它收起来，切回来时面板还开着、
+  //   值也还在。
   h.fn('showScreen')('plugins');    // 前提：真的站在插件这一屏上
   toggle().onclick();
   fill();
   h.fn('showScreen')('jobs');
+  assert.equal(body().classList.contains('hidden'), true,
+    '离开那一屏时它要收起来 —— 收起就是退回默认');
   h.fn('showScreen')('plugins');
+  assert.equal(body().classList.contains('hidden'), true, '回来时仍然是收着的');
   assertDefault('离开再回来之后');
 });
 
