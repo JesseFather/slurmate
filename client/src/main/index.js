@@ -783,6 +783,12 @@ async function doConnect(conn, extra = {}) {
     //     `tryReattach` 自己会推通知说"正在逐个接上"。
     try {
       await tryReattach();
+      // 连上之后落在面板（随后界面把屏切到插件页），不是落在某一条会话的页面上。
+      //   接回来的那些可能是另一台电脑正在看的（用户 2026-10-18 的第三种重登录），
+      //   把用户直接推进别人的作业里，就是替他做了一次接管。浏览器式的
+      //   「恢复上次的页面」不属于这里：这一条路是用户点「连接」，
+      //   而页面的连续性是网络波动那条路的事（那一条不重跑 `tryReattach`）。
+      win.showPanel();
     } catch (e) {
       // 接回失败不能把这次连接说成失败：连接本身是好的，只是上次那几条
       // 会话没接回来（它们仍然在集群上跑，下一次连接会再试一遍）。
@@ -2943,11 +2949,18 @@ async function onSessionChange(slot) {
     const views = sessionViews();
     // 窗口那一层要的两件事（几条活着、各自的 closeWarning）走这一份；界面要的
     // 那一份走 pushSessions。分开：前者是"关窗会掐断什么"，后者是"画什么"。
-    win.setSessions(views.map((v) => ({
-      live: v.live,
-      service: v.service,
-      plugin: (sessions.get(v.slot) || {}).plugin || null,
-    })));
+    win.setSessions(views.map((v) => {
+      const rec = sessions.get(v.slot) || {};
+      const c = rec.controller;
+      return {
+        // 「本机在看」才算一条：被接管的、以及接上来还没心跳成功的那一段，
+        //   都不属于本机 —— 关窗确认与收尾只该数、只该结束本机真正在看的那几条
+        //   （见 `SessionController.watching`）。
+        live: v.live && Boolean(c) && c.watching,
+        service: v.service,
+        plugin: rec.plugin || null,
+      };
+    }));
     win.pushSessions(views, frontSlot());
     // 「作业一结束右栏就收起来」那条规矩的落点。判据与面板上那个点、以及
     //   `startOutPoll` 自己那一条同源（有没有作业在跑）—— 三处各写一份的话，
@@ -3283,6 +3296,8 @@ async function ensureSurface(rec, snap) {
   // 判据跟着这次会话的后端走（`snap.dev`）。
   await win.showSurface({
     slot: rec.slot, url: snap.origin + surface.path, partition, demo: snap.dev,
+    // 本机起的那条才把页面推上来；接上来的那条留在面板上（用户点标签再过去）。
+    reveal: !rec.adopted,
   });
   if (rebuilt) {
     win.pushNotice('info', '已切换到新的工作区，页面已重新加载。');
@@ -3528,7 +3543,7 @@ async function stopAllSessions() {
     //    （`SessionController.stop()` 顶上还有同一道闸，这里再判一次是为了
     //     不产生一条误导的报错：它现在回的是 `ok:false`，而 `shutdown()`
     //     会把它当成失败推到界面上。）
-    if (c.suspended) continue;
+    if (!c.watching) continue;
     out.push({ slot: rec.slot, sessionId: c.sessionId, res: await c.stop() });
   }
   // 临时那一份的后备回收。正常路径是 `_renderSession` 里那一处（会话走到终态
@@ -4199,7 +4214,10 @@ async function reattachOne(s) {
     return;
   }
 
-  const rec = { slot, plugin, pluginWhy: why, controller: null,
+  // `adopted`：这一条是接上来的，不是本机开的。界面那一侧靠它决定
+  //   「本机没有接管」那句话，以及"新建的页面要不要把面板顶下去" ——
+  //   接上来的那条可能是另一台电脑正在看的（用户 2026-10-18）。
+  const rec = { slot, plugin, pluginWhy: why, controller: null, adopted: true,
                 connectionId: conn ? conn.id : null, claims: new Set() };
   // 接上来的那一条也要认领，理由与 `startSession` 那一处逐字相同：它的插件进程
   //   是我们重启之前起的，而它正在写的那份目录，按当前输入可能已经算不出名字
@@ -5004,7 +5022,11 @@ function registerIpc() {
     const ids = [];
     for (const rec of sessions.values()) {
       const c = rec.controller;
-      if (c && c.sessionId) ids.push(c.sessionId);
+      // 只放掉本机真正在看的那几条。把另一台电脑正在看的会话也一起 `leave`
+      //   等于替它清掉看护者 —— 那一段倒计时要等它下一拍心跳才收回来，
+      //   而用户只是在这一台上点了「临时离开」（用户 2026-10-18：
+      //   没有被接管的作业还在老电脑上运行）。
+      if (c && c.sessionId && c.watching) ids.push(c.sessionId);
     }
 
     let left = { ok: true, cleared: [] };

@@ -316,6 +316,19 @@ class SessionController extends EventEmitter {
    */
   get suspended() { return this._suspended; }
 
+  /**
+   * 本机现在真的在看这条会话吗。
+   *
+   * 两种「不是」：被别人接管的（`_suspended`），以及接上来、还没成功心跳过的
+   *   （`_adopted && !_watched`）—— 后一种是第二台电脑刚连上时的那一段：
+   *   心跳还没回来，服务端也没说它归谁。收尾时不能被算成"本机在看"，
+   *   否则关一次窗口就把另一台电脑的作业 `goodbye` 掉了（用户 2026-10-18：
+   *   「没有被接管的作业还在老电脑上运行」）。
+   */
+  get watching() {
+    return !this._suspended && (!this._adopted || this._watched);
+  }
+
   // ── 服务种类 ────────────────────────────────────────────────────────────
   /**
    * 本次会话提供的是哪种服务 —— 原样，不归一、不认名字。

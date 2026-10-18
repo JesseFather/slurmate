@@ -4648,6 +4648,9 @@ test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的�
   fire(wc, 'did-start-loading');
   fire(wc, 'did-stop-loading');
   assert.equal(ov._visible, false, '页面加载完，遮罩收起来');
+  // 网络波动不换屏：断之前在看页面，恢复之后还在看页面（用户 2026-10-18
+  //   的第二种重登录要的正是"恢复上次的页面状态"）。
+  assert.equal(w.panelFront, false, '自动重连不把人从页面里拽回面板');
 
   // 活着的页面一次都不许碰 —— 编辑器里没保存的改动、终端里滚过的内容都在里面。
   const alive = wc.reloads || 0;
@@ -7477,6 +7480,55 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
   cleanupSiteState(idx);
 });
 
+test('另一台电脑正在看的作业：关窗不数它，断开也不碰它', async (t) => {
+  // 用户 2026-10-18 的第三种重登录：在一台电脑上接着站点、开着插件，到另一处
+  //   用另一台电脑连上来。接管是作业级的 —— 没被接管的那些仍然归老电脑，
+  //   这台机器关窗、断开都不该碰它们。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  // 造出「另一台电脑在看它」，走心跳那条真路。
+  await invoke('app:debug', 'foreign-keeper');
+  await ctl.heartbeatNow();
+  assert.ok(ctl.suspended, '前置：本机认出它归另一台电脑');
+
+  const w = idx._test.getWindow();
+  assert.ok(w._sessions.length > 0, '前置：窗口那一层收到了会话');
+  // 窗口那一份是异步推过去的（`onSessionChange`），等它反映出来再判。
+  await waitUntil(() => w._sessions.every((x) => !x.live),
+    '窗口那一层把这条会话算成「本机没在看」');
+  assert.equal(w._sessions.every((x) => !x.live), true,
+    '本机没在看的会话不该被数进「关窗会结束」—— 关掉这台电脑不会结束老电脑的作业');
+
+  // 断开走的是同一个 `stopAllSessions`：一条 goodbye 都不许发。
+  const dis = await invoke('app:disconnect');
+  assert.equal(dis.ok, true, JSON.stringify(dis));
+  assert.equal(['releasing', 'released', 'expired', 'rejected']
+    .includes(onlyFake(b).state), false,
+    '被另一台电脑看着的作业仍在集群上跑 —— 这台机器断开不许 goodbye 它');
+
+  // 重连之后再点【临时离开】：`leave` 也只许放掉本机在看的那些 ——
+  //   把另一台的看护者一起清掉，等于替它开始倒计时。
+  await connectDemo(idx);
+  await waitUntil(() => idx._test.getSessions().size > 0, '重新接上那条会话');
+  const keeperBefore = onlyFake(b).keeper;
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, JSON.stringify(lv));
+  assert.equal(onlyFake(b).keeper, keeperBefore,
+    '本机没在看它 —— 临时离开不许动它的看护者（那是老电脑的）');
+
+  await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('【断开】是【临时离开】的反面：它真的把作业停掉', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -8007,6 +8059,16 @@ test('【临时离开】之后重连：那条会话要接回来，看护者回�
   const conn = await testConn();
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+
+  // 连上之后落在面板上（界面随后切到插件页），不是被推进那条会话的页面里。
+  //   用户 2026-10-18 的模型：临时离开之后回来，选哪个插件由用户点。
+  const w = idx._test.getWindow();
+  assert.equal(w.panelFront, true,
+    '接回来之后面板要在前面 —— 页面不该把用户推进某一条会话里');
+  if (w.hasSurface(a.slot)) {
+    assert.equal(viewFor(w, a.slot)._visible, false,
+      '接回来的页面让开；用户点上面的标签再过去');
+  }
 
   const rec = onlyRec(idx);
   assert.ok(rec, '重连之后那条会话要回到本机手上 —— 若接不回来，它的作业会在 '

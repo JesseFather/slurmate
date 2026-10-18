@@ -267,7 +267,7 @@ class ShellWindow {
    *   已经没有意义：URL 的路径部分由插件声明（`contributes.surface.path`），所以
    *   "同一个隧道端口、不同路径"也是合法的。
    */
-  async showSurface({ slot, url, partition, demo = false }) {
+  async showSurface({ slot, url, partition, demo = false, reveal = true }) {
     // WebContentsView 的 partition 只在构造时读一次（就是下面那个 new）。
     //   所以「换工作区」= 换 partition，必须销毁重建 —— 只 loadURL 是没用的，
     //   页面会继续跑在旧的存储分区里（旧的布局、旧的登录 cookie），
@@ -316,7 +316,11 @@ class ShellWindow {
       //     面板收回去，那一屏就没法用了。
       //   而它只对前台那一块做：起一条后台会话时把前台那块旧页面顶上来，
       //     是另一个方向的意外（用户会以为"我起的是它吗"）。
-      if (slot === this._front) this._panelFront = false;
+      // `reveal`：这一块页面刚建出来时，要不要把面板收回去、把页面推上来。
+      //   本机自己起的那条（用户点了「启动」）要；接上来的那条不要 ——
+      //   它可能是另一台电脑正在看的，把用户推进去等于替他接管了一次
+      //   （用户 2026-10-18）。用户点会话标签时照常切过去（`setFront`）。
+      if (slot === this._front && reveal) this._panelFront = false;
       await loadPage(view.webContents, url);
     } else {
       // 隧道换端口：origin 变了，但不重装监听器（它们读的是 s.origin）。
