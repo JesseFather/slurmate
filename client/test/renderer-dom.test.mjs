@@ -571,21 +571,13 @@ test('bootstrap 挂了，界面照样点得动（一次 reject 不许拆掉整�
     (e) => h.fn('onInitFailed')(e));
 
   // ── 那几格必须仍然有动作 ──
-  // 一律走 `$()` 取元素：`byId` 是取过才有的缓存，而 `sec-about` 只在
-  //   下面那一下被点到时才第一次被取到。
-  // 入口是「Slurmate」那一行右端那颗感叹号（`#btn-about`，2026-10-17 改），
-  //   不是标题那一行（点标题在任何一个界面里都是"回首页"的意思，而这里的返回
-  //   方式已经由各处动作约束好了）。
-  const foot = h.run("$('btn-about')");
-  assert.equal(typeof foot.onclick, 'function',
-    '「关于」那颗按钮仍然要挂着动作 —— 首屏数据无法获取不该让入口变成哑的');
-  // 壳里的 `$()` 是现造一个空元素，它不会去读 panel.html —— 所以
-  //   `hidden` 那一格得自己摆成初始状态（真机上由 panel.html 上的 class 给）。
-  h.run("$('sec-about').classList.add('hidden');");
-  assert.equal(h.run("$('sec-about').classList.contains('hidden')"), true, '（前提：它本来是收着的）');
-  foot.onclick();
-  assert.equal(h.run("$('sec-about').classList.contains('hidden')"), false,
-    '点下去要开 —— 用户报的就是"点了没反应"');
+  // 判据落在 `bindEvents()` 真的跑完了：它同步挂完所有监听，而 `bootUI` 的
+  //   失败发生在它之后。入口取 `#btn-new` —— 它固定在 panel.html 里。
+  // 「关于」那颗不在这条判据里：它的展开与收起是 CSS（悬停 / 聚焦），
+  //   一颗监听都不需要，所以"bootstrap 失败让它变哑"这件事在它身上不成立。
+  const nx = h.run("$('btn-new')");
+  assert.equal(typeof nx.onclick, 'function',
+    '「新建连接」仍然要挂着动作 —— 首屏数据无法获取不该让界面变成哑的');
 
   // ── 而失败本身第一眼看得见（不再只滚进提示流）──
   const banner = h.byId.get('fatal-banner');
@@ -593,6 +585,26 @@ test('bootstrap 挂了，界面照样点得动（一次 reject 不许拆掉整�
     '初始化失败要有一块常驻的地方说出来 —— 提示流会滚过去、也会被顶下去');
   assert.match(h.byId.get('fatal-why').textContent, /假装获取失败/,
     '而原因要照原话说出来');
+});
+
+test('关于卡片里的版本号是主进程给的那一个，缺了就照实说', () => {
+  // 2026-10-18：用户报「关于里面的信息不对」。卡片里那一格版本读的是
+  //   `app:bootstrap` 的 `version`（主进程的 `app.getVersion()`），界面不另写
+  //   一个串 —— 写了就会漂，而且漂的方向是"界面上写着 A、装上去的是 B"。
+  const h = start({});
+  h.run('boot = { version: "9.9.9" };');
+  h.fn('renderAbout')();
+  assert.equal(h.byId.get('about-ver').textContent, '版本 9.9.9');
+
+  h.run('boot = {};');
+  h.fn('renderAbout')();
+  assert.equal(h.byId.get('about-ver').textContent, '版本未知',
+    '没有版本号时说「未知」，不猜一个数 —— 读成"这就是这一版"是最坏的一种');
+
+  h.run('boot = null;');
+  h.fn('renderAbout')();
+  assert.equal(h.byId.get('about-ver').textContent, '版本未知',
+    '连启动信息都没有的时候同样如此（它够得着在被赋值之前被调用）');
 });
 
 test('重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {
@@ -1449,10 +1461,10 @@ test('高级选项：一块一份，两块各填各的，值不串到另一块',
 
   const kidsOf = (e) => (e.children || []).filter((k) => k && k.tagName);
   const blockOf = (i) => h.byId.get('plugin-blocks').children[i];
-  const advOf = (b) => kidsOf(b).find((x) => x.tagName === 'DETAILS');
+  const advOf = (b) => kidsOf(b).find((x) => x.className === 'plug-adv');
   /** 那一块里那几格：CPU / 内存 / GRES / 数量 / 分区（`field()` 造 div>label+控件）。 */
   const cellsOf = (b) => {
-    const row = kidsOf(advOf(b)).find((x) => x.className === 'row');
+    const row = childrenOf(advOf(b)).find((x) => x.className === 'row');
     return kidsOf(row).map((w) => kidsOf(w)[1]);
   };
   const btnOf = (b) => kidsOf(
@@ -1660,11 +1672,19 @@ test('同一份插件清单不重画：展开着的高级选项不许自己合�
       spaces: SPACES });
     h.fn('renderPlugins')(PV);
     const blockOf = (i) => h.byId.get('plugin-blocks').children[i];
-    const advOf = (b) => childrenOf(b).find((x) => x.tagName === 'DETAILS');
+    // 按 class 里的一个记号找：`adv-body` 那一格同时带着 `hidden`，
+    //   整串比对会把展开着的那一层也漏掉。
+    const has = (x, cls) => (x.className || '').split(/\s+/).indexOf(cls) >= 0;
+    const advOf = (b) => childrenOf(b).find((x) => has(x, 'plug-adv'));
+    const toggleOf = (b) => childrenOf(b).find((x) => has(x, 'adv-toggle'));
+    const bodyOf = (b) => childrenOf(b).find((x) => has(x, 'adv-body'));
 
     const first = blockOf(0);
     const adv = advOf(first);
-    adv.open = true;
+    // 展开那一块走用户那条路：点那颗开关（2026-10-18 起它不是 `<details>` 了）。
+    toggleOf(first).onclick();
+    assert.equal(bodyOf(first).classList.contains('hidden'), false,
+      '（前提：它现在是展开着的）');
     const cells = childrenOf(adv).find((x) => x.className === 'row').children;
     cells[0].children[1].value = '7';        // CPU 那一格填到一半
 
@@ -1673,7 +1693,8 @@ test('同一份插件清单不重画：展开着的高级选项不许自己合�
     h.fn('renderPlugins')(JSON.parse(JSON.stringify(PV)));
 
     assert.equal(blockOf(0), first, '同一份内容不该换掉那一块');
-    assert.equal(advOf(first).open, true, '展开着的还在展开着');
+    assert.equal(bodyOf(first).classList.contains('hidden'), false,
+      '展开着的还在展开着');
     assert.equal(cells[0].children[1].value, '7', '填了一半的值还在原处');
 
     // 反过来：内容真的变了就必须重画。少了这一半，上面那三条可以拿"永远不画"换来。
@@ -1688,6 +1709,78 @@ test('同一份插件清单不重画：展开着的高级选项不许自己合�
     h.fn('renderPlugins')(PV);
     assert.equal(h.byId.get('plugin-blocks').children.length, 2, '清空之后同一份要重画');
   });
+
+test('高级选项收起就退回默认；离开插件屏再回来同样如此', () => {
+  // 2026-10-18 用户报的两条：「调整完，收起，再打开应该恢复默认，可是并没有」，
+  //   以及「连切换页面再回来都没有恢复默认」。判据是那一格真的被清空、滑块真的
+  //   回到站点那份默认 —— 不是"重画了一遍"。
+  const view = JSON.parse(JSON.stringify(PV));
+  view.plugins[0].defaults = { cpus: 2, mem: '8G', time: '12:00:00',
+    gpus: { name: 'gpu', type: null, count: 1 } };
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES },
+  'window.slurmate.jobs = () => Promise.resolve({ ok: false,'
+  + ' error: { detail: "没有站点" } });');
+  h.fn('renderPlugins')(view);
+  h.fn('renderPartitions')([
+    { name: 'normal', allowed: true, mem_per_node_mb: 128000,
+      gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] },
+  ]);
+  const block = () => h.byId.get('plugin-blocks').children[0];
+  // 按 class 里的一个记号找（`adv-body` 那一格同时带着 `hidden`）。
+  const find = (b, cls) => childrenOf(b).find(
+    (x) => (x.className || '').split(/\s+/).indexOf(cls) >= 0);
+  const toggle = () => find(block(), 'adv-toggle');
+  const body = () => find(block(), 'adv-body');
+  const row = () => find(body(), 'row');
+  const cell = (i) => row().children.filter((k) => k && k.tagName)[i];
+  const ctrl = (i) => childrenOf(cell(i)).find((x) =>
+    (x.tagName === 'INPUT' || x.tagName === 'SELECT') && x.type !== 'range');
+  const range = (i) => childrenOf(cell(i)).find((x) => x.type === 'range');
+  const val = (i) => find(cell(i), 'adv-val');
+
+  const fill = () => {
+    const r0 = range(0);
+    r0.value = '3'; r0.oninput();              // CPU 8 核
+    const p = ctrl(4);
+    p.value = 'normal'; p.onchange();          // 挑一个分区（内存滑块才有顶）
+    const m = range(1);
+    m.value = '15'; m.oninput();               // 内存 16G
+    const g = ctrl(2);
+    g.value = '0'; g.onchange();               // 第一张卡
+    const n = range(3);
+    n.value = '1'; n.oninput();                // 2 张
+  };
+  const assertDefault = (when) => {
+    assert.equal(ctrl(0).value, '', `CPU 那一格要清空（${when}）`);
+    assert.equal(ctrl(1).value, '', `内存要清空（${when}）`);
+    assert.equal(ctrl(4).value, '', `分区要回到「随机选择一个」（${when}）`);
+    assert.equal(ctrl(2).value, '', `GRES 要回到「用插件的默认」（${when}）`);
+    assert.equal(ctrl(3).value, '', `数量要清空（${when}）`);
+    assert.equal(ctrl(3).disabled, true, `而它要回到灰的（${when}）`);
+    assert.equal(range(0).value, '1', `CPU 滑块要停回默认的 2 核（${when}）`);
+    assert.equal(val(0).textContent, '2', `读数要写回默认值（${when}）`);
+  };
+
+  // ① 收起 = 不要这一份了。填进去的值不许留着 —— 它们会在下一次
+  //   「开始会话」时被发出去，而界面上只剩一行收着的「高级选项」。
+  toggle().onclick();
+  assert.equal(body().classList.contains('hidden'), false, '（前提：点开了）');
+  fill();
+  assert.equal(val(0).textContent, '8', '（前提：填进去了）');
+  toggle().onclick();
+  assert.equal(body().classList.contains('hidden'), true, '收起');
+  assertDefault('收起之后');
+
+  // ② 切换页面再回来（用户点的那一条）。这一屏的 DOM 一直留在文档里，
+  //   切走只是加一个 `hidden` —— 不在切走那一刻清，值就跟着留下。
+  h.fn('showScreen')('plugins');    // 前提：真的站在插件这一屏上
+  toggle().onclick();
+  fill();
+  h.fn('showScreen')('jobs');
+  h.fn('showScreen')('plugins');
+  assertDefault('离开再回来之后');
+});
 
 test('共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
   // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：

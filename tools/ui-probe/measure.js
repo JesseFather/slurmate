@@ -90,30 +90,19 @@
   var SCROLLERS = ['#panel', '.conns', '.jobs', '.notices', '.joblog', '#statusbar'];
 
   /**
-   * 展开着的高级选项里，`sel` 选中的东西真的画出来了几个。
+   * 每一块真的画出来的那一行上跑一遍 `fn`（收着的那几块不跑）。
    *
-   * 判据是"它真的落在那个 `<details>` 画出来的盒子里"，既不是"DOM 里有几个"，
-   *   也不是上面那个 `visible()`。这个无头壳里，收着的 `<details>` 里那几个孩子
-   *   照样有一个非零的矩形 —— `content-visibility: hidden` 把上一次的布局留着，
-   *   而那个矩形从 details 自己的盒子（只有摘要那一行高）底下伸出去。
-   *   实测（`plugins` 那一格，收着）：details 的盒子是 19px 高，而那一行的矩形
-   *   挂在它下面 126px 处。
-   *   所以"收着"与"展开着"在 `visible()` 眼里长得一模一样 —— 少了这一条，
-   *   一个把 `<details>` 删掉、只留 DOM 的改动会让这一格照样全绿。
+   * 2026-10-18 换了载体（`<details>` → 一层 `display: none` 的 `.adv-body`）：
+   *   收着的那一行没有矩形，`visible()` 一条就挡住了。从前那套"矩形挂在
+   *   details 盒子外面"的包含判断随 `<details>` 一起删掉了 —— 它守的是
+   *   `content-visibility: hidden` 那个形状，而新载体没有那个形状。
    */
-  /** 每一块真的画出来的那一行上跑一遍 `fn`（收着的那几块不跑）。 */
   function eachDrawnAdvRow(fn) {
     Array.prototype.forEach.call(
-      document.querySelectorAll('#plugin-blocks details.plug-adv'),
+      document.querySelectorAll('#plugin-blocks .plug-adv'),
       function (d) {
         var row = d.querySelector('.row');
-        // `visible()` 挡的是"这一屏根本不在前台"那一档（那时两个盒子的坐标都是 0，
-        //   下面那条包含判断会把 0 当成"在里面"）；它挡不住收着的 details，
-        //   那一档由包含判断挡。
         if (!row || !visible(row)) return;
-        var db = d.getBoundingClientRect();
-        var rb = row.getBoundingClientRect();
-        if (rb.top < db.top || rb.bottom > db.bottom + 1) return;
         fn(row);
       });
   }
@@ -320,6 +309,61 @@
       portAsk: $('sb-port').classList.contains('hidden') ? 0 : 1,
     };
 
+    // ── 同一行里的字与框：竖直中心要对上（用户 2026-10-18 报的"没有对齐居中"）
+    //
+    //   量两类行内 label：`.plug-data` 里那一格「数据」（旁边是一个下拉），
+    //   以及 `.plug-meta` 里那个「本机启用」（勾选框那一簇与同一行的那几格字）。
+    //   全局 `label { margin-bottom: 5px }` 是给"标签在上、控件在下"的格子留的，
+    //   它在行内把这一格的盒子顶高 2.5px —— 肉眼看到的就是"字比框高半格"。
+    //   邻居取父节点的第一个可见孩子：两处父节点都只有一行，参照物与要量的
+    //   这一格在同一行上。
+    out.inline = [];
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.plug-data-lbl, .plug-toggle'), function (el) {
+        if (!visible(el)) return;
+        var mate = null;
+        Array.prototype.forEach.call(el.parentNode.children, function (k) {
+          if (k === el || mate || !visible(k)) return;
+          mate = k;
+        });
+        if (!mate) return;
+        var a = el.getBoundingClientRect();
+        var b = mate.getBoundingClientRect();
+        out.inline.push({
+          sel: describe(el),
+          own: Math.round((a.top + a.height / 2) * 10) / 10,
+          mate: Math.round((b.top + b.height / 2) * 10) / 10,
+        });
+      });
+
+    // ── 高级选项那几格里，同一行的控件要一样高、上边要对齐 ──
+    //
+    //   它们是一张网格，"同一行"由标签那一行的顶边认定：标签顶边相同的那几格
+    //   就是同一行（「分区」自己占一整行，它是单独一组，不参与比较）。
+    //   这条抓的是滑块曾经比输入框矮 20px、还往下挪 6px 的那个形状 —— 同一行的
+    //   框上下边一眼就能看出错开。
+    out.advRows = [];
+    eachDrawnAdvRow(function (rowEl) {
+      var groups = {};
+      Array.prototype.forEach.call(rowEl.querySelectorAll('.adv-cell'), function (cell) {
+        var head = cell.querySelector('.adv-head');
+        var ctrl = null;
+        Array.prototype.forEach.call(cell.querySelectorAll('input, select'), function (c) {
+          if (ctrl || !visible(c)) return;
+          ctrl = c;
+        });
+        if (!head || !ctrl) return;
+        var key = Math.round(head.getBoundingClientRect().top);
+        if (!groups[key]) groups[key] = [];
+        var r = ctrl.getBoundingClientRect();
+        groups[key].push({ sel: describe(cell),
+          top: Math.round(r.top * 10) / 10, h: Math.round(r.height * 10) / 10 });
+      });
+      Object.keys(groups).forEach(function (k) {
+        if (groups[k].length > 1) out.advRows.push({ row: describe(rowEl), cells: groups[k] });
+      });
+    });
+
     var de = document.documentElement;
     out.docScroll = de.scrollWidth > de.clientWidth + 1;
     out.fatal = !$('fatal-banner').classList.contains('hidden')
@@ -336,6 +380,22 @@
       setup: function () { return Promise.resolve(); },
       sentinel: function () { return document.querySelectorAll('#plugin-data .plug-desc').length > 0; },
       what: '首屏（含本机的插件数据那一块）',
+    },
+
+    // 同一屏，把焦点停到那颗感叹号上：悬停卡片由 `:focus-within` 浮出来。
+    //   这一格量的是那张卡片（宽度、右端、里面的字会不会折），而且它得真的
+    //   画出来 —— `sentinel` 判的就是 `display`，不是"DOM 里有"。
+    'conns-about': {
+      setup: function () {
+        var b = $('btn-about');
+        if (b) b.focus();
+        return Promise.resolve();
+      },
+      sentinel: function () {
+        var c = $('about-card');
+        return !!c && getComputedStyle(c).display === 'block';
+      },
+      what: '首屏：关于卡片（焦点停在感叹号上）',
     },
 
     // 同一屏，点开那一行的删除确认。用户报的那张截图就是这一格。
@@ -442,9 +502,12 @@
         renderPartitions(F.partitions || []);
         showScreen('plugins');
         Array.prototype.forEach.call(
-          document.querySelectorAll('#plugin-blocks details.plug-adv'),
+          document.querySelectorAll('#plugin-blocks .plug-adv'),
           function (d) {
-            d.open = true;
+            // 展开走用户那条路：点那颗开关（2026-10-18 起它不是 `<details>` 了，
+            //   所以没有 `d.open = true` 这一格）。
+            var t = d.querySelector('.adv-toggle');
+            if (t) t.click();
             // 挑一个分区、再挑一张卡：内存与数量那两条滑块只在有顶的时候才画，
             //   不挑的话这一格只量得到 CPU 那一条。那个分区里第一张卡正好是这个
             //   插件默认的那张，所以三条都画得出来。

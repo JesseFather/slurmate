@@ -162,14 +162,30 @@
            标题，比一个不能点的标题坏得多。
          「关于」的入口就在这一行右端：一颗感叹号（`#btn-about`，2026-10-17 改）。
            用户的原话是"把关于放到这里，做成感叹号"，随后又点了位置："叹号放到
-           slurmate 同行右端"。点开之后，内容在这一屏的最末（`#sec-about`）。
+           slurmate 同行右端"。
+         2026-10-18 改：内容是悬停卡片，不再是这一屏最末那一段。鼠标停在感叹号上、
+           或者键盘把它聚焦到，卡片就从下面浮出来（`#about-card`，样式见 app.css
+           的 `.about-tip`）。卡片里写着版本（由 `renderAbout` 从
+           `app:bootstrap` 的 `version` 那一格填进去）与一句说明。
          它只在"没在跑会话"的时候露得出来：会话一跑起来，窗口主体就被插件那块
            原生视图从 y=30 往下整块盖住（见 windows.js 的 `_layout`），这一行一个
            像素都露不出来。而这一屏本来就只在没在跑会话的时候看得见 —— 会话跑着的
            时候你在第二屏。 -->
     <div id="about-head">
       <h1>Slurmate</h1>
-      <button id="btn-about" class="icon-btn" title="关于" aria-label="关于">!</button>
+      <!-- 悬停层整层由 CSS 做（`.about-tip:hover .about-card`）：一个 `onclick`
+           都不挂，于是某一次 `bootstrap()` 失败不会让它变成一颗点了没反应的
+           按钮。卡片始终在 DOM 里，收着的时候是 `display: none`；
+           聚焦到按钮时（`:focus-within`）同样浮出来，键盘用户拿得到。 -->
+      <span class="about-tip">
+        <button id="btn-about" class="icon-btn" aria-label="关于"
+                aria-describedby="about-card">!</button>
+        <div id="about-card" class="about-card" role="tooltip">
+          <p class="about-name">Slurmate <span id="about-ver" class="mono">版本未知</span></p>
+          <p>把集群上的一个作业变成可以干活的远程开发会话。</p>
+          <p>连接、密钥与插件数据都在本机，站点那一侧是 <code>slurmate-sessiond</code>。</p>
+        </div>
+      </span>
     </div>
     <section id="sec-connect">
       <!-- 操作放右上角：它们是这一屏的「入口」，而列表本身是内容。
@@ -315,19 +331,6 @@
         <button id="btn-save">保存并连接</button>
         <button id="btn-cancel-form" class="ghost">取消</button>
       </div>
-    </section>
-    <!-- ── 关于 ──
-         内容 = 这一版的说明。入口是上面「Slurmate」那一行右端那颗感叹号
-         （`#btn-about`，2026-10-17 改）。
-         它与那颗入口都在 `#screen-conns` 里面：于是"只在主页面显示"由
-           屏的显隐那一句自动成立，不需要第二处判据（`showScreen` 里再 toggle
-           一次就是第二个"我在哪一屏"）。 -->
-    <section id="sec-about" class="hidden">
-      <h2>关于</h2>
-      <p class="sub">
-        Slurmate 把集群上的一个作业变成可以干活的远程开发会话。
-        连接、密钥与插件数据都在本机，站点那一侧是 <code>slurmate-sessiond</code>。
-      </p>
     </section>
     </section><!-- /screen-conns -->
 

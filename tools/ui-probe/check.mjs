@@ -298,12 +298,29 @@ function judge(r) {
     if (cnt.advBoxes) bad.push(`有 ${cnt.advBoxes} 条滑块旁边还留着输入框`);
     if (cnt.advNoval) bad.push(`有 ${cnt.advNoval} 条滑块没有读数`);
   }
+  // 同一行里字与框的竖直中心（用户 2026-10-18 报的"没有对齐居中"）。
+  //   量的是两个盒子的中心，1px 余量留给小数坐标。
+  for (const a of (r.inline || [])) {
+    if (Math.abs(a.own - a.mate) > 1) {
+      bad.push(`${a.sel} 与同一行那一格没有竖直居中：中心 ${a.own}，参照 ${a.mate}`);
+    }
+  }
+  // 高级选项里同一行的控件：上边与高度都要一样。
+  //   这两条都量过：滑块那次是 34.8px 对 14px、上边差 6px。
+  for (const g of (r.advRows || [])) {
+    const tops = [...new Set(g.cells.map((c) => Math.round(c.top)))];
+    const hs = [...new Set(g.cells.map((c) => Math.round(c.h)))];
+    if (tops.length > 1 || hs.length > 1) {
+      bad.push(`高级选项同一行的控件没对齐（顶 ${tops.join(' / ')}，高 ${hs.join(' / ')}）：`
+        + g.cells.map((c) => `${c.sel}=${c.top}/${c.h}`).join('，'));
+    }
+  }
   return bad;
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
-const CASES = ['conns', 'conns-armed', 'conns-connecting', 'conns-ws', 'plugins',
+const CASES = ['conns', 'conns-about', 'conns-armed', 'conns-connecting', 'conns-ws', 'plugins',
   'plugins-adv', 'jobs', 'statusbar-session', 'statusbar-panel', 'statusbar-port'];
 
 async function main() {

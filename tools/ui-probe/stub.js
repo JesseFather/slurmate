@@ -41,6 +41,9 @@
         connections: [],
         partitions: [],
         plugins: F.pluginsView || {},
+        // 「关于」卡片那一格。取一个与真版本不同的数：写成今天那个版本，
+        //   探针截图上的那一行就会看起来像"它读到了什么"，而它读的是桩。
+        version: '9.9.9',
       });
     },
     pluginData: function () { calls.push('pluginData'); return Promise.resolve(F.pluginData || {}); },

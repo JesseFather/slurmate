@@ -693,6 +693,12 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   //
   // 它必须看得出来能点（一颗圆形 ghost 按钮，不是一行灰字）：用户
   //   2026-10-09 报的原话就是"我没有找到「关于」按钮"，而这一版它仍然是唯一的入口。
+  //
+  // 2026-10-18 再改：内容是悬停卡片（用户："鼠标放在感叹号上之后悬浮窗出来的
+  //   样子"），并且卡片里要写版本（"关于里面的信息也不对啊，应该写版本等等"）。
+  //   整块说明留在 DOM 里，展开与收起都是 CSS（`:hover` / `:focus-within`）——
+  //   一个 `onclick` 都不挂，于是某一次 `bootstrap()` reject 不会让它变成一颗
+  //   点了没反应的按钮。
   assert.match(html, /<button id="btn-about" class="icon-btn"[^>]*>!<\/button>/,
     '第一屏要有一颗感叹号按钮 —— 它是「关于」唯一的入口');
   // 与标题同一行、在右端：那一行是弹性布局，标题占满余下的宽度。
@@ -700,21 +706,39 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   assert.ok(mast, '未找到 #about-head 那一块');
   assert.match(mast[1], /id="btn-about"/,
     '感叹号要在「Slurmate」那一行里面 —— 不是另外起一行');
+  assert.match(mast[1], /id="about-card"/,
+    '卡片也要在同一行那一块里：它锚在感叹号下面（`position: absolute` 的参照是 `.about-tip`）');
   assert.match(css, /#about-head\s*\{[^}]*display:\s*flex/,
     '那一行要排成一行（弹性布局）');
   const mastH1 = /#about-head h1\s*\{([^}]*)\}/.exec(css);
   assert.ok(mastH1, 'app.css 里应当有 #about-head h1 那一条');
   assert.match(mastH1[1], /flex:\s*1/,
     '标题要占满余下的宽度 —— 感叹号才会被推到右端');
-  // 看得见的只有 `!`，全名必须在 title 与 aria-label 上：屏幕阅读器读到的
-  //   是「关于」，而不是一个"感叹号按钮"。
+  // 看得见的只有 `!`，全名必须在 aria-label 上：屏幕阅读器读到的是「关于」，
+  //   而不是一个"感叹号按钮"。`title` 不再写：它会在悬停时再弹一个系统提示，
+  //   与卡片叠在一起就是同一句话出现两遍。
   const aboutBtn = /<button id="btn-about"[^>]*>/.exec(html);
   assert.ok(aboutBtn, '未找到 #btn-about');
-  assert.match(aboutBtn[0], /title="关于"/, '悬停要说出它是关于');
   assert.match(aboutBtn[0], /aria-label="关于"/, '读屏时名字也得是关于');
-  assert.match(js, /\$\('btn-about'\)\.onclick\s*=/,
-    'panel.js 没给它绑动作 —— 点了没反应。而那正是最难查的一种：界面上一切'
-    + '正常，只是这个入口按下去什么都不发生');
+  assert.match(aboutBtn[0], /aria-describedby="about-card"/,
+    '把卡片挂成它的描述 —— 键盘用户聚焦到这颗按钮时读屏会念出那一块');
+  // 卡片里必须有版本那一格，而且版本由 `renderAbout()` 从 `bootstrap` 的
+  //   `version` 填进去：写死一个串会在下一次发版之后继续说着上一个版本。
+  assert.match(html, /id="about-card"[\s\S]*?id="about-ver"/,
+    '「关于」卡片里要有一格版本号');
+  assert.match(js, /function renderAbout\(\)[\s\S]{0,240}?boot\.version/,
+    '版本号要从 `boot.version` 来 —— 那是 `app.getVersion()` 带回来的那一格');
+  assert.match(js, /boot = await window\.slurmate\.bootstrap\(\);\s*renderAbout\(\);/,
+    '拿到启动信息之后要把版本写进卡片');
+  // 展开/收起是 CSS：这两条缺一条，卡片就永远不出现（或者永远盖在那一行上）。
+  assert.match(css, /\.about-tip:hover \.about-card[^{]*\{[^}]*display:\s*block/,
+    '悬停在感叹号上要让卡片浮出来');
+  assert.match(css, /\.about-tip:focus-within \.about-card[^{]*\{[^}]*display:\s*block/,
+    '键盘聚焦也要能看见 —— 否则它只有鼠标用户拿得到');
+  assert.match(css, /\.about-card\s*\{[^}]*display:\s*none/,
+    '收着的时候是 `display: none`：占位或者能被聚焦到都不算收起来');
+  assert.equal(/\$\('btn-about'\)\.onclick/.test(js), false,
+    '不要给它挂 `onclick` —— 悬停层由 CSS 做，一个监听都不需要');
   // 「登录节点」那个标题删掉了：列表自己就是那一块内容，标题只是再说一遍。
   assert.equal(/<h2>登录节点<\/h2>/.test(html), false,
     '「登录节点」那个标题要删掉 —— 感叹号站的就是它原来的位置');
@@ -724,7 +748,7 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   const c0 = html.indexOf('<section id="screen-conns" class="screen">');
   const c1 = html.indexOf('</section><!-- /screen-conns -->');
   const fo = html.indexOf('id="btn-about"');
-  const ab = html.indexOf('id="sec-about"');
+  const ab = html.indexOf('id="about-card"');
   assert.ok(c0 !== -1 && c1 !== -1, 'panel.html 里应当有第一屏那一对起止标记');
   assert.ok(c0 < fo && fo < ab && ab < c1,
     '「关于」的入口与那一段都必须在第一屏里面（落在那一屏的起止标记之间）—— '
@@ -785,10 +809,15 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   assert.equal(/about-foot/.test(html) || /about-foot/.test(js),
     false, '从前最末那一行那颗「关于」整个删掉了 —— 留着就是第二个入口');
 
-  // 「关于」里只留这一版的说明。开发者模式整个删掉了（0.27）：开关、沙盒、
-  //   内置假连接、调试那一屏都不在界面与源码里。
-  const sec = /<section id="sec-about"[\s\S]*?<\/section>/.exec(html);
-  assert.ok(sec, 'panel.html 里应当有 #sec-about');
+  // 那一屏最末那一段关于整个删掉了：内容搬进了悬停卡片，留着第二份就是两个
+  //   会漂的真相（一处改了版本、另一处还写着旧版本）。
+  assert.equal(/id="sec-about"/.test(html), false,
+    '#sec-about 还在 —— 关于已经搬进 #about-card');
+  // 卡片里写着什么：名称 + 版本 + 站点那一侧是什么。开发者模式整个删掉了
+  //   （0.27）：开关、沙盒、内置假连接、调试那一屏都不在界面与源码里。
+  const card = /<div id="about-card"[\s\S]*?<\/div>/.exec(html);
+  assert.ok(card, 'panel.html 里应当有 #about-card');
+  assert.match(card[0], /slurmate-sessiond/, '要说清站点那一侧是什么');
   for (const id of ['dev-on', 'dev-pending', 'dev-restart', 'dev-debug', 'sb-dev']) {
     assert.equal(html.includes(`id="${id}"`), false, `#${id} 还在 —— 开发者模式应该整个删掉`);
   }
@@ -1029,7 +1058,7 @@ test('删掉的那些长解释：一个都不许回来，而承重的那句换�
 
   // ④ `#sec-dev` 那个容器整个没了（内容是搬走，不是复制一份）。
   assert.equal(htmlBare.includes('id="sec-dev"'), false,
-    '#sec-dev 那个容器删掉了 —— 内容搬进 #sec-about，留下一个空壳等于两处都能改');
+    '#sec-dev 那个容器删掉了 —— 内容搬进「关于」，留下一个空壳等于两处都能改');
 
   // ⑤ `#sec-data` 那段统论（"一份 = 一个插件 + 共享组 + 工作区"、"一份数据有两个
   //    落点"），删。它说的是每一行自己就在说的话（`placesText` 逐行说清它在

@@ -224,10 +224,28 @@ button.icon-btn {
   line-height: 22px; font-weight: 700;
 }
 button.icon-btn:hover { background: #45494e; }
-#sec-about {
-  border-left: 3px solid var(--border); padding-left: 14px;
-  margin-top: 14px;
+
+/* 「关于」的悬停卡片（2026-10-18 改）。
+   入口是旁边那颗感叹号：鼠标停上去、或者键盘把焦点停上去，卡片就从下面浮出来。
+   卡片始终在 DOM 里，收着的时候是 `display: none` —— 不用 `opacity` 那一路：
+   那样收着的卡片仍然占位，也仍然能被聚焦到。
+   与按钮之间那 6px 由卡片自己的一条透明带补上（`::before`）：空着的话，鼠标从
+   按钮移进卡片的路上 `:hover` 会断一瞬，卡片就在手指下面消失。 */
+.about-tip { position: relative; flex: none; display: flex; }
+.about-card {
+  display: none; position: absolute; right: 0; top: calc(100% + 6px);
+  width: 280px; padding: 10px 12px; z-index: 10;
+  background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .45);
 }
+.about-card::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 6px;
+}
+.about-tip:hover .about-card, .about-tip:focus-within .about-card { display: block; }
+.about-card p { margin: 0; font-size: 12px; color: var(--fg-dim); }
+.about-card .about-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.about-card p + p { margin-top: 6px; }
+.about-card code { font-family: ui-monospace, Consolas, monospace; }
 h2 { font-size: 13px; margin: 26px 0 10px; color: #9cdcfe; font-weight: 600; }
 /* 「新建连接」里的两步编号。比 h2 再低一级 —— 它们是同一屏内的分段，
    不该和「登录节点」这样的区块标题抢注意力。 */
@@ -478,22 +496,29 @@ button.remember:hover { background: #5c4e22; }
 /* ── 高级选项（每一块插件自己一份）──
    它从前是全屏共用的一份（`#adv`），长在第二屏最底下 —— 而它喂的是某一块的
    「开始会话」。现在它长在那一块里（panel.js 的 `pluginAdv`）。
-   收起来的时候它只有一个小三角加一行小字，没有框、没有内边距：它默认就是收着的，
-   而一块带边框的空盒子摆在那里，看起来像这一块还有东西没填完。展开之后才给它框
-   —— 那时它才是一个区块，框在说这几格属于一起。
-   全界面只有两处 `<details>`：这一处，以及「没加载上的那些」那一组（`issueFold`）。
-   从前那条通用的 `details` 规则并进了这里，`summary` 那条留着给第二处用。 */
+   2026-10-18 改：载体从 `<details>` 换成"一颗按内容定宽的按钮 + 一层可以
+   显隐的格子"。用户点的是三件事：
+     · 展开之后不加框、这一行字也不变色。`details[open]` 那套样式把开关那一行
+       画成了蓝字加粗的第二个标题，而它只是"还有几格可以调"；
+     · 只有那四个字能点 —— `summary` 是块级元素，整行宽度都是它的点击区；
+     · 收起与离开这一屏都要退回默认（见 panel.js 的 `resetAdv`），而
+       `<details>` 不会把"我被收起来了"告诉任何人。
+   全界面只剩一处 `<details>`：「没加载上的那些」那一组（`issueFold`）。 */
 .plug-adv { margin: 12px 0 0; }
-details[open].plug-adv {
-  border: 1px solid var(--border); border-radius: 4px;
-  padding: 10px 14px; margin-bottom: 10px;
+/* 这一颗按内容定宽，展开与收着完全相同：它是一句开关，不是这一块的标题。
+   那个三角与四个字在同一个文本节点里（见 panel.js 的 `pluginAdv`）。 */
+.adv-toggle {
+  display: inline-flex; align-items: center;
+  padding: 0; border: 0; background: transparent; box-shadow: none;
+  color: var(--fg-dim); font: inherit; font-size: 12px;
+  cursor: pointer;
 }
-summary { cursor: pointer; color: #9cdcfe; font-weight: 600; font-size: 12px; }
-/* 收着的那一行比标题轻：它说的是"还有几格可以调"，不是这一块的标题。 */
-.plug-adv > summary { color: var(--fg-dim); font-weight: 400; }
-details[open].plug-adv > summary { color: #9cdcfe; font-weight: 600; }
-details[open] summary { margin-bottom: 12px; }
+.adv-toggle:hover { background: transparent; color: var(--fg); }
+/* 展开的那几格原地长在下面：没有框、没有底色。 */
+.adv-body { margin-top: 10px; }
 .adv-note { margin: 10px 0 0; }
+summary { cursor: pointer; color: #9cdcfe; font-weight: 600; font-size: 12px; }
+details[open] summary { margin-bottom: 12px; }
 
 /* 高级选项里那五格是一张网格，列数写死四列，不随窗口宽窄改。
    从前它是一行会折的弹性盒子：列宽由内容撑，「分区」掉不掉到第二行取决于那一刻
@@ -510,7 +535,13 @@ details[open] summary { margin-bottom: 12px; }
   display: grid; gap: 10px 20px; align-items: start;
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
-.plug-adv .row input, .plug-adv .row select { width: 100%; min-width: 0; }
+/* 一格里的控件同高。下拉自己那个行盒比输入框矮 1.8px（实测 33 对 34.8），
+   并排在同一行里就是一条看得出来的错位；滑块要不是这个高度，差的就不是 1px，
+   而是二十来像素。所以高度写死成输入框那个外高：1.6em 行高 + 12px 上下内边距
+   + 2px 边框。 */
+.plug-adv .row input, .plug-adv .row select {
+  width: 100%; min-width: 0; height: calc(1.6em + 14px);
+}
 /* 一格上面那一行：标签在左，读数在右。
    读数只有装了滑块才写东西（见 panel.js 的 `attachRange`），空着的时候宽度是 0，
    所以没装滑块的格子里这一行与从前那个标签一样。 */
@@ -521,9 +552,10 @@ details[open] summary { margin-bottom: 12px; }
 /* 那三条滑块（每一格的第二种输入法，见 panel.js 的 `attachRange`）。
    它们不是"一格"，是长在控件下面的一条：所以去掉 `input` 那条规则给的底色与边框
    —— 一条带白框的灰条看起来像另一个输入框。 */
+/* 高度由上面那一条给（与同一行的输入框、下拉同高）。从前它是 14px 高，
+   再往下挪 6px —— 同一行里滑块与框的上下边不一致，看起来就是"高低错落"。 */
 .plug-adv .row input[type=range] {
-  background: transparent; border: 0; padding: 0;
-  height: 14px; margin: 6px 0 0;
+  background: transparent; border: 0; padding: 0; margin: 0;
 }
 .plug-adv .row input[type=range]:focus { outline: 1px solid var(--accent); }
 /* 「分区」自己占一整行：它那个下拉里装的是分区名（没权限的那些还要接一句
@@ -591,15 +623,22 @@ p.alarm {
   font-size: 12px; margin-bottom: 10px;
 }
 .plug-meta .k { color: var(--fg-dim); }
+/* 行内的那几个 label（这一颗与 `.plug-data-lbl`）要把 `label` 那条
+   `margin-bottom: 5px` 去掉：那是给"标签在上、控件在下"的格子留的间距，
+   而它们与框并排在同一行、由 `align-items: center` 居中 —— 多出来的 5px 会让
+   它的字比旁边的框高半格，看起来就是"没对齐"（用户 2026-10-18 报的
+   "同一行字和框没有对齐居中"）。 */
 .plug-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer;
-               user-select: none; }
+               user-select: none; margin-bottom: 0; }
 .plug-toggle input { margin: 0; cursor: pointer; }
 .plug .why { font-size: 12px; color: var(--warn); margin: 0 0 10px; }
 /* 插件块上那一格「这个插件用哪一份数据」。长解释在 title= 里（悬停），正文只有
    标签 + 下拉：那一行要说的事（谁在用这一份）已经在下拉的选项文字里了。 */
 .plug-data { display: flex; align-items: center; gap: 8px; font-size: 12px;
              margin-bottom: 10px; }
-.plug-data-lbl { color: var(--fg-dim); flex: none; }
+/* `margin-bottom: 0` 的理由同 `.plug-toggle` 那一段：它与框并排，居中靠的是
+   这一行的 `align-items`，而 `label` 的 5px 下外边距会把这一格的字顶高半格。 */
+.plug-data-lbl { color: var(--fg-dim); flex: none; margin-bottom: 0; }
 .plug-space {
   font: inherit; font-size: 12px; padding: 2px 6px; height: 24px;
   max-width: 380px; border-radius: 3px;
@@ -740,7 +779,10 @@ dialog p#fork-body { white-space: pre-line; }
 #screen-plugins > .sec-head,
 #screen-jobs > .sec-head {
   margin: 22px 0 18px;
-  align-items: flex-start;
+  /* 竖直居中（2026-10-18 改）：标题块是两行（名字 + 登录条目），而右边那几颗
+     按钮只有一行。`flex-start` 让按钮贴着标题的顶边，整行看起来是偏的 ——
+     用户报的原话是"同一行字和框，没有对齐居中"。 */
+  align-items: center;
 }
 
 /* 标题那一块的两行。

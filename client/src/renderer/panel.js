@@ -325,6 +325,7 @@ function clearPortAsk() {
  *   浮窗接手之后那个节整个删掉，不留第二份渲染。
  */
 function showScreen(name) {
+  const prev = SCREEN;
   SCREEN = name;
   // 换屏（以及连上/断开那三处收尾）把「端口被占」那一问收掉：它问的是当前这条
   //   连接的那些数据的端口，而用户已经走开了 —— 把一个问题留在状态条上等着答，
@@ -336,6 +337,13 @@ function showScreen(name) {
                            ['plugins', 'screen-plugins'],
                            ['jobs', 'screen-jobs']]) {
     $(id).classList.toggle('hidden', key !== name);
+  }
+  // 离开插件那一屏，就把各块的高级选项退回默认（2026-10-18 用户点的："连切换
+  //   页面再回来都没有恢复默认"）。判据是"离开"，不是"重画"：这一屏的 DOM 一直
+  //   留在文档里，切回来只是去掉 `hidden`，控件里的值跟着留着 —— 而它们会在下一次
+  //   「开始会话」时被发出去。
+  if (prev === 'plugins' && name !== 'plugins') {
+    for (const st of advCells) resetAdv(st);
   }
   // 离开第一屏就把那个表单收掉 —— 它只在「还没连上」那一屏里说得通（判据是
   // "用户走开了"，不是"会话跑起来了"）。不收的话，用户从第二屏退回来会看见一个半填的表单，
@@ -3294,6 +3302,13 @@ function attachRange(cell, ctrl, values, dflt, fmt, parse) {
     const i = at(parse(ctrl.value));
     if (i >= 0) { r.value = String(i); show(i); }
   });
+  // 回到初始位置（收起高级选项时用，见 `resetAdv`）。默认值不另存一份：
+  //   `i0` 与 `show` 就是这个函数自己那份事实。
+  r.reset = () => {
+    ctrl.value = '';
+    r.value = String(i0);
+    show(i0);
+  };
   ctrl.classList.add('hidden');
   cell.append(r);
   return r;
@@ -3385,9 +3400,29 @@ function applyCountRange(st) {
  *   取决于那一刻每格里写着多长的字 —— 同一份内容在不同时候长得不一样。
  */
 function pluginAdv(defaults) {
-  const box = document.createElement('details');
-  box.className = 'plug-adv';
-  box.append(el('summary', null, '高级选项'));
+  const box = el('div', 'plug-adv');
+  // 展开与收起由这一颗控制（2026-10-18 改：从前是 `<details>` 的 `summary`）。
+  //   换了载体是为了三件事，缺一件都不行：
+  //     · 只有这一行字能点。`summary` 是块级元素，整行宽度都是它的点击区；
+  //       用户要的是"点这四个字"，所以它按内容定宽（见 app.css 的 `.adv-toggle`）。
+  //     · 展开之后不加框、字也不变色。`details[open]` 那套样式把这一行从
+  //       灰色正文变成了蓝底加粗，而那只是一句开关，不是这一块的标题。
+  //     · 收起来要退回默认。那个动作落在这一颗的 `onclick` 上（见下面
+  //       `resetAdv`）—— `<details>` 自己不会告诉谁"我被收起来了"。
+  // 三角与这四个字是同一个文本节点：探针那条"按钮的文字被挤了"按行盒数数，
+  //   而一颗装着两个孩子的按钮会数出三个矩形（两个孩子各一个，外加行盒）——
+  //   那会被读成"折成了三行"。一个节点就只有一个矩形。
+  const toggle = el('button', 'adv-toggle', '▸ 高级选项');
+  toggle.type = 'button';
+  // 读屏只读「高级选项」：那个三角是装饰，而它是这个按钮唯一的可见内容。
+  toggle.setAttribute('aria-label', '高级选项');
+  toggle.setAttribute('aria-expanded', 'false');
+  // 那几格住在这里面：收起 = 这一层 `hidden`（`display: none`）。
+  // 初值走 `classList.add` 而不是写进 `className`：展开/收起那条判据读的就是
+  //   `classList`（`panel.html` 里那几处也一样），两处记同一件事会漂。
+  const body = el('div', 'adv-body');
+  body.classList.add('hidden');
+  box.append(toggle, body);
 
   /**
    * 一格 = 一行标签 + 那个控件（CSP 里没有内联 style，布局一律走 class）。
@@ -3487,12 +3522,12 @@ function pluginAdv(defaults) {
   st.gresNCell = cellCount;
   applyCountRange(st);
 
-  box.append(row);
+  body.append(row);
   // 只留"看不出来"的那一句：默认值本身在读数里、"不填就取默认"也已经在操作里
   //   （没装滑块的格子上那个框的占位话写着），不必再用一句话说一遍。
   // 剩下这条是用户从这里看不出来的：它到下一次连接才生效。
-  box.append(el('p', 'sub adv-note',
-    '这些设置不会被记住，关掉窗口或下次连接后即恢复默认。'
+  body.append(el('p', 'sub adv-note',
+    '这些设置不会被记住，收起它、离开这一屏或下次连接后即恢复默认。'
     + '唯一的例外是作业没结束时的闪断重连，那时会沿用它。'));
 
   // 换分区，可选的 GRES 跟着换（上限是分区自己的：同一个集群上一种卡每节点
@@ -3500,7 +3535,42 @@ function pluginAdv(defaults) {
   st.part.onchange = () => renderGresFor(st);
   fillPartSelect(st);
   advCells.push(st);
+
+  // 收起 = 退回默认（2026-10-18 用户点的那一条：填过、收起、再打开要恢复默认）。
+  //   判据是"收起"，不是"展开"：展开时屏幕上那几格必须与下一次会交出去的那一份
+  //   逐字相同 —— 先清空再画与"打开一个空面板"是同一件事，但收起时清空能保证
+  //   用户看到的那一屏从来不是旧值。
+  toggle.onclick = () => {
+    const open = body.classList.contains('hidden');
+    if (!open) resetAdv(st);
+    body.classList.toggle('hidden', !open);
+    toggle.textContent = open ? '▾ 高级选项' : '▸ 高级选项';
+    toggle.setAttribute('aria-expanded', String(open));
+  };
   return { box, st };
+}
+
+/**
+ * 把一块的高级选项退回默认：一个字都不填，滑块停回站点那份默认。
+ *
+ * 两个入口：收起这一块（`pluginAdv` 里那一颗），以及离开插件那一屏
+ *   （`showScreen`）。两处都是"用户走开了"，而留在控件里的值不会跟着走开 ——
+ *   下一次「开始会话」照样会把它发出去，界面上却只剩一行收着的「高级选项」。
+ *
+ * 顺序是承重的：先清控件，再重画分区那一格。`fillPartSelect` 会顺着
+ *   `renderGresFor` 把 GRES 打回「用插件的默认」、把数量那一格打回灰的、
+ *   并把内存那条滑块按当前分区的上限重判一次。
+ * 内存那条滑块单独再归位一次：上限没变的时候 `applyMemRange` 会原样留下
+ *   上一条（它按"上限变了才重画"判），而它此刻还停在用户拖到的位置上。
+ */
+function resetAdv(st) {
+  st.cpus.value = '';
+  st.mem.value = '';
+  st.gresN.value = '';
+  if (st.cpusRange) st.cpusRange.reset();
+  st.part.value = '';
+  fillPartSelect(st);
+  if (st.memRange) st.memRange.reset();
 }
 
 /**
@@ -3798,16 +3868,13 @@ const keyPayload = () =>
  */
 function bindEvents() {
   // ── 事件 ──
-  // 「关于」的入口是「Slurmate」那一行右端那颗感叹号（`#btn-about`，见
-  // panel.html 那一段，2026-10-17 改）。它装的是这一版的说明，而那不是
-  // 每次打开都要看的 —— 所以它是一块可以点开、也可以不点的地方。
-  // 它是一颗真 `<button>`：键盘与焦点行为是白拿的（从前那个 `role="button"`
-  //   的 div 得手写回车/空格两条路）。看得见的只有 `!`，全名在 title 与
-  //   aria-label 上 —— 屏幕阅读器读到的仍然是「关于」。
-  // 而标题那一行仍然不可点（2026-10-11 改）："点标题"在任何一个界面里都是
+  // 「关于」那一颗这里没有监听：它是一张悬停卡片（`.about-tip:hover` 与
+  // `:focus-within`，见 app.css），展开与收起都归 CSS。整块说明在一个
+  //   常驻的 DOM 节点里，所以这里也没有"填内容"的那一步 —— 版本号由
+  //   `renderAbout()` 在拿到 `bootstrap` 之后写进去。
+  // 标题那一行仍然不可点（2026-10-11 改）："点标题"在任何一个界面里都是
   //   "回首页"的意思，而这里的返回方式已经由各处动作约束好了 —— 见 panel.html
   //   上 `#about-head` 那一段。
-  $('btn-about').onclick = () => $('sec-about').classList.toggle('hidden');
 
   $('btn-new').onclick = () => openNewForm();
   $('btn-cancel-form').onclick = () => closeForm();
@@ -4140,6 +4207,19 @@ function bindEvents() {
 }
 
 /**
+ * 「关于」卡片里那一格版本号。
+ *
+ * 版本只有一个来源：主进程 `app.getVersion()`（`app:bootstrap` 带回来的
+ *   `version`）。在这里另写一个字符串就会漂 —— 而且漂的方向没人会注意到：
+ *   界面上写着一个版本，装上去的那一份是另一个。
+ * 没有这一格就照实说「版本未知」，不猜。
+ */
+function renderAbout() {
+  const v = boot && boot.version;
+  $('about-ver').textContent = v ? `版本 ${v}` : '版本未知';
+}
+
+/**
  * 取首屏数据，画出来。所有 `await` 都在这里。
  *
  * 它 reject 只该是"首屏空着" —— 事件监听已经在 `bindEvents()` 里挂好了，
@@ -4148,6 +4228,7 @@ function bindEvents() {
 async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
+  renderAbout();
   syncNewButton();
 
   // bootstrap 里没有公钥 —— 密钥是按连接的，界面在打开某条连接的表单时
