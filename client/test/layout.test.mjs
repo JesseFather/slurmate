@@ -37,6 +37,7 @@ const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const {
   STATUS_BAR_HEIGHT, RAIL_W, HOVER_W, railRect, stageRect, hoverRect, inHoverZone,
+  overlayVisible,
 } = require('../src/main/layout.js');
 
 const W = 1280;
@@ -50,6 +51,17 @@ test('主体那块：上面让开状态条，左右各让开一条边栏', () =>
   assert.equal(r.height, H - STATUS_BAR_HEIGHT);
   // 右边那条栏的内侧 = 主体块的右边界。差一个像素的话，右边会露出一线背景色。
   assert.equal(r.x + r.width, W - RAIL_W);
+});
+
+test('遮罩的显隐：有话要说，而且屏幕主体不是面板', () => {
+  assert.equal(overlayVisible({ text: '', panelFront: false }), false,
+    '没有话要说就不该挂一块黑幕');
+  assert.equal(overlayVisible({ text: null, panelFront: false }), false);
+  assert.equal(overlayVisible({ text: '隧道断开，正在重试。', panelFront: false }), true);
+  // 用户 2026-10-18 报的那一条：断网时点「面板」回不到别的页面 ——
+  //   会话页让开了，遮罩没让开。
+  assert.equal(overlayVisible({ text: '隧道断开，正在重试。', panelFront: true }), false,
+    '面板抬上来时遮罩必须让开，否则点「面板」看起来像没反应');
 });
 
 test('过小的窗口不产生负宽度（缩到极小也不许抛）', () => {

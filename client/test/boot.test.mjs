@@ -380,7 +380,9 @@ class FakeWebContents {
   getURL() { return this._url; }
   loadURL(u) { this._url = u; return Promise.resolve(); }
   loadFile(p) { this._url = 'file://' + p; return Promise.resolve(); }
-  reload() {}
+  // 数一次数：用例要断言"网络回来时那块坏掉的页面被重载了一次"，
+  //   而 `_url` 在重载前后不变（同址），看不出来。
+  reload() { this.reloads = (this.reloads || 0) + 1; }
   focus() {}
   setWindowOpenHandler() {}
   executeJavaScript() { return Promise.resolve(); }
@@ -4561,6 +4563,78 @@ test('会话一结束就要收起 code-server 视图，把面板还给用户', a
   assert.equal(Boolean(theView(w)), false,
     '会话结束后必须销毁 code-server 视图 —— 它是原生层、覆在面板上方，'
     + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
+});
+
+/** 遮罩那一块视图（`calls.views` 里加载 overlay.html 的那个）。 */
+const overlayViewOf = () =>
+  calls.views.find((v) => /overlay\.html$/.test(v.webContents._url));
+
+/** 手动触发某个 webContents 事件（桩里没有真的 Chromium 去发它）。 */
+function fire(wc, ev, ...args) {
+  for (const fn of (wc.handlers[ev] || [])) fn({}, ...args);
+}
+
+test('断网遮罩在面板抬上来时让开 —— 点「面板」要看得见面板', async () => {
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await w.showOverlay('隧道断开，正在重试。作业未受影响，仍在计算节点上运行。');
+  const ov = overlayViewOf();
+  assert.ok(ov, '前置：遮罩那块视图建出来了');
+  assert.equal(ov._visible, true, '前置：有话要说时遮罩是露着的');
+
+  // 用户 2026-10-18 报的那一条：断网时回不到别的页面。遮罩与会话页是同一块
+  //   矩形上的两层，抬面板只藏了会话页 —— 一整块"连接暂时中断"留在原处，
+  //   看起来像状态条上那颗「面板」点了没反应。
+  await invoke('app:showPanel');
+  assert.equal(w.panelFront, true, '前置：面板抬上来了');
+  assert.equal(ov._visible, false,
+    '面板抬上来时遮罩必须让开，否则用户看见的还是同一句「连接暂时中断」');
+
+  // 切回会话页：那句话还要在 —— 连接确实还没回来。
+  w.setFront(null);
+  assert.equal(ov._visible, true, '会话页回来了，遮罩也回来');
+  w.hideOverlay();
+  assert.equal(ov._visible, false, '没有话要说时遮罩收着');
+});
+
+test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的回来', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 1);
+
+  const started = await appStart(null, 'code-server');
+  assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
+  const slot = started.slot;
+  await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那块页面建出来');
+  const wc = viewFor(w, slot).webContents;
+
+  // 断网的那一段：页面自己重载了一次，失败，停在一块白屏上。
+  fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+
+  // 网络回来了（状态里那句警告已经清掉，这一条走的是状态变化那条路）。
+  const before = wc.reloads || 0;
+  await invoke('app:setFront', { slot });
+  assert.equal(wc.reloads, before + 1, '坏掉的页面要在这一刻重载一次');
+  const ov = overlayViewOf();
+  assert.ok(ov, '重载期间要有遮罩解释那一段白屏');
+  assert.equal(ov._visible, true);
+  assert.match(ov.webContents.handlers['send:overlay:text'].slice(-1)[0] || '',
+    /正在重新打开页面/);
+
+  // 画面真的回来了：遮罩在同一下收掉，而不是隧道一说通就收。
+  fire(wc, 'did-start-loading');
+  fire(wc, 'did-stop-loading');
+  assert.equal(ov._visible, false, '页面加载完，遮罩收起来');
+
+  // 活着的页面一次都不许碰 —— 编辑器里没保存的改动、终端里滚过的内容都在里面。
+  const alive = wc.reloads || 0;
+  await invoke('app:setFront', { slot });
+  assert.equal(wc.reloads, alive, '页面没坏就不许重载它');
+
+  await invoke('app:stop', { slot });
 });
 
 /** 轮询等一个条件成立。失败时把最后看到的东西说出来，而不是干等超时。 */

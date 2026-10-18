@@ -99,6 +99,21 @@ function hoverRect(w, h, side) {
 }
 
 /**
+ * 遮罩现在该不该露。
+ *
+ * 两条判据缺一不可：有一句话要说（`text` 非空），并且屏幕主体不是面板
+ *   （`panelFront` 为假）。第二条是用户 2026-10-18 报的那一条 —— 断网之后
+ *   点状态条上的「面板」回不到别的页面：会话页让开了，遮罩没让开，一整块
+ *   "连接暂时中断"留在原处，看起来像那颗按钮点了没反应。
+ *
+ * 遮罩与面板是同一块矩形上的两层，而"谁在上面"只能由窗口这一层回答
+ *   —— 面板那一侧看不见遮罩，也没有办法把自己抬到它上面。
+ */
+function overlayVisible({ text, panelFront }) {
+  return Boolean(text) && !panelFront;
+}
+
+/**
  * 鼠标在不在「那一条栏 ∪ 它那个浮窗」里面。`x` / `y` 是窗口内容区里的坐标。
  *
  * 这一条是浮窗的唯一收起判据（见 windows.js 的 `_watchCursor`）。不用
@@ -121,5 +136,5 @@ function inRect(r, x, y) {
 
 module.exports = {
   STATUS_BAR_HEIGHT, RAIL_W, HOVER_W,
-  railRect, stageRect, hoverRect, inHoverZone,
+  railRect, stageRect, hoverRect, inHoverZone, overlayVisible,
 };

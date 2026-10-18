@@ -3059,7 +3059,12 @@ async function _renderSession(slot) {
       await win.showOverlay(snap.warning);
       win.setBusy(true);
     } else if (snap.state === State.RUNNING) {
-      win.hideOverlay();
+      // 网络回来这一刻，断网期间坏掉的页面由这里重新打开（页面活着就什么都不做）。
+      //   遮罩留到它真的加载完再收 —— 状态条先恢复、画面后回来，中间隔着一段
+      //   白屏，而这段时间不能没有任何解释（用户 2026-10-18 报的：
+      //   "左侧条已经恢复，画面就应该回来了"）。见 windows.js 的 `recoverSurface`。
+      const waiting = await win.recoverSurface(slot, '正在重新打开页面…');
+      if (!waiting) win.hideOverlay();
       win.setBusy(false);
     }
   }
