@@ -4657,6 +4657,44 @@ test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的�
   await invoke('app:stop', { slot });
 });
 
+test('没有页面可盖的会话：断线那句话由状态条说，不挂整屏遮罩', async (t) => {
+  // 用户 2026-10-18 真机：一条「未知服务」的会话被另一台电脑接管之后，整块
+  //   窗口主体被「连接暂时中断」盖住 —— 而那条会话根本没有页面，面板就在
+  //   底下。遮罩把唯一能操作的东西涂掉了，上栏也没有「面板」那一颗
+  //   （它只在有页面盖着时才画）。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 2);
+
+  // 有页面的那一条：警告照旧挂遮罩（正对照，否则"永远不挂"也能让下面绿）。
+  const cs = await appStart(null, 'code-server');
+  assert.equal(cs.ok, true, `开会话失败：${JSON.stringify(cs)}`);
+  await waitUntil(() => (w.hasSurface(cs.slot) ? viewFor(w, cs.slot) : null),
+    '那一块页面建出来');
+  const csCtl = idx._test.sessionAt(cs.slot).controller;
+  csCtl.warning = '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。';
+  await invoke('app:setFront', { slot: cs.slot });
+  const ov = overlayViewOf();
+  assert.ok(ov && ov._visible === true, '前置：有页面盖着时，警告照旧挂遮罩');
+
+  // 没有页面的那一条（中转站那一类）：同一句话，不挂遮罩。
+  const relay = await appStart(null, 'sshd');
+  assert.equal(relay.ok, true, `开会话失败：${JSON.stringify(relay)}`);
+  const relayCtl = idx._test.sessionAt(relay.slot).controller;
+  await waitUntil(() => relayCtl.state === 'running', '中转站会话进入 running', 30000);
+  assert.equal(w.hasSurface(relay.slot), false, '前置：这一类没有页面');
+  relayCtl.warning = '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。';
+  await invoke('app:setFront', { slot: relay.slot });
+  assert.equal(overlayViewOf()._visible, false,
+    '没有页面可盖时不该整屏遮罩 —— 那会把唯一能操作的面板涂掉');
+
+  await invoke('app:stop', { slot: cs.slot });
+  await invoke('app:stop', { slot: relay.slot });
+  await openUpTo(idx, 1);
+});
+
 /** 轮询等一个条件成立。失败时把最后看到的东西说出来，而不是干等超时。 */
 async function waitUntil(fn, what, ms = 15000) {
   const deadline = Date.now() + ms;

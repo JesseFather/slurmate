@@ -73,6 +73,17 @@ const SUSPENDED_TAKEN_OVER =
   '这条作业已被另一台电脑接管，本机不再看护它（作业仍在运行）。';
 
 /**
+ * 「另一台电脑正在看护它」—— 而这台电脑从来没有接手过，只是连上来看了一眼。
+ *
+ * 必须与上面那句分开：对这台电脑来说「被接管」不成立 —— 没有人从它手上
+ *   拿走任何东西。用户 2026-10-18 在第二台电脑上看到的就是那句不成立的话，
+ *   而它读起来像「我这边的作业没了」。真相是另一台一直在看，而这一台还没接手。
+ */
+const SUSPENDED_WATCHED_ELSEWHERE =
+  '这条作业正由另一台电脑看护，本机没有接管（作业仍在运行）。'
+  + '到「作业」页点「接管」可以让本机看护它。';
+
+/**
  * 稳定态刷新间隔（剩余时间、续期次数、tunnel_target 变化、被回收检测）。
  *
  * 60 秒而不是 30：一次 status = 一个 SSH exec channel = sshd fork + PAM session +
@@ -192,10 +203,14 @@ class SessionController extends EventEmitter {
    */
   constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, releaseMs, pushStaleMs,
-                requestedKind, needsPubkey }) {
+                requestedKind, needsPubkey, adopted }) {
     super();
     this.backend = backend;
     this.spaceId = spaceId;
+    /** 这一条是不是「接上来的」（`tryReattach`），而不是本机开的。 */
+    this._adopted = Boolean(adopted);
+    /** 本机有没有成功心跳过 —— 没有过，就谈不上「被接管」。 */
+    this._watched = false;
     this.onRelayPort = onRelayPort || (() => {});
     this.getExcludedPorts = getExcludedPorts || (() => new Set());
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
@@ -883,7 +898,13 @@ class SessionController extends EventEmitter {
       //      把一句服务端明说了的话咽掉。
       const ign = resp.data && resp.data.ignored;
       if (ign) {
-        if (ign === 'not_keeper') this.suspend(SUSPENDED_TAKEN_OVER);
+        // 两种情形那句话不同：接过手、又被另一台拿走的（本机在看 → 被别人
+        //   接手），与从头到尾只是在旁边看着的（接上来的那条）。对后者说
+        //   「已被接管」是一句不成立的话 —— 它从来没看过这条作业。
+        if (ign === 'not_keeper') {
+          this.suspend(this._adopted && !this._watched
+            ? SUSPENDED_WATCHED_ELSEWHERE : SUSPENDED_TAKEN_OVER);
+        }
         else {
           this.warning = `心跳被服务端忽略了（${ign}），本机可能不再看护这条会话。`;
           this._emit();
@@ -891,6 +912,7 @@ class SessionController extends EventEmitter {
         return;
       }
       this._heartbeatAt = Date.now();
+      this._watched = true;
       this._rateLimitedBeats = 0;
       if (this.warning && /心跳/.test(this.warning)) this.warning = null;
     } else if (c.action === Action.SESSION_GONE) {

@@ -82,8 +82,8 @@ const transportFail = () => ({
  *   `_tunnelPort` 时会 `listen(0)`，于是永远有一个监听套接字活着，
  *   整个测试进程退不掉（上一版就撞过一次，表现为文件多花几十秒）。
  */
-function running(backend) {
-  const ctrl = new SessionController({ backend, workspaceId: 'L1' });
+function running(backend, extra = {}) {
+  const ctrl = new SessionController({ backend, workspaceId: 'L1', ...extra });
   ctrl.state = State.RUNNING;
   ctrl.sessionId = 's1';
   ctrl.session = view();
@@ -181,6 +181,24 @@ test('`ignored: not_keeper`，这条会话进入「被接管」，而且这一�
   assert.equal(c._hbTimer, null, '心跳必须停 —— 那边已经接手了');
   assert.equal(b.listenerCount('notify'), 0, '退订：不然监听器只增不减');
   assert.equal(c.tunnelStops.length, 0, '隧道不拆 —— 用户可能还开着那个页面在看');
+});
+
+test('接上来的那条被拒：说「本机没有接管」，不说「已被接管」', async () => {
+  // 用户 2026-10-18 真机：第二台电脑连上站点、接上那条正在跑的会话，
+  //   服务端回 `ignored: not_keeper` —— 这是设计（另一台一直在看，本机不抢）。
+  //   而界面上那句话写的是「已被另一台电脑接管」，读起来像"我这边的作业没了"，
+  //   可这台电脑从来没有接手过。两句必须分开。
+  const b = new StubBackend();
+  b.reply = ok({ state: 'enrolled', at: 1000, ignored: 'not_keeper' });
+  const c = running(b, { adopted: true });
+
+  await c._beat();
+
+  assert.match(c.suspended, /没有接管/, `接上来的那条要说"本机没有接管"：${c.suspended}`);
+  assert.equal(/已被另一台电脑接管/.test(c.suspended), false,
+    '它从来没有看过这条作业，「被接管」对它不成立');
+  assert.match(c.suspended, /作业仍在运行/, '那句话仍然要说清作业还在跑');
+  assert.match(c.suspended, /「作业」页/, '并且给出去哪一颗按钮（接管在作业页上）');
 });
 
 test('认不出来的 `ignored` 取值：不算数，但不放弃这条会话', async () => {

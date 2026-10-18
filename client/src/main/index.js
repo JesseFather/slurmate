@@ -3055,7 +3055,13 @@ async function _renderSession(slot) {
 
   // 遮罩与忙碌位跟着前台那一条走：它们是"占满整块界面"的东西，而屏幕只有一块。
   if (slot === frontSlot()) {
-    if (snap.state === State.RUNNING && snap.warning) {
+    // 遮罩只盖「插件那块页面」。没有页面可盖时（未知服务、不要界面的插件），
+    //   整屏黑幕只会把唯一能操作的面板涂掉 —— 用户 2026-10-18 在真机上就是
+    //   这样被困住的：状态条上只剩一颗「未知服务」的标签，屏幕上除了那句
+    //   「连接暂时中断」什么都没有，连「面板」那一颗都不在（它只在有页面
+    //   盖着时才画）。那句话由状态条说就够了。
+    const covered = win.hasSurface(slot);
+    if (snap.state === State.RUNNING && snap.warning && covered) {
       await win.showOverlay(snap.warning);
       win.setBusy(true);
     } else if (snap.state === State.RUNNING) {
@@ -3063,7 +3069,8 @@ async function _renderSession(slot) {
       //   遮罩留到它真的加载完再收 —— 状态条先恢复、画面后回来，中间隔着一段
       //   白屏，而这段时间不能没有任何解释（用户 2026-10-18 报的：
       //   "左侧条已经恢复，画面就应该回来了"）。见 windows.js 的 `recoverSurface`。
-      const waiting = await win.recoverSurface(slot, '正在重新打开页面…');
+      const waiting = covered
+        ? await win.recoverSurface(slot, '正在重新打开页面…') : false;
       if (!waiting) win.hideOverlay();
       win.setBusy(false);
     }
@@ -4207,6 +4214,11 @@ async function reattachOne(s) {
     // 认不出时原样记下，于是界面仍然得出「未知」。
     requestedKind: plugin ? plugin.name : s.service_kind,
     needsPubkey: Boolean(plugin && plugin.contributes.submitPubkey),
+    // 「接上来的」而不是本机开的：服务端说看护者不是你的时候，那句话要说
+    //   「本机没有接管」，不是「已被另一台电脑接管」—— 后者是一台曾经在看、
+    //   又被别人拿走的电脑的情形（用户 2026-10-18 在第二台电脑上读到的正是
+    //   那句不成立的话）。
+    adopted: true,
   });
   rec.controller.on('change', () => onSessionChange(slot));
   rec.controller.sessionId = s.session_id;
