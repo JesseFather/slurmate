@@ -157,13 +157,24 @@ function fmtAge(ms) {
   return `${Math.round(s / 60)} 分钟前`;
 }
 
+/**
+ * 提示的四档。
+ *
+ * `kind` 直接进 `className`，而它来自主进程推过来的那条通道（`pushNotice`），
+ *   那条通道没有类型。一个没见过的值会变成一个没有定义的类：既没有颜色也没有
+ *   图标，现场看起来像"样式坏了"，而不是"有一句话没有转成能画的东西"。
+ *   所以收进这四档，之外的一律按「信息」画。
+ */
+const NOTICE_KINDS = ['ok', 'error', 'warn', 'info'];
+
 function notice(kind, text) {
+  const k = NOTICE_KINDS.includes(kind) ? kind : 'info';
   const box = $('notices');
   const el = document.createElement('div');
-  el.className = 'notice ' + kind;
+  el.className = 'notice ' + k;
   const tag = document.createElement('span');
   tag.className = 'tag';
-  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息' }[kind] || kind;
+  tag.textContent = { ok: 'OK', error: '错误', warn: '注意', info: '信息' }[k];
   const body = document.createElement('span');
   body.className = 'body';
   body.textContent = text;              // textContent：绝不把外部文本当 HTML 插进去

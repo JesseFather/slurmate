@@ -70,7 +70,7 @@ import time
 #   第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.28"
+VERSION = "0.29"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -539,6 +539,74 @@ def now_ts():
 
 
 # ==============================================================================
+#  运行期可写挂载的复测（账本 S45）
+# ==============================================================================
+
+
+def writable_mounts(mountinfo_text):
+    """从 `/proc/self/mountinfo` 的文本里列出可写的挂载点。
+
+    每一行按格切：第 5 格是挂载点，第 6 格是挂载选项（逗号分隔）。选项里带
+    `rw` 就是可写。按格切而不是拿正则去认路径 —— 路径里可以有空格（内核写成
+    `\\040`），切成格子之后原样取用，空格与转义都不会认错。
+    """
+    out = set()
+    for line in mountinfo_text.splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        if "rw" in parts[5].split(","):
+            out.add(parts[4])
+    return out
+
+
+def _read_mountinfo():
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8",
+                  errors="replace") as f:
+            return writable_mounts(f.read())
+    except OSError as e:
+        log.warning("读取 /proc/self/mountinfo 失败：%s（这一项本轮跳过）", e)
+        return None
+
+
+class MountGuard(object):
+    """盯住「启动之后才出现的可写挂载」。
+
+    `ProtectSystem=strict` 把单元启动那一刻已经存在的挂载逐个挂成只读，而
+    systemd.exec(5) 明写：按路径设的只读不延伸到后来出现的子挂载。于是
+    autofs 一类的站点上，家目录树在单元跑起来之后才挂上，那个挂载点可写，
+    而 `tools/check-cluster.sh` 第 8 节只在启动那一刻量过一次。
+
+    它只报，不拦：一次误判就杀光所有会话，代价比这个洞本身大。基线取第一次
+    读到的那一份（启动时那一次）；之后每轮复读，新出现的可写挂载每个路径只报
+    一次。读不到就当作"这一轮没量到"，下一轮再试。
+    """
+
+    def __init__(self, read=None):
+        self._read = read or _read_mountinfo
+        self._baseline = None
+        self._reported = set()
+
+    def prime(self):
+        """记下基线（启动时那一次）。"""
+        self._baseline = self._read()
+
+    def check(self):
+        """返回这一轮新出现的可写挂载（已经报过的不再给）。"""
+        cur = self._read()
+        if cur is None:
+            return []
+        if self._baseline is None:
+            self._baseline = cur
+            return []
+        fresh = sorted(p for p in cur if p not in self._baseline)
+        out = [p for p in fresh if p not in self._reported]
+        self._reported.update(out)
+        return out
+
+
+# ==============================================================================
 #  配置
 # ==============================================================================
 
@@ -1000,6 +1068,14 @@ CONTRIBUTES_KEYS = ("surface", "login", "ports", "submitPubkey",
 SURFACE_KEYS = ("kind", "path")
 LOGIN_KEYS = ("path", "field", "cookie")
 DATA_KEYS = ("inherit", "perVersion")
+# `site` 段与它的 `bin` 子对象：只有守护进程读（客户端把这一段当不透明数据，
+#   见 docs/CONTRACT.md §2 的表格）。没有未知键检查时，`defaultEnabled` 那类
+#   「有缺省」的键打错一个字，两侧都不说话，那个开关永远不生效（账本 S31 T8）。
+# 这两张表也在 tools/manifest-keys.json 里，CI 有一段「只有守护进程读」的比对；
+#   顺序与那份 JSON 逐字相同。
+SITE_KEYS = ("defaultCpus", "defaultMem", "defaultTime", "defaultEnabled",
+             "bin", "enumKeys")
+BIN_KEYS = ("env", "discovery", "name", "fallback")
 
 
 def _ver_segments(s, pattern):
@@ -1538,6 +1614,7 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
         site = {}
     if not isinstance(site, dict):
         return None, problems + ["%s：`site` 必须是一个对象" % where]
+    unknown_keys(site, SITE_KEYS, "`site`")
 
     default_cpus = None
     v = site.get("defaultCpus")
@@ -1608,6 +1685,7 @@ def parse_plugin_manifest(where, raw, install_dir=None, needs_job=False):
         if not isinstance(b, dict):
             bad("`site.bin` 必须是一个对象")
         else:
+            unknown_keys(b, BIN_KEYS, "`site.bin`")
             bin_env = b.get("env")
             if not isinstance(bin_env, str) or not bin_env.strip():
                 bad("`site.bin.env` 必须是一个非空的环境变量名")
@@ -6235,13 +6313,12 @@ class Store(object):
           `_`），但"它能匹配上什么"这件事不该靠一个关于字符集的推论来保证 ——
           一个多出来的 `%` 就是一个静默失效的上限，而配置文件里明明写着它。
 
-        从 nft 规则恢复出来的那些会话（`trust='recovered'`）数不到任何一个
-          插件头上：`service_plugin` 是 NULL（规则里没有任何东西能说明那个端口上
-          跑的是哪个插件，见 `recover_from_rules`）。它们仍然占着【全局】那一个
-          名额，所以这不是一条绕过全局上限的路；但某个插件的上限在恢复之后确实
-          可能被多占。这是写在文档里的洞，不是漏写 —— 见
-          cluster/docs/CONFIGURATION.md 的〈max_sessions〉与账本 S43
-          （同一处 NULL 在客户端那一侧的第二个后果也在那一条里）。
+        从 nft 规则恢复出来的那些会话（`trust='recovered'`）：0.29 起规则的
+          comment 带着 `-<id>@<版本>`，于是重建出来的行认得插件、也能数到这一边。
+          库里丢失之前写入的老规则没有那一段，那种行仍然是 NULL —— 它们占着
+          【全局】那一个名额，但按插件数时数不到任何一边。那是老规则的形状，
+          不是猜出来的值（见 `recover_from_rules` 与
+          cluster/docs/CONFIGURATION.md 的〈max_sessions〉）。
         """
         q = ",".join("?" * len(OCCUPYING_STATES))
         if plugin_id is None:
@@ -6310,7 +6387,13 @@ class Nft(object):
 
     TABLE = "inet slurmate"
     CHAIN = "output"
-    RE_SESS = re.compile(r'comment "(slurmate-sess-\d+-\d+-\d+)"\s*#\s*handle (\d+)')
+    # 尾巴上那一段（`-<id>@<版本>`）可选：0.29 起写入规则时带上它，而库里
+    #   丢失的旧规则仍然是老形状。`(group 1)` 必须是整条 comment ——
+    #   `session_rules()` 的键与 `comment_for()` 算出来的名字要逐字可比，
+    #   少收一段的症状是"规则明明在，对账认为它不在"，然后每 tick 补一条重复的。
+    RE_SESS = re.compile(
+        r'comment "(slurmate-sess-\d+-\d+-\d+'
+        r'(?:-[0-9A-Za-z]+@[0-9]+\.[0-9]+\.[0-9]+)?)"\s*#\s*handle (\d+)')
     # 任意一条规则的 (comment, handle)。
     # `del_by_comment()` 用这个，不能用 `RE_SESS`，那个只认会话规则
     #   （`slurmate-sess-…`），拿它去找基础规则会一条都匹配不到，而
@@ -6404,10 +6487,21 @@ class Nft(object):
         return rules
 
     @staticmethod
-    def comment_for(uid, job_id, port):
-        return "slurmate-sess-%d-%d-%d" % (uid, job_id, port)
+    def comment_for(uid, job_id, port, service_plugin=None):
+        """这条会话的 ACL 规则名。
 
-    def add_session_rule(self, node_ip, port, uid, job_id):
+        `service_plugin` 是 `<id>@<版本>`；给了就缀在尾巴上（0.29）。它是
+        `recover_from_rules()` 在库丢了之后唯一能把会话认回插件的线索：从前
+        comment 只有 (uid, job, port)，重建出来的行 `service_plugin` 只能是
+        NULL，于是按插件数 `max_sessions` 时它数不到任何一边（账本 S43）。
+
+        不传时给老形状 —— `trust='recovered'` 的行本来就没有插件可写，而
+        老规则也要能照旧认出来。
+        """
+        base = "slurmate-sess-%d-%d-%d" % (uid, job_id, port)
+        return base + ("-" + service_plugin if service_plugin else "")
+
+    def add_session_rule(self, node_ip, port, uid, job_id, service_plugin=None):
         if not is_ipv4(node_ip):
             return False, "节点地址不是 IPv4: %r" % node_ip
         # 这一条 drop 的目标必须是【本集群的一台真节点】。
@@ -6431,7 +6525,7 @@ class Nft(object):
                       "（本集群 %d 台）。这条规则的目标只能是本集群的节点。",
                       node_ip, len(known))
             return False, "节点地址不在集群的节点列表里: %s" % node_ip
-        comment = self.comment_for(uid, job_id, port)
+        comment = self.comment_for(uid, job_id, port, service_plugin)
         # 幂等：先删同名（防重复）
         self.del_by_comment(comment)
         rc, _, err = self._nft([
@@ -6471,9 +6565,9 @@ class Nft(object):
 
 # 一份日志最多往回读多少字节、最多给多少行。
 #
-# 它从不读整份文件：日志是不轮转的，一个跑了一整天的 IDE 会话可以是几十 MB，
-#   而客户端要的永远是尾部。`lseek` 到 `size - CAP` 再读 CAP 个字节，代价与文件
-#   大小无关。
+# 它从不读整份文件：一份日志可以很大（作业侧按保留期与目录上限清理，而正在跑的
+#   那一条不会被清），一个跑了一整天的 IDE 会话可以是几十 MB，而客户端要的永远是
+#   尾部。`lseek` 到 `size - CAP` 再读 CAP 个字节，代价与文件大小无关。
 LOG_TAIL_CAP = 128 * 1024
 LOG_TAIL_MAX_LINES = 2000
 LOG_TAIL_DEFAULT_LINES = 200
@@ -7899,6 +7993,8 @@ class Sessiond(object):
         self.next_tick_at = time.time()
         # 本 tick 的作业信息缓存：job_id -> dict|None。每个作业每 tick 至多查
         # 一次，它是"推送不放大 fork"的全部依据，见 tick_job()。
+        # 启动之后新出现的可写挂载（账本 S45）。基线在 `start()` 里取。
+        self.mount_guard = MountGuard()
         self._tick_job = {}
         # 本 tick 每个 uid 渲染一次的快照：uid -> (digest, [会话视图])。
         self._tick_snap = {}
@@ -8001,6 +8097,9 @@ class Sessiond(object):
         except Exception as e:                               # noqa: BLE001
             log.warning("无法打开审计日志 %s: %s", self.cfg.audit_log, e)
 
+        # 沙箱的基线：单元启动那一刻的挂载就是 `ProtectSystem=strict` 盖住的
+        #   全部。之后的 tick 拿它做对照（账本 S45）。
+        self.mount_guard.prime()
         self.nft.ensure()
         # DB 可能丢过，先从既有规则反向恢复，再让对账去收敛。
         # 顺序很重要：先恢复再对账，否则对账会把它们当孤儿删掉。
@@ -8342,6 +8441,15 @@ class Sessiond(object):
             self.phase_heartbeat()
             self.phase_release()
             self.phase_gc()
+        # 启动之后新出现的可写挂载：只报不拦（见 MountGuard 的 docstring）。
+        #   它排在阶段之后是因为它读一次 /proc 就够了，与那些阶段没有先后关系；
+        #   而"每轮都读"是承重的 —— 晚挂上的挂载点只能在挂上之后才看得见。
+        for _path in self.mount_guard.check():
+            log.error("启动之后出现了新的可写挂载：%s。"
+                      "ProtectSystem=strict 只盖启动那一刻的挂载，"
+                      "该目录树是后来挂上的，本进程在它下面可写（账本 S45）。"
+                      "这一条只报不拦。", _path)
+            self.audit("mount_became_writable", path=_path)
         # 推送在对账失败时也照做，这是有意的：快照渲染的是数据库与 Slurm
         #   的现状，不是 nft 的现状，读不到规则不代表会话列表是错的。
         #   而"停推"会让界面变成一张看起来正常、其实静止的画（没有任何地方
@@ -8369,7 +8477,8 @@ class Sessiond(object):
         for s in self.store.by_state(ACL_STATES):
             if s.get("node_ip") and s.get("service_port"):
                 expected[self.nft.comment_for(s["uid"], s["job_id"],
-                                              s["service_port"])] = s
+                                              s["service_port"],
+                                              s.get("service_plugin"))] = s
 
         # 多余的规则 → 删（fail-secure：宁可少放行）
         for comment in set(rules) - set(expected):
@@ -8381,8 +8490,9 @@ class Sessiond(object):
         for comment, s in expected.items():
             if comment not in rules:
                 log.warning("补齐缺失规则 %s", comment)
-                ok, detail = self.nft.add_session_rule(s["node_ip"], s["service_port"],
-                                                       s["uid"], s["job_id"])
+                ok, detail = self.nft.add_session_rule(
+                    s["node_ip"], s["service_port"], s["uid"], s["job_id"],
+                    s.get("service_plugin"))
                 self.audit("acl_reinstalled" if ok else "acl_reinstall_failed",
                            comment=comment, detail=detail)
         return True
@@ -8405,15 +8515,23 @@ class Sessiond(object):
         for s in self.store.by_state((ST_RESERVED, ST_SUBMITTED) + ACL_STATES):
             if s.get("job_id") and s.get("service_port"):
                 known.add(self.nft.comment_for(s["uid"], s["job_id"],
-                                               s["service_port"]))
+                                               s["service_port"],
+                                               s.get("service_plugin")))
         recovered = 0
         for comment in rules:
             if comment in known:
                 continue
-            m = re.match(r"^slurmate-sess-(\d+)-(\d+)-(\d+)$", comment)
+            # 两种形状都认：老规则没有尾巴（重建出来的行只能是 NULL，与从前
+            #   相同）；0.29 起写入的带 `-<id>@<版本>`，于是这条会话认得出自己
+            #   是哪个插件的 —— 按插件数 `max_sessions` 时才数得到它（账本 S43）。
+            m = re.match(
+                r"^slurmate-sess-(\d+)-(\d+)-(\d+)"
+                r"(?:-([0-9A-Za-z]+)@([0-9]+\.[0-9]+\.[0-9]+))?$", comment)
             if not m:
                 continue
             uid, job_id, port = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            service_plugin = ("%s@%s" % (m.group(4), m.group(5))
+                              if m.group(4) else None)
             if self.store.by_job(job_id):
                 continue                      # 已有记录，交给正常对账
             status, job = self.slurm.job_state(job_id)
@@ -8457,6 +8575,9 @@ class Sessiond(object):
                 requested_time=job.get("TimeLimit", "?"), job_id=job_id,
                 state=ST_ENROLLED, node=node, node_ip=node_ip,
                 service_port=port, candidates=str(port),
+                # 规则里写了哪个插件就填哪个；老规则没有这一段，仍然是 NULL
+                #   （不猜）。种类（service_kind）依旧不填 —— 规则里没有它。
+                service_plugin=service_plugin,
                 auth_mode="password", created_at=now, enrolled_at=now,
                 submitted_at=now, trust="recovered", note="recovered_from_rule")
             recovered += 1
@@ -8702,7 +8823,8 @@ class Sessiond(object):
 
         node_ip = info["node_ip"]
         port = int(info["service_port"])
-        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"], s["job_id"])
+        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"],
+                                              s["job_id"], s.get("service_plugin"))
         if not ok:
             log.error("会话 %s 装 ACL 失败: %s（下个 tick 重试）", s["session_id"], detail)
             return
@@ -8739,9 +8861,10 @@ class Sessiond(object):
             return
         log.warning("会话 %s 目标变更 %s:%s → %s:%d，重装 ACL", s["session_id"],
                     s["node_ip"], s["service_port"], node_ip, port)
-        self.nft.del_by_comment(self.nft.comment_for(s["uid"], s["job_id"],
-                                                     s["service_port"]))
-        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"], s["job_id"])
+        self.nft.del_by_comment(self.nft.comment_for(
+            s["uid"], s["job_id"], s["service_port"], s.get("service_plugin")))
+        ok, detail = self.nft.add_session_rule(node_ip, port, s["uid"],
+                                              s["job_id"], s.get("service_plugin"))
         if ok:
             self.store.update(s["session_id"], node=info.get("node"), node_ip=node_ip,
                               service_port=port, file_inode=info.get("_inode"),

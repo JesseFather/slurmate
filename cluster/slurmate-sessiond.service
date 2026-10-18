@@ -58,6 +58,12 @@ UMask=0027
 #   而家目录正是这里要保护的东西。strict 会跳过 /dev、/proc、/sys 这三个 API
 #   文件系统（它们由 PrivateDevices=、ProtectKernelTunables=、
 #   ProtectControlGroups= 那几条管），所以它卷不到自己。
+#
+# 它只盖【启动那一刻】已经存在的挂载：systemd.exec(5) 明写，按路径设的只读
+#   不延伸到后来出现的子挂载。autofs 一类按需挂载的站点上，家目录树是在本单元
+#   跑起来之后才挂上的，那一棵于是可写。守护进程每轮 tick 复读一次
+#   /proc/self/mountinfo，把新出现的可写挂载记一条日志与一条审计（只报不拦）；
+#   判据与实现见 slurmate-sessiond 的 MountGuard 与账本 S45。
 ProtectSystem=strict
 # /home、/root、/run/user 那三个由这一条单独管，不在上一条的覆盖里。
 #   实测（RHEL 9.7 / systemd 252）：只写 ProtectSystem=strict 时 /root 仍然写得

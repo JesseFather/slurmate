@@ -1443,6 +1443,27 @@ function cmdBuild(dir, opts) {
   const engWhy = enginesShapeProblem(manifest);
   if (engWhy) throw new Error(`${MANIFEST} 里的 ${engWhy}（§2.3.1）`);
 
+  // §2.2：`site.defaultCpus` 与 `site.defaultMem` 没有缺省，站点侧必填。
+  //   判在这里的理由与下面 §3.7 那条大小上限相同：作者在自己机器上就该看到，
+  //   而不是把包装到站点上才被拒（账本 S31 T9）。
+  //
+  //   只在 `site` 是对象时判 —— 打包器不认识"这个包是不是一个真插件"：
+  //   符合性向量那棵树（tools/conformance/tree）刻意没有 `site`，而它也要能打。
+  //   `site` 整个不在的那种，由守护进程在安装时拒（那一侧判的是自己读得到的
+  //   东西）。上限（MAX_CPUS_REQUEST）同样留给守护进程，不在这里抄第二个数。
+  if (manifest.site !== undefined && manifest.site !== null) {
+    const site = manifest.site;
+    if (typeof site !== 'object' || Array.isArray(site)) {
+      throw new Error(`${MANIFEST} 里的 site 必须是一个对象（§2.2）`);
+    }
+    if (!Number.isInteger(site.defaultCpus) || site.defaultCpus < 1) {
+      throw new Error(`${MANIFEST} 里的 site.defaultCpus 必须是一个正整数（§2.2）`);
+    }
+    if (typeof site.defaultMem !== 'string' || !site.defaultMem.trim()) {
+      throw new Error(`${MANIFEST} 里的 site.defaultMem 必须是一个非空字符串（§2.2）`);
+    }
+  }
+
   // §3.7：负载的大小上限。判在这里、而且是发布之前，正是 §3.7 存在的
   //   理由：站点那边只有 `--check-plugins` 对管理员打，客户端那边要等包发出去、
   //   收下来才拒，作者拿到的都是"装不上"，而那时他已经发布出去了。

@@ -1248,6 +1248,49 @@ def main():
                       lambda: mod.Slurm(cfg).node_catalog())
     check("而 scontrol 失败时整个目录是 None（三半一起获取失败）", _down is None, repr(_down))
 
+    # ── 6c. 运行期可写挂载的复测（账本 S45）──────────────────────────────
+    #
+    # `ProtectSystem=strict` 只盖启动那一刻已经存在的挂载，而 systemd.exec(5)
+    #   明写它不延伸到后来出现的子挂载。这一组判的是"它报得出来"，不是"它拦得住"
+    #   —— 拦的代价是误判一次杀光所有会话。
+    section("6c. 运行期可写挂载的复测（S45）")
+    _mi = (
+        "36 35 98:0 / / rw,relatime - ext4 /dev/root rw\n"
+        "37 36 0:1 / /dev rw,nosuid - tmpfs tmpfs rw\n"
+        "38 36 0:2 / /home ro,relatime - nfs srv:/home ro\n"
+        "39 36 0:3 / /mnt/my\\040disk rw,relatime - nfs srv:/d rw\n")
+    check("writable_mounts 只收 rw 的，路径里的 \\040 原样保留",
+          mod.writable_mounts(_mi) == {"/", "/dev", "/mnt/my\\040disk"},
+          repr(mod.writable_mounts(_mi)))
+
+    _mounts = {"/", "/dev"}
+
+    def _read_mounts():
+        return set(_mounts)
+
+    _g = mod.MountGuard(read=_read_mounts)
+    _g.prime()
+    _r0 = _g.check()
+    check("基线那一份不报（启动时本来就有的可写挂载不该是警报）",
+          _r0 == [], repr(_r0))
+    _mounts.add("/home/alice")
+    _r1 = _g.check()
+    check("启动之后新出现的可写挂载：报出来，而且点名是哪一个",
+          _r1 == ["/home/alice"], repr(_r1))
+    _r2 = _g.check()
+    check("同一个路径只报一次（否则每个 tick 一行，真要紧的消息被它顶掉）",
+          _r2 == [], repr(_r2))
+    _mounts.add("/home/bob")
+    _mounts.discard("/home/alice")
+    # 消失再出现的那一个已经报过：`_reported` 按路径记，不是按"这一轮在不在"。
+    _r3 = _g.check()
+    check("另一个新路径照报；已经报过的那个不再报",
+          _r3 == ["/home/bob"], repr(_r3))
+
+    _bad = mod.MountGuard(read=lambda: None)
+    check("读取 mountinfo 失败时当作这一轮没量到（不抛、也不误报）",
+          _bad.check() == [] and _bad.check() == [])
+
     # ── 7. 会话文件校验（安全关键）────────────────────────────────────────
     section("7. 会话文件校验（安全关键）")
     home = os.path.join(tmpdir, "home")
@@ -2517,6 +2560,11 @@ exit 0
           _rc19 == 0 and "1 个包" in _out19, _out19[:260])
     check("而且印的是今天那条路（整包一次取走），不是 v0.6 那两条",
           "整包上限" in _out19 and "份数" in _out19, _out19[:260])
+    # 账本 S29：「缺省资源」那一列从前只有函数侧的证据（op_plugins 的 defaults），
+    #   没有一条用例从 CLI 的输出上断言它真的被印出来。少印一格不会红任何一条用例，
+    #   而管理员正是靠这一列回答「这个插件缺省给多少」。
+    check("「缺省资源」那一列真的把回包里的值印出来了（2 核 / 8G）",
+          "2 核 / 8G" in _out19, _out19[:260])
 
     _old_daemon_data = {"plugins": _good_data["plugins"], "enabled": ["jup"]}
     _rc19, _out19 = _cli_plugins_screen(_old_daemon_data)
@@ -3575,6 +3623,23 @@ exit 0
           _er.returncode == 0,
           "rc=%s\n%s" % (_er.returncode, _er.stderr[-400:]))
 
+    # 账本 S11：这一屏的「外部命令」与「插件逐条」两段从前没有用例。
+    #   少打一行不会红任何一条用例，而它正是管理员改完配置之后第一眼要看的那一屏。
+    #   判据是"打出来了没有"（与 19.5h 同一条形状），不是函数的返回值。
+    check("外部命令段：五条命令的解析结果都打出来了",
+          "外部命令" in _er.stdout
+          and all(("%-9s" % c) in _er.stdout
+                  for c in ("sbatch", "scancel", "squeue", "scontrol",
+                            "sacctmgr")),
+          _er.stdout[-900:])
+    check("插件逐条段：id@版本、缺省资源、分发与作业脚本四样都在",
+          ("id@版本" in _er.stdout
+           and "01M2JKHTZGKJBFQQTWYXMQMF2V@1.0.0" in _er.stdout
+           and "默认 1 核 / 1G" in _er.stdout
+           and "分发" in _er.stdout
+           and "作业脚本" in _er.stdout),
+          _er.stdout[-900:])
+
     # ── 19.5i 悬空的 drop-in 文件：一条，且真的打得出来 ──────────────
     #
     # 与 19.5h 逐字同一个理由（F35：算出来了、没送出去）。上面那条钉的是 gres
@@ -3622,6 +3687,25 @@ exit 0
           "（一个指不到人的文件不该让整个站点无法启动）",
           _sr.returncode == 0,
           "rc=%s\n%s" % (_sr.returncode, _sr.stderr[-400:]))
+
+    # ── 19.5j 非 `--check` 那条启动路径：配置错误当场记日志并返回 1 ──────
+    #
+    # 账本 S29：`--check` 的出口有用例，`main()` 里真正启动那一支没有。
+    #   把 `if errors and not args.check:` 下面那两句删掉，一条都不会红 ——
+    #   而它的症状正是这一类：进程退出，日志里一个字都没有。
+    _bconf = write_conf("max_sessions_per_user = 0\n", "check-bad.conf")
+    _br = subprocess.run(
+        [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
+         "--config", _bconf],
+        capture_output=True, text=True,
+        env=dict(os.environ,
+                 PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
+    check("配置错误在启动那条路上也要说出来，并以 1 退出"
+          "（不是安静地起一个半坏的进程）",
+          _br.returncode == 1 and "配置错误" in _br.stderr
+          and "max_sessions_per_user" in _br.stderr,
+          "rc=%s\n%s\n%s" % (_br.returncode, _br.stdout[-400:],
+                             _br.stderr[-400:]))
 
     # 19.5d 插件目录的形状（跨语言契约，重定义为"两边读的是同一份内容"）
     #
@@ -3795,6 +3879,45 @@ exit 0
               rows[0]["service_plugin"] is None, repr(rows[0]["service_plugin"]))
         check("恢复态的会话视图把解析键原样报成 None",
               d.session_view(rows[0], with_secret=False)["service_plugin"] is None)
+    d.store.close()
+
+    # 19.7b 规则带了 `-<id>@<版本>`：恢复出来的会话要认得插件（账本 S43）
+    #
+    # 只改一半的症状两头都不好看：写入改了、解析没改，规则一条都恢复不出来，
+    #   接着对账把在跑的作业的规则当孤儿删掉 —— 那正是 F26 记的后果。
+    #   这一条钉解析那一半；写入那一半由下面 `comment_for`/`add_session_rule`
+    #   的用例钉住（两者用的是同一个函数，钉住它也就钉住了写入）。
+    _sp = "01M2JKHTZGKJBFQQTWYXMQMF2V@1.0.0"
+
+    class _FakeNft2(object):
+        def session_rules(self):
+            return ["slurmate-sess-%d-%d-%d-%s" % (UID, 99998, 55556, _sp)]
+
+        def del_by_comment(self, _c):
+            pass
+
+        def comment_for(self, uid, job_id, port, service_plugin=None):
+            return mod.Nft.comment_for(uid, job_id, port, service_plugin)
+
+    d.store = mod.Store(os.path.join(tmpdir, "svc-recover2.db"))
+    _real_nft, _real_slurm = d.nft, d.slurm
+    d.nft, d.slurm = _FakeNft2(), _FakeSlurm()
+    try:
+        n2 = d.recover_from_rules()
+    finally:
+        d.nft, d.slurm = _real_nft, _real_slurm
+    rows2 = d.store.by_state((mod.ST_ENROLLED,))
+    check("带插件的规则也恢复得出来（前置）",
+          n2 == 1 and len(rows2) == 1, "n=%s rows=%s" % (n2, len(rows2)))
+    if rows2:
+        check("恢复态认得插件：service_plugin 就是规则尾巴上那一段",
+              rows2[0]["service_plugin"] == _sp, repr(rows2[0]["service_plugin"]))
+        check("而服务种类仍然是 NULL —— 规则里没有它，绝不从插件名反推",
+              rows2[0]["service_kind"] is None, repr(rows2[0]["service_kind"]))
+        check("按插件数得到 1（从前这一列是 NULL，数不到任何一边）",
+              d.store.count_occupying(UID, "01M2JKHTZGKJBFQQTWYXMQMF2V") == 1,
+              repr(d.store.count_occupying(
+                  UID, "01M2JKHTZGKJBFQQTWYXMQMF2V")))
     d.store.close()
 
     # 19.8 库的表结构与本版对不上，启动时就拒绝（不再有"自动补列"那条路）
@@ -5433,6 +5556,17 @@ exit 0
               "书面 %r / 客户端 %r / 守护进程 %r"
               % (_mk_written.get(_name), _mk_client[_name], _mk_daemon[_name]))
 
+    # `site` 与 `site.bin` 只有守护进程读：客户端把这一段当不透明数据，所以
+    #   这两张表只与书面判据比（见 tools/manifest-keys.json 的 `_` 段与
+    #   docs/CONTRACT.md §2）。没有它们的时候，一个有缺省的 `site` 键打错一个
+    #   字，两侧都不说话，那个开关永远不生效（账本 S31 T8）。
+    for _name, _const in (("site", "SITE_KEYS"), ("bin", "BIN_KEYS")):
+        _d = list(getattr(mod, _const, ()))
+        check("%s：书面判据 = 守护进程元组（只有守护进程读，逐字、有序）"
+              % _name,
+              bool(_d) and _mk_written.get(_name) == _d,
+              "书面 %r / 守护进程 %r" % (_mk_written.get(_name), _d))
+
     # ── 判定那一半：拼错了真的会被拒（"两侧都拒"的另一半在这里）────────
     #
     # 上面那几条比的是常量。这一条把常量接回清单那条路上 —— 一张写对了
@@ -5474,7 +5608,15 @@ exit 0
              lambda m: m["contributes"]["login"].update({"pathh": "/"}), "pathh"),
             ("contributes.data 子键",
              lambda m: m["contributes"]["data"].update({"inheritt": "x"}),
-             "inheritt")):
+             "inheritt"),
+            # `site` 那两张表只有守护进程读；这一条就是它们的用处 ——
+            #   `defaultEnabled` 那类「有缺省」的键打错一个字，从前是静默忽略。
+            ("site 子键",
+             lambda m: m["site"].update({"defaultCpuss": 4}), "defaultCpuss"),
+            ("site.bin 子键",
+             lambda m: m["site"].update(
+                 {"bin": {"fallback": "/x/bin/cs", "flalback": "/y"}}),
+             "flalback")):
         _mf = json.loads(json.dumps(_mk_valid))
         _edit(_mf)
         _s2, _p2 = _mk_parse(_mf)
@@ -7736,8 +7878,9 @@ exit 0
                 return True
             return False
 
-        def add_session_rule(self, node_ip, port, uid, job_id):
-            c = mod.Nft.comment_for(uid, job_id, port)
+        def add_session_rule(self, node_ip, port, uid, job_id,
+                             service_plugin=None):
+            c = mod.Nft.comment_for(uid, job_id, port, service_plugin)
             self.rules[c] = (node_ip, port)
             return True, c
 
@@ -8721,11 +8864,14 @@ exit 0
             self.deleted.append(c)
             self.rules.pop(c, None)
 
-        def comment_for(self, uid, job_id, port):
-            return "slurmate-sess-%d-%s-%s" % (uid, job_id, port)
+        def comment_for(self, uid, job_id, port, service_plugin=None):
+            base = "slurmate-sess-%d-%s-%s" % (uid, job_id, port)
+            return base + ("-" + service_plugin if service_plugin else "")
 
-        def add_session_rule(self, node_ip, port, uid, job_id):
-            self.rules[self.comment_for(uid, job_id, port)] = (node_ip, port)
+        def add_session_rule(self, node_ip, port, uid, job_id,
+                             service_plugin=None):
+            self.rules[self.comment_for(uid, job_id, port,
+                                        service_plugin)] = (node_ip, port)
             return True, ""
 
     # ── 26.1 老客户端一字不改地继续工作（§八 第 2 步的判据）──────────────
@@ -10275,7 +10421,7 @@ exit 0
         f.write("".join("第 %d 行\n" % i for i in range(20000)))
     _rb = ((_jlog(lines=5).get("data") or {}).get("out")) or {}
     check("给的是尾部，而且 `truncated` 说了「这不是整份」"
-          "（日志不轮转，一个跑了一整天的会话可以几十 MB —— 从不读整份是硬要求）",
+          "（一份日志可以几十 MB —— 从不读整份是硬要求，与清理策略无关）",
           str(_rb.get("text", "")).endswith("第 19999 行")
           and "第 0 行" not in str(_rb.get("text", ""))
           and _rb.get("truncated") is True and _rb.get("lines") == 5,

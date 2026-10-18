@@ -410,6 +410,36 @@ section('3. init —— 铸一个 id，只动一个键');
     r.code !== 0 && /init/.test(r.err), r.err);
 }
 
+{
+  // §2.2：`site.defaultCpus` / `site.defaultMem` 是站点侧的必填格，而它们从前
+  //   只被守护进程判 —— 作者在自己机器上永远看不到（账本 S31 T9）。
+  const out = () => path.join(os.tmpdir(), 'site-keys.splug');
+
+  const { plug: noMem } = mkRepo({
+    ...baseFiles(),
+    'plugin.json': mf({ site: { defaultCpus: 2 } }),
+  });
+  const r1 = packer('build', noMem, '--out', out());
+  check('site 里缺 defaultMem：build 失败，而且报错点名那个键',
+    r1.code !== 0 && /defaultMem/.test(r1.err), `${r1.code} ${r1.err}`);
+
+  const { plug: badCpus } = mkRepo({
+    ...baseFiles(),
+    'plugin.json': mf({ site: { defaultCpus: '2', defaultMem: '8G' } }),
+  });
+  const r2 = packer('build', badCpus, '--out', out());
+  check('site.defaultCpus 写成字符串：build 失败并点名（类型错不当成"没写"）',
+    r2.code !== 0 && /defaultCpus/.test(r2.err), `${r2.code} ${r2.err}`);
+
+  const { plug: good } = mkRepo({
+    ...baseFiles(),
+    'plugin.json': mf({ site: { defaultCpus: 2, defaultMem: '8G' } }),
+  });
+  const r3 = packer('build', good, '--out', out());
+  check('正对照：两格都写对了就打得出来（否则上面两条会被"什么都拒"一并满足）',
+    r3.code === 0, r3.err);
+}
+
 // ==============================================================================
 //  4. 版本号与跳过表：跨文件的常量
 // ==============================================================================

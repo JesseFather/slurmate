@@ -1973,6 +1973,19 @@ test('作业结束的那一刻那一句进提示流，而且好坏按退出码�
   assert.equal(/错误/.test(n0), false, '`0:0` 是干净收尾 —— 报成错误会让用户去查一个不存在的问题');
 });
 
+test('没见过的提示档按「信息」画，不把那个词塞进 className', () => {
+  // `kind` 从主进程那条通道来，而那条通道没有类型。它直接拼进 className 的话，
+  //   一个没见过的值就是一个没有定义的类 —— 那句提示既没有颜色也没有图标，
+  //   现场看起来像"样式坏了"（账本 S31 T1）。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.fn('notice')('evil', '一句话');
+  const last = h.byId.get('notices').children[0];
+  assert.equal(last.className, 'notice info',
+    '未知那一档要落到「信息」，而不是原样拼进类名');
+  const tag = (last.children || [])[0];
+  assert.equal(tag._text, '信息', '标签也要是那一档的名字，不是一个没人认识的字');
+});
+
 test('「查看日志」按需取一次：三态各不相同，空的那一块不出现', async () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   h.run("SCREEN = 'jobs';"

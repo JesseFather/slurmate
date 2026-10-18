@@ -2282,6 +2282,26 @@ test('插件目录：坏插件只影响它自己，其余照常工作', (t) => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+test('本机插件加载失败的那几条，要走到回包里（registry.errors → pluginsView）', async () => {
+  // 账本 S29：这一条打的是「线」，不是函数。用例从前只打在 Registry 的
+  //   errors 上 —— 而 `pluginsView()` 少抄一格、或者回包里少一个键，
+  //   一条都不会红，界面上那块「插件没有加载」就永远空着。
+  const idx = require('../src/main/index.js');
+  const reg = idx._test.getRegistry();
+  const before = reg.errors.slice();
+  const why = '夹具：这一份插件坏了';
+  reg.errors.push(why);
+  try {
+    const b = await invoke('app:bootstrap');
+    assert.ok(Array.isArray(b.plugins && b.plugins.errors),
+      '回包里要带 plugins.errors —— 界面那一块读的就是它');
+    assert.ok(b.plugins.errors.includes(why),
+      '本机加载失败的每一条都要到界面上；少了它，症状只是"加了插件它就是不生效"');
+  } finally {
+    reg.errors = before;
+  }
+});
+
 test('身份是铸造出来的：池里的名字必须与清单逐字相同，不一致的一律不加载', (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');

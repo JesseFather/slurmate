@@ -174,7 +174,7 @@ jobs:
         # （client/package.json、client/package-lock.json、cluster/slurmate、
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
         #
-        # 客户端那两处写的是三段（`0.28.0`）：那个 `version` 字段同时是 npm
+        # 客户端那两处写的是三段（`0.29.0`）：那个 `version` 字段同时是 npm
         #   包的版本号，而 npm 与 electron-builder 都要求语义化版本 —— 写两段会被
         #   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"），
         #   一个安装包都打不出来。协议版本 = 包版本的前两段，客户端对站点自报
@@ -261,7 +261,7 @@ jobs:
           #   两份记录类文档排除在外：它们讲的就是各个版本。
           DOC_CUR = re.compile(r"(?:当前维护的版本|当前版本)：\**\s*`?v?([0-9]+\.[0-9]+)")
           # 比的是**协议版本**（两段），不是 `places[0][1]` —— 后者现在是客户端
-          #   那个三段的包版本（`0.28.0`），拿它去比文档里的 `v0.28` 会一路误红。
+          #   那个三段的包版本（`0.29.0`），拿它去比文档里的 `v0.29` 会一路误红。
           want = protos[0] if protos else ""
           skip_doc = ("CHANGELOG.md", "docs/KNOWN-ISSUES.md")
           found = []
@@ -366,6 +366,10 @@ jobs:
                     ("surface", "SURFACE_KEYS"),
                     ("login", "LOGIN_KEYS"),
                     ("data", "DATA_KEYS")]
+          # 只有守护进程读的两张（`site` 段与它的 `bin` 子对象）。客户端把这一段
+          #   当不透明数据，所以它们不走上面那条「两侧逐字相同」的比对，只比
+          #   书面判据与守护进程那一侧（账本 S31 T8）。
+          DAEMON_ONLY = [("site", "SITE_KEYS"), ("bin", "BIN_KEYS")]
 
           written = json.load(open("tools/manifest-keys.json", encoding="utf-8"))
           js = open("client/src/main/plugins/index.js", encoding="utf-8").read()
@@ -388,6 +392,15 @@ jobs:
                   bad = 1
                   print("      书面 %r" % (w,))
                   print("      客户端 %r / 守护进程 %r" % (client, daemon))
+          for name, const in DAEMON_ONLY:
+              daemon = list(getattr(mod, const, ()))
+              w = written.get(name)
+              ok = bool(daemon) and w == daemon
+              print("  %-12s %s" % (name, "ok（只有守护进程）" if ok else "FAIL"))
+              if not ok:
+                  bad = 1
+                  print("      书面 %r" % (w,))
+                  print("      守护进程 %r" % (daemon,))
           if bad:
               print("✗ 清单键三处不一致（或有一处没抠出来）。")
               print("  它们必须逐字相同：改规则要同时改 tools/manifest-keys.json")
@@ -395,6 +408,7 @@ jobs:
               print("  cluster/slurmate-sessiond）。")
               sys.exit(1)
           print("✓ 书面判据 = 客户端 = 守护进程（五张表，十五处都真的抠到了）")
+          print("✓ 另有只归守护进程的两张（site / bin）与书面判据逐字相同")
           PY
 
       - name: 插件负载上限：书面判据与三侧逐字一致
