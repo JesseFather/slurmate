@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.30。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.31。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.30`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.31`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.30.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.31.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.30`，不是 `v0.30.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.31`，不是 `v0.31.0`。
 
-顺带一句：`v0.30` 不是 `v0.2`。`minor` 是十进制字符串，`30` 比 `2` 大。
+顺带一句：`v0.31` 不是 `v0.2`。`minor` 是十进制字符串，`31` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -628,7 +628,7 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 成功 data：
 
 ```json
-{"version": "0.30", "pid": 123, "started_at": 1757...,
+{"version": "0.31", "pid": 123, "started_at": 1757...,
  "config": {"path": "/etc/slurmate/slurmate.conf",
             "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
             "last_reload": {"seq": 3, "at": 1757..., "ok": true,
@@ -773,10 +773,12 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > N 个：8 张卡分在 4 台机器上（`total: 8`、`per_node_max: 2`）时，一个作业最多只能
 > 要 2 张。界面拿它当数量那一格的 `max`，服务端拿它当判据。
 
-> 这一份不带"已用"。已用与空闲在 `cluster` op 的 `gres` 项里
-> （`used` / `free`），来源是 `squeue` 的 `%b`。本机实测（slurm-wlm 23.11.4）：
-> 节点的 `CfgTRES` / `AllocTRES` 里不含 gres，`GresUsed=` 这个字段也不存在 ——
-> 所以那一格只能从队列现算，三态与边界写在 `cluster` 那一节。
+> 这一份不带"已用"。已用与可用在 `cluster` op 的 `gres` 项里
+> （`used` / `free`），来源是 `sinfo -O` 的 `GresUsed`。
+
+> 本机实测（slurm-wlm 23.11.4）：`scontrol show node -o` 的文本里没有
+> `GresUsed=`，但 `sinfo -N -O "…,GresUsed:…"` 有。三态与边界写在
+> `cluster` 那一节。
 
 > 这里没有 `defaults`。默认资源是按插件的（在一个 shell 里跑 codex 和在
 > IDE 里跑语言服务器不是一回事），所以它跟 `plugins` op 走。在这里放一个全局的
@@ -1507,7 +1509,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
  "rules_count": 3, "active_sessions": 3, "pending_sessions": 1,
  "consistent": true,
  "port_range": [55001, 55999],
- "version": "0.30", "last_tick_at": 1790301794,
+ "version": "0.31", "last_tick_at": 1790301794,
  "tick_age_seconds": 2, "last_tick_error": null,
  "existing": {"codeserver_table": true, "portdaemon_table": true}}
 ```
@@ -1537,12 +1539,12 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 `me`（按 uid 的那一份）。
 
 ```json
-{"at": 1790301794,
+{"at": 1790301794, "now": 1790301794,
  "health": {"up": true, "at": 1790301794},
  "version": "slurm-wlm 23.11.4",
  "partitions": {"A6000": {"max_time": "183-00:00:00", "is_default": false,
                           "state": "UP", "nodes": 2, "cpus": 160}},
- "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {},
+ "nodes":    {"A6000": {"counts": {"mixed": 2}, "flags": {},
                         "cpus": {"allocated": 60, "idle": 68,
                                  "other": 0, "total": 128},
                         "mem_free": {"sum": 80000, "max": 50000}}},
@@ -1575,31 +1577,36 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 `partitions` 那个 op —— 它的失败要挡住整张表单）。这一屏是只读的现状展示，
 一格获取失败不该让另外五格也看不见。
 
-`nodes.<分区>.cpus` 是 `sinfo -N` 的 `%C` 按分区累加：`idle` 是这个分区此刻
-还剩多少核。`total` 含 DOWN 的节点（它们占着名单但没有空闲核）。这一格缺席
-表示没问到，不能写成四个 0 —— 0 的意思是"确实一核都不剩"。
+`nodes.<分区>.cpus` 是 `sinfo -N -O` 的 `CPUsState` 按分区累加：`idle` 是这个
+分区此刻还剩多少核。`total` 含 DOWN 的节点（它们占着名单但没有空闲核）。这一格
+缺席表示没问到，不能写成四个 0 —— 0 的意思是"确实一核都不剩"。
 
-`nodes.<分区>.mem_free` 是 `sinfo -N` 的 `%e`（每节点空闲内存，MB）按分区累加：
-`sum` 是各节点空闲内存的合计，`max` 是其中最多的一台（一条作业只落在一台节点
-上，所以后者才是"这条作业此刻最多能要到多少"）。它取的是 `slurmd` 报的空闲
-内存，不是调度器眼里的可分配量；键缺席 = 没问到（旧版 Slurm 不认 `%e`，或查询
-失败），不写成 0。
+`nodes.<分区>.mem_free` 是 `Memory - AllocMem` 按分区累加：`sum` 是各节点可
+分配内存的合计，`max` 是其中最多的一台（一条作业只落在一台节点上，所以后者才是
+"这条作业此刻最多能要到多少"）。
+
+这是调度器眼里的可分配量，与 `FreeMem`（节点上物理空闲，含缓存与未计入分配的
+部分）不是同一个数；两种口径在本机实测可以差两个数量级。键缺席 = 没问到
+（旧版 Slurm 不认 `-O`，或查询失败），不写成 0。
 
 `mem.<分区>` 是这个分区里内存最大那种节点的 MB 数。它是容量，与上面那格
 余量分开：`mem` 回答"这台节点有多大"，`mem_free` 回答"此刻还剩多少"。
 
-`gres.<分区>[].used` / `.free` 是 GRES 的已用与空闲，来源是 `squeue` 的 `%b`：
-只数确实占着分配的作业（`R` / `CG` / `CF` / `S`，`PD` 不算），`free` 是
-`total - used` 并钳到不小于 0。中钟（30 秒）刷新，所以它是"上一次对账时"的
-数，不是毫秒级的实时值。
+`gres.<分区>[].used` / `.free` 是 GRES 的已用与可用，来源是 `sinfo -N -O` 的
+`GresUsed`：Slurm 按节点算好的已用量，按分区汇总，`free` 是 `total - used`
+并钳到不小于 0。中钟（30 秒）刷新，所以它是"上一次对账时"的数，不是毫秒级的
+实时值。
 
-三态与边界：作业没写 GRES 型号、而这个分区里同名的卡有不止一种型号时，这一项
-不给 `used` / `free`（判不了归属，不猜）；一台节点属于两个以上分区时也不给
-（`total` 把它的卡计进了每个分区，而 `squeue` 只算在提交的那个分区上 ——
-减出来的"空闲"是假的）。键缺席 = 取不到；`used: 0` = 确实没人占。
+三态与边界：同一分区里同名的卡有不止一种型号、而已用量没写型号时，这一项
+不给 `used` / `free`（判不了归属，不猜）。节点跨分区时照常给：`sinfo -N` 对
+每个分区各出一行，每行都带着这台节点的真实已用量，不会把别人占的卡算成空闲。
+键缺席 = 取不到；`used: 0` = 确实没人占。
 
 `taken` 是每一格"取到它的时刻"（Unix 秒）。慢钟上的一格可以是 5 分钟前的，
-而"这份有多旧"是用户要看的 —— 所以它必须送出去，不能由客户端拿收到的时刻顶替。
+而"这一份有多旧"是用户要看的 —— 所以它必须送出去，不能由客户端拿收到的时刻顶替。
+
+`now` 是服务端此刻的时间；客户端算年龄时用它当基准（`now - taken`），不用本机
+时钟 —— 两端有时钟差时，后者会把刚取到的数算成负数，钳完就成了一句"0 秒前"。
 
 `me.allowed_partitions` 的三态与 `whoami` 一致：`null` = 不限制（这是答案），
 列表 = 允许的那些。

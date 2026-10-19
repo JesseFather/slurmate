@@ -922,13 +922,14 @@ JSON，交给 Slurm 的那个串（`name[:type]:count`）由 `gres_spec()` 当�
 
 - `per_node_max`（一个作业能要几个）与 `total`（这个分区一共几张）是两个问题，
   `--gres=gpu:N` 是每节点 N 个，所以界面与判据都用前者；
-- "已用"不在这一趟里。本机实测（slurm-wlm 23.11.4）：节点的 `CfgTRES` /
-  `AllocTRES` 不含 gres，`GresUsed=` 也不存在。
-- 它由 `queue_table()` 从 `squeue` 的 `%b` 现算（只数占着分配的作业），
+- "已用"不在这一趟里。本机实测（slurm-wlm 23.11.4）：`scontrol show node -o`
+  的文本里没有 `GresUsed=`，但 `sinfo -N -O "…,GresUsed:…"` 有。
+- 它由 `node_table()` 从 `sinfo -O` 的 `GresUsed` 取（Slurm 按节点算好的数），
   `Cluster.shared()` 再把它附到每个 GRES 项上。
 
-代价如实记：那是中钟（30 秒）上的一个推算值。作业没写型号而分区里同名多型号时、
-或一台节点跨多个分区时，宁可不给。
+代价如实记：那是中钟（30 秒）上的一个值。同一分区里同名的卡有不止一种型号、
+而已用量没写型号时，宁可不给（判不了归属）。节点跨分区时照常给：每台节点的
+已用量对它所在的每个分区都成立。
 
 `site.defaultGpus`（插件声明默认卡数）永远不会有。而"默认卡数"这一层在
 那个插件的配置里（`default_gpus`）。
@@ -1467,11 +1468,14 @@ fork 落在 tick 上，请求只读缓存。
 
 ### 节点忙闲：flag 只做展示
 
-`sinfo -N -h -o "%P|%N|%t|%C|%e"` 聚合成"每分区每个 base state 几台"，
-第四列 `%C`（每节点 `allocated/idle/other/total`）按分区累加成 CPU 余量，
-第五列 `%e`（每节点空闲内存，MB）累加成 `mem_free`（合计与单节点最多）。
-旧版 `sinfo` 不认 `%e` 时退回四列再取一次，少的只是内存余量那一格 ——
-不能让一次版本差异把整张节点表判成取不到。
+`sinfo -N -h -O "…"`（长字段名：`Memory` / `AllocMem` / `Gres` / `GresUsed` /
+`Partition` / `StateLong` / `CPUsState`）聚合成"每分区每个 base state 几台"。
+
+`CPUsState` 按分区累加成 CPU 余量；`Memory - AllocMem` 累加成 `mem_free`
+（可分配量的合计与单节点最多）；`GresUsed` 累加成每个分区的已用量。
+
+旧版 `sinfo` 不认 `-O` 时退回 `-o "%P|%N|%t|%C"` 再取一次，少的是内存余量与
+GRES 已用两格 —— 不能让一次版本差异把整张节点表判成取不到。
 后缀（`*` `~` `#` `!` `%` `$` `@` `^` `-` `+`）原样带出去、单独一列。
 
 它们跨 Slurm 版本含义不一致：同一份 manpage 上 `~` 是"presently in powered off"，
@@ -1487,15 +1491,13 @@ fork 落在 tick 上，请求只读缓存。
 
 ### 队列：「其余那一档」不并进 running
 
-一次 `squeue -h -o "%i|%P|%t|%u|%b"` 回答所有人：每分区的排队/在跑计数、
-排队顺序、按用户分的列表，以及占着分配的作业要了哪些 GRES。
-旧版 `squeue` 不认 `%b` 时退回四列，GRES 余量缺席、其余照旧。
+一次 `squeue -h -o "%i|%P|%t|%u"` 回答所有人：每分区的排队/在跑计数、
+排队顺序、按用户分的列表。GRES 已用不在这条查询里（它由 `sinfo -O` 的
+`GresUsed` 取）。
 
 - 数组作业算一条（Slurm 自己也是把它当一个作业排的）。
 - `CG` / `S` / `ST` 那些单独一档，不并进 running —— 并了之后"这个分区忙不忙"
   就开始说谎，而那是这一格唯一的用途。
-- GRES 余量只数 `R` / `CG` / `CF` / `S`：`PD` 也带着 `%b`，但那是想占、还没占上。
-  多节点作业的 `%N` 是压缩表，所以按 `%P`（作业的分区）汇总，不去数节点。
 - "我排第几"从共享的两份列表现推，不额外 fork。报的是第几位，不是
   "还要等多久"（后者取决于分区此刻有多少空闲节点，报出来像承诺）。
 

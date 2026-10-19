@@ -135,7 +135,9 @@ test('集群那一份带每节点核数、内存余量与 GRES 余量；分区�
     assert.deepEqual(d.nodes.A6000.mem_free, { sum: 120000, max: 70000 },
       '内存余量：合计与单节点最多');
     assert.equal(d.gres.A6000[0].used, 2, 'GRES 已用');
-    assert.equal(d.gres.A6000[0].free, 6, 'GRES 空闲 = 总数 - 已用');
+    assert.equal(d.gres.A6000[0].free, 6, 'GRES 可用 = 总数 - 已用');
+    // 客户端算"这一格有多旧"用服务端时间当基准，不看本机时钟。
+    assert.equal(typeof d.now, 'number', '服务端时间要带上');
 
     // `op_partitions` 那一份是 `NodeCatalog.gres` 的原样投影：不能长出
     //   `used` / `free`（真守护进程那里是复制之后才附上去的）。

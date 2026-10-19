@@ -515,7 +515,7 @@ plugins（一个含 package{format,bytes,digest} 的清单）
 | `scontrol show config \| grep GresTypes` | `GresTypes = gpu`（只有名字，没有型号、没有数量） |
 | `scontrol show node -o` | `Gres=gpu:4` / `Gres=gpu:8`，**全集群没有一个带型号的** |
 | 同上，`CfgTRES=` / `AllocTRES=` | `cpu=78,mem=250G,billing=78`，**里面没有 gres**（那要求 `AccountingStorageTRES` 里列了 `gres/gpu`，本集群没列） |
-| 同上，有没有 `GresUsed=` | **没有这个字段** |
+| 同上，有没有 `GresUsed=` | 这条命令的文本里没有；`sinfo -N -O "…,GresUsed:…"` **有**（本集群实测 `gpu:0` / `gpu:1` / `gpu:2`） |
 
 两件事只有夹具里有，真集群上一次都没走过。
 
@@ -525,9 +525,10 @@ plugins（一个含 package{format,bytes,digest} 的清单）
    一台 `Gres=gpu:a100:2`，`client/src/main/backend-fake.js` 的 A6000 也是这样），
    否则那条路一次都不被测到。见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) 里 F26 的教训。
 2. **"已用几张"。** 0.30 起 `cluster` op 的 GRES 项带 `used` / `free`，来源是
-   `squeue` 的 `%b`（**已经**在本集群上取到过真实输出：运行中的作业报
-   `gres/gpu:1`，没要卡的报 `N/A`）。它仍然是一格推算值，边界如实写着：中钟
-   30 秒刷新；作业没写型号而分区里同名多型号时不给；一台节点跨多个分区时不给。
+   `sinfo -O` 的 `GresUsed`（**已经**在本集群上取到过真实输出：`gpu:0` / `gpu:1` /
+   `gpu:2`）。它是 Slurm 按节点算好的数，不是从作业请求现推的。边界如实写着：
+   中钟 30 秒刷新；同一分区里同名的卡有不止一种型号、而已用量没写型号时不给
+   （判不了归属）；节点跨分区时照常给。
 
 **夹具比真集群"脏"这件事在这里是故意的**，而它有个代价必须记着：这条路上的缺陷只有
 在带型号的真集群上才会现形。

@@ -168,7 +168,7 @@ const CPUS_PER_NODE = {
   'A6000': 78,
   'RTX8000': 38,
 };
-// 运行中作业占着的 GRES（真站点上由 `squeue %b` 现算，这里直接给结果）。
+// 已用的 GRES（真站点上由 `sinfo -O` 的 `GresUsed` 取，这里直接给结果）。
 //   与 `GRES` 分开：`op_partitions` 的清单里不许出现 `used` / `free`。
 const GRES_USED = {
   '2080TI': [0],
@@ -194,12 +194,15 @@ const PARTITIONS = [
  *
  * 形状与守护进程 `Slurm.node_table()` 的返回逐字一致：counts 只装 base
  *   state，flags 单独一列。两者的键不相交，那是"从右往左剥"能成立的前提。
+ *
+ * `mem_free` 是调度器眼里的可分配量（`Memory - AllocMem`），不是节点的物理
+ *   空闲（`FreeMem`）；两种口径可以差两个数量级。
  */
 const NODES = {
   '2080TI': { counts: { idle: 1, drain: 1 }, flags: { '*': 1 },
     cpus: { allocated: 0, idle: 38, other: 0, total: 38 },
     mem_free: { sum: 60000, max: 60000 } },
-  'A6000': { counts: { mix: 2 }, flags: {},
+  'A6000': { counts: { mixed: 2 }, flags: {},
     cpus: { allocated: 2, idle: 76, other: 0, total: 78 },
     mem_free: { sum: 120000, max: 70000 } },
   'RTX8000': { counts: { idle: 1 }, flags: {},
@@ -1496,7 +1499,8 @@ class FakeBackend extends Backend {
    */
   _cluster() {
     const miss = this._clusterMissing || {};
-    const data = { at: nowSec(), taken: {} };
+    // `now` 是服务端此刻的时间，客户端用它算每一格的年龄（不看本机时钟）。
+    const data = { at: nowSec(), now: nowSec(), taken: {} };
     if (!miss.health) {
       data.health = { up: true, at: nowSec() };
       data.taken.health = nowSec();
@@ -1517,8 +1521,8 @@ class FakeBackend extends Backend {
       data.taken.partitions = nowSec() - 42;
     }
     if (!miss.gres) {
-      // `used` / `free` 与真守护进程一样来自"正在占着分配的作业"：这里直接
-      //   给结果（`GRES_USED`），形状与 `Cluster.shared()` 拼出来的一致。
+      // `used` / `free` 与真守护进程一样来自 `sinfo -O` 的 `GresUsed`：这里
+      //   直接给结果（`GRES_USED`），形状与 `Cluster.shared()` 拼出来的一致。
       const used = GRES_USED;
       data.gres = {};
       for (const p of PARTITIONS) {

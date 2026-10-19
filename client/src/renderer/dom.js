@@ -46,10 +46,17 @@ function na(what) {
   return cel('p', 'na', `获取失败：${what}。这一格是「没问到」，不是「没有」。`);
 }
 
-/** 一个时间戳有多旧。服务端的慢钟是 5 分钟，所以"这一份有多旧"是用户要看的。 */
-function agoText(ts) {
+/**
+ * 一个时间戳有多旧。服务端的慢钟是 5 分钟，所以"这一份有多旧"是用户要看的。
+ *
+ * `now` 是服务端此刻的时间（`op_cluster` 的 `now`）。用它当基准、不拿本机
+ *   时钟去减：两端有时钟差时，后者会把刚刚取到的数算成负数，钳完就成了一句
+ *   "0 秒前"。`now` 缺席时退回本机时钟（旧站点）。
+ */
+function agoText(ts, now) {
   if (typeof ts !== 'number') return null;
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  const base = typeof now === 'number' ? now : Date.now() / 1000;
+  const s = Math.max(0, Math.floor(base - ts));
   if (s < 90) return `${s} 秒前`;
   const m = Math.floor(s / 60);
   return m < 90 ? `${m} 分钟前` : `${Math.floor(m / 60)} 小时前`;

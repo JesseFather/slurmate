@@ -81,8 +81,8 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | 该用户能用哪些分区 | `sacctmgr show assoc user=<u> format=Account,Partition` |
 | 该用户的账户 | 同上，`format=Account` |
 | 是否强制 association | `scontrol show config` 的 `AccountingStorageEnforce` |
-| 每分区节点忙闲、CPU 与内存余量 | `sinfo -N -h -o "%P\|%N\|%t\|%C\|%e"` |
-| 队列深度、排队顺序与 GRES 已用 | `squeue -h -o "%i\|%P\|%t\|%u\|%b"` |
+| 每分区节点忙闲、CPU、可分配内存与 GRES 已用 | `sinfo -N -h -O "…,Memory:…,AllocMem:…,Gres:…,GresUsed:…,…"` |
+| 队列深度与排队顺序 | `squeue -h -o "%i\|%P\|%t\|%u"` |
 | 该用户的公平份额 | `sshare -u <u> -P -o Account,User,FairShare,RawUsage,EffectvUsage` |
 | 最近几天的作业 | `sacct -u <u> -S now-7days` |
 

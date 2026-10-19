@@ -754,18 +754,18 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.30', tick_age_seconds: 2, last_tick_error: null });
+    version: '0.31', tick_age_seconds: 2, last_tick_error: null });
   await btn.onclick();
   assert.match(said(), /0 条 ACL 规则/, said());
   assert.match(said(), /1 个还没有登记上/, said());
-  assert.match(said(), /守护进程 0\.30/, said());
+  assert.match(said(), /守护进程 0\.31/, said());
   assert.match(said(), /上一次对账在 2 秒前/, said());
 
   // 对账那一轮抛了异常：进「发现问题」，不被"检查通过"盖住。
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.30', tick_age_seconds: 2,
+    version: '0.31', tick_age_seconds: 2,
     last_tick_error: 'IntegrityError: UNIQUE constraint failed' });
   await btn.onclick();
   assert.match(said(), /检查发现问题/, said());

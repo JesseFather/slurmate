@@ -322,14 +322,19 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
     : '（这一格没有数据）';
   row.append(cel('div', 'dim', `CPU　${cs}`));
 
-  // 内存：容量那一格来自 `RealMemory=`，余量来自 `sinfo %e`（每节点空闲内存）。
-  //   两个都报：合计看这个分区还空多少，单节点最多看一条作业此刻最多能要到
+  // 内存：容量那一格来自 `RealMemory=`，可分配余量来自 `sinfo -O` 的
+  //   `Memory - AllocMem`（调度器眼里的可分配量，与 `slurm--` 插件同源）。
+  //   两个都报：合计看这个分区还能分多少，单节点最多看一条作业此刻最多能要到
   //   多少 —— 一条作业只落在一台节点上。余量那一格缺席（旧版 Slurm 或
   //   查询失败）时只报容量，不把"没问到"画成 0。
+  //
+  //   这里刻意不写"空闲"：`FreeMem` 是节点物理空闲（含缓存与未计入分配的
+  //   部分），与可分配量可以差两个数量级；把它也叫"空闲"会让用户以为
+  //   两种口径是同一个数。
   const mb = mem && mem[name];
   const mf = nodes && nodes[name] && nodes[name].mem_free;
   const free = (mf && typeof mf.sum === 'number' && typeof mf.max === 'number')
-    ? `　空闲合计 ${mbText(mf.sum)}（单节点最多 ${mbText(mf.max)}）` : '';
+    ? `　可分配合计 ${mbText(mf.sum)}（单节点最多 ${mbText(mf.max)}）` : '';
   const ms = typeof mb === 'number' ? `每节点最多 ${mbText(mb)}${free}`
     : '（这一格没有数据）';
   row.append(cel('div', 'dim', `内存　${ms}`));
@@ -347,10 +352,9 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
     : (g === undefined ? '（不在 GRES 清单里）'
       : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`
         + (typeof e.total === 'number' ? `，共 ${e.total}` : '')
-        // 余量来自 `squeue %b`（正在占着分配的作业）。缺席 = 取不到
-        //   （旧版 Slurm、队列查询失败、或分区之间节点重叠）—— 不写，
-        //   也不说"空着"。
-        + (typeof e.free === 'number' ? `，空闲 ${e.free}` : '')).join('，')
+        // 可用量来自 `sinfo -O` 的 `GresUsed`（Slurm 按节点算好的已用量）。
+        //   缺席 = 取不到（旧版 Slurm 或查询失败）—— 不写，也不说"空着"。
+        + (typeof e.free === 'number' ? `，可用 ${e.free}` : '')).join('，')
         : '确实一张都没有'));
   row.append(cel('div', 'dim', `GRES　${gs}`));
   return row;
@@ -375,11 +379,15 @@ function renderCluster() {
   }
 
   const h = d.health;
+  const now = d.now;
   $('cl-health').textContent = h
     ? `控制器${h.up ? '在线' : '连不上'}`
     : '控制器状态获取失败';
   $('cl-health').className = 'st' + (h && !h.up ? ' bad' : '');
-  if (h) box.append(cel('p', 'sub', `取数于 ${agoText(h.at) || '刚刚'}`));
+  // 每一格有自己的钟：控制器 2 秒、节点与队列 30 秒、版本 300 秒。所以这一句
+  //   只说控制器那一格，不写成"这一页是 N 秒前取的"。
+  if (h) box.append(cel('p', 'sub',
+    `控制器：${agoText(h.at, now) || '刚刚'}问过`));
 
   // 控制器与版本：两个互相独立的格子，所以各说各的。
   if (!h) box.append(na('控制器状态（scontrol ping）'));
@@ -390,8 +398,15 @@ function renderCluster() {
   ver.append(cel('div', null, d.version || '获取失败'));
   ver.append(cel('div', 'k', '分区表'), cel('div', null,
     d.partitions ? `${Object.keys(d.partitions).length} 个` +
-      (agoText(d.taken && d.taken.partitions) ? `（${agoText(d.taken.partitions)}）` : '')
+      (agoText(d.taken && d.taken.partitions, now)
+        ? `（${agoText(d.taken.partitions, now)}）` : '')
       : '获取失败'));
+  // CPU / 内存 / GRES 三行来自同一趟 `sinfo`，所以共用这一格时间。
+  //   缺席（`null`）= 没问到，与"确实没有节点"（`{}`）分开。
+  const nt = d.taken && d.taken.nodes;
+  ver.append(cel('div', 'k', '节点数据'), cel('div', null,
+    d.nodes === null || d.nodes === undefined ? '获取失败'
+      : (agoText(nt, now) ? `${agoText(nt, now)}` : '刚刚')));
   box.append(ver);
 
   // ── 队列（全集群）──
@@ -411,9 +426,11 @@ function renderCluster() {
       other += x.other || 0;
     }
     const q = cel('div', 'ctable');
+    const qt = agoText(d.taken && d.taken.queue, now);
     q.append(cel('div', 'k', '队列'));
     q.append(cel('div', null, `排队 ${pend}　在跑 ${running}`
-      + (other ? `　其它 ${other}` : '') + '　（全部用户）'));
+      + (other ? `　其它 ${other}` : '')
+      + `　（全部用户${qt ? `，${qt}` : ''}）`));
     box.append(q);
   }
 
