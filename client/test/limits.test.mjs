@@ -57,18 +57,20 @@ function constOf(src, name, file) {
   return Number(m[1]);
 }
 
-test('MAX_CPUS_REQUEST：守护进程、界面、假后端三处一致', () => {
+test('CPU 的绝对护栏：客户端退路不超过守护进程，真正的上限来自分区', () => {
   const d = constOf(daemon, 'MAX_CPUS_REQUEST', 'slurmate-sessiond');
-  // 界面那一格（v0.18：高级选项搬进了每一块里，于是这一格从 panel.html 的
-  // `max="64"` 变成了 panel.js 里的一个常量 —— 判据跟着元素搬了家，强度没减）。
+  // `UI_MAX_CPUS` 不再是"界面上限"，而是"站点没报 `cpus_per_node` 时的退路"。
+  //   它只需不超过服务端那道绝对护栏；真正的顶由 `applyCpuRange` 按分区设。
   const u = constOf(js, 'UI_MAX_CPUS', 'panel.js');
-  assert.equal(u, d,
-    `界面上限 ${u} 与服务端的 MAX_CPUS_REQUEST ${d} 不一致：`
-    + '用户照着界面填，而服务端按另一个数钳制');
-  // 而那个常量真的被设到那一格上了：只声明不用的常量是一条永远绿的判据 ——
-  //   用户照样能填 999，而服务端会把它悄悄钳掉。
-  assert.match(js, /st\.cpus\.max = String\(UI_MAX_CPUS\);/,
-    'panel.js 里「CPU 核数」那一格要把 UI_MAX_CPUS 设成 max');
+  assert.ok(u <= d,
+    `客户端退路 ${u} 超过了服务端的绝对护栏 ${d}：`
+    + '用户照着界面填，而服务端会把它悄悄钳掉');
+  // 真正的上限只能来自服务端的 `cpus_per_node`。
+  assert.match(js, /p\.cpus_per_node/,
+    'panel.js 里「CPU 核数」的顶必须来自分区报的 `cpus_per_node`');
+  // 而那一格真的被设上了：只声明不用的常量是一条永远绿的判据。
+  assert.match(js, /st\.cpus\.max = String\(top\);/,
+    'panel.js 里「CPU 核数」那一格要把当前顶（top）设成 max');
   const f = /clampInt\(req && req\.cpus, DEFAULTS\.cpus, 1, (\d+)\)/.exec(fake);
   assert.ok(f, 'backend-fake.js 里 cpus 的钳制那一行未找到（改过写法？）');
   assert.equal(Number(f[1]), d,
@@ -107,11 +109,11 @@ test('界面上每一个资源上限都指得出出处，没有一个数字是�
   //   用户不会像打字那样先想一想。
   const sets = [...js.matchAll(/\.max\s*=\s*([^;\n]+);/g)].map((m) => m[1].trim());
   assert.deepEqual(sets.sort(), [
-    'String(UI_MAX_CPUS)',        // CPU 那一格：那个与守护进程交叉校验过的常量
+    'String(top)',                // CPU 那一格：当前分区的每节点核数（或退路）
     'String(e.per_node_max)',     // 数量那一格：服务端给的每节点上限
     'String(values.length - 1)',  // 滑块自己的档位下标 —— 它不是资源上限
   ].sort(),
-  'panel.js 里对 `.max` 的赋值应当恰好三处（CPU 取 UI_MAX_CPUS、数量取 per_node_max、'
+  'panel.js 里对 `.max` 的赋值应当恰好三处（CPU 取当前顶、数量取 per_node_max、'
   + `滑块取下标的顶）—— 现在是 ${JSON.stringify(sets)}。多出来的那一处多半就是写死的上限`);
 
   // 而一个数字都不许直接写在 max 上（`max = 8` / `max = '8'`）：那正是这条
@@ -123,9 +125,8 @@ test('界面上每一个资源上限都指得出出处，没有一个数字是�
 
   // 三条滑块的顶各自指得出出处。这两条是上面那三处的一半：`max` 只是那个
   //   `input[type=range]` 的下标范围，真正决定"能拖到多大的资源"的是那几份档位表。
-  assert.match(js, /for \(let n = 28; n <= UI_MAX_CPUS; n \+= 4\)/,
-    'CPU 那条滑块的档位只到 UI_MAX_CPUS 为止 —— 那个数有人与服务端交叉盯着，'
-    + '换成一个字面量就没人盯了');
+  assert.match(js, /for \(let n = 28; n <= ceil; n \+= 4\)/,
+    'CPU 那条滑块的档位要按当前的顶生成 —— 顶来自分区，不是一个常量');
   assert.match(js, /const mb = p && p\.mem_per_node_mb;/,
     '内存那条滑块的顶必须来自分区报的 `mem_per_node_mb`，'
     + '不能是客户端自己算的、更不是一个常量');

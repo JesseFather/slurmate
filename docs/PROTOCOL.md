@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.29。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.30。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.29`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.30`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.29.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.30.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.29`，不是 `v0.29.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.30`，不是 `v0.30.0`。
 
-顺带一句：`v0.29` 不是 `v0.2`。`minor` 是十进制字符串，`29` 比 `2` 大。
+顺带一句：`v0.30` 不是 `v0.2`。`minor` 是十进制字符串，`30` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -451,7 +451,7 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 | code | 含义 | 典型 `kind` | CLI 退出码 |
 |---|---|---|---|
 | `0` | 成功 | — | `0` |
-| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
+| `2` | 用法错误 / 客户端 bug / 请求不合法 | `bad_request`、`bad_json`、`empty_request`、`unknown_op`、`bad_partition`、`bad_time`、`bad_gres`、`bad_resources`、`bad_service_kind`、`missing_service_kind`、`bad_ssh_pubkey` | `2` |
 | `3` | 未找到（会话不存在，uid 查不到，或本站没有这个东西） | `not_found`、`unknown_uid`、`plugin_unknown` | `3` |
 | `4` | 被拒绝：配额、权限、账户、熔断、这个服务用不了 | `quota_active`、`no_account`、`no_partition`、`throttled`、`forbidden`、`service_kind_disabled`、`service_kind_no_job`、`plugin_package_too_large` | `4` |
 | `5` | **守护进程暂时给不了**：不可达、端口池空、常驻连接已满、正在重启 | `daemon_unreachable`、`no_port`、`too_many_connections`、`draining` | `5` |
@@ -628,7 +628,7 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 成功 data：
 
 ```json
-{"version": "0.29", "pid": 123, "started_at": 1757...,
+{"version": "0.30", "pid": 123, "started_at": 1757...,
  "config": {"path": "/etc/slurmate/slurmate.conf",
             "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
             "last_reload": {"seq": 3, "at": 1757..., "ok": true,
@@ -719,6 +719,7 @@ CLI 在它归零之后才停服务：claims 行若还停在 ACL 状态，下一�
 ```json
 {"partitions": [{"name": "2080TI", "allowed": true, "is_default": true,
                  "max_time": "183-00:00:00", "mem_per_node_mb": 128000,
+                 "cpus_per_node": 40,
                  "gres": [{"name": "gpu", "type": null,
                            "per_node_max": 8, "total": 8}]}]}
 ```
@@ -747,6 +748,18 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > `-o` 的那一趟输出里，没配 GRES 的节点（`Gres=` 整个不出现）占绝大多数，
 > 而它们照样有内存 —— 两个累加器在守护进程里是分开的。
 
+`cpus_per_node` 是这个分区里一台节点最多能要到的有效核数，来源是
+`scontrol show node -o` 的 `CPUEfctv=`（缺席时退回 `CPUTot=`）。它同样是三态：
+
+| 取值 | 意思 |
+|---|---|
+| 键不存在 | 查不到（`scontrol` 失败，或这台节点两个字段都没报）。界面退回一个保守的退路 |
+| 整数 | 这个分区单节点的上限 |
+
+> 不是 `scontrol show partition` 的 `TotalCPUs`：那个是分区总和（两台各 80 核
+> 报 160），拿它当 `--cpus-per-task` 的上限会让用户填一个任何一台节点都给不出
+> 的数。
+
 `gres` 是这个分区上能申请的 GRES，来源是 `scontrol show node -o` 的 `Gres=`
 与 `Partitions=`（`Slurm.node_catalog()`）。它是三态，与协议里其它地方同一条规矩：
 
@@ -760,11 +773,10 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > N 个：8 张卡分在 4 台机器上（`total: 8`、`per_node_max: 2`）时，一个作业最多只能
 > 要 2 张。界面拿它当数量那一格的 `max`，服务端拿它当判据。
 
-> 没有"已用"这一格，也不会有。本机实测（slurm-wlm 23.11.4）：节点的
-> `CfgTRES` / `AllocTRES` 里不含 gres，那要求 `AccountingStorageTRES` 里列了
-> `gres/gpu`，而 `GresUsed=` 这个字段也不存在。
-
-> 拿 `squeue` 的作业去减是另一件事，而且那个数刚算完就过期。报一个错的数量比不报更糟。
+> 这一份不带"已用"。已用与空闲在 `cluster` op 的 `gres` 项里
+> （`used` / `free`），来源是 `squeue` 的 `%b`。本机实测（slurm-wlm 23.11.4）：
+> 节点的 `CfgTRES` / `AllocTRES` 里不含 gres，`GresUsed=` 这个字段也不存在 ——
+> 所以那一格只能从队列现算，三态与边界写在 `cluster` 那一节。
 
 > 这里没有 `defaults`。默认资源是按插件的（在一个 shell 里跑 codex 和在
 > IDE 里跑语言服务器不是一回事），所以它跟 `plugins` op 走。在这里放一个全局的
@@ -1040,7 +1052,7 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 |---|---|---|
 | `service_kind` | **本站的短名**（插件配置的文件名） | 配置里的 `default_plugin`；**没配就是必填**，否则 `2 missing_service_kind` |
 | `ssh_pubkey` | 一行公钥 | 清单里 `contributes.submitPubkey` 为真的插件**必填**，否则 `2 bad_ssh_pubkey` |
-| `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在它那份配置里覆盖；服务端钳制到 1–上限） |
+| `cpus` | 整数 | **该插件**的 `site.defaultCpus`（站点可在它那份配置里覆盖；服务端钳制到 `1`–`MAX_CPUS_REQUEST`=1024，那只是挡住荒谬请求的绝对护栏，真正的上限是分区的 `cpus_per_node`） |
 | `mem` | 字符串 | **该插件**的 `site.defaultMem`（必须匹配 `^[0-9]+[KMGTP]?$` 且非 0；否则回退默认并打 warning） |
 | `gres` | **对象** `{name, type, count}`，或 **`null`** | **省略** = 用**该插件**的 `default_gpus`（站点在它那份配置里配的策略；它没配就是不占）。**显式 `null`** = 不占，**盖过**插件的默认。见下面的〈`gres`：一个结构化描述符〉 |
 | `partition` | 字符串 | **未给 = 从该用户有权限的分区里随机挑一个**（见下） |
@@ -1053,7 +1065,9 @@ association 求交。客户端不再自己维护一份「用途 → 分区」的
 > 机器。客户端的「高级选项」只是临时覆盖，不写进任何配置，关掉窗口即失效。
 
 > 随机挑分区的边界：`allowed_partitions()` 查不到时返回 `PARTITIONS_UNKNOWN`
-> 哨兵。
+> 哨兵。随机挑的时候还要从装得下这个请求的分区里挑 —— 按分区的
+> `gres` / `cpus_per_node` / `mem_per_node_mb` 逐个判；目录整份取不到时不判
+> （权威在 Slurm 那一侧），一个都装不下报 `2 bad_resources`。
 
 > 显式指定分区的路径继续 fail-closed：用户点了名就必须验，返回 `6`。缺省随机的路径
 > 退化为不带 `-p`，交给 Slurm 的默认分区，并在响应里带一个 `warning`。
@@ -1142,6 +1156,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 |---|---|---|
 | `2` | `bad_partition` | 指定的分区名不存在 |
 | `2` | `bad_gres` | `gres` 的形状不合法 / 这个分区没有那种 GRES / 数量超过 `per_node_max` |
+| `2` | `bad_resources` | 没点名分区，而有权限的分区里没有一个装得下 `cpus` / `mem` |
 | `2` | `bad_time` | 时间格式无法解析或 ≤ 0 |
 | `3` | `unknown_uid` | `getpwuid` 失败 |
 | `4` | `throttled` | 该 uid 在熔断静默期内 |
@@ -1489,14 +1504,31 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 
 ```json
 {"socket": true, "table": true, "rules_readable": true,
- "rules_count": 3, "active_sessions": 3, "consistent": true,
+ "rules_count": 3, "active_sessions": 3, "pending_sessions": 1,
+ "consistent": true,
  "port_range": [55001, 55999],
+ "version": "0.30", "last_tick_at": 1790301794,
+ "tick_age_seconds": 2, "last_tick_error": null,
  "existing": {"codeserver_table": true, "portdaemon_table": true}}
 ```
 
 `consistent` = 规则数 == 活跃会话数。它不等就说明对账在报错
 （`cluster/slurmate-sessiond`）。`existing` 是非侵入式体检：
 只读地看一眼既有系统还在不在，本系统绝不碰它们。
+
+`active_sessions` 只数装上了 ACL 的那几种状态。`pending_sessions` 是
+「已提交、还没有登记上」那一段（`reserved` / `submitted`）：一条卡在那里的会话
+会让 `active_sessions` 是 0 而体检看起来一切正常，两格分开报。
+
+`version` 是守护进程自己的版本。
+
+`last_tick_at` 是最近一次对账完成的时间，`tick_age_seconds` 是它到现在的秒数。
+从没对过账时两者都是 `null`。
+
+`last_tick_error` 是最近一次对账抛出的异常（`<类型>: <信息>`），没抛过为 `null`。
+它不是 `null` 时，对账与它之后的阶段都不再推进。
+
+老版本的守护进程不报这四格。
 ### `cluster`
 
 请求：`{"op":"cluster"}`
@@ -1512,13 +1544,15 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
                           "state": "UP", "nodes": 2, "cpus": 160}},
  "nodes":    {"A6000": {"counts": {"mix": 2}, "flags": {},
                         "cpus": {"allocated": 60, "idle": 68,
-                                 "other": 0, "total": 128}}},
+                                 "other": 0, "total": 128},
+                        "mem_free": {"sum": 80000, "max": 50000}}},
  "mem":      {"A6000": 128000},
  "queue":    {"depth": {"A6000": {"pending": 48, "running": 4}},
               "pending": {"A6000": ["7001", "…"]},
               "by_user": {"alice": ["7001", "…"]}, "at": 1790301780},
  "gres":     {"A6000": [{"name": "gpu", "type": "a100",
-                         "per_node_max": 2, "total": 4}]},
+                         "per_node_max": 2, "total": 4,
+                         "used": 1, "free": 3}]},
  "taken":    {"health": 1790301794, "partitions": 1790301500},
  "me": {"account": "chbstudents", "account_error": null,
         "allowed_partitions": null,
@@ -1545,8 +1579,24 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 还剩多少核。`total` 含 DOWN 的节点（它们占着名单但没有空闲核）。这一格缺席
 表示没问到，不能写成四个 0 —— 0 的意思是"确实一核都不剩"。
 
-`mem.<分区>` 是这个分区里内存最大那种节点的 MB 数。它是容量不是余量：Slurm
-没有一份可靠的"空闲内存"，本 op 也不去推一个。（键缺席 = 没问到。）
+`nodes.<分区>.mem_free` 是 `sinfo -N` 的 `%e`（每节点空闲内存，MB）按分区累加：
+`sum` 是各节点空闲内存的合计，`max` 是其中最多的一台（一条作业只落在一台节点
+上，所以后者才是"这条作业此刻最多能要到多少"）。它取的是 `slurmd` 报的空闲
+内存，不是调度器眼里的可分配量；键缺席 = 没问到（旧版 Slurm 不认 `%e`，或查询
+失败），不写成 0。
+
+`mem.<分区>` 是这个分区里内存最大那种节点的 MB 数。它是容量，与上面那格
+余量分开：`mem` 回答"这台节点有多大"，`mem_free` 回答"此刻还剩多少"。
+
+`gres.<分区>[].used` / `.free` 是 GRES 的已用与空闲，来源是 `squeue` 的 `%b`：
+只数确实占着分配的作业（`R` / `CG` / `CF` / `S`，`PD` 不算），`free` 是
+`total - used` 并钳到不小于 0。中钟（30 秒）刷新，所以它是"上一次对账时"的
+数，不是毫秒级的实时值。
+
+三态与边界：作业没写 GRES 型号、而这个分区里同名的卡有不止一种型号时，这一项
+不给 `used` / `free`（判不了归属，不猜）；一台节点属于两个以上分区时也不给
+（`total` 把它的卡计进了每个分区，而 `squeue` 只算在提交的那个分区上 ——
+减出来的"空闲"是假的）。键缺席 = 取不到；`used: 0` = 确实没人占。
 
 `taken` 是每一格"取到它的时刻"（Unix 秒）。慢钟上的一格可以是 5 分钟前的，
 而"这份有多旧"是用户要看的 —— 所以它必须送出去，不能由客户端拿收到的时刻顶替。

@@ -70,7 +70,7 @@ import time
 #   第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.29"
+VERSION = "0.30"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -267,6 +267,21 @@ def sanitize_mem(v, default):
     return default, bool(s)
 
 
+def session_mem_mb(v):
+    """会话内存写法（`8G` / `512M` / 裸数字）→ MB；认不出给 `None`。
+
+    与 `sanitize_mem()` 同一套写法，但换成整数：那个函数原样把字符串交给
+    Slurm，而这里要拿它和每节点内存比大小。裸数字按 Slurm 的规矩是 MB。
+    """
+    m = re.fullmatch(r"([0-9]+)([KMGTP]?)", str(v or "").strip().upper())
+    if not m:
+        return None
+    per = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 ** 2,
+           "P": 1024 ** 3}[m.group(2) or "M"]
+    mb = int(m.group(1)) * per
+    return int(mb) if float(mb).is_integer() else None
+
+
 def normalize_ipv4(s):
     """严格校验并规范化 IPv4。返回规范字符串，不合法返回 None。
 
@@ -416,6 +431,31 @@ def parse_gres_field(s):
             continue
         out.append({"name": name, "type": typ, "count": cnt})
     return out
+
+
+def parse_job_gres(raw):
+    """`squeue -o %b` 那一格 → GRES 描述符列表。
+
+    与 `parse_gres_field()` 分开只有一处理由：`%b` 把类型写成
+    `gres/gpu:1`（也可能写成 `gres:gpu:1`），而 `parse_gres_field()` 认的是
+    `gpu:1`。先把这个前缀剥掉、把 `cpu=…` 这类非 GRES 项丢掉，再交给它 ——
+    不另写第二个解析器。
+    """
+    s = str(raw or "").strip()
+    if not s or s in ("N/A", "(null)"):
+        return []
+    items = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok or tok in ("N/A", "(null)") or "=" in tok:
+            continue
+        low = tok.lower()
+        if low.startswith("gres/"):
+            tok = tok[5:]
+        elif low.startswith("gres:"):
+            tok = tok[5:]
+        items.append(tok)
+    return parse_gres_field(",".join(items))
 
 
 def clean_gres(v):
@@ -998,8 +1038,12 @@ HISTORY_MAX_ROWS = 30
 # 具体缺省值不在这里：它是按插件的（在中转站里跑一个 shell 和在 IDE 里
 #   跑语言服务器不是一回事），所以它写在插件的 plugin.json 的 `site.defaultCpus` /
 #   `site.defaultMem` 里，站点可以在那个插件的配置里覆盖它。
-#   这里只有"绝不能超过多少"这一条，那是框架的策略，不是插件能自选的。
-MAX_CPUS_REQUEST = 64
+#
+# 这个数只是【荒谬请求的量级护栏】，不是策略上限。真正决定"能要几核"的是
+#   分区的节点核数：界面按 `op_partitions` 给的 `cpus_per_node` 划线，Slurm
+#   按同一份配置拒绝。写死 64 会在 80 核的节点上把合法请求悄悄钳掉，而用户
+#   照着界面填的数与真正提交的数不再一致（2026-10-19 用户点的那一条）。
+MAX_CPUS_REQUEST = 1024
 # 框架不为 GRES 设上限，因为GRES 的上限不是框架的
 #   策略，而是集群的事实，每节点配了几张卡由管理员在 `gres.conf` 里定，写死在
 #   代码里等于替所有站点做了同一个决定（每节点 16 张卡的站点也只能要 8 张）。
@@ -6464,8 +6508,8 @@ class Nft(object):
         if rc == 0:
             if self.BASE_LO not in out:
                 self._nft(["insert", "rule", "inet", "slurmate", "output",
-                           "oif", "lo", "accept", "comment", self.BASE_LO],
-                          check=True)
+                           "oif", "lo", "accept", "comment",
+                           self.quote_comment(self.BASE_LO)], check=True)
                 log.warning("补齐基础规则 %s", self.BASE_LO)
             # 清掉 0.23 之前那条 `ip daddr != <cluster_cidr> accept`。
             #   这里【要】删一条本版根本不插的规则，理由只有一个，而它是硬理由：
@@ -6492,6 +6536,20 @@ class Nft(object):
             if m:
                 rules[m.group(1)] = int(m.group(2))
         return rules
+
+    @staticmethod
+    def quote_comment(comment):
+        """把一个 comment 变成 nft 认得的字符串实参（带引号）。
+
+        nft 的 `comment` 后面跟的是一个字符串。不带引号的裸词大多数时候也能
+          解析，而 `@` 在 nft 语法里是集合 / 映射引用的起始符：0.29 给 comment
+          加上 `-<id>@<版本>` 之后，那个裸词在 `@` 处当场解析失败（`syntax
+          error, unexpected @`），于是每一次登记都卡在装 ACL 这一步，会话一直
+          停在 `submitted`（2026-10-19 真机，100% 复现）。
+        引号也一并转义：comment 今天是拼出来的（ULID + 版本号），但把"它里面
+          不会出现引号"当成前提，就是把一次未来的改动变成一次静默失败。
+        """
+        return '"%s"' % str(comment).replace("\\", "\\\\").replace('"', '\\"')
 
     @staticmethod
     def comment_for(uid, job_id, port, service_plugin=None):
@@ -6540,7 +6598,7 @@ class Nft(object):
             "ip", "daddr", node_ip, "tcp", "dport", str(port), "ct", "state", "new",
             "meta", "skuid", "!=", str(uid),
             "meta", "skuid", "!=", "0",
-            "drop", "comment", comment,
+            "drop", "comment", self.quote_comment(comment),
         ], check=True)
         if rc != 0:
             return False, err.strip()[:200]
@@ -6801,18 +6859,29 @@ def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
 
 
 class NodeCatalog(object):
-    """`scontrol show node -o` 那一趟的三半产出。
+    """`scontrol show node -o` 那一趟的产出。
 
-    三半来自同一条命令，所以只有一个返回对象：分两次查就是把本仓库里最贵的
+    四半来自同一条命令，所以只有一个返回对象：分两次查就是把本仓库里最贵的
     那一次 fork（大集群上这条命令的输出很大）跑两遍，而它们问的是同一批节点。
 
-      · `gres` ：{分区名: [{"name","type","per_node_max","total"}]}
-      · `mem`  ：{分区名: 这个分区里内存最大的那种节点的内存，单位 MB}
-      · `addrs`：Slurm 报的节点地址全集（一个 set），或 `None`
+      · `gres`   ：{分区名: [{"name","type","per_node_max","total"}]}
+      · `mem`    ：{分区名: 这个分区里内存最大的那种节点的内存，单位 MB}
+      · `cpus`   ：{分区名: 这个分区里有效核数最多的那种节点的核数}
+      · `addrs`  ：Slurm 报的节点地址全集（一个 set），或 `None`
+      · `overlap`：有没有一台节点属于两个以上的分区
 
-    前两半各自都是三态的：`None` = 这一趟没问出来（`scontrol` 失败），
+    前三半各自都是三态的：`None` = 这一趟没问出来（`scontrol` 失败），
     `{}` = 问到了，集群上确实一个都没有。把它们合并会让界面替集群说一句
     它不知道的话（"这个分区没有卡" / "这个分区没有内存上限"）。
+
+    `cpus` 要的是每节点【有效】核数（`CPUEfctv`），不是 `scontrol show
+      partition` 的 `TotalCPUs`：后者是分区总和（A6000 两台各 80 核报 160），
+      拿它当 `-c` 的上限会让用户填一个分区里任何一台节点都给不出的数。
+
+    `overlap` 服务的是 GRES 余量（`Cluster.shared()`）：`squeue` 只把作业
+      算在它提交的分区上，而 `total` 会把一台节点的卡计进它所在的每个分区。
+      节点跨分区时，`total - used` 会把别人占的卡算成空闲 —— 那种情况下宁可
+      不给这个数。
 
     `addrs` 服务的是"这条 ACL 规则的目标可不可以是那个地址"
     （`Nft.add_session_rule()`）—— 0.23 之前那是 `cluster_cidr` 的活。
@@ -6825,12 +6894,14 @@ class NodeCatalog(object):
     是集群的事实。
     """
 
-    __slots__ = ("gres", "mem", "addrs")
+    __slots__ = ("gres", "mem", "cpus", "addrs", "overlap")
 
-    def __init__(self, gres=None, mem=None, addrs=None):
+    def __init__(self, gres=None, mem=None, cpus=None, addrs=None, overlap=False):
         self.gres = gres
         self.mem = mem
+        self.cpus = cpus
         self.addrs = addrs
+        self.overlap = overlap
 
 
 class Slurm(object):
@@ -7021,17 +7092,20 @@ class Slurm(object):
           · 节点的 `CfgTRES` / `AllocTRES` 里没有 gres：那要求
             `AccountingStorageTRES` 里列了 `gres/gpu`，本集群没列。
           · `GresUsed=` 这个字段在本版本上不存在（别的版本/别的配置里才有）。
-            "已用"这一格报不出来，就不报。拿 `squeue` 的作业去减是另一件
-            事，而且那个数刚算完就过期了，报一个错的数量比不报更糟。
-            这一条记在 `docs/KNOWN-ISSUES.md` 的〈未实测/取不到〉里。
+            本类仍然不报"已用"：那一格由 `queue_table()` 从 `squeue` 的 `%b`
+            现算（见那里的说明），与这一趟的静态配置分开。
           · `RealMemory=` 的单位是 MB（Slurm 自己的说法），每条节点行都有。
+          · `CPUEfctv=` 是每节点的有效核数（保留核已经扣掉）；`CPUTot=` 是
+            含保留核的总数。分区的 `TotalCPUs` 是各节点之和，不能拿它当
+            单节点的上限。
 
-        内存那一半与 GRES 那一半必须分开累加：这一趟里"没配 GRES 的节点"
-        占绝大多数，而它们照样有内存。从前那条"没有 `Gres=` 就整行跳过"对
-        GRES 是对的，拿它去管内存会让一个分区里绝大多数节点的内存都不算数。
+        内存、CPU 与 GRES 三半必须分开累加：这一趟里"没配 GRES 的节点"
+        占绝大多数，而它们照样有内存与核数。从前那条"没有 `Gres=` 就整行跳过"对
+        GRES 是对的，拿它去管内存会让一个分区里绝大多数节点的内存都不算数；
+        CPU 那一半放在同一个位置，否则只有配了卡的节点才有核数上限。
 
         这个查询很贵（大集群上 `scontrol show node -o` 的输出很大），所以它归
-          `Cluster` 的慢钟，钟只能有一处（见本类的 docstring）。两半都在这一趟
+          `Cluster` 的慢钟，钟只能有一处（见本类的 docstring）。几半都在这一趟
           里取完，不为了多一格再跑一遍。
         """
         rc, out, err = run_cmd([self.cfg.scontrol, "show", "node", "-o"], timeout=10)
@@ -7040,8 +7114,10 @@ class Slurm(object):
             return None
         by_part = {}
         mem = {}
+        cpus = {}
         addrs = set()
         addrs_partial = False
+        overlap = False
         for line in out.splitlines():
             # 地址那一半先收：它与分区无关（不在任何分区里的节点也是一台节点），
             #   所以它排在下面那个 `continue` 之前。
@@ -7060,11 +7136,19 @@ class Slurm(object):
                 continue                      # 不在任何分区里的节点，另两半都用不上
             mm = re.search(r"\bRealMemory=(\d+)", line)
             node_mem = int(mm.group(1)) if mm else None
+            # `CPUEfctv` 是扣掉保留核之后每节点能要到的核数；老版本或某些
+            #   节点上没有这一格时退回 `CPUTot`。两者都认不出就不记这一台。
+            cm = re.search(r"\bCPUEfctv=(\d+)", line) or re.search(r"\bCPUTot=(\d+)", line)
+            node_cpus = int(cm.group(1)) if cm else None
             gm = re.search(r"\bGres=(\S+)", line)
             entries = parse_gres_field(gm.group(1)) if gm else []
-            for pname in pm.group(1).split(","):
-                # 分区名后面的 `*`（默认分区）是别的输出形态里的记号，这里剥掉。
-                pname = pname.strip().rstrip("*")
+            parts = [x.strip().rstrip("*") for x in pm.group(1).split(",")]
+            if len([x for x in parts if x]) > 1:
+                # 一台节点属于两个以上分区：`squeue` 只把作业算在提交的那个
+                #   分区上，而 `total` 把它的卡计进每个分区。GRES 余量在这种
+                #   情况下是不准的（见 __init__ 的 `overlap`）。
+                overlap = True
+            for pname in parts:
                 if not pname:
                     continue
                 # 内存取这一趟里最大的一台：作业要得比它还大就永远排不上，
@@ -7073,6 +7157,11 @@ class Slurm(object):
                 #   整个不进 `mem`，界面据此不画滑块。
                 if node_mem is not None and (pname not in mem or node_mem > mem[pname]):
                     mem[pname] = node_mem
+                # CPU 同理，取有效核数最大的那一台。它必须排在下面那条
+                #   `continue` 之前 —— 没配 GRES 的节点占绝大多数。
+                if node_cpus is not None and (pname not in cpus
+                                              or node_cpus > cpus[pname]):
+                    cpus[pname] = node_cpus
                 if not entries:
                     continue
                 acc = by_part.setdefault(pname, {})
@@ -7095,7 +7184,8 @@ class Slurm(object):
         #   也没有作业，这一格怎么判都没有后果。
         if addrs_partial or not addrs:
             addrs = None
-        return NodeCatalog(gres=gres, mem=mem, addrs=addrs)
+        return NodeCatalog(gres=gres, mem=mem, cpus=cpus, addrs=addrs,
+                           overlap=overlap)
 
     def is_accounting_enforced(self):
         """AccountingStorageEnforce 里是否含 associations，决定 sbatch 必须带 -A。"""
@@ -7170,12 +7260,18 @@ class Slurm(object):
 
     # ── 集群全局的另外三样 ──────────────────────────────────────────────────
     def node_table(self):
-        """`sinfo -N -h -o "%P|%N|%t|%C"` → 每分区节点计数与 CPU 余量
+        """`sinfo -N -h -o "%P|%N|%t|%C|%e"` → 每分区节点计数、CPU 与内存余量
 
         返回 `{分区: {"counts": {base_state: n}, "flags": {后缀: n},
                      "cpus": {"allocated": n, "idle": n, "other": n,
-                              "total": n}}}`；None = 取不到（与 partition_table
-        同一条规矩）。
+                              "total": n},
+                     "mem_free": {"sum": MB, "max": MB}}}`；None = 取不到
+        （与 partition_table 同一条规矩）。
+
+        `mem_free` 是 `%e`（每节点空闲内存，MB）按分区累加出来的：`sum` 是
+          各节点空闲内存的合计，`max` 是其中最多的一台 —— 一条作业只能落在
+          一台节点上，所以后者才是"这条作业此刻最多能要到多少"。一行都没给
+          `%e` 时这个键缺席（= 没问到），不是 0。
 
         `cpus` 是 `%C` 那一格（每节点 `allocated/idle/other/total`）按分区累加
           的结果，`idle` 就是"这个分区现在还剩多少核"。它不是
@@ -7205,10 +7301,16 @@ class Slurm(object):
         #    `PARTITION`、状态叫 `STATE` 的分区，然后原样画进界面，
         #    而它看起来就像一个真的分区。（真集群实测抓到，假桩因为手写的输出
         #    本来就没有表头而一直是绿的，桩比现实干净，缺陷就在用例里隐形。）
-        rc, out, _ = run_cmd([self.cfg.sinfo, "-N", "-h", "-o", "%P|%N|%t|%C"],
+        rc, out, _ = run_cmd([self.cfg.sinfo, "-N", "-h", "-o", "%P|%N|%t|%C|%e"],
                              timeout=10)
         if rc != 0:
-            return None
+            # 旧版 Slurm 不认 `%e`。退回原来的格式再取一次：少的只是空闲内存
+            #   那一格，CPU 与节点计数照旧可用。反过来（整张表判成取不到）会
+            #   让一次版本差异把节点忙闲、排队名次一起抹掉。
+            rc, out, _ = run_cmd([self.cfg.sinfo, "-N", "-h", "-o", "%P|%N|%t|%C"],
+                                 timeout=10)
+            if rc != 0:
+                return None
         if len(out) > CLUSTER_QUERY_MAX_BYTES:
             log.warning("sinfo -N 输出 %d 字节，超过上限 %d，本次按获取失败处理",
                         len(out), CLUSTER_QUERY_MAX_BYTES)
@@ -7250,15 +7352,34 @@ class Slurm(object):
                         cc["idle"] += i
                         cc["other"] += o
                         cc["total"] += t
+            # `%e` 是每节点空闲内存（MB）。与 `%C` 同一条规矩：认不出的那一行
+            #   不加；整个分区一行都没有时 `mem_free` 键缺席。
+            if len(parts) >= 5:
+                try:
+                    free_mb = int(parts[4].strip())
+                except ValueError:
+                    free_mb = None
+                if free_mb is not None:
+                    mf = d.setdefault("mem_free", {"sum": 0, "max": 0})
+                    mf["sum"] += free_mb
+                    mf["max"] = max(mf["max"], free_mb)
         return table
 
     def queue_table(self):
-        """`squeue -h -o "%i|%P|%t|%u"`，一次调用回答所有人的三个问题。
+        """`squeue -h -o "%i|%P|%t|%u|%b"`，一次调用回答所有人的三个问题。
 
         `{"depth": {分区: {"pending": n, "running": m, "other": k}},
           "pending": {分区: [job_id, ...]},     # 顺序就是 Slurm 的排队顺序
           "by_user": {用户名: [job_id, ...]},
+          "gres_used": {分区: [{"name","type","count"}]},
           "at": ts}`；返回 None = 取不到。
+
+        `gres_used` 是"确实占着分配"的作业（`R` / `CG` / `CF` / `S`）请求的
+          GRES 按分区汇总。它由 `Cluster.shared()` 拿去给配置清单里的每一项
+          附 `used` / `free`。`PD` 的作业也带着 `%b`，但那条是"想要"，不是
+          "占着" —— 算进去会把空闲量报少。
+        旧版 Slurm 不认 `%b` 时退回原来那四列，`gres_used` 键缺席（= 取不到），
+          队列深度与排队顺序照旧可用。
 
         队列深度与排队顺序是集群的事实、对所有人一样，所以一次查、
           所有连接共用（`Cluster` 的中钟）。"我排在第几位"由 `Cluster` 从
@@ -7268,9 +7389,15 @@ class Slurm(object):
           这种写法，而 Slurm 自己也是把它当一个作业排的。数成 9 条会让"队列深度"
           在用了数组的集群上直接虚高一个量级，而那个数正是用户在看的那个。
         """
-        rc, out, _ = run_cmd([self.cfg.squeue, "-h", "-o", "%i|%P|%t|%u"], timeout=10)
+        rc, out, _ = run_cmd(
+            [self.cfg.squeue, "-h", "-o", "%i|%P|%t|%u|%b"], timeout=10)
+        has_gres = rc == 0
         if rc != 0:
-            return None
+            # 旧版 Slurm 不认 `%b`：退回原格式，少的只是 GRES 余量。
+            rc, out, _ = run_cmd([self.cfg.squeue, "-h", "-o", "%i|%P|%t|%u"],
+                                 timeout=10)
+            if rc != 0:
+                return None
         if len(out) > CLUSTER_QUERY_MAX_BYTES:
             # 这个常量管的是解析与保留，不是读取：`run_cmd` 已经把输出整个
             #   读进来了（本文件里每一条查询都是如此，`scontrol show node -o`
@@ -7279,6 +7406,9 @@ class Slurm(object):
                         len(out), CLUSTER_QUERY_MAX_BYTES)
             return None
         depth, pending, by_user = {}, {}, {}
+        gres_used = {}
+        # 哪些状态算"确实占着分配"。`PD` 也带着 `%b`，但那是想占、还没占上。
+        holds = ("R", "CG", "CF", "S")
         for line in out.splitlines():
             f = line.split("|")
             if len(f) < 4:
@@ -7289,6 +7419,11 @@ class Slurm(object):
             user = f[3].strip()
             if not jid or not pname:
                 continue
+            if has_gres and len(f) >= 5 and st in holds:
+                for e in parse_job_gres(f[4]):
+                    key = (e["name"], e["type"])
+                    acc = gres_used.setdefault(pname, {})
+                    acc[key] = acc.get(key, 0) + e["count"]
             d = depth.setdefault(pname, {"pending": 0, "running": 0})
             if st == "PD":
                 d["pending"] += 1
@@ -7301,8 +7436,14 @@ class Slurm(object):
                 #   而那是这一整格唯一的用途。
                 d["other"] = d.get("other", 0) + 1
             by_user.setdefault(user, []).append(jid)
-        return {"depth": depth, "pending": pending, "by_user": by_user,
-                "at": now_ts()}
+        out = {"depth": depth, "pending": pending, "by_user": by_user,
+               "at": now_ts()}
+        if has_gres:
+            out["gres_used"] = {
+                p: [{"name": n, "type": t, "count": c}
+                    for (n, t), c in acc.items()]
+                for p, acc in gres_used.items()}
+        return out
 
     def fairshare(self, user):
         """`sshare -u <user> -P -o Account,User,FairShare,RawUsage,EffectvUsage`。
@@ -7644,10 +7785,11 @@ class Cluster(object):
     def _nodes_catalog(self):
         """那一趟 `scontrol show node -o` 的结果（`NodeCatalog` 或 None）。
 
-        取不到时给一个空壳 `NodeCatalog` 而不是 None：两个读者（`gres()` /
-        `node_mem()`）各自要的是自己那一半，而"问不到"在两半上的表现都是
-        `None` —— 让每个读者各自判一次"整个目录是不是 None"是把同一件事
-        写两遍。空壳里两半都是 `None`，正是它们各自要的那种"问不到"。
+        取不到时给一个空壳 `NodeCatalog` 而不是 None：几个读者（`gres()` /
+        `node_mem()` / `node_cpus()`）各自要的是自己那一半，而"问不到"在
+        每一半上的表现都是 `None` —— 让每个读者各自判一次"整个目录是不是
+        None"是把同一件事写几遍。空壳里每一半都是 `None`，正是它们各自要的
+        那种"问不到"。
         """
         cat = self._read_meth("gres", INFO_SLOW_SECONDS, "node_catalog")
         return cat if cat is not None else NodeCatalog()
@@ -7659,9 +7801,25 @@ class Cluster(object):
         """每个分区里内存最大的那种节点有多少 MB；None = 没问到。
 
         与 `gres()` 共用同一格缓存（同一个 `node_catalog` 的返回值），所以它
-        一次 fork 都不多发 —— 两半来自同一条 `scontrol show node -o`。
+        一次 fork 都不多发 —— 几半来自同一条 `scontrol show node -o`。
         """
         return self._nodes_catalog().mem
+
+    def node_cpus(self):
+        """每个分区里有效核数最多的那种节点有多少核；None = 没问到。
+
+        同样共用 `node_catalog` 那一格缓存。`op_partitions` 拿它当
+        `cpus_per_node`，`fit_resources()` 拿它判随机分区装不装得下。
+        """
+        return self._nodes_catalog().cpus
+
+    def node_overlap(self):
+        """有没有一台节点属于两个以上的分区。
+
+        只有 GRES 余量读它：那种情况下 `squeue` 的分区归属与 `total` 的
+        分区累加不是同一件事，`used` / `free` 宁可不给。
+        """
+        return self._nodes_catalog().overlap
 
     def node_addrs(self):
         """Slurm 报的节点地址全集；`None` = 这一趟拿不到一份完整的集合。
@@ -7712,14 +7870,75 @@ class Cluster(object):
                 None if info.get("max_time") is None
                 else fmt_slurm_time(info["max_time"])))
                 for name, info in parts.items()}
+        # 队列那一份里带着内部的 `gres_used`（给 `_gres_with_usage()` 用）；
+        #   协议里的 `queue` 不长这一格，返回前浅拷贝一份把它去掉。
+        q = self.queue()
+        used = None
+        if q is not None:
+            used = q.get("gres_used")
+            q = {k: v for k, v in q.items() if k != "gres_used"}
         return {"health": self.health(),
                 "version": self.slurm_version(),
                 "partitions": parts,
-                "gres": self.gres(),
+                "gres": self._gres_with_usage(self.gres(), used,
+                                               self.node_overlap()),
                 "mem": self.node_mem(),
                 "nodes": self.nodes(),
-                "queue": self.queue(),
+                "queue": q,
                 "taken": {k: v for k, v in self._taken.items() if ":" not in k}}
+
+    def _gres_with_usage(self, gres, used, overlap):
+        """给 GRES 清单的每一项附 `used` / `free`；取不到就两格都不给。
+
+        `used` 来自 `queue_table()` 的 `%b`（只在占着分配的作业上计）。
+        `None` = 队列那一趟取不到（或旧版 Slurm 不认 `%b`）→ 两格都不给。
+        节点跨分区（`overlap`）时也不给：`total` 把一台节点的卡计进它所在的
+        每个分区，而 `squeue` 只算在提交的那个分区上，减出来的"空闲"是假的。
+        同一分区里同名多种型号、而作业没写型号时也判不了归属 —— 这种名字的
+        每一项都不给，不猜。
+
+        返回的必须是【新的】dict 与新的项：`self.gres()` 返回的是缓存里的
+        同一个对象，原地写会让 `op_partitions` 也长出这两格，而那边的形状是
+        协议与用例钉死的。
+        """
+        if gres is None:
+            return None
+        if used is None or overlap:
+            return {p: [dict(e) for e in entries] for p, entries in gres.items()}
+        out = {}
+        for pname, entries in gres.items():
+            pu = used.get(pname) or []
+            by_name = {}
+            for u in pu:
+                by_name.setdefault(u["name"], []).append(u)
+            rows = []
+            for e in entries:
+                row = dict(e)
+                same_name = [x for x in entries if x["name"] == e["name"]]
+                cand = by_name.get(e["name"], [])
+                untyped = [u for u in cand if not u.get("type")]
+                known_types = {x.get("type") for x in same_name}
+                ambiguous = False
+                if untyped and len(same_name) > 1:
+                    # 同名多型号、作业没写型号：不知道是哪一种。
+                    ambiguous = True
+                if any(u.get("type") and u["type"] not in known_types
+                       for u in cand):
+                    # 作业用了这个分区没有的型号：数据对不上，不猜。
+                    ambiguous = True
+                if ambiguous:
+                    rows.append(row)
+                    continue
+                u = sum(x["count"] for x in cand
+                        if x.get("type") and x["type"] == e.get("type"))
+                if len(same_name) == 1:
+                    u += sum(x["count"] for x in untyped)
+                total = int(e.get("total") or 0)
+                row["used"] = u
+                row["free"] = max(0, total - u)
+                rows.append(row)
+            out[pname] = rows
+        return out
 
     def for_user(self, user):
         """这个用户自己那一份。共享的东西不在这里（它们在 `shared()` 里）。"""
@@ -7986,6 +8205,12 @@ class Sessiond(object):
         self._plugin_cache = {}
         self.startup_at = now_ts()
         self.config_loaded_at = self.startup_at
+        # 最近一次对账完成/失败的样子。`op_doctor` 把这两格报给界面：一条会话
+        #   一直停在 `submitted` 时，"tick 还在不在跑"与"最近一次 tick 是不是
+        #   抛了异常"是两个必须分开的事实，而它们从前只写在守护进程的日志里
+        #   （2026-10-19 真机：用户看不到那份日志）。
+        self.last_tick_at = None
+        self.last_tick_error = None
         # 每一次重载的结果。`seq` 而不是时刻：CLI 靠"它前进了没有"判断这次
         #   重载落没落地，而秒级时刻在同一秒内的两次重载分不开。
         #   启动那次也算一次载入（ok=true），于是第一次 `reload` 有一个基线。
@@ -8221,7 +8446,13 @@ class Sessiond(object):
     def _run_tick(self):
         try:
             self.tick()
-        except Exception:                                    # noqa: BLE001
+            self.last_tick_at = time.time()
+            self.last_tick_error = None
+        except Exception as e:                               # noqa: BLE001
+            # 把最后那次异常的形状留下来给 `op_doctor`：一个每 tick 都抛的
+            #   异常会让所有阶段停止推进，而界面上只是"一直排队"。日志里那一条
+            #   用户看不到（他不是 root）。
+            self.last_tick_error = "%s: %s" % (type(e).__name__, e)
             log.exception("tick 异常（已捕获，守护进程继续）")
 
     def handle_events(self, events):
@@ -8803,6 +9034,8 @@ class Sessiond(object):
           （见那两个常量的注解，以及账本 F27）。
         """
         now = now_ts()
+        # 从提交到现在多久。两个分支都要用它判"过了正常的等待窗口没有"。
+        waited = now - (s["submitted_at"] or s["created_at"])
         info, why = self.load_session_file(s["uid"], s["job_id"])
         # `starting` 是作业刚起来、服务还没开始监听时写下的那一份（见 run.sbatch
         #   的 `write_session "starting"`）。它不是"校验没过"，而是"还没到"：
@@ -8812,7 +9045,6 @@ class Sessiond(object):
         if info is not None and str(info.get("state") or "") == "starting":
             info, why = None, "starting"
         if info is None:
-            waited = now - (s["submitted_at"] or s["created_at"])
             # 作业在跑、而登记没有在进行。这句话从前要等到 `enroll_ttl` 才有：
             #   用户界面上是「排队中」，作业却在正常运行、日志照常输出，而唯一
             #   的线索要等半小时（2026-10-19 真机，100% 复现）。过了正常的
@@ -8846,6 +9078,13 @@ class Sessiond(object):
                                               s["job_id"], s.get("service_plugin"))
         if not ok:
             log.error("会话 %s 装 ACL 失败: %s（下个 tick 重试）", s["session_id"], detail)
+            # 文件读得出来、校验也过了，卡在装规则这一步：与文件读不出来同一个
+            #   症状（作业在跑、界面一直「排队中」），所以走同一格。没有这一格
+            #   的话，这条路上唯一的线索只写在守护进程的日志里，而用户看不到
+            #   那份日志（2026-10-19 真机第二次复现）。
+            if waited >= ENROLL_PROBLEM_GRACE:
+                self.enroll_problem[s["session_id"]] = "acl_failed: %s" % detail
+                self.note_enroll_acl_failed(s, detail)
             return
 
         self.store.update(
@@ -8887,6 +9126,30 @@ class Sessiond(object):
         self.enroll_file_missing[sid] = (first_seen, now)
         log.warning("会话 %s（job=%s）的会话文件仍然读取失败（%s），已持续 %d 秒；"
                     "作业仍在运行。", sid, s["job_id"], why, now - first_seen)
+
+    def note_enroll_acl_failed(self, s, detail):
+        """作业在跑、登记卡在装 ACL 规则：首报立刻说，之后按同一个间隔节流。
+
+        与 `note_enroll_unreadable` 共用那张表与那个间隔：两者说的是同一件事
+          （"这条会话登记不上"），只是卡在哪一步。分开两套节流的话，两种原因
+          交替出现时会各说一遍，而用户要的是"现在卡在哪"。
+        """
+        sid = s["session_id"]
+        now = now_ts()
+        seen = self.enroll_file_missing.get(sid)
+        if seen is None:
+            self.enroll_file_missing[sid] = (now, now)
+            log.warning("会话 %s（job=%s）装 ACL 规则失败（%s）：作业已经在运行，"
+                        "而登记没有进行。", sid, s["job_id"], detail)
+            self.audit("enroll_acl_failed", session=sid, job=s["job_id"],
+                       detail=detail, seconds=0)
+            return
+        first_seen, last_said = seen
+        if now - last_said < self.cfg.enroll_file_warn_seconds:
+            return
+        self.enroll_file_missing[sid] = (first_seen, now)
+        log.warning("会话 %s（job=%s）的 ACL 规则仍然安装失败（%s），已持续 %d 秒；"
+                    "作业仍在运行。", sid, s["job_id"], detail, now - first_seen)
 
     def refresh_enrollment(self, s, job):
         """已登记的会话：作业重启/重排后可能换节点或端口，要跟着更新 ACL。"""
@@ -10313,6 +10576,7 @@ class Sessiond(object):
         unknown = (allowed is PARTITIONS_UNKNOWN)
         catalog = self.cluster.gres()
         mem = self.cluster.node_mem()
+        cpus = self.cluster.node_cpus()
         out = []
         # 默认分区排在最前（界面按顺序渲染），其余按名字排，顺序稳定，
         # 用户才不会觉得"上次那个分区这次找不到了"。
@@ -10344,6 +10608,11 @@ class Sessiond(object):
             #   界面不解释原因，它只是不画 —— 而这一格缺席时那个输入框照旧在。
             if mem is not None and name in mem:
                 d["mem_per_node_mb"] = mem[name]
+            # 这个分区里一台节点最多能要到几核（有效核数，保留核已扣掉）。
+            #   与 `mem_per_node_mb` 同一条三态：键不存在 = 没问到，界面据此
+            #   退回一个保守的退路；不是 0（0 的意思是"这台集群没有核"）。
+            if cpus is not None and name in cpus:
+                d["cpus_per_node"] = cpus[name]
             if not ok:
                 d["reason"] = "你的账号没有 %s 分区的权限" % name
             if unknown:
@@ -10558,8 +10827,21 @@ class Sessiond(object):
         out["rules_readable"] = rules is not None
         out["rules_count"] = len(rules) if rules else 0
         out["active_sessions"] = len(self.store.by_state(ACL_STATES))
+        # "已提交、还没有登记上"的那一段。它与 `active_sessions` 分开报：
+        #   那一格只数装上了 ACL 的会话，于是一条卡在 `submitted` 的会话会让
+        #   体检显示"0 个活跃会话、一切正常"，而用户眼前正卡着一条
+        #   （2026-10-19 真机）。有它，界面上"排队中"与"体检说 0"就不再矛盾。
+        out["pending_sessions"] = len(self.store.by_state(
+            (ST_RESERVED, ST_SUBMITTED)))
         out["consistent"] = (rules is not None
                              and out["rules_count"] == out["active_sessions"])
+        # 这一份是哪一版、tick 还在不在跑。版本那一格是给"装上了没有"一个
+        #   当场可看的答案：两端版本对不上时，很多现象只是"旧的那一份还在跑"。
+        out["version"] = VERSION
+        out["last_tick_at"] = self.last_tick_at
+        out["tick_age_seconds"] = (None if self.last_tick_at is None
+                                   else int(time.time() - self.last_tick_at))
+        out["last_tick_error"] = self.last_tick_error
         out["port_range"] = [self.cfg.port_start, self.cfg.port_end]
         # 非侵入式体检：现有三件套是否还在
         # 用与 Nft 相同的路径解析，不要硬编码 /sbin/nft，
@@ -10886,6 +11168,32 @@ class Sessiond(object):
                           % (where, gres_label(g), cap, g["count"]))
         return g, None
 
+    def fit_resources(self, cpus, mem, partition):
+        """这个分区的单节点装不装得下 `cpus` / `mem`。返回 `(ok, 说明)`。
+
+        只用于"分区由我们随机挑"那一段：装着装不下的请求挑过去，作业会在
+        sbatch 那一刻被 Slurm 拒，而用户明明没有指定分区、没有任何办法绕开。
+        上限取每节点有效核数与每节点最大内存，不取 `partition_table()` 的
+        `TotalCPUs`（那是分区总和）。
+
+        整份目录取不到时不判；目录到了而这个分区缺那一格时也不判
+          （逐分区 fail-open）。报错等于一次 `scontrol` 抖动让所有提交失败，
+          而权威本来就在 Slurm 那一侧。
+        """
+        cpus_cat = self.cluster.node_cpus()
+        mem_cat = self.cluster.node_mem()
+        if cpus_cat is not None and partition in cpus_cat:
+            cap = cpus_cat[partition]
+            if cpus > cap:
+                return False, ("分区 %s 每节点最多 %d 核，你要了 %d 核"
+                               % (partition, cap, cpus))
+        if mem_cat is not None and partition in mem_cat:
+            mb = session_mem_mb(mem)
+            if mb is not None and mb > mem_cat[partition]:
+                return False, ("分区 %s 每节点最多 %d MB 内存，你要了 %s"
+                               % (partition, mem_cat[partition], mem))
+        return True, None
+
     def op_submit(self, uid, req, client_id=None):
         """`client_id` = 提交这条连接的身份（没报就是 None，见 dispatch）。"""
         cfg = self.cfg
@@ -11114,6 +11422,17 @@ class Sessiond(object):
                                      "有权限的分区里没有一个能给你 %s（%s）"
                                      % (gres_label(gres), why))
                 usable = fit
+            # 再按 cpus / mem 过滤：装不下的分区不该被挑中。界面上那三条
+            #   滑块的顶是"各分区里的最大值"，所以一个"最大核数 + 最大内存"
+            #   的组合本身可能跨分区 —— 那种请求确实可能一个分区都装不下，
+            #   这里如实拒绝，而不是让它排到一台永远装不下的节点上。
+            fit_r = [n for n in usable if self.fit_resources(cpus, mem, n)[0]]
+            if not fit_r:
+                why = self.fit_resources(cpus, mem, sorted(usable)[0])[1] or ""
+                return self._err(2, "bad_resources",
+                                 "有权限的分区里没有一个能给你 %d 核 / %s（%s）"
+                                 % (cpus, mem, why))
+            usable = fit_r
             # 随机挑，不按顺序挑第一个，顺序挑会让所有默认会话落到同一个分区，
             # 而用户明确要的是分散。代价是他事先不知道会落到哪种卡上，所以
             # session_view 必须把【实际落到的】分区返回给界面显示。

@@ -60,7 +60,8 @@ test('共享的那几格与「自己那一份」分在两处（分开的不只�
   const b = fresh();
   try {
     const d = (await b.rpc({ op: 'cluster' })).data;
-    for (const k of ['at', 'health', 'version', 'partitions', 'gres', 'nodes', 'queue', 'taken', 'me']) {
+    for (const k of ['at', 'health', 'version', 'partitions', 'gres', 'mem',
+      'nodes', 'queue', 'taken', 'me']) {
       assert.ok(k in d, `缺了 ${k}：${JSON.stringify(Object.keys(d))}`);
     }
     for (const k of ['account', 'allowed_partitions', 'fairshare', 'pending_count', 'first_in']) {
@@ -78,7 +79,8 @@ test('「获取失败」能立刻造出来，而且它是缺席、不是「没�
   try {
     b.debugClusterMissing();
     const d = (await b.rpc({ op: 'cluster' })).data;
-    for (const k of ['health', 'version', 'partitions', 'gres', 'nodes', 'queue']) {
+    for (const k of ['health', 'version', 'partitions', 'gres', 'mem',
+      'nodes', 'queue']) {
       assert.equal(k in d, false, `${k} 应当缺席：${JSON.stringify(d[k])}`);
     }
     // 而 `me` 那一块照常在：一格获取失败不该让整屏都空掉。
@@ -117,6 +119,36 @@ test('节点表故意比真集群脏：带后缀的那两个只在测试后端�
         assert.ok(!/[*~#!%@^+-]$/.test(st), `counts 里出现了没剥干净的状态：${st}`);
       }
     }
+  } finally {
+    await b.close();
+  }
+});
+
+test('集群那一份带每节点核数、内存余量与 GRES 余量；分区清单不带 used/free', async () => {
+  // 0.30 起浮窗要报余量。假后端必须与真守护进程同形，否则"界面上画得出来"
+  //   与"真站点上有这一格"是两件事。
+  const b = fresh();
+  try {
+    const d = (await b.rpc({ op: 'cluster' })).data;
+    assert.equal(d.nodes.A6000.cpus.total, 78,
+      `节点表里要有 %C 累加：${JSON.stringify(d.nodes.A6000)}`);
+    assert.deepEqual(d.nodes.A6000.mem_free, { sum: 120000, max: 70000 },
+      '内存余量：合计与单节点最多');
+    assert.equal(d.gres.A6000[0].used, 2, 'GRES 已用');
+    assert.equal(d.gres.A6000[0].free, 6, 'GRES 空闲 = 总数 - 已用');
+
+    // `op_partitions` 那一份是 `NodeCatalog.gres` 的原样投影：不能长出
+    //   `used` / `free`（真守护进程那里是复制之后才附上去的）。
+    const pv = await b.rpc({ op: 'partitions' });
+    assert.equal(pv.ok, true, JSON.stringify(pv).slice(0, 200));
+    const a6 = pv.data.partitions.find((x) => x.name === 'A6000');
+    assert.equal(a6.cpus_per_node, 78, '分区清单要带每节点核数');
+    assert.equal('used' in a6.gres[0], false, '分区清单的 GRES 不带 used');
+    assert.equal('free' in a6.gres[0], false, '分区清单的 GRES 不带 free');
+    // `DEBUG` 没有内存与核数：那两格缺席 = 没问到，不是 0。
+    const dbg = pv.data.partitions.find((x) => x.name === 'DEBUG');
+    assert.equal('cpus_per_node' in dbg, false, 'DEBUG 不该有 cpus_per_node');
+    assert.equal('mem_per_node_mb' in dbg, false, 'DEBUG 不该有 mem_per_node_mb');
   } finally {
     await b.close();
   }

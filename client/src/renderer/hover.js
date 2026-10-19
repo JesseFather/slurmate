@@ -322,10 +322,16 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
     : '（这一格没有数据）';
   row.append(cel('div', 'dim', `CPU　${cs}`));
 
-  // 内存是容量不是余量：Slurm 没有一份可靠的"空闲内存"（没写 mem 的作业不
-  //   计入已分配），推一个数出来比不报更糟。所以只报每节点的上限。
+  // 内存：容量那一格来自 `RealMemory=`，余量来自 `sinfo %e`（每节点空闲内存）。
+  //   两个都报：合计看这个分区还空多少，单节点最多看一条作业此刻最多能要到
+  //   多少 —— 一条作业只落在一台节点上。余量那一格缺席（旧版 Slurm 或
+  //   查询失败）时只报容量，不把"没问到"画成 0。
   const mb = mem && mem[name];
-  const ms = typeof mb === 'number' ? `每节点最多 ${mbText(mb)}` : '（这一格没有数据）';
+  const mf = nodes && nodes[name] && nodes[name].mem_free;
+  const free = (mf && typeof mf.sum === 'number' && typeof mf.max === 'number')
+    ? `　空闲合计 ${mbText(mf.sum)}（单节点最多 ${mbText(mf.max)}）` : '';
+  const ms = typeof mb === 'number' ? `每节点最多 ${mbText(mb)}${free}`
+    : '（这一格没有数据）';
   row.append(cel('div', 'dim', `内存　${ms}`));
 
   const q = queue && queue.depth && queue.depth[name];
@@ -340,7 +346,11 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
   const gs = !gres ? '获取失败'
     : (g === undefined ? '（不在 GRES 清单里）'
       : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`
-        + (typeof e.total === 'number' ? `，共 ${e.total}` : '')).join('，')
+        + (typeof e.total === 'number' ? `，共 ${e.total}` : '')
+        // 余量来自 `squeue %b`（正在占着分配的作业）。缺席 = 取不到
+        //   （旧版 Slurm、队列查询失败、或分区之间节点重叠）—— 不写，
+        //   也不说"空着"。
+        + (typeof e.free === 'number' ? `，空闲 ${e.free}` : '')).join('，')
         : '确实一张都没有'));
   row.append(cel('div', 'dim', `GRES　${gs}`));
   return row;

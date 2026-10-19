@@ -265,6 +265,15 @@ let siteSync = null;
 let versionVerdict = null;
 
 /**
+ * 握手时报上来的守护进程版本（`applyVersionGate` 填）。
+ *
+ * 给「检查集群」那一颗用：站点那一侧装的到底是哪一版，是排查"新包装上了没有"
+ *   的第一个问题，而体检的其余几格都答不了它。老守护进程不在 `doctor` 的
+ *   回包里报 `version`，那一格就由这里补上（握手时问到的版本仍然是真的）。
+ */
+let connectedDaemonVersion = null;
+
+/**
  * 待同意的那些（暂存树还在磁盘上，等用户点）。
  *
  * 换连接、断开、重新对账都会把它清掉 —— 它描述的是这一次连接的现场。
@@ -669,6 +678,8 @@ async function applyVersionGate(res) {
   const theirs = JSON.stringify(res.daemonVersion);
   // 记下来给界面用（`site_too_new` 那一句要拿它说准，见 panel.js）。
   versionVerdict = g.verdict;
+  connectedDaemonVersion = typeof res.daemonVersion === 'string'
+    ? res.daemonVersion : null;
 
   if (g.blocked) {
     // 先把连接关掉：绝不留一条"连上了、但不许用"的连接在那儿占着守护进程的
@@ -3880,6 +3891,7 @@ async function teardownConnection() {
   pendingConsent = [];
   siteSync = null;
   versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
+  connectedDaemonVersion = null;
 }
 
 /**
@@ -5521,6 +5533,13 @@ function registerIpc() {
 
   send('app:doctor', async () => {
     const resp = await backend.rpc({ op: 'doctor' });
+    // 老守护进程的回包里没有 `version`：用握手时问到的那个号补上。体检要回答
+    //   的第一个问题就是"站点上跑的是哪一版"，而那一格在三处都答得上来时不该
+    //   只因为守护进程旧就空着。
+    if (resp && resp.ok && resp.data && resp.data.version === undefined
+        && connectedDaemonVersion) {
+      resp.data.version = connectedDaemonVersion;
+    }
     return resp;
   });
 

@@ -623,6 +623,11 @@ function renderSnapshot(s) {
       // 作业在跑、而站点那边登记没有在进行：这句话是用户唯一看得见的原因
       //   （守护进程日志里那一行要等它读到日志才会被看见）。
       if (s.enrollProblem) bits.push(`站点还没有完成登记：${s.enrollProblem}`);
+      // 作业已经在跑、而站点还没有登记上：这一句不靠守护进程报原因。
+      //   原因那一格是 0.29 才有的，老站点不发；而"作业在跑、站点没登记"
+      //   这件事两边都答得上来（作业状态由站点给）。少了这一句，状态条只写
+      //   「作业 8298 运行中」，读起来像一切正常 —— 而用户正卡在这里。
+      else if (s.jobState === 'RUNNING') bits.push('站点还没有完成登记');
       detail = bits.filter(Boolean).join(' · ');
     } else if (st === 'error') {
       detail = s.error || '';
@@ -3216,29 +3221,35 @@ let partList = [];
 let advCells = [];
 
 /**
- * 界面上「CPU 核数」那一格的上限。
+ * 「CPU 核数」那一格在站点没报 `cpus_per_node` 时的退路。
  *
- * 它必须与守护进程的 `MAX_CPUS_REQUEST`（以及假后端里那道钳制）相等。
- *   两处不一致的漂法是静默的，而且方向很难看：界面若比服务端松，用户填的数
- *   被服务端悄悄钳掉；界面若比服务端紧，用户被界面拦住，而服务端那道闸从此
- *   再也没有人走到过。
- * 渲染层在隔离的上下文里跑（`contextIsolation`），读不到主进程的常量，所以这里
- *   只能再写一遍 —— 与协议里那几个上限同一个处境。三个数由 `test/limits.test.mjs`
- *   交叉盯着（改一处漏另一处 = 当场红）。
+ * 真正的上限来自分区（`op_partitions` 的 `cpus_per_node`）：各分区的节点核数
+ *   不一样，写死一个数总会在某一边错 —— 写小了把合法请求拦住，写大了让用户
+ *   填一个那台节点给不出的数。这个常量只在旧站点或查询失败时兜底。
+ * 它必须不超过守护进程的 `MAX_CPUS_REQUEST`（那道绝对护栏），由
+ *   `test/limits.test.mjs` 盯着。
  */
 const UI_MAX_CPUS = 64;
 
+/** 一个整数写法 → 整数；认不出给 `null`。 */
+function intOf(s) {
+  const n = Number(String(s).trim());
+  return Number.isInteger(n) ? n : null;
+}
+
 /**
- * CPU 那一格的档位。
+ * CPU 那一格的档位：从 1 到 `ceil`。
  *
- * 用户点名的形状：1、2、4、8、12、16、20、24，之后每 4 一档，顶到 `UI_MAX_CPUS`。
+ * 用户点名的形状：1、2、4、8、12、16、20、24，之后每 4 一档，最后是顶本身。
  *   它不是一条连续的尺子 —— 核数是按"能开几个进程"要的，中间那些数没有人要。
- * 站点那份默认值不在表上时由调用方插进去（见 `pluginAdv` 里那一段）：滑块停不到
+ * 顶本身必须进表：78 核的节点只到 76 的话，这个分区能要到的最大值就选不到。
+ * 站点那份默认值不在表上时由调用方插进去（见 `applyCpuRange`）：滑块停不到
  *   那个数上的话，问题就不是"档位合不合理"，而是"站点说的默认它指不出来"。
  */
-function cpuLadder() {
-  const out = [1, 2, 4, 8, 12, 16, 20, 24];
-  for (let n = 28; n <= UI_MAX_CPUS; n += 4) out.push(n);
+function cpuLadder(ceil) {
+  const out = [1, 2, 4, 8, 12, 16, 20, 24].filter((n) => n <= ceil);
+  for (let n = 28; n <= ceil; n += 4) out.push(n);
+  if (out[out.length - 1] !== ceil) out.push(ceil);
   return out;
 }
 
@@ -3263,20 +3274,54 @@ function memGbOf(s) {
 }
 
 /**
- * 那个分区里内存最大的节点有多少整 GB；`null` = 这一格没有可用的上限。
+ * 这一格的核数上限：指定分区用它自己的，随机时取有权限分区里的最大值。
+ *
+ * 随机取最大值而不是最小值：用户说的是"随便挑一个分区"，挑中的那个由服务端
+ *   从装得下这个请求的分区里选（`fit_resources()`），所以最大值要得到。
+ * 只算 `allowed` 的分区：无权限的永远不会被挑中。
+ * `null` = 这一格没有可用的上限（旧站点、或者查询失败），调用方退回
+ *   `UI_MAX_CPUS`。
+ */
+function cpuCeilingFor(partName) {
+  if (partName) {
+    const p = partList.find((x) => x.name === partName);
+    const n = p && p.cpus_per_node;
+    return (Number.isInteger(n) && n >= 1) ? n : null;
+  }
+  let best = null;
+  for (const p of partList) {
+    if (!p.allowed || !Number.isInteger(p.cpus_per_node) || p.cpus_per_node < 1) {
+      continue;
+    }
+    best = best === null ? p.cpus_per_node : Math.max(best, p.cpus_per_node);
+  }
+  return best;
+}
+
+/**
+ * 这一格的内存上限（整 GB）；`null` = 这一格没有可用的上限。
  *
  * 向下取整：节点报 191000 MB（186.5 GB）时顶就是 186 —— 一个整数滑块要不到那半
  *   个 GB，而报 187 是一个这台机器上不存在的数。
- * 没挑分区时给 `null`：上限是分区自己的事实。取所有分区里最大的那个数会让滑块停在
- *   一个这一趟作业永远要不到的数上（服务端对内存只校验写法，不拦），而取最小的
- *   又与"随便挑一个分区"这句话对不上。挑了一个分区，这两个问题都不存在。
+ * 没挑分区时取有权限分区里的最大值：理由与 `cpuCeilingFor` 同一条 ——
+ *   服务端只从装得下这个请求的分区里挑。
  */
 function memCeilingGb(partName) {
-  if (!partName) return null;
-  const p = partList.find((x) => x.name === partName);
-  const mb = p && p.mem_per_node_mb;
-  if (!Number.isInteger(mb) || mb < 1024) return null;
-  return Math.floor(mb / 1024);
+  if (partName) {
+    const p = partList.find((x) => x.name === partName);
+    const mb = p && p.mem_per_node_mb;
+    if (!Number.isInteger(mb) || mb < 1024) return null;
+    return Math.floor(mb / 1024);
+  }
+  let best = null;
+  for (const p of partList) {
+    if (!p.allowed) continue;
+    const mb = p.mem_per_node_mb;
+    if (!Number.isInteger(mb) || mb < 1024) continue;
+    const gb = Math.floor(mb / 1024);
+    best = best === null ? gb : Math.max(best, gb);
+  }
+  return best;
 }
 
 /**
@@ -3318,7 +3363,11 @@ function attachRange(cell, ctrl, values, dflt, fmt, parse) {
   const show = (i) => { val.textContent = fmt(values[i]); };
   // 初始位置：这一格里已经有字（用户填过、或者上一个分区留下的）就跟着它，
   //   一个字都没有才停在站点那份默认上。
-  const cur = at(parse(ctrl.value));
+  // 那个字若已经不在新档位上（换了分区、上限变小），先清掉：只挪滑块位置
+  //   而不清控件的话，界面显示默认值、提交却带着那个看不见的旧数。
+  const parsed = parse(ctrl.value);
+  const cur = at(parsed);
+  if (cur < 0 && ctrl.value.trim() !== '') ctrl.value = '';
   r.value = String(cur >= 0 ? cur : i0);
   show(Number(r.value));
   r.oninput = () => {
@@ -3375,6 +3424,35 @@ function dropRange(st, key, cell, ctrl) {
  *   · 站点那份默认不是整 GB，或者比顶还大（换分区时会遇到）→ 不画。
  * 两种情况下那个输入框照旧在，`512M` 这种写法照旧写得进去。
  */
+/**
+ * CPU 那一格的滑块：顶 = 当前分区的每节点核数；随机分区取各分区的最大值。
+ *
+ * 每次重判：换分区、分区表刷新都要走它。站点那份默认不在档位上时插进去；
+ *   默认比顶还大（站点默认是给另一种节点的）时不画，输入框留着。
+ */
+function applyCpuRange(st) {
+  const ceil = cpuCeilingFor(st.part.value);
+  const top = ceil === null ? UI_MAX_CPUS : ceil;
+  st.cpus.max = String(top);
+  const def = st.cpusDef;
+  const ok = def !== null && def >= 1 && def <= top;
+  if (!ok) {
+    dropRange(st, 'cpusRange', st.cpusCell, st.cpus);
+    st.cpusRangeTop = null;
+    return;
+  }
+  if (st.cpusRange && st.cpusRangeTop === top) return;
+  dropRange(st, 'cpusRange', st.cpusCell, st.cpus);
+  const values = cpuLadder(top);
+  if (values.indexOf(def) < 0) {
+    values.push(def);
+    values.sort((a, b) => a - b);
+  }
+  st.cpusRange = attachRange(st.cpusCell, st.cpus, values, def,
+    (v) => String(v), intOf);
+  st.cpusRangeTop = top;
+}
+
 function applyMemRange(st) {
   const ceil = memCeilingGb(st.part.value);
   const def = st.memDefGb;
@@ -3389,29 +3467,41 @@ function applyMemRange(st) {
 }
 
 /**
- * 数量那一格的滑块：只在下面那个下拉点名了某一张卡之后才有意义。
+ * 数量那一格的滑块：只要下面那个下拉点名了某一张卡就画。
  *
- * 它停在那个插件配的默认卡上，且只有当下拉选中的正是那张卡时才有得停 ——
- *   换了另一张卡就没有"默认几个"这回事了，那时不画（替它补一个数就是替站点
- *   定政策）。上限跟着 `applyGresMaxFor` 算出来的那一格走。
+ * 初值：插件默认卡的"默认几个"只属于它点名的那张卡 —— 选中的正是那张时停在
+ *   那个数上；换了另一张卡就没有默认值（替它沿用别处的默认等于替站点定政策），
+ *   停在 1。这一格本来就是必填，所以初值要写进控件：不写的话，用户点了卡、
+ *   不拖滑块直接按「开始会话」会被 `startWith` 拦下。
+ * 上限跟着 `applyGresMaxFor` 算出来的那一格走（`per_node_max`）。
  */
 function applyCountRange(st) {
   dropRange(st, 'gresNRange', st.gresNCell, st.gresN);
   const v = st.gres.value;
   const e = (v === '' || v === 'none') ? null : st.curGres[Number(v)];
-  const d = st.gresNDef;
-  if (!e || !d || d.name !== e.name || (d.type || null) !== (e.type || null)) return;
+  if (!e) return;
   // 上限就是那一格数字框的上限（`per_node_max`），不另设一个 —— 两处不一样的
   //   话，滑块能拖到的数与手能填的数就不是同一件东西。
   const max = e.per_node_max;
-  if (!Number.isInteger(max) || max < 1 || d.count < 1 || d.count > max) return;
+  if (!Number.isInteger(max) || max < 1) return;
+  // 初值：插件默认卡同名同型号、且数量落在上限内就用它，否则 1。
+  //   点了卡却找不到"默认几个"时停 1，而不是不画 —— 这一格本来就是必填。
+  const d = st.gresNDef;
+  let init = 1;
+  if (d && d.name === e.name && (d.type || null) === (e.type || null)
+      && Number.isInteger(d.count) && d.count >= 1 && d.count <= max) {
+    init = d.count;
+  }
   const values = [];
   for (let n = 1; n <= max; n++) values.push(n);
-  st.gresNRange = attachRange(st.gresNCell, st.gresN, values, d.count,
+  st.gresNRange = attachRange(st.gresNCell, st.gresN, values, init,
     (n) => String(n), (s) => {
       const n = Number(String(s).trim());
       return Number.isInteger(n) ? n : null;
     });
+  // 这一格是"必填"：挂上滑块就把初值写进控件。不写的话，用户点了卡、
+  //   不拖滑块直接按「开始会话」，会被 `startWith` 那句"选了 GRES 就要填数量"拦下。
+  if (!st.gresN.value.trim()) st.gresN.value = String(init);
 }
 
 /**
@@ -3488,7 +3578,7 @@ function pluginAdv(defaults) {
   st.cpus = document.createElement('input');
   st.cpus.type = 'number';
   st.cpus.min = '1';
-  st.cpus.max = String(UI_MAX_CPUS);
+  // 上限由 `applyCpuRange` 按当前分区设；这里不写死一个数。
   st.cpus.placeholder = '留空即默认';
   const cellCpus = field('CPU 核数', st.cpus);
   row.append(cellCpus);
@@ -3525,20 +3615,10 @@ function pluginAdv(defaults) {
 
   // ── 三条滑块 ──
   //
-  // 站点那份默认不在档位上时把它插进档位表：不插的话滑块只能停在最近的一档上，
-  //   而那一档不是站点说的默认值（CPU 那一格会走到这里：管理员把默认设成 6 核
-  //   完全合理，而 6 不在 1/2/4/8 那张表上）。
-  const ladder = cpuLadder();
-  const dCpus = (def && Number.isInteger(def.cpus)) ? def.cpus : null;
-  if (dCpus !== null && dCpus >= 1 && dCpus <= UI_MAX_CPUS && ladder.indexOf(dCpus) < 0) {
-    ladder.push(dCpus);
-    ladder.sort((a, b) => a - b);
-  }
-  const intOf = (s) => {
-    const n = Number(String(s).trim());
-    return Number.isInteger(n) ? n : null;
-  };
-  st.cpusRange = attachRange(cellCpus, st.cpus, ladder, dCpus, (v) => String(v), intOf);
+  // CPU 那一条的顶随分区变，整条由 `applyCpuRange` 判（换分区、分区表刷新都走它）。
+  st.cpusDef = (def && Number.isInteger(def.cpus)) ? def.cpus : null;
+  st.cpusCell = cellCpus;
+  applyCpuRange(st);
 
   // 内存那一格：默认那一半在这里定（是不是整 GB），上限那一半随分区变，
   //   所以整条由 `applyMemRange` 判、这里只把格子和默认值记下来。
@@ -3727,7 +3807,8 @@ function renderGresFor(st) {
   sel.onchange = () => applyGresMaxFor(st);
   applyGresMaxFor(st);
   // 上限那一半跟着分区走，所以换分区（`fillPartSelect` 那条路）与换 GRES 都要
-  //   重判一次内存那一格的滑块。放在这里，别处不再各调一次。
+  //   重判一次 CPU 与内存那两格的滑块。放在这里，别处不再各调一次。
+  applyCpuRange(st);
   applyMemRange(st);
 }
 
@@ -4148,8 +4229,23 @@ function bindEvents() {
     if (!d.consistent) bad.push(`规则数(${d.rules_count})与会话数(${d.active_sessions})不一致`);
     if (!(d.existing && d.existing.codeserver_table)) bad.push('现有的 inet codeserver 表不见了');
     if (!(d.existing && d.existing.portdaemon_table)) bad.push('现有的 port-daemon 表不见了');
+    // 对账那一轮抛了异常：所有阶段从那一步起都不再推进，而界面上只表现为
+    //   「排队中」。它比"规则数对不上"更靠前，所以先报它。
+    if (d.last_tick_error) bad.push(`最近一次对账出错：${d.last_tick_error}`);
     if (bad.length) notice('error', '检查发现问题：' + bad.join('；'));
-    else notice('ok', `检查通过：${d.rules_count} 条 ACL 规则，${d.active_sessions} 个活跃会话。`);
+    else {
+      const bits = [`${d.rules_count} 条 ACL 规则`, `${d.active_sessions} 个活跃会话`];
+      // 卡在「已提交、还没有登记上」的那一段。它不算"不一致"（规则数本来就
+      //   该是 0），所以不挡体检通过；但它正是用户眼前那条会话 —— 不报出来，
+      //   体检会说"一切正常"。
+      if (d.pending_sessions > 0) bits.push(`${d.pending_sessions} 个还没有登记上`);
+      let extra = '';
+      if (d.version) extra = `守护进程 ${d.version}`;
+      if (typeof d.tick_age_seconds === 'number') {
+        extra += (extra ? '，' : '') + `上一次对账在 ${d.tick_age_seconds} 秒前`;
+      }
+      notice('ok', `检查通过：${bits.join('，')}。` + (extra ? `（${extra}）` : ''));
+    }
   };
 
   // 「最近作业」是一个按需拉的动作，不跟着上面那张表一起刷：它是最贵的

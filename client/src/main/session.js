@@ -106,6 +106,7 @@ const ENROLL_PROBLEM_TEXT = {
   bad_json: '会话文件不是合法的 JSON',
   not_object: '会话文件的内容不是一个对象',
   uid_unknown: '站点认不出这个用户',
+  acl_failed: '站点装 ACL 规则失败',
 };
 
 function enrollProblemText(raw) {
@@ -623,10 +624,15 @@ class SessionController extends EventEmitter {
     // 只带上真正有值的键。带 `cpus: undefined` 会让 JSON.stringify 直接丢掉它，
     // 但带 `cpus: null` 不会 —— 而服务端会把 null 当成「用户要了 0 核」。
     const req = { op: 'submit' };
-    for (const k of ['cpus', 'mem', 'gres', 'partition', 'time']) {
+    for (const k of ['cpus', 'mem', 'partition', 'time']) {
       const v = resources && resources[k];
       if (v !== undefined && v !== null && v !== '') req[k] = v;
     }
+    // `gres` 是唯一一个「显式 null 有意义」的键：它说的是「我不占」，
+    //   盖过插件配置里的 `default_gpus`。上面那条过滤会把 null 当成"没填"
+    //   丢掉，于是用户点了「不占 GRES」，服务端照旧给他默认卡
+    //   （2026-10-19 查出来的）。undefined 仍然不发 —— 那才是"用默认"。
+    if (resources && resources.gres !== undefined) req.gres = resources.gres;
 
     // 服务种类与公钥。先校验再提交 —— 服务端也会校验（回 code 2），
     // 但走到那里已经花掉一次 sbatch 往返，而这里缺公钥只可能是调用方写错了。

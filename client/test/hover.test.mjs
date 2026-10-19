@@ -132,14 +132,18 @@ function cluster(omit = []) {
     nodes: { gpu: { counts: { idle: 10, mix: 2 }, flags: {},
       // `%C` 累加：空闲 640 / 总 672。cpu 那个分区故意不给 `cpus` ——
       //   同一份夹具里要能画得出"这一格没有数据"，否则那一支永远走不到。
-      cpus: { allocated: 32, idle: 640, other: 0, total: 672 } },
+      cpus: { allocated: 32, idle: 640, other: 0, total: 672 },
+      // `%e` 累加：合计 80000 MB、单节点最多 60000 MB（78.1 / 58.6 GB）。
+      mem_free: { sum: 80000, max: 60000 } },
     cpu: { counts: { idle: 38, alloc: 2 }, flags: {} } },
     mem: { gpu: 128000, cpu: 191000 },
     // 两个分区，数字故意不一样：下面那条"合计"的判据要能分出"加起来了"与
     //   "只画了其中一个"（一个分区的话，两种写法印出来一模一样）。
     queue: { depth: { gpu: { pending: 0, running: 3, other: 0 },
       cpu: { pending: 5, running: 1 } } },
-    gres: { gpu: [{ name: 'gpu', label: 'gpu:a6000', per_node_max: 4, total: 48 }] },
+    // `used` / `free` 是 `squeue %b` 现算出来的（真站点上分区跨节点时不给）。
+    gres: { gpu: [{ name: 'gpu', label: 'gpu:a6000', per_node_max: 4,
+      total: 48, used: 16, free: 32 }] },
     taken: {},
     me: { account: 'lab', allowed_partitions: null,
       fairshare: { account: 'lab', fair_share: 0.42 },
@@ -200,15 +204,21 @@ test('数据齐的时候，画得出来而且不抛（浮窗白屏的守卫）',
   assert.match(h.text('cl-body'), /取数于/);
 });
 
-test('分区要报 CPU 余量与内存容量，GRES 要报总量', () => {
+test('分区要报 CPU / 内存 / GRES 的余量，内存还要报容量', () => {
   const h = boot();
   h.subs.data({ cluster: cluster(), link: { connected: true } });
   const t = h.text('cl-body');
   assert.ok(t.includes('CPU　空闲 640 / 672 核（已分配 32）'), `CPU 余量那一行：${t}`);
   assert.ok(t.includes('内存　每节点最多 125 GB'), `内存那一行：${t}`);
+  // 余量：合计 + 单节点最多（用户 2026-10-19 选的口径）。
+  assert.ok(t.includes('空闲合计 78.1 GB（单节点最多 58.6 GB）'),
+    `内存余量那一格：${t}`);
   // 191000 MB 不是整 GB，留一位小数（真机上很常见）。
   assert.ok(t.includes('内存　每节点最多 186.5 GB'), `非整 GB 那一格：${t}`);
-  assert.ok(t.includes('gpu:a6000 ×4/节点，共 48'), `GRES 总量：${t}`);
+  assert.ok(t.includes('gpu:a6000 ×4/节点，共 48，空闲 32'), `GRES 总量与余量：${t}`);
+  // 那一格没有 `cpus` / `mem_free` 时只少余量，不把容量那一行也带走。
+  assert.equal(/内存　每节点最多 186.5 GB　空闲/.test(t), false,
+    '没有 %e 的分区不写余量（缺席不是 0）');
   // 没有 `cpus` 的那一格要说"没有数据"，不许画成 0 ——
   //   0 的意思是"确实一核都不剩"，那是另一句话。
   assert.ok(t.includes('CPU　（这一格没有数据）'), `缺 %C 的分区：${t}`);

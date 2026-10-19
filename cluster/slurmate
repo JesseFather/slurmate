@@ -55,7 +55,7 @@ import time
 #
 # 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
 # 它停在旧值也没人会发现。
-VERSION = "0.29"
+VERSION = "0.30"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
@@ -1306,21 +1306,28 @@ def cmd_partitions(args):
     if not isinstance(r, dict):
         return 1
     d = r["data"]
-    print("%-12s %-8s %-14s %-24s %s" % ("分区", "默认", "时间上限", "GRES", "说明"))
-    print("-" * 86)
+    print("%-12s %-8s %-14s %-12s %-24s %s"
+          % ("分区", "默认", "时间上限", "每节点核数", "GRES", "说明"))
+    print("-" * 98)
     for p in d["partitions"]:
         mark = "" if p.get("allowed") else "  [无权限]"
-        # GRES 那一列三态，与协议同一条规矩：`gres` 这个键不存在 = 服务端查不到
-        # （它没有说"这个分区没有卡"的资格），`[]` = 确实一个都没配。
+        # 三态，与协议同一条规矩：键不存在 = 服务端查不到（它没有说"没有"的
+        # 资格），有值 = 查到了。
+        cpus = p.get("cpus_per_node")
+        cpus_text = ("%d" % cpus) if isinstance(cpus, int) else "（获取失败）"
+        # GRES 那一列同理：`gres` 这个键不存在 = 服务端查不到，`[]` = 确实
+        # 一个都没配。
         if "gres" not in p:
             gres = "（获取失败）"
         else:
             gres = "、".join("%s×%d" % (gres_label(e), e.get("per_node_max") or 0)
                              for e in p["gres"]) or "无"
-        print("%-12s %-8s %-14s %-24s %s%s"
+        print("%-12s %-8s %-14s %-12s %-24s %s%s"
               % (p["name"], "是" if p.get("is_default") else "",
-                 p.get("max_time") or "无上限", gres, p.get("reason", ""), mark))
+                 p.get("max_time") or "无上限", cpus_text, gres,
+                 p.get("reason", ""), mark))
     print()
+    print("「每节点核数」是 `-c` 的上限（有效核数，保留核已经扣掉）。")
     print("GRES 那一列是每个节点最多几个（`--gres` 就是按节点算的）。")
     print("不指定 --partition 时，会从有权限的分区里随机选择一个。")
     print("缺省资源是按插件的，见 `slurmate plugins`。")
@@ -1599,7 +1606,14 @@ def cmd_doctor(args):
     print("  ACL 规则数         : %s" % d.get("rules_count"))
     print("  活跃会话数         : %s" % d.get("active_sessions"))
     print("  规则与会话一致     : %s" % (ok if d.get("consistent") else bad))
+    print("  未登记的会话数     : %s" % d.get("pending_sessions", "?"))
     print("  端口池             : %s-%s" % tuple(d.get("port_range", ["?", "?"])))
+    print("  守护进程版本       : %s" % d.get("version", "?"))
+    print("  上次对账           : %s"
+          % ("从未完成" if d.get("last_tick_at") is None
+             else "%s 秒前" % d.get("tick_age_seconds")))
+    if d.get("last_tick_error"):
+        print("  上次对账出错       : %s" % d.get("last_tick_error"))
     ex = d.get("existing") or {}
     print("  --- 现有系统（只读检查，本系统不碰它们）---")
     print("    控制节点 inet codeserver 表 : %s"

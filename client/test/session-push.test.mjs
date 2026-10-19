@@ -420,3 +420,31 @@ test('等登记那段轮询也走同一个合并入口（口令不许被一次�
   assert.equal(ctrl.state, State.RUNNING);
   assert.equal(ctrl.session.auth_password, 'pw-secret', '口令不许被那一次抖动抹掉');
 });
+
+test('提交请求：显式「不占 GRES」的 null 要发出去，其余 null 仍然丢掉', async () => {
+  // 界面上选「（不占 GRES）」发的是 `gres: null`（盖过插件默认卡）。它到了
+  //   `SessionController.start` 那一层被「只带有值的键」的过滤器当成"没填"
+  //   丢掉，服务端于是照旧给默认卡 —— 用户明确点的「不占」不生效。
+  //   修复只对 `gres` 破例：`cpus: null` 若发出去会被服务端当成 0 核。
+  const backend = new StubBackend();
+  backend.reply = (req) => {
+    if (req.op === 'submit') {
+      return { ok: false, code: 4, error: { kind: 'quota_active', detail: '停在这里就够' } };
+    }
+    return ok({ session: null });
+  };
+  // `start` 之前会先等一次"作业日志目录"（真的后端在那条连接上建它）。
+  //   这个桩不演那一步，给一个"已经好了"就够了 —— 这一条判的是请求的形状。
+  backend.ensurePrepared = async () => ({ ok: true });
+  const ctrl = new SessionController({ backend, workspaceId: null,
+    requestedKind: 'cs' });
+  await ctrl.start({ gres: null, cpus: null, mem: '8G', partition: '', time: null },
+    { needsPubkey: false });
+  const sub = backend.calls.find((c) => c.op === 'submit');
+  assert.ok(sub, '应当发出一次 submit');
+  assert.equal('gres' in sub, true, '显式的 null 是一个有含义的值，不能丢');
+  assert.equal(sub.gres, null);
+  assert.equal('cpus' in sub, false, 'cpus 的 null 仍然要丢掉（服务端会当成 0 核）');
+  assert.equal('time' in sub, false);
+  assert.equal(sub.mem, '8G');
+});

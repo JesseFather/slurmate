@@ -553,15 +553,20 @@ def slurm_stub(argv, timeout=10, check=False):
     if "show node" in cmd and args[-1] == "-o":
         return 0, (
             "NodeName=nodea1 Arch=x86_64 NodeAddr=192.0.2.11 State=MIXED "
-            "RealMemory=128000 Gres=gpu:a100:2 Partitions=A6000\n"
+            "CPUEfctv=64 CPUTot=64 RealMemory=128000 Gres=gpu:a100:2 "
+            "Partitions=A6000\n"
             "NodeName=nodea2 Arch=x86_64 NodeAddr=192.0.2.12 State=IDLE "
-            "RealMemory=191000 Gres=gpu:a100:2 Partitions=A6000\n"
+            "CPUEfctv=64 CPUTot=64 RealMemory=191000 Gres=gpu:a100:2 "
+            "Partitions=A6000\n"
             "NodeName=nodeb1 Arch=x86_64 NodeAddr=192.0.2.20 State=IDLE "
-            "RealMemory=262144 Gres=gpu:4,mps:100 Partitions=RTX8000\n"
+            "CPUEfctv=128 CPUTot=128 RealMemory=262144 Gres=gpu:4,mps:100 "
+            "Partitions=RTX8000\n"
             "NodeName=nodec1 Arch=x86_64 NodeAddr=192.0.2.30 State=IDLE "
-            "RealMemory=128000 Gres=gpu:8 Partitions=2080TI\n"
+            "CPUEfctv=64 CPUTot=64 RealMemory=128000 Gres=gpu:8 "
+            "Partitions=2080TI\n"
+            # 这一台没有 `Gres=`：它照样有内存与核数，两半都必须算到它。
             "NodeName=noded1 Arch=x86_64 NodeAddr=192.0.2.40 State=IDLE "
-            "RealMemory=191000 Partitions=2080TI\n"), ""
+            "CPUEfctv=96 CPUTot=96 RealMemory=191000 Partitions=2080TI\n"), ""
 
     if "show node" in cmd:
         return {
@@ -602,14 +607,16 @@ def slurm_stub(argv, timeout=10, check=False):
         #    `R` 与"其余那一档"（`CG` 收尾中）都走不到，而"其余那一档不并进
         #    running"正是这里唯一的那条判断（见 Slurm.queue_table）。
         return 0, (
-            "7001|A6000|PD|alice\n"
-            "7002|A6000|PD|bob\n"
-            "7003|A6000|PD|alice\n"
-            "7004|RTX8000|R|alice\n"
-            "7005|RTX8000|CG|bob\n"
+            "7001|A6000|PD|alice|N/A\n"
+            "7002|A6000|PD|bob|N/A\n"
+            "7003|A6000|PD|alice|N/A\n"
+            # `R` 与 `CG` 都算"占着分配"：`%b` 是 `gres/gpu:1` 这种形状。
+            "7004|RTX8000|R|alice|gres/gpu:1\n"
+            "7005|RTX8000|CG|bob|gres/gpu:1\n"
             # 作业数组：`%i` 给的是这个写法，而 Slurm 把它当一条排。
             #   数成 9 条会让"队列深度"在用了数组的集群上直接虚高一个量级。
-            "7006_[3-9,13-19%2]|2080TI|PD|alice\n"), ""
+            #   `PD` 那一条也带着想要的 `%b`，但它还没占上 —— 不能算。
+            "7006_[3-9,13-19%2]|2080TI|PD|alice|gres/gpu:4\n"), ""
 
     # 四条查询。形状照抄真机（本机实测 slurm-wlm 23.11.4）。
     if "sinfo" in cmd and "-V" in args:
@@ -629,11 +636,11 @@ def slurm_stub(argv, timeout=10, check=False):
         #    这一行是真集群实测抓到那个缺陷之后补上的 —— 手写一个不带表头的
         #    输出，等于把那条路径从用例里抹掉。
         _body = (
-            "A6000|nodea1|mix|60/4/0/64\n"
-            "A6000|nodea2|idle|0/64/0/64\n"
-            "RTX8000|nodeb1|alloc|128/0/0/128\n"
-            "2080TI*|nodec1|idle*|0/64/0/64\n"
-            "2080TI*|nodec2|down~|0/0/0/64\n")
+            "A6000|nodea1|mix|60/4/0/64|30000\n"
+            "A6000|nodea2|idle|0/64/0/64|50000\n"
+            "RTX8000|nodeb1|alloc|128/0/0/128|20000\n"
+            "2080TI*|nodec1|idle*|0/64/0/64|10000\n"
+            "2080TI*|nodec2|down~|0/0/0/64|0\n")
         # `-h` 在，没有表头；不在，有（与真机逐字一致）。
         return 0, ("" if "-h" in args else "PARTITION|NODELIST|STATE\n") + _body, ""
 
@@ -1222,10 +1229,35 @@ def main():
     check("集合获取失败（Slurm 问不到、或节点报的是主机名）→ 不判，规则照装",
           _ok3 and len(_added(_c3)) == 1, "%s / %s" % (_ok3, _d3))
 
+    # comment 末尾带上插件（`-<id>@<版本>`）时，交给 nft 的必须是一个带引号的
+    #   字符串。裸词里的 `@` 是 nft 的集合引用起始符 —— 2026-10-19 真机：
+    #   0.29 加上那个尾巴之后，每一次 `add rule` 都在 `@` 处语法错误
+    #   （`syntax error, unexpected @`），会话一直停在 `submitted`。
+    _n4, _c4 = _mk_nft(set(_NET))
+    _ok4, _d4 = _n4.add_session_rule(
+        "192.0.2.11", 55001, UID, 42, "01M2JKHTZGKJBFQQTWYXMQMF2V@1.0.1")
+    _cm4 = _added(_c4)[0]
+    _arg4 = _cm4[_cm4.index("comment") + 1]
+    check("带插件尾巴的 comment 交给 nft 时带引号（裸词里的 @ 会让它语法错误）",
+          _ok4 and _arg4.startswith('"') and _arg4.endswith('"')
+          and "@" in _arg4 and _d4 in _arg4,
+          "%s / %r" % (_ok4, _arg4))
+    # 对照：老形状（没有尾巴）同样带引号。两条路是同一行代码，而这一条挡住
+    #   "只给带 @ 的那一种加引号"这种补法。
+    _cm1 = _added(_c1)[0]
+    _arg1 = _cm1[_cm1.index("comment") + 1]
+    check("对照：不带插件尾巴的 comment 也带引号",
+          _arg1.startswith('"') and _arg1.endswith('"'), repr(_arg1))
+    check("comment 里的引号与反斜杠被转义",
+          mod.Nft.quote_comment('a"b\\c') == '"a\\"b\\\\c"',
+          repr(mod.Nft.quote_comment('a"b\\c')))
+
     # 那一份集合是从 `scontrol show node -o` 里收的，与 GRES / 内存同一趟。
     #   它有一格自己的三态：`None` = 拿不到一份完整的集合。
-    _cat_line = ("NodeName=n1 NodeAddr=192.0.2.11 Partitions=p0 RealMemory=1000\n"
-                 "NodeName=n2 NodeAddr=192.0.2.12 Partitions=p0 RealMemory=2000\n")
+    _cat_line = ("NodeName=n1 NodeAddr=192.0.2.11 Partitions=p0 RealMemory=1000 "
+                 "CPUEfctv=8\n"
+                 "NodeName=n2 NodeAddr=192.0.2.12 Partitions=p0 RealMemory=2000 "
+                 "CPUEfctv=16 CPUTot=20\n")
     _cat = mod.NodeCatalog()
     check("（夹具）空壳 NodeCatalog 的 addrs 是 None（= 获取失败，不是「没有节点」）",
           _cat.addrs is None, repr(_cat.addrs))
@@ -1233,10 +1265,23 @@ def main():
                      (0, _cat_line, "") if "show node" in " ".join(map(str, argv))
                      else (1, "", "unexpected"),
                      lambda: mod.Slurm(cfg).node_catalog())
-    check("三半来自同一趟 `scontrol show node -o`：地址、GRES、内存",
+    check("四半来自同一趟 `scontrol show node -o`：地址、GRES、内存、核数",
           _got is not None and _got.addrs == _NET
-          and _got.mem == {"p0": 2000} and _got.gres == {},
-          repr((_got and _got.addrs, _got and _got.mem, _got and _got.gres)))
+          and _got.mem == {"p0": 2000} and _got.gres == {}
+          and _got.cpus == {"p0": 16} and _got.overlap is False,
+          repr((_got and _got.addrs, _got and _got.mem, _got and _got.gres,
+                _got and _got.cpus, _got and _got.overlap)))
+    check("CPUEfctv 优先、CPUTot 只是退路（20 不能盖掉 16）",
+          _got is not None and _got.cpus == {"p0": 16},
+          repr(_got and _got.cpus))
+    _over = with_stub(mod, lambda argv, timeout=10, check=False:
+                      (0, "NodeName=n1 NodeAddr=192.0.2.11 "
+                          "Partitions=p0,p1 RealMemory=1000 CPUEfctv=8\n", "")
+                      if "show node" in " ".join(map(str, argv))
+                      else (1, "", "unexpected"),
+                      lambda: mod.Slurm(cfg).node_catalog())
+    check("一台节点属于两个分区 → overlap（GRES 余量在这种情况下不给）",
+          _over is not None and _over.overlap is True, repr(_over and _over.overlap))
     _host_line = "NodeName=n1 NodeAddr=node01 Partitions=p0 RealMemory=1000\n"
     _got2 = with_stub(mod, lambda argv, timeout=10, check=False:
                       (0, _host_line, "") if "show node" in " ".join(map(str, argv))
@@ -1486,6 +1531,33 @@ def main():
         check("对照：登记确实发生了（上一条不是恒真）",
               d.store.get("stuck-1")["state"] == mod.ST_ENROLLED,
               d.store.get("stuck-1")["state"])
+
+        # 文件读得出来、校验也过了，卡在装 ACL 规则这一步。第二个真机现场是
+        #   这一种：界面上同样是「排队中」，而唯一的线索只写在守护进程的日志里。
+        # 端口换一对：stuck-1 已经登记在 55017 上，而 (node_ip, service_port)
+        #   活跃期间唯一（表上那条索引），撞上去是一次 IntegrityError。
+        write_session("job-5712.json", dict(good, service_port=55019))
+        d.store.insert(session_id="stuck-2", uid=UID, user="alice",
+                       job_id=5712, partition="2080TI", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_SUBMITTED, candidates="55019,55020",
+                       created_at=_now2 - 120, submitted_at=_now2 - 120,
+                       trust="owned")
+        d.nft.add_session_rule = lambda *a, **k: (False, "nft: 权限不足")
+        d.try_enroll(d.store.get("stuck-2"), job)
+        _v3 = d.session_view(d.store.get("stuck-2"), with_secret=False)
+        check("装 ACL 失败也要点名（这一格从前只写在守护进程的日志里）",
+              str(_v3.get("enroll_problem") or "").startswith("acl_failed:"),
+              str(_v3.get("enroll_problem")))
+        check("装 ACL 失败那一条也说一句（首报立刻）",
+              any("装 ACL 规则失败" in m for m in _cap.lines), str(_cap.lines))
+        d.nft.add_session_rule = lambda *a, **k: (True, "test")
+        d.try_enroll(d.store.get("stuck-2"), job)
+        check("装上之后那一格消失",
+              "enroll_problem" not in d.session_view(d.store.get("stuck-2"),
+                                                     with_secret=False),
+              str(d.session_view(d.store.get("stuck-2"),
+                                 with_secret=False).get("enroll_problem")))
     finally:
         mod.log.removeHandler(_cap)
         mod.log.setLevel(_cap_lvl)
@@ -1951,9 +2023,30 @@ exit 0
           env.get("SLURMATE_PARTITION") == sess["partition"]
           and env.get("SLURMATE_CPUS") == "2", str(env))
 
-    r, sess, _ = run_submit({"op": "submit", "cpus": 999, "mem": "4G"})
-    check("超上限的 cpus 被钳制", sess["cpus"] == mod.MAX_CPUS_REQUEST, str(sess["cpus"]))
+    # 绝对护栏：荒谬的请求被钳到 MAX_CPUS_REQUEST。用点名分区那一条，
+    #   避开随机分区的资源过滤 —— 这一条判的是"钳制"，不是"挑分区"。
+    r, sess, _ = run_submit({"op": "submit", "cpus": 4096, "mem": "4G",
+                             "partition": "A6000"})
+    check("超上限的 cpus 被钳到绝对护栏", sess["cpus"] == mod.MAX_CPUS_REQUEST,
+          str(sess["cpus"]))
     check("显式 mem 生效", sess["mem"] == "4G", sess["mem"])
+
+    # 随机分区按 cpus / mem 过滤：100 核只有 RTX8000（每节点 128）装得下。
+    r, sess, _ = run_submit({"op": "submit", "cpus": 100})
+    check("随机分区时只从装得下的分区里选（100 核 → RTX8000）",
+          r.get("ok") and sess["partition"] == "RTX8000",
+          "%s / %s" % (r.get("ok"), sess.get("partition")))
+
+    # 一个都装不下：如实拒绝，不挑一个装不下的分区。
+    r, _s, _e = run_submit({"op": "submit", "cpus": 200})
+    check("有权限的分区一个都装不下 → bad_resources(code 2)",
+          not r.get("ok") and r["code"] == 2
+          and r["error"]["kind"] == "bad_resources", str(r))
+    # 内存同理：A6000/2080TI 是 128000/191000，RTX8000 是 262144。
+    r, sess, _ = run_submit({"op": "submit", "mem": "250G"})
+    check("随机分区按内存过滤（250G 只有 RTX8000 装得下）",
+          r.get("ok") and sess["partition"] == "RTX8000",
+          "%s / %s" % (r.get("ok"), sess.get("partition")))
 
     r, sess, _ = run_submit({"op": "submit", "mem": "0"})
     check("mem=0 被回退到默认，且【告知】用户",
@@ -7665,6 +7758,30 @@ exit 0
           _q_doc.get("active_sessions") == _q_acl and _q_acl < _q_occ,
           "doctor=%r acl=%d occupying=%d" % (_q_doc.get("active_sessions"),
                                              _q_acl, _q_occ))
+    # 而"我眼前正卡着一条"必须能在体检里读出来。0.29 起它另报一格：
+    #   用户 2026-10-19 第二次现场看到的正是「0 条 ACL 规则，0 个活跃会话」。
+    _q_pend = len(d.store.by_state((mod.ST_RESERVED, mod.ST_SUBMITTED)))
+    check("op_doctor 另报 pending_sessions：卡在预留/已提交的那几条数得到",
+          _q_doc.get("pending_sessions") == _q_pend and _q_pend >= 1,
+          "doctor=%r pending=%d" % (_q_doc.get("pending_sessions"), _q_pend))
+    check("op_doctor 报守护进程版本与对账那两格",
+          _q_doc.get("version") == mod.VERSION
+          and "last_tick_at" in _q_doc and "tick_age_seconds" in _q_doc
+          and "last_tick_error" in _q_doc,
+          "doctor=%r" % (_q_doc,))
+    _saved_tick = d.tick
+    _saved_level = mod.log.level
+    mod.log.setLevel(logging.CRITICAL)
+    d.tick = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        d._run_tick()
+    finally:
+        d.tick = _saved_tick
+        mod.log.setLevel(_saved_level)
+    check("对账抛了异常：那一格留得下来（体检据此说「检查发现问题」）",
+          (d.last_tick_error or "").startswith("RuntimeError: boom"),
+          str(d.last_tick_error))
+    d.last_tick_error = None
 
     cfg.max_sessions_per_user = _q_limit0
     check("配置里不写这个键时用缺省值 1（缺省在安全侧）",
@@ -8556,6 +8673,17 @@ exit 0
           _mem and _mem.get("RTX8000") == 262144, str(_mem))
     check("内存那一半里没有 GRES 那些格子",
           _mem and all(isinstance(v, int) for v in _mem.values()), str(_mem))
+    # ── 同一趟里的 CPU 那一半 ────────────────────────────────────────────
+    #   上限是每节点【有效】核数（`CPUEfctv`），不是分区总和。`noded1` 没有
+    #   `Gres=`、核数却比同分区那台多（96 > 64），所以"放在 `if not entries`
+    #   之后"的老写法会算漏它 —— 与内存那一条同形的判据。
+    _cpu = _ncat.cpus if _ncat is not None else None
+    check("每节点核数按分区取最大的那一台（A6000 两台都是 64 → 64）",
+          _cpu and _cpu.get("A6000") == 64, str(_cpu))
+    check("没配 GRES 的节点照样算核数（2080TI 96 > 64）",
+          _cpu and _cpu.get("2080TI") == 96, str(_cpu))
+    check("分区总和不会被当成每节点上限（RTX8000 是 128，不是几台之和）",
+          _cpu and _cpu.get("RTX8000") == 128, str(_cpu))
     # 缓存：一个钟周期之内不重复 fork（这是每个 partitions / cluster 请求
     # 都要走的那条路）。
     #
@@ -8607,6 +8735,11 @@ exit 0
     check("它跟着分区走，不是一个全局的数",
           _by_name["RTX8000"].get("mem_per_node_mb") == 262144,
           str(_by_name["RTX8000"].get("mem_per_node_mb")))
+    # 每节点核数：与上面同一趟查询的第四半。
+    check("每个分区带上每节点有效核数（A6000 64 / RTX8000 128）",
+          _by_name["A6000"].get("cpus_per_node") == 64
+          and _by_name["RTX8000"].get("cpus_per_node") == 128,
+          str({k: v.get("cpus_per_node") for k, v in _by_name.items()}))
     # 三态：查不到时那个键整个不存在（不是 `[]`）。
     #   `[]` 的意思是"这个分区确实没配"，而"没问到"是另一句话 ——
     #   把两者合并，界面就会替集群说一句它不知道的话。
@@ -8622,6 +8755,8 @@ exit 0
           _pv2.get("ok") and "gres" not in _p0, str(sorted(_p0)))
     check("同一趟问不到，`mem_per_node_mb` 这个键也不存在",
           _pv2.get("ok") and "mem_per_node_mb" not in _p0, str(sorted(_p0)))
+    check("同一趟问不到，`cpus_per_node` 这个键也不存在",
+          _pv2.get("ok") and "cpus_per_node" not in _p0, str(sorted(_p0)))
 
     # 而它是两档缺席：整个目录没问到（上一段），与"这个分区里的节点一台都没报
     #   `RealMemory=`"（这一段）。后者在界面上做同一件事（不画那个滑块），
@@ -8637,8 +8772,9 @@ exit 0
     fresh_cluster(mod, d, cfg)
     _pv3 = with_stub(mod, _no_mem_run, lambda: d.op_partitions(UID))
     _by3 = {p["name"]: p for p in (_pv3.get("data") or {}).get("partitions", [])}
-    check("节点没报 `RealMemory=` 时，只有内存那一格缺席（`gres` 照旧在）",
+    check("节点没报 `RealMemory=` / `CPUEfctv` 时，只有那两格缺席（`gres` 照旧在）",
           _pv3.get("ok") and "mem_per_node_mb" not in _by3.get("A6000", {})
+          and "cpus_per_node" not in _by3.get("A6000", {})
           and _by3.get("A6000", {}).get("gres") == [{"name": "gpu", "type": None,
                                                      "per_node_max": 2, "total": 2}],
           str(sorted(_by3.get("A6000", {}))))
@@ -10182,16 +10318,37 @@ exit 0
           _nt and _nt["2080TI"]["cpus"] == {"allocated": 0, "idle": 64,
                                             "other": 0, "total": 128},
           str(_nt and _nt.get("2080TI")))
+    check("`%e` 按分区累加：空闲内存的合计与单节点最多",
+          (_nt or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 80000, "max": 50000},
+          str(_nt and _nt.get("A6000")))
+    check("空闲内存为 0 的节点照实计入（合计不加、最大值不降）",
+          (_nt or {}).get("2080TI", {}).get("mem_free")
+          == {"sum": 10000, "max": 10000},
+          str(_nt and _nt.get("2080TI")))
 
     def _no_cpu(argv, timeout=10, check=False):
         return 0, "A6000|nodea1|mix\nA6000|nodea2|mix|坏\n", ""
 
     _nt2 = with_stub(mod, _no_cpu, lambda: mod.Slurm(cfg).node_table())
-    check("`%C` 整个缺席或认不出时 `cpus` 键缺席（= 没问到），不是 0 ——"
+    check("`%C` / `%e` 整个缺席或认不出时那两格键缺席（= 没问到），不是 0 ——"
           "0 的意思是「确实一核都不剩」，那是另一句话",
           _nt2 and set(_nt2["A6000"]) == {"counts", "flags"}
           and _nt2["A6000"]["counts"] == {"mix": 2},
           str(_nt2))
+
+    # 旧版 Slurm 不认 `%e`：退回原格式再取一次，CPU 与节点计数照旧可用。
+    def _no_free(argv, timeout=10, check=False):
+        fmt = str(argv[-1])
+        if "%e" in fmt:
+            return 1, "", "sinfo: invalid format"
+        return 0, "A6000|nodea1|mix|60/4/0/64\nA6000|nodea2|idle|0/64/0/64\n", ""
+
+    _nt3 = with_stub(mod, _no_free, lambda: mod.Slurm(cfg).node_table())
+    check("旧版 sinfo 不认 `%e`：退回原格式，CPU 那一格照旧，内存余量缺席",
+          _nt3 and _nt3["A6000"]["cpus"] == {"allocated": 60, "idle": 68,
+                                             "other": 0, "total": 128}
+          and "mem_free" not in _nt3["A6000"], str(_nt3))
 
     # ── 28.5 队列：深度、顺序、以及"我在第几位" ────────────────────────
     _q = with_stub(mod, slurm_stub, lambda: mod.Slurm(cfg).queue_table())
@@ -10210,6 +10367,24 @@ exit 0
           _q and _q["by_user"]["alice"] == ["7001", "7003", "7004",
                                             "7006_[3-9,13-19%2]"],
           str(_q and _q["by_user"].get("alice")))
+    # GRES 余量：只数"占着分配"的（`R` / `CG`）。`PD` 那条也带着 `%b`，
+    #   但它是想占、还没占上。
+    check("`%b` 按分区汇总：`R` 与 `CG` 都算，`PD` 不算",
+          _q and _q.get("gres_used", {}).get("RTX8000")
+          == [{"name": "gpu", "type": None, "count": 2}]
+          and "2080TI" not in _q.get("gres_used", {}),
+          str(_q and _q.get("gres_used")))
+
+    def _no_b(argv, timeout=10, check=False):
+        fmt = str(argv[-1])
+        if "%b" in fmt:
+            return 1, "", "squeue: invalid format"
+        return 0, "7004|RTX8000|R|alice\n", ""
+
+    _q2 = with_stub(mod, _no_b, lambda: mod.Slurm(cfg).queue_table())
+    check("旧版 squeue 不认 `%b`：退回原格式，深度照旧，`gres_used` 缺席",
+          _q2 and _q2["depth"]["RTX8000"]["running"] == 1
+          and "gres_used" not in _q2, str(_q2))
 
     _cs5 = _CountSlurm()
     _cs5.answer["queue_table"] = with_stub(
@@ -10335,6 +10510,39 @@ exit 0
           and (_cd.get("mem") or {}).get("A6000") == 191000,
           repr(((_cd.get("nodes") or {}).get("A6000"),
                 (_cd.get("mem") or {}).get("A6000"))))
+    check("`nodes` 里也带内存余量（`%e` 的合计与单节点最多）",
+          (_cd.get("nodes") or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 80000, "max": 50000},
+          str((_cd.get("nodes") or {}).get("A6000", {}).get("mem_free")))
+    _g_a = ((_cd.get("gres") or {}).get("A6000") or [{}])[0]
+    _g_r = ((_cd.get("gres") or {}).get("RTX8000") or [{}])[0]
+    check("GRES 清单带上「已用 / 空闲」（`R` 与 `CG` 的 `%b` 现算）",
+          _g_a.get("used") == 0 and _g_a.get("free") == 4
+          and _g_r.get("used") == 2 and _g_r.get("free") == 2,
+          repr((_g_a, _g_r)))
+    check("内部的 `gres_used` 不搬到协议里（`queue` 那一格不长这一项）",
+          "gres_used" not in ((_cd.get("queue") or {})), str(sorted(_cd.get("queue") or {})))
+    check("GRES 余量是【新】对象：原地写会污染 `op_partitions` 的那份清单",
+          _g_a is not (((_d28.cluster.gres() or {}).get("A6000") or [{}])[0])
+          and "used" not in (((_d28.cluster.gres() or {}).get("A6000") or [{}])[0]),
+          repr((_g_a, (_d28.cluster.gres() or {}).get("A6000"))))
+
+    # 节点跨分区：`total` 把一台节点的卡计进它所在的每个分区，而 `squeue`
+    #   只算在提交的分区上 —— 那种情况下 `total - used` 会把别人占的卡算成
+    #   空闲。宁可不给。
+    def _over_run(argv, timeout=10, check=False):
+        a = [str(x) for x in argv]
+        if "show node" in " ".join(a) and a[-1] == "-o":
+            return 0, ("NodeName=nodea1 NodeAddr=192.0.2.11 CPUEfctv=64 "
+                       "RealMemory=128000 Gres=gpu:2 Partitions=A6000,extra\n"), ""
+        return slurm_stub(argv, timeout, check)
+
+    _d28b = _mkd()
+    _d28b.slurm = mod.Slurm(cfg)
+    _cv3 = with_stub(mod, _over_run, lambda: _d28b.op_cluster(UID))
+    _g3 = (((_cv3.get("data") or {}).get("gres") or {}).get("A6000") or [{}])[0]
+    check("一台节点跨两个分区 → GRES 不给 used/free（减出来的空闲是假的）",
+          "used" not in _g3 and "free" not in _g3, repr(_g3))
     check("而「自己那一份」在 `me` 里 —— 共享的与按 uid 的分开"
           "（分开的不只是缓存：客户端据此知道「这一格变了不是我的事」）",
           set(_cd.get("me") or {}) >= {"account", "allowed_partitions",

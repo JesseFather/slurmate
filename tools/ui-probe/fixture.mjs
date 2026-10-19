@@ -227,11 +227,13 @@ export function buildPortAsk() {
 export function buildPartitions() {
   return [
     { name: 'gpu-long-queue', allowed: true, mem_per_node_mb: 191000,
+      cpus_per_node: 128,
       gres: [
         { name: 'gpu', type: 'a100-80g', per_node_max: 4, total: 32, label: 'a100-80g' },
         { name: 'gpu', type: 'h100', per_node_max: 8, total: 16, label: 'h100' },
       ] },
     { name: 'cpu-with-a-long-name', allowed: true, mem_per_node_mb: 128000,
+      cpus_per_node: 64,
       gres: [{ name: 'gpu', type: null, per_node_max: 1, total: 2, label: '任意卡' }] },
     { name: 'restricted', allowed: false,
       reason: '这个分区要另外申请，申请单在集群的门户上填，批下来之前这里提交不出去。' },

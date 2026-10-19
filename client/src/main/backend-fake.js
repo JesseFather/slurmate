@@ -161,6 +161,20 @@ const MEM_MB = {
   'A6000': 191000,
   'RTX8000': 262144,
 };
+// 每个分区里一台节点最多能要到几核（协议里的 `cpus_per_node`，同 `CPUEfctv`）。
+//   三种形状都摆出来：38 / 78（比高级选项那个旧的固定 64 大）/ 缺席（DEBUG）。
+const CPUS_PER_NODE = {
+  '2080TI': 38,
+  'A6000': 78,
+  'RTX8000': 38,
+};
+// 运行中作业占着的 GRES（真站点上由 `squeue %b` 现算，这里直接给结果）。
+//   与 `GRES` 分开：`op_partitions` 的清单里不许出现 `used` / `free`。
+const GRES_USED = {
+  '2080TI': [0],
+  'A6000': [2],
+  'RTX8000': [1, 20],
+};
 const PARTITIONS = [
   { name: '2080TI',  allowed: true,  is_default: true, max_time: '183-00:00:00', gres: GRES['2080TI'] },
   { name: 'A6000',   allowed: true,  max_time: '183-00:00:00', gres: GRES['A6000'] },
@@ -182,9 +196,17 @@ const PARTITIONS = [
  *   state，flags 单独一列。两者的键不相交，那是"从右往左剥"能成立的前提。
  */
 const NODES = {
-  '2080TI': { counts: { idle: 1, drain: 1 }, flags: { '*': 1 } },
-  'A6000': { counts: { mix: 2 }, flags: {} },
-  'RTX8000': { counts: { idle: 1 }, flags: {} },
+  '2080TI': { counts: { idle: 1, drain: 1 }, flags: { '*': 1 },
+    cpus: { allocated: 0, idle: 38, other: 0, total: 38 },
+    mem_free: { sum: 60000, max: 60000 } },
+  'A6000': { counts: { mix: 2 }, flags: {},
+    cpus: { allocated: 2, idle: 76, other: 0, total: 78 },
+    mem_free: { sum: 120000, max: 70000 } },
+  'RTX8000': { counts: { idle: 1 }, flags: {},
+    cpus: { allocated: 1, idle: 37, other: 0, total: 38 },
+    mem_free: { sum: 90000, max: 90000 } },
+  // 这一格故意缺 `cpus` 与 `mem_free`：三态里"没问到"的用法与 DEBUG 的
+  //   无权限是两件事，界面上要都走得到。
   'DEBUG': { counts: { down: 1 }, flags: { '~': 1 } },
 };
 
@@ -1204,7 +1226,7 @@ class FakeBackend extends Backend {
   debugClusterMissing(kind) {
     this._clusterMissing = kind ? { [kind]: true } : {
       health: true, version: true, partitions: true, gres: true,
-      nodes: true, queue: true, fairshare: true,
+      mem: true, nodes: true, queue: true, fairshare: true,
     };
     return Object.keys(this._clusterMissing);
   }
@@ -1495,8 +1517,31 @@ class FakeBackend extends Backend {
       data.taken.partitions = nowSec() - 42;
     }
     if (!miss.gres) {
-      data.gres = JSON.parse(JSON.stringify(GRES));
+      // `used` / `free` 与真守护进程一样来自"正在占着分配的作业"：这里直接
+      //   给结果（`GRES_USED`），形状与 `Cluster.shared()` 拼出来的一致。
+      const used = GRES_USED;
+      data.gres = {};
+      for (const p of PARTITIONS) {
+        data.gres[p.name] = GRES[p.name].map((e, i) => {
+          const row = { ...e };
+          if (Number.isInteger(used[p.name] && used[p.name][i])) {
+            const u = used[p.name][i];
+            row.used = u;
+            row.free = Math.max(0, e.total - u);
+          }
+          return row;
+        });
+      }
       data.taken.gres = nowSec() - 42;
+    }
+    if (!miss.mem) {
+      // 与 `gres` 同一条 `scontrol show node -o` 来的那一格（真守护进程里两者
+      //   共用一次查询）。`DEBUG` 没有内存：那一格缺席 = 没问到。
+      data.mem = {};
+      for (const p of PARTITIONS) {
+        if (Number.isInteger(MEM_MB[p.name])) data.mem[p.name] = MEM_MB[p.name];
+      }
+      data.taken.mem = nowSec() - 42;
     }
     if (!miss.nodes) {
       data.nodes = JSON.parse(JSON.stringify(NODES));
@@ -1621,6 +1666,9 @@ class FakeBackend extends Backend {
     return PARTITIONS.map((p) => {
       const d = { ...p, gres: p.gres.map((e) => ({ ...e })) };
       if (Number.isInteger(MEM_MB[p.name])) d.mem_per_node_mb = MEM_MB[p.name];
+      if (Number.isInteger(CPUS_PER_NODE[p.name])) {
+        d.cpus_per_node = CPUS_PER_NODE[p.name];
+      }
       return d;
     });
   }
@@ -1632,10 +1680,14 @@ class FakeBackend extends Backend {
    * 而用户明确要的是分散。随机挑的代价是用户事先不知道会落到哪种卡上 ——
    * 所以 `session_view` 里必须把实际落到的分区返回给界面显示出来。
    */
-  _randPickPartition() {
-    if (this._pickPartition) return this._pickPartition(PARTITIONS);
-    const usable = PARTITIONS.filter((p) => p.allowed);
+  _randPickPartition(need) {
+    // 与真守护进程一样：只从装得下这个请求的分区里挑（`fit_resources()`）。
+    //   装不下还挑过去的话，作业会在 sbatch 那一刻被拒，而用户明明没有点名
+    //   分区、没有任何办法绕开。
+    const usable = PARTITIONS.filter(
+      (p) => p.allowed && fitsPartition(p, need || {}));
     if (usable.length === 0) return null;
+    if (this._pickPartition) return this._pickPartition(usable);
     return usable[Math.floor(Math.random() * usable.length)];
   }
 
@@ -1711,20 +1763,9 @@ class FakeBackend extends Backend {
         + `（本站给这个插件的上限是 ${cap}），排队中的也算。结束一个再开下一个。`);
     }
 
-    // 显式指定了分区 → 必须校验权限（fail-closed）；
-    // 没指定 → 随机挑一个。这与守护进程侧的规则一致。
-    let part;
-    if (req && req.partition) {
-      part = PARTITIONS.find((p) => p.name === String(req.partition));
-      if (!part) return err(2, 'bad_partition', `未知分区：${req.partition}`);
-      if (!part.allowed) return err(4, 'no_partition', part.reason || '没有该分区的权限');
-    } else {
-      part = this._randPickPartition();
-      if (!part) return err(6, 'partitions_unknown', '查询可用分区失败');
-    }
-
     // 服务端填默认值并做上限钳制 —— 不信客户端送来的东西。
-    const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 64);
+    //   这一步必须在挑分区之前：随机挑分区时要按它过滤（真守护进程同一条）。
+    const cpus = clampInt(req && req.cpus, DEFAULTS.cpus, 1, 1024);
     // 内存那一格：与守护进程的 `sanitize_mem` 逐字同形。
     //   `--mem=0` 在 Slurm 里的含义是「该节点的全部内存」，不是零 —— 一个笔误
     //   会让开发会话吃掉整台机器。所以显式拒绝并回退，而回退必须报给用户
@@ -1735,9 +1776,32 @@ class FakeBackend extends Backend {
      *  这个项目一路在清的那类问题。 */
     const warnings = [];
     if (memFix.fell) warnings.push(`内存参数无法识别，已改用 ${mem}。`);
-    // GRES：与守护进程同一条规矩 —— 分区定下来之后再对账，因为上限是分区
-    // 自己的（同一个集群上 2080TI 每节点 8 张、A6000 每节点 4 张）。
-    const gresp = gresFor(req && req.gres, part);
+    // GRES 先只查形状：分区匹配要等分区定下来（上限是分区自己的）。
+    //   形状错与"这个分区装不下"必须分开 —— 混在一起时，一个畸形的请求会
+    //   被报成"分区查询失败"或者被随机过滤吞掉。
+    const gshape = validateGresShape(req && req.gres);
+    if (gshape.err) return err(2, 'bad_gres', gshape.err);
+
+    // 显式指定了分区 → 必须校验权限（fail-closed）；
+    // 没指定 → 从装得下这个请求的分区里随机挑一个。与守护进程侧的规则一致。
+    let part;
+    if (req && req.partition) {
+      part = PARTITIONS.find((p) => p.name === String(req.partition));
+      if (!part) return err(2, 'bad_partition', `未知分区：${req.partition}`);
+      if (!part.allowed) return err(4, 'no_partition', part.reason || '没有该分区的权限');
+    } else {
+      part = this._randPickPartition({ cpus, mem, gres: gshape.gres });
+      if (!part) {
+        const any = PARTITIONS.some((p) => p.allowed);
+        return any
+          ? err(2, 'bad_resources',
+            `有权限的分区里没有一个能给你 ${cpus} 核 / ${mem}（测试后端）`)
+          : err(6, 'partitions_unknown', '查询可用分区失败');
+      }
+    }
+    // GRES：分区定下来之后对账，因为上限是分区自己的（同一个集群上
+    //   2080TI 每节点 8 张、A6000 每节点 4 张）。
+    const gresp = gresFor(gshape.gres, part);
     if (gresp.err) return err(2, 'bad_gres', gresp.err);
     const gres = gresp.gres;
 
@@ -2360,7 +2424,7 @@ const GRES_FIELD_RE = /^[A-Za-z0-9_]{1,32}$/;
  *   会被拒（或反过来），而 `backend-fake.test.mjs` 只守得住字段名，守不住规则。
  * 上限从分区的清单来（`per_node_max`），不是写死一个 8 —— 与守护进程一样。
  */
-function gresFor(raw, part) {
+function validateGresShape(raw) {
   if (raw === undefined || raw === null || raw === '') return { gres: null };
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return { err: 'gres 必须是一个对象：{"name": …, "type": …, "count": …}' };
@@ -2381,6 +2445,45 @@ function gresFor(raw, part) {
   if (count > MAX_GRES_COUNT) {
     return { err: `gres 的 count 上限是 ${MAX_GRES_COUNT}，得到 ${count}` };
   }
+  return { gres: { name, type, count } };
+}
+
+/** `8G` / `512M` / 裸数字（MB）→ MB；认不出给 `null`（与守护进程同一套写法）。 */
+function memToMb(v) {
+  const m = /^([0-9]+)([KMGTP]?)$/.exec(String(v == null ? '' : v).trim().toUpperCase());
+  if (!m) return null;
+  const per = { K: 1 / 1024, M: 1, G: 1024, T: 1024 ** 2, P: 1024 ** 3 }[m[2] || 'M'];
+  const mb = Number(m[1]) * per;
+  return Number.isInteger(mb) ? mb : null;
+}
+
+/**
+ * 这个分区的单节点装不装得下这个请求。取不到那一格时不判 —— 与守护进程的
+ * `fit_resources()` 同一条 fail-open。
+ */
+function fitsPartition(part, need) {
+  const cap = CPUS_PER_NODE[part.name];
+  if (Number.isInteger(cap) && Number.isInteger(need.cpus) && need.cpus > cap) {
+    return false;
+  }
+  const mm = MEM_MB[part.name];
+  const mb = memToMb(need.mem);
+  if (Number.isInteger(mm) && mb !== null && mb > mm) return false;
+  if (need.gres) {
+    const list = Array.isArray(part.gres) ? part.gres : [];
+    const match = list.filter((e) => e.name === need.gres.name
+      && (!need.gres.type || e.type === need.gres.type));
+    if (match.length === 0) return false;
+    if (need.gres.count > Math.max(...match.map((e) => e.per_node_max))) return false;
+  }
+  return true;
+}
+
+function gresFor(raw, part) {
+  const shape = validateGresShape(raw);
+  if (shape.err) return shape;
+  if (!shape.gres) return { gres: null };
+  const { name, type, count } = shape.gres;
   const list = Array.isArray(part.gres) ? part.gres : [];
   const match = list.filter((e) => e.name === name && (!type || e.type === type));
   if (match.length === 0) {

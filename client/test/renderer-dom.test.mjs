@@ -740,6 +740,38 @@ test('「重新同步」在整屏底部挨着「检查集群」：点它走那�
     assert.match(said, /还没连上站点/, '失败要说清为什么');
   });
 
+test('「检查集群」把守护进程的版本、对账时间与"还没有登记上"一起说出来', async () => {
+  // 用户 2026-10-19 第二次真机：「检查通过：0 条 ACL 规则，0 个活跃会话」，
+  //   而眼前正卡着一条作业在跑的会话。体检要说得出这两件事：站点上是哪一版、
+  //   有没有会话停在"已提交、还没有登记上"那一段；对账抛了异常要算问题。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const btn = h.byId.get('btn-doctor');
+  const said = () => childrenOf(h.doc.getElementById('notices'))
+    .map((x) => x._text || '').join('\n');
+  const answer = (data) => h.run(`window.__doctor = ${JSON.stringify(data)};`
+    + 'window.slurmate.doctor = () => Promise.resolve({ ok: true, data: window.__doctor });');
+
+  answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
+    active_sessions: 0, pending_sessions: 1, consistent: true,
+    existing: { codeserver_table: true, portdaemon_table: true },
+    version: '0.30', tick_age_seconds: 2, last_tick_error: null });
+  await btn.onclick();
+  assert.match(said(), /0 条 ACL 规则/, said());
+  assert.match(said(), /1 个还没有登记上/, said());
+  assert.match(said(), /守护进程 0\.30/, said());
+  assert.match(said(), /上一次对账在 2 秒前/, said());
+
+  // 对账那一轮抛了异常：进「发现问题」，不被"检查通过"盖住。
+  answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
+    active_sessions: 0, pending_sessions: 1, consistent: true,
+    existing: { codeserver_table: true, portdaemon_table: true },
+    version: '0.30', tick_age_seconds: 2,
+    last_tick_error: 'IntegrityError: UNIQUE constraint failed' });
+  await btn.onclick();
+  assert.match(said(), /检查发现问题/, said());
+  assert.match(said(), /IntegrityError/, said());
+});
+
 test('状态条右侧那两颗：只在会话页面盖着时露，写的是「停止该作业」', async () => {
   // 用户 2026-10-18 定的形状：code-server 那类作业页面上给一颗「停止该作业」——
   //   快速结束眼前这一条的机会；插件页与作业页都不给（前者没有页面可重载、
@@ -818,7 +850,15 @@ test('排队中：状态条说得出作业在跑、以及站点那边为什么�
   assert.match(detail, /运行中/, '作业那一侧的真实状态要说出来');
   assert.match(detail, /站点还没有完成登记：mode_too_open/, detail);
 
-  // 没有那一格时不说这句 —— 缺席是"没有这个问题"，不是"不知道"。
+  // 原因那一格缺席（老站点不发），而作业已经在跑：这一句仍然要说。
+  //   判据在客户端这一侧：作业状态是站点给的，两边都答得上来。
+  h.fn('renderSnapshot')({
+    state: 'queued', jobId: '11', jobState: 'RUNNING', jobTerminal: false,
+    jobText: '运行中', resources: {}, gresText: null,
+  });
+  assert.match(h.byId.get('sb-detail')._text || '', /站点还没有完成登记/);
+
+  // 作业还没开始跑：不说这句 —— 那时"排队中"就是全部的事实。
   h.fn('renderSnapshot')({
     state: 'queued', jobId: '11', jobState: 'PENDING', jobTerminal: false,
     jobText: '排队中 · 在等空闲资源', resources: {}, gresText: null,
@@ -1583,7 +1623,7 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
   assert.equal(rangeOf(0).value, '1', 'CPU 那条停在站点的默认（2 核）上，不是起点上');
   assert.equal(st.cpus.value, '', '而那一格里仍然一个字都没有 —— 留空即默认');
   assert.equal(rangeOf(0).max, '17',
-    '档位表：1 2 4 8 12 16 20 24（8 档）+ 28 32 … 64（10 档）共 18 档');
+    '还没选分区时用退路 64：1 2 4 8 12 16 20 24（8 档）+ 28 32 … 64（10 档）共 18 档');
   // 装了滑块的格子不再摆那个输入框，位置改由滑块旁边那个读数说。
   //   输入框还在 DOM 里（提交那一侧读的就是它），所以判的是"画不画得出来"。
   assert.equal(boxOf(0).classList.contains('hidden'), true,
@@ -1612,10 +1652,16 @@ test('三格滑块：停在站点那份默认上，拖动它就把值写进那�
     '而没有滑块的时候，那一格留着的仍是那个输入框：`512M` 这种写法要写得进去');
   assert.equal(valOf(1).textContent, '', '那时也没有读数，标签那一行与从前相同');
   h.fn('renderPartitions')([
-    { name: 'normal', allowed: true, mem_per_node_mb: 128000,
+    { name: 'normal', allowed: true, mem_per_node_mb: 128000, cpus_per_node: 64,
       gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] },
-    { name: 'big', allowed: true, mem_per_node_mb: 191000, gres: [] },
+    { name: 'big', allowed: true, mem_per_node_mb: 191000, cpus_per_node: 128,
+      gres: [] },
   ]);
+  // 随机分区：两个顶都取有权限分区里的最大值（不是最小值）。
+  assert.equal(rangeOf(0).max, '33',
+    '随机分区时 CPU 滑块顶 = 各分区最大值 128（1 2 4 … 24 + 28…128 共 34 档）');
+  assert.equal(rangeOf(1).max, '185',
+    '随机分区时内存滑块顶 = 各分区最大值（191000 MB → 186 GB，下标 0…185）');
   st.part.value = 'normal';
   st.part.onchange();
   assert.equal(rangeOf(1).max, '124', '128000 MB → 125 个整 GB，下标 0…124');
@@ -1682,11 +1728,13 @@ test('滑块画不出来就不画：站点没给默认、默认不在档位上�
   assert.equal(rangeOf(cellsOf(a3.box), 0), undefined,
     '默认比上限还大时不画 —— 装了它也只能停在一个服务端会钳掉的数上');
 
-  // ④ 选了另一张卡：没有"默认几个"这回事（替它补一个数就是替站点定政策）
+  // ④ 选了另一张卡：照样有滑块（数量这一格本来就是必填），初值 1。
+  //    站点给的"默认几个"只属于它点名的那张卡；换了卡就没有那个数，
+  //    替它沿用别处的默认等于替站点定政策 —— 所以停 1，让用户自己拖。
   const a4 = h.fn('pluginAdv')({ cpus: 2, mem: '8G',
     gpus: { name: 'gpu', type: null, count: 1 } });
   h.fn('renderPartitions')([
-    { name: 'mixed', allowed: true, mem_per_node_mb: 262144,
+    { name: 'mixed', allowed: true, mem_per_node_mb: 262144, cpus_per_node: 128,
       gres: [{ name: 'gpu', type: 'rtx8000', per_node_max: 4, total: 4 },
              { name: 'mps', type: null, per_node_max: 100, total: 100 }] },
   ]);
@@ -1695,11 +1743,13 @@ test('滑块画不出来就不画：站点没给默认、默认不在档位上�
   const c4 = cellsOf(a4.box);
   a4.st.gres.value = '1';                    // `mps`，不是默认那张 `gpu`
   a4.st.gres.onchange();
-  assert.equal(rangeOf(c4, 3), undefined, '换了另一张卡就没有默认几个，不画');
+  assert.ok(rangeOf(c4, 3), '点名了卡就有滑块 —— 这一格本来就是必填');
+  assert.equal(rangeOf(c4, 3).value, '0', '没有对应的默认数量时停在 1 张');
+  assert.equal(a4.st.gresN.value, '1', '初值要写进控件：不拖直接提交也得有个数');
   a4.st.gres.value = '0';                    // `gpu:rtx8000`
   a4.st.gres.onchange();
-  assert.equal(rangeOf(c4, 3), undefined,
-    '型号也不一致（默认是 `gpu`、这一项是 `gpu:rtx8000`）—— 还是同一张卡才作数');
+  assert.ok(rangeOf(c4, 3), '型号也不一致时照样有滑块');
+  assert.equal(a4.st.gresN.value, '1');
 });
 
 test('同一份插件清单不重画：展开着的高级选项不许自己合上，填了一半的值不许被清掉',
@@ -1766,7 +1816,7 @@ test('高级选项收起就退回默认；离开插件屏时也收起来', () =>
   + ' error: { detail: "没有站点" } });');
   h.fn('renderPlugins')(view);
   h.fn('renderPartitions')([
-    { name: 'normal', allowed: true, mem_per_node_mb: 128000,
+    { name: 'normal', allowed: true, mem_per_node_mb: 128000, cpus_per_node: 64,
       gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] },
   ]);
   const block = () => h.byId.get('plugin-blocks').children[0];

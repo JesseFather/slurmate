@@ -81,8 +81,8 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | 该用户能用哪些分区 | `sacctmgr show assoc user=<u> format=Account,Partition` |
 | 该用户的账户 | 同上，`format=Account` |
 | 是否强制 association | `scontrol show config` 的 `AccountingStorageEnforce` |
-| 每分区节点忙闲 | `sinfo -N -h -o "%P\|%N\|%t"` |
-| 队列深度与排队顺序 | `squeue -h -o "%i\|%P\|%t\|%u"` |
+| 每分区节点忙闲、CPU 与内存余量 | `sinfo -N -h -o "%P\|%N\|%t\|%C\|%e"` |
+| 队列深度、排队顺序与 GRES 已用 | `squeue -h -o "%i\|%P\|%t\|%u\|%b"` |
 | 该用户的公平份额 | `sshare -u <u> -P -o Account,User,FairShare,RawUsage,EffectvUsage` |
 | 最近几天的作业 | `sacct -u <u> -S now-7days` |
 
@@ -775,6 +775,10 @@ Slurm 分区名大小写敏感，而 association 里的 `Partition` 字段由管
 同一个原因进会话视图的 `enroll_problem`，界面据此在状态条上写
 「站点还没有完成登记（原因）」。登记成功之后两处一起消失。
 
+装 ACL 规则失败走同一格：`enroll_problem` 的值是 `acl_failed: <原因>`，
+日志与审计那一条叫 `enroll_acl_failed`，节流共用同一个间隔。两条路都不再只
+留在守护进程的日志里 —— 用户看不到那份日志。
+
 这段等待期里没有原因时，用户能看见的只有「排队中」；而 `ENROLL_TTL` 到期时
 作业已经被取消，那一句迟到的日志没有用处。
 
@@ -849,7 +853,7 @@ Slurm 分区名大小写敏感，而 association 里的 `Partition` 字段由管
 | `log_dir_max_bytes` 在 1 到 2⁶³-1 之间 | 越界之后值不可信，而它要进 bash 的算术 |
 | **八个** Slurm 命令都能解析到 | 无法提交、查状态或查权限 |
 | 每个插件配置里的键都认得（文件名、文件内键） | 拼错的文件名/键会被静默忽略 |
-| 那份配置里的 `enabled` 是 yes/no、`default_cpus` 在 1-64、`default_mem` 可解析、`default_time` 可解析且不短于 1 分钟、`default_gpus` 是 `名字[:型号]:数量`、`max_sessions` 是不小于 1 的整数 | 认不出时拒绝启动，**不回退默认值** |
+| 那份配置里的 `enabled` 是 yes/no、`default_cpus` 在 1-1024、`default_mem` 可解析、`default_time` 可解析且不短于 1 分钟、`default_gpus` 是 `名字[:型号]:数量`、`max_sessions` 是不小于 1 的整数 | 认不出时拒绝启动，**不回退默认值**。`default_cpus` 的上界只是荒谬请求的护栏，真正的上限是分区的 `cpus_per_node` |
 | 至少有一个插件是开着的 | 客户端上一个按钮都不会有 |
 | 由清单声明了取值范围的键（`site.enumKeys`）都落在声明的取值里 | 无法决定那个插件起服务时要用的参数 |
 | 数据库表结构是本版的 | 少一列或多一列都只会在第一次用到时炸成「内部错误」 |
