@@ -523,12 +523,16 @@ else
     _sb_t0="$(date '+%Y-%m-%d %H:%M:%S')"
     _env=()
     [[ -n "$_share_root" ]] && _env+=("--setenv=SLURMATE_PROBE_SHARE_ROOT=$_share_root")
+    # 标准输入必须接 /dev/null：`systemd-run --pipe` 在标准输入是终端时会把
+    #   那个终端的属性改掉（erase 从 ^H 变 ^?、打开 imaxbel 与 echoprt），
+    #   退格键随后失灵，而且要退出整个会话才恢复。探针不读标准输入，接走它
+    #   不影响任何判定。
     timeout 60 systemd-run --wait --pipe --unit=slurmate-sandbox-probe \
         --property=Type=oneshot \
         --property=RuntimeDirectory=slurmate-probe \
         ${_env[@]+"${_env[@]}"} \
         "${_props[@]}" \
-        /bin/bash "$SANDBOX_PROBE" > "$SANDBOX_OUT" 2>&1
+        /bin/bash "$SANDBOX_PROBE" </dev/null > "$SANDBOX_OUT" 2>&1
 
     _why=""
     grep -q "is UP" "$SANDBOX_OUT" || _why="scontrol ping 没通"
@@ -791,7 +795,13 @@ if [[ -d "$_plugdir" ]]; then
         done"
         # 记录表不在 = 那次安装没提交（或者有人手放了一棵树）。这一条
         #    与守护进程对账时的处置逐字同源，所以这里只报、不删。
-        _no_rec="\$(find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -exec sh -c 'test -f "$1.json" || echo "$1"' _ {} \; 2>/dev/null)"
+        # 这一条要真的执行 find：外层若写成 "$(…)"，里面 sh -c 的 $1 会被
+        #   本脚本先展开（set -u 下就是「未绑定的变量」）；写成 '\$(…)' 又只
+        #   存下一段文本。所以命令替换不裹双引号，由内层 sh 自己取 $1。
+        _no_rec="$(
+            find "$_plugdir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' \
+                -exec sh -c 'test -f "$1.json" || echo "$1"' _ {} \; 2>/dev/null
+        )"
         if [[ -n "$_no_rec" ]]; then
             r FAIL "下面这几个插件目录没有记录表（那一次安装没提交完，或者它是人手放进去的）："
             printf '%s\n' "$_no_rec" | sed 's/^/      /'

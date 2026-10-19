@@ -81,6 +81,20 @@
 现在只对 `gres` 破例保留 `null`；`cpus` / `mem` / `partition` / `time` 的 `null`
 仍然丢弃（服务端会把 `cpus: null` 当成 0 核）。
 
+### Fixed — 沙箱探针不再改掉终端
+
+`systemd-run --wait --pipe` 在标准输入是终端时会把那个终端的属性改掉：
+`erase` 从 `^H` 变成 `^?`，同时打开 `imaxbel` 与 `echoprt`。表现是安装或
+`--check` 跑完之后，同一个会话里退格键显示 `^H`，要重新登录才恢复
+（2026-10-19 真机）。
+
+`tools/check-cluster.sh` 第 8 节那条探针不读标准输入，现在把它的 stdin 接到
+`/dev/null`。`--pipe` 保留 —— 探针的输出要靠它接回 `$SANDBOX_OUT`。
+
+同一节里另有一条从未执行过的判据：`_no_rec="\$(find …)"` 存下的是一段字面
+文本，不是命令结果；那一行里的 `"$1"` 又落在外层双引号里，`set -u` 下直接报
+「未绑定的变量」，把脚本从那里截断。命令替换改为不裹双引号，由内层 `sh` 取 `$1`。
+
 ## [0.29] — 未发布
 
 > 协议版本是 **0.29**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
