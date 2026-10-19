@@ -85,7 +85,7 @@ SESSION_FILE_FIELDS = {
     "service_kind", "service_pid",
     # 作业内 sshd 的主机公钥。客户端把它写进自己的 known_hosts 再连，
     # 这样那边就能用 StrictHostKeyChecking yes 而不是首次信任。
-    # code-server 的作业写的是空串（它没有主机密钥）。
+    # 有界面的插件的作业写的是空串（它没有主机密钥）。
     "ssh_host_key",
 }
 
@@ -1092,7 +1092,7 @@ PLUGIN_VERSION_RE = re.compile(
     r"\A%s\.%s\.%s\Z" % (_SEG_ANY, _SEG_BYTE, _SEG_BYTE))
 # 下面这两条也与客户端 `plugins/index.js` 的 `ulid.isId` / `NAME_RE` 逐字一致，
 #   理由与上面完全一样（一侧收下、另一侧拒了）。它们跟着版本号一起用 `\A … \Z`：
-#   `"code-server\n"` 那种值（不带 `\A … \Z` 就会被放行）。
+#   `"某个插件名\n"` 那种值（不带 `\A … \Z` 就会被放行）。
 # 铸造出来的 id 是一个 ULID：26 个 Crockford base32 字符（去掉了 I / L / O / U）。
 PLUGIN_ID_RE = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
 # 站点短名进配置文件名（`<名字>.conf`）、进会话文件、进日志与报错文案。
@@ -1506,7 +1506,7 @@ class PluginSpec(object):
         #   不该在没有任何人同意的情况下多出一个能力。
         #
         #   为 True 的只有一种插件：它就是升级前那个唯一可用的服务（历史上是
-        #   code-server）。这条标记存在的全部理由就是「升级不改变现有站点的行为」，
+        #   有界面的插件）。这条标记存在的全部理由就是「升级不改变现有站点的行为」，
         #   而不是「这个插件比较重要」。新插件不要标它。
         self.default_enabled = default_enabled
         # 需要客户端随提交带一行公钥（作业内的插件把它写进 authorized_keys 之类）。
@@ -1521,7 +1521,7 @@ class PluginSpec(object):
         self.bin_name = bin_name
         self.bin_fallback = bin_fallback
         # 取值只能是固定几种的键：(键名, 允许值, 缺省值)。放在这里而不是写一段
-        # `if 插件名 == "code-server"`，校验规则属于插件的元数据。
+        # `if 插件名 == "某个插件"`，校验规则属于插件的元数据。
         self.enum_keys = tuple(enum_keys)
 
     @property
@@ -1965,7 +1965,7 @@ SLURM_COMMANDS = ("sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
 # 正是这个项目一路在清的那类问题：文件里写着，而实际什么也没发生。
 #
 # 插件自己的键不在这里，见 PluginSpec.conf_keys()。`auth_mode`、`bin`
-#   这些东西是插件的策略（code-server 的认证方式、sshd 的可执行文件路径），
+#   这些东西是插件的策略（有界面的插件声明的认证方式、中转站声明的可执行文件路径），
 #   不是站点的事实，所以它们各自住在那个插件的配置里，而不是在顶层排成一排。
 GLOBAL_KEYS = frozenset([
     "range_start", "range_end", "reserved_ranges", "candidates_per_session",
@@ -5282,7 +5282,7 @@ class PluginConfig(object):
             self.bin, self.bin_src = (spec.bin_fallback, "惯例路径（本机不做查找："
                                                          "登录节点上的结果对计算节点不是证据）")
 
-        # ── 取值受限的键（如 code-server 的 auth_mode）──
+        # ── 取值受限的键（如 auth_mode）──
         self.enum = {}
         for key, choices, default in spec.enum_keys:
             val = (raw.get(key) or "").strip().lower() or default
@@ -5302,7 +5302,7 @@ class PluginConfig(object):
         需要公钥的插件：`publickey`。作业内的 sshd 用客户端带上来的那把公钥认证，
         会话文件里根本没有口令（run.sbatch 那条分支不生成口令）。
 
-        其余插件：用它那份配置里的 enum 键（code-server 的 `auth_mode`）。插件一个
+        其余插件：用它那份配置里的 enum 键（某个插件的 `auth_mode`）。插件一个
         enum 键都没有时是 `none`，那表示「框架不知道有什么客户端侧的认证步骤」，
         而不是「不需要认证」；具体怎么接由插件自己在客户端侧声明。
         """
@@ -5453,7 +5453,7 @@ def render_plugin_file(spec, enabled, commented):
 
     `enabled` 写的是插件自己声明的缺省（`site.defaultEnabled`），不是
       写死的 `no`。写死 `no` 是一处静默的行为改变：一个"一份配置都没写"的
-      站点本来靠清单缺省开着的插件（code-server 就是），会在第一次对账生成它
+      站点本来靠清单缺省开着的插件（有界面的插件就是），会在第一次对账生成它
       那一份之后悄悄关掉，那正是 CONFIGURATION.md 点名的最危险的
       那类改变。生成物只该照实说出生效值，不该改变它。
 
@@ -6244,9 +6244,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     service_port    INTEGER,
     candidates      TEXT NOT NULL,
     auth_mode       TEXT NOT NULL DEFAULT 'password',
-    -- 这个会话提供哪种服务（'code-server' / 'sshd'）。
+    -- 这个会话提供哪种服务（插件短名，例如 'web-demo' / 'sshd'）。
     -- 可空，NULL = 未知，从 nft 规则恢复出来的会话不知道自己是什么服务，
-    --   那时报 NULL 比编一个 'code-server' 诚实（与 cpus/mem 在恢复态报 null 而不是 0
+    --   那时报 NULL 比编一个具体的插件名诚实（与 cpus/mem 在恢复态报 null 而不是 0
     --   是同一条原则）。
     service_kind    TEXT,
     -- 这个会话用的是哪一个插件、哪一版，`"<id>@<版本>"`。
@@ -7052,7 +7052,7 @@ class Slurm(object):
         "作业已结束"→ phase_release 删掉 nft 规则 + 删掉用户家目录里的会话文件，
         而作业还在跑。
         这是最危险的一类误判：静默、批量、且不可恢复（会话文件被删后无法重新登记，
-        防护消失而 code-server 仍在监听端口，直到 TimeLimit 到期）。
+        防护消失而服务仍在监听端口，直到 TimeLimit 到期）。
         运维重启 slurmctld 是例行动作，所以这条路径必须保守。
 
         `scontrol show job <不存在的 id>` 通常返回非零并打印 "Invalid job id
@@ -8878,8 +8878,8 @@ class Sessiond(object):
             # 而 session_view() 把 0 与空串都渲染成"未知"。
             #
             # service_kind 同理，而且这里连 不传 都是刻意的：nft 规则里没有
-            # 任何东西能说明那个端口上跑的是 code-server 还是 sshd，所以这一列会是
-            # NULL = 未知。绝不要在这里填 'code-server' 当默认，猜错会让界面
+            # 任何东西能说明那个端口上跑的是有界面的插件还是中转站，所以这一列会是
+            # NULL = 未知。绝不要在这里填一个具体的插件名当默认，猜错会让界面
             # 拿口令去 POST 一个 SSH 端口，弹出一句语义完全错误的"自动登录失败"。
             # （service_kind 不在下面的参数里，所以它天然是 NULL；写下来是防后人"顺手补全"。）
             self.store.insert(
@@ -10740,7 +10740,7 @@ class Sessiond(object):
             "resources": {"cpus": s["cpus"] or None, "mem": s["mem"] or None,
                           "gres": load_gres(s["gres"])},
             # 这个会话提供的是哪种服务。界面据此决定「连接」该做什么，
-            # code-server 要建视图并自动登录，sshd 只是把隧道指向它、让用户拿
+            # 有界面的插件要建视图并自动登录，sshd 只是把隧道指向它、让用户拿
             # 原生 VS Code / codex 去连，客户端不做任何 HTTP 的事。
             # NULL = 不知道（从 nft 规则恢复出来的会话），界面要如实显示，
             # 不要猜一个默认值，猜错会让界面拿口令去打一个 SSH 端口。
@@ -10822,7 +10822,7 @@ class Sessiond(object):
                 # 作业内 sshd 的主机公钥（不是秘密，但和口令一起读最省一次文件 IO）。
                 # 客户端用它把这一条预先写进 known_hosts，没有它，那边的 ssh 只能
                 # 首次信任，而"首次"在这条通路上是可以被抢的（见 run.sbatch 里那段）。
-                # 空串 = 这个作业没有 sshd（code-server 分支），此时不放进 d：
+                # 空串 = 这个作业没有 sshd（有界面的插件分支），此时不放进 d：
                 # 「没有这个字段」和「有这个字段但是空」对客户端是两件事，
                 # 后者会被读成"主机公钥是空的"，那是个没法处理的输入。
                 hk = info.get("ssh_host_key")
@@ -11707,7 +11707,7 @@ class Sessiond(object):
             "SLURMATE_GRES": gres_spec(gres) or "",
             "SLURMATE_AUTH_MODE": pcfg.session_auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
-            # 可执行文件走插件自己声明的那个变量名（code-server 是
+            # 可执行文件走插件自己声明的那个变量名（有界面的插件是
             # SLURMATE_CS_BIN，sshd 是 SLURMATE_SSHD_BIN）。加第三个插件不用动这里。
             **({spec.bin_env: pcfg.bin} if spec.bin_env else {}),
             "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),

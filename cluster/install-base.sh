@@ -2025,7 +2025,7 @@ case "$RULESET_VERDICT" in
     DYNAMIC)
         warn "nftables 规则集有差异，但仅涉及【已知会随用户作业流动】的规则："
         printf '%s\n' "$RULESET_OUT" | tail -n +2 | sed 's/^/        /' >&2
-        warn "  即部署这几秒内恰有用户启停 code-server（cs-*）或提交带端口"
+        warn "  即部署这几秒内恰有用户启停编辑器（cs-*）或提交带端口"
         warn "  转发的作业（job-*）。本系统不会产生这两类 comment，可以放行。"
         warn "  若想拿到完全干净的 SAME，可在业务空闲时重跑 --check 复核。"
         ;;
@@ -2081,7 +2081,7 @@ ls -A /tmp/codeserver-ports 2>/dev/null | sort > "${WORK_DIR}/locks-after.txt" |
 if diff -q "${WORK_DIR}/locks-before.txt" "${WORK_DIR}/locks-after.txt" >/dev/null; then
     ok "codeserver 锁目录内容未变"
 else
-    warn "锁目录有变化（通常是并发用户启停了 code-server，非本系统所致）："
+    warn "锁目录有变化（通常是并发用户启停了编辑器，非本系统所致）："
     diff "${WORK_DIR}/locks-before.txt" "${WORK_DIR}/locks-after.txt" | sed 's/^/        /' >&2
 fi
 

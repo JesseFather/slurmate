@@ -19,7 +19,7 @@
 #  这是被安装器织进本插件那一份作业脚本的片段，不是可执行脚本
 #  （成品是 <prefix>/share/slurmate/jobs/<本插件的 ULID>.sbatch）。两条硬规矩
 #  （不许 shebang / 不许 `#SBATCH`、函数名一律带 `_sshd` 后缀）与
-#  plugins/code-server/job/start.sh 的文件头是同一份，那里解释得最细。
+#  基座的 packer/docs/README.md 里解释得最细。
 #
 #  为什么要有这个插件：原生 VS Code Remote-SSH、codex 这类工具要求一个 ssh
 #  连接，而用户不能直接 ssh 到计算节点。
@@ -226,7 +226,7 @@ start_sshd() {
     cat > "$cfg" <<EOF
 # 由 run.sbatch 里的 start_sshd 生成，每次作业一份。逐项理由见对应注释。
 Port $p
-# 与 code-server 的 --bind-addr 对齐：只听集群地址。默认是 0.0.0.0 + ::，
+# 与有界面的插件的 --bind-addr 对齐：只听集群地址。默认是 0.0.0.0 + ::，
 # 那会把端口挂到计算节点的所有接口上 —— 而 nft ACL 挂在【登录节点】的 output 链，
 # 管不到"从外部直连计算节点"这条路径。
 ListenAddress $NODE_IP

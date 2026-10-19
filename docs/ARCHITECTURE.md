@@ -180,7 +180,7 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 > `client/src/main/backend-ssh.js` 已经实现（专用密钥认证、固定 argv 的 RPC、
 > 主机密钥 TOFU 校验），而 SSH 握手与 exec 通道都在真集群上走通过一次：版本握手与
 > 那几项站点查询取回的是那台集群的真实数据。`direct-tcpip` 转发也在 2026-10-18
-> 走通了 —— 提交会话、code-server 跑起来之后，界面从隧道里打开过。
+> 走通了 —— 提交会话、插件跑起来之后，界面从隧道里打开过。
 > 仍然只有推断的是常驻通道与两台电脑的接管，见
 > [`docs/KNOWN-ISSUES.md`](KNOWN-ISSUES.md) 的 U1。
 
@@ -233,9 +233,9 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 客户端那一侧一步人工动作都不需要（它自己取回来），
 也不用改基座的任何一行源码。
 
-仓库顶层 [`plugins/`](../plugins) 下放着两棵开发样例树（一个网页 IDE、一个作业内
-的用户态 ssh —— 后者给原生 VS Code Remote-SSH / codex 这类要求 ssh 连接的工具用），
-它们用来在开发时对齐两侧的能力，不是"基座自带的插件"。契约见
+仓库顶层 [`plugins/`](../plugins) 下放着一棵开发样例树（作业内的用户态 ssh ——
+给原生 VS Code Remote-SSH / codex 这类要求 ssh 连接的工具用），
+它用来在开发时对齐两侧的能力，不是"基座自带的插件"。契约见
 [packer/docs/README.md](../packer/docs/README.md)，站点侧配置见
 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md) 的插件一节。
 
