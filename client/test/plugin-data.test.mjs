@@ -43,17 +43,17 @@ const require = createRequire(import.meta.url);
 const pluginData = require('../src/main/plugin-data.js');
 const P = require('../src/main/plugins/index.js');
 
-/** code-server 的 id。用真的那一个，"身份里带的是这个插件的 id"读起来才不像巧合。 */
-const ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
+/** web-demo 的 id。用真的那一个，"身份里带的是这个插件的 id"读起来才不像巧合。 */
+const ID = '01M2JKHTZGKJBFQQTWYXMQMF30';
 
 /** 一个注册表里的插件对象该有的样子（只列身份要用的那几项）。 */
 const plugin = (over = {}) => ({
-  id: ID, name: 'code-server', version: '1.0.0',
+  id: ID, name: 'web-demo', version: '1.0.0',
   contributes: { ports: 1, concurrent: false, data: null },
   ...over,
 });
 
-/** 声明了能同时开两份的那一个 —— code-server 真实的样子。 */
+/** 声明了能同时开两份的那一个 —— web-demo 真实的样子。 */
 const concurrent = (over = {}) => plugin({
   contributes: { ports: 1, concurrent: true, data: { inherit: 'editor' } },
   ...over,
@@ -186,7 +186,7 @@ test('要数据空间却无法获取那一份，抛，不回落成两段', () =>
   }
   // 报错要点出是哪个插件：池里可以并存同一个插件的多个版本，只说"缺那一份"
   // 指不回那一份清单。
-  assert.throws(() => pluginData.identityOf(p, null), /code-server/);
+  assert.throws(() => pluginData.identityOf(p, null), /web-demo/);
   // 而不要数据空间的那一个拿不到也不抛 —— 它本来就没有第三段。
   assert.doesNotThrow(() => pluginData.identityOf(relay(), null));
 });
@@ -273,7 +273,7 @@ test('foldAscii 仍然只有一份实现（plugins/index.js 那一份是 re-expo
 });
 
 /** 磁盘上那一份 id：小写、26 个字符（`ULID` 的折叠形态）。手写，不用被测函数算。 */
-const DISK_ID = '01m2jkhtzgkjbfqqtwyxmqmf2v';
+const DISK_ID = '01m2jkhtzgkjbfqqtwyxmqmf30';
 
 test('identityOfDiskName：认得出折叠过的 id 与版本形状的第二段，认不出残缺的', () => {
   assert.deepEqual(pluginData.identityOfDiskName(`${DISK_ID}@editor@s0000000000ab`),
@@ -374,7 +374,7 @@ test('四条判据各管一件事：hasSurface / needsSpace / canOpenSecond / po
 /** 一份最小合法清单，`over` 里的东西直接盖上去。 */
 function manifest(over = {}) {
   return {
-    id: ID, name: 'code-server', displayName: '开发环境', version: '1.0.0',
+    id: ID, name: 'web-demo', displayName: 'Web 示例', version: '1.0.0',
     contributes: { ports: 1, concurrent: false },
     ...over,
   };

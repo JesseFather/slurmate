@@ -81,12 +81,12 @@ test('客户端那五张键表与 tools/manifest-keys.json 逐字相同（有序
 
 // ── ② 拼错了会怎样：装不上，而且报错点名那个键 ──────────────────────────────
 
-const ID = '01M2JKHTZGKJBFQQTWYXMQMF2V';
+const ID = '01M2JKHTZGKJBFQQTWYXMQMF30';
 
 /** 一份完整合法的清单 —— 每一条反例都只在它上面动一个键名。 */
 function validManifest() {
   return {
-    id: ID, name: 'code-server', displayName: '开发环境', version: '1.0.0',
+    id: ID, name: 'web-demo', displayName: 'Web 示例', version: '1.0.0',
     description: '', author: 'slurmate',
     engines: { slurmate: '>=0.5' },
     contributes: {

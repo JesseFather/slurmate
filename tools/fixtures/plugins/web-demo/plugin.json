@@ -1,0 +1,33 @@
+{
+  "id": "01M2JKHTZGKJBFQQTWYXMQMF30",
+  "name": "web-demo",
+  "displayName": "Web 示例",
+  "version": "1.0.0",
+  "description": "测试夹具：一个有界面的 web 插件。基座不依赖任何具体插件，夹具只提供它需要的能力。",
+  "author": "slurmate",
+  "engines": { "slurmate": ">=0.5" },
+  "contributes": {
+    "surface": { "kind": "web", "path": "/" },
+    "login": { "path": "/login", "field": "password", "cookie": "web-demo-session" },
+    "ports": 1,
+    "submitPubkey": false,
+    "concurrent": true,
+    "data": {
+      "inherit": "editor"
+    }
+  },
+  "site": {
+    "defaultCpus": 2,
+    "defaultMem": "8G",
+    "defaultEnabled": true,
+    "bin": {
+      "env": "SLURMATE_WEB_DEMO_BIN",
+      "discovery": "which",
+      "name": "web-demo",
+      "fallback": "/usr/local/bin/web-demo"
+    },
+    "enumKeys": {
+      "auth_mode": { "choices": ["password", "none"], "default": "password" }
+    }
+  }
+}

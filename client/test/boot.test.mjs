@@ -67,7 +67,13 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 const CFG_DIR = userData;
 const SITE_POOL = path.join(fakeHome, '.slurmate', 'site-plugins');
-const SAMPLE_PLUGINS = ['code-server', 'sshd'];
+const SAMPLE_PLUGINS = ['sshd', 'web-demo'];
+/** 测试夹具插件放在这里；`sshd` 仍然从仓库的 `plugins/` 取。 */
+const FIXTURE_PLUGINS = path.join(REPO, 'tools', 'fixtures', 'plugins');
+function pluginSrcDir(n) {
+  const inFixture = path.join(FIXTURE_PLUGINS, n);
+  return fs.existsSync(inFixture) ? inFixture : path.join(REPO, 'plugins', n);
+}
 /**
  * 假站点样例树那一处的固定位置（见 `buildFixtureSiteTree`）。
  * 固定而不是每次 mkdtemp：`setSampleDir` 存的是路径，而用例会在
@@ -100,8 +106,8 @@ const require = createRequire(import.meta.url);
  * 跑得起来的树。
  *
  * 为什么不能直接用仓库里那两棵：假站点现在真的把插件的作业侧跑起来
- *    （见 fake-job.js）。仓库里的 `code-server/job/start.sh` 要这台机器上真的有一个
- *    `code-server` —— 开发机上也许有，CI 上一定没有。用真树的话，几十条会话用例
+ *    （见 fake-job.js）。仓库里的 `web-demo/job/start.sh` 要这台机器上真的有一个
+ *    `web-demo` —— 开发机上也许有，CI 上一定没有。用真树的话，几十条会话用例
  *    会一起红在"作业侧无法启动"上，而那条报错与它们要验的事情毫无关系。
  *
  * 换掉的是只有站点侧那一半（`job/start.sh`，以及它旁边那个 `job/serve.js`）。
@@ -121,7 +127,7 @@ function buildFixtureSiteTree(names) {
   fs.rmSync(SITE_TREE, { recursive: true, force: true });
   fs.mkdirSync(SITE_TREE, { recursive: true });
   for (const n of names) {
-    const src = path.join(REPO, 'plugins', n);
+    const src = pluginSrcDir(n);
     const dest = path.join(SITE_TREE, n);
     fs.cpSync(src, dest, { recursive: true });
     const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
@@ -130,7 +136,7 @@ function buildFixtureSiteTree(names) {
     if (!(mf.contributes && mf.contributes.surface)) continue;
     const short = String(mf.name).replace(/-/g, '_');
     fs.writeFileSync(path.join(dest, 'job', 'serve.js'), [
-      '// 夹具：这个插件的作业侧服务（真站点上这里跑的是 code-server 那个',
+      '// 夹具：这个插件的作业侧服务（真站点上这里跑的是 web-demo 那个',
       '//   真程序）。它跑的是客户端里那个假 web 服务，而契约从**这份插件自己的',
       '//   清单**里读 —— 于是一条会话两端都是真的。',
       "const fs = require('fs');",
@@ -191,7 +197,7 @@ function setSitePlugins(names) {
   config.saveConfig(CFG_DIR, cfg);
 
   for (const n of names) {
-    const src = path.join(REPO, 'plugins', n);
+    const src = pluginSrcDir(n);
     const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
     const dest = poolTreeOf(SITE_POOL, mf.id, mf.version);
     assert.ok(dest, `夹具里那个插件的 id 必须是 ULID：${mf.id}`);
@@ -391,7 +397,7 @@ class FakeWebContents {
 class FakeWebContentsView {
   constructor(opts = {}) {
     this.webContents = new FakeWebContents();
-    // code-server 视图必须跑在自己的 partition 里（= 它那份运行时数据的身份，
+    // web-demo 视图必须跑在自己的 partition 里（= 它那份运行时数据的身份，
     // 见 plugin-data.js）。
     // 登录要在这个 partition 的 cookie jar 里查 —— 所以桩也得把 session 接上。
     this.webContents.session =
@@ -1567,13 +1573,13 @@ test('分区来自 Slurm（不是配置里的「用途」），且没权限的�
   assert.ok(denied.reason, '禁用必须给出理由，而不是让用户猜');
 });
 
-test('开会话：创建 code-server 视图，并真的自动登录成功', async (t) => {
+test('开会话：创建 web-demo 视图，并真的自动登录成功', async (t) => {
   t.after(() => { Module._load = origLoad; });
 
   const before = calls.views.length;
   // 高级选项的临时覆盖：只传真实填了的键。这里模拟用户填了 4 核，
   // 内存不填 → 由服务端用自己的默认值（而不是客户端编一个）。
-  await appStart({ cpus: 4 }, 'code-server');
+  await appStart({ cpus: 4 }, 'web-demo');
 
   // 等登记完成（假后端 200ms）+ 建隧道 + 登录
   const view = await (async () => {
@@ -1583,7 +1589,7 @@ test('开会话：创建 code-server 视图，并真的自动登录成功', asyn
       if (v && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(v.webContents._url)) return v;
       if (Date.now() > deadline) {
         const snap = await frontSnap();
-        assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(snap)}`);
+        assert.fail(`等待 web-demo 视图超时。当前状态：${JSON.stringify(snap)}`);
       }
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -1596,7 +1602,7 @@ test('开会话：创建 code-server 视图，并真的自动登录成功', asyn
   //   共享组 @ 实例。三样缺一不可：
   //   · 末段是工作区 id，不是端口 —— 按端口命名会让「A 工作区被回收后端口被新工作区
   //     复用」时，新工作区的「空白工作区」继承 A 的 localStorage 与登录 cookie；
-  //   · 中间那段是清单里写的 `editor`（写死了几个版本共用一份，这正是 code-server
+  //   · 中间那段是清单里写的 `editor`（写死了几个版本共用一份，这正是 web-demo
   //     升级不丢布局的原因）；
   //   · 头一段是插件 id —— 少了它，两个都声明了 ports 的插件共用一个工作区时
   //     会读写同一份存储（今天只有一个这样的插件，所以那是个还没炸的洞）。
@@ -1614,7 +1620,7 @@ test('开会话：创建 code-server 视图，并真的自动登录成功', asyn
   const ok = await (async () => {
     const deadline = Date.now() + 8000;
     for (;;) {
-      if (jar && jar.has('code-server-session')) return true;
+      if (jar && jar.has('web-demo-session')) return true;
       if (Date.now() > deadline) return false;
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -1644,14 +1650,14 @@ test('开会话：创建 code-server 视图，并真的自动登录成功', asyn
     '断开之后必须能重新接上，否则「断开」就成了单向门');
 });
 
-/** 等一个新的 code-server 视图出现。loadURL 在自动登录之前就返回了，所以只能轮询。 */
+/** 等一个新的 web-demo 视图出现。loadURL 在自动登录之前就返回了，所以只能轮询。 */
 async function waitForView(fromIndex, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const v = calls.views[fromIndex];
     if (v && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(v.webContents._url)) return v;
     if (Date.now() > deadline) {
-      assert.fail(`等待 code-server 视图超时。当前状态：${JSON.stringify(await invoke('app:states'))}`);
+      assert.fail(`等待 web-demo 视图超时。当前状态：${JSON.stringify(await invoke('app:states'))}`);
     }
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -1682,7 +1688,7 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
     '假后端应当连得上');
 
   const before = calls.views.length;
-  const started = await appStart({}, 'code-server');
+  const started = await appStart({}, 'web-demo');
   assert.equal(started.ok, true, `开会话应当成功：${JSON.stringify(started)}`);
   const view1 = await waitForView(before);
 
@@ -1770,10 +1776,10 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
   // 契约现在由插件给，不由基座写死。这份契约直接从装着的那个插件清单里取
   //   —— 测试因此钉住的是"真插件声明的值"，而不是测试里另抄一份（抄的那份迟早
   //   会与清单分叉，而分叉的表现是"登录莫名其妙失败"）。
-  const cs = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
-  assert.ok(cs, '这个用例要先装上 code-server 插件（见文件头的池设置）');
+  const cs = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
+  assert.ok(cs, '这个用例要先装上 web-demo 插件（见文件头的池设置）');
   const contract = cs.contributes.login;
-  assert.ok(contract, 'code-server 的清单里必须有 contributes.login');
+  assert.ok(contract, 'web-demo 的清单里必须有 contributes.login');
 
   // 造一个「状态码 200 但 jar 里没有 cookie」的 session，模拟真实服务对口令错误的
   // 响应。任何靠状态码判断的写法都会在这里报成功。
@@ -1789,7 +1795,7 @@ test('口令错误时不能报成功 —— 这正是「HTTP 200 但没有 cooki
   // 反过来：有 cookie 就是成功，哪怕状态码不是 302
   const ses2 = {
     fetch: async () => ({ status: 200 }),
-    cookies: { get: async () => [{ name: 'code-server-session', value: 'x' }] },
+    cookies: { get: async () => [{ name: 'web-demo-session', value: 'x' }] },
   };
   assert.equal((await webLogin(ses2, 'http://127.0.0.1:1', 'pw', contract)).ok, true);
 
@@ -1824,7 +1830,7 @@ test('服务端通报的默认资源要真的送到界面上，不能又在客�
   //   填当下那份默认值。回发旧值的客户端会把管理员的改动永远钉死。
   const r = await invoke('app:partitions');
   assert.equal(r.ok, true);
-  const codeServer = r.plugins.plugins.find((p) => p.name === 'code-server');
+  const codeServer = r.plugins.plugins.find((p) => p.name === 'web-demo');
   assert.ok(codeServer, '代码宿主插件必须出现在可用的插件里');
   // 时限在同一格里 —— 它是"这个插件缺省给多少"的第三个答案，
   //   而不是另一件事。少了它界面就说不出"这个会话能跑多久"，用户只能在作业被
@@ -1838,7 +1844,7 @@ test('服务端通报的默认资源要真的送到界面上，不能又在客�
     '没配默认卡，那句话里不说 GRES（不编一个，也不显示一个裸对象）');
 
   const boot = await invoke('app:bootstrap');
-  const cs2 = boot.plugins.plugins.find((p) => p.name === 'code-server');
+  const cs2 = boot.plugins.plugins.find((p) => p.name === 'web-demo');
   assert.deepEqual(cs2.defaults,
     { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     'bootstrap 也要带 —— 界面首次渲染时还没有其他机会拿到它');
@@ -1864,7 +1870,7 @@ test('站点配了默认卡，那句「默认 …」里出现它，且走唯一�
   try {
     const r = await invoke('app:partitions');
     assert.equal(r.ok, true);
-    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    const cs = r.plugins.plugins.find((p) => p.name === 'web-demo');
     assert.deepEqual(cs.defaults.gpus, { name: 'gpu', type: 'a6000', count: 1 },
       '站点报的那个描述符要原样带回来 —— 界面不重排它的形状');
     assert.equal(cs.defaultsGresText, 'gpu:a6000 × 1',
@@ -1889,7 +1895,7 @@ test('老守护进程的 `defaults` 里没有 time：缺了就是缺了，不许
   try {
     const r = await invoke('app:partitions');
     assert.equal(r.ok, true);
-    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    const cs = r.plugins.plugins.find((p) => p.name === 'web-demo');
     assert.deepEqual(cs.defaults, { cpus: 2, mem: '8G' },
       'v0.5 的守护进程只报这两格 —— 客户端照原样带回来，不补 time / gpus');
     assert.equal(cs.defaults.time, undefined,
@@ -2044,11 +2050,11 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   //   这两件事不能互相类推 —— 把 `index.js` 那个根的 source 改成 site 而
   //   不管台账，会让池里每一份都变成 `active: false`。
   const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
-  const cs = reg.list().find((p) => p.name === 'code-server');
-  assert.ok(cs, '前置条件：池里有 code-server');
+  const cs = reg.list().find((p) => p.name === 'web-demo');
+  assert.ok(cs, '前置条件：池里有 web-demo');
   const ref = `${cs.id}@${cs.version}`;
 
-  assert.equal(reg.resolve(cs.id, ref).plugin.name, 'code-server', '解析键查得到就是它');
+  assert.equal(reg.resolve(cs.id, ref).plugin.name, 'web-demo', '解析键查得到就是它');
 
   // 服务端没说是哪一种服务时，一律不猜 —— 而且是两种"没说"同一个答案：
   //     · `null`     守护进程明说它不知道（会话是从 nft 规则恢复出来的）
@@ -2057,19 +2063,19 @@ test('插件注册表：四种输入四种答案，尤其「不知道」不能�
   //   这两种"没说"都不许兜到某个默认插件上 —— 兜过去违反这个协议的三态纪律：
   //   缺席不等于可以猜。
   //
-  //   这里的"不猜"是承重的：猜 code-server 会拿口令去 POST 一个 SSH 端口，
+  //   这里的"不猜"是承重的：猜 web-demo 会拿口令去 POST 一个 SSH 端口，
   //     猜 sshd 会拿主机公钥去配一个 HTTP 端口，两种都是系统在声称它并不知道的事。
   assert.equal(reg.resolve(undefined, undefined).plugin, null,
     '键不存在时绝不猜（从前会兜到 legacyDefault 那个插件上）');
   assert.equal(reg.resolve(null, undefined).plugin, null,
-    '守护进程明说不知道时绝不猜 —— 猜 code-server 会拿口令去 POST 一个 SSH 端口');
+    '守护进程明说不知道时绝不猜 —— 猜 web-demo 会拿口令去 POST 一个 SSH 端口');
   // 只给了短名、没有解析键，也不足以定位：池是全局的，两个站点可以各有
   //   一个叫同一个名字的插件，而它们是两个不同的东西。哪怕短名唯一命中也不猜 ——
   //   命中唯一只说明"本机只有一个叫这个名字的"，没说明这个会话用的是哪一版。
-  assert.equal(reg.resolve('code-server', undefined).plugin, null,
+  assert.equal(reg.resolve('web-demo', undefined).plugin, null,
     '只有短名时绝不猜 —— 它没有说清这个会话用的是哪一份代码');
   assert.equal(reg.resolve('ssh', undefined).plugin, null, '认不出的短名也不许退回默认');
-  assert.equal(reg.resolve('code-server', 'garbage').plugin, null, '坏掉的解析键不许退回默认');
+  assert.equal(reg.resolve('web-demo', 'garbage').plugin, null, '坏掉的解析键不许退回默认');
 
   // 认得出 id、但本机没有那一版 —— 这是"站点升级了插件而客户端还没跟上"的
   //   形态，也是用户最需要一句话的时候。必须说得出缺的是哪一版，而不是笼统的"未知"。
@@ -2142,7 +2148,7 @@ test('去重是按插件分桶的：两个插件各记各的"上次值"', (t) =>
   t.after(() => { Module._load = origLoad; });
   const { Registry, bucketOf } = require('../src/main/plugins/index.js');
   const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
-  const cs = reg.list().find((p) => p.name === 'code-server');
+  const cs = reg.list().find((p) => p.name === 'web-demo');
   const ss = reg.list().find((p) => p.name === 'sshd');
   assert.ok(cs && ss, '前置条件：池里两个插件都在');
   const b1 = bucketOf(cs);
@@ -2207,7 +2213,7 @@ function writePlugin(root, over = {}, clientSrc = undefined, opts = {}) {
   const vdir = /^\d+\.\d+\.\d+$/.test(String(mf.version)) ? String(mf.version) : '1.0.0';
   // 清单里那个 id 与名字里那个：正常形状下它们是同一个。两处会分家的
   //   只有两种现场，各自要显式地说出来：
-  //     · 清单里的 id 根本不是 ULID（`{id: 'code-server'}`），名字那一半只能另铸一个，
+  //     · 清单里的 id 根本不是 ULID（`{id: 'web-demo'}`），名字那一半只能另铸一个，
   //       否则夹具自己都拼不出一个合法的槽位名，那一份会被静静跳过，用例红在
   //       一个与被测规则无关的地方；
   //     · 要造"名字与清单不一致"（`{nameId: 另一个 ULID}`），显式给。
@@ -2251,7 +2257,7 @@ test('插件目录：坏插件只影响它自己，其余照常工作', (t) => {
   const badJson = writePlugin(tmp, { name: 'badjson' });
   fs.writeFileSync(path.join(badJson.dir, 'plugin.json'), '{ not json');
   // id 不是 ULID —— 身份是铸造出来的，编一个名字冒充不了
-  const badid = writePlugin(tmp, { id: 'code-server', name: 'badid' });
+  const badid = writePlugin(tmp, { id: 'web-demo', name: 'badid' });
   // 未知键：打错一个键名不该静默变成"配了但不生效"
   const badkey = writePlugin(tmp, { contribution: {} });
   // 客户端代码导出里打错了一个钩子名
@@ -2735,14 +2741,14 @@ test('零插件：界面拿到的是一份说得通的空态，不是"安装包�
     //   于是池空 + 本机没有它们，`missing`
     //   里就是它们，而且每一份都标着 `delivery: 'package'`——
     //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
-    assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['code-server', 'sshd'],
+    assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['sshd', 'web-demo'],
       '站点照实报了它要分发的两个插件，而本机一个都没有');
     assert.ok(pv.missing.every((m) => m.delivery === 'package'),
       `每一份都要标出"站点会发它"：${JSON.stringify(pv.missing)}`);
 
     // 一个插件都没有时，提交必须被明确拦住并给出路，而不是起一个
     //   看起来起来了但连不上的作业，也不是一句"本版支持：（一个都没有）"。
-    const started = await appStart({}, 'code-server');
+    const started = await appStart({}, 'web-demo');
     assert.equal(started.ok, false, '没有插件就起不了会话 —— 必须在提交前拦住');
     const notices = (calls.windows[0].webContents.handlers['send:ui:notice'] || [])
       .map((n) => n.text).join('\n');
@@ -3384,7 +3390,7 @@ test('假站点真的把这个插件的作业侧跑起来：隧道那头是它�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const run = await startRunning(idx, 'code-server');
+  const run = await startRunning(idx, 'web-demo');
   const sess = run.ctl.session;
   assert.equal(sess.state, 'enrolled', '会话要登记上');
 
@@ -3431,7 +3437,7 @@ test('假站点真的把这个插件的作业侧跑起来：隧道那头是它�
 function siteTreeWithJobSide(script, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-badjob-'));
   fs.cpSync(SITE_TREE, root, { recursive: true });
-  const jobDir = path.join(root, 'code-server', 'job');
+  const jobDir = path.join(root, 'web-demo', 'job');
   fs.writeFileSync(path.join(jobDir, 'start.sh'), script);
   for (const [name, text] of Object.entries(extra)) {
     fs.writeFileSync(path.join(jobDir, name), text);
@@ -3457,15 +3463,15 @@ test('作业侧无法启动，会话不许判成功，而原因要说得出是�
 
   idx._test.setSampleDir(siteTreeWithJobSide([
     '#!/bin/sh',
-    'start_code_server() {',
-    '    log "这个插件在这台机器上无法启动：本机没有 code-server"',
+    'start_web_demo() {',
+    '    log "这个插件在这台机器上无法启动：本机没有 web-demo"',
     '    return 1',
     '}',
     '',
   ].join('\n')));
   await invoke('app:syncPlugins');
 
-  const r = await appStart(null, 'code-server');
+  const r = await appStart(null, 'web-demo');
   assert.equal(r.ok, true, `提交本身要成功（站点收下了它）：${JSON.stringify(r)}`);
   const ctl = idx._test.sessionAt(r.slot).controller;
 
@@ -3484,7 +3490,7 @@ test('作业侧无法启动，会话不许判成功，而原因要说得出是�
   // 判据二：为什么起不来，在作业日志里，而且是它自己说的。
   const jl = await invoke('app:jobLog', { session_id: ctl.sessionId, lines: 200 });
   assert.equal(jl.ok, true, JSON.stringify(jl));
-  assert.match(jl.data.out.text, /这个插件在这台机器上无法启动：本机没有 code-server/,
+  assert.match(jl.data.out.text, /这个插件在这台机器上无法启动：本机没有 web-demo/,
     '作者的原话要在日志里 —— 那正是他排查的起点');
   assert.match(jl.data.err.text, /所有候选端口都失败了/,
     '宿主那一句也要在（说的是"每一个候选都试过了"）');
@@ -3513,7 +3519,7 @@ test('作业侧把服务的输出重定向走，宿主拒绝启动，并说出�
 
   idx._test.setSampleDir(siteTreeWithJobSide([
     '#!/bin/sh',
-    'start_code_server() {',
+    'start_web_demo() {',
     '    node "$(dirname "${BASH_SOURCE[0]}")/hidden.js" "$1" >/dev/null 2>&1 &',
     '    SVC_PID=$!',
     '    sleep 0.3',
@@ -3527,7 +3533,7 @@ test('作业侧把服务的输出重定向走，宿主拒绝启动，并说出�
   }));
   await invoke('app:syncPlugins');
 
-  const r = await appStart(null, 'code-server');
+  const r = await appStart(null, 'web-demo');
   assert.equal(r.ok, true, JSON.stringify(r));
   const ctl = idx._test.sessionAt(r.slot).controller;
   await waitUntil(() => ['error', 'ended'].includes(ctl.state), '会话不许判成功', 30000);
@@ -3556,11 +3562,11 @@ test('该目录树里没有 `job/start.sh`，站点当场说"提交不了"，不
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-nojob-'));
   fs.cpSync(SITE_TREE, root, { recursive: true });
-  fs.rmSync(path.join(root, 'code-server', 'job', 'start.sh'));
+  fs.rmSync(path.join(root, 'web-demo', 'job', 'start.sh'));
   idx._test.setSampleDir(root);
 
   const byName = (n) => idx._test.getBackend()._sitePlugins().find((p) => p.name === n);
-  const noJob = byName('code-server');
+  const noJob = byName('web-demo');
   assert.ok(noJob, '夹具前提：站点照样要报它（装得上、看得见）');
   assert.equal(noJob.enabled, true, '装了、也开着 —— 与"本站关了它"是两件事');
   assert.equal(noJob.can_submit, false, '没有作业侧，提交不了');
@@ -3597,7 +3603,7 @@ test('这台机器上没有 bash，那句提示说得清是哪一种无法启动
 
   // ── 而它接得上：整条路上真的走到那句，而且会话不许判成功 ──
   idx._test.getBackend().debugNoBash(true);
-  const r = await appStart(null, 'code-server');
+  const r = await appStart(null, 'web-demo');
   assert.equal(r.ok, true, JSON.stringify(r));
   const ctl = idx._test.sessionAt(r.slot).controller;
   await waitUntil(() => ['error', 'ended'].includes(ctl.state), '会话不许判成功', 30000);
@@ -4042,23 +4048,23 @@ test('`missing` 不说谎：站点关掉的插件不算"本机没有"', async (t
   await invoke('app:debug', 'reset');
   await withSitePlugins([], async () => {
     // 先把站点池清空。不清的话，前面那条端到端用例已经同意并装上了
-    //   code-server，`registry.get()` 查得到它 —— 于是这条用例会因为错误的理由
+    //   web-demo，`registry.get()` 查得到它 —— 于是这条用例会因为错误的理由
     //   通过（"本机已经有它"而不是"站点关掉的不算数"），变异验证 M12 就是这样
     //   漏过去的。
     fs.rmSync(idx._test.getSitePoolDir(), { recursive: true, force: true });
     idx._test.getRegistry().reload();
 
     const r0 = await invoke('app:partitions');
-    assert.ok(r0.plugins.missing.map((m) => m.name).includes('code-server'),
+    assert.ok(r0.plugins.missing.map((m) => m.name).includes('web-demo'),
       '前置：清空之后站点开着、本机没有，它必须在 missing 里');
 
-    // 站点把 code-server 关掉。`op_plugins` 按协议必须报它（带 enabled:false），
+    // 站点把 web-demo 关掉。`op_plugins` 按协议必须报它（带 enabled:false），
     // 而 `missing` 若不按 enabled 过滤 —— 于是管理员关掉一个插件，界面上会永远挂着
     // 一句"站点有而本机没有，升级客户端"。
-    idx._test.getBackend().debugDisableSitePlugin('code-server');
+    idx._test.getBackend().debugDisableSitePlugin('web-demo');
     const r = await invoke('app:partitions');
     const names = r.plugins.missing.map((m) => m.name);
-    assert.equal(names.includes('code-server'), false,
+    assert.equal(names.includes('web-demo'), false,
       `站点关掉的插件不该出现在 missing 里：${JSON.stringify(names)}`);
     assert.ok(names.includes('sshd'), '而站点开着、本机没有的那个仍然要在');
   });
@@ -4078,7 +4084,7 @@ test('站点装了客户端不认识的插件：不崩，而且说得出该怎�
 
     // 客户端认识的那两个照常
     assert.deepEqual(r.plugins.plugins.map((p) => p.name).sort(),
-      ['code-server', 'sshd']);
+      ['sshd', 'web-demo']);
     // 认不出的那个要被报出来，而不是被过滤掉 —— 它是升级提示的唯一来源。
     //   过滤掉的话，用户面对的就是"按钮凭空少了一个"，而没有任何地方解释为什么。
     const miss = r.plugins.missing.map((p) => p.name);
@@ -4271,7 +4277,7 @@ test('并发上限那一格：站点报几就是几，而缺席不是「1」', a
   backend.maxActive = 3;
   try {
     const r = await invoke('app:partitions');
-    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    const cs = r.plugins.plugins.find((p) => p.name === 'web-demo');
     assert.equal(cs.maxSessions, 3, '站点报几就是几');
   } finally {
     backend.maxActive = 1;
@@ -4283,7 +4289,7 @@ test('并发上限那一格：站点报几就是几，而缺席不是「1」', a
     const r = await invoke('app:partitions');
     const by = Object.fromEntries(r.plugins.plugins.map((p) => [p.name, p]));
     assert.equal(by.sshd.maxSessions, 2, '插件那一份写了就用它');
-    assert.equal(by['code-server'].maxSessions, 1, '没写的跟随全局');
+    assert.equal(by['web-demo'].maxSessions, 1, '没写的跟随全局');
   } finally {
     backend.pluginMaxSessions.delete('sshd');
   }
@@ -4296,7 +4302,7 @@ test('并发上限那一格：站点报几就是几，而缺席不是「1」', a
   });
   try {
     const r = await invoke('app:partitions');
-    const cs = r.plugins.plugins.find((p) => p.name === 'code-server');
+    const cs = r.plugins.plugins.find((p) => p.name === 'web-demo');
     assert.equal(cs.maxSessions, null,
       '站点没说就是 null —— 界面据此什么都不画，而不是补一个 1');
   } finally {
@@ -4555,7 +4561,7 @@ test('时序：新位置写成功才清旧的；写失败时旧的一个都不�
   assert.equal(fs.existsSync(old.config), false, '新位置写成功之后，旧的才清');
 });
 
-test('会话一结束就要收起 code-server 视图，把面板还给用户', async (t) => {
+test('会话一结束就要收起 web-demo 视图，把面板还给用户', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = idx._test.getBackend();
@@ -4570,7 +4576,7 @@ test('会话一结束就要收起 code-server 视图，把面板还给用户', a
   //   「等待超时」收场 —— 红的理由和它想验的事情毫无关系，而真正想验的那条
   //   断言（结束后视图还在不在）根本没被执行到。测试红了不等于测试对了。
   const w = idx._test.getWindow();
-  await appStart(null, 'code-server');
+  await appStart(null, 'web-demo');
   await waitUntil(() => (theView(w) && !theView(w).webContents.isDestroyed()
     && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(theView(w).webContents._url)
     ? theView(w) : null), '插件声明的那块界面');
@@ -4581,7 +4587,7 @@ test('会话一结束就要收起 code-server 视图，把面板还给用户', a
   //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
   await invoke('app:stop', { slot: await frontSlotOf() });
   assert.equal(Boolean(theView(w)), false,
-    '会话结束后必须销毁 code-server 视图 —— 它是原生层、覆在面板上方，'
+    '会话结束后必须销毁 web-demo 视图 —— 它是原生层、覆在面板上方，'
     + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
 });
 
@@ -4624,7 +4630,7 @@ test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的�
   await ensureConnected(idx);
   await openUpTo(idx, 1);
 
-  const started = await appStart(null, 'code-server');
+  const started = await appStart(null, 'web-demo');
   assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
   const slot = started.slot;
   await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那块页面建出来');
@@ -4672,7 +4678,7 @@ test('没有页面可盖的会话：断线那句话由状态条说，不挂整�
   await openUpTo(idx, 2);
 
   // 有页面的那一条：警告照旧挂遮罩（正对照，否则"永远不挂"也能让下面绿）。
-  const cs = await appStart(null, 'code-server');
+  const cs = await appStart(null, 'web-demo');
   assert.equal(cs.ok, true, `开会话失败：${JSON.stringify(cs)}`);
   await waitUntil(() => (w.hasSurface(cs.slot) ? viewFor(w, cs.slot) : null),
     '那一块页面建出来');
@@ -4848,7 +4854,7 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
     + '（端口 = origin = 一份浏览器存储），而中转站没有浏览器');
   assert.ok(snap.localPort > 0, '隧道必须真的在监听');
 
-  // 这一条是整节的重点：中转站不该建 code-server 视图。
+  // 这一条是整节的重点：中转站不该建 web-demo 视图。
   //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西（ssh 怎么连）
   //   恰好写在被盖住的那块面板上。
   assert.equal(calls.views.length, viewsBefore,
@@ -4907,7 +4913,7 @@ test('配置里认不出的 enabled 值按「跟着站点走」处理，不读�
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-cfg-'));
   fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
     schema: config.SCHEMA,
-    plugins: { sshd: { enabled: 'no' }, 'code-server': { enabled: true } },
+    plugins: { sshd: { enabled: 'no' }, 'web-demo': { enabled: true } },
   }));
   const cfg = config.loadConfig(tmp);
 
@@ -4917,7 +4923,7 @@ test('配置里认不出的 enabled 值按「跟着站点走」处理，不读�
   assert.equal(config.pluginEnabledLocally(cfg, 'sshd'), true,
     '认不出的值按「跟着站点走」处理，不读成「关掉」');
   // 认得出的照旧生效
-  assert.equal(config.pluginEnabledLocally(cfg, 'code-server'), true);
+  assert.equal(config.pluginEnabledLocally(cfg, 'web-demo'), true);
   assert.equal(config.pluginEnabledLocally(cfg, '从没听过的插件'), true,
     '没表过态 = 跟着站点走');
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -4952,7 +4958,7 @@ test('未知服务的会话：接上隧道、不建视图，并说清该升级�
   // 起一个正常会话 —— 认不出的那种也要接隧道，所以这里必须有一个真的在监听
   // 的端口。起完再把这个会话的 service_kind 换成客户端不认识的名字，正是
   // "别人用 CLI 提交了一个本站新插件"在客户端眼里的样子。
-  const started = await appStart({ cpus: 2 }, 'code-server');
+  const started = await appStart({ cpus: 2 }, 'web-demo');
   assert.equal(started.ok, true,
     `开会话失败：${JSON.stringify(started.sessions || started)}`);
   // 取刚起的这一条的 controller（`onlyCtl` 取的是表里第一个，而多开之后
@@ -4990,7 +4996,7 @@ test('未知服务的会话：接上隧道、不建视图，并说清该升级�
   // 插件对象住在记录上（`rec.plugin`），不在 controller 上 —— 多开之后
   //   "这个 controller 属于谁"必须由表来回答，controller 自己不该认识插件。
   const recNow = idx._test.sessionAt(started.slot);
-  assert.equal(recNow.plugin && recNow.plugin.name, 'code-server', '而且攥着的确实还是它');
+  assert.equal(recNow.plugin && recNow.plugin.name, 'web-demo', '而且攥着的确实还是它');
   w.destroySurface(w.front);
 
   // ── 不变量二：走客户端重启那条路时，认不出的插件要接隧道、不建视图 ──
@@ -5194,8 +5200,8 @@ test('多开：一个开发会话与一个中转站会话同时活着，互不�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  // ── 起甲：code-server（有界面）──
-  const a = await appStart(null, 'code-server');
+  // ── 起甲：web-demo（有界面）──
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲提交失败：${JSON.stringify(a)}`);
   const ctlA = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctlA.state === 'running' && ctlA.snapshot().origin,
@@ -5263,7 +5269,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   await connectDemo(idx);
 
   // ── 甲：一条有页面的会话 ──
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲提交失败：${JSON.stringify(a)}`);
   const ctlA = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctlA.state === 'running' && ctlA.snapshot().origin, '甲进入 running', 30000);
@@ -5302,7 +5308,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   await invoke('app:showPanel');
   assert.equal(w.panelFront, true, '前置：标志立着，而那个槽上此刻没有页面');
 
-  const a3 = await appStart(null, 'code-server');
+  const a3 = await appStart(null, 'web-demo');
   assert.equal(a3.ok, true, `甲′提交失败：${JSON.stringify(a3)}`);
   assert.equal(a3.slot, a.slot,
     '前置：同一个插件 + 同一份数据，同一个槽（这条用例的整个意义就在这里）');
@@ -5334,7 +5340,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   await waitUntil(() => !occupiedOf(idx, b2.slot), '乙那个槽松开', 20000);
   b.debugReap();
   const c1Before = noticesOf().length;
-  const c1 = await appStart(null, 'code-server');
+  const c1 = await appStart(null, 'web-demo');
   assert.equal(c1.ok, true, `丙提交失败：${JSON.stringify(c1)}　通知：`
     + noticesOf().slice(c1Before).map((n) => n.text).join(' | '));
   const ctlC1 = idx._test.sessionAt(c1.slot).controller;
@@ -5342,7 +5348,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   await waitUntil(() => w.front === c1.slot, '前台是丙', 20000);
   await invoke('app:showPanel');
   assert.equal(w.panelFront, true);
-  const c2 = await appStart(null, 'code-server');   // 同一个插件开第二份 = 临时副本
+  const c2 = await appStart(null, 'web-demo');   // 同一个插件开第二份 = 临时副本
   assert.equal(c2.ok, true, `丁提交失败：${JSON.stringify(c2)}`);
   assert.notEqual(c2.slot, c1.slot, '两份数据，两个槽');
   const ctlC2 = idx._test.sessionAt(c2.slot).controller;
@@ -5372,7 +5378,7 @@ test('同一个槽不许两条：拒绝，而且说得出是哪一个挡住了',
   // 这条用例用的是合成插件，理由必须写下来：它要的是
   //    「要工作区、但不能多开」这一格 —— 而那正是"认领"与"槽闸"唯一分得开
   //    的地方。
-  //    · 拿 code-server 来测会测到一句不再成立的话：它今天是
+  //    · 拿 web-demo 来测会测到一句不再成立的话：它今天是
   //      `concurrent: true`，于是第二个会话会正常起来（见下一条用例），
   //      而这条用例断言的是"必须在提交之前被拒"。
   //    · 拿 sshd 来测则相反 —— 它不要工作区，`spaceId` 在 `claimSpace`
@@ -5451,7 +5457,7 @@ test('同一个工作区里，两个不同的要数据空间的插件可以同�
   });
   idx._test.getBackend().debugAddSitePlugin('second-space');
 
-  const a = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
   const b = await startRunning(idx, 'second-space');
 
   // 判据一：两个槽。同一个工作区、同一个连接，而它们不是同一条会话。
@@ -5462,7 +5468,7 @@ test('同一个工作区里，两个不同的要数据空间的插件可以同�
   const cfg = idx._test.getCfg();
   const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId) || cfg.connections[0];
   const wsr = cfg.workspaces.find((l) => l.id === conn.workspaceId);
-  const sidA = wsr.refs[idx._test.getRegistry().list().find((p) => p.name === 'code-server').id];
+  const sidA = wsr.refs[idx._test.getRegistry().list().find((p) => p.name === 'web-demo').id];
   const sidB = wsr.refs[id];
   assert.ok(sidA && sidB, `夹具前提：两个插件在这个工作区里各有一份数据：${JSON.stringify(wsr.refs)}`);
   assert.notEqual(sidA, sidB, '两个插件各有各的一份 —— 不是共用一份');
@@ -5496,7 +5502,7 @@ test('同一个工作区里，两个不同的要数据空间的插件可以同�
 
 // ── 阶段 7：第二份从哪来（认领 + 临时实例）──────────────────────────────────
 //
-// 这一组用例的共同前提：同一个插件（code-server）要能同时开两份，所以
+// 这一组用例的共同前提：同一个插件（web-demo）要能同时开两份，所以
 // `openUpTo(idx, 2)` 是配额，`connectDemo` 给出那条连接 —— 而第一份认领它。
 
 /**
@@ -5579,20 +5585,20 @@ test('同一个插件开两份：第二份是临时实例（另一个端口、�
   await openUpTo(idx, 3);
   await connectDemo(idx);
 
-  const a = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
   const idA = a.ctl.spaceId;
   const partA = w.surfacePartition(a.slot);
   const cfg = idx._test.getCfg();
-  const refSpace = refSpaceOf(idx, 'code-server');
+  const refSpace = refSpaceOf(idx, 'web-demo');
 
   // 判据一：第一份仍然是持久的，一个字都没变。它认领的就是引用表指着的那一份
   //   （与这个机制存在之前逐字相同），分区名也就是那一份算出来的那一个。
   assert.equal(idA, refSpace.id, '第一份认领的是连接那个工作区里这个插件的那一份');
   assert.equal(partA, P.partitionOf(P.identityOf(
-    idx._test.getRegistry().list().find((p) => p.name === 'code-server'), refSpace)),
+    idx._test.getRegistry().list().find((p) => p.name === 'web-demo'), refSpace)),
   '第一份的分区名与从前逐字相同');
 
-  const b = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'web-demo');
   const idB = b.ctl.spaceId;
 
   // 判据二：两份落在两个槽、两个实例键上 —— 而第二份那个键
@@ -5614,7 +5620,7 @@ test('同一个插件开两份：第二份是临时实例（另一个端口、�
   const partB = w.surfacePartition(b.slot);
   assert.notEqual(partB, partA, '两份必须是两个存储分区');
   assert.equal(partB, P.partitionOf(P.identityOf(
-    idx._test.getRegistry().list().find((p) => p.name === 'code-server'), temp)));
+    idx._test.getRegistry().list().find((p) => p.name === 'web-demo'), temp)));
   assert.equal(refSpace.id === idB, false, '而第二份不属于任何工作区');
 
   // 判据四：界面上两条都看得见，而只有第二份带 `temporary`（那个标记是
@@ -5649,7 +5655,7 @@ test('同一个插件开两份：第二份是临时实例（另一个端口、�
   //    顺带把"两份临时的绝不能拿到同一个首选端口"也钉住（`usedSpacePortsAll`
   //    漏掉一个来源时唯一的可观测后果：前两条恰好一个 18080 一个 18081，看不出来；
   //    第三条才会与第二条撞上）。
-  const c3 = await startRunning(idx, 'code-server');
+  const c3 = await startRunning(idx, 'web-demo');
   const xs = [[a.ctl, idA], [b.ctl, idB], [c3.ctl, c3.ctl.spaceId]];
   assert.equal(new Set(xs.map(([, id]) => id)).size, 3,
     `三条三个实例键：${JSON.stringify(xs.map(([, id]) => id))}`);
@@ -5682,19 +5688,19 @@ test('临时实例的插件数据目录是持有者那一份的快照', async (t
   await connectDemo(idx);
 
   // 先在持有者那个身份下放一份"用户攒出来的数据"。
-  const { dir: baseDir, space } = makePluginDataDir(idx, 'code-server');
+  const { dir: baseDir, space } = makePluginDataDir(idx, 'web-demo');
   fs.writeFileSync(path.join(baseDir, 'settings.json'), '{"theme":"dark"}');
   fs.mkdirSync(path.join(baseDir, 'nested'), { recursive: true });
   fs.writeFileSync(path.join(baseDir, 'nested', 'deep.txt'), 'deep');
 
-  const a = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
   assert.equal(a.ctl.spaceId, space.id, '夹具前提：第一份认领的就是引用表指着的那一份');
-  const b = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'web-demo');
 
   // 起点是持有者那一份（整个目录，含嵌套），而且是开局就有的 ——
   //   不是"插件第一次写的时候才去拿"。少了这一步，第二份看到的是一间空屋子，
   //   而用户会以为自己的设置丢了。
-  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', b.ctl.spaceId));
+  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'web-demo', b.ctl.spaceId));
   assert.equal(fs.readFileSync(path.join(tempDir, 'settings.json'), 'utf8'),
     '{"theme":"dark"}', '临时实例开局就该看见持有者那份的内容');
   assert.equal(fs.readFileSync(path.join(tempDir, 'nested', 'deep.txt'), 'utf8'), 'deep',
@@ -5724,14 +5730,14 @@ test('持有者结束之后，还开着的那一份不接任；下一个新开�
   //   下一次开会话还要用它）。这条断言同时守着 `releaseEphemeral` 那两个前提里的
   //   后一个：只回收临时实例（把 `Map.delete` 那道守卫去掉，它就会连持久的
   //   那份一起清掉 —— 而症状是"关掉一个会话，另一个的编辑器设置没了"）。
-  const { dir: baseDir } = makePluginDataDir(idx, 'code-server');
+  const { dir: baseDir } = makePluginDataDir(idx, 'web-demo');
 
-  const a = await startRunning(idx, 'code-server');
-  const refSpace = refSpaceOf(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
+  const refSpace = refSpaceOf(idx, 'web-demo');
   assert.equal(a.ctl.spaceId, refSpace.id, '夹具前提：甲是持有者');
   assert.equal(fs.existsSync(path.join(baseDir, 'marker')), true, '夹具前提：那份数据在');
 
-  const b = await startRunning(idx, 'code-server');
+  const b = await startRunning(idx, 'web-demo');
   const idB = b.ctl.spaceId;
   assert.equal(idx._test.getTempSpaces().has(idB), true, '夹具前提：乙是临时实例');
 
@@ -5754,7 +5760,7 @@ test('持有者结束之后，还开着的那一份不接任；下一个新开�
     '持有者那份数据必须原样在 —— 回收只该回收临时那一份');
 
   // 而下一个新开的会话认领持有者那一份 —— 认领只在开局那一刻发生。
-  const c = await startRunning(idx, 'code-server');
+  const c = await startRunning(idx, 'web-demo');
   assert.equal(c.ctl.spaceId, refSpace.id,
     '新开的那一条才认领持有者（那个槽已经空了）');
 
@@ -5773,12 +5779,12 @@ test('临时实例结束，它的两份数据一起没，而持久那一份一�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const { dir: baseDir } = makePluginDataDir(idx, 'code-server');
-  const a = await startRunning(idx, 'code-server');
-  const b = await startRunning(idx, 'code-server');
+  const { dir: baseDir } = makePluginDataDir(idx, 'web-demo');
+  const a = await startRunning(idx, 'web-demo');
+  const b = await startRunning(idx, 'web-demo');
   const idB = b.ctl.spaceId;
   const partB = w.surfacePartition(b.slot);
-  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'code-server', idB));
+  const tempDir = path.join(idx._test.getPluginDataRoot(), diskNameOf(idx, 'web-demo', idB));
   assert.equal(fs.existsSync(tempDir), true, '夹具前提：临时那一份真的建出来了');
   // 分区那一半也要先摆出来（判据是"盘上那个目录没了"，见下面）。
   const partDirB = path.join(appPaths.sessionData, 'Partitions',
@@ -5819,11 +5825,11 @@ test('断开（= 客户端退出前走的那条路）也要把临时实例收干
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await startRunning(idx, 'code-server');
-  const b = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
+  const b = await startRunning(idx, 'web-demo');
   const idB = b.ctl.spaceId;
   const tempDir = path.join(idx._test.getPluginDataRoot(),
-    diskNameOf(idx, 'code-server', idB));
+    diskNameOf(idx, 'web-demo', idB));
   assert.equal(idx._test.getTempSpaces().has(idB), true, '夹具前提：乙是临时实例');
 
   // 走的是 `stopAllSessions` —— `before-quit` 与关窗收尾的同一条路。
@@ -5886,7 +5892,7 @@ test('自动回收：没人认领的孤儿清掉，而活会话正用着的那�
     fs.mkdirSync(liveDir, { recursive: true });
     fs.writeFileSync(path.join(liveDir, 'marker'), 'x');
 
-    setSitePlugins(['code-server']);
+    setSitePlugins(['web-demo']);
     idx._test.getRegistry().reload();
     t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
     assert.equal(idx._test.getRegistry().list().some((p) => p.name === 'sshd'), false,
@@ -5937,11 +5943,11 @@ test('会话换过工作区之后，两个落点都护着 —— 被交给过的
     await openUpTo(idx, 1);
     await connectDemo(idx);
 
-    const a = await startRunning(idx, 'code-server');
+    const a = await startRunning(idx, 'web-demo');
     const instA = a.ctl.spaceId;
     assert.ok(instA, '前提：这条会话落在一份数据上');
 
-    // 换到另一份真的数据上（另一个工作区里 code-server 的那一份）。
+    // 换到另一份真的数据上（另一个工作区里 web-demo 的那一份）。
     //   一份真的数据才算出得了名字 —— 而这条用例判的就是那个名字在不在 `held` 里。
     //   那个新工作区没有任何连接，所以下一轮 `commitConfig` 会把它连同这一份
     //     数据一起回收掉；用例末尾本来就走了一次收尾，这里不必额外造一个连接。
@@ -5949,17 +5955,17 @@ test('会话换过工作区之后，两个落点都护着 —— 被交给过的
     const config = require('../src/main/config.js');
     const otherWs = { id: config.newWorkspaceId(), name: '移动过去的工作区', refs: {} };
     cfg.workspaces = [...cfg.workspaces, otherWs];
-    const cs = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+    const cs = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
     const moved = config.spaceFor(cfg, otherWs.id, cs.id, 'editor', 1).space;
     const instB = moved.id;
     a.ctl.setSpace(instB);
     assert.equal(a.ctl.spaceId, instB, '前提：这条会话的那一份真的换了');
 
     const live = idx._test.getLiveDataDirs();
-    assert.ok(live.includes(diskNameOf(idx, 'code-server', instA)),
+    assert.ok(live.includes(diskNameOf(idx, 'web-demo', instA)),
       `会话被交给过的那个落点要护着（它可能还在那儿写）：`
       + `${JSON.stringify(live)}`);
-    assert.ok(live.includes(diskNameOf(idx, 'code-server', instB)),
+    assert.ok(live.includes(diskNameOf(idx, 'web-demo', instB)),
       `会话现在这个落点也要护着（它下一秒就要往里写）：`
       + `${JSON.stringify(live)}`);
 
@@ -5980,8 +5986,8 @@ test('重连：N 条会话各拿一个实例，不会只剩第一条', async (t)
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await startRunning(idx, 'code-server');
-  const b = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
+  const b = await startRunning(idx, 'web-demo');
   const idB = b.ctl.spaceId;
   assert.notEqual(a.ctl.spaceId, idB, '夹具前提：两条各有各的实例');
 
@@ -6045,12 +6051,12 @@ test('prepare 失败的会话：不留记录，也不留临时实例', async (t)
     clientSrc: 'module.exports = { prepare: (ctx) => ({ ok: false, message: ctx.dataDir() }) };',
   });
 
-  // 让 code-server 先跑起来：它证明"同一时刻还有其他会话在跑"，而 prep-fail
+  // 让 web-demo 先跑起来：它证明"同一时刻还有其他会话在跑"，而 prep-fail
   //   落到的是它自己那份数据。
   //   注意它不再把 prep-fail 挤成"临时的"：槽是按那一份数据分的，
   //     而两个不同的插件天然是两份数据 —— 那是这次重做故意放开的
   //     （见上面「两个不同的要布局的插件可以同时活着」那一条）。
-  const a = await startRunning(idx, 'code-server');
+  const a = await startRunning(idx, 'web-demo');
   const prepFail = idx._test.getRegistry().list().find((p) => p.name === 'prep-fail');
   const before = idx._test.getSessions().size;
   // 用差集而不是"表是空的"：这条用例要说的是"这一次什么都没留下"，
@@ -6077,7 +6083,7 @@ test('prepare 失败的会话：不留记录，也不留临时实例', async (t)
   const seg = said[0].text.split('@');
   assert.equal(seg.length, 3, `dataDir 的目录名是三段身份：${said[0].text}`);
   assert.match(seg[2], /^s[0-9a-f]{12}$/, '第三段是一份数据的 id');
-  assert.notEqual(seg[2], a.ctl.spaceId, '而且是它自己那一份（不是 code-server 那份）');
+  assert.notEqual(seg[2], a.ctl.spaceId, '而且是它自己那一份（不是 web-demo 那份）');
   const itsSpace = config.findSpace(idx._test.getCfg(), seg[2]);
   assert.ok(itsSpace, '那一份稳稳地在配置里（这个插件在这个工作区里的那一份）');
   assert.equal(itsSpace.pluginId, prepFail.id, '而且记的正是这个插件');
@@ -6094,7 +6100,7 @@ test('崩溃重连要接回全部会话，而不是最新那一条', async (t) =
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
   const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
@@ -6124,7 +6130,7 @@ test('关窗确认要数全部活着的会话（若说一句不成立 = F13 同�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
   const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
@@ -6156,7 +6162,7 @@ test('关窗确认要数全部活着的会话（若说一句不成立 = F13 同�
   assert.match(d.message, /2|两个/, `要说出几条：${d.message}`);
   // 不能只念一条插件的话 —— 那等于把"你的编辑器里有没保存的改动"这件
   //   只对其中一条成立的事说成对两条都成立。
-  assert.match(d.detail, /开发环境|code-server/, `要念到第一条：${d.detail}`);
+  assert.match(d.detail, /Web 示例|web-demo/, `要念到第一条：${d.detail}`);
   assert.match(d.detail, /中转站|sshd/, `也要念到第二条：${d.detail}`);
 
   for (const s of (await invoke('app:states')).sessions) {
@@ -6173,7 +6179,7 @@ test('收尾要停全部会话（关窗 / 退出 / 断开走的是同一份实�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
   const b2 = await appStart(null, 'sshd');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
@@ -6211,15 +6217,15 @@ test('首选端口被占住：先问「启动 / 记住并启动 / 取消」，�
   await connectDemo(idx);
   const conn = await onlyTestConnection(idx);
 
-  // 这条连接那个工作区里、code-server 那一份数据的端口 = 这次会话的首选端口。
+  // 这条连接那个工作区里、web-demo 那一份数据的端口 = 这次会话的首选端口。
   // 它得先有一次会话才会被建出来 —— 这份夹具在这一行之前跑过一次
   //   `connectDemo`，而数据的 id 是开会话时铸的（`spaceFor`）。所以这里在
   //   `app:start` 之前先问：那一份在不在，不在就说明夹具的前提不成立。
   const cfgNow = idx._test.getCfg();
   const wsRef = (cfgNow.workspaces.find((l) => l.id === conn.workspaceId) || {}).refs || {};
-  const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
   const wantSpace = config.loadConfig(CFG_DIR).spaces.find((x) => x.id === wsRef[csPlugin.id]);
-  assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 code-server 的那一份）');
+  assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 web-demo 的那一份）');
   const want = wantSpace.ports[0];
   assert.ok(want > 0, '那一份数据应当有一个首选端口');
 
@@ -6238,7 +6244,7 @@ test('首选端口被占住：先问「启动 / 记住并启动 / 取消」，�
   //   这一支是整条路存在的理由：探测发生在提交之前，所以此刻作业还没有
   //     上集群 —— 界面上那个「取消」才是字面意思。等绑定那一刻再问，作业
   //      已经在跑了，用户答"取消"是一句空话。
-  const ask = await invoke('app:start', null, 'code-server');
+  const ask = await invoke('app:start', null, 'web-demo');
   assert.equal(ask.ok, false, `被占住时不该报成功：${JSON.stringify(ask)}`);
   assert.equal(ask.code, 'port_conflict',
     '被占住要作为一件事问出来，而不是悄悄顺移');
@@ -6258,7 +6264,7 @@ test('首选端口被占住：先问「启动 / 记住并启动 / 取消」，�
   //   那句话的证据：①之后系统仍然是一个干净的"什么都没发生"。
 
   // ── ③ 用户答「启动」，带上作答重发，走既有的顺移扫描 ──
-  const a = await invoke('app:start', null, 'code-server', 'shift');
+  const a = await invoke('app:start', null, 'web-demo', 'shift');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -6307,9 +6313,9 @@ test('答「记住并启动」， 那份数据的端口真的改了，而下次�
 
   const cfgNow = idx._test.getCfg();
   const wsRef = (cfgNow.workspaces.find((l) => l.id === conn.workspaceId) || {}).refs || {};
-  const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  const csPlugin = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
   const wantSpace = config.loadConfig(CFG_DIR).spaces.find((x) => x.id === wsRef[csPlugin.id]);
-  assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 code-server 的那一份）');
+  assert.ok(wantSpace, '夹具应当已经建出那一份数据（那条连接的工作区里 web-demo 的那一份）');
   const want = wantSpace.ports[0];
 
   // 由测试把首选端口占住（这台机器上它可能本来就被占着 —— 那也一样）。
@@ -6321,11 +6327,11 @@ test('答「记住并启动」， 那份数据的端口真的改了，而下次�
   t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
   // ── ① 先问一句（与上一条同形：被占就什么都不提交）──
-  const ask = await invoke('app:start', null, 'code-server');
+  const ask = await invoke('app:start', null, 'web-demo');
   assert.equal(ask.code, 'port_conflict', '被占住仍然要先问，不许自己决定');
 
   // ── ② 用户选「记住并启动」，带 `'remember'` 重发 ──
-  const a = await invoke('app:start', null, 'code-server', 'remember');
+  const a = await invoke('app:start', null, 'web-demo', 'remember');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -6349,7 +6355,7 @@ test('答「记住并启动」， 那份数据的端口真的改了，而下次�
   // ── ③ 再开一次：不再问（首选端口现在就是那个新端口，而它空着）──
   //   占住者占的是旧端口，与新的首选端口无关 —— 这正是"记住"要买到的东西：
   //     那个程序一直占着的时候，用户只在第一次被问一遍。
-  const b = await invoke('app:start', null, 'code-server');
+  const b = await invoke('app:start', null, 'web-demo');
   assert.equal(b.code, undefined,
     `记住之后不该再问：${JSON.stringify({ code: b.code, port: b.port })}`);
   assert.equal(b.ok, true, `再开一次失败：${JSON.stringify(b)}`);
@@ -6373,7 +6379,7 @@ test('那个端口归别人（配置里另一份数据声称着它）， 照旧�
   await connectDemo(idx);
   await onlyTestConnection(idx);
 
-  const { space, workspaceId } = makePluginDataDir(idx, 'code-server');
+  const { space, workspaceId } = makePluginDataDir(idx, 'web-demo');
   const want = space.ports[0];
   const ws = idx._test.getCfg().workspaces.find((l) => l.id === workspaceId);
 
@@ -6405,7 +6411,7 @@ test('那个端口归别人（配置里另一份数据声称着它）， 照旧�
   t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
   // 直接调 IPC：这一条要看见的正是"它没有问"，而夹具那一层会把问答题掉。
-  const a = await invoke('app:start', null, 'code-server');
+  const a = await invoke('app:start', null, 'web-demo');
   assert.equal(a.code, undefined,
     '那个端口归别人，照旧静默顺移，不许问：'
     + JSON.stringify({ code: a.code, port: a.port }));
@@ -6437,8 +6443,8 @@ test('临时副本那一份：端口被占不问，照旧避让（它是这一�
   //   （`assignSpacePorts` 只看配置里用掉了哪些），所以同一个现场下两次拿到的是
   //   同一个端口。先起一遍把那个号记下来、收掉，再把那个号占住重起一次 ——
   //   若它也走"问一句"那条路，第二次就会拿回 `port_conflict`。
-  const a = await startRunning(idx, 'code-server');       // 持有者（持久那份）
-  const b = await startRunning(idx, 'code-server');       // 临时副本
+  const a = await startRunning(idx, 'web-demo');       // 持有者（持久那份）
+  const b = await startRunning(idx, 'web-demo');       // 临时副本
   assert.equal(idx._test.getTempSpaces().has(b.ctl.spaceId), true,
     '夹具前提：第二份是临时的');
   const tempPort = idx._test.getTempSpaces().get(b.ctl.spaceId).ports[0];
@@ -6456,7 +6462,7 @@ test('临时副本那一份：端口被占不问，照旧避让（它是这一�
   });
   t.after(() => (held ? new Promise((r) => squatter.close(r)) : Promise.resolve()));
 
-  const again = await invoke('app:start', null, 'code-server');
+  const again = await invoke('app:start', null, 'web-demo');
   assert.equal(again.code, undefined,
     `临时副本上不许问"要不要临时换" —— 它是这一次会话当场选择的端口：`
     + `${JSON.stringify({ code: again.code, port: again.port })}`);
@@ -6716,7 +6722,7 @@ test('删掉最后一条用某个工作区的连接，那个工作区的两份�
   await connectDemo(idx);
   const conn = await onlyMyConnection(idx);
 
-  const { dir, workspaceId, space, plugin } = makePluginDataDir(idx, 'code-server');
+  const { dir, workspaceId, space, plugin } = makePluginDataDir(idx, 'web-demo');
   const partition = P.partitionOf(P.identityOf(plugin, space));
   assert.equal(space.id, (idx._test.getCfg().spaces.find((x) => x.id === space.id) || {}).id,
     '那一份数据真的在配置里');
@@ -6753,8 +6759,8 @@ test('会话跑着的时候，它脚下那份数据目录不能被回收清掉',
   await connectDemo(idx);
   await onlyTestConnection(idx);
 
-  const { dir, workspaceId } = makePluginDataDir(idx, 'code-server');
-  const a = await appStart(null, 'code-server');
+  const { dir, workspaceId } = makePluginDataDir(idx, 'web-demo');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
@@ -6808,8 +6814,8 @@ test('而会话结束之后，同一份必须清得掉（反向的那一半）',
   await connectDemo(idx);
   await onlyTestConnection(idx);
 
-  const { dir, workspaceId } = makePluginDataDir(idx, 'code-server');
-  const a = await appStart(null, 'code-server');
+  const { dir, workspaceId } = makePluginDataDir(idx, 'web-demo');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '进入 running', 30000);
@@ -6869,8 +6875,8 @@ test('没声明分实例的那一份不跟着任何工作区走', async (t) => {
   fs.mkdirSync(headlessDir, { recursive: true });
   fs.writeFileSync(path.join(headlessDir, 'marker'), 'x');
 
-  // code-server 那一份：属于这个工作区，会被清。
-  const cs = makePluginDataDir(idx, 'code-server');
+  // web-demo 那一份：属于这个工作区，会被清。
+  const cs = makePluginDataDir(idx, 'web-demo');
 
   // sshd 那一份：身份里没有实例段，它不属于任何一个工作区。
   const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
@@ -6902,7 +6908,7 @@ test('磁盘删不动时不把删除本身判成失败，并把它排到下一�
   await connectDemo(idx);
   const conn = await onlyMyConnection(idx);
 
-  const { dir } = makePluginDataDir(idx, 'code-server');
+  const { dir } = makePluginDataDir(idx, 'web-demo');
   const dataRoot = idx._test.getPluginDataRoot();
   // 让那个目录删不动：把它的父层设成不可写。
   fs.chmodSync(dataRoot, 0o500);
@@ -7015,7 +7021,7 @@ test('作业列表来自服务端（`op:list`），不是本机那张会话表',
     '还没有活着的作业时，活的那一批是空的（已经结束的那些会照旧留着 —— 服务端也是这样）');
 
   // ── 起一条，再看 ──
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   r = await invoke('app:jobs');
   assert.equal(r.ok, true);
@@ -7074,7 +7080,7 @@ test('排队中的作业：作业那一屏看得见它，【结束】取消的�
 
   // 不 await：`app:start` 只等一小段登记预算（`ENROLL_WAIT_BUDGET_MS`），
   //   而这一条要看的是"还排着队"那一段，先在它返回之前把现场查完。
-  const starting = appStart(null, 'code-server');
+  const starting = appStart(null, 'web-demo');
   let ctl = null;
   for (let i = 0; i < 200 && !(ctl && ctl.sessionId); i += 1) {
     await new Promise((r) => setTimeout(r, 20));
@@ -7108,12 +7114,12 @@ test('被站点拒掉的提交：不留下一颗死标签，也不留下一份�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
   b.debugReap();
-  const first = await startRunning(idx, 'code-server');
+  const first = await startRunning(idx, 'web-demo');
   const tempBefore = idx._test.getTempSpaces().size;
   const said = noticesOf().length;
 
   // 夹具的并发上限是 1（与真站点缺省相同）：第二次提交会被站点拒掉。
-  const r = await appStart(null, 'code-server');
+  const r = await appStart(null, 'web-demo');
   assert.equal(r.ok, false, `第二次提交应当失败：${JSON.stringify(r)}`);
 
   const st = await invoke('app:states');
@@ -7133,7 +7139,7 @@ test('【接管】只换看护者那一格，会话其余部分一动都不动',
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true);
   const before = await invoke('app:jobs');
   const row = liveJobs(before)[0];
@@ -7242,7 +7248,7 @@ test('端到端：点「连接」之后，作业列表里就看得见那些还�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7298,7 +7304,7 @@ test('连着的时候再点一次「连接」：已经在手上的那几条不�
   await openUpTo(idx, 2);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7363,7 +7369,7 @@ test('【临时离开】：看护者交回去，作业一个字都没动', async
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7411,7 +7417,7 @@ test('闪断（连接掉了，没点任何按钮）， 看护者保留，重连�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7458,7 +7464,7 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7500,7 +7506,7 @@ test('另一台电脑正在看的作业：关窗不数它，断开也不碰它',
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7546,7 +7552,7 @@ test('【断开】是【临时离开】的反面：它真的把作业停掉', as
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -7610,16 +7616,16 @@ test('同名不同 id 的两条站点插件都进视图 —— 按短名收表�
   });
   await invoke('app:debug', 'reset');
 
-  // 造"同名、不同 id"的现场：短名撞上仓库里真的 code-server，id 是假站点
+  // 造"同名、不同 id"的现场：短名撞上仓库里真的 web-demo，id 是假站点
   //   自己那一个（`DEMO_EXTRA_ID`）。这是合法的一种站点 ——
   //   两个不同的插件可以同名，配置文件名写 `<id>.conf` 就分得开。
-  idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
+  idx._test.getBackend().debugAddSitePlugin('web-demo', '另一个示例');
 
   await withSitePlugins([], async () => {
     const r = await invoke('app:partitions');
-    const cs = (r.plugins.missing || []).filter((m) => m.name === 'code-server');
+    const cs = (r.plugins.missing || []).filter((m) => m.name === 'web-demo');
     assert.equal(cs.length, 2,
-      `站点报了两条 code-server（两个 id），本机一条都没有，两条都该在 missing 里。`
+      `站点报了两条 web-demo（两个 id），本机一条都没有，两条都该在 missing 里。`
       + `实际 ${cs.length} 条：${JSON.stringify(cs)}。`
       + '按短名收表，后一条会盖掉前一条 —— 界面上凭空少一个插件，'
       + '而没有任何一句话解释它去哪了（`missing` 也用的是同一张表，所以它同样少报）。');
@@ -7635,13 +7641,13 @@ test('短名有歧义时不替用户选择一个，而是把那几个 id 摆出�
     cleanupSiteState(idx);
   });
   await invoke('app:debug', 'reset');
-  idx._test.getBackend().debugAddSitePlugin('code-server', '另一个开发环境');
+  idx._test.getBackend().debugAddSitePlugin('web-demo', '另一个示例');
 
   // 先让 `sitePlugins` 带上那两条（它来自连接时的 `op:plugins`，不是现算的）。
   await invoke('app:partitions');
 
   const before = noticesOf().length;
-  const r = await appStart({}, 'code-server');
+  const r = await appStart({}, 'web-demo');
   assert.equal(r.ok, false, '短名指不出是哪一个，必须在提交之前拦下，不许选择一个');
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
   assert.match(said, /都叫/, `要说清是短名撞了（不是"不认识这个插件"）：${said}`);
@@ -7657,21 +7663,21 @@ test('站点版本漂移那句话按 id 认亲 —— 若短名撞了它会指�
   });
   await invoke('app:debug', 'reset');
 
-  // 池里装着另一个插件：短名也叫 code-server，但 id 与站点报的那个不是一回事
+  // 池里装着另一个插件：短名也叫 web-demo，但 id 与站点报的那个不是一回事
   //   —— 这是合法的（两个不同的插件可以同名，配置里用 id 各配一块）。
   const mine = '01M2JKM1M1M1M1M1M1M1M1M1M9';
   setSitePlugins([]);                       // 先清干净：池里只留下面这一个
-  putSitePlugin({ id: mine, name: 'code-server', version: '2.0.0' });
+  putSitePlugin({ id: mine, name: 'web-demo', version: '2.0.0' });
 
-  // 站点报的是它那个 code-server（仓库里的真插件，1.0.0）。
+  // 站点报的是它那个 web-demo（仓库里的真插件，1.0.0）。
   await invoke('app:partitions');
 
   const before = noticesOf().length;
-  await appStart({}, 'code-server');
+  await appStart({}, 'web-demo');
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
 
   assert.doesNotMatch(said, /站点那边/,
-    '本机这一份与站点报的那个 code-server 是两个不同的插件（id 不同），'
+    '本机这一份与站点报的那个 web-demo 是两个不同的插件（id 不同），'
     + '只是短名撞了。按短名若认亲，这里会拿站点那条的版本号说出'
     + '「站点那边是 1.0.0 版，本机这一份是 2.0.0 版」—— 那是一句指错对象的提示，'
     + '它把用户指去升级一个本来没问题的插件。'
@@ -7862,7 +7868,7 @@ test('建作业日志目录：连接时不说，提交那一步才说 —— 而
   //   服务端什么都没留下时不留"死标签"），所以提示流是它唯一显示的地方。
   const before2 = back._sessions.length;
   const before2n = noticesOf().length;
-  const r1 = await appStart(null, 'code-server');
+  const r1 = await appStart(null, 'web-demo');
   assert.equal(back._sessions.length, before2, '建不出目录时不许提交 —— 一个作业都不该出去');
   assert.equal(r1.ok, false, `这一趟要如实报失败：${JSON.stringify(r1)}`);
   assert.equal((r1.sessions || []).length, 0, '服务端什么都没建，本机也不许留下一条记录');
@@ -7878,7 +7884,7 @@ test('建作业日志目录：连接时不说，提交那一步才说 —— 而
   await openUpTo(idx, 2);        // 收尾：与其它用例同一个动作（这一趟本来就没有留下记录）
   const before3 = back._sessions.length;
   back.ensurePrepared = async () => ({ ok: false, error: null, definite: false });
-  const r2 = await appStart(null, 'code-server');
+  const r2 = await appStart(null, 'web-demo');
   assert.equal(r2.ok, true, `没等到就不许拦：${JSON.stringify(r2)}`);
   assert.equal(back._sessions.length, before3 + 1, '它照常提交出去了');
 });
@@ -7914,7 +7920,7 @@ test('右栏：停靠就起轮询，而它自己会停（收起之后不再白�
   //   「已经有 1 个会话占着位置」挡掉，症状是"这条会话没有登记上"。
   //   与下面那条（`back0.debugReap()`）同一条理由，同一个动词。
   idx._test.getBackend().debugReap();
-  assert.equal((await appStart({}, 'code-server')).ok, true);
+  assert.equal((await appStart({}, 'web-demo')).ok, true);
   const ctl = onlyCtl(idx);
   for (let i = 0; i < 60 && !ctl.sessionId; i += 1) {
     await new Promise((r) => setTimeout(r, 100));
@@ -8007,7 +8013,7 @@ test('作业一结束，右栏自己收起来（那时它没有内容可说）',
   //    一直跑着 —— 不清的话这一次 `app:start` 会被站点拒（"已经有 1 个会话占着位置"），
   //    而症状是"这条用例的前置条件永远不成立"，指不回原因。
   back0.debugReap();
-  assert.equal((await appStart({}, 'code-server')).ok, true);
+  assert.equal((await appStart({}, 'web-demo')).ok, true);
   // 按槽取那一条，不用 `onlyRec`（它取的是 map 里的第一个，
   //   而前面几条用例可能还留着一条没被回收的记录 —— 于是这条判据会去问一个
   //   根本不是刚起来的那条会话，症状是"前置不成立"）。
@@ -8055,7 +8061,7 @@ test('【临时离开】之后重连：那条会话要接回来，看护者回�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -8100,19 +8106,19 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
   await ctl.heartbeatNow();
   const sid = onlyFake(b).session_id;
 
-  // 把工作区里 code-server 那一格删掉。真机上它可能来自"工作区换过"、
+  // 把工作区里 web-demo 那一格删掉。真机上它可能来自"工作区换过"、
   //   "那份数据被删过"、或者手改过的配置 —— 而会话在服务端活得好好的。
   const cfg = idx._test.getCfg();
   const conn = cfg.connections.find((c) => c.id === cfg.activeConnectionId);
   const ws = cfg.workspaces.find((w) => w.id === conn.workspaceId);
-  const plugin = idx._test.getRegistry().list().find((p) => p.name === 'code-server');
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
   assert.ok(ws && plugin, '夹具前提：工作区与插件都得在');
   const oldSpace = ws.refs[plugin.id];
   delete ws.refs[plugin.id];
@@ -8152,7 +8158,7 @@ test('【临时离开】之后重连：排队中的那条不许把连接卡住',
   //   用完就回来，重连也一样（用户 2026-10-19 真机：重连停在「连接中…」，
   //   上栏已经有标签，点它没有任何反应）。
   b.enrollDelayMs = 20000;
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   assert.equal(ctl.state, 'queued', '前置：作业还排着队');
@@ -8192,7 +8198,7 @@ test('一次只连一条：第一条还在飞的时候，第二条被拒绝，�
   await connectDemo(idx);
   // 一条排着队的会话会让 `tryReattach` 在预算里停住，于是第一条连接真的在飞。
   b.enrollDelayMs = 20000;
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const connA = await testConn();
 
@@ -8233,7 +8239,7 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   const b = await openUpTo(idx, 1);
   await connectDemo(idx);
 
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
@@ -8294,7 +8300,7 @@ test('面板抬起来 / 会话标签切回来：每一份会话状态都带上 p
   const idx = require('../src/main/index.js');
   await openUpTo(idx, 1);
   await connectDemo(idx);
-  const a = await appStart(null, 'code-server');
+  const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
   const ctl = idx._test.sessionAt(a.slot).controller;
   await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);

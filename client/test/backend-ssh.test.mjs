@@ -44,12 +44,12 @@ function hostKeyBlob(algorithm = 'ssh-ed25519', raw = crypto.randomBytes(32)) {
 
 test('RPC 命令行是编译期常量，不含任何插值', () => {
   // 这条既是防注入，也是穿过 sshd 那个 ForceCommand 守卫的必要条件
-  // （命令串里不能出现 code-server 字面量）。它一旦变成拼出来的字符串，
+  // （命令串里不能出现 web-demo 字面量）。它一旦变成拼出来的字符串，
   // 两条性质同时失效。
   assert.equal(typeof sshBackend.RPC_CMD, 'string');
   assert.equal(sshBackend.RPC_CMD, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
   assert.ok(!/[$`{}]/.test(sshBackend.RPC_CMD), '不得含任何模板/变量语法');
-  assert.ok(!/code-server/.test(sshBackend.RPC_CMD), '不得含 code-server 字面量');
+  assert.ok(!/web-demo/.test(sshBackend.RPC_CMD), '不得含 web-demo 字面量');
 
   // 解释器必须是钉死的 bash，不能交给登录 shell 去挑。
   //   sshd 用 `$SHELL -c "<命令串>"` 执行 exec 请求，而 $SHELL 来自 /etc/passwd ——
@@ -820,7 +820,7 @@ test('STREAM_CMD 是编译期常量，建目录那一段也在它里面', () => 
   assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
-  assert.ok(!/code-server/.test(cmd), '不得含 code-server 字面量');
+  assert.ok(!/web-demo/.test(cmd), '不得含 web-demo 字面量');
 
   // 建目录那一句必须与退路那条（`PREPARE_CMD`）逐字相同：一份规矩只有一处实现。
   const core = 'mkdir -p "$HOME/.slurmate/logs"';

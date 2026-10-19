@@ -130,7 +130,7 @@ test('Ctrl+W / Ctrl+N / F5 / Ctrl+R 必须到达页面 —— 这正是要解决
   ]) {
     const r = guard(input);
     assert.equal(r.prevented, false,
-      `${input.key}（ctrl=${!!input.control}）不该被吞 —— 它必须到达 code-server`);
+      `${input.key}（ctrl=${!!input.control}）不该被吞 —— 它必须到达 web-demo`);
   }
 });
 

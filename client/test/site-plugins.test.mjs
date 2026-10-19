@@ -984,7 +984,7 @@ async function upgradeWithSessions(sessionState) {
   consentAll(env, r);
 
   // `service_plugin` 要用这个 fake 自己铸的那个 id（`v1.id`），
-  //   不是 code-server 那一个 —— 写死的话这一条测的就成了别的插件。
+  //   不是 web-demo 那一个 —— 写死的话这一条测的就成了别的插件。
   const row = { session_id: 's1', service_plugin: `${v1.id}@1.0.0` };
   if (sessionState !== undefined) row.state = sessionState;
   site.state.sessions = [row];

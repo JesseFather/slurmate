@@ -32,16 +32,16 @@
   <h1>演示工作区</h1>
   <div class="magenta">演示模式 · 未连接集群</div>
   <label for="password">密码</label>
-  <!-- 字段名必须是 password —— 这是与 code-server 4.135.0 实测一致的契约 -->
+  <!-- 字段名必须是 password —— 这是网页表单登录这一类协议的常见形态 -->
   <input type="password" id="password" name="password" autofocus autocomplete="off">
   <button type="submit">登录</button>
   <div class="err" id="err"></div>
 </form>
 <script>
-  // 演示后端在口令错误时返回 200 + 无 Set-Cookie，与真实 code-server 一致。
+  // 演示后端在口令错误时返回 200 + 无 Set-Cookie，与真实服务一致。
   // 所以这里也照实提示，而不是假装成功。
   if (location.search.includes('failed=1')) {
-    document.getElementById('err').textContent = '密码不正确。（演示后端行为与真实 code-server 一致：返回 200 但不发 cookie）';
+    document.getElementById('err').textContent = '密码不正确。（演示后端行为与真实服务一致：返回 200 但不发 cookie）';
   }
 </script>
 </body>

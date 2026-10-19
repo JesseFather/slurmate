@@ -575,7 +575,7 @@
         renderPlugins(F.pluginsView || {});
         showScreen('plugins');
         renderSessions({ sessions: [{ slot: 'a', service: '编辑器', live: true,
-          snap: { state: 'running', serviceKind: 'code-server', sessionId: 'sess-a',
+          snap: { state: 'running', serviceKind: 'web-demo', sessionId: 'sess-a',
                   jobId: '7783', localPort: 18080 } }],
           front: 'a', panelFront: false });
         return Promise.resolve();
@@ -596,7 +596,7 @@
         renderPlugins(F.pluginsView || {});
         showScreen('plugins');
         renderSessions({ sessions: [{ slot: 'a', service: '编辑器', live: true,
-          snap: { state: 'running', serviceKind: 'code-server', sessionId: 'sess-a',
+          snap: { state: 'running', serviceKind: 'web-demo', sessionId: 'sess-a',
                   jobId: '7783', localPort: 18080 } }],
           front: 'a', panelFront: true });
         return Promise.resolve();

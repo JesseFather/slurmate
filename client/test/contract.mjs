@@ -37,9 +37,9 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 const { createDemoWebService } = require('../src/main/demo-server.js');
 const { webLogin, isLoginPath } = require('../src/main/weblogin.js');
 
-/** code-server 插件声明的登录契约 —— 那份 HTTP 200 的实测事实就是在它身上量的。 */
+/** 夹具插件声明的登录契约。那份 HTTP 200 的实测事实来自这一类网页表单登录服务。 */
 const MANIFEST = JSON.parse(
-  fs.readFileSync(path.join(here, '..', '..', 'plugins', 'code-server', 'plugin.json'), 'utf8'));
+  fs.readFileSync(path.join(here, '..', '..', 'tools', 'fixtures', 'plugins', 'web-demo', 'plugin.json'), 'utf8'));
 const CONTRACT = MANIFEST.contributes.login;
 const SURFACE = MANIFEST.contributes.surface;
 

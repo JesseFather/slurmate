@@ -134,6 +134,18 @@
 code-server 合法地占着 55001 时，那一节会红在与被测行为无关的地方。端口改为
 运行时挑一个空闲的。
 
+### Changed — 基座的测试不再拿具体插件当夹具
+
+新增 `tools/fixtures/plugins/web-demo`：一个最小的、有界面会登录的 web 插件，
+只给测试用，不进安装包。客户端与集群测试改读它 —— `contract`、`integration`、
+`boot`、`plugin-data`、`renderer`、`ui-probe` 都不再读 `plugins/code-server`。
+
+生产代码里的举例与测试后端的假数据一并去名。基座仍然没有一处按插件名分支：
+这一版改的是说法与夹具，不是功能。
+
+集群测试里两条跟随插件的用例（认证 canary、插件 README 与清单一致）随插件
+走，在本轮移除。插件的作业侧与客户端测试下一步跟着插件项目一起搬。
+
 ## [0.30] — 未发布
 
 > 协议版本是 **0.30**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

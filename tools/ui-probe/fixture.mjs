@@ -104,7 +104,7 @@ export function buildPluginsView() {
   //   式子搬过来算，这个字段就不会有第二种答案。
   const one = (o) => {
     const p = Object.assign({
-    id: '01m4x3bpny0363sf5qmfw89zgt', version: '1.0.0', name: 'code-server',
+    id: '01m4x3bpny0363sf5qmfw89zgt', version: '1.0.0', name: 'web-demo',
     title: '浏览器里的编辑器', description: '',
     hasClientCode: true, surface: { kind: 'web', path: '/' },
     ports: 1, group: 'editor',

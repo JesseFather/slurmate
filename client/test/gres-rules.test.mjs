@@ -42,7 +42,7 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 // 假站点不认识任何插件 —— "那个站点装了哪些"由调用方告诉它（见 integration.mjs）。
 // 这里给它仓库里真那一个，好让 `service_kind` 有得填。
 const SITE = () => path.join(HERE, '..', '..', 'plugins');
-// 用 sshd 而不是 code-server：code-server 声明了 `contributes.surface`，
+// 用 sshd 而不是 web-demo：web-demo 声明了 `contributes.surface`，
 //   那意味着 `_submit` 会真的把它的作业侧跑起来（见 backend-fake.js 的
 //   `_startJob`）—— 这一组要验的是 GRES 的规则，为它去起一个进程、挑端口、
 //   等登记，只会让用例更难读、更容易碎。两个插件走的是同一段 GRES 代码

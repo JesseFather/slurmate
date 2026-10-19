@@ -151,7 +151,7 @@ function jobText(snap) {
   if (s.jobTerminal && code && code !== '0:0') text += `（退出码 ${code}）`;
 
   // 重启过就要说 —— 作业被重新排队之后，跑着的东西是新的，
-  // 用户在 code-server 里没保存的状态已经没了，而他不会知道。
+  // 用户在 web-demo 里没保存的状态已经没了，而他不会知道。
   const n = Number.parseInt(s.jobRestarts, 10);
   if (Number.isFinite(n) && n > 0) text += ` · 已重启 ${n} 次`;
 

@@ -17,7 +17,7 @@
  * index.js —— 主进程入口。
  *
  * 职责：单实例锁、生命周期、后端选择、密钥与连接的管理、把 SessionController 和
- * ShellWindow 接起来、以及 code-server 的自动登录（POST /login + 查 cookie jar）。
+ * ShellWindow 接起来、以及 web-demo 的自动登录（POST /login + 查 cookie jar）。
  *
  * ── 身份体系：这里不认识任何 IDM ─────────────────────────────────────────────
  *
@@ -110,7 +110,7 @@ let clientIdentity = null;
  *
  * 每个槽一份记录，而不是当前那一个会话那份单值 —— 单值能成立，靠的是
  *   "同一时刻只有一个会话"这条假设，而假设不是判据 ——
- *   它的失败形态是：起中转站时把 code-server 那块界面收掉、关窗只掐断两条会话里
+ *   它的失败形态是：起中转站时把 web-demo 那块界面收掉、关窗只掐断两条会话里
  *   的一条、插件拿错别人的会话口令。
  *
  * 键是槽而不是 sessionId：会话在提交回来之前还没有 id，而"这个槽被占了"
@@ -1719,7 +1719,7 @@ function releaseEphemeral(spaceId) {
  * 把持有者那份插件数据拷一份当临时那一份的起点。
  *
  * 拷的是那个工作区上这个插件那一份（引用表指着的那一份），不是
- *   "持有者那条会话的" —— 持有者可能是另一个插件（同一个工作区上，code-server 与
+ *   "持有者那条会话的" —— 持有者可能是另一个插件（同一个工作区上，web-demo 与
  *   别人可以各有一份身份）。按会话去拷会拷到别人的数据。
  *
  * 同步（`fs.cpSync`），而且调用点与认领之间不许有 `await`：两条
@@ -1857,7 +1857,7 @@ function liveSpaceIds() {
  * 给那个插件建的数据目录（`ctx.dataDir()` 给的那个）。
  *
  * 不是正确性必需 —— 名字永不复用（数据 id 与 partition 都是），残留数据永远
- * 不会被新的数据读到。是隐私：那个分区里躺着 code-server 的登录 cookie，那个目录里
+ * 不会被新的数据读到。是隐私：那个分区里躺着 web-demo 的登录 cookie，那个目录里
  * 躺着插件自己的东西（sshd 的钥匙、别的插件的缓存）。
  *
  * 有且只有一条致命前提：绝不能对正被用着的那一份做。那会把一条正在跑的
@@ -3106,7 +3106,7 @@ async function _renderSession(slot) {
       // 这个插件不要界面（比如中转站）：它自己那一块收掉。
       //
       // 收的是这一个槽：收"窗口里那一块"是一次越权 —— 起 sshd 时
-      //    （以及它每次心跳、每次隧道重建时）会把 code-server 那块正跑着的页面
+      //    （以及它每次心跳、每次隧道重建时）会把 web-demo 那块正跑着的页面
       //    一起销毁，而用户看到的是"我的编辑器忽然没了"，日志里一个字都没有。
       win.destroySurface(slot);
       if (plugin.attach) await plugin.attach(pluginContext(rec), snap);
@@ -3365,7 +3365,7 @@ async function ensureSurface(rec, snap) {
  *
  * 参数是那一条会话的记录，不是插件对象 —— 因为这里每一个"我"都必须是这一条
  *   会话的：`session()` 是它的会话视图，`win` 是它那块界面。收 `plugin` 再去读
- *   模块级的"当前会话"的话，失败形态不是崩溃：是 code-server 拿着另一条会话的
+ *   模块级的"当前会话"的话，失败形态不是崩溃：是 web-demo 拿着另一条会话的
  *   口令去 POST，然后弹一句"控制节点还没返回会话口令"。
  *
  * 插件能用的一切都在这里。它不能 `require` 客户端的源码 —— 插件装在池里
@@ -3379,7 +3379,7 @@ function pluginContext(rec) {
      * 这块界面自己的那两件事，绑在这一条会话上。
      *
      * 递给它整个 `ShellWindow` 是张冠李戴：`surfaceSession` 会拿到"窗口里
-     *   那一块"的 session，而 code-server 拿它去查 cookie jar —— 查错一个分区，
+     *   那一块"的 session，而 web-demo 拿它去查 cookie jar —— 查错一个分区，
      *   症状是"自动登录失败（HTTP 200，未拿到会话 cookie）"，而口令本身是对的。
      *
      * 顺带收窄了：插件本来就不该碰 forceClose / pushSessions / pushNotice 那些，
@@ -3390,7 +3390,7 @@ function pluginContext(rec) {
       //   把它改成方法不会报错，只会让 `ses` 变成一个函数而一路传下去（`ctx.login`
       //   拿它当 Electron session 用），失败形态是"自动登录莫名其妙不工作"。
       get surfaceSession() { return win.surfaceSession(rec.slot); },
-      // 重新加载这一条会话的页面。有登录契约的插件（今天就是 code-server）
+      // 重新加载这一条会话的页面。有登录契约的插件（今天就是 web-demo）
       //   只在页面还停在登录表单上时才真的重载 —— 它的用途是"登录之后把页面
       //   带回应用"，而 `attach` 每次状态变化都会被调（心跳 45 秒、推送 30 秒），
       //   无条件重载就是页面每半分钟白一次（2026-10-17 真机）。
@@ -3984,7 +3984,7 @@ async function handleWindowClose() {
 function handleWindowAction(action, payload) {
   if (action === 'renderer-gone') {
     // 不写服务名：崩掉的是框架建的那块视图，它加载谁的页面取决于当前这个
-    //   会话是哪个插件 —— 对着一个 Jupyter 会话说"code-server 页面崩溃了"，
+    //   会话是哪个插件 —— 对着一个 Jupyter 会话说"web-demo 页面崩溃了"，
     //   用户会去查一个跟这件事无关的东西。
     win.pushNotice('error',
       `会话页面崩溃了（${payload && payload.reason}）。可以点「重新加载」恢复。`);
@@ -4212,7 +4212,7 @@ async function reattachOne(s) {
   // 重连必须走同一个 `claimSpace`（不是"照抄 startSession 那两行"）。
   //
   //    临时那一份只存在于上一个进程的内存里 —— 配置里没有它。所以重启之后 N 条
-  //    code-server 会话全都算成"引用表指着的那一份"，全部落进同一个槽，只接回第一条，
+  //    web-demo 会话全都算成"引用表指着的那一份"，全部落进同一个槽，只接回第一条，
   //    其余的在控制节点上继续跑、心跳没了，300 秒 `suspect`、1800 秒 `scancel`。
   //    而那条提示语还是错的（"想留住它就先用 `slurm` 把它的作业停掉" —— 那是
   //    我们自己的会话）。走到认领之后：第一条认领那一份，其余各拿一份临时的。
@@ -4233,7 +4233,7 @@ async function reattachOne(s) {
   // 还在排队（reserved/submitted）的会话也必须接上，哪怕它还没有 tunnel_target。
   //   若按 `if (!s || !s.tunnel_target) return;` 把没有 tunnel_target 的挡掉，
   //   「作业还在队列里」这种最需要说出来的情况反而完全看不见：界面照常显示
-  //   「启动 code-server」，
+  //   「启动 web-demo」，
   //   用户一点就提交了第二个作业，而第一个还在排队。这既正是「单一启动」要防的
   //   资源占用，又恰好是「换了电脑 / 上次没关干净」最常见的形态 —— 重启客户端时
   //   作业往往还没跑起来。
@@ -4312,7 +4312,7 @@ async function reattachOne(s) {
   rec.controller.state = State.RUNNING;
   await rec.controller._bringUpTunnel(preferredPort);
   // 走同一个渲染入口（`_renderSession`），不要在各处直接调 openCodeServer ——
-  //   那条直路只服务 code-server 一种会话，而接上一个中转站会话时它会把隧道指向
+  //   那条直路只服务 web-demo 一种会话，而接上一个中转站会话时它会把隧道指向
   //   的 SSH 端口当成一个网页去加载。分派只有一个地方。
   await onSessionChange(slot);
 }
@@ -4582,7 +4582,7 @@ function registerIpc() {
       // 只改标记，不碰任何会话：没有会话在跑时本来就没有"那个会话"可改，标记
       //   落在 `cfg` 里（下面那句 setConnectionWorkspace）。
     }
-    // outsideWorkspace 时两条都不走：配置照改（下次起 code-server 就用新工作区了），
+    // outsideWorkspace 时两条都不走：配置照改（下次起 web-demo 就用新工作区了），
     // 但这个正在跑的中转站会话不受任何影响 —— 它的 spaceId 保持 null。
 
     config.setConnectionWorkspace(cfg, connectionId, target.id);

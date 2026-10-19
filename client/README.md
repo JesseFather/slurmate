@@ -206,7 +206,7 @@ methods failed` 是 ssh2 的原话，唯一含义是服务器不认这把公钥�
 那几项站点查询取回的是那台集群的真实数据。
 
 提交之后那一段也在 2026-10-17/18 走过了：会话提交、`direct-tcpip` 转发、
-code-server 界面打开、临时离开之后接回来、释放，以及排队（Slurm `PENDING`）那一段。
+插件界面打开、临时离开之后接回来、释放，以及排队（Slurm `PENDING`）那一段。
 仍然只有推断的是常驻通道在真机上有没有建起来，见 U1；`slurmate submit` 那条 CLI
 链路见 U6。
 
@@ -275,7 +275,7 @@ code-server 界面打开、临时离开之后接回来、释放，以及排队�
 | 限制 | 为什么 |
 |---|---|
 | 需要 **bash 4 或更新** | `job/start.sh` 是一段被 `source` 进来的 shell 片段，用到了关联数组（`PLUGIN_SESSION_FIELDS`）。Windows 上先找 Git for Windows 自带的那个，再找 WSL 里的；macOS 自带的 `/bin/bash` 是 3.2 |
-| 插件的依赖得装在**这台机器**上 | 真站点上那两个样例要计算节点上有 code-server / sshd。起不来**既不静默、也不拿别的东西顶替** —— 它的 stdout/stderr 就是答案 |
+| 插件的依赖得装在**这台机器**上 | 真站点上的样例插件要计算节点上有它自己的服务（例如 sshd）。起不来**既不静默、也不拿别的东西顶替** —— 它的 stdout/stderr 就是答案 |
 
 所以下面这些路径是真的在跑：
 

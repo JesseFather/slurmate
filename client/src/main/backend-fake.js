@@ -19,7 +19,7 @@
  * ── 它不是什么 ─────────────────────────────────────────────────────────────
  * 它不是「随便返回点数据让界面能画出来」的空壳。它的 RPC 响应逐字段照着
  * `cluster/slurmate-sessiond` 的 `session_view` 和 `op_*` 构造，
- * 状态迁移照着真的状态机，并且真的起一个 HTTP 服务复刻 code-server
+ * 状态迁移照着真的状态机，并且真的起一个 HTTP 服务复刻 web-demo
  * 的登录契约、真的走一遍 tunnel.js。
  *
  * 唯一被假掉的是 SSH 那一跳。
@@ -227,11 +227,11 @@ const QUEUE = {
 /** 假的 `sacct` 输出。混进两条作业步（`.0` / `.extern`）不可能 —— 那个
  *  过滤发生在守护进程里，这里已经是过滤后的形状。 */
 const HISTORY = [
-  { job_id: '901002', name: 'code-server', state: 'COMPLETED', exit_code: '0:0',
+  { job_id: '901002', name: 'web-demo', state: 'COMPLETED', exit_code: '0:0',
     elapsed: '06:38:58', end: '2026-09-22T17:17:13', partition: 'A6000' },
-  { job_id: '901001', name: 'code-server', state: 'TIMEOUT', exit_code: '0:0',
+  { job_id: '901001', name: 'web-demo', state: 'TIMEOUT', exit_code: '0:0',
     elapsed: '5-01:01:38', end: '2026-09-22T10:36:34', partition: 'A6000' },
-  { job_id: '901000', name: 'code-server', state: 'FAILED', exit_code: '0:9',
+  { job_id: '901000', name: 'web-demo', state: 'FAILED', exit_code: '0:9',
     elapsed: '00:03:11', end: '2026-09-21T09:02:00', partition: '2080TI' },
 ];
 
@@ -1203,7 +1203,7 @@ class FakeBackend extends Backend {
     }
   }
 
-  /** 建立到目标的数据通道。假站点里目标就是本地的那个假 code-server。 */
+  /** 建立到目标的数据通道。假站点里目标就是本地的那个假 web-demo。 */
   dial(host, port) {
     return new Promise((resolve, reject) => {
       if (Date.now() < this._tunnelDownUntil) {

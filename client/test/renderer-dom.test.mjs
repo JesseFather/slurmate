@@ -798,7 +798,7 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
 });
 
 test('状态条右侧那两颗：只在会话页面盖着时露，写的是「停止该作业」', async () => {
-  // 用户 2026-10-18 定的形状：code-server 那类作业页面上给一颗「停止该作业」——
+  // 用户 2026-10-18 定的形状：web-demo 那类作业页面上给一颗「停止该作业」——
   //   快速结束眼前这一条的机会；插件页与作业页都不给（前者没有页面可重载、
   //   也没有作业可停，后者自己那一屏上就有大按钮）。「结束会话」这个名字不再出现。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
@@ -809,9 +809,9 @@ test('状态条右侧那两颗：只在会话页面盖着时露，写的是「�
   const btn = h.byId.get('sb-end');
   const reload = h.byId.get('sb-reload');
   // `hasSurface` 认的是插件清单里的 `surface`（与「重新加载」同一份判据）。
-  h.run("lastPlugins = { plugins: [{ name: 'code-server', surface: { kind: 'web', path: '/' } }] };");
+  h.run("lastPlugins = { plugins: [{ name: 'web-demo', surface: { kind: 'web', path: '/' } }] };");
   const snap = { state: 'running', slot: 's1', sessionId: 'sess-a', jobId: '11',
-                 serviceKind: 'code-server' };
+                 serviceKind: 'web-demo' };
 
   // ── 会话页面盖着：两颗都在，「停止该作业」 ──
   h.run("SCREEN = 'plugins'; SESS = { sessions: [{ slot: 's1', live: true }],"
@@ -1315,7 +1315,7 @@ test('顶栏标签：同一个插件开两份时，两个标签必须分得开',
 });
 
 test('一条会话也露标签：那颗「面板」是回到插件页与作业页的唯一入口', async () => {
-  // 真机（2026-10-18）：只有一条 code-server 会话时，标签栏从前整条收着 ——
+  // 真机（2026-10-18）：只有一条 web-demo 会话时，标签栏从前整条收着 ——
   //   而那一块原生视图从 y=30 往下盖住整个窗口主体。于是起完会话就回不到
   //   插件页与作业页，连"现在跑的是哪一条"都看不见。用户报的原话是
   //   "没有显示这个插件的标签，而且没有返回到插件或者作业页面的按钮或方式"。
@@ -2248,11 +2248,11 @@ test('切标签：推送里的 panelFront 当场决定状态条右侧那两颗�
   //   再从插件页点回会话标签，也不变。它们的显隐跟着"页面在不在眼前"走，
   //   而那个事实随每一份会话状态推送（`panelFront`）一起到。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
-  h.run("lastPlugins = { plugins: [{ name: 'code-server', surface: { kind: 'web', path: '/' } }] };"
+  h.run("lastPlugins = { plugins: [{ name: 'web-demo', surface: { kind: 'web', path: '/' } }] };"
     + "SCREEN = 'plugins';");
   const push = (panelFront) => h.fn('renderSessions')({
     sessions: [{ slot: 's1', live: true, snap: { state: 'running', slot: 's1',
-      serviceKind: 'code-server', sessionId: 'sess-a' } }],
+      serviceKind: 'web-demo', sessionId: 'sess-a' } }],
     front: 's1', panelFront,
   });
   const btn = () => h.byId.get('sb-end');
@@ -2297,7 +2297,7 @@ test('作业那一页点一条正在跑的作业：只换选中，不把页面�
 });
 
 test('重连之后：会话表从主进程取一次，标签栏不会空着', async () => {
-  // 真机（2026-10-18）：临时离开再连上，界面直接进了 code-server 的页面，
+  // 真机（2026-10-18）：临时离开再连上，界面直接进了 web-demo 的页面，
   //   而上栏没有标签、也没有「面板」—— 过一会又出现。那是界面在 `connect`
   //   返回之后把会话表清空了：主进程接回来的那几条被这一清从界面上删掉，
   //   下一次推送（心跳）才补回来。现在连上之后直接拉一次权威的会话表。

@@ -39,20 +39,20 @@ const { SessionController, State, QUEUED_POLL_MS } = require('../src/main/sessio
 const { Tunnel, probeLocalPort } = require('../src/main/tunnel.js');
 
 // 假后端扮演的是一个具体的站点，"那个站点装了哪些插件"由调用方告诉它 ——
-//   它自己不认识任何插件，基座也不认识。这里给它的是仓库里真那个 code-server 插件。
+//   它自己不认识任何插件，基座也不认识。这里给它的是测试夹具那一棵。
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const REPO = path.join(HERE, '..', '..');
 const CS_MANIFEST = JSON.parse(fs.readFileSync(
-  path.join(REPO, 'plugins', 'code-server', 'plugin.json'), 'utf8'));
+  path.join(HERE, '..', '..', 'tools', 'fixtures', 'plugins', 'web-demo', 'plugin.json'), 'utf8'));
 const LOGIN = CS_MANIFEST.contributes.login;
 const SURFACE = CS_MANIFEST.contributes.surface;
 const SESSION_COOKIE = LOGIN.cookie;
 
 /**
- * 夹具的站点树：仓库里那棵 code-server 树的一份拷贝，只换掉站点侧那一半。
+ * 夹具的站点树：测试夹具那棵树的一份拷贝，只换掉站点侧那一半。
  *
  * 为什么必须换：假站点现在真的把 `job/start.sh` 跑起来，而仓库里那一份
- *    要这台机器上真的有一个 `code-server`（CI 上没有）。换掉的是 `job/start.sh`
+ *    要这台机器上真的有一个那个服务（CI 上没有）。换掉的是 `job/start.sh`
  *    与它旁边的 `job/serve.js` —— 客户端那一半一个字节都不动，清单还是那份
  *    清单，登录契约还是那份契约。
  *
@@ -65,11 +65,11 @@ const SESSION_COOKIE = LOGIN.cookie;
  */
 function fixtureSiteTree() {
   const root = fs.mkdtempSync(path.join(require('os').tmpdir(), 'slurmate-site-'));
-  const dest = path.join(root, 'code-server');
-  fs.cpSync(path.join(REPO, 'plugins', 'code-server'), dest, { recursive: true });
+  const dest = path.join(root, 'web-demo');
+  fs.cpSync(path.join(HERE, '..', '..', 'tools', 'fixtures', 'plugins', 'web-demo'), dest, { recursive: true });
   const short = String(CS_MANIFEST.name).replace(/-/g, '_');
   fs.writeFileSync(path.join(dest, 'job', 'serve.js'), [
-    '// 夹具：这个插件的作业侧服务（真站点上这里跑的是 code-server 那个真程序）。',
+    '// 夹具：这个插件的作业侧服务（真站点上这里跑的是那个真程序）。',
     "const fs = require('fs');",
     `const { createDemoWebService } = require(${JSON.stringify(path.join(HERE, '..', 'src', 'main', 'demo-server.js'))});`,
     `const mf = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(dest, 'plugin.json'))}, 'utf8'));`,

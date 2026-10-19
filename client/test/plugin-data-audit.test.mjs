@@ -36,18 +36,18 @@ const require = createRequire(import.meta.url);
 const pluginData = require('../src/main/plugin-data.js');
 const audit = require('../src/main/plugin-data-audit.js');
 
-const CS = '01M2JKHTZGKJBFQQTWYXMQMF2V';
+const CS = '01M2JKHTZGKJBFQQTWYXMQMF30';
 const SSHD = '01M2JKHTZGF12N0T9CB3XVK36H';
 const WORKSPACE = 'w0123456789ab';
 const OTHER_WORKSPACE = 'wffffffffffff';
-/** code-server 在 `WORKSPACE` 里的那一份数据。 */
+/** web-demo 在 `WORKSPACE` 里的那一份数据。 */
 const SPACE = 's0123456789ab';
 /** 一个不在配置里的数据 id（用来造"那一份已经没了"那一档）。 */
 const OTHER_SPACE = 'sffffffffffff';
 
-/** 有界面、能同时开两份、跨版本共享的那种插件 —— code-server 真实的样子。 */
+/** 有界面、能同时开两份、跨版本共享的那种插件 —— web-demo 真实的样子。 */
 const cs = (over = {}) => ({
-  id: CS, name: 'code-server', displayName: '开发环境', version: '1.0.0',
+  id: CS, name: 'web-demo', displayName: 'Web 示例', version: '1.0.0',
   contributes: {
     surface: { kind: 'web', path: '/' }, ports: 1, concurrent: true,
     data: { inherit: 'editor' },
@@ -76,7 +76,7 @@ const ws = (id, name, refs) => ({ id, name, refs: refs || {} });
 /** `WORKSPACE` 那一份，加上它那一格引用 —— 大多数用例要的就是这个。 */
 const wsOne = () => ws(WORKSPACE, '工作区1', { [CS]: SPACE });
 
-/** code-server 在某一份数据里的身份（三段）。 */
+/** web-demo 在某一份数据里的身份（三段）。 */
 const csIn = (spaceId, group = 'editor') => pluginData.identityOf(cs(), sp(spaceId, CS, group));
 
 const conn = (workspaceId, id = 'c1') => ({ id, workspaceId });
@@ -116,9 +116,9 @@ const run = (o) => audit.audit({
 // ── 活着的分区绝不能被报出来 ──────────────────────────────────────────────
 
 test('活着的分区不在名单里（手写磁盘名：不能拿被测函数自己算期望）', () => {
-  // 这份名字是手写的：`01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab` 就是
-  // Electron 会把 code-server 那个身份落成的目录名（id 段折叠过）。
-  const live = '01m2jkhtzgkjbfqqtwyxmqmf2v@editor@s0123456789ab';
+  // 这份名字是手写的：`01m2jkhtzgkjbfqqtwyxmqmf30@editor@s0123456789ab` 就是
+  // Electron 会把 web-demo 那个身份落成的目录名（id 段折叠过）。
+  const live = '01m2jkhtzgkjbfqqtwyxmqmf30@editor@s0123456789ab';
   const r = run({ names: [live] });
   assert.deepEqual(r.rows, [],
     '有一份数据、也有一条连接正指着它那个工作区 —— 它不是孤儿');
@@ -230,12 +230,12 @@ test('那一份没了：第三段那个数据 id 已经不在配置里，一行�
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'orphan');
   assert.equal(r.rows[0].deletable, true);
-  assert.match(r.rows[0].label, /开发环境/, '标签要带插件的显示名，不是一串 ULID');
+  assert.match(r.rows[0].label, /Web 示例/, '标签要带插件的显示名，不是一串 ULID');
   assert.match(r.rows[0].why, new RegExp(OTHER_SPACE), '得说清是哪一段不一致');
 });
 
 test('插件没了：id 认得出、注册表里没有它，一行，可删', () => {
-  // 末尾是 w（code-server 那个是 v）—— 一个本机没有的 id。
+  // 末尾是 w（夹具那个是 0）—— 一个本机没有的 id。
   const gone = '01m2jkhtzgkjbfqqtwyxmqmf2w';
   const r = run({ names: [`${gone}@editor@${SPACE}`] });
   assert.equal(r.rows.length, 1);
@@ -245,7 +245,7 @@ test('插件没了：id 认得出、注册表里没有它，一行，可删', ()
 });
 
 test('0.7 之前的旧分区：三种旧形状都认得，可删', () => {
-  const names = ['slot-1', 'layout-l0123456789ab', 'plugin-01M2JKHTZGKJBFQQTWYXMQMF2V'];
+  const names = ['slot-1', 'layout-l0123456789ab', 'plugin-01M2JKHTZGKJBFQQTWYXMQMF30'];
   const r = run({ names });
   assert.deepEqual(r.rows.map((x) => x.kind), ['legacy', 'legacy', 'legacy']);
   assert.ok(r.rows.every((x) => x.deletable), '那里面是没人再读的登录 cookie，删得掉才对');
@@ -313,7 +313,7 @@ test('没人用的工作区：数据在、而没有任何连接指着它，一�
   assert.equal(r.rows.length, 1);
   assert.equal(r.rows[0].kind, 'unused');
   assert.equal(r.rows[0].deletable, true);
-  assert.match(r.rows[0].label, /开发环境/);
+  assert.match(r.rows[0].label, /Web 示例/);
   assert.match(r.rows[0].why, /工作区1/, '要说清是哪个工作区 —— 名字才是用户认得的那一项');
 });
 
@@ -511,7 +511,7 @@ test('一屏孤儿走一遍回收：真孤儿被收，`unused` 那份原样留�
   //   手搓的 `{kind:'unused'}` 与 `audit()` 真产出的那一行是两回事（前者不会
   //   因为 `expected` 那张表变了而跟着变）。
   const ghost = '01m2jkhtzgf12n0t9cb3xvk36h@default';   // 本机没有这个插件
-  const old = '01m2jkhtzgkjbfqqtwyxmqmf2v@0.9.0';       // 老版本留下的
+  const old = '01m2jkhtzgkjbfqqtwyxmqmf30@0.9.0';       // 老版本留下的
   const legacy = 'slot-2';                              // 0.7 之前的分区
   const unusedName = disk(csIn(SPACE));  // 那一份还在配置里、工作区也还在，报 unused
 

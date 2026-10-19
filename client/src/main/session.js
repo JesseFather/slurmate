@@ -425,7 +425,7 @@ class SessionController extends EventEmitter {
       // 中转站会话是 null（见构造函数的说明）。
       spaceId: this.spaceId,
       // 已归一的三种取值之一。界面据此决定「连接」该做什么，不要自己猜：
-      // null（服务端明说不知道）与 'code-server' 是完全不同的两件事。
+      // null（服务端明说不知道）与 'web-demo' 是完全不同的两件事。
       serviceKind: this.serviceKind(),
       // 会话的解析键（`<id>@<版本>`）。同样是三态，理由见 servicePlugin()。
       servicePlugin: this.servicePlugin(),

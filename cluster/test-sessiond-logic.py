@@ -69,9 +69,9 @@ UID = os.getuid()
 
 # 仓库里那两个真插件的短名。它们不是守护进程的常量 —— 守护进程里现在
 # 一个插件名都没有，表是扫出来的。这里写死是因为下面的用例要指名道姓地引用
-# 「code-server 那个插件」「sshd 那个插件」，而它们来自 make_config 装进去的
+# 「web-demo 那个插件」「sshd 那个插件」，而它们来自 make_config 装进去的
 # 那两份真清单。
-CS = "code-server"
+CS = "web-demo"
 SSHD = "sshd"
 
 PASS = 0
@@ -163,7 +163,7 @@ def load_cli():
 def free_port(lo=55001, hi=55999):
     """挑一个此刻空闲的端口。
 
-    本机可能真有 code-server 之类的服务占着 55001（那是它合法的端口区间），
+    本机可能真有 web-demo 之类的服务占着 55001（那是它合法的端口区间），
     写死一个数会让这一节因为与环境冲突而红，而它验的不是端口本身。
     """
     for p in range(lo, hi):
@@ -458,7 +458,7 @@ def make_config(mod, tmpdir):
     with open(CONF, "r", encoding="utf-8") as f:
         text = f.read()
     # 补上 default_plugin：这一份测试配置要的是「一个升级前的老站点」的样子
-    # —— 那时不带 service_kind 的提交落到 code-server。第 19 节用不带这一项的
+    # —— 那时不带 service_kind 的提交落到 web-demo。第 19 节用不带这一项的
     # 另一份配置测"没配就该被明确拒绝"。
     #
     # 这一行是替换，不是"插一行进去"。
@@ -466,7 +466,7 @@ def make_config(mod, tmpdir):
     #   值与缺省相同），所以 `default_plugin` 是一个空值的真行 —— 再插一行就会
     #   撞上那条"同一个键写两遍是错误"的硬规则。替换对两种形状都成立，而且顺带把
     #   "这一行必须在示例里"变成一条当场说得出话的前置条件。
-    for _k, _v in (("default_plugin", "code-server"),):
+    for _k, _v in (("default_plugin", "web-demo"),):
         text, _n = re.subn(r"(?m)^%s\s*=.*$" % _k, "%s = %s" % (_k, _v), text)
         if _n != 1:
             raise ValueError("示例配置 %s 里应当恰好有一行 `%s =`（实际 %d 行）"
@@ -490,7 +490,10 @@ def make_config(mod, tmpdir):
     #    也是真的打包（走 build_package 那个容器）、再照安装器的形状解开
     #      （`install_package` → 一棵树 + 一份记录表），不是绕过这两步直接摆一棵树：
     #      "装出来是一棵能对账的树"正是这一版要测的东西，夹具绕过它就等于没测。
-    plugins_src = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
+    #    装的是测试夹具那一棵（`tools/fixtures/plugins/`）与仓库里留下的
+    #    sshd 样例。基座不认识任何具体插件，夹具只提供它需要的能力。
+    plugins_src = os.path.normpath(
+        os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins"))
     plugins_dir = os.path.join(tmpdir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)
     for _name in sorted(os.listdir(plugins_src)):
@@ -499,6 +502,10 @@ def make_config(mod, tmpdir):
             continue
         install_package(plugins_dir,
                         plugin_files_of(_d, skip=mod.PLUGIN_COPY_SKIP))
+    _sshd = os.path.normpath(os.path.join(HERE, os.pardir, "plugins", "sshd"))
+    if os.path.isfile(os.path.join(_sshd, "plugin.json")):
+        install_package(plugins_dir,
+                        plugin_files_of(_sshd, skip=mod.PLUGIN_COPY_SKIP))
     mod.default_plugins_dir = lambda: plugins_dir
 
     # 5. 作业脚本目录 —— 按各插件的 ULID 真织一遍（见上面第 2 条的说明）。
@@ -686,7 +693,7 @@ def slurm_stub(argv, timeout=10, check=False):
     # 判据要带 `sacctmgr not in` —— 这个桩全篇按子串认命令，而
     #    "sacctmgr" 里就含 "sacct"。少了它，所有 sacctmgr 调用都会被这一支接住
     #    （实测：五条既有的账户/分区权限用例一起变红，而报出来的是"alice 的账户
-    #    是 8101|code-server|COMPLETED…"）。
+    #    是 8101|web-demo|COMPLETED…"）。
     if "sacct" in cmd and "sacctmgr" not in cmd:
         # 时间写法照真机校验。 `sacct` 只认 `now-7days` / `now-7day`，
         #    写 `now-7d` 会回 `Invalid time specification`（真集群实测）。
@@ -698,10 +705,10 @@ def slurm_stub(argv, timeout=10, check=False):
         # 混进两个作业步（`.extern` / `.0`）：它们与作业同时出现，
         #   混进来会让"最近 30 条"变成"最近 10 个作业的每一步"。
         return 0, (
-            "8100|code-server|FAILED|0:9|00:03:11|2026-09-21T09:02:00|2080TI\n"
+            "8100|web-demo|FAILED|0:9|00:03:11|2026-09-21T09:02:00|2080TI\n"
             "8100.extern|extern|COMPLETED|0:0|00:03:11|2026-09-21T09:02:00|\n"
-            "8101|code-server|COMPLETED|0:0|06:38:58|2026-09-22T17:17:13|A6000\n"
-            "8101.0|code-server|COMPLETED|0:0|06:39:01|2026-09-22T17:17:16|\n"), ""
+            "8101|web-demo|COMPLETED|0:0|06:38:58|2026-09-22T17:17:13|A6000\n"
+            "8101.0|web-demo|COMPLETED|0:0|06:39:01|2026-09-22T17:17:16|\n"), ""
 
     if "sacctmgr" in cmd:
         user = next((a[5:] for a in args if a.startswith("user=")), "")
@@ -1002,8 +1009,8 @@ def main():
     check("整行注释与空行被跳过",
           parse("# 说明\n\n   \nrange_end = 5\n")[0] == {"range_end": "5"})
     check("值两端空白被去掉",
-          parse("default_plugin =   code-server  \n")[0]
-          == {"default_plugin": "code-server"})
+          parse("default_plugin =   web-demo  \n")[0]
+          == {"default_plugin": "web-demo"})
 
     # 插件配置不住在主文件里：一个插件一个文件。所以主文件里
     #   `[plugin:...]` 这件事不存在了，写了就是错误。
@@ -1845,7 +1852,7 @@ exit 0
 
     def argv_of(**over):
         js = over.pop("job_script", "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch")
-        sk = over.pop("service_kind", "code-server")
+        sk = over.pop("service_kind", "web-demo")
         return mod.build_sbatch_argv(cfg, dict(base_sess, **over), {"A": "1"},
                                      _logdir, js, sk)
 
@@ -1855,13 +1862,13 @@ exit 0
           not any(x.startswith("--gres") for x in a), str(a))
     check("默认不写 -w（节点由 Slurm 在分区内选择）", "-w" not in a, str(a))
     check(" 作业名是 sj-<插件短名>（不再是会话 id）",
-          "--job-name=sj-code-server" in a, str(a))
+          "--job-name=sj-web-demo" in a, str(a))
     check(" 作业脚本路径是 argv 的末项（操作数在选项之后）",
           a[-1] == "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch", str(a))
 
     # 每个真插件都提交它自己那一份作业脚本。
     #
-    # 这一条堵的是「提交了 code-server、跑起来的是 sshd」—— 一个插件一份成品之后，
+    # 这一条堵的是「提交了 web-demo、跑起来的是 sshd」—— 一个插件一份成品之后，
     # 脚本路径由 op_submit 按 spec.id 算出来，而那个算错在真机上隔着作业日志，
     # 不容易看见（第 18 节的 submit 是打桩的，看不见 argv）。
     for _sp in cfg.plugin_specs:
@@ -1910,7 +1917,7 @@ exit 0
     #   输出分成两份、还有保留期与总量上限在那两个目录里做，落点必须是一个
     #   确定的目录。作业脚本会 `mkdir -p` 它，此后每个作业都安全。
     a = mod.build_sbatch_argv(cfg, dict(base_sess, partition=""), {}, _logdir,
-                              "/tmp/j.sbatch", "code-server")
+                              "/tmp/j.sbatch", "web-demo")
     def _pat(flag):
         return a[a.index(flag) + 1] if flag in a else None
     _o, _e = _pat("-o"), _pat("-e")
@@ -1941,9 +1948,9 @@ exit 0
     #   而模板里没有任何一条 `#SBATCH` 指令提到 export。只判一头的话，
     #   "两边都删掉"会全绿 —— 而那是把环境变量整个弄丢。
     _sub_env = {"SLURMATE_SESSION_ID": "s-1", "SLURMATE_CANDIDATES": "55001;55002",
-                "SLURMATE_AUTH_MODE": "password", "SLURMATE_SERVICE_KIND": "code-server"}
+                "SLURMATE_AUTH_MODE": "password", "SLURMATE_SERVICE_KIND": "web-demo"}
     _aexp = mod.build_sbatch_argv(cfg, dict(base_sess, partition="2080TI"), _sub_env,
-                                  home, "/tmp/j.sbatch", "code-server")
+                                  home, "/tmp/j.sbatch", "web-demo")
     _exp = [x for x in _aexp if x.startswith("--export=")]
     check(" 命令行上恰好一个 --export=ALL,…（环境变量唯一的来路）",
           len(_exp) == 1, str(_aexp))
@@ -2304,7 +2311,7 @@ exit 0
     try:
         _argv_dead = mod.build_sbatch_argv(cfg, dict(sess, session_id="x"),
                                            env, home, "/tmp/j.sbatch",
-                                           "code-server")
+                                           "web-demo")
     except Exception as _e:                                  # noqa: BLE001
         _argv_dead = ["<拼不出 argv：%s>" % _e]
     check("退化时 sbatch 不带 -p", "-p" not in _argv_dead, str(_argv_dead))
@@ -2316,7 +2323,7 @@ exit 0
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"})
     d.store.close()
 
-    # ── 19. 服务种类（code-server / sshd）───────────────────────────────────
+    # ── 19. 服务种类（web-demo / sshd）───────────────────────────────────
     #
     # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的分派结构性地
     # 保证。这里测的是守护进程这一侧：缺省、开关、公钥、以及"从 nft 规则恢复出来
@@ -2355,7 +2362,7 @@ exit 0
 
     print("\n  -- 19.0 扫出来的插件表 --")
     check("扫出了两个插件（表来自磁盘，不是代码常量）",
-          sorted(cfg.plugins_by_name) == [CS, SSHD], str(sorted(cfg.plugins_by_name)))
+          sorted(cfg.plugins_by_name) == sorted([CS, SSHD]), str(sorted(cfg.plugins_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
     # 一个插件在站点上是一棵树 + 一份记录表：树按 id 命名，记录表就在它
     #   旁边。两条都要在 —— 只有树没有记录表 = 那次安装没提交。
@@ -2370,7 +2377,7 @@ exit 0
           not [n for n in os.listdir(cfg.plugins_dir) if n.endswith(".splug")],
           str(sorted(os.listdir(cfg.plugins_dir))))
     check("job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
-          cfg.resolve_plugin(CS)[0].job_entry == "start_code_server"
+          cfg.resolve_plugin(CS)[0].job_entry == "start_web_demo"
           and cfg.resolve_plugin(SSHD)[0].job_entry == "start_sshd",
           "%s / %s" % (cfg.resolve_plugin(CS)[0].job_entry,
                        cfg.resolve_plugin(SSHD)[0].job_entry))
@@ -2403,7 +2410,8 @@ exit 0
     #     （那里只有对账在写）—— 两处的方向刻意不同。
     _baddir = os.path.join(tmpdir, "plugins-broken")
     os.makedirs(_baddir, exist_ok=True)
-    with open(os.path.join(HERE, os.pardir, "plugins", CS, "plugin.json"),
+    with open(os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins", CS,
+                           "plugin.json"),
               "rb") as _f:
         _cs_manifest = _f.read()
     install_package(_baddir, [("plugin.json", _cs_manifest)])      # 好的那一份
@@ -3147,7 +3155,7 @@ exit 0
     # 19.1 插件配置（slurmate.conf.d/）
     #
     # 这一节的核心是向后兼容：一份插件配置都没有的老站点必须仍然只开
-    #   code-server
+    #   web-demo
     #   （它标了 site.defaultEnabled）。少了这条，所有现有站点升级后会一个服务都
     #   开不出来，而配置里一个字都不像有问题。
 
@@ -3195,7 +3203,7 @@ exit 0
                                           name))
 
     _c = pcfg("")
-    check("一个 [plugin:*] 块都没有 → 只有 code-server（与升级前完全一致）",
+    check("一个 [plugin:*] 块都没有 → 只有 web-demo（与升级前完全一致）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
           _c.plugin_config(SSHD).present is False
@@ -3255,15 +3263,15 @@ exit 0
           repr(_c.plugin_config(CS).default_gpus))
 
     _c = pcfg("[plugin:sshd]\nenabled = yes\n")
-    check("开 sshd 不会一并关掉 code-server（管理员只想开中转站，不该丢掉 IDE）",
-          _c.enabled_kinds == (CS, SSHD),
+    check("开 sshd 不会一并关掉 web-demo（管理员只想开中转站，不该丢掉 IDE）",
+          sorted(_c.enabled_kinds) == sorted([CS, SSHD]),
           str(_c.enabled_kinds))
 
-    _c = pcfg("[plugin:code-server]\nenabled = no\n[plugin:sshd]\nenabled = yes\n")
-    check("显式关掉 code-server 是合法的（站点只留中转站）",
+    _c = pcfg("[plugin:web-demo]\nenabled = no\n[plugin:sshd]\nenabled = yes\n")
+    check("显式关掉 web-demo 是合法的（站点只留中转站）",
           _c.enabled_kinds == (SSHD,), str(_c.enabled_kinds))
 
-    _c = pcfg("[plugin:code-server]\nenabled = no\n")
+    _c = pcfg("[plugin:web-demo]\nenabled = no\n")
     check("一个插件都不开是合法的（「外壳」的定义：基座不因插件的有无而缺一块）",
           _c.enabled_kinds == () and _c.validate() == [], str(_c.validate())[:140])
     # 但 default_plugin 指向一个没装的插件仍然是硬错误：那不是"本站没开
@@ -3382,7 +3390,7 @@ exit 0
              "defualt_cpus", "err"),
             ("[plugin:sshd]\nenabled = yes\nrange_start = 55001\n",
              "通用键写进了插件那一份里（它住在主配置）", "range_start", "err"),
-            ("[plugin:code-server]\nauth_mode = passwd\n", "auth_mode 取值非法",
+            ("[plugin:web-demo]\nauth_mode = passwd\n", "auth_mode 取值非法",
              "auth_mode", "err"),
             ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
              "default_mem", "err"),
@@ -3453,15 +3461,15 @@ exit 0
 
     # 19.0e 缺省插件来自配置，不是写死的名字
     #
-    # 这条与 19.3（`make_config` 那份配置里 default_plugin = code-server）合起来
-    # 才完整：只测"缺省是 code-server"的话，一个把 code-server 写死的实现照样全绿
+    # 这条与 19.3（`make_config` 那份配置里 default_plugin = web-demo）合起来
+    # 才完整：只测"缺省是 web-demo"的话，一个把 web-demo 写死的实现照样全绿
     # —— 而"写死一个缺省插件名"正是这一版要从基座里拿掉的东西。
     _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
     check("default_plugin 被解析出来，且指向已装的插件时不是错误",
           _c.default_plugin == "sshd" and _c.validate() == [],
           "%r / %s" % (_c.default_plugin, _c.validate()[:1]))
     # 但只查这个属性是不够的：把 `kind = cfg.default_plugin` 改成写死的
-    #   `kind = "code-server"` 时它照样全绿 —— 而"写死一个缺省插件名"正是这一版
+    #   `kind = "web-demo"` 时它照样全绿 —— 而"写死一个缺省插件名"正是这一版
     #   要从基座里拿掉的东西。所以下面真的走一遍提交，看落到哪个插件上。
     _pub8 = ("ssh-ed25519 "
              "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
@@ -3501,9 +3509,9 @@ exit 0
               "ssh-ed25519 " + base64.b64encode(b"\x00" * 51).decode()) is None)
     check("空串被拒", mod.parse_ssh_pubkey("") is None)
 
-    # 19.3 缺省仍然是 code-server —— 与本功能引入前完全一致
+    # 19.3 缺省仍然是 web-demo —— 与本功能引入前完全一致
     r, sess, env = run_submit({"op": "submit"})
-    check("不传 service_kind 时缺省是 code-server",
+    check("不传 service_kind 时缺省是 web-demo",
           sess["service_kind"] == CS, str(sess.get("service_kind")))
     check("环境变量把服务种类传给了作业",
           env.get("SLURMATE_SERVICE_KIND") == CS, str(env))
@@ -3675,7 +3683,7 @@ exit 0
         _by_ms = {p["name"]: p for p in
                   (d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
                    .get("data") or {}).get("plugins", [])}
-        check("而它是每个插件一份的：sshd 写 4 不牵连 code-server",
+        check("而它是每个插件一份的：sshd 写 4 不牵连 web-demo",
               _by_ms[SSHD].get("max_sessions") == 4
               and _by_ms[CS].get("max_sessions") == cfg.max_sessions_per_user,
               str({k: v.get("max_sessions") for k, v in _by_ms.items()}))
@@ -3947,14 +3955,22 @@ exit 0
     #   身份（它扫自己的池）。清单漂了不会崩溃，只会静默接错 —— 会话记的
     #   `<id>@<版本>` 在客户端的池里查不到，界面只解释、不动作，用户看到的是
     #   "作业起来了但界面一片白"，而根因一个字都不在里面。
-    _plugdir = os.path.normpath(os.path.join(HERE, os.pardir, "plugins"))
+    # 清单的来源与 `make_config` 装的是同一批：测试夹具 + 仓库里留下的样例。
+    _plugdirs = [
+        os.path.normpath(os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins")),
+        os.path.normpath(os.path.join(HERE, os.pardir, "plugins")),
+    ]
     _manifests = {}
-    if os.path.isdir(_plugdir):
-        for _name in sorted(os.listdir(_plugdir)):
-            _mf = os.path.join(_plugdir, _name, "plugin.json")
+    _manifest_paths = {}
+    for _pd in _plugdirs:
+        if not os.path.isdir(_pd):
+            continue
+        for _name in sorted(os.listdir(_pd)):
+            _mf = os.path.join(_pd, _name, "plugin.json")
             if os.path.isfile(_mf):
                 with open(_mf, encoding="utf-8") as _f:
                     _manifests[_name] = json.load(_f)
+                _manifest_paths[_name] = _mf
     check("找得到仓库里的插件清单（若未找到下面几条是空断言）",
           len(_manifests) >= 2, str(sorted(_manifests)))
 
@@ -3980,18 +3996,18 @@ exit 0
         # 三个半边都要在。客户端那一半（client/index.js）可以由插件自己决定有
         #   没有（没有就是纯声明式插件），但作业侧那一半必须有 —— 一个有界面
         #   却没有任何作业侧代码的插件，用户点下去只会拿到一个起不来的会话。
+        _src = os.path.dirname(_manifest_paths.get(_spec.name, ""))
         check("%s 有作业侧 job/start.sh" % _spec.name,
-              os.path.isfile(os.path.join(_plugdir, _spec.name, "job", "start.sh")),
-              os.path.join(_plugdir, _spec.name, "job", "start.sh"))
+              bool(_src) and os.path.isfile(os.path.join(_src, "job", "start.sh")),
+              os.path.join(_src, "job", "start.sh"))
         # 血统表（`lineage.json`）也是这棵树的一部分：§2.5 要求它跟着源码树
         #   进版本控制，`packer build` 少它就拒绝出包。它不是第四半边 ——
         #   它是一份记录，进负载，所以这里与清单、两半、README 并列。
         check("%s 的目录里没有多余的条目（清单、客户端、作业侧、血统表）"
               % _spec.name,
-              not (set(os.listdir(os.path.join(_plugdir, _spec.name)))
-                   - {"plugin.json", "client", "job", "README.md",
-                      "lineage.json"}),
-              str(sorted(os.listdir(os.path.join(_plugdir, _spec.name)))))
+              bool(_src) and not (set(os.listdir(_src))
+                   - {"plugin.json", "client", "job", "README.md", "lineage.json"}),
+              str(sorted(os.listdir(_src))) if _src else "(未找到源目录)")
 
     check("两个插件的 id 互不相同（两个插件抢一个 id 会让客户端静默取错）",
           len({q.id for q in cfg.plugin_specs}) == len(cfg.plugin_specs))
@@ -4065,7 +4081,7 @@ exit 0
           is None)
 
     # 19.7 从 nft 规则恢复出来的会话不许猜自己的服务种类
-    #     nft 规则里没有任何东西能说明那个端口上跑的是 code-server 还是 sshd。
+    #     nft 规则里没有任何东西能说明那个端口上跑的是 web-demo 还是 sshd。
     class _FakeNft(object):
         def session_rules(self):
             return ["slurmate-sess-%d-%d-%d" % (UID, 99999, 55555)]
@@ -4098,7 +4114,7 @@ exit 0
     check("恢复用例本身要真的恢复出一行（否则下面那条是空断言）",
           n == 1 and len(rows) == 1, "n=%s rows=%s" % (n, len(rows)))
     if rows:
-        check("恢复态的服务种类是 NULL，不是 'code-server'",
+        check("恢复态的服务种类是 NULL，不是 'web-demo'",
               rows[0]["service_kind"] is None, repr(rows[0]["service_kind"]))
         # 解析键同理。而且这里尤其不能拿短名去反查一个出来 —— 短名是 NULL，
         #   反查只会得到"随便选择一个同名的"，而那个作业可能根本不是它起的。
@@ -4252,7 +4268,7 @@ exit 0
     # "主机公钥是空的"，而空公钥没有任何合法处理方式。
     check("空白的主机公钥不出现在响应里",
           "ssh_host_key" not in _v_blank, repr(_v_blank.get("ssh_host_key")))
-    check("没有这一项时也不出现（code-server 的作业就是这样）",
+    check("没有这一项时也不出现（web-demo 的作业就是这样）",
           "ssh_host_key" not in _v_none, repr(_v_none.get("ssh_host_key")))
     d.store.close()
 
@@ -6377,7 +6393,7 @@ exit 0
         # ── ⑤ 清单声明 defaultEnabled=true 的插件，生成的那一份照实写 yes ────
         #
         # 这一条防的是一处静默的行为改变：写死 `enabled = no` 的话，
-        #    一个"一份插件配置都没写"的站点（code-server 就靠清单缺省开着）会在装完
+        #    一个"一份插件配置都没写"的站点（web-demo 就靠清单缺省开着）会在装完
         #    第一次装插件之后悄悄关掉 —— 而配置文件里多了一行，看起来
         #    像是"一直就这样"。
         _SY4 = os.path.join(_sy_home, "plugins4")
@@ -7258,10 +7274,10 @@ exit 0
                          ("plugin_call", "host_start_service", "plugin_names"))
     _dharness = "\n".join([
         "set -u",
-        "SLURMATE_SERVICE_KIND=code-server",
+        "SLURMATE_SERVICE_KIND=web-demo",
         _dfuncs,
-        'start_code_server() { printf "START %s\\n" "$1"; }',
-        'precheck_code_server() { printf "PRECHECK\\n"; return 7; }',
+        'start_web_demo() { printf "START %s\\n" "$1"; }',
+        'precheck_web_demo() { printf "PRECHECK\\n"; return 7; }',
         'host_start_service 55001; printf "rc_start=%s\\n" "$?"',
         'plugin_call precheck; printf "rc_pre=%s\\n" "$?"',
         'plugin_call cleanup; printf "rc_cleanup=%s\\n" "$?"',
@@ -7271,7 +7287,7 @@ exit 0
     ])
     _dr = subprocess.run(["bash", "-c", _dharness], capture_output=True, text=True)
     _out = _dr.stdout
-    check("plugin_call start 分派到 start_code_server（短名里的 - 写成 _）",
+    check("plugin_call start 分派到 start_web_demo（短名里的 - 写成 _）",
           "START 55001" in _out and "rc_start=0" in _out, _out[:200])
     check("插件自己的钩子失败时返回码原样透出（7，不是被吞成 0/1）",
           "PRECHECK" in _out and "rc_pre=7" in _out, _out[:200])
@@ -7280,7 +7296,7 @@ exit 0
     check("这份脚本里没有请求的那个服务时也返回 3（宿主据此以 24 结束会话）",
           "rc_unknown=3" in _out, _out[:200])
     check("plugin_names 能列出作业侧有实现的插件（错误信息靠它说清楚）",
-          "names=code_server" in _out, _out[:200])
+          "names=web_demo" in _out, _out[:200])
 
     # ── 22. 真的把编织出来的作业脚本跑起来 ──────────────────────────────────
     #
@@ -7346,7 +7362,7 @@ exit 0
     check("请求的服务不在脚本里 → 以 24 结束（不是跑完候选端口才失败）",
           _rc == 24, "rc=%s 日志=%s" % (_rc, _log[-300:]))
     check("而且它说清这份脚本里到底有些什么（错误信息要能照着做）",
-          "这份作业脚本里没有服务" in _log and "code_server" in _log,
+          "这份作业脚本里没有服务" in _log and "web_demo" in _log,
           _log[-400:])
 
     # ── 22b 零块（宿主-only）的脚本 ──
@@ -7372,7 +7388,7 @@ exit 0
           _awk0.returncode == 0 and _syn0.returncode == 0, _syn0.stderr[:200])
     _h2 = os.path.join(tmpdir, "jobsh-zero")
     os.makedirs(_h2, exist_ok=True)
-    _rc0, _log0 = run_jobsh(_woven0, "code-server", _h2)
+    _rc0, _log0 = run_jobsh(_woven0, "web-demo", _h2)
     check("它同样以 24 明确结束（不是跑完候选端口才失败）",
           _rc0 == 24, "rc=%s 日志=%s" % (_rc0, _log0[-300:]))
     check("它的日志里「这份脚本里有的是」那一项是空的（括号里什么都没有）",
@@ -7737,96 +7753,6 @@ exit 0
           not os.path.exists(os.path.join(_tl_home["quiet"], "toplevel-ran")),
           os.listdir(_tl_home["quiet"]))
 
-    # ── 22h 认证 canary：口令未生效时作业不许继续跑 ───────────────────────
-    #
-    # code-server 升级后若改了 `--auth password` 的语义，服务照样起、页面照样
-    #   能用，而口令完全没生效 —— 正常使用中永远看不出来。canary 用一个不带
-    #   cookie 的 `GET /` 判它：正常是 302 → /login，200 意味着页面直接给了出去。
-    #
-    # 两半都必须有：抓住 200，并且不误杀正常的 302。只有前一半的话，一个
-    #   "无条件 exit 26" 的实现照样绿。
-    _hc = os.path.join(tmpdir, "jobsh-canary")
-    os.makedirs(_hc, exist_ok=True)
-    _fake_cs = os.path.join(_hc, "fake-code-server")
-    with open(_fake_cs, "w", encoding="utf-8") as _f:
-        _f.write("\n".join([
-            "#!/usr/bin/env python3",
-            "import os, sys",
-            "from http.server import BaseHTTPRequestHandler, HTTPServer",
-            'mode = os.environ.get("FAKE_CS_MODE", "open")',
-            "a = sys.argv[1:]",
-            'addr = a[a.index("--bind-addr") + 1]',
-            'host, port = addr.rsplit(":", 1)',
-            "class H(BaseHTTPRequestHandler):",
-            "    def do_GET(self):",
-            '        if self.path == "/healthz":',
-            '            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")',
-            '        elif mode == "open":',
-            '            self.send_response(200); self.end_headers(); self.wfile.write(b"<html>")',
-            "        else:",
-            '            self.send_response(302); self.send_header("Location", "/login"); self.end_headers()',
-            "    def log_message(self, *a):",
-            "        pass",
-            "HTTPServer((host, int(port)), H).serve_forever()",
-            "",
-        ]))
-    os.chmod(_fake_cs, 0o755)
-
-    _rc_can, _log_can = run_jobsh(_woven, "code-server", _hc, {
-        "SLURMATE_AUTH_MODE": "password",
-        "SLURMATE_CS_BIN": _fake_cs,
-        "FAKE_CS_MODE": "open",
-        "FAKE_NODE_ADDR": "127.0.0.1",
-    })
-    check("认证 canary 抓住「口令未生效」：不带 cookie 的 GET / 返回 200 时"
-          "作业以 26 结束",
-          _rc_can == 26 and "认证 canary 失败" in _log_can,
-          "rc=%s 日志=%s" % (_rc_can, _log_can[-500:]))
-    check("而且它说得出预期与后果（3xx → /login、口令没有生效）",
-          "3xx" in _log_can and "/login" in _log_can
-          and "口令没有生效" in _log_can, _log_can[-500:])
-    check("它不换端口重试 —— 口令未生效与端口无关"
-          "（换端口只会把同一个缺陷再演一遍）",
-          _log_can.count("尝试在 ") == 1, _log_can[-500:])
-
-    # 反例：正常的 302 → /login 不许被误杀。
-    _hc2 = os.path.join(tmpdir, "jobsh-canary-ok")
-    os.makedirs(os.path.join(_hc2, "bin"), exist_ok=True)
-    write_stub(os.path.join(_hc2, "bin", "scontrol"),
-               'echo "NodeName=node01 NodeAddr=127.0.0.1 State=IDLE"\n')
-    _env_c = dict(_env_full)
-    _env_c.update({
-        "HOME": _hc2, "SLURM_JOB_ID": "777004",
-        "PATH": os.path.join(_hc2, "bin") + ":"
-                + os.environ.get("PATH", "/usr/bin:/bin"),
-        "SLURMATE_SESSION_ID": "sess-canary-ok",
-        "SLURMATE_SESS_DIR": os.path.join(_hc2, ".slurmate", "sessions"),
-        "SLURMATE_LOG_DIR": os.path.join(_hc2, ".slurmate", "logs"),
-        "SLURMATE_CANDIDATES": str(free_port()),
-        "SLURMATE_SERVICE_KIND": "code-server",
-        "SLURMATE_AUTH_MODE": "password",
-        "SLURMATE_CS_BIN": _fake_cs,
-        "FAKE_CS_MODE": "login",
-    })
-    _pc = subprocess.Popen(["bash", _woven], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, env=_env_c)
-    _clog = ""
-    for _ in range(60):
-        time.sleep(0.5)
-        _clog = _read_logs(_hc2)
-        if "会话就绪" in _clog:
-            break
-    _pc.send_signal(_sig.SIGTERM)
-    try:
-        _pc.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        _pc.kill()
-        _pc.wait()
-    _clog = _read_logs(_hc2)
-    check("而正常的 302 → /login 不会被误杀：会话照样走到「会话就绪」",
-          "会话就绪" in _clog and "认证 canary 失败" not in _clog,
-          _clog[-500:])
-
     # ── 22i 作业侧契约的三条机器断言（账本 S31 的 T3 / T4 / T5）─────────
     #
     # 这三条从前只有文档。违反它们的后果都很重、发现成本都高，而正常使用中
@@ -7867,7 +7793,7 @@ exit 0
           _rc_t3 == 27 and "没有写 $SVC_PID" in _log_t3,
           "rc=%s 日志=%s" % (_rc_t3, _log_t3[-500:]))
 
-    # 服务必须是**子进程**且 fd 真的不同：`SVC_PID=$$` 拿的是宿主自己，
+    # 服务必须是子进程且 fd 真的不同：`SVC_PID=$$` 拿的是宿主自己，
     #   `exec 1>>` 之后两边读同一个 fd，比对相等，判不出来。
     _t4 = _weave_blocks("t4", (
         "start_thing() {\n"
@@ -9013,7 +8939,7 @@ exit 0
     _v_sess = {"session_id": "s1", "job_id": None, "state": mod.ST_RESERVED,
                "partition": "A6000", "cpus": 4, "mem": "16G",
                "gres": json.dumps({"name": "gpu", "type": "a100", "count": 2}),
-               "service_kind": "code-server", "service_plugin": "x@1.0.0",
+               "service_kind": "web-demo", "service_plugin": "x@1.0.0",
                "node": None, "node_ip": None, "service_port": None,
                "created_at": 0, "enrolled_at": None, "last_hb_socket": None,
                # 手搓的会话行必须把 session_view 读的每一列都写出来：
@@ -11218,23 +11144,6 @@ exit 0
           and _cap_doc == str(mod.DEFAULT_MAX_SESSIONS_PER_USER),
           "命中 %d 行；文档说 %r，代码是 %r"
           % (len(_cap_rows), _cap_doc, mod.DEFAULT_MAX_SESSIONS_PER_USER))
-
-    # 这里读的是插件自己的 README（基座文档不点名任何插件）。举错例子的
-    #   症状没变 —— "文档里的反例在真站点上并不成立"，而它读起来一点问题都没有
-    #   —— 所以这一条要把文档说的与清单里真的都看一遍：两边各说各的时，
-    #   错的那一份不会红任何东西。
-    _cs_readme = io.open(
-        os.path.join(HERE, os.pardir, "plugins", "code-server", "README.md"),
-        encoding="utf-8").read()
-    _cs_manifest = json.load(io.open(
-        os.path.join(HERE, os.pardir, "plugins", "code-server", "plugin.json"),
-        encoding="utf-8"))
-    _cs_conc = (_cs_manifest.get("contributes") or {}).get("concurrent")
-    check("plugins/code-server/README.md 说这个插件声明了 `concurrent: true`，"
-          "而插件清单里真的是",
-          '"concurrent": true' in _cs_readme and _cs_conc is True,
-          "README 里有那句话=%s；清单里是 %r"
-          % ('"concurrent": true' in _cs_readme, _cs_conc))
 
     # ══════════════════════════════════════════════════════════════════════
     #  29. 看护者：谁在看这条会话（v0.9 阶段 1）

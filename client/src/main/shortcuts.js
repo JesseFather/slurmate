@@ -18,7 +18,7 @@
  *
  * ── 这一节推翻了一个很自然但错误的设想 ────────────────────────────────────
  *
- * 直觉方案是「用 before-input-event 拦下 Ctrl+W，再转发给 code-server」。
+ * 直觉方案是「用 before-input-event 拦下 Ctrl+W，再转发给 web-demo」。
  * 这在 API 语义上做不到。Electron 文档原文：调用 `event.preventDefault()`
  * 会阻止页面的 keydown/keyup 和菜单加速键 —— 两者一起掐，不存在「只拦浏览器
  * 默认行为、把按键继续交给页面」这回事。
@@ -168,7 +168,7 @@ function attachKeyGuard(wc, opts = {}) {
     }
 
     // 其余一律放行 —— 包括 Ctrl+W / Ctrl+N / Ctrl+T / F5 / Ctrl+P。
-    // 它们没有菜单加速键，会直达页面由 code-server 处理。
+    // 它们没有菜单加速键，会直达页面由 web-demo 处理。
     //
     // 放行的键不上报。从前测试后端下每按一次带修饰键的键都往日志里写一行
     //   （「已放行：Ctrl+w」），用来核对"按键到底有没有到页面"—— 那件事已经核完了，

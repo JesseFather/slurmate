@@ -508,7 +508,7 @@ function normalizeConnection(raw, fallbackId) {
 // 一个工作区回答的是「这几条连接算同一个」—— 由用户说了算。它本身不拥有任何
 // 东西，只拥有一张表：这个工作区里，每个插件用哪一份数据。
 //
-// 为什么需要「工作区」这一层：code-server（VS Code web）把 UI 布局存在浏览器 localStorage 里，
+// 为什么需要「工作区」这一层：web-demo（VS Code web）把 UI 布局存在浏览器 localStorage 里，
 // 而 localStorage 按 origin（scheme://host:port）隔离 —— 客户端用隧道的本地监听端口
 // 构造 origin，所以「端口不同」就等于「浏览器存储不同」。工作区把「哪条连接算同一个」变成
 // 用户可控的映射：左侧连接条目、右侧工作区，多对一，引用计数归零即回收。
