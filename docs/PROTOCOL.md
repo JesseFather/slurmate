@@ -539,7 +539,7 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 这是 `classify.js` 这个文件存在的首要理由。
 
 分错的代价是现实的：把 `daemon_unreachable` 当成「会话没了」去处理，就会停止心跳 ——
-一个正在跑的作业在 `orphan_after_seconds`（默认 1800 秒）后被自动 `scancel`，
+一个正在跑的作业在 `orphan_after`（默认 1800 秒）后被自动 `scancel`，
 而用户以为自己只是断了个线。
 
 同一条原则适用于 `code 4`：`kind == "throttled"` 是被熔断了，等一会儿会自动恢复，

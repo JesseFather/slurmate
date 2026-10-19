@@ -1,4 +1,12 @@
 #!/bin/bash
+if ! LC_ALL=C awk '/^#===SLURMATE-PAYLOAD===$/{found=1; exit} END{exit found?0:1}' \
+        "${BASH_SOURCE[0]}" 2>/dev/null; then
+    printf '  [中止] 这一份包不完整（壳被截断）。重新取一份，并核对它的 sha256。\n' >&2
+    exit 1
+fi
+# 上面这一道自检必须留在最前面：壳被截断时，bash 读到截断处就安静收尾，后面
+#   再写什么检查都不会执行。包体标记在壳的末行，找不到就是文件不完整。
+
 # Copyright 2026 JesseFather
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

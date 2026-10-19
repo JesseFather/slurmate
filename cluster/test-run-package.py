@@ -376,6 +376,16 @@ def main():
               r.returncode != 0 and "不完整" in (r.stdout + r.stderr),
               (r.stdout + r.stderr)[-200:])
 
+        # 截在壳这一半：tar 那条路根本走不到，靠的是壳最前面那道自检。
+        shell_cut = os.path.join(tmp, "shellcut.run")
+        with open(out, "rb") as srcf, open(shell_cut, "wb") as dstf:
+            dstf.write(srcf.read(int(size * 0.01)))
+        d4 = os.path.join(tmp, "x4")
+        r = run(["bash", shell_cut, "--extract", d4])
+        check("壳被截断：非零退出，且说的是「不完整」",
+              r.returncode != 0 and "不完整" in (r.stdout + r.stderr),
+              (r.stdout + r.stderr)[-200:])
+
         # ── 5. 壳本身该干净 ───────────────────────────────────────────────
         print("\n── 5. 壳里不许夹带 ──")
         head = read(HEADER)

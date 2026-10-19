@@ -554,7 +554,7 @@ scancel <多出来的 job_id>
 
 ### 会话被 `scancel` 了（状态 `orphaned`）
 
-原因：客户端心跳中断超过 `orphan_after_seconds`（默认 1800 秒）。
+原因：客户端心跳中断超过 `orphan_after`（默认 1800 秒）。
 判活只看客户端经 unix socket 发的心跳，完全不读作业写的 `.jobhb` 文件。
 
 ```bash
@@ -738,7 +738,7 @@ slurmate heartbeat <sid>     # 打一拍，倒计时从头算
 
 ### 用户被熔断静默（code 4 / `throttled`）
 
-在 `reject_window_seconds`（默认 600 秒）内被拒超过 `reject_threshold`（默认 20 次），
+在 `reject_window`（默认 600 秒）内被拒超过 `reject_threshold`（默认 20 次），
 该 uid 进入 `throttle_seconds`（默认 1800 秒）的静默期。
 
 ```bash
