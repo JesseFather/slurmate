@@ -40,10 +40,11 @@
  *
  * ── 三个「不」 ──────────────────────────────────────────────────────────────
  *
- * 读不到记录就不回收，只报。记录丢了/坏了，池里每个版本的引用数都算 0，
- *   按规则会把整个池清空 —— 那是"因为读不到一张表而删掉用户的文件"。与安装器
- *   织作业脚本时那条「目录里有东西、却没有本工具的部署标记，中止，不是删」
- *   是同一个先例：不知道谁在引用的时候，唯一安全的动作是什么都不删。
+ * 读不到引用就不回收，只报。快照表丢了/坏了，它记的引用数会一起归零；
+ *   每个版本旁边另有一份自己的引用副本（`.refs`），回收逐版本看那一份。
+ *   于是丢一张表只影响它自己那一版，而不是全池。两份都读不到时，那一版不删。
+ *   与安装器织作业脚本时那条「目录里有东西、却没有本工具的部署标记，中止，
+ *   不是删」是同一个先例：不知道谁在引用的时候，唯一安全的动作是什么都不删。
  *
  * 写记录在回收之前。反过来（先回收后写）会按一份旧引用表动手，把另一个
  *   站点还要的版本删掉 —— 这是这个设计里唯一会真正丢数据的地方。
@@ -90,8 +91,13 @@
  * 两张表不是一回事，名字必须分开（本文件里也是）：
  *
  *   记录表（`<id>_<版本>.json`）一份构件的提交点。随那一份一起换入、一起删。
- *   快照表（`.sites.json`）整个池的引用计数：哪个站点要哪一版。回收的
- *                                  唯一判据，与任何一份构件的完好与否无关。
+ *   快照表（`.sites.json`）整个池的引用计数：哪个站点要哪一版。
+ *   引用副本（`.<id>_<版本>.refs`）快照表里属于这一版的那几行，逐版本存一份。
+ *                                  快照表丢了/坏了，回收按这一份逐版本判断，
+ *                                  一张表出问题只影响它自己那一版。
+ *
+ * 快照表仍是"哪个站点要哪一版"的完整视图（界面读它），而回收的承重判据是
+ *   逐版本那份副本 —— 后者不可能被一次写坏整体带走。
  *
  * 合并叫"记录"的那天，症状是"删一个坏掉的插件"与"改一次回收判据"会被当成
  *     同一件事来做。
@@ -570,6 +576,95 @@ function sitesWanting(snapshot, id, version) {
 }
 
 /**
+ * 每个版本自己那份引用副本（`.refs`）。
+ *
+ * 快照表是整池一张表：它丢了或读不动，池里每个版本的引用数会同时归零。
+ *   那种情况下"什么都不删"是一条纪律（见文件头），而纪律要靠人守。
+ *   这里把同一份引用按版本各存一份：一张表出问题只影响那一个版本，
+ *   回收不再需要"整张表读不到就全停"这条纪律来挡。
+ *
+ * 文件名以点开头：`poolEntries()` 跳过点开头的名字，于是它不会被当成槽位，
+ *   也不会被清扫报成"来历不明的东西"。名字由槽位名加前缀后缀得出，不另拼。
+ */
+const REFS_SUFFIX = '.refs';
+const REFS_VERSION = 1;
+
+/** 一个版本的引用副本在哪。名字建不出来时返回 `null`。 */
+function refsPathOf(siteRoot, id, version) {
+  const n = SLOT.slotNameOf(id, version);
+  return n ? path.join(siteRoot, `.${n}${REFS_SUFFIX}`) : null;
+}
+
+/** 快照表里"这一版被哪些站点要" → 排好序的站点键。 */
+function refsSitesOf(snapshot, id, version) {
+  const out = [];
+  if (!snapshot || !snapshot.sites || typeof snapshot.sites !== 'object') return out;
+  for (const [key, s] of Object.entries(snapshot.sites)) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
+    const w = s.wants;
+    if (!w || typeof w !== 'object' || Array.isArray(w)) continue;
+    if (w[id] === version) out.push(key);
+  }
+  return out.sort();
+}
+
+/**
+ * 写一个版本的引用副本。返回 `{ok}` 或 `{ok:false, why}`，不抛。
+ *
+ * 写不下去时调用方不回收这一版：磁盘上那份副本可能是旧的，而按旧副本
+ *   判断等于按一张已经过期的表删东西。
+ */
+function writeRefs(siteRoot, id, version, sites) {
+  const file = refsPathOf(siteRoot, id, version);
+  if (!file) return { ok: false, why: '这个 (id, 版本) 拼不出池里的路径。' };
+  const want = [...sites].sort();
+  // 内容没变就不写：池通常在共享家目录上，而每一轮对账都重写每个版本
+  //   一份小文件，在 NFS 上是白付的同步写。读一次比写一次便宜。
+  const cur = readRefs(siteRoot, id, version);
+  if (cur.ok && cur.sites.length === want.length
+      && [...cur.sites].sort().every((k, i) => k === want[i])) {
+    return { ok: true, unchanged: true };
+  }
+  try {
+    writeJsonAtomic(file, { version: REFS_VERSION, sites: want });
+  } catch (e) {
+    return { ok: false, why: `写 ${path.basename(file)} 失败：${e.message}` };
+  }
+  return { ok: true };
+}
+
+/**
+ * 读一个版本的引用副本。
+ *
+ * @returns {{ok:true, sites:string[]} | {ok:false, missing:true} | {ok:false, why:string}}
+ *
+ * "还不存在"与"坏了"分开：前者是旧池还没写过副本，后者是这一版暂时不能判。
+ *   回收那边两者都按不删处理，但只有后者值得在通知里说一句。
+ */
+function readRefs(siteRoot, id, version) {
+  const file = refsPathOf(siteRoot, id, version);
+  if (!file) return { ok: false, why: '这个 (id, 版本) 拼不出池里的路径。' };
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return { ok: false, missing: true };
+    return { ok: false, why: `读取 ${path.basename(file)} 失败：${e.message}` };
+  }
+  let rec;
+  try {
+    rec = JSON.parse(raw);
+  } catch (e) {
+    return { ok: false, why: `${path.basename(file)} 不是合法的 JSON（${e.message}）` };
+  }
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)
+      || !Array.isArray(rec.sites) || rec.sites.some((k) => typeof k !== 'string')) {
+    return { ok: false, why: `${path.basename(file)} 的形状不对（要 {version, sites}）` };
+  }
+  return { ok: true, sites: rec.sites };
+}
+
+/**
  * 池里每一个已提交的槽位（`<id>_<版本>/` + 旁边那张记录表）。
  *
  * 判据是两样都在，而这不是"更严格一点"，是提交点语义本身：树在、记录表不在，
@@ -675,6 +770,22 @@ function sweepPool(siteRoot) {
       continue;
     }
     strays.push(name);
+  }
+
+  // 引用副本与树同生共死：树不在的那一份没有任何读者，留着只是池根一个
+  //   谁也看不见的文件。它以点开头，`poolEntries` 不收，所以单独收一遍。
+  //   判据与上面那条一致：名字解析得出槽位、而那个槽位的树不在了。
+  let names = [];
+  try { names = fs.readdirSync(siteRoot); } catch { /* 读不动：这一轮不清，不影响别的判断 */ }
+  for (const n of names) {
+    if (!n.startsWith('.') || !n.endsWith(REFS_SUFFIX)) continue;
+    const slot = SLOT.parseSlotName(n.slice(1, -REFS_SUFFIX.length));
+    if (!slot) continue;
+    const tree = SLOT.treeDirOf(siteRoot, slot.id, slot.version);
+    let hasTree = false;
+    try { hasTree = fs.statSync(tree).isDirectory(); } catch { /* 不在 */ }
+    if (hasTree) continue;
+    try { fs.unlinkSync(path.join(siteRoot, n)); } catch { /* 下一轮再试 */ }
   }
   return { removed, strays };
 }
@@ -1071,7 +1182,7 @@ async function rpcWithBackoff(rpc, req) {
  * 对账一次。单一入口，依赖注入 `rpc` —— 好测，不需要真 socket。
  *
  * 顺序是承重的：读记录 → 拿站点清单 → 下载 → 暂存校验 → 换入 → 写记录 →
- * 回收 → （调用方）`reload()`。
+ * 写每个版本的引用副本 → 回收 → （调用方）`reload()`。
  *
  * @param {object} o
  *   rpc                {Function} `rpc(req) → Promise<响应>`
@@ -1213,7 +1324,8 @@ async function sync(o) {
       snapshot = emptySnapshot();
     } else {
       snapshotOk = false;
-      out.notices.push(`读取站点的插件快照表失败（${rr.why}）。这一次不会回收任何版本。`);
+      out.notices.push(`读取站点的插件快照表失败（${rr.why}）。`
+        + '这一次只按每个版本自己的引用副本判断，不知道谁在引用的版本不会回收。');
     }
     out.snapshot = { ok: snapshotOk, why: rr.ok ? null : rr.why };
     return await run();
@@ -1552,22 +1664,54 @@ async function sync(o) {
       }
     }
 
-    // ── 6. 回收（引用计数归零才删）──
-    if (!snapshotOk) {
-      // 见文件头：不知道谁在引用的时候，唯一安全的动作是什么都不删。
-    } else if (!protectedKnown) {
-      // 活会话那张表没拿到，同样是不"不知道"。
+    // ── 6. 每个版本自己那份引用副本（`.refs`）──
+    //
+    // 位置同样承重：它在快照表写盘之后、回收之前。副本由快照表重算，所以
+    //   "表里已经没有的站点键"会在这里被清掉 —— 旧连接删了之后，它不能再
+    //   隔着副本永远护住一个版本。
+    //
+    // 写不下去的那一版不进回收：磁盘上那份副本可能是旧的，而按旧副本判断
+    //   等于按一张已经过期的表删东西。
+    const noReclaim = new Set();
+    if (snapshotOk) {
+      for (const it of listPooled(siteRoot)) {
+        const w = writeRefs(siteRoot, it.id, it.version,
+          refsSitesOf(snapshot, it.id, it.version));
+        if (w.ok) continue;
+        noReclaim.add(`${it.id}@${it.version}`);
+        out.notices.push(`没有写成 ${it.id}@${it.version} 的引用副本（${w.why}），`
+          + '这一轮不会回收它。');
+      }
+    }
+
+    // ── 7. 回收（这一版自己的引用副本为空才删）──
+    if (!protectedKnown) {
+      // 活会话那张表没拿到，那是"不知道谁在用它" —— 唯一安全的动作是不删。
     } else {
+      // 快照表读不动时，这里为空集：判据退到每个版本自己的副本（下一段）。
+      //   一张表出问题不再让整个池停止回收 —— 每个版本自带它的答案。
       const wanted = new Set();
-      for (const s of Object.values(snapshot.sites)) {
-        for (const [id, v] of Object.entries(s.wants || {})) wanted.add(`${id}@${v}`);
+      if (snapshotOk) {
+        for (const s of Object.values(snapshot.sites)) {
+          for (const [id, v] of Object.entries(s.wants || {})) wanted.add(`${id}@${v}`);
+        }
       }
       for (const it of listPooled(siteRoot)) {
         const key = `${it.id}@${it.version}`;
         if (wanted.has(key) || protectedVersions.has(key)) continue;
+        if (noReclaim.has(key)) continue;
         // 本轮刚下来的不算 —— 它没进 wants 只可能是它上面那一步失败了。
         if (out.added.some((x) => x.id === it.id && x.version === it.version)) continue;
         if (out.pendingConsent.some((x) => x.id === it.id && x.version === it.version)) continue;
+        // 这一版自己记着还有站点要它 —— 快照表与副本不一致时按副本留。
+        //   副本读不动时同样不删：不知道谁在引用它。
+        const rr = readRefs(siteRoot, it.id, it.version);
+        if (!rr.ok) {
+          out.notices.push(`${key} 的引用副本读取失败`
+            + `（${rr.why || '还没写过'}），不知道还有没有站点要它，所以没有回收。`);
+          continue;
+        }
+        if (rr.sites.length) continue;
         try {
           // 记录表与树一起走（`removeSlot`，先撤提交再删内容）。两句独立的
           //   `rmSync` 会留下"删了一个、另一个没删掉"的状态 —— 那种残留谁也看不见
@@ -1582,7 +1726,7 @@ async function sync(o) {
       }
     }
 
-    // ── 7. 换上之后逐个复查：拿得到才算成功 ──
+    // ── 8. 换上之后逐个复查：拿得到才算成功 ──
     //
     // `reload()` 从不抛，坏插件进 `errors`；"文件都下来了"不等于"装上了"。
     if (typeof o.verify === 'function') {
@@ -1621,6 +1765,12 @@ function removeSlot(siteRoot, id, version) {
     fs.rmSync(tree, { recursive: true, force: true });
   } catch (e) {
     return { ok: false, error: `删不掉 ${tree}：${e.message}` };
+  }
+  // 引用副本是旁挂的一份，不是提交点：它删不掉不影响这一份是否已经从池里
+  //   消失（树与记录表都走了），下一轮 `sweepPool` 会收掉它。所以这里不报失败。
+  const refs = refsPathOf(siteRoot, id, version);
+  if (refs) {
+    try { fs.unlinkSync(refs); } catch { /* sweep 收 */ }
   }
   return { ok: true };
 }
@@ -1777,6 +1927,10 @@ function noteConsent(o) {
   } catch (e) {
     return { ok: false, why: `写快照表失败：${e.message}` };
   }
+  // 同一份引用也落到这一版自己的副本上。写不成时快照表已经更新了（同意这一步
+  //   已经成立），所以只把原因带回去；下一轮对账会重写副本。
+  const wr = writeRefs(o.siteRoot, o.id, o.version, refsSitesOf(rec, o.id, o.version));
+  if (!wr.ok) return { ok: false, why: wr.why };
   return { ok: true };
 }
 
@@ -1824,6 +1978,8 @@ module.exports = {
   listPooled, sweepPool, readSlot, removeSlot,
   // ── 快照表（`.sites.json`）：整个池的引用计数，与上面那些记录表不是一回事 ──
   readSnapshot, writeJsonAtomic, snapshotPathOf,
+  // ── 逐版本的引用副本（`.refs`）：快照表之外的第二道防线 ──
+  refsPathOf, readRefs,
   // ── 给用例与目录模式用的纯函数 ──
   checkRelPath, checkDeclared, caseCollisions, effectiveLimits,
   deliveryOf, packageMetaProblem, fileListOf, pinVerdict, verifyStaged,

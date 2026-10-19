@@ -1511,12 +1511,39 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
  "port_range": [55001, 55999],
  "version": "0.31", "last_tick_at": 1790301794,
  "tick_age_seconds": 2, "last_tick_error": null,
+ "auth_mode_none": 0,
+ "checked": 14, "problems": [],
  "existing": {"codeserver_table": true, "portdaemon_table": true}}
 ```
 
-`consistent` = 规则数 == 活跃会话数。它不等就说明对账在报错
-（`cluster/slurmate-sessiond`）。`existing` 是非侵入式体检：
+`problems` 是体检的结论。空数组 = 检查过、没有发现；每一项是
+`{"key": "...", "detail": "..."}`。`key` 是稳定的机器判据，`detail` 是给人看的一句。
+
+`checked` 是这一轮实际检查了几项。没有它，"没有告警"与"检查根本没跑"
+在界面上分不开。
+
+`problems` 里可能出现的 `key`：
+
+| key | 它说的事 |
+|---|---|
+| `socket_missing` | 控制通道的 socket 不存在 |
+| `table_missing` | `inet slurmate` 表不存在 |
+| `rules_unreadable` | 规则集读不出来 |
+| `claim_incomplete` | 一条活跃会话缺作业号、节点地址或端口，拼不出规则 |
+| `rule_missing` | 有会话该有的规则不在 |
+| `rule_orphan` | 有规则对不上任何活跃会话 |
+| `rule_unparsable` | 一条 `slurmate-sess-` 开头的规则拆不出字段 |
+| `auth_mode_unknown` | 活跃会话的 `auth_mode` 既不是 `password` 也不是 `none` |
+| `tick_never` | 对账一次都没有跑过 |
+| `tick_error` | 最近一次对账出错 |
+| `base_table_missing` | 现有系统的 `inet codeserver` 或 `ip port-daemon` 表不见了 |
+
+`consistent` = 规则集合 == 活跃 claim 集合，两个方向都比。数量相等而集合不等
+同样是问题（见 `rule_missing` / `rule_orphan`）。`existing` 是非侵入式体检：
 只读地看一眼既有系统还在不在，本系统绝不碰它们。
+
+`auth_mode_none` 是活跃会话里关闭了口令的条数。`none` 是站点显式配的宽松模式，
+不算问题，但体检要说出来。
 
 `active_sessions` 只数装上了 ACL 的那几种状态。`pending_sessions` 是
 「已提交、还没有登记上」那一段（`reserved` / `submitted`）：一条卡在那里的会话
@@ -1530,7 +1557,9 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 `last_tick_error` 是最近一次对账抛出的异常（`<类型>: <信息>`），没抛过为 `null`。
 它不是 `null` 时，对账与它之后的阶段都不再推进。
 
-老版本的守护进程不报这四格。
+老版本的守护进程不报 `problems` / `checked` / `auth_mode_none`，也不报
+`last_tick_*` 那四格。客户端在 `problems` 缺席时说的是"守护进程太旧"，
+不是"检查通过" —— 后者会把"没有这一项检查"读成"检查过了、没问题"。
 ### `cluster`
 
 请求：`{"op":"cluster"}`

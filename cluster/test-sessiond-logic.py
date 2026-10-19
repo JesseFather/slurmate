@@ -1210,9 +1210,10 @@ def main():
     # 正则能从 nft 输出里抠回来
     line = ('\t\tip daddr 192.0.2.11 tcp dport 55017 ct state new '
             'meta skuid != %d meta skuid != 0 drop comment "%s" # handle 7' % (UID, c))
-    m = mod.Nft.RE_SESS.search(line)
-    check("能从 nft -a 输出解析出 comment 与 handle",
-          bool(m) and m.group(1) == c and int(m.group(2)) == 7,
+    m = mod.Nft.RE_ANY_RULE.search(line)
+    check("能从 nft -a 输出解析出 comment 与 handle，并能拆回字段",
+          bool(m) and m.group(1) == c and int(m.group(2)) == 7
+          and mod.parse_session_comment(m.group(1)) is not None,
           str(m.groups() if m else None))
 
     # ── 6b. ACL 规则的目标必须是本集群的一台节点 ────────────────────────────
@@ -3812,6 +3813,59 @@ exit 0
            and "分发" in _er.stdout
            and "作业脚本" in _er.stdout),
           _er.stdout[-900:])
+
+    # 账本 S11 剩下的三段：控制器健康、Slurm 版本、分区表。上面那套桩让三者
+    #   都取不到，于是这一屏说的必须是「连不上 / 读取失败 / 一个都没有」——
+    #   把"问不到"画成"在线 / 没有分区"是这一节最想拦的那种话。
+    check("S11：控制器那一行说「连不上」（桩的 ping 没有 UP），并说清后果",
+          "控制器" in _er.stdout and "连不上" in _er.stdout
+          and "不会误释放会话" in _er.stdout,
+          _er.stdout[-900:])
+    check("S11：Slurm 版本那一行说「读取失败」并点名命令",
+          "Slurm 版本" in _er.stdout and "sinfo -V" in _er.stdout,
+          _er.stdout[-900:])
+    check("S11：分区表 rc=0 而输出为空时说的是「一个都没有」，不是「读取失败」"
+          "（两者在运维上要做的事完全不同）",
+          "分区          : 【一个都没有】" in _er.stdout,
+          _er.stdout[-900:])
+
+    # 这三段的成功路径需要另一套桩：上面那套是全失败，只判失败态的话，
+    #   一个永远打印「读取失败」的实现照样绿。
+    _epath_ok = os.path.join(_eprefix, "bin-ok")
+    os.makedirs(_epath_ok, exist_ok=True)
+    for _cmd in ("sbatch", "scancel", "squeue", "sacctmgr", "sshare", "sacct"):
+        write_stub(os.path.join(_epath_ok, _cmd), "exit 0\n")
+    write_stub(os.path.join(_epath_ok, "sinfo"),
+               'case "$1" in\n'
+               '  -V) echo "slurm-wlm 23.11.4" ;;\n'
+               '  *) exit 0 ;;\n'
+               'esac\n')
+    write_stub(os.path.join(_epath_ok, "scontrol"),
+               'case "$*" in\n'
+               '  *"ping"*) echo "Slurmctld(primary) at ctl is UP" ;;\n'
+               '  *"show partition"*)\n'
+               '    echo "PartitionName=CPU Default=NO MaxTime=UNLIMITED'
+               ' TotalNodes=4 TotalCPUs=160 State=UP"\n'
+               '    echo "PartitionName=A6000 Default=YES MaxTime=1-00:00:00'
+               ' TotalNodes=2 TotalCPUs=78 State=UP" ;;\n'
+               '  *"show node"*)\n'
+               '    echo "NodeName=n1 NodeAddr=192.0.2.11 State=IDLE'
+               ' Gres=gpu:a100:2 Partitions=A6000" ;;\n'
+               'esac\n')
+    _okr = subprocess.run(
+        [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
+         "--check", "--config", _econf],
+        capture_output=True, text=True,
+        env=dict(os.environ,
+                 PATH=_epath_ok + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
+    check("S11：控制器在线时说的是「在线」",
+          "控制器        : 在线" in _okr.stdout, _okr.stdout[-900:])
+    check("S11：Slurm 版本原样打出来（不改写、不吞掉前缀）",
+          "slurm-wlm 23.11.4" in _okr.stdout, _okr.stdout[-900:])
+    check("S11：分区表逐项打出来 —— 名字、默认标记、时间上限都在",
+          ("A6000" in _okr.stdout and "默认" in _okr.stdout
+           and "1-00:00:00" in _okr.stdout and "无时间上限" in _okr.stdout),
+          _okr.stdout[-900:])
 
     # ── 19.5i 悬空的 drop-in 文件：一条，且真的打得出来 ──────────────
     #
@@ -6587,7 +6641,7 @@ exit 0
     _ck = tempfile.mkdtemp(prefix="slurmate-ck-")
     try:
         def _mk4(uid, name, ver="1.0.0", out=None):
-            """一个合法的包：清单 + 一份过得了三道断言的作业侧。"""
+            """一个合法的包：清单 + 一份过得了四道断言的作业侧。"""
             return put_package(out or _d4, [
                 ("plugin.json", json.dumps(
                     {"id": uid, "name": name, "version": ver,
@@ -6733,7 +6787,7 @@ exit 0
             ("plugin.json", json.dumps(
                 {"id": _U4, "name": "broken", "version": "1.0.0",
                  "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8")),
-            # 函数名对（三道断言那一关要能过），错的是 shell 语法本身
+            # 函数名对（四道断言那一关要能过），错的是 shell 语法本身
             #   —— 这样这一条红的成因才唯一。
             ("job/start.sh", b"start_broken() {\n"),
         ])
@@ -7246,8 +7300,11 @@ exit 0
         os.makedirs(fakebin, exist_ok=True)
         # detect_node_ip 优先问 scontrol；这里给它一个字面 IPv4（ACL 依赖它，
         # 而它是这条路上唯一一个必须真的能拿到的东西）。
+        # `FAKE_NODE_ADDR` 只给需要真的连上那个地址的用例（认证 canary 要
+        # 起一个本机监听的服务）—— 192.0.2.x 是文档地址，绑不上。
         write_stub(os.path.join(fakebin, "scontrol"),
-                   'echo "NodeName=node01 NodeAddr=192.0.2.20 State=IDLE"\n')
+                   'echo "NodeName=node01 NodeAddr=%s State=IDLE"\n'
+                   % (extra_env or {}).get("FAKE_NODE_ADDR", "192.0.2.20"))
         # 候选端口动态挑：本机可能真有服务占着 55001。
         _p1 = free_port()
         _p2 = free_port(_p1 + 1) if _p1 + 1 < 55999 else free_port(55001, _p1)
@@ -7679,6 +7736,152 @@ exit 0
           " —— 拆成一份一份的全部理由就在这里",
           not os.path.exists(os.path.join(_tl_home["quiet"], "toplevel-ran")),
           os.listdir(_tl_home["quiet"]))
+
+    # ── 22h 认证 canary：口令未生效时作业不许继续跑 ───────────────────────
+    #
+    # code-server 升级后若改了 `--auth password` 的语义，服务照样起、页面照样
+    #   能用，而口令完全没生效 —— 正常使用中永远看不出来。canary 用一个不带
+    #   cookie 的 `GET /` 判它：正常是 302 → /login，200 意味着页面直接给了出去。
+    #
+    # 两半都必须有：抓住 200，并且不误杀正常的 302。只有前一半的话，一个
+    #   "无条件 exit 26" 的实现照样绿。
+    _hc = os.path.join(tmpdir, "jobsh-canary")
+    os.makedirs(_hc, exist_ok=True)
+    _fake_cs = os.path.join(_hc, "fake-code-server")
+    with open(_fake_cs, "w", encoding="utf-8") as _f:
+        _f.write("\n".join([
+            "#!/usr/bin/env python3",
+            "import os, sys",
+            "from http.server import BaseHTTPRequestHandler, HTTPServer",
+            'mode = os.environ.get("FAKE_CS_MODE", "open")',
+            "a = sys.argv[1:]",
+            'addr = a[a.index("--bind-addr") + 1]',
+            'host, port = addr.rsplit(":", 1)',
+            "class H(BaseHTTPRequestHandler):",
+            "    def do_GET(self):",
+            '        if self.path == "/healthz":',
+            '            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")',
+            '        elif mode == "open":',
+            '            self.send_response(200); self.end_headers(); self.wfile.write(b"<html>")',
+            "        else:",
+            '            self.send_response(302); self.send_header("Location", "/login"); self.end_headers()',
+            "    def log_message(self, *a):",
+            "        pass",
+            "HTTPServer((host, int(port)), H).serve_forever()",
+            "",
+        ]))
+    os.chmod(_fake_cs, 0o755)
+
+    _rc_can, _log_can = run_jobsh(_woven, "code-server", _hc, {
+        "SLURMATE_AUTH_MODE": "password",
+        "SLURMATE_CS_BIN": _fake_cs,
+        "FAKE_CS_MODE": "open",
+        "FAKE_NODE_ADDR": "127.0.0.1",
+    })
+    check("认证 canary 抓住「口令未生效」：不带 cookie 的 GET / 返回 200 时"
+          "作业以 26 结束",
+          _rc_can == 26 and "认证 canary 失败" in _log_can,
+          "rc=%s 日志=%s" % (_rc_can, _log_can[-500:]))
+    check("而且它说得出预期与后果（3xx → /login、口令没有生效）",
+          "3xx" in _log_can and "/login" in _log_can
+          and "口令没有生效" in _log_can, _log_can[-500:])
+    check("它不换端口重试 —— 口令未生效与端口无关"
+          "（换端口只会把同一个缺陷再演一遍）",
+          _log_can.count("尝试在 ") == 1, _log_can[-500:])
+
+    # 反例：正常的 302 → /login 不许被误杀。
+    _hc2 = os.path.join(tmpdir, "jobsh-canary-ok")
+    os.makedirs(os.path.join(_hc2, "bin"), exist_ok=True)
+    write_stub(os.path.join(_hc2, "bin", "scontrol"),
+               'echo "NodeName=node01 NodeAddr=127.0.0.1 State=IDLE"\n')
+    _env_c = dict(_env_full)
+    _env_c.update({
+        "HOME": _hc2, "SLURM_JOB_ID": "777004",
+        "PATH": os.path.join(_hc2, "bin") + ":"
+                + os.environ.get("PATH", "/usr/bin:/bin"),
+        "SLURMATE_SESSION_ID": "sess-canary-ok",
+        "SLURMATE_SESS_DIR": os.path.join(_hc2, ".slurmate", "sessions"),
+        "SLURMATE_LOG_DIR": os.path.join(_hc2, ".slurmate", "logs"),
+        "SLURMATE_CANDIDATES": str(free_port()),
+        "SLURMATE_SERVICE_KIND": "code-server",
+        "SLURMATE_AUTH_MODE": "password",
+        "SLURMATE_CS_BIN": _fake_cs,
+        "FAKE_CS_MODE": "login",
+    })
+    _pc = subprocess.Popen(["bash", _woven], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, env=_env_c)
+    _clog = ""
+    for _ in range(60):
+        time.sleep(0.5)
+        _clog = _read_logs(_hc2)
+        if "会话就绪" in _clog:
+            break
+    _pc.send_signal(_sig.SIGTERM)
+    try:
+        _pc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        _pc.kill()
+        _pc.wait()
+    _clog = _read_logs(_hc2)
+    check("而正常的 302 → /login 不会被误杀：会话照样走到「会话就绪」",
+          "会话就绪" in _clog and "认证 canary 失败" not in _clog,
+          _clog[-500:])
+
+    # ── 22i 作业侧契约的三条机器断言（账本 S31 的 T3 / T4 / T5）─────────
+    #
+    # 这三条从前只有文档。违反它们的后果都很重、发现成本都高，而正常使用中
+    #   一次都看不到：漏写 $SVC_PID 让作业安静地起不来，把服务输出转走让站点
+    #   上一个字都没有，函数外的语句被拼进主流程中间。
+    _t5_bad = mod.plugin_jobsh_problems(
+        "thing", "start_thing() { return 0; }\n: > \"$HOME/toplevel\"\n")
+    check("T5：函数定义之外的一行被拒绝（它会被拼进主流程中间）",
+          any("函数定义之外" in p for p in _t5_bad), str(_t5_bad))
+    _t5_ok = mod.plugin_jobsh_problems(
+        "thing", "_thing_helper() {\n  : > \"$HOME/ok\"\n}\n"
+                 "start_thing() {\n  return 0\n}\n")
+    check("T5：只有函数定义的文件通过（别把正常的插件误拒）",
+          _t5_ok == [], str(_t5_ok))
+
+    def _weave_blocks(name, body):
+        bp = os.path.join(tmpdir, "blocks-%s.sh" % name)
+        op = os.path.join(tmpdir, "woven-%s.sbatch" % name)
+        with open(bp, "w", encoding="utf-8") as f:
+            f.write(body)
+        r = subprocess.run(
+            ["awk", "-v", "blocks=" + bp,
+             '/^# @@SLURMATE_PLUGIN_BLOCKS@@$/ {'
+             ' while ((getline line < blocks) > 0) print line;'
+             ' close(blocks); found = 1; next }'
+             ' { print } END { if (!found) exit 9 }', _rb],
+            capture_output=True, text=True)
+        with open(op, "w", encoding="utf-8") as f:
+            f.write(r.stdout)
+        return op
+
+    _t3 = _weave_blocks("t3", "start_thing() { log 'T3-启动了'; return 0; }\n")
+    _h_t3 = os.path.join(tmpdir, "jobsh-t3")
+    os.makedirs(_h_t3, exist_ok=True)
+    _rc_t3, _log_t3 = run_jobsh(_t3, "thing", _h_t3)
+    check("T3：start_ 返回成功却没写 $SVC_PID → 27，并说清契约"
+          "（不写的话清理、流检查与 wait 三处都读取失败）",
+          _rc_t3 == 27 and "没有写 $SVC_PID" in _log_t3,
+          "rc=%s 日志=%s" % (_rc_t3, _log_t3[-500:]))
+
+    # 服务必须是**子进程**且 fd 真的不同：`SVC_PID=$$` 拿的是宿主自己，
+    #   `exec 1>>` 之后两边读同一个 fd，比对相等，判不出来。
+    _t4 = _weave_blocks("t4", (
+        "start_thing() {\n"
+        "    log 'T4-先写一行'\n"
+        "    ( exec 1>>\"$HOME/redirected.out\"; exec sleep 300 ) &\n"
+        "    SVC_PID=$!\n"
+        "    return 0\n"
+        "}\n"))
+    _h_t4 = os.path.join(tmpdir, "jobsh-t4")
+    os.makedirs(_h_t4, exist_ok=True)
+    _rc_t4, _log_t4 = run_jobsh(_t4, "thing", _h_t4)
+    check("T4：把服务输出重定向走后，作业以 25 结束并说清后果",
+          _rc_t4 == 25 and "重定向" in _log_t4,
+          "rc=%s 日志=%s" % (_rc_t4, _log_t4[-500:]))
 
     # ── 23. 配额：一个会话占着一个位置 ─────────────────────────────────────
     section("23. 配额（每人最多几个会话）")
@@ -11359,6 +11562,103 @@ exit 0
           and _d35.session_view(_d35.store.get("s-l1"),
                                 with_secret=False).get("keeper") is None,
           repr(_vw.get("keeper")))
+
+    # ── 29.14 体检：判不变量，不是数数目 ────────────────────────────────
+    #
+    # 数与数相等证不了保护还在：规则集与 claim 集可以同时为 0，而所有会话
+    #   都卡在等登记（2026-10-19 真机）。这里造几种"数量相等而保护是错的"
+    #   现场，判 `problems` 说得出来，并判 `checked` 存在 —— 没有后者，
+    #   "没有告警"与"检查根本没跑"在界面上分不开。
+    section("29.14. 体检：不变量，不是数目")
+
+    class _DoctorNft(object):
+        bin = "/sbin/nft"
+
+        def __init__(self):
+            self.rules = {}
+
+        def ensure(self):
+            return True
+
+        def session_rules(self):
+            # 与生产同一条判据：只收拆得开的那一些。
+            return {c: h for c, h in self.rules.items()
+                    if mod.parse_session_comment(c) is not None}
+
+        def all_comments(self):
+            return list(self.rules)
+
+        def table_exists(self):
+            return True
+
+        def del_by_comment(self, _c):
+            pass
+
+        def add_session_rule(self, *_a, **_k):
+            return True, ""
+
+        def comment_for(self, uid, job_id, port, service_plugin=None):
+            return mod.Nft.comment_for(uid, job_id, port, service_plugin)
+
+    _doc_real_run_cmd = mod.run_cmd
+    mod.run_cmd = lambda argv, *a, **k: (0, "", "")
+    try:
+        _doc_sock = os.path.join(tmpdir, "doctor.sock")
+        with open(_doc_sock, "w"):
+            pass
+        dd = _mkd()
+        dd.nft = _DoctorNft()
+        dd.cfg.socket_path = _doc_sock
+        dd.last_tick_at = mod.now_ts()
+        _add(dd, "s-doc1", job_id="701", state=mod.ST_ENROLLED)
+        dd.store.update("s-doc1", node_ip="192.0.2.11", service_port=55001)
+        _doc_c = dd.nft.comment_for(UID, 701, 55001)
+        dd.nft.rules = {_doc_c: 1}
+
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        check("一致时 problems 为空、checked 是一个正数"
+              "（没有 checked，「没有告警」就与「检查根本没跑」分不开）",
+              _dr.get("problems") == [] and isinstance(_dr.get("checked"), int)
+              and _dr.get("checked") > 0,
+              "doctor=%r" % (_dr,))
+
+        # 数量仍是 1 对 1，而集合整个错开 —— 这是"数数量"判据的盲区。
+        dd.nft.rules = {dd.nft.comment_for(UID, 799, 55001): 1}
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        _keys = [p.get("key") for p in (_dr.get("problems") or [])]
+        check("规则数与会话数相等、而集合错开时，两个方向各报一条"
+              "（数量相等不是不变量）",
+              _dr.get("rules_count") == _dr.get("active_sessions") == 1
+              and "rule_missing" in _keys and "rule_orphan" in _keys,
+              "doctor=%r" % (_dr,))
+
+        # 一条 `slurmate-sess-` 开头却拆不开的规则：`session_rules()` 收不到它，
+        #   所以只有全量列举这一路看得见。
+        dd.nft.rules = {_doc_c: 1, "slurmate-sess-这不是数字": 2}
+        check("前提：拆不开的那条规则真的不在 `session_rules()` 里"
+              "（否则下一条测的是一条看得见的规则）",
+              "slurmate-sess-这不是数字" not in dd.nft.session_rules(),
+              str(sorted(dd.nft.session_rules())))
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        _keys = [p.get("key") for p in (_dr.get("problems") or [])]
+        check("而从全量列举里能认出它、并报成 rule_unparsable",
+              "rule_unparsable" in _keys, "doctor=%r" % (_dr,))
+
+        # 口令那一格：none 是显式宽松，不是问题；认不得的值才是。
+        dd.nft.rules = {_doc_c: 1}
+        dd.store.update("s-doc1", auth_mode="none")
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        check("`auth_mode = none` 不算问题，但要说出来（报条数）",
+              (_dr.get("problems") or []) == []
+              and _dr.get("auth_mode_none") == 1, "doctor=%r" % (_dr,))
+        dd.store.update("s-doc1", auth_mode="nonsense")
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        _keys = [p.get("key") for p in (_dr.get("problems") or [])]
+        check("认不得的 auth_mode 报一条（它既不是 password 也不是 none）",
+              "auth_mode_unknown" in _keys, "doctor=%r" % (_dr,))
+        dd.store.update("s-doc1", auth_mode="password")
+    finally:
+        mod.run_cmd = _doc_real_run_cmd
 
     # ══ 30. 释放那条路要能说实话（v0.9 阶段 4：账本 F12 / F13）══════════════
     #

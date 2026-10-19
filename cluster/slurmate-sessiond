@@ -4575,7 +4575,7 @@ def uninstall_plugins(ids, plugins_dir, conf_path, jobs_dir, say=print,
 #     是唯一入口"的，而"装一个插件要再跑一次部署脚本"正是那句话没成立的证据。
 #     搬过来之后，装、卸、配置、作业脚本四件事都在这一侧说完。
 #
-#   判据一条没改，只是换了语言：三道断言、两遍式、只删自己装过的那些。
+#   判据一条没改，只是换了语言：四道断言、两遍式、只删自己装过的那些。
 #     模板与拼接标记也逐字没变，作业脚本里那一行的形状是跨文件契约
 #     （`cluster/run.sbatch` 的文件头写着它）。
 
@@ -4593,7 +4593,7 @@ def default_job_template():
 
 
 def plugin_jobsh_problems(pname, text):
-    """插件那一份 `job/start.sh` 要过的三道断言。返回问题列表（空 = 能织）。
+    """插件那一份 `job/start.sh` 要过的四道断言。返回问题列表（空 = 能织）。
 
     它们不是"防御性编程"，每一条对应的都是一个静默失效：
 
@@ -4648,6 +4648,50 @@ def plugin_jobsh_problems(pname, text):
             "指不回这个文件。\n"
             "        规则：契约钩子用 <动词>_%s，其余一律用 _%s_ 前缀。"
             % ("、".join(bad_fns), suffix, suffix))
+
+    # ④ 函数定义之外不许有语句。同处一份文件时，那一行会在每一个作业里
+    #    执行；一份一个插件之后它只在本插件里执行，但仍然是"被拼进主流程
+    #    中间的一行"—— 它的副作用落在哪个阶段、与宿主的哪一步相邻，都不由
+    #    作者决定，而症状指不回这个文件。
+    top = []
+    in_func = False
+    pending = False
+    for i, ln in enumerate(text.splitlines(), 1):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        if pending:
+            pending = False
+            if s == "{":
+                in_func = True
+                continue
+        if not in_func:
+            m2 = re.match(r"^[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*(.*)$", s)
+            if m2:
+                rest = m2.group(1)
+                if rest == "{":
+                    in_func = True
+                    continue
+                # 整个函数写在一行上（`start_x() { return 0; }`）也是合法写法。
+                if rest.startswith("{") and rest.endswith("}"):
+                    continue
+                if rest == "":
+                    pending = True
+                    continue
+            top.append(i)
+            continue
+        # 函数结尾的 `}` 在行首；带缩进的那些是函数体里的块
+        #   （`command -v x || { … }`），不能拿它们收函数。
+        if s == "}" and not ln[:1].isspace():
+            in_func = False
+    if top:
+        out.append(
+            "文件里有 %d 行位于函数定义之外（第 %s 行）。\n"
+            "        它们会被拼进作业脚本的主流程中间，在每一个作业里执行，"
+            "而副作用落在\n"
+            "        哪个阶段、与宿主的哪一步相邻，都不由作者决定。把那些语句"
+            "放进函数里。"
+            % (len(top), "、".join(str(i) for i in top)))
     return out
 
 
@@ -4743,7 +4787,7 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
             text = raw.decode("utf-8", "replace")
             probs = plugin_jobsh_problems(spec.name, text)
             if probs:
-                say("✗ 插件 %s 的 %s 过不了作业侧的三道断言："
+                say("✗ 插件 %s 的 %s 过不了作业侧的四道断言："
                     % (spec.name, PLUGIN_JOB_ENTRY))
                 for p in probs:
                     say("      %s" % p)
@@ -4778,7 +4822,7 @@ def weave_plugin_jobs(plugins_dir, jobs_dir, template_path, say=print):
                     "一份都没有改动。" % PLUGIN_JOB_ENTRY)
                 return 1
             wanted.append((spec.id, path))
-            say("  · %s：三道断言通过，织成 %d 行的作业脚本"
+            say("  · %s：四道断言通过，织成 %d 行的作业脚本"
                 % (spec.name, woven.count("\n")))
 
         # ── 第二遍：全部验过了，才开始装 ────────────────────────────────────
@@ -6418,6 +6462,34 @@ class Store(object):
 #  nftables
 # ==============================================================================
 
+# 会话规则 comment 的形状：`slurmate-sess-<uid>-<job>-<port>[-<id>@<版本>]`。
+# 它的唯一实现是 `parse_session_comment()`：`session_rules()` 用它判"这条
+#   comment 是不是会话规则、它属于谁"，`doctor` 也用它判"拆不开的规则"。
+#   从前这里还有第二份正则（`Nft.RE_SESS`），两份模式串各写一遍 —— 而
+#   "规则读到了、拆不开"正是那样长出来的，它又是 `doctor` 要报的一种。
+SESSION_COMMENT_PATTERN = (
+    r"slurmate-sess-(?P<uid>\d+)-(?P<job_id>\d+)-(?P<port>\d+)"
+    r"(?:-(?P<plugin_id>[0-9A-Za-z]+)@(?P<plugin_version>[0-9]+\.[0-9]+\.[0-9]+))?")
+RE_SESSION_COMMENT = re.compile(SESSION_COMMENT_PATTERN)
+
+
+def parse_session_comment(comment):
+    """`Nft.comment_for()` 的逆。认不出返回 `None`，认出返回那四个字段。
+
+    认不出是一种必须报出来的状态：一条 `slurmate-sess-` 开头却拼不上
+    (uid, job, port) 的规则，`doctor` 既认不出它属于谁，也没法说它是错的。
+    """
+    m = RE_SESSION_COMMENT.fullmatch(comment or "")
+    if not m:
+        return None
+    return {"uid": int(m.group("uid")),
+            "job_id": int(m.group("job_id")),
+            "port": int(m.group("port")),
+            "service_plugin": ("%s@%s" % (m.group("plugin_id"),
+                                          m.group("plugin_version"))
+                               if m.group("plugin_id") else None)}
+
+
 class Nft(object):
     """维护 inet slurmate 表的 ACL。
 
@@ -6440,17 +6512,13 @@ class Nft(object):
 
     TABLE = "inet slurmate"
     CHAIN = "output"
-    # 尾巴上那一段（`-<id>@<版本>`）可选：0.29 起写入规则时带上它，而库里
-    #   丢失的旧规则仍然是老形状。`(group 1)` 必须是整条 comment ——
-    #   `session_rules()` 的键与 `comment_for()` 算出来的名字要逐字可比，
-    #   少收一段的症状是"规则明明在，对账认为它不在"，然后每 tick 补一条重复的。
-    RE_SESS = re.compile(
-        r'comment "(slurmate-sess-\d+-\d+-\d+'
-        r'(?:-[0-9A-Za-z]+@[0-9]+\.[0-9]+\.[0-9]+)?)"\s*#\s*handle (\d+)')
     # 任意一条规则的 (comment, handle)。
-    # `del_by_comment()` 用这个，不能用 `RE_SESS`，那个只认会话规则
-    #   （`slurmate-sess-…`），拿它去找基础规则会一条都匹配不到，而
-    #   `del_by_comment()` 照样返回 True（它报的是"规则集读得到"）。症状是
+    # 尾部那一段（`-<id>@<版本>`）可选这件事由 `parse_session_comment()` 判：
+    #   0.29 起写入规则时带上它，而库里丢失的旧规则仍然是老形状。这一层只负责
+    #   把整条 comment 与 handle 取出来 —— `(group 1)` 必须是整条 comment，
+    #   少收一段的症状是"规则明明在，对账认为它不在"，然后每 tick 补一条重复的。
+    # `del_by_comment()` 也用它：另立一条"只认会话规则"的正则去删基础规则
+    #   会一条都匹配不到，而它照样返回 True（它报的是"规则集读得到"）。症状是
     #   "删过了，但规则还在"，且没有任何地方会报错。
     RE_ANY_RULE = re.compile(r'comment "([^"]+)"\s*#\s*handle (\d+)')
     BASE_LO = "slurmate-base-lo"
@@ -6528,16 +6596,38 @@ class Nft(object):
         return True
 
     def session_rules(self):
-        """返回 {comment: handle}"""
+        """返回 {comment: handle}。
+
+        只收认得出的会话规则。这个限制曾经让另一类规则彻底不可见：
+        `slurmate-sess-` 开头、却拼不出 (uid, job, port) 的规则，既不在
+        `session_rules()` 里，也不在任何一份报告里 —— `doctor` 那时判不出它。
+        `all_comments()` 补上那一格。
+        """
         rc, out, _ = self._nft(["-a", "list", "chain", "inet", "slurmate", "output"])
         if rc != 0:
             return None                      # None = 读不到（表不存在或没权限）
         rules = {}
         for line in out.splitlines():
-            m = self.RE_SESS.search(line)
-            if m:
+            m = self.RE_ANY_RULE.search(line)
+            if m and parse_session_comment(m.group(1)) is not None:
                 rules[m.group(1)] = int(m.group(2))
         return rules
+
+    def all_comments(self):
+        """链上每一条规则的 comment，不论形状。读不到返回 `None`。
+
+        `RE_ANY_RULE` 只认带 `# handle N` 的行 —— 那正是 `nft -a` 的输出，
+          也是这一条读的命令；不带 `-a` 的写法会一条都收不到。
+        """
+        rc, out, _ = self._nft(["-a", "list", "chain", "inet", "slurmate", "output"])
+        if rc != 0:
+            return None
+        found = []
+        for line in out.splitlines():
+            m = self.RE_ANY_RULE.search(line)
+            if m:
+                found.append(m.group(1))
+        return found
 
     @staticmethod
     def quote_comment(comment):
@@ -8750,14 +8840,12 @@ class Sessiond(object):
             # 两种形状都认：老规则没有尾巴（重建出来的行只能是 NULL，与从前
             #   相同）；0.29 起写入的带 `-<id>@<版本>`，于是这条会话认得出自己
             #   是哪个插件的 —— 按插件数 `max_sessions` 时才数得到它（账本 S43）。
-            m = re.match(
-                r"^slurmate-sess-(\d+)-(\d+)-(\d+)"
-                r"(?:-([0-9A-Za-z]+)@([0-9]+\.[0-9]+\.[0-9]+))?$", comment)
-            if not m:
+            #   拆法与 `session_rules()` 共用 `parse_session_comment()`。
+            parsed = parse_session_comment(comment)
+            if not parsed:
                 continue
-            uid, job_id, port = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            service_plugin = ("%s@%s" % (m.group(4), m.group(5))
-                              if m.group(4) else None)
+            uid, job_id, port = parsed["uid"], parsed["job_id"], parsed["port"]
+            service_plugin = parsed["service_plugin"]
             if self.store.by_job(job_id):
                 continue                      # 已有记录，交给正常对账
             status, job = self.slurm.job_state(job_id)
@@ -10805,20 +10893,33 @@ class Sessiond(object):
                                       for s in rows[-50:]]})
 
     def op_doctor(self, uid):
+        """体检：不是数几样，而是逐条判不变量。
+
+        数与数相等证不了保护还在：规则集与 claim 集可以同时为 0，而所有会话
+          都卡在等登记（2026-10-19 真机正是这样）。所以这里判的是集合与方向，
+          并把结论结构化地带回去：`problems` 是结论，`checked` 是"真的检查了
+          几项" —— 没有后者，"没有告警"与"检查根本没跑"在界面上分不开。
+
+        四类问题各有自己的键，界面与脚本不必解析人话：
+          socket_missing / table_missing / rules_unreadable /
+          claim_incomplete / rule_missing / rule_orphan / rule_unparsable /
+          auth_mode_unknown / tick_never / tick_error / base_table_missing
+
+        `consistent` 保留（旧界面读它），但判据改成集合相等，不再是数量相等。
+        """
         out = {"socket": os.path.exists(self.cfg.socket_path),
                "table": self.nft.table_exists()}
         rules = self.nft.session_rules()
         out["rules_readable"] = rules is not None
         out["rules_count"] = len(rules) if rules else 0
-        out["active_sessions"] = len(self.store.by_state(ACL_STATES))
+        active = self.store.by_state(ACL_STATES)
+        out["active_sessions"] = len(active)
         # "已提交、还没有登记上"的那一段。它与 `active_sessions` 分开报：
         #   那一格只数装上了 ACL 的会话，于是一条卡在 `submitted` 的会话会让
         #   体检显示"0 个活跃会话、一切正常"，而用户眼前正卡着一条
         #   （2026-10-19 真机）。有它，界面上"排队中"与"体检说 0"就不再矛盾。
         out["pending_sessions"] = len(self.store.by_state(
             (ST_RESERVED, ST_SUBMITTED)))
-        out["consistent"] = (rules is not None
-                             and out["rules_count"] == out["active_sessions"])
         # 这一份是哪一版、tick 还在不在跑。版本那一格是给"装上了没有"一个
         #   当场可看的答案：两端版本对不上时，很多现象只是"旧的那一份还在跑"。
         out["version"] = VERSION
@@ -10838,6 +10939,99 @@ class Sessiond(object):
             "portdaemon_table": run_cmd([nftbin, "list", "table",
                                          "ip", "port-daemon"])[0] == 0,
         }
+
+        problems = []
+
+        def note(key, detail):
+            problems.append({"key": key, "detail": detail})
+
+        checked = 0
+
+        def must(ok, key, detail):
+            nonlocal checked
+            checked += 1
+            if not ok:
+                note(key, detail)
+
+        # ── 不变量 ──
+        must(out["socket"], "socket_missing", "控制通道的 socket 不存在")
+        must(out["table"], "table_missing", "nft 表 inet slurmate 不存在")
+        must(rules is not None, "rules_unreadable",
+             "读取 inet slurmate output 链的规则失败")
+        must(out["last_tick_at"] is not None, "tick_never",
+             "对账一次都还没有跑过")
+        must(not out["last_tick_error"], "tick_error",
+             "最近一次对账出错：%s" % (out["last_tick_error"] or ""))
+        must(out["existing"]["codeserver_table"], "base_table_missing",
+             "现有的 inet codeserver 表不见了")
+        must(out["existing"]["portdaemon_table"], "base_table_missing",
+             "现有的 ip port-daemon 表不见了")
+
+        # 活跃 claim 的期望规则名。缺节点地址或端口的那些各自记一条 ——
+        #   它们算作活跃，却拼不出一条该有的规则，那本身就是问题。
+        expected = {}
+        for s in active:
+            checked += 1
+            if not (s.get("job_id") and s.get("node_ip")
+                    and s.get("service_port")):
+                note("claim_incomplete",
+                     "会话 %s 算作活跃，却没有作业号、节点地址或服务端口"
+                     % (s.get("session_id") or "?"))
+                continue
+            expected[self.nft.comment_for(s["uid"], s["job_id"],
+                                          s["service_port"],
+                                          s.get("service_plugin"))] = s
+
+        if rules is not None:
+            # 双向比较，不是数数量：数量相等而集合不等，保护照样是错的。
+            missing = sorted(set(expected) - set(rules))
+            checked += 1
+            if missing:
+                note("rule_missing",
+                     "有 %d 条会话该有的 ACL 规则不在：%s"
+                     % (len(missing), "、".join(missing[:3])
+                        + ("…" if len(missing) > 3 else "")))
+            orphans = sorted(set(rules) - set(expected))
+            checked += 1
+            if orphans:
+                note("rule_orphan",
+                     "有 %d 条 ACL 规则与任何活跃会话都不一致：%s"
+                     % (len(orphans), "、".join(orphans[:3])
+                        + ("…" if len(orphans) > 3 else "")))
+            # 每条会话规则都要能拆回 (uid, job, port)。判据用全量列举：
+            #   `session_rules()` 只收认得出的那些，而"认不出"正是这里要报的
+            #   状态 —— 少这一路，一条 `slurmate-sess-` 开头却拼不出字段的规则
+            #   既不在规则集里，也不在任何一份报告里。
+            allc = self.nft.all_comments()
+            checked += 1
+            unparsable = [] if allc is None else [
+                c for c in allc
+                if c.startswith("slurmate-sess-")
+                and parse_session_comment(c) is None]
+            if allc is None:
+                note("rules_unreadable", "读取链上现有的全部规则 comment 失败")
+            elif unparsable:
+                note("rule_unparsable",
+                     "有 %d 条规则的 comment 拆不开：%s"
+                     % (len(unparsable), "、".join(unparsable[:3])
+                        + ("…" if len(unparsable) > 3 else "")))
+
+        out["consistent"] = rules is not None and set(rules) == set(expected)
+
+        # `none` 是站点显式配的宽松模式，不是问题；但要说出来 ——
+        #   一个"检查通过"而不提口令被关掉，等于替站点把它藏了。
+        bad_mode = [s.get("session_id") or "?" for s in active
+                    if s.get("auth_mode") not in ("password", "none")]
+        checked += 1
+        if bad_mode:
+            note("auth_mode_unknown",
+                 "有 %d 条活跃会话的 auth_mode 不是 password 也不是 none：%s"
+                 % (len(bad_mode), "、".join(bad_mode[:3])))
+        out["auth_mode_none"] = sum(1 for s in active
+                                    if s.get("auth_mode") == "none")
+
+        out["checked"] = checked
+        out["problems"] = problems
         return self._ok(out)
 
     def op_cluster(self, uid):

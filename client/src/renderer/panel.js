@@ -4222,30 +4222,29 @@ function bindEvents() {
     const r = await window.slurmate.doctor();
     if (!r || !r.ok) return notice('error', '检查失败：' + ((r && r.error && r.error.detail) || '无响应'));
     const d = r.data;
-    const bad = [];
-    if (!d.socket) bad.push('socket 不存在');
-    if (!d.table) bad.push('nft 表不存在');
-    if (!d.rules_readable) bad.push('规则不可读');
-    if (!d.consistent) bad.push(`规则数(${d.rules_count})与会话数(${d.active_sessions})不一致`);
-    if (!(d.existing && d.existing.codeserver_table)) bad.push('现有的 inet codeserver 表不见了');
-    if (!(d.existing && d.existing.portdaemon_table)) bad.push('现有的 port-daemon 表不见了');
-    // 对账那一轮抛了异常：所有阶段从那一步起都不再推进，而界面上只表现为
-    //   「排队中」。它比"规则数对不上"更靠前，所以先报它。
-    if (d.last_tick_error) bad.push(`最近一次对账出错：${d.last_tick_error}`);
-    if (bad.length) notice('error', '检查发现问题：' + bad.join('；'));
-    else {
-      const bits = [`${d.rules_count} 条 ACL 规则`, `${d.active_sessions} 个活跃会话`];
-      // 卡在「已提交、还没有登记上」的那一段。它不算"不一致"（规则数本来就
-      //   该是 0），所以不挡体检通过；但它正是用户眼前那条会话 —— 不报出来，
-      //   体检会说"一切正常"。
-      if (d.pending_sessions > 0) bits.push(`${d.pending_sessions} 个还没有登记上`);
-      let extra = '';
-      if (d.version) extra = `守护进程 ${d.version}`;
-      if (typeof d.tick_age_seconds === 'number') {
-        extra += (extra ? '，' : '') + `上一次对账在 ${d.tick_age_seconds} 秒前`;
-      }
-      notice('ok', `检查通过：${bits.join('，')}。` + (extra ? `（${extra}）` : ''));
+    // 判定在守护进程那一侧，这里只负责说出来。两边各判一遍就是同一条规矩
+    //   两份实现，而它们漂开的那天，界面说"通过"而服务端说"有问题"。
+    const problems = Array.isArray(d.problems) ? d.problems : null;
+    if (!problems) {
+      return notice('error', '这个站点的守护进程版本过低，报不出不变量检查，请先升级站点。');
     }
+    if (problems.length) {
+      const lines = problems.map((p) => (p && p.detail) || (p && p.key) || '未说明');
+      return notice('error', '检查发现问题：' + lines.join('；'));
+    }
+    const bits = [`检查了 ${d.checked} 项`, `${d.rules_count} 条 ACL 规则`,
+                  `${d.active_sessions} 个活跃会话`];
+    // 卡在「已提交、还没有登记上」的那一段。它不算问题（规则数本来就
+    //   该是 0），所以不挡体检通过；但它正是用户眼前那条会话 —— 不报出来，
+    //   体检会说"一切正常"。
+    if (d.pending_sessions > 0) bits.push(`${d.pending_sessions} 个还没有登记上`);
+    if (d.auth_mode_none > 0) bits.push(`${d.auth_mode_none} 条关闭了口令`);
+    let extra = '';
+    if (d.version) extra = `守护进程 ${d.version}`;
+    if (typeof d.tick_age_seconds === 'number') {
+      extra += (extra ? '，' : '') + `上一次对账在 ${d.tick_age_seconds} 秒前`;
+    }
+    notice('ok', `检查通过：${bits.join('，')}。` + (extra ? `（${extra}）` : ''));
   };
 
   // 「最近作业」是一个按需拉的动作，不跟着上面那张表一起刷：它是最贵的

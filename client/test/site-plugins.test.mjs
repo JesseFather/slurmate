@@ -327,6 +327,7 @@ const readSnapshotOf = (siteRoot) => JSON.parse(
 //   命名规则变的那天继续绿着，而绿的是另一个形状。
 const poolTree = (env, p, version) => SLOT.treeDirOf(env.siteRoot, p.id, version || p.version);
 const poolRecord = (env, p, version) => SLOT.recordPathOf(env.siteRoot, p.id, version || p.version);
+const poolRefs = (env, p, version) => S.refsPathOf(env.siteRoot, p.id, version || p.version);
 const stagedTree = (env, s, p, version) => path.join(s.stagingDir, `${p.id}_${version || p.version}`);
 const slotOf = (env, p, version) => S.readSlot(env.siteRoot, p.id, version || p.version);
 const recOf = (env, p, version) => slotOf(env, p, version).record;
@@ -1033,6 +1034,93 @@ test('不认识的会话状态要护着（判错的方向是回收掉用户在�
   assert.equal(fs.existsSync(poolTree(env, v1, '1.0.0')), true,
     '不认识的状态，护着，不回收');
   assert.deepEqual(r.reclaimed, []);
+});
+
+// ── 逐版本的引用副本（`.refs`）─────────────────────────────────────────────
+//
+// 快照表是整池一张表，它丢了会让每个版本的引用同时归零。副本把同一份
+//   答案按版本各存一份，于是回收逐版本判断 —— 这正是 F23 的修法。
+
+const readRefsOf = (env, p, version) => {
+  const r = S.readRefs(env.siteRoot, p.id, version || p.version);
+  assert.equal(r.ok, true, `引用副本要读得动：${r.why}`);
+  return r.sites;
+};
+
+test('同意之后，这一版自己的引用副本记着是哪个站点要它', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r = await callSync(site, env);
+  consentAll(env, r);
+  assert.deepEqual(readRefsOf(env, p), ['aaaaaaaaaaaaaaaa'],
+    '副本记的是站点键，不是标签 —— 标签会改，键不会');
+});
+
+test('快照表坏了，逐版本的引用副本仍然分得开谁有人要', async () => {
+  const siteA = makeSite();
+  const siteB = makeSite();
+  const env = makeEnv();
+  const a = siteA.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const b = siteB.add('b', { name: 'b' }, { 'client/index.js': 'module.exports = {};\n' });
+  let r = await callSync(siteA, env);
+  consentAll(env, r);
+  r = await callSync(siteB, env, { siteKey: 'bbbbbbbbbbbbbbbb', siteLabel: 'v@w:22' });
+  consentAll(env, r);
+  assert.equal(fs.existsSync(poolTree(env, a)), true, '前提：两版都在池里');
+  assert.equal(fs.existsSync(poolTree(env, b)), true);
+
+  // B 那一版没有任何站点要它了。真实流程里这一步发生在"B 升级到新版"那一轮：
+  //   副本由快照表重算，旧版那一条成为空集。
+  fs.writeFileSync(poolRefs(env, b), JSON.stringify({ version: 1, sites: [] }));
+  fs.writeFileSync(path.join(env.siteRoot, S.SNAPSHOT_NAME), '{ 这不是 JSON');
+
+  r = await callSync(siteA, env);
+  assert.equal(fs.existsSync(poolTree(env, a)), true,
+    '副本还记着 A 要它，不能因为快照表坏了就删');
+  assert.equal(fs.existsSync(poolTree(env, b)), false,
+    '它自己的副本说没人要 —— 一张表出问题只影响它自己那一版');
+  assert.deepEqual(r.reclaimed.map((x) => x.id), [b.id]);
+});
+
+test('引用副本读不动，那一版不回收', async () => {
+  const siteA = makeSite();
+  const siteB = makeSite();
+  const env = makeEnv();
+  const a = siteA.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const b = siteB.add('b', { name: 'b' }, { 'client/index.js': 'module.exports = {};\n' });
+  let r = await callSync(siteA, env);
+  consentAll(env, r);
+  r = await callSync(siteB, env, { siteKey: 'bbbbbbbbbbbbbbbb', siteLabel: 'v@w:22' });
+  consentAll(env, r);
+
+  fs.writeFileSync(poolRefs(env, b), '{ 这不是 JSON');
+  fs.writeFileSync(path.join(env.siteRoot, S.SNAPSHOT_NAME), '{ 这不是 JSON');
+
+  r = await callSync(siteA, env);
+  assert.equal(fs.existsSync(poolTree(env, a)), true);
+  assert.equal(fs.existsSync(poolTree(env, b)), true,
+    '读不动就是"不知道谁在要它"，唯一安全的动作是不删');
+  assert.ok(r.notices.some((n) => /引用副本读取失败/.test(n)),
+    `要说出来：${JSON.stringify(r.notices)}`);
+});
+
+test('树不在的引用副本会被清扫，也不冒充池里的条目', async () => {
+  const site = makeSite();
+  const env = makeEnv();
+  const p = site.add('a', { name: 'a' }, { 'client/index.js': 'module.exports = {};\n' });
+  const r0 = await callSync(site, env);
+  consentAll(env, r0);
+
+  const gone = { id: ulid.mint(), version: '1.0.0' };
+  const orphan = poolRefs(env, gone);
+  fs.writeFileSync(orphan, JSON.stringify({ version: 1, sites: [] }));
+  const r = await callSync(site, env);
+
+  assert.equal(fs.existsSync(orphan), false, '没有树的副本没有任何读者，下一轮清扫要收掉');
+  assert.equal(r.poolStrays.some((n) => n.endsWith('.refs')), false,
+    '它是我们自己写的，不是"来历不明的条目"');
+  assert.equal(fs.existsSync(poolRefs(env, p)), true, '树还在的那一份一个字都不能动');
 });
 
 // ── 记录与回收的次序 ────────────────────────────────────────────────────────

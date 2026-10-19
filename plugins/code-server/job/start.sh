@@ -75,6 +75,36 @@ _code_server_scrub_env() {
           VSCODE_RECONNECTION_GRACE_TIME BROWSER 2>/dev/null || true
 }
 
+# ── 认证 canary ────────────────────────────────────────────────────────────
+#
+# 这个检查回答的是"口令到底生效了没有"。code-server 升级后若改了 `--auth
+#   password` 的语义，服务照样起、页面照样能用，而口令完全没生效 —— 正常
+#   使用中永远看不出来，而那正是 `auth_mode = password` 唯一的价值。
+#
+# 判据：不带 cookie 的 `GET /` 必须是重定向（正常是 302 → /login）。200
+#   意味着页面直接给了出去。其余状态码不在这里判 —— 那可能是服务自己的
+#   问题，就绪判定已经覆盖过一轮；把"服务坏了"报成"口令没生效"会把排查
+#   引向错误的方向。
+#
+# 失败时直接结束整个作业，不走 `start_` 那条"返回非 0、换下一个端口"的
+#   路：口令没生效与端口无关，换一个端口只会把同一个缺陷再演一遍。
+_code_server_auth_canary() {
+    local p="$1" code
+    [[ "$AUTH_MODE" == "password" ]] || return 0
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+            "http://${NODE_IP}:${p}/" 2>/dev/null || echo 000)"
+    [[ "$code" == "200" ]] || return 0
+    log_err "认证 canary 失败：不带 cookie 的 GET / 返回 200（预期 3xx → /login）"
+    log "      配置要求 auth=password，而页面直接给了出去，口令没有生效。"
+    log "      检查这个 code-server 版本的 --auth 语义；会话不会以这种状态继续。"
+    kill -TERM "$SVC_PID" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$SVC_PID" 2>/dev/null || true
+    SVC_PID=""
+    write_session "failed" 26 || true
+    exit 26
+}
+
 start_code_server() {
     local p="$1"
     # 兜底值只是"这个变量不该为空"的防御。真正的值由守护进程按站点的
@@ -116,6 +146,7 @@ start_code_server() {
         fi
         if curl -fsS -o /dev/null --max-time 2 "http://${NODE_IP}:${p}/healthz" 2>/dev/null; then
             log "code-server 就绪: ${NODE_IP}:${p} pid=$SVC_PID (/healthz 通过)"
+            _code_server_auth_canary "$p"
             return 0
         fi
         code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 \
@@ -126,6 +157,7 @@ start_code_server() {
                 log "端口 $p 已有 HTTP 响应（$code）但 /healthz 未通过，等待 IDE 就绪"
             elif (( i - http_ok_since >= 5 )); then
                 log "code-server 就绪: ${NODE_IP}:${p} pid=$SVC_PID（HTTP 响应兜底判定）"
+                _code_server_auth_canary "$p"
                 return 0
             fi
         fi

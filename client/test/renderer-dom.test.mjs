@@ -754,22 +754,47 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.31', tick_age_seconds: 2, last_tick_error: null });
+    version: '0.31', tick_age_seconds: 2, last_tick_error: null,
+    checked: 12, problems: [], auth_mode_none: 0 });
   await btn.onclick();
+  // 「检查了 N 项」是这一屏上唯一能把"检查跑了、没有发现"与"检查没跑"
+  //   分开的东西 —— 少了它，一个什么都不做的 doctor 与一个健康的 doctor
+  //   在界面上逐字相同。
+  assert.match(said(), /检查了 12 项/, said());
   assert.match(said(), /0 条 ACL 规则/, said());
   assert.match(said(), /1 个还没有登记上/, said());
   assert.match(said(), /守护进程 0\.31/, said());
   assert.match(said(), /上一次对账在 2 秒前/, said());
 
-  // 对账那一轮抛了异常：进「发现问题」，不被"检查通过"盖住。
+  answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
+    active_sessions: 0, pending_sessions: 1, consistent: true,
+    existing: { codeserver_table: true, portdaemon_table: true },
+    version: '0.31', tick_age_seconds: 2, last_tick_error: null,
+    checked: 12, problems: [], auth_mode_none: 2 });
+  await btn.onclick();
+  assert.match(said(), /2 条关闭了口令/, said());
+
+  // 判定在守护进程那一侧，界面只把 `problems` 说出来 —— 它不再自己重算
+  //   一遍（同一条规矩两份实现，漂开的那天界面说"通过"而服务端说"有问题"）。
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
     version: '0.31', tick_age_seconds: 2,
-    last_tick_error: 'IntegrityError: UNIQUE constraint failed' });
+    checked: 12, auth_mode_none: 0,
+    problems: [{ key: 'tick_error',
+      detail: '最近一次对账出错：IntegrityError: UNIQUE constraint failed' }] });
   await btn.onclick();
   assert.match(said(), /检查发现问题/, said());
   assert.match(said(), /IntegrityError/, said());
+
+  // 没有 `problems` 的是旧守护进程。此时不能拿"没报问题"当"没有问题"——
+  //   那正好是这一版要消灭的那种假绿。
+  answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
+    active_sessions: 0, pending_sessions: 0, consistent: true,
+    existing: { codeserver_table: true, portdaemon_table: true },
+    version: '0.31', tick_age_seconds: 2, last_tick_error: null });
+  await btn.onclick();
+  assert.match(said(), /版本过低/, said());
 });
 
 test('状态条右侧那两颗：只在会话页面盖着时露，写的是「停止该作业」', async () => {

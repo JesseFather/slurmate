@@ -1614,13 +1614,26 @@ def cmd_doctor(args):
              else "%s 秒前" % d.get("tick_age_seconds")))
     if d.get("last_tick_error"):
         print("  上次对账出错       : %s" % d.get("last_tick_error"))
+    probs = d.get("problems")
+    if isinstance(probs, list):
+        print("  不变量检查         : 检查了 %s 项，%s"
+              % (d.get("checked", "?"),
+                 "全部通过" if not probs else "发现 %d 个问题" % len(probs)))
+        for p in probs:
+            print("    %s %s" % (bad, (p or {}).get("detail")
+                                  or (p or {}).get("key") or "未说明"))
+    else:
+        # 没有这一格的是旧守护进程。不能拿"它没报问题"当"没有问题"。
+        print("  不变量检查         : ?（守护进程没有 problems 这一格，版本过低）")
     ex = d.get("existing") or {}
     print("  --- 现有系统（只读检查，本系统不碰它们）---")
     print("    控制节点 inet codeserver 表 : %s"
           % (ok if ex.get("codeserver_table") else bad))
     print("    port-daemon DNAT 表        : %s"
           % (ok if ex.get("portdaemon_table") else bad))
-    return 0
+    # 检查要能真的失败：有问题、或者对面太旧而根本没检查，退出码都非零 ——
+    #   脚本里那句 `&&` 才不会把"说不清"读成"通过"。
+    return 0 if probs == [] else 1
 
 
 def cmd_gc(args):

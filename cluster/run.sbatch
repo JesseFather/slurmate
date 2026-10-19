@@ -52,7 +52,9 @@
 #  退出码（本文件添补的几位）：20 无法确定节点 IPv4 / 21 作业日志打不开 /
 #    22 候选端口全部失败 / 23 配置要口令却生成不出来 / 24 这份脚本里没有请求的
 #    那个服务（下面那道守卫）、或插件的预检没过、或认证方式宿主不认识 /
-#    25 插件把服务进程的输出重定向走了（见 svc_stream_ok）
+#    25 插件把服务进程的输出重定向走了（见 svc_stream_ok）/
+#    26 插件自己的认证 canary 失败（口令没有生效）/
+#    27 插件报告启动成功，却没有写 $SVC_PID
 #
 #  产出：
 #    <家目录>/.slurmate/sessions/job-<id>.json   会话身份、隧道目标、口令
@@ -535,6 +537,17 @@ pick_port_and_start() {
             n_busy=$((n_busy + 1)); continue
         fi
         if host_start_service "$p"; then
+            # 契约：start_ 成功时必须把服务进程的 pid 写进 $SVC_PID。
+            #   没写的话，后面每一处（流检查、cleanup、wait）都拿不到它，
+            #   而症状是作业安静地起不来 —— 日志里没有一句指回这个文件。
+            if [[ -z "$SVC_PID" ]]; then
+                log_err "插件报告启动成功，却没有写 \$SVC_PID。"
+                log_err "  契约要求在 start_<短名> 成功时把服务进程的 pid 写进它"
+                log_err "  （作业侧心跳的存活门、cleanup 与主流程最后的 wait"
+                log_err "  三处都读它）。这个会话不会继续。"
+                write_session "failed" 27 || true
+                exit 27
+            fi
             # 服务起来了，但它的输出还在不在作业的那条流上？（见 svc_stream_ok）
             #   不在了就当场判失败并以 25 结束，不试下一个端口 —— 这是插件的
             #   缺陷，换端口不会好，而"悄悄跑起来、日志一个字都没有"才是最难查的。

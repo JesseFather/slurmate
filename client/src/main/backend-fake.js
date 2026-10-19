@@ -2263,16 +2263,31 @@ class FakeBackend extends Backend {
   }
 
   _doctor() {
-    // `active_sessions` 只数 `enrolled`（有 nft 规则的那些）—— 与守护进程一致，
-    //   排队中的不算，否则体检会报"规则数与会话数不一致"。
-    const enrolled = this._sessions.filter((s) => s.state === 'enrolled').length;
+    // `active_sessions` 的语气与守护进程一致：只数 ACL_STATES 那四个状态
+    //   （有 nft 规则的那些），排队中的另报一格，否则体检会报"规则数与会话数
+    //   不一致"。
+    const active = this._sessions.filter((s) =>
+      ['enrolled', 'suspect', 'orphaned', 'releasing'].includes(s.state));
+    const pending = this._sessions.filter((s) =>
+      ['reserved', 'submitted'].includes(s.state)).length;
     return ok({
       socket: true, table: true, rules_readable: true,
-      rules_count: enrolled,
-      active_sessions: enrolled,
+      rules_count: active.length,
+      active_sessions: active.length,
+      pending_sessions: pending,
       consistent: true,
+      version: this._daemonVersion === null
+        ? pluginFiles.hostVersion() : this._daemonVersion,
+      last_tick_at: nowSec(),
+      tick_age_seconds: 0,
+      last_tick_error: null,
       port_range: [55001, 55999],
       existing: { codeserver_table: true, portdaemon_table: true },
+      // 假站点上没有一条会失败的不变量；`checked` 仍然要给，否则界面上
+      //   "检查了 N 项"那一句会显示成 undefined。
+      checked: 10,
+      problems: [],
+      auth_mode_none: active.filter((s) => s.auth_mode === 'none').length,
     });
   }
 
