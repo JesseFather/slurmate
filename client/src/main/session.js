@@ -84,6 +84,38 @@ const SUSPENDED_WATCHED_ELSEWHERE =
   + '到「作业」页点「接管」可以让本机看护它。';
 
 /**
+ * 守护进程说的「登记没有进行」的原因（`enroll_problem`）→ 给人看的一句话。
+ *
+ * 原样印那几个串（`component_group_or_world_writable`）对用户没有用处，而删掉
+ *   它又会让排查的人失去唯一的线索 —— 所以两句一起给：中文在前，原文在括号里。
+ * 认不出来的原因原样印出，不猜（与 `jobstate.js` 同一条规矩）。
+ */
+const ENROLL_PROBLEM_TEXT = {
+  not_yet: '会话文件还没有出现',
+  starting: '服务还在启动',
+  missing_component: '会话目录不存在',
+  component_not_dir: '会话目录的某一级不是目录',
+  component_bad_owner: '会话目录的属主不对',
+  component_group_or_world_writable: '会话目录对同组或其他用户可写',
+  open_failed: '会话文件打不开',
+  not_regular: '会话文件不是普通文件',
+  uid_mismatch: '会话文件的属主不对',
+  mode_too_open: '会话文件的权限过宽',
+  too_large: '会话文件过大',
+  hardlinked: '会话文件是多处链接的',
+  bad_json: '会话文件不是合法的 JSON',
+  not_object: '会话文件的内容不是一个对象',
+  uid_unknown: '站点认不出这个用户',
+};
+
+function enrollProblemText(raw) {
+  if (!raw) return null;
+  const key = String(raw).split(':')[0];
+  const text = ENROLL_PROBLEM_TEXT[key];
+  return text ? `${text}（${raw}）` : String(raw);
+}
+
+/**
  * 稳定态刷新间隔（剩余时间、续期次数、tunnel_target 变化、被回收检测）。
  *
  * 60 秒而不是 30：一次 status = 一个 SSH exec channel = sshd fork + PAM session +
@@ -94,6 +126,17 @@ const SUSPENDED_WATCHED_ELSEWHERE =
 const STATUS_MS = 60000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
+/**
+ * 提交之后等登记的那一小段预算。
+ *
+ * 作业通常几秒内就登记完，那时把隧道起好再返回，界面一上来就是完整的现场。
+ *   排队可以长达几小时，所以这段时间一过就交还控制权，轮询留在后台继续跑 ——
+ *   否则「开始」与「重连」会停在原地（用户 2026-10-19 真机）。
+ * 这一段里轮询用 `FAST_POLL_MS`，过了它才退回 `QUEUED_POLL_MS`：
+ *   3 秒一拍会把"几秒内登记完"那条快路也拖成 3 秒。
+ */
+const ENROLL_WAIT_BUDGET_MS = 3000;
+const FAST_POLL_MS = 150;
 /**
  * 释放期的轮询间隔。
  *
@@ -406,6 +449,9 @@ class SessionController extends EventEmitter {
       //   老站点不发这个字段时是 `undefined`，jobText() 会退回去印状态原文。
       jobTerminal: typeof s.job_terminal === 'boolean' ? s.job_terminal : undefined,
       jobReason: s.job_reason || null,
+      // 作业在跑、而站点那边登记没有在进行的那个原因（守护进程给的那一格）。
+      //   缺席 = 没有这个问题（老守护进程也缺席）—— 界面据此不说那句话。
+      enrollProblem: enrollProblemText(s.enroll_problem),
       jobExitCode: s.job_exit_code || null,
       jobRestarts: s.job_restarts || null,
       timeLimit: s.time_limit || null,
@@ -658,11 +704,39 @@ class SessionController extends EventEmitter {
     return this._afterSubmit(opts);
   }
 
-  /** 提交成功之后：等登记 → 开隧道 → 起心跳。 */
+  /**
+   * 提交成功之后：等登记 → 开隧道 → 起心跳。
+   *
+   * 排队可以长达几小时，所以不能等整段跑完才返回（用户 2026-10-19 真机：
+   *   作业排在队列里时，两个入口都停在原地 —— 「开始」那颗按钮一直灰着，
+   *   重连则停在「连接中…」，连站点都进不去）。
+   * 所以这里只等 `ENROLL_WAIT_BUDGET_MS` 这一段：登记完就把隧道起好再返回；
+   *   没等到的就交还控制权，链留在后台，作业开始之后自己把页面接上。
+   */
   async _afterSubmit(opts) {
-    const ok = await this._waitForEnroll();
-    if (!ok) return null;
-    return this._bringUpTunnel(opts.preferredPort);
+    // `enrollBudgetMs` 给"重连接回一条已经排着队的会话"用：那里等这几秒
+    //   没有用处（它不会因为多等一会儿就登记完），而一条一条等下去会把
+    //   重连拖成 N 倍。见 `reattachOne`。
+    const budgetMs = Number.isFinite(opts.enrollBudgetMs)
+      ? opts.enrollBudgetMs : ENROLL_WAIT_BUDGET_MS;
+    let timer = null;
+    const budget = new Promise((resolve) => {
+      timer = setTimeout(resolve, budgetMs);
+    });
+    const chain = this._waitForEnroll()
+      .then((ok) => (ok ? this._bringUpTunnel(opts.preferredPort) : null))
+      .catch((e) => {
+        this._setState(State.ERROR, {
+          error: '会话起来之后建立连接失败：' + ((e && e.message) || e),
+        });
+        return null;
+      });
+    try {
+      await Promise.race([chain, budget]);
+    } finally {
+      clearTimeout(timer);
+    }
+    return this.snapshot();
   }
 
   /**
@@ -684,12 +758,38 @@ class SessionController extends EventEmitter {
     }
   }
 
-  /** 等待守护进程登记完成（tunnel_target 出现）。 */
+  /**
+   * 等待守护进程登记完成（tunnel_target 出现）。
+   *
+   * 前 `ENROLL_WAIT_BUDGET_MS` 里用小间隔问，过了才退回 `queuedPollMs`：
+   *   作业通常几秒内登记完，3 秒一拍会把那条快路也拖成 3 秒。
+   *
+   * 每一拍都要自己接住传输层的异常：一次抛出就会让这条轮询没有下一拍，
+   *   外层那条 promise 永远挂着（真机 2026-10-19：重连停在「正在接回」）。
+   */
   _waitForEnroll() {
+    const since = Date.now();
+    const nextDelay = () => (
+      Date.now() - since < ENROLL_WAIT_BUDGET_MS
+        ? Math.min(this.queuedPollMs, FAST_POLL_MS)
+        : this.queuedPollMs);
     return new Promise((resolve) => {
       const poll = async () => {
         if (this._stopped) return resolve(false);
-        const resp = await this.backend.rpc({ op: 'status', session_id: this.sessionId });
+        let resp;
+        try {
+          // 带上限：SSH 通道没有应答时，这一拍也要有个尽头（`withTimeout` 的
+          //   拒绝走下面同一个分支，下一拍再问）。
+          resp = await withTimeout(
+            this.backend.rpc({ op: 'status', session_id: this.sessionId }), 20000);
+        } catch (e) {
+          // 守护进程可能正在重启，链路也可能抖了一下 —— 下一拍再问，
+          //   不要判定失败，也不要让这条轮询停在这里。
+          this.warning = '暂时问不到会话状态，正在重试：' + ((e && e.message) || e);
+          this._setState(State.QUEUED);
+          setTimeout(poll, nextDelay()).unref?.();
+          return;
+        }
         const c = classify(resp, { op: 'status' });
 
         if (c.action === Action.OK) {
@@ -725,9 +825,9 @@ class SessionController extends EventEmitter {
           // 传输层/守护进程不可达 —— 继续等，不要判定失败。
           // 这一段守护进程可能正在重启，而作业还在跑。
           this.warning = c.message;
-          this._emit();
+          this._setState(State.QUEUED);
         }
-        setTimeout(poll, this.queuedPollMs).unref?.();
+        setTimeout(poll, nextDelay()).unref?.();
       };
       poll();
     });

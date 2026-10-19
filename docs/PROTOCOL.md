@@ -1206,6 +1206,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `job_reason` | 排队原因（Slurm 的 `Reason` 原话，如 `Resources` / `JobHeldUser`）。**`Reason=None` 被服务端滤掉**，所以它只在真有原因时出现 |
 | `job_exit_code` | Slurm 的 `ExitCode` 原话（`"143:0"` / `"0:0"`）。**没结束时也有值**（恒为 `0:0`）—— 该不该显示是调用方的判断 |
 | `job_restarts` | Slurm 的 `Restarts` 原话（字符串形式的整数）。**重启过就要说出来**：作业被重新排队之后跑着的东西是新的 |
+| `enroll_problem` | 作业已经在运行、而登记没有在进行的那个原因（`load_session_file()` 给的那个串，如 `component_group_or_world_writable`）。**只在确实停在那里超过一分钟时出现**；缺席 = 没有这个问题。界面据此说「站点还没有完成登记」并带上原因 |
 | `auth_password` | 只在会话处于 `ACL_STATES` 时返回 |
 
 > `job_terminal` 是判定，不是状态名：客户端不许自己判。

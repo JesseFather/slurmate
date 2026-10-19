@@ -1435,6 +1435,66 @@ def main():
     d.reject = _real_reject
     write_session("job-5712.json", good)
 
+    # ── 8b. 作业在跑、登记没有进行：要说得出原因 ───────────────────────────
+    #
+    # 2026-10-19 真机（100% 复现）：作业正常运行、日志照常输出，界面上一直是
+    #   「排队中」；守护进程要等 ENROLL_TTL（半小时）才写一行日志，而那时作业
+    #   已经被回收了。这一组钉的是"过了等待窗口就把原因说出来"，以及视图里带一格。
+    section("8b. 作业在跑、而登记没有进行")
+    class _Cap(logging.Handler):                            # noqa: N801
+        def __init__(self):
+            super().__init__()
+            self.lines = []
+
+        def emit(self, rec):
+            self.lines.append(rec.getMessage())
+
+    _cap = _Cap()
+    _cap_lvl = mod.log.level
+    mod.log.addHandler(_cap)
+    mod.log.setLevel(logging.DEBUG)
+    _real_nft = d.nft
+    _real_nft_add = d.nft.add_session_rule
+    d.nft.add_session_rule = lambda *a, **k: (True, "test")
+    # 这一节的 `d.store` 是第 5 节那一份，早已关掉了；这一组要写一行，
+    #   于是给一个自己的库，跑完还回去。
+    _real_store = d.store
+    _st8 = mod.Store(os.path.join(tmpdir, "enroll-problem.db"))
+    d.store = _st8
+    try:
+        _now2 = int(time.time())
+        d.store.insert(session_id="stuck-1", uid=UID, user="alice",
+                       job_id=5712, partition="2080TI", account="acct",
+                       cpus=2, mem="8G", requested_time="1:00:00",
+                       state=mod.ST_SUBMITTED, candidates="55017,55018",
+                       created_at=_now2 - 120, submitted_at=_now2 - 120,
+                       trust="owned")
+        write_session("job-5712.json", good, mode=0o644)
+        d.try_enroll(d.store.get("stuck-1"), job)
+        check("会话文件读取失败：过了等待窗口要说一句，并点名原因",
+              any("mode_too_open" in m for m in _cap.lines), str(_cap.lines))
+        _v = d.session_view(d.store.get("stuck-1"), with_secret=False)
+        check("视图里带着那一格（界面据此说「站点还没有完成登记」）",
+              _v.get("enroll_problem") == "mode_too_open",
+              str(_v.get("enroll_problem")))
+
+        write_session("job-5712.json", good)
+        d.try_enroll(d.store.get("stuck-1"), job)
+        _v2 = d.session_view(d.store.get("stuck-1"), with_secret=False)
+        check("登记上之后那一格消失",
+              "enroll_problem" not in _v2, str(_v2.get("enroll_problem")))
+        check("对照：登记确实发生了（上一条不是恒真）",
+              d.store.get("stuck-1")["state"] == mod.ST_ENROLLED,
+              d.store.get("stuck-1")["state"])
+    finally:
+        mod.log.removeHandler(_cap)
+        mod.log.setLevel(_cap_lvl)
+        d.nft.add_session_rule = _real_nft_add
+        d.nft = _real_nft
+        d.store = _real_store
+        _st8.close()
+        write_session("job-5712.json", good)
+
     # ── 9. Slurm 交互 ──────────────────────────────────────────────────────
     section("9. Slurm 交互")
     # 9a. 解析逻辑用【桩】测，不连真集群。

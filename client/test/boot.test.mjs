@@ -5259,7 +5259,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const w = idx._test.getWindow();
-  await openUpTo(idx, 3);
+  const b = await openUpTo(idx, 3);
   await connectDemo(idx);
 
   // ── 甲：一条有页面的会话 ──
@@ -5291,6 +5291,10 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   //   起同一个插件、同一份数据，槽名与前台都是同一个。
   await invoke('app:stop', { slot: a.slot });
   await waitUntil(() => !occupiedOf(idx, a.slot), '甲那个槽松开', 20000);
+  // 假站点那边也要真的放开这个名额（`releasing` 仍然占着位置，1.6 秒后才释放）。
+  //   不等它的话，后面第 4 次提交会撞上「已经有 3 个会话占着位置」，而这一条
+  //   断言的却是界面上那块页面 —— 两件事无关，失败信息却指不到这里。
+  b.debugReap();
   assert.equal(w.front, a.slot,
     '前置：前台仍旧是那个槽（记录留着，界面要显示"已结束"）—— 这正是②判不出来的那一格');
   // 用户又点了一次那颗「调试」（面板本来就露着 —— 那条会话已经没了），这一步只是
@@ -5315,20 +5319,24 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   assert.equal(w.panelFront, true);
   await invoke('app:stop', { slot: a3.slot });
   await waitUntil(() => !occupiedOf(idx, a3.slot), '甲′那个槽松开', 20000);
-  const b = await appStart(null, 'sshd');          // 另一个插件，另一个槽
-  assert.equal(b.ok, true, `乙提交失败：${JSON.stringify(b)}`);
-  assert.notEqual(b.slot, a.slot, '前置：它落在另一个槽上');
-  await waitUntil(() => w.front === b.slot, '前台换到乙那个槽上', 20000);
+  b.debugReap();
+  const b2 = await appStart(null, 'sshd');          // 另一个插件，另一个槽
+  assert.equal(b2.ok, true, `乙提交失败：${JSON.stringify(b2)}`);
+  assert.notEqual(b2.slot, a.slot, '前置：它落在另一个槽上');
+  await waitUntil(() => w.front === b2.slot, '前台换到乙那个槽上', 20000);
   assert.equal(w.panelFront, false,
     '路②：前台换了，面板让开（少了它，页面上来了而面板还按着它）');
 
   // ── 反过来：起一条后台会话时，面板不许被顶掉 ──
   //   判据是"这一块是不是前台"（见 windows.js 的 `showSurface`）。少了这一半的话，
   //   用户站在调试那一屏上起第二条会话，冒出来的是第一条那个旧页面。
-  await invoke('app:stop', { slot: b.slot });
-  await waitUntil(() => !occupiedOf(idx, b.slot), '乙那个槽松开', 20000);
+  await invoke('app:stop', { slot: b2.slot });
+  await waitUntil(() => !occupiedOf(idx, b2.slot), '乙那个槽松开', 20000);
+  b.debugReap();
+  const c1Before = noticesOf().length;
   const c1 = await appStart(null, 'code-server');
-  assert.equal(c1.ok, true, `丙提交失败：${JSON.stringify(c1)}`);
+  assert.equal(c1.ok, true, `丙提交失败：${JSON.stringify(c1)}　通知：`
+    + noticesOf().slice(c1Before).map((n) => n.text).join(' | '));
   const ctlC1 = idx._test.sessionAt(c1.slot).controller;
   await waitUntil(() => ctlC1.state === 'running' && ctlC1.snapshot().origin, '丙进入 running', 30000);
   await waitUntil(() => w.front === c1.slot, '前台是丙', 20000);
@@ -7064,8 +7072,8 @@ test('排队中的作业：作业那一屏看得见它，【结束】取消的�
   // 夹具的登记延迟默认 8 秒（真集群上的样子）—— 正好把会话按在「排队」上。
   b.enrollDelayMs = 5000;
 
-  // 不 await：`app:start` 要等登记完成才返回（`_waitForEnroll`），而这一条
-  //   要看的正是"还在排队"那一段。
+  // 不 await：`app:start` 只等一小段登记预算（`ENROLL_WAIT_BUDGET_MS`），
+  //   而这一条要看的是"还排着队"那一段，先在它返回之前把现场查完。
   const starting = appStart(null, 'code-server');
   let ctl = null;
   for (let i = 0; i < 200 && !(ctl && ctl.sessionId); i += 1) {
@@ -7249,8 +7257,7 @@ test('端到端：点「连接」之后，作业列表里就看得见那些还�
   assert.equal((await invoke('app:states')).sessions.length, 0, '前置：本机手上已经没有它了');
 
   // 给假后端的每一次 RPC 加一点延迟。这一格是这条用例的全部要害：
-  //   没有它，"接回做完才返回"与"发出去就返回"在几十微秒里分不出来，
-  //   而那条差别正是用户看到的"点了连接，进去却是空的、要等一会儿才有"。
+  //   没有它，"连接先返回、接回在后台"与"两件事一起做完"在几十微秒里分不出来。
   const latency0 = b.rpcLatencyMs;
   b.rpcLatencyMs = 40;
   let res;
@@ -7264,12 +7271,16 @@ test('端到端：点「连接」之后，作业列表里就看得见那些还�
   }
   assert.equal(res.ok, true, `连接失败：${JSON.stringify(res)}`);
 
-  // 紧接着查，中间不等任何东西 —— 连接返回时接回就该已经做完了。
-  const st = await invoke('app:states');
-  assert.equal(st.sessions.filter((x) => x.live).length, 1,
-    '点完「连接」之后，接回必须已经做完（`doConnect` 的最后一步 await 了 '
-    + 'tryReattach）—— 若发出去就返回，用户进作业列表看到的是一张空表，'
-    + '而那几条作业正在集群上跑着、没有心跳');
+  // 连接一成功就交还界面（用户 2026-10-19：不要再停在主页上等会话）。
+  //   此刻接回还在后台，上栏是空的 —— 这正是要的，界面已经可用。
+  const st0 = await invoke('app:states');
+  assert.equal(st0.sessions.filter((x) => x.live).length, 0,
+    '连接返回时接回还没做完 —— 它不该排在用户点「连接」这条路前面');
+
+  // 而它会自己接上来；接上之后作业列表里也看得见、并且是本机接着的。
+  await waitUntil(() => idx._test.getSessions().size === 1
+    && [...idx._test.getSessions().values()]
+      .some((r) => r.controller.state === 'running'), '后台把会话接回来', 20000);
 
   // 而作业列表那一屏（第三屏的数据）也应当看得见它，且是本机接着的。
   const j = await invoke('app:jobs');
@@ -8070,6 +8081,8 @@ test('【临时离开】之后重连：那条会话要接回来，看护者回�
       '接回来的页面让开；用户点上面的标签再过去');
   }
 
+  // 接回是在后台跑的（连接一成功就交还界面），所以这里要等它落到本机手上。
+  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
   const rec = onlyRec(idx);
   assert.ok(rec, '重连之后那条会话要回到本机手上 —— 若接不回来，它的作业会在 '
     + '1800 秒后被当作孤儿 scancel，而用户既接不回来、也开不了新的');
@@ -8110,6 +8123,7 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   const before = noticesOf().length;
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
 
   const rec = onlyRec(idx);
@@ -8123,6 +8137,91 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   const nowSpace = ws.refs[plugin.id];
   assert.ok(nowSpace && nowSpace !== oldSpace, '引用表里要补上一份新的数据');
   assert.ok(cfg.spaces.some((s) => s.id === nowSpace), '补出来的那一份必须是配置里真的存在的一格');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('【临时离开】之后重连：排队中的那条不许把连接卡住', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  // 作业一直排在队列里（真集群上可以是几小时）。提交要能在等登记的预算
+  //   用完就回来，重连也一样（用户 2026-10-19 真机：重连停在「连接中…」，
+  //   上栏已经有标签，点它没有任何反应）。
+  b.enrollDelayMs = 20000;
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  assert.equal(ctl.state, 'queued', '前置：作业还排着队');
+  const sid = ctl.sessionId;
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+  assert.equal(idx._test.getSessions().size, 0, '前提：离开之后本机一条记录都不留');
+
+  const conn = await testConn();
+  const rc = await Promise.race([
+    invoke('app:connect', { connectionId: conn.id }),
+    new Promise((resolve) => setTimeout(
+      () => resolve({ ok: false, timeout: true }), 12000)),
+  ]);
+  assert.equal(rc.ok, true,
+    `重连不许卡在排队上：${JSON.stringify(rc)}`);
+
+  // 连上之后落在面板上，界面照常可用；那条会话挂在上栏，作业开始之后自己打开。
+  const w = idx._test.getWindow();
+  assert.equal(w.panelFront, true, '连上之后落在面板，不进任何一条会话的页面');
+  await waitUntil(() => onlyRec(idx), '排队的那条会话回到本机手上', 20000);
+  const rec = onlyRec(idx);
+  assert.ok(rec, '排队中的会话也要接回来 —— 不接就既看不见、也停不掉');
+  assert.equal(rec.controller.sessionId, sid, '接回来的必须是同一条会话');
+  assert.equal(['queued', 'running'].includes(rec.controller.state), true,
+    '接回来之后它仍然停在排队上（或者已经跑起来了）');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('一次只连一条：第一条还在飞的时候，第二条被拒绝，活跃连接不动', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  // 一条排着队的会话会让 `tryReattach` 在预算里停住，于是第一条连接真的在飞。
+  b.enrollDelayMs = 20000;
+  const a = await appStart(null, 'code-server');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const connA = await testConn();
+
+  const saved = await invoke('app:saveConnection',
+    { user: 'bob', host: '203.0.113.7', port: 10100, label: '第二条' });
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  const connB = saved.connection;
+
+  await invoke('app:leave');
+  // 把拨号拖慢一点：连接本身只要几十毫秒，不拖慢的话第一条可能在第二下
+  //   之前就返回了，这一条就测不到"同时在飞"那一格。
+  const realConnect = b.connect.bind(b);
+  b.connect = async (...args) => {
+    await new Promise((r) => setTimeout(r, 300));
+    return realConnect(...args);
+  };
+  t.after(() => { b.connect = realConnect; });
+  const first = invoke('app:connect', { connectionId: connA.id });
+  await new Promise((r) => setTimeout(r, 80));   // 让第一条真的进入 in-flight
+
+  const second = await invoke('app:connect', { connectionId: connB.id });
+  assert.equal(second.ok, false, `第二条连接必须被拒绝：${JSON.stringify(second)}`);
+  assert.equal(second.code, 'busy');
+  assert.equal(idx._test.getCfg().activeConnectionId, connA.id,
+    '被拒绝的第二下不许改活跃连接 —— 用户 2026-10-19 真机：两次同时在飞，'
+    + '退出之后连回的是哪一条全看谁后返回');
+
+  const done = await first;
+  assert.equal(done.ok, true, `第一条照常连上：${JSON.stringify(done)}`);
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
@@ -8162,8 +8261,10 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   const conn = await testConn();
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
-  assert.equal(denied, 1, '前提：`status` 被拒过一次');
+  // 接回在后台：连接返回时那一次 `status` 还没有发出去。
+  await waitUntil(() => denied === 1, '前提：`status` 被拒过一次', 20000);
 
+  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
   const rec = onlyRec(idx);
   assert.ok(rec, '若被限流一次就放弃，那条作业会在 1800 秒后被当作孤儿 scancel');
   assert.equal(rec.controller.sessionId, sid);
@@ -8176,6 +8277,10 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   const before = noticesOf().length;
   const rc2 = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc2.ok, true);
+  // 那句"没读到完整信息"是后台接回说完的 —— 等它说出来再读提示流。
+  await waitUntil(() => noticesOf().slice(before)
+    .some((n) => /没读到它的完整信息/.test(n.text || '')),
+  '一直拒绝时要把那句话说出来', 20000);
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
   assert.match(said, /没读到它的完整信息/, `没接回来时要说清是哪一步卡住了：${said}`);
   assert.match(said, /rate_limited|限流|没有说明原因/, '要带上站点那句错误，或者如实说它没给');

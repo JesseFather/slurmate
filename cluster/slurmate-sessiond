@@ -672,6 +672,13 @@ RESERVED_TTL = 600
 ENROLL_TTL = 1800
 QUEUED_TTL = 86400
 RELEASED_KEEP = 600
+# 作业跑起来之后，会话文件读不出来多久才值得说一句。
+#
+# 十几秒是正常的等待窗口（文件刚写完、NFS 缓存还没跟上）。过了它还没有一个
+#   原因，那件事就要有声音：用户界面上是「排队中」，作业却在正常运行、日志照常
+#   输出，而在这条之前要等到 ENROLL_TTL（半小时）才有一行日志（2026-10-19 真机，
+#   100% 复现）。作业一被回收，那句"迟到半小时的日志"没有任何用处了。
+ENROLL_PROBLEM_GRACE = 15
 # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
 JOB_MISSING_CONFIRM_TICKS = 3
 
@@ -7965,6 +7972,10 @@ class Sessiond(object):
         # 两个都要：一个用来算"已经持续多久"，一个用来算"该不该再说一次"。
         # 见 note_enrollment_file_missing()。
         self.enroll_file_missing = {}
+        # session_id -> 登记没有在进行的那个原因（`load_session_file` 给的那个串）。
+        # 只在作业已经跑起来、而文件过了等待窗口还读不出来时才写；登记上就删。
+        # 见 try_enroll() 与 note_enroll_unreadable()。
+        self.enroll_problem = {}
         # session_id -> 下一次"再 scancel 一次"的时刻（见 phase_release 的闸）。
         # 它只管重试与说话，不管"看一眼作业还在不在"。
         self.release_retry = {}
@@ -8801,7 +8812,15 @@ class Sessiond(object):
         if info is not None and str(info.get("state") or "") == "starting":
             info, why = None, "starting"
         if info is None:
-            if now - (s["submitted_at"] or s["created_at"]) > self.cfg.enroll_ttl:
+            waited = now - (s["submitted_at"] or s["created_at"])
+            # 作业在跑、而登记没有在进行。这句话从前要等到 `enroll_ttl` 才有：
+            #   用户界面上是「排队中」，作业却在正常运行、日志照常输出，而唯一
+            #   的线索要等半小时（2026-10-19 真机，100% 复现）。过了正常的
+            #   等待窗口就把原因留下来 —— 日志一行、审计一条，视图里也带一格。
+            if waited >= ENROLL_PROBLEM_GRACE:
+                self.enroll_problem[s["session_id"]] = why
+                self.note_enroll_unreadable(s, why)
+            if waited > self.cfg.enroll_ttl:
                 log.warning("会话 %s（job=%s）迟迟未登记（%s），回收并取消作业",
                             s["session_id"], s["job_id"], why)
                 # 不在这里 scancel，也不在这里写终态（账本 F32）。
@@ -8836,11 +8855,38 @@ class Sessiond(object):
             job_started_at=info.get("job_started_at"),
             auth_mode=info.get("auth_mode", "password"),
             last_hb_socket=s["last_hb_socket"] or now, note=None)
+        # 登记上了：原因那一格与节流状态都该走 —— 它们说的是"还没登记"。
+        self.enroll_problem.pop(s["session_id"], None)
+        self.enroll_file_missing.pop(s["session_id"], None)
         self.audit("enrolled", session=s["session_id"], uid=s["uid"],
                    job=s["job_id"], node=info.get("node"), node_ip=node_ip,
                    port=port, rule=detail)
         log.info("会话登记: %s (uid=%d job=%s) → %s:%d",
                  s["session_id"], s["uid"], s["job_id"], node_ip, port)
+
+    def note_enroll_unreadable(self, s, why):
+        """作业在跑、会话文件读不出来：首报立刻说，之后按同一个间隔节流。
+
+        与 `note_enrollment_file_missing` 共用那张表与那个间隔：两者问的是同一
+          件事（"这个用户的会话文件怎么读不出来"），只是会话在登记前还是登记后。
+          分开两张表的话，同一个原因会在前后各说一遍，而它们本是同一句。
+        """
+        sid = s["session_id"]
+        now = now_ts()
+        seen = self.enroll_file_missing.get(sid)
+        if seen is None:
+            self.enroll_file_missing[sid] = (now, now)
+            log.warning("会话 %s（job=%s）的会话文件读取失败（%s）：作业已经在运行，"
+                        "而登记没有进行。", sid, s["job_id"], why)
+            self.audit("enroll_file_unreadable", session=sid, job=s["job_id"],
+                       why=why, seconds=0)
+            return
+        first_seen, last_said = seen
+        if now - last_said < self.cfg.enroll_file_warn_seconds:
+            return
+        self.enroll_file_missing[sid] = (first_seen, now)
+        log.warning("会话 %s（job=%s）的会话文件仍然读取失败（%s），已持续 %d 秒；"
+                    "作业仍在运行。", sid, s["job_id"], why, now - first_seen)
 
     def refresh_enrollment(self, s, job):
         """已登记的会话：作业重启/重排后可能换节点或端口，要跟着更新 ACL。"""
@@ -9092,7 +9138,8 @@ class Sessiond(object):
             #    这张名册是唯一一处：往上面加一个表却忘了加进这里，症状
             #      与上面那句一模一样，而它指不回任何一行，所以这几行挨着放。
             for _t in (self.job_missing, self.job_unknown, self.job_stuck,
-                       self.enroll_file_missing, self.release_retry):
+                       self.enroll_file_missing, self.enroll_problem,
+                       self.release_retry):
                 _t.pop(s["session_id"], None)
             # 落哪个终态是 `begin_release()` 当时定下的（缺省 `released`）。
             #   缺一格时回落到 `released`：这是三选一里唯一一个不含判断的
@@ -10378,6 +10425,12 @@ class Sessiond(object):
             "requested_time": s["requested_time"], "note": s["note"],
             "auth_mode": s["auth_mode"], "account": s["account"],
         }
+        # 作业在跑、而登记没有在进行的那个原因。缺席 = 没有这个问题 ——
+        #   界面据此说得出「作业已经在运行，站点还没有完成登记」。
+        # 它只对提交人自己可见（`op_status` 本来就只回本人的会话）。
+        problem = self.enroll_problem.get(s["session_id"])
+        if problem:
+            d["enroll_problem"] = problem
         if s["node_ip"] and s["service_port"]:
             # 客户端必须原样使用这个【字面 IPv4:端口】去建 -L。
             # 不要再解析节点名，否则客户端解析出的地址可能和守护进程写进

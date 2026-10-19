@@ -173,6 +173,15 @@ let whoami = null;
  * 与 `whoami` 同生共死：`doConnect` 成功那一刻写，`teardownConnection` 清。
  */
 let connectedConnId = null;
+/**
+ * 有一条连接正在连（`app:connect` 那一段）。
+ *
+ * 同一时刻只允许一条：两次连接同时在飞的时候，后一条会换掉活跃连接、动本机的
+ *   会话记录，而前一条返回时又把界面按它自己的结果画一遍 —— 用户 2026-10-19
+ *   真机：第一条停在排队上，这时点第二条居然进去了，退出之后又连回第一条。
+ * 界面那一侧也会灰掉其余入口（见 panel.js 的 `connectTo`），这一格是权威。
+ */
+let connectInFlight = false;
 let partitions = [];
 /**
  * 这台机器的 `userData`（app ready 之前就读到的那一份）。
@@ -775,25 +784,21 @@ async function doConnect(conn, extra = {}) {
     //   这个站点"，而"这个站点上还有我的作业在跑"是紧接着必须发生的事（不接回 =
     //   没有心跳 = 1800 秒后作业被 scancel）。
     //
-    //   它必须 await。不 await 的话，"连上了"与"接回来了"之间就有一个
-    //     窗口，而这个窗口里的每一次按键（提交、切工作区、结束）都在跟一个还在
-    //     跑的接回抢同一个槽 —— 症状是随机的（多一个视图、少一次重建），
-    //     而且都指不回这里。接回一条会话要建隧道、登录取 cookie，是秒级的事；
-    //     那点等待换来的是"连上之后现场已经安定"这一条可依赖的事实。
-    //     `tryReattach` 自己会推通知说"正在逐个接上"。
-    try {
-      await tryReattach();
-      // 连上之后落在面板（随后界面把屏切到插件页），不是落在某一条会话的页面上。
-      //   接回来的那些可能是另一台电脑正在看的（用户 2026-10-18 的第三种重登录），
-      //   把用户直接推进别人的作业里，就是替他做了一次接管。浏览器式的
-      //   「恢复上次的页面」不属于这里：这一条路是用户点「连接」，
-      //   而页面的连续性是网络波动那条路的事（那一条不重跑 `tryReattach`）。
-      win.showPanel();
-    } catch (e) {
+    //   它不 await。连接成没成与那几条会话接没接回来是两件事，而用户点完
+    //     「连接」要的是"进去"（用户 2026-10-19：停在主页上，上栏却已经有标签）。
+    //     接回一条会话要建隧道、登录取 cookie，是秒级的事，几条就是几倍；
+    //     把它排在连接前面，连接这条路上就一直在等一件用户没在等的事。
+    //     界面这就切到插件页，会话一条一条接回来时自己出现在上栏。
+    //
+    //   `tryReattach` 自己会推通知说"正在逐个接上"；接回来的那些可能正是另一台
+    //     电脑在看的（用户 2026-10-18 的第三种重登录），所以这里只把面板抬起来，
+    //     不把用户推进任何一条会话的页面。
+    win.showPanel();
+    tryReattach().catch((e) => {
       // 接回失败不能把这次连接说成失败：连接本身是好的，只是上次那几条
       // 会话没接回来（它们仍然在集群上跑，下一次连接会再试一遍）。
       win.pushNotice('error', '接上已有的会话时出错：' + ((e && e.message) || e));
-    }
+    });
   } else if (res.code === 'host_key_unknown' || res.code === 'host_key_changed') {
     // 主机密钥要用户拍板 —— 这不是「连接失败」，是一个待确认的安全决定。
     // 所以不设成 error 标题，界面会弹一个专门的确认框。
@@ -2833,27 +2838,55 @@ async function startSession(resources, serviceKind, portChoice) {
 
   // ── 「记住并启动」：把这份数据的首选端口改成隧道真正绑上的那一个 ──
   //
-  // 写的是 `snap.localPort`（真绑上的那个），不是自己按顺移规则重算一遍 ——
-  //   同一条规则不许有两份实现，而两份漂开的形态是"记下来的端口没人在用"。
-  // 临时副本与中转站进不来：判据是上面那两个框架事实（`persistentSpace`），
-  //   永远不是插件名。`localPort === preferredPort` 时什么也不做（那一趟没顺移）。
-  // 而写不进去要如实说出来：用户点的是"记住"，而它没记住 —— 静默的话，他
-  //   下次开局还会被问一遍，却以为自己已经答过了。
-  if (snap && portChoice === 'remember' && persistentSpace
-      && snap.localPort && snap.localPort !== preferredPort) {
-    const wrote = config.recordSpacePort(cfg, space.id, snap.localPort);
-    if (!wrote.ok) {
-      win.pushNotice('error', `端口未能记进配置：${wrote.error}`
-        + `　这一次会话照常跑着（用的是 ${snap.localPort}），但下次启动还会问你一次。`);
-    } else {
-      commitConfig();
-      win.pushNotice('info', `这份数据的端口已记成 ${snap.localPort}`
-        + `（原来是 ${preferredPort}），下次启动直接用它，不会再问。`);
-    }
+  // 提交返回时作业可能还在排队，那一刻没有"新端口"可记。所以这里只挂一个待办，
+  //   等状态真的到 running 再记（`applyPendingRemember`）—— 直接读 `localPort`
+  //   会读到 null，待办当场丢掉，用户下次开局还会被问一遍，却以为自己答过了。
+  if (snap && portChoice === 'remember' && persistentSpace) {
+    rec.pendingRememberPort = { spaceId: space.id, preferred: preferredPort };
+    applyPendingRemember(rec);
+  }
+
+  // 排队中也要把控制权交回界面：那条会话已经在服务端上了，作业开始之后
+  //   页面会自己打开（见 `_afterSubmit`）。这句话让人知道现在能做什么。
+  if (snap && snap.state === State.QUEUED) {
+    win.pushNotice('info', `会话已提交，正在排队（作业 ${snap.jobId || '—'}）。`
+      + '作业开始之后页面会自己打开，这期间可以照常做其他事。');
   }
 
   // 回槽：界面拿它指着说"我起的是这一个"（`app:start` 的回包）。
   return { slot, snap };
+}
+
+/**
+ * 把「记住并启动」的待办落下来。
+ *
+ * 写的是隧道真绑上的那个端口（快照里的 `localPort`），不是按顺移规则重算一遍 ——
+ *   同一条规则不许有两份实现，而两份漂开的形态是"记下来的端口没人在用"。
+ * `localPort === preferred` 时什么也不做（这一趟没有顺移）。
+ * 写不进去要如实说出来：用户点的是"记住"，没记住的话，他下次开局还会被问一遍，
+ *   却以为自己已经答过了。
+ */
+function applyPendingRemember(rec) {
+  const p = rec.pendingRememberPort;
+  if (!p || !rec.controller) return;
+  const snap = rec.controller.snapshot();
+  if (!snap) return;
+  if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
+    delete rec.pendingRememberPort;      // 会话没等到 running：没有端口可记
+    return;
+  }
+  if (snap.state !== State.RUNNING || !snap.localPort) return;
+  delete rec.pendingRememberPort;
+  if (snap.localPort === p.preferred) return;
+  const wrote = config.recordSpacePort(cfg, p.spaceId, snap.localPort);
+  if (!wrote.ok) {
+    win.pushNotice('error', `端口未能记进配置：${wrote.error}`
+      + `　这一次会话照常跑着（用的是 ${snap.localPort}），但下次启动还会问你一次。`);
+  } else {
+    commitConfig();
+    win.pushNotice('info', `这份数据的端口已记成 ${snap.localPort}`
+      + `（原来是 ${p.preferred}），下次启动直接用它，不会再问。`);
+  }
 }
 
 /**
@@ -2943,6 +2976,9 @@ function warnVersionDrift(plugin) {
  */
 async function onSessionChange(slot) {
   try {
+    // 「记住并启动」的待办：排队中的那条到了 running 才记（见它的说明）。
+    const rec0 = sessions.get(slot);
+    if (rec0) applyPendingRemember(rec0);
     await _renderSession(slot);
     // 一次推全部 —— 面板那一屏要显示的是"这个窗口里有几个会话、各自什么样"，
     // 而不是"最后动过的那一个"。
@@ -4255,7 +4291,9 @@ async function reattachOne(s) {
     // 交给现成的状态机往下走：等登记 → 建隧道 → （回到 RUNNING 时 onSessionChange
     // 会自己把视图/ssh 配置建起来，界面标题也已经有「排队中 — 作业 N」那一档）。
     rec.controller.state = State.QUEUED;
-    await rec.controller._afterSubmit({ preferredPort });
+    // 预算给 0：这一条已经确认在排队，等那几秒不会让登记提前发生；
+    //   而重连要逐条接，N 条就是 N 倍的等待（用户点完「连接」就进不去）。
+    await rec.controller._afterSubmit({ preferredPort, enrollBudgetMs: 0 });
     return;
   }
 
@@ -4794,6 +4832,12 @@ function registerIpc() {
 
   // ── 连接 ──
   send('app:connect', async (payload) => {
+    // 同一时刻只有一条连接在连。两次同时在飞的后果见 `connectInFlight` 的说明；
+    //   这一句放在最前面 —— 连活跃连接那一格都不许先被换掉。
+    if (connectInFlight) {
+      return { ok: false, code: 'busy',
+               error: '正在连接站点，请等这一次结束再连另一条。' };
+    }
     let conn = config.activeConnection(cfg);
     if (payload && payload.connectionId) {
       conn = cfg.connections.find((c) => c.id === payload.connectionId) || conn;
@@ -4823,17 +4867,22 @@ function registerIpc() {
     //      从前还有一道 `allowSwitchTo` 的闸，随这条不变量一起删掉了）。这一句管的是
     //      另一件事：既然真要换，就把本机这一侧收干净。它是 IPC 层的防线，
     //      不该假设界面的形状 —— `app:connect` 传哪一条进来都做得到。
-    if (backend.connected && connectedConnId !== conn.id) await leaveSite();
+    connectInFlight = true;
+    try {
+      if (backend.connected && connectedConnId !== conn.id) await leaveSite();
 
-    // 显式点名要连哪一条，就是「这条是我要用的」。不跟着改的话，
-    // 下次启动自动重连会连到另一台上去 —— 而用户完全看不出为什么。
-    if (cfg.activeConnectionId !== conn.id) {
-      cfg.activeConnectionId = conn.id;
-      config.saveConfig(cfgDir, cfg);
+      // 显式点名要连哪一条，就是「这条是我要用的」。不跟着改的话，
+      // 下次启动自动重连会连到另一台上去 —— 而用户完全看不出为什么。
+      if (cfg.activeConnectionId !== conn.id) {
+        cfg.activeConnectionId = conn.id;
+        config.saveConfig(cfgDir, cfg);
+      }
+
+      const res = await doConnect(conn);
+      return { ...res, whoami, partitions, plugins: pluginsView() };
+    } finally {
+      connectInFlight = false;
     }
-
-    const res = await doConnect(conn);
-    return { ...res, whoami, partitions, plugins: pluginsView() };
   });
 
   /**

@@ -803,6 +803,29 @@ test('状态条右侧那两颗：只在会话页面盖着时露，写的是「�
   assert.equal(reload.classList.contains('hidden'), true);
 });
 
+test('排队中：状态条说得出作业在跑、以及站点那边为什么还没有登记', () => {
+  // 用户 2026-10-19 真机：作业正常运行、日志照常输出，界面上只有「排队中」。
+  //   作业状态（`jobText`）与守护进程给的原因（`enrollProblem`）都要露出来 ——
+  //   否则用户无从判断是在等资源、还是卡在登记这一步。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'plugins'; SESS = { sessions: [], front: null, panelFront: true };");
+  h.fn('renderSnapshot')({
+    state: 'queued', jobId: '11', jobState: 'RUNNING', jobTerminal: false,
+    jobText: '运行中', enrollProblem: 'mode_too_open', resources: {}, gresText: null,
+  });
+  const detail = h.byId.get('sb-detail')._text || '';
+  assert.match(detail, /作业 11/, `作业号要在：${detail}`);
+  assert.match(detail, /运行中/, '作业那一侧的真实状态要说出来');
+  assert.match(detail, /站点还没有完成登记：mode_too_open/, detail);
+
+  // 没有那一格时不说这句 —— 缺席是"没有这个问题"，不是"不知道"。
+  h.fn('renderSnapshot')({
+    state: 'queued', jobId: '11', jobState: 'PENDING', jobTerminal: false,
+    jobText: '排队中 · 在等空闲资源', resources: {}, gresText: null,
+  });
+  assert.equal(/站点还没有完成登记/.test(h.byId.get('sb-detail')._text || ''), false);
+});
+
 test('作业那一屏开着时，活会话的集合一变就重取一次列表', () => {
   // 用户 2026-10-18：排队中的作业不在作业那一屏上。提交返回之前那一屏是空的，
   //   而它不跟着状态推送更新 —— 于是一个刚排队起来的作业要等到手动「刷新」
@@ -1169,12 +1192,31 @@ test('连接表单里的「③ 工作区」：三种取值各有各的那一句�
   assert.match(h.byId.get('ws-hint').textContent, /不会跟着走/);
 });
 
+test('停在连接那一屏时不画会话标签', () => {
+  // 用户 2026-10-19 真机：连接卡在主页上，上栏却已经冒出会话标签。第一屏是
+  //   "还没进去"的那一屏，那里不该有可切的东西 —— 连接成没成与会话接没接
+  //   回来是两件事，界面不能把后者的进展画在前者的屏上。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'conns';");
+  h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true, snap: {} }],'
+    + ' front: "a" };');
+  h.fn('renderTabs')();
+  const box = h.byId.get('session-tabs');
+  assert.equal(box.classList.contains('hidden'), true, '第一屏上不该有标签');
+  assert.equal(box.children.length, 0, '一个都不许画（不是画好再藏起来）');
+
+  h.run("SCREEN = 'plugins';");
+  h.fn('renderTabs')();
+  assert.equal(box.classList.contains('hidden'), false, '进了插件页才出现');
+});
+
 test('顶栏标签：同一个插件开两份时，两个标签必须分得开', () => {
   // 这一条守的是多开（`contributes.concurrent: true`：第二份拿到自己的
   //   临时数据 = 自己的槽，于是两条同时在跑）。标签上写的是插件的显示名，
   //   于是两个标签一模一样 —— 而它们指着两份不同的数据、两个不同的本地端口。
   //   用户点哪一个都有一半概率点错，而"点错了"的表现是"我的编辑器里东西不对了"。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'plugins';");
   h.run('SESS = { sessions: ['
     + '{ slot: "a", service: "编辑器", live: true, snap: { localPort: 18080 } },'
     + '{ slot: "b", service: "编辑器", live: true, snap: { localPort: 18081 } }'
@@ -1220,7 +1262,7 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
     + 'lastPlugins = { plugins: ['
     + '{ id: "p1", name: "cs", title: "编辑器", surface: { path: "/" } },'
     + '{ id: "p2", name: "relay", title: "中转站" } ] };'
-    + 'connected = true;');
+    + "SCREEN = 'plugins'; connected = true;");
   const tabs = () => h.byId.get('session-tabs').children;
   const panelTab = () => tabs().filter((b) => b.textContent === '面板');
 

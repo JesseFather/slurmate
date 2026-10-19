@@ -385,6 +385,9 @@ function showScreen(name) {
   // 屏一换，那些跟着当前这一屏走的小块都要重算一次：作业详情（只在这一屏里
   // 露）、映射图的连线（几何，元素刚露出来的那一帧还没定下来）。都交给
   // `renderSnapshot` 那一份判据 —— 在这里另判一遍就是两份，而它们会漂。
+  // 上栏也一样：它只在第二、三屏上画（见 `renderTabs`），换屏之后要立刻跟上，
+  //   否则从第一屏连进来之后，标签要等下一次状态推送才出现。
+  renderTabs();
   renderSnapshot(lastSnap);
   if (name === 'jobs') refreshJobs();
 }
@@ -475,6 +478,13 @@ function frontTemporary() {
  */
 function renderTabs() {
   const box = $('session-tabs');
+  // 第一屏是"还没进去"的那一屏：那里没有可切的会话。停在第一屏却看见标签，
+  //   是"连接卡着、而界面已经有一部分进去了"的样子（用户 2026-10-19 真机）。
+  if (SCREEN === 'conns') {
+    box.classList.add('hidden');
+    box.textContent = '';
+    return;
+  }
   const list = SESS.sessions;
   // 有没有一块页面正盖着面板。判据与"重新加载 / 停止该作业"那两颗同一份
   //   （`hasSurface`）：声明了界面的插件才会起那块原生视图，也只有那时"回不去"
@@ -607,7 +617,13 @@ function renderSnapshot(s) {
       if (s.tunnelState === 'down') bits.push('隧道断开，正在重试');
       detail = bits.join(' · ');
     } else if (st === 'queued') {
-      detail = s.jobId ? `作业 ${s.jobId} · 等待调度与登记` : '等待调度';
+      // 作业那一侧的状态与原因（`jobText`）也要露出来：光说「等待调度与登记」，
+      //   用户分不清是在等空闲资源、还是被额度或 hold 卡住了 —— 后者等多久都不会开始。
+      const bits = [s.jobId ? `作业 ${s.jobId}` : null, s.jobText || '等待调度与登记'];
+      // 作业在跑、而站点那边登记没有在进行：这句话是用户唯一看得见的原因
+      //   （守护进程日志里那一行要等它读到日志才会被看见）。
+      if (s.enrollProblem) bits.push(`站点还没有完成登记：${s.enrollProblem}`);
+      detail = bits.filter(Boolean).join(' · ');
     } else if (st === 'error') {
       detail = s.error || '';
     } else if (st === 'submitting') {
@@ -1233,6 +1249,9 @@ function renderConnections(list) {
     box.append(li);
   }
 
+  // 整块重画会换掉那些按钮，于是「连接中…」期间灰着的那几个又活了 ——
+  //   连接还在飞，这里补一次。
+  if (connectingNow) lockConnectEntries();
   renderWorkspaceMap();
 }
 
@@ -3778,15 +3797,45 @@ function askHostKey(res) {
  * 按钮和它的原话都由调用方给：那颗按钮在两条路上不是同一个元素，而"连接中…"要
  *   画在屏幕上那一颗上。
  */
+let connectingNow = false;
+
+/** 连接在飞的那几秒里，其余入口一律灰着。
+ *
+ *  用户 2026-10-19 真机：第一条连接停在排队上，这时点第二条居然进去了，
+ *    退出之后又连回第一条。主进程那一格是权威（`app:connect` 回 `busy`），
+ *    这里让"点得动"这件事本身不再成立。 */
+function lockConnectEntries() {
+  for (const b of document.querySelectorAll('#conn-list button, #btn-save')) {
+    if (!b.disabled) {
+      b.disabled = true;
+      b.dataset.lockedByConnect = '1';
+    }
+  }
+}
+
+function unlockConnectEntries() {
+  for (const b of document.querySelectorAll('button[data-locked-by-connect]')) {
+    b.disabled = false;
+    delete b.dataset.lockedByConnect;
+  }
+}
+
 async function connectTo(c, btn) {
+  if (connectingNow) {
+    return notice('info', '正在连接站点，请等这一次结束再连另一条。');
+  }
+  connectingNow = true;
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = '连接中…';
+  lockConnectEntries();
   notice('info', `正在连接 ${c.user}@${c.host}…`);
   try {
     return await handleConnectResult(
       await window.slurmate.connect({ connectionId: c.id }));
   } finally {
+    connectingNow = false;
+    unlockConnectEntries();
     btn.disabled = false;
     btn.textContent = label;
   }
@@ -3807,8 +3856,8 @@ async function handleConnectResult(res) {
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
     if (res.plugins) renderPlugins(res.plugins);
     renderConnections(boot.connections);
-    // 会话表从主进程取一次权威的：`doConnect` 的最后一步是 `tryReattach`，
-    //   接回来的那几条已经在它手里了。
+    // 会话表从主进程取一次权威的。接回在后台跑（`doConnect` 不等它），所以
+    //   此刻手里通常是空的 —— 接回来的那几条会由状态推送自己添上来。
     //   这里从前写死一份空表 —— 重连时它会把刚接回来的那几条从界面上删掉：
     //   标签栏与那颗「面板」一起没了，而会话页面照样盖在窗口主体上，于是用户
     //   直接掉进 code-server 的网页里、没有任何路回到面板（2026-10-18 真机）。
@@ -3816,9 +3865,8 @@ async function handleConnectResult(res) {
     renderSessions(st && Array.isArray(st.sessions) ? st : { sessions: [], front: null });
     // 连上之后进第二屏。这一屏之所以能进，正是"连上"这件事本身：
     //   插件是站点分发的，没有连接就不知道有哪些插件。
-    //   而"接回上次那些会话"是主进程在 connect 里做完才返回的（`doConnect`
-    //     的最后一步）—— 所以走到这一行时，本机手上已经有那几条会话了，
-    //     第三屏进去就看得见它们。
+    //   接回上次那些会话是后台的事（用户 2026-10-19：连接成没成不该等它），
+    //     接回来一条就在上栏多一个标签。
     JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
     showScreen('plugins');
     return true;
@@ -4296,6 +4344,12 @@ async function init() {
 
 /** 连上列表里的某一条。点它就等于把它设为当前连接。 */
 async function doConnectTo(c, btn) {
+  // 一次只连一条。这一句必须排在 `setActiveConnection` 前面：那一句会当场
+  //   改掉活跃连接，而一次被拒绝的第二下不该留下任何痕迹（用户 2026-10-19
+  //   真机：两次连接同时在飞，最后连上的是哪一条全看谁后返回）。
+  if (connectingNow) {
+    return notice('info', '正在连接站点，请等这一次结束再连另一条。');
+  }
   // 这里从前有一道闸（`allowSwitchTo`）：连着 A 的时候点 B 会被拦下，并把
   //   "还连着哪一条、上面有几条会话在跑"说出来。它整个删掉了（2026-10-11）——
   //   它守的那件事现在由界面的形状承担：站在第一屏上就一定不在任何站点里，

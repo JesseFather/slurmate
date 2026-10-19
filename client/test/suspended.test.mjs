@@ -329,3 +329,21 @@ test('两条会话里只被接管一条，另一条照常收尾（那道闸是�
   assert.equal(gone.tunnelStops.length, 0, '被接管的那条：隧道不动');
   assert.equal(live.tunnelStops.length, 1, '另一条照常收尾');
 });
+
+test('enroll_problem：中文在前、原文在括号里；认不出来的原样印', () => {
+  // 守护进程给的是内部串（`mode_too_open`），直接印给用户没有用处；而删掉它
+  //   又会让排查的人失去唯一的线索。两条路一起给。
+  const c = running(new StubBackend());
+  c.session = view({ enroll_problem: 'mode_too_open' });
+  assert.equal(c.snapshot().enrollProblem, '会话文件的权限过宽（mode_too_open）');
+
+  c.session = view({ enroll_problem: 'open_failed:40' });
+  assert.equal(c.snapshot().enrollProblem, '会话文件打不开（open_failed:40）',
+    '带冒号的那一档按冒号前面那一截认');
+
+  c.session = view({ enroll_problem: 'something_new' });
+  assert.equal(c.snapshot().enrollProblem, 'something_new', '认不出来就原样印，不猜');
+
+  c.session = view();
+  assert.equal(c.snapshot().enrollProblem, null, '缺席 = 没有这个问题');
+});
