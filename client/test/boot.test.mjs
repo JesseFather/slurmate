@@ -1005,11 +1005,14 @@ test('新建连接落在哪个工作区：默认规则 + 表单显式选的那�
   assert.equal(back.connection.workspaceId, aWs,
     '同址那条赢过活跃连接那条 —— 活跃在 203.0.113.7 上也不行');
 
-  // ── 而一条不认识的地址：跟着活跃连接走 ──
+  // ── 而一条不认识的地址：新建一份空白工作区，不跟着活跃连接走 ──
+  //   2026-10-20 起这条规则删掉了「活跃连接」那一档：不同机器各自一份布局，
+  //     要共享就在表单里显式选。
   const other = await invoke('app:saveConnection',
     { user: 'alice', host: '192.0.2.44', port: 10100 });
-  assert.equal(other.connection.workspaceId, far.connection.workspaceId,
-    '不认识的地址，跟着活跃连接那个工作区');
+  assert.notEqual(other.connection.workspaceId, far.connection.workspaceId,
+    '不认识的地址不跟着活跃连接走 —— 那是两台不同的机器');
+  assert.ok(other.connection.workspaceId, '它仍然要落在一个工作区里');
 
   // ── 界面显式选一个（表单里的「③ 工作区」）：它赢过默认规则 ──
   const picked = await invoke('app:saveConnection',
@@ -1038,10 +1041,11 @@ test('新建连接落在哪个工作区：默认规则 + 表单显式选的那�
   assert.deepEqual(q, { ok: true, workspaceId: aWs },
     '表单显示的默认值就是保存时会落进的那个 —— 两份实现会漂开，而症状是'
     + '「界面说 A、存进去是 B」，两边都不报错');
-  // 一个从没见过的地址：给的是一个具体的工作区（活跃那个）或 null，不能是"获取失败"
+  // 一个从没见过的地址：给的是 null（新建一份空白），不是"获取失败"，
+  //   也不再跟着活跃连接走（2026-10-20 起）。
   const q2 = await invoke('app:defaultWorkspace', { host: '192.0.2.250', port: 10100 });
   assert.equal(q2.ok, true);
-  assert.equal(q2.workspaceId, far.connection.workspaceId);
+  assert.equal(q2.workspaceId, null);
 
   await dropMyConnections();
   assert.deepEqual(mine((await invoke('app:bootstrap')).connections), [],
@@ -8055,7 +8059,7 @@ test('作业一结束，右栏自己收起来（那时它没有内容可说）',
 //    就结束了。这两条把它补上，并且钉住两条出路：接得回来；接不回来时必须说话。
 // ════════════════════════════════════════════════════════════════════════════
 
-test('【临时离开】之后重连：那条会话要接回来，看护者回到本机', async (t) => {
+test('【临时离开】之后重连：只保活，不自动接回；点接管之后才回来', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8074,33 +8078,122 @@ test('【临时离开】之后重连：那条会话要接回来，看护者回�
   assert.equal(onlyFake(b).keeper, null, '前提：看护者交回去了');
 
   const conn = await testConn();
+  const hbBefore = onlyFake(b).last_hb_at;
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
 
   // 连上之后落在面板上（界面随后切到插件页），不是被推进那条会话的页面里。
-  //   用户 2026-10-18 的模型：临时离开之后回来，选哪个插件由用户点。
   const w = idx._test.getWindow();
   assert.equal(w.panelFront, true,
-    '接回来之后面板要在前面 —— 页面不该把用户推进某一条会话里');
-  if (w.hasSurface(a.slot)) {
-    assert.equal(viewFor(w, a.slot)._visible, false,
-      '接回来的页面让开；用户点上面的标签再过去');
-  }
+    '连接之后面板要在前面 —— 页面不该把用户推进某一条会话里');
 
-  // 接回是在后台跑的（连接一成功就交还界面），所以这里要等它落到本机手上。
-  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
+  // 看护者为空：只保活，不接回（用户 2026-10-20 拍板）。
+  await waitUntil(() => idx._test.getKeepAlive().includes(sid),
+    '那条会话进入保活集合', 20000);
+  assert.equal(idx._test.getSessions().size, 0,
+    '看护者为空时不接回：不建隧道、不上标签、不进页面');
+  await waitUntil(() => onlyFake(b).last_hb_at > hbBefore,
+    '保活的心跳真的推进了服务端的时间戳', 20000);
+  assert.equal(onlyFake(b).keeper, null, '保活不写看护者 —— 谁当家只能由接管决定');
+
+  const jobs = await invoke('app:jobs');
+  const row = (jobs.jobs || []).find((j) => j.session_id === sid);
+  assert.ok(row, `作业页要看得到它：${JSON.stringify(jobs)}`);
+  assert.equal(row.attached, false, '前提：没有接回本机');
+  assert.equal(row.keeper_text, '没人接管（本机在保活）');
+
+  // 用户点「接管」之后才接回来 —— 这是唯一把控制权拿回本机的入口。
+  const tk = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+  await waitUntil(() => onlyRec(idx), '接管之后那条会话回到本机手上', 20000);
   const rec = onlyRec(idx);
-  assert.ok(rec, '重连之后那条会话要回到本机手上 —— 若接不回来，它的作业会在 '
-    + '1800 秒后被当作孤儿 scancel，而用户既接不回来、也开不了新的');
+  assert.ok(rec, '接管之后要接回来 —— 否则用户点完接管什么都没有');
   assert.equal(rec.controller.sessionId, sid, '接回来的必须是同一条会话');
   await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
-  await waitUntil(() => onlyFake(b).keeper === b._client.id, '心跳把看护者认领回来', 20000);
+  await waitUntil(() => onlyFake(b).keeper === b._client.id, '看护者是本机', 20000);
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });
 
-test('重连时引用表里那一格不在了：照样接得回来，而且要说清楚', async (t) => {
+test('接回本机看护的会话：面板留在前面，页面不自动盖上来', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await ctl.heartbeatNow();
+  const w = idx._test.getWindow();
+  w.showPanel();                       // 前置：用户站在面板上
+  assert.equal(w.panelFront, true);
+
+  // 模拟客户端重启：本地记录清掉，`tryReattach` 重跑；看护者仍是本机
+  //   （没有 leave 过），所以这一条会被接回来。
+  await idx._test.reattach();
+  await waitUntil(() => onlyRec(idx), '那条会话被接回来', 20000);
+  const rec = onlyRec(idx);
+  assert.equal(w.panelFront, true,
+    '接回来的会话不许把面板收走 —— 用户没有点它的标签（2026-10-20 报的'
+    + '「连接之后直接进插件页面」）');
+  if (w.hasSurface(rec.slot)) {
+    assert.equal(viewFor(w, rec.slot)._visible, false,
+      '页面可以建出来，但它要让开；用户点上面的标签再过去');
+  }
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('被接管之后：这一端的插件页面收掉，不能再操作', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await ctl.heartbeatNow();
+  const w = idx._test.getWindow();
+  assert.equal(w.hasSurface(a.slot), true, '前置：页面已经建出来');
+
+  // 服务端说看护者换成了另一台电脑。本机下一次心跳被回 `ignored`，
+  //   于是进入「已被接管」—— 这一端要把页面交出去，而不是留着一层遮罩
+  //   让用户继续用（2026-10-20 报的"上栏说被接管，但我完全可以正常使用"）。
+  await invoke('app:debug', 'foreign-keeper');
+  await ctl.heartbeatNow();
+  assert.match(ctl.suspended || '', /接管/, '前提：本机进入了被接管');
+  await waitUntil(() => !w.hasSurface(a.slot), '被接管之后那一槽的页面要收掉', 5000);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('空手连接超时断开：手里没有控制权，到点就拆连接', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  idx._test.setEmptyHandsMs(300);
+  t.after(() => idx._test.setEmptyHandsMs(10 * 60 * 1000));
+  await connectDemo(idx);
+  assert.equal(b.connected, true);
+
+  // 站点上没有一条本机看护的会话：这算「空手」。到点要断开，
+  //   否则客户端可以一直开着替没有主人的作业续命（用户 2026-10-20 补的一条）。
+  await waitUntil(() => !b.connected, '到点之后连接被拆掉', 5000);
+  assert.match(noticesOf().map((n) => n.text).join('\n'),
+    /没有一条会话由本机看护/, '断开要说清原因');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('接管时引用表里那一格不在了：照样接得回来，而且要说清楚', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8113,6 +8206,9 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   await ctl.heartbeatNow();
   const sid = onlyFake(b).session_id;
 
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+
   // 把工作区里 web-demo 那一格删掉。真机上它可能来自"工作区换过"、
   //   "那份数据被删过"、或者手改过的配置 —— 而会话在服务端活得好好的。
   const cfg = idx._test.getCfg();
@@ -8123,13 +8219,14 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   const oldSpace = ws.refs[plugin.id];
   delete ws.refs[plugin.id];
 
-  const lv = await invoke('app:leave');
-  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
-
-  const before = noticesOf().length;
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
-  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
+  assert.equal(idx._test.getSessions().size, 0, '前提：重连只保活，不接回');
+
+  const before = noticesOf().length;
+  const tk = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+  await waitUntil(() => onlyRec(idx), '接管之后那条会话回到本机手上', 20000);
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
 
   const rec = onlyRec(idx);
@@ -8148,7 +8245,7 @@ test('重连时引用表里那一格不在了：照样接得回来，而且要�
   cleanupSiteState(idx);
 });
 
-test('【临时离开】之后重连：排队中的那条不许把连接卡住', async (t) => {
+test('【临时离开】之后重连：排队中的那条只保活，不把连接卡住', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8177,12 +8274,20 @@ test('【临时离开】之后重连：排队中的那条不许把连接卡住',
   assert.equal(rc.ok, true,
     `重连不许卡在排队上：${JSON.stringify(rc)}`);
 
-  // 连上之后落在面板上，界面照常可用；那条会话挂在上栏，作业开始之后自己打开。
+  // 连上之后落在面板上，界面照常可用。排队中的那条同样只保活 ——
+  //   不接回就没有标签、没有页面，但这不代表它看不见：作业页仍然列着它。
   const w = idx._test.getWindow();
   assert.equal(w.panelFront, true, '连上之后落在面板，不进任何一条会话的页面');
-  await waitUntil(() => onlyRec(idx), '排队的那条会话回到本机手上', 20000);
+  await waitUntil(() => idx._test.getKeepAlive().includes(sid),
+    '排队的那条进入保活集合', 20000);
+  assert.equal(idx._test.getSessions().size, 0, '排队中的那条也只保活，不接回');
+
+  // 接管之后才接回来。
+  const tk = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+  await waitUntil(() => onlyRec(idx), '接管之后那条会话回到本机手上', 20000);
   const rec = onlyRec(idx);
-  assert.ok(rec, '排队中的会话也要接回来 —— 不接就既看不见、也停不掉');
+  assert.ok(rec, '接管之后排队中的会话也要接回来 —— 不接就既看不见、也停不掉');
   assert.equal(rec.controller.sessionId, sid, '接回来的必须是同一条会话');
   assert.equal(['queued', 'running'].includes(rec.controller.state), true,
     '接回来之后它仍然停在排队上（或者已经跑起来了）');
@@ -8233,7 +8338,7 @@ test('一次只连一条：第一条还在飞的时候，第二条被拒绝，�
   cleanupSiteState(idx);
 });
 
-test('重连时撞上限流：等一拍再取，而不是安静地跳过那条会话', async (t) => {
+test('接管时撞上限流：等一拍再取，而不是安静地跳过那条会话', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8246,9 +8351,8 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   await ctl.heartbeatNow();
   const sid = onlyFake(b).session_id;
 
-  // 连上站点那一刻是一串突发请求，守护进程的限流桶是按 uid 的 1 秒滑窗。
-  //   真机上"`list` 过了、紧跟着的 `status` 被回 rate_limited"正是边界上最
-  //   典型的样子（2026-10-18，0.25）。这里把那一次拒绝造出来。
+  // 接管那一下要取一份完整视图，而它也会撞上限流（守护进程的桶是按 uid 的
+  //   1 秒滑窗）。这里把那一次拒绝造出来：第一次被拒、第二次成功。
   const realRpc = b.rpc.bind(b);
   let denied = 0;
   let alwaysDeny = false;
@@ -8267,28 +8371,32 @@ test('重连时撞上限流：等一拍再取，而不是安静地跳过那条�
   const conn = await testConn();
   const rc = await invoke('app:connect', { connectionId: conn.id });
   assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
-  // 接回在后台：连接返回时那一次 `status` 还没有发出去。
-  await waitUntil(() => denied === 1, '前提：`status` 被拒过一次', 20000);
+  // 重连只保活：它不取 status，于是 `denied` 仍然是 0。
+  await waitUntil(() => idx._test.getKeepAlive().includes(sid),
+    '那条会话进入保活集合', 20000);
+  assert.equal(denied, 0, '前提：重连只保活，不发 status');
 
-  await waitUntil(() => onlyRec(idx), '接回的那条会话回到本机手上', 20000);
+  const tk = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk.ok, true, `接管失败：${JSON.stringify(tk)}`);
+  assert.equal(denied, 1, '接管取视图时被拒过一次');
+  await waitUntil(() => onlyRec(idx), '接管之后那条会话回到本机手上', 20000);
   const rec = onlyRec(idx);
   assert.ok(rec, '若被限流一次就放弃，那条作业会在 1800 秒后被当作孤儿 scancel');
   assert.equal(rec.controller.sessionId, sid);
   await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
 
-  // 一直拒绝：接不上就必须说出来，别再让用户对着"正在重新接上"猜。
+  // 一直拒绝：接不上就必须说出来，别再让用户对着"接管成功"猜。
   const lv2 = await invoke('app:leave');
   assert.equal(lv2.ok, true);
   alwaysDeny = true;
   const before = noticesOf().length;
-  const rc2 = await invoke('app:connect', { connectionId: conn.id });
-  assert.equal(rc2.ok, true);
-  // 那句"没读到完整信息"是后台接回说完的 —— 等它说出来再读提示流。
+  const tk2 = await invoke('app:takeover', { sessionId: sid });
+  assert.equal(tk2.ok, true);
   await waitUntil(() => noticesOf().slice(before)
-    .some((n) => /没读到它的完整信息/.test(n.text || '')),
+    .some((n) => /未能读回这条会话的完整信息/.test(n.text || '')),
   '一直拒绝时要把那句话说出来', 20000);
   const said = noticesOf().slice(before).map((n) => n.text).join('\n');
-  assert.match(said, /没读到它的完整信息/, `没接回来时要说清是哪一步卡住了：${said}`);
+  assert.match(said, /未能读回这条会话的完整信息/, `接不回来时要说清是哪一步卡住了：${said}`);
   assert.match(said, /rate_limited|限流|没有说明原因/, '要带上站点那句错误，或者如实说它没给');
 
   await openUpTo(idx, 1);

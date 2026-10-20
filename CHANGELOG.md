@@ -31,6 +31,77 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.32] — 未发布
+
+> 协议版本是 **0.32**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
+> `0.32`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
+> **`0.32.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
+
+### Changed — 看护者只由提交与「接管」写入（账本 U1）
+
+`op_heartbeat` 从前有一档「报了身份、keeper 为空 → 认领」。它让"连上站点、发了一拍
+心跳"变成一次接管，与「接管必须是一个用户的动作」直接冲突，也是老电脑被别人接回
+控制权的来源。这一档删掉了。
+
+`keeper` 现在只有两个写入口：`submit` 与 `takeover`。心跳报了身份、keeper 为空时
+照常接受并刷新 `last_hb_socket`，但不写那一格。代价说清：界面会一直说「没人接管」，
+哪怕本机正在替它续命。
+
+**判据**：`cluster/test-sessiond-logic.py` 29.4 重写 —— 报身份、keeper 为空，心跳
+被接受、`keeper` 仍是 `NULL`；要当家只能 `takeover`。假后端的 `_heartbeat` 同步删掉
+认领，否则它演出一件真集群上不会发生的事。
+
+### Changed — 连接站点不接回没在看的会话，只保活
+
+`tryReattach` 从前把所有活会话都接回本机。现在只有看护者是本机的那些接回；看护者
+为空、或者是另一台电脑的，都不建隧道、不上标签、不进页面，只由新的保活定时器发心跳。
+看护者变空之后下一拍自动接上，不必重新连接。
+
+作业页的「接管」因此成了把没接着的会话接回来的唯一入口：判据从「本机接着它」改成
+「看护者不是本机」。接管成功之后才 `reattachOne`。
+
+连着站点、而手里没有任何控制权时，十分钟后自动断开（`EMPTY_HANDS_MS`），经
+`ui:siteClosed` 让界面回到第一屏。不断开的话，一个一直开着的客户端可以替一条没人
+接管的作业无限续命。
+
+**判据**：`client/test/boot.test.mjs` 三条 —— 临时离开后重连只保活、点接管才回来；
+空手超时断开且不取消作业；接管时撞上限流要等一拍再取。
+
+### Fixed — 连接之后自动打开插件页面
+
+`pushSessions` 在前台从 `null` 变成一条接回来的会话时清掉 `_panelFront`，把
+`ensureSurface` 里 `reveal: !rec.adopted` 绕过去了。现在只有 `reveal` 为真才清，
+而 `onSessionChange` 按"新前台那条是不是接回来的"传它。
+
+**判据**：`client/test/boot.test.mjs` 新增一条 —— 模拟客户端重启、接回本机看护的
+会话，`panelFront` 仍为真、页面不可见。改之前为假。
+
+### Fixed — 保存连接之后工作区表陈旧；新连接的默认规则
+
+`app:saveConnection` 与 `app:deleteConnection` 的回包都带着 `workspaces`，界面只取了
+`connections`。映射图与表单下拉因此一直读启动时那一份空表 —— 首页缺了工作区那一列，
+编辑表单里也看不到当前连接的工作区。
+
+`defaultWorkspaceFor` 同时删掉「否则用活跃连接那个」一档：不同地址的新连接各自新建
+一份空白工作区，要共享就在表单里显式选。
+
+**判据**：`client/test/renderer-dom.test.mjs` 新增一条（保存之后映射图的工作区列多
+一个节点）；`client/test/config.test.mjs` 的默认规则用例按新规则改写。
+
+### Fixed — 被接管的一端交出页面，站点立刻通知
+
+被接管之后 `_renderSession` 现在销毁那一槽的插件页面，不再留一层遮罩让用户继续用。
+重新接管时 `resume()` 会把页面重新建出来。
+
+`op_takeover` 成功之后，守护进程立刻向旧看护者的在线连接推一份全量快照（站点记着
+每条连接的 `client_id`），不等下一个 tick。客户端收到推送发现 `keeper` 变了，只
+补打一次心跳；**结论仍只由心跳回包里的 `ignored` 给**，不拿推送直接下判断 ——
+接管成功后收到旧推送不会误判。
+
+**判据**：`client/test/boot.test.mjs`（被接管后 surface 被销毁）；`client/test/
+suspended.test.mjs`（推送里 keeper 变了立刻补打一拍）；`cluster/test-sessiond-logic.py`
+29.6（旧看护者在线的连接立刻收到那条推送）。
+
 ## [0.31] — 未发布
 
 > 协议版本是 **0.31**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

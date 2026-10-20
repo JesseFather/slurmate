@@ -875,8 +875,12 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
  *      用户是在同一台集群上再加一条（换个账号、或者删了再建），他要的是同一份
  *      编辑器布局与登录状态，而不是一份全新的空白存储 —— 后者正是这次重做要消灭的
  *      那个症状：「布局没了、登录又得重来」，而没有任何一处会红。
- *   ② 否则用活跃连接那个 —— 「我正看着这台，再连一台就是接着它用」。
- *   ③ 都没有，`null`：调用方新建一个空白工作区。
+ *   ② 否则 `null`：调用方新建一个空白工作区。
+ *
+ * 从前这里还有一条「否则用活跃连接那个」的规则。它把不同地址的连接也并进
+ *   同一份布局，而用户 2026-10-20 报的正是这一条：「创建多个连接……用的都是
+ *   同一个布局」。两条连接算不算同一个，是工作区那张引用表的显式声明，
+ *   不该由"此刻哪条连接是活跃的"替用户决定 —— 要共享就在表单里选那一个。
  *
  * 两个读者是界面（表单那个下拉要把默认值显示出来，用户按保存之前就看得见）
  *   与主进程（保存时定下来）。两处各写一遍必然漂开，而漂开的症状是
@@ -886,7 +890,7 @@ function setConnectionWorkspace(cfg, connId, workspaceId) {
  *   该复用的仍然是那一份本机的浏览器存储（它与远端是哪个账号无关）。
  *   要改成 `user@host:port` 全同才算同址，就是这一行的事 —— 而那是另一个产品判断。
  *
- * ① ② 两路各自查过那个工作区还在，所以返回值要么是 `null`、要么是这一刻
+ * ① 那一路查过那个工作区还在，所以返回值要么是 `null`、要么是这一刻
  *   存在的一个 id。但调用方不要把它当成"一定存在"就不查了：它可能在这一刻
  *   到落盘之间被回收（那是调用方的事，与这条规则无关）。
  */
@@ -894,18 +898,13 @@ function defaultWorkspaceFor(cfg, conn) {
   const host = conn && conn.host;
   // 端口一律收成数再比：`conn.port` 存进来时是数（`normalizeConnection`），
   //   而问这条规则的那个调用方是从输入框里读的（可能是个字符串）。
-  //   不收的话症状是"同址那条默认静默失效"—— 退回"活跃连接的"，
-  //   界面上看不出任何异常，而用户拿到的是另一份空白存储。
+  //   不收的话症状是"同址那条默认静默失效"—— 界面上看不出任何异常，
+  //   而用户拿到的是另一份空白存储。
   const port = Number(conn && conn.port);
   if (host && Number.isInteger(port) && port > 0) {
     const same = ((cfg && cfg.connections) || []).find((c) => c && c.id !== conn.id
       && c.host === host && c.port === port && findWorkspace(cfg, c.workspaceId));
     if (same) return same.workspaceId;
-  }
-  const active = activeConnection(cfg);
-  if (active && active.id !== (conn && conn.id)
-      && findWorkspace(cfg, active.workspaceId)) {
-    return active.workspaceId;
   }
   return null;
 }

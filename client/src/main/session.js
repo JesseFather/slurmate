@@ -544,6 +544,17 @@ class SessionController extends EventEmitter {
     if (!s) return;
 
     const prev = this.session || {};
+    // 看护者变了：立刻补打一次心跳，不等 45 秒的定时器。
+    //
+    //   推送只负责说"该打一拍了"，不能直接拿它下"我被接管了"的结论 ——
+    //   接管成功之后可能还收到一份旧的快照（keeper 还是别人），直接信它就会
+    //   把刚接管的会话又判成被接管。那一拍打到服务端时 keeper 已经是本机，
+    //   回的是接受，于是什么都不变；真的被接管了，回的是 `ignored`，
+    //   由 `_beat()` 走现有的挂起路径。
+    //
+    //   这是三条路里最快的一条（站点在 `op_takeover` 之后立刻推一份），
+    //   心跳那 45 秒一拍是它丢了之后的兜底。
+    if (s.keeper !== prev.keeper && !this._suspended) this._beat();
     // 这两个字段变了就必须去要一份权威视图：
     //   `state` —— 越过 ACL 边界意味着口令可能刚出现（排队 → 已登记）；
     //   `tunnel_target` —— 作业换了节点/端口，隧道要重建，而重建要用带口令的那一份。
@@ -1463,7 +1474,8 @@ function withTimeout(promise, ms) {
   });
 }
 
-// `HEARTBEAT_MS` 删了：它只是构造函数的缺省值（`heartbeatMs || HEARTBEAT_MS`），
-//   而用例要调心跳节奏时走的是构造参数，不是这个常量。
-module.exports = { SessionController, State, STATUS_MS, QUEUED_POLL_MS, SUBMIT_TIMEOUT_MS,
-  SERVER_LIVE_STATES, SERVER_FINISHED_STATES, PUSH_STALE_MS, PUSH_ABSENT_KEYS };
+// `HEARTBEAT_MS` 导出给 index.js 的保活定时器：那条路发的也是 heartbeat，
+//   两条节奏必须一致 —— 各写一个数字的话，一处改了另一处会静默地不同。
+module.exports = { SessionController, State, STATUS_MS, HEARTBEAT_MS, QUEUED_POLL_MS,
+  SUBMIT_TIMEOUT_MS, SERVER_LIVE_STATES, SERVER_FINISHED_STATES, PUSH_STALE_MS,
+  PUSH_ABSENT_KEYS };

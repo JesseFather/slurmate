@@ -131,6 +131,23 @@ test('suspend() 幂等：只记第一条原因', () => {
   assert.equal(c.snapshot().suspended, '第一条');
 });
 
+test('推送里 keeper 变了：立刻补打一次心跳，结论仍由回包给', async () => {
+  // 站点在接管成功之后会立刻推一份新快照。客户端拿它做的事只有一件：
+  //   补打一拍，不等 45 秒的定时器。不拿推送里的 keeper 直接下判断 ——
+  //   接管成功后收到一份旧推送（keeper 还是别人）会因此误判。
+  const b = new StubBackend();
+  const c = running(b);
+  c.session = { ...c.session, keeper: 'me' };
+  assert.equal(b.count('heartbeat'), 0);
+
+  c._handlePush({ sessions: [{ ...view(), keeper: 'other' }] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(b.count('heartbeat'), 1,
+    'keeper 变了要立刻补打一拍 —— 否则最坏要等 45 秒');
+  assert.equal(c.suspended, null,
+    '推送本身不下结论：回包没到之前不判「被接管」');
+});
+
 test('被接管的会话，stop() 一个 goodbye 都不发', async () => {
   // 这是这一份里最要紧的一条。`goodbye` 会让守护进程的 phase_release
   //      删掉 ACL 并 scancel 作业 —— 而用户以为自己只是换了个地方看。

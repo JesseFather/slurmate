@@ -1091,13 +1091,16 @@ test('站在第一屏上就一定不在连接里 ——「换站点」那条路�
   //      · 于是那道闸（连同它那句"去这一屏的标题栏上按两颗按钮"的 alert）成了
   //        一段走不到、而且话是错的码，一并删掉了；
   //      · `bootUI` 里"有活会话就直接进第二屏"（面板被重新加载的那条路）。
-  //    判据是结构：`showScreen('conns')` 只许出现在三处（开局、临时离开、
-  //      断开），而那三处各自把 `connected` 收成 false 或者根本没有连接。
+  //    判据是结构：`showScreen('conns')` 只许出现在四处（开局、临时离开、
+  //      断开、主进程主动断开），而那四处各自把 `connected` 收成 false
+  //      或者根本没有连接。第四处是 2026-10-20 加的：空手超时时主进程会
+  //      自己拆连接，界面必须跟着回到第一屏，否则第二屏的按钮全打在一个
+  //      已经关掉的通道上。
   //    数的是代码里的出现（注释里留着"它从前是什么样"是刻意的 —— 而那种
   //      查"出现过"的判据会把一段解释也数进去，所以先剥注释）。
   const at = [...stripJsComments(js).matchAll(/showScreen\('conns'\)/g)];
-  assert.equal(at.length, 3,
-    `showScreen('conns') 只该出现在三处（开局 / 临时离开 / 断开），现在是 ${at.length} 处`
+  assert.equal(at.length, 4,
+    `showScreen('conns') 只该出现在四处（开局 / 临时离开 / 断开 / 主进程主动断开），现在是 ${at.length} 处`
     + ' —— 多一处就是"连着回到列表"那条路又长回来了');
   const bootFn = /async function bootUI\(\)[\s\S]*?\n\}/.exec(js);
   assert.ok(bootFn, 'panel.js 里应当有 bootUI()');

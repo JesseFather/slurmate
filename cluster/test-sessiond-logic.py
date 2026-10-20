@@ -11212,19 +11212,55 @@ exit 0
           _d31.store.get("s-free")["keeper"] is None,
           repr(_d31.store.get("s-free")["keeper"]))
 
-    # ── 29.4 报了身份的空 keeper，认领，而认领之后别人就进不来了 ─────────
+    # ── 29.4 报了身份的空 keeper：接受、但不认领（2026-10-20 起）────────
+    #
+    # 从前这一格是「认领」。用户拍板之后，看护者只由提交与接管写入 ——
+    #   心跳回答的是「谁还在续命」，不是「谁当家」。这一条与 29.3 的匿名那条
+    #   在结果上一致，差别只在"报了身份也照样不写 keeper"。
     _rc31 = _d31.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-free"}, "mC")
-    check("报了身份、而 keeper 为空，认领（keeper 变成它）—— "
-          "没有这一条，CLI 提交的会话永远无主：界面画不出「这台电脑在看它」，"
-          "换一台电脑之后两台都以为自己在看、谁也踢不掉谁",
-          _d31.store.get("s-free")["keeper"] == "mC",
+    check("报了身份、而 keeper 为空：心跳被接受（没有 ignored），"
+          "而 keeper 仍然是 NULL —— 看护者只由提交与接管写入",
+          _rc31.get("ok") and "ignored" not in (_rc31.get("data") or {})
+          and _d31.store.get("s-free")["keeper"] is None,
           repr(_d31.store.get("s-free")["keeper"]))
     _rd31 = _d31.dispatch(UID, os.getgid(),
                           {"op": "heartbeat", "session_id": "s-free"}, "mD")
-    check("认领之后，第三台电脑的心跳就被挡在外面了（回 ignored）",
-          (_rd31.get("data") or {}).get("ignored") == "not_keeper",
+    check("第二台电脑同样刷得动，也都不认领 —— 「谁在续命」与「谁当家」是两件事",
+          _rd31.get("ok") and "ignored" not in (_rd31.get("data") or {})
+          and _d31.store.get("s-free")["keeper"] is None,
           str(_rd31.get("data")))
+    _tk31 = _d31.dispatch(UID, os.getgid(),
+                          {"op": "takeover", "session_id": "s-free"}, "mC")
+    check("要当家只能点接管：takeover 之后 keeper 才是 mC",
+          _tk31.get("ok") and _d31.store.get("s-free")["keeper"] == "mC",
+          str(_tk31.get("data")))
+
+    # ── 29.6 接管成功之后，站点立刻把新的看护者推给旧看护者 ────────────
+    #
+    # 用户 2026-10-20：不要等 45 秒后那一拍心跳。站点本来就记着每条连接的
+    #   `client_id`，于是在 `op_takeover` 里直接推一份全量快照。
+    _d33 = _mkd()
+    _add(_d33, "s-take", job_id="605", keeper="mA", hb=mod.now_ts() - 10)
+    _cA, _kA = _pair(_d33)
+    _kA.client_id = "mA"
+    _kA.subscribed = True
+    _cB, _kB = _pair(_d33)
+    _kB.client_id = "mB"
+    _cB.send({"op": "takeover", "session_id": "s-take", "rid": 7})
+    _drive(_d33)
+    _outA = _cA.lines()
+    _pushA = [m for m in _outA if "push" in m]
+    check("接管之后旧看护者的连接立刻收到一条推送（不等下一个 tick）",
+          len(_pushA) == 1, str(_outA)[:300])
+    check("那条推送里的 keeper 已经是新看护者",
+          bool(_pushA) and any(s.get("session_id") == "s-take"
+                               and s.get("keeper") == "mB"
+                               for s in (_pushA[0].get("sessions") or [])),
+          str(_pushA)[:300])
+    check("而接管者自己拿到的是正常的回包",
+          any(m.get("rid") == 7 and m.get("ok") for m in _cB.lines()),
+          str(_cB.lines())[:200])
 
     # ── 29.5 没报身份，一律刷得动，哪怕看护者是别人 ─────────────────
     #

@@ -70,7 +70,7 @@ const hosts = require('./hosts.js');
 // `KIND` 也引进来：主进程里有好几处要问"这是不是那个假后端"。写字面量
 //   `'fake'` 的话，将来改这个名字会漏掉一处，而漏掉的那一处不会有任何提示。
 const { createBackend, KIND } = require('./backend.js');
-const { SessionController, State, SERVER_LIVE_STATES } = require('./session.js');
+const { SessionController, State, SERVER_LIVE_STATES, HEARTBEAT_MS } = require('./session.js');
 const { probeLocalPort } = require('./tunnel.js');
 const { gresLabel, gresText } = require('./gres.js');
 const { jobText } = require('./jobstate.js');
@@ -120,6 +120,23 @@ let clientIdentity = null;
  *   不再查注册表（站点会升级，而一个跑着的会话用的是它提交时那一份代码）。
  */
 let sessions = new Map();
+/**
+ * 「只保活、不接管」的那些会话：`session_id` 的集合。
+ *
+ * 连上站点时（`tryReattach`）看护者不是本机的那几条不接回来 —— 不建隧道、
+ *   不建页面、不上标签。但作业不能因为没人续命而被回收，所以这里替它发心跳。
+ *   看护者为空时这一拍刷新 `last_hb_socket`；看护者是别人时服务端回 `ignored`，
+ *   照收不误 —— 等那台电脑一走、看护者变空，下一拍自动接上，
+ *   不必重新连接。
+ *
+ * 它与 `sessions` 是两回事：集合里的会话没有 controller、没有本地记录。
+ *   用户点「接管」之后才从集合里删掉，再走 `reattachOne` 建出记录。
+ *
+ * 空手超时（`EMPTY_HANDS_MS`）到点时这个集合连同定时器一起清掉 ——
+ *   否则一个客户端可以一直开着，永远替一条没人看的作业续命。
+ */
+let keepAliveSids = new Set();
+let keepAliveTimer = null;
 /**
  * 临时的那些数据：`id → {id, pluginId, group, ports}`，形状与 `config.normalizeSpace`
  * 的产物逐字同形（于是凡是拿一份数据去用的地方，拿到临时的也不需要分支）。
@@ -805,6 +822,9 @@ async function doConnect(conn, extra = {}) {
     //     电脑在看的（用户 2026-10-18 的第三种重登录），所以这里只把面板抬起来，
     //     不把用户推进任何一条会话的页面。
     win.showPanel();
+    // 空手计时从"连上"这一刻起算。`tryReattach` 接回本机看护的会话时，
+    //   `onSessionChange` 会把表撤掉；接不回来的那些不计控制权。
+    if (hasControl()) disarmEmptyHands(); else armEmptyHands();
     tryReattach().catch((e) => {
       // 接回失败不能把这次连接说成失败：连接本身是好的，只是上次那几条
       // 会话没接回来（它们仍然在集群上跑，下一次连接会再试一遍）。
@@ -2363,8 +2383,12 @@ function jobsView(rows) {
       // 「谁在看」只有三句话，而它们是三件不同的事：本机在看 / 另一台电脑
       //   在看（那台也许多半已经断了网）/ 没人在看（倒计时正在跑）。
       //   压成一个布尔会让后两种糊成"不是本机"，而用户要做的事完全不同。
+      // keeper 为空时再分一格：本机正替它保活的话，「没人在看」是一句假话 ——
+      //   作业确实有人在续命，只是没有人当家。
       keeper_text: !live ? null
-        : (r.keeper ? (r.keeper === me ? '本机在看' : '另一台电脑在看') : '没人在看'),
+        : (r.keeper ? (r.keeper === me ? '本机在看' : '另一台电脑在看')
+          : (keepAliveSids.has(sid) ? '没人接管（本机在保活）' : '没人在看')),
+      keepalive: keepAliveSids.has(sid),
       keeper_is_me: Boolean(me) && r.keeper === me,
     };
   });
@@ -3008,7 +3032,15 @@ async function onSessionChange(slot) {
         plugin: rec.plugin || null,
       };
     }));
-    win.pushSessions(views, frontSlot());
+    // 前台换到一条接回来的会话时，面板不让开 —— 用户没有点过它的标签，
+    //   而"连上站点就自动进了插件页面"正是这一格漏出来的（见 windows.js 的
+    //   `pushSessions` 与用户 2026-10-20 报的那一条）。
+    const f = frontSlot();
+    const frec = f ? sessions.get(f) : null;
+    win.pushSessions(views, f, { reveal: !(frec && frec.adopted) });
+    // 手里有控制权就把空手表撤掉；没有就重新起表（见 `EMPTY_HANDS_MS`）。
+    if (hasControl()) disarmEmptyHands();
+    else if (backend.connected) armEmptyHands();
     // 「作业一结束右栏就收起来」那条规矩的落点。判据与面板上那个点、以及
     //   `startOutPoll` 自己那一条同源（有没有作业在跑）—— 三处各写一份的话，
     //   漂的那一处表现为"作业停了，浮窗还挂在那儿显示旧内容"，看起来像它还在跑。
@@ -3092,8 +3124,15 @@ async function _renderSession(slot) {
   //
   // 这里没有任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
   //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个目录。
+  // 被接管：这一块页面不再归本机操作。直接收掉，而不是盖一层遮罩 ——
+  //   用户 2026-10-20 报的是"上栏说被接管，而我完全可以正常使用"。
+  //   隧道不拆：重新接管之后要接着用它，而 `suspend()` 本来就特意没拆。
+  //   收掉之后 `hasSurface` 为假，下面那段遮罩也没有可盖的东西。
+  const handedOff = Boolean(snap.suspended);
+  if (handedOff) win.destroySurface(slot);
+
   const plugin = rec.plugin;
-  if (snap.state === State.RUNNING && snap.origin) {
+  if (!handedOff && snap.state === State.RUNNING && snap.origin) {
     if (!plugin) {
       // 未知服务：绝不建界面（那个端口上跑的可能是任何东西），也绝不 POST 口令。
       // 但它自己那一块必须收掉（上面那道状态闸已经收过了）。
@@ -3872,6 +3911,9 @@ function stopSitePoll() {
 async function teardownConnection() {
   stopSitePoll();
   stopOutPoll();
+  // 离开/断开之后既没有要保活的会话，也没有"空手"可计 —— 两样都从零开始。
+  disarmEmptyHands();
+  stopKeepAlive();
   await backend.close();
   whoami = null;
   connectedConnId = null;   // 与 whoami 同生共死，理由见它的声明处
@@ -4021,6 +4063,90 @@ async function rpcAfterRateLimit(req) {
 }
 
 /**
+ * 保活：替那些「看护者不是本机」的会话续命，但不当家。
+ *
+ * 它发的就是普通心跳。看护者为空时服务端刷新 `last_hb_socket`；
+ *   看护者是别人时回 `ignored` —— 那不是错误，是"还没轮到本机"，照收。
+ *   两种回包都不报给用户：这是后台的一拍，不是一次操作。
+ *
+ * 失败也不报：与心跳那条路同一条取舍（闪断时继续重试，绝不放弃）。
+ */
+function startKeepAlive() {
+  if (keepAliveTimer) return;
+  const beat = async () => {
+    if (!backend.connected) return;
+    for (const sid of [...keepAliveSids]) {
+      // 一条会话在两次心跳之间被用户接管、或者被另一条路结束了：
+      //   集合只在这里被读，删它的是 takeover / teardown。
+      if (!keepAliveSids.has(sid)) continue;
+      await rpcAfterRateLimit({ op: 'heartbeat', session_id: sid });
+    }
+  };
+  keepAliveTimer = setInterval(() => { beat(); }, HEARTBEAT_MS);
+  keepAliveTimer.unref?.();
+  beat();                            // 立刻打一拍，别等 45 秒
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; }
+  keepAliveSids = new Set();
+}
+
+/**
+ * 空手连接能挂多久：手里一条会话的控制权都没有时，到点就断开。
+ *
+ * 十分钟够用户看清这个站点上有哪些插件、哪些作业，并决定要不要接管。
+ *   比 `suspect_after`（300 秒）长、比 `orphan_after`（1800 秒）短一半 ——
+ *   它要保证的是"挂保活"这件事有尽头，而不是催用户。
+ */
+const EMPTY_HANDS_MS = 10 * 60 * 1000;
+/** 用例要把它调小才测得到（见 `_test.setEmptyHandsMs`）；生产路径永远是上面那个。 */
+let emptyHandsMs = EMPTY_HANDS_MS;
+let emptyHandsTimer = null;
+
+/** 手里有没有任何一条会话的控制权：本机提交的、或者接管回来的。 */
+function hasControl() {
+  for (const [slot, rec] of sessions) {
+    if (rec && rec.controller && occupied(slot)) return true;
+  }
+  return false;
+}
+
+function disarmEmptyHands() {
+  if (emptyHandsTimer) { clearTimeout(emptyHandsTimer); emptyHandsTimer = null; }
+}
+
+function armEmptyHands() {
+  if (emptyHandsTimer) return;
+  emptyHandsTimer = setTimeout(() => {
+    emptyHandsTimer = null;
+    if (!backend.connected || hasControl()) return;
+    closeEmptyHandsSite().catch((e) => {
+      if (win) win.pushNotice('error', '空手超时断开时出错：' + ((e && e.message) || e));
+    });
+  }, emptyHandsMs);
+  emptyHandsTimer.unref?.();
+}
+
+/**
+ * 空手超时：断开这个站点，什么都不取消。
+ *
+ * 保活集合里的那些本来就不归本机管 —— `forgetSessions()` 一个字都不发给
+ *   服务端（它是 `abandon()`），所以这条路上没有 `goodbye`、没有 `scancel`。
+ *   断开之后那条作业重新进入"没人看着它"的倒计时，而这正是用户要的：
+ *   客户端不能靠一直开着替它续命。
+ */
+async function closeEmptyHandsSite() {
+  stopKeepAlive();
+  const reason = '这个站点上没有一条会话由本机看护，已自动断开。'
+    + '要接着看护某一条，请在作业页点「接管」。';
+  await forgetSessions();
+  await teardownConnection();
+  win.pushNotice('info', reason);
+  win.pushSiteClosed({ reason });
+}
+
+/**
  * 用户点了一次连接之后，把这个站点上还没结束的会话接回本机。
  *
  * 先 `list` 筛出还占着位置的那些，再逐个用 `status` 取完整视图 —— 两次都走
@@ -4113,11 +4239,33 @@ async function tryReattach() {
   const fresh = live.filter((r) => !have.has(r.session_id));
   if (!fresh.length) return;           // 全都已经在手上了，正常路径
 
-  win.pushNotice('info', fresh.length > 1
-    ? `发现 ${fresh.length} 个还没结束的会话，正在逐个接上。`
+  // ── 只有看护者是本机的那几条要接回来 ──
+  //
+  // 其余两档都不接（用户 2026-10-20 拍板）：
+  //   · 看护者是另一台电脑：接了也只会被回 `ignored`，而页面与标签已经出现；
+  //   · 看护者为空：用户要的是「只保活、不自动当家」，要接手得点「接管」。
+  // 两档都进保活集合 —— 别人在看时这一拍被回 `ignored`，等它一走就自动接上。
+  const me = clientIdentity && clientIdentity.id;
+  const mine = fresh.filter((r) => me && r.keeper === me);
+  const nextKeep = new Set();
+  for (const r of fresh) if (!mine.includes(r)) nextKeep.add(r.session_id);
+  keepAliveSids = nextKeep;
+  if (keepAliveSids.size) startKeepAlive(); else stopKeepAlive();
+
+  if (!mine.length) {
+    win.pushNotice('info', keepAliveSids.size > 1
+      ? `站点上还有 ${keepAliveSids.size} 个会话，看护者不是本机：只替它们保活，`
+        + '不接回来。要接手其中一条，到「作业」页点「接管」。'
+      : '站点上还有一个会话，看护者不是本机：只替它保活，不接回来。'
+        + '要接手，到「作业」页点「接管」。');
+    return;
+  }
+
+  win.pushNotice('info', mine.length > 1
+    ? `发现 ${mine.length} 个还没结束的会话，正在逐个接上。`
     : '发现一个还没结束的会话，正在重新接上。');
 
-  for (const row of fresh) {
+  for (const row of mine) {
     const one = await rpcAfterRateLimit({ op: 'status', session_id: row.session_id });
     // 读不到完整视图时不许安静地跳过去。
     //
@@ -5512,8 +5660,27 @@ function registerIpc() {
     if (!sid) return { ok: false, error: { detail: '没有说清要接管哪一条会话。' } };
     const resp = await backend.rpc({ op: 'takeover', session_id: sid });
     if (resp && resp.ok) {
-      const rec = [...sessions.values()].find(
+      // 接管成功之后它不再属于"只保活"那一档。
+      keepAliveSids.delete(sid);
+      if (!keepAliveSids.size) stopKeepAlive();
+
+      let rec = [...sessions.values()].find(
         (x) => x.controller && x.controller.sessionId === sid);
+      // 本机之前没有接它（看护者是别人，或者为空）：接管之后才把它接回来。
+      //   少了这一步，服务端那一格已经换成本机，而本机没有隧道、没有页面，
+      //   用户看到的是"接管成功，然后什么都没有"。
+      if (!rec) {
+        const one = await rpcAfterRateLimit({ op: 'status', session_id: sid });
+        const view = one && one.ok && one.data && one.data.session;
+        if (view) {
+          await reattachOne(view);
+          rec = [...sessions.values()].find(
+            (x) => x.controller && x.controller.sessionId === sid);
+        } else {
+          win.pushNotice('error', '接管成功了，但未能读回这条会话的完整信息：'
+            + whyOf(one) + '。再连一次这个站点会把它接回来。');
+        }
+      }
       // 立刻续一次命：那一条是本机接着的才打得了心跳（别的连心跳都没有）。
       if (rec && rec.controller) {
         // 先撤销「被接管」这个终态，再补那一拍 —— 顺序不能反。
@@ -5525,6 +5692,9 @@ function registerIpc() {
         rec.controller.resume();
         try { await rec.controller.heartbeatNow(); } catch { /* 接管已经成功了 */ }
       }
+      // 用户点的是「接管」，接下来要看的就是它 —— 与连接站点时"停在面板上"
+      //   不是同一种意图：那一次用户没有点任何一条会话。
+      if (rec) win.setFront(rec.slot);
       win.pushNotice('info', `已接管这条会话：从现在起由这台电脑看护它（作业一个字都没动）。`);
     }
     win.pushSessions(sessionViews(), frontSlot());
@@ -5826,6 +5996,11 @@ module.exports = {
      * 用例需要的是"现在有哪几条、各自什么状态"，那正是这一份。
      */
     getSessions: () => sessions,
+    /** 「只保活、不接管」的那些 `session_id`（见 `keepAliveSids`）。 */
+    getKeepAlive: () => [...keepAliveSids],
+    /** 把空手超时调到毫秒级 —— 生产路径上它是十分钟（见 `EMPTY_HANDS_MS`）。 */
+    setEmptyHandsMs: (ms) => { emptyHandsMs = ms; },
+    getEmptyHandsMs: () => emptyHandsMs,
     /** 某一槽的记录（`getSessions().get(slot)` 的糖，用例里读起来短一点）。 */
     sessionAt: (slot) => sessions.get(slot),
     getWindow: () => win,

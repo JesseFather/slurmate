@@ -70,7 +70,7 @@ import time
 #   第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.31"
+VERSION = "0.32"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -11086,16 +11086,21 @@ class Sessiond(object):
 
     # ── RPC：写操作 ─────────────────────────────────────────────────────────
     def op_heartbeat(self, uid, req, client_id=None):
-        """心跳，而「谁的心跳算数」由 `keeper` 那一列定。判据只有这一份。
+        """心跳。它回答的是「谁还在续命」，不回答「谁当家」—— 后者只看 `keeper`。
 
-        判据是四档，一档都不能少：
+        判据是三档：
 
         | 发心跳的连接 | `keeper` | 结果 |
         |---|---|---|
-        | 报了身份 | 空 | 接受，并认领（keeper = 我） |
-        | 报了身份 | 是我 | 接受 |
+        | 报了身份 | 是我，或者空 | 接受，`keeper` 不写 |
         | 报了身份 | 是别人 | 回 `ok` + `ignored`，什么都不动 |
-        | 没报身份 | 任意 | 一律接受，keeper 不动 |
+        | 没报身份 | 任意 | 一律接受，`keeper` 不动 |
+
+        `keeper` 只由两处写入：`op_submit`（提交的那条连接是第一任看护者）
+          与 `op_takeover`（用户点「接管」）。心跳从不认领 —— 2026-10-20 起
+          这一条由用户拍板：接管必须是用户的动作，不能是"连上站点、发了一拍心跳"
+          的副作用。代价说清：看护者空着时，界面会一直说「没人接管」，
+          哪怕本机正在替它续命；要当家就得点一下「接管」。
 
         最后一行是承重的，别把它「收严」成"keeper 不是我就不算"。
           没报身份的连接有两类，而两类都必须能续命：
@@ -11116,12 +11121,11 @@ class Sessiond(object):
         所以判据是一条不对称的规矩：身份是"被排除"的必要条件，不是
           "被接受"的必要条件。 不报身份的连接永远不会被别人挡在心跳之外，
           没有身份 = 不被排除。
-          （而只有认了身份的连接才写得进 `keeper`：没有名字就没人可写。）
 
-        「认出我是看护者之后要认领」不是顺手加的：CLI 提交的会话
-          （keeper 为空）在客户端上打开时，界面要画得出"这台电脑在看它"，
-          而"接管"这个按钮也要有东西可接管，没有认领，那条会话永远无主，
-          用户换一台电脑之后两台都以为自己在看，谁也踢不掉谁。
+        从前这里还有一档「报了身份、keeper 为空 → 认领」。它删掉之后，
+          CLI 提交的会话在客户端上打开时不会再被自动认领，界面按"没人接管、
+          本机在保活"来说；要成为看护者，点一次「接管」。这一条与
+          「换一台电脑看同一个作业」是同一件事，不该有两种来路。
 
         不是看护者时回 `ok` + `ignored` 而不回错：心跳不是一条会让客户端
           重试的请求，回错会让它退避、进而把「不是看护者」演成「网络不好」。
@@ -11139,9 +11143,6 @@ class Sessiond(object):
             return self._ok({"state": s["state"], "at": now,
                              "ignored": "not_keeper"})
         kw = {"last_hb_socket": now}
-        if client_id and keeper is None:
-            kw["keeper"] = client_id
-            self.audit("keeper_claimed", session=sid, uid=uid, client=client_id)
         if s["state"] == ST_SUSPECT:
             # 心跳恢复，从"网络闪断"回到正常态。作业和 ACL 全程都没动过。
             kw["state"] = ST_ENROLLED
@@ -11170,12 +11171,18 @@ class Sessiond(object):
           时宽进，因为排除错了会杀作业），接管是"我来当家"（缺少身份时严出，
           因为它要往那一格里写一个名字）。
 
-        已经有看护者、而它不是我的时候，不通知、也不拒绝别的看护者，
-          旧看护者下一次心跳会被回 `ignored`，而那正是它认出「这条作业被另一台
-          电脑接管了」的信号。另一条路是那一份全量快照：`keeper` 变了，
-          指纹变了，下一个 tick 就有一条推送（见 snapshot_for）。
-          刻意不加一条专门的推送：全量推送的可丢弃性是这一版的承重性质，
-          而"谁在看"这件事本来就是快照里的一格。
+        旧看护者有三条路知道自己被接管了，一条比一条慢：
+          ① 这一条 op 成功之后立刻推一份全量快照给它（下面那一段）；
+          ② 它自己的下一次心跳被回 `ignored`（最坏 45 秒）；
+          ③ 下一个 tick 的指纹发现 `keeper` 变了（≤2 秒，如果①被水位挡下）。
+          三条都是同一份数据，判据仍然只有心跳回包那一个 —— 推送只负责把
+          "该打一拍了"这件事说到，绝不替客户端下"我被接管了"的结论。
+
+        立刻推的那一段是 2026-10-20 加的：站点本来就记着每条连接的
+          `client_id`（见 Conn），于是"旧看护者在不在线"答得出来。不在线就
+          跳过 —— 它回来时走 `tryReattach`，`keeper` 已是别人，没有被接回的
+          可能，也就没有可操作的页面。推的仍是全量快照，协议那条
+          「只推全量、丢掉任何一条都无害」一个字不改。
         """
         if not client_id:
             return self._err(2, "no_client_id",
@@ -11197,7 +11204,35 @@ class Sessiond(object):
             self.audit("taken_over", session=sid, uid=uid, was=was, keeper=client_id)
             log.info("会话 %s 的看护者从「%s」换成「%s」（作业一个字都没动）",
                      sid, was or "（无）", client_id)
+            self._push_taken_over(uid, was)
         return self._ok({"session_id": sid, "keeper": client_id, "was": was})
+
+    def _push_taken_over(self, uid, was):
+        """把新的 `keeper` 立刻推给旧看护者，不等下一个 tick。
+
+        它不构造任何新形状：`snapshot_for(uid)` + `enqueue_push()` 就是常规
+        推送那条路，只是被叫得早了一点。本 tick 的快照缓存要先丢掉，否则推
+        出去的仍是 `keeper` 改成新值之前的那一份 —— 那会让"立刻"变成一句假话。
+
+        被水位挡下（`enqueue_push` 回 False）不是错误：下一个 tick 的指纹仍然
+        对不上，还会再试；再不行还有心跳那一条兜底。
+        """
+        if not was:
+            return
+        self._tick_snap.pop(uid, None)
+        for conn in self.conns():
+            if conn.uid != uid or conn.client_id != was:
+                continue
+            if not conn.subscribed or conn.closing:
+                continue
+            digest, sessions = self.snapshot_for(uid)
+            if self.enqueue_push(conn, sessions):
+                conn.sent_digest = digest
+                conn.pushed_at = time.time()
+                # 与常规推送那条路一样：入队之后要把 `EVENT_WRITE` 挂上，
+                #   否则消息留在队列里等下一次客户端发请求才被带走 ——
+                #   "立刻推"就成了一句假话。
+                self.sync_events(conn)
 
     def op_leave(self, uid, req):
         """「这些会话我不看了」，把它们的看护者置空。倒计时从这一刻起算。

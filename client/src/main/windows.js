@@ -846,14 +846,24 @@ class ShellWindow {
    *   下的失败形态是"某一条会话在界面上根本不存在" —— 既没有标签、
    *   也没有「结束会话」的入口，而它在集群上占着资源。
    */
-  pushSessions(list, front) {
+  pushSessions(list, front, opts) {
     const next = front || null;
     // 前台换了，面板让开（2026-10-11 加，与 `setFront` 里那一句同一件事的
     //   另一半）。少了它的症状是"我点了开始会话，什么都没出来"：用户可能正站在
     //   「调试」那一屏上，而新会话的页面被 `_panelFront` 按着不让露。
     //   只在真的换了的时候清：用户站在调试那一屏、而会话表每隔几秒推一次
     //     （心跳），每推一次都把面板收回去的话，那一屏会用不了。
-    if (next !== this._front) this._panelFront = false;
+    //
+    // `reveal`（缺省真）说的是「这一次前台变化，是不是用户要的」。
+    //   连接站点之后 `tryReattach` 把上次的会话接回来，`front` 从 null 变成
+    //   那一条 —— 那也是"前台换了"，但用户没有点过它的标签，面板不能因此让开。
+    //   2026-10-19 的 `reveal: !rec.adopted` 只守住了 `showSurface` 那一半，
+    //   这一半漏着，症状就是"连上站点就自动进了插件页面"（用户 2026-10-20 报的）。
+    // 前台变成 null（会话结束 / 本机记录被清掉）时不清：没有页面可盖，
+    //   面板本来就看得见。清了之后紧接着接回同一槽的会话就分不出
+    //   "前台换过一轮"与"用户要那块页面"，而重新接回一条会话是用户没点过的。
+    const reveal = !(opts && opts.reveal === false);
+    if (next !== null && next !== this._front && reveal) this._panelFront = false;
     this._front = next;
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) {
@@ -894,6 +904,18 @@ class ShellWindow {
   pushConn(state) {
     const wc = this.win.webContents;
     if (!wc.isDestroyed()) wc.send('ui:conn', state);
+  }
+
+  /**
+   * 站点被主进程主动断开（空手超时）。
+   *
+   * 它不是用户点的动作，所以不能只靠"用户点了断开"那条渲染层自己的路径 ——
+   *   界面不知道主进程刚刚拆了连接，会一直停在第二屏上，而每一个按钮
+   *   都打在一个已经关掉的通道上。
+   */
+  pushSiteClosed(payload) {
+    const wc = this.win.webContents;
+    if (!wc.isDestroyed()) wc.send('ui:siteClosed', payload || {});
   }
 
   /**

@@ -227,6 +227,13 @@ contextBridge.exposeInMainWorld('slurmate', {
     ipcRenderer.on('ui:conn', h);
     return () => ipcRenderer.removeListener('ui:conn', h);
   },
+  // 主进程主动断开站点（空手超时）。它不是用户点的动作 —— 渲染层要据此
+  //   回到第一屏，而不是停在一个已经没有连接的站点里。
+  onSiteClosed: (fn) => {
+    const h = (_e, payload) => fn(payload);
+    ipcRenderer.on('ui:siteClosed', h);
+    return () => ipcRenderer.removeListener('ui:siteClosed', h);
+  },
   // 左栏那个圆点的三态（`ok` / `bad` / `na`）。它是状态，不是提示。
   onSite: (fn) => {
     const h = (_e, s) => fn(s);

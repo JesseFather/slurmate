@@ -278,6 +278,7 @@ function bindAll(bootObj, extra = '') {
   const h = start(bootObj, extra);
   h.run('window.addEventListener = () => {};'
     + 'window.slurmate.onSite = () => {}; window.slurmate.onStates = () => {};'
+    + 'window.slurmate.onSiteClosed = () => {};'
     + 'window.slurmate.onNotice = () => {}; window.slurmate.onPlugins = () => {};');
   h.fn('bindEvents')();
   return h;
@@ -754,7 +755,7 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.31', tick_age_seconds: 2, last_tick_error: null,
+    version: '0.32', tick_age_seconds: 2, last_tick_error: null,
     checked: 12, problems: [], auth_mode_none: 0 });
   await btn.onclick();
   // 「检查了 N 项」是这一屏上唯一能把"检查跑了、没有发现"与"检查没跑"
@@ -763,13 +764,13 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   assert.match(said(), /检查了 12 项/, said());
   assert.match(said(), /0 条 ACL 规则/, said());
   assert.match(said(), /1 个还没有登记上/, said());
-  assert.match(said(), /守护进程 0\.31/, said());
+  assert.match(said(), /守护进程 0\.32/, said());
   assert.match(said(), /上一次对账在 2 秒前/, said());
 
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.31', tick_age_seconds: 2, last_tick_error: null,
+    version: '0.32', tick_age_seconds: 2, last_tick_error: null,
     checked: 12, problems: [], auth_mode_none: 2 });
   await btn.onclick();
   assert.match(said(), /2 条关闭了口令/, said());
@@ -779,7 +780,7 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 1, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.31', tick_age_seconds: 2,
+    version: '0.32', tick_age_seconds: 2,
     checked: 12, auth_mode_none: 0,
     problems: [{ key: 'tick_error',
       detail: '最近一次对账出错：IntegrityError: UNIQUE constraint failed' }] });
@@ -792,7 +793,7 @@ test('「检查集群」把守护进程的版本、对账时间与"还没有登�
   answer({ socket: true, table: true, rules_readable: true, rules_count: 0,
     active_sessions: 0, pending_sessions: 0, consistent: true,
     existing: { codeserver_table: true, portdaemon_table: true },
-    version: '0.31', tick_age_seconds: 2, last_tick_error: null });
+    version: '0.32', tick_age_seconds: 2, last_tick_error: null });
   await btn.onclick();
   assert.match(said(), /版本过低/, said());
 });
@@ -1197,6 +1198,29 @@ test('连接进行中要说一声：按钮灰着写「连接中…」，出结�
   assert.equal(save.disabled, false);
   assert.equal(save.textContent, '保存并连接',
     '还原成它原来那句话 —— 写成「连接」，用户会以为这颗按钮换了意思');
+});
+
+test('保存连接之后，界面手里的工作区表跟着回包换', async () => {
+  // 只换 `connections` 的话，映射图与下一次打开的表单读的仍是启动时那一份：
+  //   用户看到一张缺了中间一列的图（2026-10-20 报的"首页的工作区都不显示"）。
+  const NEW_WS = { id: 'w000000000009', name: '工作区 9', refCount: 1,
+    members: ['c9'], soleOwnerId: 'c9', refs: {}, spaces: [] };
+  const NEW_CONN = { id: 'c9', user: 'carol', host: '198.51.100.11', port: 10100,
+    workspaceId: NEW_WS.id };
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.slurmate.saveConnection = () => Promise.resolve({'
+    + ' ok: true, created: true, connection: ' + JSON.stringify(NEW_CONN) + ','
+    + ' connections: boot.connections.concat([' + JSON.stringify(NEW_CONN) + ']),'
+    + ' workspaces: boot.workspaces.concat([' + JSON.stringify(NEW_WS) + ']) });'
+    + 'window.slurmate.setActiveConnection = () => Promise.resolve({ ok: true });'
+    + 'window.slurmate.connect = () => Promise.resolve('
+    + '{ ok: false, error: "假装连不上" });');
+  h.run('form = { open: true, mode: "new", id: null };'
+    + '$("f-user").value = "carol"; $("f-host").value = "198.51.100.11";'
+    + '$("f-port").value = "10100"; $("f-workspace").value = "";');
+  await h.byId.get('btn-save').onclick();
+  assert.equal(h.byId.get('wmap-workspaces').children.length, WSS.length + 1,
+    '保存之后映射图要用回包里那份工作区表 —— 少了它，首页的工作区那一列是空的');
 });
 
 test('连接表单里的「③ 工作区」：三种取值各有各的那一句后果', () => {
@@ -2204,14 +2228,13 @@ test('没加载上的那些收在一个能展开的框里：抬头一直在，�
     '默认收着：它不阻塞任何操作，而一字排开摆在插件列表头上像"这个客户端坏了"');
 });
 
-test('【接管】只在另一台电脑正看着它时可用 —— 没人看时心跳会自己接过来', () => {
-  // 用户 2026-10-18：接管是两个客户端互相争抢时才有的动作。一颗"没人看"时
-  //   也亮着的接管按钮，会让用户把它当成"接不上"的出路 —— 而它只改看护者那一格，
-  //   接不上的会话照样接不上。
+test('【接管】只在看护者不是本机时可用 —— 它也是把会话接回来的入口', () => {
+  // 2026-10-20 起：看护者为空时心跳不再自动认领，接管是唯一把控制权拿回本机的
+  //   入口。于是两种场合都要亮：另一台电脑在看，以及没人在看。
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   const row = (over) => ({
-    session_id: 'sess-a', slot: 's1', live: true, attached: true,
-    job_id: '11', keeper: null, keeper_is_me: false, ...over,
+    session_id: 'sess-a', slot: 's1', live: true, attached: false,
+    job_id: '11', keeper: 'other', keeper_is_me: false, ...over,
   });
   const draw = (r) => {
     h.run(`SCREEN = 'jobs'; JOBS = ${JSON.stringify({
@@ -2220,25 +2243,25 @@ test('【接管】只在另一台电脑正看着它时可用 —— 没人看时
     h.fn('renderJobsSelection')();
   };
 
-  // ① 本机还没接着它 —— 出路是重连，不是接管。
-  draw(row({ attached: false }));
+  // ① 本机还没接着它、而看护者是别人 —— 接管可用，而且它会把会话接回来。
+  draw(row({ attached: false, keeper: 'other' }));
   // 按钮是 `renderJobsSelection` 第一次 `$()` 时才被建出来的（人造 DOM 按需建）。
   const btn = h.byId.get('btn-jobs-takeover');
-  assert.equal(btn.disabled, true, '没接着的会话不该给一颗接管按钮');
-  assert.match(btn.title, /重新连一次这个站点会把它接上/);
+  assert.equal(btn.disabled, false, '没接着的会话，接管就是把它接回来的入口');
+  assert.match(btn.title, /并把它接回来/);
 
-  // ② 没人看它 —— 接上之后心跳会把它认领过来，接管是一次空动作。
-  draw(row());
-  assert.equal(btn.disabled, true, '没人在看时接管也是空动作：心跳自己会认领');
-  assert.match(btn.title, /不需要接管/);
+  // ② 没人在看 —— 心跳不再自动认领，接管同样可用。
+  draw(row({ keeper: null }));
+  assert.equal(btn.disabled, false, '看护者为空时接管是唯一当家的入口');
+  assert.match(btn.title, /看护者换成这台电脑/);
 
   // ③ 本机在看它 —— 空动作。
-  draw(row({ keeper: 'me', keeper_is_me: true }));
+  draw(row({ keeper: 'me', keeper_is_me: true, attached: true }));
   assert.equal(btn.disabled, true);
   assert.match(btn.title, /已经在看它了/);
 
-  // ④ 另一台电脑在看它 —— 只有这一种才该亮。
-  draw(row({ keeper: 'other' }));
+  // ④ 另一台电脑在看、而本机已经接着它 —— 仍然可用。
+  draw(row({ keeper: 'other', attached: true }));
   assert.equal(btn.disabled, false, '另一台电脑正看着它时，接管才是要做的事');
   assert.match(btn.title, /看护者换成这台电脑/);
 });

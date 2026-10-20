@@ -673,9 +673,9 @@ test('spaceFor 对不存在的工作区返回 null，不凭空造一个', () => 
 
 // ── 新建连接时默认落在哪个工作区 ─────────────────────────────────────────────
 
-test('defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', () => {
+test('defaultWorkspaceFor：同址复用，异址一律新建（null）', () => {
   const cfg = config.loadConfig(tmpdir());
-  // ③ 一条连接都没有，null（调用方据此新建一个空白工作区）
+  // 一条连接都没有，null（调用方据此新建一个空白工作区）
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), null);
 
   cfg.workspaces = [
@@ -688,18 +688,19 @@ test('defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', () => {
   ];
   cfg.activeConnectionId = 'c2';
 
-  // ② 别的机器，跟着活跃连接走（"我正看着这台，再连一台就是接着它用"）
-  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.30', port: 10100 }), gid(2));
+  // 别的机器：null。2026-10-20 起不再跟着活跃连接走 —— 两条连接算不算
+  //   同一个，是工作区那张引用表的显式声明，不由"此刻哪条是活跃的"替用户决定。
+  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.30', port: 10100 }), null);
 
-  // ① 同址，用它那个，赢过活跃连接那条 —— 这是这条规则存在的全部理由：
+  // 同址，用它那个 —— 这是这条规则存在的全部理由：
   //    连同一台机器第二次，用户要的是同一份编辑器布局，不是一张白纸。
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), gid(1));
   // 比的是 host + port，不含用户名：同一台机器换个账号，要复用的仍是那一份
   //   本机的浏览器存储（它与远端是哪个账号无关）。
   assert.equal(config.defaultWorkspaceFor(cfg,
     { user: 'carol', host: '198.51.100.7', port: 10100 }), gid(1));
-  // 端口不同 = 同一台机器上的另一个 sshd，不算同址，退回活跃那条。
-  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 2222 }), gid(2));
+  // 端口不同 = 同一台机器上的另一个 sshd，不算同址，新建。
+  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 2222 }), null);
   // 端口从输入框来的时候是字符串 —— 不收起成数的话"同址"会静默失效，
   //   而症状是用户拿到另一份空白存储，界面上一个字都不提。
   assert.equal(config.defaultWorkspaceFor(cfg,
@@ -709,13 +710,12 @@ test('defaultWorkspaceFor：同址 → 活跃 → 都没有（null）', () => {
   //   不排除自己的话它会命中自己（workspaceId 还是空的，那一条 anyway 会被跳过），
   //   而一旦调用方给了它一个 workspaceId，就会变成"默认 = 我要落的那个"这种循环。
   assert.equal(config.defaultWorkspaceFor(cfg,
-    { id: 'c1', host: '198.51.100.7', port: 10100 }), gid(2), '不能命中自己');
+    { id: 'c1', host: '198.51.100.7', port: 10100 }), null, '不能命中自己');
 
-  // ④ 同址那条指着的工作区已经没了，跳过它，不要返回一个悬空的 id
+  // 同址那条指着的工作区已经没了，跳过它，不要返回一个悬空的 id
   cfg.workspaces = [{ id: gid(2), name: 'B', refs: {} }];
-  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), gid(2),
-    'c1 那个工作区已经不在配置里了，退回活跃那条，而不是返回一个不存在的条目');
-  // 而活跃那条也没了，null
+  assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), null,
+    'c1 那个工作区已经不在配置里了，宁可不复用，也不返回一个不存在的条目');
   cfg.workspaces = [];
   assert.equal(config.defaultWorkspaceFor(cfg, { host: '198.51.100.7', port: 10100 }), null);
 });

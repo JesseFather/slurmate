@@ -2121,11 +2121,10 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 心跳。判据与真守护进程的 `op_heartbeat` 逐档同构（见那一段的四档表）：
+   * 心跳。判据与真守护进程的 `op_heartbeat` 逐档同构（见那一段的三档表）：
    *
    *   | 发心跳的连接 | keeper | 结果 |
-   *   | 报了身份 | 空 | 接受，并认领 |
-   *   | 报了身份 | 是我 | 接受 |
+   *   | 报了身份 | 是我，或者空 | 接受，keeper 不写 |
    *   | 报了身份 | 是别人 | 回 `ok` + `ignored`，什么都不动 |
    *   | 没报身份 | 任意 | 一律接受，keeper 不动 |
    *
@@ -2134,7 +2133,9 @@ class FakeBackend extends Backend {
    *   测试后端里就会演出一件真集群上不会发生的事 —— 而假站点全部的价值
    *   就是它演的是同一件事。
    *
-   * 也不认领没报身份的连接：`keeper` 写谁？没有名字就没人可写。
+   * 心跳从不认领（2026-10-20 起，与真守护进程同一份语义）：
+   *   看护者只由提交与接管写入。假站点要是还按老规矩认领，这里演出的
+   *   就是一件真集群上不会发生的事。
    */
   _heartbeat(req) {
     const sid = req && req.session_id;
@@ -2148,7 +2149,6 @@ class FakeBackend extends Backend {
       return ok({ state: s.state, at: nowSec(), ignored: 'not_keeper' });
     }
     s.last_hb_at = nowSec();
-    if (me && keeper === null) s.keeper = me;
     if (s.state === 'suspect') s.state = 'enrolled';
     return ok({ state: s.state, at: nowSec() });
   }

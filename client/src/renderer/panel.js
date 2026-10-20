@@ -527,13 +527,16 @@ function renderTabs() {
   }
   for (const s of list) {
     const b = document.createElement('button');
+    // 被接管的会话仍然列在这里（它还在集群上跑着），但页面已经收掉了 ——
+    //   `dead` 说的正是"这一条现在没有可切过去的东西"，与已结束的同一档。
+    const suspended = Boolean(s.snap && s.snap.suspended);
     b.className = 'tab' + (s.slot === SESS.front ? ' on' : '')
-      + (s.live ? '' : ' dead');
+      + (s.live && !suspended ? '' : ' dead');
     const name = s.service || '（未知服务）';
     const port = s.snap && s.snap.localPort;
     b.textContent = seen.get(name) > 1 && port ? `${name} · ${port}` : name;
     const st = s.snap && s.snap.state;
-    b.title = STATE_TEXT[st] || st || '';
+    b.title = suspended ? s.snap.suspended : (STATE_TEXT[st] || st || '');
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }
@@ -1240,6 +1243,8 @@ function renderConnections(list) {
           if (!r.ok) return notice('error', r.error);
           boot.connections = r.connections;
           boot.activeConnectionId = r.activeConnectionId;
+          // 删掉一条连接可能连带回收它的工作区，引用表同样要跟着回包换。
+          boot.workspaces = r.workspaces || boot.workspaces;
           // 正在编辑的就是这一条 —— 表单不能再留在一个已经不存在的条目上
           if (form.open && form.mode === 'edit' && form.id === c.id) closeForm();
           renderConnections(boot.connections);
@@ -3111,27 +3116,26 @@ function renderJobs() {
 /**
  * 三个动作按钮的可用性与提示。
  *
- * 「接管」只在【另一台电脑正在看着它】时可用。另外两种"不需要接管"要各自说出来，
- *   而不是留一颗按下去什么都不做的按钮：
- *   · 本机已经在看它 —— 那是一次空动作，而它成功之后会回一句"已接管"，
- *     用户会以为刚才发生了什么。
- *   · 没人在看它 —— 心跳会自己把它认领过来（服务端的 `op_heartbeat` 对
- *     `keeper IS NULL` 就是认领）。接管在这里同样是一次空动作。
- *   用户 2026-10-18：接管是两个客户端互相争抢时才有的动作，不是"没人看"的出路。
+ * 「接管」的判据是「看护者不是本机」，不再要求本机已经接着它 —— 2026-10-20 起
+ *   连上站点不会再把别人在看的、或者没人看的会话接回来（只保活），于是
+ *   「接管」正是把它们接回来的唯一入口。本机已经在看它时禁用：那一次空动作
+ *   成功之后会回一句"已接管"，用户会以为刚才发生了什么。
+ *
+ * 「结束」与「重新加载」仍要求本机接着它：它们要的是这条会话的完整视图
+ *   与本地记录，没接回来就没有可停的东西。没接着的那些，出路是接管。
  */
 function renderJobsSelection() {
   const j = selectedJob();
-  const canAct = Boolean(j && j.live && j.attached);
-  const elsewhere = Boolean(j && j.keeper) && !j.keeper_is_me;
-  $('btn-jobs-end').disabled = !canAct;
-  $('btn-jobs-takeover').disabled = !canAct || !elsewhere;
-  $('btn-jobs-reload').disabled = !canAct;
+  const attached = Boolean(j && j.live && j.attached);
+  const canTakeover = Boolean(j && j.live) && !j.keeper_is_me;
+  $('btn-jobs-end').disabled = !attached;
+  $('btn-jobs-takeover').disabled = !canTakeover;
+  $('btn-jobs-reload').disabled = !attached;
   $('btn-jobs-takeover').title = !j ? '先在上面点一条作业'
     : (!j.live ? '这一条已经结束了'
-    : (!j.attached ? '本机还没接着它：重新连一次这个站点会把它接上'
     : (j.keeper_is_me ? '这台电脑已经在看它了'
-    : (!j.keeper ? '没人在看它：接上之后心跳会自己把它认领过来，不需要接管'
-    : '把这条会话的看护者换成这台电脑（作业一个字都不动）'))));
+    : (!j.attached ? '把看护者换成这台电脑，并把它接回来（作业一个字都不动）'
+    : '把这条会话的看护者换成这台电脑（作业一个字都不动）')));
   // 状态条上那一颗不跟着选中的这一条走：它只在会话页面盖着时露，停的是前台
   //   那一条（见 renderStatusEnd）。这一屏停选中的那一条，用的是它自己那颗
   //   `btn-jobs-end`。
@@ -4097,6 +4101,10 @@ function bindEvents() {
 
     const saved = await window.slurmate.saveConnection(input);
     if (!saved.ok) return notice('error', saved.error);
+    // 工作区那张引用表跟着回包一起换。只换 `connections` 的话，映射图与表单
+    //   下拉读的仍是启动时那一份，而新连接其实已经落进一个工作区了 ——
+    //   用户看到的是一张缺了中间一列的图（用户 2026-10-20 报的那一条）。
+    boot.workspaces = saved.workspaces || boot.workspaces;
     boot.connections = saved.connections;
 
     // `wasLive` 必须在动 `boot.activeConnectionId` 之前问：在赋值之后
@@ -4348,6 +4356,13 @@ function bindEvents() {
   });
 
   window.slurmate.onStates(renderSessions);
+  // 主进程主动断开了这个站点（空手超时）：界面必须跟着回到第一屏。
+  //   不跟的话，第二屏上的按钮会继续打在一个已经关掉的通道上。
+  window.slurmate.onSiteClosed((p) => {
+    setConnected(false);
+    showScreen('conns');
+    if (p && p.reason) notice('info', p.reason);
+  });
   window.slurmate.onNotice((n) => {
     if (n.kind === 'key-blocked') {
       // 快捷键诊断：我们吞掉了一个键，而用户正想问"按了为什么没反应" ——
