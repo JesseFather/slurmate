@@ -623,6 +623,9 @@ p.alarm {
   font-size: 12px; margin-bottom: 10px;
 }
 .plug-meta .k { color: var(--fg-dim); }
+/* 到上限那一行。它说的是"现在开不了"，与旁边只读的上限不同档 —— 用与
+   `.plug .why` 同一种颜色，因为它同样是"这一块现在按不动"的原因。 */
+.plug-meta .warn { color: var(--warn); }
 /* 行内的那几个 label（这一颗与 `.plug-data-lbl`）要把 `label` 那条
    `margin-bottom: 5px` 去掉：那是给"标签在上、控件在下"的格子留的间距，
    而它们与框并排在同一行、由 `align-items: center` 居中 —— 多出来的 5px 会让

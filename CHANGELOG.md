@@ -132,6 +132,32 @@ suspended.test.mjs`（推送里 keeper 变了立刻补打一拍）；`cluster/te
 之后页面与提示页一起收）；`client/test/renderer.test.mjs` 一条静态判据 —— 三份
 渲染页面都不许出现内联样式。
 
+### Changed — 插件块把名额说到前面（账本 S42）
+
+站点给每个插件设的 `max_sessions` 从前只读地摆在插件块上：到上限时「开始会话」
+照旧亮着，点下去才拿到 `4 quota_active`。现在那一行换成
+「这台电脑上已经有 N 个（上限 M）」并加琥珀色，按钮一起灰掉、title 说出为什么。
+
+数由渲染层从会话表算，按插件 id 归并（服务端也按 id 数，站点升级之后旧版本那条
+会话仍占着名额）；`renderSessions` 一变就就地改那两格，不重画整块 —— 重画会清掉
+用户填了一半的高级选项。
+
+两种不预告：全站上限 `max_sessions_per_user` 在协议里没有这一格，客户端推不出来；
+同一个工作区被占由主进程的 `claimSpace()` 加槽闸判。这两种仍然由服务端那句点名的
+话负责。
+
+**判据**：`client/test/renderer-dom.test.mjs` 一条 —— 满员时按钮灰着、另一个插件
+不跟着灰、结束一条之后按钮回来。
+
+### Fixed — 0.32 删掉 `leave` 之后，四份文档还在说"临时离开清空看护者"
+
+`docs/ARCHITECTURE.md` §3.1.1、`cluster/docs/TROUBLESHOOTING.md`
+〈我点了【临时离开】…〉那一节、`client/README.md` 的动作表与 `docs/KNOWN-ISSUES.md`
+的 U1 按新语义改写：临时离开只在本机发生，看护者一个字节都不动，倒计时看的是心跳，
+回来重连直接接回。
+
+**判据**：`grep` 不到 `〈leave〉` 那类指路；文档检查器（链接与措辞）照旧过。
+
 ## [0.31] — 未发布
 
 > 协议版本是 **0.31**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

@@ -429,6 +429,11 @@ function renderSessions(payload) {
   if (SCREEN === 'jobs' && liveIds !== lastLiveIds) refreshJobs();
   lastLiveIds = liveIds;
 
+  // 插件块上「还能不能再开一个」跟着会话表走。就地改那两格，不重画整块 ——
+  //   重画会把用户填了一半的高级选项清掉（见 `renderPlugins` 的指纹与
+  //   `syncPluginQuota`）。
+  syncPluginQuota();
+
   renderSnapshot(frontSnap());
 }
 
@@ -1761,6 +1766,7 @@ function renderPlugins(pv, force) {
   // 走到这里就是"内容真的变了"（上面那道指纹已经把没变的挡回去了），所以丢掉
   //   旧的格子是对的 —— 留在表里的是已经不在文档里的元素。
   advCells = [];
+  quotaCells.clear();
   // 空池是正常状态，不是故障。基座本来就不带插件 —— 所以这一段的任务不是
   //   道歉，是给出路：池在哪、怎么装、装完怎么让它出现。
   if (!list.length) box.append(emptyPool(pv));
@@ -2654,6 +2660,67 @@ function askFork(wsName, others) {
   });
 }
 
+/**
+ * 每个插件此刻在这台电脑上占着几个名额。
+ *
+ * 判据只有一条：会话视图里还活着的那几条，按插件 id 归并。id 取服务端给的
+ *   解析键（`snap.servicePlugin`，形如 `<id>@<版本>`）的前缀 —— 服务端的配额
+ *   也按 id 数（站点升级之后，旧版本那条会话仍然占着这个名额），而本机认不出
+ *   的插件同样数得进去。取不出 id 的会话不数：少报的方向是安全的。
+ *
+ * 它只数这台电脑手上的记录。别的电脑上的会话不在这一份视图里，于是这里会少报
+ *   —— 那种情况下按钮仍然亮着、点下去由服务端拒（服务端那句话带着当下的个数），
+ *   与本轮之前的行为相同。多报才会把能提交的时刻说成不能，而那一种在这里不会发生。
+ */
+function pluginActiveCount() {
+  const out = new Map();
+  for (const s of SESS.sessions) {
+    if (!s || !s.live) continue;
+    const ref = s.snap && typeof s.snap.servicePlugin === 'string'
+      ? s.snap.servicePlugin : null;
+    const at = ref ? ref.lastIndexOf('@') : -1;
+    if (at <= 0) continue;
+    const id = ref.slice(0, at);
+    out.set(id, (out.get(id) || 0) + 1);
+  }
+  return out;
+}
+
+/**
+ * 把某一块的「名额」那一行与「开始会话」改成"现在还能不能开"的样子。
+ *
+ * 到上限时那句话换成「这台电脑上已经有 N 个（上限 M）」并加 `.warn`，按钮一起
+ *   灰掉 —— 这是把服务端要说的话说到前面（它回的是 `4 quota_active` 加当下的
+ *   个数）。不到上限就回到只读的上限那一句。
+ *
+ * `counts` 由 `syncPluginQuota` 一次算好传进来：逐块各算一遍的话，同一个问题
+ *   在这几块之间会有 N 份答案，而它们迟早不同步。
+ */
+function applyPluginQuota(id, counts) {
+  const cell = quotaCells.get(id);
+  if (!cell) return;
+  const n = (counts || pluginActiveCount()).get(id) || 0;
+  const full = n >= cell.max;
+  cell.line.textContent = full
+    ? `这台电脑上已经有 ${n} 个（上限 ${cell.max}）`
+    : `最多同时 ${cell.max} 个会话`;
+  cell.line.classList.toggle('warn', full);
+  // 本来就不能起的那颗按钮（`runnable` 为假）不在这里动：它灰着的理由与名额
+  //   无关，而 title 上那句才是用户该看的。
+  if (!cell.runnable) return;
+  cell.btn.disabled = full;
+  cell.btn.title = full
+    ? `这个插件上已经到本站上限（${cell.max} 个）：结束一个再开下一个。`
+    : '';
+}
+
+/** 会话表一变就重算一遍名额（就地改两格，不重画整块）。 */
+function syncPluginQuota() {
+  if (!quotaCells.size) return;
+  const counts = pluginActiveCount();
+  for (const id of quotaCells.keys()) applyPluginQuota(id, counts);
+}
+
 function pluginBlock(p) {
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
@@ -2706,15 +2773,17 @@ function pluginBlock(p) {
     : '默认资源由服务端定'));
 
   // 站点给这个插件设的并发上限。与上面那句同一类事实（管理员设的政策，
-  //   用户改不了），所以并排只读地摆着，不进按钮的文案。
+  //   用户改不了），所以并排只读地摆着。
   //
-  // 它不预告"你还能不能再开一个"：那要看用户此刻有几个会话，而那个数会变
-  //   （这一块只在站点对账、提交、连接那些时候重画）。报一个会过期的数比只说
-  //   上限更坏 —— 用户会照着它决定按不按。真按下去被拒时，服务端那句话里带着
-  //   当下的个数，那才是准的。
+  // 到上限时这一行换成「这台电脑上已经有 N 个（上限 M）」、按钮一起灰掉 ——
+  //   那句话是把服务端要说的话说到前面（它回 `4 quota_active` 加当下的个数）。
+  //   数只数这台电脑手里的会话，见 `pluginActiveCount`：少报不会把能提交的时刻
+  //   说成不能，多报才会。
   // 缺席（老守护进程报不出这一格）就不说：`null` 与"上限是 1"必须分得开。
+  let quotaLine = null;
   if (typeof p.maxSessions === 'number') {
-    meta.append(el('span', null, `最多同时 ${p.maxSessions} 个会话`));
+    quotaLine = el('span', null, `最多同时 ${p.maxSessions} 个会话`);
+    meta.append(quotaLine);
   }
 
   // 本机开关。它能点，是因为"本机要不要"是用户自己的决定，与站点无关。
@@ -2793,6 +2862,14 @@ function pluginBlock(p) {
   // 交出去的是这一块那一份（`adv`），不是"界面上当前那份" —— 见 pluginAdv。
   btn.onclick = () => startWith(p.name, adv, btn);
   actions.append(btn);
+
+  // 名额那一行与这颗按钮一起登记：会话表一变，`syncPluginQuota` 就地改这两格。
+  if (quotaLine) {
+    quotaCells.set(p.id, {
+      line: quotaLine, btn, max: p.maxSessions, runnable: Boolean(p.runnable),
+    });
+    applyPluginQuota(p.id);
+  }
 
   // ── 两颗删除：本机那一份，以及站点上那一棵 ──
   //
@@ -3229,6 +3306,15 @@ let partList = [];
  *   第 2 块往后那几格从此再也读不到、也改不动，而它们看起来完全正常。
  */
 let advCells = [];
+
+/**
+ * 每一块里「名额」那一行与那颗「开始会话」的引用（id → 两格）。
+ *
+ * 它与 `advCells` 一起在 `renderPlugins` 里换一批：会话表一变，`syncPluginQuota`
+ *   就地改这两格，而不是把整块列表重画一遍 —— 重画会把用户填了一半的高级选项
+ *   清掉（`renderPlugins` 那道指纹防的正是这件事）。
+ */
+const quotaCells = new Map();
 
 /**
  * 「CPU 核数」那一格在站点没报 `cpus_per_node` 时的退路。

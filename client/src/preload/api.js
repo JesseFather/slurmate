@@ -37,8 +37,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   connect: (payload) => ipcRenderer.invoke('app:connect', payload),
   // 【断开】与【临时离开】是两个方向相反的动作，名字挨着，别弄混：
   //    · 断开：每一条会话都发 `goodbye` 作业被 `scancel`。彻底终止。
-  //    · 临时离开：发一条 `leave` 看护者置空，作业继续在集群上跑，
-  //      但倒计时从那一刻起算（300 秒 suspect → 1800 秒 orphaned → scancel）。
+  //    · 临时离开：本机收尾（停心跳、拆连接、收掉页面与记录），一个请求都不发；
+  //      作业继续在集群上跑，看护者仍是本机。倒计时看的是心跳，从那一刻起算
+  //      （300 秒 suspect → 1800 秒 orphaned → scancel）。
   //    别把【断开】读成"作业继续在集群上跑，可以再连回来"—— 那是错的，
   //      而错的方向恰好是最贵的那个：用户点了它，以为作业会留着。
   disconnect: () => ipcRenderer.invoke('app:disconnect'),

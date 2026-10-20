@@ -741,6 +741,61 @@ test('「重新同步」在整屏底部挨着「检查集群」：点它走那�
     assert.match(said, /还没连上站点/, '失败要说清为什么');
   });
 
+test('插件块把名额说到前面：满员时按钮灰着，结束一条就回来', () => {
+  // 账本 S42：上限从前只在点下去之后由服务端拦（`4 quota_active`）。现在那一行
+  //   说得出"这台电脑上已经有几个"，按钮一起灰掉。
+  //   数只来自本机手里的会话（`pluginActiveCount`）—— 所以它只说「这台电脑上」，
+  //   别的电脑上的会话它数不到，那种情况下按钮仍然亮着、由服务端拒。
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  const PVQ = {
+    ...PV,
+    plugins: [{ ...PV.plugins[0], maxSessions: 2 }, { ...PV.plugins[1], maxSessions: 2 }],
+  };
+  h.run(`SESS = ${JSON.stringify({
+    sessions: [
+      { slot: 'a', live: true, snap: { servicePlugin: 'p1@1.0.0' } },
+      { slot: 'b', live: true, snap: { servicePlugin: 'p1@1.0.0' } },
+    ],
+    front: 'a',
+    panelFront: false,
+  })};`);
+  h.run(`renderPlugins(${JSON.stringify(PVQ)});`);
+
+  const blocks = () => childrenOf(h.byId.get('plugin-blocks'))
+    .filter((x) => x.className === 'plug' || x.className === 'plug plug-off');
+  const blockOf = (title) => blocks().find((b) => childrenOf(b)
+    .some((x) => x.tagName === 'H3' && x._text === title));
+  const startBtn = (b) => childrenOf(b)
+    .find((x) => x.tagName === 'BUTTON' && x._text === '开始会话');
+  const metaText = (b) => childrenOf(b)
+    .filter((x) => (x.className || '').startsWith('plug-meta'))
+    .map((x) => childrenOf(x).map((y) => y._text).join('|'))
+    .join('|');
+
+  const p1 = blockOf('编辑器');
+  assert.ok(p1, '前置：编辑器那一块画出来了');
+  assert.equal(startBtn(p1).disabled, true,
+    '这个插件上已经两个（上限 2）：按钮必须灰着，不能等点下去才被拒');
+  assert.match(metaText(p1), /这台电脑上已经有 2 个（上限 2）/,
+    `满员那一行要说出现在有几个：${metaText(p1)}`);
+  assert.match(startBtn(p1).title || '', /到本站上限/,
+    '灰着的时候要说出为什么');
+
+  // 数按插件 id 归并：另一个插件上有会话不该把这一块也灰掉。
+  const p2 = blockOf('中转站');
+  assert.equal(startBtn(p2).disabled, false, '其他插件不跟着灰');
+  assert.match(metaText(p2), /最多同时 2 个会话/,
+    '没到上限的那一块只说上限，不报一个会过期的数');
+  assert.equal(/这台电脑上已经有/.test(metaText(p2)), false);
+
+  // 结束一条：`renderSessions` 会调 `syncPluginQuota`，就地改回来。
+  h.run(`renderSessions({ sessions: [
+    { slot: 'a', live: true, snap: { servicePlugin: 'p1@1.0.0' } }], front: 'a' });`);
+  assert.equal(startBtn(blockOf('编辑器')).disabled, false,
+    '结束一条之后按钮要回来 —— 那个数跟着会话表走');
+  assert.match(metaText(blockOf('编辑器')), /最多同时 2 个会话/);
+});
+
 test('「检查集群」把守护进程的版本、对账时间与"还没有登记上"一起说出来', async () => {
   // 用户 2026-10-19 第二次真机：「检查通过：0 条 ACL 规则，0 个活跃会话」，
   //   而眼前正卡着一条作业在跑的会话。体检要说得出这两件事：站点上是哪一版、
