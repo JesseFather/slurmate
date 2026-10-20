@@ -14,19 +14,22 @@
 
 'use strict';
 /**
- * preload/overlay.js —— 断线遮罩的桥。
+ * preload/overlay.js —— 提示页的桥。
  *
- * 遮罩是一个独立的 webContents，物理上盖在 web-demo 视图之上。
- * 之所以不往 web-demo 页面里注入 DOM：那会在下一次 web-demo 升级后碎掉，
- * 还会污染 VS Code 自己的 webview 状态。
+ * 提示页是一个独立的 webContents，物理上盖在插件那块页面之上。
+ * 之所以不往那块页面里注入 DOM：那会在下一次插件升级后碎掉，还会污染它自己的
+ * webview 状态。
+ *
+ * 推过去的是一条 `{ title, text }`：标题与正文一起给，页面不用自己猜上面那行
+ * 大字该写什么（猜的结果会在下一次文案改动时漂开）。
  */
 
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('overlay', {
-  onText: (fn) => {
-    const h = (_e, text) => fn(text);
-    ipcRenderer.on('overlay:text', h);
-    return () => ipcRenderer.removeListener('overlay:text', h);
+  onShow: (fn) => {
+    const h = (_e, msg) => fn(msg);
+    ipcRenderer.on('overlay:show', h);
+    return () => ipcRenderer.removeListener('overlay:show', h);
   },
 });

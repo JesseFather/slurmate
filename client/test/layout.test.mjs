@@ -53,15 +53,26 @@ test('主体那块：上面让开状态条，左右各让开一条边栏', () =>
   assert.equal(r.x + r.width, W - RAIL_W);
 });
 
-test('遮罩的显隐：有话要说，而且屏幕主体不是面板', () => {
-  assert.equal(overlayVisible({ text: '', panelFront: false }), false,
-    '没有话要说就不该挂一块黑幕');
-  assert.equal(overlayVisible({ text: null, panelFront: false }), false);
-  assert.equal(overlayVisible({ text: '隧道断开，正在重试。', panelFront: false }), true);
+test('提示页的显隐：有字、面板没抬上来、前台正是那一槽、那一槽有页面', () => {
+  const base = {
+    text: '隧道断开，正在重试。', panelFront: false,
+    front: 'a', slot: 'a', hasSurface: true,
+  };
+  assert.equal(overlayVisible(base), true);
+  assert.equal(overlayVisible({ ...base, text: '' }), false,
+    '没有话要说就不该挂一页');
+  assert.equal(overlayVisible({ ...base, text: null }), false);
   // 用户 2026-10-18 报的那一条：断网时点「面板」回不到别的页面 ——
-  //   会话页让开了，遮罩没让开。
-  assert.equal(overlayVisible({ text: '隧道断开，正在重试。', panelFront: true }), false,
-    '面板抬上来时遮罩必须让开，否则点「面板」看起来像没反应');
+  //   会话页让开了，提示页没让开。
+  assert.equal(overlayVisible({ ...base, panelFront: true }), false,
+    '面板抬上来时提示页必须让开，否则点「面板」看起来像没反应');
+  // 用户 2026-10-21 报的那一条：提示页活得比它那块页面更久，盖住第一屏。
+  assert.equal(overlayVisible({ ...base, front: 'b' }), false,
+    '前台是另一条会话时，这一页不属于它');
+  assert.equal(overlayVisible({ ...base, hasSurface: false }), false,
+    '那一槽已经没有页面了，这一页没有可盖的内容');
+  assert.equal(overlayVisible({ ...base, slot: null }), false,
+    '一句话没有归属就不许露');
 });
 
 test('过小的窗口不产生负宽度（缩到极小也不许抛）', () => {

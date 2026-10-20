@@ -618,6 +618,12 @@ function renderSnapshot(s) {
       if (s.expiresAt !== undefined) bits.push('剩余 ' + fmtLeft(s.expiresAt));
       if (s.renewCount) bits.push('已续期 ' + s.renewCount + ' 次');
       if (s.tunnelState === 'down') bits.push('隧道断开，正在重试');
+      // 隧道好好的时候，那些警告（心跳被限流、状态问不到）不挂提示页 ——
+      //   页面照常能用，整块盖住它等于替用户把编辑器关了一次（2026-10-21 用户
+      //   报的"什么也点不了"）。那句话的唯一落点就是这一行。
+      //   判据与主进程那一半同源：那边只在 `tunnelState !== 'listening'` 或者
+      //   页面加载失败时挂提示页（见 index.js 的 `_renderSession`）。
+      if (s.warning && s.tunnelState === 'listening') bits.unshift(s.warning);
       detail = bits.join(' · ');
     } else if (st === 'queued') {
       // 作业那一侧的状态与原因（`jobText`）也要露出来：光说「等待调度与登记」，

@@ -14,18 +14,21 @@
 
 'use strict';
 /**
- * overlay.js —— 断线遮罩。
+ * overlay.js —— 提示页（断线、页面打不开）。
  *
- * 遮罩是一个独立的 webContents，物理盖在 web-demo 视图之上。这样做而不是往
- * web-demo 页面里注入 DOM，是因为注入会在下一次 web-demo 升级后碎掉，
- * 还会污染 VS Code 自己的 webview 状态。
+ * 它是一个独立的 webContents，物理盖在插件那块页面之上。这样做而不是往那块
+ * 页面里注入 DOM，是因为注入会在那款软件下一次升级后碎掉，还会污染它自己的
+ * webview 状态。
  *
- * 这个页面刻意做得很薄：只显示一行外壳推过来的文字。任何逻辑都不放在这里，
- * 因为它盖着的那个页面才是用户真正在用的东西。
+ * 这一页刻意做得很薄：外壳推来两行字，它照着印。任何逻辑都不放在这里 ——
+ * 它盖着的那块页面才是用户真正在用的那一个，而"什么时候该露这一页"是窗口
+ * 那一层的事（见 layout.js 的 `overlayVisible`）。
  */
 
-const el = document.getElementById('text');
+const titleEl = document.getElementById('title');
+const textEl = document.getElementById('text');
 
-window.overlay.onText((text) => {
-  el.textContent = text || '正在重新连接…';
+window.overlay.onShow((msg) => {
+  titleEl.textContent = (msg && msg.title) || '连接暂时中断';
+  textEl.textContent = (msg && msg.text) || '正在重新连接…';
 });

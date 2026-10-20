@@ -4595,7 +4595,7 @@ test('会话一结束就要收起 web-demo 视图，把面板还给用户', asyn
     + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
 });
 
-/** 遮罩那一块视图（`calls.views` 里加载 overlay.html 的那个）。 */
+/** 提示页那一块视图（`calls.views` 里加载 overlay.html 的那个）。 */
 const overlayViewOf = () =>
   calls.views.find((v) => /overlay\.html$/.test(v.webContents._url));
 
@@ -4604,30 +4604,48 @@ function fire(wc, ev, ...args) {
   for (const fn of (wc.handlers[ev] || [])) fn({}, ...args);
 }
 
-test('断网遮罩在面板抬上来时让开 —— 点「面板」要看得见面板', async () => {
+test('提示页跟着它那一槽走：面板、标签、页面销毁三处都让开', async () => {
   const idx = require('../src/main/index.js');
   const w = idx._test.getWindow();
-  await w.showOverlay('隧道断开，正在重试。作业未受影响，仍在计算节点上运行。');
+  // 手工造两块页面：这一组判据只关心窗口那几层谁在上面，不关心会话怎么起来。
+  for (const slot of ['probe-a', 'probe-b']) {
+    await w.showSurface({ slot, url: 'http://127.0.0.1:9/',
+      partition: `persist:${slot}`, reveal: false });
+  }
+  w.setFront('probe-a');
+  await w.showOverlay('probe-a', {
+    title: '连接暂时中断', text: '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。',
+  });
   const ov = overlayViewOf();
-  assert.ok(ov, '前置：遮罩那块视图建出来了');
-  assert.equal(ov._visible, true, '前置：有话要说时遮罩是露着的');
+  assert.ok(ov, '前置：提示页那块视图建出来了');
+  assert.equal(ov._visible, true, '前置：有话要说时提示页是露着的');
 
-  // 用户 2026-10-18 报的那一条：断网时回不到别的页面。遮罩与会话页是同一块
+  // 用户 2026-10-18 报的那一条：断网时回不到别的页面。提示页与会话页是同一块
   //   矩形上的两层，抬面板只藏了会话页 —— 一整块"连接暂时中断"留在原处，
   //   看起来像状态条上那颗「面板」点了没反应。
-  await invoke('app:showPanel');
+  // 直接调窗口那一层：这一条判的是"谁在上面"，不是 `app:showPanel` 那条通道。
+  //   走通道的话，它会顺手推一份会话状态，而前台由那一份表决定 —— 表里还有
+  //   前面用例留下的会话时，前台会被换成别人的槽。
+  w.showPanel();
   assert.equal(w.panelFront, true, '前置：面板抬上来了');
   assert.equal(ov._visible, false,
-    '面板抬上来时遮罩必须让开，否则用户看见的还是同一句「连接暂时中断」');
+    '面板抬上来时提示页必须让开，否则用户看见的还是同一句「连接暂时中断」');
+  w.setFront('probe-a');
+  assert.equal(ov._visible, true, '切回那一块页面，那句话还要在 —— 连接确实没回来');
 
-  // 切回会话页：那句话还要在 —— 连接确实还没回来。
-  w.setFront(null);
-  assert.equal(ov._visible, true, '会话页回来了，遮罩也回来');
-  w.hideOverlay();
-  assert.equal(ov._visible, false, '没有话要说时遮罩收着');
+  // 用户 2026-10-21 报的那一条：提示页从前会跟着前台跑，而它说的只是某一条
+  //   会话的那块页面。前台换成另一条时，它必须让开。
+  w.setFront('probe-b');
+  assert.equal(ov._visible, false, '前台换了，这句话不属于这一块页面');
+
+  w.setFront('probe-a');
+  assert.equal(ov._visible, true);
+  w.destroySurface('probe-a');
+  assert.equal(ov._visible, false, '那一块页面没了，提示页没有可盖的内容');
+  w.closeAllSurfaces();
 });
 
-test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的回来', async (t) => {
+test('网络回来时，坏掉的页面重载一次；提示页留到画面真的回来', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const w = idx._test.getWindow();
@@ -4649,15 +4667,16 @@ test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的�
   await invoke('app:setFront', { slot });
   assert.equal(wc.reloads, before + 1, '坏掉的页面要在这一刻重载一次');
   const ov = overlayViewOf();
-  assert.ok(ov, '重载期间要有遮罩解释那一段白屏');
+  assert.ok(ov, '重载期间要有提示页解释那一段空白');
   assert.equal(ov._visible, true);
-  assert.match(ov.webContents.handlers['send:overlay:text'].slice(-1)[0] || '',
-    /正在重新打开页面/);
+  const shown = ov.webContents.handlers['send:overlay:show'].slice(-1)[0] || {};
+  assert.match(shown.title || '', /正在重新打开页面/,
+    '这一轮说的是"在重开"，不是"断线了" —— 两件事的出路不同');
 
-  // 画面真的回来了：遮罩在同一下收掉，而不是隧道一说通就收。
+  // 画面真的回来了：提示页在同一下收掉，而不是隧道一说通就收。
   fire(wc, 'did-start-loading');
   fire(wc, 'did-stop-loading');
-  assert.equal(ov._visible, false, '页面加载完，遮罩收起来');
+  assert.equal(ov._visible, false, '页面加载完，提示页收起来');
   // 网络波动不换屏：断之前在看页面，恢复之后还在看页面（用户 2026-10-18
   //   的第二种重登录要的正是"恢复上次的页面状态"）。
   assert.equal(w.panelFront, false, '自动重连不把人从页面里拽回面板');
@@ -4670,29 +4689,41 @@ test('网络回来时，坏掉的页面重载一次；遮罩留到画面真的�
   await invoke('app:stop', { slot });
 });
 
-test('没有页面可盖的会话：断线那句话由状态条说，不挂整屏遮罩', async (t) => {
-  // 用户 2026-10-18 真机：一条「未知服务」的会话被另一台电脑接管之后，整块
-  //   窗口主体被「连接暂时中断」盖住 —— 而那条会话根本没有页面，面板就在
-  //   底下。遮罩把唯一能操作的东西涂掉了，上栏也没有「面板」那一颗
-  //   （它只在有页面盖着时才画）。
+test('提示页只在页面用不了时挂：页面还能用、没有页面，都不挂', async (t) => {
+  // 两条用户报过的：
+  //   · 2026-10-18：「未知服务」的会话被另一台电脑接管之后，整块窗口主体被
+  //     「连接暂时中断」盖住 —— 而那条会话根本没有页面，面板就在底下。提示页
+  //     把唯一能操作的面板涂掉了，上栏也没有「面板」那一颗（它只在有页面盖着
+  //     时才画）。
+  //   · 2026-10-21：心跳限流这类警告时页面照常能用，提示页却整块盖住它 ——
+  //     "什么也点不了"。
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const w = idx._test.getWindow();
   await ensureConnected(idx);
   await openUpTo(idx, 2);
 
-  // 有页面的那一条：警告照旧挂遮罩（正对照，否则"永远不挂"也能让下面绿）。
   const cs = await appStart(null, 'web-demo');
   assert.equal(cs.ok, true, `开会话失败：${JSON.stringify(cs)}`);
   await waitUntil(() => (w.hasSurface(cs.slot) ? viewFor(w, cs.slot) : null),
     '那一块页面建出来');
+  const csView = viewFor(w, cs.slot);
   const csCtl = idx._test.sessionAt(cs.slot).controller;
+
+  // 页面照常能用时的那一类警告：不挂。
+  csCtl.warning = '心跳被站点限流（这一秒的请求过多），仍在重试。';
+  await invoke('app:setFront', { slot: cs.slot });
+  assert.equal(overlayViewOf()._visible, false,
+    '页面还能用时不挂提示页 —— 那几句话由状态条那一行说');
+
+  // 页面真的打不开了：挂（正对照，否则"永远不挂"也能让上面绿）。
+  fire(csView.webContents, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
   csCtl.warning = '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。';
   await invoke('app:setFront', { slot: cs.slot });
-  const ov = overlayViewOf();
-  assert.ok(ov && ov._visible === true, '前置：有页面盖着时，警告照旧挂遮罩');
+  assert.equal(overlayViewOf()._visible, true, '前置：页面用不了时要有一页解释');
 
-  // 没有页面的那一条（中转站那一类）：同一句话，不挂遮罩。
+  // 没有页面的那一条（中转站那一类）：同一句话，不挂。
   const relay = await appStart(null, 'sshd');
   assert.equal(relay.ok, true, `开会话失败：${JSON.stringify(relay)}`);
   const relayCtl = idx._test.sessionAt(relay.slot).controller;
@@ -4701,11 +4732,45 @@ test('没有页面可盖的会话：断线那句话由状态条说，不挂整�
   relayCtl.warning = '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。';
   await invoke('app:setFront', { slot: relay.slot });
   assert.equal(overlayViewOf()._visible, false,
-    '没有页面可盖时不该整屏遮罩 —— 那会把唯一能操作的面板涂掉');
+    '没有页面可盖时不该挂提示页 —— 那会把唯一能操作的面板涂掉');
 
   await invoke('app:stop', { slot: cs.slot });
   await invoke('app:stop', { slot: relay.slot });
   await openUpTo(idx, 1);
+});
+
+test('带着提示页点【临时离开】：提示页与页面一起收，不盖住回来的第一屏', async (t) => {
+  // 用户 2026-10-21 实测到的那一格：断开之后第一屏在，而那句提示留在原处，
+  //   从 y=30 往下铺满窗口主体 —— 连接列表在它底下，什么也点不了。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 1);
+
+  const started = await appStart(null, 'web-demo');
+  assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
+  const slot = started.slot;
+  await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那一块页面建出来');
+  const ctl = idx._test.sessionAt(slot).controller;
+  // 让提示页真的露出来：一块加载失败的页面。
+  fire(viewFor(w, slot).webContents, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+  ctl.warning = '隧道断开，正在重试。作业未受影响，仍在计算节点上运行。';
+  await invoke('app:setFront', { slot });
+  assert.equal(overlayViewOf()._visible, true, '前置：离开之前提示页是露着的');
+
+  const r = await invoke('app:leave');
+  assert.equal(r.ok, true, `临时离开失败：${JSON.stringify(r)}`);
+
+  assert.equal(w.hasSurface(slot), false,
+    '离开之后那一块页面必须销毁 —— 它的隧道已经拆了，留着只是白养一个 renderer');
+  assert.equal(w.front, null, '没有页面可看，前台是空的');
+  assert.equal(overlayViewOf()._visible, false,
+    '提示页必须跟着一起收，否则它盖住的就是用户要点的连接列表');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
 });
 
 /** 轮询等一个条件成立。失败时把最后看到的东西说出来，而不是干等超时。 */

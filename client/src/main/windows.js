@@ -54,7 +54,7 @@
  *
  * ── 绝不往视图里注入 DOM ───────────────────────────────────────────────────
  * `executeJavaScript` 塞 DOM 会在那款软件下一次升级后碎掉，还会污染它自己的
- * webview 状态。遮罩是独立的 webContents，物理隔离 —— 这是唯一正确的做法。
+ * webview 状态。提示页是独立的 webContents，物理隔离 —— 这是唯一正确的做法。
  */
 
 const path = require('path');
@@ -208,7 +208,7 @@ class ShellWindow {
     this.overlayView = null;
     /**
      * 浮窗那一层。懒建（头一次停靠时才建），建成之后跨次复用 ——
-     * 与遮罩同一条理由：每次停靠都新建的话，鼠标来回扫几下就堆出几十个进程。
+     * 与提示页同一条理由：每次停靠都新建的话，鼠标来回扫几下就堆出几十个进程。
      */
     this.hoverView = null;
     /**
@@ -229,10 +229,21 @@ class ShellWindow {
     // 由 setSessions 设。窗口不认识任何插件（见 _confirmClose）。
     this._sessions = [];
     this._overlayText = null;
+    /** 提示页上那行大字（与 `_overlayText` 一起由 `_overlayShow` 写）。 */
+    this._overlayTitle = null;
     /**
-     * 遮罩正在等哪一块页面重新加载完（`recoverSurface` 设，加载完清）。
+     * 这一句提示说的是哪一槽的页面。
      *
-     * 网络回来的那一刻，断网期间坏掉的页面由我们重载，而遮罩要留到它真的回来
+     * 它是提示页的寿命：前台不是那一槽、或者那一槽已经没有页面时，这一页就不露
+     *   （判据在 layout.js 的 `overlayVisible`）。从前没有这一格，一句话只认
+     *   "有字"，于是一块提示页可以活到连接都拆了之后（用户 2026-10-21 报的
+     *   "什么也点不了"）。
+     */
+    this._overlaySlot = null;
+    /**
+     * 提示页正在等哪一块页面重新加载完（`recoverSurface` 设，加载完清）。
+     *
+     * 网络回来的那一刻，断网期间坏掉的页面由我们重载，而提示页要留到它真的回来
      *   —— 否则中间那一段是一块白屏，左侧状态条却已经显示正常（用户 2026-10-18
      *   报的"左侧条恢复了、画面还没回来"）。
      */
@@ -297,7 +308,7 @@ class ShellWindow {
       //   而失败之后它不会自己再试，隧道恢复它也是白的。只有这种页面才值得
       //   在恢复那一刻重载；活着的页面一次都不碰（没保存的改动还在里面）。
       // `reloadTries`：自动重载的次数。重载本身也可能失败，无上限就是一个
-      //   以状态轮询为节拍的循环。每次有新的一句遮罩时归零（新的一轮断线）。
+      //   以状态轮询为节拍的循环。每次有新的一句提示页时归零（新的一轮断线）。
       s = { view, origin: originOf(url), partition,
             broken: false, reloadTries: 0, recovering: false };
       this.surfaces.set(slot, s);
@@ -387,7 +398,7 @@ class ShellWindow {
       if (!s || s.broken) return;     // 失败的那些导航也会走到这里（错误页）
       s.reloadTries = 0;
       s.recovering = false;
-      // 这是"画面回来了"的那一下。等着它的遮罩在这里收（焦点也一并还给
+      // 这是"画面回来了"的那一下。等着它的提示页在这里收（焦点也一并还给
       //   页面）—— 与画面同一下，而不是隧道一说通就收（见 `recoverSurface`）。
       if (this._overlayHold === slot) this.hideOverlay();
     });
@@ -427,13 +438,41 @@ class ShellWindow {
     this.surfaces.delete(slot);
     this._destroying.delete(slot);
     if (this._front === slot) this._front = null;
+    // 那一句话说的是这一块页面，页面没了，它跟着没。只清自己那一槽：
+    //   后台那条会话结束时，前台那句"连接暂时中断"与它毫无关系（见 `_overlaySlot`）。
+    if (this._overlaySlot === slot) {
+      this._overlayText = null;
+      this._overlayTitle = null;
+      this._overlaySlot = null;
+      this._overlayHold = null;
+    }
   }
 
   /** 收起某一个槽的界面（销毁那一块）。会话结束时走这条。 */
   destroySurface(slot) {
     if (!this.surfaces.has(slot)) return;
     this._destroySurface(slot);
-    this.hideOverlay();
+    this._layout();
+  }
+
+  /**
+   * 把所有会话的那几块页面一次收掉。离开站点、断开、空手超时走这条。
+   *
+   * 那几条隧道已经拆了，页面再也不会被看见；留着它们只是白养 renderer 进程
+   *   —— 而"藏起来"与"收掉"在界面上看不出区别，只在进程表里有区别。
+   *
+   * 提示页与浮窗必须一起收：它们是同一块窗口主体上的三层，只收页面的话，
+   *   一句"连接暂时中断"会继续盖在第一屏上，而那一屏上正是用户要点的连接列表
+   *   （用户 2026-10-21 报的"什么也点不了"）。
+   */
+  closeAllSurfaces() {
+    for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
+    this._overlayText = null;
+    this._overlayTitle = null;
+    this._overlaySlot = null;
+    this._overlayHold = null;
+    this._front = null;
+    this.hideHover();       // 它自己会调 `_layout`
     this._layout();
   }
 
@@ -533,26 +572,38 @@ class ShellWindow {
     await loadPage(s.view.webContents, url);
   }
 
-  // ── 遮罩（断线提示）────────────────────────────────────────────────────
+  // ── 提示页（断线、页面打不开）──────────────────────────────────────────
   /**
-   * 显示遮罩。懒创建、跨事件复用 —— 每次断开都新建的话，反复断线会瞬间堆出
-   * 几十个 renderer 进程。
+   * 把提示页挂到某一条会话的那块页面上。懒创建、跨事件复用 —— 每次断开都新建
+   * 的话，反复断线会瞬间堆出几十个 renderer 进程。
+   *
+   * 第一参是槽：这一页说的是哪一条会话，显隐就跟着那条走（见 layout.js 的
+   *   `overlayVisible`）。少了它，一句话可以活得比它所属的那块页面更久，
+   *   而它是一块原生视图，盖住的正是用户下一步要点的连接列表
+   *   （用户 2026-10-21 报的"什么也点不了"）。
    */
-  async showOverlay(text) {
-    // 一句新提醒 = 新的一轮断线：自动重载的次数从头算。
-    const s = this._front ? this.surfaces.get(this._front) : null;
-    if (s) s.reloadTries = 0;
-    await this._overlayShow(text);
+  async showOverlay(slot, { title, text } = {}) {
+    // 一句新提醒 = 新的一轮断线：自动重载的次数从头算。判据是"换了一句"，
+    //   不是"又被调了一次" —— 后者会让次数永远停在 0：状态一变就重新挂一遍
+    //   同一句话，而 `recoverSurface` 的下一次重载又有了额度，于是页面被反复
+    //   重载（一个以状态轮询为节拍的循环，与那段注释要防的是同一件事）。
+    const s = slot ? this.surfaces.get(slot) : null;
+    if (s && (this._overlaySlot !== slot || this._overlayText !== (text || ''))) {
+      s.reloadTries = 0;
+    }
+    await this._overlayShow(slot, { title, text });
   }
 
   /**
-   * 把遮罩挂出来（或者把上面那句话换掉）。
+   * 把提示页挂出来（或者把上面那句话换掉）。
    *
    * 显隐不在这里定，在 `_layout` —— 那里有唯一的判据（layout.js 的
    *   `overlayVisible`）。这里只负责"有话要说"与建那一块视图。
    */
-  async _overlayShow(text) {
-    this._overlayText = text;
+  async _overlayShow(slot, { title, text } = {}) {
+    this._overlayText = text || '';
+    this._overlayTitle = title || '连接暂时中断';
+    this._overlaySlot = slot || null;
     this._overlayHold = null;
     if (!this.overlayView) {
       this.overlayView = new WebContentsView({
@@ -568,13 +619,19 @@ class ShellWindow {
         path.join(__dirname, '..', 'renderer', 'overlay.html'));
     }
     this._layout();
-    this._sendOverlay(text);
+    this._sendOverlay();
+  }
+
+  /** 这一块页面现在是不是停在一张加载失败的空白页上（`did-fail-load` 记的）。 */
+  surfaceBroken(slot) {
+    const s = this.surfaces.get(slot);
+    return Boolean(s && s.broken);
   }
 
   /**
-   * 网络回来了：断网期间坏掉的那块页面重载一次，遮罩留到它真的回来。
+   * 网络回来了：断网期间坏掉的那块页面重载一次，提示页留到它真的回来。
    *
-   * 返回 true 表示画面还没回来（遮罩留着，由 `did-stop-loading` 收）。
+   * 返回 true 表示画面还没回来（提示页留着，由 `did-stop-loading` 收）。
    *   返回 false 表示什么都没做：页面活着时一次都不碰它 —— 它可能只是掉了几拍
    *   心跳，编辑器里没保存的改动、终端里滚过的内容都还在，重载一次就是全没。
    *
@@ -592,7 +649,7 @@ class ShellWindow {
     if (!s.broken || s.reloadTries >= 2) return false;
     s.reloadTries += 1;
     s.recovering = true;
-    await this._overlayShow(text);
+    await this._overlayShow(slot, { title: '正在重新打开页面', text });
     // 必须排在 `_overlayShow` 之后：它把 `_overlayHold` 清成 null（"上一轮
     //   已经结束"），这里才说"不，这一轮在等这块页面"。
     this._overlayHold = slot;
@@ -602,10 +659,12 @@ class ShellWindow {
 
   hideOverlay() {
     this._overlayText = null;
+    this._overlayTitle = null;
+    this._overlaySlot = null;
     this._overlayHold = null;
-    // 移除遮罩后必须把焦点还给界面那块视图，否则用户打字没反应 ——
+    // 移除提示页后必须把焦点还给界面那块视图，否则用户打字没反应 ——
     //   又一个「看起来正常但就是不工作」的静默失败。
-    //   还给的必须是前台那一块：遮罩底下看得见的就是它。
+    //   还给的必须是前台那一块：提示页底下看得见的就是它。
     //   而面板抬在前面时前台那一块是藏着的 —— 把焦点交给它，用户点了面板
     //   再打字就落进一块看不见的页面里。
     const s = this._panelFront ? null : (this._front ? this.surfaces.get(this._front) : null);
@@ -613,10 +672,15 @@ class ShellWindow {
     this._layout();
   }
 
-  _sendOverlay(text) {
+  /**
+   * 把这一页要说的两行推过去。标题与正文一起推：只有正文的话，页面得自己
+   *   猜上面那行大字该写什么，而"猜"的结果会在下一次文案改动时漂开。
+   */
+  _sendOverlay() {
     const wc = this.overlayView && this.overlayView.webContents;
     if (!wc || wc.isDestroyed()) return;
-    const send = () => wc.send('overlay:text', text || '');
+    const msg = { title: this._overlayTitle || '连接暂时中断', text: this._overlayText || '' };
+    const send = () => wc.send('overlay:show', msg);
     if (wc.isLoading()) wc.once('did-finish-load', send);
     else send();
   }
@@ -645,11 +709,17 @@ class ShellWindow {
     }
     if (this.overlayView && !this.overlayView.webContents.isDestroyed()) {
       this.overlayView.setBounds(stage);
-      // 显隐的判据只有一处（layout.js 的 `overlayVisible`）：有话要说，并且
-      //   屏幕主体不是面板。面板抬上来时遮罩让开 —— 否则用户点「面板」看到的是
-      //   同一块"连接暂时中断"，像是那颗按钮没反应（2026-10-18 真机）。
+      // 显隐的判据只有一处（layout.js 的 `overlayVisible`）：有话要说、面板没抬
+      //   上来、前台正是这句话所属的那一槽、那一槽还有一块页面。四条缺一不可
+      //   —— 少最后两条，一句话就会盖住它不属于的那一屏（见那里与
+      //   `_overlaySlot` 的说明）。
       this.overlayView.setVisible(overlayVisible({
-        text: this._overlayText, panelFront: this._panelFront }));
+        text: this._overlayText,
+        panelFront: this._panelFront,
+        front: this._front,
+        slot: this._overlaySlot,
+        hasSurface: Boolean(this._overlaySlot && this.surfaces.has(this._overlaySlot)),
+      }));
     }
     if (this.hoverView && !this.hoverView.webContents.isDestroyed()) {
       if (this._hover.side) this.hoverView.setBounds(hoverRect(w, h, this._hover.side));
@@ -675,7 +745,7 @@ class ShellWindow {
     if (this.win.isDestroyed() || !this.hoverView) return;
     const wc = this.hoverView.webContents;
     if (wc.isDestroyed()) return;
-    // 置顶：遮罩可能比它晚建，也可能早建。而这两层谁在上面是有讲究的 ——
+    // 置顶：提示页可能比它晚建，也可能早建。而这两层谁在上面是有讲究的 ——
     //   断线时用户最想看的就是站点状态，浮窗被一句"连接暂时中断"盖住正好反了。
     //   `addChildView` 是追加，所以先摘再挂就保证在最上面。
     try { this.win.contentView.removeChildView(this.hoverView); } catch { /* 可能还没挂上 */ }

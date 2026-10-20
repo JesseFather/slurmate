@@ -252,13 +252,24 @@ test('界面文字里不许出现 markdown 记号 —— 那些字符串是按�
   }
 });
 
-test('panel.html 里没有内联 style —— CSP 会静默丢掉它', () => {
-  // 先把注释去掉：文件头那段注释里就写着 `style="..."` 这几个字，
-  // 它是在解释这条禁令，不是在违反它。
-  const bare = html.replace(/<!--[\s\S]*?-->/g, '');
-  assert.equal(/style\s*=/.test(bare), false,
-    'panel.html 出现了内联 style —— CSP 无 unsafe-inline，它会被静默丢弃，'
-    + '表现是布局莫名其妙不对而没有任何提示。样式一律写进 app.css。');
+test('三个渲染页面里都没有内联样式 —— CSP 会静默丢掉它', () => {
+  // 面板、浮窗、提示页的 CSP 都是 `style-src 'self'`：内联 style 属性与
+  //   <style> 块都会被静默丢弃，表现是布局莫名其妙不对、或者整页退回浏览器
+  //   默认样式。2026-10-21 真机上那句"提示页怎么都是白屏"就是后一种：
+  //   overlay.html 的样式写在一段 <style> 里，丢掉之后就是白底黑字的大标题。
+  //
+  // 先把注释去掉：文件头那几段注释里就写着 `style="..."` 这几个字，
+  //   它们是在解释这条禁令，不是在违反它。
+  for (const name of ['panel.html', 'hover.html', 'overlay.html']) {
+    const bare = fs.readFileSync(path.join(R, name), 'utf8')
+      .replace(/<!--[\s\S]*?-->/g, '');
+    assert.equal(/<style[\s>]/i.test(bare), false,
+      `${name} 出现了 <style> 块 —— CSP 无 unsafe-inline，它会被静默丢弃，`
+      + '表现是整页退回浏览器默认样式。样式一律写进同目录的 .css。');
+    assert.equal(/\sstyle\s*=/.test(bare), false,
+      `${name} 出现了内联 style 属性 —— CSP 无 unsafe-inline，它会被静默丢弃，`
+      + '表现是布局莫名其妙不对而没有任何提示。样式一律写进同目录的 .css。');
+  }
 });
 
 test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {

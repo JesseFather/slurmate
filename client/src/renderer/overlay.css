@@ -1,0 +1,47 @@
+/* 提示页那一层的样式。
+   它整块替换插件页面，与面板、浮窗是同一个窗口里的三层，所以配色与字体逐字
+   同一套 —— 颜色对不上会显得像另一个程序。
+   单独一份文件而不是页面里一段 <style>：CSP 是 `style-src 'self'`，内联样式块
+   会被静默丢掉，而表现只是"没上样式"（2026-10-21 真机上就是白底黑字的默认
+   样式）。同一条理由在 hover.css 文件头也写了一遍。 */
+
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --fg: #d4d4d4;
+  --fg-dim: #8a8a8a;
+  --warn: #dcdcaa;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+/* 大字报留着：这一页只有一句话，居中是它该有的形状。 */
+body { display: grid; place-items: center; }
+
+.card { max-width: 520px; padding: 0 24px; text-align: center; }
+
+/* 标题与面板第二、三屏的标题同一个字号（18px / 600）：它说的是"这一屏现在是
+   什么"，不是页面里的一个区块标题。 */
+h1 {
+  display: flex; align-items: center; justify-content: center; gap: 9px;
+  margin: 0 0 12px; font-size: 18px; font-weight: 600;
+}
+
+/* 一个还在动的点：它说"这不是一个终点，还有重试在跑"。 */
+.dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--warn); flex: none;
+  animation: pulse 1.2s infinite;
+}
+@keyframes pulse { 50% { opacity: .2; } }
+
+#text { margin: 0; color: var(--fg); }
+
+/* 出路那句话。它必须比正文轻：用户先读"发生了什么"，再读"还能做什么"。 */
+.hint { margin: 16px 0 0; font-size: 12px; line-height: 1.8; color: var(--fg-dim); }

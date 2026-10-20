@@ -371,7 +371,7 @@ npm config set ELECTRON_MIRROR https://npmmirror.com/mirrors/electron/
 的 `backend.debug*` 方法造出来，测试通过 `app:debug` 调用它们：
 
 - 守护进程挂掉 —— 验证客户端不会因此判定会话结束
-- 隧道断开 —— 验证遮罩出现、重连提示、恢复后焦点回到编辑器
+- 隧道断开 —— 验证提示页出现、重连提示、恢复后焦点回到编辑器
 - 会话被回收 —— 验证「作业被 scancel 了」这条路径
 - 不支持分发（`old-distribute`）—— 让假站点报插件但不报顶层 `limits`。
   回退必须是那一句「本站的守护进程太旧」，而不是退回池里已经有的那一份
@@ -460,8 +460,8 @@ src/main/
   tunnel.js        槽位中继 + 直连通道
   shortcuts.js     最小菜单 + 按键黑名单
   windows.js       BrowserWindow + WebContentsView
-src/preload/       contextIsolation 下的三个桥（面板 / 遮罩 / 假页面）
-src/renderer/      面板、状态条、遮罩
+src/preload/       contextIsolation 下的三个桥（面板 / 提示页 / 假页面）
+src/renderer/      面板、状态条、提示页
 src/demo/          那个假服务的两个页面（夹具与 contract.mjs 用）
 test/              classify / config / keys / shortcuts / renderer / backend-ssh /
                    plugin-package / site-plugins / contract（契约）/ integration /

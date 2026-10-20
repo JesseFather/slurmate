@@ -3124,10 +3124,10 @@ async function _renderSession(slot) {
   //
   // 这里没有任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
   //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个目录。
-  // 被接管：这一块页面不再归本机操作。直接收掉，而不是盖一层遮罩 ——
+  // 被接管：这一块页面不再归本机操作。直接收掉，而不是盖一层提示页 ——
   //   用户 2026-10-20 报的是"上栏说被接管，而我完全可以正常使用"。
   //   隧道不拆：重新接管之后要接着用它，而 `suspend()` 本来就特意没拆。
-  //   收掉之后 `hasSurface` 为假，下面那段遮罩也没有可盖的东西。
+  //   收掉之后 `hasSurface` 为假，下面那段提示页也没有可盖的东西。
   const handedOff = Boolean(snap.suspended);
   if (handedOff) win.destroySurface(slot);
 
@@ -3152,25 +3152,45 @@ async function _renderSession(slot) {
     }
   }
 
-  // 遮罩与忙碌位跟着前台那一条走：它们是"占满整块界面"的东西，而屏幕只有一块。
+  // 提示页与忙碌位跟着前台那一条走：两者都占满整块界面，而屏幕只有一块。
   if (slot === frontSlot()) {
-    // 遮罩只盖「插件那块页面」。没有页面可盖时（未知服务、不要界面的插件），
-    //   整屏黑幕只会把唯一能操作的面板涂掉 —— 用户 2026-10-18 在真机上就是
-    //   这样被困住的：状态条上只剩一颗「未知服务」的标签，屏幕上除了那句
-    //   「连接暂时中断」什么都没有，连「面板」那一颗都不在（它只在有页面
-    //   盖着时才画）。那句话由状态条说就够了。
+    // 提示页只盖「插件那块页面」，而且只在页面真的用不了时挂：隧道断了，或者
+    //   这一块加载失败、停在空白页上。
+    //
+    //   心跳被限流、状态问不到这类警告不在这里挂 —— 那时页面照常能用，而整块
+    //   盖住它等于替用户把编辑器关了一次（用户 2026-10-21 报的"什么也点不了"）。
+    //   那几句话由状态条那一行说（见 panel.js 的 `renderSnapshot`）。
+    //
+    //   没有页面可盖时（未知服务、不要界面的插件）也不挂：整块提示页只会把唯一
+    //   能操作的面板涂掉 —— 用户 2026-10-18 在真机上就是这样被困住的：
+    //   状态条上只剩一颗「未知服务」的标签，屏幕上除了那句「连接暂时中断」
+    //   什么都没有，连「面板」那一颗都不在（它只在有页面盖着时才画）。
     const covered = win.hasSurface(slot);
-    if (snap.state === State.RUNNING && snap.warning && covered) {
-      await win.showOverlay(snap.warning);
-      win.setBusy(true);
-    } else if (snap.state === State.RUNNING) {
-      // 网络回来这一刻，断网期间坏掉的页面由这里重新打开（页面活着就什么都不做）。
-      //   遮罩留到它真的加载完再收 —— 状态条先恢复、画面后回来，中间隔着一段
-      //   白屏，而这段时间不能没有任何解释（用户 2026-10-18 报的：
+    if (snap.state === State.RUNNING && covered) {
+      // 网络回来这一刻，断网期间坏掉的那块页面先试着重新打开（页面活着就什么都
+      //   不做）。提示页留到它真的加载完再收 —— 状态条先恢复、画面后回来，中间
+      //   隔着一段空白，而这段时间不能没有任何解释（用户 2026-10-18 报的：
       //   "左侧条已经恢复，画面就应该回来了"）。见 windows.js 的 `recoverSurface`。
-      const waiting = covered
-        ? await win.recoverSurface(slot, '正在重新打开页面…') : false;
-      if (!waiting) win.hideOverlay();
+      //
+      //   隧道还断着就不试：那一次重载必然失败，两次机会白白用完（`reloadTries`）。
+      const waiting = snap.tunnelState === 'listening'
+        ? await win.recoverSurface(slot, '网络已经回来，等页面加载完。') : false;
+      if (waiting) {
+        win.setBusy(true);
+      } else if (snap.tunnelState !== 'listening' || win.surfaceBroken(slot)) {
+        await win.showOverlay(slot, {
+          title: snap.tunnelState === 'listening' ? '页面暂时打不开' : '连接暂时中断',
+          text: snap.warning || '页面现在打不开，正在重试。',
+        });
+        win.setBusy(true);
+      } else {
+        win.hideOverlay();
+        win.setBusy(false);
+      }
+    } else {
+      // 排队、提交中、被接管、结束，或者本来就没有页面：前台那一句提示必须跟着
+      //   收 —— 否则它会停在上一条会话的那句话上，盖住底下本该露出来的面板。
+      win.hideOverlay();
       win.setBusy(false);
     }
   }
@@ -3909,6 +3929,11 @@ function stopSitePoll() {
 }
 
 async function teardownConnection() {
+  if (win) win.closeAllSurfaces();
+  // 页面与提示页一起收。离开站点之后那几条隧道都拆了，页面再也不会被看见；
+  //   留着它们只是白养 renderer 进程，而提示页会盖住回来的第一屏
+  //   （用户 2026-10-21 报的"什么也点不了"）。三条路共用这里：临时离开、
+  //   断开、空手超时。
   stopSitePoll();
   stopOutPoll();
   // 离开/断开之后既没有要保活的会话，也没有"空手"可计 —— 两样都从零开始。

@@ -107,6 +107,31 @@
 suspended.test.mjs`（推送里 keeper 变了立刻补打一拍）；`cluster/test-sessiond-logic.py`
 29.6（旧看护者在线的连接立刻收到那条推送）。
 
+### Fixed — 提示页统一配色，并且只属于一条会话的那块页面
+
+提示页自己没上样式：`overlay.html` 把 CSS 写在内联 `<style>` 里，而同一页的 CSP
+是 `style-src 'self'`。内联样式块被静默丢掉，页面退回浏览器默认样式 —— 白底、
+黑字、大号标题，与面板的主题完全不搭（2026-10-21 真机）。样式搬进
+`overlay.css`，令牌与 `app.css` / `hover.css` 同一套。
+
+提示页的寿命也没有绑在任何一块页面上：`_overlayText` 只在 `destroySurface` 与
+`_renderSession` 的 RUNNING 分支里清，而显隐只判「有字 && 面板没抬上来」。带着
+提示页点【临时离开】之后，记录与连接都收掉了，那句话还在，继续盖住回来的第一屏
+—— 用户看到的是"什么也点不了"。
+
+现在一句话记着它属于哪一槽（`_overlaySlot`），`overlayVisible` 的四条判据缺一不可：
+有字、面板没抬上来、前台正是那一槽、那一槽还有页面。`teardownConnection` 调
+`win.closeAllSurfaces()`：临时离开、断开、空手超时三条路都把页面与提示页一起收掉，
+顺带补上"离开之后藏着的 renderer 一直活着"那条泄漏。
+
+提示页也只在页面真的用不了时挂：隧道不是 `listening`，或者那一块加载失败。心跳被
+限流、状态问不到这类警告页面照常能用，改为写在状态条那一行，不再整块盖住插件区。
+
+**判据**：`client/test/layout.test.mjs` 的显隐四档；`client/test/boot.test.mjs`
+三条（面板 / 标签 / 页面销毁都让开；页面还能用与没有页面都不挂；带提示页临时离开
+之后页面与提示页一起收）；`client/test/renderer.test.mjs` 一条静态判据 —— 三份
+渲染页面都不许出现内联样式。
+
 ## [0.31] — 未发布
 
 > 协议版本是 **0.31**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
