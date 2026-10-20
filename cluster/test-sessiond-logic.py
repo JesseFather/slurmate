@@ -9732,16 +9732,14 @@ exit 0
           and bool(re.search(r"typeof obj\.seq === 'number'", _be_src)),
           "守护进程那份是 %s" % (_m_msg_key.group(1) if _m_msg_key else "没找到"))
 
-    # `takeover` / `leave` 这两个 op 的名字：守护进程的 dispatch 表与协议文档。
+    # `takeover` 这个 op 的名字：守护进程的 dispatch 表与协议文档。
     #    漂了不是"报个错"，是那一下点了没反应 —— 用户以为接管了，而服务端
     #    收到的是 unknown_op（客户端那一半在阶段 6 落地）。
     _doc_src = io.open(os.path.join(HERE, os.pardir, "docs", "PROTOCOL.md"),
                        encoding="utf-8").read()
-    check("`takeover` / `leave` 在 dispatch 表里，而文档里写的也是同两个名字",
-          all(('"%s"' % _op) in _msg_src and ("`%s`" % _op) in _doc_src
-              for _op in ("takeover", "leave")),
-          "takeover=%s leave=%s"
-          % ('"takeover"' in _msg_src, '"leave"' in _msg_src))
+    check("`takeover` 在 dispatch 表里，而文档里写的也是同一个名字",
+          '"takeover"' in _msg_src and "`takeover`" in _doc_src,
+          'takeover=%s' % ('"takeover"' in _msg_src))
     # 「同一个名字写在两个文件里」这一类，而且这一条真的漏过一次：
     #    `index.js` 有两处读 `c.suspended`（收尾时跳过它、接手前 abandon 它），
     #    而 `SessionController` 当时只有 `_suspended` 与快照里的 `suspended` ——
@@ -10060,8 +10058,8 @@ exit 0
     #        （账本 S28）。v0.8 靠"被顶掉的禁止自动重连"那道客户端闸兜着，
     #        而那道闸一没了，这个形状就没有终点。
     #
-    # 替代品不是"另一种顶替"，是按会话的 `keeper` 一列 + 两条显式的 op
-    #   （`takeover` / `leave`，见第 29 节）。所以这一节现在守两件事：
+    # 替代品不是"另一种顶替"，是按会话的 `keeper` 一列 + 两个写入口
+    #   （`submit` 与 `takeover`，见第 29 节）。所以这一节现在守两件事：
     #   ① 身份在服务端只有一个来源、只有一个用途；② 连接上限是拒绝，不是顶掉。
 
     # ── 27.0 认领的收敛（纯函数）───────────────────────────────────────
@@ -11369,65 +11367,10 @@ exit 0
           (_rtk4.get("error") or {}).get("kind") == "session_gone",
           str(_rtk4.get("error")))
 
-    # ── 29.9 离开：清空，而只报真的清掉的那几条 ─────────────────────
-    _d35 = _mkd()
-    _add(_d35, "s-l1", job_id="608", keeper="mA", hb=mod.now_ts() - 5)
-    _add(_d35, "s-l2", job_id="609", keeper="mB", hb=mod.now_ts() - 5)
-    _add(_d35, "s-l3", job_id="610", hb=mod.now_ts() - 5)      # 本来就没人在看
-    _rlv = _d35.dispatch(UID, os.getgid(),
-                         {"op": "leave",
-                          "session_ids": ["s-l1", "s-l2", "s-l3", "s-nope"]})
-    check("leave 把清单里那些会话的看护者清空 —— 包括是别人的："
-          "它是一次「放手」，与 goodbye 同族，不是一次「取得」",
-          _d35.store.get("s-l1")["keeper"] is None
-          and _d35.store.get("s-l2")["keeper"] is None,
-          "%r / %r" % (_d35.store.get("s-l1")["keeper"],
-                       _d35.store.get("s-l2")["keeper"]))
-    check("而响应里只报真的清掉了的那几条：本来就没人在看的（s-l3）与"
-          "不存在的（s-nope）都不算 —— 报进去就是一句假话（那几条什么都没发生）",
-          (_rlv.get("data") or {}).get("cleared") == ["s-l1", "s-l2"],
-          str(_rlv.get("data")))
-    check("清空之后库里是 NULL，不是空串"
-          "（空串会让「确实没人在看」与「有人在看、只是名字是空的」分不开）",
-          _d35.store.get("s-l1")["keeper"] is None,
-          repr(_d35.store.get("s-l1")["keeper"]))
-    _rlv2 = _d35.dispatch(UID, os.getgid(), {"op": "leave"})
-    check("不带清单 / 空清单被明确拒绝（不是「沉默地什么都不做」）",
-          (_rlv2.get("error") or {}).get("kind") == "bad_request",
-          str(_rlv2.get("error")))
-    _rlv3 = _d35.dispatch(UID, os.getgid(),
-                          {"op": "leave",
-                           "session_ids": ["x%d" % i
-                                           for i in range(mod.LEAVE_MAX_SESSIONS + 1)]})
-    check("超过 %d 条被拒绝而不是悄悄截断"
-          "（截断会让客户端以为「都放开了」，而后面那几条还挂着看护者）"
-          % mod.LEAVE_MAX_SESSIONS,
-          (_rlv3.get("error") or {}).get("kind") == "bad_request",
-          str(_rlv3.get("error")))
-
-    # ── 29.10 离开之后走的是同一条窗口（不新开第二个）────────────────
-    _d36 = _mkd(suspect_after=10, orphan_after=20, startup_grace_seconds=0)
-    _cancels = []
-    _d36.slurm.cancel = lambda *a, **k: _cancels.append(a) or True
-    _add(_d36, "s-win", job_id="611", keeper="mA", hb=mod.now_ts() - 30)
-    _d36.dispatch(UID, os.getgid(),
-                  {"op": "leave", "session_ids": ["s-win"]})
-    _d36.tick()
-    check("离开之后走的是同一条窗口：心跳断了 30 秒，suspect"
-          "（既不「立刻结束」，也不「什么都不做」—— 一条窗口两个入口）",
-          _d36.store.get("s-win")["state"] == mod.ST_SUSPECT,
-          _d36.store.get("s-win")["state"])
-    _d36.tick()
-    _sw = _d36.store.get("s-win")
-    check("再一轮，orphaned，而且真的发了 scancel"
-          "（「临时离开由超时来控制」这句话落在这里）",
-          _sw["note"] == "orphaned" and len(_cancels) == 1,
-          "%s / scancel %d 次" % (_sw["note"], len(_cancels)))
-
     # ── 29.11 闪断 ≠ 离开 ───────────────────────────────────────────
     #
-    # 这是"离开"这条 op 存在的全部理由的反面：一次网络抖动不是一次
-    #    离开。把两者混起来，用户回来时作业已经在回收路上了。
+    # 一次网络抖动不是一次离开：本机只是联系不上，看护者仍然保留。
+    #    把两者混起来（闪断当成离开去处理），用户回来时作业已经在回收路上了。
     _d37 = _mkd()
     _f1c, _f1k = _pair(_d37)
     _f1c.send({"op": "ping", "rid": 1, "client": {"id": "mA", "name": "甲机"}})
@@ -11492,9 +11435,12 @@ exit 0
     _k1c.close()
 
     # ── 29.13 契约：`session_view` 的那一格与文档 ─────────────────────────
+    _d35 = _mkd()
+    _d36 = _mkd()
     _proto = io.open(os.path.join(HERE, os.pardir, "docs", "PROTOCOL.md"),
                      encoding="utf-8").read()
     _add(_d35, "s-view", job_id="614", keeper="mZ")
+    _add(_d35, "s-null-keeper", job_id="615")
     _vw = _d35.session_view(_d35.store.get("s-view"), with_secret=False)
     check("跨文件：`session_view` 真的吐 `keeper` 那一格，而 docs/PROTOCOL.md "
           "的字段表里也写着它（两半缺一，界面那一侧就没有可读的内容）",
@@ -11504,7 +11450,7 @@ exit 0
     check("而取值只有两种：一个 client_id 或者 `null`"
           "（不是空串、不是 \"unknown\" —— 界面据此知道该不该画「接管」）",
           isinstance(_vw.get("keeper"), str)
-          and _d35.session_view(_d35.store.get("s-l1"),
+          and _d35.session_view(_d35.store.get("s-null-keeper"),
                                 with_secret=False).get("keeper") is None,
           repr(_vw.get("keeper")))
 

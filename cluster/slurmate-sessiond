@@ -932,7 +932,6 @@ CONN_IN_MAX = 65536
 # session_id，而每一个都要一次点查 + 一次写。`op_list` 只给最近 50 条，所以正常
 # 的客户端不可能超过这个数，超了就是有人手写的，拒绝比截断诚实
 # （截断会让客户端以为"都放开了"）。
-LEAVE_MAX_SESSIONS = 64
 
 # 读到 EOF（半关）之后，还允许留着把出站排空多久。
 # 这个窗口是必须的：老客户端（`slurmate rpc`）每次发完就半关，
@@ -8308,8 +8307,8 @@ class Sessiond(object):
         self._tick_job = {}
         # 本 tick 每个 uid 渲染一次的快照：uid -> (digest, [会话视图])。
         self._tick_snap = {}
-        # 看护者按会话排（会话行上那一格 `keeper`，见 op_takeover /
-        #   op_leave）：按 uid 顶掉整个客户端会连坐（"接管作业 1"连"作业 2"
+        # 看护者按会话排（会话行上那一格 `keeper`，见 op_submit /
+        #   op_takeover）：按 uid 顶掉整个客户端会连坐（"接管作业 1"连"作业 2"
         #   那台电脑上另一条会话被一起踢掉）。
         #   连接数不需要一张表：`uid_conn_count()` 从 selector 现读。
 
@@ -10180,8 +10179,6 @@ class Sessiond(object):
                 return self.op_heartbeat(uid, req, client_id)
             if op == "takeover":
                 return self.op_takeover(uid, req, client_id)
-            if op == "leave":
-                return self.op_leave(uid, req)
             if op == "goodbye":
                 return self.op_goodbye(uid, req)
             if op == "doctor":
@@ -11233,61 +11230,6 @@ class Sessiond(object):
                 #   否则消息留在队列里等下一次客户端发请求才被带走 ——
                 #   "立刻推"就成了一句假话。
                 self.sync_events(conn)
-
-    def op_leave(self, uid, req):
-        """「这些会话我不看了」，把它们的看护者置空。倒计时从这一刻起算。
-
-        与闪断的分工是这一条的全部意义：
-
-        | | 服务端收到什么 | 看护者 | 谁能让它停下来 |
-        |---|---|---|---|
-        | 闪断 | 什么都没收到（连接断了） | 保留 | 只有原来的看护者（或接管） |
-        | 离开 | 这条 op | 清空 | 任何开始看它的客户端（会认领） |
-
-        「留一个已经走了的人当看护者」不是小事：界面会照实说"甲机在看"，
-          而那是一句假话，要 30 分钟之后才被超时纠正，用户等不到那一刻，
-          他只会看到"我的作业怎么还在"。清空之后那句话当场就变成"没人在看"。
-
-        倒计时不加第二个窗口：这里只是把看护者清空，之后仍然走
-          `suspect_after`(300 秒) → `orphan_after`(1800 秒) → `scancel`。
-          一条窗口两个入口，加第二个窗口会让"多久算消失"有两个说法，而它们会漂。
-
-        这条 op 不校验身份，与 `goodbye` 同一条理由：它是一次放手，
-          不是一次取得。要防的是"谁的作业被别人的心跳续了命"（那由心跳的判据
-          管），而"我以为我不看了"这句话没有假冒的价值，它只能让作业更早
-          被回收，且随时可以被下一个开始看它的客户端认领回去（认领那一支见
-          op_heartbeat）。反过来，校验身份会有一个具体得多的坏处：客户端在
-          常驻通道断掉之后走的是 exec 退路，那条路上身份是被删掉的，
-          于是「临时离开」会静默地不生效，而用户以为自己已经离开了。
-
-        清单是显式的，不是"我名下的全部"：只有调用方知道它刚才在看哪几条。
-          不完整的清单不会造成错误（漏掉的那些没人刷心跳，照样会超时），
-          它只影响"那句话什么时候变成真的"。
-        """
-        got = req.get("session_ids")
-        if not isinstance(got, list) or not got:
-            return self._err(2, "bad_request",
-                             "leave 要带一张非空的 session_ids 清单。")
-        if len(got) > LEAVE_MAX_SESSIONS:
-            # 拒绝而不是悄悄截断：截断会让客户端以为"都放开了"，而它列在后面
-            #   的那些会话仍然挂着一个看护者。上限本身是防放大用的，
-            #   一次请求最多值这么多次点查，而 op_list 只给 50 条，
-            #   正常的客户端不可能超过它。
-            return self._err(2, "bad_request",
-                             "一次最多放开 %d 条会话（清单里有 %d 条）。"
-                             % (LEAVE_MAX_SESSIONS, len(got)))
-        cleared = []
-        for raw in got:
-            sid = str(raw or "")
-            s = self.store.get(sid)
-            # 不是我的、不存在的、以及看护者本来就是空的都安静跳过：
-            # 后者尤其要跳过，它会被记成一次"放手"，而实际上什么都没发生。
-            if not s or s["uid"] != uid or s["keeper"] is None:
-                continue
-            self.store.update(sid, keeper=None)
-            self.audit("left", session=sid, uid=uid, was=s["keeper"])
-            cleared.append(sid)
-        return self._ok({"cleared": cleared})
 
     def _release_quietly(self, s, reason):
         """对一条会话发 `scancel` 并交给 `phase_release`。返回 scancel 是否成功。
