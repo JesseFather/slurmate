@@ -155,9 +155,13 @@ function setPluginEnabled(dir, cfg, name, enabled) {
 //   没变的那一版里加进来的，所以"条目里没有 `alg`"只能解释成"当时那个公式"
 //   = 1。把它默认成"当前公式"的话，换公式那天所有老条目都会被读成新公式 ——
 //   而那正是这套字段要防的事。
+//
+// 公式在 0.33 换到 2（域串 + UTF-8 字节序，见 `plugins.digestOf`）。于是
+//   记着 1 的条目与没有 `alg` 的条目都不再成立，每份插件重新问一次同意 ——
+//   界面那一句说的是"另一种算法算的"，不是"内容变了"。
 
-/** 当前这个公式的版本。1 = 整棵目录的 `plugins.digestOf`。 */
-const TRUST_ALG = 1;
+/** 当前这个公式的版本。2 = 带域串、按 UTF-8 字节排序的 `plugins.digestOf`。 */
+const TRUST_ALG = 2;
 /** 条目里没有 `alg` 时按哪个公式解释。改公式时这一个不会跟着变。 */
 const TRUST_ALG_LEGACY = 1;
 

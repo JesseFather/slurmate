@@ -4127,6 +4127,24 @@ test('F18 回归：改了 client/ 下的文件而不动 plugin.json，摘要必�
   for (const d of [root, root2]) fs.rmSync(d, { recursive: true, force: true });
 });
 
+test('摘要公式 v2：固定域串与 UTF-8 字节序都在哈希里', () => {
+  // 台账的 alg 从 1 换到 2，公式的两处改动各要一条能被改红的判据：
+  //   域串（两个用途的 SHA-256 不会被当成同一个值）与排序（UTF-16 码元序在
+  //   非 BMP 路径上与 UTF-8 字节序相反）。下面的黄金值就是这两处的指纹。
+  const P = require('../src/main/plugins/index.js');
+  const files = [
+    { path: 'cases/￿.txt', kind: 'f', mode: 0o644, size: 1,
+      sha256: 'a'.repeat(64), link: null },
+    { path: 'cases/\u{1F600}.txt', kind: 'f', mode: 0o644, size: 1,
+      sha256: 'b'.repeat(64), link: null },
+  ];
+  assert.equal(P.digestOf(files), P.digestOf([files[1], files[0]]),
+    '摘要只依赖内容，与传进来的次序无关');
+  assert.equal(P.digestOf(files),
+    '44c880725cc123205660d297a65a37902a0f42b1422006c217ab0c63d07d4826',
+    '码元序（😀 在前）或少了域串，算出来的都不是这个值');
+});
+
 test('`missing` 不说谎：站点关掉的插件不算"本机没有"', async (t) => {
   t.after(async () => {
     Module._load = origLoad;
@@ -6722,6 +6740,315 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
+});
+
+// ── 契约 §4 的「用例」：每一格一条能改红的判据 ────────────────────────────────
+//
+// 这四条的读者是 `docs/CONTRACT.md` §4.4。它们是"框架递给插件的值"那几格的
+//   守卫：改坏 `pluginContext` 里的接线，这里当场红。
+//
+// 观察靠夹具插件自己写文件，不用返回值（`attach` 的返回值按契约被忽略），
+//   也不用 `ctx.notice`（那是界面上的东西，而这里要的是结构化的事实）。
+
+/** 一段探针插件的源码：`attach` 时把 §4 那几格写进 `out`。 */
+function ctxProbeSrc(out) {
+  return `
+const fs = require('fs');
+const path = require('path');
+let recorded = false;
+module.exports = {
+  async attach(ctx) {
+    if (recorded) return;
+    recorded = true;
+    const c = ctx.connection();
+    const d = ctx.dataDir();
+    fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+      surfaceSessionType: typeof ctx.win.surfaceSession,
+      surfaceSessionPath: (ctx.win.surfaceSession && ctx.win.surfaceSession.getStoragePath)
+        ? ctx.win.surfaceSession.getStoragePath() : null,
+      connectionKeys: Object.keys(c || {}).sort(),
+      connectionFrozen: Object.isFrozen(c),
+      connectionSame: ctx.connection() === c,
+      dataDir: d,
+      dataDirAbsolute: path.isAbsolute(d),
+      dataDirExists: fs.existsSync(d),
+      home: ctx.home(),
+      homeAbsolute: path.isAbsolute(ctx.home()),
+      keys: Object.keys(ctx.keys).sort(),
+      keysFrozen: Object.isFrozen(ctx.keys),
+      reloadType: typeof ctx.win.reloadSurface,
+    }));
+  },
+};
+`;
+}
+
+test('ctx 的成员：surfaceSession 绑在会话上，connection 与 keys 是冻结的副本', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const started = [];
+  // 断言中途红了也要把会话收掉：否则测试进程留着心跳定时器，整条套件会挂住，
+  //   而"红了"与"跑了六分钟才被杀"在 CI 上是两种完全不同的信号。
+  t.after(async () => {
+    for (const slot of started) await invoke('app:stop', { slot });
+    await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
+  await openUpTo(idx, 3);
+  await connectDemo(idx);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-ctx-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const outA = path.join(tmp, 'a.json');
+  const outB = path.join(tmp, 'b.json');
+  for (const [name, id, out] of [['ctx-a', mintId(), outA], ['ctx-b', mintId(), outB]]) {
+    putSitePlugin({
+      id, name,
+      over: { contributes: { ports: 1, concurrent: true,
+        surface: { kind: 'web', path: '/' } } },
+      clientSrc: ctxProbeSrc(out),
+    });
+    idx._test.getBackend().debugAddSitePlugin(name);
+  }
+
+  const a = await startRunning(idx, 'ctx-a');
+  started.push(a.slot);
+  await waitUntil(() => fs.existsSync(outA), '第一份观察写出');
+  const b = await startRunning(idx, 'ctx-b');
+  started.push(b.slot);
+  await waitUntil(() => fs.existsSync(outB), '第二份观察写出');
+
+  const oa = JSON.parse(fs.readFileSync(outA, 'utf8'));
+  const ob = JSON.parse(fs.readFileSync(outB, 'utf8'));
+
+  // surfaceSession：是取值器（不是方法），并且两份会话拿到的是两个不同的分区。
+  //   把 getter 改成方法时它是 `function`；拿窗口当前那块视图时两份会相同。
+  assert.equal(oa.surfaceSessionType, 'object',
+    'ctx.win.surfaceSession 必须是一个值（取值器），不是函数');
+  assert.ok(oa.surfaceSessionPath, '有界面时它必须拿得到那块视图的 session');
+  assert.notEqual(oa.surfaceSessionPath, ob.surfaceSessionPath,
+    '两份会话必须各自绑在自己的分区上');
+
+  // connection：恰好五个字段、冻结、每次给新副本。
+  assert.deepEqual(oa.connectionKeys, ['host', 'id', 'label', 'port', 'user']);
+  assert.equal(oa.connectionFrozen, true, '副本必须是冻结的 —— 插件改它不该写回配置');
+  assert.equal(oa.connectionSame, false, '每次现取，不能把同一个对象递两次');
+  assert.equal(ob.connectionFrozen, true);
+
+  // dataDir：绝对路径，而且交出来的时候还没有被创建。
+  assert.equal(oa.dataDirAbsolute, true, '数据目录必须是绝对路径');
+  assert.equal(oa.dataDirExists, false, '交出来时目录不该已经被建好 —— 它可能还不存在');
+  assert.notEqual(oa.dataDir, ob.dataDir, '两个插件两份数据');
+
+  // home：用户的家目录（测试进程里是临时目录）。
+  assert.equal(oa.home, electronStub.app.getPath('home'));
+  assert.equal(oa.homeAbsolute, true);
+
+  // keys：只有契约 §4.2 的六个函数，而且是冻结的。
+  //   直接递模块对象的话会多出 `_internal`（那是本仓库用例用的）。
+  assert.deepEqual(oa.keys,
+    ['fingerprintOf', 'generate', 'isUsablePrivatePem', 'isValidPublicKeyLine',
+      'publicKeyLine', 'publicKeyLineFromPrivatePem']);
+  assert.equal(oa.keysFrozen, true, '插件不许改写这把共用工具箱');
+  assert.equal(oa.reloadType, 'function');
+});
+
+test('ctx.win.reloadSurface() 只在登录路径上重载', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const started = [];
+  t.after(async () => {
+    for (const slot of started) await invoke('app:stop', { slot });
+    await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
+  await openUpTo(idx, 4);
+  await connectDemo(idx);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-reload-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  // 三段：无契约（必须重载）、有契约而页面不在登录路径（不许重载）、
+  //   有契约且页面就在登录路径（必须重载）。少了第三段，"有契约就永远不重载"
+  //   这个错误一条都抓不到。
+  const cases = [
+    ['rl-none', { kind: 'web', path: '/' }, null, 1],
+    ['rl-other', { kind: 'web', path: '/' },
+      { path: '/login', field: 'password', cookie: 'sessid' }, 0],
+    ['rl-login', { kind: 'web', path: '/login' },
+      { path: '/login', field: 'password', cookie: 'sessid' }, 1],
+  ];
+  for (const [name, surface, login, want] of cases) {
+    const out = path.join(tmp, `${name}.json`);
+    const contributes = { ports: 1, concurrent: true, surface };
+    if (login) contributes.login = login;
+    putSitePlugin({
+      id: mintId(), name, over: { contributes },
+      clientSrc: `
+const fs = require('fs');
+let called = false;
+module.exports = { async attach(ctx) {
+  if (called) return;
+  called = true;
+  await ctx.win.reloadSurface();
+  fs.writeFileSync(${JSON.stringify(out)}, '1');
+} };
+`,
+    });
+    idx._test.getBackend().debugAddSitePlugin(name);
+    const r = await startRunning(idx, name);
+    started.push(r.slot);
+    await waitUntil(() => fs.existsSync(out), `${name} 调过 reloadSurface`);
+    const v = viewFor(idx._test.getWindow(), r.slot);
+    assert.ok(v, `${name} 必须有一块视图`);
+    assert.equal(v.webContents.reloads || 0, want,
+      `${name}：期望重载 ${want} 次`);
+  }
+});
+
+test('ctx.home() 是用户的家目录；不是绝对路径就抛', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
+  const out = path.join(tmp, 'calls.jsonl');
+  const started = [];
+  t.after(async () => {
+    for (const slot of started) await invoke('app:stop', { slot });
+    await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
+  t.after(() => {
+    electronStub.app.setPath('home', fakeHome);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  putSitePlugin({
+    id: mintId(), name: 'home-probe',
+    over: { contributes: { ports: 1, concurrent: true,
+      surface: { kind: 'web', path: '/' } } },
+    clientSrc: `
+const fs = require('fs');
+let ctxRef = null;
+let done = false;
+const timer = setInterval(() => {
+  if (!ctxRef || done) return;
+  let line;
+  try { line = JSON.stringify({ ok: true, home: ctxRef.home() }); }
+  catch (e) { line = JSON.stringify({ ok: false, message: e.message }); done = true; }
+  fs.appendFileSync(${JSON.stringify(out)}, line + '\\n');
+  if (done) clearInterval(timer);
+}, 100);
+timer.unref();
+module.exports = { async attach(ctx) { ctxRef = ctx; } };
+`,
+  });
+  idx._test.getBackend().debugAddSitePlugin('home-probe');
+  const r = await startRunning(idx, 'home-probe');
+  started.push(r.slot);
+
+  const lines = () => (fs.existsSync(out)
+    ? fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((s) => JSON.parse(s))
+    : []);
+  await waitUntil(() => lines().some((x) => x.ok), '第一次取家目录');
+  assert.equal(lines().find((x) => x.ok).home, fakeHome);
+
+  // 桩把家目录换成一个相对路径：那是插件拼路径时唯一真正危险的那一态。
+  electronStub.app.setPath('home', 'relative-home');
+  await waitUntil(() => lines().some((x) => !x.ok), '坏家目录被拒绝');
+  const bad = lines().find((x) => !x.ok);
+  assert.match(bad.message, /绝对路径/, '抛出来的消息要说清是哪一格不成立');
+});
+
+test('ctx.login 的失败路，以及契约来自本插件清单', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const started = [];
+  t.after(async () => {
+    for (const slot of started) await invoke('app:stop', { slot });
+    await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+    await openUpTo(idx, 1);
+    cleanupSiteState(idx);
+  });
+  await openUpTo(idx, 3);
+  await connectDemo(idx);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-login-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const outC = path.join(tmp, 'with-contract.json');
+  const outN = path.join(tmp, 'no-contract.json');
+  const LOGIN = { path: '/auth-x', field: 'secret-x', cookie: 'sess-x' };
+
+  putSitePlugin({
+    id: mintId(), name: 'login-probe',
+    over: { contributes: { ports: 1, concurrent: true,
+      surface: { kind: 'web', path: '/' }, login: LOGIN } },
+    clientSrc: `
+const fs = require('fs');
+module.exports = { async attach(ctx) {
+  const seen = [];
+  const ses = (cookie, boom) => ({
+    fetch: async (url, opts) => {
+      seen.push({ url, body: opts.body });
+      if (boom) throw new Error('boom');
+      return { status: 200 };
+    },
+    cookies: { get: async (q) => { seen.push({ cookie: q.name });
+      return cookie ? [{ name: q.name, value: 'v' }] : []; } },
+  });
+  const origin = 'http://127.0.0.1:1';
+  fs.writeFileSync(${JSON.stringify(outC)}, JSON.stringify({
+    noPassword: await ctx.login(ses(false, false), origin, ''),
+    noCookie: await ctx.login(ses(false, false), origin, 'pw'),
+    fetchFailed: await ctx.login(ses(false, true), origin, 'pw'),
+    ok: await ctx.login(ses(true, false), origin, 'pw'),
+    seen,
+  }));
+} };
+`,
+  });
+  putSitePlugin({
+    id: mintId(), name: 'login-none',
+    over: { contributes: { ports: 1, concurrent: true,
+      surface: { kind: 'web', path: '/' } } },
+    clientSrc: `
+const fs = require('fs');
+module.exports = { async attach(ctx) {
+  fs.writeFileSync(${JSON.stringify(outN)}, JSON.stringify(
+    await ctx.login({ fetch: async () => { throw new Error('不该发请求'); },
+      cookies: { get: async () => [] } }, 'http://127.0.0.1:1', 'pw')));
+} };
+`,
+  });
+  idx._test.getBackend().debugAddSitePlugin('login-probe');
+  idx._test.getBackend().debugAddSitePlugin('login-none');
+
+  const a = await startRunning(idx, 'login-probe');
+  started.push(a.slot);
+  await waitUntil(() => fs.existsSync(outC), '有契约那一份写出观察');
+  const b = await startRunning(idx, 'login-none');
+  started.push(b.slot);
+  await waitUntil(() => fs.existsSync(outN), '无契约那一份写出观察');
+
+  const withC = JSON.parse(fs.readFileSync(outC, 'utf8'));
+  assert.equal(withC.noPassword.reason, 'no_password');
+  assert.equal(withC.noCookie.reason, 'no_cookie');
+  assert.equal(withC.noCookie.status, 200);
+  assert.equal(withC.fetchFailed.reason, 'fetch_failed: boom');
+  assert.equal(withC.ok.ok, true, '拿到契约里的 cookie 就算成功');
+  // 契约来自插件清单，不是框架里写死的某个路径/字段名。
+  const post = withC.seen.find((x) => x.url);
+  assert.match(post.url, /\/auth-x$/, '登录 POST 的路径必须取自本插件清单');
+  assert.match(post.body, /secret-x=pw/, '表单字段名同理');
+  assert.equal(withC.seen.find((x) => x.cookie).cookie, 'sess-x',
+    '判断成功看哪个 cookie 也来自清单');
+
+  const noC = JSON.parse(fs.readFileSync(outN, 'utf8'));
+  assert.equal(noC.reason, 'no_contract',
+    '没声明登录契约的插件调 ctx.login，要得到 no_contract，而不是发一次请求');
 });
 
 test('换一条连接 = 离开上一个站点：本机那些记录一条都不留，而作业一个字不动', async (t) => {

@@ -64,7 +64,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 
 ---
 
-## 一、站点通用键。一共 20 个。
+## 一、站点通用键。一共 21 个。
 
 这是 v0.2 的收缩，v0.3 又把它推进了一步：能从 Slurm 查到的，一律不再写一份；
 只属于某个插件的，搬进那个插件的块。
@@ -96,6 +96,7 @@ default_plugin = <短名>          # 提交时不带 service_kind 用哪个（�
 | `default_plugin` | 短名 | **空**（无默认值） | 提交时不带 `service_kind` 用哪个插件。**留空 = 必填**，见〈一之二〉 |
 | `max_sessions_per_user` | 正整数 | `1` | 每人最多几个会话。**排队中的也算占着位置**。见下方专节 |
 | `max_connections_per_user` | 正整数 | `8` | 每人同时几条**连接**。超限的回 `too_many_connections`，**不动已在的**。与上一格是**两个旋钮**，见下方专节 |
+| `max_rpc_per_second` | 正整数 | `100` | 每个 uid 每秒最多几次 RPC（1 秒滑窗，所有 op 都算，含心跳与状态轮询）。**0 会被自检拒绝**。会话越多越容易打满；超限回 `7 rate_limited` |
 | `renew_increment` | 时间串 | `1:00:00` | 每次续期加多少。见下方专节 |
 | `renew_threshold` | 时间串 | `0:10:00` | 剩余时间少于它就续。见下方专节 |
 | `renew_max_total` | 时间串 | `7-00:00:00` | 一个会话累计最多活多久，到顶之后不再续 |
@@ -954,7 +955,7 @@ sudo slurmate service reload
 | 档 | 判据 | 有哪些 |
 |---|---|---|
 | **随时可热** | 只影响"从这一刻之后新发生的事" | `default_plugin`、`candidates_per_session`、`max_sessions_per_user`、`max_connections_per_user` |
-| **可热，但会说一句** | 会动到**已经建立**的东西 | `range_start` / `range_end` / `reserved_ranges`（已经在跑的会话，端口可能落在**新区间之外** —— **不拦**，让它跑完）、8 个 Slurm 命令路径（**下一次** fork 用的就是新的那一个）、`renew_increment` / `renew_threshold` / `renew_max_total`（作用在已建立的会话上）、`log_keep_days` / `log_dir_max_bytes`（改小之后此后提交的作业会删别人的日志） |
+| **可热，但会说一句** | 会动到**已经建立**的东西 | `max_rpc_per_second`（调低之后已在跑的会话的下一次心跳可能被拒）、`range_start` / `range_end` / `reserved_ranges`（已经在跑的会话，端口可能落在**新区间之外** —— **不拦**，让它跑完）、8 个 Slurm 命令路径（**下一次** fork 用的就是新的那一个）、`renew_increment` / `renew_threshold` / `renew_max_total`（作用在已建立的会话上）、`log_keep_days` / `log_dir_max_bytes`（改小之后此后提交的作业会删别人的日志） |
 | **必须重启** | 不是"运行期的事实" | （这一档现在是空的。它同时是表外键的兜底：`_changed_keys_by_class()` 把没分类的键**默认**归到这里） |
 
 第二档那几种改完会被接受，但日志里会各说一句、并记进审计的 `notes` —— 否则

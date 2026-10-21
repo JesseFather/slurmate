@@ -7953,6 +7953,22 @@ exit 0
     check("写 0 会被自检拦下（否则表现是「谁都开不了会话」而没人看得出根因）",
           any("max_sessions_per_user" in e for e in _q_bad), str(_q_bad))
 
+    # 限流上限：缺省 100，可配。会话越多越容易打满（每条会话各有心跳与状态
+    #   轮询，它们都落在同一个 uid 的桶里），所以它是站点可以调的一格。
+    _rps_def = mod.Config(write_conf("", "rps-default.conf"))
+    check("限流上限不写时用缺省 100",
+          _rps_def.max_rpc_per_second == mod.MAX_RPC_PER_SECOND == 100,
+          str(_rps_def.max_rpc_per_second))
+    _rps_ok = mod.Config(write_conf("max_rpc_per_second = 200\n",
+                                    "rps-ok.conf"))
+    check("写 200 是合法的（自检无错误）", _rps_ok.validate() == [])
+    check("写下的值真的生效（不是只做到「不报错」）",
+          _rps_ok.max_rpc_per_second == 200, str(_rps_ok.max_rpc_per_second))
+    _rps_bad = mod.Config(write_conf("max_rpc_per_second = 0\n",
+                                     "rps-zero.conf")).validate()
+    check("写 0 会被自检拦下（否则每一条 RPC 都被拒，所有会话都被当成闪断）",
+          any("max_rpc_per_second" in e for e in _rps_bad), str(_rps_bad))
+
     # 作业日志的保留期。它是【静默失效】的那一类，所以必须在这里拦住：那一格
     #   原样进作业脚本里的 `find … -mtime "+N"`，而那条命令的报错被丢掉、后面还
     #   缀着 `|| true` —— 负数是一条非法表达式，0 会把"约一天以前"的全部删掉。
@@ -12227,6 +12243,11 @@ exit 0
     check("两个日志数也归 NOTICE（改小之后，此后提交的作业会删别人的日志）",
           all(mod.RELOAD_CLASS.get(k) == mod.RELOAD_NOTICE for k in _lg_keys),
           str({k: mod.RELOAD_CLASS.get(k) for k in _lg_keys}))
+    # 限流上限调低之后，已经在跑的那些会话的下一次心跳可能被拒 —— 那是
+    #   "动到已经建立的东西"，所以与端口区间同一档，不归 HOT。
+    check("max_rpc_per_second 归 NOTICE（调低会动到已在跑的会话）",
+          mod.RELOAD_CLASS.get("max_rpc_per_second") == mod.RELOAD_NOTICE,
+          str(mod.RELOAD_CLASS.get("max_rpc_per_second")))
 
     # ── 这一节的两件基础设施 ────────────────────────────────────────────────
     #

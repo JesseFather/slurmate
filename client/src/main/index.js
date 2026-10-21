@@ -3471,6 +3471,22 @@ async function ensureSurface(rec, snap) {
 }
 
 /**
+ * 递给插件的钥匙工具箱，只有契约 §4.2 的那六个函数。
+ *
+ * 不是把 `keys.js` 的模块对象直接递出去：那个对象上还有 `_internal`（给本仓库
+ *   的用例用的），而插件拿到它就看到了一份没有写进契约的表。这个对象是冻结的，
+ *   而且所有会话共用同一个 —— 插件改不动 `generate` 之类的成员。
+ */
+const PLUGIN_KEYS = Object.freeze({
+  generate: keys.generate,
+  publicKeyLine: keys.publicKeyLine,
+  publicKeyLineFromPrivatePem: keys.publicKeyLineFromPrivatePem,
+  isUsablePrivatePem: keys.isUsablePrivatePem,
+  fingerprintOf: keys.fingerprintOf,
+  isValidPublicKeyLine: keys.isValidPublicKeyLine,
+});
+
+/**
  * 递给插件的全部能力。
  *
  * 插件拿到的是这个对象，而不是整个模块作用域。这不是洁癖：它把"一个插件能
@@ -3548,8 +3564,9 @@ function pluginContext(rec) {
       }) : null;
     },
     /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
-     *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。 */
-    keys,
+     *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。
+     *  只有六个函数、而且是冻结的：模块对象上还有 `_internal`，它不在契约里。 */
+    keys: PLUGIN_KEYS,
     // 这一条会话的视图，不是"当前那一个"。
     session: () => (rec.controller && rec.controller.session) || null,
     whoami: () => whoami,
@@ -3561,7 +3578,16 @@ function pluginContext(rec) {
      *   唯一的例子。别拿它当数据目录用：它是所有插件共用的一个根，两个插件
      *   会在里面撞上。
      */
-    home: () => app.getPath('home'),
+    home: () => {
+      const h = app.getPath('home');
+      // 插件会拿它拼路径（sshd 往 `~/.ssh/config` 写那一行）。空串或相对路径
+      //   拼出来的落点会落到进程的 cwd 里，而那是一个插件与框架都不该碰的地方。
+      if (typeof h !== 'string' || !h || !path.isAbsolute(h)) {
+        throw new Error('用户的家目录不是一个绝对路径（' + JSON.stringify(h)
+          + '），插件不能用它拼路径。');
+      }
+      return h;
+    },
 
     /**
      * 这个插件自己的数据目录（绝对路径）。目录可能还不存在 —— 由第一次

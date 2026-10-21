@@ -569,7 +569,7 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 - 未知 code 一律当作不可重试。「宁可停下来让人看见，也不要盲目重试掩盖问题」
   （`client/src/main/classify.js`）。
 - `code 2` 绝不重试。重试只会重复同一个错误，白白消耗 RPC 配额
-  （`max_rpc_per_second = 100`，`client/src/main/classify.js`）。
+  （配置键 `max_rpc_per_second`，缺省 100；`client/src/main/classify.js`）。
 
 ### 幂等性：只有 `submit` 不是幂等的
 
@@ -603,8 +603,9 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 ## 六、操作
 
 所有 op 都在 `dispatch()` 里分发（`cluster/slurmate-sessiond`）。
-限流先于一切：任何 op 都要先过 `rpc_allowed()`（每 uid 每秒
-`max_rpc_per_second` 次），超了直接 `_err(7, "rate_limited")`。
+限流先于一切：任何 op 都要先过 `rpc_allowed()`（配置键
+`max_rpc_per_second`，缺省每 uid 每秒 100 次），超了直接
+`_err(7, "rate_limited")`。
 请求能解析成 JSON 对象但 `op` 不认识 → `_err(2, "unknown_op", op)`。
 
 ### `ping`

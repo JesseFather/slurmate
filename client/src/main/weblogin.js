@@ -89,10 +89,9 @@ async function webLogin(ses, origin, password, contract) {
 /**
  * 这个 URL 是不是契约里的那个登录页。
  *
- * 今天没有任何地方调用它。它配的是「页面静默变回登录表单时自动重登」
- *   （监听 `did-navigate`）—— 那个监听从来没有被接上。留着它是因为它是这份
- *   契约的自然一半，而且写对它有细节（只比 pathname：`/login?failed=1` 也算，
- *   而 `/login/../x` 不算）。接上那个监听之前，别以为它已经在起作用。
+ * 调用它的是 `pluginContext` 的 `ctx.win.reloadSurface`：有登录契约的插件只在
+ *   页面还停在登录表单上时才真的重载。判据只比 pathname（`/login?failed=1`
+ *   也算，而 `/login/../x` 不算）。
  */
 function isLoginPath(url, path) {
   if (typeof url !== 'string' || !url) return false;

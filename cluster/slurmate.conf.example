@@ -14,6 +14,7 @@ sacct =
 
 max_sessions_per_user = 1
 max_connections_per_user = 8
+max_rpc_per_second = 100
 
 default_plugin =
 

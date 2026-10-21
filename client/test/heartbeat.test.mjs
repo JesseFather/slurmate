@@ -81,6 +81,8 @@ test('心跳被限流不是断线：一拍不说，连着两拍才进 warning；
   await c._beat();
   assert.match(c.snapshot().warning || '', /限流/,
     '连着两拍都被限流（九十秒没有一次成功心跳）就该让人知道');
+  assert.match(c.snapshot().warning, /同时开着的会话越多越容易发生/,
+    '要说出「会话越多越容易打满」这层原因 —— 用户能做的动作就在那句话里');
   assert.match(c.snapshot().warning, /仍在重试/);
 
   b.reply = null;

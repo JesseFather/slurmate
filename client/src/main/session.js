@@ -1162,7 +1162,7 @@ class SessionController extends EventEmitter {
       this._heartbeatAt = Date.now();
       this._watched = true;
       this._rateLimitedBeats = 0;
-      if (this.warning && /心跳/.test(this.warning)) this.warning = null;
+      if (this.warning && /心跳|限流/.test(this.warning)) this.warning = null;
     } else if (c.action === Action.SESSION_GONE) {
       // 会话没了，心跳没有意义了。但不能因此判定作业已停 —— 只报告事实。
       this._stopHeartbeat();
@@ -1175,9 +1175,14 @@ class SessionController extends EventEmitter {
       //   （2026-10-18 真机）。
       //   连着两拍都被限流才说出来：那时已经九十秒没有一次成功心跳，
       //   而离 1800 秒那条线还很远 —— 不是不说，是等事实成立。
+      //
+      //   这一句要说出原因，而原因不在应答里：桶按 uid 数请求，所有会话的心跳
+      //   与状态轮询都落在同一个桶里。只写「被限流」的话，用户看到的是
+      //   「站点在拒绝我」，而他能做的「少开几条会话」一个字也没有出现。
       this._rateLimitedBeats += 1;
       if (this._rateLimitedBeats >= 2) {
-        this.warning = '心跳被站点限流（' + c.message + '），仍在重试。';
+        this.warning = '站点限流：同一账户的请求过多，'
+          + '同时开着的会话越多越容易发生；仍在重试。';
       }
     } else {
       // 传输层失败 / 守护进程不可达：继续重试，绝不放弃。

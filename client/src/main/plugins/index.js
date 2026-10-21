@@ -597,10 +597,24 @@ function readPluginFiles(dir) {
  * 不包含目录名（目录名不参与任何判定）、不包含站点签名（签名的内容正是
  *   这个摘要）。池里两条摘要相同的记录是同一个东西，摘要不同就是两个东西在抢
  *   同一个 `(id, 版本)`。
+ *
+ * 公式有两个版本，台账的 `alg` 字段记的是哪一个（见 `config.js` 的 TRUST_ALG）。
+ *   v1 的字节流没有域串，排序用的是 JS 字符串的码元序；v2 在最前面写一个固定
+ *   域串，并把排序改成路径的 UTF-8 字节序 —— 与包摘要（PLUGIN-CONTAINER §3.4）
+ *   同一套约定。两处都只在非 ASCII 路径或"两个用途的摘要碰巧相同"时才看得见，
+ *   但台账里比的是两个摘要是否相等，所以那一格必须是无歧义的。
  */
+const DIGEST_DOMAIN = 'slurmate-plugin-tree\0';
+
 function digestOf(files) {
   const h = crypto.createHash('sha256');
-  for (const f of files) {
+  h.update(DIGEST_DOMAIN);
+  // 排序放在这里而不是信任调用方：`readPluginFiles` 返回的顺序是它的家务事，
+  //   而这个摘要的定义必须只依赖内容。按 UTF-8 字节比，不用 JS 的 `<` ——
+  //   后者比的是 UTF-16 码元，非 BMP 路径上的次序与字节序相反。
+  const ordered = [...files].sort((a, b) => Buffer.compare(
+    Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')));
+  for (const f of ordered) {
     h.update(f.kind); h.update('\0');
     h.update(f.path); h.update('\0');
     h.update(String(f.mode)); h.update('\0');

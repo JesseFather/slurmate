@@ -45,7 +45,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 为什么是这个形状：五个组件、状态机、nft 规则、信任模型、对账与自愈 |
 | [PROTOCOL.md](PROTOCOL.md) | 契约：传输、信封、错误码、三态区分、每个 op |
 | [IMPLEMENTING.md](IMPLEMENTING.md) | 写一个新后端 / 换一门语言的清单，每一条对应一个具体的静默失败 |
-| [CONTRACT.md](CONTRACT.md) | 每一格接口的承诺等级（稳定 / 试验 / 内部）× 保证方式（机器 / 一句话 / 无） |
+| [CONTRACT.md](CONTRACT.md) | 每一格接口的承诺等级（稳定 / 试验 / 内部）× 保证方式（机器 / 用例 / 一句话 / 无） |
 | [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 账本：已核实的缺陷、没有完整实测过的、结构性欠账 |
 
 ## 别处还有

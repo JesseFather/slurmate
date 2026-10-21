@@ -1210,7 +1210,8 @@ test('同意台账只收形状完整的条目 —— 残缺的丢掉比留着安
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     schema: 6,
     trustedPlugins: {
-      'good@1.0.0': { digest: 'a'.repeat(64), site: 'u@h:22', at: 1 },
+      'good@1.0.0': { digest: 'a'.repeat(64), alg: config.TRUST_ALG,
+                      site: 'u@h:22', at: 1 },
       // 短摘要：绝不能被当成"已经同意过" —— 那样真正的那份内容从来没被核对过
       'short@1.0.0': { digest: 'a'.repeat(16), site: 'u@h:22', at: 1 },
       // 缺 digest
@@ -1468,9 +1469,10 @@ test('老的台账条目（没有 alg）按当时那个公式解释，不是"当
   assert.equal(cfg.trustedPlugins['OLD@1.0.0'].alg, config.TRUST_ALG_LEGACY);
   assert.equal(cfg.trustedPlugins['WEIRD@1.0.0'].alg, config.TRUST_ALG_LEGACY,
     'alg 认不出的保留条目（丢掉会让界面只会说"没同意过"），但按老公式解释');
-  // 而只要当前公式还是 1，它们就照旧有效 —— 加这个字段不让任何一条旧同意失效。
-  assert.equal(config.isTrusted(cfg, 'OLD', '1.0.0', 'b'.repeat(64)), true,
-    '加一个字段不该让用户重新同意一遍');
+  // 当前公式已经是 2，而这两条按 1 解释 —— 于是它们不再成立，用户重新确认一次。
+  //   这不是"内容变了"，界面那一句会说清（见 panel.js 的 algChanged 分支）。
+  assert.equal(config.isTrusted(cfg, 'OLD', '1.0.0', 'b'.repeat(64)), false,
+    '按老公式记下的摘要不能给新公式算出来的值作证');
 });
 
 test('§5.3 撤回同意：删掉台账那一条，且如实报告删没删到', () => {

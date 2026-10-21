@@ -891,6 +891,11 @@ def parse_ssh_pubkey(raw):
     if struct.unpack(">I", blob[15:19])[0] != 32:
         return None
     return "ssh-ed25519 " + b64
+
+
+# 每个 uid 每秒最多几次 RPC 的缺省值；配置键 `max_rpc_per_second` 可以覆盖。
+#   桶在 `dispatch()` 里（按 uid、1 秒滑窗），超了回 `rate_limited`。
+#   会话越多越容易打满：每条会话各有心跳与状态轮询，而它们都算在同一个 uid 上。
 MAX_RPC_PER_SECOND = 100
 REJECT_THRESHOLD = 20
 REJECT_WINDOW = 600
@@ -1975,6 +1980,8 @@ GLOBAL_KEYS = frozenset([
     "max_sessions_per_user",
     # 每人同时几条连接。超限就拒绝新来的那一条（不顶掉旧的）。
     "max_connections_per_user",
+    # 每个 uid 每秒最多几次 RPC（1 秒滑窗，所有 op 都算）。缺省 100。
+    "max_rpc_per_second",
     "sbatch", "scancel", "squeue", "scontrol", "sacctmgr",
     # 这三个是集群信息用的。不能省，它们是集群信息
     #   那三格的唯一来源，而 `resolve_bin` 找不到就返回 None，于是
@@ -2041,6 +2048,10 @@ RELOAD_CLASS = {
     "max_connections_per_user": RELOAD_HOT,
 
     # ── 可热，但要说一句 ──────────────────────────────────────────────────
+    # 限流上限：调低之后，已经在跑的那些会话的下一次心跳可能被拒。它们会退避
+    #   重试，但连续几拍被拒就会走到 `suspect` —— 那是动到已经建立的东西，
+    #   所以归这一档而不是上一档。
+    "max_rpc_per_second": RELOAD_NOTICE,
     # 端口区间与避让区间：已经在跑的会话，它的端口可能落在新区间之外。
     # 不拦：那些会话该跑完就跑完（拆的时候按会话记录里的端口拆，与区间无关），
     #   而拦下来会让"改一个数"变成"必须重启、断掉所有人的会话"。
@@ -5941,7 +5952,10 @@ class Config(object):
         #   它不顶掉任何人：超限时被拒的是那条新连接。
         self.max_connections_per_user = getint("max_connections_per_user",
                                                DEFAULT_MAX_CONNECTIONS_PER_USER)
-        self.max_rpc_per_second = MAX_RPC_PER_SECOND
+        # 限流桶的上限。它与上面两格数的是不同的量：那两格数会话与连接，
+        #   这一格数请求；会话越多，请求越多（每条各有心跳与状态轮询）。
+        self.max_rpc_per_second = getint("max_rpc_per_second",
+                                         MAX_RPC_PER_SECOND)
         self.reject_threshold = REJECT_THRESHOLD
         self.reject_window = REJECT_WINDOW
         self.throttle_seconds = THROTTLE_SECONDS
@@ -6150,6 +6164,15 @@ class Config(object):
                 "开一条常驻通道、`slurmate wait` 之类还会各占一条，正常用量"
                 "是个位数，别把它写成 1。"
                 % self.max_connections_per_user)
+        # 限流上限。0 的后果比上面两格更广：心跳、状态轮询、每一次 op 都被拒，
+        #   于是所有会话都会被客户端当成闪断。会话越多，每条会话的心跳与轮询
+        #   越容易把这个桶打满，所以它有一个下限，而没有一个值得写死的上限。
+        if self.max_rpc_per_second < 1:
+            errors.append(
+                "max_rpc_per_second = %d 不成立：0 会让每一条 RPC（包括心跳）"
+                "都被限流，所有会话都会被当成闪断。想要不额外限制就写一个"
+                "足够大的数。"
+                % self.max_rpc_per_second)
         # 端口区间必须与集群上其他端口管理系统完全不交（nftables 对同 hook 同
         # priority 的跨表顺序没有保证，只有"集合不交"才能保证判决确定）。
         # 要与哪些区间避让由配置的 reserved_ranges 决定，不写死在代码里。
@@ -12099,6 +12122,8 @@ def main():
             print("  %s" % _rw)
         print("  作业日志      : 保留 %d 天 / 目录上限 %s"
               % (cfg.log_keep_days, human_bytes(cfg.log_dir_max_bytes)))
+        print("  限流          : 每个 uid 每秒 %d 次 RPC（1 秒滑窗）"
+              % cfg.max_rpc_per_second)
         # 命令路径逐条打印【解析结果】而不是配置里写了什么：配置留空是推荐值，
         # 而留空之后究竟找没找到、找到的是哪一个，只有这里说得清。
         print("  外部命令      :")
