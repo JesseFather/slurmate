@@ -12685,6 +12685,54 @@ exit 0
                   for w in _d_f46.cfg.stale_conf_problems),
               str(_d_f46.cfg.stale_conf_problems)[:300])
 
+        # 账本 S29：`start()` 那几条站级结论的出口。`start()` 本身要建 socket、
+        #   连数据库、装 nft 规则，用例够不着；这四条结论已经抽进
+        #   `announce_config_state()`，热重载每一轮都走同一个函数（F46 就是为
+        #   这件事抽的）。判据是"日志里真的出现了"，不是"代码里写了" ——
+        #   与 19.5h 同一条形状：算出来了、没送出去，这一节一条都不会红。
+        #
+        # 三个输入直接摆上：它们各自怎么算出来，19 节与 26 节已经判过；这里
+        #   判的是"算出来之后有没有说出去"。第四条（悬空的插件配置）由上面
+        #   F46 那一组经 `_do_reload()` 判过，不在这里重复。
+        _S29 = write_conf("range_start = 55001\nrange_end = 55099\n",
+                          "rl-s29.conf")
+        _d_s29 = _mk_reload_d(_S29)
+
+        class _S29Spec(object):
+            id = "01M2JKHTZGF12N0T9CB3XVK36H"
+
+        class _S29Plugin(object):
+            name = "sshd"
+            spec = _S29Spec()
+            default_gpus = {"name": "gpu", "type": "h100", "count": 1}
+
+        class _S29Missing(object):
+            name = "beta"
+
+        _d_s29.cfg.plugins = {"sshd": _S29Plugin()}
+        _d_s29.cfg.plugin_problems = ["一份坏掉的插件树：清单无法解析"]
+        _d_s29.cfg.plugin_job_missing = [_S29Missing()]
+        _d_s29.cfg.stale_conf_problems = []
+        _c29 = _LogCap()
+        _lvl29 = mod.log.level
+        mod.log.addHandler(_c29)
+        mod.log.setLevel(logging.DEBUG)
+        try:
+            _d_s29.announce_config_state()
+        finally:
+            mod.log.removeHandler(_c29)
+            mod.log.setLevel(_lvl29)
+        _errs29 = [m for (lvl, m) in _c29.lines if lvl == "ERROR"]
+        check("S29：插件树坏了 —— 那一条进的是 error 日志，不是被静默跳过",
+              any("插件有问题" in m and "清单无法解析" in m for m in _errs29),
+              str(_errs29)[:400])
+        check("S29：有作业侧却没作业脚本 —— 日志点名是哪个插件、脚本该在哪",
+              any("beta" in m and "作业脚本" in m for m in _errs29),
+              str(_errs29)[:400])
+        check("S29：那份配置里的 default_gpus 本站没有 —— gres 那一条也进了日志",
+              any("default_gpus" in m and "gpu:h100" in m for m in _errs29),
+              str(_errs29)[:400])
+
     finally:
         mod.default_plugins_dir = _saved_rl_dir
         mod.run_cmd = _saved_rl_run
