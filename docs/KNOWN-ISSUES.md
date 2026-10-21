@@ -192,10 +192,17 @@ OOM 与节点重启仍然有这一段，上面的修法（过期时反查）仍�
 `KillWait` 窗口、epilog 挂住、以及"权限少一个读位"那种失败没有专门造过。后一种仍是
 "无法读取文件"，而那句话里不提权限 —— 它要故意摆坏才看得到，不在正常走的路上。
 
-### U4 — sshd 会话的端到端没验过
+### U4 — sshd 会话的端到端：作业侧在本地跑通了，站点那一跳没有
 
-要部署到控制节点后手工提交一个 `service_kind=sshd` 的会话，从登录节点 `ssh -W` 连
-一次。今天这个插件的作业侧只有静态检查与桩测试。
+**2026-10-21 本地把作业侧真的跑了一遍**（不是桩）：按宿主的接口给
+`SLURMATE_SSH_PUBKEY` / `LOCAL_LOG_DIR` / `NODE_IP`，`precheck_sshd` 通过，主机密钥
+落到 `$HOME/.slurmate/ssh/host_ed25519`；用户态 sshd 9.6 在 `127.0.0.1:55221` 起来、
+版本行嗅探到 `SSH-2.0-*`，用客户端同格式的公钥登录成功，`PLUGIN_SESSION_FIELDS[ssh_host_key]`
+有值。
+
+**没有验到的是站点那一整条**：sbatch 织入、计算节点上真的起 sshd、登录节点的 nft
+规则、客户端的隧道与写 `~/.ssh/config`。要一台装好这个插件的站点，从界面上起一条
+会话，再在终端里 `ssh slurmate`。
 
 ### U6 — `slurmate submit` 这条 CLI 本身没在真集群上跑过
 
@@ -218,7 +225,9 @@ slurmate submit  →  slurmate wait --session <id>  →  nft list chain inet slu
 升级也走过）。没有真实字节撑到过的：
 
 - **签名**：真站点上分发的包里没有签名块（`sign` 是独立一步）。验签、
-  `--expect-signer` 与血统表那几处只有用例。
+  `--expect-signer` 与血统表那几处只有用例。2026-10-21 打了一份签名的 sshd 1.0.1
+  包（签名者 `a2349e75…`，`verify` 与 `inspect` 都过），但它还没有经过站点分发；
+  验签那一环要等它装上、客户端取回之后才算真。
 - **整包上限 2 MiB**：包里没有签名块、体积只有二十几 KiB；`RPC_MAX_RESPONSE_BYTES`
   是 4 MiB，余量约 1.5 倍，这个余量在真集群上一次都没有被撑到过。超限时
   `json.loads` 必失败，客户端把它归成 `daemon_unreachable`。
