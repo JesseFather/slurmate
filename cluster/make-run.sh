@@ -49,6 +49,7 @@ die() { echo "  [中止] $*" >&2; exit 1; }
 #   "发出去的东西有一份清单"，不是"顺手多带一份"。
 PAYLOAD=(
     cluster/install-base.sh
+    cluster/slurmate-uninstall
     cluster/slurmate-sessiond
     cluster/slurmate
     cluster/nft-compare.py

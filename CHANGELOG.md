@@ -31,6 +31,46 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.34] — 未发布
+
+> 协议版本是 **0.34**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
+> `0.34`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
+> **`0.34.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
+>
+> 这一版没有新增协议 op：卸载不再依赖安装包、卸载先停会话；站点上没有
+> Slurmate 时客户端回连接屏。
+
+### Added — 本机卸载器
+
+安装时多放两样：`/usr/local/sbin/slurmate-uninstall` 与
+`<share>/slurmate/deploy/`（`install-base.sh`、`conf-merge.py`、
+`slurmate.conf.example`）。`sudo slurmate-uninstall` 直接可用，参数原样转发
+（`--purge-state` / `--dry-run` / `--force`）。安装包的 `--uninstall` 仍在，
+是那一份缺失时的退路；两条路跑同一份卸载逻辑。与 `nvidia-uninstall`、
+`cuda-uninstaller` 同一个形状。
+
+### Changed — 卸载先取消会话，再删 ACL
+
+`inet slurmate` 里每条会话规则就是隔离。卸载现在先走 `slurmate service stop`
+（取消全部会话 → 等释放 → 停服务 → 删表），再删文件；会话停不干净时中止，
+加 `--force` 才继续。服务没在运行而表里还有会话规则时同样中止，提示先
+`slurmate service start` 取回会话。
+
+**判据**：`cluster/test-sessiond-logic.py` 19.13b 的源码顺序判据（CLI 调用
+必须在删表之前）；`cmd_service_stop` 自身的顺序已有行为用例。
+
+### Changed — 站点上没有 Slurmate 时，客户端断开回连接屏
+
+`rpc()` 现在认退出码 126/127 与 `No such file or directory`：这是
+`cli_missing`，不是传输抖动。后端停掉重连并广播 `definitive`，主进程忘掉会话、
+关掉页面、回连接屏，文案说明作业可能还在跑。握手时同一结论回
+`code: 'cli_missing'`，界面停在连接屏并给出那句话。主动断开也会广播状态，
+左栏不再停在「已连接」。
+
+**判据**：`client/test/backend-ssh.test.mjs` 三条（rpc 的 127、非 127 不误判、
+连接时）；`classify` 一条；`client/test/boot.test.mjs` 一条（页面收掉、
+`ui:siteClosed`、会话忘掉）。
+
 ## [0.33] — 未发布
 
 > 协议版本是 **0.33**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

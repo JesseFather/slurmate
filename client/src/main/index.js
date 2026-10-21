@@ -232,6 +232,14 @@ let siteFetching = false;
 let link = { connected: false, detail: null };
 
 /**
+ * 「站点上已经没有 Slurmate」这一类收尾，每条连接只做一次。
+ *
+ * 后端只广播一次 `definitive`，但收尾是异步的（忘会话、关页面）；这面旗子
+ * 防的是收尾途中再来一条状态事件又走一遍。`doConnect` 时复位。
+ */
+let definitiveHandled = false;
+
+/**
  * 多久问一次站点现状。
  *
  * 间隔跟着通道走，这不是优化，是"不在别人的登录节点上每 30 秒 fork 一次"：
@@ -443,6 +451,15 @@ function bootstrap() {
       // 刚连上（或刚重连上）的那一刻补一次：`startSitePoll` 那个定时器要等到
       // 下一拍，而圆点在那之前是灰的。
       if (!was && link.connected) refreshSite();
+      // 站点上没有本系统的命令：这条路不会自己好，收尾一次。
+      if (s && s.definitive && !definitiveHandled) {
+        definitiveHandled = true;
+        handleSiteGone(link.detail || '站点上已经没有 Slurmate。')
+          .catch((e) => {
+            win.pushNotice('error', '断开时出错：'
+              + (e && e.message ? e.message : String(e)));
+          });
+      }
     });
 
     // 本机池那个目录不再被读了，说一句。它是用户自己装插件的地方。
@@ -749,6 +766,7 @@ async function doConnect(conn, extra = {}) {
   // 先把世代号推一格：上一次连接的插件对账可能还在后台取文件，而它带回来的
   //   东西属于上一个站点。见 reconcileSitePlugins 的世代守卫。
   connectGeneration += 1;
+  definitiveHandled = false;
   pendingConsent = [];
   // 这条连接自己的那把私钥。没有就生成一把 —— 但读不出来时绝不生成
   // （见 ensureKey）：那会作废用户已经注册到 IDM 的公钥，而症状只是「认证失败」。
@@ -4260,6 +4278,24 @@ function armEmptyHands() {
  *   断开之后那条作业重新进入"没人看着它"的倒计时，而这正是用户要的：
  *   客户端不能靠一直开着替它续命。
  */
+/**
+ * 站点上没有本系统的命令（被卸载、或没装好）：这条路不会自己好。
+ *
+ * 与空手超时同一条收尾 —— 忘掉会话、关掉页面、回连接屏。
+ * 不先问用户：站点已经不在，页面即使还能打开也不再受任何东西管理；
+ *   文案里说清「作业可能还在跑」，那是他能据此决定下一步的唯一事实。
+ */
+async function handleSiteGone(reason) {
+  stopKeepAlive();
+  await forgetSessions();
+  await teardownConnection();
+  const text = reason + '作业可能还在跑，本机已经不能再管理它们。';
+  if (win) {
+    win.pushNotice('error', text);
+    win.pushSiteClosed({ reason: text });
+  }
+}
+
 async function closeEmptyHandsSite() {
   stopKeepAlive();
   const reason = '这个站点上没有一条会话由本机看护，已自动断开。'

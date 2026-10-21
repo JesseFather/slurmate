@@ -658,6 +658,15 @@ class SshBackend extends Backend {
     this._closed = false;
     this._reconnectTimer = null;
     this._attempt = 0;
+    // 「不用再重试」那一类结论（见 `_markDefinitive`）。它只由
+    //   站点上没有本系统命令这一件事置位，`connect()` 时复位。
+    this._definitive = false;
+    // 这一次 `_open()` 是不是重连排的：自动重连时见到 cli_missing 要通知
+    //   上层收尾；用户手动连接那一次只回报错，界面本来就停在连接屏上。
+    this._autoReconnect = false;
+    // 握手那两条（ping / whoami）走的是同一个 `rpc()`。它们失败时由
+    //   `_openOnce` 自己决定怎么回报，不由 `rpc()` 顺手广播收尾。
+    this._handshaking = false;
     this._lastHostKey = null;   // { fingerprint, algorithm } —— 供界面展示
 
     /**
@@ -770,6 +779,9 @@ class SshBackend extends Backend {
 
     this._profile = { user: profile.user, host: profile.host, port: profile.port };
     this._closed = false;
+    this._definitive = false;
+    this._autoReconnect = false;
+    this._handshaking = false;
     this._attempt = 0;
     // 建目录那一次是跟着连接走的（它挂在 `_conn` 上）：换一条连接就必须重新
     //   发起。留着上一次那个 promise 的话，新连接的第一次提交会拿到旧连接的
@@ -818,7 +830,10 @@ class SshBackend extends Backend {
       let settled = false;
       let rejected = null;       // 主机密钥被拒时的原因
 
-      const done = (res) => { if (!settled) { settled = true; resolve(res); } };
+      const done = (res) => {
+        this._handshaking = false;
+        if (!settled) { settled = true; resolve(res); }
+      };
 
       client.on('ready', async () => {
         this._conn = client;
@@ -860,6 +875,7 @@ class SshBackend extends Backend {
         //     闸在 index.js —— 演示后端也要过同一道闸，而 index.js 是这两个后端
         //     唯一的交汇点。这里只负责"把版本问出来"，以及把"问不到"的几种情况
         //     分开（它们是三个不同的结论，不是一个）。
+        this._handshaking = true;
         const ping = await this.rpc({ op: 'ping' });
         const noPing = Boolean(ping && !ping.ok && ping.error
           && ping.error.kind === 'unknown_op');
@@ -878,6 +894,12 @@ class SshBackend extends Backend {
             || '未知原因';
           try { client.end(); } catch { /* 尽力 */ }
           this._conn = null;
+          if (ping && ping.error && ping.error.kind === 'cli_missing') {
+            const detail = '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。';
+            // 自动重连时要把上层也叫醒；用户手动连接那一次只回报错。
+            if (this._autoReconnect) this._markDefinitive(detail);
+            return done({ ok: false, code: 'cli_missing', error: detail });
+          }
           return done({
             ok: false,
             code: 'rpc_unavailable',
@@ -893,6 +915,13 @@ class SshBackend extends Backend {
           this._whoami = resp.data;
           this._daemonVersion = daemonVersion;
           return done({ ok: true, whoami: resp.data, daemonVersion });
+        }
+        if (resp && resp.error && resp.error.kind === 'cli_missing') {
+          const missing = '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。';
+          try { client.end(); } catch { /* 尽力 */ }
+          this._conn = null;
+          if (this._autoReconnect) this._markDefinitive(missing);
+          return done({ ok: false, code: 'cli_missing', error: missing });
         }
         const detail = (resp && resp.error && resp.error.detail)
           || (resp && resp.error && resp.error.kind) || '未知原因';
@@ -995,17 +1024,37 @@ class SshBackend extends Backend {
   }
 
   _scheduleReconnect() {
-    if (this._closed || !this._profile || this._reconnectTimer) return;
+    if (this._closed || this._definitive || !this._profile || this._reconnectTimer) return;
     const delay = Math.min(RECONNECT_MIN_MS * (2 ** this._attempt), RECONNECT_MAX_MS);
     this._attempt += 1;
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
-      if (this._closed || !this._profile) return;
+      if (this._closed || this._definitive || !this._profile) return;
       // 只重连「被断掉的」连接。这里【不】重试主机密钥被拒的情况 ——
       // 那需要用户先做决定，自动重试只会把同一个拒绝重复一遍。
-      this._open().catch(() => { /* 下一轮 close 会再排 */ });
+      this._autoReconnect = true;
+      this._open()
+        .catch(() => { /* 下一轮 close 会再排 */ })
+        .finally(() => { this._autoReconnect = false; });
     }, delay);
     this._reconnectTimer.unref?.();
+  }
+
+  /**
+   * 一条「重试不会变好」的结论：站点上没有本系统的命令。
+   *
+   * 它只广播一次，并把重连停掉。上层（index.js）收到 `definitive: true`
+   *   之后会走与空手定时器同一条收尾（忘掉会话、关页面、回连接屏）。
+   * 不在这里直接关连接：`rpc()` 可能还在把这一条应答交出去，收尾由上层做。
+   */
+  _markDefinitive(detail) {
+    if (this._definitive) return;
+    this._definitive = true;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._emitState(false, detail, { definitive: true });
   }
 
   // ── 作业日志目录 ────────────────────────────────────────────────────────
@@ -1397,6 +1446,7 @@ class SshBackend extends Backend {
         let stdout = '';
         let stderr = '';
         let gotExit = false;
+        let exitCode = null;
         let finished = false;
         // 与常驻通道同一个理由（见 ResidentChannel 里的 `_dec`）：按 chunk 各转一次
         //   字符串会把跨边界的多字节字符撕成 U+FFFD，而那是间歇性的。
@@ -1411,13 +1461,31 @@ class SshBackend extends Backend {
           }
         });
         stream.stderr.on('data', (d) => { stderr += d; });
-        stream.on('exit', () => { gotExit = true; });
+        stream.on('exit', (code) => {
+          gotExit = true;
+          if (typeof code === 'number') exitCode = code;
+        });
         stream.on('error', (e) => finish(transportError('通道出错：' + e.message)));
         stream.on('close', () => {
           stdout += dec.end();     // 最后那几个字节（同样可能是半个字符）
           // 不因为「没收到 exit 事件」就当成失败 —— 宁可不丢一个合法应答。
           const picked = pickEnvelope(stdout);
           if (picked.found) return finish(picked.envelope);
+
+          // 站点上没有本系统的命令（被卸载、或没装好）。退出码与 shell 的原话
+          //   一起认：`bash -c '/usr/local/bin/slurmate rpc'` 在命令不存在时回
+          //   127，stderr 是那一句 `No such file or directory`。
+          //   这是「重试不会变好」的那一类，单独给一个 kind；重连由上层停掉。
+          if ((exitCode === 126 || exitCode === 127)
+              && /No such file or directory|not found|command not found/i.test(stderr)) {
+            const detail = '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。';
+            // 握手那两条由 `_openOnce` 自己决定怎么回报（见 `_handshaking`）。
+            if (!this._handshaking) this._markDefinitive(detail);
+            return finish({
+              ok: false, code: null, data: null,
+              error: { kind: 'cli_missing', detail },
+            });
+          }
 
           // 一行都没解析出来。把原始输出一并报出来，别只留一句「解析失败」——
           // 这正是「rc 文件污染 / 守护进程没装 / 被 guard 拦了 / python 崩了」
@@ -1472,6 +1540,10 @@ class SshBackend extends Backend {
     this._whoami = null;
     this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
     if (c) { try { c.end(); } catch { /* 尽力而为 */ } }
+    // 主动关闭也要广播。`client.on('close')` 那道守卫要求 `_conn === client`，
+    //   而上面刚把它清掉，所以不在这里说一声的话，左栏与浮窗那一行会一直
+    //   停在「已连接」。
+    this._emitState(false, '连接已关闭');
   }
 }
 

@@ -4897,6 +4897,31 @@ exit 0
           'txn_save_dir "${SHARE_DIR}/plugins"' in _ib_src)
     check("--purge-state 是改名到兄弟目录，不是直接 rm -rf",
           "txn_purge_dir" in _ib_src and "uninstall-${TS}" in _ib_src)
+    # 0.34：卸载先停会话，再删 ACL。`service stop` 已经是正确顺序
+    #   （stop_all → 等释放 → 停服务 → 删表），这里只钉"先调它、后删表"。
+    # 判据看代码，不看注释：把一行注释掉并不等于它还在（下一次变异当场
+    #   证明过这一点 —— 注释里留着同一个字符串，判据会绿）。
+    _i_stop = _ib_code.find('SLURMATE_LOCK_HELD=1 "$CLI" service stop')
+    _i_nft = _ib_code.find("nft delete table inet slurmate")
+    check("卸载先停会话再删 nft 表（顺序反了就是隔离先消失、作业还在跑）",
+          _i_stop != -1 and _i_nft != -1 and _i_stop < _i_nft,
+          "stop=%d nft=%d" % (_i_stop, _i_nft))
+    check("会话停不干净时拒绝；--force 是那一档逃生口",
+          "--force)             FORCE=1" in _ib_code
+          and "确认后加 --force" in _ib_code
+          and "不再受本站管理" in _ib_code)
+    check("本机卸载器：包装脚本、载荷与卸载时的清理都在",
+          'install_one "${SRC_DIR}/slurmate-uninstall" "$UNINSTALL" 755' in _ib_code
+          and '"${DEPLOY_DIR}/install-base.sh"' in _ib_code
+          and 'txn_save_dir "$DEPLOY_DIR"' in _ib_code)
+    check("_conf_ours 只要求它真正要执行的那两份（本机卸载器不带整份源文件）",
+          'files_are_trusted "${SELF_DIR}/conf-merge.py"' in _ib_code)
+    _un = os.path.join(HERE, "slurmate-uninstall")
+    _un_src = open(_un, encoding="utf-8").read()
+    check("本机卸载器把参数原样转给安装器（--purge-state / --force / --dry-run）",
+          '--uninstall "$@"' in _un_src and "mktemp -d" in _un_src
+          and "install-base.sh" in _un_src,
+          "未见参数转发或临时目录拷贝")
     _ts = subprocess.run(["bash", _ib, "--txn-selftest"],
                          capture_output=True, text=True)
     _m = re.search(r"事务自测：(\d+)/(\d+) 通过", _ts.stdout)

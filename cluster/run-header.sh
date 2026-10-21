@@ -107,12 +107,16 @@ slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
   --dry-run      演练：说清将要做什么，一个字都不改（与安装、修复、体检合用）
   --no-restart   装/升级/修复结束后不重启服务（演练与脚本用）
   --purge-state  卸载时连状态数据一起删（与 --uninstall 合用）
+  --force        卸载时会话停不干净也继续（与 --uninstall 合用）
   --version      只打印这一份包的版本
   --help         这一屏
 
 它只做两件事：把包体解压到临时目录，把动词转给包内的
 cluster/install-base.sh。五个部署动词的实现只有那一份：预检、快照、
 非干扰比对、卸载的逐项归属校验，都在它里面。
+
+装好之后也可以不依赖这一份包卸载：`sudo slurmate-uninstall`
+（安装时放在 /usr/local/sbin，载荷在 /usr/local/share/slurmate/deploy）。
 
 安装、升级、修复、卸载都是一次事务：中途失败自动恢复到运行前，成功后
 不保留旧副本。被 kill -9 或断电打断的现场，下一次会先自动收尾。

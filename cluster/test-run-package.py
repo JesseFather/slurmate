@@ -295,6 +295,8 @@ def main():
                  (["--repair"], "STUB-ARGS: --repair"),
                  (["--uninstall", "--purge-state"],
                   "STUB-ARGS: --uninstall --purge-state"),
+                 (["--uninstall", "--force"],
+                  "STUB-ARGS: --uninstall --force"),
                  (["--repair", "--dry-run"], "STUB-ARGS: --repair --dry-run"),
                  (["--check"], "STUB-ARGS: --check"),
                  (["--rollback", "/root/slurmate-deploy-20260101-000000"],

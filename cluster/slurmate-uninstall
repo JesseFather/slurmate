@@ -1,0 +1,73 @@
+#!/bin/bash
+# Copyright 2026 JesseFather
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+#  slurmate-uninstall — 用装在本机的那一份安装器卸载本站
+# ==============================================================================
+#
+#  安装时由 `install-base.sh` 放到 `/usr/local/sbin/`，并在
+#  `/usr/local/share/slurmate/deploy/` 留一份卸载器要用的文件。于是卸载不需要
+#  最初那份 `.run` —— 与 NVIDIA 的 `nvidia-uninstall`、CUDA 的
+#  `cuda-uninstaller` 同一个形状：装上去的软件自带卸载器，安装包只是退路。
+#
+#  它把 `deploy/` 拷进临时目录再跑：卸载会删掉 `deploy/` 本身，脚本要能跑完。
+#
+#  用法：
+#    sudo slurmate-uninstall                    # 保留状态与日志
+#    sudo slurmate-uninstall --purge-state      # 连状态与日志一起删
+#    sudo slurmate-uninstall --dry-run          # 演练，不做任何改动
+#    sudo slurmate-uninstall --force            # 会话停不干净时仍然继续
+#
+#  本机这一份坏了或不存在时，用安装包卸：
+#    sudo bash slurmate-site-<版本>.run --uninstall
+# ==============================================================================
+
+set -uo pipefail
+
+SHARE_DIR="/usr/local/share/slurmate"
+DEPLOY_DIR="${SHARE_DIR}/deploy"
+
+usage() {
+    awk '/^# =====/ { n++; next }
+         n == 2 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+esac
+
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "请以 root 运行：sudo slurmate-uninstall" >&2
+    exit 1
+fi
+
+if [[ ! -x "${DEPLOY_DIR}/install-base.sh" ]]; then
+    echo "本机没有可用的卸载器（${DEPLOY_DIR}/install-base.sh）。" >&2
+    echo "  用安装包卸载：sudo bash slurmate-site-<版本>.run --uninstall" >&2
+    exit 1
+fi
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/slurmate-uninstall.XXXXXX")" || {
+    echo "无法创建临时目录，没有改动任何文件。" >&2
+    exit 1
+}
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+cp -a "${DEPLOY_DIR}/." "$TMP/" || {
+    echo "无法把卸载器拷到临时目录 ${TMP}，没有改动任何文件。" >&2
+    exit 1
+}
+
+bash "${TMP}/install-base.sh" --uninstall "$@"

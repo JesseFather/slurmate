@@ -572,13 +572,28 @@ ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>
 
 ### 步骤 6：卸载
 
+装好的机器自带卸载器，不需要最初那份包：
+
 ```bash
-sudo bash slurmate-site-<版本>.run --uninstall              # 保留状态与日志
-sudo bash slurmate-site-<版本>.run --uninstall --purge-state
+sudo slurmate-uninstall                    # 保留状态与日志
+sudo slurmate-uninstall --purge-state
 ```
 
-卸载路径永远可用 —— 它不做任何多余的预检，出故障时管理员最需要的就是能干净地
-把它拿掉（`cluster/install-base.sh`）。
+卸载默认先取消本站全部会话，再停服务、删表、删文件 —— 与 `slurmate service stop`
+同一条路。顺序要紧：nft 表里的会话规则就是隔离，先删表而作业还在跑，那些端口
+对别的 UID 就敞开了。
+
+会话停不干净时会中止并说明原因；确认要留着那些作业继续，加 `--force`。
+
+`slurmate-uninstall` 不在时（只装了一半，或那份载荷被删了），用安装包：
+
+```bash
+sudo bash slurmate-site-<版本>.run --uninstall
+```
+
+卸载路径不做预检：基线不完整、源文件缺失、配置损坏都不该拦住它。
+
+唯一的例外是上面那一格 —— 还有会话停不下来（`cluster/install-base.sh`）。
 
 两处刻意的保守行为：
 

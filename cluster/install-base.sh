@@ -68,8 +68,12 @@
 #    sudo bash install-base.sh --dry-run           # 演练，不做任何改动
 #    sudo bash install-base.sh --no-restart        # 装完不重启服务（演练/脚本用）
 #    sudo bash install-base.sh --uninstall --purge-state
+#    sudo bash install-base.sh --uninstall --force  # 会话停不干净时仍继续
 #    sudo bash install-base.sh --require-baseline  # 前置基线缺失即中止（见下）
 #    sudo bash install-base.sh --rollback <目录>   # 收尾一次没有走完的部署
+#
+#  卸载也可以不依赖安装包：装好之后用 `sudo slurmate-uninstall`
+#  （见 cluster/slurmate-uninstall）。两条路跑的是同一份卸载逻辑。
 #
 #  装、升、修、卸都是一次事务：中途任何一个失败都按撤销日志恢复到运行前
 #  （文件、配置、单元、开机自启、服务状态、nft 表），成功则连日志带旧副本
@@ -121,7 +125,12 @@ SCRIPT_PATH="${SLURMATE_ORIG_SCRIPT:-$SELF_SCRIPT}"
 
 DAEMON="/usr/local/sbin/slurmate-sessiond"
 CLI="/usr/local/bin/slurmate"
+# 本机卸载器：装上去之后，卸载不再需要最初那份 .run。
+#   `install-base.sh` 与它用到的两份文件留在 `<SHARE_DIR>/deploy/`，
+#   所以包装脚本本身只有一层转发。见 cluster/slurmate-uninstall。
+UNINSTALL="/usr/local/sbin/slurmate-uninstall"
 SHARE_DIR="/usr/local/share/slurmate"
+DEPLOY_DIR="${SHARE_DIR}/deploy"
 # `<SHARE_DIR>/jobs` 与 `<SHARE_DIR>/plugins` 不归本脚本管 —— 那两条路径
 #   由安装器按同一个前缀算出来（`slurmate-sessiond` 的 default_jobs_dir /
 #   default_plugins_dir），本脚本不认识它们。这是刻意的：一个路径一旦有两个
@@ -144,6 +153,7 @@ MODE="install"
 REQUIRE_BASELINE=0
 DRYRUN=0
 PURGE=0
+FORCE=0
 NORESTART=0
 ROLLBACK_FROM=""
 
@@ -157,9 +167,9 @@ while [[ $# -gt 0 ]]; do
         --dry-run)           DRYRUN=1 ;;
         --no-restart)        NORESTART=1 ;;
         --require-baseline)  REQUIRE_BASELINE=1 ;;
-        # 兼容旧命令行：--force 是空操作（基线不完整时默认就继续），保留接受，
-        # 免得旧脚本/旧笔记里的命令直接报错。
-        --force)             : ;;
+        # 只有卸载读它：会话停不干净时仍然继续。
+        #   别处仍然是空操作（基线不完整时默认就继续），旧命令行照旧能跑。
+        --force)             FORCE=1 ;;
         --purge-state)       PURGE=1 ;;
         --rollback)
             MODE="rollback"
@@ -827,7 +837,7 @@ fi
 # ── 源文件清单与可信性 ──────────────────────────────────────────────────────
 # 安装路径用它决定要不要自拷贝；卸载路径用它决定能不能执行同目录的
 #   `conf-merge.py`（那个文件会以 root 跑）。
-SRC_FILES=(slurmate-sessiond slurmate run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py conf-merge.py)
+SRC_FILES=(slurmate-sessiond slurmate slurmate-uninstall run.sbatch slurmate.conf.example slurmate-sessiond.service nft-compare.py conf-merge.py)
 ALL_SRC_FILES=()
 while IFS= read -r f; do
     [[ -n "$f" ]] && ALL_SRC_FILES+=("$f")
@@ -837,6 +847,22 @@ done < <(for f in "${SRC_FILES[@]}"; do printf '%s\n' "${SRC_DIR}/${f}"; done)
 source_is_trusted() {
     local f st owner mode
     for f in "${ALL_SRC_FILES[@]}"; do
+        st="$(stat -c '%U %a' "$f" 2>/dev/null)" || return 1
+        owner="${st%% *}"; mode="${st##* }"
+        [[ "$owner" == "root" ]] || return 1
+        (( (8#${mode} & 8#022) == 0 )) || return 1
+    done
+    return 0
+}
+
+# 只信指定的那几份，不要求整份源文件清单齐备。
+#
+# 本机卸载器只带 conf-merge.py 与站点配置示例，不带守护进程与命令行；
+#   而 `_conf_ours()` 要执行的只有前者。判据与上面同一条：root 拥有、
+#   组/其他不可写。
+files_are_trusted() {
+    local f st owner mode
+    for f in "$@"; do
         st="$(stat -c '%U %a' "$f" 2>/dev/null)" || return 1
         owner="${st%% *}"; mode="${st##* }"
         [[ "$owner" == "root" ]] || return 1
@@ -902,15 +928,54 @@ fi
 # ==============================================================================
 #  卸载：放在最前面，且只要求 root
 # ==============================================================================
-#  卸载必须【永远可用】—— 不能因为基线不完整、源文件缺失、配置损坏而拦不住。
-#  出故障时管理员最需要的就是能干净地把它拿掉。
+#  卸载不做预检 —— 不能因为基线不完整、源文件缺失、配置损坏而拦不住。
+#  唯一会拦它的是一件事：还有会话停不下来。那一格默认拒绝（先停会话、再删
+#    ACL 是安全顺序），`--force` 是保证它能走完的那一格。
 #  它也是一次事务：删每一样之前先写撤销记录；中途失败按日志恢复。
 if [[ "$MODE" == "uninstall" ]]; then
     step "卸载"
 
     if [[ "$DRYRUN" -eq 1 ]]; then
-        info "[演练] 卸载会停服务、删表、删文件；本次没有改动任何文件。"
+        info "[演练] 卸载会先取消本站全部会话，再停服务、删表、删文件；本次没有改动任何文件。"
         exit 0
+    fi
+
+    # ── 会话：先停会话，再删 ACL ────────────────────────────────────────────
+    # 顺序要紧：nft 表里每条 `slurmate-sess-…` 规则就是隔离本身。先删表、
+    #   而作业还在跑，从那刻起那些端口对别的 UID 就是敞开的。
+    #   `slurmate service stop` 已经是正确顺序（取消全部会话 → 等释放 →
+    #   停服务 → 删表），这里复用它，不写第二份。
+    #
+    # 服务没在跑（或 CLI 不在）时无法取消作业：只要 nft 里还有会话规则，
+    #   就拒绝 —— 那正是「作业还在跑、隔离即将消失」的那一格。出路是先
+    #   `slurmate service start`（守护进程会从 claims 取回会话），或 --force。
+    _uninstall_session_rules() {
+        [[ -x "$NFT" ]] || { echo 0; return 0; }
+        "$NFT" -a list chain inet slurmate output 2>/dev/null \
+            | grep -c 'slurmate-sess-' || true
+    }
+    _uninstall_stop_sessions() {
+        if [[ -x "$CLI" ]] && systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+            SLURMATE_LOCK_HELD=1 "$CLI" service stop
+            return $?
+        fi
+        local n
+        n="$(_uninstall_session_rules)"
+        if [[ "${n:-0}" -gt 0 ]]; then
+            warn "服务没有在运行，而 nft 里还有 ${n} 条会话规则：这些作业可能还在跑"
+            warn "  先启动服务（它会从 claims 取回会话）再卸载：sudo slurmate service start"
+            return 1
+        fi
+        return 0
+    }
+
+    info "停止本站会话（先取消作业，再停服务与删表）"
+    if ! _uninstall_stop_sessions; then
+        if [[ "$FORCE" -eq 1 ]]; then
+            warn "按 --force 继续：仍在跑的作业会失去 ACL，并且不再受本站管理"
+        else
+            die "会话没有停干净，没有改动任何文件。修好之后重试，或确认后加 --force。"
+        fi
     fi
 
     _conf_ours() {
@@ -919,8 +984,10 @@ if [[ "$MODE" == "uninstall" ]]; then
         local f="$1"
         [[ -f "${SELF_DIR}/conf-merge.py" \
            && -f "${SELF_DIR}/slurmate.conf.example" ]] || return 1
-        # 要执行同目录里的脚本，判据与安装前的自拷贝一致。
-        source_is_trusted || return 1
+        # 要执行同目录里的脚本，判据与安装前的自拷贝一致；但只要求这两份
+        #   —— 本机卸载器的载荷里没有守护进程与命令行。
+        files_are_trusted "${SELF_DIR}/conf-merge.py" \
+                          "${SELF_DIR}/slurmate.conf.example" || return 1
         "$PY" "${SELF_DIR}/conf-merge.py" --looks-like-config "$f" \
             --example "${SELF_DIR}/slurmate.conf.example" >/dev/null 2>&1
     }
@@ -973,7 +1040,8 @@ if [[ "$MODE" == "uninstall" ]]; then
 
     # 删文件前逐项确认"这确实是本系统装的文件"。
     # 站点配置单独判：它按设计就不含产品名。
-    for f in "$DAEMON" "$CLI" "$CONF" "$UNIT" "${SHARE_DIR}/nft-compare.py" \
+    for f in "$DAEMON" "$CLI" "$UNINSTALL" "$CONF" "$UNIT" \
+             "${SHARE_DIR}/nft-compare.py" \
              "${SHARE_DIR}/run.sbatch.template"; do
         if [[ ! -e "$f" ]]; then
             continue
@@ -993,6 +1061,14 @@ if [[ "$MODE" == "uninstall" ]]; then
         rm -f "$f" || die "删除 ${f} 失败（正在回滚）"
         ok "已删除 ${f}"
     done
+
+    # 本机卸载器的载荷：先整棵备份，再删。脚本此刻跑在 /tmp 的副本上
+    #   （见 cluster/slurmate-uninstall），删掉这一棵不会打断它。
+    if [[ -d "$DEPLOY_DIR" ]]; then
+        txn_save_dir "$DEPLOY_DIR" || die "无法备份 ${DEPLOY_DIR}（正在回滚）"
+        rm -rf "$DEPLOY_DIR" || die "删除 ${DEPLOY_DIR} 失败（正在回滚）"
+        ok "已删除 ${DEPLOY_DIR}"
+    fi
 
     # 只在目录为空时才删 —— 里面若有别人放的文件就留着。
     for d in "$SHARE_DIR" "$CONF_DIR"; do
@@ -1506,6 +1582,11 @@ audit_installed() {
     audit_file "命令行"     "$CLI"    755 "${SRC_DIR}/slurmate"
     audit_file "比对器"     "${SHARE_DIR}/nft-compare.py" 644 "${SRC_DIR}/nft-compare.py"
     audit_file "作业模板"   "${SHARE_DIR}/run.sbatch.template" 644 "${SRC_DIR}/run.sbatch"
+    audit_file "本机卸载器" "$UNINSTALL" 755 "${SRC_DIR}/slurmate-uninstall"
+    audit_file "卸载器载荷" "${DEPLOY_DIR}/install-base.sh" 755 "$SELF_SCRIPT"
+    audit_file "卸载器配置比对" "${DEPLOY_DIR}/conf-merge.py" 644 "${SRC_DIR}/conf-merge.py"
+    audit_file "卸载器配置示例" "${DEPLOY_DIR}/slurmate.conf.example" 644 \
+               "${SRC_DIR}/slurmate.conf.example"
     audit_file "systemd 单元" "$UNIT" 644 ""
     audit_file "站点配置"   "$CONF"   644 ""
 
@@ -1838,8 +1919,8 @@ install_one() {
 }
 
 # 确保所有目标文件的父目录存在（真实系统上这些目录本来就在，但不能依赖这个前提）
-for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$CONF_DIR" \
-         "$(dirname "$UNIT")" "$STATE_DIR"; do
+for d in "$(dirname "$DAEMON")" "$(dirname "$CLI")" "$SHARE_DIR" "$DEPLOY_DIR" \
+         "$CONF_DIR" "$(dirname "$UNIT")" "$STATE_DIR"; do
     if [[ ! -d "$d" ]]; then
         if [[ "$DRYRUN" -eq 1 ]]; then
             echo "  [演练] mkdir -p $d"
@@ -1859,9 +1940,10 @@ done
 #   话指不回权限，会让人去查脚本是不是生成失败了。
 if [[ "$DRYRUN" -eq 0 ]]; then
     txn_mode "$SHARE_DIR"
+    txn_mode "$DEPLOY_DIR"
     txn_mode "$CONF_DIR"
     txn_mode "$STATE_DIR"
-    chmod 755 "$SHARE_DIR" "$CONF_DIR" \
+    chmod 755 "$SHARE_DIR" "$DEPLOY_DIR" "$CONF_DIR" \
         || die "无法设置共享目录与配置目录的权限（已中止，正在回滚）"
     chmod 700 "$STATE_DIR" \
         || die "无法设置状态目录的权限（已中止，正在回滚）"
@@ -1877,6 +1959,15 @@ install_one "${SRC_DIR}/nft-compare.py"     "${SHARE_DIR}/nft-compare.py" 644
 #   能独立完成。名字里带 `template` 是刻意的：`jobs/` 下那一串才是作业脚本，
 #   这一份不是作业、也不会被提交。
 install_one "${SRC_DIR}/run.sbatch" "${SHARE_DIR}/run.sbatch.template" 644
+
+# ── 本机卸载器：卸载不再依赖最初那份 .run ──────────────────────────────
+#   包装脚本放 /usr/local/sbin；它要跑的那三份留一份在 <SHARE_DIR>/deploy。
+#   两边都是 root 所有、用户不可写 —— 卸载器以 root 运行。
+install_one "${SRC_DIR}/slurmate-uninstall" "$UNINSTALL" 755
+install_one "$SELF_SCRIPT" "${DEPLOY_DIR}/install-base.sh" 755
+install_one "${SRC_DIR}/conf-merge.py" "${DEPLOY_DIR}/conf-merge.py" 644
+install_one "${SRC_DIR}/slurmate.conf.example" \
+            "${DEPLOY_DIR}/slurmate.conf.example" 644
 
 # ── slurmate.conf：不存在时安装，存在时只对键 ──
 # 它是站点配置 —— 管理员会在上面改端口区间、要避让的其他区间、缺省插件。
@@ -2204,6 +2295,8 @@ ${DONE_TITLE}
     ${UNIT}
     ${SHARE_DIR}/nft-compare.py
     ${SHARE_DIR}/run.sbatch.template   ← 作业模板（安装器织作业脚本时读它）
+    ${UNINSTALL}
+    ${DEPLOY_DIR}/                  ← 本机卸载器要跑的那三份
 
   插件不在这张表里，也不归本脚本管（v0.12 起）。装完基座之后装插件：
 
@@ -2225,9 +2318,12 @@ ${DONE_TITLE}
     ${CLI} doctor                 # 普通用户跑，诊断 ACL 是否与服务一致
     ${DAEMON} --check             # 重新做一次配置自检
 
-  卸载：
-    sudo bash ${SCRIPT_PATH} --uninstall              # 保留状态与日志
-    sudo bash ${SCRIPT_PATH} --uninstall --purge-state
+  卸载（本机卸载器，不再需要这一份安装包）：
+    sudo slurmate-uninstall                            # 保留状态与日志
+    sudo slurmate-uninstall --purge-state
+    没有那个命令时，用安装包：sudo bash ${SCRIPT_PATH} --uninstall
+    默认先取消本站全部会话（与 \`slurmate service stop\` 同一条路），
+      再停服务、删表、删文件；会话停不干净时加 --force。
     它会把插件一起卸掉（在删守护进程之前调卸载器），一个插件在站点上留下
       哪几处痕迹，那条判据只有一份实现。
 

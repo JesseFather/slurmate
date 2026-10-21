@@ -252,6 +252,109 @@ test('★ kind=transport 的信封被 classify 归为传输层，而不是「守
   assert.match(c.message, /命令无法运行/, '要带上具体原因，而不是笼统的「没有返回应答」');
 });
 
+test('★ kind=cli_missing 归为 FATAL：站点上没有命令，重试不会变好', () => {
+  const env = { ok: false, code: null, data: null,
+                error: { kind: 'cli_missing',
+                         detail: '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。' } };
+  const c = classify(env, { op: 'status' });
+  assert.equal(c.action, Action.FATAL);
+  assert.match(c.message, /没有 Slurmate 的命令/);
+});
+
+test('★★ 命令不在（退出 127 + No such file）：rpc 报 cli_missing，并把重连停掉',
+  async (t) => {
+    const b = connectedBackend();
+    b._conn.exec = (cmd, cb) => {
+      const s = new EventEmitter();
+      s.stderr = new EventEmitter();
+      s.close = () => {};
+      s.end = () => {};
+      setImmediate(() => {
+        s.stderr.emit('data', Buffer.from(
+          'bash: /usr/local/bin/slurmate: No such file or directory\n', 'utf8'));
+        s.emit('exit', 127);
+        s.emit('close');
+      });
+      cb(null, s);
+    };
+    const states = [];
+    b.on('state', (s) => states.push(s));
+    const r = await b.rpc({ op: 'status' });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.kind, 'cli_missing',
+      '不能退化成 transport：那会被当成一次网络抖动，一直重试');
+    assert.equal(b._definitive, true);
+    assert.equal(states.length, 1);
+    assert.equal(states[0].definitive, true);
+    assert.equal(states[0].connected, false);
+    t.after(() => { if (b._reconnectTimer) clearTimeout(b._reconnectTimer); });
+  });
+
+test('★ 主动 close 也广播断开（左栏与浮窗那一行不许停在「已连接」）', async () => {
+  const b = connectedBackend();
+  const states = [];
+  b.on('state', (s) => states.push(s));
+  await b.close();
+  assert.equal(states.length, 1);
+  assert.equal(states[0].connected, false);
+  assert.match(states[0].detail, /关闭/);
+});
+
+test('★ 退出码正常但输出不是应答：仍然是 transport，不误判成命令不在', async () => {
+  const b = connectedBackend();
+  b._conn.exec = (cmd, cb) => {
+    const s = new EventEmitter();
+    s.stderr = new EventEmitter();
+    s.close = () => {};
+    s.end = () => {};
+    setImmediate(() => {
+      s.stderr.emit('data', Buffer.from('something else\n', 'utf8'));
+      s.emit('exit', 1);
+      s.emit('close');
+    });
+    cb(null, s);
+  };
+  const r = await b.rpc({ op: 'status' });
+  assert.equal(r.error.kind, 'transport');
+  assert.equal(b._definitive, false);
+});
+
+test('★★ 连上去但命令不在：connect 回 cli_missing，界面拿到的是能读懂的那一句',
+  async (t) => {
+    const ssh2 = require('ssh2');
+    const realClient = ssh2.Client;
+    class MissingClient extends EventEmitter {
+      connect() { setImmediate(() => this.emit('ready')); }
+      end() {}
+      exec(cmd, cb) {
+        if (cmd === sshBackend.STREAM_CMD) {
+          return setImmediate(() => cb(new Error('用例里不建常驻通道')));
+        }
+        const s = new EventEmitter();
+        s.stderr = new EventEmitter();
+        s.close = () => {};
+        s.end = () => {};
+        cb(null, s);
+        setImmediate(() => {
+          s.stderr.emit('data', Buffer.from(
+            'bash: /usr/local/bin/slurmate: No such file or directory\n', 'utf8'));
+          s.emit('exit', 127);
+          s.emit('close');
+        });
+      }
+    }
+    ssh2.Client = MissingClient;
+    t.after(() => { ssh2.Client = realClient; });
+
+    const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+    const r = await b.connect({ user: 'u', host: 'h', port: 22 });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'cli_missing');
+    assert.match(r.error, /没有 Slurmate 的命令/);
+    assert.equal(b._definitive, false,
+      '手动连接不广播收尾 —— 界面本来就停在连接屏，只差一句能读懂的原因');
+  });
+
 // ── 认证失败：把 ssh2 的原话翻译成能指向根因的话 ─────────────────────────────
 //
 // 这一节存在的理由很具体：真机上「All configured authentication methods failed」

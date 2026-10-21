@@ -8655,6 +8655,38 @@ test('空手连接超时断开：手里没有控制权，到点就拆连接', as
   cleanupSiteState(idx);
 });
 
+test('站点上没有 Slurmate：忘掉会话、收掉页面、回连接屏', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  const w = idx._test.getWindow();
+  await waitUntil(() => w.hasSurface(a.slot), '前置：页面已经建出来', 10000);
+
+  // 后端在 rpc 那条路上认出来之后发的那一条：不是网络抖动，重试不会变好。
+  //   站点被卸载（或被换成了没有基座的机器）走的就是这里。
+  b.emit('state', { kind: 'ssh', connected: false, definitive: true,
+                    detail: '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。' });
+
+  const closedOf = () => calls.windows[0].webContents.handlers['send:ui:siteClosed'] || [];
+  await waitUntil(() => !w.hasSurface(a.slot), '页面要收掉', 5000);
+  await waitUntil(() => closedOf().length > 0, '要回连接屏（ui:siteClosed）', 5000);
+  const closed = closedOf();
+  assert.ok(closed.length >= 1, '要回连接屏（ui:siteClosed）');
+  assert.match(closed[closed.length - 1].reason, /没有 Slurmate 的命令/);
+  assert.match(closed[closed.length - 1].reason, /作业可能还在跑/,
+    '断开那句话要说明作业可能还在跑');
+  assert.ok(!idx._test.sessionAt(a.slot), '会话记录要忘掉');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('接管时引用表里那一格不在了：照样接得回来，而且要说清楚', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');

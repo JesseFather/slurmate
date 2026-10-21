@@ -146,9 +146,20 @@ class Backend extends EventEmitter {
   async dial(host, port) { throw new Error('未实现 dial'); }
   async close() { /* 默认无事可做 */ }
 
-  /** 供子类调用，广播连接状态。 */
-  _emitState(connected, detail) {
-    this.emit('state', { kind: this.kind, connected: Boolean(connected), detail: detail || null });
+  /**
+   * 供子类调用，广播连接状态。
+   *
+   * `extra` 是给「不用再重试」的那一类结论用的（例如站点上没有本系统的
+   *   命令）：顶上那两格对所有状态都成立，额外的旗标只在你真的知道那是
+   *   什么的时候才带上。
+   */
+  _emitState(connected, detail, extra) {
+    this.emit('state', {
+      kind: this.kind,
+      connected: Boolean(connected),
+      detail: detail || null,
+      ...(extra || {}),
+    });
   }
 }
 

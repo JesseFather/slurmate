@@ -84,6 +84,12 @@ function classify(resp, ctx) {
     return mk(Action.TRANSPORT, null, 'transport',
       resp.error.detail || '与登录节点通信失败', ctx);
   }
+  // 站点上没有本系统的命令（被卸载、或没装好）。它不是传输抖动：重试不会
+  //   变好，后端会把重连停掉并通知上层收尾。
+  if (resp.ok === false && resp.error && resp.error.kind === 'cli_missing') {
+    return mk(Action.FATAL, null, 'cli_missing',
+      resp.error.detail || '站点上没有 Slurmate 的命令。', ctx);
+  }
   // ── 2. 成功 ──────────────────────────────────────────────────────────────
   if (resp.ok === true) {
     return mk(Action.OK, 0, null, '', ctx);
