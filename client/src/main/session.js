@@ -63,6 +63,14 @@ const State = {
 const HEARTBEAT_MS = 45000;
 
 /**
+ * 本机插件从「开始」到「给出 origin」的预算。
+ *
+ * 它与提交不是一回事：本机插件不碰集群，起不来时唯一能做的就是当场说清，
+ *   而不是让界面无限停在「正在启动」。插件自己起进程/绑端口的耗时算在里面。
+ */
+const LOCAL_START_MS = 10000;
+
+/**
  * 「这条作业被另一台电脑接管了」—— 交给 `suspend()` 的那句话。
  *
  * 它是一条常量而不是散在 `_beat()` 与界面里的两句文案：界面那一边（状态条、
@@ -247,7 +255,7 @@ class SessionController extends EventEmitter {
    */
   constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, releaseMs, pushStaleMs,
-                requestedKind, needsPubkey, adopted }) {
+                localMs, requestedKind, needsPubkey, adopted }) {
     super();
     this.backend = backend;
     this.spaceId = spaceId;
@@ -261,6 +269,7 @@ class SessionController extends EventEmitter {
     this.statusMs = statusMs || STATUS_MS;
     this.queuedPollMs = queuedPollMs || QUEUED_POLL_MS;
     this.releaseMs = releaseMs || RELEASE_POLL_MS;
+    this.localMs = localMs || LOCAL_START_MS;
     /**
      * 推送看门狗的长度。可注入，与上面三个节奏同一个理由：用例要把它压到
      * 几百毫秒才验得了"通道坏了会退回轮询"——而真值见 `PUSH_STALE_MS`。
@@ -295,6 +304,18 @@ class SessionController extends EventEmitter {
      */
     this._portChoice = null;
     this._tunnelPort = null;
+    /**
+     * 本机插件（没有作业侧）的运行时。
+     *
+     * `_localOrigin` 非空就是本机会话：没有 submit、没有心跳、没有隧道。
+     *   `_localDispose` 由插件在 `startLocal()` 的返回值里给，停止时调一次。
+     * `_localGen` 是给「超时之后插件才返回」用的：那时资源已经属于一次作废的
+     *   启动，仍然要 dispose，但不能把它记进这一次会话。
+     */
+    this._localOrigin = null;
+    this._localPort = null;
+    this._localDispose = null;
+    this._localGen = 0;
     this._heartbeatAt = 0;        // 最近一次心跳成功的时间（毫秒）
     /**
      * 连续几拍心跳被限流。见 `_beat()` 那一支：限流不是断线，而一次限流
@@ -438,8 +459,11 @@ class SessionController extends EventEmitter {
       resources: s.resources || null,
       node: s.node || null,
       tunnelTarget: s.tunnel_target || null,
-      localPort: this._tunnelPort,
-      origin: this.tunnel.origin,
+      // 本机会话没有隧道：origin 与端口由插件在 `startLocal()` 里给。
+      localPort: this._localOrigin ? this._localPort : this._tunnelPort,
+      origin: this._localOrigin || this.tunnel.origin,
+      /** 这一条是不是本机插件（不提交作业、不占集群配额）。 */
+      local: Boolean(this._localOrigin),
       // expires_at / job_state / time_limit 在 show_job 失败时整个 key 不存在
       // （cluster/slurmate-sessiond:1678-1687）。所以这里必须容忍 undefined，
       // 界面显示「剩余时间未知」而不是 0。
@@ -459,7 +483,9 @@ class SessionController extends EventEmitter {
       renewCount: typeof s.renew_count === 'number' ? s.renew_count : null,
       lastHbAt: s.last_hb_at || null,
       hbAgeMs: this._heartbeatAt ? Date.now() - this._heartbeatAt : null,
-      tunnelState: this.tunnel.state,
+      // `'local'` 是给界面与提示页判据用的第三种态：本机会话没有隧道，
+      //   而 `'stopped'` 会被读成「连接断了」。
+      tunnelState: this._localOrigin ? 'local' : this.tunnel.state,
       backendKind: this.backend.kind,
       error: this.error,
       warning: this.warning,
@@ -721,6 +747,95 @@ class SessionController extends EventEmitter {
     return this._afterSubmit(opts);
   }
 
+  // ── 本机插件：不提交作业的那条路 ────────────────────────────────────────
+  /** 这一条是不是本机会话（插件没有作业侧）。 */
+  isLocal() { return this._localOrigin !== null; }
+
+  /**
+   * 启动一个本机插件：不提交作业、不建隧道、不起心跳。
+   *
+   * 它只做三件事：调插件的 `startLocal()`、校验它给的 origin、把状态推到
+   *   running。任何一步失败都进 ERROR，并且把插件已经交出来的 dispose 调掉 ——
+   *   "报错了但端口还开着"比没有启动更坏。
+   *
+   * @param {function} hook 插件导出的 `startLocal(ctx, {port})`
+   * @param {object} ctx    `pluginContext(rec)`
+   * @param {object} opts   `{ port, serviceKind }`
+   */
+  async startLocal(hook, ctx, opts = {}) {
+    if (this.state !== State.IDLE && this.state !== State.ENDED && this.state !== State.ERROR) {
+      throw new Error('会话已在进行中');
+    }
+    this._stopped = false;
+    this.error = null;
+    this.warning = null;
+    this._requestedKind = opts.serviceKind || this._requestedKind;
+    this._setState(State.SUBMITTING);
+
+    const gen = ++this._localGen;
+    let r;
+    const pending = Promise.resolve().then(
+      () => hook(ctx, { port: opts.port == null ? null : opts.port }));
+    // 迟到的结果由这一个处理：超时、或者启动期间被 stop 掉之后，`_localGen`
+    //   已经前进，插件晚交出来的资源仍然要收 —— 否则它会一直占着端口。
+    //   收过一次就不再收：主路径只看 generation，不再调第二遍。
+    pending.then((late) => {
+      if (late && gen !== this._localGen) disposeQuietly(late);
+    }, () => {});
+    try {
+      r = await withTimeout(pending, this.localMs);
+    } catch (e) {
+      // 已经被停掉的那一次不要再写状态：停掉是用户的动作，压过这一条超时。
+      if (gen !== this._localGen) return null;
+      // 这一次启动作废：让迟到的返回值走上面那条收尾。
+      this._localGen += 1;
+      this._setState(State.ERROR, { error: `本机插件未能启动：${e.message}` });
+      return null;
+    }
+    // 启动期间这条会话已经被停掉，或者已经超时：资源已经由上面那一条收掉，
+    //   这里只退出，不再收第二遍。
+    if (gen !== this._localGen || this._stopped) return null;
+    if (!r || r.ok !== true) {
+      await disposeQuietly(r);
+      this._setState(State.ERROR, {
+        error: (r && r.message) || '本机插件没有给出 origin。',
+      });
+      return null;
+    }
+    const why = localOriginProblem(r.origin);
+    if (why) {
+      await disposeQuietly(r);
+      this._setState(State.ERROR, { error: why });
+      return null;
+    }
+    const u = new URL(r.origin);
+    this._localOrigin = `${u.protocol}//${u.host}`;
+    this._localPort = Number(u.port);
+    this._localDispose = typeof r.dispose === 'function' ? r.dispose : null;
+    this._setState(State.RUNNING);
+    return this.snapshot();
+  }
+
+  /**
+   * 收掉本机插件交出来的资源。返回失败原因（成功是 `null`）。
+   *
+   * `this._localGen += 1` 是给"超时之后插件才返回"那条路用的：那一次启动已经
+   *   作废，迟到的结果不能再写进 `_localOrigin`。dispose 同时清空，保证
+   *   stop 与 abandon 各调一次也不会收第二次。
+   */
+  async _disposeLocal() {
+    const d = this._localDispose;
+    this._localDispose = null;
+    this._localGen += 1;
+    if (!d) return null;
+    try {
+      await d();
+      return null;
+    } catch (e) {
+      return e.message;
+    }
+  }
+
   /**
    * 提交成功之后：等登记 → 开隧道 → 起心跳。
    *
@@ -943,6 +1058,9 @@ class SessionController extends EventEmitter {
    * 那会让界面显示一切正常而页面根本打不开。
    */
   async relisten(newSpaceId, preferredPort, excludePorts) {
+    if (this._localOrigin) {
+      return { ok: false, error: '本机会话没有隧道，不能切换工作区；先结束它。' };
+    }
     const target = this.session && this.session.tunnel_target;
     if (!target) return { ok: false, error: '还没有隧道目标，无法切换工作区。' };
     const prevSpace = this.spaceId;
@@ -1304,6 +1422,11 @@ class SessionController extends EventEmitter {
     this._stopStatusPoll();
     this._stopReleaseWatch();
     this._watchBackend(false);
+    if (this._localOrigin) {
+      await this._disposeLocal();
+      this._localOrigin = null;
+      this._localPort = null;
+    }
     await this.tunnel.stop();
   }
 
@@ -1402,6 +1525,20 @@ class SessionController extends EventEmitter {
     this._stopStatusPoll();         //    否则残留心跳收到 code:3 会被误判成出错。
     this._watchBackend(false);      // 同上：释放期的推送会写一个没人再看的状态。
 
+    // 本机会话：没有作业可释放，收掉插件交出来的资源就结束。
+    //   收尾失败要说出来 —— 端口可能还开着，而"已停止"会让用户以为它关了。
+    if (this._localOrigin) {
+      const err = await this._disposeLocal();
+      this._localOrigin = null;
+      this._localPort = null;
+      this._setState(State.ENDED);
+      return {
+        ok: !err,
+        state: 'ended',
+        detail: err ? `本机会话已停止，但插件的收尾失败：${err}` : '本机会话已停止。',
+      };
+    }
+
     await this.tunnel.stop();
 
     if (!this.sessionId) {
@@ -1462,6 +1599,57 @@ class SessionController extends EventEmitter {
     };
   }
 
+}
+
+/**
+ * 本机插件给的 origin 合不合规。合规返回 `null`，否则返回一句给用户看的话。
+ *
+ * 只接受 `http://127.0.0.1:<端口>`：本机插件在用户自己的机器上跑，页面不需要
+ *   也不应该从别的主机来。路径由 `contributes.surface.path` 拼，所以这里
+ *   不允许 origin 自带路径、查询或凭据 —— 两处都能拼路径的话，最终加载的
+ *   是哪一个就取决于代码顺序了。
+ *
+ * 它校验的是插件"报上来的地址"，不能保证插件真的只绑在回环上；那条写在
+ *   插件契约里（`docs/CONTRACT.md` 的 `startLocal` 一节）。
+ */
+function localOriginProblem(origin) {
+  if (typeof origin !== 'string' || !origin.trim()) {
+    return '本机插件没有给出 origin。';
+  }
+  let u;
+  try {
+    u = new URL(origin);
+  } catch {
+    return `本机插件给出的 origin 不是合法 URL：${origin}`;
+  }
+  if (u.protocol !== 'http:') {
+    return `本机插件只能监听 http，得到的是 ${u.protocol}`;
+  }
+  if (u.hostname !== '127.0.0.1') {
+    return `本机插件必须监听 127.0.0.1，得到的是 ${u.hostname}`;
+  }
+  if (u.username || u.password) {
+    return '本机插件的 origin 不得携带凭据。';
+  }
+  if (u.pathname !== '/' || u.search || u.hash) {
+    return '本机插件的 origin 只写协议、地址与端口。';
+  }
+  const port = Number(u.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return '本机插件的 origin 必须带一个有效端口。';
+  }
+  return null;
+}
+
+/** 收掉一个可能给了一半的启动结果；收尾失败不能把调用方带崩。 */
+async function disposeQuietly(r) {
+  const d = r && typeof r.dispose === 'function' ? r.dispose : null;
+  if (!d) return;
+  try {
+    await d();
+  } catch {
+    /* 调用方那一句已经说了启动失败；这里再抛会盖掉它 */
+  }
 }
 
 function withTimeout(promise, ms) {

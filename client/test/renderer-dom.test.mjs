@@ -796,6 +796,74 @@ test('插件块把名额说到前面：满员时按钮灰着，结束一条就�
   assert.match(metaText(blockOf('编辑器')), /最多同时 2 个会话/);
 });
 
+test('本机插件：没有作业侧但有 startLocal 时，按钮写「在本机打开」且可点', () => {
+  // F52 ②：只有客户端一半的插件不再是死路。站点说 `can_submit: false`，
+  //   而客户端看见 `startLocal` 时，界面给一个本机入口；没有钩子的仍然是灰的。
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  const PL = {
+    ...PV,
+    plugins: [
+      { id: 'p3', name: 'local-demo', title: '本机样例', version: '1.0.0',
+        description: '', ports: 1, group: 'local-demo', runnable: true,
+        hasClientCode: true, siteEnabled: true, siteKnown: true, locallyEnabled: true,
+        canSubmit: false, local: true, defaults: { cpus: 1, mem: '1G' }, maxSessions: 2 },
+      { id: 'p4', name: 'half', title: '只有一半', version: '1.0.0',
+        description: '', ports: 0, group: null, runnable: false,
+        hasClientCode: true, siteEnabled: true, siteKnown: true, locallyEnabled: true,
+        canSubmit: false, local: false, defaults: { cpus: 1, mem: '1G' } },
+    ],
+  };
+  h.run(`renderPlugins(${JSON.stringify(PL)});`);
+  const blocks = () => childrenOf(h.byId.get('plugin-blocks'))
+    .filter((x) => x.className === 'plug' || x.className === 'plug plug-off');
+  const blockOf = (title) => blocks().find((b) => childrenOf(b)
+    .some((x) => x.tagName === 'H3' && x._text === title));
+  const btnOf = (b) => childrenOf(b)
+    .find((x) => x.tagName === 'BUTTON'
+      && (x._text === '在本机打开' || x._text === '开始会话'));
+
+  const local = blockOf('本机样例');
+  assert.ok(local, '前置：本机插件那一块画出来了');
+  assert.equal(btnOf(local)._text, '在本机打开');
+  assert.equal(btnOf(local).disabled, false, '有本机入口就可点');
+  assert.match(childrenOf(local).find((x) => x.className === 'why')._text,
+    /只在本机运行/);
+  assert.equal(childrenOf(local).some((x) => x.tagName === 'DETAILS'), false,
+    '本机插件不画作业的高级选项');
+  assert.equal(/最多同时/.test(childrenOf(local).map((x) => x._text || '').join('|')),
+    false, '本机插件不占站点名额');
+
+  const half = blockOf('只有一半');
+  assert.ok(half);
+  assert.equal(btnOf(half)._text, '开始会话', '没有本机入口时仍是作业那颗按钮');
+  assert.equal(btnOf(half).disabled, true, '它无法启动');
+  assert.match(childrenOf(half).find((x) => x.className === 'why')._text,
+    /没有提供本机入口/);
+});
+
+test('S34：会话标签与「剩余时间」的说明真的长在界面上', () => {
+  const h = start({ connections: [], workspaces: [], activeConnectionId: null });
+  // ① 会话标签：输入法失效时的恢复动作
+  h.run("SCREEN = 'plugins';");
+  h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true,'
+    + ' snap: { state: "running" } }], front: "a" };');
+  h.fn('renderTabs')();
+  const tab = h.byId.get('session-tabs').children[0];
+  assert.match(tab.title || '', /输入法无效时先点击编辑区/);
+
+  // ② 「剩余时间」为「未知」时的说明
+  h.run(`renderKv(${JSON.stringify({
+    state: 'running', sessionId: 's1', jobId: '42', partition: 'A6000',
+    node: 'n1', tunnelTarget: '192.0.2.1:55001', localPort: 18090,
+    resources: { cpus: 1, mem: '1G' }, expiresAt: undefined,
+    jobText: '运行中', suspended: null, hbAgeMs: 100, tunnelState: 'listening',
+  })});`);
+  const kv = childrenOf(h.byId.get('kv'));
+  const i = kv.findIndex((x) => x.tagName === 'DT' && x._text === '剩余时间');
+  assert.ok(i >= 0, '前提：剩余时间那一行在');
+  assert.match(kv[i + 1].title || '', /站点本次未提供剩余时间；「未知」不代表已到期/);
+});
+
 test('「检查集群」把守护进程的版本、对账时间与"还没有登记上"一起说出来', async () => {
   // 用户 2026-10-19 第二次真机：「检查通过：0 条 ACL 规则，0 个活跃会话」，
   //   而眼前正卡着一条作业在跑的会话。体检要说得出这两件事：站点上是哪一版、

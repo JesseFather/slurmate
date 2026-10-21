@@ -541,7 +541,11 @@ function renderTabs() {
     const port = s.snap && s.snap.localPort;
     b.textContent = seen.get(name) > 1 && port ? `${name} · ${port}` : name;
     const st = s.snap && s.snap.state;
-    b.title = suspended ? s.snap.suspended : (STATE_TEXT[st] || st || '');
+    const base = suspended ? s.snap.suspended : (STATE_TEXT[st] || st || '');
+    // 输入法失效时页面收不到按键，而这不是会话本身出了问题；把恢复动作放在
+    //   标签的 title 上，用户不必去翻排障文档。
+    const ime = '输入法无效时先点击编辑区；仍无效时重新加载。';
+    b.title = base ? `${base} ${ime}` : ime;
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }
@@ -557,6 +561,17 @@ function renderTabs() {
  */
 function hasRunningSession() {
   return liveCount() > 0;
+}
+
+/** 当前活着的会话里有没有本机插件（不提交作业的那种）。 */
+function hasLocalSession() {
+  return (SESS.sessions || []).some((s) => s.live && s.snap && s.snap.local);
+}
+
+/** 活着的会话全部是本机插件 —— 离开/断开时不涉及任何作业。 */
+function onlyLocalSessions() {
+  const live = (SESS.sessions || []).filter((s) => s.live);
+  return live.length > 0 && live.every((s) => s.snap && s.snap.local);
 }
 
 /**
@@ -618,6 +633,7 @@ function renderSnapshot(s) {
       detail = s.suspended;
     } else if (st === 'running' || st === 'releasing') {
       const bits = [];
+      if (s.local) bits.push('本机运行（不占集群）');
       if (s.partition) bits.push(s.partition);
       if (s.node) bits.push(s.node);
       if (s.expiresAt !== undefined) bits.push('剩余 ' + fmtLeft(s.expiresAt));
@@ -628,7 +644,9 @@ function renderSnapshot(s) {
       //   报的"什么也点不了"）。那句话的唯一落点就是这一行。
       //   判据与主进程那一半同源：那边只在 `tunnelState !== 'listening'` 或者
       //   页面加载失败时挂提示页（见 index.js 的 `_renderSession`）。
-      if (s.warning && s.tunnelState === 'listening') bits.unshift(s.warning);
+      if (s.warning && (s.tunnelState === 'listening' || s.tunnelState === 'local')) {
+        bits.unshift(s.warning);
+      }
       detail = bits.join(' · ');
     } else if (st === 'queued') {
       // 作业那一侧的状态与原因（`jobText`）也要露出来：光说「等待调度与登记」，
@@ -641,7 +659,9 @@ function renderSnapshot(s) {
       //   原因那一格是 0.29 才有的，老站点不发；而"作业在跑、站点没登记"
       //   这件事两边都答得上来（作业状态由站点给）。少了这一句，状态条只写
       //   「作业 8298 运行中」，读起来像一切正常 —— 而用户正卡在这里。
-      else if (s.jobState === 'RUNNING') bits.push('站点还没有完成登记');
+      else if (s.jobState === 'RUNNING') {
+        bits.push('站点还没有完成登记（会话文件缓存最长 60 秒）');
+      }
       detail = bits.filter(Boolean).join(' · ');
     } else if (st === 'error') {
       detail = s.error || '';
@@ -686,7 +706,7 @@ function renderSnapshot(s) {
     && lastEndedSlot !== (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
   if (endedNow) {
     lastEndedSlot = (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
-    if (s) notice(jobEndedKind(s), s.jobText || '作业已结束。');
+    if (s) notice(jobEndedKind(s), s.local ? '本机会话已结束。' : (s.jobText || '作业已结束。'));
   }
 
   // 这一帧里露出来的东西刚变过（状态条、映射图的节点），连线的几何位置要到
@@ -713,10 +733,15 @@ function renderStatusEnd(s) {
   const pageOnScreen = Boolean(s) && st === 'running'
     && hasSurface(s) && !SESS.panelFront;
   reload.classList.toggle('hidden', !pageOnScreen);
-  btn.textContent = '停止该作业';
-  btn.title = pageOnScreen && s.jobId
-    ? `停止这一条作业（作业 ${s.jobId}），集群上的作业会被取消。`
-    : '停止这一条作业，集群上的作业会被取消。';
+  if (s && s.local) {
+    btn.textContent = '关闭本机会话';
+    btn.title = '关闭这个本机会话；它没有集群作业，本地服务会随之停止。';
+  } else {
+    btn.textContent = '停止该作业';
+    btn.title = pageOnScreen && s.jobId
+      ? `停止这一条作业（作业 ${s.jobId}），集群上的作业会被取消。`
+      : '停止这一条作业，集群上的作业会被取消。';
+  }
   btn.classList.toggle('hidden', !pageOnScreen);
 }
 
@@ -948,7 +973,14 @@ function renderKv(s) {
     s.gresText || null,
   ].filter(Boolean).join(' / ') || '—';
 
-  const rows = [
+  // 本机会话没有作业：作业 ID / 分区 / 剩余时间 / 心跳都不是它的事实。
+  //   照常画一遍会让它们显示成「—」，那读起来像"作业信息暂时查不到"，
+  //   而真相是这一条根本没有作业。
+  const rows = s.local ? [
+    ['会话类型', '本机（不提交作业）'],
+    ['本地地址', localAddressText(s)],
+    ['状态', '本机运行'],
+  ] : [
     ['会话 ID', s.sessionId || '—'],
     ['作业 ID', s.jobId || '—'],
     // 默认是随机挑分区，所以用户事先不知道会落到哪种卡上 —— 必须显示实际结果
@@ -957,7 +989,11 @@ function renderKv(s) {
     ['节点', s.node || '—'],
     ['隧道目标', s.tunnelTarget || '—'],
     ['本地地址', localAddressText(s)],
-    ['剩余时间', fmtLeft(s.expiresAt)],
+    // 「未知」是站点这次没报，不是 0，也不代表已到期 —— 说明放在 title 里，
+    //   正文保持一格。
+    ['剩余时间', fmtLeft(s.expiresAt),
+      typeof s.expiresAt === 'number'
+        ? null : '站点本次未提供剩余时间；「未知」不代表已到期。'],
     // 这一句由主进程译好（`jobstate.js`）—— 界面只印，不自己译：Slurm 的原文
     // 大写枚举（`OUT_OF_MEMORY`）是说给管理员听的话。
     ['作业状态', s.jobText || '—'],
@@ -966,16 +1002,17 @@ function renderKv(s) {
     //   一句不成立的话，而用户会照着它去把作业停掉。
     ...(s.suspended ? [['本机', s.suspended]] : []),
     ['上次心跳', fmtAge(s.hbAgeMs)],
-    ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止' }[s.tunnelState]
-      || s.tunnelState || '—'],
+    ['隧道', { listening: '已连接', down: '断开，重试中', stopped: '已停止',
+      local: '本机直连' }[s.tunnelState] || s.tunnelState || '—'],
   ];
   const dl = $('kv');
   dl.textContent = '';
-  for (const [k, v] of rows) {
+  for (const [k, v, title] of rows) {
     const dt = document.createElement('dt');
     dt.textContent = k;
     const dd = document.createElement('dd');
     dd.textContent = v;
+    if (title) dd.title = title;
     dl.append(dt, dd);
   }
 }
@@ -2431,7 +2468,7 @@ const WHY_NOT_RUNNABLE = {
   siteUnknown: '这个守护进程不通报插件清单，所以客户端不知道站点开没开它。',
   siteOff: '本站没有开放这个插件，要开得找管理员。',
   localOff: '本机把它关掉了，勾上左边那个开关就能用。',
-  noJob: '本站装了「%s」，但它没有作业侧实现，提交不了。得找管理员重新部署。',
+  noJob: '「%s」没有作业侧，提交不了；它也没有提供本机入口。',
 };
 
 /**
@@ -2722,6 +2759,9 @@ function syncPluginQuota() {
 }
 
 function pluginBlock(p) {
+  // 本机插件：站点说有它、但没有作业侧，而客户端给了本机入口。
+  //   它与「起不来」是两件事，所以不进 `plug-off`，也不画资源选项与名额。
+  const localBlock = Boolean(p.local) && !p.canSubmit;
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
 
@@ -2767,10 +2807,13 @@ function pluginBlock(p) {
   // 卡那一格由主进程译好（`defaultsGresText`，走 `gres.js`）—— 与下面
   //   `renderKv` 里那一行同一条路子。渲染层不拼 `name:type × n`：那是第二个拼法。
   const def = p.defaults;
-  meta.append(el('span', null, def
-    ? `默认 ${def.cpus} 核 / ${def.mem}${def.time ? ` / ${def.time}` : ''}`
-      + (p.defaultsGresText ? ` / ${p.defaultsGresText}` : '')
-    : '默认资源由服务端定'));
+  // 本机插件不提交作业，站点给的默认资源与它无关；印出来会让人以为它会占资源。
+  if (!localBlock) {
+    meta.append(el('span', null, def
+      ? `默认 ${def.cpus} 核 / ${def.mem}${def.time ? ` / ${def.time}` : ''}`
+        + (p.defaultsGresText ? ` / ${p.defaultsGresText}` : '')
+      : '默认资源由服务端定'));
+  }
 
   // 站点给这个插件设的并发上限。与上面那句同一类事实（管理员设的政策，
   //   用户改不了），所以并排只读地摆着。
@@ -2781,7 +2824,7 @@ function pluginBlock(p) {
   //   说成不能，多报才会。
   // 缺席（老守护进程报不出这一格）就不说：`null` 与"上限是 1"必须分得开。
   let quotaLine = null;
-  if (typeof p.maxSessions === 'number') {
+  if (!localBlock && typeof p.maxSessions === 'number') {
     quotaLine = el('span', null, `最多同时 ${p.maxSessions} 个会话`);
     meta.append(quotaLine);
   }
@@ -2810,8 +2853,11 @@ function pluginBlock(p) {
 
   d.append(meta);
 
-  // ── 起不来的原因：一句话说清该做什么 ──
-  if (!p.runnable) {
+  // ── 起不来的原因（或本机插件的说明）：一句话说清 ──
+  if (localBlock) {
+    d.append(el('p', 'why',
+      '这个插件没有作业侧，只在本机运行：不提交作业、不占集群配额。'));
+  } else if (!p.runnable) {
     d.append(el('p', 'why', whyNotRunnable(p)));
   } else if (p.siteEnabled && p.siteVersion && p.siteVersion !== p.version) {
     // 两半代码是配套的，版本对不上要说在前面。不说的话用户看到的是
@@ -2840,7 +2886,7 @@ function pluginBlock(p) {
   // 只给起得来的那些画（`p.runnable`）：一颗灰着的「开始会话」不需要资源，
   //   而填了也用不上 —— 摆在那里等于说"这一块能起"。
   let adv = null;
-  if (p.runnable) {
+  if (p.runnable && !localBlock) {
     // 站点那份默认要传下去：那三格滑块停在它上面，而它是站点按插件定的
     //   （`plugins` 那一 op 的 `defaults`），不是客户端写死的数。
     const a = pluginAdv(p.defaults);
@@ -2857,7 +2903,7 @@ function pluginBlock(p) {
   actions.className = 'plug-actions';
 
   const btn = document.createElement('button');
-  btn.textContent = '开始会话';
+  btn.textContent = localBlock ? '在本机打开' : '开始会话';
   btn.disabled = !p.runnable;
   // 交出去的是这一块那一份（`adv`），不是"界面上当前那份" —— 见 pluginAdv。
   btn.onclick = () => startWith(p.name, adv, btn);
@@ -4582,15 +4628,22 @@ async function doConnectTo(c, btn) {
  *   说出来，而不是等用户自己发现 —— 见 panel.html 里这个按钮的 title。
  */
 async function doLeave() {
+  const onlyLocal = onlyLocalSessions();
+  const anyLocal = hasLocalSession();
   const r = await window.slurmate.leave();
   if (!r || !r.ok) return notice('error', (r && r.error) || '临时离开失败。');
   setConnected(false);
   whoami = null;
-  // 看护者仍然是本机（见 `app:leave`）：回来连上就直接接回，不必点接管。
-  //   而作业的倒计时照旧从心跳停下的那一刻起算。
-  notice('info', '已临时离开。作业仍在集群上运行，看护者仍然是本机，'
-    + '回来连上这个站点会直接接回。但 35 分钟内没有人回来接着看，'
-    + '它会被自动回收。');
+  if (onlyLocal) {
+    // 本机会话没有作业：离开就是结束它，没有倒计时，也没有看护者。
+    notice('info', '已临时离开。本机会话会随连接结束，本次没有影响任何作业。');
+  } else {
+    // 看护者仍然是本机（见 `app:leave`）：回来连上就直接接回，不必点接管。
+    //   而作业的倒计时照旧从心跳停下的那一刻起算。
+    notice('info', '已临时离开。作业仍在集群上运行，看护者仍然是本机，'
+      + '回来连上这个站点会直接接回。但 35 分钟内没有人回来接着看，'
+      + '它会被自动回收。' + (anyLocal ? '本机会话会随连接结束。' : ''));
+  }
   // 回到第一屏，并把作业列表作废 —— 与断开逐字同一个理由：那份数据属于刚才
   //   那个站点，留着它会让下一次进作业列表时先闪一下上一个站点的作业
   //   （见 JOBS.forConn）。
@@ -4623,6 +4676,7 @@ async function doLeave() {
  * 于是这个函数可以被别处直接调用而不会弹框 —— 它只做那件事。
  */
 async function doDisconnect() {
+  const onlyLocal = onlyLocalSessions();
   const r = await window.slurmate.disconnect();
   if (!r || !r.ok) return notice('error', (r && r.error) || '断开失败。');
   setConnected(false);
@@ -4630,6 +4684,8 @@ async function doDisconnect() {
   const rel = r.released;
   if (rel && !rel.ok) {
     notice('error', rel.detail);          // 释放没成功必须说，不能吞掉
+  } else if (onlyLocal) {
+    notice('info', '已断开连接。本机会话已结束，本次没有影响任何作业。');
   } else if (rel && rel.state === 'releasing') {
     notice('info', '已断开连接，并请求释放会话。请以状态条变为「已结束」为准。');
   } else {

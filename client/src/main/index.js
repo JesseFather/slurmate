@@ -1223,10 +1223,14 @@ function pluginsView() {
       //   `null` = 没配 / 没要（确定的事实），`undefined` 那一格不来 = 老守护
       //     进程（它没有 `defaults.gpus`）—— 两种都不说 GRES，理由与 cpus/mem 同。
       defaultsGresText: gresText(s && s.defaults && s.defaults.gpus),
-      // 能不能真的起一个会话 —— 三个条件都成立。界面画"启动"按钮时看这个。
-      // 三个条件各有各的主语（站点 / 用户 / 站点的部署状态），所以界面上那三句
-      // 解释也必须是三句不同的话。
-      runnable: siteEnabled && locallyEnabled && canSubmit,
+      // 这个插件有没有本机入口（客户端钩子 `startLocal`）。它只在站点报
+      //   `can_submit: false` 时才有意义：有作业侧的插件仍走作业。
+      local: typeof plugin.startLocal === 'function',
+      // 能不能真的起一个会话。三个条件都成立；本机插件不要求 `canSubmit`
+      //   —— 它本来就没有作业可提交。三个条件各有各的主语（站点 / 用户 /
+      //   站点的部署状态），所以界面上那几句解释也必须是几句不同的话。
+      runnable: siteEnabled && locallyEnabled
+        && (canSubmit || typeof plugin.startLocal === 'function'),
     };
   });
 
@@ -2561,6 +2565,30 @@ function excludedPortsOfRec(rec) {
  * @returns {Promise<{slot, snap}|{conflict:{want,spaceId}}|null>}
  *   `conflict` 这一支表示"首选端口被占着，等用户答"，此刻什么都没提交。
  */
+/** 站点清单里这一条；拿不到清单时返回 `null`（与 `pluginsView()` 同一口径）。 */
+function siteEntryFor(plugin) {
+  if (!sitePlugins || !Array.isArray(sitePlugins.plugins)) return null;
+  return sitePlugins.plugins.find((x) => x && x.id === plugin.id) || null;
+}
+
+/**
+ * 这个插件此刻走不走本机入口。
+ *
+ * 四个条件与 `pluginsView()` 的 `local` / `runnable` 同源：
+ *   插件导出 `startLocal`、站点明确说 `can_submit: false`（没有作业侧）、
+ *   站点开着它、本机也开着它。有作业侧的插件永远走作业 —— 两者都声明时
+ *   作业优先，避免同一个插件因为多了一个钩子就换了执行位置。
+ */
+function localOutletFor(plugin) {
+  if (typeof plugin.startLocal !== 'function') return false;
+  const s = siteEntryFor(plugin);
+  const known = Boolean(sitePlugins && Array.isArray(sitePlugins.plugins));
+  if (!known || !s) return false;
+  if (s.enabled === false) return false;
+  if (s.can_submit !== false) return false;
+  return config.pluginEnabledLocally(cfg, plugin.id);
+}
+
 async function startSession(resources, serviceKind, portChoice) {
   // 必须写明要哪一个插件。
   //
@@ -2649,6 +2677,14 @@ async function startSession(resources, serviceKind, portChoice) {
   //     切活跃连接不影响已经在跑的会话，所以重连接回来的会话可能拿到"不是它自己的"
   //     那条（见 pluginContext 的 `connection()`）。
   const conn = config.activeConnection(cfg);
+  const isLocal = localOutletFor(plugin);
+
+  // 本机插件由站点分发，入口也只在该站点的那一屏上。没有连接就没有可归属的
+  //   站点；允许它照样启动会让"离开站点之后本机服务还在跑"变成一条正常路径。
+  if (isLocal && (!conn || !backend || !backend.connected)) {
+    win.pushNotice('error', '本机插件需要先连接站点才能打开。');
+    return null;
+  }
 
   // 工作区是按插件的：跑在浏览器里的插件要一个（端口 = origin = 一份
   //   编辑器布局），不跑浏览器的不给 —— 给它一个只会凭空造出一份永远不会被
@@ -2699,9 +2735,12 @@ async function startSession(resources, serviceKind, portChoice) {
   //   而 `spacePortOf` 那条路连回落都没有（找不到就抛）：临时那份不在配置里，
   //     一条会回落到基址（18080）的实现会让每一份临时的都从 18080 起扫，也就是
   //     持有者自己那个端口。
+  //
+  // 本机插件没有隧道：`ports: 1` 用那份数据自己的端口，`ports: 0` 不给端口
+  //   （插件自选）。后者不得回落到 `RELAY_PORT_BASE` —— 那是中转站共用的基准端口。
   const preferredPort = space
     ? spacePortOf(space.id)
-    : config.RELAY_PORT_BASE;
+    : (isLocal ? null : config.RELAY_PORT_BASE);
 
   // ── 端口冲突：在提交之前问 ──────────────────────────────────────────
   //
@@ -2732,7 +2771,9 @@ async function startSession(resources, serviceKind, portChoice) {
   //      —— 此刻还没有"新端口"这回事。
   const persistentSpace = Boolean(space) && !tempSpaces.has(space.id);
   const answered = portChoice === 'shift' || portChoice === 'remember';
-  if (persistentSpace && !answered
+  // 本机插件不探端口：端口要么是那份数据自己的（`ports: 1`，插件自己绑），
+  //   要么由插件自选；沿用隧道那套「换一个还是记住」只会问一个不存在的选择。
+  if (!isLocal && persistentSpace && !answered
       && !excludedPortsFor(space.id, null).has(preferredPort)) {
     let probe;
     try {
@@ -2841,14 +2882,22 @@ async function startSession(resources, serviceKind, portChoice) {
   }
 
   // `preferredPort` 在上面（端口那道闸那一节）就算出来了 —— 探测要用它。
-  const snap = await rec.controller.start(resources, {
-    preferredPort,
-    serviceKind: plugin.name,
-    needsPubkey: plugin.contributes.submitPubkey,
-    sshPubkey,
-    // 用户在那道闸上答过的（没问过就是 null）。见 `SessionController._portChoice`。
-    portChoice,
-  });
+  //
+  // 本机插件走 `startLocal()`：不提交、不建隧道、不起心跳。两条路返回同一种
+  //   快照，所以下面的失败清理与界面切换都只有一份。
+  const snap = isLocal
+    ? await rec.controller.startLocal(plugin.startLocal, pluginContext(rec), {
+        port: preferredPort,
+        serviceKind: plugin.name,
+      })
+    : await rec.controller.start(resources, {
+        preferredPort,
+        serviceKind: plugin.name,
+        needsPubkey: plugin.contributes.submitPubkey,
+        sshPubkey,
+        // 用户在那道闸上答过的（没问过就是 null）。见 `SessionController._portChoice`。
+        portChoice,
+      });
   if (!snap && !rec.controller.sessionId) {
     // 这一次在服务端没有留下任何东西（被 quota / 权限 / 校验拒掉，或者压根没提交
     //   出去）。那条记录与临时那一份都只是这一趟的产物：留着它们，界面上会多出
@@ -2876,7 +2925,7 @@ async function startSession(resources, serviceKind, portChoice) {
   // 提交返回时作业可能还在排队，那一刻没有"新端口"可记。所以这里只挂一个待办，
   //   等状态真的到 running 再记（`applyPendingRemember`）—— 直接读 `localPort`
   //   会读到 null，待办当场丢掉，用户下次开局还会被问一遍，却以为自己答过了。
-  if (snap && portChoice === 'remember' && persistentSpace) {
+  if (snap && !isLocal && portChoice === 'remember' && persistentSpace) {
     rec.pendingRememberPort = { spaceId: space.id, preferred: preferredPort };
     applyPendingRemember(rec);
   }
@@ -3028,6 +3077,8 @@ async function onSessionChange(slot) {
         //   都不属于本机 —— 关窗确认与收尾只该数、只该结束本机真正在看的那几条
         //   （见 `SessionController.watching`）。
         live: v.live && Boolean(c) && c.watching,
+        // 本机会话没有作业，关窗确认不能再说「作业会被取消」。
+        local: Boolean(c && c.isLocal()),
         service: v.service,
         plugin: rec.plugin || null,
       };
@@ -3173,13 +3224,22 @@ async function _renderSession(slot) {
       //   "左侧条已经恢复，画面就应该回来了"）。见 windows.js 的 `recoverSurface`。
       //
       //   隧道还断着就不试：那一次重载必然失败，两次机会白白用完（`reloadTries`）。
-      const waiting = snap.tunnelState === 'listening'
-        ? await win.recoverSurface(slot, '网络已经回来，等页面加载完。') : false;
+      // 本机会话没有隧道，`'local'` 也是「页面可用」的一档 —— 否则它会被
+      //   读成「连接断了」，页面一建好就整块盖住。
+      const pageUsable = snap.tunnelState === 'listening'
+        || snap.tunnelState === 'local';
+      const waiting = pageUsable
+        ? await win.recoverSurface(slot, snap.tunnelState === 'local'
+          ? '本机插件页面正在重新加载。' : '网络已经回来，等页面加载完。')
+        : false;
       if (waiting) {
         win.setBusy(true);
-      } else if (snap.tunnelState !== 'listening' || win.surfaceBroken(slot)) {
-        await win.showOverlay(slot, {
-          title: snap.tunnelState === 'listening' ? '页面暂时打不开' : '连接暂时中断',
+      } else if (!pageUsable || win.surfaceBroken(slot)) {
+        await win.showOverlay(slot, snap.tunnelState === 'local' ? {
+          title: '本机插件页面打不开',
+          text: '可重新加载，或结束会话后重新打开。',
+        } : {
+          title: pageUsable ? '页面暂时打不开' : '连接暂时中断',
           text: snap.warning || '页面现在打不开，正在重试。',
         });
         win.setBusy(true);
@@ -3814,6 +3874,13 @@ async function refreshOut() {
     pushOutToHover();
     return;
   }
+  // 本机会话没有作业，也就没有作业日志。不发那条 RPC（它会回「还没有登记」）。
+  if (typeof c.isLocal === 'function' && c.isLocal()) {
+    out = { slot, data: null, error: '本机会话没有作业日志', unsupported: true,
+            at: Date.now() };
+    pushOutToHover();
+    return;
+  }
   // 一次只飞一个：1.5 秒一拍，而一次 RPC 完全可能比一拍还慢（退化成 exec 时
   //   尤其如此）。并发两次的结果是"后回来的可能是更旧的一份"，而它们写的还是
   //   同一个 `out`。
@@ -4006,7 +4073,13 @@ async function leaveSite() {
  */
 async function forgetSessions() {
   for (const [slot, rec] of [...sessions.entries()]) {
+    // 本机会话不会经过 `_renderSession`（它马上退出循环），所以视图、插件运行时
+    //   与临时数据要在这里收。次序与别处相同：销毁视图 → dispose → 回收数据；
+    //   反过来会让 `livePartitions()` 还看得见那个分区，清理被静默跳过。
+    const local = Boolean(rec.controller && rec.controller.isLocal());
+    if (local) win.destroySurface(slot);
     if (rec.controller) await rec.controller.abandon();
+    if (local) releaseEphemeral(rec.controller.spaceId);
     sessions.delete(slot);
   }
 }
@@ -4724,7 +4797,12 @@ function registerIpc() {
     //   一瞬间用户手上的连接指向一个没人监听的端口。所以那种会话只改配置、不动会话本身。
     //
     //   判据是 spaceId 有没有（框架的事实），不是"是哪个插件"（那是插件名）。
-    const sessionInWorkspace = sessionLive && live.controller.spaceId !== null;
+    // 本机会话同样不能走 relisten：它没有隧道，换端口就是让本地页面失联。
+    //   与"不要工作区的插件"归同一档：只改配置，不动正在跑的那一条。
+    const localLive = sessionLive
+      && typeof live.controller.isLocal === 'function' && live.controller.isLocal();
+    const sessionInWorkspace = sessionLive && !localLive
+      && live.controller.spaceId !== null;
     const outsideWorkspace = sessionLive && !sessionInWorkspace;
 
     if (isActive && live && !outsideWorkspace) {

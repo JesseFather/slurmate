@@ -39,6 +39,34 @@
 >
 > 这一版没有协议改动：新增的只有测试与文档，外加 sshd 开发样例的一份新包。
 
+### Added — 本机插件：没有作业侧也能打开（账本 F52 ②）
+
+客户端钩子 `startLocal(ctx, {port})`。站点报 `can_submit: false` 而插件导出它时，
+插件块给「在本机打开」：不提交作业、不建隧道、不起心跳、不占配额。`origin` 只接受
+`http://127.0.0.1:<端口>`；停止时调插件给的幂等 `dispose`，超时或被停掉之后才交
+出来的资源也会收。有作业侧的插件仍走作业，两者都声明时作业优先。
+
+界面跟着改：本机插件不画资源选项与名额；状态条写「本机运行（不占集群）」，
+那颗按钮叫「关闭本机会话」；右栏说「本机会话没有作业日志」；只有本机会话时，
+离开 / 断开 / 关窗不再说 35 分钟或作业被取消。协议里 `service_kind_no_job` 的
+「部署不完整」同步改成「合法状态：可能只在本机运行」。
+
+**判据**：`client/test/local.test.mjs` 五条（零 RPC、非法 origin、超时迟到收尾、
+只 dispose 一次、relisten 拒绝）；`client/test/boot.test.mjs` 一条端到端（站点
+`can_submit=false`、零 RPC、视图 URL、停止后端口关闭且 `disposed` 只有一行）；
+`client/test/renderer-dom.test.mjs` 一条（按钮与原因行）。夹具
+`client/test/fixtures/plugins/local-demo` 只有客户端一半，不进基座分发。
+
+### Changed — 排障里四处话进了界面（账本 S34）
+
+- 排队行补「站点还没有完成登记（会话文件缓存最长 60 秒）」；
+- 两颗「重新加载」的 `title` 说明用途与 `Ctrl+Shift+R`；
+- 会话标签的 `title` 说明输入法无效时先点击编辑区、仍无效时重新加载；
+- 「剩余时间」为「未知」时给出说明：站点本次未提供，不代表已到期。
+
+**判据**：`client/test/renderer.test.mjs` 一条静态文案，`client/test/renderer-dom.test.mjs`
+一条（标签与剩余时间真的画出来）。其余句子判成留文档或界面已有，记在账本 S34。
+
 ### Changed — sshd 开发样例升到 1.0.1，并铸了签名钥匙
 
 `plugins/sshd` 的作业侧在 0.31 之后改过，而 1.0.0 的内容已经打包装过账；按 §2.4

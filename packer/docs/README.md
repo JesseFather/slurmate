@@ -53,7 +53,11 @@ node packer/slurmate-packer.js build <插件目录>      # → <id>.splug（落�
 没有 `job/start.sh` 会怎样（上面那个「可以没有」指的就是它）：插件照常安装、
 照常在 `slurmate plugins` 与客户端界面上出现，但提交不了 —— 守护进程在提交时
 报 `service_kind_no_job`（code 4），`op_plugins` 里那个插件的 `can_submit` 是
-`false`，所以界面上的按钮是灰的、并且说清了原因。这是合法状态，不是坏掉的插件。
+`false`。这是合法状态，不是坏掉的插件。
+
+这类插件在客户端上有两条路：`client/index.js` 导出 `startLocal`
+（`docs/CONTRACT.md` §3.4）时，界面给「在本机打开」，不提交作业；没有这个钩子时，
+按钮是灰的，并说明它没有本机入口。
 
 要让它能提交，就在源码树里补一份 `job/start.sh`、升版本号、重新
 `packer build`，再装一次 —— 部署那一步会为它生成 `<ULID>.sbatch`。

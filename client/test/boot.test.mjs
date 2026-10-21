@@ -68,9 +68,21 @@ const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '.
 const CFG_DIR = userData;
 const SITE_POOL = path.join(fakeHome, '.slurmate', 'site-plugins');
 const SAMPLE_PLUGINS = ['sshd', 'web-demo'];
-/** 测试夹具插件放在这里；`sshd` 仍然从仓库的 `plugins/` 取。 */
+/** 本机插件（没有作业侧）只在它自己那几条用例里装上 —— 默认池不变，免得动到计数。 */
+const LOCAL_PLUGINS = [...SAMPLE_PLUGINS, 'local-demo'];
+/**
+ * 测试夹具插件放在两处：`client/test/fixtures/plugins` 给只有客户端一半的，
+ * `tools/fixtures/plugins` 给两侧都有的；`sshd` 仍然从仓库的 `plugins/` 取。
+ *
+ * 本机插件（`local-demo`）刻意不放 `tools/fixtures/plugins`：那一棵也是
+ *   集群侧用例的安装夹具，它们的断言按"每个插件都有作业侧"写的。放进去会
+ *   让那条套件红在一整片与它无关的断言上。
+ */
 const FIXTURE_PLUGINS = path.join(REPO, 'tools', 'fixtures', 'plugins');
+const CLIENT_FIXTURE_PLUGINS = path.join(REPO, 'client', 'test', 'fixtures', 'plugins');
 function pluginSrcDir(n) {
+  const inClient = path.join(CLIENT_FIXTURE_PLUGINS, n);
+  if (fs.existsSync(inClient)) return inClient;
   const inFixture = path.join(FIXTURE_PLUGINS, n);
   return fs.existsSync(inFixture) ? inFixture : path.join(REPO, 'plugins', n);
 }
@@ -123,17 +135,21 @@ const require = createRequire(import.meta.url);
  * @param {string[]} names `<repo>/plugins/<名字>`
  * @returns {string} 那棵树的根
  */
-function buildFixtureSiteTree(names) {
-  fs.rmSync(SITE_TREE, { recursive: true, force: true });
-  fs.mkdirSync(SITE_TREE, { recursive: true });
+function buildFixtureSiteTree(names, destRoot = SITE_TREE) {
+  fs.rmSync(destRoot, { recursive: true, force: true });
+  fs.mkdirSync(destRoot, { recursive: true });
   for (const n of names) {
     const src = pluginSrcDir(n);
-    const dest = path.join(SITE_TREE, n);
+    const dest = path.join(destRoot, n);
     fs.cpSync(src, dest, { recursive: true });
     const mf = JSON.parse(fs.readFileSync(path.join(src, 'plugin.json'), 'utf8'));
     // 只换有界面的那一类：没有界面的（中转站）今天的作业侧不跑
     //   （see backend-fake.js 的 `_submit`），换它只是多一份没人读的文件。
     if (!(mf.contributes && mf.contributes.surface)) continue;
+    // 没有作业侧的（本机插件）不补 job：补了就把 `can_submit` 变成 true，
+    //   而那正是本机入口要演的那个现场。这一条必须在写 `job/serve.js` 之前，
+    //   否则 `job/` 目录不存在，写文件当场 ENOENT。
+    if (!fs.existsSync(path.join(dest, 'job', 'start.sh'))) continue;
     const short = String(mf.name).replace(/-/g, '_');
     fs.writeFileSync(path.join(dest, 'job', 'serve.js'), [
       '// 夹具：这个插件的作业侧服务（真站点上这里跑的是 web-demo 那个',
@@ -1652,6 +1668,75 @@ test('开会话：创建 web-demo 视图，并真的自动登录成功', async (
   const conn = await testConn();
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
     '断开之后必须能重新接上，否则「断开」就成了单向门');
+});
+
+test('本机插件：站点报 can_submit=false，点「在本机打开」不提交作业', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const siteDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-local-site-'));
+  buildFixtureSiteTree(LOCAL_PLUGINS, siteDir);
+  setSitePlugins(LOCAL_PLUGINS);
+  idx._test.setSampleDir(siteDir);
+  try {
+    await connectDemo(idx);
+    const p = idx._test.getPluginsView().plugins.find((x) => x.name === 'local-demo');
+    assert.ok(p, '夹具前提：插件视图里应当有 local-demo');
+    assert.equal(p.canSubmit, false, '站点说它没有作业侧');
+    assert.equal(p.local, true, '客户端看见了 startLocal');
+    assert.equal(p.runnable, true, '本机入口应当可点');
+
+    // 本机会话一个 RPC 都不该发：submit / status / heartbeat / goodbye 全算。
+    const backend = idx._test.getBackend();
+    const realRpc = backend.rpc.bind(backend);
+    const ops = [];
+    backend.rpc = (req) => { ops.push(req.op); return realRpc(req); };
+    const beforeViews = calls.views.length;
+    let r;
+    try {
+      r = await appStart({}, 'local-demo');
+    } finally {
+      backend.rpc = realRpc;
+    }
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const snap = idx._test.sessionAt(r.slot).controller.snapshot();
+    assert.equal(snap.local, true);
+    assert.equal(snap.state, 'running');
+    assert.equal(snap.sessionId, null);
+    assert.equal(snap.tunnelState, 'local');
+    assert.match(snap.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.deepEqual(ops, [], '本机会话一个 RPC 都不发');
+
+    const view = await (async () => {
+      const deadline = Date.now() + 10000;
+      for (;;) {
+        const v = calls.views[beforeViews];
+        if (v && v.webContents._url === `${snap.origin}/`) return v;
+        if (Date.now() > deadline) {
+          assert.fail(`等待本机视图超时：${JSON.stringify(await invoke('app:states'))}`);
+        }
+        await new Promise((res) => setTimeout(res, 100));
+      }
+    })();
+    assert.ok(view, '本机插件页面应当被加载');
+
+    const ov = calls.views.find((v) => /overlay\.html$/.test(v.webContents._url));
+    assert.ok(!ov || ov._visible === false, '本机会话不该挂提示页');
+
+    const port = snap.localPort;
+    assert.equal(await portAlive(port), true, '前提：本机服务真的在听');
+    const dirName = diskNameOf(idx, 'local-demo', snap.spaceId);
+    const mark = path.join(idx._test.getPluginDataRoot(), dirName, 'disposed');
+
+    const stop = await invoke('app:stop', { slot: r.slot });
+    assert.equal(stop.ok, true, JSON.stringify(stop));
+    await waitUntil(async () => !(await portAlive(port)), '本地端口关闭');
+    assert.deepEqual(ops, [], '停止也不发 goodbye');
+    assert.equal(fs.readFileSync(mark, 'utf8').trim().split('\n').length, 1,
+      'stop 之后 dispose 恰好跑了一次');
+  } finally {
+    resetFixture();
+    fs.rmSync(siteDir, { recursive: true, force: true });
+  }
 });
 
 /** 等一个新的 web-demo 视图出现。loadURL 在自动登录之前就返回了，所以只能轮询。 */

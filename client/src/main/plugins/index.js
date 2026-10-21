@@ -187,7 +187,7 @@ const LOGIN_KEYS = ['path', 'field', 'cookie'];
  * 插件要的"这条会话属于哪条连接"由 `ctx.connection()` 给（见 index.js 的
  * pluginContext），那是一个读的能力，不是一个让插件回报偏好的口子。
  */
-const CLIENT_HOOKS = ['prepare', 'attach', 'closeWarning'];
+const CLIENT_HOOKS = ['prepare', 'attach', 'closeWarning', 'startLocal'];
 
 /**
  * 站点短名的字符集。它进那份插件配置的文件名、进会话文件、进日志与报错文案 ——
@@ -1007,7 +1007,7 @@ function activatePlugin(entry) {
   }
   const why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
   if (why) return { error: `${entry.clientPath}：${why}` };
-  for (const k of ['prepare', 'attach']) {
+  for (const k of ['prepare', 'attach', 'startLocal']) {
     if (mod[k] !== undefined && typeof mod[k] !== 'function') {
       return { error: `${entry.clientPath}：${k} 必须是一个函数` };
     }
@@ -1024,6 +1024,7 @@ function activatePlugin(entry) {
       prepare: mod.prepare || null,
       attach: mod.attach || null,
       closeWarning: mod.closeWarning || null,
+      startLocal: mod.startLocal || null,
     },
   };
 }

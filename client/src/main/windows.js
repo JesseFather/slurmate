@@ -121,6 +121,15 @@ const NEUTRAL_CLOSE_WARNING = {
   detail: '计算节点上的作业会被立即取消。\n',
 };
 
+/**
+ * 本机会话的中性关窗文案。它没有作业，照搬上面那句会凭空说一个不存在的作业。
+ * 插件自己给了 `closeWarning` 时仍以插件那份为准。
+ */
+const LOCAL_CLOSE_WARNING = {
+  message: '关闭窗口会结束这个本机会话。',
+  detail: '本机会话没有作业；关闭后本地服务随之停止，下次需要重新打开。\n',
+};
+
 class ShellWindow {
   /**
    * @param {object} opts
@@ -1047,15 +1056,23 @@ class ShellWindow {
       // 一条一条各念各的：两条会话各掐断什么，只有各自的插件说得清。合成
       //   一句"会结束 2 个会话"等于把"你的编辑器里有没保存的改动"这件只对其中
       //   一条成立的事说成对两条都成立。
-      const warn = (s) => (s.plugin && s.plugin.closeWarning) || NEUTRAL_CLOSE_WARNING;
+      const warn = (s) => (s.plugin && s.plugin.closeWarning)
+        || (s.local ? LOCAL_CLOSE_WARNING : NEUTRAL_CLOSE_WARNING);
       const message = live.length === 1
         ? warn(live[0]).message
         : `关闭窗口会结束这 ${live.length} 个会话。`;
+      const anyLocal = live.some((s) => s.local);
+      const allLocal = live.every((s) => s.local);
+      const tail = anyLocal
+        ? (allLocal
+          ? '（本机会话随窗口结束；本次没有影响任何作业。）'
+          : '（其中本机会话随窗口结束；集群上的作业会被取消。）')
+        : '（若只是想暂时离开，直接放着窗口不管就行：合盖或断网不会结束作业，'
+          + '下次打开会自动接上。）';
       const detail = (live.length === 1
         ? warn(live[0]).detail
         : live.map((s) => `· ${s.service || '（未知服务）'}：${warn(s).detail}`).join('\n'))
-        + '（若只是想暂时离开，直接放着窗口不管就行：合盖或断网不会结束作业，'
-        + '下次打开会自动接上。）';
+        + tail;
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'question',
         buttons: [live.length === 1 ? '结束会话并退出' : `结束这 ${live.length} 个会话并退出`,

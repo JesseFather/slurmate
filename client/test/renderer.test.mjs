@@ -97,6 +97,15 @@ test('panel.js 用到的每个元素 id 都在 panel.html 里', () => {
   assert.ok(idsUsed().size > 10, '抽取到的 id 不足，正则多半没匹配上');
 });
 
+test('S34：两颗「重新加载」的 title 说出用途与快捷键', () => {
+  // 账本 S34：排障里那句「页面空白时点重新加载 / Ctrl+Shift+R」必须在界面上。
+  //   两颗按钮（状态条与作业页）各一份，缺一颗就有一条路回到文档。
+  const want = '重新加载这一块页面。页面空白或无法操作时使用；Ctrl+Shift+R 等效。';
+  const all = html.match(/title="[^"]*重新加载这一块页面[^"]*"/g) || [];
+  assert.equal(all.length, 2, `两颗都该带这一句，抽到 ${all.length} 条`);
+  for (const t of all) assert.ok(t.includes(want), `文案要逐字在：${t}`);
+});
+
 test('panel.js 调用的每个桥方法 preload 都暴露了', () => {
   const exposed = bridgeMethods();
   const missing = [...bridgeCalls()].filter((m) => !exposed.has(m)).sort();
@@ -902,7 +911,10 @@ test('高级选项长在每一块里，不是全屏共用的一份', () => {
   // ② 画在那一块里，而且只给起得来的那些画。
   const blockFn = /function pluginBlock\(p\)[\s\S]*?\n\}/.exec(js);
   assert.ok(blockFn, 'panel.js 里应当有 pluginBlock()');
-  assert.match(blockFn[0], /if \(p\.runnable\) \{[\s\S]{0,220}?pluginAdv\(p\.defaults\)/,
+  // 本机插件（`localBlock`）没有作业，也就不画作业的高级选项 —— 条件里那一段
+  //   是它；有作业侧的那些仍然只按 `p.runnable` 判。
+  assert.match(blockFn[0],
+    /if \(p\.runnable(?: && !localBlock)?\) \{[\s\S]{0,220}?pluginAdv\(p\.defaults\)/,
     '高级选项要画在那一块里，而且只给起得来的那些画 —— 一颗灰着的'
     + '「开始会话」不需要资源，摆在那里等于说"这一块能起"。'
     + '而它必须把这一块那份默认传下去：那三格滑块停在站点按插件定的默认上，'
@@ -931,8 +943,10 @@ test('高级选项长在每一块里，不是全屏共用的一份', () => {
 
   // 而它的形状一个字没改 —— 这一轮只把这几格从公共区域搬进去（用户说过：
   //   插件块的形状等第一个插件联合调试时再仔细设计）。所以块里那几样照旧：
-  assert.match(blockFn[0], /btn\.textContent = '开始会话'/,
-    '「开始会话」这颗按钮本身没动');
+  // 本机插件那一颗写「在本机打开」（F52 ②）；其余仍是「开始会话」。
+  assert.match(blockFn[0],
+    /btn\.textContent = (?:localBlock \? '在本机打开' : )?'开始会话'/,
+    '「开始会话」这颗按钮本身没动（本机插件那一支除外）');
 });
 
 test('第二/三屏的标题照第一屏的 masthead 做（2026-10-17 改）', () => {

@@ -1,0 +1,20 @@
+{
+  "id": "01J0DEM0CA1B2C3D4E5F6G7H89",
+  "name": "local-demo",
+  "displayName": "本机样例",
+  "version": "1.0.0",
+  "description": "只有客户端一半的本机插件：不提交作业，只在本机起一个页面。",
+  "author": "slurmate",
+  "engines": { "slurmate": ">=0.33" },
+  "contributes": {
+    "surface": { "kind": "web", "path": "/" },
+    "ports": 1,
+    "concurrent": true,
+    "data": { "inherit": "local-demo" }
+  },
+  "site": {
+    "defaultCpus": 1,
+    "defaultMem": "1G",
+    "defaultEnabled": true
+  }
+}

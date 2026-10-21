@@ -1166,7 +1166,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `2` | `missing_service_kind` | 没给 `service_kind`，而本站也没配 `default_plugin` |
 | `2` | `bad_service_kind` | 本站**没有装**这个短名的插件（客户端太新，或名字打错） |
 | `4` | `service_kind_disabled` | 认得这个插件，但**本站没开**（管理员的一个决定） |
-| `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**（部署不完整，`plugins/` 里有而 `jobs/` 里没有对应那一份） |
+| `4` | `service_kind_no_job` | 本站装了它、也开着，但**它没有作业侧实现**。合法状态：这个插件可能只在本机运行（客户端有 `startLocal` 时给「在本机打开」）；也可能部署时漏了作业脚本 |
 | `2` | `bad_ssh_pubkey` | 需要公钥的插件没带公钥，或那行公钥不合法 |
 | `4` | `quota_active` | **占着位置**的会话数已达上限。上限有两格，都在站点那一侧：全局的 `max_sessions_per_user`，以及**这个插件自己的** `max_sessions`（见 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md)）。**排队中的也算**。是哪一格拦的写在 `detail` 里 |
 | `4` | `no_account` | 该用户没有 Slurm association |

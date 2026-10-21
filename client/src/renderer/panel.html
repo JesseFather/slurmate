@@ -69,7 +69,8 @@
        从连接那一屏换。 -->
   <!-- 这两个按钮必须待在状态条里：会话跑起来之后，窗口主体会被 web-demo
        页面整个盖住，状态条是唯一还在的、属于我们自己的像素。 -->
-  <button id="sb-reload" class="ghost tiny hidden">重新加载</button>
+  <button id="sb-reload" class="ghost tiny hidden"
+          title="重新加载这一块页面。页面空白或无法操作时使用；Ctrl+Shift+R 等效。">重新加载</button>
   <!-- 「停止该作业」是两段式的（见 panel.js 的 armConfirm）：点一下
        只是把这一格换成一行确认，第二下才真的结束。理由与那两个出口同源 ——
        它会把集群上正在跑的作业取消掉，而它旁边紧挨着「重新加载」。
@@ -470,7 +471,8 @@
              末尾等于让人先读完再回头看是哪一颗。格式与 `#btn-leave` 那个 title 同形。 -->
         <button id="btn-jobs-end" class="danger"
                 title="结束这一条会话，集群上的作业会被取消。关掉窗口同样会结束；合盖、断网、断电不会，作业会保留，下次连上自动接回。">结束</button>
-        <button id="btn-jobs-reload" class="ghost">重新加载</button>
+        <button id="btn-jobs-reload" class="ghost"
+                title="重新加载这一块页面。页面空白或无法操作时使用；Ctrl+Shift+R 等效。">重新加载</button>
         <button id="btn-jobs-refresh" class="ghost">刷新</button>
       </div>
       <p class="sub" id="jobs-when"></p>
