@@ -66,7 +66,7 @@ test('本机插件：startLocal 进 running，零 RPC，也不起心跳与轮询
   assert.equal(snap.origin, 'http://127.0.0.1:55221');
   assert.equal(snap.localPort, 55221);
   assert.equal(snap.tunnelState, 'local');
-  assert.equal(snap.local, true);
+  assert.equal(snap.onHost, true);
   assert.equal(snap.sessionId, null);
   assert.equal(snap.jobId, null);
   assert.equal(c.backend.calls.length, 0, '本机会话一个 RPC 都不发');

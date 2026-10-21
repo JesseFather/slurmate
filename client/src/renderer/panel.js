@@ -565,13 +565,13 @@ function hasRunningSession() {
 
 /** 当前活着的会话里有没有本机插件（不提交作业的那种）。 */
 function hasLocalSession() {
-  return (SESS.sessions || []).some((s) => s.live && s.snap && s.snap.local);
+  return (SESS.sessions || []).some((s) => s.live && s.snap && s.snap.onHost);
 }
 
 /** 活着的会话全部是本机插件 —— 离开/断开时不涉及任何作业。 */
 function onlyLocalSessions() {
   const live = (SESS.sessions || []).filter((s) => s.live);
-  return live.length > 0 && live.every((s) => s.snap && s.snap.local);
+  return live.length > 0 && live.every((s) => s.snap && s.snap.onHost);
 }
 
 /**
@@ -633,7 +633,7 @@ function renderSnapshot(s) {
       detail = s.suspended;
     } else if (st === 'running' || st === 'releasing') {
       const bits = [];
-      if (s.local) bits.push('本机运行（不占集群）');
+      if (s.onHost) bits.push('本机运行（不占集群）');
       if (s.partition) bits.push(s.partition);
       if (s.node) bits.push(s.node);
       if (s.expiresAt !== undefined) bits.push('剩余 ' + fmtLeft(s.expiresAt));
@@ -706,7 +706,7 @@ function renderSnapshot(s) {
     && lastEndedSlot !== (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
   if (endedNow) {
     lastEndedSlot = (SESS.sessions.find((x) => x.slot === SESS.front) || {}).slot;
-    if (s) notice(jobEndedKind(s), s.local ? '本机会话已结束。' : (s.jobText || '作业已结束。'));
+    if (s) notice(jobEndedKind(s), s.onHost ? '本机会话已结束。' : (s.jobText || '作业已结束。'));
   }
 
   // 这一帧里露出来的东西刚变过（状态条、映射图的节点），连线的几何位置要到
@@ -733,7 +733,7 @@ function renderStatusEnd(s) {
   const pageOnScreen = Boolean(s) && st === 'running'
     && hasSurface(s) && !SESS.panelFront;
   reload.classList.toggle('hidden', !pageOnScreen);
-  if (s && s.local) {
+  if (s && s.onHost) {
     btn.textContent = '关闭本机会话';
     btn.title = '关闭这个本机会话；它没有集群作业，本地服务会随之停止。';
   } else {
@@ -976,7 +976,7 @@ function renderKv(s) {
   // 本机会话没有作业：作业 ID / 分区 / 剩余时间 / 心跳都不是它的事实。
   //   照常画一遍会让它们显示成「—」，那读起来像"作业信息暂时查不到"，
   //   而真相是这一条根本没有作业。
-  const rows = s.local ? [
+  const rows = s.onHost ? [
     ['会话类型', '本机（不提交作业）'],
     ['本地地址', localAddressText(s)],
     ['状态', '本机运行'],
@@ -2761,7 +2761,7 @@ function syncPluginQuota() {
 function pluginBlock(p) {
   // 本机插件：站点说有它、但没有作业侧，而客户端给了本机入口。
   //   它与「起不来」是两件事，所以不进 `plug-off`，也不画资源选项与名额。
-  const localBlock = Boolean(p.local) && !p.canSubmit;
+  const localBlock = Boolean(p.hasLocalEntry) && !p.canSubmit;
   const d = document.createElement('div');
   d.className = 'plug' + (p.runnable ? '' : ' plug-off');
 

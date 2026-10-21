@@ -38,7 +38,7 @@
 > **`0.33.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
 >
 > 这一版没有新增协议 op：改的是一个配置键、客户端的契约接线与摘要公式，外加
-> sshd 开发样例的一份新包。
+> sshd 开发样例的一份新包与一次视图字段改名。
 
 ### Changed — 契约页新增保证方式「用例」，十三格逐条落位（账本 S31 T7）
 
@@ -100,6 +100,20 @@
 `can_submit=false`、零 RPC、视图 URL、停止后端口关闭且 `disposed` 只有一行）；
 `client/test/renderer-dom.test.mjs` 一条（按钮与原因行）。夹具
 `client/test/fixtures/plugins/local-demo` 只有客户端一半，不进基座分发。
+
+### Changed — 会话视图的 `local` 字段改名
+
+视图里的 `local` 字段被属性访问时，那一串写法与脱敏检查防的内网域名后缀
+（mDNS / FreeIPA 的域名）同形，于是每一条属性访问都被判成泄漏。改名，
+检查器不动：
+
+- 会话快照的 `local` → `onHost`（这一条跑在本机，不占集群）；
+- 插件视图的 `local` → `hasLocalEntry`（这个插件有没有 `startLocal` 入口）；
+- 关窗确认那一份视图的 `local` → `onHost`。
+
+**判据**：`bash tools/check-sanitized.sh` 重新通过；`client/test/boot.test.mjs`
+的本机会话用例、`client/test/local.test.mjs` 与 `client/test/renderer-dom.test.mjs`
+的夹具跟改。
 
 ### Changed — 排障里四处话进了界面（账本 S34）
 

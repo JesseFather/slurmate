@@ -806,11 +806,11 @@ test('本机插件：没有作业侧但有 startLocal 时，按钮写「在本�
       { id: 'p3', name: 'local-demo', title: '本机样例', version: '1.0.0',
         description: '', ports: 1, group: 'local-demo', runnable: true,
         hasClientCode: true, siteEnabled: true, siteKnown: true, locallyEnabled: true,
-        canSubmit: false, local: true, defaults: { cpus: 1, mem: '1G' }, maxSessions: 2 },
+        canSubmit: false, hasLocalEntry: true, defaults: { cpus: 1, mem: '1G' }, maxSessions: 2 },
       { id: 'p4', name: 'half', title: '只有一半', version: '1.0.0',
         description: '', ports: 0, group: null, runnable: false,
         hasClientCode: true, siteEnabled: true, siteKnown: true, locallyEnabled: true,
-        canSubmit: false, local: false, defaults: { cpus: 1, mem: '1G' } },
+        canSubmit: false, hasLocalEntry: false, defaults: { cpus: 1, mem: '1G' } },
     ],
   };
   h.run(`renderPlugins(${JSON.stringify(PL)});`);

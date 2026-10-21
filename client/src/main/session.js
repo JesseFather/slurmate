@@ -463,7 +463,7 @@ class SessionController extends EventEmitter {
       localPort: this._localOrigin ? this._localPort : this._tunnelPort,
       origin: this._localOrigin || this.tunnel.origin,
       /** 这一条是不是本机插件（不提交作业、不占集群配额）。 */
-      local: Boolean(this._localOrigin),
+      onHost: Boolean(this._localOrigin),
       // expires_at / job_state / time_limit 在 show_job 失败时整个 key 不存在
       // （cluster/slurmate-sessiond:1678-1687）。所以这里必须容忍 undefined，
       // 界面显示「剩余时间未知」而不是 0。

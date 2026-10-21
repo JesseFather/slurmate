@@ -1057,12 +1057,12 @@ class ShellWindow {
       //   一句"会结束 2 个会话"等于把"你的编辑器里有没保存的改动"这件只对其中
       //   一条成立的事说成对两条都成立。
       const warn = (s) => (s.plugin && s.plugin.closeWarning)
-        || (s.local ? LOCAL_CLOSE_WARNING : NEUTRAL_CLOSE_WARNING);
+        || (s.onHost ? LOCAL_CLOSE_WARNING : NEUTRAL_CLOSE_WARNING);
       const message = live.length === 1
         ? warn(live[0]).message
         : `关闭窗口会结束这 ${live.length} 个会话。`;
-      const anyLocal = live.some((s) => s.local);
-      const allLocal = live.every((s) => s.local);
+      const anyLocal = live.some((s) => s.onHost);
+      const allLocal = live.every((s) => s.onHost);
       const tail = anyLocal
         ? (allLocal
           ? '（本机会话随窗口结束；本次没有影响任何作业。）'

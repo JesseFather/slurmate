@@ -1225,7 +1225,7 @@ function pluginsView() {
       defaultsGresText: gresText(s && s.defaults && s.defaults.gpus),
       // 这个插件有没有本机入口（客户端钩子 `startLocal`）。它只在站点报
       //   `can_submit: false` 时才有意义：有作业侧的插件仍走作业。
-      local: typeof plugin.startLocal === 'function',
+      hasLocalEntry: typeof plugin.startLocal === 'function',
       // 能不能真的起一个会话。三个条件都成立；本机插件不要求 `canSubmit`
       //   —— 它本来就没有作业可提交。三个条件各有各的主语（站点 / 用户 /
       //   站点的部署状态），所以界面上那几句解释也必须是几句不同的话。
@@ -3078,7 +3078,7 @@ async function onSessionChange(slot) {
         //   （见 `SessionController.watching`）。
         live: v.live && Boolean(c) && c.watching,
         // 本机会话没有作业，关窗确认不能再说「作业会被取消」。
-        local: Boolean(c && c.isLocal()),
+        onHost: Boolean(c && c.isLocal()),
         service: v.service,
         plugin: rec.plugin || null,
       };

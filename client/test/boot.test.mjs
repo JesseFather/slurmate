@@ -1682,7 +1682,7 @@ test('本机插件：站点报 can_submit=false，点「在本机打开」不提
     const p = idx._test.getPluginsView().plugins.find((x) => x.name === 'local-demo');
     assert.ok(p, '夹具前提：插件视图里应当有 local-demo');
     assert.equal(p.canSubmit, false, '站点说它没有作业侧');
-    assert.equal(p.local, true, '客户端看见了 startLocal');
+    assert.equal(p.hasLocalEntry, true, '客户端看见了 startLocal');
     assert.equal(p.runnable, true, '本机入口应当可点');
 
     // 本机会话一个 RPC 都不该发：submit / status / heartbeat / goodbye 全算。
@@ -1699,7 +1699,7 @@ test('本机插件：站点报 can_submit=false，点「在本机打开」不提
     }
     assert.equal(r.ok, true, JSON.stringify(r));
     const snap = idx._test.sessionAt(r.slot).controller.snapshot();
-    assert.equal(snap.local, true);
+    assert.equal(snap.onHost, true);
     assert.equal(snap.state, 'running');
     assert.equal(snap.sessionId, null);
     assert.equal(snap.tunnelState, 'local');
