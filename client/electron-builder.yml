@@ -32,11 +32,15 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  # 图标三平台共用同一份 1024 见方的 PNG（矢量源是旁边的 icon.svg，见
-  #   src/renderer/）。打包时由 app-builder 转成 .ico / .icns；窗口图标
-  #   （windows.js 的 `icon`）读的是同一个文件。写死路径而不是靠 buildResources
-  #   的默认约定：那张图还要进 asar 给运行期用，放在 src 里才一份文件管两处。
-  icon: src/renderer/icon.png
+  # Windows 单独一份：方底铺满整块画布（矢量源 icon-win.svg）。Windows 不像
+  #   macOS 那样替图标留边，同一张留白的图放进任务栏会比别的程序小一圈，
+  #   底下再垫一层白底就成了"白框里一个小方框"（2026-10-24 报的）。
+  #   两份 PNG 都是透底的，方底以外的地方不许有颜色。
+  #   打包时由 app-builder 转成 .ico；窗口图标（windows.js 的 `icon`）仍读
+  #   icon.png —— 那是运行期的同一份资产，与安装包里的图标是两处。
+  #   写死路径而不是靠 buildResources 的默认约定：那张图还要进 asar 给运行期用，
+  #   放在 src 里才一份文件管两处。
+  icon: src/renderer/icon-win.png
   # 未签名。首次运行 SmartScreen 会拦一次，选「更多信息 → 仍要运行」。
   # 内部分发可以接受；要消除提示需要代码签名证书。
 
