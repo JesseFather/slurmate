@@ -143,6 +143,13 @@ function buildDir(tmp, fixture) {
     if (!fs.existsSync(src)) throw new Error(`panel.html 引用了 ${ref}，而它不在 ${RENDERER}`);
     fs.copyFileSync(src, path.join(tmp, path.basename(ref)));
   }
+  // 只由脚本引用的图（加载记号 `icon-anim.svg` 就是）扫 HTML 扫不到。整目录照搬：
+  //   少搬一张，页面里就是一只碎图，而探针量到的是"一个不存在的界面"。
+  for (const e of fs.readdirSync(RENDERER, { withFileTypes: true })) {
+    if (!e.isFile()) continue;
+    const dst = path.join(tmp, e.name);
+    if (!fs.existsSync(dst)) fs.copyFileSync(path.join(RENDERER, e.name), dst);
+  }
 
   // CSP 那条 meta 原样留着，一个字都不改。
   //
@@ -184,8 +191,12 @@ function buildDir(tmp, fixture) {
  *   "真的 panel.html" 了。端口用 0 让内核挑，只听 127.0.0.1，跑完就关。
  */
 function serve(dir) {
+  // 图片那两类是给界面里真的会出现的图片用的（项目图标：`panel.html` 的标题左边
+  //   与连接中的那颗按钮）。少一条 MIME，Chromium 会把 SVG 当二进制拒绝，
+  //   页面上只剩一个碎图图标 —— 探针据此量到的，是一个不存在的界面。
   const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8' };
+    '.js': 'text/javascript; charset=utf-8',
+    '.svg': 'image/svg+xml', '.png': 'image/png' };
   const server = http.createServer((req, res) => {
     const rel = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
     const file = path.join(dir, rel);
@@ -260,8 +271,10 @@ function judge(r) {
   //   它与上面两条不是同一件事 —— 折行的按钮【既不滚动也不越界】（盒子规规矩矩
   //   待在界内），所以两条老判据一条都不响。用户 2026-10-17 报的就是这一处。
   for (const b of (r.buttons || []).slice(0, 6)) {
-    bad.push(`${b.sel} 的文字被挤了：${b.lines} 行，文字 ${b.textWidth} > 盒子 `
-      + `${b.boxWidth}：${b.text}`);
+    const how = b.lines > 1 ? `折成了 ${b.lines} 行`
+      : (b.over > 1 ? `内容比盒子宽 ${b.over}px`
+        : `文字 ${b.textWidth} 比盒子 ${b.boxWidth} 宽`);
+    bad.push(`${b.sel} 的文字被挤了：${how}：${b.text}`);
   }
   if ((r.buttons || []).length > 6) bad.push(`另外还有 ${r.buttons.length - 6} 处按钮被挤`);
   // 右端要与上面那几块对齐（用户 2026-10-17 的截图：连接列表短了一截）。

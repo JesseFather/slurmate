@@ -205,15 +205,27 @@
     Array.prototype.forEach.call(document.querySelectorAll('button'), function (el) {
       if (!visible(el)) return;
       if (!(el.textContent || '').trim()) return;
-      var rects = null;
+      // 只量文字节点：按钮里现在可能有图（加载记号），图自己的矩形不是"一行字"，
+      //   算进来会让每一颗带记号的按钮都被判成折行。
+      var rects = [];
+      var tops = [];
       try {
-        var rng = document.createRange();
-        rng.selectNodeContents(el);
-        rects = rng.getClientRects();
+        Array.prototype.forEach.call(el.childNodes, function (n) {
+          if (n.nodeType !== 3) return;
+          if (!(n.textContent || '').trim()) return;
+          var rng = document.createRange();
+          rng.selectNodeContents(n);
+          var rs = rng.getClientRects();
+          for (var i = 0; i < rs.length; i++) {
+            rects.push(rs[i]);
+            var t = Math.round(rs[i].top);
+            if (tops.indexOf(t) < 0) tops.push(t);
+          }
+        });
       } catch (e) {
         return;         // 量不到就不判它 —— 这一条不该变成"抛了就算红"
       }
-      if (!rects || !rects.length) return;
+      if (!rects.length) return;
       var textW = 0;
       for (var i = 0; i < rects.length; i++) {
         textW = Math.max(textW, rects[i].width);
@@ -221,10 +233,13 @@
       var cs = getComputedStyle(el);
       var boxW = el.clientWidth
         - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-      if (rects.length > 1 || textW > boxW + 1) {
-        out.buttons.push({ sel: describe(el), lines: rects.length,
+      // 第三样：整颗内容（文字 + 记号）比盒子宽。`nowrap` 不让折行，于是挤压
+      //   表现成"字伸到盒子外面" —— 盒子自己的矩形规规矩矩，前两条都不响。
+      var over = el.scrollWidth - el.clientWidth;
+      if (tops.length > 1 || textW > boxW + 1 || over > 1) {
+        out.buttons.push({ sel: describe(el), lines: tops.length,
           textWidth: Math.round(textW), boxWidth: Math.round(boxW),
-          text: snippet(el) });
+          over: Math.max(0, over), text: snippet(el) });
       }
     });
 
