@@ -145,7 +145,7 @@ test('跑出 client/src 的路径只有那几处，而且各自都交代过', ()
  *   所以在这里钉住三件事 —— 三平台指向同一个文件、文件在、PNG 够大；顺带把
  *   "两份 SVG 真的被界面用到"也钉住，免得哪天界面改了而资产留在原地没人读。
  */
-test('三平台图标指向同一份 PNG，两份 SVG 都被界面用到', () => {
+test('三平台图标指向同一份 PNG，三份 SVG 各管一处', () => {
   const ICON = 'src/renderer/icon.png';
   const esc = ICON.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const key of ['win', 'mac', 'linux']) {
@@ -166,12 +166,13 @@ test('三平台图标指向同一份 PNG，两份 SVG 都被界面用到', () =>
     `${ICON} 是 ${width}×${height} —— 低于 512 见方时 app-builder 转不出 .icns`);
 
   const RENDERER = path.join(SRC, 'renderer');
-  for (const f of ['icon.svg', 'icon-anim.svg']) {
+  for (const f of ['icon.svg', 'icon-mark.svg', 'icon-anim.svg']) {
     assert.ok(fs.existsSync(path.join(RENDERER, f)), `src/renderer/${f} 不在`);
   }
+  // 三份各管一处：方底那份是系统图标（打包与窗口），裸的静止与动画在界面里。
   assert.match(fs.readFileSync(path.join(RENDERER, 'panel.html'), 'utf8'),
-    /<img class="brand-mark" src="icon\.svg"/,
-    'panel.html 里没有那枚静止图标 —— icon.svg 成了没人读的资产');
+    /<img class="brand-mark" src="icon-mark\.svg"/,
+    'panel.html 里没有那枚静止记号 —— 它成了没人读的资产');
   assert.match(fs.readFileSync(path.join(RENDERER, 'panel.js'), 'utf8'),
     /icon-anim\.svg/,
     'panel.js 里没有加载动画 —— icon-anim.svg 成了没人读的资产');

@@ -1,9 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="311 136 402 752"
      role="img" aria-labelledby="t d">
   <title id="t">Slurmate 加载中</title>
   <desc id="d">起始停一瞬，两环啪地上下分开（冲过 74 再落回 66），缺口由 52 度张到 120 度：每个缺口只有一头往外退，另一头钉住不动；各自绕自己的圆心带加减速转满 360 度，方块同步转 90 度；随后啪地吸回，方块弹到 1.12 再落定。周期 1.8 秒。</desc>
-  <rect x="96" y="96" width="832" height="832" rx="196" fill="#0E1726"/>
-  <g transform="translate(512 512) scale(0.86) translate(-512 -512)">
+  <g>
     <g>
       <animateTransform attributeName="transform" type="translate"
         values="0 0; 0 0; 0 -74; 0 -66; 0 -66; 0 0; 0 0" keyTimes="0; 0.06; 0.11; 0.15; 0.70; 0.75; 1"

@@ -80,8 +80,8 @@ html, body {
 
 #statusbar .st { font-weight: 600; }
 /* 状态字前面那枚记号（提交 / 排队 / 释放，见 panel.js 的 renderSnapshot）。
-   比按钮里那枚小一号：这里只有 12px 的字，14px 的记号会把 30px 的条顶满。 */
-#statusbar .mark-spin { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
+   比按钮里那枚矮 2px：这里只有 12px 的字，再高会顶满 30px 的条。 */
+#statusbar .mark-spin { height: 13px; margin-right: 4px; vertical-align: -2px; }
 #statusbar .sep { color: var(--border); }
 #statusbar .spacer { flex: 1; }
 
@@ -214,9 +214,12 @@ h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
    它被推到右端，与第一屏那几块的同一条右端线对齐。 */
 #about-head { margin-top: 22px; display: flex; align-items: center; gap: 10px; }
 #about-head h1 { flex: 1; min-width: 0; margin: 0; display: flex; align-items: center; gap: 9px; }
-/* 标题左边那枚项目图标（2026-10-23 加）。尺寸只写在 CSS 里：图标本身是矢量的，
-   将来要跟着字号调整，改这一处就够了。`flex: none` 是不让它被那行 flex 压扁。 */
-.brand-mark { flex: none; width: 28px; height: 28px; }
+/* 标题左边那枚项目记号（2026-10-23 加）。界面里用的是不带方底的裸记号：
+   方底是给系统图标用的（任务栏、安装包那一圈遮罩里需要它），而这里背景已经
+   是我们自己的，带上方底只是一个深色方块。
+   尺寸只给高度，宽度按记号自己的比例（402:752）走 —— `flex: none` 不让那行
+   flex 把它压扁。 */
+.brand-mark { flex: none; height: 26px; width: auto; }
 
 /* 第一屏标题那一行右端的「关于」（2026-10-17 改）。
    看得见的只有一个感叹号，全名在 `title` 与 `aria-label` 上（见 panel.html）。
@@ -286,9 +289,10 @@ button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
 /* 连接在飞的那几秒，按钮文字前面那枚小记号（见 panel.js 的 spinMark）。
+   与标题同一条规矩：裸记号，宽按比例（402:752）走，只定高度。
    `vertical-align` 往下压 2px：按钮的行高是 18px，记号的中心要落在文字的中线上，
    而图片的基线是它的底边。 */
-.mark-spin { width: 14px; height: 14px; margin-right: 5px; vertical-align: -2px; }
+.mark-spin { height: 15px; width: auto; margin-right: 5px; vertical-align: -2px; }
 /* 「记住并启动」—— 那一行三颗里唯一会改配置的一颗。
    用琥珀（`--warn`）：那个颜色在这个仓库里等于「注意」，而它要提示的正是"这一步会
    把这份数据的端口改掉"。它与两段式那颗 `danger`（红）不是同一件事：这里

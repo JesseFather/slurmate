@@ -4065,7 +4065,7 @@ function spinMark() {
   //   为了一枚图标把整条连接路径抛停，比多播一秒动画坏得多。
   const still = typeof window.matchMedia === 'function'
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  img.src = still ? 'icon.svg' : 'icon-anim.svg';
+  img.src = still ? 'icon-mark.svg' : 'icon-anim.svg';
   return img;
 }
 

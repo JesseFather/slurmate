@@ -466,8 +466,8 @@ src/main/
   shortcuts.js     最小菜单 + 按键黑名单
   windows.js       BrowserWindow + WebContentsView
 src/preload/       contextIsolation 下的三个桥（面板 / 提示页 / 假页面）
-src/renderer/      面板、状态条、提示页，以及项目图标（`icon.svg` 静止、`icon-anim.svg`
-                   加载态、`icon.png` 供打包与窗口图标用）
+src/renderer/      面板、状态条、提示页，以及项目图标（`icon.svg` 是方底那版，供打包
+                   与窗口图标用；界面里用裸的 `icon-mark.svg` 与 `icon-anim.svg`）
 src/demo/          那个假服务的两个页面（夹具与 contract.mjs 用）
 test/              classify / config / keys / shortcuts / renderer / backend-ssh /
                    plugin-package / site-plugins / contract（契约）/ integration /
