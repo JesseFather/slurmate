@@ -32,6 +32,11 @@ win:
   target:
     - target: nsis
       arch: [x64]
+  # 图标三平台共用同一份 1024 见方的 PNG（矢量源是旁边的 icon.svg，见
+  #   src/renderer/）。打包时由 app-builder 转成 .ico / .icns；窗口图标
+  #   （windows.js 的 `icon`）读的是同一个文件。写死路径而不是靠 buildResources
+  #   的默认约定：那张图还要进 asar 给运行期用，放在 src 里才一份文件管两处。
+  icon: src/renderer/icon.png
   # 未签名。首次运行 SmartScreen 会拦一次，选「更多信息 → 仍要运行」。
   # 内部分发可以接受；要消除提示需要代码签名证书。
 
@@ -49,6 +54,7 @@ mac:
   target:
     - target: dmg
       arch: [x64, arm64]
+  icon: src/renderer/icon.png
   category: public.app-category.developer-tools
   # 不签名、不公证。后果：Gatekeeper 会拦，用户首次需右键 →「打开」，
   # 或执行 xattr -dr com.apple.quarantine /Applications/Slurmate.app
@@ -63,6 +69,7 @@ linux:
       arch: [x64]
     - target: deb
       arch: [x64]
+  icon: src/renderer/icon.png
   category: Development
   # .deb 的 fpm 打包要求 maintainer 是 `Name <email>` 格式，且 package.json 里
   # 必须有 homepage —— 两者缺一都会让 deb 目标失败（Windows/macOS 不受影响，

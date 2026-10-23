@@ -210,7 +210,10 @@ h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
    这一行现在也是「关于」那颗感叹号的家（2026-10-17 改）：名字占满余下的宽度，
    它被推到右端，与第一屏那几块的同一条右端线对齐。 */
 #about-head { margin-top: 22px; display: flex; align-items: center; gap: 10px; }
-#about-head h1 { flex: 1; min-width: 0; margin: 0; }
+#about-head h1 { flex: 1; min-width: 0; margin: 0; display: flex; align-items: center; gap: 9px; }
+/* 标题左边那枚项目图标（2026-10-23 加）。尺寸只写在 CSS 里：图标本身是矢量的，
+   将来要跟着字号调整，改这一处就够了。`flex: none` 是不让它被那行 flex 压扁。 */
+.brand-mark { flex: none; width: 28px; height: 28px; }
 
 /* 第一屏标题那一行右端的「关于」（2026-10-17 改）。
    看得见的只有一个感叹号，全名在 `title` 与 `aria-label` 上（见 panel.html）。
@@ -279,6 +282,10 @@ button.ghost:hover { background: #45494e; }
 button.danger { background: #6b2020; }
 button.danger:hover { background: #8a2a2a; }
 button.tiny { padding: 2px 9px; font-size: 11px; line-height: 18px; }
+/* 连接在飞的那几秒，按钮文字前面那枚小记号（见 panel.js 的 spinMark）。
+   `vertical-align` 往下压 2px：按钮的行高是 18px，记号的中心要落在文字的中线上，
+   而图片的基线是它的底边。 */
+.mark-spin { width: 14px; height: 14px; margin-right: 5px; vertical-align: -2px; }
 /* 「记住并启动」—— 那一行三颗里唯一会改配置的一颗。
    用琥珀（`--warn`）：那个颜色在这个仓库里等于「注意」，而它要提示的正是"这一步会
    把这份数据的端口改掉"。它与两段式那颗 `danger`（红）不是同一件事：这里

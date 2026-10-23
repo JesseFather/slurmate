@@ -409,6 +409,10 @@ npx electron-builder --publish never
 
 产物在 `dist/`。三平台配置见 `electron-builder.yml`。
 
+图标三平台共用 `src/renderer/icon.png`（1024 见方，由 `icon.svg` 导出），
+窗口图标读的是同一份。连接中的加载动画是 `icon-anim.svg`：SMIL 写在 SVG 里，
+Chromium 直接播；静止帧与图标重合。
+
 CI 在仓库根目录的 `.github/workflows/build.yml` —— 不是本目录。
 （GitHub Actions 只读仓库根的 `.github/workflows/`，放在 `client/` 下永远不会被触发。）
 workflow 里所有步骤都带 `working-directory: client`，推 `v*` tag 会把三平台产物挂到
@@ -462,7 +466,8 @@ src/main/
   shortcuts.js     最小菜单 + 按键黑名单
   windows.js       BrowserWindow + WebContentsView
 src/preload/       contextIsolation 下的三个桥（面板 / 提示页 / 假页面）
-src/renderer/      面板、状态条、提示页
+src/renderer/      面板、状态条、提示页，以及项目图标（`icon.svg` 静止、`icon-anim.svg`
+                   加载态、`icon.png` 供打包与窗口图标用）
 src/demo/          那个假服务的两个页面（夹具与 contract.mjs 用）
 test/              classify / config / keys / shortcuts / renderer / backend-ssh /
                    plugin-package / site-plugins / contract（契约）/ integration /

@@ -157,6 +157,10 @@ class ShellWindow {
       minHeight: 640,
       show: false,
       backgroundColor: '#1e1e1e',
+      // 窗口图标。打包版的 Windows 与 macOS 取的是安装包内嵌的那枚（见
+      //   electron-builder.yml 的 `icon`）；Linux 的窗口管理器读的正是这一格，
+      //   源码直跑时三平台也都会用它。asar 里的路径读得了（Electron 自己解）。
+      icon: path.join(__dirname, '..', 'renderer', 'icon.png'),
       // 不用 autoHideMenuBar：那会让 Alt 弹出菜单栏，而 Alt 是 VS Code 的菜单助记键
       autoHideMenuBar: false,
       webPreferences: {

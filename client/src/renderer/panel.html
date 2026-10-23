@@ -173,7 +173,9 @@
            像素都露不出来。而这一屏本来就只在没在跑会话的时候看得见 —— 会话跑着的
            时候你在第二屏。 -->
     <div id="about-head">
-      <h1>Slurmate</h1>
+      <!-- 标题左边那枚项目图标（2026-10-23 加）。`alt` 空着：它就写在这行 h1 里，
+           图只是这行字的一部分 —— 读屏再念一遍等于把同一件事说两次。 -->
+      <h1><img class="brand-mark" src="icon.svg" alt="">Slurmate</h1>
       <!-- 悬停层整层由 CSS 做（`.about-tip:hover .about-card`）：一个 `onclick`
            都不挂，于是某一次 `bootstrap()` 失败不会让它变成一颗点了没反应的
            按钮。卡片始终在 DOM 里，收着的时候是 `display: none`；

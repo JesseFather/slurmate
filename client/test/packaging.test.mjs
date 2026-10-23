@@ -137,3 +137,42 @@ test('跑出 client/src 的路径只有那几处，而且各自都交代过', ()
       + '要么把它移动进 src/，要么在上面那张表里写清它怎么活下来');
   }
 });
+
+// ── 图标 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 图标那条路径写错了不会报错：打包照样成功，只是安装包换回 Electron 的默认图标。
+ *   所以在这里钉住三件事 —— 三平台指向同一个文件、文件在、PNG 够大；顺带把
+ *   "两份 SVG 真的被界面用到"也钉住，免得哪天界面改了而资产留在原地没人读。
+ */
+test('三平台图标指向同一份 PNG，两份 SVG 都被界面用到', () => {
+  const ICON = 'src/renderer/icon.png';
+  const esc = ICON.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const key of ['win', 'mac', 'linux']) {
+    const block = blockOf(key);
+    assert.ok(block, `electron-builder.yml 里未找到 ${key} 段 —— 这条判据失去目标`);
+    assert.match(block, new RegExp(`^\\s*icon:\\s*${esc}\\s*$`, 'm'),
+      `${key} 段没有指向 ${ICON} —— 打包出来的安装包会退回 Electron 的默认图标`);
+  }
+
+  const png = path.join(CLIENT, ICON);
+  assert.ok(fs.existsSync(png), `${ICON} 不在`);
+  // PNG 的 IHDR 在文件头：8 字节签名 + 4 长度 + 4 类型，宽高各 4 字节（大端）。
+  const head = fs.readFileSync(png).subarray(0, 24);
+  assert.equal(head.subarray(1, 4).toString('latin1'), 'PNG', `${ICON} 不是 PNG`);
+  const width = head.readUInt32BE(16);
+  const height = head.readUInt32BE(20);
+  assert.ok(width >= 512 && height >= 512,
+    `${ICON} 是 ${width}×${height} —— 低于 512 见方时 app-builder 转不出 .icns`);
+
+  const RENDERER = path.join(SRC, 'renderer');
+  for (const f of ['icon.svg', 'icon-anim.svg']) {
+    assert.ok(fs.existsSync(path.join(RENDERER, f)), `src/renderer/${f} 不在`);
+  }
+  assert.match(fs.readFileSync(path.join(RENDERER, 'panel.html'), 'utf8'),
+    /<img class="brand-mark" src="icon\.svg"/,
+    'panel.html 里没有那枚静止图标 —— icon.svg 成了没人读的资产');
+  assert.match(fs.readFileSync(path.join(RENDERER, 'panel.js'), 'utf8'),
+    /icon-anim\.svg/,
+    'panel.js 里没有加载动画 —— icon-anim.svg 成了没人读的资产');
+});

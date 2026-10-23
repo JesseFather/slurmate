@@ -4043,6 +4043,23 @@ function unlockConnectEntries() {
   }
 }
 
+/** 连接在飞的那几秒，按钮前面那枚小记号（样式见 app.css 的 `.mark-spin`）。
+ *
+ *  用动画版图标。系统开了「减少动态效果」就换静止的同一张：那条偏好要的是
+ *    画面别动，而"正在连接"这件事按钮上的文字已经说清了。
+ */
+function spinMark() {
+  const img = document.createElement('img');
+  img.className = 'mark-spin';
+  img.alt = '';
+  // 读不到那条偏好（jsdom 里没有 `matchMedia`）就按"没有偏好"处理：
+  //   为了一枚图标把整条连接路径抛停，比多播一秒动画坏得多。
+  const still = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  img.src = still ? 'icon.svg' : 'icon-anim.svg';
+  return img;
+}
+
 async function connectTo(c, btn) {
   if (connectingNow) {
     return notice('info', '正在连接站点，请等这一次结束再连另一条。');
@@ -4050,7 +4067,8 @@ async function connectTo(c, btn) {
   connectingNow = true;
   const label = btn.textContent;
   btn.disabled = true;
-  btn.textContent = '连接中…';
+  btn.textContent = '';
+  btn.append(spinMark(), '连接中…');
   lockConnectEntries();
   notice('info', `正在连接 ${c.user}@${c.host}…`);
   try {

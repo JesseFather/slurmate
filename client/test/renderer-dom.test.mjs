@@ -96,6 +96,9 @@ function mkEl(tag) {
     //   没有这几样的话，那一段代码一进去就 TypeError —— 而"炸了"与"守住了"
     //   在这一组眼里必须分得开。
     adopt(k) {
+      // 字符串按文本节点收 —— 真的 DOM 就是这样，而 `append(图, '连接中…')`
+      //   那一类写法在这一组里要能测得到（连接中的那颗按钮就是这么写的）。
+      if (typeof k === 'string') k = { nodeType: 3, textContent: k };
       if (k && typeof k === 'object') { k.parentNode = e; e.children.push(k); }
       return k;
     },
@@ -165,7 +168,14 @@ function mkEl(tag) {
     },
   };
   Object.defineProperty(e, 'textContent', {
-    get() { return e._text; },
+    // 文本节点参与拼接，元素孩子不参与 —— 与真的 DOM 同一句话。只拼文本节点
+    //   是有意收窄的：这一组里 `textContent` 的断言读的都是"这个元素自己写着
+    //   什么"，把子树全拼进来会让它们悄悄变宽。
+    get() {
+      return e._text + e.children
+        .map((c) => (c && c.nodeType === 3 ? c.textContent : ''))
+        .join('');
+    },
     set(v) {
       e._text = String(v);
       // 被清掉的那些孩子要脱离文档（`parentNode` 归零）—— 两段式确认收
