@@ -984,7 +984,7 @@ sudo slurmate service reload
 
 `systemctl reload` 的退出码不表达"生效了没有" —— 它只说信号送到了。
 `slurmate service reload` 能读到结果：它等 `daemon` op 的 `last_reload` 前进，
-报出接受还是拒绝（[KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) §三 的 `S30`
+报出接受还是拒绝（[KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) §五 的 `S30`
 记的是这件事的来龙去脉）。直接 `systemctl reload` 仍然只有信号语义。
 
 装插件、`slurmate plugin sync` 这两条动线做完会自己重载，并等到守护进程报出
