@@ -12571,6 +12571,90 @@ exit 0
               "那说的是从前那个进程一辈子只有启动那一刻的认知）",
               _dp._plugin_cache == {}, str(_dp._plugin_cache))
 
+        # 32.8 nftables 被重启之后，表、链与基础规则都要补回来
+        #
+        # `systemctl restart nftables` 会把 `inet slurmate` 整张表清掉。`ensure()`
+        #   逐项补齐（表 → 链 → 基础规则），而这条路上没有任何东西会报 ——
+        #   补不上时的症状是"会话规则装不进去"，之后所有清理阶段静默跳过，
+        #   进程看起来还是健康的。这一格是账本 S5 里本机跑得动的那一半。
+        class _NftRestart(object):
+            """只记存在性与规则集；不认网段（0.23 起基础规则不再带网段）。"""
+
+            def __init__(self):
+                self.table = False
+                self.chain = False
+                self.rules = []
+                self.inserts = 0
+
+            def flush(self):
+                self.table = self.chain = False
+                self.rules = []
+
+            def _render(self):
+                return "".join("        " + r + "\n" for r in self.rules)
+
+            def _nft(self, args, check=False, timeout=10):
+                a = list(args)
+                if a[:1] == ["-a"]:
+                    a = a[1:]
+                if a[:2] == ["list", "table"] and a[2:] == ["inet", "slurmate"]:
+                    return (0, "", "") if self.table else (1, "", "No such file")
+                if a[:2] == ["add", "table"]:
+                    self.table = True
+                    return 0, "", ""
+                if a[:2] == ["list", "chain"] and a[2:] == ["inet", "slurmate", "output"]:
+                    if self.table and self.chain:
+                        return 0, self._render(), ""
+                    return 1, "", "No such file"
+                if a[:2] == ["add", "chain"]:
+                    self.chain = True
+                    return 0, "", ""
+                if a[:2] == ["insert", "rule"]:
+                    self.inserts += 1
+                    self.rules.insert(0, " ".join(a[4:-2]) + ' comment "%s"' % a[-1])
+                    return 0, "", ""
+                if a[:2] == ["delete", "rule"]:
+                    return 0, "", ""
+                return 0, "", ""
+
+        _nrs = _NftRestart()
+        _d8 = _mk_reload_d(_PLUG)
+        _d8.nft._nft = _nrs._nft
+        check("（夹具）一开始表与链都不在",
+              _nrs.table is False and _nrs.chain is False,
+              "table=%s chain=%s" % (_nrs.table, _nrs.chain))
+        check("空内核上 ensure() 建出表、链与基础规则",
+              _d8.nft.ensure() is True and _nrs.table and _nrs.chain
+              and len(_nrs.rules) == 1 and mod.Nft.BASE_LO in _nrs.rules[0],
+              "table=%s chain=%s rules=%s"
+              % (_nrs.table, _nrs.chain, _nrs.rules))
+        _ins = _nrs.inserts
+        check("再跑一次是幂等的：不再插第二条基础规则",
+              _d8.nft.ensure() is True and _nrs.inserts == _ins
+              and len(_nrs.rules) == 1,
+              "inserts %d → %d / rules=%s" % (_ins, _nrs.inserts, _nrs.rules))
+
+        _nrs.flush()
+        check("nftables 重启之后（表与链都没了），ensure() 把三样都补回来",
+              _d8.nft.ensure() is True and _nrs.table and _nrs.chain
+              and len(_nrs.rules) == 1 and mod.Nft.BASE_LO in _nrs.rules[0],
+              "table=%s chain=%s rules=%s"
+              % (_nrs.table, _nrs.chain, _nrs.rules))
+
+        _nrs.flush()
+        _nrs.table = True
+        check("只删了链：ensure() 重建链与基础规则，且不重建表",
+              _d8.nft.ensure() is True and _nrs.chain
+              and len(_nrs.rules) == 1 and mod.Nft.BASE_LO in _nrs.rules[0],
+              "chain=%s rules=%s" % (_nrs.chain, _nrs.rules))
+
+        _nrs.flush()
+        _nrs.table = _nrs.chain = True
+        check("只删了基础规则：ensure() 补一条，并排在链首（insert，不是 add）",
+              _d8.nft.ensure() is True and len(_nrs.rules) == 1
+              and mod.Nft.BASE_LO in _nrs.rules[0],
+              "rules=%s" % (_nrs.rules,))
+
         # 32.10 端口区间换了，游标重置（不重置的话它会落在新区间之外）
         _RANGE = write_conf(""
                             "range_start = 55001\nrange_end = 55099\n", "rl-range.conf")

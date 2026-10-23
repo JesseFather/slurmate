@@ -86,7 +86,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { keysProblem, validateClientModule } = require('./hooks');
+const { keysProblem } = require('./hooks');
+const { PluginHost } = require('./plugin-host');
 const crypto = require('crypto');
 const vm = require('vm');
 const ulid = require('./ulid.js');
@@ -629,13 +630,13 @@ function digestOf(files) {
  *
  * 这个函数绝不执行插件代码。它读清单、逐字段校验，把 `client/index.js`
  *   读成文本并只做语法检查（`vm.Script` 编译，不运行），再走一遍目录算摘要。
- *   真正的 `require()` 在 `activatePlugin()` 里。
+ *   真正的 `require()` 在插件宿主进程里（`host-worker.js`）。
  *
  * 两趟分开不是整洁，是同意闸能成立的前提 —— 一边读 `client/index.js`
  *     一边就 `require()` 它的话，"对账结束才 reload()、没同意的不激活"这句话是
  *     空的：远端代码会在用户看到对话框之前就在主进程里跑完，点"不同意"什么也
  *     拦不住。所以 `inspectDir` 可以跑在任何目录上（包括没同意的），
- *     而 `activatePlugin` 只跑在过了闸的那些上。
+ *     而宿主只起在过了闸的那些上。
  *
  * 每一步失败都说清是哪个文件的哪个键。这个函数的报错是"加了插件它就是不
  *   生效"这个症状的唯一线索来源，含糊的报错等于没有报错。
@@ -924,7 +925,7 @@ function inspectDir(dir) {
     }
   }
   if (hasClientCode) {
-    // 语法错要在装之前就查出来。放到 activatePlugin 里查的话，"文件都下来了"
+    // 语法错要在装之前就查出来。放到执行那一步查的话，"文件都下来了"
     // 会被当成对账成功，而真正的失败要等到 reload 才以一句"加载失败"出现 ——
     // 那时用户面对的是"同步完成了但插件没出现"，两件事分不开。
     try {
@@ -999,30 +1000,6 @@ function shortDigest(d) {
  *
  * 单项失败不抛，返回 `{error}`：一个坏插件不许把整次扫描带崩。
  */
-function activatePlugin(entry) {
-  if (!entry.clientPath) return { plugin: entry.plugin };
-
-  let mod;
-  try {
-    // 每次都重新加载：注册表可能在同一次运行里被重建（测试会这么用），
-    // 而 require 的缓存会让"删掉插件文件"在进程内看起来毫无效果。
-    delete require.cache[require.resolve(entry.clientPath)];
-    mod = require(entry.clientPath);
-  } catch (e) {
-    return { error: `${entry.clientPath}：加载失败（${e.message}）` };
-  }
-  const checked = validateClientModule(mod, entry.clientPath);
-  if (checked.error) return { error: checked.error };
-  return {
-    plugin: {
-      ...entry.plugin,
-      prepare: checked.hooks.prepare,
-      attach: checked.hooks.attach,
-      closeWarning: checked.hooks.closeWarning,
-      startLocal: checked.hooks.startLocal,
-    },
-  };
-}
 
 function isDir(p) {
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
@@ -1196,10 +1173,7 @@ function scanRoot(root, allows) {
       out.push({ plugin: { ...r.entry.plugin, active: false }, label });
       continue;
     }
-    const a = activatePlugin(r.entry);
-    out.push(a.error
-      ? { error: `${label}：${a.error.replace(`${dir}：`, '')}` }
-      : { plugin: a.plugin, label });
+    out.push({ entry: r.entry, label });
   }
   return out;
 }
@@ -1229,7 +1203,18 @@ class Registry {
     this.errors = [];
     /** 每个插件各自的上次通知键。见 once()。 */
     this.notices = new Map();
-    this.reload();
+    // ── 宿主 ──
+    // 一个 `(id, 版本)` 一个进程。注入点留给测试；生产不传，由 host-spawn 按
+    // 运行时选 utilityProcess / child_process。
+    this.spawn = opts.spawn;
+    this.onHostCall = typeof opts.onHostCall === 'function' ? opts.onHostCall : async () => null;
+    this.onHostEvent = typeof opts.onHostEvent === 'function' ? opts.onHostEvent : () => {};
+    this.onHostLog = typeof opts.onHostLog === 'function' ? opts.onHostLog : () => {};
+    this.onHostLost = typeof opts.onHostLost === 'function' ? opts.onHostLost : () => {};
+    // 还有活会话的键。退休的宿主靠它判断能不能退出。
+    this.liveKeys = typeof opts.liveKeys === 'function' ? opts.liveKeys : () => new Set();
+    this.hosts = new Map();        // `<id>@<版本>` → {host, digest, key}
+    this.ready = this.reload();
   }
 
   /**
@@ -1244,7 +1229,7 @@ class Registry {
     for (const root of this.roots) {
       for (const item of scanRoot(root, this.allows)) {
         if (item.error) errors.push(item.error);
-        else found.push(item.plugin);
+        else found.push(item);
       }
     }
 
@@ -1265,17 +1250,19 @@ class Registry {
     //   里不带摘要正是靠那句话才成立（见 plugin-data.js 的文件头）。也因为它
     //   在 `roots` 多起来的那天会立刻重新有意义（构造函数收的就是一个数组）。
     const byKey = new Map();
-    for (const p of found) {
+    for (const item of found) {
+      const p = item.entry ? item.entry.plugin : item.plugin;
       const key = `${p.id}@${p.version}`;
       if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(p);
+      byKey.get(key).push(item);
     }
 
     const plugins = new Map();
     for (const [key, group] of [...byKey.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const digests = [...new Set(group.map((p) => p.digest))];
+      const meta = (i) => (i.entry ? i.entry.plugin : i.plugin);
+      const digests = [...new Set(group.map((i) => meta(i).digest))];
       if (digests.length > 1) {
-        const where = group.map((p) => `${p.dir}（摘要 ${shortDigest(p.digest)}）`).join('、');
+        const where = group.map((i) => `${meta(i).dir}（摘要 ${shortDigest(meta(i).digest)}）`).join('、');
         errors.push(`${key}：有 ${group.length} 份内容不同的副本在抢同一个 id 和版本`
           + `，都没有加载。${where}。`
           + '这多半是有人抄了别人的 id，或者改了插件却没升版本号。'
@@ -1283,23 +1270,108 @@ class Registry {
         continue;
       }
       // 摘要一致 → 同一构件，合并成一条（只多记一个来源）。
-      //
-      // 保留哪一个：优先带钩子的那个。摘要相同意味着两棵树的字节一样，所以
-      // "哪一份"在内容上无所谓；但它们在闸门上可能不同，挑错了会把一个能用
-      // 的插件变成不可用。
-      //
-      // 只剩一个根之后，同一根下两份的 `allows` 答案必然相同 —— 所以这一行
-      //   今天恒等于 `group[0]`。它没有被删掉，因为 `allows` 是调用方递进来的
-      //   谓词（`Registry` 的默认恒真，测试也自己传），它不保证对两份给出同一个
-      //   答案；而这一行的语义是"按闸门状态挑"，不是"按顺序挑"。真加回第二个根
-      //   的那天，它就该重新有意义。
-      const first = group.find((p) => p.active !== false) || group[0];
-      plugins.set(key, first);
+      // 优先带代码的那一份：摘要相同意味着两棵树的字节一样，所以"哪一份"
+      //   在内容上无所谓；但它们在闸门上可能不同，挑错了会把一个能用的插件
+      //   变成不可用。
+      const first = group.find((i) => i.entry) || group[0];
+      plugins.set(key, first.entry
+        ? this._activate(first.entry)
+        : { ...first.plugin });
     }
 
     this.plugins = plugins;
     this.errors = errors;
-    return this;
+
+    // 宿主：新插件开始握手，老宿主按「还有没有活会话」决定退不退。
+    const jobs = [];
+    for (const [key, plugin] of plugins) {
+      if (!plugin.ready) continue;
+      jobs.push(plugin.ready.catch((e) => {
+        // 握手失败 = 这个插件不能用。把它从表里拿掉并记一条，与扫描期失败同一个出口。
+        errors.push(`${key}：${e.message}`);
+        if (this.plugins.get(key) === plugin) this.plugins.delete(key);
+      }));
+    }
+    const live = new Set(plugins.keys());
+    for (const [key, rec] of [...this.hosts]) {
+      if (live.has(key)) continue;
+      if (this.liveKeys().has(key)) continue;  // 还有会话在跑：留到它们结束
+      this.hosts.delete(key);
+      jobs.push(rec.host.close());
+    }
+
+    this._chain = Promise.allSettled(jobs).then(() => this);
+    return this._chain;
+  }
+
+  /**
+   * 为一个插件条目建宿主（或复用摘要相同的那一个）。
+   *
+   * 复用是承重的：`reload()` 在一次运行里会跑很多次（装、同意、删），
+   *   每次都换一个进程会把模块状态与 once 去重表清掉，而用户看到的是一句
+   *   已经看过的通知又出现一次。
+   */
+  _activate(entry) {
+    const key = `${entry.plugin.id}@${entry.plugin.version}`;
+    if (!entry.clientPath) {
+      return { ...entry.plugin, host: null, ready: Promise.resolve({}) };
+    }
+    let rec = this.hosts.get(key);
+    // 回调里用 plugin 而不是 key：调用发生在握手之后，那时 plugin 已经建好。
+    //   这个绑定必须在 if 之外 —— 在 if 里另声明一个会把外层那个遮住，
+    //   回调于是一直拿到 null（症状是每一次 attach 都被判成 SESSION_GONE）。
+    let plugin = null;
+    if (!rec || rec.digest !== entry.plugin.digest || rec.host.dead) {
+      if (rec) rec.host.close();
+      const host = new PluginHost({
+        entry: entry.clientPath,
+        key,
+        spawn: this.spawn,
+        onCall: (session, member, args) => this.onHostCall(plugin, session, member, args),
+        onEvent: (session, kind, text) => this.onHostEvent(plugin, session, kind, text),
+        onLog: (level, text) => this.onHostLog(plugin, level, text),
+        onLost: (e) => this.onHostLost(plugin, e),
+      });
+      rec = { host, digest: entry.plugin.digest, key };
+      this.hosts.set(key, rec);
+    }
+    const host = rec.host;
+    plugin = {
+      ...entry.plugin,
+      host,
+      closeWarning: host.info ? host.info.closeWarning : null,
+      prepare: (ctx, session) => host.request(session, 'prepare', ctx, {}),
+      attach: (ctx, snap, session) => host.request(session, 'attach', ctx, { snap }),
+      startLocal: async (ctx, opts, session) => {
+        const r = await host.request(session, 'startLocal', ctx, { port: opts && opts.port });
+        if (!r || r.ok !== true) return r;
+        const out = { ok: true, origin: r.origin };
+        if (r.hasDispose) {
+          out.dispose = async () => {
+            await host.request(session, 'disposeLocal', {}, { token: r.token });
+          };
+        }
+        return out;
+      },
+      disposeLocal: (session, token) => host.request(session, 'disposeLocal', {}, { token }),
+      // 握过手的那一份宿主已经知道答案了。新宿主在握手回来之前一律当作
+      //   「没有本机入口」—— 按钮短暂置灰，比一个点了才知道不存在的入口好。
+      hasLocalEntry: Boolean(host.info && host.info.has && host.info.has.startLocal),
+    };
+    plugin.ready = host.start().then((info) => {
+      plugin.closeWarning = info.closeWarning || null;
+      plugin.hasLocalEntry = Boolean(info.has && info.has.startLocal);
+      return info;
+    });
+    return plugin;
+  }
+
+  /** 收尾：所有宿主发 bye，等一小会儿再强杀（由 PluginHost.close 负责）。 */
+  closeAll() {
+    const jobs = [];
+    for (const rec of this.hosts.values()) jobs.push(rec.host.close());
+    this.hosts.clear();
+    return Promise.allSettled(jobs);
   }
 
   /**
@@ -1449,7 +1521,7 @@ module.exports = {
   MANIFEST_KEYS, CONTRIBUTES_KEYS, SURFACE_KEYS, LOGIN_KEYS, DATA_KEYS,
   versionCheck,        // 握手：客户端版本 × 服务端版本 → 一个态
   // ── 站点分发那条路要用的（见 site-plugins.js）──
-  COPY_SKIP, foldAscii, inspectDir, activatePlugin, readPluginFiles, digestOf, shortDigest,
+  COPY_SKIP, foldAscii, inspectDir, readPluginFiles, digestOf, shortDigest,
   // 作业侧入口那一格（只有它有跨语言的那一份：守护进程里叫 PLUGIN_JOB_ENTRY）
   JOB_ENTRY,
   // ── 读一棵源插件树（不是池）—— 打包器与测试后端的假站点用 ──

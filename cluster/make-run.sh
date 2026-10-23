@@ -57,6 +57,7 @@ PAYLOAD=(
     cluster/run.sbatch
     cluster/slurmate.conf.example
     cluster/slurmate-sessiond.service
+    cluster/fault-drill.sh
     cluster/README.md
     cluster/docs/DEPLOYMENT.md
     cluster/docs/CONFIGURATION.md

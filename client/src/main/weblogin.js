@@ -80,16 +80,22 @@ async function webLogin(ses, origin, password, contract) {
   const cookies = await ses.cookies.get({ name: contract.cookie, url: origin });
   if (Array.isArray(cookies) && cookies.length > 0) return { ok: true, status };
 
-  // 到这儿说明没拿到 cookie。可能是口令错，也可能是服务升级改了端点或字段名；
-  // 而 fetch 本身出错时那个错要说出来 —— 三种的出路不同。
-  if (failure) return { ok: false, reason: 'fetch_failed: ' + failure.message };
+  // 到这儿说明没拿到 cookie。三种情形的出路不同，必须分开：
+  //   ① 服务端把我们送了回来（302 回登录页，或者 Electron 把它报成一次被取消
+  //      的重定向）：它看见了这次提交并拒绝了 —— 口令不对，或者登录口径变了；
+  //   ② 端点通了、也没重定向，但 cookie 没进来：多半是 cookie 名不对；
+  //   ③ 根本没连上：那个异常要说出来。
+  const redirected = Boolean(failure && /redirect/i.test(failure.message))
+    || (typeof status === 'number' && status >= 300 && status < 400);
+  if (failure && !redirected) return { ok: false, reason: 'fetch_failed: ' + failure.message };
+  if (redirected) return { ok: false, reason: 'login_rejected', status };
   return { ok: false, reason: 'no_cookie', status };
 }
 
 /**
  * 这个 URL 是不是契约里的那个登录页。
  *
- * 调用它的是 `pluginContext` 的 `ctx.win.reloadSurface`：有登录契约的插件只在
+ * 调用它的是 `reloadSurfaceFor`（`ctx.win.reloadSurface` 的父进程一侧）：有登录契约的插件只在
  *   页面还停在登录表单上时才真的重载。判据只比 pathname（`/login?failed=1`
  *   也算，而 `/login/../x` 不算）。
  */

@@ -106,6 +106,53 @@ S47，不再只出现在一个表格单元里。
 它随 0.33 删除的去向。跨文档那几处引用（`CONFIGURATION.md` 的 §三 S30、
 `PLUGIN-TROUBLESHOOTING.md` 的 F24 归属）跟着改。
 
+### Changed — 插件代码搬进独立进程（账本 S2）
+
+每个 `(id, 版本)` 一个宿主进程：生产用 Electron 的 `utilityProcess`，纯 Node 测试用
+`child_process`。钩子走一条请求/应答协议，`ctx` 只递纯数据。
+
+- `ctx.win.surfaceSession` 从契约删除，活的 Electron `session` 不再过边界；
+  登录改 `ctx.login(origin)`，口令由主进程自己从会话里取。
+- `session()` 的副本里删掉 `auth_password`；`once()` 的去重表跟着宿主走。
+- `prepare` 可以返回 Promise（10 秒预算）。槽改由显式预留占住 —— 顺带修掉
+  `probeLocalPort` 落在认领与写表之间的既有竞态。
+- 宿主崩溃：作业会话继续跑、插件能力停止并说出来；本机会话进 `error`。
+  升级/卸载按「还有没有活会话」决定旧宿主退不退。
+
+**这不是沙箱**：宿主仍有完整 Node 权限。`SECURITY.md` 与账本第五节如实写了这条边界。
+
+**判据**：`client/test/plugin-host.test.mjs` 十一条、`client/test/plugin-lifecycle.test.mjs`
+三条、`boot.test.mjs` 的 ctx 守卫与本机入口。
+
+### Changed — 基座不再测插件内部（账本 S3）
+
+七条直接调 `sshconfig.js` / `relay.attach` 的用例从 `client/test/` 删掉 —— 它们测的是
+sshd 自己的逻辑，等它搬出仓库时在它自己的项目里重建。留下的两条接缝用例不再
+`require` 插件代码；基座套件里对 `plugins/` 的 require 为 0。
+
+### Added — 登录、连接上限与诊断材料（账本 S47）
+
+- 自动登录的结果分成三档：`login_rejected`（服务端把提交送了回来）、
+  `no_cookie`（端点通了、cookie 没进来）、`fetch_failed`（连不上）。
+- `too_many_connections` 单独归成 `conn_limit`；握手不再说「已连上、但无法执行」，
+  而是「站点连接已满」。
+- 插件那一屏多了「导出诊断」：版本、平台、连接、插件、会话、宿主日志，不含口令与密钥。
+- 端口顺移的两句 warning 已覆盖「布局会重置」与「下次回到首选端口」，这一条按已有
+  行为结清。
+
+### Added — 故障演练脚本与 nft 自愈用例（账本 S5）
+
+`cluster/fault-drill.sh`：九项演练，root、真站点、逐项确认；`DEPLOYMENT.md` 有用法。
+`test-sessiond-logic.py` 补 32.8：`Nft.ensure()` 在表、链、基础规则被清掉之后逐项补回来，
+且不重复插。真机那一跑仍然等发布之前。
+
+### Changed — 账本：S2 / S3 / S47 结清
+
+三条搬进第四节；S5 收窄成「脚本与自愈用例备好、真机还没跑」；S40/S41 的名称改成
+「测试后端」（开发者模式删掉之后，假站点这个概念已经不存在）；第五节补上
+「插件宿主不是权限边界」。
+
+
 ## [0.33] — 未发布
 
 > 协议版本是 **0.33**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

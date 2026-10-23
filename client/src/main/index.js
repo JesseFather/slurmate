@@ -120,6 +120,9 @@ let clientIdentity = null;
  *   不再查注册表（站点会升级，而一个跑着的会话用的是它提交时那一份代码）。
  */
 let sessions = new Map();
+// 正在准备中的槽。插件 prepare 改成异步之后，认领与写表之间会经过一次等待，
+// 而槽的可见性不能再靠「这一段没有 await」来保证（见 docs/CONTRACT.md §3.1.1）。
+const startingSlots = new Map();
 /**
  * 「只保活、不接管」的那些会话：`session_id` 的集合。
  *
@@ -350,10 +353,14 @@ if (!app.requestSingleInstanceLock()) {
       win.win.focus();
     }
   });
-  bootstrap();
+  // `bootstrap` 现在是异步的（注册表要等插件宿主握手）。它失败时说一句，
+  //   而不是留一个没人接的 rejection。
+  bootstrap().catch((e) => {
+    if (win) win.pushNotice('error', `启动时出错：${e.message}`);
+  });
 }
 
-function bootstrap() {
+async function bootstrap() {
   userDataDir = app.getPath('userData');
 
   // 测试后端只在源码树里、只由测试进程打开。打包版里 `app.isPackaged` 为真，
@@ -376,7 +383,7 @@ function bootstrap() {
     // 池目录依赖 cfgDir，而注册表是在模块加载期建的，那时 cfgDir 还是 null。
     //   所以拿到真路径之后重新扫一遍。
     ensureSitePoolDir();
-    registry.reload();
+    await registry.reload();
 
     // 上一次没删掉的那些目录，趁现在删 —— 这一句的位置就是它的全部理由，
     //   必须在任何一块界面被建出来之前。见 `sweepPendingRemovals`。
@@ -508,25 +515,29 @@ function bootstrap() {
   });
 
   app.on('before-quit', async (e) => {
-    if (quitting || !sessions.size) return;
+    if (quitting) return;
     quitting = true;
     e.preventDefault();
     win.setBusy(false);
     // 走唯一那份实现（见 `stopAllSessions`）。各写一遍的话，只停一个而
     //   剩下的会话会在控制节点上停在一个"客户端已经退出、而它还以为有人连着"的
     //   状态，要等 1800 秒的孤儿判定才被 scancel。
-    try {
-      for (const { sessionId, res } of await stopAllSessions()) {
-        if (!res.ok && sessionId) {
-          // 落盘待补发。下次启动时补发 —— 这就是「跨崩溃的可靠投递」。
-          // 注意：绝不用 process.on('exit') 做这件事，那里只能跑同步代码，发不出网络请求。
-          config.addPendingGoodbye(cfgDir, sessionId);
+    if (sessions.size) {
+      try {
+        for (const { sessionId, res } of await stopAllSessions()) {
+          if (!res.ok && sessionId) {
+            // 落盘待补发。下次启动时补发 —— 这就是「跨崩溃的可靠投递」。
+            // 注意：绝不用 process.on('exit') 做这件事，那里只能跑同步代码，发不出网络请求。
+            config.addPendingGoodbye(cfgDir, sessionId);
+          }
         }
+      } catch (err) {
+        // 退出这条路绝不能因为收尾失败就走不掉：用户按的是关闭，不是"重试释放"。
+        win.pushNotice('error', '结束会话时出错：' + err.message);
       }
-    } catch (err) {
-      // 退出这条路绝不能因为收尾失败就走不掉：用户按的是关闭，不是"重试释放"。
-      win.pushNotice('error', '结束会话时出错：' + err.message);
     }
+    // 插件宿主一律收掉：没有会话时也要收，否则那几个进程会留到主进程退出。
+    await registry.closeAll();
     app.exit(0);
   });
 }
@@ -1036,9 +1047,9 @@ function reconcileSitePlugins() {
         stale: () => gen !== connectGeneration,
         // 「文件都下来了」不等于「装上了」：`reload()` 从不抛，坏插件进
         //   `errors`。所以换入之后逐个复查 —— 拿得到才算成功。
-        verify: (landed) => {
+        verify: async (landed) => {
           if (gen !== connectGeneration) return [];
-          registry.reload();
+          await registry.reload();
           const failed = [];
           for (const e of landed) {
             const p = registry.get(e.id, e.version);
@@ -1243,12 +1254,12 @@ function pluginsView() {
       defaultsGresText: gresText(s && s.defaults && s.defaults.gpus),
       // 这个插件有没有本机入口（客户端钩子 `startLocal`）。它只在站点报
       //   `can_submit: false` 时才有意义：有作业侧的插件仍走作业。
-      hasLocalEntry: typeof plugin.startLocal === 'function',
+      hasLocalEntry: Boolean(plugin.hasLocalEntry),
       // 能不能真的起一个会话。三个条件都成立；本机插件不要求 `canSubmit`
       //   —— 它本来就没有作业可提交。三个条件各有各的主语（站点 / 用户 /
       //   站点的部署状态），所以界面上那几句解释也必须是几句不同的话。
       runnable: siteEnabled && locallyEnabled
-        && (canSubmit || typeof plugin.startLocal === 'function'),
+        && (canSubmit || plugin.hasLocalEntry),
     };
   });
 
@@ -1718,9 +1729,10 @@ function usedSpacePortsAll(exceptId) {
  * @param {object} plugin
  * @returns {object} 这次会话用的那一份
  */
-function claimSpace(baseSpace, plugin) {
+function claimSpace(baseSpace, plugin, taken) {
+  const busy = taken || occupied;
   if (!pluginData.canOpenSecond(plugin)) return baseSpace;
-  if (!occupied(pluginData.slotOf(baseSpace.id))) return baseSpace;
+  if (!busy(pluginData.slotOf(baseSpace.id))) return baseSpace;
   const t = {
     id: config.newSpaceId(),
     pluginId: baseSpace.pluginId,
@@ -2310,9 +2322,22 @@ function clearOneRow(row, roots) {
  */
 function occupied(slot) {
   const rec = sessions.get(slot);
+  if (rec && rec.reserved) return true;
   const c = rec && rec.controller;
   return Boolean(c)
     && ![State.ENDED, State.ERROR, State.IDLE, State.RELEASING].includes(c.state);
+}
+
+/**
+ * 这个槽现在被占着吗（本人手里的预留不算）。
+ *
+ * 预留与豁免必须成对：`claimSpace` 在并发时靠它判断该不该拿临时那一份，
+ *   而刚刚写下预留的那一条自己不能被自己的预留挡住。
+ */
+function slotTaken(slot, token) {
+  if (occupied(slot)) return true;
+  const holder = startingSlots.get(slot);
+  return Boolean(holder) && holder !== token;
 }
 
 /**
@@ -2424,7 +2449,11 @@ function jobsView(rows) {
  * （只有一个会话时这是自动的 —— 新 controller 直接顶掉旧的。多开之后要有人做。）
  */
 function reapSessions() {
-  for (const [slot] of sessions) if (!occupied(slot)) sessions.delete(slot);
+  for (const [slot, rec] of sessions) {
+    if (occupied(slot)) continue;
+    closeHostSession(rec);
+    sessions.delete(slot);
+  }
 }
 
 /**
@@ -2598,7 +2627,7 @@ function siteEntryFor(plugin) {
  *   作业优先，避免同一个插件因为多了一个钩子就换了执行位置。
  */
 function localOutletFor(plugin) {
-  if (typeof plugin.startLocal !== 'function') return false;
+  if (!plugin.hasLocalEntry) return false;
   const s = siteEntryFor(plugin);
   const known = Boolean(sitePlugins && Array.isArray(sitePlugins.plugins));
   if (!known || !s) return false;
@@ -2688,12 +2717,23 @@ async function startSession(resources, serviceKind, portChoice) {
   }
   warnVersionDrift(plugin);
 
+  // 插件代码在独立进程里。握手没过（加载失败、导出不合法、超时）就不能
+  //   拿它去接会话 —— 否则失败会推迟到 prepare，而那时槽已经占住了。
+  if (plugin.ready) {
+    try {
+      await plugin.ready;
+    } catch (e) {
+      win.pushNotice('error', `「${plugin.displayName || plugin.name}」没有加载成功：${e.message}`);
+      return null;
+    }
+  }
+
   // 这一次会话是哪条连接的 —— 读一次，两处共用：工作区从它算，
   //   `ctx.connection()` 也从它来。分两处读会让它们指向两条不同的连接。
   //
   //   读的是当前活跃连接：会话就是从界面上那个连接起的。这个读法有代价 ——
   //     切活跃连接不影响已经在跑的会话，所以重连接回来的会话可能拿到"不是它自己的"
-  //     那条（见 pluginContext 的 `connection()`）。
+  //     那条（见 `connectionFor()`）。
   const conn = config.activeConnection(cfg);
   const isLocal = localOutletFor(plugin);
 
@@ -2719,7 +2759,16 @@ async function startSession(resources, serviceKind, portChoice) {
   //    空的浏览器存储、持有者那份数据的快照）。
   //    它与下面那道槽闸的次序是承重的：认领先发生，于是"能多开"的插件拿到
   //    一份新数据、槽闸放行；"不能多开"的插件拿到原来那一份，槽闸照旧拒它并说出原因。
-  const space = baseSpace === null ? null : claimSpace(baseSpace, plugin);
+  // 预留：在第一次等待之前把槽占住。`prepare` 现在要过进程边界，认领与写表
+  //   之间必然会经过一次等待；槽的可见性从这里起由 `startingSlots` 保证，
+  //   不再靠"这一段恰好没有 await"（见 docs/CONTRACT.md §3.1.1）。
+  const startToken = {};
+  const baseSlot = pluginData.slotOf(baseSpace && baseSpace.id);
+  // 别的启动已经占着这个槽时不要覆盖它的预留：覆盖之后，两条都会看到
+  //   「持有者是我自己」，于是都拿到原来那一份数据。
+  if (!slotTaken(baseSlot, startToken)) startingSlots.set(baseSlot, startToken);
+  const space = baseSpace === null
+    ? null : claimSpace(baseSpace, plugin, (s) => slotTaken(s, startToken));
 
   // ── 槽：一个活跃会话占一份「一个就够」的资源，同一个槽只能有一个 ──────────
   //
@@ -2728,9 +2777,17 @@ async function startSession(resources, serviceKind, portChoice) {
   // 会话挡着，也不说该怎么办。而多开的代价更大：被拒绝的那条会静默地顶掉一条
   // 正在跑的。
   const slot = pluginData.slotOf(space && space.id);
-  if (occupied(slot)) {
+  if (slot !== baseSlot) {
+    // 用了临时那一份：持有者仍然占着 base，改为占临时这个槽。
+    if (startingSlots.get(baseSlot) === startToken) startingSlots.delete(baseSlot);
+    startingSlots.set(slot, startToken);
+  }
+  if (slotTaken(slot, startToken)) {
+    if (startingSlots.get(slot) === startToken) startingSlots.delete(slot);
+    if (space && space.id !== (baseSpace && baseSpace.id)) releaseEphemeral(space.id);
     const other = sessions.get(slot);
-    const who = other.plugin ? `「${other.plugin.displayName || other.plugin.name}」` : '另一个会话';
+    const who = other && other.plugin
+      ? `「${other.plugin.displayName || other.plugin.name}」` : '另一个会话';
     win.pushNotice('error', space
       ? `${who}正用着「${workspaceNameOf(space.id) || '那个工作区'}」里`
         + `「${plugin.displayName || plugin.name}」那一份数据。一份数据就是一个本地端口、`
@@ -2798,6 +2855,7 @@ async function startSession(resources, serviceKind, portChoice) {
       probe = await probeLocalPort(preferredPort);
     } catch (e) {
       // 探不动不是"端口被占"：报成冲突会让用户去关一个无关的程序。
+      if (startingSlots.get(slot) === startToken) startingSlots.delete(slot);
       win.pushNotice('error', `探测本地端口 ${preferredPort} 失败：${e.message}`);
       return null;
     }
@@ -2805,6 +2863,7 @@ async function startSession(resources, serviceKind, portChoice) {
       // 此刻什么都没有发生：没有作业、没有会话记录、没有占位、配置一个字
       //   都没动。这正是「取消」能是字面意思的原因 —— 界面那一行三选一，答
       //   「取消」就地回退，没有任何东西要撤。
+      if (startingSlots.get(slot) === startToken) startingSlots.delete(slot);
       return { conflict: { want: preferredPort, spaceId: space.id } };
     }
   }
@@ -2864,6 +2923,10 @@ async function startSession(resources, serviceKind, portChoice) {
   });
   rec.controller.on('change', () => onSessionChange(slot));
   rec.controller.on('retarget', () => onSessionChange(slot));
+  // 预留转交给会话记录：`occupied()` 从这一刻起认 `reserved`，
+  //   一直认到 controller 把状态改成 SUBMITTING（那是同步发生的，见下面）。
+  if (startingSlots.get(slot) === startToken) startingSlots.delete(slot);
+  rec.reserved = true;
   sessions.set(slot, rec);
 
   // 临时那一份：开局把持有者那份插件数据拷一份当起点。
@@ -2889,8 +2952,9 @@ async function startSession(resources, serviceKind, portChoice) {
   //   `held` 会护着它）。
   let sshPubkey = null;
   if (plugin.prepare) {
-    const pre = plugin.prepare(pluginContext(rec));
+    const pre = await plugin.prepare(pluginCtxData(rec), String(rec.slot));
     if (!pre || !pre.ok) {
+      closeHostSession(rec);
       sessions.delete(slot);
       releaseEphemeral(space && space.id);
       win.pushNotice('error', (pre && pre.message) || '提交前的准备失败，已中止。');
@@ -2904,7 +2968,9 @@ async function startSession(resources, serviceKind, portChoice) {
   // 本机插件走 `startLocal()`：不提交、不建隧道、不起心跳。两条路返回同一种
   //   快照，所以下面的失败清理与界面切换都只有一份。
   const snap = isLocal
-    ? await rec.controller.startLocal(plugin.startLocal, pluginContext(rec), {
+    ? await rec.controller.startLocal(
+      (ctx, opts) => plugin.startLocal(ctx, opts, String(rec.slot)),
+      pluginCtxData(rec), {
         port: preferredPort,
         serviceKind: plugin.name,
       })
@@ -2916,6 +2982,9 @@ async function startSession(resources, serviceKind, portChoice) {
         // 用户在那道闸上答过的（没问过就是 null）。见 `SessionController._portChoice`。
         portChoice,
       });
+  // controller 的两个入口都在函数体开头同步把状态改成 SUBMITTING；
+  //   那之后槽由状态本身占着，预留可以交了。
+  rec.reserved = false;
   if (!snap && !rec.controller.sessionId) {
     // 这一次在服务端没有留下任何东西（被 quota / 权限 / 校验拒掉，或者压根没提交
     //   出去）。那条记录与临时那一份都只是这一趟的产物：留着它们，界面上会多出
@@ -2927,6 +2996,7 @@ async function startSession(resources, serviceKind, portChoice) {
     // 已经有 `sessionId` 的那些不走这一支 —— 服务端确实建了一条会话（提交超时后
     //   认领到的、或者被拒到终态的），那条记录要留着让人看见它、接上它、结束它。
     const why = (rec.controller.snapshot() || {}).error || '会话没有起来。';
+    closeHostSession(rec);
     sessions.delete(slot);
     // 次序与回收那份临时数据的那几处相同：先拆视图，再删数据（见 releaseEphemeral）。
     //   这一趟本来就没有视图，这一句是给"槽被上一轮留下过一块"那种情况兜底。
@@ -3209,7 +3279,7 @@ async function _renderSession(slot) {
       await warnUnknownService(slot, snap);
     } else if (plugin.contributes.surface) {
       await ensureSurface(rec, snap);
-      if (plugin.attach) await plugin.attach(pluginContext(rec), snap);
+      if (plugin.attach) await plugin.attach(pluginCtxData(rec), snap, String(rec.slot));
     } else {
       // 这个插件不要界面（比如中转站）：它自己那一块收掉。
       //
@@ -3217,7 +3287,7 @@ async function _renderSession(slot) {
       //    （以及它每次心跳、每次隧道重建时）会把 web-demo 那块正跑着的页面
       //    一起销毁，而用户看到的是"我的编辑器忽然没了"，日志里一个字都没有。
       win.destroySurface(slot);
-      if (plugin.attach) await plugin.attach(pluginContext(rec), snap);
+      if (plugin.attach) await plugin.attach(pluginCtxData(rec), snap, String(rec.slot));
     }
   }
 
@@ -3317,6 +3387,12 @@ const registry = new plugins.Registry([
    */
   allows: (entry) => Boolean(cfg)
     && config.isTrusted(cfg, entry.plugin.id, entry.plugin.version, entry.digest),
+  // 插件宿主的四路回调与「还有哪些键有活会话」。
+  onHostCall: (plugin, session, member, args) => hostCall(plugin, session, member, args),
+  onHostEvent: (plugin, session, kind, text) => { if (win) win.pushNotice(kind, text); },
+  onHostLog: (plugin, level, text) => pushPluginLog(plugin, level, text),
+  onHostLost: (plugin, err) => hostLost(plugin, err),
+  liveKeys: () => livePluginKeys(),
 });
 
 /**
@@ -3525,140 +3601,230 @@ const PLUGIN_KEYS = Object.freeze({
  *   （`~/.slurmate/site-plugins/<id>_<版本>/`），相对路径指不到客户端；就算指得到，
  *   那种依赖也是无法检查的。所以缺什么就在这里加什么，而不是让插件绕过这份清单。
  */
-function pluginContext(rec) {
-  const plugin = rec.plugin;
+/**
+ * 递给插件的那一份上下文（纯数据，可跨进程）。
+ *
+ * 它不再是一个带活对象的 `ctx`：插件进程只能拿到值，拿不到 Electron 的
+ *   session、也拿不到口令。需要往返的两件事（重新加载页面、自动登录）走
+ *   宿主的回调通道，见 `hostCall`。
+ *
+ * 每一项都在每次钩子调用前现算：`cfg` 会变，而插件里的 await 可能跨过那个变化。
+ */
+function pluginCtxData(rec) {
   return {
-    /**
-     * 这块界面自己的那两件事，绑在这一条会话上。
-     *
-     * 递给它整个 `ShellWindow` 是张冠李戴：`surfaceSession` 会拿到"窗口里
-     *   那一块"的 session，而 web-demo 拿它去查 cookie jar —— 查错一个分区，
-     *   症状是"自动登录失败（HTTP 200，未拿到会话 cookie）"，而口令本身是对的。
-     *
-     * 顺带收窄了：插件本来就不该碰 forceClose / pushSessions / pushNotice 那些，
-     *   "能碰什么"这份清单撑大没有任何好处。
-     */
-    win: {
-      // 是取值器，不是方法 —— 插件那边写的是 `const ses = ctx.win.surfaceSession`。
-      //   把它改成方法不会报错，只会让 `ses` 变成一个函数而一路传下去（`ctx.login`
-      //   拿它当 Electron session 用），失败形态是"自动登录莫名其妙不工作"。
-      get surfaceSession() { return win.surfaceSession(rec.slot); },
-      // 重新加载这一条会话的页面。有登录契约的插件（今天就是 web-demo）
-      //   只在页面还停在登录表单上时才真的重载 —— 它的用途是"登录之后把页面
-      //   带回应用"，而 `attach` 每次状态变化都会被调（心跳 45 秒、推送 30 秒），
-      //   无条件重载就是页面每半分钟白一次（2026-10-17 真机）。
-      // 没有登录契约的插件没有"登录之后要不要重载"这回事，照旧无条件重载。
-      // 手写那颗「重新加载」走的是 `win.reloadSurface`，不受这一条限制。
-      reloadSurface: async () => {
-        const contract = plugin.contributes && plugin.contributes.login;
-        if (contract
-            && !weblogin.isLoginPath(win.surfaceURL(rec.slot), contract.path)) {
-          return;
-        }
-        await win.reloadSurface(rec.slot);
-      },
-    },
-    /**
-     * 这一条会话属于哪条连接（只读，拿不到就是 `null`）。
-     *
-     * 给插件的不是整个 `config` 模块（那既是"当前活跃连接"，又是整个
-     *   `config.json` 的写权）。这里只给这一条会话自己那点事实，而且是
-     *   副本：插件改一个字段不该在下一次 `saveConfig` 时被原样写回磁盘 —— 那是
-     *   把配置文件的写权限交给插件走一条看不见的路。
-     *
-     * 「属于哪条连接」而不是"当前活跃的那条"：多开之后两者会分家 —— 会话跑在
-     *   C1 上，用户把活跃连接切成 C2，按"当前"去拿会把 C2 的用户名写进 C1 那份
-     *   ssh 配置。唯一的例外是重连接回来的会话（它不知道自己属于谁，只能取活跃
-     *   连接那个），见 `reattachOne` 与账本 S26。
-     *
-     * 只给"一条连接是什么"那几个字段。工作区与数据的事实不在这里 —— 那是
-     *   另一条轴，而快照里已经有了（`snap.spaceId`）。在这里再放一份等于把几条轴
-     *   又焊回一个对象上。
-     */
-    connection: () => {
-      const c = (cfg.connections || []).find((x) => x.id === rec.connectionId);
-      return c ? Object.freeze({
-        id: c.id, label: c.label, user: c.user, host: c.host, port: c.port,
-      }) : null;
-    },
-    /** 框架的 SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）。纯 Node `crypto`，
-     *  没有任何"读到客户端自己那把私钥"的入口 —— 见 keys.js。
-     *  只有六个函数、而且是冻结的：模块对象上还有 `_internal`，它不在契约里。 */
-    keys: PLUGIN_KEYS,
-    // 这一条会话的视图，不是"当前那一个"。
-    session: () => (rec.controller && rec.controller.session) || null,
-    whoami: () => whoami,
-    /**
-     * 用户自己的家目录。测试桩里它指到临时的假家目录（见 test/boot.test.mjs）。
-     *
-     * 它不是插件写数据的地方（那是 `dataDir()`）：这一条留给"要碰
-     *   用户自己的文件"的场合 —— sshd 往 `~/.ssh/config` 加那一行 Include 就是
-     *   唯一的例子。别拿它当数据目录用：它是所有插件共用的一个根，两个插件
-     *   会在里面撞上。
-     */
-    home: () => {
-      const h = app.getPath('home');
-      // 插件会拿它拼路径（sshd 往 `~/.ssh/config` 写那一行）。空串或相对路径
-      //   拼出来的落点会落到进程的 cwd 里，而那是一个插件与框架都不该碰的地方。
-      if (typeof h !== 'string' || !h || !path.isAbsolute(h)) {
-        throw new Error('用户的家目录不是一个绝对路径（' + JSON.stringify(h)
-          + '），插件不能用它拼路径。');
-      }
-      return h;
-    },
-
-    /**
-     * 这个插件自己的数据目录（绝对路径）。目录可能还不存在 —— 由第一次
-     * 写它的那次写盘建出来（`atomic-write.js` 的 `mkdir` 默认开着）。
-     *
-     * 与 `home()` 的分工：那个是"用户的家目录"（所有插件共用），这个是"你的落点"
-     *   （按身份分：插件 id / 共享组 / 数据空间）。
-     * 插件要存自己的东西，用这个 —— 自己发明一个位置会让基座既不知道它在哪儿、
-     *   也没法把它列给用户看。
-     *
-     * 路径由身份算出来（`plugin-data.js` 的第三个落点），所以它和对账看到的是
-     *   同一个目录 —— 那是"用户看得见、删得掉"的前提。
-     *
-     * 没有数据空间参数了 —— 它由框架从这一条会话填（今天就是它那一份数据）。
-     *   与 `login()` 同一条理由：插件没法把一个它不传的参数传错。
-     *
-     *   让插件自己传（"声明了要工作区却不传就抛"）守的是一条真实的不变量，
-     *   但它够不着：插件要拿那一份只能从 `snap.spaceId` 里拿，而 `prepare()`
-     *   根本没有 `snap` —— 一个要工作区、又要在提交前写数据的插件，除了猜没有别的
-     *   办法。由框架填之后，那个抛只剩最后一道（`identityOf` 自己那道，给
-     *   `ensureSurface` / 对账那些走参数化的调用点用）。
-     * 而框架填的那一半有一个前提：`rec.controller` 得先构造出来（读的是
-     *   它那个 `spaceId`）—— 见 `startSession` 里那段次序说明。
-     *
-     * 算不出根来的时候抛，不返回 null：一个 null 会让插件拼出一个相对路径
-     *   （落进进程的 cwd 里），那比抛严重得多。
-     */
-    dataDir: () => {
-      const root = pluginDataRoot();
-      if (!root) {
-        throw new Error('还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。');
-      }
-      const name = pluginData.dataDirNameOf(pluginData.identityOf(
-        plugin, findSpaceAll(rec.controller && rec.controller.spaceId)));
-      // 认领的第二个写点：目录是在这里交出去的，所以"这条会话用过哪些落点"
-      //    必须在这里长。少了这一行，`relisten` 把会话挪到另一份数据之后新那个
-      //    目录就没人护 —— 而它正是插件马上要写的那一份（见 `liveDataDirs` 那段）。
-      //    排在 `path.join` 之前没有讲究：这一行不会抛（上面那个表达式已经
-      //    算出来了），抛的是 `identityOf` 自己 —— 而它抛的时候这里根本走不到。
-      if (rec.claims) rec.claims.add(name);
-      return path.join(root, name);
-    },
-    /**
-     * 自动登录。契约由框架从当前插件自己的清单里取，不由插件传进来 ——
-     * 插件没法把这个参数传错，也没法去登别人的页面。
-     */
-    login: (ses, origin, password) =>
-      weblogin.webLogin(ses, origin, password, plugin.contributes.login),
-    notice: (kind, text) => win.pushNotice(kind, text),
-    // 分桶用的是 `id@版本`，不是短名 —— 池里可以并存同一个插件的多个版本，而
-    // "这个版本已经说过这句话了"与"那个版本说过了"是两件事。
-    once: (key) => registry.once(plugins.bucketOf(plugin), key),
+    connection: connectionFor(rec),
+    session: sessionForPlugin(rec),
+    whoami: whoami ? { ...whoami } : null,
+    home: homeFor(),
+    dataDir: dataDirFor(rec, rec.plugin),
   };
+}
+
+/** 这一条会话属于哪条连接（只读副本）。 */
+function connectionFor(rec) {
+  const c = (cfg.connections || []).find((x) => x.id === rec.connectionId);
+  return c ? Object.freeze({
+    id: c.id, label: c.label, user: c.user, host: c.host, port: c.port,
+  }) : null;
+}
+
+/** 会话视图的副本。口令不过进程边界 —— 插件要登录就走 `ctx.login(origin)`。 */
+function sessionForPlugin(rec) {
+  const s = rec.controller && rec.controller.session;
+  if (!s) return null;
+  const copy = { ...s };
+  delete copy.auth_password;
+  return copy;
+}
+
+/** 用户家目录。取不到或不是绝对路径时把原因带回去，由插件那边原样抛。 */
+function homeFor() {
+  try {
+    const h = app.getPath('home');
+    if (typeof h !== 'string' || !h || !path.isAbsolute(h)) {
+      return { ok: false, error: '用户的家目录不是一个绝对路径（' + JSON.stringify(h)
+        + '），插件不能用它拼路径。' };
+    }
+    return { ok: true, value: h };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * 这个插件自己的数据目录（绝对路径），同时认领它。
+ *
+ * 与 `claimDataDir` 共用同一个表达式：分开算会让「护着的」与「交出去的」
+ *   漂开，而漂开的症状正是这条判据要防的那件事。
+ */
+function dataDirFor(rec, plugin) {
+  try {
+    const root = pluginDataRoot();
+    if (!root) {
+      return { ok: false, error: '还不知道插件的数据目录该放在哪儿（配置目录还没定下来）。' };
+    }
+    const name = pluginData.dataDirNameOf(pluginData.identityOf(
+      plugin, findSpaceAll(rec.controller && rec.controller.spaceId)));
+    if (rec.claims) rec.claims.add(name);
+    return { ok: true, value: path.join(root, name) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/** 宿主回调：只允许两件事，而且都绑在这一条会话上。 */
+function hostCall(plugin, session, member, args) {
+  const rec = sessions.get(session);
+  // 比的是身份，不是对象：`reload()` 会为同一个键建一个新的插件对象，而会话
+  //   手里捕获的是它开始那一刻那一个。按对象比会把「装/删了别的插件」误判成
+  //   「你这条会话没了」。
+  const same = rec && rec.plugin && plugin
+    && plugins.bucketOf(rec.plugin) === plugins.bucketOf(plugin);
+  if (!same) {
+    const e = new Error('这条会话已经结束');
+    e.code = 'SESSION_GONE';
+    throw e;
+  }
+  if (member === 'reloadSurface') return reloadSurfaceFor(rec, plugin);
+  if (member === 'login') return loginFor(rec, plugin, args && args[0]);
+  const e = new Error(`不认识的成员：${member}`);
+  e.code = 'BAD_MEMBER';
+  throw e;
+}
+
+/**
+ * 重新加载这一条会话的页面。
+ *
+ * 有登录契约的插件只在页面还停在登录表单上时才真的重载 —— 它的用途是
+ *   "登录之后把页面带回应用"，而 attach 每次状态变化都会被调（心跳 45 秒、
+ *   推送 30 秒），无条件重载就是页面每半分钟白一次（2026-10-17 真机）。
+ */
+async function reloadSurfaceFor(rec, plugin) {
+  const contract = plugin.contributes && plugin.contributes.login;
+  if (contract && !weblogin.isLoginPath(win.surfaceURL(rec.slot), contract.path)) return;
+  await win.reloadSurface(rec.slot);
+}
+
+/**
+ * 自动登录。口令由主进程自己从会话里取，插件只给 origin。
+ *
+ * origin 必须是这条会话此刻的 origin：否则插件可以让主进程拿着用户的口令
+ *   去 POST 任意地址。
+ */
+async function loginFor(rec, plugin, origin) {
+  if (typeof origin !== 'string' || !origin) return { ok: false, reason: 'bad_origin' };
+  let want;
+  try { want = new URL(origin).origin; } catch { return { ok: false, reason: 'bad_origin' }; }
+  const ses = win.surfaceSession(rec.slot);
+  const url = win.surfaceURL(rec.slot);
+  if (!ses || !url) return { ok: false, reason: 'no_surface' };
+  let now;
+  try { now = new URL(url).origin; } catch { return { ok: false, reason: 'no_surface' }; }
+  if (now !== want) return { ok: false, reason: 'bad_origin' };
+  const password = rec.controller && rec.controller.session
+    && rec.controller.session.auth_password;
+  return weblogin.webLogin(ses, origin, password, plugin.contributes && plugin.contributes.login);
+}
+
+/** 告诉宿主这一条会话结束了：它会收掉这条会话留下的本机资源。 */
+function closeHostSession(rec) {
+  if (rec && rec.plugin && rec.plugin.host) {
+    rec.plugin.host.sessionClosed(String(rec.slot));
+  }
+}
+
+/**
+ * 诊断材料。只写"客户端知道什么"，不写凭据、口令与密钥。
+ *
+ * 排版按"人拿它去贴进一个问题单"来定：一节一段，每条一行，没有 JSON 括号。
+ */
+function diagnosticsText() {
+  const lines = [];
+  const ver = (typeof app.getVersion === 'function' && app.getVersion()) || '未知';
+  lines.push('# Slurmate 诊断材料', '');
+  lines.push(`生成时间：${new Date().toISOString()}`);
+  lines.push(`客户端版本：${ver}`);
+  lines.push(`平台：${process.platform} ${process.arch}，Node ${process.versions.node}`);
+  lines.push('');
+
+  lines.push('## 连接');
+  const active = cfg && cfg.activeConnectionId;
+  for (const c of (cfg && cfg.connections) || []) {
+    lines.push(`- ${c.label || '(无标签)'} ${c.user}@${c.host}:${c.port}`
+      + (c.id === active ? '（活跃）' : ''));
+  }
+  if (!lines.length || lines[lines.length - 1] === '## 连接') lines.push('- （没有保存的连接）');
+  lines.push('');
+
+  lines.push('## 插件');
+  for (const p of registry.list()) {
+    const state = p.active === false ? '未加载' : '已加载';
+    lines.push(`- ${p.name} ${p.version} id=${p.id} ${state}`
+      + ` 本机入口=${p.hasLocalEntry ? '有' : '无'}`);
+  }
+  if (!registry.list().length) lines.push('- （本机没有插件）');
+  lines.push('');
+
+  lines.push('## 会话');
+  for (const v of sessionViews()) {
+    const snap = v.snap || {};
+    lines.push(`- ${v.slot} ${v.service || '未知服务'} 状态=${snap.state || '未知'}`
+      + ` 作业=${snap.jobId || '无'} 端口=${snap.localPort || '无'}`
+      + (v.temporary ? ' 临时数据' : ''));
+  }
+  if (!sessionViews().length) lines.push('- （没有会话）');
+  lines.push('');
+
+  lines.push('## 插件宿主日志（最近 200 条）');
+  if (!pluginLogs.length) lines.push('- （没有）');
+  for (const l of pluginLogs) {
+    lines.push(`- ${l.at} ${l.plugin || ''} ${l.level} ${l.text}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+/** 还有活会话的插件键。退休的宿主靠它判断能不能退出。 */
+function livePluginKeys() {
+  const out = new Set();
+  for (const rec of sessions.values()) {
+    if (!rec.plugin || !rec.controller) continue;
+    if ([State.ENDED, State.ERROR, State.IDLE, State.RELEASING].includes(rec.controller.state)) continue;
+    out.add(plugins.bucketOf(rec.plugin));
+  }
+  return out;
+}
+
+/** 插件宿主退出：作业会话继续跑，插件能力停止；本机会话没有页面可用。 */
+function hostLost(plugin, err) {
+  if (!plugin) return;
+  const key = plugin ? plugins.bucketOf(plugin) : null;
+  for (const rec of sessions.values()) {
+    if (!rec.plugin || !rec.controller) continue;
+    if (key && plugins.bucketOf(rec.plugin) !== key) continue;
+    if (rec.controller.isLocal && rec.controller.isLocal()) {
+      rec.controller._setState(State.ERROR, { error: '本机插件进程已退出，页面不可用。' });
+    } else {
+      rec.controller.warning = '插件进程已退出：插件功能停止，会话仍在运行。';
+      onSessionChange(rec.slot);
+    }
+  }
+  if (win) {
+    win.pushNotice('error', `「${plugin.displayName || plugin.name}」的插件进程已退出；`
+      + '它负责的功能停止，会话本身不受影响。');
+  }
+}
+
+// 插件宿主自己的日志。只留在内存里给诊断材料用（见 app:exportDiagnostics）。
+const PLUGIN_LOG_MAX = 200;
+const pluginLogs = [];
+function pushPluginLog(plugin, level, text) {
+  pluginLogs.push({
+    at: new Date().toISOString(),
+    plugin: plugin ? plugins.bucketOf(plugin) : null,
+    level,
+    text: String(text || ''),
+  });
+  if (pluginLogs.length > PLUGIN_LOG_MAX) pluginLogs.splice(0, pluginLogs.length - PLUGIN_LOG_MAX);
 }
 
 /**
@@ -4124,6 +4290,7 @@ async function forgetSessions() {
     if (local) win.destroySurface(slot);
     if (rec.controller) await rec.controller.abandon();
     if (local) releaseEphemeral(rec.controller.spaceId);
+    closeHostSession(rec);
     sessions.delete(slot);
   }
 }
@@ -4339,6 +4506,7 @@ async function tryReattach() {
     const c = rec.controller;
     if (!c || !c.suspended) continue;
     await c.abandon();
+    closeHostSession(rec);
     sessions.delete(slot);
   }
 
@@ -5633,7 +5801,7 @@ function registerIpc() {
     });
     if (!nc.ok) win.pushNotice('warn', `插件装上了，但引用表未能更新（${nc.why}）。`);
     pendingConsent = pendingConsent.filter((p) => !(p.id === id && p.version === version));
-    registry.reload();
+    await registry.reload();
     const p = registry.get(id, version);
     if (!p || p.active === false) {
       const why = `同意之后它仍然没有被加载，看「插件没有加载」那几条。`;
@@ -5680,7 +5848,7 @@ function registerIpc() {
       if (!d.ok) { win.pushNotice('error', d.error); return { ok: false, error: d.error }; }
       // 台账里那条也一并清掉（通常是本来就没有），理由见 dropPluginVersion。
       config.forgetPlugin(cfgDir, cfg, id, version);
-      registry.reload();
+      await registry.reload();
       win.pushNotice('info', `没有同意「${hit.title || hit.name}」，本机这一份已经删掉了。`
         + '站点上那份不受影响：它还在时，下次同步会再问一次。');
     } else {
@@ -5725,7 +5893,7 @@ function registerIpc() {
     const d = sitePluginSync.dropPooledVersion(sitePoolDir(), id, version);
     if (!d.ok) { win.pushNotice('error', d.error); return { ok: false, error: d.error }; }
     config.forgetPlugin(cfgDir, cfg, id, version);
-    registry.reload();
+    await registry.reload();
     win.pushNotice('info', `本机那一份 ${version} 已经删掉了。`
       + '站点还在分发它时，下一次同步会重新问你一次。');
     return { ok: true, plugins: pluginsView() };
@@ -5846,6 +6014,32 @@ function registerIpc() {
       resp.data.version = connectedDaemonVersion;
     }
     return resp;
+  });
+
+  /**
+   * 导出诊断材料：客户端知道的那几样，落成一份文本。
+   *
+   * 只取客户端自己的事实：版本、平台、连接（不含凭据）、插件清单、会话视图、
+   *   插件宿主的日志。站点那边的事实由「检查集群」回答，不在这里复述一份 ——
+   *   两份答案漂开的时候，用户会把诊断材料当成另一个真相。
+   */
+  send('app:exportDiagnostics', async () => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let picked;
+    try {
+      picked = await dialog.showSaveDialog({
+        defaultPath: `slurmate-diagnostics-${stamp}.txt`,
+      });
+    } catch (e) {
+      return { ok: false, error: `未能打开保存对话框：${e.message}` };
+    }
+    if (!picked || picked.canceled || !picked.filePath) return { ok: false, canceled: true };
+    try {
+      fs.writeFileSync(picked.filePath, diagnosticsText());
+    } catch (e) {
+      return { ok: false, error: `未能写出诊断材料：${e.message}` };
+    }
+    return { ok: true, path: picked.filePath };
   });
 
   // `app:cluster` 这个通道没有了。它原先服务的是「集群状态」那一屏，而那一屏

@@ -1732,7 +1732,7 @@ async function sync(o) {
     if (typeof o.verify === 'function') {
       const landed = [...out.added, ...out.kept];
       if (landed.length) {
-        for (const f of (o.verify(landed) || [])) out.failed.push(f);
+        for (const f of ((await o.verify(landed)) || [])) out.failed.push(f);
       }
     }
     return out;

@@ -64,6 +64,17 @@ test('code 5 的两种含义必须分开 —— 这是本模块存在的首要�
   const noport = classify(err(5, 'no_port', '端口池暂时没有可用端口'), { op: 'submit' });
   assert.equal(noport.action, Action.RETRY_SOON);
 
+  // (b2) 站点连接数到上限：单独的 kind。服务端 detail 已经说清是哪一种满、
+  //      以及"已经连上的不受影响"；客户端不许把它混进"内部错误"那一档。
+  const limit = classify(
+    err(5, 'too_many_connections',
+      '你这个账号同时已经有 8 条连接了（本站每人的上限）。已经连上的不受影响，'
+      + '被拒绝的只有这一条新连接；关掉几个不用的再试。'),
+    { op: 'submit' });
+  assert.equal(limit.kind, 'conn_limit');
+  assert.equal(limit.action, Action.RETRY_BACKOFF);
+  assert.match(limit.message, /已经连上的不受影响/);
+
   // (c) 排空窗口（`slurmate service restart` 设的）：几秒后就好，
   //     服务端的 detail 直接给用户看；submit 本身不自动重试。
   const draining = classify(

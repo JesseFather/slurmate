@@ -759,7 +759,7 @@ class SessionController extends EventEmitter {
    *   "报错了但端口还开着"比没有启动更坏。
    *
    * @param {function} hook 插件导出的 `startLocal(ctx, {port})`
-   * @param {object} ctx    `pluginContext(rec)`
+   * @param {object} ctx    父进程算好的上下文（`pluginCtxData(rec)`）
    * @param {object} opts   `{ port, serviceKind }`
    */
   async startLocal(hook, ctx, opts = {}) {

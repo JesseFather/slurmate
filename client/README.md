@@ -153,7 +153,7 @@
    快照表丢了它仍然记得谁要这一版；副本也读不出来就只报告、不回收。与集群侧
    安装器那条「目录里有东西、却没有部署标记就中止，不是删」同一个先例。
 4. 同意闸在"下载后、暂存验完、换入之前" —— 更早没有摘要可同意（摘要是从字节
-   算出来的），更晚就已经执行了（`activatePlugin()` 里那个 `require()` 就是执行）。
+   算出来的），更晚就已经执行了（宿主进程里那个 `require()` 就是执行）。
 5. 删除 = 撤回同意（§5.3）—— 池里那一份不在了，台账那条就一并消失，下一次
    重新问。不这么算的话，"删掉"会被下一次对账读成"摘要与台账相符"而静默装
    回来 —— 那不是"当作从来没有过"，那是"用户想让它消失，它自己回来了"。
@@ -439,7 +439,8 @@ src/main/
   classify.js      RPC 结果 → 客户端可行动作（纯函数，最容易写错的地方）
   weblogin.js      「POST 表单 + 查 cookie」这个**通用**登录机制（纯函数）
   keys.js          SSH 钥匙工具箱（ed25519 ↔ OpenSSH 格式）—— 也是插件的能力之一
-  plugins/         插件**框架**：注册表 + 铸造 id 的 ulid.js（不是插件目录；
+  plugins/         插件**框架**：注册表、铸造 id 的 ulid.js、插件宿主
+                   （host-worker / plugin-host / host-spawn；不是插件目录，
                    "装"这件事整个在 site-plugins.js 里）
   plugin-package.js **读包**：解析 `.splug` 容器、逐份校 sha256、重算内容摘要、验签（纯 Node，可脱离 Electron 测）
   site-plugins.js  **站点分发**：对账、引用计数、同意闸、暂存与换入（纯 Node，可脱离 Electron 测）
@@ -502,13 +503,13 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
    这一次 `scancel` 没成功时，守护进程会带一句 `data.warning`，`stop()` 必须把它显示
    出来 —— 用户会以为作业停了，而它可能还在烧 GPU。
 
-4. 激活就是 `require()`，所以它必须是两趟。`plugins/index.js` 的 `activatePlugin()`
-   在读到 `client/index.js` 时会当场 `delete require.cache[…]; require(clientPath)`
-   —— 激活就是执行。
+4. 激活就是执行，所以它必须是两趟。`inspectDir()` 只读清单与字节，不执行；
+   真正的 `require()` 发生在插件宿主进程里（`plugins/host-worker.js`），
+   主进程里没有一行 `require(插件入口)`。
 
    因此任何"先全都扫进来、之后再决定哪些激活"的写法都会让同意闸形同虚设：远端代码在
-   用户看到对话框之前就已经在主进程里跑完了，点"不同意"什么也拦不住。所以扫描与激活
-   是两个函数（`inspectDir()` / `activatePlugin()`），而 `Registry` 那道 `allows`
+   用户看到对话框之前就已经跑完了，点"不同意"什么也拦不住。所以扫描与起宿主
+   是两趟（`inspectDir()` / `Registry._activate()`），而 `Registry` 那道 `allows`
    谓词问的是每一个目录、没有例外。
 
    用例在 `test/boot.test.mjs`：一个在被加载时写标记文件的插件，在对账跑完、点同意

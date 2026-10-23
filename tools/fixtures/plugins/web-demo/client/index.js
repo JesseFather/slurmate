@@ -35,18 +35,24 @@ module.exports = {
 
 /** 界面已经由框架打开了，这里只做登录。幂等。 */
 async function attach(ctx, snap) {
-  const ses = ctx.win.surfaceSession;
-  if (!ses) return;
-
   const s = ctx.session() || {};
   if (s.auth_mode === 'none') return;
 
   const once = (key) => ctx.once(`${key}|${snap.sessionId || ''}`);
 
-  const res = await ctx.login(ses, snap.origin, s.auth_password);
+  // 口令不出主进程：插件只给 origin，父进程自己从会话里取。
+  const res = await ctx.login(snap.origin);
+  // 页面还没建出来（或已经被收掉）时什么都不做。
+  if (res.reason === 'no_surface') return;
   if (res.ok) {
     if (once('login-ok')) ctx.notice('ok', '已自动登录。');
     await ctx.win.reloadSurface();
+  } else if (res.reason === 'login_rejected') {
+    if (once('login-rejected')) {
+      ctx.notice('error',
+        '站点拒绝了这次自动登录。多半是会话口令不对；如果口令没变，'
+        + '那就是服务升级后改了登录口径（路径、字段名或 cookie 名）。');
+    }
   } else if (res.reason === 'no_cookie') {
     if (once('login-no-cookie')) {
       ctx.notice('error',

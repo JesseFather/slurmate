@@ -184,6 +184,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   // 必须指名 slot：省略会被主进程拒绝，而不是"停那唯一的一个"。
   stop: (slot) => ipcRenderer.invoke('app:stop', { slot }),
   doctor: () => ipcRenderer.invoke('app:doctor'),
+  exportDiagnostics: () => ipcRenderer.invoke('app:exportDiagnostics'),
   // 最近几天的作业（`sacct`）。按需拉：它是最贵的一条查询，而它回答的
   // "过去发生了什么"不会自己变新，所以不进任何一层缓存。
   history: () => ipcRenderer.invoke('app:history'),

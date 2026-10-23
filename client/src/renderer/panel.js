@@ -4419,6 +4419,16 @@ function bindEvents() {
     notice('ok', `检查通过：${bits.join('，')}。` + (extra ? `（${extra}）` : ''));
   };
 
+  $('btn-export-diag').onclick = async () => {
+    const r = await window.slurmate.exportDiagnostics();
+    if (r && r.ok) {
+      notice('ok', `诊断材料已写出：${r.path}`);
+      return;
+    }
+    if (r && r.canceled) return;
+    notice('error', (r && r.error) || '未能导出诊断材料。');
+  };
+
   // 「最近作业」是一个按需拉的动作，不跟着上面那张表一起刷：它是最贵的
   //   一条查询（守护进程会同步 fork `sacct`），而它回答的"过去发生了什么"不会
   //   自己变新。

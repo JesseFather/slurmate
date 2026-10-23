@@ -649,6 +649,30 @@ sudo slurmate service status      # 看它现在是什么状态；不需要 root
 
 ---
 
+## 发布之前的故障注入演练
+
+正常使用走不到的那些路径，靠一次主动演练验收：`cluster/fault-drill.sh`（root，
+在装好的站点上跑）。它逐项制造故障、逐项看判据，失败即非零。
+
+```
+sudo cluster/fault-drill.sh --list
+sudo cluster/fault-drill.sh --run nft-restart
+sudo cluster/fault-drill.sh --all --yes
+```
+
+九项：重启 nftables（表、链与基础规则自愈）、重启守护进程（规则收敛、会话不被拆）、
+停 munge、重启 slurmctld、`kill -9` 一条作业、客户端断网 60 秒（进 `suspect`、
+规则不拆）、手工删库（从 nft comment 反向恢复）、并发两次部署（`flock` 挡住一个）、
+`scancel`。
+
+它需要一条正在跑的会话：「会话不被拆」的那几项没有会话时会跳过，而不是假装通过。
+客户端断网那一项要第二个人在客户端上动手。
+
+这一项在账本里的编号是 S5，用户定的时机是正式版发布之前。脚本备好了不等于演练过了：
+真机上跑过一次、结论写进发布记录，才算结清。
+
+---
+
 ## 部署完仍然要注意的
 
 `install-base.sh` 跑通 不等于系统已被验证 —— 它证明的是"这台机器的环境满足前提"。

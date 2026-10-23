@@ -379,7 +379,7 @@ const committed = (env, p, version) => fs.existsSync(poolRecord(env, p, version)
 test('同意闸真的拦住了代码执行 —— 这是它的全部意义', () => {
   // 这条是整块工作里最承重的一条。
   //
-  //   在 `inspectDir`/`activatePlugin` 分开之前，`loadDir()` 在读到
+  //   在扫描与执行分成两趟之前，`loadDir()` 在读到
   //   `client/index.js` 时当场 `require()` —— 于是"对账结束时才 reload()、
   //   没同意的不激活"这句话是空的：远端代码在用户看到对话框之前就已经在本进程里
   //   跑完了，点"不同意"什么也拦不住。

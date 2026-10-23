@@ -30,8 +30,11 @@ const P = require('./host-protocol');
 // child_process.fork 给 `process.send` / `process.on('message')`。
 const parentPort = process.parentPort || null;
 function send(m) {
-  if (parentPort) parentPort.postMessage(m);
-  else if (process.send) process.send(m);
+  // 父进程可能已经走了；往一个关掉的通道写会抛 EPIPE，而那不该让宿主崩掉。
+  try {
+    if (parentPort) parentPort.postMessage(m);
+    else if (process.send) process.send(m);
+  } catch { /* 通道已关闭 */ }
 }
 function onMessage(fn) {
   if (parentPort) parentPort.on('message', (e) => fn(e && e.data !== undefined ? e.data : e));
@@ -77,7 +80,7 @@ function makeCtx(session) {
     win: {
       reloadSurface: () => callParent(session, 'reloadSurface'),
     },
-    connection: () => clone(st.ctx.connection),
+    connection: () => Object.freeze(clone(st.ctx.connection)),
     keys,
     session: () => clone(st.ctx.session),
     whoami: () => clone(st.ctx.whoami),
@@ -183,7 +186,17 @@ onMessage((m) => {
     }
     hooks = checked.hooks;
     try {
-      keys = Object.freeze(require(m.keysPath));
+      // 只交契约 §4.2 的那六个函数。模块对象上还有 `_internal`（本仓库用例
+      //   用的），整份递出去等于给插件看了一张没写进契约的表。
+      const k = require(m.keysPath);
+      keys = Object.freeze({
+        generate: k.generate,
+        publicKeyLine: k.publicKeyLine,
+        publicKeyLineFromPrivatePem: k.publicKeyLineFromPrivatePem,
+        isUsablePrivatePem: k.isUsablePrivatePem,
+        fingerprintOf: k.fingerprintOf,
+        isValidPublicKeyLine: k.isValidPublicKeyLine,
+      });
     } catch (e) {
       send(P.msg('ready', { ok: false, error: P.err(P.ERR.LOAD_FAILED, `加载 keys.js 失败（${e.message}）`) }));
       return;

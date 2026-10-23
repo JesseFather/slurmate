@@ -135,7 +135,9 @@ class PluginHost {
       this._pending.delete(m.id);
       clearTimeout(p.timer);
       if (m.ok) p.resolve(m.value);
-      else p.reject(this._err(m.error));
+      else {
+        p.reject(this._err(m.error));
+      }
       return;
     }
     if (m.t === 'call') {
@@ -168,7 +170,14 @@ class PluginHost {
       const value = await this.onCall(m.s, m.member, m.args || []);
       out = { v: P.PROTOCOL, t: 'callres', id: m.id, ok: true, value: value === undefined ? null : value };
     } catch (e) {
-      out = { v: P.PROTOCOL, t: 'callres', id: m.id, ok: false, error: this._err(e) };
+      // 跨进程那边只认纯数据；Error 实例过 IPC 会丢掉 message/code。
+      out = {
+        v: P.PROTOCOL,
+        t: 'callres',
+        id: m.id,
+        ok: false,
+        error: { code: (e && e.code) || P.ERR.THREW, message: (e && e.message) || String(e) },
+      };
     }
     if (!this.dead) this._send(out);
   }

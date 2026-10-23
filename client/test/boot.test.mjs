@@ -549,6 +549,7 @@ const electronStub = {
   dialog: {
     showMessageBox: async () => ({ response: 2 }),
     showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+    showSaveDialog: async () => ({ canceled: true }),
   },
   clipboard: { writeText: (t) => { calls.clipboard = t; } },
 };
@@ -778,7 +779,8 @@ test('index.js 能加载并完成整个启动流程', async (t) => {
 
   // IPC 通道注册齐全
   for (const ch of ['app:bootstrap', 'app:probeHosts', 'app:connect', 'app:partitions',
-                    'app:start', 'app:states', 'app:doctor', 'app:stop', 'app:reload',
+                    'app:start', 'app:states', 'app:doctor', 'app:exportDiagnostics',
+                    'app:stop', 'app:reload',
                     // 连接管理：地址必须在界面上可填可删。
                     'app:saveConnection', 'app:deleteConnection', 'app:setActiveConnection',
                     // 主动断开：与「结束会话」同义 —— 用户主动表达的终止，
@@ -1679,6 +1681,12 @@ test('本机插件：站点报 can_submit=false，点「在本机打开」不提
   idx._test.setSampleDir(siteDir);
   try {
     await connectDemo(idx);
+    // 本机入口是握手之后才知道的（插件代码在独立进程里）。
+    await idx._test.getRegistry().ready;
+    await waitUntil(() => {
+      const x = idx._test.getPluginsView().plugins.find((y) => y.name === 'local-demo');
+      return Boolean(x && x.hasLocalEntry);
+    }, '握手之后视图里看见本机入口');
     const p = idx._test.getPluginsView().plugins.find((x) => x.name === 'local-demo');
     assert.ok(p, '夹具前提：插件视图里应当有 local-demo');
     assert.equal(p.canSubmit, false, '站点说它没有作业侧');
@@ -2333,7 +2341,7 @@ function sshdId() {
   return p.id;
 }
 
-test('插件目录：坏插件只影响它自己，其余照常工作', (t) => {
+test('插件目录：坏插件只影响它自己，其余照常工作', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const { Registry } = require('../src/main/plugins/index.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-plug-'));
@@ -2355,6 +2363,8 @@ test('插件目录：坏插件只影响它自己，其余照常工作', (t) => {
   fs.mkdirSync(path.join(tmp, 'not-a-plugin'), { recursive: true });
 
   const reg = new Registry([{ dir: tmp, source: 'pool' }]);
+  // 导出校验在宿主里跑，所以那一条报错要等握手回来。
+  await reg.ready;
 
   assert.deepEqual(reg.list().map((p) => p.name), ['good'],
     '只有形状完整的那个被收下');
@@ -4417,256 +4427,7 @@ test('并发上限那一格：站点报几就是几，而缺席不是「1」', a
   }
 });
 
-test('sshconfig：Include 幂等，且一个字都不动用户原有的配置', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-'));
-  // 两个根了：`dataDir` 是插件自己的落点（框架给的），`home` 是用户的
-  //   家目录（`~/.ssh/config` 在那儿 —— 那是他的东西，我们只借两行）。
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-data-'));
-  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
-  const userCfg = sshc.userConfigPath(home);
-  const original = 'Host myserver\n    HostName example.com\n\nHost *\n    ServerAliveInterval 60\n';
-  fs.writeFileSync(userCfg, original, { mode: 0o600 });
-
-  const r1 = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r1.ok, true, r1.detail || '');
-  assert.equal(r1.changed, true);
-  const after1 = fs.readFileSync(userCfg, 'utf8');
-  assert.ok(after1.startsWith('# slurmate:include'),
-    '必须加在最上面：ssh 对每个参数取第一个获得的值，用户那份里常见的'
-    + ' `Host *` 块若排在前面，它的 Port/User 会赢过我们这一份');
-  assert.ok(after1.includes(`Include ${sshc.pathsFor(dataDir).config}`));
-  assert.ok(after1.includes(original), '用户原有的内容必须逐字保留');
-  assert.equal(after1.endsWith(original), true, '而且必须排在我们那两行之后');
-
-  // 幂等：第二次连文件都不该动（mtime 也不动 —— 反复惊动用户的同步/杀毒软件
-  // 本身就是一种副作用）
-  const r2 = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r2.ok, true);
-  assert.equal(r2.changed, false, '第二次不该再动这个文件');
-  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1);
-
-  // 自愈之一：搬家前那个形状的路径要被换掉，而不是并排留着两份
-  // （并排留着的话，第一条仍然生效，而且指向一个不存在的地方）
-  fs.writeFileSync(userCfg,
-    after1.replace(sshc.pathsFor(dataDir).config, '/old/home/.slurmate/ssh/config'));
-  const r3 = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r3.changed, true, '路径变了要改回来');
-  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1,
-    '旧的那一行要被换掉，不能两份并存');
-
-  // 自愈之二：标记行下面那一条 Include，不管它指向哪儿。这一条是搬家带来的：
-  //   新路径不含 `.slurmate/`，所以上面那条按路径形状认的判据认不出它 —— 靠的是
-  //   "紧跟在标记行后面"这件事本身。少了它，旧行会幸存，留下一条悬空的 Include，
-  //   而悬空不致命（ssh 会忽略它继续读后面的内容）—— 也就是说改错了没有任何
-  //   症状，这正是它必须有用例钉着的原因。
-  const elsewhere = path.join(path.dirname(dataDir), 'plugin-data', 'X@relay', 'config');
-  fs.writeFileSync(userCfg, after1.replace(sshc.pathsFor(dataDir).config, elsewhere));
-  const r5 = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r5.changed, true, '换了根之后那一条也要被替换掉');
-  assert.equal(fs.readFileSync(userCfg, 'utf8'), after1, '不能两份并存');
-
-  // 读不出来时绝不能当作空文件往下写 —— 那会把用户全部的 ssh 配置抹掉，
-  //   而这是整个客户端里后果最严重的一次写盘。
-  const bad = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg-bad-'));
-  fs.mkdirSync(path.join(bad, '.ssh', 'config'), { recursive: true });   // 是个目录
-  const r4 = sshc.ensureInclude({ dataDir, home: bad });
-  assert.equal(r4.ok, false, '读取失败就必须报错');
-  assert.ok(r4.detail, '要给出原因，好让界面告诉用户手工加哪一行');
-});
-
-test('sshconfig：写出来的配置要能让 ssh 真的连上（端口、钥匙、known_hosts）', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshcfg2-'));
-  const p = sshc.pathsFor(dataDir);
-
-  // 一次性钥匙：只生成一次，之后必须复用（换了钥匙 = 「刚才还能连，现在认证失败」）
-  const k1 = sshc.ensureRelayKey(dataDir, require('../src/main/keys.js'));
-  assert.equal(k1.ok, true, k1.detail || '');
-  assert.equal(k1.created, true);
-  assert.match(k1.publicKeyLine, /^ssh-ed25519 [A-Za-z0-9+/]{68} slurmate-\d{8}-\d{4}$/,
-    `公钥形状要能被控制节点的规则接受：${k1.publicKeyLine}`);
-  const k2 = sshc.ensureRelayKey(dataDir, require('../src/main/keys.js'));
-  assert.equal(k2.created, false);
-  assert.equal(k2.publicKeyLine, k1.publicKeyLine, '第二次必须复用同一把');
-
-  const hostKey = 'ssh-ed25519 ' + 'A'.repeat(68);
-  const w = sshc.writeRelayConfig({ dataDir, port: 18090, user: 'alice', hostKey });
-  assert.equal(w.ok, true, w.detail || '');
-  assert.equal(w.strict, true);
-
-  const cfg = fs.readFileSync(p.config, 'utf8');
-  assert.match(cfg, /^Host slurmate$/m, '别名必须恒定 —— codex 那一侧认的就是这一个词');
-  assert.match(cfg, /^\s+Port 18090$/m);
-  assert.match(cfg, /^\s+User alice$/m);
-  assert.match(cfg, /^\s+HostName 127\.0\.0\.1$/m);
-  assert.match(cfg, /^\s+IdentityFile .*id_ed25519$/m);
-  // 不写这一条的话，ssh 会先把 agent 里的、~/.ssh 下的每一把都试一遍，
-  //   失败会计进 MaxAuthTries（默认 6）—— 钥匙一多，还没轮到我们这把就被断开了，
-  //   症状是一句「认证失败」，指不回根因。
-  assert.match(cfg, /^\s+IdentitiesOnly yes$/m);
-  assert.match(cfg, /^\s+StrictHostKeyChecking yes$/m,
-    '拿到了主机公钥就该严格核对，而不是首次信任');
-  assert.equal(fs.statSync(p.config).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(p.identity).mode & 0o777, 0o600);
-
-  // 两处路径都必须在新位置。搬家最容易犯的错是改漏一条 —— 那时 `IdentityFile`
-  //   或 `UserKnownHostsFile` 还指着旧目录（而那里的文件刚被删掉），症状是"昨天还能
-  //   用，今天连不上"，而 ssh 只会给一句 `Permission denied`，完全指不到这里。
-  assert.ok(cfg.includes(p.identity), 'IdentityFile 必须指向插件的落点');
-  assert.ok(cfg.includes(p.knownHosts), 'UserKnownHostsFile 必须指向插件的落点');
-  assert.ok(!cfg.includes('.slurmate'), '配置里不能再出现搬家前的那条路径');
-
-  // known_hosts：非 22 端口必须写成 [地址]:端口，方括号不能省
-  assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
-    `[127.0.0.1]:18090 ${hostKey}\n`);
-
-  // 拿不到主机公钥（守护进程还是旧版本）时退回首次信任 —— 能用但降级
-  // 好过写出一个 ssh 直接拒绝连接的配置。
-  const w2 = sshc.writeRelayConfig({ dataDir, port: 18091, user: 'alice', hostKey: null });
-  assert.equal(w2.ok, true);
-  assert.equal(w2.strict, false);
-  const cfg2 = fs.readFileSync(p.config, 'utf8');
-  assert.match(cfg2, /^\s+Port 18091$/m, '端口要跟着隧道走');
-  assert.match(cfg2, /^\s+StrictHostKeyChecking accept-new$/m);
-  // 形状不对的"主机公钥"绝不能被写进 known_hosts：一行一个条目，
-  // 值里的换行能让它变成两行，也就是凭空多出一个主机条目。
-  assert.equal(fs.readFileSync(p.knownHosts, 'utf8'),
-    `[127.0.0.1]:18090 ${hostKey}\n`, '没有可信公钥时不许动 known_hosts');
-  const evil = sshc.writeRelayConfig({ dataDir, port: 18092, user: 'alice',
-    hostKey: 'ssh-ed25519 ' + 'A'.repeat(68) + '\nevil.example ssh-ed25519 ' + 'B'.repeat(68) });
-  assert.equal(evil.strict, false, '带换行的值必须被当成非法');
-});
-
-test('用 dotfiles 管理 ~/.ssh/config（符号链接）的人不能被损坏', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  // `~/.ssh/config -> ~/dotfiles/config` 是常见做法。而 rename(2) 不跟随目标上的
-  // 符号链接 —— 直接 rename 上去会把那条链接换成一个普通文件，于是用户改
-  // ~/dotfiles/config 不再影响 ssh，两边从此各说各话，且没有任何地方会报错。
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-'));
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshlink-data-'));
-  const dotfiles = path.join(home, 'dotfiles');
-  fs.mkdirSync(dotfiles, { recursive: true });
-  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
-  const real = path.join(dotfiles, 'config');
-  fs.writeFileSync(real, 'Host from-dotfiles\n    HostName example.com\n', { mode: 0o600 });
-  fs.symlinkSync(real, path.join(home, '.ssh', 'config'));
-
-  const r = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r.ok, true, r.detail || '');
-
-  const linkPath = sshc.userConfigPath(home);
-  assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true,
-    '那条符号链接必须还在 —— 被换成普通文件就等于用户的 dotfiles 工作流静默失效');
-  assert.ok(fs.readFileSync(real, 'utf8').includes('Include ' + sshc.pathsFor(dataDir).config),
-    '内容要写进链接指向的那个文件');
-  assert.ok(fs.readFileSync(real, 'utf8').includes('Host from-dotfiles'),
-    '用户原有的内容照旧保留');
-});
-
-test('无法读取用户的 ssh 配置时，连碰都不能碰它', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  // root 能读任何文件，这条造不出来 —— 明说跳过，而不是让它静默地「全绿」。
-  if (typeof process.getuid === 'function' && process.getuid() === 0) {
-    console.log('  （以 root 运行：跳过「读取失败」这条用例，它在本环境无法构造）');
-    return;
-  }
-
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshperm-'));
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sshperm-data-'));
-  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true, mode: 0o700 });
-  const cfg = sshc.userConfigPath(home);
-  const precious = 'Host keepme\n    HostName important.example.com\n';
-  fs.writeFileSync(cfg, precious, { mode: 0o000 });
-
-  const r = sshc.ensureInclude({ dataDir, home });
-  assert.equal(r.ok, false, '读取失败就必须报错');
-  assert.ok(r.detail, '要给出原因，好让界面告诉用户手工加哪一行');
-  fs.chmodSync(cfg, 0o600);
-  assert.equal(fs.readFileSync(cfg, 'utf8'), precious,
-    '读取失败时绝不能当作空文件往下写 —— 那会把用户全部的 ssh 配置抹掉，'
-    + '是整个客户端里后果最严重的一次写盘');
-});
-
 // ── 搬家：从 ~/.slurmate/ssh/ 挪到框架给的那个数据目录 ──────────────────────
-
-test('搬家的清理：只删我们那三个文件，目录里的其他条目一个不碰', (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move-'));
-  const old = sshc.legacyPaths(home);
-  fs.mkdirSync(old.dir, { recursive: true, mode: 0o700 });
-  for (const [f, c] of [[old.config, '# 旧的\n'], [old.knownHosts, '[127.0.0.1]:1234 x\n'],
-    [old.identity, '旧的钥匙\n']]) {
-    fs.writeFileSync(f, c, { mode: 0o600 });
-  }
-  // 集群侧的作业 sshd 把主机密钥写在同一个目录里（`plugins/sshd/job/start.sh`），
-  //   而客户端的家目录与集群账号的家目录在 HPC 上常常就是同一个（共享 NFS）。
-  //   所以这里放一个"别人的文件"，钉住"清理只认那三个名字"。
-  const jobKey = path.join(old.dir, 'host_ed25519');
-  fs.writeFileSync(jobKey, '作业侧的主机密钥\n', { mode: 0o600 });
-
-  const clean = sshc.dropLegacyFiles(home);
-  assert.deepEqual(clean.deleted.slice().sort(),
-    [old.config, old.identity, old.knownHosts].slice().sort());
-  assert.deepEqual(clean.failed, []);
-  assert.equal(fs.existsSync(jobKey), true,
-    '绝不删目录、也绝不删不认识的文件 —— 删掉作业侧那个主机密钥，客户端会把它'
-    + '判定为中间人攻击，而症状是"昨天还能用，今天连不上"');
-
-  // 每一次 attach 都会调它，所以第二次必须无害（ENOENT 不是失败）。
-  assert.deepEqual(sshc.dropLegacyFiles(home).deleted, []);
-  assert.deepEqual(sshc.dropLegacyFiles(home).failed, []);
-});
-
-test('时序：新位置写成功才清旧的；写失败时旧的一个都不能少', async (t) => {
-  t.after(() => { Module._load = origLoad; });
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-  const relay = require('../../plugins/sshd/client/index.js');
-
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move2-'));
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-move2-data-'));
-  const old = sshc.legacyPaths(home);
-  fs.mkdirSync(old.dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(old.config, '# 旧的\n', { mode: 0o600 });
-
-  const notices = [];
-  // 本仓库的第一个假 ctx。它存在的理由只有一个：这条时序只能从 `attach`
-  //   那一层测（写盘的成功与失败各跑一遍），而 `attach` 的入口就是一个 ctx。
-  const ctx = {
-    // 是 `connection()` 而不是 `config` / `cfg` —— 插件不该拿到整个 config.json
-    //   的写权，也不该拿"当前活跃连接"当"我这条会话的连接"。
-    connection: () => ({ id: 'c1', label: '', user: 'alice', host: 'h', port: 22 }),
-    dataDir: () => dataDir,
-    home: () => home,
-    once: () => true,               // "第一次"（那道闸的语义见 pluginContext 的 once）
-    notice: (kind, text) => notices.push({ kind, text }),
-  };
-  const snap = { localPort: 18090, sshHostKey: 'ssh-ed25519 ' + 'A'.repeat(68) };
-
-  // ① 写不进去（数据目录只读），旧的必须原封不动。
-  fs.chmodSync(dataDir, 0o500);
-  t.after(() => { try { fs.chmodSync(dataDir, 0o700); } catch { /* 尽力而为 */ } });
-  await relay.attach(ctx, snap);
-  assert.equal(fs.existsSync(old.config), true,
-    '新位置没写成时绝不能删旧的 —— 否则用户落到"两边都没有"，而 `ssh slurmate`'
-    + '谁也不认');
-  assert.ok(notices.some((n) => n.kind === 'error'), '而且必须如实说出来');
-
-  // ② 能写了，旧的才清掉。
-  fs.chmodSync(dataDir, 0o700);
-  await relay.attach(ctx, snap);
-  assert.equal(fs.existsSync(old.config), false, '新位置写成功之后，旧的才清');
-});
 
 test('会话一结束就要收起 web-demo 视图，把面板还给用户', async (t) => {
   t.after(() => { Module._load = origLoad; });
@@ -4989,7 +4750,6 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   await ensureConnected(idx);
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
 
   // 等上一个用例的会话真的被释放。假后端的 goodbye 要 1.6 秒才落地，而配额是 1 ——
   // 不等的话这里会拿到一句「已有 1 个活跃会话」，而那是上一个用例的会话，
@@ -5053,17 +4813,17 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
     '插件数据目录要落在测试的临时 userData 里 —— 绝不能读写用户真实的那一份');
   const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
   const dataDir = path.join(dataRoot, P.dataDirNameOf(P.identityOf(sshdPlugin)));
-  assert.equal(fs.existsSync(sshc.pathsFor(dataDir).config), true,
+  assert.equal(fs.existsSync(path.join(dataDir, 'config')), true,
     'ssh 配置要写在框架给的那个数据目录里');
 
-  const cfg = fs.readFileSync(sshc.pathsFor(dataDir).config, 'utf8');
+  const cfg = fs.readFileSync(path.join(dataDir, 'config'), 'utf8');
   assert.match(cfg, new RegExp(`^\\s+Port ${snap.localPort}$`, 'm'),
     '端口必须是隧道实际在监听的那一个（可能从 18090 顺移过）');
   assert.match(cfg, /^\s+User demo$/m, '用户名取自这条连接');
-  assert.match(fs.readFileSync(sshc.userConfigPath(home), 'utf8'),
-    new RegExp(`Include ${sshc.pathsFor(dataDir).config.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+  assert.match(fs.readFileSync(path.join(home, '.ssh', 'config'), 'utf8'),
+    new RegExp(`Include ${path.join(dataDir, 'config').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
     '用户的 ssh 配置里要有一行 Include，而且指向新位置');
-  assert.equal(fs.readFileSync(sshc.pathsFor(dataDir).knownHosts, 'utf8'),
+  assert.equal(fs.readFileSync(path.join(dataDir, 'known_hosts'), 'utf8'),
     `[127.0.0.1]:${snap.localPort} ssh-ed25519 ${'A'.repeat(68)}\n`,
     '作业带回来的主机公钥要被钉进 known_hosts');
 
@@ -6266,6 +6026,40 @@ test('prepare 失败的会话：不留记录，也不留临时实例', async (t)
   cleanupSiteState(idx);
 });
 
+test('并发两次开始：槽在等待之前就占住了，第二条得到占用提示', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+
+  putSitePlugin({
+    id: mintId(), name: 'race',
+    over: { contributes: { ports: 0, concurrent: false } },
+    // prepare 故意慢一点：插件现在跑在独立进程里，认领与写表之间会经过一次
+    //   等待。少了槽预留，两条 app:start 会都看到「没有持有者」。
+    clientSrc: `
+      module.exports = { async prepare() {
+        await new Promise((r) => setTimeout(r, 80));
+        return { ok: true };
+      } };
+    `,
+  });
+  idx._test.getBackend().debugAddSitePlugin('race');
+
+  const [a, b] = await Promise.all([appStart(null, 'race'), appStart(null, 'race')]);
+  const okCount = [a, b].filter((r) => r && r.ok).length;
+  assert.equal(okCount, 1,
+    `只能有一条拿到槽（a=${JSON.stringify(a && a.ok)} b=${JSON.stringify(b && b.ok)}）`);
+  assert.match(JSON.stringify(noticesOf()), /正占着中转站的位置/,
+    '被拒的那一条要说清是谁占着');
+
+  const won = [a, b].find((r) => r && r.ok);
+  if (won) await invoke('app:stop', { slot: won.slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('崩溃重连要接回全部会话，而不是最新那一条', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -6693,7 +6487,6 @@ test('中转站的端口绝不能落进任何一份数据', async (t) => {
 test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活跃连接不影响它', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
   const P = require('../src/main/plugin-data.js');
   await openUpTo(idx, 1);
   await connectDemo(idx);                       // C1：user=demo
@@ -6708,7 +6501,7 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
   const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
   const dataDir = path.join(idx._test.getPluginDataRoot(),
     P.dataDirNameOf(P.identityOf(sshdPlugin)));
-  const conf = sshc.pathsFor(dataDir).config;
+  const conf = path.join(dataDir, 'config');
   assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m, '前提：先写的是 C1 的用户');
 
   // 再配一条另一个用户的连接，并把它设为活跃。这一步不停任何会话 ——
@@ -6824,11 +6617,10 @@ test('ctx 的成员：surfaceSession 绑在会话上，connection 与 keys 是�
 
   // surfaceSession：是取值器（不是方法），并且两份会话拿到的是两个不同的分区。
   //   把 getter 改成方法时它是 `function`；拿窗口当前那块视图时两份会相同。
-  assert.equal(oa.surfaceSessionType, 'object',
-    'ctx.win.surfaceSession 必须是一个值（取值器），不是函数');
-  assert.ok(oa.surfaceSessionPath, '有界面时它必须拿得到那块视图的 session');
-  assert.notEqual(oa.surfaceSessionPath, ob.surfaceSessionPath,
-    '两份会话必须各自绑在自己的分区上');
+  // 活的 Electron session 不再过进程边界（S2）：插件要登录就走 ctx.login(origin)。
+  assert.equal(oa.surfaceSessionType, 'undefined',
+    'ctx.win.surfaceSession 已经不再是契约的一部分');
+  assert.equal(ob.surfaceSessionType, 'undefined');
 
   // connection：恰好五个字段、冻结、每次给新副本。
   assert.deepEqual(oa.connectionKeys, ['host', 'id', 'label', 'port', 'user']);
@@ -6932,18 +6724,12 @@ test('ctx.home() 是用户的家目录；不是绝对路径就抛', async (t) =>
       surface: { kind: 'web', path: '/' } } },
     clientSrc: `
 const fs = require('fs');
-let ctxRef = null;
-let done = false;
-const timer = setInterval(() => {
-  if (!ctxRef || done) return;
+module.exports = { async attach(ctx) {
   let line;
-  try { line = JSON.stringify({ ok: true, home: ctxRef.home() }); }
-  catch (e) { line = JSON.stringify({ ok: false, message: e.message }); done = true; }
+  try { line = JSON.stringify({ ok: true, home: ctx.home() }); }
+  catch (e) { line = JSON.stringify({ ok: false, message: e.message }); }
   fs.appendFileSync(${JSON.stringify(out)}, line + '\\n');
-  if (done) clearInterval(timer);
-}, 100);
-timer.unref();
-module.exports = { async attach(ctx) { ctxRef = ctx; } };
+} };
 `,
   });
   idx._test.getBackend().debugAddSitePlugin('home-probe');
@@ -6957,13 +6743,16 @@ module.exports = { async attach(ctx) { ctxRef = ctx; } };
   assert.equal(lines().find((x) => x.ok).home, fakeHome);
 
   // 桩把家目录换成一个相对路径：那是插件拼路径时唯一真正危险的那一态。
+  // 上下文在每次钩子调用前刷新，所以逼一次状态变化就能让它读到新值。
+  const ctl = idx._test.sessionAt(r.slot).controller;
   electronStub.app.setPath('home', 'relative-home');
+  ctl.emit('change', ctl.snapshot());
   await waitUntil(() => lines().some((x) => !x.ok), '坏家目录被拒绝');
   const bad = lines().find((x) => !x.ok);
   assert.match(bad.message, /绝对路径/, '抛出来的消息要说清是哪一格不成立');
 });
 
-test('ctx.login 的失败路，以及契约来自本插件清单', async (t) => {
+test('ctx.login 的边界：origin 必须是这条会话的，口令不过进程边界', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const started = [];
@@ -6988,24 +6777,11 @@ test('ctx.login 的失败路，以及契约来自本插件清单', async (t) => 
       surface: { kind: 'web', path: '/' }, login: LOGIN } },
     clientSrc: `
 const fs = require('fs');
-module.exports = { async attach(ctx) {
-  const seen = [];
-  const ses = (cookie, boom) => ({
-    fetch: async (url, opts) => {
-      seen.push({ url, body: opts.body });
-      if (boom) throw new Error('boom');
-      return { status: 200 };
-    },
-    cookies: { get: async (q) => { seen.push({ cookie: q.name });
-      return cookie ? [{ name: q.name, value: 'v' }] : []; } },
-  });
-  const origin = 'http://127.0.0.1:1';
+module.exports = { async attach(ctx, snap) {
   fs.writeFileSync(${JSON.stringify(outC)}, JSON.stringify({
-    noPassword: await ctx.login(ses(false, false), origin, ''),
-    noCookie: await ctx.login(ses(false, false), origin, 'pw'),
-    fetchFailed: await ctx.login(ses(false, true), origin, 'pw'),
-    ok: await ctx.login(ses(true, false), origin, 'pw'),
-    seen,
+    badOrigin: await ctx.login('http://127.0.0.1:1'),
+    noPassword: await ctx.login(snap.origin),
+    sessionKeys: Object.keys(ctx.session() || {}),
   }));
 } };
 `,
@@ -7016,10 +6792,8 @@ module.exports = { async attach(ctx) {
       surface: { kind: 'web', path: '/' } } },
     clientSrc: `
 const fs = require('fs');
-module.exports = { async attach(ctx) {
-  fs.writeFileSync(${JSON.stringify(outN)}, JSON.stringify(
-    await ctx.login({ fetch: async () => { throw new Error('不该发请求'); },
-      cookies: { get: async () => [] } }, 'http://127.0.0.1:1', 'pw')));
+module.exports = { async attach(ctx, snap) {
+  fs.writeFileSync(${JSON.stringify(outN)}, JSON.stringify(await ctx.login(snap.origin)));
 } };
 `,
   });
@@ -7034,21 +6808,53 @@ module.exports = { async attach(ctx) {
   await waitUntil(() => fs.existsSync(outN), '无契约那一份写出观察');
 
   const withC = JSON.parse(fs.readFileSync(outC, 'utf8'));
-  assert.equal(withC.noPassword.reason, 'no_password');
-  assert.equal(withC.noCookie.reason, 'no_cookie');
-  assert.equal(withC.noCookie.status, 200);
-  assert.equal(withC.fetchFailed.reason, 'fetch_failed: boom');
-  assert.equal(withC.ok.ok, true, '拿到契约里的 cookie 就算成功');
-  // 契约来自插件清单，不是框架里写死的某个路径/字段名。
-  const post = withC.seen.find((x) => x.url);
-  assert.match(post.url, /\/auth-x$/, '登录 POST 的路径必须取自本插件清单');
-  assert.match(post.body, /secret-x=pw/, '表单字段名同理');
-  assert.equal(withC.seen.find((x) => x.cookie).cookie, 'sess-x',
-    '判断成功看哪个 cookie 也来自清单');
+  assert.equal(withC.badOrigin.reason, 'bad_origin',
+    '不是这条会话的 origin 一律拒 —— 否则插件能让主进程拿口令去 POST 任意地址');
+  assert.equal(withC.noPassword.reason, 'no_password',
+    '假会话里没有口令，插件只给 origin');
+  assert.equal(withC.sessionKeys.includes('auth_password'), false,
+    '口令不随 session() 过进程边界');
 
   const noC = JSON.parse(fs.readFileSync(outN, 'utf8'));
   assert.equal(noC.reason, 'no_contract',
     '没声明登录契约的插件调 ctx.login，要得到 no_contract，而不是发一次请求');
+});
+
+test('诊断材料导出：只写客户端知道的事实，口令与密钥一个字都不进', async (t) => {
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-diag-'));
+  const out = path.join(tmp, 'diag.txt');
+  const saved = electronStub.dialog.showSaveDialog;
+  electronStub.dialog.showSaveDialog = async () => ({ canceled: false, filePath: out });
+  t.after(() => {
+    electronStub.dialog.showSaveDialog = saved;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const r = await invoke('app:exportDiagnostics');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.path, out);
+  const text = fs.readFileSync(out, 'utf8');
+  assert.match(text, /客户端版本：/);
+  assert.match(text, /## 连接/);
+  assert.match(text, /## 插件/);
+  assert.match(text, /## 会话/);
+  assert.match(text, /## 插件宿主日志/);
+  // 诊断材料会被人贴进问题单，凭据一个字都不能在里面。
+  assert.doesNotMatch(text, /auth_password/);
+  assert.doesNotMatch(text, /BEGIN [A-Z ]*PRIVATE KEY/);
+
+  // 用户按取消：不写文件，也不报错。
+  electronStub.dialog.showSaveDialog = async () => ({ canceled: true });
+  const c = await invoke('app:exportDiagnostics');
+  assert.equal(c.ok, false);
+  assert.equal(c.canceled, true);
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
 });
 
 test('换一条连接 = 离开上一个站点：本机那些记录一条都不留，而作业一个字不动', async (t) => {
@@ -7107,36 +6913,6 @@ test('换一条连接 = 离开上一个站点：本机那些记录一条都不�
   cleanupSiteState(idx);
 });
 
-test('无法获取连接就不写 ssh 配置 —— 绝不回落到 whoami（它可能属于另一个站点）', async (t) => {
-  const relay = require('../../plugins/sshd/client/index.js');
-  const sshc = require('../../plugins/sshd/client/sshconfig.js');
-
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-noconn-'));
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-noconn-data-'));
-  const notices = [];
-  const ctx = {
-    // 拿不到 —— 这条会话所属的连接已经不在了（被删掉，或者它是重连接回来的、
-    //   而客户端根本不知道它属于谁）。
-    connection: () => null,
-    // `whoami` 故意给一个别的用户：它答的是"最近一次连上的是谁"，
-    //    是一个模块级单值，而切换活跃连接不会停掉已经在跑的会话 ——
-    //    按它回落就会把另一个站点的用户名写进这一条会话的 ssh 配置。
-    whoami: () => ({ user: 'alice' }),
-    dataDir: () => dataDir,
-    home: () => home,
-    once: () => true,
-    notice: (kind, text) => notices.push({ kind, text }),
-  };
-  const snap = { localPort: 18090, sshHostKey: 'ssh-ed25519 ' + 'A'.repeat(68) };
-
-  await relay.attach(ctx, snap);
-
-  assert.equal(fs.existsSync(sshc.pathsFor(dataDir).config), false,
-    '无法获取连接就不写 —— 回落 whoami 会把 alice 写进去，而这条会话不是 alice 的');
-  assert.ok(notices.some((n) => n.kind === 'error'),
-    '而且必须如实说出来（用户仍然可以直连那个端口）');
-});
-
 test('导出 preferredPort 的插件会被拒绝 —— 那个钩子已经收掉了', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -7150,7 +6926,7 @@ test('导出 preferredPort 的插件会被拒绝 —— 那个钩子已经收掉
     over: { contributes: { ports: 0, concurrent: false } },
     clientSrc: 'module.exports = { preferredPort() { return 18099; } };\n',
   });
-  reg.reload();
+  await reg.reload();
 
   const hit = reg.errors.find((e) => /preferredPort/.test(e));
   assert.ok(hit, `应当有一条指名 preferredPort 的报错：${JSON.stringify(reg.errors)}`);
@@ -7159,7 +6935,7 @@ test('导出 preferredPort 的插件会被拒绝 —— 那个钩子已经收掉
     '它不该被当成一个可用的插件加载进来');
 
   resetFixture();
-  reg.reload();
+  await reg.reload();
 });
 
 // ── 丙组：一个工作区被回收时，它名下的数据一起删 ─────────────────────────────

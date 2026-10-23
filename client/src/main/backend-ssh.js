@@ -900,6 +900,14 @@ class SshBackend extends Backend {
             if (this._autoReconnect) this._markDefinitive(detail);
             return done({ ok: false, code: 'cli_missing', error: detail });
           }
+          if (ping && ping.error && ping.error.kind === 'too_many_connections') {
+            // 不是"这条路坏了"：站点听得见，只是它的连接数到上限。说成
+            //   "已连上、但无法执行"会让用户去查安装，而该做的是关掉不用的连接。
+            const detail = ping.error.detail || '站点的连接数已经到上限。';
+            try { client.end(); } catch { /* 尽力 */ }
+            this._conn = null;
+            return done({ ok: false, code: 'conn_limit', error: `站点连接已满：${detail}` });
+          }
           return done({
             ok: false,
             code: 'rpc_unavailable',
@@ -922,6 +930,12 @@ class SshBackend extends Backend {
           this._conn = null;
           if (this._autoReconnect) this._markDefinitive(missing);
           return done({ ok: false, code: 'cli_missing', error: missing });
+        }
+        if (resp && resp.error && resp.error.kind === 'too_many_connections') {
+          const detail = resp.error.detail || '站点的连接数已经到上限。';
+          try { client.end(); } catch { /* 尽力 */ }
+          this._conn = null;
+          return done({ ok: false, code: 'conn_limit', error: `站点连接已满：${detail}` });
         }
         const detail = (resp && resp.error && resp.error.detail)
           || (resp && resp.error && resp.error.kind) || '未知原因';

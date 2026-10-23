@@ -114,6 +114,12 @@ function classify(resp, ctx) {
     if (kind === 'no_port') {
       return mk(Action.RETRY_SOON, code, kind, message, ctx);
     }
+    // 站点连接数到上限：服务端的 detail 已经说清是全局满了还是这个账号满了，
+    //   以及"已经连上的不受影响"。这里只给它一个自己的 kind，界面据此说"下一步"，
+    //   而不是混进"内部错误"那一档。
+    if (kind === 'too_many_connections') {
+      return mk(Action.RETRY_BACKOFF, code, 'conn_limit', message, ctx);
+    }
     return mk(Action.RETRY_BACKOFF, code, kind, message, ctx);
   }
 

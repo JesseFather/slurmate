@@ -219,8 +219,22 @@ test('fetch 在重定向上被取消时，先看 cookie：登录已经成功', a
 
   const no = await webLogin(ses([]), 'http://x', 'pw', CONTRACT);
   assert.equal(no.ok, false);
-  assert.match(no.reason, /^fetch_failed: Redirect was cancelled$/,
-    '没拿到 cookie 时照旧把那个异常说出来 —— 三种失败的出路不同');
+  assert.equal(no.reason, 'login_rejected',
+    '没拿到 cookie 而服务端又把我们送了回来：这是「它拒了这次登录」，不是「连不上」');
+
+  // 端点通了、也没重定向，只是 cookie 没进来：换成 cookie 名不对那一类。
+  const plain = {
+    fetch: async () => ({ status: 200 }),
+    cookies: { get: async () => [] },
+  };
+  assert.equal((await webLogin(plain, 'http://x', 'pw', CONTRACT)).reason, 'no_cookie');
+
+  // 真的连不上时，那个异常原样说出来。
+  const down = {
+    fetch: async () => { throw new Error('boom'); },
+    cookies: { get: async () => [] },
+  };
+  assert.equal((await webLogin(down, 'http://x', 'pw', CONTRACT)).reason, 'fetch_failed: boom');
 });
 
 test('isLoginPath 的边界', () => {
