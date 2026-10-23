@@ -79,9 +79,6 @@ html, body {
 @keyframes pulse { 50% { opacity: .25; } }
 
 #statusbar .st { font-weight: 600; }
-/* 状态字前面那枚记号（提交 / 排队 / 释放，见 panel.js 的 renderSnapshot）。
-   比按钮里那枚矮 2px：这里只有 12px 的字，再高会顶满 30px 的条。 */
-#statusbar .mark-spin { height: 13px; margin-right: 4px; vertical-align: -2px; }
 #statusbar .sep { color: var(--border); }
 #statusbar .spacer { flex: 1; }
 

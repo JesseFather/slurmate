@@ -617,16 +617,9 @@ function renderSnapshot(s) {
   const st = s ? s.state : 'idle';
   bar.className = 's-' + st;
 
-  // 过渡态（提交、排队、释放）在状态字前面挂那枚小记号。只在状态真的变了时才重写：
-  //   快照是周期性送来的，每次重插一遍的话动画会跟着从头播，看起来反而在抖。
-  const stateEl = $('sb-state');
-  if (stateEl.dataset.state !== st) {
-    stateEl.dataset.state = st;
-    stateEl.textContent = STATE_TEXT[st] || st;
-    if (st === 'submitting' || st === 'queued' || st === 'releasing') {
-      stateEl.prepend(spinMark());
-    }
-  }
+  // 状态条上不放记号（用户 2026-10-23）：左边那颗圆点已经把状态说完了
+  //   （`body` 的 `s-*` 一类决定它的颜色），再挂一枚动画只是同一件事说两遍。
+  $('sb-state').textContent = STATE_TEXT[st] || st;
 
   let detail = '';
   if (s) {
