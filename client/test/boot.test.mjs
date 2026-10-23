@@ -8444,18 +8444,24 @@ test('站点上没有 Slurmate：忘掉会话、收掉页面、回连接屏', as
   const w = idx._test.getWindow();
   await waitUntil(() => w.hasSurface(a.slot), '前置：页面已经建出来', 10000);
 
+  // 这条通道整份文件共用一条数组：上一条用例（空手超时断开）也往这里推过一份。
+  //   所以「有没有收到」必须比基线，`length > 0` 会被上一条留下的记录直接满足 ——
+  //   断言于是读到别人的理由，而这一次的收尾还在路上（`handleSiteGone` 先关页面，
+  //   再 `await backend.close()`，最后才回连接屏）。
+  const closedOf = () => calls.windows[0].webContents.handlers['send:ui:siteClosed'] || [];
+  const closedBefore = closedOf().length;
+
   // 后端在 rpc 那条路上认出来之后发的那一条：不是网络抖动，重试不会变好。
   //   站点被卸载（或被换成了没有基座的机器）走的就是这里。
   b.emit('state', { kind: 'ssh', connected: false, definitive: true,
                     detail: '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。' });
 
-  const closedOf = () => calls.windows[0].webContents.handlers['send:ui:siteClosed'] || [];
   await waitUntil(() => !w.hasSurface(a.slot), '页面要收掉', 5000);
-  await waitUntil(() => closedOf().length > 0, '要回连接屏（ui:siteClosed）', 5000);
-  const closed = closedOf();
-  assert.ok(closed.length >= 1, '要回连接屏（ui:siteClosed）');
-  assert.match(closed[closed.length - 1].reason, /没有 Slurmate 的命令/);
-  assert.match(closed[closed.length - 1].reason, /作业可能还在跑/,
+  await waitUntil(() => closedOf().length > closedBefore, '要回连接屏（ui:siteClosed）', 5000);
+  const closed = closedOf().slice(closedBefore);
+  assert.equal(closed.length, 1, `这一次断开只回一次连接屏，实际回了 ${closed.length} 次`);
+  assert.match(closed[0].reason, /没有 Slurmate 的命令/);
+  assert.match(closed[0].reason, /作业可能还在跑/,
     '断开那句话要说明作业可能还在跑');
   assert.ok(!idx._test.sessionAt(a.slot), '会话记录要忘掉');
 
