@@ -1,3 +1,5 @@
+<img src="client/src/renderer/icon.svg" width="72" height="72" alt="">
+
 # Slurmate
 
 Slurmate 在 Slurm 集群上提供远程开发环境。
