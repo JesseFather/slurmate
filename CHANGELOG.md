@@ -31,6 +31,31 @@
 - ★ **`0.y` 是内测期，整条版本规则不受约束**（架构还在动，每次更新都可能有重大变动）。
   **`1.0` 是"不承诺"与"承诺"的分界线**：到那一天要刻意摘掉那条例外。
 
+## [0.35] — 未发布
+
+> 协议版本是 **0.35**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
+> `0.35`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
+> **`0.35.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
+>
+> 这一版没有新增协议 op，客户端与站点之间的报文一条都没改：改的是图标资产。
+
+### Fixed — Windows 任务栏上的图标：白底套方框
+
+`icon.png` 是**不透明的白底**（每个像素的 alpha 都是 255），方底以外那一圈就被
+画成白色。Windows 不像 macOS 那样替图标留边，这张图放进任务栏就成了白框里套一个
+小方框，而且比别的程序小一圈（用户 2026-10-24 报的）。
+
+两份系统图标现在都是透底的：方底以外的像素 alpha 为 0，边缘那一圈直接取方底色
+`#0E1726`，不做反混合（反混合会在角上留一圈白边）。Windows 另有一份
+`icon-win.png`，矢量源是 `icon-win.svg`：方底铺满整块画布，圆角与记号按同一个
+比例放大。`electron-builder.yml` 的 `win.icon` 指向它；macOS 与 Linux 仍用留边的
+`icon.png`（macOS 的图标本来就该留白）。窗口图标那一处（运行期）仍读 `icon.png`。
+
+**判据**：`client/test/packaging.test.mjs` 一条 —— 三平台各指向该用的那份、两份都
+不小于 512 见方，并且真的把 PNG 解出来，判左上角 alpha 为 0、正中 alpha 为 255。
+只判文件存在或颜色类型的话，这一格会一直绿：上一份就是带 alpha 通道的 RGBA，
+只是 alpha 全写着 255。
+
 ## [0.34] — 未发布
 
 > 协议版本是 **0.34**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着

@@ -409,8 +409,13 @@ npx electron-builder --publish never
 
 产物在 `dist/`。三平台配置见 `electron-builder.yml`。
 
-图标三平台共用 `src/renderer/icon.png`（1024 见方，由 `icon.svg` 导出），
-窗口图标读的是同一份。连接中的加载动画是 `icon-anim.svg`：SMIL 写在 SVG 里，
+图标：`src/renderer/icon.png`（1024 见方，由 `icon.svg` 导出，透底、四周留白）
+供 macOS、Linux 打包与窗口图标使用。
+
+Windows 用 `icon-win.png`（源 `icon-win.svg`），方底铺满整块画布 —— Windows
+不替图标留边，留白的那张在任务栏上会比别的程序小一圈。
+
+连接中的加载动画是 `icon-anim.svg`：SMIL 写在 SVG 里，
 Chromium 直接播；静止帧与图标重合。
 
 CI 在仓库根目录的 `.github/workflows/build.yml` —— 不是本目录。
@@ -467,8 +472,9 @@ src/main/
   shortcuts.js     最小菜单 + 按键黑名单
   windows.js       BrowserWindow + WebContentsView
 src/preload/       contextIsolation 下的三个桥（面板 / 提示页 / 假页面）
-src/renderer/      面板、状态条、提示页，以及项目图标（`icon.svg` 是方底那版，供打包
-                   与窗口图标用；界面里用裸的 `icon-mark.svg` 与 `icon-anim.svg`）
+src/renderer/      面板、状态条、提示页，以及项目图标（`icon.svg` 与 `icon-win.svg`
+                   是方底那两版，供打包与窗口图标用；界面里用裸的 `icon-mark.svg`
+                   与 `icon-anim.svg`）
 src/demo/          那个假服务的两个页面（夹具与 contract.mjs 用）
 test/              classify / config / keys / shortcuts / renderer / backend-ssh /
                    plugin-package / site-plugins / contract（契约）/ integration /
