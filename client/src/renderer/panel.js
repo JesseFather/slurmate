@@ -617,7 +617,16 @@ function renderSnapshot(s) {
   const st = s ? s.state : 'idle';
   bar.className = 's-' + st;
 
-  $('sb-state').textContent = STATE_TEXT[st] || st;
+  // 过渡态（提交、排队、释放）在状态字前面挂那枚小记号。只在状态真的变了时才重写：
+  //   快照是周期性送来的，每次重插一遍的话动画会跟着从头播，看起来反而在抖。
+  const stateEl = $('sb-state');
+  if (stateEl.dataset.state !== st) {
+    stateEl.dataset.state = st;
+    stateEl.textContent = STATE_TEXT[st] || st;
+    if (st === 'submitting' || st === 'queued' || st === 'releasing') {
+      stateEl.prepend(spinMark());
+    }
+  }
 
   let detail = '';
   if (s) {
@@ -4060,15 +4069,21 @@ function spinMark() {
   return img;
 }
 
+/** 把一颗按钮换成「记号 + 这句话」，返回它原来那句（收尾时写回去）。 */
+function busyLabel(btn, text) {
+  const old = btn.textContent;
+  btn.textContent = '';
+  btn.append(spinMark(), text);
+  return old;
+}
+
 async function connectTo(c, btn) {
   if (connectingNow) {
     return notice('info', '正在连接站点，请等这一次结束再连另一条。');
   }
   connectingNow = true;
-  const label = btn.textContent;
   btn.disabled = true;
-  btn.textContent = '';
-  btn.append(spinMark(), '连接中…');
+  const label = busyLabel(btn, '连接中…');
   lockConnectEntries();
   notice('info', `正在连接 ${c.user}@${c.host}…`);
   try {
@@ -4719,8 +4734,7 @@ async function doDisconnect() {
 async function doProbe() {
   const btn = $('btn-probe');
   btn.disabled = true;
-  const old = btn.textContent;
-  btn.textContent = '探测中…';
+  const old = busyLabel(btn, '探测中…');
   try {
     lastProbe = (await window.slurmate.probeHosts()) || [];
     renderConnections(boot.connections || []);
