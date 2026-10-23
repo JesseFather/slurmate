@@ -86,6 +86,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { keysProblem, validateClientModule } = require('./hooks');
 const crypto = require('crypto');
 const vm = require('vm');
 const ulid = require('./ulid.js');
@@ -187,7 +188,6 @@ const LOGIN_KEYS = ['path', 'field', 'cookie'];
  * 插件要的"这条会话属于哪条连接"由 `ctx.connection()` 给（见 index.js 的
  * pluginContext），那是一个读的能力，不是一个让插件回报偏好的口子。
  */
-const CLIENT_HOOKS = ['prepare', 'attach', 'closeWarning', 'startLocal'];
 
 /**
  * 站点短名的字符集。它进那份插件配置的文件名、进会话文件、进日志与报错文案 ——
@@ -624,11 +624,6 @@ function digestOf(files) {
   return h.digest('hex');
 }
 
-function keysProblem(obj, allowed, what) {
-  const bad = Object.keys(obj).filter((k) => !allowed.includes(k));
-  return bad.length ? `${what}里有认不得的键：${bad.join('、')}（认识的只有 ${allowed.join('、')}）` : null;
-}
-
 /**
  * 读一个插件目录的组成（清单 + 文件清单 + 摘要）。返回 `{ entry }` 或 `{ error }`。
  *
@@ -1016,29 +1011,15 @@ function activatePlugin(entry) {
   } catch (e) {
     return { error: `${entry.clientPath}：加载失败（${e.message}）` };
   }
-  if (!mod || typeof mod !== 'object' || Array.isArray(mod)) {
-    return { error: `${entry.clientPath}：必须导出一个对象（可以一个钩子都不写）` };
-  }
-  const why = keysProblem(mod, CLIENT_HOOKS, '导出的对象');
-  if (why) return { error: `${entry.clientPath}：${why}` };
-  for (const k of ['prepare', 'attach', 'startLocal']) {
-    if (mod[k] !== undefined && typeof mod[k] !== 'function') {
-      return { error: `${entry.clientPath}：${k} 必须是一个函数` };
-    }
-  }
-  if (mod.closeWarning !== undefined) {
-    const cw = mod.closeWarning;
-    if (!cw || typeof cw.message !== 'string' || typeof cw.detail !== 'string') {
-      return { error: `${entry.clientPath}：closeWarning 必须是 {message, detail} 两个字符串` };
-    }
-  }
+  const checked = validateClientModule(mod, entry.clientPath);
+  if (checked.error) return { error: checked.error };
   return {
     plugin: {
       ...entry.plugin,
-      prepare: mod.prepare || null,
-      attach: mod.attach || null,
-      closeWarning: mod.closeWarning || null,
-      startLocal: mod.startLocal || null,
+      prepare: checked.hooks.prepare,
+      attach: checked.hooks.attach,
+      closeWarning: checked.hooks.closeWarning,
+      startLocal: checked.hooks.startLocal,
     },
   };
 }
