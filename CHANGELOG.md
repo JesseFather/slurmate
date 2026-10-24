@@ -101,6 +101,22 @@
 逐份比对，路径与标记错了在打包这一步就停）；打 tag 时包名里的版本号与 tag
 对不上，`release.yml` 那一步退出非零，不进 Release。
 
+### Changed — 主文档重写
+
+根 README 从一份带日期的状态日志改成服务基座的入口：开头三小段讲定位，
+〈能做到什么〉一张表铺开能力，其余各节只留结论与指路。
+
+删掉的内容都有家：状态表与真机记录在 `client/README.md` 与账本 U 条目里；插件
+分发那段在 `SECURITY.md`、`packer/`、`DEPLOYMENT.md` 里；设计原则在
+`CONTRIBUTING.md`、`docs/PROTOCOL.md`、`docs/CONTRACT.md` 里。两条过时的说法一并
+消失：`rpc --stream` 写成「尚未实现」（S4 早已做完）、测试计数停在 1443 / 744。
+
+顺带改准两处指路：`docs/ARCHITECTURE.md` 里「常驻通道与接管只有推断」那句
+（U1 已经全部见过），以及 `cluster/docs/DEPLOYMENT.md` 指向 README 旧小节的地方
+（改指 `SECURITY.md`）。
+
+**判据**：五份检查器全绿；README 里没有指向自己的计数、日期与版本点。
+
 ## [0.34] — 未发布
 
 > 协议版本是 **0.34**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
