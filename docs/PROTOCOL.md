@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.35。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.36。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.35`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.36`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.35.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.36.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.35`，不是 `v0.35.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.36`，不是 `v0.36.0`。
 
-顺带一句：`v0.35` 不是 `v0.2`。`minor` 是十进制字符串，`35` 比 `2` 大。
+顺带一句：`v0.36` 不是 `v0.2`。`minor` 是十进制字符串，`36` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -630,7 +630,7 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 成功 data：
 
 ```json
-{"version": "0.35", "pid": 123, "started_at": 1757...,
+{"version": "0.36", "pid": 123, "started_at": 1757...,
  "config": {"path": "/etc/slurmate/slurmate.conf",
             "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
             "last_reload": {"seq": 3, "at": 1757..., "ok": true,
@@ -1223,8 +1223,8 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `job_state`、`time_limit`、`expires_at` | **可能整个键不存在**（`show_job` 失败时），调用方必须容忍 `undefined` |
 | `job_terminal` | **布尔**：这个作业算不算**真终态**。见下 |
 | `job_reason` | 排队原因（Slurm 的 `Reason` 原话，如 `Resources` / `JobHeldUser`）。**`Reason=None` 被服务端滤掉**，所以它只在真有原因时出现 |
-| `job_exit_code` | Slurm 的 `ExitCode` 原话（`"143:0"` / `"0:0"`）。**没结束时也有值**（恒为 `0:0`）—— 该不该显示是调用方的判断 |
-| `job_restarts` | Slurm 的 `Restarts` 原话（字符串形式的整数）。**重启过就要说出来**：作业被重新排队之后跑着的东西是新的 |
+| `job_exit_code` | Slurm 的 `ExitCode` 原话（`"143:0"` / `"0:0"`）。**只在 `job_terminal` 为真时出现** —— 批量查询拿不到这个字段，而推送与 `list` 必须逐字同构；未结束时它本来也只是占位值 |
+| `job_restarts` | Slurm 的 `Restarts` 原话（字符串形式的整数）。**只在 `job_terminal` 为真时出现**。重启过就要说出来：作业被重新排队之后跑着的东西是新的 |
 | `enroll_problem` | 作业已经在运行、而登记没有在进行的那个原因（`load_session_file()` 给的那个串，如 `component_group_or_world_writable`）。**只在确实停在那里超过一分钟时出现**；缺席 = 没有这个问题。界面据此说「站点还没有完成登记」并带上原因 |
 | `auth_password` | 只在会话处于 `ACL_STATES` 时返回 |
 
@@ -1489,7 +1489,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
  "rules_count": 3, "active_sessions": 3, "pending_sessions": 1,
  "consistent": true,
  "port_range": [55001, 55999],
- "version": "0.35", "last_tick_at": 1790301794,
+ "version": "0.36", "last_tick_at": 1790301794,
  "tick_age_seconds": 2, "last_tick_error": null,
  "auth_mode_none": 0,
  "checked": 14, "problems": [],

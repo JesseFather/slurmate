@@ -156,7 +156,9 @@ const baseFiles = (over = {}) => ({
   'plugin.json': mf(over),
   'lineage.json': lin(over.id || MF_ID),
   'client/index.js': 'module.exports = {};\n',
-  'job/start.sh': '#!/bin/bash\necho hi\n',
+  // 作业侧要过那四条断言（无 shebang、有 start_<短名>、函数带命名空间、
+  //   定义之外没有语句），所以夹具从一开始就长成它能过的样子。
+  'job/start.sh': 'start_plug() {\n  true\n}\n',
 });
 
 // ==============================================================================
@@ -337,6 +339,47 @@ section('2. 不该进包的条目：排除并说出来，或者拒绝');
   const r2 = packer('build', plug, '--out', path.join(base, 'o2.splug'));
   check('工作树脏了，拒绝打包（§3.5：输入是一个提交，不是工作树）',
     r2.code !== 0 && /不干净/.test(r2.err), r2.err);
+}
+
+// ==============================================================================
+//  2b. 作业侧四条断言：打包时就判，不等装到站点上
+// ==============================================================================
+
+section('2b. job/start.sh 的四条断言');
+
+{
+  // 作业侧那四条断言只在"看起来是一个真插件"时判 —— 判据是清单里有没有
+  //   `site`（与 §2.2 其它几格同一个条件）。所以这里把 `site` 填上。
+  const jobRepo = (script) => mkRepo({
+    ...baseFiles({ site: { defaultCpus: 1, defaultMem: '2G' } }),
+    'job/start.sh': script,
+  });
+
+  const cases = [
+    ['有 shebang', '#!/bin/bash\nstart_plug() {\n  true\n}\n', /shebang/],
+    ['有 #SBATCH', 'start_plug() {\n  true\n}\n  #SBATCH --mem=1G\n', /#SBATCH/],
+    ['没有 start_plug', 'start_other() {\n  true\n}\n', /start_plug/],
+    ['函数没带命名空间', 'log() {\n  true\n}\nstart_plug() {\n  true\n}\n', /没有命名空间/],
+    ['函数定义之外有语句', 'echo hi\nstart_plug() {\n  true\n}\n', /函数定义之外/],
+  ];
+  for (const [name, script, why] of cases) {
+    const { plug, base } = jobRepo(script);
+    const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+    check(`${name}：拒绝，而且一个包都没写`,
+      r.code !== 0 && why.test(r.err) && !fs.existsSync(path.join(base, 'o.splug')), r.err);
+  }
+
+  const good = [
+    ['整行函数', 'start_plug() { true; }\n'],
+    ['花括号另起一行', 'start_plug()\n{\n  true\n}\n'],
+    ['带命名空间的助手', 'start_plug() {\n  _plug_go\n}\n_plug_go() {\n  true\n}\n'],
+    ['注释与空行不算语句', '# 说明\n\nstart_plug() {\n  # 里面也随便\n  true\n}\n'],
+  ];
+  for (const [name, script] of good) {
+    const { plug, base } = jobRepo(script);
+    const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+    check(`${name}：放行`, r.code === 0, r.err);
+  }
 }
 
 // ==============================================================================
@@ -1012,6 +1055,69 @@ section('9. §2.4 的手滑闸：发布表');
   g('commit', '-qm', '1.0.1');
   check('升了版本号，过（这道闸拦的是"同一版本两份内容"，不是"不许改"）',
     packer('build', plug, '--out', out).code === 0, '');
+}
+
+// ==============================================================================
+
+section('10. 文档随包走：`docs` 动词与嵌进去的那三份');
+
+{
+  const docs = ['README.md', 'PLUGIN-SPEC.md', 'PLUGIN-CONTAINER.md'];
+  const srcDir = path.join(HERE, 'docs');
+
+  // 源码树里跑：DOCS 是 null，`docs` 从旁边的 docs/ 直接读。
+  const d1 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-docs-'));
+  TMP.push(d1);
+  const r1 = packer('docs', '--out', d1);
+  check('源码树里 `docs` 跑得通', r1.code === 0, r1.err.slice(0, 200));
+  check('写出了随包的三份，且逐字节等于 docs/ 里那几份',
+    docs.every((n) => fs.existsSync(path.join(d1, n))
+      && fs.readFileSync(path.join(d1, n)).equals(fs.readFileSync(path.join(srcDir, n)))),
+    d1);
+
+  // 发布用的那一份：把文档嵌进 .js，然后单独拷到一个空目录里跑。
+  //   这一条是重点 —— 作者手里只有那一个文件，它得自带文档。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-mkp-'));
+  TMP.push(base);
+  const built = path.join(base, 'slurmate-packer-0.0.0.js');
+  check('make-packer.js 跑得通', (() => {
+    try { execFileSync(process.execPath, [path.join(HERE, 'make-packer.js'), '--out', built], { encoding: 'utf8' }); return true; } catch { return false; }
+  })(), built);
+  check('源码里留着占位标记，产物里没有它',
+    fs.readFileSync(PACKER, 'utf8').includes('const DOCS = null;   // @EMBED-DOCS@')
+    && !fs.readFileSync(built, 'utf8').includes('@EMBED-DOCS@'), '');
+
+  const alone = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-alone-'));
+  TMP.push(alone);
+  const only = path.join(alone, 'slurmate-packer.js');
+  fs.copyFileSync(built, only);
+  check('那一份拷出来只有它自己（旁边没有 docs/）',
+    fs.readdirSync(alone).length === 1, fs.readdirSync(alone).join(','));
+
+  const d2 = path.join(alone, 'out');
+  let r2;
+  try {
+    r2 = { code: 0, out: execFileSync(process.execPath, [only, 'docs', '--out', d2], { encoding: 'utf8' }) };
+  } catch (e) { r2 = { code: -1, out: '', err: String(e.stderr || e) }; }
+  check('独立的那一份照样解得出文档（作者不需要基座仓库）', r2.code === 0, (r2.err || '').slice(0, 200));
+  check('解出来的三份与源码树里逐字节一致',
+    docs.every((n) => fs.existsSync(path.join(d2, n))
+      && fs.readFileSync(path.join(d2, n)).equals(fs.readFileSync(path.join(srcDir, n)))),
+    '');
+
+  // 解出来之后只有这三份，所以它们之间不许有指向包外的链接 —— 与站点包
+  //   的 `test-run-package.py` 第 6 节是同一条规则、同一类判据。
+  const outside = [];
+  for (const n of docs) {
+    const text = fs.readFileSync(path.join(srcDir, n), 'utf8');
+    for (const m of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+      const t = m[1].split('#')[0];
+      if (!t || /^[a-z]+:/i.test(t)) continue;
+      if (!docs.includes(path.basename(t)) || t.includes('/')) outside.push(`${n} → ${m[1]}`);
+    }
+  }
+  check('三份之间没有指向包外的链接（读者手上只有这三份）', outside.length === 0,
+    outside.slice(0, 5).join('；'));
 }
 
 // ==============================================================================

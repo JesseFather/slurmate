@@ -5,8 +5,15 @@
 
 站点端交付的是一个文件 —— `slurmate-site-<版本>.run`，发布在
 <https://github.com/JesseFather/slurmate/releases> 上，与客户端安装包同一页。
-拷到登录节点（控制节点）上，用 root 跑它即可：它自带守护进程、命令行、作业模板、
-systemd 单元、只读自检脚本与这几份文档。
+取文件的那一次构建在 Actions 的 run summary 里打印了这一份包的 sha256；
+拷到登录节点（控制节点）之前核对一次：
+
+```bash
+sha256sum slurmate-site-<版本>.run
+```
+
+然后以 root 跑它。它自带守护进程、命令行、作业模板、systemd 单元、只读自检脚本
+与这几份文档。
 
 ---
 
@@ -19,9 +26,11 @@ sudo bash slurmate-site-<版本>.run --check
 ```
 
 体检有两屏：第一屏跑包内的 `tools/check-cluster.sh`（下面这些环境事实），第二屏
-跑部署预检。两屏都只读，唯一的写操作是在 `/root` 下留一份 nft 规则快照和一份报告。
-第一屏查的正是那些「不满足也不会报错，只会在几小时后以奇怪的方式失败」的东西
-（`tools/check-cluster.sh`）。
+跑部署预检。两屏都只读：第一屏的 nft 规则快照存在 `/root/slurmate-probe-<时间>/`，
+退出时删掉；第二屏的临时目录在 `/tmp/slurmate-<模式>-<时间>/`，同样退出即删。
+
+报告走 stdout，要存档就整份重定向。第一屏查的正是那些「不满足也不会报错，只会在
+几小时后以奇怪的方式失败」的东西（`tools/check-cluster.sh`）。
 
 ### 1. 单一登录节点，且 nft 规则挂在它的 output 链上
 
@@ -302,9 +311,12 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 
 ## 第二部分：部署流程
 
-下面每条命令都写成自解压包的样子。它与仓库里的 `cluster/install-base.sh` 是同一份
-实现 —— 从源码树跑就把 `bash slurmate-site-<版本>.run` 换成
-`bash cluster/install-base.sh`，动词与开关逐字相同。
+下面每条命令都写成自解压包的样子。从源码树部署就把
+`bash slurmate-site-<版本>.run` 换成 `bash cluster/install-base.sh`，另外两条：
+
+- `cluster/install-base.sh` 没有 `--extract` 与 `--version` —— 这两个动词在壳里。
+- `--check` 少一屏：包里的 `--check` 先跑环境自检，源码树里只跑部署预检。
+  需要那一屏就单跑 `sudo bash tools/check-cluster.sh`。
 
 ### 步骤 0：把这一份包拷到控制节点上
 
@@ -324,31 +336,14 @@ Slurm 默认 30 秒。清理函数只做一件要紧事：写墓碑让守护进�
 > 以及最后 `exec` 那一行。它们用的是相对于 `SECURE_DIR` 的位置，脚本名走
 > `basename "$0"` 所以改名字不受影响，但子目录层级变了要同步。
 
-### 步骤 0.5：把插件打成包（要装插件的话）
+### 步骤 0.5：准备插件包（要装插件的话）
 
-站点上铺开的是构建产物，不是一棵源码树。
-服务器上从头到尾没有源码 —— 打包发生在作者的机器上：
+站点上铺开的是构建产物，不是一棵源码树。服务器上从头到尾没有插件的源码 ——
+打包发生在作者的机器上，管理员拿到的是成品 `<id>.splug`。
 
-```bash
-# 在插件的源码树里（可以是另一个仓库）
-node packer/slurmate-packer.js init  path/to/your-plugin     # 铸一个 id（只做一次）
-node packer/slurmate-packer.js keygen path/to/your-plugin    # 想签名才需要（只做一次）
-git commit -am "铸一个 id"
-node packer/slurmate-packer.js build path/to/your-plugin     # → <id>.splug（落在源码树的上一层）
-node packer/slurmate-packer.js sign  <id>.splug              # 可选，但见 PLUGIN-SPEC.md §6.4
-```
-
-把那几个 `.splug` 收集到一个目录，拷到登录节点上，然后装：
-
-```bash
-sudo slurmate plugin install --from ~/下载的插件
-```
-
-安装器永不打包，它只收成品。所以拿一棵插件源码树当那个目录用是不行的：那里
-没有 `.splug`，而它会逐条点名说"它不是一个插件包、不会被安装"并指路
-`packer build`。
-
-那个失败是刻意的：包是构建产物，不进 git。二进制进 git 等于代码评审死掉。
+安装器永不打包，它只收成品。拿一棵插件源码树当目录用是不行的：那里没有
+`.splug`，而它会逐条点名说"它不是一个插件包、不会被安装"。那个失败是刻意的：
+包是构建产物，不进 git。
 
 插件是独立项目，基座仓库里不收录任何一棵插件树 —— 成品由作者在自己那边打，
 这里只负责装。所以这里没有一份欠着的成品要补。
@@ -357,19 +352,19 @@ sudo slurmate plugin install --from ~/下载的插件
 
 ```bash
 sudo slurmate plugin install ~/下载的插件/<id>.splug
+sudo slurmate plugin install --from ~/下载的插件      # 整个目录
 ```
 
-它做四件事，每一件都会说给人听：验签（[PLUGIN-SPEC.md](../../packer/docs/PLUGIN-SPEC.md) §6.4）、
-把包里有什么打一屏出来、
-按 `(id)` 记住签名者（同一个 id 换了钥匙会停下来问）、装成
+它做四件事，每一件都会说给人听：验签、把包里有什么打一屏出来、按 `(id)` 记住
+签名者（同一个 id 换了钥匙会停下来问）、装成
 `<prefix>/share/slurmate/plugins/<ULID>/` 一棵树加 `<ULID>.json` 一份记录表。
 装完它还会顺手做三件：写它那份
 `slurmate.conf.d/<id>.conf`、织好作业脚本、让守护进程重读一遍配置 ——
 全程不重启，正在跑的会话一条都不受影响。
 
-服务器上没有源码可以对照，所以那一屏是管理员手上唯一的依据 —— 它也是这条
-路上已知的取舍之一，见 [SECURITY.md](../../SECURITY.md) 的
-〈站点分发的插件：四条护栏的对账〉。
+服务器上没有源码可以对照，所以那一屏是管理员手上唯一的依据。签名能证明这个包
+出自某一把钥匙，不能证明那把钥匙属于作者 —— 钥匙是随包一起来的。要确认来源，
+就与作者另行公布的那一个指纹对一次。
 
 ### 步骤 1：先 `--check`
 
@@ -409,7 +404,7 @@ python3 cluster/slurmate-sessiond --check-plugins --plugins-dir ~/下载的插�
   `sudo slurmate service reload`（改配置不需要重启；它会等守护进程报出接受还是拒绝）；
 - 或先手动 `cp cluster/slurmate.conf.example /etc/slurmate/slurmate.conf` 改好再部署。
 
-站点通用键一共 20 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
+站点通用键一共 21 个，全部见 [CONFIGURATION.md](CONFIGURATION.md)；
 没有哪一格是非填不可的（端口池与几个配额都有安全的默认值）。
 
 插件要不要开、开哪几个，也在这一步决定。`enabled = yes` 的插件会被
@@ -539,7 +534,7 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 ```
 
 第 2 步的输出里 `data` 是只含客户端侧那一份容器的 base64，`digest` 要与作者那边
-`packer inspect` 报的「客户端侧」那一行一致 —— 不是「内容摘要」那一行（那一行
+打包器 `inspect` 报的「客户端侧」那一行一致 —— 不是「内容摘要」那一行（那一行
 是整棵树的）。若它回
 `9 plugin_package_changed`，说明守护进程起来之后有人动过那个包（就地换了包而
 没重新部署）—— 那要重跑一次 install-base.sh，而不是重试这个请求。
@@ -549,7 +544,7 @@ slurmate rpc <<< '{"op":"plugin_package","id":"<ULID>","version":"1.0.0"}'
 
 第 1 步的输出里还有一行「包 N 字节 / M 份文件」和一行完整的内容摘要。那个
 摘要是这个站点上唯一能回答"我装上去的是不是作者发布的那一份"的东西（服务器上
-没有源码树可对照）—— 它要与作者那边 `packer inspect` 报的逐个字符比。
+没有源码树可对照）—— 它要与作者那边打包器 `inspect` 报的逐个字符比。
 
 客户端那一侧只有在一台真的客户端上才验得到：连上去之后应该出现
 「本站要给你 N 个插件，都还没经过你的同意」，点同意之后它们才开始工作。
@@ -570,7 +565,7 @@ ls -l ~/.slurmate/site-plugins/           # <ULID>_<版本>/ 与 <ULID>_<版本>
 
 这条路 2026-10-18 在一台真站点上跑通了（站点装包 → 客户端取回 → 同意 → 用起来，
 版本升级也走过）。还没有量的是签名、那 4 MiB 的响应余量，以及单线程守护进程扛不扛
-得住一次 2 MiB 级的响应。见 [docs/KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md) 的 U7。
+得住一次 2 MiB 级的响应。这三样在真实分发量之前都算未验证。
 
 ### 步骤 6：卸载
 
@@ -626,18 +621,9 @@ sudo bash slurmate-site-<版本>.run --doctor
 修回去用 `--repair`：只增不改，站点配置的取值与状态数据不动；结束时默认重启一次
 服务。
 
-日常的启停不必手写 `systemctl`（详见 `cluster/README.md` 那张表）：
-
-```bash
-sudo slurmate service stop        # 关机式：取消本站全部会话 → 停服务 → 删表
-sudo slurmate service restart     # 自检 → 排空 → 对齐派生物 → 重启 → 等就绪
-sudo slurmate service reload      # 热重载（含模板与作业脚本），等它报出结果
-sudo slurmate service status      # 看它现在是什么状态；不需要 root
-```
-
-`stop` 与 `restart` 的区别要记住：`restart` 只换守护进程，作业与会话不动；
-`stop` 会先取消本站提交的 Slurm 作业（用户自己的作业不动），再删 nft 表。
-`start` 之后表会重建，但被停掉的会话不会回来。
+日常的启停不必手写 `systemctl`：`slurmate service` 的几个动词、以及 `stop` 与
+`restart` 的区别，只有一份，在 `cluster/README.md` 的那张表里。`start` 之后 nft 表
+会重建，但被停掉的会话不会回来。
 
 其余长期事项：
 
@@ -656,11 +642,17 @@ sudo slurmate service status      # 看它现在是什么状态；不需要 root
 正常使用走不到的那些路径，靠一次主动演练验收：`cluster/fault-drill.sh`（root，
 在装好的站点上跑）。它逐项制造故障、逐项看判据，失败即非零。
 
+它在单文件包里，但不会被装到机器上 —— 演练是发布前的一次性动作，不是运维工具。
+从包里解压出来跑：
+
+```bash
+sudo bash slurmate-site-<版本>.run --extract /tmp/slurmate-drill
+sudo bash /tmp/slurmate-drill/cluster/fault-drill.sh --list
+sudo bash /tmp/slurmate-drill/cluster/fault-drill.sh --run nft_restart
+sudo bash /tmp/slurmate-drill/cluster/fault-drill.sh --all --yes
 ```
-sudo cluster/fault-drill.sh --list
-sudo cluster/fault-drill.sh --run nft-restart
-sudo cluster/fault-drill.sh --all --yes
-```
+
+项名用下划线（`nft_restart`、`kill_job`），`--list` 打出的就是它们。
 
 九项：重启 nftables（表、链与基础规则自愈）、重启守护进程（规则收敛、会话不被拆）、
 停 munge、重启 slurmctld、`kill -9` 一条作业、客户端断网 60 秒（进 `suspect`、
@@ -678,13 +670,10 @@ sudo cluster/fault-drill.sh --all --yes
 ## 部署完仍然要注意的
 
 `install-base.sh` 跑通 不等于系统已被验证 —— 它证明的是"这台机器的环境满足前提"。
-已核实的缺陷、还没有完整实测过的路径、以及结构性欠账都在
-[KNOWN-ISSUES.md](../../docs/KNOWN-ISSUES.md)，每条写了位置、后果与修法。
 
-与部署直接相关的两条按编号引用（编号是稳定的，复述会漂）：
+与部署直接相关的有两条，知道它们就够了：
 
-- U2 —— 首次安装、卸载、修复与升级都在真机上跑过；诊断（`--doctor`）的输出与
-  失败注入还没有专门跑过。
-- U6 —— CLI 的 `slurmate submit` 这条链路还没在真集群上成功跑过（客户端那条提交
-  路已经跑过，见 U1/U3）。第一次用它时先用普通用户身份把整条路走一遍（U6 里给了
-  那串命令）。
+- 诊断（`--doctor`）的每一格在真机上都跑过，但"取不到"与"确实没有"这两句话的
+  措辞与顺序没有逐格对照过。第一次跑它时逐格读一遍输出。
+- CLI 的 `slurmate submit` 还没在真集群上成功跑过（客户端那条提交路已经跑过）。
+  第一次用它时先用普通用户身份把整条路走一遍，再交给别人用。

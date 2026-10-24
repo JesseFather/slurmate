@@ -29,7 +29,7 @@
  *   代价是几处常量在这里有第二份（跳过表、版本号形状），
  *   由 `.github/workflows/checks.yml` 里的 lint 与 `tools/conformance/` 的向量钉住。
  *
- * ── 六个动词 ────────────────────────────────────────────────────────────────
+ * ── 七个动词 ────────────────────────────────────────────────────────────────
  *
  *   init    铸一个 id（只在源码树里没有的时候）并插入写回 plugin.json，
  *           同时给血统表记一条。`--fork` / `--adopt` 是 §2.5 那次"停下来问"的
@@ -40,6 +40,7 @@
  *   sign    给一个已经打好的包盖上签名（不改内容摘要，所以不必重新打包）
  *   verify  校验一个 `.splug`：逐份字节、内容摘要、签名、血统表与签名者对得上吗
  *   inspect 把人该看的东西打出来（作者拿它对着规范逐行核对）
+ *   docs    把随包的三份文档写到磁盘上（怎么打、规范、容器格式）
  *
  * 写树的动词与打包的动词不能合并。 `init` / `keygen` 会弄脏源码树，
  *   而 §3.5 要求打包的输入是一个干净的提交，一条命令做完两件事必然自相
@@ -73,6 +74,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+
+/**
+ * 随包走的三份文档。发布用的那一份由 `packer/make-packer.js` 把它们填进下面
+ * 这一格；源码树里它是 `null`，`docs` 动词改为直接从 `docs/` 读。
+ *
+ * 为什么要嵌：插件作者的工作目录是他自己的插件仓库，基座仓库对他来说是别人的
+ *   仓库。只发一个 `.js`、把规范留在仓库里，等于让他去翻别人的目录 —— 与
+ *   "管理员不该被指向源码文档"是同一条理由。
+ */
+const DOCS = null;   // @EMBED-DOCS@
 
 // ==============================================================================
 //  容器格式（packer/docs/PLUGIN-SPEC.md 附录 A）
@@ -224,6 +235,90 @@ function payloadSizeProblem(files) {
       + '  这不是本站的偏好：任何站点都收不下比这更大的负载。';
   }
   return null;
+}
+
+/**
+ * `job/start.sh` 要过的四条断言。返回问题列表（空 = 能过）。
+ *
+ * 判据与守护进程的 `plugin_jobsh_problems()` 逐条相同 —— 那边在编织时装不下就
+ *   中止，这边在打包时先拒。理由：作者不该先有一台站点，才知道自己的作业侧会
+ *   被拒；而三样静默失效的错误（shebang 被拼在中间、入口名对不上、函数盖掉宿主）
+ *   在别人的集群上才露出来时，已经没有人能把它们指回这个文件了。
+ *
+ * 四条与它们各自防的事：
+ *   ① 无 shebang、无 `#SBATCH` —— 拼接点之后，Slurm 只解析开头那一段注释。
+ *   ② 定义 `start_<短名>` —— 宿主的 `plugin_call` 按这个拼法分派。
+ *   ③ 其余函数带 `_<短名>_` 前缀 —— 盖掉宿主的函数是静默的。
+ *   ④ 函数定义之外没有语句 —— 那一行会被拼进主流程中间。
+ */
+function jobScriptProblems(pname, text) {
+  const suffix = String(pname).replace(/-/g, '_');
+  const esc = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = text.split('\n');
+  const out = [];
+
+  const offenders = [];
+  lines.forEach((ln, i) => {
+    if (ln.startsWith('#!') || /^[ \t]*#SBATCH/.test(ln)) offenders.push(i + 1);
+  });
+  if (offenders.length) {
+    out.push(`文件里有 shebang 或 #SBATCH（第 ${offenders.join('、')} 行）。\n`
+      + '        它们会被拼在作业脚本的中间，而 Slurm 只解析脚本开头的注释块，\n'
+      + '        所以带了不是报错，是「写了但静默不生效」。删掉它们。');
+  }
+
+  if (!new RegExp(`^[ \\t]*start_${esc}[ \\t]*\\(\\)`, 'm').test(text)) {
+    out.push(`文件里没有定义 start_${suffix}（插件 ${pname} 的作业侧入口）。\n`
+      + '        宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字不一致等于没有实现。\n'
+      + '        短名里的 `-` 在这一侧写成 `_`。');
+  }
+
+  const bad = [];
+  for (const m of text.matchAll(/^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)/gm)) {
+    const fn = m[1];
+    if (fn === `start_${suffix}` || fn === `precheck_${suffix}` || fn === `cleanup_${suffix}`) continue;
+    if (fn.startsWith(`_${suffix}_`)) continue;
+    bad.push(fn);
+  }
+  if (bad.length) {
+    out.push(`文件里定义了没有命名空间的函数：${bad.join('、')}\n`
+      + '        它会被拼进作业脚本，而宿主自己的函数（log / cleanup / write_session /\n'
+      + '        pick_port_and_start …）都是没有后缀的动词，一个同名的插件函数会\n'
+      + '        把它们静默盖掉，症状是「清理没跑」「日志少了几行」，指不回这个文件。\n'
+      + `        规则：契约钩子用 <动词>_${suffix}，其余一律用 _${suffix}_ 前缀。`);
+  }
+
+  // ④ 与守护进程同一套行扫描：函数头可以只写一行 `name()`，`{` 落在下一行；
+  //    收函数只看行首那个不带缩进的 `}`（带缩进的是函数体里的块）。
+  const top = [];
+  let inFunc = false;
+  let pending = false;
+  lines.forEach((ln, i) => {
+    const s = ln.trim();
+    if (!s || s.startsWith('#')) return;
+    if (pending) {
+      pending = false;
+      if (s === '{') { inFunc = true; return; }
+    }
+    if (!inFunc) {
+      const m2 = /^[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*(.*)$/.exec(s);
+      if (m2) {
+        const rest = m2[1];
+        if (rest === '{') { inFunc = true; return; }
+        if (rest.startsWith('{') && rest.endsWith('}')) return;
+        if (rest === '') { pending = true; return; }
+      }
+      top.push(i + 1);
+      return;
+    }
+    if (s === '}' && !/^\s/.test(ln)) inFunc = false;
+  });
+  if (top.length) {
+    out.push(`文件里有 ${top.length} 行位于函数定义之外（第 ${top.join('、')} 行）。\n`
+      + '        它们会被拼进作业脚本的主流程中间，在每一个作业里执行，而副作用落在\n'
+      + '        哪个阶段、与宿主的哪一步相邻，都不由作者决定。把那些语句放进函数里。');
+  }
+  return out;
 }
 
 /**
@@ -1213,7 +1308,45 @@ function oneContentPerVersion(home, id, version, digest, out, opts) {
 }
 
 // ==============================================================================
-//  六个动词
+//  文档（第七个动词）
+// ==============================================================================
+
+/** 随包走的三份：怎么打、规范、容器格式。顺序就是 `docs` 写出来的顺序。 */
+const DOC_NAMES = ['README.md', 'PLUGIN-SPEC.md', 'PLUGIN-CONTAINER.md'];
+
+/**
+ * 取这三份：发布那一份里是嵌进来的，源码树里是 `docs/` 里那几份。
+ * 两处都没有就返回 `null` —— 那不是"没有文档"，是这一份打包器做坏了。
+ */
+function docBundle() {
+  if (DOCS) return DOCS;
+  const dir = path.join(__dirname, 'docs');
+  const out = {};
+  for (const n of DOC_NAMES) {
+    const f = path.join(dir, n);
+    if (!fs.existsSync(f)) return null;
+    out[n] = fs.readFileSync(f, 'utf8');
+  }
+  return out;
+}
+
+function cmdDocs(opt) {
+  const docs = docBundle();
+  if (!docs) {
+    throw new Error('这一份打包器里没有文档，旁边也没有 docs/：它不完整，重新取一份');
+  }
+  const out = path.resolve(opt.out || path.join(process.cwd(), 'slurmate-packer-docs'));
+  fs.mkdirSync(out, { recursive: true });
+  for (const n of DOC_NAMES) {
+    fs.writeFileSync(path.join(out, n), docs[n], 'utf8');
+  }
+  console.log(`文档已经写到 ${out}`);
+  for (const n of DOC_NAMES) console.log(`  ${n}`);
+  return 0;
+}
+
+// ==============================================================================
+//  其余六个动词
 // ==============================================================================
 
 /**
@@ -1462,6 +1595,27 @@ function cmdBuild(dir, opts) {
     if (typeof site.defaultMem !== 'string' || !site.defaultMem.trim()) {
       throw new Error(`${MANIFEST} 里的 site.defaultMem 必须是一个非空字符串（§2.2）`);
     }
+
+    // 作业侧那四条断言（`packer/docs/README.md`〈作业侧契约〉）。与守护进程的
+    //   编织是同一套判据，只是把发现它们的时刻从"装到站点上"提到"作者打包时"。
+    //
+    //   判据也是 `site` 在不在，与上面 §2.2 同一格：一个要装到站点上的插件必须
+    //   有 `site`（守护进程会拒没有它的），而符合性向量那棵树刻意没有它、也要
+    //   能打 —— 那一份 job/start.sh 是字节夹具，不是一份能织的作业侧。
+    //   没有 `job/start.sh` 是合法状态，不判；有它就必须过。
+    const jobFile = files.find((f) => f.path === JOB_ENTRY);
+    if (jobFile) {
+      if (typeof manifest.name !== 'string' || !manifest.name.trim()) {
+        throw new Error(`${MANIFEST} 里的 name 必须是一个非空字符串：`
+          + '作业侧的入口函数名由它拼出来（§2.2）');
+      }
+      const why = jobScriptProblems(manifest.name, jobFile.data.toString('utf8'));
+      if (why.length) {
+        throw new Error(`${JOB_ENTRY} 过不了作业侧的四条断言`
+          + '（与站点编织时同一套判据）：\n\n  '
+          + why.map((w, i) => `${i + 1}. ${w}`).join('\n\n  '));
+      }
+    }
   }
 
   // §3.7：负载的大小上限。判在这里、而且是发布之前，正是 §3.7 存在的
@@ -1469,6 +1623,7 @@ function cmdBuild(dir, opts) {
   //   收下来才拒，作者拿到的都是"装不上"，而那时他已经发布出去了。
   const sizeWhy = payloadSizeProblem(files);
   if (sizeWhy) throw new Error(sizeWhy);
+
 
   // §2.5：这个 id 得在这棵树这个提交的血统表里。表从提交里读（不是从盘上），
   // 于是"我们判的那张表"与"进负载的那张表"是同一次读出来的同一份字节。
@@ -1861,6 +2016,7 @@ function usage(code) {
   node slurmate-packer.js verify  <包> [--expect-digest <hex>] [--expect-signer <指纹>]
                                        [--against <插件目录>[@<ref>]]
   node slurmate-packer.js inspect <包> [--json]
+  node slurmate-packer.js docs    [--out <目录>]
 
   --home <目录> 可以跟在任何动词后面（等价于 $SLURMATE_PACKER_HOME）。默认
   ~/.config/slurmate/packer，里面是 keys/<id>.pem（私钥）与 releases.json（发布表）。
@@ -1882,8 +2038,8 @@ function usage(code) {
   verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者是否一致。
            --against 顺带判 §3.6。
   inspect  打出包里到底有什么，作者拿它对着规范逐行核对。
-
-规范：packer/docs/PLUGIN-SPEC.md（尤其 §2、§3、§4、附录 A）。`);
+  docs     把随包的三份文档写出来（怎么打、PLUGIN-SPEC.md、PLUGIN-CONTAINER.md）。
+           默认写到 ./slurmate-packer-docs。它们与这个脚本同一个版本。`);
   return code;
 }
 
@@ -1938,6 +2094,7 @@ function main(argv) {
       if (!target) throw new Error('inspect 要一个包');
       return cmdInspect(target, opt);
     }
+    if (verb === 'docs') return cmdDocs(opt);
     throw new Error(`不认识的动词 ${verb}`);
   } catch (e) {
     console.error(`✗ ${e.message}`);
@@ -1949,7 +2106,7 @@ if (require.main === module) {
   process.exit(main(process.argv.slice(2)));
 }
 
-// 这个文件的身份是一个 CLI（六个动词，见文件头），而导出表只服务两种读者：
+// 这个文件的身份是一个 CLI（七个动词，见文件头），而导出表只服务两种读者：
 //   演示后端（`client/src/main/backend-fake.js` 拿它现打一个真包）与
 //   `test-packer.mjs` / `tools/conformance/` 的向量。所以这里留的是包格式那一层
 //   （常量、解析/构造、规范化）。
@@ -1958,7 +2115,7 @@ if (require.main === module) {
 //   `insertId` / `replaceId` / `packerHome` / `keyFilePath` / `releasesPath` /
 //   `saveKey` / `loadKey` / `readLineage` / `lineageEntry` / `writeLineage` /
 //   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）不在导出表里
-// 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
+// 它们只被本文件的七个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
 //   仍然被那些动词用着；只是不再对外承诺。这与 `plugin_payload_index()` 是同一条
 //   纪律：一个没人读的导出就是一句没人守的承诺。
 module.exports = {

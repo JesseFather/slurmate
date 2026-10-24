@@ -248,14 +248,15 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
 
 ## 文档
 
-索引在 [`docs/README.md`](docs/README.md)（按"你是谁"分三组：管理员 / 插件作者 /
-实现者与维护者）。写到一半不知道该放哪一份时先看它 —— 加一份新文档时也顺手在那里
+索引在 [`docs/README.md`](docs/README.md)：它先列 `docs/` 这六份，再列别处的几份，
+每份标明读者。写到一半不知道该放哪一份时先看它 —— 加一份新文档时也顺手在那里
 加一行，否则新文档就只有写过它的人知道。
 
 ### 公开文档用规范体
 
-公开文档指 `git ls-files '*.md'` 里除 `CHANGELOG.md` 与 `docs/KNOWN-ISSUES.md`
-之外的全部。那两份是记录，不是规范：它们按时间累积、按编号引用，保持原样。
+公开文档指 `git ls-files '*.md'` 里除 `CHANGELOG.md`、`docs/KNOWN-ISSUES.md` 与
+`tools/conformance/tree/` 之外的全部。前两份是记录，不是规范：它们按时间累积、
+按编号引用，保持原样。第三份是符合性向量的输入树，字节被用例钉着，不能改写。
 
 一条要求 = 一个可判定的句子。「写得清楚一点」「尽量不要」这类句子不进公开文档 ——
 它们无法被判定，因此无法被守住，也无法被变异验证。
@@ -421,8 +422,11 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
       *    所以超时取 45 秒，比 CLI 内部的 40 秒长；超时绝不重试，改用 status 认领。
 ```
 
-上面三条由 `tools/check-copy-style.py` 守着。它用一张迁移期棘轮表，数字在
-`tools/copy-style-baseline.json` 里。
+上面三条没有机器判据，靠评审。`tools/check-copy-style.py` 判的是另外几类东西：
+注释里的成对加粗与 `★ ⚠ ⇒`、字符串长度、界面用词（`tools/ui-terms.json`）。
+它用一张迁移期棘轮表，数字在 `tools/copy-style-baseline.json` 里。
+
+「不引行号」这一条最容易漏：它不会红任何东西，而漂了之后指的人要重新找一遍。
 
 ### 指路按符号名，不写行号
 
