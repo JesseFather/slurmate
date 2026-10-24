@@ -31,6 +31,7 @@ const fs = require('fs');
 const path = require('path');
 
 let pubkey = null;
+let attachSeq = 0;
 
 module.exports = {
   closeWarning: {
@@ -62,10 +63,15 @@ function attach(ctx, snap) {
   const c = ctx.connection() || {};
   const dir = ctx.dataDir();
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'attach.json'), JSON.stringify({
+  // 原子写：先落临时文件再改名。直接 writeFileSync 会先把目标截成 0 字节，
+  //   而基座套件在另一个进程里轮询这个文件 —— 它可能在截断与写完之间读到空文件。
+  const final = path.join(dir, 'attach.json');
+  const tmp = path.join(dir, `attach.json.${process.pid}.${attachSeq++}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify({
     user: c.user || null,
     host: c.host || null,
     port: c.port || null,
     serviceKind: (snap && snap.serviceKind) || null,
   }));
+  fs.renameSync(tmp, final);
 }

@@ -4647,6 +4647,24 @@ async function waitUntil(fn, what, ms = 15000) {
   }
 }
 
+/**
+ * 等一个 JSON 文件可读。`existsSync` 不够：写方可能先建出 0 字节的文件，
+ *   而这里读到的是一个空串（CI 上实测过一次 `Unexpected end of JSON input`）。
+ *   解析成功才算数。
+ */
+async function waitForJson(file, what, ms = 5000) {
+  let last = null;
+  await waitUntil(() => {
+    try {
+      last = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }, what, ms);
+  return last;
+}
+
 test('声明式插件：没有一行客户端代码，照样开界面', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
@@ -4813,8 +4831,7 @@ test('中转站：起 relay-demo 会话不建视图，attach 拿到的是这条�
   //   没有界面的插件不会留下别的东西。
   //   `attach` 是异步的，而 `running` 那一格先出现 —— 文件可能还差一拍才落地。
   const recordedPath = path.join(dataDir, 'attach.json');
-  await waitUntil(() => fs.existsSync(recordedPath), '夹具把连接记下来', 5000);
-  const recorded = JSON.parse(fs.readFileSync(recordedPath, 'utf8'));
+  const recorded = await waitForJson(recordedPath, '夹具把连接记下来');
   assert.equal(recorded.user, 'demo', '插件拿到的必须是这条会话所属连接的用户名');
   assert.equal(recorded.serviceKind, 'relay-demo');
 
@@ -6494,8 +6511,8 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
     P.dataDirNameOf(P.identityOf(relayPlugin)));
   const conf = path.join(dataDir, 'attach.json');
   const recordedUser = () => JSON.parse(fs.readFileSync(conf, 'utf8')).user;
-  await waitUntil(() => fs.existsSync(conf), '夹具把连接记下来', 5000);
-  assert.equal(recordedUser(), 'demo', '前提：先记下的是 C1 的用户');
+  assert.equal((await waitForJson(conf, '夹具把连接记下来')).user, 'demo',
+    '前提：先记下的是 C1 的用户');
 
   // 再配一条另一个用户的连接，并把它设为活跃。这一步不停任何会话 ——
   // 那正是"按当前活跃连接去取"会出错的地方。
