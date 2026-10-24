@@ -322,50 +322,14 @@ Windows 上 `findBash()` 那一段（Git Bash、WSL、路径翻译）只有纯�
 
 ---
 
-### S32 — 站点端进 deb 的两条前提没做
-
-> **2026-10-16 改了前提，2026-10-24 再收一次。** 单文件包
-> （`slurmate-site-<版本>.run`）已经把 `cluster/README.md` 与 `cluster/docs/`
-> 那四份一起带走，`--extract` 就能读 —— "文档随站点端分发"在包这一条路上已经成立。
-> 剩下的是 deb 那一条：下面三条里第 2、3 条只对 deb 成立，今天一条都没落实。
-
-进 deb 的时候（`cluster/README.md` 末尾写着这件事），有三条已探明的后果：
-
-| # | 事实 | 要做什么 |
-|---|---|---|
-| 1 | `/usr/share/doc/<包名>/` 是 dpkg 会覆盖的位置 | 站点自己的笔记禁止放那儿，它属于 `/etc/slurmate/`。这一条已经写进 `cluster/README.md` 末尾，是三条里唯一落地的 |
-| 2 | Debian 政策要求 `/usr/share/doc/<包名>/copyright`（必装），而 `LICENSE` 在仓库根 | 写一条构建步骤把它装过去。今天没有任何东西做这件事 |
-| 3 | `CHANGELOG.md` 是 Markdown | 进包要转格式 + 压缩（政策那一侧认 gzip 过的 changelog）。这是一步真的构建动作，不是拷文件 |
-
-进了包就与版本绑死：改文档要跟着版本号走，而管理员手上那份永远对应他装的那一个版本。
-
-这一条不是缺陷，是设计上还没做的东西。它不收"文档没有到管理员手上"——
-那件事已经由单文件包解决了。
-
----
-
-### S33 — 打包器的文档没有分发路径
-
-打包器本身已经发了：`release.yml` 的 `site` job 产出
-`slurmate-packer-<版本>.js`，与站点包挂在同一个 Release 上。作者不需要 clone 仓库
-就能拿到那个工具。
-
-没有路的是它的文档。`packer/docs/` 留在仓库里，而单文件脚本带不了目录。今天的答案
-是"作者去仓库读"，代价是他得先知道仓库在哪，以及他读的那一份对应哪个版本。
-
-三条候选，一条都没定：附在 Release 页上 / 打进那个脚本 / 仍然留在仓库。它不阻塞
-任何事 —— 归拢本身已经完成，作者要读的东西都在一个目录里。
-
-它与 **S32** 是同一件事的两侧：都是"文档怎么到读者手上"。
-
----
-
 ## 四、已经不再是问题的
 
 留着，免得再被翻出来当成待办。
 
 | 曾经的问题 | 现状 |
 |---|---|
+| **S32 — 站点端的文档没有进包的路**：`cluster/` 从仓库跑安装器，管理员拿到的是仓库里的一份 clone；那些文档没有任何一份构建步骤把它放到他手边。 | **结清，分发方式定为单文件包。** 0.35 起 `slurmate-site-<版本>.run` 带着 `cluster/README.md` 与 `cluster/docs/` 四份（`make-run.sh` 的 `PAYLOAD`），`--extract` 就能读；0.36 起包内文档不再指向包外。**deb 不是计划中的路**，`cluster/README.md` 里那句「将来进 deb」已删。**判据**：`cluster/test-run-package.py` 断言解出来的恰好是清单上那些并逐份比对字节，第 6 节再断言包内文档的相对链接都落在包里。 |
+| **S33 — 打包器的文档没有分发路径**：`packer/` 没有 `package.json`，没有任何东西可以一起分发；作者要读的几份只能从仓库拿。 | **结清，分发方式定为单个文件。** 每个版本的 Release 上有 `slurmate-packer-<版本>.js`（`release.yml` 的 `site` job 产出），取下来就能跑。文档留在 `packer/docs/`：这一侧的读者是插件作者，本来就在仓库里；单文件脚本带不了目录，附在 Release 上则多一份要与版本同步的副本。**判据**：`release.yml` 与 `build.yml` 都产出那个文件，`docs/RELEASING.md` 的产物表列着它。 |
 | **打包器不判作业侧的命名与结构（0.36 之前）**：`job/start.sh` 的命名与结构由站点在编织时判（S31 T5 的第 ④ 条，以及 `start_<短名>` 与 `_<短名>_` 前缀），而作者在自己的机器上打包时一条都看不到 —— 要发现，必须先有一台装好的站点。 | **0.36 修掉。** `packer build` 用同一套判据：无 shebang、无 `#SBATCH`、定义了 `start_<短名>`、其余函数带 `_<短名>_` 前缀、函数定义之外没有语句。只对清单里带 `site` 的树生效（符合性向量那棵树刻意没有 `site`，它的作业侧是字节夹具）。**判据**：`packer/test-packer.mjs` 第 2b 节九条（五个反例、四个正例），全套 141 / 0。 |
 | **S2 — 插件跑在主进程里，没有任何隔离**：`require()` 进 Electron 主进程，完整 Node 权限；`contributes.prepare` 的同步不变量还压在主进程的执行次序上。 | **0.34 收口。** 每个 `(id, 版本)` 一个宿主进程（生产 `utilityProcess`，纯 Node 测试 `child_process`），钩子走请求/应答协议，`ctx` 只递纯数据。`ctx.win.surfaceSession` 从契约删除，登录改 `ctx.login(origin)`（口令不过边界）；`session()` 不含 `auth_password`；`prepare` 改成异步，槽由显式预留占住（顺带修掉 `probeLocalPort` 的既有竞态）。宿主崩溃时作业会话继续跑、插件能力停止。**判据**：`client/test/plugin-host.test.mjs` 十一条、`client/test/plugin-lifecycle.test.mjs`、`boot.test.mjs` 的 ctx 守卫与并发启动。**边界**：不是沙箱（见 §五 保留 ㉕ 与 SECURITY.md）。 |
 | **S3 — 插件的测试还住在 `client/test/` 里**：七条直接调 `sshconfig.js` / `relay.attach` 的用例测的是 sshd 自己的逻辑，却住在基座套件里。 | **0.34 收口。** 那七条从基座删掉（sshd 搬出仓库时在它自己的项目里重建）；留下两条「走主进程接缝」的用例，并把它们对插件路径的 `require` 换成内联路径 —— 基座套件里不再有一行 `require('../../plugins/...')`。基座不为样例维护测试项目或 CI job。**判据**：基座测试对 `plugins/` 的 require 为 0，客户端套件绿。 |
