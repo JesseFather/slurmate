@@ -40,7 +40,8 @@
   之间本来没有任何东西挡着 —— 与判据一同一个理由。
 
 用法：
-    python3 tools/check-plugin-docs.py                # 扫仓库里的 plugins/
+    python3 tools/check-plugin-docs.py                # 本仓库不收录插件：只判判据二
+    python3 tools/check-plugin-docs.py --plugins-dir <插件项目所在目录>
     python3 tools/check-plugin-docs.py --self-test    # 种坏样本，断言它真的会红
 """
 
@@ -203,9 +204,10 @@ def check(plugins_dir, base):
     return problems
 
 
-def run(plugins_dir):
+def run(plugins_dir, have_plugins=True):
+    """`have_plugins` 为假 = 这个仓库没有插件目录，判据一不判（判据二照判）。"""
     base = conf_keys_of_daemon()
-    problems = check(plugins_dir, base)
+    problems = check(plugins_dir, base) if have_plugins else []
     problems += check_manifest_table(SPEC, MANIFEST_KEYS)
     for p in problems:
         print("✗ %s" % p)
@@ -214,10 +216,14 @@ def run(plugins_dir):
               " PLUGIN_COMMON_KEYS，后者的权威是 tools/manifest-keys.json ——"
               "改键就要改表。" % len(problems))
         return 1
-    n = sum(1 for d in sorted(os.listdir(plugins_dir))
-            if os.path.isfile(os.path.join(plugins_dir, d, "plugin.json")))
-    print("✓ %d 个插件的〈配置条目〉表与各自清单逐字一致；PLUGIN-SPEC.md 的清单键表"
-          "与 tools/manifest-keys.json 逐字一致" % n)
+    if not have_plugins:
+        print("（本仓库不收录任何插件，判据一没有对象；插件项目的〈配置条目〉表"
+              "用 --plugins-dir 指过去判。）")
+    else:
+        n = sum(1 for d in sorted(os.listdir(plugins_dir))
+                if os.path.isfile(os.path.join(plugins_dir, d, "plugin.json")))
+        print("✓ %d 个插件的〈配置条目〉表与各自清单逐字一致" % n)
+    print("✓ PLUGIN-SPEC.md 的清单键表与 tools/manifest-keys.json 逐字一致")
     return 0
 
 
@@ -305,12 +311,16 @@ def self_test():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--plugins-dir", default=os.path.join(ROOT, "plugins"))
+    ap.add_argument("--plugins-dir", default=None,
+                    help="插件项目所在的目录；缺省时看仓库里有没有 plugins/")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
-    return run(args.plugins_dir)
+    if args.plugins_dir is not None:
+        return run(args.plugins_dir)
+    d = os.path.join(ROOT, "plugins")
+    return run(d, os.path.isdir(d))
 
 
 if __name__ == "__main__":

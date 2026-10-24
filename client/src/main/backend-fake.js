@@ -113,13 +113,13 @@ const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 //   · 装上去的（`siteInstalledDir`，沙盒里程序自己的一处）—— 这才是"站点上
 //     有什么"的答案，而它只有一条来的路：`installPlugins`（与真站点上管理员
 //     `plugin install` 同形）。
-//   · 开发样例（`samplePluginsDir`，仓库里的 `plugins/`）—— 基座两端都不带
-//     任何插件（`plugins/README.md` 第一行），那两棵是开发基座时用来对齐插件两侧
-//     能力的样例。打包版没有它们 —— 那是对的，不是降级。
+//   · 测试夹具（`samplePluginsDir`，仓库里的 `tools/fixtures/plugins/`）—— 基座
+//     仓库不收录任何插件，那两棵是两套件共用的夹具。打包版没有它们 ——
+//     那是对的，不是降级。
 //
 //   两条走不通的路值得写明，它们各自会造出一个假现场：
 //
-//   · 写死几个插件（名字与 id 抄那两个样例）是一句谎话 —— 基座不带插件，于是
+//   · 写死几个插件（名字与 id 抄夹具里那两棵）是一句谎话 —— 基座不带插件，于是
 //     满屏"本站有而本机没有"，一个故意不带插件的基座看起来像坏了。
 //   · 报"本机池里装了什么" 留下一个更隐蔽的死角：站点报的就是本机有的那些，
 //     于是「站点有而本机没有」这条最重要的路径在假站点里永远走不到 —— 而
@@ -433,9 +433,9 @@ class FakeBackend extends Backend {
     /**
      * 假站点上那两处目录（见文件头）。两处，两个角色：
      *   · `siteInstalledDir` —— 装上去的东西落的地方（也是 `installPlugins` 的落点）
-     *   · `samplePluginsDir` —— 开发样例住的地方（打包版没有它，那是对的）
+     *   · `samplePluginsDir` —— 测试夹具住的地方（打包版没有它，那是对的）
      *
-     * 传函数而不是路径 —— 打包之后样例那棵树不存在、沙盒那处要等 userData 定下来，
+     * 传函数而不是路径 —— 打包之后夹具那棵树不存在、沙盒那处要等 userData 定下来，
      * 而"这个目录现在在哪／在不在"必须是每次现算的结果。
      */
     this._siteInstalledDir = typeof opts.siteInstalledDir === 'function'
@@ -613,7 +613,7 @@ class FakeBackend extends Backend {
   }
 
   /**
-   * 假站点上那两处目录（装上去的 + 开发样例），装上去的排在前面。
+   * 假站点上那两处目录（装上去的 + 夹具），装上去的排在前面。
    *
    * 顺序是承重的：同一个 id 在两处都有时，先扫到的那个进索引（下面 `has` 那一句
    *   决定谁赢）—— 而"站上已经有一棵"这条判据也因此看得见两处。
@@ -660,7 +660,7 @@ class FakeBackend extends Backend {
         const c = (mf.contributes && typeof mf.contributes === 'object') ? mf.contributes : {};
         const key = `${mf.id}@${mf.version}`;
         // 两处都有同一个 `id@版本` 先扫到的那个算数（装上去的排在前）。
-        //   同一棵树在两处各有一份不是错误（从源码跑时把样例也装了一遍就会这样），
+        //   同一棵树在两处各有一份不是错误（从源码跑时把夹具也装了一遍就会这样），
         //   而"站点上有哪几棵树"必须只有一个答案 —— 让后扫到的覆盖掉，
         //   会让 `installPlugins` 里那条"同 id 拒装"的判据看到一个和它刚看过的
         //   不一样的 `dir`。
@@ -707,7 +707,7 @@ class FakeBackend extends Backend {
    *
    *   · `installPlugins` 装着插件 —— 站点"装完当场就报它"靠的就是这一下
    *     （真守护进程那边是 `plugin install` 之后的重载）。
-   *   · 用例要换掉假站点那棵样例树（`_test.setDevSampleDir`）—— 那在真机上
+   *   · 用例要换掉假站点那棵夹具树（`_test.setDevSampleDir`）—— 那在真机上
    *     等于重启，而一个进程里 index.js 只加载一次。
    *
    * 除这两处没有别人该调它：这张快照是启动快照，随手丢它就等于把
@@ -725,7 +725,7 @@ class FakeBackend extends Backend {
    *   这正是真实的 `op_plugins` 的行为。
    */
   _sitePlugins() {
-    // ── 分发源：盘上的真文件（装上去的那一处 + 开发样例那一处）──
+    // ── 分发源：盘上的真文件（装上去的那一处 + 夹具那一处）──
     const distributed = [...this._siteIndex().entries()].map(([key, v]) => ({
       id: key.slice(0, key.lastIndexOf('@')),
       version: key.slice(key.lastIndexOf('@') + 1),
@@ -753,7 +753,7 @@ class FakeBackend extends Backend {
     //   测试后端的全部价值是它演的是同一件事，而兜底演的是一件自证成立的
     //   事。
     //
-    //   打包版没有样例那棵树（基座两端都不带任何插件，那是对的），于是新装的
+    //   打包版没有夹具那棵树（基座两端都不带任何插件，那是对的），于是新装的
     //     客户端上假站点是空的 —— 一个插件都不装是合法状态，出路是去装一个。
     //     别再往回加兜底 —— 换了名字的兜底还是同一个毛病。
     //
@@ -769,7 +769,7 @@ class FakeBackend extends Backend {
    * 把一个 `.splug` 装到假站点上 —— 与真站点 `slurmate plugin install <文件.splug>` 同形。
    *
    * 落点是"装上去的东西"那一处（`_siteInstalledDir()`，沙盒里、程序自己的），
-   *   与样例那一棵分家 —— 用户装什么，都不该动到开发样例。一棵树一个 id，与真
+   *   与夹具那一棵分家 —— 用户装什么，都不该动到夹具。一棵树一个 id，与真
    *   站点一样 —— 所以"同一个 id 已经有另一棵树"是拒，不是覆盖（那棵树可能在
    *   两处中的任何一处，那句错话里印的就是它的 `dir`）。真站点上那条路是
    *   `uninstall` 之后再装，而这句话要说清删掉哪个目录。
@@ -929,8 +929,8 @@ class FakeBackend extends Backend {
   /**
    * 从假站点上撤掉一棵插件树 —— 与真站点 `slurmate plugin uninstall <id>` 同形。
    *
-   * 只能撤"装上去的"那一处（`_siteInstalledDir()`）。开发样例那一棵在仓库里，
-   *   它不是装上去的 —— 撤它等于删仓库里的样例树，而那与这个假站点要演的那件事
+   * 只能撤"装上去的"那一处（`_siteInstalledDir()`）。夹具那一棵在仓库里，
+   *   它不是装上去的 —— 撤它等于删仓库里的夹具树，而那与这个假站点要演的那件事
    *   （管理员在站点上装、卸）毫无关系。判据是那棵树住在哪个根下，不是它叫什么：
    *   `_siteIndex()` 里每一格都带着自己的 `dir`，而两处目录是分开的。
    *
@@ -961,11 +961,11 @@ class FakeBackend extends Backend {
     for (const key of list) {
       const hit = index.get(key);
       if (!hit) { problems.push(`${key}：假站点上没有这一份。`); continue; }
-      // 它住在哪一处：装上去的，还是开发样例。比的是父目录，不是名字前缀 ——
+      // 它住在哪一处：装上去的，还是夹具。比的是父目录，不是名字前缀 ——
       //   目录名两处用的是同一个（插件 id），拿名字判分不开。
       if (path.resolve(path.dirname(hit.dir)) !== path.resolve(root)) {
-        problems.push(`${hit.title}：它是开发样例，不是装上去的（在 ${hit.dir}）。`
-          + '样例那一棵树在仓库里，撤它要改仓库。');
+        problems.push(`${hit.title}：它是夹具，不是装上去的（在 ${hit.dir}）。`
+          + '夹具那一棵树在仓库里，撤它要改仓库。');
         continue;
       }
       try {
@@ -1437,8 +1437,8 @@ class FakeBackend extends Backend {
   debugRateLimit(n = 3) { this._rateLimitBurst = n; }
 
   // 这里没有"就地换掉站点那个文件"的调试动作，虽然那是最想演的一条。
-  //   原因很具体：假站点的分发源是仓库里的 `plugins/` —— 真文件。往那里
-  //   写一个字节等于改用户的仓库，而那是一个调试开关绝不该有的副作用。
+  //   原因很具体：假站点的分发源是仓库里的 `tools/fixtures/plugins/` —— 真文件。
+  //   往那里写一个字节等于改仓库，而那是一个调试开关绝不该有的副作用。
   //   那条路径（`9 plugin_file_changed`）由集群侧自己的用例覆盖，见
   //   `cluster/test-sessiond-logic.py` 的 19.11。
 

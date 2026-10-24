@@ -8,7 +8,7 @@ ACL 的登记簿从「SSH 会话」改挂到「Slurm 作业」上 —— 于是 
 - 集群侧（`cluster/`） —— root 守护进程 `slurmate-sessiond`、用户 CLI `slurmate`、
   作业模板 `run.sbatch`、部署脚本 `install-base.sh`、配置示例 `slurmate.conf.example`
 - 客户端（`client/`） —— Electron 桌面应用
-- 插件（`plugins/`） —— 独立项目，基座两端都不依赖它们。契约见
+- 插件 —— 独立项目，基座仓库里一棵都不收录，两端都不依赖它们。契约见
   [packer/docs/README.md](packer/docs/README.md)。一个插件都不装是合法状态，所以基座里
   不许出现任何插件的名字、也不许出现「至少得有一个插件」的假设。
 
@@ -309,7 +309,7 @@ REJECT-then-accept 的防火墙）都会被判成「登录节点可达」。检�
 格式，不改变它在叙历史这件事），这一条豁免反引号（`` `sshare -u <用户>` `` 是
 照着敲的命令）。理由写在 `tools/check-doc-prose.py` 的文件头。
 
-点名一个插件只在两种情况下允许：`plugins/<名>/**` 里（它自己的树），或
+点名一个插件只在两种情况下允许：在它自己的项目里（`plugins/<名>/**`），或
 记录（`CHANGELOG.md`、`docs/KNOWN-ISSUES.md`）。其余公开文档里插件一律以机制
 语言出现（"声明 `contributes.login` 的插件"）。
 

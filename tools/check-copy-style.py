@@ -467,7 +467,7 @@ def sh_spans(text):
             m = HERE.match(text, i)
             # 只收没被重定向进文件的 here-doc：`cat <<EOF` 打在终端上，
             #   `cat > "$cfg" <<EOF` 写进的是配置文件。判据管的是会被画出来的
-            #   文字，配置文件不是（`plugins/sshd/job/start.sh` 那份就是后者）。
+            #   文字，配置文件不是（插件作业侧那份 start.sh 就是后者）。
             if m and ">" not in text[text.rfind("\n", 0, i) + 1:eol(m.end())]:
                 word, start = m.group(2), eol(m.end()) + 1
                 j = start
@@ -794,7 +794,7 @@ def counts_of(rel, text):
             body = block[i]
             # 块注释的续行以 `*` 开头（`* 这一行`）。那个星号是标记不是正文：
             #   留着的话，一句话折成两行时中间会多出一个星号，成对的加粗就配不上
-            #   了（`plugins/sshd/client/sshconfig.js` 那四对就是这么漏的）。
+            #   了（插件客户端那份代码里的四对就是这么漏的）。
             if ext in STAR_CONT and body.lstrip().startswith("*"):
                 k = len(body) - len(body.lstrip())
                 body = body[:k] + " " + body[k + 1:]

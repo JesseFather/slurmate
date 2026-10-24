@@ -20,8 +20,8 @@ Slurmate 让用户在 Slurm 集群上用远程开发环境。它的核心动作�
 把「谁能连我端口」这份网络 ACL 的登记簿，从「SSH 会话」改挂到「Slurm 作业」上。
 于是 SSH 闪断不再等于会话终结 —— 作业还在跑，ACL 还在，重连即恢复。
 
-作业里跑什么由插件决定，而插件是独立项目（[`plugins/`](../plugins)）：
-基座两端都不带任何插件，一个都不装是合法状态。见〈插件〉那一节。
+作业里跑什么由插件决定，而插件是独立项目：基座仓库里一棵都不收录，
+两端都不带，一个都不装是合法状态。见〈插件〉那一节。
 
 ## 一、五个组件
 
@@ -233,10 +233,9 @@ ACL 的唯一载体。表、链、基础规则都由守护进程幂等补齐（`
 客户端那一侧一步人工动作都不需要（它自己取回来），
 也不用改基座的任何一行源码。
 
-仓库顶层 [`plugins/`](../plugins) 下放着一棵开发样例树（作业内的用户态 ssh ——
-给原生 VS Code Remote-SSH / codex 这类要求 ssh 连接的工具用），
-它用来在开发时对齐两侧的能力，不是"基座自带的插件"。契约见
-[packer/docs/README.md](../packer/docs/README.md)，站点侧配置见
+基座仓库里没有插件目录：一棵插件树就是一个独立项目，开发时把基座 clone 下来
+当只读脚手架用。基座自己的两套件只认 [`tools/fixtures/plugins/`](../tools/fixtures/plugins/)
+那两棵夹具。契约见 [packer/docs/README.md](../packer/docs/README.md)，站点侧配置见
 [CONFIGURATION.md](../cluster/docs/CONFIGURATION.md) 的插件一节。
 
 ### 一个插件有三样身份，别把它们合并

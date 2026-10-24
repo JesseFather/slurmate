@@ -48,9 +48,10 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 //
 // 站点池 = `<假家目录>/.slurmate/site-plugins`（见 index.js 的 sitePoolDir）。
 //
-// 装进去的是仓库里真的那两个插件（`<repo>/plugins/`），不是测试里合成的
-//   替身。这两个插件与基座的接口正是这次改动反复在动的东西 —— 用替身测等于
-//   测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被真正验过。
+// 装进去的是两棵夹具树（`tools/fixtures/plugins/`），不是测试里现编的替身。
+//   基座仓库不收录任何插件，夹具就是基座与插件之间那道接口的全部样本 —— 用
+//   现编的替身测等于测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被
+//   真正验过。
 //
 // 布局是 `<id>_<版本>/` 加旁边那张记录表 —— 站点池唯一的形状，也就是安装器
 //   写出来的形状（v0.13）。
@@ -67,12 +68,12 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 const REPO = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 const CFG_DIR = userData;
 const SITE_POOL = path.join(fakeHome, '.slurmate', 'site-plugins');
-const SAMPLE_PLUGINS = ['sshd', 'web-demo'];
+const SAMPLE_PLUGINS = ['relay-demo', 'web-demo'];
 /** 本机插件（没有作业侧）只在它自己那几条用例里装上 —— 默认池不变，免得动到计数。 */
 const LOCAL_PLUGINS = [...SAMPLE_PLUGINS, 'local-demo'];
 /**
  * 测试夹具插件放在两处：`client/test/fixtures/plugins` 给只有客户端一半的，
- * `tools/fixtures/plugins` 给两侧都有的；`sshd` 仍然从仓库的 `plugins/` 取。
+ * `tools/fixtures/plugins` 给两侧都有作业侧的。
  *
  * 本机插件（`local-demo`）刻意不放 `tools/fixtures/plugins`：那一棵也是
  *   集群侧用例的安装夹具，它们的断言按"每个插件都有作业侧"写的。放进去会
@@ -83,11 +84,10 @@ const CLIENT_FIXTURE_PLUGINS = path.join(REPO, 'client', 'test', 'fixtures', 'pl
 function pluginSrcDir(n) {
   const inClient = path.join(CLIENT_FIXTURE_PLUGINS, n);
   if (fs.existsSync(inClient)) return inClient;
-  const inFixture = path.join(FIXTURE_PLUGINS, n);
-  return fs.existsSync(inFixture) ? inFixture : path.join(REPO, 'plugins', n);
+  return path.join(FIXTURE_PLUGINS, n);
 }
 /**
- * 假站点样例树那一处的固定位置（见 `buildFixtureSiteTree`）。
+ * 假站点夹具树那一处的固定位置（见 `buildFixtureSiteTree`）。
  * 固定而不是每次 mkdtemp：`setSampleDir` 存的是路径，而用例会在
  *   `cleanupSiteState` 里反复把它指回来 —— 换个路径就等于每次都要重指一遍，
  *   漏一次的症状是"站点报的插件与池里的不一致"。
@@ -99,7 +99,7 @@ const DEMO_SERVER_JS = path.join(REPO, 'client', 'src', 'main', 'demo-server.js'
 const require = createRequire(import.meta.url);
 
 /**
- * 把站点池设成指定的几个插件（名字对应 `<repo>/plugins/<名字>`），并重扫。
+ * 把站点池设成指定的几个插件（名字对应夹具树里的目录名），并重扫。
  *
  * 传空数组 = 一个插件都没有、也什么都没同意过 —— 那是基座的正常状态，
  * 也得能被测到。
@@ -117,13 +117,13 @@ const require = createRequire(import.meta.url);
  * 夹具的站点树 —— 假站点上"那个管理员装了什么"的答案，而且它必须是一棵
  * 跑得起来的树。
  *
- * 为什么不能直接用仓库里那两棵：假站点现在真的把插件的作业侧跑起来
- *    （见 fake-job.js）。仓库里的 `web-demo/job/start.sh` 要这台机器上真的有一个
- *    `web-demo` —— 开发机上也许有，CI 上一定没有。用真树的话，几十条会话用例
+ * 为什么不能直接用夹具里的作业侧：假站点现在真的把插件的作业侧跑起来
+ *    （见 fake-job.js）。夹具的 `web-demo/job/start.sh` 要这台机器上真的有一个
+ *    `web-demo` —— 开发机上也许有，CI 上一定没有。用原树的话，几十条会话用例
  *    会一起红在"作业侧无法启动"上，而那条报错与它们要验的事情毫无关系。
  *
  * 换掉的是只有站点侧那一半（`job/start.sh`，以及它旁边那个 `job/serve.js`）。
- *    客户端那一半一个字节都不动 —— 池里装的还是仓库里那两棵真树
+ *    客户端那一半一个字节都不动 —— 池里装的还是夹具树里那两棵
  *    （见 `setSitePlugins` 的拷贝步骤），清单、`client/index.js`、摘要全都逐字相同。
  *    这不是"用替身测了个寂寞"：这个假站点演的正是真站点的分工 ——
  *    作业侧跑在集群上，客户端这一半跑在这里，而夹具只是让集群那一半有个
@@ -132,7 +132,7 @@ const require = createRequire(import.meta.url);
  * 它同时钉住了一件真事：作业侧不重定向输出（契约 §5.5），起服务之前
  *   等就绪，成功时写 `$SVC_PID`。这三条正是那份契约里最容易写错的地方。
  *
- * @param {string[]} names `<repo>/plugins/<名字>`
+ * @param {string[]} names 夹具树里的目录名
  * @returns {string} 那棵树的根
  */
 function buildFixtureSiteTree(names, destRoot = SITE_TREE) {
@@ -254,14 +254,14 @@ async function withSitePlugins(names, fn) {
  * "没有可以提交的服务"上，而失败点离夹具十万八千里。
  */
 /**
- * 把夹具恢复成缺省：站点池 = 两个插件都装着，而假站点那棵样例树指回夹具
+ * 把夹具恢复成缺省：站点池 = 两个插件都装着，而假站点那棵夹具树指回夹具
  * 那一棵。
  *
  * 后一半与 `setSitePlugins` 是两件事，别合并：那份池是本机装了哪几个
  *    （`withSitePlugins([])` 要的正是"本机一个都没有、而站点照样发那两个"），
- *   而样例树是站点上有什么。合并的话，那一整组用例会红在"站点什么都没报"上。
+ *   而夹具树是站点上有什么。合并的话，那一整组用例会红在"站点什么都没报"上。
  *
- * 它也是"样例树指回来"唯一的地方 —— 用例可以临时把它换掉
+ * 它也是"夹具树指回来"唯一的地方 —— 用例可以临时把它换掉
  *   （`emptyFakeSite`、以及那几条装插件的用例），而漏掉这一句的症状是：从那条
  *   用例起，后面的会话用例拿仓库里那棵真树去跑作业侧，红在"无法启动"上。
  */
@@ -370,7 +370,7 @@ function dropSlot(sitePool, id, version) {
 
 // 全套件的缺省：两个插件都装着，而且都过了同意闸。
 setSitePlugins(SAMPLE_PLUGINS);
-// 而站点那一侧是另一件事：它给的是真实文件，客户端那一半逐字来自仓库那两棵，
+// 而站点那一侧是另一件事：它给的是真实文件，客户端那一半逐字来自夹具树，
 //   只有作业侧换成了本机跑得起来的一份（见 buildFixtureSiteTree）。谁把它指过去，
 //   见 `before()` 与 `resetFixture()`。
 buildFixtureSiteTree(SAMPLE_PLUGINS);
@@ -571,7 +571,7 @@ process.env.SLURMATE_TEST_BACKEND = '1';
 process.env.SLURMATE_TEST_ENROLL_MS = '200';
 
 /**
- * 假站点那棵样例树指向夹具（见 `buildFixtureSiteTree`）。
+ * 假站点那棵夹具树指向夹具（见 `buildFixtureSiteTree`）。
  *
  * 必须在第一条用例之前、而且要在 index.js 起来之后：
  *   · 文件顶层那时 index.js 还没加载（它的 `_test` 不存在，硬 require 它会在一个
@@ -1198,7 +1198,7 @@ test('换一份数据：另开一份 / 复用别处的 / 有会话就拒', async
   // 不要数据空间的插件没有这一格（界面根本不会画）。这一句留着是因为
   //   少了它会给一个永远不会读它的插件凭空造一份数据。
   const noNeed = await invoke('app:setWorkspaceRef',
-    { workspaceId: wsA, pluginId: sshdId(), spaceId: null });
+    { workspaceId: wsA, pluginId: relayId(), spaceId: null });
   assert.equal(noNeed.ok, false);
   assert.match(noNeed.error, /不要数据空间/);
 
@@ -1946,10 +1946,10 @@ test('服务端通报的默认资源要真的送到界面上，不能又在客�
     { cpus: 2, mem: '8G', time: '12:00:00', gpus: null },
     'bootstrap 也要带 —— 界面首次渲染时还没有其他机会拿到它');
 
-  // 而这一份是每个插件一份，来自它自己的清单：另一个样例的清单里写的是
+  // 而这一份是每个插件一份，来自它自己的清单：另一个夹具的清单里写的是
   //   1 核 / 2G，站点就必须报那一份。全局一份的话，界面上每个插件都显示同一个
   //   数 —— 而"这个站点给这个插件配了多少"在界面上就永远看不到。
-  const relay = r.plugins.plugins.find((p) => p.name === 'sshd');
+  const relay = r.plugins.plugins.find((p) => p.name === 'relay-demo');
   assert.deepEqual(relay.defaults,
     { cpus: 1, mem: '2G', time: '12:00:00', gpus: null },
     '默认资源每个插件一份（来自清单的 site.defaultCpus / defaultMem）');
@@ -2246,7 +2246,7 @@ test('去重是按插件分桶的：两个插件各记各的"上次值"', (t) =>
   const { Registry, bucketOf } = require('../src/main/plugins/index.js');
   const reg = new Registry([{ dir: SITE_POOL, source: 'site' }]);
   const cs = reg.list().find((p) => p.name === 'web-demo');
-  const ss = reg.list().find((p) => p.name === 'sshd');
+  const ss = reg.list().find((p) => p.name === 'relay-demo');
   assert.ok(cs && ss, '前置条件：池里两个插件都在');
   const b1 = bucketOf(cs);
   const b2 = bucketOf(ss);
@@ -2333,11 +2333,11 @@ function mintId() {
   return _ulidMod.mint();
 }
 
-/** 内建 sshd 插件的 id。开关按 id 记，所以测试得拿得到它。 */
-function sshdId() {
+/** 夹具里那个没有界面的插件的 id。开关按 id 记，所以测试得拿得到它。 */
+function relayId() {
   const idx = require('../src/main/index.js');
-  const p = idx._test.getRegistry().list().find((x) => x.name === 'sshd');
-  assert.ok(p, '这个用例要先装上 sshd 插件（见文件头的池设置）');
+  const p = idx._test.getRegistry().list().find((x) => x.name === 'relay-demo');
+  assert.ok(p, '这个用例要先装上 relay-demo 夹具（见文件头的池设置）');
   return p.id;
 }
 
@@ -2840,7 +2840,7 @@ test('零插件：界面拿到的是一份说得通的空态，不是"安装包�
     //   于是池空 + 本机没有它们，`missing`
     //   里就是它们，而且每一份都标着 `delivery: 'package'`——
     //   那正是界面该说"去同步"而不是"去升级客户端"的判据。
-    assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['sshd', 'web-demo'],
+    assert.deepEqual(pv.missing.map((m) => m.name).sort(), ['relay-demo', 'web-demo'],
       '站点照实报了它要分发的两个插件，而本机一个都没有');
     assert.ok(pv.missing.every((m) => m.delivery === 'package'),
       `每一份都要标出"站点会发它"：${JSON.stringify(pv.missing)}`);
@@ -2874,8 +2874,8 @@ test('站点分发端到端：下来了但没同意就不加载，同意之后�
   });
   await invoke('app:debug', 'reset');
   await withSitePlugins([], async () => {
-    // 池子空，本机一个插件都没有，而站点报了两个真文件（仓库里的
-    //   plugins/，见 backend-fake 的 _siteIndex）。
+    // 池子空，本机一个插件都没有，而站点报了两份真文件（夹具树里的，
+    //   见 backend-fake 的 _siteIndex）。
     const r = await invoke('app:syncPlugins');
     assert.equal(r.ok, true, JSON.stringify(r));
 
@@ -3025,7 +3025,7 @@ async function installSplug(t, files) {
  * 一个"假站点上什么都没有"的干净现场：本机一个插件都没有，站点那两处都是空的。
  *
  * 两处都要清，而且理由不同：
- *   · `dir`（样例那一棵）是这条用例自己给的临时目录（真机上那是"换一棵树 + 重启"）；
+ *   · `dir`（夹具那一棵）是这条用例自己给的临时目录（真机上那是"换一棵树 + 重启"）；
  *   · `siteInstalledDir`（装上去的那一处）是同一个临时目录，会在同一个文件里
  *     几条用例之间留着 —— 不清的话，前一条装上去的插件会在后一条里"本来就在站上"，
  *     而那个症状是"站点报了它、而夹具说站点是空的"。
@@ -3072,7 +3072,7 @@ test('往假站点上装一个 .splug：站点当场报它，而客户端走的�
         '选择的必须是打包器的产物（`.splug`），不是随便什么文件');
 
       // ── ① 「装上去的东西」那一处真的多了一棵树，而两半都在 ──
-      //   落点是临时 userData 里那一处，不是样例那棵 —— 装什么，都不该动到样例。
+      //   落点是临时 userData 里那一处，不是夹具那棵 —— 装什么，都不该动到夹具。
       const dest = path.join(idx._test.getSiteInstalledDir(), want.id);
       assert.equal(fs.existsSync(path.join(dest, 'plugin.json')), true,
         `站点上该多出一棵 ${dest}`);
@@ -3080,8 +3080,8 @@ test('往假站点上装一个 .splug：站点当场报它，而客户端走的�
         '站点侧必须一起落地 —— 若只铺客户端侧，这个假站点演的是一个'
         + '真站点不可能有的形状');
       assert.deepEqual(fs.readdirSync(src), [],
-        '装上去的插件不许落在样例那一棵里 —— 那是开发基座用的样例，'
-        + '若用户装什么都会动到它，那两棵树就不再是"仓库此刻的样子"了');
+        '装上去的插件不许落在夹具那一棵里 —— 那是两套件共用的夹具树，'
+        + '若用户装什么都会动到它，那两棵树就不再和提交里的一致了');
 
       // ── ② 站点当场就报它（不用重启）──
       const reported = idx._test.getBackend()._sitePlugins();
@@ -3321,7 +3321,7 @@ test('撤不掉的那几种，每一种都说得出是哪一种', async (t) => {
   });
 
   await withSitePlugins([], async () => {
-    // 站点上从"什么都没有"开始，再放一棵开发样例进去。
+    // 站点上从"什么都没有"开始，再放一棵夹具进去。
     //   顺序不能反（`emptyFakeSite` 自己断言站点报的是零个），而放进去之后要
     //   重扫一次 —— 真机上那一步是重启。
     await emptyFakeSite(idx, src);
@@ -3329,14 +3329,14 @@ test('撤不掉的那几种，每一种都说得出是哪一种', async (t) => {
     writePluginTree(src, { id: sampleId, name: 'demo-sample', title: '样例盒子' });
     idx._test.setSampleDir(src);
     assert.equal(idx._test.getBackend()._sitePlugins().some((p) => p.id === sampleId), true,
-      '夹具前提：站点现在报的就是那一份开发样例');
+      '夹具前提：站点现在报的就是那一份夹具');
 
-    // ① 开发样例撤不掉 —— 它在仓库里，撤它是改仓库。
+    // ① 夹具撤不掉 —— 它在仓库里，撤它是改仓库。
     const a = await invoke('app:uninstallSitePlugin', sampleId, '1.0.0');
     assert.equal(a.ok, false);
-    assert.match(a.error, /开发样例/, `要说清它是哪一种：${a.error}`);
+    assert.match(a.error, /夹具/, `要说清它是哪一种：${a.error}`);
     assert.equal(fs.existsSync(path.join(src, 'demo-sample')), true,
-      '被拒之后样例那一棵一个字都不许动 —— 那是开发者的源码树');
+      '被拒之后夹具那一棵一个字都不许动 —— 那是开发者的源码树');
 
     // ② 站点上没有这一份。
     const b = await invoke('app:uninstallSitePlugin', '01M2JKM1M1M1M1M1M1M1M1M1MA', '1.0.0');
@@ -3434,7 +3434,7 @@ test('无法安装的那几种，每一种都说得出是哪一种', async (t) =
     assert.deepEqual(fs.readdirSync(installed), [idA],
       '好的那一个也不许落地 —— "装了一半"是最坏的那种中间态');
 
-    // ── ⑦ 样例那一棵里的 id 同样参与"一个 id 只留一棵树" ──
+    // ── ⑦ 夹具那一棵里的 id 同样参与"一个 id 只留一棵树" ──
     //   两处必须一起看：只查"装上去的"那一处的话，样例里已经有的那个 id
     //      会被再装一份上去 —— 而站点上从此有两棵同 id 的树，正是这条规矩要挡的形状
     //      （守护进程那边两棵树会互相覆盖，而覆盖是静默的）。
@@ -3443,16 +3443,16 @@ test('无法安装的那几种，每一种都说得出是哪一种', async (t) =
     // 换一棵树 = 真机上重启一次（那份启动快照要重建，见 forgetSiteIndex 的注释）
     idx._test.setSampleDir(src);
     const pkgE = path.join(tmp, 'e.splug');
-    // 版本要与样例那一棵不同：两份一模一样的话，站点会如实回"站上已经是这一份
+    // 版本要与夹具那一棵不同：两份一模一样的话，站点会如实回"站上已经是这一份
     //   了"（那是另一条路，而且它是对的）—— 那样这一条就验不到"同 id 拒装"。
     buildSplug(writePluginTree(path.join(tmp, 'e'), {
       id: sampleId, name: 'demo-sample', title: '样例盒子', version: '2.0.0' }), pkgE);
     const clashSample = await installSplug(t, [pkgE]);
-    assert.equal(clashSample.ok, false, '样例那一棵里已经有这个 id 了，不许再装一份');
+    assert.equal(clashSample.ok, false, '夹具那一棵里已经有这个 id 了，不许再装一份');
     const sampleDir = path.join(src, 'demo-sample');
     assert.match(clashSample.error,
       new RegExp(sampleDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-      '同样要指出那一棵树在哪个目录 —— 这次它在样例那一处');
+      '同样要指出那一棵树在哪个目录 —— 这次它在夹具那一处');
 
     // ── ⑧ 选空了：什么都不发生，也不出提示 ──
     const stub = electronStub.dialog;
@@ -3555,7 +3555,7 @@ test('作业侧无法启动，会话不许判成功，而原因要说得出是�
       if (rec.controller) await rec.controller.abandon();
     }
     idx._test.getSessions().clear();
-    cleanupSiteState(idx);                    // 顺带把样例树指回夹具那一棵
+    cleanupSiteState(idx);                    // 顺带把夹具树指回夹具那一棵
   });
   await openUpTo(idx, 2);
   await connectDemo(idx);
@@ -3669,7 +3669,7 @@ test('该目录树里没有 `job/start.sh`，站点当场说"提交不了"，不
   assert.ok(noJob, '夹具前提：站点照样要报它（装得上、看得见）');
   assert.equal(noJob.enabled, true, '装了、也开着 —— 与"本站关了它"是两件事');
   assert.equal(noJob.can_submit, false, '没有作业侧，提交不了');
-  assert.equal(byName('sshd').can_submit, true,
+  assert.equal(byName('relay-demo').can_submit, true,
     '一条坏的不许把整张表带下去（另一个照样提交得了）');
 });
 
@@ -4183,7 +4183,7 @@ test('`missing` 不说谎：站点关掉的插件不算"本机没有"', async (t
     const names = r.plugins.missing.map((m) => m.name);
     assert.equal(names.includes('web-demo'), false,
       `站点关掉的插件不该出现在 missing 里：${JSON.stringify(names)}`);
-    assert.ok(names.includes('sshd'), '而站点开着、本机没有的那个仍然要在');
+    assert.ok(names.includes('relay-demo'), '而站点开着、本机没有的那个仍然要在');
   });
 });
 
@@ -4201,7 +4201,7 @@ test('站点装了客户端不认识的插件：不崩，而且说得出该怎�
 
     // 客户端认识的那两个照常
     assert.deepEqual(r.plugins.plugins.map((p) => p.name).sort(),
-      ['sshd', 'web-demo']);
+      ['relay-demo', 'web-demo']);
     // 认不出的那个要被报出来，而不是被过滤掉 —— 它是升级提示的唯一来源。
     //   过滤掉的话，用户面对的就是"按钮凭空少了一个"，而没有任何地方解释为什么。
     const miss = r.plugins.missing.map((p) => p.name);
@@ -4249,18 +4249,18 @@ test('站点关掉一个插件：客户端看得见它、但起不了 —— 三
   await invoke('app:debug', 'reset');
   await invoke('app:partitions');
   let r = await invoke('app:partitions');
-  let sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-  assert.equal(sshd.runnable, true, '站点开着、本机也没关 → 能起');
+  let relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+  assert.equal(relayDemo.runnable, true, '站点开着、本机也没关 → 能起');
 
-  await invoke('app:debug', 'site-plugin-off', 'sshd');
+  await invoke('app:debug', 'site-plugin-off', 'relay-demo');
   try {
     r = await invoke('app:partitions');
-    sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-    assert.equal(sshd.siteEnabled, false, '站点关掉了');
-    assert.equal(sshd.runnable, false, '站点关了就不能起');
+    relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+    assert.equal(relayDemo.siteEnabled, false, '站点关掉了');
+    assert.equal(relayDemo.runnable, false, '站点关了就不能起');
     // 但仍然列出来：把它藏掉，用户看到的是"按钮少了一个"，
     //   而不知道该找管理员。留着它，界面才能说清是站点没开。
-    assert.ok(sshd, '站点关掉的插件仍然要在表里，只是不能起');
+    assert.ok(relayDemo, '站点关掉的插件仍然要在表里，只是不能起');
   } finally {
     await invoke('app:debug', 'reset');
     await invoke('app:partitions');
@@ -4271,25 +4271,25 @@ test('本机关掉一个插件：站点照旧，只是本机不再给按钮', as
   t.after(async () => {
     Module._load = origLoad;
     const idx = require('../src/main/index.js');
-    await invoke('app:setPluginEnabled', sshdId(), true);
+    await invoke('app:setPluginEnabled', relayId(), true);
     void idx;
   });
   await invoke('app:debug', 'reset');
   await invoke('app:partitions');
 
-  const off = await invoke('app:setPluginEnabled', sshdId(), false);
+  const off = await invoke('app:setPluginEnabled', relayId(), false);
   assert.equal(off.ok, true, JSON.stringify(off));
 
   const r = await invoke('app:partitions');
-  const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-  assert.equal(sshd.locallyEnabled, false, '本机关了');
-  assert.equal(sshd.siteEnabled, true, '站点那边一点没动 —— 两件事');
-  assert.equal(sshd.runnable, false);
+  const relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+  assert.equal(relayDemo.locallyEnabled, false, '本机关了');
+  assert.equal(relayDemo.siteEnabled, true, '站点那边一点没动 —— 两件事');
+  assert.equal(relayDemo.runnable, false);
 
   // 开关按 id 记，不按短名：池是全局的，两个站点可以各有一个叫 `jupyter`
   //   的插件而它们是两个不同的东西（两个 id）。按短名记会让一个站点的开关管到
   //   另一个站点的那个。
-  const byName = await invoke('app:setPluginEnabled', 'sshd', false);
+  const byName = await invoke('app:setPluginEnabled', 'relay-demo', false);
   assert.equal(byName.ok, false, '传短名要被拒绝 —— 短名不是身份');
   const bad = await invoke('app:setPluginEnabled', 'no-such-plugin', false);
   assert.equal(bad.ok, false, '认不出的 id 要被拒绝，而不是静静写进配置');
@@ -4308,20 +4308,20 @@ test('站点装了它但没有作业侧实现：看得见、开着的、就是�
   await invoke('app:partitions');
 
   let r = await invoke('app:partitions');
-  let sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-  assert.equal(sshd.canSubmit, true, '正常站点上装了的插件就是提交得出去的');
+  let relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+  assert.equal(relayDemo.canSubmit, true, '正常站点上装了的插件就是提交得出去的');
 
-  await invoke('app:debug', 'site-plugin-no-job', 'sshd');
+  await invoke('app:debug', 'site-plugin-no-job', 'relay-demo');
   r = await invoke('app:partitions');
-  sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
+  relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
 
-  assert.equal(sshd.siteKnown, true, '站点是答话了的');
-  assert.equal(sshd.siteEnabled, true, '站点开着它 —— 这一点必须没变');
-  assert.equal(sshd.locallyEnabled, true, '本机也开着它 —— 这一点也必须没变');
-  assert.equal(sshd.canSubmit, false, '站点说：装了，但没有作业侧实现');
-  assert.equal(sshd.runnable, false, '所以按钮是灰的');
+  assert.equal(relayDemo.siteKnown, true, '站点是答话了的');
+  assert.equal(relayDemo.siteEnabled, true, '站点开着它 —— 这一点必须没变');
+  assert.equal(relayDemo.locallyEnabled, true, '本机也开着它 —— 这一点也必须没变');
+  assert.equal(relayDemo.canSubmit, false, '站点说：装了，但没有作业侧实现');
+  assert.equal(relayDemo.runnable, false, '所以按钮是灰的');
   // 仍然要列出来：把它藏掉，用户看到的是"按钮凭空少了一个"。
-  assert.ok(sshd, '提交不了的插件仍然要在表里，只是不能起');
+  assert.ok(relayDemo, '提交不了的插件仍然要在表里，只是不能起');
 });
 
 test('三态纪律：老守护进程不报 can_submit，缺席，不是"否"', async (t) => {
@@ -4350,10 +4350,10 @@ test('三态纪律：老守护进程不报 can_submit，缺席，不是"否"', a
   });
   try {
     const r = await invoke('app:partitions');
-    const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-    assert.equal(sshd.siteKnown, true, '站点清单本身是拿得到的');
-    assert.equal(sshd.canSubmit, true, '字段缺席，按"站点没说"算可以提交');
-    assert.equal(sshd.runnable, true);
+    const relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+    assert.equal(relayDemo.siteKnown, true, '站点清单本身是拿得到的');
+    assert.equal(relayDemo.canSubmit, true, '字段缺席，按"站点没说"算可以提交');
+    assert.equal(relayDemo.runnable, true);
   } finally {
     backend._sitePlugins = origSite;
   }
@@ -4362,10 +4362,10 @@ test('三态纪律：老守护进程不报 can_submit，缺席，不是"否"', a
   await invoke('app:debug', 'old-daemon');
   try {
     const r = await invoke('app:partitions');
-    const sshd = r.plugins.plugins.find((p) => p.name === 'sshd');
-    assert.equal(sshd.siteKnown, false, '老守护进程连清单都报不出来');
-    assert.equal(sshd.canSubmit, true, '无法获取站点清单，不能因此判它提交不了');
-    assert.equal(sshd.runnable, true, '老服务端的用户一个按钮都不能少');
+    const relayDemo = r.plugins.plugins.find((p) => p.name === 'relay-demo');
+    assert.equal(relayDemo.siteKnown, false, '老守护进程连清单都报不出来');
+    assert.equal(relayDemo.canSubmit, true, '无法获取站点清单，不能因此判它提交不了');
+    assert.equal(relayDemo.runnable, true, '老服务端的用户一个按钮都不能少');
   } finally {
     await invoke('app:debug', 'reset');
     await invoke('app:partitions');
@@ -4401,14 +4401,14 @@ test('并发上限那一格：站点报几就是几，而缺席不是「1」', a
   }
 
   // 而某一个插件自己写了一个数：报出去的是它，别的插件不受影响。
-  backend.pluginMaxSessions.set('sshd', 2);
+  backend.pluginMaxSessions.set('relay-demo', 2);
   try {
     const r = await invoke('app:partitions');
     const by = Object.fromEntries(r.plugins.plugins.map((p) => [p.name, p]));
-    assert.equal(by.sshd.maxSessions, 2, '插件那一份写了就用它');
+    assert.equal(by['relay-demo'].maxSessions, 2, '插件那一份写了就用它');
     assert.equal(by['web-demo'].maxSessions, 1, '没写的跟随全局');
   } finally {
-    backend.pluginMaxSessions.delete('sshd');
+    backend.pluginMaxSessions.delete('relay-demo');
   }
 
   // 老守护进程不报这一格：缺席 ≠ 1（三态，与上面那条 `can_submit` 同一条纪律）。
@@ -4588,7 +4588,7 @@ test('提示页只在页面用不了时挂：页面还能用、没有页面，�
   assert.equal(overlayViewOf()._visible, true, '前置：页面用不了时要有一页解释');
 
   // 没有页面的那一条（中转站那一类）：同一句话，不挂。
-  const relay = await appStart(null, 'sshd');
+  const relay = await appStart(null, 'relay-demo');
   assert.equal(relay.ok, true, `开会话失败：${JSON.stringify(relay)}`);
   const relayCtl = idx._test.sessionAt(relay.slot).controller;
   await waitUntil(() => relayCtl.state === 'running', '中转站会话进入 running', 30000);
@@ -4661,7 +4661,7 @@ test('声明式插件：没有一行客户端代码，照样开界面', async (t
   //   没有 `client/index.js` 的插件也能开界面 —— 开界面本来就不需要代码。
   //
   //   没有这一条的话，「按 contributes.surface 分派」与「按插件有没有 attach 分派」
-  //   在内建的两个插件上行为完全一样（两个都有 attach，而 sshd 的 surface 是
+  //   在内建的两个插件上行为完全一样（两个都有 attach，而 relay-demo 的 surface 是
   //   空、两种写法都不建视图），于是那条分派线根本没有被验到。
   // 装进站点池（`<id>_<版本>/` + 记录表）并记一条台账 —— 池里每一份都过同意闸，
   //   没有台账的会以 `active: false` 进来，而这条用例要的是它能真的跑起来。
@@ -4746,7 +4746,7 @@ test('声明式插件：没有一行客户端代码，照样开界面', async (t
   cleanupSiteState(idx);
 });
 
-test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', async (t) => {
+test('中转站：起 relay-demo 会话不建视图，attach 拿到的是这条会话的连接', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   await ensureConnected(idx);
@@ -4762,7 +4762,7 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true);
 
   const viewsBefore = calls.views.length;
-  const started = await appStart(null, 'sshd');
+  const started = await appStart(null, 'relay-demo');
   assert.equal(started.ok, true, `提交中转站会话失败：${JSON.stringify(started.snapshot)}`);
 
   // 等它跑到 running（假后端 200ms 登记）
@@ -4775,7 +4775,7 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.ok(snap && snap.state === 'running', `没跑到 running：${JSON.stringify(snap)}`);
-  assert.equal(snap.serviceKind, 'sshd');
+  assert.equal(snap.serviceKind, 'relay-demo');
   // 客户端发上去的是 OpenSSH 的一整行（带注释，那正是用户能分辨「哪把是哪把」
   // 的唯一依据），由服务端规范化掉注释 —— 注释里的逗号会劈开 `--export=ALL,k=v,…`，
   // 而那是服务端那边要挡的事（见 test-sessiond-logic.py 19.9）。
@@ -4786,46 +4786,34 @@ test('中转站：起 sshd 会话不建视图，而是把本地 ssh 配置好', 
     + '（端口 = origin = 一份浏览器存储），而中转站没有浏览器');
   assert.ok(snap.localPort > 0, '隧道必须真的在监听');
 
-  // 这一条是整节的重点：中转站不该建 web-demo 视图。
-  //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西（ssh 怎么连）
-  //   恰好写在被盖住的那块面板上。
+  // 这一条是整节的重点：没有 `contributes.surface` 的插件不该建视图。
+  //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西
+  //   （他终端里的那条连接）一点都看不见。
   assert.equal(calls.views.length, viewsBefore,
     '中转站不需要 WebContentsView —— 用户要看的输出在他自己的终端里');
 
-  // 假家目录里只有两处：基座自己建的站点池，以及这个插件自己写的 `~/.ssh`。
-  //   `~/.ssh/config` 正是中转站要碰的那一个文件（它本来就该写），而站点池是
-  //   基座的；除此之外什么都不该多出来。
+  // 假家目录里只有基座自己建的站点池；夹具只写框架给的数据目录，不往家目录里
+  //   发明位置（`ctx.dataDir()` 之外的地方它一件都不碰）。
   assert.deepEqual(fs.readdirSync(path.join(fakeHome, '.slurmate')).sort(),
     ['.site-staging', 'site-plugins'], '假家目录里只该有基座自己建的那两处');
-  assert.equal(fs.existsSync(path.join(fakeHome, '.ssh')), true,
-    '中转站要往 ~/.ssh/config 里加一行 Include —— 那是它唯一的接口');
+  assert.equal(fs.existsSync(path.join(fakeHome, '.ssh')), false,
+    '夹具只写数据目录 —— 插件不该在家目录里另开一处');
 
-  // 测试进程的两个根都在临时目录里：
-  //   · `home`    —— 假家目录（用户的 `~/.ssh/config` 在它下面）
-  //   · `dataDir` —— 测试 userData 里的插件数据目录，框架按身份算出来的
+  // 数据目录按身份算：没有实例段（`ports: 0`），只有 `<id>@<共享组>`。
   // 这条断言用的路径是从框架现算的（`getPluginDataRoot` + 身份），而插件是
   //   通过 `ctx.dataDir()` 写的 —— 两边算出来必须是同一个目录，否则"界面上说没有、
   //   插件却在写"这件事会从这里开始。
   const P = require('../src/main/plugin-data.js');
-  const home = fakeHome;
   const dataRoot = idx._test.getPluginDataRoot();
   assert.ok(dataRoot.startsWith(userData),
     '插件数据目录要落在测试的临时 userData 里 —— 绝不能读写用户真实的那一份');
-  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
-  const dataDir = path.join(dataRoot, P.dataDirNameOf(P.identityOf(sshdPlugin)));
-  assert.equal(fs.existsSync(path.join(dataDir, 'config')), true,
-    'ssh 配置要写在框架给的那个数据目录里');
-
-  const cfg = fs.readFileSync(path.join(dataDir, 'config'), 'utf8');
-  assert.match(cfg, new RegExp(`^\\s+Port ${snap.localPort}$`, 'm'),
-    '端口必须是隧道实际在监听的那一个（可能从 18090 顺移过）');
-  assert.match(cfg, /^\s+User demo$/m, '用户名取自这条连接');
-  assert.match(fs.readFileSync(path.join(home, '.ssh', 'config'), 'utf8'),
-    new RegExp(`Include ${path.join(dataDir, 'config').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
-    '用户的 ssh 配置里要有一行 Include，而且指向新位置');
-  assert.equal(fs.readFileSync(path.join(dataDir, 'known_hosts'), 'utf8'),
-    `[127.0.0.1]:${snap.localPort} ssh-ed25519 ${'A'.repeat(68)}\n`,
-    '作业带回来的主机公钥要被钉进 known_hosts');
+  const relayPlugin = idx._test.getRegistry().list().find((p) => p.name === 'relay-demo');
+  const dataDir = path.join(dataRoot, P.dataDirNameOf(P.identityOf(relayPlugin)));
+  // 夹具的 `attach` 把这次拿到的连接写在这里。它是"接缝被调到了"的唯一证据：
+  //   没有界面的插件不会留下别的东西。
+  const recorded = JSON.parse(fs.readFileSync(path.join(dataDir, 'attach.json'), 'utf8'));
+  assert.equal(recorded.user, 'demo', '插件拿到的必须是这条会话所属连接的用户名');
+  assert.equal(recorded.serviceKind, 'relay-demo');
 
   // 收尾
   await invoke('app:stop', { slot: await frontSlotOf() });
@@ -4845,14 +4833,14 @@ test('配置里认不出的 enabled 值按「跟着站点走」处理，不读�
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-cfg-'));
   fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
     schema: config.SCHEMA,
-    plugins: { sshd: { enabled: 'no' }, 'web-demo': { enabled: true } },
+    plugins: { 'relay-demo': { enabled: 'no' }, 'web-demo': { enabled: true } },
   }));
   const cfg = config.loadConfig(tmp);
 
   // 认不出的形状（这里是字符串 'no'）丢掉，回到"跟着站点走" ——
   //   而"跟着站点走"是 true。读成 false 的话，配置文件里一个笔误就让一个功能
   //   凭空消失，而界面上只会少一个按钮、没有任何地方解释为什么。
-  assert.equal(config.pluginEnabledLocally(cfg, 'sshd'), true,
+  assert.equal(config.pluginEnabledLocally(cfg, 'relay-demo'), true,
     '认不出的值按「跟着站点走」处理，不读成「关掉」');
   // 认得出的照旧生效
   assert.equal(config.pluginEnabledLocally(cfg, 'web-demo'), true);
@@ -5143,7 +5131,7 @@ test('多开：一个开发会话与一个中转站会话同时活着，互不�
   const viewA = viewFor(w, a.slot);
 
   // ── 起乙：中转站（不要界面）──
-  const bs = await appStart(null, 'sshd');
+  const bs = await appStart(null, 'relay-demo');
   assert.equal(bs.ok, true, `乙提交失败：${JSON.stringify(bs)}`);
   assert.notEqual(bs.slot, a.slot,
     '要工作区与不要工作区的是两个槽 —— 那条能力（IDE + 终端中转）靠它');
@@ -5258,7 +5246,7 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   await invoke('app:stop', { slot: a3.slot });
   await waitUntil(() => !occupiedOf(idx, a3.slot), '甲′那个槽松开', 20000);
   b.debugReap();
-  const b2 = await appStart(null, 'sshd');          // 另一个插件，另一个槽
+  const b2 = await appStart(null, 'relay-demo');          // 另一个插件，另一个槽
   assert.equal(b2.ok, true, `乙提交失败：${JSON.stringify(b2)}`);
   assert.notEqual(b2.slot, a.slot, '前置：它落在另一个槽上');
   await waitUntil(() => w.front === b2.slot, '前台换到乙那个槽上', 20000);
@@ -5313,7 +5301,7 @@ test('同一个槽不许两条：拒绝，而且说得出是哪一个挡住了',
   //    · 拿 web-demo 来测会测到一句不再成立的话：它今天是
   //      `concurrent: true`，于是第二个会话会正常起来（见下一条用例），
   //      而这条用例断言的是"必须在提交之前被拒"。
-  //    · 拿 sshd 来测则相反 —— 它不要工作区，`spaceId` 在 `claimSpace`
+  //    · 拿 relay-demo 来测则相反 —— 它不要工作区，`spaceId` 在 `claimSpace`
   //      之前就已经是 null，于是认领那一步根本走不到：去掉认领这条用例照样
   //      绿，那半边就是装饰。
   //    它不需要假站点认识它：被拒发生在提交之前，这个插件到不了后端。
@@ -5479,7 +5467,7 @@ function diskNameOf(idx, pluginName, spaceId) {
   const P = require('../src/main/plugin-data.js');
   const plugin = idx._test.getRegistry().list().find((p) => p.name === pluginName);
   assert.ok(plugin, `夹具前提：注册表里应当有 ${pluginName}`);
-  // 不要工作区的插件没有第三段（sshd 那份就只有一个 `<id>@<共享组>`）——
+  // 不要工作区的插件没有第三段（relay-demo 那份就只有一个 `<id>@<共享组>`）——
   //   那时不传 `spaceId` 正是对的，传了反而会把一个不存在的身份算出来。
   if (!spaceId) return P.dataDirNameOf(P.identityOf(plugin));
   const space = idx._test.getCfg().spaces.find((x) => x.id === spaceId)
@@ -5818,8 +5806,8 @@ test('自动回收：没人认领的孤儿清掉，而活会话正用着的那�
     fs.writeFileSync(path.join(root, ghost, 'marker'), 'x');
 
     // ── 一条活着的会话，它正用着一份目录（中转站：身份里没有实例段）──
-    await startRunning(idx, 'sshd');
-    const liveName = diskNameOf(idx, 'sshd');
+    await startRunning(idx, 'relay-demo');
+    const liveName = diskNameOf(idx, 'relay-demo');
     const liveDir = path.join(root, liveName);
     fs.mkdirSync(liveDir, { recursive: true });
     fs.writeFileSync(path.join(liveDir, 'marker'), 'x');
@@ -5827,7 +5815,7 @@ test('自动回收：没人认领的孤儿清掉，而活会话正用着的那�
     setSitePlugins(['web-demo']);
     idx._test.getRegistry().reload();
     t.after(() => { resetFixture(); idx._test.getRegistry().reload(); });
-    assert.equal(idx._test.getRegistry().list().some((p) => p.name === 'sshd'), false,
+    assert.equal(idx._test.getRegistry().list().some((p) => p.name === 'relay-demo'), false,
       '夹具前提：注册表真的算不出它了 —— 否则这一条测的是其他内容');
 
     // ── 对账（`app:pluginData` 就是那个时机：客户端启动时拉一次）──
@@ -6068,7 +6056,7 @@ test('崩溃重连要接回全部会话，而不是最新那一条', async (t) =
 
   const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await appStart(null, 'sshd');
+  const b2 = await appStart(null, 'relay-demo');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -6098,7 +6086,7 @@ test('关窗确认要数全部活着的会话（若说一句不成立 = F13 同�
 
   const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await appStart(null, 'sshd');
+  const b2 = await appStart(null, 'relay-demo');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -6129,7 +6117,7 @@ test('关窗确认要数全部活着的会话（若说一句不成立 = F13 同�
   // 不能只念一条插件的话 —— 那等于把"你的编辑器里有没保存的改动"这件
   //   只对其中一条成立的事说成对两条都成立。
   assert.match(d.detail, /Web 示例|web-demo/, `要念到第一条：${d.detail}`);
-  assert.match(d.detail, /中转站|sshd/, `也要念到第二条：${d.detail}`);
+  assert.match(d.detail, /中转站/, `也要念到第二条：${d.detail}`);
 
   for (const s of (await invoke('app:states')).sessions) {
     await invoke('app:stop', { slot: s.slot });
@@ -6147,7 +6135,7 @@ test('收尾要停全部会话（关窗 / 退出 / 断开走的是同一份实�
 
   const a = await appStart(null, 'web-demo');
   assert.equal(a.ok, true, `甲没起来：${JSON.stringify(a.sessions)}`);
-  const b2 = await appStart(null, 'sshd');
+  const b2 = await appStart(null, 'relay-demo');
   assert.equal(b2.ok, true, `乙没起来：${JSON.stringify(b2.sessions)}`);
   await waitUntil(() => idx._test.sessionAt(b2.slot)
     && idx._test.sessionAt(b2.slot).controller.state === 'running',
@@ -6460,7 +6448,7 @@ test('中转站的端口绝不能落进任何一份数据', async (t) => {
   assert.ok(spacePorts.every((p) => Number.isInteger(p)),
     `那些端口要是数（端口从工作区搬到数据上之后，这一条曾经静默失效过 —— `
     + `工作区上没有 \`port\` 了，\`map\` 出来一串 undefined，而 \`includes\` 于是恒为假）`);
-  const b = await appStart(null, 'sshd');
+  const b = await appStart(null, 'relay-demo');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -6492,17 +6480,18 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
   await connectDemo(idx);                       // C1：user=demo
   await onlyTestConnection(idx);
 
-  const b = await appStart(null, 'sshd');
+  const b = await appStart(null, 'relay-demo');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
     '中转站进入 running', 20000);
 
-  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
+  const relayPlugin = idx._test.getRegistry().list().find((p) => p.name === 'relay-demo');
   const dataDir = path.join(idx._test.getPluginDataRoot(),
-    P.dataDirNameOf(P.identityOf(sshdPlugin)));
-  const conf = path.join(dataDir, 'config');
-  assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m, '前提：先写的是 C1 的用户');
+    P.dataDirNameOf(P.identityOf(relayPlugin)));
+  const conf = path.join(dataDir, 'attach.json');
+  const recordedUser = () => JSON.parse(fs.readFileSync(conf, 'utf8')).user;
+  assert.equal(recordedUser(), 'demo', '前提：先记下的是 C1 的用户');
 
   // 再配一条另一个用户的连接，并把它设为活跃。这一步不停任何会话 ——
   // 那正是"按当前活跃连接去取"会出错的地方。
@@ -6523,11 +6512,11 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
   assert.equal(idx._test.getCfg().activeConnectionId, c2.connection.id,
     '前提：活跃连接真的切过去了');
 
-  // 这份 ssh 配置属于这条会话，而这条会话属于 C1。按"当前活跃"去取会把
-  //    C2 的用户名写进去 —— 而症状是"ssh 连上了，但不是你要的那台机器"，
+  // 这份记录属于这条会话，而这条会话属于 C1。按"当前活跃"去取会把
+  //    C2 的用户名写进去 —— 而症状是"连上了，但不是你要的那台机器"，
   //    用户完全看不出为什么。
-  assert.match(fs.readFileSync(conf, 'utf8'), /^\s+User demo$/m,
-    '切活跃连接不该改到这条会话的 ssh 配置 —— 它属于 C1，不属于"当前活跃的那条"');
+  assert.equal(recordedUser(), 'demo',
+    '切活跃连接不该改到这条会话拿到的值 —— 它属于 C1，不属于"当前活跃的那条"');
 
   await invoke('app:stop', { slot: b.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
@@ -6864,7 +6853,7 @@ test('换一条连接 = 离开上一个站点：本机那些记录一条都不�
   await connectDemo(idx);                        // C1
   await onlyTestConnection(idx);
 
-  const b = await appStart(null, 'sshd');
+  const b = await appStart(null, 'relay-demo');
   assert.equal(b.ok, true, `提交失败：${JSON.stringify(b)}`);
   const ctl = idx._test.sessionAt(b.slot).controller;
   await waitUntil(() => ctl.state === 'running' && ctl.snapshot().localPort,
@@ -7135,10 +7124,10 @@ test('没声明分实例的那一份不跟着任何工作区走', async (t) => {
   // web-demo 那一份：属于这个工作区，会被清。
   const cs = makePluginDataDir(idx, 'web-demo');
 
-  // sshd 那一份：身份里没有实例段，它不属于任何一个工作区。
-  const sshdPlugin = idx._test.getRegistry().list().find((p) => p.name === 'sshd');
+  // relay-demo 那一份：身份里没有实例段，它不属于任何一个工作区。
+  const relayPlugin = idx._test.getRegistry().list().find((p) => p.name === 'relay-demo');
   const relayDir = path.join(idx._test.getPluginDataRoot(),
-    P.dataDirNameOf(P.identityOf(sshdPlugin)));
+    P.dataDirNameOf(P.identityOf(relayPlugin)));
   fs.mkdirSync(relayDir, { recursive: true });
   fs.writeFileSync(path.join(relayDir, 'marker'), 'x');
 
@@ -7151,7 +7140,7 @@ test('没声明分实例的那一份不跟着任何工作区走', async (t) => {
     '属于那一份数据、但没有界面的那一份也要跟着走 —— 判据是 needsSpace，'
     + '抄成 hasSurface 会让它永远留着，而且审计里看不出来');
   assert.equal(fs.existsSync(path.join(relayDir, 'marker')), true,
-    '而不属于任何工作区的那一份绝不能跟着走 —— 它只有一份（sshd 的钥匙与 '
+    '而不属于任何工作区的那一份绝不能跟着走 —— 它只有一份（relay-demo 的钥匙与 '
     + 'ssh 配置就在里面），删掉它等于把 `ssh slurmate` 改坏');
 
   await openUpTo(idx, 1);
