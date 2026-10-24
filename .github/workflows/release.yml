@@ -20,6 +20,15 @@ name: release
 # Windows 首次运行 SmartScreen 会拦一次（更多信息 → 仍要运行）；
 # macOS 首次需右键 →「打开」，或 xattr -dr com.apple.quarantine /Applications/Slurmate.app。
 # 消除这一步需要代码签名证书，本项目没有。
+#
+# 一个 SHA256SUMS 随产物一起发布。它证明下载完整，不证明来源：能替换产物的
+# 人也能替换这个文件。
+#
+# ── 发布说明由人写 ──────────────────────────────────────────────────────────
+# 不用 generate_release_notes：同一个版本可能先出几个预览版，自动生成的提交
+# 列表会把预览那些噪音一起堆进去。draft 里的 notes 由发布者手写。
+#
+# 正式版的 tag 是 v0.35，预览版是 v0.35-rc1；后者发布时标成 pre-release。
 on:
   push:
     tags: ['v*']
@@ -28,6 +37,25 @@ permissions:
   contents: write      # action-gh-release 需要写 Release
 
 jobs:
+  # tag 只许打在 main 的历史里。这一遍不跑 checks.yml 那些检查器（它们在每次推
+  #   main 与 PR 上跑），所以"tag 打在 main 上已经绿过的提交"是发布的前提。
+  #   这里把它做成机器判据：一条本地提交直接打 tag 推上去，会被这一步拦住。
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # merge-base 要完整历史
+      - name: tag 必须在 main 的历史里
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag 指向的提交不在 main 上：$GITHUB_SHA" >&2
+            echo "正式版与预览版都只从 main 的历史里打 tag。" >&2
+            exit 1
+          fi
+
   # 不依赖 build.yml —— 它可能因为 paths 过滤器没跑，也可能跑在别的 ref 上。
   # tag 指向的那次提交直接重新构建，保证 Release 上的产物与 tag 一一对应。
   build:
@@ -74,15 +102,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 cluster/test-run-package.py
       - run: bash cluster/make-run.sh
-      - name: 版本号与 tag 一致
-        # 包名里的版本号取自 cluster/slurmate-sessiond。两者对不上时，Release 上会
-        # 多出一个与 tag 不同名的文件，而没有人会去核对 —— 现在停，不进 Release。
+      - name: 版本号与 tag 的版本一致
+        # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.35（正式版）
+        #   或 v0.35-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上
+        #   会多出一个与 tag 不同名的文件，而没有人会去核对。
         run: |
           f="$(ls dist/slurmate-site-*.run)"
           v="$(basename "$f" .run)"
           v="${v#slurmate-site-}"
-          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
-            echo "tag 是 $GITHUB_REF_NAME，而这一份包叫 $(basename "$f")" >&2
+          base="${GITHUB_REF_NAME%%-*}"
+          if [ "v$v" != "$base" ]; then
+            echo "tag 是 $GITHUB_REF_NAME（版本段 $base），而这一份包叫 $(basename "$f")" >&2
             exit 1
           fi
       - name: 摘要
@@ -95,7 +125,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [build, site]
+    needs: [guard, build, site]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -103,9 +133,28 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: 校验值
+        # 一个 SHA256SUMS 与所有产物放在一起。它证明下载完整，不证明来源。
+        run: |
+          cd artifacts
+          for f in *; do
+            if [ "$f" != SHA256SUMS ]; then sha256sum "$f"; fi
+          done > SHA256SUMS
+          cat SHA256SUMS
+      - name: 预览版标记
+        # 正式版 tag 是 v0.35；预览版是 v0.35-rc1 这一种形状。
+        id: kind
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          # draft: true —— 产物未签名，先让人过一眼再公开发布。
+          # draft: true —— 产物未签名，先让人过一眼；notes 也在这时手写。
           files: artifacts/**/*
           draft: true
-          generate_release_notes: true
+          prerelease: ${{ steps.kind.outputs.prerelease }}
+          # 不用 generate_release_notes：同一个版本可能先出几个预览版，
+          # 自动生成的提交列表会把预览那些噪音一起堆进来。

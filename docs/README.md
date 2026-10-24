@@ -38,7 +38,7 @@
 
 ## 这个目录里有什么
 
-`docs/` 是实现者与维护者那一侧。扁平的五份，不加第二层。
+`docs/` 是实现者与维护者那一侧。扁平的六份，不加第二层。
 
 | 文档 | 是什么 |
 |---|---|
@@ -46,6 +46,7 @@
 | [PROTOCOL.md](PROTOCOL.md) | 契约：传输、信封、错误码、三态区分、每个 op |
 | [IMPLEMENTING.md](IMPLEMENTING.md) | 写一个新后端 / 换一门语言的清单，每一条对应一个具体的静默失败 |
 | [CONTRACT.md](CONTRACT.md) | 每一格接口的承诺等级（稳定 / 试验 / 内部）× 保证方式（机器 / 用例 / 一句话 / 无） |
+| [RELEASING.md](RELEASING.md) | 发布流程：版本与 tag、三个 job、校验值与手写的 notes |
 | [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 账本：已核实的缺陷、没有完整实测过的、结构性欠账 |
 
 ## 别处还有
