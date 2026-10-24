@@ -1,17 +1,19 @@
 name: build
 
-# 只负责一件事：把 client/ 打包成三个平台的安装包。站点端的单文件包不在这里，
-# 在 site.yml —— 它没有三个平台，也不该让改一行集群侧注释就跑一遍这里的矩阵。
+# 负责两件事：把 client/ 打成三个平台的安装包，把 cluster/ 拼成站点端的单文件包。
+#
+# 站点端并在这里，不单开一条工作流：公开仓库的 Actions 分钟数不设上限，两条
+# 工作流带来的唯一区别是 Actions 页面上多一个要认的名字。
 #
 # 发布（打 tag → 挂 Release）在 release.yml 里，故意分开。
 # 原因见 release.yml 顶部的说明：GitHub 对 push 事件是把 branches + tags + paths
 # 三者取【与】的，而给一个已推送的提交打 tag 时变更文件集为空 —— 只要这个
 # workflow 带 paths 过滤器，release 就永远不会触发，且失败时没有任何报错。
 #
-# ── 关于 CI 成本 ────────────────────────────────────────────────────────────
+# ── 关于 CI 时间 ────────────────────────────────────────────────────────────
 # Actions 分钟数按平台加权：Linux 1× / Windows 2× / macOS 10×。
-# 一次三平台打包约 100 分钟额度。所以：
-#   - paths 过滤器挡掉只改 cluster/ 或文档的提交
+# 一次三平台打包约 100 分钟。所以：
+#   - paths 过滤器挡掉只改文档的提交
 #   - concurrency 挡掉连推多次时的并行排队（只跑最新的那个）
 #   - 想不制造提交就验证构建：Actions 页面 → Run workflow（workflow_dispatch）
 on:
@@ -19,15 +21,23 @@ on:
     branches: [main]
     paths:
       - 'client/**'
+      - 'cluster/**'
+      - 'tools/check-cluster.sh'
       # 夹具与客户端的接口是最容易悄悄漂掉的东西（清单里的 id / 版本 /
       #   贡献点，客户端注册表逐字用它们）。漏掉这一条，改夹具就不会触发
       #   客户端构建 —— CI 在最需要的时候不跑。
       - 'tools/fixtures/plugins/**'
+      - 'LICENSE'
+      - 'NOTICE'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'client/**'
+      - 'cluster/**'
+      - 'tools/check-cluster.sh'
       - 'tools/fixtures/plugins/**'
+      - 'LICENSE'
+      - 'NOTICE'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -62,6 +72,37 @@ jobs:
       # package.json 是否一致（有人改了后者忘了前者，这里就会红）。
       - run: npm ci
       - run: npm test
+
+  # 站点端与打包器：同一个版本、同一次发布。
+  #   站点端是守护进程、CLI、作业模板、部署脚本与文档拼成的一个 `.run`；
+  #   打包器是单文件零依赖的脚本，插件作者拿走就能用。
+  #   两者都没有三个平台，所以不进下面的矩阵；测试也不必等客户端那一套。
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 单文件包自测
+        # 打包器的失败路径（源文件缺失、包体标记错位、解出来的与放进去的不同）
+        # 都在这一份里。先证它打得出，再打真的那一份。
+        run: python3 cluster/test-run-package.py
+      - name: 打包
+        run: bash cluster/make-run.sh
+      - name: 打包器
+        # 单文件零依赖，与基座同一个版本；放进 dist，与站点包一起上传。
+        run: |
+          v="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' cluster/slurmate-sessiond)"
+          cp packer/slurmate-packer.js "dist/slurmate-packer-${v}.js"
+      - name: 摘要
+        # 产物在 Actions 页面上只给一个名字；管理员拿它认包靠 sha256，
+        # 所以把这一份里的每个文件都写进本次运行的摘要。
+        run: sha256sum dist/* | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurmate-base
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
 
   build:
     needs: test

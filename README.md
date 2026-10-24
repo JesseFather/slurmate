@@ -99,7 +99,8 @@ node packer/slurmate-packer.js init  my-plugin
 node packer/slurmate-packer.js build my-plugin
 ```
 
-契约见 [packer/docs/README.md](packer/docs/README.md)。
+打包器随每个版本发布（`slurmate-packer-<版本>.js`），也可以直接用仓库里的
+`packer/slurmate-packer.js`。契约见 [packer/docs/README.md](packer/docs/README.md)。
 
 ### 参与开发
 

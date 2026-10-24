@@ -84,19 +84,22 @@
 
 **判据**：客户端 782 条与集群 1459 条全绿；`git ls-files plugins/` 一个文件都没有。
 
-### Changed — 站点端的单文件包也能由 CI 打
+### Changed — 站点端与打包器也由 CI 打
 
 `cluster/make-run.sh` 一直能在本机打出 `slurmate-site-<版本>.run`，产物只落在
-这台机器的 `dist/` 里。现在它多了一条路：改到 `cluster/**` 时，`site.yml` 打一份
-存成 Actions 产物；打 tag 时，`release.yml` 再打一份，与三个平台的客户端安装包
-挂在同一个 Release 上。
+这台机器的 `dist/` 里。现在它多了一条路：`build.yml` 多了一个 `site` job，与
+客户端的三平台矩阵并列；打 tag 时 `release.yml` 也打一份，与客户端安装包挂在
+同一个 Release 上。
 
-它没有并进 `build.yml`：那份工作流的 paths 是客户端专属，把 `cluster/**` 加进去，
-改一行集群侧注释也要跑一次约 100 分钟的三平台 Electron 打包。也没有并进
-`checks.yml`：那里是判据，产物不该与判据混在一次运行里（`test-run-package.py`
-仍在那里跑，`site.yml` 与 `release.yml` 的站点 job 在打包之前也会各跑一遍）。
+同一个 job 把打包器复制成 `slurmate-packer-<版本>.js`：客户端、站点端与打包器
+同一个版本、同一次发布，Actions 页面上也只有 `build`、`checks`、`release` 三条。
 
-**判据**：`python3 cluster/test-run-package.py` 81 条全绿；`site.yml` 打出的包与
+站点端并进 `build.yml`，没有单开一条工作流：公开仓库的 Actions 分钟数不设上限，
+两条工作流的唯一区别是 Actions 页面上多一个要认的名字。也没有并进 `checks.yml`：
+那里是判据，产物不该与判据混在一次运行里（`test-run-package.py` 仍在那里跑，
+`build.yml` 与 `release.yml` 的站点 job 在打包之前也会各跑一遍）。
+
+**判据**：`python3 cluster/test-run-package.py` 81 条全绿；`build.yml` 打出的包与
 `bash cluster/make-run.sh` 本机打出的那份内容相同（`make-run.sh` 拼完当场解回来
 逐份比对，路径与标记错了在打包这一步就停）；打 tag 时包名里的版本号与 tag
 对不上，`release.yml` 那一步退出非零，不进 Release。

@@ -8,8 +8,10 @@
 |---|---|---|
 | 客户端安装包（`.exe` / `.dmg` / `.AppImage` / `.deb` / `.zip`） | `release.yml` 的 `build` | Windows / macOS / Linux |
 | `slurmate-site-<版本>.run` | `release.yml` 的 `site` | 任意 Linux |
+| `slurmate-packer-<版本>.js` | `release.yml` 的 `site` | — |
 
-站点包的 sha256 打印在 `site` job 的 run summary 里；客户端安装包不另发校验值。
+客户端、站点端与打包器同一个版本、同一次发布。站点包与打包器的 sha256 打印在
+`site` job 的 run summary 里；客户端安装包不另发校验值。
 
 ## 版本与 tag
 
@@ -73,7 +75,7 @@ tag 推上去之后 `release.yml` 开始跑。
 |---|---|
 | `guard` | tag 必须在 `main` 的历史里 |
 | `build` | 三个平台各跑一遍 `npm test`，然后 `electron-builder` |
-| `site` | 跑单文件包自测，打出 `.run`，核对包名里的版本与 tag |
+| `site` | 跑单文件包自测，打出 `.run` 与打包器，核对包名里的版本与 tag |
 
 `publish` 依赖这三个 job；任何一个红了都不会有 draft Release。
 
@@ -81,7 +83,7 @@ tag 推上去之后 `release.yml` 开始跑。
 
 打开 Releases 页面上的 draft，逐项确认：
 
-- 客户端五个扩展名、站点包都在；
+- 客户端五个扩展名、站点包、打包器都在；
 - release notes 由发布者手写；
 - 预览版的 `prerelease` 已勾上；
 - 点 Publish。

@@ -89,9 +89,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 站点端只有一个文件，与三个平台的客户端安装包挂在同一个 Release 上。
-  # 它只是把 cluster/ 的源文件拼起来（tar.gz 加一行标记），在哪台机器上打都一样，
-  # 所以钉在 Linux 上，不必进上面那个矩阵。
+  # 站点端与打包器，与三个平台的客户端安装包挂在同一个 Release 上。
+  #   站点包只是把 cluster/ 的源文件拼起来（tar.gz 加一行标记），打包器是一个
+  #   单文件脚本；两者在哪台机器上出都一样，所以钉在 Linux 上，不必进矩阵。
   site:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -99,6 +99,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 cluster/test-run-package.py
       - run: bash cluster/make-run.sh
+      - name: 打包器
+        run: |
+          v="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' cluster/slurmate-sessiond)"
+          cp packer/slurmate-packer.js "dist/slurmate-packer-${v}.js"
       - name: 版本号与 tag 的版本一致
         # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.35（正式版）
         #   或 v0.35-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上
@@ -113,11 +117,11 @@ jobs:
             exit 1
           fi
       - name: 摘要
-        run: sha256sum dist/*.run | tee -a "$GITHUB_STEP_SUMMARY"
+        run: sha256sum dist/* | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: slurmate-site
-          path: dist/*.run
+          name: slurmate-base
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
