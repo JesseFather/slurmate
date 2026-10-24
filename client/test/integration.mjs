@@ -103,7 +103,7 @@ function fixtureSiteTree() {
   return root;
 }
 
-// 一棵，全程共用：假站点那棵样例树（与 app 在测试后端下读到的是同一处，
+// 一棵，全程共用：假站点那棵夹具树（与 app 在测试后端下读到的是同一处，
 //   见 index.js 的 `samplePluginsDir`；装上去的东西另有一处）。
 const SITE_TREE = fixtureSiteTree();
 const SITE_PLUGIN_DIR = () => SITE_TREE;

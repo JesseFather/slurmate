@@ -409,13 +409,13 @@ async function bootstrap() {
         enrollDelayMs: Number.isFinite(Number(process.env.SLURMATE_TEST_ENROLL_MS))
           ? Number(process.env.SLURMATE_TEST_ENROLL_MS) : undefined,
         // 假站点上那两个目录，两个角色是分开的（见下面那一段的注释）：
-        //   `samplePluginsDir` 是开发样例住的地方（从源码跑时才有），
+        //   `samplePluginsDir` 是测试夹具住的地方（从源码跑时才有），
         //   `siteInstalledDir` 是装上去的东西落的地方（测试用的 userData 里）。
         //   都是一份真实文件（真的 sha256、真的字节），于是「站点有而本机没有」这条
         //   最重要的路径真的走得到：池空的时候站点照样报那些插件，对账真的把它们
         //   取下来、真的要求同意。
         //
-        // 传函数而不是路径：样例那棵树只在源码树里有，而"这个目录现在在哪／在不在"
+        // 传函数而不是路径：夹具那棵树只在源码树里有，而"这个目录现在在哪／在不在"
         //   必须是每次现算的结果。
         samplePluginsDir,
         siteInstalledDir,
@@ -2904,10 +2904,9 @@ async function startSession(resources, serviceKind, portChoice) {
   rec.controller = new SessionController({
       backend,
       spaceId: space ? space.id : null,
-      // 不要工作区的插件：实际端口要交给插件自己去写进用户那份 ssh 配置
-      // （见 plugins/sshd/client/sshconfig.js）。这里只需要「重新渲染一次」，插件
-      // 按当前端口重写它那份配置；端口和主机公钥都没变时它会自己跳过
-      // （那正是 ctx.once() 的用处）。
+      // 不要工作区的插件：实际端口要交给插件自己去落（写进它自己那份配置）。
+      // 这里只需要「重新渲染一次」，插件按当前端口重写它需要的那份；端口和
+      // 主机公钥都没变时它会自己跳过（那正是 ctx.once() 的用处）。
       //
       // 要工作区的会话没有对应的回调 —— 端口是那份数据的只读属性，顺移只影响
       //   这一次会话，实际值在快照里。见 session.js 的 `_announcePort`。
@@ -3262,7 +3261,7 @@ async function _renderSession(slot) {
   //   另一边会去建一个 WebContentsView 加载一个根本不说 HTTP 的端口。
   //
   // 这里没有任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
-  //   插件时这一段一行都不用改 —— 要动的是 plugins/ 下多一个目录。
+  //   插件时这一段一行都不用改 —— 要动的是插件自己那一棵树。
   // 被接管：这一块页面不再归本机操作。直接收掉，而不是盖一层提示页 ——
   //   用户 2026-10-20 报的是"上栏说被接管，而我完全可以正常使用"。
   //   隧道不拆：重新接管之后要接着用它，而 `suspend()` 本来就特意没拆。
@@ -3447,31 +3446,30 @@ function warnLegacyPool() {
 //   · `siteInstalledDir()` —— 装上去的东西。这才是"站点上有什么"的答案，
 //     而它只有一条来的路：测试顺手调 `backend.installPlugins`，与真站点上管理员
 //     `slurmate plugin install` 同形。落在临时 userData 里。
-//   · `samplePluginsDir()` —— 开发样例住的地方（仓库里的 `plugins/`）。
-//     基座两端都不带任何插件（`plugins/README.md` 第一行）：那两棵是开发
-//     基座时用来对齐插件两侧能力的样例，安装包里没有它们 —— 那是对的，不是降级。
-//     从源码跑时它们在场，只是"开发基座要有东西可对齐"。一个插件都不装是合法状态。
+//   · `samplePluginsDir()` —— 测试夹具住的地方（`tools/fixtures/plugins/`）。
+//     基座仓库不收录任何插件：那两棵是两套件共用的夹具，安装包里没有它们 ——
+//     那是对的，不是降级。从源码跑时它们在场。一个插件都不装是合法状态。
 //
 // 这两处只服务测试后端；安装包里既没有假站点，也没有它们。
 
 /**
- * 测试接缝：把样例那一棵换掉（`null` = 恢复默认）。
+ * 测试接缝：把夹具那一棵换掉（`null` = 恢复默认）。
  *
  * 用例要造"站上一个插件都没有"的现场（那里放一个空目录），而真机上那意味着
- *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次。它只动样例那一处：
+ *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次。它只动夹具那一处：
  *   装上去的东西在临时 userData 里，用例自己那份本来就是空的。
  */
 let sampleDirOverride = null;
 
 /**
- * 开发样例住的地方 —— 仓库里的 `plugins/`。打包版没有它，而那是对的。
+ * 测试夹具住的地方 —— 仓库里的 `tools/fixtures/plugins/`。打包版没有它，而那是对的。
  *
  * 传函数而不是路径的地方（backend-fake）看的是每次现算：从源码跑与从安装包
  *   跑是两个事实。返回 `null` = 这个位置不存在（安装包里没有它）。
  */
 function samplePluginsDir() {
   if (sampleDirOverride !== null) return sampleDirOverride || null;
-  const d = path.join(__dirname, '..', '..', '..', 'plugins');
+  const d = path.join(__dirname, '..', '..', '..', 'tools', 'fixtures', 'plugins');
   try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
 }
 
@@ -6394,11 +6392,11 @@ module.exports = {
      */
     seedTestConnection: () => ensureTestConnection(),
     /**
-     * 把假站点的样例那一棵就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
+     * 把假站点的夹具那一棵就地换掉，并丢弃那张启动快照（传 `null` = 恢复默认那棵）。
      *
      * 用例要的现场是"站上一个插件都没有"（那里放一个空目录），而真机上那意味着
      *   换一棵树 + 重启 —— 一个进程里 index.js 只加载一次，所以只能这么造。
-     * 它只动样例那一处：装上去的东西在临时 userData 里，用例自己那份本来就是空的。
+     * 它只动夹具那一处：装上去的东西在临时 userData 里，用例自己那份本来就是空的。
      *
      * `backend` 可能还没有（`bootstrap` 之后才建）：那种情况下这一句仍然是
      *   有效的 —— override 是每次现算的（后端建起来读的正是它），而没有后端也

@@ -5,8 +5,8 @@
 Slurmate 在 Slurm 集群上提供远程开发环境。
 它把网络 ACL 的登记簿挂在作业上，不挂在 SSH 会话上，所以 SSH 闪断不会丢会话。
 
-作业里跑什么由插件决定。插件是独立项目（[`plugins/`](plugins)），基座两端都不带
-插件，一个都不装也是正常状态。
+作业里跑什么由插件决定。插件是独立项目，基座仓库里一棵都不收录，两端都不带，
+一个都不装也是正常状态。
 
 ---
 
@@ -105,15 +105,14 @@ cluster/          集群侧（部署到登录节点）
   nft-compare.py           非干扰比对器（带自测）
   test-sessiond-logic.py   守护进程自测
 client/           Electron 桌面客户端
-plugins/          插件的独立项目。基座不依赖它们，客户端打包不含它们。这个目录里
-                   放着一棵开发样例树，用来在开发时对齐两侧的能力；一个插件都没有
-                   是合法状态。见 packer/docs/README.md
 packer/           插件作者的打包器（单文件、零依赖）。它跑在作者的机器上，产出
                    .splug；服务器上从头到尾没有源码树，install-base.sh 永不打包
 docs/             README.md 是索引（按读者分三组）；其余：架构、部署、配置、协议、
                    插件规范与容器格式、排障、已知问题
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
   conformance/    三份实现共用的符合性向量（输入树 + 期望的包字节 + 坏包 + 签名夹具）
+  fixtures/       测试夹具。`plugins/` 下是两套件共用的两棵插件树 —— 基座不收录
+                   任何插件，这里只放能力测试需要的那两棵
 ```
 
 ---
@@ -202,8 +201,8 @@ sudo bash cluster/install-base.sh              # 部署
 - ACL 规则的目标必须是一条真实的节点地址：判据取 Slurm 报的 `NodeAddr` 全集
   （`Nft.add_session_rule()`），拿不到那份集合时不判、只记一条。
 - 产物未签名：Windows 首次运行会被 SmartScreen 拦，macOS 需要右键 →「打开」。
-- 基座不带任何插件，两端都是。作业里能跑什么由插件决定，而插件是独立项目
-  （[`plugins/`](plugins)），基座里没有任何一个插件的名字。
+- 基座不带任何插件，两端都是。作业里能跑什么由插件决定，而插件是独立项目，
+  基座里没有任何一个插件的名字。
 
   插件以一个包文件（`.splug`）分发。作者在自己的机器上用 [`packer/`](packer) 打包
   （服务器上从头到尾没有源码树），管理员把包装上去：`sudo slurmate plugin install <包>`，

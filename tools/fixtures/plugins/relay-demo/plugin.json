@@ -1,0 +1,27 @@
+{
+  "id": "01M5MX8V566VAM1CPRV9XQ46WM",
+  "name": "relay-demo",
+  "displayName": "中转示例",
+  "version": "1.0.0",
+  "description": "测试夹具：一个没有界面、要公钥的中转插件。基座不依赖任何具体插件，夹具只提供它需要的能力。",
+  "author": "slurmate",
+  "engines": { "slurmate": ">=0.5" },
+  "contributes": {
+    "ports": 0,
+    "submitPubkey": true,
+    "concurrent": false,
+    "data": {
+      "inherit": "relay"
+    }
+  },
+  "site": {
+    "defaultCpus": 1,
+    "defaultMem": "2G",
+    "defaultEnabled": false,
+    "bin": {
+      "env": "SLURMATE_RELAY_DEMO_BIN",
+      "discovery": "convention",
+      "fallback": "/usr/sbin/relay-demo"
+    }
+  }
+}

@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const R = path.join(here, '..', 'src', 'renderer');
 const SRC = path.join(here, '..', 'src');
-const PLUGINS = path.join(here, '..', '..', 'plugins');
+const PLUGINS = path.join(here, '..', '..', 'tools', 'fixtures', 'plugins');
 
 /** 一个目录下（含子目录）里以某几个后缀结尾的文件。`node_modules` 不进去。 */
 function walk(dir, exts) {
@@ -123,7 +123,7 @@ test('界面里不许写死任何插件名 —— 按钮必须由清单画出来
   //   插件名是在解释这套机制，不是在违反它（`panel.html` 顶部那条 CSP 的
   //   检查也是同样的处理）。
   for (const [what, src] of [['panel.js', js], ['panel.html', html]]) {
-    for (const name of ['web-demo', 'sshd']) {
+    for (const name of ['web-demo', 'relay-demo']) {
       const lit = new RegExp(`['"\`]${name}['"\`]`);
       assert.equal(lit.test(src), false,
         `${what} 里出现了插件名的字面量 ${JSON.stringify(name)} —— `

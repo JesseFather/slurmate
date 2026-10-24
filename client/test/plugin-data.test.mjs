@@ -59,9 +59,9 @@ const concurrent = (over = {}) => plugin({
   ...over,
 });
 
-/** 不要数据空间的那一个 —— sshd 真实的样子（`ports: 0`）。 */
+/** 不要数据空间的那一个 —— relay-demo 的真实样子（`ports: 0`）。 */
 const relay = (over = {}) => plugin({
-  id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd',
+  id: '01M5MX8V566VAM1CPRV9XQ46WM', name: 'relay-demo',
   contributes: { ports: 0, concurrent: false, data: { inherit: 'relay' } },
   ...over,
 });
@@ -207,7 +207,7 @@ test('其他插件共用同一个共享组名，也不会共用同一份存储',
   // 共享组名是作者自己起的，两个插件正好都叫 editor 是完全正常的。分区名的头一段
   // 是插件 id，所以它们不会撞 —— 少了这一段（只有末段），
   // 两个声明了 ports 的插件共用一个工作区时会读写同一份存储。
-  const other = concurrent({ id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'other' });
+  const other = concurrent({ id: '01M5MX8V566VAM1CPRV9XQ46WM', name: 'other' });
   const a = space({ group: 'editor' });
   const b = space({ pluginId: other.id, group: 'editor' });
   assert.notEqual(partitionOf(concurrent(), a), partitionOf(other, b));
@@ -258,7 +258,7 @@ test('折叠是单射：两个不同的 ULID 折不出同一个名字', () => {
   // 共用一个目录。`ulid.ENCODING` 只有大写，而折叠对"大写字母+数字"是单射，
   // 所以两个不同的 ULID 折不出同一个串 —— 后两段的字符集本来就只允许小写，折不动。
   assert.notEqual(
-    pluginData.dataDirNameOf(['01M2JKHTZGF12N0T9CB3XVK36H', 'relay']),
+    pluginData.dataDirNameOf(['01M5MX8V566VAM1CPRV9XQ46WM', 'relay']),
     pluginData.dataDirNameOf(['01M2JKHTZGF12N0T9CB3XVK36W', 'relay']));
   // 而且它是折叠过的：拿它再折一次必须不变（幂等）。
   const n = pluginData.dataDirNameOf(['01M2ABC', 'EDITOR']);
@@ -347,7 +347,7 @@ test('四条判据各管一件事：hasSurface / needsSpace / canOpenSecond / po
     //   只是那两份不能同时活着。清理与对账都按 needsSpace，不按 canOpenSecond ——
     //   用后者会把好几份活着的数据判成"不属于这份数据"而漏删（或者根本算不出来）。
     [{ surface, ports: 1, concurrent: false }, true, true, false, 1],
-    // 不要数据空间的那一个（sshd）：整台机器上一份，没有第三段。
+    // 不要数据空间的那一个（relay-demo）：整台机器上一份，没有第三段。
     [{ surface, ports: 0, concurrent: false }, true, false, false, 0],
     // 缺省（不写这一格）= 0 —— 与写成 0 同义，与相邻那两格同一条纪律。
     [{ surface, concurrent: false }, true, false, false, 0],
@@ -550,11 +550,11 @@ test('contributes.data： 老的 perInstance 得到一句指路的报错，不�
 });
 
 test('contributes.data：一个声明都不写的插件是正常的（那一格有缺省）', () => {
-  // sshd 就是这样：它落盘那几个文件是可丢弃的缓存，共享组那一格它不用表态。
+  // relay-demo 就是这样：它落盘那几个文件是可丢弃的缓存，共享组那一格它不用表态。
   // 注意它与 `concurrent` 的差别：那一格没有缺省、必须写（见上面第一条），
   //   而这一格不写只是一个保守的选择。
   const r = inspect({
-    id: '01M2JKHTZGF12N0T9CB3XVK36H', name: 'sshd', displayName: 'SSH 中转站',
+    id: '01M5MX8V566VAM1CPRV9XQ46WM', name: 'relay-demo', displayName: '中转示例',
     version: '1.0.0', contributes: { ports: 0, concurrent: false },
   });
   assert.ok(!r.error, `不声明 data 必须合法：${r.error}`);

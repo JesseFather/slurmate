@@ -69,10 +69,10 @@ UID = os.getuid()
 
 # 仓库里那两个真插件的短名。它们不是守护进程的常量 —— 守护进程里现在
 # 一个插件名都没有，表是扫出来的。这里写死是因为下面的用例要指名道姓地引用
-# 「web-demo 那个插件」「sshd 那个插件」，而它们来自 make_config 装进去的
+# 「web-demo 那个插件」「relay-demo 那个插件」，而它们来自 make_config 装进去的
 # 那两份真清单。
 CS = "web-demo"
-SSHD = "sshd"
+RELAY = "relay-demo"
 
 PASS = 0
 FAIL = 0
@@ -482,16 +482,16 @@ def make_config(mod, tmpdir):
     mod.LOG_DIR = os.path.join(tmpdir, "log")
     mod.SOCKET_PATH = os.path.join(tmpdir, "ctl.sock")
     # 4. 插件目录 —— 与作业脚本同理，由守护进程自身的安装位置推导，开发机上
-    #    还没部署。这里现场把仓库顶层 plugins/ 下那两个真插件打成包，装进一个
-    #    临时目录 —— 正是安装器会做的事（集群侧装包只有那一处实现）。
+    #    还没部署。这里现场把测试夹具那一棵（`tools/fixtures/plugins/`）里的
+    #    真清单打成包，装进一个临时目录 —— 正是安装器会做的事（集群侧装包只有
+    #    那一处实现）。
     #
-    #    刻意用真的那两个而不是合成替身：插件与基座的接口正是这一版反复在
-    #      动的东西，用替身测等于没测 —— 替身会跟着实现一起漂，而真插件不会。
+    #    刻意用真清单而不是合成替身：插件与基座的接口正是这一版反复在动的
+    #      东西，用替身测等于没测 —— 替身会跟着实现一起漂，而夹具不会。
     #    也是真的打包（走 build_package 那个容器）、再照安装器的形状解开
     #      （`install_package` → 一棵树 + 一份记录表），不是绕过这两步直接摆一棵树：
     #      "装出来是一棵能对账的树"正是这一版要测的东西，夹具绕过它就等于没测。
-    #    装的是测试夹具那一棵（`tools/fixtures/plugins/`）与仓库里留下的
-    #    sshd 样例。基座不认识任何具体插件，夹具只提供它需要的能力。
+    #    基座仓库不收录任何插件，夹具只提供它需要的能力。
     plugins_src = os.path.normpath(
         os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins"))
     plugins_dir = os.path.join(tmpdir, "plugins")
@@ -502,10 +502,6 @@ def make_config(mod, tmpdir):
             continue
         install_package(plugins_dir,
                         plugin_files_of(_d, skip=mod.PLUGIN_COPY_SKIP))
-    _sshd = os.path.normpath(os.path.join(HERE, os.pardir, "plugins", "sshd"))
-    if os.path.isfile(os.path.join(_sshd, "plugin.json")):
-        install_package(plugins_dir,
-                        plugin_files_of(_sshd, skip=mod.PLUGIN_COPY_SKIP))
     mod.default_plugins_dir = lambda: plugins_dir
 
     # 5. 作业脚本目录 —— 按各插件的 ULID 真织一遍（见上面第 2 条的说明）。
@@ -1017,8 +1013,8 @@ def main():
     for i, (bad, why) in enumerate((("range_start = 1\nrange_start = 2\n", "重复键"),
                                     ("这不是赋值\n", "缺等号"),
                                     ("= 5\n", "缺键名"),
-                                    ("[plugin:sshd]\nenabled = yes\n", "主文件里写块头"),
-                                    ("[plugin:sshd\n", "没闭合的块头"),
+                                    ("[plugin:relay-demo]\nenabled = yes\n", "主文件里写块头"),
+                                    ("[plugin:relay-demo\n", "没闭合的块头"),
                                     ("[cluster]\nx = 1\n", "其他块头同理"))):
         try:
             parse(bad, "bad-%d.conf" % i)
@@ -1030,21 +1026,21 @@ def main():
     _pc = os.path.join(tmpdir, "treeparse.conf")
     with open(_pc, "w", encoding="utf-8") as f:
         f.write("range_end = 5\n")
-    write_plugin_conf(_pc, "sshd", "# 说明\nenabled = yes\ndefault_cpus = 3\n")
+    write_plugin_conf(_pc, "relay-demo", "# 说明\nenabled = yes\ndefault_cpus = 3\n")
     _g, _s, _m = mod.parse_config(_pc)
     check("插件配置住在 `<配置路径>.d/<名字>.conf`，主文件只有通用键",
           _g == {"range_end": "5"}
-          and _s == {"sshd": {"enabled": "yes", "default_cpus": "3"}},
+          and _s == {"relay-demo": {"enabled": "yes", "default_cpus": "3"}},
           "%s / %s" % (_g, _s))
     check("第三个返回值给出是哪一个文件（报错要说得出这句，不然管理员"
           "得去猜）",
-          _m["sshd"]["file"].endswith(
-              os.path.join("treeparse.conf.d", "sshd.conf")), str(_m))
+          _m["relay-demo"]["file"].endswith(
+              os.path.join("treeparse.conf.d", "relay-demo.conf")), str(_m))
 
     # 主文件里写块头那条报错要说清该写到哪儿去 —— 只说"不合法"的话，
     #   管理员唯一想得到的动作是把那几行删掉，而那是把他的配置丢掉。
     try:
-        parse("[plugin:sshd]\nenabled = yes\n", "hint.conf")
+        parse("[plugin:relay-demo]\nenabled = yes\n", "hint.conf")
         _hint = ""
     except ValueError as e:
         _hint = str(e)
@@ -1052,7 +1048,7 @@ def main():
           ".d/" in _hint and "一个插件一个文件" in _hint, _hint)
 
     # drop-in 文件里同样不写块头 —— 文件名已经说了这一份是谁的。
-    _weird = write_plugin_conf(_pc, "weird", "[plugin:sshd]\nenabled = yes\n")
+    _weird = write_plugin_conf(_pc, "weird", "[plugin:relay-demo]\nenabled = yes\n")
     try:
         mod.parse_config(_pc)
         _hint2 = ""
@@ -1868,7 +1864,7 @@ exit 0
 
     # 每个真插件都提交它自己那一份作业脚本。
     #
-    # 这一条堵的是「提交了 web-demo、跑起来的是 sshd」—— 一个插件一份成品之后，
+    # 这一条堵的是「提交了 web-demo、跑起来的是 relay-demo」—— 一个插件一份成品之后，
     # 脚本路径由 op_submit 按 spec.id 算出来，而那个算错在真机上隔着作业日志，
     # 不容易看见（第 18 节的 submit 是打桩的，看不见 argv）。
     for _sp in cfg.plugin_specs:
@@ -2323,7 +2319,7 @@ exit 0
     r, _s, _e = run_submit({"op": "submit", "partition": "2080TI"})
     d.store.close()
 
-    # ── 19. 服务种类（web-demo / sshd）───────────────────────────────────
+    # ── 19. 服务种类（web-demo / relay-demo）───────────────────────────────────
     #
     # 一个会话提供哪种服务。两条路互斥，由 run.sbatch 的分派结构性地
     # 保证。这里测的是守护进程这一侧：缺省、开关、公钥、以及"从 nft 规则恢复出来
@@ -2362,7 +2358,7 @@ exit 0
 
     print("\n  -- 19.0 扫出来的插件表 --")
     check("扫出了两个插件（表来自磁盘，不是代码常量）",
-          sorted(cfg.plugins_by_name) == sorted([CS, SSHD]), str(sorted(cfg.plugins_by_name)))
+          sorted(cfg.plugins_by_name) == sorted([CS, RELAY]), str(sorted(cfg.plugins_by_name)))
     check("清单合法时没有诊断输出", cfg.plugin_problems == (), str(cfg.plugin_problems))
     # 一个插件在站点上是一棵树 + 一份记录表：树按 id 命名，记录表就在它
     #   旁边。两条都要在 —— 只有树没有记录表 = 那次安装没提交。
@@ -2378,9 +2374,9 @@ exit 0
           str(sorted(os.listdir(cfg.plugins_dir))))
     check("job_entry 是按短名推出来的真契约（与 run.sbatch 的 plugin_call 同一条规则）",
           cfg.resolve_plugin(CS)[0].job_entry == "start_web_demo"
-          and cfg.resolve_plugin(SSHD)[0].job_entry == "start_sshd",
+          and cfg.resolve_plugin(RELAY)[0].job_entry == "start_relay_demo",
           "%s / %s" % (cfg.resolve_plugin(CS)[0].job_entry,
-                       cfg.resolve_plugin(SSHD)[0].job_entry))
+                       cfg.resolve_plugin(RELAY)[0].job_entry))
     # 「有没有作业侧」现在是一个事实，不是一条合法性判据：两个真插件都有，
     #   而没有的那种是合法的（见 19.0e）。所以这里断言的是"这两个有"，
     #   不是"所有插件都必须有"。
@@ -3171,8 +3167,8 @@ exit 0
           "住在哪儿、谁起的名字"由 19.18 的专门用例钉着。
 
         每次调用先清空 drop-in 目录：真实的对账只删"它自己那一份"，而
-          夹具要的是"这一次写的就是全部"。不清的话，上一次留下的 `sshd.conf`
-          会继续生效 —— 症状是"一个插件都不开"那条用例拿到一个开着的 sshd
+          夹具要的是"这一次写的就是全部"。不清的话，上一次留下的 `relay-demo.conf`
+          会继续生效 —— 症状是"一个插件都不开"那条用例拿到一个开着的 relay-demo
           （这个夹具第一版就是这么写的，当场被那条用例逮到）。
         """
         p = os.path.join(tmpdir, name)
@@ -3206,41 +3202,41 @@ exit 0
     check("一个 [plugin:*] 块都没有 → 只有 web-demo（与升级前完全一致）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("没写的块也有一份配置，且能分出「没写」与「写了但关着」",
-          _c.plugin_config(SSHD).present is False
-          and _c.plugin_config(SSHD).enabled is False)
+          _c.plugin_config(RELAY).present is False
+          and _c.plugin_config(RELAY).enabled is False)
 
     # ── 取值写错时，报错要点名那一份配置在哪个文件 ────────────────────
     #
-    # 报错不能报成 `[plugin:sshd] 的 default_cpus`：写进主文件本身就是一条
+    # 报错不能报成 `[plugin:relay-demo] 的 default_cpus`：写进主文件本身就是一条
     #   硬错误（守护进程拒绝启动），照着它去改会撞上这条错误，比不指还坏。
     #   这里报的是那一份 drop-in 的路径。
     # 判据是"那条报错里出现了那一份配置的文件名"，而且没有 `[plugin:` ——
-    #   只判前者的话，写成 `[plugin:sshd]（sshd.conf）` 这种既旧又新的混搭也会绿。
+    #   只判前者的话，写成 `[plugin:relay-demo]（relay-demo.conf）` 这种既旧又新的混搭也会绿。
     _bad_where = None
     try:
-        pcfg("[plugin:sshd]\ndefault_cpus = 很多\n")
+        pcfg("[plugin:relay-demo]\ndefault_cpus = 很多\n")
     except ValueError as _e:
         _bad_where = str(_e)
     check("配置项写错时的报错点名那一份配置的文件，不再写 `[plugin:…]`",
-          _bad_where is not None and "sshd.conf" in _bad_where
+          _bad_where is not None and "relay-demo.conf" in _bad_where
           and "[plugin:" not in _bad_where,
           repr(_bad_where))
 
-    _c = pcfg("[plugin:sshd]\ndefault_cpus = 4\n")
+    _c = pcfg("[plugin:relay-demo]\ndefault_cpus = 4\n")
     check("写了块但没写 enabled → 仍然不开（一句 default_cpus 不该开出一条 ssh 的路）",
           _c.enabled_kinds == (CS,), str(_c.enabled_kinds))
     check("那份配置里写的默认资源生效；没写的用插件自己的内建值",
-          _c.plugin_config(SSHD).default_cpus == 4
-          and _c.plugin_config(SSHD).default_mem == "2G",
-          "%s / %s" % (_c.plugin_config(SSHD).default_cpus,
-                       _c.plugin_config(SSHD).default_mem))
+          _c.plugin_config(RELAY).default_cpus == 4
+          and _c.plugin_config(RELAY).default_mem == "2G",
+          "%s / %s" % (_c.plugin_config(RELAY).default_cpus,
+                       _c.plugin_config(RELAY).default_mem))
     # 时限是"那份配置 ＞ 清单 ＞ 内建"三层。这里验"配置里写的生效 + 规范化"，另外两层
     #   各自有它自己的那一条（`_jup` 那一节：清单声明的 3:30:00 走到了提交，
     #   并有一条纯解析的断言验它盖过清单）。
-    _c = pcfg("[plugin:sshd]\ndefault_time = 2:00:00\n")
+    _c = pcfg("[plugin:relay-demo]\ndefault_time = 2:00:00\n")
     check("那份配置里写的 default_time 生效，且与清单那条相同规范化",
-          _c.plugin_config(SSHD).default_time == "02:00:00",
-          str(_c.plugin_config(SSHD).default_time))
+          _c.plugin_config(RELAY).default_time == "02:00:00",
+          str(_c.plugin_config(RELAY).default_time))
 
     # ── `default_gpus`：只在那儿 ────────────────────────────────────────
     #
@@ -3248,28 +3244,28 @@ exit 0
     #   本站管那张卡叫什么（`gpu` 还是 `mps`、型号叫 `a100` 还是 `A100-PCIE-40GB`），
     #   那是本站在 `gres.conf` 里定的事实。所以"作者声明缺省卡数"这一格不该有，
     #   不是"还没做"（见账本 F15 的去向）。
-    _c = pcfg("[plugin:sshd]\ndefault_gpus = gpu:a100:2\n")
+    _c = pcfg("[plugin:relay-demo]\ndefault_gpus = gpu:a100:2\n")
     check("那份配置里写的 default_gpus 生效 —— 形状就是 `--gres=` 后面那一段",
-          _c.plugin_config(SSHD).default_gpus == {"name": "gpu", "type": "a100",
+          _c.plugin_config(RELAY).default_gpus == {"name": "gpu", "type": "a100",
                                                   "count": 2},
-          repr(_c.plugin_config(SSHD).default_gpus))
+          repr(_c.plugin_config(RELAY).default_gpus))
     check("不带型号的那一段形状也认（与 sbatch 同一条语法）",
-          pcfg("[plugin:sshd]\ndefault_gpus = gpu:4\n")
-          .plugin_config(SSHD).default_gpus == {"name": "gpu", "type": None,
+          pcfg("[plugin:relay-demo]\ndefault_gpus = gpu:4\n")
+          .plugin_config(RELAY).default_gpus == {"name": "gpu", "type": None,
                                                 "count": 4})
     check("没写，不占（None，而不是一个「安全的数量」）—— 默认占住稀缺"
           "算力是站点政策，框架不替所有站点选择一个数",
           _c.plugin_config(CS).default_gpus is None,
           repr(_c.plugin_config(CS).default_gpus))
 
-    _c = pcfg("[plugin:sshd]\nenabled = yes\n")
-    check("开 sshd 不会一并关掉 web-demo（管理员只想开中转站，不该丢掉 IDE）",
-          sorted(_c.enabled_kinds) == sorted([CS, SSHD]),
+    _c = pcfg("[plugin:relay-demo]\nenabled = yes\n")
+    check("开 relay-demo 不会一并关掉 web-demo（管理员只想开中转站，不该丢掉 IDE）",
+          sorted(_c.enabled_kinds) == sorted([CS, RELAY]),
           str(_c.enabled_kinds))
 
-    _c = pcfg("[plugin:web-demo]\nenabled = no\n[plugin:sshd]\nenabled = yes\n")
+    _c = pcfg("[plugin:web-demo]\nenabled = no\n[plugin:relay-demo]\nenabled = yes\n")
     check("显式关掉 web-demo 是合法的（站点只留中转站）",
-          _c.enabled_kinds == (SSHD,), str(_c.enabled_kinds))
+          _c.enabled_kinds == (RELAY,), str(_c.enabled_kinds))
 
     _c = pcfg("[plugin:web-demo]\nenabled = no\n")
     check("一个插件都不开是合法的（「外壳」的定义：基座不因插件的有无而缺一块）",
@@ -3285,9 +3281,9 @@ exit 0
     #    少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
     #    每一次省略 service_kind 的提交都拿到 `4 service_kind_disabled`，
     #    错误消息说的是「本站没开「SSH 中转站」」—— 它不会提这是配置里
-    #    default_plugin 配错了。用户看到的是"站点好像不支持 sshd"，而管理员
+    #    default_plugin 配错了。用户看到的是"站点好像不支持 relay-demo"，而管理员
     #    接下来的排查方向从第一步就是错的。
-    _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = no\n")
+    _c = pcfg("default_plugin = relay-demo\n[plugin:relay-demo]\nenabled = no\n")
     _errs = " ".join(_c.validate())
     check("default_plugin 指向装了、但关着的插件 → 启动就拒绝",
           _errs != "", str(_c.validate())[:160])
@@ -3298,7 +3294,7 @@ exit 0
     # 对照组：同一个 default_plugin，把它打开就一切正常。少了这一条，一个
     #    "default_plugin 非空就报错"的实现也能让上面两条绿 —— 而它会拒绝一份
     #    完全合法的配置。
-    _ok = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
+    _ok = pcfg("default_plugin = relay-demo\n[plugin:relay-demo]\nenabled = yes\n")
     check("对照：同一个 default_plugin，插件开着，一个错误都没有",
           _ok.validate() == [], str(_ok.validate())[:160])
 
@@ -3386,27 +3382,27 @@ exit 0
     #      这件事当场红，而不是靠读代码的人记得。
     for _txt, _why, _kw, _where in (
             ("[plugin:ssh]\nenabled = yes\n", "未知的插件名", "ssh", "warn"),
-            ("[plugin:sshd]\ndefualt_cpus = 1\n", "插件配置里拼错的键",
+            ("[plugin:relay-demo]\ndefualt_cpus = 1\n", "插件配置里拼错的键",
              "defualt_cpus", "err"),
-            ("[plugin:sshd]\nenabled = yes\nrange_start = 55001\n",
+            ("[plugin:relay-demo]\nenabled = yes\nrange_start = 55001\n",
              "通用键写进了插件那一份里（它住在主配置）", "range_start", "err"),
             ("[plugin:web-demo]\nauth_mode = passwd\n", "auth_mode 取值非法",
              "auth_mode", "err"),
-            ("[plugin:sshd]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
+            ("[plugin:relay-demo]\ndefault_mem = 0\n", "default_mem 写成 Slurm 的整机内存",
              "default_mem", "err"),
-            ("[plugin:sshd]\ndefault_time = 0:30\n", "default_time 比 1 分钟还短",
+            ("[plugin:relay-demo]\ndefault_time = 0:30\n", "default_time 比 1 分钟还短",
              "default_time", "err"),
-            ("[plugin:sshd]\ndefault_time = unlimited\n", "default_time 写成「无限」",
+            ("[plugin:relay-demo]\ndefault_time = unlimited\n", "default_time 写成「无限」",
              "default_time", "err"),
-            ("[plugin:sshd]\ndefault_time = 两小时\n", "default_time 认不出",
+            ("[plugin:relay-demo]\ndefault_time = 两小时\n", "default_time 认不出",
              "default_time", "err"),
-            ("[plugin:sshd]\ndefault_gpus = gpu:a100\n",
+            ("[plugin:relay-demo]\ndefault_gpus = gpu:a100\n",
              "default_gpus 缺数量（写成了名字:型号）", "数量必须是整数", "err"),
-            ("[plugin:sshd]\ndefault_gpus = gpu:1,mps:2\n",
+            ("[plugin:relay-demo]\ndefault_gpus = gpu:1,mps:2\n",
              "default_gpus 写了两项", "只能写一项", "err"),
-            ("[plugin:sshd]\ndefault_gpus = gpu:0\n",
+            ("[plugin:relay-demo]\ndefault_gpus = gpu:0\n",
              "default_gpus 的数量是 0", "count", "err"),
-            ("[plugin:sshd]\ndefault_gpus = gpu:1:2:3\n",
+            ("[plugin:relay-demo]\ndefault_gpus = gpu:1:2:3\n",
              "default_gpus 段数不对", "无法识别", "err")):
         try:
             _c = pcfg(_txt)
@@ -3425,7 +3421,7 @@ exit 0
     _dt_msgs = {}
     for _v in ("0:30", "unlimited", "两小时"):
         try:
-            _dt_msgs[_v] = " ".join(pcfg("[plugin:sshd]\ndefault_time = %s\n" % _v)
+            _dt_msgs[_v] = " ".join(pcfg("[plugin:relay-demo]\ndefault_time = %s\n" % _v)
                                     .validate())
         except ValueError as _ex:
             _dt_msgs[_v] = str(_ex)
@@ -3443,7 +3439,7 @@ exit 0
     #   绿。这一条就是补那个洞的。
     #   v0.12：根因从"顺序"变成了"它住在另一份文件里"—— 通用键在主配置
     #     （`slurmate.conf`），插件那一份里写不下它。
-    _msg = " ".join(pcfg("[plugin:sshd]\nenabled = yes\nrange_start = 55001\n")
+    _msg = " ".join(pcfg("[plugin:relay-demo]\nenabled = yes\nrange_start = 55001\n")
                     .validate())
     check("而且要说清是「它住在主配置里」，不是一句泛泛的「认不出这个键」",
           "通用键" in _msg and "主配置" in _msg, _msg[:160])
@@ -3464,9 +3460,9 @@ exit 0
     # 这条与 19.3（`make_config` 那份配置里 default_plugin = web-demo）合起来
     # 才完整：只测"缺省是 web-demo"的话，一个把 web-demo 写死的实现照样全绿
     # —— 而"写死一个缺省插件名"正是这一版要从基座里拿掉的东西。
-    _c = pcfg("default_plugin = sshd\n[plugin:sshd]\nenabled = yes\n")
+    _c = pcfg("default_plugin = relay-demo\n[plugin:relay-demo]\nenabled = yes\n")
     check("default_plugin 被解析出来，且指向已装的插件时不是错误",
-          _c.default_plugin == "sshd" and _c.validate() == [],
+          _c.default_plugin == "relay-demo" and _c.validate() == [],
           "%r / %s" % (_c.default_plugin, _c.validate()[:1]))
     # 但只查这个属性是不够的：把 `kind = cfg.default_plugin` 改成写死的
     #   `kind = "web-demo"` 时它照样全绿 —— 而"写死一个缺省插件名"正是这一版
@@ -3474,18 +3470,18 @@ exit 0
     _pub8 = ("ssh-ed25519 "
              "AAAAC3NzaC1lZDI1NTE5AAAAIKOQC0BF5KaDnhkVut1TZH7WyBhCtnK8zrunOAZ7wSGx")
     _sd, _sk = cfg.default_plugin, cfg.enabled_kinds
-    _se = cfg.plugin_config(SSHD).enabled
+    _se = cfg.plugin_config(RELAY).enabled
     try:
-        cfg.default_plugin = SSHD
-        cfg.plugin_config(SSHD).enabled = True
+        cfg.default_plugin = RELAY
+        cfg.plugin_config(RELAY).enabled = True
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
         _r8, _s8, _ = run_submit({"op": "submit", "ssh_pubkey": _pub8})
         check("不带 service_kind 时真的落到配置里那个插件上（不是写死的名字）",
-              _r8.get("ok") and _s8.get("service_kind") == SSHD,
+              _r8.get("ok") and _s8.get("service_kind") == RELAY,
               "%s / %s" % (str(_r8.get("error"))[:90], _s8.get("service_kind")))
     finally:
         cfg.default_plugin, cfg.enabled_kinds = _sd, _sk
-        cfg.plugin_config(SSHD).enabled = _se
+        cfg.plugin_config(RELAY).enabled = _se
 
     # 19.2 公钥的解析（纯函数）。ed25519 的 blob 恒为 51 字节，形状可以卡死。
     _pub = ("ssh-ed25519 "
@@ -3516,10 +3512,10 @@ exit 0
     check("环境变量把服务种类传给了作业",
           env.get("SLURMATE_SERVICE_KIND") == CS, str(env))
 
-    # 19.4 站点没开 sshd 时必须明确拒绝 —— 而不是起一个"看起来起来了但连不上"的作业
-    r, _s, _e = run_submit({"op": "submit", "service_kind": "sshd",
+    # 19.4 站点没开 relay-demo 时必须明确拒绝 —— 而不是起一个"看起来起来了但连不上"的作业
+    r, _s, _e = run_submit({"op": "submit", "service_kind": "relay-demo",
                             "ssh_pubkey": _pub})
-    check("站点没开 sshd → code 4 service_kind_disabled",
+    check("站点没开 relay-demo → code 4 service_kind_disabled",
           not r.get("ok") and r["code"] == 4
           and r["error"]["kind"] == "service_kind_disabled", str(r.get("error")))
     r, _s, _e = run_submit({"op": "submit", "service_kind": "telnet"})
@@ -3528,32 +3524,32 @@ exit 0
           and r["error"]["kind"] == "bad_service_kind", str(r.get("error")))
 
     # 19.5 站点开启之后
-    _saved = cfg.plugin_config(SSHD).enabled
-    cfg.plugin_config(SSHD).enabled = True
+    _saved = cfg.plugin_config(RELAY).enabled
+    cfg.plugin_config(RELAY).enabled = True
     cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
     try:
-        r, sess, env = run_submit({"op": "submit", "service_kind": "sshd",
+        r, sess, env = run_submit({"op": "submit", "service_kind": "relay-demo",
                                    "ssh_pubkey": _pub})
-        check("开了之后 sshd 提交成功", r.get("ok"), str(r))
+        check("开了之后 relay-demo 提交成功", r.get("ok"), str(r))
         check("会话记住了服务种类（界面据此决定「连接」做什么）",
-              sess["service_kind"] == SSHD, str(sess.get("service_kind")))
-        check("sshd 会话的 auth_mode 是 publickey，不是 password",
+              sess["service_kind"] == RELAY, str(sess.get("service_kind")))
+        check("relay-demo 会话的 auth_mode 是 publickey，不是 password",
               sess["auth_mode"] == "publickey", sess["auth_mode"])
         check("缺公钥 → code 2 bad_ssh_pubkey",
               (lambda q: not q[0].get("ok") and q[0]["code"] == 2
                and q[0]["error"]["kind"] == "bad_ssh_pubkey")(
-                   run_submit({"op": "submit", "service_kind": "sshd"})),
+                   run_submit({"op": "submit", "service_kind": "relay-demo"})),
               "（见下一条的返回值）")
         check("公钥（连注释）传给了作业，且已规范化",
               env.get("SLURMATE_SSH_PUBKEY") == _pub,
               repr(env.get("SLURMATE_SSH_PUBKEY")))
         # 守护进程不下发主机密钥目录之类"插件自己的路径"了：那是插件内部
-        #   的事（sshd 插件的 job/start.sh 里写着 $HOME/.slurmate/ssh）。守护进程
+        #   的事（插件作业侧自己的路径，夹具里就没有这一类）。守护进程
         #   只下发插件的清单里声明过的那个 bin_env。
         check("守护进程按插件清单声明的变量名下发可执行文件路径",
-              env.get("SLURMATE_SSHD_BIN") == cfg.plugin_config(SSHD).bin
+              env.get("SLURMATE_RELAY_DEMO_BIN") == cfg.plugin_config(RELAY).bin
               and "SLURMATE_SSH_DIR" not in env,
-              "%s / %s" % (env.get("SLURMATE_SSHD_BIN"),
+              "%s / %s" % (env.get("SLURMATE_RELAY_DEMO_BIN"),
                            env.get("SLURMATE_SSH_DIR")))
         # 公钥的注释被丢掉了，所以它不可能把逗号带进 --export。
         #   注意这里只查我们自己新加的三个变量 —— `SLURMATE_CANDIDATES`
@@ -3561,12 +3557,12 @@ exit 0
         check("新加的三个变量都不含逗号（--export 的分隔符）",
               all("," not in str(env.get(k, "")) for k in
                   ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
-                   "SLURMATE_SSHD_BIN")),
+                   "SLURMATE_RELAY_DEMO_BIN")),
               str({k: env.get(k) for k in
                    ("SLURMATE_SERVICE_KIND", "SLURMATE_SSH_PUBKEY",
-                    "SLURMATE_SSHD_BIN")}))
+                    "SLURMATE_RELAY_DEMO_BIN")}))
     finally:
-        cfg.plugin_config(SSHD).enabled = _saved
+        cfg.plugin_config(RELAY).enabled = _saved
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
     # 19.5b 默认资源是按插件的 —— 这是"插件的策略放在它自己那份配置里"最直接的体现
@@ -3574,16 +3570,16 @@ exit 0
     # 它不该是所有服务共用一个值的两个代码常量（DEFAULT_CPUS / DEFAULT_MEM）：
     # 在中转站里跑一个 shell 和在 IDE 里跑语言服务器不是一回事。它是那一份配置里的
     # 一项，缺失时才回落到插件自己的内建值。
-    _sshd_id = cfg.resolve_plugin(SSHD)[0].id
-    _saved_cfg = cfg.plugins[_sshd_id]
+    _relay_id = cfg.resolve_plugin(RELAY)[0].id
+    _saved_cfg = cfg.plugins[_relay_id]
     try:
         # 表按 id 收（短名可以重复），所以这里写回去也要按 id。
-        cfg.plugins[_sshd_id] = mod.PluginConfig(
-            cfg.resolve_plugin(SSHD)[0],
+        cfg.plugins[_relay_id] = mod.PluginConfig(
+            cfg.resolve_plugin(RELAY)[0],
             {"enabled": "yes", "default_cpus": "7", "default_mem": "5G"}, True)
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
-        _r, _sess, _env = run_submit({"op": "submit", "service_kind": "sshd",
+        _r, _sess, _env = run_submit({"op": "submit", "service_kind": "relay-demo",
                                       "ssh_pubkey": _pub})
         check("省略 cpus/mem 时用【这个插件那份配置里】的默认值，不是全局那两个常量",
               _sess["cpus"] == 7 and _sess["mem"] == "5G",
@@ -3595,7 +3591,7 @@ exit 0
         # 作业日志的保留期与总量上限今天也是配置键，随提交下发。值必须是
         #   【纯十进制】：那条比较是 bash 的 `(( total > … ))`，写成 `10G` 就是一次
         #   非法算术、`(( ))` 返回非零 → 静默不删（日志一直涨，而什么都不报）。
-        _r, _sess_j, _env_j = run_submit({"op": "submit", "service_kind": "sshd",
+        _r, _sess_j, _env_j = run_submit({"op": "submit", "service_kind": "relay-demo",
                                           "ssh_pubkey": _pub})
         check("作业日志的两个数随提交下发（缺省 7 天 / 10 GiB）",
               _env_j.get("SLURMATE_LOG_KEEP_DAYS") == "7"
@@ -3611,7 +3607,7 @@ exit 0
         _save_lk, _save_lb = cfg.log_keep_days, cfg.log_dir_max_bytes
         try:
             cfg.log_keep_days, cfg.log_dir_max_bytes = 3, 512 * 1024 * 1024
-            _r, _, _env_j2 = run_submit({"op": "submit", "service_kind": "sshd",
+            _r, _, _env_j2 = run_submit({"op": "submit", "service_kind": "relay-demo",
                                          "ssh_pubkey": _pub})
             check("改配置之后下发的是新的那两个值",
                   _env_j2.get("SLURMATE_LOG_KEEP_DAYS") == "3"
@@ -3621,12 +3617,12 @@ exit 0
         finally:
             cfg.log_keep_days, cfg.log_dir_max_bytes = _save_lk, _save_lb
 
-        _r, _sess2, _ = run_submit({"op": "submit", "service_kind": "sshd",
+        _r, _sess2, _ = run_submit({"op": "submit", "service_kind": "relay-demo",
                                     "ssh_pubkey": _pub, "cpus": 3})
         check("显式给的资源仍然覆盖那份配置里的默认值",
               _sess2["cpus"] == 3, str(_sess2.get("cpus")))
     finally:
-        cfg.plugins[_sshd_id] = _saved_cfg
+        cfg.plugins[_relay_id] = _saved_cfg
         cfg.enabled_kinds = tuple(sorted({q.name for q in cfg.plugins.values() if q.enabled}))
 
     # 19.5c op_plugins：客户端据此决定画哪些按钮、每个按钮写多少资源
@@ -3634,10 +3630,10 @@ exit 0
     _data = _resp.get("data") or {}
     _by = {p["name"]: p for p in (_data.get("plugins") or [])}
     check("op_plugins 报出全部插件（含没启用的）",
-          set(_by) == {CS, SSHD}, str(sorted(_by)))
+          set(_by) == {CS, RELAY}, str(sorted(_by)))
     check("每个插件带自己的默认资源",
           _by[CS]["defaults"]["cpus"] == 2
-          and _by[SSHD]["defaults"]["cpus"] == 1,
+          and _by[RELAY]["defaults"]["cpus"] == 1,
           str({k: v.get("defaults") for k, v in _by.items()}))
     # 时限在同一格 `defaults` 里，因为它要回答的是同一个问题（"这个插件
     #   缺省给多少"），而客户端显示它的地方也只有那一处。这一格不进协议的话，
@@ -3650,7 +3646,7 @@ exit 0
     #   一条清清楚楚的红。
     check("defaults 里也有 time（少了它，界面说不出「能跑多久」）",
           _by[CS]["defaults"].get("time") == mod.DEFAULT_TIME
-          and _by[SSHD]["defaults"].get("time") == mod.DEFAULT_TIME,
+          and _by[RELAY]["defaults"].get("time") == mod.DEFAULT_TIME,
           str({k: v.get("defaults") for k, v in _by.items()}))
     # GRES 那一格是描述符或 null（与 `submit` 的 `gres` 同一形状），不是数字：
     #   `null` = 本站没给这个插件配默认卡，那是确定的事实，而"这个键整个不在"
@@ -3660,7 +3656,7 @@ exit 0
     #     在输出上分不开。
     check("defaults 里也有 gpus，且没配时是 `null`（不是缺键、不是 0）",
           _by[CS]["defaults"].get("gpus", "缺") is None
-          and _by[SSHD]["defaults"].get("gpus", "缺") is None,
+          and _by[RELAY]["defaults"].get("gpus", "缺") is None,
           str({k: v.get("defaults") for k, v in _by.items()}))
 
     # 并发上限（`max_sessions`）。与上面那几格同一类：管理员设的【政策】，
@@ -3672,29 +3668,29 @@ exit 0
     #   （同 `can_submit`）。取值走 `.get`，理由与上面那两条相同。
     check("op_plugins 报出 max_sessions，插件没写时跟随主配置（已经解析成数）",
           _by[CS].get("max_sessions") == cfg.max_sessions_per_user
-          and _by[SSHD].get("max_sessions") == cfg.max_sessions_per_user,
+          and _by[RELAY].get("max_sessions") == cfg.max_sessions_per_user,
           str({k: v.get("max_sessions") for k, v in _by.items()}))
     # 而它是【每个插件一份】的：一个插件写了不牵连别的。这一条挡的是"报一个
     #   全局值"那种实现 —— 那种实现在所有插件都没写时与真值逐字相同。
-    _ms_ids = {n: cfg.resolve_plugin(n)[0].id for n in (CS, SSHD)}
-    _ms_before = cfg.plugins[_ms_ids[SSHD]].max_sessions
+    _ms_ids = {n: cfg.resolve_plugin(n)[0].id for n in (CS, RELAY)}
+    _ms_before = cfg.plugins[_ms_ids[RELAY]].max_sessions
     try:
-        cfg.plugins[_ms_ids[SSHD]].max_sessions = 4
+        cfg.plugins[_ms_ids[RELAY]].max_sessions = 4
         _by_ms = {p["name"]: p for p in
                   (d.dispatch(os.getuid(), os.getgid(), {"op": "plugins"})
                    .get("data") or {}).get("plugins", [])}
-        check("而它是每个插件一份的：sshd 写 4 不牵连 web-demo",
-              _by_ms[SSHD].get("max_sessions") == 4
+        check("而它是每个插件一份的：relay-demo 写 4 不牵连 web-demo",
+              _by_ms[RELAY].get("max_sessions") == 4
               and _by_ms[CS].get("max_sessions") == cfg.max_sessions_per_user,
               str({k: v.get("max_sessions") for k, v in _by_ms.items()}))
     finally:
-        cfg.plugins[_ms_ids[SSHD]].max_sessions = _ms_before
-    check("enabled 如实反映站点决定（sshd 默认关着）",
+        cfg.plugins[_ms_ids[RELAY]].max_sessions = _ms_before
+    check("enabled 如实反映站点决定（relay-demo 默认关着）",
           _by[CS]["enabled"] is True
-          and _by[SSHD]["enabled"] is False,
+          and _by[RELAY]["enabled"] is False,
           str({k: v.get("enabled") for k, v in _by.items()}))
     check("也报出没启用的插件 —— 「装了但停用」与「本站没有」是两回事",
-          SSHD in _by)
+          RELAY in _by)
     check("不替客户端过滤它可能不认识的名字（那是升级提示的唯一来源）",
           all("name" in p and "title" in p for p in _by.values()))
 
@@ -3778,7 +3774,7 @@ exit 0
                ' Gres=gpu:a100:2 Partitions=A6000" ;;\n'
                'esac\n')
     install_package(_eplug, [("plugin.json", json.dumps({
-        "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "sshd",
+        "id": "01M2JKHTZGKJBFQQTWYXMQMF2V", "name": "relay-demo",
         "version": "1.0.0",
         "site": {"defaultCpus": 1, "defaultMem": "1G"}}).encode("utf-8"))])
     _econf = write_conf(""
@@ -3786,7 +3782,7 @@ exit 0
                         "check-gres.conf")
     # 插件配置是它自己的一份文件（`<主配置>.d/<名字>.conf`）。
     #   本站只有 `gpu:a100`，所以这里故意写一个没有的型号。
-    write_plugin_conf(_econf, "sshd", "enabled = yes\ndefault_gpus = gpu:h100:1\n")
+    write_plugin_conf(_econf, "relay-demo", "enabled = yes\ndefault_gpus = gpu:h100:1\n")
     _er = subprocess.run(
         [sys.executable, os.path.join(_ebin, "slurmate-sessiond"),
          "--check", "--config", _econf],
@@ -3794,7 +3790,7 @@ exit 0
         env=dict(os.environ,
                  PATH=_epath + ":" + os.environ.get("PATH", "/usr/bin:/bin")))
     check("`--check` 真的把那条警告打出来了（算出来了也送出去了）",
-          "gpu:h100" in _er.stdout and "sshd" in _er.stdout,
+          "gpu:h100" in _er.stdout and "relay-demo" in _er.stdout,
           "rc=%s\n%s\n--- stderr ---\n%s"
           % (_er.returncode, _er.stdout[-700:], _er.stderr[-300:]))
     check("而且点名本站有什么 —— 管理员照这一行改，不用去猜",
@@ -3888,7 +3884,7 @@ exit 0
     #    `--check` 才走得下去 —— 反过来（留在 validate 里）的话，这条命令在打印
     #    任何东西之前就以 1 退出了，两三行断言一起红。
     #
-    # 复用上面那一节的假安装前缀与桩：`_eplug` 里只有 MF2V（sshd）。
+    # 复用上面那一节的假安装前缀与桩：`_eplug` 里只有 MF2V（relay-demo）。
     _stale_conf = write_conf(""
                              "range_start = 55001\nrange_end = 55099\n",
                              "check-stale.conf")
@@ -3948,17 +3944,16 @@ exit 0
     # 插件名都不写：表是扫出来的，而它扫的正是仓库里那两个真插件。于是这条钉子的
     # 含义是：
     #
-    #     仓库 plugins/<目录>/plugin.json 是唯一的真相来源，
+    #     `tools/fixtures/plugins/<目录>/plugin.json` 是唯一的真相来源，
     #     守护进程读到的必须与文件里的逐字一致。
     #
     # 这仍然值得一条用例：客户端那一半也是从同一份清单读
     #   身份（它扫自己的池）。清单漂了不会崩溃，只会静默接错 —— 会话记的
     #   `<id>@<版本>` 在客户端的池里查不到，界面只解释、不动作，用户看到的是
     #   "作业起来了但界面一片白"，而根因一个字都不在里面。
-    # 清单的来源与 `make_config` 装的是同一批：测试夹具 + 仓库里留下的样例。
+    # 清单的来源与 `make_config` 装的是同一批：测试夹具那一棵。
     _plugdirs = [
         os.path.normpath(os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins")),
-        os.path.normpath(os.path.join(HERE, os.pardir, "plugins")),
     ]
     _manifests = {}
     _manifest_paths = {}
@@ -3976,7 +3971,7 @@ exit 0
 
     for _spec in cfg.plugin_specs:
         _mf = _manifests.get(_spec.name)
-        check("插件 %s：仓库的 plugins/ 下有它" % _spec.name, _mf is not None,
+        check("插件 %s：测试夹具里有它" % _spec.name, _mf is not None,
               str(sorted(_manifests)))
         if _mf is None:
             continue
@@ -4066,7 +4061,7 @@ exit 0
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
                    candidates="55001", created_at=mod.now_ts(),
-                   service_kind=SSHD)
+                   service_kind=RELAY)
     d.store.insert(session_id="s-unknown", uid=UID, user="alice",
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
@@ -4075,13 +4070,13 @@ exit 0
     # 文件。这里要验的只是 service_kind 的渲染，与口令无关。
     check("session_view 报出 service_kind",
           d.session_view(d.store.get("s-known"), with_secret=False)["service_kind"]
-          == SSHD)
+          == RELAY)
     check("数据库里没有时报 None，不许猜一个默认值 —— 猜错会让界面拿口令去打 SSH 端口",
           d.session_view(d.store.get("s-unknown"), with_secret=False)["service_kind"]
           is None)
 
     # 19.7 从 nft 规则恢复出来的会话不许猜自己的服务种类
-    #     nft 规则里没有任何东西能说明那个端口上跑的是 web-demo 还是 sshd。
+    #     nft 规则里没有任何东西能说明那个端口上跑的是 web-demo 还是 relay-demo。
     class _FakeNft(object):
         def session_rules(self):
             return ["slurmate-sess-%d-%d-%d" % (UID, 99999, 55555)]
@@ -4227,7 +4222,7 @@ exit 0
           "%d 个 vs 数据库里 %d 个"
           % (len(_cands_env.split(";")), len(_db_cands.split(","))))
 
-    # 19.10 作业内 sshd 的主机公钥
+    # 19.10 作业内服务的主机公钥
     # 客户端拿它把这一条【预先】写进 known_hosts，从而能用 StrictHostKeyChecking yes
     # 连进来。没有它，那边只能 accept-new（首次信任），而"首次"在这条通路上是可以
     # 被抢的：端口来自候选表，同节点另一个用户理论上能先占住它，客户端第一次连过去
@@ -4250,7 +4245,7 @@ exit 0
                    partition="A6000", account="acct", cpus=2, mem="8G",
                    requested_time="1:00:00", state=mod.ST_ENROLLED,
                    candidates="55003", created_at=mod.now_ts(),
-                   service_kind=SSHD)
+                   service_kind=RELAY)
     _real_load, _real_slurm = d.load_session_file, d.slurm
     d.slurm = _FakeSlurmNoJob()
     try:
@@ -4429,7 +4424,7 @@ exit 0
                      if x.get("name") == name), None)
 
     _cs4 = cfg.resolve_plugin(CS)[0]
-    _pk4 = {n: _plug_of(n) for n in (CS, SSHD)}
+    _pk4 = {n: _plug_of(n) for n in (CS, RELAY)}
     check("加法过渡结束了：每条只剩 package，`files` 那个键不在 "
           "（v0.6 两条同时在，v0.7 只留这一条）",
           bool(_pk4) and all("files" not in (x or {})
@@ -4437,7 +4432,7 @@ exit 0
                              for x in _pk4.values()),
           str({k: sorted((v or {}).keys()) for k, v in _pk4.items()})[:200])
 
-    for _n in (CS, SSHD):
+    for _n in (CS, RELAY):
         _spec = cfg.resolve_plugin(_n)[0]
         _info = (_pk4.get(_n) or {}).get("package") or {}
         # "盘上那一份"是一棵树 + 一份记录表：把这两样现对一遍账，
@@ -7187,7 +7182,7 @@ exit 0
             "MY_UID=$(id -u)", "MY_USER=$(id -un)",
             "SLURMATE_PARTITION=A6000", "NODE=node01", "NODE_IP=192.0.2.20",
             "SVC_PORT=55003", "STARTED_AT=1700000000",
-            "SLURMATE_SERVICE_KIND=sshd", "SVC_PID=4242",
+            "SLURMATE_SERVICE_KIND=relay-demo", "SVC_PID=4242",
             "AUTH_MODE=publickey", 'AUTH_PASSWORD=""',
             _decl,
             # 插件侧的写法就是这样：往那个数组里写一个键。宿主不认识
@@ -7219,7 +7214,7 @@ exit 0
             check("插件加的字段被写进去了，而且宿主统一做了转义（键名跨语言契约）",
                   _parsed.get("ssh_host_key") == _hk
                   and _parsed.get("service_pid") == 4242
-                  and _parsed.get("service_kind") == "sshd"
+                  and _parsed.get("service_kind") == "relay-demo"
                   and _parsed.get("auth_mode") == "publickey"
                   and _parsed.get("tunnel_target") == "192.0.2.20:55003"
                   and _parsed.get("exit_code") is None,
@@ -8019,7 +8014,7 @@ exit 0
     #   判据可以被写成"还是数全局那个数"，而在全局 = 1 的缺省配置上，
     #   两种写法的结果逐字相同。
     _ms_cs = cfg.resolve_plugin(CS)[0]
-    _ms_ss = cfg.resolve_plugin(SSHD)[0]
+    _ms_ss = cfg.resolve_plugin(RELAY)[0]
     _ms_saved = (cfg.plugins[_ms_cs.id].max_sessions,
                  cfg.plugins[_ms_ss.id].max_sessions,
                  cfg.plugins[_ms_ss.id].enabled,
@@ -8058,14 +8053,14 @@ exit 0
         check("拒绝里点的是这个插件的名字（否则用户的排查方向是错的）",
               cfg.plugins[_ms_cs.id].title in _ms3d, _ms3d)
 
-        # 这一条是"数的是插件"真正的判据。 此刻总数是 2，已经越过 sshd 自己那个
-        #   上限（1），而 sshd 自己一条都没有 —— 所以只要计数写成了数全局那一堆，
+        # 这一条是"数的是插件"真正的判据。 此刻总数是 2，已经越过 relay-demo 自己那个
+        #   上限（1），而它自己一条都没有 —— 所以只要计数写成了数全局那一堆，
         #   这一个提交就会被拒。上面那几条分不开这两种写法（变异验证实测：把
         #   `count_occupying(uid, spec.id)` 换成 `count_occupying(uid)`，那几条全绿）。
-        _ms4 = quota_submit(5, SSHD, _ms_pubkey)
-        check("总数 2 已越过 sshd 的上限 1，而它自己一条都没有 → 开得起来",
+        _ms4 = quota_submit(5, RELAY, _ms_pubkey)
+        check("总数 2 已越过 relay-demo 的上限 1，而它自己一条都没有 → 开得起来",
               _ms4.get("ok"), str(_ms4))
-        _ms5 = quota_submit(5, SSHD, _ms_pubkey)
+        _ms5 = quota_submit(5, RELAY, _ms_pubkey)
         _ms5d = ((_ms5.get("error") or {}).get("detail") or "")
         check("而它自己那条到了上限之后，拒的是它自己那一格",
               (_ms5.get("error") or {}).get("kind") == "quota_active"
@@ -8087,8 +8082,8 @@ exit 0
               (_ms6.get("error") or {}).get("kind") == "quota_active", str(_ms6))
 
         # 反方向：插件那一格写得再小也放不开全局那一格。
-        # 此刻占着 3 条（2 个 cs + 1 个 sshd），把全局压到 2，再提交一条 sshd：
-        #   sshd 自己那一格（上限 1）也已经满了，所以这一条要挑一个还有余量的
+        # 此刻占着 3 条（2 个 cs + 1 个 relay-demo），把全局压到 2，再提交一条 relay-demo：
+        #   relay-demo 自己那一格（上限 1）也已经满了，所以这一条要挑一个还有余量的
         #   插件才分得开 —— 把 cs 的上限临时抬到 5。
         cfg.plugins[_ms_cs.id].max_sessions = 5
         _ms7 = quota_submit(2, CS)
@@ -8116,7 +8111,7 @@ exit 0
               d.store.count_occupying(UID, _ms_cs.id) == 2
               and d.store.count_occupying(UID, _ms_ss.id) == 1
               and d.store.count_occupying(UID) == 4,
-              "cs=%d sshd=%d 全部=%d"
+              "cs=%d relay=%d 全部=%d"
               % (d.store.count_occupying(UID, _ms_cs.id),
                  d.store.count_occupying(UID, _ms_ss.id),
                  d.store.count_occupying(UID)))
@@ -10808,11 +10803,11 @@ exit 0
     _dj.store = mod.Store(os.path.join(tmpdir, "joblog.db"))
     _dj.store.insert(session_id="s-jl", uid=UID, user="alice", job_id=4242,
                      state=mod.ST_ENROLLED, created_at=mod.now_ts(),
-                     service_kind=SSHD, candidates="55003", account="acct",
+                     service_kind=RELAY, candidates="55003", account="acct",
                      cpus=1, mem="1G", requested_time="1:00:00")
     _dj.store.insert(session_id="s-other", uid=UID + 1, user="bob", job_id=4243,
                      state=mod.ST_ENROLLED, created_at=mod.now_ts(),
-                     service_kind=SSHD, candidates="55003", account="acct",
+                     service_kind=RELAY, candidates="55003", account="acct",
                      cpus=1, mem="1G", requested_time="1:00:00")
 
     def _jlog(**over):
@@ -12832,14 +12827,14 @@ exit 0
             id = "01M2JKHTZGF12N0T9CB3XVK36H"
 
         class _S29Plugin(object):
-            name = "sshd"
+            name = "relay-demo"
             spec = _S29Spec()
             default_gpus = {"name": "gpu", "type": "h100", "count": 1}
 
         class _S29Missing(object):
             name = "beta"
 
-        _d_s29.cfg.plugins = {"sshd": _S29Plugin()}
+        _d_s29.cfg.plugins = {"relay-demo": _S29Plugin()}
         _d_s29.cfg.plugin_problems = ["一份坏掉的插件树：清单无法解析"]
         _d_s29.cfg.plugin_job_missing = [_S29Missing()]
         _d_s29.cfg.stale_conf_problems = []

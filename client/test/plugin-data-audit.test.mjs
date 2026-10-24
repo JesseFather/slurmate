@@ -37,7 +37,7 @@ const pluginData = require('../src/main/plugin-data.js');
 const audit = require('../src/main/plugin-data-audit.js');
 
 const CS = '01M2JKHTZGKJBFQQTWYXMQMF30';
-const SSHD = '01M2JKHTZGF12N0T9CB3XVK36H';
+const RELAY = '01M5MX8V566VAM1CPRV9XQ46WM';
 const WORKSPACE = 'w0123456789ab';
 const OTHER_WORKSPACE = 'wffffffffffff';
 /** web-demo 在 `WORKSPACE` 里的那一份数据。 */
@@ -57,7 +57,7 @@ const cs = (over = {}) => ({
 
 /** 有界面、但不能多开：只有一份存储，不属于任何工作区。 */
 const oneStore = () => ({
-  id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
+  id: RELAY, name: 'relay-demo', displayName: '中转示例', version: '1.0.0',
   contributes: { surface: { kind: 'web', path: '/' }, ports: 0, concurrent: false,
     data: null },
 });
@@ -82,10 +82,10 @@ const csIn = (spaceId, group = 'editor') => pluginData.identityOf(cs(), sp(space
 const conn = (workspaceId, id = 'c1') => ({ id, workspaceId });
 const disk = (identity) => pluginData.diskNameOf(identity);
 
-/** sshd 实际的样子：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
+/** relay-demo 实际的样子：没有 `contributes.surface`（它的东西跑在用户自己的机器上，
  *  框架连一块界面都不建），但声明了数据、而且不能多开。 */
 const relay = () => ({
-  id: SSHD, name: 'sshd', displayName: 'SSH 中转站', version: '1.0.0',
+  id: RELAY, name: 'relay-demo', displayName: '中转示例', version: '1.0.0',
   contributes: { ports: 0, submitPubkey: true, concurrent: false,
     data: { inherit: 'relay' } },
 });
@@ -159,22 +159,22 @@ test('没声明分实例的插件那一份存储永远不报（它不属于任�
 // 这几条守的是第二根带回来的那类事故：照搬分区那一侧的入口条件，会把一份正在
 // 被用的数据摆上删除按钮。
 
-test('没有界面、却会写数据的插件（sshd 实际的样子）—— 那一份永远不报', () => {
+test('没有界面、却会写数据的插件（relay-demo 实际的样子）—— 那一份永远不报', () => {
   // 这一条守的是本阶段最贵的一处。若对账"该有的"入口按"有没有界面"算
-  //   （`hasSurface`），sshd 那份数据目录就一诞生就是孤儿：sshd 没有
+  //   （`hasSurface`），relay-demo 那份数据目录就一诞生就是孤儿：它没有
   //   `contributes.surface`（它的东西跑在用户自己的机器上，框架连一块界面都不建），
   //   而它会写数据（`ctx.dataDir()`）。于是界面上一个删除按钮，而一个跑着的
-  //   会话正靠它（`~/.ssh/config` 的 IdentityFile / UserKnownHostsFile 都指着那里）
-  //   —— 症状是"`ssh slurmate` 忽然认证失败"，而用户刚刚点过一个他以为无害的按钮。
+  //   会话正靠它（插件落盘的东西都指着那里）—— 症状是"会话忽然不好用了"，
+  //   而用户刚刚点过一个他以为无害的按钮。
   const live = disk(pluginData.identityOf(relay()));
-  assert.equal(live, '01m2jkhtzgf12n0t9cb3xvk36h@relay', '手写形状：折叠过的 id + 声明的共享组名');
+  assert.equal(live, `${RELAY.toLowerCase()}@relay`, '手写形状：折叠过的 id + 声明的共享组名');
   const r = run({ plugins: [relay()], names: [], dataNames: [live], connections: [] });
   assert.deepEqual(r.rows, [], '它没有实例段，不属于任何工作区，永远不列');
   assert.equal(r.diskChecked, true);
 
   // 反向：同一条入口下，一份真的没人要的旧数据必须照旧报出来 —— 少了这一条，
   //   一个"什么都报不出来"的实现也能让上面那条绿。
-  const old = disk([SSHD, '0.9.0']);           // 算不出来的第二段：版本形状的那一种
+  const old = disk([RELAY, '0.9.0']);           // 算不出来的第二段：版本形状的那一种
   const r2 = run({ plugins: [relay()], names: [], dataNames: [old], connections: [] });
   assert.deepEqual(r2.rows.map((x) => `${x.kind}:${x.name}`), [`orphan:${old}`]);
   assert.equal(r2.rows[0].deletable, true);

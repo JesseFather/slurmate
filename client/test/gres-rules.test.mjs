@@ -40,15 +40,15 @@ const { FakeBackend } = require('../src/main/backend-fake.js');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // 假站点不认识任何插件 —— "那个站点装了哪些"由调用方告诉它（见 integration.mjs）。
-// 这里给它仓库里真那一个，好让 `service_kind` 有得填。
-const SITE = () => path.join(HERE, '..', '..', 'plugins');
-// 用 sshd 而不是 web-demo：web-demo 声明了 `contributes.surface`，
+// 这里给它夹具里那一个，好让 `service_kind` 有得填。
+const SITE = () => path.join(HERE, '..', '..', 'tools', 'fixtures', 'plugins');
+// 用 relay-demo 而不是 web-demo：web-demo 声明了 `contributes.surface`，
 //   那意味着 `_submit` 会真的把它的作业侧跑起来（见 backend-fake.js 的
 //   `_startJob`）—— 这一组要验的是 GRES 的规则，为它去起一个进程、挑端口、
 //   等登记，只会让用例更难读、更容易碎。两个插件走的是同一段 GRES 代码
 //   （在服务种类那一段之后），所以换了不影响。
-const KIND = 'sshd';
-/** 形状正确的一行公钥（sshd 声明了 submitPubkey，提交时必须带）。 */
+const KIND = 'relay-demo';
+/** 形状正确的一行公钥（relay-demo 声明了 submitPubkey，提交时必须带）。 */
 const PUBKEY = 'ssh-ed25519 ' + 'A'.repeat(68) + ' slurmate-test';
 
 function make() {
@@ -60,7 +60,7 @@ function make() {
  * 而它们在"提交收下了没有"那一段里就判完了 —— 在起作业侧之前。
  * 为了验一条规则去起一个进程与一条隧道，只会让这条用例更难读、更容易碎。
  *
- * 而它不 await 也就意味着：那一条会话的作业侧（sshd 那一类没有界面，
+ * 而它不 await 也就意味着：那一条会话的作业侧（relay-demo 那一类没有界面，
  *   所以这里压根不会起）与定时器都不参与。用例结束时不留下任何东西。
  */
 async function submit(req) {
