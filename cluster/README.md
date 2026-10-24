@@ -9,8 +9,10 @@
 /etc/slurmate/slurmate.conf.d/       每个插件一份
 ```
 
-交付给管理员的是一个文件：`slurmate-site-<版本>.run`（由 `cluster/make-run.sh`
-从这一棵树打出来）。拷到控制节点上以 root 跑，它自带守护进程、命令行、作业模板、
+交付给管理员的是一个文件：`slurmate-site-<版本>.run`。仓库打 tag 时，CI 用
+`cluster/make-run.sh` 从这一棵树打出一份，与客户端安装包一起挂在 Release 上。
+
+本机现打用同一条命令。拷到控制节点上以 root 跑，它自带守护进程、命令行、作业模板、
 systemd 单元、只读自检脚本与这几份文档。仓库里那一份 `cluster/install-base.sh`
 是它的实现，两边的动词与开关逐字相同。
 

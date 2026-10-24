@@ -141,7 +141,7 @@ jobs:
           done
           exit $fail
 
-      - name: Node 版本：三份工作流只允许一个值
+      - name: Node 版本：工作流里只允许一个值
         # 同一套用例在 CI 上跑在两个大版本下时，一个只在其中一个版本上失败的
         #   用例会在另一条工作流上绿（账本 F47）。三处的值是手写的，没有任何
         #   机制保证同步 —— 这条 lint 就是那道网。
@@ -163,11 +163,11 @@ jobs:
               print("✗ node-version 出现了 %d 个值：" % len(seen))
               for v, at in sorted(seen.items()):
                   print("    %s  %s" % (v, "、".join(at)))
-              print("  三份工作流必须钉在同一个版本上。")
+              print("  所有工作流必须钉在同一个版本上。")
               sys.exit(1)
           v = next(iter(seen))
           total = sum(len(x) for x in seen.values())
-          print("✓ 三份工作流都钉在 Node %s（%d 处）" % (v, total))
+          print("✓ 工作流里的 node-version 都是 Node %s（%d 处）" % (v, total))
           PY
 
       - name: 版本号：协议版本四处一致、客户端那两处是三段、文档里的「当前版本」也跟着走

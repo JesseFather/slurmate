@@ -1,6 +1,7 @@
 name: build
 
-# 只负责一件事：把 client/ 打包成三个平台的安装包。
+# 只负责一件事：把 client/ 打包成三个平台的安装包。站点端的单文件包不在这里，
+# 在 site.yml —— 它没有三个平台，也不该让改一行集群侧注释就跑一遍这里的矩阵。
 #
 # 发布（打 tag → 挂 Release）在 release.yml 里，故意分开。
 # 原因见 release.yml 顶部的说明：GitHub 对 push 事件是把 branches + tags + paths
