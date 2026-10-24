@@ -1,9 +1,14 @@
 name: build
 
-# 负责两件事：把 client/ 打成三个平台的安装包，把 cluster/ 拼成站点端的单文件包。
+# 把 client/ 打成三个平台的安装包，把 cluster/ 拼成站点端的单文件包。
 #
-# 站点端并在这里，不单开一条工作流：公开仓库的 Actions 分钟数不设上限，两条
-# 工作流带来的唯一区别是 Actions 页面上多一个要认的名字。
+# ── 只在手动触发时跑 ───────────────────────────────────────────────────────
+# 分支上只跑 checks.yml（不到一分钟）；构建只在打 tag 时由 release.yml 做一次，
+# 一次运行里产出产物并开 Release，不重复。
+#
+# 这一份留着是因为"打 tag 之前先确认三个平台都装得上"仍有价值：它只产出附件，
+# 不碰 Release，打坏了删掉那次运行即可。合并之后不自动跑 —— 一次三平台打包
+# 约 100 分钟，而 tag 那一次已经覆盖了同样的东西。
 #
 # 发布（打 tag → 挂 Release）在 release.yml 里，故意分开。
 # 原因见 release.yml 顶部的说明：GitHub 对 push 事件是把 branches + tags + paths
@@ -12,33 +17,9 @@ name: build
 #
 # ── 关于 CI 时间 ────────────────────────────────────────────────────────────
 # Actions 分钟数按平台加权：Linux 1× / Windows 2× / macOS 10×。
-# 一次三平台打包约 100 分钟。所以：
-#   - paths 过滤器挡掉只改文档的提交
-#   - concurrency 挡掉连推多次时的并行排队（只跑最新的那个）
-#   - 想不制造提交就验证构建：Actions 页面 → Run workflow（workflow_dispatch）
+# 测试只在 Linux 上跑一遍；三个平台只打各自的包，不再各跑一遍测试
+# （客户端用例里有 POSIX 权限位与符号链接，Windows 上本来就不成立）。
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'client/**'
-      - 'cluster/**'
-      - 'tools/check-cluster.sh'
-      # 夹具与客户端的接口是最容易悄悄漂掉的东西（清单里的 id / 版本 /
-      #   贡献点，客户端注册表逐字用它们）。漏掉这一条，改夹具就不会触发
-      #   客户端构建 —— CI 在最需要的时候不跑。
-      - 'tools/fixtures/plugins/**'
-      - 'LICENSE'
-      - 'NOTICE'
-      - '.github/workflows/build.yml'
-  pull_request:
-    paths:
-      - 'client/**'
-      - 'cluster/**'
-      - 'tools/check-cluster.sh'
-      - 'tools/fixtures/plugins/**'
-      - 'LICENSE'
-      - 'NOTICE'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 # 同一分支上连推多次时，取消排队中的旧运行，只跑最新的。

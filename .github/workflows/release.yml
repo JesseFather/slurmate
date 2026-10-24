@@ -34,8 +34,8 @@ permissions:
   contents: write      # action-gh-release 需要写 Release
 
 jobs:
-  # tag 只许打在 main 的历史里。这一遍不跑 checks.yml 那些检查器（它们在每次推
-  #   main 与 PR 上跑），所以"tag 打在 main 上已经绿过的提交"是发布的前提。
+  # tag 只许打在 main 的历史里。这一遍不跑 checks.yml 那些检查器（它们在 PR 上跑），
+  #   所以"tag 指向的提交经过了一次已经绿过的 PR"是发布的前提。
   #   这里把它做成机器判据：一条本地提交直接打 tag 推上去，会被这一步拦住。
   guard:
     runs-on: ubuntu-latest
@@ -53,9 +53,32 @@ jobs:
             exit 1
           fi
 
-  # 不依赖 build.yml —— 它可能因为 paths 过滤器没跑，也可能跑在别的 ref 上。
+  # 客户端用例在上面的 test 里跑一遍，三个平台只打各自的包。
+  #
+  # 不在每个平台各跑一遍测试：客户端用例里有 POSIX 权限位（0600 / 0700）与
+  #   符号链接，Windows 上本来就不成立 —— 那会让 Windows 那一格永远红，而红的是
+  #   与"这个安装包能不能用"无关的东西。测试验的是代码，平台差异由打包本身暴露。
+  test:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  # 不依赖 build.yml —— 它只在手动触发时跑，也可能跑在别的 ref 上。
   # tag 指向的那次提交直接重新构建，保证 Release 上的产物与 tag 一一对应。
   build:
+    needs: [guard, test]
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +96,6 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci
-      - run: npm test
       - run: npx electron-builder --publish never
       - uses: actions/upload-artifact@v4
         with:
@@ -93,6 +115,7 @@ jobs:
   #   站点包只是把 cluster/ 的源文件拼起来（tar.gz 加一行标记），打包器是一个
   #   单文件脚本；两者在哪台机器上出都一样，所以钉在 Linux 上，不必进矩阵。
   site:
+    needs: guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -418,8 +418,10 @@ Chromium 直接播；静止帧与图标重合。
 CI 在仓库根目录的 `.github/workflows/` —— 不是本目录。
 （GitHub Actions 只读仓库根的 `.github/workflows/`，放在 `client/` 下永远不会被触发。）
 
-- `build.yml`：推 `main` 与 PR 时跑测试与构建，产物只留在 Actions 上，不碰 Release。
-- `release.yml`：推 `v*` tag 时跑，把三平台安装包挂到一个 draft Release 上。
+- `build.yml`：只在手动触发时跑，产物只留在 Actions 上，不碰 Release。
+  打 tag 之前想先确认三个平台都装得上时用它。
+- `release.yml`：推 `v*` tag 时跑，先在 Linux 上跑一遍测试，再在三个平台各打一次包，
+  挂到一个 draft Release 上。分支上只跑 `checks.yml`。
 
 两个文件里客户端那几步都带 `working-directory: client`；`build.yml` 的 `site` job 例外。
 
