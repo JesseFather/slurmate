@@ -156,7 +156,9 @@ const baseFiles = (over = {}) => ({
   'plugin.json': mf(over),
   'lineage.json': lin(over.id || MF_ID),
   'client/index.js': 'module.exports = {};\n',
-  'job/start.sh': '#!/bin/bash\necho hi\n',
+  // 作业侧要过那四条断言（无 shebang、有 start_<短名>、函数带命名空间、
+  //   定义之外没有语句），所以夹具从一开始就长成它能过的样子。
+  'job/start.sh': 'start_plug() {\n  true\n}\n',
 });
 
 // ==============================================================================
@@ -337,6 +339,47 @@ section('2. 不该进包的条目：排除并说出来，或者拒绝');
   const r2 = packer('build', plug, '--out', path.join(base, 'o2.splug'));
   check('工作树脏了，拒绝打包（§3.5：输入是一个提交，不是工作树）',
     r2.code !== 0 && /不干净/.test(r2.err), r2.err);
+}
+
+// ==============================================================================
+//  2b. 作业侧四条断言：打包时就判，不等装到站点上
+// ==============================================================================
+
+section('2b. job/start.sh 的四条断言');
+
+{
+  // 作业侧那四条断言只在"看起来是一个真插件"时判 —— 判据是清单里有没有
+  //   `site`（与 §2.2 其它几格同一个条件）。所以这里把 `site` 填上。
+  const jobRepo = (script) => mkRepo({
+    ...baseFiles({ site: { defaultCpus: 1, defaultMem: '2G' } }),
+    'job/start.sh': script,
+  });
+
+  const cases = [
+    ['有 shebang', '#!/bin/bash\nstart_plug() {\n  true\n}\n', /shebang/],
+    ['有 #SBATCH', 'start_plug() {\n  true\n}\n  #SBATCH --mem=1G\n', /#SBATCH/],
+    ['没有 start_plug', 'start_other() {\n  true\n}\n', /start_plug/],
+    ['函数没带命名空间', 'log() {\n  true\n}\nstart_plug() {\n  true\n}\n', /没有命名空间/],
+    ['函数定义之外有语句', 'echo hi\nstart_plug() {\n  true\n}\n', /函数定义之外/],
+  ];
+  for (const [name, script, why] of cases) {
+    const { plug, base } = jobRepo(script);
+    const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+    check(`${name}：拒绝，而且一个包都没写`,
+      r.code !== 0 && why.test(r.err) && !fs.existsSync(path.join(base, 'o.splug')), r.err);
+  }
+
+  const good = [
+    ['整行函数', 'start_plug() { true; }\n'],
+    ['花括号另起一行', 'start_plug()\n{\n  true\n}\n'],
+    ['带命名空间的助手', 'start_plug() {\n  _plug_go\n}\n_plug_go() {\n  true\n}\n'],
+    ['注释与空行不算语句', '# 说明\n\nstart_plug() {\n  # 里面也随便\n  true\n}\n'],
+  ];
+  for (const [name, script] of good) {
+    const { plug, base } = jobRepo(script);
+    const r = packer('build', plug, '--out', path.join(base, 'o.splug'));
+    check(`${name}：放行`, r.code === 0, r.err);
+  }
 }
 
 // ==============================================================================

@@ -227,6 +227,90 @@ function payloadSizeProblem(files) {
 }
 
 /**
+ * `job/start.sh` 要过的四条断言。返回问题列表（空 = 能过）。
+ *
+ * 判据与守护进程的 `plugin_jobsh_problems()` 逐条相同 —— 那边在编织时装不下就
+ *   中止，这边在打包时先拒。理由：作者不该先有一台站点，才知道自己的作业侧会
+ *   被拒；而三样静默失效的错误（shebang 被拼在中间、入口名对不上、函数盖掉宿主）
+ *   在别人的集群上才露出来时，已经没有人能把它们指回这个文件了。
+ *
+ * 四条与它们各自防的事：
+ *   ① 无 shebang、无 `#SBATCH` —— 拼接点之后，Slurm 只解析开头那一段注释。
+ *   ② 定义 `start_<短名>` —— 宿主的 `plugin_call` 按这个拼法分派。
+ *   ③ 其余函数带 `_<短名>_` 前缀 —— 盖掉宿主的函数是静默的。
+ *   ④ 函数定义之外没有语句 —— 那一行会被拼进主流程中间。
+ */
+function jobScriptProblems(pname, text) {
+  const suffix = String(pname).replace(/-/g, '_');
+  const esc = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = text.split('\n');
+  const out = [];
+
+  const offenders = [];
+  lines.forEach((ln, i) => {
+    if (ln.startsWith('#!') || /^[ \t]*#SBATCH/.test(ln)) offenders.push(i + 1);
+  });
+  if (offenders.length) {
+    out.push(`文件里有 shebang 或 #SBATCH（第 ${offenders.join('、')} 行）。\n`
+      + '        它们会被拼在作业脚本的中间，而 Slurm 只解析脚本开头的注释块，\n'
+      + '        所以带了不是报错，是「写了但静默不生效」。删掉它们。');
+  }
+
+  if (!new RegExp(`^[ \\t]*start_${esc}[ \\t]*\\(\\)`, 'm').test(text)) {
+    out.push(`文件里没有定义 start_${suffix}（插件 ${pname} 的作业侧入口）。\n`
+      + '        宿主的 plugin_call 就是按 <动词>_<短名> 分派的，名字不一致等于没有实现。\n'
+      + '        短名里的 `-` 在这一侧写成 `_`。');
+  }
+
+  const bad = [];
+  for (const m of text.matchAll(/^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)/gm)) {
+    const fn = m[1];
+    if (fn === `start_${suffix}` || fn === `precheck_${suffix}` || fn === `cleanup_${suffix}`) continue;
+    if (fn.startsWith(`_${suffix}_`)) continue;
+    bad.push(fn);
+  }
+  if (bad.length) {
+    out.push(`文件里定义了没有命名空间的函数：${bad.join('、')}\n`
+      + '        它会被拼进作业脚本，而宿主自己的函数（log / cleanup / write_session /\n'
+      + '        pick_port_and_start …）都是没有后缀的动词，一个同名的插件函数会\n'
+      + '        把它们静默盖掉，症状是「清理没跑」「日志少了几行」，指不回这个文件。\n'
+      + `        规则：契约钩子用 <动词>_${suffix}，其余一律用 _${suffix}_ 前缀。`);
+  }
+
+  // ④ 与守护进程同一套行扫描：函数头可以只写一行 `name()`，`{` 落在下一行；
+  //    收函数只看行首那个不带缩进的 `}`（带缩进的是函数体里的块）。
+  const top = [];
+  let inFunc = false;
+  let pending = false;
+  lines.forEach((ln, i) => {
+    const s = ln.trim();
+    if (!s || s.startsWith('#')) return;
+    if (pending) {
+      pending = false;
+      if (s === '{') { inFunc = true; return; }
+    }
+    if (!inFunc) {
+      const m2 = /^[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*(.*)$/.exec(s);
+      if (m2) {
+        const rest = m2[1];
+        if (rest === '{') { inFunc = true; return; }
+        if (rest.startsWith('{') && rest.endsWith('}')) return;
+        if (rest === '') { pending = true; return; }
+      }
+      top.push(i + 1);
+      return;
+    }
+    if (s === '}' && !/^\s/.test(ln)) inFunc = false;
+  });
+  if (top.length) {
+    out.push(`文件里有 ${top.length} 行位于函数定义之外（第 ${top.join('、')} 行）。\n`
+      + '        它们会被拼进作业脚本的主流程中间，在每一个作业里执行，而副作用落在\n'
+      + '        哪个阶段、与宿主的哪一步相邻，都不由作者决定。把那些语句放进函数里。');
+  }
+  return out;
+}
+
+/**
  * 跳过集合：不进负载的那几个名字。与客户端 `plugins/index.js` 的 `COPY_SKIP`
  * 和守护进程的 `PLUGIN_COPY_SKIP` 逐字相同，CI 有一条 lint 比对三份。
  *
@@ -1462,6 +1546,27 @@ function cmdBuild(dir, opts) {
     if (typeof site.defaultMem !== 'string' || !site.defaultMem.trim()) {
       throw new Error(`${MANIFEST} 里的 site.defaultMem 必须是一个非空字符串（§2.2）`);
     }
+
+    // 作业侧那四条断言（`packer/docs/README.md`〈作业侧契约〉）。与守护进程的
+    //   编织是同一套判据，只是把发现它们的时刻从"装到站点上"提到"作者打包时"。
+    //
+    //   判据也是 `site` 在不在，与上面 §2.2 同一格：一个要装到站点上的插件必须
+    //   有 `site`（守护进程会拒没有它的），而符合性向量那棵树刻意没有它、也要
+    //   能打 —— 那一份 job/start.sh 是字节夹具，不是一份能织的作业侧。
+    //   没有 `job/start.sh` 是合法状态，不判；有它就必须过。
+    const jobFile = files.find((f) => f.path === JOB_ENTRY);
+    if (jobFile) {
+      if (typeof manifest.name !== 'string' || !manifest.name.trim()) {
+        throw new Error(`${MANIFEST} 里的 name 必须是一个非空字符串：`
+          + '作业侧的入口函数名由它拼出来（§2.2）');
+      }
+      const why = jobScriptProblems(manifest.name, jobFile.data.toString('utf8'));
+      if (why.length) {
+        throw new Error(`${JOB_ENTRY} 过不了作业侧的四条断言`
+          + '（与站点编织时同一套判据）：\n\n  '
+          + why.map((w, i) => `${i + 1}. ${w}`).join('\n\n  '));
+      }
+    }
   }
 
   // §3.7：负载的大小上限。判在这里、而且是发布之前，正是 §3.7 存在的
@@ -1469,6 +1574,7 @@ function cmdBuild(dir, opts) {
   //   收下来才拒，作者拿到的都是"装不上"，而那时他已经发布出去了。
   const sizeWhy = payloadSizeProblem(files);
   if (sizeWhy) throw new Error(sizeWhy);
+
 
   // §2.5：这个 id 得在这棵树这个提交的血统表里。表从提交里读（不是从盘上），
   // 于是"我们判的那张表"与"进负载的那张表"是同一次读出来的同一份字节。

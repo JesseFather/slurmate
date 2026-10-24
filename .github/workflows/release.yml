@@ -25,7 +25,7 @@ name: release
 # 不用 generate_release_notes：同一个版本可能先出几个预览版，自动生成的提交
 # 列表会把预览那些噪音一起堆进去。draft 里的 notes 由发布者手写。
 #
-# 正式版的 tag 是 v0.35，预览版是 v0.35-rc1；后者发布时标成 pre-release。
+# 正式版的 tag 是 v0.36，预览版是 v0.36-rc1；后者发布时标成 pre-release。
 on:
   push:
     tags: ['v*']
@@ -104,8 +104,8 @@ jobs:
           v="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' cluster/slurmate-sessiond)"
           cp packer/slurmate-packer.js "dist/slurmate-packer-${v}.js"
       - name: 版本号与 tag 的版本一致
-        # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.35（正式版）
-        #   或 v0.35-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上
+        # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.36（正式版）
+        #   或 v0.36-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上
         #   会多出一个与 tag 不同名的文件，而没有人会去核对。
         run: |
           f="$(ls dist/slurmate-site-*.run)"
@@ -135,7 +135,7 @@ jobs:
           path: artifacts
           merge-multiple: true
       - name: 预览版标记
-        # 正式版 tag 是 v0.35；预览版是 v0.35-rc1 这一种形状。
+        # 正式版 tag 是 v0.36；预览版是 v0.36-rc1 这一种形状。
         id: kind
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then

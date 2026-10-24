@@ -20,8 +20,8 @@ tag 里的版本是协议版本，不是 `client/package.json` 那个三段的�
 
 | 类型 | tag | 例 |
 |---|---|---|
-| 正式版 | `v<版本>` | `v0.35` |
-| 预览版 | `v<版本>-<后缀>` | `v0.35-rc1` |
+| 正式版 | `v<版本>` | `v0.36` |
+| 预览版 | `v<版本>-<后缀>` | `v0.36-rc1` |
 
 同一个版本可以有多个预览版。两类 tag 都先落成一个 draft Release，审过再公开。
 
@@ -53,7 +53,7 @@ tag 必须打在 `main` 的历史里，`release.yml` 的 `guard` job 判这一�
 
 ```bash
 git add -A
-git commit -m "0.35：发布"
+git commit -m "0.36：发布"
 git push origin main
 ```
 
@@ -62,9 +62,9 @@ git push origin main
 ### 5. 打 tag
 
 ```bash
-git tag v0.35          # 正式版
-git tag v0.35-rc1      # 预览版
-git push origin v0.35
+git tag v0.36          # 正式版
+git tag v0.36-rc1      # 预览版
+git push origin v0.36
 ```
 
 tag 推上去之后 `release.yml` 开始跑。
