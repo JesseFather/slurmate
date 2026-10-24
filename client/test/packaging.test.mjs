@@ -84,8 +84,8 @@ const ALLOWED_ESCAPES = [
   [/[/\\]package\.json$/,
     '客户端自己的 package.json：`files:` 白名单里有它（版本号那一处读它）'],
   [/[/\\]plugins$/,
-    '测试夹具那一棵（`tools/fixtures/plugins`）。安装包里没有它是对的'
-    + '（基座仓库不收录任何插件），调用方按"不在就 null"处理'],
+    '测试夹具那一棵（`tools/fixtures/plugins`）。安装包里没有它是对的，'
+    + '调用方按"不在就 null"处理'],
 ];
 
 function walk(dir, out = []) {

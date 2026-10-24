@@ -49,9 +49,8 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-home-'));
 // 站点池 = `<假家目录>/.slurmate/site-plugins`（见 index.js 的 sitePoolDir）。
 //
 // 装进去的是两棵夹具树（`tools/fixtures/plugins/`），不是测试里现编的替身。
-//   基座仓库不收录任何插件，夹具就是基座与插件之间那道接口的全部样本 —— 用
-//   现编的替身测等于测了个寂寞，而"基座里一个插件名都没有"这件事也就没有被
-//   真正验过。
+//   夹具就是基座与插件之间那道接口的全部样本 —— 用现编的替身测等于测了个寂寞，
+//   而"基座里一个插件名都没有"这件事也就没有被真正验过。
 //
 // 布局是 `<id>_<版本>/` 加旁边那张记录表 —— 站点池唯一的形状，也就是安装器
 //   写出来的形状（v0.13）。
@@ -4765,16 +4764,18 @@ test('中转站：起 relay-demo 会话不建视图，attach 拿到的是这条�
   const started = await appStart(null, 'relay-demo');
   assert.equal(started.ok, true, `提交中转站会话失败：${JSON.stringify(started.snapshot)}`);
 
-  // 等它跑到 running（假后端 200ms 登记）
+  // 等它跑到 running，而且隧道真的在监听（假后端 200ms 登记；`origin` 与端口
+  //   是两个先后落地的事实，只看 running 会偶尔读到还没绑上的那一刻）。
   let snap = null;
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 20000;
   for (;;) {
     snap = await frontSnap();
-    if (snap && snap.state === 'running') break;
+    if (snap && snap.state === 'running' && snap.localPort > 0) break;
     if (Date.now() > deadline) break;
     await new Promise((r) => setTimeout(r, 100));
   }
-  assert.ok(snap && snap.state === 'running', `没跑到 running：${JSON.stringify(snap)}`);
+  assert.ok(snap && snap.state === 'running' && snap.localPort > 0,
+    `没跑到 running 或隧道还没监听：${JSON.stringify(snap)}`);
   assert.equal(snap.serviceKind, 'relay-demo');
   // 客户端发上去的是 OpenSSH 的一整行（带注释，那正是用户能分辨「哪把是哪把」
   // 的唯一依据），由服务端规范化掉注释 —— 注释里的逗号会劈开 `--export=ALL,k=v,…`，
@@ -4784,7 +4785,6 @@ test('中转站：起 relay-demo 会话不建视图，attach 拿到的是这条�
   assert.equal(snap.spaceId, null,
     '中转站不要数据空间（`contributes.ports: 0`）：数据空间是给浏览器用的'
     + '（端口 = origin = 一份浏览器存储），而中转站没有浏览器');
-  assert.ok(snap.localPort > 0, '隧道必须真的在监听');
 
   // 这一条是整节的重点：没有 `contributes.surface` 的插件不该建视图。
   //   建了的话窗口主体会被一块加载不出来的页面盖住，而用户要的东西
@@ -4811,7 +4811,10 @@ test('中转站：起 relay-demo 会话不建视图，attach 拿到的是这条�
   const dataDir = path.join(dataRoot, P.dataDirNameOf(P.identityOf(relayPlugin)));
   // 夹具的 `attach` 把这次拿到的连接写在这里。它是"接缝被调到了"的唯一证据：
   //   没有界面的插件不会留下别的东西。
-  const recorded = JSON.parse(fs.readFileSync(path.join(dataDir, 'attach.json'), 'utf8'));
+  //   `attach` 是异步的，而 `running` 那一格先出现 —— 文件可能还差一拍才落地。
+  const recordedPath = path.join(dataDir, 'attach.json');
+  await waitUntil(() => fs.existsSync(recordedPath), '夹具把连接记下来', 5000);
+  const recorded = JSON.parse(fs.readFileSync(recordedPath, 'utf8'));
   assert.equal(recorded.user, 'demo', '插件拿到的必须是这条会话所属连接的用户名');
   assert.equal(recorded.serviceKind, 'relay-demo');
 
@@ -6491,6 +6494,7 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
     P.dataDirNameOf(P.identityOf(relayPlugin)));
   const conf = path.join(dataDir, 'attach.json');
   const recordedUser = () => JSON.parse(fs.readFileSync(conf, 'utf8')).user;
+  await waitUntil(() => fs.existsSync(conf), '夹具把连接记下来', 5000);
   assert.equal(recordedUser(), 'demo', '前提：先记下的是 C1 的用户');
 
   // 再配一条另一个用户的连接，并把它设为活跃。这一步不停任何会话 ——

@@ -217,7 +217,7 @@ def run(plugins_dir, have_plugins=True):
               "改键就要改表。" % len(problems))
         return 1
     if not have_plugins:
-        print("（本仓库不收录任何插件，判据一没有对象；插件项目的〈配置条目〉表"
+        print("（没有找到插件目录，判据一没有对象；插件项目的〈配置条目〉表"
               "用 --plugins-dir 指过去判。）")
     else:
         n = sum(1 for d in sorted(os.listdir(plugins_dir))
