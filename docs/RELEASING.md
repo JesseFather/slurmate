@@ -30,19 +30,17 @@ tag 必须打在 `main` 的历史里，`release.yml` 的 `guard` job 判这一�
 
 ## 步骤
 
-### 1. 确认 `main` 是绿的
+### 1. 确认要打 tag 的那个提交经过了绿的 PR
 
-`checks.yml` 在每次推 `main` 与每个 PR 上跑五个 job。`release.yml` 只跑客户端与
-站点包自己的测试，不重复那一套，所以发布的前提是 tag 指向一个已经绿过的 `main` 提交。
+`checks.yml` 只在 PR 上跑五个 job（`sanitized` / `client` / `cluster` /
+`conformance` / `lint`），合并之后不重跑。分支保护的 ruleset 要求走 PR 且这五个
+required check 通过，所以 `main` 上的每个提交都来自一次绿过的 PR。
 
-这道前提由两样东西分担，它们不是一回事：
+`guard` job 只验 tag 指向的提交是 `main` 的祖先，不查它绿没绿。它挡的是
+"从别的分支打 tag"，挡不了"绕过 PR 直接推 `main` 再打 tag" —— 后者靠 ruleset。
 
-- 分支保护：`main` 只接受 PR，且五个 required check（`sanitized` / `client` /
-  `cluster` / `conformance` / `lint`）必须通过。没有它，直接推 `main` 也能进。
-- `guard` job：只验 tag 指向的提交是 `main` 的祖先，不查它绿没绿。
-
-所以 `guard` 挡的是"从别的分支打 tag"，挡不了"在红的提交上打 tag" —— 后者靠第一步
-自己看一眼。
+构建只在打 tag 时自动跑一次。想在打 tag 之前先确认三个平台都装得上，手动运行
+`build.yml`（Actions 页面 → Run workflow）：它只产出附件，不碰 Release。
 
 ### 2. 定版本
 
@@ -81,16 +79,19 @@ git push origin v0.36
 
 tag 推上去之后 `release.yml` 开始跑。
 
-### 6. 看四个 job
+### 6. 看五个 job
 
 | job | 做什么 |
 |---|---|
 | `guard` | tag 必须在 `main` 的历史里 |
-| `build` | 三个平台各跑一遍 `npm test`，然后 `electron-builder` |
+| `test` | 在 Linux 上跑一遍 `npm test` |
+| `build` | 三个平台各打一次包（`electron-builder`），不重复跑测试 |
 | `site` | 跑单文件包自测，打出 `.run` 与打包器（`make-packer.js` 把文档嵌进去），核对包名里的版本与 tag |
 | `publish` | 收集三样产物，开一个 draft Release |
 
-`publish` 依赖前三个；任何一个红了都不会有 draft Release。
+`publish` 依赖前三个产物 job 与 `guard`；任何一个红了都不会有 draft Release。
+三个平台只打各自的包，测试只在 Linux 上跑：客户端用例里有 POSIX 权限位与符号
+链接，Windows 上本来就不成立。
 
 ### 7. 审 draft 并发布
 

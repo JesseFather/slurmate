@@ -1,10 +1,12 @@
 name: checks
 
-# 与打包无关的检查。跑得很快（不到一分钟），所以每次推都跑，不做 paths 过滤 ——
+# 与打包无关的检查。跑得很快（不到一分钟），不做 paths 过滤 ——
 # 这些检查要防的恰恰是"改了 A 结果弄坏了 B"。
+#
+# 只在 PR 上跑（以及手动触发），合并之后不重跑：合并提交不引入 PR 头之外的内容。
+# 构建不在这里 —— 打 tag 时由 release.yml 做一次；想在打 tag 之前先确认三个平台
+# 都装得上，手动运行 build.yml（它只产出附件，不碰 Release）。
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
