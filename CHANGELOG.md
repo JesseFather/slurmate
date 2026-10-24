@@ -138,13 +138,12 @@ README 里没有指向自己的计数、日期与版本点。
 ### Changed — 发布流程补全
 
 新增 `docs/RELEASING.md`：正式版与预览版的完整步骤、版本与 tag 的形状、三个 job
-各做什么、失败时怎么对。`release.yml` 跟着补了四样：
+各做什么、失败时怎么对。`release.yml` 跟着补了三样：
 
 - `guard` job：tag 必须落在 `main` 的历史里。这一遍不跑 `checks.yml` 那些检查器，
   所以「从 main 上已经绿过的提交打 tag」是前提，现在由机器判。
 - 预览版：tag 写成 `v0.35-rc1`，发布时标成 pre-release；站点 job 只比对 tag 的
   版本段，不再要求整条 tag 与包名逐字相同。
-- `SHA256SUMS` 随产物一起发布。它证明下载完整，不证明来源。
 - release notes 改成手写：`generate_release_notes` 取掉。同一个版本可能先出几个
   预览版，自动生成的提交列表只会把预览那些噪音一起堆进来。
 
