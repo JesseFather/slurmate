@@ -64,8 +64,38 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # 站点端只有一个文件，与三个平台的客户端安装包挂在同一个 Release 上。
+  # 它只是把 cluster/ 的源文件拼起来（tar.gz 加一行标记），在哪台机器上打都一样，
+  # 所以钉在 Linux 上，不必进上面那个矩阵。
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 cluster/test-run-package.py
+      - run: bash cluster/make-run.sh
+      - name: 版本号与 tag 一致
+        # 包名里的版本号取自 cluster/slurmate-sessiond。两者对不上时，Release 上会
+        # 多出一个与 tag 不同名的文件，而没有人会去核对 —— 现在停，不进 Release。
+        run: |
+          f="$(ls dist/slurmate-site-*.run)"
+          v="$(basename "$f" .run)"
+          v="${v#slurmate-site-}"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "tag 是 $GITHUB_REF_NAME，而这一份包叫 $(basename "$f")" >&2
+            exit 1
+          fi
+      - name: 摘要
+        run: sha256sum dist/*.run | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurmate-site
+          path: dist/*.run
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: build
+    needs: [build, site]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

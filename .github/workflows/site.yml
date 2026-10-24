@@ -1,0 +1,55 @@
+name: site
+
+# 只负责一件事：把 cluster/ 拼成站点端的单文件包（`slurmate-site-<版本>.run`）。
+#
+# ── 为什么不是 build.yml 里的一个 job ──────────────────────────────────────
+# build.yml 的 paths 是客户端专属（`client/**` 与夹具）。把 `cluster/**` 加进
+# 它的 paths，改一行集群侧注释也要跑一次约 100 分钟的三平台 Electron 打包。
+# 而这里的产物只是把十几份源文件拼起来（一个 tar.gz 加一行标记），本机 0.3 秒。
+#
+# 与 build.yml 一样，这里只产出产物、不碰 Release。发布在 release.yml 里。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cluster/**'
+      - 'tools/check-cluster.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.github/workflows/site.yml'
+  pull_request:
+    paths:
+      - 'cluster/**'
+      - 'tools/check-cluster.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+
+# 同一分支上连推多次时，取消排队中的旧运行，只跑最新的。
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 单文件包自测
+        # 打包器的失败路径（源文件缺失、包体标记错位、解出来的与放进去的不同）
+        # 都在这一份里。先证它打得出，再打真的那一份。
+        run: python3 cluster/test-run-package.py
+      - name: 打包
+        run: bash cluster/make-run.sh
+      - name: 摘要
+        # 产物在 Actions 页面上只有一个名字；管理员拿它认包靠 sha256，
+        # 所以把这一份包的 sha256 写进本次运行的摘要。
+        run: sha256sum dist/*.run | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurmate-site
+          path: dist/*.run
+          if-no-files-found: error
+          retention-days: 30
