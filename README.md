@@ -29,7 +29,7 @@ Slurmate 在 Slurm 集群上提供远程开发环境。
 
 真机上已经确认的：常驻通道在登录节点上真的有一条常驻进程（接上站点之后
 `pgrep -af 'slurmate stream'` 看得到），两台电脑的接管也按通了、目前功能正常。
-仍然只有推断的是：sshd 样例那条路，以及大包的响应上限余量。见
+仍然只有推断的是：没有界面的插件那条路，以及大包的响应上限余量。见
 [client/README.md](client/README.md)，以及
 [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) 的〈没有完整实测过的〉一节。
 

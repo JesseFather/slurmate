@@ -256,13 +256,13 @@ const DEFAULT_TIME_SECONDS = 12 * 3600;
 /** `op_list` 回几条。与守护进程那个 `rows[-50:]` 同一个数。 */
 const LIST_MAX = 50;
 
-/** 假站点里「作业内 sshd」听在哪个端口。没有真的 sshd —— 见 _submit 的说明。 */
-const DEMO_SSHD_PORT = 55901;
+/** 假站点里那个中转服务听在哪个端口。那个端口后面没有任何东西在监听。 */
+const DEMO_RELAY_PORT = 55901;
 /**
  * 模拟用的主机公钥。这不是一把真钥匙 —— 只是一串形状正确的 base64。
  * 客户端会把它写进 known_hosts（形状校验是真的），但假站点里那个端口后面没有
  * 任何东西在监听，所以 `ssh slurmate` 会在连接阶段就失败。这是诚实的：
- * 测试后端假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的 sshd 也是假的。
+ * 测试后端假掉的从来不只是 SSH 那一跳，而这里连那一跳后面的服务也是假的。
  */
 const DEMO_HOST_KEY = 'ssh-ed25519 ' + 'A'.repeat(68);
 
@@ -2022,7 +2022,7 @@ class FakeBackend extends Backend {
       sess.auth_password = (job.info && job.info.auth_password) || null;
     } else {
       // 中转站那一类今天不跑作业侧，见 `_submit` 那一段与账本 S40。
-      sess.service_port = DEMO_SSHD_PORT;
+      sess.service_port = DEMO_RELAY_PORT;
       sess.ssh_host_key = DEMO_HOST_KEY;
     }
     sess.tunnel_target = `127.0.0.1:${sess.service_port}`;
