@@ -77,13 +77,11 @@ SCHEMA_VERSION = 1
 SESSION_FILE_FIELDS = {
     "schema", "session_id", "job_id", "uid", "user", "partition", "node", "node_ip",
     "service_port", "tunnel_target", "state", "job_started_at", "written_at",
-    "job_hb_at", "code_server_pid", "auth_mode", "auth_password",
+    "job_hb_at", "auth_mode", "auth_password",
     "slurm_restart_number", "exit_code",
-    # 服务的种类与它的 pid。`code_server_pid` 保留在上面是给滚动升级期间还在跑的
-    # 旧作业用的：它们写的还是那个名字，而这个白名单会静默丢弃没登记的字段，
-    # 漏了它，那些作业的 pid 会凭空消失，且没有任何地方会报错。
+    # 服务的种类与它的 pid。
     "service_kind", "service_pid",
-    # 作业内 sshd 的主机公钥。客户端把它写进自己的 known_hosts 再连，
+    # 作业内服务的主机公钥。客户端把它写进自己的 known_hosts 再连，
     # 这样那边就能用 StrictHostKeyChecking yes 而不是首次信任。
     # 有界面的插件的作业写的是空串（它没有主机密钥）。
     "ssh_host_key",
@@ -1388,7 +1386,7 @@ PLUGIN_PACKAGE_MAX_BYTES = 2 << 20
 #
 # 这个数与客户端那份硬上限同名同义，改它等于改客户端的判据。
 #
-# 今天最大的一份是 sshd 的 client/sshconfig.js（17.5 KB），余量 15 倍。
+# 今天最大的一份插件文件约 17.5 KB，余量 15 倍。
 PLUGIN_FILE_MAX_BYTES = 256 * 1024
 
 # 一份插件的份数上限（负载内规则）。与上面同类：守护进程只通报、不拦截，
@@ -1435,7 +1433,7 @@ class PluginSpec(object):
     """一个插件在【服务端】的元数据，由 `<prefix>/share/slurmate/plugins/<ULID>/`
     那棵已安装的树里的 `plugin.json` 扫出来，不是代码里写死的。
 
-    这里刻意不写任何 `if name == "sshd"` 之类的分支。守护进程需要知道的关于一个
+    这里刻意不写任何 `if name == "<某个插件>"` 之类的分支。守护进程需要知道的关于一个
       插件的一切都在这个对象上；加一个插件不该要求改守护进程的任何一行。
     """
 
@@ -2250,10 +2248,10 @@ _MAIN_NO_SECTION = (
     "        而不是由文件里某一行注释说了算，判据得是结构，不能是内容。\n"
     "        搬法：把块头那一行丢掉，剩下的键值写成 `<本文件>.d/<名字>.conf`。"
     "例如\n"
-    "              [plugin:sshd]\n"
+    "              [plugin:<短名>]\n"
     "              enabled = yes\n"
     "              default_cpus = 1\n"
-    "          变成 `<本文件>.d/sshd.conf`，内容只有\n"
+    "          变成 `<本文件>.d/<短名>.conf`，内容只有\n"
     "              enabled = yes\n"
     "              default_cpus = 1\n"
     "        也可以一块都不搬，那些插件就是「装在本站、但没开」。跑一次\n"
@@ -5159,7 +5157,7 @@ class PluginConfig(object):
     """一个插件的生效配置：元数据（PluginSpec）+ 站点在它那一份里写的东西。
 
     行为只看 `enabled`，不看那一份在不在：
-        建一个 `sshd.conf` 不会顺手把别的插件关掉（管理员只想开一个中转站、
+        建一份插件的 `.conf` 不会顺手把别的插件关掉（管理员只想开一个插件、
         结果所有人的 IDE 没了，是最危险的那类静默改变），也不会因为"文件在那儿"
         就自动把它打开（一句 `default_cpus = 1` 在没有任何显式同意的情况下开出一条
         交互式 ssh 进计算节点的路）。
@@ -5172,7 +5170,7 @@ class PluginConfig(object):
         self.name = spec.name
         self.title = spec.title
         self.present = present
-        # 取值校验的报错点名这一份配置在哪个文件，不写 `[plugin:sshd] 的 …`：
+        # 取值校验的报错点名这一份配置在哪个文件，不写 `[plugin:<短名>] 的 …`：
         #   后者指的位置（主文件）照做就会报错，写 `[plugin:…]` 段本身就是
         #   一条硬错误（守护进程拒绝启动）。指一个"照做就
         #   报错"的位置，比不指还坏。`where` 由 `build_plugin_configs` 传进来
@@ -5309,7 +5307,7 @@ class PluginConfig(object):
     def session_auth_mode(self):
         """这个插件的会话用什么认证方式，会写进会话文件、交给客户端。
 
-        需要公钥的插件：`publickey`。作业内的 sshd 用客户端带上来的那把公钥认证，
+        需要公钥的插件：`publickey`。它用客户端带上来的那把公钥认证，
         会话文件里根本没有口令（run.sbatch 那条分支不生成口令）。
 
         其余插件：用它那份配置里的 enum 键（某个插件的 `auth_mode`）。插件一个
@@ -5514,9 +5512,9 @@ def stale_plugin_conf_problems(sections, meta, resolve):
       事。判据若落在"内容里有没有某个标记"，指不到人就只是残缺，而残缺说不清是
       "删到一半"还是"手写错了"，那就只能当硬错误。
 
-    必须说出来，不能静默忽略：把文件命名成 `ssh.conf`（少个 d，而本站只有
-      `sshd`）被吞掉的症状是「配了但它就是不生效」，与未知键那条要防的是同一类
-      问题，只是后果轻得多。
+    必须说出来，不能静默忽略：把文件命名成一个指不到人的名字（差一个字母、
+      或者多个分隔符）被吞掉的症状是「配了但它就是不生效」，与未知键那条要防的
+      是同一类问题，只是后果轻得多。
 
     `meta` 用来把成因说清。指不到人有三种成因，而它们的修法不同：
         · 安装器起的名字（`<ULID>.conf`），那个插件被拿走了，而这一份没跟上。
@@ -6129,8 +6127,8 @@ class Config(object):
             #
             #   少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
             #   每一次省略 service_kind 的提交都拿到 `4 service_kind_disabled`，
-            #   错误消息说的是「本站没开「SSH 中转站」」，它不会提这是
-            #   default_plugin 配错了。用户看到的是"站点好像不支持 sshd"，而真相是
+            #   错误消息说的是「本站没开「某某插件」」，它不会提这是
+            #   default_plugin 配错了。用户看到的是"站点好像不支持那个插件"，而真相是
             #   "站点把缺省指到了一个关着的插件上"，管理员的排查方向从第一步就是错的。
             #
             #   它进 `validate()` 是对的，与"插件坏了不是启动错误"不冲突：
@@ -6266,7 +6264,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     service_port    INTEGER,
     candidates      TEXT NOT NULL,
     auth_mode       TEXT NOT NULL DEFAULT 'password',
-    -- 这个会话提供哪种服务（插件短名，例如 'web-demo' / 'sshd'）。
+    -- 这个会话提供哪种服务（插件短名，例如 'web-demo'）。
     -- 可空，NULL = 未知，从 nft 规则恢复出来的会话不知道自己是什么服务，
     --   那时报 NULL 比编一个具体的插件名诚实（与 cpus/mem 在恢复态报 null 而不是 0
     --   是同一条原则）。
@@ -10760,7 +10758,7 @@ class Sessiond(object):
             "resources": {"cpus": s["cpus"] or None, "mem": s["mem"] or None,
                           "gres": load_gres(s["gres"])},
             # 这个会话提供的是哪种服务。界面据此决定「连接」该做什么，
-            # 有界面的插件要建视图并自动登录，sshd 只是把隧道指向它、让用户拿
+            # 有界面的插件要建视图并自动登录，没有界面的插件只把隧道指向它、让用户拿
             # 原生 VS Code / codex 去连，客户端不做任何 HTTP 的事。
             # NULL = 不知道（从 nft 规则恢复出来的会话），界面要如实显示，
             # 不要猜一个默认值，猜错会让界面拿口令去打一个 SSH 端口。
@@ -10839,10 +10837,10 @@ class Sessiond(object):
                 if isinstance(pw, str) and pw:
                     d["auth_password"] = pw
                 d["auth_mode"] = info.get("auth_mode", d.get("auth_mode"))
-                # 作业内 sshd 的主机公钥（不是秘密，但和口令一起读最省一次文件 IO）。
+                # 作业内服务的主机公钥（不是秘密，但和口令一起读最省一次文件 IO）。
                 # 客户端用它把这一条预先写进 known_hosts，没有它，那边的 ssh 只能
                 # 首次信任，而"首次"在这条通路上是可以被抢的（见 run.sbatch 里那段）。
-                # 空串 = 这个作业没有 sshd（有界面的插件分支），此时不放进 d：
+                # 空串 = 这个作业没有主机公钥（有界面的插件分支），此时不放进 d：
                 # 「没有这个字段」和「有这个字段但是空」对客户端是两件事，
                 # 后者会被读成"主机公钥是空的"，那是个没法处理的输入。
                 hk = info.get("ssh_host_key")
@@ -11503,7 +11501,7 @@ class Sessiond(object):
                              "结束一个再开下一个。"
                              % (pcfg.title, _held, _limit))
 
-        # sshd 用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
+        # 需要公钥的插件用客户端那把公钥写 authorized_keys。这里就校验、并把注释丢掉。
         # 为什么必须丢掉注释：OpenSSH 公钥的注释里可以有逗号，而守护进程是用
         #   `--export=ALL,k=v,…` 把环境变量传给 sbatch 的，一个逗号就能把一个环境
         #   变量劈成两个，提交变成畸形 argv。（这个系统里"攻击者"和"受害者"是同一个
@@ -11511,7 +11509,7 @@ class Sessiond(object):
         #   等作业起来了再失败清楚得多。）
         # 这里是第一道，run.sbatch 里那条同款正则是第二道。
         ssh_pubkey = ""
-        # 「这个插件要不要公钥」是插件的元数据，不是一段 `if kind == "sshd"`，
+        # 「这个插件要不要公钥」是插件的元数据，不是一段 `if kind == "<某个插件>"`，
         # 加第三个插件不该要求改这里。
         if spec.needs_pubkey:
             ssh_pubkey = parse_ssh_pubkey(req.get("ssh_pubkey")) or ""
@@ -11707,8 +11705,8 @@ class Sessiond(object):
             "SLURMATE_GRES": gres_spec(gres) or "",
             "SLURMATE_AUTH_MODE": pcfg.session_auth_mode,
             "SLURMATE_PASSWORD_BYTES": str(cfg.password_bytes),
-            # 可执行文件走插件自己声明的那个变量名（有界面的插件是
-            # SLURMATE_CS_BIN，sshd 是 SLURMATE_SSHD_BIN）。加第三个插件不用动这里。
+            # 可执行文件走插件自己声明的那个变量名（清单里的 `site.bin.env`）。
+            # 加第三个插件不用动这里。
             **({spec.bin_env: pcfg.bin} if spec.bin_env else {}),
             "SLURMATE_SESS_DIR": os.path.join(home, ".slurmate", "sessions"),
             # 作业日志目录。它必须与 `build_sbatch_argv` 那个 `-o/-e` 的同一个
@@ -11947,7 +11945,7 @@ def main():
         #   措辞必须与 `--check` 的「已启用/已停用」（那才是本站状态）分得开。
         #
         #   别让两屏都用「启用/停用」，同一个词、两件事，而部署脚本里它们
-        #     前后紧挨着打印。站点写了 `[plugin:sshd] enabled = yes` 而这一屏说
+        #     前后紧挨着打印。站点写了 `[plugin:<短名>] enabled = yes` 而这一屏说
         #     「停用」时，"我明明开了"与"它说停用"之间的那一步排查，方向从第一
         #     步就是错的。（见 KNOWN-ISSUES 的 F39。）
         print("  这一屏不读站点配置，所以下面那一列是插件清单里声明的缺省，")

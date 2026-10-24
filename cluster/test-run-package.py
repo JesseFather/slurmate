@@ -395,8 +395,8 @@ def main():
               not re.search(r"(/mnt/|/home/|/Users/|/nas/)", head),
               str(re.findall(r"(?:/mnt/|/home/|/Users/|/nas/)\S*", head)[:3]))
         prod = head + read(MAKER)
-        check("壳与打包器里没有插件名（基座这一侧一个都不该有）",
-              "code-server" not in prod and "sshd" not in prod)
+        check("壳与打包器里没有插件名（夹具的名字也算，基座这一侧一个都不该有）",
+              "web-demo" not in prod and "relay-demo" not in prod)
 
         print("\n" + "=" * 60)
         print("  通过 %d  失败 %d" % (PASS, FAIL))

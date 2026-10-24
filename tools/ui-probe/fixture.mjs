@@ -134,8 +134,8 @@ export function buildPluginsView() {
                     gpus: { name: 'gpu', type: 'a100-80g', count: 2 } },
       }),
       one({
-        id: '01m4x3bpny0363sf5qmfw89zgt2', version: '2.0.0', name: 'sshd',
-        title: 'SSH 服务', description: '', ports: 0, group: null,
+        id: '01m4x3bpny0363sf5qmfw89zgt2', version: '2.0.0', name: 'relay-demo',
+        title: '中转服务', description: '', ports: 0, group: null,
         surface: { kind: 'none', path: '' },
         // 站点关着它 —— 按上面那个式子，这一块的按钮就该是灰的。
         siteEnabled: false,
@@ -187,7 +187,7 @@ export function buildJobs() {
     },
     {
       session_id: '01m4x3bpny0363sf5qmfw89zgt2', live: true, attached: false,
-      service: 'SSH 服务', state_text: '提交中', state: 'submitted',
+      service: '中转服务', state_text: '提交中', state: 'submitted',
       job_id: 7654321, partition: 'gpu-long', node: 'node-with-a-long-name02',
       expires_at: soon, keeper_text: '另一台电脑在看：another-workstation',
       keeper_is_me: false,

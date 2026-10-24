@@ -1383,7 +1383,7 @@ def main():
         "node_ip": "192.0.2.11", "service_port": 55017,
         "tunnel_target": "192.0.2.11:55017", "state": "running",
         "job_started_at": 1, "written_at": 2, "job_hb_at": 3,
-        "code_server_pid": 4, "auth_mode": "password",
+        "auth_mode": "password",
         "slurm_restart_number": 0, "exit_code": None,
     }
     write_session("job-5712.json", good)
@@ -3280,7 +3280,7 @@ exit 0
     # 装了、但关着 —— 与上面那条同一类，都是硬错误（账本 F17）。
     #    少了这一条，这个组合能通过 `--check`、守护进程能正常起来，而此后
     #    每一次省略 service_kind 的提交都拿到 `4 service_kind_disabled`，
-    #    错误消息说的是「本站没开「SSH 中转站」」—— 它不会提这是配置里
+    #    错误消息说的是「本站没开「某某插件」」—— 它不会提这是配置里
     #    default_plugin 配错了。用户看到的是"站点好像不支持 relay-demo"，而管理员
     #    接下来的排查方向从第一步就是错的。
     _c = pcfg("default_plugin = relay-demo\n[plugin:relay-demo]\nenabled = no\n")
@@ -9803,7 +9803,7 @@ exit 0
         "node_ip": "192.0.2.11", "service_port": 55019,
         "tunnel_target": "192.0.2.11:55019", "state": "running",
         "job_started_at": 1, "written_at": 2, "job_hb_at": 3,
-        "code_server_pid": 4, "auth_mode": "password",
+        "auth_mode": "password",
         "auth_password": "pw-push-secret",
         "slurm_restart_number": 0, "exit_code": None,
     })
