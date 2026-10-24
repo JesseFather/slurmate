@@ -21,9 +21,6 @@ name: release
 # macOS 首次需右键 →「打开」，或 xattr -dr com.apple.quarantine /Applications/Slurmate.app。
 # 消除这一步需要代码签名证书，本项目没有。
 #
-# 一个 SHA256SUMS 随产物一起发布。它证明下载完整，不证明来源：能替换产物的
-# 人也能替换这个文件。
-#
 # ── 发布说明由人写 ──────────────────────────────────────────────────────────
 # 不用 generate_release_notes：同一个版本可能先出几个预览版，自动生成的提交
 # 列表会把预览那些噪音一起堆进去。draft 里的 notes 由发布者手写。
@@ -133,14 +130,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: 校验值
-        # 一个 SHA256SUMS 与所有产物放在一起。它证明下载完整，不证明来源。
-        run: |
-          cd artifacts
-          for f in *; do
-            if [ "$f" != SHA256SUMS ]; then sha256sum "$f"; fi
-          done > SHA256SUMS
-          cat SHA256SUMS
       - name: 预览版标记
         # 正式版 tag 是 v0.35；预览版是 v0.35-rc1 这一种形状。
         id: kind

@@ -8,9 +8,8 @@
 |---|---|---|
 | 客户端安装包（`.exe` / `.dmg` / `.AppImage` / `.deb` / `.zip`） | `release.yml` 的 `build` | Windows / macOS / Linux |
 | `slurmate-site-<版本>.run` | `release.yml` 的 `site` | 任意 Linux |
-| `SHA256SUMS` | `release.yml` 的 `publish` | — |
 
-`SHA256SUMS` 证明下载完整，不证明来源：能替换产物的人也能替换这个文件。
+站点包的 sha256 打印在 `site` job 的 run summary 里；客户端安装包不另发校验值。
 
 ## 版本与 tag
 
@@ -82,8 +81,7 @@ tag 推上去之后 `release.yml` 开始跑。
 
 打开 Releases 页面上的 draft，逐项确认：
 
-- 客户端五个扩展名、站点包、`SHA256SUMS` 都在；
-- `SHA256SUMS` 与下载下来的文件对得上；
+- 客户端五个扩展名、站点包都在；
 - release notes 由发布者手写；
 - 预览版的 `prerelease` 已勾上；
 - 点 Publish。
@@ -104,4 +102,4 @@ tag 推上去之后 `release.yml` 开始跑。
 ## 产物未签名
 
 Windows 首次运行会被 SmartScreen 拦一次，macOS 首次需要右键打开。消除这一步需要
-代码签名证书，本项目没有。`SHA256SUMS` 不改变这一点。
+代码签名证书，本项目没有。
