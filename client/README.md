@@ -415,10 +415,13 @@ Windows 用 `icon-win.png`（源 `icon-win.svg`），方底铺满整块画布 �
 连接中的加载动画是 `icon-anim.svg`：SMIL 写在 SVG 里，
 Chromium 直接播；静止帧与图标重合。
 
-CI 在仓库根目录的 `.github/workflows/build.yml` —— 不是本目录。
+CI 在仓库根目录的 `.github/workflows/` —— 不是本目录。
 （GitHub Actions 只读仓库根的 `.github/workflows/`，放在 `client/` 下永远不会被触发。）
-workflow 里所有步骤都带 `working-directory: client`，推 `v*` tag 会把三平台产物挂到
-draft Release 上。
+
+- `build.yml`：推 `main` 与 PR 时跑测试与构建，产物只留在 Actions 上，不碰 Release。
+- `release.yml`：推 `v*` tag 时跑，把三平台安装包挂到一个 draft Release 上。
+
+两个文件里客户端那几步都带 `working-directory: client`；`build.yml` 的 `site` job 例外。
 
 产物未签名：
 

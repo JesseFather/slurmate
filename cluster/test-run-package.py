@@ -19,7 +19,7 @@ test-run-package.py — 站点端单文件包（`slurmate-site-<版本>.run`）�
 
 用法： /usr/bin/python3 cluster/test-run-package.py
 
-它测四件事：
+它测六件事：
 
   1. 打包器打得出来，打出来的包里【恰好】是清单上那些文件，而且逐份与源相同
      —— 少发一份（装到一半缺文件）与多发一份（把测试、夹具、插件顺手带出去）
@@ -31,12 +31,16 @@ test-run-package.py — 站点端单文件包（`slurmate-site-<版本>.run`）�
      一条不需要 root，也绝不会碰到系统里的任何位置。
   4. 打包器自己的失败路径：源文件缺失、壳里还剩占位符、壳的最后一行不是包体
      标记、包体被截断。四种都要非零退出并说清是哪一种。
+  5. 壳里不夹带构建机的路径，也不出现插件名。
+  6. 包内文档里没有指向包外的链接 —— 管理员手上只有这一份包，一条指到仓库里
+     的死链与写错一个字是同一件事。
 
 本文件不依赖 root、不依赖集群、不碰系统里任何位置：所有写入都在临时目录里，
 桩安装器什么都不做（只把收到的参数打印出来）。
 """
 import hashlib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -397,6 +401,28 @@ def main():
         prod = head + read(MAKER)
         check("壳与打包器里没有插件名（夹具的名字也算，基座这一侧一个都不该有）",
               "web-demo" not in prod and "relay-demo" not in prod)
+
+        # ── 6. 包内文档不指向包外 ─────────────────────────────────────────
+        print("\n── 6. 包内文档不指向包外 ──")
+        outside = []
+        n_links = 0
+        for f in got:
+            if not f.endswith(".md"):
+                continue
+            # 链接目标按文档所在目录解析，再折成相对包根的路径。绝对 URL 与
+            #   纯锚点不算 —— 前者是外站，后者在本文内。
+            for target in re.findall(r"\]\(([^)]+)\)", read(os.path.join(d1, f))):
+                target = target.split("#", 1)[0].strip()
+                if not target or "://" in target:
+                    continue
+                n_links += 1
+                rel = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(f), target))
+                if rel not in want:
+                    outside.append("%s → %s" % (f, target))
+        check("包内文档里的相对链接都落在包里（作者那一侧的文档不在包里）",
+              not outside, "；".join(outside[:5]))
+        check("上一条不是空断言（真的扫到了链接）", n_links >= 5, str(n_links))
 
         print("\n" + "=" * 60)
         print("  通过 %d  失败 %d" % (PASS, FAIL))

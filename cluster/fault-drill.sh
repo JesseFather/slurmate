@@ -22,7 +22,7 @@
 #
 #  用法：
 #    sudo cluster/fault-drill.sh --list
-#    sudo cluster/fault-drill.sh --run nft-restart
+#    sudo cluster/fault-drill.sh --run nft_restart
 #    sudo cluster/fault-drill.sh --all --yes
 #
 #  前提：一台装好的站点（root）、真的 Slurm 控制节点、一条正在跑的会话。

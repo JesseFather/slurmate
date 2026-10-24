@@ -41,7 +41,7 @@
 
 ### Changed — 打包器在打包时就判作业侧那四条断言
 
-`packer build` 现在对清单里带 `site` 的树跑一遍站点编织时的同一套判据：无
+`build` 现在对清单里带 `site` 的树跑一遍站点编织时的同一套判据：无
 shebang 与 `#SBATCH`、有 `start_<短名>`、其余函数带 `_<短名>_` 前缀、函数定义
 之外没有语句。以前这四条只有装到站点上才会发现，作者得先有一台集群。
 
@@ -51,14 +51,36 @@ shebang 与 `#SBATCH`、有 `start_<短名>`、其余函数带 `_<短名>_` 前�
 **判据**：`packer/test-packer.mjs` 新增 9 条（5 个反例、4 个正例，包含「花括号
 另起一行」「整行函数」「带命名空间的助手」三种合法写法），全套 141 条全绿。
 
+### Changed — 文档按读者归位
+
+三份只读审计覆盖了全部公开文档，改的是四类问题。
+
+- **包内文档不指向包外**：站点单文件包带着 `cluster/README.md` 与四份文档，而它们
+  共有 37 处链接指向没有入包的 `SECURITY.md`、`docs/`、`packer/docs/`。现在结论留在
+  原地、指路删掉。`docs/README.md` 加一条推论 P4，机器判据写在
+  `cluster/test-run-package.py` 里。
+- **事实错误**：站点端十几处 —— 旧的 `max_active_per_user` 解释、`[ports]` 段头、
+  `--extract` 与源码树那份安装器的动词差异、`fault-drill.sh` 的路径与子命令名、
+  站点通用键的个数。打包器一侧有格式版本（`1` → `2`）、总上限字节数、最小清单、
+  客户端的池路径、快速开始里那个产物文件名。
+- **账本与现实相反**：S32 收窄成「进 deb 的两条前提」，S33 改成「文档没有分发路径」；
+  `docs/ARCHITECTURE.md` 与 `SECURITY.md` 里「进程隔离还欠着」改成「四条都做了，
+  但它不是沙箱」。另补记打包器的作业侧校验与「不发校验值文件」这条决定。
+- **规范缺节**：作业侧契约（宿主环境、三个钩子、四条断言）整节搬进
+  `PLUGIN-SPEC.md` 的 §7，`packer/docs/README.md` 只留摘要与指路；`contributes`
+  的规则正文同理。
+
+**判据**：五份检查器全绿；`cluster/test-run-package.py` 新增的「包内文档不指向包外」
+先留一处外链验证它红，修掉之后绿。运行时行为一个字都没动。
+
 ## [0.35] — 未发布
 
 > 协议版本是 **0.35**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
 > `0.35`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
 > **`0.35.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
 >
-> 这一版没有新增协议 op，客户端与站点之间的报文一条都没改：改的是图标资产、
-> 测试夹具与文档。
+> 这一版没有新增协议 op，客户端与站点之间的报文一条都没改。改的是图标资产、
+> 测试夹具、仓库结构（站点端与打包器并进同一次发布）与文档。
 
 ### Fixed — Windows 任务栏上的图标：白底套方框
 
@@ -115,7 +137,7 @@ shebang 与 `#SBATCH`、有 `start_<短名>`、其余函数带 `_<短名>_` 前�
 同一个版本、同一次发布，Actions 页面上也只有 `build`、`checks`、`release` 三条。
 
 站点端并进 `build.yml`，没有单开一条工作流：公开仓库的 Actions 分钟数不设上限，
-两条工作流的唯一区别是 Actions 页面上多一个要认的名字。也没有并进 `checks.yml`：
+分开的唯一后果是 Actions 页面上多一个要认的名字。也没有并进 `checks.yml`：
 那里是判据，产物不该与判据混在一次运行里（`test-run-package.py` 仍在那里跑，
 `build.yml` 与 `release.yml` 的站点 job 在打包之前也会各跑一遍）。
 
@@ -123,6 +145,22 @@ shebang 与 `#SBATCH`、有 `start_<短名>`、其余函数带 `_<短名>_` 前�
 `bash cluster/make-run.sh` 本机打出的那份内容相同（`make-run.sh` 拼完当场解回来
 逐份比对，路径与标记错了在打包这一步就停）；打 tag 时包名里的版本号与 tag
 对不上，`release.yml` 那一步退出非零，不进 Release。
+
+### Fixed — 夹具写 `attach.json` 时会被读到半截
+
+`tools/fixtures/plugins/relay-demo/client/index.js` 用 `writeFileSync` 写那份文件，
+而它是"先截断、再写"：测试轮询到文件存在时，内容可能还是 0 字节，于是 CI 上出现过
+`Unexpected end of JSON input`。现在先写临时文件再 `rename`，读的一侧改用
+`waitForJson()`（读到合法 JSON 再断言）。
+
+**判据**：`client/test/boot.test.mjs` 的两处等待都换成 `waitForJson`；那一轮 CI 由红
+转绿，本地 `boot.test.mjs` 153 / 153、整套 782 / 782。
+
+### Changed — 不发校验值文件
+
+Release 上不再附 `SHA256SUMS`。它只能证明"下载没有损坏"，而站点包的 sha256 已经
+打印在 `site` job 的 run summary 里，客户端安装包不需要。多一个资产，就多一处会与
+产物对不上的地方。这条决定的理由留在 `docs/KNOWN-ISSUES.md` 的〈保留 ㉖〉。
 
 ### Changed — 主文档重写
 
@@ -170,7 +208,7 @@ README 里没有指向自己的计数、日期与版本点。
 - release notes 改成手写：`generate_release_notes` 取掉。同一个版本可能先出几个
   预览版，自动生成的提交列表只会把预览那些噪音一起堆进来。
 
-**判据**：四份工作流都能解析，job 图是 `guard` → `build` / `site` → `publish`；
+**判据**：三份工作流都能解析，job 图是 `guard` → `build` / `site` → `publish`；
 `site` 在 tag 与 `cluster/slurmate-sessiond` 的 `VERSION` 不一致时退出非零；
 `guard` 在 tag 指到 `main` 之外的提交时退出非零。
 

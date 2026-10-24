@@ -1,22 +1,27 @@
 # slurmate-packer
 
 插件作者的打包器。单文件、零依赖（只用 `crypto` / `fs` / `os` / `path` /
-`child_process`）—— 下载这个文件夹就能用：
+`child_process`），只要一个 `node`。
+
+发布形态是单个文件：每个版本的 Release 上有一个 `slurmate-packer-<版本>.js`，
+与客户端安装包、站点包同一页。在仓库里则直接跑 `packer/slurmate-packer.js`。
+
+命令一律是 `node slurmate-packer.js <动词>`。没有单独安装的 `packer` 命令。
 
 ```sh
 node slurmate-packer.js init    path/to/your-plugin
 node slurmate-packer.js keygen  path/to/your-plugin     # 想签名才需要这一步
 git commit -am "铸一个 id（和一把钥匙）"
 node slurmate-packer.js build   path/to/your-plugin
-node slurmate-packer.js sign    your-plugin-1.0.0.splug
-node slurmate-packer.js inspect your-plugin-1.0.0.splug
+node slurmate-packer.js sign    <id>.splug
+node slurmate-packer.js inspect <id>.splug
 ```
 
 产出的 `.splug` 发布到作者的网站 / GitHub；站点管理员下载下来交给安装器。
 服务器上从头到尾没有源码树 —— 打包发生在作者的机器上。
 
-规范：`packer/docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名）与 `packer/docs/PLUGIN-CONTAINER.md`
-（容器格式，即那份规范的附录 A）。
+规范：`packer/docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名、§5–§7 运行）与
+`packer/docs/PLUGIN-CONTAINER.md`（容器格式，即那份规范的附录 A）。
 
 ## 六个动词
 
@@ -24,20 +29,21 @@ node slurmate-packer.js inspect your-plugin-1.0.0.splug
 |---|---|
 | `init <目录> [--fork] [--adopt]` | 树里没有 id 时铸一个 ULID，**插入**写回 `plugin.json`，并在血统表里记一条。树里**已经有** id 而血统表不认识它时它会停下来问（§2.5），两个答案是 `--fork`（这是**另一个**插件，换 id）与 `--adopt`（这是**同一个**插件、只是记录不在了，补一条） |
 | `keygen <目录>` | 给这个 id 定一把 Ed25519 钥匙：公钥进血统表，私钥进钥匙库（`0600`）。钥匙库里**已经**有一把（§4.1 的〈换机器 = 复制 .pem〉）就**认它**，不铸新的 |
-| `build <目录> [--commit <ref>] [--out <文件>] [--reuse-version]` | 从一个**提交**打出一个 `.splug`。它**不看钥匙库**，但会判负载的大小上限（§3.7，见下）与作业侧那四条断言（〈作业侧契约〉） |
+| `build <目录> [--commit <ref>] [--out <文件>] [--reuse-version]` | 从一个**提交**打出一个 `.splug`。它**不看钥匙库**，但会判负载的大小上限（§3.7，见下）；树带 `site` 时还判作业侧那四条断言（〈作业侧契约〉） |
 | `sign <包> [--out <文件>]` | 给一个已经打好的包盖上签名 —— **不改内容摘要**，所以不必重新打包 |
 | `verify <包> [--against <目录>[@<ref>]] [--expect-digest <hex>] [--expect-signer <指纹>]` | 逐份校字节、算摘要、验签，并核对血统表与签名者；`--against` 顺带判 §3.6 |
 | `inspect <包> [--json]` | 打出包里到底有什么 —— 拿它对着规范逐行核对 |
 
 `build` 会在产出之前判负载的大小上限（§3.7）：单份 ≤ 256 KiB、加起来
-≤ 1,562,251 字节、份数 ≤ 256。超了它拒绝，并给出数字与是哪一条。
+≤ 1,561,905 字节、份数 ≤ 256。超了它拒绝，并给出数字与是哪一条。
 
 那是发布之前唯一会说话的地方：站点那边只有一条管理员看得见的告警，客户端那边要等包
 发出去、收下来才拒。这几个数与守护进程、客户端那两份由用例钉着逐字相同；它们为什么
 长这样写在 `packer/docs/PLUGIN-SPEC.md` 的 §3.7。
 
-`job/start.sh` 还要过四条断言：无 shebang、有 `start_<短名>`、函数带命名空间、
-定义之外没有语句。判据与站点编织时同一套，作者不必先有一台集群。
+清单里带 `site` 的树，`job/start.sh` 还要过四条断言：无 shebang、有 `start_<短名>`、
+函数带命名空间、定义之外没有语句。判据与站点编织时同一套，作者不必先有一台集群。
+（没有 `site` 的树不判 —— 它不装到站点上，作业侧也就不会被执行。）
 
 ## 树里的、机器上的：三样东西分开放
 
@@ -118,7 +124,7 @@ node slurmate-packer.js inspect your-plugin-1.0.0.splug
 node packer/test-packer.mjs
 ```
 
-129 条，不需要网络、不需要这个仓库处于任何特定提交状态（它自己造临时仓库）。
+141 条，不需要网络、不需要这个仓库处于任何特定提交状态（它自己造临时仓库）。
 它顺带把客户端那一份读方（`client/src/main/plugin-package.js`）拉进来跑同一批
 坏包 —— 三份实现里这两份都在 JS 里，让它们在同一批字节上给出同一个理由词，是
 "三端一致"这条契约里最容易分家的一半。
