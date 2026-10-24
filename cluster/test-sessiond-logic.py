@@ -491,7 +491,7 @@ def make_config(mod, tmpdir):
     #    也是真的打包（走 build_package 那个容器）、再照安装器的形状解开
     #      （`install_package` → 一棵树 + 一份记录表），不是绕过这两步直接摆一棵树：
     #      "装出来是一棵能对账的树"正是这一版要测的东西，夹具绕过它就等于没测。
-    #    基座仓库不收录任何插件，夹具只提供它需要的能力。
+    #    夹具只提供基座需要的能力。
     plugins_src = os.path.normpath(
         os.path.join(HERE, os.pardir, "tools", "fixtures", "plugins"))
     plugins_dir = os.path.join(tmpdir, "plugins")

@@ -3348,7 +3348,7 @@ async function _renderSession(slot) {
  *
  *   `site`  站点池 —— 站点分发的插件落在这里（见 site-plugins.js）。唯一的根。
  *
- * 基座自己不带任何插件 —— 一个都没有是正常状态，不是安装包坏了。
+ * 一个插件都没有是正常状态，不是安装包坏了。
  *   `src/main/plugins/` 那个目录是框架（注册表 + ulid.js + 安装器），不是插件目录，
  *   所以它压根不作为根传进来。
  *
@@ -3447,8 +3447,8 @@ function warnLegacyPool() {
 //     而它只有一条来的路：测试顺手调 `backend.installPlugins`，与真站点上管理员
 //     `slurmate plugin install` 同形。落在临时 userData 里。
 //   · `samplePluginsDir()` —— 测试夹具住的地方（`tools/fixtures/plugins/`）。
-//     基座仓库不收录任何插件：那两棵是两套件共用的夹具，安装包里没有它们 ——
-//     那是对的，不是降级。从源码跑时它们在场。一个插件都不装是合法状态。
+//     那两棵是两套件共用的夹具，安装包里没有它们 —— 那是对的，不是降级。
+//     从源码跑时它们在场。
 //
 // 这两处只服务测试后端；安装包里既没有假站点，也没有它们。
 

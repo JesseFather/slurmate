@@ -9,8 +9,8 @@ ACL 的登记簿从「SSH 会话」改挂到「Slurm 作业」上 —— 于是 
   作业模板 `run.sbatch`、部署脚本 `install-base.sh`、配置示例 `slurmate.conf.example`
 - 客户端（`client/`） —— Electron 桌面应用
 - 插件 —— 独立项目，基座仓库里一棵都不收录，两端都不依赖它们。契约见
-  [packer/docs/README.md](packer/docs/README.md)。一个插件都不装是合法状态，所以基座里
-  不许出现任何插件的名字、也不许出现「至少得有一个插件」的假设。
+  [packer/docs/README.md](packer/docs/README.md)。基座里不许出现任何插件的名字、
+  也不许出现「至少得有一个插件」的假设。
 
 > 若只读一节，读[《检查必须能真的失败》](#检查必须能真的失败)。
 > 这个项目对「静默失败」有近乎偏执的关注 —— 系统报告成功而事情没成，是它要消灭的

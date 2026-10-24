@@ -1181,7 +1181,7 @@ function scanRoot(root, allows) {
 class Registry {
   /**
    * @param {Array<{dir:string|Function|null, source:string}>} [roots]
-   *   省略 = 一个插件都没有，这是诚实默认值：基座自己不带任何插件。
+   *   省略 = 一个插件都没有，这是诚实默认值。
    *
    *   `dir` 可以是函数，而且可以返回 `null` —— 那表示"这个根这次不加载"
    *   （见 scanRoot）。站点池在拿不到家目录时就靠它。

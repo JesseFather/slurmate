@@ -111,8 +111,8 @@ docs/             README.md 是索引（按读者分三组）；其余：架构�
                    插件规范与容器格式、排障、已知问题
 tools/            check-cluster.sh（部署前环境自检）、check-sanitized.sh（CI 用）
   conformance/    三份实现共用的符合性向量（输入树 + 期望的包字节 + 坏包 + 签名夹具）
-  fixtures/       测试夹具。`plugins/` 下是两套件共用的两棵插件树 —— 基座不收录
-                   任何插件，这里只放能力测试需要的那两棵
+  fixtures/       测试夹具。`plugins/` 下是两套件共用的两棵插件树，只放
+                   能力测试需要的那两棵
 ```
 
 ---
