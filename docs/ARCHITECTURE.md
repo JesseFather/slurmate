@@ -723,6 +723,14 @@ Slurmate 把登记簿的持有者换成 Slurm 作业：
 `rejected`）、登记超时与排队超时（落 `expired`）。六条全走这一道闸 ——
 自己 `scancel` 一次、直接跳终态的形状正是账本 F32 记的那个，见 §3.0。
 
+另有一条往回走的边：`reserved` 且 `job_id` 为空的行，若按作业注释
+（提交时带的 `--comment=slurmate:<会话 id>`）反查得到作业，就写回 `job_id`、
+转 `submitted`。那只会出现在一种情形里 —— `sbatch` 已经返回、那一行还没写进库
+时进程死了。
+
+反查不到就照旧等 `reserved_ttl`；问不到控制器则什么都不做，等下一个 tick
+（过期是不可逆的）。
+
 | 状态 | 含义 | 谁把它推进来 |
 |---|---|---|
 | `reserved` | 已分配候选端口，尚未提交 | `op_submit` 插行时（`cluster/slurmate-sessiond`） |
@@ -781,8 +789,9 @@ Slurmate 把登记簿的持有者换成 Slurm 作业：
 代价是一个杀不掉的作业会让会话一直停在 `releasing`，而这是有意的。另外两个选择
 （静默地宣布结束 / 静默地一直重试）都是这个项目一路在清的那类问题。
 
-多出来的账单是每个 `releasing` 会话每 tick 一次 `scontrol` —— 与
-`phase_running` 对在跑的会话做的事是同一笔账，而正常的一次释放只持续一两个 tick。
+多出来的账单是每个 `releasing` 会话每 tick 一次 `scontrol`，而正常的一次释放只
+持续一两个 tick。（`phase_running` 走批量；这一道闸不走，因为它要三态与
+`Requeue=`，而正在结束的会话屈指可数。）
 `scancel` 的重发与那行日志则按 `release_retry_seconds` 节流：重复的 `scancel`
 对"作业还活着"这个事实一个字都改变不了。
 
@@ -805,6 +814,11 @@ Slurmate 把登记簿的持有者换成 Slurm 作业：
 轴：Slurm 的作业状态（`JobState=`），它回答"那个作业现在怎么样"。
 
 两者只在一处相交：`phase_running()`，每个 tick 一次。
+
+那一次查询是批量的：`Slurm.job_states()` 用一条 `squeue -h -j a,b,c`
+问完这一批（`cluster/slurmate-sessiond`），代价与并发会话数无关。没有出现在
+这一批里的一律回落 `job_state()`，因为只有它分得清"作业结束了"与"问不到控制器"；
+`Requeue=` 这条附加判据也仍然只从回落那一条来。
 
 相交处的规则只有一条：
 
@@ -836,6 +850,10 @@ Slurmate 把登记簿的持有者换成 Slurm 作业：
 - `Requeue` 那一格不能省。被重新排队的作业会自己回来，而"回来的那一个"
   面对的是一套已经被拆掉的防护 —— 用户连不上，也没有人再去 `scancel` 它。
   判据是 `scontrol show job` 的 `Requeue=`（0 = 不重排），拿不到时按不重排处理。
+
+  批量查询（`squeue`）没有这个字段，而它只回答"还在队列里的那些"；条件终态
+  一离开队列就回落 `job_state()`，那一次拿得到 `Requeue=`。所以这条判据的
+  来源仍然只有一处。
 - 不认识的状态必须落在"保留"侧。Slurm 加一个新状态时，判成释放等于
   "集群升级一次，所有人的防护被拆一遍"。
 
@@ -1525,6 +1543,8 @@ GRES 已用两格 —— 不能让一次版本差异把整张节点表判成取�
 （`slurmctld` 重启中、`munge` 抖动、控制器繁忙）。两者无法用返回码区分，所以
 `Slurm.job_state()` 靠的是控制器本身是否可达（`scontrol ping`），返回三态：
 `JOB_OK` / `JOB_MISSING` / `JOB_UNKNOWN`（`cluster/slurmate-sessiond`）。
+批量查询（`job_states()`）不改变这条语义：它只回答"还在队列里的那些"，
+其余的一律回落到 `job_state()` —— "不在这一批里"从来不等于"不存在"。
 
 - `JOB_UNKNOWN`：什么都不做，只记日志。
 - `JOB_MISSING`：还要连续确认 `job_missing_confirm_ticks` 次（默认 3）才认账

@@ -293,6 +293,23 @@ test('获取失败集群信息时，那一句是错误，不是空白', () => {
   assert.match(h.text('cl-body'), /获取集群信息失败：守护进程没有响应/);
 });
 
+test('账户为空时，那一格答「无」，原因另起一行', () => {
+  // `account` 为空而 `account_error` 有值 = 服务端确实答了，答案是"没有账户"。
+  //   它与"获取失败"（两个都空）是两件事，也与有账户（显示账户名）是三件事。
+  //   这一态在测试后端里永远不出现（`account_error` 恒为 `null`），所以界面
+  //   这一支必须自己有一条判据 —— 否则它是一片没人走过的代码（账本 S41）。
+  const h = boot();
+  const d = cluster();
+  d.me.account = null;
+  d.me.account_error = '账户服务未响应（sacctmgr 超时）';
+  h.subs.data({ cluster: d, link: { connected: true } });
+  const t = h.text('cl-body');
+  assert.ok(t.includes('账户 | 无'), `账户那一格是「无」：${t}`);
+  assert.equal(/账户 \| 获取失败/.test(t), false,
+    '答了「没有账户」就不许说成「获取失败」');
+  assert.ok(t.includes('账户服务未响应（sacctmgr 超时）'), `原因要原样摆出来：${t}`);
+});
+
 // ── 右栏：作业输出 ──────────────────────────────────────────────────────────
 
 /** 一格日志。`text` 走 `op_job_log` 给的那个形状（止于换行，见 paintHalf）。 */

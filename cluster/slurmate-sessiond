@@ -695,6 +695,18 @@ ENROLL_PROBLEM_GRACE = 15
 # "作业查不到"要连续确认多少个 tick 才认定结束（防 scontrol 瞬时不稳）
 JOB_MISSING_CONFIRM_TICKS = 3
 
+# 提交时写在作业注释上的前缀，后面接会话 id。
+#
+# 它存在的理由只有一个：`sbatch` 返回 job_id 之后、那一行写进库里之前进程若死掉，
+#   job_id 就丢了，而作业已经在集群里（账本 F40）。注释是唯一在作业创建那一刻
+#   就写进控制器、事后又查得回来的标记（`squeue -o "%k"`；本机 23.11.4 实测，
+#   排队中与在跑的都查得到）。
+#
+# 会话 id 因此对全集群可见。它不是凭证（口令从不进环境变量、也不进注释），
+#   而所有按 id 的 op 都先判 `s["uid"] != uid`。别把它当泄漏改回去翻
+#   `scontrol show job` 的 `Environment=`：那会去读同一个用户其他作业的环境。
+JOB_COMMENT_PREFIX = "slurmate:"
+
 # 释放流程里"作业还没确认停掉"时，隔多久再 scancel 一次。
 #
 # 它只节流重试与说话，不节流"看一眼作业还在不在"。看一眼是每个
@@ -6935,8 +6947,13 @@ def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
     #
     #   短名有 PLUGIN_NAME_RE 管着（`[a-z0-9-]`），所以它是安全的 argv 元素，
     #   没有空格、没有逗号、不可能被当成另一个 flag。
+    # 注释带着会话 id。它是 F40 那段窗口的唯一出路：`sbatch` 一旦返回，作业
+    #   就在集群里了，而库里那一行可能还没写上 job_id；有了这一格，超期时能按
+    #   `squeue -u <用户> -o "%k"` 把它认回来（见 Slurm.find_job_by_comment）。
+    #   它是 argv 元素，不经过 shell，id 又是十六进制，不可能拼出另一个选项。
     argv = [cfg.sbatch, "--parsable",
             "--job-name=sj-%s" % service_kind,
+            "--comment=%s%s" % (JOB_COMMENT_PREFIX, sess["session_id"]),
             "-A", sess["account"],
             "-c", str(sess["cpus"]),
             "--mem=%s" % sess["mem"],
@@ -7063,6 +7080,11 @@ class Slurm(object):
     JOB_MISSING = "missing"  # 已确认不存在
     JOB_UNKNOWN = "unknown"  # 【问不到】，联系不上控制器
 
+    def _controller_up(self):
+        """控制器可达吗。判据是那一句 `UP`，不是返回码（见 job_state）。"""
+        rc, out, _ = run_cmd([self.cfg.scontrol, "ping"], timeout=5)
+        return rc == 0 and "UP" in out.upper()
+
     def job_state(self, job_id):
         """返回 (status, info)。
 
@@ -7099,8 +7121,7 @@ class Slurm(object):
 
         # 到这里：命令失败，或返回了空输出，这次没拿到作业信息。
         # 必须分清"作业确实不存在"和"我们根本问不到"。
-        rc0, out0, _ = run_cmd([self.cfg.scontrol, "ping"], timeout=5)
-        if rc0 != 0 or "UP" not in out0.upper():
+        if not self._controller_up():
             return self.JOB_UNKNOWN, None
         # 控制器可达，却查不到这个作业 → 它确实结束了
         # （正常结束/被取消/记录已被 MinJobAge=300 清理）。
@@ -7110,6 +7131,111 @@ class Slurm(object):
         if rc2 == 0 and out2.strip():
             return self.JOB_OK, {}          # 还在队列里，但拿不到详情
         return self.JOB_MISSING, None
+
+    # 批量查询的格式串。各字段的顺序就是 `job_states()` 里解析的顺序，
+    #   两处必须一起改。`%r`（排队原因）放在最后：它是自由文本，只有它在末尾，
+    #   `split("|", 6)` 才不会被字段里的竖线劈开。
+    JOB_BATCH_FORMAT = "%i|%T|%N|%l|%e|%P|%r"
+
+    def job_states(self, job_ids):
+        """一批作业一次 fork。返回 `{job_id(int): (status, info)}`。
+
+        为什么批量：`phase_running()` 每 tick 要对每个活跃会话问一次状态，而
+          `scontrol show job` 是一次同步 fork（本机实测 7.3 ms，slurm-wlm
+          23.11.4）。N 个会话就是每个 tick N×7.3 ms 的事件循环阻塞（账本 F30）。
+          `squeue -h -j a,b,c` 在同一版本上按 `-j` 正确过滤，一次就能拿到这批
+          （`squeue --json -j` 不行：它静默无视过滤、返回全集群的作业）。
+
+        语义与 `job_state()` 相同，只是"问得到的那一半"来自 squeue：
+          · 出现在这一批里的 → `JOB_OK`，info 有七个字段；
+          · 没出现的 → 一律回落到 `job_state()`，与返回码无关。不能把
+            "不在这一批里"当成 MISSING：作业一离开队列 squeue 就查不到，
+            而它的记录还能留 MinJobAge；也只有回落那一条会 ping，才分得清
+            "结束了"与"问不到控制器"；
+          · 一批都没答上来（rc != 0）→ 先判一次控制器可达性。不可达就整批
+            `JOB_UNKNOWN`，免得 N 个 id 各 ping 一次。
+
+        只按 `%i` 建映射，不按行序：数组作业的 `%i` 是 `5706_[3-19%2]` 这种
+          形状，解析不出整数，直接跳过。按行序对齐会让一行的状态安到别人的
+          会话上（账本 F31 的形态）。
+
+        少于两个 id 时不发批量：一个作业一次 `job_state()` 就是一次 fork，
+          走批量要先问 squeue、再回落一次 scontrol，反而更贵。
+
+        info 里没有 `Requeue` / `ExitCode` / `Restarts`：squeue 没有这几个字段
+          的格式符。前者的后果只是延迟 —— 条件终态在队列里时按"非终态"保留，
+          作业一离开队列就回落，那一次的 `scontrol` 拿得到 `Requeue=0`。
+          后两个见 `session_view()` 里那一格。
+        """
+        ids = [int(j) for j in job_ids]
+        if len(ids) < 2:
+            return {i: self.job_state(i) for i in ids}
+        out = {}
+        rc, txt, _ = run_cmd(
+            [self.cfg.squeue, "-h", "-j", ",".join(str(i) for i in ids),
+             "-o", self.JOB_BATCH_FORMAT], timeout=8)
+        if rc == 0:
+            for line in (txt or "").splitlines():
+                parts = line.split("|", 6)
+                if len(parts) != 7:
+                    continue
+                try:
+                    jid = int(parts[0])
+                except ValueError:
+                    continue
+                if jid not in ids:
+                    continue
+                out[jid] = (self.JOB_OK, {
+                    "JobState": parts[1],
+                    "NodeList": parts[2] or None,
+                    "TimeLimit": parts[3],
+                    "EndTime": parts[4],
+                    "Partition": parts[5] or None,
+                    "Reason": parts[6] or None,
+                })
+        elif not self._controller_up():
+            return {i: (self.JOB_UNKNOWN, None) for i in ids}
+        for i in ids:
+            if i not in out:
+                out[i] = self.job_state(i)
+        return out
+
+    def find_job_by_comment(self, user, marker):
+        """按作业注释反查 job_id。返回 `("found", id)` / `("absent", None)` /
+        `("unknown", None)`。
+
+        只服务账本 F40 那一段：提交窗口里丢掉的 job_id（`sbatch` 已经返回、
+          那一行还没写进库，进程死了）。别拿它做日常查询 —— 它扫的是一个用户
+          的全部作业，而正常路径手里都有 job_id。
+
+        `absent` 的门槛与 `job_state()` 的 MISSING 是同一条：命令确实答了，
+          而且控制器可达。本机实测 `squeue -u <不存在的用户>` 返回 rc=0、
+          错误只在 stderr 上 —— 只看返回码会把一次坏查询判成"确认没有作业"，
+          而那一判的后果是那个作业再也没人回收，正是这条缺陷本身。
+
+        命中多行时返回 `unknown` 而不是挑一个：挑错了就是两条会话指向同一个
+          作业，之后会有两次 `scancel` 与两套 ACL 拆同一份东西。
+        """
+        rc, txt, _ = run_cmd([self.cfg.squeue, "-h", "-u", user,
+                              "-o", "%i|%k"], timeout=8)
+        if rc != 0:
+            return "unknown", None
+        hits = []
+        for line in (txt or "").splitlines():
+            jid, _, comment = line.partition("|")
+            if comment.strip() != marker:
+                continue
+            try:
+                hits.append(int(jid))
+            except ValueError:
+                continue                    # 数组形态，不是我们提交的
+        if len(hits) == 1:
+            return "found", hits[0]
+        if len(hits) > 1:
+            return "unknown", None
+        if not (txt or "").strip() and not self._controller_up():
+            return "unknown", None
+        return "absent", None
 
     def expand_node(self, nodelist):
         if not nodelist:
@@ -8277,6 +8403,9 @@ class Sessiond(object):
         # 作业状态查询的连续计数（见 phase_running 里的说明）
         self.job_missing = {}       # session_id -> 连续"查不到"次数
         self.job_unknown = {}       # session_id -> 连续"查不了"次数
+        # session_id -> 连续"认不回来"次数（F40：停在 reserved 的行按作业注释
+        #   反查，问不到控制器时下个 tick 再试）。只用来给日志节流。
+        self.recover_unknown = {}
         # session_id -> 第一次看到"非终态且不在 RUNNING"的时刻。
         # 存时刻而不是计数：tick 之间有别的活（查询、fork），按 tick 数算会把
         # 一个跑了 8 秒的 tick 当成 2 秒。
@@ -8922,24 +9051,73 @@ class Sessiond(object):
         return recovered
 
     def phase_pending(self):
-        """回收卡在 reserved 的会话（提交失败/进程崩溃留下的悬挂）。"""
+        """回收卡在 reserved 的会话（提交失败/进程崩溃留下的悬挂）。
+
+        崩溃有两种形态，后果完全不同，所以这里先分一次（账本 F40）：
+          · `sbatch` 之前就死了 → 集群里什么都没有，等 `reserved_ttl` 过期即可；
+          · `sbatch` 返回之后、那一行写进库之前死了 → 作业真的在集群里，而这一行
+            的 `job_id` 是 NULL。靠提交时写在作业注释上的会话 id 把它认回来
+            （`JOB_COMMENT_PREFIX`）。认回来之后它照常登记、照常续期、照常回收，
+            用户看到的只是"晚了两个 tick"。
+
+        认领每个 tick 都试一次，不等过期：dispatch 同步跑到底，所以下一个 tick
+          看到的 reserved 一定是残留。一个已经在跑的作业多等 600 秒，就是 600 秒
+          没有 ACL、没人续期、没人管它。
+
+        认不回来（问不到控制器）时什么都不做 —— 既不认领也不过期。过期是不可逆
+          的：一判成 expired，就再也没有任何阶段会去取消那个作业，而那正是这条
+          缺陷本身的后果。
+        """
         now = now_ts()
         for s in self.store.by_state((ST_RESERVED,)):
+            sid = s["session_id"]
+            if not s.get("job_id"):
+                status, jid = self.slurm.find_job_by_comment(
+                    s["user"], JOB_COMMENT_PREFIX + sid)
+                if status == "found":
+                    # 已经有另一行指向这个作业时不认领：两行指同一个作业会被
+                    #   拆两次、取消两次。那一行才是它的主人，这一行照旧过期。
+                    if self.store.by_job(jid) is None:
+                        self.store.update(sid, job_id=jid, state=ST_SUBMITTED,
+                                          submitted_at=now, note="recovered")
+                        self.audit("job_recovered", session=sid, job=jid,
+                                   uid=s["uid"], reason="reserved_gap")
+                        log.warning("会话 %s 停在 reserved，按作业注释认回了 "
+                                    "job=%s", sid, jid)
+                        self.recover_unknown.pop(sid, None)
+                        continue
+                    log.warning("会话 %s 停在 reserved，注释命中 job=%s，但那一行已经"
+                                "记在其他会话上，不认领", sid, jid)
+                elif status == "unknown":
+                    n = self.recover_unknown.get(sid, 0) + 1
+                    self.recover_unknown[sid] = n
+                    if n == 1 or n % 30 == 0:
+                        log.warning("会话 %s 停在 reserved，但反查作业失败已连续 %d 次"
+                                    "（联系不上控制器？），暂不处理", sid, n)
+                    continue
+                # absent：命令确实答了，而且集群里没有这个作业。
+            self.recover_unknown.pop(sid, None)
             if now - s["created_at"] > self.cfg.reserved_ttl:
-                log.warning("会话 %s 长时间停留在 reserved，回收", s["session_id"])
-                self.store.update(s["session_id"], state=ST_EXPIRED, ended_at=now,
+                log.warning("会话 %s 长时间停留在 reserved，回收", sid)
+                self.store.update(sid, state=ST_EXPIRED, ended_at=now,
                                   note="reserved_ttl")
-                self.audit("expired", session=s["session_id"], reason="reserved_ttl")
+                self.audit("expired", session=sid, reason="reserved_ttl")
 
     def phase_running(self):
         now = now_ts()
         states = (ST_SUBMITTED, ST_ENROLLED, ST_SUSPECT, ST_ORPHANED)
-        for s in self.store.by_state(states):
-            if not s.get("job_id"):
-                continue
-            status, job = self.slurm.job_state(s["job_id"])
+        # 一批一次，不是一个会话一次：这条查询跑在事件循环线程里，每个会话
+        #   一次同步 fork，代价就是每 tick N×7.3 ms 的阻塞（账本 F30）。
+        #   `job_states()` 只回答"还在队列里的那些"，剩下的逐个回落
+        #   `job_state()` —— 三态与 `Requeue` 仍然只由那一条路给。
+        rows = [s for s in self.store.by_state(states) if s.get("job_id")]
+        if not rows:
+            return
+        got = self.slurm.job_states([int(s["job_id"]) for s in rows])
+        for s in rows:
+            status, job = got[int(s["job_id"])]
             # 顺手把这一次的结果喂给本 tick 的缓存：快照要渲染同一个会话的
-            #   作业状态，没有它就要再 fork 一次（见 tick_job）。
+            #   作业状态，没有它就要再查一次（见 tick_job）。
             self._tick_job[s["job_id"]] = (job if status == self.slurm.JOB_OK
                                            else None)
 
@@ -10814,20 +10992,24 @@ class Sessiond(object):
                 r = str(job.get("Reason") or "").strip()
                 if r and r not in ("None", "N/A"):
                     d["job_reason"] = r
-                # 退出码（`143:0` = 被 SIGTERM 干掉，`0:0` = 正常）与原样重启次数。
-                # 这两个不过滤：它们在"作业还没结束时"也各有一个合法取值
-                #   （`0:0` / `0`），而"该不该显示"是客户端的判断，它知道作业
-                #   是不是结束了。守护进程只负责把 Slurm 说的话搬过来。
-                if job.get("ExitCode"):
-                    d["job_exit_code"] = job["ExitCode"]
-                if job.get("Restarts"):
-                    d["job_restarts"] = job["Restarts"]
                 # 发的是判定，不是 `Requeue=` 那个原始字段。
                 #   判"终不终态"的规则（含 PREEMPTED / TIMEOUT 的附加条件）只有
                 #   这一份，客户端照着念就行，把 `Requeue` 发过去等于让客户端
                 #   再实现一遍，而"一个判据两处实现会漂"，漂的方向是界面说
                 #   "已结束（被抢占）"而作业几分钟后又回来了。
-                d["job_terminal"] = job_is_terminal(job)
+                terminal = job_is_terminal(job)
+                # 退出码（`143:0` = 被 SIGTERM 干掉，`0:0` = 正常）与原样重启次数，
+                #   只在终态时发。
+                #   这两个字段在"作业还没结束时"也有值，但那是占位（`0:0` /
+                #   `0`），而 `job_states()` 的批量查询拿不到它们（squeue 没有
+                #   对应的格式符）。推送与 `list` 必须逐字同构（见
+                #   `docs/PROTOCOL.md` 的〈通知的形状〉），所以两边都只在终态发；
+                #   客户端 `jobEndedKind()` 本来也只在作业结束那一刻读退出码。
+                if terminal and job.get("ExitCode"):
+                    d["job_exit_code"] = job["ExitCode"]
+                if terminal and job.get("Restarts"):
+                    d["job_restarts"] = job["Restarts"]
+                d["job_terminal"] = terminal
         if with_secret and s["state"] in ACL_STATES:
             # 口令由【作业自己生成】并写在 0600 的会话文件里（守护进程从不写用户
             # 家目录）。这里只读，复用带全部安全检查的读取路径。

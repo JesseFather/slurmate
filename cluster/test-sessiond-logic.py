@@ -1738,6 +1738,139 @@ exit 0
           len({mod.Slurm.JOB_OK, mod.Slurm.JOB_MISSING,
                mod.Slurm.JOB_UNKNOWN}) == 3)
 
+    # ── 10b. 批量查询与注释反查（F30 / F40 的查询层）───────────────────────
+    #
+    # `phase_running()` 每 tick 只发一次查询，代价因此与会话数无关；而"没出现在
+    #   这一批里"绝不能被当成"作业结束了" —— 那两件事在这里一次钉死。
+    section("10b. job_states：一批一次，没答上来的逐个回落")
+    sl3 = mod.Slurm(cfg)
+    _calls = []
+
+    def _stub(answers):
+        """`answers` 是一串 (判据, 返回值)：判据是 argv 里必须出现的元素。
+
+        记与比都用命令的 basename：`cfg.squeue` 是解析出来的绝对路径。
+        """
+        def _raw(argv, timeout=10, check=False):
+            a = [os.path.basename(str(x)) if i == 0 else str(x)
+                 for i, x in enumerate(argv)]
+            _calls.append(a)
+            for need, ans in answers:
+                if all(n in a for n in need):
+                    return ans
+            return 1, "", ""
+        return _raw
+
+    _BATCH = (0, "7001|RUNNING|node01|01:00:00|2026-09-17T17:44:39|A6000|None\n"
+                 "7002|PENDING||01:00:00|N/A|A6000|Resources\n", "")
+    _calls[:] = []
+    _got = with_stub(mod, _stub([(("squeue", "-j"), _BATCH)]),
+                     lambda: sl3.job_states([7001, 7002]))
+    check("两个以上作业：整批只发一次查询", len(_calls) == 1,
+          "%d 次：%s" % (len(_calls), _calls[:3]))
+    check("一次 squeue 拿到两个作业的七个字段",
+          _got[7001][0] == mod.Slurm.JOB_OK
+          and _got[7001][1]["JobState"] == "RUNNING"
+          and _got[7001][1]["NodeList"] == "node01"
+          and _got[7001][1]["EndTime"] == "2026-09-17T17:44:39"
+          and _got[7001][1]["Reason"] == "None", str(_got))
+    check("排队中的作业 NodeList 是空 → 那一格是 None，不是空串",
+          _got[7002][1]["NodeList"] is None, str(_got[7002][1]))
+
+    # 只按 `%i` 建映射。数组作业的 id 解析不出整数，陌生的 id 更不该被收下 ——
+    #   按行序对齐会让一行的状态安到别人的会话上（F31 的形态）。
+    _MIX = (0, "7002|RUNNING|node02|01:00:00|2026-09-17T17:44:39|A6000|None\n"
+               "5706_[3-9%2]|PENDING||01:00:00|N/A|A6000|Resources\n"
+               "9999|RUNNING|node09|01:00:00|2026-09-17T17:44:39|A6000|None\n", "")
+    _got = with_stub(mod, _stub([(("squeue", "-j"), _MIX)]),
+                     lambda: sl3.job_states([7001, 7002]))
+    check("数组 id 与没问的 id 都被丢掉，不会安到其他会话上",
+          _got[7002][1]["NodeList"] == "node02"
+          and (_got[7001][0] != mod.Slurm.JOB_OK
+               or _got[7001][1].get("NodeList") != "node02")
+          and 9999 not in _got, str(_got))
+
+    # 一个活、一个没了：没了的那一个必须走 job_state()，因为只有它分得清
+    #   "结束了"与"问不到控制器"。
+    _MIXED = (0, "7001|RUNNING|node01|01:00:00|2026-09-17T17:44:39|A6000|None\n", "")
+    _DONE = (0, "JobId=7002 JobState=COMPLETED Requeue=0 ExitCode=143:0 "
+                "TimeLimit=01:00:00 EndTime=2026-09-17T17:44:39 Partition=A6000 "
+                "NodeList=node02 Reason=None ", "")
+    _calls[:] = []
+    _got = with_stub(mod, _stub([(("squeue", "-j"), _MIXED),
+                                 (("show", "job", "7002"), _DONE)]),
+                     lambda: sl3.job_states([7001, 7002]))
+    _f2 = _got.get(7002, (None, None))[1] or {}
+    check("没出现在批次里的那个回落到 job_state()（一次 scontrol）",
+          _got[7001][1]["JobState"] == "RUNNING"
+          and _f2.get("JobState") == "COMPLETED"
+          and sum(1 for c in _calls if "show" in c) == 1,
+          "%s / %s" % (_got.get(7002, (None,))[0], _calls))
+    check("回落那一路仍然带着 Requeue（条件终态只在那里判得了）",
+          _f2.get("Requeue") == "0", str(_f2))
+
+    # 控制器不可达：整批 UNKNOWN，一个会话都不许被释放。
+    _calls[:] = []
+    _got = with_stub(mod, _stub([(("squeue",), (1, "", "boom")),
+                                 (("ping",), (1, "", ""))]),
+                     lambda: sl3.job_states([7001, 7002]))
+    check("控制器不可达 → 整批 UNKNOWN",
+          all(v[0] == mod.Slurm.JOB_UNKNOWN for v in _got.values()), str(_got))
+    check("而且只判一次可达性，不是每个 id 各 ping 一次",
+          len(_calls) == 2, "%d 次：%s" % (len(_calls), _calls))
+
+    # 批次成功但什么都没返回（作业全结束了）：仍然逐个回落，绝不把
+    #   "不在批次里"直接当成 MISSING —— 那会跳过 ping。
+    _calls[:] = []
+    _got = with_stub(mod, _stub([(("squeue", "-j"), (0, "", "")),
+                                 (("show", "job"), (1, "", "")),
+                                 (("ping",), (0, "UP", ""))]),
+                     lambda: sl3.job_states([7001, 7002]))
+    check("空批次仍然逐个回落；控制器可达时判 MISSING",
+          all(v[0] == mod.Slurm.JOB_MISSING for v in _got.values()), str(_got))
+    check("  而且那一次 ping 真的发生过（不是把空批次当成答案）",
+          any("ping" in c for c in _calls), str(_calls))
+
+    _calls[:] = []
+    _got = with_stub(mod, _stub([(("show", "job"), _DONE)]),
+                     lambda: sl3.job_states([7002]))
+    check("只有一个作业时不发批量（一次 job_state 就是一次 fork）",
+          len(_calls) == 1 and "squeue" not in _calls[0], str(_calls))
+
+    # ── 注释反查（F40）─────────────────────────────────────────────────────
+    section("10c. find_job_by_comment：找到 / 确实没有 / 问不到")
+    _Q = (("squeue", "-u"), (0, "7001|slurmate:abc\n7002|other-note\n", ""))
+    check("命中唯一一条 → found 且带回 job_id",
+          with_stub(mod, _stub([_Q]), lambda: sl3.find_job_by_comment(
+              "alice", "slurmate:abc")) == ("found", 7001))
+    check("答了但没有命中 → absent（不必再 ping）",
+          with_stub(mod, _stub([(("squeue", "-u"), (0, "7002|other-note\n", ""))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("absent", None))
+    check("命中两条 → unknown（选一个会拆两次）",
+          with_stub(mod, _stub([(("squeue", "-u"),
+                                 (0, "7001|slurmate:abc\n7002|slurmate:abc\n", ""))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("unknown", None))
+    check("数组形态的 id 不算命中",
+          with_stub(mod, _stub([(("squeue", "-u"), (0, "7001_[1-3]|slurmate:abc\n", ""))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("absent", None))
+    check("输出为空 + 控制器可达 → absent",
+          with_stub(mod, _stub([(("squeue", "-u"), (0, "", "")),
+                                (("ping",), (0, "UP", ""))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("absent", None))
+    check("输出为空 + 控制器不可达 → unknown（坏查询不许当成「确认没有作业」）",
+          with_stub(mod, _stub([(("squeue", "-u"), (0, "", "")),
+                                (("ping",), (1, "", ""))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("unknown", None))
+    check("命令本身失败 → unknown",
+          with_stub(mod, _stub([(("squeue", "-u"), (1, "", "bad user"))]),
+                    lambda: sl3.find_job_by_comment("alice", "slurmate:abc"))
+          == ("unknown", None))
+
     # ── 11. IPv4 规范化（M2 回归）──────────────────────────────────────────
     section("11. IPv4 规范化")
     for good in ("192.0.2.11", "203.0.113.5", "255.255.255.255"):
@@ -1859,6 +1992,12 @@ exit 0
     check("默认不写 -w（节点由 Slurm 在分区内选择）", "-w" not in a, str(a))
     check(" 作业名是 sj-<插件短名>（不再是会话 id）",
           "--job-name=sj-web-demo" in a, str(a))
+    # F40 的唯一出路：sbatch 一返回作业就在集群里，而那一行可能还没写上
+    #   job_id；注释是唯一在作业创建那一刻就进了控制器、事后又查得回来的标记。
+    _cmt = "--comment=%s9f2c4a1bdeadbeef" % mod.JOB_COMMENT_PREFIX
+    check(" 作业注释带着会话 id（超期时按它反查）", _cmt in a, str(a))
+    check(" 注释在作业脚本操作数之前（末项必须还是脚本）",
+          a.index(_cmt) < len(a) - 1, str(a[-2:]))
     check(" 作业脚本路径是 argv 的末项（操作数在选项之后）",
           a[-1] == "/tmp/jobs/01M2JKM4P7Q8R2S5T9V0W3X6Y8.sbatch", str(a))
 
@@ -8272,6 +8411,11 @@ exit 0
                 return self.JOB_UNKNOWN, None
             return self.JOB_OK, dict(j)
 
+        def job_states(self, jids):
+            # 与真实现同形：一批一次，没答上来的逐个回落（见 Slurm.job_states）。
+            #   这一节要的是分派与释放判据，不是查询次数，所以批量就是逐个问。
+            return {int(j): self.job_state(j) for j in jids}
+
         def show_job(self, jid):
             j = self.jobs.get(int(jid), "absent")
             return dict(j) if isinstance(j, dict) else None
@@ -8666,9 +8810,19 @@ exit 0
           _v_pend.get("job_reason") == "JobHeldUser", repr(_v_pend.get("job_reason")))
     check("而 `Reason=None`（没有原因）不出现在视图里",
           "job_reason" not in _v_run, repr(_v_run.get("job_reason")))
-    check("退出码与重启次数原样传出去（该不该显示是客户端的判断）",
-          _v_run.get("job_exit_code") == "0:0" and _v_run.get("job_restarts") == "2",
+    # 这两个字段只在终态时发。批量查询（`job_states()`，一次 squeue）拿不到它们
+    #   —— squeue 没有对应的格式符 —— 而推送与 `list` 必须逐字同构。对未结束的
+    #   作业它们本来也只是占位（`0:0` / `0`）。
+    check("未结束的作业不发退出码与重启次数（两个来源必须同形）",
+          "job_exit_code" not in _v_run and "job_restarts" not in _v_run,
           "%r / %r" % (_v_run.get("job_exit_code"), _v_run.get("job_restarts")))
+    _JS_LINE_DONE = (_JS_LINE_RUNNING.replace("JobState=RUNNING", "JobState=COMPLETED")
+                     .replace("ExitCode=0:0", "ExitCode=143:0"))
+    _v_done = _view_with(_JS_LINE_DONE)
+    check("终态时原样传出去（`143:0` = 被 SIGTERM 干掉，`2` = 重启过两次）",
+          _v_done.get("job_exit_code") == "143:0"
+          and _v_done.get("job_restarts") == "2",
+          "%r / %r" % (_v_done.get("job_exit_code"), _v_done.get("job_restarts")))
     # 发出去的是判定，不是 `Requeue=` 那个原始字段：判"终不终态"的规则
     #    （含 PREEMPTED / TIMEOUT 的附加条件）只有守护进程这一份。
     #    把 `Requeue` 发过去等于让客户端再实现一遍 —— 而"一个判据两处实现会漂"，
@@ -9093,12 +9247,20 @@ exit 0
 
         def __init__(self):
             self.calls = 0
+            self.batches = 0
             self.jobs = {}
 
         def job_state(self, jid):
             self.calls += 1
             j = self.jobs.get(str(jid))
             return (self.JOB_OK, j) if j is not None else (self.JOB_MISSING, None)
+
+        def job_states(self, jids):
+            # 真实现是一次 `squeue` 批量；桩没有那条路，逐 id 转给 job_state。
+            #   `batches` 单独数：这一节要钉"每 tick 只问一次"这件事本身，
+            #   而那与每个 id 各自算几次是两笔账。
+            self.batches += 1
+            return {int(j): self.job_state(j) for j in jids}
 
         def show_job(self, jid):
             self.calls += 1
@@ -9599,11 +9761,12 @@ exit 0
             _c, _k = _pair(dd)
             _k.subscribed = True
         dd.slurm.calls = 0
+        dd.slurm.batches = 0
         dd.tick()
-        return dd.slurm.calls
+        return dd.slurm.calls, dd.slurm.batches
 
-    _one = _calls_per_tick(1)
-    _four = _calls_per_tick(4)
+    _one, _b1 = _calls_per_tick(1)
+    _four, _b4 = _calls_per_tick(4)
     check("推送渲染的 fork 次数与连接数无关（这才是「不放大」）",
           _one == _four and _one > 0,
           "1 条连接 %d 次 / 4 条连接 %d 次" % (_one, _four))
@@ -9616,6 +9779,11 @@ exit 0
     check("而且每个作业每 tick 至多一次 Slurm 查询"
           "（3 个会话，至多 3 次；快照复用它，不查第二遍）",
           _one <= 3, "%d 次（3 个会话）" % _one)
+    # 查得少还不够：查询的次数必须与并发会话数无关（账本 F30）。
+    #   三个会话一次批量，四十个会话也是一次；桩里的 job_states 逐个转给
+    #   job_state，所以上面的计数仍按 id 算，这一条数的是批量本身。
+    check("3 个会话每 tick 只发一次批量查询（次数与会话数无关）",
+          _b1 == 1 and _b4 == 1, "1 条连接 %d 次 / 4 条连接 %d 次" % (_b1, _b4))
 
     # ── 26.15 逐字节读也不丢帧（用例⑥）─────────────────────────────────
     _d12 = _mkd(snapshot_interval=0.0)
@@ -11634,6 +11802,10 @@ exit 0
                 return self.JOB_UNKNOWN, None
             return self.JOB_OK, dict(j)
 
+        def job_states(self, jids):
+            # 与真实现同形：一批一次，没答上来的逐个回落。
+            return {int(j): self.job_state(j) for j in jids}
+
         def show_job(self, jid):
             j = self.jobs.get(str(jid))
             return dict(j) if isinstance(j, dict) else None
@@ -13590,6 +13762,187 @@ exit 0
               "rc=%s" % _r5.returncode)
     finally:
         shutil.rmtree(os.path.dirname(_cmd), ignore_errors=True)
+
+    # ── 33. 崩溃窗口：reserved 那一行按作业注释认回来（F40）───────────────
+    #
+    # `sbatch` 返回 job_id 之后、那一行写进库之前进程死掉，库里那一行停在
+    #   reserved 且 job_id 为 NULL，而作业已经在集群里跑着。判据是那一段窗口的
+    #   三种答案：认回来、确认没有、问不到 —— 第三种绝不能被当成第二种。
+    section("33. 提交窗口里丢掉的 job_id：按作业注释认回来（F40）")
+
+    class _RecSlurm(object):
+        """只服务 F40 那条反查的桩：`ask` 是它每次给的答案。"""
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def __init__(self):
+            self.ask = ("absent", None)
+            self.asks = []
+
+        def find_job_by_comment(self, user, marker):
+            self.asks.append((user, marker))
+            return self.ask
+
+        def job_state(self, _jid):
+            return self.JOB_MISSING, None
+
+        def job_states(self, jids):
+            return {int(j): self.job_state(j) for j in jids}
+
+        def show_job(self, _jid):
+            return None
+
+        def expand_node(self, n):
+            return n
+
+        def node_ip(self, _n):
+            return "192.0.2.11"
+
+        def renew(self, *_a, **_k):
+            return True, ""
+
+        def cancel(self, *_a, **_k):
+            return True
+
+    _fd = _mkd()
+    _fq = _RecSlurm()
+    _fd.slurm = _fq
+    _fev = []
+    _fd.audit = lambda e, **kw: _fev.append(dict(kw, event=e))
+    _fn = [1800000000]
+    _real_now_f = mod.now_ts
+    mod.now_ts = lambda: _fn[0]
+
+    def _fins(sid, age=10, **over):
+        row = dict(session_id=sid, uid=UID, user="alice", account="acct",
+                   requested_time="01:00:00", state=mod.ST_RESERVED,
+                   candidates="55001,55002", created_at=_fn[0] - age,
+                   partition="A6000", cpus=1, mem="1G")
+        row.update(over)
+        _fd.store.insert(**row)
+
+    _fins("s-gap")
+    _fq.ask = ("found", 8123)
+    _fev[:] = []
+    _fd.phase_pending()
+    _row = _fd.store.get("s-gap")
+    check("注释命中 → 写回 job_id 并转 submitted",
+          _row["job_id"] == 8123 and _row["state"] == mod.ST_SUBMITTED, str(_row))
+    check("  submitted_at 推到此刻，created_at 一个字不动"
+          "（会话总寿命不该被一次崩溃恢复重置）",
+          _row["submitted_at"] == _fn[0] and _row["created_at"] == _fn[0] - 10,
+          "%s / %s" % (_row["submitted_at"], _row["created_at"]))
+    check("  反查用的标记是「前缀 + 会话 id」，按这个会话的用户去问",
+          _fq.asks and _fq.asks[-1] == ("alice", "slurmate:s-gap"), str(_fq.asks))
+    _rec = [e for e in _fev if e["event"] == "job_recovered"]
+    check("  审计一条 job_recovered（不是复用 submitted 那个名字）",
+          len(_rec) == 1 and _rec[0].get("job") == 8123, str(_fev))
+
+    # 同一个作业已经记在另一行上：不认领，也不 scancel（两行拆两份会拆两次）。
+    _fins("s-gap2")
+    _fq.ask = ("found", 8123)
+    _fd.phase_pending()
+    check("作业已经记在其他会话上 → 不认领",
+          _fd.store.get("s-gap2")["state"] == mod.ST_RESERVED
+          and _fd.store.get("s-gap2")["job_id"] is None,
+          str(_fd.store.get("s-gap2")))
+    _fn[0] += mod.RESERVED_TTL + 1
+    _fd.phase_pending()
+    check("  而它到了 TTL 照旧过期（那个作业由认领的那一行负责）",
+          _fd.store.get("s-gap2")["state"] == mod.ST_EXPIRED,
+          str(_fd.store.get("s-gap2")))
+
+    # 问不到控制器：既不认领也不过期。过期是不可逆的 —— 一判 expired，
+    #   就再也没有任何阶段会去取消那个作业。
+    _fins("s-gap3", age=mod.RESERVED_TTL + 1)
+    _fq.ask = ("unknown", None)
+    _fd.phase_pending()
+    check("问不到控制器 → 保持 reserved，不认领也不过期",
+          _fd.store.get("s-gap3")["state"] == mod.ST_RESERVED
+          and _fd.store.get("s-gap3")["job_id"] is None,
+          str(_fd.store.get("s-gap3")))
+
+    _fq.ask = ("absent", None)
+    _fd.phase_pending()
+    check("确认集群里没有这个作业 → 照旧过期（行为与今天逐字相同）",
+          _fd.store.get("s-gap3")["state"] == mod.ST_EXPIRED,
+          str(_fd.store.get("s-gap3")))
+
+    _fins("s-young", age=1)
+    _fd.phase_pending()
+    check("还没到 TTL、确认没有作业的 → 保持 reserved 等它过期",
+          _fd.store.get("s-young")["state"] == mod.ST_RESERVED,
+          str(_fd.store.get("s-young")))
+    mod.now_ts = _real_now_f
+
+    # ── 34. 心跳老化：300 秒 suspect、1800 秒 orphaned（S40/S41 那一格）──
+    #
+    # 这一格从前只有一个数字被钉住（`suspect_after == 300`），而三种走向没有
+    #   一条用例走过。它是"心跳丢了"唯一的判据，而判错的形态是用户的作业被
+    #   静默杀掉（或者一条早该回收的会话永远占着配额）。
+    section("34. 心跳老化：300 秒 suspect、1800 秒 orphaned")
+    _hd = _mkd()
+
+    class _HbSlurm(_RecSlurm):
+        def __init__(self):
+            _RecSlurm.__init__(self)
+            self.cancels = []
+
+        def cancel(self, jid, reason=""):
+            self.cancels.append((str(jid), reason))
+            return True
+
+    _hq = _HbSlurm()
+    _hd.slurm = _hq
+    _hev = []
+    _hd.audit = lambda e, **kw: _hev.append(dict(kw, event=e))
+    _hn = [1900000000]
+    _real_now_h = mod.now_ts
+    mod.now_ts = lambda: _hn[0]
+
+    def _hins(sid, state, miss, trust=None, job=9001):
+        row = dict(session_id=sid, uid=UID, user="alice", account="acct",
+                   requested_time="01:00:00", state=state, candidates="55001",
+                   created_at=_hn[0] - 9000, last_hb_socket=_hn[0] - miss,
+                   job_id=job)
+        if trust:
+            row["trust"] = trust
+        _hd.store.insert(**row)
+
+    _hins("h-fresh", mod.ST_ENROLLED, 10)
+    _hins("h-suspect", mod.ST_ENROLLED, 400)
+    _hins("h-orphan", mod.ST_SUSPECT, 1900, job=9003)
+    _hins("h-recovered", mod.ST_SUSPECT, 1900, trust="recovered", job=9004)
+    _hd.phase_heartbeat()
+    check("心跳还在 → 原样不动",
+          _hd.store.get("h-fresh")["state"] == mod.ST_ENROLLED,
+          _hd.store.get("h-fresh")["state"])
+    check("过了 300 秒 → 判 suspect，作业与 ACL 都保留（那只是网络闪断）",
+          _hd.store.get("h-suspect")["state"] == mod.ST_SUSPECT,
+          _hd.store.get("h-suspect")["state"])
+    check("  而且一条审计都不写 scancel 那一侧",
+          any(e["event"] == "suspect" and e.get("session") == "h-suspect"
+              for e in _hev), str(_hev))
+    _orph = _hd.store.get("h-orphan")
+    check("过了 1800 秒 → 判 orphaned 并交给释放闸",
+          _orph["state"] == mod.ST_RELEASING and _orph["note"] == "orphaned",
+          "%s / %s" % (_orph["state"], _orph["note"]))
+    check("  并且真的 scancel 了那个作业",
+          ("9003", "orphaned") in _hq.cancels, str(_hq.cancels))
+    check("恢复态记录（trust=recovered）永远不会被自动 scancel",
+          _hd.store.get("h-recovered")["state"] == mod.ST_SUSPECT
+          and all(j != "9004" for j, _r in _hq.cancels), str(_hq.cancels))
+
+    # 启动静默期：守护进程刚起来，别把重启窗口里没来得及心跳的会话误判成孤儿。
+    _hn[0] += 10
+    _hd.hb_grace_until = _hn[0] + 100
+    _hins("h-grace", mod.ST_ENROLLED, 9999, job=9005)
+    _hd.phase_heartbeat()
+    check("启动静默期内一条都不判（重启窗口不是用户掉线）",
+          _hd.store.get("h-grace")["state"] == mod.ST_ENROLLED,
+          _hd.store.get("h-grace")["state"])
+    mod.now_ts = _real_now_h
 
     # ── 汇总前的核账：源码里有几节，就真的跑了几节 ──────────────────────
     #

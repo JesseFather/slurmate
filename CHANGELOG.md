@@ -37,7 +37,51 @@
 > `0.36`，`client/package.json` 与 `client/package-lock.json` 的 `version` 是
 > **`0.36.0`** —— 那个字段是三段（见本文件顶部），前两段就是协议版本。
 >
-> 这一版没有新增协议 op：改的是打包器的校验。
+> 这一版没有新增协议 op：改的是作业状态的查询方式，以及打包器的校验与文档。
+
+### Fixed — 每个 tick 的作业状态查询改成一批一次（F30）
+
+`phase_running()` 从前对每个活跃会话调一次 `scontrol show job`（每次一到三次同步
+fork，本机实测 7.3 ms），跑在事件循环线程里；N 个会话就是每个 tick N 倍的阻塞。
+现在 `Slurm.job_states()` 用一条 `squeue -h -j a,b,c` 问完这一批，查询的代价与
+并发会话数无关。
+
+没出现在这一批里的一律回落 `job_state()` —— 只有它分得清"作业结束了"与"问不到
+控制器"，`Requeue=` 那条附加判据也仍然只从回落那一条来。"不在批次里"从来不等于
+"不存在"。
+
+配套改了一处契约：`session_view()` 的 `job_exit_code` / `job_restarts` 改成只在
+作业终态时发。squeue 没有这两个字段的格式符，而推送与 `list` 必须逐字同构；对
+未结束的作业它们本来也只是占位值（`0:0` / `0`）。
+
+**判据**：`cluster/test-sessiond-logic.py` 第 10b 节十一条与 26.14 的批量计数。
+
+### Fixed — 提交窗口里丢掉的 job_id，按作业注释认回来（F40）
+
+`sbatch` 返回之后、那一行写进库之前进程死掉，库里那一行停在 `reserved` 且
+`job_id` 为 NULL，而作业已经在集群里：600 秒后被判 `expired`，那个作业却取消不了，
+一直跑到 `TimeLimit`，没有一行日志说得清。
+
+现在提交时带 `--comment=slurmate:<会话 id>`；`phase_pending()` 对 `job_id` 为空的
+`reserved` 行每个 tick 用 `squeue -u <用户> -o "%k"` 反查一次。命中就写回 `job_id`、
+转 `submitted`；确认没有就照旧等 `reserved_ttl`；问不到控制器就下个 tick 再试 ——
+过期是不可逆的，`JOB_UNKNOWN` 不许被当成"不存在"。
+
+`created_at` 不动：会话总寿命不该被一次崩溃恢复重置。
+
+**判据**：第 10c 节七条与第 33 节九条，加上第 17 节那条 `--comment` 的 argv 断言。
+
+### Changed — 心跳老化有了判据，S40 / S41 结清
+
+`phase_heartbeat()` 的三种走向此前只有两个阈值数字被钉住（`suspect_after == 300`），
+一条用例都没走过。新增第 34 节七条：未到阈值不动、过 300 秒转 `suspect`、
+过 1800 秒转 `orphaned` 并 `scancel`、`trust="recovered"` 的记录永不自动
+`scancel`、启动静默期内一条都不判。客户端补一条浮窗判据：`account` 为空而
+`account_error` 非空时账户格是「无」、原因另起一行。
+
+测试后端"演不出来的那几样"逐格核过之后搬进账本第五节（保留 ㉗）：每一格都指得到
+它该在的那一层的判据，或者属于第二节的真机项。不扩那个后端 —— 开发者模式将来
+可能整个删掉。
 
 ### Changed — 打包器在打包时就判作业侧那四条断言
 
