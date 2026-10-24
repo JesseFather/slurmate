@@ -100,9 +100,9 @@ jobs:
       - run: python3 cluster/test-run-package.py
       - run: bash cluster/make-run.sh
       - name: 打包器
-        run: |
-          v="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' cluster/slurmate-sessiond)"
-          cp packer/slurmate-packer.js "dist/slurmate-packer-${v}.js"
+        # 文档嵌在这一份文件里，作者不需要基座仓库。默认写到
+        #   dist/slurmate-packer-<版本>.js，版本读的是同一个 VERSION 行。
+        run: node packer/make-packer.js
       - name: 版本号与 tag 的版本一致
         # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.36（正式版）
         #   或 v0.36-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上

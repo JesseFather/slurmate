@@ -322,22 +322,6 @@ Windows 上 `findBash()` 那一段（Git Bash、WSL、路径翻译）只有纯�
 
 ---
 
-### S33 — 打包器的文档到不了作者手上
-
-打包器本身已经发了：`release.yml` 的 `site` job 产出
-`slurmate-packer-<版本>.js`，与站点包挂在同一个 Release 上。作者不需要 clone 基座
-仓库就能拿到那个工具。
-
-到不了的是它的文档。插件作者不是基座的作者 —— 他的工作现场是插件自己的那个仓库，
-`packer/docs/` 对他来说是一条**别人的仓库**里的路径。他需要的是随工具一起拿到的那
-几份：怎么打、`PLUGIN-SPEC.md`、`PLUGIN-CONTAINER.md`。
-
-今天没有任何东西把这几份送到他手上。候选两条，一条都没定：作为 Release 资产挂在
-`.js` 旁边 / 打进那个脚本、用一个动词解出来。它与 S32 是同一件事的两侧，而 S32
-那一侧已经由单文件包解决。
-
----
-
 ## 四、已经不再是问题的
 
 留着，免得再被翻出来当成待办。
@@ -345,6 +329,7 @@ Windows 上 `findBash()` 那一段（Git Bash、WSL、路径翻译）只有纯�
 | 曾经的问题 | 现状 |
 |---|---|
 | **S32 — 站点端的文档没有进包的路**：`cluster/` 从仓库跑安装器，管理员拿到的是仓库里的一份 clone；那些文档没有任何一份构建步骤把它放到他手边。 | **结清，分发方式定为单文件包。** 0.35 起 `slurmate-site-<版本>.run` 带着 `cluster/README.md` 与 `cluster/docs/` 四份（`make-run.sh` 的 `PAYLOAD`），`--extract` 就能读；0.36 起包内文档不再指向包外。**deb 不是计划中的路**，`cluster/README.md` 里那句「将来进 deb」已删。**判据**：`cluster/test-run-package.py` 断言解出来的恰好是清单上那些并逐份比对字节，第 6 节再断言包内文档的相对链接都落在包里。 |
+| **S33 — 打包器的文档到不了作者手上**：工具作为单个 `.js` 发得出去，而怎么打、规范、容器格式这三份留在基座仓库里 —— 插件作者的工作目录是他自己的插件仓库，那是别人的仓库。 | **0.36 结清，文档嵌进发布的那一份。** `packer/make-packer.js` 把 `packer/docs/` 的三份填进脚本的 `DOCS` 格，`node slurmate-packer.js docs` 把它们写出来；三份之间不指向包外。作者拿到的那一个文件就是全部。**判据**：`packer/test-packer.mjs` 第 10 节八条 —— 源码树里与单独拷到空目录的那一份各解一次，逐字节比对；再断言三份之间没有指向包外的链接。 |
 | **打包器不判作业侧的命名与结构（0.36 之前）**：`job/start.sh` 的命名与结构由站点在编织时判（S31 T5 的第 ④ 条，以及 `start_<短名>` 与 `_<短名>_` 前缀），而作者在自己的机器上打包时一条都看不到 —— 要发现，必须先有一台装好的站点。 | **0.36 修掉。** `packer build` 用同一套判据：无 shebang、无 `#SBATCH`、定义了 `start_<短名>`、其余函数带 `_<短名>_` 前缀、函数定义之外没有语句。只对清单里带 `site` 的树生效（符合性向量那棵树刻意没有 `site`，它的作业侧是字节夹具）。**判据**：`packer/test-packer.mjs` 第 2b 节九条（五个反例、四个正例），全套 141 / 0。 |
 | **S2 — 插件跑在主进程里，没有任何隔离**：`require()` 进 Electron 主进程，完整 Node 权限；`contributes.prepare` 的同步不变量还压在主进程的执行次序上。 | **0.34 收口。** 每个 `(id, 版本)` 一个宿主进程（生产 `utilityProcess`，纯 Node 测试 `child_process`），钩子走请求/应答协议，`ctx` 只递纯数据。`ctx.win.surfaceSession` 从契约删除，登录改 `ctx.login(origin)`（口令不过边界）；`session()` 不含 `auth_password`；`prepare` 改成异步，槽由显式预留占住（顺带修掉 `probeLocalPort` 的既有竞态）。宿主崩溃时作业会话继续跑、插件能力停止。**判据**：`client/test/plugin-host.test.mjs` 十一条、`client/test/plugin-lifecycle.test.mjs`、`boot.test.mjs` 的 ctx 守卫与并发启动。**边界**：不是沙箱（见 §五 保留 ㉕ 与 SECURITY.md）。 |
 | **S3 — 插件的测试还住在 `client/test/` 里**：七条直接调 `sshconfig.js` / `relay.attach` 的用例测的是 sshd 自己的逻辑，却住在基座套件里。 | **0.34 收口。** 那七条从基座删掉（sshd 搬出仓库时在它自己的项目里重建）；留下两条「走主进程接缝」的用例，并把它们对插件路径的 `require` 换成内联路径 —— 基座套件里不再有一行 `require('../../plugins/...')`。基座不为样例维护测试项目或 CI job。**判据**：基座测试对 `plugins/` 的 require 为 0，客户端套件绿。 |

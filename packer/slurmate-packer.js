@@ -29,7 +29,7 @@
  *   代价是几处常量在这里有第二份（跳过表、版本号形状），
  *   由 `.github/workflows/checks.yml` 里的 lint 与 `tools/conformance/` 的向量钉住。
  *
- * ── 六个动词 ────────────────────────────────────────────────────────────────
+ * ── 七个动词 ────────────────────────────────────────────────────────────────
  *
  *   init    铸一个 id（只在源码树里没有的时候）并插入写回 plugin.json，
  *           同时给血统表记一条。`--fork` / `--adopt` 是 §2.5 那次"停下来问"的
@@ -40,6 +40,7 @@
  *   sign    给一个已经打好的包盖上签名（不改内容摘要，所以不必重新打包）
  *   verify  校验一个 `.splug`：逐份字节、内容摘要、签名、血统表与签名者对得上吗
  *   inspect 把人该看的东西打出来（作者拿它对着规范逐行核对）
+ *   docs    把随包的三份文档写到磁盘上（怎么打、规范、容器格式）
  *
  * 写树的动词与打包的动词不能合并。 `init` / `keygen` 会弄脏源码树，
  *   而 §3.5 要求打包的输入是一个干净的提交，一条命令做完两件事必然自相
@@ -73,6 +74,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+
+/**
+ * 随包走的三份文档。发布用的那一份由 `packer/make-packer.js` 把它们填进下面
+ * 这一格；源码树里它是 `null`，`docs` 动词改为直接从 `docs/` 读。
+ *
+ * 为什么要嵌：插件作者的工作目录是他自己的插件仓库，基座仓库对他来说是别人的
+ *   仓库。只发一个 `.js`、把规范留在仓库里，等于让他去翻别人的目录 —— 与
+ *   "管理员不该被指向源码文档"是同一条理由。
+ */
+const DOCS = null;   // @EMBED-DOCS@
 
 // ==============================================================================
 //  容器格式（packer/docs/PLUGIN-SPEC.md 附录 A）
@@ -1297,7 +1308,45 @@ function oneContentPerVersion(home, id, version, digest, out, opts) {
 }
 
 // ==============================================================================
-//  六个动词
+//  文档（第七个动词）
+// ==============================================================================
+
+/** 随包走的三份：怎么打、规范、容器格式。顺序就是 `docs` 写出来的顺序。 */
+const DOC_NAMES = ['README.md', 'PLUGIN-SPEC.md', 'PLUGIN-CONTAINER.md'];
+
+/**
+ * 取这三份：发布那一份里是嵌进来的，源码树里是 `docs/` 里那几份。
+ * 两处都没有就返回 `null` —— 那不是"没有文档"，是这一份打包器做坏了。
+ */
+function docBundle() {
+  if (DOCS) return DOCS;
+  const dir = path.join(__dirname, 'docs');
+  const out = {};
+  for (const n of DOC_NAMES) {
+    const f = path.join(dir, n);
+    if (!fs.existsSync(f)) return null;
+    out[n] = fs.readFileSync(f, 'utf8');
+  }
+  return out;
+}
+
+function cmdDocs(opt) {
+  const docs = docBundle();
+  if (!docs) {
+    throw new Error('这一份打包器里没有文档，旁边也没有 docs/：它不完整，重新取一份');
+  }
+  const out = path.resolve(opt.out || path.join(process.cwd(), 'slurmate-packer-docs'));
+  fs.mkdirSync(out, { recursive: true });
+  for (const n of DOC_NAMES) {
+    fs.writeFileSync(path.join(out, n), docs[n], 'utf8');
+  }
+  console.log(`文档已经写到 ${out}`);
+  for (const n of DOC_NAMES) console.log(`  ${n}`);
+  return 0;
+}
+
+// ==============================================================================
+//  其余六个动词
 // ==============================================================================
 
 /**
@@ -1967,6 +2016,7 @@ function usage(code) {
   node slurmate-packer.js verify  <包> [--expect-digest <hex>] [--expect-signer <指纹>]
                                        [--against <插件目录>[@<ref>]]
   node slurmate-packer.js inspect <包> [--json]
+  node slurmate-packer.js docs    [--out <目录>]
 
   --home <目录> 可以跟在任何动词后面（等价于 $SLURMATE_PACKER_HOME）。默认
   ~/.config/slurmate/packer，里面是 keys/<id>.pem（私钥）与 releases.json（发布表）。
@@ -1988,8 +2038,8 @@ function usage(code) {
   verify   逐份校字节、算内容摘要、验签，并核对包里的血统表与签名者是否一致。
            --against 顺带判 §3.6。
   inspect  打出包里到底有什么，作者拿它对着规范逐行核对。
-
-规范：packer/docs/PLUGIN-SPEC.md（尤其 §2、§3、§4、附录 A）。`);
+  docs     把随包的三份文档写出来（怎么打、PLUGIN-SPEC.md、PLUGIN-CONTAINER.md）。
+           默认写到 ./slurmate-packer-docs。它们与这个脚本同一个版本。`);
   return code;
 }
 
@@ -2044,6 +2094,7 @@ function main(argv) {
       if (!target) throw new Error('inspect 要一个包');
       return cmdInspect(target, opt);
     }
+    if (verb === 'docs') return cmdDocs(opt);
     throw new Error(`不认识的动词 ${verb}`);
   } catch (e) {
     console.error(`✗ ${e.message}`);
@@ -2055,7 +2106,7 @@ if (require.main === module) {
   process.exit(main(process.argv.slice(2)));
 }
 
-// 这个文件的身份是一个 CLI（六个动词，见文件头），而导出表只服务两种读者：
+// 这个文件的身份是一个 CLI（七个动词，见文件头），而导出表只服务两种读者：
 //   演示后端（`client/src/main/backend-fake.js` 拿它现打一个真包）与
 //   `test-packer.mjs` / `tools/conformance/` 的向量。所以这里留的是包格式那一层
 //   （常量、解析/构造、规范化）。
@@ -2064,7 +2115,7 @@ if (require.main === module) {
 //   `insertId` / `replaceId` / `packerHome` / `keyFilePath` / `releasesPath` /
 //   `saveKey` / `loadKey` / `readLineage` / `lineageEntry` / `writeLineage` /
 //   `lineageEntryOfPackage` / `readReleases` / `writeReleases`）不在导出表里
-// 它们只被本文件的六个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
+// 它们只被本文件的七个动词调用，仓库里没有任何外部读者。它们仍然在文件里、
 //   仍然被那些动词用着；只是不再对外承诺。这与 `plugin_payload_index()` 是同一条
 //   纪律：一个没人读的导出就是一句没人守的承诺。
 module.exports = {

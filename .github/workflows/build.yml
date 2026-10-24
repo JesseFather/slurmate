@@ -90,9 +90,8 @@ jobs:
         run: bash cluster/make-run.sh
       - name: 打包器
         # 单文件零依赖，与基座同一个版本；放进 dist，与站点包一起上传。
-        run: |
-          v="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' cluster/slurmate-sessiond)"
-          cp packer/slurmate-packer.js "dist/slurmate-packer-${v}.js"
+        # 文档嵌在这一份文件里（作者手上只有它），版本号取自同一个 VERSION 行。
+        run: node packer/make-packer.js
       - name: 摘要
         # 产物在 Actions 页面上只给一个名字；管理员拿它认包靠 sha256，
         # 所以把这一份里的每个文件都写进本次运行的摘要。

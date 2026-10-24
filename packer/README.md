@@ -6,6 +6,9 @@
 发布形态是单个文件：每个版本的 Release 上有一个 `slurmate-packer-<版本>.js`，
 与客户端安装包、站点包同一页。在仓库里则直接跑 `packer/slurmate-packer.js`。
 
+文档嵌在那一份文件里 —— 插件作者的工作目录是自己的插件仓库，不该为了读规范去翻
+基座的仓库。`node slurmate-packer.js docs` 把三份写到 `./slurmate-packer-docs/`。
+
 命令一律是 `node slurmate-packer.js <动词>`。没有单独安装的 `packer` 命令。
 
 ```sh
@@ -23,7 +26,7 @@ node slurmate-packer.js inspect <id>.splug
 规范：`packer/docs/PLUGIN-SPEC.md`（§2 身份、§3 包、§4 签名、§5–§7 运行）与
 `packer/docs/PLUGIN-CONTAINER.md`（容器格式，即那份规范的附录 A）。
 
-## 六个动词
+## 七个动词
 
 | 动词 | 做什么 |
 |---|---|
@@ -33,6 +36,7 @@ node slurmate-packer.js inspect <id>.splug
 | `sign <包> [--out <文件>]` | 给一个已经打好的包盖上签名 —— **不改内容摘要**，所以不必重新打包 |
 | `verify <包> [--against <目录>[@<ref>]] [--expect-digest <hex>] [--expect-signer <指纹>]` | 逐份校字节、算摘要、验签，并核对血统表与签名者；`--against` 顺带判 §3.6 |
 | `inspect <包> [--json]` | 打出包里到底有什么 —— 拿它对着规范逐行核对 |
+| `docs [--out <目录>]` | 把随包的三份文档写到磁盘上：怎么打、规范、容器格式 |
 
 `build` 会在产出之前判负载的大小上限（§3.7）：单份 ≤ 256 KiB、加起来
 ≤ 1,561,905 字节、份数 ≤ 256。超了它拒绝，并给出数字与是哪一条。
@@ -124,7 +128,7 @@ node slurmate-packer.js inspect <id>.splug
 node packer/test-packer.mjs
 ```
 
-141 条，不需要网络、不需要这个仓库处于任何特定提交状态（它自己造临时仓库）。
+149 条，不需要网络、不需要这个仓库处于任何特定提交状态（它自己造临时仓库）。
 它顺带把客户端那一份读方（`client/src/main/plugin-package.js`）拉进来跑同一批
 坏包 —— 三份实现里这两份都在 JS 里，让它们在同一批字节上给出同一个理由词，是
 "三端一致"这条契约里最容易分家的一半。

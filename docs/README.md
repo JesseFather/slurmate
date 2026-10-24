@@ -7,13 +7,14 @@
 客户端的 `files:` 白名单是 `src/**` 与 `package.json`，测试后端那几个模块排除在外
 （见 `client/electron-builder.yml`）。站点端的单文件包把 `cluster/README.md` 与
 `cluster/docs/` 那四份一起带走（`cluster/make-run.sh` 的 `PAYLOAD`）。打包器以
-`slurmate-packer-<版本>.js` 单文件随版本发布，它的文档是 `packer/docs/`，留在仓库里。
+`slurmate-packer-<版本>.js` 单文件随版本发布，那三份文档嵌在脚本里
+（`packer/make-packer.js`），`docs` 动词把它们写出来。
 
 | 单元 | 谁拿 | 带文档吗 | 文档在哪 |
 |---|---|---|---|
 | 客户端 | 用集群的人 | 不带 | 步骤与提示全在界面上。用户要的是直观、易用 |
 | 站点端 | 站点管理员 | 带：`cluster/README.md` 与四份 | [`cluster/docs/`](../cluster/docs/)，`--extract` 即可读 |
-| 打包器 | 插件作者 | 不带（发的是单个脚本） | [`packer/docs/`](../packer/docs/)，在仓库里 |
+| 打包器 | 插件作者 | 带：三份嵌在脚本里 | [`packer/docs/`](../packer/docs/)，`docs` 动词写出来 |
 | 插件 | 站点 | 不带 | 包里只有代码 |
 
 四条推论，它们管着「一份新文档该放哪」：
@@ -23,7 +24,7 @@
 | P1 | 一个家，别处指路。仓库里禁止同一份文档存在两份 | 手抄的第二份先漂，而漂了不会红任何东西 |
 | P2 | 必须自包含时用构建期拼接，不手抄 | 先例已经有了：安装器把插件片段织进 `run.sbatch` |
 | P3 | 一篇有多个读者时，先看能不能拆（按节 / 按列），拆不动的才两边都带 | 拆比带便宜，带比抄便宜 |
-| P4 | 随包分发的文档不指向包外 | 管理员手上只有那一份包。一条指到仓库的死链，与写错一个字是同一件事。判据在 `cluster/test-run-package.py` |
+| P4 | 随包分发的文档不指向包外 | 读者手上只有那一份包。一条指到仓库的死链，与写错一个字是同一件事。判据在 `cluster/test-run-package.py` 与 `packer/test-packer.mjs` |
 
 > 给管理员那一侧，文件数只减不增。今天四份 + 一份入口 README。
 

@@ -1059,6 +1059,69 @@ section('9. §2.4 的手滑闸：发布表');
 
 // ==============================================================================
 
+section('10. 文档随包走：`docs` 动词与嵌进去的那三份');
+
+{
+  const docs = ['README.md', 'PLUGIN-SPEC.md', 'PLUGIN-CONTAINER.md'];
+  const srcDir = path.join(HERE, 'docs');
+
+  // 源码树里跑：DOCS 是 null，`docs` 从旁边的 docs/ 直接读。
+  const d1 = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-docs-'));
+  TMP.push(d1);
+  const r1 = packer('docs', '--out', d1);
+  check('源码树里 `docs` 跑得通', r1.code === 0, r1.err.slice(0, 200));
+  check('写出了随包的三份，且逐字节等于 docs/ 里那几份',
+    docs.every((n) => fs.existsSync(path.join(d1, n))
+      && fs.readFileSync(path.join(d1, n)).equals(fs.readFileSync(path.join(srcDir, n)))),
+    d1);
+
+  // 发布用的那一份：把文档嵌进 .js，然后单独拷到一个空目录里跑。
+  //   这一条是重点 —— 作者手里只有那一个文件，它得自带文档。
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-mkp-'));
+  TMP.push(base);
+  const built = path.join(base, 'slurmate-packer-0.0.0.js');
+  check('make-packer.js 跑得通', (() => {
+    try { execFileSync(process.execPath, [path.join(HERE, 'make-packer.js'), '--out', built], { encoding: 'utf8' }); return true; } catch { return false; }
+  })(), built);
+  check('源码里留着占位标记，产物里没有它',
+    fs.readFileSync(PACKER, 'utf8').includes('const DOCS = null;   // @EMBED-DOCS@')
+    && !fs.readFileSync(built, 'utf8').includes('@EMBED-DOCS@'), '');
+
+  const alone = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-alone-'));
+  TMP.push(alone);
+  const only = path.join(alone, 'slurmate-packer.js');
+  fs.copyFileSync(built, only);
+  check('那一份拷出来只有它自己（旁边没有 docs/）',
+    fs.readdirSync(alone).length === 1, fs.readdirSync(alone).join(','));
+
+  const d2 = path.join(alone, 'out');
+  let r2;
+  try {
+    r2 = { code: 0, out: execFileSync(process.execPath, [only, 'docs', '--out', d2], { encoding: 'utf8' }) };
+  } catch (e) { r2 = { code: -1, out: '', err: String(e.stderr || e) }; }
+  check('独立的那一份照样解得出文档（作者不需要基座仓库）', r2.code === 0, (r2.err || '').slice(0, 200));
+  check('解出来的三份与源码树里逐字节一致',
+    docs.every((n) => fs.existsSync(path.join(d2, n))
+      && fs.readFileSync(path.join(d2, n)).equals(fs.readFileSync(path.join(srcDir, n)))),
+    '');
+
+  // 解出来之后只有这三份，所以它们之间不许有指向包外的链接 —— 与站点包
+  //   的 `test-run-package.py` 第 6 节是同一条规则、同一类判据。
+  const outside = [];
+  for (const n of docs) {
+    const text = fs.readFileSync(path.join(srcDir, n), 'utf8');
+    for (const m of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+      const t = m[1].split('#')[0];
+      if (!t || /^[a-z]+:/i.test(t)) continue;
+      if (!docs.includes(path.basename(t)) || t.includes('/')) outside.push(`${n} → ${m[1]}`);
+    }
+  }
+  check('三份之间没有指向包外的链接（读者手上只有这三份）', outside.length === 0,
+    outside.slice(0, 5).join('；'));
+}
+
+// ==============================================================================
+
 /** 拿到一棵夹具树的 git 句柄（`mkRepo` 返回的那个，测试里用得上）。 */
 function gitOf(base) {
   return (...a) => execFileSync('git', ['-C', base, '-c', 'user.email=t@example.com',
