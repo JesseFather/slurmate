@@ -52,7 +52,7 @@
 
 | 在哪 | 讲什么 | 读者 |
 |---|---|---|
-| 根 [README.md](../README.md) | 这个项目是什么、现在能用到什么程度 | 所有人 |
+| 根 [README.md](../README.md) | 这个项目是什么、怎么开始 | 所有人 |
 | 根 [CONTRIBUTING.md](../CONTRIBUTING.md) | 怎么改它：提交信息、检查必须能真的失败、文档体例、不写行号、脱敏 | 贡献者 |
 | 根 [SECURITY.md](../SECURITY.md) | 威胁模型、四条护栏的逐条对账、不在威胁模型内的东西 | 维护者 + 管理员 |
 | [cluster/README.md](../cluster/README.md) | 站点端的入口与索引 | 管理员 |
