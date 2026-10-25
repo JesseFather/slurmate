@@ -327,6 +327,8 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
   //   两个都报：合计看这个分区还能分多少，单节点最多看一条作业此刻最多能要到
   //   多少 —— 一条作业只落在一台节点上。余量那一格缺席（旧版 Slurm 或
   //   查询失败）时只报容量，不把"没问到"画成 0。
+  //   余量只算接得了新作业的节点：draining / down / maint 上的空内存谁也拿不到，
+  //   算进去就是一个要不到的数（节点那一行照旧把它们数出来）。
   //
   //   这里刻意不写"空闲"：`FreeMem` 是节点物理空闲（含缓存与未计入分配的
   //   部分），与可分配量可以差两个数量级；把它也叫"空闲"会让用户以为
@@ -352,7 +354,8 @@ function partitionBlock(name, info, nodes, queue, gres, mem) {
     : (g === undefined ? '（不在 GRES 清单里）'
       : (g.length ? g.map((e) => `${e.label || e.name} ×${e.per_node_max}/节点`
         + (typeof e.total === 'number' ? `，共 ${e.total}` : '')
-        // 可用量来自 `sinfo -O` 的 `GresUsed`（Slurm 按节点算好的已用量）。
+        // 可用量按节点算，而且只算接得了新作业的节点 —— `共` 仍含 draining /
+        //   down 那些，所以 `可用` 比 `共 - 已用` 小是正常的。
         //   缺席 = 取不到（旧版 Slurm 或查询失败）—— 不写，也不说"空着"。
         + (typeof e.free === 'number' ? `，可用 ${e.free}` : '')).join('，')
         : '确实一张都没有'));

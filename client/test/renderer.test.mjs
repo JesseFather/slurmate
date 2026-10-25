@@ -1531,9 +1531,38 @@ test('★ 那颗「面板」：一条会话时也在，点它把面板抬回来'
   assert.doesNotMatch(panelBlock[0], /showScreen\(/,
     '★ 它不换屏 —— 回到用户离开时的那一屏');
   // CSS：虚线把它与实线的会话标签分开。不借颜色 —— 那几档颜色在这个仓库里
-  //   各有各的意思（--err = 出错，--warn = 进行中）。
-  assert.match(css, /#session-tabs \.tab\.panel \{ border-style: dashed; \}/);
-  assert.match(css, /#session-tabs \.tab\.panel:hover \{ color: var\(--fg\); \}/);
+  //   各有各的意思（--err = 出错，--warn = 进行中）。字与边比别的标签重一档
+  //   （用户 2026-10-25：太不明显），仍然只用 --fg / --fg-dim 这一档。
+  assert.match(css, /#session-tabs \.tab\.panel \{[^}]*border-style: dashed/);
+  assert.match(css, /#session-tabs \.tab\.panel \{[^}]*color: var\(--fg\)/);
+  assert.match(css, /#session-tabs \.tab\.panel \{[^}]*font-weight: 600/);
+  assert.match(css, /#session-tabs \.tab\.panel:hover \{ border-color: var\(--fg\); \}/);
+});
+
+test('状态条上那颗「临时离开」：与「重新加载」同一种配色，后果写在 title 里', () => {
+  // 2026-10-25 用户：插件页面盖着窗口时，那块 30px 上只有「重新加载」与
+  //   「停止该作业」，回面板的路只写在标签「面板」的 title 里。这一颗把那条路
+  //   摆到眼前，而且与「重新加载」同一种配色 —— 它不结束作业。
+  const m = /<button id="sb-leave"([^>]*)>([^<]*)<\/button>/.exec(html);
+  assert.ok(m, 'panel.html 里要有那颗「临时离开」');
+  assert.match(m[1], /class="ghost tiny hidden"/,
+    '它与会话动作不是一类（ghost，不是 danger）—— 作业继续在集群上跑');
+  assert.equal(m[2], '临时离开');
+  assert.match(m[1], /35 分钟/,
+    '后果要写在 title 上：心跳停下，没人回来接着看就会被回收');
+  assert.match(m[1], /作业继续在集群上跑/, '正面那一半也要说');
+  // 位置：紧挨着「重新加载」，在「停止该作业」之前 —— 那两颗一组，
+  //   结束作业那颗固定在右端。
+  const bar = /<div id="statusbar"[\s\S]*?<\/div>/.exec(html);
+  assert.ok(bar, '未找到状态条');
+  const iReload = bar[0].indexOf('id="sb-reload"');
+  const iLeave = bar[0].indexOf('id="sb-leave"');
+  const iEnd = bar[0].indexOf('id="sb-end"');
+  assert.ok(iReload >= 0 && iLeave > iReload && iEnd > iLeave,
+    '顺序应当是：重新加载 → 临时离开 → 停止该作业');
+  // 两段式：主进程那一跳（`doLeave`）不在第一下里。
+  assert.match(js, /\$\('sb-leave'\)\.onclick = \(\) => \{\s*const s = frontSnap\(\);\s*armConfirm\(/,
+    '点一下先摆确认，第二下才离开');
 });
 
 test('状态条：标签多了横向滚，右边那几颗不许被挤出去', () => {

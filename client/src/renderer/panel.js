@@ -137,6 +137,14 @@ let SCREEN = 'conns';
  */
 let JOBS = { forConn: null, list: null, at: 0, error: null, selected: null };
 
+/**
+ * 详情底下那份日志此刻画的是哪一条。`null` = 没画。
+ *
+ * 它不进 `JOBS`：那不是列表数据，是"界面上正摆着谁" —— 与 `JOBS` 一起重置
+ * 只会让两处各自多一份要维护的常量。
+ */
+let jobLogFor = null;
+
 // ── 工具 ────────────────────────────────────────────────────────────────────
 function fmtLeft(expiresAt) {
   // expires_at 在 show_job 失败时整个字段不存在（守护进程的行为）。
@@ -731,10 +739,13 @@ function renderSnapshot(s) {
 function renderStatusEnd(s) {
   const btn = $('sb-end');
   const reload = $('sb-reload');
+  const leave = $('sb-leave');
   const st = s ? s.state : 'idle';
   const pageOnScreen = Boolean(s) && st === 'running'
     && hasSurface(s) && !SESS.panelFront;
   reload.classList.toggle('hidden', !pageOnScreen);
+  // 回面板的那条路跟着那块页面一起露：页面盖着的时候它是唯一看得见的出口。
+  leave.classList.toggle('hidden', !pageOnScreen);
   if (s && s.onHost) {
     btn.textContent = '关闭本机会话';
     btn.title = '关闭这个本机会话；它没有集群作业，本地服务会随之停止。';
@@ -1028,19 +1039,45 @@ function renderKv(s) {
  *   地址、心跳都是本机的事实）；没接着的那一条只有站点报的那几格，其余写「—」。
  */
 function renderJobDetail(front) {
-  const j = selectedJob();
-  let s;
-  if (j) {
-    // 这一条自己的本地快照（隧道、心跳那几格只有本机有）。它不是前台也照样取 ——
-    //   选中不改前台（见 `selectJob`）。
-    const rec = (SESS.sessions || []).find((x) => x.slot && x.slot === j.slot);
-    s = (rec && rec.snap) || jobAsSnap(j);
-  } else {
-    s = front || null;
-  }
+  const s = detailSnap(front);
   const show = Boolean(s) && SCREEN === 'jobs';
   $('job-detail').classList.toggle('hidden', !show);
   if (show) renderKv(s);
+}
+
+/**
+ * 详情那一块用的快照：选中那一条的本地视图（隧道、心跳那几格只有本机有），
+ * 没有选中时用前台那一条。
+ *
+ * 选中不改前台（见 `selectJob`），所以这两件事必须分开取。`loadJobLog` 用的是
+ * 同一份 —— 否则高亮着 A、日志摆的是 B 的。
+ */
+function detailSnap(front) {
+  const j = selectedJob();
+  if (!j) return front || null;
+  const rec = (SESS.sessions || []).find((x) => x.slot && x.slot === j.slot);
+  return (rec && rec.snap) || jobAsSnap(j);
+}
+
+/**
+ * 让日志跟着选中的那一条走。
+ *
+ * 换一条就把它收掉；本来就开着的话，顺带给新的那一条取一次 —— 用户点开
+ * 日志之后再切换作业，要的是"看这一条的"，不是"把上一份摆在那里"。
+ */
+function syncJobLog() {
+  // `jobLogFor` 非空 = 这一格此刻真的摆着某一条的日志。没打开过就什么都不做：
+  //   日志是按需取的，刷一次列表不该顺手多 fork 一个 python。
+  if (!jobLogFor) return;
+  const s = detailSnap(frontSnap());
+  const id = s ? s.sessionId : null;
+  if (jobLogFor === id) return;
+  jobLogFor = null;                     // 先把旧的那一份收掉
+  const box = $('joblog-body');
+  box.textContent = '';
+  box.classList.add('hidden');
+  $('joblog-meta').textContent = '';
+  if (id) loadJobLog();                 // 本来就开着：跟到新的那一条上
 }
 
 /** 把作业列表那一行摆成 `renderKv` 认的形状。本机没有的那几格是 `null`。 */
@@ -1073,14 +1110,19 @@ function jobAsSnap(j) {
  *   两处各判一遍的话，漂的那一处不会报错。
  */
 async function loadJobLog() {
-  const s = frontSnap();
+  const s = detailSnap(frontSnap());
   const box = $('joblog-body');
   const meta = $('joblog-meta');
   if (!s || !s.sessionId) { meta.textContent = '这一条还没有会话 ID。'; return; }
+  const id = s.sessionId;
+  jobLogFor = id;
   meta.textContent = '读取中…';
   box.classList.remove('hidden');
   box.textContent = '';
-  const r = await window.slurmate.jobLog({ session_id: s.sessionId, lines: 500 });
+  const r = await window.slurmate.jobLog({ session_id: id, lines: 500 });
+  // 这一趟读的时候用户可能已经换了一条：那一份属于上一条，画在这里就是
+  //   把 A 的输出摆在 B 的标题底下。
+  if (jobLogFor !== id) return;
   box.textContent = '';
   if (!r || !r.ok) {
     // 获取失败（或者这个站点太旧没有这个能力）—— 如实说，不画一个空框。
@@ -3241,6 +3283,8 @@ function renderJobs() {
 
   renderJobsSelection();
   // 选中变了，下面那一块就要跟着换（否则高亮的是 A、详情里还是 B）。
+  //   日志是同一件事的另一半：它是按需取的，所以只在本来就开着时重取。
+  syncJobLog();
   renderJobDetail(frontSnap());
 }
 
@@ -4370,7 +4414,14 @@ function bindEvents() {
   //   而没改另一边，当场变红。它们指的是哪三个动作，见 panel.html 那一段注释。
   $('btn-jobs-new').onclick = () => showScreen('plugins');
   $('btn-jobs-takeover').onclick = takeoverSelectedJob;
-  $('btn-jobs-end').onclick = endSelectedJob;
+  // 两段式（见 `armConfirm`）：它取消的是集群上正在跑的作业。作业列表那一屏
+  //   上这一颗旁边就是「重新加载」与「接管」，而它长得没什么特别 —— 点错的代价
+  //   是一条跑到一半的作业没了。与状态条那颗 `#sb-end` 同一套语义。
+  $('btn-jobs-end').onclick = () => armConfirm($('btn-jobs-end'), {
+    why: '结束这一条作业，集群上的作业会被取消，里面正在跑的任务也会停。',
+    yes: '结束',
+    run: endSelectedJob,
+  });
   $('btn-jobs-reload').onclick = () => {
     const j = selectedJob();
     return window.slurmate.reload(j ? j.slot : null);
@@ -4442,6 +4493,20 @@ function bindEvents() {
   //   那一条）；状态条这一份留着，理由与 `sb-end` 同：会话一跑起来，窗口主体
   //   就被原生视图整块盖住，那 30px 是唯一够得着的像素。
   $('sb-reload').onclick = () => window.slurmate.reload(frontSlot());
+  // 「临时离开」：页面盖着窗口时回面板的出口（与 `#btn-leave` 是同一个动作）。
+  //   两段式 —— 它停的是心跳，"35 分钟内没人回来接着看就会被回收"不是一眼
+  //   能看出来的后果。本机会话没有作业，那句话换成"随连接结束"。
+  $('sb-leave').onclick = () => {
+    const s = frontSnap();
+    armConfirm($('sb-leave'), {
+      why: s && s.onHost
+        ? '临时离开：本机会话没有作业，它会随这次连接结束。'
+        : '临时离开：作业继续在集群上跑，但本机不再看护它；'
+          + '35 分钟内没有人回来接着看，它会被自动回收。',
+      yes: '离开',
+      run: doLeave,
+    });
+  };
   // `#btn-end` 那个按钮没有了 —— 它的位置由作业列表那一屏上的
   //   【结束】（`#btn-jobs-end`，结束选中的那一条）接过。状态条上这一个留着，
   //   而且必须留着：会话跑起来之后窗口主体被原生视图整块盖住，那 30px 是唯一

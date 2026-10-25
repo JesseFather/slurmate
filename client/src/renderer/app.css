@@ -115,8 +115,16 @@ html, body {
      页面抬上来，这一颗把面板抬回来），长成一模一样就是最容易点错的一格。
    不借颜色区分：那几档颜色在这个仓库里各有各的意思（--err = 出错，
      --warn = 进行中），借一个过来等于把两件事说成一件。 */
-#session-tabs .tab.panel { border-style: dashed; }
-#session-tabs .tab.panel:hover { color: var(--fg); }
+/* 它的字与边比别的标签重一档（用户 2026-10-25：太不明显）：页面盖着的时候，
+   它是回到面板的唯一入口，而其余标签只是切会话。仍然不借颜色 —— 只把
+   --fg / --fg-dim 这一档提上去，不碰任何有含义的那几档。 */
+#session-tabs .tab.panel {
+  border-style: dashed;
+  color: var(--fg);
+  border-color: var(--fg-dim);
+  font-weight: 600;
+}
+#session-tabs .tab.panel:hover { border-color: var(--fg); }
 /* 「临时副本」那条常驻提示。它必须在状态条里 —— 会话一跑起来，面板那一块
    就被原生视图整块盖住，而那正是最需要看见这句话的时候（见 panel.html）。 */
 #statusbar .temp-tag {

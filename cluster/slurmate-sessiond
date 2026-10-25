@@ -431,6 +431,40 @@ def parse_gres_field(s):
     return out
 
 
+def gres_node_free(configured, used):
+    """一台节点上的 GRES 余量：`{(名字, 型号): 数量}` 与判不了的名字集合。
+
+    两个入参都是 `parse_gres_field()` 的形状，取自 `sinfo -N -O` 同一行的
+    `Gres` 与 `GresUsed`：Slurm 按节点给，所以这里能按节点减。
+
+    没写型号的已用量归给同名唯一的那种配置；同名多型号时判不了归属，那个名字
+    进第二个返回值，调用方据此不给这一项的余量（与 `_gres_with_usage()` 的
+    三态是同一条规矩：判不了就不说，不猜）。
+
+    钳到不小于 0：Slurm 偶尔会在已用量超过配置的那一刻（正在释放）报一个
+    比配置大的数，负的余量没有意义。
+    """
+    conf = {}
+    for e in configured:
+        key = (e["name"], e["type"] or "")
+        conf[key] = conf.get(key, 0) + e["count"]
+    ambiguous = set()
+    for u in used:
+        name = u["name"]
+        if u["type"]:
+            key = (name, u["type"])
+            if key in conf:
+                conf[key] -= u["count"]
+            continue
+        same = [k for k in conf if k[0] == name]
+        if len(same) == 1:
+            conf[same[0]] -= u["count"]
+        elif len(same) > 1:
+            ambiguous.add(name)
+    return ({k: max(0, v) for k, v in conf.items() if k[0] not in ambiguous},
+            ambiguous)
+
+
 def clean_gres(v):
     """把客户端送来的任意形状收成描述符。返回 `(描述符或 None, 错误说明或 None)`。
 
@@ -1015,6 +1049,21 @@ CLUSTER_QUERY_MAX_BYTES = 1 << 20
 #   `resv`/`comp`/`fail`/`unk`/`plnd`/`pow_dn`/`pow_up`/`reboot_issued`…）不交，
 #   这是"从右往左剥"能成立的前提。用例逐字盯着这两个集合不相交。
 NODE_FLAG_CHARS = "*~#!%@^-+"
+
+# 这些 base state 的节点接不了新作业。余量（可分配内存、GRES 可用）只按
+#   其余节点算 —— 一台 draining / down / maint 的节点上那些空卡与空内存
+#   谁也拿不到，把它们算进"可用"就是报一个要不到的余量（2026-10-25 真机：
+#   2 个节点 1 个 draining，界面报「可用 7」，而真正能落到的那台只剩 3 张）。
+# 名单只收【确定接不了】的那些。不在名单里的状态照常算（`allocated` 这种
+#   只是忙，不是坏了）—— 这一格漏判的后果是把一部分本来也拿不到的资源
+#   算成可用，而多判一个状态会把整台健康节点的余量抹掉，后者更难发现。
+# 名字取自 `man sinfo` 的 NODE STATE CODES 一节（长形式，与本文件
+#   `node_table()` 剥出来的是同一种写法）。
+NODE_UNUSABLE_STATES = frozenset((
+    "drain", "draining", "down", "maint", "maintenance", "fail", "failing",
+    "unknown", "completing", "future", "planned", "powered_down",
+    "powering_down", "powering_up", "reboot_issued", "reboot_requested",
+))
 
 # `sinfo -O` 的字段与宽度。`-O` 的长字段名是唯一能同时取到内存与 GRES 已用的
 #   形态：`%B` 不是 `GresUsed`（它是每节点可分给作业的 CPU 数），`GresUsed`
@@ -7561,7 +7610,7 @@ class Slurm(object):
                 state_raw = f["StateLong"]
                 cpus_raw = f["CPUsState"]
                 mem_raw, alloc_raw = f["Memory"], f["AllocMem"]
-                used_raw = f["GresUsed"]
+                gres_raw, used_raw = f["Gres"], f["GresUsed"]
             else:
                 parts = line.split("|")
                 if len(parts) < 3:
@@ -7569,7 +7618,7 @@ class Slurm(object):
                 pname = parts[0].strip().rstrip("*")
                 state_raw = parts[2].strip()
                 cpus_raw = parts[3].strip() if len(parts) >= 4 else ""
-                mem_raw = alloc_raw = used_raw = ""
+                mem_raw = alloc_raw = gres_raw = used_raw = ""
             if not pname:
                 continue
             state = state_raw.strip()
@@ -7598,12 +7647,16 @@ class Slurm(object):
                     cc["idle"] += i
                     cc["other"] += o
                     cc["total"] += t
+            # 余量只算接得了新作业的节点（见 `NODE_UNUSABLE_STATES`）。
+            #   `counts` / `flags` / `cpus` 照旧按全部节点累加 —— 那三格说的是
+            #   "这个分区此刻是什么样"，不是"还能要到多少"。
+            usable = state not in NODE_UNUSABLE_STATES
             # 可分配内存 = 总内存 - 已分配。两个都认得出才算这一台。
             try:
                 free_mb = max(0, int(mem_raw) - int(alloc_raw))
             except (TypeError, ValueError):
                 free_mb = None
-            if free_mb is not None:
+            if usable and free_mb is not None:
                 mf = d.setdefault("mem_free", {"sum": 0, "max": 0})
                 mf["sum"] += free_mb
                 mf["max"] = max(mf["max"], free_mb)
@@ -7612,11 +7665,27 @@ class Slurm(object):
                 key = (e["name"], e["type"])
                 gu = d.setdefault("gres_used", {})
                 gu[key] = gu.get(key, 0) + e["count"]
+            # GRES 余量同样只算接得了新作业的节点：配置与已用来自同一行，
+            #   所以这里减得出"这台节点上还剩几张能要"。
+            if usable and gres_raw:
+                nfree, ambig = gres_node_free(parse_gres_field(gres_raw),
+                                              parse_gres_field(used_raw))
+                if nfree or ambig:
+                    gf = d.setdefault("gres_free", {})
+                    for key, v in nfree.items():
+                        gf[key] = gf.get(key, 0) + v
+                    if ambig:
+                        d.setdefault("gres_ambig", set()).update(ambig)
         for d in table.values():
             gu = d.get("gres_used")
             if isinstance(gu, dict):
                 d["gres_used"] = [{"name": n, "type": t, "count": c}
                                   for (n, t), c in gu.items()]
+            gf = d.get("gres_free")
+            if isinstance(gf, dict):
+                amb = d.pop("gres_ambig", set())
+                d["gres_free"] = [{"name": n, "type": t or None, "count": c}
+                                  for (n, t), c in gf.items() if n not in amb]
         return table
 
     def queue_table(self):
@@ -8093,13 +8162,19 @@ class Cluster(object):
                 for name, info in parts.items()}
         nodes = self.nodes()
         used = None
+        free = None
         if nodes is not None:
             used = {p: d["gres_used"] for p, d in nodes.items()
                     if d.get("gres_used")}
+            # 每台节点各减各的：`total - used` 会把接不了新作业的节点上那些
+            #   空卡也算成可用（见 `NODE_UNUSABLE_STATES`）。
+            free = {p: {(e["name"], e.get("type") or ""): e["count"]
+                        for e in d["gres_free"]}
+                    for p, d in nodes.items() if d.get("gres_free")}
         return {"health": self.health(),
                 "version": self.slurm_version(),
                 "partitions": parts,
-                "gres": self._gres_with_usage(self.gres(), used),
+                "gres": self._gres_with_usage(self.gres(), used, free),
                 "mem": self.node_mem(),
                 "nodes": nodes,
                 "queue": self.queue(),
@@ -8109,13 +8184,18 @@ class Cluster(object):
                 "now": now_ts(),
                 "taken": {k: v for k, v in self._taken.items() if ":" not in k}}
 
-    def _gres_with_usage(self, gres, used):
+    def _gres_with_usage(self, gres, used, free=None):
         """给 GRES 清单的每一项附 `used` / `free`；取不到就两格都不给。
 
         `used` 来自 `node_table()` 的 `GresUsed`（Slurm 按节点算好的已用量）。
         `None` = 那一趟取不到（旧版 Slurm 不认 `-O`，或查询失败）→ 两格都不给。
         同一分区里同名多种型号、而已用量没写型号时也判不了归属 —— 这种名字的
         每一项都不给，不猜。
+
+        `free` 是 `node_table()` 按节点减出来的余量（键 `(名字, 型号)`），只含
+        接得了新作业的节点。有就用它；没有（旧版 Slurm、或者那一项判不了归属）
+        才退回 `total - used` —— 那个数把 draining / down 节点上的空卡也算成
+        可用，偏大。
 
         返回的必须是【新的】dict 与新的项：`self.gres()` 返回的是缓存里的
         同一个对象，原地写会让 `op_partitions` 也长出这两格，而那边的形状是
@@ -8155,7 +8235,13 @@ class Cluster(object):
                     u += sum(x["count"] for x in untyped)
                 total = int(e.get("total") or 0)
                 row["used"] = u
-                row["free"] = max(0, total - u)
+                # 有按节点算出来的余量就用它：那一份只算接得了新作业的节点。
+                #   算不出来（旧版 Slurm、或者这一项判不了归属）才退回
+                #   `total - used` —— 那个数把 draining / down 节点上的空卡
+                #   也算进去了，是一个偏大的答案。
+                fp = (free or {}).get(pname) or {}
+                key = (e["name"], e.get("type") or "")
+                row["free"] = fp[key] if key in fp else max(0, total - u)
                 rows.append(row)
             out[pname] = rows
         return out
