@@ -1416,15 +1416,23 @@ class SshBackend extends Backend {
    *
    * 契约：不抛异常。传输层失败返回一个 `kind='transport'` 的信封，由
    * classify.js 统一分类 —— 调用方（session.js）从不 try/catch rpc 的返回值。
+   *
+   * 两条链路共用同一个预算（`timeoutMs`，缺省 `RPC_TIMEOUT_MS`）。从前只有
+   *   常驻通道那条有预算，exec 那条没有 —— 而 `conn.exec` 的回调不保证会来
+   *   （连接正好在那一瞬间断掉时它永远不触发，`prepare()` 早就为同一条性质
+   *   加了兜底）。少了它的后果不是"慢一点"：一条送出去就没有下文的 status
+   *   会让调用方永远等下去，而对账那一层是"在飞的还在飞"的闩（见 session.js
+   *   的 `_statusBusy`）—— 会话从此再也收不到"作业结束了"。
    */
-  async rpc(req) {
+  async rpc(req, timeoutMs) {
+    const ms = timeoutMs || RPC_TIMEOUT_MS;
     // 常驻通道在，就走它。这是这一版唯一改变行为的一行。
     //
     //   判据是"现在有没有一条活的常驻通道"，而它是一条每时每刻都在变的事实：
     //   没建起来、断了、正在重开，都落到下面那条 exec 路上 ——
     //   于是"降级"不需要任何一处 try/catch，它就是同一个函数的下一个分支。
     if (this._resident && !this._resident.dead) {
-      return this._resident.request(req);
+      return this._resident.request(req, ms);
     }
     let conn;
     try {
@@ -1454,18 +1462,38 @@ class SshBackend extends Backend {
     delete body.client;
 
     return new Promise((resolve) => {
+      let finished = false;
+      let timer = null;
+      /** 命令通道。回调没来之前是 null，兜底到点时也没有东西可关。 */
+      let chan = null;
+      const finish = (res) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        resolve(res);
+      };
+      // 兜底：`conn.exec` 的回调不保证会来（理由见这个函数的注释）。
+      //   到点就把这一条判成传输层失败 —— 契约里"不抛异常、返回信封"照旧。
+      timer = setTimeout(() => {
+        try { if (chan) chan.close(); } catch { /* 尽力 */ }
+        finish(transportError(
+          `登录节点上的命令超过 ${Math.round(ms / 1000)} 秒没有应答。`));
+      }, ms);
+      timer.unref?.();
+
       conn.exec(RPC_CMD, (err, stream) => {
-        if (err) return resolve(transportError('无法在登录节点上执行命令：' + err.message));
+        // 兜底已经先说完了：这条通道属于一个已经结束的等待，别把它挂上去。
+        if (finished) { try { stream?.close?.(); } catch { /* 尽力 */ } return; }
+        if (err) return finish(transportError('无法在登录节点上执行命令：' + err.message));
+        chan = stream;
 
         let stdout = '';
         let stderr = '';
         let gotExit = false;
         let exitCode = null;
-        let finished = false;
         // 与常驻通道同一个理由（见 ResidentChannel 里的 `_dec`）：按 chunk 各转一次
         //   字符串会把跨边界的多字节字符撕成 U+FFFD，而那是间歇性的。
         const dec = new StringDecoder('utf8');
-        const finish = (res) => { if (!finished) { finished = true; resolve(res); } };
 
         stream.on('data', (d) => {
           stdout += dec.write(d);

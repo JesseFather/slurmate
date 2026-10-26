@@ -237,6 +237,32 @@ test('fetch 在重定向上被取消时，先看 cookie：登录已经成功', a
   assert.equal((await webLogin(down, 'http://x', 'pw', CONTRACT)).reason, 'fetch_failed: boom');
 });
 
+test('登录请求没有回应时自己说出来，不靠宿主的二十秒预算', async () => {
+  // 隧道断着的时候本地监听照旧接受连接，而 `ses.fetch` 没有超时 ——
+  //   那条 POST 会一直挂着。从前结束它的是插件宿主的预算，于是整次 attach
+  //   变成一句「attach 超过 20000 毫秒没有返回」，真正的原因一个字都没有。
+  // 判据两半：这一跳在预算内回来，而且理由说得清是"没有回应"。
+  const hung = {
+    fetch: () => new Promise(() => {}),
+    cookies: { get: async () => [] },
+  };
+  const t0 = Date.now();
+  const res = await webLogin(hung, 'http://x', 'pw', CONTRACT, 50);
+  const ms = Date.now() - t0;
+  assert.equal(res.ok, false);
+  assert.match(res.reason, /^fetch_failed: 登录请求超过/,
+    `要说清是登录没有回应：${res.reason}`);
+  assert.ok(ms < 1000, `50 毫秒的预算，却等了 ${ms} 毫秒`);
+
+  // 超时那一刻 cookie 可能已经进了 jar（与文件头第 3 条同一件事）。
+  const late = {
+    fetch: () => new Promise(() => {}),
+    cookies: { get: async ({ name }) => [{ name, value: 'x' }] },
+  };
+  assert.equal((await webLogin(late, 'http://x', 'pw', CONTRACT, 50)).ok, true,
+    'cookie 进了 jar 就是登录成功，超时只说明那次 POST 没有回应');
+});
+
 test('isLoginPath 的边界', () => {
   const p = CONTRACT.path;
   assert.equal(isLoginPath(`http://127.0.0.1:18080${p}`, p), true);

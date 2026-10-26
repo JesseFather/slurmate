@@ -477,3 +477,29 @@ test('提交请求：显式「不占 GRES」的 null 要发出去，其余 null 
   assert.equal('time' in sub, false);
   assert.equal(sub.mem, '8G');
 });
+
+test('一次没有应答的 status 不许把对账闩死（作业结束了，界面必须收得到）', async () => {
+  // 现场（用户 2026-10-26）：断网那一刻发出去的 status 没有下文，而
+  //   `_statusOnce()` 用一个"在飞的还在飞"的闩防重入，闩只在 finally 里放开。
+  //   于是对账从此停摆：作业在集群上已经结束，界面上的「正在重试」一直挂着。
+  // 判据分两半：① 这一拍超时之后闩放开；② 下一拍收到终态时必须结束。
+  const backend = new StubBackend();
+  const ctrl = running(backend, {});
+  ctrl.statusRpcMs = 40;
+
+  // 断网那一段：请求送出去就没有下文。
+  backend.reply = () => new Promise(() => {});
+  const t0 = Date.now();
+  await ctrl._statusOnce();
+  const ms = Date.now() - t0;
+  assert.equal(ctrl._statusBusy, false, '超时之后闩必须放开，否则对账再也不跑');
+  assert.ok(ms < 2000, `预算 40 毫秒，却等了 ${ms} 毫秒`);
+  assert.equal(ctrl.state, State.RUNNING, '没有应答不等于作业结束了');
+
+  // 网络回来，而这期间作业已经结束。
+  backend.reply = (req) => (req.op === 'status'
+    ? ok({ session: view({ state: 'released', job_state: 'COMPLETED' }) })
+    : ok({}));
+  await ctrl._statusOnce();
+  assert.equal(ctrl.state, State.ENDED, '收到终态就必须结束，不能停在 running');
+});

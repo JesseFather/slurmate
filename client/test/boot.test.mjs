@@ -6545,6 +6545,46 @@ test('ctx.connection() 只回这一条会话所属的那条连接 —— 切活�
   cleanupSiteState(idx);
 });
 
+test('插件动作失败：界面照常更新，同一句只说一遍', async (t) => {
+  // 现场（用户 2026-10-26）：隧道断开时 attach 等到超时才回来，而它从前是渲染
+  //   里的一行 await —— 失败就把整轮更新一起扔掉，并报一句「更新界面时出错」。
+  //   浏览器每重连一次就是一条同样的错误，日志刷屏。
+  // 三条判据：① 那句渲染层的错误不许出现；② 同一条失败只说一遍；③ 界面那一轮
+  //   真的走完了（会话视图照常推过去）。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const { slot, ctl } = await startRunning(idx, 'web-demo');
+  const rec = idx._test.sessionAt(slot);
+
+  // 造一次「attach 没有回来」。真实那一条要等隧道拨号（二十秒才超时），
+  //   而这里要验的是框架那一侧的处理，不是隧道。
+  rec.plugin = { ...rec.plugin, attach: async () => {
+    throw new Error('attach 超过 20000 毫秒没有返回');
+  } };
+
+  const sent = () => calls.windows[0].webContents.handlers['send:session:states'] || [];
+  const before = noticesOf().length;
+  const pushed = sent().length;
+  // 三次状态变化挨着发：第二、三次到达时第一次还没回来 —— 正是断网时
+  //   「浏览器每重连一次就发一次」那个形状。
+  for (let i = 0; i < 3; i += 1) ctl.emit('change', ctl.snapshot());
+  await new Promise((r) => setTimeout(r, 300));
+
+  const said = noticesOf().slice(before).map((n) => `${n.kind}: ${n.text}`);
+  assert.equal(said.some((s) => /更新界面时出错/.test(s)), false,
+    `attach 不是渲染，它失败不许把这一轮更新扔掉：${said.join(' / ')}`);
+  assert.equal(said.filter((s) => /插件动作未能完成/.test(s)).length, 1,
+    `同一条错误只说一遍：${said.join(' / ')}`);
+  assert.ok(sent().length > pushed, '界面那一轮真的走完了（会话视图照常推给界面）');
+
+  await invoke('app:stop', { slot });
+  await waitUntil(async () => !idx._test.getBackend()._occupying().length, '释放', 20000);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 // ── 契约 §4 的「用例」：每一格一条能改红的判据 ────────────────────────────────
 //
 // 这四条的读者是 `docs/CONTRACT.md` §4.4。它们是"框架递给插件的值"那几格的

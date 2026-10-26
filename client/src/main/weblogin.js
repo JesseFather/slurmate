@@ -50,31 +50,57 @@
 const FORM_TYPE = 'application/x-www-form-urlencoded';
 
 /**
+ * 登录这一跳的预算。
+ *
+ * 它打的是本机隧道，正常几百毫秒。给预算不是为了对付慢，是为了让「隧道断着」
+ *   这一刻有尽头：本地监听在隧道断开时照样接受连接，而 `ses.fetch` 自己没有
+ *   超时 —— 那条 POST 会一直挂着，直到插件宿主的 20 秒预算把它砍掉。砍掉之后
+ *   整次 attach 变成一句「attach 超过 20000 毫秒没有返回」，真正的原因（登录
+ *   没有应答）一个字都不在里面。
+ *
+ * 它比隧道那一次拨号的预算（20 秒）短，所以先说出来的是这一句。
+ */
+const LOGIN_TIMEOUT_MS = 10000;
+
+/**
  * 登录：POST 契约里的路径，然后用 cookie jar 判定成败。
  *
  * @param {object} ses       Electron 的 session（提供 fetch 与 cookies）
  * @param {string} origin    形如 `http://127.0.0.1:18080`
  * @param {string} password  口令
  * @param {object} contract  插件的 `contributes.login`：{path, field, cookie}
+ * @param {number} [timeoutMs] 这一跳的预算，缺省见 `LOGIN_TIMEOUT_MS`。
+ *                             用例把它压短才验得了「没有应答」那一档。
  * @returns {Promise<{ok:boolean, reason?:string, status?:number|null}>}
  */
-async function webLogin(ses, origin, password, contract) {
+async function webLogin(ses, origin, password, contract, timeoutMs = LOGIN_TIMEOUT_MS) {
   if (!contract) return { ok: false, reason: 'no_contract' };
   if (!password) return { ok: false, reason: 'no_password' };
 
   let status = null;
   let failure = null;
+  let timer = null;
   try {
-    const res = await ses.fetch(origin + contract.path, {
-      method: 'POST',
-      headers: { 'content-type': FORM_TYPE },
-      body: new URLSearchParams({ [contract.field]: password }).toString(),
-      redirect: 'manual',
-    });
+    const res = await Promise.race([
+      ses.fetch(origin + contract.path, {
+        method: 'POST',
+        headers: { 'content-type': FORM_TYPE },
+        body: new URLSearchParams({ [contract.field]: password }).toString(),
+        redirect: 'manual',
+      }),
+      // 到点就把这一跳判成"没有回应"。它走的是下面那个异常分支，
+      //   于是 cookie 照查 —— 超时的这一刻登录可能已经成功（见文件头第 3 条）。
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `登录请求超过 ${Math.round(timeoutMs / 1000)} 秒没有回应`)), timeoutMs);
+      }),
+    ]);
     status = res.status;
   } catch (e) {
     // 不在这里返回：见文件头第 3 条。cookie 可能已经进了 jar，先查再报。
     failure = e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   const cookies = await ses.cookies.get({ name: contract.cookie, url: origin });

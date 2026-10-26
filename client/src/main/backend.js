@@ -38,7 +38,9 @@
  *                              后两者不是同一件事，判定见 plugins/index.js 的
  *                              `versionCheck`（三个缺席各有名字）。两个后端都必须
  *                              报它 —— 版本闸在 index.js，它只看这一个字段。
- *   rpc(req)               → 守护进程风格的响应对象；不抛异常（传输失败由 classify 处理）
+ *   rpc(req, timeoutMs?)   → 守护进程风格的响应对象；不抛异常（传输失败由 classify 处理）
+ *                            第二条参数是这一次的预算，省略时用实现自己的缺省值。
+ *                            「没有应答」也是一次传输失败，各实现都不许让它永远挂着。
  *   dial(host, port)       → Promise<Duplex>  建立一条到目标的数据通道
  *   close()                → 拆除
  *   on('state', fn)        → 连接状态变化 { connected, detail }

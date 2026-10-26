@@ -3209,6 +3209,54 @@ function frontSlot() {
 }
 
 /**
+ * 调一次插件的 attach。
+ *
+ * 它从前是渲染里的一行 `await`，失败就和渲染一起被那句「更新界面时出错」吞掉。
+ *   三件事因此分开，每一件都对应一个真机现场：
+ *
+ *   · attach 不是渲染。它失败时界面这一轮该照常更新 —— 状态、标签、提示页
+ *     都是这次渲染的产物，而插件那一步（多半是自动登录）与它们没有关系。
+ *
+ *   · 同一条会话同时只跑一次。隧道断着的时候浏览器每重连一次就发一次状态变化，
+ *     而每一次 attach 都要等到登录超时才回来；不去重的话它们在同一份会话上
+ *     排队，界面上是一条接一条相同的错误（用户 2026-10-26 报的就是这个）。
+ *     在飞期间到来的变化只记一个待办，这一轮结束后用此刻的快照补一次 ——
+ *     直接丢掉的话，最后一次变化可能等不到下一拍（心跳 45 秒）。
+ *
+ *   · 同一条错误只说一遍。下一次调用会再试，成功之后那句记录清掉。
+ *
+ * 这三格记在会话记录上，是这一处私有的运行时状态（不落盘、不对外）。
+ */
+async function runAttach(rec, plugin, snap) {
+  if (!plugin || !plugin.attach) return;
+  if (rec.attachBusy) { rec.attachAgain = true; return; }
+  rec.attachBusy = true;
+  try {
+    await plugin.attach(pluginCtxData(rec), snap, String(rec.slot));
+    rec.attachError = null;
+  } catch (e) {
+    const text = (e && e.message) || String(e);
+    if (rec.attachError !== text) {
+      rec.attachError = text;
+      win.pushNotice('warn',
+        `「${plugin.displayName || plugin.name}」的插件动作未能完成：${text}。`
+        + '界面照常更新；下一次状态变化会再试。');
+    }
+  } finally {
+    rec.attachBusy = false;
+    if (rec.attachAgain) {
+      rec.attachAgain = false;
+      // 只在这一条还在跑的时候补：在飞那一段时间里它可能已经结束（或正在
+      //   释放），那时 attach 的条件不成立了。
+      const fresh = rec.controller && rec.controller.snapshot();
+      if (fresh && fresh.state === State.RUNNING) {
+        await runAttach(rec, rec.plugin || plugin, fresh);
+      }
+    }
+  }
+}
+
+/**
  * 画这一条会话。
  *
  * 参数是槽，不是快照 —— 这一点是故意的。收一个裸 `snap` 的签名会把"这是
@@ -3278,7 +3326,7 @@ async function _renderSession(slot) {
       await warnUnknownService(slot, snap);
     } else if (plugin.contributes.surface) {
       await ensureSurface(rec, snap);
-      if (plugin.attach) await plugin.attach(pluginCtxData(rec), snap, String(rec.slot));
+      await runAttach(rec, plugin, snap);
     } else {
       // 这个插件不要界面（比如中转站）：它自己那一块收掉。
       //
@@ -3286,7 +3334,7 @@ async function _renderSession(slot) {
       //    （以及它每次心跳、每次隧道重建时）会把 web-demo 那块正跑着的页面
       //    一起销毁，而用户看到的是"我的编辑器忽然没了"，日志里一个字都没有。
       win.destroySurface(slot);
-      if (plugin.attach) await plugin.attach(pluginCtxData(rec), snap, String(rec.slot));
+      await runAttach(rec, plugin, snap);
     }
   }
 
