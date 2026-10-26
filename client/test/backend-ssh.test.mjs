@@ -60,6 +60,37 @@ test('RPC 命令行是编译期常量，不含任何插值', () => {
   assert.match(sshBackend.RPC_CMD, /'[^']+'$/, '内层命令必须整体加引号');
 });
 
+test('命令通道没有应答也有尽头（exec 那条路的兜底）', async () => {
+  // 现场：网络断掉的那一刻 `conn.exec` 的回调永远不来。`prepare()` 早就为
+  //   同一条性质加了兜底，而 `rpc()` 这条路上没有 —— 一条送出去就没有下文的
+  //   status 会让调用方永远等下去，对账那层是"在飞的还在飞"的闩，于是会话
+  //   再也收不到"作业结束了"（用户 2026-10-26 报的现场）。
+  let closed = false;
+  // 一条 ssh2 通道该有的样子（`on` / `stderr` / `close`）：缺了它们，兜底那条
+  //   判据还没轮到出手，测试就先被一个 TypeError 打红了 —— 红的理由会与想验的
+  //   事情无关。
+  const late = Object.assign(new EventEmitter(), {
+    stderr: new EventEmitter(),
+    close() { closed = true; },
+  });
+  const b = new sshBackend.SshBackend({});
+  b._profile = { user: 'u', host: 'h', port: 22 };
+  b._closed = false;
+  // 回调迟到 120 毫秒；预算是 40 毫秒。两个数差得够开，慢机器上也分得出来。
+  b._conn = { exec(cmd, cb) { setTimeout(() => cb(null, late), 120); } };
+
+  const t0 = Date.now();
+  const resp = await b.rpc({ op: 'status' }, 40);
+  assert.equal(resp.ok, false, '超时必须回一个信封，而不是抛异常（契约不许抛）');
+  assert.equal(resp.error.kind, 'transport', '超时是传输层失败，由 classify 统一分档');
+  assert.match(resp.error.detail, /没有应答/, `那句话要说清发生了什么：${resp.error.detail}`);
+  assert.ok(Date.now() - t0 < 1000, `40 毫秒的预算不该等这么久：${Date.now() - t0} 毫秒`);
+
+  // 迟到的那个回调：不许把通道挂上来，也不许再 resolve 一次。
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(closed, true, '迟到的通道要当场关掉，否则它在登录节点上一直开着');
+});
+
 // ── 应答解析：这道缝挡的是「登录节点的 shell 环境不干净」──────────────────────
 //
 // sshd 用登录 shell 解释我们发过去的命令串，所以 rc 文件（zsh 的 ~/.zshenv 连 `-c`

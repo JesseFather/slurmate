@@ -10681,6 +10681,35 @@ exit 0
           == {"sum": 32000, "max": 32000},
           str(_nt and _nt.get("2080TI")))
 
+    # 接不了新作业的节点不贡献余量（2026-10-25 真机：2 个节点、1 个
+    #   draining，界面报「可用 GPU 7」「可分配 412 GB」，而能落到的那台
+    #   只剩 3 张卡、202 GB）。节点本身照旧计数 —— 界面要说得出「draining 1」。
+    def _draining(argv, timeout=10, check=False):
+        widths = (64, 16, 16, 200, 200, 64, 32, 32)
+        rows = (
+            ("nodea1", "256000", "49152", "gpu:4", "gpu:1",
+             "A6000", "mixed", "16/64/0/80"),
+            ("nodea2", "256000", "40960", "gpu:4", "gpu:0",
+             "A6000", "draining", "34/0/46/80"),
+        )
+        return 0, "".join(
+            "".join(str(v).ljust(w) for v, w in zip(row, widths)) + "\n"
+            for row in rows), ""
+
+    _nt5 = with_stub(mod, _draining, lambda: mod.Slurm(cfg).node_table())
+    check("draining 的节点不贡献可分配内存（合计与单节点最多都只剩健康那台）",
+          (_nt5 or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 206848, "max": 206848},
+          str(_nt5 and _nt5.get("A6000")))
+    check("draining 的节点也不贡献 GRES 余量：按节点减，只累加接得了新作业的",
+          (_nt5 or {}).get("A6000", {}).get("gres_free")
+          == [{"name": "gpu", "type": None, "count": 3}],
+          str(_nt5 and _nt5.get("A6000")))
+    check("而它照旧进 counts —— 界面要说得出来「draining 1」",
+          (_nt5 or {}).get("A6000", {}).get("counts")
+          == {"mixed": 1, "draining": 1},
+          str(_nt5 and _nt5.get("A6000")))
+
     def _no_cpu(argv, timeout=10, check=False):
         widths = (64, 16, 16, 200, 200, 64, 32, 32)
         rows = (("nodea1", "", "", "(null)", "(null)", "A6000", "mixed", "坏"),
@@ -10863,10 +10892,43 @@ exit 0
           str((_cd.get("nodes") or {}).get("A6000", {}).get("mem_free")))
     _g_a = ((_cd.get("gres") or {}).get("A6000") or [{}])[0]
     _g_r = ((_cd.get("gres") or {}).get("RTX8000") or [{}])[0]
-    check("GRES 清单带上「已用 / 可用」（`sinfo -O` 的 `GresUsed`）",
+    _g_2 = ((_cd.get("gres") or {}).get("2080TI") or [{}])[0]
+    check("GRES 清单带上「已用 / 可用」（`sinfo -O` 的 `GresUsed`，按节点减）",
           _g_a.get("used") == 2 and _g_a.get("free") == 2
           and _g_r.get("used") == 1 and _g_r.get("free") == 3,
           repr((_g_a, _g_r)))
+    # op_cluster 那一路也走按节点算的余量。判据用一台 draining 的节点：
+    #   它配置了 4 张、空着，而 `total - used` 会把它算成可用（2026-10-25 真机）。
+    def _draining_all(argv, timeout=10, check=False):
+        a = [str(x) for x in argv]
+        if "show node" in " ".join(a):
+            return 0, (
+                "NodeName=nodea1 NodeAddr=192.0.2.11 CPUEfctv=64 "
+                "RealMemory=256000 Gres=gpu:4 Partitions=A6000\n"
+                "NodeName=nodea2 NodeAddr=192.0.2.12 CPUEfctv=64 "
+                "RealMemory=256000 Gres=gpu:4 Partitions=A6000\n"), ""
+        if "sinfo" in " ".join(a) and "-O" in a:
+            widths = (64, 16, 16, 200, 200, 64, 32, 32)
+            rows = (
+                ("nodea1", "256000", "49152", "gpu:4", "gpu:1",
+                 "A6000", "mixed", "16/64/0/80"),
+                ("nodea2", "256000", "40960", "gpu:4", "gpu:0",
+                 "A6000", "draining", "34/0/46/80"),
+            )
+            return 0, "".join(
+                "".join(str(v).ljust(w) for v, w in zip(r, widths)) + "\n"
+                for r in rows), ""
+        return slurm_stub(argv, timeout, check)
+
+    _d28b = _mkd()
+    _d28b.slurm = mod.Slurm(cfg)
+    _cv3 = with_stub(mod, _draining_all, lambda: _d28b.op_cluster(UID))
+    _g3 = (((_cv3.get("data") or {}).get("gres") or {}).get("A6000") or [{}])[0]
+    check("op_cluster 那一路也走按节点算的余量：draining 那台的 4 张不算可用，"
+          "`total` 仍是分区配置",
+          _g3.get("total") == 8 and _g3.get("used") == 1
+          and _g3.get("free") == 3,
+          repr(_g3))
     check("`queue` 那一格不长内部的 GRES 已用（它只在 `nodes` 里）",
           "gres_used" not in ((_cd.get("queue") or {})), str(sorted(_cd.get("queue") or {})))
     check("GRES 余量是【新】对象：原地写会污染 `op_partitions` 的那份清单",

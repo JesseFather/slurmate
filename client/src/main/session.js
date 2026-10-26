@@ -133,6 +133,18 @@ function enrollProblemText(raw) {
  * 纯属给这个循环加压，受害的是所有人。
  */
 const STATUS_MS = 60000;
+/**
+ * 一次 status 的预算。
+ *
+ * 对账每一拍都必须有个尽头：`_statusOnce()` 用一个"在飞的还在飞"的闩
+ *   （`_statusBusy`）防止两条应答互相覆盖，而那个闩只在 finally 里放开 ——
+ *   一次永不返回的 status 会让对账从此停摆，症状是"作业已经结束了，界面还停在
+ *   正在重试"，直到进程退出。
+ *
+ * 与等登记那一拍同一个数（那里从前是写死的一行，现在共用这一个名字）：
+ *   两者问的是同一个问题，慢到二十秒还没回来就不是"慢"了。
+ */
+const STATUS_RPC_TIMEOUT_MS = 20000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
 /**
@@ -146,6 +158,21 @@ const QUEUED_POLL_MS = 3000;
  */
 const ENROLL_WAIT_BUDGET_MS = 3000;
 const FAST_POLL_MS = 150;
+/**
+ * 作业已经跑起来、登记还没完成时，这一段的轮询间隔与窗口。
+ *
+ * 这一格是「作业跑起来了，界面还停在『站点还没有完成登记』」的那几秒。
+ *   它其实不是站点慢：作业脚本还在探端口、起服务、等它应 `/healthz`，
+ *   然后才写 `running`；守护进程读到那一份才登记。`QUEUED_POLL_MS` 的 3 秒
+ *   一拍让这段本来只有几秒的路凭空多出一半（2026-10-25 真机，约 10 秒）。
+ *
+ * 只在作业 RUNNING 之后的前 `ENROLL_RUNNING_BUDGET_MS` 里用。再长就说明
+ *   不是「在起服务」了（文件写不出来、ACL 装不上），那时 3 秒一拍就够 ——
+ *   而按 4 拍/秒问下去只是在烧登录节点（一次 status 是一个 exec channel，
+ *   见 `STATUS_MS` 上面那一段）。
+ */
+const ENROLL_RUNNING_POLL_MS = 250;
+const ENROLL_RUNNING_BUDGET_MS = 30000;
 /**
  * 释放期的轮询间隔。
  *
@@ -238,6 +265,7 @@ class SessionController extends EventEmitter {
    *   heartbeatMs / statusMs / queuedPollMs / releaseMs
    *                                          可注入的节奏，仅供测试缩短用。
    *                                          生产值见文件顶部的常量。
+   *   statusRpcMs                            一次 status 的预算（同上）。
    *
    * spaceId 是这一份数据的 id（见 config.js 的「数据空间」那一节）：它决定本地
    * 监听端口、从而决定浏览器 origin 与存储分区。
@@ -255,7 +283,7 @@ class SessionController extends EventEmitter {
    */
   constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, releaseMs, pushStaleMs,
-                localMs, requestedKind, needsPubkey, adopted }) {
+                statusRpcMs, localMs, requestedKind, needsPubkey, adopted, enrollBudgetMs }) {
     super();
     this.backend = backend;
     this.spaceId = spaceId;
@@ -268,6 +296,12 @@ class SessionController extends EventEmitter {
     this.heartbeatMs = heartbeatMs || HEARTBEAT_MS;
     this.statusMs = statusMs || STATUS_MS;
     this.queuedPollMs = queuedPollMs || QUEUED_POLL_MS;
+    /**
+     * 等登记的那一小段「越快越好」的窗口。可注入，与上面几个节奏同一个理由：
+     *   用例要把它压到 0 才验得了它之后的那一档（作业跑起来之后的快速窗口）。
+     */
+    this.enrollBudgetMs = Number.isFinite(enrollBudgetMs)
+      ? enrollBudgetMs : ENROLL_WAIT_BUDGET_MS;
     this.releaseMs = releaseMs || RELEASE_POLL_MS;
     this.localMs = localMs || LOCAL_START_MS;
     /**
@@ -275,6 +309,11 @@ class SessionController extends EventEmitter {
      * 几百毫秒才验得了"通道坏了会退回轮询"——而真值见 `PUSH_STALE_MS`。
      */
     this.pushStaleMs = pushStaleMs || PUSH_STALE_MS;
+    /**
+     * 一次 status 的预算。可注入，理由与上面几个节奏相同：用例把它压到几十
+     *   毫秒，才验得了"这一拍没有应答、下一拍照常问"。
+     */
+    this.statusRpcMs = statusRpcMs || STATUS_RPC_TIMEOUT_MS;
 
     this.state = State.IDLE;
     this.sessionId = null;
@@ -877,7 +916,7 @@ class SessionController extends EventEmitter {
    */
   async _claim() {
     try {
-      const resp = await withTimeout(this.backend.rpc({ op: 'status' }), 20000);
+      const resp = await withTimeout(this.backend.rpc({ op: 'status' }), this.statusRpcMs);
       const c = classify(resp, { op: 'status' });
       if (c.action !== Action.OK) return false;
       const s = resp.data && resp.data.session;
@@ -895,16 +934,25 @@ class SessionController extends EventEmitter {
    *
    * 前 `ENROLL_WAIT_BUDGET_MS` 里用小间隔问，过了才退回 `queuedPollMs`：
    *   作业通常几秒内登记完，3 秒一拍会把那条快路也拖成 3 秒。
+   * 作业一变成 RUNNING 再开一次窗口（`ENROLL_RUNNING_POLL_MS`）：那之后的
+   *   几秒是作业在起服务，登记就在眼前，3 秒一拍是白等。
    *
    * 每一拍都要自己接住传输层的异常：一次抛出就会让这条轮询没有下一拍，
    *   外层那条 promise 永远挂着（真机 2026-10-19：重连停在「正在接回」）。
    */
   _waitForEnroll() {
     const since = Date.now();
-    const nextDelay = () => (
-      Date.now() - since < ENROLL_WAIT_BUDGET_MS
-        ? Math.min(this.queuedPollMs, FAST_POLL_MS)
-        : this.queuedPollMs);
+    // 作业跑起来之后的快速窗口。第一次看见 RUNNING 时开一次，不续期 ——
+    //   续期的话，一条永远登记不上的会话会把 250 毫秒一拍拖满整个 `enroll_ttl`。
+    let fastUntil = 0;
+    const nextDelay = () => {
+      const now = Date.now();
+      if (now - since < this.enrollBudgetMs) {
+        return Math.min(this.queuedPollMs, FAST_POLL_MS);
+      }
+      if (now < fastUntil) return Math.min(this.queuedPollMs, ENROLL_RUNNING_POLL_MS);
+      return this.queuedPollMs;
+    };
     return new Promise((resolve) => {
       const poll = async () => {
         if (this._stopped) return resolve(false);
@@ -913,7 +961,7 @@ class SessionController extends EventEmitter {
           // 带上限：SSH 通道没有应答时，这一拍也要有个尽头（`withTimeout` 的
           //   拒绝走下面同一个分支，下一拍再问）。
           resp = await withTimeout(
-            this.backend.rpc({ op: 'status', session_id: this.sessionId }), 20000);
+            this.backend.rpc({ op: 'status', session_id: this.sessionId }), this.statusRpcMs);
         } catch (e) {
           // 守护进程可能正在重启，链路也可能抖了一下 —— 下一拍再问，
           //   不要判定失败，也不要让这条轮询停在这里。
@@ -936,6 +984,10 @@ class SessionController extends EventEmitter {
           //   直接赋值的话，一次读文件失败（NFS 抖动）就会把它抹掉，
           //   此后没有任何一条路会把它拿回来（登记完成之后轮询就停了）。
           this.session = mergeView(this.session, s, { fromPush: false });
+          // 作业刚跑起来：接下来这几秒是它在起服务，登记就在眼前。
+          if (!fastUntil && s.job_state === 'RUNNING') {
+            fastUntil = Date.now() + ENROLL_RUNNING_BUDGET_MS;
+          }
           if (s.tunnel_target) {
             this._setState(State.RUNNING);
             return resolve(true);
@@ -1251,7 +1303,20 @@ class SessionController extends EventEmitter {
     if (this._statusBusy) return;
     this._statusBusy = true;
     try {
-      const resp = await this.backend.rpc({ op: 'status', session_id: this.sessionId });
+      // 这一拍必须有尽头。`_statusBusy` 在 finally 里才放开，而一次没有应答的
+      //   status 从前会把这一行永远挂住 —— 对账从此停摆，会话再也收不到
+      //   "作业结束了"，界面上那句「正在重试」就一直挂在那里（用户 2026-10-26
+      //   报的正是这个现场）。
+      //   超时与"传输层没回答"同一档：不判作业结束、不报警，下一拍再问。
+      //   这里不说话是有意的 —— 断线那一刻心跳那一路已经在说「心跳发送失败」，
+      //   而这句更具体的「隧道断开，正在重试」由隧道自己说。
+      let resp;
+      try {
+        resp = await withTimeout(
+          this.backend.rpc({ op: 'status', session_id: this.sessionId }), this.statusRpcMs);
+      } catch {
+        return;
+      }
       const c = classify(resp, { op: 'status' });
 
       if (c.action === Action.OK) {

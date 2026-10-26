@@ -994,6 +994,51 @@ test('状态条右侧那两颗：只在会话页面盖着时露，写的是「�
   assert.equal(reload.classList.contains('hidden'), true);
 });
 
+test('状态条上的「临时离开」：页面盖着时露，两段式，第二段才走', async () => {
+  // 2026-10-25 用户：那块页面上只有「重新加载」与「停止该作业」，回面板的路
+  //   只写在标签「面板」的 title 里 —— 要先知道去点它。这一颗把那条路摆出来。
+  //   它与「重新加载」同一种配色（ghost）：它不结束作业，只是本机走开。
+  //   两段式（`armConfirm`）：它会停心跳，没人回来接着看的后果要说出来。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__leaves = 0; window.slurmate.leave = () => {'
+    + ' window.__leaves += 1; return Promise.resolve({ ok: true }); };'
+    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
+  h.run("document.body.append($('sb-leave'));");
+  const leave = h.byId.get('sb-leave');
+  h.run("lastPlugins = { plugins: [{ name: 'web-demo', surface: { kind: 'web', path: '/' } }] };");
+  const snap = { state: 'running', slot: 's1', sessionId: 'sess-a', jobId: '11',
+                 serviceKind: 'web-demo' };
+
+  // ── 页面盖着：它在 ──
+  h.run("SCREEN = 'plugins'; SESS = { sessions: [{ slot: 's1', live: true }],"
+    + " front: 's1', panelFront: false };");
+  h.fn('renderSnapshot')(snap);
+  assert.equal(leave.classList.contains('hidden'), false,
+    '页面盖着时它是回面板的那条路');
+  // 它的配色与 title 长在 panel.html 上（这一组的壳不解析 HTML），
+  //   那两条由 renderer.test.mjs 对着文件判。
+
+  // ── 第一段 ──
+  leave.onclick();
+  assert.equal(h.run('window.__leaves'), 0, '第一次不许走 —— 它是第一段');
+  const cluster = (() => {
+    const p = leave.parentNode;
+    return p.children[p.children.indexOf(leave) + 1];
+  })();
+  assert.equal(cluster.className, 'armed');
+  assert.match(cluster.children[0]._text, /35 分钟/, '后果要说出来');
+  assert.match(cluster.children[0]._text, /作业继续在集群上跑/);
+
+  // ── 第二段 ──
+  await cluster.children[1].onclick();
+  assert.equal(h.run('window.__leaves'), 1, '第二段才真的走，而且恰好一次');
+
+  // ── 面板抬上来：它不在（那时面板本来就看得见）──
+  h.run("SESS.panelFront = true; SESS.sessions = [{ slot: 's1', live: true }];");
+  h.fn('renderSnapshot')(snap);
+  assert.equal(leave.classList.contains('hidden'), true);
+});
+
 test('排队中：状态条说得出作业在跑、以及站点那边为什么还没有登记', () => {
   // 用户 2026-10-19 真机：作业正常运行、日志照常输出，界面上只有「排队中」。
   //   作业状态（`jobText`）与守护进程给的原因（`enrollProblem`）都要露出来 ——
@@ -2216,6 +2261,36 @@ test('作业列表里点另一条：高亮与下面的详情都跟着走', () =>
   assert.match(kvText, /42/);
 });
 
+test('作业列表那一屏的「结束」也走两段式：点错一次就是一条跑到一半的作业没了', async () => {
+  // 2026-10-25 用户：这一颗从前点一下就结束。它旁边紧挨着「重新加载」与
+  //   「接管」，而它长得没什么特别 —— 代价是集群上那条作业被取消。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__stops = []; window.slurmate.stop = (slot) => {'
+    + ' window.__stops.push(slot); return Promise.resolve({ ok: true }); };'
+    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
+  h.run("document.body.append($('btn-jobs-end'));");
+  const btn = h.byId.get('btn-jobs-end');
+  const rows = [{ session_id: 'sess-a', slot: 's1', live: true, attached: true,
+                  job_id: '11' }];
+  h.run(`SCREEN = 'jobs'; JOBS = ${JSON.stringify({
+    list: rows, at: 1, error: null, selected: 'sess-a',
+  })};`);
+  h.fn('renderJobsSelection')();
+
+  // ── 第一段 ──
+  btn.onclick();
+  assert.equal(h.run('window.__stops.length'), 0, '第一次不许结束 —— 它是第一段');
+  const p = btn.parentNode;
+  const cluster = p.children[p.children.indexOf(btn) + 1];
+  assert.ok(cluster && cluster.className === 'armed', '那一行确认要插在按钮后面');
+  assert.match(cluster.children[0]._text, /作业会被取消/, '后果要说出来');
+
+  // ── 第二段 ──
+  await cluster.children[1].onclick();
+  assert.equal(JSON.stringify(h.run('window.__stops')), '["s1"]',
+    '第二段才结束，而且停的是选中的那一条');
+});
+
 test('作业结束的那一刻那一句进提示流，而且好坏按退出码分', () => {
   const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
   const notices = () => h.byId.get('notices').children.map(
@@ -2300,6 +2375,43 @@ test('「查看日志」按需取一次：三态各不相同，空的那一块�
     + " error: '这个站点的守护进程版本过低，不支持插件分发。' });");
   await h.run('loadJobLog()');
   assert.match(shown(), /这个站点的守护进程版本过低/);
+});
+
+test('日志跟着选中的那一条走：切换作业时重取，没打开过就不取', async () => {
+  // 2026-10-25 用户：在作业列表里换一条，下面那块日志还是上一条的 ——
+  //   高亮着 B、摆着 A 的输出，而它看起来就像"B 的日志"。
+  const rows = [
+    { session_id: 'sess-a', slot: 's1', live: true, attached: true, job_id: '41' },
+    { session_id: 'sess-b', slot: 's2', live: true, attached: true, job_id: '42' },
+  ];
+  const open = (extra) => {
+    const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+      extra);
+    h.run("SCREEN = 'jobs'; SESS = { sessions: [], front: null };"
+      + "window.__asked = [];"
+      + "window.slurmate.jobLog = (a) => { window.__asked.push(a.session_id);"
+      + " return Promise.resolve({ ok: true, data: { out: null, err: null } }); };"
+      + `JOBS = ${JSON.stringify({ error: null, at: Date.now(), selected: 'sess-a',
+                                   list: rows })};`);
+    h.fn('renderJobs')();
+    return h;
+  };
+  const asked = (h) => JSON.parse(JSON.stringify(h.run('window.__asked')));
+
+  // ── 没打开过：切换不该顺手取一次（那是一次真的 RPC）──
+  const idle = open('');
+  idle.byId.get('job-list').children[1].onclick();
+  await idle.run('new Promise((r) => setTimeout(r, 0))');
+  assert.deepEqual(asked(idle), [], '日志没开着，切换作业不该发起任何请求');
+
+  // ── 开着：跟着选中的那一条重取 ──
+  const h = open('');
+  await h.run('loadJobLog()');
+  assert.deepEqual(asked(h), ['sess-a'], '先取的是选中的那一条');
+  h.byId.get('job-list').children[1].onclick();
+  await h.run('new Promise((r) => setTimeout(r, 0))');
+  assert.deepEqual(asked(h), ['sess-a', 'sess-b'],
+    '切到哪一条，日志就该重取哪一条 —— 不是把上一条留着');
 });
 
 test('「获取失败」的三种情况，三句不同，各有各的出路', () => {

@@ -421,6 +421,35 @@ test('等登记那段轮询也走同一个合并入口（口令不许被一次�
   assert.equal(ctrl.session.auth_password, 'pw-secret', '口令不许被那一次抖动抹掉');
 });
 
+test('作业一跑起来就换快拍，不再按排队那档的 3 秒等', async (t) => {
+  // 守的是「作业运行中、站点还没有完成登记」那几秒。那几秒其实不是站点慢：
+  //   作业还在起服务，登记就在眼前。旧行为按 `queuedPollMs` 一拍，于是
+  //   界面在这段路上白等一倍（2026-10-25 真机，约 10 秒里有一半是它）。
+  // 判据是"第一拍看见 RUNNING 之后多久回来"：把 `enrollBudgetMs` 压到 0
+  //   才看得见 `queuedPollMs` 那一档，否则前 3 秒本来就是 150 毫秒一拍。
+  t.after(keepAlive());
+  const b = new StubBackend();
+  let polls = 0;
+  b.reply = (req) => {
+    if (req.op !== 'status') return ok({});
+    polls += 1;
+    return polls === 1
+      ? ok({ session: view({ state: 'submitted', tunnel_target: null,
+                             job_state: 'RUNNING' }) })
+      : ok({ session: view({ job_state: 'RUNNING' }) });
+  };
+  const ctrl = new SessionController({
+    backend: b, spaceId: 'L1', queuedPollMs: 3000, enrollBudgetMs: 0 });
+  ctrl.sessionId = 's1';
+  t.after(() => { ctrl._stopped = true; });
+  const t0 = Date.now();
+  const enrolled = await ctrl._waitForEnroll();
+  const ms = Date.now() - t0;
+  assert.equal(enrolled, true);
+  assert.ok(ms < 1000,
+    `看见 RUNNING 之后走了 ${ms} 毫秒，该在 250 毫秒那一档而不是 3 秒`);
+});
+
 test('提交请求：显式「不占 GRES」的 null 要发出去，其余 null 仍然丢掉', async () => {
   // 界面上选「（不占 GRES）」发的是 `gres: null`（盖过插件默认卡）。它到了
   //   `SessionController.start` 那一层被「只带有值的键」的过滤器当成"没填"
@@ -447,4 +476,30 @@ test('提交请求：显式「不占 GRES」的 null 要发出去，其余 null 
   assert.equal('cpus' in sub, false, 'cpus 的 null 仍然要丢掉（服务端会当成 0 核）');
   assert.equal('time' in sub, false);
   assert.equal(sub.mem, '8G');
+});
+
+test('一次没有应答的 status 不许把对账闩死（作业结束了，界面必须收得到）', async () => {
+  // 现场（用户 2026-10-26）：断网那一刻发出去的 status 没有下文，而
+  //   `_statusOnce()` 用一个"在飞的还在飞"的闩防重入，闩只在 finally 里放开。
+  //   于是对账从此停摆：作业在集群上已经结束，界面上的「正在重试」一直挂着。
+  // 判据分两半：① 这一拍超时之后闩放开；② 下一拍收到终态时必须结束。
+  const backend = new StubBackend();
+  const ctrl = running(backend, {});
+  ctrl.statusRpcMs = 40;
+
+  // 断网那一段：请求送出去就没有下文。
+  backend.reply = () => new Promise(() => {});
+  const t0 = Date.now();
+  await ctrl._statusOnce();
+  const ms = Date.now() - t0;
+  assert.equal(ctrl._statusBusy, false, '超时之后闩必须放开，否则对账再也不跑');
+  assert.ok(ms < 2000, `预算 40 毫秒，却等了 ${ms} 毫秒`);
+  assert.equal(ctrl.state, State.RUNNING, '没有应答不等于作业结束了');
+
+  // 网络回来，而这期间作业已经结束。
+  backend.reply = (req) => (req.op === 'status'
+    ? ok({ session: view({ state: 'released', job_state: 'COMPLETED' }) })
+    : ok({}));
+  await ctrl._statusOnce();
+  assert.equal(ctrl.state, State.ENDED, '收到终态就必须结束，不能停在 running');
 });

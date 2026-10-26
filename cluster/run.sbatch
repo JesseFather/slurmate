@@ -646,10 +646,6 @@ log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
     "service=$SLURMATE_SERVICE_KIND"
 log "候选端口: $SLURMATE_CANDIDATES"
 
-# 开头先扫一遍自己那些已经不在队列里的会话文件（理由见 2a-2）。放在这里而不是
-#   收尾时：收尾那一段要在 KillWait 里跑完，不该再往里加活。
-sweep_stale_sessions
-
 NODE_IP="$(detect_node_ip)" || {
     log_err "无法确定节点 IPv4，退出（ACL 依赖字面 IP，宁可不启动）"
     exit 20
@@ -754,6 +750,12 @@ fi
 write_session "running" null || log_err "写会话文件失败"
 write_jobhb
 log "会话就绪: tunnel_target=${NODE_IP}:${SVC_PORT}"
+
+# 扫一遍自己那些已经不在队列里的会话文件（理由见 2a-2）。排在「会话就绪」之后：
+#   它是一次 `squeue` 往返，而它清扫的是别人的残骸 —— 把它摆在起服务之前，
+#   等于让每个新会话替旧文件付这笔钱（2026-10-25 真机：那几秒是等登记，
+#   而作业自己还没走到起服务）。不放在收尾那一段：那里要在 KillWait 里跑完。
+sweep_stale_sessions
 
 # 作业侧心跳（每 60 秒），证明"作业还活着，是客户端掉了还是作业没了"
 ( while sleep 60; do write_jobhb || true; done ) &
