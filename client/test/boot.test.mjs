@@ -383,7 +383,15 @@ const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], 
    * （见 windows.js 的 `_startCursorWatch`），所以"鼠标走开了"这件事只能这样造：
    * 没有别的事件可以触发它，那正是它不用 `mouseleave` 的理由。
    */
-  cursor: { x: 0, y: 0 } };
+  cursor: { x: 0, y: 0 },
+  /**
+   * `setProgressBar()` 收到的每一个值，按先后顺序。
+   *
+   * 任务栏那颗忙碌指示是 Windows 上唯一一处"这个程序正在做事"的记号，而它
+   *   只有这一个出口（见 windows.js 的 `setBusy`）。用例要断言的是"没有活动时
+   *   它不许亮" —— 2 = 不定进度（在转），-1 = 灭。
+   */
+  progress: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
 
@@ -449,7 +457,7 @@ class FakeBrowserWindow {
   getContentBounds() { return { x: 0, y: 0, width: this._size[0], height: this._size[1] }; }
   setMenuBarVisibility() {}
   setTitle(t) { calls.titles.push(t); }
-  setProgressBar() {}
+  setProgressBar(v) { calls.progress.push(v); }
   show() {}
   focus() {}
   isMinimized() { return false; }
@@ -3167,6 +3175,46 @@ test('站点把插件升了一个版本：同意新版之后旧版当场收掉�
     });
   });
 
+test('会话一结束就补一次对账：没人再引用的旧版本当场消失', async (t) => {
+  // 用户 2026-10-27：插件升级之后，旧版本要断开重连才消失。上一条用例守的是
+  //   "同意那一刻"（旧版本已经没有任何站点要它）；这一条守的是另一半 ——
+  //   旧版本活过了那一刻（它还被一条正在跑的会话用着，换了等于把那条会话脚下的
+  //   代码换掉），于是它只在会话结束那一刻才真的没人要。而"会话走完了"
+  //   从前不触发对账：旧版本一直躺到下一次连上站点。
+  //   现场造的是那一轮对账该看到的形状：同一个 id 在池里有两版，旧的那一版
+  //   没有任何站点要它、也没有任何会话用着它。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+  await invoke('app:syncPlugins');
+  await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+
+  const run = await startRunning(idx, 'web-demo');
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
+  assert.ok(plugin, '夹具前提：注册表里应当有 web-demo');
+
+  // 池里同一个 id 多一版，而它自己的引用副本是空的（没有任何站点要它）。
+  //   真机上这一版是升级之前的那一份，回收只认引用 —— 所以它是"该收"的那一版。
+  const pool = idx._test.getSitePoolDir();
+  const cur = `${plugin.id}_${plugin.version}`;
+  const old = `${plugin.id}_0.0.1`;
+  fs.cpSync(path.join(pool, cur), path.join(pool, old), { recursive: true });
+  fs.copyFileSync(path.join(pool, `${cur}.json`), path.join(pool, `${old}.json`));
+  fs.writeFileSync(path.join(pool, `.${old}.refs`),
+    JSON.stringify({ version: 1, sites: [] }));
+  assert.equal(fs.existsSync(path.join(pool, old)), true, '前置：旧版本在池里');
+  assert.equal(idx._test.siteSyncIdle(), true,
+    '前置：这一刻没有对账在跑（否则它才是那个把旧版收掉的人；"活会话引用着的'
+    + '那一版不许回收"由 `client/test/site-plugins.test.mjs` 那两条钉着）');
+
+  await invoke('app:stop', { slot: run.slot });
+  await waitUntil(() => !fs.existsSync(path.join(pool, old)),
+    '会话结束之后，没人再引用的旧版本当场回收', 20000);
+  assert.equal(fs.existsSync(path.join(pool, `${old}.json`)), false,
+    '记录表与树一起走 —— 留一张指向空目录的记录表就是另一种残留');
+});
+
 test('从假站点上撤掉一个插件：站点当场不报它了，而本机这一份留着',
   async (t) => {
     // 这一条判的是站点那一侧的撤 —— 管理员在真站点上敲的那条
@@ -4548,6 +4596,52 @@ test('网络回来时，坏掉的页面重载一次；提示页留到画面真�
   const alive = wc.reloads || 0;
   await invoke('app:setFront', { slot });
   assert.equal(wc.reloads, alive, '页面没坏就不许重载它');
+
+  await invoke('app:stop', { slot });
+});
+
+test('任务栏的忙碌指示只在页面真的在重载时亮，画面一回来就灭', async (t) => {
+  // 用户 2026-10-27（Windows）：离开窗口之后任务栏那颗图标一直在转，提示
+  //   "有活动"，而真实的动作一个都没有。它从前在"页面坏了、隧道断着"时也亮 ——
+  //   而那一段可以持续到用户下次回来。2 = 不定进度（在转），-1 = 灭。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 1);
+
+  const started = await appStart(null, 'web-demo');
+  assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
+  const slot = started.slot;
+  await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那块页面建出来');
+  const wc = viewFor(w, slot).webContents;
+  const last = () => calls.progress[calls.progress.length - 1];
+
+  // ── ① 坏掉的页面正在重载：亮（那是真的在飞的一步）──
+  calls.progress.length = 0;
+  fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+  const before = wc.reloads || 0;
+  await invoke('app:setFront', { slot });
+  assert.equal(wc.reloads, before + 1, '前置：这一刻确实重载了一次');
+  assert.equal(last(), 2, '重载在飞时，任务栏那颗灯要亮');
+
+  // ── ② 画面回来了：亮灭在同一刻，不等下一次状态变化 ──
+  fire(wc, 'did-start-loading');
+  fire(wc, 'did-stop-loading');
+  assert.equal(last(), -1, '画面回来就灭 —— 否则它会一直转到下一次状态变化');
+
+  // ── ③ 两次重载都用完、页面停在提示页上：没有动作在飞，灯不许亮 ──
+  for (let i = 0; i < 2; i += 1) {
+    fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+      'http://127.0.0.1:1/', true);
+    await invoke('app:setFront', { slot });
+  }
+  fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+  await invoke('app:setFront', { slot });
+  assert.equal(overlayViewOf()._visible, true, '前置：这一轮页面上挂的是提示页');
+  assert.equal(last(), -1, '坏着不等于有活动：那一刻已经没有重载在飞');
 
   await invoke('app:stop', { slot });
 });

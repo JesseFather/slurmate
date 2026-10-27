@@ -70,7 +70,7 @@ import time
 #   第四处（package-lock）容易漏：`npm ci` 不比较 lock 里根那个
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
-VERSION = "0.36"
+VERSION = "0.37"
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -8270,13 +8270,18 @@ class Cluster(object):
         （从 1 数起）。它不是"还要等几个"：前面那些作业有多少会同时开跑
         取决于分区有多少空闲节点，而那是另一个数（`depth` 与 `nodes` 里都有）。
         报一个推算出来的等待时间比不报更糟，它在用户那儿看起来像承诺。
+
+        三态：快照取不到 → 键缺席（没问到）；快照拿到了而我没有排队作业 →
+        `pending_count: 0`（确实没有）。这两件事从前都走缺席那一条，于是
+        客户端把"我没有排队作业"画成了「获取失败」，而那一句在每一台空闲的
+        集群上都会出现。
         """
         q = self.queue()
         if q is None:
             return {}
         mine = set(q["by_user"].get(user) or ())
         if not mine:
-            return {}
+            return {"pending_count": 0, "first_in": {}}
         where = {}                      # job_id -> (分区, 从 1 数起的名次)
         for pname, lst in q["pending"].items():
             for i, jid in enumerate(lst):

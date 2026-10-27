@@ -413,7 +413,13 @@ class ShellWindow {
       s.recovering = false;
       // 这是"画面回来了"的那一下。等着它的提示页在这里收（焦点也一并还给
       //   页面）—— 与画面同一下，而不是隧道一说通就收（见 `recoverSurface`）。
-      if (this._overlayHold === slot) this.hideOverlay();
+      // 任务栏那颗"正在重载"的灯也在这里灭：它说的就是这一步，而画面回来之后
+      //   不一定还有下一次状态变化来清它（用户 2026-10-27：离开窗口之后那颗
+      //   图标一直在转，提示"有活动"，而真实的动作一个都没有）。
+      if (this._overlayHold === slot) {
+        this.hideOverlay();
+        this.setBusy(false);
+      }
     });
     // 这类页面最容易 OOM。挂了要能提示并重载，而不是留一块白。
     wc.on('render-process-gone', (_e, details) => {

@@ -994,6 +994,10 @@ async function refreshPartitions() {
 
 /** 上一次对账的 promise。只给测试用（真机上没人等它）。 */
 let siteSyncPromise = null;
+/** 有一轮对账在飞。同一时刻只跑一轮 —— 理由见 `reconcileSitePlugins`。 */
+let siteSyncRunning = false;
+/** 在飞那一轮结束之后还要再跑一轮（会话刚结束这一类"错过了一拍"的请求）。 */
+let siteSyncAgain = false;
 
 /**
  * 和站点对一次账：把该分发的插件取下来、该回收的回收。
@@ -1008,8 +1012,18 @@ let siteSyncPromise = null;
  *
  * 下载失败绝不回退到本机池（见 site-plugins.js 的文件头）。没有站点的时候
  *   一个插件都没有，那是正确的、必须如实说出来的结果。
+ *
+ * 同一时刻只跑一轮。它开头会 `++connectGeneration`，而那一个世代号正是在飞
+ *   那一轮"这次还算不算数"的守卫 —— 第二轮一进来，第一轮就会把自己当成
+ *   "连接换了一条"整份丢弃。所以后来的请求只记一个待办，由在飞那一轮结束时
+ *   再排一次（见 `.finally`）。
  */
 function reconcileSitePlugins() {
+  if (siteSyncRunning) {
+    siteSyncAgain = true;
+    return siteSyncPromise;
+  }
+  siteSyncRunning = true;
   const gen = ++connectGeneration;
   siteSyncPromise = (async () => {
     const conn = config.activeConnection(cfg);
@@ -1120,8 +1134,50 @@ function reconcileSitePlugins() {
     siteSync = { supported: false, reason: 'internal', syncedAt: Date.now(),
                  error: `站点插件对账时出错：${e.message}` };
     return siteSync;
+  }).finally(() => {
+    siteSyncRunning = false;
+    // 在飞期间有人要再对一次（多半是又一条会话结束了）：那一轮已经看不到
+    //   这一条的状态，所以补一轮。
+    if (siteSyncAgain) {
+      siteSyncAgain = false;
+      scheduleSiteReclaim();
+    }
   });
   return siteSyncPromise;
+}
+
+/** 池里这个 id 有几版。读不到目录 = 0（"没有"与"读不动"在这一格等价：都不会回收）。 */
+function pooledVersionCount(id) {
+  const root = sitePoolDir();
+  if (!root || !id) return 0;
+  try {
+    return sitePluginSync.listPooled(root).filter((x) => x.id === id).length;
+  } catch {
+    return 0;
+  }
+}
+
+let siteReclaimTimer = null;
+
+/**
+ * 会话结束之后补一次对账 —— 让"没人再引用它"的那一版当场被回收。
+ *
+ * 回收只认引用（站点快照表里的 `wants` 与 `op:list` 报的活会话），而
+ *   "一条会话走完了"这件事从前不触发对账：于是会话手里那一版在新版装上来之后
+ *   一直躺在池里，界面上两颗同名的块并排，要等下一次连上站点才收掉
+ *   （用户 2026-10-27：升级插件之后旧版本必须断开重连才消失）。
+ *
+ * 隔一小会儿再跑，不立刻跑：一次「结束会话」可能连着结束几条（关窗、断开），
+ *   而它们该合成一轮对账。代价只是旧版本晚一秒消失。
+ */
+function scheduleSiteReclaim() {
+  if (siteReclaimTimer) return;
+  siteReclaimTimer = setTimeout(() => {
+    siteReclaimTimer = null;
+    if (quitting || !backend || !backend.connected) return;
+    reconcileSitePlugins();
+  }, 800);
+  if (siteReclaimTimer.unref) siteReclaimTimer.unref();
 }
 
 /**
@@ -3151,6 +3207,20 @@ async function onSessionChange(slot) {
     const rec0 = sessions.get(slot);
     if (rec0) applyPendingRemember(rec0);
     await _renderSession(slot);
+    // 一条会话走完了（结束、或者出错停在那儿）：它冻在站点里那个 `id@版本`
+    //   从此不再被任何会话引用。那一版该不该回收只有对账下得了（回收只认引用），
+    //   而"会话结束"从前不触发对账 —— 于是新版装上来、旧版一直躺在池里，界面上
+    //   两颗同名的块并排，要等下一次连上站点才收掉（用户 2026-10-27）。
+    // 只在这一条第一次走到终态时排一次：`onSessionChange` 在终态上还会被叫很多次。
+    const done = sessions.get(slot);
+    const doneState = done && done.controller ? done.controller.snapshot().state : null;
+    if (done && !done.reclaimQueued
+        && (doneState === State.ENDED || doneState === State.ERROR)) {
+      done.reclaimQueued = true;
+      // 池里只有这一版时什么都不会被回收，那一趟白跑（它要把整池哈希一遍）。
+      //   这条判据也让"平时的结束会话"与"刚升级完插件"这两件事分开。
+      if (done.plugin && pooledVersionCount(done.plugin.id) > 1) scheduleSiteReclaim();
+    }
     // 一次推全部 —— 面板那一屏要显示的是"这个窗口里有几个会话、各自什么样"，
     // 而不是"最后动过的那一个"。
     const views = sessionViews();
@@ -3377,7 +3447,13 @@ async function _renderSession(slot) {
           title: pageUsable ? '页面暂时打不开' : '连接暂时中断',
           text: snap.warning || '页面现在打不开，正在重试。',
         });
-        win.setBusy(true);
+        // 这一支不点亮任务栏（用户 2026-10-27）。它是一段"坏了"的状态，
+        //   而不是"正在做什么"：断网、页面停在一张空页上，这两件事可以持续
+        //   到用户下次回来。点亮它的话，用户离开窗口之后看到的就是任务栏那颗
+        //   图标一直在转 —— 提示"有活动"，而真实的动作一个都没有。
+        // 断着这件事由提示页与左栏说（用户回来时它们就摆在眼前）；
+        //   任务栏那颗灯只留给真的在飞的那一步：`waiting`（页面正在重载）。
+        win.setBusy(false);
       } else {
         win.hideOverlay();
         win.setBusy(false);
@@ -6461,6 +6537,14 @@ module.exports = {
     getPluginsView: () => pluginsView(),
     /** 上一次对账的结果（三态的原样）。 */
     getSiteSync: () => siteSync,
+    /**
+     * 对账此刻闲着吗：没有在飞的一轮、没有待补的一轮、也没有排着的回收。
+     *
+     * 用例要造"池里多一版没人要的旧版本"的现场，而任何一轮对账都会当场把
+     *   它收掉 —— 所以造现场之前必须确认对账真的停了，否则那条判据测的就成了
+     *   "对账顺手回收了"，而不是"会话结束触发了对账"。
+     */
+    siteSyncIdle: () => !siteSyncRunning && !siteSyncAgain && !siteReclaimTimer,
     /** 待同意的那些。 */
     getPendingConsent: () => pendingConsent,
     /** 站点池在哪（测试要直接看盘上的东西）。 */
