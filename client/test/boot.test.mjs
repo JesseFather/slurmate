@@ -3175,6 +3175,92 @@ test('站点把插件升了一个版本：同意新版之后旧版当场收掉�
     });
   });
 
+test('站点上换了插件、而这台机器上一条会话都没有：点「开始会话」那一趟照样补一次对账',
+  async (t) => {
+    // 用户 2026-10-27：会话结束那条路只覆盖"有会话在跑"。一条会话都没有的
+    //   时候，客户端从前根本不知道站点上换了东西 —— 插件清单只在连接时取一次，
+    //   于是新版要断开重连才出现，旧版也要到那一刻才收掉。
+    // 这一条直接调那一趟判据（`checkSitePlugins`）；"开始会话时会调它"那一句
+    //   由下面那条源码判据钉住 —— 真起一条会话要另有一棵跑得起来的作业侧，
+    //   而那与这一格无关。
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setSampleDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+      fs.rmSync(src, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      const id = '01M2JKM1M1M1M1M1M1M1M1M1M9';
+
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.0' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      assert.equal((await invoke('app:consentPlugin', id, '1.0.0')).ok, true);
+      await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+      const pool = idx._test.getSitePoolDir();
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '前置：池里有 1.0.0');
+
+      // ── 站点上换成 1.0.1：这里没有会话、也没有人点「重新同步」 ──
+      fs.rmSync(path.join(src, 'demo-box'), { recursive: true, force: true });
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.1' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal(idx._test.siteSyncIdle(), true, '前置：没有对账在跑');
+
+      // 点「开始会话」时会跑的那一趟（用例直接调它）。
+      const src2 = fs.readFileSync(
+        path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+      const atStart = src2.indexOf('async function startSession(');
+      assert.ok(atStart > 0, '前置：找得到 `startSession`');
+      assert.match(src2.slice(atStart, src2.indexOf('\n}\n', atStart)),
+        /checkSitePlugins\(\)/,
+        '点「开始会话」那一趟要问一次站点清单 —— 少了它，站点换了插件只有重连才看得见');
+
+      const before = idx._test.getSiteSync().syncedAt;
+      assert.equal(await idx._test.checkSitePlugins(), true, '清单变了，要认出来');
+      await waitUntil(() => idx._test.getSiteSync().syncedAt !== before,
+        '补了一次对账', 20000);
+      const pend = idx._test.getPendingConsent().find((p) => p.id === id);
+      assert.ok(pend, `新版要走到同意闸：${JSON.stringify(idx._test.getPendingConsent())}`);
+      assert.equal(pend.version, '1.0.1');
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '还没同意新版，旧版当然还在');
+
+      // ── 清单没变的时候什么都不做：这一趟大部分时候的答案都是"没变" ──
+      await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+      const same = idx._test.getSiteSync().syncedAt;
+      assert.equal(await idx._test.checkSitePlugins(), false, '清单没变');
+      assert.equal(idx._test.getSiteSync().syncedAt, same, '没变就不该再对一次账');
+    });
+  });
+
+test('两轮对账撞在一起：后来的只记成待办，不是把在飞那一轮作废', async (t) => {
+  // 用户 2026-10-27 报的"两个版本同在"有一个来路就在这里：同意插件那一步会补
+  //   一次对账，而那一刻常常已经有一轮在飞（连接时那一轮、或者上一次同意那一轮）。
+  //   再起一轮会 `++connectGeneration` —— 在飞那一轮随后把自己当成"连接换了一条"
+  //   整份丢弃，而新一轮又抢不到对账锁：两轮都白跑，旧版本一个都收不掉。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await invoke('app:syncPlugins');
+  await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+
+  const p1 = idx._test.reconcileSitePlugins();
+  const p2 = idx._test.reconcileSitePlugins();
+  assert.equal(p2, p1, '第二条请求只是记成待办：它不该另起一轮');
+  await p1;
+  await waitUntil(() => idx._test.siteSyncIdle(), '补的那一轮跑完');
+  const s = idx._test.getSiteSync();
+  assert.equal(s.error, null, `两轮都该正常收场，实际：${s.error}`);
+  assert.equal(s.supported, true, '前置：这个假站点支持分发');
+});
+
 test('会话一结束就补一次对账：没人再引用的旧版本当场消失', async (t) => {
   // 用户 2026-10-27：插件升级之后，旧版本要断开重连才消失。上一条用例守的是
   //   "同意那一刻"（旧版本已经没有任何站点要它）；这一条守的是另一半 ——

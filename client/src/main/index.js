@@ -259,6 +259,44 @@ const SITE_POLL_EXEC_MS = 120000;
 function sitePollMs() {
   return backend && backend.resident === true ? SITE_POLL_MS : SITE_POLL_EXEC_MS;
 }
+
+/**
+ * 站点上的插件清单变了没有；变了就补一次对账。
+ *
+ * 什么时候问（用户 2026-10-27 定的）：连接时取一次、点「重新同步」取一次、
+ *   点「开始会话」时顺手再问一次。不做定时轮询 —— 那一趟问的只是"变了没有"，
+ *   而大部分时候的答案是"没变"；退化成 exec 时一次 RPC 就是一个 fork，
+ *   为了一个不常发生的变化在别人的登录节点上多跑一趟不划算。
+ *
+ * 为什么要有这一趟：插件清单从前只在连接时取一次。于是一个已经连着的客户端
+ *   在站点升级插件之后完全不知道 —— 要断开重连才看得见新版，旧版什么时候消失
+ *   也跟着拖到那一刻。
+ *
+ * 问不到就当没变：不触发对账，也不把界面手里那份擦掉（"没问到"不等于"没有"，
+ *   与三态那一条同源）。
+ *
+ * 这一趟只认"当前这条连接的那个站点"。别的连接条目的 `wants` 一个字都不动 ——
+ *   对账写的是 `sites[本站点键].wants`，而"要不要删某一版"看的是所有站点加起来
+ *   的引用（见 site-plugins.js 第 5 步）：另一个站点那边没有升级，它要的那一版
+ *   就还在。
+ */
+async function checkSitePlugins() {
+  if (!backend || !backend.connected || !sitePlugins) return false;
+  const p = await loadPlugins();
+  if (!p.ok) return false;
+  const before = pluginKeySet(sitePlugins.plugins);
+  const after = pluginKeySet(p.plugins);
+  if (before.size === after.size && [...after].every((k) => before.has(k))) return false;
+  reconcileSitePlugins();
+  return true;
+}
+
+/** 一份 `op_plugins` 清单里"站点此刻要分发的那些版本"的集合。 */
+function pluginKeySet(list) {
+  return new Set((list || [])
+    .filter((x) => x && x.enabled !== false && x.id && x.version)
+    .map((x) => `${x.id}@${x.version}`));
+}
 /**
  * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
  * 不支持这个 op）—— 那时按"站点没说"处理，而不是当成"一个都没有"。
@@ -3020,6 +3058,13 @@ async function startSession(resources, serviceKind, portChoice) {
 
   // `preferredPort` 在上面（端口那道闸那一节）就算出来了 —— 探测要用它。
   //
+  // 点「开始会话」是用户唯一一次说"我要用这个站点的插件"：顺手问一次站点
+  //   清单，变了就补一次对账（见 `checkSitePlugins`）。不 await —— 会话该起就
+  //   起，用的是池里此刻那一版；对账在后台把新版取回来、把没人再要的旧版收掉。
+  // 本机插件不问：它一个 RPC 都不该发（见 boot 用例〈本机插件：站点报
+  //   can_submit=false，点「在本机打开」不提交作业〉）。
+  if (!isLocal) checkSitePlugins();
+
   // 本机插件走 `startLocal()`：不提交、不建隧道、不起心跳。两条路返回同一种
   //   快照，所以下面的失败清理与界面切换都只有一份。
   const snap = isLocal
@@ -3526,7 +3571,13 @@ const registry = new plugins.Registry([
  */
 function sitePoolDir() {
   try {
-    return path.join(app.getPath('home'), '.slurmate', 'site-plugins');
+    const home = app.getPath('home');
+    // 家目录必须是绝对的。相对的那一个会让池子跟着"当前工作目录"跑 ——
+    //   一个对账（后台跑的）落在一个谁也想不到的地方，而且换一次启动目录就
+    //   换一处池子。判据与插件 `ctx.home()` 那条同源（那里是拒绝，这里是
+    //   "这个根这次不加载"）。
+    if (!home || !path.isAbsolute(home)) return null;
+    return path.join(home, '.slurmate', 'site-plugins');
   } catch {
     // 拿不到就返回 null，而 null 在那条路上意味着"这个根这次不加载"。
     //   把一个次要功能的失败变成整个客户端起不来不值当。
@@ -5942,6 +5993,11 @@ function registerIpc() {
     } catch (e) {
       win.pushNotice('warn', `插件装上了，但旧版本这次没收掉：${e.message}`);
     }
+    // 对账在里面会重扫一次注册表，但那一步只在对账真的换了东西时发生（见
+    //   site-plugins.js 第 8 步）。这里再扫一遍，是因为界面手里那份视图来自
+    //   注册表 —— "装完还看见两个版本"最没必要的一种来路，就是池里已经干净了、
+    //   而注册表还攥着已经删掉的那一个对象。
+    await registry.reload();
     return { ok: true, plugins: pluginsView() };
   });
 
@@ -6545,6 +6601,20 @@ module.exports = {
      *   "对账顺手回收了"，而不是"会话结束触发了对账"。
      */
     siteSyncIdle: () => !siteSyncRunning && !siteSyncAgain && !siteReclaimTimer,
+    /**
+     * 手动跑一遍"站点上的插件清单变了没有"（`checkSitePlugins`）。
+     *
+     * 它平时由定时器按分钟级跑，用例不能真等那一分钟。返回 `true` 表示认出了
+     *   一次变化（并且已经排了一轮对账）。
+     */
+    checkSitePlugins: () => checkSitePlugins(),
+    /**
+     * 手动起一轮对账（`reconcileSitePlugins`）。
+     *
+     * 用例要造"两轮撞在一起"的现场：先连着调它两次，看第二条请求是另起一轮
+     *   （那会把在飞那一轮作废）还是只记成待办。
+     */
+    reconcileSitePlugins: () => reconcileSitePlugins(),
     /** 待同意的那些。 */
     getPendingConsent: () => pendingConsent,
     /** 站点池在哪（测试要直接看盘上的东西）。 */
