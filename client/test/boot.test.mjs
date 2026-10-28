@@ -7984,6 +7984,52 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
   cleanupSiteState(idx);
 });
 
+test('被接管的那条在那边结束了：本机跟着走到「已结束」，那句话也跟着换', async (t) => {
+  // 用户 2026-10-28 的现场：在另一台电脑上接管，那边把作业结束掉之后，
+  //   这台一直写着「被接管」与「运行中」。根因是 `suspend()` 把对账跟心跳一起
+  //   停了 —— 而这台机器从此再没有一条路能知道那边结束了。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  // 另一台电脑把它拿走了，本机从心跳应答里认出来。
+  await invoke('app:debug', 'foreign-keeper');
+  await ctl.heartbeatNow();
+  assert.ok(ctl.suspended, '前置：本机认出它归另一台电脑');
+  assert.match(ctl.snapshot().suspended, /运行中|仍在运行/,
+    '前提：刚放手时作业还在跑');
+
+  // 那边把作业结束掉：服务端那一行到终态（`status` 仍然按会话号答得出来，
+  //   这是本机还能知道这件事的前提 —— 那一格不认看护者）。
+  await invoke('app:debug', 'reap');
+  const row = b._sessions.find((s) => s.session_id === ctl.sessionId);
+  assert.equal(row.state, 'released', '前置：服务端那一行已经是终态');
+
+  // 对账的钟每 60 秒叫它一次；这里直接叫那一趟，验的是它之后一路到界面。
+  await ctl._statusOnce();
+
+  const snap = ctl.snapshot();
+  assert.equal(snap.state, 'ended', '那边结束了，本机也要走到结束');
+  assert.match(snap.suspended, /结束/, `那句话要换成"结束了"：${snap.suspended}`);
+  assert.equal(/仍在运行/.test(snap.suspended), false,
+    '「作业仍在运行」此刻是一句假话 —— 用户会照着它去重新提交一个');
+  assert.equal(snap.error, null, '别人正常的收尾不是一次出错');
+
+  const w = idx._test.getWindow();
+  await waitUntil(() => w._sessions.every((x) => !x.live),
+    '窗口那一层把这条会话算成「已结束」');
+
+  await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('另一台电脑正在看的作业：关窗不数它，断开也不碰它', async (t) => {
   // 用户 2026-10-18 的第三种重登录：在一台电脑上接着站点、开着插件，到另一处
   //   用另一台电脑连上来。接管是作业级的 —— 没被接管的那些仍然归老电脑，

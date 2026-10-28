@@ -101,18 +101,22 @@ function running(backend, extra = {}) {
 
 const REASON = '这条作业已经被「乙机」上的客户端接管了。';
 
-test('suspend() 停下心跳、对账与订阅，并把原因写给界面', async () => {
+test('suspend() 停下心跳与订阅、把理由写给界面，而对账留着', async () => {
   const b = new StubBackend();
   const c = running(b);
   c._startHeartbeat();
   c._startStatusPoll();
   c._watchBackend(true);
   assert.equal(b.listenerCount('notify'), 1, '前提：先订上');
+  const poll = c._statusTimer;
 
   c.suspend(REASON);
 
   assert.equal(c._hbTimer, null, '心跳必须停 —— 那边已经接手了');
-  assert.equal(c._statusTimer, null, '对账也必须停 —— 否则每一轮都是一次注定失败的重试');
+  // 对账不能停：它是"那边结束了没有"唯一的答案。停掉之后界面会一直写着
+  //   「被接管、作业运行中」，而作业早就没了（用户 2026-10-28）。
+  assert.notEqual(c._statusTimer, null, '对账要留着 —— 只回答"这条会话结束了没有"');
+  assert.equal(c._statusTimer, poll, '而它是原来那个钟，不是又起了一个');
   assert.equal(b.listenerCount('notify'), 0, '退订：不然监听器只增不减');
   assert.equal(c.snapshot().suspended, REASON);
   // 而 `snapshot()` 里那一个是给界面的，这一个 `c.suspended` 是给
@@ -297,7 +301,7 @@ test('resume()：接管成功之后，停掉的四样一起开回来', async () 
   c.resume();
 
   assert.equal(c.suspended, null);
-  // 检查的四样与 `suspend()` 停掉的四样一一对应，少开任何一样都是静默的退化。
+  // 检查的四样与 `suspend()` 动过的四样一一对应，少开任何一样都是静默的退化。
   assert.equal(c.snapshot().warning, null, '那句原因要跟着撤掉（不然界面一直说"被接管"）');
   assert.notEqual(c._hbTimer, null,
     '心跳要回来 —— 少了它，1800 秒之后作业被 scancel，而界面写着"已接管"');
@@ -321,6 +325,96 @@ test('resume() 幂等，而且不动一个没被接管的会话', () => {
   c.resume();
   assert.equal(c._hbTimer, t, '第二次 resume 不许多出一个定时器（两个心跳=两条路）');
   c._stopHeartbeat();
+  c._stopStatusPoll();
+});
+
+// ── 放手的到期：那边结束了，这边也要跟着走到「已结束」（2026-10-28）────────
+//
+// 从前 `suspend()` 把对账跟心跳一起停掉，于是守护进程那边结束之后本机什么都
+//   不知道：界面一直写着「已被另一台电脑接管（作业仍在运行）」，而作业早就没了。
+//   而对账这条路本来就是通的 —— `status` 按会话号认人，不认看护者（`op_status`）。
+
+test('那边结束了：对账把本机带到「已结束」，那句话也跟着换', async () => {
+  const b = new StubBackend();
+  const c = running(b);
+  c.suspend(REASON);
+  assert.equal(c.snapshot().suspended, REASON, '前提：刚放手时说的还是那句原因');
+
+  b.reply = ok({ session: view({ state: 'released' }) });
+  await c._statusOnce();
+
+  assert.equal(c.state, State.ENDED, '那边结束了，这边也结束了');
+  const now = c.snapshot().suspended;
+  assert.match(now, /结束/, `换上的那一句要说它结束了：${now}`);
+  assert.equal(/仍在运行/.test(now), false,
+    '「作业仍在运行」此刻是一句假话 —— 用户会照着它去重新提交一个');
+  assert.equal(b.count('goodbye'), 0, '放手就是放手：一条 goodbye 都不发');
+  assert.equal(c._statusTimer, null, '走到终态之后钟也要停');
+  assert.equal(c.tunnelStops.length, 1, '作业没了，本机那条隧道也要收掉');
+
+  // 收尾那道闸仍要拦（没什么可发的），但它后面那半句「作业仍在运行」
+  //   到这一刻已经不成立了。
+  const r = await c.stop();
+  assert.equal(r.ok, true, '已经结束了：这一趟什么也不用做');
+  assert.equal(/仍在运行/.test(r.detail), false, `那句话此刻是假的：${r.detail}`);
+  assert.equal(b.count('goodbye'), 0);
+});
+
+test('那一行被删掉了（没赶上终态那一份）：也算结束，不是一次出错', async () => {
+  // 守护进程把结束的那一行留 `RELEASED_KEEP` 六百秒，本机离线超过它就只能
+  //   看到 `3 not_found`。而本机不是看护者：别人正常的收尾不是事故，报成
+  //   ERROR 会让界面挂一整屏红字，说的还是"会话已不存在"。
+  const b = new StubBackend();
+  const c = running(b);
+  c.suspend(REASON);
+
+  b.reply = { ok: false, code: 3, error: { kind: 'not_found', detail: 'not_found' } };
+  await c._statusOnce();
+
+  assert.equal(c.state, State.ENDED, '会话没了 = 结束了');
+  assert.equal(c.snapshot().error, null, '这不是一次出错');
+  assert.match(c.snapshot().suspended, /结束/, '那句话同样要换');
+});
+
+test('被接管的会话只问"结束了没有"：不重建隧道、不替别人的心跳报警', async () => {
+  const b = new StubBackend();
+  const c = running(b);
+  // 放手之前本机是打过心跳的 —— 少了这一步，"不报警"是因为没有素材，
+  //   而不是因为这道闸真的拦住了。
+  c._heartbeatAt = Date.now() - 3600 * 1000;
+  c.suspend(REASON);
+
+  let starts = 0;
+  c.tunnel.start = async () => { starts += 1; return { port: 18081, shifted: false }; };
+  b.reply = ok({ session: view({ tunnel_target: '192.0.2.99:55009',
+                                  last_hb_at: Math.floor(Date.now() / 1000) - 3600 }) });
+
+  await c._statusOnce();
+
+  assert.equal(starts, 0, '隧道不重建 —— 那是看护者的活，而本机连页面都收了');
+  assert.equal(c.tunnelStops.length, 0, '而它也没被拆：重新接管之后要继续用它');
+  assert.equal(/心跳已过期/.test(c.snapshot().warning || ''), false,
+    '心跳那一路已经放手了：那边有没有在续命，本机不该报警');
+  assert.equal(c.state, State.RUNNING, '会话还活着，本机不该自己往前走');
+
+  // 那边开始收尾（`releasing`）时也一样：本机不是正在释放它的那一方，
+  //   把状态拨成「正在释放」等于替别人认领一个它没做的动作。
+  b.reply = ok({ session: view({ state: 'releasing' }) });
+  await c._statusOnce();
+  assert.equal(c.state, State.RUNNING, '只在守护进程说它到终态之后才结束');
+});
+
+test('对账的钟自己走到：被接管之后不用谁去戳它', async () => {
+  const b = new StubBackend();
+  const c = running(b, { statusMs: 5 });
+  c.suspend(REASON);
+  const before = b.count('status');
+
+  await new Promise((r) => setTimeout(r, 60));
+
+  assert.ok(b.count('status') > before,
+    '钟要自己走 —— 不然界面还是要等用户下一次操作才刷新');
+  c._stopStatusPoll();
 });
 
 test('对照：没被接管的会话照常发 goodbye（那道闸不是把 stop 关掉了）', async () => {

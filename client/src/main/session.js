@@ -92,6 +92,21 @@ const SUSPENDED_WATCHED_ELSEWHERE =
   + '到「作业」页点「接管」可以让本机看护它。';
 
 /**
+ * 上面那两句的到期版本：会话在别人的看护下结束了。
+ *
+ * 前两句都必须说「作业仍在运行」—— 少了它，用户会去重新提交一个。而它有到期
+ *   时刻：那边结束之后，那句话就成了假话。用户 2026-10-28 报的现场是那边早就
+ *   结束了、这边一直写着「被接管」与「运行中」，因为被接管的会话从前什么都不问。
+ *
+ * 两句仍然分开，与上面那两句一一对应：有没有别的电脑从本机手上拿走它，
+ *   是两件事。
+ */
+const SUSPENDED_TAKEN_OVER_ENDED =
+  '这条作业已被另一台电脑接管，现在结束了，本机不再看护它。';
+const SUSPENDED_WATCHED_ELSEWHERE_ENDED =
+  '这条作业已经结束，本机没有看护过它。';
+
+/**
  * 守护进程说的「登记没有进行」的原因（`enroll_problem`）→ 给人看的一句话。
  *
  * 原样印那几个串（`component_group_or_world_writable`）对用户没有用处，而删掉
@@ -369,10 +384,18 @@ class SessionController extends EventEmitter {
     /**
      * 这条作业被另一台电脑接管了（那时这里是原因那句话），没有被接管就是 `null`。
      *
-     * 它是一个终态：置上之后本机不再心跳、不再对账、不再订阅推送，
-     *   而在用户手动点「连接」之前不会清掉。见 `suspend()`。
+     * 它是一个终态：置上之后本机不再心跳、不再订阅推送，而在用户手动点「连接」
+     *   之前不会清掉。对账是例外 —— 它留着，只回答"这条会话结束了没有"。
+     *   见 `suspend()` 与 `_settleHandedOff()`。
      */
     this._suspended = null;
+    /**
+     * 上面那句的到期版本：会话在别人的看护下结束之后，换成这一句。
+     *
+     * 与 `_suspended` 成对写在 `suspend()` 里 —— 两句话的判据是同一个
+     *   （有没有别的电脑从本机手上拿走它），在这里再判一次就会漂。
+     */
+    this._suspendedEnded = null;
 
     /**
      * 推送那一路的水位。
@@ -1202,8 +1225,10 @@ class SessionController extends EventEmitter {
         //   接手），与从头到尾只是在旁边看着的（接上来的那条）。对后者说
         //   「已被接管」是一句不成立的话 —— 它从来没看过这条作业。
         if (ign === 'not_keeper') {
-          this.suspend(this._adopted && !this._watched
-            ? SUSPENDED_WATCHED_ELSEWHERE : SUSPENDED_TAKEN_OVER);
+          const peeking = this._adopted && !this._watched;
+          this.suspend(peeking ? SUSPENDED_WATCHED_ELSEWHERE : SUSPENDED_TAKEN_OVER,
+                       peeking ? SUSPENDED_WATCHED_ELSEWHERE_ENDED
+                               : SUSPENDED_TAKEN_OVER_ENDED);
         }
         else {
           this.warning = `心跳被服务端忽略了（${ign}），本机可能不再看护这条会话。`;
@@ -1275,6 +1300,9 @@ class SessionController extends EventEmitter {
    * 它是对账的钟，不是对账本身 —— 推送健康的时候它什么都不做，
    *    而在推送不来的时候（旧 CLI / 老守护进程 / 通道断了）它每一轮都照问不误，
    *    与这一版之前逐字相同。
+   *
+   * 被接管的会话也靠它：`suspend()` 把推送退订了，于是这里必然为真，而那一支
+   *    只回答"这条会话结束了没有"（见 `_statusOnce()`）。
    */
   _startStatusPoll() {
     if (this._statusTimer) return;
@@ -1327,6 +1355,29 @@ class SessionController extends EventEmitter {
           //   也会让它缺席 —— 那不能当成"口令没了"。规则只有一份，见 mergeView()。
           this.session = mergeView(this.session, s, { fromPush: false });
 
+          if (SERVER_FINISHED_STATES.includes(s.state)) {
+            this._settleHandedOff();
+            this._stopHeartbeat();
+            this._stopStatusPoll();
+            this._stopReleaseWatch();
+            // 会话结束了，本地监听必须一起收掉。留着它的后果不是「多占一个端口」：
+            //   浏览器仍然连得上本地端口，却会被 dial 接到一个已经不存在的目标上 ——
+            //   表现是「页面打不开，但也不报错」。端口只在 stop() 里释放是不够的，
+            //   会话被守护进程回收（超时、孤儿、被拒）时根本不会走到 stop()。
+            await this.tunnel.stop();
+            this._setState(State.ENDED);
+            return;
+          }
+
+          // 被接管的会话：对账只回答一个问题 —— 它结束了没有。
+          //   上面那一支（终态）就是它等的答案；其余几件事（隧道重建、心跳交叉
+          //   校验、`releasing`）都是看护者的活，本机已经不管这条会话了。
+          //   从前这条对账跟着心跳一起被 `suspend()` 停掉，于是那边结束之后
+          //   这边什么都不知道，界面永远停在「被接管、作业运行中」（用户
+          //   2026-10-28 报的现场）。这句话说得出"它结束了没有"，靠的是
+          //   `status` 按会话号认人、不认看护者（`op_status`）。
+          if (this._suspended) { this._emit(); return; }
+
           // tunnel_target 变了（作业重启换了节点/端口）→ 重建隧道。
           // 不做这件事的表现是页面卡住、没有任何报错。
           // 释放期不重建：`stop()` 已经把隧道拆了，而释放期这次轮询只回答
@@ -1360,18 +1411,6 @@ class SessionController extends EventEmitter {
             this.emit('retarget', this.snapshot());
           }
 
-          if (SERVER_FINISHED_STATES.includes(s.state)) {
-            this._stopHeartbeat();
-            this._stopStatusPoll();
-            this._stopReleaseWatch();
-            // 会话结束了，本地监听必须一起收掉。留着它的后果不是「多占一个端口」：
-            //   浏览器仍然连得上本地端口，却会被 dial 接到一个已经不存在的目标上 ——
-            //   表现是「页面打不开，但也不报错」。端口只在 stop() 里释放是不够的，
-            //   会话被守护进程回收（超时、孤儿、被拒）时根本不会走到 stop()。
-            await this.tunnel.stop();
-            this._setState(State.ENDED);
-            return;
-          }
           if (s.state === 'releasing') {
             this._stopHeartbeat();          // 已在释放，心跳没有意义了
             // 只在第一次进入时改状态：释放期那个 3 秒一次的短轮询会反复走到
@@ -1389,7 +1428,14 @@ class SessionController extends EventEmitter {
         await this.tunnel.stop();     // 同上：会话都没了，监听没有理由留着
         // 释放期里"会话没了"就是释放做完了：守护进程删掉了那一行。运行期间
         //   它才是出错（会话在用户背后消失了）。
-        if (this.state === State.RELEASING) this._setState(State.ENDED);
+        // 被接管的那条也不算出错：它在别人手上结束之后，那一行会被删掉
+        //   （`RELEASED_KEEP` 之后），本机看到的是同一条终局 —— 而本机连
+        //   "看护者"都不是，没有资格把别人正常的收尾报成一次事故。
+        if (this._suspended) {
+          this._settleHandedOff();
+          this._setState(State.ENDED);
+        }
+        else if (this.state === State.RELEASING) this._setState(State.ENDED);
         else this._setState(State.ERROR, { error: '会话已不存在。' });
         return;
       } else if (![Action.DAEMON_DOWN, Action.TRANSPORT, Action.RATE_LIMITED].includes(c.action)) {
@@ -1501,7 +1547,11 @@ class SessionController extends EventEmitter {
   }
 
   /**
-   * 这条作业被另一台电脑接管了：停下本机的一切，一个字都不发给服务端。
+   * 这条作业被另一台电脑接管了：放手，一个字都不发给服务端。
+   *
+   * 放的只有"看护"：心跳停、推送退订。对账留着 —— 它不发请求以外的东西，
+   *   而"那边什么时候结束"只有它答得出（见 `_statusOnce()` 那一支）。所以
+   *   "停下本机的一切"这句话在这里不成立，只剩"不再替它做任何决定"。
    *
    * 这个方法存在的全部理由是那一条不能发出去的 `goodbye`。
    *
@@ -1523,19 +1573,46 @@ class SessionController extends EventEmitter {
    * 它是逐会话的：同一台电脑上另一条作业被别人接管了，不影响
    *      这一条 —— 而"整台电脑被一条 uid 顶掉"那种形状做不到这件事。
    *
+   * 而"放手"有一条到期：那条会话在别人手上结束了（`_settleHandedOff()`）。
+   *   它不说出来，界面会一直写着"作业仍在运行"，而作业早就没了。
+   *
    * 「临时离开」不走这里。两者的效果看着像（都停下心跳、都不发 goodbye），
    *   但离开之后本机连记录都不留（用户已经回列表了、页面也拆了），而这里
    *   留着记录、留着隧道 —— 因为用户可能还开着那个页面在看。见 index.js 的
    *   `app:leave`。
    */
-  suspend(reason) {
+  suspend(reason, whenEnded) {
     if (this._suspended) return;                 // 幂等：只记第一条原因
     this._suspended = reason || SUSPENDED_TAKEN_OVER;
+    this._suspendedEnded = whenEnded || SUSPENDED_TAKEN_OVER_ENDED;
     this._stopHeartbeat();
-    this._stopStatusPoll();
     this._watchBackend(false);
+    // 推送退订了：把它记成"没在喂"。不留这一步的话，看门狗要等满 75 秒
+    //   （`PUSH_STALE_MS`）才会让对账动起来。
+    this._lastPushAt = 0;
+    // 对账留着，而且从这一刻起它只回答一个问题：这条会话结束了没有。
+    //   从前它跟心跳一起被停掉，于是那边结束之后这边什么都不知道 ——
+    //   界面永远停在「被接管、作业运行中」，而作业早就没了（用户 2026-10-28）。
+    //   心跳与它相反，必须停：那边已经接手，本机再打只能被回 `ignored`。
+    this._startStatusPoll();
     this.warning = this._suspended;
     this._emit();
+  }
+
+  /**
+   * 被接管的那条会话结束了：把「作业仍在运行」那一句换成它现在的那一句。
+   *
+   * 换而不是清：这句原因仍然是"本机为什么不管它"的答案，界面那一格还靠
+   *   `suspended` 决定"这一块页面不再归本机"。过期的只有「仍在运行」半句。
+   *
+   * 由 `_statusOnce()` 的两条终路调用（守护进程说它到了终态、或者说它不存在）。
+   *   两条都是"作业已经不在了"，所以换上去那句说得出口。
+   */
+  _settleHandedOff() {
+    if (!this._suspended) return;
+    const why = this._suspended;
+    this._suspended = this._suspendedEnded || SUSPENDED_TAKEN_OVER_ENDED;
+    if (this.warning === why) this.warning = this._suspended;
   }
 
   /**
@@ -1547,9 +1624,10 @@ class SessionController extends EventEmitter {
    *    「已接管」。而心跳不发这件事的代价不是"少几个字"：1800 秒之后，那条
    *    作业会被当作没人看护而 `scancel` 掉，界面上仍然写着"已接管"。
    *
-   * 四样一起开回来，与 `suspend()` 停掉的四样一一对应：心跳、对账、订阅，
-   *   以及那句原因。少开任何一样的症状都是静默的（少了对账，剩余时间永远停在
-   *   接管那一刻，而那个数看起来完全正常）。
+   * 四样一起开回来，与 `suspend()` 动过的四样一一对应：心跳、订阅、那句原因，
+   *   以及对账的判据（它一直开着，但接管之前只回答"结束了没有"）。少开任何一样
+   *   的症状都是静默的（少了对账，剩余时间永远停在接管那一刻，而那个数看起来
+   *   完全正常）。
    *
    * 这里不拆也不建隧道：`suspend()` 特意没拆（用户可能还开着那个页面在看），
    *   于是接管回来时它还在。这与"接管一个字都不动会话"是同一条纪律的延伸。
@@ -1586,9 +1664,17 @@ class SessionController extends EventEmitter {
     //   下一个"顺手加"的收尾入口不该有机会绕过它。
     //   为什么不发：见 `suspend()` —— 那个 `goodbye` 会把用户的作业 scancel 掉，
     //   而用户以为自己只是换了个地方看。
+    // 而那条会话已经结束了的时候，这道闸仍要拦（没什么可发的），但后半句得换：
+    //   它此刻说得出「作业仍在运行」才是错的。判据只看状态机 —— 终态是那一刻
+    //   唯一的证据，`_settleHandedOff()` 换上去那句也是凭它换的。
     if (this._suspended) {
-      return { ok: false, state: 'suspended',
-               detail: this._suspended + '本机没有发送释放请求，作业仍在运行。' };
+      const over = this.state === State.ENDED;
+      return {
+        ok: over,
+        state: over ? 'ended' : 'suspended',
+        detail: over ? this._suspended
+                     : this._suspended + '本机没有发送释放请求，作业仍在运行。',
+      };
     }
     this._stopped = true;
     this._stopHeartbeat();          // 必须在 goodbye 之前停。
