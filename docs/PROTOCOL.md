@@ -12,20 +12,20 @@
 
 ## 〇、协议版本
 
-当前版本：v0.36。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.37。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.36`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.37`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.36.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
+（`0.37.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
 语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
 前导零：写成 `1.007` 就是错的，它会让"同一个版本"有两个字符串。
 
-超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.36`，不是 `v0.36.0`。
+超上界时**必须**进位，`0.255` 之后是 `1.0`。所以它是 `v0.37`，不是 `v0.37.0`。
 
-顺带一句：`v0.36` 不是 `v0.2`。`minor` 是十进制字符串，`36` 比 `2` 大。
+顺带一句：`v0.37` 不是 `v0.2`。`minor` 是十进制字符串，`37` 比 `2` 大。
 
 把它读成"小数点后面的 10 分之一"是这条规则最容易踩的一脚，而踩了之后症状是版本闸
 把更新的那一端判成更旧的。
@@ -523,11 +523,18 @@ exec，心跳全部被回 `ignored`，300 秒 `suspect`、1800 秒 `scancel`，�
 `ignored` 是逐会话的（它回的是这一条 `session_id`），而它是客户端认出
 「本机不再管这条会话」的唯一信号。
 
-处理：这条会话进入「已被接管」状态 —— 停下它的心跳与对账，而且
-`stop()` 一个字都不许发给服务端。那条 `goodbye` 会让 `phase_release` 删掉 ACL
-并 scancel 作业，而用户以为自己只是换了个地方看。服务端分辨不了那个 `goodbye`
-是谁发的（它按 `session_id` 记账，不按连接），所以这一半只能在客户端堵
+处理：这条会话进入「已被接管」状态 —— 停下它的心跳，而且 `stop()` 一个字都
+不许发给服务端。那条 `goodbye` 会让 `phase_release` 删掉 ACL 并 scancel 作业，
+而用户以为自己只是换了个地方看。服务端分辨不了那个 `goodbye` 是谁发的（它按
+`session_id` 记账，不按连接），所以这一半只能在客户端堵
 （`client/src/main/session.js` 的 `suspend`）。
+
+对账不停，而且从这一刻起它只回答一个问题：这条会话结束了没有。`status` 按
+`session_id` 认人、不认看护者，所以答案拿得到。少了它，那边结束之后这台电脑
+什么都不知道，界面会一直停在「被接管、作业运行中」。
+
+终态与 `3 not_found` 都算结束（后者是那一行过了保留期被删掉），两条都走
+「已结束」，不算出错 —— 本机连看护者都不是，别人正常的收尾不是一次事故。
 
 为什么不回 `ok:false`：心跳不是一条会让客户端重试的请求，回错会让它退避，
 进而把「不是看护者」演成「网络不好」。而 `ignored` 这一格正是为了让它看出区别。
@@ -630,7 +637,7 @@ F14 已经修掉：配额数的那个集合（`OCCUPYING_STATES`）含 `reserved
 成功 data：
 
 ```json
-{"version": "0.36", "pid": 123, "started_at": 1757...,
+{"version": "0.37", "pid": 123, "started_at": 1757...,
  "config": {"path": "/etc/slurmate/slurmate.conf",
             "digest": "…", "on_disk_digest": "…", "loaded_at": 1757...,
             "last_reload": {"seq": 3, "at": 1757..., "ok": true,
@@ -1489,7 +1496,7 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
  "rules_count": 3, "active_sessions": 3, "pending_sessions": 1,
  "consistent": true,
  "port_range": [55001, 55999],
- "version": "0.36", "last_tick_at": 1790301794,
+ "version": "0.37", "last_tick_at": 1790301794,
  "tick_age_seconds": 2, "last_tick_error": null,
  "auth_mode_none": 0,
  "checked": 14, "problems": [],
@@ -1581,6 +1588,10 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 
 客户端画这一态时，必须与「确实没有」分得开，而且必须说成获取失败。把它画成
 "这台集群没有分区"，用户会去查一个不存在的问题，而真正的原因在守护进程那一侧。
+
+`me.pending_count` 与 `me.first_in` 一起出现或一起缺席：队列快照取不到时缺席
+（获取失败）；快照取到了而这个人一条排队作业都没有时是 `0` 与 `{}`（确实没有）。
+把后者写成缺席，界面就会在每一台空闲的集群上说「获取失败：排队名次」。
 
 `partitions` / `gres` / `nodes` / `queue` 获取失败时本 op 不报错（对比
 `partitions` 那个 op —— 它的失败要挡住整张表单）。这一屏是只读的现状展示，

@@ -524,27 +524,37 @@ function renderTabs() {
   // 它与会话标签做的是相反的事（那几颗抬页面、这一颗抬面板），所以长相加一个
   //   虚线边（见 app.css 的 `.tab.panel`）：两颗相反的动词长成一模一样，正是
   //   最容易点错的那一格。
-  // 判据是 `covered`：没有页面盖着的时候面板本来就看得见，摆一颗按下去不变样的
-  //   按钮是在说一件不成立的事。
+  // 只要这一条栏露着，它就一直在（用户 2026-10-27）。从前它的判据是
+  //   「有没有页面盖着」，于是只跑着一个没有界面的插件时，栏里只剩一颗点不动
+  //   的插件标签，而回面板的那颗按钮整个不见了。它不是"这一刻有没有用"的按钮，
+  //   是这个窗口的固定回程 —— 栏在，它就在。
   // 点它不换屏 —— 回到用户离开时的那一屏（`SCREEN` 是用户的选择，见那一格）。
-  if (covered) {
-    const b = document.createElement('button');
-    b.className = 'tab panel';
-    b.textContent = '面板';
-    b.title = '把面板抬到会话页面上面。插件页与作业页都在那里，回到你离开时的那一屏。';
-    b.onclick = async () => {
-      const r = await window.slurmate.showPanel();
-      if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
-    };
-    box.appendChild(b);
-  }
+  const panelTab = document.createElement('button');
+  panelTab.className = 'tab panel';
+  panelTab.textContent = '面板';
+  panelTab.title = covered
+    ? '把面板抬到会话页面上面。插件页与作业页都在那里，回到你离开时的那一屏。'
+    : '回到插件页与作业页（你离开时的那一屏）。';
+  panelTab.onclick = async () => {
+    const r = await window.slurmate.showPanel();
+    if (!r || !r.ok) { notice('error', (r && r.error) || '面板抬不起来。'); }
+  };
+  box.appendChild(panelTab);
   for (const s of list) {
     const b = document.createElement('button');
     // 被接管的会话仍然列在这里（它还在集群上跑着），但页面已经收掉了 ——
     //   `dead` 说的正是"这一条现在没有可切过去的东西"，与已结束的同一档。
     const suspended = Boolean(s.snap && s.snap.suspended);
+    const plug = pluginOfSession(s.snap);
+    // 跑着、而插件明说了自己没有界面（中转站那类）：标签要在（它是"这一条
+    //   在跑"的唯一记号），可它没有可切过去的页面 —— 点下去什么都不会发生。
+    //   灰掉、不许点（用户 2026-10-27）。判据要求 `plug` 在：插件认不出来时
+    //   不知道它有没有页面，那时不许把一颗可能真的能切过去的标签按死。
+    const noPage = Boolean(s.live) && !suspended && Boolean(plug) && !plug.surface;
     b.className = 'tab' + (s.slot === SESS.front ? ' on' : '')
-      + (s.live && !suspended ? '' : ' dead');
+      + (s.live && !suspended ? '' : ' dead')
+      + (noPage ? ' nopage' : '');
+    b.disabled = noPage;
     const name = s.service || '（未知服务）';
     const port = s.snap && s.snap.localPort;
     b.textContent = seen.get(name) > 1 && port ? `${name} · ${port}` : name;
@@ -553,7 +563,11 @@ function renderTabs() {
     // 输入法失效时页面收不到按键，而这不是会话本身出了问题；把恢复动作放在
     //   标签的 title 上，用户不必去翻排障文档。
     const ime = '输入法无效时先点击编辑区；仍无效时重新加载。';
-    b.title = base ? `${base} ${ime}` : ime;
+    // 没有界面的那一条把"为什么点不动"写在 title 上 —— 一颗灰按钮不说原因，
+    //   读起来像"它坏了"。
+    b.title = noPage
+      ? `${base ? base + ' ' : ''}这个插件没有界面：会话在跑，但没有可切过去的页面。`
+      : (base ? `${base} ${ime}` : ime);
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }

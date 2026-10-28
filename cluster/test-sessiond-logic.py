@@ -10777,8 +10777,18 @@ exit 0
           and _pos.get("pending_count") == 3,
           str({k: _pos.get(k) for k in ("first_in", "pending_count")}))
     _pos2 = _cl5.for_user("carol")
-    check("没有排队作业的人不报排队名次（而不是报 0）",
-          "first_in" not in _pos2 and "pending_count" not in _pos2, str(_pos2))
+    check("快照取到了、而我没有排队作业：报 0（确实没有），不是缺席（没问到）",
+          _pos2.get("pending_count") == 0 and _pos2.get("first_in") == {},
+          str({k: _pos2.get(k) for k in ("first_in", "pending_count")}))
+    # 另一半判据：快照本身取不到时必须缺席 —— 那样客户端才画「获取失败」。
+    #   两条成对，缺一条的话"永远报 0"也能全绿。
+    _cs6 = _CountSlurm()
+    _cs6.answer["queue_table"] = None
+    _cl6 = mod.Cluster(cfg, _cs6)
+    _cl6.refresh(_T0, users=["alice"])
+    _pos3 = _cl6.for_user("alice")
+    check("队列快照获取失败时，排队名次整格缺席（没问到 ≠ 没有）",
+          "first_in" not in _pos3 and "pending_count" not in _pos3, str(_pos3))
 
     # ── 28.6 fairshare：`-u` 而不是 `-U`（一个看起来正常的错答案）──────
     _seen = []

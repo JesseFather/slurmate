@@ -259,6 +259,44 @@ const SITE_POLL_EXEC_MS = 120000;
 function sitePollMs() {
   return backend && backend.resident === true ? SITE_POLL_MS : SITE_POLL_EXEC_MS;
 }
+
+/**
+ * 站点上的插件清单变了没有；变了就补一次对账。
+ *
+ * 什么时候问（用户 2026-10-27 定的）：连接时取一次、点「重新同步」取一次、
+ *   点「开始会话」时顺手再问一次。不做定时轮询 —— 那一趟问的只是"变了没有"，
+ *   而大部分时候的答案是"没变"；退化成 exec 时一次 RPC 就是一个 fork，
+ *   为了一个不常发生的变化在别人的登录节点上多跑一趟不划算。
+ *
+ * 为什么要有这一趟：插件清单从前只在连接时取一次。于是一个已经连着的客户端
+ *   在站点升级插件之后完全不知道 —— 要断开重连才看得见新版，旧版什么时候消失
+ *   也跟着拖到那一刻。
+ *
+ * 问不到就当没变：不触发对账，也不把界面手里那份擦掉（"没问到"不等于"没有"，
+ *   与三态那一条同源）。
+ *
+ * 这一趟只认"当前这条连接的那个站点"。别的连接条目的 `wants` 一个字都不动 ——
+ *   对账写的是 `sites[本站点键].wants`，而"要不要删某一版"看的是所有站点加起来
+ *   的引用（见 site-plugins.js 第 5 步）：另一个站点那边没有升级，它要的那一版
+ *   就还在。
+ */
+async function checkSitePlugins() {
+  if (!backend || !backend.connected || !sitePlugins) return false;
+  const p = await loadPlugins();
+  if (!p.ok) return false;
+  const before = pluginKeySet(sitePlugins.plugins);
+  const after = pluginKeySet(p.plugins);
+  if (before.size === after.size && [...after].every((k) => before.has(k))) return false;
+  reconcileSitePlugins();
+  return true;
+}
+
+/** 一份 `op_plugins` 清单里"站点此刻要分发的那些版本"的集合。 */
+function pluginKeySet(list) {
+  return new Set((list || [])
+    .filter((x) => x && x.enabled !== false && x.id && x.version)
+    .map((x) => `${x.id}@${x.version}`));
+}
 /**
  * 本站点的插件清单，来自 `op_plugins`。`null` = 还没问到（或守护进程太旧，
  * 不支持这个 op）—— 那时按"站点没说"处理，而不是当成"一个都没有"。
@@ -994,6 +1032,10 @@ async function refreshPartitions() {
 
 /** 上一次对账的 promise。只给测试用（真机上没人等它）。 */
 let siteSyncPromise = null;
+/** 有一轮对账在飞。同一时刻只跑一轮 —— 理由见 `reconcileSitePlugins`。 */
+let siteSyncRunning = false;
+/** 在飞那一轮结束之后还要再跑一轮（会话刚结束这一类"错过了一拍"的请求）。 */
+let siteSyncAgain = false;
 
 /**
  * 和站点对一次账：把该分发的插件取下来、该回收的回收。
@@ -1008,8 +1050,18 @@ let siteSyncPromise = null;
  *
  * 下载失败绝不回退到本机池（见 site-plugins.js 的文件头）。没有站点的时候
  *   一个插件都没有，那是正确的、必须如实说出来的结果。
+ *
+ * 同一时刻只跑一轮。它开头会 `++connectGeneration`，而那一个世代号正是在飞
+ *   那一轮"这次还算不算数"的守卫 —— 第二轮一进来，第一轮就会把自己当成
+ *   "连接换了一条"整份丢弃。所以后来的请求只记一个待办，由在飞那一轮结束时
+ *   再排一次（见 `.finally`）。
  */
 function reconcileSitePlugins() {
+  if (siteSyncRunning) {
+    siteSyncAgain = true;
+    return siteSyncPromise;
+  }
+  siteSyncRunning = true;
   const gen = ++connectGeneration;
   siteSyncPromise = (async () => {
     const conn = config.activeConnection(cfg);
@@ -1120,8 +1172,50 @@ function reconcileSitePlugins() {
     siteSync = { supported: false, reason: 'internal', syncedAt: Date.now(),
                  error: `站点插件对账时出错：${e.message}` };
     return siteSync;
+  }).finally(() => {
+    siteSyncRunning = false;
+    // 在飞期间有人要再对一次（多半是又一条会话结束了）：那一轮已经看不到
+    //   这一条的状态，所以补一轮。
+    if (siteSyncAgain) {
+      siteSyncAgain = false;
+      scheduleSiteReclaim();
+    }
   });
   return siteSyncPromise;
+}
+
+/** 池里这个 id 有几版。读不到目录 = 0（"没有"与"读不动"在这一格等价：都不会回收）。 */
+function pooledVersionCount(id) {
+  const root = sitePoolDir();
+  if (!root || !id) return 0;
+  try {
+    return sitePluginSync.listPooled(root).filter((x) => x.id === id).length;
+  } catch {
+    return 0;
+  }
+}
+
+let siteReclaimTimer = null;
+
+/**
+ * 会话结束之后补一次对账 —— 让"没人再引用它"的那一版当场被回收。
+ *
+ * 回收只认引用（站点快照表里的 `wants` 与 `op:list` 报的活会话），而
+ *   "一条会话走完了"这件事从前不触发对账：于是会话手里那一版在新版装上来之后
+ *   一直躺在池里，界面上两颗同名的块并排，要等下一次连上站点才收掉
+ *   （用户 2026-10-27：升级插件之后旧版本必须断开重连才消失）。
+ *
+ * 隔一小会儿再跑，不立刻跑：一次「结束会话」可能连着结束几条（关窗、断开），
+ *   而它们该合成一轮对账。代价只是旧版本晚一秒消失。
+ */
+function scheduleSiteReclaim() {
+  if (siteReclaimTimer) return;
+  siteReclaimTimer = setTimeout(() => {
+    siteReclaimTimer = null;
+    if (quitting || !backend || !backend.connected) return;
+    reconcileSitePlugins();
+  }, 800);
+  if (siteReclaimTimer.unref) siteReclaimTimer.unref();
 }
 
 /**
@@ -2964,6 +3058,13 @@ async function startSession(resources, serviceKind, portChoice) {
 
   // `preferredPort` 在上面（端口那道闸那一节）就算出来了 —— 探测要用它。
   //
+  // 点「开始会话」是用户唯一一次说"我要用这个站点的插件"：顺手问一次站点
+  //   清单，变了就补一次对账（见 `checkSitePlugins`）。不 await —— 会话该起就
+  //   起，用的是池里此刻那一版；对账在后台把新版取回来、把没人再要的旧版收掉。
+  // 本机插件不问：它一个 RPC 都不该发（见 boot 用例〈本机插件：站点报
+  //   can_submit=false，点「在本机打开」不提交作业〉）。
+  if (!isLocal) checkSitePlugins();
+
   // 本机插件走 `startLocal()`：不提交、不建隧道、不起心跳。两条路返回同一种
   //   快照，所以下面的失败清理与界面切换都只有一份。
   const snap = isLocal
@@ -3151,6 +3252,20 @@ async function onSessionChange(slot) {
     const rec0 = sessions.get(slot);
     if (rec0) applyPendingRemember(rec0);
     await _renderSession(slot);
+    // 一条会话走完了（结束、或者出错停在那儿）：它冻在站点里那个 `id@版本`
+    //   从此不再被任何会话引用。那一版该不该回收只有对账下得了（回收只认引用），
+    //   而"会话结束"从前不触发对账 —— 于是新版装上来、旧版一直躺在池里，界面上
+    //   两颗同名的块并排，要等下一次连上站点才收掉（用户 2026-10-27）。
+    // 只在这一条第一次走到终态时排一次：`onSessionChange` 在终态上还会被叫很多次。
+    const done = sessions.get(slot);
+    const doneState = done && done.controller ? done.controller.snapshot().state : null;
+    if (done && !done.reclaimQueued
+        && (doneState === State.ENDED || doneState === State.ERROR)) {
+      done.reclaimQueued = true;
+      // 池里只有这一版时什么都不会被回收，那一趟白跑（它要把整池哈希一遍）。
+      //   这条判据也让"平时的结束会话"与"刚升级完插件"这两件事分开。
+      if (done.plugin && pooledVersionCount(done.plugin.id) > 1) scheduleSiteReclaim();
+    }
     // 一次推全部 —— 面板那一屏要显示的是"这个窗口里有几个会话、各自什么样"，
     // 而不是"最后动过的那一个"。
     const views = sessionViews();
@@ -3377,7 +3492,13 @@ async function _renderSession(slot) {
           title: pageUsable ? '页面暂时打不开' : '连接暂时中断',
           text: snap.warning || '页面现在打不开，正在重试。',
         });
-        win.setBusy(true);
+        // 这一支不点亮任务栏（用户 2026-10-27）。它是一段"坏了"的状态，
+        //   而不是"正在做什么"：断网、页面停在一张空页上，这两件事可以持续
+        //   到用户下次回来。点亮它的话，用户离开窗口之后看到的就是任务栏那颗
+        //   图标一直在转 —— 提示"有活动"，而真实的动作一个都没有。
+        // 断着这件事由提示页与左栏说（用户回来时它们就摆在眼前）；
+        //   任务栏那颗灯只留给真的在飞的那一步：`waiting`（页面正在重载）。
+        win.setBusy(false);
       } else {
         win.hideOverlay();
         win.setBusy(false);
@@ -3450,7 +3571,13 @@ const registry = new plugins.Registry([
  */
 function sitePoolDir() {
   try {
-    return path.join(app.getPath('home'), '.slurmate', 'site-plugins');
+    const home = app.getPath('home');
+    // 家目录必须是绝对的。相对的那一个会让池子跟着"当前工作目录"跑 ——
+    //   一个对账（后台跑的）落在一个谁也想不到的地方，而且换一次启动目录就
+    //   换一处池子。判据与插件 `ctx.home()` 那条同源（那里是拒绝，这里是
+    //   "这个根这次不加载"）。
+    if (!home || !path.isAbsolute(home)) return null;
+    return path.join(home, '.slurmate', 'site-plugins');
   } catch {
     // 拿不到就返回 null，而 null 在那条路上意味着"这个根这次不加载"。
     //   把一个次要功能的失败变成整个客户端起不来不值当。
@@ -5866,6 +5993,11 @@ function registerIpc() {
     } catch (e) {
       win.pushNotice('warn', `插件装上了，但旧版本这次没收掉：${e.message}`);
     }
+    // 对账在里面会重扫一次注册表，但那一步只在对账真的换了东西时发生（见
+    //   site-plugins.js 第 8 步）。这里再扫一遍，是因为界面手里那份视图来自
+    //   注册表 —— "装完还看见两个版本"最没必要的一种来路，就是池里已经干净了、
+    //   而注册表还攥着已经删掉的那一个对象。
+    await registry.reload();
     return { ok: true, plugins: pluginsView() };
   });
 
@@ -6461,6 +6593,28 @@ module.exports = {
     getPluginsView: () => pluginsView(),
     /** 上一次对账的结果（三态的原样）。 */
     getSiteSync: () => siteSync,
+    /**
+     * 对账此刻闲着吗：没有在飞的一轮、没有待补的一轮、也没有排着的回收。
+     *
+     * 用例要造"池里多一版没人要的旧版本"的现场，而任何一轮对账都会当场把
+     *   它收掉 —— 所以造现场之前必须确认对账真的停了，否则那条判据测的就成了
+     *   "对账顺手回收了"，而不是"会话结束触发了对账"。
+     */
+    siteSyncIdle: () => !siteSyncRunning && !siteSyncAgain && !siteReclaimTimer,
+    /**
+     * 手动跑一遍"站点上的插件清单变了没有"（`checkSitePlugins`）。
+     *
+     * 它平时由定时器按分钟级跑，用例不能真等那一分钟。返回 `true` 表示认出了
+     *   一次变化（并且已经排了一轮对账）。
+     */
+    checkSitePlugins: () => checkSitePlugins(),
+    /**
+     * 手动起一轮对账（`reconcileSitePlugins`）。
+     *
+     * 用例要造"两轮撞在一起"的现场：先连着调它两次，看第二条请求是另起一轮
+     *   （那会把在飞那一轮作废）还是只记成待办。
+     */
+    reconcileSitePlugins: () => reconcileSitePlugins(),
     /** 待同意的那些。 */
     getPendingConsent: () => pendingConsent,
     /** 站点池在哪（测试要直接看盘上的东西）。 */

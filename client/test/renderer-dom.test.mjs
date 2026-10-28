@@ -858,7 +858,9 @@ test('S34：会话标签与「剩余时间」的说明真的长在界面上', ()
   h.run('SESS = { sessions: [{ slot: "a", service: "编辑器", live: true,'
     + ' snap: { state: "running" } }], front: "a" };');
   h.fn('renderTabs')();
-  const tab = h.byId.get('session-tabs').children[0];
+  // 「面板」排第一（固定的回程），会话标签跟在它后面。
+  const tab = h.byId.get('session-tabs').children[1];
+  assert.equal(tab.textContent, '编辑器');
   assert.match(tab.title || '', /输入法无效时先点击编辑区/);
 
   // ② 「剩余时间」为「未知」时的说明
@@ -1489,12 +1491,14 @@ test('顶栏标签：同一个插件开两份时，两个标签必须分得开',
     + '{ slot: "b", service: "编辑器", live: true, snap: { localPort: 18081 } }'
     + '], front: "a" };');
   h.fn('renderTabs')();
+  // 「面板」排第一（它是一颗固定的回程），会话标签跟在它后面。
   const tabs = h.byId.get('session-tabs').children;
-  assert.equal(tabs.length, 2, '两条会话两个标签');
-  assert.notEqual(tabs[0].textContent, tabs[1].textContent,
+  assert.equal(tabs.length, 3, '两条会话两个标签，加一颗「面板」');
+  assert.equal(tabs[0].textContent, '面板');
+  assert.notEqual(tabs[1].textContent, tabs[2].textContent,
     '同名时必须补区分符 —— 两个完全相同的标签等于没有标签');
-  assert.match(tabs[0].textContent, /18080/, '区分符是本地端口');
-  assert.match(tabs[1].textContent, /18081/);
+  assert.match(tabs[1].textContent, /18080/, '区分符是本地端口');
+  assert.match(tabs[2].textContent, /18081/);
   // 而不同名时一个字都不加：给每一条都挂一个端口，等于把"这两条需要分"
   // 说给所有人听（设计律：非必要不提示）。
   h.run(`SESS = { sessions: [
@@ -1502,18 +1506,20 @@ test('顶栏标签：同一个插件开两份时，两个标签必须分得开',
     { slot: 'b', service: '中转站', live: true, snap: {} } ], front: 'a' };`);
   h.fn('renderTabs')();
   const t2 = h.byId.get('session-tabs').children;
-  assert.equal(t2[0].textContent, '编辑器', '不重名就不加字');
-  assert.equal(t2[1].textContent, '中转站');
+  assert.equal(t2[1].textContent, '编辑器', '不重名就不加字');
+  assert.equal(t2[2].textContent, '中转站');
   // 一条会话、而本机还不知道它那个插件（`lastPlugins` 为空 —— 对不上插件
-  //   的时候就是这样）：不知道它有没有页面，所以不会有「面板」那一颗；
-  //   但它跑着，标签要露 —— 用户 2026-10-18：在运行的作业要一直挂在上栏。
+  //   的时候就是这样）：它跑着，标签要露 —— 用户 2026-10-18：在运行的作业要
+  //   一直挂在上栏。「面板」那一颗与它认不认得出插件无关（栏在，它就在）。
   h.run(`SESS = { sessions: [
     { slot: 'a', service: '编辑器', live: true, snap: { localPort: 18080 } } ], front: 'a' };`);
   h.fn('renderTabs')();
+  const t3 = h.byId.get('session-tabs').children;
   assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
     '跑着的会话就要在栏上，哪怕本机认不出它的插件');
-  assert.equal([...h.byId.get('session-tabs').children]
-    .some((b) => b.textContent === '面板'), false, '认不出有没有页面时不给「面板」');
+  assert.equal(t3[0].textContent, '面板', '「面板」与"认不认得出插件"无关');
+  assert.equal(t3[1].disabled, false,
+    '插件认不出来 = 不知道它有没有页面，那时不许把标签按死');
 });
 
 test('一条会话也露标签：那颗「面板」是回到插件页与作业页的唯一入口', async () => {
@@ -1564,14 +1570,26 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
   const last = () => h.byId.get('notices').children[0].children[1].textContent;
   assert.match(last(), /假装抬不起来/);
 
-  // ── ⑤ 没有页面的会话不盖任何东西：它没有「面板」那一颗，但标签仍在 ──
+  // ── ⑤ 没有界面的插件（中转站那类）：标签在、灰掉、点不动；「面板」照样在 ──
+  //
+  // 用户 2026-10-27：只跑着一个没有界面的插件时，上栏只剩一颗点不动的插件
+  //   标签，而回面板的那颗按钮整个不见了 —— 那一屏没有任何出路。
   h.run(`SESS = { sessions: [
     { slot: 'b', service: '中转站', live: true,
-      snap: { serviceKind: 'relay', localPort: 18081 } } ], front: 'b' };`);
+      snap: { serviceKind: 'relay', localPort: 18081, state: 'running' } } ], front: 'b' };`);
   h.fn('renderTabs')();
   assert.equal(h.byId.get('session-tabs').classList.contains('hidden'), false,
     '跑着的会话要一直挂在上栏 —— 没有页面也是');
-  assert.equal(panelTab().length, 0, '没有页面可抬时不给「面板」');
+  assert.equal(panelTab().length, 1, '「面板」不能消失 —— 它是这个窗口的固定回程');
+  assert.equal(tabs()[1].textContent, '中转站', '那个插件的标签也要在：它是"这一条在跑"的记号');
+  assert.equal(tabs()[1].disabled, true, '它没有可切过去的页面，所以不许点');
+  assert.match(tabs()[1].className, /\bnopage\b/, '灰掉：与"已结束"（dead）是两件事');
+  assert.match(tabs()[1].title, /没有界面/, '灰按钮要说原因，不然读起来像"它坏了"');
+  // 而点「面板」照旧有用：面板就是此刻该露的那一屏。
+  h.run("window.slurmate.showPanel = () => { window.__shown += 1;"
+    + ' return Promise.resolve({ ok: true }); };');
+  await panelTab()[0].onclick();
+  assert.equal(h.run('window.__shown'), 2, '「面板」抬得起来 —— 那一屏不是死路');
 });
 
 test('右栏整条只在有作业在跑的时候亮（那时它才有内容可说）', () => {

@@ -383,7 +383,15 @@ const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], 
    * （见 windows.js 的 `_startCursorWatch`），所以"鼠标走开了"这件事只能这样造：
    * 没有别的事件可以触发它，那正是它不用 `mouseleave` 的理由。
    */
-  cursor: { x: 0, y: 0 } };
+  cursor: { x: 0, y: 0 },
+  /**
+   * `setProgressBar()` 收到的每一个值，按先后顺序。
+   *
+   * 任务栏那颗忙碌指示是 Windows 上唯一一处"这个程序正在做事"的记号，而它
+   *   只有这一个出口（见 windows.js 的 `setBusy`）。用例要断言的是"没有活动时
+   *   它不许亮" —— 2 = 不定进度（在转），-1 = 灭。
+   */
+  progress: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
 
@@ -449,7 +457,7 @@ class FakeBrowserWindow {
   getContentBounds() { return { x: 0, y: 0, width: this._size[0], height: this._size[1] }; }
   setMenuBarVisibility() {}
   setTitle(t) { calls.titles.push(t); }
-  setProgressBar() {}
+  setProgressBar(v) { calls.progress.push(v); }
   show() {}
   focus() {}
   isMinimized() { return false; }
@@ -3167,6 +3175,132 @@ test('站点把插件升了一个版本：同意新版之后旧版当场收掉�
     });
   });
 
+test('站点上换了插件、而这台机器上一条会话都没有：点「开始会话」那一趟照样补一次对账',
+  async (t) => {
+    // 用户 2026-10-27：会话结束那条路只覆盖"有会话在跑"。一条会话都没有的
+    //   时候，客户端从前根本不知道站点上换了东西 —— 插件清单只在连接时取一次，
+    //   于是新版要断开重连才出现，旧版也要到那一刻才收掉。
+    // 这一条直接调那一趟判据（`checkSitePlugins`）；"开始会话时会调它"那一句
+    //   由下面那条源码判据钉住 —— 真起一条会话要另有一棵跑得起来的作业侧，
+    //   而那与这一格无关。
+    const idx = require('../src/main/index.js');
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'slurmate-sitesrc-'));
+    t.after(async () => {
+      Module._load = origLoad;
+      idx._test.setSampleDir(null);
+      cleanupSiteState(idx);
+      fs.rmSync(idx._test.getSiteInstalledDir(), { recursive: true, force: true });
+      fs.rmSync(src, { recursive: true, force: true });
+    });
+
+    await withSitePlugins([], async () => {
+      await emptyFakeSite(idx, src);
+      const id = '01M2JKM1M1M1M1M1M1M1M1M1M9';
+
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.0' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal((await invoke('app:syncPlugins')).ok, true);
+      assert.equal((await invoke('app:consentPlugin', id, '1.0.0')).ok, true);
+      await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+      const pool = idx._test.getSitePoolDir();
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '前置：池里有 1.0.0');
+
+      // ── 站点上换成 1.0.1：这里没有会话、也没有人点「重新同步」 ──
+      fs.rmSync(path.join(src, 'demo-box'), { recursive: true, force: true });
+      writePluginTree(src, { id, name: 'demo-box', title: '示例盒子', version: '1.0.1' });
+      idx._test.getBackend().forgetSiteIndex();
+      assert.equal(idx._test.siteSyncIdle(), true, '前置：没有对账在跑');
+
+      // 点「开始会话」时会跑的那一趟（用例直接调它）。
+      const src2 = fs.readFileSync(
+        path.join(REPO, 'client', 'src', 'main', 'index.js'), 'utf8');
+      const atStart = src2.indexOf('async function startSession(');
+      assert.ok(atStart > 0, '前置：找得到 `startSession`');
+      assert.match(src2.slice(atStart, src2.indexOf('\n}\n', atStart)),
+        /checkSitePlugins\(\)/,
+        '点「开始会话」那一趟要问一次站点清单 —— 少了它，站点换了插件只有重连才看得见');
+
+      const before = idx._test.getSiteSync().syncedAt;
+      assert.equal(await idx._test.checkSitePlugins(), true, '清单变了，要认出来');
+      await waitUntil(() => idx._test.getSiteSync().syncedAt !== before,
+        '补了一次对账', 20000);
+      const pend = idx._test.getPendingConsent().find((p) => p.id === id);
+      assert.ok(pend, `新版要走到同意闸：${JSON.stringify(idx._test.getPendingConsent())}`);
+      assert.equal(pend.version, '1.0.1');
+      assert.equal(fs.existsSync(poolTreeOf(pool, id, '1.0.0')), true,
+        '还没同意新版，旧版当然还在');
+
+      // ── 清单没变的时候什么都不做：这一趟大部分时候的答案都是"没变" ──
+      await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+      const same = idx._test.getSiteSync().syncedAt;
+      assert.equal(await idx._test.checkSitePlugins(), false, '清单没变');
+      assert.equal(idx._test.getSiteSync().syncedAt, same, '没变就不该再对一次账');
+    });
+  });
+
+test('两轮对账撞在一起：后来的只记成待办，不是把在飞那一轮作废', async (t) => {
+  // 用户 2026-10-27 报的"两个版本同在"有一个来路就在这里：同意插件那一步会补
+  //   一次对账，而那一刻常常已经有一轮在飞（连接时那一轮、或者上一次同意那一轮）。
+  //   再起一轮会 `++connectGeneration` —— 在飞那一轮随后把自己当成"连接换了一条"
+  //   整份丢弃，而新一轮又抢不到对账锁：两轮都白跑，旧版本一个都收不掉。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 1);
+  await connectDemo(idx);
+  await invoke('app:syncPlugins');
+  await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+
+  const p1 = idx._test.reconcileSitePlugins();
+  const p2 = idx._test.reconcileSitePlugins();
+  assert.equal(p2, p1, '第二条请求只是记成待办：它不该另起一轮');
+  await p1;
+  await waitUntil(() => idx._test.siteSyncIdle(), '补的那一轮跑完');
+  const s = idx._test.getSiteSync();
+  assert.equal(s.error, null, `两轮都该正常收场，实际：${s.error}`);
+  assert.equal(s.supported, true, '前置：这个假站点支持分发');
+});
+
+test('会话一结束就补一次对账：没人再引用的旧版本当场消失', async (t) => {
+  // 用户 2026-10-27：插件升级之后，旧版本要断开重连才消失。上一条用例守的是
+  //   "同意那一刻"（旧版本已经没有任何站点要它）；这一条守的是另一半 ——
+  //   旧版本活过了那一刻（它还被一条正在跑的会话用着，换了等于把那条会话脚下的
+  //   代码换掉），于是它只在会话结束那一刻才真的没人要。而"会话走完了"
+  //   从前不触发对账：旧版本一直躺到下一次连上站点。
+  //   现场造的是那一轮对账该看到的形状：同一个 id 在池里有两版，旧的那一版
+  //   没有任何站点要它、也没有任何会话用着它。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  await openUpTo(idx, 2);
+  await connectDemo(idx);
+  await invoke('app:syncPlugins');
+  await waitUntil(() => idx._test.siteSyncIdle(), '对账停下来');
+
+  const run = await startRunning(idx, 'web-demo');
+  const plugin = idx._test.getRegistry().list().find((p) => p.name === 'web-demo');
+  assert.ok(plugin, '夹具前提：注册表里应当有 web-demo');
+
+  // 池里同一个 id 多一版，而它自己的引用副本是空的（没有任何站点要它）。
+  //   真机上这一版是升级之前的那一份，回收只认引用 —— 所以它是"该收"的那一版。
+  const pool = idx._test.getSitePoolDir();
+  const cur = `${plugin.id}_${plugin.version}`;
+  const old = `${plugin.id}_0.0.1`;
+  fs.cpSync(path.join(pool, cur), path.join(pool, old), { recursive: true });
+  fs.copyFileSync(path.join(pool, `${cur}.json`), path.join(pool, `${old}.json`));
+  fs.writeFileSync(path.join(pool, `.${old}.refs`),
+    JSON.stringify({ version: 1, sites: [] }));
+  assert.equal(fs.existsSync(path.join(pool, old)), true, '前置：旧版本在池里');
+  assert.equal(idx._test.siteSyncIdle(), true,
+    '前置：这一刻没有对账在跑（否则它才是那个把旧版收掉的人；"活会话引用着的'
+    + '那一版不许回收"由 `client/test/site-plugins.test.mjs` 那两条钉着）');
+
+  await invoke('app:stop', { slot: run.slot });
+  await waitUntil(() => !fs.existsSync(path.join(pool, old)),
+    '会话结束之后，没人再引用的旧版本当场回收', 20000);
+  assert.equal(fs.existsSync(path.join(pool, `${old}.json`)), false,
+    '记录表与树一起走 —— 留一张指向空目录的记录表就是另一种残留');
+});
+
 test('从假站点上撤掉一个插件：站点当场不报它了，而本机这一份留着',
   async (t) => {
     // 这一条判的是站点那一侧的撤 —— 管理员在真站点上敲的那条
@@ -4548,6 +4682,52 @@ test('网络回来时，坏掉的页面重载一次；提示页留到画面真�
   const alive = wc.reloads || 0;
   await invoke('app:setFront', { slot });
   assert.equal(wc.reloads, alive, '页面没坏就不许重载它');
+
+  await invoke('app:stop', { slot });
+});
+
+test('任务栏的忙碌指示只在页面真的在重载时亮，画面一回来就灭', async (t) => {
+  // 用户 2026-10-27（Windows）：离开窗口之后任务栏那颗图标一直在转，提示
+  //   "有活动"，而真实的动作一个都没有。它从前在"页面坏了、隧道断着"时也亮 ——
+  //   而那一段可以持续到用户下次回来。2 = 不定进度（在转），-1 = 灭。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 1);
+
+  const started = await appStart(null, 'web-demo');
+  assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
+  const slot = started.slot;
+  await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那块页面建出来');
+  const wc = viewFor(w, slot).webContents;
+  const last = () => calls.progress[calls.progress.length - 1];
+
+  // ── ① 坏掉的页面正在重载：亮（那是真的在飞的一步）──
+  calls.progress.length = 0;
+  fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+  const before = wc.reloads || 0;
+  await invoke('app:setFront', { slot });
+  assert.equal(wc.reloads, before + 1, '前置：这一刻确实重载了一次');
+  assert.equal(last(), 2, '重载在飞时，任务栏那颗灯要亮');
+
+  // ── ② 画面回来了：亮灭在同一刻，不等下一次状态变化 ──
+  fire(wc, 'did-start-loading');
+  fire(wc, 'did-stop-loading');
+  assert.equal(last(), -1, '画面回来就灭 —— 否则它会一直转到下一次状态变化');
+
+  // ── ③ 两次重载都用完、页面停在提示页上：没有动作在飞，灯不许亮 ──
+  for (let i = 0; i < 2; i += 1) {
+    fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+      'http://127.0.0.1:1/', true);
+    await invoke('app:setFront', { slot });
+  }
+  fire(wc, 'did-fail-load', -106, 'ERR_INTERNET_DISCONNECTED',
+    'http://127.0.0.1:1/', true);
+  await invoke('app:setFront', { slot });
+  assert.equal(overlayViewOf()._visible, true, '前置：这一轮页面上挂的是提示页');
+  assert.equal(last(), -1, '坏着不等于有活动：那一刻已经没有重载在飞');
 
   await invoke('app:stop', { slot });
 });
@@ -7798,6 +7978,52 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
     '而且接管成功之后立刻补的那一拍要真的落地 —— 它被 `_beat()` 顶上那道'
     + '若闸挡掉，"在 1800 秒大限前 40 秒才点接管"那个窄窗口就原样留着');
   assert.equal(onlyFake(b).keeper, b._client.id, '服务端那一格也换回来了');
+
+  await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('被接管的那条在那边结束了：本机跟着走到「已结束」，那句话也跟着换', async (t) => {
+  // 用户 2026-10-28 的现场：在另一台电脑上接管，那边把作业结束掉之后，
+  //   这台一直写着「被接管」与「运行中」。根因是 `suspend()` 把对账跟心跳一起
+  //   停了 —— 而这台机器从此再没有一条路能知道那边结束了。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+
+  // 另一台电脑把它拿走了，本机从心跳应答里认出来。
+  await invoke('app:debug', 'foreign-keeper');
+  await ctl.heartbeatNow();
+  assert.ok(ctl.suspended, '前置：本机认出它归另一台电脑');
+  assert.match(ctl.snapshot().suspended, /运行中|仍在运行/,
+    '前提：刚放手时作业还在跑');
+
+  // 那边把作业结束掉：服务端那一行到终态（`status` 仍然按会话号答得出来，
+  //   这是本机还能知道这件事的前提 —— 那一格不认看护者）。
+  await invoke('app:debug', 'reap');
+  const row = b._sessions.find((s) => s.session_id === ctl.sessionId);
+  assert.equal(row.state, 'released', '前置：服务端那一行已经是终态');
+
+  // 对账的钟每 60 秒叫它一次；这里直接叫那一趟，验的是它之后一路到界面。
+  await ctl._statusOnce();
+
+  const snap = ctl.snapshot();
+  assert.equal(snap.state, 'ended', '那边结束了，本机也要走到结束');
+  assert.match(snap.suspended, /结束/, `那句话要换成"结束了"：${snap.suspended}`);
+  assert.equal(/仍在运行/.test(snap.suspended), false,
+    '「作业仍在运行」此刻是一句假话 —— 用户会照着它去重新提交一个');
+  assert.equal(snap.error, null, '别人正常的收尾不是一次出错');
+
+  const w = idx._test.getWindow();
+  await waitUntil(() => w._sessions.every((x) => !x.live),
+    '窗口那一层把这条会话算成「已结束」');
 
   await invoke('app:debug', 'foreign-keeper', false);
   await openUpTo(idx, 1);
