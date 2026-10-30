@@ -2096,7 +2096,7 @@ test('高级选项收起就退回默认；离开插件屏时也收起来', () =>
   const assertDefault = (when) => {
     assert.equal(ctrl(0).value, '', `CPU 那一格要清空（${when}）`);
     assert.equal(ctrl(1).value, '', `内存要清空（${when}）`);
-    assert.equal(ctrl(4).value, '', `分区要回到「随机选择一个」（${when}）`);
+    assert.equal(ctrl(4).value, '', `分区要回到「不点名」那一项（${when}）`);
     assert.equal(ctrl(2).value, '', `GRES 要回到「用插件的默认」（${when}）`);
     assert.equal(ctrl(3).value, '', `数量要清空（${when}）`);
     assert.equal(ctrl(3).disabled, true, `而它要回到灰的（${when}）`);
@@ -2322,6 +2322,28 @@ test('作业结束之后失败原因不再消失（从前它恰好在那一刻�
   h.fn('renderSnapshot')(null);
   assert.equal(h.byId.get('job-detail').classList.contains('hidden'), true,
     '一会儿都没跑过的时候不该摆一个空的详情块');
+});
+
+test('分区还没定下来时写「待定」，并把交给 Slurm 的那几个念出来', () => {
+  // 2026-10-30：缺省提交把几个候选一起交给 Slurm（`-p A,B`），落到哪个要等
+  //   作业进队列才知道。那时干摆一个「—」与"查不到"长得一模一样，而
+  //   `partitions` 就在手边 —— 说得出交给它的是哪几个。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.run("SCREEN = 'jobs'; SESS = { sessions: [], front: null };");
+  const base = { state: 'queued', sessionId: 's1', jobId: '42',
+    jobText: '等待调度', hbAgeMs: 1000, tunnelState: 'stopped',
+    resources: {}, gresText: null };
+  const kv = () => childrenOf(h.byId.get('kv')).map((x) => x._text || '').join(' ');
+
+  h.fn('renderSnapshot')({ ...base, partition: null,
+    partitions: ['A6000', 'RTX8000'] });
+  assert.match(kv(), /待定（A6000 \/ RTX8000）/, kv());
+
+  // 定下来之后就是那个名字，不再有「待定」—— 两个都在的话，界面在说
+  //   "还没定，而它是 A6000"。
+  h.fn('renderSnapshot')({ ...base, partition: 'A6000', partitions: null });
+  assert.match(kv(), /A6000/, kv());
+  assert.equal(/待定/.test(kv()), false, kv());
 });
 
 test('作业列表里点另一条：高亮与下面的详情都跟着走', () => {

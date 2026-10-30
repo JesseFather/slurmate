@@ -50,7 +50,6 @@ import json
 import logging
 import os
 import pwd
-import random
 import re
 import selectors
 import shutil
@@ -6314,9 +6313,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- `CREATE TABLE IF NOT EXISTS` 改动，而那一列是 NOT NULL，所以启动时会
     -- 明确拒绝（见 Config._db_schema_errors），而不是等第一次提交时炸成内部错误。
     --
-    -- partition 允许为空串：分区权限查不到时（sacctmgr 失败），缺省提交会退化为
-    -- 不带 -p，此时"落在哪个分区"在提交那一刻确实无人知晓，而空串是它诚实的
-    -- 表示。作业跑起来之后 session_view 会改用它从 Slurm 查到的实际分区。
+    -- partition 存的是【交给 -p 的那个串】，它有三种形状：
+    --   · 一个分区名  = 用户点了名；
+    --   · 一列（逗号）= 几个候选一起交给了 Slurm，由它挑最早能开始的；
+    --   · 空串        = 分区权限查不到（sacctmgr 失败），退化成不带 -p。
+    -- 后两种在提交那一刻都不知道"实际落在哪个"，而空串与一列就是它诚实的
+    --   表示。作业进队列之后 phase_running 会把实际那一个写回来，session_view
+    --   也一直用 Slurm 报的那个覆盖。
     partition       TEXT NOT NULL DEFAULT '',
     account         TEXT NOT NULL,
     cpus            INTEGER NOT NULL DEFAULT 1,
@@ -7015,8 +7018,9 @@ def build_sbatch_argv(cfg, sess, env, logdir, job_script, service_kind):
             # 两份，不合成一份，见函数头那段。`--open-mode=append` 是体积上限
             # 那条性质的前提，也是可选的：见同一段。
             "-o", outpat, "-e", errpat, "--open-mode=append"]
-    # 分区可以是空串，见 op_submit 里「缺省随机」那一节的说明：权限查不到时
+    # 分区可以是空串，见 op_submit 里分区那一节的说明：权限查不到时
     # 我们退化为不带 -p，把选择权交回 Slurm 的默认分区。
+    # 也可以是一列（逗号分隔）：那时 Slurm 在这一列里挑最早能开始的。
     if sess.get("partition"):
         argv.extend(["-p", sess["partition"]])
     # gres 为空 → 【完全省略】--gres，而不是写 gpu:0。默认不占 GPU，
@@ -9255,6 +9259,13 @@ class Sessiond(object):
             if not jstate:
                 continue                      # 拿不到状态，保守跳过
 
+            # 提交时交给 Slurm 的可能是一列候选（见 op_submit），落到哪个由它
+            #   挑。作业一进队列就有答案了（`%P`），写回库里 —— 否则这一行
+            #   会一直挂着一列候选，作业结束之后更没人补得上。
+            if job.get("Partition") and "," in (s["partition"] or ""):
+                self.store.update(s["session_id"], partition=job["Partition"])
+                s = dict(s, partition=job["Partition"])
+
             # ── 唯一的释放判据：这是个真终态吗 ──────────────────────────
             #
             # 判据是"是不是终态"，不是"是不是 RUNNING"。用
@@ -11020,10 +11031,20 @@ class Sessiond(object):
         d = {
             "session_id": s["session_id"], "job_id": s["job_id"],
             "state": s["state"],
-            # 空串 = 提交时分区权限查不到、退化成不带 -p（见 op_submit）。
-            # 那种情况下"落在哪个分区"在提交那一刻确实无人知晓，报 null 比
-            # 编一个出来诚实；作业跑起来之后下面会用 Slurm 的答案补上。
-            "partition": s["partition"] or None,
+            # `partition` 说的是【实际落到的】分区，而它在提交那一刻可能还
+            # 不知道：
+            #   · 空串 = 分区权限查不到、退化成不带 -p（见 op_submit）；
+            #   · 一列（逗号分隔）= 把几个候选一起交给了 Slurm，由它挑
+            #     最早能开始的那个。
+            # 两种都报 null —— 编一个出来就是替 Slurm 回答。作业跑起来之后
+            #   下面会用 Slurm 的答案补上（phase_running 还会写回库里）。
+            # `partitions` 是那一列候选本身，只在"还没定、而确实交给了一列"
+            #   时出现：界面据此说「待定（A6000 / RTX8000）」，而不是干摆一个
+            #   「—」。定下来之后它就没有了 —— 那时 `partition` 已经在回答。
+            "partition": (None if (not s["partition"] or "," in s["partition"])
+                          else s["partition"]),
+            "partitions": ([p for p in s["partition"].split(",") if p]
+                           if "," in (s["partition"] or "") else None),
             # cpus/mem 为 0/空 = 未知。这种情况是真实存在的：从 nft 规则
             # 恢复出来的会话（别的进程提交的作业）我们没写过它的命令行，
             # 它当时要了多少资源无从得知。报 null 而不是 0，
@@ -11872,8 +11893,8 @@ class Sessiond(object):
                                  "你的账号在 %s 这些分区上都没有权限"
                                  % "、".join(sorted(table)))
             # 要了 GRES 的时候，只从装得下它的分区里挑。
-            #   不这么做的话，"要 2 张卡、分区随便"会随机落到一个没有那种卡的
-            #   分区上被拒，而用户明明没有指定分区，他没有任何办法绕开。
+            #   不这么做的话，"要 2 张卡、分区随便"会把一个没有那种卡的分区也交
+            #   给 Slurm，而用户明明没有指定分区，他没有任何办法绕开。
             #   界面上给的选项也是这么算的（所有有权限分区的并集），两边是同一句话。
             if gres:
                 fit = [n for n in usable if self.fit_gres(gres, n)[1] is None]
@@ -11894,15 +11915,30 @@ class Sessiond(object):
                                  "有权限的分区里没有一个能给你 %d 核 / %s（%s）"
                                  % (cpus, mem, why))
             usable = fit_r
-            # 随机挑，不按顺序挑第一个，顺序挑会让所有默认会话落到同一个分区，
-            # 而用户明确要的是分散。代价是他事先不知道会落到哪种卡上，所以
-            # session_view 必须把【实际落到的】分区返回给界面显示。
-            partition = random.choice(sorted(usable))
-        max_time_secs = table[partition]["max_time"] if partition else None
+            # 把装得下的那几个整列交给 Slurm，由它挑「最早能开始」的那个
+            #   （`man sbatch` 的 `-p`：给一列名字时它选最早能开始的那个，
+            #   不看名字顺序，优先级高的分区先考虑）。从前这里是自己
+            #   `random.choice` —— 随机不看忙闲，落在一个排长队的空分区上
+            #   就要一直等，而另一个分区正空着（用户 2026-10-30 报的）。
+            # 代价：提交那一刻不知道最终落到哪个，要等作业跑起来从 Slurm
+            #   读回（见 session_view 与 phase_running 的写回）。所以这一列
+            #   同时是库里 `partition` 那一格的值，界面据此说「待定」。
+            partition = ",".join(sorted(usable))
+        # 候选有几个就按最紧的那个钳时限：我们不知道 Slurm 最后挑哪个，
+        #   而请求必须每一个候选都装得下；`None`（无上限）不参与比较。
+        parts = [p for p in partition.split(",") if p]
+        max_time_secs = None
+        for p in parts:
+            mt = table[p]["max_time"]
+            if mt is not None and (max_time_secs is None or mt < max_time_secs):
+                max_time_secs = mt
 
-        # ── GRES 与这个分区对不对得上 ──────────────────────────────────────
+        # ── GRES 与这些分区对不对得上 ──────────────────────────────────────
         # 必须在分区定下来之后，见 fit_gres() 的 docstring：上限是分区自己的。
-        gres, gres_err = self.fit_gres(gres, partition)
+        # 候选不止一个时按「这些分区合起来」验：每一个候选早在上面那一层
+        #   逐个筛过了（装不下的没进这一列），所以这一趟只会放行 ——
+        #   留着它是为了描述符与拒绝理由只有这一处出口。
+        gres, gres_err = self.fit_gres(gres, "" if len(parts) > 1 else partition)
         if gres_err:
             return self._err(2, "bad_gres", gres_err)
 
@@ -11978,8 +12014,9 @@ class Sessiond(object):
             #   那个端口恰好被占用时作业就以"候选端口全部失败"退出，一条指向
             #   错误方向的错误信息，而且时有时无。分号实测可以完好穿过 --export。
             "SLURMATE_CANDIDATES": ";".join(str(c) for c in cands),
-            # 可能为空串（权限查不到而退化）。run.sbatch 只把它记进日志与会话
-            # 文件，不做任何判断，空就是"不知道"，不是"没分区"。
+            # 这是【请求】：空串（权限查不到而退化）或者一列候选，都由 Slurm
+            # 做最终决定。作业侧读它只用于日志；会话文件里那一格记的是实际
+            # 落到的那个（`$SLURM_JOB_PARTITION`，见 run.sbatch）。
             "SLURMATE_PARTITION": partition,
             "SLURMATE_CPUS": str(cpus),
             "SLURMATE_MEM": mem,
@@ -12040,8 +12077,12 @@ class Sessiond(object):
                  "candidates=%s time=%s",
                  uid, job_id, partition or "(Slurm 默认)", cpus, mem,
                  gres_spec(gres) or "(不占)", cands, time_str)
+        # 分区与 `session_view` 同一种形状：实际落到的那个，不知道就是 null；
+        #   `partitions` 是这一次交给 Slurm 的候选列。两处各写一种形状的话，
+        #   客户端要按"这是提交回包还是状态推送"分两套读法。
         out = {"session_id": sid, "job_id": job_id, "state": ST_SUBMITTED,
-               "partition": partition or None,
+               "partition": parts[0] if len(parts) == 1 else None,
+               "partitions": parts if len(parts) > 1 else None,
                "resources": {"cpus": cpus, "mem": mem, "gres": gres},
                "candidates": cands, "requested_time": time_str}
         if warning:

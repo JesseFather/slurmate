@@ -280,7 +280,7 @@ test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t)
   ctl.on('change', (s) => seen.push(s.state));
 
   // ── 提交并一路推到 running ──
-  // 不传任何资源 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
+  // 不传任何资源 = 用服务端默认值（2 核 / 8G / 分区由 Slurm 在有权限的里挑）。
   const snap = await ctl.start({}, { preferredPort: workspacePort, serviceKind: CS_MANIFEST.name });
   assert.ok(snap, '启动应当成功');
   assert.equal(ctl.state, State.RUNNING);

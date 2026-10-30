@@ -1106,7 +1106,7 @@ def print_session(s, verbose=True):
         print("作业 ID   : %s" % s.get("job_id"))
     res = s.get("resources") or {}
     gt = gres_text(res.get("gres"))
-    print("分区      : %s" % (s.get("partition") or "（Slurm 默认）"))
+    print("分区      : %s" % (s.get("partition") or "（由 Slurm 决定）"))
     print("资源      : %s 核 / %s%s"
           % (res.get("cpus") or "?", res.get("mem") or "?",
              "，%s" % gt if gt else ""))
@@ -1329,7 +1329,8 @@ def cmd_partitions(args):
     print()
     print("「每节点核数」是 `-c` 的上限（有效核数，保留核已经扣掉）。")
     print("GRES 那一列是每个节点最多几个（`--gres` 就是按节点算的）。")
-    print("不指定 --partition 时，会从有权限的分区里随机选择一个。")
+    print("不指定 --partition 时，会把有权限、装得下的分区一起交给 Slurm，")
+    print("由它选择最早能开始的那个；落到哪个在作业进队列之后才定得下来。")
     print("缺省资源是按插件的，见 `slurmate plugins`。")
     return 0
 
@@ -1465,7 +1466,7 @@ def cmd_submit(args):
     gt = gres_text(res.get("gres"))
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
     print("插件 %s" % (req.get("service_kind") or "（本站的 default_plugin）"))
-    print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
+    print("分区 %s，时间上限 %s" % (d.get("partition") or "（由 Slurm 决定）",
                                    d.get("requested_time")))
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
                                 "，%s" % gt if gt else ""))
@@ -1785,7 +1786,8 @@ def build_parser():
     p.add_argument("--json", action="store_true")
 
     p = add("submit", cmd_submit, "提交一个开发会话（所有参数都可省略）")
-    p.add_argument("--partition", help="分区（省略则从有权限的分区里随机选择一个）")
+    p.add_argument("--partition",
+                   help="分区（省略则由 Slurm 在有权限、装得下的那些里选择）")
     p.add_argument("--cpus", type=int,
                    help="CPU 核心数（省略 = 该插件的服务端默认）")
     p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")

@@ -1987,6 +1987,11 @@ exit 0
 
     a = argv_of()
     check("指定了分区 → 带 -p", "-p" in a and "2080TI" in a, str(a))
+    # 缺省那条路给的是一个逗号列表（见 op_submit）：`-p` 本来就收这种写法，
+    #   Slurm 在名单里挑最早能开始的（`man sbatch` 的 -p）。
+    a = argv_of(partition="2080TI,A6000,RTX8000")
+    check("候选列原样进 -p（逗号分隔就是 Slurm 的写法，不是我们发明的）",
+          "-p" in a and a[a.index("-p") + 1] == "2080TI,A6000,RTX8000", str(a))
     check("没 GPU → 完全省略 --gres（不是 gpu:0）",
           not any(x.startswith("--gres") for x in a), str(a))
     check("默认不写 -w（节点由 Slurm 在分区内选择）", "-w" not in a, str(a))
@@ -2175,10 +2180,12 @@ exit 0
     check("缺省提交成功", r.get("ok"), str(r))
     check("缺省 cpus=2、mem=8G（服务端填，客户端没给）",
           sess["cpus"] == 2 and sess["mem"] == "8G", "%s / %s" % (sess["cpus"], sess["mem"]))
-    check("缺省分区是从有权限的列表里选择的（不是空）",
-          sess["partition"] in ("A6000", "RTX8000", "2080TI"), sess["partition"])
-    check("响应里带回实际选中的分区（用户事先不知道）",
-          (r.get("data") or {}).get("partition") == sess.get("partition"), str(r.get("data")))
+    check("缺省提交把有权限、装得下的分区整列交给 Slurm（不是替它选一个）",
+          sess["partition"] == "2080TI,A6000,RTX8000", sess["partition"])
+    _d = r.get("data") or {}
+    check("响应里那一格是 null 与候选列 —— 落到哪个要等作业进队列才知道",
+          _d.get("partition") is None and _d.get("partitions")
+          == ["2080TI", "A6000", "RTX8000"], str(_d))
     check("缺省无 warning（服务端没替用户改任何内容）",
           "warning" not in (r.get("data") or {}),
           str((r.get("data") or {}).get("warning")))
@@ -2289,10 +2296,10 @@ exit 0
                             "gres": {"name": "gpu", "count": 16}})
     check("2080TI 每节点 8 张、要 16 张 → 拒绝（不是悄悄截成 8）",
           not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
-    # 没点名分区（会随机挑一个）→ 必须从装得下它的分区里挑。mps 只有
-    # RTX8000 有 —— 若从全部有权限的分区里随机挑，就会落到装不下它的 2080TI
-    # 上被拒，而用户没有任何办法绕开（他本来就没指定分区）。界面上给的选项也是
-    # 并集，两边必须是同一句话。
+    # 没点名分区 → 候选只留装得下它的那些。mps 只有 RTX8000 有 —— 若把
+    # 全部有权限的分区都交出去，就会有一次落到装不下它的 2080TI 上被判"永远
+    # 起不来"，而用户没有任何办法绕开（他本来就没指定分区）。界面上给的选项
+    # 也是并集，两边必须是同一句话。
     _picked = set()
     for _ in range(12):
         r, sess, _ = run_submit({"op": "submit", "gres": {"name": "mps", "count": 100}})
@@ -2304,15 +2311,12 @@ exit 0
     else:
         check("没点名分区时只从装得下它的分区里选择（mps 只有 RTX8000 有）",
               _picked == {"RTX8000"}, str(sorted(_picked)))
-    # 而过滤不能把"随机选择"变成"永远选择同一个"：不带型号的 gpu 要 2 个，
-    #   三个分区都装得下，落点必须分散（12 次全落同一个的概率约 3^-11）。
-    _picked2 = set()
-    for _ in range(12):
-        _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
-        if _r2.get("ok"):
-            _picked2.add(_s2["partition"])
-    check("过滤之后仍然是随机选择（不是永远选择第一个装得下的）",
-          len(_picked2) >= 2, str(sorted(_picked2)))
+    # 而过滤之后留下的不是一个"挑好的"，是一条候选列：不带型号的 gpu 要 2 个，
+    #   三个分区都装得下，于是三个都进 `-p`，由 Slurm 选择最早能开始的。
+    _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
+    check("装得下的都留在候选列里（不是替 Slurm 选一个）",
+          _r2.get("ok") and _s2["partition"] == "2080TI,A6000,RTX8000",
+          str(_s2.get("partition")))
     r, _s, _e = run_submit({"op": "submit",
                             "gres": {"name": "gpu", "type": "nosuch", "count": 1}})
     check("有权限的分区一个都装不下 → bad_gres，且那句话里有原因",
@@ -2377,6 +2381,25 @@ exit 0
           sess["requested_time"] == "7-00:00:00", sess["requested_time"])
     check("截断时间会告知用户", "上限" in (r.get("data") or {}).get("warning", ""),
           str((r.get("data") or {}).get("warning")))
+
+    # 候选不止一个时，时限按【最紧的那个】钳：我们不知道 Slurm 最后挑哪个，
+    #   而请求必须每一个候选都装得下。桩里三个分区都是 183 天，这里临时换一份
+    #   表让它们不一样 —— 否则这一条与上面那条判的是同一件事。
+    _real_parts = mod.Cluster.partitions
+    mod.Cluster.partitions = lambda self: {
+        "A6000": {"max_time": 86400, "is_default": False, "state": "UP",
+                  "nodes": 2, "cpus": 160},
+        "RTX8000": {"max_time": None, "is_default": False, "state": "UP",
+                    "nodes": 1, "cpus": 128},
+        "2080TI": {"max_time": 86400 * 30, "is_default": True, "state": "UP",
+                   "nodes": 1, "cpus": 64},
+    }
+    try:
+        r, sess, _ = run_submit({"op": "submit", "time": "2-00:00:00"})
+        check("候选有几个时按最紧的那个 MaxTime 钳（不知道 Slurm 会选哪个）",
+              sess["requested_time"] == "1-00:00:00", sess["requested_time"])
+    finally:
+        mod.Cluster.partitions = _real_parts
 
     r, sess, env = run_submit({"op": "submit", "time": "nonsense"})
     check("无法解析的时间 → bad_time(code 2)",
@@ -14059,6 +14082,64 @@ exit 0
           _hd.store.get("h-grace")["state"] == mod.ST_ENROLLED,
           _hd.store.get("h-grace")["state"])
     mod.now_ts = _real_now_h
+
+    # ── 35. 提交时交给 Slurm 的候选列，落定之后写回 ──────────────────────
+    #
+    # 缺省提交把"有权限、装得下"的那几个分区整列交给 `-p`，由 Slurm 选择最早
+    #   能开始的（见 op_submit）。于是提交之后有一段时间，库里那一格是一列，
+    #   而"实际落在哪个"要等作业进队列才知道。这两件事各有一条判据：
+    #   落定之前视图不编一个分区出来，落定之后库里存的是真的那一个。
+    section("35. 候选分区：落定之前不编、落定之后写回")
+    _pd = _mkd()
+
+    class _PartSlurm(object):
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def job_states(self, jids):
+            return {int(j): (self.JOB_OK, {
+                "JobState": "RUNNING", "NodeList": "nodeb1",
+                "TimeLimit": "01:00:00", "EndTime": "2038-01-01T00:00:00",
+                "Partition": "RTX8000", "Reason": None}) for j in jids}
+
+        def job_state(self, jid):
+            return self.job_states([jid])[int(jid)]
+
+        # 作业还没进 Slurm 眼里时什么都问不到 —— 落定之前那一格靠的就是它。
+        def show_job(self, _jid):
+            return None
+
+    _pd.slurm = _PartSlurm()
+    _pd.store.insert(session_id="p-cand", uid=UID, user="alice", account="acct",
+                     requested_time="01:00:00", state=mod.ST_SUBMITTED,
+                     candidates="55001", partition="A6000,RTX8000",
+                     job_id=9101, created_at=0)
+    _pv = _pd.session_view(_pd.store.get("p-cand"))
+    check("落定之前 partition 是 null（不替 Slurm 编一个）",
+          _pv.get("partition") is None, repr(_pv.get("partition")))
+    check("  而那一列候选在 partitions 里 —— 界面据此说「待定（A6000 / RTX8000）」",
+          _pv.get("partitions") == ["A6000", "RTX8000"], str(_pv.get("partitions")))
+
+    _pd.phase_running()
+    _prow = _pd.store.get("p-cand")
+    check("作业进队列之后，实际那个分区写回库里（`%P` 给的）",
+          _prow["partition"] == "RTX8000", repr(_prow["partition"]))
+    _pv2 = _pd.session_view(_prow)
+    check("视图随之换成实际分区，候选列不再出现（那时它已经在回答）",
+          _pv2.get("partition") == "RTX8000" and _pv2.get("partitions") is None,
+          "%r / %r" % (_pv2.get("partition"), _pv2.get("partitions")))
+
+    # 点名了分区的那条路一个字都没变：库里就是一个名字，写回那一支不碰它。
+    _pd.store.insert(session_id="p-one", uid=UID, user="alice", account="acct",
+                     requested_time="01:00:00", state=mod.ST_SUBMITTED,
+                     candidates="55002", partition="A6000",
+                     job_id=9102, created_at=0)
+    _prow2 = _pd.store.get("p-one")
+    check("单一个分区名（点了名）时视图直接就是它，没有待定那一格",
+          _pd.session_view(_prow2).get("partition") == "A6000"
+          and _pd.session_view(_prow2).get("partitions") is None,
+          str(_pd.session_view(_prow2).get("partition")))
 
     # ── 汇总前的核账：源码里有几节，就真的跑了几节 ──────────────────────
     #

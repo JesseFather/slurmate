@@ -1031,8 +1031,12 @@ function renderKv(s) {
   ] : [
     ['会话 ID', s.sessionId || '—'],
     ['作业 ID', s.jobId || '—'],
-    // 默认是随机挑分区，所以用户事先不知道会落到哪种卡上 —— 必须显示实际结果
-    ['分区', s.partition || '—'],
+    // 默认是把几个候选一起交给 Slurm 挑，所以提交之后有一段时间只说得
+    //   出候选：那时写「待定」，并把交给它的是哪几个念出来 —— 干摆一个
+    //   「—」与"查不到"长得一模一样。
+    ['分区', s.partition
+      || (s.partitions && s.partitions.length
+        ? `待定（${s.partitions.join(' / ')}）` : '—')],
     ['资源', resText],
     ['节点', s.node || '—'],
     ['隧道目标', s.tunnelTarget || '—'],
@@ -1121,6 +1125,8 @@ function jobAsSnap(j) {
     sessionId: j.session_id,
     jobId: j.job_id,
     partition: j.partition,
+    // 还没定下来的那些：列表行也带这一列（见守护进程的 `session_view`）。
+    partitions: Array.isArray(j.partitions) ? j.partitions : null,
     resources: j.resources || null,
     gresText: j.gres_text || null,
     node: j.node,
@@ -3514,10 +3520,11 @@ function memGbOf(s) {
 }
 
 /**
- * 这一格的核数上限：指定分区用它自己的，随机时取有权限分区里的最大值。
+ * 这一格的核数上限：指定分区用它自己的，不指定时取有权限分区里的最大值。
  *
- * 随机取最大值而不是最小值：用户说的是"随便挑一个分区"，挑中的那个由服务端
- *   从装得下这个请求的分区里选（`fit_resources()`），所以最大值要得到。
+ * 取最大值而不是最小值：用户说的是"随便挑一个分区"，而服务端会把装得下这个
+ *   请求的那几个一起交给 Slurm（`fit_resources()`），落到哪一个都可能，所以
+ *   最大值要得到 —— 取最小值会把合法的大请求拦住。
  * 只算 `allowed` 的分区：无权限的永远不会被挑中。
  * `null` = 这一格没有可用的上限（旧站点、或者查询失败），调用方退回
  *   `UI_MAX_CPUS`。
@@ -3665,7 +3672,7 @@ function dropRange(st, key, cell, ctrl) {
  * 两种情况下那个输入框照旧在，`512M` 这种写法照旧写得进去。
  */
 /**
- * CPU 那一格的滑块：顶 = 当前分区的每节点核数；随机分区取各分区的最大值。
+ * CPU 那一格的滑块：顶 = 当前分区的每节点核数；没挑分区时取各分区的最大值。
  *
  * 每次重判：换分区、分区表刷新都要走它。站点那份默认不在档位上时插进去；
  *   默认比顶还大（站点默认是给另一种节点的）时不画，输入框留着。
@@ -3931,7 +3938,7 @@ function resetAdv(st) {
  *
  * 保留这一块自己选着的那个：重画发生在"分区表变了"的时候，不是"用户换了分区"
  *   的时候 —— 若每次重画都把选择抹掉，用户挑好的分区会在一次后台刷新之后自己弹回
- *   "随机挑一个"。
+ *   那个"不点名"的选项。
  */
 function fillPartSelect(st) {
   const sel = st.part;
@@ -3939,7 +3946,7 @@ function fillPartSelect(st) {
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = '（随机选择一个有权限的）';
+  none.textContent = '（不点名，由 Slurm 在有权限的里选择）';
   sel.append(none);
 
   for (const p of partList) {
@@ -3976,7 +3983,7 @@ function renderPartitions(list) {
  * 没挑分区时给的是所有有权限分区的并集：不这么做，"要 2 张卡、分区随便"
  *   这句话在界面上就表达不出来 —— 而服务端是支持的（`fit_gres` 在没点名分区时
  *   在所有分区里找）。并集里同一个名字取各分区里最大的 `per_node_max`，
- *   因为最终落到哪个分区由服务端随机挑。
+ *   因为最终落到哪个分区由 Slurm 在候选里挑。
  */
 function gresChoicesFor(partName) {
   if (partName) {
