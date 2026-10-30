@@ -24,8 +24,8 @@ tag 里的是发布标识：正式版就是协议版本，预览版在它后面�
 
 | 类型 | tag | 例 |
 |---|---|---|
-| 正式版 | `v<版本>` | `v0.37` |
-| 预览版 | `v<版本>-<后缀>` | `v0.37-rc1` |
+| 正式版 | `v<版本>` | `v0.38` |
+| 预览版 | `v<版本>-<后缀>` | `v0.38-rc1` |
 
 同一个版本可以有多个预览版。两类 tag 都先落成一个 draft Release，审过再公开。
 
@@ -82,7 +82,7 @@ required check 通过，所以 `main` 上的每个提交都来自一次绿过的
 
 ```bash
 git add -A
-git commit -m "0.37：发布"
+git commit -m "0.38：发布"
 git push origin <分支>
 ```
 
@@ -91,9 +91,9 @@ git push origin <分支>
 ### 5. 打 tag
 
 ```bash
-git tag v0.37          # 正式版
-git tag v0.37-rc1      # 预览版
-git push origin v0.37
+git tag v0.38          # 正式版
+git tag v0.38-rc1      # 预览版
+git push origin v0.38
 ```
 
 tag 推上去之后 `release.yml` 开始跑。
