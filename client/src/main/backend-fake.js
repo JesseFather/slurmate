@@ -1019,6 +1019,7 @@ class FakeBackend extends Backend {
       // 与真实后端同一个形状：握手要的那个版本号。见 backend.js 的接口注释。
       daemonVersion: this._daemonVersion === null
         ? pluginFiles.hostVersion() : this._daemonVersion,
+      daemonCaps: this._caps(),
     };
   }
 
@@ -1076,6 +1077,9 @@ class FakeBackend extends Backend {
           //      一句只在它身上不成立的协议，比没有它更坏。
           version: this._daemonVersion === null
             ? pluginFiles.hostVersion() : this._daemonVersion,
+          // 演老守护进程时这一格整个不出现 —— 真老守护进程的 `ping` 里
+          //   没有这个键，写成 `null` 会让"缺席"与"报了空"混成一种形状。
+          ...(this._caps() === null ? {} : { caps: this._caps() }),
           time: nowSec(),
         });
       case 'whoami':     return this._whoami();
@@ -1372,6 +1376,18 @@ class FakeBackend extends Backend {
    */
   debugDaemonVersion(v) {
     this._daemonVersion = (v === null || v === undefined) ? null : String(v);
+  }
+
+  /**
+   * 假站点声明的能力。演的是"当前版本那一份"，所以缺省报它支持的那些。
+   *
+   * 一旦 `debugDaemonVersion` 把版本改成一个具体值，就按基线演（不报 caps）：
+   *   那些值都是拿来模拟老服务端或某个异类的，而"老"在这个协议里就等于
+   *   "没有声明任何超出基线的东西"。这条约定不随版本号漂 —— 它判的是
+   *   "有没有被装扮成别的版本"，不是"那个版本号多大"。
+   */
+  _caps() {
+    return this._daemonVersion === null ? ['submit.any_partition'] : null;
   }
 
   /**

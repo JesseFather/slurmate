@@ -340,6 +340,15 @@ let versionVerdict = null;
 let connectedDaemonVersion = null;
 
 /**
+ * 握手时对面声明支撑的几样东西（`ping` 应答里的 `caps`，`applyVersionGate` 填）。
+ *
+ * 它是"对面支持什么"的唯一来源。`null` 是缺席：老守护进程不报 `caps`，
+ *   那时按基线处理 —— 缺席不是"全都支持"，也不是"全都不支持"。
+ * 与 `connectedDaemonVersion` 一样是连接级事实，断开时清掉。
+ */
+let connectedDaemonCaps = null;
+
+/**
  * 待同意的那些（暂存树还在磁盘上，等用户点）。
  *
  * 换连接、断开、重新对账都会把它清掉 —— 它描述的是这一次连接的现场。
@@ -763,6 +772,8 @@ async function applyVersionGate(res) {
   versionVerdict = g.verdict;
   connectedDaemonVersion = typeof res.daemonVersion === 'string'
     ? res.daemonVersion : null;
+  connectedDaemonCaps = Array.isArray(res.daemonCaps)
+    ? res.daemonCaps.filter((c) => typeof c === 'string') : null;
 
   if (g.blocked) {
     // 先把连接关掉：绝不留一条"连上了、但不许用"的连接在那儿占着守护进程的
@@ -1472,6 +1483,9 @@ function pluginsView() {
       // 那一句说准 —— 那是唯一一处界面的说法取决于握手结论的地方，理由见
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
       daemonVersionVerdict: versionVerdict,
+      // 对面声明支持什么。界面据此决定用不用新行为（例如分区下拉里那个
+      //   "不点名"选项指的是 Slurm 还是守护进程）。缺席时按基线处理。
+      daemonCaps: connectedDaemonCaps,
       failed: siteSync.failed || [],
       // 视图这一份不带回回收的数 —— 回收的后果用户看得到的是下面
       //   `versions` 那一栏（哪几个版本还在、还被谁要），一个数说不出这些。
@@ -4409,6 +4423,7 @@ async function teardownConnection() {
   siteSync = null;
   versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
   connectedDaemonVersion = null;
+  connectedDaemonCaps = null;
 }
 
 /**
@@ -5545,7 +5560,8 @@ function registerIpc() {
       }
 
       const res = await doConnect(conn);
-      return { ...res, whoami, partitions, plugins: pluginsView() };
+      return { ...res, whoami, partitions, plugins: pluginsView(),
+               daemonCaps: connectedDaemonCaps };
     } finally {
       connectInFlight = false;
     }
@@ -5563,7 +5579,8 @@ function registerIpc() {
     }
     config.rememberHostKey(cfgDir, cfg, conn.host, conn.port, fingerprint);
     const res = await doConnect(conn, { trustHostKey: fingerprint });
-    return { ...res, whoami, partitions, plugins: pluginsView() };
+    return { ...res, whoami, partitions, plugins: pluginsView(),
+             daemonCaps: connectedDaemonCaps };
   });
 
   /**

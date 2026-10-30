@@ -2940,6 +2940,13 @@ exit 0
     check("守护进程自己的 VERSION 合框架版本的形状（忘改成 x.y 时红在本地）",
           mod.FRAMEWORK_VERSION_RE.match(mod.VERSION) is not None, repr(mod.VERSION))
 
+    # 发布标识不是协议版本：它的前缀必须逐字是 VERSION，后面可以有 `-<后缀>`。
+    #   两者混起来有两种症状：报成三段的（客户端判"不是我们的守护进程"），
+    #   或者停在上一版而没人发现（包名与它一起错）。
+    check("发布标识 RELEASE 的前缀就是 VERSION，后缀可有可无",
+          mod.RELEASE == mod.VERSION
+          or mod.RELEASE.startswith(mod.VERSION + "-"), repr(mod.RELEASE))
+
     for _scheme, _re_ in (("framework", mod.FRAMEWORK_VERSION_RE),
                           ("plugin", mod.PLUGIN_VERSION_RE)):
         _good, _bad = _fx[_scheme]["valid"], _fx[_scheme]["invalid"]
@@ -8099,7 +8106,7 @@ exit 0
           _q_doc.get("pending_sessions") == _q_pend and _q_pend >= 1,
           "doctor=%r pending=%d" % (_q_doc.get("pending_sessions"), _q_pend))
     check("op_doctor 报守护进程版本与对账那两格",
-          _q_doc.get("version") == mod.VERSION
+          _q_doc.get("version") == mod.RELEASE
           and "last_tick_at" in _q_doc and "tick_age_seconds" in _q_doc
           and "last_tick_error" in _q_doc,
           "doctor=%r" % (_q_doc,))
@@ -13197,7 +13204,7 @@ exit 0
     _svc = _d_svc.op_daemon(UID, os.getgid())["data"]
     check("daemon op 报的是这个进程自己的事实：版本、pid、端口池、"
           "nft 表与会话数",
-          _svc["version"] == mod.VERSION and _svc["pid"] == os.getpid()
+          _svc["version"] == mod.RELEASE and _svc["pid"] == os.getpid()
           and _svc["port_range"] == [55001, 55099]
           and _svc["nft_table"] is True
           and _svc["sessions"]["active"] == 0,
@@ -14140,6 +14147,65 @@ exit 0
           _pd.session_view(_prow2).get("partition") == "A6000"
           and _pd.session_view(_prow2).get("partitions") is None,
           str(_pd.session_view(_prow2).get("partition")))
+
+    # ── 36. 协议面：上一版客户端读的字段一个都没少 ────────────────────────
+    #
+    # 同 major 内不许破坏兼容 —— 那是一条承诺，而这一节是它的机器判据：
+    #   把上一版客户端会发的请求与它读的字段留在 tools/protocol-surface.json
+    #   里，在这里逐条回放。删字段、改名、改类型都会红；新增字段不会，因为
+    #   旧客户端根本不看它。
+    # 这份清单与 docs/PROTOCOL.md 讲的是同一件事，但那一篇是给人读的散文，
+    #   机器读不了 —— 判据只能是这一份。
+    section("36. 协议面：上一版客户端读的字段一个都没少")
+    _pf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            os.pardir, "tools", "protocol-surface.json")
+    with open(_pf_path, encoding="utf-8") as _pf_f:
+        _surface = json.load(_pf_f)
+
+    def _kind_ok(v, kind):
+        if kind == "bool":
+            return isinstance(v, bool)
+        if kind == "number":
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+        if kind == "string":
+            return isinstance(v, str)
+        if kind == "array":
+            return isinstance(v, list)
+        if kind == "object":
+            return isinstance(v, dict)
+        if kind == "protocol":
+            return (isinstance(v, str)
+                    and mod.FRAMEWORK_VERSION_RE.match(v) is not None)
+        return False
+
+    check("协议面清单有内容，且它标明了那一版客户端",
+          bool(_surface.get("cases")) and bool(_surface.get("client")),
+          "client=%r 用例 %d 条"
+          % (_surface.get("client"), len(_surface.get("cases") or [])))
+
+    _sfc = _mkd()
+    for _case in _surface["cases"]:
+        _sr = _sfc.dispatch(UID, os.getgid(), dict(_case["request"]))
+        _sd = (_sr or {}).get("data") or {}
+        _sbad = [k for k, kind in _case["response"].items()
+                 if k not in _sd or not _kind_ok(_sd[k], kind)]
+        check("`%s`：上一版客户端读的 %d 个字段都还在、类型不变"
+              % (_case["op"], len(_case["response"])),
+              (_sr or {}).get("ok") is True and not _sbad,
+              "ok=%r 缺或类型变了=%s（应答的键 %s）"
+              % ((_sr or {}).get("ok"), _sbad, str(sorted(_sd))[:200]))
+
+    # 能力列表：它在 `caps` 出现之前就存在的那几条之外，另报一样东西。
+    #   这里钉两件事 —— 它是字符串数组，且这一版真的声明了那一样。少了后者，
+    #   一个永远为空的 `caps` 也能过前面那条"字段还在"的判据。
+    _cap_r = _sfc.dispatch(UID, os.getgid(), {"op": "ping"})
+    _cap_d = (_cap_r or {}).get("data") or {}
+    check("ping 报出这一版声明的那几样能力（字符串数组，且不是空的）",
+          isinstance(_cap_d.get("caps"), list)
+          and bool(_cap_d["caps"])
+          and all(isinstance(c, str) for c in _cap_d["caps"])
+          and "submit.any_partition" in _cap_d["caps"],
+          repr(_cap_d.get("caps")))
 
     # ── 汇总前的核账：源码里有几节，就真的跑了几节 ──────────────────────
     #

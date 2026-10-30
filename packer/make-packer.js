@@ -24,8 +24,9 @@
  *
  * 用法： node packer/make-packer.js [--out <文件>]
  *
- * 默认写到 `dist/slurmate-packer-<版本>.js`。版本从 `cluster/slurmate-sessiond`
- *   的 `VERSION` 读 —— 与站点包同一个来源，不在这里抄第二份名单。
+ * 默认写到 `dist/slurmate-packer-<发布标识>.js`。那一段从 `cluster/slurmate-sessiond`
+ *   的 `RELEASE` 读 —— 与站点包同一个来源，不在这里抄第二份名单。预览版与
+ *   正式版因此打出两个不同的文件名，而不是同名覆盖。
  *
  * 这件事没有放进 `slurmate-packer.js` 自己：那个文件要能被直接跑（源码树里
  *   开发时就是这样），而"把文档装进来"是一次构建动作，不是它的一个动词。
@@ -46,15 +47,15 @@ function die(msg) {
   process.exit(1);
 }
 
-function version() {
+function release() {
   const f = path.join(ROOT, 'cluster', 'slurmate-sessiond');
   const lines = fs.readFileSync(f, 'utf8')
-    .split('\n').filter((l) => /^VERSION = ".*"$/.test(l));
+    .split('\n').filter((l) => /^RELEASE = ".*"$/.test(l));
   if (lines.length !== 1) {
-    die(`${f} 里匹配 ^VERSION = "..." 的行有 ${lines.length} 行，该正好 1 行`);
+    die(`${f} 里匹配 ^RELEASE = "..." 的行有 ${lines.length} 行，该正好 1 行`);
   }
-  const v = lines[0].slice('VERSION = "'.length, -1);
-  if (!v) die('版本号是空的');
+  const v = lines[0].slice('RELEASE = "'.length, -1);
+  if (!v) die('发布标识是空的');
   return v;
 }
 
@@ -89,7 +90,7 @@ function main(argv) {
   //   拼回了产物里、还截断了文档。
   const built = src.replace(MARKER, () => embedded);
 
-  if (!out) out = path.join(ROOT, 'dist', `slurmate-packer-${version()}.js`);
+  if (!out) out = path.join(ROOT, 'dist', `slurmate-packer-${release()}.js`);
   fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   fs.writeFileSync(out, built, 'utf8');
 

@@ -3447,6 +3447,20 @@ async function takeoverSelectedJob() {
 let partList = [];
 
 /**
+ * 对面声明支持的那几样（`bootstrap().site.daemonCaps`）。
+ *
+ * `null` 是缺席：老守护进程不报 `caps`，或者还没有连上。缺席按基线处理 ——
+ *   不是"全都支持"，也不是"全都不支持"。界面只问一件事：
+ *   分区下拉里那个"不点名"的选项，`submit.any_partition` 在不在这张表里。
+ */
+let daemonCaps = null;
+
+/** 对面有没有声明某一项能力。缺席一律按"没有"。 */
+function hasCap(name) {
+  return Array.isArray(daemonCaps) && daemonCaps.includes(name);
+}
+
+/**
  * 这一屏上活着的那些块的那几格（`renderPlugins` 每重画一次就整个换一批）。
  *
  * 为什么要有一份名单：分区表是站点级的，它到得比插件块早、也可能中途变
@@ -3946,7 +3960,12 @@ function fillPartSelect(st) {
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = '（不点名，由 Slurm 在有权限的里选择）';
+  // 这句话说的是"谁来挑"。只有对面声明了 `submit.any_partition`，它才是把
+  //   整列候选交给 Slurm；老守护进程那边是它自己从有权限的里挑一个。两者都
+  //   能用，但对用户是两件事，所以按声明分开说 —— 不拿版本号猜。
+  none.textContent = hasCap('submit.any_partition')
+    ? '（不点名，由 Slurm 在有权限的里选择）'
+    : '（不点名，由站点的守护进程选择）';
   sel.append(none);
 
   for (const p of partList) {
@@ -4204,6 +4223,9 @@ async function handleConnectResult(res) {
     if (!acct) {
       notice('error', '这个账号尚未分配集群计算权限，请联系管理员，否则提交作业会失败。');
     }
+    // 能力列表要先落下来：分区下拉那个"不点名"选项的文案读它，而下面那一行
+    //   就会重画下拉。顺序反了，用户看到的永远是上一次连接的声明。
+    daemonCaps = Array.isArray(res.daemonCaps) ? res.daemonCaps : null;
     if (res.partitions) renderPartitions(res.partitions);
     // 插件清单也是连上之后才有的（`op_plugins` 走这条路）—— 不在这里刷的话，
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
@@ -4699,6 +4721,10 @@ async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
   renderAbout();
+  // 能力列表是连接级的事实，与 `partitions` 一样在首屏取一次；之后每次
+  //   连上站点都会带回新的那一份（见 `handleConnectResult`）。
+  daemonCaps = (boot.site && Array.isArray(boot.site.daemonCaps))
+    ? boot.site.daemonCaps : null;
   syncNewButton();
 
   // bootstrap 里没有公钥 —— 密钥是按连接的，界面在打开某条连接的表单时

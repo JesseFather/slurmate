@@ -30,7 +30,7 @@
  *                          字段 `_conn`，而演示后端用的是另一个名字，那个判断
  *                          在假后端上就恒为假、整条启动接续被静默关掉。
  *                          要「有没有连上」就问后端，别去猜它的内部字段叫什么。
- *   connect(profile)       → { ok, error?, code?, whoami?, daemonVersion? }
+ *   connect(profile)       → { ok, error?, code?, whoami?, daemonVersion?, daemonCaps? }
  *                            建立连接（假后端在这里起 HTTP 服务）
  * `daemonVersion` 是握手要的那个号，三态：
  *                              字符串 = 问到了；`null` = 对面没有 `ping` 这个 op；
@@ -38,6 +38,11 @@
  *                              后两者不是同一件事，判定见 plugins/index.js 的
  *                              `versionCheck`（三个缺席各有名字）。两个后端都必须
  *                              报它 —— 版本闸在 index.js，它只看这一个字段。
+ * `daemonCaps` 是对面声明支持的那几样（`ping` 应答的 `caps`）。数组 = 问到了；
+ *                              `null` / 缺席 = 老守护进程没声明，按基线处理。
+ *                              它不是"版本号换成另一个形状"：版本号回答能不能谈，
+ *                              能力回答能不能用某一样新行为（例如分区下拉里那个
+ *                              不点名的选项指的是 Slurm 还是守护进程自己）。
  *   rpc(req, timeoutMs?)   → 守护进程风格的响应对象；不抛异常（传输失败由 classify 处理）
  *                            第二条参数是这一次的预算，省略时用实现自己的缺省值。
  *                            「没有应答」也是一次传输失败，各实现都不许让它永远挂着。

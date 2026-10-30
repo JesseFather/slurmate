@@ -2203,6 +2203,41 @@ test('提交成功之后当场收起高级选项（那几格只对下一次「�
   assert.equal(ctrl(0).value, '', '收起就是退回默认');
 });
 
+test('分区下拉里那个「不点名」的选项按声明的能力分两种说法', () => {
+  // 同一句话在两版服务端上是两件事：0.37 起，不点名 = 把候选整列交给 Slurm；
+  //   老守护进程那边是它自己从有权限的里挑一个。客户端不拿版本号猜
+  //   （`0.y` 期间那条比较连拦都不拦），按 `caps` 声明说。
+  // 这一条同时是那条声明唯一的消费者：没有它，`caps` 就是一段没人读的字节。
+  const view = JSON.parse(JSON.stringify(PV));
+  view.plugins[0].defaults = { cpus: 2, mem: '8G', time: '12:00:00',
+    gpus: { name: 'gpu', type: null, count: 1 } };
+  const parts = [{ name: 'normal', allowed: true, mem_per_node_mb: 128000,
+    cpus_per_node: 64, gres: [{ name: 'gpu', type: null, per_node_max: 8, total: 8 }] }];
+  const firstOption = (h) => {
+    const block = h.byId.get('plugin-blocks').children[0];
+    const find = (b, cls) => childrenOf(b).find(
+      (x) => String(x.className || '').split(/\s+/).indexOf(cls) >= 0);
+    const row = find(find(block, 'adv-body'), 'row');
+    const cell = row.children.filter((k) => k && k.tagName)[4];
+    const sel = childrenOf(cell).find((x) => x.tagName === 'SELECT');
+    return sel.children[0];
+  };
+
+  const h1 = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES }, 'daemonCaps = ["submit.any_partition"];');
+  h1.fn('renderPlugins')(view);
+  h1.fn('renderPartitions')(parts);
+  assert.equal(firstOption(h1).textContent, '（不点名，由 Slurm 在有权限的里选择）',
+    '对面声明了 submit.any_partition：不点名就是把那一列交给 Slurm 选择');
+
+  const h2 = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1',
+    spaces: SPACES }, 'daemonCaps = null;');
+  h2.fn('renderPlugins')(view);
+  h2.fn('renderPartitions')(parts);
+  assert.equal(firstOption(h2).textContent, '（不点名，由站点的守护进程选择）',
+    '对面没声明（老守护进程）：它自己选择，而不是 Slurm');
+});
+
 test('共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
   // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：
   // 选错的那一个会让另外几条连接跟着一起变，而它们各自的界面上什么都没发生 ——

@@ -70,6 +70,22 @@ import time
 #   version 字段，所以它可能停在旧值而没人发现。
 #   规则见下面「版本号：两套方案」。
 VERSION = "0.37"
+# 发布标识：这一份是哪一个预览版（或正式版）。`--version`、`daemon` 应答里那
+#   一格、审计与启动日志报它，站点包名也用它。形状是 `VERSION` 后面跟可选的
+#   `-<后缀>`；正式版没有后缀，那时它与 `VERSION` 逐字相同。
+#   它不是协议版本：`ping` 报的仍是 `VERSION`。rc 与正式版之间的协议
+#   完全一样，把它报成两个号会让客户端判成"对面不是我们的守护进程"。
+#   与 `cluster/slurmate` 的那一行必须相同，由 .github/workflows/checks.yml 断言。
+RELEASE = "0.37-rc1"
+# 这一版在基线之上多支持的几样东西。客户端据此决定用不用新行为，而不是
+#   拿版本号猜 —— 后者在 0.y 期间连拦都不拦（见 docs/PROTOCOL.md〈三方〉）。
+# 缺省即基线：不在这一个列表里的，客户端必须按最老的行为处理。
+# 老守护进程不报 `caps`。那一格缺席的意思只是"这一版没有声明任何超出基线的
+#   东西"，不是"全都不支持"，更不是"全都支持"。
+PING_CAPS = (
+    # 缺省提交把候选分区整列交给 Slurm（`partition` 报 null + `partitions` 一列）。
+    "submit.any_partition",
+)
 SCHEMA_VERSION = 1
 
 # 会话文件里允许出现的字段（白名单）。任何未知字段一律忽略，类型不符即拒。
@@ -8676,7 +8692,7 @@ class Sessiond(object):
         except Exception:                                    # noqa: BLE001
             log.exception("从规则恢复会话时异常（继续启动，对账会收敛）")
         self.setup_socket()
-        self.audit("daemon_start", version=VERSION, pid=os.getpid(),
+        self.audit("daemon_start", version=RELEASE, pid=os.getpid(),
                    port_range=[self.cfg.port_start, self.cfg.port_end],
                    plugins=list(self.cfg.enabled_kinds))
 
@@ -8685,7 +8701,7 @@ class Sessiond(object):
 
         log.info("slurmate-sessiond %s 启动 (pid=%d, 端口池 %d-%d, tick=%ds, "
                  "插件 %s)",
-                 VERSION, os.getpid(), self.cfg.port_start, self.cfg.port_end,
+                 RELEASE, os.getpid(), self.cfg.port_start, self.cfg.port_end,
                  self.cfg.tick_seconds,
                  "、".join(self.cfg.enabled_kinds) or "（无）")
         return True
@@ -10462,7 +10478,7 @@ class Sessiond(object):
         try:
             if op == "ping":
                 return self._ok({"pong": True, "version": VERSION,
-                                 "time": now_ts()})
+                                 "caps": list(PING_CAPS), "time": now_ts()})
             # 服务生命周期用的两个 op。`daemon` 只读，任何用户都能问；
             #   `drain` 改的是"还收不收提交"，只有 root 能发。
             #   名字不能是 `status`：那已经是会话状态。
@@ -10522,7 +10538,7 @@ class Sessiond(object):
         plugins = list(self.cfg.plugins.values())
         now = time.time()
         return self._ok({
-            "version": VERSION,
+            "version": RELEASE,
             "pid": os.getpid(),
             "started_at": self.startup_at,
             "config": {
@@ -11246,7 +11262,9 @@ class Sessiond(object):
             (ST_RESERVED, ST_SUBMITTED)))
         # 这一份是哪一版、tick 还在不在跑。版本那一格是给"装上了没有"一个
         #   当场可看的答案：两端版本对不上时，很多现象只是"旧的那一份还在跑"。
-        out["version"] = VERSION
+        #   报发布标识而不是协议版本：同一版本的两个预览版协议一样，靠协议版本
+        #   那一格分不出装在机器上的是哪一个。
+        out["version"] = RELEASE
         out["last_tick_at"] = self.last_tick_at
         out["tick_age_seconds"] = (None if self.last_tick_at is None
                                    else int(time.time() - self.last_tick_at))
@@ -12151,7 +12169,7 @@ def main():
                          "集群侧读包只有这一个入口，编织那一节用它取插件里的 "
                          "job/start.sh 去织作业脚本，于是'包怎么读'只有 Python "
                          "这一份实现")
-    ap.add_argument("--version", action="version", version=VERSION)
+    ap.add_argument("--version", action="version", version=RELEASE)
     args = ap.parse_args()
 
     # ── 从包里取一份文件（编织那一节用）────────────────────────────────────

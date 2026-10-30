@@ -56,6 +56,13 @@ import time
 # 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
 # 它停在旧值也没人会发现。
 VERSION = "0.37"
+# 发布标识：这一份包是哪一次发出来的。`--version` 报它，站点包名用它。
+#   形状是 `VERSION` 后面跟可选的 `-<后缀>`；正式版没有后缀，那时它与
+#   `VERSION` 逐字相同。它不是协议版本：`ping` 报的仍是 `VERSION`，
+#   因为 rc 与正式版之间的协议完全一样，说成不同反而会让两端判得不对。
+#   后缀与 `cluster/slurmate-sessiond` 的那一行必须相同，由
+#   .github/workflows/checks.yml 断言。
+RELEASE = "0.37-rc1"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
@@ -1680,7 +1687,7 @@ def build_parser():
     ap = argparse.ArgumentParser(
         prog="slurmate",
         description="Slurmate：远程开发会话管理（客户端请用 `slurmate rpc`）")
-    ap.add_argument("--version", action="version", version=VERSION)
+    ap.add_argument("--version", action="version", version=RELEASE)
     sub = ap.add_subparsers(dest="cmd")
 
     def add(name, fn, help_text, **kw):

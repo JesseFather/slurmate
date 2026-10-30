@@ -126,17 +126,30 @@ jobs:
         # 文档嵌在这一份文件里，作者不需要基座仓库。默认写到
         #   dist/slurmate-packer-<版本>.js，版本读的是同一个 VERSION 行。
         run: node packer/make-packer.js
-      - name: 版本号与 tag 的版本一致
-        # 包名里的版本号取自 cluster/slurmate-sessiond。tag 是 v0.37（正式版）
-        #   或 v0.37-rc1（预览版）时，前半段必须与它相同 —— 对不上时 Release 上
-        #   会多出一个与 tag 不同名的文件，而没有人会去核对。
+      - name: 包名与 tag 逐字一致
+        # 两个包名里的发布标识都取自 cluster/slurmate-sessiond 的 `RELEASE`。
+        #   tag 与它必须逐字相同（去掉开头的 v）：预览版与正式版是两份不同的
+        #   产物，同名覆盖过一次，就再也分不出手里这份是哪一个。
         run: |
           f="$(ls dist/slurmate-site-*.run)"
           v="$(basename "$f" .run)"
           v="${v#slurmate-site-}"
-          base="${GITHUB_REF_NAME%%-*}"
-          if [ "v$v" != "$base" ]; then
-            echo "tag 是 $GITHUB_REF_NAME（版本段 $base），而这一份包叫 $(basename "$f")" >&2
+          p="$(ls dist/slurmate-packer-*.js)"
+          pv="$(basename "$p" .js)"
+          pv="${pv#slurmate-packer-}"
+          bad=0
+          for got in "$v" "$pv"; do
+            if [ "v$got" != "$GITHUB_REF_NAME" ]; then
+              echo "tag 是 $GITHUB_REF_NAME，而 dist 里的发布标识是 $got" >&2
+              bad=1
+            fi
+          done
+          if [ "$v" != "$pv" ]; then
+            echo "站点包与打包器的发布标识不同：$v / $pv" >&2
+            bad=1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "两处都取自 cluster/slurmate-sessiond 的 RELEASE，应当与 tag 逐字相同。" >&2
             exit 1
           fi
       - name: 摘要

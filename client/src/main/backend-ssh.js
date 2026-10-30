@@ -652,6 +652,10 @@ class SshBackend extends Backend {
      *   在两条连接之间没有任何保证。
      */
     this._daemonVersion = null;
+    // 握手问到的能力列表（`ping` 应答里的 `caps`）。与 `_daemonVersion` 一样
+    //   是这一条连接的事实，同生共死。缺席（老守护进程不报）保持 `null`，
+    //   调用方按基线处理 —— 不是"全都支持"。
+    this._daemonCaps = null;
     // 调用方（index.js 的启动接续）问的是「有没有连上」，不是「你的私有字段叫什么」。
     // 见 backend.js 接口注释。连接中途断开时 `_conn` 会被置回 null（:309、:501），
     // 所以这个 getter 跟着它就是准的。
@@ -811,6 +815,7 @@ class SshBackend extends Backend {
     if (this._conn) {
       return Promise.resolve({
         ok: true, whoami: this._whoami, daemonVersion: this._daemonVersion,
+        daemonCaps: this._daemonCaps,
       });
     }
     if (this._connecting) return this._connecting;
@@ -885,8 +890,14 @@ class SshBackend extends Backend {
         //   undefined —— 答了一个对象，但里面没有 `version`。
         // 后两者都不是"旧"，`versionCheck` 会给它们各自一个名字。
         let daemonVersion = null;
+        // 能力列表与版本一样是三态：数组 = 问到了；null = 没问到（对面没有
+        //   `ping`）；undefined 那一格不存在 —— 老守护进程的 `ping` 里没有
+        //   `caps`，这里把它折成 `null`，调用方按基线处理。
+        let daemonCaps = null;
         if (ping && ping.ok) {
           daemonVersion = (ping.data || {}).version;
+          const caps = (ping.data || {}).caps;
+          daemonCaps = Array.isArray(caps) ? caps.filter((c) => typeof c === 'string') : null;
         } else if (!noPing) {
           // 问不到、也不是"对面没有这个 op"，这条链路本身有问题。
           // 与下面 whoami 的失败走同一条路：如实报告，别以为连上了。
@@ -922,7 +933,8 @@ class SshBackend extends Backend {
         if (resp && resp.ok) {
           this._whoami = resp.data;
           this._daemonVersion = daemonVersion;
-          return done({ ok: true, whoami: resp.data, daemonVersion });
+          this._daemonCaps = daemonCaps;
+          return done({ ok: true, whoami: resp.data, daemonVersion, daemonCaps });
         }
         if (resp && resp.error && resp.error.kind === 'cli_missing') {
           const missing = '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。';
@@ -975,6 +987,7 @@ class SshBackend extends Backend {
           this._conn = null;
           this._whoami = null;
           this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
+          this._daemonCaps = null;      // 同上
           // 常驻通道也同生共死，而且要先摘掉重开定时器 —— 不摘的话，SSH
           //   断开之后那个定时器会去重开一条属于上一条 SSH 连接的通道，
           //   而它现在连 `_conn` 都是 null，只会在日志里留下一句莫名其妙的失败。
@@ -1581,6 +1594,7 @@ class SshBackend extends Backend {
     this._conn = null;
     this._whoami = null;
     this._daemonVersion = null;   // 与 _conn 同生共死，理由见构造器
+    this._daemonCaps = null;      // 同上
     if (c) { try { c.end(); } catch { /* 尽力而为 */ } }
     // 主动关闭也要广播。`client.on('close')` 那道守卫要求 `_conn === client`，
     //   而上面刚把它清掉，所以不在这里说一声的话，左栏与浮窗那一行会一直
