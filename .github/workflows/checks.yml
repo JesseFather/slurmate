@@ -57,10 +57,14 @@ jobs:
   # ── 集群侧自测 ──────────────────────────────────────────────────────────────
   # 注意：有人可能会以为这个测试需要真集群才能跑。不需要 ——
   # 它对 Slurm 的调用全部打了桩（替换 run_cmd），测的是解析逻辑本身。
-  # 所以它能在裸的 ubuntu-latest 上跑，也【应该】在这里跑：
+  # 所以它能在裸的 runner 上跑，也【应该】在这里跑：
   # 以前它只在开发机上手动跑过，等于没有回归防线。
   cluster:
-    runs-on: ubuntu-latest
+    # 钉在 24.04，不用 ubuntu-latest：那个已经指向 26.04，而 setup-python 的
+    #   3.9 只提供到 24.04（3.9.25 的构建列表里没有 26.04）。3.9 是刻意的
+    #   （部署目标是 RHEL 9 系），不能为了让镜像跑得起来就升到 3.12 —— 那会让
+    #   "用了 3.10 的语法"这类问题漏过去。
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +115,8 @@ jobs:
 
   # ── 语法与一致性 ────────────────────────────────────────────────────────────
   lint:
-    runs-on: ubuntu-latest
+    # 同上：3.9 只到 24.04。这一条与 cluster 那一条是同一个理由。
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
