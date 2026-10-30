@@ -17,12 +17,15 @@
 ## 版本与 tag
 
 协议版本是两段（`major.minor`），规则见 [CHANGELOG.md](../CHANGELOG.md) 顶部。
-tag 里的版本是协议版本，不是 `client/package.json` 那个三段的值。
+
+tag 里的是发布标识：正式版就是协议版本，预览版在它后面加 `-<后缀>`。它与
+`cluster/slurmate-sessiond` 的 `RELEASE` 必须逐字相同（去掉开头的 `v`），
+`release.yml` 判这一条。两个包名也用它，所以预览版与正式版不会同名。
 
 | 类型 | tag | 例 |
 |---|---|---|
-| 正式版 | `v<版本>` | `v0.37` |
-| 预览版 | `v<版本>-<后缀>` | `v0.37-rc1` |
+| 正式版 | `v<版本>` | `v0.38` |
+| 预览版 | `v<版本>-<后缀>` | `v0.38-rc1` |
 
 同一个版本可以有多个预览版。两类 tag 都先落成一个 draft Release，审过再公开。
 
@@ -46,9 +49,25 @@ required check 通过，所以 `main` 上的每个提交都来自一次绿过的
 
 版本号由发布者点名。不发新版本时跳过本节。
 
-升版本要改四处：`client/package.json`、`client/package-lock.json`、
-`cluster/slurmate`、`cluster/slurmate-sessiond`。`docs/PROTOCOL.md` 的〈协议版本〉
-与 `SECURITY.md` 的「当前维护的版本」跟着改；`checks.yml` 断言这几处一致。
+两个号要分开改，它们回答的问题不同：协议版本回答"这两端能不能谈"，发布标识回答
+"这是哪一次发出来的"。
+
+协议版本（`x.y`）改两处：`cluster/slurmate` 与 `cluster/slurmate-sessiond`。
+`docs/PROTOCOL.md` 的〈协议版本〉与 `SECURITY.md` 的「当前维护的版本」跟着改。
+
+发布标识（预览版的后缀）改同样那两处的 `RELEASE`。正式版没有后缀，那时它与协议
+版本逐字相同。
+
+`client/package.json` 与 `client/package-lock.json` 的那个三段版本是派生的：
+`VERSION` + `.0` + 后缀。它照样要改，但不是第三个号 —— 它是算出来的，`checks.yml`
+断言它逐字等于那个派生值。
+
+第三段固定是 `.0`，只为满足 electron-builder 的 semver 校验。界面、诊断与安装包文件名都用
+两段。
+
+`release.yml` 断言两个站点包名、客户端安装包文件名与 tag 逐字相同。
+
+预览版之间只动发布标识，协议版本不动 —— 它们的协议一样。
 
 还有一处没有检查器守着，要手改：本文与 `release.yml` 注释里的示例版本号。
 
@@ -63,7 +82,7 @@ required check 通过，所以 `main` 上的每个提交都来自一次绿过的
 
 ```bash
 git add -A
-git commit -m "0.37：发布"
+git commit -m "0.38：发布"
 git push origin <分支>
 ```
 
@@ -72,9 +91,9 @@ git push origin <分支>
 ### 5. 打 tag
 
 ```bash
-git tag v0.37          # 正式版
-git tag v0.37-rc1      # 预览版
-git push origin v0.37
+git tag v0.38          # 正式版
+git tag v0.38-rc1      # 预览版
+git push origin v0.38
 ```
 
 tag 推上去之后 `release.yml` 开始跑。
@@ -86,7 +105,7 @@ tag 推上去之后 `release.yml` 开始跑。
 | `guard` | tag 必须在 `main` 的历史里 |
 | `test` | 在 Linux 上跑一遍 `npm test` |
 | `build` | 三个平台各打一次包（`electron-builder`），不重复跑测试 |
-| `site` | 跑单文件包自测，打出 `.run` 与打包器（`make-packer.js` 把文档嵌进去），核对包名里的版本与 tag |
+| `site` | 跑单文件包自测，打出 `.run` 与打包器（`make-packer.js` 把文档嵌进去），核对两个包名与 tag 逐字相同 |
 | `publish` | 收集三样产物，开一个 draft Release |
 
 `publish` 依赖前三个产物 job 与 `guard`；任何一个红了都不会有 draft Release。
@@ -112,7 +131,7 @@ tag 推上去之后 `release.yml` 开始跑。
 |---|---|
 | `guard` 红 | tag 不在 `main` 的历史里 |
 | 推 `main` 被拒 | 分支保护要求走 PR 并通过五个 required check |
-| `site` 红，报版本段 | tag 与 `cluster/slurmate-sessiond` 的 `VERSION` 不一致 |
+| `site` 红，报发布标识 | tag 与 `cluster/slurmate-sessiond` 的 `RELEASE` 不逐字相同 |
 | 没有 draft | `publish` 依赖的 job 里有红 |
 | 少一个平台 | `build` 矩阵里那一格红了，看它的日志 |
 

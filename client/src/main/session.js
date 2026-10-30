@@ -515,9 +515,12 @@ class SessionController extends EventEmitter {
       sshHostKey: typeof s.ssh_host_key === 'string' ? s.ssh_host_key : null,
       sessionId: this.sessionId,
       jobId: s.job_id || null,
-      // 本次实际落在哪个分区/节点 —— 因为默认是「从有权限的分区里随机挑」，
-      // 用户事先不知道会落到哪种卡上，界面上必须显示出来。
+      // 本次实际落在哪个分区/节点。默认是「有权限、装得下的那几个一起交给
+      //   Slurm，由它挑最早能开始的」，所以提交那一刻不知道落在哪一个：
+      //   那时 `partition` 是 null，而 `partitions` 是交给它的那一列候选
+      //   （定下来之后只剩前者）。
       partition: s.partition || null,
+      partitions: Array.isArray(s.partitions) ? s.partitions : null,
       resources: s.resources || null,
       node: s.node || null,
       tunnelTarget: s.tunnel_target || null,
@@ -697,7 +700,7 @@ class SessionController extends EventEmitter {
    *   {cpus, mem, gres, partition, time}。`gres` 是结构化的描述符
    *   `{name, type, count}`（`type` 可空）—— 不是一个数字：GRES 的名字
    *   与型号是管理员在集群上定的，可能是 `gpu:a100`，也可能是 `mps`。
-   *   全部可选。缺省由服务端填（2 CPU / 8G / 从有权限的分区里随机挑一个）——
+   *   全部可选。缺省由服务端填（2 CPU / 8G / 分区由 Slurm 在有权限的里挑）——
    *   默认值不由客户端填，否则一个改过的客户端省略字段就能要到整机。
    *   只传用户真的填了的键，不要用 undefined 覆盖服务端的默认值。
    * @param {object} opts { preferredPort, serviceKind, sshPubkey, portChoice }

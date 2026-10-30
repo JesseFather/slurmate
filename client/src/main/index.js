@@ -340,6 +340,15 @@ let versionVerdict = null;
 let connectedDaemonVersion = null;
 
 /**
+ * 握手时对面声明支撑的几样东西（`ping` 应答里的 `caps`，`applyVersionGate` 填）。
+ *
+ * 它是"对面支持什么"的唯一来源。`null` 是缺席：老守护进程不报 `caps`，
+ *   那时按基线处理 —— 缺席不是"全都支持"，也不是"全都不支持"。
+ * 与 `connectedDaemonVersion` 一样是连接级事实，断开时清掉。
+ */
+let connectedDaemonCaps = null;
+
+/**
  * 待同意的那些（暂存树还在磁盘上，等用户点）。
  *
  * 换连接、断开、重新对账都会把它清掉 —— 它描述的是这一次连接的现场。
@@ -763,6 +772,8 @@ async function applyVersionGate(res) {
   versionVerdict = g.verdict;
   connectedDaemonVersion = typeof res.daemonVersion === 'string'
     ? res.daemonVersion : null;
+  connectedDaemonCaps = Array.isArray(res.daemonCaps)
+    ? res.daemonCaps.filter((c) => typeof c === 'string') : null;
 
   if (g.blocked) {
     // 先把连接关掉：绝不留一条"连上了、但不许用"的连接在那儿占着守护进程的
@@ -1472,6 +1483,9 @@ function pluginsView() {
       // 那一句说准 —— 那是唯一一处界面的说法取决于握手结论的地方，理由见
       // panel.js 里那一段：握过手就说明服务端不新，于是"站点太新"只能是别的原因。
       daemonVersionVerdict: versionVerdict,
+      // 对面声明支持什么。界面据此决定用不用新行为（例如分区下拉里那个
+      //   "不点名"选项指的是 Slurm 还是守护进程）。缺席时按基线处理。
+      daemonCaps: connectedDaemonCaps,
       failed: siteSync.failed || [],
       // 视图这一份不带回回收的数 —— 回收的后果用户看得到的是下面
       //   `versions` 那一栏（哪几个版本还在、还被谁要），一个数说不出这些。
@@ -3907,13 +3921,33 @@ function closeHostSession(rec) {
 }
 
 /**
+ * 客户端对外的版本号：两段（可以带发布后缀）。
+ *
+ * `app.getVersion()` 读的是 `client/package.json` 的 `version`，而那个字段必须
+ *   是三段 —— electron-builder 的 `fixVersionField` 用 semver 校验它，写两段
+ *   会当场被拒掉，一个安装包都打不出来。npm 在 install / pack 上不校验这个
+ *   字段，它只在发布到 registry 时才要求。它是整套版本号里唯一
+ *   绕不过去的三段，而且只是那个包的载体，不是另一个号。
+ * 第三段固定是 `.0`（`.github/workflows/checks.yml` 断言这一点）。对用户没有
+ *   意义的那个数字带出去，只会让人以为存在一个"补丁级"。
+ * 切法与 `client/src/main/plugins/index.js` 的 `hostVersion()` 是同一刀：前两段
+ *   就是协议版本。读不到或形状不认识时原样给 —— 不猜。
+ */
+function wireVersion(v) {
+  const s = typeof v === 'string' ? v : '';
+  const m = /^(\d+)\.(\d+)\.\d+(-.*)?$/.exec(s);
+  return m ? `${m[1]}.${m[2]}${m[3] || ''}` : s;
+}
+
+/**
  * 诊断材料。只写"客户端知道什么"，不写凭据、口令与密钥。
  *
  * 排版按"人拿它去贴进一个问题单"来定：一节一段，每条一行，没有 JSON 括号。
  */
 function diagnosticsText() {
   const lines = [];
-  const ver = (typeof app.getVersion === 'function' && app.getVersion()) || '未知';
+  const raw = (typeof app.getVersion === 'function' && app.getVersion()) || '';
+  const ver = wireVersion(raw) || '未知';
   lines.push('# Slurmate 诊断材料', '');
   lines.push(`生成时间：${new Date().toISOString()}`);
   lines.push(`客户端版本：${ver}`);
@@ -4409,6 +4443,7 @@ async function teardownConnection() {
   siteSync = null;
   versionVerdict = null;    // 连接级的结论，连着的那条没了它就不再成立
   connectedDaemonVersion = null;
+  connectedDaemonCaps = null;
 }
 
 /**
@@ -4999,7 +5034,9 @@ function registerIpc() {
     // 不含临时那一份：它只活在内存里（`tempSpaces`），会随会话结束消失，
     //   列出来等于让用户去选一个明天不存在的东西。
     spaces: cfg.spaces,
-    version: app.getVersion(),
+    // 两段的那个（见 `wireVersion`）：界面与诊断都显示它。三段只活在
+    //   `client/package.json` 里，那是 npm 的载体，不是第二个版本号。
+    version: wireVersion(app.getVersion()),
   }));
 
   // 测试夹具那条不探：它是本机的假站点，探出来的"可达 / 不可达"两边都是假话。
@@ -5545,7 +5582,8 @@ function registerIpc() {
       }
 
       const res = await doConnect(conn);
-      return { ...res, whoami, partitions, plugins: pluginsView() };
+      return { ...res, whoami, partitions, plugins: pluginsView(),
+               daemonCaps: connectedDaemonCaps };
     } finally {
       connectInFlight = false;
     }
@@ -5563,7 +5601,8 @@ function registerIpc() {
     }
     config.rememberHostKey(cfgDir, cfg, conn.host, conn.port, fingerprint);
     const res = await doConnect(conn, { trustHostKey: fingerprint });
-    return { ...res, whoami, partitions, plugins: pluginsView() };
+    return { ...res, whoami, partitions, plugins: pluginsView(),
+             daemonCaps: connectedDaemonCaps };
   });
 
   /**
@@ -6508,6 +6547,8 @@ module.exports = {
     /** 把空手超时调到毫秒级 —— 生产路径上它是十分钟（见 `EMPTY_HANDS_MS`）。 */
     setEmptyHandsMs: (ms) => { emptyHandsMs = ms; },
     getEmptyHandsMs: () => emptyHandsMs,
+    /** 客户端对外的版本号（两段）。用例要证明 npm 载体那个第三段不会带出去。 */
+    wireVersion,
     /** 某一槽的记录（`getSessions().get(slot)` 的糖，用例里读起来短一点）。 */
     sessionAt: (slot) => sessions.get(slot),
     getWindow: () => win,

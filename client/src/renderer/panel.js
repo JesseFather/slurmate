@@ -633,6 +633,9 @@ function jobEndedKind(sn) {
 /** 上一次为哪个槽报过"作业结束了"（只报一次，见 renderSnapshot 里那一条）。 */
 let lastEndedSlot = null;
 
+/** 上一帧里会话页面盖没盖着面板（只在盖上来那一下收高级选项，见 renderSnapshot）。 */
+let lastCovered = false;
+
 function renderSnapshot(s) {
   lastSnap = s || null;
   const bar = $('statusbar');
@@ -704,6 +707,15 @@ function renderSnapshot(s) {
   //   `renderStatusEnd` 里（它同时看屏名与"面板有没有抬上来"）。这里不各判一遍：
   //   两处各写一份的话，切标签时会有一处不跟着变（2026-10-18 真机）。
   renderStatusEnd(s);
+  // 会话页面盖上来，就是离开了插件那一屏（用户 2026-10-30）。
+  //   那一屏的 DOM 一直留在文档里：`showScreen` 切走只加一个 `hidden`，而被原生
+  //   视图盖住时连 `hidden` 都没有。于是"离开"在路由那一层从来没发生过 ——
+  //   展开着的高级选项、填进去的值一直留到用户点「面板」回来。
+  //   只认盖上来那一下（边沿）：收起就是退回默认，每帧收一次等于把用户正在填的
+  //   那一格清掉，而页面盖着的时候他本来也填不了。
+  const covered = pageCovering(s);
+  if (covered && !lastCovered) for (const cell of advCells) cell.collapse();
+  lastCovered = covered;
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
   //    `setVisible(true)`，从状态条下沿铺到底），面板里那一条也跟着被盖住 ——
@@ -739,6 +751,18 @@ function renderSnapshot(s) {
 }
 
 /**
+ * 会话页面此刻有没有盖在面板上。
+ *
+ * 判据：前台那条跑着、它的插件有页面、而面板没被抬上来（`SESS.panelFront`，
+ *   由主进程随会话状态一起推）。
+ * 两处读者：状态条右侧那几颗（露不露）与高级选项（盖上来就等于离开了插件那一屏）。
+ *   各判一遍的话，漂开的方向是"按钮已经在会话页面上了，而高级选项还开着"。
+ */
+function pageCovering(s) {
+  return Boolean(s) && s.state === 'running' && hasSurface(s) && !SESS.panelFront;
+}
+
+/**
  * 状态条右侧那两颗：只在会话页面真的盖着窗口时存在。
  *
  * 用户 2026-10-18 定的形状：
@@ -747,16 +771,13 @@ function renderSnapshot(s) {
  *     那一屏上就有大按钮，不需要这一颗。
  * 所以「结束会话」这个名字没有了 —— 它停的一直是一条作业。
  *
- * 「页面盖着」的判据：前台那条跑着、它的插件有页面、而面板没被抬上来
- *   （`SESS.panelFront`，由主进程随会话状态一起推）。
+ * 「页面盖着」的判据在 `pageCovering()`：高级选项那边读的是同一个。
  */
 function renderStatusEnd(s) {
   const btn = $('sb-end');
   const reload = $('sb-reload');
   const leave = $('sb-leave');
-  const st = s ? s.state : 'idle';
-  const pageOnScreen = Boolean(s) && st === 'running'
-    && hasSurface(s) && !SESS.panelFront;
+  const pageOnScreen = pageCovering(s);
   reload.classList.toggle('hidden', !pageOnScreen);
   // 回面板的那条路跟着那块页面一起露：页面盖着的时候它是唯一看得见的出口。
   leave.classList.toggle('hidden', !pageOnScreen);
@@ -1010,8 +1031,12 @@ function renderKv(s) {
   ] : [
     ['会话 ID', s.sessionId || '—'],
     ['作业 ID', s.jobId || '—'],
-    // 默认是随机挑分区，所以用户事先不知道会落到哪种卡上 —— 必须显示实际结果
-    ['分区', s.partition || '—'],
+    // 默认是把几个候选一起交给 Slurm 挑，所以提交之后有一段时间只说得
+    //   出候选：那时写「待定」，并把交给它的是哪几个念出来 —— 干摆一个
+    //   「—」与"查不到"长得一模一样。
+    ['分区', s.partition
+      || (s.partitions && s.partitions.length
+        ? `待定（${s.partitions.join(' / ')}）` : '—')],
     ['资源', resText],
     ['节点', s.node || '—'],
     ['隧道目标', s.tunnelTarget || '—'],
@@ -1100,6 +1125,8 @@ function jobAsSnap(j) {
     sessionId: j.session_id,
     jobId: j.job_id,
     partition: j.partition,
+    // 还没定下来的那些：列表行也带这一列（见守护进程的 `session_view`）。
+    partitions: Array.isArray(j.partitions) ? j.partitions : null,
     resources: j.resources || null,
     gresText: j.gres_text || null,
     node: j.node,
@@ -3110,6 +3137,10 @@ async function startWith(serviceKind, adv, btn, opts = {}) {
       const pv = await window.slurmate.partitions();
       if (pv && pv.plugins) renderPlugins(pv.plugins);
     }
+    // 提交成功：这一份填写已经用掉了，当场收起、退回默认（用户 2026-10-30）。
+    //   它只对下一次「开始会话」有效，而那句话就写在这几格下面 —— 留着不收，
+    //   用户从会话页面点「面板」回来看到的仍是开着、填着值的那几格。
+    if (r && r.ok) adv.collapse();
   } finally {
     btn.disabled = false;
   }
@@ -3187,11 +3218,16 @@ function historyLine(j) {
 //   规矩的第二份实现。没接着的那些照实说出来，出路是重连一次。
 
 /**
- * 重新问一次服务端（`op:list`）。
+ * 重新问一次服务端（`op:list`），顺带把本机那几条会话的视图也重取一份。
  *
  * 它不是缓存刷新，是一次真查询。作业列表的变化有一大半发生在本进程之外
  *   （另一台电脑提交的、CLI 提交的、排队中的作业被调度器跑起来），所以它必须
  *   能随时重问 —— 「刷新」那个按钮存在的理由就是这个，而不是装饰。
+ *
+ * 详情那一块还有一半来自本机的会话视图（隧道、本地地址、上次心跳只有本机有），
+ *   而那一份只在状态真的变过时才推过来。不跟着重取的话，这一颗只换列表：行上的
+ *   作业状态更新了，下面那一块还是上一次推送的样子，要再点一次「面板」才看得见
+ *   （用户 2026-10-30）。那一趟是本机的 IPC，不向站点多问一次。
  */
 async function refreshJobs() {
   const connId = boot ? boot.activeConnectionId : null;
@@ -3207,6 +3243,14 @@ async function refreshJobs() {
     forConn: connId, list: r.jobs || [], at: r.at || Date.now(),
     error: null, selected: JOBS.selected,
   };
+  // 先记下这一份的活会话集合再交给 `renderSessions`：它自己会在集合变过时再排
+  //   一轮 `refreshJobs`，而那一轮问的正是我们手上这一份 —— 不记就多问站点一次。
+  const st = await window.slurmate.states();
+  if (st && Array.isArray(st.sessions)) {
+    lastLiveIds = st.sessions.filter((x) => x.live)
+      .map((x) => x.slot).sort().join(',');
+    renderSessions(st);
+  }
   renderJobs();
 }
 
@@ -3403,6 +3447,20 @@ async function takeoverSelectedJob() {
 let partList = [];
 
 /**
+ * 对面声明支持的那几样（`bootstrap().site.daemonCaps`）。
+ *
+ * `null` 是缺席：老守护进程不报 `caps`，或者还没有连上。缺席按基线处理 ——
+ *   不是"全都支持"，也不是"全都不支持"。界面只问一件事：
+ *   分区下拉里那个"不点名"的选项，`submit.any_partition` 在不在这张表里。
+ */
+let daemonCaps = null;
+
+/** 对面有没有声明某一项能力。缺席一律按"没有"。 */
+function hasCap(name) {
+  return Array.isArray(daemonCaps) && daemonCaps.includes(name);
+}
+
+/**
  * 这一屏上活着的那些块的那几格（`renderPlugins` 每重画一次就整个换一批）。
  *
  * 为什么要有一份名单：分区表是站点级的，它到得比插件块早、也可能中途变
@@ -3476,10 +3534,11 @@ function memGbOf(s) {
 }
 
 /**
- * 这一格的核数上限：指定分区用它自己的，随机时取有权限分区里的最大值。
+ * 这一格的核数上限：指定分区用它自己的，不指定时取有权限分区里的最大值。
  *
- * 随机取最大值而不是最小值：用户说的是"随便挑一个分区"，挑中的那个由服务端
- *   从装得下这个请求的分区里选（`fit_resources()`），所以最大值要得到。
+ * 取最大值而不是最小值：用户说的是"随便挑一个分区"，而服务端会把装得下这个
+ *   请求的那几个一起交给 Slurm（`fit_resources()`），落到哪一个都可能，所以
+ *   最大值要得到 —— 取最小值会把合法的大请求拦住。
  * 只算 `allowed` 的分区：无权限的永远不会被挑中。
  * `null` = 这一格没有可用的上限（旧站点、或者查询失败），调用方退回
  *   `UI_MAX_CPUS`。
@@ -3627,7 +3686,7 @@ function dropRange(st, key, cell, ctrl) {
  * 两种情况下那个输入框照旧在，`512M` 这种写法照旧写得进去。
  */
 /**
- * CPU 那一格的滑块：顶 = 当前分区的每节点核数；随机分区取各分区的最大值。
+ * CPU 那一格的滑块：顶 = 当前分区的每节点核数；没挑分区时取各分区的最大值。
  *
  * 每次重判：换分区、分区表刷新都要走它。站点那份默认不在档位上时插进去；
  *   默认比顶还大（站点默认是给另一种节点的）时不画，输入框留着。
@@ -3839,7 +3898,7 @@ function pluginAdv(defaults) {
   //   （没装滑块的格子上那个框的占位话写着），不必再用一句话说一遍。
   // 剩下这条是用户从这里看不出来的：它到下一次连接才生效。
   body.append(el('p', 'sub adv-note',
-    '这些设置不会被记住，收起它、离开这一屏或下次连接后即恢复默认。'
+    '这些设置不会被记住：开始一次会话、收起它、离开这一屏，都恢复默认。'
     + '唯一的例外是作业没结束时的闪断重连，那时会沿用它。'));
 
   // 换分区，可选的 GRES 跟着换（上限是分区自己的：同一个集群上一种卡每节点
@@ -3849,9 +3908,10 @@ function pluginAdv(defaults) {
   advCells.push(st);
 
   // 收起 = 退回默认（2026-10-18 用户点的那一条：填过、收起、再打开要恢复默认）。
-  //   状态只有两档：收着 = 全是默认；展开着 = 可能填着值。离开插件那一屏也走
-  //   这一条路（`showScreen` 调 `st.collapse`）—— 不重画、不另清一遍，两处清值
-  //   迟早会漂开。
+  //   状态只有两档：收着 = 全是默认；展开着 = 可能填着值。三条入口都走这一条路：
+  //   点这颗开关、离开插件那一屏（`showScreen`）、以及会话页面盖上来或者提交成功
+  //   （`renderSnapshot` 与 `startWith`，2026-10-30）—— 不重画、不另清一遍，
+  //   各处各清一遍迟早会漂开。
   const setOpen = (open) => {
     if (!open) resetAdv(st);
     body.classList.toggle('hidden', !open);
@@ -3892,7 +3952,7 @@ function resetAdv(st) {
  *
  * 保留这一块自己选着的那个：重画发生在"分区表变了"的时候，不是"用户换了分区"
  *   的时候 —— 若每次重画都把选择抹掉，用户挑好的分区会在一次后台刷新之后自己弹回
- *   "随机挑一个"。
+ *   那个"不点名"的选项。
  */
 function fillPartSelect(st) {
   const sel = st.part;
@@ -3900,7 +3960,12 @@ function fillPartSelect(st) {
   sel.textContent = '';
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = '（随机选择一个有权限的）';
+  // 这句话说的是"谁来挑"。只有对面声明了 `submit.any_partition`，它才是把
+  //   整列候选交给 Slurm；老守护进程那边是它自己从有权限的里挑一个。两者都
+  //   能用，但对用户是两件事，所以按声明分开说 —— 不拿版本号猜。
+  none.textContent = hasCap('submit.any_partition')
+    ? '（不点名，由 Slurm 在有权限的里选择）'
+    : '（不点名，由站点的守护进程选择）';
   sel.append(none);
 
   for (const p of partList) {
@@ -3937,7 +4002,7 @@ function renderPartitions(list) {
  * 没挑分区时给的是所有有权限分区的并集：不这么做，"要 2 张卡、分区随便"
  *   这句话在界面上就表达不出来 —— 而服务端是支持的（`fit_gres` 在没点名分区时
  *   在所有分区里找）。并集里同一个名字取各分区里最大的 `per_node_max`，
- *   因为最终落到哪个分区由服务端随机挑。
+ *   因为最终落到哪个分区由 Slurm 在候选里挑。
  */
 function gresChoicesFor(partName) {
   if (partName) {
@@ -4158,6 +4223,9 @@ async function handleConnectResult(res) {
     if (!acct) {
       notice('error', '这个账号尚未分配集群计算权限，请联系管理员，否则提交作业会失败。');
     }
+    // 能力列表要先落下来：分区下拉那个"不点名"选项的文案读它，而下面那一行
+    //   就会重画下拉。顺序反了，用户看到的永远是上一次连接的声明。
+    daemonCaps = Array.isArray(res.daemonCaps) ? res.daemonCaps : null;
     if (res.partitions) renderPartitions(res.partitions);
     // 插件清单也是连上之后才有的（`op_plugins` 走这条路）—— 不在这里刷的话，
     //   首次连接前界面上只有"这个守护进程不通报插件清单"，而那是句假话。
@@ -4636,6 +4704,8 @@ function bindEvents() {
  * 版本只有一个来源：主进程 `app.getVersion()`（`app:bootstrap` 带回来的
  *   `version`）。在这里另写一个字符串就会漂 —— 而且漂的方向没人会注意到：
  *   界面上写着一个版本，装上去的那一份是另一个。
+ * 带回来的是两段（主进程的 `wireVersion` 把 npm 载体那个第三段切掉了），
+ *   所以这一格与站点端 `--version` 报的是同一个形状。
  * 没有这一格就照实说「版本未知」，不猜。
  */
 function renderAbout() {
@@ -4653,6 +4723,10 @@ async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
   renderAbout();
+  // 能力列表是连接级的事实，与 `partitions` 一样在首屏取一次；之后每次
+  //   连上站点都会带回新的那一份（见 `handleConnectResult`）。
+  daemonCaps = (boot.site && Array.isArray(boot.site.daemonCaps))
+    ? boot.site.daemonCaps : null;
   syncNewButton();
 
   // bootstrap 里没有公钥 —— 密钥是按连接的，界面在打开某条连接的表单时

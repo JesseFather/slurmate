@@ -79,22 +79,30 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 版本号只有一处来源：守护进程里那一行。它同时是四个声明里的一个，另三处由 CI
-#   盯着（见 .github/workflows/checks.yml 的版本号那一步）—— 这里不抄第二份名单，
-#   只读它，并要求读到的正好一行：行格式变了就当场停，而不是打出一个空版本号。
+# 包名与包里的 `--version` 都用发布标识（`RELEASE`），不是协议版本：预览版
+#   与正式版的协议完全一样，但它们是两个包，必须叫得出两条不同的名字。
+# 只有一处来源：守护进程里那一行 `RELEASE`。另两处（本文件读的 CLI 那行、CI）
+#   都盯着它 —— 这里不抄第二份名单，只读它，并要求读到的正好一行：行格式变了
+#   就当场停，而不是打出一个空名字。
 ver_of() {
-    local f="$1" n
-    n="$(grep -c '^VERSION = "' "$f" || true)"
-    [[ "$n" == "1" ]] || die "$f 里匹配 '^VERSION = \"' 的行有 $n 行，该正好 1 行"
-    sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$f"
+    local f="$1" key="$2" n
+    n="$(grep -c "^${key} = \"" "$f" || true)"
+    [[ "$n" == "1" ]] || die "$f 里匹配 '^${key} = \"' 的行有 $n 行，该正好 1 行"
+    sed -n "s/^${key} = \"\(.*\)\"\$/\1/p" "$f"
 }
-VERSION="$(ver_of "${SELF_DIR}/slurmate-sessiond")"
-CLI_VERSION="$(ver_of "${SELF_DIR}/slurmate")"
-[[ "$VERSION" == "$CLI_VERSION" ]] \
-    || die "两个 VERSION 不同：slurmate-sessiond=${VERSION} slurmate=${CLI_VERSION}"
-[[ -n "$VERSION" ]] || die "版本号是空的"
+VERSION="$(ver_of "${SELF_DIR}/slurmate-sessiond" VERSION)"
+RELEASE="$(ver_of "${SELF_DIR}/slurmate-sessiond" RELEASE)"
+CLI_RELEASE="$(ver_of "${SELF_DIR}/slurmate" RELEASE)"
+[[ "$RELEASE" == "$CLI_RELEASE" ]] \
+    || die "两个 RELEASE 不同：slurmate-sessiond=${RELEASE} slurmate=${CLI_RELEASE}"
+[[ -n "$RELEASE" ]] || die "发布标识是空的"
+# 发布标识的形状：协议版本后面跟可选的 `-<后缀>`。这一条同时把"忘了改
+#   RELEASE"（它还停在上一版）与"写错了 VERSION"两种情形分开：前者对不上
+#   前缀，后者对不上后缀那一半。
+[[ "${RELEASE%%-*}" == "$VERSION" ]] \
+    || die "RELEASE=${RELEASE} 的前缀不是 VERSION=${VERSION}（应为 \${VERSION} 或 \${VERSION}-<后缀>）"
 
-[[ -n "$OUT" ]] || OUT="${ROOT}/dist/slurmate-site-${VERSION}.run"
+[[ -n "$OUT" ]] || OUT="${ROOT}/dist/slurmate-site-${RELEASE}.run"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/slurmate-make-run.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -111,7 +119,7 @@ for f in "${PAYLOAD[@]}"; do
     chmod "$_mode" "${WORK}/payload/${f}"
 done
 
-sed "s|@VERSION@|${VERSION}|" "${SELF_DIR}/run-header.sh" > "${WORK}/header/run"
+sed "s|@RELEASE@|${RELEASE}|" "${SELF_DIR}/run-header.sh" > "${WORK}/header/run"
 # 换完不许再有占位符：留着的话，说明壳里加了新的 `@…@` 而这里没跟上 —— 那样
 #   打成包之后它才会露出来，而那已经是别人的机器上了。
 if grep -q '@[A-Z_]\{2,\}@' "${WORK}/header/run"; then

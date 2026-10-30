@@ -55,7 +55,14 @@ import time
 #
 # 第四处（package-lock）最容易漏：`npm ci` 不比较 lock 里根那个 version 字段，
 # 它停在旧值也没人会发现。
-VERSION = "0.37"
+VERSION = "0.38"
+# 发布标识：这一份包是哪一次发出来的。`--version` 报它，站点包名用它。
+#   形状是 `VERSION` 后面跟可选的 `-<后缀>`；正式版没有后缀，那时它与
+#   `VERSION` 逐字相同。它不是协议版本：`ping` 报的仍是 `VERSION`，
+#   因为 rc 与正式版之间的协议完全一样，说成不同反而会让两端判得不对。
+#   后缀与 `cluster/slurmate-sessiond` 的那一行必须相同，由
+#   .github/workflows/checks.yml 断言。
+RELEASE = "0.38-rc1"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
@@ -1106,7 +1113,7 @@ def print_session(s, verbose=True):
         print("作业 ID   : %s" % s.get("job_id"))
     res = s.get("resources") or {}
     gt = gres_text(res.get("gres"))
-    print("分区      : %s" % (s.get("partition") or "（Slurm 默认）"))
+    print("分区      : %s" % (s.get("partition") or "（由 Slurm 决定）"))
     print("资源      : %s 核 / %s%s"
           % (res.get("cpus") or "?", res.get("mem") or "?",
              "，%s" % gt if gt else ""))
@@ -1329,7 +1336,8 @@ def cmd_partitions(args):
     print()
     print("「每节点核数」是 `-c` 的上限（有效核数，保留核已经扣掉）。")
     print("GRES 那一列是每个节点最多几个（`--gres` 就是按节点算的）。")
-    print("不指定 --partition 时，会从有权限的分区里随机选择一个。")
+    print("不指定 --partition 时，会把有权限、装得下的分区一起交给 Slurm，")
+    print("由它选择最早能开始的那个；落到哪个在作业进队列之后才定得下来。")
     print("缺省资源是按插件的，见 `slurmate plugins`。")
     return 0
 
@@ -1465,7 +1473,7 @@ def cmd_submit(args):
     gt = gres_text(res.get("gres"))
     print("已提交：作业 %s（会话 %s）" % (d.get("job_id"), d.get("session_id")))
     print("插件 %s" % (req.get("service_kind") or "（本站的 default_plugin）"))
-    print("分区 %s，时间上限 %s" % (d.get("partition") or "（Slurm 默认）",
+    print("分区 %s，时间上限 %s" % (d.get("partition") or "（由 Slurm 决定）",
                                    d.get("requested_time")))
     print("资源 %s 核 / %s%s" % (res.get("cpus"), res.get("mem"),
                                 "，%s" % gt if gt else ""))
@@ -1679,7 +1687,7 @@ def build_parser():
     ap = argparse.ArgumentParser(
         prog="slurmate",
         description="Slurmate：远程开发会话管理（客户端请用 `slurmate rpc`）")
-    ap.add_argument("--version", action="version", version=VERSION)
+    ap.add_argument("--version", action="version", version=RELEASE)
     sub = ap.add_subparsers(dest="cmd")
 
     def add(name, fn, help_text, **kw):
@@ -1785,7 +1793,8 @@ def build_parser():
     p.add_argument("--json", action="store_true")
 
     p = add("submit", cmd_submit, "提交一个开发会话（所有参数都可省略）")
-    p.add_argument("--partition", help="分区（省略则从有权限的分区里随机选择一个）")
+    p.add_argument("--partition",
+                   help="分区（省略则由 Slurm 在有权限、装得下的那些里选择）")
     p.add_argument("--cpus", type=int,
                    help="CPU 核心数（省略 = 该插件的服务端默认）")
     p.add_argument("--mem", help="内存，如 8G（省略 = 该插件的服务端默认）")

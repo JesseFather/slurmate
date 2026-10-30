@@ -1,7 +1,8 @@
 {
   "name": "slurmate",
+  "private": true,
   "productName": "Slurmate",
-  "version": "0.37.0",
+  "version": "0.38.0-rc1",
   "description": "Slurmate — 远程开发会话桌面客户端（Electron 外壳）",
   "license": "Apache-2.0",
   "author": "JesseFather <JesseFather@users.noreply.github.com>",
@@ -17,5 +18,8 @@
   "devDependencies": {
     "electron": "^44.3.0",
     "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "artifactName": "${productName}-${buildVersion}-${arch}.${ext}"
   }
 }

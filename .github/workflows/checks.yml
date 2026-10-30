@@ -57,10 +57,14 @@ jobs:
   # ── 集群侧自测 ──────────────────────────────────────────────────────────────
   # 注意：有人可能会以为这个测试需要真集群才能跑。不需要 ——
   # 它对 Slurm 的调用全部打了桩（替换 run_cmd），测的是解析逻辑本身。
-  # 所以它能在裸的 ubuntu-latest 上跑，也【应该】在这里跑：
+  # 所以它能在裸的 runner 上跑，也【应该】在这里跑：
   # 以前它只在开发机上手动跑过，等于没有回归防线。
   cluster:
-    runs-on: ubuntu-latest
+    # 钉在 24.04，不用 ubuntu-latest：那个已经指向 26.04，而 setup-python 的
+    #   3.9 只提供到 24.04（3.9.25 的构建列表里没有 26.04）。3.9 是刻意的
+    #   （部署目标是 RHEL 9 系），不能为了让镜像跑得起来就升到 3.12 —— 那会让
+    #   "用了 3.10 的语法"这类问题漏过去。
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +115,8 @@ jobs:
 
   # ── 语法与一致性 ────────────────────────────────────────────────────────────
   lint:
-    runs-on: ubuntu-latest
+    # 同上：3.9 只到 24.04。这一条与 cluster 那一条是同一个理由。
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -178,9 +183,9 @@ jobs:
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
         #
         # 客户端那两处写的是三段（`0.37.0`）：那个 `version` 字段同时是 npm
-        #   包的版本号，而 npm 与 electron-builder 都要求语义化版本 —— 写两段会被
-        #   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"），
-        #   一个安装包都打不出来。协议版本 = 包版本的前两段，客户端对站点自报
+        #   包的版本号。electron-builder 的 `fixVersionField` 拿 semver 校验它 ——
+        #   写两段会当场被拒掉（"Invalid version"），一个安装包都打不出来。
+        #   npm 在 install / pack 上不校验这个字段，只有发布到 registry 才要求。协议版本 = 包版本的前两段，客户端对站点自报
         #   的就是这两段（`client/src/main/plugins/index.js` 的 `hostVersion()`）。
         #   所以这一条断言比的是四处的协议版本，不是四个字符串逐字相同。
         #
@@ -205,15 +210,27 @@ jobs:
 
           # npm 那一侧的写法。不从别处 import：它只在这两处用得上，而这两处
           # 正是本仓库里唯一的 npm 包。与 SHAPE 一样是"禁前导零"的逐段十进制。
-          PKG_SHAPE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+          # 第三段之后允许一个可选的 `-<发布后缀>`：预览版与正式版必须是两个
+          #   不同的版本号（同一个号不能对应两份内容），而 npm 与
+          #   electron-builder 都只要求它是语义化版本 —— 预发布段正是为此存在。
+          PKG_SHAPE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+          # 站点端的发布标识：协议版本后面跟同一个可选后缀。
+          REL_SHAPE = re.compile(r"^[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+
+          def const_of(path, name):
+              src = open(path, encoding="utf-8").read()
+              m = re.search(r'^%s\s*=\s*"([^"]+)"' % name, src, re.M)
+              return m.group(1) if m else ""
 
           def daemon_version(path):
-              src = open(path, encoding="utf-8").read()
-              m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M)
-              return m.group(1) if m else ""
+              return const_of(path, "VERSION")
 
           def from_json(path):
               return json.load(open(path, encoding="utf-8")).get("version") or ""
+
+          def suffix(v):
+              """发布标识的后缀；正式版是空串。"""
+              return v.split("-", 1)[1] if "-" in v else ""
 
           def proto(v, is_pkg):
               """这一处声明的协议版本；形状不对时给 None。
@@ -250,6 +267,61 @@ jobs:
               print("✗ 协议版本不一致：%s" % sorted(set(protos)))
               print("  改版本时四处都要改（客户端那两处写成三段，前两段就是协议版本）。")
               bad = 1
+
+          # ── 发布标识：客户端那个包版本与站点端那两行必须是同一个 ──────────
+          #
+          #   协议版本回答"这两端能不能谈"，发布标识回答"这是哪一次发出来的"。
+          #   预览版与正式版的协议完全一样，所以协议版本必须相同；而它们是
+          #   两份不同的内容，所以发布标识必须不同 —— 同一个号对应两份内容，
+          #   正是版本号最不该做的事。
+          #   漏改一边的症状：包叫 `0.37-rc1`，而它装上去的客户端自称 `0.37.0`
+          #   （或者反过来），报问题时两边对不上，而没有任何东西会红。
+          rel_d = const_of("cluster/slurmate-sessiond", "RELEASE")
+          rel_c = const_of("cluster/slurmate", "RELEASE")
+          pkgv = from_json("client/package.json")
+          pkg_rel = suffix(pkgv)
+          for name, v in (("cluster/slurmate-sessiond", rel_d),
+                          ("cluster/slurmate", rel_c)):
+              ok = bool(v) and REL_SHAPE.match(v) is not None
+              print("  %-26s %-12s %s" % (name, v or "(空)",
+                      "ok 发布标识" if ok else "FAIL 不是 x.y 或 x.y-<后缀>"))
+              if not ok:
+                  bad = 1
+          if rel_d and rel_c and rel_d != rel_c:
+              print("✗ 两个 RELEASE 不同：%s / %s" % (rel_d, rel_c))
+              bad = 1
+          if rel_d and protos and rel_d.split("-", 1)[0] != protos[0]:
+              print("✗ RELEASE=%s 的前缀不是协议版本 %s" % (rel_d, protos[0]))
+              bad = 1
+          if suffix(rel_d) != pkg_rel:
+              print("✗ 发布后缀对不上：客户端包版本 %s（后缀 %r），"
+                    "站点 RELEASE %s（后缀 %r）" % (pkgv, pkg_rel, rel_d, suffix(rel_d)))
+              print("  预览版与正式版都必须两端一起改。")
+              bad = 1
+          else:
+              print("  %-26s %-12s ok 与站点 RELEASE 的后缀相同"
+                    % ("client/package.json", pkgv))
+
+          # 客户端那个三段的包版本是派生的：VERSION + ".0" + 后缀。它不是第二个
+          #   号，第三段固定是 `.0` —— 那一格只为满足 electron-builder 的
+          #   semver 校验，
+          #   界面上早就把它切掉了（主进程的 `wireVersion`）。
+          want_pkg = (protos[0] if protos else "") + ".0" + (
+              "-" + suffix(rel_d) if rel_d and suffix(rel_d) else "")
+          if pkgv != want_pkg:
+              print("✗ client/package.json 的版本应当逐字是 %s，而它是 %s"
+                    % (want_pkg, pkgv or "(空)"))
+              print("  它是派生的（VERSION + '.0' + 后缀），不是另起的号。")
+              bad = 1
+          lockv = from_json("client/package-lock.json")
+          if lockv != pkgv:
+              print("✗ client/package-lock.json 是 %s，而 package.json 是 %s"
+                    % (lockv or "(空)", pkgv or "(空)"))
+              bad = 1
+          if pkgv == want_pkg and lockv == pkgv:
+              print("  %-26s %-12s ok 派生的三段（VERSION + '.0' + 后缀）"
+                    % ("客户端包版本", pkgv))
+
           # ── 文档里那几处「当前版本」必须跟着走 ────────────────────────────
           #
           #   这一条抓的是一个真的发生过的 staleness：仓库走到 0.13 的时候
@@ -288,7 +360,7 @@ jobs:
                   bad = 1
           if bad:
               sys.exit(1)
-          print("✓ 四处的协议版本一致；文档里那几处「当前版本」也跟着走")
+          print("✓ 四处的协议版本一致；发布标识两端相同；文档里那几处「当前版本」也跟着走")
           PY
 
       - name: 插件的跳过表三端必须一致

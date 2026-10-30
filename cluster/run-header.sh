@@ -66,8 +66,9 @@ fi
 
 set -uo pipefail
 
-# make-run.sh 在拼包时把这一行换成真的版本号。
-VERSION="@VERSION@"
+# make-run.sh 在拼包时把这一行换成真的发布标识（例如 `0.37-rc1`）。
+#   它与 `--version` 报的是同一个值，也与文件名里那个一致 —— 三处只读这一行。
+RELEASE="@RELEASE@"
 
 SELF="${BASH_SOURCE[0]}"
 # 相对路径跑的时候要先变成绝对路径：解压之后当前目录可能变了，而 $SELF 还要
@@ -86,9 +87,9 @@ FORWARD=()
 
 usage() {
     cat <<EOF
-slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
+slurmate-site-${RELEASE}.run — Slurmate 站点端单文件包
 
-用法：sudo bash slurmate-site-${VERSION}.run [动词] [开关]
+用法：sudo bash slurmate-site-${RELEASE}.run [动词] [开关]
 
   --check        体检：装之前查环境与前置条件，不做任何改动（两屏，见下）
   --doctor       诊断：装之后查文件、目录、服务与数据，不做任何改动
@@ -102,7 +103,7 @@ slurmate-site-${VERSION}.run — Slurmate 站点端单文件包
 
   --extract [目录]
                  只解压，不改动系统，也不需要 root
-                 （默认 ./slurmate-site-${VERSION}）
+                 （默认 ./slurmate-site-${RELEASE}）
 
   --dry-run      演练：说清将要做什么，一个字都不改（与安装、修复、体检合用）
   --no-restart   装/升级/修复结束后不重启服务（演练与脚本用）
@@ -134,7 +135,7 @@ cluster/install-base.sh。五个部署动词的实现只有那一份：预检、
 第一屏是事实清单，它的退出码不进结论；这一次体检的结论是第二屏的退出码。
 
 文档随包分发（cluster/docs/ 四份 + cluster/README.md），
-解压即可读：bash slurmate-site-${VERSION}.run --extract /tmp/slurmate-docs
+解压即可读：bash slurmate-site-${RELEASE}.run --extract /tmp/slurmate-docs
 EOF
 }
 
@@ -184,7 +185,7 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi ;;
         -h|--help)   usage; exit 0 ;;
-        --version)   echo "${VERSION}"; exit 0 ;;
+        --version)   echo "${RELEASE}"; exit 0 ;;
         # 其余开关原样转给 install-base.sh —— 它那一层认得哪些、不认得哪些，
         #   只有它说了算（在这里再列一份名单就是第二个写方）。
         -*)          FORWARD+=("$1"); shift ;;
@@ -193,7 +194,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$MODE" == "extract" ]]; then
-    dest="${EXTRACT_TO:-./slurmate-site-${VERSION}}"
+    dest="${EXTRACT_TO:-./slurmate-site-${RELEASE}}"
     extract_to "$dest"
     echo "  已解压到 $(cd "$dest" && pwd)"
     echo "  文档：$dest/cluster/README.md、$dest/cluster/docs/"
@@ -226,7 +227,7 @@ if [[ ! -f "$TMP/cluster/install-base.sh" ]]; then
 fi
 
 echo
-echo "  slurmate-site-${VERSION}.run"
+echo "  slurmate-site-${RELEASE}.run"
 echo "  包体已解压到 ${TMP}（退出时删掉，系统里不留中转站）"
 
 # 体检有两屏，因为查的不是同一类事实：环境那一份（前置条件）与部署预检那一份

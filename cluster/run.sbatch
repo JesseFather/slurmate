@@ -107,9 +107,14 @@ umask 077
 : "${SLURMATE_AUTH_MODE:?缺少 SLURMATE_AUTH_MODE}"
 
 # 分区可能为空串：守护进程在"分区权限查不到"时缺省提交会退化成不带 -p，
-# 由 Slurm 的默认分区兜底。空就是"提交那一刻不知道"，不是"没有分区" ——
-# 作业跑起来之后守护进程会从 scontrol 查到实际的，不需要这里猜。
+# 由 Slurm 的默认分区兜底。也可能是一列（逗号分隔）：那是交给 `-p` 的候选，
+# 落到哪个由 Slurm 挑。两种都是"提交那一刻不知道"，不是"没有分区"。
+#
+# 而作业自己手里有答案：`$SLURM_JOB_PARTITION` 是 Slurm 分给它的那个分区。
+# 会话文件与日志记它，不记那个请求 —— 那个文件是"这条会话是什么"的记录，
+# 不是"我们当初要了什么"的记录。
 SLURMATE_PARTITION="${SLURMATE_PARTITION:-}"
+SESSION_PARTITION="${SLURM_JOB_PARTITION:-$SLURMATE_PARTITION}"
 SLURMATE_CPUS="${SLURMATE_CPUS:-0}"
 SLURMATE_MEM="${SLURMATE_MEM:-}"
 # 请求的 GRES，写法就是交给 sbatch 的那个串（`gpu:a100:2` / `mps:100`），
@@ -331,7 +336,7 @@ write_session() {
     local body
     body="$(printf '{"schema":1,"session_id":"%s","job_id":%s,"uid":%s,"user":"%s","partition":"%s","node":"%s","node_ip":"%s","service_port":%s,"tunnel_target":"%s:%s","state":"%s","job_started_at":%s,"written_at":%s,"job_hb_at":%s,"service_kind":"%s","service_pid":%s,"auth_mode":"%s","auth_password":"%s","slurm_restart_number":%s,"exit_code":%s%s}\n' \
         "$(json_escape "$SLURMATE_SESSION_ID")" "$JOB_ID" "$MY_UID" "$(json_escape "$MY_USER")" \
-        "$(json_escape "$SLURMATE_PARTITION")" "$(json_escape "$NODE")" "$NODE_IP" \
+        "$(json_escape "$SESSION_PARTITION")" "$(json_escape "$NODE")" "$NODE_IP" \
         "${SVC_PORT:-0}" "$NODE_IP" "${SVC_PORT:-0}" "$state" "$STARTED_AT" \
         "$(date +%s)" "$(date +%s)" \
         "$(json_escape "$SLURMATE_SERVICE_KIND")" "${SVC_PID:-0}" \
@@ -642,7 +647,7 @@ trap 'log_err "收到 SIGUSR1：作业即将到期"; [[ -n "$SVC_PORT" ]] && wri
 
 # ─── 6. 主流程 ──────────────────────────────────────────────────────────────
 log "启动 session=$SLURMATE_SESSION_ID job=$JOB_ID node=$NODE" \
-    "partition=${SLURMATE_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gres=${SLURMATE_GRES:-（不占）}" \
+    "partition=${SESSION_PARTITION:-（Slurm 默认）} cpus=$SLURMATE_CPUS mem=${SLURMATE_MEM:-?} gres=${SLURMATE_GRES:-（不占）}" \
     "service=$SLURMATE_SERVICE_KIND"
 log "候选端口: $SLURMATE_CANDIDATES"
 

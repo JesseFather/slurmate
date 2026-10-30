@@ -1987,6 +1987,11 @@ exit 0
 
     a = argv_of()
     check("指定了分区 → 带 -p", "-p" in a and "2080TI" in a, str(a))
+    # 缺省那条路给的是一个逗号列表（见 op_submit）：`-p` 本来就收这种写法，
+    #   Slurm 在名单里挑最早能开始的（`man sbatch` 的 -p）。
+    a = argv_of(partition="2080TI,A6000,RTX8000")
+    check("候选列原样进 -p（逗号分隔就是 Slurm 的写法，不是我们发明的）",
+          "-p" in a and a[a.index("-p") + 1] == "2080TI,A6000,RTX8000", str(a))
     check("没 GPU → 完全省略 --gres（不是 gpu:0）",
           not any(x.startswith("--gres") for x in a), str(a))
     check("默认不写 -w（节点由 Slurm 在分区内选择）", "-w" not in a, str(a))
@@ -2175,10 +2180,12 @@ exit 0
     check("缺省提交成功", r.get("ok"), str(r))
     check("缺省 cpus=2、mem=8G（服务端填，客户端没给）",
           sess["cpus"] == 2 and sess["mem"] == "8G", "%s / %s" % (sess["cpus"], sess["mem"]))
-    check("缺省分区是从有权限的列表里选择的（不是空）",
-          sess["partition"] in ("A6000", "RTX8000", "2080TI"), sess["partition"])
-    check("响应里带回实际选中的分区（用户事先不知道）",
-          (r.get("data") or {}).get("partition") == sess.get("partition"), str(r.get("data")))
+    check("缺省提交把有权限、装得下的分区整列交给 Slurm（不是替它选一个）",
+          sess["partition"] == "2080TI,A6000,RTX8000", sess["partition"])
+    _d = r.get("data") or {}
+    check("响应里那一格是 null 与候选列 —— 落到哪个要等作业进队列才知道",
+          _d.get("partition") is None and _d.get("partitions")
+          == ["2080TI", "A6000", "RTX8000"], str(_d))
     check("缺省无 warning（服务端没替用户改任何内容）",
           "warning" not in (r.get("data") or {}),
           str((r.get("data") or {}).get("warning")))
@@ -2289,10 +2296,10 @@ exit 0
                             "gres": {"name": "gpu", "count": 16}})
     check("2080TI 每节点 8 张、要 16 张 → 拒绝（不是悄悄截成 8）",
           not r.get("ok") and r["error"]["kind"] == "bad_gres", str(r))
-    # 没点名分区（会随机挑一个）→ 必须从装得下它的分区里挑。mps 只有
-    # RTX8000 有 —— 若从全部有权限的分区里随机挑，就会落到装不下它的 2080TI
-    # 上被拒，而用户没有任何办法绕开（他本来就没指定分区）。界面上给的选项也是
-    # 并集，两边必须是同一句话。
+    # 没点名分区 → 候选只留装得下它的那些。mps 只有 RTX8000 有 —— 若把
+    # 全部有权限的分区都交出去，就会有一次落到装不下它的 2080TI 上被判"永远
+    # 起不来"，而用户没有任何办法绕开（他本来就没指定分区）。界面上给的选项
+    # 也是并集，两边必须是同一句话。
     _picked = set()
     for _ in range(12):
         r, sess, _ = run_submit({"op": "submit", "gres": {"name": "mps", "count": 100}})
@@ -2304,15 +2311,12 @@ exit 0
     else:
         check("没点名分区时只从装得下它的分区里选择（mps 只有 RTX8000 有）",
               _picked == {"RTX8000"}, str(sorted(_picked)))
-    # 而过滤不能把"随机选择"变成"永远选择同一个"：不带型号的 gpu 要 2 个，
-    #   三个分区都装得下，落点必须分散（12 次全落同一个的概率约 3^-11）。
-    _picked2 = set()
-    for _ in range(12):
-        _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
-        if _r2.get("ok"):
-            _picked2.add(_s2["partition"])
-    check("过滤之后仍然是随机选择（不是永远选择第一个装得下的）",
-          len(_picked2) >= 2, str(sorted(_picked2)))
+    # 而过滤之后留下的不是一个"挑好的"，是一条候选列：不带型号的 gpu 要 2 个，
+    #   三个分区都装得下，于是三个都进 `-p`，由 Slurm 选择最早能开始的。
+    _r2, _s2, _ = run_submit({"op": "submit", "gres": {"name": "gpu", "count": 2}})
+    check("装得下的都留在候选列里（不是替 Slurm 选一个）",
+          _r2.get("ok") and _s2["partition"] == "2080TI,A6000,RTX8000",
+          str(_s2.get("partition")))
     r, _s, _e = run_submit({"op": "submit",
                             "gres": {"name": "gpu", "type": "nosuch", "count": 1}})
     check("有权限的分区一个都装不下 → bad_gres，且那句话里有原因",
@@ -2377,6 +2381,25 @@ exit 0
           sess["requested_time"] == "7-00:00:00", sess["requested_time"])
     check("截断时间会告知用户", "上限" in (r.get("data") or {}).get("warning", ""),
           str((r.get("data") or {}).get("warning")))
+
+    # 候选不止一个时，时限按【最紧的那个】钳：我们不知道 Slurm 最后挑哪个，
+    #   而请求必须每一个候选都装得下。桩里三个分区都是 183 天，这里临时换一份
+    #   表让它们不一样 —— 否则这一条与上面那条判的是同一件事。
+    _real_parts = mod.Cluster.partitions
+    mod.Cluster.partitions = lambda self: {
+        "A6000": {"max_time": 86400, "is_default": False, "state": "UP",
+                  "nodes": 2, "cpus": 160},
+        "RTX8000": {"max_time": None, "is_default": False, "state": "UP",
+                    "nodes": 1, "cpus": 128},
+        "2080TI": {"max_time": 86400 * 30, "is_default": True, "state": "UP",
+                   "nodes": 1, "cpus": 64},
+    }
+    try:
+        r, sess, _ = run_submit({"op": "submit", "time": "2-00:00:00"})
+        check("候选有几个时按最紧的那个 MaxTime 钳（不知道 Slurm 会选哪个）",
+              sess["requested_time"] == "1-00:00:00", sess["requested_time"])
+    finally:
+        mod.Cluster.partitions = _real_parts
 
     r, sess, env = run_submit({"op": "submit", "time": "nonsense"})
     check("无法解析的时间 → bad_time(code 2)",
@@ -2916,6 +2939,13 @@ exit 0
 
     check("守护进程自己的 VERSION 合框架版本的形状（忘改成 x.y 时红在本地）",
           mod.FRAMEWORK_VERSION_RE.match(mod.VERSION) is not None, repr(mod.VERSION))
+
+    # 发布标识不是协议版本：它的前缀必须逐字是 VERSION，后面可以有 `-<后缀>`。
+    #   两者混起来有两种症状：报成三段的（客户端判"不是我们的守护进程"），
+    #   或者停在上一版而没人发现（包名与它一起错）。
+    check("发布标识 RELEASE 的前缀就是 VERSION，后缀可有可无",
+          mod.RELEASE == mod.VERSION
+          or mod.RELEASE.startswith(mod.VERSION + "-"), repr(mod.RELEASE))
 
     for _scheme, _re_ in (("framework", mod.FRAMEWORK_VERSION_RE),
                           ("plugin", mod.PLUGIN_VERSION_RE)):
@@ -8076,7 +8106,7 @@ exit 0
           _q_doc.get("pending_sessions") == _q_pend and _q_pend >= 1,
           "doctor=%r pending=%d" % (_q_doc.get("pending_sessions"), _q_pend))
     check("op_doctor 报守护进程版本与对账那两格",
-          _q_doc.get("version") == mod.VERSION
+          _q_doc.get("version") == mod.RELEASE
           and "last_tick_at" in _q_doc and "tick_age_seconds" in _q_doc
           and "last_tick_error" in _q_doc,
           "doctor=%r" % (_q_doc,))
@@ -10676,9 +10706,12 @@ exit 0
           (_nt or {}).get("A6000", {}).get("mem_free")
           == {"sum": 356352, "max": 256000},
           str(_nt and _nt.get("A6000")))
-    check("已分配等于总内存的节点贡献 0（合计不加、最大值不降）",
-          (_nt or {}).get("2080TI", {}).get("mem_free")
-          == {"sum": 32000, "max": 32000},
+    # 2080TI 那两台一台不响应（`idle*`）、一台 down，都不接新作业 ——
+    #   余量整个缺席，而不是写一个 0（0 的意思是"确实一点都剩不下"，那是
+    #   另一句话；缺席只说"这一格没有"）。"贡献 0"那一条在下面 `_drained` 那组。
+    check("两台的接不了新作业时余量整个缺席，不写 0",
+          "mem_free" not in ((_nt or {}).get("2080TI") or {})
+          and "gres_free" not in ((_nt or {}).get("2080TI") or {}),
           str(_nt and _nt.get("2080TI")))
 
     # 接不了新作业的节点不贡献余量（2026-10-25 真机：2 个节点、1 个
@@ -10709,6 +10742,47 @@ exit 0
           (_nt5 or {}).get("A6000", {}).get("counts")
           == {"mixed": 1, "draining": 1},
           str(_nt5 and _nt5.get("A6000")))
+
+    # 真集群上"排空完成"的写法是 `drained`，而 `draining` 是"正在排空"。
+    # 这一格是这一组最要紧的一条：上面那份黑名单里写的是 `drain`，两种写法
+    #   一个都没命中，于是 drained 那台的 4 张卡与 250 GB 照样被算成可用
+    #   （2026-10-30 真机，用户的 A6000：1 idle + 1 drained，界面报
+    #   「可分配合计 500 GB」「可用 8」）。名单改成白名单之后两种写法都漏不掉。
+    def _drained(argv, timeout=10, check=False):
+        widths = (64, 16, 16, 200, 200, 64, 32, 32)
+        rows = (
+            ("nodea1", "256000", "0", "gpu:4", "gpu:0", "A6000", "idle", "0/80/0/80"),
+            ("nodea2", "256000", "0", "gpu:4", "gpu:0", "A6000", "drained", "0/0/80/80"),
+            ("nodea3", "256000", "0", "gpu:4", "gpu:0", "A6000", "idle$", "0/80/0/80"),
+            # 已分配等于总内存的那一台：它一个字节的余量都不贡献，
+            #   合计不加、最大值不降。不带后缀、状态也合格 —— 它必须真的走到
+            #   累加那一步，否则这一条测的只是"它被剔掉了"。
+            ("nodea4", "256000", "256000", "gpu:4", "gpu:4",
+             "A6000", "idle", "80/0/0/80"),
+        )
+        return 0, "".join(
+            "".join(str(v).ljust(w) for v, w in zip(row, widths)) + "\n"
+            for row in rows), ""
+
+    _nt6 = with_stub(mod, _drained, lambda: mod.Slurm(cfg).node_table())
+    check("`drained`（真集群的长写法）不贡献余量：只剩那台 idle 的 250 GB / 4 张",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 256000, "max": 256000}
+          and (_nt6 or {}).get("A6000", {}).get("gres_free")
+          == [{"name": "gpu", "type": None, "count": 4}],
+          str(_nt6 and _nt6.get("A6000")))
+    check("`idle$`（维护预约）也不贡献余量 —— 它是 idle，但谁也排不进去",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")["sum"] == 256000,
+          str(_nt6 and _nt6.get("A6000")))
+    check("已分配等于总内存的节点贡献 0（合计不加、最大值不降）",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 256000, "max": 256000},
+          str(_nt6 and _nt6.get("A6000")))
+    check("而它们照旧进 counts 与 flags —— 界面要说得出来「idle 3 drained 1」",
+          (_nt6 or {}).get("A6000", {}).get("counts")
+          == {"idle": 3, "drained": 1}
+          and (_nt6 or {}).get("A6000", {}).get("flags") == {"$": 1},
+          str(_nt6 and _nt6.get("A6000")))
 
     def _no_cpu(argv, timeout=10, check=False):
         widths = (64, 16, 16, 200, 200, 64, 32, 32)
@@ -13130,7 +13204,7 @@ exit 0
     _svc = _d_svc.op_daemon(UID, os.getgid())["data"]
     check("daemon op 报的是这个进程自己的事实：版本、pid、端口池、"
           "nft 表与会话数",
-          _svc["version"] == mod.VERSION and _svc["pid"] == os.getpid()
+          _svc["version"] == mod.RELEASE and _svc["pid"] == os.getpid()
           and _svc["port_range"] == [55001, 55099]
           and _svc["nft_table"] is True
           and _svc["sessions"]["active"] == 0,
@@ -14015,6 +14089,123 @@ exit 0
           _hd.store.get("h-grace")["state"] == mod.ST_ENROLLED,
           _hd.store.get("h-grace")["state"])
     mod.now_ts = _real_now_h
+
+    # ── 35. 提交时交给 Slurm 的候选列，落定之后写回 ──────────────────────
+    #
+    # 缺省提交把"有权限、装得下"的那几个分区整列交给 `-p`，由 Slurm 选择最早
+    #   能开始的（见 op_submit）。于是提交之后有一段时间，库里那一格是一列，
+    #   而"实际落在哪个"要等作业进队列才知道。这两件事各有一条判据：
+    #   落定之前视图不编一个分区出来，落定之后库里存的是真的那一个。
+    section("35. 候选分区：落定之前不编、落定之后写回")
+    _pd = _mkd()
+
+    class _PartSlurm(object):
+        JOB_OK = mod.Slurm.JOB_OK
+        JOB_MISSING = mod.Slurm.JOB_MISSING
+        JOB_UNKNOWN = mod.Slurm.JOB_UNKNOWN
+
+        def job_states(self, jids):
+            return {int(j): (self.JOB_OK, {
+                "JobState": "RUNNING", "NodeList": "nodeb1",
+                "TimeLimit": "01:00:00", "EndTime": "2038-01-01T00:00:00",
+                "Partition": "RTX8000", "Reason": None}) for j in jids}
+
+        def job_state(self, jid):
+            return self.job_states([jid])[int(jid)]
+
+        # 作业还没进 Slurm 眼里时什么都问不到 —— 落定之前那一格靠的就是它。
+        def show_job(self, _jid):
+            return None
+
+    _pd.slurm = _PartSlurm()
+    _pd.store.insert(session_id="p-cand", uid=UID, user="alice", account="acct",
+                     requested_time="01:00:00", state=mod.ST_SUBMITTED,
+                     candidates="55001", partition="A6000,RTX8000",
+                     job_id=9101, created_at=0)
+    _pv = _pd.session_view(_pd.store.get("p-cand"))
+    check("落定之前 partition 是 null（不替 Slurm 编一个）",
+          _pv.get("partition") is None, repr(_pv.get("partition")))
+    check("  而那一列候选在 partitions 里 —— 界面据此说「待定（A6000 / RTX8000）」",
+          _pv.get("partitions") == ["A6000", "RTX8000"], str(_pv.get("partitions")))
+
+    _pd.phase_running()
+    _prow = _pd.store.get("p-cand")
+    check("作业进队列之后，实际那个分区写回库里（`%P` 给的）",
+          _prow["partition"] == "RTX8000", repr(_prow["partition"]))
+    _pv2 = _pd.session_view(_prow)
+    check("视图随之换成实际分区，候选列不再出现（那时它已经在回答）",
+          _pv2.get("partition") == "RTX8000" and _pv2.get("partitions") is None,
+          "%r / %r" % (_pv2.get("partition"), _pv2.get("partitions")))
+
+    # 点名了分区的那条路一个字都没变：库里就是一个名字，写回那一支不碰它。
+    _pd.store.insert(session_id="p-one", uid=UID, user="alice", account="acct",
+                     requested_time="01:00:00", state=mod.ST_SUBMITTED,
+                     candidates="55002", partition="A6000",
+                     job_id=9102, created_at=0)
+    _prow2 = _pd.store.get("p-one")
+    check("单一个分区名（点了名）时视图直接就是它，没有待定那一格",
+          _pd.session_view(_prow2).get("partition") == "A6000"
+          and _pd.session_view(_prow2).get("partitions") is None,
+          str(_pd.session_view(_prow2).get("partition")))
+
+    # ── 36. 协议面：上一版客户端读的字段一个都没少 ────────────────────────
+    #
+    # 同 major 内不许破坏兼容 —— 那是一条承诺，而这一节是它的机器判据：
+    #   把上一版客户端会发的请求与它读的字段留在 tools/protocol-surface.json
+    #   里，在这里逐条回放。删字段、改名、改类型都会红；新增字段不会，因为
+    #   旧客户端根本不看它。
+    # 这份清单与 docs/PROTOCOL.md 讲的是同一件事，但那一篇是给人读的散文，
+    #   机器读不了 —— 判据只能是这一份。
+    section("36. 协议面：上一版客户端读的字段一个都没少")
+    _pf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            os.pardir, "tools", "protocol-surface.json")
+    with open(_pf_path, encoding="utf-8") as _pf_f:
+        _surface = json.load(_pf_f)
+
+    def _kind_ok(v, kind):
+        if kind == "bool":
+            return isinstance(v, bool)
+        if kind == "number":
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+        if kind == "string":
+            return isinstance(v, str)
+        if kind == "array":
+            return isinstance(v, list)
+        if kind == "object":
+            return isinstance(v, dict)
+        if kind == "protocol":
+            return (isinstance(v, str)
+                    and mod.FRAMEWORK_VERSION_RE.match(v) is not None)
+        return False
+
+    check("协议面清单有内容，且它标明了那一版客户端",
+          bool(_surface.get("cases")) and bool(_surface.get("client")),
+          "client=%r 用例 %d 条"
+          % (_surface.get("client"), len(_surface.get("cases") or [])))
+
+    _sfc = _mkd()
+    for _case in _surface["cases"]:
+        _sr = _sfc.dispatch(UID, os.getgid(), dict(_case["request"]))
+        _sd = (_sr or {}).get("data") or {}
+        _sbad = [k for k, kind in _case["response"].items()
+                 if k not in _sd or not _kind_ok(_sd[k], kind)]
+        check("`%s`：上一版客户端读的 %d 个字段都还在、类型不变"
+              % (_case["op"], len(_case["response"])),
+              (_sr or {}).get("ok") is True and not _sbad,
+              "ok=%r 缺或类型变了=%s（应答的键 %s）"
+              % ((_sr or {}).get("ok"), _sbad, str(sorted(_sd))[:200]))
+
+    # 能力列表：它在 `caps` 出现之前就存在的那几条之外，另报一样东西。
+    #   这里钉两件事 —— 它是字符串数组，且这一版真的声明了那一样。少了后者，
+    #   一个永远为空的 `caps` 也能过前面那条"字段还在"的判据。
+    _cap_r = _sfc.dispatch(UID, os.getgid(), {"op": "ping"})
+    _cap_d = (_cap_r or {}).get("data") or {}
+    check("ping 报出这一版声明的那几样能力（字符串数组，且不是空的）",
+          isinstance(_cap_d.get("caps"), list)
+          and bool(_cap_d["caps"])
+          and all(isinstance(c, str) for c in _cap_d["caps"])
+          and "submit.any_partition" in _cap_d["caps"],
+          repr(_cap_d.get("caps")))
 
     # ── 汇总前的核账：源码里有几节，就真的跑了几节 ──────────────────────
     #

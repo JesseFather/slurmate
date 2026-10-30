@@ -141,7 +141,7 @@ contextBridge.exposeInMainWorld('slurmate', {
   // resources 是高级选项里的临时覆盖：{cpus, mem, gres, partition}。
   // `gres` 是结构化描述符 `{name, type, count}`，不是一个数字 —— 名字与
   // 型号是管理员在集群上定的（见 main/gres.js）。
-  // 留空 = 用服务端默认值（2 核 / 8G / 随机挑一个有权限的分区）。
+  // 留空 = 用服务端默认值（2 核 / 8G / 分区由 Slurm 在有权限、装得下的里挑）。
   partitions: () => ipcRenderer.invoke('app:partitions'),
   // serviceKind 是本站的短名（那份配置的文件名、界面上那个 code），必填 ——
   // 客户端这一侧没有缺省插件（"缺省"是站点配置里 `default_plugin` 的事，

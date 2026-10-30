@@ -1,0 +1,46 @@
+{
+  "_": [
+    "上一版客户端（0.36）会发的请求，与它读的应答字段。",
+    "",
+    "这一份是「跨版本矩阵」的静态形式：旧实现跑不起来，但它的请求与读法可以留下来。",
+    "判据在新版守护进程上跑 —— cluster/test-sessiond-logic.py 的 36 节 —— 同一条请求",
+    "仍要答得下来，且清单里的每个字段都还在、类型不变。",
+    "",
+    "字段清单只记「旧客户端读了什么」，不记「新版多了什么」：新增字段不需要登记，",
+    "因为旧客户端根本不看它；删除、改名、改类型才是要红的那件事。",
+    "",
+    "`protocol` 是一种特殊的类型：两段、无前导零的 `x.y`。它单独成一种是因为",
+    "`version` 那一格报错形状的后果不是「显示得难看」，而是客户端判成",
+    "「对面不是我们的守护进程」并拒绝连接。",
+    "",
+    "改这一份等于改承诺：删掉一条就是宣布不再支持那一版客户端，",
+    "而那必须是一次升 `x` 的发布（见 docs/PROTOCOL.md〈三方〉）。"
+  ],
+
+  "client": "0.36",
+
+  "cases": [
+    {
+      "op": "ping",
+      "note": "最小连通性探针。客户端的版本闸只读这一格的 `version`。",
+      "request": {"op": "ping"},
+      "response": {"pong": "bool", "version": "protocol", "time": "number"}
+    },
+    {
+      "op": "daemon",
+      "note": "服务生命周期与体检。`version` 报发布标识，形状仍是字符串。",
+      "request": {"op": "daemon"},
+      "response": {
+        "version": "string", "pid": "number", "started_at": "number",
+        "config": "object", "sessions": "object", "plugins": "object",
+        "port_range": "array", "nft_table": "bool", "draining": "object"
+      }
+    },
+    {
+      "op": "list",
+      "note": "会话列表。界面拿它画连接下拉与状态快照的底稿。",
+      "request": {"op": "list"},
+      "response": {"sessions": "array"}
+    }
+  ]
+}
