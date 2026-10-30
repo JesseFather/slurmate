@@ -178,9 +178,9 @@ jobs:
         # cluster/slurmate-sessiond），没有任何机制保证它们同步。
         #
         # 客户端那两处写的是三段（`0.37.0`）：那个 `version` 字段同时是 npm
-        #   包的版本号，而 npm 与 electron-builder 都要求语义化版本 —— 写两段会被
-        #   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"），
-        #   一个安装包都打不出来。协议版本 = 包版本的前两段，客户端对站点自报
+        #   包的版本号。electron-builder 的 `fixVersionField` 拿 semver 校验它 ——
+        #   写两段会当场被拒掉（"Invalid version"），一个安装包都打不出来。
+        #   npm 在 install / pack 上不校验这个字段，只有发布到 registry 才要求。协议版本 = 包版本的前两段，客户端对站点自报
         #   的就是这两段（`client/src/main/plugins/index.js` 的 `hostVersion()`）。
         #   所以这一条断言比的是四处的协议版本，不是四个字符串逐字相同。
         #
@@ -298,7 +298,8 @@ jobs:
                     % ("client/package.json", pkgv))
 
           # 客户端那个三段的包版本是派生的：VERSION + ".0" + 后缀。它不是第二个
-          #   号，第三段固定是 `.0` —— 那一格只为满足 npm 的语义化版本要求，
+          #   号，第三段固定是 `.0` —— 那一格只为满足 electron-builder 的
+          #   semver 校验，
           #   界面上早就把它切掉了（主进程的 `wireVersion`）。
           want_pkg = (protos[0] if protos else "") + ".0" + (
               "-" + suffix(rel_d) if rel_d and suffix(rel_d) else "")

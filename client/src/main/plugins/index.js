@@ -514,8 +514,9 @@ function versionCheck(clientVersion, serverVersion) {
  * 读不到就跳过这项检查。
  *
  * 取的是 `client/package.json` 那个 `version` 的前两段，不是整串。
- *   那个字段是三段：npm 与 electron-builder 都要求语义化版本，写 `0.20` 会被
- *   electron-builder 的 `fixVersionField` 当场拒掉（"Invalid version"）。
+ *   那个字段是三段：electron-builder 的 `fixVersionField` 拿 semver 校验它，
+ *   写 `0.20` 会当场被拒掉（"Invalid version"）。npm 在 install / pack 上不校验
+ *   这个字段，它只在发布到 registry 时才要求。
  *   而协议版本是两段（docs/PROTOCOL.md §〇）。协议版本 = 包版本的前两段 ——
  *   这条关系就落在下面这一行。
  * 少切这一刀的症状指不回本文件：对站点自报 `0.20.0`，而 `FRAMEWORK_VERSION_RE`

@@ -3924,8 +3924,9 @@ function closeHostSession(rec) {
  * 客户端对外的版本号：两段（可以带发布后缀）。
  *
  * `app.getVersion()` 读的是 `client/package.json` 的 `version`，而那个字段必须
- *   是三段 —— npm 与 electron-builder 都要求语义化版本，写两段会被
- *   `fixVersionField` 当场拒掉，一个安装包都打不出来。它是整套版本号里唯一
+ *   是三段 —— electron-builder 的 `fixVersionField` 用 semver 校验它，写两段
+ *   会当场被拒掉，一个安装包都打不出来。npm 在 install / pack 上不校验这个
+ *   字段，它只在发布到 registry 时才要求。它是整套版本号里唯一
  *   绕不过去的三段，而且只是那个包的载体，不是另一个号。
  * 第三段固定是 `.0`（`.github/workflows/checks.yml` 断言这一点）。对用户没有
  *   意义的那个数字带出去，只会让人以为存在一个"补丁级"。

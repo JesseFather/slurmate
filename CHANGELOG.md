@@ -10,9 +10,9 @@
 那一行写着"遵循语义化版本"，而语义化版本要求三段 —— 那句话是错的。
 规则与判据见 `tools/version-fixtures.json`。
 
-★ **客户端那个 npm 包的 `version` 是个例外：它必须是三段。** npm 与 electron-builder
-都要求语义化版本，写两段会被 electron-builder 的 `fixVersionField` 直接拒掉
-（`Invalid version`），一个安装包都打不出来。**它的前两段就是协议版本**，客户端对
+★ **客户端那个 npm 包的 `version` 是个例外：它必须是三段。** electron-builder 的
+`fixVersionField` 拿 semver 校验它，写两段会直接拒掉（`Invalid version`），一个
+安装包都打不出来。npm 在 `install` / `pack` 上不校验这个字段。**它的前两段就是协议版本**，客户端对
 站点自报的也是那两段。这条关系落在 `client/src/main/plugins/index.js` 的
 `hostVersion()` 里，由 `.github/workflows/checks.yml` 那条版本号断言钉住。
 
@@ -75,7 +75,7 @@
 发出来的"。同一个协议版本可以有多次发布，而它们是不同的内容，必须有不同的名字。
 
 - 客户端那个包版本带后缀：`0.37.0-rc1`。它是派生的三段 —— `VERSION` + `.0` +
-  后缀，第三段只为满足 npm 的语义化版本要求。`hostVersion()` 取前两段，所以对
+  后缀，第三段只为满足 electron-builder 的 semver 校验。`hostVersion()` 取前两段，所以对
   站点自报的仍是 `0.37`。
 - 界面与诊断显示两段：主进程的 `wireVersion()` 把那个第三段切掉，「关于」写的是
   `0.37-rc1`，与站点端 `--version` 同一形状。

@@ -13,11 +13,12 @@
 ## 〇、协议版本
 
 当前版本：v0.37。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
-三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言：
+三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言。
+
 `cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.37`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.37.0`）—— 那个字段同时是 npm 包的版本号，而 npm 与 electron-builder 都要求
-语义化版本，两段会被构建工具直接拒掉。协议版本 = 包版本的前两段，断言比的
+（`0.37.0`）—— 那个字段同时是 npm 包的版本号。electron-builder 拿 semver 校验
+它，两段会被当场拒掉（`Invalid version`）。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 
 这个号是 `major.minor`：两段。`major` 无上限，`minor` ∈ `0..255`，**禁止**
@@ -48,7 +49,7 @@
 
 > 语义化版本要求三段，而协议版本只有两段，所以协议版本不遵循语义化版本。
 
-> 客户端发行包的 `version` 是三段（npm 与 electron-builder 的要求），它的前两段就是
+> 客户端发行包的 `version` 是三段（electron-builder 的 semver 校验），它的前两段就是
 > 协议版本。客户端对站点自报的是那前两段。
 
 ### 发布标识
@@ -60,7 +61,7 @@
 - 站点端两个常量：`VERSION` 是协议版本，`RELEASE` 是发布标识。`RELEASE` 的形状是
   `VERSION` 后面跟可选的 `-<后缀>`；正式版没有后缀，那时两者逐字相同。
 - 客户端那个包版本是派生的三段：`VERSION` + `.0` + 后缀（`0.37.0-rc1`）。第三段
-  固定是 `.0`，只为满足 npm 的语义化版本要求。
+  固定是 `.0`，只为满足 electron-builder 的 semver 校验。
 - `hostVersion()` 取前两段，所以对站点自报的是 `0.37`；界面与诊断显示的是两段
   （`0.37-rc1`）。
 - `ping` 报 `VERSION`，因为那条闸比的是协议；`daemon` 与 `doctor` 报 `RELEASE`；
