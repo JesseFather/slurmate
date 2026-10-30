@@ -106,7 +106,15 @@ jobs:
       - name: 打包
         # --publish never：只产出安装包，不碰 Release。
         # 发布是 release.yml 的事，这里不需要 GH_TOKEN。
-        run: npx electron-builder --publish never
+        # --config.buildVersion：文件名用两段的发布标识，来源与站点包同一个
+        #   （cluster/slurmate-sessiond 的 RELEASE）。
+        run: |
+          rel="$(sed -n 's/^RELEASE = "\(.*\)"$/\1/p' ../cluster/slurmate-sessiond)"
+          if [ -z "$rel" ]; then
+            echo "读不到 cluster/slurmate-sessiond 的 RELEASE" >&2
+            exit 1
+          fi
+          npx electron-builder --publish never --config.buildVersion="$rel"
       - uses: actions/upload-artifact@v4
         with:
           name: slurmate-${{ matrix.os }}

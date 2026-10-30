@@ -96,7 +96,28 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci
-      - run: npx electron-builder --publish never
+      - name: 打包
+        # --publish never：只产出安装包，不碰 Release。
+        # --config.buildVersion：安装包文件名用两段的发布标识，与站点包同一个
+        #   来源（cluster/slurmate-sessiond 的 RELEASE）。不传时它回落到三段的
+        #   产品版本 —— 包里没有错，只是名字与 tag 对不上。
+        run: |
+          rel="$(sed -n 's/^RELEASE = "\(.*\)"$/\1/p' ../cluster/slurmate-sessiond)"
+          if [ -z "$rel" ]; then
+            echo "读不到 cluster/slurmate-sessiond 的 RELEASE" >&2
+            exit 1
+          fi
+          npx electron-builder --publish never --config.buildVersion="$rel"
+      - name: 文件名里要有发布标识
+        # buildVersion 没传上去时，文件名会是三段的产品版本 —— 那与 tag 对不上，
+        #   而 Release 上的文件名是管理员与用户认包的唯一依据。
+        run: |
+          rel="$(sed -n 's/^RELEASE = "\(.*\)"$/\1/p' ../cluster/slurmate-sessiond)"
+          if ! ls dist | grep -qF -- "$rel"; then
+            echo "dist 里没有一份文件名带 $rel：" >&2
+            ls dist >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: slurmate-${{ matrix.os }}

@@ -4704,6 +4704,8 @@ function bindEvents() {
  * 版本只有一个来源：主进程 `app.getVersion()`（`app:bootstrap` 带回来的
  *   `version`）。在这里另写一个字符串就会漂 —— 而且漂的方向没人会注意到：
  *   界面上写着一个版本，装上去的那一份是另一个。
+ * 带回来的是两段（主进程的 `wireVersion` 把 npm 载体那个第三段切掉了），
+ *   所以这一格与站点端 `--version` 报的是同一个形状。
  * 没有这一格就照实说「版本未知」，不猜。
  */
 function renderAbout() {

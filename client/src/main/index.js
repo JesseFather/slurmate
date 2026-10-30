@@ -3921,13 +3921,32 @@ function closeHostSession(rec) {
 }
 
 /**
+ * 客户端对外的版本号：两段（可以带发布后缀）。
+ *
+ * `app.getVersion()` 读的是 `client/package.json` 的 `version`，而那个字段必须
+ *   是三段 —— npm 与 electron-builder 都要求语义化版本，写两段会被
+ *   `fixVersionField` 当场拒掉，一个安装包都打不出来。它是整套版本号里唯一
+ *   绕不过去的三段，而且只是那个包的载体，不是另一个号。
+ * 第三段固定是 `.0`（`.github/workflows/checks.yml` 断言这一点）。对用户没有
+ *   意义的那个数字带出去，只会让人以为存在一个"补丁级"。
+ * 切法与 `client/src/main/plugins/index.js` 的 `hostVersion()` 是同一刀：前两段
+ *   就是协议版本。读不到或形状不认识时原样给 —— 不猜。
+ */
+function wireVersion(v) {
+  const s = typeof v === 'string' ? v : '';
+  const m = /^(\d+)\.(\d+)\.\d+(-.*)?$/.exec(s);
+  return m ? `${m[1]}.${m[2]}${m[3] || ''}` : s;
+}
+
+/**
  * 诊断材料。只写"客户端知道什么"，不写凭据、口令与密钥。
  *
  * 排版按"人拿它去贴进一个问题单"来定：一节一段，每条一行，没有 JSON 括号。
  */
 function diagnosticsText() {
   const lines = [];
-  const ver = (typeof app.getVersion === 'function' && app.getVersion()) || '未知';
+  const raw = (typeof app.getVersion === 'function' && app.getVersion()) || '';
+  const ver = wireVersion(raw) || '未知';
   lines.push('# Slurmate 诊断材料', '');
   lines.push(`生成时间：${new Date().toISOString()}`);
   lines.push(`客户端版本：${ver}`);
@@ -5014,7 +5033,9 @@ function registerIpc() {
     // 不含临时那一份：它只活在内存里（`tempSpaces`），会随会话结束消失，
     //   列出来等于让用户去选一个明天不存在的东西。
     spaces: cfg.spaces,
-    version: app.getVersion(),
+    // 两段的那个（见 `wireVersion`）：界面与诊断都显示它。三段只活在
+    //   `client/package.json` 里，那是 npm 的载体，不是第二个版本号。
+    version: wireVersion(app.getVersion()),
   }));
 
   // 测试夹具那条不探：它是本机的假站点，探出来的"可达 / 不可达"两边都是假话。
@@ -6525,6 +6546,8 @@ module.exports = {
     /** 把空手超时调到毫秒级 —— 生产路径上它是十分钟（见 `EMPTY_HANDS_MS`）。 */
     setEmptyHandsMs: (ms) => { emptyHandsMs = ms; },
     getEmptyHandsMs: () => emptyHandsMs,
+    /** 客户端对外的版本号（两段）。用例要证明 npm 载体那个第三段不会带出去。 */
+    wireVersion,
     /** 某一槽的记录（`getSessions().get(slot)` 的糖，用例里读起来短一点）。 */
     sessionAt: (slot) => sessions.get(slot),
     getWindow: () => win,

@@ -2643,6 +2643,26 @@ test('版本号：两套方案 —— 形状 / 大小 / 范围，逐条对上共
   }
 });
 
+test('客户端对外的版本号是两段：npm 载体那个第三段不带到界面上', () => {
+  // `client/package.json` 的 `version` 必须是三段（npm 与 electron-builder 的要求），
+  //   于是 `app.getVersion()` 也是三段。它是整套版本号里唯一绕不过去的三段，
+  //   而且只是那个包的载体 —— 带出去会让人以为存在一个"补丁级"。
+  // 界面写两段、站点端 `--version` 也写两段，两边才是同一个形状。
+  const T = idxLoaded();
+  assert.ok(T && T.exports._test.wireVersion,
+    'index.js 要已经被加载过（before 钩子做那件事）');
+  const wire = T.exports._test.wireVersion;
+  assert.equal(wire('0.37.0'), '0.37', '第三段切掉');
+  assert.equal(wire('0.37.0-rc1'), '0.37-rc1', '发布后缀留着');
+  // 读不到、或者形状不认识时原样给 —— 不猜一个版本出来
+  assert.equal(wire(''), '');
+  assert.equal(wire(undefined), '');
+  assert.equal(wire('0.37'), '0.37');
+  // 真包版本也必须切得出两段：忘了改 package.json 时这条会红在本地
+  const pkg = require('../package.json').version;
+  assert.match(wire(pkg), /^\d+\.\d+(-[0-9A-Za-z.-]+)?$/, pkg);
+});
+
 test('无法读取自己的版本号，插件装不得，且说的是"哪一项检查没做"', (t) => {
   // 这一格若是 fail-open，就比"跳过一项检查"更糟：`inspectDir` 里的短路
   //   （`&& host`）在 host 读不到时同时跳过了两项（形状检查与范围检查），

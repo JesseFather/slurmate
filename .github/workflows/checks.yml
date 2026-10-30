@@ -297,6 +297,25 @@ jobs:
               print("  %-26s %-12s ok 与站点 RELEASE 的后缀相同"
                     % ("client/package.json", pkgv))
 
+          # 客户端那个三段的包版本是派生的：VERSION + ".0" + 后缀。它不是第二个
+          #   号，第三段固定是 `.0` —— 那一格只为满足 npm 的语义化版本要求，
+          #   界面上早就把它切掉了（主进程的 `wireVersion`）。
+          want_pkg = (protos[0] if protos else "") + ".0" + (
+              "-" + suffix(rel_d) if rel_d and suffix(rel_d) else "")
+          if pkgv != want_pkg:
+              print("✗ client/package.json 的版本应当逐字是 %s，而它是 %s"
+                    % (want_pkg, pkgv or "(空)"))
+              print("  它是派生的（VERSION + '.0' + 后缀），不是另起的号。")
+              bad = 1
+          lockv = from_json("client/package-lock.json")
+          if lockv != pkgv:
+              print("✗ client/package-lock.json 是 %s，而 package.json 是 %s"
+                    % (lockv or "(空)", pkgv or "(空)"))
+              bad = 1
+          if pkgv == want_pkg and lockv == pkgv:
+              print("  %-26s %-12s ok 派生的三段（VERSION + '.0' + 后缀）"
+                    % ("客户端包版本", pkgv))
+
           # ── 文档里那几处「当前版本」必须跟着走 ────────────────────────────
           #
           #   这一条抓的是一个真的发生过的 staleness：仓库走到 0.13 的时候

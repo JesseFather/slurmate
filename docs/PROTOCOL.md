@@ -59,10 +59,12 @@
 
 - 站点端两个常量：`VERSION` 是协议版本，`RELEASE` 是发布标识。`RELEASE` 的形状是
   `VERSION` 后面跟可选的 `-<后缀>`；正式版没有后缀，那时两者逐字相同。
-- 客户端那个包版本允许带同一个后缀（`0.37.0-rc1`）。`hostVersion()` 取前两段，
-  所以它对站点自报的仍是 `0.37`。
+- 客户端那个包版本是派生的三段：`VERSION` + `.0` + 后缀（`0.37.0-rc1`）。第三段
+  固定是 `.0`，只为满足 npm 的语义化版本要求。
+- `hostVersion()` 取前两段，所以对站点自报的是 `0.37`；界面与诊断显示的是两段
+  （`0.37-rc1`）。
 - `ping` 报 `VERSION`，因为那条闸比的是协议；`daemon` 与 `doctor` 报 `RELEASE`；
-  `--version` 与两个包名用 `RELEASE`。
+  `--version`、两个站点包名与客户端安装包名用 `RELEASE`。
 - 两端的后缀必须相同，由 `.github/workflows/checks.yml` 断言；包名与 tag 逐字一致，
   由 `release.yml` 断言。
 

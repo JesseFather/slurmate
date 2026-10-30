@@ -52,15 +52,20 @@ required check 通过，所以 `main` 上的每个提交都来自一次绿过的
 两个号要分开改，它们回答的问题不同：协议版本回答"这两端能不能谈"，发布标识回答
 "这是哪一次发出来的"。
 
-协议版本（`x.y`）改四处：`client/package.json` 与 `client/package-lock.json` 那个
-三段版本的前两段、`cluster/slurmate`、`cluster/slurmate-sessiond`。`docs/PROTOCOL.md`
-的〈协议版本〉与 `SECURITY.md` 的「当前维护的版本」跟着改；`checks.yml` 断言这几处
-一致。
+协议版本（`x.y`）改两处：`cluster/slurmate` 与 `cluster/slurmate-sessiond`。
+`docs/PROTOCOL.md` 的〈协议版本〉与 `SECURITY.md` 的「当前维护的版本」跟着改。
 
-发布标识（预览版的后缀）改三处，后缀必须相同：`client/package.json` 的 `version`
-（`package-lock.json` 跟着）、`cluster/slurmate` 的 `RELEASE`、`cluster/slurmate-sessiond`
-的 `RELEASE`。`checks.yml` 断言两端的后缀一致，`release.yml` 断言包名与 tag 逐字相同。
-正式版没有后缀，那时 `RELEASE` 与协议版本逐字相同。
+发布标识（预览版的后缀）改同样那两处的 `RELEASE`。正式版没有后缀，那时它与协议
+版本逐字相同。
+
+`client/package.json` 与 `client/package-lock.json` 的那个三段版本是派生的：
+`VERSION` + `.0` + 后缀。它照样要改，但不是第三个号 —— 它是算出来的，`checks.yml`
+断言它逐字等于那个派生值。
+
+第三段固定是 `.0`，只为满足 npm 的语义化版本要求。界面、诊断与安装包文件名都用
+两段。
+
+`release.yml` 断言两个站点包名、客户端安装包文件名与 tag 逐字相同。
 
 预览版之间只动发布标识，协议版本不动 —— 它们的协议一样。
 
