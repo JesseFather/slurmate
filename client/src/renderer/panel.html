@@ -487,7 +487,11 @@
                 title="结束这一条会话，集群上的作业会被取消。关掉窗口同样会结束；合盖、断网、断电不会，作业会保留，下次连上自动接回。">结束</button>
         <button id="btn-jobs-reload" class="ghost"
                 title="重新加载这一块页面。页面空白或无法操作时使用；Ctrl+Shift+R 等效。">重新加载</button>
-        <button id="btn-jobs-refresh" class="ghost">刷新</button>
+        <!-- 这一颗问两处：向站点重取一次作业列表，再重取本机这几条会话的视图
+             （隧道、本地地址、上次心跳只有本机有）。少取后一份的话，列表变了、
+             下面那一块还停在上一次推送的样子 —— 用户得再点一次「面板」。 -->
+        <button id="btn-jobs-refresh" class="ghost"
+                title="向这个站点重新要一次作业列表，并重取本机这几条会话的状态。">刷新</button>
       </div>
       <p class="sub" id="jobs-when"></p>
       <!-- 三态：这一格是获取失败时的话。它必须画得跟"确实没有作业"不一样 ——

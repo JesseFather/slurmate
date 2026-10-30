@@ -1078,7 +1078,11 @@ test('作业那一屏开着时，活会话的集合一变就重取一次列表',
   //   才出现。判据是活会话的集合变没变，不是每一份推送都问一次。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
     'window.__jobsCalls = 0; window.slurmate.jobs = () => {'
-    + '  window.__jobsCalls += 1; return Promise.resolve({ ok: true, jobs: [], at: 1 }); };');
+    + '  window.__jobsCalls += 1; return Promise.resolve({ ok: true, jobs: [], at: 1 }); };'
+    // 重取列表那一趟还会重取本机的会话视图（见 `refreshJobs`）：真机上那是主进程
+    //   手上的权威一份，这里给一份同形状的空表。
+    + 'window.slurmate.states = () =>'
+    + ' Promise.resolve({ sessions: [], front: null, panelFront: true });');
   h.run("SCREEN = 'jobs';");
   h.fn('renderSessions')({ sessions: [], front: null });
   const after = h.run('window.__jobsCalls');
@@ -2124,6 +2128,81 @@ test('高级选项收起就退回默认；离开插件屏时也收起来', () =>
   assertDefault('离开再回来之后');
 });
 
+test('会话页面盖上来也算离开插件那一屏：高级选项跟着收起来', () => {
+  // 2026-10-30 用户：填完高级选项、点「开始会话」，页面盖上来，再点「面板」回来
+  //   —— 那几格还开着、填进去的值还在。
+  // 根因是"离开"从来没发生过：插件那一屏的 DOM 一直在文档里，`showScreen` 切走
+  //   只加一个 `hidden`，而会话页面是盖在上面的，路由那一层一步都没动。
+  // 判据落在"离开"上，所以盖上来那一下也要走同一条 `collapse()`。
+  const view = JSON.parse(JSON.stringify(PV));
+  view.plugins[0].surface = true;              // 编辑器那块有页面
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  h.fn('renderPlugins')(view);
+  h.fn('renderPartitions')([
+    { name: 'normal', allowed: true, mem_per_node_mb: 128000, cpus_per_node: 64, gres: [] },
+  ]);
+  const block = () => h.byId.get('plugin-blocks').children[0];
+  const find = (b, cls) => childrenOf(b).find(
+    (x) => (x.className || '').split(/\s+/).indexOf(cls) >= 0);
+  const toggle = () => find(block(), 'adv-toggle');
+  const body = () => find(block(), 'adv-body');
+  const cell = (i) => find(body(), 'row').children.filter((k) => k && k.tagName)[i];
+  const ctrl = (i) => childrenOf(cell(i)).find((x) =>
+    (x.tagName === 'INPUT' || x.tagName === 'SELECT') && x.type !== 'range');
+
+  const snap = (over) => ({ state: 'running', sessionId: 'sess-a', jobId: '42',
+    serviceKind: 'cs', partition: 'normal', hbAgeMs: 1000, ...over });
+  const push = (panelFront) => h.fn('renderSessions')({
+    sessions: [{ slot: 'a', service: '编辑器', live: true, snap: snap() }],
+    front: 'a', panelFront,
+  });
+
+  h.run("SCREEN = 'plugins';");
+  toggle().onclick();
+  ctrl(0).value = '8';                          // CPU 那一格填到一半
+  assert.equal(body().classList.contains('hidden'), false, '（前提：点开了）');
+
+  // 页面盖上来：前台那条在跑、插件有页面、面板没被抬上来。
+  push(false);
+  assert.equal(body().classList.contains('hidden'), true,
+    '盖上来就是离开了这一屏 —— 那几格要收起来');
+  assert.equal(ctrl(0).value, '', '收起就是退回默认，填进去的值不许留着');
+
+  // 反过来的那一半：面板抬回来不再把它清一遍（那会把用户重新填的抹掉），
+  //   而它本来就是收着的。
+  ctrl(0).value = '6';
+  push(true);
+  assert.equal(body().classList.contains('hidden'), true, '回来时仍然是收着的');
+  assert.equal(ctrl(0).value, '6', '抬回面板那一次不该再清一遍 —— 那一格是用户刚填的');
+});
+
+test('提交成功之后当场收起高级选项（那几格只对下一次「开始会话」有效）', async () => {
+  // 2026-10-30 用户：点完「开始会话」，那几格还开着、填进去的值还在。留着不收的话，
+  //   用户从会话页面点「面板」回来，看到的是几格"看起来还要被发出去"的设置 ——
+  //   而它们其实已经用掉了。
+  const view = JSON.parse(JSON.stringify(PV));
+  view.plugins[0].surface = true;
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.slurmate.start = () => Promise.resolve({ ok: true, slot: 1,'
+    + ' sessions: [], front: null });');
+  h.fn('renderPlugins')(view);
+  const block = () => h.byId.get('plugin-blocks').children[0];
+  const find = (b, cls) => childrenOf(b).find(
+    (x) => (x.className || '').split(/\s+/).indexOf(cls) >= 0);
+  const body = () => find(block(), 'adv-body');
+  const ctrl = (i) => childrenOf(find(body(), 'row').children.filter((k) => k && k.tagName)[i])
+    .find((x) => (x.tagName === 'INPUT' || x.tagName === 'SELECT') && x.type !== 'range');
+
+  find(block(), 'adv-toggle').onclick();
+  ctrl(0).value = '8';
+  assert.equal(body().classList.contains('hidden'), false, '（前提：点开了、也填了）');
+
+  await h.fn('startWith')('cs', h.run('advCells[0]'), h.doc.getElementById('start-btn'));
+
+  assert.equal(body().classList.contains('hidden'), true, '交出去之后要收起来');
+  assert.equal(ctrl(0).value, '', '收起就是退回默认');
+});
+
 test('共用的那张表：先弹框问「一起改还是分一张自己的」，选完才带 scope 重发', async () => {
   // 主进程第一发回 `shared`（这张表还有别的连接在用）。界面不许替用户选一个：
   // 选错的那一个会让另外几条连接跟着一起变，而它们各自的界面上什么都没发生 ——
@@ -2279,13 +2358,53 @@ test('作业列表里点另一条：高亮与下面的详情都跟着走', () =>
   assert.match(kvText, /42/);
 });
 
+test('「刷新」连本机那几条会话的视图一起重取：下面那一块跟着变', async () => {
+  // 2026-10-30 用户：作业那一屏的「刷新」只换了列表，选中那条的详情要再点一次
+  //   「面板」才更新。
+  // 根因：详情有一半来自本机的会话视图（隧道、本地地址、上次心跳只有本机有），
+  //   而那一份只在状态真的变过时由主进程推过来 —— 只重问站点（`op:list`），
+  //   详情读的仍是上一次推送的那一份。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__jobCalls = 0; window.__stateCalls = 0;'
+    + 'window.slurmate.jobs = () => { window.__jobCalls += 1;'
+    + ' return Promise.resolve({ ok: true, at: 1, jobs: [{'
+    + ' session_id: "sess-a", slot: "s1", job_id: "42", partition: "normal",'
+    + ' node: "n1", live: true, attached: true, job_text: "完成" }] }); };'
+    + 'window.slurmate.states = () => { window.__stateCalls += 1;'
+    + ' return Promise.resolve({ front: "s1", panelFront: true, sessions: [{'
+    + '  slot: "s1", service: "编辑器", live: true, snap: { state: "running",'
+    + '   sessionId: "sess-a", jobId: "42", partition: "normal", node: "n1",'
+    + '   jobText: "完成", hbAgeMs: 1000, tunnelState: "listening",'
+    + '   resources: {}, gresText: null } }] }); };');
+  h.run("SCREEN = 'jobs'; JOBS = { list: [{ session_id: 'sess-a', slot: 's1',"
+    + " job_id: '42', partition: 'normal', node: 'n1', live: true, attached: true,"
+    + " job_text: '运行中' }], at: 1, error: null, selected: 'sess-a' };"
+    + "SESS = { sessions: [{ slot: 's1', service: '编辑器', live: true, snap: {"
+    + " state: 'running', sessionId: 'sess-a', jobId: '42', partition: 'normal',"
+    + " node: 'n1', jobText: '运行中', hbAgeMs: 90000, tunnelState: 'listening',"
+    + " resources: {}, gresText: null } }], front: 's1', panelFront: true };");
+  h.fn('renderJobs')();
+  const kv = () => childrenOf(h.byId.get('kv')).map((x) => x._text || '').join(' ');
+
+  await h.byId.get('btn-jobs-refresh').onclick();
+
+  assert.equal(h.run('window.__jobCalls'), 1, '（前提：问了一次站点）');
+  assert.equal(h.run('window.__stateCalls'), 1,
+    '本机会话的视图也要重取一次 —— 详情那一块读的是它');
+  assert.match(kv(), /完成/, '详情要跟着换成新的那一条（作业状态）');
+  assert.equal(/运行中/.test(kv()), false, '上一次推送的那一份不许留在下面');
+});
+
 test('作业列表那一屏的「结束」也走两段式：点错一次就是一条跑到一半的作业没了', async () => {
   // 2026-10-25 用户：这一颗从前点一下就结束。它旁边紧挨着「重新加载」与
   //   「接管」，而它长得没什么特别 —— 代价是集群上那条作业被取消。
   const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
     'window.__stops = []; window.slurmate.stop = (slot) => {'
     + ' window.__stops.push(slot); return Promise.resolve({ ok: true }); };'
-    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });');
+    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });'
+    // 结束之后那一趟重取也会重取本机的会话视图（见 `refreshJobs`）。
+    + 'window.slurmate.states = () =>'
+    + ' Promise.resolve({ sessions: [], front: null, panelFront: true });');
   h.run("document.body.append($('btn-jobs-end'));");
   const btn = h.byId.get('btn-jobs-end');
   const rows = [{ session_id: 'sess-a', slot: 's1', live: true, attached: true,

@@ -10676,9 +10676,12 @@ exit 0
           (_nt or {}).get("A6000", {}).get("mem_free")
           == {"sum": 356352, "max": 256000},
           str(_nt and _nt.get("A6000")))
-    check("已分配等于总内存的节点贡献 0（合计不加、最大值不降）",
-          (_nt or {}).get("2080TI", {}).get("mem_free")
-          == {"sum": 32000, "max": 32000},
+    # 2080TI 那两台一台不响应（`idle*`）、一台 down，都不接新作业 ——
+    #   余量整个缺席，而不是写一个 0（0 的意思是"确实一点都剩不下"，那是
+    #   另一句话；缺席只说"这一格没有"）。"贡献 0"那一条在下面 `_drained` 那组。
+    check("两台的接不了新作业时余量整个缺席，不写 0",
+          "mem_free" not in ((_nt or {}).get("2080TI") or {})
+          and "gres_free" not in ((_nt or {}).get("2080TI") or {}),
           str(_nt and _nt.get("2080TI")))
 
     # 接不了新作业的节点不贡献余量（2026-10-25 真机：2 个节点、1 个
@@ -10709,6 +10712,47 @@ exit 0
           (_nt5 or {}).get("A6000", {}).get("counts")
           == {"mixed": 1, "draining": 1},
           str(_nt5 and _nt5.get("A6000")))
+
+    # 真集群上"排空完成"的写法是 `drained`，而 `draining` 是"正在排空"。
+    # 这一格是这一组最要紧的一条：上面那份黑名单里写的是 `drain`，两种写法
+    #   一个都没命中，于是 drained 那台的 4 张卡与 250 GB 照样被算成可用
+    #   （2026-10-30 真机，用户的 A6000：1 idle + 1 drained，界面报
+    #   「可分配合计 500 GB」「可用 8」）。名单改成白名单之后两种写法都漏不掉。
+    def _drained(argv, timeout=10, check=False):
+        widths = (64, 16, 16, 200, 200, 64, 32, 32)
+        rows = (
+            ("nodea1", "256000", "0", "gpu:4", "gpu:0", "A6000", "idle", "0/80/0/80"),
+            ("nodea2", "256000", "0", "gpu:4", "gpu:0", "A6000", "drained", "0/0/80/80"),
+            ("nodea3", "256000", "0", "gpu:4", "gpu:0", "A6000", "idle$", "0/80/0/80"),
+            # 已分配等于总内存的那一台：它一个字节的余量都不贡献，
+            #   合计不加、最大值不降。不带后缀、状态也合格 —— 它必须真的走到
+            #   累加那一步，否则这一条测的只是"它被剔掉了"。
+            ("nodea4", "256000", "256000", "gpu:4", "gpu:4",
+             "A6000", "idle", "80/0/0/80"),
+        )
+        return 0, "".join(
+            "".join(str(v).ljust(w) for v, w in zip(row, widths)) + "\n"
+            for row in rows), ""
+
+    _nt6 = with_stub(mod, _drained, lambda: mod.Slurm(cfg).node_table())
+    check("`drained`（真集群的长写法）不贡献余量：只剩那台 idle 的 250 GB / 4 张",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 256000, "max": 256000}
+          and (_nt6 or {}).get("A6000", {}).get("gres_free")
+          == [{"name": "gpu", "type": None, "count": 4}],
+          str(_nt6 and _nt6.get("A6000")))
+    check("`idle$`（维护预约）也不贡献余量 —— 它是 idle，但谁也排不进去",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")["sum"] == 256000,
+          str(_nt6 and _nt6.get("A6000")))
+    check("已分配等于总内存的节点贡献 0（合计不加、最大值不降）",
+          (_nt6 or {}).get("A6000", {}).get("mem_free")
+          == {"sum": 256000, "max": 256000},
+          str(_nt6 and _nt6.get("A6000")))
+    check("而它们照旧进 counts 与 flags —— 界面要说得出来「idle 3 drained 1」",
+          (_nt6 or {}).get("A6000", {}).get("counts")
+          == {"idle": 3, "drained": 1}
+          and (_nt6 or {}).get("A6000", {}).get("flags") == {"$": 1},
+          str(_nt6 and _nt6.get("A6000")))
 
     def _no_cpu(argv, timeout=10, check=False):
         widths = (64, 16, 16, 200, 200, 64, 32, 32)

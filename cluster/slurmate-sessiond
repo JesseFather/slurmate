@@ -1043,27 +1043,32 @@ INFO_RETRY_SECONDS = 10
 CLUSTER_QUERY_MAX_BYTES = 1 << 20
 
 # 节点状态后缀（`sinfo` 的 `%t` 里跟在 base state 后面的那些字符）。
-# 取自 `man sinfo` 的 NODE STATE CODES 一节。它们只做展示，一个都不参与
-#   判定，理由见 `Slurm.node_table()` 的 docstring。
+# 取自 `man sinfo` 的 NODE STATE CODES 一节。它们不进状态名、只进 `flags`；
+#   参与判定的只有 `NODE_UNUSABLE_FLAGS` 那一个用途（余量）。
+# `$`（维护预约）从前漏在名单外 —— 于是那种节点的状态原样是 `idle$`，
+#   被当成一个名叫 `idle$` 的新状态数进 `counts`（2026-10-30）。
 # 这份集合与 `%t` 的紧凑状态名（`mix`/`idle`/`alloc`/`drain`/`down`/`maint`/
 #   `resv`/`comp`/`fail`/`unk`/`plnd`/`pow_dn`/`pow_up`/`reboot_issued`…）不交，
 #   这是"从右往左剥"能成立的前提。用例逐字盯着这两个集合不相交。
-NODE_FLAG_CHARS = "*~#!%@^-+"
+NODE_FLAG_CHARS = "*~#!$%@^-+"
 
-# 这些 base state 的节点接不了新作业。余量（可分配内存、GRES 可用）只按
-#   其余节点算 —— 一台 draining / down / maint 的节点上那些空卡与空内存
-#   谁也拿不到，把它们算进"可用"就是报一个要不到的余量（2026-10-25 真机：
+# 接得了新作业的那三个状态。余量（可分配内存、GRES 可用）只按它们算 ——
+#   一台 draining / drained / down / maint 的节点上那些空卡与空内存
+#   谁也拿不到，算进"可用"就是报一个要不到的余量（2026-10-25 真机：
 #   2 个节点 1 个 draining，界面报「可用 7」，而真正能落到的那台只剩 3 张）。
-# 名单只收【确定接不了】的那些。不在名单里的状态照常算（`allocated` 这种
-#   只是忙，不是坏了）—— 这一格漏判的后果是把一部分本来也拿不到的资源
-#   算成可用，而多判一个状态会把整台健康节点的余量抹掉，后者更难发现。
+# 这份名单是白名单，不是黑名单（2026-10-30 改）。黑名单漏了 `drained`：那是
+#   `sinfo` 对"排空完成"的长写法，而名单里写的是 `drain` —— 真集群上
+#   1 idle + 1 drained 的分区照样报「可分配合计 500 GB」「可用 8」。
+#   漏的方向是"把拿不到的资源算成可用"，而界面上完全看不出来；
+#   白名单漏的方向反过来（少算），那是保守的那一侧。
 # 名字取自 `man sinfo` 的 NODE STATE CODES 一节（长形式，与本文件
 #   `node_table()` 剥出来的是同一种写法）。
-NODE_UNUSABLE_STATES = frozenset((
-    "drain", "draining", "down", "maint", "maintenance", "fail", "failing",
-    "unknown", "completing", "future", "planned", "powered_down",
-    "powering_down", "powering_up", "reboot_issued", "reboot_requested",
-))
+NODE_USABLE_STATES = frozenset(("idle", "mixed", "allocated"))
+
+# 带这些后缀的节点也接不了新作业：不响应（`*`）、已关电 / 正在 / 将要 / 已经
+#   关机与上电（`~` `#` `!` `%`）、维护预约（`$`）、待重启与已发出重启（`@` `^`）。
+#   `-`（backfill 预留）与 `+`（有作业在收尾）不算：那两种节点照样用得上。
+NODE_UNUSABLE_FLAGS = frozenset("*~#!%@$^")
 
 # `sinfo -O` 的字段与宽度。`-O` 的长字段名是唯一能同时取到内存与 GRES 已用的
 #   形态：`%B` 不是 `GresUsed`（它是每节点可分给作业的 CPU 数），`GresUsed`
@@ -7569,17 +7574,22 @@ class Slurm(object):
           一行都没给，`cpus` 键缺席 =「没问到」。缺席不写成 0：0 的意思是
           "确实一核都不剩"，那是另一句话。
 
-        只按 base state 计数，后缀一律原样带出去只做展示。
+        只按 base state 计数；后缀原样带出去给界面显示，另有一个用途：
+          余量（`mem_free` / `gres_free`）要把它们一起看。
 
           节点状态的后缀（`*` 不响应、`~` 已关电、`#` 上电/配置中、`!` 待关机、
           `%` 关机中、`$` 维护预约、`@` 待重启、`^` 已发出重启、`-` 被 backfill
           预留、`+` 还有作业在收尾）跨 Slurm 版本含义不一致，同一份 manpage
           上 `~` 是"presently in powered off"，别的文档把它说成省电模式，还有版本
-          把它关联到 COMPLETING。拿它做判定等于把"我记得的那个版本"当成协议。
-          剥掉后缀、只按 base state 计数；后缀原样留着给界面显示。
+          把它关联到 COMPLETING。所以拿它去判"这台节点现在是什么状态"等于把
+          "我记得的那个版本"当成协议 —— 状态名只从剥好的 base state 来。
+          余量是唯一的例外，而且方向是保守的：`NODE_UNUSABLE_FLAGS` 里那几个
+          的节点按"用不上"算。把一台其实还能用的节点少算，界面说的是"余量少"；
+          反过来多算一台，界面说的是"要得到"，而用户排上去才知道要不到。
 
-        `StateLong` 给的是长形式（`idle` / `mixed` / `allocated` / `drain` /
-          `down` / `maint` / `resv` / `completing` / `fail` / `unknown` …）。
+        `StateLong` 给的是长形式（`idle` / `mixed` / `allocated` / `draining` /
+          `drained` / `down` / `maint` / `completing` / `fail` / `unknown` …；
+          本机实测"排空完成"报的是 `drained`，不是 `drain`）。
           这些名字里没有一个字符与后缀集合相交，所以"从右往左剥后缀"不会把
           状态本身剥没，这是剥法成立的前提，不是巧合。`NODE_FLAG_CHARS` 上面
           那条用例盯着它。
@@ -7647,10 +7657,12 @@ class Slurm(object):
                     cc["idle"] += i
                     cc["other"] += o
                     cc["total"] += t
-            # 余量只算接得了新作业的节点（见 `NODE_UNUSABLE_STATES`）。
-            #   `counts` / `flags` / `cpus` 照旧按全部节点累加 —— 那三格说的是
-            #   "这个分区此刻是什么样"，不是"还能要到多少"。
-            usable = state not in NODE_UNUSABLE_STATES
+            # 余量只算接得了新作业的节点（见 `NODE_USABLE_STATES` 与
+            #   `NODE_UNUSABLE_FLAGS`）。`counts` / `flags` / `cpus` 照旧按全部
+            #   节点累加 —— 那三格说的是"这个分区此刻是什么样"，不是
+            #   "还能要到多少"。
+            usable = (state in NODE_USABLE_STATES
+                      and not any(f in NODE_UNUSABLE_FLAGS for f in flags))
             # 可分配内存 = 总内存 - 已分配。两个都认得出才算这一台。
             try:
                 free_mb = max(0, int(mem_raw) - int(alloc_raw))
@@ -8167,7 +8179,7 @@ class Cluster(object):
             used = {p: d["gres_used"] for p, d in nodes.items()
                     if d.get("gres_used")}
             # 每台节点各减各的：`total - used` 会把接不了新作业的节点上那些
-            #   空卡也算成可用（见 `NODE_UNUSABLE_STATES`）。
+            #   空卡也算成可用（见 `NODE_USABLE_STATES`）。
             free = {p: {(e["name"], e.get("type") or ""): e["count"]
                         for e in d["gres_free"]}
                     for p, d in nodes.items() if d.get("gres_free")}

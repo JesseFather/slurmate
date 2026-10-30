@@ -633,6 +633,9 @@ function jobEndedKind(sn) {
 /** 上一次为哪个槽报过"作业结束了"（只报一次，见 renderSnapshot 里那一条）。 */
 let lastEndedSlot = null;
 
+/** 上一帧里会话页面盖没盖着面板（只在盖上来那一下收高级选项，见 renderSnapshot）。 */
+let lastCovered = false;
+
 function renderSnapshot(s) {
   lastSnap = s || null;
   const bar = $('statusbar');
@@ -704,6 +707,15 @@ function renderSnapshot(s) {
   //   `renderStatusEnd` 里（它同时看屏名与"面板有没有抬上来"）。这里不各判一遍：
   //   两处各写一份的话，切标签时会有一处不跟着变（2026-10-18 真机）。
   renderStatusEnd(s);
+  // 会话页面盖上来，就是离开了插件那一屏（用户 2026-10-30）。
+  //   那一屏的 DOM 一直留在文档里：`showScreen` 切走只加一个 `hidden`，而被原生
+  //   视图盖住时连 `hidden` 都没有。于是"离开"在路由那一层从来没发生过 ——
+  //   展开着的高级选项、填进去的值一直留到用户点「面板」回来。
+  //   只认盖上来那一下（边沿）：收起就是退回默认，每帧收一次等于把用户正在填的
+  //   那一格清掉，而页面盖着的时候他本来也填不了。
+  const covered = pageCovering(s);
+  if (covered && !lastCovered) for (const cell of advCells) cell.collapse();
+  lastCovered = covered;
   // 「这一份是临时副本」—— 两个地方都要露，而状态条那一份是必须的，
   //    不是锦上添花：会话一跑起来，窗口主体就被原生视图整块盖住（只有前台那块
   //    `setVisible(true)`，从状态条下沿铺到底），面板里那一条也跟着被盖住 ——
@@ -739,6 +751,18 @@ function renderSnapshot(s) {
 }
 
 /**
+ * 会话页面此刻有没有盖在面板上。
+ *
+ * 判据：前台那条跑着、它的插件有页面、而面板没被抬上来（`SESS.panelFront`，
+ *   由主进程随会话状态一起推）。
+ * 两处读者：状态条右侧那几颗（露不露）与高级选项（盖上来就等于离开了插件那一屏）。
+ *   各判一遍的话，漂开的方向是"按钮已经在会话页面上了，而高级选项还开着"。
+ */
+function pageCovering(s) {
+  return Boolean(s) && s.state === 'running' && hasSurface(s) && !SESS.panelFront;
+}
+
+/**
  * 状态条右侧那两颗：只在会话页面真的盖着窗口时存在。
  *
  * 用户 2026-10-18 定的形状：
@@ -747,16 +771,13 @@ function renderSnapshot(s) {
  *     那一屏上就有大按钮，不需要这一颗。
  * 所以「结束会话」这个名字没有了 —— 它停的一直是一条作业。
  *
- * 「页面盖着」的判据：前台那条跑着、它的插件有页面、而面板没被抬上来
- *   （`SESS.panelFront`，由主进程随会话状态一起推）。
+ * 「页面盖着」的判据在 `pageCovering()`：高级选项那边读的是同一个。
  */
 function renderStatusEnd(s) {
   const btn = $('sb-end');
   const reload = $('sb-reload');
   const leave = $('sb-leave');
-  const st = s ? s.state : 'idle';
-  const pageOnScreen = Boolean(s) && st === 'running'
-    && hasSurface(s) && !SESS.panelFront;
+  const pageOnScreen = pageCovering(s);
   reload.classList.toggle('hidden', !pageOnScreen);
   // 回面板的那条路跟着那块页面一起露：页面盖着的时候它是唯一看得见的出口。
   leave.classList.toggle('hidden', !pageOnScreen);
@@ -3110,6 +3131,10 @@ async function startWith(serviceKind, adv, btn, opts = {}) {
       const pv = await window.slurmate.partitions();
       if (pv && pv.plugins) renderPlugins(pv.plugins);
     }
+    // 提交成功：这一份填写已经用掉了，当场收起、退回默认（用户 2026-10-30）。
+    //   它只对下一次「开始会话」有效，而那句话就写在这几格下面 —— 留着不收，
+    //   用户从会话页面点「面板」回来看到的仍是开着、填着值的那几格。
+    if (r && r.ok) adv.collapse();
   } finally {
     btn.disabled = false;
   }
@@ -3187,11 +3212,16 @@ function historyLine(j) {
 //   规矩的第二份实现。没接着的那些照实说出来，出路是重连一次。
 
 /**
- * 重新问一次服务端（`op:list`）。
+ * 重新问一次服务端（`op:list`），顺带把本机那几条会话的视图也重取一份。
  *
  * 它不是缓存刷新，是一次真查询。作业列表的变化有一大半发生在本进程之外
  *   （另一台电脑提交的、CLI 提交的、排队中的作业被调度器跑起来），所以它必须
  *   能随时重问 —— 「刷新」那个按钮存在的理由就是这个，而不是装饰。
+ *
+ * 详情那一块还有一半来自本机的会话视图（隧道、本地地址、上次心跳只有本机有），
+ *   而那一份只在状态真的变过时才推过来。不跟着重取的话，这一颗只换列表：行上的
+ *   作业状态更新了，下面那一块还是上一次推送的样子，要再点一次「面板」才看得见
+ *   （用户 2026-10-30）。那一趟是本机的 IPC，不向站点多问一次。
  */
 async function refreshJobs() {
   const connId = boot ? boot.activeConnectionId : null;
@@ -3207,6 +3237,14 @@ async function refreshJobs() {
     forConn: connId, list: r.jobs || [], at: r.at || Date.now(),
     error: null, selected: JOBS.selected,
   };
+  // 先记下这一份的活会话集合再交给 `renderSessions`：它自己会在集合变过时再排
+  //   一轮 `refreshJobs`，而那一轮问的正是我们手上这一份 —— 不记就多问站点一次。
+  const st = await window.slurmate.states();
+  if (st && Array.isArray(st.sessions)) {
+    lastLiveIds = st.sessions.filter((x) => x.live)
+      .map((x) => x.slot).sort().join(',');
+    renderSessions(st);
+  }
   renderJobs();
 }
 
@@ -3839,7 +3877,7 @@ function pluginAdv(defaults) {
   //   （没装滑块的格子上那个框的占位话写着），不必再用一句话说一遍。
   // 剩下这条是用户从这里看不出来的：它到下一次连接才生效。
   body.append(el('p', 'sub adv-note',
-    '这些设置不会被记住，收起它、离开这一屏或下次连接后即恢复默认。'
+    '这些设置不会被记住：开始一次会话、收起它、离开这一屏，都恢复默认。'
     + '唯一的例外是作业没结束时的闪断重连，那时会沿用它。'));
 
   // 换分区，可选的 GRES 跟着换（上限是分区自己的：同一个集群上一种卡每节点
@@ -3849,9 +3887,10 @@ function pluginAdv(defaults) {
   advCells.push(st);
 
   // 收起 = 退回默认（2026-10-18 用户点的那一条：填过、收起、再打开要恢复默认）。
-  //   状态只有两档：收着 = 全是默认；展开着 = 可能填着值。离开插件那一屏也走
-  //   这一条路（`showScreen` 调 `st.collapse`）—— 不重画、不另清一遍，两处清值
-  //   迟早会漂开。
+  //   状态只有两档：收着 = 全是默认；展开着 = 可能填着值。三条入口都走这一条路：
+  //   点这颗开关、离开插件那一屏（`showScreen`）、以及会话页面盖上来或者提交成功
+  //   （`renderSnapshot` 与 `startWith`，2026-10-30）—— 不重画、不另清一遍，
+  //   各处各清一遍迟早会漂开。
   const setOpen = (open) => {
     if (!open) resetAdv(st);
     body.classList.toggle('hidden', !open);
