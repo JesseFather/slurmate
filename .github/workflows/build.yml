@@ -104,10 +104,12 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci
       - name: 打包
+        # shell: bash 是必须的：三平台矩阵，Windows 的默认 shell 是 PowerShell。
         # --publish never：只产出安装包，不碰 Release。
         # 发布是 release.yml 的事，这里不需要 GH_TOKEN。
         # --config.buildVersion：文件名用两段的发布标识，来源与站点包同一个
         #   （cluster/slurmate-sessiond 的 RELEASE）。
+        shell: bash
         run: |
           rel="$(sed -n 's/^RELEASE = "\(.*\)"$/\1/p' ../cluster/slurmate-sessiond)"
           if [ -z "$rel" ]; then
