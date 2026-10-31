@@ -27,6 +27,17 @@ files:
 
 asar: true
 
+# 文件名里的版本段用 `${buildVersion}`，不是 `${version}`。
+#
+# `${version}` 是 package.json 那个三段的 npm 载体（`0.38.0-rc1`），带出去会让
+#   文件名与 tag 对不上；`${buildVersion}` 由 CI 从 cluster/slurmate-sessiond 的
+#   RELEASE 传进来，是两段的发布标识（`0.38-rc1`）。不传时它回落到 `${version}`。
+#
+# 这三条 artifactName 必须留在这个文件里，不能挪进 package.json 的 `build` 字段：
+#   electron-builder 只要在 package.json 里看到 `build`，就改用那一份配置，整个
+#   yml 不再生效 —— 症状是 target 回落到默认值（Linux 少 deb、macOS 只出当前架构
+#   且多一个 zip），而每个平台的 job 都是绿的。2026-10-30 v0.38-rc1 就这么错过一次。
+
 # ── Windows ────────────────────────────────────────────────────────────────
 win:
   target:
@@ -51,7 +62,7 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Slurmate
-  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  artifactName: ${productName}-${buildVersion}-win-${arch}.${ext}
 
 # ── macOS ──────────────────────────────────────────────────────────────────
 mac:
@@ -64,7 +75,7 @@ mac:
   # 或执行 xattr -dr com.apple.quarantine /Applications/Slurmate.app
   # （README 里写了）。要消除这一步需要 Apple 开发者账号。
   identity: null
-  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  artifactName: ${productName}-${buildVersion}-mac-${arch}.${ext}
 
 # ── Linux ──────────────────────────────────────────────────────────────────
 linux:
@@ -79,7 +90,7 @@ linux:
   # 必须有 homepage —— 两者缺一都会让 deb 目标失败（Windows/macOS 不受影响，
   # 所以只有 Linux 这个矩阵会红）。这里显式写全，不依赖从 author 推导。
   maintainer: "JesseFather <JesseFather@users.noreply.github.com>"
-  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  artifactName: ${productName}-${buildVersion}-linux-${arch}.${ext}
 
 # 自动更新本期不做（没有发布渠道）。留位：
 # publish:
