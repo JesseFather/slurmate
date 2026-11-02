@@ -8009,6 +8009,30 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
   cleanupSiteState(idx);
 });
 
+test('常驻通道没建起来时，接管在本地就说明白', async (t) => {
+  // 2026-11-02 真机：降级到 exec 之后，接管必然失败 —— 身份（client）只在
+  //   常驻通道上报。用户看到的是守护进程那句内部术语（「这条连接没有自报
+  //   身份」），既不知道原因，也不知道下一步该做什么。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  // 真实后端上 resident 是三态属性；假后端只有一个 getter，所以在这里
+  //   盖一个自有属性上去 —— 之后 app:takeover 就走那一道闸。
+  Object.defineProperty(b, 'resident', { value: false, configurable: true });
+  t.after(() => { delete b.resident; });
+
+  const tk = await invoke('app:takeover', { sessionId: 'no-such-session' });
+  assert.equal(tk.ok, false);
+  assert.equal(tk.error.kind, 'no_resident',
+    `要让用户看到原因，而不是站点那边的内部术语：${JSON.stringify(tk)}`);
+  assert.match(tk.error.detail, /常驻通道/);
+  assert.match(tk.error.detail, /重试/, '还要说清它会不会自己好');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
 test('被接管的那条在那边结束了：本机跟着走到「已结束」，那句话也跟着换', async (t) => {
   // 用户 2026-10-28 的现场：在另一台电脑上接管，那边把作业结束掉之后，
   //   这台一直写着「被接管」与「运行中」。根因是 `suspend()` 把对账跟心跳一起

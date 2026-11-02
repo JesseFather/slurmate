@@ -303,16 +303,41 @@ const RPC_TIMEOUT_MS = 180000;
 const STREAM_REOPEN_MIN_MS = 2000;
 const STREAM_REOPEN_MAX_MS = 60000;
 /**
- * 连续失败多少次之后不再重开。
+ * 指数退避封顶在一分钟，但永不放弃。
  *
- * 必须有个头。登录节点上的 CLI 是旧的（没有 `stream` 这个子命令）时，
- *   每一次重开都是一次注定失败的 exec —— 而它换来的是每分钟多 fork 一个
- *   python，比这一版想省掉的那个还贵。那种情况下正确的是：记下原因、退回
- *   exec、不再试。
- * 而"连着三次都失败"与"曾经成功过又断了"要分得开：后者会把计数清零，
- *   于是重开一条曾经好用的通道永远有配额（见 `_openStream` 成功那一支）。
+ * 「连续失败三次就不再重开」把两种完全不同的失败放在同一个判据下：登录节点
+ *   上的 CLI 是旧的（没有 `stream` 这个子命令）—— 那种失败是永久的；以及
+ *   登录节点一时卡住（NFS 压力、python 起得慢）—— 那种失败会自己好。
+ * 后果在 2026-11-02 真机上发生了：登录节点在大量文件复制期间把三次重开都
+ *   耗掉，此后这条 SSH 连接永久走 exec —— 而 exec 上接管做不了（身份只在
+ *   常驻通道上报），提交与对账也变成一条命令一个 channel。节点恢复之后，
+ *   客户端再也不会自己回来，只有断开重连才行。
+ * 现在没有终点：退避涨到一分钟就停在那里。旧 CLI 的代价是每分钟一个立刻
+ *   退出的 python（零点几秒的进程），而暂时性故障最多一分钟就自己回来。
  */
-const STREAM_ATTEMPT_MAX = 3;
+
+/**
+ * 连续几次「开不出新通道」之后判这条 SSH 连接不能用了。
+ *
+ * 一次可能是这一下会话数到顶（重试就好），连着几次就不是了 ——
+ *   见 `SshBackend` 构造器里 `_channelOpenFailures` 的注释。
+ */
+const CHANNEL_OPEN_FAILURE_LIMIT = 3;
+
+/**
+ * 第 `attempt` 次重开等多久。纯函数，`_scheduleStreamReopen` 唯一的算法。
+ *
+ * 指数退避：2 / 4 / 8 / 16 / 32 / 60 秒，之后一直是一分钟。指数只算到第 6 次
+ *   （那一下已经到 64 秒、被上限截住）：交给 `2 ** n` 一路涨下去，一条长命
+ *   连接上的 `n` 迟早会把它推到 Infinity。
+ *
+ * @param {number} attempt 已经排过几次重开（0 起）
+ * @returns {number} 毫秒
+ */
+function streamReopenDelay(attempt) {
+  const n = Number.isFinite(attempt) && attempt > 0 ? Math.floor(attempt) : 0;
+  return Math.min(STREAM_REOPEN_MIN_MS * (2 ** Math.min(n, 6)), STREAM_REOPEN_MAX_MS);
+}
 
 /**
  * 等一个结果，但最多等 `budgetMs` 毫秒；到点就回一个「没等到」。
@@ -748,6 +773,16 @@ class SshBackend extends Backend {
     this._prepareRetried = false;
     this._streamTimer = null;
     this._streamAttempt = 0;
+    /**
+     * 这条 SSH 连接上连续几次「开不出新通道」。
+     *
+     * 一次 `(SSH) Channel open failure: open failed` 可能只是这一刻的
+     *   会话数到顶（sshd 的 MaxSessions），重试一次就好；连着几次就说明这条
+     *   连接已经不能用了（sshd 卡死、连接半死）—— 那时继续对着它重试，症状
+     *   是提交与接管全部停在这一句英文上（2026-11-02 真机）。
+     * 连上一条新的就清零（见 `_openOnce` 的 `ready` 分支）。
+     */
+    this._channelOpenFailures = 0;
   }
 
   /**
@@ -894,6 +929,8 @@ class SshBackend extends Backend {
       client.on('ready', async () => {
         this._conn = client;
         this._attempt = 0;
+        // 新的一条连接有新的会话额度（sshd 的 MaxSessions 是按连接算的）。
+        this._channelOpenFailures = 0;
         this._emitState(true, `${user}@${host}:${port}`);
 
         // 先把常驻通道建起来（尽力而为），再走下面那套握手。
@@ -1460,11 +1497,10 @@ class SshBackend extends Backend {
   /** 排一次重开。只在真的能重开时才排，理由见下面那两行。 */
   _scheduleStreamReopen() {
     if (this._closed || !this._conn || this._streamTimer) return;
-    // 连着失败够多次就不再试 —— 见 STREAM_ATTEMPT_MAX。此后这一条 SSH 连接上
-    // 一直走 exec，这是正常的退路，不是坏掉的状态。
-    if (this._streamAttempt >= STREAM_ATTEMPT_MAX) return;
-    const delay = Math.min(
-      STREAM_REOPEN_MIN_MS * (2 ** this._streamAttempt), STREAM_REOPEN_MAX_MS);
+    // 没有终点，退避涨到一分钟就停在那里 —— 理由见 `streamReopenDelay`：
+    //   暂时性失败（登录节点卡住）必须能自己回来，而旧 CLI 那种永久失败
+    //   每分钟多一个立刻退出的 python，代价可以接受。
+    const delay = streamReopenDelay(this._streamAttempt);
     this._streamAttempt += 1;
     this._streamTimer = setTimeout(() => {
       this._streamTimer = null;
@@ -1559,7 +1595,22 @@ class SshBackend extends Backend {
       conn.exec(RPC_CMD, (err, stream) => {
         // 兜底已经先说完了：这条通道属于一个已经结束的等待，别把它挂上去。
         if (finished) { try { stream?.close?.(); } catch { /* 尽力 */ } return; }
-        if (err) return finish(transportError('无法在登录节点上执行命令：' + err.message));
+        if (err) {
+          // 「开不出新通道」要单独看：它可能只是这一下会话数到顶，也可能这条
+          //   SSH 连接已经不能再用。一次就当普通失败交给调用方重试，连续
+          //   `CHANNEL_OPEN_FAILURE_LIMIT` 次就结束这条连接，让 `close` 那条
+          //   路走正常重连 —— 否则客户端会对着一条再也开不出命令的连接一直
+          //   重试，而症状是提交与接管全停在 `(SSH) Channel open failure` 上
+          //   （2026-11-02 真机）。
+          if (/Channel open failure/i.test(err.message || '')) {
+            this._channelOpenFailures += 1;
+            if (this._channelOpenFailures >= CHANNEL_OPEN_FAILURE_LIMIT) {
+              try { conn.end(); } catch { /* 尽力 */ }
+            }
+          }
+          return finish(transportError('无法在登录节点上执行命令：' + err.message));
+        }
+        this._channelOpenFailures = 0;
         chan = stream;
 
         let stdout = '';
@@ -1724,6 +1775,8 @@ module.exports = {
   ResidentChannel,    // 同上：它只认字节与行，所以不连 SSH 也验得了
   authFailureDetail,  // 同上：这是「认证失败」唯一能指向根因的东西
   shellProbeHint,     // 同上：超时那一档唯一能指向根因的东西
+  streamReopenDelay,  // 同上：常驻通道的重开节奏只此一份算法
   AUTH_FAILED_RE,
   RPC_TIMEOUT_MS, STREAM_PROBE_MS, SHELL_PROBE_MS,
+  CHANNEL_OPEN_FAILURE_LIMIT,
 };

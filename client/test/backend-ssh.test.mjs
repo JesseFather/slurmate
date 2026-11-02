@@ -135,6 +135,68 @@ test('握手超时之后：空转命令把「shell 起不来」与「命令自�
   assert.equal(sshBackend.shellProbeHint(null, { user: 'u', host: 'h' }), '');
 });
 
+test('常驻通道失败几次之后仍然会再试：暂时性故障要能自己回来', () => {
+  // 2026-11-02 真机：登录节点在大量文件复制期间把三次重开都耗掉，此后这条
+  //   SSH 连接永久走 exec —— 接管做不了（身份只在常驻通道上报），提交与
+  //   对账也变成一条命令一个 channel。节点恢复之后客户端再也不会自己回来。
+  // 2 / 4 / 8 / 16 / 32 / 60 秒，之后封顶一分钟 —— 不再有"试够就算了"。
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 500].map(sshBackend.streamReopenDelay),
+    [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000],
+    '指数退避涨到一分钟就停在那里');
+  assert.equal(sshBackend.streamReopenDelay(-1), 2000, '坏输入按第一次算');
+
+  // 而排重开这件事本身：次数用完之后仍然要排下一次。
+  const b = new sshBackend.SshBackend({});
+  b._closed = false;
+  b._conn = {};
+  b._streamAttempt = 50;
+  b._scheduleStreamReopen();
+  assert.ok(b._streamTimer,
+    '三次之后该慢下来，而不是停下 —— 停下的那天这条连接再也回不到常驻通道');
+  clearTimeout(b._streamTimer);
+});
+
+test('连着开不出命令通道：第三次之后结束这条 SSH 连接，让重连接手', async () => {
+  // 现场（2026-11-02）：接管失败，原话是「无法在登录节点上执行命令：
+  //   (SSH) Channel open failure: open failed」，而此后每一条 RPC 都撞同一句 ——
+  //   连接已经不能再起命令，客户端却一直对着它重试。
+  const b = new sshBackend.SshBackend({});
+  b._profile = { user: 'u', host: 'h', port: 22 };
+  b._closed = false;
+  let ended = 0;
+  const conn = {
+    exec(_cmd, cb) { cb(new Error('(SSH) Channel open failure: open failed')); },
+    end() { ended += 1; },
+  };
+  b._conn = conn;
+
+  const r1 = await b.rpc({ op: 'status' }, 1000);
+  assert.equal(r1.ok, false);
+  assert.equal(ended, 0, '一次可能只是这一下会话数到顶，先别动连接');
+  assert.equal(b._channelOpenFailures, 1);
+
+  await b.rpc({ op: 'status' }, 1000);
+  assert.equal(ended, 0, '第二次仍然可能只是刚才那一下的余波');
+
+  await b.rpc({ op: 'status' }, 1000);
+  assert.equal(ended, 1, '连续三次开不出通道，这条连接就不能再用了');
+
+  // 成功开出一次通道就清零 —— 否则一次偶尔撞上的会话数上限会攒到三次。
+  const b2 = new sshBackend.SshBackend({});
+  b2._conn = {
+    exec(_cmd, cb) {
+      const s = new EventEmitter();
+      s.stderr = new EventEmitter();
+      s.end = () => { s.emit('exit', 1); s.emit('close'); };
+      cb(null, s);
+    },
+  };
+  b2._channelOpenFailures = 2;
+  await b2.rpc({ op: 'status' }, 1000);
+  assert.equal(b2._channelOpenFailures, 0);
+});
+
 // ── 应答解析：这道缝挡的是「登录节点的 shell 环境不干净」──────────────────────
 //
 // sshd 用登录 shell 解释我们发过去的命令串，所以 rc 文件（zsh 的 ~/.zshenv 连 `-c`
@@ -1128,15 +1190,19 @@ test('探针失败：不建通道、记下原因、并排一次重开', async (t
   b._teardownStream();
 });
 
-test('重开是有上限的：连着失败够多次就不再试', async (t) => {
+test('重开没有上限：失败再多次，下一分钟仍然会试', async (t) => {
   keepLoop(t);
-  // 上限挡的是"登录节点上的 CLI 是旧的"那种永久失败 —— 它和暂时的失败
-  // 现场一模一样（一行 usage + 退出码 2），区分不了，只能靠次数。
-  // 每一次失败的重开都是一次注定失败的 exec，也就是每分钟白 fork 一个 python。
+  // 从前这里是「三次之后就不再试」，它把"CLI 是旧的"（永久）与"登录节点
+  //   一时卡住"（会自己好）放在同一个判据下。2026-11-02 真机上，登录节点在
+  //   大量文件复制期间把三次都耗掉，此后这条连接永久走 exec —— 接管做不了，
+  //   节点恢复之后客户端也不会自己回来。
+  // 现在退避封顶一分钟，但永不停止：旧 CLI 的代价是每分钟一次立刻退出的
+  //   python，而暂时性故障最多一分钟就回来。
   const b = connectedBackend();
   b._streamAttempt = 3;
   b._scheduleStreamReopen();
-  assert.equal(b._streamTimer, null, '到了上限就不该再排');
+  assert.ok(b._streamTimer, '到了第三次也不该停 —— 停下的那天这条连接回不到常驻通道');
+  b._teardownStream();
 });
 
 test('一次成功会把重开计数清零（曾经好用的通道永远有配额）', async (t) => {
