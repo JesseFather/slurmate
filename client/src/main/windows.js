@@ -218,6 +218,15 @@ class ShellWindow {
      *   于是 `frontSlot()` 变成 null，前台换了，在这里就清掉了。
      */
     this._panelFront = false;
+    /**
+     * 被藏起来、但页面还留着的那几个槽（见 `hideSurface`）。
+     *
+     * `pushSessions` 每推一次都会按 `frontSlot()` 重设 `_front`，而 `frontSlot()`
+     *   对"已结束但记录还留着"的那一条仍会返回它的槽（界面要显示「已结束」那一屏）。
+     *   不挡住的话，页面保留下来之后，下一次推送又会把它设成前台、显示出来 ——
+     *   而它该藏着。`showSurface` / `setFront` 把这个槽交出去时清掉。
+     */
+    this._hidden = new Set();
     this.overlayView = null;
     /**
      * 浮窗那一层。懒建（头一次停靠时才建），建成之后跨次复用 ——
@@ -298,6 +307,8 @@ class ShellWindow {
     //   而界面上完全看不出区别。
     //   判据是这一个槽自己的分区，不是"窗口里那块"的 —— 见 index.js 的
     //     `ensureSurface`。
+    // 这一槽的页面重新被交出来（新起一条、或者接回同一工作区）：它不是藏着的那一块了。
+    this._hidden.delete(slot);
     let s = this.surfaces.get(slot);
     if (s && s.partition !== partition) { this._destroySurface(slot); s = null; }
 
@@ -464,6 +475,7 @@ class ShellWindow {
       if (v.webContents && !v.webContents.isDestroyed()) v.webContents.close();
     } catch { /* 同上 */ }
     this.surfaces.delete(slot);
+    this._hidden.delete(slot);
     this._destroying.delete(slot);
     if (this._front === slot) this._front = null;
     // 那一句话说的是这一块页面，页面没了，它跟着没。只清自己那一槽：
@@ -476,10 +488,24 @@ class ShellWindow {
     }
   }
 
-  /** 收起某一个槽的界面（销毁那一块）。会话结束时走这条。 */
+  /** 收起某一个槽的界面（销毁那一块）。确认作业结束之后走这条。 */
   destroySurface(slot) {
     if (!this.surfaces.has(slot)) return;
     this._destroySurface(slot);
+    this._layout();
+  }
+
+  /**
+   * 收起某一个槽的页面，但不销毁它。
+   *
+   * 与 `destroySurface` 的差别只有一条：页面留着。作业可能还在集群上跑，
+   *   下次连上同一个工作区时同一块视图接着用（见 index.js 的 `keptSurfaces`）。
+   *   用户此刻看不见它：`_front` 清掉，`_layout` 把每一块都藏起来；再点它的
+   *   标签时原样回来。
+   */
+  hideSurface(slot) {
+    this._hidden.add(slot);
+    if (this._front === slot) this._front = null;
     this._layout();
   }
 
@@ -505,6 +531,9 @@ class ShellWindow {
   closeAllSurfaces({ keepPages = false } = {}) {
     if (!keepPages) {
       for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
+    } else {
+      // 留着的页面全部藏起来：下一次推送不许把它们设回前台。
+      for (const slot of this.surfaces.keys()) this._hidden.add(slot);
     }
     this._overlayText = null;
     this._overlayTitle = null;
@@ -526,6 +555,7 @@ class ShellWindow {
    */
   setFront(slot) {
     this._front = slot || null;
+    if (slot) this._hidden.delete(slot);
     // 用户点了一条会话的标签，他要的就是那块页面 —— 面板让开（见 `_panelFront`）。
     //   少了这一句，「调试」那一屏上点会话标签会"什么都不发生"。
     this._panelFront = false;
@@ -959,7 +989,11 @@ class ShellWindow {
    *   也没有「结束会话」的入口，而它在集群上占着资源。
    */
   pushSessions(list, front, opts) {
-    const next = front || null;
+    // 被藏起来的那一槽（会话结束了、被接管了、或者离开站点时留下的页面）不许
+    //   被这次推送设回前台 —— `frontSlot()` 对"记录还留着但已经结束"的那一条
+    //   仍会返回它的槽，而那块页面该藏着。
+    const wanted = front || null;
+    const next = wanted !== null && this._hidden.has(wanted) ? null : wanted;
     // 前台换了，面板让开（2026-10-11 加，与 `setFront` 里那一句同一件事的
     //   另一半）。少了它的症状是"我点了开始会话，什么都没出来"：用户可能正站在
     //   「调试」那一屏上，而新会话的页面被 `_panelFront` 按着不让露。
@@ -982,7 +1016,10 @@ class ShellWindow {
       // `panelFront` 一起带上：界面靠它决定状态条右侧那几颗按钮露不露 ——
       //   会话页面盖着时才有「重新加载 / 停止该作业」，面板抬回来时一颗都不该有。
       //   不带的话，切标签（`setFront` / `showPanel`）之后那几颗会停在上一次的样子。
-      wc.send('session:states', { sessions: list, front: this._front,
+      // `front` 发给界面的是"哪一条是当前会话"（已结束的记录也算，
+      //   界面要显示「已结束 + 重新开始」那一屏）；窗口里真正可见的是
+      //   `this._front`（藏着的那一槽在这里是 null）。两个问题不一样。
+      wc.send('session:states', { sessions: list, front: wanted,
                                   panelFront: this._panelFront });
     }
     this._layout();

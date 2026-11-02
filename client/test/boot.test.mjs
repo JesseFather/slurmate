@@ -1790,6 +1790,11 @@ test('运行中切换工作区：只换本地端口与存储分区，作业一�
   // （断开之后的重连不会把它接回来：`tryReattach` 跳过 `releasing`。）
   idx._test.getBackend().debugReap();
 
+  // 前一条用例可能留下了保留的页面（断开、结束不再销毁，见 index.js 的
+  //   `keptSurfaces`）。这一条起会话时会复用那一块，而 `waitForView` 判的是
+  //   "视图数变多了" —— 它会一直等不到。先清掉，让这一条从干净状态开始。
+  idx._test.getWindow().closeAllSurfaces();
+
   assert.equal((await invoke('app:connect', { connectionId: conn.id })).ok, true,
     '假后端应当连得上');
 
@@ -4606,12 +4611,16 @@ test('会话一结束就要收起 web-demo 视图，把面板还给用户', asyn
 
   // 结束会话。用户点下按钮之后，隧道在 stop() 的最开头就停了，页面从那一刻起
   //   就是死的 —— 而状态要等下一次 status 轮询（60 秒）才可能从 releasing 变成
-  //   ended。所以收起视图必须发生在 releasing，不能等 ended：否则用户还要盯着
+  //   ended。所以让开必须发生在 releasing，不能等 ended：否则用户还要盯着
   //   一块打不开的页面最多一分钟，而面板上那几个「重新开始」的按钮全被它盖着。
+  //
+  // 让开是"藏起来"，不是"销毁"：作业要等守护进程确认消失才算彻底结束，在那之前
+  //   它可能被接回来（见 index.js 的 `keptSurfaces`）。
   await invoke('app:stop', { slot: await frontSlotOf() });
-  assert.equal(Boolean(theView(w)), false,
-    '会话结束后必须销毁 web-demo 视图 —— 它是原生层、覆在面板上方，'
-    + '留着就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
+  assert.ok(theView(w), '页面还在 —— 保留到确认结束');
+  assert.equal(theView(w)._visible, false,
+    '会话结束后那一块页面必须让开 —— 它是原生层、覆在面板上方，'
+    + '留着可见就是一块盖住面板的死页面，而面板上正是「重新开始」那几个按钮');
 });
 
 /** 提示页那一块视图（`calls.views` 里加载 overlay.html 的那个）。 */
@@ -5292,6 +5301,9 @@ async function openUpTo(idx, n) {
     if (rec.controller) await rec.controller.abandon();
   }
   idx._test.getSessions().clear();
+  // 上一条用例留下的空手计时器要撤掉：这一条可能把周期调到毫秒级，而
+  //   `armEmptyHands` 见到已有计时器会直接返回（见它的实现）。
+  idx._test.disarmEmptyHands();
   // 【临时离开】会把页面留在窗口里（见 index.js 的 `keptSurfaces`）。用例结束时
   //   没接回去的那些会留到下一轮，而下一轮的 `theView(w)` 会拿到上一条用例的
   //   页面 —— 红在一个与它无关的地方。
@@ -5402,7 +5414,9 @@ test('多开：一个开发会话与一个中转站会话同时活着，互不�
   //   判据是 `occupied`（与 index.js 同一个口径），不是"记录还在不在"。
   assert.ok(idx._test.getSessions().get(a.slot), '甲那条记录该留着（界面要显示"已结束"）');
   assert.equal(occupiedOf(idx, a.slot), false, '甲那个槽要能被下一轮用起来');
-  assert.equal(w.hasSurface(a.slot), false, '甲那块界面该收掉');
+  // 结束是一个过程：releasing 时页面留着（作业还没确认消失），ended 之后才销毁。
+  await waitUntil(() => !w.hasSurface(a.slot),
+    '甲那块界面在确认结束之后要收掉', 20000);
 
   await invoke('app:stop', { slot: bs.slot });
   await waitUntil(async () => !idx._test.getBackend()._occupying().length, '两条都释放', 20000);
@@ -5458,8 +5472,13 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   //   不等它的话，后面第 4 次提交会撞上「已经有 3 个会话占着位置」，而这一条
   //   断言的却是界面上那块页面 —— 两件事无关，失败信息却指不到这里。
   b.debugReap();
-  assert.equal(w.front, a.slot,
-    '前置：前台仍旧是那个槽（记录留着，界面要显示"已结束"）—— 这正是②判不出来的那一格');
+  // 界面那一份 `front` 仍旧是那个槽（记录留着，界面要显示「已结束」）；窗口里
+  //   那一块页面是藏着的（`_front` 为 null，见 windows.js 的 `hideSurface`）。
+  //   路③ 说的是"下一轮复用同一个槽时面板必须让开"，判据是槽名没变。
+  const statesOf = () => (calls.windows[0].webContents.handlers['send:session:states'] || []);
+  const lastStates = statesOf().slice(-1)[0] || {};
+  assert.equal(lastStates.front, a.slot,
+    '前置：界面那份前台仍旧是那个槽（记录留着，界面要显示"已结束"）');
   // 用户又点了一次那颗「调试」（面板本来就露着 —— 那条会话已经没了），这一步只是
   //   把标志重新立起来。而这正是③要守的现场：前台一个字没变，而页面是新的一块。
   await invoke('app:showPanel');
@@ -5486,9 +5505,16 @@ test('面板被插件页面盖住之后，三条路都要能把它抬回来', as
   const b2 = await appStart(null, 'relay-demo');          // 另一个插件，另一个槽
   assert.equal(b2.ok, true, `乙提交失败：${JSON.stringify(b2)}`);
   assert.notEqual(b2.slot, a.slot, '前置：它落在另一个槽上');
-  await waitUntil(() => w.front === b2.slot, '前台换到乙那个槽上', 20000);
-  assert.equal(w.panelFront, false,
-    '路②：前台换了，面板让开（少了它，页面上来了而面板还按着它）');
+  // 界面那份 `front` 换到乙的槽上（窗口里那一块是 relay，没有页面）。
+  await waitUntil(() => {
+    const st = (calls.windows[0].webContents.handlers['send:session:states'] || [])
+      .slice(-1)[0] || {};
+    return st.front === b2.slot;
+  }, '界面前台换到乙那个槽上', 20000);
+  // 乙是 relay，没有页面 —— 窗口这一层没有可见的会话页面，而甲′那块必须让开。
+  //   `panelFront` 在"没有页面可盖"时没有意义，不再拿它当判据。
+  await waitUntil(() => w.front !== a3.slot, '前台不再指着甲′那个槽', 20000);
+  assert.equal(viewA3._visible, false, '路②：前台换了，旧那块页面要让开');
 
   // ── 反过来：起一条后台会话时，面板不许被顶掉 ──
   //   判据是"这一块是不是前台"（见 windows.js 的 `showSurface`）。少了这一半的话，
@@ -8862,7 +8888,7 @@ test('接回本机看护的会话：面板留在前面，页面不自动盖上�
   cleanupSiteState(idx);
 });
 
-test('被接管之后：这一端的插件页面收掉，不能再操作', async (t) => {
+test('被接管之后：这一端的插件页面藏起来，不能再操作', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8882,7 +8908,11 @@ test('被接管之后：这一端的插件页面收掉，不能再操作', async
   await invoke('app:debug', 'foreign-keeper');
   await ctl.heartbeatNow();
   assert.match(ctl.suspended || '', /接管/, '前提：本机进入了被接管');
-  await waitUntil(() => !w.hasSurface(a.slot), '被接管之后那一槽的页面要收掉', 5000);
+  // 页面藏起来，但不销毁：作业在别人手上继续跑，本机随时可能再接管回来，
+  //   那时同一块视图接着用（用户 2026-11-03）。
+  await waitUntil(() => !viewFor(w, a.slot)._visible,
+    '被接管之后那一槽的页面要藏起来', 5000);
+  assert.equal(w.hasSurface(a.slot), true, '页面留着 —— 接管回来时接着用');
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
@@ -8907,7 +8937,7 @@ test('空手连接超时断开：手里没有控制权，到点就拆连接', as
   cleanupSiteState(idx);
 });
 
-test('站点上没有 Slurmate：忘掉会话、收掉页面、回连接屏', async (t) => {
+test('站点上没有 Slurmate：忘掉会话、藏起页面、回连接屏', async (t) => {
   t.after(() => { Module._load = origLoad; });
   const idx = require('../src/main/index.js');
   const b = await openUpTo(idx, 1);
@@ -8932,7 +8962,10 @@ test('站点上没有 Slurmate：忘掉会话、收掉页面、回连接屏', as
   b.emit('state', { kind: 'ssh', connected: false, definitive: true,
                     detail: '站点上没有 Slurmate 的命令（可能刚被卸载或没有装好）。' });
 
-  await waitUntil(() => !w.hasSurface(a.slot), '页面要收掉', 5000);
+  // 页面藏起来，但不销毁：作业可能还在集群上跑，下次连上这个站点时按那份
+  //   清单确认它结束了没有（用户 2026-11-03）。
+  await waitUntil(() => !viewFor(w, a.slot)._visible, '页面要藏起来', 5000);
+  assert.equal(w.hasSurface(a.slot), true, '作业可能还在跑 —— 页面留着');
   await waitUntil(() => closedOf().length > closedBefore, '要回连接屏（ui:siteClosed）', 5000);
   const closed = closedOf().slice(closedBefore);
   assert.equal(closed.length, 1, `这一次断开只回一次连接屏，实际回了 ${closed.length} 次`);
