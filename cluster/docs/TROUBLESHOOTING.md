@@ -833,6 +833,59 @@ sudo grep rejected  /var/log/slurmate/audit.log | tail -30
 最可能的原因：这个站点上没有开记账（`AccountingStorageType` 是空的），
 或者作业比配置的窗口（缺省 7 天）更早。
 
+### 某台客户端连上要一两分钟，登录节点上堆出一堆 `conda`
+
+症状：客户端显示「已连上」，随后长时间停在「正在提交」或直接超时；登录节点的负载
+与磁盘都不高；`ps -u <用户> -o stat,comm` 里成堆 `bash` 与 `conda`，其中一部分是
+`D` 状态。
+
+先量这一段：
+
+```
+journalctl -u sshd --since '-10 min' -o short-precise | grep '<用户>'
+```
+
+`Accepted publickey` 到 `pam_unix(sshd:session): session opened` 之间的时间就是嫌疑
+区间。几秒以上就看这个用户的 cgroup：
+
+```
+cat /sys/fs/cgroup/user.slice/user-<uid>.slice/memory.events
+cat /sys/fs/cgroup/user.slice/user-<uid>.slice/memory.current
+cat /sys/fs/cgroup/user.slice/user-<uid>.slice/memory.max
+```
+
+`high` 很大、`oom_kill` 非零，说明这个用户的额度已经被占满，新会话在等内存回收。
+若站着的那条 `sshd` 进程 `wchan` 是 `mem_cgroup_handle_over_high`，就是这一条。
+
+原因在用户的 shell 启动文件里。`conda init` 写入的那一段每被读一次就启动一个
+`conda` 进程（几十 MB），在 NFS 上卡住时不会退出，只增不减。
+
+| 文件 | 谁读它 |
+|---|---|
+| `~/.bashrc` | 0.38-rc2 之前的客户端会在每条命令上读一次；0.38-rc2 起内层 bash 带 `--norc`，不再读 |
+| `~/.zshenv` | 外层登录 shell 每次执行命令都读，客户端改不了 |
+| `~/.cshrc` | 登录 shell 是 csh/tcsh 时同理，客户端改不了 |
+
+确认：
+
+```
+grep -n conda ~/.bashrc ~/.zshenv ~/.cshrc
+time zsh -c true
+```
+
+`time zsh -c true` 走非交互 zsh，会读 `~/.zshenv`；几十秒就是它。
+
+处理：让用户在对应文件里把那段包进交互判断（bash 用 `[[ $- == *i* ]]`，zsh 用
+`[[ -o interactive ]]`），或者把初始化移到 `~/.zshrc`。然后收掉残留会话：
+
+```
+loginctl terminate-user <用户>
+```
+
+不要靠调大 `MemoryMax` 解决：那只是把同一个问题推迟到下一次占满。
+
+作业不受影响。作业由守护进程提交，环境是固定的那几条，不读用户的启动文件。
+
 ---
 
 ## 版本
