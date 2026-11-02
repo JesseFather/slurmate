@@ -76,7 +76,7 @@ VERSION = "0.38"
 #   它不是协议版本：`ping` 报的仍是 `VERSION`。rc 与正式版之间的协议
 #   完全一样，把它报成两个号会让客户端判成"对面不是我们的守护进程"。
 #   与 `cluster/slurmate` 的那一行必须相同，由 .github/workflows/checks.yml 断言。
-RELEASE = "0.38-rc1"
+RELEASE = "0.38-rc2"
 # 这一版在基线之上多支持的几样东西。客户端据此决定用不用新行为，而不是
 #   拿版本号猜 —— 后者在 0.y 期间连拦都不拦（见 docs/PROTOCOL.md〈三方〉）。
 # 缺省即基线：不在这一个列表里的，客户端必须按最老的行为处理。
@@ -11243,7 +11243,7 @@ class Sessiond(object):
         四类问题各有自己的键，界面与脚本不必解析人话：
           socket_missing / table_missing / rules_unreadable /
           claim_incomplete / rule_missing / rule_orphan / rule_unparsable /
-          auth_mode_unknown / tick_never / tick_error / base_table_missing
+          auth_mode_unknown / tick_never / tick_error
 
         `consistent` 保留（旧界面读它），但判据改成集合相等，不再是数量相等。
         """
@@ -11304,10 +11304,13 @@ class Sessiond(object):
              "对账一次都还没有跑过")
         must(not out["last_tick_error"], "tick_error",
              "最近一次对账出错：%s" % (out["last_tick_error"] or ""))
-        must(out["existing"]["codeserver_table"], "base_table_missing",
-             "现有的 inet codeserver 表不见了")
-        must(out["existing"]["portdaemon_table"], "base_table_missing",
-             "现有的 ip port-daemon 表不见了")
+        # 既有系统那两张表是【环境事实】，不是本系统的不变量。
+        #   `install-base.sh` 把同一批设施叫作「可选基线」，写着「别人的集群上
+        #   没有这些是正常的」，默认只提示、不中止。这里把「本来就没有」报成
+        #   问题，等于把一个站点的部署选择当成故障（2026-11-02 真机：一台只装了
+        #   Slurmate 的站点被报「现有的 inet codeserver 表不见了」）。
+        #   `existing` 照旧报出来供人核对，但不进 problems —— 它回答的是
+        #   「既有系统现在长什么样」，不是「本系统坏了没有」。
 
         # 活跃 claim 的期望规则名。缺节点地址或端口的那些各自记一条 ——
         #   它们算作活跃，却拼不出一条该有的规则，那本身就是问题。
@@ -11362,12 +11365,24 @@ class Sessiond(object):
 
         # `none` 是站点显式配的宽松模式，不是问题；但要说出来 ——
         #   一个"检查通过"而不提口令被关掉，等于替站点把它藏了。
+        #
+        # 值域来自三方，缺一不可：数据库的列默认值（`password`）、框架自己写的
+        #   两个（`none` 与 `publickey` —— 后者是 `session_auth_mode` 对需要
+        #   公钥的插件唯一会写的值），以及插件规范里的 `auth_mode` 枚举。
+        #   不在这里抄一份白名单：抄的那天，一条用公钥认证的活跃会话就会被报成
+        #   「不是 password 也不是 none」（2026-11-02 真机报的正是这个），而它
+        #   证明不了任何东西 —— 那个值本来就是本系统写进去的。
+        known_modes = {"password", "none", "publickey"}
+        for _pc in self.cfg.plugins.values():
+            for _key, _choices, _dflt in _pc.spec.enum_keys:
+                if _key == "auth_mode":
+                    known_modes.update(_choices)
         bad_mode = [s.get("session_id") or "?" for s in active
-                    if s.get("auth_mode") not in ("password", "none")]
+                    if s.get("auth_mode") not in known_modes]
         checked += 1
         if bad_mode:
             note("auth_mode_unknown",
-                 "有 %d 条活跃会话的 auth_mode 不是 password 也不是 none：%s"
+                 "有 %d 条活跃会话的 auth_mode 不在本站点能产出的值里：%s"
                  % (len(bad_mode), "、".join(bad_mode[:3])))
         out["auth_mode_none"] = sum(1 for s in active
                                     if s.get("auth_mode") == "none")

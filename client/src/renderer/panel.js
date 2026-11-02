@@ -85,6 +85,13 @@ let SESS = { sessions: [], front: null, panelFront: false };
 /** 上一次推送时活着的槽，逗号连起来。作业那一屏据此判断"要不要重取一次"。 */
 let lastLiveIds = null;
 /**
+ * 上一次画标签栏时那一份输入的指纹（见 `renderTabs`）。
+ *
+ * 它只在 `renderTabs` 里读写：它是"这一条栏现在画的是什么"的记录，别处绕过去
+ *   改它，下一份真正不同的数据就会被跳过 —— 而症状是标签停在旧样子上。
+ */
+let lastTabKey = null;
+/**
  * 最近一次的插件清单。界面里有两处需要知道"这个会话的插件声明了界面没有"，
  * 而快照本身是插件无关的（session.js 不认识任何插件）—— 所以在这里留一份，
  * 按 `serviceKind`（站点短名）去查。
@@ -496,9 +503,26 @@ function renderTabs() {
   if (SCREEN === 'conns') {
     box.classList.add('hidden');
     box.textContent = '';
+    lastTabKey = null;
     return;
   }
   const list = SESS.sessions;
+  // 画之前先问一句"要画的东西变了没有"。没变就不动 DOM。
+  //
+  // 会话状态是推来的，而推送的次数不归界面管：同一份内容可以连着到很多遍
+  //   （心跳、对账、隧道那条通道的每一次状态变化）。每来一遍就整条重画的话，
+  //   用户按下的那一刻那颗按钮已经不在了 —— 浏览器不会把这一下算成一次点击
+  //   （用户 2026-10-31 报的"提示页出来之后整个软件点不动"）。
+  //
+  // 判据是整份输入，不只是会话表：屏名、前台、以及插件清单都参与画这一条栏
+  //   （`hasSurface` 读的就是清单）。少算一格，那一格变化时标签会停在旧样子上。
+  // 取不出指纹（比如某个字段成环）就照常重画 —— 宁可多画一次，不要画错。
+  let key = null;
+  try {
+    key = JSON.stringify([SCREEN, SESS.front, list, lastPlugins && lastPlugins.plugins]);
+  } catch { key = null; }
+  if (key !== null && key === lastTabKey) return;
+  lastTabKey = key;
   // 有没有一块页面正盖着面板。判据与"重新加载 / 停止该作业"那两颗同一份
   //   （`hasSurface`）：声明了界面的插件才会起那块原生视图，也只有那时"回不去"
   //   这回事才存在。中转站那类会话不盖任何东西，不需要这一条栏。
@@ -542,8 +566,6 @@ function renderTabs() {
   box.appendChild(panelTab);
   for (const s of list) {
     const b = document.createElement('button');
-    // 被接管的会话仍然列在这里（它还在集群上跑着），但页面已经收掉了 ——
-    //   `dead` 说的正是"这一条现在没有可切过去的东西"，与已结束的同一档。
     const suspended = Boolean(s.snap && s.snap.suspended);
     const plug = pluginOfSession(s.snap);
     // 跑着、而插件明说了自己没有界面（中转站那类）：标签要在（它是"这一条
@@ -551,10 +573,16 @@ function renderTabs() {
     //   灰掉、不许点（用户 2026-10-27）。判据要求 `plug` 在：插件认不出来时
     //   不知道它有没有页面，那时不许把一颗可能真的能切过去的标签按死。
     const noPage = Boolean(s.live) && !suspended && Boolean(plug) && !plug.surface;
+    // 已经结束的，与被本机放手的（被接管）：两档都没有可切过去的页面 ——
+    //   后者的那一块在接管那一刻就收掉了（index.js 的 `_renderSession`）。
+    //   两档都淡下去，而且都不许点：点下去既没有画面，也会把面板换成那条
+    //   会话的样子 —— 用户 2026-10-31 报的正是「标签是灰的，点一下右边冒出
+    //   重新加载 / 临时离开 / 停止该作业三颗」。
+    const dead = !s.live || suspended;
     b.className = 'tab' + (s.slot === SESS.front ? ' on' : '')
-      + (s.live && !suspended ? '' : ' dead')
+      + (dead ? ' dead' : '')
       + (noPage ? ' nopage' : '');
-    b.disabled = noPage;
+    b.disabled = dead || noPage;
     const name = s.service || '（未知服务）';
     const port = s.snap && s.snap.localPort;
     b.textContent = seen.get(name) > 1 && port ? `${name} · ${port}` : name;
@@ -563,11 +591,13 @@ function renderTabs() {
     // 输入法失效时页面收不到按键，而这不是会话本身出了问题；把恢复动作放在
     //   标签的 title 上，用户不必去翻排障文档。
     const ime = '输入法无效时先点击编辑区；仍无效时重新加载。';
-    // 没有界面的那一条把"为什么点不动"写在 title 上 —— 一颗灰按钮不说原因，
+    // 点不动的那几条把"为什么点不动"写在 title 上 —— 一颗灰按钮不说原因，
     //   读起来像"它坏了"。
     b.title = noPage
       ? `${base ? base + ' ' : ''}这个插件没有界面：会话在跑，但没有可切过去的页面。`
-      : (base ? `${base} ${ime}` : ime);
+      : dead
+        ? `${base ? base + ' ' : ''}这一条现在没有可切过去的页面。`
+        : (base ? `${base} ${ime}` : ime);
     b.onclick = () => window.slurmate.setFront(s.slot);
     box.appendChild(b);
   }
@@ -753,13 +783,17 @@ function renderSnapshot(s) {
 /**
  * 会话页面此刻有没有盖在面板上。
  *
- * 判据：前台那条跑着、它的插件有页面、而面板没被抬上来（`SESS.panelFront`，
- *   由主进程随会话状态一起推）。
+ * 判据：前台那条跑着、本机没有放手（`suspended`）、它的插件有页面、而面板
+ *   没被抬上来（`SESS.panelFront`，由主进程随会话状态一起推）。
+ * 被接管那一条仍然停在 `running`，而它那一块页面在接管那一刻就收掉了
+ *   （index.js 的 `_renderSession`）—— 少了这一格，前台停在一条被接管的
+ *   会话上时，状态条右侧会摆出三颗按下去没有对象的按钮（用户 2026-10-31）。
  * 两处读者：状态条右侧那几颗（露不露）与高级选项（盖上来就等于离开了插件那一屏）。
  *   各判一遍的话，漂开的方向是"按钮已经在会话页面上了，而高级选项还开着"。
  */
 function pageCovering(s) {
-  return Boolean(s) && s.state === 'running' && hasSurface(s) && !SESS.panelFront;
+  return Boolean(s) && s.state === 'running' && !s.suspended
+    && hasSurface(s) && !SESS.panelFront;
 }
 
 /**

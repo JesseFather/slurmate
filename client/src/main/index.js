@@ -6178,6 +6178,21 @@ function registerIpc() {
   send('app:takeover', async (payload = {}) => {
     const sid = String((payload && payload.sessionId) || '');
     if (!sid) return { ok: false, error: { detail: '没有说清要接管哪一条会话。' } };
+    // 常驻通道没建起来时，这一条现在一定做不了（见上面那段：身份只在常驻
+    //   通道上报，exec 退路上它会被删掉）。与其让用户看到守护进程那句
+    //   `no_client_id` 的内部术语，不如在这里说清原因与下一步。
+    //   `resident` 是三态：`false` 才是「试过、不通」；`null`（刚连上那一瞬）
+    //   与假后端（开发者模式没有这个概念）都不拦，让常态路径照旧。
+    if (backend.resident === false) {
+      return {
+        ok: false,
+        error: {
+          kind: 'no_resident',
+          detail: '接管需要一条常驻通道，这条连接上它现在没建起来。'
+            + '客户端会在后台继续重试；稍后再点一次，或者断开重连。',
+        },
+      };
+    }
     const resp = await backend.rpc({ op: 'takeover', session_id: sid });
     if (resp && resp.ok) {
       // 接管成功之后它不再属于"只保活"那一档。

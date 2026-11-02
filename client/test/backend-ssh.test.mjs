@@ -47,7 +47,7 @@ test('RPC 命令行是编译期常量，不含任何插值', () => {
   // （命令串里不能出现 web-demo 字面量）。它一旦变成拼出来的字符串，
   // 两条性质同时失效。
   assert.equal(typeof sshBackend.RPC_CMD, 'string');
-  assert.equal(sshBackend.RPC_CMD, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
+  assert.equal(sshBackend.RPC_CMD, "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'");
   assert.ok(!/[$`{}]/.test(sshBackend.RPC_CMD), '不得含任何模板/变量语法');
   assert.ok(!/web-demo/.test(sshBackend.RPC_CMD), '不得含 web-demo 字面量');
 
@@ -55,7 +55,14 @@ test('RPC 命令行是编译期常量，不含任何插值', () => {
   //   sshd 用 `$SHELL -c "<命令串>"` 执行 exec 请求，而 $SHELL 来自 /etc/passwd ——
   //   HPC 登录节点上常是 zsh，与 bash 并非完全互通。少了这一层，同一份客户端
   //   在不同集群上会跑出不同结果，且失败时只看得到「认证失败」。
-  assert.match(sshBackend.RPC_CMD, /^\/bin\/bash -c /, '必须显式指定 bash');
+  assert.match(sshBackend.RPC_CMD, /^\/bin\/bash --norc -c /, '必须显式指定 bash');
+
+  // `--norc` 不是保险，是必需的：2026-11-03 真机上，一个用户的 ~/.bashrc 里有
+  //   conda init 那一段，每条命令都会起一个约 40 MB 的 conda 去算 shell hook，
+  //   卡在 NFS 上不退，几十条之后把该用户的 cgroup 占满，登录要等两分钟。
+  //   这一条判据少掉，那次故障就会原样回来。
+  assert.match(sshBackend.RPC_CMD, /--norc/,
+    '必须带 --norc：否则用户 ~/.bashrc 里的初始化会跟着每一条命令跑一遍');
   // 内层命令整体被单引号包住：否则登录 shell 会把参数拆开，`rpc` 会变成 $0
   assert.match(sshBackend.RPC_CMD, /'[^']+'$/, '内层命令必须整体加引号');
 });
@@ -89,6 +96,112 @@ test('命令通道没有应答也有尽头（exec 那条路的兜底）', async 
   // 迟到的那个回调：不许把通道挂上来，也不许再 resolve 一次。
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(closed, true, '迟到的通道要当场关掉，否则它在登录节点上一直开着');
+});
+
+test('握手超时之后：空转命令把「shell 起不来」与「命令自己卡住」分开', async () => {
+  // 现场：界面上写「已连上 <host>，但无法执行 slurmate rpc：登录节点上的
+  //   命令超过 180 秒没有应答」。这一句至少有三种原因 ——
+  //   登录 shell 的启动脚本卡住、家目录所在的共享盘卡死、命令本身起不来 ——
+  //   而三种修法完全不同。这里钉住的那条判据是：再问一条空转命令（/bin/true）。
+  const b = new sshBackend.SshBackend({});
+
+  // 1) 空转命令也没有回音：结论在登录 shell 这一侧。
+  const stuck = { exec() { /* 回调永远不来 —— 与真机上那条 exec 相同 */ } };
+  // 探针的超时定时器是 unref 的（生产上程序退出时不该为它多等 8 秒）。
+  //   用例里没有别的句柄，得自己撑住事件循环，否则这条 await 永远不回来。
+  const keep = setTimeout(() => {}, 500);
+  const r1 = await b._probeShell(stuck, 40);
+  clearTimeout(keep);
+  assert.equal(r1.timedOut, true, `没回音要判成超时：${JSON.stringify(r1)}`);
+  const h1 = sshBackend.shellProbeHint(r1, { user: 'u', host: 'h' });
+  assert.match(h1, /卡住的是登录节点上的 shell 启动脚本/,
+    `要指向 shell 的启动脚本，而不是笼统地再说一次超时：${h1}`);
+  assert.match(h1, /ssh u@h true/, '要给一条能自己核对的命令');
+
+  // 2) 空转命令立刻回 0：shell 是好的，卡住的是 slurmate 命令本身。
+  const fine = {
+    exec(_cmd, cb) {
+      const s = new EventEmitter();
+      s.end = () => { s.emit('exit', 0); s.emit('close'); };
+      cb(null, s);
+    },
+  };
+  const r2 = await b._probeShell(fine);
+  assert.equal(r2.ok, true, `一条立刻退出的命令应当判成正常：${JSON.stringify(r2)}`);
+  assert.match(sshBackend.shellProbeHint(r2, { user: 'u', host: 'h' }),
+    /卡住的是 slurmate 命令本身/,
+    '结论要指向命令那一侧，而且要给手工核对的入口');
+
+  // 3) 通道在问它的这一下断了：第三种结论，不许冒充前两种。
+  const broken = { exec(_cmd, cb) { cb(new Error('通道断了')); } };
+  const r3 = await b._probeShell(broken);
+  assert.match(sshBackend.shellProbeHint(r3, { user: 'u', host: 'h' }),
+    /通道断了/, '问不到也要如实说问不到');
+
+  // 没有结论时一个字都不追加（调用方直接拼在错误后面）。
+  assert.equal(sshBackend.shellProbeHint(null, { user: 'u', host: 'h' }), '');
+});
+
+test('常驻通道失败几次之后仍然会再试：暂时性故障要能自己回来', () => {
+  // 2026-11-02 真机：登录节点在大量文件复制期间把三次重开都耗掉，此后这条
+  //   SSH 连接永久走 exec —— 接管做不了（身份只在常驻通道上报），提交与
+  //   对账也变成一条命令一个 channel。节点恢复之后客户端再也不会自己回来。
+  // 2 / 4 / 8 / 16 / 32 / 60 秒，之后封顶一分钟 —— 不再有"试够就算了"。
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 500].map(sshBackend.streamReopenDelay),
+    [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000],
+    '指数退避涨到一分钟就停在那里');
+  assert.equal(sshBackend.streamReopenDelay(-1), 2000, '坏输入按第一次算');
+
+  // 而排重开这件事本身：次数用完之后仍然要排下一次。
+  const b = new sshBackend.SshBackend({});
+  b._closed = false;
+  b._conn = {};
+  b._streamAttempt = 50;
+  b._scheduleStreamReopen();
+  assert.ok(b._streamTimer,
+    '三次之后该慢下来，而不是停下 —— 停下的那天这条连接再也回不到常驻通道');
+  clearTimeout(b._streamTimer);
+});
+
+test('连着开不出命令通道：第三次之后结束这条 SSH 连接，让重连接手', async () => {
+  // 现场（2026-11-02）：接管失败，原话是「无法在登录节点上执行命令：
+  //   (SSH) Channel open failure: open failed」，而此后每一条 RPC 都撞同一句 ——
+  //   连接已经不能再起命令，客户端却一直对着它重试。
+  const b = new sshBackend.SshBackend({});
+  b._profile = { user: 'u', host: 'h', port: 22 };
+  b._closed = false;
+  let ended = 0;
+  const conn = {
+    exec(_cmd, cb) { cb(new Error('(SSH) Channel open failure: open failed')); },
+    end() { ended += 1; },
+  };
+  b._conn = conn;
+
+  const r1 = await b.rpc({ op: 'status' }, 1000);
+  assert.equal(r1.ok, false);
+  assert.equal(ended, 0, '一次可能只是这一下会话数到顶，先别动连接');
+  assert.equal(b._channelOpenFailures, 1);
+
+  await b.rpc({ op: 'status' }, 1000);
+  assert.equal(ended, 0, '第二次仍然可能只是刚才那一下的余波');
+
+  await b.rpc({ op: 'status' }, 1000);
+  assert.equal(ended, 1, '连续三次开不出通道，这条连接就不能再用了');
+
+  // 成功开出一次通道就清零 —— 否则一次偶尔撞上的会话数上限会攒到三次。
+  const b2 = new sshBackend.SshBackend({});
+  b2._conn = {
+    exec(_cmd, cb) {
+      const s = new EventEmitter();
+      s.stderr = new EventEmitter();
+      s.end = () => { s.emit('exit', 1); s.emit('close'); };
+      cb(null, s);
+    },
+  };
+  b2._channelOpenFailures = 2;
+  await b2.rpc({ op: 'status' }, 1000);
+  assert.equal(b2._channelOpenFailures, 0);
 });
 
 // ── 应答解析：这道缝挡的是「登录节点的 shell 环境不干净」──────────────────────
@@ -920,7 +1033,8 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
     [...new Set([...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))],
     ['HOME'],
     '命令串里唯一的变量必须是 $HOME —— 客户端拼不出远端家目录');
-  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /^\/bin\/bash --norc -c /,
+    '必须显式指定 bash 并跳过用户的 rc（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.match(cmd, /umask 077/, '与作业脚本里那个 umask 一致 —— 目录要是 0700');
   assert.match(cmd, /mkdir -p/);
@@ -951,7 +1065,8 @@ test('STREAM_CMD 是编译期常量，建目录那一段也在它里面', () => 
   //   才以"作业起不来"的样子出现。
   const cmd = sshBackend.STREAM_CMD;
   assert.equal(typeof cmd, 'string');
-  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /^\/bin\/bash --norc -c /,
+    '必须显式指定 bash 并跳过用户的 rc（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
   assert.ok(!/web-demo/.test(cmd), '不得含 web-demo 字面量');
@@ -978,9 +1093,9 @@ test('两条命令同一个解释器、同一个二进制路径', () => {
   //   —— 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程
   //   的问题。
   const { RPC_CMD: rpc, STREAM_CMD: stream, PREPARE_CMD: prep } = sshBackend;
-  assert.equal(rpc, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
+  assert.equal(rpc, "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'");
   for (const c of [rpc, stream, prep]) {
-    assert.match(c, /^\/bin\/bash -c '/, '三条都显式指定 bash');
+    assert.match(c, /^\/bin\/bash --norc -c '/, '三条都显式指定 bash 并跳过 rc');
     assert.ok(c.endsWith("'"), '内层命令都要整体加引号');
   }
   assert.ok(rpc.includes('/usr/local/bin/slurmate rpc'));
@@ -1084,15 +1199,19 @@ test('探针失败：不建通道、记下原因、并排一次重开', async (t
   b._teardownStream();
 });
 
-test('重开是有上限的：连着失败够多次就不再试', async (t) => {
+test('重开没有上限：失败再多次，下一分钟仍然会试', async (t) => {
   keepLoop(t);
-  // 上限挡的是"登录节点上的 CLI 是旧的"那种永久失败 —— 它和暂时的失败
-  // 现场一模一样（一行 usage + 退出码 2），区分不了，只能靠次数。
-  // 每一次失败的重开都是一次注定失败的 exec，也就是每分钟白 fork 一个 python。
+  // 从前这里是「三次之后就不再试」，它把"CLI 是旧的"（永久）与"登录节点
+  //   一时卡住"（会自己好）放在同一个判据下。2026-11-02 真机上，登录节点在
+  //   大量文件复制期间把三次都耗掉，此后这条连接永久走 exec —— 接管做不了，
+  //   节点恢复之后客户端也不会自己回来。
+  // 现在退避封顶一分钟，但永不停止：旧 CLI 的代价是每分钟一次立刻退出的
+  //   python，而暂时性故障最多一分钟就回来。
   const b = connectedBackend();
   b._streamAttempt = 3;
   b._scheduleStreamReopen();
-  assert.equal(b._streamTimer, null, '到了上限就不该再排');
+  assert.ok(b._streamTimer, '到了第三次也不该停 —— 停下的那天这条连接回不到常驻通道');
+  b._teardownStream();
 });
 
 test('一次成功会把重开计数清零（曾经好用的通道永远有配额）', async (t) => {

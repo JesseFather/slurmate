@@ -4636,6 +4636,11 @@ test('提示页跟着它那一槽走：面板、标签、页面销毁三处都�
   const ov = overlayViewOf();
   assert.ok(ov, '前置：提示页那块视图建出来了');
   assert.equal(ov._visible, true, '前置：有话要说时提示页是露着的');
+  // 它占的正是插件页面那一块（`stageRect`）：上面那 30px 状态条、左右各 10px
+  //   的两条栏都不归它盖。用户 2026-10-31 定的形状是"只替换插件里面的页面，
+  //   面板照样能回"—— 回面板靠的就是那 30px 里那颗「面板」标签。
+  assert.deepEqual(ov._bounds, { x: 10, y: 30, width: 1280 - 20, height: 860 - 30 },
+    '提示页只替换插件那块页面，不许盖住状态条与两条栏');
 
   // 用户 2026-10-18 报的那一条：断网时回不到别的页面。提示页与会话页是同一块
   //   矩形上的两层，抬面板只藏了会话页 —— 一整块"连接暂时中断"留在原处，
@@ -8000,6 +8005,30 @@ test('被接管之后又点【接管】：本机是真的把它拿回来了', as
   assert.equal(onlyFake(b).keeper, b._client.id, '服务端那一格也换回来了');
 
   await invoke('app:debug', 'foreign-keeper', false);
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('常驻通道没建起来时，接管在本地就说明白', async (t) => {
+  // 2026-11-02 真机：降级到 exec 之后，接管必然失败 —— 身份（client）只在
+  //   常驻通道上报。用户看到的是守护进程那句内部术语（「这条连接没有自报
+  //   身份」），既不知道原因，也不知道下一步该做什么。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  // 真实后端上 resident 是三态属性；假后端只有一个 getter，所以在这里
+  //   盖一个自有属性上去 —— 之后 app:takeover 就走那一道闸。
+  Object.defineProperty(b, 'resident', { value: false, configurable: true });
+  t.after(() => { delete b.resident; });
+
+  const tk = await invoke('app:takeover', { sessionId: 'no-such-session' });
+  assert.equal(tk.ok, false);
+  assert.equal(tk.error.kind, 'no_resident',
+    `要让用户看到原因，而不是站点那边的内部术语：${JSON.stringify(tk)}`);
+  assert.match(tk.error.detail, /常驻通道/);
+  assert.match(tk.error.detail, /重试/, '还要说清它会不会自己好');
+
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
 });

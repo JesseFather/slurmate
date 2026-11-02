@@ -263,6 +263,9 @@ button.icon-btn:hover { background: #45494e; }
 .about-tip:hover .about-card, .about-tip:focus-within .about-card { display: block; }
 .about-card p { margin: 0; font-size: 12px; color: var(--fg-dim); }
 .about-card .about-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+/* 许可与项目地址那一行：它是卡片上的注脚，比正文再轻一档 —— 用户要的
+   是"这是什么、我装的是哪一版"，这两样排在前面。 */
+.about-card .about-meta { font-size: 11px; }
 .about-card p + p { margin-top: 6px; }
 .about-card code { font-family: ui-monospace, Consolas, monospace; }
 h2 { font-size: 13px; margin: 26px 0 10px; color: #9cdcfe; font-weight: 600; }

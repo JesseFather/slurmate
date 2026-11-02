@@ -281,6 +281,21 @@ test('三个渲染页面里都没有内联样式 —— CSP 会静默丢掉它',
   }
 });
 
+test('提示页只顶替插件那块页面：它自己不长出出口', () => {
+  // 用户 2026-10-31 定的形状：断开的提示只替换插件里面的那块页面，面板照样
+  //   能回 —— 而回面板的那条路是上栏那颗「面板」标签，不是这一页上的第二颗
+  //   按钮。给它一颗按钮等于给同一个动作开第二个出口，而两个出口里总有一个
+  //   会先坏、坏的那个还没人看。
+  const ovHtml = fs.readFileSync(path.join(R, 'overlay.html'), 'utf8');
+  const ovPre = fs.readFileSync(path.join(SRC, 'preload', 'overlay.js'), 'utf8');
+  assert.equal(/<button[\s>]/i.test(ovHtml), false,
+    '提示页上不该有控件：它只顶替插件那块页面，回面板走的是上栏那颗标签');
+  assert.match(ovHtml, /要切到其他会话或面板，用上栏的标签/,
+    '出路要写清楚在上栏 —— 那一行是这块页面之外唯一还在的、属于我们的像素');
+  assert.equal(/ipcRenderer\.invoke/.test(ovPre), false,
+    '提示页的桥只收不送：加一条反方向的通道就是给同一个动作开第二个出口');
+});
+
 test('映射图的样式在 app.css 里，且连线显式 fill:none', () => {
   for (const sel of ['.wmap-lines', '.wnode']) {
     assert.ok(css.includes(sel), `app.css 缺少 ${sel}`);
@@ -746,6 +761,13 @@ test('「关于」的入口是第一屏那颗感叹号 —— 而标题那一行
   //   `version` 填进去：写死一个串会在下一次发版之后继续说着上一个版本。
   assert.match(html, /id="about-card"[\s\S]*?id="about-ver"/,
     '「关于」卡片里要有一格版本号');
+  // 卡片里那几句说的是可以核对的事实，不只是客气话（用户 2026-10-31：
+  //   "现在的内容不专业"）。三样缺一样，读的人就得去别处才能拼出完整的答案。
+  const aboutCard = /id="about-card"([\s\S]*?)<\/div>/.exec(html);
+  assert.ok(aboutCard, '未找到 #about-card');
+  assert.match(aboutCard[1], /slurmate-sessiond/, '要说出站点那一侧是哪个程序');
+  assert.match(aboutCard[1], /Apache-2\.0/, '许可要写出来');
+  assert.match(aboutCard[1], /github\.com\/JesseFather\/slurmate/, '项目地址要写出来');
   assert.match(js, /function renderAbout\(\)[\s\S]{0,240}?boot\.version/,
     '版本号要从 `boot.version` 来 —— 那是 `app.getVersion()` 带回来的那一格');
   assert.match(js, /boot = await window\.slurmate\.bootstrap\(\);\s*renderAbout\(\);/,

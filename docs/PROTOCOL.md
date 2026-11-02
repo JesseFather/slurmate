@@ -166,7 +166,7 @@
 
 ```
 ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
-    -- "/bin/bash -c '/usr/local/bin/slurmate stream'"
+    -- "/bin/bash --norc -c '/usr/local/bin/slurmate stream'"
 ```
 
 - stdin 一行一条请求，可以带 `rid`；stdout 一行一条：响应带 `rid`，
@@ -199,13 +199,15 @@ ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
 
 ```
 ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
-    -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
+    -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'"
 ```
 
 - 请求体走 stdin，响应走 stdout，各一行 JSON。一次一请求，请求完即退出。
-- 客户端把命令显式包在 `/bin/bash -c` 里执行（见 [client/README.md](../client/README.md)）——
+- 客户端把命令显式包在 `/bin/bash --norc -c` 里执行（见 [client/README.md](../client/README.md)）——
   sshd 用登录 shell 解释 exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。
-  但登录 shell 的 rc 文件仍会执行（zsh 的 `~/.zshenv` 连 `-c` 都读），
+  `--norc` 让内层 bash 不读用户的 `~/.bashrc`：那里面可能有 `conda init` 那一段，
+  每一条命令都会起一个 conda 去算 shell hook。
+  但外层登录 shell 的 rc 仍会执行（zsh 的 `~/.zshenv` 连 `-c` 都读），
   所以客户端解析应答时从后往前找第一个合法信封，而不是假定它在最后一行。
 - argv 是编译期常量，用户输入永远不出现在命令串里。这既是防注入，也是穿过
   登录节点上 `ForceCommand` 守卫的必要条件（某些集群的守卫只放行白名单里的命令名
@@ -1593,14 +1595,19 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `rule_missing` | 有会话该有的规则不在 |
 | `rule_orphan` | 有规则对不上任何活跃会话 |
 | `rule_unparsable` | 一条 `slurmate-sess-` 开头的规则拆不出字段 |
-| `auth_mode_unknown` | 活跃会话的 `auth_mode` 既不是 `password` 也不是 `none` |
+| `auth_mode_unknown` | 活跃会话的 `auth_mode` 不在本站点能产出的值里 |
 | `tick_never` | 对账一次都没有跑过 |
 | `tick_error` | 最近一次对账出错 |
-| `base_table_missing` | 现有系统的 `inet codeserver` 或 `ip port-daemon` 表不见了 |
+
+「本站点能产出的值」是 `password`（列默认值）、`none` 与 `publickey`（框架自己写的
+两个，后者属于需要公钥的插件），加上各插件 `auth_mode` 枚举里的全部取值。
 
 `consistent` = 规则集合 == 活跃 claim 集合，两个方向都比。数量相等而集合不等
-同样是问题（见 `rule_missing` / `rule_orphan`）。`existing` 是非侵入式体检：
-只读地看一眼既有系统还在不在，本系统绝不碰它们。
+同样是问题（见 `rule_missing` / `rule_orphan`）。
+
+`existing` 是非侵入式体检：只读地看一眼既有系统还在不在，本系统绝不碰它们。
+它只报事实，不参与 `problems`：站点的既有设施本来就没有是正常的，「没有」不等于
+「本系统坏了」（`install-base.sh` 把同一批设施叫作「可选基线」）。
 
 `auth_mode_none` 是活跃会话里关闭了口令的条数。`none` 是站点显式配的宽松模式，
 不算问题，但体检要说出来。

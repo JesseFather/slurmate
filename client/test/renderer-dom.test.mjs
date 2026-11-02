@@ -1596,6 +1596,86 @@ test('一条会话也露标签：那颗「面板」是回到插件页与作业�
   assert.equal(h.run('window.__shown'), 2, '「面板」抬得起来 —— 那一屏不是死路');
 });
 
+test('同一份会话表推两遍：标签栏不重建（按下的那一刻按钮得还在）', () => {
+  // 用户 2026-10-31：断网期间状态推得密，而每推一遍整条上栏就被重画一遍 ——
+  //   按下的那一刻那颗按钮已经不在了，浏览器不会把这一下算成一次点击。
+  //   判据是"节点还是原来那一个"：内容相同就不该动 DOM。
+  const h = start({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' });
+  const push = (state = 'running') => {
+    // 主进程每一次推的都是新对象、内容可能一个字不差 —— 这与"真的变了"
+    //   必须分得开，所以每遍都重新造一份。
+    h.run(`SCREEN = 'plugins'; SESS = { sessions: [{ slot: 'a', service: '编辑器',`
+      + ` live: true, snap: { state: '${state}', localPort: 18080 } }],`
+      + " front: 'a', panelFront: false };");
+    h.fn('renderTabs')();
+    return h.byId.get('session-tabs').children[1];
+  };
+
+  const first = push();
+  assert.equal(first.textContent, '编辑器', '前置：标签画出来了');
+  assert.equal(push(), first,
+    '内容没变，那一颗按钮就该还是原来那一颗 —— 换掉它等于让这一次点击落空');
+
+  // 真的变了就要重画，否则标签停在旧样子上。
+  assert.notEqual(push('queued'), first, '状态变了要重画');
+
+  // 第一屏会把这一条栏整个清空；回到第二屏时必须重新画出来，
+  //   而不是因为"指纹没变"继续空着。
+  h.run("SCREEN = 'conns';");
+  h.fn('renderTabs')();
+  assert.equal(h.byId.get('session-tabs').children.length, 0, '第一屏上不该有标签');
+  const back = push();
+  assert.equal(back.textContent, '编辑器', '回到第二屏要重新画出来');
+});
+
+test('被接管的那一条：标签灰着就不许点，状态条右边那三颗也不冒出来', () => {
+  // 用户 2026-10-31：作业被另一台电脑接管之后，上栏那颗标签淡下去了，可它照样
+  //   能点 —— 点下去没有画面，右侧却冒出「重新加载 / 临时离开 / 停止该作业」。
+  //   那三颗的判据是"会话页面盖着窗口"，而被接管的那一刻本机已经把那一块收掉了
+  //   （index.js 的 `_renderSession`）：状态还是 `running`，页面已经不在。
+  const h = bindAll({ connections: CONNS, workspaces: WSS, activeConnectionId: 'c1' },
+    'window.__front = null; window.slurmate.setFront = (s) => { window.__front = s; };'
+    + 'window.slurmate.jobs = () => Promise.resolve({ ok: true, jobs: [], at: 1 });'
+    + "lastPlugins = { plugins: [{ name: 'web-demo', surface: { kind: 'web', path: '/' } }] };"
+    + "SCREEN = 'plugins';");
+  h.run("document.body.append($('sb-end')); document.body.append($('sb-reload'));"
+    + "document.body.append($('sb-leave'));");
+  const snap = { state: 'running', slot: 'a', sessionId: 'sess-a', jobId: '11',
+                 serviceKind: 'web-demo', suspended: '已被另一台电脑接管，本机不再看护它。' };
+  h.run(`SESS = { sessions: [
+    { slot: 'a', service: 'web-demo', live: true, snap: ${JSON.stringify(snap)} },
+    { slot: 'b', service: 'web-demo', live: false,
+      snap: { state: 'ended', slot: 'b', serviceKind: 'web-demo' } }
+  ], front: 'a', panelFront: false };`);
+
+  // ── 标签：淡下去，而且点不动 ──
+  h.fn('renderTabs')();
+  const tabs = h.byId.get('session-tabs').children;
+  assert.equal(tabs[0].textContent, '面板', '「面板」排第一');
+  assert.equal(tabs[1].disabled, true,
+    '被接管的那一条没有可切过去的页面 —— 灰着却还能点，就是那条缺陷');
+  assert.match(tabs[1].className, /\bdead\b/);
+  assert.match(tabs[1].title, /没有可切过去的页面/,
+    `灰按钮要说原因，不然读起来像"它坏了"：${tabs[1].title}`);
+  assert.equal(tabs[2].disabled, true, '已经结束的那一条同理');
+
+  // ── 状态条：一颗都不许露 ──
+  h.fn('renderSnapshot')(snap);
+  assert.equal(h.byId.get('sb-end').classList.contains('hidden'), true,
+    '被接管之后本机没有那块页面 —— 「停止该作业」不该出现');
+  assert.equal(h.byId.get('sb-reload').classList.contains('hidden'), true,
+    '「重新加载」没有对象可重载');
+  assert.equal(h.byId.get('sb-leave').classList.contains('hidden'), true,
+    '「临时离开」只跟着那块页面走');
+
+  // ── 接管回来（页面也跟着回来）：三颗照旧 ──
+  h.run("SESS.sessions[0].snap.suspended = null;");
+  h.fn('renderSnapshot')({ ...snap, suspended: null });
+  assert.equal(h.byId.get('sb-end').classList.contains('hidden'), false,
+    '接管回来之后页面重新盖上来，这三颗就该在');
+  assert.equal(h.byId.get('sb-reload').classList.contains('hidden'), false);
+});
+
 test('右栏整条只在有作业在跑的时候亮（那时它才有内容可说）', () => {
   // 2026-10-11 改：上色的对象从那个 6px 的圆点换成了边栏自己 ——
   //   10px 宽的一条边上再放一个 6px 的点，看起来跟没有一样（用户报的原话）。

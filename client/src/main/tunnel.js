@@ -244,8 +244,14 @@ class Tunnel extends EventEmitter {
       // 隧道断了。立刻销毁本地连接，让浏览器拿到一个明确的失败（RST），
       // 而不是让它永远 pending —— 后者看起来像界面卡死，是最难排查的表现。
       local.destroy();
-      this.state = 'down';
-      this.emit('state', { state: 'down', port: this.port, error: e.message });
+      // 只在真的变过去那一下广播。断网时那块页面一直在重试，每一次失败都走
+      //   这条路 —— 而"隧道断了"这件事只发生了一次。每条都广播的话，读者
+      //   （`session.js`）每收到一次就把整份状态推给面板，面板把上栏重画一遍：
+      //   按下的那一刻按钮已经不在了，于是点不动（用户 2026-10-31）。
+      if (this.state !== 'down') {
+        this.state = 'down';
+        this.emit('state', { state: 'down', port: this.port, error: e.message });
+      }
       return;
     }
 

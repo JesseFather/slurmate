@@ -160,6 +160,14 @@ const STATUS_MS = 60000;
  *   两者问的是同一个问题，慢到二十秒还没回来就不是"慢"了。
  */
 const STATUS_RPC_TIMEOUT_MS = 20000;
+/**
+ * 提交超时之后那一次认领的重试间隔。
+ *
+ * 认领本身是幂等的（一次不带 session_id 的 status），所以它比提交多一次机会：
+ *   第一次撞上登录节点卡住不代表会话没建成，而错判的代价是用户看着一条正在
+ *   跑的作业被客户端宣布为「提交失败」（2026-11-02 真机）。
+ */
+const CLAIM_RETRY_MS = 2000;
 /** 等待登记时的轮询间隔。这一段是唯一需要密集轮询的时期。 */
 const QUEUED_POLL_MS = 3000;
 /**
@@ -298,7 +306,8 @@ class SessionController extends EventEmitter {
    */
   constructor({ backend, spaceId, onRelayPort, getExcludedPorts,
                 heartbeatMs, statusMs, queuedPollMs, releaseMs, pushStaleMs,
-                statusRpcMs, localMs, requestedKind, needsPubkey, adopted, enrollBudgetMs }) {
+                statusRpcMs, localMs, requestedKind, needsPubkey, adopted, enrollBudgetMs,
+                claimRetryMs }) {
     super();
     this.backend = backend;
     this.spaceId = spaceId;
@@ -329,6 +338,8 @@ class SessionController extends EventEmitter {
      *   毫秒，才验得了"这一拍没有应答、下一拍照常问"。
      */
     this.statusRpcMs = statusRpcMs || STATUS_RPC_TIMEOUT_MS;
+    /** 认领那一次重试的间隔。可注入，理由与上面几个节奏相同。 */
+    this.claimRetryMs = claimRetryMs || CLAIM_RETRY_MS;
 
     this.state = State.IDLE;
     this.sessionId = null;
@@ -939,20 +950,38 @@ class SessionController extends EventEmitter {
   /**
    * 认领：不带 session_id 的 status 会返回该 uid 最新的活跃会话
    * （cluster/slurmate-sessiond:1699-1710）。用于「submit 响应丢了但会话其实建好了」。
+   *
+   * 两次机会，但只对【问不到】重试。一次传输失败（登录节点卡住、通道开不出来）
+   *   不等于"会话没建成"；守护进程明确答了 `session: null` 才是结论 ——
+   *   那时第二次问也不会变。错判的代价是用户看着一条正在跑的作业被客户端
+   *   宣布为「提交失败」（2026-11-02 真机）。
    */
   async _claim() {
-    try {
-      const resp = await withTimeout(this.backend.rpc({ op: 'status' }), this.statusRpcMs);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt) {
+        await new Promise((r) => {
+          const t = setTimeout(r, this.claimRetryMs);
+          t.unref?.();
+        });
+      }
+      let resp;
+      try {
+        resp = await withTimeout(this.backend.rpc({ op: 'status' }), this.statusRpcMs);
+      } catch {
+        continue;                       // 没拿到结论：再问一次
+      }
       const c = classify(resp, { op: 'status' });
+      if (c.action === Action.TRANSPORT || c.action === Action.DAEMON_DOWN) {
+        continue;                       // 同上：链路那一侧的问题，不是结论
+      }
       if (c.action !== Action.OK) return false;
       const s = resp.data && resp.data.session;
       if (!s || !s.session_id) return false;
       this.sessionId = s.session_id;
       this._setState(State.QUEUED);
       return true;
-    } catch {
-      return false;
     }
+    return false;
   }
 
   /**

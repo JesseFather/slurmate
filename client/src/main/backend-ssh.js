@@ -28,7 +28,7 @@
  *      # 必须原样用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
  *      #     引号吃掉，ssh 发过去的是另一个命令串，验的就不是客户端真正发的那个了。
  *      ssh -T -p 22 user@<登录节点> \
- *          -- "/bin/bash -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
+ *          -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
  *      #   期望：恰好一行 JSON，ok:true，退出码 0。有额外输出就是没直通。
  *      #
  *      #   背景：有些集群会给普通用户的 sshd 装一个 ForceCommand 拦截器来管
@@ -97,7 +97,7 @@ const { Backend, KIND } = require('./backend.js');
 /**
  * 固定 argv。常量，不接受任何用户输入拼接。
  *
- * 显式走 `/bin/bash -c`，不用「登录 shell 是什么就用什么」。
+ * 显式走 `/bin/bash --norc -c`，不用「登录 shell 是什么就用什么」。
  *
  *   sshd 执行 exec 请求的方式是 `$SHELL -c "<命令串>"`，而 `$SHELL` 来自
  *   /etc/passwd —— 在 HPC 登录节点上经常是 zsh。zsh 与 bash 并非完全互通，
@@ -105,16 +105,24 @@ const { Backend, KIND } = require('./backend.js');
  *   一旦它用上某个 shell 的方言，症状会是「在这台机器上能连、换一台就认证失败」
  *   这类指不回根因的问题。把解释器钉死，等于把这条变量从等式里去掉。
  *
- * 但它挡不住 rc 文件，别把这两件事混起来：sshd 仍然先用登录 shell 解释
- *     整个命令串，所以 zsh 的 `~/.zshenv` 照样会被 source（zsh 连非交互、非登录的
- *     `-c` 都会读它 —— 这是它与 bash 的一处真实差异，bash 的 `-c` 不读任何 rc）。
- *     `~/.zshenv` 若往 stdout 打印东西，就会混进 RPC 的应答里。
- *     那一条由下面的应答解析兜底（从后往前找第一个合法信封），不是靠这里换 shell。
+ * `--norc` 不是保险，是必需的。2026-11-03 真机：一个用户的 `~/.bashrc` 里有
+ *     `conda init` 写进去的那一段，每条命令都会起一个约 40 MB 的 conda 去算
+ *     shell hook，而它在 NFS 上卡成 `D` 状态、不退。客户端一次连接要开好几条
+ *     exec（ping / whoami / 建目录 / stream），重试时还会并发 —— 几十个 conda
+ *     把该用户的 cgroup（这里限 512 MB）占满，此后每一次新会话都被内核按在
+ *     `memory.high` 上节流，登录要等两分钟。
+ *     我们这三条命令不需要用户的 rc：可执行文件是绝对路径，`exec` 之后没有别的。
+ *     加 `--norc` 之后 `.bashrc` 不再被读，那条链从源头断掉。
+ *
+ * 外层仍然挡不住：sshd 先用登录 shell 解释整个命令串，所以 zsh 的 `~/.zshenv`
+ *     照样会被 source（zsh 连非交互、非登录的 `-c` 都会读它）。它若往 stdout
+ *     打印东西，会混进 RPC 的应答里 —— 那一条由下面的应答解析兜底（从后往前找
+ *     第一个合法信封），不是靠这里换 shell。
  *
  *   `/bin/bash` 在 Linux 上不存在的概率很低；真没有的话，命令会以
  *   「没有返回可解析的应答」明确失败，而不是静默连上。
  */
-const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
+const RPC_CMD = "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'";
 
 /**
  * 作业日志目录那一条 `mkdir`。两条命令共用这一句。
@@ -171,7 +179,7 @@ const PREPARE_FAIL = 'slurmate prepare: failed';
  * 二进制路径与 `RPC_CMD` 分头写死是有意的：这一串里一个用户输入都没有，
  *   看一眼就知道。代价是路径写了两遍 —— 有一条用例钉住两者用的是同一个。
  */
-const STREAM_CMD = "/bin/bash -c '"
+const STREAM_CMD = "/bin/bash --norc -c '"
   + '( umask 077; if ' + LOGS_MKDIR + ' && ' + SESS_MKDIR + ' && ' + HOME_PRIVATE
   + '; then printf "' + PREPARE_OK + '\\n" >&2'
   + '; else printf "' + PREPARE_FAIL + ' %s\\n" "$?" >&2; fi ) >/dev/null & '
@@ -192,7 +200,7 @@ const STREAM_CMD = "/bin/bash -c '"
  *
  * 与另外两条一样是编译期常量：不接受任何用户输入拼接。
  */
-const PREPARE_CMD = "/bin/bash -c 'umask 077; " + LOGS_MKDIR + " && " + SESS_MKDIR
+const PREPARE_CMD = "/bin/bash --norc -c 'umask 077; " + LOGS_MKDIR + " && " + SESS_MKDIR
   + " && " + HOME_PRIVATE + "'";
 
 const READY_TIMEOUT_MS = 20000;
@@ -244,6 +252,49 @@ const RECONNECT_MAX_MS = 30000;
 const STREAM_PROBE_MS = 8000;
 
 /**
+ * 握手超时之后那条「空转命令」的预算。
+ *
+ * 它只在一次已经失败（等了 180 秒）的连接上跑，用来把两种完全不同的原因分开：
+ *   登录节点上的 shell 起不来，还是 slurmate 命令自己卡住。
+ *   探针是 `/bin/true`：它不读 stdin、不碰家目录以外的任何东西，正常是几十毫秒。
+ *   取 8 秒与 `STREAM_PROBE_MS` 同一个量级 —— 超过它就说明连一条空命令都排不上。
+ */
+const SHELL_PROBE_MS = 8000;
+
+/**
+ * 把「握手超时」那条错误补成能指向根因的话。
+ *
+ * 用户看到的原话只有「登录节点上的命令超过 180 秒没有应答」—— 而这一句至少有
+ *   三种原因：登录 shell 的启动脚本卡住（`~/.bashrc` 里等交互或访问大目录）、
+ *   家目录所在的共享盘卡死、`slurmate` 命令本身起不来。三种修法完全不同。
+ *   空转命令能把它们分成两半：它也卡住 → shell/节点那一侧；它立刻回来 →
+ *   命令那一侧。
+ *
+ * @param {object|null} probe  `_probeShell()` 的结论
+ * @param {{user:string,host:string}} who
+ * @returns {string} 追加到原错误后面的那一段（没有结论时为空串）
+ */
+function shellProbeHint(probe, who) {
+  if (!probe) return '';
+  const at = who && who.user ? `${who.user}@${who.host}` : '登录节点';
+  if (probe.timedOut) {
+    return '再执行一条空转命令（/bin/true）也没有应答：卡住的是登录节点上的 shell '
+      + '启动脚本，不是 Slurmate。用系统的 ssh 手工执行 `ssh '
+      + at + ' true` 会看到同样的停顿。在 ~/.bashrc、~/.zshenv 一类文件的'
+      + '最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
+      + '等待网络、访问大目录的那几行。';
+  }
+  if (probe.ok) {
+    return '同一台机器上一条空转命令（/bin/true）却立刻回来了：卡住的是 '
+      + 'slurmate 命令本身。在登录节点上手工执行 '
+      + '`/usr/bin/time /usr/local/bin/slurmate rpc <<< \'{"op":"ping"}\'`，'
+      + '看它停在哪一步（启动 python，还是等守护进程的 socket）。';
+  }
+  return '想再执行一条空转命令来区分原因，但这条额外请求也失败了：'
+    + (probe.error || '未知原因');
+}
+
+/**
  * 常驻通道上单条请求的兜底超时。
  *
  * 它是兜底，不是语义上的超时 —— 语义超时在调用点各自有
@@ -260,16 +311,41 @@ const RPC_TIMEOUT_MS = 180000;
 const STREAM_REOPEN_MIN_MS = 2000;
 const STREAM_REOPEN_MAX_MS = 60000;
 /**
- * 连续失败多少次之后不再重开。
+ * 指数退避封顶在一分钟，但永不放弃。
  *
- * 必须有个头。登录节点上的 CLI 是旧的（没有 `stream` 这个子命令）时，
- *   每一次重开都是一次注定失败的 exec —— 而它换来的是每分钟多 fork 一个
- *   python，比这一版想省掉的那个还贵。那种情况下正确的是：记下原因、退回
- *   exec、不再试。
- * 而"连着三次都失败"与"曾经成功过又断了"要分得开：后者会把计数清零，
- *   于是重开一条曾经好用的通道永远有配额（见 `_openStream` 成功那一支）。
+ * 「连续失败三次就不再重开」把两种完全不同的失败放在同一个判据下：登录节点
+ *   上的 CLI 是旧的（没有 `stream` 这个子命令）—— 那种失败是永久的；以及
+ *   登录节点一时卡住（NFS 压力、python 起得慢）—— 那种失败会自己好。
+ * 后果在 2026-11-02 真机上发生了：登录节点在大量文件复制期间把三次重开都
+ *   耗掉，此后这条 SSH 连接永久走 exec —— 而 exec 上接管做不了（身份只在
+ *   常驻通道上报），提交与对账也变成一条命令一个 channel。节点恢复之后，
+ *   客户端再也不会自己回来，只有断开重连才行。
+ * 现在没有终点：退避涨到一分钟就停在那里。旧 CLI 的代价是每分钟一个立刻
+ *   退出的 python（零点几秒的进程），而暂时性故障最多一分钟就自己回来。
  */
-const STREAM_ATTEMPT_MAX = 3;
+
+/**
+ * 连续几次「开不出新通道」之后判这条 SSH 连接不能用了。
+ *
+ * 一次可能是这一下会话数到顶（重试就好），连着几次就不是了 ——
+ *   见 `SshBackend` 构造器里 `_channelOpenFailures` 的注释。
+ */
+const CHANNEL_OPEN_FAILURE_LIMIT = 3;
+
+/**
+ * 第 `attempt` 次重开等多久。纯函数，`_scheduleStreamReopen` 唯一的算法。
+ *
+ * 指数退避：2 / 4 / 8 / 16 / 32 / 60 秒，之后一直是一分钟。指数只算到第 6 次
+ *   （那一下已经到 64 秒、被上限截住）：交给 `2 ** n` 一路涨下去，一条长命
+ *   连接上的 `n` 迟早会把它推到 Infinity。
+ *
+ * @param {number} attempt 已经排过几次重开（0 起）
+ * @returns {number} 毫秒
+ */
+function streamReopenDelay(attempt) {
+  const n = Number.isFinite(attempt) && attempt > 0 ? Math.floor(attempt) : 0;
+  return Math.min(STREAM_REOPEN_MIN_MS * (2 ** Math.min(n, 6)), STREAM_REOPEN_MAX_MS);
+}
 
 /**
  * 等一个结果，但最多等 `budgetMs` 毫秒；到点就回一个「没等到」。
@@ -383,9 +459,17 @@ function hostKeyAlgorithm(rawKey) {
   return s ? s.value.toString('utf8') : null;
 }
 
-/** 后端的「传输层失败」信封：给 classify.js 认的 kind='transport' 标记。 */
-function transportError(detail) {
-  return { ok: false, code: null, data: null, error: { kind: 'transport', detail } };
+/**
+ * 后端的「传输层失败」信封：给 classify.js 认的 kind='transport' 标记。
+ *
+ * `extra` 只给内部判据用（今天是 `timedOut`）：`classify` 只看 `kind` 与
+ *   `detail`，多出来的字段不会改变任何一档动作。
+ */
+function transportError(detail, extra) {
+  return {
+    ok: false, code: null, data: null,
+    error: { kind: 'transport', detail, ...(extra || {}) },
+  };
 }
 
 /** ssh2 在「服务器拒绝了所有认证方式」时抛的原话。 */
@@ -697,6 +781,16 @@ class SshBackend extends Backend {
     this._prepareRetried = false;
     this._streamTimer = null;
     this._streamAttempt = 0;
+    /**
+     * 这条 SSH 连接上连续几次「开不出新通道」。
+     *
+     * 一次 `(SSH) Channel open failure: open failed` 可能只是这一刻的
+     *   会话数到顶（sshd 的 MaxSessions），重试一次就好；连着几次就说明这条
+     *   连接已经不能用了（sshd 卡死、连接半死）—— 那时继续对着它重试，症状
+     *   是提交与接管全部停在这一句英文上（2026-11-02 真机）。
+     * 连上一条新的就清零（见 `_openOnce` 的 `ready` 分支）。
+     */
+    this._channelOpenFailures = 0;
   }
 
   /**
@@ -843,6 +937,8 @@ class SshBackend extends Backend {
       client.on('ready', async () => {
         this._conn = client;
         this._attempt = 0;
+        // 新的一条连接有新的会话额度（sshd 的 MaxSessions 是按连接算的）。
+        this._channelOpenFailures = 0;
         this._emitState(true, `${user}@${host}:${port}`);
 
         // 先把常驻通道建起来（尽力而为），再走下面那套握手。
@@ -901,8 +997,16 @@ class SshBackend extends Backend {
         } else if (!noPing) {
           // 问不到、也不是"对面没有这个 op"，这条链路本身有问题。
           // 与下面 whoami 的失败走同一条路：如实报告，别以为连上了。
-          const why = (ping && ping.error && (ping.error.detail || ping.error.kind))
+          let why = (ping && ping.error && (ping.error.detail || ping.error.kind))
             || '未知原因';
+          // 握手等到兜底超时（180 秒）时，再说一句话就把用户留在原地了 ——
+          //   先问一条空转命令，把「登录节点的 shell 起不来」与「slurmate
+          //   命令自己卡住」分开（见 `shellProbeHint`）。只在超时这一档问，
+          //   别的失败（比如命令不存在）已经有明确的结论。
+          if (ping && ping.error && ping.error.timedOut) {
+            const hint = shellProbeHint(await this._probeShell(client), { user, host });
+            if (hint) why += '\n' + hint;
+          }
           try { client.end(); } catch { /* 尽力 */ }
           this._conn = null;
           if (ping && ping.error && ping.error.kind === 'cli_missing') {
@@ -1401,11 +1505,10 @@ class SshBackend extends Backend {
   /** 排一次重开。只在真的能重开时才排，理由见下面那两行。 */
   _scheduleStreamReopen() {
     if (this._closed || !this._conn || this._streamTimer) return;
-    // 连着失败够多次就不再试 —— 见 STREAM_ATTEMPT_MAX。此后这一条 SSH 连接上
-    // 一直走 exec，这是正常的退路，不是坏掉的状态。
-    if (this._streamAttempt >= STREAM_ATTEMPT_MAX) return;
-    const delay = Math.min(
-      STREAM_REOPEN_MIN_MS * (2 ** this._streamAttempt), STREAM_REOPEN_MAX_MS);
+    // 没有终点，退避涨到一分钟就停在那里 —— 理由见 `streamReopenDelay`：
+    //   暂时性失败（登录节点卡住）必须能自己回来，而旧 CLI 那种永久失败
+    //   每分钟多一个立刻退出的 python，代价可以接受。
+    const delay = streamReopenDelay(this._streamAttempt);
     this._streamAttempt += 1;
     this._streamTimer = setTimeout(() => {
       this._streamTimer = null;
@@ -1489,15 +1592,33 @@ class SshBackend extends Backend {
       //   到点就把这一条判成传输层失败 —— 契约里"不抛异常、返回信封"照旧。
       timer = setTimeout(() => {
         try { if (chan) chan.close(); } catch { /* 尽力 */ }
+        // `timedOut` 是给 `_openOnce` 的判据：只有这一档要再去问一条空转命令，
+        //   把「shell 起不来」与「命令自己卡住」分开（见 `shellProbeHint`）。
         finish(transportError(
-          `登录节点上的命令超过 ${Math.round(ms / 1000)} 秒没有应答。`));
+          `登录节点上的命令超过 ${Math.round(ms / 1000)} 秒没有应答。`,
+          { timedOut: true }));
       }, ms);
       timer.unref?.();
 
       conn.exec(RPC_CMD, (err, stream) => {
         // 兜底已经先说完了：这条通道属于一个已经结束的等待，别把它挂上去。
         if (finished) { try { stream?.close?.(); } catch { /* 尽力 */ } return; }
-        if (err) return finish(transportError('无法在登录节点上执行命令：' + err.message));
+        if (err) {
+          // 「开不出新通道」要单独看：它可能只是这一下会话数到顶，也可能这条
+          //   SSH 连接已经不能再用。一次就当普通失败交给调用方重试，连续
+          //   `CHANNEL_OPEN_FAILURE_LIMIT` 次就结束这条连接，让 `close` 那条
+          //   路走正常重连 —— 否则客户端会对着一条再也开不出命令的连接一直
+          //   重试，而症状是提交与接管全停在 `(SSH) Channel open failure` 上
+          //   （2026-11-02 真机）。
+          if (/Channel open failure/i.test(err.message || '')) {
+            this._channelOpenFailures += 1;
+            if (this._channelOpenFailures >= CHANNEL_OPEN_FAILURE_LIMIT) {
+              try { conn.end(); } catch { /* 尽力 */ }
+            }
+          }
+          return finish(transportError('无法在登录节点上执行命令：' + err.message));
+        }
+        this._channelOpenFailures = 0;
         chan = stream;
 
         let stdout = '';
@@ -1564,6 +1685,51 @@ class SshBackend extends Backend {
   }
 
   /**
+   * 问一条空转命令：登录节点上的 shell 现在还能不能起命令。
+   *
+   * 只在握手已经超时之后调一次。判据是 `/bin/true` —— 它不读 stdin、不产生
+   *   任何输出，正常几十毫秒就退出。于是三种结论互斥：
+   *     ok        —— shell 正常，卡住的是 slurmate 命令本身
+   *     timedOut  —— 连一条空命令都排不上：shell 的启动脚本、家目录或节点本身
+   *     error     —— 通道在问它的这一下断了，这一条区分不出什么
+   * 它自己一定有尽头（`SHELL_PROBE_MS`）：这条连接已经迟到 180 秒，
+   *   再挂住的话用户只是多等一次。
+   */
+  _probeShell(client, budgetMs) {
+    const budget = budgetMs || SHELL_PROBE_MS;
+    return new Promise((resolve) => {
+      let done = false;
+      let chan = null;
+      let timer = null;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve(v);
+      };
+      timer = setTimeout(() => {
+        try { if (chan) chan.close(); } catch { /* 尽力 */ }
+        finish({ ok: false, timedOut: true });
+      }, budget);
+      timer.unref?.();
+      try {
+        client.exec('/bin/true', (err, stream) => {
+          if (done) { try { stream?.close?.(); } catch { /* 尽力 */ } return; }
+          if (err) return finish({ ok: false, error: err.message });
+          chan = stream;
+          let code = null;
+          stream.on('exit', (c) => { if (typeof c === 'number') code = c; });
+          stream.on('error', (e) => finish({ ok: false, error: e.message }));
+          stream.on('close', () => finish({ ok: code === 0 }));
+          stream.end();
+        });
+      } catch (e) {
+        finish({ ok: false, error: e && e.message });
+      }
+    });
+  }
+
+  /**
    * 建立一条到目标的数据通道（隧道用）。
    *
    * host 必须是守护进程给的 `tunnel_target` 里那个字面 IPv4，禁止再解析节点名。
@@ -1616,6 +1782,9 @@ module.exports = {
   parseEnvelopeLine,  // 同上：exec 与常驻通道共用同一条「什么算一条消息」的判据
   ResidentChannel,    // 同上：它只认字节与行，所以不连 SSH 也验得了
   authFailureDetail,  // 同上：这是「认证失败」唯一能指向根因的东西
+  shellProbeHint,     // 同上：超时那一档唯一能指向根因的东西
+  streamReopenDelay,  // 同上：常驻通道的重开节奏只此一份算法
   AUTH_FAILED_RE,
-  RPC_TIMEOUT_MS, STREAM_PROBE_MS,
+  RPC_TIMEOUT_MS, STREAM_PROBE_MS, SHELL_PROBE_MS,
+  CHANNEL_OPEN_FAILURE_LIMIT,
 };

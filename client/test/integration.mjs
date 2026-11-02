@@ -270,6 +270,36 @@ test('隧道：只听 127.0.0.1，不绑所有网卡', async () => {
   await t.stop();
 });
 
+test('隧道连不上：一次断线只广播一次，页面重试多少次都相同', async () => {
+  // 断网时插件那块页面一直在重连，每一次失败都走 `_onConnection` 的 catch。
+  //   从前那一支不看状态就广播，于是"隧道断了"这一件事被广播了
+  //   （浏览器重试次数）遍，而读者每收到一次就把整份会话状态推给面板、
+  //   面板把上栏重画一遍 —— 按下的那一刻按钮已经不在了（用户 2026-10-31
+  //   报的"提示页出来之后整个软件点不动"）。
+  const backend = { dial: async () => { throw new Error('连不上'); } };
+  const t = new Tunnel({ backend });
+  const port = await freePort();
+  const seen = [];
+  try {
+    await t.start({ preferredPort: port, target: '203.0.113.9:9999' });
+    t.on('state', (s) => seen.push(s.state));
+    // 模拟那个页面：连着来五条本地连接，全部拨不出去。
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => {
+        const s = net.connect(port, '127.0.0.1');
+        s.once('error', () => resolve());
+        s.once('close', () => resolve());
+        // 兜底：拨号那一步是异步的，别让一条不该挂的连接把整轮用例拖住。
+        s.setTimeout(2000, () => { s.destroy(); resolve(); });
+      });
+    }
+    assert.deepEqual(seen, ['down'],
+      `一次断线只许广播一次，实际：${seen.join(' / ')}`);
+  } finally {
+    if (t.server) await t.stop();
+  }
+});
+
 test('全链路：提交 → 登记 → 隧道 → 登录 → 释放', async (t) => {
   t.after(keepAlive());
   const backend = await makeBackend(t, { enrollDelayMs: 300 });
