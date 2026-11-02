@@ -2,7 +2,7 @@
   "name": "slurmate",
   "private": true,
   "productName": "Slurmate",
-  "version": "0.38.0-rc2",
+  "version": "0.38.0-rc3",
   "description": "Slurmate — 远程开发会话桌面客户端（Electron 外壳）",
   "license": "Apache-2.0",
   "author": "JesseFather <JesseFather@users.noreply.github.com>",

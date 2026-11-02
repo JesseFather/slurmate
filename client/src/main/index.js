@@ -120,6 +120,23 @@ let clientIdentity = null;
  *   不再查注册表（站点会升级，而一个跑着的会话用的是它提交时那一份代码）。
  */
 let sessions = new Map();
+/**
+ * 窗口里留着、等着接回来的那些页面：`槽 → { connectionId, sessionId }`。
+ *
+ * 页面跟工作区走，不跟连接走：槽由 `pluginData.slotOf(spaceId)` 算出来，同一个
+ *   工作区在不同连接条目下是同一个槽、同一个本地端口、同一个存储分区。所以
+ *   用户从 A 离开、切到 B、再回到 A 时，那块页面可以原样接着用 —— 它不属于
+ *   哪一条连接。
+ *
+ * 留着它的判据只有一条：这条作业还没确认彻底结束。临时离开、切换连接、
+ *   断开、空手超时、站点没了、被别的电脑接管 —— 作业都可能还在集群上跑，
+ *   页面就留着；只有站点那份清单里已经没有它的活记录（或者重连之后确认它
+ *   到了终态），才销毁。`sessionId` 是问那一份清单用的钥匙。
+ *
+ * 写它的只有离开一个站点的那几条路（见 `rememberKeptSurfaces`）。本机会话与
+ *   临时工作区不进这本账：它们没有可接回的工作区身份。
+ */
+let keptSurfaces = new Map();
 // 正在准备中的槽。插件 prepare 改成异步之后，认领与写表之间会经过一次等待，
 // 而槽的可见性不能再靠「这一段没有 await」来保证（见 docs/CONTRACT.md §3.1.1）。
 const startingSlots = new Map();
@@ -2575,8 +2592,12 @@ function reapSessions() {
 function livePartitions() {
   const out = new Set();
   if (!win) return out;
-  for (const rec of sessions.values()) {
-    const p = win.surfacePartition(rec.slot);
+  // 判据是「窗口里挂着的那几块页面」，不是「表里那几条记录」：临时离开之后
+  //   `sessions` 空了，而页面还留着（见 `keptSurfaces`），它们脚下的分区
+  //   同样正被用着 —— 只按记录算的话，那一刻回收一个工作区会把它们的
+  //   localStorage 抽掉，而症状只是「页面莫名其妙坏了」。
+  for (const slot of win.surfaceSlots()) {
+    const p = win.surfacePartition(slot);
     if (p) out.add(pluginData.foldAscii(p));
   }
   return out;
@@ -3139,6 +3160,13 @@ async function startSession(resources, serviceKind, portChoice) {
       + '作业开始之后页面会自己打开，这期间可以照常做其他事。');
   }
 
+  // 用户点的那一次「开始会话」：页面第一次可用时把它推到前台。起点在这里立，
+  //   由 `_renderSession` 消费 —— 复用了上一轮留下的页面时，`showSurface` 的
+  //   "新建"分支不会再走，只有这一格能把它推上来。
+  rec.revealOnRunning = true;
+  // 已经在 running 的（或者同步跑起来的那条）：立刻消费一次标记。
+  if (rec.controller.snapshot().state === State.RUNNING) await onSessionChange(slot);
+
   // 回槽：界面拿它指着说"我起的是这一个"（`app:start` 的回包）。
   return { slot, snap };
 }
@@ -3330,7 +3358,10 @@ async function onSessionChange(slot) {
  *   而且是窗口那一层唯一的答案：原生视图同一时刻只装得下一块。
  */
 function frontSlot() {
-  if (win && win.front && sessions.has(win.front)) return win.front;
+  // 第一行只认「还占着位置」的那一条：页面保留之后，一条已结束的会话在窗口里
+  //   仍可能是 `_front`（它那块页面还留着），但"前台"该交给下一条活着的 ——
+  //   否则新起的那条永远不会被当成前台，面板也就不会让开（用户 2026-11-03）。
+  if (win && win.front && occupied(win.front)) return win.front;
   // 没有前台、或者前台那个已经被收掉了：挑第一个活着的。
   for (const [slot] of sessions) if (occupied(slot)) return slot;
   const first = sessions.keys().next();
@@ -3398,20 +3429,32 @@ async function _renderSession(slot) {
   if (!rec || !rec.controller) return;          // 记录已经收了：什么都不画
   const snap = rec.controller.snapshot();
 
-  // 会话没有了（结束/出错/正在释放），或者压根还没起来：这一条会话的页面背后的
-  // 服务器已经不存在了 —— 隧道在 stop() 的最开头就停了 —— 收起它那一块，
+  // 会话没有了（结束/出错/正在释放），或者压根还没起来：把它那一块让开，
   // 把窗口主体还给面板，而面板上正是「重新开始」那几个按钮。
   //
-  // RELEASING 也要算在内，而且它才是在真机上最先到达的那一个：stop() 发出
-  //   goodbye 之后状态就是 releasing，而它要等下一次 status 轮询（60 秒）才可能
-  //   变成 ended。只收 ENDED 的话，用户点了「结束会话」之后还要盯着一块打不开的
-  //   页面最多一分钟。
+  // 让开分两档，判据只有一条：作业确认彻底结束了没有。
+  //   · ENDED 是确认结束（站点说这条会话到了终态）—— 只有这一档销毁页面。
+  //   · RELEASING 是"正在释放"（goodbye 已经发出去、scancel 还在走）、
+  //     ERROR 是这一端出了错 —— 两档作业都可能还在集群上跑，页面留着，
+  //     下次连上同一个工作区时同一块视图接着用（用户 2026-11-03）。
+  //   · IDLE 还没有页面，藏起来与销毁没有区别。
+  //
+  // 本机会话与临时工作区例外，一律销毁：它们没有可接回的工作区身份
+  //   （本机会话没有作业；临时那份一重启就换了 id、分区与端口）。
   //
   // 收的是这一个槽，不是"窗口里那一块"。收"窗口里那一块"是静默的
   //   越权：甲会话结束，把乙会话那块正跑着的页面一起销毁掉 —— 通知、状态条
   //   全都正常，只有用户的编辑器没了，而出路（重新加载）正压在那块页面底下。
   if ([State.RELEASING, State.ENDED, State.ERROR, State.IDLE].includes(snap.state)) {
-    win.destroySurface(slot);
+    rec.revealOnRunning = false;      // 没等到 running：那一次「推到前台」作废
+    const local = Boolean(rec.controller.isLocal && rec.controller.isLocal());
+    const ephemeral = tempSpaces.has(rec.controller.spaceId);
+    if (snap.state === State.ENDED || local || ephemeral) {
+      win.destroySurface(slot);
+      keptSurfaces.delete(slot);
+    } else {
+      win.hideSurface(slot);
+    }
     // 临时那一份到这里就没了（这一条会话结束了，那份副本的使命也就完了）。
     //
     //    必须排在 `destroySurface` 之后，次序是承重的：那个调用会销毁这一块
@@ -3439,12 +3482,12 @@ async function _renderSession(slot) {
   //
   // 这里没有任何插件名。注册表回答的是"这个会话归哪个插件"，所以加第三个
   //   插件时这一段一行都不用改 —— 要动的是插件自己那一棵树。
-  // 被接管：这一块页面不再归本机操作。直接收掉，而不是盖一层提示页 ——
-  //   用户 2026-10-20 报的是"上栏说被接管，而我完全可以正常使用"。
+  // 被接管：这一块页面不再归本机操作，藏起来 —— 不销毁。作业在别人手上继续跑，
+  //   本机随时可能再接管回来，那时同一块视图接着用（用户 2026-11-03）。
   //   隧道不拆：重新接管之后要接着用它，而 `suspend()` 本来就特意没拆。
-  //   收掉之后 `hasSurface` 为假，下面那段提示页也没有可盖的东西。
+  //   藏起来之后用户点不到它（标签灰着），也不会盖一层提示页。
   const handedOff = Boolean(snap.suspended);
-  if (handedOff) win.destroySurface(slot);
+  if (handedOff) win.hideSurface(slot);
 
   const plugin = rec.plugin;
   if (!handedOff && snap.state === State.RUNNING && snap.origin) {
@@ -3456,6 +3499,14 @@ async function _renderSession(slot) {
     } else if (plugin.contributes.surface) {
       await ensureSurface(rec, snap);
       await runAttach(rec, plugin, snap);
+      // 用户点的那一次「开始会话」：页面第一次可用时把它推到前台。
+      //   复用上一轮留下的页面时，`showSurface` 的"新建"分支不会再走（那一句
+      //   面板让开的判据在那边），这一格得在这里补 —— 少了它，症状正是
+      //   "我点了开始会话，什么都没出来"。
+      if (rec.revealOnRunning && slot === frontSlot()) {
+        rec.revealOnRunning = false;
+        win.setFront(slot);
+      }
     } else {
       // 这个插件不要界面（比如中转站）：它自己那一块收掉。
       //
@@ -4412,12 +4463,20 @@ function stopSitePoll() {
   pushSiteDot();
 }
 
-async function teardownConnection() {
-  if (win) win.closeAllSurfaces();
-  // 页面与提示页一起收。离开站点之后那几条隧道都拆了，页面再也不会被看见；
-  //   留着它们只是白养 renderer 进程，而提示页会盖住回来的第一屏
-  //   （用户 2026-10-21 报的"什么也点不了"）。三条路共用这里：临时离开、
-  //   断开、空手超时。
+async function teardownConnection({ keepSurfaces = true } = {}) {
+  // 提示页无论如何都要收：它盖住的是用户要点的连接列表（用户 2026-10-21
+  //   报的"什么也点不了"）。
+  //
+  // 页面默认藏起来留着：离开这几种站点（临时离开、断开、空手超时、站点没了）
+  //   时作业都可能还在集群上跑，回来连上同一个工作区时同一块视图接着用 ——
+  //   页面不重新加载（用户 2026-11-03）。只有确认作业彻底结束才销毁，而那个
+  //   判据在 `_renderSession` 的 ENDED 分支与 `pruneKeptSurfaces` 里。
+  //   `keepSurfaces: false` 是留给"确定不会再回来"的显式销毁档。
+  if (win) win.closeAllSurfaces({ keepPages: keepSurfaces });
+  // 页面当场销毁的那一档，留着的那份账也一起清 —— 不清的话，下一次重连
+  //   会对着几个已经不在的槽调 `destroySurface`（无害，但那份账就成了
+  //   "说有一块页面，而窗口里没有"）。
+  if (!keepSurfaces) keptSurfaces.clear();
   stopSitePoll();
   stopOutPoll();
   // 离开/断开之后既没有要保活的会话，也没有"空手"可计 —— 两样都从零开始。
@@ -4471,9 +4530,36 @@ async function teardownConnection() {
  *     正是它要避免的那件事：用户回来时东西没了，而他以为自己只是走开一会。
  *     与 `abandon()` 的另外两处调用（`tryReattach`、模拟重启）同一条取舍。
  */
-async function leaveSite() {
+async function leaveSite({ keepSurfaces = true } = {}) {
   await forgetSessions();
-  await teardownConnection();
+  await teardownConnection({ keepSurfaces });
+}
+
+/**
+ * 把本机手上那些会话的页面记进「留着等接回」那份账。
+ *
+ * 必须在 `leaveSite()` 之前调：`teardownConnection()` 会把 `connectedConnId`
+ *   清空，之后就不知道这些页面是哪条连接留下的了。
+ *
+ * 本机会话与临时工作区的页面不进这份账 —— `forgetSessions()` 当场销毁它们，
+ *   没有可接回的东西（本机会话没有作业；临时那份一重启就换了 id、分区与端口）。
+ *
+ * `sessionId` 是重连之后问站点"这条作业还在不在"的钥匙（见 `pruneKeptSurfaces`）。
+ *   提交中还没拿到号的那一条记 null：那时也还没有页面。
+ */
+function rememberKeptSurfaces() {
+  const connectionId = connectedConnId;
+  if (!connectionId) return;
+  for (const rec of sessions.values()) {
+    const local = Boolean(rec.controller && rec.controller.isLocal
+      && rec.controller.isLocal());
+    const ephemeral = Boolean(rec.controller && tempSpaces.has(rec.controller.spaceId));
+    if (local || ephemeral) continue;
+    keptSurfaces.set(rec.slot, {
+      connectionId,
+      sessionId: (rec.controller && rec.controller.sessionId) || null,
+    });
+  }
 }
 
 /**
@@ -4495,9 +4581,13 @@ async function forgetSessions() {
     //   与临时数据要在这里收。次序与别处相同：销毁视图 → dispose → 回收数据；
     //   反过来会让 `livePartitions()` 还看得见那个分区，清理被静默跳过。
     const local = Boolean(rec.controller && rec.controller.isLocal());
-    if (local) win.destroySurface(slot);
+    // 临时工作区同样销毁：它只活在这次会话里，重启之后会重新认领一份新的
+    //   （新 id、新分区、新端口），现有那块页面接不回来。留着它还会让
+    //   `livePartitions()` 一直算那份分区"正被用着"，临时数据永远清不掉。
+    const ephemeral = Boolean(rec.controller && tempSpaces.has(rec.controller.spaceId));
+    if (local || ephemeral) win.destroySurface(slot);
     if (rec.controller) await rec.controller.abandon();
-    if (local) releaseEphemeral(rec.controller.spaceId);
+    if (local || ephemeral) releaseEphemeral(rec.controller.spaceId);
     closeHostSession(rec);
     sessions.delete(slot);
   }
@@ -4662,8 +4752,11 @@ function armEmptyHands() {
  */
 async function handleSiteGone(reason) {
   stopKeepAlive();
+  // 作业可能还在跑（站点命令被卸载了，集群上的作业不受影响）—— 页面留着，
+  //   等下次连上确认它结束了没有（用户 2026-11-03）。
+  rememberKeptSurfaces();
   await forgetSessions();
-  await teardownConnection();
+  await teardownConnection({ keepSurfaces: true });
   const text = reason + '作业可能还在跑，本机已经不能再管理它们。';
   if (win) {
     win.pushNotice('error', text);
@@ -4675,8 +4768,10 @@ async function closeEmptyHandsSite() {
   stopKeepAlive();
   const reason = '这个站点上没有一条会话由本机看护，已自动断开。'
     + '要接着看护某一条，请在作业页点「接管」。';
+  // 空手超时只说明本机没在看护，作业可能还在跑 —— 页面留着。
+  rememberKeptSurfaces();
   await forgetSessions();
-  await teardownConnection();
+  await teardownConnection({ keepSurfaces: true });
   win.pushNotice('info', reason);
   win.pushSiteClosed({ reason });
 }
@@ -4689,6 +4784,22 @@ async function closeEmptyHandsSite() {
  * 这正是「仅关闭窗口，保持作业运行」那条路的意义所在。
  */
 async function tryReattach() {
+  const connectionId = connectedConnId;
+  let liveIds = null;
+  try {
+    await tryReattachInner((ids) => { liveIds = ids; });
+  } finally {
+    // 无论接回走到哪一步（早早返回、读不到清单、接回中途出错），都来收一次账：
+    //   `liveIds` 为 null 时它只摘"已接回"的那些，不销毁页面。
+    pruneKeptSurfaces(connectionId, liveIds);
+  }
+}
+
+/**
+ * `tryReattach()` 的主体。`setLiveIds` 把"站点上还活着的那些会话号"交回去 ——
+ *   收账那一步靠它区分"作业确实结束了"与"看护者不是本机、作业还在跑"。
+ */
+async function tryReattachInner(setLiveIds) {
   // 「有没有连上」问后端，不去猜它的私有字段叫什么 —— 去猜（`backend._conn` 之类）
   // 的话，假后端用的是另一个内部名字，这一行会在它上面恒为真地提前返回，让整条
   // 「接上已有会话」的路在唯一能测它的地方完全不可达；而「上次没关干净的会话」
@@ -4747,6 +4858,12 @@ async function tryReattach() {
       + whyOf(listed) + '。作业不受影响；再连一次这个站点会重试。');
     return;
   }
+  // 这一份清单同时回答"哪几条作业还活着"：保留页面的收账只认它（见
+  //   `pruneKeptSurfaces`）。`releasing` 也算活着 —— scancel 还在走，作业
+  //   没有确认消失之前，页面不能销毁。
+  setLiveIds(new Set(((listed.data && listed.data.sessions) || [])
+    .filter((r) => r && SERVER_LIVE_STATES.includes(r.state))
+    .map((r) => r.session_id)));
   // `releasing` 不算要接回来的那一档：它已经在拆了，接回来既没有可看的页面，
   //   也没有可做的动作（`reattachOne` 会把它当成 RUNNING 重新起一条隧道）。
   //   断开之后立刻重连时最常见的正是它 —— 上一轮刚发出去的 `goodbye` 还没走完。
@@ -4823,6 +4940,30 @@ async function tryReattach() {
       continue;
     }
     await reattachOne(view);
+  }
+}
+
+/**
+ * 重连之后，把这一条连接离开时留下、而且确认作业已经结束的那些页面收掉。
+ *
+ * 判据是"站点那份清单里还有没有这条会话的活记录"，不是"这次有没有接回来"：
+ *   · 接回来了（槽在 `sessions` 里）—— 页面有归属，从账本摘掉；
+ *   · 清单里还有它（被别的电脑接管、或者正在释放）—— 作业可能还在跑，页面留着；
+ *   · 清单里没有它（released / rejected / expired）—— 确认结束，销毁；
+ *   · 清单根本没读到（`liveIds` 为 null）—— 什么都确认不了，页面留着。
+ *
+ * 只动这一条连接留下的那些：别的连接留下的页面继续留着 —— 用户随时可能
+ *   切回去（用户 2026-11-03）。
+ */
+function pruneKeptSurfaces(connectionId, liveIds) {
+  if (!connectionId) return;
+  for (const [slot, kept] of [...keptSurfaces]) {
+    if (!kept || kept.connectionId !== connectionId) continue;
+    if (sessions.has(slot)) { keptSurfaces.delete(slot); continue; }
+    if (!liveIds) continue;
+    if (kept.sessionId && liveIds.has(kept.sessionId)) continue;
+    if (win) win.destroySurface(slot);
+    keptSurfaces.delete(slot);
   }
 }
 
@@ -5572,7 +5713,14 @@ function registerIpc() {
     //      不该假设界面的形状 —— `app:connect` 传哪一条进来都做得到。
     connectInFlight = true;
     try {
-      if (backend.connected && connectedConnId !== conn.id) await leaveSite();
+      // 连着一条、现在要换另一条：本机收尾，但页面留着 —— 与【临时离开】
+      //   同一个方向。页面属于工作区，不属于连接（槽、端口、存储分区都由
+      //   工作区算出来），所以切回来时同一块视图接着用，不重新加载。
+      //   记录必须在 `leaveSite()` 之前：它会清掉 `connectedConnId`。
+      if (backend.connected && connectedConnId !== conn.id) {
+        rememberKeptSurfaces();
+        await leaveSite({ keepSurfaces: true });
+      }
 
       // 显式点名要连哪一条，就是「这条是我要用的」。不跟着改的话，
       // 下次启动自动重连会连到另一台上去 —— 而用户完全看不出为什么。
@@ -5739,8 +5887,13 @@ function registerIpc() {
     //   停着（`stop()` 之后没有人再推进它们），并且带着这个站点的 `session_id`
     //   活到下一次连接 —— 选中一条已经结束的作业，前台就被切成那个死记录
     //   （见 `forgetSessions` 的说明）。
+    //
+    // 页面不销毁：goodbye 已经发出去，但作业要等守护进程确认消失才算彻底结束；
+    //   在那之前它仍然可能接回来（用户 2026-11-03）。下一次连上这个站点时
+    //   `pruneKeptSurfaces` 按站点那份清单决定收不收。
+    rememberKeptSurfaces();
     await forgetSessions();
-    await teardownConnection();
+    await teardownConnection({ keepSurfaces: true });
     return { ok: true, released };
   });
 
@@ -5762,9 +5915,19 @@ function registerIpc() {
    * 本机这一侧的收尾走 `leaveSite()`：`abandon()` 掉记录（一个字都不发给
    *   服务端）再拆连接。提交中、还没有会话号的那一条同样如此，它的结局是
    *   "在服务端长出来、然后按那条窗口被回收"—— 与"提交到一半合上电脑"逐字相同。
+   *
+   * 页面不销毁，留着重连时接着用（`keepSurfaces`）。它脚下的隧道已经拆了，
+   *   页面会显示断线、自己重连；用户回来连上同一个站点之后，同一个页面恢复
+   *   原来的样子 —— 编辑器里的布局、终端、对话都还在，不会重新加载一次
+   *   （用户 2026-11-03 报的 code-server 里 Claude 提示"对话在别处还开着"，
+   *   根源就是那次重新加载）。重连后那条会话接不回来时，`keptSurfaces`
+   *   负责把它收掉；连别的站点不清它们 —— 页面属于工作区。
    */
   send('app:leave', async () => {
-    await leaveSite();
+    // 这份账必须在 `leaveSite()` 之前记：`teardownConnection()` 会清掉
+    //   `connectedConnId`，之后就不知道这些页面是哪条连接留下的了。
+    rememberKeptSurfaces();
+    await leaveSite({ keepSurfaces: true });
     // `left` 这个形状留着：界面读它决定要不要多说一句警告。
     //   离开不再依赖任何一条服务端请求，所以这里永远是成功的。
     return { ok: true, left: { ok: true, cleared: [] } };
@@ -6562,6 +6725,9 @@ module.exports = {
     /** 把空手超时调到毫秒级 —— 生产路径上它是十分钟（见 `EMPTY_HANDS_MS`）。 */
     setEmptyHandsMs: (ms) => { emptyHandsMs = ms; },
     getEmptyHandsMs: () => emptyHandsMs,
+    // 用例把每一条都当独立现场：上一条留下的空手计时器不撤，这一条调小
+    //   周期之后也等不到它（`armEmptyHands` 见到已有计时器会直接返回）。
+    disarmEmptyHands,
     /** 客户端对外的版本号（两段）。用例要证明 npm 载体那个第三段不会带出去。 */
     wireVersion,
     /** 某一槽的记录（`getSessions().get(slot)` 的糖，用例里读起来短一点）。 */
