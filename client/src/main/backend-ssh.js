@@ -244,6 +244,49 @@ const RECONNECT_MAX_MS = 30000;
 const STREAM_PROBE_MS = 8000;
 
 /**
+ * 握手超时之后那条「空转命令」的预算。
+ *
+ * 它只在一次已经失败（等了 180 秒）的连接上跑，用来把两种完全不同的原因分开：
+ *   登录节点上的 shell 起不来，还是 slurmate 命令自己卡住。
+ *   探针是 `/bin/true`：它不读 stdin、不碰家目录以外的任何东西，正常是几十毫秒。
+ *   取 8 秒与 `STREAM_PROBE_MS` 同一个量级 —— 超过它就说明连一条空命令都排不上。
+ */
+const SHELL_PROBE_MS = 8000;
+
+/**
+ * 把「握手超时」那条错误补成能指向根因的话。
+ *
+ * 用户看到的原话只有「登录节点上的命令超过 180 秒没有应答」—— 而这一句至少有
+ *   三种原因：登录 shell 的启动脚本卡住（`~/.bashrc` 里等交互或访问大目录）、
+ *   家目录所在的共享盘卡死、`slurmate` 命令本身起不来。三种修法完全不同。
+ *   空转命令能把它们分成两半：它也卡住 → shell/节点那一侧；它立刻回来 →
+ *   命令那一侧。
+ *
+ * @param {object|null} probe  `_probeShell()` 的结论
+ * @param {{user:string,host:string}} who
+ * @returns {string} 追加到原错误后面的那一段（没有结论时为空串）
+ */
+function shellProbeHint(probe, who) {
+  if (!probe) return '';
+  const at = who && who.user ? `${who.user}@${who.host}` : '登录节点';
+  if (probe.timedOut) {
+    return '再执行一条空转命令（/bin/true）也没有应答：卡住的是登录节点上的 shell '
+      + '启动脚本，不是 Slurmate。用系统的 ssh 手工执行 `ssh '
+      + at + ' true` 会看到同样的停顿。在 ~/.bashrc、~/.zshenv 一类文件的'
+      + '最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
+      + '等待网络、访问大目录的那几行。';
+  }
+  if (probe.ok) {
+    return '同一台机器上一条空转命令（/bin/true）却立刻回来了：卡住的是 '
+      + 'slurmate 命令本身。在登录节点上手工执行 '
+      + '`/usr/bin/time /usr/local/bin/slurmate rpc <<< \'{"op":"ping"}\'`，'
+      + '看它停在哪一步（启动 python，还是等守护进程的 socket）。';
+  }
+  return '想再执行一条空转命令来区分原因，但这条额外请求也失败了：'
+    + (probe.error || '未知原因');
+}
+
+/**
  * 常驻通道上单条请求的兜底超时。
  *
  * 它是兜底，不是语义上的超时 —— 语义超时在调用点各自有
@@ -383,9 +426,17 @@ function hostKeyAlgorithm(rawKey) {
   return s ? s.value.toString('utf8') : null;
 }
 
-/** 后端的「传输层失败」信封：给 classify.js 认的 kind='transport' 标记。 */
-function transportError(detail) {
-  return { ok: false, code: null, data: null, error: { kind: 'transport', detail } };
+/**
+ * 后端的「传输层失败」信封：给 classify.js 认的 kind='transport' 标记。
+ *
+ * `extra` 只给内部判据用（今天是 `timedOut`）：`classify` 只看 `kind` 与
+ *   `detail`，多出来的字段不会改变任何一档动作。
+ */
+function transportError(detail, extra) {
+  return {
+    ok: false, code: null, data: null,
+    error: { kind: 'transport', detail, ...(extra || {}) },
+  };
 }
 
 /** ssh2 在「服务器拒绝了所有认证方式」时抛的原话。 */
@@ -901,8 +952,16 @@ class SshBackend extends Backend {
         } else if (!noPing) {
           // 问不到、也不是"对面没有这个 op"，这条链路本身有问题。
           // 与下面 whoami 的失败走同一条路：如实报告，别以为连上了。
-          const why = (ping && ping.error && (ping.error.detail || ping.error.kind))
+          let why = (ping && ping.error && (ping.error.detail || ping.error.kind))
             || '未知原因';
+          // 握手等到兜底超时（180 秒）时，再说一句话就把用户留在原地了 ——
+          //   先问一条空转命令，把「登录节点的 shell 起不来」与「slurmate
+          //   命令自己卡住」分开（见 `shellProbeHint`）。只在超时这一档问，
+          //   别的失败（比如命令不存在）已经有明确的结论。
+          if (ping && ping.error && ping.error.timedOut) {
+            const hint = shellProbeHint(await this._probeShell(client), { user, host });
+            if (hint) why += '\n' + hint;
+          }
           try { client.end(); } catch { /* 尽力 */ }
           this._conn = null;
           if (ping && ping.error && ping.error.kind === 'cli_missing') {
@@ -1489,8 +1548,11 @@ class SshBackend extends Backend {
       //   到点就把这一条判成传输层失败 —— 契约里"不抛异常、返回信封"照旧。
       timer = setTimeout(() => {
         try { if (chan) chan.close(); } catch { /* 尽力 */ }
+        // `timedOut` 是给 `_openOnce` 的判据：只有这一档要再去问一条空转命令，
+        //   把「shell 起不来」与「命令自己卡住」分开（见 `shellProbeHint`）。
         finish(transportError(
-          `登录节点上的命令超过 ${Math.round(ms / 1000)} 秒没有应答。`));
+          `登录节点上的命令超过 ${Math.round(ms / 1000)} 秒没有应答。`,
+          { timedOut: true }));
       }, ms);
       timer.unref?.();
 
@@ -1564,6 +1626,51 @@ class SshBackend extends Backend {
   }
 
   /**
+   * 问一条空转命令：登录节点上的 shell 现在还能不能起命令。
+   *
+   * 只在握手已经超时之后调一次。判据是 `/bin/true` —— 它不读 stdin、不产生
+   *   任何输出，正常几十毫秒就退出。于是三种结论互斥：
+   *     ok        —— shell 正常，卡住的是 slurmate 命令本身
+   *     timedOut  —— 连一条空命令都排不上：shell 的启动脚本、家目录或节点本身
+   *     error     —— 通道在问它的这一下断了，这一条区分不出什么
+   * 它自己一定有尽头（`SHELL_PROBE_MS`）：这条连接已经迟到 180 秒，
+   *   再挂住的话用户只是多等一次。
+   */
+  _probeShell(client, budgetMs) {
+    const budget = budgetMs || SHELL_PROBE_MS;
+    return new Promise((resolve) => {
+      let done = false;
+      let chan = null;
+      let timer = null;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve(v);
+      };
+      timer = setTimeout(() => {
+        try { if (chan) chan.close(); } catch { /* 尽力 */ }
+        finish({ ok: false, timedOut: true });
+      }, budget);
+      timer.unref?.();
+      try {
+        client.exec('/bin/true', (err, stream) => {
+          if (done) { try { stream?.close?.(); } catch { /* 尽力 */ } return; }
+          if (err) return finish({ ok: false, error: err.message });
+          chan = stream;
+          let code = null;
+          stream.on('exit', (c) => { if (typeof c === 'number') code = c; });
+          stream.on('error', (e) => finish({ ok: false, error: e.message }));
+          stream.on('close', () => finish({ ok: code === 0 }));
+          stream.end();
+        });
+      } catch (e) {
+        finish({ ok: false, error: e && e.message });
+      }
+    });
+  }
+
+  /**
    * 建立一条到目标的数据通道（隧道用）。
    *
    * host 必须是守护进程给的 `tunnel_target` 里那个字面 IPv4，禁止再解析节点名。
@@ -1616,6 +1723,7 @@ module.exports = {
   parseEnvelopeLine,  // 同上：exec 与常驻通道共用同一条「什么算一条消息」的判据
   ResidentChannel,    // 同上：它只认字节与行，所以不连 SSH 也验得了
   authFailureDetail,  // 同上：这是「认证失败」唯一能指向根因的东西
+  shellProbeHint,     // 同上：超时那一档唯一能指向根因的东西
   AUTH_FAILED_RE,
-  RPC_TIMEOUT_MS, STREAM_PROBE_MS,
+  RPC_TIMEOUT_MS, STREAM_PROBE_MS, SHELL_PROBE_MS,
 };

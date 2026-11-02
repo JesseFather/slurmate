@@ -11898,6 +11898,28 @@ exit 0
         check("认不得的 auth_mode 报一条（它既不是 password 也不是 none）",
               "auth_mode_unknown" in _keys, "doctor=%r" % (_dr,))
         dd.store.update("s-doc1", auth_mode="password")
+
+        # 公钥认证是框架自己写的第三种值（`session_auth_mode`：需要公钥的插件
+        #   → `publickey`）。少了它，code-server 这一类插件的每一条活跃会话都会
+        #   被体检报成「认不得」—— 而那个值本来就是本系统写进去的
+        #   （2026-11-02 真机报的正是这个）。
+        dd.store.update("s-doc1", auth_mode="publickey")
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        check("`auth_mode = publickey` 不算问题（框架自己写的值，不是认不得）",
+              (_dr.get("problems") or []) == [], "doctor=%r" % (_dr,))
+        dd.store.update("s-doc1", auth_mode="password")
+
+        # 既有系统那两张表是可选基线：`install-base.sh` 明确写着「别人的集群上
+        #   没有这些是正常的」。体检把它们的不在报成问题，等于把站点的部署选择
+        #   当成故障（2026-11-02 真机：只装了 Slurmate 的站点被报
+        #   「现有的 inet codeserver 表不见了」）。
+        mod.run_cmd = lambda argv, *a, **k: (1, "", "")
+        _dr = (dd.op_doctor(UID) or {}).get("data") or {}
+        check("既有基线那两张表都不在时，体检不报问题（它们是事实，不是不变量）",
+              (_dr.get("problems") or []) == []
+              and (_dr.get("existing") or {}).get("codeserver_table") is False,
+              "doctor=%r" % (_dr,))
+        mod.run_cmd = lambda argv, *a, **k: (0, "", "")
     finally:
         mod.run_cmd = _doc_real_run_cmd
 

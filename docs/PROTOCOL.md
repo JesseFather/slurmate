@@ -1593,14 +1593,19 @@ GRES 是管理员自定义的（`GresTypes` + `gres.conf`），名字与型号�
 | `rule_missing` | 有会话该有的规则不在 |
 | `rule_orphan` | 有规则对不上任何活跃会话 |
 | `rule_unparsable` | 一条 `slurmate-sess-` 开头的规则拆不出字段 |
-| `auth_mode_unknown` | 活跃会话的 `auth_mode` 既不是 `password` 也不是 `none` |
+| `auth_mode_unknown` | 活跃会话的 `auth_mode` 不在本站点能产出的值里 |
 | `tick_never` | 对账一次都没有跑过 |
 | `tick_error` | 最近一次对账出错 |
-| `base_table_missing` | 现有系统的 `inet codeserver` 或 `ip port-daemon` 表不见了 |
+
+「本站点能产出的值」是 `password`（列默认值）、`none` 与 `publickey`（框架自己写的
+两个，后者属于需要公钥的插件），加上各插件 `auth_mode` 枚举里的全部取值。
 
 `consistent` = 规则集合 == 活跃 claim 集合，两个方向都比。数量相等而集合不等
-同样是问题（见 `rule_missing` / `rule_orphan`）。`existing` 是非侵入式体检：
-只读地看一眼既有系统还在不在，本系统绝不碰它们。
+同样是问题（见 `rule_missing` / `rule_orphan`）。
+
+`existing` 是非侵入式体检：只读地看一眼既有系统还在不在，本系统绝不碰它们。
+它只报事实，不参与 `problems`：站点的既有设施本来就没有是正常的，「没有」不等于
+「本系统坏了」（`install-base.sh` 把同一批设施叫作「可选基线」）。
 
 `auth_mode_none` 是活跃会话里关闭了口令的条数。`none` 是站点显式配的宽松模式，
 不算问题，但体检要说出来。

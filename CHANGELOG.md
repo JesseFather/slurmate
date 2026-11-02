@@ -173,6 +173,33 @@
 断言（提示页与插件页面同一块矩形，状态条与两条栏都露着）、
 `client/test/renderer.test.mjs`〈提示页只顶替插件那块页面：它自己不长出出口〉。
 
+### Fixed — 体检不再把「本来就没有的既有设施」报成问题，也不再认不得 `publickey`
+
+真机上报了两句：
+
+- 「现有的 inet codeserver 表不见了」。`install-base.sh` 把同一批设施叫作「可选
+  基线」，写着「别人的集群上没有这些是正常的」—— 一台只装了 Slurmate 的站点本来
+  就可能没有那张表。`existing` 仍照实报出来供人核对，但不再进 `problems`：它回答
+  的是既有系统现在长什么样，不是本系统坏了没有。
+- 「有 1 条活跃会话的 auth_mode 不是 password 也不是 none」。需要公钥的插件写进去
+  的正是第三种值 `publickey`（`session_auth_mode`）。白名单从前只抄了密码那两种，
+  于是每一条用公钥认证的会话都会被报成「认不得」。现在值域从三处取：列默认值、
+  框架自己写的两个、以及插件规范里的 `auth_mode` 枚举。
+
+**判据**：`cluster/test-sessiond-logic.py` 29.14 那两条（`publickey` 不算问题；
+两张基线表都不在时 `problems` 为空，而 `existing` 记着 `false`）。
+
+### Fixed — 握手超时之后说得清是哪一半卡住了
+
+「已连上 …，但无法执行 `/bin/bash -c '/usr/local/bin/slurmate rpc'`：登录节点上的
+命令超过 180 秒没有应答」这一句至少有三种原因：登录 shell 的启动脚本卡住、家目录
+所在的共享盘卡死、`slurmate` 命令自己起不来。现在超时之后会再问一条 `/bin/true`
+（8 秒预算）：它也卡住，就把结论指向登录 shell 与家目录，并给出一条能自己核对的
+`ssh <user>@<host> true`；它立刻回来，就把结论指向命令本身，并给出手工核对的命令。
+
+**判据**：`client/test/backend-ssh.test.mjs`〈握手超时之后：空转命令把「shell 起不来」
+与「命令自己卡住」分开〉。
+
 ### Fixed — 没有排队作业时不再说「获取失败：排队名次」
 
 `me.pending_count` 缺席被客户端读成"没问到"，而守护进程在"这个人一条排队作业

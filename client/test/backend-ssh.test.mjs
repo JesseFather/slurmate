@@ -91,6 +91,50 @@ test('命令通道没有应答也有尽头（exec 那条路的兜底）', async 
   assert.equal(closed, true, '迟到的通道要当场关掉，否则它在登录节点上一直开着');
 });
 
+test('握手超时之后：空转命令把「shell 起不来」与「命令自己卡住」分开', async () => {
+  // 现场：界面上写「已连上 <host>，但无法执行 slurmate rpc：登录节点上的
+  //   命令超过 180 秒没有应答」。这一句至少有三种原因 ——
+  //   登录 shell 的启动脚本卡住、家目录所在的共享盘卡死、命令本身起不来 ——
+  //   而三种修法完全不同。这里钉住的那条判据是：再问一条空转命令（/bin/true）。
+  const b = new sshBackend.SshBackend({});
+
+  // 1) 空转命令也没有回音：结论在登录 shell 这一侧。
+  const stuck = { exec() { /* 回调永远不来 —— 与真机上那条 exec 相同 */ } };
+  // 探针的超时定时器是 unref 的（生产上程序退出时不该为它多等 8 秒）。
+  //   用例里没有别的句柄，得自己撑住事件循环，否则这条 await 永远不回来。
+  const keep = setTimeout(() => {}, 500);
+  const r1 = await b._probeShell(stuck, 40);
+  clearTimeout(keep);
+  assert.equal(r1.timedOut, true, `没回音要判成超时：${JSON.stringify(r1)}`);
+  const h1 = sshBackend.shellProbeHint(r1, { user: 'u', host: 'h' });
+  assert.match(h1, /卡住的是登录节点上的 shell 启动脚本/,
+    `要指向 shell 的启动脚本，而不是笼统地再说一次超时：${h1}`);
+  assert.match(h1, /ssh u@h true/, '要给一条能自己核对的命令');
+
+  // 2) 空转命令立刻回 0：shell 是好的，卡住的是 slurmate 命令本身。
+  const fine = {
+    exec(_cmd, cb) {
+      const s = new EventEmitter();
+      s.end = () => { s.emit('exit', 0); s.emit('close'); };
+      cb(null, s);
+    },
+  };
+  const r2 = await b._probeShell(fine);
+  assert.equal(r2.ok, true, `一条立刻退出的命令应当判成正常：${JSON.stringify(r2)}`);
+  assert.match(sshBackend.shellProbeHint(r2, { user: 'u', host: 'h' }),
+    /卡住的是 slurmate 命令本身/,
+    '结论要指向命令那一侧，而且要给手工核对的入口');
+
+  // 3) 通道在问它的这一下断了：第三种结论，不许冒充前两种。
+  const broken = { exec(_cmd, cb) { cb(new Error('通道断了')); } };
+  const r3 = await b._probeShell(broken);
+  assert.match(sshBackend.shellProbeHint(r3, { user: 'u', host: 'h' }),
+    /通道断了/, '问不到也要如实说问不到');
+
+  // 没有结论时一个字都不追加（调用方直接拼在错误后面）。
+  assert.equal(sshBackend.shellProbeHint(null, { user: 'u', host: 'h' }), '');
+});
+
 // ── 应答解析：这道缝挡的是「登录节点的 shell 环境不干净」──────────────────────
 //
 // sshd 用登录 shell 解释我们发过去的命令串，所以 rc 文件（zsh 的 ~/.zshenv 连 `-c`
