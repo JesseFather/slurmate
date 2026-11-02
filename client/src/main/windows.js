@@ -352,10 +352,19 @@ class ShellWindow {
       //   之后的 `/?folder=…`）不该被当成"换了页面"，否则每一次状态变化都会把
       //   它拉回根路径 —— 用户看到的是一闪一闪的白屏（2026-10-17 真机）。
       //   这一块属于哪个 origin 是框架的事实，页面里的路径是插件自己的事。
+      //
+      // 这里判两件事，缺一件都会留下一块连不上服务器的页面：
+      //   ① 隧道换了端口（nextOrigin 与上一次记录的不同）—— 页面必须重新指过去。
+      //      【临时离开】回来时首选端口被别的程序占了就是这一格。
+      //   ② 页面自己导航去了别处（cur 的 origin 不是我们上一次记录的那个）——
+      //      把它拉回来。只判 ② 时，① 那一格恰好与
+      //      prevOrigin 相等（cur 还停在旧地址上），页面不会被重定向，
+      //      于是它永远停在旧端口（2026-11-03 查临时离开接续时发现的）。
       const prevOrigin = s.origin;
-      s.origin = originOf(url);
+      const nextOrigin = originOf(url);
+      s.origin = nextOrigin;
       const cur = s.view.webContents.getURL();
-      if (!cur || originOf(cur) !== prevOrigin) {
+      if (nextOrigin !== prevOrigin || !cur || originOf(cur) !== prevOrigin) {
         await loadPage(s.view.webContents, url);
       }
     }
@@ -477,15 +486,26 @@ class ShellWindow {
   /**
    * 把所有会话的那几块页面一次收掉。离开站点、断开、空手超时走这条。
    *
-   * 那几条隧道已经拆了，页面再也不会被看见；留着它们只是白养 renderer 进程
-   *   —— 而"藏起来"与"收掉"在界面上看不出区别，只在进程表里有区别。
+   * @param {object} [opts]
+   * @param {boolean} [opts.keepPages] true 时只藏起来、不销毁。
+   *   【临时离开】用这一档：用户回来重连同一个站点时，同一个页面接着用 ——
+   *   页面里的编辑器、终端、对话都还在，不需要重新加载
+   *   （用户 2026-11-03 报的 code-server 里 Claude 提示"对话在别处还开着"，
+   *   根源就是那次重新加载）。
    *
-   * 提示页与浮窗必须一起收：它们是同一块窗口主体上的三层，只收页面的话，
-   *   一句"连接暂时中断"会继续盖在第一屏上，而那一屏上正是用户要点的连接列表
-   *   （用户 2026-10-21 报的"什么也点不了"）。
+   *   不销毁的代价是 renderer 进程继续活着，而且它脚下的隧道已经拆了 ——
+   *   页面会显示断线、自己重连。只有【临时离开】与切换连接走这一档：
+   *   断开、空手超时、站点没了这三条路上都不会再回来，留着只是白养一个
+   *   renderer。
+   *
+   * 提示页与浮窗必须一起收（两档都是）：它们是同一块窗口主体上的三层，
+   *   只收页面的那一半，一句"连接暂时中断"会继续盖在第一屏上，而那一屏上
+   *   正是用户要点的连接列表（用户 2026-10-21 报的"什么也点不了"）。
    */
-  closeAllSurfaces() {
-    for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
+  closeAllSurfaces({ keepPages = false } = {}) {
+    if (!keepPages) {
+      for (const slot of [...this.surfaces.keys()]) this._destroySurface(slot);
+    }
     this._overlayText = null;
     this._overlayTitle = null;
     this._overlaySlot = null;
@@ -494,6 +514,9 @@ class ShellWindow {
     this.hideHover();       // 它自己会调 `_layout`
     this._layout();
   }
+
+  /** 现在窗口里挂着哪几个槽的页面（保留下来、还没接回去的那些也算）。 */
+  surfaceSlots() { return [...this.surfaces.keys()]; }
 
   /**
    * 把某一个槽那块抬到面板上面。其余各块 `setVisible(false)` —— 不销毁：

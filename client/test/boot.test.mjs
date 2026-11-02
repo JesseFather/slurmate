@@ -407,8 +407,10 @@ class FakeWebContents {
   close() { this._destroyed = true; }
   isLoading() { return false; }
   getURL() { return this._url; }
-  loadURL(u) { this._url = u; return Promise.resolve(); }
-  loadFile(p) { this._url = 'file://' + p; return Promise.resolve(); }
+  // 数一次数：`_url` 在同址重新加载时前后不变，看不出页面有没有被重开。
+  //   临时离开回来时"页面不重新加载"那条判据要靠它（2026-11-03）。
+  loadURL(u) { this.loads = (this.loads || 0) + 1; this._url = u; return Promise.resolve(); }
+  loadFile(p) { this.loads = (this.loads || 0) + 1; this._url = 'file://' + p; return Promise.resolve(); }
   // 数一次数：用例要断言"网络回来时那块坏掉的页面被重载了一次"，
   //   而 `_url` 在重载前后不变（同址），看不出来。
   reload() { this.reloads = (this.reloads || 0) + 1; }
@@ -4807,7 +4809,7 @@ test('提示页只在页面用不了时挂：页面还能用、没有页面，�
   await openUpTo(idx, 1);
 });
 
-test('带着提示页点【临时离开】：提示页与页面一起收，不盖住回来的第一屏', async (t) => {
+test('带着提示页点【临时离开】：提示页收掉，页面留着回来接着用', async (t) => {
   // 用户 2026-10-21 实测到的那一格：断开之后第一屏在，而那句提示留在原处，
   //   从 y=30 往下铺满窗口主体 —— 连接列表在它底下，什么也点不了。
   t.after(() => { Module._load = origLoad; });
@@ -4828,11 +4830,16 @@ test('带着提示页点【临时离开】：提示页与页面一起收，不�
   await invoke('app:setFront', { slot });
   assert.equal(overlayViewOf()._visible, true, '前置：离开之前提示页是露着的');
 
+  const before = viewFor(w, slot);
   const r = await invoke('app:leave');
   assert.equal(r.ok, true, `临时离开失败：${JSON.stringify(r)}`);
 
-  assert.equal(w.hasSurface(slot), false,
-    '离开之后那一块页面必须销毁 —— 它的隧道已经拆了，留着只是白养一个 renderer');
+  // 页面不销毁：用户回来重连同一个站点时，同一块视图接着用，页面不重新加载
+  //   （用户 2026-11-03）。它此刻脚下没有隧道，所以显示断线、自己重连。
+  assert.equal(w.hasSurface(slot), true,
+    '临时离开要把页面留着 —— 回来重连时同一个页面接着用');
+  assert.equal(viewFor(w, slot), before, '而且是同一块视图对象，不是重建出来的');
+  assert.equal(before._visible, false, '页面要藏起来，不能盖住回来的第一屏');
   assert.equal(w.front, null, '没有页面可看，前台是空的');
   assert.equal(overlayViewOf()._visible, false,
     '提示页必须跟着一起收，否则它盖住的就是用户要点的连接列表');
@@ -5285,6 +5292,11 @@ async function openUpTo(idx, n) {
     if (rec.controller) await rec.controller.abandon();
   }
   idx._test.getSessions().clear();
+  // 【临时离开】会把页面留在窗口里（见 index.js 的 `keptSurfaces`）。用例结束时
+  //   没接回去的那些会留到下一轮，而下一轮的 `theView(w)` 会拿到上一条用例的
+  //   页面 —— 红在一个与它无关的地方。
+  const w = idx._test.getWindow();
+  if (w) w.closeAllSurfaces();
   await new Promise((r) => setTimeout(r, 150));
   return b;
 }
@@ -8674,6 +8686,145 @@ test('【临时离开】之后重连：直接接回，不需要点接管', async
   assert.equal(rec.controller.sessionId, sid, '接回来的必须是同一条会话');
   await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
   assert.equal(onlyFake(b).keeper, b._client.id, '看护者一直是本机，一个字都没变');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('【临时离开】之后重连：同一个页面接着用，一次都不重新加载', async (t) => {
+  // 用户 2026-11-03：临时离开再接回来，页面会重新加载一次，code-server 里的
+  //   Claude 会提示"这段对话在别处还开着"—— 一个页面被关掉又新开了一个，
+  //   服务端分不清那是同一个人。
+  //
+  // 判据是视图对象与 loadURL 的次数，不是 URL：同址重载前后 URL 一字不差。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await waitUntil(() => (w.hasSurface(a.slot) ? viewFor(w, a.slot) : null),
+    '页面建出来', 20000);
+
+  const viewBefore = viewFor(w, a.slot);
+  const wcBefore = viewBefore.webContents;
+  const urlBefore = wcBefore._url;
+  const loadsBefore = wcBefore.loads || 0;
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+  assert.equal(w.hasSurface(a.slot), true, '前提：离开之后页面留着');
+  assert.equal(viewFor(w, a.slot), viewBefore, '前提：还是离开前那块视图');
+
+  const conn = await testConn();
+  const rc = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+
+  await waitUntil(() => onlyRec(idx), '那条会话被接回来', 20000);
+  const rec = onlyRec(idx);
+  assert.equal(rec.slot, a.slot, '同一个工作区接回来还是同一个槽 —— 页面才有归属');
+  await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
+
+  assert.equal(w.hasSurface(rec.slot), true, '接回来之后页面还在');
+  assert.equal(viewFor(w, rec.slot), viewBefore, '同一个页面接着用，不是重建出来的');
+  assert.equal(wcBefore.isDestroyed(), false, '离开期间那块 webContents 没有被关掉');
+  assert.equal(wcBefore._url, urlBefore, '页面没有被重新指向');
+  assert.equal(wcBefore.loads || 0, loadsBefore,
+    '离开再回来一次 loadURL 都没有 —— 页面重新加载就是「对话在别处还开着」的根源');
+
+  await openUpTo(idx, 1);
+  cleanupSiteState(idx);
+});
+
+test('【临时离开】之后换一条连接：同一个工作区的页面还是那一块', async (t) => {
+  // 用户 2026-11-03：页面跟工作区走，不跟连接条目走。同一个工作区被两条连接
+  //   用着时，从一条切到另一条，不应该重新加载一次页面。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+  const connA = await testConn();
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await waitUntil(() => (w.hasSurface(a.slot) ? viewFor(w, a.slot) : null),
+    '页面建出来', 20000);
+
+  const viewBefore = viewFor(w, a.slot);
+  const wcBefore = viewBefore.webContents;
+  const loadsBefore = wcBefore.loads || 0;
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+
+  // 第二条连接，再显式绑到 A 那个工作区。测试夹具那条连接的工作区不参与
+  //   默认规则（`ensureConnectionWorkspace` 会把它挑掉），所以要先建、再切。
+  const saved = await invoke('app:saveConnection', {
+    user: 'demo-other', host: 'other.example', port: 22, label: '另一条连接',
+  });
+  assert.equal(saved.ok, true, `建第二条连接失败：${JSON.stringify(saved)}`);
+  const bound = await invoke('app:setConnectionWorkspace', {
+    connectionId: saved.connection.id, workspaceId: connA.workspaceId,
+    confirmDiscard: true,
+  });
+  assert.equal(bound.ok, true, `绑定工作区失败：${JSON.stringify(bound)}`);
+
+  const rc = await invoke('app:connect', { connectionId: saved.connection.id });
+  assert.equal(rc.ok, true, `切到第二条连接失败：${JSON.stringify(rc)}`);
+  await waitUntil(() => onlyRec(idx), '那条会话被接回来', 20000);
+  const rec = onlyRec(idx);
+  assert.equal(rec.slot, a.slot, '同一个工作区接回来还是同一个槽');
+  await waitUntil(() => rec.controller.state === 'running', '接回来的会话进入 running', 20000);
+
+  assert.equal(w.hasSurface(rec.slot), true, '页面还在');
+  assert.equal(viewFor(w, rec.slot), viewBefore, '切连接不重建页面');
+  assert.equal(wcBefore.isDestroyed(), false, '那块 webContents 没有被关掉');
+  assert.equal(wcBefore.loads || 0, loadsBefore, '切连接一次 loadURL 都没有');
+
+  // 清理：先把会话收掉（删连接会拒绝"工作区里还有会话"），再删第二条连接。
+  await openUpTo(idx, 1);
+  const del = await invoke('app:deleteConnection', saved.connection.id);
+  assert.equal(del.ok, true, `删第二条连接失败：${JSON.stringify(del)}`);
+  cleanupSiteState(idx);
+});
+
+test('【临时离开】之后作业结束了：那块留着的页面在重连时收掉', async (t) => {
+  // 留下的页面不是无条件保留的：它只对"接得回来"的那条有用。作业在离开期间
+  //   结束之后，隧道不会再建起来 —— 留着一块永远断线的页面没有意义，而且
+  //   它的存储分区会一直被算作"正被用着"。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  const b = await openUpTo(idx, 1);
+  await connectDemo(idx);
+
+  const a = await appStart(null, 'web-demo');
+  assert.equal(a.ok, true, `提交失败：${JSON.stringify(a)}`);
+  const ctl = idx._test.sessionAt(a.slot).controller;
+  await waitUntil(() => ctl.state === 'running', '会话跑起来', 20000);
+  await waitUntil(() => (w.hasSurface(a.slot) ? viewFor(w, a.slot) : null),
+    '页面建出来', 20000);
+
+  const lv = await invoke('app:leave');
+  assert.equal(lv.ok, true, `临时离开失败：${JSON.stringify(lv)}`);
+  assert.equal(w.hasSurface(a.slot), true, '前提：离开之后页面留着');
+
+  // 离开期间作业在集群上结束了（超时、被 scancel、或者自己退出）。
+  b.debugReap();
+
+  const conn = await testConn();
+  const rc = await invoke('app:connect', { connectionId: conn.id });
+  assert.equal(rc.ok, true, `重连失败：${JSON.stringify(rc)}`);
+
+  await waitUntil(() => !w.hasSurface(a.slot),
+    '接不回来的那条，它留下的页面要收掉', 20000);
 
   await openUpTo(idx, 1);
   cleanupSiteState(idx);
