@@ -62,7 +62,7 @@ VERSION = "0.38"
 #   因为 rc 与正式版之间的协议完全一样，说成不同反而会让两端判得不对。
 #   后缀与 `cluster/slurmate-sessiond` 的那一行必须相同，由
 #   .github/workflows/checks.yml 断言。
-RELEASE = "0.38-rc2"
+RELEASE = "0.38-rc3"
 DEFAULT_SOCKET = "/run/slurmate-session/ctl.sock"
 DEFAULT_SESSIOND = "/usr/local/sbin/slurmate-sessiond"
 # systemd 单元的名字。与 `cluster/slurmate-sessiond.service` 的 `[Unit]` 与
