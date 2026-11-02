@@ -28,7 +28,7 @@
  *      # 必须原样用下面这条：外层双引号保住内层单引号，否则本地 shell 会先把
  *      #     引号吃掉，ssh 发过去的是另一个命令串，验的就不是客户端真正发的那个了。
  *      ssh -T -p 22 user@<登录节点> \
- *          -- "/bin/bash -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
+ *          -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'" <<< '{"op":"ping"}'
  *      #   期望：恰好一行 JSON，ok:true，退出码 0。有额外输出就是没直通。
  *      #
  *      #   背景：有些集群会给普通用户的 sshd 装一个 ForceCommand 拦截器来管
@@ -97,7 +97,7 @@ const { Backend, KIND } = require('./backend.js');
 /**
  * 固定 argv。常量，不接受任何用户输入拼接。
  *
- * 显式走 `/bin/bash -c`，不用「登录 shell 是什么就用什么」。
+ * 显式走 `/bin/bash --norc -c`，不用「登录 shell 是什么就用什么」。
  *
  *   sshd 执行 exec 请求的方式是 `$SHELL -c "<命令串>"`，而 `$SHELL` 来自
  *   /etc/passwd —— 在 HPC 登录节点上经常是 zsh。zsh 与 bash 并非完全互通，
@@ -105,16 +105,24 @@ const { Backend, KIND } = require('./backend.js');
  *   一旦它用上某个 shell 的方言，症状会是「在这台机器上能连、换一台就认证失败」
  *   这类指不回根因的问题。把解释器钉死，等于把这条变量从等式里去掉。
  *
- * 但它挡不住 rc 文件，别把这两件事混起来：sshd 仍然先用登录 shell 解释
- *     整个命令串，所以 zsh 的 `~/.zshenv` 照样会被 source（zsh 连非交互、非登录的
- *     `-c` 都会读它 —— 这是它与 bash 的一处真实差异，bash 的 `-c` 不读任何 rc）。
- *     `~/.zshenv` 若往 stdout 打印东西，就会混进 RPC 的应答里。
- *     那一条由下面的应答解析兜底（从后往前找第一个合法信封），不是靠这里换 shell。
+ * `--norc` 不是保险，是必需的。2026-11-03 真机：一个用户的 `~/.bashrc` 里有
+ *     `conda init` 写进去的那一段，每条命令都会起一个约 40 MB 的 conda 去算
+ *     shell hook，而它在 NFS 上卡成 `D` 状态、不退。客户端一次连接要开好几条
+ *     exec（ping / whoami / 建目录 / stream），重试时还会并发 —— 几十个 conda
+ *     把该用户的 cgroup（这里限 512 MB）占满，此后每一次新会话都被内核按在
+ *     `memory.high` 上节流，登录要等两分钟。
+ *     我们这三条命令不需要用户的 rc：可执行文件是绝对路径，`exec` 之后没有别的。
+ *     加 `--norc` 之后 `.bashrc` 不再被读，那条链从源头断掉。
+ *
+ * 外层仍然挡不住：sshd 先用登录 shell 解释整个命令串，所以 zsh 的 `~/.zshenv`
+ *     照样会被 source（zsh 连非交互、非登录的 `-c` 都会读它）。它若往 stdout
+ *     打印东西，会混进 RPC 的应答里 —— 那一条由下面的应答解析兜底（从后往前找
+ *     第一个合法信封），不是靠这里换 shell。
  *
  *   `/bin/bash` 在 Linux 上不存在的概率很低；真没有的话，命令会以
  *   「没有返回可解析的应答」明确失败，而不是静默连上。
  */
-const RPC_CMD = "/bin/bash -c '/usr/local/bin/slurmate rpc'";
+const RPC_CMD = "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'";
 
 /**
  * 作业日志目录那一条 `mkdir`。两条命令共用这一句。
@@ -171,7 +179,7 @@ const PREPARE_FAIL = 'slurmate prepare: failed';
  * 二进制路径与 `RPC_CMD` 分头写死是有意的：这一串里一个用户输入都没有，
  *   看一眼就知道。代价是路径写了两遍 —— 有一条用例钉住两者用的是同一个。
  */
-const STREAM_CMD = "/bin/bash -c '"
+const STREAM_CMD = "/bin/bash --norc -c '"
   + '( umask 077; if ' + LOGS_MKDIR + ' && ' + SESS_MKDIR + ' && ' + HOME_PRIVATE
   + '; then printf "' + PREPARE_OK + '\\n" >&2'
   + '; else printf "' + PREPARE_FAIL + ' %s\\n" "$?" >&2; fi ) >/dev/null & '
@@ -192,7 +200,7 @@ const STREAM_CMD = "/bin/bash -c '"
  *
  * 与另外两条一样是编译期常量：不接受任何用户输入拼接。
  */
-const PREPARE_CMD = "/bin/bash -c 'umask 077; " + LOGS_MKDIR + " && " + SESS_MKDIR
+const PREPARE_CMD = "/bin/bash --norc -c 'umask 077; " + LOGS_MKDIR + " && " + SESS_MKDIR
   + " && " + HOME_PRIVATE + "'";
 
 const READY_TIMEOUT_MS = 20000;

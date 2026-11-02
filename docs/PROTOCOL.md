@@ -166,7 +166,7 @@
 
 ```
 ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
-    -- "/bin/bash -c '/usr/local/bin/slurmate stream'"
+    -- "/bin/bash --norc -c '/usr/local/bin/slurmate stream'"
 ```
 
 - stdin 一行一条请求，可以带 `rid`；stdout 一行一条：响应带 `rid`，
@@ -199,13 +199,15 @@ ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
 
 ```
 ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
-    -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
+    -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'"
 ```
 
 - 请求体走 stdin，响应走 stdout，各一行 JSON。一次一请求，请求完即退出。
-- 客户端把命令显式包在 `/bin/bash -c` 里执行（见 [client/README.md](../client/README.md)）——
+- 客户端把命令显式包在 `/bin/bash --norc -c` 里执行（见 [client/README.md](../client/README.md)）——
   sshd 用登录 shell 解释 exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。
-  但登录 shell 的 rc 文件仍会执行（zsh 的 `~/.zshenv` 连 `-c` 都读），
+  `--norc` 让内层 bash 不读用户的 `~/.bashrc`：那里面可能有 `conda init` 那一段，
+  每一条命令都会起一个 conda 去算 shell hook。
+  但外层登录 shell 的 rc 仍会执行（zsh 的 `~/.zshenv` 连 `-c` 都读），
   所以客户端解析应答时从后往前找第一个合法信封，而不是假定它在最后一行。
 - argv 是编译期常量，用户输入永远不出现在命令串里。这既是防注入，也是穿过
   登录节点上 `ForceCommand` 守卫的必要条件（某些集群的守卫只放行白名单里的命令名

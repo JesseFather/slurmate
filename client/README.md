@@ -531,7 +531,7 @@ test/              classify / config / keys / shortcuts / renderer / backend-ssh
 `slurmate rpc`：从 stdin 读一行 JSON，向 stdout 写一行 JSON，然后退出。一次一请求。
 
 ```
-ssh -T -p 22 user@<登录节点> -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
+ssh -T -p 22 user@<登录节点> -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'"
 ```
 
 外层双引号是必须的：本地 shell 会先把单引号吃掉，去掉它就变成另一个命令串，
@@ -541,9 +541,13 @@ ssh -T -p 22 user@<登录节点> -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
 `ForceCommand` 守卫的必要条件：某些集群的守卫只放行白名单里的命令名，而固定 argv
 天然满足。
 
-为什么显式包一层 `/bin/bash -c`：sshd 执行 exec 请求用的是登录 shell
+为什么显式包一层 `/bin/bash --norc -c`：sshd 执行 exec 请求用的是登录 shell
 （`$SHELL -c "…"`，值来自 /etc/passwd，HPC 上常是 zsh）。把解释器钉死成 bash，就不会
 出现「这条命令串在 zsh 下是语法错误、换台机器就好」这类查不出原因的问题。
+
+`--norc` 必须带上：用户的 `~/.bashrc` 里可能有 `conda init` 那一段，每一条命令都会
+起一个 conda 去算 shell hook，几十条之后把该用户的 cgroup 占满。这三条命令不需要
+用户的 rc —— 可执行文件是绝对路径。
 
 但它挡不住 rc 文件：sshd 仍先用登录 shell 解析整个串，所以 zsh 的 `~/.zshenv`（连 `-c`
 都会读，bash 不会）照样会执行。它若往 stdout 打印东西，就混进了应答。

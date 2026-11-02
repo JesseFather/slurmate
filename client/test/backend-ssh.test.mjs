@@ -47,7 +47,7 @@ test('RPC 命令行是编译期常量，不含任何插值', () => {
   // （命令串里不能出现 web-demo 字面量）。它一旦变成拼出来的字符串，
   // 两条性质同时失效。
   assert.equal(typeof sshBackend.RPC_CMD, 'string');
-  assert.equal(sshBackend.RPC_CMD, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
+  assert.equal(sshBackend.RPC_CMD, "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'");
   assert.ok(!/[$`{}]/.test(sshBackend.RPC_CMD), '不得含任何模板/变量语法');
   assert.ok(!/web-demo/.test(sshBackend.RPC_CMD), '不得含 web-demo 字面量');
 
@@ -55,7 +55,14 @@ test('RPC 命令行是编译期常量，不含任何插值', () => {
   //   sshd 用 `$SHELL -c "<命令串>"` 执行 exec 请求，而 $SHELL 来自 /etc/passwd ——
   //   HPC 登录节点上常是 zsh，与 bash 并非完全互通。少了这一层，同一份客户端
   //   在不同集群上会跑出不同结果，且失败时只看得到「认证失败」。
-  assert.match(sshBackend.RPC_CMD, /^\/bin\/bash -c /, '必须显式指定 bash');
+  assert.match(sshBackend.RPC_CMD, /^\/bin\/bash --norc -c /, '必须显式指定 bash');
+
+  // `--norc` 不是保险，是必需的：2026-11-03 真机上，一个用户的 ~/.bashrc 里有
+  //   conda init 那一段，每条命令都会起一个约 40 MB 的 conda 去算 shell hook，
+  //   卡在 NFS 上不退，几十条之后把该用户的 cgroup 占满，登录要等两分钟。
+  //   这一条判据少掉，那次故障就会原样回来。
+  assert.match(sshBackend.RPC_CMD, /--norc/,
+    '必须带 --norc：否则用户 ~/.bashrc 里的初始化会跟着每一条命令跑一遍');
   // 内层命令整体被单引号包住：否则登录 shell 会把参数拆开，`rpc` 会变成 $0
   assert.match(sshBackend.RPC_CMD, /'[^']+'$/, '内层命令必须整体加引号');
 });
@@ -1026,7 +1033,8 @@ test('★ PREPARE_CMD 也是编译期常量，而且与作业那侧指的是同�
     [...new Set([...cmd.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))],
     ['HOME'],
     '命令串里唯一的变量必须是 $HOME —— 客户端拼不出远端家目录');
-  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /^\/bin\/bash --norc -c /,
+    '必须显式指定 bash 并跳过用户的 rc（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.match(cmd, /umask 077/, '与作业脚本里那个 umask 一致 —— 目录要是 0700');
   assert.match(cmd, /mkdir -p/);
@@ -1057,7 +1065,8 @@ test('STREAM_CMD 是编译期常量，建目录那一段也在它里面', () => 
   //   才以"作业起不来"的样子出现。
   const cmd = sshBackend.STREAM_CMD;
   assert.equal(typeof cmd, 'string');
-  assert.match(cmd, /^\/bin\/bash -c /, '必须显式指定 bash（登录 shell 可能是 zsh）');
+  assert.match(cmd, /^\/bin\/bash --norc -c /,
+    '必须显式指定 bash 并跳过用户的 rc（登录 shell 可能是 zsh）');
   assert.match(cmd, /'[^']+'$/, '内层命令必须整体加引号');
   assert.ok(!/`/.test(cmd) && !/\$\{/.test(cmd), '不得含模板语法（`` ` `` 或 `${…}`）');
   assert.ok(!/web-demo/.test(cmd), '不得含 web-demo 字面量');
@@ -1084,9 +1093,9 @@ test('两条命令同一个解释器、同一个二进制路径', () => {
   //   —— 那就有漂的可能，而漂的表现是"其中一条链路连不上"，看起来像守护进程
   //   的问题。
   const { RPC_CMD: rpc, STREAM_CMD: stream, PREPARE_CMD: prep } = sshBackend;
-  assert.equal(rpc, "/bin/bash -c '/usr/local/bin/slurmate rpc'");
+  assert.equal(rpc, "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'");
   for (const c of [rpc, stream, prep]) {
-    assert.match(c, /^\/bin\/bash -c '/, '三条都显式指定 bash');
+    assert.match(c, /^\/bin\/bash --norc -c '/, '三条都显式指定 bash 并跳过 rc');
     assert.ok(c.endsWith("'"), '内层命令都要整体加引号');
   }
   assert.ok(rpc.includes('/usr/local/bin/slurmate rpc'));

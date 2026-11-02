@@ -200,6 +200,21 @@
 **判据**：`client/test/backend-ssh.test.mjs`〈握手超时之后：空转命令把「shell 起不来」
 与「命令自己卡住」分开〉。
 
+### Fixed — 客户端的三条命令不再读用户的 `~/.bashrc`
+
+真机（2026-11-03）：一个用户的 `~/.bashrc` 里有 `conda init` 那一段，每条命令都会起一个
+约 40 MB 的 conda 去算 shell hook，在 NFS 上卡在 `D` 状态不退。客户端一次连接要开好几条
+exec，重试时还会并发 —— 几十个 conda 把该用户的 cgroup（站点限 512 MB）占满，此后每一次
+新会话都被内核按在 `memory.high` 上节流，登录要等两分钟；我们自己的 `sshd` 会话进程也在
+同一个 cgroup 里，一起被卡住。
+
+现在三条命令的内层解释器是 `/bin/bash --norc -c`：命令里用的是绝对路径、`exec` 之后
+没有别的，不需要用户的 rc。外层登录 shell（zsh 的 `~/.zshenv`）仍会执行 —— 那一层客户端
+改不了，由应答解析兜底。
+
+**判据**：`client/test/backend-ssh.test.mjs` 的两条（`RPC_CMD` 的精确形状与 `--norc`、
+三条命令同一个解释器）。
+
 ### Fixed — 登录节点一时卡住之后，客户端再也回不到常驻通道
 
 真机上的两句是「接管失败：无法在登录节点上执行命令：(SSH) Channel open failure:

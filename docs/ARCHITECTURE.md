@@ -86,12 +86,17 @@ JSON（`cluster/slurmate`）。客户端必须用固定 argv 调用：
 
 ```
 ssh -T -o BatchMode=yes -p 22 alice@node01.example.com \
-    -- "/bin/bash -c '/usr/local/bin/slurmate rpc'"
+    -- "/bin/bash --norc -c '/usr/local/bin/slurmate rpc'"
 ```
 
-（外层双引号与内层 `/bin/bash -c` 都是客户端实际发出的形状：sshd 用登录 shell 解释
-exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。登录 shell 的 rc 文件仍会执行，
-所以应答解析不能假定 JSON 在最后一行 —— 见 [PROTOCOL.md](PROTOCOL.md)。）
+（外层双引号与内层 `/bin/bash --norc -c` 都是客户端实际发出的形状：sshd 用登录
+shell 解释 exec 请求，钉死解释器可以免掉 zsh/bash 的方言差异。
+
+`--norc` 必须带上：用户的 `~/.bashrc` 里可能有 `conda init` 那一段，每一条命令都会
+起一个 conda 去算 shell hook，几十条之后把该用户的 cgroup 占满。这三条命令不需要
+用户的 rc —— 可执行文件是绝对路径。外层登录 shell 的 rc 仍会执行（zsh 的
+`~/.zshenv` 连非交互都读），所以应答解析不能假定 JSON 在最后一行 —— 见
+[PROTOCOL.md](PROTOCOL.md)。）
 
 请求体走 stdin，命令行是编译期常量。这样用户输入从构造上不可能进入 SSH 命令串 ——
 是消除注入，而不是「记得别拼字符串」。这一点还有第二个必要性：某些集群在 sshd 上
