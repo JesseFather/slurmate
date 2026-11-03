@@ -931,6 +931,13 @@ async function doConnect(conn, extra = {}) {
     win.setTitle('Slurmate — 等待确认主机密钥');
   } else {
     win.setTitle('Slurmate — 未连接');
+    // 这一次没连上：把后端彻底停下。界面已经回到"可以再点连接"的样子，
+    //   而后台那条连接可能还挂着（握手要等很久超时），它一断又会排下一轮
+    //   重连 —— 每一轮都在登录节点上起一套 shell（用户 2026-11-03：conda
+    //   卡在 NFS 上，进程越堆越多，只能关掉软件）。
+    // 自动重连只留给「连上之后被断开」那一种；握手就没过的不该在后台自己
+    //   一遍遍重来，那正是用户看不见的进程来源。
+    await backend.close();
   }
   return res;
 }

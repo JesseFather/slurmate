@@ -627,6 +627,39 @@ function keepLoop(t) {
   t.after(() => clearInterval(h));
 }
 
+test('认证成功但还没握手完：重连计数不清零', async (t) => {
+  // 2026-11-03 真机：登录节点的登录 shell 会激活用户 `.profile` 里的 conda，
+  //   而 conda 卡在 NFS 上不退。SSH 认证能过，随后的 ping / whoami 全卡住，
+  //   直到 keepalive 把连接杀掉。重连计数原先在 `ready` 清零，于是每一轮都从
+  //   1 秒重新排 —— 连接一条接一条地建，每一条都在登录节点上起一套 shell 与
+  //   conda，进程越堆越多，用户只能关掉软件。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec() { /* 永不回调：登录 shell 卡在 conda 上 */ }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+  keepLoop(t);
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  t.after(() => { try { b.close(); } catch { /* 尽力 */ } });
+  b._profile = { user: 'u', host: 'h', port: 22 };
+  b._closed = false;
+  b._attempt = 4;
+
+  b._open();                                  // 不 await：握手会挂在 exec 上
+  await new Promise((res) => setImmediate(res));
+  assert.equal(b._attempt, 4, 'ready 不是清零点：认证成功不等于这条连接能用');
+
+  made[0].emit('close');
+  assert.equal(b._attempt, 5, '断开之后照常递增 —— 退避不能每次退回 1 秒');
+});
+
 /** exec 那条路的假 channel：`end(body)` 之后回一条应答并关闭。 */
 class FakeExecStream extends EventEmitter {
   constructor(reply) {

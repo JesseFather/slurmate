@@ -936,7 +936,12 @@ class SshBackend extends Backend {
 
       client.on('ready', async () => {
         this._conn = client;
-        this._attempt = 0;
+        // 重连计数【不】在这里清零。认证成功不等于这条连接能用：握手要再走
+        //   `ping` 与 `whoami` 两条 exec，而那一步可能卡在用户的登录 shell 上
+        //   （2026-11-03 真机：`~/.profile` 激活的 conda 在 NFS 上卡成 D 状态）。
+        //   从前在这里清零，于是每一次「认证成功、握手失败」都从 1 秒重新排 ——
+        //   连接一条接一条地建，每一条都在登录节点上起一套 shell 与 conda，
+        //   用户看到的是进程越堆越多，直到关掉软件。见 `_scheduleReconnect`。
         // 新的一条连接有新的会话额度（sshd 的 MaxSessions 是按连接算的）。
         this._channelOpenFailures = 0;
         this._emitState(true, `${user}@${host}:${port}`);
@@ -1038,6 +1043,9 @@ class SshBackend extends Backend {
           this._whoami = resp.data;
           this._daemonVersion = daemonVersion;
           this._daemonCaps = daemonCaps;
+          // 走到这里才说明整条链路真的能用（SSH 认证 + 两条握手 RPC）。
+          //   重连的退避从这一刻重新起算。
+          this._attempt = 0;
           return done({ ok: true, whoami: resp.data, daemonVersion, daemonCaps });
         }
         if (resp && resp.error && resp.error.kind === 'cli_missing') {
