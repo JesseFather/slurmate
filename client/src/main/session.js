@@ -409,13 +409,17 @@ class SessionController extends EventEmitter {
     this._suspendedEnded = null;
 
     /**
-     * 推送那一路的水位。
+     * 推送那一路的两个水位。
      *
-     * `_lastPushAt` 恒为 0 就是"这个后端从不推送"——而那不是异常状态，
-     *   是这一版必须支持的常态（旧 CLI、老守护进程、通道断了）。
-     *   见 `_pushHealthy()`。
+     * `_lastPushAt` 是"收到过任何一份推送"，`_lastSeenPushAt` 是"收到的推送里
+     *   有本会话"。前者回答通道活没活，后者才回答对账要不要让位 —— 全量推送
+     *   每 30 秒来一份，只看到别的会话也照样刷新前者，于是本会话消失之后
+     *   对账永远不动（用户 2026-11-03 报的现场）。
+     * 两者恒为 0 就是"这个后端从不推送"——那不是异常状态，是这一版必须支持
+     *   的常态（旧 CLI、老守护进程、通道断了）。见 `_pushHealthy()`。
      */
     this._lastPushAt = 0;
+    this._lastSeenPushAt = 0;
     this._pushSeq = 0;
     this._statusBusy = false;
     this._watching = false;
@@ -644,6 +648,8 @@ class SessionController extends EventEmitter {
     //   自己拆掉隧道、界面上写"会话已不存在"，而作业还在跑。
     //   真没了的话 `_statusOnce()` 会给权威答案（它走 `status`，那一条不截断）。
     if (!s) return;
+    // 只有这一条出现在推送里，才算"本会话的推送还在喂"（见 `_pushHealthy()`）。
+    this._lastSeenPushAt = Date.now();
 
     const prev = this.session || {};
     // 看护者变了：立刻补打一次心跳，不等 45 秒的定时器。
@@ -668,14 +674,21 @@ class SessionController extends EventEmitter {
   }
 
   /**
-   * 推送还在喂吗。
+   * 本会话的推送还在喂吗。
+   *
+   * 判据是"最近一份推送里有本会话"，不是"最近收到过推送"：站点每 30 秒推一份
+   *   全量（`SNAPSHOT_INTERVAL`），内容不变也推。本会话消失之后那些推送里根本
+   *   没有它，而后者照样被刷新 —— 对账于是永远不动，界面停在「运行中」
+   *   （用户 2026-11-03 报的现场）。
+   * 推送里没有本会话也不在这里判死：快照截断到 50 条，见 `_handlePush`。
+   *   这里只把对账接回每 60 秒一次的节奏，由 `status` 给权威答案。
    *
    * 反面就是"退回这一版之前的行为"，而那是设计的一部分，不是容错：
-   *   一条推送都不来，`_lastPushAt` 恒为 0，这里永远为假，`STATUS_MS` 轮询
+   *   一条推送都不来，两个水位恒为 0，这里永远为假，`STATUS_MS` 轮询
    *   照常跑。旧 CLI、老守护进程、SSH 常驻通道起不来，走的都是这一条。
    */
   _pushHealthy() {
-    return this._lastPushAt > 0 && (Date.now() - this._lastPushAt) < this.pushStaleMs;
+    return this._lastSeenPushAt > 0 && (Date.now() - this._lastSeenPushAt) < this.pushStaleMs;
   }
 
   /**
@@ -728,6 +741,7 @@ class SessionController extends EventEmitter {
     // 上一个会话的推送水位不能带进这一个：留着的话，一条新会话可能在还没有
     // 收到过任何推送的时候就被判成"推送健康"，于是它的第一次对账要等满 60 秒。
     this._lastPushAt = 0;
+    this._lastSeenPushAt = 0;
     this._pushSeq = 0;
     this._requestedKind = opts.serviceKind || null;
     this._needsPubkey = Boolean(opts.needsPubkey);
@@ -1276,6 +1290,10 @@ class SessionController extends EventEmitter {
       // 会话没了，心跳没有意义了。但不能因此判定作业已停 —— 只报告事实。
       this._stopHeartbeat();
       this.warning = '控制节点上该会话已不存在，心跳停止。';
+      // 立刻要一份权威视图。带 session_id 的 `status` 与这一拍给的是同一个
+      //   答案，而 `_statusOnce()` 才会把状态推到终局；等对账的钟要再等一拍，
+      //   那段时间界面挂着一个「运行中」（用户 2026-11-03）。
+      this._statusOnce();
     } else if (c.action === Action.RATE_LIMITED) {
       // 限流不是断线（`classify.js` 的 RATE_LIMITED：退避重试，不弹错给用户）。
       //   接回站点、对账那一阵的突发会把站点的桶打满，而心跳正好落在里面 ——
@@ -1622,6 +1640,7 @@ class SessionController extends EventEmitter {
     // 推送退订了：把它记成"没在喂"。不留这一步的话，看门狗要等满 75 秒
     //   （`PUSH_STALE_MS`）才会让对账动起来。
     this._lastPushAt = 0;
+    this._lastSeenPushAt = 0;
     // 对账留着，而且从这一刻起它只回答一个问题：这条会话结束了没有。
     //   从前它跟心跳一起被停掉，于是那边结束之后这边什么都不知道 ——
     //   界面永远停在「被接管、作业运行中」，而作业早就没了（用户 2026-10-28）。
