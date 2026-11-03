@@ -391,7 +391,14 @@ const calls = { titles: [], notices: [], ipc: new Map(), menus: 0, windows: [], 
    *   只有这一个出口（见 windows.js 的 `setBusy`）。用例要断言的是"没有活动时
    *   它不许亮" —— 2 = 不定进度（在转），-1 = 灭。
    */
-  progress: [] };
+  progress: [],
+  /**
+   * `flashFrame()` 收到的每一个值。
+   *
+   * 任务栏那颗橙色闪烁由页面请求注意力触发，而它会一直闪到有人调一次
+   *   `flashFrame(false)`。用例要断言的是"页面刷新不许把它点亮"（用户 2026-11-03）。
+   */
+  flashes: [] };
 /** partition → cookie jar。用来验证「登录判定靠 cookie jar 而不是状态码」。 */
 const partitionJars = {};
 
@@ -460,6 +467,7 @@ class FakeBrowserWindow {
   setMenuBarVisibility() {}
   setTitle(t) { calls.titles.push(t); }
   setProgressBar(v) { calls.progress.push(v); }
+  flashFrame(v) { calls.flashes.push(v); }
   show() {}
   focus() {}
   isMinimized() { return false; }
@@ -4764,6 +4772,45 @@ test('任务栏的忙碌指示只在页面真的在重载时亮，画面一回�
   await invoke('app:setFront', { slot });
   assert.equal(overlayViewOf()._visible, true, '前置：这一轮页面上挂的是提示页');
   assert.equal(last(), -1, '坏着不等于有活动：那一刻已经没有重载在飞');
+
+  await invoke('app:stop', { slot });
+});
+
+test('页面刷新不会让任务栏闪：每一次刷新都把那颗灯灭掉', async (t) => {
+  // 用户 2026-11-03（Windows）：只要页面有刷新任务栏就闪一下，而插件页面几乎
+  //   时刻在刷新。那颗橙色闪烁由页面请求注意力触发，Electron 接到
+  //   `flashFrame(true)` 上，只有窗口获得焦点或有人调 `flashFrame(false)` 才停。
+  //   判据是"我们只许灭，不许点" —— 从不为 true，且每个落点都要有一下。
+  t.after(() => { Module._load = origLoad; });
+  const idx = require('../src/main/index.js');
+  const w = idx._test.getWindow();
+  await ensureConnected(idx);
+  await openUpTo(idx, 1);
+
+  const started = await appStart(null, 'web-demo');
+  assert.equal(started.ok, true, `开会话失败：${JSON.stringify(started)}`);
+  const slot = started.slot;
+  await waitUntil(() => (w.hasSurface(slot) ? viewFor(w, slot) : null), '那块页面建出来');
+  const wc = viewFor(w, slot).webContents;
+
+  calls.flashes.length = 0;
+  fire(wc, 'did-start-loading');
+  fire(wc, 'did-stop-loading');
+  fire(wc, 'did-navigate');
+  fire(wc, 'did-navigate-in-page');
+  fire(wc, 'page-title-updated');
+  assert.equal(calls.flashes.length >= 5, true,
+    '每一类刷新事件都要把灯灭一次，少一个落点就留一段闪烁');
+  assert.equal(calls.flashes.some((v) => v !== false), false,
+    '一次都不许把它点亮');
+
+  // 面板页自己的加载也走同一条。
+  calls.flashes.length = 0;
+  fire(w.win.webContents, 'did-start-loading');
+  fire(w.win.webContents, 'did-stop-loading');
+  fire(w.win.webContents, 'page-title-updated');
+  assert.equal(calls.flashes.length >= 3, true);
+  assert.equal(calls.flashes.some((v) => v !== false), false);
 
   await invoke('app:stop', { slot });
 });

@@ -61,6 +61,19 @@
 没有本会话：对账照跑，会话消失之后走到终局〉与〈心跳说会话没了：立刻问一次
 权威视图，不等对账的钟〉。改之前状态停在 `RUNNING`、`status` 一次都不发。
 
+### Fixed — 任务栏不再因为页面刷新而闪
+
+页面刷新会点亮 Windows 任务栏那颗橙色的注意力灯（`window.focus()` 一类请求），
+而它要等窗口获得焦点或有人调 `flashFrame(false)` 才停。插件页面几乎时刻在刷新，
+于是那颗灯一直在闪（用户 2026-11-03）。
+
+现在每一次导航、加载与标题变化都把它灭掉：`did-start-loading`、`did-stop-loading`、
+`did-navigate`、`did-navigate-in-page`、`page-title-updated`；面板页自己的加载
+同样处理。只灭这一颗灯，页面自己的行为一个字都不动。
+
+**判据**：`client/test/boot.test.mjs`〈页面刷新不会让任务栏闪：每一次刷新都把那颗
+灯灭掉〉——每个落点都有一次 `flashFrame(false)`，且一次都不许传 `true`。
+
 ## [0.38] — 2026-11-03
 
 > 协议版本是 **0.38**：`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着
