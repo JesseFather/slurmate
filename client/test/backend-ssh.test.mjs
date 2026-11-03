@@ -117,6 +117,9 @@ test('握手超时之后：空转命令把「shell 起不来」与「命令自�
   assert.match(h1, /卡住的是登录节点上的 shell 启动脚本/,
     `要指向 shell 的启动脚本，而不是笼统地再说一次超时：${h1}`);
   assert.match(h1, /ssh u@h true/, '要给一条能自己核对的命令');
+  // `.profile` 必须点名：2026-11-03 那位用户的 conda 就写在 `.profile` 里，
+  //   而 `--norc` 管不到它。只提 `.bashrc` 与 `.zshenv` 会让他查错文件。
+  assert.match(h1, /\.profile/, '要列出登录 shell 真正会读的那几个文件');
 
   // 2) 空转命令立刻回 0：shell 是好的，卡住的是 slurmate 命令本身。
   const fine = {

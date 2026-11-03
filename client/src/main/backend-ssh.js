@@ -280,8 +280,9 @@ function shellProbeHint(probe, who) {
   if (probe.timedOut) {
     return '再执行一条空转命令（/bin/true）也没有应答：卡住的是登录节点上的 shell '
       + '启动脚本，不是 Slurmate。用系统的 ssh 手工执行 `ssh '
-      + at + ' true` 会看到同样的停顿。在 ~/.bashrc、~/.zshenv 一类文件的'
-      + '最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
+      + at + ' true` 会看到同样的停顿。检查登录 shell 会读的那几个文件'
+      + '（~/.profile、~/.bash_profile、~/.bashrc、~/.zshenv），'
+      + '在最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
       + '等待网络、访问大目录的那几行。';
   }
   if (probe.ok) {
