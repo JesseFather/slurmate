@@ -12,12 +12,12 @@
 
 ## 〇、协议版本
 
-当前版本：v0.38。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
+当前版本：v0.39。协议版本、客户端版本、服务端版本是同一个号 —— 它们不是
 三件东西，是一件的三个落点。四处声明由 `.github/workflows/checks.yml` 断言。
 
-`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.38`，而
+`cluster/slurmate` 与 `cluster/slurmate-sessiond` 逐字写着 `0.39`，而
 `client/package.json` 与 `client/package-lock.json` 的 `version` 是三段
-（`0.38.0`）—— 那个字段同时是 npm 包的版本号。electron-builder 拿 semver 校验
+（`0.39.0`）—— 那个字段同时是 npm 包的版本号。electron-builder 拿 semver 校验
 它，两段会被当场拒掉（`Invalid version`）。协议版本 = 包版本的前两段，断言比的
 就是这四处的前两段。
 

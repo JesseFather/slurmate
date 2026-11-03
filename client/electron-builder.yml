@@ -29,9 +29,9 @@ asar: true
 
 # 文件名里的版本段用 `${buildVersion}`，不是 `${version}`。
 #
-# `${version}` 是 package.json 那个三段的 npm 载体（`0.38.0-rc1`），带出去会让
+# `${version}` 是 package.json 那个三段的 npm 载体（`0.39.0-rc1`），带出去会让
 #   文件名与 tag 对不上；`${buildVersion}` 由 CI 从 cluster/slurmate-sessiond 的
-#   RELEASE 传进来，是两段的发布标识（`0.38-rc1`）。不传时它回落到 `${version}`。
+#   RELEASE 传进来，是两段的发布标识（`0.39-rc1`）。不传时它回落到 `${version}`。
 #
 # 这三条 artifactName 必须留在这个文件里，不能挪进 package.json 的 `build` 字段：
 #   electron-builder 只要在 package.json 里看到 `build`，就改用那一份配置，整个
