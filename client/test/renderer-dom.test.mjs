@@ -289,7 +289,8 @@ function bindAll(bootObj, extra = '') {
   h.run('window.addEventListener = () => {};'
     + 'window.slurmate.onSite = () => {}; window.slurmate.onStates = () => {};'
     + 'window.slurmate.onSiteClosed = () => {};'
-    + 'window.slurmate.onNotice = () => {}; window.slurmate.onPlugins = () => {};');
+    + 'window.slurmate.onNotice = () => {}; window.slurmate.onPlugins = () => {};'
+    + 'window.slurmate.onUpdate = () => {};');
   h.fn('bindEvents')();
   return h;
 }
@@ -616,6 +617,38 @@ test('关于卡片里的版本号是主进程给的那一个，缺了就照实�
   h.fn('renderAbout')();
   assert.equal(h.byId.get('about-ver').textContent, '版本未知',
     '连启动信息都没有的时候同样如此（它够得着在被赋值之前被调用）');
+});
+
+test('查到有更新的正式版时，「关于」卡片里多一行，按钮上出现那个点', () => {
+  const h = bindAll({});
+  h.fn('renderUpdate')({
+    status: 'update', latest: '0.40',
+    url: 'https://github.com/JesseFather/slurmate/releases/tag/v0.40',
+  });
+  assert.equal(h.byId.get('about-update').classList.contains('hidden'), false,
+    '有更新时那一行要显示出来');
+  assert.equal(h.byId.get('about-latest').textContent, '0.40',
+    '版本号照主进程给的那个写，界面不自己拼');
+  assert.equal(h.byId.get('btn-about').classList.contains('has-update'), true,
+    '卡片是悬停才出来的，没有那个点用户不会去点「关于」');
+
+  // 点「打开下载页」走的是主进程的 openExternal，地址就是这次带回来的那个。
+  h.run('window.slurmate.openExternal = (u) => { window.__opened = u; };');
+  h.run("$('btn-download').onclick()");
+  assert.equal(h.run('window.__opened'),
+    'https://github.com/JesseFather/slurmate/releases/tag/v0.40');
+});
+
+test('没查到更新时不出现那一行，也不留半个提醒', () => {
+  // 查不到、已是最新、没查过，这三种在界面上没有区别 —— 都不该有那行字。
+  for (const state of [null, { status: 'current', latest: '0.40', url: null },
+    { status: 'unknown', latest: null, url: null }]) {
+    const h = bindAll({});
+    h.fn('renderUpdate')(state);
+    assert.equal(h.byId.get('about-update').classList.contains('hidden'), true,
+      `${JSON.stringify(state)} 不该让那一行出现`);
+    assert.equal(h.byId.get('btn-about').classList.contains('has-update'), false);
+  }
 });
 
 test('重画会把没走完的第一段收掉（重画的就是它挂身的那一片）', () => {

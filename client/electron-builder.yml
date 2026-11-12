@@ -92,6 +92,11 @@ linux:
   maintainer: "JesseFather <JesseFather@users.noreply.github.com>"
   artifactName: ${productName}-${buildVersion}-linux-${arch}.${ext}
 
-# 自动更新本期不做（没有发布渠道）。留位：
+# 自动更新本期不做：安装包未签名，而它是一条把代码送进所有人机器的通道
+#   （见 SECURITY.md 与 src/main/updates.js 顶上那一段）。客户端会自己查最新
+#   正式版并弹一次提醒，但不下载、不安装。
+# 真要开自动更新时，清单由下面这份 publish 生成（electron-builder 只有配了它
+#   才会产出 latest.yml）；两个渠道分别指向这两个固定地址：
 # publish:
-#   provider: github
+#   provider: generic
+#   url: https://github.com/JesseFather/slurmate/releases/latest/download

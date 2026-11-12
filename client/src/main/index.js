@@ -78,6 +78,9 @@ const { sessionStateText } = require('./sessionstate.js');
 const { ShellWindow } = require('./windows.js');
 const { installMenu, attachKeyGuard } = require('./shortcuts.js');
 const weblogin = require('./weblogin.js');
+const updates = require('./updates.js');
+// 两段版本号的切法只此一份，住在 updates.js。诊断、界面与更新检查都用它。
+const { wireVersion } = updates;
 const plugins = require('./plugins/index.js');
 const sitePluginSync = require('./site-plugins.js');
 // 从模块上摘下来，而不是在函数里写 `plugins.shortDigest` —— `pluginsView()` 里
@@ -563,6 +566,8 @@ async function bootstrap() {
     });
 
     registerIpc();
+    // 更新提醒是后台动作：开局这一屏不等它，它也一个字都不往站点发。
+    armUpdateCheck();
 
     // 测试后端那条连接。播在这里，不是 `loadConfig` 里：配置模块不该知道测试
     //   夹具的存在。放在这个位置有两个理由：`win` 已经在了，而第一屏还没拿到数据
@@ -3979,23 +3984,12 @@ function closeHostSession(rec) {
 }
 
 /**
- * 客户端对外的版本号：两段（可以带发布后缀）。
+ * 客户端对外的版本号是两段，切法在 `updates.js` 的 `wireVersion`。
  *
- * `app.getVersion()` 读的是 `client/package.json` 的 `version`，而那个字段必须
- *   是三段 —— electron-builder 的 `fixVersionField` 用 semver 校验它，写两段
- *   会当场被拒掉，一个安装包都打不出来。npm 在 install / pack 上不校验这个
- *   字段，它只在发布到 registry 时才要求。它是整套版本号里唯一
- *   绕不过去的三段，而且只是那个包的载体，不是另一个号。
- * 第三段固定是 `.0`（`.github/workflows/checks.yml` 断言这一点）。对用户没有
- *   意义的那个数字带出去，只会让人以为存在一个"补丁级"。
- * 切法与 `client/src/main/plugins/index.js` 的 `hostVersion()` 是同一刀：前两段
- *   就是协议版本。读不到或形状不认识时原样给 —— 不猜。
+ * 那个函数上面带着这一刀的来由：`client/package.json` 的 `version` 必须是三段
+ *   （electron-builder 的 `fixVersionField` 拒两段），而界面、诊断与发布 tag
+ *   用的都是两段。它只此一份，这里不另写一遍。
  */
-function wireVersion(v) {
-  const s = typeof v === 'string' ? v : '';
-  const m = /^(\d+)\.(\d+)\.\d+(-.*)?$/.exec(s);
-  return m ? `${m[1]}.${m[2]}${m[3] || ''}` : s;
-}
 
 /**
  * 诊断材料。只写"客户端知道什么"，不写凭据、口令与密钥。
@@ -5147,6 +5141,98 @@ async function reattachOne(s) {
   //   那条直路只服务 web-demo 一种会话，而接上一个中转站会话时它会把隧道指向
   //   的 SSH 端口当成一个网页去加载。分派只有一个地方。
   await onSessionChange(slot);
+}
+
+// ── 更新提醒 ────────────────────────────────────────────────────────────────
+/**
+ * 有新的正式版时提醒一次，不下载、不安装。
+ *
+ * 只提醒的理由在 `updates.js` 顶上：安装包未签名，而自动更新是一条把代码送进
+ *   所有用户机器的通道。没有签名之前不开它。
+ *
+ * 查不到一律当没发生过：断网、代理、GitHub 改了跳转形状，用户不该在界面上
+ *   看到任何一句话。这不是一条需要他处理的错误。
+ */
+const UPDATE_FIRST_DELAY_MS = 6000;
+
+/** 最近一次检查的结果。界面刷新之后靠它把提醒重新画出来。 */
+let updateState = null;
+
+/** 推给所有界面。窗口可能一个都还没有，那时只记下来。 */
+function pushUpdate(state) {
+  updateState = state;
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('ui:update', state);
+  }
+}
+
+async function checkUpdate() {
+  // 从源码跑的时候不查：那个版本的 tag 还没打，查回来的永远比自己旧或一样。
+  if (!app.isPackaged) return;
+  const r = await updates.check({ currentVersion: app.getVersion() });
+  // `update` 才推。`current` 与 `unknown` 只落进 updateState，界面问的时候
+  //   能答"查过了、没有"，但不会凭空弹一条提示。
+  if (r.status !== updates.STATUS_UPDATE) {
+    updateState = r;
+    return;
+  }
+  pushUpdate(r);
+  await offerUpdate(r);
+}
+
+/**
+ * 弹一次「有新版本」。两颗按钮：打开 GitHub、取消。
+ *
+ * 一天只弹一次，记的是日期不是版本号：同一个版本没升级，第二天打开软件照样
+ *   提醒他。一天里开几次，只有第一次看到这个窗（`shouldOffer` 判日期）。
+ * 用户之后想看，「关于」卡片里那一行一直在（`pushUpdate` 已经推过去了）。
+ *
+ * 弹窗不带 `win` 以外的窗口：它是应用级的一件事，不是某一条会话的。但窗口
+ *   还在时带上它，居中的位置才对。
+ */
+async function offerUpdate(state) {
+  const today = updates.localDay();
+  if (!updates.shouldOffer(state, cfg.updatePromptedOn, today)) return;
+  const parent = win && win.win && !win.win.isDestroyed() ? win.win : null;
+  const box = {
+    type: 'info',
+    title: 'Slurmate',
+    message: `有新的正式版 ${state.latest}`,
+    detail: `本机是 ${wireVersion(app.getVersion())}。`
+      + '可以去 GitHub 看看这一版改了什么，再决定要不要装。',
+    buttons: ['打开 GitHub', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  };
+  let r;
+  try {
+    r = parent ? await dialog.showMessageBox(parent, box) : await dialog.showMessageBox(box);
+  } catch {
+    // 弹不出来不是用户要处理的事；「关于」卡片里那一行照旧在。
+    return;
+  }
+  if (r && r.response === 0 && state.url) shell.openExternal(state.url);
+  // 两种回答都记下这一天。弹窗没能弹出来时走的是上面那个 catch，不记 ——
+  //   那样用户下次打开还能看到它。
+  cfg.updatePromptedOn = today;
+  commitConfig();
+}
+
+/**
+ * 启动之后查一次。只有这一次，没有定时器。
+ *
+ * 规则是「每天第一次打开软件时提醒一次」，所以软件一直开着不该再弹；下一次
+ *   打开是新的一个进程，那时再查。延迟是为了不与开局那一屏抢带宽：那一刻
+ *   正要连站点、取分区、对插件。
+ *
+ * 计时器不许把进程拴住。Electron 主进程本来就不会因为事件循环空了而退出，
+ *   但用例进程会 —— 一个没 unref 的计时器会让整套用例永远跑不完，而症状是
+ *   "卡住"，指不回这一行。
+ */
+function armUpdateCheck() {
+  const t = setTimeout(() => { checkUpdate().catch(() => {}); }, UPDATE_FIRST_DELAY_MS);
+  if (typeof t.unref === 'function') t.unref();
 }
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
@@ -6589,6 +6675,9 @@ function registerIpc() {
   });
 
   send('app:openExternal', async (url) => { await shell.openExternal(url); return { ok: true }; });
+  // 界面重画时问一次。推送（`ui:update`）只在查到更新的那一刻发，而界面可能
+  //   那时还没加载完，或者用户刷新过一次。
+  send('app:updateState', async () => updateState);
 
   // ── 测试后端的接缝 ────────────────────────────────────────────────────────
   //
