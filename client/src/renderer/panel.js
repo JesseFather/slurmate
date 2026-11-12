@@ -4730,6 +4730,13 @@ function bindEvents() {
     //   被吞掉的失败是同一件事。
     notice(['ok', 'error', 'warn'].includes(n.kind) ? n.kind : 'info', n.text);
   });
+
+  // 有新版本：只在「关于」卡片里多一行，不弹提示、不抢焦点。更新不是用户
+  //   此刻要处理的事，查到是顺带的（见 main/updates.js 顶上那一段）。
+  window.slurmate.onUpdate(renderUpdate);
+  $('btn-download').onclick = () => {
+    if (updateUrl) window.slurmate.openExternal(updateUrl);
+  };
 }
 
 /**
@@ -4747,6 +4754,27 @@ function renderAbout() {
   $('about-ver').textContent = v ? `版本 ${v}` : '版本未知';
 }
 
+/** 上一次查到的那个发布页。没有更新时是 null。 */
+let updateUrl = null;
+
+/**
+ * 「关于」卡片里那一行「有新版本」。
+ *
+ * 只在真的查到更新的正式版时出现。查不到、已是最新、或者根本没查过，都是
+ *   不出现的那一刻 —— 这几种在界面上没有区别，也不该有（见 main/updates.js）。
+ * 提醒落在「关于」卡片里，而不是一条弹出来的通知：更新不是一件用户此刻必须
+ *   处理的事，而「关于」正是他主动问「我装的是哪一版」的地方。
+ */
+function renderUpdate(state) {
+  const on = Boolean(state && state.status === 'update' && state.latest);
+  $('about-update').classList.toggle('hidden', !on);
+  // 按钮上那颗小圆点：卡片是悬停才出来的，不点一下「关于」就看不见。
+  $('btn-about').classList.toggle('has-update', on);
+  if (!on) return;
+  updateUrl = state.url || null;
+  $('about-latest').textContent = state.latest;
+}
+
 /**
  * 取首屏数据，画出来。所有 `await` 都在这里。
  *
@@ -4757,6 +4785,10 @@ async function bootUI() {
   boot = await window.slurmate.bootstrap();
 
   renderAbout();
+  // 上一次检查更新的结果。主进程在启动几秒之后才查，正常这时还没有；
+  //   问一次是为了应付「界面重新加载过」—— 那时推送已经发过了。
+  //   失败静默：这不是一条用户要处理的错误。
+  window.slurmate.updateState().then(renderUpdate, () => {});
   // 能力列表是连接级的事实，与 `partitions` 一样在首屏取一次；之后每次
   //   连上站点都会带回新的那一份（见 `handleConnectResult`）。
   daemonCaps = (boot.site && Array.isArray(boot.site.daemonCaps))

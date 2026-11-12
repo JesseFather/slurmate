@@ -117,6 +117,9 @@ test('握手超时之后：空转命令把「shell 起不来」与「命令自�
   assert.match(h1, /卡住的是登录节点上的 shell 启动脚本/,
     `要指向 shell 的启动脚本，而不是笼统地再说一次超时：${h1}`);
   assert.match(h1, /ssh u@h true/, '要给一条能自己核对的命令');
+  // `.profile` 必须点名：2026-11-03 那位用户的 conda 就写在 `.profile` 里，
+  //   而 `--norc` 管不到它。只提 `.bashrc` 与 `.zshenv` 会让他查错文件。
+  assert.match(h1, /\.profile/, '要列出登录 shell 真正会读的那几个文件');
 
   // 2) 空转命令立刻回 0：shell 是好的，卡住的是 slurmate 命令本身。
   const fine = {
@@ -626,6 +629,100 @@ function keepLoop(t) {
   const h = setInterval(() => {}, 1000);
   t.after(() => clearInterval(h));
 }
+
+test('常驻通道超时（登录 shell 卡住）：后面的握手一条都不发', async (t) => {
+  // 2026-11-03 真机：登录 shell 激活 `.profile` 里的 conda，卡在 NFS 上。
+  //   每一条 exec 都再起一份 shell —— 连接一次就起四五个，进程越堆越多。
+  //   超时说明登录节点上的 shell 根本起不来，后面那几条不是"还有机会"。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); this.execs = []; made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec(cmd, cb) { this.execs.push(cmd); /* 永不回调：shell 卡住 */ }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+  keepLoop(t);
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  b._streamProbeMs = 20;
+  t.after(() => { try { b.close(); } catch { /* 尽力 */ } });
+
+  const r = await b.connect({ user: 'u', host: 'h', port: 22 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'shell_stuck', '要说清是 shell 卡住，不是 CLI 旧');
+  assert.match(r.error, /\.profile/, '提示要指向登录 shell 会读的文件');
+  assert.equal(made[0].execs.length, 1,
+    '只发常驻通道那一条；ping / whoami / 建目录一条都不许再发');
+});
+
+test('常驻通道开出来了但 ping 不答：同样早停，不再发后面的 exec', async (t) => {
+  // 与上一条只差一层：`conn.exec` 的回调来了（通道开出来了），但通道上的
+  //   `ping` 在探针预算内没答。登录 shell 卡住时两种形态都会出现，而两种都
+  //   不该让后面那几条握手再各起一份 shell。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); this.execs = []; made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec(cmd, cb) {
+      this.execs.push(cmd);
+      if (cmd === sshBackend.STREAM_CMD) return setImmediate(() => cb(null, new FakeDuplex()));
+      return undefined;
+    }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+  keepLoop(t);
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  b._streamProbeMs = 20;
+  t.after(() => { try { b.close(); } catch { /* 尽力 */ } });
+
+  const r = await b.connect({ user: 'u', host: 'h', port: 22 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'shell_stuck');
+  assert.equal(made[0].execs.length, 1,
+    '只发常驻通道那一条；ping / whoami / 建目录一条都不许再发');
+});
+
+test('认证成功但还没握手完：重连计数不清零', async (t) => {
+  // 2026-11-03 真机：登录节点的登录 shell 会激活用户 `.profile` 里的 conda，
+  //   而 conda 卡在 NFS 上不退。SSH 认证能过，随后的 ping / whoami 全卡住，
+  //   直到 keepalive 把连接杀掉。重连计数原先在 `ready` 清零，于是每一轮都从
+  //   1 秒重新排 —— 连接一条接一条地建，每一条都在登录节点上起一套 shell 与
+  //   conda，进程越堆越多，用户只能关掉软件。
+  const ssh2 = require('ssh2');
+  const realClient = ssh2.Client;
+  const made = [];
+  class FakeClient extends EventEmitter {
+    constructor() { super(); made.push(this); }
+    connect() { setImmediate(() => this.emit('ready')); }
+    end() {}
+    exec() { /* 永不回调：登录 shell 卡在 conda 上 */ }
+  }
+  ssh2.Client = FakeClient;
+  t.after(() => { ssh2.Client = realClient; });
+  keepLoop(t);
+
+  const b = new sshBackend.SshBackend({ privateKey: keys.generate().privateKeyPem });
+  t.after(() => { try { b.close(); } catch { /* 尽力 */ } });
+  b._profile = { user: 'u', host: 'h', port: 22 };
+  b._closed = false;
+  b._attempt = 4;
+
+  b._open();                                  // 不 await：握手会挂在 exec 上
+  await new Promise((res) => setImmediate(res));
+  assert.equal(b._attempt, 4, 'ready 不是清零点：认证成功不等于这条连接能用');
+
+  made[0].emit('close');
+  assert.equal(b._attempt, 5, '断开之后照常递增 —— 退避不能每次退回 1 秒');
+});
 
 /** exec 那条路的假 channel：`end(body)` 之后回一条应答并关闭。 */
 class FakeExecStream extends EventEmitter {

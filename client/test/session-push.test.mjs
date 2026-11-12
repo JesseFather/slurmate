@@ -339,6 +339,44 @@ test('推送停了超过看门狗，轮询自己接上（不是静默地不更�
   assert.ok(b.count('status') >= 1, '看门狗过了之后必须自己接上');
 });
 
+test('全量推送一直在推、但里面没有本会话：对账照跑，会话消失之后走到终局', async (t) => {
+  // 站点每 30 秒推一份全量，内容不变也推（`SNAPSHOT_INTERVAL`）。本会话被
+  //   控制节点回收之后，那些推送里只剩其他会话 —— 若把"收到过推送"当成
+  //   "这一条还在喂"，对账从此停摆，界面停在「运行中」（用户 2026-11-03）。
+  t.after(keepAlive());
+  const b = new StubBackend();
+  b.reply = () => ({ ok: false, code: 3, error: { kind: 'not_found', detail: 'not_found' } });
+  const ctrl = new SessionController({
+    backend: b, workspaceId: 'L1', statusMs: 20, pushStaleMs: 45 });
+  ctrl.state = State.RUNNING;
+  ctrl.sessionId = 's1';
+  ctrl.session = view();
+  ctrl._lastTarget = ctrl.session.tunnel_target;
+  ctrl._watchBackend(true);
+  ctrl._startStatusPoll();
+  t.after(() => ctrl._stopStatusPoll());
+  const feed = setInterval(
+    () => push(ctrl, [view({ session_id: '其他会话' })]), 10);
+  t.after(() => clearInterval(feed));
+  await new Promise((r) => setTimeout(r, 120));
+  assert.ok(b.count('status') >= 1, '本会话不在推送里，对账必须自己接上');
+  assert.equal(ctrl.state, State.ERROR, '会话行已经没了，不许停在「运行中」');
+});
+
+test('心跳说会话没了：立刻问一次权威视图，不等对账的钟', async (t) => {
+  // 心跳与带 session_id 的 `status` 问的是同一件事。心跳已经拿到 not_found，
+  //   却让界面再等一拍对账 —— 那段时间用户看到的是「运行中」加一句「心跳停止」
+  //   （用户 2026-11-03）。
+  t.after(keepAlive());
+  const b = new StubBackend();
+  b.reply = () => ({ ok: false, code: 3, error: { kind: 'not_found', detail: 'not_found' } });
+  const ctrl = running(b);
+  await ctrl.heartbeatNow();
+  await tick(); await tick();
+  assert.ok(b.count('status') >= 1, '心跳确认会话没了，必须立刻问一次权威视图');
+  assert.equal(ctrl.state, State.ERROR);
+});
+
 test('看门狗必须严格大于守护进程的快照周期', () => {
   // 守护进程保证"哪怕什么都没变也每 30 秒推一条"。取小了会把正常的空闲
   // 读成"通道坏了"，于是每一轮都去问一次 —— 把这一版省下来的东西原样还回去。

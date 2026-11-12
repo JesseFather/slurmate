@@ -109,6 +109,12 @@ const DEFAULTS = {
   //   我以为的那个人做的"）—— 后者要签名，见 SECURITY.md。
   //   挡得住"事后偷换"，挡不住"第一次给的就是坏的"。
   trustedPlugins: {},       // { ["<id>@<版本>"]: { digest, site, at } }
+  // 上一次为更新弹窗的那一天（本地日期，`YYYY-MM-DD`）。同一天只弹一次：
+  //   一天里开几次软件，只有第一次会看到它。第二天再开照样提醒，因为那时
+  //   用户还没升级。
+  //   空串 = 从来没弹过。只收日期形状，认不出的丢弃（丢掉等于"今天还没弹过"，
+  //   也就是多提醒一次 —— 比"永远不提醒"安全）。
+  updatePromptedOn: '',
 };
 
 /** 这个插件在本机开着吗？没表过态 → true（跟着站点走）。 */
@@ -1184,6 +1190,13 @@ function loadConfig(dir) {
   //   `isTrusted` 于是不可能通过（版本对不上），而那与"丢掉"在行为上是同一件事
   //   —— 重新问一次。差别在界面上：留着才能说清"是换算法了"，丢掉就只剩
   //   一句"没有同意过"，而那句话把一次可解释的升级说成了一次从零开始。
+  // 上一次弹更新那天的日期。只收 `YYYY-MM-DD`，别的一律当没弹过 ——
+  //   手改出来的一个怪字符串如果被当真，那一天就再也看不到提醒了。
+  if (typeof raw.updatePromptedOn === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(raw.updatePromptedOn)) {
+    cfg.updatePromptedOn = raw.updatePromptedOn;
+  }
+
   if (raw.trustedPlugins && typeof raw.trustedPlugins === 'object'
       && !Array.isArray(raw.trustedPlugins)) {
     for (const [key, v] of Object.entries(raw.trustedPlugins)) {

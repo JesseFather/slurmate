@@ -240,9 +240,18 @@ h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
 button.icon-btn {
   flex: none; width: 22px; height: 22px; padding: 0;
   border-radius: 50%; background: #3a3d41; color: var(--fg);
-  line-height: 22px; font-weight: 700;
+  line-height: 22px; font-weight: 700; position: relative;
 }
 button.icon-btn:hover { background: #45494e; }
+/* 有新版本时按钮右上角那颗点。卡片是悬停才出来的 —— 没有这一点，用户不去
+   点「关于」就永远不知道有更新。 */
+button.icon-btn.has-update::after {
+  content: ''; position: absolute; top: -1px; right: -1px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #e5a13a; border: 1px solid #252526;
+}
+.about-card .about-update { color: #e5a13a; }
+.about-card .about-update button { margin-left: 6px; vertical-align: baseline; }
 
 /* 「关于」的悬停卡片（2026-10-18 改）。
    入口是旁边那颗感叹号：鼠标停上去、或者键盘把焦点停上去，卡片就从下面浮出来。

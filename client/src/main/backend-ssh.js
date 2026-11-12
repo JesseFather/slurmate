@@ -280,8 +280,9 @@ function shellProbeHint(probe, who) {
   if (probe.timedOut) {
     return '再执行一条空转命令（/bin/true）也没有应答：卡住的是登录节点上的 shell '
       + '启动脚本，不是 Slurmate。用系统的 ssh 手工执行 `ssh '
-      + at + ' true` 会看到同样的停顿。在 ~/.bashrc、~/.zshenv 一类文件的'
-      + '最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
+      + at + ' true` 会看到同样的停顿。检查登录 shell 会读的那几个文件'
+      + '（~/.profile、~/.bash_profile、~/.bashrc、~/.zshenv），'
+      + '在最前面加上「不是交互式就直接返回」的判断，或者去掉其中需要交互、'
       + '等待网络、访问大目录的那几行。';
   }
   if (probe.ok) {
@@ -782,6 +783,16 @@ class SshBackend extends Backend {
     this._streamTimer = null;
     this._streamAttempt = 0;
     /**
+     * 这一次常驻通道是「根本开不出来」还是「开出来又失败」。
+     *
+     * 超时意味着登录节点上的 shell 起不来（不是 CLI 旧、也不是守护进程没在跑）——
+     *   之后那几条握手 exec 一条都不该再发：每一条都会再起一份登录 shell。
+     *   见 `_openOnce` 里那一支与 `_openStream` 的超时分支。
+     */
+    this._streamStuck = false;
+    /** 常驻通道探针的上限。可注入，只为让用例不用等满 8 秒。 */
+    this._streamProbeMs = STREAM_PROBE_MS;
+    /**
      * 这条 SSH 连接上连续几次「开不出新通道」。
      *
      * 一次 `(SSH) Channel open failure: open failed` 可能只是这一刻的
@@ -936,7 +947,12 @@ class SshBackend extends Backend {
 
       client.on('ready', async () => {
         this._conn = client;
-        this._attempt = 0;
+        // 重连计数【不】在这里清零。认证成功不等于这条连接能用：握手要再走
+        //   `ping` 与 `whoami` 两条 exec，而那一步可能卡在用户的登录 shell 上
+        //   （2026-11-03 真机：`~/.profile` 激活的 conda 在 NFS 上卡成 D 状态）。
+        //   从前在这里清零，于是每一次「认证成功、握手失败」都从 1 秒重新排 ——
+        //   连接一条接一条地建，每一条都在登录节点上起一套 shell 与 conda，
+        //   用户看到的是进程越堆越多，直到关掉软件。见 `_scheduleReconnect`。
         // 新的一条连接有新的会话额度（sshd 的 MaxSessions 是按连接算的）。
         this._channelOpenFailures = 0;
         this._emitState(true, `${user}@${host}:${port}`);
@@ -950,6 +966,27 @@ class SshBackend extends Backend {
         //   它绝不让 connect() 失败：建不起来就退回去用 exec，而"为什么
         //     建不起来"记在 `residentError` 里。理由见文件头那一段。
         await this._openStream();
+
+        // 常驻通道是【超时】而不是【开出来又失败】：登录节点上的 shell 根本
+        //   起不来。再发 ping / whoami / 建目录那几条只会各起一份登录 shell，
+        //   而每一份都可能去激活用户 `.profile` 里的 conda（2026-11-03 真机：
+        //   conda 卡在 NFS 上不退，几条连接就把 cgroup 占满）。到这里就停，
+        //   把结论说清楚 —— 后面那几条不是"还有机会"，只是"再多起几份"。
+        // 区别开「开出来又失败」（旧 CLI、守护进程没在跑）：那种能退回到 exec，
+        //   照旧往下走。
+        if (this._streamStuck) {
+          try { client.end(); } catch { /* 尽力 */ }
+          this._conn = null;
+          return done({
+            ok: false,
+            code: 'shell_stuck',
+            error: `已连上 ${host}，但登录节点上的一条命令在 `
+              + `${Math.round(this._streamProbeMs / 1000)} 秒内没有回应。`
+              + '这通常是登录 shell 的启动脚本卡住了：检查 ~/.profile、'
+              + '~/.bash_profile、~/.bashrc 里需要交互、等待网络或访问大目录的那几行。'
+              + `用系统的 ssh 手工执行 \`ssh ${user}@${host} true\` 会看到同样的停顿。`,
+          });
+        }
 
         // 建作业日志目录（同样尽力而为 —— 见 `prepare()`）。放这儿而不是
         //   `connect()` 的开头：它要一条真的通了的 SSH 连接。
@@ -1038,6 +1075,9 @@ class SshBackend extends Backend {
           this._whoami = resp.data;
           this._daemonVersion = daemonVersion;
           this._daemonCaps = daemonCaps;
+          // 走到这里才说明整条链路真的能用（SSH 认证 + 两条握手 RPC）。
+          //   重连的退避从这一刻重新起算。
+          this._attempt = 0;
           return done({ ok: true, whoami: resp.data, daemonVersion, daemonCaps });
         }
         if (resp && resp.error && resp.error.kind === 'cli_missing') {
@@ -1399,6 +1439,8 @@ class SshBackend extends Backend {
     return new Promise((resolve) => {
       let settled = false;
       let timer = null;
+      const probeMs = this._streamProbeMs;
+      this._streamStuck = false;
       const done = (v) => {
         if (settled) return;
         settled = true;
@@ -1412,9 +1454,10 @@ class SshBackend extends Backend {
       //    它比探针宽 2 秒：正常情况下结束这次等待的总是探针。
       timer = setTimeout(() => {
         this.residentError = '建立常驻通道时超时（命令通道没有回应）';
+        this._streamStuck = true;
         this._scheduleStreamReopen();
         done(false);
-      }, STREAM_PROBE_MS + 2000);
+      }, probeMs + 2000);
       timer.unref?.();
       try {
         conn.exec(STREAM_CMD, (err, stream) => {
@@ -1433,7 +1476,7 @@ class SshBackend extends Backend {
             // 这台电脑是谁。每一条请求都带上（见 ResidentChannel.request）。
             client: this._opts.client || null,
           });
-          ch.request({ op: 'ping' }, STREAM_PROBE_MS).then((resp) => {
+          ch.request({ op: 'ping' }, probeMs).then((resp) => {
             // 判据是"对面答了一个信封"，不是 `ok:true`：限流
             //   （`rate_limited`）也是一次正常的往返，它同样证明这条通道是通的。
             //   拿 `ok` 去判会把一次限流记成"这是条坏通道"，然后降级一整个进程。
@@ -1455,6 +1498,12 @@ class SshBackend extends Backend {
             }
             this.residentError = (resp && resp.error
               && (resp.error.detail || resp.error.kind)) || '这条通道没有应答';
+            // 通道开出来了，但 `ping` 在探针预算内没答：登录节点上的命令卡住了
+            //   （不是"这条通道坏了"，也不是旧 CLI —— 那两种会立刻回来或报错）。
+            //   后面的握手 exec 同样会卡，由 `_openOnce` 早停，不再各起一份 shell。
+            this._streamStuck = Boolean(resp && resp.error
+              && resp.error.kind === 'transport'
+              && /没有得到应答/.test(resp.error.detail || ''));
             ch.close();
             // 失败也要排下一次：这一句覆盖的是"登录节点上的守护进程正好在
             //   重启"这一类暂时的失败。而"CLI 是旧的"那种永久的失败由

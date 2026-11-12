@@ -175,6 +175,11 @@ class ShellWindow {
       this.win.setMenuBarVisibility(false);
     }
 
+    // 面板页自己的加载与标题变化同样会请求一次注意力（见 `_quietTaskbar`）。
+    this.win.webContents.on('did-start-loading', () => this._quietTaskbar());
+    this.win.webContents.on('did-stop-loading', () => this._quietTaskbar());
+    this.win.webContents.on('page-title-updated', () => this._quietTaskbar());
+
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'panel.html'));
     this.win.once('ready-to-show', () => this.win.show());
 
@@ -414,10 +419,21 @@ class ShellWindow {
     //
     // 次框架的失败不算：页面本身还站在那儿，坏的是里面的一格。
     // ERR_ABORTED（-3）也不算：那是被后一次导航顶掉了（见 `loadPage`）。
+    // 任务栏那颗「有通知」的橙色闪烁由页面请求注意力触发（`window.focus()`、
+    //   通知），Electron 把它接到 `flashFrame(true)` 上，而闪烁要等窗口获得焦点
+    //   或有人调 `flashFrame(false)` 才停。插件页面每次刷新都会请求一次 ——
+    //   code-server、Notebook 那类页面几乎时刻在刷新，于是任务栏一直在闪
+    //   （用户 2026-11-03）。挂在每一次导航、加载、标题变化的落点上熄灭它；
+    //   页面自己的行为一个字都不动。
     wc.on('did-start-loading', () => {
+      this._quietTaskbar();
       const s = this.surfaces.get(slot);
       if (s) s.broken = false;
     });
+    wc.on('did-stop-loading', () => { this._quietTaskbar(); });
+    wc.on('did-navigate', () => { this._quietTaskbar(); });
+    wc.on('did-navigate-in-page', () => { this._quietTaskbar(); });
+    wc.on('page-title-updated', () => { this._quietTaskbar(); });
     wc.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
       if (!isMainFrame || code === -3) return;
       const s = this.surfaces.get(slot);
@@ -1088,6 +1104,19 @@ class ShellWindow {
     if (this.win.isDestroyed()) return;
     if (busy) this.win.setProgressBar(2);
     else this.win.setProgressBar(-1);
+  }
+
+  /**
+   * 熄灭任务栏那颗橙色闪烁。
+   *
+   * 它由页面请求用户注意力触发（`window.focus()`、通知），Electron 把它接到
+   *   `flashFrame(true)` 上 —— 不调这一下，闪烁会一直持续到窗口获得焦点。
+   * 插件页面每次刷新都会请求一次，而 code-server、Notebook 那类页面几乎时刻
+   *   在刷新，于是任务栏一直在闪（用户 2026-11-03）。
+   * 只灭这一颗灯，页面自己的行为一个字都不动。
+   */
+  _quietTaskbar() {
+    if (!this.win.isDestroyed()) this.win.flashFrame(false);
   }
 
   // ── 关闭 ────────────────────────────────────────────────────────────────

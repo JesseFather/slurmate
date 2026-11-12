@@ -201,6 +201,9 @@ contextBridge.exposeInMainWorld('slurmate', {
   jobLog: (payload) => ipcRenderer.invoke('app:jobLog', payload),
   reload: (slot) => ipcRenderer.invoke('app:reload', { slot }),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  // 上一次检查更新的结果（`{status, latest, url}`，还没查过时是 null）。
+  // 只回答"有没有更新的正式版"，不下载、不安装 —— 见 main/updates.js。
+  updateState: () => ipcRenderer.invoke('app:updateState'),
 
   // 主进程 → 渲染进程
   onStates: (fn) => {
@@ -241,5 +244,11 @@ contextBridge.exposeInMainWorld('slurmate', {
     const h = (_e, s) => fn(s);
     ipcRenderer.on('ui:site', h);
     return () => ipcRenderer.removeListener('ui:site', h);
+  },
+  // 查到有更新的正式版。只在 `status === 'update'` 时推，其余结果不打扰。
+  onUpdate: (fn) => {
+    const h = (_e, state) => fn(state);
+    ipcRenderer.on('ui:update', h);
+    return () => ipcRenderer.removeListener('ui:update', h);
   },
 });

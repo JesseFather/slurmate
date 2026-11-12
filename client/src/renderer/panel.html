@@ -193,6 +193,12 @@
                 aria-describedby="about-card">!</button>
         <div id="about-card" class="about-card" role="tooltip">
           <p class="about-name">Slurmate <span id="about-ver" class="mono">版本未知</span></p>
+          <!-- 有新版本时才出现。只提醒，不下载：安装包未签名，自动更新的那条
+               路还没开（见 src/main/updates.js 顶上那一段）。 -->
+          <p class="about-update hidden" id="about-update">
+            有新版本 <span class="mono" id="about-latest"></span>
+            <button id="btn-download" class="ghost tiny">打开下载页</button>
+          </p>
           <p>把集群上的 Slurm 作业变成可交互的远程开发会话。</p>
           <p>客户端在本机；站点一侧是守护进程 <code>slurmate-sessiond</code>。连接配置、密钥与插件数据只保存在这台电脑上。</p>
           <p class="about-meta">Apache-2.0 许可 · github.com/JesseFather/slurmate</p>
